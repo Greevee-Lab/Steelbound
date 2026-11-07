@@ -60,6 +60,7 @@ editions/community/COMMERCIAL.md => COMMERCIAL.md
 editions/community/CONTRIBUTING.md => CONTRIBUTING.md
 editions/community/LICENSE => LICENSE
 editions/community/THIRD_PARTY.md => THIRD_PARTY.md
+editions/community/github/FUNDING.yml => .github/FUNDING.yml
 poc-native/contrib/sbc_mapping.md
 # W180 EXPORT: englische Spieler-Doku (W175) + Tester-Hinweise (Alpha 1)
 poc-native/docs/community/*.md

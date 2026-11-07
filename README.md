@@ -23,13 +23,19 @@ official product and is not affiliated with Capcom or Microsoft.
 
 ## Support the project
 
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/W7W2U4716)
+
 Steelbound is a hobby project, built in my spare time to preserve this great
-game – a big investment of time and money. If you'd like to help cover some
-development costs, you can support it **one-time or monthly** (GitHub Sponsors
-or Buy Me a Coffee) – see [DONATE.md](DONATE.md). Thank you! ☕
+game. Bringing a 2002 Xbox title back to modern PCs – faithfully, at 120 FPS,
+with VR and the original controller – is a **very large and complex task**,
+and it comes with **high running costs**: AI-assisted development (tokens and
+subscriptions) on top of a lot of personal time.
+
+If you enjoy Steelbound and want to help cover some of these costs, any
+support – one-time or monthly – is greatly appreciated. See [DONATE.md](DONATE.md).
+Thank you! ☕
 
 [![Steelbound – video](https://img.youtube.com/vi/Iln350iJGcc/hqdefault.jpg)](https://youtu.be/Iln350iJGcc)
-
 
 ## What Steelbound is not
 

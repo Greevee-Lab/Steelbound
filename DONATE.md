@@ -1,15 +1,16 @@
 # Support Steelbound
 
 Steelbound is a **hobby project**. I build it in my spare time to keep this
-wonderful game playable on modern hardware – that takes a lot of time and
-also real money (hardware, tools, development costs).
+wonderful game playable on modern hardware. It is a very large and complex
+task with **high running costs** – AI-assisted development (tokens and
+subscriptions), hardware for testing – on top of a lot of personal time.
 
 If you enjoy Steelbound and want to help cover some of those costs, I'd be
 very happy about your support – **one-time or monthly**, whatever suits you.
 Every coffee helps. ☕ Thank you!
 
-- **GitHub Sponsors** (one-time or monthly): use the **Sponsor** button at the top of the repository – [sponsor-link]
-- **Buy Me a Coffee**: [coffee-link]
+- **Sponsor button** at the top of the repository (links to Ko-fi; GitHub Sponsors may follow later)
+- **Ko-fi** (one-time or monthly): [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/W7W2U4716) – https://ko-fi.com/W7W2U4716
 
 Please note:
 

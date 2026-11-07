@@ -89,18 +89,10 @@ like the original.
 - **Fits your game** tells whether the pack was made for your game
   version (yes (PAL), no, or not checked yet).
 
-## Pack Creator overview
-
-The **Pack Creator** (separate app, **Open Pack Creator** on the Packs
-page) builds a pack from your own disc image in seven steps: Image,
-Dump, Categories, Upscale, Text, Review, Export. You dump the original
-textures, upscale them, reconstruct text without AI smearing, review
-every variant side by side, and export a validated `.sbpack`. The app
-shows which helpers it needs.
-
 ## Legal note
 
-Packs are derived from your own disc. Packs are created and shared by
-their users, who are solely responsible for them. The launcher only
+Packs must contain only their authors' **own artwork**, never textures
+taken from the game. Packs are created and shared by their users, who are
+solely responsible for them. The launcher only
 checks packs technically, never legally. This notice is not legal
 advice.

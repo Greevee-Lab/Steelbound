@@ -42,8 +42,9 @@ Battalion controller via USB adapter is optional; setup is described in
 
 ## Can I share packs I made?
 
-Packs you build with the Pack Creator come from your own disc. Sharing
-them is your responsibility; see the legal note in
+Yes, as long as the pack contains only **your own artwork** – textures you
+created yourself – and never textures taken from the game. Sharing packs is
+your responsibility; see the legal note in
 [Graphics and packs](GRAPHICS_AND_PACKS.md).
 
 ## Where do I change settings?

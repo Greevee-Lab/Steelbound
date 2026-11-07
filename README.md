@@ -38,9 +38,8 @@ Thank you! ☕
 - A **client** (`sb_ldr.exe` + `sb_emu.dll`): runs the game natively with
   high-level emulation of kernel, XDK and D3D8 calls.
 - An **open package format** (`.sbpack`, see `PACK_FORMAT.md`) for community
-  texture and effect packs: images and parameters, never code.
-- A **Pack Creator**: builds your own packs locally from your own copy of
-  the game (dump, upscale, review, export).
+  texture and effect packs with **your own artwork**: images and parameters,
+  never code.
 
 
 ## What Steelbound is not
@@ -95,11 +94,12 @@ and Alpha testing (what to test, where logs and crash reports are).
 
 The recommended preset is **Original (HD) – 120 FPS**. Details: [Getting started](poc-native/docs/community/GETTING_STARTED.md). Want to build it yourself? See [Building](#building-visual-studio-2022-32-bit-is-required).
 
-## Packs and the Pack Creator
+## Packs
 
-Texture and effect packs (`.sbpack`) are optional add-ons made by users:
-upscaled or hand-made textures and effect parameters. Without any pack the
-game looks exactly like the original.
+Texture and effect packs (`.sbpack`) are optional add-ons made by users.
+A pack contains **your own artwork** – textures you created yourself – and
+effect parameters. Packs must not contain textures taken from the game.
+Without any pack the game looks exactly like the original.
 
 ## Building (Visual Studio 2022, 32-bit is required)
 
@@ -149,9 +149,9 @@ is not called “Open Source”.
 ## Legal notice
 
 > This project ships no game content. You need your own copy of the game.
-> Texture and effect packs derived from game textures are created and shared
-> by their users, who are solely responsible for them. This notice is not
-> legal advice.
+> Texture and effect packs are made and shared by their users and must only
+> contain their own artwork, never textures taken from the game. Pack authors
+> are solely responsible for their packs. This notice is not legal advice.
 
 The launcher shows the author and license of every pack. Packs from others
 are only checked technically, never legally.

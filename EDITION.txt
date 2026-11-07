@@ -1,6 +1,6 @@
 Steel Battalion - Game Preservation Project
 Edition: community
-Stand: 2026-11-07 (Commit 520ad66+lokal)
+Stand: 2026-11-07 (Commit 044b73b+lokal)
 
 Dateien (sha256):
 e87c03bade133de4ce690dd1607d2aa4f15a5a334d0966fb7926d5ddac696870  COMMERCIAL.md
@@ -83,7 +83,7 @@ e752583691fa9131ce02fc0d70acd8363cb9524b98b2350dadf5af062a4654be  poc-native/har
 ea20d71cfcdb6fc9c79ce9716bff46ce4d86b9c94199f461e8f2f0cc7214506f  poc-native/harness/src/input_tap.h
 94a067e6969e9a2d2b24d8b271f43c662ec1ccb2b68944300d42cd5195ccd53b  poc-native/harness/src/iso_vfs.c
 e25a70ef6fa3bb62647d07bbb64b5bd9dca2db10597103540c6fc293de3209fa  poc-native/harness/src/iso_vfs.h
-09785570acf929aecb33ac6b0f0aa40e7170a4f00ffe95bdf1064e2e266fb2b7  poc-native/harness/src/kernel_hle.c
+dff8162b8d416366c7659203d21cc3b3aac9868a2790d88e931fd111eae4fff3  poc-native/harness/src/kernel_hle.c
 5f106e8a9ae8cf6611f5001cf7aad6d24cacf10f588483bc9e6eaab7b75ab7f7  poc-native/harness/src/kernel_hle.h
 d25bbb27daf384850068c0b1c95cd4d08b0f7c00f4fe4cf470c4b57fe6f46bcb  poc-native/harness/src/krnl_file.c
 1cbdeb1a4567dc633755ffc2814b22ddd5cae8af9e73c9b1d4b948e04de8858f  poc-native/harness/src/krnl_int.h
@@ -164,8 +164,8 @@ e507fdfc76f5c54fd86ab5e6f19482c45c5d0a4a00170c55ceb2b444610550bb  poc-native/har
 6f31575c41fcf814e0557150b1e32576621e84c5b1b4a9921f6ecbab5df83ced  poc-native/harness/tests/iso_vfs_check.c
 00cfb92e5b3018c393c3bdb7127ba0de5632069fa75152b1921fac2cb8ca55ae  poc-native/harness/tests/vr_mock_runtime.c
 34f0795ac3db338bdd0eb94044acc78d37d41e214f872c3199efe92d89302aad  poc-native/harness/tests/vr_mock_runtime.json
-a6df1c1b61b15fbb7e87b41221bc06ad0484b753566ea3cfb3e199606d277bfc  poc-native/lang/de.lang
-18f6bb72e7b317328fadf4738a4ab782f6cc5a65d8db4f4556129cf9304b0a5c  poc-native/lang/en.lang
+cf84c5fa00ec7ace574aef1b014e0d9e9aba1c35ae474bd8f440a2468e674b04  poc-native/lang/de.lang
+431cc0ad3e1d078eb3458096f3bca9d8d1f17156dfb299710e1a85bc572f3600  poc-native/lang/en.lang
 663f1bf8eb9151ad2ccee6025b77fb97e7e2b0cdbe2ef0818a1a4e18feb36e7e  poc-native/launcher/CMakeLists.txt
 08df9badf078115ae02a15fa4d0e693c60976953b515e42aa98441c2564fd033  poc-native/launcher/res/bg_nutzer.png
 ca6c90c52b597216111234b7635521b14f444034b778b28bfd460fd61ece078c  poc-native/launcher/res/bg_nutzer.webp
@@ -180,7 +180,7 @@ a236702f245dbdb9b5ab5522e18d2464d774d5db19e749dd4fb2b75925f7ff6a  poc-native/lau
 2043fd43bb5cfb3ecfb4a0a8e358fdf9415e0dd4149c3379fd6a0493236ff297  poc-native/launcher/src/launcher_cfg.h
 c870ba7c64b36c7b61df61a705c86044fca548421cbc5e6b4f5108092683cf82  poc-native/launcher/src/launcher_ctrl.c
 908e9f3ecbc947901c9a6579ca34ef16d78a2cfd081d716cb23ba25afb8d579f  poc-native/launcher/src/launcher_ctrl.h
-659b01d7f6e05a6f350334aedf98a377ac79cc0e1301e0f19f66063664d1329b  poc-native/launcher/src/launcher_gui.c
+21c317a2f704a9e4436213cb03d155c62cc3ab084bb32b481edd268a5c282399  poc-native/launcher/src/launcher_gui.c
 e6f43c5a9e8df2861119ec82549275d1eab37d453d7e29e53c9f4208ff88e7ea  poc-native/launcher/src/launcher_packtest.c
 e6c3e4ef4611210dfcd592ff073ebbd5b8c7599f6828cffb0930cc0cd266f25c  poc-native/launcher/src/launcher_res.h
 8eff3ec19f9c941502f78795ae5702148bb3767a536318e9d94da0580ca8a1df  poc-native/launcher/src/launcher_rules.c

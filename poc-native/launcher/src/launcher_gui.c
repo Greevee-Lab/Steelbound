@@ -3028,9 +3028,11 @@ static const char ks_legacy_text[] =
     "[vr]\n"
     "vr_recenter = KEY:F8\n";
 
-/* Formen der Zeichnung. */
+/* Formen der Zeichnung. KS_LEDR/G/B = Taste mit roter/gruener/blauer
+ * Leuchtleiste (3x3-Raster im Mittelblock). */
 enum { KS_BTN, KS_TOG, KS_EJECT, KS_DIAL, KS_GEAR, KS_LEVER, KS_TRIG,
-       KS_KNOB, KS_SIGHT, KS_SBTN, KS_PEDAL };
+       KS_KNOB, KS_SIGHT, KS_SBTN, KS_PEDAL, KS_ROT, KS_LEDR, KS_LEDG,
+       KS_LEDB };
 /* Baugruppen (Reihenfolge der Tabelle). */
 enum { KS_G_LEFT, KS_G_CENTER, KS_G_RIGHT, KS_G_PEDALS, KS_G_N };
 
@@ -3045,87 +3047,134 @@ typedef struct {
     short ax, ay;      /* Leader-Start (0 = keiner) */
 } ks_elem_t;
 
-/* Mittelteil: 5 Spalten x 7 Reihen (Zelle 116 breit, Kappe 24 hoch). */
-#define KS_CX(c) (338 + (c) * 122)
-#define KS_RY(r) (70 + (r) * 76)
-#define KS_CELL(id, lk, sk, el, sh, c, r) \
-    { id, lk, sk, el, sh, KS_G_CENTER, KS_CX(c), KS_RY(r), 116, 24, \
-      0, 0, 0, 0, 0 }
+/* W184 KEYS-LAYOUT: physische Anordnung des Original-Controllers (eigene
+ * Zeichnung; Lage der Bedienelemente nach oeffentlichen Beschreibungen
+ * und einem Belegungsplan als Lagehinweis, nichts davon uebernommen).
+ * Linker Block: Schaltkulisse 5..R mit Gang-Leuchten, Drehhebel in
+ * waagrechter Kulisse mit Sicht-Stick (Daumen, druckbar) oben drauf,
+ * Feld KIPPSCHALTER (2 + 3 schraeg versetzt). Mittelblock: COM1-5 oben
+ * links, Tuner-Rad darunter, 3x3-Raster rechts (Leuchtleiste rot/gruen/
+ * blau), unten Feld FUNKTION (FSS/Manipulator/Linienfarbe) und WAFFENWAHL
+ * (Haupt/Sub/Magazin). Rechter Block: Zielhebel (Daumentaste Hauptwaffe +
+ * Lock-On oben, Abzug vorn), Eject unter Schutzklappe oben rechts, Feld
+ * MULTI-MONITOR (2x3, untere Reihe Hauptmonitor-Zoom), senkrechte Reihe
+ * Luke/Zuendung/START. Pedale: Slide-Step, Bremse, Gas.
+ * Zellen (lw = 0): Hover-Flaeche x-3,y-3,w+6,h+40; Name auf der Kappe,
+ * Belegung darunter. Selbsttest 55 prueft Bloecke + Ueberlappung. */
+#define KS_VIEWBOX "0 0 1320 964"
+#define KS_CO_H 62 /* Hoehe Callout-Kasten */
+#define KS_C(id, lk, sk, el, sh, g, x, y, w, h) \
+    { id, lk, sk, el, sh, g, x, y, w, h, 0, 0, 0, 0, 0 }
+/* Mittelblock: COM-Reihe (5 x 40, Schritt 46) und 3x3-Raster (72/78). */
+#define KS_COM(id, c) \
+    KS_C(id, "bind." id, NULL, id, KS_BTN, KS_G_CENTER, 428 + (c) * 46, 76, \
+         40, 30)
+#define KS_LED(id, sk, sh, c, r) \
+    KS_C(id, "bind." id, sk, id, sh, KS_G_CENTER, 668 + (c) * 78, \
+         76 + (r) * 80, 72, 26)
+#define KS_ROW(id, c, y) \
+    KS_C(id, "bind." id, NULL, id, KS_BTN, KS_G_CENTER, 434 + (c) * 152, y, \
+         140, 24)
+#define KS_MM(id, sk, c, r) \
+    KS_C(id, "bind." id, sk, id, KS_BTN, KS_G_RIGHT, 936 + (c) * 116, \
+         384 + (r) * 80, 108, 24)
+#define KS_TG(id, sk, x, y) \
+    KS_C(id, "bind." id, sk, id, KS_TOG, KS_G_LEFT, x, y, 88, 24)
 
 static const ks_elem_t ks_elems[] = {
-    /* Linker Block: Schalthebel (R/N/1-5) und Drehhebel */
+    /* Linker Block */
     { "gear", "gui.svg_gear", NULL,
       "gear.up gear.down gear.r gear.n gear.1 gear.2 gear.3 gear.4 gear.5",
-      KS_GEAR, KS_G_LEFT, 40, 165, 110, 225, 24, 420, 140, 95, 392 },
+      KS_GEAR, KS_G_LEFT, 26, 92, 116, 360, 24, 470, 120, 84, 452 },
     { "rot", "gui.svg_rot", NULL, "rot rot.neg rot.pos",
-      KS_LEVER, KS_G_LEFT, 212, 170, 60, 220, 172, 420, 130, 242, 392 },
-    /* Mittelteil */
-    KS_CELL("bi34", "bind.bi34", "gui.svg_t_filter", "bi34", KS_TOG, 0, 0),
-    KS_CELL("bi35", "bind.bi35", "gui.svg_t_oxygen", "bi35", KS_TOG, 1, 0),
-    KS_CELL("bi36", "bind.bi36", "gui.svg_t_fuel", "bi36", KS_TOG, 2, 0),
-    KS_CELL("bi37", "bind.bi37", "gui.svg_t_buffer", "bi37", KS_TOG, 3, 0),
-    KS_CELL("bi38", "bind.bi38", "gui.svg_t_vtloc", "bi38", KS_TOG, 4, 0),
-    KS_CELL("bi3", "bind.bi3", "gui.svg_eject", "bi3", KS_EJECT, 0, 1),
-    KS_CELL("bi4", "bind.bi4", NULL, "bi4", KS_BTN, 1, 1),
-    KS_CELL("bi5", "bind.bi5", NULL, "bi5", KS_BTN, 2, 1),
-    KS_CELL("bi6", "bind.bi6", NULL, "bi6", KS_BTN, 3, 1),
-    KS_CELL("tuner", "gui.svg_tuner", NULL, "tuner.up tuner.down", KS_DIAL,
-            4, 1),
-    KS_CELL("bi28", "bind.bi28", NULL, "bi28", KS_BTN, 0, 2),
-    KS_CELL("bi29", "bind.bi29", NULL, "bi29", KS_BTN, 1, 2),
-    KS_CELL("bi30", "bind.bi30", NULL, "bi30", KS_BTN, 2, 2),
-    KS_CELL("bi31", "bind.bi31", NULL, "bi31", KS_BTN, 3, 2),
-    KS_CELL("bi32", "bind.bi32", NULL, "bi32", KS_BTN, 4, 2),
-    KS_CELL("bi22", "bind.bi22", NULL, "bi22", KS_BTN, 0, 3),
-    KS_CELL("bi23", "bind.bi23", NULL, "bi23", KS_BTN, 1, 3),
-    KS_CELL("bi24", "bind.bi24", NULL, "bi24", KS_BTN, 2, 3),
-    KS_CELL("bi25", "bind.bi25", NULL, "bi25", KS_BTN, 3, 3),
-    KS_CELL("bi26", "bind.bi26", NULL, "bi26", KS_BTN, 4, 3),
-    KS_CELL("bi7", "bind.bi7", NULL, "bi7", KS_BTN, 0, 4),
-    KS_CELL("bi8", "bind.bi8", NULL, "bi8", KS_BTN, 1, 4),
-    KS_CELL("bi9", "bind.bi9", NULL, "bi9", KS_BTN, 2, 4),
-    KS_CELL("bi10", "bind.bi10", NULL, "bi10", KS_BTN, 3, 4),
-    KS_CELL("bi14", "bind.bi14", NULL, "bi14", KS_BTN, 4, 4),
-    KS_CELL("bi11", "bind.bi11", NULL, "bi11", KS_BTN, 0, 5),
-    KS_CELL("bi12", "bind.bi12", NULL, "bi12", KS_BTN, 1, 5),
-    KS_CELL("bi13", "bind.bi13", NULL, "bi13", KS_BTN, 2, 5),
-    KS_CELL("bi15", "bind.bi15", NULL, "bi15", KS_BTN, 3, 5),
-    KS_CELL("bi21", "bind.bi21", NULL, "bi21", KS_BTN, 4, 5),
-    KS_CELL("bi16", "bind.bi16", NULL, "bi16", KS_BTN, 0, 6),
-    KS_CELL("bi17", "bind.bi17", NULL, "bi17", KS_BTN, 1, 6),
-    KS_CELL("bi18", "bind.bi18", NULL, "bi18", KS_BTN, 2, 6),
-    KS_CELL("bi19", "bind.bi19", NULL, "bi19", KS_BTN, 3, 6),
-    KS_CELL("bi20", "bind.bi20", NULL, "bi20", KS_BTN, 4, 6),
-    /* Rechter Block: Zielhebel (Hauptwaffe/Feuer/Lock-On), Sicht-Stick */
-    { "aim", "gui.svg_aim", NULL,
-      "aim_x aim_y aim_x.neg aim_x.pos aim_y.neg aim_y.pos",
-      KS_LEVER, KS_G_RIGHT, 1086, 175, 66, 230, 1172, 250, 88, 1152, 280 },
-    { "bi0", "bind.bi0", NULL, "bi0",
-      KS_TRIG, KS_G_RIGHT, 1070, 222, 16, 48, 976, 250, 88, 1070, 246 },
-    { "bi1", "bind.bi1", NULL, "bi1",
-      KS_KNOB, KS_G_RIGHT, 1134, 200, 9, 0, 1172, 170, 88, 1143, 200 },
-    { "bi2", "bind.bi2", NULL, "bi2",
-      KS_KNOB, KS_G_RIGHT, 1104, 196, 9, 0, 976, 170, 88, 1095, 196 },
+      KS_ROT, KS_G_LEFT, 176, 196, 204, 16, 160, 68, 114, 252, 182 },
     { "sight", "gui.svg_sight", NULL,
       "sight_x sight_y sight_x.neg sight_x.pos sight_y.neg sight_y.pos",
-      KS_SIGHT, KS_G_RIGHT, 1030, 470, 20, 50, 1068, 420, 92, 1050, 462 },
+      KS_SIGHT, KS_G_LEFT, 278, 204, 14, 0, 282, 250, 114, 284, 217 },
     { "bi33", "bind.bi33", NULL, "bi33",
-      KS_SBTN, KS_G_RIGHT, 1030, 470, 7, 0, 1068, 490, 92, 1037, 474 },
-    { "bi27", "bind.bi27", NULL, "bi27",
-      KS_BTN, KS_G_RIGHT, 1168, 440, 90, 24, 0, 0, 0, 0, 0 },
+      KS_SBTN, KS_G_LEFT, 278, 204, 6, 0, 282, 68, 114, 281, 199 },
+    KS_TG("bi34", "gui.svg_t_filter", 158, 552),
+    KS_TG("bi35", "gui.svg_t_oxygen", 194, 472),
+    KS_TG("bi36", "gui.svg_t_fuel", 254, 552),
+    KS_TG("bi37", "gui.svg_t_buffer", 288, 472),
+    KS_TG("bi38", "gui.svg_t_vtloc", 310, 392),
+    /* Mittelblock */
+    KS_COM("bi28", 0), KS_COM("bi29", 1), KS_COM("bi30", 2),
+    KS_COM("bi31", 3), KS_COM("bi32", 4),
+    { "tuner", "gui.svg_tuner", NULL, "tuner.up tuner.down",
+      KS_DIAL, KS_G_CENTER, 540, 250, 58, 0, 480, 344, 120, 540, 312 },
+    KS_LED("bi16", NULL, KS_LEDR, 0, 0),
+    KS_LED("bi17", "gui.svg_s_ext", KS_LEDR, 1, 0),
+    KS_LED("bi18", NULL, KS_LEDR, 2, 0),
+    KS_LED("bi19", NULL, KS_LEDG, 0, 1),
+    KS_LED("bi20", NULL, KS_LEDG, 1, 1),
+    KS_LED("bi21", NULL, KS_LEDG, 2, 1),
+    KS_LED("bi22", NULL, KS_LEDB, 0, 2),
+    KS_LED("bi23", NULL, KS_LEDB, 1, 2),
+    KS_LED("bi24", NULL, KS_LEDB, 2, 2),
+    KS_ROW("bi13", 0, 456), KS_ROW("bi14", 1, 456), KS_ROW("bi15", 2, 456),
+    KS_ROW("bi25", 0, 540), KS_ROW("bi26", 1, 540), KS_ROW("bi27", 2, 540),
+    /* Rechter Block: Zielhebel. bi0 (Report "MainWeapon") = grosse
+     * Daumentaste oben, bi1 ("Fire", Sub-Waffe) = Abzug vorn, bi2 =
+     * Lock-On oben (Quellen uneinig, s. BERICHT_M2 W184). */
+    { "aim", "gui.svg_aim", NULL,
+      "aim_x aim_y aim_x.neg aim_x.pos aim_y.neg aim_y.pos",
+      KS_LEVER, KS_G_RIGHT, 1046, 104, 66, 220, 926, 236, 96, 1046, 200 },
+    { "bi0", "bind.bi0", NULL, "bi0",
+      KS_TRIG, KS_G_RIGHT, 1080, 112, 22, 18, 1124, 76, 96, 1102, 121 },
+    { "bi1", "bind.bi1", NULL, "bi1",
+      KS_TRIG, KS_G_RIGHT, 1030, 146, 16, 44, 926, 150, 96, 1030, 168 },
+    { "bi2", "bind.bi2", NULL, "bi2",
+      KS_KNOB, KS_G_RIGHT, 1062, 121, 8, 0, 926, 76, 96, 1054, 121 },
+    { "bi3", "bind.bi3", "gui.svg_eject", "bi3",
+      KS_EJECT, KS_G_RIGHT, 1250, 84, 36, 40, 1206, 152, 94, 1268, 136 },
+    KS_MM("bi7", "gui.svg_s_open", 0, 0), KS_MM("bi8", NULL, 1, 0),
+    KS_MM("bi9", NULL, 0, 1), KS_MM("bi10", NULL, 1, 1),
+    KS_MM("bi11", NULL, 0, 2), KS_MM("bi12", NULL, 1, 2),
+    KS_C("bi4", "bind.bi4", NULL, "bi4", KS_BTN, KS_G_RIGHT, 1192, 380, 100,
+         34),
+    KS_C("bi5", "bind.bi5", NULL, "bi5", KS_BTN, KS_G_RIGHT, 1192, 464, 100,
+         34),
+    KS_C("bi6", "bind.bi6", NULL, "bi6", KS_BTN, KS_G_RIGHT, 1192, 548, 100,
+         34),
     /* Pedale: Slide-Step links, Bremse Mitte, Gas rechts */
     { "pedal_l", "gui.svg_pedal_l", NULL, "pedal_l",
-      KS_PEDAL, KS_G_PEDALS, 440, 690, 70, 100, 405, 800, 140, 0, 0 },
+      KS_PEDAL, KS_G_PEDALS, 452, 716, 84, 124, 420, 868, 150, 0, 0 },
     { "pedal_m", "gui.svg_pedal_m", NULL, "pedal_m",
-      KS_PEDAL, KS_G_PEDALS, 575, 700, 130, 90, 570, 800, 140, 0, 0 },
+      KS_PEDAL, KS_G_PEDALS, 590, 738, 140, 102, 586, 868, 150, 0, 0 },
     { "pedal_r", "gui.svg_pedal_r", NULL, "pedal_r",
-      KS_PEDAL, KS_G_PEDALS, 770, 680, 70, 110, 735, 800, 140, 0, 0 },
+      KS_PEDAL, KS_G_PEDALS, 780, 704, 84, 136, 752, 868, 150, 0, 0 },
 };
 #define KS_N ((int)(sizeof ks_elems / sizeof ks_elems[0]))
 
 static const char *const ks_grp_key[KS_G_N] = {
     "gui.svg_left", "gui.svg_center", "gui.svg_right", "gui.svg_pedals",
 };
+
+/* Baugruppen-Rahmen x, y, w, h (Reihenfolge wie KS_G_*); Beschriftung
+ * oben mittig. */
+static const short ks_blk[KS_G_N][4] = {
+    { 12, 30, 392, 610 }, { 414, 30, 492, 610 }, { 916, 30, 392, 610 },
+    { 390, 660, 540, 292 },
+};
+
+/* Felder innerhalb der Bloecke: Rahmen (w = 0: nur Beschriftung) und
+ * Beschriftung (lkey NULL: keine) an tx/ty. */
+typedef struct {
+    short x, y, w, h;
+    const char *lkey;
+    short tx, ty;
+} ks_field_t;
+
+static const ks_field_t ks_fields[] = {
+    { 152, 330, 246, 296, "gui.svg_f_tog", 162, 348 },
+    { 424, 426, 472, 194, "gui.svg_f_func", 436, 448 },
+    { 0, 0, 0, 0, "gui.svg_f_wpn", 436, 532 },
+    { 926, 356, 246, 262, "gui.svg_f_mm", 936, 374 },
+    { 0, 0, 0, 0, "gui.svg_f_zoom", 936, 537 },
+    { 1182, 356, 120, 262, NULL, 0, 0 },
+};
+#define KS_NF ((int)(sizeof ks_fields / sizeof ks_fields[0]))
 
 /* Quellen je Callout-Zeile/Tabellenspalte. SBC-Quellen (W159) laufen
  * als "SBC:<Name>" in der Tastatur-Zeile mit. */
@@ -3466,49 +3515,96 @@ static void ks_svg_shape(char *out, size_t cap, size_t *o, const ks_elem_t *e)
                   "<line class=\"ic\" x1=\"%d\" y1=\"%d\" x2=\"%d\" y2=\"%d\"/>",
                   x, y, w, h, x + 6, y + 4, x + 10, y + 12, x + 14, y + 3);
         break;
-    case KS_EJECT: /* Kappe rot, Schutzklappe gestrichelt, Scharnier oben */
+    case KS_LEDR: /* Taste mit Leuchtleiste (rot/gruen/blau) */
+    case KS_LEDG:
+    case KS_LEDB:
         ks_printf(out, cap, o,
-                  "<rect class=\"cv\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                  "<rect class=\"sh\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                  "height=\"%d\" rx=\"5\"/>"
+                  "<rect class=\"%s\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                  "height=\"3\" rx=\"1.5\"/>",
+                  x, y, w, h,
+                  e->shape == KS_LEDR ? "ldr"
+                  : e->shape == KS_LEDG ? "ldg" : "ldb",
+                  x + 8, y + 4, w - 16);
+        break;
+    case KS_EJECT: /* Schutzklappe mit Warnstreifen, Scharnier oben, Kappe */
+        ks_printf(out, cap, o,
+                  "<rect class=\"hzf\" x=\"%d\" y=\"%d\" width=\"%d\" "
                   "height=\"%d\" rx=\"6\"/>"
                   "<line class=\"cvh\" x1=\"%d\" y1=\"%d\" x2=\"%d\" y2=\"%d\"/>"
                   "<rect class=\"sh ej\" x=\"%d\" y=\"%d\" width=\"%d\" "
                   "height=\"%d\" rx=\"5\"/>",
-                  x - 5, y - 7, w + 10, h + 12, x + 8, y - 7, x + w - 8, y - 7,
-                  x, y, w, h);
+                  x - 12, y - 12, w + 24, h + 24, x - 4, y - 12, x + w + 4,
+                  y - 12, x, y, w, h);
         break;
-    case KS_DIAL: /* Tuner-Rad: Kreis mit Marke + Kappe */
+    case KS_DIAL: { /* Tuner-Rad (Mitte x/y, Radius w): 13 Rasten von 9 Uhr
+                     * im Uhrzeigersinn bis 6 Uhr (CONTROLLER.md S3.4) */
+        double r1 = w + 5, r2 = w + 13;
         ks_printf(out, cap, o,
-                  "<rect class=\"sh\" x=\"%d\" y=\"%d\" width=\"%d\" "
-                  "height=\"%d\" rx=\"5\"/>"
-                  "<circle class=\"ic\" cx=\"%d\" cy=\"%d\" r=\"9\"/>"
+                  "<circle class=\"bs\" cx=\"%d\" cy=\"%d\" r=\"%d\"/>"
+                  "<circle class=\"sh\" cx=\"%d\" cy=\"%d\" r=\"%d\"/>"
+                  "<circle class=\"ic\" cx=\"%d\" cy=\"%d\" r=\"%d\"/>",
+                  x, y, w + 16, x, y, w, x, y, w * 62 / 100);
+        for (i = 0; i <= 12; i++) {
+            double a = i * 3.14159265358979 / 8.0;
+            double dx = -cos(a), dy = -sin(a);
+            ks_printf(out, cap, o,
+                      "<line class=\"ic\" x1=\"%d\" y1=\"%d\" x2=\"%d\" "
+                      "y2=\"%d\"/>",
+                      x + (int)lround(dx * r1), y + (int)lround(dy * r1),
+                      x + (int)lround(dx * r2), y + (int)lround(dy * r2));
+        }
+        ks_printf(out, cap, o,
                   "<line class=\"ic\" x1=\"%d\" y1=\"%d\" x2=\"%d\" y2=\"%d\"/>",
-                  x, y, w, h, x + 14, y + 12, x + 14, y + 12, x + 14, y + 4);
+                  x, y - w * 30 / 100, x, y - w * 90 / 100);
         break;
-    case KS_GEAR: { /* Kulisse R N 1 2 3 4 5, Knauf auf N */
-        static const char *const pos[7] = { "R", "N", "1", "2", "3", "4",
-                                            "5" };
-        int cx = x + w / 2;
+    }
+    case KS_GEAR: { /* Kulisse senkrecht (oben 5 ... unten R), rechts davon
+                     * die Gang-Leuchten mit Ziffern, Knauf auf N */
+        static const char *const pos[7] = { "5", "4", "3", "2", "1", "N",
+                                            "R" };
+        int sx = x + 18, st = y + 14, sb = y + h - 14;
         ks_printf(out, cap, o,
                   "<rect class=\"sh\" x=\"%d\" y=\"%d\" width=\"%d\" "
                   "height=\"%d\" rx=\"12\"/>"
-                  "<path class=\"sl\" d=\"M%d %dV%d",
-                  x, y, w, h, cx, y + 10, y + 10 + 6 * 34);
+                  "<rect class=\"bs\" x=\"%d\" y=\"%d\" width=\"22\" "
+                  "height=\"%d\" rx=\"11\"/>",
+                  x, y, w, h, sx, st, sb - st);
         for (i = 0; i < 7; i++) {
-            ks_printf(out, cap, o, "M%d %dh%d", cx, y + 10 + i * 34,
-                      (i % 2) ? 24 : -24);
-        }
-        keyshtml_add(out, cap, o, "\"/>");
-        for (i = 0; i < 7; i++) {
+            int py = st + 16 + i * (sb - st - 32) / 6;
             ks_printf(out, cap, o,
+                      "<line class=\"ic\" x1=\"%d\" y1=\"%d\" x2=\"%d\" "
+                      "y2=\"%d\"/>"
+                      "<rect class=\"ic\" x=\"%d\" y=\"%d\" width=\"20\" "
+                      "height=\"12\" rx=\"2\"/>"
                       "<text class=\"gl\" x=\"%d\" y=\"%d\">%s</text>",
-                      cx + ((i % 2) ? 42 : -42), y + 14 + i * 34, pos[i]);
+                      sx + 26, py, sx + 34, py, x + 58, py - 6, x + 96,
+                      py + 4, pos[i]);
+            if (i == 5) {
+                ks_printf(out, cap, o,
+                          "<circle class=\"sh kn\" cx=\"%d\" cy=\"%d\" "
+                          "r=\"12\"/>",
+                          sx + 11, py);
+            }
         }
-        ks_printf(out, cap, o,
-                  "<circle class=\"sh kn\" cx=\"%d\" cy=\"%d\" r=\"9\"/>",
-                  cx + 24, y + 44);
         break;
     }
-    case KS_LEVER: { /* Griff, Schaft, Sockel */
+    case KS_ROT: { /* Drehhebel von oben: waagrechte Kulisse, Griffkopf
+                    * in der Mitte (traegt den Sicht-Stick) */
+        int cx = x + w / 2, cy = y + h / 2;
+        ks_printf(out, cap, o,
+                  "<rect class=\"bs\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                  "height=\"%d\" rx=\"%d\"/>"
+                  "<text class=\"gl\" x=\"%d\" y=\"%d\">" KS_TRI_L "</text>"
+                  "<text class=\"gl\" x=\"%d\" y=\"%d\">" KS_TRI_R "</text>"
+                  "<rect class=\"sh\" x=\"%d\" y=\"%d\" width=\"64\" "
+                  "height=\"46\" rx=\"14\"/>",
+                  x, y, w, h, h / 2, x + 14, cy + 4, x + w - 14, cy + 4,
+                  cx - 32, cy - 23);
+        break;
+    }
+    case KS_LEVER: { /* Griff, Schaft, Sockel (Seitenansicht) */
         int cx = x + w / 2, gh = h * 55 / 100, sh = h * 36 / 100;
         ks_printf(out, cap, o,
                   "<ellipse class=\"bs\" cx=\"%d\" cy=\"%d\" rx=\"%d\" "
@@ -3524,8 +3620,8 @@ static void ks_svg_shape(char *out, size_t cap, size_t *o, const ks_elem_t *e)
     case KS_TRIG:
         ks_printf(out, cap, o,
                   "<rect class=\"sh\" x=\"%d\" y=\"%d\" width=\"%d\" "
-                  "height=\"%d\" rx=\"6\"/>",
-                  x, y, w, h);
+                  "height=\"%d\" rx=\"%d\"/>",
+                  x, y, w, h, w < h ? 6 : 4);
         break;
     case KS_KNOB:
     case KS_SBTN:
@@ -3533,14 +3629,12 @@ static void ks_svg_shape(char *out, size_t cap, size_t *o, const ks_elem_t *e)
                   "<circle class=\"sh\" cx=\"%d\" cy=\"%d\" r=\"%d\"/>", x, y,
                   w);
         break;
-    case KS_SIGHT: /* kleiner Stick: Sockel, Schaft, Kopf */
+    case KS_SIGHT: /* Sicht-Stick von oben: Kopf mit vier Richtungsmarken */
         ks_printf(out, cap, o,
-                  "<ellipse class=\"bs\" cx=\"%d\" cy=\"%d\" rx=\"%d\" "
-                  "ry=\"10\"/>"
-                  "<rect class=\"bs\" x=\"%d\" y=\"%d\" width=\"14\" "
-                  "height=\"%d\" rx=\"4\"/>"
-                  "<circle class=\"sh\" cx=\"%d\" cy=\"%d\" r=\"%d\"/>",
-                  x, y + w + h + 4, w * 16 / 10, x - 7, y + w - 2, h, x, y, w);
+                  "<circle class=\"sh\" cx=\"%d\" cy=\"%d\" r=\"%d\"/>"
+                  "<path class=\"ic\" d=\"M%d %dv4M%d %dv-4M%d %dh4M%d %dh-4\"/>",
+                  x, y, w, x, y - w + 2, x, y + w - 2, x - w + 2, y,
+                  x + w - 2, y);
         break;
     case KS_PEDAL:
         ks_printf(out, cap, o,
@@ -3611,6 +3705,13 @@ static void ks_css(char *out, size_t cap, size_t *o)
         ".ctl .cv{fill:none;stroke:#d9534f;stroke-width:1.2;"
         "stroke-dasharray:4 3}\n"
         ".ctl .cvh{stroke:#d9534f;stroke-width:3;stroke-linecap:round}\n"
+        ".ctl .hzf{fill:url(#ks-hz);stroke:#d9534f;stroke-width:1.2}\n"
+        ".ctl .hz{fill:#7a6418}\n.ctl .hzb{fill:#1a1c20}\n"
+        ".ctl .ldr{fill:#e0524c}\n.ctl .ldg{fill:#5cc15a}\n"
+        ".ctl .ldb{fill:#3d9be0}\n"
+        ".ctl .fd{fill:none;stroke:#3a414d;stroke-width:1.2}\n"
+        ".ctl .fdc{fill:#7d8592;font-size:10px;font-weight:700;"
+        "letter-spacing:1.5px}\n"
         ".ctl .lb{fill:#11141a;stroke:#2f3541;stroke-width:1}\n"
         ".ctl .lbc{fill:transparent;stroke:none}\n"
         ".ctl .ld{fill:none;stroke:#6c7480;stroke-width:1;"
@@ -3652,6 +3753,11 @@ static void ks_css(char *out, size_t cap, size_t *o)
         ".ctl .ic{stroke:#555}\n.ctl .sl{stroke:#888}\n.ctl .kn{fill:#ddd}\n"
         ".ctl .gl{fill:#333}\n"
         ".ctl .ej{fill:#fde8e8;stroke:#b22}\n.ctl .cv,.ctl .cvh{stroke:#b22}\n"
+        ".ctl .hzf{stroke:#b22}\n.ctl .hz{fill:#e8c440}\n"
+        ".ctl .hzb{fill:#fff}\n"
+        ".ctl .ldr{fill:#c62828}\n.ctl .ldg{fill:#2e7d32}\n"
+        ".ctl .ldb{fill:#1565c0}\n"
+        ".ctl .fd{stroke:#aaa}\n.ctl .fdc{fill:#555}\n"
         ".ctl .lb{fill:#fff;stroke:#bbb}\n.ctl .lbc{fill:none;stroke:none}\n"
         ".ctl .ld{stroke:#999}\n.ctl .nm{fill:#111}\n"
         ".ctl svg .tk{fill:#000}\n.ctl svg .tm{fill:#0a58a8}\n"
@@ -3741,33 +3847,51 @@ static void keysvg_build(const char *profile, const char *prof_text,
     keyshtml_add(out, cap, o, "</div>\n");
     /* Zeichnung (kein xmlns noetig: inline-SVG in HTML) */
     keyshtml_add(out, cap, o,
-                 "<svg viewBox=\"0 0 1280 890\" role=\"img\" aria-label=\"");
+                 "<svg viewBox=\"" KS_VIEWBOX "\" role=\"img\" aria-label=\"");
     {
         char e[256];
         keyshtml_escape(LT("gui.svg_h"), e, sizeof e);
         keyshtml_add(out, cap, o, e);
     }
-    keyshtml_add(out, cap, o, "\">\n"
-                 "<rect class=\"bd\" x=\"14\" y=\"120\" width=\"298\" "
-                 "height=\"480\" rx=\"30\"/>\n"
-                 "<rect class=\"bd\" x=\"326\" y=\"30\" width=\"628\" "
-                 "height=\"580\" rx=\"22\"/>\n"
-                 "<rect class=\"bd\" x=\"968\" y=\"120\" width=\"298\" "
-                 "height=\"480\" rx=\"30\"/>\n"
-                 "<rect class=\"bd\" x=\"400\" y=\"640\" width=\"480\" "
-                 "height=\"240\" rx=\"20\"/>\n");
-    {
-        static const int cxy[KS_G_N][2] = {
-            { 163, 586 }, { 640, 54 }, { 1117, 586 }, { 640, 664 }
-        };
-        for (g = 0; g < KS_G_N; g++) {
-            char e[256];
-            keyshtml_escape(LT(ks_grp_key[g]), e, sizeof e);
-            ks_printf(out, cap, o,
-                      "<text class=\"bdc\" x=\"%d\" y=\"%d\">%s</text>\n",
-                      cxy[g][0], cxy[g][1], e);
-        }
+    /* Warnstreifen der Eject-Klappe (lokales Muster, kein Verweis) */
+    keyshtml_add(out, cap, o, "\">\n<defs><pattern id=\"ks-hz\" "
+                 "width=\"10\" height=\"10\" patternUnits=\"userSpaceOnUse\" "
+                 "patternTransform=\"rotate(45)\"><rect class=\"hzb\" "
+                 "width=\"10\" height=\"10\"/><rect class=\"hz\" width=\"5\" "
+                 "height=\"10\"/></pattern></defs>\n");
+    for (g = 0; g < KS_G_N; g++) {
+        char e[256];
+        ks_printf(out, cap, o,
+                  "<rect class=\"bd\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                  "height=\"%d\" rx=\"%d\"/>\n",
+                  ks_blk[g][0], ks_blk[g][1], ks_blk[g][2], ks_blk[g][3],
+                  g == KS_G_CENTER ? 18 : g == KS_G_PEDALS ? 20 : 26);
+        keyshtml_escape(LT(ks_grp_key[g]), e, sizeof e);
+        ks_printf(out, cap, o,
+                  "<text class=\"bdc\" x=\"%d\" y=\"%d\">%s</text>\n",
+                  ks_blk[g][0] + ks_blk[g][2] / 2, ks_blk[g][1] + 22, e);
     }
+    /* Felder (Rahmen + Beschriftung) und Sockelplatte des Zielhebels */
+    for (i = 0; i < KS_NF; i++) {
+        const ks_field_t *f = &ks_fields[i];
+        if (f->w) {
+            ks_printf(out, cap, o,
+                      "<rect class=\"fd\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                      "height=\"%d\" rx=\"8\"/>",
+                      f->x, f->y, f->w, f->h);
+        }
+        if (f->lkey) {
+            char e[256];
+            keyshtml_escape(LT(f->lkey), e, sizeof e);
+            ks_printf(out, cap, o,
+                      "<text class=\"fdc\" x=\"%d\" y=\"%d\">%s</text>",
+                      f->tx, f->ty, e);
+        }
+        keyshtml_add(out, cap, o, "\n");
+    }
+    keyshtml_add(out, cap, o,
+                 "<rect class=\"bs\" x=\"1009\" y=\"288\" width=\"140\" "
+                 "height=\"44\" rx=\"8\"/>\n");
     for (i = 0; i < KS_N; i++) {
         const ks_elem_t *e = &ks_elems[i];
         const ks_toks_t *k = &tok[i];
@@ -3799,23 +3923,19 @@ static void keysvg_build(const char *profile, const char *prof_text,
         keyshtml_add(out, cap, o, "</title>");
         if (cell) {
             /* Hintergrund (Hover-Flaeche), Kappe mit Name, Zeilen darunter */
-            int nx = e->x + e->w / 2, off = 0;
+            int nx = e->x + e->w / 2, off = e->shape == KS_TOG ? 9 : 0;
             ks_printf(out, cap, o,
                       "<rect class=\"lb lbc\" x=\"%d\" y=\"%d\" width=\"%d\" "
-                      "height=\"64\" rx=\"6\"/>",
-                      e->x - 4, e->y - 4, e->w + 8);
+                      "height=\"%d\" rx=\"6\"/>",
+                      e->x - 3, e->y - 3, e->w + 6, e->h + 40);
             ks_svg_shape(out, cap, o, e);
-            if (e->shape == KS_TOG) {
-                off = 9;
-            } else if (e->shape == KS_DIAL) {
-                off = 12;
-            }
             ks_printf(out, cap, o, "<g class=\"co\" id=\"co-%s\">", e->id);
-            ks_svg_name(out, cap, o, nx + off, e->y + 16, 1, e->w - 12 - 2 * off,
-                        ks_name(e, 1));
+            ks_svg_name(out, cap, o, nx + off,
+                        e->y + e->h / 2 + 4 + (e->shape >= KS_LEDR ? 2 : 0),
+                        1, e->w - 12 - 2 * off, ks_name(e, 1));
             for (l = 0; l < nl; l++) {
-                ks_svg_line(out, cap, o, nx, e->y + 38 + l * 14, 1, e->w,
-                            k, m[l]);
+                ks_svg_line(out, cap, o, nx, e->y + e->h + 14 + l * 14, 1,
+                            e->w, k, m[l]);
             }
             keyshtml_add(out, cap, o, "</g>");
         } else {
@@ -3824,7 +3944,7 @@ static void keysvg_build(const char *profile, const char *prof_text,
                 int px = e->ax < e->lx ? e->lx
                          : e->ax > e->lx + e->lw ? e->lx + e->lw : e->ax;
                 int py = e->ay < e->ly ? e->ly
-                         : e->ay > e->ly + 62 ? e->ly + 62 : e->ay;
+                         : e->ay > e->ly + KS_CO_H ? e->ly + KS_CO_H : e->ay;
                 ks_printf(out, cap, o,
                           "<line class=\"ld\" x1=\"%d\" y1=\"%d\" x2=\"%d\" "
                           "y2=\"%d\"/>",
@@ -3832,8 +3952,8 @@ static void keysvg_build(const char *profile, const char *prof_text,
             }
             ks_printf(out, cap, o,
                       "<g class=\"co\" id=\"co-%s\"><rect class=\"lb\" "
-                      "x=\"%d\" y=\"%d\" width=\"%d\" height=\"62\" rx=\"7\"/>",
-                      e->id, e->lx, e->ly, e->lw);
+                      "x=\"%d\" y=\"%d\" width=\"%d\" height=\"%d\" rx=\"7\"/>",
+                      e->id, e->lx, e->ly, e->lw, KS_CO_H);
             ks_svg_name(out, cap, o, e->lx + 6, e->ly + 15, 0, e->lw - 12,
                         ks_name(e, 1));
             for (l = 0; l < nl; l++) {
@@ -3960,7 +4080,7 @@ static int ks_co(const char *html, const char *id, char *buf, size_t cap)
 static int ks_selfcheck(const char *html, int prof, char *why, size_t cap)
 {
     static char co[8192];
-    const char *sv = strstr(html, "<svg viewBox=\"0 0 1280 890\"");
+    const char *sv = strstr(html, "<svg viewBox=\"" KS_VIEWBOX "\"");
     const char *se = sv ? strstr(sv, "</svg>") : NULL;
     size_t hl = strlen(html);
     int i;
@@ -4066,6 +4186,97 @@ static int ks_selfcheck(const char *html, int prof, char *why, size_t cap)
         ks_co(html, "gear", co, sizeof co);
         if (!strstr(co, ">" KS_TRI_U "E<") || !strstr(co, ">" KS_TRI_D "Q<")) {
             strcpy_s(why, cap, "Gang falsch (Standard)");
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* W184 Selbsttest: Kasten eines Elements (Callout bzw. Zelle). */
+static void ks_box(const ks_elem_t *e, int r[4])
+{
+    if (e->lw) {
+        r[0] = e->lx, r[1] = e->ly, r[2] = e->lw, r[3] = KS_CO_H;
+    } else {
+        r[0] = e->x - 3, r[1] = e->y - 3, r[2] = e->w + 6, r[3] = e->h + 40;
+    }
+}
+
+static int ks_in(const int r[4], const short b[4])
+{
+    return r[0] >= b[0] && r[1] >= b[1] && r[0] + r[2] <= b[0] + b[2] &&
+           r[1] + r[3] <= b[1] + b[3];
+}
+
+/* W184 Selbsttest: physische Anordnung. Jedes Element liegt mit Form-
+ * Anker, Leader-Start und Kasten in seinem Block, kein Kasten ueberdeckt
+ * einen anderen, Felder liegen in einem Block, und die Bloecke stimmen
+ * mit der Zuordnung des Original-Controllers ueberein (Regressionsschutz:
+ * Kippschalter + Sicht-Stick links, Luke/Zuendung/START/Eject/MultiMon
+ * rechts, Magazin + Waffenwahl + COM + Tuner in der Mitte). 1 = ok. */
+static int ks_layoutcheck(char *why, size_t cap)
+{
+    static const struct { const char *id; int g; } want[] = {
+        { "gear", KS_G_LEFT }, { "rot", KS_G_LEFT }, { "sight", KS_G_LEFT },
+        { "bi33", KS_G_LEFT }, { "bi34", KS_G_LEFT }, { "bi38", KS_G_LEFT },
+        { "bi28", KS_G_CENTER }, { "bi32", KS_G_CENTER },
+        { "tuner", KS_G_CENTER }, { "bi16", KS_G_CENTER },
+        { "bi24", KS_G_CENTER }, { "bi13", KS_G_CENTER },
+        { "bi25", KS_G_CENTER }, { "bi27", KS_G_CENTER },
+        { "aim", KS_G_RIGHT }, { "bi0", KS_G_RIGHT }, { "bi3", KS_G_RIGHT },
+        { "bi4", KS_G_RIGHT }, { "bi6", KS_G_RIGHT }, { "bi7", KS_G_RIGHT },
+        { "bi12", KS_G_RIGHT }, { "pedal_m", KS_G_PEDALS },
+    };
+    int i, j;
+    for (i = 0; i < KS_N; i++) {
+        const ks_elem_t *e = &ks_elems[i];
+        const short *b = ks_blk[e->grp];
+        int r[4], pt[4];
+        ks_box(e, r);
+        pt[0] = e->x, pt[1] = e->y, pt[2] = 0, pt[3] = 0;
+        if (!ks_in(r, b) || !ks_in(pt, b)) {
+            _snprintf_s(why, cap, _TRUNCATE, "%s ausserhalb seines Blocks",
+                        e->id);
+            return 0;
+        }
+        pt[0] = e->ax, pt[1] = e->ay;
+        if (e->ax && !ks_in(pt, b)) {
+            _snprintf_s(why, cap, _TRUNCATE, "Leader %s ausserhalb", e->id);
+            return 0;
+        }
+        for (j = 0; j < i; j++) {
+            int q[4];
+            ks_box(&ks_elems[j], q);
+            if (r[0] < q[0] + q[2] && q[0] < r[0] + r[2] &&
+                r[1] < q[1] + q[3] && q[1] < r[1] + r[3]) {
+                _snprintf_s(why, cap, _TRUNCATE, "Kasten %s ueberdeckt %s",
+                            e->id, ks_elems[j].id);
+                return 0;
+            }
+        }
+    }
+    for (i = 0; i < KS_NF; i++) {
+        const ks_field_t *f = &ks_fields[i];
+        int r[4], hit = 0, g;
+        r[0] = f->w ? f->x : f->tx, r[1] = f->w ? f->y : f->ty;
+        r[2] = f->w, r[3] = f->h;
+        for (g = 0; g < KS_G_N; g++) {
+            hit |= ks_in(r, ks_blk[g]);
+        }
+        if (!hit) {
+            _snprintf_s(why, cap, _TRUNCATE, "Feld %d ausserhalb", i);
+            return 0;
+        }
+    }
+    for (i = 0; i < (int)(sizeof want / sizeof want[0]); i++) {
+        for (j = 0; j < KS_N; j++) {
+            if (strcmp(ks_elems[j].id, want[i].id) == 0) {
+                break;
+            }
+        }
+        if (j == KS_N || ks_elems[j].grp != want[i].g) {
+            _snprintf_s(why, cap, _TRUNCATE, "%s im falschen Block",
+                        want[i].id);
             return 0;
         }
     }
@@ -12701,6 +12912,15 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
         } else {
             GT_FAIL("54 keys-svg", "%s", why54);
         }
+        { /* 55 (W184 KEYS-LAYOUT): physische Anordnung, keine Ueberlappung */
+            char why55[200] = "";
+            if (ks_layoutcheck(why55, sizeof why55)) {
+                GT_OK("55 keys-layout (Bloecke wie Original, Felder, keine "
+                      "Callout-Ueberlappung)");
+            } else {
+                GT_FAIL("55 keys-layout", "%s", why55);
+            }
+        }
         { /* Beispiel-HTML (englisch, Fixture) fuers Doku-Archiv */
             char keep[8];
             strcpy_s(keep, sizeof keep, sb_lang_code());
@@ -12711,7 +12931,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                            "fixture: original controller not connected",
                            html, sizeof html);
             _snprintf_s(fx, sizeof fx, _TRUNCATE,
-                        "%sw182_controls_example.html", tmp);
+                        "%sw184_controls_example.html", tmp);
             write_file(fx, html);
             printf("     (54: Beispiel %s)\n", fx);
             sb_lang_set(keep);

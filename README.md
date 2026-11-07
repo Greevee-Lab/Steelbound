@@ -9,7 +9,7 @@ starter application. No game content is included or distributed.
 This repository is source-available (see [License](#license)). It is not an
 official product and is not affiliated with Capcom or Microsoft.
 
-[![Steelbound in action – watch on YouTube](https://img.youtube.com/vi/Iln350iJGcc/maxresdefault.jpg)](https://youtu.be/Iln350iJGcc)
+<a href="https://youtu.be/Iln350iJGcc"><img src="assets/cockpit.jpg" width="480" alt="Steelbound – cockpit in mission (click to watch the video on YouTube)"></a>
 
 ▶ **[Watch Steelbound in action on YouTube](https://youtu.be/Iln350iJGcc)**
 

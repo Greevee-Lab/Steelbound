@@ -42,6 +42,10 @@ RULES = [
     (r"^poc-native/launcher/res/bg_nutzer\.(png|webp)$", "kern",
      "W178 COMM-BG: Launcher-Hintergrundbild (neues Motiv, Eigentum des "
      "Projektinhabers, Positivliste + assets_allow.tsv)"),
+    # Nutzerentscheidung 7.11.: README-Vorschaubild der Community-Seite (einzige
+    # Screenshot-Ausnahme, verkleinert, Link aufs Video; assets_allow.tsv).
+    (r"^editions/community/media/cockpit\.jpg$", "kern",
+     "README-Vorschaubild (Nutzerentscheidung 7.11., assets_allow.tsv)"),
     (r"^poc-native/launcher/res/convert_bg\.py$", "kern",
      "W178 COMM-BG: Konverter WebP->PNG (reproduziert das Community-Hintergrundbild)"),
     (r"^poc-native/harness/golden/", "private",

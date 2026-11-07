@@ -52,6 +52,7 @@ endif()
 add_library(sb_emu SHARED
   src/sb_emu.def
   src/emu_main.c
+  src/sb_relaunch.c
   src/hlog.c
   src/hcfg.c
   src/sb_lang.c

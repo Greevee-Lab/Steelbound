@@ -19,6 +19,8 @@ void hcfg_defaults(void)
     strcpy_s(g_cfg.hdd_root, sizeof g_cfg.hdd_root, "HDD");
     g_cfg.game_image[0] = 0;   /* W150: leer = Ordner-Modus (bisher) */
     g_cfg.version_check = 1;     /* W150: unbekannte Spielversion -> kein Start */
+    g_cfg.xlaunch_self = 1;      /* W186 RESET-TITLE: "Zurueck zum Titel" = Client-Neustart */
+    g_cfg.xlaunch_replay = 0;    /* W186: Neustart-Kind ohne Replay-Kette */
     g_cfg.width = 2560;
     g_cfg.height = 1080;
     g_cfg.present_interval = 0;
@@ -133,6 +135,12 @@ void hcfg_defaults(void)
     g_cfg.audio_setbuf_fast = 1; /* W168 PERF-TICK */
     g_cfg.pd_gw_nopri = 1; /* W168 PERF-TICK */
     g_cfg.swap_match_unlock = 1; /* W168 PERF-TICK */
+    g_cfg.ip_cb_ring = 1; /* W174 PERF-M2: Standard 1 (W174_g1 dicht 1,29 -> 1,04 ms je Wiedergabe mit GPU-VB; verify W174_g2 510/510 diff=0) */
+    g_cfg.ip_vb_gpu = 3; /* W174 PERF-M2: Standard 3 (W174_g1 M2 dicht 8,34 -> 1,29 ms GPU je Wiedergabe; verify W174_g2 510/510 diff=0) */
+    g_cfg.ip_gdiag = 0; /* W174 DIAG */
+    g_cfg.ip_match_compact = 1; /* W174 PERF-M2: Standard 1 (Selbstpruefung W174_m2: 25,4 Mio. Vergleiche abweichend=0; Zuordnung am Swap im dichten M2 schneller) */
+    g_cfg.krnl_reg_cache = 1; /* W174 PERF-M2: Standard 1 (W174_c0b/c1 Testtakt M2 dicht: Tick-Last 27,4 -> 24,7 ms, Kern 16) */
+    g_cfg.ip_ablate = 0; /* W174 DIAG */
     g_cfg.hlog_async = 1; /* W168 PERF-TICK */
     g_cfg.audio_decode_par = 4; /* W168 PERF-TICK */
     g_cfg.tex_inline_data = 1; /* W65 WORLDVIEW: Inline-XPR-Daten im Header-Block (Fix, Hangar-Texturen) */
@@ -465,6 +473,12 @@ static int set_key_overlay(const char *k, const char *v)
     else if (strcmp(k, "ctx_wait_diag") == 0) { g_cfg.ctx_wait_diag = atoi(v); } /* DIAG(PERF-TICK,W168) */
     else if (strcmp(k, "pd_gw_nopri") == 0) { g_cfg.pd_gw_nopri = atoi(v); } /* PERF(PERF-TICK,W168) */
     else if (strcmp(k, "swap_match_unlock") == 0) { g_cfg.swap_match_unlock = atoi(v); } /* PERF(PERF-TICK,W168) */
+    else if (strcmp(k, "ip_cb_ring") == 0) { g_cfg.ip_cb_ring = atoi(v); } /* PERF(PERF-M2,W174) */
+    else if (strcmp(k, "ip_vb_gpu") == 0) { g_cfg.ip_vb_gpu = atoi(v); } /* PERF(PERF-M2,W174) */
+    else if (strcmp(k, "krnl_reg_cache") == 0) { g_cfg.krnl_reg_cache = atoi(v); } /* PERF(PERF-M2,W174) */
+    else if (strcmp(k, "ip_match_compact") == 0) { g_cfg.ip_match_compact = atoi(v); } /* PERF(PERF-M2,W174) */
+    else if (strcmp(k, "ip_gdiag") == 0) { g_cfg.ip_gdiag = atoi(v); } /* DIAG(PERF-M2,W174) */
+    else if (strcmp(k, "ip_ablate") == 0) { g_cfg.ip_ablate = atoi(v); } /* DIAG(PERF-M2,W174) */
     else if (strcmp(k, "perf_blk") == 0) { g_cfg.perf_blk = atoi(v); }
     else if (strcmp(k, "perf_gsplit") == 0) { g_cfg.perf_gsplit = atoi(v); }
     else if (strcmp(k, "perf_gpass") == 0) { g_cfg.perf_gpass = atoi(v); } /* W146 */
@@ -497,6 +511,10 @@ static void set_key(const char *k, const char *v)
         strcpy_s(g_cfg.game_image, sizeof g_cfg.game_image, v);
     } else if (strcmp(k, "version_check") == 0) {
         g_cfg.version_check = atoi(v);
+    } else if (strcmp(k, "xlaunch_self") == 0) {
+        g_cfg.xlaunch_self = atoi(v);
+    } else if (strcmp(k, "xlaunch_replay") == 0) {
+        g_cfg.xlaunch_replay = atoi(v);
     } else if (strcmp(k, "iso_selftest") == 0) {
         g_cfg.iso_selftest = atoi(v);
     } else if (strcmp(k, "width") == 0) {

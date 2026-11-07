@@ -3,6 +3,7 @@
  * MapLetter, MediaCheck, XapiNotify). W68 SPLIT: 1:1 aus xdk_hooks.c. */
 #include "hooks_int.h"
 #include "sb_remaster.h" /* W103 REM-FRAME */
+#include "sb_relaunch.h" /* W186 RESET-TITLE */
 
 /* XapiSelectCachePartition (0x18CFC0, 3 Args, RET 0xC): waehlt Cache-
  * Partition (liest partition0-Tabelle, komplexe Logik). M1: Cache=1 +
@@ -19,13 +20,48 @@ u32 __stdcall hook_XapiSelectCachePartition(u32 a1, u32 a2, u32 pCache)
 }
 
 /* XLaunchNewImageA (0x192363, 2 Args, RET 8): laedt neues XBE + rebootet.
- * M1: IGNORIEREN (kein Reboot, weiter mit aktuellem Image). Pfad loggen! */
+ * Arg 2 ist ein PLAUNCH_DATA (bisher als "flags" geloggt; Zeile unveraendert).
+ * Aufrufer (W186, Disasm): 0xE066D = BACK TO TITLE -> YES ("Reset the game and
+ * return to the title screen?", Szenen 6/0x1F) mit "D:\default.xbe" und
+ * genulltem LAUNCH_DATA; 0xE0271 = Szene-0-Dialog (Speicherplatz) mit NULL
+ * = Dashboard (LD_LAUNCH_DASHBOARD, Grund 2 = Speicherverwaltung);
+ * 0x192B1A = XapiBootToDash (XapiInitProcess-Fehlerpfade).
+ * W186 RESET-TITLE: eigenes Image -> Client-Neustart (sb_relaunch.c,
+ * xlaunch_self=1; 2 = sauberes Ende; 0 = alt). Alles andere wie bisher:
+ * IGNORIEREN (kein Reboot, weiter mit aktuellem Image), loggen. */
+static int xlaunch_is_self(const char *p)
+{
+    if (!p) {
+        return 0;
+    }
+    if (_strnicmp(p, "D:", 2) == 0) {
+        p += 2;
+    } else if (_strnicmp(p, "\\Device\\CdRom0", 14) == 0) {
+        p += 14;
+    } else {
+        return 0;
+    }
+    return _stricmp(p, "\\default.xbe") == 0;
+}
+
 u32 __stdcall hook_XLaunchNewImageA(u32 pPath, u32 flags)
 {
     const char *path = pPath ? (const char *)(uintptr_t)pPath : "(null)";
     void *ret = _ReturnAddress(); /* Aufrufer (seltenes Echt-Ereignis) */
+    if (flags) { /* W186: LAUNCH_DATA-Kopf (Typ/Grund + 3 Parameter) */
+        const u32 *ld = (const u32 *)(uintptr_t)flags;
+        HLOG_W("XLAUNCH LAUNCH_DATA: %08X %08X %08X %08X", ld[0], ld[1], ld[2], ld[3]);
+    }
+    if (pPath && xlaunch_is_self(path) && g_cfg.xlaunch_self) {
+        HLOG_W("XLAUNCH XLaunchNewImageA('%s', flags=0x%X) <- 0x%p -> %s", path, flags, ret,
+               g_cfg.xlaunch_self == 2 ? "ENDE" : "NEUSTART");
+        sb_relaunch_exec(path); /* kehrt nur bei Fehlschlag zurueck */
+    }
     HLOG_W("XLAUNCH XLaunchNewImageA('%s', flags=0x%X) <- 0x%p -> IGNORIERT",
            path, flags, ret);
+    if (!pPath) {
+        HLOG_W("XLAUNCH: Ziel Dashboard (kein Dashboard im Client) -> wie bisher ignoriert");
+    }
     return 0; /* ERFOLG (kein Reboot, weiter!) */
 }
 

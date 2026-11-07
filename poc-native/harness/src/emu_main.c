@@ -22,8 +22,10 @@
 #include "watch_dr.h" /* W41 WATCHDR */
 #include "sb_gamever.h" /* W150 ISO-DIRECT */
 #include "sb_userdata.h" /* W150 USER-DATA */
+#include "sb_relaunch.h" /* W186 RESET-TITLE */
 
 static int g_run_seconds;
+static volatile LONG g_wd_waited; /* W186: Sekunden seit Watchdog-Start (Rest-Laufzeit) */
 
 /* W94 CRASHLOG: Absturz-Spuren dauerhaft machen. Die WER-Dumps vom 3.11.
  * zeigten: bei ungueltiger Spiel-SEH-Kette (c00001a5) beendet Windows den
@@ -1123,6 +1125,7 @@ static DWORD WINAPI watchdog(LPVOID unused)
     for (;;) {
         Sleep(5000);
         waited += 5;
+        InterlockedExchange(&g_wd_waited, waited); /* W186 */
         HLOG_I("watchdog: %.0fs, Frames=%u", (double)waited, hooks_frame_count());
         threadwatch(waited);
         { extern void sb_vr_watch(void); sb_vr_watch(); } /* W145: VR-Runtime-Haenger (vr_enable=0: sofort zurueck) */
@@ -1294,6 +1297,25 @@ static DWORD WINAPI watchdog(LPVOID unused)
     /* unreachable */
 }
 
+/* W186 RESET-TITLE: Rest eines Testlaufs (--run-seconds) in Sekunden,
+ * -1 = ohne Limit (Spielerbetrieb). */
+int emu_run_seconds_left(void)
+{
+    if (g_run_seconds <= 0) {
+        return -1;
+    }
+    return g_run_seconds - (int)g_wd_waited;
+}
+
+/* W186: geordnetes Ende wie beim --run-seconds-Ende (index.json, Statistik,
+ * Log schliessen); ExitProcess macht der Aufrufer. */
+void emu_shutdown_for_exit(void)
+{
+    sb_rem_shutdown();
+    krnl_dump_stats();
+    hlog_close();
+}
+
 
 /* Mini-Argparser auf GetCommandLineA (werden per DLL-Einstieg gerufen). */
 /* W159: --set-Kette aus der Kommandozeile (Launcher-Start: vr_enable=...).
@@ -1458,28 +1480,34 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
         ExitProcess(8);
     }
 
+    sb_relaunch_boot(); /* W186: Neustart-Kind wartet hier auf das Ende des alten Prozesses */
     hcfg_defaults();
     parse_cmdline(&cfg_path, &xbe_path);
+    if (sb_relaunch_run_seconds() >= 0) { /* W186: Testlauf-Rest erben */
+        g_run_seconds = sb_relaunch_run_seconds();
+    }
 
     /* Logs/Shots pro Lauf in hcfg_out_dir() (SB_OUT_DIR, sonst "out"). */
     _snprintf_s(log_path, sizeof log_path, _TRUNCATE, "%s/sb_harness.log",
                 hcfg_out_dir());
     /* W94 CRASHLOG: vorheriges Log behalten (Absturz-Log ging beim
      * Neustart verloren). Nur beim ersten Oeffnen, best effort. */
-    {
+    if (!sb_relaunch_child()) { /* W186: Neustart haengt an (Log des alten Prozesses bleibt davor) */
         char prev[620];
         _snprintf_s(prev, sizeof prev, _TRUNCATE, "%s/sb_harness.prev.log",
                     hcfg_out_dir());
         MoveFileExA(log_path, prev, MOVEFILE_REPLACE_EXISTING);
     }
     strcpy_s(g_log_path, sizeof g_log_path, log_path);
-    hlog_init(log_path, HLOG_INFO);
+    if (sb_relaunch_child()) { hlog_init_append(log_path, HLOG_INFO); }
+    else { hlog_init(log_path, HLOG_INFO); }
     HLOG_I("sb_emu: Harness startet (DLL=0x%p)", GetModuleHandleA("sb_emu.dll"));
     hcfg_load(cfg_path);
     /* W159: Start-Parameter --set "k=v;..." (Launcher: vr_enable je Startweg).
      * Gewinnt ueber sb_native.cfg, user.cfg und SB_CFG_SET; die Dateien
      * bleiben unveraendert (Einzelstart-Override). */
     hcfg_apply_set(g_cmdline_set, "cmdline");
+    sb_relaunch_after_cfg(); /* W186: nur im Neustart-Kind (Zeile RELAUNCH + Ersatz-Set) */
     sb_rem_fx_start(); /* W151 EFFECT-PACK: Effect-Pack-Parameter auf cfg legen */
     if (sb_userdata_path(SB_UD_CRASH, g_crash_dir, sizeof g_crash_dir) != 1) { /* W150 */
         g_crash_dir[0] = 0;
@@ -1507,7 +1535,7 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     }
     hlog_close();
     /* A6 hlog_keep: zweites Oeffnen NICHT trunkieren (cfg-Zeilen bleiben). */
-    if (g_cfg.hlog_keep) { hlog_init_append(log_path, g_cfg.level); }
+    if (g_cfg.hlog_keep || sb_relaunch_child()) { hlog_init_append(log_path, g_cfg.level); }
     else { hlog_init(log_path, g_cfg.level); }
     if (g_cfg.hlog_async) { hlog_async_start(); } /* PERF(PERF-TICK,W168) */
 

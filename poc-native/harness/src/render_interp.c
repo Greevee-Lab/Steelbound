@@ -33,6 +33,7 @@
  * interp_fps=0: g_ip_recording bleibt 0, sb_interp_swap kehrt sofort mit 0
  * zurueck -> exakt der bisherige Pfad. */
 #include "render_int.h"
+#include <share.h> /* W174: _fsopen/_SH_DENYNO */
 #include <d3d11_1.h>
 #include "render_qa.h"
 #include "sb_perfhud.h" /* W122 PERF-HUD */
@@ -129,6 +130,15 @@ typedef struct {
     unsigned rqxcap, rqxpos, rqxwant, rqccap, rqcpos, rqcwant;
     unsigned nodisc;  /* PERF(TICK-PERF,W125): Bit 1/2/4 = vb/rqx/rqc frei (GPU-Fence) -> erstes Map NO_OVERWRITE */
     ID3D11SamplerState *smp0; /* PERF(RENDER-THREAD,W126): s0 des Spiels beim Aufnahme-Start (AddRef) - Anfangszustand der Deferred-Wiedergabe */
+    /* PERF(PERF-M2,W174) ip_vb_gpu: GPU-Kopien (DEFAULT) von Tick-VB/Stream 2 je Liste (bleiben bei der Liste, nicht im Reserve-Satz) */
+    ID3D11Buffer *vbg, *rqxg;
+    ID3D11ShaderResourceView *rqxgsrv;
+    unsigned vbgcap, rqxgcap;
+    unsigned gpu_ok;  /* Bits 1/2: vbg/rqxg tragen den Inhalt dieses Ticks */
+    volatile LONG ga_st; /* W174: Anlage im Hilfs-Thread 0 frei, 1 laeuft, 2 fertig (abholen am Swap) */
+    ID3D11Buffer *ga_vbg, *ga_rqxg;
+    ID3D11ShaderResourceView *ga_srv;
+    unsigned ga_vbcap, ga_rqxcap;
 } ip_list_t;
 
 typedef struct {
@@ -263,6 +273,7 @@ static void ip_list_reset(ip_list_t *L)
     L->nrefs = 0;
     L->bbref = -1;
     L->nodisc = 0;
+    L->gpu_ok = 0; /* W174 */
     if (L->smp0) { ID3D11SamplerState_Release(L->smp0); L->smp0 = NULL; } /* W126 */
 }
 
@@ -470,6 +481,206 @@ static int ip_rq_ensure(ip_list_t *L)
     return 1;
 }
 
+/* PERF(PERF-M2,W174) ip_vb_gpu: Die Tick-Puffer sind DYNAMIC (CPU schreibt,
+ * Treiber legt sie i. d. R. in Systemspeicher). Jede Zwischenbild-Wiedergabe
+ * liest den ganzen Tick (lerp-Draws zwei Stroeme) erneut ueber PCIe. Am Swap
+ * eine GPU-Kopie in einen DEFAULT-Puffer der Liste (einmal je Tick); die
+ * Wiedergabe liest daraus. Inhalt und Offsets gleich -> gleiche Bilder.
+ * Bits: 1 VB, 2 Stream 2/Roh-Eingaenge (rqx), 4 Konstanten-Fenster (rqc). */
+static unsigned st_vbg_copy, st_vbg_fail;
+static double st_vbg_mb;
+/* DIAG(PERF-M2,W174) ip_gdiag: GPU-Zeit der Kopien am Swap (Timestamps, asynchron) */
+#define GC_N 8
+static ID3D11Query *gc_dj[GC_N], *gc_t0[GC_N], *gc_t1[GC_N];
+static int gc_st[GC_N], gc_fail;
+static double gc_ms, gc_mx;
+static unsigned gc_n;
+static void gc_poll(void)
+{
+    int k;
+    for (k = 0; k < GC_N; k++) {
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj;
+        UINT64 t0, t1;
+        if (gc_st[k] != 2) { continue; }
+        if (ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)gc_dj[k], &dj, sizeof dj,
+                                        D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) { continue; }
+        gc_st[k] = 0;
+        if (dj.Disjoint || !dj.Frequency ||
+            ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)gc_t0[k], &t0, sizeof t0, D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK ||
+            ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)gc_t1[k], &t1, sizeof t1, D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK ||
+            t1 < t0) { continue; }
+        {
+            double ms = (double)(t1 - t0) * 1000.0 / (double)dj.Frequency;
+            gc_ms += ms; gc_n++;
+            if (ms > gc_mx) { gc_mx = ms; }
+        }
+    }
+}
+static int gc_begin(void)
+{
+    int k;
+    if (g_cfg.ip_gdiag <= 0 || gc_fail) { return -1; }
+    gc_poll();
+    for (k = 0; k < GC_N; k++) { if (gc_st[k] == 0) { break; } }
+    if (k >= GC_N) { return -1; }
+    if (!gc_dj[k]) {
+        D3D11_QUERY_DESC qd;
+        memset(&qd, 0, sizeof qd);
+        qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+        if (FAILED(ID3D11Device_CreateQuery(g_dev, &qd, &gc_dj[k]))) { gc_fail = 1; return -1; }
+        qd.Query = D3D11_QUERY_TIMESTAMP;
+        if (FAILED(ID3D11Device_CreateQuery(g_dev, &qd, &gc_t0[k])) ||
+            FAILED(ID3D11Device_CreateQuery(g_dev, &qd, &gc_t1[k]))) { gc_fail = 1; return -1; }
+    }
+    ID3D11DeviceContext_Begin(g_ctx, (ID3D11Asynchronous *)gc_dj[k]);
+    ID3D11DeviceContext_End(g_ctx, (ID3D11Asynchronous *)gc_t0[k]);
+    return k;
+}
+static void gc_end(int k)
+{
+    if (k < 0) { return; }
+    ID3D11DeviceContext_End(g_ctx, (ID3D11Asynchronous *)gc_t1[k]);
+    ID3D11DeviceContext_End(g_ctx, (ID3D11Asynchronous *)gc_dj[k]);
+    gc_st[k] = 2;
+}
+static ID3D11Buffer *ip_mk_default(unsigned bytes, UINT bind)
+{
+    D3D11_BUFFER_DESC bd;
+    ID3D11Buffer *b = NULL;
+    int cr = sb_ctx_release_all(); /* Device-Aufruf ohne ctx_lock (40-64 MB) */
+    memset(&bd, 0, sizeof bd);
+    bd.ByteWidth = bytes;
+    bd.Usage = D3D11_USAGE_DEFAULT;
+    bd.BindFlags = bind;
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &b))) { b = NULL; }
+    sb_ctx_reacquire(cr);
+    return b;
+}
+
+/* Neuanlage (Tick-VB gewachsen, z. B. M2 60 -> 90 MB): Ein DEFAULT-Puffer
+ * dieser Groesse kostet beim Anlegen 65-75 ms (W174_r1) - am Swap haette das den
+ * Tick aufgehalten. Daher im Hilfs-Thread (Device-Aufruf, frei-threaded);
+ * bis zur Abholung liest die Wiedergabe dieser Liste wie bisher den DYNAMIC-
+ * Puffer (gleiche Daten). Beim ersten Present (sb_interp_prealloc) synchron. */
+static unsigned st_vbg_async;
+static DWORD WINAPI ip_ga_work(LPVOID p)
+{
+    ip_list_t *L = (ip_list_t *)p;
+    if (L->ga_vbcap) { L->ga_vbg = ip_mk_default(L->ga_vbcap * (unsigned)sizeof(im_vertex_t), D3D11_BIND_VERTEX_BUFFER); }
+    if (L->ga_rqxcap) {
+        L->ga_rqxg = ip_mk_default(L->ga_rqxcap, D3D11_BIND_VERTEX_BUFFER | (rq_xsrv_supported() ? D3D11_BIND_SHADER_RESOURCE : 0u));
+        if (L->ga_rqxg && rq_xsrv_supported()) { L->ga_srv = rq_mksrv(L->ga_rqxg, L->ga_rqxcap); }
+    }
+    InterlockedExchange(&L->ga_st, 2);
+    return 0;
+}
+
+static void ip_ga_adopt(ip_list_t *L)
+{
+    if (L->ga_vbg) {
+        if (L->vbg) { ID3D11Buffer_Release(L->vbg); }
+        L->vbg = L->ga_vbg; L->vbgcap = L->ga_vbcap;
+        HLOG_I("INTERP vb_gpu: GPU-VB Liste %d %u Vertices (%u MB, Hilfs-Thread)", (int)(L - g_ipl), L->vbgcap,
+               (unsigned)(((unsigned long long)L->vbgcap * sizeof(im_vertex_t)) >> 20));
+    } else if (L->ga_vbcap) { st_vbg_fail++; }
+    if (L->ga_rqxg && (L->ga_srv || !rq_xsrv_supported())) {
+        if (L->rqxgsrv) { ID3D11ShaderResourceView_Release(L->rqxgsrv); }
+        if (L->rqxg) { ID3D11Buffer_Release(L->rqxg); }
+        L->rqxg = L->ga_rqxg; L->rqxgsrv = L->ga_srv; L->rqxgcap = L->ga_rqxcap;
+    } else {
+        if (L->ga_srv) { ID3D11ShaderResourceView_Release(L->ga_srv); }
+        if (L->ga_rqxg) { ID3D11Buffer_Release(L->ga_rqxg); }
+        if (L->ga_rqxcap) { st_vbg_fail++; }
+    }
+    L->ga_vbg = NULL; L->ga_rqxg = NULL; L->ga_srv = NULL;
+    L->ga_vbcap = L->ga_rqxcap = 0;
+    InterlockedExchange(&L->ga_st, 0);
+}
+
+static void ip_gpu_alloc(ip_list_t *L, int async)
+{
+    unsigned want = (unsigned)g_cfg.ip_vb_gpu;
+    int needvb, needrq;
+    if (!want || !g_dev) { return; }
+    if (L->ga_st == 2) { ip_ga_adopt(L); }
+    needvb = (want & 1u) && L->vb && (!L->vbg || L->vbgcap < L->vbcap);
+    needrq = (want & 2u) && L->rqx && (!L->rqxg || L->rqxgcap < L->rqxcap);
+    if (!needvb && !needrq) { return; }
+    if (async) {
+        if (L->ga_st != 0) { return; } /* laeuft schon */
+        L->ga_vbcap = needvb ? L->vbcap : 0u;
+        L->ga_rqxcap = needrq ? L->rqxcap : 0u;
+        L->ga_vbg = NULL; L->ga_rqxg = NULL; L->ga_srv = NULL;
+        InterlockedExchange(&L->ga_st, 1);
+        if (!QueueUserWorkItem(ip_ga_work, L, WT_EXECUTELONGFUNCTION)) {
+            L->ga_vbcap = L->ga_rqxcap = 0;
+            InterlockedExchange(&L->ga_st, 0);
+            st_vbg_fail++;
+            return;
+        }
+        st_vbg_async++;
+        return;
+    }
+    if (needvb) {
+        if (L->vbg) { ID3D11Buffer_Release(L->vbg); L->vbg = NULL; L->vbgcap = 0; }
+        L->vbg = ip_mk_default(L->vbcap * (unsigned)sizeof(im_vertex_t), D3D11_BIND_VERTEX_BUFFER);
+        if (L->vbg) {
+            L->vbgcap = L->vbcap;
+            HLOG_I("INTERP vb_gpu: GPU-VB Liste %d %u Vertices (%u MB)", (int)(L - g_ipl), L->vbgcap,
+                   (unsigned)(((unsigned long long)L->vbgcap * sizeof(im_vertex_t)) >> 20));
+        } else { st_vbg_fail++; }
+    }
+    if (needrq) {
+        if (L->rqxgsrv) { ID3D11ShaderResourceView_Release(L->rqxgsrv); L->rqxgsrv = NULL; }
+        if (L->rqxg) { ID3D11Buffer_Release(L->rqxg); L->rqxg = NULL; L->rqxgcap = 0; }
+        L->rqxg = ip_mk_default(L->rqxcap, D3D11_BIND_VERTEX_BUFFER |
+                                               (rq_xsrv_supported() ? D3D11_BIND_SHADER_RESOURCE : 0u));
+        if (L->rqxg) {
+            L->rqxgcap = L->rqxcap;
+            if (rq_xsrv_supported()) { L->rqxgsrv = rq_mksrv(L->rqxg, L->rqxgcap); }
+        } else { st_vbg_fail++; }
+    }
+}
+
+static void ip_gpu_copy(ip_list_t *L)
+{
+    D3D11_BOX bx;
+    unsigned want = (unsigned)g_cfg.ip_vb_gpu;
+    int gk = -1;
+    L->gpu_ok = 0;
+    if (!want || !g_ctx) { return; }
+    ip_gpu_alloc(L, 1); /* fehlende/zu kleine Kopien im Hilfs-Thread anlegen (sonst schon in sb_interp_prealloc) */
+    memset(&bx, 0, sizeof bx);
+    bx.bottom = 1; bx.back = 1;
+    if ((want & 1u) && L->vb && L->nverts) {
+        if (L->vbg && L->vbgcap >= L->nverts) { /* alte Kopie reicht, solange der Tick hineinpasst */
+            gk = gc_begin(); /* DIAG(PERF-M2,W174) */
+            bx.left = 0; bx.right = L->nverts * (unsigned)sizeof(im_vertex_t);
+            ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)L->vbg, 0, 0, 0, 0,
+                                                      (ID3D11Resource *)L->vb, 0, &bx);
+            L->gpu_ok |= 1u;
+            st_vbg_copy++;
+            st_vbg_mb += (double)bx.right / 1048576.0;
+        }
+    }
+    if ((want & 2u) && L->rqx && L->rqxpos) {
+        if (L->rqxg && L->rqxgcap >= L->rqxpos && (L->rqxgsrv || !L->rqxsrv)) {
+            bx.left = 0; bx.right = L->rqxpos > L->rqxcap ? L->rqxcap : L->rqxpos;
+            ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)L->rqxg, 0, 0, 0, 0,
+                                                      (ID3D11Resource *)L->rqx, 0, &bx);
+            L->gpu_ok |= 2u;
+            st_vbg_mb += (double)bx.right / 1048576.0;
+        }
+    }
+    gc_end(gk);
+}
+
+/* Puffer der Wiedergabe: GPU-Kopie, wenn vorhanden und gewuenscht. */
+static ID3D11Buffer *ip_vbsel(const ip_list_t *L, int g)
+{
+    return (g && (L->gpu_ok & 1u)) ? L->vbg : L->vb;
+}
+
 /* PERF(PERF-WARM,W139) warm_vbpre=1: alle Tick-Puffersaetze (IP_LISTS Listen +
  * interp_bsets Reserve-Saetze, je VB 40-60 MB + Stream 2 64 MB + Konstanten
  * 4 MB) schon beim ersten Present mit Offscreen-BB (Bootbild, unsichtbar und
@@ -505,6 +716,7 @@ void sb_interp_prealloc(void)
         if (!ip_vb_ensure(L) || !ip_rq_ensure(L)) { break; }
         ip_touch(L->vb); ip_touch(L->rqx); ip_touch(L->rqc);
         nl++;
+        ip_gpu_alloc(L, 0); /* PERF(PERF-M2,W174) ip_vb_gpu: GPU-Kopien gleich mit anlegen */
     }
     n = g_cfg.interp_bsets > IP_BS_MAX ? IP_BS_MAX : g_cfg.interp_bsets;
     for (k = 0; k < n && nl == IP_LISTS; k++) {
@@ -992,6 +1204,12 @@ static int ip_hhead[1u << IP_HBITS], ip_ghead[1u << IP_HBITS];
 static int *ip_hnext, *ip_gnext;
 static unsigned ip_hcap;
 
+/* PERF(PERF-M2,W174) ip_match_compact: Signatur, Eingangs-Hash und Bezugspunkte der Draws von A
+ * dicht gepackt (ip_inst_best lief die Hash-Kette ueber die grossen ip_op_t; 46 % der Swap-Proben
+ * in schweren M2-Ticks, W174_r2). Gleiche Vergleiche, gleiche Reihenfolge -> gleiche Zuordnung. */
+typedef struct { unsigned sig, rawhash; float rn[4][3]; } ip_ck_t;
+static ip_ck_t *ip_ck;
+static unsigned ip_ckcap;
 static int ip_hash_build(ip_list_t *A)
 {
     unsigned j;
@@ -1004,12 +1222,19 @@ static int ip_hash_build(ip_list_t *A)
         ip_gnext = nn;
         ip_hcap = A->nops;
     }
+    if (g_cfg.ip_match_compact && ip_ckcap < A->nops) {
+        ip_ck_t *nc = (ip_ck_t *)realloc(ip_ck, A->nops * sizeof *nc);
+        if (!nc) { return 0; }
+        ip_ck = nc;
+        ip_ckcap = A->nops;
+    }
     memset(ip_hhead, 0xFF, sizeof ip_hhead);
     memset(ip_ghead, 0xFF, sizeof ip_ghead);
     for (j = A->nops; j-- > 0;) {
         const ip_op_t *a = &A->ops[j];
         unsigned h;
         if (a->kind != IP_DRAW) { continue; }
+        if (g_cfg.ip_match_compact) { ip_ck[j].sig = a->sig; ip_ck[j].rawhash = a->rawhash; memcpy(ip_ck[j].rn, a->rn, sizeof a->rn); }
         h = IP_HB(a->sig);
         ip_hnext[j] = ip_hhead[h];
         ip_hhead[h] = (int)j;
@@ -1108,14 +1333,14 @@ static unsigned ip_bcap;
 
 /* Bildsprung a -> o: groesster NDC-Sprung der 4 Bezugs-Vertices (wie
  * ip_plausible, aus den beim Aufzeichnen berechneten NDC). */
-static float ip_cost(const ip_op_t *a, const ip_op_t *o)
+static float ip_cost_rn(const float arn[4][3], const ip_op_t *o)
 {
     int q, front = 0;
     float m = 0.0f;
     for (q = 0; q < 4; q++) {
-        float w0 = a->rn[q][2], w1 = o->rn[q][2];
+        float w0 = arn[q][2], w1 = o->rn[q][2];
         if (w0 > 1e-6f && w1 > 1e-6f) {
-            float dx = fabsf(o->rn[q][0] - a->rn[q][0]), dy = fabsf(o->rn[q][1] - a->rn[q][1]);
+            float dx = fabsf(o->rn[q][0] - arn[q][0]), dy = fabsf(o->rn[q][1] - arn[q][1]);
             if (dx > m) { m = dx; }
             if (dy > m) { m = dy; }
             front++;
@@ -1125,6 +1350,7 @@ static float ip_cost(const ip_op_t *a, const ip_op_t *o)
     }
     return front ? m : 0.0f;
 }
+static float ip_cost(const ip_op_t *a, const ip_op_t *o) { return ip_cost_rn(a->rn, o); }
 
 static int ip_bhash_build(ip_list_t *B)
 {
@@ -1148,12 +1374,41 @@ static int ip_bhash_build(ip_list_t *B)
 
 /* Kleinster-Sprung-Kandidat in A (frei, gleiche Signatur + Eingangs-Hash).
  * *n = Zahl der Kandidaten, *c1/*c2 = bester/zweitbester Sprung. */
+static unsigned st_ck_chk, st_ck_bad; /* DIAG(PERF-M2,W174) ip_match_compact=2: Selbstpruefung */
+static int ip_inst_best_x(ip_list_t *A, const ip_op_t *o, int *n, float *c1, float *c2, int *second, int compact);
 static int ip_inst_best(ip_list_t *A, const ip_op_t *o, int *n, float *c1, float *c2, int *second)
+{
+    int b = ip_inst_best_x(A, o, n, c1, c2, second, g_cfg.ip_match_compact > 0);
+    if (g_cfg.ip_match_compact == 2) {
+        int n2, s2, b2;
+        float d1, d2;
+        b2 = ip_inst_best_x(A, o, &n2, &d1, &d2, &s2, 0);
+        st_ck_chk++;
+        if (b2 != b || n2 != *n || s2 != *second || memcmp(&d1, c1, sizeof d1) != 0 || memcmp(&d2, c2, sizeof d2) != 0) {
+            if (st_ck_bad++ < 8u) { HLOG_W("INTERP match_compact: Abweichung best %d/%d n %d/%d", b, b2, *n, n2); }
+        }
+        if ((st_ck_chk % 200000u) == 0u) { HLOG_I("INTERP match_compact Pruefung: %u Vergleiche, abweichend=%u", st_ck_chk, st_ck_bad); }
+    }
+    return b;
+}
+static int ip_inst_best_x(ip_list_t *A, const ip_op_t *o, int *n, float *c1, float *c2, int *second, int compact)
 {
     int j, best = -1;
     *n = 0;
     *c1 = *c2 = IP_COST_INF;
     *second = -1;
+    if (compact && ip_ck && ip_ckcap >= A->nops) { /* PERF(PERF-M2,W174): gleiche Pruefungen, dicht gepackt */
+        for (j = ip_hhead[IP_HB(o->sig)]; j >= 0; j = ip_hnext[j]) {
+            const ip_ck_t *k = &ip_ck[j];
+            float c;
+            if (k->sig != o->sig || k->rawhash != o->rawhash || A->ops[j].taken) { continue; }
+            (*n)++;
+            c = ip_cost_rn(k->rn, o);
+            if (c < *c1) { *c2 = *c1; *second = best; *c1 = c; best = j; }
+            else if (c < *c2) { *c2 = c; *second = j; }
+        }
+        return best;
+    }
     for (j = ip_hhead[IP_HB(o->sig)]; j >= 0; j = ip_hnext[j]) {
         const ip_op_t *a = &A->ops[j];
         float c;
@@ -1778,6 +2033,128 @@ static void ip_cb_write(const ip_cx_t *x, ID3D11Buffer *cb, const float m[16], u
     else { *(unsigned *)((unsigned char *)map.pData + 64) = u; }
     memcpy((unsigned char *)map.pData + 68, g_cw_par, sizeof g_cw_par); /* W166 COCKPIT-WIDEN */
     ID3D11DeviceContext_Unmap(x->c, (ID3D11Resource *)cb, 0);
+}
+
+/* ---------- PERF(PERF-M2,W174): Konstanten-Ring, Zaehler, Diagnose-Varianten ----------
+ * ip_cb_ring=1: Statt je Draw b0 (und b1 bei lerp) per Map(DISCARD) eines
+ * 80-Byte-Puffers zu erneuern (3400 Draws -> ~5000 Maps je Wiedergabe), schreibt
+ * die Wiedergabe vorab alle Draw-Konstanten in einen Ring-Puffer (ein Map je
+ * Wiedergabe, 256-Byte-Plaetze, gleiche aufeinanderfolgende Saetze nur einmal)
+ * und bindet je Draw nur den Versatz (VS/PS-SetConstantBuffers1). Gleiche
+ * Bytes im gelesenen Bereich (mvp, has_tex bzw. ip_t, cw-Parameter) -> gleiche
+ * Bilder. Nicht mit VR-Augen/Diagnosebild (alter Pfad). */
+#define IP_RING_SLOT 256u
+typedef struct {
+    ID3D11Buffer *buf;
+    unsigned cap;          /* Plaetze */
+    unsigned *ofs;         /* je Op 2 Plaetze (b0, b1); ~0 = keiner */
+    unsigned ofscap;
+} ip_ring_t;
+static ip_ring_t ip_ring[2]; /* 0 = Immediate, 1 = Deferred (Render-Thread) */
+
+/* DIAG(PERF-M2,W174) ip_gdiag: Zaehler je Wiedergabe */
+typedef struct {
+    unsigned nops, ndraw, nlerp, nrq, nclr, nmap, nrtv, nsrv, ncb, slots, var, nverts, rqxb, ring, vbg;
+    unsigned long long vbytes;
+} ip_rc_t;
+static ip_rc_t ip_rc_ctx[2];
+
+static int ip_ring_fill(const ip_cx_t *x, const ip_list_t *B, const ip_list_t *A, int lerp_ok, float t, ip_rc_t *rc)
+{
+    ip_ring_t *R = &ip_ring[x->deferred ? 1 : 0];
+    unsigned i, need = 0, n = 0, last0 = 0xFFFFFFFFu, last1 = 0xFFFFFFFFu;
+    unsigned char r[80], p0[80], p1[80];
+    D3D11_MAPPED_SUBRESOURCE m;
+    unsigned char *d;
+    HRESULT hr;
+    if (!x->c1 || !B->nops) { return 0; }
+    for (i = 0; i < B->nops; i++) {
+        const ip_op_t *o = &B->ops[i];
+        if (o->kind != IP_DRAW) { continue; }
+        need += (lerp_ok && o->flag && o->match >= 0 && (unsigned)o->match < A->nops) ? 2u : 1u;
+    }
+    if (!need) { return 0; }
+    if (R->ofscap < 2u * B->nops) {
+        unsigned nc = 2u * B->nops + 1024u;
+        unsigned *no = (unsigned *)realloc(R->ofs, (size_t)nc * sizeof *no);
+        if (!no) { return 0; }
+        R->ofs = no;
+        R->ofscap = nc;
+    }
+    if (!R->buf || R->cap < need) {
+        D3D11_BUFFER_DESC bd;
+        unsigned nc = need + need / 4u;
+        if (nc < 4096u) { nc = 4096u; }
+        if (R->buf) { ID3D11Buffer_Release(R->buf); R->buf = NULL; R->cap = 0; }
+        memset(&bd, 0, sizeof bd);
+        bd.ByteWidth = nc * IP_RING_SLOT;
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &R->buf))) { R->buf = NULL; return 0; }
+        R->cap = nc;
+        HLOG_I("INTERP cb_ring: Ring-Puffer %s %u Plaetze (%u KB)", x->deferred ? "Render-Thread" : "Spiel-Thread", nc,
+               nc * IP_RING_SLOT / 1024u);
+    }
+    WD_CALL("ip_ring_map", NULL, hr = ID3D11DeviceContext_Map(x->c, (ID3D11Resource *)R->buf, 0, D3D11_MAP_WRITE_DISCARD, 0, &m));
+    if (FAILED(hr)) { return 0; }
+    d = (unsigned char *)m.pData;
+    for (i = 0; i < B->nops; i++) {
+        const ip_op_t *o = &B->ops[i];
+        R->ofs[2u * i] = R->ofs[2u * i + 1u] = 0xFFFFFFFFu;
+        if (o->kind != IP_DRAW) { continue; }
+        memcpy(r, o->mvp, 64);
+        memcpy(r + 64, &o->has_tex, 4);
+        memcpy(r + 68, g_cw_par, sizeof g_cw_par);
+        if (last0 == 0xFFFFFFFFu || memcmp(r, p0, 80) != 0) {
+            memcpy(d + (size_t)n * IP_RING_SLOT, r, 80);
+            memcpy(p0, r, 80);
+            last0 = n++;
+        }
+        R->ofs[2u * i] = last0;
+        if (lerp_ok && o->flag && o->match >= 0 && (unsigned)o->match < A->nops) {
+            memcpy(r, A->ops[o->match].mvp, 64);
+            memcpy(r + 64, &t, 4);
+            if (last1 == 0xFFFFFFFFu || memcmp(r, p1, 80) != 0) {
+                memcpy(d + (size_t)n * IP_RING_SLOT, r, 80);
+                memcpy(p1, r, 80);
+                last1 = n++;
+            }
+            R->ofs[2u * i + 1u] = last1;
+        }
+    }
+    ID3D11DeviceContext_Unmap(x->c, (ID3D11Resource *)R->buf, 0);
+    rc->slots = n;
+    rc->nmap++;
+    return 1;
+}
+
+/* Versatz binden (nur bei Wechsel). which: 0 = b0 (VS+PS), 1 = b1 (VS). */
+static void ip_ring_bind(const ip_cx_t *x, unsigned slot, int which, unsigned cur[3], ip_rc_t *rc)
+{
+    ID3D11Buffer *b = ip_ring[x->deferred ? 1 : 0].buf;
+    UINT f = slot * (IP_RING_SLOT / 16u), nc = IP_RING_SLOT / 16u;
+    if (slot == 0xFFFFFFFFu) { return; }
+    if (which == 0) {
+        if (cur[0] != slot) { ID3D11DeviceContext1_VSSetConstantBuffers1(x->c1, 0, 1, &b, &f, &nc); cur[0] = slot; rc->ncb++; }
+        if (cur[2] != slot) { ID3D11DeviceContext1_PSSetConstantBuffers1(x->c1, 0, 1, &b, &f, &nc); cur[2] = slot; rc->ncb++; }
+    } else if (cur[1] != slot) {
+        ID3D11DeviceContext1_VSSetConstantBuffers1(x->c1, 1, 1, &b, &f, &nc);
+        cur[1] = slot;
+        rc->ncb++;
+    }
+}
+
+/* DIAG(PERF-M2,W174) ip_ablate: Variante dieser Wiedergabe (0 = normal). Im
+ * Wechsel je Tick und t, damit alle Varianten dieselbe Szene/Last sehen. */
+static unsigned ip_var_pick(const ip_list_t *B, float t)
+{
+    unsigned ab = (unsigned)g_cfg.ip_ablate & 127u, vars[8], nv = 0, k;
+    if (!ab || t <= 0.0f || t >= 1.0f) { return 0u; }
+    vars[nv++] = 0u;
+    for (k = 1u; k <= 64u; k <<= 1) { if (ab & k) { vars[nv++] = k; } }
+    k = (unsigned)(t * 8.0f + 0.5f) >> 1;
+    return vars[(B->serial + k) % nv];
 }
 
 /* Tick B in die Schatten wiedergeben (Anfangsstand aus A bzw. B);
@@ -2585,7 +2962,28 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
     int vrbb = 0, vrkind = -1; /* W134 VR-PROTO */
     int ccm = 0; /* W146 GPU-COST: Cockpit-Cache 0 aus, 1 aufbauen, 2 nutzen */
     int vtk = 0; /* W183 VR-FIX3: 1 = RT-Ops uebersprungen (Tick-Endstand) */
+    ip_rc_t rc; /* DIAG(PERF-M2,W174) ip_gdiag */
+    unsigned var = 0u, rcur[3] = { 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu }; /* W174: Variante, gebundene Ring-Plaetze VS b0/b1, PS b0 */
+    int ring = 0, vbgB = 0, vbgA = 0; /* PERF(PERF-M2,W174) */
+    unsigned *rofs = NULL;
+    ID3D11Buffer *bvb, *avb = NULL; /* W174: Tick-VB von B/A (GPU-Kopie oder DYNAMIC) */
     fxr_rep_begin(&fxs);
+    memset(&rc, 0, sizeof rc);
+    if (!dbg && !vrp) {
+        unsigned ab = (unsigned)g_cfg.ip_ablate;
+        var = ip_var_pick(B, t);
+        ring = (ab & 80u) ? (var == 16u || var == 64u) : (g_cfg.ip_cb_ring > 0);
+        vbgB = (ab & 96u) ? (var == 32u || var == 64u) : (g_cfg.ip_vb_gpu > 0);
+    }
+    vbgA = vbgB && A && (A->gpu_ok & 1u);
+    vbgB = vbgB && (B->gpu_ok & 1u);
+    bvb = ip_vbsel(B, vbgB);
+    if (A) { avb = ip_vbsel(A, vbgA); }
+    rc.var = var;
+    rc.nops = B->nops;
+    rc.nverts = B->nverts;
+    rc.rqxb = B->rqxpos;
+    rc.vbg = (unsigned)vbgB;
     memset(&cvp, 0xFF, sizeof cvp);
     memset(&csc, 0xFF, sizeof csc);
     if (!x->deferred) {
@@ -2616,8 +3014,13 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
     }
     if (!x->deferred && !vrp && !dbg) { ccm = cc_begin(B, bi, A, lerp_ok, x); } /* W146 GPU-COST */
     if (ip_gs_n >= 0) { ip_gs_mark((ID3D11RenderTargetView *)2); } /* DIAG(TICK-PERF,W125): Kopien fertig */
+    if (ring) { /* PERF(PERF-M2,W174) ip_cb_ring: alle Draw-Konstanten in einem Map */
+        ring = ip_ring_fill(x, B, A, lerp_ok, t, &rc);
+        rofs = ip_ring[x->deferred ? 1 : 0].ofs;
+    }
+    rc.ring = (unsigned)ring;
     ID3D11DeviceContext_PSSetShader(x->c, g_im_ps, NULL, 0);
-    ID3D11DeviceContext_PSSetConstantBuffers(x->c, 0, 1, &x->cb0);
+    if (!ring) { ID3D11DeviceContext_PSSetConstantBuffers(x->c, 0, 1, &x->cb0); }
     for (i = 0; i < B->nops; i++) {
         ip_op_t *o = &B->ops[i];
         int lerp;
@@ -2645,6 +3048,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
                 continue;
             }
             if (o->sh_rtv) { WD_CALL("ip_clear_rtv", NULL, ID3D11DeviceContext_ClearRenderTargetView(x->c, o->sh_rtv, o->col)); }
+            rc.nclr++;
             continue;
         }
         if (o->kind == IP_CLR_DSV) {
@@ -2664,6 +3068,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             ID3D11DeviceContext_OMSetRenderTargets(x->c, 1, &o->sh_rtv, o->sh_dsv);
             crtv = o->sh_rtv;
             cdsv = o->sh_dsv;
+            rc.nrtv++;
         }
         if (o->bs != cbs) {
             /* Blendfaktor/Maske setzt der IM-Pfad konstant (NULL/0xFFFFFFFF). */
@@ -2680,7 +3085,13 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             crs = o->rs;
         }
         if (memcmp(&o->vp, &cvp, sizeof cvp) != 0) {
-            ID3D11DeviceContext_RSSetViewports(x->c, 1, &o->vp);
+            if (var == 1u) { /* DIAG(PERF-M2,W174) ip_ablate 1: Viewport 1x1 (keine Pixelarbeit) */
+                D3D11_VIEWPORT v1 = o->vp;
+                v1.Width = 1.0f; v1.Height = 1.0f;
+                ID3D11DeviceContext_RSSetViewports(x->c, 1, &v1);
+            } else {
+                ID3D11DeviceContext_RSSetViewports(x->c, 1, &o->vp);
+            }
             cvp = o->vp;
         }
         if (memcmp(&o->sc, &csc, sizeof csc) != 0) {
@@ -2690,12 +3101,14 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
         if (o->sh_srv != csrv) {
             ID3D11DeviceContext_PSSetShaderResources(x->c, 0, 1, &o->sh_srv);
             csrv = o->sh_srv;
+            rc.nsrv++;
         }
         if (o->topo != ctopo) {
             ID3D11DeviceContext_IASetPrimitiveTopology(x->c, (D3D11_PRIMITIVE_TOPOLOGY)o->topo);
             ctopo = o->topo;
         }
-        ip_cb_write(x, x->cb0, o->mvp, o->has_tex, 0.0f, 0);
+        if (ring) { ip_ring_bind(x, rofs[2u * i], 0, rcur, &rc); } /* PERF(PERF-M2,W174) */
+        else if (var != 4u) { ip_cb_write(x, x->cb0, o->mvp, o->has_tex, 0.0f, 0); rc.nmap++; }
         if (dbg && ip_dbg_ps && ip_dbg_cb) {
             /* gefaerbt nur Draws, die NICHT interpoliert/unveraendert sind */
             int want = (o->why != IP_W_BB2D && o->why != IP_W_LERP && o->why != IP_W_STATIC &&
@@ -2718,6 +3131,10 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             }
         }
         lerp = lerp_ok && o->flag && o->match >= 0 && (unsigned)o->match < A->nops;
+        rc.ndraw++; /* DIAG(PERF-M2,W174) */
+        if (lerp) { rc.nlerp++; }
+        rc.vbytes += (unsigned long long)o->nv * sizeof(im_vertex_t) * (lerp ? 2u : 1u);
+        if (o->rq) { rc.nrq++; }
         vrbb = vrp && o->rtv == g_rtv; /* W134 VR-PROTO: Draw in den Backbuffer -> je Auge */
         vrkind = !vrbb ? -1 : (!o->cls ? 0 : (ip_vr_isp2(o->mvp) ? 2 : 1));
         if (vrbb) {
@@ -2772,24 +3189,33 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             ID3D11DeviceContext1_PSSetConstantBuffers1(x->c1, 4, 1, (ID3D11Buffer *const *)&r->cbuf, &r->pfirst, &r->pnum);
             ID3D11DeviceContext_PSSetShaderResources(x->c, 0, 4, sv);
             ID3D11DeviceContext_PSSetSamplers(x->c, 0, 4, (ID3D11SamplerState *const *)r->smp);
-            if (r->xsrv) { ID3D11DeviceContext_VSSetShaderResources(x->c, 0, 1, (ID3D11ShaderResourceView *const *)&r->xsrv); } /* SHADE-PERF (W80) */
-            else { ID3D11DeviceContext_IASetVertexBuffers(x->c, 2, 1, (ID3D11Buffer *const *)&r->xbuf, &r->xstride, &r->xoff); }
+            { /* PERF(PERF-M2,W174) ip_vb_gpu Bit 2: Stream 2/Roh-Eingaenge aus der GPU-Kopie (gleicher Versatz) */
+                ID3D11ShaderResourceView *xs = (ID3D11ShaderResourceView *)r->xsrv;
+                ID3D11Buffer *xb = (ID3D11Buffer *)r->xbuf;
+                if (vbgB && (B->gpu_ok & 2u)) {
+                    if (xs && xs == B->rqxsrv && B->rqxgsrv) { xs = B->rqxgsrv; }
+                    if (xb && xb == B->rqx && B->rqxg) { xb = B->rqxg; }
+                }
+                if (xs) { ID3D11DeviceContext_VSSetShaderResources(x->c, 0, 1, &xs); } /* SHADE-PERF (W80) */
+                else { ID3D11DeviceContext_IASetVertexBuffers(x->c, 2, 1, &xb, &r->xstride, &r->xoff); }
+            }
             if (lerp) {
                 const ip_op_t *a = &A->ops[o->match];
                 ID3D11Buffer *cbs2[2];
                 UINT o1 = a->vstart * stride;
-                ip_cb_write(x, x->cb1, a->mvp, 0, t, 1);
+                if (ring) { ip_ring_bind(x, rofs[2u * i + 1u], 1, rcur, &rc); }
+                else if (var != 4u) { ip_cb_write(x, x->cb1, a->mvp, 0, t, 1); rc.nmap++; }
                 ID3D11DeviceContext_IASetInputLayout(x->c, r->layl);
                 ID3D11DeviceContext_VSSetShader(x->c, r->vsl, NULL, 0);
                 cbs2[0] = x->cb0; cbs2[1] = x->cb1;
-                ID3D11DeviceContext_VSSetConstantBuffers(x->c, 0, 2, cbs2);
-                ID3D11DeviceContext_IASetVertexBuffers(x->c, 0, 1, &B->vb, &st2, &o0);
-                ID3D11DeviceContext_IASetVertexBuffers(x->c, 1, 1, &A->vb, &st2, &o1);
+                if (!ring) { ID3D11DeviceContext_VSSetConstantBuffers(x->c, 0, 2, cbs2); }
+                ID3D11DeviceContext_IASetVertexBuffers(x->c, 0, 1, &bvb, &st2, &o0);
+                ID3D11DeviceContext_IASetVertexBuffers(x->c, 1, 1, &avb, &st2, &o1);
             } else {
                 ID3D11DeviceContext_IASetInputLayout(x->c, r->lay);
                 ID3D11DeviceContext_VSSetShader(x->c, r->vs, NULL, 0);
-                ID3D11DeviceContext_VSSetConstantBuffers(x->c, 0, 1, &x->cb0);
-                ID3D11DeviceContext_IASetVertexBuffers(x->c, 0, 1, &B->vb, &st2, &o0);
+                if (!ring) { ID3D11DeviceContext_VSSetConstantBuffers(x->c, 0, 1, &x->cb0); }
+                ID3D11DeviceContext_IASetVertexBuffers(x->c, 0, 1, &bvb, &st2, &o0);
             }
             if (vrbb) { /* W134 VR-PROTO: Shading-Draw 3D-Pfad je Auge (lineare Augen-Matrix in b0/b1) */
                 int e;
@@ -2804,7 +3230,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
                 crtv = (ID3D11RenderTargetView *)1; cdsv = (ID3D11DepthStencilView *)1;
                 memset(&cvp, 0xFF, sizeof cvp); memset(&csc, 0xFF, sizeof csc);
             } else {
-                WD_CALL("ip_draw_rq", x->c, ID3D11DeviceContext_Draw(x->c, o->nv, 0)); /* DIAG(PERF-WARM,W139) */
+                if (var != 8u) { WD_CALL("ip_draw_rq", x->c, ID3D11DeviceContext_Draw(x->c, var == 2u && o->nv > 3u ? 3u : o->nv, 0)); } /* DIAG(PERF-WARM,W139); W174 ip_ablate */
             }
             mode = -1;      /* naechster alter Draw bindet VS/Layout/Streams neu */
             rq_dirty = 1;   /* ... und PS/Sampler/Stufen */
@@ -2817,7 +3243,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             ID3D11ShaderResourceView *nul[3] = { NULL, NULL, NULL };
             ID3D11SamplerState *ds = rq_default_sampler();
             ID3D11DeviceContext_PSSetShader(x->c, (dbg && cps == 1) ? ip_dbg_ps : g_im_ps, NULL, 0);
-            ID3D11DeviceContext_PSSetConstantBuffers(x->c, 0, 1, &x->cb0);
+            if (!ring) { ID3D11DeviceContext_PSSetConstantBuffers(x->c, 0, 1, &x->cb0); }
             ID3D11DeviceContext_PSSetShaderResources(x->c, 1, 3, nul);
             if (ds) { ID3D11DeviceContext_PSSetSamplers(x->c, 0, 1, &ds); }
             ID3D11DeviceContext_PSSetShaderResources(x->c, 0, 1, &o->sh_srv);
@@ -2837,17 +3263,18 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             const ip_op_t *a = &A->ops[o->match];
             ID3D11Buffer *vbs[2];
             UINT strides[2], offs[2];
-            ip_cb_write(x, x->cb1, a->mvp, 0, t, 1);
+            if (ring) { ip_ring_bind(x, rofs[2u * i + 1u], 1, rcur, &rc); } /* PERF(PERF-M2,W174) */
+            else if (var != 4u) { ip_cb_write(x, x->cb1, a->mvp, 0, t, 1); rc.nmap++; }
             if (mode != 1) {
                 ID3D11Buffer *cbs2[2];
                 ID3D11DeviceContext_IASetInputLayout(x->c, ip_lay2);
                 ID3D11DeviceContext_VSSetShader(x->c, ip_vs2, NULL, 0);
                 cbs2[0] = x->cb0;
                 cbs2[1] = x->cb1;
-                ID3D11DeviceContext_VSSetConstantBuffers(x->c, 0, 2, cbs2);
+                if (!ring) { ID3D11DeviceContext_VSSetConstantBuffers(x->c, 0, 2, cbs2); }
                 mode = 1;
             }
-            vbs[0] = B->vb; vbs[1] = A->vb;
+            vbs[0] = bvb; vbs[1] = avb;
             strides[0] = stride; strides[1] = stride;
             offs[0] = o->vstart * stride; offs[1] = a->vstart * stride;
             ID3D11DeviceContext_IASetVertexBuffers(x->c, 0, 2, vbs, strides, offs);
@@ -2856,15 +3283,15 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
                 crtv = (ID3D11RenderTargetView *)1; cdsv = (ID3D11DepthStencilView *)1;
                 memset(&cvp, 0xFF, sizeof cvp); memset(&csc, 0xFF, sizeof csc);
             } else {
-                WD_CALL("ip_draw_lerp", x->c, ID3D11DeviceContext_Draw(x->c, o->nv, 0));
+                if (var != 8u) { WD_CALL("ip_draw_lerp", x->c, ID3D11DeviceContext_Draw(x->c, var == 2u && o->nv > 3u ? 3u : o->nv, 0)); } /* W174 ip_ablate */
             }
         } else {
             if (mode != 0) {
                 ID3D11Buffer *nb = NULL;
                 ID3D11DeviceContext_IASetInputLayout(x->c, g_im_layout);
                 ID3D11DeviceContext_VSSetShader(x->c, g_im_vs, NULL, 0);
-                ID3D11DeviceContext_VSSetConstantBuffers(x->c, 0, 1, &x->cb0);
-                ID3D11DeviceContext_IASetVertexBuffers(x->c, 0, 1, &B->vb, &stride, &zero);
+                if (!ring) { ID3D11DeviceContext_VSSetConstantBuffers(x->c, 0, 1, &x->cb0); }
+                ID3D11DeviceContext_IASetVertexBuffers(x->c, 0, 1, &bvb, &stride, &zero);
                 ID3D11DeviceContext_IASetVertexBuffers(x->c, 1, 1, &nb, &stride, &zero);
                 mode = 0;
             }
@@ -2873,7 +3300,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
                 crtv = (ID3D11RenderTargetView *)1; cdsv = (ID3D11DepthStencilView *)1;
                 memset(&cvp, 0xFF, sizeof cvp); memset(&csc, 0xFF, sizeof csc);
             } else {
-                WD_CALL("ip_draw", x->c, ID3D11DeviceContext_Draw(x->c, o->nv, o->vstart));
+                if (var != 8u) { WD_CALL("ip_draw", x->c, ID3D11DeviceContext_Draw(x->c, var == 2u && o->nv > 3u ? 3u : o->nv, o->vstart)); } /* W174 ip_ablate */
             }
         }
     }
@@ -2883,6 +3310,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
         ID3D11DeviceContext_PSSetConstantBuffers(x->c, 1, 1, &nb);
     }
     fxr_rep_end(x->c, &fxs); /* W133 REM-FX */
+    ip_rc_ctx[x->deferred ? 1 : 0] = rc; /* DIAG(PERF-M2,W174) */
     if (!x->deferred) {
         ip_state_restore(&sv);
         ip_gs_end(B->nops); /* DIAG(TICK-PERF,W125) */
@@ -3208,6 +3636,7 @@ typedef struct {
     float t;
     ID3D11CommandList *cl;
     LONGLONG q0, q1; /* Aufzeichnung Start/Ende (QPC, Render-Thread) */
+    ip_rc_t rc;      /* DIAG(PERF-M2,W174): Zaehler der Aufzeichnung */
 } ip_rtjob_t;
 static ip_rtjob_t ip_rtj;
 static HANDLE ip_rt_th, ip_rt_ev;
@@ -3217,6 +3646,7 @@ static int ip_rt_ok, ip_rt_tried;
 static unsigned st_rt_hit, st_rt_miss, st_rt_wait, st_rt_stale, st_rt_n, st_rt_fail, st_rt_exec;
 static double st_rt_ms, st_rt_max, st_rt_wait_ms, st_rt_exec_ms;
 static ip_cx_t ip_cx_imm_v;
+static ip_rc_t ip_rc_got; /* DIAG(PERF-M2,W174): Zaehler des zuletzt abgeholten Auftrags */
 static ip_list_t *ip_rt_nA, *ip_rt_nB; /* Testtakt: Folgebild (A, B, t) fuer ip_rt_get */
 static float ip_rt_nt;
 
@@ -3240,6 +3670,7 @@ static DWORD WINAPI ip_rt_main(LPVOID p)
             ID3D11CommandList *cl = NULL;
             j->q0 = ip_now();
             ip_replay_ex(&g_ipl[j->bi], j->bi, j->ai >= 0 ? &g_ipl[j->ai] : NULL, j->ai, j->t, 0, &ip_rt_cx);
+            j->rc = ip_rc_ctx[1]; /* DIAG(PERF-M2,W174) */
             if (FAILED(ID3D11DeviceContext_FinishCommandList(ip_rt_cx.c, FALSE, &cl))) { cl = NULL; }
             j->cl = cl;
             j->q1 = ip_now();
@@ -3318,6 +3749,7 @@ static ID3D11CommandList *ip_rt_collect(void)
     ID3D11CommandList *cl = ip_rtj.cl;
     double ms = ip_ms(ip_rtj.q0, ip_rtj.q1);
     ip_rtj.cl = NULL;
+    ip_rc_got = ip_rtj.rc; /* DIAG(PERF-M2,W174) */
     st_rt_n++;
     st_rt_ms += ms;
     if (ms > st_rt_max) { st_rt_max = ms; }
@@ -3419,6 +3851,141 @@ static void ip_rt_exec(ID3D11CommandList *cl)
     st_rt_exec_ms += ip_ms(q0, ip_now());
 }
 
+/* ---------- DIAG(PERF-M2,W174) ip_gdiag: GPU-Zeit je Wiedergabe ----------
+ * Timestamps im Immediate-Context um die Wiedergabe (Command-List bzw.
+ * direkte Wiedergabe inkl. Startkopien), asynchron gelesen. Je Messung eine
+ * Zeile in <SB_OUT_DIR>/ipgpu.csv mit den Zaehlern der Wiedergabe, alle 10 s
+ * Zeile IPGPU je Variante (ip_ablate). Funktioniert mit render_thread=1. */
+#define GD_N 16
+typedef struct {
+    ID3D11Query *dj, *t0, *t1;
+    int st; /* 0 frei, 2 wartet */
+    ip_rc_t rc;
+    unsigned ser;
+    float t;
+} gd_slot_t;
+static gd_slot_t gd_s[GD_N];
+static unsigned gd_cnt, gd_lost;
+static int gd_fail;
+static FILE *gd_f;
+static double gd_ms[8], gd_dr[8], gd_vb[8], gd_mx[8];
+static unsigned gd_n[8];
+static LONGLONG gd_t0;
+static const char *const gd_vn[8] = { "normal", "vp1x1", "v3", "nocb", "nodraw", "ring", "gpuvb", "ring+gpuvb" };
+
+static int gd_vi(unsigned var)
+{
+    int k = 0;
+    while (var && k < 7) { var >>= 1; k++; }
+    return k;
+}
+
+static void gd_log(int force)
+{
+    LONGLONG now = ip_now();
+    char b[1400];
+    int o = 0, k;
+    if (!gd_t0) { gd_t0 = now; return; }
+    if (!force && ip_ms(gd_t0, now) < 10000.0) { return; }
+    for (k = 0; k < 8 && o >= 0; k++) {
+        if (!gd_n[k]) { continue; }
+        o += _snprintf_s(b + o, sizeof b - (size_t)o, _TRUNCATE, " | %s n=%u gpu=%.3fms(max %.2f) draws=%.0f vb=%.1fMB",
+                         gd_vn[k], gd_n[k], gd_ms[k] / gd_n[k], gd_mx[k], gd_dr[k] / gd_n[k], gd_vb[k] / gd_n[k]);
+    }
+    if (o > 0) {
+        HLOG_I("IPGPU %.1fs:%s | verloren=%u vb_kopien=%u (%.1f MB/Kopie, fehl %u, GPU %.3fms(max %.2f) je Kopie, n=%u) neuanlagen=%u",
+               ip_ms(gd_t0, now) / 1000.0, b, gd_lost, st_vbg_copy, st_vbg_copy ? st_vbg_mb / st_vbg_copy : 0.0, st_vbg_fail,
+               gc_n ? gc_ms / gc_n : 0.0, gc_mx, gc_n, st_vbg_async);
+    }
+    gc_ms = gc_mx = 0.0; gc_n = 0;
+    memset(gd_ms, 0, sizeof gd_ms); memset(gd_dr, 0, sizeof gd_dr); memset(gd_vb, 0, sizeof gd_vb);
+    memset(gd_mx, 0, sizeof gd_mx); memset(gd_n, 0, sizeof gd_n);
+    gd_lost = 0; st_vbg_copy = 0; st_vbg_mb = 0.0; st_vbg_fail = 0;
+    gd_t0 = now;
+}
+
+static void gd_poll(void)
+{
+    int k;
+    for (k = 0; k < GD_N; k++) {
+        gd_slot_t *g = &gd_s[k];
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj;
+        UINT64 t0, t1;
+        double ms;
+        int vi;
+        if (g->st != 2) { continue; }
+        if (ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)g->dj, &dj, sizeof dj,
+                                        D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) { continue; }
+        g->st = 0;
+        if (dj.Disjoint || !dj.Frequency ||
+            ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)g->t0, &t0, sizeof t0, D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK ||
+            ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)g->t1, &t1, sizeof t1, D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK ||
+            t1 < t0) {
+            gd_lost++;
+            continue;
+        }
+        ms = (double)(t1 - t0) * 1000.0 / (double)dj.Frequency;
+        vi = gd_vi(g->rc.var);
+        gd_ms[vi] += ms; gd_n[vi]++;
+        gd_dr[vi] += g->rc.ndraw;
+        gd_vb[vi] += (double)g->rc.vbytes / 1048576.0;
+        if (ms > gd_mx[vi]) { gd_mx[vi] = ms; }
+        if (!gd_f) {
+            char dir[600], path[700];
+            DWORD n = GetEnvironmentVariableA("SB_OUT_DIR", dir, sizeof dir);
+            if (!n || n >= sizeof dir) { strcpy_s(dir, sizeof dir, "."); }
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s/ipgpu.csv", dir);
+            gd_f = _fsopen(path, "w", _SH_DENYNO); /* mitlesbar waehrend des Laufs */
+            if (!gd_f) { gd_fail = 1; HLOG_W("IPGPU: %s nicht schreibbar", path); }
+            else {
+                fprintf(gd_f, "ser,t,var,ms,nops,ndraw,nlerp,nrq,nclr,nverts,vb_mb,rqx_kb,nmap,ncb,slots,nrtv,nsrv,ring,vbg,qpc_s\n");
+                HLOG_I("IPGPU: Messung je Wiedergabe nach %s (ip_gdiag=%d, ip_ablate=%d, ip_cb_ring=%d, ip_vb_gpu=%d)", path,
+                       g_cfg.ip_gdiag, g_cfg.ip_ablate, g_cfg.ip_cb_ring, g_cfg.ip_vb_gpu);
+            }
+        }
+        if (gd_f) {
+            fprintf(gd_f, "%u,%.3f,%u,%.4f,%u,%u,%u,%u,%u,%u,%.2f,%u,%u,%u,%u,%u,%u,%u,%u,%.4f\n", g->ser, g->t, g->rc.var, ms,
+                    g->rc.nops, g->rc.ndraw, g->rc.nlerp, g->rc.nrq, g->rc.nclr, g->rc.nverts,
+                    (double)g->rc.vbytes / 1048576.0, g->rc.rqxb / 1024u, g->rc.nmap, g->rc.ncb, g->rc.slots,
+                    g->rc.nrtv, g->rc.nsrv, g->rc.ring, g->rc.vbg, (double)ip_now() / (double)ip_qpf.QuadPart);
+        }
+    }
+    gd_log(0);
+}
+
+static int gd_begin(void)
+{
+    int k;
+    D3D11_QUERY_DESC qd;
+    if (g_cfg.ip_gdiag <= 0 || gd_fail) { return -1; }
+    gd_poll();
+    if ((++gd_cnt % (unsigned)g_cfg.ip_gdiag) != 0u) { return -1; }
+    for (k = 0; k < GD_N; k++) { if (gd_s[k].st == 0) { break; } }
+    if (k >= GD_N) { gd_lost++; return -1; }
+    if (!gd_s[k].dj) {
+        memset(&qd, 0, sizeof qd);
+        qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+        if (FAILED(ID3D11Device_CreateQuery(g_dev, &qd, &gd_s[k].dj))) { gd_fail = 1; return -1; }
+        qd.Query = D3D11_QUERY_TIMESTAMP;
+        if (FAILED(ID3D11Device_CreateQuery(g_dev, &qd, &gd_s[k].t0)) ||
+            FAILED(ID3D11Device_CreateQuery(g_dev, &qd, &gd_s[k].t1))) { gd_fail = 1; return -1; }
+    }
+    ID3D11DeviceContext_Begin(g_ctx, (ID3D11Asynchronous *)gd_s[k].dj);
+    ID3D11DeviceContext_End(g_ctx, (ID3D11Asynchronous *)gd_s[k].t0);
+    return k;
+}
+
+static void gd_end(int k, const ip_rc_t *rc, unsigned ser, float t)
+{
+    gd_slot_t *g = &gd_s[k];
+    ID3D11DeviceContext_End(g_ctx, (ID3D11Asynchronous *)g->t1);
+    ID3D11DeviceContext_End(g_ctx, (ID3D11Asynchronous *)g->dj);
+    g->rc = *rc;
+    g->ser = ser;
+    g->t = t;
+    g->st = 2;
+}
+
 /* Bild zwischen A und B zeigen: t >= 1 (oder ohne A) -> gesichertes Spiel-Bild
  * von B; sonst Wiedergabe in die Schatten. tag = Name fuer Bildfolgen. */
 static void ip_show(ip_list_t *A, ip_list_t *B, float t, const char *tag)
@@ -3455,13 +4022,15 @@ static void ip_show(ip_list_t *A, ip_list_t *B, float t, const char *tag)
         img = (ID3D11Resource *)g_ish[B->bbref].bak[bi];
         st_exact++;
     } else {
-        int gq;
+        int gq, gd;
         ID3D11CommandList *cl = ip_rt_active() ? ip_rt_get(A, B, t) : NULL; /* W126 RENDER-THREAD */
         if (!cl) { gpm = sb_gp_begin(0); } /* DIAG(GPU-COST,W146) */
         dy_begin(); /* W146 rt_scale_dyn */
         gq = ip_gpu_begin();
+        gd = gd_begin(); /* DIAG(PERF-M2,W174) */
         if (cl) { ip_rt_exec(cl); }
         else { ip_replay(B, bi, A, ai, t); }
+        if (gd >= 0) { gd_end(gd, cl ? &ip_rc_got : &ip_rc_ctx[0], B->serial, t); }
         if (gq) { ip_gpu_end(); }
         img = (ID3D11Resource *)g_ish[B->bbref].sh;
         t1 = ip_now();
@@ -4066,6 +4635,7 @@ int sb_interp_swap(void)
     }
     if (L) {
         L->ready = 1;
+        if (g_cfg.ip_vb_gpu > 0) { ip_gpu_copy(L); } /* PERF(PERF-M2,W174) */
         A = ip_nhist ? &g_ipl[ip_hist[ip_nhist - 1]] : NULL;
         /* 2. Zuordnung gegen den Vortick. */
         if (A) {

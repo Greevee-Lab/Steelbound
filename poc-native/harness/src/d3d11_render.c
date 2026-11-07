@@ -42,6 +42,7 @@ sb_eye g_rig[2];
 static float g_last_game_aspect, g_last_out_aspect;
 
 #include "vr.h" /* W134 VR-PROTO */
+#include "sb_relaunch.h" /* W186 RESET-TITLE */
 int g_vr_blit; /* W134 VR-PROTO: sb_render_blit zeigt ein Augenbild (ohne Nachbearbeitung des Monobilds) */
 
 static LRESULT CALLBACK sb_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
@@ -373,6 +374,8 @@ static DWORD WINAPI sb_ui_thread(LPVOID unused)
             ex = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
             x = GetSystemMetrics(SM_XVIRTUALSCREEN) - (rc.right - rc.left) - 200;
             y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        } else {
+            sb_relaunch_winpos(&x, &y); /* W186: Neustart-Kind an der Stelle des alten Fensters */
         }
         g_hwnd = CreateWindowExA(ex, "SB_NATIVE", "Steel Battalion - Game Preservation Project",
                                  WS_OVERLAPPEDWINDOW, x, y,
@@ -479,6 +482,8 @@ void sb_render_init(void)
             ex = WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
             x = GetSystemMetrics(SM_XVIRTUALSCREEN) - (rc.right - rc.left) - 200;
             y = GetSystemMetrics(SM_YVIRTUALSCREEN);
+        } else {
+            sb_relaunch_winpos(&x, &y); /* W186: Neustart-Kind an der Stelle des alten Fensters */
         }
         g_hwnd = CreateWindowExA(ex, "SB_NATIVE", "Steel Battalion - Game Preservation Project",
                                  WS_OVERLAPPEDWINDOW, x, y,

@@ -207,8 +207,35 @@ static void memreg_add(u32 va, u32 size, u32 kind)
     g_exreg[g_exreg_n % EXREG_MAX].kind = kind;
     g_exreg_n++;
 }
-/* M2c: Range-Match (VEH-Herkunft). */
+/* PERF(PERF-M2,W174) krnl_reg_cache=1: krnl_phys_to_virt/krnl_memreg_find durchsuchen das
+ * Register (bis 8192 Eintraege) linear - je Textur-/RT-Zugriff (M2-Kampf: 12 % bzw. 3 % der
+ * Uebergabe-Proben in schweren Ticks, W174_r2). Ergebnis-Cache je Thread (TLS, keine Sperren),
+ * gueltig solange das Register unveraendert ist (jede Aenderung erhoeht g_exreg_n). Gleiche
+ * Antworten wie der Scan (reine Funktion von Adresse + Register); Mehrdeutigkeiten (PHYSALIAS-
+ * Diagnose) werden nicht gecacht, mit contig_diag kein Cache. */
+#define KRC_N 512u
+typedef struct { unsigned gen, key, res, base, len; } krc_t;
+static __declspec(thread) krc_t g_krc_p2v[KRC_N], g_krc_mf[KRC_N];
+static unsigned krc_slot(unsigned k) { return ((k >> 4) ^ (k >> 13) ^ (k >> 22)) & (KRC_N - 1u); }
+static unsigned krnl_memreg_find_scan(unsigned va, unsigned *pbase, unsigned *plen);
 unsigned krnl_memreg_find(unsigned va, unsigned *pbase, unsigned *plen)
+{
+    krc_t *c;
+    unsigned gen, b = 0, l = 0, r;
+    if (!g_cfg.krnl_reg_cache || g_cfg.contig_diag) { return krnl_memreg_find_scan(va, pbase, plen); }
+    gen = g_exreg_n + 1u;
+    c = &g_krc_mf[krc_slot(va)];
+    if (c->gen == gen && c->key == va) {
+        if (c->res) { if (pbase) { *pbase = c->base; } if (plen) { *plen = c->len; } }
+        return c->res;
+    }
+    r = krnl_memreg_find_scan(va, &b, &l);
+    c->gen = gen; c->key = va; c->res = r; c->base = b; c->len = l;
+    if (r) { if (pbase) { *pbase = b; } if (plen) { *plen = l; } }
+    return r;
+}
+/* M2c: Range-Match (VEH-Herkunft). */
+static unsigned krnl_memreg_find_scan(unsigned va, unsigned *pbase, unsigned *plen)
 {
     unsigned k, cnt = (g_exreg_n < EXREG_MAX) ? g_exreg_n : EXREG_MAX;
     for (k = 0; k < cnt; k++) {
@@ -222,7 +249,21 @@ unsigned krnl_memreg_find(unsigned va, unsigned *pbase, unsigned *plen)
     return 0;
 }
 /* M2c: PHYS (lower28) -> VIRT (ExBloecke). 0 = kein Treffer. */
+static unsigned krnl_phys_to_virt_scan(unsigned phys, int *alias);
 unsigned krnl_phys_to_virt(unsigned phys)
+{
+    krc_t *c;
+    unsigned gen, pm = phys & 0x0FFFFFFFu, r;
+    int alias = 0;
+    if (!g_cfg.krnl_reg_cache || g_cfg.contig_diag) { return krnl_phys_to_virt_scan(phys, &alias); }
+    gen = g_exreg_n + 1u;
+    c = &g_krc_p2v[krc_slot(pm)];
+    if (c->gen == gen && c->key == pm && c->len == (unsigned)g_cfg.phys_exact) { return c->res; } /* PERF(PERF-M2,W174) */
+    r = krnl_phys_to_virt_scan(phys, &alias);
+    if (!alias) { c->gen = gen; c->key = pm; c->res = r; c->len = (unsigned)g_cfg.phys_exact; }
+    return r;
+}
+static unsigned krnl_phys_to_virt_scan(unsigned phys, int *alias)
 {
     unsigned k, cnt = (g_exreg_n < EXREG_MAX) ? g_exreg_n : EXREG_MAX;
     unsigned pm = phys & 0x0FFFFFFFu;
@@ -245,7 +286,8 @@ unsigned krnl_phys_to_virt(unsigned phys)
         }
     }
     if (ex && fm && ex != fm) {
-        static unsigned nalias; /* DIAG(W73): Mehrdeutigkeit tatsaechlich aufgetreten */
+        static unsigned nalias;
+        *alias = 1; /* DIAG(W73): Mehrdeutigkeit tatsaechlich aufgetreten */
         if (nalias < 16u || g_cfg.contig_diag) {
             nalias++;
             HLOG_W("PHYSALIAS #%u: phys=0x%X erster Treffer=0x%X exakter Blockanfang=0x%X -> %s",

@@ -7,3 +7,5 @@
 # Motiv (keine Rechte) bleibt per editions/clean_deny.tsv gesperrt.
 poc-native/launcher/res/bg_nutzer.png	08df9badf078115ae02a15fa4d0e693c60976953b515e42aa98441c2564fd033	Launcher-Hintergrundbild (neues Motiv, Eigentum des Projektinhabers, W178 COMM-BG)
 poc-native/launcher/res/bg_nutzer.webp	ca6c90c52b597216111234b7635521b14f444034b778b28bfd460fd61ece078c	Quelldatei des Launcher-Hintergrundbilds (Eigentum des Projektinhabers, W178 COMM-BG)
+# Nutzerentscheidung 7.11.: einzige Screenshot-Ausnahme = README-Vorschaubild (verkleinert, Link aufs Video).
+assets/cockpit.jpg	8277a08e03a21ffe3cfb82512be85e1999e11da7bec16c0038434ad5928bf18e	README-Vorschaubild: verkleinerter Screenshot aus dem eigenen Client (Video des Projektinhabers), bewusste Ausnahme laut Nutzerentscheidung 7.11.

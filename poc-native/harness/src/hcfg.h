@@ -12,6 +12,8 @@ typedef struct {
     char game_image[512]; /* W150 ISO-DIRECT: Spiel-Abbild (XISO/Redump), Vorrang vor media_root/xbe_path; leer = Ordner-Modus */
     int version_check;    /* W150: 1 = nur bekannte Spielversion (PAL) starten, 0 = nur warnen */
     int iso_selftest;     /* W150 DIAG: 1 = D:-Selbsttest (Lesen, Schreibschutz) vor dem Spielstart */
+    int xlaunch_self;     /* W186 RESET-TITLE: XLaunchNewImage auf D:\default.xbe: 1 = Client-Neustart, 2 = sauberes Ende, 0 = ignorieren (alt) */
+    int xlaunch_replay;   /* W186: 1 = Neustart-Kind spielt replay_steps/replay erneut ab, 0 = Kind ohne Replay (Standard) */
     /* [display] */
     unsigned width, height;
     int present_interval; /* 0 = uncapped, 1 = vsync */
@@ -394,6 +396,12 @@ typedef struct {
     int perf_prof;              /* DIAG(PERF-HUD,W122): 1 = Stichproben-Profiler des Spiel-Threads (Zeile PERFPROF, mit perf_log) */
     int perf_prof_heavy;
     int swap_match_unlock;      /* PERF(PERF-TICK,W168): 1 = Interp-Zuordnung am Swap ohne ctx_lock (Present-Takt wartet nicht) */
+    int krnl_reg_cache;         /* PERF(PERF-M2,W174): 1 = Ergebnis-Cache (je Thread) fuer krnl_phys_to_virt/krnl_memreg_find (linearer Register-Scan je Textur-/RT-Zugriff); gleiche Antworten */
+    int ip_match_compact;       /* PERF(PERF-M2,W174): 1 = Interp-Zuordnung (ip_inst_best) liest Signatur/Hash/Bezugspunkte aus einem dicht gepackten Feld; gleiche Zuordnung */
+    int ip_cb_ring;             /* PERF(PERF-M2,W174): 1 = Zwischenbild-Wiedergabe schreibt alle Draw-Konstanten (b0/b1) einmal je Wiedergabe in einen Ring-Puffer und bindet sie per Versatz (*SetConstantBuffers1) statt Map(DISCARD) je Draw; gleiche Bytes. Standard 1 (W174) */
+    int ip_vb_gpu;              /* PERF(PERF-M2,W174): Bits 1 = Tick-VB am Swap in einen GPU-Puffer (DEFAULT) kopieren und die Wiedergabe daraus lesen; 2 = ebenso Stream 2/Roh-Eingaenge (rqx) des Shading-Pfads. Standard 3 (W174), 0 = alt */
+    int ip_gdiag;               /* DIAG(PERF-M2,W174): N > 0 = jede N-te Zwischenbild-Wiedergabe GPU-Zeit (Timestamps um Wiedergabe/Command-List) + Zaehler je Wiedergabe -> runs/<tag>/ipgpu.csv, Zeile IPGPU */
+    int ip_ablate;              /* DIAG(PERF-M2,W174): Varianten im Wechsel je Wiedergabe (Bild veraendert!): 1 Viewport 1x1, 2 max. 3 Vertices je Draw, 4 keine Konstanten-Maps, 8 keine Draws, 16 Ring (wie ip_cb_ring), 32 GPU-VB (braucht ip_vb_gpu), 64 Ring+GPU-VB */
     int pd_gw_nopri;            /* PERF(PERF-TICK,W168): 1 = GPU-Warten des Takt-Threads pollt die Sperre ohne Vortritt (Spiel-Thread weicht nicht alle 0,25 ms) */
     int ctx_wait_diag;          /* DIAG(PERF-TICK,W168): 1 = Zeile CTXWAIT (Spiel-Thread wartet auf ctx_lock, Haltezeit Takt-Thread) */        /* DIAG(PERF-TICK,W168): perf_prof=2 - Schwelle schwerer Tick (ms, 0 = 28) fuer PERFPROF3 */
     int perf_blk;               /* DIAG(TICK-PERF,W125): 1 = Zeitmesser um Blockier-Kandidaten (Zeile TICKBLK, mit perf_log) */

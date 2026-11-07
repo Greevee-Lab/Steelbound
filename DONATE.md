@@ -4,6 +4,7 @@ Steelbound is a **hobby project**. I build it in my spare time to keep this
 wonderful game playable on modern hardware. It is a very large and complex
 task with **high running costs** – AI-assisted development (tokens and
 subscriptions), hardware for testing – on top of a lot of personal time.
+So far, **hundreds of dollars** have already gone into development.
 
 If you enjoy Steelbound and want to help cover some of those costs, I'd be
 very happy about your support – **one-time or monthly**, whatever suits you.

@@ -209,6 +209,7 @@ int gui_page_from_name(const char *v)
 #define ID_CTRL_BROWSER 1090 /* W179: Tastenuebersicht als HTML im Browser */
 #define ID_VRPRESET 1091   /* W183 VR-FIX3: VR-Leistung (Leistung/Ausgewogen/Qualitaet/Eigene) */
 #define ID_VRRES 1092      /* W183 VR-FIX3: VR-Render-Aufloesung (% der Runtime-Empfehlung) */
+#define ID_CTRL_ZADIG 1093 /* W185: Einrichtungsanleitung als HTML im Browser */
 static char g_img_msg[600]; /* W150: Ergebnis der letzten Abbild-Pruefung (UTF-8) */
 static int g_img_ok;
 static void check_image_ex(int status);
@@ -4587,6 +4588,219 @@ static void keyshtml_open(void)
             set_status_k(t, 2);
         } else {
             set_status(LT("gui.keys_open_ok"));
+        }
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* W185 ZADIG-HELP: Anleitung "Original-Controller anschliessen"       */
+/* ------------------------------------------------------------------ */
+/* Lokale HTML-Seite wie W179 (controls.html): Erzeugen im Benutzer-
+ * daten-Ordner, im Browser oeffnen, eingebettetes CSS im Launcher-
+ * Look (keyshtml_css), druckbar, Sprache = Launcher-Sprache, kein
+ * Netzwerk durch den Launcher. Inhalt aus lang-Schluesseln
+ * (gui.zadig_*), genau ein externer Verweis (Zadig-Seite als <a href>,
+ * der Nutzer laedt selbst), keine Skripte. Quelltext ASCII (U8_*),
+ * Ausgabe UTF-8. */
+#define ZADIG_URL "https://zadig.akeo.ie/"
+
+/* Zusatz-CSS: Listen + die eine Link-Farbe (Schirm, Druck). */
+static void zadig_css(char *out, size_t cap, size_t *o)
+{
+    keyshtml_add(out, cap, o,
+                 "<style>\n"
+                 "ol,ul{margin:0 0 8px;padding-left:22px;font-size:14px;"
+                 "color:#c9cfd9}\n"
+                 "li{margin:0 0 4px}\n"
+                 "a{color:#f2a84e}\n"
+                 "@media print{\n"
+                 "ol,ul{color:#333}\n"
+                 "a{color:#8a4d00}\n"
+                 "}\n"
+                 "</style>\n");
+}
+
+/* Eine Anleitungszeile als <li> (escapen, Zadig-Adresse verlinken). */
+static void zadig_li(char *out, size_t cap, size_t *o, const char *line)
+{
+    static char e[4096];
+    char *p, *q;
+    keyshtml_escape(line ? line : "", e, sizeof e);
+    keyshtml_add(out, cap, o, "<li>");
+    p = e;
+    for (;;) {
+        char sv;
+        q = strstr(p, ZADIG_URL);
+        if (!q) {
+            keyshtml_add(out, cap, o, p);
+            break;
+        }
+        sv = *q;
+        *q = '\0';
+        keyshtml_add(out, cap, o, p);
+        *q = sv;
+        keyshtml_add(out, cap, o, "<a href=\"" ZADIG_URL "\">" ZADIG_URL "</a>");
+        p = q + sizeof ZADIG_URL - 1;
+    }
+    keyshtml_add(out, cap, o, "</li>\n");
+}
+
+/* Abschnitt oeffnen: <section><h2>Kopf</h2><ol/ul> Zeilen </..>.
+ * zadig_section_end schliesst (dazwischen passt Hinweis-HTML, s.
+ * Warnung in Schritt 2, Zentrier-Hinweis in Schritt 4). */
+static void zadig_section_open(char *out, size_t cap, size_t *o,
+                               const char *head, const char *body, int ordered)
+{
+    static char b[4096], e[256];
+    char *p;
+    keyshtml_add(out, cap, o, "<section><h2>");
+    keyshtml_escape(head ? head : "", e, sizeof e);
+    keyshtml_add(out, cap, o, e);
+    keyshtml_add(out, cap, o, ordered ? "</h2>\n<ol>\n" : "</h2>\n<ul>\n");
+    strcpy_s(b, sizeof b, body ? body : "");
+    p = b;
+    while (*p) {
+        char *line = p, *nl = strchr(p, '\n');
+        if (nl) {
+            *nl = '\0';
+        }
+        if (*keyshtml_trim(line)) {
+            zadig_li(out, cap, o, line);
+        }
+        if (!nl) {
+            break;
+        }
+        p = nl + 1;
+    }
+    keyshtml_add(out, cap, o, ordered ? "</ol>\n" : "</ul>\n");
+}
+
+static void zadig_section_end(char *out, size_t cap, size_t *o)
+{
+    keyshtml_add(out, cap, o, "</section>\n");
+}
+
+/* Hinweis-Absatz in einem Abschnitt. */
+static void zadig_p(char *out, size_t cap, size_t *o, const char *text)
+{
+    static char e[2048];
+    keyshtml_add(out, cap, o, "<p>");
+    keyshtml_escape(text ? text : "", e, sizeof e);
+    keyshtml_add(out, cap, o, e);
+    keyshtml_add(out, cap, o, "</p>\n");
+}
+
+/* Warnung in einem Abschnitt (Warnkasten wie Primaerfeuer). */
+static void zadig_warn(char *out, size_t cap, size_t *o, const char *text)
+{
+    static char e[2048];
+    keyshtml_add(out, cap, o, "<div class=\"prim\"><div class=\"prim-k\">");
+    keyshtml_escape(text ? text : "", e, sizeof e);
+    keyshtml_add(out, cap, o, e);
+    keyshtml_add(out, cap, o, "</div></div>\n");
+}
+
+static void zadig_build(char *out, size_t cap)
+{
+    size_t o = 0;
+    const char *brand = SB_EDITION_COMMUNITY ? "Steelbound" : "Steel Battalion";
+    keyshtml_add(out, cap, &o, "<!DOCTYPE html>\n<html lang=\"");
+    keyshtml_add(out, cap, &o, sb_lang_code());
+    keyshtml_add(out, cap, &o, "\">\n<head>\n<meta charset=\"utf-8\">\n"
+                 "<meta name=\"viewport\" content=\"width=device-width,"
+                 "initial-scale=1\">\n<title>");
+    keyshtml_add(out, cap, &o, brand);
+    keyshtml_add(out, cap, &o, " " U8_DASH " ");
+    keyshtml_add(out, cap, &o, LT("gui.zadig_title"));
+    keyshtml_add(out, cap, &o, "</title>\n");
+    keyshtml_css(out, cap, &o);
+    zadig_css(out, cap, &o);
+    keyshtml_add(out, cap, &o, "</head>\n<body><div class=\"wrap\">\n<h1>");
+    keyshtml_add(out, cap, &o, brand);
+    keyshtml_add(out, cap, &o, " " U8_DASH " ");
+    keyshtml_add(out, cap, &o, LT("gui.zadig_title"));
+    keyshtml_add(out, cap, &o, "</h1>\n<div class=\"grid\">\n");
+    zadig_section_open(out, cap, &o, LT("gui.zadig_need_h"),
+                       LT("gui.zadig_need"), 0);
+    zadig_section_end(out, cap, &o);
+    zadig_section_open(out, cap, &o, LT("gui.zadig_driver_h"),
+                       LT("gui.zadig_driver"), 1);
+    zadig_warn(out, cap, &o, LT("gui.zadig_warn"));
+    zadig_p(out, cap, &o, LT("gui.zadig_admin"));
+    zadig_section_end(out, cap, &o);
+    zadig_section_open(out, cap, &o, LT("gui.zadig_launch_h"),
+                       LT("gui.zadig_launch"), 1);
+    zadig_section_end(out, cap, &o);
+    zadig_section_open(out, cap, &o, LT("gui.zadig_assist_h"),
+                       LT("gui.zadig_assist"), 1);
+    zadig_p(out, cap, &o, LT("gui.zadig_center"));
+    zadig_section_end(out, cap, &o);
+    zadig_section_open(out, cap, &o, LT("gui.zadig_start_h"),
+                       LT("gui.zadig_start"), 1);
+    zadig_section_end(out, cap, &o);
+    zadig_section_open(out, cap, &o, LT("gui.zadig_fix_h"),
+                       LT("gui.zadig_fix"), 0);
+    zadig_section_end(out, cap, &o);
+    keyshtml_add(out, cap, &o, "</div>\n<footer>");
+    keyshtml_add(out, cap, &o, LT("gui.keys_local"));
+    keyshtml_add(out, cap, &o, "</footer></div></body>\n</html>\n");
+}
+
+/* W185: Zielpfad zadig_guide.html (W150-Datenorte, sonst Client-Ordner). */
+static void zadig_path(char *out, size_t cap)
+{
+    char acp[1024];
+    if (sb_userdata_path(SB_UD_ROOT, acp, sizeof acp) == 1) {
+        char u8[1024];
+        u8_from_acp(acp, u8, sizeof u8);
+        _snprintf_s(out, cap, _TRUNCATE, "%s/zadig_guide.html", u8);
+        return;
+    }
+    _snprintf_s(out, cap, _TRUNCATE, "%s/zadig_guide.html", g_client_dir);
+}
+
+/* W185: Knopf "Setup guide": HTML schreiben + oeffnen. Fehler als
+ * Klartext in die Statuszeile. Test/Shot: nur schreiben, nie oeffnen
+ * (stiehlt nie den Fokus). */
+static void zadig_open(void)
+{
+    char path[1200];
+    static char html[65536];
+    FILE *f = NULL;
+    size_t hlen;
+    zadig_build(html, sizeof html);
+    zadig_path(path, sizeof path);
+    if (u8_fopen_s(&f, path, "wb") != 0 || !f) {
+        char t[1500];
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.zadig_write_err"), path);
+        set_status_k(t, 2);
+        return;
+    }
+    hlen = strlen(html);
+    if (hlen && fwrite(html, 1, hlen, f) != hlen) {
+        char t[1500];
+        fclose(f);
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.zadig_write_err"), path);
+        set_status_k(t, 2);
+        return;
+    }
+    fclose(f);
+    if (g_o.shot != 0) {
+        printf("[open] %s\n", path);
+        set_status(LT("gui.zadig_open_ok"));
+        return;
+    }
+    {
+        wchar_t w[1200];
+        HINSTANCE rc;
+        u8_to_w(path, w, 1200);
+        rc = ShellExecuteW(g_hwnd, L"open", w, NULL, NULL, SW_SHOWNORMAL);
+        if ((INT_PTR)rc <= 32) {
+            char t[1500];
+            _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.zadig_open_err"), path);
+            set_status_k(t, 2);
+        } else {
+            set_status(LT("gui.zadig_open_ok"));
         }
     }
 }
@@ -10180,6 +10394,7 @@ static void ui_apply_language(void)
     combo_set0(ID_CTRL_PROF, "gui.legacy_label");
     ui_settext(ctl(ID_CTRL_REFRESH), LT("gui.ctl_reload"));
     ui_settext(ctl(ID_CTRL_BIND), LT("gui.ctl_bind"));
+    ui_settext(ctl(ID_CTRL_ZADIG), LT("gui.zadig_btn")); /* W185 */
     ui_settext(ctl(ID_CTRL_SBC), LT("gui.sbc"));
     ui_settext(ctl(ID_CTRL_SBCCHK), LT("gui.btn_check"));
     ui_settext(ctl(ID_CTRL_MOUSEOFF), LT("gui.ctl_mouseoff"));
@@ -10475,6 +10690,10 @@ static void build_controls(void)
        LT("gui.pk_del"), 0);
 
     /* --- Steuerung: Eingabegeraet, Belegung, Tastenuebersicht/Maus --- */
+    /* W185: Anleitung in der Titelzeile der Geraete-Karte (Titel links,
+     * Freiflaeche rechts; einziger freier Platz ohne Umbau). */
+    mk(w, K_BTN, ID_CTRL_ZADIG, P_CTRL, CX0 + COLW - 18 - 156, CY0 + 10,
+       156, 26, LT("gui.zadig_btn"), 0);
     mk(w, K_TOGGLE, ID_CTRL_SBC, P_CTRL, CX0 + 18, CY0 + 44, 210, 28, LT("gui.sbc"), 0);
     mk(w, K_BTN, ID_CTRL_SBCCHK, P_CTRL, CX0 + 232, CY0 + 42, 90, 32, LT("gui.btn_check"), 0);
     /* W128: Maus-Achsen aus, solange der Original-Controller aktiv ist */
@@ -10937,6 +11156,9 @@ static void on_command_inner(int id, int code)
         break;
     case ID_CTRL_BROWSER: /* W179 KEYS-HTML */
         keyshtml_open();
+        break;
+    case ID_CTRL_ZADIG: /* W185 ZADIG-HELP */
+        zadig_open();
         break;
     case ID_PK_LIST: /* W148 PACK-LAUNCHER, W172: Detail rechts folgt */
         if (code == LBN_SELCHANGE) {
@@ -12999,6 +13221,136 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                         "%sw184_controls_example.html", tmp);
             write_file(fx, html);
             printf("     (54: Beispiel %s)\n", fx);
+            sb_lang_set(keep);
+        }
+    }
+    /* 56 (W185 ZADIG-HELP): Einrichtungsanleitung als lokale HTML-Seite
+     * (nur bauen, nie oeffnen, nie Fokus): alle 6 Abschnitte, Warnung
+     * mit 0A7B:D000, genau ein Link (<a href> auf die Zadig-Seite),
+     * keine Skripte/externen Verweise, Escaping (& -> &amp;);
+     * Datei-Roundtrip wie zadig_open schreibt; beide Sprachen. */
+    {
+        static char html[65536];
+        static const char *const zsecs[] = {
+            "gui.zadig_need_h", "gui.zadig_driver_h", "gui.zadig_launch_h",
+            "gui.zadig_assist_h", "gui.zadig_start_h", "gui.zadig_fix_h",
+        };
+        static const char *const zbad[] = {
+            "<script", "SCRIPT", "<link", "<img", "src=", "url(",
+            "javascript:", "onload=", "onclick=", "onerror=",
+        };
+        static const char *const zlangs[] = { "en", "de" };
+        char fx[1300], keep[8], why56[300] = "", e[2048], hl[32];
+        int ok56 = 1, li, k;
+        strcpy_s(keep, sizeof keep, sb_lang_code());
+        for (li = 0; li < 2 && ok56; li++) {
+            const char *q;
+            int nlink = 0, nurl = 0;
+            sb_lang_set(zlangs[li]);
+            zadig_build(html, sizeof html);
+            for (k = 0; k < 6 && ok56; k++) {
+                keyshtml_escape(sb_lang(zsecs[k]), e, sizeof e);
+                if (!strstr(html, e)) {
+                    ok56 = 0;
+                    _snprintf_s(why56, sizeof why56, _TRUNCATE,
+                                "%s: Abschnitt fehlt: %s", zlangs[li],
+                                zsecs[k]);
+                }
+            }
+            if (ok56 && !strstr(html, "0A7B:D000")) {
+                ok56 = 0;
+                _snprintf_s(why56, sizeof why56, _TRUNCATE,
+                            "%s: Warnung 0A7B:D000 fehlt", zlangs[li]);
+            }
+            if (ok56) { /* genau ein Link, sonst kein http */
+                for (q = html; (q = strstr(q, "<a href=\"")) != NULL; q++) {
+                    nlink++;
+                }
+                for (q = html; (q = strstr(q, ZADIG_URL)) != NULL; q++) {
+                    nurl++;
+                }
+                if (nlink != 1 || nurl != 2 ||
+                    !strstr(html, "<a href=\"" ZADIG_URL "\">" ZADIG_URL
+                            "</a>")) {
+                    ok56 = 0;
+                    _snprintf_s(why56, sizeof why56, _TRUNCATE,
+                                "%s: Link falsch (a=%d, url=%d)", zlangs[li],
+                                nlink, nurl);
+                }
+            }
+            if (ok56) { /* keine Skripte/externen Verweise */
+                for (k = 0; k < 10 && ok56; k++) {
+                    if (strstr(html, zbad[k])) {
+                        ok56 = 0;
+                        _snprintf_s(why56, sizeof why56, _TRUNCATE,
+                                    "%s: verbotener Verweis: %s", zlangs[li],
+                                    zbad[k]);
+                    }
+                }
+            }
+            if (ok56) { /* Escaping: jedes & gehoert zu einer Entitaet */
+                for (q = html; (q = strchr(q, '&')) != NULL; q++) {
+                    if (strncmp(q, "&amp;", 5) && strncmp(q, "&lt;", 4) &&
+                        strncmp(q, "&gt;", 4) && strncmp(q, "&quot;", 6)) {
+                        ok56 = 0;
+                        _snprintf_s(why56, sizeof why56, _TRUNCATE,
+                                    "%s: rohes &", zlangs[li]);
+                        break;
+                    }
+                }
+                if (ok56 && !strstr(html, "&amp;")) {
+                    ok56 = 0; /* kein & im Text = Probe wirkungslos */
+                    _snprintf_s(why56, sizeof why56, _TRUNCATE,
+                                "%s: kein &amp; (Probe leer)", zlangs[li]);
+                }
+            }
+            if (ok56) { /* Titel/Edition, Sprache, Fuss, Druck */
+                keyshtml_escape(sb_lang("gui.zadig_title"), e, sizeof e);
+                _snprintf_s(hl, sizeof hl, _TRUNCATE, "<html lang=\"%s\">",
+                            sb_lang_code());
+                if (!strstr(html, SB_EDITION_COMMUNITY ? "Steelbound"
+                                                      : "Steel Battalion") ||
+                    !strstr(html, e) || !strstr(html, hl) ||
+                    !strstr(html, sb_lang("gui.keys_local")) ||
+                    !strstr(html, "@media print")) {
+                    ok56 = 0;
+                    _snprintf_s(why56, sizeof why56, _TRUNCATE,
+                                "%s: Titel/Sprache/Fuss/Druck falsch",
+                                zlangs[li]);
+                }
+            }
+        }
+        if (ok56) { /* Datei-Roundtrip (wie zadig_open schreibt) */
+            FILE *f = NULL;
+            static char back[65536];
+            size_t n = 0;
+            _snprintf_s(fx, sizeof fx, _TRUNCATE, "%sw185_zadig_self.html",
+                        tmp);
+            write_file(fx, html);
+            if (u8_fopen_s(&f, fx, "rb") == 0 && f) {
+                n = fread(back, 1, sizeof back - 1, f);
+                fclose(f);
+            }
+            back[n] = '\0';
+            if (n == 0 || strcmp(back, html) != 0) {
+                ok56 = 0;
+                strcpy_s(why56, sizeof why56, "Datei-Roundtrip");
+            }
+            u8_DeleteFile(fx);
+        }
+        if (ok56) {
+            GT_OK("56 zadig-guide (6 Abschnitte, Warnung 0A7B:D000, ein "
+                  "Link, kein Skript, Escaping, en+de)");
+        } else {
+            GT_FAIL("56 zadig-guide", "%s", why56);
+        }
+        { /* Beispiel-HTML (englisch) fuers Doku-Archiv */
+            sb_lang_set("en");
+            zadig_build(html, sizeof html);
+            _snprintf_s(fx, sizeof fx, _TRUNCATE,
+                        "%sw185_zadig_guide.html", tmp);
+            write_file(fx, html);
+            printf("     (56: Beispiel %s)\n", fx);
             sb_lang_set(keep);
         }
     }

@@ -13,6 +13,21 @@ official product and is not affiliated with Capcom or Microsoft.
 
 ▶ **[Watch Steelbound in action on YouTube](https://youtu.be/Iln350iJGcc)**
 
+## Support the project
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/W7W2U4716)
+
+Steelbound is a hobby project, built in my spare time to preserve this great
+game. Bringing a 2002 Xbox title back to modern PCs – faithfully, at 120 FPS,
+with VR and the original controller – is a **very large and complex task**,
+and it comes with **high running costs**: AI-assisted development (tokens and
+subscriptions) on top of a lot of personal time – **hundreds of dollars have
+already gone into development** so far.
+
+If you enjoy Steelbound and want to help cover some of these costs, any
+support – one-time or monthly – is greatly appreciated. See [DONATE.md](DONATE.md).
+Thank you! ☕
+
 ## What Steelbound is
 
 - A **launcher** (`sb_launcher.exe`): pick your own game copy, configure
@@ -24,20 +39,6 @@ official product and is not affiliated with Capcom or Microsoft.
 - A **Pack Creator**: builds your own packs locally from your own copy of
   the game (dump, upscale, review, export).
 
-
-## Support the project
-
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/W7W2U4716)
-
-Steelbound is a hobby project, built in my spare time to preserve this great
-game. Bringing a 2002 Xbox title back to modern PCs – faithfully, at 120 FPS,
-with VR and the original controller – is a **very large and complex task**,
-and it comes with **high running costs**: AI-assisted development (tokens and
-subscriptions) on top of a lot of personal time.
-
-If you enjoy Steelbound and want to help cover some of these costs, any
-support – one-time or monthly – is greatly appreciated. See [DONATE.md](DONATE.md).
-Thank you! ☕
 
 ## What Steelbound is not
 

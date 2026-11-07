@@ -14,3 +14,4 @@ eingebettet	bin/sb_emu.dll	xbe:0x2DE840+64:5d85718ec594b982c252d0279e5966ffca33a
 eingebettet	bin/sb_launcher.exe	xbe:0x2DE850+64:5ada112f312b5b0b6d44e1b2bff85559bfb56ee4ae351d1f5e90d370c4fa93c6	Triviale Zaehlfolge int32 4..19 (eigene Tabelle map[] in launcher_gui.c assist_led_name = LED-zu-Tasten-Index, W143; XBE enthaelt zufaellig dieselbe Folge). Keine Spieldaten. W152 (analog Master 6.11.)
 pfad	poc-native/launcher/src/launcher.c	absoluter Pfad: D:.spiel.default.xbe	erfundener Spielpfad im Launcher-Selbsttest 40 (VR-Startwege, W159)
 pfad	bin/sb_launcher.exe	absoluter Pfad: D:.spiel.default.xbe	erfundener Spielpfad im Launcher-Selbsttest 40 (VR-Startwege, W159)
+netz	poc-native/launcher/src/launcher_gui.c	URL-Literal im Code	W185: einziger externer Verweis, Link auf die offizielle Zadig-Seite in der lokal erzeugten Anleitung (kein Netzwerkzugriff durch den Launcher, Nutzer laedt selbst)

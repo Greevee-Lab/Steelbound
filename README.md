@@ -12,6 +12,7 @@ official product and is not affiliated with Capcom or Microsoft.
 ## Support the project
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/W7W2U4716)
+[![PayPal](https://img.shields.io/badge/PayPal-Support%20via%20PayPal-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/paypalme/Greevee)
 
 Steelbound is a hobby project, built in my spare time to preserve this great
 game. Bringing a 2002 Xbox title back to modern PCs – faithfully, at 120 FPS,

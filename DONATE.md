@@ -10,8 +10,9 @@ If you enjoy Steelbound and want to help cover some of those costs, I'd be
 very happy about your support – **one-time or monthly**, whatever suits you.
 Every coffee helps. ☕ Thank you!
 
-- **Sponsor button** at the top of the repository (links to Ko-fi; GitHub Sponsors may follow later)
+- **Sponsor button** at the top of the repository (links to Ko-fi and PayPal; GitHub Sponsors may follow later)
 - **Ko-fi** (one-time or monthly): [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/W7W2U4716) – https://ko-fi.com/W7W2U4716
+- **PayPal** (one-time): https://www.paypal.com/paypalme/Greevee
 
 Please note:
 

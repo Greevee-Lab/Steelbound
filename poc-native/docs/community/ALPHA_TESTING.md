@@ -167,7 +167,6 @@ panel as long as the protection is active.
   what this alpha is for.
 - **VR is experimental.** Expect rough edges with headsets, runtimes and
   performance.
-- The Pack Creator is not part of Alpha 1.
 - The legal texts (`LICENSE`, `THIRD_PARTY.md`) are drafts.
 - Steelbound does not use the network: no updates, no telemetry, no
   automatic crash upload. Reports reach us only when you send them.

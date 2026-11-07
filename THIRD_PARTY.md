@@ -16,20 +16,7 @@ listed here only for attribution; it is not a third-party component.
 
 ## Shipped with the release
 
-| Component | Version | License | Purpose |
-|---|---|---|---|
-| Real-ESRGAN-ncnn-vulkan (`realesrgan-ncnn-vulkan.exe`) | 20220424 (release v0.2.5.0), https://github.com/xinntao/Real-ESRGAN | BSD-3-Clause | AI upscaler used by the Pack Creator on the user's own GPU |
-| ncnn (runtime inside the exe above) | see Real-ESRGAN release, https://github.com/Tencent/ncnn | BSD-3-Clause | inference runtime |
-| realsr-ncnn-vulkan (upstream of the exe) | https://github.com/nihui/realsr-ncnn-vulkan | MIT | upscaler frontend |
-| texconv (`texconv.exe`) | may2026, https://github.com/microsoft/DirectXTex | MIT | DDS conversion (BC1/BC7 + mipmaps) in the Pack Creator |
-
-## Planned for the release (Pack Creator, phase 2 — not bundled yet)
-
-| Component | License | Purpose |
-|---|---|---|
-| Embedded Python runtime (without network modules) | PSF-2.0, https://www.python.org/downloads/windows/ | runs the Pack Creator pipeline locally |
-| Pillow | HPND, https://pypi.org/project/pillow/ | image handling in the pipeline |
-| Replacement fonts (e.g. Montserrat, Roboto, Arimo, Carlito and others) | OFL-1.1 / Apache-2.0, https://github.com/google/fonts | redistributable fonts for text reconstruction; the Windows fonts used during development are NOT redistributable |
+No third-party binaries are shipped with the community release.
 
 ## Referenced during development (not shipped)
 
@@ -43,15 +30,5 @@ listed here only for attribution; it is not a third-party component.
 
 ## Open points (must be resolved before release)
 
-1. **Model weights license:** the Real-ESRGAN model files (`*.bin`,
-   `*.param`) in the ncnn-vulkan release carry no recognisable license of
-   their own; it is **open** whether they fall under the repo's BSD-3.
-   They will only be bundled once this is checked.
-2. **Training-data terms:** the training sets behind the weights (DIV2K,
-   Flickr2K, OST) have their own terms; their effect on the weights is open.
-3. **XbSymbolDatabase attribution:** whether the MIT attribution duty
+1. **XbSymbolDatabase attribution:** whether the MIT attribution duty
    applies to recognition results (names/addresses) is open.
-4. **Fonts:** no replacement font is bundled yet; an OCR-A replacement and
-   custom pixel fonts are still to be drawn as our own OFL fonts.
-5. The license texts above will be placed next to the binaries as `.txt`
-   files (`third_party/licenses/`) once the tools are bundled.

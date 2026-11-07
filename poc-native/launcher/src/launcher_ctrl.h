@@ -91,6 +91,8 @@ void lctrl_bind_init(lctrl_bind_t *b);
 /* Datei parsen (Semantik wie imap_profile_parse: '#' inline, ';'/'[',
  * element = alt, alt; unbekannt = ignorieren). 0 = ok, 1 = fehlt. */
 int lctrl_bind_load_file(const char *path, lctrl_bind_t *b);
+/* W182: dasselbe fuer einen Profiltext im Speicher. 0 = ok, 1 = NULL. */
+int lctrl_bind_load_text(const char *text, lctrl_bind_t *b);
 /* Name -> Index (bi0/bi+N, Klarname, achse[.neg/.pos], gear.*, tuner.*).
  * -1 = unbekannt. */
 int lctrl_bind_elem_index(const char *name);

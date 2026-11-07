@@ -20,6 +20,17 @@ official product and is not affiliated with Capcom or Microsoft.
 - A **Pack Creator**: builds your own packs locally from your own copy of
   the game (dump, upscale, review, export).
 
+
+## Support the project
+
+Steelbound is a hobby project, built in my spare time to preserve this great
+game – a big investment of time and money. If you'd like to help cover some
+development costs, you can support it **one-time or monthly** (GitHub Sponsors
+or Buy Me a Coffee) – see [DONATE.md](DONATE.md). Thank you! ☕
+
+[![Steelbound – video](https://img.youtube.com/vi/Iln350iJGcc/hqdefault.jpg)](https://youtu.be/Iln350iJGcc)
+
+
 ## What Steelbound is not
 
 - It contains **no game content**: no XBE or disc-image parts, no textures,
@@ -66,17 +77,11 @@ and Alpha testing (what to test, where logs and crash reports are).
 
 ## Quickstart
 
-1. Build the client and the launcher (see [Building](#building)), or use a
-   release archive. Place `sb_launcher.exe` next to `sb_ldr.exe`
-   (or pass `--client-dir <folder>`).
-2. Start the launcher and select your own game copy (the folder containing
-   `default.xbe` and `Media/`).
-3. Configure display, audio and controls, then play.
+1. **Download** the latest `Steelbound-*-win32.zip` from the [Releases](../../releases) page and unpack it into any folder.
+2. Install the **Microsoft Visual C++ Redistributable 2015–2022 (x86)** if it is not already present.
+3. Start **`sb_launcher.exe`**, choose **your own disc image** of Steel Battalion (Europe/PAL) as `.iso` or `.xiso` on the Play page, press **Check**, then **Launch game**.
 
-Your saves, settings, caches and packs live in your user profile
-(`%LOCALAPPDATA%\Steelbound\`); the program folder stays read-only. For a
-portable setup (USB stick), place an empty file named `portable.txt` next
-to the exe — then everything stays in the program folder.
+The recommended preset is **Original (HD) – 120 FPS**. Details: [Getting started](poc-native/docs/community/GETTING_STARTED.md). Want to build it yourself? See [Building](#building-visual-studio-2022-32-bit-is-required).
 
 ## Packs and the Pack Creator
 

@@ -1,13 +1,15 @@
-# Donations (draft)
+# Support Steelbound
 
-Steelbound is free for noncommercial use. If you want to support the
-author's work on this preservation project, voluntary donations to the
-author are welcome:
+Steelbound is a **hobby project**. I build it in my spare time to keep this
+wonderful game playable on modern hardware – that takes a lot of time and
+also real money (hardware, tools, development costs).
 
-- [donation-link-1]
-- [donation-link-2]
+If you enjoy Steelbound and want to help cover some of those costs, I'd be
+very happy about your support – **one-time or monthly**, whatever suits you.
+Every coffee helps. ☕ Thank you!
 
-(The links above are placeholders and will be filled in at export time.)
+- **GitHub Sponsors** (one-time or monthly): use the **Sponsor** button at the top of the repository – [sponsor-link]
+- **Buy Me a Coffee**: [coffee-link]
 
 Please note:
 

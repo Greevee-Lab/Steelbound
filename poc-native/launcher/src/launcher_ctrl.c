@@ -635,6 +635,36 @@ void lctrl_bind_row_text(const lctrl_bind_t *b, int idx, char *out, size_t cap)
     }
 }
 
+/* Eine Profilzeile auswerten (Semantik wie imap_profile_parse: '#'
+ * inline, ';'/'[' ueberspringen, element = alt, alt; unbekannt = still
+ * ignorieren, letzte Zeile gewinnt). line wird veraendert. */
+static void bind_parse_line(char *line, lctrl_bind_t *b)
+{
+    char *h, *eq, *val, *one, *ctx = NULL;
+    int idx;
+    h = strchr(line, '#');
+    if (h) { *h = '\0'; } /* Kommentar ab '#' (wie Client) */
+    trim(line);
+    if (!line[0] || line[0] == ';' || line[0] == '[') { return; }
+    eq = strchr(line, '=');
+    if (!eq) { return; }
+    *eq = '\0';
+    trim(line);
+    idx = lctrl_bind_elem_index(line);
+    if (idx < 0) { return; } /* unbekannt: ignorieren */
+    val = eq + 1;
+    b->row[idx].n_alt = 0; /* letzte Zeile gewinnt */
+    for (one = strtok_s(val, ",", &ctx); one;
+         one = strtok_s(NULL, ",", &ctx)) {
+        trim(one);
+        if (!one[0]) { continue; }
+        if (b->row[idx].n_alt >= LCTRL_ALT_N) { break; }
+        strcpy_s(b->row[idx].alt[b->row[idx].n_alt],
+                 sizeof b->row[idx].alt[0], one);
+        b->row[idx].n_alt++;
+    }
+}
+
 int lctrl_bind_load_file(const char *path, lctrl_bind_t *b)
 {
     FILE *f;
@@ -642,31 +672,29 @@ int lctrl_bind_load_file(const char *path, lctrl_bind_t *b)
     lctrl_bind_init(b);
     if (u8_fopen_s(&f, path, "r") != 0 || !f) { return 1; }
     while (fgets(line, sizeof line, f)) {
-        char *h, *eq, *val, *one, *ctx = NULL;
-        int idx;
-        h = strchr(line, '#');
-        if (h) { *h = '\0'; } /* Kommentar ab '#' (wie Client) */
-        trim(line);
-        if (!line[0] || line[0] == ';' || line[0] == '[') { continue; }
-        eq = strchr(line, '=');
-        if (!eq) { continue; }
-        *eq = '\0';
-        trim(line);
-        idx = lctrl_bind_elem_index(line);
-        if (idx < 0) { continue; } /* unbekannt: ignorieren */
-        val = eq + 1;
-        b->row[idx].n_alt = 0; /* letzte Zeile gewinnt */
-        for (one = strtok_s(val, ",", &ctx); one;
-             one = strtok_s(NULL, ",", &ctx)) {
-            trim(one);
-            if (!one[0]) { continue; }
-            if (b->row[idx].n_alt >= LCTRL_ALT_N) { break; }
-            strcpy_s(b->row[idx].alt[b->row[idx].n_alt],
-                     sizeof b->row[idx].alt[0], one);
-            b->row[idx].n_alt++;
-        }
+        bind_parse_line(line, b);
     }
     fclose(f);
+    return 0;
+}
+
+/* W182 KEYS-SVG: gleiche Auswertung fuer einen Profiltext im Speicher
+ * (Browser-Export: Profiltext ist schon gelesen). */
+int lctrl_bind_load_text(const char *text, lctrl_bind_t *b)
+{
+    char line[512];
+    const char *p = text;
+    lctrl_bind_init(b);
+    if (!text) { return 1; }
+    while (*p) {
+        size_t n = strcspn(p, "\r\n");
+        size_t c = n < sizeof line - 1 ? n : sizeof line - 1;
+        memcpy(line, p, c);
+        line[c] = '\0';
+        bind_parse_line(line, b);
+        p += n;
+        while (*p == '\r' || *p == '\n') { p++; }
+    }
     return 0;
 }
 

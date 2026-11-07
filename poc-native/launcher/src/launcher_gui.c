@@ -20,6 +20,7 @@
 #include <wincodec.h>
 #include <math.h>
 #include <stdint.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -2909,7 +2910,7 @@ static void keyshtml_css(char *out, size_t cap, size_t *o)
         "body{margin:0;background:#0b0d11;color:#eaedf2;"
         "font-family:system-ui,\"Segoe UI\",SegoeUI,Roboto,Arial,sans-serif;"
         "line-height:1.5}\n"
-        ".wrap{max-width:1100px;margin:0 auto;padding:24px 20px 40px}\n"
+        ".wrap{max-width:1240px;margin:0 auto;padding:24px 20px 40px}\n"
         "h1{font-size:26px;margin:0 0 4px;letter-spacing:.5px}\n"
         ".sub{color:#98a0ac;margin:0 0 16px;font-size:14px}\n"
         ".prim{background:#2a1f10;border:1px solid #e2963a;"
@@ -2958,6 +2959,1147 @@ static void keyshtml_css(char *out, size_t cap, size_t *o)
     keyshtml_add(out, cap, o, "</style>\n");
 }
 
+/* ------------------------------------------------------------------ */
+/* W182 KEYS-SVG: Original-Controller als schematische SVG-Zeichnung    */
+/* ------------------------------------------------------------------ */
+/* Eigene Zeichnung (keine Fotos, keine fremden Grafiken, keine Logos),
+ * inline im HTML, ohne Verweise. Elemente/Bezeichnungen nach
+ * CONTROLLER.md S8 (Labels bind.*). Belegung je Element aus derselben
+ * Quelle wie W179: aktives Profil (Profiltext, lctrl_bind-Parser wie
+ * der Belegungs-Dialog); Standardbelegung = eingebautes keyboard_default
+ * (bitgenau Legacy; Selbsttest 54 vergleicht mit
+ * harness/profiles/keyboard_default.ini). Tasten 1-5 rasten die fuenf
+ * Kippschalter immer (Launcher-Start key_toggles=1, imap_toggles_apply).
+ * Hover: CSS (:hover/:has), kein Skript. Quelltext ASCII, Ausgabe UTF-8. */
+
+#define KS_LARR "\xE2\x86\x90"  /* Pfeil links */
+#define KS_UARR "\xE2\x86\x91"  /* Pfeil hoch */
+#define KS_RARR "\xE2\x86\x92"  /* Pfeil rechts */
+#define KS_DARR "\xE2\x86\x93"  /* Pfeil runter */
+#define KS_HARR "\xE2\x86\x94"  /* links-rechts */
+#define KS_VARR "\xE2\x86\x95"  /* hoch-runter */
+#define KS_TRI_U "\xE2\x96\xB2" /* Dreieck hoch */
+#define KS_TRI_D "\xE2\x96\xBC" /* Dreieck runter */
+#define KS_TRI_L "\xE2\x97\x80" /* Dreieck links */
+#define KS_TRI_R "\xE2\x96\xB6" /* Dreieck rechts */
+#define KS_EMDASH "\xE2\x80\x94" /* Geviertstrich = nicht belegt */
+
+/* Standardbelegung (Legacy) = keyboard_default (input_map.c eingebaut). */
+static const char ks_legacy_text[] =
+    "[buttons]\n"
+    "bi0 = KEY:SPACE, MOUSE:LEFT\n"
+    "bi1 = KEY:F, MOUSE:RIGHT\n"
+    "bi2 = KEY:L, MOUSE:MIDDLE\n"
+    "bi4 = KEY:H\n"
+    "bi5 = KEY:I\n"
+    "bi6 = KEY:ENTER\n"
+    "bi8 = KEY:M\n"
+    "bi9 = KEY:TAB\n"
+    "bi11 = KEY:Z\n"
+    "bi12 = KEY:X\n"
+    "bi13 = KEY:V\n"
+    "bi18 = KEY:C\n"
+    "bi20 = KEY:O\n"
+    "bi21 = KEY:N\n"
+    "bi27 = KEY:R\n"
+    "[axes]\n"
+    "aim_x.neg = KEY:LEFT:cond=!SHIFT\n"
+    "aim_x.pos = KEY:RIGHT:cond=!SHIFT\n"
+    "aim_x = MOUSE:X:mode=aim\n"
+    "aim_y.neg = KEY:UP:cond=!SHIFT\n"
+    "aim_y.pos = KEY:DOWN:cond=!SHIFT\n"
+    "aim_y = MOUSE:Y:mode=aim\n"
+    "rot.neg = KEY:A\n"
+    "rot.pos = KEY:D\n"
+    "sight_x.neg = KEY:LEFT\n"
+    "sight_x.pos = KEY:RIGHT\n"
+    "sight_x = MOUSE:X:mode=sight\n"
+    "sight_y.neg = KEY:UP\n"
+    "sight_y.pos = KEY:DOWN\n"
+    "sight_y = MOUSE:Y:mode=sight\n"
+    "pedal_l = KEY:LCTRL, MOUSE:X1, MOUSE:X2\n"
+    "pedal_m = KEY:S\n"
+    "pedal_r = KEY:W\n"
+    "[gear]\n"
+    "gear.up = KEY:E\n"
+    "gear.down = KEY:Q\n"
+    "tuner.up = KEY:T\n"
+    "tuner.down = KEY:G\n"
+    "[vr]\n"
+    "vr_recenter = KEY:F8\n";
+
+/* Formen der Zeichnung. */
+enum { KS_BTN, KS_TOG, KS_EJECT, KS_DIAL, KS_GEAR, KS_LEVER, KS_TRIG,
+       KS_KNOB, KS_SIGHT, KS_SBTN, KS_PEDAL };
+/* Baugruppen (Reihenfolge der Tabelle). */
+enum { KS_G_LEFT, KS_G_CENTER, KS_G_RIGHT, KS_G_PEDALS, KS_G_N };
+
+typedef struct {
+    const char *id;    /* CSS-Kennung: el-<id>, co-<id>, e-<id> */
+    const char *lkey;  /* Name (Tabelle, Tooltip) */
+    const char *skey;  /* Kurzname in der Zeichnung (NULL = lkey) */
+    const char *elems; /* Profil-Elemente, je ein Leerzeichen getrennt */
+    unsigned char shape, grp;
+    short x, y, w, h;  /* Form (Knopf/Hebel: Rechteck; Kreis: Mitte+r) */
+    short lx, ly, lw;  /* Callout-Kasten; lw = 0: Zeilen unter der Kappe */
+    short ax, ay;      /* Leader-Start (0 = keiner) */
+} ks_elem_t;
+
+/* Mittelteil: 5 Spalten x 7 Reihen (Zelle 116 breit, Kappe 24 hoch). */
+#define KS_CX(c) (338 + (c) * 122)
+#define KS_RY(r) (70 + (r) * 76)
+#define KS_CELL(id, lk, sk, el, sh, c, r) \
+    { id, lk, sk, el, sh, KS_G_CENTER, KS_CX(c), KS_RY(r), 116, 24, \
+      0, 0, 0, 0, 0 }
+
+static const ks_elem_t ks_elems[] = {
+    /* Linker Block: Schalthebel (R/N/1-5) und Drehhebel */
+    { "gear", "gui.svg_gear", NULL,
+      "gear.up gear.down gear.r gear.n gear.1 gear.2 gear.3 gear.4 gear.5",
+      KS_GEAR, KS_G_LEFT, 40, 165, 110, 225, 24, 420, 140, 95, 392 },
+    { "rot", "gui.svg_rot", NULL, "rot rot.neg rot.pos",
+      KS_LEVER, KS_G_LEFT, 212, 170, 60, 220, 172, 420, 130, 242, 392 },
+    /* Mittelteil */
+    KS_CELL("bi34", "bind.bi34", "gui.svg_t_filter", "bi34", KS_TOG, 0, 0),
+    KS_CELL("bi35", "bind.bi35", "gui.svg_t_oxygen", "bi35", KS_TOG, 1, 0),
+    KS_CELL("bi36", "bind.bi36", "gui.svg_t_fuel", "bi36", KS_TOG, 2, 0),
+    KS_CELL("bi37", "bind.bi37", "gui.svg_t_buffer", "bi37", KS_TOG, 3, 0),
+    KS_CELL("bi38", "bind.bi38", "gui.svg_t_vtloc", "bi38", KS_TOG, 4, 0),
+    KS_CELL("bi3", "bind.bi3", "gui.svg_eject", "bi3", KS_EJECT, 0, 1),
+    KS_CELL("bi4", "bind.bi4", NULL, "bi4", KS_BTN, 1, 1),
+    KS_CELL("bi5", "bind.bi5", NULL, "bi5", KS_BTN, 2, 1),
+    KS_CELL("bi6", "bind.bi6", NULL, "bi6", KS_BTN, 3, 1),
+    KS_CELL("tuner", "gui.svg_tuner", NULL, "tuner.up tuner.down", KS_DIAL,
+            4, 1),
+    KS_CELL("bi28", "bind.bi28", NULL, "bi28", KS_BTN, 0, 2),
+    KS_CELL("bi29", "bind.bi29", NULL, "bi29", KS_BTN, 1, 2),
+    KS_CELL("bi30", "bind.bi30", NULL, "bi30", KS_BTN, 2, 2),
+    KS_CELL("bi31", "bind.bi31", NULL, "bi31", KS_BTN, 3, 2),
+    KS_CELL("bi32", "bind.bi32", NULL, "bi32", KS_BTN, 4, 2),
+    KS_CELL("bi22", "bind.bi22", NULL, "bi22", KS_BTN, 0, 3),
+    KS_CELL("bi23", "bind.bi23", NULL, "bi23", KS_BTN, 1, 3),
+    KS_CELL("bi24", "bind.bi24", NULL, "bi24", KS_BTN, 2, 3),
+    KS_CELL("bi25", "bind.bi25", NULL, "bi25", KS_BTN, 3, 3),
+    KS_CELL("bi26", "bind.bi26", NULL, "bi26", KS_BTN, 4, 3),
+    KS_CELL("bi7", "bind.bi7", NULL, "bi7", KS_BTN, 0, 4),
+    KS_CELL("bi8", "bind.bi8", NULL, "bi8", KS_BTN, 1, 4),
+    KS_CELL("bi9", "bind.bi9", NULL, "bi9", KS_BTN, 2, 4),
+    KS_CELL("bi10", "bind.bi10", NULL, "bi10", KS_BTN, 3, 4),
+    KS_CELL("bi14", "bind.bi14", NULL, "bi14", KS_BTN, 4, 4),
+    KS_CELL("bi11", "bind.bi11", NULL, "bi11", KS_BTN, 0, 5),
+    KS_CELL("bi12", "bind.bi12", NULL, "bi12", KS_BTN, 1, 5),
+    KS_CELL("bi13", "bind.bi13", NULL, "bi13", KS_BTN, 2, 5),
+    KS_CELL("bi15", "bind.bi15", NULL, "bi15", KS_BTN, 3, 5),
+    KS_CELL("bi21", "bind.bi21", NULL, "bi21", KS_BTN, 4, 5),
+    KS_CELL("bi16", "bind.bi16", NULL, "bi16", KS_BTN, 0, 6),
+    KS_CELL("bi17", "bind.bi17", NULL, "bi17", KS_BTN, 1, 6),
+    KS_CELL("bi18", "bind.bi18", NULL, "bi18", KS_BTN, 2, 6),
+    KS_CELL("bi19", "bind.bi19", NULL, "bi19", KS_BTN, 3, 6),
+    KS_CELL("bi20", "bind.bi20", NULL, "bi20", KS_BTN, 4, 6),
+    /* Rechter Block: Zielhebel (Hauptwaffe/Feuer/Lock-On), Sicht-Stick */
+    { "aim", "gui.svg_aim", NULL,
+      "aim_x aim_y aim_x.neg aim_x.pos aim_y.neg aim_y.pos",
+      KS_LEVER, KS_G_RIGHT, 1086, 175, 66, 230, 1172, 250, 88, 1152, 280 },
+    { "bi0", "bind.bi0", NULL, "bi0",
+      KS_TRIG, KS_G_RIGHT, 1070, 222, 16, 48, 976, 250, 88, 1070, 246 },
+    { "bi1", "bind.bi1", NULL, "bi1",
+      KS_KNOB, KS_G_RIGHT, 1134, 200, 9, 0, 1172, 170, 88, 1143, 200 },
+    { "bi2", "bind.bi2", NULL, "bi2",
+      KS_KNOB, KS_G_RIGHT, 1104, 196, 9, 0, 976, 170, 88, 1095, 196 },
+    { "sight", "gui.svg_sight", NULL,
+      "sight_x sight_y sight_x.neg sight_x.pos sight_y.neg sight_y.pos",
+      KS_SIGHT, KS_G_RIGHT, 1030, 470, 20, 50, 1068, 420, 92, 1050, 462 },
+    { "bi33", "bind.bi33", NULL, "bi33",
+      KS_SBTN, KS_G_RIGHT, 1030, 470, 7, 0, 1068, 490, 92, 1037, 474 },
+    { "bi27", "bind.bi27", NULL, "bi27",
+      KS_BTN, KS_G_RIGHT, 1168, 440, 90, 24, 0, 0, 0, 0, 0 },
+    /* Pedale: Slide-Step links, Bremse Mitte, Gas rechts */
+    { "pedal_l", "gui.svg_pedal_l", NULL, "pedal_l",
+      KS_PEDAL, KS_G_PEDALS, 440, 690, 70, 100, 405, 800, 140, 0, 0 },
+    { "pedal_m", "gui.svg_pedal_m", NULL, "pedal_m",
+      KS_PEDAL, KS_G_PEDALS, 575, 700, 130, 90, 570, 800, 140, 0, 0 },
+    { "pedal_r", "gui.svg_pedal_r", NULL, "pedal_r",
+      KS_PEDAL, KS_G_PEDALS, 770, 680, 70, 110, 735, 800, 140, 0, 0 },
+};
+#define KS_N ((int)(sizeof ks_elems / sizeof ks_elems[0]))
+
+static const char *const ks_grp_key[KS_G_N] = {
+    "gui.svg_left", "gui.svg_center", "gui.svg_right", "gui.svg_pedals",
+};
+
+/* Quellen je Callout-Zeile/Tabellenspalte. SBC-Quellen (W159) laufen
+ * als "SBC:<Name>" in der Tastatur-Zeile mit. */
+enum { KS_SRC_KEY, KS_SRC_MOUSE, KS_SRC_PAD, KS_SRC_N };
+#define KS_TOKN 24
+
+typedef struct {
+    char t[KS_SRC_N][KS_TOKN][64];
+    int n[KS_SRC_N];
+} ks_toks_t;
+
+static void ks_printf(char *out, size_t cap, size_t *o, const char *fmt, ...)
+{
+    char b[1024];
+    va_list ap;
+    va_start(ap, fmt);
+    _vsnprintf_s(b, sizeof b, _TRUNCATE, fmt, ap);
+    va_end(ap);
+    keyshtml_add(out, cap, o, b);
+}
+
+/* Zeichen (Codepoints) eines UTF-8-Textes. */
+static int ks_cps(const char *s)
+{
+    int n = 0;
+    for (; s && *s; s++) {
+        n += ((unsigned char)*s & 0xC0) != 0x80;
+    }
+    return n;
+}
+
+static void ks_tok_add(ks_toks_t *k, int src, const char *s)
+{
+    int i;
+    if (src < 0 || src >= KS_SRC_N || !s || !*s) {
+        return;
+    }
+    for (i = 0; i < k->n[src]; i++) {
+        if (strcmp(k->t[src][i], s) == 0) {
+            return; /* doppelt (z. B. Pfeile fuer X und Sicht) */
+        }
+    }
+    if (k->n[src] < KS_TOKN) {
+        strncpy_s(k->t[src][k->n[src]], sizeof k->t[src][0], s, _TRUNCATE);
+        k->n[src]++;
+    }
+}
+
+/* "LS <->" + "LS ^v" -> "LS" (beide Achsen derselben Quelle). */
+static void ks_tok_merge(ks_toks_t *k)
+{
+    static const char hs[] = " " KS_HARR, vs[] = " " KS_VARR;
+    int s, i, j;
+    for (s = 0; s < KS_SRC_N; s++) {
+        for (i = 0; i < k->n[s]; i++) {
+            size_t n = strlen(k->t[s][i]);
+            if (n <= sizeof hs - 1 ||
+                strcmp(k->t[s][i] + n - (sizeof hs - 1), hs) != 0) {
+                continue;
+            }
+            for (j = 0; j < k->n[s]; j++) {
+                size_t m = strlen(k->t[s][j]);
+                if (j == i || m != n ||
+                    strncmp(k->t[s][j], k->t[s][i], n - (sizeof hs - 1)) ||
+                    strcmp(k->t[s][j] + m - (sizeof vs - 1), vs) != 0) {
+                    continue;
+                }
+                k->t[s][i][n - (sizeof hs - 1)] = '\0';
+                memmove(k->t[s][j], k->t[s][j + 1],
+                        (size_t)(k->n[s] - j - 1) * sizeof k->t[s][0]);
+                k->n[s]--;
+                if (j < i) {
+                    i--;
+                }
+                break;
+            }
+        }
+    }
+}
+
+/* Funktions-Praefix je Profil-Element (mehrteilige Elemente). */
+static const char *ks_prefix(const char *key)
+{
+    static const struct { const char *k, *p; } t[] = {
+        { "gear.up", KS_TRI_U }, { "gear.down", KS_TRI_D },
+        { "gear.r", "R:" }, { "gear.n", "N:" }, { "gear.1", "1:" },
+        { "gear.2", "2:" }, { "gear.3", "3:" }, { "gear.4", "4:" },
+        { "gear.5", "5:" }, { "tuner.up", KS_TRI_U },
+        { "tuner.down", KS_TRI_D }, { "rot.neg", KS_TRI_L },
+        { "rot.pos", KS_TRI_R },
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof t / sizeof t[0]); i++) {
+        if (strcmp(key, t[i].k) == 0) {
+            return t[i].p;
+        }
+    }
+    return "";
+}
+
+/* Eine Quelle ("KEY:LEFT:cond=!SHIFT", "PAD:LX:dz=0.15") lesbar machen;
+ * *src = Gruppe. Parameter fallen weg (cond=SHIFT -> "Shift+"). */
+static void ks_atom(const char *a, char *out, size_t cap, int *src)
+{
+    static const struct { const char *n, *t; } keys[] = {
+        { "LEFT", KS_LARR }, { "RIGHT", KS_RARR }, { "UP", KS_UARR },
+        { "DOWN", KS_DARR }, { "LCTRL", "LCtrl" }, { "RCTRL", "RCtrl" },
+        { "CTRL", "Ctrl" }, { "SHIFT", "Shift" }, { "ALT", "Alt" },
+        { "ESC", "Esc" },
+    }, pads[] = {
+        { "LX", "LS " KS_HARR }, { "LY", "LS " KS_VARR },
+        { "RX", "RS " KS_HARR }, { "RY", "RS " KS_VARR },
+        { "DU", "D" KS_UARR }, { "DUP", "D" KS_UARR },
+        { "DD", "D" KS_DARR }, { "DDOWN", "D" KS_DARR },
+        { "DL", "D" KS_LARR }, { "DLEFT", "D" KS_LARR },
+        { "DR", "D" KS_RARR }, { "DRIGHT", "D" KS_RARR },
+    };
+    char ty[16], nm[64];
+    const char *c1, *c2, *par = "";
+    size_t n;
+    int i;
+    *src = KS_SRC_KEY;
+    out[0] = '\0';
+    c1 = strchr(a, ':');
+    if (!c1 || (size_t)(c1 - a) >= sizeof ty) {
+        strncpy_s(out, cap, a, _TRUNCATE); /* unbekannte Form: roh */
+        return;
+    }
+    memcpy(ty, a, (size_t)(c1 - a));
+    ty[c1 - a] = '\0';
+    c2 = strchr(c1 + 1, ':');
+    n = c2 ? (size_t)(c2 - c1 - 1) : strlen(c1 + 1);
+    if (n >= sizeof nm) {
+        n = sizeof nm - 1;
+    }
+    memcpy(nm, c1 + 1, n);
+    nm[n] = '\0';
+    if (c2) {
+        par = c2;
+    }
+    if (_stricmp(ty, "MOUSE") == 0) {
+        static const struct { const char *n, *k; } ms[] = {
+            { "LEFT", "gui.svg_m_left" }, { "RIGHT", "gui.svg_m_right" },
+            { "MIDDLE", "gui.svg_m_middle" }, { "X1", "gui.svg_m_x1" },
+            { "X2", "gui.svg_m_x2" },
+        };
+        *src = KS_SRC_MOUSE;
+        if (_stricmp(nm, "X") == 0 || _stricmp(nm, "Y") == 0) {
+            _snprintf_s(out, cap, _TRUNCATE, "%s %s", LT("gui.svg_mouse"),
+                        _stricmp(nm, "X") == 0 ? KS_HARR : KS_VARR);
+            return;
+        }
+        for (i = 0; i < (int)(sizeof ms / sizeof ms[0]); i++) {
+            if (_stricmp(nm, ms[i].n) == 0) {
+                strncpy_s(out, cap, LT(ms[i].k), _TRUNCATE);
+                return;
+            }
+        }
+        _snprintf_s(out, cap, _TRUNCATE, "%s %s", LT("gui.svg_mouse"), nm);
+        return;
+    }
+    if (_stricmp(ty, "PAD") == 0) {
+        *src = KS_SRC_PAD;
+        for (i = 0; i < (int)(sizeof pads / sizeof pads[0]); i++) {
+            if (_stricmp(nm, pads[i].n) == 0) {
+                strncpy_s(out, cap, pads[i].t, _TRUNCATE);
+                return;
+            }
+        }
+        strncpy_s(out, cap, nm, _TRUNCATE);
+        return;
+    }
+    if (_stricmp(ty, "KEY") == 0) {
+        const char *t = nm;
+        for (i = 0; i < (int)(sizeof keys / sizeof keys[0]); i++) {
+            if (_stricmp(nm, keys[i].n) == 0) {
+                t = keys[i].t;
+                break;
+            }
+        }
+        _snprintf_s(out, cap, _TRUNCATE, "%s%s",
+                    (strstr(par, "cond=SHIFT") || strstr(par, "cond=shift"))
+                        ? "Shift+" : "", t);
+        return;
+    }
+    if (_stricmp(ty, "SBC") == 0) {
+        _snprintf_s(out, cap, _TRUNCATE, "SBC:%s", nm);
+        return;
+    }
+    strncpy_s(out, cap, a, _TRUNCATE);
+}
+
+/* Alternative (Akkord "A+B" erlaubt) -> Text, Gruppe des ersten Atoms. */
+static void ks_alt(const char *alt, char *out, size_t cap, int *src)
+{
+    char work[128], *p, *plus;
+    size_t o = 0;
+    int first = 1;
+    out[0] = '\0';
+    *src = KS_SRC_KEY;
+    strncpy_s(work, sizeof work, alt, _TRUNCATE);
+    p = work;
+    for (;;) {
+        char t[64];
+        int s;
+        plus = strchr(p, '+');
+        if (plus) {
+            *plus = '\0';
+        }
+        ks_atom(keyshtml_trim(p), t, sizeof t, &s);
+        if (first) {
+            *src = s;
+        } else {
+            keyshtml_add(out, cap, &o, "+");
+        }
+        first = 0;
+        keyshtml_add(out, cap, &o, t);
+        if (!plus) {
+            break;
+        }
+        p = plus + 1;
+    }
+}
+
+/* Belegung eines gezeichneten Elements einsammeln. */
+static void ks_collect(const lctrl_bind_t *b, const ks_elem_t *e,
+                       ks_toks_t *k)
+{
+    char names[160], *nm, *ctx = NULL;
+    memset(k, 0, sizeof *k);
+    strncpy_s(names, sizeof names, e->elems, _TRUNCATE);
+    for (nm = strtok_s(names, " ", &ctx); nm; nm = strtok_s(NULL, " ", &ctx)) {
+        int idx = lctrl_bind_elem_index(nm), a;
+        const char *pre = ks_prefix(nm);
+        if (idx < 0) {
+            continue;
+        }
+        for (a = 0; a < b->row[idx].n_alt; a++) {
+            char t[64], u[80];
+            int s;
+            ks_alt(b->row[idx].alt[a], t, sizeof t, &s);
+            _snprintf_s(u, sizeof u, _TRUNCATE, "%s%s", pre, t);
+            ks_tok_add(k, s, u);
+        }
+    }
+    /* Tasten 1-5 rasten die Kippschalter immer (key_toggles=1). */
+    if (strncmp(e->id, "bi", 2) == 0) {
+        int bi = atoi(e->id + 2);
+        if (bi >= 34 && bi <= 38) {
+            char t[4];
+            t[0] = (char)('1' + bi - 34);
+            t[1] = '\0';
+            ks_tok_add(k, KS_SRC_KEY, t);
+        }
+    }
+    ks_tok_merge(k);
+}
+
+static const char *ks_name(const ks_elem_t *e, int shortname)
+{
+    return LT(shortname && e->skey ? e->skey : e->lkey);
+}
+
+/* Eine Callout-Zeile (Quellen-Maske; leer = Geviertstrich). Zu lang ->
+ * textLength (Schrift staucht, Kasten bleibt). */
+static void ks_svg_line(char *out, size_t cap, size_t *o, int x, int y,
+                        int mid, int avail, const ks_toks_t *k, int mask)
+{
+    static const char *const cls[KS_SRC_N] = { "tk", "tm", "tp" };
+    char buf[8192];
+    size_t bo = 0;
+    int cps = 0, first = 1, s, i;
+    buf[0] = '\0';
+    for (s = 0; s < KS_SRC_N; s++) {
+        if (!(mask & (1 << s))) {
+            continue;
+        }
+        for (i = 0; i < k->n[s]; i++) {
+            char e[256];
+            if (!first) {
+                keyshtml_add(buf, sizeof buf, &bo,
+                             "<tspan class=\"sep\"> " U8_DOT " </tspan>");
+                cps += 3;
+            }
+            first = 0;
+            keyshtml_escape(k->t[s][i], e, sizeof e);
+            ks_printf(buf, sizeof buf, &bo, "<tspan class=\"%s\">%s</tspan>",
+                      cls[s], e);
+            cps += ks_cps(k->t[s][i]);
+        }
+    }
+    if (first) {
+        keyshtml_add(buf, sizeof buf, &bo,
+                     "<tspan class=\"un\">" KS_EMDASH "</tspan>");
+        cps = 1;
+    }
+    ks_printf(out, cap, o, "<text class=\"cl\" x=\"%d\" y=\"%d\"%s", x, y,
+              mid ? " text-anchor=\"middle\"" : "");
+    if (cps * 70 > avail * 10) { /* Halbfett 12: ~7 je Zeichen */
+        ks_printf(out, cap, o,
+                  " textLength=\"%d\" lengthAdjust=\"spacingAndGlyphs\"",
+                  avail);
+    }
+    keyshtml_add(out, cap, o, ">");
+    keyshtml_add(out, cap, o, buf);
+    keyshtml_add(out, cap, o, "</text>");
+}
+
+/* Name (proportional, ~6.6 je Zeichen bei 11.5). */
+static void ks_svg_name(char *out, size_t cap, size_t *o, int x, int y,
+                        int mid, int avail, const char *name)
+{
+    char e[512];
+    keyshtml_escape(name, e, sizeof e);
+    ks_printf(out, cap, o, "<text class=\"nm\" x=\"%d\" y=\"%d\"%s", x, y,
+              mid ? " text-anchor=\"middle\"" : "");
+    if (ks_cps(name) * 66 > avail * 10) {
+        ks_printf(out, cap, o,
+                  " textLength=\"%d\" lengthAdjust=\"spacingAndGlyphs\"",
+                  avail);
+    }
+    keyshtml_add(out, cap, o, ">");
+    keyshtml_add(out, cap, o, e);
+    keyshtml_add(out, cap, o, "</text>");
+}
+
+/* Form zeichnen (Klassen: sh = hervorhebbare Flaeche). */
+static void ks_svg_shape(char *out, size_t cap, size_t *o, const ks_elem_t *e)
+{
+    int x = e->x, y = e->y, w = e->w, h = e->h, i;
+    switch (e->shape) {
+    case KS_TOG:
+        ks_printf(out, cap, o,
+                  "<rect class=\"sh\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                  "height=\"%d\" rx=\"5\"/>"
+                  "<rect class=\"ic\" x=\"%d\" y=\"%d\" width=\"9\" "
+                  "height=\"16\" rx=\"3\"/>"
+                  "<line class=\"ic\" x1=\"%d\" y1=\"%d\" x2=\"%d\" y2=\"%d\"/>",
+                  x, y, w, h, x + 6, y + 4, x + 10, y + 12, x + 14, y + 3);
+        break;
+    case KS_EJECT: /* Kappe rot, Schutzklappe gestrichelt, Scharnier oben */
+        ks_printf(out, cap, o,
+                  "<rect class=\"cv\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                  "height=\"%d\" rx=\"6\"/>"
+                  "<line class=\"cvh\" x1=\"%d\" y1=\"%d\" x2=\"%d\" y2=\"%d\"/>"
+                  "<rect class=\"sh ej\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                  "height=\"%d\" rx=\"5\"/>",
+                  x - 5, y - 7, w + 10, h + 12, x + 8, y - 7, x + w - 8, y - 7,
+                  x, y, w, h);
+        break;
+    case KS_DIAL: /* Tuner-Rad: Kreis mit Marke + Kappe */
+        ks_printf(out, cap, o,
+                  "<rect class=\"sh\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                  "height=\"%d\" rx=\"5\"/>"
+                  "<circle class=\"ic\" cx=\"%d\" cy=\"%d\" r=\"9\"/>"
+                  "<line class=\"ic\" x1=\"%d\" y1=\"%d\" x2=\"%d\" y2=\"%d\"/>",
+                  x, y, w, h, x + 14, y + 12, x + 14, y + 12, x + 14, y + 4);
+        break;
+    case KS_GEAR: { /* Kulisse R N 1 2 3 4 5, Knauf auf N */
+        static const char *const pos[7] = { "R", "N", "1", "2", "3", "4",
+                                            "5" };
+        int cx = x + w / 2;
+        ks_printf(out, cap, o,
+                  "<rect class=\"sh\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                  "height=\"%d\" rx=\"12\"/>"
+                  "<path class=\"sl\" d=\"M%d %dV%d",
+                  x, y, w, h, cx, y + 10, y + 10 + 6 * 34);
+        for (i = 0; i < 7; i++) {
+            ks_printf(out, cap, o, "M%d %dh%d", cx, y + 10 + i * 34,
+                      (i % 2) ? 24 : -24);
+        }
+        keyshtml_add(out, cap, o, "\"/>");
+        for (i = 0; i < 7; i++) {
+            ks_printf(out, cap, o,
+                      "<text class=\"gl\" x=\"%d\" y=\"%d\">%s</text>",
+                      cx + ((i % 2) ? 42 : -42), y + 14 + i * 34, pos[i]);
+        }
+        ks_printf(out, cap, o,
+                  "<circle class=\"sh kn\" cx=\"%d\" cy=\"%d\" r=\"9\"/>",
+                  cx + 24, y + 44);
+        break;
+    }
+    case KS_LEVER: { /* Griff, Schaft, Sockel */
+        int cx = x + w / 2, gh = h * 55 / 100, sh = h * 36 / 100;
+        ks_printf(out, cap, o,
+                  "<ellipse class=\"bs\" cx=\"%d\" cy=\"%d\" rx=\"%d\" "
+                  "ry=\"13\"/>"
+                  "<rect class=\"bs\" x=\"%d\" y=\"%d\" width=\"16\" "
+                  "height=\"%d\" rx=\"4\"/>"
+                  "<rect class=\"sh\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                  "height=\"%d\" rx=\"%d\"/>",
+                  cx, y + gh + sh + 6, w * 78 / 100, cx - 8, y + gh, sh,
+                  x, y, w, gh, w * 38 / 100);
+        break;
+    }
+    case KS_TRIG:
+        ks_printf(out, cap, o,
+                  "<rect class=\"sh\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                  "height=\"%d\" rx=\"6\"/>",
+                  x, y, w, h);
+        break;
+    case KS_KNOB:
+    case KS_SBTN:
+        ks_printf(out, cap, o,
+                  "<circle class=\"sh\" cx=\"%d\" cy=\"%d\" r=\"%d\"/>", x, y,
+                  w);
+        break;
+    case KS_SIGHT: /* kleiner Stick: Sockel, Schaft, Kopf */
+        ks_printf(out, cap, o,
+                  "<ellipse class=\"bs\" cx=\"%d\" cy=\"%d\" rx=\"%d\" "
+                  "ry=\"10\"/>"
+                  "<rect class=\"bs\" x=\"%d\" y=\"%d\" width=\"14\" "
+                  "height=\"%d\" rx=\"4\"/>"
+                  "<circle class=\"sh\" cx=\"%d\" cy=\"%d\" r=\"%d\"/>",
+                  x, y + w + h + 4, w * 16 / 10, x - 7, y + w - 2, h, x, y, w);
+        break;
+    case KS_PEDAL:
+        ks_printf(out, cap, o,
+                  "<rect class=\"sh\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                  "height=\"%d\" rx=\"10\"/>",
+                  x, y, w, h);
+        for (i = 1; i <= 4; i++) {
+            ks_printf(out, cap, o,
+                      "<line class=\"ic\" x1=\"%d\" y1=\"%d\" x2=\"%d\" "
+                      "y2=\"%d\"/>",
+                      x + 10, y + i * h / 5, x + w - 10, y + i * h / 5);
+        }
+        break;
+    default: /* KS_BTN */
+        ks_printf(out, cap, o,
+                  "<rect class=\"sh\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                  "height=\"%d\" rx=\"5\"/>",
+                  x, y, w, h);
+        break;
+    }
+}
+
+/* Masken der belegten Zeilen (kompakt, leer = eine Strich-Zeile). */
+static int ks_masks(const ks_toks_t *k, int cell, int m[3])
+{
+    int n = 0;
+    if (cell) {
+        if (k->n[KS_SRC_KEY] || k->n[KS_SRC_MOUSE]) {
+            m[n++] = (1 << KS_SRC_KEY) | (1 << KS_SRC_MOUSE);
+        }
+        if (k->n[KS_SRC_PAD]) {
+            m[n++] = 1 << KS_SRC_PAD;
+        }
+    } else {
+        int s;
+        for (s = 0; s < KS_SRC_N; s++) {
+            if (k->n[s]) {
+                m[n++] = 1 << s;
+            }
+        }
+    }
+    if (!n) {
+        m[n++] = 0;
+    }
+    return n;
+}
+
+/* Hover-Kopplung Element <-> Callout <-> Tabellenzeile (nur CSS). */
+static void ks_css(char *out, size_t cap, size_t *o)
+{
+    static const char *const css =
+        ".ctl{margin:0 0 20px}\n"
+        ".ctl svg{display:block;width:100%;height:auto;margin:6px 0 4px;"
+        "font-family:system-ui,\"Segoe UI\",Roboto,Arial,sans-serif}\n"
+        ".ctl .bd{fill:#15181e;stroke:#343a46;stroke-width:2}\n"
+        ".ctl .bdc{fill:#6c7480;font-size:12px;font-weight:700;"
+        "letter-spacing:2px;text-anchor:middle}\n"
+        ".ctl .sh{fill:#1e222a;stroke:#4a5260;stroke-width:1.5}\n"
+        ".ctl .bs{fill:#191c22;stroke:#3a404c;stroke-width:1.2}\n"
+        ".ctl .ic{fill:none;stroke:#98a0ac;stroke-width:1.5;"
+        "stroke-linecap:round}\n"
+        ".ctl .sl{fill:none;stroke:#5a6270;stroke-width:5;"
+        "stroke-linecap:round}\n"
+        ".ctl .kn{fill:#2b303a}\n"
+        ".ctl .gl{fill:#98a0ac;font-size:12px;font-weight:700;"
+        "text-anchor:middle}\n"
+        ".ctl .ej{fill:#4a1a1a;stroke:#d9534f}\n"
+        ".ctl .cv{fill:none;stroke:#d9534f;stroke-width:1.2;"
+        "stroke-dasharray:4 3}\n"
+        ".ctl .cvh{stroke:#d9534f;stroke-width:3;stroke-linecap:round}\n"
+        ".ctl .lb{fill:#11141a;stroke:#2f3541;stroke-width:1}\n"
+        ".ctl .lbc{fill:transparent;stroke:none}\n"
+        ".ctl .ld{fill:none;stroke:#6c7480;stroke-width:1;"
+        "stroke-dasharray:3 3}\n"
+        ".ctl .nm{fill:#eaedf2;font-size:11.5px;font-weight:600}\n"
+        ".ctl .cl{font-size:12px;font-weight:600}\n"
+        ".ctl svg .tk{fill:#ffffff}\n.ctl svg .tm{fill:#7cc4ff}\n"
+        ".ctl svg .tp{fill:#8fdc8a}\n"
+        ".ctl svg .un,.ctl svg .sep{fill:#5c6470}\n"
+        ".ctl .pf .sh{fill:#3a2810;stroke:#e2963a;stroke-width:2}\n"
+        ".ctl .pf .lb{stroke:#e2963a}\n"
+        ".ctl .el:hover .sh{stroke:#f2a84e;stroke-width:2.6}\n"
+        ".ctl .el:hover .lb{stroke:#f2a84e;fill:#2a1f10}\n"
+        ".lg{display:flex;flex-wrap:wrap;gap:6px 18px;margin:0 0 6px;"
+        "font-size:13px;color:#c9cfd9}\n"
+        ".lg .sw{display:inline-block;width:12px;height:12px;"
+        "border-radius:3px;margin-right:6px;vertical-align:-1px;"
+        "border:1px solid #3e4552}\n"
+        ".sw.kb{background:#fff}.sw.ms{background:#7cc4ff}"
+        ".sw.pd{background:#8fdc8a}.sw.pf{background:#e2963a}"
+        ".sw.un{background:#5c6470}\n"
+        ".note{font-size:12.5px;color:#98a0ac}\n"
+        "table.et th{text-align:left;font-size:12px;color:#98a0ac;"
+        "padding:4px 6px;font-weight:600}\n"
+        "table.et tr.grp th{color:#f2a84e;padding-top:10px;"
+        "letter-spacing:.4px}\n"
+        "table.et td:first-child{width:30%}\n"
+        "table.et .tm,table.et .tp{display:inline-block;margin:1px 2px;"
+        "padding:0 6px;border-radius:6px;font-size:12.5px;"
+        "font-family:Consolas,\"Courier New\",monospace}\n"
+        "table.et .tm{color:#7cc4ff;border:1px solid #2c4a66}\n"
+        "table.et .tp{color:#8fdc8a;border:1px solid #2f5230}\n"
+        "table.et .un{color:#5c6470}\n"
+        "table.et tr:hover td{background:#1f2430}\n"
+        "@media print{\n"
+        ".ctl svg{break-inside:avoid}\n"
+        ".ctl .bd{fill:#f6f6f6;stroke:#999}\n.ctl .bdc{fill:#555}\n"
+        ".ctl .sh{fill:#fff;stroke:#444}\n.ctl .bs{fill:#eee;stroke:#888}\n"
+        ".ctl .ic{stroke:#555}\n.ctl .sl{stroke:#888}\n.ctl .kn{fill:#ddd}\n"
+        ".ctl .gl{fill:#333}\n"
+        ".ctl .ej{fill:#fde8e8;stroke:#b22}\n.ctl .cv,.ctl .cvh{stroke:#b22}\n"
+        ".ctl .lb{fill:#fff;stroke:#bbb}\n.ctl .lbc{fill:none;stroke:none}\n"
+        ".ctl .ld{stroke:#999}\n.ctl .nm{fill:#111}\n"
+        ".ctl svg .tk{fill:#000}\n.ctl svg .tm{fill:#0a58a8}\n"
+        ".ctl svg .tp{fill:#1d7a1d}\n"
+        ".ctl svg .un,.ctl svg .sep{fill:#888}\n"
+        ".ctl .pf .sh{fill:#fff3e2;stroke:#b26a1b}\n"
+        ".ctl .pf .lb{stroke:#b26a1b}\n"
+        ".lg{color:#333}\n.note{color:#555}\n"
+        "table.et .tm{color:#0a58a8;border-color:#9bb8d6}\n"
+        "table.et .tp{color:#1d7a1d;border-color:#a8cfa6}\n"
+        "table.et tr.grp th{color:#8a4d00}\n"
+        "}\n";
+    int i, r;
+    keyshtml_add(out, cap, o, "<style>\n");
+    keyshtml_add(out, cap, o, css);
+    /* Kopplung per :has (Element/Zeile ueberfahren -> beide markiert). */
+    for (r = 0; r < 3; r++) {
+        for (i = 0; i < KS_N; i++) {
+            ks_printf(out, cap, o, "%sbody:has(.e-%s:hover) .e-%s%s",
+                      i ? "," : "", ks_elems[i].id, ks_elems[i].id,
+                      r == 0 ? " .sh" : r == 1 ? " .lb" : " td");
+        }
+        keyshtml_add(out, cap, o,
+                     r == 0 ? "{stroke:#f2a84e;stroke-width:2.6}\n"
+                     : r == 1 ? "{stroke:#f2a84e;fill:#2a1f10}\n"
+                              : "{background:#2a1f10}\n");
+    }
+    keyshtml_add(out, cap, o, "</style>\n");
+}
+
+/* Tokens einer Quelle als Tabellenzelle. */
+static void ks_td(char *out, size_t cap, size_t *o, const ks_toks_t *k,
+                  int s)
+{
+    int i;
+    keyshtml_add(out, cap, o, "<td>");
+    if (!k->n[s]) {
+        keyshtml_add(out, cap, o, "<span class=\"un\">" KS_EMDASH "</span>");
+    }
+    for (i = 0; i < k->n[s]; i++) {
+        if (s == KS_SRC_KEY) {
+            if (i) {
+                keyshtml_add(out, cap, o, " ");
+            }
+            keyshtml_cap(out, cap, o, k->t[s][i]);
+        } else {
+            char e[256];
+            keyshtml_escape(k->t[s][i], e, sizeof e);
+            ks_printf(out, cap, o, "<span class=\"%s\">%s</span>",
+                      s == KS_SRC_MOUSE ? "tm" : "tp", e);
+        }
+    }
+    keyshtml_add(out, cap, o, "</td>");
+}
+
+/* Abschnitt "Controller und Belegung": Legende, SVG, Hinweis, Tabelle.
+ * prof_text NULL bei Standardbelegung (has_prof = 0) oder fehlendem
+ * Profil (dann keyboard_default eingebaut, sonst alles unbelegt). */
+static void keysvg_build(const char *profile, const char *prof_text,
+                         char *out, size_t cap, size_t *o)
+{
+    static lctrl_bind_t b;
+    static ks_toks_t tok[sizeof ks_elems / sizeof ks_elems[0]];
+    int i, g, has_prof = profile && profile[0];
+    if (!has_prof || (!prof_text && strcmp(profile, "keyboard_default") == 0)) {
+        lctrl_bind_load_text(ks_legacy_text, &b);
+    } else {
+        lctrl_bind_load_text(prof_text ? prof_text : "", &b);
+    }
+    for (i = 0; i < KS_N; i++) {
+        ks_collect(&b, &ks_elems[i], &tok[i]);
+    }
+    keyshtml_add(out, cap, o, "<section class=\"ctl\"><h2>");
+    keyshtml_add(out, cap, o, LT("gui.svg_h"));
+    keyshtml_add(out, cap, o, "</h2>\n<div class=\"lg\">");
+    ks_printf(out, cap, o, "<span><span class=\"sw kb\"></span>%s</span>",
+              LT("gui.svg_kbd"));
+    ks_printf(out, cap, o, "<span><span class=\"sw ms\"></span>%s</span>",
+              LT("gui.svg_mouse"));
+    ks_printf(out, cap, o, "<span><span class=\"sw pd\"></span>%s</span>",
+              LT("gui.svg_pad"));
+    ks_printf(out, cap, o, "<span><span class=\"sw pf\"></span>%s</span>",
+              LT("gui.ctl_prim"));
+    ks_printf(out, cap, o,
+              "<span><span class=\"sw un\"></span>" KS_EMDASH " %s</span>",
+              LT("gui.svg_unset"));
+    keyshtml_add(out, cap, o, "</div>\n");
+    /* Zeichnung (kein xmlns noetig: inline-SVG in HTML) */
+    keyshtml_add(out, cap, o,
+                 "<svg viewBox=\"0 0 1280 890\" role=\"img\" aria-label=\"");
+    {
+        char e[256];
+        keyshtml_escape(LT("gui.svg_h"), e, sizeof e);
+        keyshtml_add(out, cap, o, e);
+    }
+    keyshtml_add(out, cap, o, "\">\n"
+                 "<rect class=\"bd\" x=\"14\" y=\"120\" width=\"298\" "
+                 "height=\"480\" rx=\"30\"/>\n"
+                 "<rect class=\"bd\" x=\"326\" y=\"30\" width=\"628\" "
+                 "height=\"580\" rx=\"22\"/>\n"
+                 "<rect class=\"bd\" x=\"968\" y=\"120\" width=\"298\" "
+                 "height=\"480\" rx=\"30\"/>\n"
+                 "<rect class=\"bd\" x=\"400\" y=\"640\" width=\"480\" "
+                 "height=\"240\" rx=\"20\"/>\n");
+    {
+        static const int cxy[KS_G_N][2] = {
+            { 163, 586 }, { 640, 54 }, { 1117, 586 }, { 640, 664 }
+        };
+        for (g = 0; g < KS_G_N; g++) {
+            char e[256];
+            keyshtml_escape(LT(ks_grp_key[g]), e, sizeof e);
+            ks_printf(out, cap, o,
+                      "<text class=\"bdc\" x=\"%d\" y=\"%d\">%s</text>\n",
+                      cxy[g][0], cxy[g][1], e);
+        }
+    }
+    for (i = 0; i < KS_N; i++) {
+        const ks_elem_t *e = &ks_elems[i];
+        const ks_toks_t *k = &tok[i];
+        int cell = e->lw == 0, m[3], nl, l, s, j, any = 0;
+        char t[512];
+        nl = ks_masks(k, cell, m);
+        ks_printf(out, cap, o, "<g class=\"el e-%s%s\" id=\"el-%s\"><title>",
+                  e->id, strcmp(e->id, "bi0") == 0 ? " pf" : "", e->id);
+        keyshtml_escape(ks_name(e, 0), t, sizeof t);
+        keyshtml_add(out, cap, o, t);
+        if (e->shape == KS_EJECT) {
+            keyshtml_add(out, cap, o, " (");
+            keyshtml_escape(LT("gui.svg_cover"), t, sizeof t);
+            keyshtml_add(out, cap, o, t);
+            keyshtml_add(out, cap, o, ")");
+        }
+        keyshtml_add(out, cap, o, ": ");
+        for (s = 0; s < KS_SRC_N; s++) {
+            for (j = 0; j < k->n[s]; j++) {
+                keyshtml_escape(k->t[s][j], t, sizeof t);
+                keyshtml_add(out, cap, o, any ? ", " : "");
+                keyshtml_add(out, cap, o, t);
+                any = 1;
+            }
+        }
+        if (!any) {
+            keyshtml_add(out, cap, o, KS_EMDASH);
+        }
+        keyshtml_add(out, cap, o, "</title>");
+        if (cell) {
+            /* Hintergrund (Hover-Flaeche), Kappe mit Name, Zeilen darunter */
+            int nx = e->x + e->w / 2, off = 0;
+            ks_printf(out, cap, o,
+                      "<rect class=\"lb lbc\" x=\"%d\" y=\"%d\" width=\"%d\" "
+                      "height=\"64\" rx=\"6\"/>",
+                      e->x - 4, e->y - 4, e->w + 8);
+            ks_svg_shape(out, cap, o, e);
+            if (e->shape == KS_TOG) {
+                off = 9;
+            } else if (e->shape == KS_DIAL) {
+                off = 12;
+            }
+            ks_printf(out, cap, o, "<g class=\"co\" id=\"co-%s\">", e->id);
+            ks_svg_name(out, cap, o, nx + off, e->y + 16, 1, e->w - 12 - 2 * off,
+                        ks_name(e, 1));
+            for (l = 0; l < nl; l++) {
+                ks_svg_line(out, cap, o, nx, e->y + 38 + l * 14, 1, e->w,
+                            k, m[l]);
+            }
+            keyshtml_add(out, cap, o, "</g>");
+        } else {
+            ks_svg_shape(out, cap, o, e);
+            if (e->ax) {
+                int px = e->ax < e->lx ? e->lx
+                         : e->ax > e->lx + e->lw ? e->lx + e->lw : e->ax;
+                int py = e->ay < e->ly ? e->ly
+                         : e->ay > e->ly + 62 ? e->ly + 62 : e->ay;
+                ks_printf(out, cap, o,
+                          "<line class=\"ld\" x1=\"%d\" y1=\"%d\" x2=\"%d\" "
+                          "y2=\"%d\"/>",
+                          e->ax, e->ay, px, py);
+            }
+            ks_printf(out, cap, o,
+                      "<g class=\"co\" id=\"co-%s\"><rect class=\"lb\" "
+                      "x=\"%d\" y=\"%d\" width=\"%d\" height=\"62\" rx=\"7\"/>",
+                      e->id, e->lx, e->ly, e->lw);
+            ks_svg_name(out, cap, o, e->lx + 6, e->ly + 15, 0, e->lw - 12,
+                        ks_name(e, 1));
+            for (l = 0; l < nl; l++) {
+                ks_svg_line(out, cap, o, e->lx + 6, e->ly + 30 + l * 13, 0,
+                            e->lw - 12, k, m[l]);
+            }
+            keyshtml_add(out, cap, o, "</g>");
+        }
+        keyshtml_add(out, cap, o, "</g>\n");
+    }
+    keyshtml_add(out, cap, o, "</svg>\n<p class=\"note\">");
+    keyshtml_add(out, cap, o, LT("gui.svg_note"));
+    keyshtml_add(out, cap, o, " ");
+    keyshtml_add(out, cap, o, LT("gui.svg_tog"));
+    keyshtml_add(out, cap, o, "</p>\n");
+    /* Tabelle je Element (gleiche Reihenfolge, Hover gekoppelt) */
+    ks_printf(out, cap, o,
+              "<table class=\"et\"><tr><th>%s</th><th>%s</th><th>%s</th>"
+              "<th>%s</th></tr>\n",
+              LT("gui.svg_elem"), LT("gui.svg_kbd"), LT("gui.svg_mouse"),
+              LT("gui.svg_pad"));
+    for (g = 0; g < KS_G_N; g++) {
+        char e[256];
+        keyshtml_escape(LT(ks_grp_key[g]), e, sizeof e);
+        ks_printf(out, cap, o,
+                  "<tr class=\"grp\"><th colspan=\"4\">%s</th></tr>\n", e);
+        for (i = 0; i < KS_N; i++) {
+            if (ks_elems[i].grp != g) {
+                continue;
+            }
+            ks_printf(out, cap, o, "<tr class=\"e-%s%s\"><td>", ks_elems[i].id,
+                      strcmp(ks_elems[i].id, "bi0") == 0 ? " prim" : "");
+            keyshtml_escape(ks_name(&ks_elems[i], 0), e, sizeof e);
+            keyshtml_add(out, cap, o, e);
+            keyshtml_add(out, cap, o, "</td>");
+            ks_td(out, cap, o, &tok[i], KS_SRC_KEY);
+            ks_td(out, cap, o, &tok[i], KS_SRC_MOUSE);
+            ks_td(out, cap, o, &tok[i], KS_SRC_PAD);
+            keyshtml_add(out, cap, o, "</tr>\n");
+        }
+    }
+    keyshtml_add(out, cap, o, "</table></section>\n");
+}
+
+/* W182: Fixture-Profil (eigener Text, keine Spieldaten) fuer Selbsttest
+ * 54 und die Beispiel-HTML (Tastatur + Maus + Gamepad gemischt). */
+static const char ks_fixture_text[] =
+    "# W182 Fixture (keine Spieldaten)\n"
+    "[buttons]\n"
+    "bi0 = KEY:SPACE, MOUSE:LEFT, PAD:RB\n"
+    "bi1 = KEY:F, MOUSE:RIGHT, PAD:B\n"
+    "bi2 = KEY:L, MOUSE:MIDDLE, PAD:LB\n"
+    "bi3 = PAD:BACK+PAD:Y\n"
+    "bi4 = KEY:H, PAD:BACK+PAD:X\n"
+    "bi5 = KEY:I, PAD:BACK+PAD:A\n"
+    "bi6 = KEY:ENTER, PAD:START\n"
+    "bi8 = KEY:M\n"
+    "bi9 = KEY:TAB\n"
+    "bi10 = PAD:DL, PAD:DR\n"
+    "bi11 = KEY:Z\n"
+    "bi12 = KEY:X\n"
+    "bi13 = KEY:V\n"
+    "bi17 = PAD:L3\n"
+    "bi18 = KEY:C, PAD:A\n"
+    "bi20 = KEY:O, PAD:BACK+PAD:B\n"
+    "bi21 = KEY:N\n"
+    "bi25 = PAD:Y\n"
+    "bi26 = PAD:X\n"
+    "bi27 = KEY:R, PAD:LB+PAD:RB\n"
+    "bi28 = KEY:F5\n"
+    "bi33 = PAD:R3\n"
+    "bi34 = PAD:BACK+PAD:DL\n"
+    "bi35 = PAD:BACK+PAD:DR\n"
+    "[axes]\n"
+    "aim_x.neg = KEY:LEFT:cond=!SHIFT\n"
+    "aim_x.pos = KEY:RIGHT:cond=!SHIFT\n"
+    "aim_y.neg = KEY:UP:cond=!SHIFT\n"
+    "aim_y.pos = KEY:DOWN:cond=!SHIFT\n"
+    "aim_x = MOUSE:X:mode=aim, PAD:LX:dz=0.15:curve=1.5\n"
+    "aim_y = MOUSE:Y:mode=aim, PAD:LY:dz=0.15:inv=1\n"
+    "rot.neg = KEY:A\n"
+    "rot.pos = KEY:D\n"
+    "rot = PAD:RX:dz=0.12\n"
+    "sight_x.neg = KEY:LEFT:cond=SHIFT\n"
+    "sight_x.pos = KEY:RIGHT:cond=SHIFT\n"
+    "sight_y = PAD:RY:inv=1\n"
+    "pedal_l = KEY:LCTRL, MOUSE:X1, PAD:BACK+PAD:LT\n"
+    "pedal_m = KEY:S, PAD:LT:dz=0.05\n"
+    "pedal_r = KEY:W, PAD:RT:dz=0.05\n"
+    "[gear]\n"
+    "gear.up = KEY:E, PAD:BACK+PAD:RB\n"
+    "gear.down = KEY:Q, PAD:BACK+PAD:LB\n"
+    "gear.n = KEY:0\n"
+    "tuner.up = KEY:T, PAD:DU\n"
+    "tuner.down = KEY:G, PAD:DD\n";
+
+/* W182 Selbsttest: Callout-Gruppe co-<id> (bis zum naechsten </g>). */
+static int ks_co(const char *html, const char *id, char *buf, size_t cap)
+{
+    char pat[64];
+    const char *a, *e;
+    size_t n;
+    buf[0] = '\0';
+    _snprintf_s(pat, sizeof pat, _TRUNCATE, "id=\"co-%s\"", id);
+    a = strstr(html, pat);
+    if (!a) {
+        return 0;
+    }
+    e = strstr(a, "</g>");
+    if (!e) {
+        return 0;
+    }
+    n = (size_t)(e - a);
+    if (n >= cap) {
+        n = cap - 1;
+    }
+    memcpy(buf, a, n);
+    buf[n] = '\0';
+    return 1;
+}
+
+/* W182 Selbsttest: Struktur pruefen (prof = Profil- statt Standard-
+ * Variante). 1 = ok, sonst Grund in why. */
+static int ks_selfcheck(const char *html, int prof, char *why, size_t cap)
+{
+    static char co[8192];
+    const char *sv = strstr(html, "<svg viewBox=\"0 0 1280 890\"");
+    const char *se = sv ? strstr(sv, "</svg>") : NULL;
+    size_t hl = strlen(html);
+    int i;
+    if (!sv || !se) {
+        strcpy_s(why, cap, "SVG fehlt");
+        return 0;
+    }
+    if (hl < 8 || strcmp(html + hl - 8, "</html>\n") != 0) {
+        strcpy_s(why, cap, "HTML abgeschnitten (Puffer)");
+        return 0;
+    }
+    if (strstr(html, "http") || strstr(html, "HTTP") ||
+        strstr(html, "<script") || strstr(html, "src=")) {
+        strcpy_s(why, cap, "Verweis/Skript enthalten");
+        return 0;
+    }
+    for (i = 0; i < KS_N; i++) {
+        char p1[64], p2[64], p3[64];
+        const char *a, *b, *c;
+        _snprintf_s(p1, sizeof p1, _TRUNCATE, "id=\"el-%s\"", ks_elems[i].id);
+        _snprintf_s(p2, sizeof p2, _TRUNCATE, "id=\"co-%s\"", ks_elems[i].id);
+        _snprintf_s(p3, sizeof p3, _TRUNCATE, "<tr class=\"e-%s",
+                    ks_elems[i].id);
+        a = strstr(sv, p1);
+        b = strstr(sv, p2);
+        c = strstr(se, p3);
+        if (!a || a > se || !b || b > se || !c ||
+            !ks_co(html, ks_elems[i].id, co, sizeof co) ||
+            !strstr(co, "<text class=\"cl\"")) {
+            _snprintf_s(why, cap, _TRUNCATE, "Element/Callout/Zeile fehlt: %s",
+                        ks_elems[i].id);
+            return 0;
+        }
+    }
+    if (!strstr(sv, "class=\"el e-bi0 pf\"") ||
+        !strstr(se, "<tr class=\"e-bi0 prim\"")) {
+        strcpy_s(why, cap, "Primaerfeuer nicht hervorgehoben");
+        return 0;
+    }
+    if (!strstr(html, "body:has(.e-pedal_r:hover) .e-pedal_r td")) {
+        strcpy_s(why, cap, "Hover-Kopplung fehlt");
+        return 0;
+    }
+    if (!strstr(html, LT("gui.svg_kbd")) || !strstr(html, LT("gui.svg_pad")) ||
+        !strstr(html, LT("gui.svg_unset"))) {
+        strcpy_s(why, cap, "Legende fehlt");
+        return 0;
+    }
+    ks_co(html, "bi34", co, sizeof co);
+    if (!strstr(co, ">1<")) {
+        strcpy_s(why, cap, "Kippschalter-Taste 1 fehlt");
+        return 0;
+    }
+    ks_co(html, "bi19", co, sizeof co);
+    if (!strstr(co, "class=\"un\">" KS_EMDASH)) {
+        strcpy_s(why, cap, "Unbelegt-Strich fehlt (bi19)");
+        return 0;
+    }
+    ks_co(html, "bi0", co, sizeof co);
+    if (!strstr(co, ">SPACE<") || !strstr(co, LT("gui.svg_m_left")) ||
+        (prof ? !strstr(co, ">RB<") : strstr(co, ">RB<") != NULL)) {
+        strcpy_s(why, cap, "Belegung bi0 falsch");
+        return 0;
+    }
+    if (prof) {
+        ks_co(html, "aim", co, sizeof co);
+        if (!strstr(co, ">LS<") || strstr(co, "LS " KS_HARR) ||
+            !strstr(co, ">" KS_LARR "<")) {
+            strcpy_s(why, cap, "Achsen-Zusammenfassung falsch (aim)");
+            return 0;
+        }
+        ks_co(html, "bi34", co, sizeof co);
+        if (!strstr(co, ">BACK+D" KS_LARR "<")) {
+            strcpy_s(why, cap, "Akkord falsch (bi34)");
+            return 0;
+        }
+        ks_co(html, "gear", co, sizeof co);
+        if (!strstr(co, ">" KS_TRI_U "BACK+RB<") || !strstr(co, ">N:0<")) {
+            strcpy_s(why, cap, "Gang-Callout falsch");
+            return 0;
+        }
+        ks_co(html, "sight", co, sizeof co);
+        if (!strstr(co, ">Shift+" KS_LARR "<") || !strstr(co, ">RS " KS_VARR
+                                                          "<")) {
+            strcpy_s(why, cap, "Sicht-Callout falsch");
+            return 0;
+        }
+    } else {
+        if (strstr(sv, "class=\"tp\"")) {
+            strcpy_s(why, cap, "Standard-Variante mit Gamepad");
+            return 0;
+        }
+        ks_co(html, "bi3", co, sizeof co);
+        if (!strstr(co, KS_EMDASH)) {
+            strcpy_s(why, cap, "Eject belegt (Standard)");
+            return 0;
+        }
+        ks_co(html, "pedal_r", co, sizeof co);
+        if (!strstr(co, ">W<")) {
+            strcpy_s(why, cap, "Gaspedal falsch (Standard)");
+            return 0;
+        }
+        ks_co(html, "gear", co, sizeof co);
+        if (!strstr(co, ">" KS_TRI_U "E<") || !strstr(co, ">" KS_TRI_D "Q<")) {
+            strcpy_s(why, cap, "Gang falsch (Standard)");
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* W182 Selbsttest: jedes Element der Mapping-Liste (kCtrlElems ohne
+ * Client-Aktionen) ist einem gezeichneten Element zugeordnet. */
+static const char *ks_uncovered(void)
+{
+    int i, j;
+    for (i = 0; i < LCTRL_ELEM_N; i++) {
+        int hit = 0;
+        if (kCtrlElems[i].kind == LCTRL_ACT) {
+            continue;
+        }
+        for (j = 0; j < KS_N && !hit; j++) {
+            char names[160], *nm, *ctx = NULL;
+            strcpy_s(names, sizeof names, ks_elems[j].elems);
+            for (nm = strtok_s(names, " ", &ctx); nm;
+                 nm = strtok_s(NULL, " ", &ctx)) {
+                if (strcmp(nm, kCtrlElems[i].key) == 0) {
+                    hit = 1;
+                    break;
+                }
+            }
+        }
+        if (!hit) {
+            return kCtrlElems[i].key;
+        }
+    }
+    return NULL;
+}
+
 /* HTML bauen (rein bis auf LT; ohne Fenster pruefbar). profile = ""
  * heisst Standardbelegung (kein Gamepad-Abschnitt). prof_text = UTF-8
  * oder NULL (mit prof_missing als Hinweis). */
@@ -2982,6 +4124,7 @@ static void keyshtml_build(const char *memo, const char *profile,
     keyshtml_add(out, cap, &o, LT("gui.page_controls"));
     keyshtml_add(out, cap, &o, "</title>\n");
     keyshtml_css(out, cap, &o);
+    ks_css(out, cap, &o); /* W182 KEYS-SVG */
     keyshtml_add(out, cap, &o, "</head>\n<body><div class=\"wrap\">\n<h1>");
     keyshtml_add(out, cap, &o, brand);
     keyshtml_add(out, cap, &o, " " U8_DASH " ");
@@ -3001,7 +4144,9 @@ static void keyshtml_build(const char *memo, const char *profile,
     keyshtml_add(out, cap, &o, LT("gui.ctl_prim"));
     keyshtml_add(out, cap, &o, "</div><div class=\"prim-k\">");
     keyshtml_add(out, cap, &o, LT("gui.ctl_prim_keys"));
-    keyshtml_add(out, cap, &o, "</div></div>\n<div class=\"grid\">\n");
+    keyshtml_add(out, cap, &o, "</div></div>\n");
+    keysvg_build(profile, prof_text, out, cap, &o); /* W182 KEYS-SVG */
+    keyshtml_add(out, cap, &o, "<div class=\"grid\">\n");
     if (has_prof) {
         keyshtml_add(out, cap, &o, "<section class=\"full\"><h2>");
         keyshtml_add(out, cap, &o, LT("gui.ctl_profile"));
@@ -3158,7 +4303,7 @@ static void keyshtml_path(char *out, size_t cap)
 static void keyshtml_open(void)
 {
     char prof[64], miss[512], path[1200];
-    static char praw[12288], pu8[24576], html[131072];
+    static char praw[12288], pu8[24576], html[393216];
     const char *prof_text = NULL, *mouse_lbl;
     int r = 1, sens, msel, ssel;
     FILE *f = NULL;
@@ -11380,7 +12525,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
      * Fenster, nie oeffnen, nie Fokus): alle Abschnitte, Primaerfeuer,
      * Escaping (<&> im Profilnamen), keine Verweise. */
     {
-        static char html[131072];
+        static char html[393216];
         char fx[1300], why53[300] = "";
         int ok53 = 1;
         const char *fprof = "w179_<t&>st";
@@ -11397,7 +12542,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
         write_file(fx, html);
         { /* Datei-Roundtrip (wie keyshtml_open schreibt) */
             FILE *f = NULL;
-            static char back[131072];
+            static char back[393216];
             size_t n = 0;
             if (u8_fopen_s(&f, fx, "rb") == 0 && f) {
                 n = fread(back, 1, sizeof back - 1, f);
@@ -11480,6 +12625,97 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
         }
         _snprintf_s(fx, sizeof fx, _TRUNCATE, "%sw179_keyshtml.html", tmp);
         u8_DeleteFile(fx);
+    }
+    /* 54 (W182 KEYS-SVG): Controller-Zeichnung im Browser-Export (Fixture,
+     * nie oeffnen, nie Fokus): SVG vorhanden, jedes Mapping-Element hat
+     * Form + Callout + Tabellenzeile, Belegung je Element, Escaping, keine
+     * Verweise; Profil- und Standard-Variante; eingebaute Standard-
+     * belegung == harness/profiles/keyboard_default.ini (privat). */
+    {
+        static char html[393216], ftext[8192];
+        char fx[1300], why54[300] = "";
+        const char *unc = ks_uncovered();
+        int ok54 = 1;
+        if (unc) {
+            ok54 = 0;
+            _snprintf_s(why54, sizeof why54, _TRUNCATE,
+                        "Mapping-Element ohne Zeichnung: %s", unc);
+        }
+        if (ok54) { /* Profil-Variante + Escaping-Probe */
+            _snprintf_s(ftext, sizeof ftext, _TRUNCATE, "%s%s",
+                        ks_fixture_text, "bi15 = KEY:A<&> # Probe\n");
+            keyshtml_build(LT("gui.keys_memo"), "w182_<p&d>", ftext, NULL,
+                           LT("gui.mouse_abs"), 4, "", "", "", html,
+                           sizeof html);
+            ok54 = ks_selfcheck(html, 1, why54, sizeof why54);
+            if (ok54 && (!strstr(html, "A&lt;&amp;&gt;") ||
+                         strstr(html, "A<&>") ||
+                         !strstr(html, "w182_&lt;p&amp;d&gt;") ||
+                         strstr(html, "w182_<p&d>"))) {
+                ok54 = 0;
+                strcpy_s(why54, sizeof why54, "Escaping falsch");
+            }
+        }
+        if (ok54) { /* Standardbelegung (kein Profil) */
+            keyshtml_build(LT("gui.keys_memo"), "", NULL, NULL,
+                           LT("gui.mouse_abs"), 4, "", "", "", html,
+                           sizeof html);
+            ok54 = ks_selfcheck(html, 0, why54, sizeof why54);
+            if (!ok54) {
+                char t[300];
+                _snprintf_s(t, sizeof t, _TRUNCATE, "Standard: %s", why54);
+                strcpy_s(why54, sizeof why54, t);
+            }
+        }
+#ifdef SB_HARNESS_DIR_DEFAULT
+        if (ok54) { /* eingebaut == Datei (nur privat, Datei vorhanden) */
+            static lctrl_bind_t bf, bb;
+            char kp[1200];
+            _snprintf_s(kp, sizeof kp, _TRUNCATE,
+                        "%s/../../profiles/keyboard_default.ini",
+                        SB_HARNESS_DIR_DEFAULT);
+            if (lctrl_bind_load_file(kp, &bf) == 0) {
+                int r, a;
+                lctrl_bind_load_text(ks_legacy_text, &bb);
+                for (r = 0; r < LCTRL_ELEM_N && ok54; r++) {
+                    if (bf.row[r].n_alt != bb.row[r].n_alt) {
+                        ok54 = 0;
+                    }
+                    for (a = 0; ok54 && a < bf.row[r].n_alt; a++) {
+                        ok54 = strcmp(bf.row[r].alt[a], bb.row[r].alt[a]) == 0;
+                    }
+                    if (!ok54) {
+                        _snprintf_s(why54, sizeof why54, _TRUNCATE,
+                                    "Standardbelegung != keyboard_default.ini "
+                                    "(%s)", kCtrlElems[r].key);
+                    }
+                }
+            } else {
+                printf("     (54: %s fehlt, Abgleich uebersprungen)\n", kp);
+            }
+        }
+#endif
+        if (ok54) {
+            GT_OK("54 keys-svg (Zeichnung, Callouts je Element, Escaping, "
+                  "kein http, Profil + Standard)");
+        } else {
+            GT_FAIL("54 keys-svg", "%s", why54);
+        }
+        { /* Beispiel-HTML (englisch, Fixture) fuers Doku-Archiv */
+            char keep[8];
+            strcpy_s(keep, sizeof keep, sb_lang_code());
+            sb_lang_set("en");
+            keyshtml_build(sb_lang("gui.keys_memo"), "w182_fixture",
+                           ks_fixture_text, NULL, sb_lang("gui.mouse_abs"), 4,
+                           "fixture: gamepad connected (port 0)", "",
+                           "fixture: original controller not connected",
+                           html, sizeof html);
+            _snprintf_s(fx, sizeof fx, _TRUNCATE,
+                        "%sw182_controls_example.html", tmp);
+            write_file(fx, html);
+            printf("     (54: Beispiel %s)\n", fx);
+            sb_lang_set(keep);
+        }
     }
     _snprintf_s(p, sizeof p, _TRUNCATE, "%s/default.xbe", dir);
     u8_DeleteFile(p);

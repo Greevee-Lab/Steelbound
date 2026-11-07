@@ -1,0 +1,6 @@
+// launcher.rc - Ressourcen des Launchers (W82 LAUNCHER-UI2).
+// Hintergrundmotiv (Eigentum des Projektinhabers, beide Editionen,
+// W178 COMM-BG): PNG aus res/convert_bg.py, zur Laufzeit per WIC dekodiert.
+#include "launcher_res.h"
+
+IDR_BG RCDATA "../res/bg_nutzer.png"

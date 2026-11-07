@@ -1,0 +1,4 @@
+# neutral.sbc - Ruhezustand (keine Taste, Achsen neutral, Gang N).
+# Format: <when> <26 Report-Bytes inkl. Header 00 1A>; when = fN (Frames,
+# Default) oder Nms (ms seit Start). Naeheres: sbc_fixture.h.
+f0 00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 00 00 08

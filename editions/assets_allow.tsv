@@ -1,0 +1,9 @@
+# assets_allow.tsv - Positivliste fuer Bild/Audio/Video/Archiv im Community-Export (W116).
+# Spalten (TAB-getrennt): pfad (relativ im Export)	sha256	herkunft
+# Nur eigene Werke mit Herkunftsangabe; ohne Herkunft gilt ein Eintrag
+# nicht. Spielbilder, Screenshots, Dumps und Upscale-Ergebnisse NIE.
+# W178 COMM-BG: Das Launcher-Hintergrundbild (neues Motiv, Eigentum des
+# Projektinhabers, Lizenz wie die Projekt-Assets) ist erlaubt; das alte
+# Motiv (keine Rechte) bleibt per editions/clean_deny.tsv gesperrt.
+poc-native/launcher/res/bg_nutzer.png	08df9badf078115ae02a15fa4d0e693c60976953b515e42aa98441c2564fd033	Launcher-Hintergrundbild (neues Motiv, Eigentum des Projektinhabers, W178 COMM-BG)
+poc-native/launcher/res/bg_nutzer.webp	ca6c90c52b597216111234b7635521b14f444034b778b28bfd460fd61ece078c	Quelldatei des Launcher-Hintergrundbilds (Eigentum des Projektinhabers, W178 COMM-BG)

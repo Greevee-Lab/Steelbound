@@ -1,0 +1,5 @@
+# W143 CTRL-ASSIST: statischer Zustand fuer die Live-Ansicht des Assistenten.
+# Tasten MainWeapon+Fire+Start, Schalter FilterControl AN, Zielhebel links-oben,
+# Drehhebel rechts, Sight links, Pedale halb/viertel/voll, Tuner 6, Gang 3.
+0ms 00 1A 43 00 00 00 04 00 00 40 00 C0 00 40 00 E0 00 00 00 80 00 40 00 FF 06 0B
+60000ms 00 1A 43 00 00 00 04 00 00 40 00 C0 00 40 00 E0 00 00 00 80 00 40 00 FF 06 0B

@@ -1,0 +1,4 @@
+LIBRARY sb_emu
+EXPORTS
+    sb_emulate
+    sb_test_frame_count

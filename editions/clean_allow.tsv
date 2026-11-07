@@ -1,0 +1,16 @@
+# clean_allow.tsv - bewusst erlaubte Fundstellen fuer clean_check.py (W116).
+# Spalten (TAB-getrennt): kategorie	datei-glob	muster	begruendung (Pflicht)
+# muster = Regex auf den Fund-Text; bei 'eingebettet' xbe:<offset>+<laenge>:<sha256>.
+# Nie fuer geheimnis/medien/lfs (dort keine Ausnahmen). Freigaben stehen im Bericht.
+pfad	poc-native/launcher/src/launcher.c	absoluter Pfad: C:.gibt.es.nicht	erfundener, absichtlich fehlender Pfad im Launcher-Selbsttest (Validierung XBE fehlt)
+pfad	bin/sb_launcher.exe	absoluter Pfad: C:.gibt.es.nicht	erfundener, absichtlich fehlender Pfad im Launcher-Selbsttest (Validierung XBE fehlt)
+# eingebettet: nur oeffentliche Laufzeit-/Standardbytes, die Spiel-XBE und Client gleichermassen enthalten.
+# Muster xbe:<offset>+<laenge>:<sha256 der XBE-Bytes> (Bereich = Fund +-32 Byte); andere XBE -> keine Freigabe.
+eingebettet	bin/sb_emu.dll	xbe:0x1F29C0+160:2b7473d8470a8ecde435d686df19e8198a6638a39048fda879af382321007561	MSVC-Laufzeit __aulldiv (64-Bit-Division ohne Vorzeichen; XDK-libc und VC-CRT byte-gleich, Map MSVCRT:ulldiv.obj)
+eingebettet	bin/sb_emu.dll	xbe:0x1F18E0+224:b74c24e8b6a6cb43ab69f454a2869eeff546a391fb78b5c07d4c1df151eb017c	MSVC-Laufzeit __alldiv (64-Bit-Division; XDK-libc und VC-CRT byte-gleich, Map MSVCRT:lldiv.obj)
+eingebettet	bin/sb_emu.dll	xbe:0x1F3220+176:9d9f90a5b41690c52a7545a6b3509c9ca0db34b7510ed691907eb42d8f19771a	MSVC-Laufzeit __aullrem (64-Bit-Rest; XDK-libc und VC-CRT byte-gleich, Map MSVCRT:ullrem.obj)
+eingebettet	bin/sb_emu.dll	xbe:0x21AA00+240:eca16d02962a45e9a590887485c96091f1f6b3f48fe20caed74f1c9d814f5b03	IMA-ADPCM-Schrittweitentabelle (oeffentlicher IMA/DVI-Standard, 89 Werte 7..32767; audio_fmt.c, Xbox-ADPCM-Dekoder)
+eingebettet	bin/sb_emu.dll	xbe:0x2DE840+64:5d85718ec594b982c252d0279e5966ffca33a5eaf2a455038d3ab331fde70cea	Triviale Zaehlfolge int32 0..15 (eigene Tabelle kOvPage0 in sb_overlay.c = Seiten-Indizes des ESC-Menues; XBE enthaelt zufaellig dieselbe Folge). Keine Spieldaten. Master 6.11. nach W142
+eingebettet	bin/sb_launcher.exe	xbe:0x2DE850+64:5ada112f312b5b0b6d44e1b2bff85559bfb56ee4ae351d1f5e90d370c4fa93c6	Triviale Zaehlfolge int32 4..19 (eigene Tabelle map[] in launcher_gui.c assist_led_name = LED-zu-Tasten-Index, W143; XBE enthaelt zufaellig dieselbe Folge). Keine Spieldaten. W152 (analog Master 6.11.)
+pfad	poc-native/launcher/src/launcher.c	absoluter Pfad: D:.spiel.default.xbe	erfundener Spielpfad im Launcher-Selbsttest 40 (VR-Startwege, W159)
+pfad	bin/sb_launcher.exe	absoluter Pfad: D:.spiel.default.xbe	erfundener Spielpfad im Launcher-Selbsttest 40 (VR-Startwege, W159)

@@ -1,0 +1,15 @@
+# gear254drive2.sbc - W141: Fahr-Beleg in der LIVE-Mission (b8cc0=0).
+# Lehre aus W141_drive: Anker 0x53831C feuerte im Film-Replay (b8cc0=1,
+# Tabelle faehrt, Live-Gang wirkungslos). Anker jetzt: Decoder-Zaehler
+# [0x4AEEF0]==0x1500 (Replay max 3602 in zwei Laeufen, Live-Mission
+# zaehlt darueber hinaus). Motor an per -startloop (START ca. +7000f
+# nach Missionsbeginn); Phasen ab +8000f: R/N/1/5 je mit Vollgas.
+# Neutral: Aiming 0x80, Pedale 0, Tuner 0, Gang 08 (N).
+f0 00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 00 00 08
+mem:0x4AEEF0=0x1500
+f0     00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 00 00 08
+f8000  00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 FF 00 FE
+f10000 00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 FF 00 FF
+f12000 00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 FF 00 01
+f14000 00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 FF 00 05
+f16000 00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 00 00 FF

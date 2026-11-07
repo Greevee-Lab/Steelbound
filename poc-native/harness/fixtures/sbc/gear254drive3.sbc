@@ -1,0 +1,14 @@
+# gear254drive3.sbc - W141: Fahrtrichtungs-Beleg im Online-Fenster.
+# Lehren aus drive/drive2: Anker dec==0x1500 feuert ~1750f vor VT-online
+# (deterministisch, 2 Laeufe); Mission endet ~1800f nach online. Phasen
+# kurz (350-400f ~ 6 s, reicht fuer die Richtung) und frueh: R, N, 1.
+# 5. Gang entfaellt (Out-Byte 0x60 live belegt = wie Doku-13; vorwaerts
+# belegt der 1. Gang). Motor an + online per -startloop.
+# Neutral: Aiming 0x80, Pedale 0, Tuner 0, Gang 08 (N).
+f0 00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 00 00 08
+mem:0x4AEEF0=0x1500
+f0    00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 00 00 08
+f2000 00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 FF 00 FE
+f2400 00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 FF 00 FF
+f2750 00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 FF 00 01
+f3100 00 1A 00 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 00 FF

@@ -1,0 +1,15 @@
+# gear254drive.sbc - W141: Fahr-Beleg mit Geraetewerten (Nutzer 6.11.):
+# R=FE N=FF 1.=01 5.=05, je mit Vollgas. Lauf: -startloop (Motor an,
+# keine Q/E-Gaenge in der Kette) + sbc_usb=1 + diese Fixture +
+# gear_diag=1 + input_diag=1 (Gang-Lampen im SBC-LED-Log).
+# Anker: VT online ([0x53831C]==1); Phasen je 3000 Frames:
+# R+Gas (rueckwaerts?) -> N+Gas (kein Fahren?) -> 1+Gas (vorwaerts) ->
+# 5+Gas (schnell vorwaerts) -> Gas weg, N.
+# Neutral: Aiming 0x80, Pedale 0, Tuner 0, Gang 08 (N).
+f0 00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 00 00 08
+mem:0x53831C=0x1
+f0     00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 FF 00 FE
+f3000  00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 FF 00 FF
+f6000  00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 FF 00 01
+f9000  00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 FF 00 05
+f12000 00 1A 00 00 00 00 00 00 00 80 00 80 00 00 00 00 00 00 00 00 00 00 00 00 00 FF

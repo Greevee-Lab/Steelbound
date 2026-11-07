@@ -1,0 +1,7 @@
+{
+  "file_format_version": "1.0.0",
+  "runtime": {
+    "library_path": "./vr_mock_runtime.dll",
+    "name": "SB VR-Mock (nur Tests, W134)"
+  }
+}

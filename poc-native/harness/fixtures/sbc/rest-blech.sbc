@@ -1,0 +1,9 @@
+# rest-blech.sbc - Ruhezustand am echten Geraet (Nutzer 5.11. abends, W128):
+# sbc_probe: btn=0020 0000 007C aim=76 7C rot=0 sight=0,0 ped=03 17 00 tun=6 gear=3
+# Ignition-Bit (bi5) gesetzt, alle 5 Kippschalter AN, Aiming neben 0x80,
+# Pedal Mitte 0x17. Pruefen: sbc_usb=1 + sbc_fixture=<diese Datei> ->
+# Log "SBC: Auto-Kalibrierung Ruhe aim=118,124 ... ped=3,23,0" (sbc_cal=1),
+# Block in Ruhe: aim 7F7F, Pedale 000000 (Kalibrierung neutralisiert).
+f0 00 1A 20 00 00 00 7C 00 00 76 00 7C 00 00 00 00 00 00 00 03 00 17 00 00 06 03
+f1 00 1A 20 00 00 00 7C 00 00 76 00 7C 00 00 00 00 00 00 00 02 00 17 00 00 06 03
+f2 00 1A 20 00 00 00 7C 00 00 76 00 7C 00 00 00 00 00 00 00 03 00 17 00 00 06 03

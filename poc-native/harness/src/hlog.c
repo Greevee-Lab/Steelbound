@@ -12,6 +12,7 @@
 #include "hlog.h"
 #include <stdio.h>
 #include <stdarg.h>
+#include <string.h> /* W188 */
 #include <windows.h>
 
 static HANDLE g_h = INVALID_HANDLE_VALUE; /* Logdatei (roh, ohne CRT-Lock). */
@@ -94,8 +95,15 @@ void hlog_async_start(void)
     InterlockedExchange(&g_async, 1);
 }
 
+static char g_hlog_path[600]; /* W188 GAME-MENU: Feedback liest das Log-Ende */
+const char *hlog_path(void)
+{
+    return g_hlog_path;
+}
+
 void hlog_init(const char *path, int level)
 {
+    if (path) { strncpy_s(g_hlog_path, sizeof g_hlog_path, path, _TRUNCATE); }
     g_level = level;
     if (!g_cs_init) {
         InitializeCriticalSection(&g_cs);
@@ -115,6 +123,7 @@ void hlog_init(const char *path, int level)
 
 void hlog_init_append(const char *path, int level)
 {
+    if (path) { strncpy_s(g_hlog_path, sizeof g_hlog_path, path, _TRUNCATE); }
     g_level = level;
     if (!g_cs_init) {
         InitializeCriticalSection(&g_cs);

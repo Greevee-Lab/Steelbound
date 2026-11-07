@@ -637,6 +637,14 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                 else
                     HLOG_W("INPUT: Profil '%s' unbekannt -> Legacy",
                            g_cfg.input_profile);
+                if (g_prof_load_rc >= 0 && g_cfg.overlay) {
+                    /* W188 GAME-MENU: Tasten der Aktion "pause" ans
+                     * Fenster (wirkt auch, waehrend das Spiel steht). */
+                    int pvk[4];
+                    unsigned pm = 0;
+                    int pn = imap_bind_keys(&g_prof.pause, pvk, 4, &pm);
+                    sb_ovl_set_pause_binding(pvk, pn, pm);
+                }
             }
             if (g_prof_load_rc >= 0 && g_prof.has_pad &&
                 g_cfg.pad_replay_gate && snap.replay_active) {
@@ -689,6 +697,10 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                  * zentrieren. Legacy-Pfad: nur die cfg-Taste (vr.c). */
                 if (imap_action_vr_recenter(&g_prof, &g_prof_st, &snap)) {
                     sb_vr_recenter("Belegung");
+                }
+                /* W188 GAME-MENU: Aktion "pause" aus Pad/Controller (Flanke) */
+                if (g_cfg.overlay && imap_action_pause(&g_prof, &g_prof_st, &snap)) {
+                    sb_ovl_request_pause("Belegung");
                 }
             } else
                 imap_legacy_apply((imap_block_t *)s, &g_leg, &snap);

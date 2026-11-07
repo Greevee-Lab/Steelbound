@@ -25,10 +25,24 @@
 #pragma comment(lib, "dxgi.lib")
 #pragma comment(lib, "winmm.lib")
 
-/* Xbox D3DCLEAR-Flags (D3D8): TARGET=1, ZBUFFER=2, STENCIL=4. */
+/* Interne Clear-Bits der D3D11-Operationen (Werte wie PC-D3D8: TARGET=1,
+ * ZBUFFER=2, STENCIL=4). Achtung: das sind NICHT die Xbox-Werte, die das
+ * Spiel an D3DDevice_Clear uebergibt (s. XBX_CLEAR_*); clear_xbflags=0
+ * (alt) wertet die Spiel-Flags trotzdem direkt mit diesen Bits aus. */
 #define XB_CLEAR_TARGET 0x1u
 #define XB_CLEAR_ZBUFFER 0x2u
 #define XB_CLEAR_STENCIL 0x4u
+/* W177 CLEAR-FLAGS: Xbox-D3DDevice_Clear-Flags, belegt aus der eigenen
+ * Disassembly der XBE (D3DDevice_Clear 0x20DF80): Bits 0xF0 = Farbkanaele
+ * R/G/B/A (0x10/0x20/0x40/0x80; nur dann wird die Farbe ins RT-Format
+ * gewandelt), Bit 0x1 = Tiefe (Z-Wert je Tiefenformat), Bit 0x2 = Stencil;
+ * ohne Tiefenpuffer werden 0x1|0x2 gestrichen; die Flags gehen unveraendert
+ * in NV2A-Methode 0x1D94 (CLEAR_SURFACE). */
+#define XBX_CLEAR_TARGET 0xF0u
+#define XBX_CLEAR_ZBUFFER 0x1u
+#define XBX_CLEAR_STENCIL 0x2u
+/* Spiel-Flags -> interne Bits (clear_xbflags=1: Xbox-Werte, 0: alt/direkt). */
+unsigned sb_clear_eff(unsigned xflags);
 
 /* RTT (W23): Offscreen-Render-Targets des Spiels (SetRenderTarget 0x20E370).
  * Notiz (surf/data/Dims) immer, D3D11-Objekte + Umleitung nur bei rtt=1. */
@@ -291,11 +305,6 @@ void sb_pf_note(float t, unsigned src_frame); /* DIAG(POPIN,W91): Art des naechs
 int sb_pf_active(void); /* DIAG(POPIN,W91): 1 = Bildfolge (pf_ring) laeuft */
 void sb_render_blit(ID3D11Resource *src);
 void sb_edge_apply(ID3D11RenderTargetView *rtv); /* W107 EDGE-MODE (render_edge.c), unter ctx_lock */
-/* W166 COCKPIT-WIDEN (render_cwiden.c) */
-extern float g_cw_par[3];          /* cw_a, cw_b, cw_d (NDC) fuer den b0-Puffer, 0 = aus */
-int sb_cw_draw(void);              /* 1 = laufender BB-3D-Draw gehoert zur Cockpit-Ansicht und wird verbreitert */
-void sb_cw_edge_box(unsigned *bx, unsigned *bw); /* Bildraender-Box um die Verbreiterung erweitern (render_edge.c) */
-void sb_cw_log_frame(unsigned f);  /* Zustandszeile CWIDEN bei Aenderung */
 void sb_edge_ab_shots(const char *base, ID3D11Resource *src); /* DIAG(EDGE-MODE,W107): edge_ab=1, unter ctx_lock */
 void sb_render_shot_name(const char *name, ID3D11Resource *src);
 /* RTT-Notizen (render_rtt.c) */

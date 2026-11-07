@@ -39,7 +39,6 @@
 #include "sb_perfhud.h" /* W122 PERF-HUD */
 #include "render_fx_rem.h" /* W133 REM-FX */
 #include "vr.h" /* W134 VR-PROTO */
-#include "render_cwiden.h" /* W166 COCKPIT-WIDEN */
 #include <math.h>
 
 #define IP_LISTS 4
@@ -906,7 +905,7 @@ int sb_interp_vb_write(const im_vertex_t *v, unsigned n, ID3D11Buffer **vb, unsi
 
 /* Interp-VS (Stream 0 = Tick N, Stream 1 = Tick N-1), b0 wie IM-Pfad. */
 static const char *kIP_VS =
-    CW_HLSL_CB0 /* W166 COCKPIT-WIDEN */
+    "cbuffer CB : register(b0) { row_major float4x4 mvp; uint has_tex; };\n"
     "cbuffer IP : register(b1) { row_major float4x4 mvp0; float ip_t; };\n"
     "struct VSIN { float4 pos : POSITION0; float4 col : COLOR0;\n"
     "              float2 uv : TEXCOORD0; float4 pos0 : POSITION1; };\n"
@@ -915,7 +914,6 @@ static const char *kIP_VS =
     "VSOUT main(VSIN i) { VSOUT o;\n"
     "  float4 c0 = mul(i.pos0, mvp0), c1 = mul(i.pos, mvp);\n"
     "  o.pos = c0 + ip_t * (c1 - c0);\n" /* gleiche Komponenten bleiben bitgenau (W73) */
-    CW_HLSL_APPLY /* W166: nach dem Lerp (Funktion der Endposition) */
     "  o.col = i.col; o.uv = i.uv; return o; }\n";
 
 static int ip_init(void)
@@ -2031,7 +2029,6 @@ static void ip_cb_write(const ip_cx_t *x, ID3D11Buffer *cb, const float m[16], u
     memcpy(map.pData, m, 64);
     if (isf) { *(float *)((unsigned char *)map.pData + 64) = f; }
     else { *(unsigned *)((unsigned char *)map.pData + 64) = u; }
-    memcpy((unsigned char *)map.pData + 68, g_cw_par, sizeof g_cw_par); /* W166 COCKPIT-WIDEN */
     ID3D11DeviceContext_Unmap(x->c, (ID3D11Resource *)cb, 0);
 }
 
@@ -2105,7 +2102,7 @@ static int ip_ring_fill(const ip_cx_t *x, const ip_list_t *B, const ip_list_t *A
         if (o->kind != IP_DRAW) { continue; }
         memcpy(r, o->mvp, 64);
         memcpy(r + 64, &o->has_tex, 4);
-        memcpy(r + 68, g_cw_par, sizeof g_cw_par);
+        memset(r + 68, 0, 12); /* Padding (frueher W166-Parameter, entfernt in W181) */
         if (last0 == 0xFFFFFFFFu || memcmp(r, p0, 80) != 0) {
             memcpy(d + (size_t)n * IP_RING_SLOT, r, 80);
             memcpy(p0, r, 80);
@@ -4207,10 +4204,12 @@ static unsigned pd_n_ip, pd_n_hold, pd_n_late, pd_n_lockw, pd_n_iter, pd_n_gw, p
 static double pd_lockw_ms, pd_lockw_max, pd_late_max, pd_wake_err_max, pd_gw_ms;
 static LONGLONG pd_stat_q;
 
+extern volatile LONG g_sb_paused; /* sb_pause.c (W188) */
 int sb_pd_on(void)
 {
+    /* W188 GAME-MENU: in der Pause zeigt die Pause-Schleife die Bilder (Takt-Thread ruht) */
     return pd_started == 1 && g_cfg.present_decouple > 0 && g_cfg.vblank_hz > 0 && !g_cfg.vr_enable &&
-           sb_render_offscreen();
+           sb_render_offscreen() && !g_sb_paused;
 }
 
 static int pd_owns_clock(void)

@@ -1,0 +1,57 @@
+# Issue form "Bug report" (W188 GAME-MENU, feedback stage 1).
+# The in-game menu (ESC -> Feedback) opens issues/new?template=bug_report.yml and
+# pre-fills title, version, game, gpu and state. Field ids must stay in sync with
+# poc-native/harness/src/sb_feedback.c (URL parameters).
+name: Bug report
+description: Something does not work as expected (in-game ESC -> Feedback, or by hand).
+title: "[Bug] "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! If you used **ESC → Feedback** in the game, a folder with
+        `screenshot.jpg`, `log.txt`, `info.txt` and `text.txt` opened next to this page.
+        Please drag those files into the *Attachments* field below.
+        The client replaces user name, computer name and paths in these files, but please
+        have a quick look before you attach them.
+        **Never attach game files (ISO, XBE, extracted game data).**
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+      placeholder: "Steps: ... / Expected: ... / Actual: ..."
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Attachments
+      description: Drag screenshot.jpg, log.txt and info.txt from the feedback folder here.
+  - type: input
+    id: version
+    attributes:
+      label: Client version
+      description: Filled in by the game (edition and build).
+  - type: input
+    id: game
+    attributes:
+      label: Game image
+      description: Filled in by the game (detected version of your own copy).
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+  - type: input
+    id: state
+    attributes:
+      label: Game state
+      description: Filled in by the game (mode, scene, mission countdown).
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I did not attach any game files (ISO, XBE, extracted game data).
+          required: true

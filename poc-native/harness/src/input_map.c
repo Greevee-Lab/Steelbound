@@ -889,6 +889,49 @@ int imap_action_vr_recenter(const imap_profile_t *prof, imap_state_t *st,
     return hit;
 }
 
+/* W188 GAME-MENU: Client-Aktion "pause" (nur Pad-/Controller-Quellen; Tasten
+ * wertet das Fenster aus, s. input_map.h). */
+static int imap_key_off(int vk, void *ctx)
+{
+    (void)vk;
+    (void)ctx;
+    return 0;
+}
+
+int imap_action_pause(const imap_profile_t *prof, imap_state_t *st,
+                      const imap_snap_t *snap)
+{
+    imap_snap_t loc;
+    int lvl, hit;
+    if (prof->pause.n == 0) {
+        st->prev_pause = 0;
+        return 0;
+    }
+    loc = *snap;
+    loc.key = imap_key_off;
+    imap_collect_suppression(prof, &loc);
+    lvl = imap_bind_active(&prof->pause, &loc) ? 1 : 0;
+    hit = (lvl && !st->prev_pause) ? 1 : 0;
+    st->prev_pause = lvl;
+    return hit;
+}
+
+int imap_bind_keys(const imap_bind_t *b, int *vks, int cap, unsigned *padmask)
+{
+    int i, n = 0;
+    if (padmask) *padmask = 0;
+    for (i = 0; b && i < b->n; i++) {
+        const imap_chord_t *c = &b->alt[i];
+        if (c->chord) continue;
+        if (c->a.kind == IMAP_A_KEY && c->a.code > 0 && c->a.code < 256 && n < cap) {
+            vks[n++] = c->a.code;
+        } else if ((c->a.kind == IMAP_A_PADBTN || c->a.kind == IMAP_A_PADDPAD) && padmask) {
+            *padmask |= (unsigned)c->a.code;
+        }
+    }
+    return n;
+}
+
 /* ---- Profil-Parser ---- */
 
 static int imap_strieq(const char *a, const char *b)
@@ -930,6 +973,7 @@ static int imap_key_code(const char *name)
         {"F1", VK_F1}, {"F2", VK_F2}, {"F3", VK_F3}, {"F4", VK_F4},
         {"F5", VK_F5}, {"F6", VK_F6}, {"F7", VK_F7}, {"F8", VK_F8},
         {"F9", VK_F9}, {"F10", VK_F10}, {"F11", VK_F11}, {"F12", VK_F12},
+        {"PAUSE", VK_PAUSE}, /* W188 GAME-MENU */
         {NULL, 0}
     };
     int i;
@@ -1008,7 +1052,8 @@ static const struct { const char *n; int bi; } kBiAlias[] = {
 
 /* W159: Client-Aktionen (Elemente ausserhalb des Controller-Blocks). */
 enum {
-    IMAP_ACT_VR_RECENTER = 0
+    IMAP_ACT_VR_RECENTER = 0,
+    IMAP_ACT_PAUSE = 1 /* W188 GAME-MENU */
 };
 
 /* Elementname -> Ziel. btn_i >= 0: Taste; axis >= 0 (+negpos 0/1/2 =
@@ -1030,6 +1075,10 @@ static int imap_elem_parse(const char *name, imap_elem_t *e)
     e->action = -1;
     if (imap_strieq(name, "vr_recenter")) { /* W159: VR: Blick zentrieren */
         e->action = IMAP_ACT_VR_RECENTER;
+        return 0;
+    }
+    if (imap_strieq(name, "pause")) { /* W188: Spiel anhalten/fortsetzen */
+        e->action = IMAP_ACT_PAUSE;
         return 0;
     }
     if ((name[0] == 'b' || name[0] == 'B') &&
@@ -1407,6 +1456,9 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
             if (e.action == IMAP_ACT_VR_RECENTER) { /* W159 */
                 rc = imap_bind_add(&out->vr_recenter, alt, &out->has_pad,
                                    &out->has_sbc);
+            } else if (e.action == IMAP_ACT_PAUSE) { /* W188 */
+                rc = imap_bind_add(&out->pause, alt, &out->has_pad,
+                                   &out->has_sbc);
             } else if (e.btn_i >= 0) {
                 rc = imap_bind_add(&out->btn[e.btn_i], alt, &out->has_pad,
                                    &out->has_sbc);
@@ -1488,7 +1540,9 @@ static const char kBuiltinKeyboard[] =
     "tuner.up = KEY:T\n"
     "tuner.down = KEY:G\n"
     "[vr]\n"
-    "vr_recenter = KEY:F8\n";
+    "vr_recenter = KEY:F8\n"
+    "[client]\n"
+    "pause = KEY:PAUSE\n";
 
 static const char kBuiltinXbox[] =
     "# xbox_pad_default - Xbox-Gamepad + Tastatur parallel (OR / Max-Abs).\n"
@@ -1543,7 +1597,9 @@ static const char kBuiltinXbox[] =
     "tuner.up = KEY:T, PAD:DU\n"
     "tuner.down = KEY:G, PAD:DD\n"
     "[vr]\n"
-    "vr_recenter = KEY:F8\n";
+    "vr_recenter = KEY:F8\n"
+    "[client]\n"
+    "pause = KEY:PAUSE\n";
 
 int imap_profile_builtin(const char *name, imap_profile_t *out)
 {
@@ -1690,6 +1746,7 @@ int imap_profile_equal(const imap_profile_t *a, const imap_profile_t *b)
             return 1;
     }
     if (imap_bind_equal(&a->vr_recenter, &b->vr_recenter)) return 1; /* W159 */
+    if (imap_bind_equal(&a->pause, &b->pause)) return 1; /* W188 */
     if (a->has_pad != b->has_pad) return 1;
     if (a->has_sbc != b->has_sbc) return 1; /* W159 */
     return 0;

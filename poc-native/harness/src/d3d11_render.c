@@ -43,6 +43,7 @@ static float g_last_game_aspect, g_last_out_aspect;
 
 #include "vr.h" /* W134 VR-PROTO */
 #include "sb_relaunch.h" /* W186 RESET-TITLE */
+#include "sb_pause.h" /* W188 GAME-MENU */
 int g_vr_blit; /* W134 VR-PROTO: sb_render_blit zeigt ein Augenbild (ohne Nachbearbeitung des Monobilds) */
 
 static LRESULT CALLBACK sb_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
@@ -648,6 +649,17 @@ void sb_render_on_create_device(unsigned want_w, unsigned want_h)
     sb_update_rig();
 }
 
+/* W177 CLEAR-FLAGS: Spiel-Flags (Xbox D3DDevice_Clear) -> interne D3D11-Bits.
+ * clear_xbflags=1: Xbox-Semantik (XBX_CLEAR_*, render_int.h), 0 = alt
+ * (Spiel-Flags direkt als PC-Bits: 0xF0 loescht nichts, 0x3 Farbe+Z). */
+unsigned sb_clear_eff(unsigned xflags)
+{
+    if (!g_cfg.clear_xbflags) { return xflags; }
+    return ((xflags & XBX_CLEAR_TARGET) ? XB_CLEAR_TARGET : 0u)
+         | ((xflags & XBX_CLEAR_ZBUFFER) ? XB_CLEAR_ZBUFFER : 0u)
+         | ((xflags & XBX_CLEAR_STENCIL) ? XB_CLEAR_STENCIL : 0u);
+}
+
 unsigned g_last_clear, g_last_clear_flags; /* DIAG(MOVIE): letztes Clear */
 int g_submit_vb; /* DIAG(MOVIE): 1 = Submit via sb_render_vb_draw */
 
@@ -678,15 +690,20 @@ void sb_render_clear(unsigned flags, unsigned color, float z, unsigned stencil)
     rtt_note_clear(flags, color); /* RTT-Session (beide Modi) */
     if (g_cfg.bloom_diag) { bloom_diag_clear(flags, color); } /* DIAG(SHADE-BLOOM,W112) */
     if (g_cfg.dlg_text_upload && rtt_active()) { rq_text_on_clear(g_rtt[g_rtt_bound].surf, flags, color); } /* FIX(DLGTEXT2,W97) */
-    /* FIX(CLEAR-XB,W101): Xbox-D3D8-Clear-Flags (TARGET = 0xF0 je Kanal
-     * R/G/B/A 0x10..0x80, ZBUFFER = 0x1, STENCIL = 0x2; cxbx XbD3D8Types.h)
-     * statt PC-Werten (1/2/4) fuer die D3D11-Operationen. Das Spiel nutzt
-     * 0xF3 (alles), 0xF0 (nur Farbe: alt = nichts) und 0x3 (Z+Stencil: alt =
-     * Farbe+Z) - W101_c1 CLRDIAG. RTT-Buchhaltung/Textebene oben unveraendert. */
+    /* FIX(CLEAR-XB,W101/W177): Xbox-Clear-Flags (TARGET = 0xF0 je Kanal
+     * R/G/B/A 0x10..0x80, ZBUFFER = 0x1, STENCIL = 0x2; Beleg W177: eigene
+     * Disassembly D3DDevice_Clear 0x20DF80, s. render_int.h) statt PC-Werten
+     * (1/2/4) fuer die D3D11-Operationen. Das Spiel nutzt 0xF3 (alles), 0xF0
+     * (nur Farbe: alt = nichts) und 0x3 (Z+Stencil: alt = Farbe+Z) - W101_c1
+     * CLRDIAG. Die Textebene (rq_text_on_clear) erfaehrt ueber sb_clear_eff,
+     * ob ihr D3D11-Inhalt geloescht wird (W177: sonst fehlte der Hilfetext). */
     if (g_cfg.clear_xbflags) {
-        flags = ((flags & 0xF0u) ? XB_CLEAR_TARGET : 0u)
-              | ((flags & 0x1u) ? XB_CLEAR_ZBUFFER : 0u)
-              | ((flags & 0x2u) ? XB_CLEAR_STENCIL : 0u);
+        unsigned ch = flags & XBX_CLEAR_TARGET;
+        if (ch && ch != XBX_CLEAR_TARGET) { /* Teilmaske (einzelne Farbkanaele): D3D11-Clear kann das nicht */
+            static unsigned npart;
+            if (npart++ < 4u) { HLOG_W("CLEAR Teilmaske flags=0x%X (nur einige Farbkanaele) -> ganzes Ziel", flags); }
+        }
+        flags = sb_clear_eff(flags);
     }
     if (flags & XB_CLEAR_TARGET) {
         sb_ctx_enter(); /* A6 ctx_lock */
@@ -897,6 +914,7 @@ void sb_render_present(unsigned flags)
     g_ph_zone = 2;
     sb_render_present_body(flags);
     g_ph_zone = z0;
+    sb_pause_point(); /* W188 GAME-MENU: bei Pause-Wunsch steht der Spiel-Thread hier (sonst sofort zurueck) */
 }
 static void sb_render_present_body(unsigned flags)
 {
@@ -1383,6 +1401,153 @@ int sb_render_present_hold(void)
     sb_render_present_raw();
     g_phud_src = 0;
     return 1;
+}
+
+/* ---- W188 GAME-MENU: Pause-Bilder (sb_pause.c, Spiel-Thread) ----
+ * Beginn: aktuelles Spielbild (g_rtv-Resource: mit FPS-INTERP der Offscreen-
+ * BB = letztes Tick-Bild ohne Nachbearbeitung, sonst der Swapchain-BB mit
+ * fertiger Nachbearbeitung) kopieren. Je Pausenbild: Kopie zeigen, Menue
+ * darueber, Present. Ende: Swapchain-BB wieder sauber (ohne FPS-INTERP),
+ * Zwischenbild-Aufzeichnung neu (keine Paare ueber die Pause hinweg). */
+static ID3D11Texture2D *g_pause_snap;
+static unsigned g_pause_sw, g_pause_sh;
+
+int sb_render_pause_begin(void)
+{
+    ID3D11Resource *res = NULL;
+    D3D11_TEXTURE2D_DESC dd;
+    int ok = 0;
+    if (!g_dev || !g_ctx || !g_rtv) { return 0; }
+    sb_ctx_enter();
+    ID3D11RenderTargetView_GetResource(g_rtv, &res);
+    if (res) {
+        ID3D11Texture2D_GetDesc((ID3D11Texture2D *)res, &dd);
+        if (g_pause_snap && (g_pause_sw != dd.Width || g_pause_sh != dd.Height)) {
+            ID3D11Texture2D_Release(g_pause_snap);
+            g_pause_snap = NULL;
+        }
+        if (!g_pause_snap) {
+            dd.MipLevels = 1;
+            dd.ArraySize = 1;
+            dd.SampleDesc.Count = 1;
+            dd.SampleDesc.Quality = 0;
+            dd.Usage = D3D11_USAGE_DEFAULT;
+            dd.BindFlags = 0;
+            dd.CPUAccessFlags = 0;
+            dd.MiscFlags = 0;
+            if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &dd, NULL, &g_pause_snap))) { g_pause_snap = NULL; }
+            g_pause_sw = dd.Width;
+            g_pause_sh = dd.Height;
+        }
+        if (g_pause_snap) {
+            ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_pause_snap, res);
+            ok = 1;
+        }
+        ID3D11Resource_Release(res);
+    }
+    sb_ctx_leave();
+    return ok;
+}
+
+void sb_render_pause_frame(void)
+{
+    HRESULT hr;
+    if (!g_dev || !g_swap || !g_pause_snap) { return; }
+    sb_ctx_enter();
+    if (g_swap_res) { /* FPS-INTERP: wie ein gezeigtes Bild (Nachbearbeitung, Menue, VR-Leinwand, Test-Bild) */
+        sb_render_blit((ID3D11Resource *)g_pause_snap);
+        sb_render_present_raw();
+        sb_ctx_leave();
+        return;
+    }
+    {
+        ID3D11Resource *bb = NULL;
+        ID3D11RenderTargetView_GetResource(g_rtv, &bb);
+        if (bb) {
+            ID3D11DeviceContext_CopyResource(g_ctx, bb, (ID3D11Resource *)g_pause_snap);
+            ID3D11Resource_Release(bb);
+        }
+    }
+    if (g_cfg.overlay && sb_ovl_open()) { sb_ovl_draw(g_rtv, 0); }
+    if (sb_phud_visible()) { sb_phud_draw(g_rtv, 0); }
+    if (g_cfg.overlay_test[0]) { /* TEST(W118): Overlay-Bild */
+        char onm[48];
+        if (sb_ovl_shot_due(onm, sizeof onm)) { sb_render_shot_name(onm, NULL); }
+    }
+    hr = IDXGISwapChain_Present(g_swap, 0, 0);
+    sb_ctx_leave();
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+        HLOG_E("render: Device verloren (hr=0x%lX)", (long)hr);
+        ExitProcess(7);
+    }
+}
+
+void sb_render_pause_end(void)
+{
+    if (!g_dev || !g_ctx) { return; }
+    sb_ctx_enter();
+    if (!g_swap_res && g_pause_snap && g_rtv) { /* BB ohne Menue zurueck (Spiel zeichnet darauf weiter) */
+        ID3D11Resource *bb = NULL;
+        ID3D11RenderTargetView_GetResource(g_rtv, &bb);
+        if (bb) {
+            ID3D11DeviceContext_CopyResource(g_ctx, bb, (ID3D11Resource *)g_pause_snap);
+            ID3D11Resource_Release(bb);
+        }
+    }
+    if (g_swap_res) { sb_interp_reset("Pause"); }
+    sb_ctx_leave();
+}
+
+static int sb_write_jpg(const char *path, const unsigned char *bgr, unsigned w, unsigned h);
+/* W188 GAME-MENU (Feedback): Spielbild der Pause (nie der Desktop) als JPG
+ * nach path. Unter ctx_lock aufrufen. 1 = geschrieben. */
+int sb_render_pause_jpg(const char *path, unsigned *ow, unsigned *oh)
+{
+    ID3D11Texture2D *stg = NULL;
+    D3D11_TEXTURE2D_DESC dd;
+    D3D11_MAPPED_SUBRESOURCE map;
+    unsigned char *px;
+    unsigned x, y;
+    int ok;
+    if (!g_pause_snap || !path) { return 0; }
+    ID3D11Texture2D_GetDesc(g_pause_snap, &dd);
+    if (dd.Format != DXGI_FORMAT_R8G8B8A8_UNORM && dd.Format != DXGI_FORMAT_B8G8R8A8_UNORM) {
+        HLOG_W("FEEDBACK: Bildformat %d nicht unterstuetzt", (int)dd.Format);
+        return 0;
+    }
+    dd.Usage = D3D11_USAGE_STAGING;
+    dd.BindFlags = 0;
+    dd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    dd.MiscFlags = 0;
+    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &dd, NULL, &stg))) { return 0; }
+    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)stg, (ID3D11Resource *)g_pause_snap);
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)stg, 0, D3D11_MAP_READ, 0, &map))) {
+        ID3D11Texture2D_Release(stg);
+        return 0;
+    }
+    px = (unsigned char *)malloc((size_t)dd.Width * dd.Height * 3u);
+    if (!px) {
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)stg, 0);
+        ID3D11Texture2D_Release(stg);
+        return 0;
+    }
+    for (y = 0; y < dd.Height; y++) {
+        const unsigned char *s = (const unsigned char *)map.pData + (size_t)y * map.RowPitch;
+        unsigned char *d = px + (size_t)y * dd.Width * 3u;
+        int bgra = dd.Format == DXGI_FORMAT_B8G8R8A8_UNORM;
+        for (x = 0; x < dd.Width; x++) {
+            d[x * 3 + 0] = s[x * 4 + (bgra ? 0 : 2)];
+            d[x * 3 + 1] = s[x * 4 + 1];
+            d[x * 3 + 2] = s[x * 4 + (bgra ? 2 : 0)];
+        }
+    }
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)stg, 0);
+    ID3D11Texture2D_Release(stg);
+    ok = sb_write_jpg(path, px, dd.Width, dd.Height);
+    free(px);
+    if (ow) { *ow = dd.Width; }
+    if (oh) { *oh = dd.Height; }
+    return ok;
 }
 
 /* M2c: Device-Health (GPU-Fault? S_OK=gesund). */

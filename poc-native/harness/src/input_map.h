@@ -135,6 +135,7 @@ typedef struct {
     uint8_t m_aim_src;  /* W87: Bit0/Bit1 = aiming_x/y kam in diesem Poll
                          * von der Maus (Hook darf vorsteuern) */
     int prev_vr_recenter; /* W159: Pegel der Aktion vr_recenter im Vor-Poll */
+    int prev_pause;       /* W188: Pegel der Aktion pause (ohne Tasten) im Vor-Poll */
 } imap_state_t;
 
 void imap_state_init(imap_state_t *st); /* gear=8(N), tuner=0, Akkus Mitte */
@@ -216,6 +217,10 @@ typedef struct {
     /* W159: Client-Aktion statt Controller-Element: "vr_recenter"
      * (VR: Blick zentrieren) feuert auf der steigenden Flanke. */
     imap_bind_t vr_recenter;
+    /* W188 GAME-MENU: Client-Aktion "pause" (Spiel anhalten/fortsetzen,
+     * Abschnitt [client]); Tasten wertet das Fenster aus (sb_overlay.c),
+     * Pad/Controller-Quellen der Hook (Flanke). */
+    imap_bind_t pause;
     int has_pad; /* 1 = Profil referenziert Pad-Quellen */
     int has_sbc; /* 1 = Profil referenziert SBC-Quellen */
 } imap_profile_t;
@@ -245,6 +250,14 @@ void imap_profile_apply(imap_block_t *blk, imap_state_t *st,
  * Unbelegt -> 0. Ohne VR wirkt der Aufruf nicht (vr.c prueft vr_mode). */
 int imap_action_vr_recenter(const imap_profile_t *prof, imap_state_t *st,
                             const imap_snap_t *snap);
+/* W188: Client-Aktion "pause" - steigende Flanke der Pad-/Controller-
+ * Quellen (Tasten-Quellen zaehlen hier nicht: die wertet das Fenster aus,
+ * auch waehrend das Spiel steht). Unbelegt -> 0. */
+int imap_action_pause(const imap_profile_t *prof, imap_state_t *st,
+                      const imap_snap_t *snap);
+/* W188: einfache Tasten (KEY ohne Akkord) und Pad-Tasten (PAD-Taste/
+ * Steuerkreuz ohne Akkord) einer Bindung. Rueckgabe: Anzahl Tasten. */
+int imap_bind_keys(const imap_bind_t *b, int *vks, int cap, unsigned *padmask);
 
 /* ---- W128: Achsen-Arbitrierung "zuletzt aktives Geraet gewinnt" ----
  * Original-Controller (SBC) gegen Maus, je Achse (aim_x, aim_y, sight_x,

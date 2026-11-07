@@ -1454,6 +1454,61 @@ static int cli_selftest(const char *client_override)
         }
     }
 
+    /* 57 (W188 GAME-MENU): Client-Aktion pause - Element, Abschnitt [client],
+     * Tastenname PAUSE, Konflikt mit einem Spiel-Element wird gemeldet. */
+    {
+        lctrl_bind_t b1, b2;
+        char row[256], conf[4][160], err2[256], nm[32];
+        int ok = 1, n, pa, bi0;
+        const char *why = "";
+        pa = lctrl_bind_elem_index("pause");
+        bi0 = lctrl_bind_elem_index("bi0");
+        lctrl_key_name(VK_PAUSE, nm, sizeof nm);
+        if (pa < 0 || bi0 < 0 || kCtrlElems[pa].kind != LCTRL_ACT || strcmp(nm, "PAUSE") != 0) {
+            ok = 0; why = "Element/Tastenname";
+        } else {
+            lctrl_bind_init(&b1);
+            lctrl_bind_set(&b1, pa, "KEY:PAUSE, PAD:BACK+PAD:Y");
+            lctrl_bind_row_text(&b1, pa, row, sizeof row);
+            u8_GetTempPath(tmp, sizeof tmp);
+            strcat_s(tmp, sizeof tmp, "w188_bind_test.ini");
+            u8_DeleteFile(tmp);
+            if (lctrl_bind_save(tmp, &b1, "keyboard_default", err2, sizeof err2) != 0) {
+                ok = 0; why = "speichern";
+            } else {
+                memset(buf, 0, sizeof buf);
+                if (u8_fopen_s(&f, tmp, "r") == 0 && f) {
+                    (void)fread(buf, 1, sizeof buf - 1, f);
+                    fclose(f);
+                }
+                if (!strstr(buf, "[client]") || !strstr(buf, "pause = KEY:PAUSE, PAD:BACK+PAD:Y")) {
+                    ok = 0; why = "Abschnitt [client]";
+                }
+                lctrl_bind_init(&b2);
+                if (lctrl_bind_load_file(tmp, &b2) != 0) {
+                    ok = 0; why = "laden";
+                } else {
+                    char row2[256];
+                    lctrl_bind_row_text(&b2, pa, row2, sizeof row2);
+                    if (strcmp(row, row2) != 0) { ok = 0; why = "laden != speichern"; }
+                }
+            }
+            u8_DeleteFile(tmp);
+            lctrl_bind_init(&b1);
+            lctrl_bind_set(&b1, bi0, "KEY:P");
+            lctrl_bind_set(&b1, pa, "KEY:P");
+            n = lctrl_bind_conflicts(&b1, conf, 4);
+            if (n < 1 || !strstr(conf[0], "KEY:P") || !strstr(conf[0], "pause")) {
+                ok = 0; why = "Konflikt nicht gemeldet";
+            }
+        }
+        if (ok) {
+            T_OK("57 pause-bind");
+        } else {
+            T_FAIL("57 pause-bind", "%s", why);
+        }
+    }
+
     /* 54 (W183 VR-FIX3): VR-Leistungs-Preset <-> Werte (Spiegel der Client-
      * Tabelle kVrPreset), Standard "Ausgewogen", Speichern/Laden. */
     {

@@ -3,20 +3,18 @@
  * Dekoder, oPos-Muster, Konstanten-Spiegel). W68 SPLIT: 1:1 aus
  * d3d11_render.c verschoben. */
 #include "render_int.h"
-#include "render_cwiden.h" /* W166 COCKPIT-WIDEN */
 
 /* ---------- M2b-Geometriepfad (IM -> D3D11) ---------- */
 /* Fixed-Function-Ersatz: Spiel nutzt Vertex-Shader-PROGRAMME (kein FVF).
  * Heuristik pro Draw: Pixel-Koordinaten (RHW/UI) vs. Welt (3D). RHW wird
  * per Pixel->NDC-Matrix abgebildet, 3D per World*View*Proj (Hor+). */
 static const char *kIM_VS =
-    CW_HLSL_CB0 /* W166 COCKPIT-WIDEN: b0 wie IM-PS (mvp, has_tex) + Parameter im Padding */
+    "row_major float4x4 mvp : register(b0);\n"
     "struct VSIN { float4 pos : POSITION; float4 col : COLOR0;\n"
     "              float2 uv : TEXCOORD0; };\n"
     "struct VSOUT { float4 pos : SV_Position; float4 col : COLOR0;\n"
     "               float2 uv : TEXCOORD0; };\n"
     "VSOUT main(VSIN i) { VSOUT o; o.pos = mul(i.pos, mvp);\n"
-    CW_HLSL_APPLY
     "  o.col = i.col; o.uv = i.uv; return o; }\n";
 /* IM-Pixelshader (einmalig beim Init): Vertexfarbe, mal Textur. */
 static char g_ps_src[2048];

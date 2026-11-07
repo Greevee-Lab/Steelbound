@@ -29,7 +29,8 @@ while the game window has focus.
 | Tuner up / down | T / G |
 | Aim | Mouse (or arrows; Shift + arrows = sight only) |
 | Free / capture mouse | F10 |
-| Settings overlay (game keeps running) | ESC |
+| Game menu (Continue, Settings, Feedback, Quit; pauses the game) | ESC |
+| Pause / continue | Pause key (assignable: Controls page, "pause") |
 | Performance overlay | F2 (Shift + F2 moves it) |
 | Window / fullscreen | Alt + Enter |
 | VR: recenter view | F8 |

@@ -70,7 +70,7 @@ typedef struct {
     lctrl_kind_t kind;
 } lctrl_elem_t;
 
-#define LCTRL_ELEM_N 69
+#define LCTRL_ELEM_N 70 /* W188: + Client-Aktion pause */
 extern const lctrl_elem_t kCtrlElems[LCTRL_ELEM_N];
 /* W159: Original-Controller-Tasten als Belegungs-Quellen (SBC:<name>).
  * Kanonische Namen bi0..38, parserstabil wie input_map.c (kBiAlias).

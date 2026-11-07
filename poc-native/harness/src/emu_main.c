@@ -21,6 +21,7 @@
 #include "d3d11_render.h"
 #include "watch_dr.h" /* W41 WATCHDR */
 #include "sb_gamever.h" /* W150 ISO-DIRECT */
+#include "sb_feedback.h" /* W188 GAME-MENU */
 #include "sb_userdata.h" /* W150 USER-DATA */
 #include "sb_relaunch.h" /* W186 RESET-TITLE */
 
@@ -1133,7 +1134,10 @@ static DWORD WINAPI watchdog(LPVOID unused)
         {
             static unsigned last_f; static int stall_n;
             unsigned f = hooks_frame_count();
-            if (f == last_f && waited > 10) {
+            extern volatile LONG g_sb_paused; /* W188 GAME-MENU: Pause ist kein Haenger */
+            if (f == last_f && waited > 10 && g_sb_paused) {
+                HLOG_I("watchdog: PAUSE (Frames=%u, Spiel angehalten - kein STALL)", f);
+            } else if (f == last_f && waited > 10) {
                 extern int krnl_xb_thread_count(void);
                 extern int krnl_xb_thread_get(int, void **, unsigned *);
                 int i, n = krnl_xb_thread_count();
@@ -1569,7 +1573,9 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     }
     { /* W150: Spielversion (SHA-256 + Zertifikat); Patch-Adressen gelten nur fuer PAL */
         sb_gamever_t gv;
-        if (sb_gamever_check(img.file, img.file_size, &gv)) {
+        int gv_ok = sb_gamever_check(img.file, img.file_size, &gv);
+        sb_feedback_note_gamever(&gv); /* W188: Abbild-Version fuer das Feedback-Paket */
+        if (gv_ok) {
             HLOG_I("%s", gv.text);
         } else if (g_cfg.version_check) {
             HLOG_E("%s - Start abgebrochen (version_check=1)", gv.text);

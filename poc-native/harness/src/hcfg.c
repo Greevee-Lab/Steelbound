@@ -3,6 +3,7 @@
 #include "hlog.h"
 #include "sb_edition.h"
 #include "sb_userdata.h" /* W150 USER-DATA */
+#include "sb_feedback.h" /* W188: SB_FEEDBACK_REPO_DEFAULT */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -70,6 +71,8 @@ void hcfg_defaults(void)
     g_cfg.im_ring = 1;
     g_cfg.res_refcount = 1;
     g_cfg.fatx_stale_extend = 1; /* W63 FATXSTALE */
+    g_cfg.contig_alias_test = 0; /* TEST(W177) */
+    g_cfg.contig_noalias = 1; /* W177 FILM-WHITE: Contig ohne Low28-Ueberlappung (Fix, 0 = alt) */
     g_cfg.phys_exact = 1; /* W73 PHYSALIAS: Phys->Virt exakter Blockanfang zuerst (Fix) */
     g_cfg.hdr_hybrid = 1; /* W94 HDRSWAP: Hybrid-Header statt Tausch (Fix Absturz XCalculateSignatureBegin) */
     g_cfg.hdr_race_test = 0;
@@ -113,12 +116,6 @@ void hcfg_defaults(void)
     g_cfg.edge_mode = 0; /* W107 EDGE-MODE: aus (volles Hor+) bis zum Nutzerentscheid */
     g_cfg.edge_fade_width = 12; /* W107: % der 4:3-Boxbreite */
     g_cfg.edge_fade_strength = 100; /* W107: % */
-    g_cfg.cockpit_widen = 0; /* W166 COCKPIT-WIDEN: Standard Original */
-    g_cfg.cockpit_widen_seam = 100; /* W166: Naht (%) = 4:3-Kante, Box bleibt bitgleich */
-    g_cfg.cockpit_widen_band = 0; /* W166: Band (%) */
-    g_cfg.cockpit_widen_edge = 122; /* W166: Modellkante (%) */
-    g_cfg.cockpit_widen_max = 100; /* W166: max. Verschiebung (%) */
-    g_cfg.cockpit_widen_alt = 0; /* DIAG(W166) */
     g_cfg.m3d_census = 0; /* W25 MISSION3D: Missions-Zensus aus (DIAG) */
     g_cfg.sbar_diag = 0; /* W98 DIAG aus */
     g_cfg.sbar_skip_xp = 0; /* W98 DIAG aus */
@@ -231,6 +228,9 @@ void hcfg_defaults(void)
     g_cfg.overlay = 1;                  /* W118: ESC-Overlay an (geschlossen zeichnet es nichts) */
     g_cfg.overlay_test[0] = '\0';       /* W118: Test-Hook aus */
     g_cfg.overlay_save_path[0] = '\0';  /* W118: leer = user.cfg */
+    g_cfg.game_menu = 1;                /* W188: ESC = Spielmenue */
+    g_cfg.menu_pause = 1;               /* W188: ESC-Menue pausiert */
+    strcpy_s(g_cfg.feedback_repo, sizeof g_cfg.feedback_repo, SB_FEEDBACK_REPO_DEFAULT); /* W188 */
     strcpy_s(g_cfg.lang, sizeof g_cfg.lang, "en"); /* W142: [ui] lang */
     g_cfg.perf_hud = 0;                 /* W122: Leistungs-Overlay aus (Taste aktiv) */
     g_cfg.perf_hud_pos = 0;             /* W122: oben rechts */
@@ -488,6 +488,11 @@ static int set_key_overlay(const char *k, const char *v)
     else if (strcmp(k, "lang") == 0) { /* W142: [ui] lang (nur en/de) */
         strcpy_s(g_cfg.lang, sizeof g_cfg.lang, _stricmp(v, "de") == 0 ? "de" : "en");
     }
+    else if (strcmp(k, "game_menu") == 0) { g_cfg.game_menu = atoi(v); } /* W188 */
+    else if (strcmp(k, "menu_pause") == 0) { g_cfg.menu_pause = atoi(v); } /* W188 */
+    else if (strcmp(k, "repo") == 0 || strcmp(k, "feedback_repo") == 0) { /* W188 [feedback] repo */
+        strncpy_s(g_cfg.feedback_repo, sizeof g_cfg.feedback_repo, v, _TRUNCATE);
+    }
     else if (strcmp(k, "overlay_test") == 0) { strcpy_s(g_cfg.overlay_test, sizeof g_cfg.overlay_test, v); }
     else if (strcmp(k, "overlay_save_path") == 0) {
         strcpy_s(g_cfg.overlay_save_path, sizeof g_cfg.overlay_save_path, v);
@@ -680,6 +685,10 @@ static void set_key(const char *k, const char *v)
         g_cfg.im_ring = atoi(v);
     } else if (strcmp(k, "res_refcount") == 0) {
         g_cfg.res_refcount = atoi(v);
+    } else if (strcmp(k, "contig_alias_test") == 0) {
+        g_cfg.contig_alias_test = (int)strtoul(v, NULL, 0);
+    } else if (strcmp(k, "contig_noalias") == 0) {
+        g_cfg.contig_noalias = atoi(v);
     } else if (strcmp(k, "phys_exact") == 0) {
         g_cfg.phys_exact = atoi(v);
     } else if (strcmp(k, "hdr_hybrid") == 0) {
@@ -730,18 +739,6 @@ static void set_key(const char *k, const char *v)
         g_cfg.edge_fade_width = atoi(v);
     } else if (strcmp(k, "edge_fade_strength") == 0) {
         g_cfg.edge_fade_strength = atoi(v);
-    } else if (strcmp(k, "cockpit_widen") == 0) { /* W166 COCKPIT-WIDEN */
-        g_cfg.cockpit_widen = atoi(v);
-    } else if (strcmp(k, "cockpit_widen_seam") == 0) {
-        g_cfg.cockpit_widen_seam = atoi(v);
-    } else if (strcmp(k, "cockpit_widen_band") == 0) {
-        g_cfg.cockpit_widen_band = atoi(v);
-    } else if (strcmp(k, "cockpit_widen_edge") == 0) {
-        g_cfg.cockpit_widen_edge = atoi(v);
-    } else if (strcmp(k, "cockpit_widen_max") == 0) {
-        g_cfg.cockpit_widen_max = atoi(v);
-    } else if (strcmp(k, "cockpit_widen_alt") == 0) {
-        g_cfg.cockpit_widen_alt = atoi(v);
     } else if (strcmp(k, "edge_ab") == 0) {
         g_cfg.edge_ab = atoi(v);
     } else if (strcmp(k, "m3d_census") == 0) {

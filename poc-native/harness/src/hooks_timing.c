@@ -69,6 +69,34 @@ void sb_timing_go_realtime(int hz)
            g_fs_counter, vblank_tick_now());
 }
 
+/* W188 GAME-MENU: Pause (sb_pause.c). Waehrend der Pause steht der Spiel-
+ * Thread; beim Fortsetzen ruecken alle Folge-Ticks um die Pausendauer nach
+ * hinten (g_vb_off wie rt_from_mission) - der Feldzaehler laeuft ohne Sprung
+ * weiter, die Missions-Warteschleife holt nichts nach. vblank_hz=0
+ * (Testtakt): Zaehler haengt nicht an der Zeit, nichts zu tun. */
+static u32 g_pause_raw0;
+static int g_pause_rt;
+void sb_timing_pause_begin(void)
+{
+    g_pause_rt = g_cfg.vblank_hz > 0;
+    if (g_pause_rt) { g_pause_raw0 = vblank_tick_raw(); }
+}
+
+void sb_timing_pause_end(void)
+{
+    u32 d;
+    if (!g_pause_rt || g_cfg.vblank_hz <= 0) { return; }
+    d = vblank_tick_raw() - g_pause_raw0;
+    g_vb_off -= d;
+    HLOG_I("PAUSE: VBlank-Zaehler um %u Ticks verschoben (Feldzaehler %u, jetzt %u)", d, g_fs_counter,
+           vblank_tick_now());
+}
+
+unsigned sb_timing_field(void)
+{
+    return g_fs_counter;
+}
+
 static u32 vblank_tick_raw(void)
 {
     if (g_cfg.vblank_qpc) {

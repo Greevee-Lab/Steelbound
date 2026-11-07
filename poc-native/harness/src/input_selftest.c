@@ -22,6 +22,8 @@
  *         als Untergrenze ueber der Profil-Totzone (0 = unveraendert).
  * Teil 12 (W159 VR-LAUNCH): Aktion vr_recenter (Flanke, KEY/PAD/SBC,
  *         Akkord-Unterdrueckung) + SBC-Quellnamen.
+ * Teil 13 (W188 GAME-MENU): Aktion pause (Standard KEY:PAUSE, Tasten nur
+ *         ueber das Fenster, Pad-Flanke im Hook, imap_bind_keys).
  */
 #include <stdio.h>
 #include <string.h>
@@ -704,6 +706,8 @@ static void dump_profile(const imap_profile_t *p)
     dump_bind("tuner.down", &p->tuner_down);
     if (p->vr_recenter.n) /* W159 */
         dump_bind("vr_recenter", &p->vr_recenter);
+    if (p->pause.n) /* W188 */
+        dump_bind("pause", &p->pause);
 }
 
 /* W79 INPUT-REAL: Kippschalter-Rast (key_toggles), Raw-Maus, Sperre. */
@@ -1654,6 +1658,77 @@ static void run_vraction_cases(const imap_profile_t *kb,
     CHECK(imap_profile_equal(&p, &q) == 1, "vr: ungleich -> 1");
 }
 
+/* ---- Teil 13: W188 Aktion pause ----
+ * Standardprofile: pause = KEY:PAUSE. Tasten zaehlen im Hook nicht (das
+ * Fenster wertet sie aus, auch waehrend das Spiel steht), Pad-Quellen
+ * feuern auf der Flanke; imap_bind_keys liefert Tasten + Pad-Maske. */
+static void run_pause_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
+{
+    imap_profile_t p;
+    imap_snap_t s;
+    imap_state_t st;
+    cfgvar_t c = { 1, 0, 0, 0, 4, 0, 0 };
+    unsigned fr = 310000, pm = 0;
+    int kP[] = { VK_PAUSE }, vks[4], n;
+
+    printf("Teil 13: W188 Aktion pause\n");
+    CHECK(kb->pause.n == 1 && kb->pause.alt[0].a.kind == IMAP_A_KEY && kb->pause.alt[0].a.code == VK_PAUSE,
+          "pause: kb KEY:PAUSE");
+    CHECK(xbox->pause.n == 1 && xbox->pause.alt[0].a.code == VK_PAUSE, "pause: xbox KEY:PAUSE");
+    n = imap_bind_keys(&kb->pause, vks, 4, &pm);
+    CHECK(n == 1 && vks[0] == VK_PAUSE && pm == 0, "pause: bind_keys kb (n=%d)", n);
+    CHECK(imap_profile_parse("pause = KEY:P, PAD:BACK+PAD:START, PAD:Y, SBC:CHAFF\n", "t", &p) == 0,
+          "pause: parse");
+    CHECK(p.pause.n == 4, "pause: n=4 (ist %d)", p.pause.n);
+    n = imap_bind_keys(&p.pause, vks, 4, &pm);
+    CHECK(n == 1 && vks[0] == 'P' && pm == IMAP_PAD_Y, "pause: bind_keys P + Pad-Maske Y (n=%d pm=0x%X)", n, pm);
+    /* Tasten feuern im Hook nicht */
+    imap_state_init(&st);
+    make_snap(&s, fr++, &c);
+    set_keys(NULL, 0);
+    CHECK(imap_action_pause(&p, &st, &s) == 0, "pause: Ruhe -> 0");
+    {
+        int kp[] = { 'P' };
+        make_snap(&s, fr++, &c);
+        set_keys(kp, 1);
+        CHECK(imap_action_pause(&p, &st, &s) == 0, "pause: Taste P im Hook -> 0");
+    }
+    /* Pad Y: Flanke, Halten still */
+    make_snap(&s, fr++, &c);
+    set_keys(NULL, 0);
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = IMAP_PAD_Y;
+    s.pad_present = 1;
+    CHECK(imap_action_pause(&p, &st, &s) == 1, "pause: Pad Y -> Flanke");
+    make_snap(&s, fr++, &c);
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = IMAP_PAD_Y;
+    s.pad_present = 1;
+    CHECK(imap_action_pause(&p, &st, &s) == 0, "pause: Pad Y halten -> 0");
+    /* ohne Geraet still */
+    imap_state_init(&st);
+    make_snap(&s, fr++, &c);
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = IMAP_PAD_Y;
+    s.pad_present = 0;
+    CHECK(imap_action_pause(&p, &st, &s) == 0, "pause: Pad Y ohne Geraet -> 0");
+    /* Standardprofil: KEY:PAUSE allein loest im Hook nie aus */
+    imap_state_init(&st);
+    make_snap(&s, fr++, &c);
+    set_keys(kP, 1);
+    CHECK(imap_action_pause(kb, &st, &s) == 0, "pause: kb PAUSE im Hook -> 0");
+    set_keys(NULL, 0);
+    /* unbelegt -> 0, Profilvergleich erkennt Unterschied */
+    CHECK(imap_profile_parse("bi0 = KEY:SPACE\n", "t", &p) == 0 && p.pause.n == 0, "pause: unbelegt n=0");
+    CHECK(imap_action_pause(&p, &st, &s) == 0, "pause: unbelegt -> 0");
+    {
+        imap_profile_t q;
+        CHECK(imap_profile_parse("pause = KEY:PAUSE\n", "t", &p) == 0 &&
+              imap_profile_parse("pause = KEY:P\n", "t", &q) == 0 && imap_profile_equal(&p, &q) != 0,
+              "pause: Vergleich erkennt Unterschied");
+    }
+}
+
 int main(int argc, char **argv)
 {
     imap_profile_t kb_file, kb_in, xbox_file, xbox_in;
@@ -1730,6 +1805,9 @@ int main(int argc, char **argv)
     /* Teil 12: W159 Aktion vr_recenter + SBC-Quellen. */
     run_vraction_cases(rc_kb == 0 ? &kb_file : &kb_in,
                        rc_xbox == 0 ? &xbox_file : &xbox_in);
+
+    /* Teil 13: W188 Aktion pause. */
+    run_pause_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in);
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;

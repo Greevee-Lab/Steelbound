@@ -42,6 +42,7 @@ typedef struct {
     int relive; /* W118 REM-OVERLAY: neu hochladen (HD live an/aus), bleibt bis zum Erfolg */
 } tex_entry_t;
 unsigned krnl_phys_to_virt(unsigned phys);
+void krnl_phys_diag(unsigned xptr, unsigned phys, unsigned need); /* DIAG(FILM-WHITE,W177) */
 /* Unbekannte Adressen identity (Heap/VIRT), sonst Contig-Mapping. */
 static unsigned sb_tex_hostaddr(unsigned data)
 {
@@ -374,6 +375,11 @@ int sb_tex_lockbits(unsigned xptr, unsigned *pitch, unsigned *bits,
             return 0;
         }
         if (!tex_range_ok(data, lpitch * h)) {
+            if (g_cfg.contig_diag) { /* DIAG(FILM-WHITE,W177) */
+                unsigned raw = 0;
+                __try { raw = *(unsigned *)(uintptr_t)(xptr + 4); } __except (EXCEPTION_EXECUTE_HANDLER) { raw = 0; }
+                krnl_phys_diag(xptr, raw, lpitch * h);
+            }
             return 0;
         }
         if (g_cfg.tex_lock_guard && !(flags & TEX_D3DLOCK_READONLY) &&
@@ -657,6 +663,11 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
                                nlinsk, xptr, data, c0, 4096 * h,
                                tex_committed(data, 4096 * h));
                     }
+                }
+                if (g_cfg.contig_diag) { /* DIAG(FILM-WHITE,W177) */
+                    unsigned raw = 0;
+                    __try { raw = *(unsigned *)(uintptr_t)(xptr + 4); } __except (EXCEPTION_EXECUTE_HANDLER) { raw = 0; }
+                    krnl_phys_diag(xptr, raw, lpitch * h);
                 }
                 g_up_fail = 6;
                 return NULL;

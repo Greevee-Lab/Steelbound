@@ -91,6 +91,7 @@ void krnl_dump_stats(void)
     unsigned o;
     HLOG_I("KRNL MmContig: %u Allocs (Reg %u Slots)", g_exreg_n,
            8192);
+    { extern void krnl_contig_stats(void); krnl_contig_stats(); } /* W177 contig_noalias */
     HLOG_I("KRNL SUSPSAFE: %lu suspends, %lu retries, %lu giveups (safe_suspend=%d)",
            susp_n_suspend, susp_n_retry, susp_n_giveup, g_cfg.safe_suspend);
     HLOG_I("KRNL LOADLOCK: Modell %d, inject=%d, injiziert=%ld, sync=%d, rueckzuege=%ld",
@@ -230,11 +231,37 @@ static void *krnl_var_ptr(unsigned ordinal)
     }
 }
 
+/* W188 GAME-MENU: Pause (sb_pause.c) - KeTickCount steht waehrend der Pause
+ * und laeuft danach um die Pausendauer versetzt weiter (0 = bisher). */
+static volatile DWORD g_ke_tick_off;
+static volatile LONG g_ke_tick_hold;
+static DWORD g_ke_pause_t0;
+uint64_t g_kit_off;          /* krnl_sync.c: KeQueryInterruptTime-Versatz (QPC-Einheiten) */
+volatile LONG g_kit_hold;    /* 1 = Pause: KeQueryInterruptTime steht */
+LARGE_INTEGER g_kit_q0;     /* Pausenbeginn (QPC) */
+
+void krnl_time_pause(int begin)
+{
+    if (begin) {
+        g_ke_pause_t0 = GetTickCount();
+        QueryPerformanceCounter(&g_kit_q0);
+        InterlockedExchange(&g_ke_tick_hold, 1);
+        InterlockedExchange(&g_kit_hold, 1);
+    } else {
+        LARGE_INTEGER q1;
+        QueryPerformanceCounter(&q1);
+        g_kit_off += (uint64_t)(q1.QuadPart - g_kit_q0.QuadPart);
+        g_ke_tick_off += GetTickCount() - g_ke_pause_t0;
+        InterlockedExchange(&g_kit_hold, 0);
+        InterlockedExchange(&g_ke_tick_hold, 0);
+    }
+}
+
 static DWORD WINAPI tick_thread(LPVOID unused)
 {
     (void)unused;
     for (;;) {
-        g_ke_tick_count = GetTickCount();
+        if (!g_ke_tick_hold) { g_ke_tick_count = GetTickCount() - g_ke_tick_off; }
         Sleep(5);
     }
     /* unreachable */

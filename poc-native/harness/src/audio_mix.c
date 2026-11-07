@@ -2,6 +2,7 @@
  * Fenster (A7B), WASAPI-Live-Ausgabe (Ring + Thread) und Mixer-Thread.
  * W68 SPLIT: 1:1 aus audio_out.c verschoben. */
 #include "audio_int.h"
+#include "sb_pause.h" /* W188 GAME-MENU: g_sb_paused */
 #include <share.h> /* _SH_DENYNO (W102) */
 
 /* ---------- WAV-Writer (kill-sicher: Header pro Chunk neu) ---------- */
@@ -1007,12 +1008,22 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
     for (;;) {
         au32 i;
         static au32 mix_pass;
+        static LONG au_was_paused; /* W188 */
         LARGE_INTEGER h0, h1;
         /* mischen */
         memset(g_mixbuf, 0, sizeof g_mixbuf);
         au_lock();
         QueryPerformanceCounter(&h0);
-        if (g_cfg.audio_mix_yield) {
+        if (g_sb_paused != au_was_paused) {
+            /* W188: Pause-Wechsel mit Position im Ausgabestrom (audio.wav: Frame = 1/44100 s) */
+            au_was_paused = g_sb_paused;
+            HLOG_I("AUDIO: Pause %s bei Ausgabe-Frame %llu", au_was_paused ? "an (Mischer stumm)" : "aus",
+                   (unsigned long long)g_mixed_total);
+        }
+        if (au_was_paused) {
+            /* W188 GAME-MENU: Pause - Stille ausgeben, keine Stimme rueckt vor (Positionen, Notifies und
+             * Stream-Pakete stehen), die Live-Ausgabe bleibt versorgt. */
+        } else if (g_cfg.audio_mix_yield) {
             /* PERF(PERF-TICK,W168): jede Stimme genau einmal je Durchgang (mix_pass); wartet ein anderer
              * Thread auf au_lock, nach der laufenden Stimme abgeben und danach die Liste von vorn durchgehen
              * (gemischte Stimmen ueberspringen) - eingefuegte/freigegebene Stimmen bleiben so sicher. */

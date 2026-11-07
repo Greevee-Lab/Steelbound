@@ -87,6 +87,16 @@ Default data location: `%LOCALAPPDATA%\Steelbound\`. In portable mode
 
 ### Sending a report
 
+**In the game:** ESC → **Feedback** pauses the game, asks for *Bug report*
+or *Idea* and a short text, and creates a package in the data folder
+(`feedback/<date-time>/`: game screenshot, end of the log with your user
+name and paths replaced, version/GPU/settings, your text). It shows what is
+inside before anything else happens; **Open GitHub issue + folder** opens a
+pre-filled issue page in your browser and the folder, so you can drag the
+files in. Nothing is uploaded automatically.
+
+**By hand:**
+
 1. Right after the problem, open the data folder (see above).
 2. Copy `logs/sb_harness.log` and any new file from `crash/`. Do not
    start the game again first – the log is overwritten at each start.

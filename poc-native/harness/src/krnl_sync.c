@@ -977,6 +977,9 @@ u32 __stdcall hle_KeQuerySystemTime(u32 pTime)
     return 0;
 }
 
+extern uint64_t g_kit_off;     /* kernel_hle.c: W188 Pausen-Versatz (QPC-Einheiten, 0 = bisher) */
+extern volatile LONG g_kit_hold;
+extern LARGE_INTEGER g_kit_q0;
 unsigned __int64 __stdcall hle_KeQueryInterruptTime(void)
 {
     static uint64_t freq;
@@ -984,8 +987,12 @@ unsigned __int64 __stdcall hle_KeQueryInterruptTime(void)
     if (!freq) {
         QueryPerformanceFrequency((LARGE_INTEGER *)&freq);
     }
-    QueryPerformanceCounter((LARGE_INTEGER *)&now);
-    return now * 10000000ull / freq;
+    if (g_kit_hold) { /* W188: Pause - Zeit steht beim Pausenbeginn */
+        now = (uint64_t)g_kit_q0.QuadPart;
+    } else {
+        QueryPerformanceCounter((LARGE_INTEGER *)&now);
+    }
+    return (now - g_kit_off) * 10000000ull / freq;
 }
 
 /* M2c: KEVENT-Tabelle (Addr -> Host-Event). */

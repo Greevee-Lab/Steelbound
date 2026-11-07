@@ -812,14 +812,28 @@ class Checker:
             self.add("pfad", rel, line_of(data, pos) if (text and pos is not None) else None,
                      "absoluter Pfad: %s" % short)
         if self.user and len(self.user) >= 3:
+            # W188: Fund nennt das umgebende Wort ([A-Za-z0-9._-]), damit eine
+            # Freigabe genau einen oeffentlichen Namen treffen kann (z. B. den
+            # GitHub-Owner des Community-Repos, der den Nutzernamen enthaelt) -
+            # ein Pfad wie C:\Users\<name> ergibt das Wort <name> und bleibt Fund.
             rx = re.compile(re.escape(self.user.encode()), re.I)
+            wch = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._-"
+            words = set()
             for m in rx.finditer(data):
+                a, b = m.start(), m.end()
+                while a > 0 and data[a - 1] in wch:
+                    a -= 1
+                while b < len(data) and data[b] in wch:
+                    b += 1
+                word = data[a:b][:60].decode("latin-1")
                 if text:
                     self.add("pfad", rel, line_of(data, m.start()),
-                             "lokaler Nutzername")
-                else:
-                    self.add("pfad", rel, None, "lokaler Nutzername (binaer)")
-                    break
+                             "lokaler Nutzername im Wort '%s'" % word)
+                elif word not in words:
+                    words.add(word)
+                    self.add("pfad", rel, None, "lokaler Nutzername (binaer) im Wort '%s'" % word)
+                    if len(words) >= 8:
+                        break
 
     def status(self):
         if self.findings:

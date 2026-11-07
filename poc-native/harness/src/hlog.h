@@ -16,6 +16,7 @@ void hlog_close(void);
 int hlog_level(void);
 void hlog_init_append(const char *path, int level); /* wie hlog_init, haengt aber an (kein CREATE_ALWAYS) */
 long hlog_dropped(void);
+const char *hlog_path(void); /* W188: Pfad der Log-Datei (leer = keiner) */
 void hlog_msg(int level, const char *fmt, ...);
 void hlog_async_start(void); /* W168 PERF-TICK hlog_async: Schreib-Thread starten */
 void hlog_flush(void);       /* W168: Puffer leeren (bis 200 ms), ohne hlog_async wirkungslos */

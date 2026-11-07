@@ -50,6 +50,15 @@ void sb_ovl_present_end(void);
 void sb_ovl_request_fps(int fps);
 /* 1 = Test-Hook-Screenshot in diesem Bild faellig (nach dem Zeichnen). */
 int sb_ovl_shot_due(char *name, unsigned cap);
+/* W188 GAME-MENU: ESC oeffnet zuerst das Spielmenue (Weiter, Einstellungen,
+ * Fotomodus (ausgegraut), Feedback, Beenden mit Rueckfrage); die Seiten oben
+ * sind eine Tab-Zeile (TAB/Umschalt+TAB, Pfeile auf der Tab-Zeile, Pad
+ * LB/RB). Maus (Klick/Rad/Zeiger), Tastatur und Gamepad bedienen alle
+ * Bildschirme. Offenes Menue pausiert das Spiel (menu_pause, sb_pause.c).
+ * Pause-Tasten der Profil-Aktion "pause" (hooks_input.c, n=0 -> PAUSE). */
+void sb_ovl_set_pause_binding(const int *vks, int n, unsigned padmask);
+/* Pause-Aktion aus der Belegung (Pad/Controller, Spiel-Thread): oeffnet den Pause-Bildschirm. */
+void sb_ovl_request_pause(const char *why);
 
 /* ---- W122: kleine gemeinsame API (Look + Zeichenweg), genutzt vom
  * Leistungs-Overlay sb_perfhud.c. Farben (GDI COLORREF) und Deckung des

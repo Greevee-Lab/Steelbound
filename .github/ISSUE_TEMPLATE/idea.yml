@@ -1,0 +1,50 @@
+# Issue form "Idea" (W188 GAME-MENU, feedback stage 1).
+# The in-game menu (ESC -> Feedback -> Idea) opens issues/new?template=idea.yml and
+# pre-fills title, version, game, gpu and state. Field ids must stay in sync with
+# poc-native/harness/src/sb_feedback.c (URL parameters).
+name: Idea
+description: Suggest an improvement or a new feature (in-game ESC -> Feedback, or by hand).
+title: "[Idea] "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the idea! If you came from **ESC → Feedback** in the game, the folder next to
+        this page contains a screenshot of the moment - attach it if it helps to explain the idea.
+        **Never attach game files (ISO, XBE, extracted game data).**
+  - type: textarea
+    id: what
+    attributes:
+      label: Your idea
+      description: What would you like to see, and why would it help?
+    validations:
+      required: true
+  - type: textarea
+    id: files
+    attributes:
+      label: Attachments (optional)
+      description: Screenshot or other files from the feedback folder.
+  - type: input
+    id: version
+    attributes:
+      label: Client version
+  - type: input
+    id: game
+    attributes:
+      label: Game image
+  - type: input
+    id: gpu
+    attributes:
+      label: GPU
+  - type: input
+    id: state
+    attributes:
+      label: Game state
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checks
+      options:
+        - label: I did not attach any game files (ISO, XBE, extracted game data).
+          required: true

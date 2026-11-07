@@ -3042,7 +3042,9 @@ static const char ks_legacy_text[] =
     "tuner.up = KEY:T\n"
     "tuner.down = KEY:G\n"
     "[vr]\n"
-    "vr_recenter = KEY:F8\n";
+    "vr_recenter = KEY:F8\n"
+    "[client]\n"
+    "pause = KEY:PAUSE\n";
 
 /* Formen der Zeichnung. KS_LEDR/G/B = Taste mit roter/gruener/blauer
  * Leuchtleiste (3x3-Raster im Mittelblock). */

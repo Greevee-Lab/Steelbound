@@ -85,7 +85,6 @@ add_library(sb_emu SHARED
   src/render_interp.c
   src/render_warm.c
   src/render_edge.c
-  src/render_cwiden.c
   src/render_winmode.c
   src/render_combiner.c
   src/render_shade.c
@@ -100,6 +99,8 @@ add_library(sb_emu SHARED
   src/sb_gamever.c
   src/sb_userdata.c
   src/sb_overlay.c
+  src/sb_pause.c
+  src/sb_feedback.c
   src/sb_perfhud.c
   src/audio_out.c
   src/audio_fmt.c

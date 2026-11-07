@@ -391,6 +391,7 @@ void lctrl_key_name(int vk, char *out, size_t cap)
         { VK_F4, "F4" }, { VK_F5, "F5" }, { VK_F6, "F6" },
         { VK_F7, "F7" }, { VK_F8, "F8" }, { VK_F9, "F9" },
         { VK_F10, "F10" }, { VK_F11, "F11" }, { VK_F12, "F12" },
+        { VK_PAUSE, "PAUSE" }, /* W188 */
         { 0, NULL }
     };
     int i;
@@ -487,6 +488,9 @@ const lctrl_elem_t kCtrlElems[LCTRL_ELEM_N] = {
     { "tuner.down", "-", "bind.tuner.down", LCTRL_DIG },
     /* W159: Client-Aktion (Gruppe VR im Dialog, Abschnitt [vr] im Profil). */
     { "vr_recenter", "-", "bind.vr_recenter", LCTRL_ACT },
+    /* W188 GAME-MENU: Client-Aktion Pause (Abschnitt [client]); Konflikte
+     * mit Spiel-Elementen meldet lctrl_bind_conflicts wie bei allen Zeilen. */
+    { "pause", "-", "bind.pause", LCTRL_ACT },
 };
 
 /* W159: kanonische SBC-Quellnamen bi0..38 (parserstabil, s. kBiAlias). */
@@ -787,7 +791,8 @@ int lctrl_bind_save(const char *path, const lctrl_bind_t *b, const char *base,
     fprintf(f, "# Format: docs/EINGABE.md. Aktivieren: input_profile=<name>.\n");
     for (i = 0; i < LCTRL_ELEM_N; i++) {
         const char *want =
-            kCtrlElems[i].kind == LCTRL_ACT ? "vr" : /* W159 */
+            kCtrlElems[i].kind == LCTRL_ACT ?
+                (strcmp(kCtrlElems[i].key, "vr_recenter") == 0 ? "vr" : "client") : /* W159, W188 */
             kCtrlElems[i].kind == LCTRL_DIG && i < 39 ? "buttons" :
             kCtrlElems[i].kind == LCTRL_DIG ? "gear" : "axes";
         int a;

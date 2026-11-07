@@ -4,7 +4,6 @@
  * D3D11-Draw). Schnitt fuer FPS-INTERP: hier entsteht jeder Draw, Present/
  * Backbuffer bleiben in d3d11_render.c. W68 SPLIT: 1:1 aus d3d11_render.c. */
 #include "render_int.h"
-#include "render_cwiden.h" /* W166 COCKPIT-WIDEN */
 #include "render_fx_rem.h" /* W133 REM-FX */
 #include "sb_perfhud.h" /* W125 TICK-PERF */
 #include "sb_remaster.h" /* W103 REM-FRAME */
@@ -1677,11 +1676,7 @@ static void sb_im_submit_body(void)
             if (ak & 4u) { has_tex |= 0x1000000u; ip_tex = has_tex; }
         }
         if (fxr_cls) { unsigned fb = fxr_draw_bits(); if (fb) { has_tex |= fb; ip_tex = has_tex; } } /* W133 REM-FX: weicher Partikel */
-        /* W166 COCKPIT-WIDEN: Cockpit-Draw (BB, 3D, Cockpit-Ansicht) -> Bit fuer
-         * die Vertex-Verschiebung; ohne Option (Standard) nie gesetzt. */
-        if (g_cfg.cockpit_widen && !rhw && !rtt_active() && sb_cw_draw()) { has_tex |= CW_HAS_BIT; ip_tex = has_tex; }
         *(unsigned *)((unsigned char *)map.pData + 64) = has_tex;
-        memcpy((unsigned char *)map.pData + 68, g_cw_par, sizeof g_cw_par); /* W166: Parameter im Padding */
         { LARGE_INTEGER qu0, qu1;
           LARGE_INTEGER qpf2;
           QueryPerformanceFrequency(&qpf2);

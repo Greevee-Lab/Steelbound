@@ -70,6 +70,8 @@ typedef struct {
     int diag_lock_model;   /* DIAG(LOADLOCK,W119): 0 = hlock mit atomarem Owner (Fix), 1 = ntdll-Nachbildung (Owner getrennt gesetzt, nur Nachweis) */
     int hlock_spin;        /* LOADLOCK(W119): Spin-Runden (pause) vor WaitOnAddress bei belegter hlock, 0 = 64 */
     int diag_lock_inject;  /* DIAG(LOADLOCK,W119): >0 = jedes N-te hlock-Erwerb/-Freigabe Sleep(1) im Fenster (Modell 1) bzw. in der Region (Modell 0), 0 = aus */
+    int contig_alias_test; /* TEST(FILM-WHITE,W177): >0 = Contig-Anforderung genau dieser Groesse bekommt vorher einen 12-KB-Koeder mit gleichem Low28-Anfang (Lage V_C30isokill nachstellen), 0 = aus */
+    int contig_noalias;    /* FIX(FILM-WHITE,W177): 1 = Contig-Bloecke ohne Low28-Ueberlappung (eigene Contig-Tabelle, HIGH-Bloecke gezielt platziert, low_alloc-Treffer auf HIGH-Bilder stillgelegt) -> Phys->Virt eindeutig, 0 = alt */
     int phys_exact;        /* FIX(PHYSALIAS,W73): 1 = Phys->Virt bevorzugt den Contig-Block, der exakt an der Adresse beginnt (Low28-Mehrdeutigkeit, Absturz 0x24E1D3), 0 = alt (erster Treffer) */
     int hdr_hybrid;        /* FIX(HDRSWAP,W94): 1 = Hybrid-Header an 0x10000 (MZ+e_lfanew auf PE-Kopie hinter dem XBE-Header), krnl_CreateThread tauscht nicht mehr; 0 = alt (Header-Tausch je CreateThread, Race) */
     int hdr_race_test;     /* DIAG(HDRSWAP,W94): >0 = Stress-Thread erzeugt in den ersten N s laufend Leer-Threads per krnl_CreateThread (Race-Reproduktion), 0 = aus */
@@ -179,12 +181,6 @@ typedef struct {
     int edge_fade_width; /* W107: Verlaufsbreite in % der 4:3-Boxbreite (edge_mode=2), 0 = harte Kante */
     int edge_fade_strength; /* W107: Endabdunklung in % (100 = schwarz, edge_mode=2) */
     int edge_ab; /* DIAG(EDGE-MODE,W107): 1 = zu jedem Screenshot Varianten _e1/_e2 aus demselben Bild */
-    int cockpit_widen; /* W166 COCKPIT-WIDEN: 0 = Original (Standard, bitgleich), 1 = Cockpit im Breitbild verbreitern (Seitenteile starr nach aussen, Mitte unveraendert, nie strecken) */
-    int cockpit_widen_seam; /* W166: Naht in % der halben 4:3-Breite (innerhalb bleibt alles unveraendert) */
-    int cockpit_widen_band; /* W166: Uebergangsband in % (0 = harte Stufe an der Naht) */
-    int cockpit_widen_edge; /* W166: Ende des Cockpit-Modells im Hor+-Bild in % der halben 4:3-Breite (Vermessung) */
-    int cockpit_widen_max; /* W166: groesste Verschiebung in % der halben 4:3-Breite */
-    int cockpit_widen_alt; /* DIAG(COCKPIT-WIDEN,W166): 1 = Verbreiterung nur in ungeraden Bildern (A/B aus Folgebildern) */
     int aspect_mode; /* W18: 1 = 2D in Spiel-Aspect-Box (Pillarbox, schwarze Balken) + 3D Hor+, 0 = alt (2D gestreckt) */
     int rtt; /* W23: 1 = Render-to-Texture umleiten (RTV+SRV je Surface) + sampeln, 0 = nur notieren */
     int rtt_readback; /* FIX(COMBAT,W59): 1 = LIN_X8R8G8B8-RTs bis 128x128 (Zellenkarte [0x35149C], Lock-On) nach jeder Session GPU->CPU in den Xbox-Speicher, 2 = + LIN_A8R8G8B8 bis 128x128, 3 = beide bis 512x512, 9 = DIAG ohne Schreiben, 0 = alt (GPU-only) */
@@ -288,7 +284,7 @@ typedef struct {
     int im_fast; /* PERF(IM-PERF,W99): 1 = VB-Draws kompakt dekodieren (40 B statt 256-B-Slots je Vertex), Primitiv-Expansion direkt in den gemappten Puffer (IM-Ring/Tick-VB), keine Zwischenkopien; Bild bitgleich. 0 = alt. Diagnosen (rq_diag/fx_diag/Zensus/sbar_diag/interp_diag>=3) nehmen immer den alten Weg */
     int im_end_reset; /* FIX(EDGE,W64): 1 = End() schliesst den IM-Batch (kein Geister-Wiederholdraw beim naechsten VB-Draw), 0 = alt */
     int fx_blend_eq; /* FIX(FX-ORIG,W90): 1 = NV2A BLEND_EQUATION (0x350: ADD/SUB/REVSUB/MIN/MAX) + BLEND_COLOR (0x34C) abbilden, 0 = alt (immer ADD, Faktor 1) */
-    int clear_xbflags; /* FIX(CLEAR-XB,W101): 1 = Clear-Flags nach Xbox-D3D8 (TARGET 0xF0, Z 0x1, STENCIL 0x2), 0 = alt (PC-Werte 1/2/4) */
+    int clear_xbflags; /* FIX(CLEAR-XB,W101/W177): 1 = Clear-Flags nach Xbox-D3D8 (TARGET 0xF0, Z 0x1, STENCIL 0x2) inkl. Textebenen-Anpassung (W177), 2 = TEST: Xbox-Flags ohne Textebenen-Anpassung (Stand W101, Hilfetext fehlt), 0 = alt (PC-Werte 1/2/4) */
     int fx_shot_gap; /* DIAG(FX-HOLE,W106): Mindestabstand der fx_shots-Bilder in Frames (0 = 15) */
     int fx_census; /* DIAG(FX-HOLE,W106): mit m3d_census>0: die ersten N FXSHOT-Bilder loesen einen Zensus im Folgeframe aus */
     int fx_zfunc; /* FIX(FX-ORIG,W90; Standard 1 seit W101 FRONT-HANGAR): 1 = NV2A DEPTH_FUNC (0x354, GL-Enum) als D3D11-DepthFunc, 0 = alt (immer LESS) */
@@ -387,6 +383,10 @@ typedef struct {
     int overlay;                /* 1 = ESC oeffnet das Einstellungs-Overlay (Spieler-Standard), 0 = aus (ESC wie bisher) */
     char overlay_test[1024];    /* TEST(W118): Skript "<bild>:<aktion>,..." -> PostMessage an das eigene Fenster (leer = aus) */
     char overlay_save_path[512]; /* "Als Standard speichern": Ziel (leer = user.cfg neben sb_native.cfg bzw. SB_USER_CFG) */
+    /* W188 GAME-MENU (sb_overlay.c, sb_pause.c, sb_feedback.c) */
+    int game_menu;              /* 1 = ESC oeffnet zuerst das Spielmenue (Weiter/Einstellungen/Fotomodus/Feedback/Beenden), 0 = ESC direkt in die Einstellungen (W118) */
+    int menu_pause;             /* 1 = offenes ESC-Menue pausiert das Spiel (Spieler-Standard), 0 = Spiel laeuft dahinter weiter (Live-Vorschau) */
+    char feedback_repo[128];    /* [feedback] repo: GitHub-Repo fuer "Neues Issue" (Owner/Name), Standard SB_FEEDBACK_REPO_DEFAULT (sb_feedback.h) */
     /* W122 PERF-HUD (sb_perfhud.c) */
     int perf_hud;               /* 1 = Leistungs-Overlay sichtbar (Taste schaltet und speichert in user.cfg), 0 = aus (Standard) */
     int perf_hud_pos;           /* Ecke: 0 = oben rechts, 1 = oben links, 2 = unten links, 3 = unten rechts */

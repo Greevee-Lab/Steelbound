@@ -445,6 +445,7 @@ static unsigned g_dlg_surf, g_dlg_n, g_dlg_up;
 /* DIAG(DLGTEXT,W85, dlg_diag=1): QPC-Kosten je Abschnitt (0 Rastern, 1 Clear, 2 Upload) */
 static LONGLONG g_dlg_tick[4], g_dlg_cnt[4];
 static unsigned g_dlg_gpu_clr; /* FIX(DLGTEXT3): GPU-Clear (PC-Flag TARGET) einer Textebene -> Delta-Upload-Stand ungueltig */
+static unsigned g_dlg_gpu_clr_col, g_dlg_gpu_clr_data; /* W177 CLEAR-FLAGS: Farbe und Data-Adresse dieses GPU-Clears */
 static LONGLONG dlg_qpc(void) { LARGE_INTEGER q; QueryPerformanceCounter(&q); return q.QuadPart; }
 static void dlg_perf_add(int k, LONGLONG t0)
 {
@@ -599,7 +600,25 @@ static void rq_text_upload_now(unsigned bits, unsigned pitch, unsigned w, unsign
         unsigned y0 = 0, y1 = h;
         int same = 0;
         if (g_cfg.dlg_text_raster) {
-            if (g_dlg_gpu_clr) { g_dlg_gpu_clr = 0; ltex = NULL; }
+            if (g_dlg_gpu_clr) {
+                g_dlg_gpu_clr = 0;
+                /* W177 CLEAR-FLAGS (clear_xbflags=1): Der Xbox-Clear 0xF0 der
+                 * Textebene loescht jetzt auch die D3D11-Textur. Ihr Inhalt ist
+                 * danach ueberall die Clear-Farbe -> Delta-Stand auf diese Farbe
+                 * setzen (laedt nur die Textzeilen hoch; mit ltex = NULL fehlte
+                 * der Text, weil "same" den Upload ausliess, bzw. Vollupload). */
+                if (g_cfg.clear_xbflags == 1 && last && lastn >= need && ltex == (void *)g_rtt[i].tex && g_dlg_gpu_clr_data == data && lw == w &&
+                    lh == h && lpitch == pitch) {
+                    unsigned yy, xx;
+                    for (yy = 0; yy < h; yy++) {
+                        unsigned *lr = (unsigned *)(last + (size_t)yy * pitch);
+                        if (!g_dlg_gpu_clr_col) { memset(lr, 0, (size_t)w * 4u); }
+                        else { for (xx = 0; xx < w; xx++) { lr[xx] = g_dlg_gpu_clr_col; } }
+                    }
+                } else {
+                    ltex = NULL;
+                }
+            }
             if (last && lastn >= need && ltex == (void *)g_rtt[i].tex && lw == w && lh == h && lpitch == pitch) {
                 while (y0 < h && memcmp(tmp + (size_t)y0 * pitch, last + (size_t)y0 * pitch, (size_t)w * 4u) == 0) { y0++; }
                 if (y0 >= h) { same = 1; }
@@ -699,7 +718,7 @@ void rq_text_on_clear(unsigned surf, unsigned flags, unsigned color)
     unsigned data, fmt, size, w = 0, h = 0, pitch = 0, bits = 0, y, x;
     int k, ok = 1;
     static unsigned nlog;
-    if ((flags & XB_CLEAR_TARGET) && rq_txt_slot(surf, 0) >= 0) { g_dlg_gpu_clr = 1; } /* FIX(DLGTEXT3,W85) */
+    if (((g_cfg.clear_xbflags == 2 ? flags : sb_clear_eff(flags)) & XB_CLEAR_TARGET) && rq_txt_slot(surf, 0) >= 0) /* TEST(W177): =2 = Stand W101 (Textebene ohne Anpassung) */ { g_dlg_gpu_clr = 1; g_dlg_gpu_clr_col = color; g_dlg_gpu_clr_data = rq_u32(surf + 4u); } /* FIX(DLGTEXT3,W85); W177: wirksame Bits */
     if (!g_cfg.dlg_text_upload || !g_cfg.dlg_text_clear || !surf || !(flags & 0xF0u)) { return; }
     k = rq_txt_slot(surf, 0);
     if (k < 0) { return; }

@@ -56,9 +56,13 @@ One choice on the **Graphics** page. Remastered presets may reduce FPS.
 
 - **F2** shows the performance overlay (FPS, frame times, CPU/GPU load).
   **Shift + F2** moves it to the next corner. The setting is remembered.
-- **ESC** opens the settings overlay; the game keeps running behind it.
-  **TAB** switches pages: **SETTINGS**, **WORLD**, **IMAGE**,
-  **EFFECTS**, **VR**. Arrows change values, **B** compares with the
+- **ESC** opens the game menu (**Continue**, **Settings**, Photo mode
+  (coming soon), **Feedback**, **Quit**); the game is paused while it is
+  open (setting "ESC menu pauses"). In **Settings** the pages are tabs in
+  the first row: **General**, **World**, **Image**, **Effects**, **VR**;
+  **TAB / Shift+TAB**, the arrows on the tab row, a mouse click or the
+  gamepad shoulder buttons switch pages. Mouse, keyboard and gamepad work
+  in all menus. Arrows change values, **B** compares with the
   original, **Save as default** keeps the values for the next start.
 
 ## Packs

@@ -422,6 +422,21 @@ void imouse_release_keys(void)
     if (g_installed == 1) imsg_clear();
 }
 
+/* W188 GAME-MENU: Menue offen -> Maus freigeben (Zeiger sichtbar, kein
+ * ClipCursor), Menue zu -> wieder fangen, wenn sie vorher gefangen war und
+ * das Fenster den Fokus hat. UI-Thread. */
+static int g_menu_had_cap;
+void imouse_menu_capture(int open)
+{
+    if (open) {
+        g_menu_had_cap = g_captured != 0;
+        if (g_captured) imouse_capture_off("Menue offen");
+    } else {
+        if (g_menu_had_cap && g_mwnd && g_focus && g_want) imouse_capture_on(g_mwnd, "Menue zu");
+        g_menu_had_cap = 0;
+    }
+}
+
 int imsg_key(int vk, unsigned frame)
 {
     LONG gen;

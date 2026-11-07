@@ -18,7 +18,6 @@
  *   exp2    f = p0 + 2^(-32*d^2*p1^2) - 1.5,   danach f auf [0,1] geklemmt.
  * Ausgabefarben werden wie auf der NV2A auf [0,1] geklemmt. */
 #include "render_vsh.h"
-#include "render_cwiden.h" /* W166 COCKPIT-WIDEN */
 #include <stdarg.h>
 #include <stdio.h>
 #include <string.h>
@@ -226,7 +225,7 @@ int rqv_hlsl_ex(const rqv_prog_t *p, int lerp, const rqv_raw_t *raw, char *buf, 
         nc = RQV_NCONST;
     }
     *ncmap = nc;
-    rqs(&s, CW_HLSL_CB0); /* W166 COCKPIT-WIDEN: + cw_a/cw_b/cw_d im b0-Padding */
+    rqs(&s, "cbuffer CB : register(b0) { row_major float4x4 mvp; uint has_tex; };\n");
     if (lerp) { rqs(&s, "cbuffer IP : register(b1) { row_major float4x4 mvp0; float ip_t; };\n"); }
     if (raw) {
         rqs(&s, "cbuffer VC : register(b3) { float4 vc[%u]; float4 rq_fog; float4 rq_misc; uint4 rq_raw; uint4 rq_raw2;"
@@ -276,7 +275,6 @@ int rqv_hlsl_ex(const rqv_prog_t *p, int lerp, const rqv_raw_t *raw, char *buf, 
     } else {
         rqs(&s, "  o.pos = mul(i.pos, mvp);\n");
     }
-    rqs(&s, CW_HLSL_APPLY); /* W166 COCKPIT-WIDEN (nur mit has_tex-Bit) */
     if (raw) {
         rqs(&s, "  uint si = rq_src(i.vid);\n"
                 "  uint vi = rq_raw2.x != 0xFFFFFFFFu ? rqx.Load(rq_raw2.x + si) : si;\n"

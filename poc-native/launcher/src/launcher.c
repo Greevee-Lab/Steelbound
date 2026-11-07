@@ -1454,6 +1454,58 @@ static int cli_selftest(const char *client_override)
         }
     }
 
+    /* 54 (W183 VR-FIX3): VR-Leistungs-Preset <-> Werte (Spiegel der Client-
+     * Tabelle kVrPreset), Standard "Ausgewogen", Speichern/Laden. */
+    {
+        static const int want[4][6] = { { 0 }, { 65, 72, 50, 1, 0, 1 }, { 80, 0, 100, 1, 1, 2 }, { 100, 0, 100, 0, 1, 0 } };
+        launcher_settings_t v1, v2;
+        int ok = 1, pr, k;
+        char why[96] = "";
+        lcfg_defaults(&v1);
+        if (v1.vr_preset != 2 || v1.vr_render_scale != 80 || lcfg_vr_preset_match(&v1) != 2) {
+            ok = 0; strcpy_s(why, sizeof why, "Standard nicht Ausgewogen/80 %");
+        }
+        for (pr = 1; ok && pr <= 3; pr++) {
+            for (k = 0; k < 6; k++) {
+                if (lcfg_vr_preset_value(pr, k) != want[pr][k]) {
+                    ok = 0; _snprintf_s(why, sizeof why, _TRUNCATE, "Tabelle Preset %d Wert %d", pr, k);
+                }
+            }
+            lcfg_vr_preset_apply(&v1, pr);
+            if (lcfg_vr_preset_match(&v1) != pr || v1.vr_preset != pr) {
+                ok = 0; _snprintf_s(why, sizeof why, _TRUNCATE, "apply/match Preset %d", pr);
+            }
+        }
+        lcfg_vr_preset_apply(&v1, 1);
+        v1.vr_render_scale = 90;
+        if (ok && lcfg_vr_preset_match(&v1) != 0) { ok = 0; strcpy_s(why, sizeof why, "eigene Werte nicht erkannt"); }
+        lcfg_vr_preset_apply(&v1, 1);
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w183_vrperf_test.cfg");
+        u8_DeleteFile(tmp);
+        if (ok && lcfg_save_user(tmp, &v1) != 0) { ok = 0; strcpy_s(why, sizeof why, "save scheiterte"); }
+        if (ok) {
+            memset(buf, 0, sizeof buf);
+            f = NULL;
+            if (u8_fopen_s(&f, tmp, "r") == 0 && f) { (void)fread(buf, 1, sizeof buf - 1, f); fclose(f); }
+            lcfg_defaults(&v2);
+            lcfg_load_file(tmp, &v2);
+            if (!strstr(buf, "vr_preset=1") || !strstr(buf, "vr_render_scale=65") || !strstr(buf, "vr_refresh_hz=72") ||
+                !strstr(buf, "vr_world_tick=1") || !strstr(buf, "vr_shading=0")) {
+                ok = 0; strcpy_s(why, sizeof why, "Schluessel fehlen in user.cfg");
+            } else if (v2.vr_preset != 1 || v2.vr_render_scale != 65 || v2.vr_mirror_res != 50 || v2.vr_rt_scale != 1 ||
+                       lcfg_vr_preset_match(&v2) != 1) {
+                ok = 0; strcpy_s(why, sizeof why, "Werte nach Laden ungleich");
+            }
+        }
+        u8_DeleteFile(tmp);
+        if (ok) {
+            T_OK("54 vr-perf");
+        } else {
+            T_FAIL("54 vr-perf", "%s", why);
+        }
+    }
+
     /* 46 (W172 LAUNCHER-P6): Spieldaten-Validierung. Abbild hat Vorrang
      * (ungueltig -> Abbild-Fehler, Ordnerfelder egal); Ordner ohne
      * XBE-Feld -> <Ordner>/default.xbe abgeleitet, user.cfg bekommt den

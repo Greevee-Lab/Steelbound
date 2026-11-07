@@ -89,6 +89,7 @@ cfg.bad_mouseoff=sbc_mouse_off %d ungültig (0 = Maus parallel, 1 = Maus aus bei
 cfg.bad_sbc=sbc_usb %d ungültig (0 = aus, 1 = Original-Controller per USB).
 cfg.bad_vr=vr_enable %d ungültig (0 = aus, 1 = an).
 cfg.bad_vrprev=vr_preview '%s' ungültig (sbs, left, right, off).
+cfg.bad_vrscale=vr_render_scale %d ungültig (30..150 %%).
 cfg.bad_vsync=VSync %d ungültig (0 = aus, 1 = an).
 cfg.bad_width=Breite %u außerhalb 320..7680.
 cfg.bad_winmode=Darstellung %d ungültig (0 = Fenster, 1 = randlos, 2 = exklusiv).
@@ -208,7 +209,12 @@ gui.gfx_edge=Breitbild-Ränder
 gui.gfx_edgefade=Verlauf
 gui.gfx_ipfps=Bildrate
 gui.gfx_res=Auflösung
-gui.gfx_vr=Desktop-Vorschau
+gui.gfx_vr=Desktop-Spiegel
+gui.vr_perf=Leistung
+gui.vrp_perf=Leistung
+gui.vrp_bal=Ausgewogen
+gui.vrp_qual=Qualität
+gui.vrp_custom=Eigene
 gui.gfx_wh=Breite × Höhe
 gui.gfx_winmode=Anzeigemodus
 gui.ip_120=120 (flüssig)
@@ -346,7 +352,26 @@ ovl.lb_tone=Welt: Tonemapping
 ovl.lb_vqasync=Sonnentest ohne Warten
 ovl.lb_vripd=Augenabstand (Vorschau)
 ovl.lb_vron=VR (Brille)
-ovl.lb_vrprev=Desktop-Vorschau
+ovl.lb_vrprev=Spiegel: Auge
+ovl.lb_vrfwd=Sitz vor/zurück
+ovl.lb_vrpreset=VR-Leistung
+ovl.lb_vrres=VR-Renderauflösung
+ovl.lb_vrhz=Bildrate der Brille
+ovl.lb_vrmirror=Desktop-Spiegel
+ovl.lb_vrworld=Außenwelt
+ovl.lb_vrshade=Cockpit-Shading
+ovl.v_vrp_custom=Eigene
+ovl.v_vrp_perf=Leistung
+ovl.v_vrp_bal=Ausgewogen
+ovl.v_vrp_qual=Qualität
+ovl.v_vrhz_rt=Wie Runtime
+ovl.v_vrm_fill=Fensterfüllend
+ovl.v_vrm_bars=Ganzes Bild (Balken)
+ovl.v_vrm_half=Halbe Auflösung
+ovl.v_vrm_off=Aus (schwarz)
+ovl.v_vrw_tick=Spieltakt
+ovl.v_vrw_frame=Jedes Bild
+ovl.st_vrrt_restart=Monitor-Auflösung wirkt nach Neustart (speichern)
 ovl.lb_vrrec=Blick zentrieren
 ovl.lb_vrscale=Maßstab
 ovl.lb_vrseat=Sitzhöhe

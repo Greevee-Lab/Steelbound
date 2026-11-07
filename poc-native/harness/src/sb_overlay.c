@@ -57,6 +57,8 @@ enum {
     OI_FXPRESET, OI_FXSOFT, OI_FXEMB, OI_FXLIGHT, OI_FXLCKP, OI_FXIP, OI_FXCMP,
     /* W134 VR-PROTO: Seite "VR" (OV_PAGE_VR) */
     OI_VRON, OI_VRREC, OI_VRSEAT, OI_VRSCALE, OI_VRIPD, OI_VRPREV,
+    /* W183 VR-FIX3: Sitz vor/zurueck, Leistung (Preset, Aufloesung, Bildrate, Spiegel, Aussenwelt, Shading) */
+    OI_VRFWD, OI_VRPRESET, OI_VRRES, OI_VRHZ, OI_VRMIRROR, OI_VRWORLD, OI_VRSHADE,
     OI_N
 };
 /* Zeilen je Seite (Seite 0 = W118 unveraendert, Testskripte zaehlen DOWN;
@@ -78,7 +80,13 @@ static const int kOvPage2[] = { OI_PRESET, OI_AA, OI_SSAO, OI_CSAT, OI_CTEMP, OI
 static const int kOvPageFx[] = { OI_FXPRESET, OI_FXSOFT, OI_FXEMB, OI_FXLIGHT, OI_FXLCKP, OI_FXIP, OI_FXCMP,
                                  OI_SAVE, OI_CLOSE };
 #define OV_NPFX ((int)(sizeof kOvPageFx / sizeof kOvPageFx[0]))
-static const int kOvPageVr[] = { OI_VRON, OI_VRREC, OI_VRSEAT, OI_VRSCALE, OI_VRIPD, OI_VRPREV, OI_SAVE, OI_CLOSE };
+static const int kOvPageVr[] = { OI_VRON, OI_VRREC, OI_VRSEAT, OI_VRFWD, OI_VRSCALE, OI_VRIPD, OI_VRPREV,
+                                 OI_VRPRESET, OI_VRRES, OI_VRHZ, OI_VRMIRROR, OI_VRWORLD, OI_VRSHADE, OI_SAVE, OI_CLOSE };
+/* W183: Stufen der Render-Aufloesung (% der Runtime-Empfehlung) und Bildraten der Brille (0 = Runtime) */
+static const int kOvVrRes[] = { 50, 60, 65, 70, 80, 85, 90, 100, 110, 120 };
+static const int kOvVrHz[] = { 0, 72, 80, 90, 120 };
+#define OV_NVRRES ((int)(sizeof kOvVrRes / sizeof kOvVrRes[0]))
+#define OV_NVRHZ ((int)(sizeof kOvVrHz / sizeof kOvVrHz[0]))
 #define OV_NPVR ((int)(sizeof kOvPageVr / sizeof kOvPageVr[0]))
 static int g_ov_vr = -1;                /* W134: gewaehltes vr_enable (wirkt nach Neustart), -1 = noch nicht gelesen */
 static int g_ov_vrprev = -1;            /* W134: gewaehlte Vorschau 0 sbs, 1 left, 2 right, 3 off (nach Neustart) */
@@ -604,6 +612,61 @@ static void ov_change(int i, int dir)
         ov_status_key("ovl.st_prev_restart");
         break;
     }
+    case OI_VRFWD: /* W183: Sitz vor/zurueck, wirkt sofort */
+        g_cfg.vr_seat_forward = ov_clamp(g_cfg.vr_seat_forward + dir * 10, -500, 800);
+        HLOG_I("OVERLAY: vr_seat_forward -> %d (f=%u)", g_cfg.vr_seat_forward, g_present_no);
+        break;
+    case OI_VRPRESET: { /* W183: Leistung -> Ausgewogen -> Qualitaet (setzt die Einzelwerte) */
+        int q = sb_vr_preset_match(), rt0 = g_cfg.vr_rt_scale;
+        if (q <= 0) { q = dir > 0 ? 0 : 4; }
+        q = ov_clamp(q + dir, 1, 3);
+        sb_vr_preset_apply(q);
+        HLOG_I("OVERLAY: vr_preset -> %d (aufloesung %d%%, bildrate %d, spiegel %d%%, aussenwelt %s, shading %d, monitor-rt %d; f=%u)", q,
+               g_cfg.vr_render_scale, g_cfg.vr_refresh_hz, g_cfg.vr_mirror_res, g_cfg.vr_world_tick ? "spieltakt" : "je-bild",
+               g_cfg.vr_shading, g_cfg.vr_rt_scale, g_present_no);
+        if (g_cfg.vr_rt_scale != rt0) { ov_status_key("ovl.st_vrrt_restart"); }
+        break;
+    }
+    case OI_VRRES: {
+        int k, cur = -1;
+        for (k = 0; k < OV_NVRRES; k++) { if (kOvVrRes[k] <= g_cfg.vr_render_scale) { cur = k; } }
+        if (cur >= 0 && kOvVrRes[cur] == g_cfg.vr_render_scale) { cur += dir; }
+        else if (dir > 0) { cur++; } /* Zwischenwert: rechts = naechste Stufe darueber, links = darunter */
+        cur = ov_clamp(cur, 0, OV_NVRRES - 1);
+        g_cfg.vr_render_scale = kOvVrRes[cur];
+        g_cfg.vr_preset = sb_vr_preset_match();
+        HLOG_I("OVERLAY: vr_render_scale -> %d (f=%u)", g_cfg.vr_render_scale, g_present_no);
+        break;
+    }
+    case OI_VRHZ: {
+        int k, cur = 0;
+        for (k = 0; k < OV_NVRHZ; k++) { if (kOvVrHz[k] == g_cfg.vr_refresh_hz) { cur = k; } }
+        cur = (cur + (dir > 0 ? 1 : OV_NVRHZ - 1)) % OV_NVRHZ;
+        g_cfg.vr_refresh_hz = kOvVrHz[cur];
+        g_cfg.vr_preset = sb_vr_preset_match();
+        HLOG_I("OVERLAY: vr_refresh_hz -> %d (f=%u)", g_cfg.vr_refresh_hz, g_present_no);
+        break;
+    }
+    case OI_VRMIRROR: { /* W183: fensterfuellend -> Balken -> halbe Aufloesung -> aus */
+        int m = !g_cfg.vr_mirror ? 3 : (g_cfg.vr_mirror_res < 100 ? 2 : (g_cfg.vr_mirror_fit ? 1 : 0));
+        m = (m + (dir > 0 ? 1 : 3)) % 4;
+        g_cfg.vr_mirror = m != 3;
+        g_cfg.vr_mirror_fit = m == 1 ? 1 : 0;
+        g_cfg.vr_mirror_res = m == 2 ? 50 : 100;
+        g_cfg.vr_preset = sb_vr_preset_match();
+        HLOG_I("OVERLAY: vr_mirror -> %d fit=%d res=%d (f=%u)", g_cfg.vr_mirror, g_cfg.vr_mirror_fit, g_cfg.vr_mirror_res, g_present_no);
+        break;
+    }
+    case OI_VRWORLD:
+        g_cfg.vr_world_tick = !g_cfg.vr_world_tick;
+        g_cfg.vr_preset = sb_vr_preset_match();
+        HLOG_I("OVERLAY: vr_world_tick -> %d (f=%u)", g_cfg.vr_world_tick, g_present_no);
+        break;
+    case OI_VRSHADE:
+        g_cfg.vr_shading = !g_cfg.vr_shading;
+        g_cfg.vr_preset = sb_vr_preset_match();
+        HLOG_I("OVERLAY: vr_shading -> %d (f=%u)", g_cfg.vr_shading, g_present_no);
+        break;
     case OI_WINMODE:
         g_ov_winmode = (g_ov_winmode + (dir > 0 ? 1 : 2)) % 3;
         HLOG_I("OVERLAY: window_mode -> %d (wirkt nach Neustart, f=%u)", g_ov_winmode, g_present_no);
@@ -657,6 +720,12 @@ static const ov_key_t kOvKeys[] = {
     { "vr_enable", "vr" },          { "vr_preview", "vr" },
     { "vr_seat_height", "vr" },     { "vr_world_scale", "vr" },
     { "vr_ipd", "vr" },
+    /* W183 VR-FIX3 */
+    { "vr_seat_forward", "vr" },    { "vr_preset", "vr" },
+    { "vr_render_scale", "vr" },    { "vr_refresh_hz", "vr" },
+    { "vr_mirror", "vr" },          { "vr_mirror_fit", "vr" },
+    { "vr_mirror_res", "vr" },      { "vr_world_tick", "vr" },
+    { "vr_shading", "vr" },         { "vr_rt_scale", "vr" },
 };
 #define OV_NKEYS (sizeof kOvKeys / sizeof kOvKeys[0])
 
@@ -696,6 +765,16 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     else if (strcmp(k, "vr_seat_height") == 0) { v = g_cfg.vr_seat_height; }
     else if (strcmp(k, "vr_world_scale") == 0) { v = g_cfg.vr_world_scale; }
     else if (strcmp(k, "vr_ipd") == 0) { v = g_cfg.vr_ipd; }
+    else if (strcmp(k, "vr_seat_forward") == 0) { v = g_cfg.vr_seat_forward; } /* W183 */
+    else if (strcmp(k, "vr_preset") == 0) { v = g_cfg.vr_preset; }
+    else if (strcmp(k, "vr_render_scale") == 0) { v = g_cfg.vr_render_scale; }
+    else if (strcmp(k, "vr_refresh_hz") == 0) { v = g_cfg.vr_refresh_hz; }
+    else if (strcmp(k, "vr_mirror") == 0) { v = g_cfg.vr_mirror; }
+    else if (strcmp(k, "vr_mirror_fit") == 0) { v = g_cfg.vr_mirror_fit; }
+    else if (strcmp(k, "vr_mirror_res") == 0) { v = g_cfg.vr_mirror_res; }
+    else if (strcmp(k, "vr_world_tick") == 0) { v = g_cfg.vr_world_tick; }
+    else if (strcmp(k, "vr_shading") == 0) { v = g_cfg.vr_shading; }
+    else if (strcmp(k, "vr_rt_scale") == 0) { v = g_cfg.vr_rt_scale; }
     else if (strcmp(k, "world_fog") == 0) { v = g_cfg.world_fog; }
     else if (strcmp(k, "world_contrast") == 0) { v = g_cfg.world_contrast; }
     else if (strcmp(k, "world_gamma") == 0) { v = g_cfg.world_gamma; }
@@ -1238,7 +1317,10 @@ static void ov_label(int i, wchar_t *o, size_t cap)
         "ovl.lb_fxip", "ovl.lb_cmp",
         /* W134 Seite VR */
         "ovl.lb_vron", "ovl.lb_vrrec", "ovl.lb_vrseat", "ovl.lb_vrscale", "ovl.lb_vripd",
-        "ovl.lb_vrprev" };
+        "ovl.lb_vrprev",
+        /* W183 */
+        "ovl.lb_vrfwd", "ovl.lb_vrpreset", "ovl.lb_vrres", "ovl.lb_vrhz", "ovl.lb_vrmirror", "ovl.lb_vrworld",
+        "ovl.lb_vrshade" };
     ov_wkey(o, cap, lb[i]);
 }
 
@@ -1335,6 +1417,23 @@ static void ov_value(int i, wchar_t *o, size_t cap)
         ov_wu8(o, cap, nb);
         break;
     }
+    case OI_VRFWD: _snwprintf_s(o, cap, _TRUNCATE, L"%+d mm", g_cfg.vr_seat_forward); break; /* W183 */
+    case OI_VRPRESET: {
+        static const char *const pk[4] = { "ovl.v_vrp_custom", "ovl.v_vrp_perf", "ovl.v_vrp_bal", "ovl.v_vrp_qual" };
+        ov_wkey(o, cap, pk[ov_clamp(sb_vr_preset_match(), 0, 3)]);
+        break;
+    }
+    case OI_VRRES: _snwprintf_s(o, cap, _TRUNCATE, L"%d %%", g_cfg.vr_render_scale); break;
+    case OI_VRHZ:
+        if (g_cfg.vr_refresh_hz <= 0) { ov_wkey(o, cap, "ovl.v_vrhz_rt"); }
+        else { _snwprintf_s(o, cap, _TRUNCATE, L"%d Hz", g_cfg.vr_refresh_hz); }
+        break;
+    case OI_VRMIRROR:
+        ov_wkey(o, cap, !g_cfg.vr_mirror ? "ovl.v_vrm_off" : (g_cfg.vr_mirror_res < 100 ? "ovl.v_vrm_half" :
+                        (g_cfg.vr_mirror_fit ? "ovl.v_vrm_bars" : "ovl.v_vrm_fill")));
+        break;
+    case OI_VRWORLD: ov_wkey(o, cap, g_cfg.vr_world_tick ? "ovl.v_vrw_tick" : "ovl.v_vrw_frame"); break;
+    case OI_VRSHADE: ov_wkey(o, cap, g_cfg.vr_shading ? "ovl.v_on" : "ovl.v_off"); break;
     case OI_FXCMP: ov_wkey(o, cap, g_fxr_bypass ? "ovl.v_orig" : "ovl.v_opt"); break;
     case OI_EXPO: case OI_LWORLD: case OI_LCKP: case OI_FOCUS: {
         int v = i == OI_EXPO ? g_cfg.world_exposure : i == OI_LWORLD ? g_cfg.light_world :
@@ -1527,7 +1626,7 @@ static void ov_paint(void)
             (g_ov_page == 1 && (i == OI_GLITCH || i == OI_RTS || i == OI_BTHR || i == OI_CLIGHT || i == OI_ABCMP)) ||
             (g_ov_page == 2 && (i == OI_PRESET || i == OI_SSAO || i == OI_CGAIN || i == OI_SHSOFT || i == OI_ABCMP)) ||
             (g_ov_page == OV_PAGE_FX && (i == OI_FXPRESET || i == OI_FXIP || i == OI_FXCMP)) || /* W133 */
-            (g_ov_page == OV_PAGE_VR && (i == OI_VRREC || i == OI_VRIPD || i == OI_VRPREV))) { /* W134 */
+            (g_ov_page == OV_PAGE_VR && (i == OI_VRREC || i == OI_VRIPD || i == OI_VRPREV || i == OI_VRSHADE))) { /* W134, W183 */
             ov_fill(pad, y - b / 2, W - pad, y - b / 2 + b, OV_C_DIM);
         }
     }

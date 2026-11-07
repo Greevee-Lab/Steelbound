@@ -1040,6 +1040,75 @@ static void wd_holder_stacks(void)
     }
 }
 
+/* DIAG(VR-FIX3,W183): Stack eines Host-Threads (VR-Thread steht ausserhalb eines
+ * OpenXR-Aufrufs). Nur Suspendieren + CONTEXT + Stack-Kopie, Symbolisieren danach
+ * (wie wd_holder_stacks). Aufruf aus dem Watchdog. */
+void sb_wd_thread_stack(unsigned long tid, const char *label)
+{
+    HANDLE h;
+    CONTEXT cx;
+    MEMORY_BASIC_INFORMATION mbi;
+    STACKFRAME64 sf;
+    int di, ok = 0;
+    h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, tid);
+    if (!h) { HLOG_W("DIAG(VR-FIX3): %s T%04x - OpenThread scheitert", label, (unsigned)(tid & 0xFFFFu)); return; }
+    if (!wd_snap) { wd_snap = (unsigned char *)VirtualAlloc(NULL, WD_SNAP_MAX, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE); }
+    wd_sym_init();
+    wd_snap_n = 0;
+    if (SuspendThread(h) == (DWORD)-1) { CloseHandle(h); return; }
+    memset(&cx, 0, sizeof cx);
+    cx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
+    if (GetThreadContext(h, &cx)) {
+        ok = 1;
+        if (wd_snap && VirtualQuery((void *)(uintptr_t)cx.Esp, &mbi, sizeof mbi) && mbi.State == MEM_COMMIT) {
+            DWORD top = (DWORD)(uintptr_t)mbi.BaseAddress + (DWORD)mbi.RegionSize;
+            DWORD len = top > cx.Esp ? top - cx.Esp : 0;
+            if (len > WD_SNAP_MAX) { len = WD_SNAP_MAX; }
+            __try {
+                memcpy(wd_snap, (const void *)(uintptr_t)cx.Esp, len);
+                wd_snap_lo = cx.Esp;
+                wd_snap_n = len;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                wd_snap_n = 0;
+            }
+        }
+    }
+    ResumeThread(h);
+    if (ok) {
+        memset(&sf, 0, sizeof sf);
+        sf.AddrPC.Offset = cx.Eip; sf.AddrPC.Mode = AddrModeFlat;
+        sf.AddrFrame.Offset = cx.Ebp; sf.AddrFrame.Mode = AddrModeFlat;
+        sf.AddrStack.Offset = cx.Esp; sf.AddrStack.Mode = AddrModeFlat;
+        for (di = 0; di < 24; di++) {
+            BYTE sbuf[sizeof(SYMBOL_INFO) + 64];
+            SYMBOL_INFO *si = (SYMBOL_INFO *)sbuf;
+            DWORD64 disp = 0;
+            MEMORY_BASIC_INFORMATION fmbi;
+            char fmod[MAX_PATH];
+            const char *bn = "?";
+            if (!StackWalk64(IMAGE_FILE_MACHINE_I386, GetCurrentProcess(), h, &sf, &cx, wd_snap_read,
+                             SymFunctionTableAccess64, SymGetModuleBase64, NULL)) { break; }
+            if (!sf.AddrPC.Offset) { break; }
+            fmod[0] = 0;
+            if (VirtualQuery((void *)(uintptr_t)sf.AddrPC.Offset, &fmbi, sizeof fmbi)) {
+                GetModuleFileNameA((HMODULE)fmbi.AllocationBase, fmod, sizeof fmod);
+                bn = strrchr(fmod, 0x5C);
+                bn = bn ? bn + 1 : fmod;
+            }
+            si->SizeOfStruct = sizeof(SYMBOL_INFO);
+            si->MaxNameLen = 64;
+            if (SymFromAddr(GetCurrentProcess(), sf.AddrPC.Offset, &disp, si)) {
+                HLOG_W("DIAG(VR-FIX3): %s T%04x #%d: 0x%08X %s!%s+0x%X", label, (unsigned)(tid & 0xFFFFu), di,
+                       (unsigned)sf.AddrPC.Offset, bn, si->Name, (unsigned)disp);
+            } else {
+                HLOG_W("DIAG(VR-FIX3): %s T%04x #%d: 0x%08X %s", label, (unsigned)(tid & 0xFFFFu), di,
+                       (unsigned)sf.AddrPC.Offset, bn);
+            }
+        }
+    }
+    CloseHandle(h);
+}
+
 /* W145: Test-Export fuer die Mock-Runtime (SB_VR_MOCK_BLOCK=n, "Compositor
  * wartet auf das naechste Spielbild"): Zahl der Spiel-Swaps, nur lesend. */
 unsigned sb_test_frame_count(void)

@@ -2475,6 +2475,89 @@ static void ip_vr_draw(const ip_cx_t *x, sb_vr_pass_t *p, const ip_op_t *o, cons
     }
 }
 
+/* ---------- W183 VR-FIX3: Aussenwelt im Spieltakt (vr_world_tick=1) ----------
+ * Je VR-Bild muss nur das Kopfabhaengige neu: die Draws, die im Spiel in den
+ * Backbuffer gingen (Cockpit-Mesh, Instrumente, Monitor-Komposition, HUD) -
+ * je Auge mit der aktuellen Pose. Die RT-Paesse (Aussenwelt im Hauptmonitor,
+ * Sub-Monitore, Karte; ~75 % der Draws) haengen nicht vom Kopf ab: statt sie
+ * je VR-Bild (90 Hz) neu zu zeichnen, bekommen ihre Schatten den gesicherten
+ * Tick-Endstand bak[B] (Spieltakt 30 Hz, wie das Original). Sicher nur, wenn
+ * kein BB-Draw ein RT liest, bevor B es zum letzten Mal schreibt, und jedes
+ * geschriebene RT eine Sicherung von B hat - sonst volle Wiedergabe. Einmal je
+ * Tick (Seriennummer) geprueft. */
+static unsigned char vt_skip[CC_MAXOPS], vt_wr[IP_SH_MAX], vt_nosc[IP_SH_MAX];
+static unsigned vt_ser, vt_nskip;
+static int vt_ok;
+
+static int vt_reads_late(const ip_list_t *B, const ip_op_t *o, unsigned i, const unsigned *lastw)
+{
+    int k, e;
+    if (o->sh_srv && o->sh_srv != o->srv) {
+        e = cc_ent_of(B, o->sh_srv, 2);
+        if (e < 0) { return 1; }
+        if (vt_wr[e] && i < lastw[e]) { return 1; }
+    }
+    if (o->rq) {
+        for (k = 1; k < 4; k++) {
+            if (o->rq_shsrv[k] && o->rq_shsrv[k] != o->rqr.srv[k]) {
+                e = cc_ent_of(B, o->rq_shsrv[k], 2);
+                if (e < 0 || (vt_wr[e] && i < lastw[e])) { return 1; }
+            }
+        }
+    }
+    return 0;
+}
+
+static void vt_scan(const ip_list_t *B, int bi)
+{
+    unsigned i, lastw[IP_SH_MAX];
+    int k, bbread = 0, bbdep = -1;
+    vt_ser = B->serial;
+    vt_ok = 1;
+    vt_nskip = 0;
+    memset(vt_wr, 0, sizeof vt_wr);
+    memset(vt_nosc, 0, sizeof vt_nosc);
+    memset(lastw, 0, sizeof lastw);
+    if (B->nops > CC_MAXOPS) { vt_ok = 0; return; }
+    for (i = 0; i < B->nops; i++) {
+        const ip_op_t *o = &B->ops[i];
+        int bb = (o->kind == IP_DRAW && o->rtv == g_rtv) || (o->kind == IP_CLR_RTV && o->rtv == g_rtv) ||
+                 (o->kind == IP_CLR_DSV && o->dsv == g_dsv);
+        vt_skip[i] = (unsigned char)!bb;
+        if (bb) {
+            if (o->kind == IP_DRAW && o->sh_dsv && bbdep < 0) { bbdep = cc_ent_of(B, o->sh_dsv, 1); }
+            continue;
+        }
+        vt_nskip++;
+        if (o->kind != IP_CLR_DSV) {
+            int e0 = cc_ent_of(B, o->sh_rtv, 0);
+            if (o->sh_rtv && e0 < 0) { vt_ok = 0; return; }
+            if (e0 >= 0) { vt_wr[e0] = 1; lastw[e0] = i + 1u; }
+        }
+        if (o->kind != IP_CLR_RTV) {
+            int e1 = cc_ent_of(B, o->sh_dsv, 1);
+            if (o->sh_dsv && e1 < 0) { vt_ok = 0; return; }
+            if (e1 >= 0) { vt_wr[e1] = 1; lastw[e1] = i + 1u; }
+        }
+    }
+    for (i = 0; i < B->nops; i++) {
+        const ip_op_t *o = &B->ops[i];
+        int r;
+        if (vt_skip[i] || o->kind != IP_DRAW) { continue; }
+        if (vt_reads_late(B, o, i, lastw)) { vt_ok = 0; return; }
+        r = (o->sh_srv && o->sh_srv != o->srv) ? cc_ent_of(B, o->sh_srv, 2) : -1;
+        if (r >= 0 && (r == B->bbref || r == bbdep)) { bbread = 1; }
+    }
+    for (k = 0; k < IP_SH_MAX; k++) {
+        if (!vt_wr[k]) { continue; }
+        if (g_ish[k].bakser[bi] != B->serial || !g_ish[k].bak[bi]) { vt_ok = 0; return; }
+        vt_nosc[k] = 1; /* bekommt bak[B] statt der Startkopie bak[A] */
+    }
+    /* BB-Schatten: im Augenbild ungenutzt (Augenziel), ausser ein BB-Draw liest ihn. Die BB-Tiefe
+     * behaelt ihre Startkopie (Effekt-Draws kopieren sie, W133). */
+    if (!bbread && B->bbref >= 0 && B->bbref < IP_SH_MAX && !vt_wr[B->bbref]) { vt_nosc[B->bbref] = 1; }
+}
+
 static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, int dbg, const ip_cx_t *x)
 {
     int cps = -1; /* DIAG: 1 = Diagnose-PS gebunden */
@@ -2501,6 +2584,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
     sb_vr_pass_t *vrp = (ip_vrp && !x->deferred && !dbg) ? ip_vrp : NULL; /* W134 VR-PROTO */
     int vrbb = 0, vrkind = -1; /* W134 VR-PROTO */
     int ccm = 0; /* W146 GPU-COST: Cockpit-Cache 0 aus, 1 aufbauen, 2 nutzen */
+    int vtk = 0; /* W183 VR-FIX3: 1 = RT-Ops uebersprungen (Tick-Endstand) */
     fxr_rep_begin(&fxs);
     memset(&cvp, 0xFF, sizeof cvp);
     memset(&csc, 0xFF, sizeof csc);
@@ -2514,8 +2598,22 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
         ID3D11DeviceContext_PSSetSamplers(x->c, 0, 1, &B->smp0);
     }
     if (!x->deferred && !vrp && !dbg) { cc_prep(B, bi, lerp_ok); } /* W146 GPU-COST: Scan + Startkopie-Maske */
+    if (vrp && vrp->wtick) { /* W183 VR-FIX3: Aussenwelt im Spieltakt (Tick-Endstand), nur BB-Ops je Auge */
+        static int vt_have;
+        if (!vt_have || vt_ser != B->serial) { vt_scan(B, bi); vt_have = 1; }
+        vtk = vt_ok;
+        vrp->wtick_used = vtk;
+        vrp->nskip = vtk ? vt_nskip : 0u;
+        if (vtk) { ip_sh_noskip = vt_nosc; }
+    }
     ip_sh_start(B, bi, A, ai, x);
     ip_sh_noskip = NULL;
+    if (vtk) {
+        int k;
+        for (k = 0; k < IP_SH_MAX; k++) {
+            if (vt_wr[k]) { ID3D11DeviceContext_CopyResource(x->c, (ID3D11Resource *)g_ish[k].sh, (ID3D11Resource *)g_ish[k].bak[bi]); }
+        }
+    }
     if (!x->deferred && !vrp && !dbg) { ccm = cc_begin(B, bi, A, lerp_ok, x); } /* W146 GPU-COST */
     if (ip_gs_n >= 0) { ip_gs_mark((ID3D11RenderTargetView *)2); } /* DIAG(TICK-PERF,W125): Kopien fertig */
     ID3D11DeviceContext_PSSetShader(x->c, g_im_ps, NULL, 0);
@@ -2524,6 +2622,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
         ip_op_t *o = &B->ops[i];
         int lerp;
         if ((ccm & 16) && cc_skip[i]) { continue; } /* W146 GPU-COST: ruhiges Ziel (Tick-Endstand kopiert) */
+        if (vtk && vt_skip[i]) { continue; } /* W183 VR-FIX3: RT-Op, Ziel hat den Tick-Endstand */
         if ((ccm & 3) && i < (unsigned)cc_pfx) { /* W146 GPU-COST: BB-Anfang aus dem Cockpit-Cache */
             if ((ccm & 3) == 2 && (o->rtv == g_rtv || (cc_bdsv && o->dsv == cc_bdsv))) { continue; }
         } else if ((ccm & 3) == 1 && i == (unsigned)cc_pfx) {
@@ -2639,7 +2738,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             }
             if (vrkind == 1) { int q; for (q = 0; q < 4; q++) { if (o->rn[q][2] > 0.0f && (vrp->w3_min <= 0.0f || o->rn[q][2] < vrp->w3_min)) { vrp->w3_min = o->rn[q][2]; }
                                                        if (o->rn[q][2] > 0.0f && vrp->wantz && vrp->ws_n < 512u) { vrp->ws[vrp->ws_n++] = o->rn[q][2]; } } } /* W164 */
-            if (o->rq) { vrp->nrq++; if (vrkind != 1 || !x->c1) { vrp->nrqfb++; } }
+            if (o->rq) { vrp->nrq++; if (vrkind != 1 || !x->c1 || vrp->noshade) { vrp->nrqfb++; } }
             if (vrp->dump > 0) { /* DIAG(VR-PROTO,W134): Eingangsdaten der BB-Draws */
                 vrp->dump--;
                 HLOG_I("VR op i=%u kind=%d n=%u rq=%d tex=0x%X lerp=%d vpz=[%.3f,%.3f] ds=%p mvp=[%.3f %.3f %.3f %.3f|%.3f %.3f %.3f %.3f|%.3f %.3f %.3f %.3f|%.3f %.3f %.3f %.3f] "
@@ -2661,7 +2760,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
                 }
             }
         }
-        if (o->rq && x->c1 && !(vrbb && vrkind != 1)) {
+        if (o->rq && x->c1 && !(vrbb && (vrkind != 1 || vrp->noshade))) { /* W183: vr_shading=0 -> IM-PS-Ersatz */
             /* RENDER-QA (W77): Shading-Draw mit seinem Zustand (Stream 0 per
              * Versatz, Stream 2, Konstanten-Fenster, Stufen 0..3, Sampler). */
             const rq_rec_t *r = &o->rqr;
@@ -3350,7 +3449,9 @@ static void ip_show(ip_list_t *A, ip_list_t *B, float t, const char *tag)
         (void)bi; (void)ai; (void)tph;
         return;
     }
-    if (t >= 1.0f || !A) {
+    if (t >= 1.0f || !A || (g_cfg.vr_enable && sb_vr_window_mirrors())) {
+        /* W183 VR-FIX3: zeigt das Fenster den VR-Spiegel, entfaellt die Mono-Wiedergabe (sb_render_blit
+         * kopiert dann nicht, sondern zeigt das Augenbild) */
         img = (ID3D11Resource *)g_ish[B->bbref].bak[bi];
         st_exact++;
     } else {
@@ -3721,6 +3822,12 @@ static DWORD WINAPI pd_main(LPVOID p)
 void sb_pd_start(void)
 {
     if (pd_started || g_cfg.present_decouple <= 0) { return; }
+    if (g_cfg.vr_enable) { /* W183 VR-FIX3: im VR-Betrieb ruht der Takt ohnehin (sb_pd_on) -> Thread gar nicht starten */
+        if (InterlockedCompareExchange(&pd_started, 2, 0) == 0) {
+            HLOG_I("PRESENT-TAKT: aus im VR-Betrieb (Fenster folgt dem Interp-Takt, VR-Thread taktet die Brille)");
+        }
+        return;
+    }
     if (InterlockedCompareExchange(&pd_started, 2, 0) != 0) { return; }
     if (!ip_qpf.QuadPart) { QueryPerformanceFrequency(&ip_qpf); }
     if (ip_dt <= 0) { ip_dt = ip_qpf.QuadPart / (g_cfg.interp_fps > 0 ? g_cfg.interp_fps : 120); }
@@ -3900,6 +4007,9 @@ int sb_interp_vr_replay(sb_vr_pass_t *p, void *pA, void *pB, float t, long long 
     }
     if (!B || B->bbref < 0 || !B->ready) { return 0; }
     if (A && !A->ready) { A = NULL; }
+    p->hold = hold; /* W183 VR-FIX3: Diagnose Paarwahl */
+    p->bser = B->serial;
+    p->aser = A ? A->serial : 0u;
     ID3D11DeviceContext_VSGetConstantBuffers(g_ctx, 2, 1, &vcb2); /* VR-VS nutzt b2 */
     ip_vrp = p;
     {

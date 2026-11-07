@@ -9,6 +9,10 @@ starter application. No game content is included or distributed.
 This repository is source-available (see [License](#license)). It is not an
 official product and is not affiliated with Capcom or Microsoft.
 
+[![Steelbound in action – watch on YouTube](https://img.youtube.com/vi/Iln350iJGcc/maxresdefault.jpg)](https://youtu.be/Iln350iJGcc)
+
+▶ **[Watch Steelbound in action on YouTube](https://youtu.be/Iln350iJGcc)**
+
 ## What Steelbound is
 
 - A **launcher** (`sb_launcher.exe`): pick your own game copy, configure
@@ -34,8 +38,6 @@ subscriptions) on top of a lot of personal time.
 If you enjoy Steelbound and want to help cover some of these costs, any
 support – one-time or monthly – is greatly appreciated. See [DONATE.md](DONATE.md).
 Thank you! ☕
-
-[![Steelbound – video](https://img.youtube.com/vi/Iln350iJGcc/hqdefault.jpg)](https://youtu.be/Iln350iJGcc)
 
 ## What Steelbound is not
 

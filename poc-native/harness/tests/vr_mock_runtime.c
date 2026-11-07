@@ -46,6 +46,12 @@
  *  - W164 SB_VR_MOCK_POSES=w164: Posen-Programm (vorlehnen 0..0,6 m, rollen
  *    +-22,5/+-45 Grad, gieren +-30/+-60 Grad, seitlich +-15 cm), je Pose
  *    SB_VR_MOCK_POSE_HOLD s (Standard 1,5) in Schleife; Zeile "MOCK pose ...".
+ *  - W183 SB_VR_MOCK_EYE=WxH: empfohlene Augengroesse (Standard 960x1056; Quest 3
+ *    ueber VDXR z. B. 2496x2688), Maximum 4096x4096.
+ *  - W183 XR_FB_display_refresh_rate: Bildraten 72/80/90/120 Hz, Wechsel per
+ *    xrRequestDisplayRefreshRateFB (Takt + Ereignis); SB_VR_MOCK_NORR=1 = ohne.
+ *  - W183 SB_VR_MOCK_UNFOCUS=a,b: ab a s nach Sessionstart Zustand VISIBLE
+ *    (Brille ab/Systemmenue), ab b s wieder FOCUSED.
  * Kein Fenster, keine Geraete, kein Netzwerk. */
 #define COBJMACROS
 #include <windows.h>
@@ -78,6 +84,13 @@ static FILE *m_log;
 static char m_out[MAX_PATH];
 /* Ereignis-Schlange (Session-Zustaende) */
 static XrSessionState m_evq[16];
+/* W183 */
+static unsigned m_ew = MOCK_EW, m_eh = MOCK_EH;
+static int m_norr, m_rr_ev;
+static float m_rr_from, m_rr_to;
+static double m_unf_a = -1.0, m_unf_b = -1.0;
+static int m_unf_st;
+static LONGLONG m_begin_q;
 static int m_evn;
 /* Swapchains */
 typedef struct {
@@ -148,11 +161,15 @@ static XrResult XRAPI_CALL m_EnumerateInstanceExtensionProperties(const char *la
 {
     (void)layer;
     if (!n) { return XR_ERROR_VALIDATION_FAILURE; }
-    *n = 1;
+    *n = (getenv("SB_VR_MOCK_NORR") && atoi(getenv("SB_VR_MOCK_NORR")) == 1) ? 1u : 2u; /* W183 */
     if (cap == 0) { return XR_SUCCESS; }
     if (!p) { return XR_ERROR_VALIDATION_FAILURE; }
     strcpy_s(p[0].extensionName, sizeof p[0].extensionName, XR_KHR_D3D11_ENABLE_EXTENSION_NAME);
     p[0].extensionVersion = 9;
+    if (*n > 1u && cap > 1u) {
+        strcpy_s(p[1].extensionName, sizeof p[1].extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+        p[1].extensionVersion = 1;
+    }
     return XR_SUCCESS;
 }
 
@@ -164,11 +181,21 @@ static XrResult XRAPI_CALL m_CreateInstance(const XrInstanceCreateInfo *ci, XrIn
     if (XR_VERSION_MAJOR(ci->applicationInfo.apiVersion) != 1) { return XR_ERROR_API_VERSION_UNSUPPORTED; }
     for (i = 0; i < ci->enabledExtensionCount; i++) {
         if (strcmp(ci->enabledExtensionNames[i], XR_KHR_D3D11_ENABLE_EXTENSION_NAME) == 0) { d3d = 1; }
+        else if (strcmp(ci->enabledExtensionNames[i], XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME) == 0 &&
+                 !(getenv("SB_VR_MOCK_NORR") && atoi(getenv("SB_VR_MOCK_NORR")) == 1)) { /* W183 */ }
         else { return XR_ERROR_EXTENSION_NOT_PRESENT; }
     }
     QueryPerformanceFrequency(&m_qpf);
     m_t0 = mnow();
     if (getenv("SB_VR_MOCK_HZ")) { m_hz = atoi(getenv("SB_VR_MOCK_HZ")); if (m_hz < 30 || m_hz > 240) { m_hz = 90; } }
+    if (getenv("SB_VR_MOCK_EYE")) { /* W183 */
+        unsigned w = 0, h = 0;
+        if (sscanf_s(getenv("SB_VR_MOCK_EYE"), "%ux%u", &w, &h) == 2 && w >= 64u && h >= 64u && w <= 4096u && h <= 4096u) { m_ew = w; m_eh = h; }
+    }
+    m_norr = getenv("SB_VR_MOCK_NORR") && atoi(getenv("SB_VR_MOCK_NORR")) == 1;
+    if (getenv("SB_VR_MOCK_UNFOCUS")) {
+        if (sscanf_s(getenv("SB_VR_MOCK_UNFOCUS"), "%lf,%lf", &m_unf_a, &m_unf_b) != 2) { m_unf_a = m_unf_b = -1.0; }
+    }
     if (getenv("SB_VR_MOCK_SHOTS")) { m_shot_every = atoi(getenv("SB_VR_MOCK_SHOTS")); }
     m_nohmd = getenv("SB_VR_MOCK_NOHMD") && atoi(getenv("SB_VR_MOCK_NOHMD")) == 1;
     {
@@ -212,6 +239,15 @@ static XrResult XRAPI_CALL m_PollEvent(XrInstance i, XrEventDataBuffer *b)
 {
     XrEventDataSessionStateChanged *e;
     if (i != m_inst || !b) { return XR_ERROR_HANDLE_INVALID; }
+    if (m_rr_ev) { /* W183 */
+        XrEventDataDisplayRefreshRateChangedFB *r = (XrEventDataDisplayRefreshRateChangedFB *)b;
+        memset(b, 0, sizeof *b);
+        r->type = XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB;
+        r->fromDisplayRefreshRate = m_rr_from;
+        r->toDisplayRefreshRate = m_rr_to;
+        m_rr_ev = 0;
+        return XR_SUCCESS;
+    }
     if (!m_evn) { return XR_EVENT_UNAVAILABLE; }
     e = (XrEventDataSessionStateChanged *)b;
     memset(b, 0, sizeof *b);
@@ -261,8 +297,8 @@ static XrResult XRAPI_CALL m_EnumerateViewConfigurationViews(XrInstance i, XrSys
     if (!cap) { return XR_SUCCESS; }
     if (cap < 2 || !v) { return XR_ERROR_SIZE_INSUFFICIENT; }
     for (k = 0; k < 2; k++) {
-        v[k].recommendedImageRectWidth = MOCK_EW;
-        v[k].recommendedImageRectHeight = MOCK_EH;
+        v[k].recommendedImageRectWidth = m_ew; /* W183 SB_VR_MOCK_EYE */
+        v[k].recommendedImageRectHeight = m_eh;
         v[k].maxImageRectWidth = 4096;
         v[k].maxImageRectHeight = 4096;
         v[k].recommendedSwapchainSampleCount = 1;
@@ -407,6 +443,7 @@ static XrResult XRAPI_CALL m_BeginSession(XrSession s, const XrSessionBeginInfo 
     ev_push(XR_SESSION_STATE_SYNCHRONIZED);
     ev_push(XR_SESSION_STATE_VISIBLE);
     ev_push(XR_SESSION_STATE_FOCUSED);
+    m_begin_q = mnow(); /* W183 SB_VR_MOCK_UNFOCUS */
     m_timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
     if (!m_timer) { m_timer = CreateWaitableTimerW(NULL, FALSE, NULL); }
     m_next = mnow();
@@ -595,6 +632,11 @@ static XrResult XRAPI_CALL m_WaitFrame(XrSession s, const XrFrameWaitInfo *wi, X
     fs->predictedDisplayTime = q2ns(m_next + per);
     fs->shouldRender = XR_TRUE;
     m_waits++;
+    if (m_unf_a >= 0.0 && m_begin_q) { /* W183: Brille ab (VISIBLE) und wieder auf (FOCUSED) */
+        double ts = (double)(mnow() - m_begin_q) / (double)m_qpf.QuadPart;
+        if (m_unf_st == 0 && ts >= m_unf_a) { m_unf_st = 1; ev_push(XR_SESSION_STATE_VISIBLE); mlog("MOCK Zustand VISIBLE (t=%.1fs, Brille ab)", ts); }
+        else if (m_unf_st == 1 && ts >= m_unf_b) { m_unf_st = 2; ev_push(XR_SESSION_STATE_FOCUSED); mlog("MOCK Zustand FOCUSED (t=%.1fs, Brille auf)", ts); }
+    }
     return XR_SUCCESS;
 }
 
@@ -836,6 +878,41 @@ static XrResult XRAPI_CALL m_EndFrame(XrSession s, const XrFrameEndInfo *fe)
     return XR_SUCCESS;
 }
 
+/* ---------- W183: XR_FB_display_refresh_rate ---------- */
+static const float kMockRates[4] = { 72.0f, 80.0f, 90.0f, 120.0f };
+
+static XrResult XRAPI_CALL m_EnumerateDisplayRefreshRatesFB(XrSession s, uint32_t cap, uint32_t *n, float *r)
+{
+    uint32_t k;
+    if (s != m_sess || !n || m_norr) { return XR_ERROR_HANDLE_INVALID; }
+    *n = 4;
+    if (!cap) { return XR_SUCCESS; }
+    if (cap < 4 || !r) { return XR_ERROR_SIZE_INSUFFICIENT; }
+    for (k = 0; k < 4; k++) { r[k] = kMockRates[k]; }
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL m_GetDisplayRefreshRateFB(XrSession s, float *r)
+{
+    if (s != m_sess || !r || m_norr) { return XR_ERROR_HANDLE_INVALID; }
+    *r = (float)m_hz;
+    return XR_SUCCESS;
+}
+
+static XrResult XRAPI_CALL m_RequestDisplayRefreshRateFB(XrSession s, float r)
+{
+    int k, ok = 0;
+    if (s != m_sess || m_norr) { return XR_ERROR_HANDLE_INVALID; }
+    for (k = 0; k < 4; k++) { if (fabsf(kMockRates[k] - r) < 0.5f) { ok = 1; } }
+    if (!ok) { return XR_ERROR_DISPLAY_REFRESH_RATE_UNSUPPORTED_FB; }
+    m_rr_from = (float)m_hz;
+    m_rr_to = r;
+    m_hz = (int)(r + 0.5f);
+    m_rr_ev = 1;
+    mlog("MOCK Bildrate %.0f -> %.0f Hz (xrRequestDisplayRefreshRateFB)", (double)m_rr_from, (double)r);
+    return XR_SUCCESS;
+}
+
 /* ---------- xrGetInstanceProcAddr / Aushandlung ---------- */
 
 typedef struct { const char *n; PFN_xrVoidFunction f; } mock_fn_t;
@@ -847,6 +924,7 @@ static const mock_fn_t kFns[] = {
     MF(CreateReferenceSpace), MF(DestroySpace), MF(EnumerateSwapchainFormats), MF(CreateSwapchain),
     MF(DestroySwapchain), MF(EnumerateSwapchainImages), MF(AcquireSwapchainImage), MF(WaitSwapchainImage),
     MF(ReleaseSwapchainImage), MF(WaitFrame), MF(BeginFrame), MF(EndFrame), MF(LocateViews),
+    MF(EnumerateDisplayRefreshRatesFB), MF(GetDisplayRefreshRateFB), MF(RequestDisplayRefreshRateFB), /* W183 */
 };
 
 static XrResult XRAPI_CALL m_GetInstanceProcAddr(XrInstance inst, const char *name, PFN_xrVoidFunction *fn)

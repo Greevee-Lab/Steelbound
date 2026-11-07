@@ -89,6 +89,7 @@ cfg.bad_mouseoff=sbc_mouse_off %d invalid (0 = mouse in parallel, 1 = mouse off 
 cfg.bad_sbc=sbc_usb %d invalid (0 = off, 1 = original controller via USB).
 cfg.bad_vr=vr_enable %d invalid (0 = off, 1 = on).
 cfg.bad_vrprev=vr_preview '%s' invalid (sbs, left, right, off).
+cfg.bad_vrscale=vr_render_scale %d invalid (30..150 %%).
 cfg.bad_vsync=VSync %d invalid (0 = off, 1 = on).
 cfg.bad_width=Width %u out of range 320..7680.
 cfg.bad_winmode=Display mode %d invalid (0 = windowed, 1 = borderless, 2 = exclusive).
@@ -208,7 +209,12 @@ gui.gfx_edge=Widescreen sides
 gui.gfx_edgefade=Fade
 gui.gfx_ipfps=Frame rate
 gui.gfx_res=Resolution
-gui.gfx_vr=Desktop preview
+gui.gfx_vr=Desktop mirror
+gui.vr_perf=Performance
+gui.vrp_perf=Performance
+gui.vrp_bal=Balanced
+gui.vrp_qual=Quality
+gui.vrp_custom=Custom
 gui.gfx_wh=Width × Height
 gui.gfx_winmode=Display mode
 gui.ip_120=120 (smooth)
@@ -346,7 +352,26 @@ ovl.lb_tone=World: tonemapping
 ovl.lb_vqasync=Sun test without waiting
 ovl.lb_vripd=Eye distance (preview)
 ovl.lb_vron=VR (headset)
-ovl.lb_vrprev=Desktop preview
+ovl.lb_vrprev=Mirror: eye
+ovl.lb_vrfwd=Seat forward/back
+ovl.lb_vrpreset=VR performance
+ovl.lb_vrres=VR render resolution
+ovl.lb_vrhz=Headset refresh rate
+ovl.lb_vrmirror=Desktop mirror
+ovl.lb_vrworld=Outside world
+ovl.lb_vrshade=Cockpit shading
+ovl.v_vrp_custom=Custom
+ovl.v_vrp_perf=Performance
+ovl.v_vrp_bal=Balanced
+ovl.v_vrp_qual=Quality
+ovl.v_vrhz_rt=Runtime default
+ovl.v_vrm_fill=Fill window
+ovl.v_vrm_bars=Whole image (bars)
+ovl.v_vrm_half=Half resolution
+ovl.v_vrm_off=Off (black)
+ovl.v_vrw_tick=Game rate
+ovl.v_vrw_frame=Every frame
+ovl.st_vrrt_restart=Monitor resolution applies after restart (save)
 ovl.lb_vrrec=Recenter view
 ovl.lb_vrscale=World scale
 ovl.lb_vrseat=Seat height

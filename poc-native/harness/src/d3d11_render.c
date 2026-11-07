@@ -1249,6 +1249,25 @@ void sb_render_blit(ID3D11Resource *src)
     if (!g_swap_res) {
         return;
     }
+    if (g_cfg.vr_enable && !g_vr_blit && sb_vr_window_mirrors()) {
+        /* W183 VR-FIX3: Fenster zeigt in der Mission nur den VR-Spiegel (bzw. schwarz) - keine Kopie und
+         * keine Nachbearbeitung des Monobilds; ESC-Menue (und F2 ohne vr_preview_clean) darueber. */
+        sb_ctx_enter();
+        if (!g_swap_rtv &&
+            FAILED(ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv))) {
+            g_swap_rtv = NULL;
+        }
+        if (sb_vr_after_blit(g_swap_res, g_swap_rtv)) {
+            if (g_cfg.overlay && sb_ovl_open()) { sb_ovl_draw(g_swap_rtv, 0); }
+            if (!g_cfg.vr_preview_clean && sb_phud_visible()) { sb_phud_draw(g_swap_rtv, 0); }
+        }
+        if (g_cfg.overlay_test[0]) { /* TEST(W118): Overlay-Bild (gezeigtes Bild) */
+            char onm[48];
+            if (sb_ovl_shot_due(onm, sizeof onm)) { sb_render_shot_name(onm, g_swap_res); }
+        }
+        sb_ctx_leave();
+        return;
+    }
     if (!src) {
         ID3D11RenderTargetView_GetResource(g_rtv, &res);
         src = res;

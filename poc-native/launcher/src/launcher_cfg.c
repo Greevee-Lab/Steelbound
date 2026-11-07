@@ -55,6 +55,7 @@ void lcfg_defaults(launcher_settings_t *s)
     s->vr_enable = 0;           /* W134 VR-PROTO: Standard aus */
     /* W159: VR-Startweg nutzt ein Auge als Standard-Vorschau (einstellbar). */
     strcpy_s(s->vr_preview, sizeof s->vr_preview, "left");
+    lcfg_vr_preset_apply(s, 2); /* W183 VR-FIX3: Standard "Ausgewogen" (wie hcfg) */
 #if SB_EDITION_COMMUNITY
     strcpy_s(s->lang, sizeof s->lang, "en");
 #else
@@ -89,6 +90,45 @@ static const char *const kFxKey[LFX_N] = { /* W173: Reihenfolge = sb_gfxpreset.h
 const char *lcfg_shx_key(int i)
 {
     return (i >= 0 && i < LSHX_N) ? kShxKey[i] : "";
+}
+
+/* W183 VR-FIX3: Spiegel der Tabelle kVrPreset in vr.c (Client). */
+static const int kVrPre[4][6] = {
+    { 0, 0, 0, 0, 0, 0 },
+    { 65, 72, 50, 1, 0, 1 },   /* Leistung */
+    { 80, 0, 100, 1, 1, 2 },   /* Ausgewogen (Standard) */
+    { 100, 0, 100, 0, 1, 0 },  /* Qualitaet */
+};
+
+int lcfg_vr_preset_value(int preset, int k)
+{
+    if (preset < 1 || preset > 3 || k < 0 || k > 5) { return -1; }
+    return kVrPre[preset][k];
+}
+
+void lcfg_vr_preset_apply(launcher_settings_t *s, int pr)
+{
+    if (pr < 1 || pr > 3) { s->vr_preset = 0; return; }
+    s->vr_render_scale = kVrPre[pr][0];
+    s->vr_refresh_hz = kVrPre[pr][1];
+    s->vr_mirror_res = kVrPre[pr][2];
+    s->vr_world_tick = kVrPre[pr][3];
+    s->vr_shading = kVrPre[pr][4];
+    s->vr_rt_scale = kVrPre[pr][5];
+    s->vr_preset = pr;
+}
+
+int lcfg_vr_preset_match(const launcher_settings_t *s)
+{
+    int pr;
+    for (pr = 1; pr <= 3; pr++) {
+        if (s->vr_render_scale == kVrPre[pr][0] && s->vr_refresh_hz == kVrPre[pr][1] &&
+            s->vr_mirror_res == kVrPre[pr][2] && (s->vr_world_tick ? 1 : 0) == kVrPre[pr][3] &&
+            (s->vr_shading ? 1 : 0) == kVrPre[pr][4] && s->vr_rt_scale == kVrPre[pr][5]) {
+            return pr;
+        }
+    }
+    return 0;
 }
 
 int lcfg_shx_default(int i)
@@ -316,6 +356,20 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         s->vr_enable = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "vr_preview") == 0) {
         strncpy_s(s->vr_preview, sizeof s->vr_preview, v, sizeof s->vr_preview - 1);
+    } else if (strcmp(k, "vr_preset") == 0) { /* W183 VR-FIX3 */
+        s->vr_preset = atoi(v);
+    } else if (strcmp(k, "vr_render_scale") == 0) {
+        s->vr_render_scale = atoi(v);
+    } else if (strcmp(k, "vr_refresh_hz") == 0) {
+        s->vr_refresh_hz = atoi(v);
+    } else if (strcmp(k, "vr_mirror_res") == 0) {
+        s->vr_mirror_res = atoi(v);
+    } else if (strcmp(k, "vr_world_tick") == 0) {
+        s->vr_world_tick = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "vr_shading") == 0) {
+        s->vr_shading = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "vr_rt_scale") == 0) {
+        s->vr_rt_scale = atoi(v);
     } else if (strcmp(k, "lang") == 0) { /* W142: nur en/de gelten */
         if (_stricmp(v, "de") == 0) {
             strcpy_s(s->lang, sizeof s->lang, "de");
@@ -483,6 +537,11 @@ static const char *kManaged[][2] = {
     { "fx_interp", "render" },
     /* W134 VR-PROTO */
     { "vr_enable", "vr" },          { "vr_preview", "vr" },
+    /* W183 VR-FIX3: VR-Leistung */
+    { "vr_preset", "vr" },          { "vr_render_scale", "vr" },
+    { "vr_refresh_hz", "vr" },      { "vr_mirror_res", "vr" },
+    { "vr_world_tick", "vr" },      { "vr_shading", "vr" },
+    { "vr_rt_scale", "vr" },
     /* W142 L10N-EN */
     { "rt_scale", "render" },   { "rt_scale_dyn", "render" }, /* W148 */
     { "lang", "ui" },
@@ -588,6 +647,20 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = s->rt_scale_dyn;
         } else if (strcmp(k, "vr_enable") == 0) { /* W134 */
             v = s->vr_enable;
+        } else if (strcmp(k, "vr_preset") == 0) { /* W183 */
+            v = s->vr_preset;
+        } else if (strcmp(k, "vr_render_scale") == 0) {
+            v = s->vr_render_scale;
+        } else if (strcmp(k, "vr_refresh_hz") == 0) {
+            v = s->vr_refresh_hz;
+        } else if (strcmp(k, "vr_mirror_res") == 0) {
+            v = s->vr_mirror_res;
+        } else if (strcmp(k, "vr_world_tick") == 0) {
+            v = s->vr_world_tick;
+        } else if (strcmp(k, "vr_shading") == 0) {
+            v = s->vr_shading;
+        } else if (strcmp(k, "vr_rt_scale") == 0) {
+            v = s->vr_rt_scale;
         } else {
             int i; /* W131: Shader-Keys */
             for (i = 0; i < LSHX_N; i++) {
@@ -1087,6 +1160,9 @@ paths_ok:
     if (_stricmp(s->vr_preview, "sbs") != 0 && _stricmp(s->vr_preview, "left") != 0 &&
         _stricmp(s->vr_preview, "right") != 0 && _stricmp(s->vr_preview, "off") != 0) {
         FAIL(LT("cfg.bad_vrprev"), s->vr_preview);
+    }
+    if (s->vr_render_scale < 30 || s->vr_render_scale > 150) { /* W183 */
+        FAIL(LT("cfg.bad_vrscale"), s->vr_render_scale);
     }
     if (s->edge_mode < 0 || s->edge_mode > 2) { /* W107 */
         FAIL(LT("cfg.bad_edge"),

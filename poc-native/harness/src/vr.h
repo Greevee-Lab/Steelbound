@@ -45,6 +45,14 @@ typedef struct {
     int ifix;                  /* W164 vr_inst_depth: 1 = P2-Draws mit perspektivischem z/w (> 0,2: Instrumente, Anzeigen) auf ihre metrische Tiefe */
     unsigned ws_n;              /* W164: Clip-w-Stichproben der 3D-Pfad-Draws (erste Wiedergabe, wantz) */
     float ws[512];
+    /* W183 VR-FIX3 */
+    int wtick;                  /* Eingang vr_world_tick: 1 = RT-Paesse (Aussenwelt, Monitore) nicht je VR-Bild neu, sondern
+                                 * Tick-Endstand bak[B] (Spieltakt); nur BB-Draws (Cockpit, HUD) je Auge mit der aktuellen Pose */
+    int noshade;                /* Eingang vr_shading=0: Shading-Draws des 3D-Pfads im Augenbild ueber den IM-PS (billiger) */
+    int wtick_used;             /* Ausgabe: 1 = Welt aus dem Tick-Endstand (Scan sicher), 0 = volle Wiedergabe */
+    unsigned nskip;             /* Ausgabe: uebersprungene RT-Ops (wtick_used) */
+    int hold;                   /* Ausgabe: 1 = juengster Tick gehalten (naechster fehlte zum Zeitpunkt) */
+    unsigned bser, aser;        /* Ausgabe: Seriennummern des wiedergegebenen Paars (0 = keins) */
 } sb_vr_pass_t;
 
 void sb_vr_init(void);          /* nach Device + Fenster (d3d11_render.c); vr_enable=0 -> sofort zurueck */
@@ -66,6 +74,14 @@ void sb_vr_watch(void);
  * des Monitorbilds): Leinwand-Quelle (ausserhalb der Mission) sichern; im OpenXR-Modus mit
  * vr_preview sbs/left/right das Fenster durch das eingereichte Augenbild ersetzen (1 = ersetzt). */
 int sb_vr_after_blit(void *swap_res, void *swap_rtv);
+/* W183 VR-FIX3: 1 = im OpenXR-Modus zeigt das Fenster in der Mission den VR-Spiegel (bzw. schwarz bei
+ * vr_mirror=0) - die Mono-Wiedergabe des Fensters (ip_show) und Kopie/Nachbearbeitung in sb_render_blit
+ * entfallen. 0 = Fenster wie bisher. vr_enable=0: immer 0. */
+int sb_vr_window_mirrors(void);
+/* W183: ESC-Menue VR: Leistungs-Preset (1 Leistung, 2 Ausgewogen, 3 Qualitaet) auf die Einzelwerte anwenden;
+ * sb_vr_preset_match: welches Preset passt zu den aktuellen Werten (0 = eigene). */
+void sb_vr_preset_apply(int preset);
+int sb_vr_preset_match(void);
 
 /* render_interp.c: Augen-Wiedergabe (unter ctx_lock). A/B = ip_list_t*
  * (NULL -> juengstes Paar, Zeitpunkt due_qpc, 0 = jetzt). Rueckgabe 1 =

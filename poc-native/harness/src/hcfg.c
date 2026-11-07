@@ -255,6 +255,20 @@ void hcfg_defaults(void)
     g_cfg.vr_diag_skip = 0;
     g_cfg.vr_world_depth = 1;
     g_cfg.vr_inst_depth = 1;
+    g_cfg.vr_render_scale = 80;          /* W183 VR-FIX3 (Beleg BERICHT W183) */
+    g_cfg.vr_refresh_hz = 0;
+    g_cfg.vr_seat_forward = 300;
+    g_cfg.vr_recenter_start = 1;
+    g_cfg.vr_mirror = 1;
+    g_cfg.vr_mirror_fit = 0;
+    g_cfg.vr_mirror_res = 100;
+    g_cfg.vr_world_tick = 1;
+    g_cfg.vr_shading = 1;
+    g_cfg.vr_due_ahead = 0;
+    g_cfg.vr_idle_unfocused = 1;
+    g_cfg.vr_rt_scale = 2;              /* = Preset Ausgewogen */
+    g_cfg.vr_preset = 2;
+    g_cfg.vr_frame_log = 0;
     g_cfg.perf_trace = 0;               /* W137: DIAG Bild-/Tick-Spur aus */
     g_cfg.contig_fast = 1;              /* W122: low_alloc mit Merkpunkt (0 = alt) */
     g_cfg.mem_wc_strip = 1;             /* W123: WC/NOCACHE nicht ins Host-Mapping (0 = alt) */
@@ -413,6 +427,26 @@ static int set_key_vr(const char *k, const char *v)
     else if (strcmp(k, "vr_diag_skip") == 0) { g_cfg.vr_diag_skip = atoi(v); }
     else if (strcmp(k, "vr_world_depth") == 0) { g_cfg.vr_world_depth = atoi(v); }
     else if (strcmp(k, "vr_inst_depth") == 0) { g_cfg.vr_inst_depth = atoi(v); }
+    else if (strcmp(k, "vr_render_scale") == 0) { g_cfg.vr_render_scale = atoi(v); } /* W183 VR-FIX3 */
+    else if (strcmp(k, "vr_refresh_hz") == 0) { g_cfg.vr_refresh_hz = atoi(v); }
+    else if (strcmp(k, "vr_seat_forward") == 0) { g_cfg.vr_seat_forward = atoi(v); }
+    else if (strcmp(k, "vr_recenter_start") == 0) { g_cfg.vr_recenter_start = atoi(v); }
+    else if (strcmp(k, "vr_mirror") == 0) { g_cfg.vr_mirror = atoi(v); }
+    else if (strcmp(k, "vr_mirror_fit") == 0) {
+        g_cfg.vr_mirror_fit = (_stricmp(v, "bars") == 0 || _stricmp(v, "balken") == 0) ? 1 :
+                              (_stricmp(v, "crop") == 0 || _stricmp(v, "fill") == 0) ? 0 : atoi(v);
+    }
+    else if (strcmp(k, "vr_mirror_res") == 0) { g_cfg.vr_mirror_res = atoi(v); }
+    else if (strcmp(k, "vr_world_tick") == 0) { g_cfg.vr_world_tick = atoi(v); }
+    else if (strcmp(k, "vr_shading") == 0) { g_cfg.vr_shading = atoi(v); }
+    else if (strcmp(k, "vr_due_ahead") == 0) { g_cfg.vr_due_ahead = atoi(v); }
+    else if (strcmp(k, "vr_idle_unfocused") == 0) { g_cfg.vr_idle_unfocused = atoi(v); }
+    else if (strcmp(k, "vr_rt_scale") == 0) { g_cfg.vr_rt_scale = atoi(v); }
+    else if (strcmp(k, "vr_preset") == 0) {
+        g_cfg.vr_preset = _stricmp(v, "performance") == 0 ? 1 : _stricmp(v, "balanced") == 0 ? 2 :
+                          _stricmp(v, "quality") == 0 ? 3 : _stricmp(v, "custom") == 0 ? 0 : atoi(v);
+    }
+    else if (strcmp(k, "vr_frame_log") == 0) { g_cfg.vr_frame_log = atoi(v); }
     else { return 0; }
     return 1;
 }

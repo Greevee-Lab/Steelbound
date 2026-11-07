@@ -54,6 +54,15 @@ typedef struct {
                                  * entscheidet NICHT mehr ueber den Startweg:
                                  * "Spielen" erzwingt aus, "Spielen in VR" an
                                  * (Start-Parameter, user.cfg unveraendert) */
+    /* W183 VR-FIX3: VR-Leistung (Client vr.c, nur im VR-Betrieb wirksam). Preset
+     * setzt die sechs Werte; Tabelle gespiegelt aus vr.c (kVrPreset). */
+    int vr_preset;          /* 0 eigene, 1 Leistung, 2 Ausgewogen (Standard), 3 Qualitaet */
+    int vr_render_scale;    /* Render-Aufloesung je Auge in % der Runtime-Empfehlung (Standard 80) */
+    int vr_refresh_hz;      /* Bildrate der Brille (0 = Runtime) */
+    int vr_mirror_res;      /* Desktop-Spiegel in % der Fenstergroesse */
+    int vr_world_tick;      /* 1 = Aussenwelt/Monitore im Spieltakt */
+    int vr_shading;         /* 1 = Cockpit-Shading in VR */
+    int vr_rt_scale;        /* Welt-/Monitor-RT-Faktor im VR-Betrieb (0 = wie rt_scale) */
     /* W142 L10N-EN: [ui] lang ("en" | "de"). Community: "en"; private
      * Erststart: "de" (lcfg_defaults, SB_EDITION). */
     char lang[8];
@@ -119,6 +128,10 @@ void lcfg_defaults(launcher_settings_t *s);void lcfg_defaults(launcher_settings_
 /* Datei parsen (gleiche Semantik wie hcfg: Sections egal, key=value,
  * # Kommentar). Unbekannte Keys ignoriert. 0 = geparst, 1 = fehlt. */
 int lcfg_load_file(const char *path, launcher_settings_t *s);
+/* W183 VR-FIX3: VR-Leistungs-Preset (1..3) anwenden / erkennen (0 = eigene) */
+void lcfg_vr_preset_apply(launcher_settings_t *s, int preset);
+int lcfg_vr_preset_match(const launcher_settings_t *s);
+int lcfg_vr_preset_value(int preset, int k); /* k: 0 Aufloesung, 1 Bildrate, 2 Spiegel, 3 Aussenwelt, 4 Shading, 5 Monitor-RT */
 /* Wie lcfg_load_file, zaehlt zusaetzlich die key=value-Zeilen (*keys,
  * darf NULL sein). Kaputte Zeilen (ohne '=') werden still uebersprungen:
  * eine teilweise lesbare Datei liefert trotzdem ihre gueltigen Keys. */

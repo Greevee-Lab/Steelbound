@@ -207,6 +207,8 @@ int gui_page_from_name(const char *v)
 #define ID_GFX_FX 1088     /* Effekte (Stufe der fx_*) */
 #define ID_GFX_TEX 1089    /* Texturen: Original / HD aus Packs */
 #define ID_CTRL_BROWSER 1090 /* W179: Tastenuebersicht als HTML im Browser */
+#define ID_VRPRESET 1091   /* W183 VR-FIX3: VR-Leistung (Leistung/Ausgewogen/Qualitaet/Eigene) */
+#define ID_VRRES 1092      /* W183 VR-FIX3: VR-Render-Aufloesung (% der Runtime-Empfehlung) */
 static char g_img_msg[600]; /* W150: Ergebnis der letzten Abbild-Pruefung (UTF-8) */
 static int g_img_ok;
 static void check_image_ex(int status);
@@ -1737,6 +1739,18 @@ static void paint_play(void)
     }
 }
 
+/* W183 VR-FIX3: Stufen der VR-Render-Aufloesung (Kombi ID_VRRES) */
+static const int kVrRes[] = { 50, 60, 65, 70, 80, 85, 90, 100, 120 };
+#define KVRRES_N ((int)(sizeof kVrRes / sizeof kVrRes[0]))
+static int vrres_index(int pct)
+{
+    int k, best = 0;
+    for (k = 0; k < KVRRES_N; k++) {
+        if (abs(kVrRes[k] - pct) < abs(kVrRes[best] - pct)) { best = k; }
+    }
+    return best;
+}
+
 /* W171: Seite Anzeige (Bildschirm, Bildrate, VR-Vorschau, Bildformat,
  * Render-Skalierung). */
 static void paint_display(void)
@@ -1758,7 +1772,8 @@ static void paint_display(void)
 
     card(CX0, CY0 + 368, COLW, 128, LT("gui.disp_vr"));
     label1(F_SMALL, LT("gui.gfx_vr"), CX0 + 18, CY0 + 412, 100, 30, C_DIM);
-    paint_reason(6, CX0 + 18, CY0 + 448, COLW - 36, 30);
+    label1(F_SMALL, LT("gui.vr_perf"), CX0 + 18, CY0 + 446, 100, 30, C_DIM); /* W183 */
+    paint_reason(6, CX0 + 18, CY0 + 478, COLW - 36, 16);
 
     card(COL2, CY0, COLW, 376, LT("gui.gfx_aspect"));
     /* R13: festes Bildformat (S3.10) als Info, kein Schalter */
@@ -4850,6 +4865,11 @@ static void ui_from_settings(const launcher_settings_t *s)
                        _stricmp(s->vr_preview, "sbs") == 0 ? 0 :
                        _stricmp(s->vr_preview, "right") == 0 ? 2 :
                        (_stricmp(s->vr_preview, "off") == 0 || _stricmp(s->vr_preview, "xr") == 0) ? 3 : 1);
+    { /* W183 VR-FIX3: Preset (0..2 = Leistung/Ausgewogen/Qualitaet, 3 = Eigene) + Aufloesung */
+        int pr = lcfg_vr_preset_match(s);
+        ComboBox_SetCurSel(ctl(ID_VRPRESET), pr >= 1 ? pr - 1 : 3);
+        ComboBox_SetCurSel(ctl(ID_VRRES), vrres_index(s->vr_render_scale));
+    }
     ComboBox_SetCurSel(ctl(ID_RTSCALE), s->rt_scale_dyn ? 0 : /* W148 */
                        (s->rt_scale <= 0 ? 1 : s->rt_scale <= 4 ? s->rt_scale + 1 : 5));
     {
@@ -4926,6 +4946,12 @@ static void ui_to_settings(launcher_settings_t *s)
         if (sel >= 0 && sel <= 3) {
             strcpy_s(s->vr_preview, sizeof s->vr_preview, prev[sel]);
         }
+    }
+    { /* W183 VR-FIX3: Preset setzt die sechs Werte, die Aufloesung-Kombi gilt zuletzt */
+        int ps = ComboBox_GetCurSel(ctl(ID_VRPRESET)), rs = ComboBox_GetCurSel(ctl(ID_VRRES));
+        if (ps >= 0 && ps <= 2 && lcfg_vr_preset_match(s) != ps + 1) { lcfg_vr_preset_apply(s, ps + 1); }
+        if (rs >= 0 && rs < KVRRES_N) { s->vr_render_scale = kVrRes[rs]; }
+        s->vr_preset = lcfg_vr_preset_match(s);
     }
     sel = ComboBox_GetCurSel(ctl(ID_RTSCALE)); /* W148 */
     if (sel == 0) { s->rt_scale_dyn = 1; s->rt_scale = 0; }
@@ -10056,6 +10082,7 @@ static void ui_apply_language(void)
     static const char *const kScale[] = { "gui.scale2", "gui.scale4" };
     static const char *const kEdge[] = { "gui.edge_off", "gui.edge_cut", "gui.edge_fade" };
     static const char *const kVr[] = { "gui.vr_prev_sbs", "gui.vr_prev_left", "gui.vr_prev_right", "gui.vr_prev_off" };
+    static const char *const kVrPre[] = { "gui.vrp_perf", "gui.vrp_bal", "gui.vrp_qual", "gui.vrp_custom" }; /* W183 */
     static const char *const kMouse[] = { "gui.mouse_abs", "gui.mouse_rel" };
     static const char *const kLang[] = { "gui.lang_en", "gui.lang_de" };
     HWND c;
@@ -10131,6 +10158,7 @@ static void ui_apply_language(void)
         ComboBox_SetCurSel(c, (sel >= 0 && sel < KEDGES_N) ? sel : KEDGES_N - 1);
     }
     combo_refill(ID_VR, kVr, 4);
+    combo_refill(ID_VRPRESET, kVrPre, 4); /* W183 */
     c = ctl(ID_RTSCALE); /* W148: 2 Texte + Zahlen 1..4 */
     if (c) {
         sel = ComboBox_GetCurSel(c);
@@ -10305,6 +10333,21 @@ static void build_controls(void)
     combo_add(c, LT("gui.vr_prev_right"));
     combo_add(c, LT("gui.vr_prev_off"));
     ComboBox_SetCurSel(c, 1);
+    /* W183 VR-FIX3: VR-Leistung (Preset) + Render-Aufloesung nebeneinander */
+    c = mk(w, K_COMBO, ID_VRPRESET, P_DISPLAY, CX0 + 120, CY0 + 446, (COLW - 138 - 8) * 3 / 5, 30, "", 0);
+    combo_add(c, LT("gui.vrp_perf"));
+    combo_add(c, LT("gui.vrp_bal"));
+    combo_add(c, LT("gui.vrp_qual"));
+    combo_add(c, LT("gui.vrp_custom"));
+    ComboBox_SetCurSel(c, 1);
+    c = mk(w, K_COMBO, ID_VRRES, P_DISPLAY, CX0 + 120 + (COLW - 138 - 8) * 3 / 5 + 8, CY0 + 446,
+           (COLW - 138 - 8) - (COLW - 138 - 8) * 3 / 5, 30, "", 0);
+    for (i = 0; i < KVRRES_N; i++) {
+        char t[16];
+        _snprintf_s(t, sizeof t, _TRUNCATE, "%d %%", kVrRes[i]);
+        combo_add(c, t);
+    }
+    ComboBox_SetCurSel(c, vrres_index(80));
     /* Bildformat: fest (S3.10), Schalter bleibt nur fuer den Roundtrip */
     mk(w, K_TOGGLE, ID_ASPECT, P_DISPLAY, COL2 + 18, CY0 + 46, COLW - 36, 28, "", 0);
     /* W107 EDGE-MODE: [render] edge_mode / edge_fade_width / edge_fade_strength */
@@ -10755,6 +10798,28 @@ static void on_command_inner(int id, int code)
         if (code == CBN_SELCHANGE && !g_updating) {
             update_aspect_info();
             redraw_rect(COL2, CY0, COLW, 376);
+        }
+        break;
+    case ID_VRPRESET: /* W183 VR-FIX3: Preset -> Aufloesung mitfuehren */
+        if (code == CBN_SELCHANGE && !g_updating) {
+            int ps = ComboBox_GetCurSel(ctl(ID_VRPRESET));
+            if (ps >= 0 && ps <= 2) {
+                g_updating++;
+                ComboBox_SetCurSel(ctl(ID_VRRES), vrres_index(lcfg_vr_preset_value(ps + 1, 0)));
+                g_updating--;
+            }
+        }
+        break;
+    case ID_VRRES: /* W183: eigene Aufloesung -> Preset neu bestimmen */
+        if (code == CBN_SELCHANGE && !g_updating) {
+            launcher_settings_t t = g_s;
+            int ps = ComboBox_GetCurSel(ctl(ID_VRPRESET)), rs = ComboBox_GetCurSel(ctl(ID_VRRES)), m;
+            if (ps >= 0 && ps <= 2) { lcfg_vr_preset_apply(&t, ps + 1); }
+            if (rs >= 0 && rs < KVRRES_N) { t.vr_render_scale = kVrRes[rs]; }
+            m = lcfg_vr_preset_match(&t);
+            g_updating++;
+            ComboBox_SetCurSel(ctl(ID_VRPRESET), m >= 1 ? m - 1 : 3);
+            g_updating--;
         }
         break;
     case ID_WINMODE: /* W171: Hz/Aufloesung frei per Regel R7/R8 */

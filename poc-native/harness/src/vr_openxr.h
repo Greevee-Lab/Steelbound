@@ -401,6 +401,20 @@ typedef XrResult (XRAPI_PTR *PFN_xrEndFrame)(XrSession, const XrFrameEndInfo *);
 typedef XrResult (XRAPI_PTR *PFN_xrLocateViews)(XrSession, const XrViewLocateInfo *, XrViewState *, uint32_t, uint32_t *, XrView *);
 typedef XrResult (XRAPI_PTR *PFN_xrGetD3D11GraphicsRequirementsKHR)(XrInstance, XrSystemId, XrGraphicsRequirementsD3D11KHR *);
 
+/* ---- XR_FB_display_refresh_rate (Erweiterung Nr. 102, W183 VR-FIX3; nach Spezifikation) ---- */
+#define XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME "XR_FB_display_refresh_rate"
+#define XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB ((XrStructureType)1000101000)
+#define XR_ERROR_DISPLAY_REFRESH_RATE_UNSUPPORTED_FB (-1000101000)
+typedef struct XrEventDataDisplayRefreshRateChangedFB {
+    XrStructureType type;
+    const void *next;
+    float fromDisplayRefreshRate;
+    float toDisplayRefreshRate;
+} XrEventDataDisplayRefreshRateChangedFB;
+typedef XrResult (XRAPI_PTR *PFN_xrEnumerateDisplayRefreshRatesFB)(XrSession, uint32_t, uint32_t *, float *);
+typedef XrResult (XRAPI_PTR *PFN_xrGetDisplayRefreshRateFB)(XrSession, float *);
+typedef XrResult (XRAPI_PTR *PFN_xrRequestDisplayRefreshRateFB)(XrSession, float);
+
 /* ---- Loader <-> Runtime (Loader-Spezifikation, "Runtime Interface Negotiation") ---- */
 typedef enum XrLoaderInterfaceStructs {
     XR_LOADER_INTERFACE_STRUCT_UNINTIALIZED = 0,

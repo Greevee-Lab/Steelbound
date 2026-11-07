@@ -198,7 +198,7 @@ static void vr_eye_matrix(float E[16], const float q[4], const float pos[3], flo
     if (s <= 0.0f) { s = 1.0f; }
     M[12] *= s;
     M[13] = (M[13] + (float)g_cfg.vr_seat_height / 1000.0f) * s;
-    M[14] *= s;
+    M[14] = (M[14] - (float)g_cfg.vr_seat_forward / 1000.0f) * s; /* W183: Sitz nach vorne (-z) */
     m4_rigid_inv(V, M);
     /* Near/Far wie die Spielkamera (g_proj_game 0,1/100): Tiefe der linear
      * projizierten Shading-Draws = Original bei geradem Kopf (W134_e3) */
@@ -206,13 +206,31 @@ static void vr_eye_matrix(float E[16], const float q[4], const float pos[3], flo
     m4_mul(E, V, P);
 }
 
+/* W183: Kopfposition im Sitz-Raum (Meter, vor Massstab; Sitz-Versatz eingerechnet) bei Mitte (yaw, rp) */
+static void vr_seat_head(const float pos[3], float yaw, const float rp[3], float out[3])
+{
+    float dx = pos[0] - rp[0], dy = pos[1] - rp[1], dz = pos[2] - rp[2];
+    float c = cosf(yaw), sn = sinf(yaw);
+    /* Rueckdrehung um -yaw (RH, y oben): x' = c*x - s*z, z' = s*x + c*z */
+    out[0] = c * dx - sn * dz;
+    out[1] = dy + (float)g_cfg.vr_seat_height / 1000.0f;
+    out[2] = sn * dx + c * dz - (float)g_cfg.vr_seat_forward / 1000.0f;
+}
+
 static void vr_recenter_apply(const float q[4], const float pos[3])
 {
+    float before[3], after[3];
+    vr_seat_head(pos, vr_rc_yaw, vr_rc_pos, before);
     vr_rc_yaw = q_yaw(q);
     vr_rc_pos[0] = pos[0]; vr_rc_pos[1] = pos[1]; vr_rc_pos[2] = pos[2];
+    vr_seat_head(pos, vr_rc_yaw, vr_rc_pos, after);
     HLOG_I("VR recenter (%s): Kopf yaw=%.1f pitch=%.1f pos=(%.3f,%.3f,%.3f) -> neue Mitte",
            vr_rc_why[0] ? vr_rc_why : "?", vr_rc_yaw * 180.0f / VR_PI, q_pitch(q) * 180.0f / VR_PI,
            pos[0], pos[1], pos[2]);
+    /* W183 VR-FIX3: Reposition = Richtung UND Position zurueck auf die Sitzposition */
+    HLOG_I("VR reposition (%s): Kopf im Sitz vorher (%.3f,%.3f,%.3f) -> nachher (%.3f,%.3f,%.3f) m = Sitzposition (vor %d mm, hoch %d mm)",
+           vr_rc_why[0] ? vr_rc_why : "?", before[0], before[1], before[2], after[0], after[1], after[2],
+           g_cfg.vr_seat_forward, g_cfg.vr_seat_height);
 }
 
 void sb_vr_recenter(const char *why)
@@ -470,6 +488,12 @@ int sb_vr_preview_show(void *A, void *B, float t)
  * Bild-Seitenverhaeltnis), ausgerichtet per Recentering. */
 static ID3D11Texture2D *vr_pv_tex, *vr_cv_tex;
 static ID3D11ShaderResourceView *vr_pv_srv, *vr_cv_srv;
+static ID3D11RenderTargetView *vr_pv_rtv; /* W183: Spiegel wird skaliert hineingezeichnet */
+static ID3D11Texture2D *vr_pvs_tex;        /* W183: Kopie des gespiegelten Auges (ungeteilt) als Quelle der Skalierung */
+static ID3D11ShaderResourceView *vr_pvs_srv;
+static unsigned vr_pvs_w, vr_pvs_h;
+static volatile LONGLONG vr_last_xr_q;    /* W183: letztes eingereichtes VR-Bild (QPC, 0 = keins) */
+static char vr_mir_desc[200];             /* W183: zuletzt gemeldeter Spiegel-Modus */
 static unsigned vr_pv_w, vr_pv_h, vr_cv_w, vr_cv_h;
 static volatile LONG vr_pv_valid, vr_cv_valid;
 static unsigned vr_pv_frame, vr_pv_logged;
@@ -608,11 +632,13 @@ static void vq_draw(ID3D11RenderTargetView *rtv, const float vp[4], const float 
     if (s_ps) { ID3D11PixelShader_Release(s_ps); }
 }
 
-/* Textur (w x h, SRV) passend anlegen; 1 = vorhanden. */
-static int vq_tex(ID3D11Texture2D **tex, ID3D11ShaderResourceView **srv, unsigned *tw, unsigned *th, unsigned w, unsigned h)
+/* Textur (w x h, SRV, optional RTV) passend anlegen; 1 = vorhanden. */
+static int vq_tex_ex(ID3D11Texture2D **tex, ID3D11ShaderResourceView **srv, ID3D11RenderTargetView **rtv,
+                     unsigned *tw, unsigned *th, unsigned w, unsigned h)
 {
     D3D11_TEXTURE2D_DESC td;
-    if (*tex && *tw == w && *th == h) { return 1; }
+    if (*tex && *tw == w && *th == h && (!rtv || *rtv)) { return 1; }
+    if (rtv && *rtv) { ID3D11RenderTargetView_Release(*rtv); *rtv = NULL; }
     if (*srv) { ID3D11ShaderResourceView_Release(*srv); *srv = NULL; }
     if (*tex) { ID3D11Texture2D_Release(*tex); *tex = NULL; }
     memset(&td, 0, sizeof td);
@@ -620,13 +646,40 @@ static int vq_tex(ID3D11Texture2D **tex, ID3D11ShaderResourceView **srv, unsigne
     td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
     td.SampleDesc.Count = 1;
     td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE | (rtv ? D3D11_BIND_RENDER_TARGET : 0);
     if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, tex))) { *tex = NULL; return 0; }
-    if (FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)*tex, NULL, srv))) {
-        ID3D11Texture2D_Release(*tex); *tex = NULL; *srv = NULL; return 0;
+    if (FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)*tex, NULL, srv)) ||
+        (rtv && FAILED(ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)*tex, NULL, rtv)))) {
+        if (*srv) { ID3D11ShaderResourceView_Release(*srv); *srv = NULL; }
+        if (rtv && *rtv) { ID3D11RenderTargetView_Release(*rtv); *rtv = NULL; }
+        ID3D11Texture2D_Release(*tex); *tex = NULL; return 0;
     }
     *tw = w; *th = h;
     return 1;
+}
+
+static int vq_tex(ID3D11Texture2D **tex, ID3D11ShaderResourceView **srv, unsigned *tw, unsigned *th, unsigned w, unsigned h)
+{
+    return vq_tex_ex(tex, srv, NULL, tw, th, w, h);
+}
+
+/* Rechteck (vp) mit Seitenverhaeltnis a, groesstmoeglich und mittig in bw x bh (nie gestreckt) */
+static void vq_fit(float vp[4], float a, float bw, float bh)
+{
+    if (bw / bh > a) { vp[3] = bh; vp[2] = floorf(bh * a + 0.5f); } else { vp[2] = bw; vp[3] = floorf(bw / a + 0.5f); }
+    vp[0] = floorf((bw - vp[2]) * 0.5f); vp[1] = floorf((bh - vp[3]) * 0.5f);
+}
+
+/* Quad-Ecken (Clip) mit UV-Rechteck u0..u1, v0..v1 */
+static void vq_quad(float v[36], float u0, float u1, float v0, float v1)
+{
+    static const float cx[6] = { -1, 1, 1, -1, 1, -1 }, cy[6] = { 1, 1, -1, 1, -1, -1 };
+    int k;
+    for (k = 0; k < 6; k++) {
+        v[k * 6 + 0] = cx[k]; v[k * 6 + 1] = cy[k]; v[k * 6 + 2] = 0.5f; v[k * 6 + 3] = 1.0f;
+        v[k * 6 + 4] = cx[k] < 0 ? u0 : u1;
+        v[k * 6 + 5] = cy[k] > 0 ? v0 : v1;
+    }
 }
 
 static int vr_preview_xr_on(void)
@@ -634,21 +687,73 @@ static int vr_preview_xr_on(void)
     return vr_mode == 2 && vr_prev_kind <= 2;
 }
 
-/* VR-Thread unter ctx_lock, nach der Wiedergabe: eingereichtes Augenbild fuer
- * die Fenster-Vorschau sichern (ein Auge bzw. beide). */
-static void vr_preview_capture(unsigned frame, const float q[4], const float pos[3])
+/* VR-Thread unter ctx_lock, nach der Wiedergabe: eingereichtes Augenbild als
+ * Fenster-Spiegel sichern. W183 VR-FIX3: eine skalierte Kopie direkt in
+ * Fenstergroesse (x vr_mirror_res %): vr_mirror_fit=0 fuellt das Fenster durch
+ * Zuschnitt (Ausschnitt mit Fenster-Seitenverhaeltnis um die Blickachse des
+ * Auges), 1 = ganzes Augenbild mit Balken. Nie gestreckt. fov = tan(links,
+ * rechts, oben, unten) des gespiegelten Auges (Blickachse im Bild). */
+static void vr_preview_capture(unsigned frame, const float q[4], const float pos[3], const float fov[4])
 {
-    unsigned w = vr_prev_kind == 0 ? vr_tw : vr_tw / 2u;
+    unsigned sw = vr_prev_kind == 0 ? vr_tw : vr_tw / 2u, mw, mh;
+    float ae, aw, vp[4], v[36], black[4] = { 0, 0, 0, 1 }, u0 = 0, u1 = 1, v0 = 0, v1 = 1;
+    int res = g_cfg.vr_mirror_res, crop = g_cfg.vr_mirror_fit == 0;
+    char desc[200];
     D3D11_BOX box;
-    if (!vr_preview_xr_on() || !vr_tex) { return; }
-    if (!vq_tex(&vr_pv_tex, &vr_pv_srv, &vr_pv_w, &vr_pv_h, w, vr_th)) { return; }
-    box.left = vr_prev_kind == 2 ? vr_tw / 2u : 0u; box.right = box.left + w;
+    if (!vr_preview_xr_on() || !vr_tex || !g_cfg.vr_mirror || !vr_th || !g_bb_h) { return; }
+    if (res < 25) { res = 25; } else if (res > 100) { res = 100; }
+    mw = (unsigned)((g_bb_w * (unsigned)res + 50u) / 100u); mh = (unsigned)((g_bb_h * (unsigned)res + 50u) / 100u);
+    if (mw < 64u) { mw = 64u; }
+    if (mh < 64u) { mh = 64u; }
+    if (!vq_tex_ex(&vr_pv_tex, &vr_pv_srv, &vr_pv_rtv, &vr_pv_w, &vr_pv_h, mw, mh)) { return; }
+    if (!vq_tex(&vr_pvs_tex, &vr_pvs_srv, &vr_pvs_w, &vr_pvs_h, sw, vr_th)) { return; }
+    box.left = vr_prev_kind == 2 ? vr_tw / 2u : 0u; box.right = box.left + sw;
     box.top = 0; box.bottom = vr_th; box.front = 0; box.back = 1;
-    ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)vr_pv_tex, 0, 0, 0, 0, (ID3D11Resource *)vr_tex, 0, &box);
+    ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)vr_pvs_tex, 0, 0, 0, 0, (ID3D11Resource *)vr_tex, 0, &box);
+    ae = (float)sw / (float)vr_th;
+    aw = (float)mw / (float)mh;
+    if (crop) {
+        float cw = 1.0f, ch = 1.0f, uc = 0.5f, vc = 0.5f;
+        if (aw > ae) { ch = ae / aw; } else { cw = aw / ae; }
+        if (vr_prev_kind != 0 && fov && fov[1] - fov[0] > 1e-4f && fov[2] - fov[3] > 1e-4f) {
+            uc = -fov[0] / (fov[1] - fov[0]); /* Blickachse: x = 0 im Augenbild */
+            vc = fov[2] / (fov[2] - fov[3]);
+        }
+        u0 = uc - 0.5f * cw; if (u0 < 0.0f) { u0 = 0.0f; } if (u0 > 1.0f - cw) { u0 = 1.0f - cw; }
+        v0 = vc - 0.5f * ch; if (v0 < 0.0f) { v0 = 0.0f; } if (v0 > 1.0f - ch) { v0 = 1.0f - ch; }
+        u1 = u0 + cw; v1 = v0 + ch;
+        vp[0] = 0; vp[1] = 0; vp[2] = (float)mw; vp[3] = (float)mh;
+    } else {
+        vq_fit(vp, ae, (float)mw, (float)mh);
+    }
+    vq_quad(v, u0, u1, v0, v1);
+    ID3D11DeviceContext_ClearRenderTargetView(g_ctx, vr_pv_rtv, black);
+    vq_draw(vr_pv_rtv, vp, v, vr_pvs_srv);
     vr_pv_frame = frame;
     memcpy(vr_pv_pose, q, 4 * sizeof(float));
     memcpy(vr_pv_pose + 4, pos, 3 * sizeof(float));
     InterlockedExchange(&vr_pv_valid, 1);
+    _snprintf_s(desc, sizeof desc, _TRUNCATE, "%s, %s %ux%u -> Spiegel %ux%u (%d %% des Fensters %ux%u), Ausschnitt u=%.3f..%.3f v=%.3f..%.3f",
+                crop ? "fensterfuellend (Zuschnitt)" : "ganzes Bild (Balken)",
+                vr_prev_kind == 0 ? "beide Augen" : (vr_prev_kind == 1 ? "linkes Auge" : "rechtes Auge"), sw, vr_th, mw, mh, res,
+                g_bb_w, g_bb_h, u0, u1, v0, v1);
+    if (strcmp(desc, vr_mir_desc) != 0) {
+        static unsigned nlog;
+        strcpy_s(vr_mir_desc, sizeof vr_mir_desc, desc);
+        if (nlog++ < 20u) { HLOG_I("VR: Spiegel im Fenster: %s", desc); }
+    }
+}
+
+/* W183 VR-FIX3: zeigt das Fenster in der Mission den VR-Spiegel (bzw. schwarz)?
+ * Nur mit laufender OpenXR-Session, die gerade Bilder einreicht (< 0,5 s), und
+ * in der Mission (Interp-Aufzeichnung; Menues laufen ueber die Leinwand). */
+int sb_vr_window_mirrors(void)
+{
+    LONGLONG lq = vr_last_xr_q;
+    if (vr_mode != 2 || !lq || !sb_interp_vr_available()) { return 0; }
+    if ((double)(vr_now() - lq) > 0.5 * (double)vr_qpf.QuadPart) { return 0; }
+    if (!g_cfg.vr_mirror) { return 1; }
+    return vr_preview_xr_on() && vr_pv_valid && vr_pv_srv;
 }
 
 /* VR-Thread unter ctx_lock: Leinwand je Auge ins Augenziel (Hintergrund schwarz). */
@@ -665,7 +770,7 @@ static int vr_canvas_draw(const sb_vr_pass_t *p)
     ID3D11DeviceContext_ClearRenderTargetView(g_ctx, p->rtv, black);
     for (e = 0; e < p->neyes; e++) {
         for (k = 0; k < 6; k++) {
-            float x = cx[k] * 0.5f * w, y = cy[k] * 0.5f * h, z = -d;
+            float x = cx[k] * 0.5f * w, y = cy[k] * 0.5f * h, z = -d - (float)g_cfg.vr_seat_forward / 1000.0f * s; /* W183: Abstand ab Sitzposition */
             const float *E = p->E[e];
             v[k * 6 + 0] = x * E[0] + y * E[4] + z * E[8] + E[12];
             v[k * 6 + 1] = x * E[1] + y * E[5] + z * E[9] + E[13];
@@ -703,20 +808,26 @@ int sb_vr_after_blit(void *swap_res, void *swap_rtv)
         ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)vr_cv_tex, sres);
         InterlockedExchange(&vr_cv_valid, 1);
     }
-    if (vr_preview_xr_on() && vr_pv_valid && vr_pv_srv && srtv && vr_pv_h) {
+    if (!want_cv && !g_cfg.vr_mirror && srtv && sb_vr_window_mirrors()) {
+        /* W183 VR-FIX3: Spiegel aus (spart Leistung) - Fenster in der Mission schwarz, ESC-Menue bleibt */
+        float black[4] = { 0, 0, 0, 1 };
+        ID3D11DeviceContext_ClearRenderTargetView(g_ctx, srtv, black);
+        return 1;
+    }
+    if (vr_preview_xr_on() && g_cfg.vr_mirror && vr_pv_valid && vr_pv_srv && srtv && vr_pv_h) {
         float black[4] = { 0, 0, 0, 1 }, vp[4], v[36], a = (float)vr_pv_w / (float)vr_pv_h;
         float bw = (float)g_bb_w, bh = (float)g_bb_h;
-        static const float cx[6] = { -1, 1, 1, -1, 1, -1 }, cy[6] = { 1, 1, -1, 1, -1, -1 };
-        int k;
-        /* nie strecken: groesstes Rechteck mit dem Seitenverhaeltnis des Augenbilds */
-        if (bw / bh > a) { vp[3] = bh; vp[2] = floorf(bh * a + 0.5f); } else { vp[2] = bw; vp[3] = floorf(bw / a + 0.5f); }
-        vp[0] = floorf((bw - vp[2]) * 0.5f); vp[1] = floorf((bh - vp[3]) * 0.5f);
-        for (k = 0; k < 6; k++) {
-            v[k * 6 + 0] = cx[k]; v[k * 6 + 1] = cy[k]; v[k * 6 + 2] = 0.5f; v[k * 6 + 3] = 1.0f;
-            v[k * 6 + 4] = (cx[k] + 1.0f) * 0.5f; v[k * 6 + 5] = (1.0f - cy[k]) * 0.5f;
+        if (vr_pv_w == g_bb_w && vr_pv_h == g_bb_h) {
+            /* W183: Spiegel liegt schon in Fenstergroesse vor (Zuschnitt/Balken im VR-Thread) -> eine Kopie */
+            ID3D11DeviceContext_CopyResource(g_ctx, sres, (ID3D11Resource *)vr_pv_tex);
+            vp[0] = 0; vp[1] = 0; vp[2] = bw; vp[3] = bh;
+        } else {
+            /* halbe Aufloesung bzw. Fenster seit dem Spiegelbild geaendert: hochskalieren, nie strecken */
+            vq_fit(vp, a, bw, bh);
+            vq_quad(v, 0.0f, 1.0f, 0.0f, 1.0f);
+            ID3D11DeviceContext_ClearRenderTargetView(g_ctx, srtv, black);
+            vq_draw(srtv, vp, v, vr_pv_srv);
         }
-        ID3D11DeviceContext_ClearRenderTargetView(g_ctx, srtv, black);
-        vq_draw(srtv, vp, v, vr_pv_srv);
         {
             int changed = 0, i;
             for (i = 0; i < 7; i++) { if (fabsf(vr_pv_pose[i] - vr_pv_lpose[i]) > 1e-3f) { changed = 1; } }
@@ -784,6 +895,44 @@ int sb_vr_wndproc(unsigned msg, unsigned wp, long lp)
     return 1;
 }
 
+/* ---------- W183 VR-FIX3: Leistungs-Presets ----------
+ * Tabelle (eine Quelle fuer ESC-Menue und Doku; der Launcher spiegelt sie):
+ *                 Aufloesung  Bildrate  Spiegel  Aussenwelt   Shading  Monitor-RT
+ *  1 Leistung       65 %       72 Hz     50 %    Spieltakt    aus      1x
+ *  2 Ausgewogen     80 %       Runtime  100 %    Spieltakt    an       2x   (Standard)
+ *  3 Qualitaet     100 %       Runtime  100 %    je VR-Bild   an       wie Bildschirm */
+static const int kVrPreset[4][6] = {
+    { 0, 0, 0, 0, 0, 0 },
+    { 65, 72, 50, 1, 0, 1 },
+    { 80, 0, 100, 1, 1, 2 },
+    { 100, 0, 100, 0, 1, 0 },
+};
+
+void sb_vr_preset_apply(int pr)
+{
+    if (pr < 1 || pr > 3) { g_cfg.vr_preset = 0; return; }
+    g_cfg.vr_render_scale = kVrPreset[pr][0];
+    g_cfg.vr_refresh_hz = kVrPreset[pr][1];
+    g_cfg.vr_mirror_res = kVrPreset[pr][2];
+    g_cfg.vr_world_tick = kVrPreset[pr][3];
+    g_cfg.vr_shading = kVrPreset[pr][4];
+    g_cfg.vr_rt_scale = kVrPreset[pr][5];
+    g_cfg.vr_preset = pr;
+}
+
+int sb_vr_preset_match(void)
+{
+    int pr;
+    for (pr = 1; pr <= 3; pr++) {
+        if (g_cfg.vr_render_scale == kVrPreset[pr][0] && g_cfg.vr_refresh_hz == kVrPreset[pr][1] &&
+            g_cfg.vr_mirror_res == kVrPreset[pr][2] && (g_cfg.vr_world_tick ? 1 : 0) == kVrPreset[pr][3] &&
+            (g_cfg.vr_shading ? 1 : 0) == kVrPreset[pr][4] && g_cfg.vr_rt_scale == kVrPreset[pr][5]) {
+            return pr;
+        }
+    }
+    return 0;
+}
+
 const char *sb_vr_state_text(void)
 {
     static char buf[96];
@@ -814,12 +963,25 @@ static uint32_t xr_sc_idx;
 static const char *volatile xr_call;
 static volatile LONGLONG xr_call_q;
 static volatile LONG xr_hang_logged;
+/* W183: Fortschritt des VR-Threads ausserhalb der OpenXR-Aufrufe (Watchdog: Thread steht?) */
+static const char *volatile xr_stage;
+static volatile LONGLONG xr_loop_q;
+static volatile LONG xr_stage_logged;
 /* W145: Statistik Sperrzeit / Wartezeiten je Fenster (vr_diag>=1) */
 static double st2_lock, st2_lock_max, st2_wsc_max, st2_ef_max, st2_wf_max;
 static unsigned st2_n, st2_skip_tmo, st2_skip_km;
 static HANDLE xr_thread;
 static volatile DWORD xr_tid; /* W145 */
 static unsigned xr_fno;       /* W164: eingereichte VR-Bilder (Abgleich Vorschau/Pose) */
+/* W183 VR-FIX3: Render-Skalierung (Empfehlung, Maximum, angelegte Swapchain je Auge), Bildrate */
+static uint32_t xr_rec_w, xr_rec_h, xr_max_w, xr_max_h, xr_aw, xr_ah;
+static int xr_scale_cur = -1, xr_have_rr, xr_rr_req = -1, xr_focus_log = -1, xr_rc_started;
+static XrTime xr_last_disp;
+/* W183: Takt-Statistik je Fenster (vr_diag>=1, Zeile "VR takt") */
+static unsigned tk_n, tk_miss, tk_hold, tk_wtick, tk_newpose, tk_nskip;
+static double tk_lw, tk_lw_max, tk_rep, tk_rep_max, tk_dt_max;
+static unsigned tk_flog;
+static float tk_lastpose[7];
 #define XRF(n) static PFN_##n p##n
 XRF(xrEnumerateInstanceExtensionProperties); XRF(xrCreateInstance); XRF(xrDestroyInstance);
 XRF(xrGetInstanceProperties); XRF(xrPollEvent); XRF(xrGetSystem); XRF(xrGetSystemProperties);
@@ -828,6 +990,7 @@ XRF(xrBeginSession); XRF(xrEndSession); XRF(xrCreateReferenceSpace); XRF(xrEnume
 XRF(xrCreateSwapchain); XRF(xrEnumerateSwapchainImages); XRF(xrAcquireSwapchainImage);
 XRF(xrWaitSwapchainImage); XRF(xrReleaseSwapchainImage); XRF(xrWaitFrame); XRF(xrBeginFrame);
 XRF(xrEndFrame); XRF(xrLocateViews); XRF(xrGetD3D11GraphicsRequirementsKHR);
+XRF(xrEnumerateDisplayRefreshRatesFB); XRF(xrGetDisplayRefreshRateFB); XRF(xrRequestDisplayRefreshRateFB); /* W183 */
 
 static char xr_fail[256];
 
@@ -968,6 +1131,28 @@ static int xr_get(XrInstance inst, const char *n, PFN_xrVoidFunction *f)
 }
 #define XR_GET(inst, n) (xr_get(inst, #n, (PFN_xrVoidFunction *)&p##n))
 
+/* W183 VR-FIX3: eingestellte Render-Skalierung (30..150 %) */
+static int vr_scale_pct(void)
+{
+    int v = g_cfg.vr_render_scale;
+    if (v <= 0) { v = 100; }
+    if (v < 30) { v = 30; } else if (v > 150) { v = 150; }
+    return v;
+}
+
+/* Augengroesse fuer die aktuelle Skalierung, begrenzt auf die angelegte Swapchain (gerade Zahlen) */
+static void xr_eye_size(uint32_t *w, uint32_t *h)
+{
+    int sc = vr_scale_pct();
+    uint32_t ew = (uint32_t)((xr_rec_w * (unsigned)sc + 50u) / 100u), eh = (uint32_t)((xr_rec_h * (unsigned)sc + 50u) / 100u);
+    if (ew > xr_aw) { ew = xr_aw; }
+    if (eh > xr_ah) { eh = xr_ah; }
+    ew &= ~1u; eh &= ~1u;
+    if (ew < 64u) { ew = 64u; }
+    if (eh < 64u) { eh = 64u; }
+    *w = ew; *h = eh;
+}
+
 static int xr_init(void)
 {
     char rname[128];
@@ -975,7 +1160,7 @@ static int xr_init(void)
     uint32_t next = 0, i, nfmt = 0;
     int have_d3d = 0;
     XrInstanceCreateInfo ici;
-    const char *enabled[1] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME };
+    const char *enabled[2] = { XR_KHR_D3D11_ENABLE_EXTENSION_NAME, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME };
     XrInstanceProperties ip;
     XrSystemGetInfo sgi;
     XrSystemProperties sp;
@@ -1004,6 +1189,7 @@ static int xr_init(void)
     r = pxrEnumerateInstanceExtensionProperties(NULL, next, &next, ext);
     for (i = 0; XR_SUCCEEDED(r) && i < next && i < 64; i++) {
         if (strcmp(ext[i].extensionName, XR_KHR_D3D11_ENABLE_EXTENSION_NAME) == 0) { have_d3d = 1; }
+        if (strcmp(ext[i].extensionName, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME) == 0) { xr_have_rr = 1; } /* W183 */
     }
     if (!have_d3d) { xr_failf("Runtime ohne %s", XR_KHR_D3D11_ENABLE_EXTENSION_NAME); return 0; }
     memset(&ici, 0, sizeof ici);
@@ -1013,7 +1199,7 @@ static int xr_init(void)
     strcpy_s(ici.applicationInfo.engineName, sizeof ici.applicationInfo.engineName, "sb_emu");
     ici.applicationInfo.engineVersion = 1;
     ici.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
-    ici.enabledExtensionCount = 1;
+    ici.enabledExtensionCount = xr_have_rr ? 2u : 1u; /* W183: Bildrate der Brille, falls angeboten */
     ici.enabledExtensionNames = enabled;
     r = pxrCreateInstance(&ici, &xr_inst);
     if (XR_FAILED(r)) { xr_failf("xrCreateInstance %d", (int)r); return 0; }
@@ -1029,6 +1215,10 @@ static int xr_init(void)
         !XR_GET(xr_inst, xrGetD3D11GraphicsRequirementsKHR)) {
         xr_failf("Runtime liefert benoetigte Funktionen nicht");
         return 0;
+    }
+    if (xr_have_rr && (!XR_GET(xr_inst, xrEnumerateDisplayRefreshRatesFB) || !XR_GET(xr_inst, xrGetDisplayRefreshRateFB) ||
+                       !XR_GET(xr_inst, xrRequestDisplayRefreshRateFB))) {
+        xr_have_rr = 0; /* W183: Erweiterung gemeldet, Funktionen fehlen -> Bildrate nicht einstellbar */
     }
     memset(&ip, 0, sizeof ip);
     ip.type = XR_TYPE_INSTANCE_PROPERTIES;
@@ -1058,6 +1248,23 @@ static int xr_init(void)
     HLOG_I("VR: System '%s' Tracking Richtung=%u Position=%u, Auge %ux%u (max %ux%u)", sp.systemName,
            sp.trackingProperties.orientationTracking, sp.trackingProperties.positionTracking, xr_ew, xr_eh,
            vcv[0].maxImageRectWidth, vcv[0].maxImageRectHeight);
+    /* W183 VR-FIX3: Render-Skalierung. Swapchain fuer max(Einstellung, 100 %) anlegen (live per ESC bis
+     * dahin umschaltbar: imageRect kleiner als die Swapchain), gerendert wird die eingestellte Groesse. */
+    xr_rec_w = xr_ew; xr_rec_h = xr_eh;
+    xr_max_w = vcv[0].maxImageRectWidth >= xr_ew ? vcv[0].maxImageRectWidth : xr_ew;
+    xr_max_h = vcv[0].maxImageRectHeight >= xr_eh ? vcv[0].maxImageRectHeight : xr_eh;
+    {
+        int al = vr_scale_pct();
+        if (al < 100) { al = 100; }
+        xr_aw = (uint32_t)((xr_rec_w * (unsigned)al + 50u) / 100u); if (xr_aw > xr_max_w) { xr_aw = xr_max_w; }
+        xr_ah = (uint32_t)((xr_rec_h * (unsigned)al + 50u) / 100u); if (xr_ah > xr_max_h) { xr_ah = xr_max_h; }
+        if (xr_aw > 8192u) { xr_aw = 8192u; }
+        if (xr_ah > 8192u) { xr_ah = 8192u; }
+        xr_eye_size(&xr_ew, &xr_eh);
+        xr_scale_cur = vr_scale_pct();
+        HLOG_I("VR: Render-Skalierung %d %% -> Auge %ux%u (Empfehlung der Runtime %ux%u, max %ux%u); Swapchain angelegt fuer bis %d %% (%ux%u je Auge)",
+               xr_scale_cur, xr_ew, xr_eh, xr_rec_w, xr_rec_h, xr_max_w, xr_max_h, al, xr_aw, xr_ah);
+    }
     memset(&req, 0, sizeof req);
     req.type = XR_TYPE_GRAPHICS_REQUIREMENTS_D3D11_KHR;
     r = pxrGetD3D11GraphicsRequirementsKHR(xr_inst, xr_sys, &req);
@@ -1142,8 +1349,8 @@ static int xr_init(void)
     swi.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
     swi.format = fmt;
     swi.sampleCount = 1;
-    swi.width = xr_ew * 2u;
-    swi.height = xr_eh;
+    swi.width = xr_aw * 2u; /* W183: angelegte Groesse (>= gerenderte) */
+    swi.height = xr_ah;
     swi.faceCount = 1;
     swi.arraySize = 1;
     swi.mipCount = 1;
@@ -1158,6 +1365,25 @@ static int xr_init(void)
     HLOG_I("VR: Session bereit, Raum %s, Swapchain %ux%u Format %d (%u Bilder)",
            rsi.referenceSpaceType == XR_REFERENCE_SPACE_TYPE_LOCAL ? "LOCAL" : "STAGE",
            swi.width, swi.height, (int)fmt, xr_nimg);
+    if (xr_have_rr) { /* W183: Bildraten der Brille */
+        float rates[16], cur = 0.0f;
+        uint32_t nr = 0, k;
+        char lst[128];
+        size_t o = 0;
+        lst[0] = '\0';
+        if (XR_SUCCEEDED(pxrEnumerateDisplayRefreshRatesFB(xr_sess, 16, &nr, rates))) {
+            for (k = 0; k < nr && k < 16u; k++) {
+                int n = _snprintf_s(lst + o, sizeof lst - o, _TRUNCATE, "%s%.0f", k ? "/" : "", (double)rates[k]);
+                if (n > 0) { o += (size_t)n; }
+            }
+        }
+        pxrGetDisplayRefreshRateFB(xr_sess, &cur);
+        HLOG_I("VR: Bildrate der Brille einstellbar (XR_FB_display_refresh_rate): %s Hz, aktuell %.0f Hz, Einstellung vr_refresh_hz=%d",
+               lst[0] ? lst : "?", (double)cur, g_cfg.vr_refresh_hz);
+    } else {
+        HLOG_I("VR: Bildrate der Brille hier nicht einstellbar (Runtime ohne XR_FB_display_refresh_rate) - in der Runtime "
+               "(z. B. Virtual Desktop) waehlen; vr_refresh_hz=%d wirkt nicht", g_cfg.vr_refresh_hz);
+    }
     return 1;
 }
 
@@ -1201,6 +1427,9 @@ static void xr_events(void)
             HLOG_W("VR: Runtime beendet sich (INSTANCE_LOSS_PENDING) -> VR aus, Spiel laeuft auf dem Monitor weiter");
         } else if (ev.type == XR_TYPE_EVENT_DATA_REFERENCE_SPACE_CHANGE_PENDING) {
             HLOG_I("VR: Raum-Wechsel der Runtime (System-Recentering)");
+        } else if (ev.type == XR_TYPE_EVENT_DATA_DISPLAY_REFRESH_RATE_CHANGED_FB) { /* W183 */
+            const XrEventDataDisplayRefreshRateChangedFB *rc = (const XrEventDataDisplayRefreshRateChangedFB *)&ev;
+            HLOG_I("VR: Bildrate der Brille %.0f -> %.0f Hz", (double)rc->fromDisplayRefreshRate, (double)rc->toDisplayRefreshRate);
         }
     }
 }
@@ -1324,6 +1553,86 @@ static int vr_pose_shot_due(const float hq[4], const float hp[3], char *nm, size
     return 1;
 }
 
+/* W183 VR-FIX3: vor jedem Bild (VR-Thread, ohne Sperre): Render-Skalierung und
+ * Bildrate der Brille aus der Einstellung (ESC-Menue wirkt sofort). */
+static void xr_frame_prep(void)
+{
+    int sc = vr_scale_pct();
+    if (sc != xr_scale_cur) {
+        uint32_t w, h;
+        xr_eye_size(&w, &h);
+        HLOG_I("VR: Render-Skalierung %d %% -> Auge %ux%u (Empfehlung %ux%u)%s", sc, w, h, xr_rec_w, xr_rec_h,
+               ((unsigned)w + 2u < (xr_rec_w * (unsigned)sc) / 100u) ? " - begrenzt auf die angelegte Swapchain, mehr ab Neustart" : "");
+        xr_ew = w; xr_eh = h;
+        xr_scale_cur = sc;
+    }
+    if (xr_have_rr && g_cfg.vr_refresh_hz != xr_rr_req) {
+        xr_rr_req = g_cfg.vr_refresh_hz;
+        if (xr_rr_req > 0) {
+            float rates[16], best = 0.0f;
+            uint32_t nr = 0, k;
+            XrResult r = pxrEnumerateDisplayRefreshRatesFB(xr_sess, 16, &nr, rates);
+            for (k = 0; XR_SUCCEEDED(r) && k < nr && k < 16u; k++) {
+                if (best <= 0.0f || fabsf(rates[k] - (float)xr_rr_req) < fabsf(best - (float)xr_rr_req)) { best = rates[k]; }
+            }
+            if (best > 0.0f) {
+                r = pxrRequestDisplayRefreshRateFB(xr_sess, best);
+                HLOG_I("VR: Bildrate der Brille %d Hz gewuenscht -> %.0f Hz angefordert (%d)", xr_rr_req, (double)best, (int)r);
+            }
+        }
+    }
+}
+
+/* W183 VR-FIX3: Takt-Diagnose je eingereichtem Cockpit-Bild: Anzeige-Abstand
+ * (verpasste Bilder), Pose je Bild (Cockpit mit neuer Kopfpose?), Paar/t/Halten
+ * der Spielzeit, Sperr-Warten, Bildzeit. vr_frame_log=N: die ersten N Bilder der
+ * Mission einzeln; vr_diag>=1: Summe alle 5 s ("VR takt"). */
+static void xr_takt(const sb_vr_pass_t *p, const XrView *views, const float hq[4], const float hp[3], XrTime disp,
+                    XrDuration per, double lw, LONGLONG q0, float tout)
+{
+    static LONGLONG w0;
+    double dt = xr_last_disp ? (double)(disp - xr_last_disp) * 1e-6 : 0.0;
+    double rep = (double)(vr_now() - q0) * 1000.0 / (double)vr_qpf.QuadPart, win;
+    float cp[7];
+    int i, newpose = 0;
+    LONGLONG now = vr_now();
+    cp[0] = views[0].pose.orientation.x; cp[1] = views[0].pose.orientation.y;
+    cp[2] = views[0].pose.orientation.z; cp[3] = views[0].pose.orientation.w;
+    cp[4] = views[0].pose.position.x; cp[5] = views[0].pose.position.y; cp[6] = views[0].pose.position.z;
+    for (i = 0; i < 7; i++) { if (fabsf(cp[i] - tk_lastpose[i]) > 1e-6f) { newpose = 1; } }
+    memcpy(tk_lastpose, cp, sizeof tk_lastpose);
+    xr_last_disp = disp;
+    if (!w0) { w0 = now; }
+    tk_n++;
+    if (per > 0 && dt > 1.5 * (double)per * 1e-6) { tk_miss++; }
+    if (dt > tk_dt_max) { tk_dt_max = dt; }
+    if (p->hold) { tk_hold++; }
+    if (p->wtick_used) { tk_wtick++; }
+    tk_nskip += p->nskip;
+    if (newpose) { tk_newpose++; }
+    tk_lw += lw; if (lw > tk_lw_max) { tk_lw_max = lw; }
+    tk_rep += rep; if (rep > tk_rep_max) { tk_rep_max = rep; }
+    if (g_cfg.vr_frame_log > 0 && tk_flog < (unsigned)g_cfg.vr_frame_log && sb_interp_vr_available()) {
+        tk_flog++;
+        HLOG_I("VR bild %u: anzeige +%.2fms kopf pos=(%.4f,%.4f,%.4f) gier=%.2f nicken=%.2f neue-pose=%d paar=%u/%u t=%.3f halten=%d "
+               "welt=%s (rt-ops %u uebersprungen) cockpit-draws 3d=%u p2=%u 2d=%u sperre-warten=%.2fms bild=%.2fms",
+               xr_fno, dt, hp[0], hp[1], hp[2], q_yaw(hq) * 180.0f / VR_PI, q_pitch(hq) * 180.0f / VR_PI, newpose, p->aser, p->bser,
+               tout, p->hold, p->wtick_used ? "spieltakt" : "je-bild", p->nskip, p->n3d, p->np2, p->n2d, lw, rep);
+    }
+    win = (double)(now - w0) / (double)vr_qpf.QuadPart;
+    if (win >= 5.0) {
+        if (g_cfg.vr_diag >= 1 && tk_n) {
+            HLOG_I("VR takt: bilder=%u (%.1f/s) verpasst=%u (max Abstand %.1fms, Periode %.1fms) halten=%u neue-pose=%u/%u "
+                   "welt-spieltakt=%u/%u (rt-ops/bild %u) sperre-warten %.2fms (max %.2f) bild %.2fms (max %.2f) auge %ux%u (%d %%)",
+                   tk_n, (double)tk_n / win, tk_miss, tk_dt_max, per > 0 ? (double)per * 1e-6 : 0.0, tk_hold, tk_newpose, tk_n,
+                   tk_wtick, tk_n, tk_nskip / tk_n, tk_lw / tk_n, tk_lw_max, tk_rep / tk_n, tk_rep_max, xr_ew, xr_eh, xr_scale_cur);
+        }
+        tk_n = tk_miss = tk_hold = tk_wtick = tk_newpose = tk_nskip = 0;
+        tk_lw = tk_lw_max = tk_rep = tk_rep_max = tk_dt_max = 0.0;
+        w0 = now;
+    }
+}
+
 /* Ein OpenXR-Bild (W145-Reihenfolge, nie ein OpenXR-Aufruf unter ctx_lock):
  *  1 xrWaitFrame, 2 xrBeginFrame, 3 xrAcquire-/xrWaitSwapchainImage,
  *  4 kurz ctx_lock: Wiedergabe ins geteilte Augenziel (Schluessel 0 -> 1),
@@ -1344,10 +1653,14 @@ static void xr_frame(void)
     uint32_t nv = 0;
     XrResult r;
     int e, drawn = 0, have_img = 0, cv = 0;
-    LONGLONG q0, qw;
-    float tout = 1.0f;
+    LONGLONG q0, qw, qe = 0;
+    float tout = 1.0f, efov[4] = { 0, 0, 0, 0 };
     int rc_shot = 0;
+    double lw = 0.0;
     sb_vr_pass_t p;
+    xr_loop_q = vr_now();
+    xr_stage = "Bildbeginn";
+    if (InterlockedExchange(&xr_stage_logged, 0)) { HLOG_I("VR: VR-Thread laeuft wieder"); }
     memset(&fwi, 0, sizeof fwi);
     fwi.type = XR_TYPE_FRAME_WAIT_INFO;
     memset(&fs, 0, sizeof fs);
@@ -1369,6 +1682,22 @@ static void xr_frame(void)
     fei.type = XR_TYPE_FRAME_END_INFO;
     fei.displayTime = fs.predictedDisplayTime;
     fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
+    xr_frame_prep();
+    {   /* W183 VR-FIX3 vr_idle_unfocused: Brille ab/Systemmenue (nicht FOCUSED) -> keine Wiedergabe, leeres Bild */
+        int idle = g_cfg.vr_idle_unfocused && xr_state != XR_SESSION_STATE_FOCUSED;
+        if (idle != xr_focus_log) {
+            if (xr_focus_log >= 0 || idle) {
+                HLOG_I("VR: %s", idle ? "Brille nicht im Fokus -> keine VR-Bilder (spart Leistung), Fenster zeigt das Spielbild"
+                                      : "Brille im Fokus -> VR-Bilder an");
+            }
+            xr_focus_log = idle;
+        }
+        if (idle) {
+            fs.shouldRender = 0;
+            InterlockedExchange(&vr_pv_valid, 0);
+            vr_last_xr_q = 0;
+        }
+    }
     if (fs.shouldRender) {
         memset(views, 0, sizeof views);
         views[0].type = views[1].type = XR_TYPE_VIEW;
@@ -1416,6 +1745,12 @@ static void xr_frame(void)
             hp[1] = 0.5f * (views[0].pose.position.y + views[1].pose.position.y);
             hp[2] = 0.5f * (views[0].pose.position.z + views[1].pose.position.z);
             vr_yaw = q_yaw(hq); vr_pitch = q_pitch(hq);
+            if (g_cfg.vr_recenter_start && !xr_rc_started && have_img && xr_state == XR_SESSION_STATE_FOCUSED) {
+                /* W183 VR-FIX3: Startposition = Sitzposition (Richtung und Position), einmal je Session */
+                xr_rc_started = 1;
+                strcpy_s(vr_rc_why, sizeof vr_rc_why, "Start");
+                vr_recenter_apply(hq, hp);
+            }
             /* Recentering in zwei Bildern: 1 = dieses Bild noch alte Mitte (Shot "vor"),
              * 2 = naechstes Bild neue Mitte (Shot "nach") */
             if (have_img) {
@@ -1435,6 +1770,8 @@ static void xr_frame(void)
             p.neyes = 2;
             p.wfix = g_cfg.vr_world_depth ? 1 : 0; /* W164 */
             p.ifix = g_cfg.vr_inst_depth ? 1 : 0;
+            p.wtick = g_cfg.vr_world_tick ? 1 : 0; /* W183 */
+            p.noshade = g_cfg.vr_shading ? 0 : 1;
             { /* DIAG(VR-FIX2,W164): alle BB-Draws einer Mission-Wiedergabe (600. Cockpit-Bild) */
                 static unsigned nck;
                 if (g_cfg.vr_diag >= 2 && sb_interp_vr_available() && ++nck == 600u) { p.dump = 800; }
@@ -1459,11 +1796,19 @@ static void xr_frame(void)
                 }
                 /* 4. kurze Sperre: nur Wiedergabe ins geteilte Augenziel (Schluessel 0
                  * ist nach Schritt 5 des letzten Bildes sofort frei: Timeout 1 ms) */
+                qe = vr_now();
+                xr_stage = "ctx_lock";
                 sb_ctx_enter();
+                xr_stage = "Wiedergabe (unter ctx_lock)";
                 ql = vr_now();
+                lw = (double)(ql - qe) * 1000.0 / (double)vr_qpf.QuadPart; /* W183: Warten auf ctx_lock */
                 if (!xr_km_pending && vr_ensure_target(xr_ew * 2u, xr_eh) &&
                     IDXGIKeyedMutex_AcquireSync(vr_km, 0, 1) == S_OK) {
-                    LONGLONG due = vr_now() + (LONGLONG)((double)fs.predictedDisplayPeriod * 1e-9 * (double)vr_qpf.QuadPart);
+                    /* W183 VR-FIX3: Spielzeit der Wiedergabe = jetzt (- Latenz L in ip_pair_at) wie das Fenster.
+                     * W134 rechnete jetzt + Bildperiode: dann lag der Zeitpunkt in den letzten ~P ms jedes Ticks
+                     * hinter dem juengsten Tick -> "halten" (Bild steht) und Sprung beim naechsten Tick = 30-Hz-Ruckeln */
+                    LONGLONG due = vr_now() + (g_cfg.vr_due_ahead ?
+                        (LONGLONG)((double)fs.predictedDisplayPeriod * 1e-9 * (double)vr_qpf.QuadPart) : 0);
                     p.rtv = vr_rtv;
                     p.dsv = vr_dsv;
                     drawn = sb_interp_vr_replay(&p, NULL, NULL, 1.0f, due, &tout);
@@ -1501,7 +1846,9 @@ static void xr_frame(void)
                         pq[0] = views[pe].pose.orientation.x; pq[1] = views[pe].pose.orientation.y;
                         pq[2] = views[pe].pose.orientation.z; pq[3] = views[pe].pose.orientation.w;
                         pp[0] = views[pe].pose.position.x; pp[1] = views[pe].pose.position.y; pp[2] = views[pe].pose.position.z;
-                        vr_preview_capture(xr_fno, pq, pp);
+                        efov[0] = tanf(views[pe].fov.angleLeft); efov[1] = tanf(views[pe].fov.angleRight);
+                        efov[2] = tanf(views[pe].fov.angleUp); efov[3] = tanf(views[pe].fov.angleDown);
+                        vr_preview_capture(xr_fno, pq, pp, efov);
                     }
                     if (g_cfg.vr_diag >= 1) { /* W164: eingereichte Pose bei Wechsel (Abgleich mit Vorschau/Mock) */
                         static float lp[7];
@@ -1529,11 +1876,15 @@ static void xr_frame(void)
                     st2_n++;
                 }
                 sb_ctx_leave();
+                xr_stage = "AcquireSync (Keyed Mutex VR-Device)";
                 /* 5. VR-Device (ohne ctx_lock): Kopie ins Swapchain-Bild */
                 if (km_ok && IDXGIKeyedMutex_AcquireSync(xr_km, 1, 1000) == S_OK) {
+                    xr_stage = "Kopie: CopySubresourceRegion (VR-Device)";
                     ID3D11DeviceContext_CopySubresourceRegion(xr_ctx, (ID3D11Resource *)xr_img[xr_sc_idx], 0, 0, 0, 0,
                                                               (ID3D11Resource *)xr_shtex, 0, NULL);
+                    xr_stage = "Kopie: ReleaseSync (VR-Device)";
                     IDXGIKeyedMutex_ReleaseSync(xr_km, 0);
+                    xr_stage = "Kopie fertig";
                     xr_km_pending = 0;
                 } else {
                     static unsigned nkm;
@@ -1550,7 +1901,9 @@ static void xr_frame(void)
                 xr_unmark();
                 xr_sc_held = 0;
                 /* Runtime-Zaun aus Release sicher zur GPU (VDXR-Vermutung: Signal ohne Flush) */
+                xr_stage = "Flush VR-Device";
                 ID3D11DeviceContext_Flush(xr_ctx);
+                xr_stage = "nach Release";
                 if (XR_FAILED(r)) { xr_err("xrReleaseSwapchainImage", r); }
                 else if (have_img) {
                     for (e = 0; e < 2; e++) {
@@ -1571,8 +1924,10 @@ static void xr_frame(void)
                     layers[0] = (const XrCompositionLayerBaseHeader *)&layer;
                     fei.layerCount = 1;
                     fei.layers = layers;
+                    if (drawn || cv) { vr_last_xr_q = vr_now(); } /* W183: Fenster-Spiegel aktiv */
                 }
             }
+            if (drawn) { xr_takt(&p, views, hq, hp, fs.predictedDisplayTime, fs.predictedDisplayPeriod, lw, q0, tout); }
             if (cv && !drawn) { vr_frames++; } /* W164: Leinwand-Bilder zaehlen fuer vr_shots mit */
             if (drawn) {
                 vr_frames++;
@@ -1581,6 +1936,7 @@ static void xr_frame(void)
             }
         }
     }
+    xr_stage = "vor xrEndFrame";
     /* 6. xrEndFrame ohne Sperre (die Runtime nutzt hoechstens den Context des VR-Devices) */
     qw = vr_now();
     xr_mark("xrEndFrame");
@@ -1608,6 +1964,9 @@ static DWORD WINAPI xr_thread_main(LPVOID unused)
         return 0;
     }
     vr_mode = 2;
+    sb_ctx_enter(); /* W183: Quad-Shader (Leinwand/Spiegel) vor dem ersten VR-Bild anlegen */
+    vq_init();
+    sb_ctx_leave();
     while (!xr_quit) {
         xr_events();
         if (!xr_running) { Sleep(10); continue; }
@@ -1632,7 +1991,17 @@ void sb_vr_watch(void)
     const char *c = xr_call;
     LONGLONG q = xr_call_q;
     double s;
-    if (!xr_tid || !c || !vr_qpf.QuadPart) { return; }
+    if (!xr_tid || !vr_qpf.QuadPart) { return; }
+    if (xr_loop_q && !c && xr_running && !xr_quit) { /* W183: Thread steht ausserhalb eines OpenXR-Aufrufs */
+        double ls = (double)(vr_now() - xr_loop_q) / (double)vr_qpf.QuadPart;
+        if (ls > 3.0 && InterlockedCompareExchange(&xr_stage_logged, 1, 0) == 0) {
+            const char *st = xr_stage;
+            extern void sb_wd_thread_stack(unsigned long tid, const char *label);
+            HLOG_W("VR: VR-Thread steht seit %.1f s bei '%s' (kein OpenXR-Aufruf)", ls, st ? st : "?");
+            sb_wd_thread_stack(xr_tid, "VR-Thread"); /* DIAG(W183): wo steht er? */
+        }
+    }
+    if (!c) { return; }
     s = (double)(vr_now() - q) / (double)vr_qpf.QuadPart;
     if (s > 3.0 && InterlockedCompareExchange(&xr_hang_logged, 1, 0) == 0) {
         HLOG_W("VR: Runtime antwortet nicht: %s seit %.1f s (VR-Thread T%04x haelt keine Spiel-Sperre, Spiel laeuft auf dem Monitor weiter)",
@@ -1660,6 +2029,19 @@ void sb_vr_init(void)
     HLOG_I("VR: Start (vorschau=%s sim=%s sitzhoehe=%dmm massstab=%d%% ipd=%.1fmm fov=%d D=%dmm taste=%s)",
            pv, g_cfg.vr_sim, g_cfg.vr_seat_height, g_cfg.vr_world_scale, (double)g_cfg.vr_ipd / 10.0, g_cfg.vr_fov,
            g_cfg.vr_monitor_depth, g_cfg.vr_recenter_key);
+    /* W183 VR-FIX3: Einstellungen (eine Zeile) */
+    HLOG_I("VR: Einstellungen preset=%d aufloesung=%d%% bildrate=%d spiegel=%d (%s, %d%%) aussenwelt=%s shading=%d sitz vor=%dmm hoch=%dmm "
+           "zentrieren-beim-start=%d ohne-fokus-aus=%d monitor-rt=%d",
+           g_cfg.vr_preset, g_cfg.vr_render_scale, g_cfg.vr_refresh_hz, g_cfg.vr_mirror, g_cfg.vr_mirror_fit ? "balken" : "zuschnitt",
+           g_cfg.vr_mirror_res, g_cfg.vr_world_tick ? "spieltakt" : "je-vr-bild", g_cfg.vr_shading, g_cfg.vr_seat_forward,
+           g_cfg.vr_seat_height, g_cfg.vr_recenter_start, g_cfg.vr_idle_unfocused, g_cfg.vr_rt_scale);
+    if (g_cfg.vr_rt_scale > 0 && g_cfg.vr_rt_scale <= 4 && g_cfg.vr_rt_scale != g_cfg.rt_scale) {
+        /* W183: Aufloesung der Aussenwelt-/Monitor-RTs im VR-Betrieb getrennt (vor dem Anlegen der RTs) */
+        HLOG_I("VR: Welt-/Monitor-RTs mit Faktor %d (vr_rt_scale) statt rt_scale=%d%s", g_cfg.vr_rt_scale, g_cfg.rt_scale,
+               g_cfg.rt_scale_dyn ? ", rt_scale_dyn aus" : "");
+        g_cfg.rt_scale = g_cfg.vr_rt_scale;
+        g_cfg.rt_scale_dyn = 0;
+    }
     if (_stricmp(g_cfg.vr_runtime_json, "off") == 0) {
         vr_mode = (vr_prev_kind <= 2) ? 1 : 0;
         HLOG_I("VR: OpenXR aus (vr_runtime_json=off) -> %s", vr_mode == 1 ? "Desktop-Vorschau" : "VR aus");

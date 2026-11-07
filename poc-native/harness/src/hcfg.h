@@ -423,6 +423,21 @@ typedef struct {
     int vr_inst_depth;          /* W164 VR-FIX2: 1 = P2-Draws mit perspektivischem z/w (> 0,2: Rundinstrumente, Anzeigen) auf ihre metrische Tiefe statt ins Relief (Standard), 0 = W134 */
     int vr_diag_skip;           /* DIAG(VR-FIX2,W164): Bitmaske Draw-Klassen im Augenbild weglassen (1 = 2D, 2 = 3D-Pfad, 4 = P2-Cockpit), Standard 0 */
     int vr_pose_shots;          /* DIAG(VR-FIX2,W164): N > 0 = je neue ruhige Kopfpose ein Augenbild vr_<n>_pose_*, max N */
+    /* W183 VR-FIX3 (alle nur mit vr_enable=1 wirksam) */
+    int vr_render_scale;        /* Render-Aufloesung je Auge in % der Runtime-Empfehlung (30..150), Standard 80 (Preset Ausgewogen); live per ESC bis zur angelegten Swapchain-Groesse */
+    int vr_refresh_hz;          /* Bildrate der Brille (XR_FB_display_refresh_rate, z. B. 72/80/90/120), 0 = Runtime-Standard */
+    int vr_seat_forward;        /* Sitz-Versatz nach vorne in mm (+ = Augenpunkt naeher an den Monitoren), Standard 300 */
+    int vr_recenter_start;      /* 1 = beim ersten Bild im Fokus automatisch zentrieren (Startposition = Sitzposition), Standard 1 */
+    int vr_mirror;              /* 1 = Fenster zeigt in der Mission den VR-Spiegel (Augenbild), 0 = Fenster schwarz (spart Leistung), Standard 1 */
+    int vr_mirror_fit;          /* 0 = Fenster fuellen durch Zuschnitt (Standard), 1 = ganzes Augenbild mit schwarzen Balken; nie gestreckt */
+    int vr_mirror_res;          /* Aufloesung des Spiegels in % der Fenstergroesse (25..100), Standard 100 */
+    int vr_world_tick;          /* 1 = Aussenwelt/Monitor-RTs im Spieltakt (Tick-Endstand), Cockpit/HUD je VR-Bild (Standard); 0 = alles je VR-Bild (W134) */
+    int vr_shading;             /* 1 = Shading-Draws des Cockpits im Augenbild (Standard), 0 = IM-PS-Ersatz (billiger) */
+    int vr_due_ahead;           /* 0 = Spielzeit der VR-Wiedergabe = jetzt - Latenz wie das Fenster (Standard, kein Halten); 1 = W134 (jetzt + Bildperiode) */
+    int vr_idle_unfocused;      /* 1 = keine VR-Bilder, solange die Session nicht FOCUSED ist (Brille ab/Systemmenue), Standard 1 */
+    int vr_rt_scale;            /* Welt-/Monitor-RT-Faktor im VR-Betrieb (1..4), 0 = wie rt_scale, Standard 2 (Preset Ausgewogen) */
+    int vr_preset;              /* Leistungs-Preset (nur Anzeige/Speichern; Werte stehen einzeln): 0 eigene, 1 Leistung, 2 Ausgewogen, 3 Qualitaet */
+    int vr_frame_log;           /* DIAG(VR-FIX3,W183): N > 0 = die ersten N VR-Bilder in der Mission je eine Zeile "VR bild" (Pose, Paar, t, Halten, Draws, Sperre) */
 } hcfg_t;
 
 extern hcfg_t g_cfg;

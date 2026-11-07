@@ -53,6 +53,8 @@ void sb_phud_restore(void);
 int sb_phud_visible(void);
 /* Test-Hook (overlay_test PHUDPOS): naechste Ecke (Render-Thread). */
 void sb_phud_cycle_pos(void);
+/* W200: overlay LOG hook, measured F2 statistics (under ctx_lock). */
+void sb_phud_test_log(void);
 
 /* DIAG(TICK-PERF,W125): Zeitmesser um Blockier-Kandidaten des Spiel-Threads
  * (perf_blk=1, nur mit perf_log; Zeile TICKBLK je perf_log-Fenster, ms je

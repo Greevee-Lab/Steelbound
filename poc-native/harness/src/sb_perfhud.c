@@ -24,6 +24,7 @@
 #include "render_qa.h"
 #include "sb_overlay.h"
 #include "sb_perfhud.h"
+#include "sb_pause.h"
 #include "sb_lang.h"    /* W190: Hinweis Spielstaende geschuetzt */
 #include "kernel_hle.h" /* W190: krnl_savelock_active */
 #include <stdlib.h>
@@ -525,6 +526,7 @@ static int ph_fcmp(const void *a, const void *b)
 
 static double ph_target_ms(void)
 {
+    if (g_sb_paused) { return 1000.0 / (double)sb_ovl_pause_fps(); }
     if (g_cfg.interp_fps > 0 && rq_in_mission()) { return 1000.0 / (double)g_cfg.interp_fps; }
     return 1000.0 / 30.0;
 }
@@ -610,6 +612,19 @@ static void ph_stats(double win_s, ph_stat_t *s)
         s->gpu_z = s->gpu_nz ? zs / s->gpu_nz : 0.0;
         s->gpu_t = s->gpu_nt ? ts / s->gpu_nt : 0.0;
     }
+}
+
+/* W200: existing overlay LOG hook, same measured window as the F2 panel. */
+void sb_phud_test_log(void)
+{
+    ph_stat_t s;
+    if (!g_phud_meas) { return; }
+    ph_stats(1.0, &s);
+    HLOG_I("FPS-SETTING: cfg=%d target=%d paused=%d fps=%.2f frames=%u "
+           "ft_avg=%.3f p50=%.3f p99=%.3f max=%.3f ticks/s=%.2f",
+           g_cfg.interp_fps, g_sb_paused ? sb_ovl_pause_fps() :
+           (g_cfg.interp_fps > 0 ? g_cfg.interp_fps : 30), (int)g_sb_paused,
+           s.fps, s.frames, s.ft_avg, s.p50, s.p99, s.ft_max, s.tps);
 }
 
 /* ------------------------------------------------------------------ */
@@ -1502,7 +1517,7 @@ static void ph_paint(void)
         int wmi = sb_winmode_current();
         if (wmi < 0 || wmi > 2) { wmi = 0; }
         _snwprintf_s(t, 128, _TRUNCATE, L"%u\u00D7%u %s %d Sh%d RT%u%s", g_bb_w, g_bb_h, wm[wmi],
-                     g_cfg.interp_fps > 0 ? g_cfg.interp_fps : 30, g_cfg.shading, rts,
+                     g_sb_paused ? sb_ovl_pause_fps() : (g_cfg.interp_fps > 0 ? g_cfg.interp_fps : 30), g_cfg.shading, rts,
                      g_cfg.rt_scale_dyn > 0 ? L"d" : L""); /* W146: d = dynamisch */
     }
     ph_text(pad, y, t, SB_UI_C_DIM, 0);

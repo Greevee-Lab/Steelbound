@@ -71,7 +71,7 @@ void sb_pause_point(void)
     }
     HLOG_I("PAUSE: an #%u (f=%u feld=%u tmr=%u vblank_hz=%d interp_fps=%d vr=%d)", g_pause_n, f0, fld0, tmr0,
            g_cfg.vblank_hz, g_cfg.interp_fps, g_cfg.vr_enable);
-    per = qf.QuadPart / 60; /* Pausenbilder mit 60 Hz */
+    per = qf.QuadPart / sb_ovl_pause_fps();
     next = q0;
     while (g_pause_req) {
         MSG msg;
@@ -87,6 +87,8 @@ void sb_pause_point(void)
         if (!g_pause_req) {
             break;
         }
+        /* W200: the selected rate takes effect on the next pause frame. */
+        per = qf.QuadPart / sb_ovl_pause_fps();
         sb_render_pause_frame();
         nfr++;
         next.QuadPart += per;
@@ -101,6 +103,7 @@ void sb_pause_point(void)
         }
     }
     sb_render_pause_end();
+    sb_ovl_present_end(); /* W200: commit before clocks/present thread resume */
     InterlockedExchange(&g_sb_paused, 0);
     krnl_time_pause(0);
     sb_timing_pause_end();

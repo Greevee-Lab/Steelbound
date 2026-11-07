@@ -1,6 +1,6 @@
 Steel Battalion - Game Preservation Project
 Edition: community
-Stand: 2026-11-08 (Commit fa0a23c+lokal)
+Stand: 2026-11-08 (Commit 53b30ff+lokal)
 
 Dateien (sha256):
 02ef4ceacf69cd6473cc49c12cd99f0ab0cab1d4e225bacdddf70d0006f16547  .github/FUNDING.yml
@@ -49,7 +49,7 @@ c2f63b9fb936e600b43d015b1e4b1293f79b82685e3f401a0941e926735792b0  poc-native/har
 84490e79bb90f3ae194a53f71b352e6c6f82d8509473135792934e964e3bdc39  poc-native/harness/src/audio_mix.c
 0369bff90f2eb4716596a9d110068331689ea54e7387da35c9a2b9fea0cd522d  poc-native/harness/src/audio_out.c
 28b5513fff8f7b8d08b7fb14e94f68b3e8852e7853132848027cde1291e66c08  poc-native/harness/src/audio_out.h
-c77d0e7aa86ba8e91d2bc52da6ed85773b08596a3e9777687c777f19ec8e0ab2  poc-native/harness/src/d3d11_render.c
+170922ce9d8bd451011d9096250032bcd2a3376e539340fe0ed3d5c79e8080f6  poc-native/harness/src/d3d11_render.c
 af1f2f5a3dff9bf26157dac0a608120dcaeb19b80b9c2b6478af48bc47e183b5  poc-native/harness/src/d3d11_render.h
 3693d2c940cb5e97ad5c6725c42f2c39b57f2ed6b1b5bbae46da7fa6dff555dc  poc-native/harness/src/diag_campaign.c
 86ced823b3adc0870a1445a609ba77732e03188cd90ebfbc1e209e078bf6540a  poc-native/harness/src/diag_campaign.h
@@ -105,7 +105,7 @@ dfc7ed25add0c1de6eee27941a8be3393e9d82e10cd96a09887ca3ecc9091c9b  poc-native/har
 e1a05ba6ed70f1ff6e08e0835a22a91c9c6a3015d3dbeaf1210669c110c07ac4  poc-native/harness/src/render_fx_rem.h
 6ce314700fe659e9e439a24c9550873725a813681247c7f2e0502cedd003d1d2  poc-native/harness/src/render_im.c
 68f3a8cc6dd1f297acbf51b69300d9571009b0f6be45870204ea2689a10ec7b3  poc-native/harness/src/render_int.h
-816118b9337abe1245cc389e0b60c3e8deb4b137f3b525abdd81c357ff4362ce  poc-native/harness/src/render_interp.c
+8f1f1f163f4a1e92fecd77357abbe46b5ef639fe80d3c8c914d14c0109c823bf  poc-native/harness/src/render_interp.c
 de098ceb6f1de619002d1831161f823e0b6a4648d835e76128f3b474e2cc54ef  poc-native/harness/src/render_mfx.c
 2533adf35b3052805a5d0e89c2c022fe7e2486ca208adadb9908d2cbc044757e  poc-native/harness/src/render_photo.c
 f874495bdab694b6ebb4e1cfb05ce7c56930886435996a341c1fc69a30e3b2b1  poc-native/harness/src/render_psgen.c
@@ -133,15 +133,15 @@ bac9b33efdb2c234657838f05d6479a8624f7e0cc70bdd8881f200883d848ca4  poc-native/har
 036694bdfbc1a806964a7549cbcbfbec129451902caeef025643e366b4701e68  poc-native/harness/src/sb_gfxpreset.h
 6a29524db4cc03a8e2bcf625070581793b954187bccb8af1e89ff71d661e91e5  poc-native/harness/src/sb_lang.c
 eea539596f86263ce4106a80bbb939b1cb257a97d1c66017d8c34dd262ba0969  poc-native/harness/src/sb_lang.h
-3eba1e4714080dfd4e13e5c054bd7bc6421c6ce87f9c83ee65ed630818e22edc  poc-native/harness/src/sb_overlay.c
+44a7a2b771e2cc134c45efa96560579a6c19ca538a0a4f368de94bab752472d6  poc-native/harness/src/sb_overlay.c
 6a26c98231ed30921278cdf8268a0bbdf8d4c9065a1f0b2d492a15159b7556ea  poc-native/harness/src/sb_overlay.h
 7286b5a9da1929901f804cb8dada7d60fee69ac8b620690c4415502fbde10943  poc-native/harness/src/sb_pack.c
 79460ca876d0240f1c2f3bd4277f29d3d137eaa8b2336b0a63044198b2905123  poc-native/harness/src/sb_pack.h
 a72d3da7568128ea8e6e464f4758c7c18698340b23d4ec24e48ff05541303343  poc-native/harness/src/sb_packscan.c
-8ddb2e0e77f3b970efeee832fa426656fde2c8e3e290c9a3edbfa2578366cfdd  poc-native/harness/src/sb_pause.c
-83707106e23cda0ed40a0ddf85b2fa59731ef09664403644bdbb491f30cd589c  poc-native/harness/src/sb_pause.h
-d877411a3d37a5b7bb724f7b319fa7e842563649c6e82c415981da7523084eb7  poc-native/harness/src/sb_perfhud.c
-dac1f1af138f9922bed247d09fd88a192859336a45f80ea890ee112cdfc2b1f0  poc-native/harness/src/sb_perfhud.h
+deb9bfe6ad862e4ec19a3870a5f8846618d2fb05199efc24968c91f5e427b459  poc-native/harness/src/sb_pause.c
+0055d37e363b5df1adb9426862c3f4f53c4b41fc70c802659ca023158cc36485  poc-native/harness/src/sb_pause.h
+5e4ae2aa0dd41d7d2898a23ec37c43a6b768b98a1d2b8b4a794e6ffd37349156  poc-native/harness/src/sb_perfhud.c
+c35bb0f21fc57bd9d18ba2992ea5611d158233a2123515a100fb02ee50c75d13  poc-native/harness/src/sb_perfhud.h
 f2071d0d3a1b80aefd06652e77fbe25d9c4d259d1bfcd2d749e708791062d595  poc-native/harness/src/sb_photo.h
 887579f30803d2d4d2a6744087e2efe06f910894b9d04f5ecd9e778c29b3ef9a  poc-native/harness/src/sb_relaunch.c
 673698f854e6d32e3b8adc3409d27b96e4f1187b3a96dc02da47e77a61e9b5d2  poc-native/harness/src/sb_relaunch.h

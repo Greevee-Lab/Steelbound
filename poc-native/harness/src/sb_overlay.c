@@ -2030,7 +2030,7 @@ static void ov_test_tick(unsigned n)
         case OA_SHOT: g_ov_shot_due = 1; break;
         case OA_FOCUS1: PostMessageA(h, IMOUSE_MSG_TEST_FOCUS, 1, 0); break;
         case OA_FOCUS0: PostMessageA(h, IMOUSE_MSG_TEST_FOCUS, 0, 0); break;
-        case OA_LOG: PostMessageA(h, IMOUSE_MSG_TEST_STATE, 0, 0); ov_log_values("test"); ov_log_shader("test"); ov_log_shader2("test"); ov_log_fx("test"); break;
+        case OA_LOG: sb_phud_test_log(); PostMessageA(h, IMOUSE_MSG_TEST_STATE, 0, 0); ov_log_values("test"); ov_log_shader("test"); ov_log_shader2("test"); ov_log_fx("test"); break;
         case OA_PHUDPOS: sb_phud_cycle_pos(); break;
         case OA_TKEY: PostMessageA(h, OV_MSG_TEST, (WPARAM)s->vk, 0); break; /* W188 */
         case OA_TXT: { /* W188: Zeichen per WM_CHAR wie TranslateMessage ('_' = Leerzeichen) */
@@ -2313,6 +2313,13 @@ void sb_ovl_request_fps(int fps)
     HLOG_I("OVERLAY: Bildrate -> %d angefordert (Test, f=%u)", g_ov_fps, g_present_no);
 }
 
+/* W200: pause presentation follows the selection without discarding the
+ * recorded still image. Apply render resources when leaving the pause. */
+int sb_ovl_pause_fps(void)
+{
+    return g_ov_fps > 0 ? g_ov_fps : 30;
+}
+
 void sb_ovl_present_end(void)
 {
     if (!g_ov_fps_pend) { return; }
@@ -2328,8 +2335,8 @@ void sb_ovl_present_end(void)
     } else {
         sb_ctx_enter();
         sb_interp_reset("Overlay: Bildrate");
-        sb_ctx_leave();
         g_cfg.interp_fps = g_ov_fps;
+        sb_ctx_leave();
     }
     HLOG_I("OVERLAY: Bildrate aktiv: interp_fps=%d (%s, f=%u)", g_cfg.interp_fps,
            g_cfg.interp_fps ? "Zwischenbilder" : "30 Hz Original", g_present_no);

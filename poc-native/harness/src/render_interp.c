@@ -4426,7 +4426,7 @@ int sb_pd_on(void)
 {
     /* W188 GAME-MENU: in der Pause zeigt die Pause-Schleife die Bilder (Takt-Thread ruht) */
     return pd_started == 1 && g_cfg.present_decouple > 0 && g_cfg.vblank_hz > 0 && !g_cfg.vr_enable &&
-           sb_render_offscreen() && !g_sb_paused;
+           g_cfg.interp_fps > 0 && sb_render_offscreen() && !g_sb_paused;
 }
 
 static int pd_owns_clock(void)
@@ -4488,7 +4488,7 @@ static void pd_lock(void)
 static void pd_step(void)
 {
     LONGLONG now = ip_now();
-    LONGLONG dt = ip_dt > 0 ? ip_dt : ip_qpf.QuadPart / 120;
+    LONGLONG dt = ip_qpf.QuadPart / (g_cfg.interp_fps > 0 ? g_cfg.interp_fps : 30);
     if (!sb_pd_on()) { pd_deadline = now + dt; return; }
     if (ip_live && ip_nhist >= 1) {
         if (now >= ip_tnext) {

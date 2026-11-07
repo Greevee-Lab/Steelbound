@@ -8,7 +8,7 @@
  * Missions-Countdown und Filme (einzige Zeitbasis der Logik ist der
  * VBlank-Feldzaehler, FPS120.md 1.1). Waehrenddessen:
  *   - zeigt die Schleife das letzte Spielbild (Kopie) mit Menue darueber
- *     (60 Hz, Overlay-Tasten/Test-Hook laufen weiter),
+ *     (gewaehlte Bildrate, Overlay-Tasten/Test-Hook laufen weiter),
  *   - mischt der Audio-Mischer Stille (Stimmen ruecken nicht vor, Ton steht),
  *   - ruht der Present-Takt-Thread (W138), der VR-Thread laeuft weiter
  *     (Session bleibt, zeigt das stehende Bild).
@@ -48,6 +48,8 @@ void sb_render_pause_frame(void);
 void sb_render_pause_end(void);
 /* sb_overlay.c: Tasten/Pad/Test-Hook eines Pausenbildes */
 void sb_ovl_pause_tick(void);
+int sb_ovl_pause_fps(void);
+void sb_ovl_present_end(void);
 
 #ifdef __cplusplus
 }

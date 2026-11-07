@@ -1561,7 +1561,6 @@ int sb_render_pause_begin(void)
 
 void sb_render_pause_frame(void)
 {
-    HRESULT hr;
     if (!g_dev || !g_swap || !g_pause_snap) { return; }
     sb_ctx_enter();
     if (g_swap_res) { /* FPS-INTERP: wie ein gezeigtes Bild (Nachbearbeitung, Menue, VR-Leinwand, Test-Bild) */
@@ -1608,12 +1607,9 @@ void sb_render_pause_frame(void)
         char onm[48];
         if (sb_ovl_shot_due(onm, sizeof onm)) { sb_render_shot_name(onm, NULL); }
     }
-    hr = IDXGISwapChain_Present(g_swap, 0, 0);
+    /* W200: measure pause presents also without an offscreen buffer. */
+    sb_render_present_raw();
     sb_ctx_leave();
-    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
-        HLOG_E("render: Device verloren (hr=0x%lX)", (long)hr);
-        ExitProcess(7);
-    }
 }
 
 void sb_render_pause_end(void)

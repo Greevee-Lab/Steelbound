@@ -30,6 +30,7 @@ int sb_render_offscreen(void); /* d3d11_render.c: 1 = FPS-INTERP-Offscreen-BB */
 static const int kPhScale[SB_PHOTO_NSCALE] = { 1, 2, 4, 8 };
 
 static int ph_on;
+static int ph_saved_monitor_fx, ph_saved_shading; /* W198: session-only overrides */
 static int ph_cockpit = 1, ph_free;
 static float ph_yaw, ph_pitch, ph_t[3];
 static int ph_scale, ph_jpg, ph_init, ph_asp;
@@ -553,6 +554,10 @@ static int ph_scale_ok(int i, int cockpit)
 
 void sb_photo_enter(void)
 {
+    if (ph_on) { return; }
+    ph_saved_monitor_fx = g_cfg.monitor_fx;
+    ph_saved_shading = g_cfg.shading;
+    HLOG_I("PHOTO opts: saved monitor_fx=%d shading=%d", g_cfg.monitor_fx, g_cfg.shading);
     if (!ph_init) {
         ph_init = 1;
         ph_scale = ph_scale_idx_of(g_cfg.photo_scale);
@@ -580,6 +585,11 @@ void sb_photo_enter(void)
 void sb_photo_leave(void)
 {
     if (!ph_on) { return; }
+    g_cfg.monitor_fx = ph_saved_monitor_fx;
+    g_cfg.shading = ph_saved_shading;
+    sb_render_pause_dirty();
+    HLOG_I("PHOTO opts: restored monitor_fx=%d shading=%d", g_cfg.monitor_fx, g_cfg.shading);
+    ph_req = 0;
     ph_on = 0;
     ph_view_valid = 0;
     HLOG_I("PHOTO: aus (f=%u, %u Vorschau-Neuzeichnungen)", g_present_no, ph_nprev);
@@ -588,6 +598,17 @@ void sb_photo_leave(void)
 int sb_photo_active(void)
 {
     return ph_on;
+}
+
+/* Both replay paths (pause and tiled capture) read these temporary values. */
+void sb_photo_set_effect(int shader, int on)
+{
+    if (!ph_on) { return; }
+    if (shader) { g_cfg.shading = on ? 1 : 0; }
+    else { g_cfg.monitor_fx = on ? 1 : 0; }
+    ph_dirty = 1;
+    sb_render_pause_dirty();
+    HLOG_I("PHOTO opts: monitor_fx=%d shading=%d", g_cfg.monitor_fx, g_cfg.shading);
 }
 
 void sb_photo_set_cockpit(int on)
@@ -637,6 +658,10 @@ void sb_photo_get(sb_photo_ui_t *u)
     int i;
     memset(u, 0, sizeof *u);
     u->active = ph_on;
+    u->monitor_fx = g_cfg.monitor_fx;
+    u->shading = g_cfg.shading;
+    u->effect_pending = (g_cfg.shading && (!ph_saved_shading || (ph_cen_ok && !ph_cen.n_wrq))) ||
+                        (g_cfg.monitor_fx && ph_saved_monitor_fx != 1);
     u->rec = ph_rec_ok();
     u->vr = g_cfg.vr_enable != 0;
     u->cockpit = ph_cockpit;

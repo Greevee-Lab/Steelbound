@@ -740,6 +740,7 @@ gui.rule_r26_layout=Own control layout active – keys: see Controls.
 gui.rule_r27=Needs sound.
 gui.rule_r28=‘%s’ is loaded every time the launcher starts.
 gui.rule_r29=No packs yet. Build one from your own disc with the Pack Creator.
+gui.rule_r29_community=No packs yet. Packs contain their authors' own artwork. Put .sbpack files into the packs folder.
 gui.rule_r30=No texture pack – lighting and effects only.
 gui.rule_c_preset=‘%s’ applied – your custom settings were replaced.
 gui.rule_c_shader=Graphics preset is now ‘%s’.
@@ -782,7 +783,7 @@ gui.adv_setup_auto=Load this setup when the launcher starts
 gui.msg_prof_nodefault=No saved setup is loaded at start any more – user.cfg applies.
 gui.gfx_to_packs=Packs →
 gui.rule_r31=Pack limit reached (32). Remove a pack first.
-gui.rule_r32=The Pack Creator (sb_creator.exe) is not next to the launcher. It is part of the Community Edition download – put it into the launcher folder to start it from here.
+gui.rule_r32=The Pack Creator (sb_creator.exe) is not next to the launcher. Put it into the launcher folder to start it from here.
 gui.pk_list_hint=Higher packs win – drag or press Alt+↑/↓ to reorder.
 gui.pk_checkall=Check all
 gui.pk_x4best=4× (best)
@@ -1080,3 +1081,9 @@ ovl.ph_asp_wide=Screen (wide)
 ovl.ph_asp_square=Camera (monitor)
 ovl.ph_st_aspect=Image format: only without cockpit
 gui.extras_asp=Format without cockpit
+
+# W198 PHOTO-OPTS
+ovl.ph_monitor_fx=Monitor effect
+ovl.ph_shader=Shader
+ovl.ph_original=Original
+ovl.ph_effect_pending=Enable before pausing to see all effects.

@@ -1327,8 +1327,8 @@ static void ov_key_menu(int vk)
 /* ------------------------------------------------------------------ */
 /* W195 PHOTO-MODE: Foto-Panel (Bildschirm SC_PHOTO, Render-Thread)     */
 /* ------------------------------------------------------------------ */
-enum { PR_COCKPIT, PR_FREECAM, PR_MECH, PR_RES, PR_FMT, PR_SHOT, PR_BACK, PR_YAW, PR_PITCH, PR_DIST, PR_RESET, PR_ASPECT };
-static const int kPhRows0[] = { PR_COCKPIT, PR_ASPECT, PR_FREECAM, PR_MECH, PR_RES, PR_FMT, PR_SHOT, PR_BACK };
+enum { PR_COCKPIT, PR_FREECAM, PR_MECH, PR_RES, PR_FMT, PR_SHOT, PR_BACK, PR_YAW, PR_PITCH, PR_DIST, PR_RESET, PR_ASPECT, PR_MFX, PR_SHADER };
+static const int kPhRows0[] = { PR_COCKPIT, PR_ASPECT, PR_FREECAM, PR_MECH, PR_MFX, PR_SHADER, PR_RES, PR_FMT, PR_SHOT, PR_BACK };
 static const int kPhRows1[] = { PR_FREECAM, PR_YAW, PR_PITCH, PR_DIST, PR_RESET, PR_SHOT, PR_BACK };
 #define PH_NR0 ((int)(sizeof kPhRows0 / sizeof kPhRows0[0]))
 #define PH_NR1 ((int)(sizeof kPhRows1 / sizeof kPhRows1[0]))
@@ -1394,6 +1394,8 @@ static void ov_ph_change(int it, int dir)
         if (!u.rec) { ov_status_key("ovl.ph_st_norec"); break; }
         sb_photo_set_freecam(!u.freecam);
         break;
+    case PR_MFX: sb_photo_set_effect(0, !u.monitor_fx); break;
+    case PR_SHADER: sb_photo_set_effect(1, !u.shading); break;
     case PR_MECH: ov_status_key("ovl.ph_st_mech"); break;
     case PR_ASPECT:
         if (!u.rec || u.cockpit) { ov_status_key("ovl.ph_st_aspect"); break; }
@@ -2874,7 +2876,7 @@ static void ov_paint_photo(void)
     static const char *const tk[PH_NTABS] = { "ovl.ph_tab_photo", "ovl.ph_tab_cam" };
     static const char *const lk[] = { "ovl.ph_cockpit", "ovl.ph_freecam", "ovl.ph_mech", "ovl.ph_res", "ovl.ph_fmt",
                                       "ovl.ph_shot", "ovl.lb_back", "ovl.ph_yaw", "ovl.ph_pitch", "ovl.ph_dist",
-                                      "ovl.ph_reset", "ovl.ph_aspect" };
+                                      "ovl.ph_reset", "ovl.ph_aspect", "ovl.ph_monitor_fx", "ovl.ph_shader" };
     static const int sc[SB_PHOTO_NSCALE] = { 1, 2, 4, 8 };
     int W = (int)ov_bw, H = (int)ov_bh, rowh = S(12.5f), pad = S(6.0f), b = S(1.0f), th = S(OV_TABH), gap = S(3.0f);
     int y, k, t, x, tw[PH_NTABS], sum = 0, foc = g_ph_sel < 0;
@@ -2936,6 +2938,8 @@ static void ov_paint_photo(void)
         ov_text(pad + S(6.0f), yt, lb, act ? (en ? OV_C_TXT : OV_C_DIM) : c, 0);
         vb[0] = 0;
         switch (it) {
+        case PR_MFX: ov_wkey(vb, 80, u.monitor_fx ? "ovl.v_on" : "ovl.v_off"); break;
+        case PR_SHADER: ov_wkey(vb, 80, u.shading ? "ovl.ph_original" : "ovl.v_off"); break;
         case PR_COCKPIT: ov_wkey(vb, 80, u.cockpit ? "ovl.v_on" : "ovl.v_off"); break;
         case PR_ASPECT: {
             static const char *const ak[3] = { "ovl.ph_asp_crop", "ovl.ph_asp_wide", "ovl.ph_asp_square" };
@@ -2979,7 +2983,7 @@ static void ov_paint_photo(void)
         wchar_t l1[96], l2[96], l3[128], st[96];
         char nb[256], dshow[200];
         ov_wkey(l1, 96, "ovl.ph_hint1");
-        ov_wkey(l2, 96, u.freecam ? "ovl.ph_hint_cam" : (u.rec ? "ovl.ph_hint_nocam" : "ovl.ph_st_norec"));
+        ov_wkey(l2, 96, u.effect_pending ? "ovl.ph_effect_pending" : u.freecam ? "ovl.ph_hint_cam" : (u.rec ? "ovl.ph_hint_nocam" : "ovl.ph_st_norec"));
         sb_photo_dir_show(dshow, sizeof dshow);
         _snprintf_s(nb, sizeof nb, _TRUNCATE, LT("ovl.ph_dir"), dshow);
         ov_wu8(l3, 128, nb);

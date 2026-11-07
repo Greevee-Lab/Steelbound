@@ -68,3 +68,7 @@ editions/community/media/cockpit.jpg => assets/cockpit.jpg
 poc-native/contrib/sbc_mapping.md
 # W180 EXPORT: englische Spieler-Doku (W175) + Tester-Hinweise (Alpha 1)
 poc-native/docs/community/*.md
+
+# W201 NO-CREATOR: Pack Creator und Upscaler bleiben privat.
+# Keine Freigabe fuer poc-native/creator/, poc-native/tools/creator/,
+# remaster_upscale.py, tools/get_upscaler.ps1 oder third_party/tools.lock.

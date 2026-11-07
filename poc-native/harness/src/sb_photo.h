@@ -11,6 +11,9 @@
  *     aufgezeichneten Welt-Draws des Ticks werden mit geaenderter Sicht neu gezeichnet.
  *     Das Spiel zeichnet nur, was die Spielkamera sieht -> grosse Drehungen/Wege zeigen
  *     Luecken; daher Grenzen photo_cam_yaw/_pitch/_dist.
+ *   - W198 Monitor-Effekt und Shader: temporaer fuer diese Foto-Sitzung; beim
+ *     Verlassen exakte Wiederherstellung, keine Speicherung. Live wie W193,
+ *     auch fuer gekachelte Aufnahmen. Fehlender Tick-Zustand wird angezeigt.
  *   - Aufnahme-Aufloesung x1/x2/x4/x8 (Fensteraufloesung bzw. Fensterhoehe ohne Cockpit),
  *     gekachelt gerendert (Kacheln <= 4096 x 1024, Viewport-Grenze 32767), PNG oder JPG.
  * Fotos: photo_dir (leer = <Nutzerdaten>\Screenshots, legacy/Tests: <Ausgabe>\Screenshots),
@@ -30,6 +33,7 @@ struct ID3D11Resource;
 #define SB_PHOTO_NSCALE 4 /* x1, x2, x4, x8 */
 
 typedef struct {
+    int monitor_fx, shading, effect_pending; /* W198: temporary options, missing recorded state */
     int active;        /* Fotomodus offen */
     int rec;           /* Aufzeichnung des Ticks vorhanden (Mission + FPS-INTERP): Cockpit aus, freie Kamera, x2..x8 */
     int vr;            /* VR-Betrieb: Fotomodus aus */
@@ -55,6 +59,7 @@ void sb_photo_enter(void);
 void sb_photo_leave(void);
 int sb_photo_active(void);
 void sb_photo_get(sb_photo_ui_t *u);
+void sb_photo_set_effect(int shader, int on);
 void sb_photo_set_cockpit(int on);
 void sb_photo_set_freecam(int on);
 void sb_photo_set_scale(int idx);

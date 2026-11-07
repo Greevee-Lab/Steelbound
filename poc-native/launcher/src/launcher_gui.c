@@ -1381,6 +1381,9 @@ static void ui_place(uictl_t *u)
 
 static int ui_visible_on(const uictl_t *u, int page)
 {
+    if (!u) { /* W201: edition-specific controls need not exist. */
+        return 0;
+    }
     /* W173 LAUNCHER-P4: "Zuruecksetzen" nur bei Benutzerdefiniert. Die
      * Texturen-Auswahl bleibt immer sichtbar (ohne Pack: Hinweis R30). */
     if (u->id == ID_GP_RESET && !ui_checked(ID_GP0 + LGP_CUSTOM)) {
@@ -1409,7 +1412,7 @@ static int ui_visible_on(const uictl_t *u, int page)
          u->id == ID_PK_CHECK || u->id == ID_PK_DEL) && packs_count() == 0) {
         return 0;
     }
-    if (u->id == ID_PK_CREATOR && (packs_count() != 0 || g_creator != 1)) {
+    if (u->id == ID_PK_CREATOR && (SB_EDITION_COMMUNITY || packs_count() != 0 || g_creator != 1)) {
         return 0;
     }
     /* W170 LAUNCHER-P1/B4+B7: Schalter ohne Wirkung sind keine Bedienung.
@@ -5555,6 +5558,7 @@ static void rules_data(const launcher_settings_t *s, lr_env_t *e)
 }
 
 /* W172: Pack Creator neben dem Launcher (sb_creator.exe im Exe-Ordner). */
+#if !SB_EDITION_COMMUNITY
 static int creator_path(char *out, size_t cap)
 {
     wchar_t w[MAX_PATH];
@@ -5572,6 +5576,7 @@ static int creator_path(char *out, size_t cap)
     return u8_GetFileAttributes(out) != INVALID_FILE_ATTRIBUTES;
 }
 
+#endif
 static void rules_env(lr_env_t *e, launcher_settings_t *s)
 {
     *s = g_s;
@@ -5596,11 +5601,13 @@ static void rules_env(lr_env_t *e, launcher_settings_t *s)
     e->mon_h = g_mon_h;
     e->legacy_tex = g_rem_pkg == 1;
     strcpy_s(e->default_setup, sizeof e->default_setup, g_dflt_setup);
+#if !SB_EDITION_COMMUNITY
     if (g_creator < 0) {
         char cp[1200];
         g_creator = creator_path(cp, sizeof cp);
     }
     e->has_creator = g_creator == 1;
+#endif
     e->photo_dir_ok = extras_dir_ok(s->photo_dir); /* W195 R33 */
     packs_env(e);
     g_tex_src = e->tex_packs + e->legacy_tex; /* W173: Texturen-Zeile */
@@ -9920,6 +9927,7 @@ static void packs_folder(void)
 }
 
 /* W172: Pack Creator starten (nur wenn neben dem Launcher, PO-Entsch. 6). */
+#if !SB_EDITION_COMMUNITY
 static void packs_creator_open(void)
 {
     char p[1200];
@@ -9936,6 +9944,7 @@ static void packs_creator_open(void)
     ShellExecuteW(g_hwnd, L"open", w, NULL, NULL, SW_SHOWNORMAL);
 }
 
+#endif
 /* W172: Texturdetail 2x/4x (einzige Stelle, Konzept 6.4). Wirkt im Client
  * ueber hd_scale/hd_textures (wie bisher gespiegelt); Grenzen ueber dem
  * neuen Detail entfallen (nur senken). */
@@ -10154,12 +10163,14 @@ static void paint_packs(void)
         if (g_rr[29].active) { /* R29 als Ueberschrift des leeren Zustands */
             label(F_SEMI, g_rr[29].text, CX0 + 18, CY0 + 52, PKL_W - 36, 48, C_TEXT);
         }
+#if !SB_EDITION_COMMUNITY
         if (!g_rr[32].active) {
             label(F_TINY, LT("gui.pk_creator_txt"), CX0 + 18, CY0 + 152,
                   PKL_W - 36, 30, C_DIM);
         } else {
             paint_reason(32, CX0 + 18, CY0 + 118, PKL_W - 36, 64);
         }
+#endif
         label(F_TINY, LT("gui.pk_drop_hint"), CX0 + 18, CY0 + 192, PKL_W - 36, 44,
               C_FAINT);
     }
@@ -10596,7 +10607,9 @@ static void ui_apply_language(void)
     ui_settext(ctl(ID_PK_CAPRESET), LT("gui.pk_capreset"));
     ui_settext(ctl(ID_PK_LVL2), LT("gui.pk_x2"));
     ui_settext(ctl(ID_PK_LVL4), LT("gui.pk_x4best"));
+#if !SB_EDITION_COMMUNITY
     ui_settext(ctl(ID_PK_CREATOR), LT("gui.pk_creator"));
+#endif
     xbe_cue_update();
     packs_refresh_lists();
     ui_settext(ctl(ID_START), LT("gui.btn_start"));
@@ -10832,8 +10845,10 @@ static void build_controls(void)
     }
     mk(w, K_BTN, ID_PK_UP, P_PACKS, CX0 + 18, CY0 + 246, 40, 28, "\xE2\x86\x91", 0);
     mk(w, K_BTN, ID_PK_DOWN, P_PACKS, CX0 + 62, CY0 + 246, 40, 28, "\xE2\x86\x93", 0);
+#if !SB_EDITION_COMMUNITY
     mk(w, K_BTN, ID_PK_CREATOR, P_PACKS, CX0 + 18, CY0 + 118, 196, 30,
        LT("gui.pk_creator"), 0);
+#endif
     mk(w, K_BTN, ID_PK_CHECKALL, P_PACKS, CX0 + PKL_W - 18 - 116 - 6 - 110, CY0 + 246,
        110, 28, LT("gui.pk_checkall"), 0);
     mk(w, K_BTN, ID_PK_FOLDER, P_PACKS, CX0 + PKL_W - 18 - 116, CY0 + 246, 116, 28,
@@ -11425,7 +11440,9 @@ static void on_command_inner(int id, int code)
         packs_folder();
         break;
     case ID_PK_CREATOR:
+#if !SB_EDITION_COMMUNITY
         packs_creator_open();
+#endif
         break;
     case ID_PK_LVL2:
     case ID_PK_LVL4:
@@ -12546,7 +12563,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     lrules_fixture(rule, v, &s, &fe);
                     g_env_fix = &fe;
                     ui_from_settings(&s); /* ruft ui_apply_rules */
-                    if (g_rr[rule].active != v) {
+                    if (g_rr[rule].active != ((SB_EDITION_COMMUNITY && rule == 32) ? 0 : v)) {
                         ok43 = 0;
                         _snprintf_s(why43, sizeof why43, _TRUNCATE,
                                     "R%d v=%d: Regel greift=%d", rule, v,
@@ -12998,8 +13015,28 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                        ui_visible_on(ui_find(ID_GFX_TEX), P_GFX) &&
                        !ui_visible_on(ui_find(ID_PK_LIST), P_PACKS) &&
                        g_rr[29].active &&
-                       ui_visible_on(ui_find(ID_PK_CREATOR), P_PACKS) == (g_creator == 1) &&
-                       g_rr[32].active == (g_creator != 1);
+                       ui_visible_on(ui_find(ID_PK_CREATOR), P_PACKS) == (!SB_EDITION_COMMUNITY && g_creator == 1) &&
+                       g_rr[32].active == (!SB_EDITION_COMMUNITY && g_creator != 1);
+                { /* W201: simulate a neighbouring creator, never launch it. */
+                    int creator_keep = g_creator, present, edition_ok = 1;
+                    for (present = 0; present <= 1; present++) {
+                        g_creator = present;
+                        show_page(P_PACKS);
+                        edition_ok = edition_ok &&
+                            ui_visible_on(ui_find(ID_PK_CREATOR), P_PACKS) ==
+                                (!SB_EDITION_COMMUNITY && present) &&
+                            g_rr[32].active == (!SB_EDITION_COMMUNITY && !present);
+                        if (SB_EDITION_COMMUNITY) {
+                            edition_ok = edition_ok && !ui_find(ID_PK_CREATOR) &&
+                                !strstr(g_rr[29].text, "Pack Creator") &&
+                                strstr(g_rr[29].text, ".sbpack");
+                        }
+                    }
+                    g_creator = creator_keep;
+                    printf("%s W201 creator-edition (absent/present, %s)\n",
+                           edition_ok ? "PASS" : "FAIL", SB_EDITION_BADGE);
+                    ok49 = ok49 && edition_ok;
+                }
                 g_rem_pkg = keep;
                 if (!ok49) {
                     strcpy_s(why49, sizeof why49, "B5/leerer Zustand");

@@ -8,6 +8,7 @@
 #include "launcher_rules.h"
 #include "launcher_app.h"
 #include "sb_lang.h"
+#include "sb_edition.h"
 
 #define printf cli_printf
 
@@ -296,7 +297,7 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
     /* R29: noch keine Packs */
     if (e->n_packs == 0) {
         hit(&out[29], 29, LR_LVL_INFO);
-        strcpy_s(out[29].text, sizeof out[29].text, LT("gui.rule_r29"));
+        strcpy_s(out[29].text, sizeof out[29].text, LT(SB_EDITION_COMMUNITY ? "gui.rule_r29_community" : "gui.rule_r29"));
     }
     /* R30: Remaster ohne Texturquelle -> nur Licht/Effekte */
     if (s->remaster && tex_any == 0) {
@@ -310,7 +311,7 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
     }
     /* R32 (W172): Pack Creator liegt nicht neben dem Launcher -> Erklaerung
      * statt Knopf (PO-Entscheidung 6) */
-    if (!e->has_creator) {
+    if (!SB_EDITION_COMMUNITY && !e->has_creator) {
         hit(&out[32], 32, LR_LVL_INFO);
         strcpy_s(out[32].text, sizeof out[32].text, LT("gui.rule_r32"));
     }
@@ -391,7 +392,7 @@ void lrules_selftest(int *pass, int *fail)
             lrules_env_default(&e, &s);
             lrules_fixture(rule, v, &s, &e);
             lrules_eval(&e, r);
-            want_act = v;
+            want_act = (SB_EDITION_COMMUNITY && rule == 32) ? 0 : v;
             want_dis = v && kDef[rule].locks;
             if (r[rule].active != want_act || r[rule].disable != want_dis ||
                 (want_act && !r[rule].text[0]) ||

@@ -533,6 +533,7 @@ as.filter_sbc=SBC fixtures (*.sbc)|*.sbc
 as.fixture_title=Open fixture
 gui.ctl_assist=Test & calibrate...
 ovl.fps_note=Remastered options may reduce FPS
+ovl.peek_note=Live still image · hold %s: hide menu
 ovl.v_orig_hd=Original (HD) – %d FPS
 as.g_btns=Buttons
 as.g_tog=Toggles

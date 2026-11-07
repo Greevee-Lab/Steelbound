@@ -161,8 +161,9 @@ static char g_ov_save_path[600];
 /* ---- Test-Hook (overlay_test) ---- */
 typedef struct { unsigned at; int rel; int mi; int act; int vk; char txt[28]; } ov_step_t;
 enum { OA_KEY, OA_SHOT, OA_FOCUS1, OA_FOCUS0, OA_LOG, OA_PHUDPOS,
-       OA_TKEY, OA_TXT, OA_MROW, OA_MTAB, OA_PAD, OA_STATE }; /* W188 */
-static ov_step_t g_ov_steps[96];
+       OA_TKEY, OA_TXT, OA_MROW, OA_MTAB, OA_PAD, OA_STATE, /* W188 */
+       OA_PEEK }; /* W193: Taste "Menue ausblenden" druecken (vk 1) / loslassen (vk 0) */
+static ov_step_t g_ov_steps[160]; /* W193: 96 -> 160 (Pause-Live-Belege) */
 static int g_ov_nsteps, g_ov_step, g_ov_test_parsed;
 static unsigned g_ov_mission_f[8];      /* Startbild der k-ten Mission (fuer mN / mK.N) */
 static int g_ov_nmission, g_ov_in_mission;
@@ -1025,10 +1026,40 @@ static void ov_screen(int sc, int sel)
     g_ov_dirty = 1;
 }
 
+/* W193 PAUSE-LIVE: "Menue kurz ausblenden" - gehaltene Taste (menu_peek_key) blendet das
+ * Panel aus, das Menue bleibt offen (Eingabesperre, Pause). UI-Thread setzt, Zeichnen liest. */
+static volatile LONG g_ov_peek;
+static int g_ov_peek_vk = -2; /* -2 = noch nicht gelesen, 0 = aus */
+static int ov_is_pause_vk(int vk);
+static int ov_peek_vk(void)
+{
+    if (g_ov_peek_vk == -2) {
+        const char *k = g_cfg.menu_peek_key;
+        int vk = (!k[0] || _stricmp(k, "OFF") == 0 || strcmp(k, "0") == 0) ? 0 : imap_key_name(k);
+        if (vk < 0) {
+            HLOG_W("MENU: menu_peek_key '%s' unbekannt - Ausblenden aus", k);
+            vk = 0;
+        }
+        if (vk == VK_ESCAPE || vk == VK_RETURN || vk == VK_SPACE || vk == VK_TAB || vk == VK_UP || vk == VK_DOWN ||
+            vk == VK_LEFT || vk == VK_RIGHT || vk == VK_BACK || vk == 'B' || ov_is_pause_vk(vk)) {
+            HLOG_W("MENU: menu_peek_key '%s' ist eine Menue-Taste - Ausblenden aus", k);
+            vk = 0;
+        }
+        g_ov_peek_vk = vk;
+    }
+    return g_ov_peek_vk;
+}
+
+int sb_ovl_peek(void)
+{
+    return g_ov_peek != 0;
+}
+
 static void ov_close(const char *why)
 {
     HLOG_I("MENU: zu (%s, f=%u)", why, g_present_no);
     InterlockedExchange(&g_ov_textmode, 0);
+    InterlockedExchange(&g_ov_peek, 0); /* W193 */
     InterlockedExchange(&g_ov_open, 0);
 }
 
@@ -1411,6 +1442,10 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
             return 1;
         }
         if (!g_ov_open || wp == VK_F10) { return 0; }
+        if (!g_ov_textmode && ov_peek_vk() > 0 && (int)wp == ov_peek_vk()) { /* W193: Menue ausblenden, solange gehalten */
+            if (!InterlockedExchange(&g_ov_peek, 1)) { HLOG_I("MENU: ausgeblendet (Taste gehalten, f=%u)", g_present_no); }
+            return 1;
+        }
         if (g_ov_textmode) { /* W188: Feedback-Text - Zeichen kommen als WM_CHAR */
             if (wp == VK_BACK || ((wp == VK_RETURN) && !(lp & 0x40000000))) { ov_qpush((int)wp); }
             return 1;
@@ -1427,6 +1462,11 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         return 1;
     case WM_KEYUP:
         if (wp == VK_ESCAPE) { return 1; }
+        if (g_ov_peek && ov_peek_vk() > 0 && (int)wp == ov_peek_vk()) { /* W193 */
+            InterlockedExchange(&g_ov_peek, 0);
+            HLOG_I("MENU: wieder eingeblendet (f=%u)", g_present_no);
+            return g_ov_open ? 1 : 0;
+        }
         if (!g_ov_open || wp == VK_F10) { return 0; }
         return 1;
     case WM_CHAR:
@@ -1538,6 +1578,8 @@ static void ov_test_parse(void)
         else if (_stricmp(act, "BACK") == 0) { s->vk = VK_BACK; }
         else if (_stricmp(act, "PAUSE") == 0) { s->vk = VK_PAUSE; }
         else if (_stricmp(act, "STATE") == 0) { s->act = OA_STATE; }
+        else if (_stricmp(act, "PEEKDN") == 0) { s->act = OA_PEEK; s->vk = 1; } /* W193 */
+        else if (_stricmp(act, "PEEKUP") == 0) { s->act = OA_PEEK; s->vk = 0; }
         else if (_strnicmp(act, "TXT=", 4) == 0) { s->act = OA_TXT; strcpy_s(s->txt, sizeof s->txt, act + 4); }
         else if (_strnicmp(act, "MROW", 4) == 0 && act[4]) { s->act = OA_MROW; s->vk = atoi(act + 4); }
         else if (_strnicmp(act, "MTAB", 4) == 0 && act[4]) { s->act = OA_MTAB; s->vk = atoi(act + 4); }
@@ -1642,6 +1684,13 @@ static void ov_test_tick(unsigned n)
             break;
         }
         case OA_PAD: g_pad_inject |= (unsigned)s->vk; break; /* W188: naechster Pad-Poll */
+        case OA_PEEK: /* W193: Taste "Menue ausblenden" einzeln druecken bzw. loslassen (gehalten) */
+            if (ov_peek_vk() > 0) {
+                LPARAM sc = (LPARAM)MapVirtualKeyA((UINT)ov_peek_vk(), MAPVK_VK_TO_VSC) << 16;
+                if (s->vk) { PostMessageA(h, WM_KEYDOWN, (WPARAM)ov_peek_vk(), 1 | sc); }
+                else { PostMessageA(h, WM_KEYUP, (WPARAM)ov_peek_vk(), (LPARAM)(1 | sc | 0xC0000000u)); }
+            }
+            break;
         case OA_STATE: /* W188: Beleg-Zeile Spielzustand */
         {
             unsigned tmr = 0;
@@ -2467,6 +2516,11 @@ static void ov_paint(void)
             /* W143: FPS-Hinweis (Remaster-Seiten; VR hat keine solchen Optionen) */
             wchar_t fps[64];
             y += S(11.0f);
+            if (g_sb_paused && g_cfg.pause_live && ov_peek_vk() > 0) { /* W193: in der Pause Hinweis aufs Ausblenden */
+                char pn[96];
+                _snprintf_s(pn, sizeof pn, _TRUNCATE, LT("ovl.peek_note"), g_cfg.menu_peek_key);
+                ov_wu8(fps, 64, pn);
+            } else
             ov_wkey(fps, 64, "ovl.fps_note");
             ov_text(pad + S(2.0f), y, fps, OV_C_DIM, 0);
         }
@@ -2789,6 +2843,7 @@ void sb_ovl_draw(ID3D11RenderTargetView *rtv, int save)
     unsigned bx, by, bw, bh, pw, ph, x0, y0;
     static unsigned lk[4];
     if (!g_cfg.overlay || !g_ov_open || !rtv || !g_ctx) { return; }
+    if (g_ov_peek) { return; } /* W193: Menue ausgeblendet (Taste gehalten), bleibt offen */
     if (!ov_d3d_init()) { return; }
     sb_aspect_box(&bx, &by, &bw, &bh);
     ov_layout(bh, &pw, &ph);

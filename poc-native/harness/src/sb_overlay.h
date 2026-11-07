@@ -35,6 +35,7 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp);
 /* 1 = echte Eingaben duerfen das Spiel nicht erreichen (Overlay offen). */
 int sb_ovl_input_blocked(void); /* zaehlt gesperrte Abfragen (Beleg) */
 int sb_ovl_open(void);            /* ohne Zaehler */
+int sb_ovl_peek(void);            /* W193: 1 = Menue per gehaltener Taste ausgeblendet (bleibt offen) */
 /* Present-Anfang (Render-Thread): Tasten verarbeiten, Werte anwenden,
  * Test-Hook-Skript. */
 void sb_ovl_present_begin(unsigned n_present);

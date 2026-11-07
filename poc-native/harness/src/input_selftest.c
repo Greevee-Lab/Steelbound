@@ -24,6 +24,7 @@
  *         Akkord-Unterdrueckung) + SBC-Quellnamen.
  * Teil 13 (W188 GAME-MENU): Aktion pause (Standard KEY:PAUSE, Tasten nur
  *         ueber das Fenster, Pad-Flanke im Hook, imap_bind_keys).
+ * Teil 14 (W193 PAUSE-LIVE): imap_key_name fuer menu_peek_key.
  */
 #include <stdio.h>
 #include <string.h>
@@ -1808,6 +1809,11 @@ int main(int argc, char **argv)
 
     /* Teil 13: W188 Aktion pause. */
     run_pause_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in);
+    printf("Teil 14: W193 menu_peek_key\n");
+    CHECK(imap_key_name("H") == 'H' && imap_key_name("h") == 'H', "peek: H");
+    CHECK(imap_key_name("F9") == VK_F9 && imap_key_name("pause") == VK_PAUSE, "peek: Namen");
+    CHECK(imap_key_name("0x48") == 0x48, "peek: Hex");
+    CHECK(imap_key_name("XYZ") == -1 && imap_key_name("") == -1 && imap_key_name(NULL) == -1, "peek: unbekannt");
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;

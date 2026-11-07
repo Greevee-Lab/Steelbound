@@ -183,6 +183,7 @@ static unsigned g_up_fmt; static int g_up_lin; /* DIAG(MOVIE): letzter Upload */
  * 6=lin-range 7=lin-create/srv 8=swz-range 9=swz-create/srv.
  * sb_tex_get: zusaetzlich 10=xptr0/nodev 11=cache-voll 12=cached-null. */
 static unsigned g_up_fail;
+static int g_tex_pause_up; /* W193 PAUSE-LIVE: Upload in der Pause (g_present_no steht) ohne Bild-Drossel */
 static unsigned g_get_why;
 static unsigned g_stage_xp[4]; /* letztes xptr je Stage */
 static unsigned g_stage_n[4];  /* SetTexture-Calls je Stage */
@@ -596,7 +597,7 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
         last_ok = xptr;
     }
     if (g_present_no != up_frame) { up_frame = g_present_no; up_count = 0; }
-    if (up_count >= 12u) {
+    if (up_count >= 12u && !g_tex_pause_up) {
         up_skip++;
         if (g_present_no - up_logf >= 600u) {
             up_logf = g_present_no;
@@ -1428,6 +1429,102 @@ void sb_tex_relive_all(void)
         if (g_cache[i].srv) { g_cache[i].relive = 1; }
     }
     HLOG_I("TEX relive: %d Eintraege neu hochladen (f=%u)", g_ncache, g_present_no);
+}
+
+/* W193 PAUSE-LIVE: In der Pause zeichnet kein Spiel-Draw, also holt auch kein sb_tex_get die
+ * relive-Eintraege (HD live an/aus) nach. Die Pause-Neuzeichnung laedt sie hier selbst neu
+ * (hoechstens max je Aufruf, Spiel-Thread) und merkt alt -> neu: die Aufzeichnung haelt die
+ * alten SRVs (AddRef), die Wiedergabe tauscht sie per sb_tex_pause_map. Rueckgabe: offene
+ * Eintraege. sb_tex_pause_clear am Pausenende. */
+#define TEX_PRL_MAX 1024
+static ID3D11ShaderResourceView *g_prl_o[TEX_PRL_MAX], *g_prl_n[TEX_PRL_MAX];
+static int g_nprl;
+static unsigned g_prl_up, g_prl_fail;
+
+int sb_tex_pause_relive(int max, unsigned *nup, unsigned *nfail)
+{
+    int i, done = 0, left = 0;
+    for (i = 0; i < g_ncache; i++) {
+        tex_entry_t *e = &g_cache[i];
+        ID3D11ShaderResourceView *srv;
+        unsigned tw = 0, th = 0, ts = 0, data = 0, q;
+        if (!e->relive || !e->srv) { continue; }
+        if (done >= max || g_nprl >= TEX_PRL_MAX) { left++; continue; }
+        __try { data = *(unsigned *)(uintptr_t)(e->xptr + 4); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { data = 0; }
+        if (!data) { e->relive = 0; g_prl_fail++; continue; }
+        done++;
+        g_tex_pause_up = 1;
+        srv = tex_upload(e->xptr, &tw, &th, &ts);
+        g_tex_pause_up = 0;
+        if (!srv) {
+            e->relive = 0; /* bleibt beim alten Stand (wie sb_tex_get ohne Drossel) */
+            g_prl_fail++;
+            continue;
+        }
+        for (q = 0; q < (unsigned)g_nprl; q++) { /* Kette alt -> neu -> neuer */
+            if (g_prl_n[q] == e->srv) { break; }
+        }
+        if (q < (unsigned)g_nprl) {
+            ID3D11ShaderResourceView_Release(g_prl_n[q]);
+            g_prl_n[q] = srv;
+            ID3D11ShaderResourceView_AddRef(srv);
+            ID3D11ShaderResourceView_Release(e->srv);
+        } else {
+            g_prl_o[g_nprl] = e->srv; /* Referenz des Caches wandert in die Tabelle */
+            g_prl_n[g_nprl] = srv;
+            ID3D11ShaderResourceView_AddRef(srv);
+            g_nprl++;
+        }
+        e->srv = srv;
+        e->w = tw;
+        e->h = th;
+        e->size = ts;
+        e->fmt = g_up_fmt;
+        e->linear = g_up_lin;
+        e->data = data;
+        __try { e->hfmt = *(unsigned *)(uintptr_t)(e->xptr + 0xC); }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+        e->hash = tex_data_hash(sb_tex_hostaddr_x(e->xptr, data), ts);
+        e->lw_hash = 0;
+        e->lw_frame = g_present_no;
+        e->relive = 0;
+        g_prl_up++;
+    }
+    if (nup) { *nup = g_prl_up; }
+    if (nfail) { *nfail = g_prl_fail; }
+    return left;
+}
+
+ID3D11ShaderResourceView *sb_tex_pause_map(ID3D11ShaderResourceView *s)
+{
+    int q;
+    if (!s || !g_nprl) { return s; }
+    for (q = 0; q < g_nprl; q++) {
+        if (g_prl_o[q] == s) { return g_prl_n[q]; }
+    }
+    return s;
+}
+
+int sb_tex_pause_nmap(void)
+{
+    return g_nprl;
+}
+
+void sb_tex_pause_clear(void)
+{
+    int q;
+    for (q = 0; q < g_nprl; q++) {
+        if (g_prl_o[q]) { ID3D11ShaderResourceView_Release(g_prl_o[q]); }
+        if (g_prl_n[q]) { ID3D11ShaderResourceView_Release(g_prl_n[q]); }
+        g_prl_o[q] = g_prl_n[q] = NULL;
+    }
+    if (g_nprl || g_prl_up || g_prl_fail) {
+        HLOG_I("PAUSE live: Texturen in der Pause neu geladen %u (fehlgeschlagen %u, Tausch-Eintraege %d)", g_prl_up,
+               g_prl_fail, g_nprl);
+    }
+    g_nprl = 0;
+    g_prl_up = g_prl_fail = 0;
 }
 
 void sb_tex_mark_dirty(unsigned xptr)

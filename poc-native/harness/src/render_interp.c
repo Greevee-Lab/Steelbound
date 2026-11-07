@@ -1105,7 +1105,7 @@ static void ip_rec_draw_core(const float pref[4][4], unsigned outhash, unsigned 
     o->pps = g_ip_sigparts[2];
     g_ip_sigparts[0] = g_ip_sigparts[1] = g_ip_sigparts[2] = 0;
     o->ta_smp = g_ta_smp; /* FIX(TEXADDR,W84) */
-    o->nolerp = (g_mfx_kind != MFX_NONE); /* MONITOR-FX (W105) */
+    o->nolerp = g_mfx_kind; /* MONITOR-FX (W105); W193: Art (MFX_WASH/MFX_LINES) fuer die Pause-Neuzeichnung */
     o->fxk = g_fxr_reck; /* W133 REM-FX */
     if (has_tex & FXR_MASK) { memcpy(o->fxp, g_fxr_recp, sizeof o->fxp); }
     g_fxr_reck = 0;
@@ -2932,6 +2932,19 @@ static void vt_scan(const ip_list_t *B, int bi)
     if (!bbread && B->bbref >= 0 && B->bbref < IP_SH_MAX && !vt_wr[B->bbref]) { vt_nosc[B->bbref] = 1; }
 }
 
+/* ---------- W193 PAUSE-LIVE: Wiedergabe-Abweichungen der Pause-Neuzeichnung ----------
+ * Nur waehrend sb_interp_pause_render (Spiel-Thread in der Pause, ctx_lock) gesetzt; alle
+ * anderen Wiedergaben (Zwischenbilder, Verify, VR) sehen ip_pl_on = 0 -> unveraendert. */
+static int ip_pl_on;                   /* 1 = laufende Wiedergabe ist eine Pause-Neuzeichnung */
+static int ip_pl_noshade;              /* Shading-Draws mit IM-PS-Ersatz (shading jetzt aus, wie VR vr_shading=0) */
+static unsigned ip_pl_mfx;             /* Bit 0: Korn-Wash auslassen, Bit 1: Stoerzeilen auslassen (monitor_fx) */
+static ID3D11Buffer *ip_pl_cbsrc;      /* Konstanten-Fenster der Liste (Aufzeichnung) ... */
+static ID3D11Buffer *ip_pl_cb;         /* ... und die neu berechnete Kopie (sfx0..sfx3, Schattenstufen) */
+static sb_interp_mvp_hook_t ip_pl_hook; /* W191-Schnittstelle: MVP der BB-Draws (Cockpit-Projektion) */
+static unsigned ip_pl_nhook, ip_pl_nmfx, ip_pl_nnoshade; /* Zaehler der letzten Neuzeichnung */
+static int ip_pl_tex;                  /* 1 = in der Pause neu geladene Texturen tauschen (sb_tex_pause_map) */
+#define IP_PL_SRV(s) (ip_pl_tex ? sb_tex_pause_map(s) : (s))
+
 static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, int dbg, const ip_cx_t *x)
 {
     int cps = -1; /* DIAG: 1 = Diagnose-PS gebunden */
@@ -2971,6 +2984,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
         var = ip_var_pick(B, t);
         ring = (ab & 80u) ? (var == 16u || var == 64u) : (g_cfg.ip_cb_ring > 0);
         vbgB = (ab & 96u) ? (var == 32u || var == 64u) : (g_cfg.ip_vb_gpu > 0);
+        if (ip_pl_on) { ring = 0; var = 0u; } /* W193: Konstanten je Draw (MVP-Haken), keine Diagnose-Varianten */
     }
     vbgA = vbgB && A && (A->gpu_ok & 1u);
     vbgB = vbgB && (B->gpu_ok & 1u);
@@ -3022,6 +3036,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
         ip_op_t *o = &B->ops[i];
         int lerp;
         if ((ccm & 16) && cc_skip[i]) { continue; } /* W146 GPU-COST: ruhiges Ziel (Tick-Endstand kopiert) */
+        if (ip_pl_on && o->nolerp && (ip_pl_mfx & (o->nolerp == MFX_WASH ? 1u : 2u))) { ip_pl_nmfx++; continue; } /* W193: monitor_fx aus */
         if (vtk && vt_skip[i]) { continue; } /* W183 VR-FIX3: RT-Op, Ziel hat den Tick-Endstand */
         if ((ccm & 3) && i < (unsigned)cc_pfx) { /* W146 GPU-COST: BB-Anfang aus dem Cockpit-Cache */
             if ((ccm & 3) == 2 && (o->rtv == g_rtv || (cc_bdsv && o->dsv == cc_bdsv))) { continue; }
@@ -3095,9 +3110,10 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             ID3D11DeviceContext_RSSetScissorRects(x->c, 1, &o->sc);
             csc = o->sc;
         }
-        if (o->sh_srv != csrv) {
-            ID3D11DeviceContext_PSSetShaderResources(x->c, 0, 1, &o->sh_srv);
-            csrv = o->sh_srv;
+        if (IP_PL_SRV(o->sh_srv) != csrv) { /* W193: Textur-Tausch nur in der Pause-Neuzeichnung */
+            ID3D11ShaderResourceView *ss = IP_PL_SRV(o->sh_srv);
+            ID3D11DeviceContext_PSSetShaderResources(x->c, 0, 1, &ss);
+            csrv = ss;
             rc.nsrv++;
         }
         if (o->topo != ctopo) {
@@ -3105,6 +3121,13 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             ctopo = o->topo;
         }
         if (ring) { ip_ring_bind(x, rofs[2u * i], 0, rcur, &rc); } /* PERF(PERF-M2,W174) */
+        else if (ip_pl_on && ip_pl_hook && o->rtv == g_rtv) { /* W193: Cockpit-Projektion (W191) am Standbild */
+            float pm[16];
+            memcpy(pm, o->mvp, sizeof pm);
+            if (ip_pl_hook(pm, o->cls)) { ip_pl_nhook++; }
+            ip_cb_write(x, x->cb0, pm, o->has_tex, 0.0f, 0);
+            rc.nmap++;
+        }
         else if (var != 4u) { ip_cb_write(x, x->cb0, o->mvp, o->has_tex, 0.0f, 0); rc.nmap++; }
         if (dbg && ip_dbg_ps && ip_dbg_cb) {
             /* gefaerbt nur Draws, die NICHT interpoliert/unveraendert sind */
@@ -3174,16 +3197,18 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
                 }
             }
         }
-        if (o->rq && x->c1 && !(vrbb && (vrkind != 1 || vrp->noshade))) { /* W183: vr_shading=0 -> IM-PS-Ersatz */
+        if (o->rq && ip_pl_on && ip_pl_noshade) { ip_pl_nnoshade++; } /* W193: shading aus -> IM-PS-Ersatz */
+        if (o->rq && x->c1 && !(ip_pl_on && ip_pl_noshade) && !(vrbb && (vrkind != 1 || vrp->noshade))) { /* W183: vr_shading=0 -> IM-PS-Ersatz */
             /* RENDER-QA (W77): Shading-Draw mit seinem Zustand (Stream 0 per
              * Versatz, Stream 2, Konstanten-Fenster, Stufen 0..3, Sampler). */
             const rq_rec_t *r = &o->rqr;
             ID3D11ShaderResourceView *sv[4];
+            ID3D11Buffer *rcb = (ip_pl_on && ip_pl_cb && r->cbuf == ip_pl_cbsrc) ? ip_pl_cb : r->cbuf; /* W193 */
             UINT st2 = stride, o0 = o->vstart * stride;
-            sv[0] = o->sh_srv; sv[1] = o->rq_shsrv[1]; sv[2] = o->rq_shsrv[2]; sv[3] = o->rq_shsrv[3];
+            sv[0] = IP_PL_SRV(o->sh_srv); sv[1] = IP_PL_SRV(o->rq_shsrv[1]); sv[2] = IP_PL_SRV(o->rq_shsrv[2]); sv[3] = IP_PL_SRV(o->rq_shsrv[3]);
             ID3D11DeviceContext_PSSetShader(x->c, r->ps, NULL, 0);
-            ID3D11DeviceContext1_VSSetConstantBuffers1(x->c1, 3, 1, (ID3D11Buffer *const *)&r->cbuf, &r->vfirst, &r->vnum);
-            ID3D11DeviceContext1_PSSetConstantBuffers1(x->c1, 4, 1, (ID3D11Buffer *const *)&r->cbuf, &r->pfirst, &r->pnum);
+            ID3D11DeviceContext1_VSSetConstantBuffers1(x->c1, 3, 1, &rcb, &r->vfirst, &r->vnum);
+            ID3D11DeviceContext1_PSSetConstantBuffers1(x->c1, 4, 1, &rcb, &r->pfirst, &r->pnum);
             ID3D11DeviceContext_PSSetShaderResources(x->c, 0, 4, sv);
             ID3D11DeviceContext_PSSetSamplers(x->c, 0, 4, (ID3D11SamplerState *const *)r->smp);
             { /* PERF(PERF-M2,W174) ip_vb_gpu Bit 2: Stream 2/Roh-Eingaenge aus der GPU-Kopie (gleicher Versatz) */
@@ -3243,8 +3268,11 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             if (!ring) { ID3D11DeviceContext_PSSetConstantBuffers(x->c, 0, 1, &x->cb0); }
             ID3D11DeviceContext_PSSetShaderResources(x->c, 1, 3, nul);
             if (ds) { ID3D11DeviceContext_PSSetSamplers(x->c, 0, 1, &ds); }
-            ID3D11DeviceContext_PSSetShaderResources(x->c, 0, 1, &o->sh_srv);
-            csrv = o->sh_srv;
+            {
+                ID3D11ShaderResourceView *ss = IP_PL_SRV(o->sh_srv); /* W193 */
+                ID3D11DeviceContext_PSSetShaderResources(x->c, 0, 1, &ss);
+                csrv = ss;
+            }
             rq_dirty = 0;
             csmp = (ID3D11SamplerState *)1;
         }
@@ -4589,6 +4617,187 @@ int sb_interp_vr_replay(sb_vr_pass_t *p, void *pA, void *pB, float t, long long 
     ID3D11DeviceContext_VSSetConstantBuffers(g_ctx, 2, 1, &vcb2);
     if (vcb2) { ID3D11Buffer_Release(vcb2); }
     if (tout) { *tout = (A && t < 1.0f) ? t : 1.0f; }
+    return 1;
+}
+
+/* ---------- W193 PAUSE-LIVE: Standbild der Pause mit den aktuellen Einstellungen ----------
+ * Der juengste Tick liegt vollstaendig in der Aufzeichnung (Draws, Clears, Zustaende,
+ * Shading-Konstanten, Schatten-Startstand). Die exakte Wiedergabe (t = 1) zeichnet ihn neu;
+ * was erst bei der Wiedergabe bzw. im Blit gelesen wird, wirkt damit sofort. Zusaetzlich
+ * weichen nur in dieser Wiedergabe ab (ip_pl_*):
+ *  - Shading-Konstanten: sfx0..sfx3 (Nebel, Kontrast, Gamma, Schaerfe, Bloom, Belichtung,
+ *    Tonemapping, Licht Welt/Cockpit, Fokus, FXAA Welt-RT, weiche Schatten) je Shading-Draw aus den
+ *    Eingaben der Aufzeichnung neu (shfx_rq_consts_rep); Schatten aus -> Schattenstufe = 1
+ *    (tsc.z = 0, wie ohne Schattenpuffer). Das Fenster wird einmal je Liste zurueckgelesen.
+ *  - shading aus -> Shading-Draws mit IM-PS-Ersatz (wie VR vr_shading=0).
+ *  - monitor_fx aus bzw. Staerke 0 -> Korn-Wash/Stoerzeilen ausgelassen.
+ *  - MVP-Haken der Backbuffer-Draws (W191 Cockpit-Projektion).
+ * Mit unveraenderten Einstellungen ist das Ergebnis die exakte Wiedergabe (= Spiel-Bild,
+ * Abgleich sb_interp_pause_cmp). */
+static float *ip_pl_corig, *ip_pl_cwork; /* CPU-Kopie des Konstanten-Fensters (Original / neu) */
+static unsigned ip_pl_cn, ip_pl_ccap;    /* belegte Konstanten / Kapazitaet (float4) */
+static unsigned ip_pl_cser;              /* Liste, fuer die ip_pl_corig gilt */
+static unsigned ip_pl_cbcap;             /* ip_pl_cb: Konstanten */
+
+void sb_interp_set_pause_mvp_hook(sb_interp_mvp_hook_t fn)
+{
+    ip_pl_hook = fn;
+}
+
+/* Konstanten-Fenster der Liste B zurueckholen (einmal je Liste) und neu berechnen.
+ * 1 = Kopie gebunden, 0 = keine Shading-Konstanten, -1 = Fehler (Aufzeichnungswerte). */
+static int ip_pl_consts(ip_list_t *B, sb_pl_info_t *inf)
+{
+    D3D11_BUFFER_DESC bd;
+    D3D11_MAPPED_SUBRESOURCE m;
+    unsigned i, k, n;
+    ip_pl_cbsrc = NULL;
+    if (!B->rqc || !B->rqcpos) { return 0; }
+    n = B->rqcpos;
+    if (ip_pl_cser != B->serial || !ip_pl_corig || ip_pl_cn != n) {
+        ID3D11Buffer *stg = NULL;
+        if (ip_pl_ccap < n) {
+            free(ip_pl_corig);
+            free(ip_pl_cwork);
+            ip_pl_corig = (float *)malloc((size_t)n * 16u);
+            ip_pl_cwork = (float *)malloc((size_t)n * 16u);
+            ip_pl_ccap = (ip_pl_corig && ip_pl_cwork) ? n : 0u;
+            if (!ip_pl_ccap) { return -1; }
+        }
+        ID3D11Buffer_GetDesc(B->rqc, &bd);
+        bd.Usage = D3D11_USAGE_STAGING;
+        bd.BindFlags = 0;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        bd.MiscFlags = 0;
+        bd.StructureByteStride = 0;
+        if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &stg))) { return -1; }
+        ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)stg, (ID3D11Resource *)B->rqc);
+        if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)stg, 0, D3D11_MAP_READ, 0, &m))) {
+            ID3D11Buffer_Release(stg);
+            return -1;
+        }
+        memcpy(ip_pl_corig, m.pData, (size_t)n * 16u);
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)stg, 0);
+        ID3D11Buffer_Release(stg);
+        ip_pl_cser = B->serial;
+        ip_pl_cn = n;
+    }
+    memcpy(ip_pl_cwork, ip_pl_corig, (size_t)n * 16u);
+    for (i = 0; i < B->nops; i++) {
+        const ip_op_t *o = &B->ops[i];
+        const rq_rec_t *r = &o->rqr;
+        float *pb, sx[16];
+        if (o->kind != IP_DRAW || !o->rq || r->cbuf != B->rqc || r->pnum < 28u || r->pfirst + 28u > n) { continue; }
+        pb = ip_pl_cwork + (size_t)r->pfirst * 4u;
+        inf->ncb++;
+        shfx_rq_consts_rep(sx, r->sfx_xp, r->sfx_tgt, (r->sfx_fl & 1u) != 0, (r->sfx_fl & 2u) != 0,
+                           (r->sfx_fl & 4u) != 0, r->sfx_nst);
+        if (memcmp(&pb[24u * 4u], sx, sizeof sx) != 0) {
+            memcpy(&pb[24u * 4u], sx, sizeof sx);
+            inf->nsfx++;
+        }
+        if (!g_cfg.shade_shadow) { /* Schattenpuffer (tsc[k].w != 0) aus: Stufe = 1 */
+            for (k = 1; k < 4u; k++) {
+                float *ts = &pb[(19u + k) * 4u];
+                if (ts[3] != 0.0f && ts[2] != 0.0f) {
+                    ts[2] = 0.0f;
+                    ts[3] = 0.0f;
+                    inf->nshadow++;
+                }
+            }
+        }
+    }
+    if (!ip_pl_cb || ip_pl_cbcap < B->rqccap) {
+        if (ip_pl_cb) { ID3D11Buffer_Release(ip_pl_cb); ip_pl_cb = NULL; ip_pl_cbcap = 0; }
+        memset(&bd, 0, sizeof bd);
+        bd.ByteWidth = B->rqccap * 16u;
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &ip_pl_cb))) { ip_pl_cb = NULL; return -1; }
+        ip_pl_cbcap = B->rqccap;
+    }
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)ip_pl_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) { return -1; }
+    memcpy(m.pData, ip_pl_cwork, (size_t)n * 16u);
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)ip_pl_cb, 0);
+    ip_pl_cbsrc = B->rqc;
+    return 1;
+}
+
+ID3D11Resource *sb_interp_pause_render(sb_pl_info_t *inf)
+{
+    ip_list_t *A, *B;
+    sb_pl_info_t dummy;
+    unsigned i;
+    if (!inf) { inf = &dummy; }
+    memset(inf, 0, sizeof *inf);
+    if (!ip_init_done || ip_init_fail || ip_nhist < 1 || !g_dev || !g_ctx) { return NULL; }
+    B = &g_ipl[ip_hist[ip_nhist - 1]];
+    A = ip_nhist >= 2 ? &g_ipl[ip_hist[ip_nhist - 2]] : NULL;
+    if (!B->ready || B->bbref < 0) { return NULL; }
+    if (A && !A->ready) { A = NULL; }
+    ip_rt_quiesce(); /* W126: Render-Thread liest Listen/Schatten */
+    inf->ser = B->serial;
+    inf->frame = B->frame;
+    inf->nops = B->nops;
+    for (i = 0; i < B->nops; i++) {
+        if (B->ops[i].kind == IP_DRAW && B->ops[i].rq) { inf->nrq++; }
+    }
+    inf->cb_state = ip_pl_consts(B, inf);
+    if (inf->cb_state < 0) { ip_pl_cbsrc = NULL; }
+    ip_pl_noshade = !g_cfg.shading;
+    ip_pl_mfx = 0u;
+    if (!g_cfg.monitor_fx || (g_cfg.monitor_grain <= 0 && g_cfg.monitor_glitch <= 0)) { ip_pl_mfx |= 1u; }
+    if (!g_cfg.monitor_fx || g_cfg.monitor_glitch <= 0) { ip_pl_mfx |= 2u; }
+    ip_pl_nhook = ip_pl_nmfx = ip_pl_nnoshade = 0;
+    ip_pl_tex = sb_tex_pause_nmap() > 0;
+    ip_pl_on = 1;
+    ip_replay_ex(B, ip_list_index(B), A, A ? ip_list_index(A) : -1, 1.0f, 0, ip_cx_imm());
+    ip_pl_on = 0;
+    ip_pl_tex = 0;
+    ip_pl_cbsrc = NULL;
+    inf->nhook = ip_pl_nhook;
+    inf->nmfx = ip_pl_nmfx;
+    inf->noshade = ip_pl_nnoshade;
+    return (ID3D11Resource *)g_ish[B->bbref].sh;
+}
+
+int sb_interp_pause_cmp(ID3D11Resource *img, unsigned *ndiff, unsigned *maxd)
+{
+    D3D11_MAPPED_SUBRESOURCE m0, m1;
+    ip_list_t *B;
+    unsigned x, y, nd = 0, mx = 0;
+    int bi;
+    if (!ip_init_done || ip_nhist < 1 || !img) { return 0; }
+    B = &g_ipl[ip_hist[ip_nhist - 1]];
+    bi = ip_list_index(B);
+    if (B->bbref < 0 || g_ish[B->bbref].bakser[bi] != B->serial) { return 0; }
+    if (!ip_stage(0, img) || !ip_stage(1, (ID3D11Resource *)g_ish[B->bbref].bak[bi])) { return 0; }
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)ip_vstg[0], 0, D3D11_MAP_READ, 0, &m0))) { return 0; }
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)ip_vstg[1], 0, D3D11_MAP_READ, 0, &m1))) {
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)ip_vstg[0], 0);
+        return 0;
+    }
+    for (y = 0; y < g_bb_h; y++) {
+        const unsigned char *a = (const unsigned char *)m0.pData + (size_t)y * m0.RowPitch;
+        const unsigned char *b = (const unsigned char *)m1.pData + (size_t)y * m1.RowPitch;
+        if (memcmp(a, b, (size_t)g_bb_w * 4u) == 0) { continue; }
+        for (x = 0; x < g_bb_w; x++) {
+            unsigned c, d = 0;
+            for (c = 0; c < 3u; c++) {
+                unsigned dc = a[x * 4u + c] > b[x * 4u + c] ? a[x * 4u + c] - b[x * 4u + c] : b[x * 4u + c] - a[x * 4u + c];
+                if (dc > d) { d = dc; }
+            }
+            if (d) {
+                nd++;
+                if (d > mx) { mx = d; }
+            }
+        }
+    }
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)ip_vstg[1], 0);
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)ip_vstg[0], 0);
+    if (ndiff) { *ndiff = nd; }
+    if (maxd) { *maxd = mx; }
     return 1;
 }
 

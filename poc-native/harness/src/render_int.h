@@ -229,6 +229,8 @@ int shfx_cockpit_on(void);
 int shfx_post_on(void); /* W131 SHADER-OPT2: Cockpit-Licht, Farbe, FXAA Endbild, SSAO */
 void shfx_note_3d(int slot);
 void shfx_rq_consts(float *sx, const int srvk[4], int tgt, int is3d, int fog_ps, int st0rt, unsigned nstages);
+/* W193 PAUSE-LIVE: dasselbe mit den Stufen-Texturen der Aufzeichnung (xp[k] = 0: keine SRV) */
+void shfx_rq_consts_rep(float *sx, const unsigned xp[4], int tgt, int is3d, int fog_ps, int st0rt, unsigned nstages);
 void sb_shfx_post(ID3D11RenderTargetView *rtv, ID3D11Resource *res);
 void sb_shfx_ab_shot(const char *base);
 void sb_shfx_present(unsigned n);
@@ -290,6 +292,24 @@ void sb_interp_rec_clear(ID3D11RenderTargetView *rtv, const float c[4],
 int sb_interp_swap(void);
 unsigned sb_interp_pairs(void); /* W81 Test: Interp-Paare seit Start (Missionsbeleg) */
 void sb_interp_reset(const char *why); /* W81: alle Listen/Schatten/Staging frei (vor ResizeBuffers) */
+/* W193 PAUSE-LIVE: juengsten Tick (t = 1) mit den aktuellen Einstellungen neu zeichnen
+ * (Spiel-Thread in der Pause, unter ctx_lock). Rueckgabe Schatten-BB bzw. NULL. */
+typedef struct {
+    unsigned ser, frame, nops, nrq;  /* Liste: Serie, Spiel-Bild, Ops, Shading-Draws */
+    unsigned ncb, nsfx, nshadow;     /* Konstanten: Fenster neu, davon sfx geaendert, Schattenstufen aus */
+    unsigned nhook, nmfx, noshade;   /* MVP-Haken angewandt, MFX-Draws ausgelassen, Shading-Draws mit IM-PS */
+    int cb_state;                    /* 0 kein Shading, 1 Kopie ok, -1 Kopie fehlgeschlagen (Aufzeichnungswerte) */
+} sb_pl_info_t;
+ID3D11Resource *sb_interp_pause_render(sb_pl_info_t *inf);
+/* Ergebnisbild gegen das Spiel-Bild des juengsten Ticks (Sicherung am Swap): 1 = verglichen */
+int sb_interp_pause_cmp(ID3D11Resource *img, unsigned *ndiff, unsigned *maxd);
+/* Schnittstelle fuer die Cockpit-Perspektive (W191): Haken fuer die MVP jedes Backbuffer-Draws
+ * der Pause-Neuzeichnung (cls 0 = 2D/RHW, 1 = Welt/3D). Rueckgabe 1 = Matrix geaendert. Vertices,
+ * die bei der Aufzeichnung auf der CPU verschoben wurden, stehen so in der Aufzeichnung. Nach einer
+ * Aenderung der Projektion sb_render_pause_dirty() rufen. NULL = aus. */
+typedef int (*sb_interp_mvp_hook_t)(float mvp[16], int cls);
+void sb_interp_set_pause_mvp_hook(sb_interp_mvp_hook_t fn);
+void sb_render_pause_dirty(void); /* d3d11_render.c: Standbild beim naechsten Pausenbild neu zeichnen */
 /* W81 WINMODE (render_winmode.c, d3d11_render.c) */
 #include <dxgi.h>
 extern unsigned g_swap_flags;

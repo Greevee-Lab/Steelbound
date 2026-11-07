@@ -52,6 +52,13 @@ typedef struct {
     UINT vfirst, vnum, pfirst, pnum;
     ID3D11ShaderResourceView *srv[4];
     ID3D11SamplerState *smp[4];
+    /* W193 PAUSE-LIVE: Eingaben von shfx_rq_consts (Pause-Wiedergabe rechnet
+     * sfx0..sfx3 mit den aktuellen Einstellungen neu). Nur Aufzeichnung, das
+     * Bild haengt nicht davon ab. */
+    unsigned sfx_xp[4];   /* Stufen-Texturadresse (0 = keine SRV bzw. Schattenpuffer) */
+    signed char sfx_tgt;  /* gebundener RT-Slot (-1 = BB) */
+    unsigned char sfx_fl; /* Bit 0 3D (kind 0, kein RHW), Bit 1 Nebel im Spiel-PS, Bit 2 Stufe 0 ist RT */
+    unsigned char sfx_nst;
 } rq_rec_t;
 
 extern int g_rq_active;   /* 1 = aktueller Draw im Shading-Pfad */

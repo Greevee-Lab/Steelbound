@@ -231,6 +231,8 @@ void hcfg_defaults(void)
     g_cfg.overlay_save_path[0] = '\0';  /* W118: leer = user.cfg */
     g_cfg.game_menu = 1;                /* W188: ESC = Spielmenue */
     g_cfg.menu_pause = 1;               /* W188: ESC-Menue pausiert */
+    g_cfg.pause_live = 1;               /* W193: Standbild der Pause live neu zeichnen */
+    strcpy_s(g_cfg.menu_peek_key, sizeof g_cfg.menu_peek_key, "H"); /* W193: H halten = Menue ausblenden */
     strcpy_s(g_cfg.feedback_repo, sizeof g_cfg.feedback_repo, SB_FEEDBACK_REPO_DEFAULT); /* W188 */
     strcpy_s(g_cfg.lang, sizeof g_cfg.lang, "en"); /* W142: [ui] lang */
     g_cfg.perf_hud = 0;                 /* W122: Leistungs-Overlay aus (Taste aktiv) */
@@ -491,6 +493,8 @@ static int set_key_overlay(const char *k, const char *v)
     }
     else if (strcmp(k, "game_menu") == 0) { g_cfg.game_menu = atoi(v); } /* W188 */
     else if (strcmp(k, "menu_pause") == 0) { g_cfg.menu_pause = atoi(v); } /* W188 */
+    else if (strcmp(k, "pause_live") == 0) { g_cfg.pause_live = atoi(v); } /* W193 */
+    else if (strcmp(k, "menu_peek_key") == 0) { strncpy_s(g_cfg.menu_peek_key, sizeof g_cfg.menu_peek_key, v, _TRUNCATE); } /* W193 */
     else if (strcmp(k, "repo") == 0 || strcmp(k, "feedback_repo") == 0) { /* W188 [feedback] repo */
         strncpy_s(g_cfg.feedback_repo, sizeof g_cfg.feedback_repo, v, _TRUNCATE);
     }

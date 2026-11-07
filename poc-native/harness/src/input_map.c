@@ -996,6 +996,12 @@ static int imap_key_code(const char *name)
     return -1;
 }
 
+/* W193 PAUSE-LIVE: Tastenname -> VK fuer Client-Tasten ausserhalb der Profile (menu_peek_key). */
+int imap_key_name(const char *name)
+{
+    return name ? imap_key_code(name) : -1;
+}
+
 static int imap_padbtn_code(const char *name, int *is_dpad)
 {
     *is_dpad = 0;

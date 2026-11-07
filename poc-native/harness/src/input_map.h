@@ -258,6 +258,8 @@ int imap_action_pause(const imap_profile_t *prof, imap_state_t *st,
 /* W188: einfache Tasten (KEY ohne Akkord) und Pad-Tasten (PAD-Taste/
  * Steuerkreuz ohne Akkord) einer Bindung. Rueckgabe: Anzahl Tasten. */
 int imap_bind_keys(const imap_bind_t *b, int *vks, int cap, unsigned *padmask);
+/* W193: Tastenname (wie im Profil, z. B. "H", "F9", "0x48") -> VK, -1 = unbekannt */
+int imap_key_name(const char *name);
 
 /* ---- W128: Achsen-Arbitrierung "zuletzt aktives Geraet gewinnt" ----
  * Original-Controller (SBC) gegen Maus, je Achse (aim_x, aim_y, sight_x,

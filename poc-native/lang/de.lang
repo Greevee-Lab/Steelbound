@@ -533,6 +533,7 @@ as.filter_sbc=SBC-Fixtures (*.sbc)|*.sbc
 as.fixture_title=Fixture öffnen
 gui.ctl_assist=Testen & kalibrieren...
 ovl.fps_note=Remastered kann die Bildrate senken
+ovl.peek_note=Standbild live · %s halten: Menü weg
 ovl.v_orig_hd=Original (HD) – %d FPS
 as.g_btns=Tasten
 as.g_tog=Schalter

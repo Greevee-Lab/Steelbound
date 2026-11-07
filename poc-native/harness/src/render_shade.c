@@ -1402,8 +1402,17 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
         if (tgt >= 0 && g_rq_kind == 0u && !rhw) { shfx_note_3d(tgt); }
         /* Aussenwelt = Nebel an (FOGENABLE) UND Nebel im Spiel-PS; der Cockpit-PS hat
          * ebenfalls einen Nebel-Final-Combiner, zeichnet aber mit FOGENABLE=0 (W121_h4). */
-        shfx_rq_consts(&pblk[24u * 4u], srvk, tgt, g_rq_kind == 0u && !rhw, fen != 0u && g_rq_pse->info.uses_fog,
-                       srvk[0] && rq_stage_is_rt(0), g_rq_pse->info.nstages);
+        int is3d = g_rq_kind == 0u && !rhw, fogps = fen != 0u && g_rq_pse->info.uses_fog;
+        int s0rt = srvk[0] && rq_stage_is_rt(0);
+        shfx_rq_consts(&pblk[24u * 4u], srvk, tgt, is3d, fogps, s0rt, g_rq_pse->info.nstages);
+        if (g_ip_recording) { /* W193 PAUSE-LIVE: Eingaben fuer die Neuberechnung in der Pause */
+            unsigned sxp[4], snn[4];
+            sb_tex_stages(sxp, snn);
+            for (k = 0; k < 4u; k++) { g_rq_rec.sfx_xp[k] = srvk[k] ? sxp[k] : 0u; }
+            g_rq_rec.sfx_tgt = (signed char)tgt;
+            g_rq_rec.sfx_fl = (unsigned char)((is3d ? 1 : 0) | (fogps ? 2 : 0) | (s0rt ? 4 : 0));
+            g_rq_rec.sfx_nst = (unsigned char)g_rq_pse->info.nstages;
+        }
     }
     if (g_cfg.bloom_diag) { memcpy(g_rq_lastpb, pblk, sizeof g_rq_lastpb); g_rq_lastnst = g_rq_pse->info.nstages; } /* DIAG(SHADE-BLOOM,W112) */
     if (!rq_consts(vblk, vn, pblk, 28u)) { g_rq_active = 0; g_rq_why = 9u; return 0; }

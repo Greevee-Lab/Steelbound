@@ -133,7 +133,27 @@ static int sfx_is_world(int slot)
  * Bits in sfx0.x: 0x200 Aussenwelt (Belichtung/Tonemapping/Licht), 0x400
  * Gamma am Ausgang (Aussenwelt direkt im BB; Welt-RTs bekommen Gamma beim
  * Lesen), 0x800 Cockpit-Licht. sfx2 = (Belichtung, Tonemapping, Licht, Gamma). */
+/* W193 PAUSE-LIVE: gemeinsamer Kern. xp_in = Stufen-Texturadressen der Aufzeichnung (Pause-
+ * Wiedergabe, ohne Zaehler) bzw. NULL = aktuelle Stufen (rq_bind, bisheriger Weg). */
+static void sfx_consts_core(float *sx, const int srvk[4], const unsigned *xp_in, int tgt, int is3d, int fog_ps,
+                            int st0rt, unsigned nstages);
 void shfx_rq_consts(float *sx, const int srvk[4], int tgt, int is3d, int fog_ps, int st0rt, unsigned nstages)
+{
+    sfx_consts_core(sx, srvk, NULL, tgt, is3d, fog_ps, st0rt, nstages);
+}
+
+void shfx_rq_consts_rep(float *sx, const unsigned xp[4], int tgt, int is3d, int fog_ps, int st0rt, unsigned nstages)
+{
+    unsigned nf[5];
+    int srvk[4], k;
+    memcpy(nf, g_sfx_nflag, sizeof nf);
+    for (k = 0; k < 4; k++) { srvk[k] = xp[k] != 0u; }
+    sfx_consts_core(sx, srvk, xp, tgt, is3d, fog_ps, st0rt, nstages);
+    memcpy(g_sfx_nflag, nf, sizeof nf); /* Statistik nur aus dem Spielpfad */
+}
+
+static void sfx_consts_core(float *sx, const int srvk[4], const unsigned *xp_in, int tgt, int is3d, int fog_ps,
+                            int st0rt, unsigned nstages)
 {
     unsigned flags = 0, xp[4], nn[4], k;
     memset(sx, 0, 16 * sizeof(float));
@@ -160,7 +180,7 @@ void shfx_rq_consts(float *sx, const int srvk[4], int tgt, int is3d, int fog_ps,
         flags |= 1u;
         sx[1] = (float)sfx_pct(g_cfg.world_fog, 0, 100) / 100.0f;
     }
-    sb_tex_stages(xp, nn);
+    if (xp_in) { memcpy(xp, xp_in, sizeof xp); } else { sb_tex_stages(xp, nn); }
     for (k = 0; k < 4u; k++) {
         int s;
         if (!srvk[k]) { continue; }

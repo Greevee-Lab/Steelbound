@@ -28,6 +28,12 @@ void sb_tex_fmt(unsigned *fmt, int *is_linear);
 void sb_tex_mark_dirty(unsigned xptr);
 /* W118 REM-OVERLAY: alle Eintraege neu hochladen (HD live umgeschaltet). */
 void sb_tex_relive_all(void);
+/* W193 PAUSE-LIVE: relive-Eintraege in der Pause neu laden (max je Aufruf; Rueckgabe offen),
+ * alte -> neue SRV fuer die Wiedergabe, Tabelle am Pausenende leeren. */
+int sb_tex_pause_relive(int max, unsigned *nup, unsigned *nfail);
+struct ID3D11ShaderResourceView *sb_tex_pause_map(struct ID3D11ShaderResourceView *s);
+int sb_tex_pause_nmap(void);
+void sb_tex_pause_clear(void);
 /* TEXLIFE: Eintrag entfernen (Release rc=0 -> Speicher frei, kein Re-Upload). */
 void sb_tex_evict(unsigned xptr);
 void sb_tex_lockwatch_note(unsigned xptr);   /* W98: LockRect-Textur beobachten */

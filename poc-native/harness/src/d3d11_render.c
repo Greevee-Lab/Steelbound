@@ -1411,6 +1411,89 @@ int sb_render_present_hold(void)
  * Zwischenbild-Aufzeichnung neu (keine Paare ueber die Pause hinweg). */
 static ID3D11Texture2D *g_pause_snap;
 static unsigned g_pause_sw, g_pause_sh;
+/* W193 PAUSE-LIVE: Standbild aus der FPS-INTERP-Aufzeichnung mit den aktuellen Einstellungen.
+ * Bei Pausenbeginn einmal neu zeichnen und gegen das Spiel-Bild abgleichen (Korrektheitsanker),
+ * danach bei jeder Einstellungsaenderung (Fingerabdruck ueber g_cfg + Vergleichsschalter bzw.
+ * sb_render_pause_dirty) hoechstens alle 50 ms neu. Gezeigt wird die Neuzeichnung nur, solange
+ * die Einstellungen vom Pausenbeginn abweichen (sonst die Kopie = bitgleich zu W188). Ohne
+ * Aufzeichnung (ausserhalb der Mission, interp_fps=0) bzw. mit VR: Kopie wie bisher. */
+extern int g_shfx_bypass; /* render_shfx.c */
+static ID3D11Texture2D *g_pause_live;
+static int g_pl_state;            /* 1 = Neuzeichnen moeglich */
+static int g_pl_use;              /* 1 = g_pause_live zeigen */
+static unsigned g_pl_h0, g_pl_h;  /* Fingerabdruck bei Pausenbeginn / der letzten Neuzeichnung */
+static volatile LONG g_pl_dirty;  /* sb_render_pause_dirty */
+static long long g_pl_last;       /* QPC der letzten Neuzeichnung */
+static unsigned g_pl_n, g_pl_nlog;
+
+static unsigned pl_hash(void)
+{
+    const unsigned char *b = (const unsigned char *)&g_cfg;
+    unsigned h = 2166136261u;
+    size_t i;
+    for (i = 0; i < sizeof g_cfg; i++) { h = (h ^ b[i]) * 16777619u; }
+    h = (h ^ (unsigned)g_shfx_bypass) * 16777619u;
+    h = (h ^ (unsigned)g_fxr_bypass) * 16777619u;
+    return h;
+}
+
+void sb_render_pause_dirty(void)
+{
+    InterlockedExchange(&g_pl_dirty, 1);
+}
+
+/* Neu zeichnen und nach g_pause_live kopieren (unter ctx_lock). first = Pausenbeginn (Abgleich). */
+static int pl_render(int first)
+{
+    sb_pl_info_t inf;
+    ID3D11Resource *img;
+    long long q0 = rq_qpc(), q1;
+    unsigned nd = 0, mx = 0, tup = 0, tfail = 0;
+    int cmp = 0, tleft;
+    tleft = sb_tex_pause_relive(24, &tup, &tfail); /* HD live an/aus: Texturen selbst nachladen (24 je Pausenbild: Menue bleibt bedienbar) */
+    if (tleft > 0) { InterlockedExchange(&g_pl_dirty, 1); } /* Rest beim naechsten Pausenbild */
+    img = sb_interp_pause_render(&inf);
+    if (!img) { return 0; }
+    if (!g_pause_live && g_pause_snap) {
+        D3D11_TEXTURE2D_DESC dd;
+        ID3D11Texture2D_GetDesc(g_pause_snap, &dd);
+        if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &dd, NULL, &g_pause_live))) { g_pause_live = NULL; }
+    }
+    if (!g_pause_live) { return 0; }
+    {
+        D3D11_TEXTURE2D_DESC a, b;
+        ID3D11Texture2D_GetDesc((ID3D11Texture2D *)img, &a);
+        ID3D11Texture2D_GetDesc(g_pause_live, &b);
+        if (a.Width != b.Width || a.Height != b.Height || a.Format != b.Format) {
+            HLOG_W("PAUSE live: Bildgroesse %ux%u statt %ux%u - Kopie bleibt", a.Width, a.Height, b.Width, b.Height);
+            return 0;
+        }
+    }
+    if (first) { cmp = sb_interp_pause_cmp(img, &nd, &mx); }
+    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_pause_live, img);
+    q1 = rq_qpc();
+    g_pl_n++;
+    if (first || g_pl_nlog < 40u) {
+        LARGE_INTEGER qf;
+        QueryPerformanceFrequency(&qf);
+        if (!first) { g_pl_nlog++; }
+        HLOG_I("PAUSE live: %s #%u (Tick f=%u ser=%u ops=%u shading-draws=%u konst=%d fenster=%u sfx-neu=%u schatten-aus=%u "
+               "ohne-shading=%u mfx-aus=%u mvp-haken=%u texturen=%u/%u offen=%d, shading=%d monitor_fx=%d edge=%d hd=%d, %.2f ms)",
+               first ? "Neuzeichnung bei Pausenbeginn" : "Neuzeichnung", g_pl_n, inf.frame, inf.ser, inf.nops, inf.nrq,
+               inf.cb_state, inf.ncb, inf.nsfx, inf.nshadow, inf.noshade, inf.nmfx, inf.nhook, tup, tup + tfail, tleft,
+               g_cfg.shading, g_cfg.monitor_fx, g_cfg.edge_mode, g_cfg.remaster && g_cfg.hd_textures,
+               (double)(q1 - q0) * 1000.0 / (double)qf.QuadPart);
+        if (first) {
+            if (cmp) {
+                HLOG_I("PAUSE live: Abgleich Neuzeichnung vs. Spiel-Bild diff=%u px max=%u (%s)", nd, mx,
+                       nd ? "ABWEICHUNG" : "bitgleich");
+            } else {
+                HLOG_W("PAUSE live: Abgleich nicht moeglich (keine Sicherung des Ticks)");
+            }
+        }
+    }
+    return 1;
+}
 
 int sb_render_pause_begin(void)
 {
@@ -1445,6 +1528,32 @@ int sb_render_pause_begin(void)
         }
         ID3D11Resource_Release(res);
     }
+    /* W193 PAUSE-LIVE */
+    g_pl_state = 0;
+    g_pl_use = 0;
+    InterlockedExchange(&g_pl_dirty, 0);
+    if (g_pause_live) {
+        D3D11_TEXTURE2D_DESC a;
+        ID3D11Texture2D_GetDesc(g_pause_live, &a);
+        if (!g_pause_snap || a.Width != g_pause_sw || a.Height != g_pause_sh) {
+            ID3D11Texture2D_Release(g_pause_live);
+            g_pause_live = NULL;
+        }
+    }
+    if (ok && g_swap_res && g_cfg.pause_live) {
+        if (g_cfg.vr_enable) {
+            HLOG_I("PAUSE live: aus im VR-Betrieb (VR-Thread zeigt seine Wiedergabe, Session unberuehrt)");
+        } else if (pl_render(1)) {
+            g_pl_state = 1;
+            g_pl_h0 = g_pl_h = pl_hash();
+            g_pl_last = rq_qpc();
+        } else {
+            HLOG_I("PAUSE live: keine Aufzeichnung des Ticks (ausserhalb der Mission) - Standbild als Kopie, "
+                   "Nachbearbeitung/Bildraender wirken live");
+        }
+    } else if (ok && g_cfg.pause_live && !g_swap_res) {
+        HLOG_I("PAUSE live: ohne FPS-INTERP (interp_fps=0) keine Aufzeichnung - Standbild als Kopie");
+    }
     sb_ctx_leave();
     return ok;
 }
@@ -1455,7 +1564,23 @@ void sb_render_pause_frame(void)
     if (!g_dev || !g_swap || !g_pause_snap) { return; }
     sb_ctx_enter();
     if (g_swap_res) { /* FPS-INTERP: wie ein gezeigtes Bild (Nachbearbeitung, Menue, VR-Leinwand, Test-Bild) */
-        sb_render_blit((ID3D11Resource *)g_pause_snap);
+        if (g_pl_state) { /* W193 PAUSE-LIVE: Einstellungen geaendert -> neu zeichnen (gedrosselt) */
+            unsigned h = pl_hash();
+            long long now = rq_qpc();
+            LARGE_INTEGER qf;
+            QueryPerformanceFrequency(&qf);
+            if ((h != g_pl_h || g_pl_dirty) && now - g_pl_last >= qf.QuadPart / 20) {
+                int dirty = InterlockedExchange(&g_pl_dirty, 0) != 0;
+                g_pl_last = now;
+                g_pl_h = h;
+                if (h == g_pl_h0 && !dirty) {
+                    g_pl_use = 0; /* zurueck auf die Einstellungen vom Pausenbeginn: Kopie (bitgleich) */
+                } else if (pl_render(0)) {
+                    g_pl_use = 1;
+                }
+            }
+        }
+        sb_render_blit((ID3D11Resource *)(g_pl_use && g_pause_live ? g_pause_live : g_pause_snap));
         sb_render_present_raw();
         sb_ctx_leave();
         return;
@@ -1495,6 +1620,14 @@ void sb_render_pause_end(void)
         }
     }
     if (g_swap_res) { sb_interp_reset("Pause"); }
+    sb_tex_pause_clear(); /* W193: Tausch-Tabelle (Cache haelt die neuen Texturen) */
+    if (g_pl_n) {
+        HLOG_I("PAUSE live: Ende (%u Neuzeichnungen, zuletzt %s)", g_pl_n, g_pl_use ? "Neuzeichnung" : "Kopie");
+    }
+    g_pl_state = 0;
+    g_pl_use = 0;
+    g_pl_n = 0;
+    g_pl_nlog = 0;
     sb_ctx_leave();
 }
 

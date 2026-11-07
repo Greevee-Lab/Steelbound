@@ -101,13 +101,6 @@ Texture and effect packs (`.sbpack`) are optional add-ons made by users:
 upscaled or hand-made textures and effect parameters. Without any pack the
 game looks exactly like the original.
 
-The Pack Creator builds such packs locally from your own copy: dump the
-original textures, upscale them on your own GPU, reconstruct text and lines
-without AI smearing, review every variant side by side, and export a
-validated `.sbpack`. Packs made from game textures are created and shared
-by their users, who are solely responsible for them (see
-[Legal notice](#legal-notice)).
-
 ## Building (Visual Studio 2022, 32-bit is required)
 
 ```

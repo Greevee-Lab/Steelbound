@@ -107,6 +107,7 @@ typedef struct {
     int mouse_invert_y; /* 1 = Y-Achse invertiert */
     int mouse_buttons;  /* 1 = Maustasten L/R/M -> Haupt/Sub-Waffe, Lock-On */
     int input_diag;     /* DIAG(INPUT): SBC/Out/Flags bei Aenderung + Heartbeat */
+    int mouse_capture_outside_mission; /* W196: 0 = visible/free outside mission */
     int mouse_capture;    /* W79: 1 = Maus fangen (Raw Input, Cursor versteckt + aufs Fenster begrenzt, F10 = freigeben/fangen), 0 = alt (GetCursorPos) */
     int input_focus_only; /* W79: 1 = echte Tastatur/Maus nur bei Fokus des Client-Fensters, 0 = alt (global) */
     int input_source;     /* W79: 1 = echte Tasten/Maustasten aus Fenster-Nachrichten (nur mit Fokus), 0 = alt (GetAsyncKeyState, global) */

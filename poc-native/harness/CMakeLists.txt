@@ -143,6 +143,7 @@ target_compile_options(sbc_probe PRIVATE /W3)
 # ---- input_selftest: Vergleich alt<->neu + Gamepad-Logik (W76) ----
 add_executable(input_selftest
   src/input_selftest.c
+  src/input_mouse_selftest.c
   src/input_map.c
   src/input_tap.c
   src/input_sbc_usb.c

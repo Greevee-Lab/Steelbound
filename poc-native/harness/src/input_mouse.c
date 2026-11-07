@@ -28,6 +28,31 @@ static volatile LONG g_raw_dx, g_raw_dy;
 static volatile LONG g_raw_n;         /* Anzahl Raw-Pakete (Beleg/Log) */
 static volatile LONG g_focus;         /* logischer Fokus (Nachrichten/Test) */
 static volatile LONG g_test_focus;    /* 1 = Fokus per Test-Hook simuliert */
+/* W196: UI-thread-owned menu latch; all capture paths share the gate. */
+static int g_menu_open, g_menu_had_cap;
+static unsigned imouse_state_u32(unsigned addr)
+{
+#ifdef IMOUSE_SELFTEST
+    extern unsigned imouse_test_state(unsigned addr);
+    return imouse_test_state(addr);
+#else
+    __try { return *(volatile unsigned *)(uintptr_t)addr; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+#endif
+}
+static int imouse_in_mission(void)
+{
+    /* Same mission markers as the overlay; mode excludes the title demo. */
+    return imouse_state_u32(0x2EEA34u) == 4u &&
+        imouse_state_u32(0x6B96DCu) == 0x2Cu &&
+        imouse_state_u32(0x356F58u) == 1u;
+}
+static int imouse_allowed(void)
+{
+    return !g_menu_open && !sb_ovl_open() &&
+        (g_cfg.mouse_capture_outside_mission || imouse_in_mission());
+}
+
 /* Nachrichten-Tastenzustand (input_source=1). Schreiber: UI-Thread
  * (Fenster-Nachrichten), Leser: Spiel-Thread (XInput-Poll). */
 static volatile LONG g_kdown[256];    /* 1 = gedrueckt */
@@ -59,7 +84,7 @@ static HWND imouse_find_window(void)
  * simuliertem Fokus darf den Cursor des Nutzers nie einsperren. */
 static int imouse_is_fg(HWND w)
 {
-    return GetForegroundWindow() == w;
+    return !g_test_focus && w && GetForegroundWindow() == w;
 }
 
 int imouse_has_focus(void)
@@ -91,7 +116,7 @@ static void imouse_clip(HWND w)
 
 static void imouse_capture_on(HWND w, const char *why)
 {
-    if (!g_cfg.mouse_capture || IsIconic(w)) return;
+    if (!g_cfg.mouse_capture || !imouse_allowed() || IsIconic(w)) return;
     imouse_clip(w);
     if (!g_captured) {
         int phys = imouse_is_fg(w);
@@ -109,8 +134,13 @@ static void imouse_capture_off(const char *why)
 {
     if (g_captured) {
         InterlockedExchange(&g_captured, 0);
-        ClipCursor(NULL);
-        SetCursor(LoadCursorA(NULL, IDC_ARROW));
+        if (imouse_is_fg(g_mwnd)) {
+            ClipCursor(NULL);
+            if (GetCapture() == g_mwnd) ReleaseCapture();
+            SetCursor(LoadCursorA(NULL, IDC_ARROW));
+        }
+        InterlockedExchange(&g_raw_dx, 0);
+        InterlockedExchange(&g_raw_dy, 0);
         HLOG_I("INPUT: Maus freigegeben (%s)", why);
     }
 }
@@ -125,7 +155,7 @@ static void imsg_clear(void)
     }
     InterlockedIncrement(&g_kgen);
     itap_clear(); /* W92: angestaute Tipper verwerfen */
-    if (GetCapture() == g_mwnd && g_mwnd) ReleaseCapture();
+    if (imouse_is_fg(g_mwnd) && GetCapture() == g_mwnd) ReleaseCapture();
 }
 
 static void imsg_set(int vk, int down)
@@ -188,9 +218,9 @@ static void imouse_focus_lose(const char *why)
         InterlockedExchange(&g_focus, 0);
         HLOG_I("INPUT: Fenster-Fokus verloren (%s) -> Tasten geloest", why);
     }
-    InterlockedExchange(&g_test_focus, 0);
     imsg_clear();
     imouse_capture_off(why);
+    InterlockedExchange(&g_test_focus, 0);
 }
 
 static int imouse_btn_vk(UINT msg)
@@ -220,6 +250,10 @@ static int imouse_any_btn_down(void)
 
 static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 {
+    /* Reconcile also controller pause requests on the UI thread, before
+     * any input or cursor handling. Repeated open calls are idempotent. */
+    imouse_menu_capture(sb_ovl_open());
+    if (g_captured && !imouse_allowed()) imouse_capture_off("ausserhalb Mission");
     /* W118 REM-OVERLAY: ESC und (bei offenem Overlay) Tasten/Maustasten
      * gehen ans Overlay, nicht an die Spiel-Eingabe. */
     if (sb_phud_wndproc(w, msg, wp, lp)) return 0; /* W122 PERF-HUD: F2 */
@@ -294,8 +328,8 @@ static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         }
         break;
     case WM_SETCURSOR:
-        if (g_captured && LOWORD(lp) == HTCLIENT && imouse_is_fg(w)) {
-            SetCursor(NULL);
+        if (LOWORD(lp) == HTCLIENT) {
+            if (imouse_is_fg(w)) SetCursor(g_captured ? NULL : LoadCursorA(NULL, IDC_ARROW));
             return TRUE;
         }
         break;
@@ -305,13 +339,13 @@ static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
             imouse_capture_on(w, "Klick");
         if (g_cfg.input_source == 1) {
             imsg_set(imouse_btn_vk(msg), 1);
-            if (imouse_is_fg(w)) SetCapture(w); /* Loslassen ausserhalb */
+            if (g_captured && imouse_is_fg(w)) SetCapture(w); /* Loslassen ausserhalb */
         }
         break;
     case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP:
         if (g_cfg.input_source == 1) {
             imsg_set(imouse_btn_vk(msg), 0);
-            if (!imouse_any_btn_down() && GetCapture() == w)
+            if (imouse_is_fg(w) && !imouse_any_btn_down() && GetCapture() == w)
                 ReleaseCapture();
         }
         break;
@@ -320,13 +354,13 @@ static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
             imouse_capture_on(w, "Klick");
         if (g_cfg.input_source == 1) {
             imsg_set(imouse_xbtn_vk(wp), 1);
-            if (imouse_is_fg(w)) SetCapture(w); /* Loslassen ausserhalb */
+            if (g_captured && imouse_is_fg(w)) SetCapture(w); /* Loslassen ausserhalb */
         }
         break;
     case WM_XBUTTONUP:
         if (g_cfg.input_source == 1) {
             imsg_set(imouse_xbtn_vk(wp), 0);
-            if (!imouse_any_btn_down() && GetCapture() == w)
+            if (imouse_is_fg(w) && !imouse_any_btn_down() && GetCapture() == w)
                 ReleaseCapture();
         }
         break;
@@ -363,6 +397,12 @@ static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         imouse_capture_off("Fenster zu");
         break;
     default:
+        if (g_cfg.input_test_hook && msg == IMOUSE_MSG_TEST_STATE) {
+            HLOG_I("MOUSE-MENU: mission=%d menu=%d gefangen=%d sichtbar=%d test=%d physisch=%d",
+                imouse_in_mission(), g_menu_open, (int)g_captured, !g_captured,
+                (int)g_test_focus, imouse_is_fg(w));
+            return g_captured;
+        }
         if (g_cfg.input_test_hook && msg == IMOUSE_MSG_TEST_FOCUS) {
             /* Test-Hook: Fokus logisch setzen/nehmen (ohne Vordergrund). */
             if (wp) {
@@ -425,14 +465,22 @@ void imouse_release_keys(void)
 /* W188 GAME-MENU: Menue offen -> Maus freigeben (Zeiger sichtbar, kein
  * ClipCursor), Menue zu -> wieder fangen, wenn sie vorher gefangen war und
  * das Fenster den Fokus hat. UI-Thread. */
-static int g_menu_had_cap;
 void imouse_menu_capture(int open)
 {
+    open = open != 0;
+    if (open == g_menu_open) return;
+    g_menu_open = open;
     if (open) {
         g_menu_had_cap = g_captured != 0;
-        if (g_captured) imouse_capture_off("Menue offen");
+        imouse_release_keys();
+        imouse_capture_off("Menue offen");
+        if (imouse_is_fg(g_mwnd)) {
+            ClipCursor(NULL);
+            SetCursor(LoadCursorA(NULL, IDC_ARROW));
+        }
     } else {
-        if (g_menu_had_cap && g_mwnd && g_focus && g_want) imouse_capture_on(g_mwnd, "Menue zu");
+        if (g_menu_had_cap && g_mwnd && g_focus && g_want)
+            imouse_capture_on(g_mwnd, "Menue zu");
         g_menu_had_cap = 0;
     }
 }
@@ -480,7 +528,10 @@ int imouse_poll(int *dx, int *dy, int *blocked)
             InterlockedExchange(&g_suppress_btn, 0);
         if (!g_captured || g_suppress_btn) {
             *dx = *dy = 0;
-            *blocked = 1;
+            /* Free pointer in the game's own menus still permits buttons
+             * (e.g. primary fire = confirm); never feed aim deltas there. */
+            *blocked = g_suppress_btn || g_menu_open || sb_ovl_open() ||
+                imouse_in_mission() || g_cfg.mouse_capture_outside_mission;
         }
     }
     if (g_cfg.input_focus_only && !imouse_has_focus()) *blocked = 1;

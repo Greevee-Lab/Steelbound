@@ -6,7 +6,9 @@
  * GetAsyncKeyState. Wirkt dadurch nur, wenn das Client-Fenster die Eingabe
  * bekommt (Fokus); Fokusverlust (WM_KILLFOCUS/WM_ACTIVATE/WM_ACTIVATEAPP)
  * loest alle Tasten. Kurze Tipps bleiben >= 2 Spiel-Frames sichtbar.
- * mouse_capture=1: Maus fangen, solange das Client-Fenster den Fokus hat
+ * mouse_capture=1: Maus in der Mission bei Fokus fangen; eigene Menues
+ * und Spielmenues ausserhalb der Mission bleiben sichtbar/frei
+ * (mouse_capture_outside_mission=1 erlaubt dort das alte Fangverhalten)
  * (Cursor versteckt + per ClipCursor aufs Fenster begrenzt, Deltas per Raw
  * Input WM_INPUT ohne Randsaettigung). F10 = freigeben/fangen, Fokusverlust
  * gibt sofort frei, Klick ins Fenster faengt wieder (der Klick selbst feuert
@@ -24,6 +26,7 @@
  * und klinkt sich per Subclassing (GWLP_WNDPROC) ein. */
 
 #define IMOUSE_MSG_TEST_FOCUS (0x8000 + 0x7A) /* WM_APP + 0x7A */
+#define IMOUSE_MSG_TEST_STATE (0x8000 + 0x7C) /* W196: logical capture/cursor evidence */
 #define IMOUSE_MSG_TEST_MOVE  (0x8000 + 0x7B) /* WM_APP + 0x7B */
 
 /* Pro XInput-Poll (Spiel-Thread): installiert bei Bedarf die Fenster-
@@ -48,3 +51,6 @@ int imsg_key(int vk, unsigned frame);
 /* Echte Taste/Maustaste vk: input_source=1 -> imsg_key(vk, g_frames),
  * sonst GetAsyncKeyState (bisher). */
 int imsg_real_vk(int vk);
+
+/* W196: UI thread, idempotent aggregate state for all own menus/panels. */
+void imouse_menu_capture(int open);

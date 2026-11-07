@@ -1746,6 +1746,8 @@ int main(int argc, char **argv)
         return rc >= 0 ? 0 : 1;
     }
 
+    { extern int imouse_selftest(void); CHECK(imouse_selftest() == 0, "W196 mouse/menu"); }
+
     printf("input_selftest: Vergleich alt<->neu + Gamepad-Logik\n");
 
     /* Teil 1: Datei == eingebaut (Datei muss gefunden werden). */

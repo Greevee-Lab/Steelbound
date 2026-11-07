@@ -352,6 +352,7 @@ void hcfg_defaults(void)
     g_cfg.mouse_invert_y = 0;
     g_cfg.mouse_buttons = 1;
     g_cfg.input_diag = 0;
+    g_cfg.mouse_capture_outside_mission = 0;
     g_cfg.mouse_capture = 0;    /* W79: Spieler-Standard per Launcher (user.cfg) */
     g_cfg.input_focus_only = 0; /* W79 */
     g_cfg.key_toggles = 0;      /* W79 */
@@ -1130,6 +1131,8 @@ static void set_key(const char *k, const char *v)
         g_cfg.mouse_buttons = atoi(v);
     } else if (strcmp(k, "input_diag") == 0) {
         g_cfg.input_diag = atoi(v);
+    } else if (strcmp(k, "mouse_capture_outside_mission") == 0) {
+        g_cfg.mouse_capture_outside_mission = atoi(v) != 0;
     } else if (strcmp(k, "mouse_capture") == 0) {
         g_cfg.mouse_capture = atoi(v);
     } else if (strcmp(k, "input_focus_only") == 0) {

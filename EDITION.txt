@@ -1,6 +1,6 @@
 Steel Battalion - Game Preservation Project
 Edition: community
-Stand: 2026-11-07 (Commit 27de45a+lokal)
+Stand: 2026-11-07 (Commit 90fdba8+lokal)
 
 Dateien (sha256):
 57877aeadd45e81780912168317880a9cc533efbaffa21bc88edd2191c85dc97  .github/FUNDING.yml
@@ -23,7 +23,7 @@ f8cb4665df749892246142a7ecc387a41e8166485f4c9eb824a0074591c36a63  poc-native/doc
 26c1aba23d4800b23086f9d96d2cc6199fe7d7fa1dfceae52eea27abeac9d6de  poc-native/docs/community/GETTING_STARTED.md
 11152190d8555589e970b2af3ef35cfff7e9f71245f94a903cd037ef28779dde  poc-native/docs/community/GRAPHICS_AND_PACKS.md
 939d1acd1bccdbf712405e1a508f48efa614c567af009988947de0402e27a069  poc-native/docs/community/VR.md
-a361c666019f0b4e8c4869a115182102698524919aafc30bdbbd41eadff18fa6  poc-native/harness/CMakeLists.txt
+de47c81565ea6e145df4188985fbdd8de21976231b3ccbea14c53b1005d3abd8  poc-native/harness/CMakeLists.txt
 c93d8f5e65c389c55c8a2cc18377f750e4eacd415152df0300d6eb27eb10823a  poc-native/harness/fixtures/sbc/aim.sbc
 0f42e28a28a275769ef5a1a389a9279aeb7b7f6d452d3a1f8c0e8857cb7d4282  poc-native/harness/fixtures/sbc/assist_full.sbc
 88f0d98207a253ebc4073bbb7c358f99a27af4a08435efb47d7e5ff309f0da2f  poc-native/harness/fixtures/sbc/assist_live.sbc
@@ -62,8 +62,8 @@ ce172abd35021a868906cc36f749d16a23393b2aff76e8c5c66f1b3748b150e7  poc-native/har
 a1e29a1bfdfb1e15030975dc2026d443a20f3468e0010dd76892c9be3f23161e  poc-native/harness/src/fs_emu.h
 74db23149c6351fa9be89b50214ca3f3c3797f2e1bb98baf8b86d463f10432f3  poc-native/harness/src/gpu_nops.inc
 eae9f45655c57178e49ef2d18c16f912d4b11cdc869f416bf281b495359a7bf0  poc-native/harness/src/gpu_polls.inc
-330dd00c6e123483e6546504714f3888e6ae6e4d7f8d0107fc1338464879aa0f  poc-native/harness/src/hcfg.c
-a0cf2359882a072bc8bc40ed9563bf3db4d8f3703cbf9c08b399ebc802afc8f8  poc-native/harness/src/hcfg.h
+c658567a4debe08172a750e2f569a607f9539ec6f2b42acfee73ee50e26e5d96  poc-native/harness/src/hcfg.c
+35bf6b241b80f7337ed6cb8580ee5b53f398e97299551b3ea0fa9dadc7e78f89  poc-native/harness/src/hcfg.h
 4df16782fc8f8a455c65777da97bcced9323f2aab53bf3b11517e1e2cd3ae3e8  poc-native/harness/src/hlock.c
 afb7c294b114ce6ec1ecb26ce3dd8e95f950adf40fe83ea8f9e79b7d0a380e13  poc-native/harness/src/hlock.h
 de30879dc13ef0b1ec8bd3b388ede1289c4accd1ccba15c15c270d821792c9d0  poc-native/harness/src/hlock_selftest.c
@@ -78,11 +78,12 @@ c6a2702f3aad37615b4b325be4de0727955a4dcf74dfaedc79ce540582f2c6e7  poc-native/har
 a26be09739f9beac8106e9870f8e7f2b303f4b5081768abe21db2a42b6267c48  poc-native/harness/src/hooks_xapi.c
 11b0f380cc42977b488a5685474b251f58b7876c612a100d8277de9a9aa0765a  poc-native/harness/src/input_map.c
 1368cdab7b0a8cde3eb5ac95f01ed0d43860764838676b096e9b36710d800d46  poc-native/harness/src/input_map.h
-032800493764dfcc5fb368e35455c27ee957ef584ec8bf88dea9ac05c882326e  poc-native/harness/src/input_mouse.c
-c3ee3eaa7f94c98890f298a746cd4a4f255a41fb7ad8492e198f875e403eb3d8  poc-native/harness/src/input_mouse.h
+76afea70eb9d19cc9f2035e0c45b47b18f84ab4e4fbb8312acfcf86273a3b562  poc-native/harness/src/input_mouse.c
+94682212dd9ed103adb74d28b501419765f13b58f0a58b7a56bcb5b20dd964ec  poc-native/harness/src/input_mouse.h
+6be097d1b5d500a8d8ef3bc3d9a3ab2a1a6282208d99f96e7a2ee023bcfc8518  poc-native/harness/src/input_mouse_selftest.c
 6c380af5d5bec1c8879887c1484012bbfc389773ae0661621436a8794c5046bc  poc-native/harness/src/input_sbc_usb.c
 2c531266f624ca9a7d7d3621dbb6fa824f09ae0291cdde28a9f872095261e5f3  poc-native/harness/src/input_sbc_usb.h
-1a66769c817c31c6fdd73d9b2b367d9f39a3a013b92ac7771c3470a1c44194be  poc-native/harness/src/input_selftest.c
+920347754e62d73fea8315d8051419f928ccbed35153009656b7bf21fe27e762  poc-native/harness/src/input_selftest.c
 e752583691fa9131ce02fc0d70acd8363cb9524b98b2350dadf5af062a4654be  poc-native/harness/src/input_tap.c
 ea20d71cfcdb6fc9c79ce9716bff46ce4d86b9c94199f461e8f2f0cc7214506f  poc-native/harness/src/input_tap.h
 94a067e6969e9a2d2b24d8b271f43c662ec1ccb2b68944300d42cd5195ccd53b  poc-native/harness/src/iso_vfs.c
@@ -131,7 +132,7 @@ bac9b33efdb2c234657838f05d6479a8624f7e0cc70bdd8881f200883d848ca4  poc-native/har
 036694bdfbc1a806964a7549cbcbfbec129451902caeef025643e366b4701e68  poc-native/harness/src/sb_gfxpreset.h
 6a29524db4cc03a8e2bcf625070581793b954187bccb8af1e89ff71d661e91e5  poc-native/harness/src/sb_lang.c
 eea539596f86263ce4106a80bbb939b1cb257a97d1c66017d8c34dd262ba0969  poc-native/harness/src/sb_lang.h
-3c171e62e96c385d28c070791e6be93b2fb95e1650f9d1c28a76a7cd7932a5ee  poc-native/harness/src/sb_overlay.c
+863d1d6e765ff9ed9238a3c25c111e35703a084bbb1f437691643b9ad264659e  poc-native/harness/src/sb_overlay.c
 559f6e22a2608ee19ddef749a695087eb721a60b3c61ea4e7c29a74e933becba  poc-native/harness/src/sb_overlay.h
 7286b5a9da1929901f804cb8dada7d60fee69ac8b620690c4415502fbde10943  poc-native/harness/src/sb_pack.c
 79460ca876d0240f1c2f3bd4277f29d3d137eaa8b2336b0a63044198b2905123  poc-native/harness/src/sb_pack.h

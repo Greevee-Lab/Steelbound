@@ -40,7 +40,6 @@ int sb_render_views_rebuild(const char *why);  /* d3d11_render.c: Views neu (int
 HWND sb_render_hwnd(void);                     /* d3d11_render.c */
 int imouse_subclassed(void);                   /* input_mouse.c */
 void imouse_release_keys(void);                /* input_mouse.c (UI-Thread) */
-void imouse_menu_capture(int open);            /* input_mouse.c (UI-Thread, W188): Maus frei im Menue */
 int sb_render_pause_jpg(const char *path, unsigned *ow, unsigned *oh); /* d3d11_render.c (W188, unter ctx_lock) */
 
 /* ------------------------------------------------------------------ */
@@ -1655,7 +1654,7 @@ static void ov_test_tick(unsigned n)
         case OA_SHOT: g_ov_shot_due = 1; break;
         case OA_FOCUS1: PostMessageA(h, IMOUSE_MSG_TEST_FOCUS, 1, 0); break;
         case OA_FOCUS0: PostMessageA(h, IMOUSE_MSG_TEST_FOCUS, 0, 0); break;
-        case OA_LOG: ov_log_values("test"); ov_log_shader("test"); ov_log_shader2("test"); ov_log_fx("test"); break;
+        case OA_LOG: PostMessageA(h, IMOUSE_MSG_TEST_STATE, 0, 0); ov_log_values("test"); ov_log_shader("test"); ov_log_shader2("test"); ov_log_fx("test"); break;
         case OA_PHUDPOS: sb_phud_cycle_pos(); break;
         case OA_TKEY: PostMessageA(h, OV_MSG_TEST, (WPARAM)s->vk, 0); break; /* W188 */
         case OA_TXT: { /* W188: Zeichen per WM_CHAR wie TranslateMessage ('_' = Leerzeichen) */

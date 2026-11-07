@@ -24,6 +24,8 @@
 #include "render_qa.h"
 #include "sb_overlay.h"
 #include "sb_perfhud.h"
+#include "sb_lang.h"    /* W190: Hinweis Spielstaende geschuetzt */
+#include "kernel_hle.h" /* W190: krnl_savelock_active */
 #include <stdlib.h>
 #include <stdarg.h>
 #include <wchar.h>
@@ -1364,6 +1366,9 @@ static void ph_layout(unsigned bbh, unsigned *w, unsigned *h)
     *w = (unsigned)S(196.0f);
     *h = (unsigned)(S(15.0f) + S(3.0f) + 3 * S(10.0f) + S(2.0f) + S(34.0f) + S(3.0f) +
                     (g_cfg.perf_gpass > 0 ? 7 : 5) * S(10.0f) + S(4.0f)); /* W146: +2 Zeilen "GPU Pass" */
+    if (krnl_savelock_active()) {
+        *h += (unsigned)S(10.0f); /* W190: Zeile "Spielstaende geschuetzt" (nur mit aktivem Schutz) */
+    }
 }
 
 static int ph_gdi_size(unsigned w, unsigned h)
@@ -1501,6 +1506,11 @@ static void ph_paint(void)
                      g_cfg.rt_scale_dyn > 0 ? L"d" : L""); /* W146: d = dynamisch */
     }
     ph_text(pad, y, t, SB_UI_C_DIM, 0);
+    if (krnl_savelock_active()) { /* W190 SAVE-LOCK: sichtbarer Hinweis */
+        y += rowh;
+        sb_lang_w("ovl.sl_note", t, 128);
+        ph_text(pad, y, t, PH_C_WARN, 0);
+    }
     GdiFlush();
     sb_ovl_ui_finish(ph_bits, ph_bw, ph_bh, ph_f);
 }

@@ -35,6 +35,7 @@ void lcfg_defaults(launcher_settings_t *s)
     s->input_profile[0] = '\0'; /* W78: leer = Legacy-Tastatur */
     s->sbc_usb = 0;             /* W78: USB-Controller aus */
     s->sbc_mouse_off = 1;       /* W128: Maus-Achsen aus bei aktivem Controller */
+    s->save_lock = 0;           /* W190 SAVE-LOCK: Original-Verhalten */
     s->interp_fps = 120;        /* W78: Spieler-Standard wie Client (hcfg) */
     s->window_mode = 0;         /* W81: Fenster (Client-Standard) */
     s->fs_hz = 0;               /* W81: Desktop-Rate */
@@ -350,6 +351,8 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         s->sbc_usb = atoi(v);
     } else if (strcmp(k, "sbc_mouse_off") == 0) {
         s->sbc_mouse_off = atoi(v);
+    } else if (strcmp(k, "save_lock") == 0) { /* W190 */
+        s->save_lock = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "interp_fps") == 0) {
         s->interp_fps = atoi(v);
     } else if (strcmp(k, "vr_enable") == 0) { /* W134 */
@@ -508,6 +511,7 @@ static const char *kManaged[][2] = {
     { "audio_live", "audio" },      { "aspect_mode", "render" },
     { "input_profile", "input" },   { "sbc_usb", "input" },
     { "sbc_mouse_off", "input" }, /* W128 */
+    { "save_lock", "game" }, /* W190 */
     { "interp_fps", "render" },
     { "window_mode", "display" },   { "fs_hz", "display" },
     { "mouse_mode", "input" },      { "mouse_sens", "input" },
@@ -613,6 +617,8 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = s->sbc_usb;
         } else if (strcmp(k, "sbc_mouse_off") == 0) {
             v = s->sbc_mouse_off;
+        } else if (strcmp(k, "save_lock") == 0) { /* W190 */
+            v = s->save_lock ? 1 : 0;
         } else if (strcmp(k, "interp_fps") == 0) {
             v = s->interp_fps;
         } else if (strcmp(k, "window_mode") == 0) {

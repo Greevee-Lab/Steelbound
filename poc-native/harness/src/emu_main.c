@@ -1597,6 +1597,9 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     /* Dateipuffer NICHT freigeben: XeLoadSection braucht ihn (M1). */
 
     krnl_init(&img);
+    if (g_cfg.savelock_selftest) { /* DIAG(SAVE-LOCK,W190) */
+        krnl_savelock_selftest();
+    }
     watch_dr_init(); /* W41 WATCHDR: cfg parsen + DR bewaffnen (nur bei watch=...) */
     krnl_install_thunks(&img);
     hooks_install();

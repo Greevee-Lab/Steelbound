@@ -98,6 +98,7 @@ add_library(sb_emu SHARED
   src/iso_vfs.c
   src/sb_gamever.c
   src/sb_userdata.c
+  src/sb_savecheck.c
   src/sb_overlay.c
   src/sb_pause.c
   src/sb_feedback.c
@@ -166,6 +167,7 @@ add_executable(iso_vfs_check
   src/sb_gamever.c
   src/sb_sha256.c
   src/sb_userdata.c
+  src/sb_savecheck.c
 )
 target_include_directories(iso_vfs_check PRIVATE src)
 target_compile_options(iso_vfs_check PRIVATE /W3)

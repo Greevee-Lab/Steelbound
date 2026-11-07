@@ -12,6 +12,9 @@ typedef struct {
     char game_image[512]; /* W150 ISO-DIRECT: Spiel-Abbild (XISO/Redump), Vorrang vor media_root/xbe_path; leer = Ordner-Modus */
     int version_check;    /* W150: 1 = nur bekannte Spielversion (PAL) starten, 0 = nur warnen */
     int iso_selftest;     /* W150 DIAG: 1 = D:-Selbsttest (Lesen, Schreibschutz) vor dem Spielstart */
+    int save_check;       /* W187 KIA-LOAD: Spielstaende (T:) beim Start pruefen: 1 = reparieren (mit Sicherung), 2 = nur melden, 0 = aus */
+    int save_lock;        /* W190 SAVE-LOCK: 1 = Spielstaende schuetzen (T:/U: in eine Wegwerf-Arbeitskopie <hdd>\_savelock, beim naechsten Start verworfen), 0 = Original (Standard) */
+    int savelock_selftest; /* W190 DIAG: 1 = Selbsttest Pilot-Loeschen/death00 ueber die Nt*File-Wege vor dem Spiel */
     int xlaunch_self;     /* W186 RESET-TITLE: XLaunchNewImage auf D:\default.xbe: 1 = Client-Neustart, 2 = sauberes Ende, 0 = ignorieren (alt) */
     int xlaunch_replay;   /* W186: 1 = Neustart-Kind spielt replay_steps/replay erneut ab, 0 = Kind ohne Replay (Standard) */
     /* [display] */

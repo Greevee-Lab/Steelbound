@@ -20,6 +20,7 @@ void hcfg_defaults(void)
     strcpy_s(g_cfg.hdd_root, sizeof g_cfg.hdd_root, "HDD");
     g_cfg.game_image[0] = 0;   /* W150: leer = Ordner-Modus (bisher) */
     g_cfg.version_check = 1;     /* W150: unbekannte Spielversion -> kein Start */
+    g_cfg.save_check = 1;        /* W187 KIA-LOAD: Spielstaende pruefen/reparieren */
     g_cfg.xlaunch_self = 1;      /* W186 RESET-TITLE: "Zurueck zum Titel" = Client-Neustart */
     g_cfg.xlaunch_replay = 0;    /* W186: Neustart-Kind ohne Replay-Kette */
     g_cfg.width = 2560;
@@ -516,6 +517,12 @@ static void set_key(const char *k, const char *v)
         strcpy_s(g_cfg.game_image, sizeof g_cfg.game_image, v);
     } else if (strcmp(k, "version_check") == 0) {
         g_cfg.version_check = atoi(v);
+    } else if (strcmp(k, "save_check") == 0) {
+        g_cfg.save_check = atoi(v);
+    } else if (strcmp(k, "save_lock") == 0) { /* W190 SAVE-LOCK */
+        g_cfg.save_lock = atoi(v);
+    } else if (strcmp(k, "savelock_selftest") == 0) {
+        g_cfg.savelock_selftest = atoi(v);
     } else if (strcmp(k, "xlaunch_self") == 0) {
         g_cfg.xlaunch_self = atoi(v);
     } else if (strcmp(k, "xlaunch_replay") == 0) {

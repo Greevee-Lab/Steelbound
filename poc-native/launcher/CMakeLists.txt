@@ -92,6 +92,7 @@ add_executable(sb_launcher WIN32
   ../harness/src/iso_vfs.c
   ../harness/src/sb_gamever.c
   ../harness/src/sb_userdata.c
+  ../harness/src/sb_savecheck.c
   src/hlog_stub.c
 )
 target_include_directories(sb_launcher PRIVATE src ../harness/src ${CMAKE_CURRENT_BINARY_DIR})

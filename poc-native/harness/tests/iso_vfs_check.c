@@ -2,6 +2,8 @@
  *
  *   iso_vfs_check --selftest              Selbsttest ohne Spieldaten
  *   iso_vfs_check --userdata-selftest     Selbsttest Datenorte (sb_userdata)
+ *   iso_vfs_check --savecheck-selftest    Selbsttest Spielstand-Pruefung (W187) + Spielstaende schuetzen (W190)
+ *   iso_vfs_check --savecheck <hdd> [--repair]  Spielstaende pruefen (+ reparieren)
  *   iso_vfs_check <abbild> [--list]       Abbild oeffnen, Kennzahlen (+ Liste)
  *   iso_vfs_check <abbild> --compare <ordner>
  *        jede Datei des Abbilds byteweise gegen den entpackten Ordner
@@ -13,6 +15,7 @@
 #include "iso_vfs.h"
 #include "sb_gamever.h"
 #include "sb_userdata.h"
+#include "sb_savecheck.h" /* W187 KIA-LOAD */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -104,6 +107,12 @@ static void walk_host(const char *root, const char *rel)
     FindClose(h);
 }
 
+static void savecheck_print(const char *line, void *ctx)
+{
+    (void)ctx;
+    printf("%s\n", line);
+}
+
 int main(int argc, char **argv)
 {
     char err[512];
@@ -141,6 +150,27 @@ int main(int argc, char **argv)
         printf("Modus jetzt: %s (Quelle %s)\n", sb_userdata_mode_name(sb_userdata_mode()), sb_userdata_mode_source());
         if (sb_userdata_path_peek(SB_UD_ROOT, p, sizeof p) == 1) printf("Wurzel: %s\n", p);
         return rc ? 1 : 0;
+    }
+    if (argc >= 2 && strcmp(argv[1], "--savecheck-selftest") == 0) { /* W187 */
+        int rc = sb_savecheck_selftest(err, sizeof err);
+        printf("%s\n", err);
+        rc |= sb_savelock_selftest(err, sizeof err); /* W190 SAVE-LOCK */
+        printf("%s\n", err);
+        return rc ? 1 : 0;
+    }
+    if (argc >= 3 && strcmp(argv[1], "--savecheck") == 0) { /* W187 */
+        wchar_t w[600];
+        sb_savecheck_t r;
+        int rep = argc >= 4 && strcmp(argv[3], "--repair") == 0, rc;
+        MultiByteToWideChar(CP_ACP, 0, argv[2], -1, w, 600);
+        rc = sb_savecheck_run(w, rep, &r, savecheck_print, NULL);
+        if (rc < 0) {
+            printf("SAVECHECK: kein TDATA\\43430002 unter %s\n", argv[2]);
+            return 0;
+        }
+        printf("SAVECHECK: %d Dateien, %d ok, %d repariert, %d verschoben, %d offen%s%ls\n",
+               r.checked, r.ok, r.repaired, r.moved, r.failed, r.backup[0] ? ", Sicherung " : "", r.backup);
+        return r.failed ? 1 : 0;
     }
     if (argc < 2) {
         printf("Aufruf: iso_vfs_check --selftest | <abbild> [--list] [--compare <ordner>] [--version] [--bench]\n");

@@ -69,6 +69,8 @@ typedef struct {
     /* W148 PACK-LAUNCHER: [render] Render-Skalierung (Spieler-Standard: Auto dynamisch) */
     int rt_scale;             /* 0 = auto, 1..4 = fester Faktor */
     int rt_scale_dyn;         /* 1 = dynamisch (Regler), 0 = fest */
+    /* W190 SAVE-LOCK: [game] save_lock (Client krnl_file.c, Standard 0 = Original) */
+    int save_lock;            /* 1 = Spielstaende schuetzen (Testhilfe, Aenderungen beim Beenden verworfen) */
 } launcher_settings_t;
 
 /* W131 SHADER-OPT2: Shader-Keys (Index in shx[]) */

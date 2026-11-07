@@ -4,7 +4,9 @@
 #include "krnl_int.h"
 #include "sb_remaster.h" /* W103 REM-FRAME */
 #include "iso_vfs.h"     /* W150 ISO-DIRECT */
+#include "sb_savecheck.h" /* W187 KIA-LOAD */
 #include <ctype.h>
+#include <intrin.h> /* W187: _AddressOfReturnAddress (FILE delete) */
 
 /* ---------- W150 ISO-DIRECT: D: aus dem Spiel-Abbild (nur lesend) ----------
  * game_image=<Pfad> -> g_iso; alle D:-Zugriffe (NtCreateFile/NtOpenFile/
@@ -139,6 +141,31 @@ static void xb_skip_sep(const char **s)
     }
 }
 
+/* ---------- W190 SAVE-LOCK: Spielstaende schuetzen ----------
+ * Aktiv: jeder Host-Pfad <hdd>\TDATA\... bzw. <hdd>\UDATA\... (T:, U: und
+ * E:\TDATA, E:\UDATA) wird auf <hdd>\_savelock\TDATA|UDATA\... umgebogen
+ * (Wegwerf-Arbeitskopie, sb_savecheck.h). Einmal aktiv, bleibt der Schutz
+ * bis zum Prozessende an (g_sl_hdd aendert sich danach nicht mehr). */
+static volatile LONG g_sl_active;
+static char g_sl_hdd[600];  /* hdd_root mit Backslashes, ohne Endtrenner */
+static size_t g_sl_hddn;
+
+static void sl_redirect(char *out, size_t cap)
+{
+    const char *r;
+    char t[1024];
+    if (!g_sl_hddn || _strnicmp(out, g_sl_hdd, g_sl_hddn) != 0 || out[g_sl_hddn] != '\\') {
+        return;
+    }
+    r = out + g_sl_hddn + 1;
+    if ((_strnicmp(r, "TDATA", 5) != 0 && _strnicmp(r, "UDATA", 5) != 0) ||
+        (r[5] != '\\' && r[5] != '\0')) {
+        return;
+    }
+    _snprintf_s(t, sizeof t, _TRUNCATE, "%s\\_savelock\\%s", g_sl_hdd, r);
+    strcpy_s(out, cap, t);
+}
+
 /* W150: drel (optional) bekommt bei D:-Pfaden den Pfad relativ zur
  * Laufwerkswurzel, sonst "". Im Abbild-Modus ist der "Host-Pfad" nur ein
  * Anzeigename (<game_image>\<rel>, gleiche Dateinamen in den Logs). */
@@ -214,6 +241,9 @@ static int xb_path_to_host_ex(const char *xb, size_t nbytes, char *out, size_t c
             if (*s == '/') {
                 *s = '\\';
             }
+        }
+        if (g_sl_active && !d) { /* W190 SAVE-LOCK: TDATA/UDATA -> Arbeitskopie */
+            sl_redirect(out, cap);
         }
         return m > 0 ? 0 : -1;
     }
@@ -291,6 +321,151 @@ void xb_mkdir_p(const char *path)
         }
     }
     CreateDirectoryA(tmp, NULL);
+}
+
+/* W187 KIA-LOAD: T:-Spielstaende vor dem Spielstart pruefen (save_check=1:
+ * reparieren mit Sicherung unter <hdd_root>\_backup\, 2: nur melden).
+ * Beschaedigte/fremde Staende (z. B. abgebrochenes Schreiben, Import von
+ * einer echten Xbox) fuehren sonst zu "Unable to load KIA Record." usw. */
+static void save_check_log(const char *line, void *ctx)
+{
+    (void)ctx;
+    HLOG_W("%s", line);
+}
+
+void krnl_save_check(void)
+{
+    wchar_t w[640];
+    sb_savecheck_t r;
+    int rc;
+    if (!MultiByteToWideChar(CP_ACP, 0, g_cfg.hdd_root, -1, w, 640)) {
+        return;
+    }
+    rc = sb_savecheck_run(w, g_cfg.save_check == 1, &r, save_check_log, NULL);
+    if (rc < 0) {
+        return;
+    }
+    if (rc == 0) {
+        HLOG_I("SAVECHECK: %d Spielstand-Dateien ok", r.checked);
+    } else {
+        char b[700];
+        if (!WideCharToMultiByte(CP_ACP, 0, r.backup, -1, b, sizeof b, NULL, NULL)) {
+            b[0] = '\0';
+        }
+        HLOG_W("SAVECHECK: %d Dateien, %d ok, %d repariert, %d verschoben, %d unveraendert%s%s",
+               r.checked, r.ok, r.repaired, r.moved, r.failed, b[0] ? ", Sicherung " : "", b);
+    }
+}
+
+/* ---------- W190 SAVE-LOCK: Ein-/Ausschalten, Uebernehmen ----------
+ * Sitzung = Prozess plus seine XLaunchNewImage-Neustarts (W186): Wer den
+ * Schutz einschaltet, setzt SB_SAVELOCK_SESSION=1 in der eigenen Umgebung,
+ * das Neustart-Kind erbt sie und behaelt die Arbeitskopie (BACK TO TITLE
+ * verwirft also nichts). Ein neuer Start ohne die Variable verwirft die
+ * Arbeitskopie (save_lock=0) bzw. legt sie frisch an (save_lock=1). Kein
+ * Aufraeumen beim Beenden noetig: die echten Staende werden nie beruehrt. */
+static int sl_hdd_w(wchar_t *w, int cap)
+{
+    return MultiByteToWideChar(CP_ACP, 0, g_cfg.hdd_root, -1, w, cap) > 0;
+}
+
+static void sl_set_root(void)
+{
+    char *s;
+    strcpy_s(g_sl_hdd, sizeof g_sl_hdd, g_cfg.hdd_root);
+    for (s = g_sl_hdd; *s; s++) {
+        if (*s == '/') {
+            *s = '\\';
+        }
+    }
+    g_sl_hddn = strlen(g_sl_hdd);
+    while (g_sl_hddn > 0 && g_sl_hdd[g_sl_hddn - 1] == '\\') {
+        g_sl_hdd[--g_sl_hddn] = '\0';
+    }
+}
+
+int krnl_savelock_active(void)
+{
+    return g_sl_active != 0;
+}
+
+int krnl_savelock_begin(const char *why)
+{
+    wchar_t w[640];
+    char err[300];
+    int n = 0;
+    if (g_sl_active) {
+        return 0;
+    }
+    if (!sl_hdd_w(w, 640) || sb_savelock_prepare(w, &n, err, sizeof err) != 0) {
+        HLOG_W("SAVELOCK: Arbeitskopie nicht anlegbar (%s) - Schutz AUS, Spielstaende wie ohne save_lock",
+               err[0] ? err : "hdd_root");
+        return -1;
+    }
+    sl_set_root();
+    InterlockedExchange(&g_sl_active, 1);
+    SetEnvironmentVariableA("SB_SAVELOCK_SESSION", "1"); /* Neustart-Kind behaelt die Kopie */
+    HLOG_I("SAVELOCK: aktiv (%s) - T:/U: in Arbeitskopie '%s\\_savelock' (%d Dateien kopiert), "
+           "Aenderungen an Pilot/Spielstaenden werden verworfen", why, g_sl_hdd, n);
+    return 0;
+}
+
+void krnl_savelock_init(void)
+{
+    wchar_t w[640];
+    char b[8];
+    int keep = GetEnvironmentVariableA("SB_SAVELOCK_SESSION", b, sizeof b) > 0 && b[0] == '1';
+    int rc;
+    if (!sl_hdd_w(w, 640)) {
+        return;
+    }
+    if (keep && sb_savelock_present(w)) {
+        sl_set_root();
+        InterlockedExchange(&g_sl_active, 1);
+        HLOG_I("SAVELOCK: aktiv (Neustart derselben Sitzung) - Arbeitskopie '%s\\_savelock' bleibt", g_sl_hdd);
+        return;
+    }
+    if (g_cfg.save_lock || keep) {
+        krnl_savelock_begin(keep ? "Neustart, Arbeitskopie fehlte" : "Start, save_lock=1");
+        return;
+    }
+    rc = sb_savelock_discard(w); /* save_lock=0: Rest einer frueheren Sitzung */
+    if (rc != 0) {
+        HLOG_I("SAVELOCK: Arbeitskopie einer frueheren Sitzung %s ('%s\\_savelock')",
+               rc > 0 ? "verworfen" : "nicht vollstaendig loeschbar", g_cfg.hdd_root);
+    }
+}
+
+int krnl_savelock_commit(void)
+{
+    wchar_t w[640], bk[800];
+    char err[300], b8[900], pre[640];
+    unsigned i;
+    size_t pn;
+    int n = 0;
+    if (!g_sl_active || !sl_hdd_w(w, 640)) {
+        return -1;
+    }
+    /* Schreibt das Spiel gerade einen Spielstand? (offene Datei in der Kopie) */
+    _snprintf_s(pre, sizeof pre, _TRUNCATE, "%s\\_savelock\\", g_sl_hdd);
+    pn = strlen(pre);
+    for (i = 0; i < XB_HANDLE_MAX; i++) {
+        ht_entry_t *e = ht_get(XB_HANDLE_BASE + i);
+        if (e && e->kind == HT_FILE && !e->vfs && !e->is_dir && _strnicmp(e->path, pre, pn) == 0) {
+            HLOG_W("SAVELOCK: Uebernehmen verschoben - Spielstand offen '%s'", e->path);
+            return 1;
+        }
+    }
+    if (sb_savelock_commit(w, bk, 800, &n, err, sizeof err) != 0) {
+        HLOG_W("SAVELOCK: Uebernehmen FEHLER (%s)", err);
+        return -1;
+    }
+    if (!WideCharToMultiByte(CP_ACP, 0, bk, -1, b8, sizeof b8, NULL, NULL)) {
+        b8[0] = '\0';
+    }
+    HLOG_I("SAVELOCK: geschuetzte Aenderungen uebernommen (%d Dateien), alter Stand gesichert '%s'", n,
+           b8[0] ? b8 : "-");
+    return 0;
 }
 
 /* ----- Dateien ----- */
@@ -1410,6 +1585,20 @@ u32 __stdcall hle_NtSetInformationFile_counted(u32 xh, u32 iosb, u32 info,
         }
         return X_STATUS_SUCCESS;
     }
+    if (cls == 13 && info && *(uint8_t *)(uintptr_t)info) {
+        /* W187: Loeschen per FileDispositionInformation(TRUE) protokollieren
+         * (nur Log, Verhalten unveraendert). Kommt der Aufruf aus XAPI
+         * DeleteFileA (FUN_0018E47D, Ruecksprung 0x18E4EA), steht dessen
+         * Aufrufer 0x40 Byte ueber dem Ruecksprung (5 Args, esi, 0x20 Lokale,
+         * ebp). Spielstand-Loescher: 0xCA17A (Missionsende, Pilot KIA/
+         * degradiert), 0xD67AD (Degradierung -> sasen00.sav), 0x10A325/
+         * 0x10A350 (Speichern gescheitert). */
+        ht_entry_t *e = ht_get(xh);
+        u32 *ra = (u32 *)_AddressOfReturnAddress();
+        u32 caller = ra[0] == 0x18E4EAu ? ra[0x40 / 4] : 0;
+        HLOG_I("FILE delete '%s' (Disposition, Spiel-Ret=0x%X, DeleteFileA-Aufrufer=0x%X)",
+               e && e->kind == HT_FILE ? e->path : "?", ra[0], caller);
+    }
     st = hle_NtSetInformationFile(xh, iosb, info, len, cls);
     if (st == X_STATUS_SUCCESS && cls == X_FilePositionInformation && len >= 8)
         krnl_seek_note(xh, *(uint64_t *)(uintptr_t)info);
@@ -1506,5 +1695,68 @@ int krnl_vfs_selftest(void)
     }
 #undef ST_CHECK
     HLOG_I("ISO-SELFTEST: %s (%u/%u Pruefungen)", fail ? "FEHLER" : "ok", n - fail, n);
+    return (int)fail;
+}
+
+/* ---------- W190 SAVE-LOCK: Selbsttest (savelock_selftest=1, vor dem Spiel) ----------
+ * Spielt den Tod eines Piloten ueber dieselben HLE-Wege wie das Spiel nach:
+ * XAPI DeleteFileA (NtOpenFile -> FileDispositionInformation(TRUE) ->
+ * NtClose) auf T:\user00.sav, dann T:\death00.sav schreiben, dann die Sicht
+ * des Spiels (T:) und die echten Ordner pruefen. save_lock=1: echte Staende
+ * unveraendert, die Arbeitskopie zeigt den Tod (bleibt so, Beleg auf der
+ * Platte). save_lock=0: Original-Verhalten (echter Pilot geloescht). */
+int krnl_savelock_selftest(void)
+{
+    static const char kMark[16] = "W190 SAVE-LOCK!";
+    char ru[700], rd[700];
+    xb_io_status_block io;
+    u32 xh = 0, st, n = 0, fail = 0;
+    int act = g_sl_active != 0, had_d;
+    unsigned char del = 1;
+    _snprintf_s(ru, sizeof ru, _TRUNCATE, "%s\\TDATA\\%s\\user00.sav", g_cfg.hdd_root, XB_TITLE_ID_STR);
+    _snprintf_s(rd, sizeof rd, _TRUNCATE, "%s\\TDATA\\%s\\death00.sav", g_cfg.hdd_root, XB_TITLE_ID_STR);
+    if (GetFileAttributesA(ru) == INVALID_FILE_ATTRIBUTES) {
+        HLOG_W("SAVELOCK-SELFTEST: kein Pilot '%s' - uebersprungen", ru);
+        return 0;
+    }
+    had_d = GetFileAttributesA(rd) != INVALID_FILE_ATTRIBUTES;
+#define ST_CHECK(cond, what) do { n++; if (!(cond)) { fail++; HLOG_E("SAVELOCK-SELFTEST: FEHLER %s", what); } } while (0)
+    /* 1. Pilot loeschen wie DeleteFileA */
+    st = st_open("T:\\user00.sav", 0x00010000u | 0x00100000u, X_FILE_OPEN, 0x40, &xh);
+    ST_CHECK(st == X_STATUS_SUCCESS && xh, "T:\\user00.sav oeffnen (DELETE)");
+    if (st == X_STATUS_SUCCESS) {
+        hle_NtSetInformationFile_counted(xh, (u32)(uintptr_t)&io, (u32)(uintptr_t)&del, 1, 13);
+        hle_NtClose(xh);
+    }
+    /* 2. KIA-Liste schreiben */
+    st = st_open("T:\\death00.sav", 0x80000000u | 0x40000000u, X_FILE_OVERWRITE_IF, 0x40, &xh);
+    ST_CHECK(st == X_STATUS_SUCCESS && xh, "T:\\death00.sav anlegen");
+    if (st == X_STATUS_SUCCESS) {
+        st = hle_NtWriteFile(xh, 0, 0, 0, (u32)(uintptr_t)&io, (u32)(uintptr_t)kMark, sizeof kMark, 0);
+        ST_CHECK(st == X_STATUS_SUCCESS && io.information == sizeof kMark, "death00.sav schreiben");
+        hle_NtClose(xh);
+    }
+    /* 3. Sicht des Spiels in der Sitzung: konsistent */
+    st = st_open("T:\\user00.sav", 0x80000000u, X_FILE_OPEN, 0x40, &xh);
+    ST_CHECK(st == X_STATUS_OBJECT_NAME_NOT_FOUND, "Spiel sieht den Piloten geloescht");
+    if (st == X_STATUS_SUCCESS) {
+        hle_NtClose(xh);
+    }
+    st = st_open("T:\\death00.sav", 0x80000000u, X_FILE_OPEN, 0x40, &xh);
+    ST_CHECK(st == X_STATUS_SUCCESS, "Spiel sieht death00.sav");
+    if (st == X_STATUS_SUCCESS) {
+        hle_NtClose(xh);
+    }
+    /* 4. echte Ordner */
+    if (act) {
+        ST_CHECK(GetFileAttributesA(ru) != INVALID_FILE_ATTRIBUTES, "echter Pilot unveraendert da");
+        ST_CHECK((GetFileAttributesA(rd) != INVALID_FILE_ATTRIBUTES) == had_d, "kein neues echtes death00.sav");
+    } else {
+        ST_CHECK(GetFileAttributesA(ru) == INVALID_FILE_ATTRIBUTES, "Original: echter Pilot geloescht");
+        ST_CHECK(GetFileAttributesA(rd) != INVALID_FILE_ATTRIBUTES, "Original: echtes death00.sav");
+    }
+#undef ST_CHECK
+    HLOG_I("SAVELOCK-SELFTEST: %s (%u/%u Pruefungen, Modus %s)", fail ? "FEHLER" : "ok", n - fail, n,
+           act ? "geschuetzt" : "original");
     return (int)fail;
 }

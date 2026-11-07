@@ -38,6 +38,18 @@ int krnl_vfs_read_all(const char *rel, unsigned char **out, unsigned *len);
  * 0 = kein Abbild-Handle (Aufrufer nimmt den Host-Pfad). */
 int krnl_vfs_read(unsigned xh, const long long *off, void *buf, unsigned len,
                   unsigned long *got, char *path, unsigned pathcap);
+/* W190 SAVE-LOCK: Spielstaende schuetzen (Wegwerf-Arbeitskopie, sb_savecheck.h).
+ * krnl_savelock_active: 1 = T:/U: laufen in dieser Sitzung in die Arbeitskopie.
+ * krnl_savelock_begin: jetzt einschalten (frische Kopie der echten Staende),
+ *   0 = aktiv, -1 = Fehler (Schutz bleibt aus, Log).
+ * krnl_savelock_commit: Arbeitskopie in die echten Staende uebernehmen (mit
+ *   Sicherung). 0 = ok, 1 = Spiel hat gerade einen Spielstand offen (nichts
+ *   getan), -1 = Fehler / nicht aktiv. */
+int krnl_savelock_active(void);
+int krnl_savelock_begin(const char *why);
+int krnl_savelock_commit(void);
+/* W190: Selbsttest durch die echten Nt*File-Wege (savelock_selftest=1). 0 = ok. */
+int krnl_savelock_selftest(void);
 void *krnl_event_host(unsigned xh);
 unsigned long __stdcall krnl_GetExitCodeThread(unsigned long xh,
                                                unsigned long *code);

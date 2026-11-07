@@ -89,6 +89,8 @@ unsigned __int64 __stdcall hle_KeQueryInterruptTime(void);
 u32 __stdcall hle_KeSetEvent(u32 ev, u32 inc, u32 wait);
 u32 __stdcall hle_KeWaitForSingleObject(u32 obj, u32 reason, u32 mode, u32 alert, u32 timeout);
 void xb_mkdir_p(const char *path);
+void krnl_save_check(void); /* W187 KIA-LOAD: Spielstaende pruefen/reparieren (sb_savecheck.c) */
+void krnl_savelock_init(void); /* W190 SAVE-LOCK: Arbeitskopie beim Start anlegen/behalten/verwerfen */
 u32 __stdcall hle_NtCreateFile(u32 ph, u32 access, u32 attr, u32 iosb, u32 allocSize, u32 fileAttr, u32 share, u32 disp, u32 options);
 u32 __stdcall hle_NtOpenFile(u32 ph, u32 access, u32 attr, u32 iosb, u32 share, u32 options);
 u32 __stdcall hle_NtReadFile(u32 xh, u32 ev, u32 apc, u32 apcCtx, u32 iosb, u32 buf, u32 len, u32 pOff);

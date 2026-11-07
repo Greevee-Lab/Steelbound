@@ -110,6 +110,54 @@ Windows user name) and technical data. They contain no game data. Look
 through them before sending if you are unsure, and remove anything you
 do not want to share.
 
+## "Unable to load … Record" at the title screen
+
+If the game shows **Unable to load KIA Record.** (or *Player*,
+*Mission*, *RELEGATED* Record / *SYSTEM DATA*) after you press START on
+the title screen, one of your save files could not be read – for
+example a save copied from a real Xbox or another emulator (Steelbound
+signs saves differently), or a save that was cut off while the game was
+closing. Press the main weapon button to continue; the game then
+starts that list empty.
+
+Newer builds (with the save check, see the release notes) check the
+save files before every start and repair them where nothing is lost (a
+foreign signature is rewritten, the data stays). A file that cannot be
+repaired is moved to `hdd\_backup\repair-<date>-<time>\` so the
+message no longer appears. Nothing is deleted.
+
+Alpha 1 never wrote saves on a fresh install (it stopped at the boot
+screen because the cache folder `hdd\ZCACHE` was missing; fixed in
+Alpha 2), so there are no broken Alpha 1 saves to worry about.
+
+To start over completely: **Advanced › Saves & data › Reset saves…**.
+After a confirmation, all pilots, records and replays are moved to
+`hdd\_backup\saves-<date>-<time>\` and the game starts like a fresh
+install (settings and cache stay). Close the game first.
+
+## Protecting your pilot while testing
+
+Steel Battalion deletes a pilot who dies without ejecting – that is the
+original game rule. While testing you can switch on **Protect saves
+(test aid)**: in the launcher under **Advanced › Diagnostics**, or in
+the game under **ESC › Settings › General**.
+
+While it is on, the game plays on a throw-away copy of your saves
+(`hdd\_savelock\`). Inside the session everything behaves normally
+(a dead pilot is gone, records are written), but your real saves are
+never touched. The next start begins again from your real saves.
+*Saves protected (test aid)* is shown in the ESC menu and in the F2
+panel as long as the protection is active.
+
+- Switching it on in the ESC menu takes effect immediately.
+- Switching it off in the ESC menu keeps the protection until you quit
+  (shown as *On until exit*), so nothing half-protected reaches your
+  real saves.
+- **Keep protected changes** (ESC › Settings › General, press Enter
+  twice) copies the current session into your real saves; the previous
+  saves are moved to `hdd\_backup\savelock-<date>-<time>\` first.
+- *Back to title* (a game restart) stays in the same session.
+
 ## Known limitations
 
 - **Only the European (PAL) release** of Steel Battalion is supported.

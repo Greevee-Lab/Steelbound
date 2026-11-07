@@ -35,6 +35,8 @@
 #include "sb_pack.h" /* W148 PACK-LAUNCHER: Seite "Packs" (Scan/Pruefen/packs.json) */
 #include "sb_sha256.h" /* W148: XBE-Hash fuer V2 */
 #include "sb_userdata.h" /* W150 USER-DATA */
+#include "sb_savecheck.h" /* W187 KIA-LOAD: Spielstaende zuruecksetzen */
+#include <tlhelp32.h>
 #include "launcher_rules.h" /* W171 LAUNCHER-P2P3: Regelwerk R1-R30 */
 #include <shellapi.h> /* W148: ShellExecuteW (Ordner oeffnen) */
 #include "input_sbc_usb.h"
@@ -210,6 +212,8 @@ int gui_page_from_name(const char *v)
 #define ID_VRPRESET 1091   /* W183 VR-FIX3: VR-Leistung (Leistung/Ausgewogen/Qualitaet/Eigene) */
 #define ID_VRRES 1092      /* W183 VR-FIX3: VR-Render-Aufloesung (% der Runtime-Empfehlung) */
 #define ID_CTRL_ZADIG 1093 /* W185: Einrichtungsanleitung als HTML im Browser */
+#define ID_SAVES_RESET 1094 /* W187 KIA-LOAD: Spielstaende zuruecksetzen (mit Sicherung) */
+#define ID_SAVE_LOCK 1095  /* W190 SAVE-LOCK: Spielstaende schuetzen (Testhilfe) */
 static char g_img_msg[600]; /* W150: Ergebnis der letzten Abbild-Pruefung (UTF-8) */
 static int g_img_ok;
 static void check_image_ex(int status);
@@ -320,6 +324,7 @@ static void tips_place(void);
 static void ui_refresh_visibility(void);
 static void show_page(int p);
 static int ui_confirm(const char *text, const char *title);
+static void set_status_k(const char *msg, int kind); /* W187 */
 
 /* W116 EDITIONS: Remaster-Paket lokal vorhanden? Die Seite Remaster zeigt
  * ihre Inhalte nur dann. Ordner wie im Client (sb_remaster.c,
@@ -1905,6 +1910,7 @@ static void diag_row(const char *lbl, const char *val, COLORREF c, int y)
 
 /* W178 COMM-BG: beide Editionen haben die Launcher-Karte (Hintergrundbild). */
 #define ADV_DIAG_Y (CY0 + 224)
+#define ADV_DIAG_DY 34 /* W190: Diagnose-Zeilen unter dem Schalter "Spielstaende schuetzen" */
 
 /* W172/P7: Datenort im Klartext (gleiche Quelle wie --userdata:
  * sb_userdata_mode + sb_userdata_path_peek). mode = Sprachschluessel. */
@@ -1936,6 +1942,62 @@ static void adv_hdd_path(char *out, size_t cap)
     } else {
         _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", g_client_disp, h[0] ? h : "HDD");
     }
+}
+
+/* W187 KIA-LOAD: laeuft ein Spiel-Client (sb_ldr.exe)? */
+static int client_running(void)
+{
+    PROCESSENTRY32W pe;
+    int found = 0;
+    HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+    if (s == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    pe.dwSize = sizeof pe;
+    if (Process32FirstW(s, &pe)) {
+        do {
+            if (_wcsicmp(pe.szExeFile, L"sb_ldr.exe") == 0) {
+                found = 1;
+            }
+        } while (!found && Process32NextW(s, &pe));
+    }
+    CloseHandle(s);
+    return found;
+}
+
+/* W187 KIA-LOAD: Spielstaende (TDATA/UDATA unter hdd) mit Rueckfrage in
+ * <hdd>\_backup\saves-<zeit>\ sichern und leer neu anlegen. Rueckgabe wie
+ * sb_saves_reset (0 ok, 1 nichts zu tun, -1 Fehler), 2 = abgelehnt/gesperrt. */
+static int adv_saves_reset_at(const char *hdd_u8, int check_running)
+{
+    char q[2000], err[300], bk8[1200];
+    wchar_t w[1100], bk[800];
+    int rc;
+    if (!is_dir_u8(hdd_u8)) {
+        set_status_k(LT("gui.saves_reset_none"), 0);
+        return 1;
+    }
+    if (check_running && client_running()) {
+        set_status_k(LT("gui.saves_reset_running"), 2);
+        return 2;
+    }
+    _snprintf_s(q, sizeof q, _TRUNCATE, LT("gui.saves_reset_q"), hdd_u8);
+    if (!ui_confirm(q, LT("gui.saves_reset_title"))) {
+        return 2;
+    }
+    u8_to_w(hdd_u8, w, 1100);
+    rc = sb_saves_reset(w, bk, 800, err, sizeof err);
+    if (rc == 0) {
+        w_to_u8(bk, bk8, sizeof bk8);
+        _snprintf_s(q, sizeof q, _TRUNCATE, LT("gui.saves_reset_done"), bk8);
+        set_status_k(q, 1);
+    } else if (rc == 1) {
+        set_status_k(LT("gui.saves_reset_none"), 0);
+    } else {
+        _snprintf_s(q, sizeof q, _TRUNCATE, LT("gui.saves_reset_fail"), err);
+        set_status_k(q, 2);
+    }
+    return rc;
 }
 
 static void paint_adv(void)
@@ -1980,23 +2042,26 @@ static void paint_adv(void)
     card(COL2, CY0 + 136, COLW, 76, LT("gui.adv_launcher"));
 
     card(COL2, ADV_DIAG_Y, COLW, CY0 + 496 - ADV_DIAG_Y, LT("gui.adv_diag"));
+    /* W190 SAVE-LOCK: Schalter "Spielstaende schuetzen (Testhilfe)" oben in der
+     * Karte (immer sichtbar), Erklaerung darunter (eingeklappt). */
     if (!g_diag_open) {
-        label(F_TINY, LT("gui.adv_diag_txt"), COL2 + 18, ADV_DIAG_Y + 44,
+        label(F_TINY, LT("gui.save_lock_txt"), COL2 + 18, ADV_DIAG_Y + 72, COLW - 36, 30, C_DIM);
+        label(F_TINY, LT("gui.adv_diag_txt"), COL2 + 18, ADV_DIAG_Y + 112,
               COLW - 36, 32, C_FAINT);
         return;
     }
-    diag_row(LT("gui.path_client_dir"), g_client_disp, C_TEXT, ADV_DIAG_Y + 42);
+    diag_row(LT("gui.path_client_dir"), g_client_disp, C_TEXT, ADV_DIAG_Y + ADV_DIAG_DY + 42);
     diag_row(LT("gui.path_exe"),
              g_has_ldr ? LT("gui.path_found") : LT("gui.path_missing"),
-             g_has_ldr ? C_OK : C_ERR, ADV_DIAG_Y + 78);
+             g_has_ldr ? C_OK : C_ERR, ADV_DIAG_Y + ADV_DIAG_DY + 78);
     if (sb_userdata_mode() != SB_UD_LEGACY) { /* W150 USER-DATA */
         lcfg_user_cfg_path(g_client_dir, t, sizeof t);
     } else {
         _snprintf_s(t, sizeof t, _TRUNCATE, "%s\\user.cfg", g_client_disp);
     }
-    diag_row(LT("gui.path_usercfg"), t, C_TEXT, ADV_DIAG_Y + 114);
-    diag_row(LT("gui.sum_settings"), g_profile_line, C_TEXT, ADV_DIAG_Y + 150);
-    paint_reason(27, COL2 + 18, ADV_DIAG_Y + 218, COLW - 36, 16);
+    diag_row(LT("gui.path_usercfg"), t, C_TEXT, ADV_DIAG_Y + ADV_DIAG_DY + 114);
+    diag_row(LT("gui.sum_settings"), g_profile_line, C_TEXT, ADV_DIAG_Y + ADV_DIAG_DY + 150);
+    paint_reason(27, COL2 + 18, ADV_DIAG_Y + ADV_DIAG_DY + 218, COLW - 36, 16);
 }
 
 static void paint_packs(void); /* W148: unten definiert (Packs-Engine) */
@@ -5068,6 +5133,7 @@ static void ui_from_settings(const launcher_settings_t *s)
                           : s->fps_limit == 120 ? 3 : 0);
     ui_set_checked(ID_AUDIO, s->audio);
     ui_set_checked(ID_LIVE, s->audio_live);
+    ui_set_checked(ID_SAVE_LOCK, s->save_lock); /* W190 */
     ui_set_checked(ID_ASPECT, s->aspect_mode ? 1 : 0);
     refresh_ctrl_profiles(s->input_profile);
     ui_set_checked(ID_CTRL_SBC, s->sbc_usb);
@@ -5145,6 +5211,7 @@ static void ui_to_settings(launcher_settings_t *s)
     s->fps_limit = (sel >= 0 && sel < 4) ? fps_map[sel] : 0;
     s->audio = ui_checked(ID_AUDIO);
     s->audio_live = ui_checked(ID_LIVE);
+    s->save_lock = ui_checked(ID_SAVE_LOCK); /* W190 */
     /* Bildformat fest (S3.10, nie strecken). */
     s->aspect_mode = 1;
     ctrl_profile_from_ui(s->input_profile, sizeof s->input_profile);
@@ -10390,6 +10457,7 @@ static void ui_apply_language(void)
     /* Ton */
     ui_settext(ctl(ID_AUDIO), LT("gui.ton_on"));
     ui_settext(ctl(ID_LIVE), LT("gui.ton_live"));
+    ui_settext(ctl(ID_SAVE_LOCK), LT("gui.save_lock")); /* W190 */
     ui_settext(ctl(ID_DIAG), LT(g_diag_open ? "gui.adv_diag_hide" : "gui.adv_diag_show"));
     ui_settext(ctl(ID_UNDO), LT("gui.undo"));
     /* Steuerung */
@@ -10420,6 +10488,7 @@ static void ui_apply_language(void)
     ui_settext(ctl(ID_PLAY_FOLDER), LT("gui.play_use_folder"));
     ui_settext(ctl(ID_HDD_OPEN), LT("gui.adv_open"));
     ui_settext(ctl(ID_DATA_OPEN), LT("gui.adv_open_folder"));
+    ui_settext(ctl(ID_SAVES_RESET), LT("gui.saves_reset"));
     ui_settext(ctl(ID_GFX_PACKS), LT("gui.gfx_to_packs"));
     ui_settext(ctl(ID_PK_UP), "\xE2\x86\x91");
     ui_settext(ctl(ID_PK_DOWN), "\xE2\x86\x93");
@@ -10740,6 +10809,9 @@ static void build_controls(void)
     mk(w, K_BTN, ID_MEDIA_B, P_ADV, CX0 + COLW - 18 - 112, CY0 + 74, 112, 30, LT("gui.btn_browse"), 0);
     mk(w, K_EDIT, ID_XBE, P_ADV, CX0 + 18, CY0 + 124, COLW - 36 - 120, 30, "", 0);
     mk(w, K_BTN, ID_XBE_B, P_ADV, CX0 + COLW - 18 - 112, CY0 + 124, 112, 30, LT("gui.btn_browse"), 0);
+    /* W187 KIA-LOAD: im Kopf der Karte (wie "Anzeigen" bei Diagnose) */
+    mk(w, K_BTN, ID_SAVES_RESET, P_ADV, CX0 + COLW - 18 - 130, CY0 + 196 + 9, 130, 28,
+       LT("gui.saves_reset"), 0);
     mk(w, K_EDIT, ID_HDD, P_ADV, CX0 + 104, CY0 + 236, COLW - 104 - 18 - 90, 30, "", 0);
     mk(w, K_BTN, ID_HDD_OPEN, P_ADV, CX0 + COLW - 18 - 82, CY0 + 236, 82, 30,
        LT("gui.adv_open"), 0);
@@ -10765,7 +10837,9 @@ static void build_controls(void)
     mk(w, K_TOGGLE, ID_BG, P_ADV, COL2 + 18, CY0 + 176, COLW - 36, 28, LT("gui.bg"), 0);
     mk(w, K_BTN, ID_DIAG, P_ADV, COL2 + COLW - 18 - 130, ADV_DIAG_Y + 9, 130, 28,
        LT(g_diag_open ? "gui.adv_diag_hide" : "gui.adv_diag_show"), 0);
-    mk(w, K_TOGGLE, ID_LIVE, P_ADV, COL2 + 18, ADV_DIAG_Y + 188, COLW - 36, 28, LT("gui.ton_live"), 0);
+    mk(w, K_TOGGLE, ID_LIVE, P_ADV, COL2 + 18, ADV_DIAG_Y + ADV_DIAG_DY + 188, COLW - 36, 28, LT("gui.ton_live"), 0);
+    /* W190 SAVE-LOCK: immer sichtbar (auch bei eingeklappter Diagnose) */
+    mk(w, K_TOGGLE, ID_SAVE_LOCK, P_ADV, COL2 + 18, ADV_DIAG_Y + 40, COLW - 36, 28, LT("gui.save_lock"), 0);
 
     /* --- Fussleiste: Rueckgaengig, Speichern, Launch v --- */
     mk(w, K_BTN, ID_UNDO, PG_ALL, WIN_W - 28 - 150 - 12 - 130 - 10 - 112,
@@ -10929,6 +11003,10 @@ static void on_command_inner(int id, int code)
         break;
     case ID_LIVE:
         ui_set_checked(ID_LIVE, !ui_checked(ID_LIVE));
+        break;
+    case ID_SAVE_LOCK: /* W190 SAVE-LOCK: wirkt ab dem naechsten Spielstart */
+        ui_set_checked(ID_SAVE_LOCK, !ui_checked(ID_SAVE_LOCK));
+        set_status_k(LT(ui_checked(ID_SAVE_LOCK) ? "gui.save_lock_txt" : "gui.save_lock_off"), 0);
         break;
     case ID_CTRL_SBC:
         ui_set_checked(ID_CTRL_SBC, !ui_checked(ID_CTRL_SBC));
@@ -11113,6 +11191,12 @@ static void on_command_inner(int id, int code)
     case ID_GFX_PACKS:
         show_page(P_PACKS);
         break;
+    case ID_SAVES_RESET: { /* W187 KIA-LOAD */
+        char path[1100];
+        adv_hdd_path(path, sizeof path);
+        adv_saves_reset_at(path, 1);
+        break;
+    }
     case ID_HDD_OPEN:
     case ID_DATA_OPEN: { /* W172/P7: Ordner im Explorer */
         char path[1100];
@@ -12832,6 +12916,183 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                 g_dflt_setup[0] = '\0';
                 if (ok50 == 0 && !why50[0]) {
                     strcpy_s(why50, sizeof why50, "Schalter beim Start laden");
+                }
+            }
+            /* --- 57 (W187 KIA-LOAD): Spielstand-Pruefung + "Zuruecksetzen"
+             * ueber den Launcher-Weg (Rueckfrage nein/ja, Sicherung, Meldung,
+             * Pfad mit Umlaut) --- */
+            {
+                char m57[300], hd[1300], f57[1400], why57[200] = "";
+                int ok57 = sb_savecheck_selftest(m57, sizeof m57) == 0, rc57;
+                u8_find_t fd57;
+                FILE *fp;
+                if (!ok57) {
+                    strcpy_s(why57, sizeof why57, m57);
+                }
+                _snprintf_s(hd, sizeof hd, _TRUNCATE, "%sw187_hdd_" U8_UE "_%lu", tmp,
+                            GetCurrentProcessId());
+                _snprintf_s(f57, sizeof f57, _TRUNCATE, "%s/TDATA", hd);
+                u8_CreateDirectory(hd);
+                u8_CreateDirectory(f57);
+                _snprintf_s(f57, sizeof f57, _TRUNCATE, "%s/TDATA/43430002", hd);
+                u8_CreateDirectory(f57);
+                _snprintf_s(f57, sizeof f57, _TRUNCATE, "%s/TDATA/43430002/death00.sav", hd);
+                if (u8_fopen_s(&fp, f57, "wb") == 0 && fp) {
+                    fputs("kaputt", fp); /* abgeschnittener Alpha-1-Stand */
+                    fclose(fp);
+                }
+                g_confirm_auto = 0; /* Nein: nichts passiert */
+                rc57 = adv_saves_reset_at(hd, 0);
+                if (ok57 && (rc57 != 2 || u8_GetFileAttributes(f57) == INVALID_FILE_ATTRIBUTES)) {
+                    ok57 = 0;
+                    _snprintf_s(why57, sizeof why57, _TRUNCATE, "Nein: rc=%d", rc57);
+                }
+                g_confirm_auto = 1; /* Ja: gesichert + leer neu angelegt */
+                rc57 = adv_saves_reset_at(hd, 0);
+                if (ok57 && (rc57 != 0 || g_status_kind != 1 ||
+                             u8_GetFileAttributes(f57) != INVALID_FILE_ATTRIBUTES)) {
+                    ok57 = 0;
+                    _snprintf_s(why57, sizeof why57, _TRUNCATE, "Ja: rc=%d kind=%d", rc57,
+                                g_status_kind);
+                }
+                _snprintf_s(f57, sizeof f57, _TRUNCATE, "%s/_backup/saves-*", hd);
+                if (ok57 && !u8_find_first(f57, &fd57)) {
+                    ok57 = 0;
+                    strcpy_s(why57, sizeof why57, "keine Sicherung saves-*");
+                } else if (ok57) {
+                    char bf[1400];
+                    _snprintf_s(bf, sizeof bf, _TRUNCATE,
+                                "%s/_backup/%s/TDATA/43430002/death00.sav", hd, fd57.name);
+                    u8_find_close(&fd57);
+                    if (u8_GetFileAttributes(bf) == INVALID_FILE_ATTRIBUTES) {
+                        ok57 = 0;
+                        strcpy_s(why57, sizeof why57, "death00.sav fehlt in der Sicherung");
+                    } else {
+                        u8_DeleteFile(bf);
+                        printf("     (57: Sicherung %s/_backup/%s)\n", hd, fd57.name);
+                        { /* Sicherungsordner abbauen */
+                            static const char *const sub57[] = {
+                                "TDATA/43430002", "TDATA", "" };
+                            int k;
+                            for (k = 0; k < 3; k++) {
+                                wchar_t w57[1400];
+                                _snprintf_s(bf, sizeof bf, _TRUNCATE, "%s/_backup/%s/%s", hd,
+                                            fd57.name, sub57[k]);
+                                u8_to_w(bf, w57, 1400);
+                                RemoveDirectoryW(w57);
+                            }
+                        }
+                    }
+                }
+                rc57 = adv_saves_reset_at(hd, 0); /* zweimal: nichts zu sichern */
+                if (ok57 && rc57 != 1) {
+                    ok57 = 0;
+                    _snprintf_s(why57, sizeof why57, _TRUNCATE, "zweimal: rc=%d", rc57);
+                }
+                g_confirm_auto = 0;
+                { /* Testordner abbauen (leere TDATA/UDATA-Gerueste) */
+                    static const char *const sub57[] = { "TDATA/43430002", "TDATA",
+                        "UDATA/43430002", "UDATA", "_backup", "" };
+                    int k;
+                    for (k = 0; k < 6; k++) {
+                        wchar_t w57[1400];
+                        _snprintf_s(f57, sizeof f57, _TRUNCATE, "%s/%s", hd, sub57[k]);
+                        u8_to_w(f57, w57, 1400);
+                        RemoveDirectoryW(w57);
+                    }
+                }
+                if (ok57) {
+                    GT_OK("57 save-reset (sb_savecheck-Selbsttest, Rueckfrage, Sicherung, Umlaut-Pfad)");
+                } else {
+                    GT_FAIL("57 save-reset", "%s", why57);
+                }
+            }
+            /* --- 58 (W190 SAVE-LOCK): Schalter "Spielstaende schuetzen" auf
+             * Erweitert (immer sichtbar, auch bei eingeklappter Diagnose),
+             * Klick -> Einstellung, user.cfg-Rundweg [game] save_lock,
+             * Arbeitskopie-Selbsttest (sb_savelock_selftest) --- */
+            {
+                char m58[300], why58[200] = "", f58[1300];
+                launcher_settings_t a58, b58;
+                int ok58 = sb_savelock_selftest(m58, sizeof m58) == 0, od58 = g_diag_open;
+                uictl_t *u58 = ui_find(ID_SAVE_LOCK);
+                FILE *fp58;
+                if (!ok58) {
+                    strcpy_s(why58, sizeof why58, m58);
+                }
+                if (ok58 && (!u58 || u58->kind != K_TOGGLE)) {
+                    ok58 = 0;
+                    strcpy_s(why58, sizeof why58, "kein Schalter ID_SAVE_LOCK");
+                }
+                if (ok58) {
+                    lcfg_defaults(&a58);
+                    if (a58.save_lock != 0) {
+                        ok58 = 0;
+                        strcpy_s(why58, sizeof why58, "Standard nicht 0");
+                    }
+                }
+                if (ok58) { /* Einstellung -> Schalter -> Klick -> Einstellung */
+                    a58.save_lock = 1;
+                    ui_from_settings(&a58);
+                    g_diag_open = 0;
+                    if (!ui_checked(ID_SAVE_LOCK) || !ui_visible_on(u58, P_ADV)) {
+                        ok58 = 0;
+                        strcpy_s(why58, sizeof why58, "save_lock=1 nicht angezeigt (eingeklappt)");
+                    }
+                    on_command(ID_SAVE_LOCK, BN_CLICKED);
+                    ui_to_settings(&b58);
+                    if (ok58 && (ui_checked(ID_SAVE_LOCK) || b58.save_lock != 0)) {
+                        ok58 = 0;
+                        strcpy_s(why58, sizeof why58, "Klick schaltet nicht aus");
+                    }
+                    on_command(ID_SAVE_LOCK, BN_CLICKED);
+                    ui_to_settings(&b58);
+                    if (ok58 && b58.save_lock != 1) {
+                        ok58 = 0;
+                        strcpy_s(why58, sizeof why58, "Klick schaltet nicht ein");
+                    }
+                    g_diag_open = od58;
+                }
+                if (ok58) { /* user.cfg-Rundweg */
+                    char line[256];
+                    int seen = 0;
+                    _snprintf_s(f58, sizeof f58, _TRUNCATE, "%sw190_user_%lu.cfg", tmp,
+                                GetCurrentProcessId());
+                    u8_DeleteFile(f58);
+                    lcfg_defaults(&a58);
+                    a58.save_lock = 1;
+                    if (lcfg_save_user(f58, &a58) != 0) {
+                        ok58 = 0;
+                        strcpy_s(why58, sizeof why58, "lcfg_save_user");
+                    }
+                    lcfg_defaults(&b58);
+                    if (ok58 && (lcfg_load_file(f58, &b58) != 0 || b58.save_lock != 1)) {
+                        ok58 = 0;
+                        strcpy_s(why58, sizeof why58, "Rundweg save_lock=1");
+                    }
+                    if (ok58 && u8_fopen_s(&fp58, f58, "r") == 0 && fp58) {
+                        while (fgets(line, sizeof line, fp58)) {
+                            if (strncmp(line, "save_lock=1", 11) == 0) {
+                                seen = 1;
+                            }
+                        }
+                        fclose(fp58);
+                    }
+                    if (ok58 && !seen) {
+                        ok58 = 0;
+                        strcpy_s(why58, sizeof why58, "Zeile save_lock=1 fehlt");
+                    }
+                    lcfg_apply_set(&b58, "save_lock=0");
+                    if (ok58 && b58.save_lock != 0) {
+                        ok58 = 0;
+                        strcpy_s(why58, sizeof why58, "--set save_lock=0");
+                    }
+                    u8_DeleteFile(f58);
+                }
+                if (ok58) {
+                    GT_OK("58 save-lock (Schalter Erweitert, Klick, user.cfg-Rundweg, Arbeitskopie-Selbsttest)");
+                } else {
+                    GT_FAIL("58 save-lock", "%s", why58);
                 }
             }
             ShowWindow(g_hwnd, SW_HIDE);

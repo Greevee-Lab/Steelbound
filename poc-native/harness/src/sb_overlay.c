@@ -30,6 +30,7 @@
 #include "sb_pause.h" /* W188 GAME-MENU: Pause */
 #include "sb_feedback.h" /* W188 GAME-MENU: Feedback-Paket */
 #include "input_map.h" /* W188 GAME-MENU: Gamepad im Menue (imap_pad_poll) */
+#include "kernel_hle.h" /* W190 SAVE-LOCK: krnl_savelock_* */
 #include <stdlib.h>
 #include <wchar.h>
 
@@ -65,12 +66,15 @@ enum {
     OI_VRFWD, OI_VRPRESET, OI_VRRES, OI_VRHZ, OI_VRMIRROR, OI_VRWORLD, OI_VRSHADE,
     /* W188 GAME-MENU: Seite 0 "ESC-Menue pausiert" */
     OI_MPAUSE,
+    /* W190 SAVE-LOCK: Seite 0 "Spielstaende schuetzen" + "Geschuetzte Aenderungen uebernehmen" */
+    OI_SAVELOCK, OI_SLCOMMIT,
     OI_N
 };
 /* Zeilen je Seite (Seite 0 = W118 unveraendert, Testskripte zaehlen DOWN;
  * W173: Grafik-Preset als letzte Inhaltszeile, die Zeilen davor bleiben) */
 static const int kOvPage0[] = { OI_FPS, OI_SHADING, OI_MFX, OI_GRAIN, OI_GLITCH, OI_EDGE, OI_EDGEW, OI_EDGES,
                                 OI_MMODE, OI_MSENS, OI_HD, OI_HDSCALE, OI_WINMODE, OI_RES, OI_PRESET, OI_MPAUSE,
+                                OI_SAVELOCK, OI_SLCOMMIT, /* W190 */
                                 OI_SAVE, OI_CLOSE }; /* W188: + ESC-Menue pausiert */
 static const int kOvPage1[] = { OI_SHADING, OI_MFX, OI_GRAIN, OI_GLITCH,
                                 OI_EXPO, OI_TONE, OI_WGAM, OI_WSHARP, OI_FOCUS, OI_WCON, OI_FOG, OI_LWORLD, OI_RTS,
@@ -118,6 +122,7 @@ static int g_ov_winmode;                /* Darstellung (nach Neustart) */
 static int g_ov_label0;                  /* W153: hud_label_avoid beim Start ("*" bei Abweichung) */
 static int g_ov_avail;                  /* HD-Paket: 1 = x2, 2 = x4 */
 static int g_ov_dirty = 1;              /* Panel neu zeichnen */
+static ULONGLONG g_ov_sl_arm;           /* W190: "Uebernehmen" scharf bis (zweites ENTER bestaetigt) */
 /* ---- W188 GAME-MENU: Bildschirme ----
  * SC_SET = Einstellungen (W118-Seiten), SC_MENU = Spielmenue (erste Ebene),
  * SC_QUIT = Rueckfrage Beenden, SC_PAUSED = Pause-Taste, SC_FB* = Feedback. */
@@ -278,6 +283,7 @@ static int ov_enabled(int i)
     case OI_HD: return g_ov_avail != 0;
     case OI_HDSCALE: return g_ov_avail != 0 && ov_hd_on();
     case OI_RES: return 0;
+    case OI_SLCOMMIT: return krnl_savelock_active(); /* W190: nur mit aktivem Schutz */
     default: return 1;
     }
 }
@@ -347,6 +353,28 @@ static void ov_hd_apply(int on, int scale, const char *why)
     HLOG_I("OVERLAY: %s HD-Texturen %s x%d (Textur-Cache neu, f=%u)", why, on ? "an" : "aus", scale,
            g_present_no);
     ov_status_key(on ? (scale == 2 ? "ovl.st_hd2" : "ovl.st_hd4") : "ovl.st_hd_off");
+}
+
+/* W190 SAVE-LOCK: "Geschuetzte Aenderungen uebernehmen" - erstes ENTER macht
+ * scharf (Hinweis), zweites innerhalb von 4 s uebernimmt (alter Stand wird
+ * vorher unter <hdd>\_backup\savelock-<zeit>\ gesichert). */
+static void ov_sl_commit(void)
+{
+    ULONGLONG now = GetTickCount64();
+    int rc;
+    if (!krnl_savelock_active()) {
+        ov_status_key("ovl.st_sl_none");
+        return;
+    }
+    if (!g_ov_sl_arm || now > g_ov_sl_arm) {
+        g_ov_sl_arm = now + 4000u;
+        ov_status_key("ovl.st_sl_confirm");
+        return;
+    }
+    g_ov_sl_arm = 0;
+    rc = krnl_savelock_commit();
+    HLOG_I("OVERLAY: Spielstaende uebernehmen -> %d (f=%u)", rc, g_present_no);
+    ov_status_key(rc == 0 ? "ovl.st_sl_done" : rc == 1 ? "ovl.st_sl_busy" : "ovl.st_sl_cfail");
 }
 
 static void ov_change(int i, int dir)
@@ -704,6 +732,24 @@ static void ov_change(int i, int dir)
         g_cfg.menu_pause = !g_cfg.menu_pause;
         HLOG_I("OVERLAY: menu_pause -> %d (f=%u)", g_cfg.menu_pause, g_present_no);
         break;
+    case OI_SAVELOCK: /* W190 SAVE-LOCK: Einschalten wirkt sofort, Ausschalten erst beim Beenden */
+        g_cfg.save_lock = !g_cfg.save_lock;
+        if (g_cfg.save_lock && !krnl_savelock_active()) {
+            if (krnl_savelock_begin("ESC-Menue") == 0) {
+                ov_status_key("ovl.st_sl_on");
+            } else {
+                g_cfg.save_lock = 0;
+                ov_status_key("ovl.st_sl_fail");
+            }
+        } else if (krnl_savelock_active()) {
+            ov_status_key(g_cfg.save_lock ? "ovl.st_sl_on" : "ovl.st_sl_pending");
+        } else {
+            ov_status_key("ovl.st_sl_off");
+        }
+        g_ov_sl_arm = 0;
+        HLOG_I("OVERLAY: save_lock -> %d (Schutz aktiv=%d, f=%u)", g_cfg.save_lock, krnl_savelock_active(),
+               g_present_no);
+        break;
     case OI_WINMODE:
         g_ov_winmode = (g_ov_winmode + (dir > 0 ? 1 : 2)) % 3;
         HLOG_I("OVERLAY: window_mode -> %d (wirkt nach Neustart, f=%u)", g_ov_winmode, g_present_no);
@@ -763,6 +809,7 @@ static const ov_key_t kOvKeys[] = {
     { "vr_mirror_res", "vr" },      { "vr_world_tick", "vr" },
     { "vr_shading", "vr" },         { "vr_rt_scale", "vr" },
     { "menu_pause", "overlay" }, /* W188 */
+    { "save_lock", "game" }, /* W190 */
 };
 #define OV_NKEYS (sizeof kOvKeys / sizeof kOvKeys[0])
 
@@ -843,6 +890,7 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     else if (strcmp(k, "fx_light_cockpit") == 0) { v = g_cfg.fx_light_cockpit; }
     else if (strcmp(k, "fx_interp") == 0) { v = g_cfg.fx_interp; }
     else if (strcmp(k, "menu_pause") == 0) { v = g_cfg.menu_pause; } /* W188 */
+    else if (strcmp(k, "save_lock") == 0) { v = g_cfg.save_lock; } /* W190 */
     _snprintf_s(out, cap, _TRUNCATE, "%d", v);
 }
 
@@ -1037,6 +1085,8 @@ static void ov_key_set(int vk)
         } else if (ov_row(g_ov_sel) == OI_CLOSE) {
             if (g_cfg.game_menu) { ov_screen(SC_MENU, MI_SETTINGS); } /* W188: "Zurueck" */
             else { ov_close("Schliessen"); }
+        } else if (ov_row(g_ov_sel) == OI_SLCOMMIT) { /* W190: bewusste Aktion, zweites ENTER bestaetigt */
+            ov_sl_commit();
         } else {
             ov_change(ov_row(g_ov_sel), +1);
         }
@@ -1239,7 +1289,7 @@ static void ov_mouse(int x, int y, int click)
         if (g_ov_sel != r) { g_ov_sel = r; g_ov_dirty = 1; }
         if (click) {
             int it = ov_row(r);
-            if (it == OI_SAVE || it == OI_CLOSE || x < g_hit_valx) { ov_key_set(VK_RETURN); }
+            if (it == OI_SAVE || it == OI_CLOSE || it == OI_SLCOMMIT || x < g_hit_valx) { ov_key_set(VK_RETURN); }
             else { ov_change(it, x < g_hit_valx + (g_hit_x0 + g_hit_w - g_hit_valx) / 2 ? -1 : +1); }
         }
         return;
@@ -1882,7 +1932,9 @@ static void ov_label(int i, wchar_t *o, size_t cap)
         "ovl.lb_vrfwd", "ovl.lb_vrpreset", "ovl.lb_vrres", "ovl.lb_vrhz", "ovl.lb_vrmirror", "ovl.lb_vrworld",
         "ovl.lb_vrshade",
         /* W188 */
-        "ovl.lb_mpause" };
+        "ovl.lb_mpause",
+        /* W190 */
+        "ovl.lb_savelock", "ovl.lb_slcommit" };
     ov_wkey(o, cap, lb[i]);
 }
 
@@ -1899,6 +1951,9 @@ static void ov_value(int i, wchar_t *o, size_t cap)
         break;
     case OI_SHADING: ov_wkey(o, cap, g_cfg.shading ? "ovl.v_on" : "ovl.v_off"); break;
     case OI_MPAUSE: ov_wkey(o, cap, g_cfg.menu_pause ? "ovl.v_on" : "ovl.v_off"); break; /* W188 */
+    case OI_SAVELOCK: /* W190: Zustand der Sitzung; "an bis Beenden" = ausgeschaltet, wirkt beim Beenden */
+        ov_wkey(o, cap, !krnl_savelock_active() ? "ovl.v_off" : g_cfg.save_lock ? "ovl.v_on" : "ovl.v_sl_until_exit");
+        break;
     case OI_MFX:
         ov_wkey(o, cap, g_cfg.monitor_fx == 0 ? "ovl.v_off" : (g_cfg.monitor_fx == 2 ? "ovl.v_altab" : "ovl.v_orig"));
         break;
@@ -2089,6 +2144,7 @@ static int g_rel_rows_y, g_rel_rowh, g_rel_nrows, g_rel_valx, g_rel_tab_y0, g_re
 static int ov_scr_lines(void)
 {
     switch (g_ov_scr) {
+    case SC_MENU: return krnl_savelock_active() ? 1 : 0; /* W190: Hinweis "Spielstaende geschuetzt" */
     case SC_QUIT: return 1;
     case SC_PAUSED: return 1;
     case SC_FBKIND: return 2;
@@ -2240,6 +2296,10 @@ static void ov_paint_menu(void)
     switch (g_ov_scr) {
     case SC_MENU:
         if (sb_pause_requested()) { ov_wkey(tag, 48, "ovl.hdr_paused"); }
+        if (krnl_savelock_active()) { /* W190 SAVE-LOCK: sichtbarer Hinweis, solange der Schutz aktiv ist */
+            ov_wkey(ln[0], 128, "ovl.sl_note");
+            lc[0] = OV_C_HEAD;
+        }
         ov_wkey(hint, 96, "ovl.hint_menu");
         break;
     case SC_QUIT:
@@ -2365,7 +2425,7 @@ static void ov_paint(void)
         if (i == OI_CLOSE && g_cfg.game_menu) { ov_wkey(lb, 64, "ovl.lb_back"); } /* W188: zurueck ins Spielmenue */
         else { ov_label(i, lb, 64); }
         ov_text(pad + S(6.0f), yt, lb, (i == OI_SAVE || i == OI_CLOSE) ? OV_C_TXT : c, 0);
-        if (i != OI_SAVE && i != OI_CLOSE) {
+        if (i != OI_SAVE && i != OI_CLOSE && i != OI_SLCOMMIT) { /* W190: Aktion ohne Wert */
             ov_value(i, vb, 64);
             if (sel && ov_enabled(i) && i != OI_RES) {
                 wchar_t t[80];
@@ -2378,7 +2438,7 @@ static void ov_paint(void)
         y += rowh;
         if ((!g_ov_page && (i == OI_SHADING || i == OI_GLITCH || i == OI_EDGES ||
                             (i == OI_MSENS && !g_cfg.sbc_usb) || i == OI_SBCMOUSE || i == OI_HDSCALE ||
-                            i == OI_RES || i == OI_MPAUSE)) ||
+                            i == OI_RES || i == OI_MPAUSE || i == OI_SLCOMMIT)) || /* W190 */
             (g_ov_page == 1 && (i == OI_GLITCH || i == OI_RTS || i == OI_BTHR || i == OI_CLIGHT || i == OI_ABCMP)) ||
             (g_ov_page == 2 && (i == OI_PRESET || i == OI_SSAO || i == OI_CGAIN || i == OI_SHSOFT || i == OI_ABCMP)) ||
             (g_ov_page == OV_PAGE_FX && (i == OI_FXPRESET || i == OI_FXIP || i == OI_FXCMP)) || /* W133 */

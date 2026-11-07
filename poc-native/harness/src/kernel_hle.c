@@ -1048,6 +1048,10 @@ void krnl_init(xbe_image_t *img)
         _snprintf_s(d, sizeof d, _TRUNCATE, "%s/ZCACHE", g_cfg.hdd_root);
         xb_mkdir_p(d);
         HLOG_I("KRNL: hdd_root='%s' fair_cs=%d", g_cfg.hdd_root, g_cfg.fair_cs);
+        if (g_cfg.save_check) {
+            krnl_save_check();
+        }
+        krnl_savelock_init(); /* W190 SAVE-LOCK (save_lock=0: nur Rest einer frueheren Sitzung verwerfen) */
     }
 
     /* KeTickCount-Heartbeat */

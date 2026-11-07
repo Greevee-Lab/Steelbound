@@ -136,6 +136,7 @@ typedef struct {
                          * von der Maus (Hook darf vorsteuern) */
     int prev_vr_recenter; /* W159: Pegel der Aktion vr_recenter im Vor-Poll */
     int prev_pause;       /* W188: Pegel der Aktion pause (ohne Tasten) im Vor-Poll */
+    int prev_photo;       /* W195: Pegel der Aktion photo (ohne Tasten) im Vor-Poll */
 } imap_state_t;
 
 void imap_state_init(imap_state_t *st); /* gear=8(N), tuner=0, Akkus Mitte */
@@ -221,6 +222,9 @@ typedef struct {
      * Abschnitt [client]); Tasten wertet das Fenster aus (sb_overlay.c),
      * Pad/Controller-Quellen der Hook (Flanke). */
     imap_bind_t pause;
+    /* W195 PHOTO-MODE: Client-Aktion "photo" (Fotomodus oeffnen / Foto aufnehmen,
+     * Abschnitt [client], Standard KEY:F12); Tasten wertet das Fenster aus. */
+    imap_bind_t photo;
     int has_pad; /* 1 = Profil referenziert Pad-Quellen */
     int has_sbc; /* 1 = Profil referenziert SBC-Quellen */
 } imap_profile_t;
@@ -258,6 +262,9 @@ int imap_action_pause(const imap_profile_t *prof, imap_state_t *st,
 /* W188: einfache Tasten (KEY ohne Akkord) und Pad-Tasten (PAD-Taste/
  * Steuerkreuz ohne Akkord) einer Bindung. Rueckgabe: Anzahl Tasten. */
 int imap_bind_keys(const imap_bind_t *b, int *vks, int cap, unsigned *padmask);
+/* W195: Client-Aktion "photo" - steigende Flanke der Pad-/Controller-Quellen (wie pause). */
+int imap_action_photo(const imap_profile_t *prof, imap_state_t *st,
+                      const imap_snap_t *snap);
 /* W193: Tastenname (wie im Profil, z. B. "H", "F9", "0x48") -> VK, -1 = unbekannt */
 int imap_key_name(const char *name);
 

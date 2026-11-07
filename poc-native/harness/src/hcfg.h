@@ -240,6 +240,8 @@ typedef struct {
     int rq_perf; /* DIAG(SHADE-PERF,W80): 1 = QPC-Zaehler je Abschnitt des IM-/Shading-Pfads, Zeile RQPERF alle 300 Missions-Bilder */
     int rq_diag; /* DIAG(RENDER-QA,W77): 1 = Zensus Pixel-/Vertex-Shader, Nebel-/Stufen-Zustand (RQPS/RQVS/RQFOG/RQTSS/RQCOMBO) */
     int rq_every; /* DIAG(RENDER-QA,W77): RQCOMBO-Tabelle alle N Frames (Default 3000) */
+    int flash_diag; /* DIAG(W194): 1..6 Vertexproben je Draw in Screenshot-Bildern, Standard 0 */
+    int flash_pixel; /* DIAG(W194): 1+x+65536*y, Pixelspur mit bloom_diag; 0 = aus */
     int interp_verify; /* DIAG(FPS-INTERP): N = jeden N-ten Tick exakte Wiedergabe gegen Spiel-Bild pruefen (INTERP verify), 0 = aus */
     int interp_bsets;  /* PERF(TICK-PERF,W125): N = Reserve-Saetze Tick-Puffer (VB/Stream2/Konstanten) mit GPU-Fence; die Aufnahme nimmt einen Satz, den die GPU nicht mehr liest (kein Warten im DISCARD-Map). 0 = alt (Puffer je Liste) */
     int interp_bsets_nod; /* PERF(TICK-PERF,W125): 1 = freier Satz (Fence fertig) -> erstes Map NO_OVERWRITE statt DISCARD; 0 = DISCARD */
@@ -392,6 +394,15 @@ typedef struct {
     int menu_pause;             /* 1 = offenes ESC-Menue pausiert das Spiel (Spieler-Standard), 0 = Spiel laeuft dahinter weiter (Live-Vorschau) */
     int pause_live;             /* W193 PAUSE-LIVE: 1 = Standbild der Pause aus der FPS-INTERP-Aufzeichnung mit den aktuellen Einstellungen neu zeichnen, 0 = W188 (Kopie) */
     char menu_peek_key[16];     /* W193: Taste "Menue kurz ausblenden" (gedrueckt halten), Tastenname wie in Profilen; leer/OFF = aus */
+    /* W195 PHOTO-MODE ([photo]): Fotomodus (F12 bzw. Profil-Aktion "photo", ESC-Menue -> Fotomodus) */
+    int photo_mode;             /* 1 = Fotomodus verfuegbar (Standard), 0 = aus (Menue-Eintrag ausgegraut, Taste ohne Wirkung) */
+    char photo_dir[400];        /* Fotoordner (UTF-8); leer = <Nutzerdaten>\Screenshots (legacy/Tests: <Ausgabe>\Screenshots) */
+    int photo_scale;            /* Standard-Aufnahmeaufloesung: 1, 2, 4 oder 8 x Fensteraufloesung */
+    int photo_jpg;              /* 0 = PNG (Standard), 1 = JPG */
+    int photo_aspect;           /* Bildformat ohne Cockpit: 0 = Bildschirm (Ausschnitt), 1 = Bildschirm (weit, Standard; Raender evtl. leer), 2 = Kamera (wie Monitor, ~4:3) */
+    int photo_cam_yaw;          /* freie Kamera: max. Drehung links/rechts (Grad, Standard 35) */
+    int photo_cam_pitch;        /* freie Kamera: max. Neigung (Grad, Standard 25) */
+    int photo_cam_dist;         /* freie Kamera: max. Weg von der Spielkamera (Spiel-Einheiten ~ m, Standard 4) */
     char feedback_repo[128];    /* [feedback] repo: GitHub-Repo fuer "Neues Issue" (Owner/Name), Standard SB_FEEDBACK_REPO_DEFAULT (sb_feedback.h) */
     /* W122 PERF-HUD (sb_perfhud.c) */
     int perf_hud;               /* 1 = Leistungs-Overlay sichtbar (Taste schaltet und speichert in user.cfg), 0 = aus (Standard) */

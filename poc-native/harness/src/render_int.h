@@ -310,6 +310,49 @@ int sb_interp_pause_cmp(ID3D11Resource *img, unsigned *ndiff, unsigned *maxd);
 typedef int (*sb_interp_mvp_hook_t)(float mvp[16], int cls);
 void sb_interp_set_pause_mvp_hook(sb_interp_mvp_hook_t fn);
 void sb_render_pause_dirty(void); /* d3d11_render.c: Standbild beim naechsten Pausenbild neu zeichnen */
+/* W195 PHOTO-MODE (render_interp.c / render_photo.c): Foto-Wiedergabe des juengsten Ticks.
+ * Umlenkung: Draws/Clears in den Schatten-Eintrag tgt (Farbe) / tgtd (Tiefe) gehen in rtv/dsv,
+ * Viewport/Scissor affin (x*kx + ox, y*ky + oy, Scissor auf cl gekappt, Clears per ClearView auf cl). Freie Kamera:
+ * Welt-Draws (Eintrag wld, Clip-w echt) bekommen MVP * (rv^-1 P^-1 cam_d P rv). */
+typedef struct {
+    int on;
+    int tgt, tgtd;
+    ID3D11RenderTargetView *rtv;
+    ID3D11DepthStencilView *dsv;
+    float kx, ky, ox, oy;
+    LONG cl[4];        /* Scissor-Kappe (links, oben, rechts, unten) in der Kachel */
+    int wld, cam;
+    float wcx;         /* Clip-x-Faktor der Welt-Draws (Weitwinkel: < 1, sonst 1; 0 = 1) */
+    float cam_d[16];   /* Sicht-Delta (Zeilenvektor, homogen: v' = v * cam_d) */
+    float def_prj[4];  /* Ersatz-Projektion a, b, A, B (falls der Draw keine plausible traegt) */
+    void (*init)(void *ctx, ID3D11Texture2D *start); /* nach den Startkopien: Kachel vorbelegen (Zustand sichern!) */
+    void *ctx;
+    /* skalierte Zwischenziele (Welt-/Monitor-RTs bei Cockpit-Aufnahme x N): Ziel/Tiefe/Textur des
+     * Eintrags sc_e/sc_d gehen in sc_rtv/sc_dsv/sc_srv, Viewport/Scissor x sc_k (gekappt auf sc_w x sc_h) */
+    int nsc;
+    int sc_e[8], sc_d[8];
+    ID3D11RenderTargetView *sc_rtv[8];
+    ID3D11DepthStencilView *sc_dsv[8];
+    ID3D11ShaderResourceView *sc_srv[8];
+    float sc_k[8];
+    LONG sc_w[8], sc_h[8];
+} sb_ph_rep_t;
+typedef struct {
+    int ok;
+    unsigned ser, frame, nops;
+    int bb, bbd, wld, wldd;          /* Schatten-Eintraege BB / BB-Tiefe / Welt-RT / dessen Tiefe */
+    unsigned bb_w, bb_h, w_tw, w_th; /* Texturgroessen (D3D11) */
+    unsigned w_lw, w_lh;             /* Welt-RT logisch (Spiel) */
+    unsigned g_x, g_y, g_w, g_h;     /* Spiel-Viewport der Welt (logisch) */
+    float prj[4];                    /* Projektion (a, b, A, B) des ersten Welt-3D-Draws */
+    float disp_asp;                  /* Seitenverhaeltnis, in dem das Spiel das Kamerabild auf dem Hauptmonitor zeigt (0 = unbekannt) */
+    unsigned n_w, n_w3d, n_w2d, n_w2dw, n_wrq, n_bb, n_bb3d, n_bb2d, n_rts;
+    ID3D11Texture2D *bb_tex, *w_tex;
+    unsigned n_rt;                   /* RT-Ziele des Ticks (ohne BB), hoechstens 16 */
+    struct { int e, d; unsigned w, h, nd; ID3D11Texture2D *tex; } rt[16];
+} sb_ph_census_t;
+int sb_interp_photo_census(sb_ph_census_t *c, int log);
+ID3D11Resource *sb_interp_photo_render(const sb_ph_rep_t *ph, sb_pl_info_t *inf, unsigned *ncam, unsigned *nred);
 /* W81 WINMODE (render_winmode.c, d3d11_render.c) */
 #include <dxgi.h>
 extern unsigned g_swap_flags;

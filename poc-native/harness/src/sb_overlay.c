@@ -31,7 +31,9 @@
 #include "sb_feedback.h" /* W188 GAME-MENU: Feedback-Paket */
 #include "input_map.h" /* W188 GAME-MENU: Gamepad im Menue (imap_pad_poll) */
 #include "kernel_hle.h" /* W190 SAVE-LOCK: krnl_savelock_* */
+#include "sb_photo.h" /* W195 PHOTO-MODE */
 #include <stdlib.h>
+#include <ctype.h> /* W195: toupper (Test-Hook KDN=/KUP=) */
 #include <wchar.h>
 
 /* ---- Modulgrenzen (andere Dateien) ---- */
@@ -125,7 +127,8 @@ static ULONGLONG g_ov_sl_arm;           /* W190: "Uebernehmen" scharf bis (zweit
 /* ---- W188 GAME-MENU: Bildschirme ----
  * SC_SET = Einstellungen (W118-Seiten), SC_MENU = Spielmenue (erste Ebene),
  * SC_QUIT = Rueckfrage Beenden, SC_PAUSED = Pause-Taste, SC_FB* = Feedback. */
-enum { SC_SET = 0, SC_MENU, SC_QUIT, SC_PAUSED, SC_FBKIND, SC_FBTEXT, SC_FBREVIEW };
+enum { SC_SET = 0, SC_MENU, SC_QUIT, SC_PAUSED, SC_FBKIND, SC_FBTEXT, SC_FBREVIEW, SC_PHOTO /* W195 */ };
+#define OV_IS_FB(sc) ((sc) >= SC_FBKIND && (sc) <= SC_FBREVIEW)
 enum { MI_CONTINUE = 0, MI_SETTINGS, MI_PHOTO, MI_FEEDBACK, MI_QUIT, MI_N };
 /* interne Tasten im Ring (ueber dem VK-Bereich) */
 #define OK_BTAB    0x1001  /* Umschalt+Tab / LB: Seite zurueck */
@@ -133,6 +136,8 @@ enum { MI_CONTINUE = 0, MI_SETTINGS, MI_PHOTO, MI_FEEDBACK, MI_QUIT, MI_N };
 #define OK_WUP     0x1003  /* Mausrad */
 #define OK_WDN     0x1004
 #define OK_PSTART  0x1005  /* Pad START */
+#define OK_PHOTO   0x1006  /* W195: Foto-Taste (Belegung "photo") bei offenem Menue */
+#define OK_PSHOT   0x1007  /* W195: Pad Y im Fotomodus = Foto aufnehmen */
 #define OK_CHAR    0x20000 /* | Zeichen (UTF-16), Texteingabe */
 #define OK_CLICK   0x40000000 /* | x << 15 | y (Backbuffer-Pixel) */
 #define OV_MSG_TEST   (WM_APP + 0x1A8) /* TEST(W188): wp = interne Taste (UI-Thread schiebt sie in den Ring) */
@@ -143,6 +148,18 @@ static volatile LONG g_ov_textmode;      /* 1 = Texteingabe (WM_CHAR ans Overlay
 static int g_ov_msel;                    /* Auswahl in den Menue-Bildschirmen */
 static volatile LONG g_ov_pause_vk[4] = { VK_PAUSE, 0, 0, 0 }; /* Pause-Tasten (Profil-Aktion "pause") */
 static volatile LONG g_ov_pause_pad;     /* Pad-Tasten der Aktion "pause" (Bits IMAP_PAD_*) */
+static volatile LONG g_ov_photo_vk[4] = { VK_F12, 0, 0, 0 }; /* W195: Foto-Tasten (Profil-Aktion "photo") */
+static volatile LONG g_ov_photo_pad;     /* W195: Pad-Tasten der Aktion "photo" */
+/* W195 PHOTO-MODE: Foto-Panel (Bildschirm SC_PHOTO) */
+static int g_ph_tab, g_ph_sel, g_ph_from_menu;
+static volatile LONG g_ph_keys;          /* gehaltene Kamera-Tasten (Bits PK_*, UI-Thread) */
+static volatile LONG g_ph_mdx, g_ph_mdy; /* Maus-Ziehen (Client-Pixel, aufsummiert, UI-Thread) */
+static volatile LONG g_ph_drag;          /* 1 = Ziehen laeuft (Start ausserhalb des Panels) */
+static LONG g_ph_lx, g_ph_ly;            /* letzte Zieh-Position (UI-Thread) */
+static ULONGLONG g_ph_t;                 /* letzter Kamera-Schritt (ms) */
+static int g_ph_last_shown;              /* zuletzt gemeldete Aufnahme (Status) */
+static int g_ph_pad_rx, g_ph_pad_ry, g_ph_pad_lx, g_ph_pad_ly, g_ph_pad_tr; /* Pad-Achsen (Fotomodus) */
+enum { PK_W = 1, PK_S = 2, PK_A = 4, PK_D = 8, PK_Q = 16, PK_E = 32, PK_J = 64, PK_L = 128, PK_I = 256, PK_K = 512 };
 static unsigned g_ov_vframes;            /* Pausenbilder (Test-Hook-Takt laeuft in der Pause weiter) */
 static wchar_t g_fb_text[161];
 static int g_fb_len, g_fb_kind, g_fb_have, g_fb_pending;
@@ -161,7 +178,8 @@ static char g_ov_save_path[600];
 typedef struct { unsigned at; int rel; int mi; int act; int vk; char txt[28]; } ov_step_t;
 enum { OA_KEY, OA_SHOT, OA_FOCUS1, OA_FOCUS0, OA_LOG, OA_PHUDPOS,
        OA_TKEY, OA_TXT, OA_MROW, OA_MTAB, OA_PAD, OA_STATE, /* W188 */
-       OA_PEEK }; /* W193: Taste "Menue ausblenden" druecken (vk 1) / loslassen (vk 0) */
+       OA_PEEK, /* W193: Taste "Menue ausblenden" druecken (vk 1) / loslassen (vk 0) */
+       OA_PHOTO, OA_KDN, OA_KUP, OA_MDRAG }; /* W195: Foto-Taste, Taste halten/loslassen, Ziehen dx_dy */
 static ov_step_t g_ov_steps[160]; /* W193: 96 -> 160 (Pause-Live-Belege) */
 static int g_ov_nsteps, g_ov_step, g_ov_test_parsed;
 static unsigned g_ov_mission_f[8];      /* Startbild der k-ten Mission (fuer mN / mK.N) */
@@ -1010,9 +1028,19 @@ static void ov_page_set(int pg, int tabrow)
 static void ov_screen(int sc, int sel)
 {
     static const char *const nm[] = { "Einstellungen", "Spielmenue", "Beenden?", "Pause", "Feedback-Art",
-                                      "Feedback-Text", "Feedback-Paket" };
+                                      "Feedback-Text", "Feedback-Paket", "Fotomodus" };
     if (g_ov_scr != sc) {
         HLOG_I("MENU: Bildschirm -> %s (f=%u)", nm[sc], g_present_no);
+        if (g_ov_scr == SC_PHOTO) { sb_photo_leave(); InterlockedExchange(&g_ph_keys, 0); } /* W195 */
+    }
+    if (sc == SC_PHOTO && (g_ov_scr != sc || !sb_photo_active())) { /* W195: auch beim Wiederoeffnen (Bildschirm blieb SC_PHOTO) */
+        sb_photo_ui_t pu;
+        sb_photo_enter();
+        sb_photo_get(&pu);
+        g_ph_tab = 0;
+        g_ph_sel = 0;
+        g_ph_last_shown = (int)pu.nshot; /* keine alte Statuszeile aus der vorigen Sitzung */
+        g_ph_t = 0;
     }
     g_ov_scr = sc;
     g_ov_msel = sel;
@@ -1057,6 +1085,7 @@ int sb_ovl_peek(void)
 static void ov_close(const char *why)
 {
     HLOG_I("MENU: zu (%s, f=%u)", why, g_present_no);
+    if (g_ov_scr == SC_PHOTO) { sb_photo_leave(); InterlockedExchange(&g_ph_keys, 0); InterlockedExchange(&g_ph_drag, 0); } /* W195 */
     InterlockedExchange(&g_ov_textmode, 0);
     InterlockedExchange(&g_ov_peek, 0); /* W193 */
     InterlockedExchange(&g_ov_open, 0);
@@ -1140,6 +1169,7 @@ static void ov_key_set(int vk)
     }
 }
 
+static int ov_ph_nrows(void); /* W195 */
 /* W188: Zeilenzahl der Menue-Bildschirme */
 static int ov_scr_rows(void)
 {
@@ -1150,6 +1180,7 @@ static int ov_scr_rows(void)
     case SC_FBKIND: return 3;
     case SC_FBTEXT: return 1;
     case SC_FBREVIEW: return 3;
+    case SC_PHOTO: return ov_ph_nrows(); /* W195 */
     default: return ov_nrows();
     }
 }
@@ -1181,9 +1212,14 @@ static void ov_activate(int k)
         switch (k) {
         case MI_CONTINUE: ov_close("Weiter"); break;
         case MI_SETTINGS: ov_screen(SC_SET, 0); break;
-        case MI_PHOTO: /* Einsprung fuer PHOTO-MODE (spaetere Aufgabe): vorerst ausgegraut */
-            HLOG_I("MENU: Fotomodus (noch nicht verfuegbar, f=%u)", g_present_no);
-            ov_status_key("ovl.st_photo_soon");
+        case MI_PHOTO: /* W195 PHOTO-MODE */
+            if (!g_cfg.photo_mode || g_cfg.vr_enable) {
+                HLOG_I("MENU: Fotomodus nicht verfuegbar (%s, f=%u)", g_cfg.vr_enable ? "VR" : "photo_mode=0", g_present_no);
+                ov_status_key(g_cfg.vr_enable ? "ovl.ph_st_vr" : "ovl.ph_st_off");
+            } else {
+                g_ph_from_menu = 1;
+                ov_screen(SC_PHOTO, 0);
+            }
             break;
         case MI_FEEDBACK: ov_screen(SC_FBKIND, 0); break;
         case MI_QUIT: ov_screen(SC_QUIT, 0); break;
@@ -1288,6 +1324,204 @@ static void ov_key_menu(int vk)
     }
 }
 
+/* ------------------------------------------------------------------ */
+/* W195 PHOTO-MODE: Foto-Panel (Bildschirm SC_PHOTO, Render-Thread)     */
+/* ------------------------------------------------------------------ */
+enum { PR_COCKPIT, PR_FREECAM, PR_MECH, PR_RES, PR_FMT, PR_SHOT, PR_BACK, PR_YAW, PR_PITCH, PR_DIST, PR_RESET, PR_ASPECT };
+static const int kPhRows0[] = { PR_COCKPIT, PR_ASPECT, PR_FREECAM, PR_MECH, PR_RES, PR_FMT, PR_SHOT, PR_BACK };
+static const int kPhRows1[] = { PR_FREECAM, PR_YAW, PR_PITCH, PR_DIST, PR_RESET, PR_SHOT, PR_BACK };
+#define PH_NR0 ((int)(sizeof kPhRows0 / sizeof kPhRows0[0]))
+#define PH_NR1 ((int)(sizeof kPhRows1 / sizeof kPhRows1[0]))
+#define PH_NTABS 2
+
+static int ov_ph_nrows(void)
+{
+    return g_ph_tab ? PH_NR1 : PH_NR0;
+}
+
+static int ov_ph_row(int k)
+{
+    return g_ph_tab ? kPhRows1[k] : kPhRows0[k];
+}
+
+static int ov_ph_enabled(int it, const sb_photo_ui_t *u)
+{
+    switch (it) {
+    case PR_COCKPIT: case PR_FREECAM: return u->rec;
+    case PR_MECH: return 0; /* Studie Stufe 3: nicht umgesetzt (BERICHT W195) */
+    case PR_ASPECT: return u->rec && !u->cockpit; /* Bildformat nur ohne Cockpit */
+    case PR_YAW: case PR_PITCH: case PR_DIST: case PR_RESET: return u->freecam;
+    default: return 1;
+    }
+}
+
+static int ov_photo_allowed(void)
+{
+    return g_cfg.photo_mode && !g_cfg.vr_enable;
+}
+
+static void ov_ph_back(const char *why)
+{
+    if (g_ph_from_menu && g_cfg.game_menu) { ov_screen(SC_MENU, MI_PHOTO); }
+    else { ov_close(why); }
+}
+
+static void ov_ph_shot(void)
+{
+    if (sb_photo_request()) { ov_status_key("ovl.ph_st_busy"); }
+    else { ov_status_key("ovl.ph_st_vr"); }
+}
+
+static void ov_ph_tab_set(int t)
+{
+    g_ph_tab = (t + PH_NTABS) % PH_NTABS;
+    if (g_ph_sel >= ov_ph_nrows()) { g_ph_sel = ov_ph_nrows() - 1; }
+    HLOG_I("PHOTO: Seite -> %s (f=%u)", g_ph_tab ? "Kamera" : "Foto", g_present_no);
+    g_ov_dirty = 1;
+}
+
+static void ov_ph_change(int it, int dir)
+{
+    static const int sc[SB_PHOTO_NSCALE] = { 1, 2, 4, 8 };
+    sb_photo_ui_t u;
+    sb_photo_get(&u);
+    switch (it) {
+    case PR_COCKPIT:
+        if (!u.rec) { ov_status_key("ovl.ph_st_norec"); break; }
+        sb_photo_set_cockpit(!u.cockpit);
+        break;
+    case PR_FREECAM:
+        if (!u.rec) { ov_status_key("ovl.ph_st_norec"); break; }
+        sb_photo_set_freecam(!u.freecam);
+        break;
+    case PR_MECH: ov_status_key("ovl.ph_st_mech"); break;
+    case PR_ASPECT:
+        if (!u.rec || u.cockpit) { ov_status_key("ovl.ph_st_aspect"); break; }
+        sb_photo_set_aspect(u.aspect + (dir < 0 ? 2 : 1));
+        { /* gewaehlte Stufe ggf. nicht mehr moeglich -> x1 */
+            sb_photo_ui_t u2;
+            sb_photo_get(&u2);
+            if (!u2.savail[u2.scale]) { sb_photo_set_scale(0); }
+        }
+        break;
+    case PR_RES: {
+        int k, i = u.scale;
+        for (k = 0; k < SB_PHOTO_NSCALE; k++) {
+            i = (i + (dir < 0 ? SB_PHOTO_NSCALE - 1 : 1)) % SB_PHOTO_NSCALE;
+            if (u.savail[i]) { break; }
+        }
+        if (!u.savail[i]) { i = 0; }
+        sb_photo_set_scale(i);
+        HLOG_I("PHOTO: Aufloesung -> x%d (%ux%u, f=%u)", sc[i], u.sw[i], u.sh[i], g_present_no);
+        if (!u.rec) { ov_status_key("ovl.ph_st_norec"); }
+        break;
+    }
+    case PR_FMT:
+        sb_photo_set_jpg(!u.jpg);
+        HLOG_I("PHOTO: Format -> %s (f=%u)", !u.jpg ? "JPG" : "PNG", g_present_no);
+        break;
+    case PR_YAW: if (u.freecam) { sb_photo_cam_move(-(float)dir * 5.0f, 0.0f, 0.0f, 0.0f, 0.0f); } break; /* rechts = +, Gieren positiv = links */
+    case PR_PITCH: if (u.freecam) { sb_photo_cam_move(0.0f, (float)dir * 5.0f, 0.0f, 0.0f, 0.0f); } break;
+    case PR_DIST: if (u.freecam) { sb_photo_cam_move(0.0f, 0.0f, (float)dir * 0.5f, 0.0f, 0.0f); } break;
+    default: break;
+    }
+    g_ov_dirty = 1;
+}
+
+static void ov_ph_activate(int it)
+{
+    switch (it) {
+    case PR_SHOT: ov_ph_shot(); break;
+    case PR_BACK: ov_ph_back("Zurueck"); break;
+    case PR_RESET: sb_photo_cam_reset(); break;
+    default: ov_ph_change(it, +1); break;
+    }
+    g_ov_dirty = 1;
+}
+
+static void ov_key_photo(int vk)
+{
+    int n = ov_ph_nrows();
+    if (vk & OK_CHAR) { return; }
+    switch (vk) {
+    case VK_UP: case OK_WUP: g_ph_sel = g_ph_sel < 0 ? n - 1 : g_ph_sel - 1; break;
+    case VK_DOWN: case OK_WDN: g_ph_sel = g_ph_sel + 1 >= n ? -1 : g_ph_sel + 1; break;
+    case VK_LEFT:
+        if (g_ph_sel < 0) { ov_ph_tab_set(g_ph_tab - 1); } else { ov_ph_change(ov_ph_row(g_ph_sel), -1); }
+        break;
+    case VK_RIGHT:
+        if (g_ph_sel < 0) { ov_ph_tab_set(g_ph_tab + 1); } else { ov_ph_change(ov_ph_row(g_ph_sel), +1); }
+        break;
+    case VK_TAB: ov_ph_tab_set(g_ph_tab + 1); break;
+    case OK_BTAB: ov_ph_tab_set(g_ph_tab - 1); break;
+    case VK_RETURN: case VK_SPACE:
+        if (g_ph_sel < 0) { ov_ph_tab_set(g_ph_tab + 1); } else { ov_ph_activate(ov_ph_row(g_ph_sel)); }
+        break;
+    case VK_ESCAPE: ov_ph_back("ESC"); return;
+    case OK_PSTART: ov_close("START"); return;
+    case OK_PAUSE: ov_close("Pause-Taste"); return;
+    case OK_PHOTO: case OK_PSHOT: ov_ph_shot(); break;
+    default: break;
+    }
+    g_ov_dirty = 1;
+}
+
+/* Kamera-Schritt je Bild (Tasten, Maus-Ziehen, Pad) + Status der letzten Aufnahme */
+static void ov_ph_tick(void)
+{
+    ULONGLONG now = GetTickCount64();
+    float dt = g_ph_t ? (float)(now - g_ph_t) / 1000.0f : 0.0f;
+    LONG k = g_ph_keys, mx = InterlockedExchange(&g_ph_mdx, 0), my = InterlockedExchange(&g_ph_mdy, 0);
+    float yaw = 0.0f, pitch = 0.0f, f = 0.0f, r = 0.0f, up = 0.0f;
+    sb_photo_ui_t u;
+    g_ph_t = now;
+    if (dt > 0.1f) { dt = 0.1f; }
+    sb_photo_get(&u);
+    { /* Zensus (Aufzeichnung ja/nein) kommt mit dem ersten Pausenbild: Panel dann neu zeichnen */
+        static int last_rec = -1;
+        if (u.rec != last_rec) { last_rec = u.rec; g_ov_dirty = 1; }
+    }
+    if (u.nshot != (unsigned)g_ph_last_shown) {
+        wchar_t w[96];
+        g_ph_last_shown = (int)u.nshot;
+        if (u.last_ok > 0) {
+            char nb[200];
+            const char *sn = u.last_name; /* Anzeige ohne "Steelbound_JJJJ-MM-TT_" (Zeile bleibt kurz) */
+            if (strncmp(sn, "Steelbound_", 11) == 0 && strlen(sn) > 22) { sn += 22; }
+            _snprintf_s(nb, sizeof nb, _TRUNCATE, LT("ovl.ph_st_saved"), sn, u.last_w, u.last_h);
+            ov_wu8(w, 96, nb);
+            ov_status(w);
+        } else {
+            ov_status_key("ovl.ph_st_fail");
+        }
+    }
+    if (!u.freecam) { return; }
+    yaw = -(float)mx * 0.15f; /* nach rechts ziehen = nach rechts drehen (Gieren positiv = links) */
+    pitch = -(float)my * 0.15f;
+    if (k & PK_J) { yaw += 45.0f * dt; }
+    if (k & PK_L) { yaw -= 45.0f * dt; }
+    if (k & PK_I) { pitch += 45.0f * dt; }
+    if (k & PK_K) { pitch -= 45.0f * dt; }
+    if (k & PK_W) { f += 2.0f * dt; }
+    if (k & PK_S) { f -= 2.0f * dt; }
+    if (k & PK_D) { r += 2.0f * dt; }
+    if (k & PK_A) { r -= 2.0f * dt; }
+    if (k & PK_E) { up += 2.0f * dt; }
+    if (k & PK_Q) { up -= 2.0f * dt; }
+    { /* Pad: rechter Stick drehen, linker Stick fahren, Trigger hoch/runter (Totzone 25 %) */
+        const int dz = 8192;
+        if (g_ph_pad_rx > dz || g_ph_pad_rx < -dz) { yaw -= (float)g_ph_pad_rx / 32767.0f * 90.0f * dt; }
+        if (g_ph_pad_ry > dz || g_ph_pad_ry < -dz) { pitch += (float)g_ph_pad_ry / 32767.0f * 60.0f * dt; }
+        if (g_ph_pad_ly > dz || g_ph_pad_ly < -dz) { f += (float)g_ph_pad_ly / 32767.0f * 3.0f * dt; }
+        if (g_ph_pad_lx > dz || g_ph_pad_lx < -dz) { r += (float)g_ph_pad_lx / 32767.0f * 3.0f * dt; }
+        if (g_ph_pad_tr > 40 || g_ph_pad_tr < -40) { up += (float)g_ph_pad_tr / 255.0f * 2.0f * dt; }
+    }
+    if (yaw != 0.0f || pitch != 0.0f || f != 0.0f || r != 0.0f || up != 0.0f) {
+        sb_photo_cam_move(yaw, pitch, f, r, up);
+        g_ov_dirty = 1;
+    }
+}
+
 /* W188: Mausklick/Bewegung (Backbuffer-Pixel) auf die zuletzt gezeichneten Flaechen */
 static int ov_hit_row(int x, int y)
 {
@@ -1299,6 +1533,31 @@ static int ov_hit_row(int x, int y)
 static void ov_mouse(int x, int y, int click)
 {
     int r;
+    if (g_ov_scr == SC_PHOTO) { /* W195: Tab-Zeile und Zeilen des Foto-Panels */
+        if (y >= g_hit_tab_y0 && y < g_hit_tab_y1 && x >= g_hit_x0 && x < g_hit_x0 + g_hit_w) {
+            int t;
+            if (!click) { return; }
+            for (t = 0; t < PH_NTABS; t++) {
+                if (x >= g_hit_tab_x[t] && x < g_hit_tab_x[t + 1]) {
+                    if (t != g_ph_tab) { ov_ph_tab_set(t); }
+                    g_ph_sel = -1;
+                    g_ov_dirty = 1;
+                    break;
+                }
+            }
+            return;
+        }
+        r = ov_hit_row(x, y);
+        if (r < 0) { return; }
+        if (g_ph_sel != r) { g_ph_sel = r; g_ov_dirty = 1; }
+        if (click) {
+            int it = ov_ph_row(r);
+            HLOG_I("PHOTO: Klick Zeile %d (f=%u)", r, g_present_no);
+            if (it == PR_SHOT || it == PR_BACK || it == PR_RESET || x < g_hit_valx) { ov_ph_activate(it); }
+            else { ov_ph_change(it, x < g_hit_valx + (g_hit_x0 + g_hit_w - g_hit_valx) / 2 ? -1 : +1); }
+        }
+        return;
+    }
     if (g_ov_scr == SC_SET && y >= g_hit_tab_y0 && y < g_hit_tab_y1 && x >= g_hit_x0 && x < g_hit_x0 + g_hit_w) {
         int t;
         if (!click) { return; }
@@ -1337,6 +1596,17 @@ static void ov_key(int vk)
         ov_mouse((vk >> 15) & 0x7FFF, vk & 0x7FFF, 1);
         return;
     }
+    if (vk == OK_PHOTO && g_ov_scr != SC_PHOTO) { /* W195: Foto-Taste bei offenem Menue -> Fotomodus */
+        if (!ov_photo_allowed()) { ov_status_key(g_cfg.vr_enable ? "ovl.ph_st_vr" : "ovl.ph_st_off"); return; }
+        if (g_ov_scr == SC_FBTEXT) { return; }
+        g_ph_from_menu = g_cfg.game_menu != 0;
+        ov_screen(SC_PHOTO, 0);
+        return;
+    }
+    if (g_ov_scr == SC_PHOTO) { /* W195 */
+        ov_key_photo(vk);
+        return;
+    }
     if (g_ov_scr == SC_SET) {
         if (vk == OK_WUP) { vk = VK_UP; }
         else if (vk == OK_WDN) { vk = VK_DOWN; }
@@ -1370,6 +1640,60 @@ void sb_ovl_set_pause_binding(const int *vks, int n, unsigned padmask)
     HLOG_I("MENU: Pause-Belegung: Tasten %s0x%02X 0x%02X 0x%02X 0x%02X, Pad-Maske 0x%04X", n <= 0 ? "(Standard) " : "",
            (unsigned)g_ov_pause_vk[0], (unsigned)g_ov_pause_vk[1], (unsigned)g_ov_pause_vk[2], (unsigned)g_ov_pause_vk[3],
            padmask);
+}
+
+/* W195 PHOTO-MODE: Foto-Tasten (Profil-Aktion "photo", hooks_input.c); leer -> Standard F12 */
+void sb_ovl_set_photo_binding(const int *vks, int n, unsigned padmask)
+{
+    int i;
+    for (i = 0; i < 4; i++) { InterlockedExchange(&g_ov_photo_vk[i], i < n ? vks[i] : 0); }
+    if (n <= 0) { InterlockedExchange(&g_ov_photo_vk[0], VK_F12); }
+    InterlockedExchange(&g_ov_photo_pad, (LONG)padmask);
+    HLOG_I("MENU: Foto-Belegung: Tasten %s0x%02X 0x%02X 0x%02X 0x%02X, Pad-Maske 0x%04X", n <= 0 ? "(Standard) " : "",
+           (unsigned)g_ov_photo_vk[0], (unsigned)g_ov_photo_vk[1], (unsigned)g_ov_photo_vk[2], (unsigned)g_ov_photo_vk[3],
+           padmask);
+}
+
+/* W195: Foto-Aktion vom Spiel-Thread (Pad/Controller-Bindung, Flanke) */
+void sb_ovl_request_photo(const char *why)
+{
+    if (!g_cfg.overlay || !g_cfg.photo_mode || g_cfg.vr_enable) { return; }
+    if (g_ov_open) { /* Ring gehoert dem UI-Thread: ueber dessen Nachricht */
+        HWND h = sb_render_hwnd();
+        if (h) { PostMessageA(h, OV_MSG_TEST, (WPARAM)OK_PHOTO, 0); }
+        return;
+    }
+    HLOG_I("MENU: Fotomodus angefordert (%s)", why ? why : "");
+    g_ph_from_menu = 0;
+    InterlockedExchange(&g_ov_req, SC_PHOTO);
+    InterlockedExchange(&g_ov_open, 1);
+}
+
+static int ov_is_photo_vk(int vk)
+{
+    int i;
+    for (i = 0; i < 4; i++) {
+        if (g_ov_photo_vk[i] && g_ov_photo_vk[i] == vk) { return 1; }
+    }
+    return 0;
+}
+
+/* W195: Kamera-Taste -> Bit (Fotomodus, gehalten) */
+static LONG ov_ph_keybit(int vk)
+{
+    switch (vk) {
+    case 'W': return PK_W;
+    case 'S': return PK_S;
+    case 'A': return PK_A;
+    case 'D': return PK_D;
+    case 'Q': return PK_Q;
+    case 'E': return PK_E;
+    case 'J': return PK_J;
+    case 'L': return PK_L;
+    case 'I': return PK_I;
+    case 'K': return PK_K;
+    default: return 0;
+    }
 }
 
 /* W188: Pause-Aktion vom Spiel-Thread (Pad/Controller-Bindung, Flanke) */
@@ -1440,6 +1764,17 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
             }
             return 1;
         }
+        if (!g_ov_textmode && wp != VK_F10 && ov_is_photo_vk((int)wp) && g_cfg.photo_mode) { /* W195: Foto-Taste */
+            if (!(lp & 0x40000000)) {
+                if (!g_ov_open) {
+                    if (g_cfg.vr_enable) { HLOG_I("MENU: Foto-Taste im VR-Betrieb ohne Wirkung (Fotomodus aus)"); }
+                    else { g_ph_from_menu = 0; ov_open_ui(SC_PHOTO); }
+                } else {
+                    ov_qpush(OK_PHOTO);
+                }
+            }
+            return 1;
+        }
         if (!g_ov_open || wp == VK_F10) { return 0; }
         if (!g_ov_textmode && ov_peek_vk() > 0 && (int)wp == ov_peek_vk()) { /* W193: Menue ausblenden, solange gehalten */
             if (!InterlockedExchange(&g_ov_peek, 1)) { HLOG_I("MENU: ausgeblendet (Taste gehalten, f=%u)", g_present_no); }
@@ -1447,6 +1782,10 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         }
         if (g_ov_textmode) { /* W188: Feedback-Text - Zeichen kommen als WM_CHAR */
             if (wp == VK_BACK || ((wp == VK_RETURN) && !(lp & 0x40000000))) { ov_qpush((int)wp); }
+            return 1;
+        }
+        if (g_ov_scr == SC_PHOTO && ov_ph_keybit((int)wp)) { /* W195: Kamera-Tasten (gehalten) */
+            InterlockedOr(&g_ph_keys, ov_ph_keybit((int)wp));
             return 1;
         }
         if (wp == VK_UP || wp == VK_DOWN || wp == VK_LEFT || wp == VK_RIGHT) {
@@ -1461,6 +1800,10 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         return 1;
     case WM_KEYUP:
         if (wp == VK_ESCAPE) { return 1; }
+        if (ov_ph_keybit((int)wp) && (g_ph_keys & ov_ph_keybit((int)wp))) { /* W195: Kamera-Taste los */
+            InterlockedAnd(&g_ph_keys, ~ov_ph_keybit((int)wp));
+            return g_ov_open ? 1 : 0;
+        }
         if (g_ov_peek && ov_peek_vk() > 0 && (int)wp == ov_peek_vk()) { /* W193 */
             InterlockedExchange(&g_ov_peek, 0);
             HLOG_I("MENU: wieder eingeblendet (f=%u)", g_present_no);
@@ -1477,6 +1820,18 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         }
         return g_ov_open ? 1 : (wp == 0x1B);
     case WM_MOUSEMOVE: /* W188: Zeiger ueber den Zeilen waehlt (Render-Thread), Spiel-Eingabe bleibt gesperrt */
+        if (g_ov_open && g_ph_drag) { /* W195: Ziehen im Fotomodus dreht die Kamera */
+            LONG x = (short)LOWORD(lp), y = (short)HIWORD(lp);
+            if (!(wp & MK_LBUTTON)) {
+                InterlockedExchange(&g_ph_drag, 0);
+            } else {
+                InterlockedExchangeAdd(&g_ph_mdx, x - g_ph_lx);
+                InterlockedExchangeAdd(&g_ph_mdy, y - g_ph_ly);
+                g_ph_lx = x;
+                g_ph_ly = y;
+            }
+            return 0;
+        }
         if (g_ov_open) {
             LONG c = ov_click_code(w, lp);
             InterlockedExchange(&g_ov_mx, (c >> 15) & 0x7FFF);
@@ -1491,6 +1846,17 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case WM_LBUTTONDOWN: case WM_LBUTTONDBLCLK:
         if (!g_ov_open) { return 0; }
         InterlockedIncrement(&g_ov_swallow_m);
+        if (g_ov_scr == SC_PHOTO) { /* W195: Klick ausserhalb des Panels (oder Panel ausgeblendet) = Kamera ziehen */
+            LONG c = ov_click_code(w, lp);
+            int bx = (int)((c >> 15) & 0x7FFF), by = (int)(c & 0x7FFF);
+            if (g_ov_peek || bx < g_hit_x0 || bx >= g_hit_x0 + g_hit_w || by < g_hit_y0 || by >= g_hit_y0 + g_hit_h) {
+                g_ph_lx = (short)LOWORD(lp);
+                g_ph_ly = (short)HIWORD(lp);
+                InterlockedExchange(&g_ph_drag, 1);
+                if (msg == WM_LBUTTONDOWN && !g_cfg.overlay_test[0]) { SetCapture(w); }
+                return 1;
+            }
+        }
         ov_qpush((int)ov_click_code(w, lp)); /* W188: Klick waehlt/loest aus */
         return 1;
     case WM_RBUTTONDOWN: case WM_MBUTTONDOWN: case WM_XBUTTONDOWN:
@@ -1500,6 +1866,10 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         if (msg == WM_RBUTTONDOWN) { ov_qpush(VK_ESCAPE); } /* W188: rechte Maustaste = zurueck */
         return 1;
     case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP: case WM_XBUTTONUP:
+        if (msg == WM_LBUTTONUP && g_ph_drag) { /* W195 */
+            InterlockedExchange(&g_ph_drag, 0);
+            if (GetCapture() == w) { ReleaseCapture(); }
+        }
         return g_ov_open ? 1 : 0;
     default:
         return 0;
@@ -1579,6 +1949,10 @@ static void ov_test_parse(void)
         else if (_stricmp(act, "STATE") == 0) { s->act = OA_STATE; }
         else if (_stricmp(act, "PEEKDN") == 0) { s->act = OA_PEEK; s->vk = 1; } /* W193 */
         else if (_stricmp(act, "PEEKUP") == 0) { s->act = OA_PEEK; s->vk = 0; }
+        else if (_stricmp(act, "PHOTO") == 0) { s->act = OA_PHOTO; } /* W195 */
+        else if (_strnicmp(act, "KDN=", 4) == 0 && act[4]) { s->act = OA_KDN; s->vk = toupper((unsigned char)act[4]); }
+        else if (_strnicmp(act, "KUP=", 4) == 0 && act[4]) { s->act = OA_KUP; s->vk = toupper((unsigned char)act[4]); }
+        else if (_strnicmp(act, "MDRAG", 5) == 0 && act[5]) { s->act = OA_MDRAG; strcpy_s(s->txt, sizeof s->txt, act + 5); }
         else if (_strnicmp(act, "TXT=", 4) == 0) { s->act = OA_TXT; strcpy_s(s->txt, sizeof s->txt, act + 4); }
         else if (_strnicmp(act, "MROW", 4) == 0 && act[4]) { s->act = OA_MROW; s->vk = atoi(act + 4); }
         else if (_strnicmp(act, "MTAB", 4) == 0 && act[4]) { s->act = OA_MTAB; s->vk = atoi(act + 4); }
@@ -1690,6 +2064,34 @@ static void ov_test_tick(unsigned n)
                 else { PostMessageA(h, WM_KEYUP, (WPARAM)ov_peek_vk(), (LPARAM)(1 | sc | 0xC0000000u)); }
             }
             break;
+        case OA_PHOTO: ov_post_key(h, g_ov_photo_vk[0] ? (int)g_ov_photo_vk[0] : VK_F12); break; /* W195 */
+        case OA_KDN: case OA_KUP: { /* W195: Taste einzeln druecken bzw. loslassen (gehalten) */
+            LPARAM sc = (LPARAM)MapVirtualKeyA((UINT)s->vk, MAPVK_VK_TO_VSC) << 16;
+            if (s->act == OA_KDN) { PostMessageA(h, WM_KEYDOWN, (WPARAM)s->vk, 1 | sc); }
+            else { PostMessageA(h, WM_KEYUP, (WPARAM)s->vk, (LPARAM)(1 | sc | 0xC0000000u)); }
+            break;
+        }
+        case OA_MDRAG: { /* W195: Linke Taste rechts in der 4:3-Box druecken, um dx_dy (Client-Pixel) ziehen, loslassen */
+            RECT rc;
+            unsigned abx, aby, abw, abh;
+            int x0, y0, dx = 0, dy = 0, q;
+            const char *pp = s->txt;
+            dx = (int)strtol(pp, (char **)&pp, 10);
+            if (*pp == '_') { dy = (int)strtol(pp + 1, NULL, 10); }
+            sb_aspect_box(&abx, &aby, &abw, &abh);
+            x0 = (int)(abx + abw * 3u / 4u);
+            y0 = (int)(aby + abh / 2u);
+            if (GetClientRect(h, &rc) && g_bb_w && g_bb_h) {
+                x0 = (int)((long long)x0 * rc.right / (long long)g_bb_w);
+                y0 = (int)((long long)y0 * rc.bottom / (long long)g_bb_h);
+            }
+            PostMessageA(h, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(x0, y0));
+            for (q = 1; q <= 4; q++) {
+                PostMessageA(h, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM(x0 + dx * q / 4, y0 + dy * q / 4));
+            }
+            PostMessageA(h, WM_LBUTTONUP, 0, MAKELPARAM(x0 + dx, y0 + dy));
+            break;
+        }
         case OA_STATE: /* W188: Beleg-Zeile Spielzustand */
         {
             unsigned tmr = 0;
@@ -1753,7 +2155,7 @@ static void ov_pad_tick(void)
     static const struct { unsigned short bit; int vk; } map[] = {
         { IMAP_PAD_DU, VK_UP }, { IMAP_PAD_DD, VK_DOWN }, { IMAP_PAD_DL, VK_LEFT }, { IMAP_PAD_DR, VK_RIGHT },
         { IMAP_PAD_A, VK_RETURN }, { IMAP_PAD_B, VK_ESCAPE }, { IMAP_PAD_START, OK_PSTART },
-        { IMAP_PAD_LB, OK_BTAB }, { IMAP_PAD_RB, VK_TAB }, { IMAP_PAD_X, 'B' } };
+        { IMAP_PAD_LB, OK_BTAB }, { IMAP_PAD_RB, VK_TAB }, { IMAP_PAD_X, 'B' }, { IMAP_PAD_Y, OK_PSHOT } };
     ULONGLONG now = GetTickCount64();
     unsigned short cur, edge;
     size_t k;
@@ -1771,17 +2173,31 @@ static void ov_pad_tick(void)
         next_poll = now + (seen ? 16u : 500u);
         seen = imap_pad_poll(0x80000000u | ++seq, &ps);
         cur = 0;
+        g_ph_pad_lx = g_ph_pad_ly = g_ph_pad_rx = g_ph_pad_ry = g_ph_pad_tr = 0;
         if (seen) {
+            int camsticks = 0;
             cur = ps.buttons;
-            if (ps.ly > 16000) { cur |= IMAP_PAD_DU; }
-            if (ps.ly < -16000) { cur |= IMAP_PAD_DD; }
-            if (ps.lx < -16000) { cur |= IMAP_PAD_DL; }
-            if (ps.lx > 16000) { cur |= IMAP_PAD_DR; }
+            if (g_ov_scr == SC_PHOTO) { /* W195: freie Kamera - Sticks/Trigger steuern die Kamera, Steuerkreuz das Panel */
+                sb_photo_ui_t pu;
+                sb_photo_get(&pu);
+                camsticks = pu.freecam;
+                if (camsticks) {
+                    g_ph_pad_lx = ps.lx; g_ph_pad_ly = ps.ly; g_ph_pad_rx = ps.rx; g_ph_pad_ry = ps.ry;
+                    g_ph_pad_tr = (int)ps.rt - (int)ps.lt;
+                }
+            }
+            if (!camsticks) {
+                if (ps.ly > 16000) { cur |= IMAP_PAD_DU; }
+                if (ps.ly < -16000) { cur |= IMAP_PAD_DD; }
+                if (ps.lx < -16000) { cur |= IMAP_PAD_DL; }
+                if (ps.lx > 16000) { cur |= IMAP_PAD_DR; }
+            }
         }
     }
     edge = g_pad_prev == 0xFFFF ? 0 : (unsigned short)(cur & ~g_pad_prev);
     g_pad_prev = cur;
     if (edge & (unsigned short)g_ov_pause_pad) { ov_key(OK_PAUSE); edge &= (unsigned short)~g_ov_pause_pad; }
+    if (edge & (unsigned short)g_ov_photo_pad) { ov_key(OK_PHOTO); edge &= (unsigned short)~g_ov_photo_pad; } /* W195 */
     for (k = 0; k < sizeof map / sizeof map[0]; k++) {
         if (edge & map[k].bit) {
             ov_key(map[k].vk);
@@ -1844,6 +2260,7 @@ static void ov_frame(unsigned n)
             ov_mouse((int)g_ov_mx, (int)g_ov_my, 0);
         }
         if (g_fb_pending && g_sb_paused) { ov_fb_create(); }
+        if (g_ov_scr == SC_PHOTO) { ov_ph_tick(); } /* W195 */
     }
     if (g_ov_status_until && GetTickCount64() > g_ov_status_until) {
         g_ov_status_until = 0;
@@ -1855,7 +2272,8 @@ static void ov_frame(unsigned n)
         const char *why = "Menue zu";
         if (g_ov_open) {
             if (g_ov_scr == SC_PAUSED) { want = 1; why = "Pause-Taste"; }
-            else if (g_ov_scr >= SC_FBKIND) { want = 1; why = "Feedback"; }
+            else if (OV_IS_FB(g_ov_scr)) { want = 1; why = "Feedback"; }
+            else if (g_ov_scr == SC_PHOTO) { want = 1; why = "Fotomodus"; } /* W195 */
             else if (g_cfg.menu_pause) { want = 1; why = "ESC-Menue"; }
             else { why = "menu_pause=0"; }
         }
@@ -2206,9 +2624,15 @@ static void ov_layout(unsigned boxh, unsigned *w, unsigned *h)
 {
     g_ovf = (float)boxh / 540.0f;
     if (g_ovf < 1.0f) { g_ovf = 1.0f; }
+    if (g_ov_scr == SC_PHOTO) { /* W195: Foto-Panel (Kopf, Tab-Zeile, 7 Zeilen, 4 Fusszeilen) */
+        int nr = PH_NR0 > PH_NR1 ? PH_NR0 : PH_NR1;
+        *w = (unsigned)S(272.0f);
+        *h = (unsigned)(S(20.0f) + S(3.0f) + S(OV_TABH) + S(4.0f) + nr * S(12.5f) + S(6.0f) + 4 * S(11.0f) + S(6.0f));
+        return;
+    }
     if (g_ov_scr != SC_SET) { /* W188: Menue-Bildschirme */
         int nl = ov_scr_lines();
-        *w = (unsigned)S(g_ov_scr >= SC_FBKIND ? 300.0f : 210.0f);
+        *w = (unsigned)S(OV_IS_FB(g_ov_scr) ? 300.0f : 210.0f);
         *h = (unsigned)(S(20.0f) + S(5.0f) + nl * S(11.0f) + (nl ? S(5.0f) : 0) + ov_scr_rows() * S(12.5f) + S(6.0f) +
                         2 * S(11.0f) + S(6.0f));
         return;
@@ -2340,7 +2764,7 @@ static void ov_paint_menu(void)
     };
     tag[0] = 0;
     for (k = 0; k < 8; k++) { ln[k][0] = 0; lc[k] = OV_C_TXT; }
-    wcscpy_s(title, 32, g_ov_scr >= SC_FBKIND ? L"\x25A0 FEEDBACK" : L"\x25A0 SYS-MENU");
+    wcscpy_s(title, 32, OV_IS_FB(g_ov_scr) ? L"\x25A0 FEEDBACK" : L"\x25A0 SYS-MENU");
     switch (g_ov_scr) {
     case SC_MENU:
         if (sb_pause_requested()) { ov_wkey(tag, 48, "ovl.hdr_paused"); }
@@ -2414,7 +2838,7 @@ static void ov_paint_menu(void)
     g_rel_nrows = nr;
     g_rel_valx = W;
     for (k = 0; k < nr; k++) {
-        int sel = k == g_ov_msel, dis = g_ov_scr == SC_MENU && k == MI_PHOTO;
+        int sel = k == g_ov_msel, dis = g_ov_scr == SC_MENU && k == MI_PHOTO && !ov_photo_allowed(); /* W195 */
         int yt = y + (rowh - ov_font_px) / 2 - S(0.5f);
         if (sel) {
             ov_fill(b + S(2.0f), y, W - b - S(2.0f), y + rowh, OV_C_SEL);
@@ -2422,8 +2846,11 @@ static void ov_paint_menu(void)
         }
         ov_wkey(lb, 64, rk[g_ov_scr][k]);
         ov_text(pad + S(6.0f), yt, lb, dis ? OV_C_DIM : OV_C_TXT, 0);
-        if (dis) { /* Fotomodus: ausgegraut, "kommt bald" */
-            ov_wkey(vb, 64, "ovl.m_soon");
+        if (dis) { /* W195: Fotomodus ausgegraut (VR bzw. photo_mode=0) */
+            ov_wkey(vb, 64, g_cfg.vr_enable ? "ovl.ph_m_vr" : "ovl.v_off");
+            ov_text(W - pad - S(2.0f), yt, vb, OV_C_DIM, 1);
+        } else if (g_ov_scr == SC_MENU && k == MI_PHOTO && !sel && g_ov_photo_vk[0] >= VK_F1 && g_ov_photo_vk[0] <= VK_F24) {
+            _snwprintf_s(vb, 64, _TRUNCATE, L"F%d", (int)(g_ov_photo_vk[0] - VK_F1 + 1)); /* W195: Taste */
             ov_text(W - pad - S(2.0f), yt, vb, OV_C_DIM, 1);
         } else if (sel) {
             ov_text(W - pad - S(2.0f), yt, L"\x25C4", OV_C_TXT, 1);
@@ -2441,11 +2868,144 @@ static void ov_paint_menu(void)
     sb_ovl_ui_finish(ov_bits, ov_bw, ov_bh, g_ovf);
 }
 
+/* W195 PHOTO-MODE: Foto-Panel (Look der Einstellungen: Kopf, Tab-Zeile, Zeilen Bezeichnung/Wert, Fusszeilen) */
+static void ov_paint_photo(void)
+{
+    static const char *const tk[PH_NTABS] = { "ovl.ph_tab_photo", "ovl.ph_tab_cam" };
+    static const char *const lk[] = { "ovl.ph_cockpit", "ovl.ph_freecam", "ovl.ph_mech", "ovl.ph_res", "ovl.ph_fmt",
+                                      "ovl.ph_shot", "ovl.lb_back", "ovl.ph_yaw", "ovl.ph_pitch", "ovl.ph_dist",
+                                      "ovl.ph_reset", "ovl.ph_aspect" };
+    static const int sc[SB_PHOTO_NSCALE] = { 1, 2, 4, 8 };
+    int W = (int)ov_bw, H = (int)ov_bh, rowh = S(12.5f), pad = S(6.0f), b = S(1.0f), th = S(OV_TABH), gap = S(3.0f);
+    int y, k, t, x, tw[PH_NTABS], sum = 0, foc = g_ph_sel < 0;
+    wchar_t lb[80], vb[80], nm[PH_NTABS][32], tag[48];
+    sb_photo_ui_t u;
+    (void)H;
+    sb_photo_get(&u);
+    tag[0] = 0;
+    ov_wkey(tag, 48, "ovl.hdr_paused");
+    y = ov_frame_head(W, H, L"\x25A0 PHOTO", tag) + gap;
+    /* Tab-Zeile */
+    for (t = 0; t < PH_NTABS; t++) {
+        SIZE sz;
+        ov_wkey(nm[t], 32, tk[t]);
+        GetTextExtentPoint32W(ov_dc, nm[t], (int)wcslen(nm[t]), &sz);
+        tw[t] = sz.cx + 2 * S(4.0f);
+        sum += tw[t];
+    }
+    {
+        int avail = W - 2 * pad - (PH_NTABS - 1) * gap;
+        if (avail > sum) { for (t = 0; t < PH_NTABS; t++) { tw[t] += (avail - sum) / PH_NTABS; } }
+    }
+    x = pad;
+    g_rel_tab_y0 = y;
+    g_rel_tab_y1 = y + th;
+    for (t = 0; t < PH_NTABS; t++) {
+        int act = t == g_ph_tab, ty = y + (th - ov_font_px) / 2 - S(0.5f);
+        g_rel_tab_x[t] = x;
+        if (act) {
+            ov_fill(x, y, x + tw[t], y + th, foc ? OV_C_HEAD : OV_C_SEL);
+            ov_fill(x, y + th - S(1.0f), x + tw[t], y + th, OV_C_TXT);
+        } else {
+            ov_fill(x, y + th - S(1.0f), x + tw[t], y + th, OV_C_DIM);
+        }
+        SetTextAlign(ov_dc, TA_CENTER | TA_TOP);
+        SetTextColor(ov_dc, act ? (foc ? OV_C_BG : OV_C_TXT) : OV_C_DIM);
+        TextOutW(ov_dc, x + tw[t] / 2, ty, nm[t], (int)wcslen(nm[t]));
+        x += tw[t] + gap;
+    }
+    g_rel_tab_x[PH_NTABS] = x - gap;
+    y += th + S(4.0f);
+    g_rel_rows_y = y;
+    g_rel_rowh = rowh;
+    g_rel_nrows = ov_ph_nrows();
+    g_rel_valx = W * 9 / 20;
+    for (k = 0; k < ov_ph_nrows(); k++) {
+        int it = ov_ph_row(k), sel = k == g_ph_sel, en = ov_ph_enabled(it, &u), act = it == PR_SHOT || it == PR_BACK || it == PR_RESET;
+        int yt = y + (rowh - ov_font_px) / 2 - S(0.5f);
+        COLORREF c = en ? OV_C_TXT : OV_C_DIM;
+        if (sel) {
+            ov_fill(b + S(2.0f), y, W - b - S(2.0f), y + rowh, OV_C_SEL);
+            ov_fill(b + S(2.0f), y, b + S(4.0f), y + rowh, OV_C_TXT);
+        }
+        ov_wkey(lb, 80, lk[it]);
+        if (it == PR_SHOT && (g_ov_photo_vk[0] >= VK_F1 && g_ov_photo_vk[0] <= VK_F24)) { /* Taste anzeigen */
+            size_t L = wcslen(lb);
+            _snwprintf_s(lb + L, 80 - L, _TRUNCATE, L" (F%d)", (int)(g_ov_photo_vk[0] - VK_F1 + 1));
+        }
+        ov_text(pad + S(6.0f), yt, lb, act ? (en ? OV_C_TXT : OV_C_DIM) : c, 0);
+        vb[0] = 0;
+        switch (it) {
+        case PR_COCKPIT: ov_wkey(vb, 80, u.cockpit ? "ovl.v_on" : "ovl.v_off"); break;
+        case PR_ASPECT: {
+            static const char *const ak[3] = { "ovl.ph_asp_crop", "ovl.ph_asp_wide", "ovl.ph_asp_square" };
+            ov_wkey(vb, 80, ak[u.aspect >= 0 && u.aspect <= 2 ? u.aspect : 0]);
+            break;
+        }
+        case PR_FREECAM: ov_wkey(vb, 80, u.freecam ? "ovl.v_on" : "ovl.v_off"); break;
+        case PR_MECH: ov_wkey(vb, 80, "ovl.ph_v_na"); break;
+        case PR_RES: {
+            unsigned w = u.sw[u.scale], hh = u.sh[u.scale];
+            double kk = (double)w / 1024.0;
+            if (w >= 3800 && w <= 3880) { kk = 4.0; } else if (w >= 7600 && w <= 7760) { kk = 8.0; }
+            else if (w >= 15200 && w <= 15520) { kk = 16.0; }
+            if (kk < 9.95) { _snwprintf_s(vb, 80, _TRUNCATE, L"\u00D7%d %u\u00D7%u (%.1fK)", sc[u.scale], w, hh, kk); }
+            else { _snwprintf_s(vb, 80, _TRUNCATE, L"\u00D7%d %u\u00D7%u (%.0fK)", sc[u.scale], w, hh, kk); }
+            break;
+        }
+        case PR_FMT: wcscpy_s(vb, 80, u.jpg ? L"JPG" : L"PNG"); break;
+        case PR_YAW: _snwprintf_s(vb, 80, _TRUNCATE, L"%+.0f\u00B0 / \u00B1%.0f\u00B0", (double)-u.yaw, (double)u.max_yaw); break;
+        case PR_PITCH: _snwprintf_s(vb, 80, _TRUNCATE, L"%+.0f\u00B0 / \u00B1%.0f\u00B0", (double)u.pitch, (double)u.max_pitch); break;
+        case PR_DIST: _snwprintf_s(vb, 80, _TRUNCATE, L"%.1f / %.0f", (double)u.dist, (double)u.max_dist); break;
+        default: break;
+        }
+        if (vb[0]) {
+            if (sel && en && it != PR_MECH) {
+                wchar_t tt[96];
+                _snwprintf_s(tt, 96, _TRUNCATE, L"\u25C4 %s \u25BA", vb);
+                ov_text(W - pad - S(2.0f), yt, tt, OV_C_TXT, 1);
+            } else {
+                ov_text(W - pad - S(2.0f), yt, vb, c, 1);
+            }
+        }
+        y += rowh;
+        if (it == PR_ASPECT) { ov_fill(pad, y - b / 2, W - pad, y - b / 2 + b, OV_C_DIM); }
+        if (it == PR_FMT || it == PR_RESET) { ov_fill(pad, y - b / 2, W - pad, y - b / 2 + b, OV_C_DIM); }
+    }
+    y += S(3.0f);
+    ov_fill(pad, y, W - pad, y + b, OV_C_LINE);
+    y += S(3.0f);
+    {
+        wchar_t l1[96], l2[96], l3[128], st[96];
+        char nb[256], dshow[200];
+        ov_wkey(l1, 96, "ovl.ph_hint1");
+        ov_wkey(l2, 96, u.freecam ? "ovl.ph_hint_cam" : (u.rec ? "ovl.ph_hint_nocam" : "ovl.ph_st_norec"));
+        sb_photo_dir_show(dshow, sizeof dshow);
+        _snprintf_s(nb, sizeof nb, _TRUNCATE, LT("ovl.ph_dir"), dshow);
+        ov_wu8(l3, 128, nb);
+        ov_text(pad + S(2.0f), y, l1, OV_C_DIM, 0);
+        y += S(11.0f);
+        ov_text(pad + S(2.0f), y, l2, OV_C_DIM, 0);
+        y += S(11.0f);
+        ov_text(pad + S(2.0f), y, l3, OV_C_DIM, 0);
+        y += S(11.0f);
+        st[0] = 0;
+        if (u.busy) { ov_wkey(st, 96, "ovl.ph_st_busy"); }
+        ov_text(pad + S(2.0f), y, g_ov_status[0] ? g_ov_status : st, OV_C_TXT, 0);
+    }
+    GdiFlush();
+    sb_ovl_ui_finish(ov_bits, ov_bw, ov_bh, g_ovf);
+}
+
 static void ov_paint(void)
 {
     int W = (int)ov_bw, H = (int)ov_bh, i, k, y, rowh = S(12.5f), pad = S(6.0f), b = S(1.0f), cl = S(8.0f);
     int head = S(20.0f), ty;
     wchar_t lb[64], vb[64];
+    if (g_ov_scr == SC_PHOTO) { /* W195 */
+        ov_paint_photo();
+        return;
+    }
     if (g_ov_scr != SC_SET) { /* W188: Menue-Bildschirme */
         ov_paint_menu();
         return;
@@ -2855,10 +3415,10 @@ void sb_ovl_draw(ID3D11RenderTargetView *rtv, int save)
         if (!ov_tex_upload()) { return; }
         g_ov_dirty = 0;
     }
-    if (g_ov_scr != SC_SET) { /* W188: Menue-Bildschirme mittig in der 4:3-Box */
+    if (g_ov_scr != SC_SET && g_ov_scr != SC_PHOTO) { /* W188: Menue-Bildschirme mittig in der 4:3-Box */
         x0 = bx + (bw - pw) / 2;
         y0 = by + (bh - ph) / 2;
-    } else {
+    } else { /* Einstellungen, W195 Foto-Panel: oben links (Bild bleibt frei) */
         x0 = bx + (unsigned)S(10.0f);
         y0 = by + (unsigned)S(10.0f);
     }
@@ -2874,8 +3434,8 @@ void sb_ovl_draw(ID3D11RenderTargetView *rtv, int save)
         g_hit_rowh = g_rel_rowh;
         g_hit_nrows = g_rel_nrows;
         g_hit_valx = (int)x0 + g_rel_valx;
-        g_hit_tab_y0 = g_ov_scr == SC_SET ? (int)y0 + g_rel_tab_y0 : -1;
-        g_hit_tab_y1 = g_ov_scr == SC_SET ? (int)y0 + g_rel_tab_y1 : -1;
+        g_hit_tab_y0 = (g_ov_scr == SC_SET || g_ov_scr == SC_PHOTO) ? (int)y0 + g_rel_tab_y0 : -1;
+        g_hit_tab_y1 = (g_ov_scr == SC_SET || g_ov_scr == SC_PHOTO) ? (int)y0 + g_rel_tab_y1 : -1;
         for (t = 0; t <= OV_NPAGES; t++) { g_hit_tab_x[t] = (int)x0 + g_rel_tab_x[t]; }
     }
     if (lk[0] != x0 || lk[1] != y0 || lk[2] != pw || lk[3] != ph) {

@@ -38,6 +38,53 @@ static unsigned g_bl_ndump;   /* Dateien im Diag-Bild */
 static unsigned long long g_bl_bytes;
 static int g_bl_cur;          /* aktueller Draw wird protokolliert */
 static int g_bl_tslot;        /* Ziel-Slot des aktuellen Draws */
+static int g_bl_pixel_slot = -1;
+static unsigned g_bl_pixel_i;
+static unsigned g_bl_pixel_tex;
+static float g_bl_pixel_color[4];
+
+/* W194: ein frei waehlbares Pixel nach jedem Draw, nur in den begrenzten
+ * Bloom-Diagnosebildern. Log nur bei Aenderung; keine Bildkorrektur.
+ * Damit laesst sich der erste aufhellende Effekt-Draw eindeutig bestimmen. */
+static void bl_flash_pixel(void)
+{
+    static ID3D11Texture2D *staging;
+    static DXGI_FORMAT format;
+    static unsigned frames[RTT_MAX], colors[RTT_MAX];
+    D3D11_TEXTURE2D_DESC td;
+    D3D11_MAPPED_SUBRESOURCE m;
+    D3D11_BOX box;
+    unsigned xy = (unsigned)g_cfg.flash_pixel - 1u, color, on, src, dst;
+    int slot = g_bl_pixel_slot;
+    if (slot < 0 || slot >= g_rtt_n || !g_rtt[slot].tex) { return; }
+    ID3D11Texture2D_GetDesc(g_rtt[slot].tex, &td);
+    if (td.Format != DXGI_FORMAT_R8G8B8A8_UNORM && td.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+        td.Format != DXGI_FORMAT_B8G8R8X8_UNORM) { return; }
+    box.left = xy & 65535u; box.top = xy >> 16;
+    box.right = box.left + 1u; box.bottom = box.top + 1u; box.front = 0u; box.back = 1u;
+    if (box.right > td.Width || box.bottom > td.Height || td.SampleDesc.Count != 1u) { return; }
+    if (!staging || format != td.Format) {
+        if (staging) { ID3D11Texture2D_Release(staging); staging = NULL; }
+        format = td.Format;
+        td.Width = td.Height = td.MipLevels = td.ArraySize = 1u;
+        td.Usage = D3D11_USAGE_STAGING; td.BindFlags = td.MiscFlags = 0;
+        td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &staging))) { return; }
+    }
+    ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)staging, 0, 0, 0, 0,
+                                             (ID3D11Resource *)g_rtt[slot].tex, 0, &box);
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)staging, 0, D3D11_MAP_READ, 0, &m))) { return; }
+    memcpy(&color, m.pData, sizeof color);
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)staging, 0);
+    if (frames[slot] != g_bl_p || colors[slot] != color) {
+        sb_render_blend_state(&on, &src, &dst);
+        HLOG_W("FLASH pixel f=%u d=%u tgt=%d xy=%u/%u ps=0x%X vs=0x%X tex=0x%X fmt=%u value=0x%08X prev=0x%08X first=%u bl=%u/%u/%u col=(%.9g,%.9g,%.9g,%.9g)",
+               g_bl_p, g_bl_pixel_i, slot, box.left, box.top, g_im_pshader, g_im_shader, g_bl_pixel_tex,
+               (unsigned)format, color, colors[slot], frames[slot] != g_bl_p, on, src, dst,
+               g_bl_pixel_color[0], g_bl_pixel_color[1], g_bl_pixel_color[2], g_bl_pixel_color[3]);
+    }
+    frames[slot] = g_bl_p; colors[slot] = color;
+}
 #define BL_HMAX 256u
 static unsigned g_bl_hash[BL_HMAX];
 static char g_bl_hname[BL_HMAX][48];
@@ -251,11 +298,28 @@ void bloom_diag_pre(const im_vertex_t *out, unsigned nout, unsigned nsrc, int rh
     int slot[4], tslot, rel = 0;
     char nm[96];
     g_bl_cur = 0;
+    g_bl_pixel_slot = -1;
     if (!bl_frame_on()) { return; }
     __try {
         sb_tex_stages(xp, nn);
         nst = bl_nstages(g_im_pshader, &tm);
         tslot = rtt_active() ? g_rtt_bound : -1;
+        if (g_cfg.flash_pixel > 0 && tslot >= 0 && g_rtt[tslot].w >= 256u && rs_cmask) {
+            g_bl_pixel_slot = tslot; g_bl_pixel_i = g_bl_i;
+            g_bl_pixel_tex = xp[0];
+            if (nout) { memcpy(g_bl_pixel_color, out[0].col, sizeof g_bl_pixel_color); }
+            else { memset(g_bl_pixel_color, 0, sizeof g_bl_pixel_color); }
+        }
+        /* W194: Mit der Lichtspur auch die Grenzen der Welt-Paesse sichern.
+         * pre zeigt das Ergebnis des vorigen PS, post den ersten Draw des
+         * neuen PS. So bleiben additive Effekt-Paesse sichtbar, ohne jeden
+         * Geometrie-Draw zu dumpen. Die bestehenden Bild-/Dump-Limits gelten. */
+        if (g_cfg.flash_diag > 0 && tslot >= 0 && g_rtt[tslot].w >= 256u && rs_cmask) {
+            static unsigned fp, ps;
+            static int target = -1;
+            if (fp != g_bl_p || ps != g_im_pshader || target != tslot) { rel = 1; }
+            fp = g_bl_p; ps = g_im_pshader; target = tslot;
+        }
         for (k = 0; k < 4u; k++) {
             slot[k] = (((tm >> (k * 5u)) & 0x1Fu) || k == 0u) ? bl_slot_of(xp[k]) : -1;
             if (slot[k] >= 0) { rel = 1; }
@@ -392,6 +456,10 @@ void bloom_diag_pre(const im_vertex_t *out, unsigned nout, unsigned nsrc, int rh
 void bloom_diag_post(void)
 {
     char nm[96];
+    if (g_bl_pixel_slot >= 0) {
+        __try { bl_flash_pixel(); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        g_bl_pixel_slot = -1;
+    }
     if (g_bl_bbm) { /* DIAG(SHADE-M2,W117) */
         g_bl_bbm = 0;
         __try { bl_bbreg(g_bl_bbi, "nach"); } __except (EXCEPTION_EXECUTE_HANDLER) {}

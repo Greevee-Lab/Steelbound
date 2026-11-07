@@ -198,6 +198,8 @@ void hcfg_defaults(void)
     g_cfg.rq_perf = 0; /* W80 SHADE-PERF: Messung aus (DIAG) */
     g_cfg.rq_diag = 0; /* W77 RENDER-QA: Zensus aus (DIAG) */
     g_cfg.rq_every = 3000;
+    g_cfg.flash_diag = 0;
+    g_cfg.flash_pixel = 0;
     g_cfg.interp_shots = 0;
     g_cfg.interp_shot_ticks = 6;
     g_cfg.interp_shot_every = 0;
@@ -233,6 +235,12 @@ void hcfg_defaults(void)
     g_cfg.menu_pause = 1;               /* W188: ESC-Menue pausiert */
     g_cfg.pause_live = 1;               /* W193: Standbild der Pause live neu zeichnen */
     strcpy_s(g_cfg.menu_peek_key, sizeof g_cfg.menu_peek_key, "H"); /* W193: H halten = Menue ausblenden */
+    g_cfg.photo_mode = 1;               /* W195 PHOTO-MODE */
+    g_cfg.photo_scale = 1;
+    g_cfg.photo_aspect = 1;             /* W195: Bildschirm (weit) */
+    g_cfg.photo_cam_yaw = 35;
+    g_cfg.photo_cam_pitch = 25;
+    g_cfg.photo_cam_dist = 4;
     strcpy_s(g_cfg.feedback_repo, sizeof g_cfg.feedback_repo, SB_FEEDBACK_REPO_DEFAULT); /* W188 */
     strcpy_s(g_cfg.lang, sizeof g_cfg.lang, "en"); /* W142: [ui] lang */
     g_cfg.perf_hud = 0;                 /* W122: Leistungs-Overlay aus (Taste aktiv) */
@@ -496,6 +504,14 @@ static int set_key_overlay(const char *k, const char *v)
     else if (strcmp(k, "menu_pause") == 0) { g_cfg.menu_pause = atoi(v); } /* W188 */
     else if (strcmp(k, "pause_live") == 0) { g_cfg.pause_live = atoi(v); } /* W193 */
     else if (strcmp(k, "menu_peek_key") == 0) { strncpy_s(g_cfg.menu_peek_key, sizeof g_cfg.menu_peek_key, v, _TRUNCATE); } /* W193 */
+    else if (strcmp(k, "photo_mode") == 0) { g_cfg.photo_mode = atoi(v); } /* W195 PHOTO-MODE */
+    else if (strcmp(k, "photo_dir") == 0) { strncpy_s(g_cfg.photo_dir, sizeof g_cfg.photo_dir, v, _TRUNCATE); }
+    else if (strcmp(k, "photo_scale") == 0) { g_cfg.photo_scale = atoi(v); }
+    else if (strcmp(k, "photo_aspect") == 0) { g_cfg.photo_aspect = atoi(v); }
+    else if (strcmp(k, "photo_format") == 0) { g_cfg.photo_jpg = (_stricmp(v, "jpg") == 0 || _stricmp(v, "jpeg") == 0); }
+    else if (strcmp(k, "photo_cam_yaw") == 0) { g_cfg.photo_cam_yaw = atoi(v); }
+    else if (strcmp(k, "photo_cam_pitch") == 0) { g_cfg.photo_cam_pitch = atoi(v); }
+    else if (strcmp(k, "photo_cam_dist") == 0) { g_cfg.photo_cam_dist = atoi(v); }
     else if (strcmp(k, "repo") == 0 || strcmp(k, "feedback_repo") == 0) { /* W188 [feedback] repo */
         strncpy_s(g_cfg.feedback_repo, sizeof g_cfg.feedback_repo, v, _TRUNCATE);
     }
@@ -848,6 +864,10 @@ static void set_key(const char *k, const char *v)
         g_cfg.rq_diag = atoi(v);
     } else if (strcmp(k, "rq_every") == 0) {
         g_cfg.rq_every = atoi(v);
+    } else if (strcmp(k, "flash_diag") == 0) {
+        g_cfg.flash_diag = atoi(v);
+    } else if (strcmp(k, "flash_pixel") == 0) {
+        g_cfg.flash_pixel = atoi(v);
     } else if (strcmp(k, "interp_bsets") == 0) {
         g_cfg.interp_bsets = atoi(v);
     } else if (strcmp(k, "interp_bsets_nod") == 0) {

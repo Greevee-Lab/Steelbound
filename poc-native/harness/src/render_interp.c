@@ -104,6 +104,11 @@ typedef struct {
     int nolerp;             /* MONITOR-FX (W105): Korn-Wash/Stoerzeilen nie interpolieren (Zufall je Tick) */
     unsigned fxk;           /* W133 REM-FX: 1 = Effekt-Draw des Spiels, 2 = eigener Zusatz-Draw (Glut/Licht) */
     float fxp[8];           /* W133 REM-FX: Parameter (b2) bei has_tex & FXR_MASK */
+    /* W195 PHOTO-MODE: Spiel-Viewport (x,y,w,h) und logische RT-Groesse (w,h) bei RT-Draws (0 = BB/unbekannt)
+     * sowie die Spiel-Projektion (m0, m5, m10, m14) zur Zeit des Draws - nur fuer die Foto-Wiedergabe
+     * (freie Kamera: Clip -> Sicht -> Clip); kein Einfluss auf Aufzeichnung/Wiedergabe sonst. */
+    unsigned short vpg[4], rtl[2];
+    float prj[4];
 } ip_op_t;
 
 typedef struct {
@@ -1115,6 +1120,15 @@ static void ip_rec_draw_core(const float pref[4][4], unsigned outhash, unsigned 
         o->rqr = g_rq_rec;
         for (k = 1; k < 4; k++) { if (o->rqr.srv[k]) { ID3D11ShaderResourceView_AddRef(o->rqr.srv[k]); } }
     }
+    if (rtt_active()) { /* W195 PHOTO-MODE: Spiel-Viewport/RT-Groesse fuer die freie Kamera der Foto-Wiedergabe */
+        unsigned rw = 0, rh = 0;
+        rtt_cur_dims(&rw, &rh);
+        o->vpg[0] = (unsigned short)g_vp_game.x; o->vpg[1] = (unsigned short)g_vp_game.y;
+        o->vpg[2] = (unsigned short)g_vp_game.w; o->vpg[3] = (unsigned short)g_vp_game.h;
+        o->rtl[0] = (unsigned short)rw; o->rtl[1] = (unsigned short)rh;
+    }
+    o->prj[0] = g_proj_game.m[0]; o->prj[1] = g_proj_game.m[5]; /* W195 */
+    o->prj[2] = g_proj_game.m[10]; o->prj[3] = g_proj_game.m[14];
     ip_snap(o);
     o->sig = (o->sig ^ (unsigned)(uintptr_t)o->rtv) * 16777619u;
     o->sig0 = (o->sig ^ topo ^ (has_tex << 8) ^ ((unsigned)o->cls << 9)) * 16777619u;
@@ -2943,7 +2957,85 @@ static ID3D11Buffer *ip_pl_cb;         /* ... und die neu berechnete Kopie (sfx0
 static sb_interp_mvp_hook_t ip_pl_hook; /* W191-Schnittstelle: MVP der BB-Draws (Cockpit-Projektion) */
 static unsigned ip_pl_nhook, ip_pl_nmfx, ip_pl_nnoshade; /* Zaehler der letzten Neuzeichnung */
 static int ip_pl_tex;                  /* 1 = in der Pause neu geladene Texturen tauschen (sb_tex_pause_map) */
-#define IP_PL_SRV(s) (ip_pl_tex ? sb_tex_pause_map(s) : (s))
+#define IP_PL_SRV0(s) (ip_pl_tex ? sb_tex_pause_map(s) : (s))
+static ID3D11ShaderResourceView *ip_ph_srv(ID3D11ShaderResourceView *s); /* W195: skalierte Zwischenziele */
+#define IP_PL_SRV(s) ip_ph_srv(IP_PL_SRV0(s))
+
+/* ---------- W195 PHOTO-MODE: Abweichungen der Foto-Wiedergabe (zusaetzlich zu ip_pl_*) ----------
+ * Nur waehrend sb_interp_photo_render (Pause, ctx_lock): ip_ph.on = 1. Sonst 0 -> alle Pfade unveraendert.
+ *  - Umlenkung: Draws/Clears in das Ziel tgt (Farbe) bzw. tgtd (Tiefe) gehen in die Foto-Kachel
+ *    (rtv/dsv), Viewport und Scissor werden affin abgebildet (x' = x*kx + ox, y' = y*ky + oy).
+ *  - Freie Kamera: Welt-Draws (Ziel wld, Clip-w echt) bekommen MVP * M (Clip -> Sicht der
+ *    Spielkamera -> verschobene/gedrehte Sicht -> Clip), M je Draw aus seinem Spiel-Viewport. */
+static sb_ph_rep_t ip_ph;
+static unsigned ip_ph_ncam, ip_ph_nred, ip_ph_nclr;
+static ID3D11ShaderResourceView *ip_ph_shsrv[8]; /* Schatten-SRV der skalierten Eintraege (gesetzt in ip_pl_render) */
+
+static ID3D11ShaderResourceView *ip_ph_srv(ID3D11ShaderResourceView *s)
+{
+    int j;
+    if (!ip_ph.on || !ip_ph.nsc || !s) { return s; }
+    for (j = 0; j < ip_ph.nsc; j++) { if (s == ip_ph_shsrv[j]) { return ip_ph.sc_srv[j]; } }
+    return s;
+}
+
+static int ip_ph_sc_rtv(ID3D11RenderTargetView *v)
+{
+    int j;
+    for (j = 0; v && j < ip_ph.nsc; j++) { if (ip_ph.sc_e[j] >= 0 && v == g_ish[ip_ph.sc_e[j]].rtv) { return j; } }
+    return -1;
+}
+
+static int ip_ph_sc_dsv(ID3D11DepthStencilView *v)
+{
+    int j;
+    for (j = 0; v && j < ip_ph.nsc; j++) { if (ip_ph.sc_d[j] >= 0 && v == g_ish[ip_ph.sc_d[j]].dsv) { return j; } }
+    return -1;
+}
+
+static int ip_m4inv(float out[16], const float m[16]);
+static void ip_m4mul(float r[16], const float a[16], const float b[16]);
+
+/* Clip-Matrix (Zeilenvektor, c' = c * M) eines Welt-Draws: Viewport-Abbildung rv (Spiel-Viewport im RT)
+ * zurueck, Projektion zurueck, Kamera-Delta, Projektion, rv. 0 = nicht anwendbar. */
+static int ip_ph_cam_matrix(const ip_op_t *o, float M[16])
+{
+    float P[16], Pi[16], RV[16], RVi[16], T[16], U[16];
+    /* eine Spielkamera fuer alle Welt-Draws: Projektion aus dem Zensus (a aus dem Anzeige-Seitenverhaeltnis,
+     * s. render_photo.c ph_rep_base); o->prj ist g_proj_game zur Zeit des Draws und nicht fuer jeden Draw die
+     * Projektion seines Vertex-Programms (W195-Befund: a = b im Zensus, Monitor zeigt 4:3) */
+    float a = ip_ph.def_prj[0], b = ip_ph.def_prj[1], A = ip_ph.def_prj[2], Bz = ip_ph.def_prj[3];
+    (void)o->prj;
+    memset(P, 0, sizeof P);
+    P[0] = a; P[5] = b; P[10] = A; P[11] = -1.0f; P[14] = Bz;
+    if (!ip_m4inv(Pi, P)) { return 0; }
+    memset(RV, 0, sizeof RV);
+    RV[0] = 1.0f; RV[5] = 1.0f; RV[10] = 1.0f; RV[15] = 1.0f;
+    if (o->rtl[0] && o->rtl[1] && o->vpg[2] && o->vpg[3] &&
+        !(o->vpg[0] == 0 && o->vpg[1] == 0 && o->vpg[2] == o->rtl[0] && o->vpg[3] == o->rtl[1])) {
+        float rw = (float)o->rtl[0], rh = (float)o->rtl[1];
+        RV[0] = (float)o->vpg[2] / rw;
+        RV[12] = ((float)o->vpg[2] + 2.0f * (float)o->vpg[0]) / rw - 1.0f;
+        RV[5] = (float)o->vpg[3] / rh;
+        RV[13] = 1.0f - ((float)o->vpg[3] + 2.0f * (float)o->vpg[1]) / rh;
+    }
+    if (!ip_m4inv(RVi, RV)) { return 0; }
+    /* Zeilenvektor: c_f' = c_f * RVi * Pi * D * P * RV */
+    ip_m4mul(T, RVi, Pi);
+    ip_m4mul(U, T, ip_ph.cam_d);
+    ip_m4mul(T, U, P);
+    ip_m4mul(M, T, RV);
+    return 1;
+}
+
+static int ip_ph_is_world(const ip_op_t *o)
+{
+    if (ip_ph.wld < 0 || o->kind != IP_DRAW) { return 0; }
+    if (o->sh_rtv != g_ish[ip_ph.wld].rtv) { return 0; }
+    if (o->cls) { return 1; }
+    /* 2D/RHW im Welt-RT: nur mit echtem Clip-w (vorab transformierte Welt, nicht Bildschirm-Quads) */
+    return o->rn[0][2] > 1.001f || o->rn[0][2] < 0.999f || o->rn[3][2] > 1.001f || o->rn[3][2] < 0.999f;
+}
 
 static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, int dbg, const ip_cx_t *x)
 {
@@ -3017,6 +3109,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
     }
     ip_sh_start(B, bi, A, ai, x);
     ip_sh_noskip = NULL;
+    if (ip_ph.on && ip_ph.init && ip_ph.tgt >= 0) { ip_ph.init(ip_ph.ctx, g_ish[ip_ph.tgt].sh); } /* W195: Kachel vorbelegen */
     if (vtk) {
         int k;
         for (k = 0; k < IP_SH_MAX; k++) {
@@ -3035,6 +3128,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
     for (i = 0; i < B->nops; i++) {
         ip_op_t *o = &B->ops[i];
         int lerp;
+        int phred = 0; /* W195: Viewport/Scissor dieser Op schon umgelenkt gesetzt */
         if ((ccm & 16) && cc_skip[i]) { continue; } /* W146 GPU-COST: ruhiges Ziel (Tick-Endstand kopiert) */
         if (ip_pl_on && o->nolerp && (ip_pl_mfx & (o->nolerp == MFX_WASH ? 1u : 2u))) { ip_pl_nmfx++; continue; } /* W193: monitor_fx aus */
         if (vtk && vt_skip[i]) { continue; } /* W183 VR-FIX3: RT-Op, Ziel hat den Tick-Endstand */
@@ -3054,6 +3148,22 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
         if (ip_gs_n > 0 && o->sh_rtv && o->sh_rtv != ip_gs_rtv[ip_gs_n - 1]) { ip_gs_mark(o->sh_rtv); } /* DIAG(TICK-PERF,W125) */
         if (ip_gs_n > 0 && o->kind == IP_DRAW) { ip_gs_draws[ip_gs_n - 1]++; if (o->rq) { ip_gs_rq[ip_gs_n - 1]++; } }
         if (o->kind == IP_CLR_RTV) {
+            if (ip_ph.on && ip_ph.tgt >= 0 && o->sh_rtv && o->sh_rtv == g_ish[ip_ph.tgt].rtv) { /* W195: Foto-Kachel */
+                D3D11_RECT cr;
+                cr.left = ip_ph.cl[0]; cr.top = ip_ph.cl[1]; cr.right = ip_ph.cl[2]; cr.bottom = ip_ph.cl[3];
+                if (x->c1 && cr.right > cr.left && cr.bottom > cr.top) {
+                    ID3D11DeviceContext1_ClearView(x->c1, (ID3D11View *)ip_ph.rtv, o->col, &cr, 1);
+                } else {
+                    ID3D11DeviceContext_ClearRenderTargetView(x->c, ip_ph.rtv, o->col);
+                }
+                ip_ph_nclr++;
+                continue;
+            }
+            if (ip_ph.on && ip_ph.nsc && ip_ph_sc_rtv(o->sh_rtv) >= 0) { /* W195: skaliertes Zwischenziel */
+                ID3D11DeviceContext_ClearRenderTargetView(x->c, ip_ph.sc_rtv[ip_ph_sc_rtv(o->sh_rtv)], o->col);
+                ip_ph_nclr++;
+                continue;
+            }
             if (vrp && o->rtv == g_rtv) { /* W134 VR-PROTO: BB-Clear -> Augenziel */
                 ID3D11DeviceContext_ClearRenderTargetView(x->c, vrp->rtv, o->col);
                 vrp->nclr++;
@@ -3064,6 +3174,19 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             continue;
         }
         if (o->kind == IP_CLR_DSV) {
+            if (ip_ph.on && ip_ph.tgtd >= 0 && ip_ph.dsv && o->sh_dsv && o->sh_dsv == g_ish[ip_ph.tgtd].dsv) { /* W195 */
+                ID3D11DeviceContext_ClearDepthStencilView(x->c, ip_ph.dsv, o->dsflags, o->z, (UINT8)o->stencil);
+                ip_ph_nclr++;
+                continue;
+            }
+            if (ip_ph.on && ip_ph.nsc && ip_ph_sc_dsv(o->sh_dsv) >= 0) { /* W195 */
+                int j = ip_ph_sc_dsv(o->sh_dsv);
+                if (ip_ph.sc_dsv[j]) {
+                    ID3D11DeviceContext_ClearDepthStencilView(x->c, ip_ph.sc_dsv[j], o->dsflags, o->z, (UINT8)o->stencil);
+                }
+                ip_ph_nclr++;
+                continue;
+            }
             if (vrp && o->dsv == g_dsv) { /* W134 VR-PROTO: BB-Tiefe -> Augentiefe */
                 if (vrp->dsv) {
                     ID3D11DeviceContext_ClearDepthStencilView(x->c, vrp->dsv, o->dsflags, o->z, (UINT8)o->stencil);
@@ -3076,11 +3199,66 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             }
             continue;
         }
-        if (o->sh_rtv != crtv || o->sh_dsv != cdsv) {
-            ID3D11DeviceContext_OMSetRenderTargets(x->c, 1, &o->sh_rtv, o->sh_dsv);
-            crtv = o->sh_rtv;
-            cdsv = o->sh_dsv;
-            rc.nrtv++;
+        {
+            ID3D11RenderTargetView *wr = o->sh_rtv; /* W195: Foto-Umlenkung (sonst die Op-Werte, unveraendert) */
+            ID3D11DepthStencilView *wd = o->sh_dsv;
+            if (ip_ph.on) {
+                int red = 0;
+                if (ip_ph.tgt >= 0 && wr && wr == g_ish[ip_ph.tgt].rtv) { wr = ip_ph.rtv; red = 1; }
+                if (ip_ph.tgtd >= 0 && ip_ph.dsv && wd && wd == g_ish[ip_ph.tgtd].dsv && (red || !o->sh_rtv)) { wd = ip_ph.dsv; red = 1; }
+                else if (red) { wd = NULL; } /* Umlenkung ohne passende Tiefe: keine (Groessen muessen passen) */
+                if (red) {
+                    D3D11_VIEWPORT v = o->vp;
+                    D3D11_RECT s;
+                    LONG l, t, r, bt;
+                    v.TopLeftX = o->vp.TopLeftX * ip_ph.kx + ip_ph.ox;
+                    v.TopLeftY = o->vp.TopLeftY * ip_ph.ky + ip_ph.oy;
+                    v.Width = o->vp.Width * ip_ph.kx;
+                    v.Height = o->vp.Height * ip_ph.ky;
+                    l = (LONG)floorf((float)o->sc.left * ip_ph.kx + ip_ph.ox);
+                    t = (LONG)floorf((float)o->sc.top * ip_ph.ky + ip_ph.oy);
+                    r = (LONG)ceilf((float)o->sc.right * ip_ph.kx + ip_ph.ox);
+                    bt = (LONG)ceilf((float)o->sc.bottom * ip_ph.ky + ip_ph.oy);
+                    s.left = l < ip_ph.cl[0] ? ip_ph.cl[0] : (l > ip_ph.cl[2] ? ip_ph.cl[2] : l);
+                    s.top = t < ip_ph.cl[1] ? ip_ph.cl[1] : (t > ip_ph.cl[3] ? ip_ph.cl[3] : t);
+                    s.right = r < s.left ? s.left : (r > ip_ph.cl[2] ? ip_ph.cl[2] : r);
+                    s.bottom = bt < s.top ? s.top : (bt > ip_ph.cl[3] ? ip_ph.cl[3] : bt);
+                    ID3D11DeviceContext_RSSetViewports(x->c, 1, &v);
+                    ID3D11DeviceContext_RSSetScissorRects(x->c, 1, &s);
+                    memset(&cvp, 0xFF, sizeof cvp); /* naechster nicht umgelenkter Draw setzt neu */
+                    memset(&csc, 0xFF, sizeof csc);
+                    ip_ph_nred++;
+                    phred = 1;
+                } else if (ip_ph.nsc && (ip_ph_sc_rtv(wr) >= 0 || (!wr && ip_ph_sc_dsv(wd) >= 0))) {
+                    int j = wr ? ip_ph_sc_rtv(wr) : ip_ph_sc_dsv(wd), jd = ip_ph_sc_dsv(wd);
+                    float k = ip_ph.sc_k[j];
+                    D3D11_VIEWPORT v = o->vp;
+                    D3D11_RECT sr;
+                    if (wr) { wr = ip_ph.sc_rtv[j]; }
+                    wd = (jd >= 0 && (jd == j || !o->sh_rtv)) ? ip_ph.sc_dsv[jd] : NULL;
+                    v.TopLeftX *= k; v.TopLeftY *= k; v.Width *= k; v.Height *= k;
+                    sr.left = (LONG)floorf((float)o->sc.left * k); sr.top = (LONG)floorf((float)o->sc.top * k);
+                    sr.right = (LONG)ceilf((float)o->sc.right * k); sr.bottom = (LONG)ceilf((float)o->sc.bottom * k);
+                    if (sr.left < 0) { sr.left = 0; }
+                    if (sr.top < 0) { sr.top = 0; }
+                    if (sr.right > ip_ph.sc_w[j]) { sr.right = ip_ph.sc_w[j]; }
+                    if (sr.bottom > ip_ph.sc_h[j]) { sr.bottom = ip_ph.sc_h[j]; }
+                    if (sr.right < sr.left) { sr.right = sr.left; }
+                    if (sr.bottom < sr.top) { sr.bottom = sr.top; }
+                    ID3D11DeviceContext_RSSetViewports(x->c, 1, &v);
+                    ID3D11DeviceContext_RSSetScissorRects(x->c, 1, &sr);
+                    memset(&cvp, 0xFF, sizeof cvp);
+                    memset(&csc, 0xFF, sizeof csc);
+                    ip_ph_nred++;
+                    phred = 1;
+                }
+            }
+            if (wr != crtv || wd != cdsv) {
+                ID3D11DeviceContext_OMSetRenderTargets(x->c, 1, &wr, wd);
+                crtv = wr;
+                cdsv = wd;
+                rc.nrtv++;
+            }
         }
         if (o->bs != cbs) {
             /* Blendfaktor/Maske setzt der IM-Pfad konstant (NULL/0xFFFFFFFF). */
@@ -3096,7 +3274,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             ID3D11DeviceContext_RSSetState(x->c, o->rs);
             crs = o->rs;
         }
-        if (memcmp(&o->vp, &cvp, sizeof cvp) != 0) {
+        if (!phred && memcmp(&o->vp, &cvp, sizeof cvp) != 0) {
             if (var == 1u) { /* DIAG(PERF-M2,W174) ip_ablate 1: Viewport 1x1 (keine Pixelarbeit) */
                 D3D11_VIEWPORT v1 = o->vp;
                 v1.Width = 1.0f; v1.Height = 1.0f;
@@ -3106,7 +3284,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             }
             cvp = o->vp;
         }
-        if (memcmp(&o->sc, &csc, sizeof csc) != 0) {
+        if (!phred && memcmp(&o->sc, &csc, sizeof csc) != 0) {
             ID3D11DeviceContext_RSSetScissorRects(x->c, 1, &o->sc);
             csc = o->sc;
         }
@@ -3121,6 +3299,17 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             ctopo = o->topo;
         }
         if (ring) { ip_ring_bind(x, rofs[2u * i], 0, rcur, &rc); } /* PERF(PERF-M2,W174) */
+        else if (ip_ph.on && (ip_ph.cam || (ip_ph.wcx > 0.0f && ip_ph.wcx != 1.0f)) && ip_ph_is_world(o)) {
+            /* W195 PHOTO-MODE: freie Kamera bzw. Weitwinkel (Welt-RT) */
+            float M[16], pm[16];
+            if (ip_ph.cam && ip_ph_cam_matrix(o, M)) { ip_m4mul(pm, o->mvp, M); ip_ph_ncam++; }
+            else { memcpy(pm, o->mvp, sizeof pm); }
+            if (ip_ph.wcx > 0.0f && ip_ph.wcx != 1.0f) { /* Clip x * wcx (Zeilenvektor: Spalte 0 skalieren) */
+                pm[0] *= ip_ph.wcx; pm[4] *= ip_ph.wcx; pm[8] *= ip_ph.wcx; pm[12] *= ip_ph.wcx;
+            }
+            ip_cb_write(x, x->cb0, pm, o->has_tex, 0.0f, 0);
+            rc.nmap++;
+        }
         else if (ip_pl_on && ip_pl_hook && o->rtv == g_rtv) { /* W193: Cockpit-Projektion (W191) am Standbild */
             float pm[16];
             memcpy(pm, o->mvp, sizeof pm);
@@ -4724,7 +4913,25 @@ static int ip_pl_consts(ip_list_t *B, sb_pl_info_t *inf)
     return 1;
 }
 
+static ID3D11Resource *ip_pl_render(sb_pl_info_t *inf, const sb_ph_rep_t *ph);
 ID3D11Resource *sb_interp_pause_render(sb_pl_info_t *inf)
+{
+    return ip_pl_render(inf, NULL);
+}
+
+/* W195 PHOTO-MODE: wie sb_interp_pause_render, zusaetzlich mit den Foto-Abweichungen ph (Umlenkung in eine
+ * Kachel, freie Kamera). Rueckgabe Schatten-BB (Cockpit-Bild) bzw. NULL. */
+ID3D11Resource *sb_interp_photo_render(const sb_ph_rep_t *ph, sb_pl_info_t *inf, unsigned *ncam, unsigned *nred)
+{
+    ID3D11Resource *r;
+    ip_ph_ncam = ip_ph_nred = ip_ph_nclr = 0;
+    r = ip_pl_render(inf, ph);
+    if (ncam) { *ncam = ip_ph_ncam; }
+    if (nred) { *nred = ip_ph_nred + ip_ph_nclr; }
+    return r;
+}
+
+static ID3D11Resource *ip_pl_render(sb_pl_info_t *inf, const sb_ph_rep_t *ph)
 {
     ip_list_t *A, *B;
     sb_pl_info_t dummy;
@@ -4752,7 +4959,15 @@ ID3D11Resource *sb_interp_pause_render(sb_pl_info_t *inf)
     ip_pl_nhook = ip_pl_nmfx = ip_pl_nnoshade = 0;
     ip_pl_tex = sb_tex_pause_nmap() > 0;
     ip_pl_on = 1;
+    if (ph) { /* W195 */
+        int j;
+        ip_ph = *ph;
+        ip_ph.on = 1;
+        if (ip_ph.nsc > 8) { ip_ph.nsc = 8; }
+        for (j = 0; j < ip_ph.nsc; j++) { ip_ph_shsrv[j] = ip_ph.sc_e[j] >= 0 ? g_ish[ip_ph.sc_e[j]].srv : NULL; }
+    }
     ip_replay_ex(B, ip_list_index(B), A, A ? ip_list_index(A) : -1, 1.0f, 0, ip_cx_imm());
+    memset(&ip_ph, 0, sizeof ip_ph);
     ip_pl_on = 0;
     ip_pl_tex = 0;
     ip_pl_cbsrc = NULL;
@@ -4799,6 +5014,259 @@ int sb_interp_pause_cmp(ID3D11Resource *img, unsigned *ndiff, unsigned *maxd)
     if (ndiff) { *ndiff = nd; }
     if (maxd) { *maxd = mx; }
     return 1;
+}
+
+/* ---------- W195 PHOTO-MODE: Zensus des juengsten Ticks und Matrix-Hilfen ---------- */
+static int ip_m4inv(float out[16], const float m[16])
+{
+    double a[4][8];
+    int i, j, k;
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 4; j++) { a[i][j] = m[i * 4 + j]; a[i][j + 4] = (i == j) ? 1.0 : 0.0; }
+    }
+    for (i = 0; i < 4; i++) {
+        int p = i;
+        double d;
+        for (k = i + 1; k < 4; k++) { if (fabs(a[k][i]) > fabs(a[p][i])) { p = k; } }
+        if (fabs(a[p][i]) < 1e-12) { return 0; }
+        if (p != i) { for (j = 0; j < 8; j++) { double t = a[i][j]; a[i][j] = a[p][j]; a[p][j] = t; } }
+        d = a[i][i];
+        for (j = 0; j < 8; j++) { a[i][j] /= d; }
+        for (k = 0; k < 4; k++) {
+            if (k != i && a[k][i] != 0.0) {
+                double f = a[k][i];
+                for (j = 0; j < 8; j++) { a[k][j] -= f * a[i][j]; }
+            }
+        }
+    }
+    for (i = 0; i < 4; i++) { for (j = 0; j < 4; j++) { out[i * 4 + j] = (float)a[i][j + 4]; } }
+    return 1;
+}
+
+static int ip_ph_ent_rtv(ID3D11RenderTargetView *v)
+{
+    int k;
+    if (!v) { return -1; }
+    for (k = 0; k < IP_SH_MAX; k++) { if (g_ish[k].rtv == v) { return k; } }
+    return -1;
+}
+
+static int ip_ph_ent_dsv(ID3D11DepthStencilView *v)
+{
+    int k;
+    if (!v) { return -1; }
+    for (k = 0; k < IP_SH_MAX; k++) { if (g_ish[k].dsv == v) { return k; } }
+    return -1;
+}
+
+/* W195: Vertices (Position, UV, NDC nach MVP) eines Draws der Liste B ins Log (Beleg, welcher Ausschnitt
+ * des Welt-RT auf dem Hauptmonitor landet). Nur aus dem Foto-Zensus. */
+static void ip_ph_dump_draw(ip_list_t *B, const ip_op_t *o, const char *what, float *bbx)
+{
+    D3D11_BUFFER_DESC bd;
+    D3D11_BOX bx;
+    D3D11_MAPPED_SUBRESOURCE m;
+    ID3D11Buffer *stg = NULL;
+    unsigned n = bbx ? (o->nv < 65536u ? o->nv : 65536u) : (o->nv < 6u ? o->nv : 6u), q; /* Grenzen ueber alle Vertices */
+    char line[900];
+    size_t pos = 0;
+    if (!B->vb || !n) { return; }
+    memset(&bd, 0, sizeof bd);
+    bd.ByteWidth = n * sizeof(im_vertex_t);
+    bd.Usage = D3D11_USAGE_STAGING;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &stg))) { return; }
+    bx.left = o->vstart * sizeof(im_vertex_t); bx.right = bx.left + n * sizeof(im_vertex_t);
+    bx.top = 0; bx.bottom = 1; bx.front = 0; bx.back = 1;
+    ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)stg, 0, 0, 0, 0, (ID3D11Resource *)B->vb, 0, &bx);
+    if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)stg, 0, D3D11_MAP_READ, 0, &m))) {
+        const im_vertex_t *v = (const im_vertex_t *)m.pData;
+        if (bbx) { bbx[0] = bbx[2] = bbx[4] = bbx[6] = 1e30f; bbx[1] = bbx[3] = bbx[5] = bbx[7] = -1e30f; }
+        for (q = 0; q < n; q++) {
+            float c[4];
+            ip_clip(v[q].pos, o->mvp, c);
+            if (bbx && c[3] != 0.0f) { /* NDC-x/y- und UV-Grenzen */
+                float nx = c[0] / c[3], ny = c[1] / c[3];
+                if (nx < bbx[0]) { bbx[0] = nx; } if (nx > bbx[1]) { bbx[1] = nx; }
+                if (ny < bbx[2]) { bbx[2] = ny; } if (ny > bbx[3]) { bbx[3] = ny; }
+                if (v[q].uv[0] < bbx[4]) { bbx[4] = v[q].uv[0]; } if (v[q].uv[0] > bbx[5]) { bbx[5] = v[q].uv[0]; }
+                if (v[q].uv[1] < bbx[6]) { bbx[6] = v[q].uv[1]; } if (v[q].uv[1] > bbx[7]) { bbx[7] = v[q].uv[1]; }
+            }
+            if (q < 6u) pos += (size_t)_snprintf_s(line + pos, sizeof line - pos, _TRUNCATE, " v%u ndc=(%.3f,%.3f) uv=(%.4f,%.4f)", q,
+                                       c[3] != 0.0f ? c[0] / c[3] : 0.0f, c[3] != 0.0f ? c[1] / c[3] : 0.0f, v[q].uv[0],
+                                       v[q].uv[1]);
+        }
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)stg, 0);
+        if (bbx) {
+            pos += (size_t)_snprintf_s(line + pos, sizeof line - pos, _TRUNCATE, " | alle: ndc x %.3f..%.3f y %.3f..%.3f uv %.4f..%.4f x %.4f..%.4f",
+                                       bbx[0], bbx[1], bbx[2], bbx[3], bbx[4], bbx[5], bbx[6], bbx[7]);
+        }
+        HLOG_I("PHOTO: %s n=%u vp=%.0fx%.0f@%.0f,%.0f vpg=%u,%u %ux%u tex=0x%X%s", what, o->nv, o->vp.Width, o->vp.Height,
+               o->vp.TopLeftX, o->vp.TopLeftY, o->vpg[0], o->vpg[1], o->vpg[2], o->vpg[3], o->has_tex, line);
+    }
+    ID3D11Buffer_Release(stg);
+}
+
+int sb_interp_photo_census(sb_ph_census_t *c, int log)
+{
+    ip_list_t *B;
+    unsigned cnt[IP_SH_MAX], cnt3[IP_SH_MAX], dcnt[IP_SH_MAX], bdcnt[IP_SH_MAX], i;
+    int k, best = -1, bd = -1, wd = -1;
+    D3D11_TEXTURE2D_DESC td;
+    memset(c, 0, sizeof *c);
+    c->bb = c->bbd = c->wld = c->wldd = -1;
+    if (!ip_init_done || ip_init_fail || ip_nhist < 1) { return 0; }
+    B = &g_ipl[ip_hist[ip_nhist - 1]];
+    if (!B->ready || B->bbref < 0) { return 0; }
+    memset(cnt, 0, sizeof cnt);
+    memset(cnt3, 0, sizeof cnt3);
+    memset(dcnt, 0, sizeof dcnt);
+    memset(bdcnt, 0, sizeof bdcnt);
+    c->ser = B->serial;
+    c->frame = B->frame;
+    c->nops = B->nops;
+    c->bb = B->bbref;
+    for (i = 0; i < B->nops; i++) {
+        const ip_op_t *o = &B->ops[i];
+        int e;
+        if (o->kind != IP_DRAW) { continue; }
+        e = ip_ph_ent_rtv(o->sh_rtv);
+        if (e < 0) { continue; }
+        cnt[e]++;
+        if (o->cls) { cnt3[e]++; }
+        if (e == B->bbref) {
+            int d = ip_ph_ent_dsv(o->sh_dsv);
+            c->n_bb++;
+            if (o->cls) { c->n_bb3d++; } else { c->n_bb2d++; }
+            if (d >= 0) { bdcnt[d]++; }
+        }
+    }
+    for (k = 0; k < IP_SH_MAX; k++) {
+        if (k != B->bbref && cnt[k]) { c->n_rts++; }
+        if (k != B->bbref && cnt3[k] >= 8u && (best < 0 || cnt3[k] > cnt3[best])) { best = k; }
+        if (bdcnt[k] && (bd < 0 || bdcnt[k] > bdcnt[bd])) { bd = k; }
+    }
+    c->bbd = bd;
+    c->wld = best;
+    if (g_ish[B->bbref].sh) {
+        ID3D11Texture2D_GetDesc(g_ish[B->bbref].sh, &td);
+        c->bb_w = td.Width;
+        c->bb_h = td.Height;
+        c->bb_tex = g_ish[B->bbref].sh;
+    }
+    if (best >= 0) {
+        int gotvp = 0, gotprj = 0;
+        for (i = 0; i < B->nops; i++) {
+            const ip_op_t *o = &B->ops[i];
+            int d;
+            if (o->kind != IP_DRAW || o->sh_rtv != g_ish[best].rtv) { continue; }
+            c->n_w++;
+            if (o->rq) { c->n_wrq++; }
+            if (o->cls) { c->n_w3d++; } else {
+                c->n_w2d++;
+                if (o->rn[0][2] > 1.001f || o->rn[0][2] < 0.999f || o->rn[3][2] > 1.001f || o->rn[3][2] < 0.999f) { c->n_w2dw++; }
+            }
+            d = ip_ph_ent_dsv(o->sh_dsv);
+            if (d >= 0) { dcnt[d]++; }
+            if (!gotvp && o->vpg[2] && o->vpg[3] && o->rtl[0] && o->rtl[1]) {
+                c->g_x = o->vpg[0]; c->g_y = o->vpg[1]; c->g_w = o->vpg[2]; c->g_h = o->vpg[3];
+                c->w_lw = o->rtl[0]; c->w_lh = o->rtl[1];
+                gotvp = 1;
+            }
+            if (!gotprj && o->cls && o->prj[0] > 0.05f && o->prj[1] > 0.05f) {
+                memcpy(c->prj, o->prj, sizeof c->prj);
+                gotprj = 1;
+            }
+        }
+        for (k = 0; k < IP_SH_MAX; k++) { if (dcnt[k] && (wd < 0 || dcnt[k] > dcnt[wd])) { wd = k; } }
+        c->wldd = wd;
+        if (g_ish[best].sh) {
+            ID3D11Texture2D_GetDesc(g_ish[best].sh, &td);
+            c->w_tw = td.Width;
+            c->w_th = td.Height;
+            c->w_tex = g_ish[best].sh;
+        }
+        if (!gotvp && c->w_tw) { c->g_w = c->w_lw = c->w_tw; c->g_h = c->w_lh = c->w_th; }
+    }
+    for (k = 0; k < IP_SH_MAX && c->n_rt < 16u; k++) { /* RT-Ziele (ohne BB) mit Tiefe, Groesse, Draws */
+        if (k == B->bbref || !cnt[k] || !g_ish[k].sh) { continue; }
+        c->rt[c->n_rt].e = k;
+        c->rt[c->n_rt].d = -1;
+        c->rt[c->n_rt].nd = cnt[k];
+        c->rt[c->n_rt].tex = g_ish[k].sh;
+        ID3D11Texture2D_GetDesc(g_ish[k].sh, &td);
+        c->rt[c->n_rt].w = td.Width;
+        c->rt[c->n_rt].h = td.Height;
+        for (i = 0; i < B->nops; i++) {
+            const ip_op_t *o = &B->ops[i];
+            if (o->kind == IP_DRAW && o->sh_rtv == g_ish[k].rtv && o->sh_dsv) {
+                c->rt[c->n_rt].d = ip_ph_ent_dsv(o->sh_dsv);
+                break;
+            }
+        }
+        c->n_rt++;
+    }
+    c->ok = best >= 0 && c->w_tw > 0 && c->bb_w > 0;
+    if (log) {
+        char top[256];
+        size_t pos = 0;
+        unsigned used[IP_SH_MAX];
+        int r;
+        memset(used, 0, sizeof used);
+        top[0] = 0;
+        for (r = 0; r < 6; r++) { /* groesste RT-Ziele (Draws) fuer den Beleg */
+            int m = -1;
+            for (k = 0; k < IP_SH_MAX; k++) {
+                if (k != B->bbref && cnt[k] && !used[k] && (m < 0 || cnt[k] > cnt[m])) { m = k; }
+            }
+            if (m < 0) { break; }
+            used[m] = 1;
+            memset(&td, 0, sizeof td);
+            if (g_ish[m].sh) { ID3D11Texture2D_GetDesc(g_ish[m].sh, &td); }
+            pos += (size_t)_snprintf_s(top + pos, sizeof top - pos, _TRUNCATE, "%se%d %ux%u %u/%u", r ? ", " : "", m,
+                                       td.Width, td.Height, cnt[m], cnt3[m]);
+        }
+        if (best >= 0) { /* Beleg: Komposition Welt-RT -> Monitor-RT -> BB (Ausschnitt/UV) */
+            int ncomp = 0, mon = -1, nbb = 0;
+            unsigned monw = 0;
+            for (i = 0; i < B->nops && ncomp < 3; i++) {
+                const ip_op_t *o = &B->ops[i];
+                if (o->kind == IP_DRAW && o->sh_srv && o->sh_srv == g_ish[best].srv && o->sh_rtv != g_ish[best].rtv) {
+                    int e = ip_ph_ent_rtv(o->sh_rtv);
+                    if (e >= 0 && g_ish[e].sh) { /* Monitor-RT = groesstes Ziel, das das Welt-RT liest */
+                        ID3D11Texture2D_GetDesc(g_ish[e].sh, &td);
+                        if (td.Width > monw) { monw = td.Width; mon = e; }
+                    }
+                    ip_ph_dump_draw(B, o, e == B->bbref ? "Welt-RT -> BB" : "Welt-RT -> Monitor-RT", NULL);
+                    ncomp++;
+                }
+            }
+            for (i = 0; mon >= 0 && mon != B->bbref && i < B->nops && nbb < 2; i++) {
+                const ip_op_t *o = &B->ops[i];
+                if (o->kind == IP_DRAW && o->sh_srv && o->sh_srv == g_ish[mon].srv && o->sh_rtv == g_ish[B->bbref].rtv) {
+                    float bx[8];
+                    ip_ph_dump_draw(B, o, "Monitor-RT -> BB", bx);
+                    nbb++;
+                    /* Anzeige-Seitenverhaeltnis des Kamerabilds: Pixel auf dem BB je Anteil des Kamerabilds
+                     * (UV-Breite = Anteil der Monitor-RT-Breite; UV-Hoehe / Viewport-Anteil des Welt-RT). */
+                    if (nbb == 1 && bx[1] > bx[0] && bx[3] > bx[2] && bx[5] > bx[4] && bx[7] > bx[6] && c->w_lh && c->g_h) {
+                        float px = (bx[1] - bx[0]) * 0.5f * (float)c->bb_w, py = (bx[3] - bx[2]) * 0.5f * (float)c->bb_h;
+                        float fu = bx[5] - bx[4], fv = (bx[7] - bx[6]) / ((float)c->g_h / (float)c->w_lh);
+                        float as = (px / fu) / (py / fv);
+                        if (as > 0.9f && as < 2.5f) { c->disp_asp = as; }
+                    }
+                }
+            }
+        }
+        HLOG_I("PHOTO: Zensus Tick f=%u ser=%u ops=%u | BB e%d %ux%u Draws %u (3D %u, 2D %u) Tiefe e%d | Welt-RT e%d %ux%u "
+               "logisch %ux%u Spiel-Viewport %u,%u %ux%u Draws %u (3D %u, 2D %u davon mit Clip-w %u, Shading %u) Tiefe e%d | "
+               "Projektion a=%.4f b=%.4f A=%.5f B=%.5f (b/a=%.4f) | Monitor zeigt %.4f:1 | RT-Ziele %u: %s",
+               c->frame, c->ser, c->nops, c->bb, c->bb_w, c->bb_h, c->n_bb, c->n_bb3d, c->n_bb2d, c->bbd, c->wld, c->w_tw,
+               c->w_th, c->w_lw, c->w_lh, c->g_x, c->g_y, c->g_w, c->g_h, c->n_w, c->n_w3d, c->n_w2d, c->n_w2dw, c->n_wrq,
+               c->wldd, (double)c->prj[0], (double)c->prj[1], (double)c->prj[2], (double)c->prj[3],
+               c->prj[0] > 0.0f ? (double)(c->prj[1] / c->prj[0]) : 0.0, (double)c->disp_asp, c->n_rts, top);
+    }
+    return c->ok;
 }
 
 /* Swap N (sb_render_present, vor dem Present). 1 = Present uebernommen. */

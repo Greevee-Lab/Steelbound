@@ -101,6 +101,7 @@ add_library(sb_emu SHARED
   src/sb_savecheck.c
   src/sb_overlay.c
   src/sb_pause.c
+  src/render_photo.c
   src/sb_feedback.c
   src/sb_perfhud.c
   src/audio_out.c

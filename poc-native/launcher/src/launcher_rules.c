@@ -53,6 +53,7 @@ static const lr_def_t kDef[LR_N] = {
     { LR_PAT_B, 0, 0, "R30 Remaster ohne Textur-Pack" },
     { LR_PAT_A, 1, 0, "R31 Pack-Grenze erreicht (32)" },        /* W172 */
     { LR_PAT_B, 0, 0, "R32 Pack Creator nicht neben dem Launcher" }, /* W172 */
+    { LR_PAT_B, 0, 0, "R33 Fotoordner nicht nutzbar" },              /* W195 */
 };
 
 int lrules_pattern(int rule)
@@ -93,6 +94,7 @@ void lrules_env_default(lr_env_t *e, const launcher_settings_t *s)
     e->pk_sel = 0;
     e->pk_sel_enabled = 1;
     e->has_creator = 1;
+    e->photo_dir_ok = 1; /* W195 */
 }
 
 /* Regel greift: Text aus Schluessel (printf-Format mit einem %s/%d-Argument
@@ -312,6 +314,13 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
         hit(&out[32], 32, LR_LVL_INFO);
         strcpy_s(out[32].text, sizeof out[32].text, LT("gui.rule_r32"));
     }
+    /* R33 (W195 PHOTO-MODE): eingestellter Fotoordner nicht nutzbar (nicht absolut bzw.
+     * weder vorhanden noch anlegbar) -> Hinweis; der Client faellt dann nicht still zurueck,
+     * sondern meldet die fehlgeschlagene Aufnahme. Leer = Standardordner (immer ok). */
+    if (s->photo_dir[0] && !e->photo_dir_ok) {
+        hit(&out[33], 33, LR_LVL_WARN);
+        _snprintf_s(out[33].text, sizeof out[33].text, _TRUNCATE, LT("gui.rule_r33"), s->photo_dir);
+    }
 }
 
 /* ------------------------------------------------------------------ */
@@ -361,6 +370,7 @@ void lrules_fixture(int rule, int v, launcher_settings_t *s, lr_env_t *e)
              e->tex_packs = 0; e->legacy_tex = 0; break;
     case 31: e->n_packs = v ? 32 : 31; break;
     case 32: e->has_creator = !v; break;
+    case 33: strcpy_s(s->photo_dir, sizeof s->photo_dir, "Q:\\gibt_es_nicht\\Fotos"); e->photo_dir_ok = !v; break; /* W195 */
     }
 }
 

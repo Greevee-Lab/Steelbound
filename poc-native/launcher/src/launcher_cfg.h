@@ -71,6 +71,11 @@ typedef struct {
     int rt_scale_dyn;         /* 1 = dynamisch (Regler), 0 = fest */
     /* W190 SAVE-LOCK: [game] save_lock (Client krnl_file.c, Standard 0 = Original) */
     int save_lock;            /* 1 = Spielstaende schuetzen (Testhilfe, Aenderungen beim Beenden verworfen) */
+    /* W195 PHOTO-MODE: [photo] (Client render_photo.c) */
+    char photo_dir[400];      /* Fotoordner (UTF-8 intern, ANSI in der Datei); leer = Standard (<Nutzerdaten>\Screenshots) */
+    int photo_scale;          /* Standard-Aufnahmeaufloesung 1/2/4/8 x Fenster */
+    int photo_jpg;            /* 0 = PNG, 1 = JPG */
+    int photo_aspect;         /* Bildformat ohne Cockpit: 0 Bildschirm (Ausschnitt), 1 Bildschirm (weit), 2 Kamera (wie Monitor) */
 } launcher_settings_t;
 
 /* W131 SHADER-OPT2: Shader-Keys (Index in shx[]) */

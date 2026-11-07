@@ -37,7 +37,7 @@ listed here only for attribution; it is not a third-party component.
 |---|---|---|
 | nv2a_vsh_cpu | Public Domain | knowledge reference for the vertex-shader bit layout (hardware facts); our interpreter is our own implementation |
 | XbSymbolDatabase | MIT | recognition results only (function names/addresses); no code taken, its files are not in the export |
-| Cxbx-Reloaded | GPL-2.0 | read-only reference during development; no copied code, tables or patterns in our code (see the license audit in the private repo). The one generated file (`ordinal_table.inc`) is being re-derived from independent sources before release |
+| Cxbx-Reloaded | GPL-2.0 | read-only reference during development; no copied code, tables or patterns in our code (see the license audit in the private repo). The kernel ordinal table (`ordinal_table.inc`) was re-derived clean-room from our own analysis of the user's disc and non-GPL sources |
 | IMA-ADPCM step table, FNV-1a hash, SHA-256 | public standard / public-domain algorithm / own implementation per FIPS 180-4 | small standard algorithms implemented in our own code |
 | MSVC runtime | user's Visual Studio license | NOT shipped |
 

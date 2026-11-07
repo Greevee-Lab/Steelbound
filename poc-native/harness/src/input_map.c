@@ -916,6 +916,25 @@ int imap_action_pause(const imap_profile_t *prof, imap_state_t *st,
     return hit;
 }
 
+/* W195 PHOTO-MODE: Client-Aktion "photo" (nur Pad-/Controller-Quellen, wie "pause"). */
+int imap_action_photo(const imap_profile_t *prof, imap_state_t *st,
+                      const imap_snap_t *snap)
+{
+    imap_snap_t loc;
+    int lvl, hit;
+    if (prof->photo.n == 0) {
+        st->prev_photo = 0;
+        return 0;
+    }
+    loc = *snap;
+    loc.key = imap_key_off;
+    imap_collect_suppression(prof, &loc);
+    lvl = imap_bind_active(&prof->photo, &loc) ? 1 : 0;
+    hit = (lvl && !st->prev_photo) ? 1 : 0;
+    st->prev_photo = lvl;
+    return hit;
+}
+
 int imap_bind_keys(const imap_bind_t *b, int *vks, int cap, unsigned *padmask)
 {
     int i, n = 0;
@@ -1059,7 +1078,8 @@ static const struct { const char *n; int bi; } kBiAlias[] = {
 /* W159: Client-Aktionen (Elemente ausserhalb des Controller-Blocks). */
 enum {
     IMAP_ACT_VR_RECENTER = 0,
-    IMAP_ACT_PAUSE = 1 /* W188 GAME-MENU */
+    IMAP_ACT_PAUSE = 1, /* W188 GAME-MENU */
+    IMAP_ACT_PHOTO = 2  /* W195 PHOTO-MODE */
 };
 
 /* Elementname -> Ziel. btn_i >= 0: Taste; axis >= 0 (+negpos 0/1/2 =
@@ -1085,6 +1105,10 @@ static int imap_elem_parse(const char *name, imap_elem_t *e)
     }
     if (imap_strieq(name, "pause")) { /* W188: Spiel anhalten/fortsetzen */
         e->action = IMAP_ACT_PAUSE;
+        return 0;
+    }
+    if (imap_strieq(name, "photo")) { /* W195: Fotomodus */
+        e->action = IMAP_ACT_PHOTO;
         return 0;
     }
     if ((name[0] == 'b' || name[0] == 'B') &&
@@ -1465,6 +1489,9 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
             } else if (e.action == IMAP_ACT_PAUSE) { /* W188 */
                 rc = imap_bind_add(&out->pause, alt, &out->has_pad,
                                    &out->has_sbc);
+            } else if (e.action == IMAP_ACT_PHOTO) { /* W195 */
+                rc = imap_bind_add(&out->photo, alt, &out->has_pad,
+                                   &out->has_sbc);
             } else if (e.btn_i >= 0) {
                 rc = imap_bind_add(&out->btn[e.btn_i], alt, &out->has_pad,
                                    &out->has_sbc);
@@ -1548,7 +1575,8 @@ static const char kBuiltinKeyboard[] =
     "[vr]\n"
     "vr_recenter = KEY:F8\n"
     "[client]\n"
-    "pause = KEY:PAUSE\n";
+    "pause = KEY:PAUSE\n"
+    "photo = KEY:F12\n";
 
 static const char kBuiltinXbox[] =
     "# xbox_pad_default - Xbox-Gamepad + Tastatur parallel (OR / Max-Abs).\n"
@@ -1605,7 +1633,8 @@ static const char kBuiltinXbox[] =
     "[vr]\n"
     "vr_recenter = KEY:F8\n"
     "[client]\n"
-    "pause = KEY:PAUSE\n";
+    "pause = KEY:PAUSE\n"
+    "photo = KEY:F12\n";
 
 int imap_profile_builtin(const char *name, imap_profile_t *out)
 {
@@ -1753,6 +1782,7 @@ int imap_profile_equal(const imap_profile_t *a, const imap_profile_t *b)
     }
     if (imap_bind_equal(&a->vr_recenter, &b->vr_recenter)) return 1; /* W159 */
     if (imap_bind_equal(&a->pause, &b->pause)) return 1; /* W188 */
+    if (imap_bind_equal(&a->photo, &b->photo)) return 1; /* W195 */
     if (a->has_pad != b->has_pad) return 1;
     if (a->has_sbc != b->has_sbc) return 1; /* W159 */
     return 0;

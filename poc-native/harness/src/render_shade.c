@@ -1222,6 +1222,68 @@ int rq_diag_vertex(unsigned i, float pos[4], float ot[4][4])
     return 1;
 }
 
+/* W194: begrenzte, rein lesende Lichtspur. Nur explizite Screenshot-Termine,
+ * maximal screenshot_max Bilder, 4096 Draws/Bild und sechs Quell-Vertices.
+ * Konstanten/Eingaenge erlauben Nachrechnung ohne Spielspeicher-Dump.
+ * rqv_run erhaelt stets eine Kopie (Programme duerfen Konstanten schreiben). */
+static void rq_flash_diag(const float *pb)
+{
+    static unsigned last, draw;
+    unsigned p = g_present_no + 1u, sf = (unsigned)g_cfg.screenshot_frame;
+    unsigned ev = (unsigned)g_cfg.screenshot_every, n, samples, k, j, xp[4], nn[4];
+    float vin[16][4], cc[RQV_NCONST][4];
+    rqv_out_t ro;
+    if (g_cfg.flash_diag <= 0 || g_cfg.screenshot_max <= 0 || !sf || !ev || p < sf ||
+        (p - sf) % ev || (p - sf) / ev >= (unsigned)g_cfg.screenshot_max ||
+        rq_u32(0x2EEA34u) != 4u) { return; }
+    if (last != p) { last = p; draw = 0; }
+    if (draw >= 4096u) { return; }
+    n = g_rq_src.use ? g_rq_src.n : g_rq_n;
+    if (!n) { return; }
+    sb_tex_stages(xp, nn);
+    HLOG_W("FLASH draw f=%u d=%u vs=0x%X ps=0x%X tgt=%d tex=0x%X n=%u raw=%d hash=0x%X",
+           p, draw, g_im_shader, g_im_pshader, rtt_active() ? g_rtt_bound : -1, xp[0], n, g_rq_src.use, g_rq_vse->hash);
+    HLOG_W("FLASH ambient f=%u d=%u c0=(%.9g,%.9g,%.9g,%.9g)",
+           p, draw, pb[0], pb[1], pb[2], pb[3]);
+    /* XDK 0x213CC0 / 0x217E3A: Sekundaerfarbe bei SPECULARENABLE oder
+     * PS-Bedarf (Device+8, Bit 6); kein Eingriff in den Hardware-Zustand. */
+    HLOG_W("FLASH spec f=%u d=%u rs=%u psneed=%u", p, draw,
+           rq_u32(0x21AC4Cu), (rq_u32(rq_u32(0x21A8A0u) + 8u) >> 6) & 1u);
+    __try { memcpy(cc, (const void *)(uintptr_t)RQ_VMIRROR, sizeof cc); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    for (j = 0; j < g_rq_vse->nc; j++) {
+        unsigned c = g_rq_vse->cidx[j];
+        HLOG_W("FLASH c f=%u d=%u c=%d v=(%.9g,%.9g,%.9g,%.9g)",
+               p, draw, (int)c - 96, cc[c][0], cc[c][1], cc[c][2], cc[c][3]);
+    }
+    samples = (unsigned)g_cfg.flash_diag;
+    if (samples > 6u) { samples = 6u; }
+    if (samples > n) { samples = n; }
+    for (k = 0; k < samples; k++) {
+        unsigned vi = samples > 1u ? k * (n - 1u) / (samples - 1u) : 0u;
+        memset(vin, 0, sizeof vin);
+        if (g_rq_src.use) { rq_raw_vertex(vi, vin); }
+        else {
+            for (j = 0; j < g_rq_vse->nv; j++) {
+                memcpy(vin[g_rq_vse->vreg[j]], g_rq_pack + ((size_t)vi * g_rq_vse->nv + j) * 4u, 16);
+            }
+        }
+        for (j = 0; j < 16u; j++) {
+            if (!(g_rq_vse->prog.vinmask & (1u << j))) { continue; }
+            HLOG_W("FLASH v f=%u d=%u i=%u r=%u v=(%.9g,%.9g,%.9g,%.9g)",
+                   p, draw, vi, j, vin[j][0], vin[j][1], vin[j][2], vin[j][3]);
+        }
+        __try { memcpy(cc, (const void *)(uintptr_t)RQ_VMIRROR, sizeof cc); }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+        rqv_run(&g_rq_vse->prog, (const float (*)[4])vin, cc, &ro);
+        HLOG_W("FLASH o f=%u d=%u i=%u pos=(%.9g,%.9g,%.9g,%.9g) d0=(%.9g,%.9g,%.9g,%.9g) d1=(%.9g,%.9g,%.9g,%.9g)",
+               p, draw, vi, ro.o[0][0], ro.o[0][1], ro.o[0][2], ro.o[0][3],
+               ro.o[3][0], ro.o[3][1], ro.o[3][2], ro.o[3][3],
+               ro.o[4][0], ro.o[4][1], ro.o[4][2], ro.o[4][3]);
+    }
+    draw++;
+}
+
 int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
 {
     float vblk[(RQV_NCONST + 4 + 16) * 4], pblk[28 * 4]; /* W121: +sfx0..sfx3 (Fenster bleibt 32) */
@@ -1435,6 +1497,7 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
     ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 4, g_rq_rec.srv);
     ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 4, g_rq_rec.smp);
     g_rq_stat_draws++;
+    if (g_cfg.flash_diag > 0) { rq_flash_diag(pblk); }
     if (g_cfg.rq_diag) {
         static unsigned seen[64][2], nseen;
         unsigned q;

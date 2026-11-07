@@ -116,6 +116,7 @@ static const char *kind_name(sb_ud_kind_t k)
     case SB_UD_SHADERCACHE: return "shadercache";
     case SB_UD_LOGS: return "logs";
     case SB_UD_CRASH: return "crash";
+    case SB_UD_SCREENSHOTS: return "Screenshots"; /* W195 PHOTO-MODE */
     default: return "";
     }
 }

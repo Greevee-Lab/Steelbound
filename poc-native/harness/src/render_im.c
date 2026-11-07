@@ -1149,6 +1149,21 @@ static void sb_im_submit_body(void)
             float ofx = vpw * 0.5f + (float)g_vp_game.x;
             float ofy = vph * 0.5f + (float)g_vp_game.y;
             float ofz = g_vp_game.minz;
+            int eye_clip = 0;
+            unsigned flash_blend, flash_src, flash_dst;
+            sb_render_blend_state(&flash_blend, &flash_src, &flash_dst);
+            /* W194 M3-FLASH: Additive P2-Effekte koennen die Augenebene schneiden.
+             * Vorzeitiges /w mit anschliessendem w=1 faltet deren Dreiecke
+             * auf die sichtbare Seite (additive Blitze brennen dann aus).
+             * Fuer diesen Draw homogene Pixelkoordinaten bis zum Rasterizer
+             * erhalten. Andere Blendpfade und vollstaendig vordere Draws
+             * bleiben bitgleich (keine allgemeine P2-Umstellung). */
+            for (i = 0; flash_blend && flash_src == 2u && flash_dst == 2u && i < n; i++) {
+                const float *pp = IMPOS(i);
+                float cw = pp[0] * vsh_mat[3][0] + pp[1] * vsh_mat[3][1] +
+                           pp[2] * vsh_mat[3][2] + pp[3] * vsh_mat[3][3];
+                if (cw <= 0.0f) { eye_clip = 1; break; }
+            }
             for (i = 0; i < n; i++) {
                 float *pp = IMPOS(i);
                 float x = pp[0], y = pp[1];
@@ -1157,11 +1172,18 @@ static void sb_im_submit_body(void)
                 float cy = x * vsh_mat[1][0] + y * vsh_mat[1][1] + z * vsh_mat[1][2] + w * vsh_mat[1][3];
                 float cz = x * vsh_mat[2][0] + y * vsh_mat[2][1] + z * vsh_mat[2][2] + w * vsh_mat[2][3] + vsh_zadd[2];
                 float cw = x * vsh_mat[3][0] + y * vsh_mat[3][1] + z * vsh_mat[3][2] + w * vsh_mat[3][3];
-                float rw = vsh_rcc(cw);
-                pp[0] = cx * scx * rw + ofx;
-                pp[1] = cy * scy * rw + ofy;
-                pp[2] = (scz != 0.0f) ? (cz * rw) : 0.0f; /* inverser Viewport: (pz-ofz)/scz */
-                pp[3] = 1.0f;
+                if (eye_clip) {
+                    pp[0] = cx * scx + ofx * cw;
+                    pp[1] = cy * scy + ofy * cw;
+                    pp[2] = (scz != 0.0f) ? cz : 0.0f;
+                    pp[3] = cw;
+                } else {
+                    float rw = vsh_rcc(cw);
+                    pp[0] = cx * scx * rw + ofx;
+                    pp[1] = cy * scy * rw + ofy;
+                    pp[2] = (scz != 0.0f) ? (cz * rw) : 0.0f; /* inverser Viewport: (pz-ofz)/scz */
+                    pp[3] = 1.0f;
+                }
             }
             rhw = 1;
         } else {

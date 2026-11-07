@@ -25,6 +25,8 @@
  * Teil 13 (W188 GAME-MENU): Aktion pause (Standard KEY:PAUSE, Tasten nur
  *         ueber das Fenster, Pad-Flanke im Hook, imap_bind_keys).
  * Teil 14 (W193 PAUSE-LIVE): imap_key_name fuer menu_peek_key.
+ * Teil 15 (W195 PHOTO-MODE): Aktion photo (Standard KEY:F12, Tasten nur ueber
+ *         das Fenster, Pad-Flanke im Hook, imap_bind_keys, Profilvergleich).
  */
 #include <stdio.h>
 #include <string.h>
@@ -709,6 +711,8 @@ static void dump_profile(const imap_profile_t *p)
         dump_bind("vr_recenter", &p->vr_recenter);
     if (p->pause.n) /* W188 */
         dump_bind("pause", &p->pause);
+    if (p->photo.n) /* W195 */
+        dump_bind("photo", &p->photo);
 }
 
 /* W79 INPUT-REAL: Kippschalter-Rast (key_toggles), Raw-Maus, Sperre. */
@@ -1730,6 +1734,56 @@ static void run_pause_cases(const imap_profile_t *kb, const imap_profile_t *xbox
     }
 }
 
+/* ---- Teil 15: W195 Aktion photo (wie pause) ---- */
+static void run_photo_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
+{
+    imap_profile_t p;
+    imap_state_t st;
+    imap_snap_t s;
+    cfgvar_t c = { 1, 0, 0, 0, 4, 0, 0 };
+    unsigned fr = 320000, pm = 0;
+    int vks[4], n;
+    printf("Teil 15: W195 Aktion photo\n");
+    CHECK(kb->photo.n == 1 && kb->photo.alt[0].a.kind == IMAP_A_KEY && kb->photo.alt[0].a.code == VK_F12,
+          "photo: kb KEY:F12");
+    CHECK(xbox->photo.n == 1 && xbox->photo.alt[0].a.code == VK_F12, "photo: xbox KEY:F12");
+    n = imap_bind_keys(&kb->photo, vks, 4, &pm);
+    CHECK(n == 1 && vks[0] == VK_F12 && pm == 0, "photo: bind_keys kb (n=%d)", n);
+    CHECK(imap_profile_parse("photo = KEY:F11, PAD:BACK+PAD:LB, PAD:X\n", "t", &p) == 0, "photo: parse");
+    CHECK(p.photo.n == 3 && p.pause.n == 0, "photo: n=3 (ist %d), pause unberuehrt", p.photo.n);
+    n = imap_bind_keys(&p.photo, vks, 4, &pm);
+    CHECK(n == 1 && vks[0] == VK_F11 && pm == IMAP_PAD_X, "photo: bind_keys F11 + Pad-Maske X (n=%d pm=0x%X)", n, pm);
+    imap_state_init(&st);
+    make_snap(&s, fr++, &c);
+    set_keys(NULL, 0);
+    CHECK(imap_action_photo(&p, &st, &s) == 0, "photo: Ruhe -> 0");
+    make_snap(&s, fr++, &c);
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = IMAP_PAD_X;
+    s.pad_present = 1;
+    CHECK(imap_action_photo(&p, &st, &s) == 1, "photo: Pad X -> Flanke");
+    make_snap(&s, fr++, &c);
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = IMAP_PAD_X;
+    s.pad_present = 1;
+    CHECK(imap_action_photo(&p, &st, &s) == 0, "photo: Pad X halten -> 0");
+    {
+        int kf[] = { VK_F12 };
+        imap_state_init(&st);
+        make_snap(&s, fr++, &c);
+        set_keys(kf, 1);
+        CHECK(imap_action_photo(kb, &st, &s) == 0, "photo: kb F12 im Hook -> 0 (Fenster)");
+        set_keys(NULL, 0);
+    }
+    {
+        imap_profile_t q;
+        CHECK(imap_profile_parse("photo = KEY:F12\n", "t", &p) == 0 &&
+              imap_profile_parse("photo = KEY:F11\n", "t", &q) == 0 && imap_profile_equal(&p, &q) != 0,
+              "photo: Vergleich erkennt Unterschied");
+    }
+    CHECK(imap_key_name("F12") == VK_F12, "photo: Tastenname F12");
+}
+
 int main(int argc, char **argv)
 {
     imap_profile_t kb_file, kb_in, xbox_file, xbox_in;
@@ -1816,6 +1870,8 @@ int main(int argc, char **argv)
     CHECK(imap_key_name("F9") == VK_F9 && imap_key_name("pause") == VK_PAUSE, "peek: Namen");
     CHECK(imap_key_name("0x48") == 0x48, "peek: Hex");
     CHECK(imap_key_name("XYZ") == -1 && imap_key_name("") == -1 && imap_key_name(NULL) == -1, "peek: unbekannt");
+
+    run_photo_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 15: W195 */
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;

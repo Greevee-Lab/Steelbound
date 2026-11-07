@@ -21,3 +21,6 @@ pfad	poc-native/harness/src/sb_feedback.h	lokaler Nutzername im Wort 'Greevee-La
 pfad	poc-native/harness/sb_native.cfg	lokaler Nutzername im Wort 'Greevee-Lab'	W188: Spieler-cfg [feedback] repo (GitHub-Owner des Community-Repos, oeffentlicher Name); kein Pfad
 pfad	bin/sb_emu.dll	lokaler Nutzername \(binaer\) im Wort 'Greevee-Lab'	W188: Standard von [feedback] repo im Client (GitHub-Owner des Community-Repos, oeffentlicher Name); kein Pfad
 pfad	editions/clean_allow.tsv	lokaler Nutzername im Wort 'Greevee-Lab'	Freigabe-Zeilen selbst nennen den GitHub-Owner 'Greevee-Lab' (oeffentlicher Name, vom Nutzer bestaetigt 7.11.); kein Pfad
+pfad	poc-native/launcher/src/launcher_gui.c	absoluter Pfad: C:..gibt_es_nicht_w195	erfundener, absichtlich fehlender Pfad im Launcher-Selbsttest (Fotoordner, W195)
+pfad	poc-native/launcher/src/launcher_rules.c	absoluter Pfad: Q:..gibt_es_nicht	erfundener Pfad in Regel R33 (unbrauchbarer Fotoordner, W195)
+pfad	bin/sb_launcher.exe	absoluter Pfad: (C:..gibt_es_nicht_w195|Q:..gibt_es_nicht)	erfundene Selbsttest-Pfade im Launcher-Binary (W195)

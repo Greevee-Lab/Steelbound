@@ -44,6 +44,7 @@ static float g_last_game_aspect, g_last_out_aspect;
 #include "vr.h" /* W134 VR-PROTO */
 #include "sb_relaunch.h" /* W186 RESET-TITLE */
 #include "sb_pause.h" /* W188 GAME-MENU */
+#include "sb_photo.h" /* W195 PHOTO-MODE */
 int g_vr_blit; /* W134 VR-PROTO: sb_render_blit zeigt ein Augenbild (ohne Nachbearbeitung des Monobilds) */
 
 static LRESULT CALLBACK sb_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
@@ -1580,11 +1581,19 @@ void sb_render_pause_frame(void)
                 }
             }
         }
-        sb_render_blit((ID3D11Resource *)(g_pl_use && g_pause_live ? g_pause_live : g_pause_snap));
+        {
+            ID3D11Resource *show = (ID3D11Resource *)(g_pl_use && g_pause_live ? g_pause_live : g_pause_snap);
+            int raw = 0, vb0 = g_vr_blit;
+            if (sb_photo_active()) { show = sb_photo_pause_image(show, &raw); } /* W195 PHOTO-MODE: Vorschau/Aufnahme */
+            if (raw) { g_vr_blit = 1; } /* Aussenwelt ohne Endbild-Nachbearbeitung (Cockpit-Licht, Bildraender ...) */
+            sb_render_blit(show);
+            g_vr_blit = vb0;
+        }
         sb_render_present_raw();
         sb_ctx_leave();
         return;
     }
+    if (sb_photo_active()) { (void)sb_photo_pause_image((ID3D11Resource *)g_pause_snap, NULL); } /* W195: x1 aus der Kopie */
     {
         ID3D11Resource *bb = NULL;
         ID3D11RenderTargetView_GetResource(g_rtv, &bb);

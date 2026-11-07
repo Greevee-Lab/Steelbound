@@ -73,7 +73,7 @@ enum { P_PLAY, P_DISPLAY, P_GFX, P_PACKS, P_CTRL, P_AUDIO, P_ADV, P_N };
 /* W142: Sprachschluessel (Anzeige via LT), nicht direkt ausgeben. */
 static const char *const kPageName[P_N] = {
     "gui.page_play", "gui.page_display", "gui.page_graphics", "gui.page_packs",
-    "gui.page_controls", "gui.page_audio", "gui.page_advanced"
+    "gui.page_controls", "gui.page_audio_extras", "gui.page_advanced" /* W195: Ton & Extras */
 };
 static const char *const kPageKey[P_N] = {
     "play", "display", "graphics", "packs", "controls", "audio", "advanced"
@@ -214,6 +214,12 @@ int gui_page_from_name(const char *v)
 #define ID_CTRL_ZADIG 1093 /* W185: Einrichtungsanleitung als HTML im Browser */
 #define ID_SAVES_RESET 1094 /* W187 KIA-LOAD: Spielstaende zuruecksetzen (mit Sicherung) */
 #define ID_SAVE_LOCK 1095  /* W190 SAVE-LOCK: Spielstaende schuetzen (Testhilfe) */
+#define ID_PH_DIR 1096     /* W195 PHOTO-MODE: Extras - Fotoordner (Feld) */
+#define ID_PH_BROWSE 1097  /* W195: Fotoordner durchsuchen */
+#define ID_PH_OPEN 1098    /* W195: Fotoordner oeffnen */
+#define ID_PH_RES 1099     /* W195: Standard-Aufnahmeaufloesung */
+#define ID_PH_FMT 1100     /* W195: Format PNG/JPG */
+#define ID_PH_ASP 1101     /* W195: Bildformat ohne Cockpit */
 static char g_img_msg[600]; /* W150: Ergebnis der letzten Abbild-Pruefung (UTF-8) */
 static int g_img_ok;
 static void check_image_ex(int status);
@@ -1868,11 +1874,74 @@ static void paint_gfx(void)
           C_DIM);
 }
 
+/* W195 PHOTO-MODE: Standard-Fotoordner (wie der Client: <Nutzerdaten>\Screenshots, legacy <Client>\out\Screenshots) */
+static void extras_default_dir(char *out, size_t cap)
+{
+    if (sb_userdata_path_peek(SB_UD_SCREENSHOTS, out, cap) == 1) {
+        return;
+    }
+    _snprintf_s(out, cap, _TRUNCATE, "%s\\out\\Screenshots", g_client_disp[0] ? g_client_disp : (g_client_dir[0] ? g_client_dir : "."));
+}
+
+/* W195 R33: Fotoordner nutzbar? Leer = Standard (ok); sonst absolut (X:\\ bzw. \\\\server) und vorhanden
+ * oder der uebergeordnete Ordner vorhanden (der Client legt die letzte Ebene an). */
+static int extras_dir_ok(const char *d)
+{
+    char p[600];
+    size_t n;
+    if (!d || !d[0]) {
+        return 1;
+    }
+    if (!((((d[0] | 32) >= 'a' && (d[0] | 32) <= 'z') && d[1] == ':' && (d[2] == '\\' || d[2] == '/')) ||
+          (d[0] == '\\' && d[1] == '\\'))) {
+        return 0;
+    }
+    if (is_dir_u8(d)) {
+        return 1;
+    }
+    strcpy_s(p, sizeof p, d);
+    n = strlen(p);
+    while (n > 0 && (p[n - 1] == '\\' || p[n - 1] == '/')) {
+        p[--n] = 0;
+    }
+    while (n > 0 && p[n - 1] != '\\' && p[n - 1] != '/') {
+        p[--n] = 0;
+    }
+    return n > 0 ? is_dir_u8(p) : 0;
+}
+
+/* W195: wirksamer Fotoordner (Feld oder Standard) */
+static void extras_dir(char *out, size_t cap)
+{
+    char cur[600];
+    ui_gettext(ctl(ID_PH_DIR), cur, sizeof cur);
+    trim_u8(cur);
+    if (cur[0]) {
+        strcpy_s(out, cap, cur);
+    } else {
+        extras_default_dir(out, cap);
+    }
+}
+
 static void paint_audio(void)
 {
     card(CX0, CY0, CW, 140, LT("gui.audio_card"));
     label(F_SMALL, LT("gui.audio_dev_txt"), CX0 + 18, CY0 + 90, CW - 36, 40,
           C_DIM);
+    /* W195 PHOTO-MODE: Karte "Extras" (Fotoordner, Standard-Aufnahmeaufloesung, Format) */
+    card(CX0, CY0 + 152, CW, 236, LT("gui.extras_card"));
+    label1(F_TINY, LT("gui.extras_dir"), CX0 + 18, CY0 + 190, CW - 36, 16, C_DIM);
+    label1(F_SMALL, LT("gui.extras_res"), CX0 + 18, CY0 + 250, 170, 30, C_DIM);
+    label1(F_SMALL, LT("gui.extras_fmt"), CX0 + 380, CY0 + 250, 70, 30, C_DIM);
+    label1(F_SMALL, LT("gui.extras_asp"), CX0 + 18, CY0 + 290, 170, 30, C_DIM);
+    {
+        char d[600], t[900];
+        extras_default_dir(d, sizeof d);
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.extras_txt"), d);
+        if (!paint_reason(33, CX0 + 18, CY0 + 332, CW - 36, 44)) { /* W195 R33: Ordner nicht nutzbar */
+            label(F_TINY, t, CX0 + 18, CY0 + 332, CW - 36, 44, C_DIM);
+        }
+    }
 }
 
 static void paint_ctrl(void)
@@ -3109,7 +3178,8 @@ static const char ks_legacy_text[] =
     "[vr]\n"
     "vr_recenter = KEY:F8\n"
     "[client]\n"
-    "pause = KEY:PAUSE\n";
+    "pause = KEY:PAUSE\n"
+    "photo = KEY:F12\n";
 
 /* Formen der Zeichnung. KS_LEDR/G/B = Taste mit roter/gruener/blauer
  * Leuchtleiste (3x3-Raster im Mittelblock). */
@@ -5134,6 +5204,10 @@ static void ui_from_settings(const launcher_settings_t *s)
     ui_set_checked(ID_AUDIO, s->audio);
     ui_set_checked(ID_LIVE, s->audio_live);
     ui_set_checked(ID_SAVE_LOCK, s->save_lock); /* W190 */
+    ui_settext(ctl(ID_PH_DIR), s->photo_dir); /* W195 PHOTO-MODE */
+    ComboBox_SetCurSel(ctl(ID_PH_RES), s->photo_scale == 8 ? 3 : s->photo_scale == 4 ? 2 : s->photo_scale == 2 ? 1 : 0);
+    ComboBox_SetCurSel(ctl(ID_PH_FMT), s->photo_jpg ? 1 : 0);
+    ComboBox_SetCurSel(ctl(ID_PH_ASP), (s->photo_aspect >= 0 && s->photo_aspect <= 2) ? s->photo_aspect : 1);
     ui_set_checked(ID_ASPECT, s->aspect_mode ? 1 : 0);
     refresh_ctrl_profiles(s->input_profile);
     ui_set_checked(ID_CTRL_SBC, s->sbc_usb);
@@ -5212,6 +5286,16 @@ static void ui_to_settings(launcher_settings_t *s)
     s->audio = ui_checked(ID_AUDIO);
     s->audio_live = ui_checked(ID_LIVE);
     s->save_lock = ui_checked(ID_SAVE_LOCK); /* W190 */
+    { /* W195 PHOTO-MODE */
+        static const int ph_map[4] = { 1, 2, 4, 8 };
+        ui_gettext(ctl(ID_PH_DIR), s->photo_dir, sizeof s->photo_dir);
+        trim_u8(s->photo_dir);
+        sel = ComboBox_GetCurSel(ctl(ID_PH_RES));
+        s->photo_scale = (sel >= 0 && sel < 4) ? ph_map[sel] : 1;
+        s->photo_jpg = ComboBox_GetCurSel(ctl(ID_PH_FMT)) == 1 ? 1 : 0;
+        sel = ComboBox_GetCurSel(ctl(ID_PH_ASP));
+        s->photo_aspect = (sel >= 0 && sel <= 2) ? sel : 1;
+    }
     /* Bildformat fest (S3.10, nie strecken). */
     s->aspect_mode = 1;
     ctrl_profile_from_ui(s->input_profile, sizeof s->input_profile);
@@ -5517,6 +5601,7 @@ static void rules_env(lr_env_t *e, launcher_settings_t *s)
         g_creator = creator_path(cp, sizeof cp);
     }
     e->has_creator = g_creator == 1;
+    e->photo_dir_ok = extras_dir_ok(s->photo_dir); /* W195 R33 */
     packs_env(e);
     g_tex_src = e->tex_packs + e->legacy_tex; /* W173: Texturen-Zeile */
     g_data_ok = e->data_ok;
@@ -10458,6 +10543,16 @@ static void ui_apply_language(void)
     ui_settext(ctl(ID_AUDIO), LT("gui.ton_on"));
     ui_settext(ctl(ID_LIVE), LT("gui.ton_live"));
     ui_settext(ctl(ID_SAVE_LOCK), LT("gui.save_lock")); /* W190 */
+    ui_settext(ctl(ID_PH_BROWSE), LT("gui.btn_browse")); /* W195 */
+    ui_settext(ctl(ID_PH_OPEN), LT("gui.extras_open"));
+    {
+        static const char *const kPhRes[] = { "gui.extras_res_1", "gui.extras_res_2", "gui.extras_res_4", "gui.extras_res_8" };
+        combo_refill(ID_PH_RES, kPhRes, 4);
+    }
+    {
+        static const char *const kPhAsp[] = { "ovl.ph_asp_crop", "ovl.ph_asp_wide", "ovl.ph_asp_square" };
+        combo_refill(ID_PH_ASP, kPhAsp, 3);
+    }
     ui_settext(ctl(ID_DIAG), LT(g_diag_open ? "gui.adv_diag_hide" : "gui.adv_diag_show"));
     ui_settext(ctl(ID_UNDO), LT("gui.undo"));
     /* Steuerung */
@@ -10799,6 +10894,22 @@ static void build_controls(void)
     /* --- Ton --- */
     mk(w, K_TOGGLE, ID_AUDIO, P_AUDIO, CX0 + 18, CY0 + 50, 300, 28, LT("gui.ton_on"),
        0);
+    /* --- W195 PHOTO-MODE: Extras (Fotoordner, Aufnahme-Aufloesung, Format) --- */
+    mk(w, K_EDIT, ID_PH_DIR, P_AUDIO, CX0 + 18, CY0 + 208, CW - 36 - 250, 30, "", 0);
+    mk(w, K_BTN, ID_PH_BROWSE, P_AUDIO, CX0 + CW - 18 - 242, CY0 + 208, 112, 30, LT("gui.btn_browse"), 0);
+    mk(w, K_BTN, ID_PH_OPEN, P_AUDIO, CX0 + CW - 18 - 122, CY0 + 208, 122, 30, LT("gui.extras_open"), 0);
+    c = mk(w, K_COMBO, ID_PH_RES, P_AUDIO, CX0 + 190, CY0 + 250, 170, 30, "", 0);
+    combo_add(c, LT("gui.extras_res_1"));
+    combo_add(c, LT("gui.extras_res_2"));
+    combo_add(c, LT("gui.extras_res_4"));
+    combo_add(c, LT("gui.extras_res_8"));
+    c = mk(w, K_COMBO, ID_PH_FMT, P_AUDIO, CX0 + 450, CY0 + 250, 110, 30, "", 0);
+    combo_add(c, "PNG");
+    combo_add(c, "JPG");
+    c = mk(w, K_COMBO, ID_PH_ASP, P_AUDIO, CX0 + 190, CY0 + 290, 240, 30, "", 0);
+    combo_add(c, LT("ovl.ph_asp_crop"));
+    combo_add(c, LT("ovl.ph_asp_wide"));
+    combo_add(c, LT("ovl.ph_asp_square"));
 
     /* --- Erweitert: Spieldateien (Ordner-Modus), Spielstaende, gespeicherte
      * Einstellungen, Feinabstimmung, Launcher, Diagnose --- */
@@ -11195,6 +11306,40 @@ static void on_command_inner(int id, int code)
         char path[1100];
         adv_hdd_path(path, sizeof path);
         adv_saves_reset_at(path, 1);
+        break;
+    }
+    case ID_PH_BROWSE: { /* W195 PHOTO-MODE: Fotoordner waehlen */
+        BROWSEINFOW bi;
+        LPITEMIDLIST pidl;
+        wchar_t wd[MAX_PATH], title[160];
+        memset(&bi, 0, sizeof bi);
+        bi.hwndOwner = g_hwnd;
+        u8_to_w(LT("gui.extras_pick"), title, 160);
+        bi.lpszTitle = title;
+        bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+        if (g_o.shot != 0) { /* Offscreen-/Testbetrieb: kein Dialog */
+            printf("[browse] photo_dir\n");
+            break;
+        }
+        pidl = SHBrowseForFolderW(&bi);
+        if (pidl) {
+            if (SHGetPathFromIDListW(pidl, wd)) { SetWindowTextW(ctl(ID_PH_DIR), wd); }
+            CoTaskMemFree(pidl);
+        }
+        break;
+    }
+    case ID_PH_OPEN: { /* W195: Fotoordner im Explorer (fehlt er noch: Hinweis, er entsteht mit dem ersten Foto) */
+        char path[700];
+        extras_dir(path, sizeof path);
+        if (!is_dir_u8(path)) {
+            set_status_k(LT("gui.extras_noopen"), 1);
+        } else if (g_o.shot != 0) {
+            printf("[open] %s\n", path);
+        } else {
+            wchar_t wp[700];
+            u8_to_w(path, wp, 700);
+            ShellExecuteW(g_hwnd, L"open", wp, NULL, NULL, SW_SHOWNORMAL);
+        }
         break;
     }
     case ID_HDD_OPEN:
@@ -13093,6 +13238,84 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     GT_OK("58 save-lock (Schalter Erweitert, Klick, user.cfg-Rundweg, Arbeitskopie-Selbsttest)");
                 } else {
                     GT_FAIL("58 save-lock", "%s", why58);
+                }
+            }
+            /* --- 59 (W195 PHOTO-MODE): Karte "Extras" auf Ton & Extras: Fotoordner (Feld,
+             * Durchsuchen, Ordner oeffnen), Standard-Aufnahmeaufloesung, Format; Einstellung
+             * <-> Oberflaeche, user.cfg-Rundweg [photo] (Umlaut-Pfad, x4, jpg), --set,
+             * Standardordner gesetzt, "Ordner oeffnen" ohne Ordner = Hinweis (kein Absturz) --- */
+            {
+                char why59[200] = "", f59[1300], dd59[700];
+                launcher_settings_t a59, b59;
+                int ok59 = 1, k59;
+                static const int ids59[] = { ID_PH_DIR, ID_PH_BROWSE, ID_PH_OPEN, ID_PH_RES, ID_PH_FMT, ID_PH_ASP };
+                for (k59 = 0; k59 < 6 && ok59; k59++) {
+                    uictl_t *u59 = ui_find(ids59[k59]);
+                    if (!u59 || !ui_visible_on(u59, P_AUDIO) || ui_visible_on(u59, P_ADV)) {
+                        ok59 = 0;
+                        _snprintf_s(why59, sizeof why59, _TRUNCATE, "Element %d fehlt/falsche Seite", ids59[k59]);
+                    }
+                }
+                lcfg_defaults(&a59);
+                if (ok59 && (a59.photo_dir[0] || a59.photo_scale != 1 || a59.photo_jpg != 0)) {
+                    ok59 = 0;
+                    strcpy_s(why59, sizeof why59, "Standard nicht leer/x1/PNG");
+                }
+                if (ok59) { /* Einstellung -> Oberflaeche -> Einstellung */
+                    strcpy_s(a59.photo_dir, sizeof a59.photo_dir, "C:\\Fotos \xC3\xBC" "ber\\SB");
+                    a59.photo_scale = 4;
+                    a59.photo_jpg = 1;
+                    a59.photo_aspect = 2;
+                    ui_from_settings(&a59);
+                    lcfg_defaults(&b59);
+                    ui_to_settings(&b59);
+                    if (strcmp(b59.photo_dir, a59.photo_dir) != 0 || b59.photo_scale != 4 || b59.photo_jpg != 1 ||
+                        b59.photo_aspect != 2) {
+                        ok59 = 0;
+                        strcpy_s(why59, sizeof why59, "Oberflaeche-Rundweg");
+                    }
+                }
+                extras_default_dir(dd59, sizeof dd59);
+                if (ok59 && (!dd59[0] || !strstr(dd59, "Screenshots"))) {
+                    ok59 = 0;
+                    strcpy_s(why59, sizeof why59, "Standardordner ohne Screenshots");
+                }
+                if (ok59) { /* user.cfg-Rundweg */
+                    _snprintf_s(f59, sizeof f59, _TRUNCATE, "%sw195_user_%lu.cfg", tmp, GetCurrentProcessId());
+                    u8_DeleteFile(f59);
+                    if (lcfg_save_user(f59, &a59) != 0) {
+                        ok59 = 0;
+                        strcpy_s(why59, sizeof why59, "lcfg_save_user");
+                    }
+                    lcfg_defaults(&b59);
+                    if (ok59 && (lcfg_load_file(f59, &b59) != 0 || strcmp(b59.photo_dir, a59.photo_dir) != 0 ||
+                                 b59.photo_scale != 4 || b59.photo_jpg != 1 || b59.photo_aspect != 2)) {
+                        ok59 = 0;
+                        strcpy_s(why59, sizeof why59, "Rundweg photo_dir/photo_scale/photo_format");
+                    }
+                    lcfg_apply_set(&b59, "photo_scale=3");
+                    if (ok59 && b59.photo_scale != 1) {
+                        ok59 = 0;
+                        strcpy_s(why59, sizeof why59, "--set photo_scale=3 nicht auf x1");
+                    }
+                    lcfg_apply_set(&b59, "photo_format=png");
+                    if (ok59 && b59.photo_jpg != 0) {
+                        ok59 = 0;
+                        strcpy_s(why59, sizeof why59, "--set photo_format=png");
+                    }
+                    u8_DeleteFile(f59);
+                }
+                if (ok59) { /* Ordner oeffnen ohne Ordner -> Hinweis */
+                    ui_settext(ctl(ID_PH_DIR), "C:\\gibt_es_nicht_w195\\x");
+                    on_command(ID_PH_OPEN, BN_CLICKED);
+                    ui_settext(ctl(ID_PH_DIR), "");
+                }
+                lcfg_defaults(&a59);
+                ui_from_settings(&a59);
+                if (ok59) {
+                    GT_OK("59 photo-extras (Karte Extras, Rundweg Oberflaeche/user.cfg, Umlaut-Pfad, --set, Standardordner)");
+                } else {
+                    GT_FAIL("59 photo-extras", "%s", why59);
                 }
             }
             ShowWindow(g_hwnd, SW_HIDE);

@@ -24,8 +24,8 @@ enum { LR_PAT_A = 1, LR_PAT_B, LR_PAT_C, LR_PAT_D, LR_PAT_E, LR_PAT_I };
 enum { LR_LVL_INFO = 0, LR_LVL_WARN = 1, LR_LVL_ERR = 2, LR_LVL_LOCK = 3 };
 
 #define LR_FIRST 1
-#define LR_LAST 32 /* W172: + R31 Pack-Grenze, R32 Pack Creator fehlt */
-#define LR_N 33 /* Index 1..32 = R1..R32, 0 unbenutzt */
+#define LR_LAST 33 /* W172: + R31 Pack-Grenze, R32 Pack Creator fehlt; W195: + R33 Fotoordner */
+#define LR_N 34 /* Index 1..33 = R1..R33, 0 unbenutzt */
 
 typedef struct {
     const launcher_settings_t *s; /* Oberflaechen-Stand (ui_to_settings) */
@@ -56,6 +56,8 @@ typedef struct {
     char default_setup[64]; /* profiles/standard.txt ("" = keines) */
     /* W172: Pack Creator neben dem Launcher (R32) */
     int has_creator;
+    /* W195 PHOTO-MODE: eingestellter Fotoordner nutzbar (absolut, vorhanden oder anlegbar) (R33) */
+    int photo_dir_ok;
 } lr_env_t;
 
 typedef struct {

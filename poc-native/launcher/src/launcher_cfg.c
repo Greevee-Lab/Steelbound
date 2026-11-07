@@ -36,6 +36,10 @@ void lcfg_defaults(launcher_settings_t *s)
     s->sbc_usb = 0;             /* W78: USB-Controller aus */
     s->sbc_mouse_off = 1;       /* W128: Maus-Achsen aus bei aktivem Controller */
     s->save_lock = 0;           /* W190 SAVE-LOCK: Original-Verhalten */
+    s->photo_dir[0] = '\0';     /* W195 PHOTO-MODE: Standardordner */
+    s->photo_scale = 1;
+    s->photo_jpg = 0;
+    s->photo_aspect = 1; /* W195: Bildschirm (weit) */
     s->interp_fps = 120;        /* W78: Spieler-Standard wie Client (hcfg) */
     s->window_mode = 0;         /* W81: Fenster (Client-Standard) */
     s->fs_hz = 0;               /* W81: Desktop-Rate */
@@ -353,6 +357,16 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         s->sbc_mouse_off = atoi(v);
     } else if (strcmp(k, "save_lock") == 0) { /* W190 */
         s->save_lock = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "photo_dir") == 0) { /* W195 */
+        strncpy_s(s->photo_dir, sizeof s->photo_dir, v, _TRUNCATE);
+    } else if (strcmp(k, "photo_scale") == 0) {
+        int n = atoi(v);
+        s->photo_scale = (n == 2 || n == 4 || n == 8) ? n : 1;
+    } else if (strcmp(k, "photo_format") == 0) {
+        s->photo_jpg = (_stricmp(v, "jpg") == 0 || _stricmp(v, "jpeg") == 0) ? 1 : 0;
+    } else if (strcmp(k, "photo_aspect") == 0) {
+        int n = atoi(v);
+        s->photo_aspect = (n >= 0 && n <= 2) ? n : 1;
     } else if (strcmp(k, "interp_fps") == 0) {
         s->interp_fps = atoi(v);
     } else if (strcmp(k, "vr_enable") == 0) { /* W134 */
@@ -441,7 +455,8 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
 static int is_path_key(const char *k)
 {
     return strcmp(k, "xbe_path") == 0 || strcmp(k, "media_root") == 0 ||
-           strcmp(k, "hdd_root") == 0 || strcmp(k, "game_image") == 0;
+           strcmp(k, "hdd_root") == 0 || strcmp(k, "game_image") == 0 ||
+           strcmp(k, "photo_dir") == 0; /* W195 PHOTO-MODE */
 }
 
 int lcfg_load_file_count(const char *path, launcher_settings_t *s, int *keys)
@@ -512,6 +527,8 @@ static const char *kManaged[][2] = {
     { "input_profile", "input" },   { "sbc_usb", "input" },
     { "sbc_mouse_off", "input" }, /* W128 */
     { "save_lock", "game" }, /* W190 */
+    { "photo_dir", "photo" },       { "photo_scale", "photo" }, /* W195 PHOTO-MODE */
+    { "photo_format", "photo" },    { "photo_aspect", "photo" },
     { "interp_fps", "render" },
     { "window_mode", "display" },   { "fs_hz", "display" },
     { "mouse_mode", "input" },      { "mouse_sens", "input" },
@@ -587,6 +604,10 @@ static void key_value(const launcher_settings_t *s, const char *k,
         u8_to_acp(s->hdd_root, out, cap);
     } else if (strcmp(k, "game_image") == 0) { /* W150 */
         u8_to_acp(s->game_image, out, cap);
+    } else if (strcmp(k, "photo_dir") == 0) { /* W195 PHOTO-MODE */
+        u8_to_acp(s->photo_dir, out, cap);
+    } else if (strcmp(k, "photo_format") == 0) {
+        strcpy_s(out, cap, s->photo_jpg ? "jpg" : "png");
     } else if (strcmp(k, "input_profile") == 0) {
         strcpy_s(out, cap, s->input_profile);
     } else if (strcmp(k, "mouse_mode") == 0) {
@@ -619,6 +640,10 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = s->sbc_mouse_off;
         } else if (strcmp(k, "save_lock") == 0) { /* W190 */
             v = s->save_lock ? 1 : 0;
+        } else if (strcmp(k, "photo_aspect") == 0) { /* W195 */
+            v = (s->photo_aspect >= 0 && s->photo_aspect <= 2) ? s->photo_aspect : 1;
+        } else if (strcmp(k, "photo_scale") == 0) { /* W195 */
+            v = (s->photo_scale == 2 || s->photo_scale == 4 || s->photo_scale == 8) ? s->photo_scale : 1;
         } else if (strcmp(k, "interp_fps") == 0) {
             v = s->interp_fps;
         } else if (strcmp(k, "window_mode") == 0) {

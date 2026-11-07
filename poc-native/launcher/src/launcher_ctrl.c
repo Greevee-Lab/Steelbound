@@ -491,6 +491,8 @@ const lctrl_elem_t kCtrlElems[LCTRL_ELEM_N] = {
     /* W188 GAME-MENU: Client-Aktion Pause (Abschnitt [client]); Konflikte
      * mit Spiel-Elementen meldet lctrl_bind_conflicts wie bei allen Zeilen. */
     { "pause", "-", "bind.pause", LCTRL_ACT },
+    /* W195 PHOTO-MODE: Client-Aktion Fotomodus (Abschnitt [client], Standard F12). */
+    { "photo", "-", "bind.photo", LCTRL_ACT },
 };
 
 /* W159: kanonische SBC-Quellnamen bi0..38 (parserstabil, s. kBiAlias). */

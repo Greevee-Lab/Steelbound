@@ -60,6 +60,10 @@ int sb_ovl_shot_due(char *name, unsigned cap);
 void sb_ovl_set_pause_binding(const int *vks, int n, unsigned padmask);
 /* Pause-Aktion aus der Belegung (Pad/Controller, Spiel-Thread): oeffnet den Pause-Bildschirm. */
 void sb_ovl_request_pause(const char *why);
+/* W195 PHOTO-MODE: Foto-Tasten der Profil-Aktion "photo" (hooks_input.c, n=0 -> F12) und Foto-Aktion aus
+ * Pad/Controller (Spiel-Thread): oeffnet den Fotomodus (bei offenem Menue: dorthin wechseln/Foto). */
+void sb_ovl_set_photo_binding(const int *vks, int n, unsigned padmask);
+void sb_ovl_request_photo(const char *why);
 
 /* ---- W122: kleine gemeinsame API (Look + Zeichenweg), genutzt vom
  * Leistungs-Overlay sb_perfhud.c. Farben (GDI COLORREF) und Deckung des

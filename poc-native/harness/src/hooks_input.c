@@ -644,6 +644,9 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                     unsigned pm = 0;
                     int pn = imap_bind_keys(&g_prof.pause, pvk, 4, &pm);
                     sb_ovl_set_pause_binding(pvk, pn, pm);
+                    /* W195 PHOTO-MODE: Tasten der Aktion "photo" (Standard F12) */
+                    pn = imap_bind_keys(&g_prof.photo, pvk, 4, &pm);
+                    sb_ovl_set_photo_binding(pvk, pn, pm);
                 }
             }
             if (g_prof_load_rc >= 0 && g_prof.has_pad &&
@@ -701,6 +704,10 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                 /* W188 GAME-MENU: Aktion "pause" aus Pad/Controller (Flanke) */
                 if (g_cfg.overlay && imap_action_pause(&g_prof, &g_prof_st, &snap)) {
                     sb_ovl_request_pause("Belegung");
+                }
+                /* W195 PHOTO-MODE: Aktion "photo" aus Pad/Controller (Flanke) */
+                if (g_cfg.overlay && imap_action_photo(&g_prof, &g_prof_st, &snap)) {
+                    sb_ovl_request_photo("Belegung");
                 }
             } else
                 imap_legacy_apply((imap_block_t *)s, &g_leg, &snap);

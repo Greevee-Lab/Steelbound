@@ -18,7 +18,7 @@
  * kein Testlauf das echte Profil beschreibt).
  *
  * Unterordner/Dateien der Wurzel: user.cfg, hdd\, packs\, shadercache\,
- * logs\, crash\. */
+ * logs\, crash\, Screenshots\ (W195). */
 #include <stddef.h>
 
 #ifdef __cplusplus
@@ -36,7 +36,8 @@ typedef enum {
     SB_UD_PACKS,       /* installierte Pakete + packs.json */
     SB_UD_SHADERCACHE,
     SB_UD_LOGS,
-    SB_UD_CRASH
+    SB_UD_CRASH,
+    SB_UD_SCREENSHOTS  /* W195 PHOTO-MODE: Fotos des Fotomodus */
 } sb_ud_kind_t;
 
 sb_ud_mode_t sb_userdata_mode(void);

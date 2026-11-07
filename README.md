@@ -9,10 +9,6 @@ starter application. No game content is included or distributed.
 This repository is source-available (see [License](#license)). It is not an
 official product and is not affiliated with Capcom or Microsoft.
 
-<a href="https://youtu.be/Iln350iJGcc"><img src="assets/cockpit.jpg" width="480" alt="Steelbound – cockpit in mission (click to watch the video on YouTube)"></a>
-
-▶ **[Watch Steelbound in action on YouTube](https://youtu.be/Iln350iJGcc)**
-
 ## Support the project
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/W7W2U4716)
@@ -29,6 +25,12 @@ support – one-time or monthly – is greatly appreciated. See [DONATE.md](DONA
 Thank you! ☕
 
 ## What Steelbound is
+
+<p align="center">
+  <a href="https://youtu.be/Iln350iJGcc"><img src="assets/cockpit.jpg" width="480" alt="Steelbound – cockpit in mission (click to watch the video on YouTube)"></a>
+  <br>
+  ▶ <a href="https://youtu.be/Iln350iJGcc"><b>Watch Steelbound in action on YouTube</b></a>
+</p>
 
 - A **launcher** (`sb_launcher.exe`): pick your own game copy, configure
   settings, manage texture and effect packs, then play.

@@ -36,6 +36,8 @@
 #include "sb_lang.h" /* W142 L10N */
 #include "vr.h"
 #include "vr_openxr.h"
+#include "sb_overlay.h" /* W197 VR-MENU: Menue-Panel */
+#include "sb_perfhud.h" /* W197 VR-MENU: F2-Panel */
 #include <math.h>
 
 #define VR_PI 3.14159265358979f
@@ -62,6 +64,7 @@ static ID3D11DeviceContext *xr_ctx;
 /* Kopf-Simulation (Vorschau) und Recentering */
 static float vr_yaw, vr_pitch, vr_roll, vr_hpos[3];
 static volatile LONG vr_rc_req;
+static volatile LONG vr_rc_gen;      /* W197: zaehlt ausgefuehrte Recenterings (Menue-Flaeche neu vor den Blick) */
 static float vr_rc_yaw, vr_rc_pos[3];
 static char vr_rc_why[24];
 static int vr_keys; /* Bit 0 links, 1 rechts, 2 hoch, 3 runter */
@@ -223,6 +226,7 @@ static void vr_recenter_apply(const float q[4], const float pos[3])
     vr_seat_head(pos, vr_rc_yaw, vr_rc_pos, before);
     vr_rc_yaw = q_yaw(q);
     vr_rc_pos[0] = pos[0]; vr_rc_pos[1] = pos[1]; vr_rc_pos[2] = pos[2];
+    InterlockedIncrement(&vr_rc_gen); /* W197 */
     vr_seat_head(pos, vr_rc_yaw, vr_rc_pos, after);
     HLOG_I("VR recenter (%s): Kopf yaw=%.1f pitch=%.1f pos=(%.3f,%.3f,%.3f) -> neue Mitte",
            vr_rc_why[0] ? vr_rc_why : "?", vr_rc_yaw * 180.0f / VR_PI, q_pitch(q) * 180.0f / VR_PI,
@@ -558,7 +562,16 @@ static int vq_init(void)
 
 /* 2 Dreiecke (6 Ecken: x y z w u v, Clip-Raum) mit srv auf rtv im Viewport vp
  * zeichnen; Kontextzustand gesichert und zurueck. Unter ctx_lock. */
+static void vq_draw_ex(ID3D11RenderTargetView *rtv, const float vp[4], const float v[36], ID3D11ShaderResourceView *srv,
+                       ID3D11PixelShader *ps, ID3D11BlendState *bs);
 static void vq_draw(ID3D11RenderTargetView *rtv, const float vp[4], const float v[36], ID3D11ShaderResourceView *srv)
+{
+    vq_draw_ex(rtv, vp, v, srv, NULL, NULL);
+}
+
+/* W197: ps/bs = NULL -> deckender Leinwand-PS ohne Mischen (W164); sonst eigener PS + Mischzustand. */
+static void vq_draw_ex(ID3D11RenderTargetView *rtv, const float vp[4], const float v[36], ID3D11ShaderResourceView *srv,
+                       ID3D11PixelShader *ps, ID3D11BlendState *bs)
 {
     D3D11_MAPPED_SUBRESOURCE map;
     D3D11_VIEWPORT nvp, svp[1];
@@ -595,7 +608,7 @@ static void vq_draw(ID3D11RenderTargetView *rtv, const float vp[4], const float 
     nvp.TopLeftX = vp[0]; nvp.TopLeftY = vp[1]; nvp.Width = vp[2]; nvp.Height = vp[3];
     nvp.MinDepth = 0.0f; nvp.MaxDepth = 1.0f;
     ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &rtv, NULL);
-    ID3D11DeviceContext_OMSetBlendState(g_ctx, NULL, NULL, 0xFFFFFFFFu);
+    ID3D11DeviceContext_OMSetBlendState(g_ctx, bs, NULL, 0xFFFFFFFFu);
     ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, NULL, 0);
     ID3D11DeviceContext_RSSetState(g_ctx, vq_rs);
     ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &nvp);
@@ -603,7 +616,7 @@ static void vq_draw(ID3D11RenderTargetView *rtv, const float vp[4], const float 
     ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 1, &vq_vb, &stride, &off);
     ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
     ID3D11DeviceContext_VSSetShader(g_ctx, vq_vs, NULL, 0);
-    ID3D11DeviceContext_PSSetShader(g_ctx, vq_ps, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(g_ctx, ps ? ps : vq_ps, NULL, 0);
     ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &srv);
     ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 1, &vq_smp);
     ID3D11DeviceContext_Draw(g_ctx, 6, 0);
@@ -784,6 +797,19 @@ static int vr_canvas_draw(const sb_vr_pass_t *p)
     return 1;
 }
 
+/* W197 VR-MENU: d3d11_render.c sb_render_blit (unter ctx_lock, vr_enable=1, ausserhalb des Spiegel-Pfads)
+ * VOR ESC-Menue und F2: Leinwand-Quelle ohne die eigenen Overlays sichern - beide erscheinen in der
+ * Brille als eigene Flaechen (sonst doppelt: auf der Leinwand und als Flaeche). */
+void sb_vr_canvas_source(void *swap_res)
+{
+    ID3D11Resource *sres = (ID3D11Resource *)swap_res;
+    if (!sb_vr_panels_on() || !sres || !g_dev || !g_cfg.vr_canvas || sb_interp_vr_available()) { return; }
+    if (vq_tex(&vr_cv_tex, &vr_cv_srv, &vr_cv_w, &vr_cv_h, g_bb_w, g_bb_h)) {
+        ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)vr_cv_tex, sres);
+        InterlockedExchange(&vr_cv_valid, 1);
+    }
+}
+
 /* d3d11_render.c sb_render_blit (unter ctx_lock, vr_enable=1, nach Kopie,
  * Nachbearbeitung und Overlays des Monitorbilds): Leinwand-Quelle sichern,
  * dann ggf. das Fenster durch das eingereichte Augenbild ersetzen.
@@ -804,7 +830,8 @@ int sb_vr_after_blit(void *swap_res, void *swap_rtv)
                    g_bb_w, g_bb_h, g_cfg.vr_canvas_dist, g_cfg.vr_canvas_size);
         }
     }
-    if (want_cv && vq_tex(&vr_cv_tex, &vr_cv_srv, &vr_cv_w, &vr_cv_h, g_bb_w, g_bb_h)) {
+    if (want_cv && !sb_vr_panels_on() && vq_tex(&vr_cv_tex, &vr_cv_srv, &vr_cv_w, &vr_cv_h, g_bb_w, g_bb_h)) {
+        /* W197: mit Menue-Flaechen kommt die Quelle aus sb_vr_canvas_source (vor ESC-Menue/F2) */
         ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)vr_cv_tex, sres);
         InterlockedExchange(&vr_cv_valid, 1);
     }
@@ -1633,6 +1660,379 @@ static void xr_takt(const sb_vr_pass_t *p, const XrView *views, const float hq[4
     }
 }
 
+/* ---------- W197 VR-MENU: ESC-Menue und F2 als Flaechen in der Brille ----------
+ * Umsetzung im eigenen Projection-Layer (Augenziel), nicht als XrCompositionLayerQuad:
+ *  - keine weiteren Swapchains/geteilten Texturen zwischen Spiel- und VR-Device (W145-Regel bleibt einfach),
+ *  - keine Abhaengigkeit von der Quad-Layer-Umsetzung der Runtime (VDXR/SteamVR/Mock),
+ *  - Augenbilder (Belege, Mock-Shots) zeigen genau, was die Brille zeigt.
+ * Menue: beim Oeffnen vr_menu_dist vor der aktuellen Blickrichtung (Gieren + Nicken, +-30 Grad begrenzt), Flaeche
+ * zum Kopf gedreht, danach weltfest im Sitz-Raum; ein Recentering (F8, ESC "Blick zentrieren") stellt sie neu vor
+ * den Blick. Panel in eigener Textur (vr_menu_px, Mip-Kette), Welt dahinter abgedunkelt (vr_menu_dim), Mauszeiger
+ * an der Stelle, die ein Klick im Fenster trifft. F2: kopffest oben rechts (vr_hud_*). Spiegel-Fenster: das
+ * Augenbild wird VOR den Flaechen gesichert, das Fenster zeigt Menue/F2 flach wie am Desktop. */
+static ID3D11PixelShader *vm_ps;      /* vormultipliziertes RGBA */
+static ID3D11BlendState *vm_bs;       /* ONE / INV_SRC_ALPHA, nur RGB */
+static ID3D11Texture2D *vm_cur_tex, *vm_dim_tex;
+static ID3D11ShaderResourceView *vm_cur_srv, *vm_dim_srv;
+static int vm_done, vm_dim_val = -1;
+static int vm_open, vm_vis_log = -1, vm_hud_log = -1;
+static float vm_c[3], vm_r[3], vm_u[3], vm_f[3]; /* Menue: Mitte (Sitz-Raum, m), Achsen rechts/oben, Blickrichtung */
+static float vm_pyaw, vm_ppitch;
+static float vm_hc[3];                /* F2: Mitte (Sitz-Raum, m) im letzten Bild */
+static LONG vm_rc_seen;
+static unsigned vm_rate_n;
+static LONGLONG vm_rate_q0;
+static float vm_rate;
+#define VM_CUR_W 32u
+#define VM_CUR_H 48u
+
+static float vm_seg_d(float px, float py, float ax, float ay, float bx, float by)
+{
+    float dx = bx - ax, dy = by - ay, t = ((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy + 1e-9f);
+    if (t < 0.0f) { t = 0.0f; } else if (t > 1.0f) { t = 1.0f; }
+    dx = ax + t * dx - px; dy = ay + t * dy - py;
+    return sqrtf(dx * dx + dy * dy);
+}
+
+/* Pfeil-Zeiger (weiss, schwarzer Rand, 4x4-Abtastung, vormultipliziert), Spitze bei Texel (2,2) */
+static void vm_cursor_bits(unsigned *px)
+{
+    static const float P[7][2] = { { 0, 0 }, { 0, 17 }, { 4, 13.2f }, { 7, 19.8f }, { 9.6f, 18.7f }, { 6.6f, 12.4f }, { 12, 12.4f } };
+    const float sc = 2.15f, o = 2.0f;
+    unsigned x, y;
+    int i, j, k;
+    for (y = 0; y < VM_CUR_H; y++) {
+        for (x = 0; x < VM_CUR_W; x++) {
+            float r = 0, a = 0;
+            for (j = 0; j < 4; j++) {
+                for (i = 0; i < 4; i++) {
+                    float X = ((float)x + ((float)i + 0.5f) / 4.0f - o) / sc, Y = ((float)y + ((float)j + 0.5f) / 4.0f - o) / sc, d = 1e9f;
+                    int in = 0;
+                    for (k = 0; k < 7; k++) {
+                        const float *A = P[k], *B = P[(k + 1) % 7];
+                        float dd = vm_seg_d(X, Y, A[0], A[1], B[0], B[1]);
+                        if (dd < d) { d = dd; }
+                        if ((A[1] > Y) != (B[1] > Y) && X < (B[0] - A[0]) * (Y - A[1]) / (B[1] - A[1]) + A[0]) { in = !in; }
+                    }
+                    if (in) { r += 1.0f; a += 1.0f; }
+                    else if (d * sc <= 1.6f) { a += 1.0f; }
+                }
+            }
+            r /= 16.0f; a /= 16.0f;
+            {
+                unsigned c = (unsigned)(r * 255.0f + 0.5f), al = (unsigned)(a * 255.0f + 0.5f);
+                px[y * VM_CUR_W + x] = (al << 24) | (c << 16) | (c << 8) | c; /* RGBA8 (R im niedrigsten Byte) */
+            }
+        }
+    }
+}
+
+static int vm_tex_rgba(ID3D11Texture2D **tex, ID3D11ShaderResourceView **srv, const unsigned *px, unsigned w, unsigned h)
+{
+    D3D11_TEXTURE2D_DESC td;
+    D3D11_SUBRESOURCE_DATA sd;
+    if (*srv) { ID3D11ShaderResourceView_Release(*srv); *srv = NULL; }
+    if (*tex) { ID3D11Texture2D_Release(*tex); *tex = NULL; }
+    memset(&td, 0, sizeof td);
+    td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_IMMUTABLE;
+    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    memset(&sd, 0, sizeof sd);
+    sd.pSysMem = px;
+    sd.SysMemPitch = w * 4u;
+    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, &sd, tex))) { *tex = NULL; return 0; }
+    if (FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)*tex, NULL, srv))) {
+        ID3D11Texture2D_Release(*tex); *tex = NULL; *srv = NULL; return 0;
+    }
+    return 1;
+}
+
+static int vm_init(void)
+{
+    static const char *ps =
+        "Texture2D t0 : register(t0); SamplerState s0 : register(s0);\n"
+        "float4 main(float4 p : SV_Position, float2 uv : TEXCOORD0) : SV_Target { return t0.Sample(s0, uv); }\n";
+    int dim = g_cfg.vr_menu_dim < 0 ? 0 : (g_cfg.vr_menu_dim > 90 ? 90 : g_cfg.vr_menu_dim);
+    if (!vm_done) {
+        ID3DBlob *b = NULL;
+        D3D11_BLEND_DESC bd;
+        unsigned *cur;
+        vm_done = 1;
+        if (!vq_init()) { return 0; }
+        if (sb_im_compile(ps, "ps_4_0", &b)) {
+            ID3D11Device_CreatePixelShader(g_dev, b->lpVtbl->GetBufferPointer(b), b->lpVtbl->GetBufferSize(b), NULL, &vm_ps);
+            b->lpVtbl->Release(b);
+        }
+        memset(&bd, 0, sizeof bd);
+        bd.RenderTarget[0].BlendEnable = TRUE;
+        bd.RenderTarget[0].SrcBlend = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+        bd.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+        bd.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+        bd.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+        bd.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN |
+                                                   D3D11_COLOR_WRITE_ENABLE_BLUE;
+        if (FAILED(ID3D11Device_CreateBlendState(g_dev, &bd, &vm_bs))) { vm_bs = NULL; }
+        cur = (unsigned *)malloc(VM_CUR_W * VM_CUR_H * 4u);
+        if (cur) {
+            vm_cursor_bits(cur);
+            vm_tex_rgba(&vm_cur_tex, &vm_cur_srv, cur, VM_CUR_W, VM_CUR_H);
+            free(cur);
+        }
+        HLOG_I("VR-MENU: Flaechen-Shader %s (Menue %d mm vor dem Blick, Bezugsbox %d mm, Textur %d px, abdunkeln %d %%; "
+               "F2 %d mm breit in %d mm, %d/%d Grad)", (vm_ps && vm_bs && vm_cur_srv) ? "bereit" : "FEHLER", g_cfg.vr_menu_dist,
+               g_cfg.vr_menu_size, g_cfg.vr_menu_px, dim, g_cfg.vr_hud_size, g_cfg.vr_hud_dist, g_cfg.vr_hud_yaw, g_cfg.vr_hud_pitch);
+    }
+    if (dim != vm_dim_val) {
+        unsigned px = (unsigned)(dim * 255 / 100) << 24; /* schwarz, Deckung dim % (vormultipliziert) */
+        vm_dim_val = dim;
+        vm_tex_rgba(&vm_dim_tex, &vm_dim_srv, &px, 1, 1);
+    }
+    return vm_ps && vm_bs && vm_cur_srv;
+}
+
+int sb_vr_panels_on(void)
+{
+    return vr_mode == 2 && g_cfg.vr_menu;
+}
+
+const char *sb_vr_hud_text(void)
+{
+    static char b[96];
+    if (vr_mode != 2) { _snprintf_s(b, sizeof b, _TRUNCATE, "VR %s", vr_mode == 1 ? "Vorschau" : "aus"); }
+    else { _snprintf_s(b, sizeof b, _TRUNCATE, "VR %5.1f B/s Auge %ux%u %d%%", (double)vm_rate, xr_ew, xr_eh, xr_scale_cur); }
+    return b;
+}
+
+/* VR-Bildrate fuer die F2-Flaeche (eingereichte Bilder je Sekunde) */
+static void vm_rate_tick(void)
+{
+    LONGLONG now = vr_now();
+    if (!vm_rate_q0) { vm_rate_q0 = now; }
+    vm_rate_n++;
+    if ((double)(now - vm_rate_q0) >= (double)vr_qpf.QuadPart) {
+        vm_rate = (float)((double)vm_rate_n * (double)vr_qpf.QuadPart / (double)(now - vm_rate_q0));
+        vm_rate_n = 0;
+        vm_rate_q0 = now;
+    }
+}
+
+static void vm_v3(float o[3], float x, float y, float z) { o[0] = x; o[1] = y; o[2] = z; }
+
+/* Kopfpose im Sitz-Raum: Rotation R (lokal -> Sitz, Zeilenvektor) und Kopfposition t (m, Sitz-Versatz eingerechnet) */
+static void vm_head_seat(const float hq[4], const float hp[3], float R[16], float t[3])
+{
+    float M[16], RC[16], RCI[16], rq[4], z[3] = { 0, 0, 0 };
+    m4_pose(M, hq, z);
+    q_from_euler(rq, vr_rc_yaw, 0, 0);
+    m4_pose(RC, rq, z);
+    m4_rigid_inv(RCI, RC);
+    m4_mul(R, M, RCI);
+    vr_seat_head(hp, vr_rc_yaw, vr_rc_pos, t);
+}
+
+/* Punkt (Sitz-Raum, m) -> Clip des Auges e */
+static void vm_clip(const sb_vr_pass_t *p, int e, const float pt[3], float o[4])
+{
+    float s = (float)g_cfg.vr_world_scale / 100.0f, x, y, z;
+    const float *E = p->E[e];
+    if (s <= 0.0f) { s = 1.0f; }
+    x = pt[0] * s; y = pt[1] * s; z = pt[2] * s;
+    o[0] = x * E[0] + y * E[4] + z * E[8] + E[12];
+    o[1] = x * E[1] + y * E[5] + z * E[9] + E[13];
+    o[2] = x * E[2] + y * E[6] + z * E[10] + E[14];
+    o[3] = x * E[3] + y * E[7] + z * E[11] + E[15];
+}
+
+/* Rechteck (Ecken TL, TR, BR, BL im Sitz-Raum, m) mit srv je Auge zeichnen (vormultipliziert gemischt) */
+static void vm_quad(const sb_vr_pass_t *p, float c[4][3], ID3D11ShaderResourceView *srv)
+{
+    static const int ix[6] = { 0, 1, 2, 0, 2, 3 };
+    static const float uu[4] = { 0, 1, 1, 0 }, vv[4] = { 0, 0, 1, 1 };
+    float v[36], cl[4];
+    int e, k;
+    for (e = 0; e < p->neyes; e++) {
+        for (k = 0; k < 6; k++) {
+            vm_clip(p, e, c[ix[k]], cl);
+            v[k * 6 + 0] = cl[0]; v[k * 6 + 1] = cl[1]; v[k * 6 + 2] = cl[2]; v[k * 6 + 3] = cl[3];
+            v[k * 6 + 4] = uu[ix[k]]; v[k * 6 + 5] = vv[ix[k]];
+        }
+        vq_draw_ex(p->rtv, p->vp[e], v, srv, vm_ps, vm_bs);
+    }
+}
+
+/* Rechteck aus Mitte m, Achsen r/u (Einheitsvektoren) und Breite/Hoehe (m) */
+static void vm_rect(float c[4][3], const float m[3], const float r[3], const float u[3], float w, float h)
+{
+    int k;
+    for (k = 0; k < 3; k++) {
+        c[0][k] = m[k] - 0.5f * w * r[k] + 0.5f * h * u[k];
+        c[1][k] = m[k] + 0.5f * w * r[k] + 0.5f * h * u[k];
+        c[2][k] = m[k] + 0.5f * w * r[k] - 0.5f * h * u[k];
+        c[3][k] = m[k] - 0.5f * w * r[k] - 0.5f * h * u[k];
+    }
+}
+
+/* Menue-Flaeche vor die aktuelle Blickrichtung (Sitz-Raum) legen */
+static void vm_place(const float hq[4], const float hp[3], const char *why)
+{
+    float hs[3], yaw = q_yaw(hq) - vr_rc_yaw, pitch = q_pitch(hq), lim = 30.0f * VR_PI / 180.0f, d;
+    float cy, sy, cp, sp;
+    int k;
+    while (yaw > VR_PI) { yaw -= 2.0f * VR_PI; }
+    while (yaw < -VR_PI) { yaw += 2.0f * VR_PI; }
+    if (pitch > lim) { pitch = lim; } else if (pitch < -lim) { pitch = -lim; }
+    d = (float)(g_cfg.vr_menu_dist > 100 ? g_cfg.vr_menu_dist : 1750) / 1000.0f;
+    vr_seat_head(hp, vr_rc_yaw, vr_rc_pos, hs);
+    cy = cosf(yaw); sy = sinf(yaw); cp = cosf(pitch); sp = sinf(pitch);
+    vm_v3(vm_f, -sy * cp, sp, -cy * cp);   /* Blickrichtung (RH, -z vorne, Gieren links positiv) */
+    vm_v3(vm_r, cy, 0.0f, -sy);            /* rechts */
+    vm_v3(vm_u, sy * sp, cp, cy * sp);     /* oben (zum Kopf geneigt) */
+    for (k = 0; k < 3; k++) { vm_c[k] = hs[k] + d * vm_f[k]; }
+    vm_pyaw = yaw * 180.0f / VR_PI;
+    vm_ppitch = pitch * 180.0f / VR_PI;
+    {
+        static unsigned nlog;
+        if (nlog++ < 60u) {
+            HLOG_I("VR-MENU: Menue-Flaeche platziert (%s): vor dem Blick gier=%.1f nicken=%.1f (relativ zur Mitte), Abstand %.2f m, "
+                   "Mitte im Sitz (%.3f,%.3f,%.3f) m, Kopf (%.3f,%.3f,%.3f) m - danach weltfest", why, (double)vm_pyaw, (double)vm_ppitch,
+                   (double)d, (double)vm_c[0], (double)vm_c[1], (double)vm_c[2], (double)hs[0], (double)hs[1], (double)hs[2]);
+        }
+    }
+}
+
+/* VR-Thread, unter ctx_lock, nach Wiedergabe/Leinwand und nach der Spiegel-Sicherung:
+ * Menue (weltfest) + Zeiger, F2 (kopffest). Rueckgabe Bit 0 = Menue gezeichnet, Bit 1 = F2. */
+static int vm_draw(const sb_vr_pass_t *p, const float hq[4], const float hp[3], int *screen)
+{
+    sb_ovl_vr_t o;
+    ID3D11ShaderResourceView *hsrv = NULL;
+    unsigned htw = 0, hth = 0;
+    float huw = 0, huh = 0, c[4][3];
+    int vis, hud, res = 0, e;
+    LONG g = vr_rc_gen;
+    if (!g_cfg.vr_menu || !vm_init()) { return 0; }
+    vis = sb_ovl_vr_panel(&o);
+    hud = sb_phud_vr_panel(&hsrv, &htw, &hth, &huw, &huh);
+    *screen = o.screen;
+    if (o.open && (!vm_open || g != vm_rc_seen)) { vm_place(hq, hp, !vm_open ? "geoeffnet" : "Recentering"); }
+    vm_rc_seen = g;
+    if (o.open != vm_open) {
+        static unsigned nlog;
+        if (nlog++ < 60u) { HLOG_I("VR-MENU: ESC-Menue %s (Bildschirm %d)", o.open ? "offen -> Flaeche in der Brille" : "zu", o.screen); }
+        vm_open = o.open;
+    }
+    if (vis != vm_vis_log) {
+        static unsigned nlog;
+        if (vis && nlog++ < 60u) {
+            float um = (float)(g_cfg.vr_menu_size > 100 ? g_cfg.vr_menu_size : 1800) / 1000.0f / 540.0f;
+            HLOG_I("VR-MENU: Flaeche sichtbar: Panel %ux%u Texel = %.2f x %.2f m (%.1f x %.1f Grad), Bildschirm %d", o.tw, o.th,
+                   (double)(o.uw * um), (double)(o.uh * um),
+                   2.0 * atan(0.5 * o.uw * um / ((g_cfg.vr_menu_dist > 100 ? g_cfg.vr_menu_dist : 1750) / 1000.0)) * 180.0 / VR_PI,
+                   2.0 * atan(0.5 * o.uh * um / ((g_cfg.vr_menu_dist > 100 ? g_cfg.vr_menu_dist : 1750) / 1000.0)) * 180.0 / VR_PI, o.screen);
+        }
+        vm_vis_log = vis;
+    }
+    if (hud != vm_hud_log) {
+        static unsigned nlog;
+        if (nlog++ < 40u) {
+            HLOG_I("VR-MENU: F2-Flaeche %s (kopffest, %d mm breit in %d mm, rechts %d / oben %d Grad, Panel %ux%u Texel)",
+                   hud ? "an" : "aus", g_cfg.vr_hud_size, g_cfg.vr_hud_dist, g_cfg.vr_hud_yaw, g_cfg.vr_hud_pitch, htw, hth);
+        }
+        vm_hud_log = hud;
+    }
+    if (vis) {
+        float um = (float)(g_cfg.vr_menu_size > 100 ? g_cfg.vr_menu_size : 1800) / 1000.0f / 540.0f;
+        float w = o.uw * um, h = o.uh * um;
+        if (vm_dim_srv && vm_dim_val > 0) { /* Welt dahinter abdunkeln (Pause sichtbar, Menue hebt sich ab) */
+            float v[36];
+            vq_quad(v, 0.0f, 1.0f, 0.0f, 1.0f);
+            for (e = 0; e < p->neyes; e++) { vq_draw_ex(p->rtv, p->vp[e], v, vm_dim_srv, vm_ps, vm_bs); }
+        }
+        vm_rect(c, vm_c, vm_r, vm_u, w, h);
+        vm_quad(p, c, o.srv);
+        if (o.cursor && o.cu > -0.5f && o.cu < 1.5f && o.cv > -0.5f && o.cv < 1.5f) {
+            float tip[3], ch = 16.0f * um, cw = ch * (float)VM_CUR_W / (float)VM_CUR_H, tl[3];
+            int k;
+            for (k = 0; k < 3; k++) {
+                tip[k] = vm_c[k] + (o.cu - 0.5f) * w * vm_r[k] + (0.5f - o.cv) * h * vm_u[k] - 0.003f * vm_f[k]; /* 3 mm vor dem Panel */
+                tl[k] = tip[k] - (2.0f / (float)VM_CUR_W) * cw * vm_r[k] + (2.0f / (float)VM_CUR_H) * ch * vm_u[k];
+            }
+            for (k = 0; k < 3; k++) {
+                c[0][k] = tl[k];
+                c[1][k] = tl[k] + cw * vm_r[k];
+                c[2][k] = tl[k] + cw * vm_r[k] - ch * vm_u[k];
+                c[3][k] = tl[k] - ch * vm_u[k];
+            }
+            vm_quad(p, c, vm_cur_srv);
+        }
+        res |= 1;
+    }
+    if (hud && hsrv && huw > 0.0f) {
+        float R[16], t[3], d = (float)(g_cfg.vr_hud_dist > 100 ? g_cfg.vr_hud_dist : 1000) / 1000.0f;
+        float w = (float)(g_cfg.vr_hud_size > 20 ? g_cfg.vr_hud_size : 300) / 1000.0f, h = w * huh / huw;
+        float dir[3], rr[3], uu[3], m[3], ln, lc[4][3];
+        int k, j;
+        vm_v3(dir, tanf((float)g_cfg.vr_hud_yaw * VR_PI / 180.0f), tanf((float)g_cfg.vr_hud_pitch * VR_PI / 180.0f), -1.0f);
+        ln = sqrtf(dir[0] * dir[0] + dir[1] * dir[1] + dir[2] * dir[2]);
+        for (k = 0; k < 3; k++) { dir[k] /= ln; }
+        vm_v3(rr, -dir[2], 0.0f, dir[0]);
+        ln = sqrtf(rr[0] * rr[0] + rr[2] * rr[2]);
+        rr[0] /= ln; rr[2] /= ln;
+        vm_v3(uu, rr[1] * dir[2] - rr[2] * dir[1], rr[2] * dir[0] - rr[0] * dir[2], rr[0] * dir[1] - rr[1] * dir[0]);
+        for (k = 0; k < 3; k++) { m[k] = d * dir[k]; }
+        vm_rect(lc, m, rr, uu, w, h);
+        vm_head_seat(hq, hp, R, t);
+        for (j = 0; j < 4; j++) { /* Kopf-Raum -> Sitz-Raum */
+            float x = lc[j][0], y = lc[j][1], z = lc[j][2];
+            for (k = 0; k < 3; k++) { c[j][k] = x * R[k] + y * R[4 + k] + z * R[8 + k] + t[k]; }
+        }
+        for (k = 0; k < 3; k++) { vm_hc[k] = m[0] * R[k] + m[1] * R[4 + k] + m[2] * R[8 + k] + t[k]; }
+        vm_quad(p, c, hsrv);
+        res |= 2;
+    }
+    return res;
+}
+
+/* DIAG(VR-MENU,W197) vr_menu_shots: je neue ruhige Kopfpose bzw. neuer Menue-Zustand (offen, Bildschirm, F2) ein
+ * Augenbild + Zeile mit der Panel-Mitte im linken Auge (NDC): weltfest = Mitte wandert gegen die Kopfdrehung,
+ * kopffest = F2-Mitte bleibt gleich. */
+static void vm_shot(const sb_vr_pass_t *p, int flags, int screen, const float hq[4], const float hp[3])
+{
+    static float last[9], done[64][9];
+    static unsigned stable, ndone;
+    float cur[9], cl[4], mx = 0, my = 0, hx = 0, hy = 0;
+    unsigned i, k;
+    int same = 1;
+    char nm[96];
+    if (g_cfg.vr_menu_shots <= 0 || ndone >= 64u || ndone >= (unsigned)g_cfg.vr_menu_shots) { return; }
+    cur[0] = hq[0]; cur[1] = hq[1]; cur[2] = hq[2]; cur[3] = hq[3]; cur[4] = hp[0]; cur[5] = hp[1]; cur[6] = hp[2];
+    cur[7] = (float)flags; cur[8] = (float)screen;
+    for (i = 0; i < 9; i++) { if (fabsf(cur[i] - last[i]) > 1e-4f) { same = 0; } }
+    memcpy(last, cur, sizeof last);
+    stable = same ? stable + 1u : 0u;
+    if (stable != 20u) { return; }
+    for (k = 0; k < ndone; k++) {
+        int eq = 1;
+        for (i = 0; i < 9; i++) { if (fabsf(cur[i] - done[k][i]) > 1e-3f) { eq = 0; } }
+        if (eq) { return; }
+    }
+    memcpy(done[ndone++], cur, sizeof cur);
+    if (flags & 1) { vm_clip(p, 0, vm_c, cl); if (cl[3] > 1e-6f) { mx = cl[0] / cl[3]; my = cl[1] / cl[3]; } }
+    if (flags & 2) { vm_clip(p, 0, vm_hc, cl); if (cl[3] > 1e-6f) { hx = cl[0] / cl[3]; hy = cl[1] / cl[3]; } }
+    _snprintf_s(nm, sizeof nm, _TRUNCATE, "vr_%05u_menue_%s_b%d_g%+03d_v%02d", vr_frames + 1u,
+                flags == 3 ? "menue_f2" : (flags & 1) ? "menue" : "f2", screen,
+                (int)floorf((q_yaw(hq) - vr_rc_yaw) * 180.0f / VR_PI + 0.5f), (int)floorf(-hp[2] * 100.0f + 0.5f));
+    vr_shot_tex(nm);
+    HLOG_I("VR menue-shot %s: kopf gier=%.1f nicken=%.1f (relativ zur Mitte %.1f) vor=%.2fm menue=%d bildschirm=%d "
+           "mitte-links-auge ndc=(%.3f,%.3f) platziert gier=%.1f nicken=%.1f f2=%d f2-links-auge ndc=(%.3f,%.3f)", nm,
+           q_yaw(hq) * 180.0f / VR_PI, q_pitch(hq) * 180.0f / VR_PI, (q_yaw(hq) - vr_rc_yaw) * 180.0f / VR_PI, -hp[2],
+           flags & 1, screen, mx, my, vm_pyaw, vm_ppitch, (flags >> 1) & 1, hx, hy);
+}
+
 /* Ein OpenXR-Bild (W145-Reihenfolge, nie ein OpenXR-Aufruf unter ctx_lock):
  *  1 xrWaitFrame, 2 xrBeginFrame, 3 xrAcquire-/xrWaitSwapchainImage,
  *  4 kurz ctx_lock: Wiedergabe ins geteilte Augenziel (Schluessel 0 -> 1),
@@ -1652,7 +2052,7 @@ static void xr_frame(void)
     const XrCompositionLayerBaseHeader *layers[1];
     uint32_t nv = 0;
     XrResult r;
-    int e, drawn = 0, have_img = 0, cv = 0;
+    int e, drawn = 0, have_img = 0, cv = 0, vmf = 0, vmscr = 0;
     LONGLONG q0, qw, qe = 0;
     float tout = 1.0f, efov[4] = { 0, 0, 0, 0 };
     int rc_shot = 0;
@@ -1819,6 +2219,18 @@ static void xr_frame(void)
                             ID3D11DeviceContext_ClearRenderTargetView(g_ctx, vr_rtv, black);
                         }
                     }
+                    xr_fno++;
+                    if (vr_preview_xr_on()) { /* W164: Fenster-Vorschau = eingereichtes Augenbild (W197: vor den Menue-Flaechen) */
+                        int pe = vr_prev_kind == 2 ? 1 : 0;
+                        float pq[4], pp[3];
+                        pq[0] = views[pe].pose.orientation.x; pq[1] = views[pe].pose.orientation.y;
+                        pq[2] = views[pe].pose.orientation.z; pq[3] = views[pe].pose.orientation.w;
+                        pp[0] = views[pe].pose.position.x; pp[1] = views[pe].pose.position.y; pp[2] = views[pe].pose.position.z;
+                        efov[0] = tanf(views[pe].fov.angleLeft); efov[1] = tanf(views[pe].fov.angleRight);
+                        efov[2] = tanf(views[pe].fov.angleUp); efov[3] = tanf(views[pe].fov.angleDown);
+                        vr_preview_capture(xr_fno, pq, pp, efov);
+                    }
+                    vmf = vm_draw(&p, hq, hp, &vmscr); /* W197 VR-MENU: ESC-Menue (weltfest) + F2 (kopffest) */
                     if ((drawn || cv) && g_cfg.vr_shots > 0 && vr_shots_n < 24u &&
                         (rc_shot || ((vr_frames + 1u) % (unsigned)g_cfg.vr_shots) == 0u)) {
                         char nm[64];
@@ -1839,17 +2251,7 @@ static void xr_frame(void)
                                    vr_q_roll(hq) * 180.0f / VR_PI, tout, p.n3d, p.n2d, p.np2);
                         }
                     }
-                    xr_fno++;
-                    if (vr_preview_xr_on()) { /* W164: Fenster-Vorschau = eingereichtes Augenbild */
-                        int pe = vr_prev_kind == 2 ? 1 : 0;
-                        float pq[4], pp[3];
-                        pq[0] = views[pe].pose.orientation.x; pq[1] = views[pe].pose.orientation.y;
-                        pq[2] = views[pe].pose.orientation.z; pq[3] = views[pe].pose.orientation.w;
-                        pp[0] = views[pe].pose.position.x; pp[1] = views[pe].pose.position.y; pp[2] = views[pe].pose.position.z;
-                        efov[0] = tanf(views[pe].fov.angleLeft); efov[1] = tanf(views[pe].fov.angleRight);
-                        efov[2] = tanf(views[pe].fov.angleUp); efov[3] = tanf(views[pe].fov.angleDown);
-                        vr_preview_capture(xr_fno, pq, pp, efov);
-                    }
+                    if (vmf) { vm_shot(&p, vmf, vmscr, hq, hp); } /* DIAG(VR-MENU,W197) */
                     if (g_cfg.vr_diag >= 1) { /* W164: eingereichte Pose bei Wechsel (Abgleich mit Vorschau/Mock) */
                         static float lp[7];
                         static unsigned nlog;
@@ -1925,6 +2327,7 @@ static void xr_frame(void)
                     fei.layerCount = 1;
                     fei.layers = layers;
                     if (drawn || cv) { vr_last_xr_q = vr_now(); } /* W183: Fenster-Spiegel aktiv */
+                    vm_rate_tick(); /* W197: VR-Bildrate fuer die F2-Flaeche */
                 }
             }
             if (drawn) { xr_takt(&p, views, hq, hp, fs.predictedDisplayTime, fs.predictedDisplayPeriod, lw, q0, tout); }

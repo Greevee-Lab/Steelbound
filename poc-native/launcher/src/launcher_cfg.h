@@ -32,6 +32,8 @@ typedef struct {
     int edge_mode;          /* 0 = aus (volles Hor+), 1 = harter Schnitt, 2 = Abdunklung */
     int edge_fade_width;    /* Verlaufsbreite in % der 4:3-Boxbreite (0..50) */
     int edge_fade_strength; /* Endabdunklung in % (0..100) */
+    int cockpit_panini;     /* W191 UW-PERSP: Panini der Cockpit-Ansicht 0 = aus, 1..100 % ([render] cockpit_panini) */
+    int cockpit_persp;      /* W191 UW-PERSP: Cockpit-Perspektive 0 = Original, 1..100 = Staerke in % ([render] cockpit_persp, nur Desktop) */
     /* W103 REM-FRAME: [remaster] (Client: hcfg.c, Standard alles aus) */
     int remaster;           /* Hauptschalter 0 = Original, 1 = Einzelschalter gelten */
     int hd_textures;        /* HD-Texturen (remaster/textures/x<hd_scale>) */

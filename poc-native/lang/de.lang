@@ -79,6 +79,8 @@ cfg.ansi=%s '%s' enthält Zeichen, die der Client nicht lesen kann (ANSI-Codepag
 cfg.bad_aspect=Bildformat %d ungültig: nur Pillarbox (aspect_mode=1) wird angeboten - Strecken ist nicht erlaubt (Regel S3.10).
 cfg.bad_edge=Breitbild-Ränder %d ungültig (0 = volle Breite, 1 = auf 4:3 schneiden, 2 = ausblenden).
 cfg.bad_edges=Verlaufsstärke %d %% außerhalb 0..100.
+cfg.bad_cpersp=Cockpit-Perspektive %d außerhalb 0..100.
+cfg.bad_cpanini=Cockpit-Panini %d außerhalb 0..100.
 cfg.bad_edgew=Verlaufsbreite %d %% außerhalb 0..50 (Prozent der 4:3-Breite).
 cfg.bad_fps=Bildgrenze Menüs %d außerhalb 0..1000 (0 = aus).
 cfg.bad_height=Höhe %u außerhalb 200..4320.
@@ -207,6 +209,8 @@ gui.gfx_aa=Kantenglättung
 gui.gfx_aspect=Seitenverhältnis
 gui.gfx_edge=Breitbild-Ränder
 gui.gfx_edgefade=Verlauf
+gui.cpersp=Cockpit
+gui.cp_off=Original
 gui.gfx_ipfps=Bildrate
 gui.gfx_res=Auflösung
 gui.gfx_vr=Desktop-Spiegel
@@ -333,6 +337,8 @@ ovl.lb_grain=  Korn/Scanlines
 ovl.lb_hd=Texturen
 ovl.lb_hdscale=  Texturdetail
 ovl.lb_label=Zieletikett
+ovl.lb_cpersp=Cockpit: Kamera zurück
+ovl.lb_cpanini=Cockpit: Panini
 ovl.lb_lckp=Cockpit: Licht
 ovl.lb_lworld=Welt: Licht
 ovl.lb_mmode=Maus-Zielen
@@ -387,6 +393,9 @@ ovl.st_hd_none=HD: kein Textur-Pack gefunden
 ovl.st_hd_off=HD aus (Original) – lädt nach
 ovl.st_hd_stage=HD: anderes Texturdetail nicht im Pack
 ovl.st_label=Zieletikett: wirkt nach Neustart
+ovl.st_cpersp=Kamera zurück + Tele: mehr Monitor (Standbild: nach Fortsetzen)
+ovl.st_cpanini=Panini: Mitte formtreu größer, Ränder verdichtet
+ovl.st_cpersp_vr=In VR ohne Wirkung (nur Desktop)
 ovl.st_prev_restart=Vorschau wirkt nach Neustart (speichern)
 ovl.st_restart=* wirkt nach Neustart
 ovl.st_rt=Skalierung wirkt nach Neustart (speichern). Auto senkt die Auflösung bei Last kurz.
@@ -784,6 +793,8 @@ gui.msg_prof_nodefault=Beim Start wird keine gespeicherte Einstellung mehr gelad
 gui.gfx_to_packs=Packs →
 gui.rule_r31=Pack-Grenze erreicht (32). Entferne zuerst ein Pack.
 gui.rule_r32=Der Pack Creator (sb_creator.exe) liegt nicht neben dem Launcher. Zum Starten die Anwendung in den Launcher-Ordner legen.
+
+gui.rule_r34=Kamera zurück · Panini (nur Desktop)
 gui.pk_list_hint=Obere Packs gewinnen – ziehen oder Alt+↑/↓ zum Umsortieren.
 gui.pk_checkall=Alle prüfen
 gui.pk_x4best=4× (beste)

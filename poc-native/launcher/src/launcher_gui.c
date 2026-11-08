@@ -225,6 +225,8 @@ int gui_page_from_name(const char *v)
 #define ID_PH_RES 1099     /* W195: Standard-Aufnahmeaufloesung */
 #define ID_PH_FMT 1100     /* W195: Format PNG/JPG */
 #define ID_PH_ASP 1101     /* W195: Bildformat ohne Cockpit */
+#define ID_CPERSP 1102 /* W191 UW-PERSP: Cockpit-Perspektive (Anzeige > Seitenverhaeltnis) */
+#define ID_CPANINI 1103 /* W191 UW-PERSP: Panini der Cockpit-Ansicht */
 static char g_img_msg[600]; /* W150: Ergebnis der letzten Abbild-Pruefung (UTF-8) */
 static int g_img_ok;
 static void check_image_ex(int status);
@@ -1803,8 +1805,11 @@ static void paint_display(void)
     if (!paint_reason(11, COL2 + 120, CY0 + 168, COLW - 138, 16)) {
         paint_reason(12, COL2 + 120, CY0 + 168, COLW - 138, 16);
     }
-    paint_preview(COL2 + 18, CY0 + 190, COLW - 36, 80);
-    label(F_SMALL, g_aspect_info, COL2 + 18, CY0 + 276, COLW - 36, 94, C_TEXT);
+    /* W191 UW-PERSP: Cockpit-Perspektive + Hinweis "nur Desktop" (R34 bei VR) */
+    label1(F_SMALL, LT("gui.cpersp"), COL2 + 18, CY0 + 186, 100, 30, C_DIM);
+    paint_reason(33, COL2 + 120, CY0 + 218, COLW - 138, 16);
+    paint_preview(COL2 + 18, CY0 + 244, COLW - 36, 60);
+    label(F_SMALL, g_aspect_info, COL2 + 18, CY0 + 308, COLW - 36, 64, C_TEXT);
 
     card(COL2, CY0 + 388, COLW, 108, LT("gui.disp_perf"));
     label1(F_SMALL, LT("gui.rs_label"), COL2 + 18, CY0 + 432, 100, 30, C_DIM);
@@ -2676,12 +2681,42 @@ static int edge_pct_get(HWND c, const int *pre, int n, int dflt)
     return dflt;
 }
 
+/* W191 UW-PERSP: Stufen der Cockpit-Perspektive (Index = Kombi-Eintrag):
+ * Original, 10..100 % in 10er-Schritten ([render] cockpit_persp, gleicher
+ * Wert wie im ESC-Menue). Fremde Werte -> naechste Stufe. */
+static const int kCpersp[] = { 0, 10, 20, 30, 40, 50, 60, 70, 80, 90, 100 };
+#define KCPERSP_N ((int)(sizeof kCpersp / sizeof kCpersp[0]))
+static int cpersp_index(int v)
+{
+    int i, best = 0, bd = 1000;
+    for (i = 0; i < KCPERSP_N; i++) {
+        int d = v > kCpersp[i] ? v - kCpersp[i] : kCpersp[i] - v;
+        if (d < bd) { bd = d; best = i; }
+    }
+    return best;
+}
+
+static void cpersp_fill(HWND c)
+{
+    int i, sel = ComboBox_GetCurSel(c);
+    ComboBox_ResetContent(c);
+    combo_add(c, LT("gui.cp_off"));
+    for (i = 1; i < KCPERSP_N; i++) {
+        char t[16];
+        _snprintf_s(t, sizeof t, _TRUNCATE, "%d %%", kCpersp[i]);
+        combo_add(c, t);
+    }
+    ComboBox_SetCurSel(c, (sel >= 0 && sel < KCPERSP_N) ? sel : 0);
+}
+
 static void edge_from_settings(const launcher_settings_t *s)
 {
     g_updating++;
     ComboBox_SetCurSel(ctl(ID_EDGE), (s->edge_mode >= 0 && s->edge_mode <= 2) ? s->edge_mode : 0);
     edge_pct_set(ctl(ID_EDGE_W), kEdgeW, KEDGEW_N, s->edge_fade_width, LT("gui.edge_w_fmt"));
     edge_pct_set(ctl(ID_EDGE_S), kEdgeS, KEDGES_N, s->edge_fade_strength, LT("gui.edge_s_fmt"));
+    ComboBox_SetCurSel(ctl(ID_CPERSP), cpersp_index(s->cockpit_persp)); /* W191 */
+    ComboBox_SetCurSel(ctl(ID_CPANINI), cpersp_index(s->cockpit_panini));
     g_updating--; /* W171: Freigabe Verlauf = Regel R11/R12 (ui_apply_rules) */
 }
 
@@ -2691,6 +2726,12 @@ static void edge_to_settings(launcher_settings_t *s)
     s->edge_mode = (sel >= 0 && sel <= 2) ? sel : 0;
     s->edge_fade_width = edge_pct_get(ctl(ID_EDGE_W), kEdgeW, KEDGEW_N, 12);
     s->edge_fade_strength = edge_pct_get(ctl(ID_EDGE_S), kEdgeS, KEDGES_N, 100);
+    { /* W191 UW-PERSP */
+        int cs = ComboBox_GetCurSel(ctl(ID_CPERSP));
+        s->cockpit_persp = (cs >= 0 && cs < KCPERSP_N) ? kCpersp[cs] : 0;
+        cs = ComboBox_GetCurSel(ctl(ID_CPANINI));
+        s->cockpit_panini = (cs >= 0 && cs < KCPERSP_N) ? kCpersp[cs] : 0;
+    }
 }
 
 static void update_aspect_info(void)
@@ -10654,6 +10695,8 @@ static void ui_apply_language(void)
     ui_settext(ctl(ID_GP_RESET), LT("gui.gfx_reset"));
     ui_settext(ctl(ID_REM_LABEL), LT("gui.rem_label"));
     combo_refill(ID_EDGE, kEdge, 3);
+    if (ctl(ID_CPERSP)) { cpersp_fill(ctl(ID_CPERSP)); } /* W191 */
+    if (ctl(ID_CPANINI)) { cpersp_fill(ctl(ID_CPANINI)); }
     c = ctl(ID_EDGE_W);
     if (c) { /* Zahlenformate */
         sel = ComboBox_GetCurSel(c);
@@ -10909,6 +10952,14 @@ static void build_controls(void)
         combo_add(c, t);
     }
     ComboBox_SetCurSel(c, KEDGES_N - 1);
+    /* W191 UW-PERSP: Cockpit-Perspektive (Kamera vor, Hauptmonitor fest, nie gestreckt) */
+    c = mk(w, K_COMBO, ID_CPERSP, P_DISPLAY, COL2 + 120, CY0 + 186, (COLW - 138 - 8) / 2, 30, "", 0);
+    cpersp_fill(c);
+    ComboBox_SetCurSel(c, 0);
+    c = mk(w, K_COMBO, ID_CPANINI, P_DISPLAY, COL2 + 120 + (COLW - 138 - 8) / 2 + 8, CY0 + 186,
+           (COLW - 138 - 8) / 2, 30, "", 0); /* W191: Panini */
+    cpersp_fill(c);
+    ComboBox_SetCurSel(c, 0);
     /* W148: Render-Skalierung (Index: 0 = Auto dyn, 1 = Auto fest, 2..5 = 1..4) */
     c = mk(w, K_COMBO, ID_RTSCALE, P_DISPLAY, COL2 + 120, CY0 + 432, COLW - 138, 30, "", 0);
     combo_add(c, LT("gui.rs_dyn"));
@@ -11362,6 +11413,8 @@ static void on_command_inner(int id, int code)
         }
         break;
     case ID_EDGE: /* W107 EDGE-MODE (W171: Verlauf frei per Regel R11/R12) */
+    case ID_CPERSP: /* W191 UW-PERSP */
+    case ID_CPANINI:
     case ID_EDGE_W:
     case ID_EDGE_S:
         if (code == CBN_SELCHANGE && !g_updating) {
@@ -12872,7 +12925,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
         }
         g_env_fix = NULL;
         if (ok43) {
-            GT_OK("43 rules-ui (R1-R32 Fixture -> Freigabe/Begruendung, Muster C)");
+            GT_OK("43 rules-ui (R1-R34 Fixture -> Freigabe/Begruendung, Muster C)");
         } else {
             GT_FAIL("43 rules-ui", "%s", why43);
         }

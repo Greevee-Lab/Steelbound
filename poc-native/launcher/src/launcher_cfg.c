@@ -48,6 +48,8 @@ void lcfg_defaults(launcher_settings_t *s)
     s->edge_mode = 2;           /* Nutzer 5.11.: Abdunklung als Spieler-Standard (Test-cfg bleibt 0) */
     s->edge_fade_width = 10;   /* Nutzer 5.11.: 10 % */
     s->edge_fade_strength = 100;
+    s->cockpit_persp = 0;       /* W191 UW-PERSP: Original */
+    s->cockpit_panini = 0;      /* W191: Panini aus */
     s->remaster = 0;            /* W103: Original bitgenau */
     s->hd_textures = 0;
     s->hd_scale = 4;
@@ -405,6 +407,10 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         s->mouse_sens = atoi(v);
     } else if (strcmp(k, "edge_mode") == 0) { /* W107 */
         s->edge_mode = atoi(v);
+    } else if (strcmp(k, "cockpit_persp") == 0) { /* W191 */
+        s->cockpit_persp = atoi(v);
+    } else if (strcmp(k, "cockpit_panini") == 0) { /* W191 */
+        s->cockpit_panini = atoi(v);
     } else if (strcmp(k, "edge_fade_width") == 0) {
         s->edge_fade_width = atoi(v);
     } else if (strcmp(k, "edge_fade_strength") == 0) {
@@ -534,6 +540,8 @@ static const char *kManaged[][2] = {
     { "mouse_mode", "input" },      { "mouse_sens", "input" },
     { "edge_mode", "render" },      { "edge_fade_width", "render" }, /* W107 */
     { "edge_fade_strength", "render" },
+    { "cockpit_persp", "render" }, /* W191 */
+    { "cockpit_panini", "render" }, /* W191 */
     { "remaster", "remaster" },     { "hd_textures", "remaster" }, /* W103 */
     { "hd_scale", "remaster" },     { "fx_enhanced", "remaster" },
     { "ultrawide", "remaster" },    { "postfx", "remaster" },
@@ -658,6 +666,10 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = s->edge_fade_width;
         } else if (strcmp(k, "edge_fade_strength") == 0) {
             v = s->edge_fade_strength;
+        } else if (strcmp(k, "cockpit_persp") == 0) { /* W191 */
+            v = s->cockpit_persp;
+        } else if (strcmp(k, "cockpit_panini") == 0) { /* W191 */
+            v = s->cockpit_panini;
         } else if (strcmp(k, "remaster") == 0) { /* W103 */
             v = s->remaster;
         } else if (strcmp(k, "hd_textures") == 0) {
@@ -1205,6 +1217,12 @@ paths_ok:
     }
     if (s->edge_fade_strength < 0 || s->edge_fade_strength > 100) {
         FAIL(LT("cfg.bad_edges"), s->edge_fade_strength);
+    }
+    if (s->cockpit_persp < 0 || s->cockpit_persp > 100) { /* W191 */
+        FAIL(LT("cfg.bad_cpersp"), s->cockpit_persp);
+    }
+    if (s->cockpit_panini < 0 || s->cockpit_panini > 100) { /* W191 */
+        FAIL(LT("cfg.bad_cpanini"), s->cockpit_panini);
     }
     if (s->fs_hz != 0 && (s->fs_hz < 24 || s->fs_hz > 500)) {
         FAIL(LT("cfg.bad_hz"), s->fs_hz);

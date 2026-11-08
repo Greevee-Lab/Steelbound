@@ -24,6 +24,7 @@ extern "C" {
 #endif
 
 struct ID3D11RenderTargetView;
+struct ID3D11ShaderResourceView;
 
 /* 1 = Messung aktiv (HUD sichtbar oder perf_log). Hot-Path-Test. */
 extern volatile int g_phud_meas;
@@ -51,6 +52,9 @@ void sb_phud_draw(struct ID3D11RenderTargetView *rtv, int save);
 void sb_phud_restore(void);
 /* 1 = Panel sichtbar */
 int sb_phud_visible(void);
+/* W197 VR-MENU: Panel fuer die kopffeste VR-Flaeche (VR-Thread, unter ctx_lock; Neuzeichnen alle 200 ms).
+ * 1 = sichtbar; *srv/Texel-Groesse und Groesse in Panel-Einheiten (Faktor 1). */
+int sb_phud_vr_panel(struct ID3D11ShaderResourceView **srv, unsigned *tw, unsigned *th, float *uw, float *uh);
 /* Test-Hook (overlay_test PHUDPOS): naechste Ecke (Render-Thread). */
 void sb_phud_cycle_pos(void);
 /* W200: overlay LOG hook, measured F2 statistics (under ctx_lock). */

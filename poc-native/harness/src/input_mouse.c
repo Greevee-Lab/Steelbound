@@ -29,7 +29,7 @@ static volatile LONG g_raw_n;         /* Anzahl Raw-Pakete (Beleg/Log) */
 static volatile LONG g_focus;         /* logischer Fokus (Nachrichten/Test) */
 static volatile LONG g_test_focus;    /* 1 = Fokus per Test-Hook simuliert */
 /* W196: UI-thread-owned menu latch; all capture paths share the gate. */
-static int g_menu_open, g_menu_had_cap;
+static int g_menu_open, g_menu_had_cap, g_menu_restore;
 static unsigned imouse_state_u32(unsigned addr)
 {
 #ifdef IMOUSE_SELFTEST
@@ -214,6 +214,7 @@ static void imouse_focus_gain(HWND w, const char *why)
 
 static void imouse_focus_lose(const char *why)
 {
+    g_menu_restore = 0;
     if (g_focus) {
         InterlockedExchange(&g_focus, 0);
         HLOG_I("INPUT: Fenster-Fokus verloren (%s) -> Tasten geloest", why);
@@ -462,26 +463,42 @@ void imouse_release_keys(void)
     if (g_installed == 1) imsg_clear();
 }
 
-/* W188 GAME-MENU: Menue offen -> Maus freigeben (Zeiger sichtbar, kein
- * ClipCursor), Menue zu -> wieder fangen, wenn sie vorher gefangen war und
- * das Fenster den Fokus hat. UI-Thread. */
+/* W203: UI-thread reconciliation. Keep a failed restore pending while the
+ * mission loop resumes; repeated notifications must not consume it. */
 void imouse_menu_capture(int open)
 {
     open = open != 0;
-    if (open == g_menu_open) return;
-    g_menu_open = open;
-    if (open) {
-        g_menu_had_cap = g_captured != 0;
+    if (open && !g_menu_open) {
+        g_menu_had_cap = g_captured != 0 || g_menu_restore;
+        g_menu_restore = 0;
+        g_menu_open = 1;
         imouse_release_keys();
         imouse_capture_off("Menue offen");
         if (imouse_is_fg(g_mwnd)) {
             ClipCursor(NULL);
             SetCursor(LoadCursorA(NULL, IDC_ARROW));
         }
-    } else {
-        if (g_menu_had_cap && g_mwnd && g_focus && g_want)
-            imouse_capture_on(g_mwnd, "Menue zu");
+    } else if (!open && g_menu_open) {
+        g_menu_open = 0;
+        g_menu_restore = g_menu_had_cap || (g_focus && g_cfg.mouse_capture);
         g_menu_had_cap = 0;
+    }
+    if (!g_menu_open && g_menu_restore) {
+        /* A missing loop marker can be transient. A different mode/scene
+         * ends this request so it cannot leak into a later mission. */
+        if (!g_focus || !g_cfg.mouse_capture || (!g_cfg.mouse_capture_outside_mission &&
+            (imouse_state_u32(0x2EEA34u) != 4u ||
+             imouse_state_u32(0x6B96DCu) != 0x2Cu))) {
+            g_menu_restore = 0;
+            return;
+        }
+        if (g_mwnd && g_focus && imouse_allowed()) {
+            imouse_capture_on(g_mwnd, "Menue zu");
+            if (g_captured) {
+                InterlockedExchange(&g_want, 1);
+                g_menu_restore = 0;
+            }
+        }
     }
 }
 

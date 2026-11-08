@@ -176,6 +176,7 @@ static void eg_apply(ID3D11RenderTargetView *rtv, int mode, int quiet)
     if (mode <= 0 || !rtv || !g_ctx) { return; }
     if (!eg_init()) { return; }
     sb_aspect_box(&bx, &by, &bw, &bh);
+    sb_cp_edge_box(&bx, &by, &bw, &bh); /* W191 UW-PERSP: Rand beginnt an der verschobenen Cockpitkante (aus: unveraendert) */
     if (bw >= g_bb_w && bh >= g_bb_h) { return; } /* 4:3-Ausgabe: nichts ausserhalb */
     if (mode == 1) {
         wpx = 0.0f;

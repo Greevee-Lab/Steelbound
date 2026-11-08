@@ -352,6 +352,8 @@ static int cli_selftest(const char *client_override)
     a.edge_mode = 2; /* W107 */
     a.edge_fade_width = 8;
     a.edge_fade_strength = 90;
+    a.cockpit_persp = 40; /* W191 */
+    a.cockpit_panini = 30;
     if (lcfg_save_user(tmp, &a) != 0) {
         T_FAIL("2 roundtrip", "%s", "save scheiterte");
     } else {
@@ -464,6 +466,28 @@ static int cli_selftest(const char *client_override)
         }
     } else {
         T_FAIL("8b edge-range", "%s", "edge_mode=3 nicht abgelehnt");
+    }
+
+    /* 8c (W191 UW-PERSP): Cockpit-Perspektive 0..100 gueltig, -1/101 abgelehnt;
+     * Standard = Original (0) */
+    st_valid_base(&b);
+    lcfg_defaults(&a);
+    b.cockpit_persp = 0;
+    if (a.cockpit_persp == 0 && lcfg_validate(&b, err, sizeof err) == 0) {
+        b.cockpit_persp = 100;
+        if (lcfg_validate(&b, err, sizeof err) == 0) {
+            b.cockpit_persp = 101;
+            if (lcfg_validate(&b, err, sizeof err) != 0 && strstr(err, "Cockpit") &&
+                (b.cockpit_persp = -1, lcfg_validate(&b, err, sizeof err) != 0)) {
+                T_OK("8c cpersp-range");
+            } else {
+                T_FAIL("8c cpersp-range", "%s", "cockpit_persp=101/-1 nicht abgelehnt");
+            }
+        } else {
+            T_FAIL("8c cpersp-range", "%s", "cockpit_persp=100 abgelehnt");
+        }
+    } else {
+        T_FAIL("8c cpersp-range", "%s", "Standard != 0 oder 0 abgelehnt");
     }
 
     /* 9 (W47): fehlende + kaputte cfg sind robust */

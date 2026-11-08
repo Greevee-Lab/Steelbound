@@ -79,6 +79,8 @@ cfg.ansi=%s '%s' contains characters the client cannot read (ANSI code page, no 
 cfg.bad_aspect=Picture format %d invalid: only pillarbox (aspect_mode=1) is offered - stretching is forbidden (rule S3.10).
 cfg.bad_edge=Widescreen sides %d invalid (0 = full width, 1 = cut to 4:3, 2 = fade out).
 cfg.bad_edges=Fade strength %d %% out of range 0..100.
+cfg.bad_cpersp=Cockpit perspective %d out of range 0..100.
+cfg.bad_cpanini=Cockpit Panini %d out of range 0..100.
 cfg.bad_edgew=Fade width %d %% out of range 0..50 (percent of 4:3 width).
 cfg.bad_fps=Menu frame limit %d out of range 0..1000 (0 = off).
 cfg.bad_height=Height %u out of range 200..4320.
@@ -207,6 +209,8 @@ gui.gfx_aa=Anti-aliasing
 gui.gfx_aspect=Aspect ratio
 gui.gfx_edge=Widescreen sides
 gui.gfx_edgefade=Fade
+gui.cpersp=Cockpit
+gui.cp_off=Original
 gui.gfx_ipfps=Frame rate
 gui.gfx_res=Resolution
 gui.gfx_vr=Desktop mirror
@@ -333,6 +337,8 @@ ovl.lb_grain=  Grain/scanlines
 ovl.lb_hd=Textures
 ovl.lb_hdscale=  Texture detail
 ovl.lb_label=Target label
+ovl.lb_cpersp=Cockpit: camera back
+ovl.lb_cpanini=Cockpit: Panini
 ovl.lb_lckp=Cockpit: light
 ovl.lb_lworld=World: light
 ovl.lb_mmode=Mouse aiming
@@ -387,6 +393,9 @@ ovl.st_hd_none=HD: no texture pack found
 ovl.st_hd_off=HD off (original) – reloading
 ovl.st_hd_stage=HD: other texture detail not in pack
 ovl.st_label=Target label: applies after restart
+ovl.st_cpersp=Camera back + tele: more monitor (still image: after resume)
+ovl.st_cpanini=Panini: centre larger, true shape, edges compressed
+ovl.st_cpersp_vr=No effect in VR (desktop only)
 ovl.st_prev_restart=Preview applies after restart (save)
 ovl.st_restart=* applies after restart
 ovl.st_rt=Scaling applies after restart (save). Auto briefly lowers the resolution under load.
@@ -784,6 +793,8 @@ gui.msg_prof_nodefault=No saved setup is loaded at start any more – user.cfg a
 gui.gfx_to_packs=Packs →
 gui.rule_r31=Pack limit reached (32). Remove a pack first.
 gui.rule_r32=The Pack Creator (sb_creator.exe) is not next to the launcher. Put it into the launcher folder to start it from here.
+
+gui.rule_r34=Camera back · Panini (desktop only)
 gui.pk_list_hint=Higher packs win – drag or press Alt+↑/↓ to reorder.
 gui.pk_checkall=Check all
 gui.pk_x4best=4× (best)

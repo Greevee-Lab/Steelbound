@@ -83,6 +83,13 @@ int sb_vr_window_mirrors(void);
 void sb_vr_preset_apply(int preset);
 int sb_vr_preset_match(void);
 
+/* W197 VR-MENU: 1 = ESC-Menue/F2 erscheinen als eigene Flaechen in der Brille (OpenXR-Session + vr_menu=1). */
+int sb_vr_panels_on(void);
+/* W197: sb_render_blit (unter ctx_lock) vor ESC-Menue/F2: Leinwand-Quelle ohne die eigenen Overlays sichern. */
+void sb_vr_canvas_source(void *swap_res);
+/* W197: Zeile "VR" der F2-Flaeche (VR-Bildrate, Augengroesse). */
+const char *sb_vr_hud_text(void);
+
 /* render_interp.c: Augen-Wiedergabe (unter ctx_lock). A/B = ip_list_t*
  * (NULL -> juengstes Paar, Zeitpunkt due_qpc, 0 = jetzt). Rueckgabe 1 =
  * gezeichnet, 0 = keine Aufzeichnung (ausserhalb der Mission). */

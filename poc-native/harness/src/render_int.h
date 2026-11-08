@@ -368,6 +368,16 @@ void sb_pf_note(float t, unsigned src_frame); /* DIAG(POPIN,W91): Art des naechs
 int sb_pf_active(void); /* DIAG(POPIN,W91): 1 = Bildfolge (pf_ring) laeuft */
 void sb_render_blit(ID3D11Resource *src);
 void sb_edge_apply(ID3D11RenderTargetView *rtv); /* W107 EDGE-MODE (render_edge.c), unter ctx_lock */
+/* W191 UW-PERSP (render_cpersp.c): Cockpit-Perspektive (Desktop, Standard aus) */
+int sb_cp_frame(void);   /* 1 = dieses Bild Cockpit-Ansicht mit aktiver Option (0 ohne Speicherzugriff, wenn aus) */
+void sb_cp_draw(float mvp[16], int cls, float *pos, size_t st, unsigned n); /* cls 0 = 3D-Pfad, 1 = VSH-P2 (Clip auf der CPU), 2 = 2D/RHW */
+float sb_cp_panini_d(void); /* Panini-d dieses Bildes (0 = aus) */
+float sb_cp_panini_offset(void); /* senkrechte Verschiebung (NDC) nach sb_cp_panini_d */
+float sb_cp_panini_scale(float d); /* render_cpanini.c: Mitte-Vergroesserung */
+void sb_cp_panini_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, float d); /* render_cpanini.c, unter ctx_lock */
+int sb_cp_status(double *ms); /* F2-Overlay: Stufe (-1 Auto, 0 aus) + CPU ms/Bild */
+void sb_cp_present(unsigned n); /* DIAG cockpit_persp_shots (Present, unter ctx_lock) */
+void sb_cp_edge_box(unsigned *bx, unsigned *by, unsigned *bw, unsigned *bh); /* Bildraender-Box um die Kanten-Verschiebung erweitern */
 void sb_edge_ab_shots(const char *base, ID3D11Resource *src); /* DIAG(EDGE-MODE,W107): edge_ab=1, unter ctx_lock */
 void sb_render_shot_name(const char *name, ID3D11Resource *src);
 /* RTT-Notizen (render_rtt.c) */

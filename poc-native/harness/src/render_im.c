@@ -1276,6 +1276,11 @@ static void sb_im_submit_body(void)
         }
         g_im_3d++;
     }
+    /* W191 UW-PERSP: Cockpit-Perspektive (nur BB, Cockpit-Ansicht; Standard
+     * aus -> sb_cp_frame() = 0 ohne Speicherzugriff, MVP/Vertices unveraendert). */
+    if (!rtt_active() && sb_cp_frame()) {
+        sb_cp_draw(mvp, vsh_p2bb ? 1 : (rhw ? 2 : 0), rhw ? NULL : pb, pst, n);
+    }
     if (g_cfg.shadow_diag) { extern float g_im_diag_mvp[16]; memcpy(g_im_diag_mvp, mvp, sizeof g_im_diag_mvp); } /* DIAG(SHADOWBUF,W127) */
     IMP_MARK(IMP_P1); /* DIAG(IM-PERF,W99): RHW-Heuristik, VSH-Emulation, MVP */
     /* UV-Slot: 9 (TEXCOORD0), Fallback 2 (Shader mappt frei).

@@ -94,6 +94,29 @@ void sb_ovl_ui_finish(unsigned *bits, unsigned w, unsigned h, float factor);
  * auf rtv zeichnen; Kontextzustand gesichert. Unter ctx_lock. 1 = ok. */
 int sb_ovl_quad(struct ID3D11RenderTargetView *rtv, struct ID3D11ShaderResourceView *srv, unsigned x0, unsigned y0,
                 unsigned w, unsigned h);
+/* ---- W197 VR-MENU: Panels in eigener Aufloesung fuer die VR-Flaechen (vr.c) ----
+ * Gemeinsame Textur: vormultipliziertes BGRA mit Mip-Kette (Filterung in der Brille). */
+typedef struct {
+    struct ID3D11Texture2D *up;           /* DYNAMIC, Hochladen */
+    struct ID3D11Texture2D *tex;          /* DEFAULT, Mip-Kette */
+    struct ID3D11ShaderResourceView *srv;
+    unsigned w, h;
+} sb_ovl_vrtex_t;
+/* bits (w x h, vormultipliziert, top-down) in t hochladen und Mips bilden. Unter ctx_lock. 1 = ok. */
+int sb_ovl_vrtex_upload(sb_ovl_vrtex_t *t, const unsigned *bits, unsigned w, unsigned h);
+/* Zustand der Menue-Flaeche fuer den VR-Thread (unter ctx_lock). */
+typedef struct {
+    int open;                             /* 1 = Overlay offen (auch ausgeblendet per Peek-Taste) */
+    int screen;                           /* Bildschirm (SC_*), aendert sich -> Menue-Shot */
+    struct ID3D11ShaderResourceView *srv; /* Panel-Textur (NULL = noch nicht gezeichnet) */
+    unsigned tw, th;                      /* Texel */
+    float uw, uh;                         /* Panel-Groesse in Bezugseinheiten (540 = Hoehe der 4:3-Box) */
+    int cursor;                           /* 1 = Mausposition bekannt (im Fenster) */
+    float cu, cv;                         /* Mausposition relativ zum Panel (0..1 = auf dem Panel, ausserhalb moeglich) */
+} sb_ovl_vr_t;
+/* 1 = Menue sichtbar und Panel-Textur vorhanden (o immer gefuellt). Unter ctx_lock. */
+int sb_ovl_vr_panel(sb_ovl_vr_t *o);
+
 /* cfg-Datei schreiben wie "Als Standard speichern" (Launcher-Verfahren):
  * erste Zeile je Key ersetzen, Rest unveraendert, fehlende Keys unter [sec]
  * anhaengen. Anzahl Keys bzw. -1. */

@@ -991,6 +991,16 @@ static void sb_render_present_body(unsigned flags)
         if (pres) { fxr_post(g_rtv, pres); ID3D11Resource_Release(pres); }
         sb_ctx_leave();
     }
+    if (!g_swap_res && (g_cfg.cockpit_panini || g_cfg.cockpit_persp_cycle[0])) { /* W191 UW-PERSP: Panini der Cockpit-Ansicht vor der Randmaske */
+        float pd = sb_cp_panini_d();
+        if (pd > 0.0f) {
+            ID3D11Resource *pres = NULL;
+            sb_ctx_enter();
+            ID3D11RenderTargetView_GetResource(g_rtv, &pres);
+            if (pres) { sb_cp_panini_apply(g_rtv, pres, pd); ID3D11Resource_Release(pres); }
+            sb_ctx_leave();
+        }
+    }
     if (g_cfg.edge_mode > 0 && !g_swap_res) {
         sb_ctx_enter();
         sb_edge_apply(g_rtv);
@@ -1011,6 +1021,7 @@ static void sb_render_present_body(unsigned flags)
     /* Screenshot VOR Present (Backbuffer enthaelt das fertige Bild). */
     sb_ctx_enter(); /* A6 ctx_lock (Screenshot liest per Context zurueck) */
     if (g_cfg.fxr_ab) { fxr_shot_tick(n_present); } /* DIAG(REM-FX,W133): Bildpaare an Explosionen */
+    if (g_cfg.cockpit_persp_shots[0]) { sb_cp_present(n_present); } /* DIAG(UW-PERSP,W191) */
     if (g_cfg.overlay_test[0] && !g_swap_res) { /* TEST(W118): Overlay-Bild */
         char onm[48];
         if (sb_ovl_shot_due(onm, sizeof onm)) { sb_render_shot_name(onm, NULL); }
@@ -1324,6 +1335,15 @@ void sb_render_blit(ID3D11Resource *src)
         sb_ctx_leave();
     }
     sb_gp_mark(GP_HUD); /* DIAG(GPU-COST,W146) */
+    if (!g_vr_blit && (g_cfg.cockpit_panini || g_cfg.cockpit_persp_cycle[0]) && sb_cp_panini_d() > 0.0f) { /* W191 UW-PERSP: Panini auf jedes gezeigte Bild (auch Pause-Standbild) */
+        sb_ctx_enter();
+        if (!g_swap_rtv &&
+            FAILED(ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv))) {
+            g_swap_rtv = NULL;
+        }
+        sb_cp_panini_apply(g_swap_rtv, g_swap_res, sb_cp_panini_d());
+        sb_ctx_leave();
+    }
     if (!g_vr_blit && g_cfg.edge_mode > 0) { /* W107 EDGE-MODE: Maske auf das gezeigte Bild (nach Verify/Wiedergabe) */
         sb_ctx_enter();
         if (!g_swap_rtv &&
@@ -1331,6 +1351,11 @@ void sb_render_blit(ID3D11Resource *src)
             g_swap_rtv = NULL;
         }
         sb_edge_apply(g_swap_rtv);
+        sb_ctx_leave();
+    }
+    if (g_cfg.vr_enable && !g_vr_blit && sb_vr_panels_on()) { /* W197 VR-MENU: Leinwand-Quelle ohne ESC-Menue/F2 */
+        sb_ctx_enter();
+        sb_vr_canvas_source(g_swap_res);
         sb_ctx_leave();
     }
     if (g_cfg.overlay && sb_ovl_open()) { /* W118 REM-OVERLAY: auf jedes gezeigte Bild (Kopie ueberschreibt ganz) */

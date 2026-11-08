@@ -27,6 +27,7 @@
 #include "sb_pause.h"
 #include "sb_lang.h"    /* W190: Hinweis Spielstaende geschuetzt */
 #include "kernel_hle.h" /* W190: krnl_savelock_active */
+#include "vr.h"         /* W197: sb_vr_hud_text */
 #include <stdlib.h>
 #include <stdarg.h>
 #include <wchar.h>
@@ -1371,6 +1372,8 @@ static void ph_text(int x, int y, const wchar_t *s, COLORREF c, int right)
 }
 
 #define PH_ROWS 8
+static int ph_vr_paint; /* W197 VR-MENU: 1 = Zeichnen fuer die VR-Flaeche (Zusatzzeile VR) */
+static void ph_layout_f(unsigned *w, unsigned *h);
 static void ph_layout(unsigned bbh, unsigned *w, unsigned *h)
 {
     unsigned bx, by, bw, bh;
@@ -1378,11 +1381,20 @@ static void ph_layout(unsigned bbh, unsigned *w, unsigned *h)
     (void)bbh;
     ph_f = (float)bh / 540.0f;
     if (ph_f < 1.0f) { ph_f = 1.0f; }
+    ph_layout_f(w, h);
+}
+
+/* Panel-Groesse beim aktuellen Faktor ph_f (W197: auch fuer die VR-Textur) */
+static void ph_layout_f(unsigned *w, unsigned *h)
+{
     *w = (unsigned)S(196.0f);
     *h = (unsigned)(S(15.0f) + S(3.0f) + 3 * S(10.0f) + S(2.0f) + S(34.0f) + S(3.0f) +
                     (g_cfg.perf_gpass > 0 ? 7 : 5) * S(10.0f) + S(4.0f)); /* W146: +2 Zeilen "GPU Pass" */
     if (krnl_savelock_active()) {
         *h += (unsigned)S(10.0f); /* W190: Zeile "Spielstaende geschuetzt" (nur mit aktivem Schutz) */
+    }
+    if (ph_vr_paint) {
+        *h += (unsigned)S(10.0f); /* W197: Zeile "VR" (nur in der Brille) */
     }
 }
 
@@ -1519,12 +1531,27 @@ static void ph_paint(void)
         _snwprintf_s(t, 128, _TRUNCATE, L"%u\u00D7%u %s %d Sh%d RT%u%s", g_bb_w, g_bb_h, wm[wmi],
                      g_sb_paused ? sb_ovl_pause_fps() : (g_cfg.interp_fps > 0 ? g_cfg.interp_fps : 30), g_cfg.shading, rts,
                      g_cfg.rt_scale_dyn > 0 ? L"d" : L""); /* W146: d = dynamisch */
+        { /* W191 UW-PERSP: Cockpit-Perspektive + CPU-Kosten (nur wenn an) */
+            double cpms = 0.0;
+            int cps = sb_cp_status(&cpms);
+            if (cps) {
+                size_t l = wcslen(t);
+                if (cps < 0) { _snwprintf_s(t + l, 128 - l, _TRUNCATE, L" CPa %.2fms", cpms); }
+                else { _snwprintf_s(t + l, 128 - l, _TRUNCATE, L" CP%d %.2fms", cps, cpms); }
+            }
+        }
     }
     ph_text(pad, y, t, SB_UI_C_DIM, 0);
     if (krnl_savelock_active()) { /* W190 SAVE-LOCK: sichtbarer Hinweis */
         y += rowh;
         sb_lang_w("ovl.sl_note", t, 128);
         ph_text(pad, y, t, PH_C_WARN, 0);
+    }
+    if (ph_vr_paint) { /* W197 VR-MENU: VR-Bildrate und Augengroesse (nur auf der Flaeche in der Brille) */
+        const char *vt = sb_vr_hud_text();
+        y += rowh;
+        if (!MultiByteToWideChar(CP_UTF8, 0, vt, -1, t, 128)) { t[0] = 0; }
+        ph_text(pad, y, t, SB_UI_C_TXT, 0);
     }
     GdiFlush();
     sb_ovl_ui_finish(ph_bits, ph_bw, ph_bh, ph_f);
@@ -1596,4 +1623,72 @@ void sb_phud_draw(ID3D11RenderTargetView *rtv, int save)
 void sb_phud_restore(void)
 {
     sb_ovl_save_put(&ph_save);
+}
+
+/* ---- W197 VR-MENU: Panel fuer die kopffeste Flaeche in der Brille ----
+ * Zweiter GDI-Kontext (Tausch mit den Desktop-Globalen wie sb_overlay.c), Faktor aus
+ * vr_menu_px (Bezugsbox 540 Einheiten), Neuzeichnen alle 200 ms wie am Desktop. VR-Thread,
+ * unter ctx_lock (dieselbe Sperre wie sb_phud_draw). */
+typedef struct {
+    HDC dc;
+    HBITMAP bmp, bmp_old;
+    unsigned *bits;
+    unsigned bw, bh;
+    HFONT font, font_old;
+    int font_px;
+    float f;
+} ph_gdi_t;
+static ph_gdi_t ph_vrg = { NULL, NULL, NULL, NULL, 0, 0, NULL, NULL, 0, 1.0f };
+static sb_ovl_vrtex_t ph_vrt;
+static LONGLONG ph_vr_last;
+static float ph_vr_f;
+
+static void ph_gdi_swap(ph_gdi_t *o)
+{
+    HDC dc = ph_dc;
+    HBITMAP b = ph_bmp, bo = ph_bmp_old;
+    unsigned *bits = ph_bits;
+    unsigned bw = ph_bw, bh = ph_bh;
+    HFONT fo = ph_font, foo = ph_font_old;
+    int fp = ph_font_px;
+    float f = ph_f;
+    ph_dc = o->dc; ph_bmp = o->bmp; ph_bmp_old = o->bmp_old; ph_bits = o->bits; ph_bw = o->bw; ph_bh = o->bh;
+    ph_font = o->font; ph_font_old = o->font_old; ph_font_px = o->font_px; ph_f = o->f;
+    o->dc = dc; o->bmp = b; o->bmp_old = bo; o->bits = bits; o->bw = bw; o->bh = bh;
+    o->font = fo; o->font_old = foo; o->font_px = fp; o->f = f;
+}
+
+int sb_phud_vr_panel(ID3D11ShaderResourceView **srv, unsigned *tw, unsigned *th, float *uw, float *uh)
+{
+    LONGLONG now;
+    if (!ph_init || !ph_vis || !g_dev || !g_ctx) { return 0; }
+    now = ph_now();
+    if (!ph_vrt.srv || !ph_vr_last || now - ph_vr_last >= ph_qpf.QuadPart / 5) {
+        unsigned w, h;
+        float f = (float)(g_cfg.vr_menu_px > 0 ? g_cfg.vr_menu_px : 1620) / 540.0f;
+        if (f < 1.0f) { f = 1.0f; } else if (f > 8.0f) { f = 8.0f; }
+        ph_gdi_swap(&ph_vrg);
+        ph_f = f;
+        ph_vr_paint = 1;
+        ph_layout_f(&w, &h);
+        if (ph_gdi_size(w, h)) {
+            ph_paint();
+            if (sb_ovl_vrtex_upload(&ph_vrt, ph_bits, ph_bw, ph_bh)) {
+                if (ph_vr_f != f) {
+                    HLOG_I("VR-MENU: Leistungs-Panel %ux%u Texel (Faktor %.2f, Schrift %d px)", ph_bw, ph_bh, (double)f, ph_font_px);
+                }
+                ph_vr_f = f;
+            }
+        }
+        ph_vr_paint = 0;
+        ph_gdi_swap(&ph_vrg);
+        ph_vr_last = now;
+    }
+    if (!ph_vrt.srv || ph_vr_f <= 0.0f) { return 0; }
+    *srv = ph_vrt.srv;
+    *tw = ph_vrt.w;
+    *th = ph_vrt.h;
+    *uw = (float)ph_vrt.w / ph_vr_f;
+    *uh = (float)ph_vrt.h / ph_vr_f;
+    return 1;
 }

@@ -55,6 +55,7 @@ static const lr_def_t kDef[LR_N] = {
     { LR_PAT_A, 1, 0, "R31 Pack-Grenze erreicht (32)" },        /* W172 */
     { LR_PAT_B, 0, 0, "R32 Pack Creator nicht neben dem Launcher" }, /* W172 */
     { LR_PAT_B, 0, 0, "R33 Fotoordner nicht nutzbar" },              /* W195 */
+    { LR_PAT_B, 0, 1, "R34 Cockpit-Perspektive nur Desktop (nicht in VR)" }, /* W191 */
 };
 
 int lrules_pattern(int rule)
@@ -309,6 +310,11 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
         hit(&out[31], 31, LR_LVL_INFO);
         strcpy_s(out[31].text, sizeof out[31].text, LT("gui.rule_r31"));
     }
+    /* R34 (W191 UW-PERSP): Cockpit-Perspektive nur am Monitor (immer Hinweis
+     * wie R6: VR ist ein Startweg, kein Schalter; beim VR-Start schaltet der
+     * Client die Option ab, die VR-Projektion bleibt physikalisch korrekt) */
+    hit(&out[34], 34, LR_LVL_INFO);
+    strcpy_s(out[34].text, sizeof out[34].text, LT("gui.rule_r34"));
     /* R32 (W172): Pack Creator liegt nicht neben dem Launcher -> Erklaerung
      * statt Knopf (PO-Entscheidung 6) */
     if (!SB_EDITION_COMMUNITY && !e->has_creator) {
@@ -372,6 +378,7 @@ void lrules_fixture(int rule, int v, launcher_settings_t *s, lr_env_t *e)
     case 31: e->n_packs = v ? 32 : 31; break;
     case 32: e->has_creator = !v; break;
     case 33: strcpy_s(s->photo_dir, sizeof s->photo_dir, "Q:\\gibt_es_nicht\\Fotos"); e->photo_dir_ok = !v; break; /* W195 */
+    case 34: break; /* W191: feste Info */
     }
 }
 

@@ -59,6 +59,8 @@ enum {
     /* W131 SHADER-OPT2: Seite "Shader 2" (TAB von "Shader") */
     OI_PRESET, OI_AA, OI_SSAO, OI_CSAT, OI_CTEMP, OI_CLIFT, OI_CGAM, OI_CGAIN, OI_SHADOW, OI_SHSOFT, OI_VQASYNC,
     OI_LABEL, /* W153 HUD-LABEL-OPT (Seite "Shader 2") */
+    OI_CPERSP, /* W191 UW-PERSP: Cockpit-Perspektive (Seite "Shader 2") */
+    OI_CPANINI, /* W191 UW-PERSP: Panini der Cockpit-Ansicht (Seite "Shader 2") */
     /* W133 REM-FX: Seite "Effekte" (OV_PAGE_FX) */
     OI_FXPRESET, OI_FXSOFT, OI_FXEMB, OI_FXLIGHT, OI_FXLCKP, OI_FXIP, OI_FXCMP,
     /* W134 VR-PROTO: Seite "VR" (OV_PAGE_VR) */
@@ -83,7 +85,7 @@ static const int kOvPage1[] = { OI_SHADING, OI_MFX, OI_GRAIN, OI_GLITCH,
                                 OI_LCKP, OI_CGLOW, OI_CSPILL, OI_CLIGHT,
                                 OI_ABCMP, OI_SAVE, OI_CLOSE };
 static const int kOvPage2[] = { OI_PRESET, OI_AA, OI_SSAO, OI_CSAT, OI_CTEMP, OI_CLIFT, OI_CGAM, OI_CGAIN,
-                                OI_SHADOW, OI_SHSOFT, OI_VQASYNC, OI_LABEL, OI_ABCMP, OI_SAVE, OI_CLOSE };
+                                OI_SHADOW, OI_SHSOFT, OI_VQASYNC, OI_LABEL, OI_CPERSP, OI_CPANINI, OI_ABCMP, OI_SAVE, OI_CLOSE };
 #define OV_NP2 ((int)(sizeof kOvPage2 / sizeof kOvPage2[0]))
 /* W133 REM-FX: Seite "Effekte" (Index 3, nach "Shader 2") */
 #define OV_PAGE_FX 3
@@ -180,7 +182,8 @@ typedef struct { unsigned at; int rel; int mi; int act; int vk; char txt[28]; } 
 enum { OA_KEY, OA_SHOT, OA_FOCUS1, OA_FOCUS0, OA_LOG, OA_PHUDPOS,
        OA_TKEY, OA_TXT, OA_MROW, OA_MTAB, OA_PAD, OA_STATE, /* W188 */
        OA_PEEK, /* W193: Taste "Menue ausblenden" druecken (vk 1) / loslassen (vk 0) */
-       OA_PHOTO, OA_KDN, OA_KUP, OA_MDRAG, OA_CHAR }; /* W192 OA_CHAR, W195: Foto-Taste, Taste halten/loslassen, Ziehen dx_dy */
+       OA_PHOTO, OA_KDN, OA_KUP, OA_MDRAG, OA_CHAR, /* W192 OA_CHAR, W195: Foto-Taste, Taste halten/loslassen, Ziehen dx_dy */
+       OA_MHOV }; /* W197: Maus nur ueber Zeile N bewegen (VR-Zeiger) */
 static ov_step_t g_ov_steps[160]; /* W193: 96 -> 160 (Pause-Live-Belege) */
 static int g_ov_nsteps, g_ov_step, g_ov_test_parsed;
 static unsigned g_ov_mission_f[8];      /* Startbild der k-ten Mission (fuer mN / mK.N) */
@@ -315,6 +318,7 @@ static int ov_effective(int i)
     case OI_EXPO: case OI_TONE: case OI_BTHR: case OI_LWORLD: case OI_LCKP: case OI_FOCUS: return g_cfg.shading != 0;
     case OI_SHADOW: case OI_VQASYNC: return g_cfg.shading != 0; /* W131 */
     case OI_SHSOFT: return g_cfg.shading != 0 && g_cfg.shade_shadow != 0;
+    case OI_CPERSP: case OI_CPANINI: return !g_cfg.vr_enable; /* W191: nur Desktop, in VR ohne Wirkung (gedimmt) */
     default: return ov_enabled(i);
     }
 }
@@ -612,6 +616,17 @@ static void ov_change(int i, int dir)
         g_cfg.vis_query_async = !g_cfg.vis_query_async;
         HLOG_I("OVERLAY: vis_query_async -> %d (f=%u)", g_cfg.vis_query_async, g_present_no);
         break;
+    case OI_CPERSP: /* W191 UW-PERSP: 0 (Original) .. 100 % in 10er-Schritten, wirkt sofort (je Bild gelesen) */
+        g_cfg.cockpit_persp = ov_clamp((g_cfg.cockpit_persp / 10) * 10 + dir * 10, 0, 100);
+        HLOG_I("OVERLAY: cockpit_persp -> %d (f=%u)", g_cfg.cockpit_persp, g_present_no);
+        sb_render_pause_dirty(); /* W193 PAUSE-LIVE: Standbild mit der neuen Perspektive neu zeichnen */
+        ov_status_key(g_cfg.vr_enable ? "ovl.st_cpersp_vr" : "ovl.st_cpersp");
+        break;
+    case OI_CPANINI: /* W191 UW-PERSP: Panini 0..100 % in 10er-Schritten, live (Nachbearbeitung je gezeigtem Bild) */
+        g_cfg.cockpit_panini = ov_clamp((g_cfg.cockpit_panini / 10) * 10 + dir * 10, 0, 100);
+        HLOG_I("OVERLAY: cockpit_panini -> %d (f=%u)", g_cfg.cockpit_panini, g_present_no);
+        ov_status_key(g_cfg.vr_enable ? "ovl.st_cpersp_vr" : "ovl.st_cpanini");
+        break;
     case OI_LABEL: /* W153: wirkt ab Neustart (Patch beim Start) */
         g_cfg.hud_label_avoid = !g_cfg.hud_label_avoid;
         HLOG_I("OVERLAY: hud_label_avoid -> %d (wirkt nach Neustart, f=%u)", g_cfg.hud_label_avoid, g_present_no);
@@ -809,6 +824,8 @@ static const ov_key_t kOvKeys[] = {
     { "color_gain", "render" },     { "shade_shadow", "render" },
     { "shadow_soft", "render" },    { "vis_query_async", "render" },
     { "hud_label_avoid", "render" }, /* W153 */
+    { "cockpit_persp", "render" }, /* W191 */
+    { "cockpit_panini", "render" }, /* W191 */
     /* W133 REM-FX */
     { "fx_soft", "render" },        { "fx_embers", "render" },
     { "fx_light", "render" },       { "fx_light_cockpit", "render" },
@@ -856,6 +873,8 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     else if (strcmp(k, "monitor_grain") == 0) { v = g_cfg.monitor_grain; }
     else if (strcmp(k, "monitor_glitch") == 0) { v = g_cfg.monitor_glitch; }
     else if (strcmp(k, "edge_mode") == 0) { v = g_cfg.edge_mode; }
+    else if (strcmp(k, "cockpit_persp") == 0) { v = g_cfg.cockpit_persp; } /* W191 */
+    else if (strcmp(k, "cockpit_panini") == 0) { v = g_cfg.cockpit_panini; } /* W191 */
     else if (strcmp(k, "edge_fade_width") == 0) { v = g_cfg.edge_fade_width; }
     else if (strcmp(k, "edge_fade_strength") == 0) { v = g_cfg.edge_fade_strength; }
     else if (strcmp(k, "mouse_sens") == 0) { v = g_cfg.mouse_sens; }
@@ -1781,8 +1800,8 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case OV_MSG_TEST: /* TEST(W188): interne Taste (z. B. Umschalt+TAB, Mausrad) ueber den Ring */
         if (g_ov_open) { ov_qpush((int)wp); }
         return 1;
-    case OV_MSG_CLOSED: /* W188: Overlay zu -> Maus wieder fangen (falls vorher gefangen) */
-        imouse_menu_capture(0);
+    case OV_MSG_CLOSED: /* W203: queued close may arrive after another open. */
+        imouse_menu_capture(sb_ovl_open());
         return 1;
     case WM_KEYDOWN:
         if (wp == VK_ESCAPE) {
@@ -1989,6 +2008,7 @@ static void ov_test_parse(void)
         else if (_strnicmp(act, "U+", 2) == 0) { s->act = OA_CHAR; s->vk = (int)strtoul(act + 2, NULL, 16); }
         else if (_strnicmp(act, "TXT=", 4) == 0) { s->act = OA_TXT; strcpy_s(s->txt, sizeof s->txt, act + 4); }
         else if (_strnicmp(act, "MROW", 4) == 0 && act[4]) { s->act = OA_MROW; s->vk = atoi(act + 4); }
+        else if (_strnicmp(act, "MHOV", 4) == 0 && act[4]) { s->act = OA_MHOV; s->vk = atoi(act + 4); } /* W197 */
         else if (_strnicmp(act, "MTAB", 4) == 0 && act[4]) { s->act = OA_MTAB; s->vk = atoi(act + 4); }
         else if (_strnicmp(act, "PAD", 3) == 0 && act[3]) {
             static const struct { const char *n; unsigned b; } pb[] = {
@@ -2076,10 +2096,10 @@ static void ov_test_tick(unsigned n)
             }
             break;
         }
-        case OA_MROW: case OA_MTAB: { /* W188: Klick auf die Mitte von Zeile/Tab (Backbuffer -> Client) */
+        case OA_MROW: case OA_MTAB: case OA_MHOV: { /* W188: Klick auf die Mitte von Zeile/Tab (Backbuffer -> Client) */
             RECT rc;
             int bx, by;
-            if (s->act == OA_MROW) {
+            if (s->act == OA_MROW || s->act == OA_MHOV) {
                 bx = g_hit_x0 + g_hit_w / 3;
                 by = g_hit_rows_y + s->vk * g_hit_rowh + g_hit_rowh / 2;
             } else {
@@ -2092,6 +2112,7 @@ static void ov_test_tick(unsigned n)
                 by = (int)((long long)by * rc.bottom / (long long)g_bb_h);
             }
             PostMessageA(h, WM_MOUSEMOVE, 0, MAKELPARAM(bx, by));
+            if (s->act == OA_MHOV) { break; } /* W197: nur zeigen (Zeile wird gewaehlt, kein Klick) */
             PostMessageA(h, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(bx, by));
             PostMessageA(h, WM_LBUTTONUP, 0, MAKELPARAM(bx, by));
             break;
@@ -2436,6 +2457,8 @@ static void ov_label(int i, wchar_t *o, size_t cap)
         "ovl.lb_preset", "ovl.lb_aa", "ovl.lb_ssao", "ovl.lb_csat", "ovl.lb_ctemp",
         "ovl.lb_clift", "ovl.lb_cgam", "ovl.lb_cgain", "ovl.lb_shadow",
         "ovl.lb_shsoft", "ovl.lb_vqasync", "ovl.lb_label",
+        /* W191 */
+        "ovl.lb_cpersp", "ovl.lb_cpanini",
         /* W133 Seite Effekte (W173: Effekt-Stufe, Teil des Grafik-Presets) */
         "ovl.lb_fxlevel", "ovl.lb_fxsoft", "ovl.lb_fxemb", "ovl.lb_fxlight", "ovl.lb_fxlightckp",
         "ovl.lb_fxip", "ovl.lb_cmp",
@@ -2639,6 +2662,14 @@ static void ov_value(int i, wchar_t *o, size_t cap)
     case OI_SHADOW: ov_wkey(o, cap, g_cfg.shade_shadow ? "ovl.v_on" : "ovl.v_offprev"); break;
     case OI_SHSOFT: ov_wkey(o, cap, g_cfg.shadow_soft ? "ovl.v_soft33" : "ovl.v_prev22"); break;
     case OI_VQASYNC: ov_wkey(o, cap, g_cfg.vis_query_async ? "ovl.v_lat1" : "ovl.v_block"); break;
+    case OI_CPERSP: /* W191 */
+        if (g_cfg.cockpit_persp <= 0) { ov_wkey(o, cap, "ovl.v_orig"); }
+        else { _snwprintf_s(o, cap, _TRUNCATE, L"%d %%", g_cfg.cockpit_persp); }
+        break;
+    case OI_CPANINI: /* W191 */
+        if (g_cfg.cockpit_panini <= 0) { ov_wkey(o, cap, "ovl.v_orig"); }
+        else { _snwprintf_s(o, cap, _TRUNCATE, L"%d %%", g_cfg.cockpit_panini); }
+        break;
     case OI_LABEL: { /* W153: "*" bei Abweichung vom Startwert (Neustart) */
         char nb[64];
         _snprintf_s(nb, sizeof nb, _TRUNCATE, "%s%s", LT(g_cfg.hud_label_avoid ? "ovl.v_avoid" : "ovl.v_orig"),
@@ -3451,6 +3482,166 @@ int sb_ovl_quad(ID3D11RenderTargetView *rtv, ID3D11ShaderResourceView *srv, unsi
     return 1;
 }
 
+/* ------------------------------------------------------------------ */
+/* W197 VR-MENU: Panel in eigener Aufloesung fuer die VR-Flaeche        */
+/* ------------------------------------------------------------------ */
+/* Gemeinsame Textur fuer VR-Panels (auch sb_perfhud.c): DYNAMIC hochladen,
+ * in eine DEFAULT-Textur mit Mip-Kette kopieren, Mips bilden (vormultipliziert
+ * -> Box-Filter korrekt). Unter ctx_lock. */
+int sb_ovl_vrtex_upload(sb_ovl_vrtex_t *t, const unsigned *bits, unsigned w, unsigned h)
+{
+    D3D11_MAPPED_SUBRESOURCE map;
+    unsigned y;
+    if (!g_dev || !g_ctx || !t || !bits || !w || !h) { return 0; }
+    if (!t->tex || !t->up || !t->srv || t->w != w || t->h != h) {
+        D3D11_TEXTURE2D_DESC td;
+        if (t->srv) { ID3D11ShaderResourceView_Release(t->srv); t->srv = NULL; }
+        if (t->tex) { ID3D11Texture2D_Release(t->tex); t->tex = NULL; }
+        if (t->up) { ID3D11Texture2D_Release(t->up); t->up = NULL; }
+        t->w = t->h = 0;
+        memset(&td, 0, sizeof td);
+        td.Width = w;
+        td.Height = h;
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DYNAMIC;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &t->up))) { t->up = NULL; return 0; }
+        td.MipLevels = 0; /* volle Kette */
+        td.Usage = D3D11_USAGE_DEFAULT;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+        td.CPUAccessFlags = 0;
+        td.MiscFlags = D3D11_RESOURCE_MISC_GENERATE_MIPS;
+        if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &t->tex)) ||
+            FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)t->tex, NULL, &t->srv))) {
+            static unsigned nw;
+            if (nw++ < 2u) { HLOG_W("VR-MENU: Panel-Textur %ux%u gescheitert", w, h); }
+            if (t->tex) { ID3D11Texture2D_Release(t->tex); t->tex = NULL; }
+            ID3D11Texture2D_Release(t->up); t->up = NULL;
+            t->srv = NULL;
+            return 0;
+        }
+        t->w = w;
+        t->h = h;
+    }
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)t->up, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) { return 0; }
+    for (y = 0; y < h; y++) {
+        memcpy((unsigned char *)map.pData + (size_t)y * map.RowPitch, bits + (size_t)y * w, w * 4u);
+    }
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)t->up, 0);
+    ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)t->tex, 0, 0, 0, 0, (ID3D11Resource *)t->up, 0, NULL);
+    ID3D11DeviceContext_GenerateMips(g_ctx, t->srv);
+    return 1;
+}
+
+/* Zweiter GDI-Zeichenkontext (VR-Aufloesung): Tausch mit den Desktop-Globalen,
+ * damit ov_layout/ov_gdi_size/ov_paint unveraendert in beiden Groessen zeichnen. */
+typedef struct {
+    HDC dc;
+    HBITMAP bmp, bmp_old;
+    unsigned *bits;
+    unsigned bw, bh;
+    HFONT font, font_old;
+    int font_px;
+    float f;
+} ov_gdi_t;
+static ov_gdi_t ov_vrg = { NULL, NULL, NULL, NULL, 0, 0, NULL, NULL, 0, 1.0f };
+static sb_ovl_vrtex_t ov_vrt;
+static int ov_vr_scr = -1, ov_vr_rows_y, ov_vr_rowh, ov_vr_nrows;
+static float ov_vr_f;
+static long long ov_vr_q;
+
+static void ov_gdi_swap(ov_gdi_t *o)
+{
+    HDC dc = ov_dc;
+    HBITMAP b = ov_bmp, bo = ov_bmp_old;
+    unsigned *bits = ov_bits;
+    unsigned bw = ov_bw, bh = ov_bh;
+    HFONT fo = ov_font, foo = ov_font_old;
+    int fp = ov_font_px;
+    float f = g_ovf;
+    ov_dc = o->dc; ov_bmp = o->bmp; ov_bmp_old = o->bmp_old; ov_bits = o->bits; ov_bw = o->bw; ov_bh = o->bh;
+    ov_font = o->font; ov_font_old = o->font_old; ov_font_px = o->font_px; g_ovf = o->f;
+    o->dc = dc; o->bmp = b; o->bmp_old = bo; o->bits = bits; o->bw = bw; o->bh = bh;
+    o->font = fo; o->font_old = foo; o->font_px = fp; o->f = f;
+}
+
+/* Render-Thread (sb_ovl_draw, unter ctx_lock): VR-Panel neu zeichnen, wenn sich
+ * das Menue aenderte (force = g_ov_dirty), der Bildschirm wechselte oder spaetestens
+ * alle 500 ms. Trefferflaechen (g_rel_*) des Desktop-Panels bleiben unberuehrt. */
+static void ov_vr_paint(int force)
+{
+    int rel[6], rtx[OV_NPAGES + 1], t;
+    unsigned pw, ph, boxh = (unsigned)(g_cfg.vr_menu_px > 0 ? g_cfg.vr_menu_px : 1620);
+    long long now = rq_qpc();
+    LARGE_INTEGER qf;
+    QueryPerformanceFrequency(&qf);
+    if (boxh < 540u) { boxh = 540u; } else if (boxh > 4320u) { boxh = 4320u; }
+    if (!force && ov_vrt.srv && ov_vr_scr == g_ov_scr && now - ov_vr_q < qf.QuadPart / 2) { return; }
+    rel[0] = g_rel_rows_y; rel[1] = g_rel_rowh; rel[2] = g_rel_nrows; rel[3] = g_rel_valx; rel[4] = g_rel_tab_y0; rel[5] = g_rel_tab_y1;
+    for (t = 0; t <= OV_NPAGES; t++) { rtx[t] = g_rel_tab_x[t]; }
+    ov_gdi_swap(&ov_vrg);
+    ov_layout(boxh, &pw, &ph);
+    if (ov_gdi_size(pw, ph)) {
+        ov_paint();
+        if (sb_ovl_vrtex_upload(&ov_vrt, ov_bits, ov_bw, ov_bh)) {
+            if (ov_vr_scr != g_ov_scr) {
+                static unsigned nlog;
+                if (nlog++ < 40u) {
+                    HLOG_I("VR-MENU: Panel Bildschirm %d %ux%u Texel (Faktor %.2f, Schrift %d px)", g_ov_scr, ov_bw, ov_bh,
+                           (double)g_ovf, ov_font_px);
+                }
+            }
+            ov_vr_scr = g_ov_scr;
+            ov_vr_rows_y = g_rel_rows_y;
+            ov_vr_rowh = g_rel_rowh;
+            ov_vr_nrows = g_rel_nrows;
+            ov_vr_f = g_ovf;
+        }
+    }
+    ov_gdi_swap(&ov_vrg);
+    g_rel_rows_y = rel[0]; g_rel_rowh = rel[1]; g_rel_nrows = rel[2]; g_rel_valx = rel[3]; g_rel_tab_y0 = rel[4]; g_rel_tab_y1 = rel[5];
+    for (t = 0; t <= OV_NPAGES; t++) { g_rel_tab_x[t] = rtx[t]; }
+    ov_vr_q = now;
+}
+
+/* VR-Thread (unter ctx_lock): Panel + Mausposition auf dem Panel. Die Maus bedient
+ * weiter die Desktop-Trefferflaechen (Fenster); ihre Lage relativ zum Desktop-Panel
+ * wird abschnittsweise (Kopf, Zeilen, Fuss) auf das VR-Panel abgebildet, so dass der
+ * Zeiger in der Brille genau auf der Zeile steht, die ein Klick trifft. */
+int sb_ovl_vr_panel(sb_ovl_vr_t *o)
+{
+    int mx = g_ov_mx, my = g_ov_my;
+    memset(o, 0, sizeof *o);
+    o->open = (g_cfg.overlay && g_ov_open) ? 1 : 0;
+    o->screen = g_ov_scr;
+    if (!o->open || g_ov_peek || g_ov_req >= 0 || !ov_vrt.srv || ov_vr_scr != g_ov_scr || ov_vr_f <= 0.0f) { return 0; } /* g_ov_req: Bildschirm beim Oeffnen noch nicht gesetzt */
+    o->srv = ov_vrt.srv;
+    o->tw = ov_vrt.w;
+    o->th = ov_vrt.h;
+    o->uw = (float)ov_vrt.w / ov_vr_f;
+    o->uh = (float)ov_vrt.h / ov_vr_f;
+    if (mx >= 0 && my >= 0 && g_hit_w > 0 && g_hit_h > 0 && (unsigned)mx < g_bb_w && (unsigned)my < g_bb_h) {
+        float dx = (float)(mx - g_hit_x0), dy = (float)(my - g_hit_y0), yv;
+        float ryd = (float)(g_hit_rows_y - g_hit_y0), red = ryd + (float)(g_hit_nrows * g_hit_rowh), hd = (float)g_hit_h;
+        float ryv = (float)ov_vr_rows_y, rev = ryv + (float)(ov_vr_nrows * ov_vr_rowh), hv = (float)ov_vrt.h;
+        if (g_hit_rowh > 0 && ov_vr_rowh > 0 && ryd > 0.0f && hd > red && hv > rev && g_hit_nrows == ov_vr_nrows) {
+            if (dy < ryd) { yv = dy * ryv / ryd; }
+            else if (dy < red) { yv = ryv + (dy - ryd) * (float)ov_vr_rowh / (float)g_hit_rowh; }
+            else { yv = rev + (dy - red) * (hv - rev) / (hd - red); }
+        } else {
+            yv = dy * hv / hd;
+        }
+        o->cu = dx / (float)g_hit_w;
+        o->cv = yv / hv;
+        o->cursor = 1;
+    }
+    return 1;
+}
+
 void sb_ovl_draw(ID3D11RenderTargetView *rtv, int save)
 {
     unsigned bx, by, bw, bh, pw, ph, x0, y0;
@@ -3458,6 +3649,7 @@ void sb_ovl_draw(ID3D11RenderTargetView *rtv, int save)
     if (!g_cfg.overlay || !g_ov_open || !rtv || !g_ctx) { return; }
     if (g_ov_peek) { return; } /* W193: Menue ausgeblendet (Taste gehalten), bleibt offen */
     if (!ov_d3d_init()) { return; }
+    if (sb_vr_panels_on()) { ov_vr_paint(g_ov_dirty); } /* W197 VR-MENU: eigene Textur fuer die Flaeche in der Brille */
     sb_aspect_box(&bx, &by, &bw, &bh);
     ov_layout(bh, &pw, &ph);
     if (pw + 8u > bw || ph + 8u > bh) { /* winziges Fenster: auf die Box begrenzen (Faktor 1) */

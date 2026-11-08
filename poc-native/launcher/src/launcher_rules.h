@@ -24,8 +24,8 @@ enum { LR_PAT_A = 1, LR_PAT_B, LR_PAT_C, LR_PAT_D, LR_PAT_E, LR_PAT_I };
 enum { LR_LVL_INFO = 0, LR_LVL_WARN = 1, LR_LVL_ERR = 2, LR_LVL_LOCK = 3 };
 
 #define LR_FIRST 1
-#define LR_LAST 33 /* W172: + R31 Pack-Grenze, R32 Pack Creator fehlt; W195: + R33 Fotoordner */
-#define LR_N 34 /* Index 1..33 = R1..R33, 0 unbenutzt */
+#define LR_LAST 34 /* W172: + R31 Pack-Grenze, R32 Pack Creator fehlt; W195: + R33 Fotoordner; W191: + R34 Cockpit-Perspektive nur Desktop */
+#define LR_N 35 /* Index 1..34 = R1..R34, 0 unbenutzt */
 
 typedef struct {
     const launcher_settings_t *s; /* Oberflaechen-Stand (ui_to_settings) */

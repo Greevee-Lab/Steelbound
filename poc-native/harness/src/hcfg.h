@@ -187,6 +187,17 @@ typedef struct {
     int edge_fade_width; /* W107: Verlaufsbreite in % der 4:3-Boxbreite (edge_mode=2), 0 = harte Kante */
     int edge_fade_strength; /* W107: Endabdunklung in % (100 = schwarz, edge_mode=2) */
     int edge_ab; /* DIAG(EDGE-MODE,W107): 1 = zu jedem Screenshot Varianten _e1/_e2 aus demselben Bild */
+    int cockpit_persp;      /* W191 UW-PERSP: Cockpit-Perspektive (nur Desktop, Cockpit-Ansicht der Mission, in VR aus), 0 = Original (aus), 1..100 = Staerke in % von cockpit_persp_dist; Dolly-Zoom um die Ebene cockpit_persp_ref, nie gestreckt */
+    int cockpit_panini;     /* W191 UW-PERSP: Panini-Projektion der Cockpit-Ansicht (Nachbearbeitung, nur Desktop), 0 = aus, 1..100 = Staerke in % von cockpit_panini_d; Mitte formtreu vergroessert, Raender waagerecht verdichtet */
+    int cockpit_panini_d;   /* W191: groesstes Panini-d (x100); mit cockpit_panini_frame=1 begrenzt der Rahmen frueher */
+    int cockpit_panini_frame; /* W191: 1 = Radar oben und Frontview unten bleiben voll im Bild (100 % = Grenze ohne Anschnitt), 0 = d = cockpit_panini % x cockpit_panini_d (Experiment) */
+    int cockpit_persp_pause; /* W191: 1 = Kamera-Weg auch im Pause-Standbild live (Experiment: CPU-Instrumente fallen dort durch den Tiefentest), 0 = nach dem Fortsetzen */
+    int cockpit_persp_dist; /* W191: Kamera-Weg bei 100 % in mm (Spiel-Einheit ~ 1 m): > 0 = zurueck + engeres Sichtfeld (Tele, Standard 1500; Near-Ebene am alten Auge), < 0 = vor + weiteres Sichtfeld (Breitbildrand fuellen, Experiment) */
+    int cockpit_persp_ref;  /* W191: Abstand der festen Ebene (Hauptmonitor/HUD) in mm */
+    int cockpit_zoom;       /* W191: zusaetzlicher gleichmaessiger Zoom der Cockpit-Ansicht in % (100 = aus; > 100 schneidet oben/unten ab) */
+    char cockpit_persp_cycle[160]; /* DIAG(UW-PERSP,W191): Liste 'p[/z],p[/z],...' (Prozent Vorschub/Zoom), je Spiel-Bild der naechste Eintrag (Bildpaare aus Folgebildern), leer = aus */
+    char cockpit_persp_shots[64]; /* DIAG(UW-PERSP,W191): Liste 'F1,F2,..' - nach F Bildern Cockpit-Ansicht (Modus 4; -F = auch Titel-Demo) je 2x Zyklus Folgebilder als shots/cpersp_<f>_p<vorschub>_z<zoom>.jpg */
+    int cockpit_persp_diag; /* DIAG(UW-PERSP,W191): 1 = Tiefen-/Kanten-Statistik des Cockpit-Meshs (CPERSP mesh) bei jeder Aenderung, 2 = + je Draw-Klasse Zaehler */
     int aspect_mode; /* W18: 1 = 2D in Spiel-Aspect-Box (Pillarbox, schwarze Balken) + 3D Hor+, 0 = alt (2D gestreckt) */
     int rtt; /* W23: 1 = Render-to-Texture umleiten (RTV+SRV je Surface) + sampeln, 0 = nur notieren */
     int rtt_readback; /* FIX(COMBAT,W59): 1 = LIN_X8R8G8B8-RTs bis 128x128 (Zellenkarte [0x35149C], Lock-On) nach jeder Session GPU->CPU in den Xbox-Speicher, 2 = + LIN_A8R8G8B8 bis 128x128, 3 = beide bis 512x512, 9 = DIAG ohne Schreiben, 0 = alt (GPU-only) */
@@ -465,6 +476,17 @@ typedef struct {
     int vr_rt_scale;            /* Welt-/Monitor-RT-Faktor im VR-Betrieb (1..4), 0 = wie rt_scale, Standard 2 (Preset Ausgewogen) */
     int vr_preset;              /* Leistungs-Preset (nur Anzeige/Speichern; Werte stehen einzeln): 0 eigene, 1 Leistung, 2 Ausgewogen, 3 Qualitaet */
     int vr_frame_log;           /* DIAG(VR-FIX3,W183): N > 0 = die ersten N VR-Bilder in der Mission je eine Zeile "VR bild" (Pose, Paar, t, Halten, Draws, Sperre) */
+    /* W197 VR-MENU (nur mit vr_enable=1 und laufender OpenXR-Session wirksam) */
+    int vr_menu;                /* 1 = ESC-Menue als weltfeste Flaeche vor dem Spieler, F2 als kopffeste Flaeche (Standard); 0 = wie W183 (nur Fenster/Leinwand) */
+    int vr_menu_dist;           /* Abstand der Menue-Flaeche in mm (beim Oeffnen vor der Blickrichtung), Standard 1750 */
+    int vr_menu_size;           /* Groesse: Hoehe der 4:3-Bezugsbox (540 Panel-Einheiten wie am Desktop) in mm, Standard 1800 */
+    int vr_menu_px;             /* Pixeldichte: Hoehe der Bezugsbox in Texeln der eigenen Menue-Textur (Faktor = Wert/540), Standard 1620 */
+    int vr_menu_dim;            /* Welt hinter dem offenen Menue abdunkeln in % (0 = aus), Standard 35 */
+    int vr_hud_dist;            /* F2-Flaeche: Abstand in mm (kopffest), Standard 1000 */
+    int vr_hud_size;            /* F2-Flaeche: Breite in mm, Standard 340 */
+    int vr_hud_yaw;             /* F2-Flaeche: Richtung rechts der Blickachse in Grad, Standard 26 */
+    int vr_hud_pitch;           /* F2-Flaeche: Richtung ueber der Blickachse in Grad, Standard 19 */
+    int vr_menu_shots;          /* DIAG(VR-MENU,W197): N > 0 = je neue ruhige Kopfpose/Menue-Zustand bei offenem Menue oder F2 ein Augenbild vr_<n>_menue_* (max N, hoechstens 64) */
 } hcfg_t;
 
 extern hcfg_t g_cfg;

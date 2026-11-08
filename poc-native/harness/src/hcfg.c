@@ -119,6 +119,14 @@ void hcfg_defaults(void)
     g_cfg.edge_mode = 0; /* W107 EDGE-MODE: aus (volles Hor+) bis zum Nutzerentscheid */
     g_cfg.edge_fade_width = 12; /* W107: % der 4:3-Boxbreite */
     g_cfg.edge_fade_strength = 100; /* W107: % */
+    g_cfg.cockpit_persp = 0; /* W191 UW-PERSP: Original */
+    g_cfg.cockpit_persp_dist = 3000; /* W191: mm, Kamera 3 m zurueck bei 100 % (Tele; Near-Ebene am alten Auge) */
+    g_cfg.cockpit_panini = 0; /* W191: Panini aus */
+    g_cfg.cockpit_panini_d = 200; /* W191: d hoechstens 2,0 */
+    g_cfg.cockpit_panini_frame = 1; /* W191: Rahmen halten */
+    g_cfg.cockpit_persp_pause = 0; /* W191: Kamera im Standbild erst nach Fortsetzen */
+    g_cfg.cockpit_persp_ref = 750; /* W191: mm, feste Ebene zwischen Radar (0,80 m) und Frontview (0,71 m) */
+    g_cfg.cockpit_zoom = 100; /* W191: aus */
     g_cfg.m3d_census = 0; /* W25 MISSION3D: Missions-Zensus aus (DIAG) */
     g_cfg.sbar_diag = 0; /* W98 DIAG aus */
     g_cfg.sbar_skip_xp = 0; /* W98 DIAG aus */
@@ -271,7 +279,7 @@ void hcfg_defaults(void)
     g_cfg.vr_canvas = 1;                /* W164 VR-FIX2 (wirkt nur mit vr_enable=1) */
     g_cfg.vr_canvas_dist = 2500;
     g_cfg.vr_canvas_size = 1500;
-    g_cfg.vr_preview_clean = 1;
+    g_cfg.vr_preview_clean = 0;         /* W197: F2 auch im Spiegel-Fenster (wie am Desktop) */
     g_cfg.vr_pose_shots = 0;
     g_cfg.vr_diag_skip = 0;
     g_cfg.vr_world_depth = 1;
@@ -290,6 +298,16 @@ void hcfg_defaults(void)
     g_cfg.vr_rt_scale = 2;              /* = Preset Ausgewogen */
     g_cfg.vr_preset = 2;
     g_cfg.vr_frame_log = 0;
+    g_cfg.vr_menu = 1;                  /* W197 VR-MENU (wirkt nur mit vr_enable=1) */
+    g_cfg.vr_menu_dist = 1750;
+    g_cfg.vr_menu_size = 1800;
+    g_cfg.vr_menu_px = 1620;
+    g_cfg.vr_menu_dim = 35;
+    g_cfg.vr_hud_dist = 1000;
+    g_cfg.vr_hud_size = 340;
+    g_cfg.vr_hud_yaw = 26;
+    g_cfg.vr_hud_pitch = 19;
+    g_cfg.vr_menu_shots = 0;
     g_cfg.perf_trace = 0;               /* W137: DIAG Bild-/Tick-Spur aus */
     g_cfg.contig_fast = 1;              /* W122: low_alloc mit Merkpunkt (0 = alt) */
     g_cfg.mem_wc_strip = 1;             /* W123: WC/NOCACHE nicht ins Host-Mapping (0 = alt) */
@@ -469,6 +487,16 @@ static int set_key_vr(const char *k, const char *v)
                           _stricmp(v, "quality") == 0 ? 3 : _stricmp(v, "custom") == 0 ? 0 : atoi(v);
     }
     else if (strcmp(k, "vr_frame_log") == 0) { g_cfg.vr_frame_log = atoi(v); }
+    else if (strcmp(k, "vr_menu") == 0) { g_cfg.vr_menu = atoi(v); } /* W197 VR-MENU */
+    else if (strcmp(k, "vr_menu_dist") == 0) { g_cfg.vr_menu_dist = atoi(v); }
+    else if (strcmp(k, "vr_menu_size") == 0) { g_cfg.vr_menu_size = atoi(v); }
+    else if (strcmp(k, "vr_menu_px") == 0) { g_cfg.vr_menu_px = atoi(v); }
+    else if (strcmp(k, "vr_menu_dim") == 0) { g_cfg.vr_menu_dim = atoi(v); }
+    else if (strcmp(k, "vr_hud_dist") == 0) { g_cfg.vr_hud_dist = atoi(v); }
+    else if (strcmp(k, "vr_hud_size") == 0) { g_cfg.vr_hud_size = atoi(v); }
+    else if (strcmp(k, "vr_hud_yaw") == 0) { g_cfg.vr_hud_yaw = atoi(v); }
+    else if (strcmp(k, "vr_hud_pitch") == 0) { g_cfg.vr_hud_pitch = atoi(v); }
+    else if (strcmp(k, "vr_menu_shots") == 0) { g_cfg.vr_menu_shots = atoi(v); }
     else { return 0; }
     return 1;
 }
@@ -771,6 +799,28 @@ static void set_key(const char *k, const char *v)
         g_cfg.edge_fade_width = atoi(v);
     } else if (strcmp(k, "edge_fade_strength") == 0) {
         g_cfg.edge_fade_strength = atoi(v);
+    } else if (strcmp(k, "cockpit_persp") == 0) { /* W191 UW-PERSP */
+        g_cfg.cockpit_persp = atoi(v);
+    } else if (strcmp(k, "cockpit_panini") == 0) {
+        g_cfg.cockpit_panini = atoi(v);
+    } else if (strcmp(k, "cockpit_panini_d") == 0) {
+        g_cfg.cockpit_panini_d = atoi(v);
+    } else if (strcmp(k, "cockpit_panini_frame") == 0) {
+        g_cfg.cockpit_panini_frame = atoi(v);
+    } else if (strcmp(k, "cockpit_persp_pause") == 0) {
+        g_cfg.cockpit_persp_pause = atoi(v);
+    } else if (strcmp(k, "cockpit_persp_dist") == 0) {
+        g_cfg.cockpit_persp_dist = atoi(v);
+    } else if (strcmp(k, "cockpit_persp_ref") == 0) {
+        g_cfg.cockpit_persp_ref = atoi(v);
+    } else if (strcmp(k, "cockpit_zoom") == 0) {
+        g_cfg.cockpit_zoom = atoi(v);
+    } else if (strcmp(k, "cockpit_persp_cycle") == 0) {
+        strncpy_s(g_cfg.cockpit_persp_cycle, sizeof g_cfg.cockpit_persp_cycle, v, _TRUNCATE);
+    } else if (strcmp(k, "cockpit_persp_shots") == 0) {
+        strncpy_s(g_cfg.cockpit_persp_shots, sizeof g_cfg.cockpit_persp_shots, v, _TRUNCATE);
+    } else if (strcmp(k, "cockpit_persp_diag") == 0) {
+        g_cfg.cockpit_persp_diag = atoi(v);
     } else if (strcmp(k, "edge_ab") == 0) {
         g_cfg.edge_ab = atoi(v);
     } else if (strcmp(k, "m3d_census") == 0) {

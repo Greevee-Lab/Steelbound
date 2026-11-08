@@ -23,6 +23,9 @@ typedef struct {
     char text[320];       /* Log-Zeile (deutsch, unuebersetzt; Launcher nutzt Schluessel) */
 } sb_gamever_t;
 
+/* Region masks are permissions, not proof of a particular release. */
+const char *sb_gamever_region_name(uint32_t region);
+
 /* 1 = unterstuetzt, 0 = nicht (out->text erklaert). */
 int sb_gamever_check(const uint8_t *xbe, size_t n, sb_gamever_t *out);
 

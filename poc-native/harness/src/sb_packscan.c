@@ -2001,3 +2001,10 @@ int sb_pack_write_cfg(const char *packs_json, const sb_pack_order_t *ord,
     fclose(f);
     return 1;
 }
+/* W199: bounded reuse of the pack inflater; caller validates ZIP and CRC. */
+int sb_save_inflate(const unsigned char *src, size_t n, unsigned char **dst, size_t expected)
+{
+    size_t got = inflate_raw(src, n, dst, expected + 16);
+    if (got == (size_t)-1 || got != expected) { free(*dst); *dst = NULL; return 0; }
+    return 1;
+}

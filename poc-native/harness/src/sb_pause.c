@@ -12,6 +12,7 @@ static volatile LONG g_pause_req;
 static unsigned g_pause_n;
 static unsigned g_after_n;            /* Presents seit dem letzten Fortsetzen (Beleg-Zeilen +1/+30) */
 static unsigned g_after_tmr0, g_after_fld0;
+static unsigned g_movie_trace_left, g_movie_trace_frame;
 
 /* Missions-Countdown [0x3563F0] (u32, -1 je Missions-Durchlauf; diag_states STA_TMR_ADDR) */
 static unsigned pause_tmr(void)
@@ -45,6 +46,14 @@ void sb_pause_point(void)
     LARGE_INTEGER qf, q0, q1, next, now;
     unsigned nfr = 0, tmr0, fld0, f0;
     LONGLONG per;
+    if (g_cfg.pause_diag && !g_pause_req && g_movie_trace_left) {
+        unsigned frame = sb_pause_movie_frame();
+        if (g_after_n == 1u || (frame && frame != g_movie_trace_frame)) {
+            sb_pause_movie_log("nachher");
+            g_movie_trace_frame = frame;
+            --g_movie_trace_left;
+        }
+    }
     if (!g_pause_req) {
         if (g_after_n) { /* Beleg: Countdown/Feldzaehler laufen nach dem Fortsetzen ohne Sprung weiter */
             g_after_n++;
@@ -62,10 +71,16 @@ void sb_pause_point(void)
     tmr0 = pause_tmr();
     fld0 = sb_timing_field();
     f0 = g_present_no;
+    sb_tsc_pause(1);
     sb_timing_pause_begin();
     krnl_time_pause(1);
     InterlockedExchange(&g_sb_paused, 1); /* Mischer stumm, Takt-Thread ruht (sb_pd_on) */
     g_pause_n++;
+    if (g_cfg.pause_diag) {
+        sb_pause_movie_log("vorher");
+        g_movie_trace_frame = sb_pause_movie_frame();
+        g_movie_trace_left = g_movie_trace_frame ? 90u : 0u;
+    }
     if (!sb_render_pause_begin()) {
         HLOG_W("PAUSE: Bild nicht gesichert (kein Device) - Pause ohne Bild");
     }
@@ -75,13 +90,13 @@ void sb_pause_point(void)
     next = q0;
     while (g_pause_req) {
         MSG msg;
-        while (!g_cfg.ui_thread && PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) { /* alter Pfad: hier pumpen */
+        while (!g_cfg.ui_thread && PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) { /* alter Pfad: hier pumpen */
             if (msg.message == WM_QUIT) {
                 hlog_close();
                 ExitProcess(0);
             }
             TranslateMessage(&msg);
-            DispatchMessageA(&msg);
+            DispatchMessageW(&msg);
         }
         sb_ovl_pause_tick();
         if (!g_pause_req) {
@@ -102,8 +117,10 @@ void sb_pause_point(void)
             QueryPerformanceCounter(&now);
         }
     }
+    if (g_cfg.pause_diag) { sb_pause_movie_log("angehalten"); }
     sb_render_pause_end();
     sb_ovl_present_end(); /* W200: commit before clocks/present thread resume */
+    sb_tsc_pause(0);
     InterlockedExchange(&g_sb_paused, 0);
     krnl_time_pause(0);
     sb_timing_pause_end();
@@ -114,4 +131,26 @@ void sb_pause_point(void)
     g_after_n = 1;
     g_after_tmr0 = pause_tmr();
     g_after_fld0 = sb_timing_field();
+}
+
+/* W192: lesender Beleg fuer den Film-Player 0x46C20. BINK: Width/Height/
+ * Frames/FrameNum/LastFrameNum, Pointer wird beim Schliessen genullt. */
+unsigned sb_pause_movie_frame(void)
+{
+    unsigned frame = 0;
+    __try {
+        const volatile unsigned *b = *(const volatile unsigned *volatile *)(uintptr_t)0x3B8AD0u;
+        if (*(volatile unsigned *)(uintptr_t)0x35642Cu == 2u && b && b[0] && b[1] && b[3] <= b[2]) {
+            frame = b[3];
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return frame;
+}
+
+void sb_pause_movie_log(const char *where)
+{
+    unsigned frame = sb_pause_movie_frame();
+    if (frame) {
+        HLOG_I("BINK PAUSE: %s f=%u movie_frame=%u tsc=%llu", where, g_present_no, frame, sb_tsc_now());
+    }
 }

@@ -20,12 +20,12 @@ static const known_t k_known[] = {
 
 static uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 
-static const char *region_name(uint32_t r)
+const char *sb_gamever_region_name(uint32_t r)
 {
-    if (r & 4u) return "PAL";
-    if (r & 1u) return "NTSC-U";
-    if (r & 2u) return "NTSC-J";
-    return "?";
+    if (r == 4u) return "PAL";
+    if (r == 1u) return "NTSC-U";
+    if (r == 2u) return "NTSC-J";
+    return "unknown/multi-region";
 }
 
 int sb_gamever_check(const uint8_t *xbe, size_t n, sb_gamever_t *out)
@@ -42,7 +42,7 @@ int sb_gamever_check(const uint8_t *xbe, size_t n, sb_gamever_t *out)
     sb_sha256_hex(d, out->sha256);
     {
         uint32_t base = rd32(xbe + 0x104), ca = rd32(xbe + 0x118);
-        if (ca >= base && (size_t)(ca - base) + 0xB0 <= n) {
+        if (ca >= base && (size_t)(ca - base) <= n - 0xB0) {
             const uint8_t *c = xbe + (ca - base);
             out->title_id = rd32(c + 0x08);
             out->region = rd32(c + 0xA0);
@@ -60,15 +60,15 @@ int sb_gamever_check(const uint8_t *xbe, size_t n, sb_gamever_t *out)
     if (out->supported) {
         _snprintf_s(out->text, sizeof out->text, _TRUNCATE,
                     "GAMEVER: %s erkannt (Title-ID %08X, Region %s, Version %u, sha256 %.16s...) -> unterstuetzt",
-                    out->label, out->title_id, region_name(out->region), out->version, out->sha256);
+                    out->label, out->title_id, sb_gamever_region_name(out->region), out->version, out->sha256);
     } else if (out->xbe_ok && out->title_id == 0x43430002u) {
         _snprintf_s(out->text, sizeof out->text, _TRUNCATE,
                     "GAMEVER: andere Fassung von Steel Battalion (Title-ID %08X, Region %s, Version %u, sha256 %s) -> nicht unterstuetzt (nur PAL/Europe)",
-                    out->title_id, region_name(out->region), out->version, out->sha256);
+                    out->title_id, sb_gamever_region_name(out->region), out->version, out->sha256);
     } else {
         _snprintf_s(out->text, sizeof out->text, _TRUNCATE,
                     "GAMEVER: fremdes Spiel (Title-ID %08X, Region %s, sha256 %s) -> nicht unterstuetzt",
-                    out->title_id, region_name(out->region), out->sha256);
+                    out->title_id, sb_gamever_region_name(out->region), out->sha256);
     }
     return out->supported;
 }

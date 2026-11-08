@@ -664,7 +664,7 @@ cfg.what_image=Game image
 cfg.image_missing=Game image not found: '%s' does not exist.
 cfg.image_notxbox=Not an Xbox game image (XDVDFS signature missing or file damaged): '%s'.
 cfg.image_noxbe=The game image contains no default.xbe: '%s'.
-cfg.image_version=Unsupported game version (Title ID %s, region %s). Only the European (PAL) version of Steel Battalion is supported.
+cfg.image_version=This game version (Title ID %s, region %s, XBE version %u) is not yet supported. Supported: Steel Battalion (Europe, PAL).
 gui.image_ok=Image OK: %s
 gui.dlg_image_title=Choose game image
 gui.dlg_image_filter=Xbox game image
@@ -1087,3 +1087,18 @@ ovl.ph_monitor_fx=Monitor effect
 ovl.ph_shader=Shader
 ovl.ph_original=Original
 ovl.ph_effect_pending=Enable before pausing to see all effects.
+
+# W199 SAVE-IMPORT
+gui.si_import=Import...
+gui.si_export=Export...
+gui.si_folder=Select folder...
+gui.si_file=Select ZIP or SAV file...
+gui.si_invalid=Import rejected: invalid, unsafe or unsupported save data, duplicate files, or foreign title ID (expected 43430002).
+gui.si_io=Save transfer failed. Check available space, file access and destination (export needs a new filename). Existing data is retained or restored.
+gui.si_recovery=Transfer failed during rollback. Your previous saves remain in _backup/import-...; restore them before playing.
+gui.si_empty=No saves or replays to export.
+gui.si_preview=Import preview: %d save files (%d pilot files), %d replays. Conflicting files: %d.\n\nExisting saves will be backed up in _backup/import-<time>. Signatures are preserved; keep save_check=1 for repair on game start. Continue?
+gui.si_conflict=Yes = overwrite conflicting files.\nNo = merge, keep existing conflicting files.\nCancel = do not import. Other existing files remain.
+gui.si_done=Imported selection: %d saves (%d pilots), %d replays. Previous data backed up; merge retains existing conflicts.
+gui.si_exported=Saves and replays exported as ZIP.
+gui.si_foreign=Import rejected: this folder or ZIP contains a different Xbox title ID. Only Steel Battalion (43430002) is supported.

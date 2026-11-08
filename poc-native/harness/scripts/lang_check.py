@@ -24,6 +24,7 @@ SRC = [
     "launcher/src/launcher_cfg.c",
     "launcher/src/launcher_assist.c",
     "launcher/src/launcher.c",
+    "launcher/src/launcher_saves.c",  # W199 SAVE-IMPORT
     "launcher/src/launcher_rules.c",  # W171 LAUNCHER-P2P3 (gui.rule_*)
     "harness/src/sb_overlay.c",
     "harness/src/render_fx_rem.c",

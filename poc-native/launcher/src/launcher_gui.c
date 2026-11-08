@@ -1,3 +1,4 @@
+#include "launcher_saves.h"
 /* launcher_gui.c - Oberflaeche des Launchers (W82 LAUNCHER-UI2).
  * Randloses Fenster (WS_POPUP, eigene Titelleiste, DWM-Schatten),
  * Per-Monitor-DPI v2, W-API/UTF-16 an der Fenstergrenze (intern UTF-8),
@@ -33,6 +34,8 @@
 #include "sb_edition.h" /* W116 EDITIONS: Badge, Hintergrund, Remaster-Paket */
 #include "launcher_assist.h" /* W143 CTRL-ASSIST: Controller-Test-Dialog */
 #include "sb_pack.h" /* W148 PACK-LAUNCHER: Seite "Packs" (Scan/Pruefen/packs.json) */
+#include "sb_gamever.h"
+#include "iso_vfs.h"
 #include "sb_sha256.h" /* W148: XBE-Hash fuer V2 */
 #include "sb_userdata.h" /* W150 USER-DATA */
 #include "sb_savecheck.h" /* W187 KIA-LOAD: Spielstaende zuruecksetzen */
@@ -212,6 +215,8 @@ int gui_page_from_name(const char *v)
 #define ID_VRPRESET 1091   /* W183 VR-FIX3: VR-Leistung (Leistung/Ausgewogen/Qualitaet/Eigene) */
 #define ID_VRRES 1092      /* W183 VR-FIX3: VR-Render-Aufloesung (% der Runtime-Empfehlung) */
 #define ID_CTRL_ZADIG 1093 /* W185: Einrichtungsanleitung als HTML im Browser */
+#define ID_SAVES_IMPORT 1198
+#define ID_SAVES_EXPORT 1199
 #define ID_SAVES_RESET 1094 /* W187 KIA-LOAD: Spielstaende zuruecksetzen (mit Sicherung) */
 #define ID_SAVE_LOCK 1095  /* W190 SAVE-LOCK: Spielstaende schuetzen (Testhilfe) */
 #define ID_PH_DIR 1096     /* W195 PHOTO-MODE: Extras - Fotoordner (Feld) */
@@ -1957,7 +1962,7 @@ static void paint_ctrl(void)
     card(CX0, CY0 + 260, COLW, 120, LT("gui.ctl_profile"));
 
     card(CX0, CY0 + 392, COLW, 104, LT("gui.ctl_pad"));
-    label(F_BODY, g_pad_txt, CX0 + 18, CY0 + 432, COLW - 36, 22, C_TEXT);
+    label(F_BODY, g_pad_txt, CX0 + 18, CY0 + 456, COLW - 36, 22, C_TEXT);
     label(F_SMALL, g_padlive_txt, CX0 + 18, CY0 + 456, COLW - 36, 36, C_DIM);
 
     card(COL2, CY0, COLW, 496, LT("gui.ctl_keymap"));
@@ -2017,10 +2022,12 @@ static void adv_hdd_path(char *out, size_t cap)
 }
 
 /* W187 KIA-LOAD: laeuft ein Spiel-Client (sb_ldr.exe)? */
+static int g_save_test_busy = -1; /* only set by the offscreen selftest */
 static int client_running(void)
 {
     PROCESSENTRY32W pe;
     int found = 0;
+    if (g_save_test_busy >= 0) return g_save_test_busy;
     HANDLE s = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
     if (s == INVALID_HANDLE_VALUE) {
         return 0;
@@ -2072,6 +2079,139 @@ static int adv_saves_reset_at(const char *hdd_u8, int check_running)
     return rc;
 }
 
+
+/* W199: native dialogs only; same effective HDD path and running-client gate as reset. */
+static void ui_to_settings(launcher_settings_t *s);
+static void adv_saves_transfer(int exporting)
+{
+    wchar_t file[1024] = L"", hdd[1100], title[160];
+    char path[1024], msg[4096];
+    const char *error = NULL;
+    ls_counts counts;
+    ls_plan *plan;
+    int mode = 1, rc;
+    OPENFILENAMEW ofn;
+    SYSTEMTIME tm;
+    if (client_running())
+    {
+        set_status_k(LT("gui.saves_reset_running"), 2);
+        return;
+    }
+    ui_to_settings(&g_cur);
+    adv_hdd_path(path, sizeof path);
+    u8_to_w(path, hdd, 1100);
+    u8_to_w(LT(exporting ? "gui.si_export" : "gui.si_import"), title, 160);
+    memset(&ofn, 0, sizeof ofn);
+    ofn.lStructSize = sizeof ofn;
+    ofn.hwndOwner = g_hwnd;
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = 1024;
+    ofn.lpstrTitle = title;
+    ofn.Flags = OFN_NOCHANGEDIR | OFN_PATHMUSTEXIST;
+    if (exporting)
+    {
+        GetLocalTime(&tm);
+        _snwprintf_s(file, 1024, _TRUNCATE, L"Steelbound-saves-%04u%02u%02u-%02u%02u%02u.zip",
+                     tm.wYear, tm.wMonth, tm.wDay, tm.wHour, tm.wMinute, tm.wSecond);
+        ofn.lpstrFilter = L"ZIP\0*.zip\0\0";
+        ofn.lpstrDefExt = L"zip";
+        if (!GetSaveFileNameW(&ofn))
+            return;
+        if (client_running())
+        {
+            set_status_k(LT("gui.saves_reset_running"), 2);
+            return;
+        }
+        rc = ls_export(hdd, file, &error);
+        set_status_k(LT(rc == 1 ? "gui.si_exported" : error), rc == 1 ? 1 : 2);
+        if (rc < 0) ui_msgbox(g_hwnd, LT(error), LT("gui.si_export"), MB_OK | MB_ICONERROR);
+        return;
+    }
+    else
+    {
+        HMENU menu = CreatePopupMenu();
+        RECT rect;
+        wchar_t a[160], b[160];
+        int choice;
+        u8_to_w(LT("gui.si_folder"), a, 160);
+        u8_to_w(LT("gui.si_file"), b, 160);
+        AppendMenuW(menu, MF_STRING, 1, a);
+        AppendMenuW(menu, MF_STRING, 2, b);
+        GetWindowRect(ctl(ID_SAVES_IMPORT), &rect);
+        choice = TrackPopupMenu(menu, TPM_RETURNCMD, rect.left, rect.bottom, 0, g_hwnd, NULL);
+        DestroyMenu(menu);
+        if (choice == 1)
+        {
+            BROWSEINFOW bi;
+            LPITEMIDLIST pidl;
+            memset(&bi, 0, sizeof bi);
+            bi.hwndOwner = g_hwnd;
+            bi.lpszTitle = title;
+            bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+            pidl = SHBrowseForFolderW(&bi);
+            if (!pidl)
+                return;
+            rc = SHGetPathFromIDListW(pidl, file);
+            CoTaskMemFree(pidl);
+            if (!rc)
+                return;
+        }
+        else if (choice == 2)
+        {
+            ofn.lpstrFilter = L"ZIP / SAV\0*.zip;*.sav\0\0";
+            ofn.Flags |= OFN_FILEMUSTEXIST;
+            if (!GetOpenFileNameW(&ofn))
+                return;
+        }
+        else
+            return;
+    }
+    plan = ls_open(file, hdd, &counts, &error);
+    if (!plan)
+    {
+        set_status_k(LT(error), 2);
+        ui_msgbox(g_hwnd, LT(error), LT("gui.si_import"), MB_OK | MB_ICONERROR);
+        return;
+    }
+    _snprintf_s(msg, sizeof msg, _TRUNCATE, LT("gui.si_preview"), counts.saves, counts.pilots,
+                counts.replays, counts.conflicts);
+    if (counts.conflicts)
+    {
+        int answer;
+        wchar_t names[2200];
+        char names8[2200];
+        ls_conflict_names(plan, names, 2200);
+        w_to_u8(names, names8, sizeof names8);
+        strcat_s(msg, sizeof msg, "\n\n");
+        strcat_s(msg, sizeof msg, names8);
+        strcat_s(msg, sizeof msg, "\n");
+        strcat_s(msg, sizeof msg, LT("gui.si_conflict"));
+        answer = ui_msgbox(g_hwnd, msg, LT("gui.si_import"), MB_YESNOCANCEL | MB_ICONQUESTION);
+        mode = answer == IDYES ? 1 : answer == IDNO ? 2 : 0;
+    }
+    else
+        mode = ui_confirm(msg, LT("gui.si_import")) ? 1 : 0;
+    if (mode && client_running())
+    {
+        ls_close(plan);
+        set_status_k(LT("gui.saves_reset_running"), 2);
+        return;
+    }
+    rc = ls_import(plan, mode, &error);
+    ls_close(plan);
+    if (rc == 1)
+    {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, LT("gui.si_done"), counts.saves, counts.pilots,
+                    counts.replays);
+        set_status_k(msg, 1);
+        ui_msgbox(g_hwnd, msg, LT("gui.si_import"), MB_OK | MB_ICONINFORMATION);
+    }
+    else if (rc < 0) {
+        set_status_k(LT(error), 2);
+        ui_msgbox(g_hwnd, LT(error), LT("gui.si_import"), MB_OK | MB_ICONERROR);
+    }
+}
+
 static void paint_adv(void)
 {
     char t[1400];
@@ -2090,7 +2230,7 @@ static void paint_adv(void)
     }
 
     /* Spielstaende + Datenort */
-    card(CX0, CY0 + 196, COLW, 112, LT("gui.adv_saves"));
+    card(CX0, CY0 + 196, COLW, 146, LT("gui.adv_saves"));
     label1(F_SMALL, LT("gui.adv_hdd"), CX0 + 18, CY0 + 236, 84, 30, C_DIM);
     {
         char path[1024];
@@ -2103,9 +2243,9 @@ static void paint_adv(void)
     }
 
     /* Gespeicherte Einstellungen (Glossar: "Saved setup") */
-    card(CX0, CY0 + 320, COLW, 176, LT("gui.adv_setups"));
-    if (!paint_reason(28, CX0 + 18, CY0 + 468, COLW - 36, 16)) {
-        label1(F_TINY, g_prof_info, CX0 + 18, CY0 + 468, COLW - 36, 16, C_DIM);
+    card(CX0, CY0 + 354, COLW, 142, LT("gui.adv_setups"));
+    if (!paint_reason(28, CX0 + 18, CY0 + 484, COLW - 36, 12)) {
+        label1(F_TINY, g_prof_info, CX0 + 18, CY0 + 484, COLW - 36, 12, C_DIM);
     }
 
     card(COL2, CY0, COLW, 124, LT("gui.adv_finetune"));
@@ -2637,7 +2777,7 @@ static void ctrl_profile_from_ui(char *out, size_t cap)
     }
     {
         wchar_t w[128];
-        if (ComboBox_GetLBText(cb, sel, w) != CB_ERR) {
+        if (SendMessageW(cb, CB_GETLBTEXT, (WPARAM)sel, (LPARAM)w) != CB_ERR) {
             w_to_u8(w, out, (int)cap);
         }
     }
@@ -6050,7 +6190,7 @@ static void setup_auto_sync(int from_list)
         wchar_t w[128];
         int sel = ComboBox_GetCurSel(cb);
         name[0] = '\0';
-        if (sel >= 0 && ComboBox_GetLBText(cb, sel, w) != CB_ERR) {
+        if (sel >= 0 && SendMessageW(cb, CB_GETLBTEXT, (WPARAM)sel, (LPARAM)w) != CB_ERR) {
             w_to_u8(w, name, (int)sizeof name);
         }
     } else {
@@ -10594,6 +10734,8 @@ static void ui_apply_language(void)
     ui_settext(ctl(ID_PLAY_FOLDER), LT("gui.play_use_folder"));
     ui_settext(ctl(ID_HDD_OPEN), LT("gui.adv_open"));
     ui_settext(ctl(ID_DATA_OPEN), LT("gui.adv_open_folder"));
+    ui_settext(ctl(ID_SAVES_IMPORT), LT("gui.si_import"));
+    ui_settext(ctl(ID_SAVES_EXPORT), LT("gui.si_export"));
     ui_settext(ctl(ID_SAVES_RESET), LT("gui.saves_reset"));
     ui_settext(ctl(ID_GFX_PACKS), LT("gui.gfx_to_packs"));
     ui_settext(ctl(ID_PK_UP), "\xE2\x86\x91");
@@ -10943,12 +11085,14 @@ static void build_controls(void)
        LT("gui.adv_open"), 0);
     mk(w, K_BTN, ID_DATA_OPEN, P_ADV, CX0 + COLW - 18 - 112, CY0 + 272, 112, 26,
        LT("gui.adv_open_folder"), 0);
-    mk(w, K_COMBOEDIT, ID_PROF_COMBO, P_ADV, CX0 + 18, CY0 + 358, COLW - 36, 30,
+    mk(w, K_BTN, ID_SAVES_IMPORT, P_ADV, CX0 + 18, CY0 + 308, 140, 28, LT("gui.si_import"), 0);
+    mk(w, K_BTN, ID_SAVES_EXPORT, P_ADV, CX0 + 166, CY0 + 308, COLW - 184, 28, LT("gui.si_export"), 0);
+    mk(w, K_COMBOEDIT, ID_PROF_COMBO, P_ADV, CX0 + 18, CY0 + 388, COLW - 36, 30,
        "", 0);
-    mk(w, K_ACCENT, ID_PROF_LOAD, P_ADV, CX0 + 18, CY0 + 394, 96, 30, LT("gui.adv_setup_load"), 0);
-    mk(w, K_BTN, ID_PROF_SAVE, P_ADV, CX0 + 122, CY0 + 394, 96, 30, LT("gui.adv_setup_save"), 0);
-    mk(w, K_BTN, ID_PROF_DEL, P_ADV, CX0 + 226, CY0 + 394, 96, 30, LT("gui.btn_delete"), 0);
-    mk(w, K_TOGGLE, ID_PROF_DFLT, P_ADV, CX0 + 18, CY0 + 432, COLW - 36, 28,
+    mk(w, K_ACCENT, ID_PROF_LOAD, P_ADV, CX0 + 18, CY0 + 422, 96, 30, LT("gui.adv_setup_load"), 0);
+    mk(w, K_BTN, ID_PROF_SAVE, P_ADV, CX0 + 122, CY0 + 422, 96, 30, LT("gui.adv_setup_save"), 0);
+    mk(w, K_BTN, ID_PROF_DEL, P_ADV, CX0 + 226, CY0 + 422, 96, 30, LT("gui.btn_delete"), 0);
+    mk(w, K_TOGGLE, ID_PROF_DFLT, P_ADV, CX0 + 18, CY0 + 456, COLW - 36, 28,
        LT("gui.adv_setup_auto"), 0);
     c = mk(w, K_COMBO, ID_VSYNC, P_ADV, COL2 + 170, CY0 + 44, COLW - 188,
            30, "", 0);
@@ -11317,6 +11461,8 @@ static void on_command_inner(int id, int code)
     case ID_GFX_PACKS:
         show_page(P_PACKS);
         break;
+    case ID_SAVES_IMPORT: adv_saves_transfer(0); break;
+    case ID_SAVES_EXPORT: adv_saves_transfer(1); break;
     case ID_SAVES_RESET: { /* W187 KIA-LOAD */
         char path[1100];
         adv_hdd_path(path, sizeof path);
@@ -13189,6 +13335,20 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     GT_FAIL("57 save-reset", "%s", why57);
                 }
             }
+            { /* W199: both transfer actions stop before opening any dialog. */
+                int ok199;
+                g_save_test_busy = 1;
+                adv_saves_transfer(0);
+                ok199 = g_status_kind == 2 && !strcmp(g_status, LT("gui.saves_reset_running"));
+                set_status_k("", 0);
+                adv_saves_transfer(1);
+                ok199 = ok199 && g_status_kind == 2 && !strcmp(g_status, LT("gui.saves_reset_running")) &&
+                        ui_visible_on(ui_find(ID_SAVES_IMPORT), P_ADV) &&
+                        ui_visible_on(ui_find(ID_SAVES_EXPORT), P_ADV);
+                g_save_test_busy = -1;
+                if (ok199) { GT_OK("W199 transfer UI: visible, import/export blocked during play"); }
+                else { GT_FAIL("W199 transfer UI", "%s", "running-client guard"); }
+            }
             /* --- 58 (W190 SAVE-LOCK): Schalter "Spielstaende schuetzen" auf
              * Erweitert (immer sichtbar, auch bei eingeklappter Diagnose),
              * Klick -> Einstellung, user.cfg-Rundweg [game] save_lock,
@@ -13876,6 +14036,63 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
             printf("     (56: Beispiel %s)\n", fx);
             sb_lang_set(keep);
         }
+    }
+    { /* W202: synthetic certificate, no game bytes. Same folder check as launch. */
+        unsigned char xb[0x300] = {0};
+        uint32_t value;
+        sb_gamever_t gv;
+        launcher_settings_t cfg;
+        char msg[1024], keep[16], iso[1300], acp[1300];
+        int ok = 1, li, ri;
+        const char *langs[] = { "en", "de" };
+        const unsigned regions[] = { 1, 2, 4, 7, 0 };
+        strcpy_s(keep, sizeof keep, sb_lang_code());
+#define W202_PUT(off, v) do { value = (v); memcpy(xb + (off), &value, 4); } while (0)
+        W202_PUT(0, 0x48454258u);
+        W202_PUT(0x104, 0x10000u);
+        W202_PUT(0x118, 0x10200u);
+        W202_PUT(0x208, 0x43430002u);
+        W202_PUT(0x2AC, 42u);
+        for (li = 0; li < 2; li++) {
+            sb_lang_set(langs[li]);
+            for (ri = 0; ri < 5; ri++) {
+                FILE *f = NULL;
+                W202_PUT(0x2A0, regions[ri]);
+                if (sb_gamever_check(xb, sizeof xb, &gv) || !gv.xbe_ok ||
+                    gv.version != 42 || gv.region != regions[ri]) ok = 0;
+                _snprintf_s(p, sizeof p, _TRUNCATE, "%s/default.xbe", dir);
+                if (u8_fopen_s(&f, p, "wb") != 0 || !f) { ok = 0; continue; }
+                if (fwrite(xb, 1, sizeof xb, f) != sizeof xb) ok = 0;
+                fclose(f);
+                lcfg_defaults(&cfg);
+                cfg.game_image[0] = 0;
+                strcpy_s(cfg.xbe_path, sizeof cfg.xbe_path, p);
+                strcpy_s(cfg.media_root, sizeof cfg.media_root, dir);
+                strcpy_s(cfg.hdd_root, sizeof cfg.hdd_root, dir);
+                if (lcfg_validate(&cfg, msg, sizeof msg) == 0 ||
+                    !strstr(msg, li ? "Diese Spielversion" : "This game version") ||
+                    !strstr(msg, "43430002") || !strstr(msg, "42") ||
+                    !strstr(msg, sb_gamever_region_name(regions[ri])) ||
+                    !strstr(msg, "Steel Battalion (Europe, PAL)")) ok = 0;
+                _snprintf_s(iso, sizeof iso, _TRUNCATE, "%s/unknown.iso", dir);
+                u8_to_acp(iso, acp, sizeof acp);
+                if (iso_vfs_make_test_image(acp, xb, sizeof xb) != 0 ||
+                    lcfg_image_check(iso, msg, sizeof msg) != 4 ||
+                    !strstr(msg, li ? "Diese Spielversion" : "This game version") ||
+                    !strstr(msg, "43430002") || !strstr(msg, "42") ||
+                    !strstr(msg, sb_gamever_region_name(regions[ri])) ||
+                    !strstr(msg, "Steel Battalion (Europe, PAL)")) ok = 0;
+                u8_DeleteFile(iso);
+            }
+        }
+        W202_PUT(0x104, 0u);
+        W202_PUT(0x118, 0xFFFFFFF0u); /* addition would wrap in a 32-bit parser */
+        if (sb_gamever_check(xb, sizeof xb, &gv) || gv.xbe_ok) ok = 0;
+        if (sb_gamever_check(xb, 16, &gv) || gv.xbe_ok) ok = 0;
+#undef W202_PUT
+        sb_lang_set(keep);
+        if (ok) { GT_OK("61 unbekannte Version (Ordner/ISO, EN/DE, U/J/PAL/multi, Grenzen)"); }
+        else { GT_FAIL("61 unbekannte Version", "%s", "Version/Meldung unvollstaendig"); }
     }
     _snprintf_s(p, sizeof p, _TRUNCATE, "%s/default.xbe", dir);
     u8_DeleteFile(p);

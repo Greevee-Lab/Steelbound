@@ -427,7 +427,7 @@ static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         }
         break;
     }
-    return CallWindowProcA(g_old_proc, w, msg, wp, lp);
+    return CallWindowProcW(g_old_proc, w, msg, wp, lp);
 }
 
 static void imouse_install(void)
@@ -437,7 +437,7 @@ static void imouse_install(void)
     if (g_installed) return;
     h = imouse_find_window();
     if (!h) return;
-    old = SetWindowLongPtrA(h, GWLP_WNDPROC, (LONG_PTR)imouse_wndproc);
+    old = SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)imouse_wndproc);
     if (!old) {
         HLOG_W("INPUT: Fenster-Eingabe nicht installiert (GLE=%lu)",
                GetLastError());

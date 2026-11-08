@@ -464,6 +464,7 @@ void hooks_install(void)
     patch_jmp(0x18D1EBu, hook_XMountUtilityDrive, "XAPI-MountUtilityDrive");
     patch_jmp(0x18D97Fu, hook_ReadFile, "XAPI-ReadFile(sync)");
     patch_jmp(0x191250u, hook_PerfFrequency, "XAPI-PerfFreq(TSC)");
+    if (g_cfg.bink_pause) { patch_jmp(0x19123Fu, hook_PerfCounter, "XAPI-PerfCounter(Pause)"); }
     patch_jmp(0x108720u, hook_108720, "108720(NULL-Check)");
     patch_jmp(0x1086C0u, hook_1086C0, "1086C0(No-Op)");
     patch_jmp(0x108740u, hook_108740, "108740(No-Op)");

@@ -28,6 +28,9 @@ typedef struct {
     uint32_t loader_hdr_size;
 } xbe_image_t;
 
+/* Read only, for version validation before trusting any section pointers. */
+int xbe_read(const char *path, xbe_image_t *img);
+
 /* Datei laden + parsen (noch nicht mappen). */
 int xbe_parse(const char *path, xbe_image_t *img);
 /* W150: wie xbe_parse, aber aus einem malloc-Puffer (gehoert danach img). */

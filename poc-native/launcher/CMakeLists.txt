@@ -73,6 +73,7 @@ if(SB_BG_HEAD MATCHES "git-lfs.github.com/spec/v1")
 endif()
 
 add_executable(sb_launcher WIN32
+  src/launcher_saves.c
   src/launcher.c
   src/launcher_gui.c
   src/launcher_u8.c

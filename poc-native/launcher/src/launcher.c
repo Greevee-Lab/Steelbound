@@ -1,3 +1,4 @@
+#include "launcher_saves.h"
 /* launcher.c - Startanwendung (A10, W26/W47/W78/W82): CLI, Selbsttest,
  * Start des Clients. Die Oberflaeche steht seit W82 in launcher_gui.c
  * (W-API, randlos, Hintergrundbild). CLI: --selftest, --check,
@@ -1752,6 +1753,8 @@ static int cli_selftest(const char *client_override)
     /* 30-37 (W148): Packs-Seite + Render-Skalierung (launcher_packtest.c). */
     packs_selftest(&pass, &fail);
 
+    if (!ls_selftest()) { T_OK("W199 save-import layouts, conflicts, backup, ZIP roundtrip, rejection"); }
+    else { T_FAIL("W199 save-import", "%s", "failed"); }
     st_valid_cleanup(); /* COMM-SELFTEST2 */
     printf("selftest: %d PASS, %d FAIL\n", pass, fail);
     return fail ? 1 : 0;

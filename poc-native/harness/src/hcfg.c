@@ -64,6 +64,8 @@ void hcfg_defaults(void)
     g_cfg.hlock_spin = 64;
     g_cfg.audio_setbuf_len = 1; /* W22: A/B-belegt (GetPos 621M->205K, Sil 88->0%) */
     g_cfg.seek_cache = 1; /* W22: A/B-belegt (t2 60->1%, Film 23->29/s) */
+    g_cfg.bink_pause = 1;
+    g_cfg.pause_diag = 0;
     g_cfg.tsc_freq = 1; /* W22: A/B-belegt (Film 45->182 s, e1 8/9) */
     g_cfg.audio_ring_clip = 1; /* W22: A/B-belegt (Feed 1,06x->1x, g2) */
     g_cfg.audio_ring_overwrite = 1; /* W83: A/B-belegt (Film-Stotterstellen, s. BERICHT W83) */
@@ -211,7 +213,7 @@ void hcfg_defaults(void)
     g_cfg.im_fast = 1; /* W99 IM-PERF: schneller VB-Pfad (A/B W99_rt0s0/rt1s0b, L0a/L1a, Selbstpruefung W99_chk1) */
     g_cfg.im_end_reset = 1; /* W64 EDGE: IM-Batch nach End geschlossen (Fix, kein Geister-Quad im Hor+-Rand) */
     g_cfg.fx_blend_eq = 1; /* W90 FX-ORIG: Blend-Gleichung/-Farbe (Fix) */
-    g_cfg.clear_xbflags = 0; /* W101 CLEAR-XB: Xbox-Clear-Flags - aus (globale Wirkung, s. BERICHT W101) */
+    g_cfg.clear_xbflags = 1; /* W101/W177 CLEAR-XB: Xbox-Clear-Flags an (Nacht 8.11. P_N1cf: keine Kosten, Hilfetext korrekt) */
     g_cfg.fx_zfunc = 1; /* W90 FX-ORIG / W101 FRONT-HANGAR: Tiefenfunktion an - Front-Fenster-Quad (RT31-Welt) liegt LEQUAL auf gleicher Tiefe wie sein Tiefen-Quad: Hangar statt Schwarz bei offener Luke */
     g_cfg.tex_lockwatch = 1; /* W98 STARTSEQ-BARS: Fix (A/B W98_a1/a3) */
     g_cfg.remaster = 0; /* W103 REM-FRAME: [remaster] Standard AUS */
@@ -501,6 +503,8 @@ static int set_key_overlay(const char *k, const char *v)
         strcpy_s(g_cfg.lang, sizeof g_cfg.lang, _stricmp(v, "de") == 0 ? "de" : "en");
     }
     else if (strcmp(k, "game_menu") == 0) { g_cfg.game_menu = atoi(v); } /* W188 */
+    else if (strcmp(k, "bink_pause") == 0) { g_cfg.bink_pause = atoi(v); }
+    else if (strcmp(k, "pause_diag") == 0) { g_cfg.pause_diag = atoi(v); }
     else if (strcmp(k, "menu_pause") == 0) { g_cfg.menu_pause = atoi(v); } /* W188 */
     else if (strcmp(k, "pause_live") == 0) { g_cfg.pause_live = atoi(v); } /* W193 */
     else if (strcmp(k, "menu_peek_key") == 0) { strncpy_s(g_cfg.menu_peek_key, sizeof g_cfg.menu_peek_key, v, _TRUNCATE); } /* W193 */

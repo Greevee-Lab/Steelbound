@@ -552,6 +552,7 @@ extern unsigned long sb_ctx_owner_tid(void);
 extern unsigned long audio_lock_owner_tid(void);
 extern const hlock_t *sb_ctx_hlock(void);
 extern const hlock_t *audio_hlock(void);
+extern hlock_t g_tsc_lock; /* W192: pausierbarer XAPI-Counter */
 
 /* W119 LOADLOCK: Host-Sperren sind hlocks; Owner-Tid wird beim Erwerb
  * atomar mit der Uebernahme gesetzt (vorher CRITICAL_SECTION.OwningThread:
@@ -584,6 +585,7 @@ static const char *susp_held_lock(DWORD tid)
     if (!tid) {
         return NULL;
     }
+    if (hlock_owner(&g_tsc_lock) == tid) { return "g_tsc_lock"; }
     if (susp_cs_owner(&g_ht_cs) == tid) {
         return "g_ht_cs";
     }
@@ -669,12 +671,12 @@ void krnl_lock_diag(void)
  * Watchdogs (emu_main.c). Rueckgabe = Anzahl (doppelte Tids nur einmal). */
 int krnl_lock_foreign_owners(unsigned long *tids, const char **names, int cap)
 {
-    const hlock_t *locks[5];
-    const char *ln[5] = { "ht", "csmap", "unimpl", "ctx", "au" };
+    const hlock_t *locks[6];
+    const char *ln[6] = { "ht", "csmap", "unimpl", "ctx", "au", "tsc" };
     int i, j, t, n = 0;
     locks[0] = &g_ht_cs; locks[1] = &g_csmap_cs; locks[2] = &g_unimpl_cs;
-    locks[3] = sb_ctx_hlock(); locks[4] = audio_hlock();
-    for (i = 0; i < 5 && n < cap; i++) {
+    locks[3] = sb_ctx_hlock(); locks[4] = audio_hlock(); locks[5] = &g_tsc_lock;
+    for (i = 0; i < 6 && n < cap; i++) {
         DWORD o = hlock_owner(locks[i]);
         int dup = 0, xb = 0;
         if (!o) { continue; }

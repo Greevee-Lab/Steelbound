@@ -20,7 +20,7 @@ static uint32_t rd32(const uint8_t *p, size_t off)
     return v;
 }
 
-int xbe_parse(const char *path, xbe_image_t *img)
+int xbe_read(const char *path, xbe_image_t *img)
 {
     FILE *f;
     long len;
@@ -34,14 +34,24 @@ int xbe_parse(const char *path, xbe_image_t *img)
     fseek(f, 0, SEEK_END);
     len = ftell(f);
     fseek(f, 0, SEEK_SET);
+    if (len <= 0 || len > 64L * 1024 * 1024) { fclose(f); return -1; }
     buf = malloc((size_t)len);
     if (!buf || fread(buf, 1, (size_t)len, f) != (size_t)len) {
         HLOG_E("xbe: Lesen fehlgeschlagen");
         fclose(f);
+        free(buf);
         return -1;
     }
     fclose(f);
-    return xbe_parse_buf(buf, (uint32_t)len, path, img);
+    img->file = buf;
+    img->file_size = (uint32_t)len;
+    return 0;
+}
+
+int xbe_parse(const char *path, xbe_image_t *img)
+{
+    if (xbe_read(path, img) != 0) return -1;
+    return xbe_parse_buf(img->file, img->file_size, path, img);
 }
 
 /* W150 ISO-DIRECT: XBE aus einem Puffer (Abbild per iso_vfs) parsen. Der

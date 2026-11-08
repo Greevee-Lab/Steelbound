@@ -10,7 +10,7 @@ typedef struct {
     char media_root[512];
     char hdd_root[512]; /* Partition1 (E:, beschreibbar): TDATA/UDATA */
     char game_image[512]; /* W150 ISO-DIRECT: Spiel-Abbild (XISO/Redump), Vorrang vor media_root/xbe_path; leer = Ordner-Modus */
-    int version_check;    /* W150: 1 = nur bekannte Spielversion (PAL) starten, 0 = nur warnen */
+    int version_check;    /* W150/W202: 1 = unbekannte XBE ablehnen (Standard), 0 = nur warnen (Experten) */
     int iso_selftest;     /* W150 DIAG: 1 = D:-Selbsttest (Lesen, Schreibschutz) vor dem Spielstart */
     int save_check;       /* W187 KIA-LOAD: Spielstaende (T:) beim Start pruefen: 1 = reparieren (mit Sicherung), 2 = nur melden, 0 = aus */
     int save_lock;        /* W190 SAVE-LOCK: 1 = Spielstaende schuetzen (T:/U: in eine Wegwerf-Arbeitskopie <hdd>\_savelock, beim naechsten Start verworfen), 0 = Original (Standard) */
@@ -156,6 +156,8 @@ typedef struct {
     int audio_setbuf_fast; /* PERF(PERF-TICK,W168): 1 = SetBufferData dekodiert direkt in den Stimmenpuffer (gleiche Werte, ohne FIFO-Umweg) */
     int seek_cache;        /* W22: 1 = redundante Seeks cachen (t2-Spin), 0 = alt */
     /* (audio_pause_cap revertiert: wirkungslos, s. BERICHT W22) */
+    int bink_pause; /* W192: pausierbarer XAPI-TSC, Standard 1 */
+    int pause_diag; /* W192: Film-Bildnummern bei Pause, Standard 0 */
     int tsc_freq;          /* W22: 1 = Host-TSC-Frequenz melden (RDTSC/733-Nutzer 1x), 0 = alt (733 MHz, ~4,8x) */
     int audio_ring_clip;   /* W22: 1 = Unlock nur ab Ring-Frontier appenden (Bink-Ueberlapp nicht doppelt), 0 = alt (alles, 6 % Ueberlauf) */
     int pad_replay_gate;   /* W83: 1 = echtes Pad bei aktivem Replay ignorieren (wie Tastatur/Maus), 0 = alt (Pad wirkt immer) */

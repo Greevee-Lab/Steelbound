@@ -127,10 +127,21 @@ static int fb_abs_paths(char *s, size_t cap)
     return n;
 }
 
-static void fb_env(const char *name, char *o, size_t cap)
+static void fb_env(const char *name, char *o, size_t cap, UINT cp)
 {
-    DWORD r = GetEnvironmentVariableA(name, o, (DWORD)cap);
-    if (r == 0 || r >= cap) { o[0] = '\0'; }
+    wchar_t wn[64], value[600];
+    DWORD r;
+    o[0] = '\0';
+    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, wn, 64)) { return; }
+    r = GetEnvironmentVariableW(wn, value, 600);
+    if (r && r < 600) {
+        if (cp == CP_ACP) {
+            DWORD i;
+            for (i = 0; i < r && value[i] < 128; ++i) {}
+            if (i == r || GetACP() == CP_UTF8) { return; } /* schon im UTF-8-Durchgang bereinigt */
+        }
+        WideCharToMultiByte(cp, 0, value, -1, o, (int)cap, NULL, NULL);
+    }
 }
 
 int sb_feedback_sanitize(char *s, size_t cap)
@@ -142,18 +153,25 @@ int sb_feedback_sanitize(char *s, size_t cap)
     };
     char v[600];
     size_t i;
+    unsigned pass;
+    unsigned passes;
     int n = 0;
     if (!s || !cap) { return 0; }
-    for (i = 0; i < sizeof envp / sizeof envp[0]; i++) {
-        fb_env(envp[i][0], v, sizeof v);
-        if (strlen(v) >= 4) { n += fb_replace(s, cap, v, envp[i][1], 0); }
+    /* UTF-8-Eingabe und alte ANSI-Logzeilen beide bereinigen. */
+    passes = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, NULL, 0) ? 1u : 2u;
+    for (pass = 0; pass < passes; ++pass) {
+        UINT cp = pass ? CP_ACP : CP_UTF8;
+        for (i = 0; i < sizeof envp / sizeof envp[0]; i++) {
+            fb_env(envp[i][0], v, sizeof v, cp);
+            if (strlen(v) >= 4) { n += fb_replace(s, cap, v, envp[i][1], 0); }
+        }
+        fb_env("USERNAME", v, sizeof v, cp);
+        if (strlen(v) >= 2) { n += fb_replace(s, cap, v, "<user>", strlen(v) < 4); }
+        fb_env("COMPUTERNAME", v, sizeof v, cp);
+        if (strlen(v) >= 3) { n += fb_replace(s, cap, v, "<pc>", strlen(v) < 5); }
+        fb_env("USERDOMAIN", v, sizeof v, cp);
+        if (strlen(v) >= 3) { n += fb_replace(s, cap, v, "<pc>", strlen(v) < 5); }
     }
-    fb_env("USERNAME", v, sizeof v);
-    if (strlen(v) >= 2) { n += fb_replace(s, cap, v, "<user>", strlen(v) < 4); }
-    fb_env("COMPUTERNAME", v, sizeof v);
-    if (strlen(v) >= 3) { n += fb_replace(s, cap, v, "<pc>", strlen(v) < 5); }
-    fb_env("USERDOMAIN", v, sizeof v);
-    if (strlen(v) >= 3) { n += fb_replace(s, cap, v, "<pc>", strlen(v) < 5); }
     n += fb_abs_paths(s, cap);
     return n;
 }
@@ -163,10 +181,15 @@ static int fb_clean_hits(const char *s)
 {
     char v[600];
     int n = 0;
-    fb_env("USERNAME", v, sizeof v);
-    if (strlen(v) >= 4) { n += fb_count(s, v); }
-    fb_env("USERPROFILE", v, sizeof v);
-    if (strlen(v) >= 4) { n += fb_count(s, v); }
+    unsigned pass;
+    unsigned passes = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, NULL, 0) ? 1u : 2u;
+    for (pass = 0; pass < passes; ++pass) {
+        UINT cp = pass ? CP_ACP : CP_UTF8;
+        fb_env("USERNAME", v, sizeof v, cp);
+        if (strlen(v) >= 4) { n += fb_count(s, v); }
+        fb_env("USERPROFILE", v, sizeof v, cp);
+        if (strlen(v) >= 4) { n += fb_count(s, v); }
+    }
     return n;
 }
 
@@ -358,7 +381,10 @@ int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
     SYSTEMTIME lt;
     const char *kn = p->kind ? "idea" : "bug";
     txt8[0] = '\0';
-    if (text) { WideCharToMultiByte(CP_UTF8, 0, text, -1, txt8, sizeof txt8, NULL, NULL); }
+    if (text && !WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, text, -1, txt8, sizeof txt8, NULL, NULL)) {
+        HLOG_W("FEEDBACK: Text nicht als UTF-8 darstellbar (ungueltiges UTF-16 oder zu lang)");
+        return 0;
+    }
     p->repl += sb_feedback_sanitize(txt8, sizeof txt8);
     fb_gpu(gpu, sizeof gpu);
     fb_build(build, sizeof build);

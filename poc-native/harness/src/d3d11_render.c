@@ -75,7 +75,7 @@ static LRESULT CALLBACK sb_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         g_open = 0;
         return 0;
     default:
-        return DefWindowProcA(w, msg, wp, lp);
+        return DefWindowProcW(w, msg, wp, lp);
     }
 }
 
@@ -379,7 +379,7 @@ static DWORD WINAPI sb_ui_thread(LPVOID unused)
         } else {
             sb_relaunch_winpos(&x, &y); /* W186: Neustart-Kind an der Stelle des alten Fensters */
         }
-        g_hwnd = CreateWindowExA(ex, "SB_NATIVE", "Steel Battalion - Game Preservation Project",
+        g_hwnd = CreateWindowExW(ex, L"SB_NATIVE", L"Steel Battalion - Game Preservation Project",
                                  WS_OVERLAPPEDWINDOW, x, y,
                                  rc.right - rc.left, rc.bottom - rc.top,
                                  NULL, NULL, hinst, NULL);
@@ -395,12 +395,12 @@ static DWORD WINAPI sb_ui_thread(LPVOID unused)
         return 1;
     }
     for (;;) {
-        BOOL r = GetMessageA(&msg, NULL, 0, 0);
+        BOOL r = GetMessageW(&msg, NULL, 0, 0);
         if (r <= 0) { /* WM_QUIT (0) oder Fehler (-1) */
             break;
         }
         TranslateMessage(&msg);
-        DispatchMessageA(&msg);
+        DispatchMessageW(&msg);
     }
     hlog_close();
     ExitProcess(0);
@@ -409,7 +409,7 @@ static DWORD WINAPI sb_ui_thread(LPVOID unused)
 
 void sb_render_init(void)
 {
-    WNDCLASSA wc;
+    WNDCLASSW wc;
     DXGI_SWAP_CHAIN_DESC sd;
     D3D_FEATURE_LEVEL levels[] = { D3D_FEATURE_LEVEL_11_0,
                                    D3D_FEATURE_LEVEL_10_1,
@@ -434,9 +434,9 @@ void sb_render_init(void)
     /* NICHT GetModuleHandleA(NULL): sb_ldr liegt auf 0x10000 im Header-Swap
      * mit dem XBE — user32 wuerde dort Muell lesen. DLL-Handle ist sauber. */
     wc.hInstance = GetModuleHandleA("sb_emu.dll");
-    wc.lpszClassName = "SB_NATIVE";
+    wc.lpszClassName = L"SB_NATIVE";
     wc.hCursor = LoadCursorA(NULL, IDC_ARROW);
-    RegisterClassA(&wc);
+    RegisterClassW(&wc);
     /* A6 ui_thread: Fenster gehoert dem UI-Thread (erzeugt+pumpt dort).
      * Alter Pfad (0): Loader erzeugt, Present + Pump-Thread pumpen. */
     if (g_cfg.ui_thread) {
@@ -487,7 +487,7 @@ void sb_render_init(void)
         } else {
             sb_relaunch_winpos(&x, &y); /* W186: Neustart-Kind an der Stelle des alten Fensters */
         }
-        g_hwnd = CreateWindowExA(ex, "SB_NATIVE", "Steel Battalion - Game Preservation Project",
+        g_hwnd = CreateWindowExW(ex, L"SB_NATIVE", L"Steel Battalion - Game Preservation Project",
                                  WS_OVERLAPPEDWINDOW, x, y,
                                  rc.right - rc.left, rc.bottom - rc.top,
                                  NULL, NULL, wc.hInstance, NULL);
@@ -547,10 +547,10 @@ DWORD WINAPI sb_pump_thread(LPVOID unused)
     MSG msg;
     (void)unused;
     for (;;) {
-        while (!g_cfg.ui_thread && PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+        while (!g_cfg.ui_thread && PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
             if (msg.message == WM_QUIT) { hlog_close(); ExitProcess(0); }
             TranslateMessage(&msg);
-            DispatchMessageA(&msg);
+            DispatchMessageW(&msg);
         }
         Sleep(33);
     }
@@ -1056,13 +1056,13 @@ static void sb_render_present_body(unsigned flags)
                (long)g_ctx_foreign_n, g_render_tid);
     }
     /* A6 ui_thread: nur der alte Pfad pumpt hier (sonst der UI-Thread). */
-    while (!g_cfg.ui_thread && PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
+    while (!g_cfg.ui_thread && PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
         if (msg.message == WM_QUIT) {
             hlog_close();
             ExitProcess(0);
         }
         TranslateMessage(&msg);
-        DispatchMessageA(&msg);
+        DispatchMessageW(&msg);
     }
     interval = g_cfg.present_interval < 0 ? 0 : g_cfg.present_interval;
     if (interval > 4) {

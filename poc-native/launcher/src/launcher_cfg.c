@@ -1005,7 +1005,7 @@ int lcfg_image_check(const char *image_u8, char *msg, size_t cap)
         char tid[16];
         _snprintf_s(tid, sizeof tid, _TRUNCATE, "%08X", gv.title_id);
         _snprintf_s(msg, cap, _TRUNCATE, LT("cfg.image_version"), tid,
-                    (gv.region & 4u) ? "PAL" : (gv.region & 1u) ? "NTSC-U" : (gv.region & 2u) ? "NTSC-J" : "?");
+                    sb_gamever_region_name(gv.region), gv.version);
         return 4;
     }
     _snprintf_s(msg, cap, _TRUNCATE, LT("gui.image_ok"), gv.label);
@@ -1124,7 +1124,7 @@ int lcfg_validate(const launcher_settings_t *s, char *err, size_t errcap)
                     free(xb);
                     _snprintf_s(tid, sizeof tid, _TRUNCATE, "%08X", gv.title_id);
                     FAIL(LT("cfg.image_version"), tid,
-                         (gv.region & 4u) ? "PAL" : (gv.region & 1u) ? "NTSC-U" : (gv.region & 2u) ? "NTSC-J" : "?");
+                         sb_gamever_region_name(gv.region), gv.version);
                 }
             }
             free(xb);

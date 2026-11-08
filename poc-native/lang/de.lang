@@ -664,7 +664,7 @@ cfg.what_image=Spiel-Abbild
 cfg.image_missing=Spiel-Abbild nicht gefunden: '%s' existiert nicht.
 cfg.image_notxbox=Kein Xbox-Spielabbild (XDVDFS-Kennung fehlt oder Datei beschädigt): '%s'.
 cfg.image_noxbe=Das Spiel-Abbild enthält keine default.xbe: '%s'.
-cfg.image_version=Nicht unterstützte Spielversion (Title-ID %s, Region %s). Unterstützt ist nur die europäische Fassung (PAL) von Steel Battalion.
+cfg.image_version=Diese Spielversion (Title-ID %s, Region %s, XBE-Version %u) wird noch nicht unterstützt. Unterstützt: Steel Battalion (Europe, PAL).
 gui.image_ok=Abbild OK: %s
 gui.dlg_image_title=Spiel-Abbild wählen
 gui.dlg_image_filter=Xbox-Spielabbild
@@ -1087,3 +1087,18 @@ ovl.ph_monitor_fx=Monitor-Effekt
 ovl.ph_shader=Shader
 ovl.ph_original=Original
 ovl.ph_effect_pending=Effekte vor dem Pausieren einschalten.
+
+# W199 SAVE-IMPORT
+gui.si_import=Importieren...
+gui.si_export=Exportieren...
+gui.si_folder=Ordner auswählen...
+gui.si_file=ZIP- oder SAV-Datei auswählen...
+gui.si_invalid=Import abgelehnt: ungültige, unsichere oder unbekannte Daten, doppelte Dateien oder fremde Title-ID (erwartet: 43430002).
+gui.si_io=Datentransfer fehlgeschlagen. Speicherplatz, Dateizugriff und Ziel prüfen (Export braucht einen neuen Dateinamen). Vorhandene Daten bleiben erhalten oder wurden wiederhergestellt.
+gui.si_recovery=Wiederherstellung fehlgeschlagen. Die bisherigen Spielstände liegen unter _backup/import-...; vor dem Spielen wiederherstellen.
+gui.si_empty=Keine Spielstände oder Replays zum Exportieren.
+gui.si_preview=Importvorschau: %d Spielstanddateien (%d Pilotdateien), %d Replays. Dateikonflikte: %d.\n\nVorhandene Daten werden unter _backup/import-<Zeit> gesichert. Signaturen bleiben erhalten; save_check=1 zur Reparatur beim Spielstart beibehalten. Fortfahren?
+gui.si_conflict=Ja = kollidierende Dateien überschreiben.\nNein = zusammenführen, vorhandene Konfliktdateien behalten.\nAbbrechen = nichts importieren. Andere vorhandene Dateien bleiben erhalten.
+gui.si_done=Importierte Auswahl: %d Spielstände (%d Piloten), %d Replays. Altbestand gesichert; Zusammenführen behält vorhandene Konfliktdateien.
+gui.si_exported=Spielstände und Replays als ZIP exportiert.
+gui.si_foreign=Import abgelehnt: Ordner oder ZIP enthält eine fremde Xbox-Title-ID. Unterstützt wird nur Steel Battalion (43430002).

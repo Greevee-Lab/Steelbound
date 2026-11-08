@@ -1443,7 +1443,7 @@ static void parse_cmdline(const char **cfg_path, const char **xbe_path)
 /* W150: Startfehler fuer den Spieler (Abbild/Version). Testlaeufe
  * (--run-seconds) und unsichtbare Fenster zeigen nichts an (Fokus-Regel),
  * die Log-Zeile steht immer im Log. */
-static void emu_user_error(const char *key, const char *detail)
+static void emu_user_error(const char *key, const char *detail, UINT codepage)
 {
     wchar_t w[512], d[600], t[64];
     if (g_run_seconds > 0 || g_cfg.window_hidden) {
@@ -1452,7 +1452,7 @@ static void emu_user_error(const char *key, const char *detail)
     if (sb_lang_w(key, w, 512) != 0) {
         w[0] = 0;
     }
-    MultiByteToWideChar(CP_ACP, 0, detail ? detail : "", -1, d, 600);
+    MultiByteToWideChar(codepage, 0, detail ? detail : "", -1, d, 600);
     if (sb_lang_w("msg.start_title", t, 64) != 0) {
         t[0] = 0;
     }
@@ -1475,6 +1475,7 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     const char *xbe_path = NULL;
     static char log_path[600];
     xbe_image_t img;
+    sb_gamever_t gv;
     HANDLE wd;
     MEMORY_BASIC_INFORMATION mbi;
 
@@ -1552,39 +1553,55 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
         unsigned xn = 0;
         if (krnl_vfs_open(g_cfg.game_image, err, sizeof err) != 0) {
             HLOG_E("ISO: Abbild '%s' nicht nutzbar: %s", g_cfg.game_image, err);
-            emu_user_error("msg.image_bad", err);
+            emu_user_error("msg.image_bad", err, CP_ACP);
             ExitProcess(4);
         }
         if (krnl_vfs_read_all("default.xbe", &xb, &xn) != 0) {
             HLOG_E("ISO: default.xbe fehlt im Abbild '%s'", g_cfg.game_image);
-            emu_user_error("msg.image_bad", "default.xbe");
+            emu_user_error("msg.image_bad", "default.xbe", CP_ACP);
             ExitProcess(4);
         }
         HLOG_I("ISO: default.xbe aus dem Abbild (%u B; xbe_path/media_root ignoriert)", xn);
-        _snprintf_s(err, sizeof err, _TRUNCATE, "%s/default.xbe", g_cfg.game_image);
-        if (xbe_parse_buf(xb, xn, err, &img) != 0) {
-            ExitProcess(1);
-        }
-    } else if (xbe_parse(g_cfg.xbe_path, &img) != 0) {
+        memset(&img, 0, sizeof img);
+        img.file = xb;
+        img.file_size = xn;
+    } else if (xbe_read(g_cfg.xbe_path, &img) != 0) {
         ExitProcess(1);
+    }
+    { /* W150: Spielversion (SHA-256 + Zertifikat); Patch-Adressen gelten nur fuer PAL */
+        int gv_ok = sb_gamever_check(img.file, img.file_size, &gv);
+        if (!gv_ok && !g_cfg.version_check) { /* PO: Experten-Ausweg wie W150 (version_check=0) */
+            HLOG_W("%s - version_check=0: Start trotzdem (falsche Patch-Adressen moeglich)", gv.text);
+        } else if (!gv_ok) {
+            char detail[320], tid[16];
+            sb_feedback_note_gamever(&gv);
+            _snprintf_s(tid, sizeof tid, _TRUNCATE, "%08X", gv.title_id);
+            _snprintf_s(detail, sizeof detail, _TRUNCATE,
+                        sb_lang("cfg.image_version"), tid,
+                        sb_gamever_region_name(gv.region), gv.version);
+            HLOG_E("%s - Start abgebrochen (nur bekanntes PAL-Profil)", gv.text);
+            HLOG_E("%s", detail);
+            HLOG_E("GAMEVER: unsupported version; exit=5 (before XBE parse/map/hooks)");
+            emu_user_error("msg.gamever_bad", detail, CP_UTF8);
+            hlog_close();
+            ExitProcess(5);
+        }
+    }
+    { /* W202: reject unknown bytes before following XBE section/TLS pointers. */
+        char source[1400];
+        if (g_cfg.game_image[0]) {
+            _snprintf_s(source, sizeof source, _TRUNCATE, "%s/default.xbe", g_cfg.game_image);
+        } else {
+            strcpy_s(source, sizeof source, g_cfg.xbe_path);
+        }
+        if (xbe_parse_buf(img.file, img.file_size, source, &img) != 0) ExitProcess(1);
     }
     if (g_cfg.iso_selftest) { /* DIAG(ISO-DIRECT,W150) */
         krnl_vfs_selftest();
     }
-    { /* W150: Spielversion (SHA-256 + Zertifikat); Patch-Adressen gelten nur fuer PAL */
-        sb_gamever_t gv;
-        int gv_ok = sb_gamever_check(img.file, img.file_size, &gv);
-        sb_feedback_note_gamever(&gv); /* W188: Abbild-Version fuer das Feedback-Paket */
-        if (gv_ok) {
-            HLOG_I("%s", gv.text);
-        } else if (g_cfg.version_check) {
-            HLOG_E("%s - Start abgebrochen (version_check=1)", gv.text);
-            emu_user_error("msg.gamever_bad", gv.text);
-            ExitProcess(5);
-        } else {
-            HLOG_W("%s - version_check=0: Start trotzdem (falsche Patch-Adressen moeglich)", gv.text);
-        }
-    }
+    /* Preserve the PAL success log order; only validation moved before parsing. */
+    sb_feedback_note_gamever(&gv);
+    HLOG_I("%s", gv.text);
     if (xbe_map(&img) != 0) {
         ExitProcess(1);
     }

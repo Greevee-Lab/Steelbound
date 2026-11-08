@@ -162,6 +162,7 @@ static int g_ph_pad_rx, g_ph_pad_ry, g_ph_pad_lx, g_ph_pad_ly, g_ph_pad_tr; /* P
 enum { PK_W = 1, PK_S = 2, PK_A = 4, PK_D = 8, PK_Q = 16, PK_E = 32, PK_J = 64, PK_L = 128, PK_I = 256, PK_K = 512 };
 static unsigned g_ov_vframes;            /* Pausenbilder (Test-Hook-Takt laeuft in der Pause weiter) */
 static wchar_t g_fb_text[161];
+static wchar_t g_fb_high; /* W192: noch nicht vollstaendiges UTF-16-Paar */
 static int g_fb_len, g_fb_kind, g_fb_have, g_fb_pending;
 static sb_fb_pkg_t g_fb_pkg;
 /* Trefferflaechen (Backbuffer-Pixel, Render-Thread schreibt beim Zeichnen) */
@@ -179,7 +180,7 @@ typedef struct { unsigned at; int rel; int mi; int act; int vk; char txt[28]; } 
 enum { OA_KEY, OA_SHOT, OA_FOCUS1, OA_FOCUS0, OA_LOG, OA_PHUDPOS,
        OA_TKEY, OA_TXT, OA_MROW, OA_MTAB, OA_PAD, OA_STATE, /* W188 */
        OA_PEEK, /* W193: Taste "Menue ausblenden" druecken (vk 1) / loslassen (vk 0) */
-       OA_PHOTO, OA_KDN, OA_KUP, OA_MDRAG }; /* W195: Foto-Taste, Taste halten/loslassen, Ziehen dx_dy */
+       OA_PHOTO, OA_KDN, OA_KUP, OA_MDRAG, OA_CHAR }; /* W192 OA_CHAR, W195: Foto-Taste, Taste halten/loslassen, Ziehen dx_dy */
 static ov_step_t g_ov_steps[160]; /* W193: 96 -> 160 (Pause-Live-Belege) */
 static int g_ov_nsteps, g_ov_step, g_ov_test_parsed;
 static unsigned g_ov_mission_f[8];      /* Startbild der k-ten Mission (fuer mN / mK.N) */
@@ -1199,7 +1200,20 @@ static void ov_fb_create(void)
     sb_ctx_enter();
     g_fb_pkg.shot_ok = sb_render_pause_jpg(shot, &g_fb_pkg.shot_w, &g_fb_pkg.shot_h);
     sb_ctx_leave();
-    sb_feedback_finish(&g_fb_pkg, g_fb_text);
+    if (!sb_feedback_finish(&g_fb_pkg, g_fb_text)) {
+        ov_status_key("ovl.st_fb_fail");
+        return;
+    }
+    if (g_cfg.overlay_test[0] && ov_dc) {
+        static const wchar_t probe[] = L"\x00E4\x00F6\x00FC\x00DF\x00E9";
+        WORD glyphs[5];
+        unsigned i, have = 0;
+        if (GetGlyphIndicesW(ov_dc, probe, 5, glyphs, GGI_MARK_NONEXISTING_GLYPHS) != GDI_ERROR) {
+            for (i = 0; i < 5; ++i) { if (glyphs[i] != 0xFFFF) { ++have; } }
+        }
+        HLOG_I("FEEDBACK test: Unicode-Fenster=%d lateinische_Glyphen=%u/5 UTF16-Einheiten=%u",
+               IsWindowUnicode(sb_render_hwnd()), have, (unsigned)g_fb_len);
+    }
     g_fb_have = 1;
     ov_screen(SC_FBREVIEW, 0);
 }
@@ -1244,6 +1258,7 @@ static void ov_activate(int k)
         g_fb_kind = k;
         g_fb_len = 0;
         g_fb_text[0] = 0;
+        g_fb_high = 0;
         HLOG_I("FEEDBACK: Art %s (f=%u)", k ? "Idee" : "Bug", g_present_no);
         ov_screen(SC_FBTEXT, 0);
         break;
@@ -1272,12 +1287,30 @@ static void ov_key_menu(int vk)
     if (g_ov_scr == SC_FBTEXT) {
         if (vk & OK_CHAR) {
             wchar_t c = (wchar_t)(vk & 0xFFFF);
-            if (c >= 32 && c != 127 && g_fb_len < 160) { g_fb_text[g_fb_len++] = c; g_fb_text[g_fb_len] = 0; }
+            if (c >= 0xD800 && c <= 0xDBFF) {
+                g_fb_high = c; /* erst komplette Codepoints ins Textfeld */
+            } else {
+                if (c >= 0xDC00 && c <= 0xDFFF) {
+                    if (g_fb_high && g_fb_len <= 158) {
+                        g_fb_text[g_fb_len++] = g_fb_high;
+                        g_fb_text[g_fb_len++] = c;
+                    }
+                } else if (c >= 32 && c != 127 && g_fb_len < 160) {
+                    g_fb_text[g_fb_len++] = c;
+                }
+                g_fb_high = 0; /* isolierte Surrogate verwerfen */
+                g_fb_text[g_fb_len] = 0;
+            }
             g_ov_dirty = 1;
             return;
         }
         if (vk == VK_BACK) {
-            if (g_fb_len > 0) { g_fb_text[--g_fb_len] = 0; }
+            g_fb_high = 0;
+            if (g_fb_len > 0) {
+                wchar_t last = g_fb_text[--g_fb_len];
+                if (last >= 0xDC00 && last <= 0xDFFF && g_fb_len > 0) { --g_fb_len; }
+                g_fb_text[g_fb_len] = 0;
+            }
             g_ov_dirty = 1;
             return;
         }
@@ -1814,11 +1847,8 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         if (!g_ov_open || wp == VK_F10) { return 0; }
         return 1;
     case WM_CHAR:
-        if (g_ov_open && g_ov_textmode && wp >= 32 && wp != 127) { /* W188: Texteingabe (ANSI-Fenster) */
-            char c = (char)wp;
-            wchar_t wc = 0;
-            if (wp < 128 || MultiByteToWideChar(CP_ACP, 0, &c, 1, &wc, 1) != 1) { wc = (wchar_t)wp; }
-            ov_qpush(OK_CHAR | (int)wc);
+        if (g_ov_open && g_ov_textmode && wp >= 32 && wp != 127 && wp <= 0xFFFF) {
+            ov_qpush(OK_CHAR | (int)wp); /* W192: Unicode-Fenster liefert UTF-16 */
         }
         return g_ov_open ? 1 : (wp == 0x1B);
     case WM_MOUSEMOVE: /* W188: Zeiger ueber den Zeilen waehlt (Render-Thread), Spiel-Eingabe bleibt gesperrt */
@@ -1922,6 +1952,7 @@ static void ov_test_parse(void)
             }
         }
         else if (*p == '+') { s->rel = 2; p++; }
+        else if (*p == 'b') { s->rel = 3; p++; } /* W192: Bink-Bildnummer */
         s->at = (unsigned)strtoul(p, (char **)&p, 10);
         if (*p != ':') { HLOG_W("OVERLAY test: Syntaxfehler bei '%s'", p); break; }
         p++;
@@ -1955,6 +1986,7 @@ static void ov_test_parse(void)
         else if (_strnicmp(act, "KDN=", 4) == 0 && act[4]) { s->act = OA_KDN; s->vk = toupper((unsigned char)act[4]); }
         else if (_strnicmp(act, "KUP=", 4) == 0 && act[4]) { s->act = OA_KUP; s->vk = toupper((unsigned char)act[4]); }
         else if (_strnicmp(act, "MDRAG", 5) == 0 && act[5]) { s->act = OA_MDRAG; strcpy_s(s->txt, sizeof s->txt, act + 5); }
+        else if (_strnicmp(act, "U+", 2) == 0) { s->act = OA_CHAR; s->vk = (int)strtoul(act + 2, NULL, 16); }
         else if (_strnicmp(act, "TXT=", 4) == 0) { s->act = OA_TXT; strcpy_s(s->txt, sizeof s->txt, act + 4); }
         else if (_strnicmp(act, "MROW", 4) == 0 && act[4]) { s->act = OA_MROW; s->vk = atoi(act + 4); }
         else if (_strnicmp(act, "MTAB", 4) == 0 && act[4]) { s->act = OA_MTAB; s->vk = atoi(act + 4); }
@@ -2015,7 +2047,10 @@ static void ov_test_tick(unsigned n)
     while (g_ov_step < g_ov_nsteps && h) {
         ov_step_t *s = &g_ov_steps[g_ov_step];
         unsigned due;
-        if (s->rel == 1) {
+        if (s->rel == 3) {
+            if (sb_pause_movie_frame() < s->at) { return; }
+            due = n;
+        } else if (s->rel == 1) {
             if (s->mi >= g_ov_nmission) { return; }
             due = g_ov_mission_f[s->mi] + s->at;
         } else if (s->rel == 2) {
@@ -2033,9 +2068,12 @@ static void ov_test_tick(unsigned n)
         case OA_LOG: sb_phud_test_log(); PostMessageA(h, IMOUSE_MSG_TEST_STATE, 0, 0); ov_log_values("test"); ov_log_shader("test"); ov_log_shader2("test"); ov_log_fx("test"); break;
         case OA_PHUDPOS: sb_phud_cycle_pos(); break;
         case OA_TKEY: PostMessageA(h, OV_MSG_TEST, (WPARAM)s->vk, 0); break; /* W188 */
-        case OA_TXT: { /* W188: Zeichen per WM_CHAR wie TranslateMessage ('_' = Leerzeichen) */
-            const char *q;
-            for (q = s->txt; *q; q++) { PostMessageA(h, WM_CHAR, (WPARAM)(unsigned char)(*q == '_' ? ' ' : *q), 1); }
+        case OA_CHAR: PostMessageW(h, WM_CHAR, (WPARAM)s->vk, 1); break;
+        case OA_TXT: { /* W192: Testtext ist UTF-8, WM_CHAR liefert UTF-16 */
+            wchar_t text[32], *q;
+            if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s->txt, -1, text, 32)) {
+                for (q = text; *q; q++) { PostMessageW(h, WM_CHAR, *q == L'_' ? L' ' : *q, 1); }
+            }
             break;
         }
         case OA_MROW: case OA_MTAB: { /* W188: Klick auf die Mitte von Zeile/Tab (Backbuffer -> Client) */
@@ -2099,6 +2137,7 @@ static void ov_test_tick(unsigned n)
             unsigned tmr = 0;
             __try { tmr = *(volatile unsigned *)(uintptr_t)0x3563F0u; }
             __except (EXCEPTION_EXECUTE_HANDLER) { tmr = 0; }
+            sb_pause_movie_log("test");
             HLOG_I("MENU test: Zustand f=%u feld=%u tmr=%u pausiert=%d bildschirm=%d offen=%d", g_present_no,
                    sb_timing_field(), tmr, (int)g_sb_paused, g_ov_scr, (int)g_ov_open);
         }
@@ -2804,7 +2843,11 @@ static void ov_paint_menu(void)
         ov_wkey(tag, 48, g_fb_kind ? "ovl.fb_idea" : "ovl.fb_bug");
         ov_wkey(ln[0], 128, "ovl.fb_text_q");
         lc[0] = OV_C_DIM;
-        _snwprintf_s(ln[1], 128, _TRUNCATE, L"> %s_", g_fb_text + (L > maxc ? L - maxc : 0));
+        {
+            int start = L > maxc ? L - maxc : 0;
+            if (g_fb_text[start] >= 0xDC00 && g_fb_text[start] <= 0xDFFF) { ++start; }
+            _snwprintf_s(ln[1], 128, _TRUNCATE, L"> %s_", g_fb_text + start);
+        }
         _snwprintf_s(ln[2], 128, _TRUNCATE, L"%d/160", g_fb_len);
         lc[2] = OV_C_DIM;
         ov_wkey(hint, 96, "ovl.hint_text");

@@ -2,6 +2,7 @@
  * Blank, DisplayFieldStatus, GPU-Ready-Waits, TSC-Frequenz).
  * W68 SPLIT: 1:1 aus xdk_hooks.c verschoben. */
 #include "hooks_int.h"
+#include "hlock.h"
 #include "sb_perfhud.h" /* W122 PERF-HUD */
 
 /* TURBO bis Spielmodus (A1): 1 solange u32 an 0x2EEA34 (Spielmodus: 1 Logos,
@@ -308,5 +309,44 @@ u32 __stdcall hook_PerfFrequency(u32 out)
         *(u32 *)(uintptr_t)out = (u32)(g_tsc_hz & 0xFFFFFFFFu);
         *(u32 *)(uintptr_t)(out + 4) = (u32)(g_tsc_hz >> 32);
     }
+    return 1;
+}
+
+/* W192 BINK-PAUSE: XAPI QueryPerformanceCounter (0x19123F) war direkt
+ * RDTSC. Binks Timer 0x2441D0 benutzt ihn UND KeTickCount (Korrektur ab
+ * 200 ms). Beide Uhren muessen stehen. Unpausiert bleibt die Zeitbasis
+ * der Host-TSC mit der W22-Frequenz, kein QPC-Neustart/Skalierungsfehler.
+ * SUSPSAFE-registrierte hlock schuetzt die 64-Bit-Werte auch auf Win32 und gegen den Bink-Worker. */
+hlock_t g_tsc_lock; /* krnl_sync.c: SUSPSAFE muss auch diese Sperre sehen */
+static uint64_t g_tsc_offset, g_tsc_stopped;
+static int g_tsc_held;
+
+unsigned long long sb_tsc_now(void)
+{
+    uint64_t now;
+    hlock_enter(&g_tsc_lock);
+    now = (g_tsc_held ? g_tsc_stopped : __rdtsc()) - g_tsc_offset;
+    hlock_leave(&g_tsc_lock);
+    return now;
+}
+
+void sb_tsc_pause(int begin)
+{
+    if (!g_cfg.bink_pause) { return; }
+    hlock_enter(&g_tsc_lock);
+    if (begin && !g_tsc_held) {
+        g_tsc_stopped = __rdtsc();
+        g_tsc_held = 1;
+    } else if (!begin && g_tsc_held) {
+        g_tsc_offset += __rdtsc() - g_tsc_stopped;
+        g_tsc_held = 0;
+    }
+    hlock_leave(&g_tsc_lock);
+}
+
+u32 __stdcall hook_PerfCounter(u32 out)
+{
+    uint64_t now = sb_tsc_now();
+    *(uint64_t *)(uintptr_t)out = now; /* XAPI: gueltiger Ausgabezeiger */
     return 1;
 }

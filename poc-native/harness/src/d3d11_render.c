@@ -10,6 +10,7 @@
 #include "render_fx_rem.h" /* W133 REM-FX */
 #include "sb_remaster.h" /* W103 REM-FRAME */
 #include "render_qa.h"
+#include "render_clip.h"
 #include "sb_overlay.h" /* W118 REM-OVERLAY */
 #include "sb_perfhud.h" /* W122 PERF-HUD */
 #include "hlock.h" /* W119 LOADLOCK */
@@ -1006,9 +1007,12 @@ static void sb_render_present_body(unsigned flags)
         sb_edge_apply(g_rtv);
         sb_ctx_leave();
     }
+    if (sb_clip_active() && !g_swap_res) {
+        sb_ctx_enter(); sb_clip_frame(g_rtv); sb_ctx_leave();
+    }
     /* W118 REM-OVERLAY: offenes Overlay auf den Spiel-BB (Bereich gesichert,
      * nach dem Present zurueck); mit FPS-INTERP in sb_render_blit. */
-    if (g_cfg.overlay && sb_ovl_open() && !g_swap_res) {
+    if (g_cfg.overlay && (sb_ovl_open() || sb_clip_active()) && !g_swap_res) {
         sb_ctx_enter();
         sb_ovl_draw(g_rtv, 1);
         sb_ctx_leave();
@@ -1293,7 +1297,8 @@ void sb_render_blit(ID3D11Resource *src)
             g_swap_rtv = NULL;
         }
         if (sb_vr_after_blit(g_swap_res, g_swap_rtv)) {
-            if (g_cfg.overlay && sb_ovl_open()) { sb_ovl_draw(g_swap_rtv, 0); }
+            if (sb_clip_active()) { sb_clip_frame(g_swap_rtv); } /* W210: before flat client overlays */
+            if (g_cfg.overlay && (sb_ovl_open() || sb_clip_active())) { sb_ovl_draw(g_swap_rtv, 0); }
             if (!g_cfg.vr_preview_clean && sb_phud_visible()) { sb_phud_draw(g_swap_rtv, 0); }
         }
         if (g_cfg.overlay_test[0]) { /* TEST(W118): Overlay-Bild (gezeigtes Bild) */
@@ -1358,7 +1363,13 @@ void sb_render_blit(ID3D11Resource *src)
         sb_vr_canvas_source(g_swap_res);
         sb_ctx_leave();
     }
-    if (g_cfg.overlay && sb_ovl_open()) { /* W118 REM-OVERLAY: auf jedes gezeigte Bild (Kopie ueberschreibt ganz) */
+    if (sb_clip_active()) {
+        sb_ctx_enter();
+        if (!g_swap_rtv) { ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv); }
+        sb_clip_frame(g_swap_rtv);
+        sb_ctx_leave();
+    }
+    if (g_cfg.overlay && (sb_ovl_open() || sb_clip_active())) { /* W118 REM-OVERLAY: auf jedes gezeigte Bild (Kopie ueberschreibt ganz) */
         sb_ctx_enter();
         if (!g_swap_rtv &&
             FAILED(ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv))) {
@@ -1383,7 +1394,7 @@ void sb_render_blit(ID3D11Resource *src)
             g_swap_rtv = NULL;
         }
         if (sb_vr_after_blit(g_swap_res, g_swap_rtv)) {
-            if (g_cfg.overlay && sb_ovl_open()) { sb_ovl_draw(g_swap_rtv, 0); } /* ESC-Menue bleibt bedienbar */
+            if (g_cfg.overlay && (sb_ovl_open() || sb_clip_active())) { sb_ovl_draw(g_swap_rtv, 0); } /* ESC-Menue bleibt bedienbar */
             if (!g_cfg.vr_preview_clean && sb_phud_visible()) { sb_phud_draw(g_swap_rtv, 0); }
         }
         sb_ctx_leave();
@@ -1626,7 +1637,7 @@ void sb_render_pause_frame(void)
             ID3D11Resource_Release(bb);
         }
     }
-    if (g_cfg.overlay && sb_ovl_open()) { sb_ovl_draw(g_rtv, 0); }
+    if (g_cfg.overlay && (sb_ovl_open() || sb_clip_active())) { sb_ovl_draw(g_rtv, 0); }
     if (sb_phud_visible()) { sb_phud_draw(g_rtv, 0); }
     if (g_cfg.overlay_test[0]) { /* TEST(W118): Overlay-Bild */
         char onm[48];

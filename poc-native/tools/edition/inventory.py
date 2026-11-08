@@ -150,6 +150,8 @@ RULES = [
      "Pack Creator (eigener Code; Export erst mit Phase 2, Gewichte-Lizenz offen)"),
     (r"^poc-native/tools/creator/", "unklar",
      "Pack-Creator-Pipeline (eigener Code; Export erst mit Phase 2, Gewichte-Lizenz offen)"),
+    (r"^poc-native/harness/scripts/clip_check\.py$", "kern",
+     "W210: lokaler Clip-Pruefer, keine Spieldaten oder persoenlichen Pfade"),
     (r"^poc-native/harness/scripts/", "unklar",
      "Entwickler-/Diagnose-Skript (eigener Code; Bezug auf Laufordner/Spieldaten pruefen)"),
     (r"^poc-native/analyse/", "unklar",

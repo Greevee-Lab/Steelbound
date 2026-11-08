@@ -16,6 +16,7 @@ typedef struct {
     char game_image[512];   /* W150 ISO-DIRECT: Spiel-Abbild (Vorrang vor xbe_path/media_root), leer = Ordner-Modus */
     unsigned width, height;
     int present_interval; /* 0 = aus, 1 = VSync */
+    int fs_interp_match; /* W207: exclusive refresh matching, default 1 */
     int fps_limit;        /* 0 = aus */
     int audio;            /* 0 = stumm, 1 = an */
     int audio_live;       /* 0 = nur Capture, 1 = Live-Ton */
@@ -97,15 +98,20 @@ const char *lcfg_fx_key(int i);
  * Es besitzt alle Optik-Schluessel: shading + 22 Shader-Werte + Schatten,
  * fx_* und HD-Texturen (Werte: harness/src/sb_gfxpreset.h, dieselbe Tabelle
  * wie im Client/ESC-Menue). Nicht dabei: hud_label_avoid (eigene Option
- * Grafik > HUD), Anzeige, Bildrate, Cockpit-Monitor, Texturdetail.
+ * Grafik > HUD), Ausgabeformat, Cockpit-Monitor, Texturdetail.
+ * W207: Bildrate, Welt-Aufloesung/Dynamik und Hz-Anpassung gehoeren dazu.
  * Abgeleitet (kein eigener Schalter): remaster = hd_textures, fx_enhanced =
  * irgendein Effekt > 0, ultrawide/postfx = 0 (Platzhalter). */
-enum { LGP_ORIGINAL = 0, LGP_SUBTLE = 1, LGP_STRONG = 2, LGP_CUSTOM = 3 };
+enum { LGP_ORIGINAL = 0, LGP_SUBTLE = 1, LGP_STRONG = 2, LGP_PERFORMANCE = 3, LGP_CUSTOM = 4 };
 /* Schluessel-Index k (0..LGK_N-1): 0..LSHX_N-1 = shx[] (LSHX_LABEL gehoert
  * nicht dazu), LGK_FX0.. = fx[], LGK_HD = HD-Texturen. */
 #define LGK_FX0 LSHX_N
 #define LGK_HD (LSHX_N + LFX_N)
-#define LGK_N (LGK_HD + 1)
+#define LGK_FPS (LGK_HD + 1)
+#define LGK_RT (LGK_HD + 2)
+#define LGK_DYN (LGK_HD + 3)
+#define LGK_MATCH (LGK_HD + 4)
+#define LGK_N (LGK_HD + 5)
 typedef unsigned long long lgp_mask_t; /* Bit k = Schluessel k */
 const char *lcfg_gfx_key(int k);              /* cfg-Name ("" = keiner) */
 int lcfg_gfx_owned(int k);                    /* 1 = gehoert zum Preset */
@@ -120,7 +126,7 @@ int lcfg_gfx_preset(const launcher_settings_t *s, lgp_mask_t lock);
 int lcfg_gfx_diff(const launcher_settings_t *s, int p, lgp_mask_t lock, lgp_mask_t *mask);
 /* Basis von Benutzerdefiniert: Preset mit den wenigsten Abweichungen. */
 int lcfg_gfx_base(const launcher_settings_t *s, lgp_mask_t lock);
-/* Preset 0..2 anwenden (alle Schluessel + Ableitungen; hud_label_avoid
+/* Preset 0..3 anwenden (alle Schluessel + Ableitungen; hud_label_avoid
  * und hd_scale bleiben). */
 void lcfg_gfx_apply(launcher_settings_t *s, int preset);
 /* Ableitungen setzen: remaster = hd_textures = (remaster && hd_textures),
@@ -129,7 +135,7 @@ void lcfg_gfx_normalize(launcher_settings_t *s);
 /* Alte Dateien: remaster=1 + fx_enhanced=1 ohne fx-Werte bedeutete im
  * Client "Effekte dezent" (render_fx_rem.c fx_cfg_once) -> explizit. */
 void lcfg_gfx_migrate(launcher_settings_t *s);
-/* Effekt-Stufe allein (0..2, 3 = eigene Werte), gesperrte zaehlen nicht. */
+/* Effekt-Stufe allein (0..2, LGP_CUSTOM = eigene Werte), gesperrte zaehlen nicht. */
 int lcfg_fx_level(const launcher_settings_t *s, lgp_mask_t lock);
 void lcfg_fx_apply_level(launcher_settings_t *s, int level);
 

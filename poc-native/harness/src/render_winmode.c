@@ -466,8 +466,12 @@ static void wm_interp_match(int on)
                    wm_interp_saved, hz);
         }
     } else if (wm_interp_saved >= 0) {
-        HLOG_I("WINMODE: interp_fps %d -> %d (zurueck)", g_cfg.interp_fps, wm_interp_saved);
-        g_cfg.interp_fps = wm_interp_saved;
+        /* W207: Performance selected live disables Hz matching. Do not
+         * restore the old 120 FPS when leaving exclusive fullscreen. */
+        if (g_cfg.fs_interp_match) {
+            HLOG_I("WINMODE: interp_fps %d -> %d (zurueck)", g_cfg.interp_fps, wm_interp_saved);
+            g_cfg.interp_fps = wm_interp_saved;
+        }
         wm_interp_saved = -1;
     }
 }

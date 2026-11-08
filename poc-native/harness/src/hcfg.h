@@ -195,7 +195,7 @@ typedef struct {
     int cockpit_panini;     /* W191 UW-PERSP: Panini-Projektion der Cockpit-Ansicht (Nachbearbeitung, nur Desktop), 0 = aus, 1..100 = Staerke in % von cockpit_panini_d; Mitte formtreu vergroessert, Raender waagerecht verdichtet */
     int cockpit_panini_d;   /* W191: groesstes Panini-d (x100); mit cockpit_panini_frame=1 begrenzt der Rahmen frueher */
     int cockpit_panini_frame; /* W191: 1 = Radar oben und Frontview unten bleiben voll im Bild (100 % = Grenze ohne Anschnitt), 0 = d = cockpit_panini % x cockpit_panini_d (Experiment) */
-    int cockpit_persp_pause; /* W191: 1 = Kamera-Weg auch im Pause-Standbild live (Experiment: CPU-Instrumente fallen dort durch den Tiefentest), 0 = nach dem Fortsetzen */
+    int cockpit_persp_pause; /* W209: 1 = live camera in pause, 0 = legacy fallback */
     int cockpit_persp_dist; /* W191: Kamera-Weg bei 100 % in mm (Spiel-Einheit ~ 1 m): > 0 = zurueck + engeres Sichtfeld (Tele, Standard 1500; Near-Ebene am alten Auge), < 0 = vor + weiteres Sichtfeld (Breitbildrand fuellen, Experiment) */
     int cockpit_persp_ref;  /* W191: Abstand der festen Ebene (Hauptmonitor/HUD) in mm */
     int cockpit_zoom;       /* W191: zusaetzlicher gleichmaessiger Zoom der Cockpit-Ansicht in % (100 = aus; > 100 schneidet oben/unten ab) */

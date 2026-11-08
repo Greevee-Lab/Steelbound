@@ -104,6 +104,7 @@ add_library(sb_emu SHARED
   src/sb_overlay.c
   src/sb_pause.c
   src/render_photo.c
+  src/render_clip.c
   src/sb_feedback.c
   src/sb_perfhud.c
   src/audio_out.c
@@ -253,3 +254,8 @@ add_custom_target(lang_check ALL
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/scripts/lang_check.py
     ${CMAKE_CURRENT_SOURCE_DIR}/..
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
+
+# W210: synthetic offscreen capture, MF encoder and fallback (no game).
+add_executable(clip_selftest tests/clip_selftest.c src/render_clip.c)
+target_include_directories(clip_selftest PRIVATE src)
+target_compile_options(clip_selftest PRIVATE /W3)

@@ -1160,7 +1160,7 @@ static int cli_selftest(const char *client_override)
     {
         char why[200] = "";
         int p, k;
-        for (p = 0; p < 3 && !why[0]; p++) {
+        for (p = 0; p < SB_GP_NPRE && !why[0]; p++) {
             lcfg_defaults(&a);
             lcfg_gfx_apply(&a, p);
             if (lcfg_gfx_preset(&a, 0) != p) {
@@ -1193,6 +1193,10 @@ static int cli_selftest(const char *client_override)
                     b.fx[LFX_INTERP] = !b.fx[LFX_INTERP];
                 } else if (k < LGK_HD) {
                     b.fx[k - LGK_FX0] += 7;
+                } else if (k == LGK_FPS) { b.interp_fps = 0;
+                } else if (k == LGK_RT) { b.rt_scale = 4;
+                } else if (k == LGK_DYN) { b.rt_scale_dyn = 1;
+                } else if (k == LGK_MATCH) { b.fs_interp_match = !b.fs_interp_match;
                 } else {
                     b.remaster = b.hd_textures = !b.hd_textures;
                 }
@@ -1206,7 +1210,7 @@ static int cli_selftest(const char *client_override)
             if (!why[0] && lcfg_gfx_preset(&b, 0) != p) {
                 _snprintf_s(why, sizeof why, _TRUNCATE, "P%d: Etikett macht Custom", p);
             }
-            lcfg_gfx_apply(&b, (p + 1) % 3);
+            lcfg_gfx_apply(&b, (p + 1) % SB_GP_NPRE);
             if (!why[0] && b.shx[LSHX_LABEL] != 1) {
                 _snprintf_s(why, sizeof why, _TRUNCATE, "P%d: Preset setzt Etikett", p);
             }
@@ -1259,10 +1263,46 @@ static int cli_selftest(const char *client_override)
             }
         }
         if (!why[0]) {
-            T_OK("52 gfx-preset-p4 (3 Presets + Custom, Client-Tabelle, Effect Pack, Etikett)");
+            T_OK("52 gfx-preset-p4 (4 Presets + Custom, Client-Tabelle, Effect Pack, Etikett)");
         } else {
             T_FAIL("52 gfx-preset-p4", "%s", why);
         }
+    }
+
+    /* W207: Performance values, persistence, old cfg and exclusive rules. */
+    {
+        int ok = 1;
+        lr_env_t env;
+        lr_res_t rr[LR_N];
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w207_performance.cfg");
+        u8_DeleteFile(tmp);
+        lcfg_defaults(&a);
+        lcfg_gfx_apply(&a, LGP_PERFORMANCE);
+        if (a.interp_fps != 60 || a.rt_scale != 1 || a.rt_scale_dyn || a.fs_interp_match ||
+            a.shx[LSHX_SHADOW] || a.shx[LSHX_SOFT] || a.shx[LSHX_SSAO] ||
+            a.shx[LSHX_SHADING] != 1 || a.aspect_mode != 1) { ok = 0; }
+        if (lcfg_save_user(tmp, &a) != 0) { ok = 0; }
+        lcfg_defaults(&b);
+        lcfg_load_file(tmp, &b);
+        if (memcmp(&a, &b, sizeof a) || lcfg_gfx_preset(&b, 0) != LGP_PERFORMANCE) { ok = 0; }
+        b.window_mode = 2;
+        lrules_env_default(&env, &b);
+        lrules_eval(&env, rr);
+        if (rr[9].active || rr[14].active || !rr[13].active) { ok = 0; }
+        b.interp_fps = 120;
+        lrules_eval(&env, rr);
+        if (!rr[14].active || lcfg_gfx_base(&b, 0) != LGP_PERFORMANCE) { ok = 0; }
+        lcfg_gfx_apply(&b, LGP_ORIGINAL);
+        if (b.interp_fps != 120 || b.rt_scale != 0 || !b.fs_interp_match) { ok = 0; }
+        /* Legacy values remain valid and unchanged when loaded. */
+        lcfg_defaults(&b);
+        lcfg_apply_set(&b, "interp_fps=60;rt_scale=3;rt_scale_dyn=1");
+        if (b.interp_fps != 60 || b.rt_scale != 3 || b.rt_scale_dyn != 1 ||
+            !b.fs_interp_match) { ok = 0; }
+        u8_DeleteFile(tmp);
+        if (ok) { T_OK("W207 lowend (60 FPS, native RT, save/load, Custom, rules)"); }
+        else { T_FAIL("W207 lowend", "%s", "values/persistence/rules"); }
     }
 
     /* 29 (W143): Assistent-cfg Speichern/Zuruecksetzen erhaelt fremde Zeilen */

@@ -111,7 +111,16 @@ typedef struct {
     float prj[4];
 } ip_op_t;
 
+/* W209: sparse originals, allocated only for CPU-shifted P2 draws. */
+typedef struct ip_cp_s {
+    struct ip_cp_s *next;
+    unsigned start, n;
+    float pos[1][4];
+} ip_cp_t;
+
 typedef struct {
+    ip_cp_t *cp_original;
+    float cp_camera[3]; /* d, k*zoom, zoom of this tick (not a later game frame) */
     ip_op_t *ops;
     unsigned nops, capops;
     unsigned nverts;  /* belegte Vertices im Tick-VB */
@@ -260,9 +269,15 @@ static void ip_op_release(ip_op_t *o)
 static void ip_list_reset(ip_list_t *L)
 {
     unsigned i;
+    while (L->cp_original) {
+        ip_cp_t *p = L->cp_original;
+        L->cp_original = p->next;
+        free(p);
+    }
     for (i = 0; i < L->nops; i++) {
         ip_op_release(&L->ops[i]);
     }
+    L->cp_camera[0] = 0.0f; L->cp_camera[1] = L->cp_camera[2] = 1.0f;
     L->nops = 0;
     L->nverts = 0;
     L->rqxpos = 0;
@@ -1042,6 +1057,39 @@ void sb_interp_rec_draw(const im_vertex_t *v, unsigned n, unsigned topo,
     for (q = 0; q < 4u; q++) { memcpy(pref[q], v[(n - 1u) * q / 3u].pos, sizeof pref[q]); }
     ip_rec_draw_core((const float (*)[4])pref, sb_interp_hash(v, sizeof *v, n), n, topo, mvp,
                      has_tex, cls, sig, rawhash, vstart, q0);
+}
+
+/* Save originals before the active camera modifies them. The next VB upload
+ * starts at L->nverts. Expansion matches render_im.c (including its cap).
+ * No call/copy/allocation at all in the camera-0 draw path. On failure the
+ * tick is invalidated, so replay never mixes old P2 with a new mesh camera. */
+void sb_interp_rec_cpersp(const float camera[3], const float *pos, size_t st, unsigned prim, unsigned nsrc)
+{
+    ip_list_t *L;
+    ip_cp_t *p;
+    unsigned i, n;
+    if (ip_rec < 0 || !nsrc) { return; }
+    L = &g_ipl[ip_rec];
+    if (L->overflow) { return; }
+    memcpy(L->cp_camera, camera, sizeof L->cp_camera);
+    if (!pos) { return; }
+    if (nsrc > IM_VB_MAX) { nsrc = IM_VB_MAX; }
+    n = nsrc;
+    switch (prim) {
+    case 3: if (n < IM_VB_MAX) { n++; } break;
+    case 6: case 7: case 10: n = nsrc > 2u ? (nsrc - 2u) * 3u : 0u; break;
+    case 8: n = (nsrc / 4u) * 6u; break;
+    case 9: n = nsrc >= 4u ? ((nsrc - 4u) / 2u + 1u) * 6u : 0u; break;
+    default: break;
+    }
+    if (n > IM_VB_MAX) { n = IM_VB_MAX; }
+    if (!n) { return; }
+    p = (ip_cp_t *)malloc(sizeof *p + (size_t)(n - 1u) * sizeof p->pos[0]);
+    if (!p) { L->overflow = 1; return; }
+    p->start = L->nverts; p->n = n;
+    for (i = 0; i < n; i++) { memcpy(p->pos[i], pos + st * sb_im_exp_src(prim, nsrc, i), sizeof p->pos[i]); }
+    p->next = L->cp_original;
+    L->cp_original = p;
 }
 
 /* PERF(IM-PERF,W99): wie sb_interp_rec_draw, die expandierten Vertices liegen
@@ -2954,6 +3002,8 @@ static int ip_pl_noshade;              /* Shading-Draws mit IM-PS-Ersatz (shadin
 static unsigned ip_pl_mfx;             /* Bit 0: Korn-Wash auslassen, Bit 1: Stoerzeilen auslassen (monitor_fx) */
 static ID3D11Buffer *ip_pl_cbsrc;      /* Konstanten-Fenster der Liste (Aufzeichnung) ... */
 static ID3D11Buffer *ip_pl_cb;         /* ... und die neu berechnete Kopie (sfx0..sfx3, Schattenstufen) */
+static ID3D11Buffer *ip_pl_vb;         /* W209: pause-only rebuilt vertex buffer */
+static float (*ip_pl_mvp)[16];         /* matrices paired with that buffer */
 static sb_interp_mvp_hook_t ip_pl_hook; /* W191-Schnittstelle: MVP der BB-Draws (Cockpit-Projektion) */
 static unsigned ip_pl_nhook, ip_pl_nmfx, ip_pl_nnoshade; /* Zaehler der letzten Neuzeichnung */
 static int ip_pl_tex;                  /* 1 = in der Pause neu geladene Texturen tauschen (sb_tex_pause_map) */
@@ -3080,7 +3130,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
     }
     vbgA = vbgB && A && (A->gpu_ok & 1u);
     vbgB = vbgB && (B->gpu_ok & 1u);
-    bvb = ip_vbsel(B, vbgB);
+    bvb = (ip_pl_on && ip_pl_vb) ? ip_pl_vb : ip_vbsel(B, vbgB);
     if (A) { avb = ip_vbsel(A, vbgA); }
     rc.var = var;
     rc.nops = B->nops;
@@ -3310,11 +3360,8 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             ip_cb_write(x, x->cb0, pm, o->has_tex, 0.0f, 0);
             rc.nmap++;
         }
-        else if (ip_pl_on && ip_pl_hook && o->rtv == g_rtv) { /* W193: Cockpit-Projektion (W191) am Standbild */
-            float pm[16];
-            memcpy(pm, o->mvp, sizeof pm);
-            if (ip_pl_hook(pm, o->cls)) { ip_pl_nhook++; }
-            ip_cb_write(x, x->cb0, pm, o->has_tex, 0.0f, 0);
+        else if (ip_pl_on && ip_pl_mvp && o->rtv == g_rtv) {
+            ip_cb_write(x, x->cb0, ip_pl_mvp[i], o->has_tex, 0.0f, 0);
             rc.nmap++;
         }
         else if (var != 4u) { ip_cb_write(x, x->cb0, o->mvp, o->has_tex, 0.0f, 0); rc.nmap++; }
@@ -4913,6 +4960,59 @@ static int ip_pl_consts(ip_list_t *B, sb_pl_info_t *inf)
     return 1;
 }
 
+/* W209: no extra VB work during normal play or an unchanged pause. Read the
+ * recorded VB once per dirty camera replay, restore sparse originals, then
+ * transform vertices and matrices together. The recording remains immutable. */
+static int ip_pl_cpersp(ip_list_t *B)
+{
+    D3D11_BUFFER_DESC bd;
+    D3D11_MAPPED_SUBRESOURCE map;
+    D3D11_SUBRESOURCE_DATA init;
+    D3D11_BOX box;
+    ID3D11Buffer *stage = NULL;
+    im_vertex_t *v = NULL;
+    ip_cp_t *p;
+    unsigned i, bytes = B->nverts * (unsigned)sizeof *v;
+    int ok = 0;
+    if (!sb_cp_pause_begin(B->cp_camera) || !ip_pl_hook) { return 1; }
+    if (!bytes) { return 0; }
+    v = (im_vertex_t *)malloc(bytes);
+    ip_pl_mvp = (float (*)[16])malloc((size_t)B->nops * sizeof *ip_pl_mvp);
+    if (!v || !ip_pl_mvp) { goto done; }
+    memset(&bd, 0, sizeof bd);
+    bd.ByteWidth = bytes; bd.Usage = D3D11_USAGE_STAGING; bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &stage))) { goto done; }
+    memset(&box, 0, sizeof box);
+    box.right = bytes; box.bottom = box.back = 1;
+    ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)stage, 0, 0, 0, 0,
+                                            (ID3D11Resource *)B->vb, 0, &box);
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)stage, 0, D3D11_MAP_READ, 0, &map))) { goto done; }
+    memcpy(v, map.pData, bytes);
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)stage, 0);
+    for (p = B->cp_original; p; p = p->next) {
+        if (p->start > B->nverts || p->n > B->nverts - p->start) { goto done; }
+        for (i = 0; i < p->n; i++) { memcpy(v[p->start + i].pos, p->pos[i], sizeof p->pos[i]); }
+    }
+    for (i = 0; i < B->nops; i++) {
+        ip_op_t *o = &B->ops[i];
+        memcpy(ip_pl_mvp[i], o->mvp, sizeof o->mvp);
+        if (o->kind == IP_DRAW && o->rtv == g_rtv) {
+            if (o->vstart > B->nverts || o->nv > B->nverts - o->vstart) { goto done; }
+            if (ip_pl_hook(ip_pl_mvp[i], o->cls, v[o->vstart].pos,
+                           sizeof *v / sizeof(float), o->nv)) { ip_pl_nhook++; }
+        }
+    }
+    bd.Usage = D3D11_USAGE_IMMUTABLE; bd.CPUAccessFlags = 0; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    memset(&init, 0, sizeof init); init.pSysMem = v;
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, &init, &ip_pl_vb))) { goto done; }
+    ok = 1;
+done:
+    if (stage) { ID3D11Buffer_Release(stage); }
+    free(v);
+    if (!ok) { free(ip_pl_mvp); ip_pl_mvp = NULL; }
+    return ok;
+}
+
 static ID3D11Resource *ip_pl_render(sb_pl_info_t *inf, const sb_ph_rep_t *ph);
 ID3D11Resource *sb_interp_pause_render(sb_pl_info_t *inf)
 {
@@ -4957,6 +5057,7 @@ static ID3D11Resource *ip_pl_render(sb_pl_info_t *inf, const sb_ph_rep_t *ph)
     if (!g_cfg.monitor_fx || (g_cfg.monitor_grain <= 0 && g_cfg.monitor_glitch <= 0)) { ip_pl_mfx |= 1u; }
     if (!g_cfg.monitor_fx || g_cfg.monitor_glitch <= 0) { ip_pl_mfx |= 2u; }
     ip_pl_nhook = ip_pl_nmfx = ip_pl_nnoshade = 0;
+    if (!ip_pl_cpersp(B)) { HLOG_W("CPERSP pause: rebuild failed, keeping snapshot"); return NULL; }
     ip_pl_tex = sb_tex_pause_nmap() > 0;
     ip_pl_on = 1;
     if (ph) { /* W195 */
@@ -4968,6 +5069,8 @@ static ID3D11Resource *ip_pl_render(sb_pl_info_t *inf, const sb_ph_rep_t *ph)
     }
     ip_replay_ex(B, ip_list_index(B), A, A ? ip_list_index(A) : -1, 1.0f, 0, ip_cx_imm());
     memset(&ip_ph, 0, sizeof ip_ph);
+    if (ip_pl_vb) { ID3D11Buffer_Release(ip_pl_vb); ip_pl_vb = NULL; }
+    free(ip_pl_mvp); ip_pl_mvp = NULL;
     ip_pl_on = 0;
     ip_pl_tex = 0;
     ip_pl_cbsrc = NULL;

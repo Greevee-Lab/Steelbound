@@ -242,8 +242,9 @@ const char *shfx_preset_name(int which);
  * gleiche Semantik wie der Launcher). Teil: Shader / Effekte / alles (+HD). */
 enum { SB_GFX_SHADER = 0, SB_GFX_FX = 1, SB_GFX_ALL = 2 };
 int sb_gfx_part_is(int q, int part);  /* 1 = Teil entspricht Preset q (Effect-Pack-Schluessel zaehlen nicht) */
-void sb_gfx_part_apply(int q, int part); /* setzt Shader/Effekte (HD schaltet das ESC-Menue live) */
-int sb_gfx_preset_match(void);        /* 0..2, -1 = Benutzerdefiniert */
+void sb_gfx_part_apply(int q, int part); /* Shader/Effekte; HD, Rate/Skala ueber ESC-Lebenszyklus */
+int sb_gfx_preset_match_for(int fps, int rt); /* pending ESC choices */
+int sb_gfx_preset_match(void);        /* 0..3, -1 = Benutzerdefiniert */
 void sb_shfx_shading_watch(void);
 int mfx_apply(float (*buf)[16][4], unsigned *n, unsigned *prim, unsigned nmax);
 void mfx_end(void);
@@ -303,11 +304,10 @@ typedef struct {
 ID3D11Resource *sb_interp_pause_render(sb_pl_info_t *inf);
 /* Ergebnisbild gegen das Spiel-Bild des juengsten Ticks (Sicherung am Swap): 1 = verglichen */
 int sb_interp_pause_cmp(ID3D11Resource *img, unsigned *ndiff, unsigned *maxd);
-/* Schnittstelle fuer die Cockpit-Perspektive (W191): Haken fuer die MVP jedes Backbuffer-Draws
- * der Pause-Neuzeichnung (cls 0 = 2D/RHW, 1 = Welt/3D). Rueckgabe 1 = Matrix geaendert. Vertices,
- * die bei der Aufzeichnung auf der CPU verschoben wurden, stehen so in der Aufzeichnung. Nach einer
- * Aenderung der Projektion sb_render_pause_dirty() rufen. NULL = aus. */
-typedef int (*sb_interp_mvp_hook_t)(float mvp[16], int cls);
+/* W209: pause hook receives original P2 vertices and the recorded matrix.
+ * cls 0 = RHW, 1 = mesh/P2. Transform both in a private replay copy only.
+ * After slider changes call sb_render_pause_dirty(). NULL = disabled. */
+typedef int (*sb_interp_mvp_hook_t)(float mvp[16], int cls, float *pos, size_t st, unsigned n);
 void sb_interp_set_pause_mvp_hook(sb_interp_mvp_hook_t fn);
 void sb_render_pause_dirty(void); /* d3d11_render.c: Standbild beim naechsten Pausenbild neu zeichnen */
 /* W195 PHOTO-MODE (render_interp.c / render_photo.c): Foto-Wiedergabe des juengsten Ticks.
@@ -370,7 +370,9 @@ void sb_render_blit(ID3D11Resource *src);
 void sb_edge_apply(ID3D11RenderTargetView *rtv); /* W107 EDGE-MODE (render_edge.c), unter ctx_lock */
 /* W191 UW-PERSP (render_cpersp.c): Cockpit-Perspektive (Desktop, Standard aus) */
 int sb_cp_frame(void);   /* 1 = dieses Bild Cockpit-Ansicht mit aktiver Option (0 ohne Speicherzugriff, wenn aus) */
-void sb_cp_draw(float mvp[16], int cls, float *pos, size_t st, unsigned n); /* cls 0 = 3D-Pfad, 1 = VSH-P2 (Clip auf der CPU), 2 = 2D/RHW */
+void sb_cp_draw(float mvp[16], int cls, float *pos, size_t st, unsigned n, unsigned prim); /* cls 0 = mesh, 1 = P2, 2 = RHW */
+void sb_interp_rec_cpersp(const float camera[3], const float *pos, size_t st, unsigned prim, unsigned nsrc);
+int sb_cp_pause_begin(const float camera[3]); /* prepare current camera; 1 = vertices/matrices need rebuilding */
 float sb_cp_panini_d(void); /* Panini-d dieses Bildes (0 = aus) */
 float sb_cp_panini_offset(void); /* senkrechte Verschiebung (NDC) nach sb_cp_panini_d */
 float sb_cp_panini_scale(float d); /* render_cpanini.c: Mitte-Vergroesserung */

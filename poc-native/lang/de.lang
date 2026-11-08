@@ -344,7 +344,7 @@ ovl.lb_lworld=Welt: Licht
 ovl.lb_mmode=Maus-Zielen
 ovl.lb_monfx=Cockpit-Monitor
 ovl.lb_msens=  Empfindlichkeit
-ovl.lb_preset=Voreinstellung
+ovl.lb_preset=Preset
 ovl.lb_res=Auflösung
 ovl.lb_rts=Render-Skalierung
 ovl.lb_save=Als Standard speichern
@@ -393,7 +393,7 @@ ovl.st_hd_none=HD: kein Textur-Pack gefunden
 ovl.st_hd_off=HD aus (Original) – lädt nach
 ovl.st_hd_stage=HD: anderes Texturdetail nicht im Pack
 ovl.st_label=Zieletikett: wirkt nach Neustart
-ovl.st_cpersp=Kamera zurück + Tele: mehr Monitor (Standbild: nach Fortsetzen)
+ovl.st_cpersp=Kamera zurück + Tele: mehr Monitor (Standbild live)
 ovl.st_cpanini=Panini: Mitte formtreu größer, Ränder verdichtet
 ovl.st_cpersp_vr=In VR ohne Wirkung (nur Desktop)
 ovl.st_prev_restart=Vorschau wirkt nach Neustart (speichern)
@@ -1113,3 +1113,18 @@ gui.si_conflict=Ja = kollidierende Dateien überschreiben.\nNein = zusammenführ
 gui.si_done=Importierte Auswahl: %d Spielstände (%d Piloten), %d Replays. Altbestand gesichert; Zusammenführen behält vorhandene Konfliktdateien.
 gui.si_exported=Spielstände und Replays als ZIP exportiert.
 gui.si_foreign=Import abgelehnt: Ordner oder ZIP enthält eine fremde Xbox-Title-ID. Unterstützt wird nur Steel Battalion (43430002).
+
+# W207 LOWEND
+gui.gfx_p_performance=Original (HD) – Performance
+gui.gfx_p_performance_txt=Schwächere PCs: 60 FPS, native Weltauflösung.
+ovl.v_performance=Original (HD) – Performance
+ovl.st_performance=Schwache PCs. Auflösung nach Neustart.
+
+# W210 feedback clip
+ovl.clip_record=Clip aufnehmen (5 s)
+ovl.clip_remove=Clip entfernen
+ovl.clip_attached=Clip: angehängt (%.2f MB) - clip.mp4
+ovl.clip_jpg=Clip: JPG-Folge (%.2f MB), kein MP4
+ovl.clip_none=Clip: keiner
+ovl.clip_fail=Clip fehlgeschlagen; erneut versuchen
+ovl.clip_finishing=Speichern...

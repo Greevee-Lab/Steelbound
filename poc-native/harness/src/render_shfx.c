@@ -13,13 +13,13 @@
  *                     Umsetzung der bekannten Idee "Gewicht der Nachbarn nach
  *                     lokalem Min/Max", vgl. AMD FidelityFX CAS (MIT) - kein
  *                     uebernommener Code).
- *    Die drei letzten wirken beim LESEN der Welt-RTs (512² Hauptmonitor,
- *    256² FRONT VIEW: RTs mit >= 32 3D-Draws im laufenden/letzten Bild) durch
+ *    Die drei letzten wirken beim LESEN der Welt-RTs (512^2 Hauptmonitor,
+ *    256^2 FRONT VIEW: RTs mit >= 32 3D-Draws im laufenden/letzten Bild) durch
  *    Filter/Monitor-Komposition des Spiels - gleiche Wirkung wie eine
  *    Nachbearbeitung der Welt-RT, ohne Kopie. Selbst-Sampling (Hitzeflimmer-
  *    Sprites, W106) bleibt unberuehrt (sonst doppelt).
  *    - bloom_strength 0..200 % (100 = Original): Lesen der kleinen Bloom-RTs
- *                     (<= 32², 20²/6²) durch Draws in grosse Ziele (>= 128,
+ *                     (<= 32^2, 20^2/6^2) durch Draws in grosse Ziele (>= 128,
  *                     Monitor-Komposition: y^4 + T2) skaliert.
  *    Umsetzung: zwei PS-Konstanten sfx0/sfx1 hinter pflags (render_psgen.c,
  *    Fenster bleibt 32 Konstanten), Bits je Stufe; alles 0 = Original.
@@ -196,7 +196,7 @@ static void sfx_consts_core(float *sx, const int srvk[4], const unsigned *xp_in,
             g_sfx_nflag[1]++;
         } else if (g_cfg.world_focus != 100 && nstages >= 5u && g_rtt[s].w > 32u && g_rtt[s].w < 256u &&
                    tgt >= 0 && tgt < g_rtt_n && g_rtt[tgt].w >= 256u) {
-            /* Fokus-Unschaerfe: kleine Unschaerfe-RT (200² bzw. 128², Maske im Alpha)
+            /* Fokus-Unschaerfe: kleine Unschaerfe-RT (200^2 bzw. 128^2, Maske im Alpha)
              * in der Monitor-Komposition (>= 5 Stufen) -> Maske Richtung 1 = scharf */
             flags |= 0x1000u << k;
             sx[12] = (float)sfx_pct(g_cfg.world_focus, 0, 100) / 100.0f;
@@ -858,10 +858,10 @@ typedef struct {
     int expo, tone, bthr, lworld, lckp, focus;               /* W121 Teil 2 */
     int aa, ssao, sat, temp, lift, cgam, gain, shadow, soft; /* W131 */
 } sfx_preset_t;
-static const char *const kSfxName[SB_GP_NPRE] = { "original", "dezent", "stark" };
+static const char *const kSfxName[SB_GP_NPRE] = { "original", "dezent", "stark", "performance" };
 
 /* cfg-Feld je Preset-Schluessel (Reihenfolge = kSbGfxPreset). */
-typedef char sb_gp_nkey_chk[(SB_GP_NKEY == 30 && SB_GP_FX0 == 24 && SB_GP_HD == 29) ? 1 : -1];
+typedef char sb_gp_nkey_chk[(SB_GP_NKEY == 34 && SB_GP_FX0 == 24 && SB_GP_HD == 29) ? 1 : -1];
 static int *const kGpField[SB_GP_NKEY] = {
     &g_cfg.shading, &g_cfg.world_fog, &g_cfg.world_contrast, &g_cfg.world_gamma, &g_cfg.world_sharpen,
     &g_cfg.bloom_strength, &g_cfg.cockpit_glow, &g_cfg.cockpit_spill, &g_cfg.cockpit_light,
@@ -870,6 +870,7 @@ static int *const kGpField[SB_GP_NKEY] = {
     &g_cfg.color_gamma, &g_cfg.color_gain, &g_cfg.shade_shadow, &g_cfg.shadow_soft,
     &g_cfg.fx_soft, &g_cfg.fx_embers, &g_cfg.fx_light, &g_cfg.fx_light_cockpit, &g_cfg.fx_interp,
     &g_cfg.hd_textures,
+    &g_cfg.interp_fps, &g_cfg.rt_scale, &g_cfg.rt_scale_dyn, &g_cfg.fs_interp_match,
 };
 
 static void gp_range(int part, int *k0, int *k1)
@@ -913,15 +914,25 @@ void sb_gfx_part_apply(int q, int part)
     }
 }
 
-/* Einheitliches Preset: 0..2, -1 = Benutzerdefiniert (gleiche Semantik wie
+/* Einheitliches Preset: 0..3, -1 = Benutzerdefiniert (gleiche Semantik wie
  * launcher_cfg.c lcfg_gfx_preset). */
-int sb_gfx_preset_match(void)
+int sb_gfx_preset_match_for(int fps, int rt)
 {
     int q;
     for (q = 0; q < SB_GP_NPRE; q++) {
-        if (sb_gfx_part_is(q, SB_GFX_ALL)) { return q; }
+        if (sb_gfx_part_is(q, SB_GFX_SHADER) && sb_gfx_part_is(q, SB_GFX_FX) &&
+            gp_cur(SB_GP_HD) == kSbGfxPreset[SB_GP_HD].v[q] &&
+            fps == kSbGfxPreset[SB_GP_FPS].v[q] &&
+            rt == kSbGfxPreset[SB_GP_RT].v[q] &&
+            g_cfg.rt_scale_dyn == kSbGfxPreset[SB_GP_DYN].v[q] &&
+            g_cfg.fs_interp_match == kSbGfxPreset[SB_GP_MATCH].v[q]) { return q; }
     }
     return -1;
+}
+
+int sb_gfx_preset_match(void)
+{
+    return sb_gfx_preset_match_for(g_cfg.interp_fps, g_cfg.rt_scale);
 }
 
 /* DIAG-Kopie der Shader-Werte des Presets q (Reihenfolge = kSbGfxPreset). */
@@ -972,7 +983,7 @@ int shfx_preset_match(void)
 
 const char *shfx_preset_name(int which)
 {
-    return (which >= 0 && which <= 2) ? kSfxName[which] : "benutzer";
+    return (which >= 0 && which < SB_GP_NPRE) ? kSfxName[which] : "benutzer";
 }
 
 /* DIAG(W131) shfx_ab=4: Serie der neuen Optionen; shfx_ab=5: Preset-Tripel.
@@ -1089,7 +1100,7 @@ void sb_shfx_present_end(unsigned n)
 }
 
 /* FIX(SHADE-FX,W121) shade_live_reset: Wechselt `shading` zur Laufzeit (ESC-Menue),
- * halten die zeitlich gemischten Bloom-RTs (20²/6², Blend SRCALPHA/INVSRCALPHA)
+ * halten die zeitlich gemischten Bloom-RTs (20^2/6^2, Blend SRCALPHA/INVSRCALPHA)
  * den Stand des anderen Pfads: Der Bright-Pass ueberschreibt nur, wo er anspringt.
  * Beleg W121_h3: T2 = 0,225 (Rest des alten Pfads) statt 0,000 bei Shading ab Start
  * (W121_h1) -> Hangar-Komposition 0,37 statt 0,13. Auf der Xbox gibt es keinen

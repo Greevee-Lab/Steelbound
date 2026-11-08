@@ -23,6 +23,7 @@
 #include <math.h>
 #include "render_vsh.h"
 #include "render_psgen.h"
+#include "render_cpersp_math.h"
 #include "sb_edition.h"
 #if SB_EDITION_COMMUNITY
 #include "render_selftest_xbe.h"
@@ -759,6 +760,47 @@ static void test_ps(void)
     st_log(line);
 }
 
+/* W209: independent geometry oracle: a decal at the same metric depth
+ * must remain aligned with its mesh, and pass LESS_EQUAL with the live bias.
+ * Reprojecting a previously recorded mesh must match direct projection. */
+static void test_cpersp(void)
+{
+    const float al = 100.0f / 99.9f, be = -0.1f * al;
+    const float distances[] = { 0.0f, -1.5f, -3.0f };
+    unsigned old, now, j;
+    int fail = 0;
+    for (old = 0; old < 3; old++) {
+        for (now = 0; now < 3; now++) {
+            float base[16] = {0}, direct[16], replay[16];
+            float d0 = distances[old], d1 = distances[now];
+            float k0 = (0.75f - d0) / 0.75f, k1 = (0.75f - d1) / 0.75f;
+            float p[4] = {0.3f, -0.2f, al * 0.7f + be, 0.7f};
+            float flat[4] = {0.3f, 0.2f, 0.034f, 1.0f}, copy[4];
+            float w = 0.7f - d1, x, y, z;
+            base[0] = base[5] = 1.0f; base[10] = al;
+            base[11] = 1.0f; base[14] = be;
+            memcpy(direct, base, sizeof base); memcpy(replay, base, sizeof base);
+            cp_mvp_redo(direct, 0.0f, 1.0f, d1, k1, NULL, NULL);
+            cp_mvp_redo(replay, 0.0f, 1.0f, d0, k0, NULL, NULL);
+            cp_mvp_redo(replay, d0, k0, d1, k1, NULL, NULL);
+            for (j = 0; j < 16; j++) { if (fabsf(direct[j] - replay[j]) > 2e-5f) { fail++; } }
+            cp_p2_apply(p, 4, 1, d1, k1, al, be, 0.1f);
+            x = 0.3f * direct[0] / w;
+            y = -0.2f * direct[5] / w;
+            z = (0.7f * direct[10] + direct[14]) / w;
+            if (fabsf(p[0] / p[3] - x) > 1e-6f || fabsf(p[1] / p[3] - y) > 1e-6f ||
+                fabsf(z - p[2] / p[3] - (d1 ? 2e-5f : 0.0f)) > 1e-6f) { fail++; }
+            memcpy(copy, flat, sizeof flat);
+            cp_p2_apply(flat, 4, 1, d1, k1, al, be, 0.1f);
+            if (memcmp(copy, flat, sizeof flat)) { fail++; }
+            /* The old near plane remains at z=0 even after moving back. */
+            if (fabsf(0.1f * direct[10] + direct[14]) > 2e-6f) { fail++; }
+        }
+    }
+    printf("CPERSP: 9 camera pairs, alignment/depth/near/flat: %d Fehler\n", fail);
+    g_fail += fail;
+}
+
 int main(int argc, char **argv)
 {
     HMODULE dc;
@@ -797,6 +839,7 @@ int main(int argc, char **argv)
     test_vs_raw();
     printf("== 3. Register-Combiner -> HLSL\n");
     test_ps();
+    test_cpersp();
     printf("== ERGEBNIS: %d Fehler\n", g_fail);
     return g_fail ? 1 : 0;
 }

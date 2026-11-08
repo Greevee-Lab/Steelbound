@@ -37,6 +37,7 @@
  */
 #include "render_int.h"
 #include <math.h>
+#include "render_cpersp_math.h"
 
 #define CP_CYC_MAX 8
 
@@ -139,55 +140,6 @@ static void cp_build(void)
     cp_Mz[10] = cp_Mz[15] = 1.0f;
 }
 
-/* 3D-Pfad: Objektraum-Positionen mit w = 1 -> Zeile 3 der MVP ist die
- * Verschiebung. Spalte W = Abstand (metrisch), Spalte Z = al*W + be (aus der
- * MVP selbst bestimmt, kleinste Quadrate ueber die Zeilen 0..2). Vorschub d:
- * W' = W - d (mvp[15] -= d), Z' = al*W' + be (mvp[14] -= al*d), Sichtfeld
- * k*zoom auf die Spalten X/Y. Rueckgabe 0 = keine Perspektiv-MVP (unveraendert
- * bis auf Zoom). */
-/* Tiefe nach dem Kamera-Weg: z/w = al + be / w (al = f/(f-n), be = -n*al).
- * Kamera zurueck (d < 0): Near-Ebene auf n - d = Original-Near um das alte Auge
- * -> genau die Geometrie, die das Original sah (nichts hinter dem alten Auge:
- * Sitz, Rueckwand, Kopfstuetze bleiben weg), bessere Tiefenpraezision.
- * Kamera vor (d > 0): Projektion unveraendert. al0/be0 = Original. */
-static void cp_depth_new(float al0, float be0, float d, float *al1, float *be1)
-{
-    float n, f, n1;
-    if (!(d < 0.0f) || !(al0 > 1.0f) || !(be0 < 0.0f)) { *al1 = al0; *be1 = be0; return; }
-    n = -be0 / al0;
-    f = n * al0 / (al0 - 1.0f);
-    n1 = n - d;
-    if (!(f > n1 * 1.01f)) { *al1 = al0; *be1 = be0; return; }
-    *al1 = f / (f - n1);
-    *be1 = -n1 * *al1;
-}
-
-/* MVP eines 3D-Draws (Objektraum w = 1) vom Kamera-Weg d0/Faktor kz0 auf d1/kz1
- * umrechnen (Aufnahme: d0 = 0, kz0 = 1; Pause-Haken: Differenz). al0/be0 =
- * Original-Tiefe (aus der MVP bestimmt, falls NULL-Zeiger nicht gesetzt). */
-static int cp_mvp_redo(float m[16], float d0, float kz0, float d1, float kz1, float *al_out, float *be_out)
-{
-    float ww = m[3] * m[3] + m[7] * m[7] + m[11] * m[11], al, be, al0, be0, aln, ben, fx;
-    int i;
-    if (!(ww > 1e-12f)) { return 0; }
-    al = (m[2] * m[3] + m[6] * m[7] + m[10] * m[11]) / ww; /* Tiefe der vorliegenden MVP */
-    be = m[14] - al * m[15];
-    /* Original-Tiefe zurueckrechnen (d0 < 0 hatte die Near-Ebene verschoben) */
-    al0 = al; be0 = be;
-    if (d0 < 0.0f && al > 1.0f && be < 0.0f) {
-        float n1 = -be / al, f = n1 * al / (al - 1.0f), n = n1 + d0;
-        if (n > 1e-4f && f > n * 1.01f) { al0 = f / (f - n); be0 = -n * al0; }
-    }
-    fx = kz1 / kz0;
-    for (i = 0; i < 4; i++) { m[i * 4 + 0] *= fx; m[i * 4 + 1] *= fx; }
-    m[15] += d0 - d1;                       /* W' = W - d */
-    cp_depth_new(al0, be0, d1, &aln, &ben);  /* Z' = al' W' + be' */
-    m[2] = aln * m[3]; m[6] = aln * m[7]; m[10] = aln * m[11]; m[14] = aln * m[15] + ben;
-    if (al_out) { *al_out = al0; }
-    if (be_out) { *be_out = be0; }
-    return 1;
-}
-
 static int cp_mvp3(float m[16], float *al_out, float *be_out)
 {
     return cp_mvp_redo(m, 0.0f, 1.0f, cp_d, cp_k * cp_zoom, al_out, be_out);
@@ -240,41 +192,57 @@ static void cp_eval(void)
     cp_on = 1;
 }
 
-/* W193-Schnittstelle (PAUSE-LIVE): Standbild der Pause wird aus der letzten
- * Tick-Aufzeichnung neu gezeichnet. Die Aufzeichnung traegt schon die
- * Perspektive des aufgezeichneten Bildes (cp_rec_*); der Haken wendet die
- * DIFFERENZ zur aktuellen Einstellung an: 3D-Pfad (MVP mit Perspektiv-Spalte)
- * exakt, Zoom auf alle BB-Draws. Auf der CPU verschobene P2-Instrumente
- * lassen sich ohne Vertices nicht nachbilden - sie folgen erst nach dem
- * Fortsetzen (Hinweis im Bericht). */
+/* W209: replay uses original P2 positions, never inverse-projects biased depth.
+ * Mesh depth is recovered in draw order; the same near plane and P2 mapping
+ * as in the live draw are used. All scratch work happens in pause only. */
 static float cp_rec_d, cp_rec_kz = 1.0f, cp_rec_zoom = 1.0f;
-static int cp_rec_on;
-static int cp_pause_hook(float m[16], int cls)
+static float cp_pause_d, cp_pause_k, cp_pause_z;
+static float cp_pause_al, cp_pause_be, cp_pause_n;
+static float cp_shown_d, cp_shown_kz = 1.0f, cp_shown_z = 1.0f;
+
+int sb_cp_pause_begin(const float camera[3])
 {
-    float D, d, k, z, kz, ww, al, fx;
-    int pct = cp_clampi(g_cfg.cockpit_persp, 0, 100), zm = cp_clampi(g_cfg.cockpit_zoom <= 0 ? 100 : g_cfg.cockpit_zoom, 100, 200), i;
-    if (g_cfg.vr_enable || !cp_cockpit_view()) { return 0; }
+    float D;
+    int pct = cp_clampi(g_cfg.cockpit_persp, 0, 100);
+    cp_view = cp_cockpit_view();
+    if (g_cfg.vr_enable || !cp_view) { return 0; }
     D = (float)cp_clampi(g_cfg.cockpit_persp_ref, 200, 5000) / 1000.0f;
-    d = -(float)pct / 100.0f * (float)cp_clampi(g_cfg.cockpit_persp_dist, -400, 3000) / 1000.0f;
-    if (d > D * 0.5f) { d = D * 0.5f; }
-    k = (D - d) / D;
-    z = (float)zm / 100.0f;
-    kz = k * z;
-    if (!cp_rec_on) { cp_rec_d = 0.0f; cp_rec_kz = 1.0f; cp_rec_zoom = 1.0f; }
-    ww = m[3] * m[3] + m[7] * m[7] + m[11] * m[11];
-    if (cls == 1 && ww > 1e-12f && g_cfg.cockpit_persp_pause) { /* 3D-Pfad: Differenz Kamera-Weg + Sichtfeld (+ Near), Experiment */
-        if (d == cp_rec_d && kz == cp_rec_kz) { return 0; }
-        (void)al;
-        return cp_mvp_redo(m, cp_rec_d, cp_rec_kz, d, kz, NULL, NULL);
+    cp_pause_d = -(float)pct / 100.0f * (float)cp_clampi(g_cfg.cockpit_persp_dist, -400, 3000) / 1000.0f;
+    if (cp_pause_d > D * 0.5f) { cp_pause_d = D * 0.5f; }
+    cp_pause_k = (D - cp_pause_d) / D;
+    cp_pause_z = (float)cp_clampi(g_cfg.cockpit_zoom <= 0 ? 100 : g_cfg.cockpit_zoom, 100, 200) / 100.0f;
+    cp_rec_d = camera[0]; cp_rec_kz = camera[1]; cp_rec_zoom = camera[2];
+    if (!g_cfg.cockpit_persp_pause) {
+        cp_pause_d = cp_rec_d;
+        cp_pause_k = cp_rec_kz / cp_rec_zoom;
     }
-    /* Standard (cockpit_persp_pause=0): der Kamera-Weg wirkt im Standbild NICHT live -
-     * die P2-Instrumente sind bei der Aufzeichnung auf der CPU verschoben und
-     * fielen sonst durch den Tiefentest (schwarze Loecher, W191_esc3). Das
-     * Standbild behaelt die aufgezeichnete Kamera, nach dem Fortsetzen gilt der
-     * neue Wert; Panini und Zoom wirken live. */
-    if (z == cp_rec_zoom) { return 0; } /* P2/2D: nur der Zoom */
-    fx = z / cp_rec_zoom;
-    for (i = 0; i < 4; i++) { m[i * 4 + 0] *= fx; m[i * 4 + 1] *= fx; }
+    cp_shown_d = cp_pause_d; cp_shown_kz = cp_pause_k * cp_pause_z; cp_shown_z = cp_pause_z;
+    cp_depth_params();
+    cp_pause_al = cp_al; cp_pause_be = cp_be; cp_pause_n = cp_n;
+    return cp_pause_d != cp_rec_d || cp_shown_kz != cp_rec_kz || cp_pause_z != cp_rec_zoom;
+}
+
+static int cp_pause_hook(float m[16], int cls, float *pos, size_t st, unsigned n)
+{
+    float ww = m[3] * m[3] + m[7] * m[7] + m[11] * m[11];
+    int i;
+    if (cls == 1 && ww > 1e-12f) {
+        float al, be;
+        int ret = cp_mvp_redo(m, cp_rec_d, cp_rec_kz, cp_pause_d,
+                              cp_pause_k * cp_pause_z, &al, &be);
+        if (ret && n >= 10000u) { cp_pause_al = al; cp_pause_be = be; }
+        return ret;
+    }
+    /* P2 has only diagonal Hor+/zoom; RHW has viewport translation and cls 0.
+     * Original positions have been restored before entering this hook. */
+    if (cls == 1 && pos && m[10] == 1.0f && m[15] == 1.0f &&
+        m[12] == 0.0f && m[13] == 0.0f && m[14] == 0.0f) {
+        cp_p2_apply(pos, st, n, cp_pause_d, cp_pause_k, cp_pause_al, cp_pause_be, cp_pause_n);
+    }
+    for (i = 0; i < 4; i++) {
+        m[i * 4] *= cp_pause_z / cp_rec_zoom;
+        m[i * 4 + 1] *= cp_pause_z / cp_rec_zoom;
+    }
     return 1;
 }
 
@@ -283,7 +251,6 @@ int sb_cp_frame(void)
     static int hooked;
     if (!hooked) { hooked = 1; sb_interp_set_pause_mvp_hook(cp_pause_hook); }
     if (!g_cfg.cockpit_persp && g_cfg.cockpit_zoom == 100 && !g_cfg.cockpit_panini && !g_cfg.cockpit_persp_cycle[0]) {
-        cp_rec_on = 0;
         cp_view = 0; /* Panini aus */
         return 0;
     }
@@ -303,7 +270,7 @@ int sb_cp_frame(void)
         cp_q_frame = 0;
         cp_eval();
         cp_log_state(g_present_no);
-        cp_rec_on = cp_on; cp_rec_d = cp_d; cp_rec_kz = cp_k * cp_zoom; cp_rec_zoom = cp_zoom; /* Stand der Aufzeichnung (Pause) */
+        cp_shown_d = cp_d; cp_shown_kz = cp_k * cp_zoom; cp_shown_z = cp_zoom;
     }
     return cp_on;
 }
@@ -367,10 +334,14 @@ static void cp_measure(const float *pos, size_t st, unsigned n, const float mvp0
 }
 
 static void cp_draw_body(float mvp[16], int cls, float *pos, size_t st, unsigned n);
-void sb_cp_draw(float mvp[16], int cls, float *pos, size_t st, unsigned n)
+void sb_cp_draw(float mvp[16], int cls, float *pos, size_t st, unsigned n, unsigned prim)
 {
     LARGE_INTEGER q0, q1;
     QueryPerformanceCounter(&q0);
+    if (g_ip_recording) {
+        float camera[3] = { cp_d, cp_k * cp_zoom, cp_zoom };
+        sb_interp_rec_cpersp(camera, cls == 1 && cp_d != 0.0f ? pos : NULL, st, prim, n);
+    }
     cp_draw_body(mvp, cls, pos, st, n);
     QueryPerformanceCounter(&q1);
     cp_q_frame += q1.QuadPart - q0.QuadPart;
@@ -386,7 +357,6 @@ int sb_cp_status(double *ms)
 static void cp_draw_body(float mvp[16], int cls, float *pos, size_t st, unsigned n)
 {
     float t[16];
-    unsigned i;
     if (cls == 0) { /* 3D-Pfad (Cockpit-Mesh) */
         int key[4];
         float al, be;
@@ -407,25 +377,9 @@ static void cp_draw_body(float mvp[16], int cls, float *pos, size_t st, unsigned
     }
     if (cls == 1 && pos && cp_d != 0.0f) { /* VSH-P2 (Clip-Raum auf der CPU) */
         unsigned moved = 0;
-        float al = cp_al, be = cp_be, al1, be1;
+        float al = cp_al, be = cp_be;
         if (cp_have3 && cp_have3 + 2u >= g_present_no && cp_be3 < 0.0f && cp_al3 > 0.5f) { al = cp_al3; be = cp_be3; }
-        cp_depth_new(al, be, cp_d, &al1, &be1);
-        for (i = 0; i < n; i++) {
-            float *p = pos + (size_t)i * st;
-            float w = p[3], zn, wm, w1, s;
-            if (!(w > 0.0f)) { continue; }
-            zn = p[2] / w;
-            if (!(zn > 0.2f && zn < 0.999f)) { continue; }
-            wm = be / (zn - al);
-            if (!(wm > 0.0f)) { continue; }
-            w1 = wm - cp_d;
-            if (w1 < cp_n * 1.05f) { w1 = cp_n * 1.05f; }
-            s = cp_k * wm / w1;
-            p[0] *= s;
-            p[1] *= s;
-            p[2] = (al1 + be1 / w1 - 2e-5f) * w;
-            moved++;
-        }
+        moved = cp_p2_apply(pos, st, n, cp_d, cp_k, al, be, cp_n);
         cp_cls[moved ? 1 : 2]++;
         cp_p2v += moved;
     } else {
@@ -536,10 +490,9 @@ float sb_cp_panini_d(void)
     if (!(b > 0.3f && b < 20.0f)) { b = 2.41421356f; }
     T = ((float)g_bb_w / (float)g_bb_h) / b;
     c = cosf(atanf(T));
-    if (cp_rec_on && cp_rec_d != 0.0f) { /* Rahmen nach dem Kamera-Weg des gezeigten Bildes */
-        float D = (float)cp_clampi(g_cfg.cockpit_persp_ref, 200, 5000) / 1000.0f, k = (D - cp_rec_d) / D;
-        sr = k * CP_W_RADAR / (CP_W_RADAR - cp_rec_d) * cp_rec_zoom;
-        sf = k * CP_W_FRONT / (CP_W_FRONT - cp_rec_d) * cp_rec_zoom;
+    if (cp_shown_d != 0.0f || cp_shown_z != 1.0f) { /* camera of the displayed replay */
+        sr = cp_shown_kz * CP_W_RADAR / (CP_W_RADAR - cp_shown_d);
+        sf = cp_shown_kz * CP_W_FRONT / (CP_W_FRONT - cp_shown_d);
     }
     yr = (1.0f - 2.0f * CP_FR_TOP) * sr;
     yf = (1.0f - 2.0f * CP_FR_BOT) * sf;

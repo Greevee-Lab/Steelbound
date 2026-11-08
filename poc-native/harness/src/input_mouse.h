@@ -11,11 +11,12 @@
  * (mouse_capture_outside_mission=1 erlaubt dort das alte Fangverhalten)
  * (Cursor versteckt + per ClipCursor aufs Fenster begrenzt, Deltas per Raw
  * Input WM_INPUT ohne Randsaettigung). F10 = freigeben/fangen, Fokusverlust
- * gibt sofort frei, Klick ins Fenster faengt wieder (der Klick selbst feuert
+ * gibt sofort frei. Fokus-Rueckkehr und Menue-Schliessen fangen automatisch,
+ * ausser nach manueller F10-Freigabe. F10 oder Klick faengt dann wieder (der Klick selbst feuert
  * nicht: Maustasten bleiben bis zum Loslassen gesperrt).
  * input_focus_only=1: echte Tasten/Maus nur bei Fokus des Client-Fensters.
  * input_test_hook=1 (nur Tests): IMOUSE_MSG_TEST_FOCUS (wParam 1/0) setzt
- * den Fokus logisch, IMOUSE_MSG_TEST_MOVE (wParam=dx, lParam=dy, signed)
+ * den Fokus logisch (Simulation bleibt auch bei Verlust aktiv), IMOUSE_MSG_TEST_MOVE (wParam=dx, lParam=dy, signed)
  * speist ein Mausdelta wie ein Raw-Input-Paket ein - per PostMessage an das
  * (unsichtbare) Fenster, ohne Vordergrund. Physische Wirkung (ClipCursor,
  * Cursor verstecken, SetCapture) gibt es nur, wenn das Fenster wirklich im

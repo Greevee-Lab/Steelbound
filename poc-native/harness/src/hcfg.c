@@ -127,7 +127,7 @@ void hcfg_defaults(void)
     g_cfg.cockpit_panini = 0; /* W191: Panini aus */
     g_cfg.cockpit_panini_d = 200; /* W191: d hoechstens 2,0 */
     g_cfg.cockpit_panini_frame = 1; /* W191: Rahmen halten */
-    g_cfg.cockpit_persp_pause = 0; /* W191: Kamera im Standbild erst nach Fortsetzen */
+    g_cfg.cockpit_persp_pause = 1; /* W209: coherent pause replay */
     g_cfg.cockpit_persp_ref = 750; /* W191: mm, feste Ebene zwischen Radar (0,80 m) und Frontview (0,71 m) */
     g_cfg.cockpit_zoom = 100; /* W191: aus */
     g_cfg.m3d_census = 0; /* W25 MISSION3D: Missions-Zensus aus (DIAG) */

@@ -28,6 +28,9 @@ poc-native/harness/tests/vr_mock_runtime.c
 poc-native/harness/tests/vr_mock_runtime.json
 # W150 ISO-DIRECT: Pruefwerkzeug iso_vfs_check (eigener Code; Selbsttest baut ein synthetisches Abbild)
 poc-native/harness/tests/iso_vfs_check.c
+# W210: synthetic clip selftest and local artifact validator (no game data)
+poc-native/harness/tests/clip_selftest.c
+poc-native/harness/scripts/clip_check.py
 # Controller-Testdaten (eigene Aufzeichnungen, Text)
 poc-native/harness/fixtures/sbc/**
 

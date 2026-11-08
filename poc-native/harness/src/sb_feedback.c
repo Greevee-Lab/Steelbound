@@ -417,6 +417,14 @@ int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
                 g_cfg.shading, g_cfg.monitor_fx, g_cfg.edge_mode, g_cfg.aa_mode, g_cfg.ssao, g_cfg.remaster,
                 g_cfg.hd_textures, g_cfg.hd_scale, g_cfg.vr_enable, g_cfg.lang[0] ? g_cfg.lang : "en",
                 g_cfg.input_profile[0] ? g_cfg.input_profile : "(legacy)", g_cfg.menu_pause);
+    {
+        size_t used = strlen(info);
+        _snprintf_s(info + used, sizeof info - used, _TRUNCATE,
+                    "clip: %s, %u bytes, %ux%u, %s; client image only, no audio\r\n",
+                    p->clip == 1 ? "clip.mp4 (H264)" : p->clip == 2 ? "clip_000.jpg..clip_049.jpg (MP4 unavailable)" :
+                    p->clip < 0 ? "failed" : "none", p->clip_bytes, p->clip_w, p->clip_h,
+                    p->clip > 0 ? "5 seconds; see clip.txt" : "not attached");
+    }
     p->repl += sb_feedback_sanitize(info, sizeof info);
     fb_write(p->dir, "info.txt", info);
     {

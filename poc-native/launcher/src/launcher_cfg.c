@@ -28,6 +28,7 @@ void lcfg_defaults(launcher_settings_t *s)
     s->width = 2560;
     s->height = 1080;
     s->present_interval = 0;
+    s->fs_interp_match = 1;
     s->fps_limit = 120;
     s->audio = 1;
     s->audio_live = 1;
@@ -155,6 +156,10 @@ const char *lcfg_gfx_key(int k)
 {
     if (k >= 0 && k < LSHX_N) { return kShxKey[k]; }
     if (k >= LGK_FX0 && k < LGK_FX0 + LFX_N) { return kFxKey[k - LGK_FX0]; }
+    if (k == LGK_FPS) { return "interp_fps"; }
+    if (k == LGK_RT) { return "rt_scale"; }
+    if (k == LGK_DYN) { return "rt_scale_dyn"; }
+    if (k == LGK_MATCH) { return "fs_interp_match"; }
     return k == LGK_HD ? "hd_textures" : "";
 }
 
@@ -182,6 +187,10 @@ int lcfg_gfx_value(const launcher_settings_t *s, int k)
     if (k >= 0 && k < LSHX_N) { return s->shx[k]; }
     if (k == LGK_FX0 + LFX_INTERP) { return s->fx[LFX_INTERP] != 0; }
     if (k >= LGK_FX0 && k < LGK_FX0 + LFX_N) { return s->fx[k - LGK_FX0]; }
+    if (k == LGK_FPS) { return s->interp_fps; }
+    if (k == LGK_RT) { return s->rt_scale; }
+    if (k == LGK_DYN) { return s->rt_scale_dyn; }
+    if (k == LGK_MATCH) { return s->fs_interp_match; }
     if (k == LGK_HD) { return (s->remaster && s->hd_textures) ? 1 : 0; }
     return 0;
 }
@@ -278,6 +287,10 @@ void lcfg_gfx_apply(launcher_settings_t *s, int preset)
             s->shx[k] = v;
         } else if (k < LGK_FX0 + LFX_N) {
             s->fx[k - LGK_FX0] = v;
+        } else if (k == LGK_FPS) { s->interp_fps = v;
+        } else if (k == LGK_RT) { s->rt_scale = v;
+        } else if (k == LGK_DYN) { s->rt_scale_dyn = v;
+        } else if (k == LGK_MATCH) { s->fs_interp_match = v;
         } else {
             s->remaster = s->hd_textures = v;
         }
@@ -301,7 +314,7 @@ void lcfg_gfx_migrate(launcher_settings_t *s)
 int lcfg_fx_level(const launcher_settings_t *s, lgp_mask_t lock)
 {
     int p, k;
-    for (p = 0; p < SB_GP_NPRE; p++) {
+    for (p = 0; p <= LGP_STRONG; p++) {
         for (k = LGK_FX0; k < LGK_FX0 + LFX_N; k++) {
             if (!(lock & ((lgp_mask_t)1 << k)) &&
                 lcfg_gfx_value(s, k) != lcfg_gfx_preset_value(p, k)) {
@@ -318,7 +331,7 @@ int lcfg_fx_level(const launcher_settings_t *s, lgp_mask_t lock)
 void lcfg_fx_apply_level(launcher_settings_t *s, int level)
 {
     int k;
-    if (level < 0 || level >= SB_GP_NPRE) {
+    if (level < 0 || level > LGP_STRONG) {
         return;
     }
     for (k = LGK_FX0; k < LGK_FX0 + LFX_N; k++) {
@@ -342,6 +355,8 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         s->height = (unsigned)atoi(v);
     } else if (strcmp(k, "present_interval") == 0) {
         s->present_interval = atoi(v);
+    } else if (strcmp(k, "fs_interp_match") == 0) {
+        s->fs_interp_match = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "fps_limit") == 0) {
         s->fps_limit = atoi(v);
     } else if (strcmp(k, "audio") == 0) {
@@ -528,6 +543,7 @@ static const char *kManaged[][2] = {
     { "hdd_root", "game" },         { "game_image", "game" }, /* W150 */
     { "width", "display" },
     { "height", "display" },        { "present_interval", "display" },
+    { "fs_interp_match", "render" },
     { "fps_limit", "display" },     { "audio", "audio" },
     { "audio_live", "audio" },      { "aspect_mode", "render" },
     { "input_profile", "input" },   { "sbc_usb", "input" },
@@ -634,6 +650,8 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = (int)s->height;
         } else if (strcmp(k, "present_interval") == 0) {
             v = s->present_interval;
+        } else if (strcmp(k, "fs_interp_match") == 0) {
+            v = s->fs_interp_match;
         } else if (strcmp(k, "fps_limit") == 0) {
             v = s->fps_limit;
         } else if (strcmp(k, "audio") == 0) {

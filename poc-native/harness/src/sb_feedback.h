@@ -35,6 +35,8 @@ typedef struct {
     char dir[600];       /* Paket-Ordner (lokal) */
     char dir_show[200];  /* bereinigt fuer Anzeige/Log */
     char stamp[32];      /* JJJJMMTT-hhmmss */
+    int clip;           /* 0 none, 1 MP4, 2 JPG fallback, -1 failed */
+    unsigned clip_bytes, clip_w, clip_h;
     int shot_ok;
     unsigned shot_w, shot_h;
     int log_lines;       /* Zeilen in log.txt */

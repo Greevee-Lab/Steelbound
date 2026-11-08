@@ -28,8 +28,8 @@ static volatile LONG g_raw_dx, g_raw_dy;
 static volatile LONG g_raw_n;         /* Anzahl Raw-Pakete (Beleg/Log) */
 static volatile LONG g_focus;         /* logischer Fokus (Nachrichten/Test) */
 static volatile LONG g_test_focus;    /* 1 = Fokus per Test-Hook simuliert */
-/* W196: UI-thread-owned menu latch; all capture paths share the gate. */
-static int g_menu_open, g_menu_had_cap, g_menu_restore;
+/* W208: UI-thread-owned menu gate; g_want is only the manual preference. */
+static int g_menu_open;
 static unsigned imouse_state_u32(unsigned addr)
 {
 #ifdef IMOUSE_SELFTEST
@@ -116,15 +116,16 @@ static void imouse_clip(HWND w)
 
 static void imouse_capture_on(HWND w, const char *why)
 {
-    if (!g_cfg.mouse_capture || !imouse_allowed() || IsIconic(w)) return;
+    if (!g_cfg.mouse_capture || !g_want || !g_focus ||
+        !imouse_allowed() || IsIconic(w)) return;
     imouse_clip(w);
+    if (imouse_is_fg(w)) SetCursor(NULL);
     if (!g_captured) {
         int phys = imouse_is_fg(w);
         InterlockedExchange(&g_raw_dx, 0);
         InterlockedExchange(&g_raw_dy, 0);
         InterlockedExchange(&g_suppress_btn, 1);
         InterlockedExchange(&g_captured, 1);
-        if (phys) SetCursor(NULL);
         HLOG_I("INPUT: Maus gefangen (%s; F10 = freigeben)%s", why,
                phys ? "" : " [logisch: Fenster nicht im Vordergrund, kein ClipCursor]");
     }
@@ -203,25 +204,47 @@ static void imsg_key_msg(WPARAM wp, LPARAM lp, int down)
     else if (!g_kdown[l] && !g_kdown[r]) imsg_set(vk, 0);
 }
 
+/* Registration belongs to the window thread, including focus return. */
+static void imouse_register_raw(HWND w)
+{
+    RAWINPUTDEVICE rid;
+    if (!g_cfg.mouse_capture) return;
+    rid.usUsagePage = 0x01;
+    rid.usUsage = 0x02;
+    rid.dwFlags = 0; /* foreground only, never INPUTSINK */
+    rid.hwndTarget = w;
+    if (!RegisterRawInputDevices(&rid, 1, sizeof rid))
+        HLOG_W("INPUT: Raw Input nicht registriert (GLE=%lu)", GetLastError());
+}
+
+static void imouse_reconcile(HWND w, const char *why)
+{
+    if (w && g_focus && g_want && g_cfg.mouse_capture &&
+        imouse_allowed() && !IsIconic(w))
+        imouse_capture_on(w, why);
+    else
+        imouse_capture_off(why);
+}
+
 static void imouse_focus_gain(HWND w, const char *why)
 {
     if (!g_focus) {
+        imouse_register_raw(w);
         InterlockedExchange(&g_focus, 1);
         HLOG_I("INPUT: Fenster-Fokus erhalten (%s)", why);
     }
-    if (g_want) imouse_capture_on(w, why);
+    imouse_reconcile(w, why);
 }
 
 static void imouse_focus_lose(const char *why)
 {
-    g_menu_restore = 0;
     if (g_focus) {
         InterlockedExchange(&g_focus, 0);
         HLOG_I("INPUT: Fenster-Fokus verloren (%s) -> Tasten geloest", why);
     }
     imsg_clear();
     imouse_capture_off(why);
-    InterlockedExchange(&g_test_focus, 0);
+    /* Test isolation survives loss and subsequent WM_ACTIVATE/SETFOCUS. */
 }
 
 static int imouse_btn_vk(UINT msg)
@@ -254,7 +277,6 @@ static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     /* Reconcile also controller pause requests on the UI thread, before
      * any input or cursor handling. Repeated open calls are idempotent. */
     imouse_menu_capture(sb_ovl_open());
-    if (g_captured && !imouse_allowed()) imouse_capture_off("ausserhalb Mission");
     /* W118 REM-OVERLAY: ESC und (bei offenem Overlay) Tasten/Maustasten
      * gehen ans Overlay, nicht an die Spiel-Eingabe. */
     if (sb_phud_wndproc(w, msg, wp, lp)) return 0; /* W122 PERF-HUD: F2 */
@@ -263,15 +285,7 @@ static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     switch (msg) {
     case IMOUSE_MSG_INIT: {
         if (g_cfg.mouse_capture) {
-            RAWINPUTDEVICE rid;
-            rid.usUsagePage = 0x01; /* Generic Desktop */
-            rid.usUsage = 0x02;     /* Maus */
-            rid.dwFlags = 0;        /* nur im Vordergrund (kein INPUTSINK) */
-            rid.hwndTarget = w;
-            if (!RegisterRawInputDevices(&rid, 1, sizeof rid)) {
-                HLOG_W("INPUT: Raw Input nicht registriert (GLE=%lu)",
-                       GetLastError());
-            }
+            imouse_register_raw(w);
             HLOG_I("INPUT: Maus fangen aktiv (Raw Input; F10 = freigeben/fangen, "
                    "Fokusverlust gibt frei)");
         }
@@ -336,8 +350,10 @@ static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         break;
     case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN:
     case WM_LBUTTONDBLCLK: case WM_RBUTTONDBLCLK: case WM_MBUTTONDBLCLK:
-        if (g_cfg.mouse_capture && g_want && !g_captured && g_focus)
-            imouse_capture_on(w, "Klick");
+        if (g_cfg.mouse_capture && !g_captured && g_focus && imouse_allowed()) {
+            InterlockedExchange(&g_want, 1);
+            imouse_reconcile(w, "Klick");
+        }
         if (g_cfg.input_source == 1) {
             imsg_set(imouse_btn_vk(msg), 1);
             if (g_captured && imouse_is_fg(w)) SetCapture(w); /* Loslassen ausserhalb */
@@ -351,8 +367,10 @@ static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         }
         break;
     case WM_XBUTTONDOWN: case WM_XBUTTONDBLCLK:
-        if (g_cfg.mouse_capture && g_want && !g_captured && g_focus)
-            imouse_capture_on(w, "Klick");
+        if (g_cfg.mouse_capture && !g_captured && g_focus && imouse_allowed()) {
+            InterlockedExchange(&g_want, 1);
+            imouse_reconcile(w, "Klick");
+        }
         if (g_cfg.input_source == 1) {
             imsg_set(imouse_xbtn_vk(wp), 1);
             if (g_captured && imouse_is_fg(w)) SetCapture(w); /* Loslassen ausserhalb */
@@ -371,7 +389,7 @@ static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SYSKEYDOWN:
         if (wp == VK_F10) {
             if (!(lp & 0x40000000)) { /* keine Autowiederholung */
-                if (g_captured) {
+                if (g_want) {
                     InterlockedExchange(&g_want, 0);
                     imouse_capture_off("F10");
                 } else {
@@ -402,12 +420,15 @@ static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
             HLOG_I("MOUSE-MENU: mission=%d menu=%d gefangen=%d sichtbar=%d test=%d physisch=%d",
                 imouse_in_mission(), g_menu_open, (int)g_captured, !g_captured,
                 (int)g_test_focus, imouse_is_fg(w));
+            HLOG_I("MOUSE-FOCUS: fokus=%d wunsch=%d mission=%d menu=%d gefangen=%d test=%d physisch=%d",
+                (int)g_focus, (int)g_want, imouse_in_mission(), g_menu_open,
+                (int)g_captured, (int)g_test_focus, imouse_is_fg(w));
             return g_captured;
         }
         if (g_cfg.input_test_hook && msg == IMOUSE_MSG_TEST_FOCUS) {
             /* Test-Hook: Fokus logisch setzen/nehmen (ohne Vordergrund). */
+            InterlockedExchange(&g_test_focus, 1);
             if (wp) {
-                InterlockedExchange(&g_test_focus, 1);
                 imouse_focus_gain(w, "Test-Fokus");
             } else {
                 imouse_focus_lose("Test-Fokus weg");
@@ -463,43 +484,14 @@ void imouse_release_keys(void)
     if (g_installed == 1) imsg_clear();
 }
 
-/* W203: UI-thread reconciliation. Keep a failed restore pending while the
- * mission loop resumes; repeated notifications must not consume it. */
+/* W208: derive capture from current state, never from capture history.
+ * Called on every window message (including the timer) and menu transition. */
 void imouse_menu_capture(int open)
 {
     open = open != 0;
-    if (open && !g_menu_open) {
-        g_menu_had_cap = g_captured != 0 || g_menu_restore;
-        g_menu_restore = 0;
-        g_menu_open = 1;
-        imouse_release_keys();
-        imouse_capture_off("Menue offen");
-        if (imouse_is_fg(g_mwnd)) {
-            ClipCursor(NULL);
-            SetCursor(LoadCursorA(NULL, IDC_ARROW));
-        }
-    } else if (!open && g_menu_open) {
-        g_menu_open = 0;
-        g_menu_restore = g_menu_had_cap || (g_focus && g_cfg.mouse_capture);
-        g_menu_had_cap = 0;
-    }
-    if (!g_menu_open && g_menu_restore) {
-        /* A missing loop marker can be transient. A different mode/scene
-         * ends this request so it cannot leak into a later mission. */
-        if (!g_focus || !g_cfg.mouse_capture || (!g_cfg.mouse_capture_outside_mission &&
-            (imouse_state_u32(0x2EEA34u) != 4u ||
-             imouse_state_u32(0x6B96DCu) != 0x2Cu))) {
-            g_menu_restore = 0;
-            return;
-        }
-        if (g_mwnd && g_focus && imouse_allowed()) {
-            imouse_capture_on(g_mwnd, "Menue zu");
-            if (g_captured) {
-                InterlockedExchange(&g_want, 1);
-                g_menu_restore = 0;
-            }
-        }
-    }
+    if (open && !g_menu_open) imouse_release_keys();
+    g_menu_open = open;
+    imouse_reconcile(g_mwnd, open ? "Menue offen" : "Soll-Abgleich");
 }
 
 int imsg_key(int vk, unsigned frame)

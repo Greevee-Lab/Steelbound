@@ -178,8 +178,8 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
         hit(&out[8], 8, LR_LVL_INFO);
         strcpy_s(out[8].text, sizeof out[8].text, LT("gui.rule_r8"));
     }
-    /* R9: exklusiv -> Bildrate folgt der Bildwiederholrate */
-    if (s->window_mode == 2) {
+    /* R9: W207 Performance keeps 60 FPS even in exclusive fullscreen. */
+    if (s->window_mode == 2 && s->fs_interp_match && s->interp_fps > 0) {
         hit(&out[9], 9, LR_LVL_INFO);
         strcpy_s(out[9].text, sizeof out[9].text, LT("gui.rule_r9"));
     }

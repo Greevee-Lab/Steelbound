@@ -204,7 +204,7 @@ int gui_page_from_name(const char *v)
 #define ID_PK_CHECKALL 1070
 #define ID_GFX_PACKS 1071  /* Grafik: Sprung zur Seite Packs (Texturdetail) */
 /* W173 LAUNCHER-P4: ein Grafik-Preset (Konzept 3.3/4.3) */
-#define ID_GP0 1080        /* Optionsfelder Original/dezent/stark/Benutzerdefiniert (1080..1083) */
+#define ID_GP0 1180        /* Original/dezent/stark/Performance/Custom (1180..1184) */
 #define ID_GP_RESET 1084   /* Benutzerdefiniert: auf die Basis zuruecksetzen */
 #define ID_GFX_LIGHT 1085  /* Weltbeleuchtung (shading) */
 #define ID_GFX_SHADOW 1086 /* Schatten (shade_shadow) */
@@ -1839,9 +1839,9 @@ static void paint_gfx(void)
             fxbits = 1;
         }
     }
-    card(CX0, CY0, COLW, 292, LT("gui.gfx_preset_card"));
+    card(CX0, CY0, COLW, 340, LT("gui.gfx_preset_card"));
     if (g_rr[20].active) { /* Muster D an der Voreinstellung */
-        L_text(F_TINY, g_rr[20].text2, CX0 + 18, CY0 + 238, COLW - 36, 18, C_ACCENT_HI,
+        L_text(F_TINY, g_rr[20].text2, CX0 + 18, CY0 + 286, COLW - 36, 18, C_ACCENT_HI,
                DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
     { /* Texturen-Zeile (Konzept 4.3): Quelle und Detail, Sprung zu Packs */
@@ -1854,13 +1854,13 @@ static void paint_gfx(void)
             _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.gfx_tex_on"), packs_level_word(),
                         g_tex_src);
         }
-        label(F_TINY, t, CX0 + 18, CY0 + 256, COLW - 36 - 104, 30, C_DIM);
+        label(F_TINY, t, CX0 + 18, CY0 + 304, COLW - 36 - 104, 30, C_DIM);
     }
 
-    card(CX0, CY0 + 304, COLW, 120, LT("gui.gfx_image"));
-    gfx_label("gui.gfx_aa", CX0, CY0 + 348, (dm & ((lgp_mask_t)1 << LSHX_AA)) != 0);
-    label1(F_SMALL, LT("gui.gfx_monitor"), CX0 + 18, CY0 + 384, 100, 30, C_DIM);
-    label(F_SMALL, LT("gui.gfx_esc_hint"), CX0 + 4, CY0 + 432, COLW - 8, 40,
+    card(CX0, CY0 + 352, COLW, 120, LT("gui.gfx_image"));
+    gfx_label("gui.gfx_aa", CX0, CY0 + 396, (dm & ((lgp_mask_t)1 << LSHX_AA)) != 0);
+    label1(F_SMALL, LT("gui.gfx_monitor"), CX0 + 18, CY0 + 432, 100, 30, C_DIM);
+    label(F_SMALL, LT("gui.gfx_esc_hint"), CX0 + 4, CY0 + 480, COLW - 8, 20,
           C_FAINT);
 
     card(COL2, CY0, COLW, 292, LT("gui.gfx_world"));
@@ -5216,7 +5216,7 @@ static void profile_name_from_ui(char *out, size_t cap)
 static int gfx_fps(const launcher_settings_t *s)
 {
     int fps = s->interp_fps > 0 ? s->interp_fps : 30;
-    if (s->window_mode == 2 && s->interp_fps > 0) {
+    if (s->window_mode == 2 && s->fs_interp_match && s->interp_fps > 0) {
         int hz = s->fs_hz > 0 ? s->fs_hz : g_disp_hz;
         if (hz >= 60 && hz <= 240) {
             fps = hz;
@@ -5229,10 +5229,14 @@ static int gfx_fps(const launcher_settings_t *s)
 static void gfx_name(int p, const launcher_settings_t *s, char *out, size_t cap)
 {
     if (p == LGP_ORIGINAL) {
-        _snprintf_s(out, cap, _TRUNCATE, LT("gui.gfx_p_orig"), gfx_fps(s));
+        launcher_settings_t original = *s;
+        original.interp_fps = 120;
+        original.fs_interp_match = 1;
+        _snprintf_s(out, cap, _TRUNCATE, LT("gui.gfx_p_orig"), gfx_fps(&original));
     } else {
         strcpy_s(out, cap, LT(p == LGP_SUBTLE ? "gui.gfx_p_subtle"
-                              : p == LGP_STRONG ? "gui.gfx_p_strong" : "gui.gfx_p_custom"));
+                              : p == LGP_STRONG ? "gui.gfx_p_strong"
+                              : p == LGP_PERFORMANCE ? "gui.gfx_p_performance" : "gui.gfx_p_custom"));
     }
 }
 
@@ -5282,19 +5286,25 @@ static void gfx_sync_ui(void)
         sel = ComboBox_GetCurSel(ctl(ID_WINMODE));
         cur.window_mode = (sel >= 0 && sel <= 2) ? sel : cur.window_mode;
     }
+    g_gfx.interp_fps = cur.interp_fps;
+    { int sel = ComboBox_GetCurSel(ctl(ID_RTSCALE));
+      g_gfx.rt_scale_dyn = sel == 0;
+      g_gfx.rt_scale = sel >= 2 && sel <= 5 ? sel - 1 : 0;
+    }
+    p = lcfg_gfx_preset(&g_gfx, lock);
     g_updating++;
-    for (i = 0; i < 4; i++) {
-        if (i < 3) {
+    for (i = 0; i <= LGP_CUSTOM; i++) {
+        if (i < LGP_CUSTOM) {
             gfx_name(i, &cur, n, sizeof n);
             _snprintf_s(t, sizeof t, _TRUNCATE, "%s\n%s", n,
                         LT(i == 0 ? "gui.gfx_p_orig_txt" : i == 1 ? "gui.gfx_p_subtle_txt"
-                                                                 : "gui.gfx_p_strong_txt"));
+                                                                 : i == 2 ? "gui.gfx_p_strong_txt" : "gui.gfx_p_performance_txt"));
         } else if (p == LGP_CUSTOM) {
             int base = lcfg_gfx_base(&g_gfx, lock), k, hidden = 0;
             lcfg_gfx_diff(&g_gfx, base, lock, &dm);
             for (k = 0; k < LGK_N; k++) { /* Abweichungen ohne Element (ESC-Feinregler) */
                 if ((dm & ((lgp_mask_t)1 << k)) && k != LSHX_SHADING && k != LSHX_SHADOW &&
-                    k != LSHX_SOFT && k != LSHX_AA && k != LGK_HD &&
+                    k != LSHX_SOFT && k != LSHX_AA && k != LGK_HD && k < LGK_FPS &&
                     !(k >= LGK_FX0 && k < LGK_FX0 + LFX_N)) {
                     hidden++;
                 }
@@ -5331,7 +5341,7 @@ static void gfx_sync_ui(void)
         if (ComboBox_GetCount(c) < want) {
             combo_add(c, LT("gui.gfx_fx_custom"));
         }
-        ComboBox_SetCurSel(c, fl);
+        ComboBox_SetCurSel(c, fl == LGP_CUSTOM ? 3 : fl);
     }
     ComboBox_SetCurSel(ctl(ID_GFX_TEX), lcfg_gfx_value(&g_gfx, LGK_HD) ? 1 : 0);
     ComboBox_SetCurSel(ctl(ID_AAMODE), (aa >= 0 && aa <= 3) ? aa : 0);
@@ -5344,6 +5354,7 @@ static void gfx_to_settings(launcher_settings_t *s)
 {
     memcpy(s->shx, g_gfx.shx, sizeof s->shx);
     memcpy(s->fx, g_gfx.fx, sizeof s->fx);
+    s->fs_interp_match = g_gfx.fs_interp_match;
     s->remaster = g_gfx.remaster;
     s->hd_textures = g_gfx.hd_textures;
     /* W114: nur 2x/4x; die Freigaben aus der Bewertung gelten bei beiden */
@@ -10970,25 +10981,25 @@ static void build_controls(void)
     combo_add(c, "4");
     ComboBox_SetCurSel(c, 0);
 
-    /* --- Grafik (W173 LAUNCHER-P4, Konzept 4.3): links Preset (vier
+    /* --- Grafik (W173 LAUNCHER-P4, Konzept 4.3): links Preset (fuenf
      * Optionsfelder, Zuruecksetzen, Sprung Packs) + Bild, rechts Welt + HUD.
      * Anlage-Reihenfolge = Tab-Reihenfolge (links oben -> unten, dann rechts). --- */
-    for (i = 0; i < 4; i++) {
+    for (i = 0; i <= LGP_CUSTOM; i++) {
         mk(w, K_RADIO, ID_GP0 + i, P_GFX, CX0 + 18, CY0 + 42 + i * 48,
-           i == 3 ? COLW - 36 - 92 : COLW - 36, 48, "", 0);
+           i == LGP_CUSTOM ? COLW - 36 - 92 : COLW - 36, 48, "", 0);
     }
-    mk(w, K_BTN, ID_GP_RESET, P_GFX, CX0 + COLW - 18 - 84, CY0 + 42 + 3 * 48 + 4, 84, 26,
+    mk(w, K_BTN, ID_GP_RESET, P_GFX, CX0 + COLW - 18 - 84, CY0 + 42 + LGP_CUSTOM * 48 + 4, 84, 26,
        LT("gui.gfx_reset"), 0);
-    mk(w, K_BTN, ID_GFX_PACKS, P_GFX, CX0 + COLW - 18 - 96, CY0 + 254, 96, 26,
+    mk(w, K_BTN, ID_GFX_PACKS, P_GFX, CX0 + COLW - 18 - 96, CY0 + 302, 96, 26,
        LT("gui.gfx_to_packs"), 0);
-    c = mk(w, K_COMBO, ID_AAMODE, P_GFX, CX0 + 120, CY0 + 348, COLW - 138,
+    c = mk(w, K_COMBO, ID_AAMODE, P_GFX, CX0 + 120, CY0 + 396, COLW - 138,
            30, "", 0); /* W131: aa_mode 0..3 */
     combo_add(c, LT("gui.aa_off"));
     combo_add(c, LT("gui.aa_final"));
     combo_add(c, LT("gui.aa_world"));
     combo_add(c, LT("gui.aa_both"));
     ComboBox_SetCurSel(c, 0);
-    c = mk(w, K_COMBO, ID_MONFX, P_GFX, CX0 + 120, CY0 + 384, COLW - 138,
+    c = mk(w, K_COMBO, ID_MONFX, P_GFX, CX0 + 120, CY0 + 432, COLW - 138,
            30, "", 0); /* W105: Reihenfolge = kMonFx */
     combo_add(c, LT("gui.monfx_orig"));
     combo_add(c, LT("gui.monfx_grain"));
@@ -11345,6 +11356,7 @@ static void on_command_inner(int id, int code)
     case ID_GP0: /* W173 LAUNCHER-P4: Grafik-Preset waehlen (setzt alle Optik-Werte) */
     case ID_GP0 + 1:
     case ID_GP0 + 2:
+    case ID_GP0 + LGP_PERFORMANCE:
     case ID_GP_RESET: {
         lgp_mask_t lock = gfx_lock_now();
         int was = lcfg_gfx_preset(&g_gfx, lock);
@@ -11360,6 +11372,8 @@ static void on_command_inner(int id, int code)
             break; /* R14: Rueckfrage "Nein" -> eigene Werte bleiben */
         }
         lcfg_gfx_apply(&g_gfx, sel);
+        ComboBox_SetCurSel(ctl(ID_IPFPS), g_gfx.interp_fps == 60 ? 1 : 2);
+        ComboBox_SetCurSel(ctl(ID_RTSCALE), g_gfx.rt_scale + 1);
         gfx_sync_ui();
         gfx_name(sel, &before, nm, sizeof nm);
         if (was == LGP_CUSTOM) { /* Muster C: eigene Werte ersetzt -> Rueckgaengig */
@@ -11373,8 +11387,8 @@ static void on_command_inner(int id, int code)
         redraw_all();
         break;
     }
-    case ID_GP0 + 3: /* Benutzerdefiniert entsteht durch Einzelaenderung */
-        if (!ui_checked(ID_GP0 + 3)) {
+    case ID_GP0 + LGP_CUSTOM: /* Benutzerdefiniert entsteht durch Einzelaenderung */
+        if (!ui_checked(ID_GP0 + LGP_CUSTOM)) {
             set_status(LT("gui.gfx_p_custom_off"));
         }
         break;
@@ -11397,7 +11411,7 @@ static void on_command_inner(int id, int code)
             case ID_GFX_LIGHT: g_gfx.shx[LSHX_SHADING] = sel == 0 ? 1 : 0; break;
             case ID_GFX_SHADOW: g_gfx.shx[LSHX_SHADOW] = sel ? 1 : 0; break;
             case ID_GFX_SOFT: g_gfx.shx[LSHX_SOFT] = sel ? 1 : 0; break;
-            case ID_GFX_FX: lcfg_fx_apply_level(&g_gfx, sel); break; /* 3 = eigene Werte bleiben */
+            case ID_GFX_FX: if (sel < 3) { lcfg_fx_apply_level(&g_gfx, sel); } break; /* 3 = eigene Werte bleiben */
             case ID_GFX_TEX: g_gfx.remaster = g_gfx.hd_textures = sel ? 1 : 0; break;
             default: if (sel <= 3) { g_gfx.shx[LSHX_AA] = sel; } break;
             }
@@ -11994,6 +12008,7 @@ static const struct {
     int diag;
     int pksel; /* W172: gewaehltes Pack (Shots der Packs-Seite), 0 = erstes */
 } kStates[] = {
+    { "performance", "", 0 }, /* W207: shared preset below */
     { "nodata", "game_image=;xbe_path=;media_root=", 0 },
     { "fullscreen", "window_mode=2;fs_hz=144;interp_fps=120", 0 },
     { "window43", "window_mode=0;width=1600;height=1200", 0 },
@@ -12026,6 +12041,7 @@ static void gui_apply_state(const char *name)
     for (i = 0; i < (int)(sizeof kStates / sizeof kStates[0]); i++) {
         if (strcmp(name, kStates[i].name) == 0) {
             lcfg_apply_set(&g_s, kStates[i].set);
+            if (strcmp(name, "performance") == 0) { lcfg_gfx_apply(&g_s, LGP_PERFORMANCE); }
             if (kStates[i].diag) {
                 g_diag_open = 1;
             }
@@ -12649,6 +12665,31 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     ui_gettext(ctl(ID_GP0), t, sizeof t);
                     ok = strstr(t, "144 FPS") != NULL;
                     if (!ok) { printf("     (22: Name '%s')\n", t); }
+                }
+                if (ok) { /* W207: actual radio -> display controls -> save model. */
+                    on_command(ID_GP0 + LGP_PERFORMANCE, BN_CLICKED);
+                    lcfg_defaults(&b);
+                    ui_to_settings(&b);
+                    ok = ui_checked(ID_GP0 + LGP_PERFORMANCE) && b.interp_fps == 60 &&
+                         b.rt_scale == 1 && !b.rt_scale_dyn && !b.fs_interp_match &&
+                         lcfg_gfx_preset(&b, 0) == LGP_PERFORMANCE && !g_rr[9].active;
+                    ComboBox_SetCurSel(ctl(ID_IPFPS), 2);
+                    ui_apply_rules();
+                    ui_to_settings(&b);
+                    ok = ok && ui_checked(ID_GP0 + LGP_CUSTOM) &&
+                         lcfg_gfx_base(&b, 0) == LGP_PERFORMANCE;
+                    on_command(ID_GP_RESET, BN_CLICKED);
+                    ui_to_settings(&b);
+                    ok = ok && b.interp_fps == 60 && ui_checked(ID_GP0 + LGP_PERFORMANCE);
+                    ComboBox_SetCurSel(ctl(ID_RTSCALE), 4);
+                    ui_apply_rules();
+                    ui_to_settings(&b);
+                    ok = ok && b.rt_scale == 3 && ui_checked(ID_GP0 + LGP_CUSTOM);
+                    on_command(ID_GP_RESET, BN_CLICKED);
+                    on_command(ID_GP0 + LGP_ORIGINAL, BN_CLICKED);
+                    ui_to_settings(&b);
+                    ok = ok && b.interp_fps == 120 && b.rt_scale == 0 && b.fs_interp_match &&
+                         ui_checked(ID_GP0 + LGP_ORIGINAL);
                 }
                 if (!ok) { printf("     (22: Grafik-Preset falsch)\n"); }
                 ui_from_settings(&a);

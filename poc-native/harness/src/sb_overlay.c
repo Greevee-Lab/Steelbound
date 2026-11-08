@@ -18,6 +18,7 @@
  * gestreckt). Lage: oben links in der 4:3-Box (sb_aspect_box), also auch
  * im Ultrawide eingepasst. */
 #include "render_int.h"
+#include "sb_gfxpreset.h"
 #include "render_qa.h"
 #include "sb_lang.h" /* W142 L10N */
 #include "sb_overlay.h"
@@ -28,6 +29,7 @@
 #include "render_fx_rem.h" /* W133 REM-FX: Seite "Effekte" */
 #include "vr.h" /* W134 VR-PROTO: Seite "VR" */
 #include "sb_pause.h" /* W188 GAME-MENU: Pause */
+#include "render_clip.h"
 #include "sb_feedback.h" /* W188 GAME-MENU: Feedback-Paket */
 #include "input_map.h" /* W188 GAME-MENU: Gamepad im Menue (imap_pad_poll) */
 #include "kernel_hle.h" /* W190 SAVE-LOCK: krnl_savelock_* */
@@ -556,12 +558,18 @@ static void ov_change(int i, int dir)
     }
     case OI_PRESET: { /* W131, W173 LAUNCHER-P4: einheitliches Grafik-Preset Original -> dezent -> stark
                        * (Shader + Effekte + HD-Texturen, sb_gfxpreset.h; Effect-Pack-Schluessel bleiben) */
-        int q = sb_gfx_preset_match(), q0 = q, hd;
-        if (q < 0) { q = dir > 0 ? -1 : 3; }
-        q = ov_clamp(q + dir, 0, 2);
+        int q = sb_gfx_preset_match_for(g_ov_fps, g_ov_rts >= 0 ? g_ov_rts : g_cfg.rt_scale), q0 = q, hd;
+        if (q < 0) { q = dir > 0 ? -1 : SB_GP_NPRE; }
+        q = ov_clamp(q + dir, 0, SB_GP_NPRE - 1);
         if (q == q0) { return; }
         sb_gfx_part_apply(q, SB_GFX_ALL);
-        hd = q > 0;
+        g_ov_fps = kSbGfxPreset[SB_GP_FPS].v[q];
+        g_ov_fps_pend = 1; /* W200: commit under context lock after pause */
+        g_ov_rts = kSbGfxPreset[SB_GP_RT].v[q];
+        g_ov_dyn = g_cfg.rt_scale_dyn = kSbGfxPreset[SB_GP_DYN].v[q];
+        g_cfg.fs_interp_match = kSbGfxPreset[SB_GP_MATCH].v[q];
+        ov_status_key(q == SB_GP_PERFORMANCE ? "ovl.st_performance" : "ovl.st_rt");
+        hd = kSbGfxPreset[SB_GP_HD].v[q];
         if (hd != (ov_hd_on() ? 1 : 0)) {
             if (g_ov_avail) {
                 ov_hd_apply(hd, ov_hd_scale(), "Preset:");
@@ -625,6 +633,7 @@ static void ov_change(int i, int dir)
     case OI_CPANINI: /* W191 UW-PERSP: Panini 0..100 % in 10er-Schritten, live (Nachbearbeitung je gezeigtem Bild) */
         g_cfg.cockpit_panini = ov_clamp((g_cfg.cockpit_panini / 10) * 10 + dir * 10, 0, 100);
         HLOG_I("OVERLAY: cockpit_panini -> %d (f=%u)", g_cfg.cockpit_panini, g_present_no);
+        sb_render_pause_dirty(); /* W209: redraw on either camera slider */
         ov_status_key(g_cfg.vr_enable ? "ovl.st_cpersp_vr" : "ovl.st_cpanini");
         break;
     case OI_LABEL: /* W153: wirkt ab Neustart (Patch beim Start) */
@@ -802,6 +811,7 @@ static void ov_change(int i, int dir)
 /* ------------------------------------------------------------------ */
 typedef struct { const char *key, *sec; } ov_key_t;
 static const ov_key_t kOvKeys[] = {
+    { "fs_interp_match", "render" },
     { "interp_fps", "render" },     { "shading", "render" },
     { "monitor_fx", "render" },     { "monitor_grain", "render" },
     { "monitor_glitch", "render" }, { "edge_mode", "render" },
@@ -867,7 +877,8 @@ static void ov_key_value(const char *k, char *out, size_t cap)
         return;
     }
     if (strcmp(k, "rt_scale_dyn") == 0) { v = g_cfg.rt_scale_dyn ? 1 : 0; } /* W148 */
-    if (strcmp(k, "interp_fps") == 0) { v = g_ov_fps; }
+    if (strcmp(k, "fs_interp_match") == 0) { v = g_cfg.fs_interp_match; }
+    else if (strcmp(k, "interp_fps") == 0) { v = g_ov_fps; }
     else if (strcmp(k, "shading") == 0) { v = g_cfg.shading; }
     else if (strcmp(k, "monitor_fx") == 0) { v = g_cfg.monitor_fx; }
     else if (strcmp(k, "monitor_grain") == 0) { v = g_cfg.monitor_grain; }
@@ -1199,7 +1210,7 @@ static int ov_scr_rows(void)
     case SC_PAUSED: return 2;
     case SC_FBKIND: return 3;
     case SC_FBTEXT: return 1;
-    case SC_FBREVIEW: return 3;
+    case SC_FBREVIEW: return 5;
     case SC_PHOTO: return ov_ph_nrows(); /* W195 */
     default: return ov_nrows();
     }
@@ -1289,6 +1300,20 @@ static void ov_activate(int k)
         if (k == 0 || k == 1) {
             sb_feedback_open(&g_fb_pkg, sb_render_hwnd(), k == 0 ? 1 : 2, g_cfg.overlay_test[0] != 0);
             ov_status_key(k == 0 ? "ovl.st_fb_opened" : "ovl.st_fb_folder");
+        } else if (k == 3) {
+            sb_ctx_enter();
+            if (sb_clip_start(g_fb_pkg.dir)) {
+                g_fb_pkg.clip = 0;
+                g_fb_pkg.clip_bytes = g_fb_pkg.clip_w = g_fb_pkg.clip_h = 0;
+                ov_close("Clip aufnehmen");
+                sb_pause_request(0, "Clip aufnehmen");
+            } else { ov_status_key("ovl.clip_fail"); }
+            sb_ctx_leave();
+        } else if (k == 4) {
+            sb_clip_remove(g_fb_pkg.dir);
+            g_fb_pkg.clip = 0; g_fb_pkg.clip_bytes = g_fb_pkg.clip_w = g_fb_pkg.clip_h = 0;
+            sb_feedback_finish(&g_fb_pkg, g_fb_text);
+            HLOG_I("CLIP: removed");
         } else {
             ov_screen(SC_MENU, MI_FEEDBACK);
         }
@@ -2285,6 +2310,20 @@ static void ov_frame(unsigned n)
 {
     int open;
     ov_test_tick(n);
+    if (sb_clip_active()) {
+        int result;
+        sb_ctx_enter();
+        result = sb_clip_poll(&g_fb_pkg.clip_bytes, &g_fb_pkg.clip_w, &g_fb_pkg.clip_h);
+        sb_ctx_leave();
+        if (result) {
+            g_fb_pkg.clip = result;
+            sb_feedback_finish(&g_fb_pkg, g_fb_text);
+            InterlockedExchange(&g_ov_req, SC_FBREVIEW);
+            InterlockedExchange(&g_ov_open, 1);
+            g_ov_was_open = 0;
+            HLOG_I("CLIP: return feedback result=%d", result);
+        } else if (g_ov_open) { ov_close("Clip laeuft"); }
+    }
     open = g_ov_open != 0;
     if (open != g_ov_was_open) {
         g_ov_was_open = open;
@@ -2620,8 +2659,8 @@ static void ov_value(int i, wchar_t *o, size_t cap)
     }
     case OI_PRESET: { /* W131, W143; W173 LAUNCHER-P4: einheitliches Preset, der Standard heisst nach
                        * der echten Bildrate "Original (HD) - <n> FPS" (PO 7.11.; 30 = Original) */
-        static const char *const pn[3] = { "ovl.v_orig_hd", "ovl.v_subtle", "ovl.v_strong" };
-        int q = sb_gfx_preset_match();
+        static const char *const pn[SB_GP_NPRE] = { "ovl.v_orig_hd", "ovl.v_subtle", "ovl.v_strong", "ovl.v_performance" };
+        int q = sb_gfx_preset_match_for(g_ov_fps, g_ov_rts >= 0 ? g_ov_rts : g_cfg.rt_scale);
         if (q == 0) {
             char nb[96];
             _snprintf_s(nb, sizeof nb, _TRUNCATE, LT("ovl.v_orig_hd"), g_ov_fps > 0 ? g_ov_fps : 30);
@@ -2694,7 +2733,7 @@ static int ov_scr_lines(void)
     case SC_PAUSED: return 1;
     case SC_FBKIND: return 2;
     case SC_FBTEXT: return 3;
-    case SC_FBREVIEW: return 7;
+    case SC_FBREVIEW: return 8;
     default: return 0;
     }
 }
@@ -2839,7 +2878,7 @@ static void ov_paint_menu(void)
         { "ovl.m_continue", "ovl.p_menu" },
         { "ovl.fb_bug", "ovl.fb_idea", "ovl.fb_back" },
         { "ovl.fb_create" },
-        { "ovl.fb_open", "ovl.fb_folder", "ovl.fb_done" },
+        { "ovl.fb_open", "ovl.fb_folder", "ovl.fb_done", "ovl.clip_record", "ovl.clip_remove" },
     };
     tag[0] = 0;
     for (k = 0; k < 8; k++) { ln[k][0] = 0; lc[k] = OV_C_TXT; }
@@ -2899,6 +2938,11 @@ static void ov_paint_menu(void)
         ov_wkey(ln[5], 128, "ovl.fb_c_text");
         ov_wkey(ln[6], 128, "ovl.fb_c_not");
         lc[6] = OV_C_DIM;
+        if (g_fb_pkg.clip > 0) {
+            _snprintf_s(nb, sizeof nb, _TRUNCATE, LT(g_fb_pkg.clip == 1 ? "ovl.clip_attached" : "ovl.clip_jpg"),
+                        (double)g_fb_pkg.clip_bytes / 1000000.0);
+            ov_wu8(ln[7], 128, nb);
+        } else { ov_wkey(ln[7], 128, g_fb_pkg.clip < 0 ? "ovl.clip_fail" : "ovl.clip_none"); }
         ov_wkey(hint, 96, "ovl.hint_back");
         break;
     }
@@ -3646,6 +3690,22 @@ void sb_ovl_draw(ID3D11RenderTargetView *rtv, int save)
 {
     unsigned bx, by, bw, bh, pw, ph, x0, y0;
     static unsigned lk[4];
+    if (sb_clip_active() && rtv && g_ctx) {
+        wchar_t rec[64];
+        g_ovf = 1.5f;
+        if (!ov_d3d_init() || !ov_gdi_size(152, 32)) { return; }
+        ov_fill(0, 0, 152, 32, RGB(24, 8, 8));
+        if (sb_clip_seconds()) { _snwprintf_s(rec, 64, _TRUNCATE, L"\x25CF REC %d", sb_clip_seconds()); }
+        else { ov_wkey(rec, 64, "ovl.clip_finishing"); }
+        ov_text(8, 5, rec, RGB(255, 100, 100), 0);
+        sb_ovl_ui_finish(ov_bits, 152, 32, 1.5f);
+        if (ov_tex_upload()) {
+            if (save) { sb_ovl_save_take(&ov_bbsave, rtv, 16, 16, 152, 32); }
+            sb_ovl_quad(rtv, ov_srv, 16, 16, 152, 32);
+        }
+        g_ov_dirty = 1;
+        return;
+    }
     if (!g_cfg.overlay || !g_ov_open || !rtv || !g_ctx) { return; }
     if (g_ov_peek) { return; } /* W193: Menue ausgeblendet (Taste gehalten), bleibt offen */
     if (!ov_d3d_init()) { return; }

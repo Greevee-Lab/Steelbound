@@ -465,6 +465,8 @@ void hooks_install(void)
     patch_jmp(0x18D97Fu, hook_ReadFile, "XAPI-ReadFile(sync)");
     patch_jmp(0x191250u, hook_PerfFrequency, "XAPI-PerfFreq(TSC)");
     if (g_cfg.bink_pause) { patch_jmp(0x19123Fu, hook_PerfCounter, "XAPI-PerfCounter(Pause)"); }
+    if (g_cfg.audio_bink_delay && g_cfg.audio_live == 1)
+        patch_call(0x46E7Du, hook_BinkWait, "BinkWait(OutputStart)");
     patch_jmp(0x108720u, hook_108720, "108720(NULL-Check)");
     patch_jmp(0x1086C0u, hook_1086C0, "1086C0(No-Op)");
     patch_jmp(0x108740u, hook_108740, "108740(No-Op)");

@@ -155,6 +155,7 @@ u32 __stdcall hook_GPU_readywait(void);
 u32 __stdcall hook_GPU_readywait2(void);
 u32 __stdcall hook_PerfFrequency(u32 out);
 u32 __stdcall hook_PerfCounter(u32 out);
+u32 __stdcall hook_BinkWait(u32 movie);
 u32 __stdcall hook_DS_CreateSoundStream(u32 a1, u32 ppStream, u32 a3, u32 a4);
 u32 __stdcall hook_DS_BufferStop(u32 buf);
 u32 __stdcall hook_DS_BufferGetStatus(u32 buf, u32 pStatus);

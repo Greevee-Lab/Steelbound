@@ -179,6 +179,10 @@ typedef struct {
     int audio_voice_diag;  /* W95: DIAG(SFXN) aktive Puffer-Stimmen je Sekunde (Zahl/Loop/stumm/Alter + aelteste), 0 = aus */
     int audio_sfx_diag;    /* W89: DIAG(SFX) Ereignis-Spur der Puffer-Stimmen (ohne Bink), Wert = max. Zeilen, 0 = aus */
     int audio_wrap_diag;   /* W83: DIAG(BINKWRAP) Ring-Wrap-Unlocks (Lock-Puffer vs. SetBufferData-Speicher), 0 = aus */
+    int audio_sync_diag;   /* W205: 1=ring/frame/device trace, 2=also mute device only, 0=off */
+    int audio_bink_sync;   /* W205: overwrite the initial Bink ring before Play */
+    int audio_bink_delay;  /* W205: align the movie start with device output */
+    int audio_low_latency; /* W205: WASAPI short queue, default 1 */
     int audio_process_async; /* W34: 1 = Process async (PENDING + Echtzeit-Vollzug, Xbox), 0 = alt (sync + Sleep(10)x50-Backpressure -> 5,1-s-Ladepause) */
     int tex_swz06; /* FIX(W38): swizzled 32-Bit (Code 0x06, z.B. 128x128 Wash-Textur) per dokumentiertem NV2A-Morton-Swizzle laden (0=aus, 1=an, 2=an+Einmal-Dump) */
     int lin_tex_rect; /* A2: Lineartextur = Texel-Koords, /(w,h) auch ohne RHW */

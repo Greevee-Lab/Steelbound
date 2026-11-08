@@ -83,6 +83,7 @@ void audio_note_eg(au32 v, au32 pDesc);
 
 /* Statistik fuers Log (einmalig pro Lauf bei Bedarf). */
 void audio_log_stats(void);
+au32 audio_output_latency_ms(void);
 
 #ifdef __cplusplus
 }

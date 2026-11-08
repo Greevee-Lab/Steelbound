@@ -3,6 +3,7 @@
  * W68 SPLIT: 1:1 aus xdk_hooks.c verschoben. */
 #include "hooks_int.h"
 #include "hlock.h"
+#include "audio_out.h"
 #include "sb_perfhud.h" /* W122 PERF-HUD */
 
 /* TURBO bis Spielmodus (A1): 1 solange u32 an 0x2EEA34 (Spielmodus: 1 Logos,
@@ -349,4 +350,32 @@ u32 __stdcall hook_PerfCounter(u32 out)
     uint64_t now = sb_tsc_now();
     *(uint64_t *)(uintptr_t)out = now; /* XAPI: gueltiger Ausgabezeiger */
     return 1;
+}
+
+/* W205: the original BinkWait uses a private millisecond start epoch at
+ * +0x280, initialized by 0x2402C0. Align that epoch once with the measured
+ * output queue. This delays the first frame interval only; neither guest
+ * clocks nor tick rate nor the subsequent movie cadence are changed.
+ * Keep the original wait/refill code and the W192 pause clock intact. */
+u32 __stdcall hook_BinkWait(u32 movie)
+{
+    typedef u32 (__stdcall *wait_fn)(u32);
+    static u32 previous, previous_frame;
+    static int aligned;
+    volatile u32 *b = (volatile u32 *)(uintptr_t)movie;
+    u32 result = ((wait_fn)(uintptr_t)0x241430u)(movie);
+    if (movie && b[0] && b[1] && b[3] <= b[2]) {
+        if (movie != previous || (b[3] <= 1u && previous_frame > 1u)) aligned = 0;
+        previous = movie;
+        previous_frame = b[3];
+        if (!aligned && b[0x280 / 4] && b[0x2F0 / 4]) {
+            u32 delay = audio_output_latency_ms();
+            b[0x280 / 4] += delay;
+            aligned = 1;
+            if (g_cfg.audio_sync_diag)
+                HLOG_I("AVSYNC movie-start: frame=%u delay_ms=%u", b[3], delay);
+            result = ((wait_fn)(uintptr_t)0x241430u)(movie);
+        }
+    }
+    return result;
 }

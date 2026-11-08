@@ -250,7 +250,7 @@ static void au_hdr_to_game(int token)
 }
 
 /* ---------- WASAPI-Live-Ausgabe (A7B, audio_live=1) ----------
- * Shared-Mode-Renderer auf eigenem Thread: der Mixer schreibt 20-ms-Chunks
+ * Shared-Mode-Renderer auf eigenem Thread: der Mixer schreibt Audiobloecke
  * in einen Ringpuffer (eigene Sperre, nie blockierend, bei Ueberlauf wird
  * Aeltestes verworfen = live-synchron), der WASAPI-Thread resampelt
  * 44100 -> Geraete-Rate (linear) und fuettert den Shared-Puffer per Polling
@@ -260,9 +260,17 @@ static void au_hdr_to_game(int token)
 #define RING_FRAMES (MIXRATE * RING_SEC)
 static int16_t *g_ring;
 static LONG g_ring_rd, g_ring_wr, g_ring_n;
+static uint64_t g_ring_total;
 static CRITICAL_SECTION g_ring_cs;
 static int g_ring_init;
 static HANDLE g_wa_thread;
+static volatile LONG g_wa_ready;
+static volatile LONG g_output_latency_ms;
+
+au32 audio_output_latency_ms(void)
+{
+    return (au32)InterlockedCompareExchange(&g_output_latency_ms, 0, 0);
+}
 
 static void ring_init(void)
 {
@@ -273,15 +281,15 @@ static void ring_init(void)
     }
 }
 
-/* MIXCHUNK Frames anhaengen; bei Ueberlauf aelteste verwerfen. */
-static void ring_write(const int16_t *s)
+/* Append one mixer block; the low-latency path uses shorter blocks. */
+static void ring_write(const int16_t *s, au32 n)
 {
-    LONG i;
+    au32 i;
     ring_init();
     if (!g_ring)
         return;
     EnterCriticalSection(&g_ring_cs);
-    for (i = 0; i < MIXCHUNK; i++) {
+    for (i = 0; i < n; i++) {
         if (g_ring_n >= RING_FRAMES) {
             if (++g_ring_rd >= RING_FRAMES)
                 g_ring_rd = 0;
@@ -293,6 +301,7 @@ static void ring_write(const int16_t *s)
             g_ring_wr = 0;
         g_ring_n++;
     }
+    g_ring_total += n;
     LeaveCriticalSection(&g_ring_cs);
 }
 
@@ -313,6 +322,26 @@ static LONG ring_read(int16_t *dst, LONG n)
     }
     LeaveCriticalSection(&g_ring_cs);
     return got;
+}
+
+static LONG ring_count(void)
+{
+    LONG n;
+    if (!g_ring_init || !g_ring)
+        return 0;
+    EnterCriticalSection(&g_ring_cs);
+    n = g_ring_n;
+    LeaveCriticalSection(&g_ring_cs);
+    return n;
+}
+
+static uint64_t ring_consumed(void)
+{
+    uint64_t n;
+    EnterCriticalSection(&g_ring_cs);
+    n = g_ring_total - g_ring_n;
+    LeaveCriticalSection(&g_ring_cs);
+    return n;
 }
 
 /* PKEY_Device_FriendlyName = {A45C254E-DF1C-4EFD-8020-67D146A850E0}, PID 14
@@ -337,6 +366,8 @@ static const GUID kIID_AudioCli = { 0x1cb9ad4c, 0xdbfa, 0x4c32,
 static const GUID kIID_RenderCli = { 0xf294acfc, 0x3146, 0x4483,
                                      { 0xa7, 0xbf, 0xad, 0xdc, 0xa7, 0xc2,
                                        0x60, 0xe2 } };
+static const GUID kIID_AudioClock = { 0xcd63314f, 0x3fba, 0x4a1b,
+                                    { 0x81, 0x2c, 0xef, 0x96, 0x35, 0x87, 0x28, 0xe7 } };
 static const GUID kSubFloat = { 0x00000003, 0x0000, 0x0010,
                                 { 0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b,
                                   0x71 } };
@@ -408,9 +439,13 @@ static void wa_put_frame(BYTE **pp, float l, float r, WORD ch, WORD bits,
 static DWORD WINAPI au_wa_thread(LPVOID p)
 {
     HRESULT hr;
+    LARGE_INTEGER diag_freq;
     int coinited = 0;
     static au32 wano; /* Drossel fuer "kein Geraet" */
     (void)p;
+    QueryPerformanceFrequency(&diag_freq);
+    if (g_cfg.audio_low_latency)
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
     __try {
         { /* A7B: Header-Fenster (COM validiert Image-Header) */
             int htok0 = au_hdr_to_loader();
@@ -430,6 +465,13 @@ static DWORD WINAPI au_wa_thread(LPVOID p)
         IMMDevice *dev = NULL;
         IAudioClient *cli = NULL;
         IAudioRenderClient *rc = NULL;
+        IAudioClock *clock = NULL;
+        UINT64 clock_freq = 0, submitted = 0;
+        int started = 0;
+        au32 device_gap_polls = 0;
+        double device_gap_max_ms = 0.0;
+        LONGLONG empty_since = 0;
+        double empty_max_ms = 0.0;
         WAVEFORMATEX *mix = NULL;
         UINT32 rate = 0, bufFrames = 0;
         WORD ch = 0, bits = 0;
@@ -502,7 +544,7 @@ static DWORD WINAPI au_wa_thread(LPVOID p)
             continue;
         }
         hr = cli->lpVtbl->Initialize(cli, AUDCLNT_SHAREMODE_SHARED, 0,
-                                     2000000, 0, mix, NULL);
+                                     g_cfg.audio_low_latency ? 0 : 2000000, 0, mix, NULL);
         if (FAILED(hr)) {
             HLOG_W("audio: WASAPI Initialize fehlgeschlagen (hr=0x%lX)", hr);
             CoTaskMemFree(mix);
@@ -517,6 +559,9 @@ static DWORD WINAPI au_wa_thread(LPVOID p)
             Sleep(2000);
             continue;
         }
+        if (g_cfg.audio_sync_diag)
+            HLOG_I("AVSYNC setup: capacity_ms=%.3f rate=%u low_latency=%d",
+                   1000.0 * bufFrames / rate, rate, g_cfg.audio_low_latency);
         hr = cli->lpVtbl->GetService(cli, &kIID_RenderCli,
                                      (void **)&rc);
         if (FAILED(hr) || !rc) {
@@ -525,13 +570,16 @@ static DWORD WINAPI au_wa_thread(LPVOID p)
             Sleep(2000);
             continue;
         }
-        Sleep(200); /* Ring vorgluehen, damit der Start nicht knackt */
-        if (FAILED(cli->lpVtbl->Start(cli))) {
-            HLOG_W("audio: WASAPI Start fehlgeschlagen");
-            rc->lpVtbl->Release(rc);
-            cli->lpVtbl->Release(cli);
-            Sleep(2000);
-            continue;
+        if (!g_cfg.audio_low_latency) {
+            Sleep(200); /* Legacy startup and queue depth for A/B. */
+            if (FAILED(cli->lpVtbl->Start(cli))) {
+                HLOG_W("audio: WASAPI Start fehlgeschlagen");
+                rc->lpVtbl->Release(rc);
+                cli->lpVtbl->Release(cli);
+                Sleep(2000);
+                continue;
+            }
+            started = 1;
         }
         HLOG_I("audio: WASAPI läuft (Gerät %s, %u Hz/%u Kanäle/%u Bit%s)",
                name, rate, ch, bits, isfloat ? " float" : "");
@@ -555,6 +603,10 @@ static DWORD WINAPI au_wa_thread(LPVOID p)
             }
         }
         step = (double)MIXRATE / (double)rate;
+        if ((g_cfg.audio_sync_diag || g_cfg.audio_bink_delay) && SUCCEEDED(cli->lpVtbl->GetService(
+                cli, &kIID_AudioClock, (void **)&clock)))
+            clock->lpVtbl->GetFrequency(clock, &clock_freq);
+        InterlockedExchange(&g_wa_ready, 1);
         /* Render-Schleife bis Geraet weg */
         for (;;) {
             UINT32 pad = 0, avail, f;
@@ -567,8 +619,74 @@ static DWORD WINAPI au_wa_thread(LPVOID p)
                 continue;
             }
             avail = (pad < bufFrames) ? bufFrames - pad : 0;
+            if (started && !pad && g_cfg.audio_sync_diag) {
+                LARGE_INTEGER tick;
+                double empty_ms;
+                QueryPerformanceCounter(&tick);
+                if (!empty_since) empty_since = tick.QuadPart;
+                empty_ms = 1000.0 * (tick.QuadPart - empty_since) / diag_freq.QuadPart;
+                if (empty_ms > empty_max_ms) empty_max_ms = empty_ms;
+            } else empty_since = 0;
+            if (g_cfg.audio_sync_diag || g_cfg.audio_bink_delay) {
+                static ULONGLONG next_diag;
+                ULONGLONG tick = GetTickCount64();
+                UINT64 pos = 0, qpc = 0;
+                double pending = 0.0;
+                int valid_clock = clock && clock_freq &&
+                    SUCCEEDED(clock->lpVtbl->GetPosition(clock, &pos, &qpc));
+                if (valid_clock) {
+                    LARGE_INTEGER now, freq;
+                    double elapsed;
+                    QueryPerformanceCounter(&now);
+                    QueryPerformanceFrequency(&freq);
+                    elapsed = (double)now.QuadPart / freq.QuadPart - (double)qpc / 10000000.0;
+                    pending = (double)submitted / rate - (double)pos / clock_freq - elapsed;
+                    if (started) {
+                        double delay = 1000.0 * (pending + (double)(ring_count() + 2) / MIXRATE);
+                        if (delay < 0) delay = 0;
+                        if (delay > 1000) delay = 1000;
+                        InterlockedExchange(&g_output_latency_ms, (LONG)(delay + 0.5));
+                    }
+                    if (started && pending < -0.001) {
+                        device_gap_polls++;
+                        if (-pending * 1000.0 > device_gap_max_ms)
+                            device_gap_max_ms = -pending * 1000.0;
+                    }
+                }
+                if (g_cfg.audio_sync_diag && tick >= next_diag) {
+                    REFERENCE_TIME latency = 0;
+                    cli->lpVtbl->GetStreamLatency(cli, &latency);
+                    HLOG_I("AVSYNC device: pad_ms=%.3f ring_ms=%.3f stream_ms=%.3f under=%u",
+                           1000.0 * pad / rate, 1000.0 * ring_count() / MIXRATE,
+                           (double)latency / 10000.0, g_stat_wa_under);
+                    if (valid_clock) {
+                            double heard = (double)ring_consumed() - 2.0 + frac - pending * MIXRATE;
+                            unsigned frame = sb_pause_movie_presented_frame();
+                            HLOG_I("AVSYNC clock: queued_ms=%.3f submitted=%llu position=%llu frequency=%llu",
+                                   1000.0 * ((double)submitted / rate - (double)pos / clock_freq +
+                                   (double)(ring_count() + 2) / MIXRATE), submitted, pos, clock_freq);
+                            if (frame && !g_sb_paused)
+                                HLOG_I("AVSYNC heard: out=%.3f movie=%u under=%u gaps=%u max_gap_ms=%.3f empty_max_ms=%.3f",
+                                       heard, frame, g_stat_wa_under, device_gap_polls, device_gap_max_ms, empty_max_ms);
+                    }
+                    next_diag = tick + 1000;
+                }
+            }
+            if (g_cfg.audio_low_latency) {
+                UINT32 target = rate * 30u / 1000u;
+                LONG source = ring_count() - 2;
+                UINT32 ready = source > 0 ? (UINT32)((uint64_t)source * rate / MIXRATE) : 0;
+                UINT32 room = pad < target ? target - pad : 0;
+                if (avail > room) avail = room;
+                if (avail > ready) avail = ready;
+                if (!started) {
+                    UINT32 prime = bufFrames;
+                    if (prime > target) prime = target;
+                    if (ready < prime) avail = 0;
+                }
+            }
             if (!avail) {
-                Sleep(8);
+                Sleep(g_cfg.audio_low_latency ? 1 : 8);
                 continue;
             }
             if (avail > 4096)
@@ -592,6 +710,9 @@ static DWORD WINAPI au_wa_thread(LPVOID p)
             for (f = 0; f < avail; f++) {
                 float fl = (cur[0] + (nxt[0] - cur[0]) * (float)frac) / 32768.0f;
                 float fr = (cur[1] + (nxt[1] - cur[1]) * (float)frac) / 32768.0f;
+                /* Diagnostic 2 exercises the actual device queue silently;
+                 * capture and all sample/cursor accounting stay unchanged. */
+                if (g_cfg.audio_sync_diag == 2) fl = fr = 0.0f;
                 wa_put_frame(&dst, fl, fr, ch, bits, isfloat);
                 frac += step;
                 while (frac >= 1.0) {
@@ -608,11 +729,21 @@ static DWORD WINAPI au_wa_thread(LPVOID p)
                 }
             }
             hr = rc->lpVtbl->ReleaseBuffer(rc, avail, 0);
+            if (SUCCEEDED(hr)) submitted += avail;
             if (hr == AUDCLNT_E_DEVICE_INVALIDATED)
                 break;
-            Sleep(5);
+            if (!started && SUCCEEDED(hr)) {
+                /* Start only after the first real chunk has been submitted.
+                 * No initial device-clock gap and no discarded source audio. */
+                if (FAILED(cli->lpVtbl->Start(cli))) break;
+                started = 1;
+            }
+            Sleep(g_cfg.audio_low_latency ? 1 : 5);
         }
+        InterlockedExchange(&g_wa_ready, 0);
+        InterlockedExchange(&g_output_latency_ms, 0);
         cli->lpVtbl->Stop(cli);
+        if (clock) clock->lpVtbl->Release(clock);
         rc->lpVtbl->Release(rc);
         cli->lpVtbl->Release(cli);
         HLOG_W("audio: WASAPI Geraet weg (Reconnect in 2 s)");
@@ -664,7 +795,7 @@ void au_complete_due(audio_voice_t *v, int all, au32 st)
 }
 
 /* Rendert eine Stimme in den Mix (additiv). Muss unter au_lock laufen. */
-static void au_render_voice(audio_voice_t *v, au32 n)
+static void au_render_voice(audio_voice_t *v, au32 n, int bink_start_ready)
 {
     au32 i;
     float g = v->gain;
@@ -692,6 +823,8 @@ static void au_render_voice(audio_voice_t *v, au32 n)
     if (v->kind == 1 && !v->playing)
         return;
     if (v->kind == 2 && !v->active)
+        return;
+    if (!bink_start_ready && v->create_ret == 0x2435FCu && !v->played)
         return;
     for (i = 0; i < n; i++) {
         float l = 0, r = 0;
@@ -1001,12 +1134,30 @@ extern volatile LONG g_aul_sb_n;
 static DWORD WINAPI au_mix_thread(LPVOID p)
 {
     LARGE_INTEGER qpf, last, now;
+    /* Audio block granularity only: game ticks and all guest clocks stay
+     * unchanged. 220 samples are paced at their exact 44100 Hz duration. */
+    const au32 mix_n = (g_cfg.audio_live == 1 && g_cfg.audio_low_latency)
+        ? MIXRATE / 200u : MIXCHUNK;
+    const au32 lock_window = (10u * MIXRATE + mix_n - 1u) / mix_n;
     (void)p;
+    if (g_cfg.audio_live == 1 && g_cfg.audio_low_latency) {
+        ULONGLONG deadline = GetTickCount64() + 2000;
+        SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_HIGHEST);
+        /* Prepare the endpoint before starting the mixer clock. Otherwise
+         * device setup time becomes a permanent queue of old source samples.
+         * Bounded fallback keeps capture working without an audio device. */
+        ring_init();
+        au_ensure_wasapi();
+        while (!g_wa_ready && GetTickCount64() < deadline) Sleep(1);
+        if (g_cfg.audio_capture && !g_wav)
+            au_wav_open(); /* File setup must not age the first audio block. */
+    }
     QueryPerformanceFrequency(&qpf);
     QueryPerformanceCounter(&last);
     g_au_mix_tid = GetCurrentThreadId(); /* W168 PERF-TICK */
     for (;;) {
         au32 i;
+        int bink_start_ready = 1;
         static au32 mix_pass;
         static LONG au_was_paused; /* W188 */
         LARGE_INTEGER h0, h1;
@@ -1014,6 +1165,23 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
         memset(g_mixbuf, 0, sizeof g_mixbuf);
         au_lock();
         QueryPerformanceCounter(&h0);
+        if (g_cfg.audio_bink_sync) {
+            audio_voice_t *v;
+            /* Bink creates its selected tracks before issuing their first
+             * Play calls. Latch readiness once for this whole mix pass, so
+             * a pass crossing those calls cannot separate tracks by 20 ms.
+             * Already running tracks and all non-Bink voices are untouched. */
+            for (v = g_voices; v; v = v->next)
+                if (v->create_ret == 0x2435FCu && !v->played && !v->playing)
+                    bink_start_ready = 0;
+        }
+        if (g_cfg.audio_sync_diag && !g_sb_paused) {
+            static unsigned last_frame;
+            unsigned frame = sb_pause_movie_presented_frame();
+            if (frame && frame <= 6000u && frame / 30u != last_frame / 30u)
+                HLOG_I("AVSYNC sample: out=%llu movie=%u", g_mixed_total, frame);
+            last_frame = frame;
+        }
         if (g_sb_paused != au_was_paused) {
             /* W188: Pause-Wechsel mit Position im Ausgabestrom (audio.wav: Frame = 1/44100 s) */
             au_was_paused = g_sb_paused;
@@ -1033,7 +1201,7 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
             while (v) {
                 if (v->mix_pass != mix_pass) {
                     v->mix_pass = mix_pass;
-                    au_render_voice(v, MIXCHUNK);
+                    au_render_voice(v, mix_n, bink_start_ready);
                     au_pump_notifies(v);
                 }
                 if (g_au_want) {
@@ -1055,24 +1223,24 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
         {
             audio_voice_t *v = g_voices;
             while (v) {
-                au_render_voice(v, MIXCHUNK);
+                au_render_voice(v, mix_n, bink_start_ready);
                 au_pump_notifies(v);
                 v = v->next;
             }
         }
-        if (g_cfg.audio_voice_diag && (g_mixed_total % (MIXCHUNK * 50)) == 0)
+        if (g_cfg.audio_voice_diag && (g_mixed_total % MIXRATE) < mix_n)
             au_voice_diag(); /* W95: 1x pro Sekunde */
-        if (g_cfg.audio_level_diag && (g_mixed_total % (MIXCHUNK * 50)) == 0)
+        if (g_cfg.audio_level_diag && (g_mixed_total % MIXRATE) < mix_n)
             au_level_diag(); /* W102: 1x pro Sekunde */
         QueryPerformanceCounter(&h1);
         g_aul_hold_q += h1.QuadPart - h0.QuadPart; /* DIAG(PERF-TICK,W168) */
         if (h1.QuadPart - h0.QuadPart > g_aul_hold_max_q) { g_aul_hold_max_q = h1.QuadPart - h0.QuadPart; }
         g_aul_hold_n++;
         au_unlock();
-        if (g_cfg.audio_lock_diag && (g_aul_hold_n % 500u) == 0u) { /* DIAG(PERF-TICK,W168): alle ~10 s */
+        if (g_cfg.audio_lock_diag && (g_aul_hold_n % lock_window) == 0u) { /* DIAG(PERF-TICK,W168): alle ~10 s */
             double k = 1000.0 / (double)qpf.QuadPart;
             HLOG_I("AUDIOLOCK 10s: mischer_haelt=%.2fms mittel (max %.2fms) n=%ld abgegeben=%ld | andere_warten=%.1fms (n=%ld, max %.2fms) | setbuf=%.1fms (n=%ld, max %.2fms)",
-                   g_aul_hold_n ? (double)g_aul_hold_q * k / 500.0 : 0.0, (double)g_aul_hold_max_q * k, (long)g_aul_hold_n,
+                   g_aul_hold_n ? (double)g_aul_hold_q * k / lock_window : 0.0, (double)g_aul_hold_max_q * k, (long)g_aul_hold_n,
                    (long)g_aul_yield_n, (double)g_aul_wait_q * k, (long)g_aul_wait_n, (double)g_aul_wait_max_q * k,
                    (double)g_aul_sb_q * k, (long)g_aul_sb_n, (double)g_aul_sb_max_q * k);
             g_aul_hold_q = g_aul_hold_max_q = g_aul_wait_q = g_aul_wait_max_q = 0;
@@ -1080,7 +1248,7 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
             g_aul_sb_q = g_aul_sb_max_q = 0; g_aul_sb_n = 0;
         }
         /* Clamp + s16 + Peak */
-        for (i = 0; i < MIXCHUNK * 2; i++) {
+        for (i = 0; i < mix_n * 2; i++) {
             float s = g_mixbuf[i];
             float a;
             int v;
@@ -1095,7 +1263,7 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
             g_outbuf[i] = (int16_t)v;
         }
         if (g_cfg.audio_live == 1) { /* A7B: WASAPI (neu, Default) */
-            ring_write(g_outbuf);
+            ring_write(g_outbuf, mix_n);
             au_ensure_wasapi();
         } else if (g_cfg.audio_live == 2) { /* WinMM (alt) */
             au_wo_write(g_outbuf);
@@ -1104,19 +1272,19 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
             if (!g_wav)
                 au_wav_open();
             if (g_wav) {
-                fwrite(g_outbuf, 1, sizeof g_outbuf, g_wav);
-                g_wav_bytes += sizeof g_outbuf;
+                fwrite(g_outbuf, 1, mix_n * 4u, g_wav);
+                g_wav_bytes += mix_n * 4u;
                 au_wav_write_header();
             }
         }
-        g_mixed_total += MIXCHUNK;
-        if ((g_mixed_total % (MIXCHUNK * 3000)) == 0) /* alle ~60 s */
+        g_mixed_total += mix_n;
+        if ((g_mixed_total % (MIXRATE * 60u)) < mix_n) /* alle ~60 s */
             audio_log_stats();
-        /* 20-ms-Takt */
+        /* Pace the selected audio block at the unchanged sample rate. */
         QueryPerformanceCounter(&now);
         {
             LONGLONG want =
-                last.QuadPart + qpf.QuadPart * MIXCHUNK / MIXRATE;
+                last.QuadPart + qpf.QuadPart * mix_n / MIXRATE;
             LONGLONG diff = want - now.QuadPart;
             LONG ms =
                 (LONG)(diff * 1000 / (qpf.QuadPart ? qpf.QuadPart : 1));

@@ -41,6 +41,7 @@ unsigned sb_pause_count(void);
 void sb_tsc_pause(int begin);
 unsigned long long sb_tsc_now(void);
 unsigned sb_pause_movie_frame(void);
+unsigned sb_pause_movie_presented_frame(void); /* W205: diagnostic frame at last Present */
 void sb_pause_movie_log(const char *where);
 void sb_timing_pause_begin(void);
 void sb_timing_pause_end(void);

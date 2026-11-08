@@ -743,6 +743,9 @@ void audio_play(au32 v, au32 flags)
     vp->active = 1;
     vp->play_mix = g_mixed_total; /* W95 DIAG(SFXN) */
     vp->play_flags = flags;
+    if (g_cfg.audio_sync_diag && vp->create_ret == 0x2435FCu && vp->dbg_lock_n <= 16)
+        HLOG_I("AVSYNC play: v%u played=%llu fifo=%u front=%llu", vp->id,
+               vp->played, vp->fifo_n, vp->ring_front);
     au_unlock();
     au_ensure_thread();
     if (hlog_throttle(&logged))
@@ -824,6 +827,9 @@ void audio_set_pos(au32 v, au32 byteOff)
     if (!vp)
         return;
     au_lock();
+    if (g_cfg.audio_sync_diag && vp->create_ret == 0x2435FCu && vp->dbg_lock_n <= 16)
+        HLOG_I("AVSYNC setpos: v%u off=%u played=%llu fifo=%u front=%llu", vp->id,
+               byteOff, vp->played, vp->fifo_n, vp->ring_front);
     /* Playhead aus Byte-Offset ableiten (statische Daten) */
     if (vp->have_fmt && vp->data && vp->datalen) {
         uint64_t f;
@@ -1106,6 +1112,20 @@ au32 audio_unlock(au32 v, au32 p1, au32 b1, au32 p2, au32 b2)
                         (vp->ring_front % vp->buflen) + roff;
                     while (ao + vp->buflen <= vp->ring_front)
                         ao += vp->buflen;
+                    if (g_cfg.audio_bink_sync && g_cfg.audio_ring_overwrite &&
+                        vp->create_ret == 0x2435FCu && vp->fmt.tag == 1 &&
+                        vp->fmt.bits == 16 && vp->src_rate == MIXRATE &&
+                        al == (au32)vp->fmt.ch * 2u &&
+                        !vp->playing && !vp->played) {
+                        /* W205: before Play, writes address the first ring,
+                         * not a new revolution after the append frontier.
+                         * Bink first clears the entire ring, then overwrites
+                         * its beginning before Play. Using the frontier adds
+                         * an extra silent revolution (26624/44100 seconds).
+                         * Keep the existing overwrite path for queued frames;
+                         * neither the reported cursor nor any clock changes. */
+                        ao = roff;
+                    }
                     tracked = 1;
                     if (ao > vp->ring_front)
                         vp->ring_contig = 0; /* W83: Luecke im Ring */
@@ -1125,6 +1145,10 @@ au32 audio_unlock(au32 v, au32 p1, au32 b1, au32 p2, au32 b2)
                     vp->dbg_clip_bytes += skip;
                     g_stat_clip += skip;
                 }
+                if (g_cfg.audio_sync_diag && vp->create_ret == 0x2435FCu && vp->dbg_lock_n <= 16)
+                    HLOG_I("AVSYNC unlock: v%u n=%llu part=%u off=%u bytes=%u skip=%u played=%llu fifo=%u front=%llu",
+                           vp->id, vp->dbg_lock_n, i, vp->lock_off, b, skip,
+                           vp->played, vp->fifo_n, vp->ring_front);
                 au_decode_append(vp, tmp + skip, b - skip);
                 if (tracked)
                     vp->ring_contig += b - skip;

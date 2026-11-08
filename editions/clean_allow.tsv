@@ -23,8 +23,10 @@ pfad	bin/sb_emu.dll	lokaler Nutzername \(binaer\) im Wort 'Greevee-Lab'	W188: St
 pfad	editions/clean_allow.tsv	lokaler Nutzername im Wort 'Greevee-Lab'	Freigabe-Zeilen selbst nennen den GitHub-Owner 'Greevee-Lab' (oeffentlicher Name, vom Nutzer bestaetigt 7.11.); kein Pfad
 pfad	poc-native/launcher/src/launcher_gui.c	absoluter Pfad: C:..gibt_es_nicht_w195	erfundener, absichtlich fehlender Pfad im Launcher-Selbsttest (Fotoordner, W195)
 pfad	poc-native/launcher/src/launcher_rules.c	absoluter Pfad: Q:..gibt_es_nicht	erfundener Pfad in Regel R33 (unbrauchbarer Fotoordner, W195)
-pfad	bin/sb_launcher.exe	absoluter Pfad: (C:..gibt_es_nicht_w195|Q:..gibt_es_nicht)	erfundene Selbsttest-Pfade im Launcher-Binary (W195)
+pfad	bin/sb_launcher.exe	absoluter Pfad: (C:.{1,2}gibt_es_nicht_w195|Q:.{1,2}gibt_es_nicht)	erfundene Selbsttest-Pfade im Launcher-Binary (W195)
 pfad	DONATE.md	lokaler Nutzername im Wort 'Greevee'$	PayPal.me-Name des Autors im Support-Link (Nutzerwunsch 7.11.); oeffentlicher Name, kein Pfad
 pfad	README.md	lokaler Nutzername im Wort 'Greevee'$	PayPal.me-Name des Autors im Support-Link (Nutzerwunsch 7.11.); oeffentlicher Name, kein Pfad
 pfad	.github/FUNDING.yml	lokaler Nutzername im Wort 'Greevee'$	PayPal.me-Name des Autors im Support-Link (Nutzerwunsch 7.11.); oeffentlicher Name, kein Pfad
 pfad	editions/clean_allow.tsv	lokaler Nutzername im Wort 'Greevee'$	Freigabe-Zeilen fuer den PayPal.me-Namen nennen das Wort selbst (Nutzerwunsch 7.11.); kein Pfad
+pfad	sb_native.cfg	lokaler Nutzername im Wort 'Greevee-Lab'	Alpha-Paket: Spieler-cfg an der Paketwurzel, [feedback] repo = GitHub-Owner (oeffentlicher Name, Nutzer bestaetigt 7.11.); kein Pfad
+netz	bin/sb_launcher.exe	ShellExecute\w* \+ URL-Text im Binary	Launcher oeffnet nur auf Nutzeraktion lokale Ordner/HTML-Anleitungen (Fotoordner, Spielstaende, Zadig-Anleitung); einziger URL-Text = Link auf die offizielle Zadig-Seite in der lokal erzeugten Anleitung (W185); kein Netzwerkzugriff durch den Launcher

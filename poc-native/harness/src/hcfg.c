@@ -68,6 +68,9 @@ void hcfg_defaults(void)
     g_cfg.pause_diag = 0;
     g_cfg.tsc_freq = 1; /* W22: A/B-belegt (Film 45->182 s, e1 8/9) */
     g_cfg.audio_ring_clip = 1; /* W22: A/B-belegt (Feed 1,06x->1x, g2) */
+    g_cfg.audio_bink_sync = 1; /* W205: initial ring overwrite and track start */
+    g_cfg.audio_low_latency = 1; /* W205: bounded WASAPI queue */
+    g_cfg.audio_bink_delay = 1; /* W205: movie epoch follows measured output */
     g_cfg.audio_ring_overwrite = 1; /* W83: A/B-belegt (Film-Stotterstellen, s. BERICHT W83) */
     g_cfg.audio_process_async = 1; /* W34: A/B-belegt (Lade-Pause 5,1 s -> <0,2 s, Ton per Orakel unveraendert) */
     g_cfg.tex_size_header = 1;
@@ -715,6 +718,14 @@ static void set_key(const char *k, const char *v)
         if (g_cfg.pad_dz_trig > 90) g_cfg.pad_dz_trig = 90;
     } else if (strcmp(k, "audio_ring_overwrite") == 0) {
         g_cfg.audio_ring_overwrite = atoi(v);
+    } else if (strcmp(k, "audio_sync_diag") == 0) {
+        g_cfg.audio_sync_diag = atoi(v);
+    } else if (strcmp(k, "audio_bink_sync") == 0) {
+        g_cfg.audio_bink_sync = atoi(v);
+    } else if (strcmp(k, "audio_bink_delay") == 0) {
+        g_cfg.audio_bink_delay = atoi(v);
+    } else if (strcmp(k, "audio_low_latency") == 0) {
+        g_cfg.audio_low_latency = atoi(v);
     } else if (strcmp(k, "audio_wrap_diag") == 0) {
         g_cfg.audio_wrap_diag = atoi(v);
     } else if (strcmp(k, "audio_ithis_fix") == 0) {

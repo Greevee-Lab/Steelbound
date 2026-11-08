@@ -13,6 +13,7 @@ static unsigned g_pause_n;
 static unsigned g_after_n;            /* Presents seit dem letzten Fortsetzen (Beleg-Zeilen +1/+30) */
 static unsigned g_after_tmr0, g_after_fld0;
 static unsigned g_movie_trace_left, g_movie_trace_frame;
+static volatile LONG g_movie_presented_frame; /* W205: diagnostic snapshot after Present */
 
 /* Missions-Countdown [0x3563F0] (u32, -1 je Missions-Durchlauf; diag_states STA_TMR_ADDR) */
 static unsigned pause_tmr(void)
@@ -46,6 +47,8 @@ void sb_pause_point(void)
     LARGE_INTEGER qf, q0, q1, next, now;
     unsigned nfr = 0, tmr0, fld0, f0;
     LONGLONG per;
+    if (g_cfg.audio_sync_diag)
+        InterlockedExchange(&g_movie_presented_frame, (LONG)sb_pause_movie_frame());
     if (g_cfg.pause_diag && !g_pause_req && g_movie_trace_left) {
         unsigned frame = sb_pause_movie_frame();
         if (g_after_n == 1u || (frame && frame != g_movie_trace_frame)) {
@@ -145,6 +148,11 @@ unsigned sb_pause_movie_frame(void)
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return frame;
+}
+
+unsigned sb_pause_movie_presented_frame(void)
+{
+    return (unsigned)InterlockedCompareExchange(&g_movie_presented_frame, 0, 0);
 }
 
 void sb_pause_movie_log(const char *where)

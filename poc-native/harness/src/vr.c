@@ -39,6 +39,7 @@
 #include "sb_overlay.h" /* W197 VR-MENU: Menue-Panel */
 #include "sb_perfhud.h" /* W197 VR-MENU: F2-Panel */
 #include <math.h>
+#include <tlhelp32.h>
 
 #define VR_PI 3.14159265358979f
 
@@ -1321,15 +1322,21 @@ static int xr_init(void)
      * ruft sie auf, das Spiel-Device sieht sie nie. */
     {
         D3D_FEATURE_LEVEL fl[2] = { D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0 }, got = 0;
+        /* W206 VR-HANG: this device only submits the eye copy and runtime work.
+         * Avoid the driver's internal submission worker: with two devices the
+         * first AcquireSync (or even Flush before it) can wait forever inside
+         * that worker path. This does NOT make the D3D11 device single-threaded;
+         * runtime-created threads may still use it. The game device is unchanged. */
+        UINT flags = D3D11_CREATE_DEVICE_BGRA_SUPPORT | D3D11_CREATE_DEVICE_PREVENT_INTERNAL_THREADING_OPTIMIZATIONS;
         IDXGIDevice *gd = NULL;
         IDXGIAdapter *ga = NULL;
         HRESULT hr = E_FAIL;
         if (SUCCEEDED(ID3D11Device_QueryInterface(g_dev, &IID_IDXGIDevice, (void **)&gd)) && gd) {
             if (SUCCEEDED(IDXGIDevice_GetAdapter(gd, &ga)) && ga) {
-                hr = D3D11CreateDevice(ga, D3D_DRIVER_TYPE_UNKNOWN, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT, fl, 2,
+                hr = D3D11CreateDevice(ga, D3D_DRIVER_TYPE_UNKNOWN, NULL, flags, fl, 2,
                                        D3D11_SDK_VERSION, &xr_dev, &got, &xr_ctx);
                 if (FAILED(hr)) {
-                    hr = D3D11CreateDevice(ga, D3D_DRIVER_TYPE_UNKNOWN, NULL, D3D11_CREATE_DEVICE_BGRA_SUPPORT, fl + 1, 1,
+                    hr = D3D11CreateDevice(ga, D3D_DRIVER_TYPE_UNKNOWN, NULL, flags, fl + 1, 1,
                                            D3D11_SDK_VERSION, &xr_dev, &got, &xr_ctx);
                 }
                 IDXGIAdapter_Release(ga);
@@ -1343,6 +1350,7 @@ static int xr_init(void)
         }
         HLOG_I("VR: eigenes D3D11-Device fuer die Runtime (Feature-Level 0x%X, Adapter wie das Spiel); Spiel-Device bleibt privat",
                (unsigned)got);
+        HLOG_I("VR: Bilduebergabe ohne interne D3D11-Threading-Optimierungen (Device-Flags 0x%X)", (unsigned)flags);
     }
     memset(&gb, 0, sizeof gb);
     gb.type = XR_TYPE_GRAPHICS_BINDING_D3D11_KHR;
@@ -2267,7 +2275,12 @@ static void xr_frame(void)
                             memcpy(lp, cp, sizeof lp);
                         }
                     }
-                    IDXGIKeyedMutex_ReleaseSync(vr_km, 1);
+                    {
+                        HRESULT kh = IDXGIKeyedMutex_ReleaseSync(vr_km, 1);
+                        if (g_cfg.vr_diag >= 3 && xr_fno <= 3u) {
+                            HLOG_I("VR handoff %u: producer ReleaseSync(1)=0x%08lX", xr_fno, (unsigned long)kh);
+                        }
+                    }
                     ID3D11DeviceContext_Flush(g_ctx); /* Augenbild zur GPU, bevor das VR-Device darauf wartet */
                     km_ok = 1;
                     xr_km_pending = 1;
@@ -2401,7 +2414,24 @@ void sb_vr_watch(void)
             const char *st = xr_stage;
             extern void sb_wd_thread_stack(unsigned long tid, const char *label);
             HLOG_W("VR: VR-Thread steht seit %.1f s bei '%s' (kein OpenXR-Aufruf)", ls, st ? st : "?");
+            HLOG_W("VR: Bilduebergabe blockiert. Bleibt die Brille dunkel, Client neu starten. Kein Session-Neubau parallel zum blockierten Treiberaufruf.");
             sb_wd_thread_stack(xr_tid, "VR-Thread"); /* DIAG(W183): wo steht er? */
+            if (g_cfg.vr_diag >= 3) {
+                HANDLE snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+                THREADENTRY32 te;
+                te.dwSize = sizeof te;
+                if (snap != INVALID_HANDLE_VALUE) {
+                    if (Thread32First(snap, &te)) {
+                        do {
+                            if (te.th32OwnerProcessID == GetCurrentProcessId() &&
+                                te.th32ThreadID != GetCurrentThreadId() && te.th32ThreadID != xr_tid) {
+                                sb_wd_thread_stack(te.th32ThreadID, "VR-Peer");
+                            }
+                        } while (Thread32Next(snap, &te));
+                    }
+                    CloseHandle(snap);
+                }
+            }
         }
     }
     if (!c) { return; }

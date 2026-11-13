@@ -227,6 +227,8 @@ int gui_page_from_name(const char *v)
 #define ID_PH_ASP 1101     /* W195: Bildformat ohne Cockpit */
 #define ID_CPERSP 1102 /* W191 UW-PERSP: Cockpit-Perspektive (Anzeige > Seitenverhaeltnis) */
 #define ID_CPANINI 1103 /* W191 UW-PERSP: Panini der Cockpit-Ansicht */
+#define ID_CTRL_AIMTURN 1104 /* W218 SIMPLE-CONTROLS: Fadenkreuz am Rand dreht den Mech */
+#define ID_CTRL_AUTOGEAR 1105 /* W218 SIMPLE-CONTROLS: automatischer Gangwechsel */
 static char g_img_msg[600]; /* W150: Ergebnis der letzten Abbild-Pruefung (UTF-8) */
 static int g_img_ok;
 static void check_image_ex(int status);
@@ -311,6 +313,7 @@ static launcher_settings_t g_undo_s; /* Muster C: Stand vor dem Umschalten */
 static int g_undo_on;
 /* W172 LAUNCHER-P567 */
 static int g_setup_force;         /* Spielen: Einrichtungskarte offen halten */
+static int g_bb_setup = -1;       /* W220: Karte im zuletzt gezeichneten Bild (-1 = nicht Spielen) */
 static int g_data_ok = 1;         /* letzte Spieldaten-Pruefung (Regelwerk) */
 static int g_firstrun;            /* W217: erster Start (keine user.cfg, kein Standard-Profil) */
 static char g_data_err[300];
@@ -335,7 +338,7 @@ static void setup_auto_sync(int from_list);
 static void xbe_derived(const launcher_settings_t *s, char *out, size_t cap);
 static int path_eq(const char *a, const char *b);
 static void tips_place(void);
-static void ui_refresh_visibility(void);
+static int ui_refresh_visibility(void);
 static void show_page(int p);
 static int ui_confirm(const char *text, const char *title);
 static void set_status_k(const char *msg, int kind); /* W187 */
@@ -1693,6 +1696,84 @@ static int launch_blocked(void)
     return g_rr[3].disable || g_rr[4].disable;
 }
 
+/* W220 PLAY-LAYOUT: Textzeilen der Einrichtungskarte (eine Quelle fuer
+ * Zeichnen und Selbsttest 62). text == NULL: Zeile leer. */
+enum { PSR_TXT, PSR_MSG, PSR_DISC, PSR_FOLDERQ, PSR_N };
+typedef struct {
+    const char *text;
+    int font, x, y, w, h, single, reason;
+    COLORREF col;
+} psrow_t;
+
+static char g_img_path[1024]; /* W220: Pfad, zu dem g_img_msg gehoert */
+/* W220: Pruef-Fixture (Selbsttest/Shots ohne echtes Abbild): gilt nur fuer
+ * genau diesen Pfad, sonst echte Pruefung. */
+static char g_imgfix_path[1024];
+static int g_imgfix_rc;
+static char g_imgfix_msg[600];
+
+static int img_check(const char *path, char *msg, size_t cap)
+{
+    if (g_imgfix_path[0] && path && strcmp(path, g_imgfix_path) == 0) {
+        strcpy_s(msg, cap, g_imgfix_msg);
+        return g_imgfix_rc;
+    }
+    return lcfg_image_check(path, msg, cap);
+}
+
+static void imgfix_set(const char *path, int rc, const char *msg)
+{
+    strcpy_s(g_imgfix_path, sizeof g_imgfix_path, path ? path : "");
+    g_imgfix_rc = rc;
+    strcpy_s(g_imgfix_msg, sizeof g_imgfix_msg, msg ? msg : "");
+}
+
+static void play_setup_rows(psrow_t *rw)
+{
+    char cur[1024];
+    memset(rw, 0, sizeof(psrow_t) * PSR_N);
+    rw[PSR_TXT].text = LT("gui.play_setup_txt");
+    rw[PSR_TXT].font = F_SMALL;
+    rw[PSR_TXT].x = CX0 + 18; rw[PSR_TXT].y = CY0 + 250;
+    rw[PSR_TXT].w = CW - 36; rw[PSR_TXT].h = 20;
+    rw[PSR_TXT].single = 1; rw[PSR_TXT].col = C_DIM;
+    /* Ergebniszeile unter dem Pfadfeld: Pruefergebnis (nur fuer den
+     * aktuellen Pfad), sonst Erststart-Schritte (W217), sonst Fehler (R3) */
+    rw[PSR_MSG].font = F_SMALL;
+    rw[PSR_MSG].x = CX0 + 18; rw[PSR_MSG].y = CY0 + 318;
+    rw[PSR_MSG].w = CW - 36; rw[PSR_MSG].h = 36;
+    cur[0] = '\0';
+    if (ctl(ID_IMAGE)) {
+        ui_gettext(ctl(ID_IMAGE), cur, sizeof cur);
+    }
+    if (g_img_msg[0] && cur[0] && strcmp(cur, g_img_path) == 0) {
+        rw[PSR_MSG].text = g_img_msg;
+        rw[PSR_MSG].col = g_img_ok ? C_OK : C_ERR;
+    } else if (!cur[0] && !g_cur.game_image[0] && !g_cur.media_root[0] &&
+               !g_cur.xbe_path[0]) {
+        rw[PSR_MSG].text = LT("gui.play_firstrun"); /* W217 FIRST-RUN */
+        rw[PSR_MSG].col = C_TEXT;
+    } else if (g_rr[3].active) {
+        rw[PSR_MSG].text = g_rr[3].text;
+        rw[PSR_MSG].reason = 1;
+    } else if (!cur[0] && g_cur.media_root[0]) {
+        rw[PSR_MSG].text = LT("gui.play_folder_used");
+        rw[PSR_MSG].col = C_DIM;
+    }
+#if SB_EDITION_COMMUNITY
+    rw[PSR_DISC].text = LT("gui.play_own_disc");
+#endif
+    rw[PSR_DISC].font = F_TINY;
+    rw[PSR_DISC].x = CX0 + 18; rw[PSR_DISC].y = CY0 + 360;
+    rw[PSR_DISC].w = CW - 36; rw[PSR_DISC].h = 30;
+    rw[PSR_DISC].col = C_FAINT;
+    rw[PSR_FOLDERQ].text = LT("gui.play_folder_q");
+    rw[PSR_FOLDERQ].font = F_SMALL;
+    rw[PSR_FOLDERQ].x = CX0 + 18; rw[PSR_FOLDERQ].y = CY0 + 400;
+    rw[PSR_FOLDERQ].w = CW - 36 - 196; rw[PSR_FOLDERQ].h = 24;
+    rw[PSR_FOLDERQ].single = 1; rw[PSR_FOLDERQ].col = C_DIM;
+}
+
 static void paint_play(void)
 {
     int i, y;
@@ -1720,30 +1801,24 @@ static void paint_play(void)
         /* W172/P6: Einrichtungskarte (Spieldaten fehlen/ungueltig oder
          * "Aendern" an der Spiel-Zeile): Disc-Abbild waehlen + pruefen,
          * Ordner-Modus nur als Verweis nach Erweitert (Konzept 4.1). */
+        psrow_t rw[PSR_N];
+        int k;
+        play_setup_rows(rw);
         card(CX0, CY0 + 216, CW, 232, LT("gui.play_setup"));
-        label1(F_SMALL, LT("gui.play_setup_txt"), CX0 + 18, CY0 + 250, CW - 36,
-               20, C_DIM);
-        if (g_img_msg[0]) {
-            label(F_SMALL, g_img_msg, CX0 + 18, CY0 + 318, CW - 36, 36,
-                  g_img_ok ? C_OK : C_ERR);
-        } else if (!g_cur.game_image[0] && !g_cur.media_root[0] && !g_cur.xbe_path[0]) {
-            /* W217 FIRST-RUN: die drei Schritte + Feedback-Tasten */
-            label(F_SMALL, LT("gui.play_firstrun"), CX0 + 18, CY0 + 318, CW - 36, 36,
-                  C_TEXT);
-        } else if (g_cur.game_image[0] || g_cur.media_root[0] || g_cur.xbe_path[0]) {
-            /* konkreter Fehler (Grundtext steht schon unter den Knoepfen) */
-            if (!paint_reason(3, CX0 + 18, CY0 + 318, CW - 36, 36) &&
-                !g_cur.game_image[0] && g_cur.media_root[0]) {
-                label(F_SMALL, LT("gui.play_folder_used"), CX0 + 18, CY0 + 318,
-                      CW - 36, 36, C_DIM);
+        for (k = 0; k < PSR_N; k++) {
+            if (!rw[k].text) {
+                continue;
+            }
+            if (rw[k].reason) { /* konkreter Fehler aus dem Regelwerk (R3) */
+                paint_reason(3, rw[k].x, rw[k].y, rw[k].w, rw[k].h);
+            } else if (rw[k].single) {
+                label1(rw[k].font, rw[k].text, rw[k].x, rw[k].y, rw[k].w, rw[k].h,
+                       rw[k].col);
+            } else {
+                label(rw[k].font, rw[k].text, rw[k].x, rw[k].y, rw[k].w, rw[k].h,
+                      rw[k].col);
             }
         }
-        label1(F_SMALL, LT("gui.play_folder_q"), CX0 + 18, CY0 + 400,
-               CW - 36 - 196, 24, C_DIM);
-#if SB_EDITION_COMMUNITY
-        label(F_TINY, LT("gui.play_own_disc"), CX0 + 18, CY0 + 360, CW - 36, 30,
-              C_FAINT);
-#endif
     } else {
         /* W172/P6: Bereitschaft mit Sprunglinks ("Aendern" = Seite der
          * Ursache; Punkt gruen/gelb/rot). */
@@ -2299,6 +2374,7 @@ static void compose(void)
     }
     GdiFlush();
     memcpy(g_bb.px, g_base.px, (size_t)W * H * 4);
+    g_bb_setup = g_page == P_PLAY ? play_setup_shown() : -1; /* W220 */
     switch (g_page) {
     case P_PLAY: paint_play(); break;
     case P_DISPLAY: paint_display(); break;
@@ -5427,6 +5503,8 @@ static void ui_from_settings(const launcher_settings_t *s)
     refresh_ctrl_profiles(s->input_profile);
     ui_set_checked(ID_CTRL_SBC, s->sbc_usb);
     ui_set_checked(ID_CTRL_MOUSEOFF, s->sbc_mouse_off);
+    ui_set_checked(ID_CTRL_AIMTURN, s->aim_turn);   /* W218 */
+    ui_set_checked(ID_CTRL_AUTOGEAR, s->auto_gear);
     ComboBox_SetCurSel(ctl(ID_IPFPS), s->interp_fps == 60 ? 1
                                       : s->interp_fps == 120 ? 2 : 0);
     ComboBox_SetCurSel(ctl(ID_WINMODE),
@@ -5516,6 +5594,8 @@ static void ui_to_settings(launcher_settings_t *s)
     ctrl_profile_from_ui(s->input_profile, sizeof s->input_profile);
     s->sbc_usb = ui_checked(ID_CTRL_SBC);
     s->sbc_mouse_off = ui_checked(ID_CTRL_MOUSEOFF);
+    s->aim_turn = ui_checked(ID_CTRL_AIMTURN);   /* W218 */
+    s->auto_gear = ui_checked(ID_CTRL_AUTOGEAR);
     sel = ComboBox_GetCurSel(ctl(ID_IPFPS));
     s->interp_fps = (sel >= 0 && sel < 3) ? ip_map[sel] : 0;
     sel = ComboBox_GetCurSel(ctl(ID_WINMODE));
@@ -5574,14 +5654,15 @@ static void ui_to_settings(launcher_settings_t *s)
 static void update_summary(void)
 {
     launcher_settings_t s;
-    char err[1024];
     s = g_s;
     ui_to_settings(&s);
     /* W172/P6: Zeilen Spiel, Grafik, Anzeige, Packs, Steuerung; jede mit
      * "Aendern" (Sprung zur Seite der Ursache). Client fehlt = Startsperre
      * R4 unter den Startknoepfen, Einstellungsdatei = Erweitert > Diagnose. */
     g_sum[0].label = LT("gui.sum_game");
-    if (lcfg_validate(&s, err, sizeof err) == 0) {
+    /* W220: Ergebnis der Spieldaten-Pruefung aus dem Regelwerk (rules_data,
+     * je Pfadsatz gemerkt) statt erneut das Abbild zu lesen */
+    if (g_data_ok) {
         if (s.game_image[0]) { /* W150: Abbild-Modus */
             const char *b = s.game_image + strlen(s.game_image);
             while (b > s.game_image && b[-1] != '\\' && b[-1] != '/') {
@@ -5595,7 +5676,8 @@ static void update_summary(void)
         }
         g_sum[0].col = C_OK;
     } else {
-        strcpy_s(g_sum[0].value, sizeof g_sum[0].value, err);
+        strcpy_s(g_sum[0].value, sizeof g_sum[0].value,
+                 g_data_err[0] ? g_data_err : LT("gui.rule_r3"));
         g_sum[0].col = C_ERR;
     }
     g_sum[2].label = LT("gui.page_display");
@@ -5751,7 +5833,14 @@ static void rules_data(const launcher_settings_t *s, lr_env_t *e)
         strcpy_s(t.media_root, sizeof t.media_root, s->media_root);
         strcpy_s(t.hdd_root, sizeof t.hdd_root, s->hdd_root);
         err[0] = '\0';
-        ok = lcfg_validate(&t, err, sizeof err) == 0;
+        if (g_imgfix_path[0] && strcmp(s->game_image, g_imgfix_path) == 0) {
+            ok = g_imgfix_rc == 0; /* W220: Fixture (Shots) */
+            if (!ok) {
+                strcpy_s(err, sizeof err, g_imgfix_msg);
+            }
+        } else {
+            ok = lcfg_validate(&t, err, sizeof err) == 0;
+        }
         strcpy_s(key, sizeof key, k);
     }
     e->data_ok = ok;
@@ -5842,9 +5931,9 @@ static int play_setup_shown(void)
 
 /* W172: Sichtbarkeit der aktuellen Seite nachziehen (Zustand kann sich
  * durch Regeln/Packs aendern: Einrichtungskarte, leere Packs-Liste). */
-static void ui_refresh_visibility(void)
+static int ui_refresh_visibility(void)
 {
-    int i;
+    int i, n = 0;
     for (i = 0; i < g_ui_n; i++) {
         uictl_t *u = &g_ui[i];
         int want, has;
@@ -5855,8 +5944,10 @@ static void ui_refresh_visibility(void)
         has = (GetWindowLongW(u->h, GWL_STYLE) & WS_VISIBLE) != 0;
         if (want != has) {
             ShowWindow(u->h, want ? SW_SHOWNA : SW_HIDE);
+            n++;
         }
     }
+    return n;
 }
 
 /* ------------------------------------------------------------------ */
@@ -5994,6 +6085,9 @@ static void ui_apply_rules(void)
     memcpy(old, g_rr, sizeof old);
     rules_env(&e, &s);
     lrules_eval(&e, g_rr);
+    if (g_page == P_PLAY) { /* W220: Bereitschaft folgt dem aktuellen Stand */
+        update_summary();
+    }
     gfx_sync_ui(); /* W173: Bildrate im Namen, Benutzerdefiniert, Pack-Sperren */
     /* W172/P6: Einrichtungskarte bleibt offen, solange Spielen gezeigt wird
      * (kein Umspringen waehrend der Eingabe des Abbild-Pfads). */
@@ -6016,8 +6110,12 @@ static void ui_apply_rules(void)
             }
         }
     }
-    ui_refresh_visibility();
-    if (memcmp(old, g_rr, sizeof old) != 0) {
+    /* W220 PLAY-LAYOUT: Sichtbarkeit geaendert (z. B. Einrichtungskarte ->
+     * Bereitschaft nach "Durchsuchen") -> Hintergrund neu aufbauen. Sonst
+     * blieb das alte Bild (leeres Pfadfeld, Texte der Karte) unter den neu
+     * gezeigten "Aendern"-Knoepfen stehen. */
+    if (ui_refresh_visibility() != 0 || memcmp(old, g_rr, sizeof old) != 0 ||
+        (g_page == P_PLAY && g_bb_setup != play_setup_shown())) {
         redraw_all();
     }
 }
@@ -6180,21 +6278,35 @@ static void check_image_ex(int status)
 {
     char p[1024];
     ui_gettext(ctl(ID_IMAGE), p, sizeof p);
+    strcpy_s(g_img_path, sizeof g_img_path, p); /* W220: Meldung gilt nur fuer diesen Pfad */
     if (!p[0]) {
         g_img_msg[0] = 0;
         g_img_ok = 0;
     } else {
-        g_img_ok = lcfg_image_check(p, g_img_msg, sizeof g_img_msg) == 0;
+        g_img_ok = img_check(p, g_img_msg, sizeof g_img_msg) == 0;
         if (status) {
             set_status_k(g_img_msg, g_img_ok ? 1 : 2);
         }
     }
-    redraw_rect(CX0, CY0, CW, 280);
+    /* W220: ganze Karte (die Ergebniszeile liegt unter CY0+280) */
+    redraw_rect(CX0, CY0, CW, 456);
 }
 
 static void check_image(void)
 {
     check_image_ex(1);
+}
+
+/* W150/W172: Abbild gewaehlt (Dialog; W220 auch Shots/Selbsttest 62).
+ * Gueltig -> Bereitschaft statt Einrichtung; der Aufrufer (on_command)
+ * wertet danach das Regelwerk aus und baut das Bild neu auf (W220). */
+static void image_chosen(const wchar_t *file)
+{
+    SetWindowTextW(ctl(ID_IMAGE), file);
+    check_image();
+    if (g_img_ok) { /* W172/P6: gueltig -> Bereitschaft statt Einrichtung */
+        g_setup_force = 0;
+    }
 }
 
 static void browse_image(void)
@@ -6228,11 +6340,7 @@ static void browse_image(void)
     ofn.nFilterIndex = 1;
     ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
     if (GetOpenFileNameW(&ofn)) {
-        SetWindowTextW(ctl(ID_IMAGE), file);
-        check_image();
-        if (g_img_ok) { /* W172/P6: gueltig -> Bereitschaft statt Einrichtung */
-            g_setup_force = 0;
-        }
+        image_chosen(file);
     }
 }
 
@@ -10800,6 +10908,8 @@ static void ui_apply_language(void)
     ui_settext(ctl(ID_CTRL_SBC), LT("gui.sbc"));
     ui_settext(ctl(ID_CTRL_SBCCHK), LT("gui.btn_check"));
     ui_settext(ctl(ID_CTRL_MOUSEOFF), LT("gui.ctl_mouseoff"));
+    ui_settext(ctl(ID_CTRL_AIMTURN), LT("gui.ctl_aimturn"));   /* W218 */
+    ui_settext(ctl(ID_CTRL_AUTOGEAR), LT("gui.ctl_autogear"));
     ui_settext(ctl(ID_CTRL_ASSIST), LT("gui.ctl_assist"));
     ui_settext(ctl(ID_CTRL_BROWSER), LT("gui.keys_browser")); /* W179 */
     combo_refill(ID_MOUSE_MODE, kMouse, 2);
@@ -11135,7 +11245,11 @@ static void build_controls(void)
             combo_add(c, t);
         }
     }
-    mk(w, K_MEMO, ID_KEYS, P_CTRL, COL2 + 18, CY0 + 162, COLW - 36, 276,
+    /* W218 SIMPLE-CONTROLS: vereinfachte Steuerung (Standard aus; nur
+     * Maus/Tastatur/Gamepad, mit aktivem Original-Controller ohne Wirkung) */
+    mk(w, K_TOGGLE, ID_CTRL_AIMTURN, P_CTRL, COL2 + 18, CY0 + 160, COLW - 36, 28, LT("gui.ctl_aimturn"), 0);
+    mk(w, K_TOGGLE, ID_CTRL_AUTOGEAR, P_CTRL, COL2 + 18, CY0 + 192, COLW - 36, 28, LT("gui.ctl_autogear"), 0);
+    mk(w, K_MEMO, ID_KEYS, P_CTRL, COL2 + 18, CY0 + 228, COLW - 36, 210,
        "", 0);
 
     /* W179 KEYS-HTML: Tastenuebersicht als HTML (immer aktiv, ohne Regel) */
@@ -11379,6 +11493,14 @@ static void on_command_inner(int id, int code)
     case ID_CTRL_MOUSEOFF:
         ui_set_checked(ID_CTRL_MOUSEOFF, !ui_checked(ID_CTRL_MOUSEOFF));
         break;
+    case ID_CTRL_AIMTURN: /* W218 */
+        ui_set_checked(ID_CTRL_AIMTURN, !ui_checked(ID_CTRL_AIMTURN));
+        set_status(LT(ui_checked(ID_CTRL_AIMTURN) ? "gui.ctl_aimturn_on" : "gui.ctl_simple_off"));
+        break;
+    case ID_CTRL_AUTOGEAR: /* W218 */
+        ui_set_checked(ID_CTRL_AUTOGEAR, !ui_checked(ID_CTRL_AUTOGEAR));
+        set_status(LT(ui_checked(ID_CTRL_AUTOGEAR) ? "gui.ctl_autogear_on" : "gui.ctl_simple_off"));
+        break;
     case ID_REM_LABEL: { /* W153; W173 (PO 7.11.): eigene Option, nicht im Grafik-Preset */
         g_gfx.shx[LSHX_LABEL] = ui_checked(ID_REM_LABEL) ? 0 : 1;
         ui_set_checked(ID_REM_LABEL, g_gfx.shx[LSHX_LABEL]);
@@ -11529,6 +11651,9 @@ static void on_command_inner(int id, int code)
             redraw_all();
         } else if (code == EN_CHANGE && id == ID_MEDIA && !g_updating) {
             xbe_cue_update(); /* W172: "automatisch: <Ordner>\default.xbe" */
+        } else if (code == EN_CHANGE && id == ID_IMAGE && g_page == P_PLAY) {
+            /* W220: Pruefergebnis gilt nur fuer den gepruefen Pfad */
+            redraw_rect(CX0, CY0 + 310, CW, 50);
         }
         break;
     case ID_PROF_COMBO: /* W172: Schalter "beim Start laden" folgt der Auswahl */
@@ -12047,6 +12172,15 @@ static const struct {
     { "controller", "sbc_usb=1;sbc_mouse_off=1;input_profile=", 0 },
     { "custom", "remaster=1;hd_textures=1;fx_enhanced=0;aa_mode=2;shading=0", 0 },
     { "diag", "audio=0", 1 },
+    /* W220 PLAY-LAYOUT: Einrichtungskarte je Zustand (Pruef-Fixture, kein
+     * echtes Abbild; Pfad bereinigt), img_browse = Uebergang nach Durchsuchen */
+    { "img_empty", "game_image=;xbe_path=;media_root=", 0 },
+    { "img_unchecked", "game_image=;xbe_path=;media_root=", 0 },
+    { "img_ok", "game_image=;xbe_path=;media_root=", 0 },
+    { "img_version", "game_image=;xbe_path=;media_root=", 0 },
+    { "img_folder", "game_image=;xbe_path=;media_root=", 0 },
+    { "img_browse", "game_image=;xbe_path=;media_root=", 0 },
+    { "img_browse_bad", "game_image=;xbe_path=;media_root=", 0 },
     { "pack2", "", 0, 1 },  /* W172: zweites Pack gewaehlt (verdeckt durch ...) */
     { "pack3", "", 0, 2 },  /* W172: drittes Pack (Effekt-Pack mit Schloss) */
     /* W173: Remastered dezent, Effect Pack setzt color_sat/fx_embers (Effect-Pack-
@@ -12081,6 +12215,72 @@ static void gui_apply_state(const char *name)
             return;
         }
     }
+}
+
+/* W220 PLAY-LAYOUT: Zustaende der Einrichtungskarte (Shots + Selbsttest 62).
+ * Pfade sind bereinigte Beispiele; die Pruefung liefert die Fixture. */
+#define W220_ISO "D:\\Games\\Steel Battalion (Europe).iso"
+#define W220_ISO_US "D:\\Games\\Steel Battalion (USA).iso"
+#define W220_DIR "D:\\Games\\Steel Battalion"
+static void w220_fixture(const char *path, int rc)
+{
+    char m[600];
+    if (rc == 0) {
+        _snprintf_s(m, sizeof m, _TRUNCATE, LT("gui.image_ok"),
+                    "Steel Battalion (Europe, PAL)");
+    } else if (rc == 4) {
+        _snprintf_s(m, sizeof m, _TRUNCATE, LT("cfg.image_version"), "43430002",
+                    sb_gamever_region_name(1), 0u);
+    } else {
+        _snprintf_s(m, sizeof m, _TRUNCATE, LT("cfg.image_isdir"), path);
+    }
+    imgfix_set(path, rc, m);
+}
+
+/* Zustand herstellen (Seite Spielen ist offen). Rueckgabe 0 = unbekannt. */
+static int w220_state(const char *name)
+{
+    wchar_t w[600];
+    const char *path = NULL;
+    int rc = 0, check = 1;
+    if (strcmp(name, "img_browse") == 0 || strcmp(name, "img_browse_bad") == 0) {
+        /* wie der Nutzer: leere Karte, Durchsuchen, danach Regelwerk (on_command) */
+        int bad = name[10] == '_';
+        w220_fixture(bad ? W220_ISO_US : W220_ISO, bad ? 4 : 0);
+        u8_to_w(bad ? W220_ISO_US : W220_ISO, w, 600);
+        image_chosen(w);
+        ui_apply_rules();
+        return 1;
+    }
+    if (strcmp(name, "img_empty") == 0) {
+        path = "";
+        check = 0;
+    } else if (strcmp(name, "img_unchecked") == 0) {
+        path = W220_ISO;
+        check = 0;
+    } else if (strcmp(name, "img_ok") == 0) {
+        path = W220_ISO;
+    } else if (strcmp(name, "img_version") == 0) {
+        path = W220_ISO_US;
+        rc = 4;
+    } else if (strcmp(name, "img_folder") == 0) {
+        path = W220_DIR;
+        rc = 1;
+    } else {
+        return 0;
+    }
+    if (path[0]) {
+        w220_fixture(path, rc);
+    }
+    ui_settext(ctl(ID_IMAGE), path);
+    g_setup_force = 1; /* Karte offen (wie nach "Aendern" an der Spiel-Zeile) */
+    if (check) {
+        on_command(ID_IMAGE_C, BN_CLICKED);
+    } else {
+        ui_apply_rules();
+    }
+    redraw_all();
+    return 1;
 }
 
 static void gui_fill(void)
@@ -12353,6 +12553,9 @@ int gui_main(const char *client_override, const gui_opts_t *o)
                     continue;
                 }
                 show_page(p);
+                if (p == P_PLAY && strncmp(g_o.state, "img_", 4) == 0) {
+                    w220_state(g_o.state); /* W220: kein zusaetzliches Neuzeichnen */
+                }
                 pump();
                 RedrawWindow(g_hwnd, NULL, NULL,
                              RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
@@ -13043,8 +13246,9 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
     {
         static lr_env_t fe;
         gui_opts_t o;
-        int ok48 = 0, ok49 = 0, ok50 = 0, ok51 = 0;
-        char why48[200] = "", why49[240] = "", why50[200] = "", why51[200] = "";
+        int ok48 = 0, ok49 = 0, ok50 = 0, ok51 = 0, ok62 = 1;
+        char why48[200] = "", why49[240] = "", why50[200] = "", why51[200] = "",
+             why62[300] = "";
         char pkd[1100], pke[1100], q[1300], senv[1100];
         int had_env = u8_GetEnv("SB_PACKS_DIR", senv, sizeof senv) > 0;
         memset(&o, 0, sizeof o);
@@ -13169,6 +13373,147 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                 if (!ok48) {
                     strcpy_s(why48, sizeof why48, "Sprunglinks springen falsch");
                 }
+            }
+            /* --- 62 (W220 PLAY-LAYOUT): Einrichtungskarte je Zustand ---
+             * Jedes Element der Karte: echte Fenster-Sichtbarkeit, Bild passt
+             * zum Zustand (kein altes Hintergrundbild), Pfad im Feld, Texte
+             * eindeutig, keine Ueberlappung, richtige Ergebniszeile. */
+            {
+                static const struct {
+                    const char *st;
+                    int data_ok, setup, msg; /* msg: 0 keine, 1 Erststart, 2 ok, 3 Fehler */
+                    const char *path;
+                } k62[] = {
+                    { "img_empty", 0, 1, 1, "" },
+                    { "img_unchecked", 1, 1, 0, W220_ISO },
+                    { "img_ok", 1, 1, 2, W220_ISO },
+                    { "img_version", 0, 1, 3, W220_ISO_US },
+                    { "img_folder", 0, 1, 3, W220_DIR },
+                    { "img_browse_bad", 0, 1, 3, W220_ISO_US }, /* Start: leer */
+                    { "img_browse", 1, 0, 0, W220_ISO },        /* Start: leer */
+                };
+                static const int setup_ids[] = { ID_IMAGE, ID_IMAGE_C, ID_IMAGE_B,
+                                                 ID_PLAY_FOLDER };
+                int si;
+                for (si = 0; si < (int)(sizeof k62 / sizeof k62[0]) && ok62; si++) {
+                    char t[1024], why[200] = "";
+                    psrow_t rw[PSR_N];
+                    int j, m, sh = k62[si].setup;
+                    lcfg_defaults(&s);
+                    s.game_image[0] = s.xbe_path[0] = s.media_root[0] = 0;
+                    lrules_env_default(&fe, &s);
+                    fe.data_ok = 0; /* Start: keine Spieldaten (R3, Karte offen) */
+                    strcpy_s(fe.data_err, sizeof fe.data_err, "");
+                    g_img_msg[0] = '\0';
+                    g_img_path[0] = '\0';
+                    show_page(P_PLAY);
+                    ui_from_settings(&s);
+                    fe.data_ok = k62[si].data_ok;
+                    if (!k62[si].data_ok && k62[si].msg == 3) {
+                        strcpy_s(fe.data_err, sizeof fe.data_err, "x");
+                    }
+                    w220_state(k62[si].st);
+                    pump();
+                    if (play_setup_shown() != sh) {
+                        strcpy_s(why, sizeof why, "falsche Karte");
+                    } else if (g_bb_setup != sh) {
+                        strcpy_s(why, sizeof why, "Bild zeigt alte Karte (nicht neu aufgebaut)");
+                    }
+                    for (j = 0; j < 4 && !why[0]; j++) { /* echte Fenster */
+                        uictl_t *u = ui_find(setup_ids[j]);
+                        int vis = u && (GetWindowLongW(u->h, GWL_STYLE) & WS_VISIBLE) != 0;
+                        if (vis != sh) {
+                            _snprintf_s(why, sizeof why, _TRUNCATE,
+                                        "Element %d sichtbar=%d", setup_ids[j], vis);
+                        }
+                    }
+                    for (j = 0; j < SUM_GO_N && !why[0]; j++) {
+                        uictl_t *u = ui_find(ID_SUM_GO0 + j);
+                        int vis = u && (GetWindowLongW(u->h, GWL_STYLE) & WS_VISIBLE) != 0;
+                        if (vis == sh) {
+                            _snprintf_s(why, sizeof why, _TRUNCATE,
+                                        "Aendern %d sichtbar=%d", j, vis);
+                        }
+                    }
+                    ui_gettext(ctl(ID_IMAGE), t, sizeof t);
+                    if (!why[0] && strcmp(t, k62[si].path) != 0) {
+                        _snprintf_s(why, sizeof why, _TRUNCATE, "Pfadfeld '%s'", t);
+                    }
+                    if (!why[0] && !sh && (g_sum[0].col != C_OK ||
+                                           !strstr(g_sum[0].value, "(Europe).iso"))) {
+                        _snprintf_s(why, sizeof why, _TRUNCATE, "Bereitschaft Spiel '%s'",
+                                    g_sum[0].value);
+                    }
+                    if (!why[0] && sh) {
+                        /* Ergebniszeile */
+                        play_setup_rows(rw);
+                        m = !rw[PSR_MSG].text ? 0
+                            : rw[PSR_MSG].text == g_img_msg ? (rw[PSR_MSG].col == C_OK ? 2 : 3)
+                            : strcmp(rw[PSR_MSG].text, LT("gui.play_firstrun")) == 0 ? 1 : 4;
+                        if (m != k62[si].msg) {
+                            _snprintf_s(why, sizeof why, _TRUNCATE,
+                                        "Ergebniszeile %d statt %d", m, k62[si].msg);
+                        }
+                        if (!why[0] && (!rw[PSR_FOLDERQ].text || !rw[PSR_TXT].text ||
+                                        (SB_EDITION_COMMUNITY && !rw[PSR_DISC].text))) {
+                            strcpy_s(why, sizeof why, "Hinweiszeile fehlt");
+                        }
+                    }
+                    if (!why[0] && sh) {
+                        /* sichtbare Elemente der Seite: Texte eindeutig, keine
+                         * Ueberlappung untereinander und mit den Textzeilen */
+                        RECT rc[64];
+                        char tx[64][128];
+                        int n = 0, a, b;
+                        for (j = 0; j < g_ui_n && n < 48; j++) {
+                            uictl_t *u = &g_ui[j];
+                            if (u->parent != g_hwnd || u->page != P_PLAY ||
+                                !(GetWindowLongW(u->h, GWL_STYLE) & WS_VISIBLE)) {
+                                continue;
+                            }
+                            SetRect(&rc[n], u->x, u->y, u->x + u->w, u->y + u->h_);
+                            tx[n][0] = '\0';
+                            if (u->kind < K_EDIT) {
+                                ui_gettext(u->h, tx[n], sizeof tx[n]);
+                            }
+                            n++;
+                        }
+                        for (j = 0; j < PSR_N; j++) {
+                            if (rw[j].text) {
+                                SetRect(&rc[n], rw[j].x, rw[j].y, rw[j].x + rw[j].w,
+                                        rw[j].y + rw[j].h);
+                                tx[n][0] = '\0';
+                                if (rw[j].y < CY0 + 216 || rw[j].y + rw[j].h > CY0 + 448) {
+                                    _snprintf_s(why, sizeof why, _TRUNCATE,
+                                                "Zeile %d ausserhalb der Karte", j);
+                                }
+                                n++;
+                            }
+                        }
+                        for (a = 0; a < n && !why[0]; a++) {
+                            for (b = a + 1; b < n && !why[0]; b++) {
+                                RECT x;
+                                if (IntersectRect(&x, &rc[a], &rc[b])) {
+                                    _snprintf_s(why, sizeof why, _TRUNCATE,
+                                                "Ueberlappung %d/%d (y %ld/%ld)", a, b,
+                                                rc[a].top, rc[b].top);
+                                } else if (tx[a][0] && strcmp(tx[a], tx[b]) == 0) {
+                                    _snprintf_s(why, sizeof why, _TRUNCATE,
+                                                "Text doppelt '%s'", tx[a]);
+                                }
+                            }
+                        }
+                    }
+                    if (why[0]) {
+                        ok62 = 0;
+                        _snprintf_s(why62, sizeof why62, _TRUNCATE, "%s: %s",
+                                    k62[si].st, why);
+                    }
+                }
+                imgfix_set(NULL, 0, NULL);
+                g_img_msg[0] = '\0';
+                g_img_path[0] = '\0';
+                g_setup_force = 0;
             }
             /* --- 51: Tooltips = Begruendung der Sperre (Muster A) --- */
             {
@@ -13696,6 +14041,11 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
             GT_OK("48 play-setup (Einrichtungskarte, Sprunglinks)");
         } else {
             GT_FAIL("48 play-setup", "%s", why48);
+        }
+        if (ok62) {
+            GT_OK("62 play-layout (Einrichtungskarte je Zustand: Sichtbarkeit, Bild, Pfad, Texte, Ueberlappung, Durchsuchen)");
+        } else {
+            GT_FAIL("62 play-layout", "%s", why62);
         }
         if (ok49) {
             GT_OK("49 packs-ui (Liste, Reihenfolge, Konflikte, Grenzen, abgelehnt, leer, B5)");

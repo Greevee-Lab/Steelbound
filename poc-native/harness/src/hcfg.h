@@ -167,6 +167,11 @@ typedef struct {
     int pad_mouse_off;   /* W132: 1 = Maus-Achsen aus, solange ein Gamepad aktiv ist (Maustasten bleiben), 0 = parallel per Arbitrierung (Default) */
     int pad_dz_stick;    /* W143: globale Totzone Sticks in % (0..90, Default 0 = Profilwerte); wirkt als Untergrenze (max) */
     int pad_dz_trig;     /* W143: globale Totzone Trigger in % (0..90, Default 0 = Profilwerte); wirkt als Untergrenze (max) */
+    /* W218 SIMPLE-CONTROLS (nur Maus/Tastatur/Gamepad, nie Original-Controller; Standard aus = bitgleich) */
+    int aim_turn;        /* 1 = Zielhebel X ueber der Schwelle steuert den Drehhebel mit (Fadenkreuz an den Rand -> Mech dreht) */
+    int aim_turn_thresh; /* Schwelle in % des Zielhebelwegs (0..95, Default 60) */
+    int aim_turn_gain;   /* Staerke in % (0..200, Default 100 = voller Drehhebel am Anschlag) */
+    int auto_gear;       /* 1 = automatischer Gangwechsel (Gas: hoch/runter nach Geschwindigkeit, Bremse im Stand = R) */
     int audio_ring_overwrite; /* W83: 1 = Ring-Ueberlapp: spaetere Schreibung ersetzt noch nicht gespielte FIFO-Frames (Xbox-Ring), 0 = alt (Clip: erste gewinnt) */
     int audio_ithis_fix;   /* W89: 1 = Puffer-Stop/GetStatus an den I-Wrappern 0x21F53C/0x21F598 hooken (diese rufen C-Ebene mit this-0x1C -> Stimme nie erkannt: Stop wirkungslos, Status immer STOPPED = Stimmenklau), 0 = alt */
     int audio_loop_fix;    /* W89: 1 = SetLoopRegion legt nur die Region fest (Schleife nur mit Play(LOOPING)), Region/Position in Daten-Frames (Resampling), Einmal-Ton bis Datenende; 0 = alt (jede Region loopt, Quell-Frames) */
@@ -425,6 +430,7 @@ typedef struct {
     int perf_hud;               /* 1 = Leistungs-Overlay sichtbar (Taste schaltet und speichert in user.cfg), 0 = aus (Standard) */
     int perf_hud_pos;           /* Ecke: 0 = oben rechts, 1 = oben links, 2 = unten links, 3 = unten rechts */
     char perf_hud_key[16];      /* Taste: F1..F12 (ohne F10), VK<hex>; 0/aus = keine Taste. Standard F2 */
+    int watermark;              /* W219 WATERMARK: 1 = Alpha-Wasserzeichen (Version) unten rechts, 0 = aus (Code-/Test-Standard) */
     int perf_log;               /* DIAG(PERF-HUD,W122): alle N s Zeile PERFHUD + PERFSPIKE-Zeilen (0 = aus) */
     int perf_spike_ms;          /* DIAG(PERF-HUD,W122): PERFSPIKE ab dieser Bildzeit (0 = 2x Zielbildzeit) */
     int perf_prof;              /* DIAG(PERF-HUD,W122): 1 = Stichproben-Profiler des Spiel-Threads (Zeile PERFPROF, mit perf_log) */

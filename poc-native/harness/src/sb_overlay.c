@@ -73,6 +73,8 @@ enum {
     OI_MPAUSE,
     /* W190 SAVE-LOCK: Seite 0 "Spielstaende schuetzen" + "Geschuetzte Aenderungen uebernehmen" */
     OI_SAVELOCK, OI_SLCOMMIT,
+    /* W218 SIMPLE-CONTROLS: Seite 0 Ziel-Kopplung + Gang-Automatik */
+    OI_AIMTURN, OI_AUTOGEAR,
     OI_N
 };
 /* Zeilen je Seite (Seite 0 = W118 unveraendert, Testskripte zaehlen DOWN;
@@ -80,6 +82,7 @@ enum {
 static const int kOvPage0[] = { OI_FPS, OI_SHADING, OI_MFX, OI_GRAIN, OI_GLITCH, OI_EDGE, OI_EDGEW, OI_EDGES,
                                 OI_MMODE, OI_MSENS, OI_HD, OI_HDSCALE, OI_WINMODE, OI_RES, OI_PRESET, OI_MPAUSE,
                                 OI_SAVELOCK, OI_SLCOMMIT, /* W190 */
+                                OI_AIMTURN, OI_AUTOGEAR, /* W218 */
                                 OI_SAVE, OI_CLOSE }; /* W188: + ESC-Menue pausiert */
 static const int kOvPage1[] = { OI_SHADING, OI_MFX, OI_GRAIN, OI_GLITCH,
                                 OI_EXPO, OI_TONE, OI_WGAM, OI_WSHARP, OI_FOCUS, OI_WCON, OI_FOG, OI_LWORLD, OI_RTS,
@@ -456,6 +459,14 @@ static void ov_change(int i, int dir)
     case OI_MSENS:
         g_cfg.mouse_sens = ov_clamp(g_cfg.mouse_sens + dir, 1, 16);
         HLOG_I("OVERLAY: mouse_sens -> %d (f=%u)", g_cfg.mouse_sens, g_present_no);
+        break;
+    case OI_AIMTURN: /* W218: wirkt sofort (Hook liest g_cfg je Poll) */
+        g_cfg.aim_turn = !g_cfg.aim_turn;
+        HLOG_I("OVERLAY: aim_turn -> %d (f=%u)", g_cfg.aim_turn, g_present_no);
+        break;
+    case OI_AUTOGEAR: /* W218 */
+        g_cfg.auto_gear = !g_cfg.auto_gear;
+        HLOG_I("OVERLAY: auto_gear -> %d (f=%u)", g_cfg.auto_gear, g_present_no);
         break;
     case OI_SBCMOUSE: /* W128: wirkt sofort (Hook liest g_cfg je Poll) */
         g_cfg.sbc_mouse_off = !g_cfg.sbc_mouse_off;
@@ -846,6 +857,7 @@ static const ov_key_t kOvKeys[] = {
     { "fx_interp", "render" },
     { "mouse_mode", "input" },      { "mouse_sens", "input" },
     { "sbc_mouse_off", "input" }, /* W128 */
+    { "aim_turn", "input" },        { "auto_gear", "input" }, /* W218 */
     { "remaster", "remaster" },     { "hd_textures", "remaster" },
     { "hd_scale", "remaster" },     { "window_mode", "display" },
     /* W134 VR-PROTO */
@@ -894,6 +906,8 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     else if (strcmp(k, "edge_fade_strength") == 0) { v = g_cfg.edge_fade_strength; }
     else if (strcmp(k, "mouse_sens") == 0) { v = g_cfg.mouse_sens; }
     else if (strcmp(k, "sbc_mouse_off") == 0) { v = g_cfg.sbc_mouse_off; }
+    else if (strcmp(k, "aim_turn") == 0) { v = g_cfg.aim_turn; } /* W218 */
+    else if (strcmp(k, "auto_gear") == 0) { v = g_cfg.auto_gear; }
     else if (strcmp(k, "remaster") == 0) { v = g_cfg.remaster; }
     else if (strcmp(k, "hd_textures") == 0) { v = g_cfg.hd_textures; }
     else if (strcmp(k, "hd_scale") == 0) { v = ov_hd_scale(); }
@@ -2594,7 +2608,9 @@ static void ov_label(int i, wchar_t *o, size_t cap)
         /* W188 */
         "ovl.lb_mpause",
         /* W190 */
-        "ovl.lb_savelock", "ovl.lb_slcommit" };
+        "ovl.lb_savelock", "ovl.lb_slcommit",
+        /* W218 */
+        "ovl.lb_aimturn", "ovl.lb_autogear" };
     ov_wkey(o, cap, lb[i]);
 }
 
@@ -2625,6 +2641,8 @@ static void ov_value(int i, wchar_t *o, size_t cap)
     case OI_MMODE: ov_wkey(o, cap, g_cfg.mouse_mode ? "ovl.v_abs" : "ovl.v_rel"); break;
     case OI_MSENS: _snwprintf_s(o, cap, _TRUNCATE, L"%d", g_cfg.mouse_sens); break;
     case OI_SBCMOUSE: ov_wkey(o, cap, g_cfg.sbc_mouse_off ? "ovl.v_mouseoff" : "ovl.v_parallel"); break;
+    case OI_AIMTURN: ov_wkey(o, cap, g_cfg.aim_turn ? "ovl.v_on" : "ovl.v_off"); break; /* W218 */
+    case OI_AUTOGEAR: ov_wkey(o, cap, g_cfg.auto_gear ? "ovl.v_on" : "ovl.v_off"); break;
     case OI_HD:
         if (!g_ov_avail) { ov_wkey(o, cap, "ovl.v_nopkg"); }
         else { ov_wkey(o, cap, ov_hd_on() ? "ovl.v_tex_hd" : "ovl.v_orig"); } /* W173: wie Launcher "Texturen" */
@@ -2840,7 +2858,7 @@ static void ov_layout(unsigned boxh, unsigned *w, unsigned *h)
         return;
     }
     *w = (unsigned)S(262.0f);
-    *h = (unsigned)(S(20.0f) + S(4.0f) + (OV_NP0 > OV_NP1 ? OV_NP0 : OV_NP1) * S(12.5f) + S(6.0f) + 3 * S(11.0f) + S(6.0f)); /* W143: + FPS-Hinweis */
+    *h = (unsigned)(S(20.0f) + S(4.0f) + (OV_NP0 + (g_cfg.sbc_usb ? 1 : 0) > OV_NP1 ? OV_NP0 + (g_cfg.sbc_usb ? 1 : 0) : OV_NP1) * S(12.5f) + S(6.0f) + 3 * S(11.0f) + S(6.0f)); /* W143: + FPS-Hinweis; W218: Seite 0 mit SBC-Zeile kann laenger sein */
     *h += (unsigned)(S(OV_TABH) + S(3.0f)); /* W188: Tab-Zeile */
     if (g_cfg.sbc_usb) {
         *h += (unsigned)S(11.0f); /* W128: Zeile "Controller: ..." (nur sbc_usb=1) */
@@ -3270,7 +3288,7 @@ static void ov_paint(void)
         y += rowh;
         if ((!g_ov_page && (i == OI_SHADING || i == OI_GLITCH || i == OI_EDGES ||
                             (i == OI_MSENS && !g_cfg.sbc_usb) || i == OI_SBCMOUSE || i == OI_HDSCALE ||
-                            i == OI_RES || i == OI_MPAUSE || i == OI_SLCOMMIT)) || /* W190 */
+                            i == OI_RES || i == OI_MPAUSE || i == OI_SLCOMMIT || i == OI_AUTOGEAR)) || /* W190, W218 */
             (g_ov_page == 1 && (i == OI_GLITCH || i == OI_RTS || i == OI_BTHR || i == OI_CLIGHT || i == OI_ABCMP)) ||
             (g_ov_page == 2 && (i == OI_PRESET || i == OI_SSAO || i == OI_CGAIN || i == OI_SHSOFT || i == OI_ABCMP)) ||
             (g_ov_page == OV_PAGE_FX && (i == OI_FXPRESET || i == OI_FXIP || i == OI_FXCMP)) || /* W133 */

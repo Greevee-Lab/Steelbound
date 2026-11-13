@@ -38,7 +38,7 @@ planned. Only use the archive from the official Releases page.
 | `profiles/` | Default control layouts (keyboard, Xbox pad) |
 | `lang/` | Languages (English is built in, German as a file) |
 | `docs/` | This guide and the player documentation |
-| `README.md`, `LICENSE`, `THIRD_PARTY.md` | Project notes and licence texts (drafts) |
+| `README.md`, `LICENSE`, `THIRD_PARTY.md` | Project notes and licence texts |
 | `VERSION.txt` | Build date, commit and file checksums |
 
 ## Quick start
@@ -71,7 +71,7 @@ These keys can be reassigned on the launcher's **Controls** page
 
 ## What to test
 
-Please tell us what you tried, even if everything worked.
+Please tell me what you tried, even if everything worked.
 
 1. **First start:** does the launcher open, is the text readable (DPI,
    scaling), does **Set up your game** accept your PAL disc image?
@@ -251,6 +251,5 @@ restart. Check the result with **F2**.
   US release is planned.
 - **VR is experimental.** Expect rough edges with headsets, runtimes and
   performance.
-- The legal texts (`LICENSE`, `THIRD_PARTY.md`) are drafts.
 - Steelbound does not use the network: no updates, no telemetry, no
   automatic crash upload. Reports reach us only when you send them.

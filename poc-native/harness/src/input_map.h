@@ -317,6 +317,64 @@ void imap_arb_axes(imap_arb_t *a, const imap_arb_in_t *in, int out[IMAP_ARB_N]);
 int imap_arb_pad1(imap_arb1_t *a, int mouse, int pad, float mpos,
                   int dead, float wake, int *wism);
 
+/* ---- W218 SIMPLE-CONTROLS (Einstellungen, Standard aus) ----
+ * Nur Maus/Tastatur/Gamepad; mit aktivem Original-Controller ruft der Hook
+ * beides nicht auf. Rein (ohne Spielspeicher), im input_selftest geprueft.
+ *
+ * imap_aim_turn: gekoppelte Ziel-/Drehsteuerung. Liegt der Zielhebel X
+ * (aiming_x, Mitte 0x7F/0x80) betragsmaessig ueber thresh_pct % seines
+ * Wegs, wird der Drehhebel anteilig mitgesteuert: Restweg ueber der
+ * Schwelle (0..1) * gain_pct % * 127, Vorzeichen wie der Zielhebel
+ * (rechts = +). Eine staerkere vorhandene Drehhebel-Auslenkung (A/D,
+ * Stick) bleibt (betragsgroesste gewinnt). Rueckgabe: gesetzter
+ * Drehhebel-Anteil (0 = keine Kopplung). */
+int imap_aim_turn(imap_block_t *blk, int thresh_pct, int gain_pct);
+
+/* imap_autogear: automatischer Gangwechsel. Eingang je Poll: Block nach der
+ * Abbildung (Gas = pedal_r, Bremse = pedal_m, Gang = gear 7=R 8=N 9..13 =
+ * 1..5), Geschwindigkeit v (Spiel-Einheiten je Frame, vorwaerts +, aus der
+ * VT-Position) und Frame-Nummer. Regeln:
+ *  - Gas aus N -> 1. Gang.
+ *  - Hochschalten, wenn Gas gehalten, mindestens min_hold Frames seit dem
+ *    letzten Wechsel und die Geschwindigkeit nicht mehr steigt (Plateau:
+ *    Zuwachs ueber win Frames < plat_pct % von v, v > v_min). Die
+ *    Plateau-Geschwindigkeit wird je Gang gelernt (vtop).
+ *  - Herunterschalten, wenn v unter down_pct % der gelernten
+ *    Endgeschwindigkeit des naechstniedrigeren Gangs faellt; nahe Stillstand
+ *    zurueck in den 1. Gang.
+ *  - Rueckwaerts: Bremse im Stillstand (rev_delay Frames gehalten) -> R;
+ *    in R wirkt die Bremse als Gas (pedal_r = Bremse) und Gas bremst bis
+ *    zum Stillstand, dann wieder 1. Gang.
+ * Schreibt blk->gear (+ Pedale in R) und liefert den neuen Gang; *gear_st
+ * (Zustand des Abbildungspfads) wird mitgefuehrt, damit manuelle Flanken
+ * (Q/E) danach vom selben Gang aus weiterzaehlen. */
+typedef struct {
+    uint8_t init;
+    unsigned last_frame;  /* letzter ausgewerteter Frame */
+    unsigned shift_frame; /* Frame des letzten Wechsels */
+    unsigned brake_since; /* Bremse im Stillstand seit Frame (0 = nein) */
+    float hist[32];       /* v je Frame (Ring) */
+    unsigned nhist;
+    float vtop[14];       /* gelernte Endgeschwindigkeit je Gangcode */
+    int shifts;           /* Anzahl Wechsel (Diagnose) */
+} imap_autogear_t;
+
+typedef struct {
+    int min_hold;   /* Frames zwischen Wechseln (Standard 45) */
+    int win;        /* Plateau-Fenster in Frames (Standard 15, <= 31) */
+    float plat_pct; /* Plateau-Schwelle in % von v (Standard 3) */
+    float v_min;    /* Mindest-v fuer Hochschalten (Standard 0,05) */
+    float v_stop;   /* |v| darunter = Stillstand (Standard 0,02) */
+    float down_pct; /* Herunterschalten unter % von vtop[g-1] (Std. 70) */
+    int rev_delay;  /* Frames Bremse im Stillstand bis R (Standard 10) */
+    int pedal_on;   /* Pedal gilt als gedrueckt ab (Standard 0x40) */
+} imap_autogear_cfg_t;
+
+void imap_autogear_defaults(imap_autogear_cfg_t *c);
+int imap_autogear_step(imap_autogear_t *ag, const imap_autogear_cfg_t *c,
+                       imap_block_t *blk, uint8_t *gear_st, float v,
+                       unsigned frame);
+
 /* ---- Gamepad-Poll (Hook-Seite) ----
  * Laedt xinput1_4 (Fallback 1_3/9_1_0) dynamisch, fragt Port 0..3, cached
  * pro Frame. 1 = Geraet da (*out gueltig), 0 = keins (sauber inaktiv). */

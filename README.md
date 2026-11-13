@@ -212,7 +212,7 @@ access (it compares against the **local** `default.xbe` of your own copy:
 
 ## License
 
-Our own code is **source-available** under the **PolyForm Noncommercial
+My own code is **source-available** under the **PolyForm Noncommercial
 License 1.0.0** (see `LICENSE`). In short, and without replacing the
 license text:
 

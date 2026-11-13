@@ -718,6 +718,40 @@ static int cli_selftest(const char *client_override)
         }
     }
 
+    /* W218 SIMPLE-CONTROLS: aim_turn/auto_gear Standard 0, Roundtrip 1 und 0 */
+    {
+        int ok = 1;
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w218_simple_test.cfg");
+        u8_DeleteFile(tmp);
+        lcfg_defaults(&a);
+        ok = a.aim_turn == 0 && a.auto_gear == 0;
+        a.aim_turn = 1;
+        a.auto_gear = 1;
+        if (ok && lcfg_save_user(tmp, &a) == 0) {
+            lcfg_defaults(&b);
+            lcfg_load_file(tmp, &b);
+            ok = b.aim_turn == 1 && b.auto_gear == 1;
+            b.aim_turn = 0;
+            if (ok && lcfg_save_user(tmp, &b) == 0) {
+                lcfg_defaults(&a);
+                a.aim_turn = 1;
+                lcfg_load_file(tmp, &a);
+                ok = a.aim_turn == 0 && a.auto_gear == 1;
+            } else {
+                ok = 0;
+            }
+        } else {
+            ok = 0;
+        }
+        if (ok) {
+            T_OK("W218 simple-controls cfg (Standard 0, Roundtrip)");
+        } else {
+            T_FAIL("W218 simple-controls cfg", "%s", "Werte falsch");
+        }
+        u8_DeleteFile(tmp);
+    }
+
     /* 14 (W78): neue Keys Roundtrip + fremde Keys bleiben erhalten */
     {
         u8_GetTempPath(tmp, sizeof tmp);
@@ -2753,7 +2787,7 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
         }
         if (st) {
             if (!gui_state_known(st)) {
-                printf("FEHLER: --state braucht nodata|fullscreen|window43|"
+                printf("FEHLER: --state braucht nodata|fullscreen|window43|img_*|"
                        "controller|custom|diag.\n");
                 return 1;
             }

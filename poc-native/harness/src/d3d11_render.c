@@ -46,6 +46,7 @@ static float g_last_game_aspect, g_last_out_aspect;
 #include "sb_relaunch.h" /* W186 RESET-TITLE */
 #include "sb_pause.h" /* W188 GAME-MENU */
 #include "sb_photo.h" /* W195 PHOTO-MODE */
+#include "sb_watermark.h" /* W219 WATERMARK */
 int g_vr_blit; /* W134 VR-PROTO: sb_render_blit zeigt ein Augenbild (ohne Nachbearbeitung des Monobilds) */
 
 static LRESULT CALLBACK sb_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
@@ -1007,6 +1008,9 @@ static void sb_render_present_body(unsigned flags)
         sb_edge_apply(g_rtv);
         sb_ctx_leave();
     }
+    if (sb_wm_on() && !g_swap_res) { /* W219 WATERMARK: vor dem Clip-Abgriff (im Clip sichtbar), Bereich gesichert */
+        sb_ctx_enter(); sb_wm_draw(g_rtv, 1); sb_ctx_leave();
+    }
     if (sb_clip_active() && !g_swap_res) {
         sb_ctx_enter(); sb_clip_frame(g_rtv); sb_ctx_leave();
     }
@@ -1172,6 +1176,11 @@ static void sb_render_present_body(unsigned flags)
         sb_ovl_restore();
         sb_ctx_leave();
         sb_ovl_present_end();
+    }
+    if (g_cfg.watermark) { /* W219 WATERMARK: zuletzt zurueck (zuerst gesichert) */
+        sb_ctx_enter();
+        sb_wm_restore();
+        sb_ctx_leave();
     }
     if (g_cfg.shfx_ab >= 4) { sb_shfx_present_end(n_present); } /* DIAG(SHADER-OPT2,W131) */
     sb_winmode_tick(n_present); /* W81: Moduswechsel/Resize zwischen den Bildern */
@@ -1361,6 +1370,12 @@ void sb_render_blit(ID3D11Resource *src)
     if (g_cfg.vr_enable && !g_vr_blit && sb_vr_panels_on()) { /* W197 VR-MENU: Leinwand-Quelle ohne ESC-Menue/F2 */
         sb_ctx_enter();
         sb_vr_canvas_source(g_swap_res);
+        sb_ctx_leave();
+    }
+    if (sb_wm_on()) { /* W219 WATERMARK: auf jedes gezeigte Bild, vor dem Clip-Abgriff */
+        sb_ctx_enter();
+        if (!g_swap_rtv) { ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv); }
+        sb_wm_draw(g_swap_rtv, 0);
         sb_ctx_leave();
     }
     if (sb_clip_active()) {
@@ -1637,6 +1652,7 @@ void sb_render_pause_frame(void)
             ID3D11Resource_Release(bb);
         }
     }
+    sb_wm_draw(g_rtv, 0); /* W219 WATERMARK (Pause; nicht im Fotomodus) */
     if (g_cfg.overlay && (sb_ovl_open() || sb_clip_active())) { sb_ovl_draw(g_rtv, 0); }
     if (sb_phud_visible()) { sb_phud_draw(g_rtv, 0); }
     if (g_cfg.overlay_test[0]) { /* TEST(W118): Overlay-Bild */
@@ -1717,6 +1733,7 @@ int sb_render_pause_jpg(const char *path, unsigned *ow, unsigned *oh)
     }
     ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)stg, 0);
     ID3D11Texture2D_Release(stg);
+    (void)sb_wm_blend_bgr(px, dd.Width, dd.Height); /* W219 WATERMARK: Version im Feedback-Screenshot */
     ok = sb_write_jpg(path, px, dd.Width, dd.Height);
     free(px);
     if (ow) { *ow = dd.Width; }

@@ -25,6 +25,8 @@
  * Teil 13 (W188 GAME-MENU): Aktion pause (Standard KEY:PAUSE, Tasten nur
  *         ueber das Fenster, Pad-Flanke im Hook, imap_bind_keys).
  * Teil 14 (W193 PAUSE-LIVE): imap_key_name fuer menu_peek_key.
+ * Teil 16 (W218 SIMPLE-CONTROLS): Kopplung Zielhebel -> Drehhebel und
+ *   Gang-Automatik gegen ein einfaches Fahrzeugmodell.
  * Teil 15 (W195 PHOTO-MODE): Aktion photo (Standard KEY:F12, Tasten nur ueber
  *         das Fenster, Pad-Flanke im Hook, imap_bind_keys, Profilvergleich).
  */
@@ -1898,6 +1900,203 @@ static void run_feedback_clip_cases(const imap_profile_t *kb, const imap_profile
     CHECK(imap_key_name("F9") == VK_F9, "feedback_clip: Tastenname F9");
 }
 
+/* ---- Teil 16: W218 SIMPLE-CONTROLS (Kopplung Ziel->Drehhebel, Automatik) ---- */
+static void blk_neutral(imap_block_t *b)
+{
+    memset(b, 0, sizeof *b);
+    b->aiming_x = 0x7F;
+    b->aiming_y = 0x7F;
+    b->gear = 8;
+}
+
+/* Einfaches Fahrzeugmodell: je Gang Endgeschwindigkeit + Beschleunigung;
+ * Gas zieht v gegen vmax[g] (R: -0,08), Bremse 0,92/Frame, sonst 0,97;
+ * blocked = Hindernis (v bleibt 0). */
+static float sim_v(float v, const imap_block_t *b, int blocked)
+{
+    static const float vmax[14] = { 0, 0, 0, 0, 0, 0, 0, -0.08f, 0, 0.10f, 0.18f, 0.26f, 0.33f, 0.40f };
+    static const float acc[14] = { 0, 0, 0, 0, 0, 0, 0, 0.08f, 0, 0.08f, 0.06f, 0.045f, 0.035f, 0.03f };
+    if (blocked) return 0.0f;
+    if (b->pedal_m >= 0x40) return v * 0.92f;
+    if (b->pedal_r >= 0x40 && b->gear != 8) return v + acc[b->gear] * (vmax[b->gear] - v);
+    return v * 0.97f;
+}
+
+static void run_simple_cases(const imap_profile_t *kb)
+{
+    imap_block_t b;
+    imap_autogear_t ag;
+    imap_autogear_cfg_t c;
+    uint8_t gst = 8;
+    float v = 0.0f;
+    unsigned f = 1000;
+    int r, i, ups = 0, downs = 0, maxg = 0, g, prev;
+
+    printf("Teil 16: W218 SIMPLE-CONTROLS\n");
+    /* -- Kopplung Zielhebel -> Drehhebel -- */
+    blk_neutral(&b);
+    CHECK(imap_aim_turn(&b, 60, 100) == 0 && b.rot_lever == 0, "aim_turn: Mitte 0x7F -> 0");
+    b.aiming_x = 0x80;
+    CHECK(imap_aim_turn(&b, 60, 100) == 0 && b.rot_lever == 0, "aim_turn: Mitte 0x80 -> 0");
+    b.aiming_x = 0x80 + 76; /* 59,8 % */
+    CHECK(imap_aim_turn(&b, 60, 100) == 0 && b.rot_lever == 0, "aim_turn: unter Schwelle -> 0");
+    b.aiming_x = 0xFF;
+    CHECK(imap_aim_turn(&b, 60, 100) == 127 && b.rot_lever == 127, "aim_turn: Anschlag rechts -> +127");
+    blk_neutral(&b);
+    b.aiming_x = 0x00;
+    CHECK(imap_aim_turn(&b, 60, 100) == -127 && b.rot_lever == -127, "aim_turn: Anschlag links -> -127");
+    blk_neutral(&b);
+    b.aiming_x = 0x80 + 102; /* 80,3 % -> (0,803-0,6)/0,4 = 0,51 */
+    r = imap_aim_turn(&b, 60, 100);
+    CHECK(r >= 60 && r <= 70 && b.rot_lever == r, "aim_turn: anteilig (r=%d)", r);
+    blk_neutral(&b);
+    b.aiming_x = 0xFF;
+    CHECK(imap_aim_turn(&b, 60, 50) == 64, "aim_turn: Staerke 50 %% -> 64");
+    blk_neutral(&b);
+    b.aiming_x = 0xFF;
+    CHECK(imap_aim_turn(&b, 60, 0) == 0 && b.rot_lever == 0, "aim_turn: Staerke 0 -> aus");
+    blk_neutral(&b);
+    b.aiming_x = 0xFF;
+    b.rot_lever = -127; /* A gehalten: gleich starke Auslenkung bleibt */
+    CHECK(imap_aim_turn(&b, 60, 100) == 127 && b.rot_lever == -127, "aim_turn: A/D gewinnt bei Gleichstand");
+    blk_neutral(&b);
+    b.aiming_x = 0xFF;
+    b.rot_lever = 30;
+    CHECK(imap_aim_turn(&b, 60, 100) == 127 && b.rot_lever == 127, "aim_turn: Kopplung staerker als Stick");
+    blk_neutral(&b);
+    b.aiming_x = 0xFF;
+    CHECK(imap_aim_turn(&b, 0, 100) == 127, "aim_turn: Schwelle 0");
+    blk_neutral(&b);
+    b.aiming_x = 0x80 + 64;
+    CHECK(imap_aim_turn(&b, 99, 100) == 0, "aim_turn: Schwelle geklemmt 95 %%");
+    { /* Tastatur RIGHT (keyboard_default) -> Zielhebel 0xFF -> Drehhebel +127 */
+        imap_state_t st;
+        imap_snap_t sn;
+        cfgvar_t cv = { 1, 1, 0, 1, 4, 0, 0 };
+        int k = VK_RIGHT;
+        imap_state_init(&st);
+        set_keys(&k, 1);
+        make_snap(&sn, 5, &cv);
+        blk_neutral(&b);
+        imap_profile_apply(&b, &st, kb, &sn);
+        r = imap_aim_turn(&b, 60, 100);
+        CHECK(b.aiming_x == 0xFF && r == 127 && b.rot_lever == 127,
+              "aim_turn: RIGHT -> aim %02X rot %d", b.aiming_x, (int)b.rot_lever);
+        set_keys(NULL, 0);
+    }
+
+    /* -- Automatik: Anfahren und Hochschalten 1..5 -- */
+    imap_autogear_defaults(&c);
+    memset(&ag, 0, sizeof ag);
+    prev = 8;
+    for (i = 0; i < 1500; i++, f++) {
+        blk_neutral(&b);
+        b.gear = gst;
+        b.pedal_r = 0xFF;
+        g = imap_autogear_step(&ag, &c, &b, &gst, v, f);
+        /* zweiter Poll im selben Frame darf nichts zusaetzlich schalten */
+        b.gear = gst;
+        CHECK(imap_autogear_step(&ag, &c, &b, &gst, v, f) == g, "autogear: 2. Poll gleicher Gang");
+        if (g > prev) ups++;
+        if (g < prev) downs++;
+        if (g > maxg) maxg = g;
+        prev = g;
+        v = sim_v(v, &b, 0);
+    }
+    CHECK(gst == 13 && maxg == 13, "autogear: Gas lang -> 5. Gang (gst=%u)", gst);
+    CHECK(ups == 5 && downs == 0, "autogear: 5x hoch, 0x runter (hoch=%d runter=%d)", ups, downs);
+    CHECK(ag.vtop[9] > 0.09f && ag.vtop[12] > 0.30f, "autogear: Endgeschw. gelernt (1:%.3f 4:%.3f)",
+          ag.vtop[9], ag.vtop[12]);
+
+    /* -- Bremsen bis Stillstand: runter, dann R -- */
+    downs = 0;
+    for (i = 0; i < 400; i++, f++) {
+        blk_neutral(&b);
+        b.gear = gst;
+        b.pedal_m = 0xFF;
+        g = imap_autogear_step(&ag, &c, &b, &gst, v, f);
+        if (g < prev && g != 7) downs++;
+        prev = g;
+        v = sim_v(v, &b, 0);
+    }
+    CHECK(gst == 7, "autogear: Bremse im Stand -> R (gst=%u)", gst);
+    CHECK(downs >= 1, "autogear: beim Bremsen heruntergeschaltet (%d)", downs);
+    blk_neutral(&b);
+    b.gear = gst;
+    b.pedal_m = 0xC0;
+    imap_autogear_step(&ag, &c, &b, &gst, v, f++);
+    CHECK(b.gear == 7 && b.pedal_r == 0xC0 && b.pedal_m == 0, "autogear: in R Bremse = Gas (r=%u m=%u)",
+          b.pedal_r, b.pedal_m);
+    /* rueckwaerts fahren */
+    for (i = 0; i < 200; i++, f++) {
+        blk_neutral(&b);
+        b.gear = gst;
+        b.pedal_m = 0xFF;
+        imap_autogear_step(&ag, &c, &b, &gst, v, f);
+        v = sim_v(v, &b, 0);
+    }
+    CHECK(gst == 7 && v < -0.05f, "autogear: rueckwaerts (v=%.3f)", v);
+    /* Gas in R: erst bremsen, dann 1. Gang */
+    blk_neutral(&b);
+    b.gear = gst;
+    b.pedal_r = 0xFF;
+    imap_autogear_step(&ag, &c, &b, &gst, v, f++);
+    CHECK(b.gear == 7 && b.pedal_m == 0xFF && b.pedal_r == 0, "autogear: Gas in Rueckwaertsfahrt bremst");
+    for (i = 0; i < 300 && gst == 7; i++, f++) {
+        blk_neutral(&b);
+        b.gear = gst;
+        b.pedal_r = 0xFF;
+        imap_autogear_step(&ag, &c, &b, &gst, v, f);
+        v = sim_v(v, &b, 0);
+    }
+    CHECK(gst == 9, "autogear: nach Stillstand Gas -> 1. Gang (gst=%u)", gst);
+
+    /* -- Hindernis: Gas, v bleibt 0 -> kein Hochschalten -- */
+    memset(&ag, 0, sizeof ag);
+    gst = 9;
+    v = 0.0f;
+    for (i = 0; i < 600; i++, f++) {
+        blk_neutral(&b);
+        b.gear = gst;
+        b.pedal_r = 0xFF;
+        imap_autogear_step(&ag, &c, &b, &gst, v, f);
+    }
+    CHECK(gst == 9, "autogear: festgefahren bleibt 1. Gang (gst=%u)", gst);
+
+    /* -- Steigung: gelernte Endgeschw., Plateau bei 42 % -> kein Hoch, runter -- */
+    memset(&ag, 0, sizeof ag);
+    ag.init = 1;
+    ag.last_frame = f - 1;
+    ag.shift_frame = f - 100;
+    ag.vtop[9] = 0.10f;
+    ag.vtop[10] = 0.18f;
+    ag.vtop[11] = 0.26f;
+    gst = 11; /* 3. Gang */
+    for (i = 0; i < 200; i++, f++) {
+        blk_neutral(&b);
+        b.gear = gst;
+        b.pedal_r = 0xFF;
+        imap_autogear_step(&ag, &c, &b, &gst, 0.11f, f);
+    }
+    CHECK(gst == 10, "autogear: Steigung 3 -> 2, kein Pendeln (gst=%u)", gst);
+
+    /* -- N + Gas -> 1; manuelle Flanke wird uebernommen -- */
+    memset(&ag, 0, sizeof ag);
+    blk_neutral(&b);
+    gst = 8;
+    b.pedal_r = 0xFF;
+    imap_autogear_step(&ag, &c, &b, &gst, 0.0f, f++);
+    CHECK(gst == 9 && b.gear == 9, "autogear: N + Gas -> 1");
+    blk_neutral(&b);
+    b.gear = 11; /* Spieler schaltet manuell (Q/E) */
+    imap_autogear_step(&ag, &c, &b, &gst, 0.2f, f++);
+    CHECK(gst == 11 && b.gear == 11, "autogear: manueller Gang bleibt Ausgangspunkt");
+    blk_neutral(&b);
+    b.gear = 9;
+    imap_autogear_step(&ag, &c, &b, &gst, 0.0f, f++);
+    CHECK(gst == 9 && b.pedal_r == 0 && b.pedal_m == 0, "autogear: ohne Pedal keine Aenderung");
+}
+
 int main(int argc, char **argv)
 {
     imap_profile_t kb_file, kb_in, xbox_file, xbox_in;
@@ -1988,6 +2187,8 @@ int main(int argc, char **argv)
     run_photo_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 15: W195 */
     run_feedback_shot_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in);
     run_feedback_clip_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in);
+
+    run_simple_cases(rc_kb == 0 ? &kb_file : &kb_in); /* Teil 16: W218 */
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;

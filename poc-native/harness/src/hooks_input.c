@@ -507,6 +507,134 @@ static void w87_toggle_assist(sbc_in_t *s, imap_state_t *ts, unsigned chg)
     }
 }
 
+/* W218 SIMPLE-CONTROLS (aim_turn / auto_gear, Standard aus): gekoppelte
+ * Ziel-/Drehsteuerung und automatischer Gangwechsel (Logik rein in
+ * input_map.c, imap_aim_turn / imap_autogear_step). Nur Missionsschleife mit
+ * VT online, ESC-Menue zu und ohne aktiven Original-Controller (der bleibt
+ * immer echt). Geschwindigkeit: Positions-Delta des eigenen VT (Entity-
+ * Tabelle wie drive_apply, x +0x0C / z +0x14) je Spiel-Frame, Vorzeichen
+ * ueber die Blickrichtung [0x3521C0] (vorwaerts = (sin hy, cos hy)). */
+static void w218_simple_controls(sbc_in_t *s, imap_state_t *gs)
+{
+    static imap_autogear_t ag;
+    static imap_autogear_cfg_t agc;
+    static int agc_init, turn_on, logged;
+    static unsigned pos_f, npos;
+    static float hx[8], hz[8], v_last, turn_hy0;
+    static unsigned hf[8], ag_diag_f;
+    float hy = 0.0f, x = 0.0f, z = 0.0f;
+    int ok = 0;
+    if (g_cfg.sbc_usb) {
+        int sst = sbc_wire_status();
+        if (sst == SBC_WIRE_USB_OK || sst == SBC_WIRE_FIXTURE) return;
+    }
+    if (g_cfg.overlay && sb_ovl_open()) return;
+    __try {
+        u32 tab = *(volatile u32 *)(uintptr_t)0x351828u;
+        u32 n = *(volatile u32 *)(uintptr_t)0x352288u;
+        u32 ours = *(volatile uint16_t *)(uintptr_t)0x356E2Cu;
+        if (*(volatile u32 *)(uintptr_t)0x356F58u == 1u &&
+            *(volatile u32 *)(uintptr_t)0x53831Cu == 1u &&
+            tab && n <= 100000u && ours && ours < n) {
+            u32 ob = tab + ours * 0x5Cu;
+            if (*(volatile uint16_t *)(uintptr_t)ob != 0) {
+                x = *(volatile float *)(uintptr_t)(ob + 0x0C);
+                z = *(volatile float *)(uintptr_t)(ob + 0x14);
+                hy = *(volatile float *)(uintptr_t)0x3521C0u;
+                ok = 1;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = 0;
+    }
+    if (!ok) {
+        /* Missionsende/Neustart/VT offline: Verlauf und gelernte
+         * Endgeschwindigkeiten verwerfen (naechster VT kann langsamer sein). */
+        npos = 0;
+        turn_on = 0;
+        if (ag.init) memset(&ag, 0, sizeof ag);
+        return;
+    }
+    if (!logged) {
+        logged = 1;
+        HLOG_I("INPUT: vereinfachte Steuerung aktiv (aim_turn=%d thresh=%d%% "
+               "gain=%d%%, auto_gear=%d) bei f=%u", g_cfg.aim_turn,
+               g_cfg.aim_turn_thresh, g_cfg.aim_turn_gain, g_cfg.auto_gear,
+               g_frames);
+    }
+    if (g_cfg.aim_turn) {
+        int r = imap_aim_turn((imap_block_t *)s, g_cfg.aim_turn_thresh,
+                              g_cfg.aim_turn_gain);
+        if (r && !turn_on) {
+            turn_on = 1;
+            turn_hy0 = hy;
+            HLOG_I("INPUT: Ziel-Kopplung an (aim_x=%02X rot=%d hy=%.3f) bei f=%u",
+                   s->aiming_x, (int)s->rot_lever, hy, g_frames);
+        } else if (!r && turn_on) {
+            turn_on = 0;
+            HLOG_I("INPUT: Ziel-Kopplung aus (aim_x=%02X hy=%.3f, Drehung "
+                   "%.3f rad) bei f=%u", s->aiming_x, hy, hy - turn_hy0,
+                   g_frames);
+        }
+    }
+    if (g_cfg.auto_gear) {
+        uint8_t g0 = s->gear;
+        int g1;
+        if (!agc_init) {
+            imap_autogear_defaults(&agc);
+            agc_init = 1;
+        }
+        if (g_frames != pos_f) {
+            /* Geglaettet: Weg ueber bis zu 6 Frames (Einzelbild-Deltas
+             * rauschen, Beleglauf W218: Spitzen -0,8 bei 0,25/Frame).
+             * Luecke > 30 Frames oder Sprung > 3 Einheiten/Frame (Neustart,
+             * Teleport) -> Verlauf neu. */
+            unsigned i0 = npos & 7u;
+            if (npos) {
+                unsigned lp = (npos - 1u) & 7u;
+                float sx = x - hx[lp], sz = z - hz[lp];
+                unsigned df = g_frames - hf[lp];
+                if (df == 0u || df > 30u ||
+                    sx * sx + sz * sz > 9.0f * (float)(df * df)) {
+                    npos = 0;
+                    i0 = 0;
+                }
+            }
+            hx[i0] = x;
+            hz[i0] = z;
+            hf[i0] = g_frames;
+            npos++;
+            if (npos >= 2u) {
+                unsigned back = npos > 7u ? 6u : npos - 1u;
+                unsigned ob = (npos - 1u - back) & 7u;
+                float dx = x - hx[ob], dz = z - hz[ob];
+                float d = sqrtf(dx * dx + dz * dz);
+                float fw = dx * sinf(hy) + dz * cosf(hy);
+                v_last = (fw < 0.0f ? -d : d) / (float)(g_frames - hf[ob]);
+            } else {
+                v_last = 0.0f;
+            }
+            pos_f = g_frames;
+        }
+        g1 = imap_autogear_step(&ag, &agc, (imap_block_t *)s, &gs->gear,
+                                v_last, g_frames);
+        if (g_cfg.input_diag && (g_frames % 15u) == 0u && g_frames != ag_diag_f) {
+            ag_diag_f = g_frames; /* W218 DIAG: Geschwindigkeitsverlauf */
+            HLOG_I("INPUT: Automatik-Diag f=%u v=%.3f gang=%u gas=%u bremse=%u "
+                   "pos=%.1f,%.1f hy=%.3f", g_frames, v_last, g1, s->pedal_r,
+                   s->pedal_m, x, z, hy);
+        }
+        if (g1 != g0) {
+            static const char *const gn[7] = { "R", "N", "1", "2", "3", "4", "5" };
+            HLOG_I("INPUT: Automatik Gang %s -> %s (v=%.3f vtop=%.3f gas=%u "
+                   "bremse=%u) bei f=%u",
+                   (g0 >= 7 && g0 <= 13) ? gn[g0 - 7] : "?", gn[g1 - 7],
+                   v_last, ag.vtop[g0 >= 7 && g0 <= 13 ? g0 : 8],
+                   s->pedal_r, s->pedal_m, g_frames);
+        }
+    }
+}
+
 /* XInputGetState (0x2569C3, 2 Args, RET 8): Tastatur -> SBC-State, 0=OK. */
 u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
 {
@@ -738,6 +866,13 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
             }
             if (g_cfg.toggle_assist)
                 w87_toggle_assist(s, ts, chg); /* W87 */
+        }
+        if (g_cfg.aim_turn || g_cfg.auto_gear) {
+            /* W218 SIMPLE-CONTROLS: vor der absoluten Vorsteuerung (die
+             * Kopplung sieht den Hebel, nicht die Vorsteuer-Spitzen). */
+            imap_state_t *gs = (g_cfg.input_profile[0] &&
+                                g_prof_load_rc >= 0) ? &g_prof_st : &g_leg;
+            w218_simple_controls(s, gs);
         }
         if (g_cfg.mouse_mode == 1 && g_cfg.mouse_aim && !g_cfg.mouse_sight &&
             g_sbc_mouse_live) {

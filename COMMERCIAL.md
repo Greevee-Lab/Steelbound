@@ -1,14 +1,12 @@
-# Commercial use (draft)
+# Commercial use
 
 Our own code is licensed under the PolyForm Noncommercial License 1.0.0
 (see `LICENSE`). **Any commercial use by third parties requires the
 author's prior written permission.**
 
-To ask for a commercial license, contact: [contact-placeholder]
+To ask for a commercial license, contact: steelbound@outlook.de
 
-(The contact above is a placeholder and will be filled in at export time.)
-
-## FAQ (draft, no legal advice)
+## FAQ (no legal advice)
 
 **What counts as noncommercial?**
 

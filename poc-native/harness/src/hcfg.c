@@ -260,6 +260,7 @@ void hcfg_defaults(void)
     g_cfg.perf_hud_pos = 0;             /* W122: oben rechts */
     strcpy_s(g_cfg.perf_hud_key, sizeof g_cfg.perf_hud_key, "F2"); /* W122 */
     g_cfg.perf_log = 0;                 /* W122: DIAG aus */
+    g_cfg.watermark = 0;                /* W219: aus (Spieler-cfg sb_player.cfg setzt 1) */
     g_cfg.perf_spike_ms = 0;            /* W122: 0 = 2x Zielbildzeit */
     g_cfg.perf_prof = 0;                /* W122: DIAG Profiler aus */
     g_cfg.perf_prof_heavy = 0;          /* W168: DIAG Schwelle schwerer Tick (0 = 28 ms) */
@@ -406,6 +407,10 @@ void hcfg_defaults(void)
     g_cfg.pad_mouse_wake = 3;
     g_cfg.pad_dz_stick = 0;  /* W143: 0 = Profil-Totzonen unveraendert */
     g_cfg.pad_dz_trig = 0;
+    g_cfg.aim_turn = 0;         /* W218 SIMPLE-CONTROLS: Standard aus */
+    g_cfg.aim_turn_thresh = 60;
+    g_cfg.aim_turn_gain = 100;
+    g_cfg.auto_gear = 0;
     g_cfg.sbc_autocal = 1;     /* W128 (Key sbc_cal): Ruhelage beim Start erfassen */
     g_cfg.sbc_axis_dead = 6;
     g_cfg.sbc_pedal_dead = 16;
@@ -512,6 +517,7 @@ static int set_key_overlay(const char *k, const char *v)
     else if (strcmp(k, "perf_hud_pos") == 0) { g_cfg.perf_hud_pos = atoi(v); }
     else if (strcmp(k, "perf_hud_key") == 0) { strncpy_s(g_cfg.perf_hud_key, sizeof g_cfg.perf_hud_key, v, _TRUNCATE); }
     else if (strcmp(k, "perf_log") == 0) { g_cfg.perf_log = atoi(v); }
+    else if (strcmp(k, "watermark") == 0) { g_cfg.watermark = atoi(v); } /* W219 */
     else if (strcmp(k, "perf_spike_ms") == 0) { g_cfg.perf_spike_ms = atoi(v); }
     else if (strcmp(k, "perf_prof") == 0) { g_cfg.perf_prof = atoi(v); }
     else if (strcmp(k, "perf_prof_heavy") == 0) { g_cfg.perf_prof_heavy = atoi(v); } /* DIAG(PERF-TICK,W168) */
@@ -712,6 +718,18 @@ static void set_key(const char *k, const char *v)
         g_cfg.pad_dz_stick = atoi(v);
         if (g_cfg.pad_dz_stick < 0) g_cfg.pad_dz_stick = 0;
         if (g_cfg.pad_dz_stick > 90) g_cfg.pad_dz_stick = 90;
+    } else if (strcmp(k, "aim_turn") == 0) { /* W218 */
+        g_cfg.aim_turn = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "aim_turn_thresh") == 0) {
+        g_cfg.aim_turn_thresh = atoi(v);
+        if (g_cfg.aim_turn_thresh < 0) g_cfg.aim_turn_thresh = 0;
+        if (g_cfg.aim_turn_thresh > 95) g_cfg.aim_turn_thresh = 95;
+    } else if (strcmp(k, "aim_turn_gain") == 0) {
+        g_cfg.aim_turn_gain = atoi(v);
+        if (g_cfg.aim_turn_gain < 0) g_cfg.aim_turn_gain = 0;
+        if (g_cfg.aim_turn_gain > 200) g_cfg.aim_turn_gain = 200;
+    } else if (strcmp(k, "auto_gear") == 0) {
+        g_cfg.auto_gear = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "pad_dz_trig") == 0) {
         g_cfg.pad_dz_trig = atoi(v);
         if (g_cfg.pad_dz_trig < 0) g_cfg.pad_dz_trig = 0;

@@ -42,7 +42,7 @@ Maintainers then sort issues with these labels:
 | `docs` | Documentation |
 | `wontfix` | Out of scope, for example other game versions for now |
 
-## What we cannot accept
+## What I cannot accept
 
 - **No game content:** no XBE or disc-image parts, textures, screenshots,
   audio, movies, saves or packs derived from the game. Test against your

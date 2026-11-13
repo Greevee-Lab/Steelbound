@@ -107,6 +107,7 @@ add_library(sb_emu SHARED
   src/render_clip.c
   src/sb_feedback.c
   src/sb_perfhud.c
+  src/sb_watermark.c
   src/audio_out.c
   src/audio_fmt.c
   src/audio_mix.c
@@ -204,6 +205,17 @@ add_executable(render_selftest
 target_include_directories(render_selftest PRIVATE src)
 target_link_libraries(render_selftest PRIVATE d3d11)
 target_compile_options(render_selftest PRIVATE /W3)
+
+# W219 WATERMARK: Release-Version fuer das Alpha-Wasserzeichen (make_alpha.py
+# --version bzw. release.sh setzen -DSB_VERSION=0.1.0-alpha.N); leer = "dev".
+set(SB_VERSION "" CACHE STRING "Release-Version (leer = Entwickler-Build)")
+if(NOT SB_VERSION MATCHES "^[A-Za-z0-9.+-]*$")
+  message(FATAL_ERROR "SB_VERSION nur aus A-Z a-z 0-9 . + - (ist: ${SB_VERSION})")
+endif()
+if(SB_VERSION)
+  target_compile_definitions(sb_emu PRIVATE "SB_VERSION_STR=\"${SB_VERSION}\"")
+endif()
+message(STATUS "SB_VERSION=${SB_VERSION}")
 
 # W116: Edition an alle C-Ziele (nur community setzt etwas)
 if(SB_EDITION_COMMUNITY)

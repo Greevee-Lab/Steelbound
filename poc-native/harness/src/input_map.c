@@ -1956,3 +1956,108 @@ void imap_arb_axes(imap_arb_t *a, const imap_arb_in_t *in, int out[IMAP_ARB_N])
         out[i] = a->sbc_owns[i] ? sbc : in->cur[i];
     }
 }
+
+/* ---- W218 SIMPLE-CONTROLS (s. input_map.h) ---- */
+int imap_aim_turn(imap_block_t *blk, int thresh_pct, int gain_pct)
+{
+    int ax = blk->aiming_x, r;
+    float dev, t, e;
+    if (thresh_pct < 0) thresh_pct = 0;
+    if (thresh_pct > 95) thresh_pct = 95;
+    if (gain_pct < 0) gain_pct = 0;
+    if (gain_pct > 200) gain_pct = 200;
+    /* Hebel-Kennlinie: 0x7F/0x80 = Mitte, 0x00 = -1, 0xFF = +1 */
+    dev = ax >= 0x80 ? (float)(ax - 0x80) / 127.0f : (float)(ax - 0x7F) / 127.0f;
+    t = (float)thresh_pct / 100.0f;
+    if (fabsf(dev) <= t || gain_pct == 0) return 0;
+    e = (fabsf(dev) - t) / (1.0f - t);
+    r = (int)lroundf(e * (float)gain_pct / 100.0f * 127.0f);
+    r = imap_clampi(r, 0, 127);
+    if (dev < 0.0f) r = -r;
+    if (r == 0) return 0;
+    if (abs(r) > abs((int)blk->rot_lever)) blk->rot_lever = (int8_t)r;
+    return r;
+}
+
+void imap_autogear_defaults(imap_autogear_cfg_t *c)
+{
+    c->min_hold = 45;
+    c->win = 15;
+    c->plat_pct = 3.0f;
+    c->v_min = 0.05f;
+    c->v_stop = 0.02f;
+    c->down_pct = 70.0f;
+    c->rev_delay = 10;
+    c->pedal_on = 0x40;
+}
+
+int imap_autogear_step(imap_autogear_t *ag, const imap_autogear_cfg_t *c,
+                       imap_block_t *blk, uint8_t *gear_st, float v,
+                       unsigned frame)
+{
+    int g = blk->gear, gas, brk, newf, win;
+    unsigned since;
+    if (g < 7 || g > 13) g = 8;
+    if (!ag->init) {
+        memset(ag, 0, sizeof *ag);
+        ag->init = 1;
+        ag->last_frame = frame - 1u;
+        ag->shift_frame = frame;
+    }
+    gas = blk->pedal_r >= c->pedal_on;
+    brk = blk->pedal_m >= c->pedal_on;
+    newf = frame != ag->last_frame;
+    if (newf) {
+        ag->last_frame = frame;
+        ag->hist[ag->nhist & 31u] = v;
+        ag->nhist++;
+    }
+    since = frame - ag->shift_frame;
+    win = c->win < 1 ? 1 : (c->win > 31 ? 31 : c->win);
+#define AG_SHIFT(ng) do { g = (ng); ag->shift_frame = frame; ag->shifts++; \
+                          ag->nhist = 0; } while (0)
+    if (g == 7) {
+        /* Rueckwaerts: Gas (vorwaerts gewollt) bremst bis zum Stillstand */
+        if (gas && !brk && v > -c->v_stop) {
+            AG_SHIFT(9);
+        } else {
+            uint8_t pr = blk->pedal_r, pm = blk->pedal_m;
+            blk->pedal_r = pm; /* Bremse = Gas rueckwaerts */
+            blk->pedal_m = pr; /* Gas = Bremse */
+        }
+    } else {
+        if (brk && !gas && fabsf(v) < c->v_stop) {
+            if (!ag->brake_since) ag->brake_since = frame ? frame : 1u;
+            if ((int)(frame - ag->brake_since) >= c->rev_delay) {
+                AG_SHIFT(7);
+                ag->brake_since = 0;
+                blk->pedal_r = blk->pedal_m;
+                blk->pedal_m = 0;
+            }
+        } else {
+            ag->brake_since = 0;
+        }
+        if (g == 8 && gas && !brk) {
+            AG_SHIFT(9);
+        } else if (g >= 9 && newf && since >= (unsigned)c->min_hold) {
+            if (g > 9 && fabsf(v) < c->v_stop) {
+                AG_SHIFT(9); /* Stillstand: wieder anfahren im 1. Gang */
+            } else if (g > 9 && ag->vtop[g - 1] > 0.0f &&
+                       v < ag->vtop[g - 1] * c->down_pct / 100.0f) {
+                AG_SHIFT(g - 1);
+            } else if (g < 13 && gas && !brk && v > c->v_min &&
+                       ag->nhist > (unsigned)win) {
+                float old = ag->hist[(ag->nhist - 1u - (unsigned)win) & 31u];
+                int slow = ag->vtop[g] > 0.0f && v < ag->vtop[g] * 0.8f;
+                if (v - old < v * c->plat_pct / 100.0f && !slow) {
+                    if (v > ag->vtop[g]) ag->vtop[g] = v;
+                    AG_SHIFT(g + 1);
+                }
+            }
+        }
+    }
+#undef AG_SHIFT
+    blk->gear = (uint8_t)g;
+    if (gear_st) *gear_st = (uint8_t)g;
+    return g;
+}

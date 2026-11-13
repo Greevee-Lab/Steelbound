@@ -179,6 +179,11 @@ gui.ctl_bind=Belegen …
 gui.ctl_keymap=Tastenübersicht
 gui.ctl_mouse=Maus
 gui.ctl_mouseoff=Maus-Zielen aus bei Controller
+gui.ctl_aimturn=Fadenkreuz am Rand dreht den Mech
+gui.ctl_aimturn_on=Vereinfachte Steuerung: Fadenkreuz an den Rand dreht den Mech mit (nicht mit dem Original-Controller).
+gui.ctl_autogear=Automatische Gangschaltung
+gui.ctl_autogear_on=Vereinfachte Steuerung: Gänge schalten automatisch, Bremse im Stand = Rückwärts (nicht mit dem Original-Controller).
+gui.ctl_simple_off=Vereinfachte Steuerung aus (Original-Steuerung).
 gui.ctl_notfound=Tastenbelegung „%s“ nicht gefunden.\r\nDas Spiel nutzt dann die Standardbelegung und warnt (mitgelieferte Belegungen haben einen eingebauten Ersatz).
 gui.ctl_notname=Tastenbelegung „%s“ ist kein einfacher Name – das Spiel lädt sie als Pfad.
 gui.ctl_pad=Gamepad (XInput)
@@ -1031,6 +1036,8 @@ ovl.st_fb_folder=Ordner geöffnet
 # W190 SAVE-LOCK: Spielstaende schuetzen (Testhilfe)
 ovl.lb_savelock=Spielstände schützen
 ovl.lb_slcommit=Geschützte Änderungen übernehmen
+ovl.lb_aimturn=Fadenkreuz dreht Mech
+ovl.lb_autogear=Automatik-Getriebe
 ovl.v_sl_until_exit=An bis Beenden
 ovl.sl_note=Spielstände geschützt (Testhilfe)
 ovl.st_sl_on=Schutz an: Änderungen werden beim Beenden verworfen

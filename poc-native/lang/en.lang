@@ -179,6 +179,11 @@ gui.ctl_bind=Assign …
 gui.ctl_keymap=Key overview
 gui.ctl_mouse=Mouse
 gui.ctl_mouseoff=Mouse aiming off with controller
+gui.ctl_aimturn=Reticle at edge turns the mech
+gui.ctl_aimturn_on=Simplified controls: pushing the reticle to the edge also turns the mech (not with the original controller).
+gui.ctl_autogear=Automatic gear shifts
+gui.ctl_autogear_on=Simplified controls: gears shift automatically; brake at standstill = reverse (not with the original controller).
+gui.ctl_simple_off=Simplified control option off (original controls).
 gui.ctl_notfound=Control layout ‘%s’ not found.\r\nThe game then uses the standard layout and shows a warning (shipped layouts have a built-in fallback).
 gui.ctl_notname=Control layout ‘%s’ is not a plain name – the game loads it as a path.
 gui.ctl_pad=Gamepad (XInput)
@@ -1031,6 +1036,8 @@ ovl.st_fb_folder=Folder opened
 # W190 SAVE-LOCK: protect saves (test aid)
 ovl.lb_savelock=Protect saves
 ovl.lb_slcommit=Keep protected changes
+ovl.lb_aimturn=Reticle turns mech
+ovl.lb_autogear=Automatic gears
 ovl.v_sl_until_exit=On until exit
 ovl.sl_note=Saves protected (test aid)
 ovl.st_sl_on=Protected: changes are discarded on exit

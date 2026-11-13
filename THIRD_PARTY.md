@@ -1,11 +1,8 @@
-# Third-party components (draft)
+# Third-party components
 
 Our own code is source-available under the PolyForm Noncommercial License
 1.0.0 (see `LICENSE`). The components below are **not** our code: they keep
-their own licenses. Binaries are not stored in git; they ship as release
-attachments with their license texts (versions and SHA-256 in
-`third_party/tools.lock`). This list is a draft and will be finalised at
-export time. Nothing here is legal advice.
+their own licenses. Nothing here is legal advice.
 
 ## Own artwork (not third-party)
 
@@ -28,7 +25,9 @@ No third-party binaries are shipped with the community release.
 | IMA-ADPCM step table, FNV-1a hash, SHA-256 | public standard / public-domain algorithm / own implementation per FIPS 180-4 | small standard algorithms implemented in our own code |
 | MSVC runtime | user's Visual Studio license | NOT shipped |
 
-## Open points (must be resolved before release)
+## Acknowledgements
 
-1. **XbSymbolDatabase attribution:** whether the MIT attribution duty
-   applies to recognition results (names/addresses) is open.
+Thanks to the authors of XbSymbolDatabase (MIT License) and nv2a_vsh_cpu
+(Public Domain), and to the Cxbx-Reloaded and Xbox preservation community,
+whose public research helped us understand the original hardware. None of
+their code is included in Steelbound.

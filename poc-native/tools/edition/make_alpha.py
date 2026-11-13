@@ -2,6 +2,7 @@
 """make_alpha.py - Alpha-Binaerpaket aus dem Community-Export bauen (W180).
 
   python make_alpha.py --work <ordner> [--name Steelbound-alpha1] [--zip <datei.zip>]
+                       [--version 0.1.0-alpha.N]
                        [--export <fertiger Export>] [--skip-build] [--no-first-start]
                        [--xbe PFAD] [--media auto|PFAD] [--allow-skip] [--force]
 
@@ -11,6 +12,9 @@ Ablauf (alles unter --work, das ausserhalb des Repos liegen muss):
   2. build/    CMake configure + Release-Build von Client (harness) und
                Launcher NUR aus dem Export (-A Win32, SB_EDITION=community);
                Logs build/*.log. Der Export darf nicht auf das Repo zeigen.
+               W219: Release-Version als -DSB_VERSION (Wasserzeichen im
+               Client); --version oder aus --name "Steelbound-<ver>[-win32]",
+               sonst leer ("Steelbound dev").
   3. stage/<name>/  Binaerpaket: sb_launcher.exe, sb_ldr.exe, sb_emu.dll,
                sb_native.cfg (Spieler-cfg, leere Spielpfade), profiles/,
                lang/, docs/ (englische Doku), README.md, LICENSE,
@@ -108,7 +112,20 @@ def prepare_work(work, roots, force):
     return None
 
 
-def build(export, bdir, roots):
+VERSION_RE = r"[A-Za-z0-9.+\-]+"
+
+
+def release_version(name, explicit):
+    """W219: Release-Version fuer das Wasserzeichen (-DSB_VERSION).
+    --version gewinnt; sonst aus dem Paketnamen Steelbound-<ver>[-win32]
+    (release.sh: Steelbound-0.1.0-alpha.5-win32); sonst leer (dev)."""
+    if explicit:
+        return explicit
+    m = re.fullmatch(r"Steelbound-(\d+\.\d+\.\d+[A-Za-z0-9.+\-]*?)(?:-win32)?", name or "")
+    return m.group(1) if m else ""
+
+
+def build(export, bdir, roots, version=""):
     """Client + Launcher nur aus dem Export bauen. -> (rc, [logs])"""
     os.makedirs(bdir, exist_ok=True)
     logs = []
@@ -120,7 +137,7 @@ def build(export, bdir, roots):
         if os.path.exists(lg):
             os.remove(lg)
         rc = run(["cmake", "-S", src, "-B", out, "-A", "Win32",
-                  "-DSB_EDITION=community"], lg)
+                  "-DSB_EDITION=community", "-DSB_VERSION=" + version], lg)
         if rc == 0:
             rc = run(["cmake", "--build", out, "--config", "Release", "--", "-m"], lg)
         if rc != 0:
@@ -144,7 +161,7 @@ def build(export, bdir, roots):
     return 0, logs
 
 
-def assemble(stage, bases, commit):
+def assemble(stage, bases, commit, version=""):
     os.makedirs(stage, exist_ok=True)
     missing = []
     for dst, base, rel in FILES:
@@ -168,6 +185,7 @@ def assemble(stage, bases, commit):
     with open(os.path.join(stage, "VERSION.txt"), "w", encoding="utf-8", newline="\r\n") as f:
         f.write("Steelbound - Steel Battalion Game Preservation Project\n")
         f.write("Package: %s (Community Edition, binary)\n" % os.path.basename(stage))
+        f.write("Version: %s\n" % (version or "dev"))
         f.write("Built: %s from commit %s\n" % (time.strftime("%Y-%m-%d"), commit))
         f.write("No game data is included. You need your own copy of the game "
                 "(European/PAL release).\n\nFiles (sha256):\n")
@@ -333,6 +351,8 @@ def main(argv=None):
     ap.add_argument("--work", required=True)
     ap.add_argument("--name", default="Steelbound-alpha1")
     ap.add_argument("--zip")
+    ap.add_argument("--version", help="Release-Version fuer das Wasserzeichen (W219), z. B. 0.1.0-alpha.5; "
+                    "Standard: aus --name Steelbound-<ver>[-win32], sonst dev")
     ap.add_argument("--export", help="fertiger Community-Export (statt neu exportieren)")
     ap.add_argument("--skip-build", action="store_true",
                     help="vorhandenen Build unter <work>/build nutzen")
@@ -345,6 +365,11 @@ def main(argv=None):
     if not re.fullmatch(r"[A-Za-z0-9._\-]+", a.name):
         print("FEHLER: --name nur aus Buchstaben, Ziffern, . _ -", file=sys.stderr)
         return 3
+    version = release_version(a.name, a.version)
+    if version and not re.fullmatch(VERSION_RE, version):
+        print("FEHLER: --version nur aus Buchstaben, Ziffern, . + -", file=sys.stderr)
+        return 3
+    log("Version (Wasserzeichen): %s" % (version or "dev"))
     root = ec.repo_root()
     roots = [root, ec.main_checkout()]
     work = os.path.abspath(a.work)
@@ -378,7 +403,7 @@ def main(argv=None):
     # 2. Build aus dem Export
     bdir = os.path.join(work, "build")
     if not a.skip_build:
-        rc, _logs = build(export, bdir, roots)
+        rc, _logs = build(export, bdir, roots, version)
         if rc != 0:
             return 1
     # 3. Paket
@@ -387,7 +412,7 @@ def main(argv=None):
         shutil.rmtree(stage)
     bases = {"build_h": os.path.join(bdir, "harness"),
              "build_l": os.path.join(bdir, "launcher"), "export": export}
-    missing = assemble(stage, bases, package_edition.git_head(root))
+    missing = assemble(stage, bases, package_edition.git_head(root), version)
     if missing:
         log("fehlende Quellen: " + ", ".join(missing))
     # 4. Pruefung

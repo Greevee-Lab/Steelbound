@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Feedback & impressions
+    url: https://github.com/Greevee-Lab/Steelbound/discussions/new?category=general
+    about: How does Steelbound feel? Tell us what you enjoyed and what feels off (2-minute form).
+  - name: Polls and discussions
+    url: https://github.com/Greevee-Lab/Steelbound/discussions
+    about: Vote in polls, discuss ideas, show your setup.

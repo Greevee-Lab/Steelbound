@@ -240,7 +240,8 @@ typedef struct {
     int tex_lock_guard; /* FIX(PHYSALIAS,W86): 1 = LockRect prueft Schreibbarkeit des vollen Bereichs (fremder/zu kleiner Block -> Fallback + Warnung, kein AV 0x24E1D3), 0 = nur Lesbarkeit (alt) */
     int wv_diag; /* DIAG(WORLDVIEW,W65): 1 = grosse RTs (>= 512 px: RT31-Welt, S40) am Session-Ende im Zensus-Frame dumpen, 2 = nach jedem Farb-Draw (cm != 0) dorthin (monslot_*.jpg, MONDUMP-Kappe) */
     /* FPS-INTERP (W69): Zwischenbilder in der Mission (render_interp.c) */
-    int interp_fps; /* 0 = aus (heutiges Verhalten exakt), sonst Ziel-Presents/s in der Mission (60, 120; K = interp_fps/30 Bilder je 30-Hz-Tick) */
+    int interp_fps; /* 0 = aus (heutiges Verhalten exakt), sonst Ziel-Presents/s in der Mission (W223: Liste sb_fpsrate.h 60..240, cfg -1 = Monitor auto; Echtzeit-Takt beliebig, Testtakt K = interp_fps/30 Bilder je 30-Hz-Tick) */
+    int interp_auto; /* W223 FPS-RATES: kein cfg-Schluessel; 1 = cfg hatte interp_fps=-1 (Monitor auto), interp_fps ist dann die aufgeloeste Monitor-Rate (60..240) */
     int interp_diag; /* DIAG(FPS-INTERP): 1 = INTERP-Statistik/Tick-Analyse, 2 = zusaetzlich Draw-Liste der ersten Paare */
     int shading; /* RENDER-QA (W77): 1 = Shading-Pfad (VSH-Programm als GPU-VS, Register-Combiner-PS, Nebel, Stufen 0..3) in der Mission, 0 = alt (Vertexfarbe x Stufe 0) */
     int shade_mask; /* RENDER-QA (W77, DIAG): Teilfunktionen bei shading=1: 1 Nebel, 2 Vertex-Licht (oD0/oD1), 4 Stufen 1..3, 8 lange Combiner-Ketten >= 5 Stufen, 16 2D-Kompositionen (P1-Programme) (Default 7 = ohne 8/16) */

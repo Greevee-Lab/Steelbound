@@ -932,7 +932,7 @@ int sb_gfx_preset_match_for(int fps, int rt)
 
 int sb_gfx_preset_match(void)
 {
-    return sb_gfx_preset_match_for(g_cfg.interp_fps, g_cfg.rt_scale);
+    return sb_gfx_preset_match_for(g_cfg.interp_auto ? -1 : g_cfg.interp_fps, g_cfg.rt_scale); /* W223: auto = -1 (SB_FPS_AUTO) */
 }
 
 /* DIAG-Kopie der Shader-Werte des Presets q (Reihenfolge = kSbGfxPreset). */

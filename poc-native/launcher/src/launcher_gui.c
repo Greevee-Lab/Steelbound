@@ -39,6 +39,7 @@
 #include "sb_sha256.h" /* W148: XBE-Hash fuer V2 */
 #include "sb_userdata.h" /* W150 USER-DATA */
 #include "sb_savecheck.h" /* W187 KIA-LOAD: Spielstaende zuruecksetzen */
+#include "sb_fpsrate.h" /* W223 FPS-RATES: Bildraten-Liste (wie ESC-Menue) */
 #include <tlhelp32.h>
 #include "launcher_rules.h" /* W171 LAUNCHER-P2P3: Regelwerk R1-R30 */
 #include <shellapi.h> /* W148: ShellExecuteW (Ordner oeffnen) */
@@ -1870,7 +1871,9 @@ static void paint_display(void)
     card(CX0, CY0 + 244, COLW, 112, LT("gui.disp_smooth"));
     label1(F_SMALL, LT("gui.gfx_ipfps"), CX0 + 18, CY0 + 288, 100, 30, C_DIM);
     if (!paint_reason(10, CX0 + 18, CY0 + 322, COLW - 36, 30)) {
-        paint_reason(9, CX0 + 18, CY0 + 322, COLW - 36, 30);
+        if (!paint_reason(9, CX0 + 18, CY0 + 322, COLW - 36, 30)) { /* W223: sonst Hinweis GPU/Standard */
+            label(F_SMALL, LT("gui.ip_hint"), CX0 + 18, CY0 + 322, COLW - 36, 30, C_DIM);
+        }
     }
 
     card(CX0, CY0 + 368, COLW, 128, LT("gui.disp_vr"));
@@ -2713,6 +2716,34 @@ static void combo_add(HWND cb, const char *u8)
     wchar_t *w = u8_wdup(u8);
     SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)(w ? w : L""));
     free(w);
+}
+
+/* W223 FPS-RATES: Listenposition einer Bildrate (kSbFpsChoice); unbekannte
+ * Werte wie bisher auf 30 (Original), die Pruefung meldet sie. */
+static int ip_sel_of(int v)
+{
+    int i = sb_fps_choice_idx(v);
+    return i >= 0 ? i : sb_fps_choice_idx(0);
+}
+
+/* W223: Bildraten-Liste fuellen: Monitor (auto, n Hz), 30 (Original), 60,
+ * 75, 90, 100, 120 (getesteter Standard), 144, 165, 240. */
+static void ip_fill(HWND c)
+{
+    int i;
+    char b[96];
+    ComboBox_ResetContent(c);
+    for (i = 0; i < SB_FPS_NCHOICE; i++) {
+        int v = kSbFpsChoice[i];
+        if (v == SB_FPS_AUTO) {
+            if (g_disp_hz > 0) { _snprintf_s(b, sizeof b, _TRUNCATE, LT("gui.ip_auto_hz"), g_disp_hz); }
+            else { strcpy_s(b, sizeof b, LT("gui.ip_auto")); }
+        } else if (v == 0) { strcpy_s(b, sizeof b, LT("gui.ip_30")); }
+        else if (v == 60) { strcpy_s(b, sizeof b, LT("gui.ip_60")); }
+        else if (v == 120) { strcpy_s(b, sizeof b, LT("gui.ip_120")); }
+        else { _snprintf_s(b, sizeof b, _TRUNCATE, "%d", v); }
+        combo_add(c, b);
+    }
 }
 
 static void sync_preset(void)
@@ -5317,7 +5348,10 @@ static void profile_name_from_ui(char *out, size_t cap)
 static int gfx_fps(const launcher_settings_t *s)
 {
     int fps = s->interp_fps > 0 ? s->interp_fps : 30;
-    if (s->window_mode == 2 && s->fs_interp_match && s->interp_fps > 0) {
+    if (s->interp_fps == SB_FPS_AUTO) { /* W223: Monitor (auto) */
+        fps = sb_fps_auto_from_hz(g_disp_hz);
+    }
+    if (s->window_mode == 2 && (s->fs_interp_match || s->interp_fps == SB_FPS_AUTO) && s->interp_fps != 0) {
         int hz = s->fs_hz > 0 ? s->fs_hz : g_disp_hz;
         if (hz >= 60 && hz <= 240) {
             fps = hz;
@@ -5381,9 +5415,8 @@ static void gfx_sync_ui(void)
     }
     cur = g_cur;
     if (ctl(ID_IPFPS)) { /* aktuelle Bildrate der Oberflaeche */
-        static const int ip_map[3] = { 0, 60, 120 };
         int sel = ComboBox_GetCurSel(ctl(ID_IPFPS));
-        cur.interp_fps = (sel >= 0 && sel < 3) ? ip_map[sel] : cur.interp_fps;
+        cur.interp_fps = (sel >= 0 && sel < SB_FPS_NCHOICE) ? kSbFpsChoice[sel] : cur.interp_fps; /* W223 */
         sel = ComboBox_GetCurSel(ctl(ID_WINMODE));
         cur.window_mode = (sel >= 0 && sel <= 2) ? sel : cur.window_mode;
     }
@@ -5510,8 +5543,7 @@ static void ui_from_settings(const launcher_settings_t *s)
     ui_set_checked(ID_CTRL_MOUSEOFF, s->sbc_mouse_off);
     ui_set_checked(ID_CTRL_AIMTURN, s->aim_turn);   /* W218 */
     ui_set_checked(ID_CTRL_AUTOGEAR, s->auto_gear);
-    ComboBox_SetCurSel(ctl(ID_IPFPS), s->interp_fps == 60 ? 1
-                                      : s->interp_fps == 120 ? 2 : 0);
+    ComboBox_SetCurSel(ctl(ID_IPFPS), ip_sel_of(s->interp_fps)); /* W223 */
     ComboBox_SetCurSel(ctl(ID_WINMODE),
                        (s->window_mode >= 0 && s->window_mode <= 2) ? s->window_mode : 0);
     /* W159: Kombi = Vorschau-Art (Startweg entscheidet an/aus, s. do_start) */
@@ -5570,7 +5602,6 @@ static void ui_from_settings(const launcher_settings_t *s)
 static void ui_to_settings(launcher_settings_t *s)
 {
     static const int fps_map[4] = { 0, 30, 60, 120 };
-    static const int ip_map[3] = { 0, 60, 120 };
     int sel;
     ui_gettext(ctl(ID_XBE), s->xbe_path, sizeof s->xbe_path);
     ui_gettext(ctl(ID_MEDIA), s->media_root, sizeof s->media_root);
@@ -5602,7 +5633,7 @@ static void ui_to_settings(launcher_settings_t *s)
     s->aim_turn = ui_checked(ID_CTRL_AIMTURN);   /* W218 */
     s->auto_gear = ui_checked(ID_CTRL_AUTOGEAR);
     sel = ComboBox_GetCurSel(ctl(ID_IPFPS));
-    s->interp_fps = (sel >= 0 && sel < 3) ? ip_map[sel] : 0;
+    s->interp_fps = (sel >= 0 && sel < SB_FPS_NCHOICE) ? kSbFpsChoice[sel] : 0; /* W223 */
     sel = ComboBox_GetCurSel(ctl(ID_WINMODE));
     s->window_mode = (sel >= 0 && sel <= 2) ? sel : 0;
     /* W159: Kombi setzt nur die Vorschau-Art; s->vr_enable bleibt wie
@@ -5687,9 +5718,13 @@ static void update_summary(void)
     }
     g_sum[2].label = LT("gui.page_display");
     {
-        const char *fps = s.interp_fps == 0    ? LT("gui.sum_30")
-                          : s.interp_fps == 60 ? LT("gui.sum_60")
-                                               : LT("gui.sum_120");
+        char fpsb[48]; /* W223: alle Raten + Monitor (auto) */
+        const char *fps = fpsb;
+        if (s.interp_fps == 0) { fps = LT("gui.sum_30"); }
+        else if (s.interp_fps == SB_FPS_AUTO) { fps = LT("gui.sum_auto"); }
+        else if (s.interp_fps == 60) { fps = LT("gui.sum_60"); }
+        else if (s.interp_fps == 120) { fps = LT("gui.sum_120"); }
+        else { _snprintf_s(fpsb, sizeof fpsb, _TRUNCATE, "%d FPS", s.interp_fps); }
         if (s.window_mode == 1 || s.window_mode == 2) {
             _snprintf_s(g_sum[2].value, sizeof g_sum[2].value, _TRUNCATE,
                         LT("gui.play_sum_fs"),
@@ -11341,7 +11376,6 @@ static void ui_apply_language(void)
 {
     static const char *const kVsync[] = { "gui.off", "gui.on" };
     static const char *const kWinmode[] = { "gui.wm_win", "gui.wm_borderless", "gui.wm_excl" };
-    static const char *const kIp[] = { "gui.ip_30", "gui.ip_60", "gui.ip_120" };
     static const char *const kMonfx[] = { "gui.monfx_orig", "gui.monfx_grain", "gui.monfx_glitch", "gui.off" };
     static const char *const kAa[] = { "gui.aa_off", "gui.aa_final", "gui.aa_world", "gui.aa_both" };
     static const char *const kLight[] = { "gui.gfx_light_on", "gui.gfx_light_off" }; /* W173 */
@@ -11389,7 +11423,11 @@ static void ui_apply_language(void)
     }
     combo_refill(ID_WINMODE, kWinmode, 3);
     combo_set0(ID_FSHZ, "gui.fshz_desktop");
-    combo_refill(ID_IPFPS, kIp, 3);
+    if (ctl(ID_IPFPS)) { /* W223 */
+        sel = ComboBox_GetCurSel(ctl(ID_IPFPS));
+        ip_fill(ctl(ID_IPFPS));
+        ComboBox_SetCurSel(ctl(ID_IPFPS), (sel >= 0 && sel < SB_FPS_NCHOICE) ? sel : ip_sel_of(120));
+    }
     combo_refill(ID_MONFX, kMonfx, 4);
     combo_refill(ID_AAMODE, kAa, 4);
     combo_refill(ID_REM_SCALE, kScale, 2);
@@ -11614,9 +11652,7 @@ static void build_controls(void)
     /* Bildrate (Mission) */
     c = mk(w, K_COMBO, ID_IPFPS, P_DISPLAY, CX0 + 120, CY0 + 288, COLW - 138,
            30, "", 0);
-    combo_add(c, LT("gui.ip_30"));
-    combo_add(c, LT("gui.ip_60"));
-    combo_add(c, LT("gui.ip_120"));
+    ip_fill(c); /* W223 */
     /* W134 VR-PROTO, W159: Vorschau-Art (Reihenfolge = vr_from/to_settings) */
     c = mk(w, K_COMBO, ID_VR, P_DISPLAY, CX0 + 120, CY0 + 412, COLW - 138, 30, "", 0);
     combo_add(c, LT("gui.vr_prev_sbs"));
@@ -12088,7 +12124,7 @@ static void on_command_inner(int id, int code)
             break; /* R14: Rueckfrage "Nein" -> eigene Werte bleiben */
         }
         lcfg_gfx_apply(&g_gfx, sel);
-        ComboBox_SetCurSel(ctl(ID_IPFPS), g_gfx.interp_fps == 60 ? 1 : 2);
+        ComboBox_SetCurSel(ctl(ID_IPFPS), ip_sel_of(g_gfx.interp_fps)); /* W223 */
         ComboBox_SetCurSel(ctl(ID_RTSCALE), g_gfx.rt_scale + 1);
         gfx_sync_ui();
         gfx_name(sel, &before, nm, sizeof nm);
@@ -13499,7 +13535,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     ok = ui_checked(ID_GP0 + LGP_PERFORMANCE) && b.interp_fps == 60 &&
                          b.rt_scale == 1 && !b.rt_scale_dyn && !b.fs_interp_match &&
                          lcfg_gfx_preset(&b, 0) == LGP_PERFORMANCE && !g_rr[9].active;
-                    ComboBox_SetCurSel(ctl(ID_IPFPS), 2);
+                    ComboBox_SetCurSel(ctl(ID_IPFPS), ip_sel_of(120));
                     ui_apply_rules();
                     ui_to_settings(&b);
                     ok = ok && ui_checked(ID_GP0 + LGP_CUSTOM) &&

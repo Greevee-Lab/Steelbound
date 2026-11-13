@@ -4,6 +4,7 @@
 #include "sb_edition.h"
 #include "sb_userdata.h" /* W150 USER-DATA */
 #include "sb_feedback.h" /* W188: SB_FEEDBACK_REPO_DEFAULT */
+#include "sb_fpsrate.h" /* W223 FPS-RATES */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
@@ -910,6 +911,13 @@ static void set_key(const char *k, const char *v)
         g_cfg.wv_diag = atoi(v);
     } else if (strcmp(k, "interp_fps") == 0) {
         g_cfg.interp_fps = atoi(v);
+        g_cfg.interp_auto = 0;
+        if (g_cfg.interp_fps == SB_FPS_AUTO) { /* W223: Monitor (auto), Hauptmonitor; Fenster-Monitor folgt live */
+            int hz = sb_fps_monitor_hz(NULL);
+            g_cfg.interp_auto = 1;
+            g_cfg.interp_fps = sb_fps_auto_from_hz(hz);
+            HLOG_I("cfg: interp_fps=auto -> %d (Hauptmonitor %d Hz)", g_cfg.interp_fps, hz);
+        }
     } else if (strcmp(k, "interp_diag") == 0) {
         g_cfg.interp_diag = atoi(v);
     } else if (strcmp(k, "shading") == 0) {

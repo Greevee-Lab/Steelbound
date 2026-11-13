@@ -113,6 +113,14 @@ What helps us most:
 **Never attach game files** (ISO, XBE, extracted game data, saves).
 More details: [Alpha testing](poc-native/docs/community/ALPHA_TESTING.md).
 
+### Not a bug? Tell us how it feels
+
+How do the controls, the look and the sound feel? What did you enjoy, what
+feels off? Fill in the 2-minute
+[feedback form](../../discussions/new?category=general), vote in
+[polls](../../discussions/categories/polls) or show your setup in
+[Discussions](../../discussions).
+
 ## Known issues
 
 Current state of the alpha – no need to report these again, but new details

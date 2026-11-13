@@ -19,6 +19,7 @@
  * im Ultrawide eingepasst. */
 #include "render_int.h"
 #include "sb_gfxpreset.h"
+#include "sb_fpsrate.h" /* W223 FPS-RATES */
 #include "render_qa.h"
 #include "sb_lang.h" /* W142 L10N */
 #include "sb_watermark.h" /* PO: sb_version_str fuer W222 */
@@ -126,7 +127,8 @@ static int g_ov_page;                   /* W121: 0 = Allgemein, 1 = Shader (W131
 static int g_ov_rts = -1;               /* W121/2: gewaehlte Welt-Aufloesung (rt_scale, wirkt nach Neustart) */
 static int g_ov_dyn = -1;               /* W148: gewaehlte Dynamik (rt_scale_dyn, wirkt sofort) */
 static int g_ov_init;
-static int g_ov_fps;                    /* gewaehlte Bildrate (0/60/120) */
+static int g_ov_fps;                    /* gewaehlte Bildrate (0 = 30, sonst Bilder/s; bei auto die aufgeloeste Rate) */
+static int g_ov_auto;                   /* W223: 1 = Monitor (auto) gewaehlt */
 static int g_ov_fps_pend;               /* 1 = Wechsel am Present-Ende faellig */
 static int g_ov_winmode;                /* Darstellung (nach Neustart) */
 static int g_ov_label0;                  /* W153: hud_label_avoid beim Start ("*" bei Abweichung) */
@@ -417,21 +419,45 @@ static void ov_sl_commit(void)
     ov_status_key(rc == 0 ? "ovl.st_sl_done" : rc == 1 ? "ovl.st_sl_busy" : "ovl.st_sl_cfail");
 }
 
+/* W223 FPS-RATES: Auswahl fuer cfg/Preset-Erkennung (auto = SB_FPS_AUTO). */
+static int ov_fps_sel(void)
+{
+    return g_ov_auto ? SB_FPS_AUTO : g_ov_fps;
+}
+
+/* W223: Wiederholrate des Monitors mit dem Spielfenster (0 = unbekannt). */
+static int ov_monitor_hz(void)
+{
+    HWND h = sb_render_hwnd();
+    return sb_fps_monitor_hz(h ? MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY) : NULL);
+}
+
 static void ov_change(int i, int dir)
 {
-    static const int fps_v[3] = { 0, 60, 120 };
     int k;
     if (!ov_enabled(i)) { return; }
     switch (i) {
-    case OI_FPS:
-        for (k = 0; k < 3 && fps_v[k] != g_ov_fps; k++) {}
-        if (k >= 3) { k = 2; }
-        k = ov_clamp(k + dir, 0, 2);
-        if (fps_v[k] == g_ov_fps) { return; }
-        g_ov_fps = fps_v[k];
+    case OI_FPS: { /* W223 FPS-RATES: Monitor (auto), 30, 60, 75, 90, 100, 120, 144, 165, 240 */
+        int k0 = g_ov_auto ? 0 : sb_fps_choice_idx(g_ov_fps);
+        if (k0 < 0) { /* alter Sonderwert (z. B. aus der cfg): naechster Listenwert darueber */
+            for (k0 = 1; k0 < SB_FPS_NCHOICE - 1 && kSbFpsChoice[k0] < g_ov_fps; k0++) {}
+        }
+        k = ov_clamp(k0 + dir, 0, SB_FPS_NCHOICE - 1);
+        if (k == k0) { return; }
+        if (kSbFpsChoice[k] == SB_FPS_AUTO) {
+            int hz = ov_monitor_hz();
+            g_ov_auto = 1;
+            g_ov_fps = sb_fps_auto_from_hz(hz);
+            HLOG_I("OVERLAY: Bildrate auto -> %d (Monitor %d Hz, f=%u)", g_ov_fps, hz, g_present_no);
+        } else {
+            g_ov_auto = 0;
+            g_ov_fps = kSbFpsChoice[k];
+        }
         g_ov_fps_pend = 1;
         HLOG_I("OVERLAY: Bildrate -> %d (interp_fps, f=%u)", g_ov_fps ? g_ov_fps : 30, g_present_no);
+        ov_status_key("ovl.st_fps");
         break;
+    }
     case OI_SHADING:
         g_cfg.shading = !g_cfg.shading;
         HLOG_I("OVERLAY: shading -> %d (f=%u)", g_cfg.shading, g_present_no);
@@ -581,12 +607,13 @@ static void ov_change(int i, int dir)
     }
     case OI_PRESET: { /* W131, W173 LAUNCHER-P4: einheitliches Grafik-Preset Original -> dezent -> stark
                        * (Shader + Effekte + HD-Texturen, sb_gfxpreset.h; Effect-Pack-Schluessel bleiben) */
-        int q = sb_gfx_preset_match_for(g_ov_fps, g_ov_rts >= 0 ? g_ov_rts : g_cfg.rt_scale), q0 = q, hd;
+        int q = sb_gfx_preset_match_for(ov_fps_sel(), g_ov_rts >= 0 ? g_ov_rts : g_cfg.rt_scale), q0 = q, hd;
         if (q < 0) { q = dir > 0 ? -1 : SB_GP_NPRE; }
         q = ov_clamp(q + dir, 0, SB_GP_NPRE - 1);
         if (q == q0) { return; }
         sb_gfx_part_apply(q, SB_GFX_ALL);
         g_ov_fps = kSbGfxPreset[SB_GP_FPS].v[q];
+        g_ov_auto = 0; /* W223 */
         g_ov_fps_pend = 1; /* W200: commit under context lock after pause */
         g_ov_rts = kSbGfxPreset[SB_GP_RT].v[q];
         g_ov_dyn = g_cfg.rt_scale_dyn = kSbGfxPreset[SB_GP_DYN].v[q];
@@ -902,7 +929,7 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     }
     if (strcmp(k, "rt_scale_dyn") == 0) { v = g_cfg.rt_scale_dyn ? 1 : 0; } /* W148 */
     if (strcmp(k, "fs_interp_match") == 0) { v = g_cfg.fs_interp_match; }
-    else if (strcmp(k, "interp_fps") == 0) { v = g_ov_fps; }
+    else if (strcmp(k, "interp_fps") == 0) { v = ov_fps_sel(); } /* W223: auto -> -1 */
     else if (strcmp(k, "shading") == 0) { v = g_cfg.shading; }
     else if (strcmp(k, "monitor_fx") == 0) { v = g_cfg.monitor_fx; }
     else if (strcmp(k, "monitor_grain") == 0) { v = g_cfg.monitor_grain; }
@@ -2300,6 +2327,7 @@ static void ov_init_state(void)
     const char *u;
     g_ov_init = 1;
     g_ov_fps = g_cfg.interp_fps > 0 ? g_cfg.interp_fps : 0;
+    g_ov_auto = g_cfg.interp_auto ? 1 : 0; /* W223 */
     g_ov_winmode = ov_clamp(g_cfg.window_mode, 0, 2);
     g_ov_label0 = g_cfg.hud_label_avoid ? 1 : 0; /* W153 */
     g_ov_avail = sb_rem_live_avail();
@@ -2548,11 +2576,31 @@ void sb_ovl_pause_tick(void)
     sb_ctx_leave();
 }
 
+/* W223 FPS-RATES: Monitor (auto) folgt dem Monitor des Fensters (Fenster/
+ * randlos; Aufruf aus sb_winmode_tick bei Monitor- bzw. Moduswechsel).
+ * Wechsel ueber denselben Weg wie die ESC-Auswahl (Present-Ende, Context-
+ * Sperre). 0 = Overlay noch nicht bereit (spaeter erneut versuchen). */
+int sb_ovl_fps_monitor(int hz)
+{
+    int v;
+    if (!g_ov_init) { return 0; }
+    if (!g_ov_auto) { return 1; }
+    v = sb_fps_auto_from_hz(hz);
+    if (v != g_ov_fps) {
+        HLOG_I("OVERLAY: Bildrate auto -> %d (Monitor %d Hz, Fenster, f=%u)", v, hz, g_present_no);
+        g_ov_fps = v;
+        g_ov_fps_pend = 1;
+        g_ov_dirty = 1;
+    }
+    return 1;
+}
+
 /* TEST(PERF-BENCH,W137): Bildratenwechsel wie aus dem Overlay anfordern
  * (rt_from_film + rt_interp_fps), wirkt am naechsten Present-Ende. */
 void sb_ovl_request_fps(int fps)
 {
     g_ov_fps = fps > 0 ? fps : 0;
+    g_ov_auto = 0; /* W223 */
     g_ov_fps_pend = 1;
     HLOG_I("OVERLAY: Bildrate -> %d angefordert (Test, f=%u)", g_ov_fps, g_present_no);
 }
@@ -2568,6 +2616,7 @@ void sb_ovl_present_end(void)
 {
     if (!g_ov_fps_pend) { return; }
     g_ov_fps_pend = 0;
+    g_cfg.interp_auto = g_ov_auto; /* W223: Auswahl auto/fest (Rate selbst folgt unten) */
     if (g_ov_fps == g_cfg.interp_fps) { return; }
     if (g_ov_fps > 0 && !sb_render_offscreen()) {
         g_cfg.interp_fps = g_ov_fps;
@@ -2669,7 +2718,11 @@ static void ov_value(int i, wchar_t *o, size_t cap)
     o[0] = 0;
     switch (i) {
     case OI_FPS:
-        if (g_ov_fps == 0) { ov_wkey(o, cap, "ovl.v_30orig"); }
+        if (g_ov_auto) { /* W223: "Monitor (auto, <n>)" */
+            char nb[64];
+            _snprintf_s(nb, sizeof nb, _TRUNCATE, LT("ovl.v_fps_auto"), g_ov_fps > 0 ? g_ov_fps : 30);
+            ov_wu8(o, cap, nb);
+        } else if (g_ov_fps == 0) { ov_wkey(o, cap, "ovl.v_30orig"); }
         else { _snwprintf_s(o, cap, _TRUNCATE, L"%d", g_ov_fps); }
         break;
     case OI_SHADING: ov_wkey(o, cap, g_cfg.shading ? "ovl.v_on" : "ovl.v_off"); break;
@@ -2809,7 +2862,7 @@ static void ov_value(int i, wchar_t *o, size_t cap)
     case OI_PRESET: { /* W131, W143; W173 LAUNCHER-P4: einheitliches Preset, der Standard heisst nach
                        * der echten Bildrate "Original (HD) - <n> FPS" (PO 7.11.; 30 = Original) */
         static const char *const pn[SB_GP_NPRE] = { "ovl.v_orig_hd", "ovl.v_subtle", "ovl.v_strong", "ovl.v_performance" };
-        int q = sb_gfx_preset_match_for(g_ov_fps, g_ov_rts >= 0 ? g_ov_rts : g_cfg.rt_scale);
+        int q = sb_gfx_preset_match_for(ov_fps_sel(), g_ov_rts >= 0 ? g_ov_rts : g_cfg.rt_scale);
         if (q == 0) {
             char nb[96];
             _snprintf_s(nb, sizeof nb, _TRUNCATE, LT("ovl.v_orig_hd"), g_ov_fps > 0 ? g_ov_fps : 30);

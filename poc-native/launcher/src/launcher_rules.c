@@ -31,7 +31,7 @@ static const lr_def_t kDef[LR_N] = {
     { LR_PAT_A, 1, 0, "R7 Aufloesung nur im Fenster" },
     { LR_PAT_A, 1, 0, "R8 Bildwiederholrate nur exklusiv" },
     { LR_PAT_B, 0, 0, "R9 Exklusiv: Bildrate folgt Hz" },
-    { LR_PAT_B, 0, 0, "R10 120 fps auf <120 Hz ruckelt" },
+    { LR_PAT_B, 0, 0, "R10 FPS ueber Hz ruckelt" },
     { LR_PAT_A, 1, 0, "R11 Raender nur bei Nicht-4:3" },
     { LR_PAT_A, 1, 0, "R12 Verlauf nur bei Ausblenden" },
     { LR_PAT_I, 0, 1, "R13 Seitenverhaeltnis fest (nie strecken)" },
@@ -183,12 +183,13 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
         hit(&out[9], 9, LR_LVL_INFO);
         strcpy_s(out[9].text, sizeof out[9].text, LT("gui.rule_r9"));
     }
-    /* R10: 120 fps auf Fenster/randlos mit < 120 Hz */
-    if (s->interp_fps == 120 && s->window_mode != 2 && e->display_hz > 0 &&
-        e->display_hz < 120) {
+    /* R10: Bildrate ueber der Bildwiederholrate auf Fenster/randlos (W223:
+     * jede feste Rate, nicht nur 120; auto folgt dem Monitor) */
+    if (s->interp_fps > 0 && s->window_mode != 2 && e->display_hz > 0 &&
+        e->display_hz + 1 < s->interp_fps) {
         hit(&out[10], 10, LR_LVL_WARN);
         _snprintf_s(out[10].text, sizeof out[10].text, _TRUNCATE,
-                    LT("gui.rule_r10"), e->display_hz);
+                    LT("gui.rule_r10"), e->display_hz, s->interp_fps);
     }
     /* R11: Breitbild-Raender nur, wenn das Bild nicht 4:3 ist */
     {

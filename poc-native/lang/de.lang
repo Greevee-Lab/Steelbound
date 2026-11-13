@@ -85,7 +85,7 @@ cfg.bad_edgew=Verlaufsbreite %d %% außerhalb 0..50 (Prozent der 4:3-Breite).
 cfg.bad_fps=Bildgrenze Menüs %d außerhalb 0..1000 (0 = aus).
 cfg.bad_height=Höhe %u außerhalb 200..4320.
 cfg.bad_hz=Bildwiederholrate %d Hz außerhalb 24..500 (0 = Desktop).
-cfg.bad_ipfps=Bildrate %d ungültig (0 = 30 Original, 60, 120).
+cfg.bad_ipfps=Bildrate %d ungültig (-1 = Monitor, 0 = 30 Original, 60, 75, 90, 100, 120, 144, 165, 240).
 cfg.bad_monfx=Cockpit-Monitor %d/%d %% außerhalb 0..100.
 cfg.bad_mouseoff=sbc_mouse_off %d ungültig (0 = Maus parallel, 1 = Maus aus bei Controller).
 cfg.bad_sbc=sbc_usb %d ungültig (0 = aus, 1 = Original-Controller per USB).
@@ -229,6 +229,9 @@ gui.gfx_winmode=Anzeigemodus
 gui.ip_120=120 (flüssig)
 gui.ip_30=30 (Original)
 gui.ip_60=60
+gui.ip_auto=Monitor (auto)
+gui.ip_auto_hz=Monitor (auto, %d Hz)
+gui.ip_hint=Höhere Raten kosten mehr GPU; 120 ist der getestete Standard.
 gui.keys_memo=MENÜS\r\nPfeile\tAuswahl\r\nSPACE\tbestätigen\r\nENTER\tSTART / weiter\r\nL\tBriefing-Film überspringen\r\nF11\tFeedback mit Screenshot\r\nF9\tFeedback mit Video (5 s)\r\n\r\nMECH STARTEN (je Schritt kurz warten)\r\nH\t1. Cockpit-Luke schließen\r\nI\t2. Zündung (OS bootet)\r\n1 2 3 4 5\t3. Kippschalter (bei Status Check)\r\nENTER\t4. START (alle Balken über Linie)\r\n\r\nKAMPF (nach START)\r\nMaus links\tHauptwaffe (Primärfeuer)\r\nSPACE\tHauptwaffe (Primärfeuer)\r\nMaus rechts / F\tSub-Waffe\r\nMaus Mitte / L\tLock-On (nur Gegner-VTs)\r\nMaus\tZielen (Modus + Empf. oben)\r\nPfeile\tZielen (Aiming + Sight)\r\nShift+Pfeile\tnur Sicht (Sight)\r\nR\tMagazinwechsel\r\nC / O\tChaff / Override\r\nN / V\tNachtsicht / FSS\r\nZ / X\tZoom rein / raus\r\nTAB / M\tMode / Karten-Zoom\r\n\r\nFAHREN\r\nW / S\tGas / Bremse\r\nA / D\tDrehen links / rechts\r\nStrg links / Maus X1/X2\tSlide-Step (Ausweichen, mit A/D)\r\nQ / E\tGang runter / hoch\r\n\t(aus N: E = 1. Gang)\r\nT / G\tTuner hoch / runter\r\n\r\nF10\tMaus freigeben / fangen\r\n\r\nEingaben wirken nur, wenn das Spielfenster den Fokus hat. EJECT hat keine Taste (nur Profil oder Original-Controller).
 gui.lang_de=Deutsch
 gui.lang_en=Englisch
@@ -287,6 +290,7 @@ gui.start_sub=Game Preservation Project · Original-Spieldaten · 4:3-Menüs mit
 gui.sum_120=120 FPS
 gui.sum_30=30 FPS (Original)
 gui.sum_60=60 FPS
+gui.sum_auto=FPS = Monitor (auto)
 gui.sum_legacy=Tastatur & Maus (Standardbelegung)%s
 gui.sum_prof=Tastenbelegung „%s“%s
 gui.sum_sbc= · Original-Controller (USB)
@@ -417,6 +421,7 @@ ovl.tab_shader=Welt
 ovl.tab_shader2=Bild
 ovl.tab_vr=VR
 ovl.v_30orig=30 (Original)
+ovl.v_fps_auto=Monitor (%d)
 ovl.v_abs=Absolut
 ovl.v_aces=ACES-ähnlich
 ovl.v_altab=Alt (A/B)
@@ -732,7 +737,7 @@ gui.rule_r6=Gilt beim Start mit „In VR spielen“.
 gui.rule_r7=Vollbild nutzt die Auflösung deines Monitors (%s).
 gui.rule_r8=Nur im exklusiven Vollbild.
 gui.rule_r9=Im exklusiven Vollbild folgt die Bildrate der Bildwiederholrate.
-gui.rule_r10=Dein Bildschirm läuft mit %d Hz – 120 FPS können ruckeln. Nimm 60 oder einen VRR-Bildschirm.
+gui.rule_r10=Dein Bildschirm läuft mit %d Hz – %d FPS können ruckeln. Nimm Monitor (auto) oder einen VRR-Bildschirm.
 gui.rule_r11=Das Bild ist 4:3 – es gibt keine Ränder.
 gui.rule_r12=Nur mit „%s“.
 gui.rule_r13=Nie gestreckt: Menüs, Filme und HUD bleiben 4:3, Missionen nutzen die volle Breite.
@@ -1167,6 +1172,7 @@ gui.gfx_p_performance=Original (HD) – Performance
 gui.gfx_p_performance_txt=Schwächere PCs: 60 FPS, native Weltauflösung.
 ovl.v_performance=Original (HD) – Performance
 ovl.st_performance=Schwache PCs. Auflösung nach Neustart.
+ovl.st_fps=Mehr FPS = mehr GPU; 120 getestet
 
 # W210 feedback clip
 ovl.clip_record=Clip aufnehmen (5 s)

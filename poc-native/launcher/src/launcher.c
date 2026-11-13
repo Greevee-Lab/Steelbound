@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include "launcher_cfg.h"
 #include "sb_gfxpreset.h" /* W173: Selbsttest 52 (gleiche Tabelle wie der Client) */
+#include "sb_fpsrate.h" /* W223: Selbsttest FPS-RATES */
 #include "launcher_ctrl.h"
 #include "launcher_u8.h"
 #include "launcher_app.h"
@@ -1451,6 +1452,75 @@ static int cli_selftest(const char *client_override)
         u8_DeleteFile(tmp);
         if (ok) { T_OK("W207 lowend (60 FPS, native RT, save/load, Custom, rules)"); }
         else { T_FAIL("W207 lowend", "%s", "values/persistence/rules"); }
+    }
+
+    /* W223 FPS-RATES: Liste, auto-Aufloesung, Pruefung, Speichern, Preset, R10. */
+    {
+        static const int want[SB_FPS_NCHOICE] = { -1, 0, 60, 75, 90, 100, 120, 144, 165, 240 };
+        static const int hz_in[] = { 0, 1, 50, 59, 60, 74, 75, 119, 143, 144, 164, 239, 240, 360 };
+        static const int hz_out[] = { 60, 60, 60, 60, 60, 75, 75, 120, 144, 144, 165, 240, 240, 240 };
+        static const int bad[] = { -2, 1, 30, 50, 59, 61, 120 + 1, 250, 1000 };
+        int ok = 1, i;
+        char e[256], why[96] = "";
+        lr_env_t env;
+        lr_res_t rr[LR_N];
+        for (i = 0; i < SB_FPS_NCHOICE; i++) {
+            if (kSbFpsChoice[i] != want[i] || sb_fps_choice_idx(want[i]) != i) { ok = 0; strcpy_s(why, sizeof why, "list"); }
+            lcfg_defaults(&a);
+            a.interp_fps = want[i];
+            if (lcfg_validate(&a, e, sizeof e) != 0) { ok = 0; strcpy_s(why, sizeof why, "valid"); }
+        }
+        for (i = 0; i < (int)(sizeof bad / sizeof bad[0]); i++) {
+            lcfg_defaults(&a);
+            a.interp_fps = bad[i];
+            if (lcfg_validate(&a, e, sizeof e) == 0) { ok = 0; strcpy_s(why, sizeof why, "invalid accepted"); }
+        }
+        for (i = 0; i < (int)(sizeof hz_in / sizeof hz_in[0]); i++) {
+            if (sb_fps_auto_from_hz(hz_in[i]) != hz_out[i]) { ok = 0; strcpy_s(why, sizeof why, "auto hz"); }
+        }
+        /* Speichern/Laden: auto und 144; Standard bleibt 120/Original. */
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w223_fps.cfg");
+        for (i = 0; i < 2; i++) {
+            u8_DeleteFile(tmp);
+            lcfg_defaults(&a);
+            a.interp_fps = i ? 144 : SB_FPS_AUTO;
+            if (lcfg_save_user(tmp, &a) != 0) { ok = 0; }
+            lcfg_defaults(&b);
+            lcfg_load_file(tmp, &b);
+            if (memcmp(&a, &b, sizeof a) || b.interp_fps != a.interp_fps) { ok = 0; strcpy_s(why, sizeof why, "roundtrip"); }
+            if (lcfg_gfx_preset(&b, 0) != LGP_CUSTOM || lcfg_gfx_base(&b, 0) != LGP_ORIGINAL) {
+                ok = 0; strcpy_s(why, sizeof why, "custom");
+            }
+        }
+        u8_DeleteFile(tmp);
+        lcfg_defaults(&b);
+        if (b.interp_fps != 120 || lcfg_gfx_preset(&b, 0) != LGP_ORIGINAL) { ok = 0; strcpy_s(why, sizeof why, "default"); }
+        lcfg_gfx_apply(&b, LGP_PERFORMANCE);
+        if (b.interp_fps != 60) { ok = 0; strcpy_s(why, sizeof why, "performance"); }
+        lcfg_apply_set(&b, "interp_fps=-1");
+        if (b.interp_fps != SB_FPS_AUTO) { ok = 0; strcpy_s(why, sizeof why, "set auto"); }
+        /* R10: feste Rate ueber Monitor-Hz im Fenster warnt; auto/gleich/59 Hz nicht. */
+        lcfg_defaults(&b);
+        b.window_mode = 0;
+        lrules_env_default(&env, &b);
+        env.display_hz = 60;
+        b.interp_fps = 75;
+        lrules_eval(&env, rr);
+        if (!rr[10].active) { ok = 0; strcpy_s(why, sizeof why, "r10 75@60"); }
+        b.interp_fps = SB_FPS_AUTO;
+        lrules_eval(&env, rr);
+        if (rr[10].active) { ok = 0; strcpy_s(why, sizeof why, "r10 auto"); }
+        env.display_hz = 59;
+        b.interp_fps = 60;
+        lrules_eval(&env, rr);
+        if (rr[10].active) { ok = 0; strcpy_s(why, sizeof why, "r10 60@59"); }
+        env.display_hz = 144;
+        b.interp_fps = 144;
+        lrules_eval(&env, rr);
+        if (rr[10].active) { ok = 0; strcpy_s(why, sizeof why, "r10 144@144"); }
+        if (ok) { T_OK("W223 fps-rates (auto + 30..240, validate, save/load, Custom, R10)"); }
+        else { T_FAIL("W223 fps-rates", "%s", why); }
     }
 
     /* 29 (W143): Assistent-cfg Speichern/Zuruecksetzen erhaelt fremde Zeilen */

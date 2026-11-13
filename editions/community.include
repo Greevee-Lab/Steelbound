@@ -67,6 +67,9 @@ editions/community/github/FUNDING.yml => .github/FUNDING.yml
 # W188 GAME-MENU: Issue-Vorlagen (Issue Forms) fuer das In-Game-Feedback (Feld-IDs = URL-Parameter in sb_feedback.c)
 editions/community/github/ISSUE_TEMPLATE/bug_report.yml => .github/ISSUE_TEMPLATE/bug_report.yml
 editions/community/github/ISSUE_TEMPLATE/idea.yml => .github/ISSUE_TEMPLATE/idea.yml
+editions/community/github/ISSUE_TEMPLATE/config.yml => .github/ISSUE_TEMPLATE/config.yml
+# Feedback-Fragebogen als Discussion-Formular (Kategorie General), Nutzer 13.11.
+editions/community/github/DISCUSSION_TEMPLATE/general.yml => .github/DISCUSSION_TEMPLATE/general.yml
 editions/community/media/cockpit.jpg => assets/cockpit.jpg
 poc-native/contrib/sbc_mapping.md
 # W180 EXPORT: englische Spieler-Doku (W175) + Tester-Hinweise (Alpha 1)

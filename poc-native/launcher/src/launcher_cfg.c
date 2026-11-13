@@ -13,6 +13,7 @@
 #include "sb_gamever.h"  /* W150 */
 #include "sb_userdata.h" /* W150 USER-DATA */
 #include "sb_gfxpreset.h" /* W173 LAUNCHER-P4: Preset-Werte (wie Client) */
+#include "sb_fpsrate.h" /* W223 FPS-RATES: gueltige Bildraten */
 
 #ifndef SB_HARNESS_DIR_DEFAULT
 #define SB_HARNESS_DIR_DEFAULT ""
@@ -1220,7 +1221,7 @@ paths_ok:
     if (s->sbc_usb < 0 || s->sbc_usb > 1) {
         FAIL(LT("cfg.bad_sbc"), s->sbc_usb);
     }
-    if (s->interp_fps != 0 && s->interp_fps != 60 && s->interp_fps != 120) {
+    if (sb_fps_choice_idx(s->interp_fps) < 0) { /* W223: auto (-1), 0 = 30, 60..240 aus der Liste */
         FAIL(LT("cfg.bad_ipfps"), s->interp_fps);
     }
     if (s->monitor_grain < 0 || s->monitor_grain > 100 ||

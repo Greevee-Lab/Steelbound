@@ -1,0 +1,101 @@
+# Discussion form "Feedback & impressions" (category General).
+# Short survey on how the game feels, not for bugs. Linked from steelbound.dev
+# (discussions/new?category=general). Results: orchestra/steuer/feedback_pull.py.
+title: "[Feedback] "
+labels: ["feedback"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for playing! This takes about 2 minutes. Tell us how Steelbound **feels** –
+        what works, what feels off, what you enjoyed. Bugs are better in
+        [Issues](https://github.com/Greevee-Lab/Steelbound/issues/new/choose).
+  - type: dropdown
+    id: controls
+    attributes:
+      label: How do the controls feel?
+      options: ["5 – great", "4 – good", "3 – okay", "2 – off", "1 – bad", "Didn't try"]
+    validations:
+      required: true
+  - type: dropdown
+    id: smoothness
+    attributes:
+      label: How smooth does it run?
+      options: ["5 – great", "4 – good", "3 – okay", "2 – off", "1 – bad"]
+    validations:
+      required: true
+  - type: dropdown
+    id: look
+    attributes:
+      label: How does it look?
+      options: ["5 – great", "4 – good", "3 – okay", "2 – off", "1 – bad"]
+    validations:
+      required: true
+  - type: dropdown
+    id: sound
+    attributes:
+      label: How does it sound?
+      options: ["5 – great", "4 – good", "3 – okay", "2 – off", "1 – bad"]
+    validations:
+      required: true
+  - type: dropdown
+    id: setup
+    attributes:
+      label: How easy was the setup (launcher, disc image)?
+      options: ["5 – very easy", "4 – easy", "3 – okay", "2 – difficult", "1 – very difficult"]
+    validations:
+      required: true
+  - type: checkboxes
+    id: input
+    attributes:
+      label: What did you play with?
+      options:
+        - label: Original Steel Battalion controller
+        - label: Gamepad
+        - label: Mouse and keyboard
+        - label: VR headset
+  - type: input
+    id: missions
+    attributes:
+      label: Which missions did you play?
+      placeholder: "e.g. 1–4"
+  - type: textarea
+    id: liked
+    attributes:
+      label: What did you enjoy most?
+    validations:
+      required: true
+  - type: textarea
+    id: off
+    attributes:
+      label: What feels off, or different from the original on Xbox?
+    validations:
+      required: true
+  - type: dropdown
+    id: next
+    attributes:
+      label: What would you like to see next?
+      multiple: true
+      options:
+        - Support for the US release
+        - PAL50 timing option
+        - Cockpit width adjustment for widescreen
+        - Replays in the game and from the launcher
+        - Better performance on older PCs
+        - Simplified controls
+        - VR improvements
+        - Something else (tell us below)
+  - type: textarea
+    id: else
+    attributes:
+      label: Anything else?
+  - type: dropdown
+    id: recommend
+    attributes:
+      label: How likely are you to recommend Steelbound to a friend? (0–10)
+      options: ["10", "9", "8", "7", "6", "5", "4", "3", "2", "1", "0"]
+  - type: input
+    id: pc
+    attributes:
+      label: Your PC (optional)
+      placeholder: "e.g. Ryzen 5 5600, RTX 3060, 1440p"

@@ -21,6 +21,8 @@
  * (geprueft vor jedem SetWindowPos), SetFullscreenState/Minimieren/
  * Wiederherstellen werden nur geloggt, nie ausgefuehrt. */
 #include "render_int.h"
+#include "sb_fpsrate.h" /* W223 FPS-RATES */
+#include "sb_overlay.h"  /* W223: sb_ovl_fps_monitor */
 #include <dxgi.h>
 #include <math.h>
 #include <stdlib.h>
@@ -49,6 +51,8 @@ static RECT wm_save_rc;
 static LONG_PTR wm_save_style;
 static unsigned wm_save_cw, wm_save_ch; /* Backbuffer = Client vor dem Vollbild */
 static int wm_interp_saved = -1;    /* interp_fps vor fs_interp_match */
+static HMONITOR wm_fps_mon;         /* W223: Monitor der letzten auto-Aufloesung */
+static volatile LONG wm_fps_pend;   /* W223: WM_DISPLAYCHANGE -> auto neu pruefen */
 static unsigned wm_nswitch, wm_test_steps;
 /* Zaehler (UI-Thread erhoeht, Render-Thread loggt: hlog verwirft Zeilen
  * bei Schloss-Konkurrenz, daher keine Logs auf dem UI-Thread + kumulative
@@ -453,12 +457,13 @@ static int wm_pick_mode(IDXGIOutput *out, unsigned ww, unsigned wh, unsigned whz
     return 1;
 }
 
-/* fs_interp_match: Interp-Takt = Bildwiederholrate (nur bei interp_fps>0). */
+/* fs_interp_match: Interp-Takt = Bildwiederholrate (nur bei interp_fps>0).
+ * W223: Monitor (auto) folgt dem Exklusiv-Modus auch ohne fs_interp_match. */
 static void wm_interp_match(int on)
 {
     if (on) {
         unsigned hz = wm_mode_hz(&wm_mode);
-        if (g_cfg.fs_interp_match && g_cfg.interp_fps > 0 && hz >= 60 && hz <= 240 &&
+        if ((g_cfg.fs_interp_match || g_cfg.interp_auto) && g_cfg.interp_fps > 0 && hz >= 60 && hz <= 240 &&
             (int)hz != g_cfg.interp_fps) {
             wm_interp_saved = g_cfg.interp_fps;
             g_cfg.interp_fps = (int)hz;
@@ -468,7 +473,7 @@ static void wm_interp_match(int on)
     } else if (wm_interp_saved >= 0) {
         /* W207: Performance selected live disables Hz matching. Do not
          * restore the old 120 FPS when leaving exclusive fullscreen. */
-        if (g_cfg.fs_interp_match) {
+        if (g_cfg.fs_interp_match || g_cfg.interp_auto) {
             HLOG_I("WINMODE: interp_fps %d -> %d (zurueck)", g_cfg.interp_fps, wm_interp_saved);
             g_cfg.interp_fps = wm_interp_saved;
         }
@@ -822,6 +827,9 @@ int sb_winmode_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp, LRESULT *res)
     case WM_ENTERSIZEMOVE:
         InterlockedExchange(&wm_in_sizemove, 1);
         break;
+    case WM_DISPLAYCHANGE: /* W223: Aufloesung/Hz geaendert -> auto neu pruefen */
+        InterlockedExchange(&wm_fps_pend, 1);
+        break;
     case WM_EXITSIZEMOVE:
         InterlockedExchange(&wm_in_sizemove, 0);
         InterlockedExchange(&wm_size_pend, 1);
@@ -850,6 +858,28 @@ void sb_winmode_on_close(void)
 }
 
 /* Render-Thread, Ende jedes Presents (Bild fertig, kein Draw offen). */
+/* W223 FPS-RATES: Monitor (auto) im Fenster/randlos: Monitor des Fensters
+ * alle 32 Bilder pruefen (billig), Hz nur bei Monitor- bzw. Anzeige-
+ * wechsel lesen; Wechsel uebernimmt das Overlay am Present-Ende. Exklusiv
+ * regelt wm_interp_match. */
+static void wm_fps_follow(unsigned n)
+{
+    HMONITOR hm;
+    int hz;
+    if (!g_cfg.interp_auto || (wm_cur == 2 && wm_fs_on)) { return; }
+    if ((n & 31u) != 0u && !wm_fps_pend) { return; }
+    hm = MonitorFromWindow(wm_hwnd, MONITOR_DEFAULTTOPRIMARY);
+    if (hm == wm_fps_mon && !wm_fps_pend) { return; }
+    hz = sb_fps_monitor_hz(hm);
+    if (sb_ovl_fps_monitor(hz)) {
+        if (hm != wm_fps_mon) {
+            HLOG_I("WINMODE: Monitor (auto) %d Hz -> interp_fps %d (f=%u)", hz, sb_fps_auto_from_hz(hz), n);
+        }
+        wm_fps_mon = hm;
+        InterlockedExchange(&wm_fps_pend, 0);
+    }
+}
+
 void sb_winmode_tick(unsigned n)
 {
     HANDLE dctx;
@@ -875,6 +905,7 @@ void sb_winmode_tick(unsigned n)
         wm_switch(req);
     }
     wm_focus_tick(n);
+    wm_fps_follow(n); /* W223 */
     if (wm_stat_due && (n % 64u) == 0u) {
         wm_stat_due = 0;
         HLOG_I("WINMODE stat: modus=%s wechsel=%u alt_enter=%ld fokus_weg=%ld fokus_da=%ld "

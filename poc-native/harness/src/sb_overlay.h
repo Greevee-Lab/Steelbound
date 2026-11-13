@@ -49,6 +49,8 @@ void sb_ovl_restore(void);
 void sb_ovl_present_end(void);
 /* TEST(PERF-BENCH,W137): Bildratenwechsel (interp_fps) wie aus dem Overlay anfordern */
 void sb_ovl_request_fps(int fps);
+/* W223 FPS-RATES: Monitor-Hz des Fensters melden (auto folgt); 0 = noch nicht bereit */
+int sb_ovl_fps_monitor(int hz);
 /* 1 = Test-Hook-Screenshot in diesem Bild faellig (nach dem Zeichnen). */
 int sb_ovl_shot_due(char *name, unsigned cap);
 /* W188 GAME-MENU: ESC oeffnet zuerst das Spielmenue (Weiter, Einstellungen,

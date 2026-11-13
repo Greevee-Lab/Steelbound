@@ -119,3 +119,9 @@ endif()
 target_link_libraries(sb_launcher PRIVATE comdlg32 shell32 ole32 comctl32 setupapi winusb
   uxtheme dwmapi windowscodecs)
 target_compile_options(sb_launcher PRIVATE /W3)
+# W217 FIRST-RUN: Launcher mit statischer CRT (/MT) - startet auch ohne
+# VC++-Redistributable und meldet dann vor dem Spielstart klar, dass der
+# Client (sb_emu.dll) sie braucht (app_client_runtime_missing).
+set_property(TARGET sb_launcher PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+# Hybrid: nur vcruntime statisch, UCRT dynamisch (Teil von Windows 10/11).
+target_link_options(sb_launcher PRIVATE "/NODEFAULTLIB:libucrt.lib" "ucrt.lib")

@@ -312,6 +312,7 @@ static int g_undo_on;
 /* W172 LAUNCHER-P567 */
 static int g_setup_force;         /* Spielen: Einrichtungskarte offen halten */
 static int g_data_ok = 1;         /* letzte Spieldaten-Pruefung (Regelwerk) */
+static int g_firstrun;            /* W217: erster Start (keine user.cfg, kein Standard-Profil) */
 static char g_data_err[300];
 static HWND g_tip;                /* Tooltips (Begruendung gesperrter Elemente) */
 static int g_creator = -1;        /* sb_creator.exe neben dem Launcher: -1 ungeprueft */
@@ -1725,6 +1726,10 @@ static void paint_play(void)
         if (g_img_msg[0]) {
             label(F_SMALL, g_img_msg, CX0 + 18, CY0 + 318, CW - 36, 36,
                   g_img_ok ? C_OK : C_ERR);
+        } else if (!g_cur.game_image[0] && !g_cur.media_root[0] && !g_cur.xbe_path[0]) {
+            /* W217 FIRST-RUN: die drei Schritte + Feedback-Tasten */
+            label(F_SMALL, LT("gui.play_firstrun"), CX0 + 18, CY0 + 318, CW - 36, 36,
+                  C_TEXT);
         } else if (g_cur.game_image[0] || g_cur.media_root[0] || g_cur.xbe_path[0]) {
             /* konkreter Fehler (Grundtext steht schon unter den Knoepfen) */
             if (!paint_reason(3, CX0 + 18, CY0 + 318, CW - 36, 36) &&
@@ -1967,8 +1972,9 @@ static void paint_ctrl(void)
     card(CX0, CY0 + 260, COLW, 120, LT("gui.ctl_profile"));
 
     card(CX0, CY0 + 392, COLW, 104, LT("gui.ctl_pad"));
-    label(F_BODY, g_pad_txt, CX0 + 18, CY0 + 456, COLW - 36, 22, C_TEXT);
-    label(F_SMALL, g_padlive_txt, CX0 + 18, CY0 + 456, COLW - 36, 36, C_DIM);
+    /* W217: Zustand und Detail untereinander (lagen uebereinander) */
+    label(F_BODY, g_pad_txt, CX0 + 18, CY0 + 430, COLW - 36, 22, C_TEXT);
+    label(F_SMALL, g_padlive_txt, CX0 + 18, CY0 + 454, COLW - 36, 36, C_DIM);
 
     card(COL2, CY0, COLW, 496, LT("gui.ctl_keymap"));
     L_fill(COL2 + 18, CY0 + 46, COLW - 36, 50, C_ACCENT, 46, 8);
@@ -6076,6 +6082,18 @@ static int do_start(int dry, int vr)
     }
     if (do_save(1) != 0) {
         return 1;
+    }
+    { /* W217 FIRST-RUN: fehlende VC++-Laufzeit klar melden statt Windows-
+       * Fehler "VCRUNTIME140.dll wurde nicht gefunden" beim Clientstart. */
+        char miss[64];
+        if (app_client_runtime_missing(g_client_dir, NULL, miss, sizeof miss)) {
+            _snprintf_s(err, sizeof err, _TRUNCATE, LT("gui.msg_vcrt"), miss);
+            set_status_k(LT("gui.msg_vcrt_short"), 2);
+            if (!dry) {
+                ui_msgbox(g_hwnd, err, LT("gui.btn_start"), MB_ICONWARNING | MB_OK);
+            }
+            return 1;
+        }
     }
     {
         char upath[1200];
@@ -12071,6 +12089,23 @@ static void gui_fill(void)
     int kind = 0;
     app_load_effective(g_client_dir, &g_s, note, sizeof note, &kind,
                        g_o.lang[0] ? g_o.lang : NULL);
+    g_firstrun = kind == 0;
+    if (g_firstrun) {
+        /* W217 FIRST-RUN: Sprache nach Windows (ausser --lang), Fenster nur,
+         * wenn es auf den Monitor passt (sonst randlos). Der Client zeichnet
+         * im Fenstermodus DPI-unbewusst -> Arbeitsflaeche in 96-dpi-Einheiten. */
+        RECT wa;
+        int ww = 0, wh = 0, d = g_dpi >= 96 ? g_dpi : 96;
+        if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) {
+            ww = (wa.right - wa.left) * 96 / d;
+            wh = (wa.bottom - wa.top) * 96 / d;
+        }
+        if (app_firstrun_defaults(&g_s, g_o.lang[0] ? 0u : (unsigned)GetUserDefaultUILanguage(),
+                                  ww, wh) & 1) {
+            sb_lang_set(g_s.lang);
+            strcpy_s(note, sizeof note, LT("app.no_usercfg"));
+        }
+    }
     strcpy_s(g_note, sizeof g_note, note);
     g_note_kind = kind; /* W173 */
     if (kind == 2) {
@@ -12099,7 +12134,10 @@ static void gui_fill(void)
     if (!g_has_ldr) {
         set_status_k(LT("gui.fill_noldr"), 2);
     } else { /* W173 LAUNCHER-P8: ohne Schluesselzahl (steht unter Diagnose) */
-        set_status(g_note_kind == 2 ? g_note : LT("gui.fill_ready"));
+        /* W217: ohne Spieldaten nicht "Bereit." (Willkommen + erster Schritt) */
+        set_status(g_note_kind == 2 ? g_note
+                   : !g_data_ok ? LT(g_firstrun ? "gui.fill_welcome" : "gui.fill_setup")
+                                : LT("gui.fill_ready"));
     }
 }
 

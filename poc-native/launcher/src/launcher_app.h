@@ -6,6 +6,7 @@ extern "C" {
 #endif
 
 #include <stddef.h>
+#include <windows.h> /* W217: HMODULE */
 #include "launcher_cfg.h"
 
 /* Konsolen-Ausgabe (UTF-8 -> WriteConsoleW bzw. UTF-8-Bytes in Pipes). */
@@ -38,6 +39,24 @@ void app_vr_set_args(int vr, const char *vr_preview, char *out, size_t cap);
  * 0 = nein. Nur Registry lesen + Datei-Existenz, nichts laden/aendern.
  * SB_TEST_XR_ABSENT=1 erzwingt 0 (Test-Haken). */
 int app_xr_runtime_present(char *path_out, size_t cap);
+
+/* W217 FIRST-RUN: Standardwerte beim allerersten Start (keine user.cfg,
+ * kein Standard-Profil; rein, testbar). langid = GetUserDefaultUILanguage()
+ * (Community: Deutsch -> "de", sonst bleibt "en"); work_w/work_h = Arbeits-
+ * flaeche des Hauptmonitors (0 = unbekannt): passt das Fenster samt Rahmen
+ * nicht hinein, wird "randlos" gewaehlt (window_mode=1). Rueckgabe: Bitmaske
+ * 1 = Sprache gesetzt, 2 = randlos gewaehlt. */
+int app_firstrun_defaults(launcher_settings_t *s, unsigned langid, int work_w,
+                          int work_h);
+/* W217: Importiert das Modul (Datei oder geladenes Modul) die DLL `dll`?
+ * 1 = ja, 0 = nein, -1 = nicht lesbar. Liest nur die Importtabelle. */
+int app_pe_imports(const wchar_t *file, HMODULE mod, const char *dll);
+/* W217: Fehlt eine Laufzeit-DLL, die sb_emu.dll im Client-Ordner braucht?
+ * Prueft die VC++-Laufzeit (VCRUNTIME140.dll) nur, wenn sb_emu.dll sie
+ * importiert. 0 = alles da; 1 = fehlt (Name in missing). probe_name (darf
+ * NULL sein) ersetzt den gesuchten DLL-Namen (Selbsttest). */
+int app_client_runtime_missing(const char *client_dir, const char *probe_name,
+                               char *missing, size_t cap);
 
 /* Oberflaeche. shot: 0 = normal, 1 = --shot (BMP, alt), 2 = --ui-shot (PNG),
  * 3 = --bind-shot, 4 = --gui-start-dry (GUI-Startpfad ohne Clientstart),

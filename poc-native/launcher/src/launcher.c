@@ -238,6 +238,119 @@ void app_load_effective(const char *client_dir, launcher_settings_t *s,
 
 #define load_effective app_load_effective
 
+/* W217 FIRST-RUN: siehe launcher_app.h. */
+int app_firstrun_defaults(launcher_settings_t *s, unsigned langid, int work_w,
+                          int work_h)
+{
+    int r = 0;
+#if SB_EDITION_COMMUNITY
+    if ((langid & 0x3FF) == 0x07 /* LANG_GERMAN */) {
+        strcpy_s(s->lang, sizeof s->lang, "de");
+        r |= 1;
+    }
+#else
+    (void)langid; /* private Edition: Erstsprache bleibt Deutsch */
+#endif
+    /* Client-Fenster = width x height Innenflaeche + Rahmen/Titel
+     * (WS_OVERLAPPEDWINDOW, ca. 16 x 39 px bei 100 %). Passt das nicht in
+     * die Arbeitsflaeche (z. B. 2560 x 1080 auf 1920 x 1080), ragt das
+     * Fenster aus dem Bild -> randlos (Monitoraufloesung, Hor+). */
+    if (s->window_mode == 0 && work_w > 0 && work_h > 0 &&
+        (s->width + 16 > (unsigned)work_w || s->height + 39 > (unsigned)work_h)) {
+        s->window_mode = 1;
+        r |= 2;
+    }
+    return r;
+}
+
+/* W217: Importtabelle eines PE-Abbilds (als Bild abgebildet) durchsuchen. */
+static int pe_imports_mapped(const unsigned char *base, const char *dll)
+{
+    const IMAGE_DOS_HEADER *dh = (const IMAGE_DOS_HEADER *)base;
+    const IMAGE_NT_HEADERS32 *nh;
+    const IMAGE_DATA_DIRECTORY *dd;
+    const IMAGE_IMPORT_DESCRIPTOR *id;
+    if (dh->e_magic != IMAGE_DOS_SIGNATURE) {
+        return -1;
+    }
+    nh = (const IMAGE_NT_HEADERS32 *)(base + dh->e_lfanew);
+    if (nh->Signature != IMAGE_NT_SIGNATURE ||
+        nh->OptionalHeader.Magic != IMAGE_NT_OPTIONAL_HDR32_MAGIC) {
+        return -1;
+    }
+    dd = &nh->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_IMPORT];
+    if (!dd->VirtualAddress || !dd->Size) {
+        return 0;
+    }
+    for (id = (const IMAGE_IMPORT_DESCRIPTOR *)(base + dd->VirtualAddress);
+         id->Name; id++) {
+        if (_stricmp((const char *)(base + id->Name), dll) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int app_pe_imports(const wchar_t *file, HMODULE mod, const char *dll)
+{
+    int r;
+    HMODULE h = mod;
+    if (!h) {
+        /* Als Bild-Ressource abbilden: keine Ausfuehrung, keine Abhaengig-
+         * keiten laden (geht auch, wenn VCRUNTIME140.dll fehlt). */
+        h = LoadLibraryExW(file, NULL, LOAD_LIBRARY_AS_IMAGE_RESOURCE);
+        if (!h) {
+            return -1;
+        }
+    }
+    /* Bei Ressourcen-Abbildung markieren die unteren Bits den Handle. */
+    r = pe_imports_mapped((const unsigned char *)((ULONG_PTR)h & ~(ULONG_PTR)3), dll);
+    if (!mod) {
+        FreeLibrary(h);
+    }
+    return r;
+}
+
+int app_client_runtime_missing(const char *client_dir, const char *probe_name,
+                               char *missing, size_t cap)
+{
+    static const char kVcrt[] = "VCRUNTIME140.dll";
+    char emu[1200];
+    wchar_t w[1200], wn[64];
+    HMODULE h;
+    if (missing && cap) {
+        missing[0] = '\0';
+    }
+    _snprintf_s(emu, sizeof emu, _TRUNCATE, "%s/sb_emu.dll", client_dir);
+    u8_to_w(emu, w, 1200);
+    if (!probe_name && app_pe_imports(w, NULL, kVcrt) != 1) {
+        return 0; /* sb_emu.dll fehlt/statisch gelinkt: nichts zu pruefen */
+    }
+    if (!probe_name) {
+        probe_name = kVcrt;
+    }
+    u8_to_w(probe_name, wn, 64);
+    /* Gleiche Suche wie beim Laden von sb_emu.dll (Exe-Ordner des Clients
+     * zuerst, dann System32 bzw. SysWOW64). Echtes Laden statt Datendatei:
+     * eine 64-Bit-Kopie im PATH zaehlt nicht. */
+    SetDllDirectoryW(NULL);
+    {
+        wchar_t cd[1100];
+        u8_to_w(client_dir, cd, 1100);
+        SetDllDirectoryW(cd);
+    }
+    h = LoadLibraryExW(wn, NULL, 0);
+    SetDllDirectoryW(NULL);
+    if (h) {
+        FreeLibrary(h);
+        return 0;
+    }
+    if (missing && cap) {
+        strcpy_s(missing, cap, probe_name);
+    }
+    return 1;
+}
+
 #if SB_EDITION_COMMUNITY
 /* W116 EDITIONS: Der Community-Build hat keine Standardpfade (sb_edition.h).
  * Der Selbsttest nimmt das eigene Spiel-Image aus SB_TEST_XBE/SB_TEST_MEDIA;
@@ -1912,6 +2025,107 @@ static int cli_selftest(const char *client_override)
             T_OK("46 game-data (Abbild / Ordner ohne XBE-Feld / ungueltig)");
         } else {
             T_FAIL("46 game-data", "%s", why);
+        }
+    }
+
+    /* W217 FIRST-RUN: frischer Nutzerordner (Profil-Modus mit leerer Wurzel
+     * wie ein neuer PC; nie das echte %LOCALAPPDATA%). Laden schreibt nichts,
+     * Standardwerte + Erststart-Regeln, erstes Speichern legt die Wurzel an,
+     * danach gilt user.cfg; Laufzeit-Pruefung und statische Launcher-CRT. */
+    {
+        char root[1100], td[1100], up[1200], q[1200], miss[64], why[240] = "";
+        launcher_settings_t fs, f2;
+        int kind = -1, r;
+        DWORD at;
+        u8_GetTempPath(tmp, sizeof tmp);
+        _snprintf_s(root, sizeof root, _TRUNCATE, "%sw217_fresh_ud", tmp);
+        _snprintf_s(td, sizeof td, _TRUNCATE, "%sw217_fresh_client", tmp);
+        _snprintf_s(q, sizeof q, _TRUNCATE, "%s/user.cfg", root);
+        u8_DeleteFile(q);
+        _snprintf_s(q, sizeof q, _TRUNCATE, "%s/packs", root);
+        RemoveDirectoryA(q);
+        RemoveDirectoryA(root);
+        SetEnvironmentVariableA("SB_USERDATA", "profile");
+        SetEnvironmentVariableA("SB_USERDATA_ROOT", root);
+        sb_userdata_reset();
+        app_load_effective(td, &fs, NULL, 0, &kind, NULL);
+        lcfg_user_cfg_path(td, up, sizeof up);
+        at = u8_GetFileAttributes(up);
+        if (kind != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "kind=%d statt 0", kind);
+        } else if (at != INVALID_FILE_ATTRIBUTES) {
+            strcpy_s(why, sizeof why, "Laden hat user.cfg angelegt");
+        } else if (_strnicmp(up, root, strlen(root)) != 0) {
+            strcpy_s(why, sizeof why, "user.cfg nicht in der frischen Wurzel");
+        } else if (fs.game_image[0] || fs.window_mode != 0 || fs.input_profile[0] ||
+                   fs.sbc_usb != 0 || fs.interp_fps != 120 || fs.aspect_mode != 1 ||
+                   lcfg_gfx_preset(&fs, 0) != LGP_ORIGINAL) {
+            strcpy_s(why, sizeof why, "Standardwerte (Abbild leer, Fenster, Tastatur, Original (HD) 120)");
+        }
+        if (!why[0]) { /* Erststart-Regeln: Sprache + Fenster passt / randlos */
+            f2 = fs;
+            r = app_firstrun_defaults(&f2, 0x0407 /* de-DE */, 1920, 1040);
+            if (f2.window_mode != 1 || !(r & 2) ||
+                strcmp(f2.lang, SB_EDITION_COMMUNITY ? "de" : fs.lang) != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "1920x1040 de: r=%d mode=%d lang=%s",
+                            r, f2.window_mode, f2.lang);
+            }
+            f2 = fs;
+            r = app_firstrun_defaults(&f2, 0x0409 /* en-US */, 3440, 1400);
+            if (r != 0 || f2.window_mode != 0 || strcmp(f2.lang, fs.lang) != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "3440x1400 en: r=%d mode=%d", r,
+                            f2.window_mode);
+            }
+            f2 = fs;
+            f2.window_mode = 2; /* Vollbild bleibt Vollbild */
+            if (!why[0] && (app_firstrun_defaults(&f2, 0, 800, 600) & 2)) {
+                strcpy_s(why, sizeof why, "exklusives Vollbild wurde umgestellt");
+            }
+        }
+        if (!why[0]) { /* erstes Speichern legt Wurzel + user.cfg an */
+            fs.width = 1600;
+            fs.height = 900;
+            if (lcfg_save_user(up, &fs) != 0) {
+                strcpy_s(why, sizeof why, "Speichern in frische Wurzel scheitert");
+            } else {
+                app_load_effective(td, &f2, NULL, 0, &kind, NULL);
+                if (kind != 1 || f2.width != 1600 || f2.height != 900) {
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "neu geladen: kind=%d %ux%u",
+                                kind, f2.width, f2.height);
+                }
+            }
+        }
+        if (!why[0]) { /* Laufzeit-Pruefung: fehlende DLL melden, vorhandene nicht */
+            if (app_client_runtime_missing(td, "sb_w217_gibt_es_nicht.dll", miss, sizeof miss) != 1 ||
+                strcmp(miss, "sb_w217_gibt_es_nicht.dll") != 0 ||
+                app_client_runtime_missing(td, "kernel32.dll", miss, sizeof miss) != 0 ||
+                app_client_runtime_missing(td, NULL, miss, sizeof miss) != 0) {
+                strcpy_s(why, sizeof why, "Laufzeit-Pruefung falsch");
+            } else if (app_pe_imports(NULL, GetModuleHandleW(NULL), "KERNEL32.dll") != 1 ||
+                       app_pe_imports(NULL, GetModuleHandleW(NULL), "VCRUNTIME140.dll") != 0) {
+                strcpy_s(why, sizeof why, "Launcher importiert VCRUNTIME140.dll (CRT nicht statisch)");
+            }
+        }
+        if (!why[0]) { /* Ordner statt Abbild: eigener Hinweis */
+            char m[1200], want[1200];
+            _snprintf_s(want, sizeof want, _TRUNCATE, LT("cfg.image_isdir"), tmp);
+            if (lcfg_image_check(tmp, m, sizeof m) != 1 || strcmp(m, want) != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Ordner als Abbild: %.120s", m);
+            }
+        }
+        _snprintf_s(q, sizeof q, _TRUNCATE, "%s/user.cfg", root);
+        u8_DeleteFile(q);
+        _snprintf_s(q, sizeof q, _TRUNCATE, "%s/packs", root);
+        RemoveDirectoryA(q);
+        RemoveDirectoryA(root);
+        SetEnvironmentVariableA("SB_USERDATA", "legacy");
+        SetEnvironmentVariableA("SB_USERDATA_ROOT", NULL);
+        sb_userdata_reset();
+        sb_lang_set("de");
+        if (!why[0]) {
+            T_OK("W217 first-run (frischer Nutzerordner: Standardwerte, Erststart-Regeln, Speichern, Laufzeit)");
+        } else {
+            T_FAIL("W217 first-run", "%s", why);
         }
     }
 

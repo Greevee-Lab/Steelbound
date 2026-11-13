@@ -25,6 +25,15 @@ hardware. No game content is included. See also [Controls](CONTROLS.md),
    (*“Windows protected your PC”*), click **More info → Run anyway**:
    Steelbound is an unsigned hobby project; code signing is planned.
 
+3. Start `sb_launcher.exe` from the unpacked folder (not from inside the
+   ZIP – the launcher then reports missing program files).
+
+On the very first start the launcher picks the language of your Windows
+(English or German) and shows the three steps on the **Play** page:
+choose your disc image → check the keys under **Controls** → **LAUNCH
+GAME**. If the default window (2560 × 1080) does not fit your screen, it
+starts in **Borderless fullscreen** instead; change it on **Display**.
+
 ## Choose your disc image
 
 1. On the **Play** page, open **Set up your game**.
@@ -53,6 +62,12 @@ applies immediately.
   the **Play** page (**Set up your game** → **Browse …** → **Check**), or
   an extracted game folder under **Advanced**. The launcher starts only
   when the game version was checked.
+- **“… is a folder, not a disc image.”** Choose the `.iso`/`.xiso` file
+  itself. An extracted game folder goes under **Advanced**.
+- **Microsoft Visual C++ Redistributable (x86) missing.** The launcher
+  checks this before the game starts. Install `vc_redist.x86.exe` from
+  Microsoft (x86 also on 64-bit Windows), then press **LAUNCH GAME**
+  again.
 - **This game version is not supported.** Only the European (PAL) release
   of Steel Battalion is supported. No other version or region can start.
 - **Judder at 120 FPS.** On a 60 Hz display without VRR, 120 FPS may

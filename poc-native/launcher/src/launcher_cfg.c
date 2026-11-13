@@ -1013,7 +1013,12 @@ int lcfg_image_check(const char *image_u8, char *msg, size_t cap)
     uint32_t xn = 0;
     sb_gamever_t gv;
     DWORD a = u8_GetFileAttributes(image_u8);
-    if (!image_u8 || !image_u8[0] || a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY)) {
+    if (image_u8 && image_u8[0] && a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) {
+        /* W217 FIRST-RUN: Ordner statt Abbild gewaehlt -> klarer Hinweis */
+        _snprintf_s(msg, cap, _TRUNCATE, LT("cfg.image_isdir"), image_u8);
+        return 1;
+    }
+    if (!image_u8 || !image_u8[0] || a == INVALID_FILE_ATTRIBUTES) {
         _snprintf_s(msg, cap, _TRUNCATE, LT("cfg.image_missing"), image_u8 ? image_u8 : "");
         return 1;
     }

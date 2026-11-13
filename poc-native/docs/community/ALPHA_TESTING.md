@@ -14,8 +14,9 @@ Your reports decide what gets fixed first. See also
 - A Direct3D 11 capable GPU with current drivers.
 - Microsoft Visual C++ Redistributable for Visual Studio 2015–2022,
   **x86** (32-bit) version. Install the x86 package even on 64-bit
-  Windows – the launcher and the game runtime are 32-bit programs.
-  Without it, Windows reports a missing `VCRUNTIME140.dll`.
+  Windows – the game runtime is a 32-bit program. The launcher starts
+  without it and tells you before the game starts if it is missing
+  (`VCRUNTIME140.dll`).
 - Your own disc image of **Steel Battalion (Europe, PAL)** as `.iso` or
   `.xiso`. No game data is included in this package.
 

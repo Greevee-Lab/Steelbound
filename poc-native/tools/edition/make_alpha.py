@@ -128,15 +128,18 @@ def build(export, bdir, roots):
             return 1, logs
         log("Build %s gruen (%s)" % (comp, lg))
     # Der Export-Build darf das Repo nicht kennen (CMake-Cache, Projekte)
-    pats = [os.path.normcase(os.path.abspath(r)).replace("\\", "/") for r in roots]
+    # W217: mit abschliessendem "/" vergleichen, sonst trifft ".../w217" auch
+    # einen Nachbarordner ".../w217_scratch" (Fehlalarm).
+    pats = [os.path.normcase(os.path.abspath(r)).replace("\\", "/").rstrip("/") + "/"
+            for r in roots]
     for dp, _dn, fn in os.walk(bdir):
         for n in fn:
             if n == "CMakeCache.txt" or n.endswith(".vcxproj"):
                 with open(os.path.join(dp, n), encoding="utf-8", errors="replace") as f:
                     t = os.path.normcase(f.read()).replace("\\", "/")
                 for p in pats:
-                    if p in t:
-                        log("Build kennt den Repo-Pfad %s (%s)" % (p, os.path.join(dp, n)))
+                    if p in t or t.endswith(p[:-1]):
+                        log("Build kennt den Repo-Pfad %s (%s)" % (p[:-1], os.path.join(dp, n)))
                         return 1, logs
     return 0, logs
 
@@ -295,9 +298,31 @@ def first_start(zpath, fdir, name):
     pngs = [n for n in os.listdir(shots) if n.lower().endswith(".png")]
     lines.append("--ui-shot play: rc=%d, %s" % (rc, ", ".join(pngs) or "kein PNG"))
     ok &= (rc == 0 and bool(pngs))
+    # W217 FIRST-RUN: zweiter Erststart wie ein neuer PC ohne portable.txt
+    # (Modus profile, frische leere Wurzel per SB_USERDATA_ROOT statt des
+    # echten %LOCALAPPDATA%): Shot der Spielen-Seite, nichts geschrieben.
+    os.remove(os.path.join(app, "portable.txt"))
+    fresh = os.path.join(fdir, "fresh_profile")
+    os.makedirs(fresh)
+    env["SB_USERDATA_ROOT"] = fresh
+    rc, out = call(["--userdata"])
+    prof_mode = "Modus: profile" in out
+    shots2 = os.path.join(fdir, "shots_profile")
+    os.makedirs(shots2)
+    rc2, _out = call(["--ui-shot", "play", "--lang", "en", "--shot-out", shots2])
+    pngs2 = [n for n in os.listdir(shots2) if n.lower().endswith(".png")]
+    wrote = os.path.exists(os.path.join(fresh, "user.cfg"))
+    lines.append("frischer Nutzerordner (Modus profile): %s, --ui-shot play rc=%d %s, "
+                 "user.cfg angelegt: %s" % ("ja" if prof_mode else "NEIN", rc2,
+                                            ", ".join(pngs2) or "kein PNG",
+                                            "NEIN (gut)" if not wrote else "JA"))
+    ok &= prof_mode and rc2 == 0 and bool(pngs2) and not wrote
+    del env["SB_USERDATA_ROOT"]
     prof_after = os.path.isdir(prof) and set(os.listdir(prof))
     untouched = prof_before == prof_after
-    lines.append("Profil-Datenordner %s unveraendert: %s" % (prof, "ja" if untouched else "NEIN"))
+    # W217: bereinigte Ausgabe (kein Nutzername im Log)
+    lines.append("Profil-Datenordner %%LOCALAPPDATA%%\\Steelbound unveraendert: %s" % (
+        "ja" if untouched else "NEIN"))
     ok &= untouched
     return ok, lines
 

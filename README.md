@@ -78,7 +78,7 @@ also works, see [Getting started](poc-native/docs/community/GETTING_STARTED.md))
 The launcher checks the image before the first start. Other releases (USA,
 Japan) or unknown images are refused with a clear message: *“This game
 version is not supported. Only the European (PAL) version of Steel Battalion
-is supported.”* Support for the US and Japanese releases is planned.
+is supported.”* Support for the US release is planned.
 
 ## Reporting bugs
 
@@ -122,8 +122,8 @@ are welcome in the existing issue:
   restart the game; your saved progress is kept.
 - **Landscape at the screen edge pops in** in some missions.
 - **Replays:** importing and viewing replays does not fully work yet.
-- **Only the European (PAL) release** is supported; US and Japanese
-  releases are planned.
+- **Only the European (PAL) release** is supported; support for the US
+  release is planned.
 - **VR is experimental:** expect rough edges with headsets, runtimes and
   performance.
 

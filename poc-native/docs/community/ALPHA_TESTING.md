@@ -247,8 +247,8 @@ restart. Check the result with **F2**.
 - **Landscape at the screen edge pops in** in some missions.
 - **Replays:** importing and viewing replays does not fully work yet.
 - **Only the European (PAL) release** of Steel Battalion is supported.
-  Other versions and regions are refused with a message; US and Japanese
-  releases are planned.
+  Other versions and regions are refused with a message; support for the
+  US release is planned.
 - **VR is experimental.** Expect rough edges with headsets, runtimes and
   performance.
 - The legal texts (`LICENSE`, `THIRD_PARTY.md`) are drafts.

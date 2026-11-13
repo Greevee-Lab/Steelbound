@@ -11,8 +11,7 @@ your disc image is only ever read, never modified. See
 
 Only the European (PAL) release of Steel Battalion, as a `.iso` or
 `.xiso` disc image. Other versions are refused with a clear message
-instead of starting. Support for the US and Japanese releases is
-planned.
+instead of starting. Support for the US release is planned.
 
 ## Windows says “Windows protected your PC”. Is that safe?
 

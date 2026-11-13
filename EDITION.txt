@@ -1,6 +1,6 @@
 Steel Battalion - Game Preservation Project
 Edition: community
-Stand: 2026-11-13 (Commit 5809e1a+lokal)
+Stand: 2026-11-13 (Commit 50c0076+lokal)
 
 Dateien (sha256):
 02ef4ceacf69cd6473cc49c12cd99f0ab0cab1d4e225bacdddf70d0006f16547  .github/FUNDING.yml
@@ -10,7 +10,7 @@ e87c03bade133de4ce690dd1607d2aa4f15a5a334d0966fb7926d5ddac696870  COMMERCIAL.md
 086421162bfad894b5be17447ac2cef25768117bc5cddf4834fc264c3200245e  CONTRIBUTING.md
 476c3e64a2a74a92b2f004e6e23a1156bb05e86501dc8a714506f487c3f8f07e  DONATE.md
 f7441b3ea161b34eecff53e256781de9aefc0ce94c99b890b275cafcdf900c22  LICENSE
-a08e166f3d4d2d569057e24869971c9436c2b18bd73df831bed15f13eaaff410  README.md
+bf12ce777bac7a56551adef48640da4913742a9f6a6c984d0f9d8372841f8916  README.md
 4d292b020743cebd309090b19791bf30d326f8ef46603398d539616d8e951b65  THIRD_PARTY.md
 8277a08e03a21ffe3cfb82512be85e1999e11da7bec16c0038434ad5928bf18e  assets/cockpit.jpg
 2aa3575d468fc24e708f485eaa3a28a2fba9eadaedb07df54ce49c5986f669eb  editions/assets_allow.tsv

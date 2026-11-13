@@ -1,5 +1,10 @@
 # Steelbound
 
+[![Download](https://img.shields.io/badge/Download-latest%20alpha-ffb23e)](https://steelbound.dev/download.html)
+[![Website](https://img.shields.io/badge/Website-steelbound.dev-1a2026)](https://steelbound.dev)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-ff5e5b?logo=kofi&logoColor=white)](https://ko-fi.com/W7W2U4716)
+[![PayPal](https://img.shields.io/badge/PayPal-Support-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/paypalme/Greevee)
+
 Steelbound is a game preservation project: it keeps the original-Xbox
 classic **Steel Battalion (Europe)** (Capcom, 2002) faithfully playable on
 modern hardware. It is a launcher and a client for **your own copy** of the
@@ -8,6 +13,22 @@ starter application. No game content is included or distributed.
 
 This repository is source-available (see [License](#license)). It is not an
 official product and is not affiliated with Capcom or Microsoft.
+
+## Support the project
+
+[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/W7W2U4716)
+[![PayPal](https://img.shields.io/badge/PayPal-Support%20via%20PayPal-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/paypalme/Greevee)
+
+Steelbound is a hobby project, built in my spare time to preserve this great
+game. Bringing a 2002 Xbox title back to modern PCs – faithfully, at 120 FPS,
+with VR and the original controller – is a **very large and complex task**,
+and it comes with **high running costs**: AI-assisted development (tokens and
+subscriptions) on top of a lot of personal time – **hundreds of dollars have
+already gone into development** so far.
+
+If you enjoy Steelbound and want to help cover some of these costs, any
+support – one-time or monthly – is greatly appreciated. See [DONATE.md](DONATE.md).
+Thank you! ☕
 
 ## Quickstart in 3 steps
 
@@ -105,22 +126,6 @@ are welcome in the existing issue:
   releases are planned.
 - **VR is experimental:** expect rough edges with headsets, runtimes and
   performance.
-
-## Support the project
-
-[![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/W7W2U4716)
-[![PayPal](https://img.shields.io/badge/PayPal-Support%20via%20PayPal-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/paypalme/Greevee)
-
-Steelbound is a hobby project, built in my spare time to preserve this great
-game. Bringing a 2002 Xbox title back to modern PCs – faithfully, at 120 FPS,
-with VR and the original controller – is a **very large and complex task**,
-and it comes with **high running costs**: AI-assisted development (tokens and
-subscriptions) on top of a lot of personal time – **hundreds of dollars have
-already gone into development** so far.
-
-If you enjoy Steelbound and want to help cover some of these costs, any
-support – one-time or monthly – is greatly appreciated. See [DONATE.md](DONATE.md).
-Thank you! ☕
 
 ## What Steelbound is
 

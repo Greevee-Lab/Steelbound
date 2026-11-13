@@ -74,6 +74,9 @@ typedef struct {
     int hlock_spin;        /* LOADLOCK(W119): Spin-Runden (pause) vor WaitOnAddress bei belegter hlock, 0 = 64 */
     int diag_lock_inject;  /* DIAG(LOADLOCK,W119): >0 = jedes N-te hlock-Erwerb/-Freigabe Sleep(1) im Fenster (Modell 1) bzw. in der Region (Modell 0), 0 = aus */
     int contig_alias_test; /* TEST(FILM-WHITE,W177): >0 = Contig-Anforderung genau dieser Groesse bekommt vorher einen 12-KB-Koeder mit gleichem Low28-Anfang (Lage V_C30isokill nachstellen), 0 = aus */
+    int contig_reuse;      /* FIX(SEQ-RENDER,W214): 1 = freigegebene Contig-Bloecke (contig_free) nach contig_reuse_ms Quarantaene fuer passende Anforderungen wiederverwenden (Adressraum/Commit wachsen nicht je Mission/Effekt), 0 = immer neu */
+    int contig_reuse_ms;   /* W214: Quarantaene seit der Freigabe in ms (Default 2000) */
+    int contig_free;       /* FIX(SEQ-RENDER,W214): 1 = MmFreeContiguousMemory gibt das Low28-Bild des Blocks frei (Speicher bleibt), sonst ist das 256-MB-Bild nach einigen Missionen voll -> Ueberlappung -> Texturen weiss; nur mit contig_noalias=1, 0 = alt */
     int contig_noalias;    /* FIX(FILM-WHITE,W177): 1 = Contig-Bloecke ohne Low28-Ueberlappung (eigene Contig-Tabelle, HIGH-Bloecke gezielt platziert, low_alloc-Treffer auf HIGH-Bilder stillgelegt) -> Phys->Virt eindeutig, 0 = alt */
     int phys_exact;        /* FIX(PHYSALIAS,W73): 1 = Phys->Virt bevorzugt den Contig-Block, der exakt an der Adresse beginnt (Low28-Mehrdeutigkeit, Absturz 0x24E1D3), 0 = alt (erster Treffer) */
     int hdr_hybrid;        /* FIX(HDRSWAP,W94): 1 = Hybrid-Header an 0x10000 (MZ+e_lfanew auf PE-Kopie hinter dem XBE-Header), krnl_CreateThread tauscht nicht mehr; 0 = alt (Header-Tausch je CreateThread, Race) */

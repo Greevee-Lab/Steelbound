@@ -60,7 +60,8 @@ int app_client_runtime_missing(const char *client_dir, const char *probe_name,
 
 /* Oberflaeche. shot: 0 = normal, 1 = --shot (BMP, alt), 2 = --ui-shot (PNG),
  * 3 = --bind-shot, 4 = --gui-start-dry (GUI-Startpfad ohne Clientstart),
- * 5 = --assist-shot (W143, Assistent offscreen). */
+ * 5 = --assist-shot (W143, Assistent offscreen), 6 = --joy-shot (W221,
+ * Joystick/HOTAS-Dialog offscreen mit Beispieldaten). */
 typedef struct {
     int shot;
     int page;          /* -1 = alle, sonst Seite */

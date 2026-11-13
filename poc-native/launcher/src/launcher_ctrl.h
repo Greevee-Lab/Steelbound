@@ -2,6 +2,8 @@
 /* launcher_ctrl.h - Steuerungs-Helfer des Launchers (W78, CTRL-UI).
  * Eingabe-Profile auflisten, SBC-USB-/Gamepad-Status, Belegungs-Modell
  * fuer den Belegungs-Dialog (Namen wie docs/EINGABE.md). ASCII only. */
+#include "input_joy.h" /* W221: ijoy_info_t, imap_joy_state_t, IMAP_JOY_MAX */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -85,6 +87,10 @@ typedef struct {
 
 typedef struct {
     lctrl_row_t row[LCTRL_ELEM_N];
+    /* W221 HOTAS: Geraete-Zuordnung "joyN = <spec>" je Slot (leer = keine
+     * Zeile; dann gilt im Client das N-te aufgezaehlte Geraet). Wird beim
+     * Laden/Speichern erhalten (Abschnitt [joystick]). */
+    char joy[IMAP_JOY_MAX][96];
 } lctrl_bind_t;
 
 void lctrl_bind_init(lctrl_bind_t *b);
@@ -114,6 +120,38 @@ int lctrl_bind_alt_is_sbc(const char *alt);
 /* Als Profil speichern (nur belegte Zeilen + Kopf). 0 = ok, 1 = Fehler. */
 int lctrl_bind_save(const char *path, const lctrl_bind_t *b, const char *base,
                     char *err, size_t errcap);
+
+/* --- W221 HOTAS (experimentell): Joystick-Quellen ---------------------- */
+/* Lernmodus (rein, testbar): base = Stand beim Start des Lernens, prev =
+ * letzter Poll, cur = aktueller Poll. Erkennt neue Taste ("B3"), neue
+ * POV-Richtung ("POV1U") oder Achsen-Auslenkung >= 40 % des Wegs relativ
+ * zu base (Schubhebel/Pedale ruhen nicht in der Mitte). Auf Achsen-
+ * Elementen (idx LCTRL_AXIS) nur Achsen -> analoge Quelle "Z:dz=0.05"
+ * (Pedal invertiert, wenn der Weg zum Minimum fuehrt); sonst "Z+"/"Z-"
+ * bzw. "Z:zone=lo-hi". out = Teil hinter "JOYn:". Rueckgabe 1 = Taste,
+ * 2 = POV, 3 = Achse, 0 = nichts. */
+int lctrl_joy_learn(const imap_joy_state_t *base, const imap_joy_state_t *prev,
+                    const imap_joy_state_t *cur, unsigned axmask, int npov,
+                    int idx, char *out, size_t cap);
+/* Slot fuer Geraet dev (Index in list): passende joyN-Zeile, sonst
+ * implizit benutzter Slot (N-tes Geraet), sonst naechster freier Slot mit
+ * neuer Zeile joyN = <Produktname>[@k] (bzw. {GUID}). -1 = alle belegt. */
+int lctrl_joy_slot_for(lctrl_bind_t *b, const ijoy_info_t *list, int n,
+                       int dev);
+/* 1 = Profil benutzt Slot (JOYn:/JOY: in irgendeiner Alternative). */
+int lctrl_bind_uses_joy_slot(const lctrl_bind_t *b, int slot);
+/* 1 = alt ist eine einzelne analoge JOY-Achsenquelle ("JOY0:X:dz=..",
+ * kein +/-/zone), slot/axis optional. */
+int lctrl_joy_is_axis(const char *alt, int *slot, int *axis);
+/* Parameter ":key=wert" lesen (1 = vorhanden) bzw. setzen/ersetzen
+ * (val NULL/"" = entfernen). 0 = ok, 1 = passt nicht in cap. */
+int lctrl_joy_param_get(const char *alt, const char *key, char *out,
+                        size_t cap);
+int lctrl_joy_param_set(char *alt, size_t cap, const char *key,
+                        const char *val);
+/* Lesbar: "JOY1:B3" -> "Joystick 2 Taste 3" (Sprache via LT). 1 = JOY-
+ * Quelle, 0 = keine (out unveraendert). */
+int lctrl_joy_atom_text(const char *atom, char *out, size_t cap);
 
 /* --- input_selftest --dump pruefen ------------------------------------- */
 /* Profil per Client-Tool parsen lassen. 0 = Exit 0 (geparst), Text in out. */

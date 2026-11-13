@@ -7,9 +7,11 @@
 
 /* M2b-Replay: "pkt:vk,len;..." simuliert Tastendrucke (unbeaufsichtigte
  * Tests). Max 8 Slots, einmalig geparst. */
+/* W214: 192 Slots (Mehrmissions-Ketten seq, bis ~150 Schritte; vorher 128). */
+#define REPLAY_MAX 192
 static struct {
     int start, vk, len, logged;
-} g_replay[128];
+} g_replay[REPLAY_MAX];
 static int g_replay_n = -1;
 
 static void replay_parse(void)
@@ -23,7 +25,7 @@ static void replay_parse(void)
         return;
     }
     p = g_cfg.replay;
-    while (*p && g_replay_n < 128) {
+    while (*p && g_replay_n < REPLAY_MAX) {
         int st = 0, vk = 0, ln = 0;
         while (*p == ' ' || *p == ';') {
             p++;
@@ -108,8 +110,9 @@ static void replay_parse(void)
  *     IDX=0 = aus. Log: DRIVETO-Zeilen alle 100 Frames.
  * Ein ausgeloester Schritt haengt einen Slot an g_replay an (gleiche
  * Tastenlogik wie replay=). Datei-Ereignisse via replay_note_file(). */
-/* A1: 128 = vollstaendiges Standard-Replay (101 Schritte) passt; wie g_replay. */
-#define STEP_MAX 128
+/* A1: 128 = vollstaendiges Standard-Replay (101 Schritte) passt; wie g_replay.
+ * W214: 192 fuer Mehrmissions-Ketten (campaign_bot.py seq). */
+#define STEP_MAX REPLAY_MAX
 u32 g_aimat_idx; /* W59: aimat-Ziel-Bot (0 = aus) */
 static int g_aimat_fire; /* W59: aimfire:R = Autofeuer bis Distanz R (0 = aus) */
 static float g_aimat_range = 1e9f;
@@ -333,7 +336,7 @@ static void replay_movieskip_tick(void)
      * Der Mapper setzt Out+0 Bit 1 fuer bi2 (W11_F: L->+0 OR 02); START
      * (bi6), SPACE (bi0) und 'F' (bi1) skippen nicht (skip1/2/3, Kette).
      * 'L' in der Mission = Lock-On (harmlos, keine Pause). */
-    if (g_replay_n < 128) {
+    if (g_replay_n < REPLAY_MAX) {
         g_replay[g_replay_n].start = (int)g_frames;
         g_replay[g_replay_n].vk = 76; /* 'L' = bi2 */
         g_replay[g_replay_n].len = 60;
@@ -497,7 +500,7 @@ void replay_steps_tick(void)
             continue;
         }
         if (g_replay_n < 0) g_replay_n = 0;
-        if (g_replay_n < 128) {
+        if (g_replay_n < REPLAY_MAX) {
             g_replay[g_replay_n].start = (int)g_frames;
             g_replay[g_replay_n].vk = g_steps[s].vk;
             g_replay[g_replay_n].len = g_steps[s].len;

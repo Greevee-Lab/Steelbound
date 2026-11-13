@@ -129,6 +129,7 @@ static void cli_usage(void)
            "  --write-user-profile R    Benutzerprofil user_R.ini schreiben\n"
            "                            (Basis --from B, --set-bind \"e=a;...\", --force)\n"
            "  --bind-shot[=AKTION]    Test: Belegungs-Dialog sichern (BMP+PNG)\n"
+           "  --joy-shot              Test: Joystick/HOTAS-Dialog sichern (PNG, Beispieldaten)\n"
            "  --ui-shot SEITE|alle    Test: Seiten als PNG (play, display, graphics, packs,\n"
            "                          controls, audio, advanced; alte Namen start, grafik,\n"
            "                          remaster, ton, steuerung, profile, pfade gelten\n"
@@ -2163,6 +2164,231 @@ static int cli_selftest(const char *client_override)
         }
     }
 
+    /* W221 HOTAS (experimentell): joyN-Zeilen + JOY-Belegungen laden,
+     * aendern, speichern, neu laden; Lernhilfe/Slot/Parameter rein (ohne
+     * Hardware); Geraeteliste ohne Geraet = leer, kein Fehler. */
+    {
+        static const char *jt =
+            "# W221-Test\n[joystick]\njoy0 = Saitek X52 Throttle # Kommentar\n"
+            "joy2 = {11223344-0000-0000-0000-504944564944}@2\n"
+            "[buttons]\nbi0 = KEY:SPACE, JOY0:B1\n"
+            "[axes]\nrot = JOY0:X:dz=0.05:inv=1\n"
+            "[gear]\ngear.3 = JOY0:Z:zone=40-60\n";
+        static lctrl_bind_t j1, j2, j3;
+        char why[240] = "", jerr[256], jp[1100], jb[8192], t1[400], t2[400];
+        int rot = lctrl_bind_elem_index("rot");
+        int pl = lctrl_bind_elem_index("pedal_l");
+        int ax = lctrl_bind_elem_index("aim_x");
+        int b0 = lctrl_bind_elem_index("bi0"), b1 = lctrl_bind_elem_index("bi1");
+        int g3 = lctrl_bind_elem_index("gear.3"), i, n, sl, ax2 = -1;
+        FILE *jf = NULL;
+        lctrl_bind_load_text(jt, &j1);
+        if (strcmp(j1.joy[0], "Saitek X52 Throttle") != 0 || j1.joy[1][0] ||
+            strcmp(j1.joy[2], "{11223344-0000-0000-0000-504944564944}@2") != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "joy-Zeilen: '%s' '%s'", j1.joy[0], j1.joy[2]);
+        } else if (j1.row[rot].n_alt != 1 ||
+                   strcmp(j1.row[rot].alt[0], "JOY0:X:dz=0.05:inv=1") != 0 ||
+                   j1.row[b0].n_alt != 2 || j1.row[g3].n_alt != 1) {
+            strcpy_s(why, sizeof why, "JOY-Belegungen nicht geladen");
+        } else if (lctrl_bind_add(&j1, pl, "JOY1:Y:half=1") != 0 ||
+                   lctrl_bind_set(&j1, b1, "JOY0:POV1U, JOY0:Z+") != 0) {
+            strcpy_s(why, sizeof why, "lctrl_bind_add/set");
+        }
+        u8_GetTempPath(jp, sizeof jp);
+        strcat_s(jp, sizeof jp, "w221_joy_test.ini");
+        if (!why[0]) {
+            u8_DeleteFile(jp);
+            memset(jb, 0, sizeof jb);
+            if (lctrl_bind_save(jp, &j1, "t", jerr, sizeof jerr) != 0) {
+                strcpy_s(why, sizeof why, "speichern");
+            } else if (u8_fopen_s(&jf, jp, "r") == 0 && jf) {
+                (void)fread(jb, 1, sizeof jb - 1, jf);
+                fclose(jf);
+            }
+        }
+        if (!why[0] &&
+            (!strstr(jb, "\n[joystick]\njoy0 = Saitek X52 Throttle\n"
+                         "joy2 = {11223344-0000-0000-0000-504944564944}@2\n") ||
+             !strstr(jb, "pedal_l = JOY1:Y:half=1\n") ||
+             !strstr(jb, "bi1 = JOY0:POV1U, JOY0:Z+\n") ||
+             !strstr(jb, "rot = JOY0:X:dz=0.05:inv=1\n"))) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Datei: %.160s", jb);
+        }
+        if (!why[0]) {
+            if (lctrl_bind_load_file(jp, &j2) != 0) {
+                strcpy_s(why, sizeof why, "neu laden");
+            } else {
+                for (i = 0; i < IMAP_JOY_MAX && !why[0]; i++) {
+                    if (strcmp(j1.joy[i], j2.joy[i]) != 0) {
+                        _snprintf_s(why, sizeof why, _TRUNCATE, "joy%d nach Neuladen", i);
+                    }
+                }
+                for (i = 0; i < LCTRL_ELEM_N && !why[0]; i++) {
+                    lctrl_bind_row_text(&j1, i, t1, sizeof t1);
+                    lctrl_bind_row_text(&j2, i, t2, sizeof t2);
+                    if (strcmp(t1, t2) != 0) {
+                        _snprintf_s(why, sizeof why, _TRUNCATE, "%s: '%s' != '%s'",
+                                    kCtrlElems[i].key, t1, t2);
+                    }
+                }
+            }
+        }
+        if (!why[0]) { /* ohne Joystick: kein [joystick]-Abschnitt */
+            lctrl_bind_init(&j3);
+            lctrl_bind_set(&j3, b0, "KEY:SPACE");
+            memset(jb, 0, sizeof jb);
+            if (lctrl_bind_save(jp, &j3, "t", jerr, sizeof jerr) == 0 &&
+                u8_fopen_s(&jf, jp, "r") == 0 && jf) {
+                (void)fread(jb, 1, sizeof jb - 1, jf);
+                fclose(jf);
+            }
+            if (strstr(jb, "joystick") || strstr(jb, "joy0") ||
+                !strstr(jb, "bi0 = KEY:SPACE\n")) {
+                strcpy_s(why, sizeof why, "Profil ohne Joystick veraendert");
+            }
+        }
+        u8_DeleteFile(jp);
+        if (!why[0]) { /* Lernhilfe mit simulierten Zustaenden */
+            imap_joy_state_t jb0, jpv, jc;
+            char o[48];
+            int r;
+            memset(&jb0, 0, sizeof jb0);
+            for (i = 0; i < IJOY_POVS; i++) {
+                jb0.pov[i] = -1;
+            }
+            jpv = jb0;
+            jc = jb0;
+            jc.btn[0] = 1u << 2;
+            r = lctrl_joy_learn(&jb0, &jpv, &jc, 0xFF, 1, b0, o, sizeof o);
+            if (r != 1 || strcmp(o, "B3") != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Taste: %d '%s'", r, o);
+            }
+            jpv = jc;
+            jc.pov[0] = 9000;
+            r = lctrl_joy_learn(&jb0, &jpv, &jc, 0xFF, 1, b0, o, sizeof o);
+            if (!why[0] && (r != 2 || strcmp(o, "POV1R") != 0)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "POV: %d '%s'", r, o);
+            }
+            r = lctrl_joy_learn(&jb0, &jpv, &jc, 0xFF, 1, pl, o, sizeof o);
+            if (!why[0] && r != 0) { /* Taste/POV auf Achsen-Element: nichts */
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Taste auf Achse: %d '%s'", r, o);
+            }
+            /* Schubhebel ruht am Minimum: Vollgas -> Z+, Mitte -> Zone */
+            jb0 = jpv = jc = (imap_joy_state_t){ 0 };
+            for (i = 0; i < IJOY_POVS; i++) {
+                jb0.pov[i] = jpv.pov[i] = jc.pov[i] = -1;
+            }
+            jb0.axis[2] = jpv.axis[2] = -32768;
+            jc.axis[2] = 32767;
+            r = lctrl_joy_learn(&jb0, &jpv, &jc, 0xFF, 0, g3, o, sizeof o);
+            if (!why[0] && (r != 3 || strcmp(o, "Z+") != 0)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Z+: %d '%s'", r, o);
+            }
+            jc.axis[2] = 0;
+            r = lctrl_joy_learn(&jb0, &jpv, &jc, 0xFF, 0, g3, o, sizeof o);
+            if (!why[0] && (r != 3 || strcmp(o, "Z:zone=38-62") != 0)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Zone: %d '%s'", r, o);
+            }
+            /* Pedal ruht am Maximum, Weg zum Minimum -> invertiert */
+            jb0.axis[2] = jpv.axis[2] = jc.axis[2] = 0;
+            jb0.axis[1] = 32767;
+            jc.axis[1] = -32768;
+            r = lctrl_joy_learn(&jb0, &jpv, &jc, 0xFF, 0, pl, o, sizeof o);
+            if (!why[0] && (r != 3 || strcmp(o, "Y:dz=0.05:inv=1") != 0)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Pedal: %d '%s'", r, o);
+            }
+            jb0.axis[1] = jc.axis[1] = 0;
+            jc.axis[0] = 30000; /* 46 % */
+            r = lctrl_joy_learn(&jb0, &jpv, &jc, 0xFF, 0, ax, o, sizeof o);
+            if (!why[0] && (r != 3 || strcmp(o, "X:dz=0.05") != 0)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Achse: %d '%s'", r, o);
+            }
+            jc.axis[0] = 5000; /* unter 40 %: nichts */
+            r = lctrl_joy_learn(&jb0, &jpv, &jc, 0xFF, 0, ax, o, sizeof o);
+            if (!why[0] && r != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Rauschen: %d '%s'", r, o);
+            }
+            jc.axis[0] = 30000; /* Achse fehlt am Geraet: nichts */
+            r = lctrl_joy_learn(&jb0, &jpv, &jc, 0xFE, 0, ax, o, sizeof o);
+            if (!why[0] && r != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "fehlende Achse: %d", r);
+            }
+        }
+        if (!why[0]) { /* Slot-Zuordnung */
+            ijoy_info_t jl[3];
+            memset(jl, 0, sizeof jl);
+            strcpy_s(jl[0].product, sizeof jl[0].product, "Saitek X52 Throttle");
+            strcpy_s(jl[1].product, sizeof jl[1].product, "Pedals");
+            strcpy_s(jl[2].product, sizeof jl[2].product, "Pedals");
+            strcpy_s(jl[2].guid, sizeof jl[2].guid, "{A}");
+            sl = lctrl_joy_slot_for(&j1, jl, 3, 0);
+            n = lctrl_joy_slot_for(&j1, jl, 3, 1); /* JOY1 implizit = Geraet 2 */
+            if (sl != 0 || n != 1 || j1.joy[1][0]) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Slot: %d %d '%s'", sl, n, j1.joy[1]);
+            }
+            lctrl_bind_init(&j3);
+            sl = lctrl_joy_slot_for(&j3, jl, 3, 2);
+            if (!why[0] && (sl != 0 || strcmp(j3.joy[0], "Pedals@2") != 0)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "neuer Slot: %d '%s'", sl, j3.joy[0]);
+            }
+            sl = lctrl_joy_slot_for(&j3, jl, 3, 2); /* zweites Mal: dieselbe Zeile */
+            n = lctrl_joy_slot_for(&j3, jl, 3, 0);
+            if (!why[0] && (sl != 0 || n != 1 ||
+                            strcmp(j3.joy[1], "Saitek X52 Throttle") != 0)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Slot 2: %d %d '%s'", sl, n, j3.joy[1]);
+            }
+        }
+        if (!why[0]) { /* Parameter + Erkennung */
+            char a[96] = "JOY0:X:dz=0.05:inv=1";
+            int s2 = -1;
+            lctrl_joy_param_set(a, sizeof a, "dz", "0.10");
+            if (strcmp(a, "JOY0:X:dz=0.10:inv=1") != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "dz setzen: '%s'", a);
+            }
+            lctrl_joy_param_set(a, sizeof a, "inv", NULL);
+            if (!why[0] && strcmp(a, "JOY0:X:dz=0.10") != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "inv weg: '%s'", a);
+            }
+            lctrl_joy_param_set(a, sizeof a, "inv", "1");
+            lctrl_joy_param_set(a, sizeof a, "dz", NULL);
+            if (!why[0] && strcmp(a, "JOY0:X:inv=1") != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "inv/dz: '%s'", a);
+            }
+            if (!why[0] &&
+                (!lctrl_joy_is_axis("JOY:RX", &s2, &ax2) || s2 != 0 || ax2 != 3 ||
+                 lctrl_joy_is_axis("JOY0:Z+", NULL, NULL) ||
+                 lctrl_joy_is_axis("JOY0:Z-", NULL, NULL) ||
+                 lctrl_joy_is_axis("JOY1:Z:zone=20-40", NULL, NULL) ||
+                 lctrl_joy_is_axis("JOY0:B3", NULL, NULL) ||
+                 lctrl_joy_is_axis("PAD:LX", NULL, NULL) ||
+                 !lctrl_joy_is_axis("JOY3:S1:dz=0.1", &s2, &ax2) || s2 != 3 || ax2 != 7)) {
+                strcpy_s(why, sizeof why, "lctrl_joy_is_axis");
+            }
+            if (!why[0] && (!lctrl_joy_atom_text("JOY1:B3", t1, sizeof t1) ||
+                            !strstr(t1, "2") || !strstr(t1, "3") ||
+                            !lctrl_joy_atom_text("JOY0:POV1L", t1, sizeof t1) ||
+                            !lctrl_joy_atom_text("JOY0:Z:zone=20-40", t1, sizeof t1) ||
+                            !strstr(t1, "20-40") ||
+                            lctrl_joy_atom_text("KEY:A", t2, sizeof t2))) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "lesbar: '%s'", t1);
+            }
+        }
+        if (!why[0]) { /* echte Geraeteliste: ohne Geraet leer, nie Fehler */
+            if (ijoy_init() == 0) {
+                n = ijoy_scan();
+                if (n < 0 || n != ijoy_count() || (n > 0 && !ijoy_info(0))) {
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "ijoy_scan %d", n);
+                }
+                printf("  W221: %d DirectInput-Geraet(e) erkannt\n", n);
+            }
+        }
+        if (!why[0]) {
+            T_OK("W221 HOTAS: joyN-Zeilen + JOY-Belegungen erhalten, Lernhilfe, Slots, dz/inv, lesbar");
+        } else {
+            T_FAIL("W221 HOTAS", "%s", why);
+        }
+    }
+
     /* 20-25 (W82): UTF-8-Pfade, cfg-ANSI, Oberflaeche, Hintergrundbild,
      * Launcher-Einstellung, Vorschau/Offscreen (launcher_gui.c). */
     gui_selftest(client_override, &pass, &fail);
@@ -2740,6 +2966,12 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
         } else if (bv) {
             o.bind_sel = lctrl_bind_elem_index(bv);
         }
+        shot_dir(argc, argv, &o);
+        rc = gui_main(client_override, &o);
+    } else if (cli_flag(argc, argv, "--joy-shot")) {
+        /* W221 HOTAS: Joystick-Dialog offscreen (Beispielgeraete, nie sichtbar) */
+        cli_console();
+        o.shot = 6;
         shot_dir(argc, argv, &o);
         rc = gui_main(client_override, &o);
     } else if (cli_value(argc, argv, "--assist-shot")) {

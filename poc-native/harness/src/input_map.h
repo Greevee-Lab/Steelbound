@@ -11,6 +11,7 @@
  * Vergleichs-Selbsttest (input_selftest.c) prüfbar.
  */
 #include <stdint.h>
+#include "input_joy.h" /* W221: imap_joy_state_t, IMAP_JOY_MAX */
 
 #ifdef __cplusplus
 extern "C" {
@@ -106,6 +107,11 @@ typedef struct {
     struct {
         int kind, code;
     } supp[16];
+    /* W221 HOTAS (experimentell): DirectInput-Geraete in den Profil-Slots
+     * JOY0..JOY3 (Hook: ijoy_slots_get; Test: simuliert). joy_mask Bit i =
+     * Slot i hat ein Geraet; 0 = JOY-Quellen tragen nichts bei. */
+    imap_joy_state_t joy[IMAP_JOY_MAX];
+    unsigned joy_mask;
 } imap_snap_t;
 
 /* W132 PAD-ARB: einachsiger Arbitrierungs-Zustand (gleiche Logik wie
@@ -139,6 +145,9 @@ typedef struct {
     int prev_feedback_shot;
     int prev_feedback_clip;
     int prev_photo;       /* W195: Pegel der Aktion photo (ohne Tasten) im Vor-Poll */
+    uint8_t gear_direct_hit; /* W221: Direktwahl (gear.r/n/1..5, z. B.
+                              * Schubhebel-Zonen) war in diesem Poll aktiv;
+                              * der Hook laesst auto_gear dann aus */
 } imap_state_t;
 
 void imap_state_init(imap_state_t *st); /* gear=8(N), tuner=0, Akkus Mitte */
@@ -167,8 +176,22 @@ typedef enum {
     IMAP_A_PADBTN,  /* code = IMAP_PAD_*-Bit (ohne D-Pad) */
     IMAP_A_PADDPAD, /* code = IMAP_PAD_DU/DD/DL/DR-Bit */
     IMAP_A_PADTRIG, /* code 0/1 = LT/RT als Taste (Schwelle 50 %) */
-    IMAP_A_SBC      /* W159: code = Original-Controller-Taste bi0..38 */
+    IMAP_A_SBC,     /* W159: code = Original-Controller-Taste bi0..38 */
+    IMAP_A_JOY      /* W221: code = IMAP_JOY_CODE(slot, typ, idx, lo, hi) */
 } imap_atom_kind_t;
+
+/* W221 HOTAS: JOY-Atom-Code. typ 0 = Taste (idx 0..127), 1 = POV-Richtung
+ * (idx = pov*4 + 0/1/2/3 = hoch/rechts/runter/links), 2 = Achsen-Zone
+ * (idx = Achse 0..7, aktiv bei lo <= Stellung% < hi; 0 % = Minimum,
+ * 100 % = Maximum, hi = 100 schliesst ein). */
+#define IMAP_JOY_CODE(slot, typ, idx, lo, hi) \
+    ((((slot) & 3) << 28) | (((typ) & 3) << 24) | (((idx) & 0xFF) << 14) | \
+     (((lo) & 0x7F) << 7) | ((hi) & 0x7F))
+#define IMAP_JOY_SLOT(c) (((c) >> 28) & 3)
+#define IMAP_JOY_TYP(c) (((c) >> 24) & 3)
+#define IMAP_JOY_IDX(c) (((c) >> 14) & 0xFF)
+#define IMAP_JOY_LO(c) (((c) >> 7) & 0x7F)
+#define IMAP_JOY_HI(c) ((c) & 0x7F)
 
 typedef struct {
     imap_atom_kind_t kind;
@@ -191,11 +214,16 @@ typedef struct {
 
 /* Analogquelle (Stick/Trigger) mit Totzone/Kurve/Invertierung. */
 typedef struct {
-    int src; /* 0=LX 1=LY 2=RX 3=RY 4=LT 5=RT, -1 = unbenutzt */
+    int src; /* 0=LX 1=LY 2=RX 3=RY 4=LT 5=RT, -1 = unbenutzt;
+              * W221: >= 16 = JOY-Achse (16 + slot*8 + achse) */
     float dz;    /* Totzone 0..0.9 (reskaliert) */
     float curve; /* Exponent 0.5..3 (1 = linear) */
     int inv;     /* 1 = invertiert */
+    float sens;  /* W221 (nur JOY): Empfindlichkeit 0.1..4 (1 = linear) */
+    int half;    /* W221 (nur JOY auf Pedal): 1 = nur positive Haelfte,
+                  * 0 = voller Weg (Minimum = 0, Maximum = 255) */
 } imap_analog_t;
+#define IMAP_SRC_JOY 16
 
 typedef struct {
     imap_bind_t neg, pos; /* digitale Endlagen (neg gewinnt bei beiden) */
@@ -232,6 +260,12 @@ typedef struct {
     imap_bind_t feedback_clip;
     int has_pad; /* 1 = Profil referenziert Pad-Quellen */
     int has_sbc; /* 1 = Profil referenziert SBC-Quellen */
+    /* W221 HOTAS (experimentell): Geraete-Zuordnung je Slot ("joy0 = <Name
+     * oder {GUID}>[@k]", leer = k-tes Geraet der Aufzaehlung) und
+     * Bitmaske der im Profil benutzten Slots (0 = keine JOY-Quellen ->
+     * kein DirectInput, bitgleich wie bisher). */
+    char joy_dev[IMAP_JOY_MAX][96];
+    unsigned joy_used;
 } imap_profile_t;
 
 /* Eingebaute Profile (Fallback, falls Datei fehlt): "keyboard_default",

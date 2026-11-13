@@ -658,6 +658,16 @@ static void bind_parse_line(char *line, lctrl_bind_t *b)
     if (!eq) { return; }
     *eq = '\0';
     trim(line);
+    /* W221 HOTAS: Geraete-Zuordnung joy0..joy3 = <spec> erhalten */
+    if ((line[0] == 'j' || line[0] == 'J') && (line[1] == 'o' || line[1] == 'O') &&
+        (line[2] == 'y' || line[2] == 'Y') && line[3] >= '0' &&
+        line[3] < '0' + IMAP_JOY_MAX && line[4] == '\0') {
+        char spec[96];
+        strncpy_s(spec, sizeof spec, eq + 1, _TRUNCATE);
+        trim(spec);
+        strcpy_s(b->joy[line[3] - '0'], sizeof b->joy[0], spec);
+        return;
+    }
     idx = lctrl_bind_elem_index(line);
     if (idx < 0) { return; } /* unbekannt: ignorieren */
     val = eq + 1;
@@ -793,6 +803,20 @@ int lctrl_bind_save(const char *path, const lctrl_bind_t *b, const char *base,
     fprintf(f, "# Benutzerprofil, per Launcher belegt (Basis: %s).\n",
             base && *base ? base : "(leer)");
     fprintf(f, "# Format: docs/EINGABE.md. Aktivieren: input_profile=<name>.\n");
+    /* W221 HOTAS: Geraete-Zuordnung nur, wenn vorhanden (ohne Joystick
+     * bleibt die Datei bitgleich wie bisher). */
+    for (i = 0; i < IMAP_JOY_MAX; i++) {
+        if (b->joy[i][0]) {
+            int j;
+            fprintf(f, "\n[joystick]\n");
+            for (j = 0; j < IMAP_JOY_MAX; j++) {
+                if (b->joy[j][0]) {
+                    fprintf(f, "joy%d = %s\n", j, b->joy[j]);
+                }
+            }
+            break;
+        }
+    }
     for (i = 0; i < LCTRL_ELEM_N; i++) {
         const char *want =
             kCtrlElems[i].kind == LCTRL_ACT ?
@@ -814,6 +838,309 @@ int lctrl_bind_save(const char *path, const lctrl_bind_t *b, const char *base,
     fclose(f);
     if (err && errcap) { err[0] = '\0'; }
     return 0;
+}
+
+/* --- W221 HOTAS (experimentell): Joystick-Quellen ---------------------- */
+
+/* "JOYn:" bzw. "JOY:" am Anfang von a (Gross/Klein egal). Rueckgabe
+ * Laenge des Praefixes (inkl. ':'), 0 = keine JOY-Quelle; *slot = n. */
+static int joy_prefix(const char *a, int *slot)
+{
+    if (!((a[0] == 'J' || a[0] == 'j') && (a[1] == 'O' || a[1] == 'o') &&
+          (a[2] == 'Y' || a[2] == 'y'))) {
+        return 0;
+    }
+    if (a[3] == ':') {
+        if (slot) { *slot = 0; }
+        return 4;
+    }
+    if (a[3] >= '0' && a[3] < '0' + IMAP_JOY_MAX && a[4] == ':') {
+        if (slot) { *slot = a[3] - '0'; }
+        return 5;
+    }
+    return 0;
+}
+
+int lctrl_bind_uses_joy_slot(const lctrl_bind_t *b, int slot)
+{
+    int i, j;
+    if (!b) { return 0; }
+    for (i = 0; i < LCTRL_ELEM_N; i++) {
+        for (j = 0; j < b->row[i].n_alt; j++) {
+            const char *p = b->row[i].alt[j];
+            for (;;) {
+                int s = -1;
+                while (*p == ' ' || *p == '\t') { p++; }
+                if (joy_prefix(p, &s) && s == slot) { return 1; }
+                p = strchr(p, '+'); /* Akkord: naechstes Atom */
+                if (!p) { break; }
+                p++;
+            }
+        }
+    }
+    return 0;
+}
+
+static int joy_btn(const imap_joy_state_t *s, int b)
+{
+    return (int)((s->btn[b >> 5] >> (b & 31)) & 1u);
+}
+
+static int iabs_(int v)
+{
+    return v < 0 ? -v : v;
+}
+
+int lctrl_joy_learn(const imap_joy_state_t *base, const imap_joy_state_t *prev,
+                    const imap_joy_state_t *cur, unsigned axmask, int npov,
+                    int idx, char *out, size_t cap)
+{
+    int is_axis, i, best = -1, bestd = 0;
+    if (!base || !prev || !cur || !out || idx < 0 || idx >= LCTRL_ELEM_N) {
+        return 0;
+    }
+    out[0] = '\0';
+    is_axis = kCtrlElems[idx].kind == LCTRL_AXIS;
+    if (!is_axis) {
+        for (i = 0; i < IJOY_BTNS; i++) { /* neue Taste (Flanke) */
+            if (joy_btn(cur, i) && !joy_btn(prev, i)) {
+                _snprintf_s(out, cap, _TRUNCATE, "B%d", i + 1);
+                return 1;
+            }
+        }
+        if (npov > IJOY_POVS) { npov = IJOY_POVS; }
+        for (i = 0; i < npov; i++) { /* neue POV-Richtung (8 -> 4 Wege) */
+            int c = cur->pov[i], p = prev->pov[i];
+            if (c >= 0 && c < 36000) {
+                int d = ((c + 4500) / 9000) % 4;
+                int pd = (p >= 0 && p < 36000) ? ((p + 4500) / 9000) % 4 : -1;
+                if (d != pd) {
+                    _snprintf_s(out, cap, _TRUNCATE, "POV%d%c", i + 1,
+                                "URDL"[d]);
+                    return 2;
+                }
+            }
+        }
+    }
+    for (i = 0; i < IJOY_AXES; i++) { /* groesste Auslenkung ab Ruhestellung */
+        int d;
+        if (!(axmask & (1u << i))) { continue; }
+        d = (int)cur->axis[i] - (int)base->axis[i];
+        if (iabs_(d) > iabs_(bestd)) {
+            bestd = d;
+            best = i;
+        }
+    }
+    if (best < 0 || iabs_(bestd) < 26214) { /* 40 % des Wegs */
+        return 0;
+    }
+    {
+        const char *an = ijoy_axis_name(best);
+        int pct = ((int)cur->axis[best] + 32768) * 100 / 65535;
+        if (is_axis) {
+            int pedal = strncmp(kCtrlElems[idx].key, "pedal", 5) == 0;
+            _snprintf_s(out, cap, _TRUNCATE, "%s:dz=0.05%s", an,
+                        pedal && bestd < 0 ? ":inv=1" : "");
+        } else if (bestd > 0 && pct >= 75) {
+            _snprintf_s(out, cap, _TRUNCATE, "%s+", an);
+        } else if (bestd < 0 && pct <= 25) {
+            _snprintf_s(out, cap, _TRUNCATE, "%s-", an);
+        } else { /* Stellung mitten im Weg (Schubhebel): Zone darum */
+            int lo = pct - 12 < 0 ? 0 : pct - 12;
+            int hi = pct + 12 > 100 ? 100 : pct + 12;
+            _snprintf_s(out, cap, _TRUNCATE, "%s:zone=%d-%d", an, lo, hi);
+        }
+    }
+    return 3;
+}
+
+/* Spec-Text darf weder Kommentar ('#') noch Trenner enthalten. */
+static int joy_spec_ok(const char *s)
+{
+    return s && *s && !strpbrk(s, "#;,=@{}\r\n") && strlen(s) < 80;
+}
+
+int lctrl_joy_slot_for(lctrl_bind_t *b, const ijoy_info_t *list, int n,
+                       int dev)
+{
+    int s;
+    if (!b || !list || dev < 0 || dev >= n) { return -1; }
+    for (s = 0; s < IMAP_JOY_MAX; s++) { /* 1. passende joyN-Zeile */
+        if (b->joy[s][0] && ijoy_match_list(list, n, b->joy[s], s) == dev) {
+            return s;
+        }
+    }
+    for (s = 0; s < IMAP_JOY_MAX; s++) { /* 2. implizit (N-tes Geraet) */
+        if (!b->joy[s][0] && lctrl_bind_uses_joy_slot(b, s) &&
+            ijoy_match_list(list, n, "", s) == dev) {
+            return s;
+        }
+    }
+    for (s = 0; s < IMAP_JOY_MAX; s++) { /* 3. freier Slot + neue Zeile */
+        if (!b->joy[s][0] && !lctrl_bind_uses_joy_slot(b, s)) {
+            const char *nm = list[dev].product[0] ? list[dev].product
+                                                  : list[dev].name;
+            char spec[96];
+            int k;
+            spec[0] = '\0';
+            if (joy_spec_ok(nm)) {
+                for (k = 1; k <= n && !spec[0]; k++) {
+                    char t[96];
+                    if (k == 1) {
+                        strcpy_s(t, sizeof t, nm);
+                    } else {
+                        _snprintf_s(t, sizeof t, _TRUNCATE, "%s@%d", nm, k);
+                    }
+                    if (ijoy_match_list(list, n, t, s) == dev) {
+                        strcpy_s(spec, sizeof spec, t);
+                    }
+                }
+            }
+            if (!spec[0]) { /* Name unbrauchbar/mehrdeutig: Instanz-GUID */
+                strcpy_s(spec, sizeof spec, list[dev].guid);
+            }
+            strcpy_s(b->joy[s], sizeof b->joy[0], spec);
+            return s;
+        }
+    }
+    return -1;
+}
+
+int lctrl_joy_is_axis(const char *alt, int *slot, int *axis)
+{
+    char nm[16];
+    const char *p, *c;
+    int pl, s = 0, ax;
+    size_t n;
+    if (!alt) { return 0; }
+    while (*alt == ' ' || *alt == '\t') { alt++; }
+    pl = joy_prefix(alt, &s);
+    if (!pl || strchr(alt, '+') || strstr(alt, "zone=")) { return 0; }
+    p = alt + pl;
+    c = strchr(p, ':');
+    n = c ? (size_t)(c - p) : strlen(p);
+    if (n == 0 || n >= sizeof nm) { return 0; }
+    memcpy(nm, p, n);
+    nm[n] = '\0';
+    trim(nm);
+    if (nm[0] && nm[strlen(nm) - 1] == '-') { return 0; }
+    ax = ijoy_axis_parse(nm);
+    if (ax < 0) { return 0; }
+    if (slot) { *slot = s; }
+    if (axis) { *axis = ax; }
+    return 1;
+}
+
+int lctrl_joy_param_get(const char *alt, const char *key, char *out,
+                        size_t cap)
+{
+    const char *p = alt;
+    size_t kl = strlen(key);
+    if (out && cap) { out[0] = '\0'; }
+    while (p && (p = strchr(p, ':')) != NULL) {
+        p++;
+        if (_strnicmp(p, key, kl) == 0 && p[kl] == '=') {
+            const char *v = p + kl + 1;
+            size_t n = strcspn(v, ":+");
+            if (out && cap) {
+                if (n >= cap) { n = cap - 1; }
+                memcpy(out, v, n);
+                out[n] = '\0';
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int lctrl_joy_param_set(char *alt, size_t cap, const char *key,
+                        const char *val)
+{
+    char res[160], seg[96];
+    const char *p = alt;
+    size_t kl = strlen(key), o = 0;
+    int first = 1, done = 0;
+    res[0] = '\0';
+    while (*p) { /* Segmente ':'-getrennt; Typ/Name bleiben */
+        size_t n = strcspn(p, ":");
+        if (n >= sizeof seg) { n = sizeof seg - 1; }
+        memcpy(seg, p, n);
+        seg[n] = '\0';
+        if (first || !(_strnicmp(seg, key, kl) == 0 && seg[kl] == '=')) {
+            o += (size_t)_snprintf_s(res + o, sizeof res - o, _TRUNCATE,
+                                     "%s%s", first ? "" : ":", seg);
+            first = 0;
+        } else if (val && *val && !done) { /* an alter Stelle ersetzen */
+            o += (size_t)_snprintf_s(res + o, sizeof res - o, _TRUNCATE,
+                                     ":%s=%s", key, val);
+            done = 1;
+        }
+        p += n;
+        if (*p == ':') { p++; }
+    }
+    if (val && *val && !done) {
+        o += (size_t)_snprintf_s(res + o, sizeof res - o, _TRUNCATE, ":%s=%s",
+                                 key, val);
+    }
+    if (strlen(res) >= cap) { return 1; }
+    strcpy_s(alt, cap, res);
+    return 0;
+}
+
+int lctrl_joy_atom_text(const char *atom, char *out, size_t cap)
+{
+    static const char *const dk[4] = { "gui.joy_dir_u", "gui.joy_dir_r",
+                                       "gui.joy_dir_d", "gui.joy_dir_l" };
+    char nm[32], zone[24];
+    const char *p, *c;
+    int s = 0, pl, ax, n;
+    size_t l;
+    while (*atom == ' ' || *atom == '\t') { atom++; }
+    pl = joy_prefix(atom, &s);
+    if (!pl) { return 0; }
+    p = atom + pl;
+    c = strchr(p, ':');
+    l = c ? (size_t)(c - p) : strlen(p);
+    if (l >= sizeof nm) { l = sizeof nm - 1; }
+    memcpy(nm, p, l);
+    nm[l] = '\0';
+    if ((nm[0] == 'B' || nm[0] == 'b') && nm[1] >= '0' && nm[1] <= '9') {
+        n = atoi(nm + 1);
+        _snprintf_s(out, cap, _TRUNCATE, LT("gui.joy_src_btn"), s + 1, n);
+        return 1;
+    }
+    if (_strnicmp(nm, "POV", 3) == 0 && nm[3] >= '1' && nm[3] <= '4' &&
+        nm[4] && strchr("URDLurdl", nm[4])) {
+        int d = (int)(strchr("URDLurdl", nm[4]) - "URDLurdl") % 4;
+        _snprintf_s(out, cap, _TRUNCATE, LT("gui.joy_src_pov"), s + 1,
+                    nm[3] - '0', LT(dk[d]));
+        return 1;
+    }
+    l = strlen(nm);
+    if (l > 1 && (nm[l - 1] == '+' || nm[l - 1] == '-')) {
+        char sign = nm[l - 1];
+        nm[l - 1] = '\0';
+        ax = ijoy_axis_parse(nm);
+        if (ax >= 0) {
+            _snprintf_s(out, cap, _TRUNCATE, LT("gui.joy_src_axdir"), s + 1,
+                        ijoy_axis_name(ax), sign == '+' ? "+" : "-");
+            return 1;
+        }
+        nm[l - 1] = sign;
+    }
+    ax = ijoy_axis_parse(nm);
+    if (ax >= 0 && lctrl_joy_param_get(atom, "zone", zone, sizeof zone)) {
+        _snprintf_s(out, cap, _TRUNCATE, LT("gui.joy_src_zone"), s + 1,
+                    ijoy_axis_name(ax), zone);
+        return 1;
+    }
+    if (ax >= 0) {
+        _snprintf_s(out, cap, _TRUNCATE, LT("gui.joy_src_axis"), s + 1,
+                    ijoy_axis_name(ax));
+        return 1;
+    }
+    _snprintf_s(out, cap, _TRUNCATE, "%s", atom); /* unbekannt: roh */
+    return 1;
 }
 
 /* --- input_selftest --dump pruefen ------------------------------------- */

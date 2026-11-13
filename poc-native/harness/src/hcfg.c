@@ -79,6 +79,9 @@ void hcfg_defaults(void)
     g_cfg.fatx_stale_extend = 1; /* W63 FATXSTALE */
     g_cfg.contig_alias_test = 0; /* TEST(W177) */
     g_cfg.contig_noalias = 1; /* W177 FILM-WHITE: Contig ohne Low28-Ueberlappung (Fix, 0 = alt) */
+    g_cfg.contig_free = 1; /* W214 SEQ-RENDER: Low28-Bild bei MmFreeContiguousMemory frei (Fix, 0 = alt) */
+    g_cfg.contig_reuse = 1; /* W214 SEQ-RENDER: freigegebene Bloecke wiederverwenden (Fix, 0 = alt) */
+    g_cfg.contig_reuse_ms = 2000; /* W214: Quarantaene */
     g_cfg.phys_exact = 1; /* W73 PHYSALIAS: Phys->Virt exakter Blockanfang zuerst (Fix) */
     g_cfg.hdr_hybrid = 1; /* W94 HDRSWAP: Hybrid-Header statt Tausch (Fix Absturz XCalculateSignatureBegin) */
     g_cfg.hdr_race_test = 0;
@@ -780,6 +783,12 @@ static void set_key(const char *k, const char *v)
         g_cfg.contig_alias_test = (int)strtoul(v, NULL, 0);
     } else if (strcmp(k, "contig_noalias") == 0) {
         g_cfg.contig_noalias = atoi(v);
+    } else if (strcmp(k, "contig_free") == 0) {
+        g_cfg.contig_free = atoi(v);
+    } else if (strcmp(k, "contig_reuse") == 0) {
+        g_cfg.contig_reuse = atoi(v);
+    } else if (strcmp(k, "contig_reuse_ms") == 0) {
+        g_cfg.contig_reuse_ms = atoi(v);
     } else if (strcmp(k, "phys_exact") == 0) {
         g_cfg.phys_exact = atoi(v);
     } else if (strcmp(k, "hdr_hybrid") == 0) {

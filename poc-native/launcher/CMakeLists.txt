@@ -13,6 +13,7 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # W47: Tab-Seiten (Bildformat/Profile/Steuerung) brauchen comctl32.
 # W78: Steuerung (launcher_ctrl.c) + unveraendertes input_sbc_usb.c aus dem
 # Harness (nur einkompiliert: SBC-Status exakt wie der Client).
+# W221 HOTAS: input_joy.c (DirectInput 8, dinput8.dll dynamisch, keine Lib).
 # W82: neue Oberflaeche (launcher_gui.c, W-API, randlos, WIC-Hintergrund),
 # UTF-8-Schicht (launcher_u8.c), Ressourcen (Hintergrundbild) + Manifest
 # (Common Controls v6, Per-Monitor-DPI v2).
@@ -85,6 +86,7 @@ add_executable(sb_launcher WIN32
   src/launcher_packtest.c
   src/launcher_rules.c
   ../harness/src/input_sbc_usb.c
+  ../harness/src/input_joy.c
   ../harness/src/sbc_fixture.c
   ../harness/src/sbc_test.c
   ../harness/src/sb_lang.c

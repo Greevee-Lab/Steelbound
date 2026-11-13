@@ -120,6 +120,7 @@ add_library(sb_emu SHARED
   src/sbc_fixture.c
   src/sbc_wire.c
   src/input_map.c
+  src/input_joy.c
   src/input_mouse.c
   src/input_tap.c
   src/hlock.c
@@ -150,6 +151,7 @@ add_executable(input_selftest
   src/input_selftest.c
   src/input_mouse_selftest.c
   src/input_map.c
+  src/input_joy.c
   src/input_tap.c
   src/input_sbc_usb.c
 )

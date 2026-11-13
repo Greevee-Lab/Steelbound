@@ -229,6 +229,7 @@ int gui_page_from_name(const char *v)
 #define ID_CPANINI 1103 /* W191 UW-PERSP: Panini der Cockpit-Ansicht */
 #define ID_CTRL_AIMTURN 1104 /* W218 SIMPLE-CONTROLS: Fadenkreuz am Rand dreht den Mech */
 #define ID_CTRL_AUTOGEAR 1105 /* W218 SIMPLE-CONTROLS: automatischer Gangwechsel */
+#define ID_CTRL_JOY 1106 /* W221 HOTAS (experimentell): Joystick-Dialog */
 static char g_img_msg[600]; /* W150: Ergebnis der letzten Abbild-Pruefung (UTF-8) */
 static int g_img_ok;
 static void check_image_ex(int status);
@@ -3785,6 +3786,10 @@ static void ks_atom(const char *a, char *out, size_t cap, int *src)
         _snprintf_s(out, cap, _TRUNCATE, "SBC:%s", nm);
         return;
     }
+    if (lctrl_joy_atom_text(a, out, cap)) { /* W221: "Joystick 1 Taste 3" */
+        *src = KS_SRC_PAD;
+        return;
+    }
     strncpy_s(out, cap, a, _TRUNCATE);
 }
 
@@ -6441,6 +6446,10 @@ static void browse_media(void)
 #define IDB_RESULT 514
 #define IDB_CLOSE 515
 #define IDB_TITLE 516
+#define IDB_JLBL 517   /* W221: Joystick-Achse Totzone/Invertierung */
+#define IDB_JDZ 518
+#define IDB_JINV 519
+#define IDB_JAPPLY 520
 
 static lctrl_bind_t g_bind, g_bind_base;
 static char g_bind_base_name[64];
@@ -6456,6 +6465,10 @@ static HWND g_bind_hd;
 #define WM_APP_BIND_SBC (WM_APP + 8) /* w = bi 0..38 (Flanke) */
 static HANDLE g_cap_sbc_thr;
 static volatile LONG g_cap_sbc_stop;
+/* W221 HOTAS: Joystick-Lernmodus (Ruhestellung beim Start, letzter Poll). */
+static int g_cap_jn;
+static ijoy_info_t g_cap_jl[IJOY_MAX_DEV];
+static imap_joy_state_t g_cap_jbase[IJOY_MAX_DEV], g_cap_jprev[IJOY_MAX_DEV];
 
 static DWORD WINAPI bind_sbc_thread(LPVOID arg)
 {
@@ -6498,6 +6511,87 @@ static HWND bctl(HWND hd, int id)
     return GetDlgItem(hd, id);
 }
 
+/* W221 HOTAS: Totzone/Invertierung der JOY-Achsenquellen der gewaehlten
+ * Belegung anzeigen (erste JOY-Achse gibt die Werte vor). */
+static void bind_joy_row(HWND hd)
+{
+    int a, has = 0, inv = 0, en;
+    char dz[16] = "0";
+    uictl_t *u = ui_by_hwnd(bctl(hd, IDB_JINV));
+    if (g_bind_sel >= 0 && g_bind_sel < LCTRL_ELEM_N) {
+        for (a = 0; a < g_bind.row[g_bind_sel].n_alt && !has; a++) {
+            const char *alt = g_bind.row[g_bind_sel].alt[a];
+            if (lctrl_joy_is_axis(alt, NULL, NULL)) {
+                char v[16];
+                has = 1;
+                if (!lctrl_joy_param_get(alt, "dz", dz, sizeof dz)) {
+                    strcpy_s(dz, sizeof dz, "0");
+                }
+                inv = lctrl_joy_param_get(alt, "inv", v, sizeof v) &&
+                      atoi(v) != 0;
+            }
+        }
+    }
+    en = has && !g_cap_mode;
+    ui_settext(bctl(hd, IDB_JDZ), has ? dz : "");
+    if (u) {
+        u->checked = inv;
+        InvalidateRect(u->h, NULL, FALSE);
+    }
+    EnableWindow(bctl(hd, IDB_JDZ), en);
+    EnableWindow(bctl(hd, IDB_JINV), en);
+    EnableWindow(bctl(hd, IDB_JAPPLY), en);
+}
+
+static void bind_refresh_cur(HWND hd);
+static void bind_refresh_conf(HWND hd);
+
+/* W221: Totzone (0..0.9) + Invertierung in alle JOY-Achsenquellen der
+ * gewaehlten Belegung schreiben (dz=0 entfernt den Parameter). */
+static void bind_joy_apply(HWND hd)
+{
+    char t[32], dz[16], res[256];
+    double v;
+    int a, inv;
+    uictl_t *u = ui_by_hwnd(bctl(hd, IDB_JINV));
+    if (g_bind_sel < 0 || g_bind_sel >= LCTRL_ELEM_N) {
+        return;
+    }
+    ui_gettext(bctl(hd, IDB_JDZ), t, sizeof t);
+    trim_u8(t);
+    {
+        char *c = strchr(t, ','); /* deutsches Komma erlauben */
+        if (c) {
+            *c = '.';
+        }
+    }
+    v = t[0] ? atof(t) : 0.0;
+    if (v < 0.0 || v > 0.9) {
+        ui_settext(bctl(hd, IDB_RESULT), LT("gui.joy_baddz"));
+        return;
+    }
+    _snprintf_s(dz, sizeof dz, _TRUNCATE, "%.2f", v);
+    inv = u ? u->checked : 0;
+    for (a = 0; a < g_bind.row[g_bind_sel].n_alt; a++) {
+        char *alt = g_bind.row[g_bind_sel].alt[a];
+        if (lctrl_joy_is_axis(alt, NULL, NULL)) {
+            lctrl_joy_param_set(alt, sizeof g_bind.row[0].alt[0], "dz",
+                                v > 0.0 ? dz : NULL);
+            lctrl_joy_param_set(alt, sizeof g_bind.row[0].alt[0], "inv",
+                                inv ? "1" : NULL);
+        }
+    }
+    lctrl_bind_row_text(&g_bind, g_bind_sel, res, sizeof res);
+    {
+        char line[400];
+        _snprintf_s(line, sizeof line, _TRUNCATE, "%s = %s.",
+                    kCtrlElems[g_bind_sel].key, res);
+        ui_settext(bctl(hd, IDB_RESULT), line);
+    }
+    bind_refresh_cur(hd);
+    bind_refresh_conf(hd);
+}
+
 static void bind_refresh_cur(HWND hd)
 {
     char t[512], row[420];
@@ -6505,14 +6599,16 @@ static void bind_refresh_cur(HWND hd)
     int sel = ListBox_GetCurSel(lb);
     g_bind_sel = (sel >= 0) ? (int)ListBox_GetItemData(lb, sel) : -1;
     if (g_bind_sel < 0 || g_bind_sel >= LCTRL_ELEM_N) {
-        int ids[6] = { IDB_SET, IDB_ADD, IDB_MX, IDB_MY, IDB_DEL, IDB_RST };
+        int ids[9] = { IDB_SET, IDB_ADD, IDB_MX, IDB_MY, IDB_DEL, IDB_RST,
+                       IDB_JDZ, IDB_JINV, IDB_JAPPLY };
         int i;
         ui_settext(bctl(hd, IDB_CUR), LT("gui.bind_noelem"));
-        for (i = 0; i < 6; i++) {
+        for (i = 0; i < 9; i++) {
             EnableWindow(bctl(hd, ids[i]), FALSE);
         }
         return;
     }
+    bind_joy_row(hd);
     lctrl_bind_row_text(&g_bind, g_bind_sel, row, sizeof row);
     _snprintf_s(t, sizeof t, _TRUNCATE, "%s (%s): %s",
                 kCtrlElems[g_bind_sel].key, LT(kCtrlElems[g_bind_sel].lkey), row);
@@ -6593,6 +6689,23 @@ static void bind_start_capture(HWND hd, int mode)
     if (lctrl_sbc_status(sbc_st, sizeof sbc_st) == SBC_OK) {
         g_cap_sbc_stop = 0;
         g_cap_sbc_thr = CreateThread(NULL, 0, bind_sbc_thread, hd, 0, NULL);
+    }
+    /* W221 HOTAS: Joysticks neu aufzaehlen, Ruhestellung merken (Achsen-
+     * Auslenkung zaehlt relativ dazu; Schubhebel ruhen nicht mittig). */
+    g_cap_jn = 0;
+    if (ijoy_init() == 0) {
+        int i, n = ijoy_scan();
+        for (i = 0; i < n && i < IJOY_MAX_DEV; i++) {
+            const ijoy_info_t *in = ijoy_info(i);
+            if (!in) {
+                break;
+            }
+            g_cap_jl[i] = *in;
+            memset(&g_cap_jbase[i], 0, sizeof g_cap_jbase[i]);
+            (void)ijoy_read(i, &g_cap_jbase[i]);
+            g_cap_jprev[i] = g_cap_jbase[i];
+            g_cap_jn = i + 1;
+        }
     }
     _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.bind_press"),
                 kCtrlElems[g_bind_sel].key, LT(kCtrlElems[g_bind_sel].lkey));
@@ -6737,6 +6850,43 @@ static void bind_cap_pad(HWND hd)
     g_cap_prev = cur;
 }
 
+/* W221 HOTAS: Joystick-Eingabe im Lernmodus (Timer 7, 50 ms). Taste ->
+ * JOYn:Bk, POV -> JOYn:POVkU.., Achse -> analog bzw. Z+/Z-/Zone. Slot aus
+ * passender joyN-Zeile, sonst neue Zeile (bei Fehlschlag zurueck). */
+static void bind_cap_joy(HWND hd)
+{
+    int i;
+    for (i = 0; i < g_cap_jn && g_cap_mode; i++) {
+        imap_joy_state_t cur;
+        char part[48], src[64];
+        int r;
+        if (!ijoy_read(i, &cur)) {
+            continue;
+        }
+        r = lctrl_joy_learn(&g_cap_jbase[i], &g_cap_jprev[i], &cur,
+                            g_cap_jl[i].axmask, g_cap_jl[i].npov, g_bind_sel,
+                            part, sizeof part);
+        g_cap_jprev[i] = cur;
+        if (r) {
+            char keep[IMAP_JOY_MAX][96];
+            int slot, rc;
+            memcpy(keep, g_bind.joy, sizeof keep);
+            slot = lctrl_joy_slot_for(&g_bind, g_cap_jl, g_cap_jn, i);
+            if (slot < 0) {
+                ui_settext(bctl(hd, IDB_PROMPT), LT("gui.joy_noslot"));
+                return;
+            }
+            _snprintf_s(src, sizeof src, _TRUNCATE, "JOY%d:%s", slot, part);
+            rc = bind_apply(hd, src);
+            if (rc != 0) {
+                memcpy(g_bind.joy, keep, sizeof keep);
+            }
+            bind_cap_done(hd, rc);
+            return;
+        }
+    }
+}
+
 static void bind_save(HWND hd)
 {
     char rest[64], fn[72], pname[68], dir[1100], path[1200], err[512];
@@ -6842,6 +6992,14 @@ static LRESULT CALLBACK bind_proc(HWND hd, UINT msg, WPARAM wp, LPARAM lp)
             bind_save(hd);
         } else if (id == IDB_CHECK) {
             bind_check(hd);
+        } else if (id == IDB_JINV) { /* W221: Schalter Invertieren */
+            uictl_t *u = ui_by_hwnd(bctl(hd, IDB_JINV));
+            if (u) {
+                u->checked = !u->checked;
+                InvalidateRect(u->h, NULL, FALSE);
+            }
+        } else if (id == IDB_JAPPLY) {
+            bind_joy_apply(hd);
         }
         return 0;
     }
@@ -6864,6 +7022,9 @@ static LRESULT CALLBACK bind_proc(HWND hd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_TIMER:
         if (wp == 7 && g_cap_mode) {
             bind_cap_pad(hd);
+            if (g_cap_mode) {
+                bind_cap_joy(hd); /* W221 */
+            }
         } else if (wp == 9 && g_o.shot == 3) {
             KillTimer(hd, 9);
             bind_shot_save(hd);
@@ -6928,6 +7089,11 @@ static void bind_build(HWND hd, const char *base_name)
     mk(hd, K_BTN, IDB_CHECK, PG_DIALOG, 454, 396, 174, 30, LT("gui.btn_check"), WS_VISIBLE);
     mk(hd, K_STATIC, IDB_RESULT, PG_DIALOG, 274, 432, 354, 34, "", WS_VISIBLE);
     mk(hd, K_BTN, IDB_CLOSE, PG_DIALOG, 12, 446, 130, 30, LT("gui.btn_close"), WS_VISIBLE);
+    /* W221 HOTAS (experimentell): Totzone/Invertierung fuer JOY-Achsen */
+    mk(hd, K_STATIC, IDB_JLBL, PG_DIALOG, 12, 492, 300, 18, LT("gui.joy_axrow"), WS_VISIBLE);
+    mk(hd, K_EDIT, IDB_JDZ, PG_DIALOG, 318, 488, 56, 24, "", WS_VISIBLE | WS_BORDER);
+    mk(hd, K_TOGGLE, IDB_JINV, PG_DIALOG, 384, 486, 140, 28, LT("gui.joy_inv"), WS_VISIBLE);
+    mk(hd, K_BTN, IDB_JAPPLY, PG_DIALOG, 528, 485, 100, 30, LT("gui.joy_apply"), WS_VISIBLE);
 }
 
 /* Offscreen-Position (rechts ausserhalb aller Monitore). */
@@ -6984,7 +7150,7 @@ static void bind_dialog_modal(const char *base_name, const char *base_path)
     g_cap_mode = 0;
     g_bind_done = 0;
     rc.right = SX(640);
-    rc.bottom = SX(488);
+    rc.bottom = SX(528); /* W221: + Joystick-Zeile */
     AdjustWindowRectEx(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE,
                        exs);
     if (shot) {
@@ -9263,6 +9429,398 @@ static void open_assist_dialog(void)
     assist_dialog_modal(NULL);
 }
 
+/* ------------------------------------------------------------------ */
+/* W221 HOTAS (experimentell): Geraeteliste + Live-Anzeige             */
+/* (eigener Dialog: die Steuerungs-Seite hat keinen Platz mehr)         */
+/* ------------------------------------------------------------------ */
+#define IDJ_LIST 601
+#define IDJ_SCAN 602
+#define IDJ_INFO 603
+#define IDJ_CLOSE 604
+#define IDJ_EXP 605
+#define IDJ_DEVH 606
+#define JOY_LIVE_X 274
+#define JOY_LIVE_Y 118
+#define JOY_LIVE_W 354
+#define JOY_LIVE_H 290
+#define JOY_TIMER 11
+
+static int g_joy_done, g_joy_n, g_joy_ok, g_joy_demo, g_joy_have;
+static HWND g_joy_dlg_hd;
+static ijoy_info_t g_joy_list[IJOY_MAX_DEV];
+static imap_joy_state_t g_joy_st;
+
+static int shot_window(HWND w, const char *path, int png);
+
+/* Nur Shot-Modus: Beispielgeraete (kein Geraet am Testrechner noetig). */
+static void joy_demo_fill(void)
+{
+    memset(g_joy_list, 0, sizeof g_joy_list);
+    strcpy_s(g_joy_list[0].name, sizeof g_joy_list[0].name, "Example HOTAS Throttle");
+    strcpy_s(g_joy_list[0].product, sizeof g_joy_list[0].product, "Example HOTAS Throttle");
+    g_joy_list[0].axmask = 0x7F;
+    g_joy_list[0].nbtn = 32;
+    g_joy_list[0].npov = 1;
+    strcpy_s(g_joy_list[1].name, sizeof g_joy_list[1].name, "Example Rudder Pedals");
+    strcpy_s(g_joy_list[1].product, sizeof g_joy_list[1].product, "Example Rudder Pedals");
+    g_joy_list[1].axmask = 0x07;
+    g_joy_n = 2;
+    memset(&g_joy_st, 0, sizeof g_joy_st);
+    g_joy_st.axis[0] = 6000;   /* X */
+    g_joy_st.axis[1] = -9000;  /* Y */
+    g_joy_st.axis[2] = 21000;  /* Z: Schubhebel */
+    g_joy_st.axis[3] = -32768; /* RX */
+    g_joy_st.axis[4] = 0;
+    g_joy_st.axis[5] = -2500;
+    g_joy_st.axis[6] = 32767;  /* S0 */
+    g_joy_st.btn[0] = (1u << 0) | (1u << 4) | (1u << 11);
+    g_joy_st.pov[0] = 9000;
+    g_joy_st.pov[1] = g_joy_st.pov[2] = g_joy_st.pov[3] = -1;
+    g_joy_have = 1;
+}
+
+static int joy_sel(HWND hd)
+{
+    HWND lb = bctl(hd, IDJ_LIST);
+    int s = ListBox_GetCurSel(lb);
+    int i = s >= 0 ? (int)ListBox_GetItemData(lb, s) : -1;
+    return (i >= 0 && i < g_joy_n) ? i : -1;
+}
+
+static void joy_refresh_info(HWND hd)
+{
+    char t[320];
+    int i = joy_sel(hd);
+    if (i < 0) {
+        ui_settext(bctl(hd, IDJ_INFO), "");
+        g_joy_have = 0;
+    } else {
+        int na = 0, b;
+        for (b = 0; b < IJOY_AXES; b++) {
+            na += (g_joy_list[i].axmask >> b) & 1;
+        }
+        _snprintf_s(t, sizeof t, _TRUNCATE, "%s\r\n", g_joy_list[i].product[0]
+                    ? g_joy_list[i].product : g_joy_list[i].name);
+        _snprintf_s(t + strlen(t), sizeof t - strlen(t), _TRUNCATE,
+                    LT("gui.joy_info"), na, g_joy_list[i].nbtn,
+                    g_joy_list[i].npov);
+        ui_settext(bctl(hd, IDJ_INFO), t);
+        if (!g_joy_demo) {
+            g_joy_have = ijoy_read(i, &g_joy_st);
+        }
+    }
+    {
+        RECT r = { SX(JOY_LIVE_X), SX(JOY_LIVE_Y), SX(JOY_LIVE_X + JOY_LIVE_W),
+                   SX(JOY_LIVE_Y + JOY_LIVE_H) };
+        InvalidateRect(hd, &r, FALSE);
+    }
+}
+
+static void joy_rescan(HWND hd)
+{
+    HWND lb = bctl(hd, IDJ_LIST);
+    int i;
+    ListBox_ResetContent(lb);
+    if (g_joy_demo) {
+        joy_demo_fill();
+    } else {
+        g_joy_ok = ijoy_init() == 0;
+        g_joy_n = g_joy_ok ? ijoy_scan() : 0;
+        if (g_joy_n > IJOY_MAX_DEV) {
+            g_joy_n = IJOY_MAX_DEV;
+        }
+        for (i = 0; i < g_joy_n; i++) {
+            const ijoy_info_t *in = ijoy_info(i);
+            if (in) {
+                g_joy_list[i] = *in;
+            } else {
+                memset(&g_joy_list[i], 0, sizeof g_joy_list[i]);
+            }
+        }
+    }
+    for (i = 0; i < g_joy_n; i++) {
+        char e[128];
+        _snprintf_s(e, sizeof e, _TRUNCATE, "%d: %s", i + 1,
+                    g_joy_list[i].name[0] ? g_joy_list[i].name
+                                          : g_joy_list[i].product);
+        list_add(lb, e, (LPARAM)i, 1);
+    }
+    if (g_joy_n == 0) {
+        list_add(lb, LT(g_joy_ok || g_joy_demo ? "gui.joy_none" : "gui.joy_nodi"),
+                 (LPARAM)-1, 1);
+    }
+    ListBox_SetCurSel(lb, 0);
+    joy_refresh_info(hd);
+}
+
+static void joy_text(HDC dc, int font, COLORREF c, int x, int y, int w, int h,
+                     const char *u8, UINT fl)
+{
+    wchar_t *wt = u8_wdup(u8);
+    RECT r = { SX(x), SX(y), SX(x + w), SX(y + h) };
+    SelectObject(dc, g_f[font]);
+    SetTextColor(dc, c);
+    DrawTextW(dc, wt ? wt : L"", -1, &r, fl | DT_NOPREFIX | DT_SINGLELINE |
+              DT_VCENTER | DT_END_ELLIPSIS);
+    free(wt);
+}
+
+static void joy_fill(HDC dc, int x, int y, int w, int h, COLORREF c)
+{
+    RECT r = { SX(x), SX(y), SX(x) + MulDiv(w, g_dpi, 96), SX(y + h) };
+    HBRUSH b = CreateSolidBrush(c);
+    FillRect(dc, &r, b);
+    DeleteObject(b);
+}
+
+/* Live-Anzeige (Koordinaten relativ zum Dialog, Ursprung JOY_LIVE_X/Y). */
+static void joy_paint_live(HDC dc)
+{
+    static const char *const dk[4] = { "gui.joy_dir_u", "gui.joy_dir_r",
+                                       "gui.joy_dir_d", "gui.joy_dir_l" };
+    int i = -1, a, y, X = JOY_LIVE_X, Y = JOY_LIVE_Y;
+    char t[400];
+    if (g_joy_dlg_hd) {
+        i = joy_sel(g_joy_dlg_hd);
+    }
+    SetBkMode(dc, TRANSPARENT);
+    joy_text(dc, F_SEMI, C_TEXT, X, Y, JOY_LIVE_W, 22, LT("gui.joy_live"), DT_LEFT);
+    if (i < 0) {
+        return;
+    }
+    if (!g_joy_have) {
+        joy_text(dc, F_SMALL, C_WARN, X, Y + 26, JOY_LIVE_W, 20,
+                 LT("gui.joy_lost"), DT_LEFT);
+        return;
+    }
+    for (a = 0; a < IJOY_AXES; a++) {
+        int on = (g_joy_list[i].axmask >> a) & 1;
+        int pct = ((int)g_joy_st.axis[a] + 32768) * 100 / 65535;
+        int bw = 250;
+        y = Y + 28 + a * 24;
+        joy_text(dc, F_SMALL, on ? C_TEXT : C_FAINT, X, y, 34, 18,
+                 ijoy_axis_name(a), DT_LEFT);
+        joy_fill(dc, X + 38, y + 3, bw, 12, on ? C_INPUT_BRD : C_PANEL);
+        if (on) {
+            joy_fill(dc, X + 39, y + 4, (bw - 2) * pct / 100, 10, C_ACCENT);
+            joy_fill(dc, X + 38 + bw / 2, y + 1, 1, 16, C_TEXT); /* Mitte */
+            _snprintf_s(t, sizeof t, _TRUNCATE, "%d %%", pct);
+        } else {
+            strcpy_s(t, sizeof t, "-");
+        }
+        joy_text(dc, F_SMALL, on ? C_DIM : C_FAINT, X + 296, y, 58, 18, t,
+                 DT_RIGHT);
+    }
+    y = Y + 28 + IJOY_AXES * 24 + 6;
+    {
+        size_t o;
+        int b, any = 0;
+        o = (size_t)_snprintf_s(t, sizeof t, _TRUNCATE, "%s ", LT("gui.joy_btns"));
+        for (b = 0; b < IJOY_BTNS && o < sizeof t - 8; b++) {
+            if ((g_joy_st.btn[b >> 5] >> (b & 31)) & 1u) {
+                o += (size_t)_snprintf_s(t + o, sizeof t - o, _TRUNCATE,
+                                         "%s%d", any ? " " : "", b + 1);
+                any = 1;
+            }
+        }
+        if (!any) {
+            strcat_s(t, sizeof t, LT("gui.joy_btns_none"));
+        }
+        joy_text(dc, F_SMALL, any ? C_ACCENT_HI : C_DIM, X, y, JOY_LIVE_W, 20,
+                 t, DT_LEFT);
+    }
+    for (a = 0; a < g_joy_list[i].npov && a < IJOY_POVS; a++) {
+        int p = g_joy_st.pov[a];
+        y += 22;
+        if (p >= 0 && p < 36000) {
+            _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.joy_pov"), a + 1);
+            _snprintf_s(t + strlen(t), sizeof t - strlen(t), _TRUNCATE,
+                        " %d" "\xC2\xB0" " (%s)", p / 100,
+                        LT(dk[((p + 4500) / 9000) % 4]));
+        } else {
+            _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.joy_pov"), a + 1);
+            _snprintf_s(t + strlen(t), sizeof t - strlen(t), _TRUNCATE,
+                        " %s", LT("gui.joy_pov_c"));
+        }
+        joy_text(dc, F_SMALL, p >= 0 ? C_ACCENT_HI : C_DIM, X, y, JOY_LIVE_W,
+                 20, t, DT_LEFT);
+    }
+    if (g_joy_demo) {
+        joy_text(dc, F_TINY, C_FAINT, X, Y + JOY_LIVE_H - 18, JOY_LIVE_W, 16,
+                 LT("gui.joy_demo"), DT_LEFT);
+    }
+}
+
+static LRESULT CALLBACK joy_proc(HWND hd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_COMMAND: {
+        int id = LOWORD(wp), code = HIWORD(wp);
+        if (id == IDJ_CLOSE || id == IDCANCEL) {
+            g_joy_done = 1;
+        } else if (id == IDJ_SCAN) {
+            joy_rescan(hd);
+        } else if (id == IDJ_LIST && code == LBN_SELCHANGE) {
+            joy_refresh_info(hd);
+        }
+        return 0;
+    }
+    case WM_DRAWITEM:
+        draw_item((const DRAWITEMSTRUCT *)lp);
+        return TRUE;
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORSTATIC:
+        return ctlcolor((HDC)wp, (HWND)lp, msg == WM_CTLCOLORSTATIC);
+    case WM_ERASEBKGND:
+        return 1; /* WM_PAINT fuellt (doppelt gepuffert) */
+    case WM_PAINT: {
+        PAINTSTRUCT ps;
+        RECT r;
+        HDC dc = BeginPaint(hd, &ps), mem;
+        HBITMAP bm, old;
+        GetClientRect(hd, &r);
+        mem = CreateCompatibleDC(dc);
+        bm = CreateCompatibleBitmap(dc, r.right, r.bottom);
+        old = (HBITMAP)SelectObject(mem, bm);
+        if (!g_br_dialog) {
+            g_br_dialog = CreateSolidBrush(C_DIALOG);
+        }
+        FillRect(mem, &r, g_br_dialog);
+        joy_paint_live(mem);
+        BitBlt(dc, 0, 0, r.right, r.bottom, mem, 0, 0, SRCCOPY);
+        SelectObject(mem, old);
+        DeleteObject(bm);
+        DeleteDC(mem);
+        EndPaint(hd, &ps);
+        return 0;
+    }
+    case WM_TIMER:
+        if (wp == JOY_TIMER && !g_joy_demo) {
+            int i = joy_sel(hd);
+            if (i >= 0) {
+                RECT r = { SX(JOY_LIVE_X), SX(JOY_LIVE_Y),
+                           SX(JOY_LIVE_X + JOY_LIVE_W),
+                           SX(JOY_LIVE_Y + JOY_LIVE_H) };
+                g_joy_have = ijoy_read(i, &g_joy_st);
+                InvalidateRect(hd, &r, FALSE);
+            }
+        } else if (wp == 9 && g_o.shot == 6) {
+            char path[1200];
+            int rc;
+            KillTimer(hd, 9);
+            RedrawWindow(hd, NULL, NULL,
+                         RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s/w221_hotas_%d.png",
+                        g_o.out_dir, g_dpi * 100 / 96);
+            rc = shot_window(hd, path, 1);
+            printf("joy-shot: %s%s\n", rc == 0 ? "" : "FEHLER ", path);
+            g_joy_done = 1;
+        }
+        return 0;
+    case WM_CLOSE:
+        g_joy_done = 1;
+        return 0;
+    }
+    return DefWindowProcW(hd, msg, wp, lp);
+}
+
+static void joy_dialog_modal(void)
+{
+    static int reg;
+    HWND hd;
+    RECT rc = { 0, 0, 0, 0 };
+    MSG msg;
+    int ui_mark = g_ui_n;
+    int shot = g_o.shot != 0;
+    DWORD exs = shot ? (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) : 0;
+    int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+    if (!reg) {
+        WNDCLASSW wc;
+        memset(&wc, 0, sizeof wc);
+        wc.lpfnWndProc = joy_proc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.lpszClassName = L"SbJoy";
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        RegisterClassW(&wc);
+        reg = 1;
+    }
+    g_joy_done = 0;
+    g_joy_demo = g_o.shot == 6;
+    g_joy_have = 0;
+    rc.right = SX(640);
+    rc.bottom = SX(460);
+    AdjustWindowRectEx(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, exs);
+    if (shot) {
+        offscreen_pos(&x, &y);
+    } else if (g_hwnd) {
+        RECT pr;
+        GetWindowRect(g_hwnd, &pr);
+        x = pr.left + ((pr.right - pr.left) - (rc.right - rc.left)) / 2;
+        y = pr.top + ((pr.bottom - pr.top) - (rc.bottom - rc.top)) / 2;
+    }
+    {
+        wchar_t title[96];
+        u8_to_w(LT("gui.joy_title"), title, 96);
+        hd = CreateWindowExW(exs, L"SbJoy", title,
+                             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU |
+                                 WS_CLIPCHILDREN,
+                             x, y, rc.right - rc.left, rc.bottom - rc.top,
+                             g_hwnd, NULL, GetModuleHandleW(NULL), NULL);
+    }
+    if (!hd) {
+        return;
+    }
+    g_joy_dlg_hd = hd;
+    {
+        BOOL dark = TRUE;
+        DwmSetWindowAttribute(hd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */,
+                              &dark, sizeof dark);
+    }
+    mk(hd, K_STATIC, IDJ_EXP, PG_DIALOG, 12, 10, 616, 52, LT("gui.joy_exp"), WS_VISIBLE);
+    mk(hd, K_STATIC, IDJ_DEVH, PG_DIALOG, 12, 72, 250, 18, LT("gui.joy_devices"), WS_VISIBLE);
+    mk(hd, K_LIST, IDJ_LIST, PG_DIALOG, 12, 94, 250, 300, "", WS_VISIBLE);
+    mk(hd, K_BTN, IDJ_SCAN, PG_DIALOG, 12, 404, 130, 30, LT("gui.joy_scan"), WS_VISIBLE);
+    mk(hd, K_STATIC, IDJ_INFO, PG_DIALOG, 274, 72, 354, 40, "", WS_VISIBLE);
+    mk(hd, K_BTN, IDJ_CLOSE, PG_DIALOG, 498, 418, 130, 30, LT("gui.btn_close"), WS_VISIBLE);
+    joy_rescan(hd);
+    if (g_hwnd) {
+        EnableWindow(g_hwnd, FALSE);
+    }
+    if (shot) {
+        if (!is_offscreen(hd)) {
+            printf("joy-shot: FEHLER Fenster nicht au" U8_SZ
+                   "erhalb des Bildschirms - Abbruch\n");
+            g_joy_done = 1;
+        } else {
+            ShowWindow(hd, SW_SHOWNOACTIVATE);
+            SetTimer(hd, 9, 400, NULL);
+        }
+    } else {
+        ShowWindow(hd, SW_SHOW);
+        SetFocus(bctl(hd, IDJ_LIST));
+        SetTimer(hd, JOY_TIMER, 50, NULL); /* Live-Anzeige nur solange offen */
+    }
+    UpdateWindow(hd);
+    while (!g_joy_done && GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (IsDialogMessageW(hd, &msg)) {
+            continue;
+        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    KillTimer(hd, JOY_TIMER);
+    if (g_hwnd) {
+        EnableWindow(g_hwnd, TRUE);
+        if (!shot) {
+            SetFocus(ctl(ID_CTRL_JOY));
+        }
+    }
+    DestroyWindow(hd);
+    g_joy_dlg_hd = NULL;
+    g_ui_n = ui_mark;
+}
+
 static void open_bind_dialog(void)
 {
     char prof[64], path[1200];
@@ -10904,6 +11462,7 @@ static void ui_apply_language(void)
     combo_set0(ID_CTRL_PROF, "gui.legacy_label");
     ui_settext(ctl(ID_CTRL_REFRESH), LT("gui.ctl_reload"));
     ui_settext(ctl(ID_CTRL_BIND), LT("gui.ctl_bind"));
+    ui_settext(ctl(ID_CTRL_JOY), LT("gui.joy_btn")); /* W221 */
     ui_settext(ctl(ID_CTRL_ZADIG), LT("gui.zadig_btn")); /* W185 */
     ui_settext(ctl(ID_CTRL_SBC), LT("gui.sbc"));
     ui_settext(ctl(ID_CTRL_SBCCHK), LT("gui.btn_check"));
@@ -11230,6 +11789,9 @@ static void build_controls(void)
        "", 0);
     mk(w, K_BTN, ID_CTRL_REFRESH, P_CTRL, CX0 + 18, CY0 + 340, 146, 32, LT("gui.ctl_reload"), 0);
     mk(w, K_ACCENT, ID_CTRL_BIND, P_CTRL, CX0 + 176, CY0 + 340, 146, 32, LT("gui.ctl_bind"), 0);
+    /* W221 HOTAS: Joystick-Dialog in der Titelzeile der Gamepad-Karte */
+    mk(w, K_BTN, ID_CTRL_JOY, P_CTRL, CX0 + COLW - 18 - 156, CY0 + 402, 156,
+       26, LT("gui.joy_btn"), 0);
     /* W87: Maus-Zielen absolut/relativ + Empfindlichkeit */
     c = mk(w, K_COMBO, ID_MOUSE_MODE, P_CTRL, COL2 + 78, CY0 + 108,
            COLW - 18 - 70 - 52 - 8 - 78, 30, "", 0);
@@ -11762,6 +12324,9 @@ static void on_command_inner(int id, int code)
         break;
     case ID_CTRL_BIND:
         open_bind_dialog();
+        break;
+    case ID_CTRL_JOY: /* W221 HOTAS (experimentell) */
+        joy_dialog_modal();
         break;
     case ID_CTRL_SBCCHK:
         update_sbc_status();
@@ -12505,6 +13070,12 @@ int gui_main(const char *client_override, const gui_opts_t *o)
     if (g_o.shot == 3) {
         ShowWindow(g_hwnd, SW_HIDE);
         open_bind_dialog();
+        gui_teardown();
+        return 0;
+    }
+    if (g_o.shot == 6) { /* W221: --joy-shot (HOTAS-Dialog, Beispieldaten) */
+        ShowWindow(g_hwnd, SW_HIDE);
+        joy_dialog_modal();
         gui_teardown();
         return 0;
     }

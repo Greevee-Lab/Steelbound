@@ -492,6 +492,17 @@ static LONGLONG g_qpc_freq_ct(void)
     return f;
 }
 static u32 g_ct_va[CT_MAX], g_ct_len[CT_MAX];
+/* FIX(SEQ-RENDER,W214) contig_free: 1 = Block per MmFreeContiguousMemory freigegeben -> sein Low28-Bild
+ * ist wieder frei (neue Bloecke duerfen es belegen), der Host-Speicher bleibt (stale Reads per VA). */
+static volatile unsigned char g_ct_dead[CT_MAX];
+static unsigned g_ct_nfree, g_ct_nfree_miss;
+static unsigned long long g_ct_free_bytes;
+/* FIX(SEQ-RENDER,W214) contig_reuse: Liste freigegebener Bloecke (Index in g_ct_*) + Freigabezeitpunkt (Quarantaene). */
+static LONG *g_dl;
+static unsigned g_dl_n, g_dl_cap;
+static DWORD g_ct_dtick[CT_MAX];
+static unsigned g_ct_nreuse;
+static unsigned long long g_ct_reuse_bytes;
 static volatile LONG g_ct_n;
 static SRWLOCK g_ct_lock = SRWLOCK_INIT;
 static u32 *g_im_lo, *g_im_hi; /* belegte Low28-Bilder, sortiert, disjunkt (nur unter g_ct_lock) */
@@ -514,23 +525,56 @@ static int im_overlap(u32 a, u32 len)
     unsigned i = im_find(a);
     return i < g_im_n && (unsigned long long)g_im_lo[i] < (unsigned long long)a + len;
 }
+static int im_reserve(unsigned need)
+{
+    if (need > g_im_cap) {
+        unsigned nc = g_im_cap ? g_im_cap * 2u : 4096u;
+        u32 *nl, *nh;
+        while (nc < need) { nc *= 2u; }
+        nl = (u32 *)realloc(g_im_lo, nc * sizeof(u32));
+        if (!nl) { return 0; }
+        g_im_lo = nl;
+        nh = (u32 *)realloc(g_im_hi, nc * sizeof(u32));
+        if (!nh) { return 0; }
+        g_im_hi = nh;
+        g_im_cap = nc;
+    }
+    return 1;
+}
+/* FIX(SEQ-RENDER,W214): [a, a+len) aus der Bildliste nehmen (Intervalle kuerzen, teilen, loeschen). */
+static void im_remove(u32 a, u32 len)
+{
+    u32 b = a + len;
+    unsigned i;
+    if (!len) { return; }
+    if (b < a || b > 0x10000000u) { b = 0x10000000u; }
+    i = im_find(a);                                     /* erstes Intervall mit hi > a */
+    while (i < g_im_n && g_im_lo[i] < b) {
+        u32 lo = g_im_lo[i], hi = g_im_hi[i];
+        if (lo < a && hi > b) {                         /* Loch in der Mitte: teilen */
+            if (!im_reserve(g_im_n + 1u)) { return; }
+            memmove(g_im_lo + i + 2, g_im_lo + i + 1, (g_im_n - i - 1u) * sizeof(u32));
+            memmove(g_im_hi + i + 2, g_im_hi + i + 1, (g_im_n - i - 1u) * sizeof(u32));
+            g_im_n++;
+            g_im_hi[i] = a;
+            g_im_lo[i + 1u] = b;
+            g_im_hi[i + 1u] = hi;
+            return;
+        }
+        if (lo < a) { g_im_hi[i] = a; i++; continue; }  /* rechtes Ende kappen */
+        if (hi > b) { g_im_lo[i] = b; return; }         /* linkes Ende kappen */
+        memmove(g_im_lo + i, g_im_lo + i + 1, (g_im_n - i - 1u) * sizeof(u32)); /* ganz bedeckt */
+        memmove(g_im_hi + i, g_im_hi + i + 1, (g_im_n - i - 1u) * sizeof(u32));
+        g_im_n--;
+    }
+}
 static void im_insert(u32 a, u32 len)
 {
     unsigned i, j;
     u32 b = a + len;
     if (!len) { return; }
     if (b < a || b > 0x10000000u) { b = 0x10000000u; } /* Bild endet an der 256-MB-Grenze */
-    if (g_im_n + 1u > g_im_cap) {
-        unsigned nc = g_im_cap ? g_im_cap * 2u : 4096u;
-        u32 *nl, *nh;
-        nl = (u32 *)realloc(g_im_lo, nc * sizeof(u32));
-        if (!nl) { return; }
-        g_im_lo = nl;
-        nh = (u32 *)realloc(g_im_hi, nc * sizeof(u32));
-        if (!nh) { return; }
-        g_im_hi = nh;
-        g_im_cap = nc;
-    }
+    if (!im_reserve(g_im_n + 1u)) { return; }
     i = im_find(a);                                     /* erstes Intervall mit hi > a */
     if (i > 0 && g_im_hi[i - 1u] == a) { i--; }         /* links angrenzend: verschmelzen */
     j = i;
@@ -563,10 +607,31 @@ static unsigned long long im_first_free(u32 a, u32 len)
     }
     return p;
 }
+/* DIAG(SEQ-RENDER,W214, contig_diag=1): Belegung des Low28-Bildes (256 MB)
+ * durch Contig-Bloecke - alle 64 Bloecke eine Zeile (Summe der Intervalle,
+ * registrierte Bytes, Ueberlappungen). */
+static unsigned long long g_ct_bytes;
+static unsigned long long im_sum(void)
+{
+    unsigned long long t = 0;
+    unsigned i;
+    for (i = 0; i < g_im_n; i++) { t += (unsigned long long)(g_im_hi[i] - g_im_lo[i]); }
+    return t;
+}
+static void ct_diag_note(LONG n)
+{
+    extern unsigned g_present_no;
+    if (!g_cfg.contig_diag || (n & 63) != 0) { return; }
+    HLOG_I("CONTIG img: n=%ld bytes=%.1f MB bild=%.1f MB (%u Intervalle) high=%u stillgelegt=%u ueberlappend=%u frei=%u/%.1f MB (unbekannt %u) reuse=%u/%.1f MB f=%u",
+           (long)n, (double)g_ct_bytes / 1048576.0, (double)im_sum() / 1048576.0, g_im_n, g_ct_high, g_ct_quar,
+           g_ct_alias, g_ct_nfree, (double)g_ct_free_bytes / 1048576.0, g_ct_nfree_miss, g_ct_nreuse,
+           (double)g_ct_reuse_bytes / 1048576.0, g_present_no);
+}
 static void ct_register(u32 va, u32 size)
 {
     LONG n = g_ct_n;
     u32 len = CT_PAGE(size ? size : 0x1000u);
+    g_ct_bytes += len;
     if (im_overlap(va & 0x0FFFFFFFu, len)) {
         g_ct_alias++;
         if (g_ct_alias <= 8u) {
@@ -582,6 +647,7 @@ static void ct_register(u32 va, u32 size)
     g_ct_len[n] = len;
     MemoryBarrier();
     InterlockedExchange(&g_ct_n, n + 1);
+    ct_diag_note(n + 1); /* DIAG(W214) */
 }
 static int ct_find_exact(u32 va)
 {
@@ -596,18 +662,116 @@ static int ct_find_exact(u32 va)
 static unsigned ct_phys_to_virt(unsigned pm)
 {
     LONG k, n = g_ct_n;
-    unsigned ex = 0, fm = 0;
+    unsigned ex = 0, fm = 0, dm = 0;
+    LONG fk = -1;
     for (k = n - 1; k >= 0; k--) {
         u32 b = g_ct_va[k], bm = b & 0x0FFFFFFFu;
         if (pm >= bm && pm - bm < g_ct_len[k]) {
+            if (g_ct_dead[k]) { /* W214: freigegeben - nur, wenn kein lebender Block das Bild belegt (stale Read) */
+                if (!dm) { dm = b + (pm - bm); }
+                continue;
+            }
             if (bm == pm) { ex = b; break; }
             if (!fm) {
                 fm = b + (pm - bm);
+                fk = k;
                 if (!g_ct_alias) { break; }
             }
         }
     }
-    return ex ? ex : fm;
+    if (g_cfg.contig_diag && g_ct_alias && !ex && fm) { /* DIAG(SEQ-RENDER,W214): weiterer lebender Block mit diesem Bild? */
+        LONG j;
+        static volatile LONG namb;
+        for (j = fk - 1; j >= 0; j--) {
+            u32 b2 = g_ct_va[j], bm2 = b2 & 0x0FFFFFFFu;
+            if (!g_ct_dead[j] && pm >= bm2 && pm - bm2 < g_ct_len[j] && b2 + (pm - bm2) != fm) {
+                LONG c = InterlockedIncrement(&namb);
+                if (c <= 32 || (c & 1023) == 0) {
+                    HLOG_W("CTALIAS #%ld: phys=0x%X -> 0x%X (juengster), auch lebend 0x%X (Block 0x%X+0x%X)",
+                           (long)c, pm, fm, b2 + (pm - bm2), b2, g_ct_len[j]);
+                }
+                break;
+            }
+        }
+    }
+    return ex ? ex : fm ? fm : dm;
+}
+/* FIX(SEQ-RENDER,W214) [kernel] contig_free=1: MmFreeContiguousMemory gibt das Low28-Bild des Blocks frei
+ * (Host-Speicher bleibt, s. M2c). Ohne das blieb jedes Bild fuer immer belegt: je Missions-Load ~40-80 MB,
+ * nach einigen Missionen war das 256-MB-Bild voll, neue Bloecke ueberlappten wieder (Fallback) und
+ * Phys->Virt traf fremde Bloecke -> Texturen weiss/fremd (Alpha-Befund: mehrere Missionen hintereinander).
+ * Rueckgabe 1 = Block gefunden. Aufruf ohne g_ct_lock. */
+static int ct_free(u32 va)
+{
+    LONG k, n;
+    u32 bm, len;
+    if (!va) { return 0; }
+    AcquireSRWLockExclusive(&g_ct_lock);
+    n = g_ct_n;
+    for (k = n - 1; k >= 0; k--) {
+        if (g_ct_va[k] == va && !g_ct_dead[k]) { break; }
+    }
+    if (k < 0) { g_ct_nfree_miss++; ReleaseSRWLockExclusive(&g_ct_lock); return 0; }
+    g_ct_dead[k] = 1;
+    bm = va & 0x0FFFFFFFu;
+    len = g_ct_len[k];
+    im_remove(bm, len);
+    if (g_ct_alias) { /* Fallback-Ueberlappung: Bilder lebender Bloecke im Bereich wieder eintragen */
+        LONG j;
+        for (j = 0; j < n; j++) {
+            u32 cm = g_ct_va[j] & 0x0FFFFFFFu;
+            if (!g_ct_dead[j] && cm < bm + len && cm + g_ct_len[j] > bm) { im_insert(cm, g_ct_len[j]); }
+        }
+    }
+    g_ct_nfree++;
+    g_ct_free_bytes += len;
+    g_ct_dtick[k] = GetTickCount();
+    if (g_dl_n + 1u > g_dl_cap) {
+        unsigned nc = g_dl_cap ? g_dl_cap * 2u : 4096u;
+        LONG *nd = (LONG *)realloc(g_dl, nc * sizeof(LONG));
+        if (nd) { g_dl = nd; g_dl_cap = nc; }
+    }
+    if (g_dl_n < g_dl_cap) { g_dl[g_dl_n++] = k; }
+    ReleaseSRWLockExclusive(&g_ct_lock);
+    return 1;
+}
+/* FIX(SEQ-RENDER,W214) [kernel] contig_reuse=1: Anforderung aus einem freigegebenen Block bedienen (wie
+ * physischer Speicher auf der Xbox), statt neuen Adressraum zu belegen. Bedingungen: Laenge passt (exakt
+ * bevorzugt, sonst kleinster Block bis zur doppelten Groesse), seit der Freigabe >= contig_reuse_ms
+ * (Quarantaene fuer spaete Lese-/GPU-Zugriffe), Low28-Bild weiterhin frei. Ohne das wuchsen Adressraum und
+ * Commit je Missions-Load (~60 MB) und im Kampf je Effekt weiter (32-Bit-Prozess). Unter g_ct_lock.
+ * Rueckgabe Blockadresse, *plen = Blocklaenge (Seiten). */
+static void *ct_reuse(u32 size, u32 *plen)
+{
+    u32 need = CT_PAGE(size ? size : 0x1000u), bestlen = 0xFFFFFFFFu;
+    DWORD now = GetTickCount(), q = (DWORD)(g_cfg.contig_reuse_ms > 0 ? g_cfg.contig_reuse_ms : 0);
+    unsigned i, best = 0xFFFFFFFFu;
+    LONG k;
+    if (!g_cfg.contig_free || !g_cfg.contig_reuse || !g_dl_n) { return NULL; }
+    for (i = 0; i < g_dl_n; i++) {
+        u32 len;
+        k = g_dl[i];
+        len = g_ct_len[k];
+        if (len < need || len - need > need || len >= bestlen) { continue; }
+        if (now - g_ct_dtick[k] < q) { continue; }
+        if (im_overlap(g_ct_va[k] & 0x0FFFFFFFu, len)) { continue; }
+        best = i;
+        bestlen = len;
+        if (len == need) { break; }
+    }
+    if (best == 0xFFFFFFFFu) { return NULL; }
+    k = g_dl[best];
+    g_dl[best] = g_dl[--g_dl_n];
+    g_ct_dead[k] = 0;
+    im_insert(g_ct_va[k] & 0x0FFFFFFFu, g_ct_len[k]);
+    g_ct_nreuse++;
+    g_ct_reuse_bytes += g_ct_len[k];
+    if (plen) { *plen = g_ct_len[k]; }
+    if (g_cfg.contig_diag && (g_ct_nreuse <= 16u || (g_ct_nreuse & 255u) == 0)) {
+        HLOG_I("CONTIG reuse #%u: size=0x%X -> va=0x%X len=0x%X (frei seit %lu ms)", g_ct_nreuse, size,
+               g_ct_va[k], g_ct_len[k], (unsigned long)(now - g_ct_dtick[k]));
+    }
+    return (void *)(uintptr_t)g_ct_va[k];
 }
 /* low_alloc ohne Treffer auf HIGH-Bilder: Treffer stilllegen (Adressraum
  * reserviert lassen, Seiten freigeben) und weitersuchen. */
@@ -754,6 +918,11 @@ void krnl_contig_stats(void)
     if (g_cfg.contig_noalias) {
         HLOG_I("KRNL CONTIG noalias: %ld Bloecke, %u Bild-Intervalle, %u HIGH gezielt, %u stillgelegt, %u trotzdem ueberlappend%s",
                (long)g_ct_n, g_im_n, g_ct_high, g_ct_quar, g_ct_alias, g_ct_full ? ", Tabelle voll" : "");
+        if (g_cfg.contig_diag) { /* DIAG(W214) */
+            HLOG_I("KRNL CONTIG bild: %.1f MB belegt, %.1f MB registriert, %u Freigaben (%.1f MB, %u unbekannt), %u wiederverwendet (%.1f MB)",
+                   (double)im_sum() / 1048576.0, (double)g_ct_bytes / 1048576.0, g_ct_nfree,
+                   (double)g_ct_free_bytes / 1048576.0, g_ct_nfree_miss, g_ct_nreuse, (double)g_ct_reuse_bytes / 1048576.0);
+        }
     }
     HLOG_I("KRNL CONTIG HIGH (noalias=%d): %u x, Mittel %.3f ms / %.0f kZyklen, Max %.3f ms / %.0f kZyklen, >1 ms %u x",
            g_cfg.contig_noalias, g_ct_qn,
@@ -766,9 +935,11 @@ u32 __stdcall hle_MmAllocateContiguousMemory(u32 size)
 { 
     static unsigned nreu;
     int na = g_cfg.contig_noalias; /* FIX(FILM-WHITE,W177) */
-    void *r;
-    if (na) { AcquireSRWLockExclusive(&g_ct_lock); }
-    r = na ? ct_low_alloc(size ? size : 0x1000) : low_alloc(size ? size : 0x1000);
+    void *r = NULL;
+    u32 rlen = 0; /* W214 contig_reuse: Laenge des wiederverwendeten Blocks (0 = neu) */
+    if (na) { AcquireSRWLockExclusive(&g_ct_lock); r = ct_reuse(size, &rlen); }
+    if (r) { DWORD oo; VirtualProtect(r, rlen, PAGE_READWRITE, &oo); } /* Block war evtl. WC (W123) */
+    if (!r) { r = na ? ct_low_alloc(size ? size : 0x1000) : low_alloc(size ? size : 0x1000); }
     {
         static unsigned nhifall;
         if (!r) {
@@ -777,10 +948,10 @@ u32 __stdcall hle_MmAllocateContiguousMemory(u32 size)
         }
     }
     (void)nreu;
-    if (g_cfg.contig_alias_test && size == (u32)g_cfg.contig_alias_test) { r = ct_alias_test(r, size, PAGE_READWRITE, na); } /* TEST(W177) */
+    if (g_cfg.contig_alias_test && !rlen && size == (u32)g_cfg.contig_alias_test) { r = ct_alias_test(r, size, PAGE_READWRITE, na); } /* TEST(W177) */
     if (r) { exreg_add((u32)(uintptr_t)r, size ? size : 0x1000); }
     if (na) {
-        if (r) { ct_register((u32)(uintptr_t)r, size ? size : 0x1000); }
+        if (r && !rlen) { ct_register((u32)(uintptr_t)r, size ? size : 0x1000); }
         ReleaseSRWLockExclusive(&g_ct_lock);
     }
     {
@@ -797,15 +968,19 @@ u32 __stdcall hle_MmAllocateContiguousMemory(u32 size)
 u32 __stdcall hle_MmAllocateContiguousMemoryEx(u32 size, u32 low, u32 high,
                                                       u32 align, u32 prot)
 {
-    void *r;
+    void *r = NULL;
+    u32 rlen = 0; /* W214 contig_reuse */
     int na = g_cfg.contig_noalias; /* FIX(FILM-WHITE,W177) */
     (void)low;
     (void)high;
     (void)align;
-    if (na) { AcquireSRWLockExclusive(&g_ct_lock); }
-    r = na ? ct_low_alloc(size ? size : 0x1000) : low_alloc(size ? size : 0x1000);
+    if (na) { AcquireSRWLockExclusive(&g_ct_lock); r = ct_reuse(size, &rlen); }
+    if (!r) { r = na ? ct_low_alloc(size ? size : 0x1000) : low_alloc(size ? size : 0x1000); }
     if (prot) { prot = host_prot("MmContigEx", (u32)(uintptr_t)r, size, prot); } /* W123 */
-    if (r && prot && prot != PAGE_READWRITE) {
+    if (r && rlen) { /* W214: wiederverwendeter Block - Schutz immer neu setzen (vorher evtl. WC) */
+        DWORD oo;
+        VirtualProtect(r, rlen, prot ? prot : PAGE_READWRITE, &oo);
+    } else if (r && prot && prot != PAGE_READWRITE) {
         DWORD oo;
         VirtualProtect(r, size ? size : 0x1000, prot, &oo);
     }
@@ -814,10 +989,10 @@ u32 __stdcall hle_MmAllocateContiguousMemoryEx(u32 size, u32 low, u32 high,
         r = ct_high_alloc(size ? size : 0x1000, prot ? prot : PAGE_READWRITE); /* W177: na=1 gezielt, sonst VirtualAlloc(NULL) wie alt */
         if (nhifx < 8) { nhifx++; HLOG_W("MmContigEx HIGH-Fallback (0x%X)", size); }
     }
-    if (g_cfg.contig_alias_test && size == (u32)g_cfg.contig_alias_test) { r = ct_alias_test(r, size, prot ? prot : PAGE_READWRITE, na); } /* TEST(W177) */
+    if (g_cfg.contig_alias_test && !rlen && size == (u32)g_cfg.contig_alias_test) { r = ct_alias_test(r, size, prot ? prot : PAGE_READWRITE, na); } /* TEST(W177) */
     if (r) { exreg_add((u32)(uintptr_t)r, size ? size : 0x1000); }
     if (na) {
-        if (r) { ct_register((u32)(uintptr_t)r, size ? size : 0x1000); }
+        if (r && !rlen) { ct_register((u32)(uintptr_t)r, size ? size : 0x1000); }
         ReleaseSRWLockExclusive(&g_ct_lock);
     }
     {
@@ -840,6 +1015,7 @@ u32 __stdcall hle_MmFreeContiguousMemory(u32 va)
      * Spiel sampelt stale Structs!). Session-begrenzt, kein LRU (PoC). */
     static unsigned nfree;
     if (nfree < 8) { nfree++; HLOG_I("MmContig free: va=0x%X (behalten)", va); }
+    if (g_cfg.contig_noalias && g_cfg.contig_free) { (void)ct_free(va); } /* FIX(SEQ-RENDER,W214): Bild frei, Speicher bleibt */
     return 0;
 }
 

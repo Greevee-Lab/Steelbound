@@ -514,7 +514,7 @@ static void w87_toggle_assist(sbc_in_t *s, imap_state_t *ts, unsigned chg)
  * immer echt). Geschwindigkeit: Positions-Delta des eigenen VT (Entity-
  * Tabelle wie drive_apply, x +0x0C / z +0x14) je Spiel-Frame, Vorzeichen
  * ueber die Blickrichtung [0x3521C0] (vorwaerts = (sin hy, cos hy)). */
-static void w218_simple_controls(sbc_in_t *s, imap_state_t *gs)
+static void w218_simple_controls(sbc_in_t *s, imap_state_t *gs, int gear_direct)
 {
     static imap_autogear_t ag;
     static imap_autogear_cfg_t agc;
@@ -577,7 +577,15 @@ static void w218_simple_controls(sbc_in_t *s, imap_state_t *gs)
                    g_frames);
         }
     }
-    if (g_cfg.auto_gear) {
+    if (g_cfg.auto_gear && gear_direct) {
+        /* W221: Direktwahl (z. B. Schubhebel-Zonen eines HOTAS) aktiv ->
+         * der Spieler waehlt den Gang selbst, Automatik setzt aus. */
+        static unsigned gd_logged;
+        if (!gd_logged) {
+            gd_logged = 1;
+            HLOG_I("INPUT: Automatik pausiert (Gang-Direktwahl aktiv) bei f=%u", g_frames);
+        }
+    } else if (g_cfg.auto_gear) {
         uint8_t g0 = s->gear;
         int g1;
         if (!agc_init) {
@@ -814,6 +822,42 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                     snap.sbc_present = 1;
                 }
             }
+            if (g_prof_load_rc >= 0 && g_prof.joy_used) {
+                /* W221 HOTAS (experimentell): DirectInput-Geraete der Slots
+                 * JOY0..3 - nur wenn das Profil JOY-Quellen hat (sonst wird
+                 * dinput8 nie geladen). Hintergrund-Thread liest, hier nur
+                 * der letzte Stand (nie blockierend). Replay/Overlay wie Pad. */
+                static int joy_started, joy_rc;
+                static unsigned joy_last = 0xFFFFFFFFu;
+                if (!joy_started) {
+                    joy_started = 1;
+                    joy_rc = ijoy_slots_start((const char (*)[96])g_prof.joy_dev,
+                                              g_prof.joy_used);
+                    HLOG_I("INPUT: Joystick/HOTAS (experimentell) %s, Slots 0x%X",
+                           joy_rc == 0 ? "aktiv (DirectInput)" : "nicht verfuegbar (dinput8 fehlt)",
+                           g_prof.joy_used);
+                }
+                if (joy_rc == 0 && !(g_cfg.pad_replay_gate && snap.replay_active) &&
+                    !(g_cfg.overlay && sb_ovl_open())) {
+                    snap.joy_mask = ijoy_slots_get(snap.joy) & g_prof.joy_used;
+                    if (snap.joy_mask != joy_last) {
+                        int js;
+                        for (js = 0; js < IMAP_JOY_MAX; js++) {
+                            unsigned bit = 1u << js;
+                            if (!(g_prof.joy_used & bit)) continue;
+                            if ((snap.joy_mask ^ joy_last) & bit || joy_last == 0xFFFFFFFFu) {
+                                char nm[96];
+                                ijoy_slot_name(js, nm, sizeof nm);
+                                HLOG_I("INPUT: Joystick-Slot %d %s%s%s", js,
+                                       (snap.joy_mask & bit) ? "verbunden (" : "ohne Geraet",
+                                       (snap.joy_mask & bit) ? nm : "",
+                                       (snap.joy_mask & bit) ? ")" : "");
+                            }
+                        }
+                        joy_last = snap.joy_mask;
+                    }
+                }
+            }
             if (g_cfg.pad_mouse_off && snap.pad_present) {
                 /* W132 PAD-ARB: Gamepad aktiv -> Maus-Achsen aus (wie
                  * sbc_mouse_off); Maustasten bleiben immer an. */
@@ -872,7 +916,9 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
              * Kopplung sieht den Hebel, nicht die Vorsteuer-Spitzen). */
             imap_state_t *gs = (g_cfg.input_profile[0] &&
                                 g_prof_load_rc >= 0) ? &g_prof_st : &g_leg;
-            w218_simple_controls(s, gs);
+            w218_simple_controls(s, gs, g_cfg.input_profile[0] &&
+                                            g_prof_load_rc >= 0 &&
+                                            g_prof_st.gear_direct_hit);
         }
         if (g_cfg.mouse_mode == 1 && g_cfg.mouse_aim && !g_cfg.mouse_sight &&
             g_sbc_mouse_live) {

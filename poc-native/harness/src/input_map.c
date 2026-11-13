@@ -316,6 +316,39 @@ void imap_legacy_apply(imap_block_t *blk, imap_state_t *st,
 
 /* ---- Profil-Auswertung ---- */
 
+/* W221 HOTAS: JOY-Atom (Code s. IMAP_JOY_CODE). POV: jede Richtung deckt
+ * +-67,5 Grad ab (Diagonalen loesen beide Nachbarn aus). Zone: Stellung in
+ * Prozent des Wegs (0 = Minimum), lo <= p < hi (hi = 100 einschliesslich). */
+static int imap_joy_atom_active(int code, const imap_snap_t *snap)
+{
+    int slot = IMAP_JOY_SLOT(code), idx = IMAP_JOY_IDX(code);
+    const imap_joy_state_t *js;
+    if (!(snap->joy_mask & (1u << slot))) return 0;
+    js = &snap->joy[slot];
+    switch (IMAP_JOY_TYP(code)) {
+    case 0:
+        if (idx >= IJOY_BTNS) return 0;
+        return (js->btn[idx >> 5] >> (idx & 31)) & 1u;
+    case 1: {
+        int pv = (idx >> 2) < IJOY_POVS ? js->pov[idx >> 2] : -1;
+        int c = (idx & 3) * 9000, d;
+        if (pv < 0) return 0;
+        d = pv - c;
+        if (d < 0) d = -d;
+        if (d > 18000) d = 36000 - d;
+        return d <= 6750;
+    }
+    case 2: {
+        float p;
+        int lo = IMAP_JOY_LO(code), hi = IMAP_JOY_HI(code);
+        if (idx >= IJOY_AXES) return 0;
+        p = ((float)js->axis[idx] + 32768.0f) * 100.0f / 65535.0f;
+        return p >= (float)lo && (p < (float)hi || (hi >= 100 && p <= 100.0f));
+    }
+    }
+    return 0;
+}
+
 static int imap_atom_active(const imap_atom_t *a, const imap_snap_t *snap)
 {
     switch (a->kind) {
@@ -344,6 +377,8 @@ static int imap_atom_active(const imap_atom_t *a, const imap_snap_t *snap)
         if (!snap->sbc_present) return 0;
         if (a->code < 0 || a->code >= 39) return 0;
         return ((snap->sbc[a->code / 16] >> (a->code % 16)) & 1u) != 0;
+    case IMAP_A_JOY: /* W221 HOTAS: Taste / POV-Richtung / Achsen-Zone */
+        return imap_joy_atom_active(a->code, snap);
     }
     return 0;
 }
@@ -435,12 +470,56 @@ static float imap_stick_norm(int16_t v)
     return f;
 }
 
+/* W221 HOTAS: Quelle traegt bei (Pad da bzw. JOY-Slot hat ein Geraet). */
+static int imap_src_live(int src, const imap_snap_t *snap)
+{
+    if (src < 0) return 0;
+    if (src < IMAP_SRC_JOY) return snap->pad_present;
+    return (int)((snap->joy_mask >> (((src - IMAP_SRC_JOY) >> 3) & 3)) & 1u);
+}
+
+/* Zentrierte Analogquelle: Pad-Stick (0..3) oder JOY-Achse. */
+static int imap_src_centered(int src)
+{
+    return (src >= 0 && src <= 3) || src >= IMAP_SRC_JOY;
+}
+
+/* W221 HOTAS: JOY-Achse -> zentriert -1..1 (pedal = 0) bzw. Pedal 0..1
+ * (pedal = 1: voller Weg Minimum -> 0, Maximum -> 1; half = nur positive
+ * Haelfte). Reihenfolge: Invertierung, Totzone (reskaliert; Pedal: am
+ * Ruhe-Ende), Kurve, Empfindlichkeit (geklemmt). Keine globale Pad-Totzone. */
+static float imap_joy_value(const imap_analog_t *a, const imap_snap_t *snap,
+                            int pedal)
+{
+    int slot = ((a->src - IMAP_SRC_JOY) >> 3) & 3;
+    int ax = (a->src - IMAP_SRC_JOY) & 7;
+    float v, s, m;
+    if (!(snap->joy_mask & (1u << slot))) return 0.0f;
+    v = imap_stick_norm(snap->joy[slot].axis[ax]);
+    if (a->inv) v = -v;
+    if (pedal) {
+        if (a->half) m = v < 0 ? 0.0f : v;
+        else m = (v + 1.0f) * 0.5f;
+        s = 1.0f;
+    } else {
+        s = v < 0 ? -1.0f : 1.0f;
+        m = v < 0 ? -v : v;
+    }
+    if (m < a->dz) return 0.0f;
+    if (a->dz > 0.0f) m = (m - a->dz) / (1.0f - a->dz);
+    if (a->curve != 1.0f && a->curve > 0.0f) m = powf(m, a->curve);
+    if (a->sens > 0.0f && a->sens != 1.0f) m *= a->sens;
+    if (m > 1.0f) m = 1.0f;
+    return s * m;
+}
+
 /* Analogquelle -> -1..1 (Trigger: 0..1) mit Invertierung, Totzone
  * (reskaliert) und Kurve. */
 static float imap_analog_value(const imap_analog_t *a,
                                const imap_snap_t *snap)
 {
     float v;
+    if (a->src >= IMAP_SRC_JOY) return imap_joy_value(a, snap, 0);
     if (a->src < 0 || !snap->pad_present) return 0.0f;
     switch (a->src) {
     case 0: v = imap_stick_norm(snap->pad.lx); break;
@@ -578,6 +657,7 @@ static int imap_axis_centered(imap_axis_t ax, const imap_axis_map_t *m,
     int mcon = 0;    /* W132: Maus liefert auf dieser Achse */
     int po = 0;      /* W132: beste Pad-Auslenkung (0 = keine) */
     int pbound = 0;  /* W132: Achse hat Pad-Quellen */
+    int plive = 0;   /* W221: davon mindestens eine mit Geraet (Pad/JOY) */
     if (neg_p) {
         best = -full_neg;
         have = dhave = 1;
@@ -598,14 +678,16 @@ static int imap_axis_centered(imap_axis_t ax, const imap_axis_map_t *m,
         }
     }
     for (i = 0; i < 2; i++) {
-        if (m->pad[i].src >= 0 && m->pad[i].src <= 3) {
+        if (imap_src_centered(m->pad[i].src)) {
             pbound = 1;
-            break;
+            if (imap_src_live(m->pad[i].src, snap)) plive = 1;
         }
     }
-    if (snap->pad_present && pbound) {
+    if (plive) { /* W221: Pad- oder JOY-Quelle mit Geraet */
         for (i = 0; i < 2; i++) {
-            if (m->pad[i].src < 0 || m->pad[i].src > 3) continue;
+            if (!imap_src_centered(m->pad[i].src) ||
+                !imap_src_live(m->pad[i].src, snap))
+                continue;
             {
                 float v = imap_analog_value(&m->pad[i], snap);
                 int o = v >= 0 ? (int)(v * (float)full_pos + 0.5f)
@@ -618,7 +700,7 @@ static int imap_axis_centered(imap_axis_t ax, const imap_axis_map_t *m,
             }
         }
     }
-    if (snap->pad_axis_arb && pbound && snap->pad_present && mcon) {
+    if (snap->pad_axis_arb && pbound && plive && mcon) {
         /* W132: Pad gegen Maus per Arbitrierung statt Max-Abs. */
         int slot, w, wism = 0, wb, bb;
         if (ax == IMAP_AX_AIM_X) slot = 0;
@@ -664,11 +746,13 @@ static int imap_axis_pedal(const imap_axis_map_t *m, const imap_snap_t *snap)
     if (imap_bind_active(&m->neg, snap) ||
         imap_bind_active(&m->pos, snap))
         best = 0xFF;
-    if (snap->pad_present) {
+    {
         for (i = 0; i < 2; i++) {
-            if (m->pad[i].src < 0) continue;
+            if (!imap_src_live(m->pad[i].src, snap)) continue;
             {
-                float v = imap_analog_value(&m->pad[i], snap);
+                float v = m->pad[i].src >= IMAP_SRC_JOY
+                              ? imap_joy_value(&m->pad[i], snap, 1)
+                              : imap_analog_value(&m->pad[i], snap);
                 int o;
                 if (m->pad[i].src <= 3) {
                     /* Stick auf Pedal: nur positive Haelfte. */
@@ -858,9 +942,11 @@ void imap_profile_apply(imap_block_t *blk, imap_state_t *st,
         st->prev_tup = tu;
         if (td && !st->prev_tdn && st->tuner > 0) st->tuner--;
         st->prev_tdn = td;
+        st->gear_direct_hit = 0;
         for (i = 0; i < 7; i++) {
             if (imap_bind_active(&prof->gear_direct[i], snap)) {
                 st->gear = (uint8_t)(7 + i);
+                st->gear_direct_hit = 1; /* W221: auto_gear setzt aus */
                 break;
             }
         }
@@ -1262,6 +1348,55 @@ static int imap_sbc_btn_parse(const char *name)
     return -1;
 }
 
+/* W221 HOTAS: "JOY" / "JOY0".."JOY3" -> Slot, sonst -1. */
+static int imap_joy_kind(const char *kind)
+{
+    if (!((kind[0] == 'J' || kind[0] == 'j') && (kind[1] == 'O' || kind[1] == 'o') &&
+          (kind[2] == 'Y' || kind[2] == 'y')))
+        return -1;
+    if (!kind[3]) return 0;
+    if (kind[3] >= '0' && kind[3] < '0' + IMAP_JOY_MAX && !kind[4]) return kind[3] - '0';
+    return -1;
+}
+
+/* W221 HOTAS: digitaler JOY-Name ("B1".."B128", "POV1U".."POV4L" bzw.
+ * "HAT1U", Achse "Z+"/"Z-"/"Z") -> Atom-Code, -1 = unbekannt. */
+static int imap_joy_dig_code(int slot, const char *name)
+{
+    char nm[16];
+    size_t L;
+    int ax;
+    if ((name[0] == 'B' || name[0] == 'b') && name[1] >= '0' && name[1] <= '9') {
+        char *end = NULL;
+        long v = strtol(name + 1, &end, 10);
+        if (end && !*end && v >= 1 && v <= IJOY_BTNS)
+            return IMAP_JOY_CODE(slot, 0, (int)v - 1, 0, 0);
+        return -1;
+    }
+    if ((_strnicmp(name, "POV", 3) == 0 || _strnicmp(name, "HAT", 3) == 0) &&
+        name[3] >= '1' && name[3] < '1' + IJOY_POVS && name[4] && !name[5]) {
+        int d;
+        switch (name[4]) {
+        case 'U': case 'u': d = 0; break;
+        case 'R': case 'r': d = 1; break;
+        case 'D': case 'd': d = 2; break;
+        case 'L': case 'l': d = 3; break;
+        default: return -1;
+        }
+        return IMAP_JOY_CODE(slot, 1, (name[3] - '1') * 4 + d, 0, 0);
+    }
+    strncpy_s(nm, sizeof nm, name, _TRUNCATE);
+    L = strlen(nm);
+    if (L > 1 && nm[L - 1] == '-') {
+        nm[L - 1] = '\0';
+        ax = ijoy_axis_parse(nm);
+        return ax < 0 ? -1 : IMAP_JOY_CODE(slot, 2, ax, 0, 25);
+    }
+    if (L > 1 && nm[L - 1] == '+') nm[L - 1] = '\0';
+    ax = ijoy_axis_parse(nm);
+    return ax < 0 ? -1 : IMAP_JOY_CODE(slot, 2, ax, 75, 100);
+}
+
 /* Ein Atom "KIND:NAME" parsen (digitaler Kontext: Tasten/Endlagen). */
 static int imap_atom_parse_dig(const char *kind, const char *name,
                                imap_atom_t *a, int *has_pad, int *has_sbc)
@@ -1321,7 +1456,15 @@ static int imap_atom_parse_dig(const char *kind, const char *name,
         *has_sbc = 1;
         return 0;
     }
-    return -1;
+    { /* W221 HOTAS: JOYn:<Taste/POV/Achsen-Zone> */
+        int slot = imap_joy_kind(kind), code;
+        if (slot < 0) return -1;
+        code = imap_joy_dig_code(slot, name);
+        if (code < 0) return -1;
+        a->kind = IMAP_A_JOY;
+        a->code = code;
+        return 0;
+    }
 }
 
 /* Eine Alternative "SRC[+SRC][:param...]" an eine Bindung haengen. */
@@ -1384,6 +1527,18 @@ static int imap_bind_add(imap_bind_t *b, const char *text, int *has_pad,
                     else if (imap_strieq(eq, "!SHIFT") ||
                              imap_strieq(eq, "NOSHIFT")) c.cond = 2;
                     else return -1;
+                } else if (imap_strieq(p, "zone")) {
+                    /* W221 HOTAS: Achsen-Zone "lo-hi" (Prozent) */
+                    imap_atom_t *za = c.chord ? &c.b : &c.a;
+                    char *mi = strchr(eq, '-');
+                    int lo, hi;
+                    if (za->kind != IMAP_A_JOY || IMAP_JOY_TYP(za->code) != 2 || !mi)
+                        return -1;
+                    lo = atoi(eq);
+                    hi = atoi(mi + 1);
+                    if (lo < 0 || hi > 100 || lo >= hi) return -1;
+                    za->code = IMAP_JOY_CODE(IMAP_JOY_SLOT(za->code), 2,
+                                             IMAP_JOY_IDX(za->code), lo, hi);
                 } else {
                     return -1; /* unbekannter Param */
                 }
@@ -1437,6 +1592,50 @@ static int imap_axis_add_analog(imap_axis_map_t *m, const char *text,
         m->mouse_sight = mode == -2 ? -1 : mode;
         return 0;
     }
+    if (imap_joy_kind(work) >= 0) {
+        /* W221 HOTAS: JOYn:<Achse>[:dz=..:curve=..:inv=..:sens=..:half=..] */
+        int jslot = imap_joy_kind(work), ax = ijoy_axis_parse(c1), slot;
+        imap_analog_t an;
+        char *p;
+        if (ax < 0) return -1; /* z. B. JOY0:B3 / Z+ -> digital */
+        memset(&an, 0, sizeof an);
+        an.src = IMAP_SRC_JOY + jslot * 8 + ax;
+        an.curve = 1.0f;
+        an.sens = 1.0f;
+        p = params;
+        while (p && *p) {
+            char *nx = strchr(p, ':');
+            char *eq;
+            if (nx) *nx++ = '\0';
+            eq = strchr(p, '=');
+            if (!eq) return -1;
+            *eq++ = '\0';
+            if (imap_strieq(p, "dz")) {
+                an.dz = (float)atof(eq);
+                if (an.dz < 0 || an.dz > 0.9f) return -1;
+            } else if (imap_strieq(p, "curve")) {
+                an.curve = (float)atof(eq);
+                if (an.curve < 0.5f || an.curve > 3.0f) return -1;
+            } else if (imap_strieq(p, "sens")) {
+                an.sens = (float)atof(eq);
+                if (an.sens < 0.1f || an.sens > 4.0f) return -1;
+            } else if (imap_strieq(p, "inv")) {
+                an.inv = atoi(eq) != 0;
+            } else if (imap_strieq(p, "half")) {
+                an.half = atoi(eq) != 0;
+            } else {
+                return -1;
+            }
+            p = nx ? nx : "";
+        }
+        for (slot = 0; slot < 2; slot++) {
+            if (m->pad[slot].src < 0) {
+                m->pad[slot] = an;
+                return 0;
+            }
+        }
+        return -2;
+    }
     if (imap_strieq(work, "PAD")) {
         int src = imap_analog_src(c1), slot;
         float dz = 0.0f, curve = 1.0f;
@@ -1470,6 +1669,8 @@ static int imap_axis_add_analog(imap_axis_map_t *m, const char *text,
                 m->pad[slot].dz = dz;
                 m->pad[slot].curve = curve;
                 m->pad[slot].inv = inv;
+                m->pad[slot].sens = 1.0f; /* W221: nur JOY wertet aus */
+                m->pad[slot].half = 0;
                 *has_pad = 1;
                 return 0;
             }
@@ -1477,6 +1678,40 @@ static int imap_axis_add_analog(imap_axis_map_t *m, const char *text,
         return -2;
     }
     return -1;
+}
+
+/* W221 HOTAS: Bitmaske der Slots, die das Profil per JOY-Quelle benutzt. */
+static unsigned imap_bind_joy_used(const imap_bind_t *b)
+{
+    unsigned m = 0;
+    int i;
+    for (i = 0; i < b->n; i++) {
+        if (b->alt[i].a.kind == IMAP_A_JOY) m |= 1u << IMAP_JOY_SLOT(b->alt[i].a.code);
+        if (b->alt[i].chord && b->alt[i].b.kind == IMAP_A_JOY)
+            m |= 1u << IMAP_JOY_SLOT(b->alt[i].b.code);
+    }
+    return m;
+}
+
+static unsigned imap_profile_joy_used(const imap_profile_t *p)
+{
+    unsigned m = 0;
+    int i, k;
+    for (i = 0; i < 39; i++) m |= imap_bind_joy_used(&p->btn[i]);
+    for (i = 0; i < IMAP_AX_COUNT; i++) {
+        m |= imap_bind_joy_used(&p->axis[i].neg) | imap_bind_joy_used(&p->axis[i].pos);
+        for (k = 0; k < 2; k++) {
+            if (p->axis[i].pad[k].src >= IMAP_SRC_JOY)
+                m |= 1u << (((p->axis[i].pad[k].src - IMAP_SRC_JOY) >> 3) & 3);
+        }
+    }
+    m |= imap_bind_joy_used(&p->gear_up) | imap_bind_joy_used(&p->gear_down);
+    m |= imap_bind_joy_used(&p->tuner_up) | imap_bind_joy_used(&p->tuner_down);
+    for (i = 0; i < 7; i++) m |= imap_bind_joy_used(&p->gear_direct[i]);
+    m |= imap_bind_joy_used(&p->vr_recenter) | imap_bind_joy_used(&p->pause);
+    m |= imap_bind_joy_used(&p->photo) | imap_bind_joy_used(&p->feedback_shot);
+    m |= imap_bind_joy_used(&p->feedback_clip);
+    return m;
 }
 
 static void imap_profile_init(imap_profile_t *p, const char *name)
@@ -1517,6 +1752,14 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
         *eq = '\0';
         imap_trim(line);
         val = eq + 1;
+        if ((line[0] == 'j' || line[0] == 'J') && imap_joy_kind(line) >= 0 &&
+            line[3]) {
+            /* W221 HOTAS: Geraete-Zuordnung "joyN = <Name|{GUID}>[@k]" */
+            int js = imap_joy_kind(line);
+            imap_trim(val);
+            strncpy_s(out->joy_dev[js], sizeof out->joy_dev[js], val, _TRUNCATE);
+            continue;
+        }
         if (imap_elem_parse(line, &e) != 0) continue; /* unbekannt: weiter */
         for (alt = strtok_s(val, ",", &ctx); alt;
              alt = strtok_s(NULL, ",", &ctx)) {
@@ -1573,6 +1816,7 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
             (void)rc; /* fehlerhafte Alternative: ignorieren */
         }
     }
+    out->joy_used = imap_profile_joy_used(out);
     return 0;
 }
 
@@ -1807,6 +2051,9 @@ static int imap_axis_equal(const imap_axis_map_t *a, const imap_axis_map_t *b)
         if (a->pad[i].dz != b->pad[i].dz) return 1;
         if (a->pad[i].curve != b->pad[i].curve) return 1;
         if (a->pad[i].inv != b->pad[i].inv) return 1;
+        if (a->pad[i].src >= IMAP_SRC_JOY && /* W221 */
+            (a->pad[i].sens != b->pad[i].sens || a->pad[i].half != b->pad[i].half))
+            return 1;
     }
     return 0;
 }
@@ -1835,6 +2082,10 @@ int imap_profile_equal(const imap_profile_t *a, const imap_profile_t *b)
     if (imap_bind_equal(&a->photo, &b->photo)) return 1; /* W195 */
     if (a->has_pad != b->has_pad) return 1;
     if (a->has_sbc != b->has_sbc) return 1; /* W159 */
+    if (a->joy_used != b->joy_used) return 1; /* W221 */
+    for (i = 0; i < IMAP_JOY_MAX; i++) {
+        if (strcmp(a->joy_dev[i], b->joy_dev[i]) != 0) return 1;
+    }
     return 0;
 }
 

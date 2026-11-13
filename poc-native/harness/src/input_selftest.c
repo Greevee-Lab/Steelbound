@@ -27,6 +27,10 @@
  * Teil 14 (W193 PAUSE-LIVE): imap_key_name fuer menu_peek_key.
  * Teil 16 (W218 SIMPLE-CONTROLS): Kopplung Zielhebel -> Drehhebel und
  *   Gang-Automatik gegen ein einfaches Fahrzeugmodell.
+ * Teil 17 (W221 HOTAS, experimentell): simulierte DirectInput-Geraete
+ *   (imap_snap_t.joy): Abbildung, Totzone, Invertierung, Kurve/sens,
+ *   Tasten->Achse, Tasten->Gang, Achsen-Zonen->Gang, POV, mehrere Geraete,
+ *   Geraete-Zuordnung (ijoy_match_list).
  * Teil 15 (W195 PHOTO-MODE): Aktion photo (Standard KEY:F12, Tasten nur ueber
  *         das Fenster, Pad-Flanke im Hook, imap_bind_keys, Profilvergleich).
  */
@@ -715,6 +719,19 @@ static void dump_profile(const imap_profile_t *p)
         dump_bind("pause", &p->pause);
     if (p->photo.n) /* W195 */
         dump_bind("photo", &p->photo);
+    for (i = 0; i < 7; i++) { /* W221: Direktwahl (z. B. Schubhebel-Zonen) */
+        static const char *const gn[7] = {"gear.r", "gear.n", "gear.1", "gear.2",
+                                          "gear.3", "gear.4", "gear.5"};
+        if (p->gear_direct[i].n) dump_bind(gn[i], &p->gear_direct[i]);
+    }
+    if (p->joy_used) { /* W221 HOTAS */
+        printf("joy_used=0x%X\n", p->joy_used);
+        for (i = 0; i < IMAP_JOY_MAX; i++) {
+            if (p->joy_used & (1u << i))
+                printf("joy%d = '%s'%s\n", i, p->joy_dev[i],
+                       p->joy_dev[i][0] ? "" : " (Slot-Reihenfolge)");
+        }
+    }
 }
 
 /* W79 INPUT-REAL: Kippschalter-Rast (key_toggles), Raw-Maus, Sperre. */
@@ -2097,6 +2114,322 @@ static void run_simple_cases(const imap_profile_t *kb)
     CHECK(gst == 9 && b.pedal_r == 0 && b.pedal_m == 0, "autogear: ohne Pedal keine Aenderung");
 }
 
+/* ---- Teil 17: W221 HOTAS (experimentell) - simulierte DirectInput-Geraete ---- */
+static void joy_snap(imap_snap_t *s, unsigned frame)
+{
+    static const cfgvar_t c = {1, 0, 0, 1, 3, 0, 0};
+    int k, i;
+    make_snap(s, frame, &c);
+    for (k = 0; k < IMAP_JOY_MAX; k++) {
+        for (i = 0; i < IJOY_POVS; i++) s->joy[k].pov[i] = -1;
+    }
+}
+
+static void joy_btn(imap_snap_t *s, int slot, int b1, int on)
+{
+    int i = b1 - 1;
+    if (on) s->joy[slot].btn[i >> 5] |= 1u << (i & 31);
+    else s->joy[slot].btn[i >> 5] &= ~(1u << (i & 31));
+}
+
+static int16_t joy_pos(float f) /* -1..1 -> DirectInput-Bereich */
+{
+    float v = f >= 0 ? f * 32767.0f : f * 32768.0f;
+    return (int16_t)(v >= 0 ? v + 0.5f : v - 0.5f);
+}
+
+static const char kJoyProf[] =
+    "[joystick]\n"
+    "joy0 = T.16000M\n"
+    "joy1 = TWCS Throttle\n"
+    "joy2 = {11111111-2222-3333-4444-555555555555}\n"
+    "aim_x = JOY0:X:dz=0.1\n"
+    "aim_x.neg = KEY:LEFT:cond=!SHIFT\n" /* digital + Stick */
+    "aim_y = JOY0:Y:inv=1\n"
+    "rot = JOY0:RZ:dz=0.05:curve=2\n"
+    "rot.neg = JOY0:B5\n"
+    "rot.pos = JOY0:B6\n"
+    "sight_x = JOY0:S0:sens=2\n"
+    "pedal_r = KEY:W, JOY1:Z:inv=1\n"
+    "pedal_m = JOY2:RZ:dz=0.1\n"
+    "pedal_l = JOY2:X:half=1\n"
+    "bi0 = KEY:SPACE, JOY0:B1\n"
+    "bi2 = JOY0:B2+JOY0:B3\n"
+    "bi18 = JOY0:Y-\n"
+    "bi27 = JOY1:RX:zone=40-60\n"
+    "tuner.up = JOY0:POV1U\n"
+    "tuner.down = JOY0:POV1D\n"
+    "gear.up = JOY1:B1\n"
+    "gear.down = JOY1:B2\n"
+    "gear.r = JOY1:S0:zone=0-10\n"
+    "gear.n = JOY1:S0:zone=10-25\n"
+    "gear.1 = JOY1:S0:zone=25-40\n"
+    "gear.2 = JOY1:S0:zone=40-55\n"
+    "gear.3 = JOY1:S0:zone=55-70\n"
+    "gear.4 = JOY1:S0:zone=70-85\n"
+    "gear.5 = JOY1:S0:zone=85-100\n"
+    "bi1 = JOY5:B1, JOY0:B0, JOY0:POV9U, JOY0:Q, JOY0:B4\n" /* ungueltig bis auf B4 */
+    "sight_y = JOY0:Y:dz=2\n";                              /* ungueltig */
+
+static void run_joy_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
+{
+    imap_profile_t p, p2;
+    imap_snap_t s;
+    imap_block_t b;
+    imap_state_t st;
+    unsigned f = 1;
+    int i;
+    printf("Teil 17: W221 HOTAS (simulierte Geraete)\n");
+
+    /* Profil: Slots, Geraete, Bitgleichheit der Standardprofile. */
+    CHECK(imap_profile_parse(kJoyProf, "joytest", &p) == 0, "joy: parse");
+    CHECK(p.joy_used == 7u, "joy: Slots 0..2 benutzt (%u)", p.joy_used);
+    CHECK(strcmp(p.joy_dev[0], "T.16000M") == 0 && strcmp(p.joy_dev[1], "TWCS Throttle") == 0 &&
+              p.joy_dev[2][0] == '{' && p.joy_dev[3][0] == 0,
+          "joy: Geraete-Zeilen");
+    CHECK(imap_profile_parse(kJoyProf, "joytest", &p2) == 0 && imap_profile_equal(&p, &p2) == 0,
+          "joy: Profil stabil");
+    p2.axis[IMAP_AX_AIM_X].pad[0].sens = 1.5f;
+    CHECK(imap_profile_equal(&p, &p2) != 0, "joy: Vergleich sieht sens");
+    CHECK(kb->joy_used == 0 && xbox->joy_used == 0, "joy: Standardprofile ohne JOY");
+    CHECK(p.btn[1].n == 1 && p.btn[1].alt[0].a.kind == IMAP_A_JOY &&
+              IMAP_JOY_IDX(p.btn[1].alt[0].a.code) == 3,
+          "joy: ungueltige Quellen ignoriert (nur B4 bleibt)");
+    CHECK(p.axis[IMAP_AX_SIGHT_Y].pad[0].src < 0, "joy: dz=2 abgelehnt");
+    CHECK(p.axis[IMAP_AX_AIM_X].pad[0].src == IMAP_SRC_JOY + 0 &&
+              p.axis[IMAP_AX_PEDAL_M].pad[0].src == IMAP_SRC_JOY + 2 * 8 + 5,
+          "joy: Analog-Quellen kodiert");
+
+    /* Ohne Geraet: Block wie ohne JOY-Zeilen (nur Tastatur wirkt). */
+    imap_state_init(&st);
+    joy_snap(&s, f++);
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK(b.aiming_x == 0x7F && b.aiming_y == 0x7F && b.rot_lever == 0 && b.sight_x == 0 &&
+              b.pedal_l == 0 && b.pedal_m == 0 && b.pedal_r == 0 && b.buttons[0] == 0 &&
+              b.buttons[1] == 0 && b.gear == 8 && b.tuner == 0,
+          "joy: ohne Geraet neutral");
+    {
+        int k[1] = {'W'};
+        set_keys(k, 1);
+        joy_snap(&s, f++);
+        imap_profile_apply(&b, &st, &p, &s);
+        CHECK(b.pedal_r == 0xFF, "joy: Tastatur bleibt live (W)");
+        set_keys(NULL, 0);
+    }
+
+    /* Abbildung, Deadzone, Invertierung, Kurve, Empfindlichkeit. */
+    imap_state_init(&st);
+    joy_snap(&s, f++);
+    s.joy_mask = 7u;
+    s.joy[0].axis[0] = 32767;        /* X voll rechts */
+    s.joy[0].axis[1] = joy_pos(1.0f); /* Y voll (+) -> inv -> 0x00 */
+    s.joy[0].axis[5] = joy_pos(0.525f); /* RZ: (0.525-0.05)/0.95 = 0.5 -> ^2 = 0.25 */
+    s.joy[0].axis[6] = joy_pos(0.25f);  /* S0 * sens 2 = 0.5 */
+    s.joy[1].axis[2] = -32768;        /* Schub voll vorn (Minimum) -> inv -> 255 */
+    s.joy[2].axis[5] = joy_pos(0.0f); /* Pedal Mitte = halber Weg */
+    s.joy[2].axis[0] = joy_pos(-0.5f); /* half: negative Haelfte = 0 */
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK(b.aiming_x == 0xFF, "joy: X voll -> 0xFF (%02X)", b.aiming_x);
+    CHECK(b.aiming_y == 0x00, "joy: Y inv -> 0x00 (%02X)", b.aiming_y);
+    CHECK(b.rot_lever >= 31 && b.rot_lever <= 33, "joy: Totzone+Kurve rot=%d (32)", b.rot_lever);
+    CHECK(b.sight_x >= 63 && b.sight_x <= 64, "joy: sens 2 sight_x=%d (64)", b.sight_x);
+    CHECK(b.pedal_r == 0xFF, "joy: Schub inv voll -> 255 (%u)", b.pedal_r);
+    CHECK(b.pedal_m >= 112 && b.pedal_m <= 114, "joy: Pedal Mitte dz 0.1 -> %u (113)", b.pedal_m);
+    CHECK(b.pedal_l == 0, "joy: half=1 negative Haelfte -> 0 (%u)", b.pedal_l);
+    s.joy[0].axis[0] = joy_pos(0.08f); /* in der Totzone 0.1 */
+    s.joy[0].axis[1] = joy_pos(-0.5f); /* inv -> +0.5 */
+    s.joy[1].axis[2] = 32767;          /* Schub hinten -> 0 */
+    s.joy[2].axis[0] = joy_pos(0.5f);  /* half: +0.5 -> 128 */
+    s.joy[2].axis[5] = joy_pos(-0.85f); /* Pedal fast Ruhe: (0.075) < dz -> 0 */
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK(b.aiming_x == 0x7F, "joy: Totzone -> Mitte (%02X)", b.aiming_x);
+    CHECK(b.aiming_y == 0x7F + 64, "joy: Y inv halb -> %02X (BF)", b.aiming_y);
+    CHECK(b.pedal_r == 0, "joy: Schub hinten -> 0 (%u)", b.pedal_r);
+    CHECK(b.pedal_l == 128, "joy: half +0.5 -> 128 (%u)", b.pedal_l);
+    CHECK(b.pedal_m == 0, "joy: Pedal-Totzone am Ruhe-Ende (%u)", b.pedal_m);
+    s.joy[0].axis[0] = -32768;
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK(b.aiming_x == 0x00, "joy: X voll links -> 0x00 (%02X)", b.aiming_x);
+    { /* Digital (Pfeil, voll) schlaegt den halb ausgelenkten Stick. */
+        int k[1] = {VK_LEFT};
+        set_keys(k, 1);
+        s.joy[0].axis[0] = joy_pos(0.5f);
+        imap_profile_apply(&b, &st, &p, &s);
+        CHECK(b.aiming_x == 0x00, "joy: Pfeil links vor Stick halb rechts (%02X)", b.aiming_x);
+        set_keys(NULL, 0);
+    }
+
+    /* Mehrere Geraete: Slot 1 weg -> nur dessen Quellen schweigen. */
+    s.joy_mask = 5u;
+    s.joy[0].axis[0] = 32767;
+    s.joy[1].axis[2] = -32768;
+    s.joy[2].axis[0] = 32767;
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK(b.aiming_x == 0xFF && b.pedal_r == 0 && b.pedal_l == 0xFF,
+          "joy: Slot 1 fehlt -> Schub 0, Stick+Pedale live");
+    s.joy_mask = 7u;
+
+    /* Tasten, Akkord, POV, Achse-als-Taste, Zone. */
+    memset(s.joy[0].btn, 0, sizeof s.joy[0].btn);
+    s.joy[0].axis[0] = s.joy[0].axis[1] = 0;
+    joy_btn(&s, 0, 1, 1);
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK((b.buttons[0] & 1u) != 0, "joy: B1 -> Hauptwaffe");
+    joy_btn(&s, 0, 2, 1);
+    joy_btn(&s, 0, 3, 1);
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK((b.buttons[0] & 4u) != 0, "joy: Akkord B2+B3 -> Lock-On");
+    joy_btn(&s, 0, 1, 0);
+    joy_btn(&s, 0, 3, 0);
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK((b.buttons[0] & 5u) == 0, "joy: Tasten los");
+    joy_btn(&s, 0, 2, 0);
+    joy_btn(&s, 0, 4, 1);
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK((b.buttons[0] & 2u) != 0, "joy: B4 -> Subwaffe");
+    joy_btn(&s, 0, 4, 0);
+    s.joy[0].axis[1] = joy_pos(-0.9f); /* Y- (unteres Viertel) */
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK((b.buttons[1] & (1u << 2)) != 0, "joy: Achse Y- -> Chaff");
+    s.joy[0].axis[1] = joy_pos(-0.3f);
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK((b.buttons[1] & (1u << 2)) == 0, "joy: Achse Y Mitte -> kein Chaff");
+    s.joy[1].axis[3] = 0; /* RX Mitte = 50 % -> Zone 40-60 */
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK((b.buttons[1] & (1u << 11)) != 0, "joy: Zone 40-60 -> Magazin");
+    s.joy[1].axis[3] = joy_pos(0.4f); /* 70 % */
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK((b.buttons[1] & (1u << 11)) == 0, "joy: ausserhalb Zone");
+    /* Tasten -> Achse (Drehhebel per Tasten). */
+    joy_btn(&s, 0, 5, 1);
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK(b.rot_lever == -127, "joy: B5 -> Drehhebel links (%d)", b.rot_lever);
+    joy_btn(&s, 0, 5, 0);
+    joy_btn(&s, 0, 6, 1);
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK(b.rot_lever == 127, "joy: B6 -> Drehhebel rechts (%d)", b.rot_lever);
+    joy_btn(&s, 0, 6, 0);
+    /* POV: Flanken auf den Tuner, Diagonale loest Nachbarn aus. */
+    {
+        int t0 = st.tuner;
+        s.joy[0].pov[0] = 0;
+        imap_profile_apply(&b, &st, &p, &s);
+        imap_profile_apply(&b, &st, &p, &s); /* gehalten: eine Flanke */
+        CHECK(b.tuner == t0 + 1, "joy: POV hoch -> Tuner +1 (%u)", b.tuner);
+        s.joy[0].pov[0] = -1;
+        imap_profile_apply(&b, &st, &p, &s);
+        s.joy[0].pov[0] = 13500; /* rechts-unten -> zaehlt als runter */
+        imap_profile_apply(&b, &st, &p, &s);
+        CHECK(b.tuner == t0, "joy: POV Diagonale unten-rechts -> Tuner -1 (%u)", b.tuner);
+        s.joy[0].pov[0] = 9000; /* rechts: weder hoch noch runter */
+        imap_profile_apply(&b, &st, &p, &s);
+        s.joy[0].pov[0] = -1;
+        imap_profile_apply(&b, &st, &p, &s);
+        CHECK(b.tuner == t0, "joy: POV rechts ohne Wirkung (%u)", b.tuner);
+    }
+
+    /* Tasten -> Gang (Schalthebel per Tasten), dann Achse -> Gang (Zonen). */
+    imap_state_init(&st);
+    joy_snap(&s, f++);
+    s.joy_mask = 7u;
+    s.joy[1].axis[6] = joy_pos(0.0f); /* S0 Mitte = 50 % -> Zone gear.2 */
+    /* Erst ohne Zonen-Geraet pruefen: Zonen schweigen, wenn Slot fehlt. */
+    s.joy_mask = 5u;
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK(b.gear == 8 && !st.gear_direct_hit, "joy: Slot fehlt -> N, keine Direktwahl");
+    s.joy_mask = 7u;
+    s.joy[1].axis[6] = -32768; /* 0 % -> R */
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK(b.gear == 7 && st.gear_direct_hit, "joy: Schub 0 %% -> R (%u)", b.gear);
+    {
+        static const struct { float pct; int gear; } z[] = {
+            {5, 7}, {15, 8}, {30, 9}, {47, 10}, {60, 11}, {77, 12}, {92, 13}, {100, 13}, {0, 7}};
+        for (i = 0; i < (int)(sizeof z / sizeof z[0]); i++) {
+            float fr = z[i].pct / 100.0f * 2.0f - 1.0f;
+            s.joy[1].axis[6] = joy_pos(fr);
+            imap_profile_apply(&b, &st, &p, &s);
+            CHECK(b.gear == z[i].gear, "joy: Zone %.0f%% -> Gang %u (soll %d)", z[i].pct, b.gear,
+                  z[i].gear);
+        }
+    }
+    /* Tasten-Gang ohne Zonen (eigenes Profil: Gangknueppel per Tasten). */
+    {
+        static const char kG[] = "joy0 = Wheel\n"
+                                 "gear.up = JOY0:B1\n"
+                                 "gear.down = JOY0:B2\n"
+                                 "pedal_r = JOY0:Y:inv=1\n";
+        imap_profile_t g;
+        CHECK(imap_profile_parse(kG, "joygear", &g) == 0 && g.joy_used == 1u, "joy: Gang-Profil");
+        imap_state_init(&st);
+        joy_snap(&s, f++);
+        s.joy_mask = 1u;
+        s.joy[0].axis[1] = 32767; /* Pedal (inv) los -> 0 */
+        joy_btn(&s, 0, 1, 1);
+        imap_profile_apply(&b, &st, &g, &s);
+        imap_profile_apply(&b, &st, &g, &s);
+        CHECK(b.gear == 9 && b.pedal_r == 0, "joy: B1 gehalten -> eine Flanke N->1 (%u)", b.gear);
+        joy_btn(&s, 0, 1, 0);
+        imap_profile_apply(&b, &st, &g, &s);
+        joy_btn(&s, 0, 1, 1);
+        imap_profile_apply(&b, &st, &g, &s);
+        CHECK(b.gear == 10, "joy: B1 erneut -> 2 (%u)", b.gear);
+        joy_btn(&s, 0, 1, 0);
+        joy_btn(&s, 0, 2, 1);
+        imap_profile_apply(&b, &st, &g, &s);
+        CHECK(b.gear == 9 && !st.gear_direct_hit, "joy: B2 -> 1, keine Direktwahl (%u)", b.gear);
+    }
+
+    /* Maus + Stick auf derselben Achse (W132-Regel gilt auch fuer JOY):
+     * Maus ruht, Stick bewegt -> Stick. */
+    {
+        static const char kM[] = "aim_x = MOUSE:X:mode=aim, JOY0:X\n";
+        static const cfgvar_t cm = {1, 1, 0, 1, 3, 0, 0};
+        imap_profile_t m;
+        CHECK(imap_profile_parse(kM, "joymouse", &m) == 0 && m.joy_used == 1u, "joy: Maus-Profil");
+        imap_state_init(&st);
+        for (i = 0; i < 3; i++) {
+            make_snap(&s, f++, &cm);
+            s.pad_axis_arb = 1;
+            s.pad_arb_dead = 8;
+            s.pad_mouse_wake = 3;
+            s.joy_mask = 1u;
+            s.joy[0].axis[0] = i == 0 ? 0 : joy_pos(0.5f);
+            imap_profile_apply(&b, &st, &m, &s);
+        }
+        CHECK(b.aiming_x == 0x7F + 64, "joy: Stick schlaegt ruhende Maus (%02X)", b.aiming_x);
+    }
+
+    /* Geraete-Zuordnung (rein, ohne DirectInput). */
+    {
+        ijoy_info_t L[4];
+        memset(L, 0, sizeof L);
+        strcpy_s(L[0].name, sizeof L[0].name, "T.16000M");
+        strcpy_s(L[0].product, sizeof L[0].product, "T.16000M");
+        strcpy_s(L[0].guid, sizeof L[0].guid, "{AAAAAAAA-0000-0000-0000-000000000001}");
+        strcpy_s(L[1].name, sizeof L[1].name, "TWCS Throttle");
+        strcpy_s(L[1].product, sizeof L[1].product, "TWCS Throttle");
+        strcpy_s(L[1].guid, sizeof L[1].guid, "{AAAAAAAA-0000-0000-0000-000000000002}");
+        strcpy_s(L[2].name, sizeof L[2].name, "T-Rudder");
+        strcpy_s(L[2].product, sizeof L[2].product, "T-Rudder");
+        strcpy_s(L[2].guid, sizeof L[2].guid, "{AAAAAAAA-0000-0000-0000-000000000003}");
+        strcpy_s(L[2].pguid, sizeof L[2].pguid, "{B679044F-0000-0000-0000-504944564944}");
+        strcpy_s(L[3].name, sizeof L[3].name, "T.16000M");
+        strcpy_s(L[3].product, sizeof L[3].product, "T.16000M");
+        CHECK(ijoy_match_list(L, 4, "throttle", 0) == 1, "joy: Name-Teilstring");
+        CHECK(ijoy_match_list(L, 4, "{aaaaaaaa-0000-0000-0000-000000000003}", 0) == 2,
+              "joy: Instanz-GUID");
+        CHECK(ijoy_match_list(L, 4, "{B679044F-0000-0000-0000-504944564944}", 0) == 2,
+              "joy: Produkt-GUID");
+        CHECK(ijoy_match_list(L, 4, "T.16000M@2", 0) == 3, "joy: @2 = zweites gleiches Geraet");
+        CHECK(ijoy_match_list(L, 4, "", 2) == 2 && ijoy_match_list(L, 4, NULL, 5) == -1,
+              "joy: leer = Slot-Reihenfolge");
+        CHECK(ijoy_match_list(L, 4, "Saitek", 0) == -1, "joy: unbekannt -> -1");
+        CHECK(ijoy_axis_parse("rz") == 5 && ijoy_axis_parse("SLIDER") == 6 &&
+                  ijoy_axis_parse("W") == -1,
+              "joy: Achsennamen");
+    }
+}
+
 int main(int argc, char **argv)
 {
     imap_profile_t kb_file, kb_in, xbox_file, xbox_in;
@@ -2189,6 +2522,7 @@ int main(int argc, char **argv)
     run_feedback_clip_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in);
 
     run_simple_cases(rc_kb == 0 ? &kb_file : &kb_in); /* Teil 16: W218 */
+    run_joy_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 17: W221 */
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;

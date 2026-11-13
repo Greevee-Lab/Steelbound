@@ -209,14 +209,6 @@ cmake --build poc-native/launcher/build-community --config Release
 - `sb_launcher.exe --selftest` (for the validation tests, point the test at
   your own copy: `SB_TEST_XBE=<…>/default.xbe`, `SB_TEST_MEDIA=<…>`)
 - `input_selftest.exe`, `render_selftest.exe`
-- `python poc-native/tools/edition/tests/test_edition.py`
-
-## Cleanliness check
-
-`python poc-native/tools/edition/clean_check.py <folder> --report report.md`
-checks an export for game content, secrets, machine paths and network
-access (it compares against the **local** `default.xbe` of your own copy:
-`--xbe <path>`).
 
 ## License
 

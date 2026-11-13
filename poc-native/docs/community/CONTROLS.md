@@ -31,6 +31,8 @@ while the game window has focus.
 | Free / capture mouse | F10 |
 | Game menu (Continue, Settings, Feedback, Quit; pauses the game) | ESC |
 | Pause / continue | Pause key (assignable: Controls page, "pause") |
+| Feedback with screenshot / with 5-second clip | F11 / F9 |
+| Photo mode (open / take photo) | F12 |
 | Performance overlay | F2 (Shift + F2 moves it) |
 | Window / fullscreen | Alt + Enter |
 | VR: recenter view | F8 |

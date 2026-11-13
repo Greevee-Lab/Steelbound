@@ -9,11 +9,46 @@ single license for its own code (PolyForm Noncommercial 1.0.0, see
 `LICENSE`) and the author reserves later commercial licensing, every
 contribution needs a rights agreement.
 
+## Reporting bugs and ideas
+
+Bug reports and ideas are welcome from everyone and need no rights
+agreement. Use the in-game feedback (**F11** with screenshot, **F9** with a
+5-second clip, or **Esc → Feedback**) or open an issue with one of the
+templates (*Bug report*, *Idea*). See “Reporting bugs” and “Known issues”
+in the [README](README.md).
+
+### Labels (suggested set for maintainers)
+
+The issue templates set `bug` or `enhancement` plus `needs-triage`.
+Maintainers then sort issues with these labels:
+
+| Label | Use for |
+|---|---|
+| `bug` | Something does not work as expected |
+| `enhancement` | Idea or feature request |
+| `needs-triage` | New, not yet looked at |
+| `needs-info` | Waiting for details from the reporter (steps, log, settings) |
+| `confirmed` | Reproduced by a maintainer |
+| `known-issue` | Listed under “Known issues” in the README |
+| `duplicate` | Already reported elsewhere (link the original) |
+| `crash` | Game or launcher closes or freezes |
+| `graphics` | Rendering, textures, shaders, display modes |
+| `performance` | Frame rate, stutter, load |
+| `input` | Keyboard, mouse, gamepad, original controller |
+| `audio` | Sound and music |
+| `launcher` | Launcher pages, setup, settings |
+| `saves` | Save games, import, save protection |
+| `vr` | VR mode (experimental) |
+| `docs` | Documentation |
+| `wontfix` | Out of scope, for example other game versions for now |
+
 ## What we cannot accept
 
 - **No game content:** no XBE or disc-image parts, textures, screenshots,
   audio, movies, saves or packs derived from the game. Test against your
-  own copy, but never attach game material to issues or pull requests.
+  own copy, but never add game material to pull requests. In issues, the
+  only exception is the screenshot or short clip from the in-game feedback
+  package that shows the problem.
 - **No GPL- or foreign-licensed content:** no code, tables or text copied
   from GPL-licensed projects or from any source whose license is unclear or
   incompatible. Re-derive facts independently and say which independent

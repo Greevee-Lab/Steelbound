@@ -9,6 +9,103 @@ starter application. No game content is included or distributed.
 This repository is source-available (see [License](#license)). It is not an
 official product and is not affiliated with Capcom or Microsoft.
 
+## Quickstart in 3 steps
+
+1. **Download** the latest `Steelbound-*-win32.zip` from the
+   [Releases](../../releases) page and
+   unpack it into a new, empty folder.
+2. **Start `sb_launcher.exe`** and, on the **Play** page under **Set up your
+   game**, choose **your own disc image** of Steel Battalion (Europe/PAL) as
+   `.iso` or `.xiso`, then press **Check**.
+3. **Play:** press **LAUNCH GAME**.
+
+The default preset **Original (HD) – 120 FPS** is the recommended start; on
+an older or weaker PC pick **Original (HD) – Performance** on the
+**Graphics** page. More: [Getting started](poc-native/docs/community/GETTING_STARTED.md),
+[Controls](poc-native/docs/community/CONTROLS.md),
+[Alpha testing](poc-native/docs/community/ALPHA_TESTING.md),
+[FAQ](poc-native/docs/community/FAQ.md).
+
+### System requirements
+
+- Windows 10 or 11 (64-bit).
+- Microsoft Visual C++ Redistributable 2015–2022, **x86** (32-bit) version –
+  also on 64-bit Windows. Without it, Windows reports a missing
+  `VCRUNTIME140.dll`.
+- A Direct3D 11 capable GPU with current drivers.
+- Your own copy of Steel Battalion (Europe/PAL), see
+  [Supported game version](#supported-game-version).
+
+There are no hard minimum specs. The **Original (HD) – Performance** preset
+is made for modest hardware – it runs fine on an 11-year-old laptop.
+
+### Windows may warn on first start
+
+Windows Defender SmartScreen may show **“Windows protected your PC”** the
+first time you start `sb_launcher.exe`. Click **More info → Run anyway**.
+The reason: Steelbound is an unsigned hobby project, and new unsigned
+programs get this warning until they are known to Windows. Code signing is
+planned. Only download Steelbound from the official
+[Releases](../../releases) page.
+
+## Supported game version
+
+Steelbound supports **Steel Battalion (Europe/PAL)** for the original Xbox,
+as a `.iso` or `.xiso` disc image of your own copy (an extracted game folder
+also works, see [Getting started](poc-native/docs/community/GETTING_STARTED.md)).
+
+The launcher checks the image before the first start. Other releases (USA,
+Japan) or unknown images are refused with a clear message: *“This game
+version is not supported. Only the European (PAL) version of Steel Battalion
+is supported.”* Support for the US and Japanese releases is planned.
+
+## Reporting bugs
+
+The quickest way is straight from the game:
+
+| Key | What it does |
+|---|---|
+| **F11** | Feedback with a screenshot of the current moment |
+| **F9** | Feedback with a 5-second video clip |
+| **Esc → Feedback** | Same menu, by hand |
+
+1. Choose **Bug report** or **Idea** and type a short description.
+2. The game creates a feedback package in your data folder
+   (`feedback/<date-time>/`) and shows what is inside: screenshot or clip,
+   the end of the log (user name and paths removed), version, GPU and
+   settings, your text. **Nothing is sent automatically.**
+3. **Open GitHub issue + folder** opens a pre-filled issue page and the
+   folder. Drag the files from the folder into the issue and submit it.
+
+No GitHub issue from the game? Open one by hand:
+[Bug report](../../issues/new?template=bug_report.yml) ·
+[Idea](../../issues/new?template=idea.yml).
+
+What helps us most:
+
+- **Mission** (number or name) and **VT** you were piloting;
+- **steps** to get there, and whether it happens again;
+- **settings**: graphics preset, display mode, resolution, frame rate,
+  controller type (the feedback package includes most of this);
+- what you expected and what happened instead.
+
+**Never attach game files** (ISO, XBE, extracted game data, saves).
+More details: [Alpha testing](poc-native/docs/community/ALPHA_TESTING.md).
+
+## Known issues
+
+Current state of the alpha – no need to report these again, but new details
+are welcome in the existing issue:
+
+- **Textures or shaders break after several missions in a row.** Quit and
+  restart the game; your saved progress is kept.
+- **Landscape at the screen edge pops in** in some missions.
+- **Replays:** importing and viewing replays does not fully work yet.
+- **Only the European (PAL) release** is supported; US and Japanese
+  releases are planned.
+- **VR is experimental:** expect rough edges with headsets, runtimes and
+  performance.
+
 ## Support the project
 
 [![ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/W7W2U4716)
@@ -69,30 +166,11 @@ Thank you! ☕
 - English and German UI (English default).
 - Self-tests for input, rendering and pack validation.
 
-## System requirements
-
-- Windows 10 or later (64-bit), x86-64 CPU.
-- A Direct3D 11 capable GPU.
-- Your own copy of Steel Battalion (Europe, original Xbox). Only the PAL
-  release is supported; other versions are refused with a clear message.
-- Microsoft Visual C++ Redistributable 2015–2022, **x86** (32-bit) version
-  (also on 64-bit Windows).
-- To build: Visual Studio 2022 (32-bit build is required), CMake 3.24 or
-  later and Python 3 (generates the built-in English texts).
-
 ## Documentation
 
 Player guides (English) are in `poc-native/docs/community/` (in a release
 archive: `docs/`): Getting started, Controls, Graphics and packs, VR, FAQ,
 and Alpha testing (what to test, where logs and crash reports are).
-
-## Quickstart
-
-1. **Download** the latest `Steelbound-*-win32.zip` from the [Releases](../../releases) page and unpack it into any folder.
-2. Install the **Microsoft Visual C++ Redistributable 2015–2022 (x86)** if it is not already present.
-3. Start **`sb_launcher.exe`**, choose **your own disc image** of Steel Battalion (Europe/PAL) as `.iso` or `.xiso` on the Play page, press **Check**, then **Launch game**.
-
-The recommended preset is **Original (HD) – 120 FPS**. Details: [Getting started](poc-native/docs/community/GETTING_STARTED.md). Want to build it yourself? See [Building](#building-visual-studio-2022-32-bit-is-required).
 
 ## Packs
 
@@ -102,6 +180,9 @@ effect parameters. Packs must not contain textures taken from the game.
 Without any pack the game looks exactly like the original.
 
 ## Building (Visual Studio 2022, 32-bit is required)
+
+You need Visual Studio 2022 (the build must be 32-bit), CMake 3.24 or later
+and Python 3 (generates the built-in English texts).
 
 ```
 cmake -S poc-native/harness  -B poc-native/harness/build-community  -G "Visual Studio 17 2022" -A Win32 -DSB_EDITION=community

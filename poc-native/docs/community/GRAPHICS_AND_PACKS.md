@@ -11,6 +11,7 @@ One choice on the **Graphics** page. Remastered presets may reduce FPS.
 | Preset | Meaning |
 |---|---|
 | Original (HD) – 120 FPS | Unchanged Xbox look, sharp and smooth. Recommended. |
+| Original (HD) – Performance | Unchanged look for older / weaker PCs: 60 FPS, native world resolution. Resolution applies after restart. |
 | Remastered subtle | Better lighting, effects and textures. May reduce FPS. |
 | Remastered strong | The strongest remastered look. May reduce FPS. |
 | Custom | Appears when you change an option. Based on a preset; **Reset** returns to it. |
@@ -56,8 +57,8 @@ One choice on the **Graphics** page. Remastered presets may reduce FPS.
 
 - **F2** shows the performance overlay (FPS, frame times, CPU/GPU load).
   **Shift + F2** moves it to the next corner. The setting is remembered.
-- **ESC** opens the game menu (**Continue**, **Settings**, Photo mode
-  (coming soon), **Feedback**, **Quit**); the game is paused while it is
+- **ESC** opens the game menu (**Continue**, **Settings**, **Photo
+  mode** (also **F12**), **Feedback** (also **F11** / **F9**), **Quit**); the game is paused while it is
   open (setting "ESC menu pauses"). In **Settings** the pages are tabs in
   the first row: **General**, **World**, **Image**, **Effects**, **VR**;
   **TAB / Shift+TAB**, the arrows on the tab row, a mouse click or the

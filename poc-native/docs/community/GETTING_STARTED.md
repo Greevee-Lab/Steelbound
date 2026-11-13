@@ -21,7 +21,9 @@ hardware. No game content is included. See also [Controls](CONTROLS.md),
 2. For a portable setup (USB stick), place an empty file named
    `portable.txt` next to the exe. Everything then stays in the program
    folder.
-3. Start `sb_launcher.exe`.
+3. Start `sb_launcher.exe`. If Windows Defender SmartScreen warns
+   (*“Windows protected your PC”*), click **More info → Run anyway**:
+   Steelbound is an unsigned hobby project; code signing is planned.
 
 ## Choose your disc image
 
@@ -56,7 +58,8 @@ applies immediately.
 - **Judder at 120 FPS.** On a 60 Hz display without VRR, 120 FPS may
   judder; use **Frame rate** 60 on the **Display** page instead. The
   remastered presets (**Remastered subtle**, **Remastered strong**) may
-  reduce FPS; **Original (HD) – 120 FPS** is the fastest. **Render
+  reduce FPS. On an older or weaker PC use **Original (HD) –
+  Performance** (60 FPS, native world resolution). **Render
   scaling** on **Auto** lowers the resolution briefly under load.
   Press **F2** in game to check the frame rate (see
   [Graphics and packs](GRAPHICS_AND_PACKS.md)).

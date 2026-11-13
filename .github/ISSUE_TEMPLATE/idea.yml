@@ -1,18 +1,19 @@
-# Issue form "Idea" (W188 GAME-MENU, feedback stage 1).
-# The in-game menu (ESC -> Feedback -> Idea) opens issues/new?template=idea.yml and
+# Issue form "Idea" (in-game feedback).
+# The in-game feedback (ESC -> Feedback -> Idea) opens issues/new?template=idea.yml and
 # pre-fills title, version, game, gpu and state. Field ids must stay in sync with
-# poc-native/harness/src/sb_feedback.c (URL parameters).
+# poc-native/harness/src/sb_feedback.c (URL parameters). New fields need new ids.
 name: Idea
-description: Suggest an improvement or a new feature (in-game ESC -> Feedback, or by hand).
+description: Suggest an improvement or a new feature (in-game Esc → Feedback, or by hand).
 title: "[Idea] "
-labels: ["enhancement"]
+labels: ["enhancement", "needs-triage"]
 body:
   - type: markdown
     attributes:
       value: |
-        Thanks for the idea! If you came from **ESC → Feedback** in the game, the folder next to
-        this page contains a screenshot of the moment - attach it if it helps to explain the idea.
-        **Never attach game files (ISO, XBE, extracted game data).**
+        Thanks for the idea! If you came from **Esc → Feedback** in the game, the folder next to
+        this page contains a screenshot of the moment – attach it if it helps to explain the idea.
+        One idea per issue makes it easier to discuss and track.
+        **Never attach game files (ISO, XBE, extracted game data, saves).**
   - type: textarea
     id: what
     attributes:
@@ -20,6 +21,19 @@ body:
       description: What would you like to see, and why would it help?
     validations:
       required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Launcher
+        - Graphics / display
+        - Controls / controller
+        - In-game menu / photo mode
+        - Audio
+        - VR
+        - Documentation
+        - Other
   - type: textarea
     id: files
     attributes:
@@ -46,5 +60,5 @@ body:
     attributes:
       label: Checks
       options:
-        - label: I did not attach any game files (ISO, XBE, extracted game data).
+        - label: I did not attach any game files (ISO, XBE, extracted game data, saves).
           required: true

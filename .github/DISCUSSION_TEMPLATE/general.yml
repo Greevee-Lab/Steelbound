@@ -14,35 +14,35 @@ body:
     id: controls
     attributes:
       label: How do the controls feel?
-      options: ["5 – great", "4 – good", "3 – okay", "2 – off", "1 – bad", "Didn't try"]
+      options: ["★★★★★ great", "★★★★☆ good", "★★★☆☆ okay", "★★☆☆☆ off", "★☆☆☆☆ bad", "Didn't try"]
     validations:
       required: true
   - type: dropdown
     id: smoothness
     attributes:
       label: How smooth does it run?
-      options: ["5 – great", "4 – good", "3 – okay", "2 – off", "1 – bad"]
+      options: ["★★★★★ great", "★★★★☆ good", "★★★☆☆ okay", "★★☆☆☆ off", "★☆☆☆☆ bad"]
     validations:
       required: true
   - type: dropdown
     id: look
     attributes:
       label: How does it look?
-      options: ["5 – great", "4 – good", "3 – okay", "2 – off", "1 – bad"]
+      options: ["★★★★★ great", "★★★★☆ good", "★★★☆☆ okay", "★★☆☆☆ off", "★☆☆☆☆ bad"]
     validations:
       required: true
   - type: dropdown
     id: sound
     attributes:
       label: How does it sound?
-      options: ["5 – great", "4 – good", "3 – okay", "2 – off", "1 – bad"]
+      options: ["★★★★★ great", "★★★★☆ good", "★★★☆☆ okay", "★★☆☆☆ off", "★☆☆☆☆ bad"]
     validations:
       required: true
   - type: dropdown
     id: setup
     attributes:
       label: How easy was the setup (launcher, disc image)?
-      options: ["5 – very easy", "4 – easy", "3 – okay", "2 – difficult", "1 – very difficult"]
+      options: ["★★★★★ very easy", "★★★★☆ easy", "★★★☆☆ okay", "★★☆☆☆ difficult", "★☆☆☆☆ very difficult"]
     validations:
       required: true
   - type: checkboxes

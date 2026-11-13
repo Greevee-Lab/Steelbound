@@ -1,9 +1,9 @@
 Steel Battalion - Game Preservation Project
 Edition: community
-Stand: 2026-11-13 (Commit 94d81a8+lokal)
+Stand: 2026-11-13 (Commit cab7165+lokal)
 
 Dateien (sha256):
-e1f81e401369a5d05b48a4e502c29e88806c7eeef6d623e2eceecfc18d478a77  .github/DISCUSSION_TEMPLATE/general.yml
+cbebac7504a5349af3f1880c28416100f3608b8c1f82814f8378f8c46c01edf9  .github/DISCUSSION_TEMPLATE/general.yml
 02ef4ceacf69cd6473cc49c12cd99f0ab0cab1d4e225bacdddf70d0006f16547  .github/FUNDING.yml
 763d10695c9d766d9cb97a4bcf4994b3345ad72b302294c5702b5f637cab5017  .github/ISSUE_TEMPLATE/bug_report.yml
 a067710423830d0c7493a0435b8d24115c41e83dc21bd608e484ca1890659f7d  .github/ISSUE_TEMPLATE/config.yml

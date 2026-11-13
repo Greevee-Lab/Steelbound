@@ -21,6 +21,7 @@
 #include "sb_gfxpreset.h"
 #include "render_qa.h"
 #include "sb_lang.h" /* W142 L10N */
+#include "sb_watermark.h" /* PO: sb_version_str fuer W222 */
 #include "sb_overlay.h"
 #include "sb_perfhud.h" /* W122: Test-Aktion PHUDPOS */
 #include "sb_remaster.h"
@@ -37,6 +38,7 @@
 #include <stdlib.h>
 #include <ctype.h> /* W195: toupper (Test-Hook KDN=/KUP=) */
 #include <wchar.h>
+#include <time.h> /* W222: Build-Datum */
 
 /* ---- Modulgrenzen (andere Dateien) ---- */
 int sb_render_offscreen(void);                 /* d3d11_render.c: 1 = FPS-INTERP-Offscreen-BB */
@@ -134,7 +136,8 @@ static ULONGLONG g_ov_sl_arm;           /* W190: "Uebernehmen" scharf bis (zweit
 /* ---- W188 GAME-MENU: Bildschirme ----
  * SC_SET = Einstellungen (W118-Seiten), SC_MENU = Spielmenue (erste Ebene),
  * SC_QUIT = Rueckfrage Beenden, SC_PAUSED = Pause-Taste, SC_FB* = Feedback. */
-enum { SC_SET = 0, SC_MENU, SC_QUIT, SC_PAUSED, SC_FBKIND, SC_FBTEXT, SC_FBREVIEW, SC_PHOTO /* W195 */ };
+enum { SC_SET = 0, SC_MENU, SC_QUIT, SC_PAUSED, SC_FBKIND, SC_FBTEXT, SC_FBREVIEW, SC_PHOTO /* W195 */,
+       SC_WELCOME /* W222: Alpha-Hinweis beim Start */ };
 #define OV_IS_FB(sc) ((sc) >= SC_FBKIND && (sc) <= SC_FBREVIEW)
 enum { MI_CONTINUE = 0, MI_SETTINGS, MI_PHOTO, MI_FEEDBACK, MI_QUIT, MI_N };
 /* interne Tasten im Ring (ueber dem VK-Bereich) */
@@ -149,6 +152,11 @@ enum { MI_CONTINUE = 0, MI_SETTINGS, MI_PHOTO, MI_FEEDBACK, MI_QUIT, MI_N };
 #define OK_CLICK   0x40000000 /* | x << 15 | y (Backbuffer-Pixel) */
 #define OV_MSG_TEST   (WM_APP + 0x1A8) /* TEST(W188): wp = interne Taste (UI-Thread schiebt sie in den Ring) */
 #define OV_MSG_CLOSED (WM_APP + 0x1A9) /* W188: Overlay zu -> UI-Thread faengt die Maus wieder */
+#define OV_MSG_OPENED (WM_APP + 0x1AA) /* W222: Overlay vom Render-Thread geoeffnet -> UI-Thread gibt Maus/Tasten frei */
+static volatile LONG g_ov_welcome_on;    /* W222: Alpha-Hinweis offen (UI-Thread liest: beliebige Taste schliesst) */
+static int g_ov_welcome_done;            /* W222: einmal je Programmstart (Render-Thread) */
+static unsigned g_ov_welcome_f0;         /* W222: erstes Bild (Wartezeit auf die Profil-Belegung) */
+static volatile LONG g_fb_bind_known;    /* W222: Feedback-Belegung aus dem Profil uebernommen */
 static int g_ov_scr = SC_SET;            /* Render-Thread */
 static volatile LONG g_ov_req = -1;      /* UI-Thread: Bildschirm beim Oeffnen */
 static volatile LONG g_ov_textmode;      /* 1 = Texteingabe (WM_CHAR ans Overlay) */
@@ -1077,7 +1085,7 @@ static void ov_page_set(int pg, int tabrow)
 static void ov_screen(int sc, int sel)
 {
     static const char *const nm[] = { "Einstellungen", "Spielmenue", "Beenden?", "Pause", "Feedback-Art",
-                                      "Feedback-Text", "Feedback-Paket", "Fotomodus" };
+                                      "Feedback-Text", "Feedback-Paket", "Fotomodus", "Alpha-Hinweis" };
     if (g_ov_scr != sc) {
         HLOG_I("MENU: Bildschirm -> %s (f=%u)", nm[sc], g_present_no);
         if (g_ov_scr == SC_PHOTO) { sb_photo_leave(); InterlockedExchange(&g_ph_keys, 0); } /* W195 */
@@ -1091,6 +1099,7 @@ static void ov_screen(int sc, int sel)
         g_ph_last_shown = (int)pu.nshot; /* keine alte Statuszeile aus der vorigen Sitzung */
         g_ph_t = 0;
     }
+    if (sc != SC_WELCOME) { InterlockedExchange(&g_ov_welcome_on, 0); } /* W222 */
     g_ov_scr = sc;
     g_ov_msel = sel;
     g_ov_status[0] = 0; /* Statuszeile gehoert zum Bildschirm */
@@ -1137,6 +1146,7 @@ static void ov_close(const char *why)
     if (g_ov_scr == SC_PHOTO) { sb_photo_leave(); InterlockedExchange(&g_ph_keys, 0); InterlockedExchange(&g_ph_drag, 0); } /* W195 */
     InterlockedExchange(&g_ov_textmode, 0);
     InterlockedExchange(&g_ov_peek, 0); /* W193 */
+    InterlockedExchange(&g_ov_welcome_on, 0); /* W222 */
     InterlockedExchange(&g_ov_open, 0);
 }
 
@@ -1230,6 +1240,7 @@ static int ov_scr_rows(void)
     case SC_FBTEXT: return 1;
     case SC_FBREVIEW: return 5;
     case SC_PHOTO: return ov_ph_nrows(); /* W195 */
+    case SC_WELCOME: return 1; /* W222: "Weiter" */
     default: return ov_nrows();
     }
 }
@@ -1695,6 +1706,13 @@ static void ov_mouse(int x, int y, int click)
 
 static void ov_key(int vk)
 {
+    if (g_ov_scr == SC_WELCOME) { /* W222: beliebige Taste, Klick oder Pad-Taste schliesst den Alpha-Hinweis */
+        if ((vk & OK_CHAR) && !(vk & OK_CLICK)) { return; } /* Klick-Code traegt x ab Bit 15 (kann Bit 17 setzen) */
+        HLOG_I("WELCOME: geschlossen (%s 0x%X, f=%u)", (vk & OK_CLICK) ? "Klick" : "Taste", (vk & OK_CLICK) ? 0u : (unsigned)vk,
+               g_present_no);
+        ov_close("Alpha-Hinweis");
+        return;
+    }
     if (vk & OK_CLICK) {
         ov_mouse((vk >> 15) & 0x7FFF, vk & 0x7FFF, 1);
         return;
@@ -1762,6 +1780,8 @@ void sb_ovl_set_feedback_binding(int clip, const int *vks, int n)
 {
     int i;
     for (i = 0; i < 4; ++i) { InterlockedExchange(&g_fb_vk[clip != 0][i], i < n ? vks[i] : 0); }
+    InterlockedOr(&g_fb_bind_known, clip ? 2 : 1); /* W222: Alpha-Hinweis zeigt die echte Belegung */
+    g_ov_dirty = 1;
 }
 
 void sb_ovl_request_feedback(int clip)
@@ -1870,7 +1890,17 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case OV_MSG_CLOSED: /* W203: queued close may arrive after another open. */
         imouse_menu_capture(sb_ovl_open());
         return 1;
+    case OV_MSG_OPENED: /* W222: wie ov_open_ui, aber vom Render-Thread angestossen */
+        if (sb_ovl_open()) {
+            imouse_release_keys();
+            imouse_menu_capture(1);
+        }
+        return 1;
     case WM_KEYDOWN:
+        if (g_ov_open && g_ov_welcome_on && wp != VK_F10) { /* W222: beliebige Taste schliesst den Alpha-Hinweis */
+            if (!(lp & 0x40000000)) { ov_qpush(VK_RETURN); }
+            return 1;
+        }
         if (wp == VK_ESCAPE) {
             if (!(lp & 0x40000000)) { /* keine Autowiederholung */
                 if (!g_ov_open) { ov_open_ui(g_cfg.game_menu ? SC_MENU : SC_SET); } /* W188: zuerst das Spielmenue */
@@ -1993,7 +2023,7 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case WM_RBUTTONDBLCLK: case WM_MBUTTONDBLCLK: case WM_XBUTTONDBLCLK:
         if (!g_ov_open) { return 0; }
         InterlockedIncrement(&g_ov_swallow_m);
-        if (msg == WM_RBUTTONDOWN) { ov_qpush(VK_ESCAPE); } /* W188: rechte Maustaste = zurueck */
+        if (msg == WM_RBUTTONDOWN || g_ov_welcome_on) { ov_qpush(VK_ESCAPE); } /* W188: rechte Maustaste = zurueck; W222: jede Taste schliesst den Hinweis */
         return 1;
     case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP: case WM_XBUTTONUP:
         if (msg == WM_LBUTTONUP && g_ph_drag) { /* W195 */
@@ -2414,6 +2444,22 @@ static void ov_frame(unsigned n)
             HLOG_I("CLIP: return feedback result=%d", result);
         } else if (g_ov_open) { ov_close("Clip laeuft"); }
     }
+    if (g_cfg.alpha_welcome && !g_ov_welcome_done) { /* W222: Alpha-Hinweis einmal je Programmstart, sobald Bilder laufen */
+        if (!g_ov_welcome_f0) { g_ov_welcome_f0 = n ? n : 1; }
+        if (g_ov_open || sb_clip_active()) {
+            g_ov_welcome_done = 1; /* Spieler war schneller (ESC/Taste) - nicht mehr nachreichen */
+            HLOG_I("WELCOME: uebersprungen (Overlay schon offen, f=%u)", g_present_no);
+        } else if ((g_fb_bind_known & 3) == 3 || !g_cfg.input_profile[0] || n - g_ov_welcome_f0 >= 120u) {
+            HWND h = sb_render_hwnd();
+            g_ov_welcome_done = 1;
+            HLOG_I("WELCOME: Alpha-Hinweis offen (f=%u, Belegung %s)", g_present_no,
+                   (g_fb_bind_known & 3) == 3 ? "aus Profil" : "Standard");
+            InterlockedExchange(&g_ov_welcome_on, 1);
+            InterlockedExchange(&g_ov_req, SC_WELCOME);
+            InterlockedExchange(&g_ov_open, 1);
+            if (h) { PostMessageA(h, OV_MSG_OPENED, 0, 0); } /* Maus frei, gehaltene Spiel-Tasten los (UI-Thread) */
+        }
+    }
     open = g_ov_open != 0;
     if (open != g_ov_was_open) {
         g_ov_was_open = open;
@@ -2473,6 +2519,7 @@ static void ov_frame(unsigned n)
             if (g_ov_scr == SC_PAUSED) { want = 1; why = "Pause-Taste"; }
             else if (OV_IS_FB(g_ov_scr)) { want = 1; why = "Feedback"; }
             else if (g_ov_scr == SC_PHOTO) { want = 1; why = "Fotomodus"; } /* W195 */
+            else if (g_ov_scr == SC_WELCOME) { want = 1; why = "Alpha-Hinweis"; } /* W222 */
             else if (g_cfg.menu_pause) { want = 1; why = "ESC-Menue"; }
             else { why = "menu_pause=0"; }
         }
@@ -2836,6 +2883,7 @@ static int ov_scr_lines(void)
     case SC_FBKIND: return 2;
     case SC_FBTEXT: return 3;
     case SC_FBREVIEW: return 8;
+    case SC_WELCOME: return 9; /* W222: mit zwei Leerzeilen */
     default: return 0;
     }
 }
@@ -2852,7 +2900,7 @@ static void ov_layout(unsigned boxh, unsigned *w, unsigned *h)
     }
     if (g_ov_scr != SC_SET) { /* W188: Menue-Bildschirme */
         int nl = ov_scr_lines();
-        *w = (unsigned)S(OV_IS_FB(g_ov_scr) ? 300.0f : 210.0f);
+        *w = (unsigned)S((OV_IS_FB(g_ov_scr) || g_ov_scr == SC_WELCOME) ? 300.0f : 210.0f); /* W222: Hinweis breit */
         *h = (unsigned)(S(20.0f) + S(5.0f) + nl * S(11.0f) + (nl ? S(5.0f) : 0) + ov_scr_rows() * S(12.5f) + S(6.0f) +
                         2 * S(11.0f) + S(6.0f));
         return;
@@ -2966,13 +3014,39 @@ static int ov_paint_tabs(int W, int y)
     return y + th;
 }
 
+/* W222: Tastenname einer Belegung fuer den Alpha-Hinweis (0 = nicht belegt) */
+static void ov_vk_wname(int vk, wchar_t *o, size_t cap)
+{
+    UINT sc;
+    if (vk <= 0) { wcscpy_s(o, cap, L"--"); return; }
+    if (vk >= VK_F1 && vk <= VK_F24) { _snwprintf_s(o, cap, _TRUNCATE, L"F%d", vk - VK_F1 + 1); return; }
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) { _snwprintf_s(o, cap, _TRUNCATE, L"%c", vk); return; }
+    if (vk == VK_ESCAPE) { wcscpy_s(o, cap, L"Esc"); return; }
+    sc = MapVirtualKeyW((UINT)vk, MAPVK_VK_TO_VSC);
+    if (!sc || GetKeyNameTextW((LONG)(sc << 16), o, (int)cap) <= 0) { _snwprintf_s(o, cap, _TRUNCATE, L"0x%02X", vk); }
+}
+
+/* W222: Build-Datum von sb_emu.dll (PE-Zeitstempel, wie das Feedback-Paket) */
+static void ov_build_date(char *o, size_t cap)
+{
+    HMODULE m = GetModuleHandleA("sb_emu.dll");
+    strcpy_s(o, cap, "?");
+    if (m) {
+        const IMAGE_DOS_HEADER *dh = (const IMAGE_DOS_HEADER *)m;
+        const IMAGE_NT_HEADERS *nt = (const IMAGE_NT_HEADERS *)((const char *)m + dh->e_lfanew);
+        time_t t = (time_t)nt->FileHeader.TimeDateStamp;
+        struct tm g;
+        if (gmtime_s(&g, &t) == 0) { _snprintf_s(o, cap, _TRUNCATE, "%04d-%02d-%02d", g.tm_year + 1900, g.tm_mon + 1, g.tm_mday); }
+    }
+}
+
 /* W188: Menue-Bildschirme (Spielmenue, Beenden?, Pause, Feedback) im Look der Einstellungen */
 static void ov_paint_menu(void)
 {
     int W = (int)ov_bw, H = (int)ov_bh, rowh = S(12.5f), pad = S(6.0f), b = S(1.0f), y, k, nl = ov_scr_lines();
     int nr = ov_scr_rows();
-    wchar_t title[32], tag[48], ln[8][128], lb[64], vb[64], hint[96], rst[8];
-    COLORREF lc[8];
+    wchar_t title[32], tag[48], ln[9][128], lb[64], vb[64], hint[96], rst[8]; /* W222: 9 Zeilen (Alpha-Hinweis) */
+    COLORREF lc[9];
     static const char *const rk[][MI_N] = {
         { NULL },
         { "ovl.m_continue", "ovl.m_settings", "ovl.m_photo", "ovl.m_feedback", "ovl.m_quit" },
@@ -2981,11 +3055,41 @@ static void ov_paint_menu(void)
         { "ovl.fb_bug", "ovl.fb_idea", "ovl.fb_back" },
         { "ovl.fb_create" },
         { "ovl.fb_open", "ovl.fb_folder", "ovl.fb_done", "ovl.clip_record", "ovl.clip_remove" },
+        { NULL }, /* SC_PHOTO: eigenes Panel */
+        { "ovl.m_continue" }, /* W222 SC_WELCOME */
     };
     tag[0] = 0;
-    for (k = 0; k < 8; k++) { ln[k][0] = 0; lc[k] = OV_C_TXT; }
+    for (k = 0; k < 9; k++) { ln[k][0] = 0; lc[k] = OV_C_TXT; }
     wcscpy_s(title, 32, OV_IS_FB(g_ov_scr) ? L"\x25A0 FEEDBACK" : L"\x25A0 SYS-MENU");
     switch (g_ov_scr) {
+    case SC_WELCOME: { /* W222 ALPHA-WELCOME: Dank, Feedback-Tasten (echte Belegung), GitHub-Hinweis */
+        char nb[160], bd[16];
+        wchar_t kn[24], ds[96];
+        static const char *const dk[3] = { "ovl.w_k_shot", "ovl.w_k_clip", "ovl.w_k_menu" };
+        int j;
+        wcscpy_s(title, 32, L"\x25A0 ");
+        ov_wkey(title + 2, 30, "ovl.w_title");
+        if (sb_version_str()[0]) { /* PO: echte Release-Version (W219 SB_VERSION) statt Build-Datum */
+            _snprintf_s(nb, sizeof nb, _TRUNCATE, LT("ovl.w_version"), sb_version_str());
+        } else {
+            ov_build_date(bd, sizeof bd);
+            _snprintf_s(nb, sizeof nb, _TRUNCATE, LT("ovl.w_build"), bd);
+        }
+        ov_wu8(tag, 48, nb);
+        ov_wkey(ln[0], 128, "ovl.w_thanks");
+        lc[0] = OV_C_HEAD;
+        ov_wkey(ln[1], 128, "ovl.w_break");
+        for (j = 0; j < 3; j++) {
+            ov_vk_wname(j == 2 ? VK_ESCAPE : (int)g_fb_vk[j][0], kn, 24);
+            ov_wkey(ds, 96, dk[j]);
+            _snwprintf_s(ln[3 + j], 128, _TRUNCATE, L"%-5s %s", kn, ds);
+        }
+        ov_wkey(ln[7], 128, "ovl.w_reports");
+        ov_wkey(ln[8], 128, "ovl.w_helps");
+        lc[8] = OV_C_DIM;
+        ov_wkey(hint, 96, "ovl.hint_welcome");
+        break;
+    }
     case SC_MENU:
         if (sb_pause_requested()) { ov_wkey(tag, 48, "ovl.hdr_paused"); }
         if (krnl_savelock_active()) { /* W190 SAVE-LOCK: sichtbarer Hinweis, solange der Schutz aktiv ist */

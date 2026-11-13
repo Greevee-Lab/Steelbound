@@ -34,6 +34,8 @@ void sb_wm_restore(void);
  * wie am Bildschirm (Feedback-Screenshot). 1 = gemischt. */
 int sb_wm_blend_bgr(unsigned char *bgr, unsigned w, unsigned h);
 
+const char *sb_version_str(void); /* Release-Version oder "" (Entwickler-Build) */
+
 #ifdef __cplusplus
 }
 #endif

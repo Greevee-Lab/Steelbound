@@ -416,6 +416,7 @@ typedef struct {
     int menu_pause;             /* 1 = offenes ESC-Menue pausiert das Spiel (Spieler-Standard), 0 = Spiel laeuft dahinter weiter (Live-Vorschau) */
     int pause_live;             /* W193 PAUSE-LIVE: 1 = Standbild der Pause aus der FPS-INTERP-Aufzeichnung mit den aktuellen Einstellungen neu zeichnen, 0 = W188 (Kopie) */
     char menu_peek_key[16];     /* W193: Taste "Menue kurz ausblenden" (gedrueckt halten), Tastenname wie in Profilen; leer/OFF = aus */
+    int alpha_welcome;          /* W222: 1 = Alpha-Hinweis einmal je Programmstart (Spiel pausiert, beliebige Taste/Klick schliesst); Standard Community 1, Private 0 */
     /* W195 PHOTO-MODE ([photo]): Fotomodus (F12 bzw. Profil-Aktion "photo", ESC-Menue -> Fotomodus) */
     int photo_mode;             /* 1 = Fotomodus verfuegbar (Standard), 0 = aus (Menue-Eintrag ausgegraut, Taste ohne Wirkung) */
     char photo_dir[400];        /* Fotoordner (UTF-8); leer = <Nutzerdaten>\Screenshots (legacy/Tests: <Ausgabe>\Screenshots) */

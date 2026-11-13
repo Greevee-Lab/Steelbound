@@ -31,9 +31,8 @@ owners of the game is the intended, noncommercial way to share them.
 
 **Can I stream the game or post videos?**
 
-> **Proposal — decision rests with the author.** Streams and videos of you
-> playing (for example Let's Plays, reviews or tutorials) are meant to be
-> treated as fan activity and allowed, including the usual platform
-> monetisation of the video itself, as long as you do not sell or paywall
-> the software or packs. This paragraph is only a proposal until the author
-> confirms it.
+Yes. Streams and videos of you playing (for example Let's Plays, reviews or
+tutorials) are welcome as fan activity, including the usual platform
+monetisation of the video or stream itself, as long as you do not sell or
+paywall the software or packs. A link to https://steelbound.dev is
+appreciated.

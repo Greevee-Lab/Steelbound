@@ -248,6 +248,7 @@ void hcfg_defaults(void)
     g_cfg.menu_pause = 1;               /* W188: ESC-Menue pausiert */
     g_cfg.pause_live = 1;               /* W193: Standbild der Pause live neu zeichnen */
     strcpy_s(g_cfg.menu_peek_key, sizeof g_cfg.menu_peek_key, "H"); /* W193: H halten = Menue ausblenden */
+    g_cfg.alpha_welcome = SB_EDITION_COMMUNITY; /* W222: Alpha-Hinweis beim Start (Community 1, Private/Tests 0) */
     g_cfg.photo_mode = 1;               /* W195 PHOTO-MODE */
     g_cfg.photo_scale = 1;
     g_cfg.photo_aspect = 1;             /* W195: Bildschirm (weit) */
@@ -545,6 +546,7 @@ static int set_key_overlay(const char *k, const char *v)
     else if (strcmp(k, "menu_pause") == 0) { g_cfg.menu_pause = atoi(v); } /* W188 */
     else if (strcmp(k, "pause_live") == 0) { g_cfg.pause_live = atoi(v); } /* W193 */
     else if (strcmp(k, "menu_peek_key") == 0) { strncpy_s(g_cfg.menu_peek_key, sizeof g_cfg.menu_peek_key, v, _TRUNCATE); } /* W193 */
+    else if (strcmp(k, "alpha_welcome") == 0) { g_cfg.alpha_welcome = atoi(v); } /* W222 ALPHA-WELCOME */
     else if (strcmp(k, "photo_mode") == 0) { g_cfg.photo_mode = atoi(v); } /* W195 PHOTO-MODE */
     else if (strcmp(k, "photo_dir") == 0) { strncpy_s(g_cfg.photo_dir, sizeof g_cfg.photo_dir, v, _TRUNCATE); }
     else if (strcmp(k, "photo_scale") == 0) { g_cfg.photo_scale = atoi(v); }

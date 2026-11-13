@@ -27,6 +27,9 @@ static float wm_f;              /* Faktor des fertigen Bildes */
 static ID3D11Texture2D *wm_tex;
 static ID3D11ShaderResourceView *wm_srv;
 static unsigned wm_tw, wm_th;
+/* PO 13.11.: Version fuer andere Overlays (W222 Willkommens-Hinweis); "" = Entwickler-Build */
+const char *sb_version_str(void) { return SB_VERSION_STR; }
+
 static int wm_dirty_tex = 1;
 static sb_ovl_save_t wm_save;
 static wchar_t wm_txt[96];

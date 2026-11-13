@@ -118,7 +118,7 @@ More details: [Alpha testing](poc-native/docs/community/ALPHA_TESTING.md).
 How do the controls, the look and the sound feel? What did you enjoy, what
 feels off? Fill in the 2-minute
 [feedback form](../../discussions/new?category=general), vote in
-[polls](../../discussions/categories/polls) or show your setup in
+[polls](../../discussions/categories/polls) or share ideas in
 [Discussions](../../discussions).
 
 ## Known issues

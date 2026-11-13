@@ -224,7 +224,7 @@ gui.gfx_winmode=Anzeigemodus
 gui.ip_120=120 (flüssig)
 gui.ip_30=30 (Original)
 gui.ip_60=60
-gui.keys_memo=MENÜS\r\nPfeile\tAuswahl\r\nSPACE\tbestätigen\r\nENTER\tSTART / weiter\r\nL\tBriefing-Film überspringen\r\n\r\nMECH STARTEN (je Schritt kurz warten)\r\nH\t1. Cockpit-Luke schließen\r\nI\t2. Zündung (OS bootet)\r\n1 2 3 4 5\t3. Kippschalter (bei Status Check)\r\nENTER\t4. START (alle Balken über Linie)\r\n\r\nKAMPF (nach START)\r\nMaus links\tHauptwaffe (Primärfeuer)\r\nSPACE\tHauptwaffe (Primärfeuer)\r\nMaus rechts / F\tSub-Waffe\r\nMaus Mitte / L\tLock-On (nur Gegner-VTs)\r\nMaus\tZielen (Modus + Empf. oben)\r\nPfeile\tZielen (Aiming + Sight)\r\nShift+Pfeile\tnur Sicht (Sight)\r\nR\tMagazinwechsel\r\nC / O\tChaff / Override\r\nN / V\tNachtsicht / FSS\r\nZ / X\tZoom rein / raus\r\nTAB / M\tMode / Karten-Zoom\r\n\r\nFAHREN\r\nW / S\tGas / Bremse\r\nA / D\tDrehen links / rechts\r\nStrg links / Maus X1/X2\tSlide-Step (Ausweichen, mit A/D)\r\nQ / E\tGang runter / hoch\r\n\t(aus N: E = 1. Gang)\r\nT / G\tTuner hoch / runter\r\n\r\nF10\tMaus freigeben / fangen\r\n\r\nEingaben wirken nur, wenn das Spielfenster den Fokus hat. EJECT hat keine Taste (nur Profil oder Original-Controller).
+gui.keys_memo=MENÜS\r\nPfeile\tAuswahl\r\nSPACE\tbestätigen\r\nENTER\tSTART / weiter\r\nL\tBriefing-Film überspringen\r\nF11\tFeedback mit Screenshot\r\nF9\tFeedback mit Video (5 s)\r\n\r\nMECH STARTEN (je Schritt kurz warten)\r\nH\t1. Cockpit-Luke schließen\r\nI\t2. Zündung (OS bootet)\r\n1 2 3 4 5\t3. Kippschalter (bei Status Check)\r\nENTER\t4. START (alle Balken über Linie)\r\n\r\nKAMPF (nach START)\r\nMaus links\tHauptwaffe (Primärfeuer)\r\nSPACE\tHauptwaffe (Primärfeuer)\r\nMaus rechts / F\tSub-Waffe\r\nMaus Mitte / L\tLock-On (nur Gegner-VTs)\r\nMaus\tZielen (Modus + Empf. oben)\r\nPfeile\tZielen (Aiming + Sight)\r\nShift+Pfeile\tnur Sicht (Sight)\r\nR\tMagazinwechsel\r\nC / O\tChaff / Override\r\nN / V\tNachtsicht / FSS\r\nZ / X\tZoom rein / raus\r\nTAB / M\tMode / Karten-Zoom\r\n\r\nFAHREN\r\nW / S\tGas / Bremse\r\nA / D\tDrehen links / rechts\r\nStrg links / Maus X1/X2\tSlide-Step (Ausweichen, mit A/D)\r\nQ / E\tGang runter / hoch\r\n\t(aus N: E = 1. Gang)\r\nT / G\tTuner hoch / runter\r\n\r\nF10\tMaus freigeben / fangen\r\n\r\nEingaben wirken nur, wenn das Spielfenster den Fokus hat. EJECT hat keine Taste (nur Profil oder Original-Controller).
 gui.lang_de=Deutsch
 gui.lang_en=Englisch
 gui.lang_label=Sprache
@@ -1128,3 +1128,6 @@ ovl.clip_jpg=Clip: JPG-Folge (%.2f MB), kein MP4
 ovl.clip_none=Clip: keiner
 ovl.clip_fail=Clip fehlgeschlagen; erneut versuchen
 ovl.clip_finishing=Speichern...
+
+bind.feedback_shot=Feedback mit Screenshot
+bind.feedback_clip=Feedback mit Video (5 s)

@@ -3363,6 +3363,8 @@ static const char ks_legacy_text[] =
     "vr_recenter = KEY:F8\n"
     "[client]\n"
     "pause = KEY:PAUSE\n"
+    "feedback_shot = KEY:F11\n"
+    "feedback_clip = KEY:F9\n"
     "photo = KEY:F12\n";
 
 /* Formen der Zeichnung. KS_LEDR/G/B = Taste mit roter/gruener/blauer
@@ -4662,6 +4664,18 @@ static void keyshtml_build(const char *memo, const char *profile,
     char e[4096];
     int i, has_prof = profile && profile[0];
     keyshtml_parse(memo);
+    { /* W211: memo rows use actual profile bindings, including disabled keys. */
+        lctrl_bind_t bindings;
+        lctrl_bind_init(&bindings);
+        lctrl_bind_load_text(has_prof ? (prof_text ? prof_text : "") : ks_legacy_text, &bindings);
+        for (i = 0; i < kh_n; ++i) {
+            const char *action = !strcmp(kh_rows[i].act, LT("bind.feedback_shot")) ? "feedback_shot" :
+                                 !strcmp(kh_rows[i].act, LT("bind.feedback_clip")) ? "feedback_clip" : NULL;
+            if (action) {
+                lctrl_bind_row_text(&bindings, lctrl_bind_elem_index(action), kh_rows[i].key, sizeof kh_rows[i].key);
+            }
+        }
+    }
     keyshtml_add(out, cap, &o, "<!DOCTYPE html>\n<html lang=\"");
     keyshtml_add(out, cap, &o, sb_lang_code());
     keyshtml_add(out, cap, &o, "\">\n<head>\n<meta charset=\"utf-8\">\n"
@@ -13877,6 +13891,32 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                 !strstr(html, "&amp;")) {
                 ok53 = 0;
                 strcpy_s(why53, sizeof why53, "Standard-Variante falsch");
+            }
+        }
+        if (ok53) { /* W211: default keys, remapping, disabled action and collisions. */
+            lctrl_bind_t bindings;
+            char conflicts[128][160];
+            int n, k;
+            if (!strstr(html, LT("bind.feedback_shot")) || !strstr(html, "KEY:F11") ||
+                !strstr(html, LT("bind.feedback_clip")) || !strstr(html, "KEY:F9")) {
+                ok53 = 0;
+                strcpy_s(why53, sizeof why53, "Feedback defaults missing");
+            }
+            lctrl_bind_init(&bindings);
+            lctrl_bind_load_text(ks_legacy_text, &bindings);
+            n = lctrl_bind_conflicts(&bindings, conflicts, 128);
+            for (k = 0; k < n && k < 128; ++k) {
+                if (strstr(conflicts[k], "feedback_")) {
+                    ok53 = 0;
+                    strcpy_s(why53, sizeof why53, "Feedback default collision");
+                }
+            }
+            keyshtml_build(LT("gui.keys_memo"), "feedback_test", "feedback_shot = KEY:F7\n", NULL,
+                           "", 4, "", "", "", html, sizeof html);
+            if (!strstr(html, "KEY:F7") || strstr(html, "KEY:F11") || strstr(html, "KEY:F9") ||
+                !strstr(html, LT("bind.feedback_shot")) || !strstr(html, LT("bind.feedback_clip"))) {
+                ok53 = 0;
+                strcpy_s(why53, sizeof why53, "Feedback export ignores profile");
             }
         }
         if (ok53) {

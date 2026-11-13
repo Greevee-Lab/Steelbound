@@ -1784,6 +1784,120 @@ static void run_photo_cases(const imap_profile_t *kb, const imap_profile_t *xbox
     CHECK(imap_key_name("F12") == VK_F12, "photo: Tastenname F12");
 }
 
+static void run_feedback_shot_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
+{
+    imap_profile_t p;
+    imap_state_t st;
+    imap_snap_t s;
+    cfgvar_t c = { 1, 0, 0, 0, 4, 0, 0 };
+    unsigned fr = 320000, pm = 0;
+    int vks[4], n;
+    printf("Teil 15: W211 Aktion feedback_shot\n");
+    CHECK(kb->feedback_shot.n == 1 && kb->feedback_shot.alt[0].a.kind == IMAP_A_KEY && kb->feedback_shot.alt[0].a.code == VK_F11,
+          "feedback_shot: kb KEY:F11");
+    CHECK(xbox->feedback_shot.n == 1 && xbox->feedback_shot.alt[0].a.code == VK_F11, "feedback_shot: xbox KEY:F11");
+    n = imap_bind_keys(&kb->feedback_shot, vks, 4, &pm);
+    CHECK(n == 1 && vks[0] == VK_F11 && pm == 0, "feedback_shot: bind_keys kb (n=%d)", n);
+    CHECK(imap_profile_parse("feedback_shot = KEY:F7, PAD:BACK+PAD:LB, PAD:X\n", "t", &p) == 0, "feedback_shot: parse");
+    CHECK(p.feedback_shot.n == 3 && p.pause.n == 0, "feedback_shot: n=3 (ist %d), pause unberuehrt", p.feedback_shot.n);
+    n = imap_bind_keys(&p.feedback_shot, vks, 4, &pm);
+    CHECK(n == 1 && vks[0] == VK_F7 && pm == IMAP_PAD_X, "feedback_shot: bind_keys F7 + Pad-Maske X (n=%d pm=0x%X)", n, pm);
+    imap_state_init(&st);
+    make_snap(&s, fr++, &c);
+    set_keys(NULL, 0);
+    CHECK(imap_action_feedback_shot(&p, &st, &s) == 0, "feedback_shot: Ruhe -> 0");
+    make_snap(&s, fr++, &c);
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = IMAP_PAD_X;
+    s.pad_present = 1;
+    CHECK(imap_action_feedback_shot(&p, &st, &s) == 1, "feedback_shot: Pad X -> Flanke");
+    make_snap(&s, fr++, &c);
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = IMAP_PAD_X;
+    s.pad_present = 1;
+    CHECK(imap_action_feedback_shot(&p, &st, &s) == 0, "feedback_shot: Pad X halten -> 0");
+    s.pad.buttons = 0;
+    CHECK(imap_action_feedback_shot(&p, &st, &s) == 0, "feedback_shot: release");
+    s.pad.buttons = IMAP_PAD_BACK | IMAP_PAD_LB;
+    CHECK(imap_action_feedback_shot(&p, &st, &s) == 1, "feedback_shot: chord edge");
+    CHECK(imap_action_feedback_shot(&p, &st, &s) == 0, "feedback_shot: chord held");
+    p.feedback_shot.n = 0;
+    CHECK(imap_action_feedback_shot(&p, &st, &s) == 0 && st.prev_feedback_shot == 0,
+          "feedback_shot: disabled resets edge");
+    {
+        int kf[] = { VK_F11 };
+        imap_state_init(&st);
+        make_snap(&s, fr++, &c);
+        set_keys(kf, 1);
+        CHECK(imap_action_feedback_shot(kb, &st, &s) == 0, "feedback_shot: kb F11 im Hook -> 0 (Fenster)");
+        set_keys(NULL, 0);
+    }
+    {
+        imap_profile_t q;
+        CHECK(imap_profile_parse("feedback_shot = KEY:F11\n", "t", &p) == 0 &&
+              imap_profile_parse("feedback_shot = KEY:F7\n", "t", &q) == 0 && imap_profile_equal(&p, &q) != 0,
+              "feedback_shot: Vergleich erkennt Unterschied");
+    }
+    CHECK(imap_key_name("F11") == VK_F11, "feedback_shot: Tastenname F11");
+}
+
+static void run_feedback_clip_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
+{
+    imap_profile_t p;
+    imap_state_t st;
+    imap_snap_t s;
+    cfgvar_t c = { 1, 0, 0, 0, 4, 0, 0 };
+    unsigned fr = 320000, pm = 0;
+    int vks[4], n;
+    printf("Teil 15: W211 Aktion feedback_clip\n");
+    CHECK(kb->feedback_clip.n == 1 && kb->feedback_clip.alt[0].a.kind == IMAP_A_KEY && kb->feedback_clip.alt[0].a.code == VK_F9,
+          "feedback_clip: kb KEY:F9");
+    CHECK(xbox->feedback_clip.n == 1 && xbox->feedback_clip.alt[0].a.code == VK_F9, "feedback_clip: xbox KEY:F9");
+    n = imap_bind_keys(&kb->feedback_clip, vks, 4, &pm);
+    CHECK(n == 1 && vks[0] == VK_F9 && pm == 0, "feedback_clip: bind_keys kb (n=%d)", n);
+    CHECK(imap_profile_parse("feedback_clip = KEY:F7, PAD:BACK+PAD:LB, PAD:X\n", "t", &p) == 0, "feedback_clip: parse");
+    CHECK(p.feedback_clip.n == 3 && p.pause.n == 0, "feedback_clip: n=3 (ist %d), pause unberuehrt", p.feedback_clip.n);
+    n = imap_bind_keys(&p.feedback_clip, vks, 4, &pm);
+    CHECK(n == 1 && vks[0] == VK_F7 && pm == IMAP_PAD_X, "feedback_clip: bind_keys F7 + Pad-Maske X (n=%d pm=0x%X)", n, pm);
+    imap_state_init(&st);
+    make_snap(&s, fr++, &c);
+    set_keys(NULL, 0);
+    CHECK(imap_action_feedback_clip(&p, &st, &s) == 0, "feedback_clip: Ruhe -> 0");
+    make_snap(&s, fr++, &c);
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = IMAP_PAD_X;
+    s.pad_present = 1;
+    CHECK(imap_action_feedback_clip(&p, &st, &s) == 1, "feedback_clip: Pad X -> Flanke");
+    make_snap(&s, fr++, &c);
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = IMAP_PAD_X;
+    s.pad_present = 1;
+    CHECK(imap_action_feedback_clip(&p, &st, &s) == 0, "feedback_clip: Pad X halten -> 0");
+    s.pad.buttons = 0;
+    CHECK(imap_action_feedback_clip(&p, &st, &s) == 0, "feedback_clip: release");
+    s.pad.buttons = IMAP_PAD_BACK | IMAP_PAD_LB;
+    CHECK(imap_action_feedback_clip(&p, &st, &s) == 1, "feedback_clip: chord edge");
+    CHECK(imap_action_feedback_clip(&p, &st, &s) == 0, "feedback_clip: chord held");
+    p.feedback_clip.n = 0;
+    CHECK(imap_action_feedback_clip(&p, &st, &s) == 0 && st.prev_feedback_clip == 0,
+          "feedback_clip: disabled resets edge");
+    {
+        int kf[] = { VK_F9 };
+        imap_state_init(&st);
+        make_snap(&s, fr++, &c);
+        set_keys(kf, 1);
+        CHECK(imap_action_feedback_clip(kb, &st, &s) == 0, "feedback_clip: kb F9 im Hook -> 0 (Fenster)");
+        set_keys(NULL, 0);
+    }
+    {
+        imap_profile_t q;
+        CHECK(imap_profile_parse("feedback_clip = KEY:F9\n", "t", &p) == 0 &&
+              imap_profile_parse("feedback_clip = KEY:F7\n", "t", &q) == 0 && imap_profile_equal(&p, &q) != 0,
+              "feedback_clip: Vergleich erkennt Unterschied");
+    }
+    CHECK(imap_key_name("F9") == VK_F9, "feedback_clip: Tastenname F9");
+}
+
 int main(int argc, char **argv)
 {
     imap_profile_t kb_file, kb_in, xbox_file, xbox_in;
@@ -1872,6 +1986,8 @@ int main(int argc, char **argv)
     CHECK(imap_key_name("XYZ") == -1 && imap_key_name("") == -1 && imap_key_name(NULL) == -1, "peek: unbekannt");
 
     run_photo_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 15: W195 */
+    run_feedback_shot_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in);
+    run_feedback_clip_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in);
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;

@@ -647,6 +647,10 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                     /* W195 PHOTO-MODE: Tasten der Aktion "photo" (Standard F12) */
                     pn = imap_bind_keys(&g_prof.photo, pvk, 4, &pm);
                     sb_ovl_set_photo_binding(pvk, pn, pm);
+                    pn = imap_bind_keys(&g_prof.feedback_shot, pvk, 4, &pm);
+                    sb_ovl_set_feedback_binding(0, pvk, pn);
+                    pn = imap_bind_keys(&g_prof.feedback_clip, pvk, 4, &pm);
+                    sb_ovl_set_feedback_binding(1, pvk, pn);
                 }
             }
             if (g_prof_load_rc >= 0 && g_prof.has_pad &&
@@ -705,6 +709,8 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                 if (g_cfg.overlay && imap_action_pause(&g_prof, &g_prof_st, &snap)) {
                     sb_ovl_request_pause("Belegung");
                 }
+                if (g_cfg.overlay && imap_action_feedback_shot(&g_prof, &g_prof_st, &snap)) { sb_ovl_request_feedback(0); }
+                if (g_cfg.overlay && imap_action_feedback_clip(&g_prof, &g_prof_st, &snap)) { sb_ovl_request_feedback(1); }
                 /* W195 PHOTO-MODE: Aktion "photo" aus Pad/Controller (Flanke) */
                 if (g_cfg.overlay && imap_action_photo(&g_prof, &g_prof_st, &snap)) {
                     sb_ovl_request_photo("Belegung");

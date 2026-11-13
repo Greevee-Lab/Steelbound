@@ -168,6 +168,10 @@ static unsigned g_ov_vframes;            /* Pausenbilder (Test-Hook-Takt laeuft 
 static wchar_t g_fb_text[161];
 static wchar_t g_fb_high; /* W192: noch nicht vollstaendiges UTF-16-Paar */
 static int g_fb_len, g_fb_kind, g_fb_have, g_fb_pending;
+/* W211: UI publishes a request; only the render thread owns the package. */
+static volatile LONG g_fb_hot_request;
+static volatile LONG g_fb_vk[2][4] = {{ VK_F11, 0, 0, 0 }, { VK_F9, 0, 0, 0 }};
+static int g_fb_hot, g_fb_capture, g_fb_clip_prompt;
 static sb_fb_pkg_t g_fb_pkg;
 /* Trefferflaechen (Backbuffer-Pixel, Render-Thread schreibt beim Zeichnen) */
 static int g_hit_x0, g_hit_y0, g_hit_w, g_hit_h, g_hit_rows_y, g_hit_rowh, g_hit_nrows, g_hit_valx;
@@ -1217,19 +1221,25 @@ static int ov_scr_rows(void)
 }
 
 /* W188: Feedback-Paket anlegen (Render-Thread in der Pause: Spielbild liegt als Kopie vor) */
-static void ov_fb_create(void)
+static void ov_fb_shot(void)
 {
     char shot[700];
-    g_fb_pending = 0;
-    g_fb_text[g_fb_len] = 0;
-    if (!sb_feedback_begin(&g_fb_pkg, g_fb_kind)) {
-        ov_status_key("ovl.st_fb_fail");
-        return;
-    }
     _snprintf_s(shot, sizeof shot, _TRUNCATE, "%s\\screenshot.jpg", g_fb_pkg.dir);
     sb_ctx_enter();
     g_fb_pkg.shot_ok = sb_render_pause_jpg(shot, &g_fb_pkg.shot_w, &g_fb_pkg.shot_h);
     sb_ctx_leave();
+}
+
+static void ov_fb_create(void)
+{
+    g_fb_pending = 0;
+    g_fb_text[g_fb_len] = 0;
+    if (!g_fb_hot && !sb_feedback_begin(&g_fb_pkg, g_fb_kind)) {
+        ov_status_key("ovl.st_fb_fail");
+        return;
+    }
+    if (!g_fb_hot) { ov_fb_shot(); }
+    g_fb_pkg.kind = g_fb_kind;
     if (!sb_feedback_finish(&g_fb_pkg, g_fb_text)) {
         ov_status_key("ovl.st_fb_fail");
         return;
@@ -1265,7 +1275,7 @@ static void ov_activate(int k)
                 ov_screen(SC_PHOTO, 0);
             }
             break;
-        case MI_FEEDBACK: ov_screen(SC_FBKIND, 0); break;
+        case MI_FEEDBACK: g_fb_hot = 0; ov_screen(SC_FBKIND, 0); break;
         case MI_QUIT: ov_screen(SC_QUIT, 0); break;
         default: break;
         }
@@ -1733,6 +1743,24 @@ void sb_ovl_set_photo_binding(const int *vks, int n, unsigned padmask)
            padmask);
 }
 
+/* W211: no fallback after loading a profile: empty bindings stay disabled. */
+void sb_ovl_set_feedback_binding(int clip, const int *vks, int n)
+{
+    int i;
+    for (i = 0; i < 4; ++i) { InterlockedExchange(&g_fb_vk[clip != 0][i], i < n ? vks[i] : 0); }
+}
+
+void sb_ovl_request_feedback(int clip)
+{
+    if (!g_cfg.overlay || g_ov_open || sb_clip_active()) { return; }
+    if (InterlockedCompareExchange(&g_fb_hot_request, clip ? 2 : 1, 0)) { return; }
+    if (!clip) {
+        InterlockedExchange(&g_ov_req, SC_FBKIND);
+        InterlockedExchange(&g_ov_open, 1);
+        sb_pause_request(1, "Feedback hotkey");
+    }
+}
+
 /* W195: Foto-Aktion vom Spiel-Thread (Pad/Controller-Bindung, Flanke) */
 void sb_ovl_request_photo(const char *why)
 {
@@ -1835,6 +1863,18 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
                 else { ov_qpush(VK_ESCAPE); } /* zurueck/zu entscheidet der Render-Thread je Bildschirm */
             }
             return 1;
+        }
+        if (!g_ov_textmode) {
+            int c, i;
+            for (c = 0; c < 2; ++c) for (i = 0; i < 4; ++i) {
+                if (g_fb_vk[c][i] && wp == (WPARAM)g_fb_vk[c][i]) {
+                    if (!(lp & 0x40000000)) {
+                        sb_ovl_request_feedback(c);
+                        if (g_ov_open) { imouse_release_keys(); imouse_menu_capture(1); }
+                    }
+                    return 1;
+                }
+            }
         }
         if (!g_ov_textmode && wp != VK_F10 && ov_is_pause_vk((int)wp)) { /* W188: Pause-Taste */
             if (!(lp & 0x40000000)) {
@@ -2026,6 +2066,8 @@ static void ov_test_parse(void)
         else if (_stricmp(act, "STATE") == 0) { s->act = OA_STATE; }
         else if (_stricmp(act, "PEEKDN") == 0) { s->act = OA_PEEK; s->vk = 1; } /* W193 */
         else if (_stricmp(act, "PEEKUP") == 0) { s->act = OA_PEEK; s->vk = 0; }
+        else if (_stricmp(act, "F11") == 0) { s->vk = VK_F11; }
+        else if (_stricmp(act, "F9") == 0) { s->vk = VK_F9; }
         else if (_stricmp(act, "PHOTO") == 0) { s->act = OA_PHOTO; } /* W195 */
         else if (_strnicmp(act, "KDN=", 4) == 0 && act[4]) { s->act = OA_KDN; s->vk = toupper((unsigned char)act[4]); }
         else if (_strnicmp(act, "KUP=", 4) == 0 && act[4]) { s->act = OA_KUP; s->vk = toupper((unsigned char)act[4]); }
@@ -2310,6 +2352,39 @@ static void ov_frame(unsigned n)
 {
     int open;
     ov_test_tick(n);
+    {
+        LONG request = InterlockedExchange(&g_fb_hot_request, 0);
+        if (request) {
+            g_fb_hot = 1;
+            g_fb_capture = g_fb_clip_prompt = 0;
+            g_fb_kind = g_fb_len = g_fb_high = g_fb_have = 0;
+            g_fb_text[0] = 0;
+            if (sb_feedback_begin(&g_fb_pkg, 0)) {
+                g_fb_have = 1;
+                g_fb_capture = request == 1;
+                g_fb_clip_prompt = request == 2;
+                if (request == 2) {
+                    int started;
+                    sb_ctx_enter();
+                    started = sb_clip_start(g_fb_pkg.dir);
+                    sb_ctx_leave();
+                    if (!started) {
+                        g_fb_clip_prompt = 0;
+                        g_fb_pkg.clip = -1;
+                        InterlockedExchange(&g_ov_req, SC_FBKIND);
+                        InterlockedExchange(&g_ov_open, 1);
+                        ov_status_key("ovl.clip_fail");
+                    }
+                }
+                HLOG_I("FEEDBACK hotkey: %s", request == 1 ? "screenshot" : "clip");
+            } else {
+                g_fb_hot = 0;
+                InterlockedExchange(&g_ov_req, SC_FBKIND);
+                InterlockedExchange(&g_ov_open, 1);
+                ov_status_key("ovl.st_fb_fail");
+            }
+        }
+    }
     if (sb_clip_active()) {
         int result;
         sb_ctx_enter();
@@ -2318,9 +2393,10 @@ static void ov_frame(unsigned n)
         if (result) {
             g_fb_pkg.clip = result;
             sb_feedback_finish(&g_fb_pkg, g_fb_text);
-            InterlockedExchange(&g_ov_req, SC_FBREVIEW);
+            InterlockedExchange(&g_ov_req, g_fb_clip_prompt ? SC_FBKIND : SC_FBREVIEW);
             InterlockedExchange(&g_ov_open, 1);
             g_ov_was_open = 0;
+            g_fb_clip_prompt = 0;
             HLOG_I("CLIP: return feedback result=%d", result);
         } else if (g_ov_open) { ov_close("Clip laeuft"); }
     }
@@ -2343,7 +2419,7 @@ static void ov_frame(unsigned n)
             ov_log_shader("zu");
             ov_log_shader2("zu");
             ov_log_fx("zu");
-            g_fb_pending = 0;
+            g_fb_pending = g_fb_capture = 0;
             InterlockedExchange(&g_ov_textmode, 0);
             if (h) { PostMessageA(h, OV_MSG_CLOSED, 0, 0); } /* W188: Maus wieder fangen (UI-Thread) */
         }
@@ -2359,6 +2435,14 @@ static void ov_frame(unsigned n)
         if (mg != g_ov_mgen_seen) { /* W188: Zeiger waehlt die Zeile darunter */
             g_ov_mgen_seen = mg;
             ov_mouse((int)g_ov_mx, (int)g_ov_my, 0);
+        }
+        if (g_fb_capture && g_sb_paused) {
+            g_fb_capture = 0;
+            ov_fb_shot();
+            g_ov_dirty = 1;
+            sb_feedback_finish(&g_fb_pkg, g_fb_text);
+            HLOG_I("FEEDBACK hotkey: screenshot ready=%d paused=%d size=%ux%u",
+                   g_fb_pkg.shot_ok, g_sb_paused, g_fb_pkg.shot_w, g_fb_pkg.shot_h);
         }
         if (g_fb_pending && g_sb_paused) { ov_fb_create(); }
         if (g_ov_scr == SC_PHOTO) { ov_ph_tick(); } /* W195 */
@@ -2905,6 +2989,17 @@ static void ov_paint_menu(void)
     case SC_FBKIND:
         ov_wkey(ln[0], 128, "ovl.fb_kind_q");
         ov_wkey(ln[1], 128, "ovl.fb_nosend");
+        if (g_fb_hot && g_fb_have) {
+            if (g_fb_pkg.clip > 0) {
+                char nb[160];
+                _snprintf_s(nb, sizeof nb, _TRUNCATE, LT(g_fb_pkg.clip == 1 ? "ovl.clip_attached" : "ovl.clip_jpg"),
+                            (double)g_fb_pkg.clip_bytes / 1000000.0);
+                ov_wu8(ln[1], 128, nb);
+            } else {
+                ov_wkey(ln[1], 128, g_fb_pkg.clip < 0 ? "ovl.clip_fail" :
+                        g_fb_pkg.shot_ok ? "ovl.fb_c_shot" : "ovl.fb_c_noshot");
+            }
+        }
         lc[1] = OV_C_DIM;
         ov_wkey(hint, 96, "ovl.hint_back");
         break;

@@ -64,6 +64,10 @@ void sb_ovl_request_pause(const char *why);
  * Pad/Controller (Spiel-Thread): oeffnet den Fotomodus (bei offenem Menue: dorthin wechseln/Foto). */
 void sb_ovl_set_photo_binding(const int *vks, int n, unsigned padmask);
 void sb_ovl_request_photo(const char *why);
+/* W211: attachment hotkeys; empty profile bindings disable the action.
+ * Requests are ignored while any menu or clip is active. clip: 0 shot, 1 video. */
+void sb_ovl_set_feedback_binding(int clip, const int *vks, int n);
+void sb_ovl_request_feedback(int clip);
 
 /* ---- W122: kleine gemeinsame API (Look + Zeichenweg), genutzt vom
  * Leistungs-Overlay sb_perfhud.c. Farben (GDI COLORREF) und Deckung des

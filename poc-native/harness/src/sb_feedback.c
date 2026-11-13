@@ -226,8 +226,18 @@ int sb_feedback_begin(sb_fb_pkg_t *p, int kind)
         const char *o = hcfg_out_dir();
         strcpy_s(root, sizeof root, o && o[0] ? o : ".");
     }
-    _snprintf_s(p->dir, sizeof p->dir, _TRUNCATE, "%s\\feedback\\%s", root, p->stamp);
-    fb_mkdirs(p->dir);
+    /* W211: rapid hotkey sessions must never overwrite an earlier package. */
+    {
+        unsigned suffix = 0;
+        char base[600];
+        _snprintf_s(base, sizeof base, _TRUNCATE, "%s\\feedback", root);
+        fb_mkdirs(base);
+        do {
+            _snprintf_s(p->dir, sizeof p->dir, _TRUNCATE, "%s\\%s-%03u", base, p->stamp, suffix++);
+            if (CreateDirectoryA(p->dir, NULL)) { break; }
+            if (GetLastError() != ERROR_ALREADY_EXISTS || suffix == 1000) { return 0; }
+        } while (1);
+    }
     a = GetFileAttributesA(p->dir);
     strcpy_s(p->dir_show, sizeof p->dir_show, p->dir);
     sb_feedback_sanitize(p->dir_show, sizeof p->dir_show);

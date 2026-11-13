@@ -136,6 +136,8 @@ typedef struct {
                          * von der Maus (Hook darf vorsteuern) */
     int prev_vr_recenter; /* W159: Pegel der Aktion vr_recenter im Vor-Poll */
     int prev_pause;       /* W188: Pegel der Aktion pause (ohne Tasten) im Vor-Poll */
+    int prev_feedback_shot;
+    int prev_feedback_clip;
     int prev_photo;       /* W195: Pegel der Aktion photo (ohne Tasten) im Vor-Poll */
 } imap_state_t;
 
@@ -225,6 +227,9 @@ typedef struct {
     /* W195 PHOTO-MODE: Client-Aktion "photo" (Fotomodus oeffnen / Foto aufnehmen,
      * Abschnitt [client], Standard KEY:F12); Tasten wertet das Fenster aus. */
     imap_bind_t photo;
+    /* W211: feedback attachments, default F11 (shot) / F9 (5-second clip). */
+    imap_bind_t feedback_shot;
+    imap_bind_t feedback_clip;
     int has_pad; /* 1 = Profil referenziert Pad-Quellen */
     int has_sbc; /* 1 = Profil referenziert SBC-Quellen */
 } imap_profile_t;
@@ -262,7 +267,10 @@ int imap_action_pause(const imap_profile_t *prof, imap_state_t *st,
 /* W188: einfache Tasten (KEY ohne Akkord) und Pad-Tasten (PAD-Taste/
  * Steuerkreuz ohne Akkord) einer Bindung. Rueckgabe: Anzahl Tasten. */
 int imap_bind_keys(const imap_bind_t *b, int *vks, int cap, unsigned *padmask);
-/* W195: Client-Aktion "photo" - steigende Flanke der Pad-/Controller-Quellen (wie pause). */
+/* W211: feedback actions, non-keyboard rising edges (keyboard in overlay). */
+int imap_action_feedback_shot(const imap_profile_t *prof, imap_state_t *st, const imap_snap_t *snap);
+int imap_action_feedback_clip(const imap_profile_t *prof, imap_state_t *st, const imap_snap_t *snap);
+/* W195: photo, non-keyboard rising edge (like pause). */
 int imap_action_photo(const imap_profile_t *prof, imap_state_t *st,
                       const imap_snap_t *snap);
 /* W193: Tastenname (wie im Profil, z. B. "H", "F9", "0x48") -> VK, -1 = unbekannt */

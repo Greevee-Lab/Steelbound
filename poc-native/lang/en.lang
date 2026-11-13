@@ -224,7 +224,7 @@ gui.gfx_winmode=Display mode
 gui.ip_120=120 (smooth)
 gui.ip_30=30 (original)
 gui.ip_60=60
-gui.keys_memo=MENUS\r\nArrows\tSelect\r\nSPACE\tConfirm\r\nENTER\tSTART / continue\r\nL\tSkip briefing movie\r\n\r\nSTART THE MECH (wait briefly each step)\r\nH\t1. Close cockpit hatch\r\nI\t2. Ignition (OS boots)\r\n1 2 3 4 5\t3. Toggle switches (at status check)\r\nENTER\t4. START (all bars above the line)\r\n\r\nCOMBAT (after START)\r\nMouse left\tMain weapon (primary fire)\r\nSPACE\tMain weapon (primary fire)\r\nMouse right / F\tSub-weapon\r\nMouse middle / L\tLock-on (enemy VTs only)\r\nMouse\tAim (mode + sens. above)\r\nArrows\tAim (aiming + sight)\r\nShift+Arrows\tsight only\r\nR\tReload magazine\r\nC / O\tChaff / Override\r\nN / V\tNight vision / FSS\r\nZ / X\tZoom in / out\r\nTAB / M\tMode / map zoom\r\n\r\nDRIVING\r\nW / S\tThrottle / brake\r\nA / D\tTurn left / right\r\nLeft Ctrl / mouse X1/X2\tSlide-step (dodge, with A/D)\r\nQ / E\tGear down / up\r\n\t(from N: E = 1st gear)\r\nT / G\tTuner up / down\r\n\r\nF10\tFree / capture mouse\r\n\r\nInput only works while the game window has focus. EJECT has no key (profile or original controller only).
+gui.keys_memo=MENUS\r\nArrows\tSelect\r\nSPACE\tConfirm\r\nENTER\tSTART / continue\r\nL\tSkip briefing movie\r\nF11\tFeedback with screenshot\r\nF9\tFeedback with video (5 s)\r\n\r\nSTART THE MECH (wait briefly each step)\r\nH\t1. Close cockpit hatch\r\nI\t2. Ignition (OS boots)\r\n1 2 3 4 5\t3. Toggle switches (at status check)\r\nENTER\t4. START (all bars above the line)\r\n\r\nCOMBAT (after START)\r\nMouse left\tMain weapon (primary fire)\r\nSPACE\tMain weapon (primary fire)\r\nMouse right / F\tSub-weapon\r\nMouse middle / L\tLock-on (enemy VTs only)\r\nMouse\tAim (mode + sens. above)\r\nArrows\tAim (aiming + sight)\r\nShift+Arrows\tsight only\r\nR\tReload magazine\r\nC / O\tChaff / Override\r\nN / V\tNight vision / FSS\r\nZ / X\tZoom in / out\r\nTAB / M\tMode / map zoom\r\n\r\nDRIVING\r\nW / S\tThrottle / brake\r\nA / D\tTurn left / right\r\nLeft Ctrl / mouse X1/X2\tSlide-step (dodge, with A/D)\r\nQ / E\tGear down / up\r\n\t(from N: E = 1st gear)\r\nT / G\tTuner up / down\r\n\r\nF10\tFree / capture mouse\r\n\r\nInput only works while the game window has focus. EJECT has no key (profile or original controller only).
 gui.lang_de=Deutsch
 gui.lang_en=English
 gui.lang_label=Language
@@ -1128,3 +1128,6 @@ ovl.clip_jpg=Clip: JPG sequence (%.2f MB); no MP4
 ovl.clip_none=Clip: none
 ovl.clip_fail=Clip failed; please try again
 ovl.clip_finishing=Saving...
+
+bind.feedback_shot=Feedback with screenshot
+bind.feedback_clip=Feedback with video (5 s)

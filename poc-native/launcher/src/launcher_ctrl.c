@@ -492,6 +492,8 @@ const lctrl_elem_t kCtrlElems[LCTRL_ELEM_N] = {
      * mit Spiel-Elementen meldet lctrl_bind_conflicts wie bei allen Zeilen. */
     { "pause", "-", "bind.pause", LCTRL_ACT },
     /* W195 PHOTO-MODE: Client-Aktion Fotomodus (Abschnitt [client], Standard F12). */
+    { "feedback_shot", "-", "bind.feedback_shot", LCTRL_ACT },
+    { "feedback_clip", "-", "bind.feedback_clip", LCTRL_ACT },
     { "photo", "-", "bind.photo", LCTRL_ACT },
 };
 

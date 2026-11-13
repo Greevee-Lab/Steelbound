@@ -128,7 +128,7 @@ static void cli_usage(void)
            "  --shot-out DIR          Ziel f" U8_UE "r --shot (Default: %%TEMP%%)\n"
            "  --write-user-profile R    Benutzerprofil user_R.ini schreiben\n"
            "                            (Basis --from B, --set-bind \"e=a;...\", --force)\n"
-           "  --bind-shot[=vr]        Test: Belegungs-Dialog sichern (BMP+PNG)\n"
+           "  --bind-shot[=AKTION]    Test: Belegungs-Dialog sichern (BMP+PNG)\n"
            "  --ui-shot SEITE|alle    Test: Seiten als PNG (play, display, graphics, packs,\n"
            "                          controls, audio, advanced; alte Namen start, grafik,\n"
            "                          remaster, ton, steuerung, profile, pfade gelten\n"
@@ -1629,6 +1629,112 @@ static int cli_selftest(const char *client_override)
         }
     }
 
+    {
+        lctrl_bind_t b1, b2;
+        char row[256], conf[4][160], err2[256], nm[32];
+        int ok = 1, n, ph, bi0;
+        const char *why = "";
+        ph = lctrl_bind_elem_index("feedback_shot");
+        bi0 = lctrl_bind_elem_index("bi0");
+        lctrl_key_name(VK_F11, nm, sizeof nm);
+        if (ph < 0 || bi0 < 0 || kCtrlElems[ph].kind != LCTRL_ACT || strcmp(nm, "F11") != 0) {
+            ok = 0; why = "Element/Tastenname";
+        } else {
+            lctrl_bind_init(&b1);
+            lctrl_bind_set(&b1, ph, "KEY:F11, PAD:BACK+PAD:LB");
+            lctrl_bind_row_text(&b1, ph, row, sizeof row);
+            u8_GetTempPath(tmp, sizeof tmp);
+            strcat_s(tmp, sizeof tmp, "w211_feedback_shot_bind_test.ini");
+            u8_DeleteFile(tmp);
+            if (lctrl_bind_save(tmp, &b1, "keyboard_default", err2, sizeof err2) != 0) {
+                ok = 0; why = "speichern";
+            } else {
+                memset(buf, 0, sizeof buf);
+                if (u8_fopen_s(&f, tmp, "r") == 0 && f) {
+                    (void)fread(buf, 1, sizeof buf - 1, f);
+                    fclose(f);
+                }
+                if (!strstr(buf, "[client]") || !strstr(buf, "feedback_shot = KEY:F11, PAD:BACK+PAD:LB")) {
+                    ok = 0; why = "Abschnitt [client]";
+                }
+                lctrl_bind_init(&b2);
+                if (lctrl_bind_load_file(tmp, &b2) != 0) {
+                    ok = 0; why = "laden";
+                } else {
+                    char row2[256];
+                    lctrl_bind_row_text(&b2, ph, row2, sizeof row2);
+                    if (strcmp(row, row2) != 0) { ok = 0; why = "laden != speichern"; }
+                }
+            }
+            u8_DeleteFile(tmp);
+            lctrl_bind_init(&b1);
+            lctrl_bind_set(&b1, bi0, "KEY:F11");
+            lctrl_bind_set(&b1, ph, "KEY:F11");
+            n = lctrl_bind_conflicts(&b1, conf, 4);
+            if (n < 1 || !strstr(conf[0], "KEY:F11") || !strstr(conf[0], "feedback_shot")) {
+                ok = 0; why = "Konflikt nicht gemeldet";
+            }
+        }
+        if (ok) {
+            T_OK("W211 feedback_shot-bind");
+        } else {
+            T_FAIL("W211 feedback_shot-bind", "%s", why);
+        }
+    }
+
+    {
+        lctrl_bind_t b1, b2;
+        char row[256], conf[4][160], err2[256], nm[32];
+        int ok = 1, n, ph, bi0;
+        const char *why = "";
+        ph = lctrl_bind_elem_index("feedback_clip");
+        bi0 = lctrl_bind_elem_index("bi0");
+        lctrl_key_name(VK_F9, nm, sizeof nm);
+        if (ph < 0 || bi0 < 0 || kCtrlElems[ph].kind != LCTRL_ACT || strcmp(nm, "F9") != 0) {
+            ok = 0; why = "Element/Tastenname";
+        } else {
+            lctrl_bind_init(&b1);
+            lctrl_bind_set(&b1, ph, "KEY:F9, PAD:BACK+PAD:LB");
+            lctrl_bind_row_text(&b1, ph, row, sizeof row);
+            u8_GetTempPath(tmp, sizeof tmp);
+            strcat_s(tmp, sizeof tmp, "w211_feedback_clip_bind_test.ini");
+            u8_DeleteFile(tmp);
+            if (lctrl_bind_save(tmp, &b1, "keyboard_default", err2, sizeof err2) != 0) {
+                ok = 0; why = "speichern";
+            } else {
+                memset(buf, 0, sizeof buf);
+                if (u8_fopen_s(&f, tmp, "r") == 0 && f) {
+                    (void)fread(buf, 1, sizeof buf - 1, f);
+                    fclose(f);
+                }
+                if (!strstr(buf, "[client]") || !strstr(buf, "feedback_clip = KEY:F9, PAD:BACK+PAD:LB")) {
+                    ok = 0; why = "Abschnitt [client]";
+                }
+                lctrl_bind_init(&b2);
+                if (lctrl_bind_load_file(tmp, &b2) != 0) {
+                    ok = 0; why = "laden";
+                } else {
+                    char row2[256];
+                    lctrl_bind_row_text(&b2, ph, row2, sizeof row2);
+                    if (strcmp(row, row2) != 0) { ok = 0; why = "laden != speichern"; }
+                }
+            }
+            u8_DeleteFile(tmp);
+            lctrl_bind_init(&b1);
+            lctrl_bind_set(&b1, bi0, "KEY:F9");
+            lctrl_bind_set(&b1, ph, "KEY:F9");
+            n = lctrl_bind_conflicts(&b1, conf, 4);
+            if (n < 1 || !strstr(conf[0], "KEY:F9") || !strstr(conf[0], "feedback_clip")) {
+                ok = 0; why = "Konflikt nicht gemeldet";
+            }
+        }
+        if (ok) {
+            T_OK("W211 feedback_clip-bind");
+        } else {
+            T_FAIL("W211 feedback_clip-bind", "%s", why);
+        }
+    }
+
     /* 54 (W183 VR-FIX3): VR-Leistungs-Preset <-> Werte (Spiegel der Client-
      * Tabelle kVrPreset), Standard "Ausgewogen", Speichern/Laden. */
     {
@@ -2383,6 +2489,8 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
         o.shot = 3;
         if (bv && strcmp(bv, "vr") == 0) { /* W159: VR-Gruppe in Sicht */
             o.bind_sel = lctrl_bind_elem_index("vr_recenter");
+        } else if (bv) {
+            o.bind_sel = lctrl_bind_elem_index(bv);
         }
         shot_dir(argc, argv, &o);
         rc = gui_main(client_override, &o);

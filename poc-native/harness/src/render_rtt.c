@@ -10,6 +10,23 @@
 
 rtt_entry_t g_rtt[RTT_MAX];
 int g_rtt_n;
+/* W204 DRAW-OPT: a missing bit proves that this address was never an RT.
+ * Keep old bits on release/reuse: collisions only cost a normal lookup.
+ * Insert on EVERY data assignment, even with the switch off (live toggles).
+ * Access is serialized by ctx_lock, like the RT table itself. */
+static unsigned rtt_data_bits[256];
+static unsigned rtt_data_hash(unsigned data)
+{
+    data ^= data >> 16;
+    data *= 0x7FEB352Du;
+    data ^= data >> 15;
+    return data & 8191u;
+}
+static void rtt_data_note(unsigned data)
+{
+    unsigned h = rtt_data_hash(data);
+    rtt_data_bits[h >> 5] |= 1u << (h & 31u);
+}
 static int g_rtt_cur = -1;
 int rtt_cur_slot(void) { return g_rtt_cur; } /* DIAG(SHADE-BLOOM,W112): Session-Ziel */
 int g_rtt_bound = -1;
@@ -1310,6 +1327,7 @@ void sb_rtt_on_set_target(unsigned surf, unsigned depth, unsigned caller)
             else { goto shadow_fail; }
             memset(&g_rtt[idx], 0, sizeof g_rtt[idx]);
             g_rtt[idx].surf = surf; g_rtt[idx].data = data;
+            rtt_data_note(data);
             g_rtt[idx].w = w; g_rtt[idx].h = h; g_rtt[idx].pw = w; g_rtt[idx].ph = h;
             g_rtt[idx].isdepth = 1;
             { /* z-Bereich der Xbox-Tiefenformate (NV2A: F16 max 511.9375, D16 65535, D24 2^24-1, F24 ~1e30):
@@ -1360,6 +1378,7 @@ shadow_fail:
         if (g_rtt_cur == idx) { g_rtt_cur = -1; }
         rtt_release_entry(idx);
         g_rtt[idx].surf = surf; g_rtt[idx].data = data;
+        rtt_data_note(data);
         g_rtt[idx].w = w; g_rtt[idx].h = h;
         { unsigned sc = rtt_scale_for(w, h, fmt); g_rtt[idx].pw = w * sc; g_rtt[idx].ph = h * sc; }
     }
@@ -1395,6 +1414,7 @@ shadow_fail:
             rtt_release_entry(idx);
         }
         g_rtt[idx].surf = surf; g_rtt[idx].data = data;
+        rtt_data_note(data);
         g_rtt[idx].w = w; g_rtt[idx].h = h;
         { unsigned sc = rtt_scale_for(w, h, fmt); g_rtt[idx].pw = w * sc; g_rtt[idx].ph = h * sc; }
         g_rtt[idx].tex = NULL; g_rtt[idx].rtv = NULL;
@@ -1657,6 +1677,27 @@ int sb_rtt_lookup(unsigned xptr, ID3D11ShaderResourceView **srv,
     __try { data = *(unsigned *)(uintptr_t)(xptr + 4); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
     if (!data) { return 0; }
+    if (g_cfg.rtt_lookup_filter) {
+        unsigned dh = rtt_data_hash(data);
+        if (!(rtt_data_bits[dh >> 5] & (1u << (dh & 31u)))) {
+            if (g_cfg.rtt_lookup_filter == 2) {
+                static unsigned checked, mismatch;
+                for (i = 0; i < g_rtt_n; i++) {
+                    if (g_rtt[i].surf && g_rtt[i].data == data && !g_rtt[i].isdepth) {
+                        mismatch++;
+                        break;
+                    }
+                }
+                checked++;
+                if (checked == 1 || checked % 100000u == 0 || i < g_rtt_n) {
+                    HLOG_I("DRAWOPT rtt_filter: checked=%u mismatch=%u", checked, mismatch);
+                }
+                if (i < g_rtt_n) { goto filter_fallback; }
+            }
+            return 0;
+        }
+    }
+filter_fallback:
     if (g_cfg.rtt_stale) {
         /* FIX(MAP-RETRY,W124): unter allen Daten-Treffern den zuletzt
          * gerenderten, nicht veralteten Eintrag mit passender Groesse waehlen

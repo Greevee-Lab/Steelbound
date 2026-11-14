@@ -1058,9 +1058,345 @@ int ls_selftest(void)
     free(read);
     p = ls_open(zip, dest2, &c, &err);
     CHECK(!p);
+    /* W248 REPSIG: Xbox replay (synthetic, real size 0xF61EC + 20-byte foreign
+     * signature) next to an own replay (signature 0). The import keeps both
+     * bit-identical like saves; the start check (sb_savecheck_run, save_check=1)
+     * then backs up the Xbox original and zeroes its signature only. */
+    {
+        wchar_t s3[PATHN], d3[PATHN], f[PATHN];
+        const unsigned rn = SB_REPLAY_DATA_SIZE + 20;
+        unsigned char *rx = calloc(1, rn), *ro = calloc(1, rn);
+        sb_savecheck_t r;
+        unsigned k;
+        CHECK(rx && ro);
+        for (k = 0; k < SB_REPLAY_DATA_SIZE; k++)
+        {
+            rx[k] = (unsigned char)(k * 7 + 1);
+            ro[k] = (unsigned char)(k * 5 + 3);
+        }
+        memset(rx + SB_REPLAY_DATA_SIZE, 0x5c, 20);
+        join(s3, root, L"xbox_rep");
+        join(d3, root, L"hdd_rep");
+        join(f, s3, L"UDATA\\43430002\\0A0B0C0D0E01\\st00_0.rep");
+        CHECK(writebytes(f, rx, rn));
+        join(f, s3, L"UDATA\\43430002\\0A0B0C0D0E01\\SaveMeta.xbx");
+        CHECK(writebytes(f, "meta", 4));
+        join(f, s3, L"UDATA\\43430002\\0A0B0C0D0E02\\st00_0.rep");
+        CHECK(writebytes(f, ro, rn));
+        p = ls_open(s3, d3, &c, &err);
+        CHECK(p && c.replays == 2 && c.files == 3);
+        CHECK(ls_import(p, 1, &err) == 1);
+        ls_close(p);
+        p = NULL;
+        join(f, d3, L"UDATA\\43430002\\0A0B0C0D0E01\\st00_0.rep");
+        read = readbytes(f, &n);
+        CHECK(read && n == rn && !memcmp(read, rx, rn)); /* import: signature preserved */
+        free(read);
+        CHECK(sb_savecheck_run(d3, 1, &r, NULL, NULL) == 1 && r.replays == 2 && r.repaired == 1 &&
+              r.failed == 0 && r.backup[0]);
+        read = readbytes(f, &n);
+        CHECK(read && n == rn && !memcmp(read, rx, SB_REPLAY_DATA_SIZE) && read[SB_REPLAY_DATA_SIZE] == 0 &&
+              read[rn - 1] == 0);
+        free(read);
+        join(f, d3, L"UDATA\\43430002\\0A0B0C0D0E02\\st00_0.rep");
+        read = readbytes(f, &n);
+        CHECK(read && n == rn && !memcmp(read, ro, rn)); /* own replay bit-identical */
+        free(read);
+        join(f, r.backup, L"UDATA\\43430002\\0A0B0C0D0E01\\st00_0.rep");
+        read = readbytes(f, &n);
+        CHECK(read && n == rn && !memcmp(read, rx, rn)); /* Xbox original in _backup/repair-* */
+        free(read);
+        CHECK(sb_savecheck_run(d3, 1, &r, NULL, NULL) == 0 && r.replays == 2);
+        free(rx);
+        free(ro);
+    }
 done:
     ls_close(p);
     remove_tree(root);
     return ok ? 0 : 1;
 #undef CHECK
+}
+
+/* ---- W254 REPLAY-LAUNCHER: gespeicherte Replays auflisten (experimentell) ----
+ * <hdd>\UDATA\43430002\<id>\st00_0.rep, id = 1..32 Hex-Zeichen (wie der Client
+ * fuer replay_autoplay prueft). Name aus SaveMeta.xbx (UTF-16 "Name=..."),
+ * Mission aus "MISnn" (nn + 1), Zeit = Aenderungszeit der .rep-Datei. */
+static int rp_hex_id(const wchar_t *s)
+{
+    size_t n = 0;
+    for (; s[n]; n++)
+    {
+        wchar_t c = s[n];
+        if (n >= 32 || !((c >= L'0' && c <= L'9') || (c >= L'A' && c <= L'F') || (c >= L'a' && c <= L'f')))
+            return 0;
+    }
+    return n >= 1;
+}
+static void rp_meta(const wchar_t *dir, ls_replay *r)
+{
+    static const unsigned char key[10] = {'N', 0, 'a', 0, 'm', 0, 'e', 0, '=', 0};
+    wchar_t f[PATHN];
+    unsigned n = 0, i, k = 0;
+    unsigned char *d;
+    join(f, dir, L"SaveMeta.xbx");
+    d = readbytes(f, &n);
+    if (!d)
+        return;
+    for (i = (n >= 2 && d[0] == 0xFF && d[1] == 0xFE) ? 2u : 0u; i + 1 < n && i < 4096; i += 2)
+    {
+        /* Zeile "Name=<Text>" (UTF-16LE), nur druckbares ASCII uebernehmen */
+        if (i + 10 <= n && !memcmp(d + i, key, 10))
+        {
+            for (i += 10; i + 1 < n && k + 1 < sizeof r->name; i += 2)
+            {
+                unsigned c = d[i] | (d[i + 1] << 8);
+                if (c == '\r' || c == '\n' || c == 0)
+                    break;
+                r->name[k++] = (char)(c >= 32 && c < 127 ? c : '?');
+            }
+            break;
+        }
+    }
+    r->name[k] = 0;
+    free(d);
+    if (!strncmp(r->name, "MIS", 3) && r->name[3] >= '0' && r->name[3] <= '9' && r->name[4] >= '0' &&
+        r->name[4] <= '9')
+        r->mission = (r->name[3] - '0') * 10 + (r->name[4] - '0') + 1;
+}
+static int rp_newer(const ls_replay *a, const ls_replay *b)
+{
+    LONG c = CompareFileTime(&a->time, &b->time);
+    return c > 0 || (c == 0 && wcscmp(a->id, b->id) < 0);
+}
+int ls_replays(const wchar_t *hdd, ls_replay *out, int cap)
+{
+    wchar_t base[PATHN], pat[PATHN], dir[PATHN], rep[PATHN];
+    WIN32_FIND_DATAW fd;
+    HANDLE h;
+    int n = 0, i, j;
+    if (!hdd || !*hdd || !out || cap <= 0)
+        return 0;
+    join(base, hdd, L"UDATA\\43430002");
+    join(pat, base, L"*");
+    h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE)
+        return 0;
+    do
+    {
+        WIN32_FILE_ATTRIBUTE_DATA ad;
+        ls_replay *r;
+        if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+            !rp_hex_id(fd.cFileName) || n >= cap)
+            continue;
+        join(dir, base, fd.cFileName);
+        join(rep, dir, L"st00_0.rep");
+        if (!GetFileAttributesExW(rep, GetFileExInfoStandard, &ad) || (ad.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
+            continue;
+        r = &out[n];
+        memset(r, 0, sizeof *r);
+        wcscpy_s(r->id, 33, fd.cFileName);
+        r->time = ad.ftLastWriteTime;
+        r->size = ad.nFileSizeHigh ? 0xFFFFFFFFu : ad.nFileSizeLow;
+        r->state = 2;
+        if (r->size == SB_REPLAY_DATA_SIZE + 20u)
+        {
+            HANDLE fh = CreateFileW(rep, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+                                    FILE_ATTRIBUTE_NORMAL, NULL);
+            r->state = 0;
+            if (fh != INVALID_HANDLE_VALUE)
+            {
+                unsigned char tail[20];
+                DWORD got = 0;
+                LARGE_INTEGER o;
+                o.QuadPart = SB_REPLAY_DATA_SIZE;
+                if (SetFilePointerEx(fh, o, NULL, FILE_BEGIN) && ReadFile(fh, tail, 20, &got, NULL) && got == 20)
+                {
+                    for (j = 0; j < 20; j++)
+                        if (tail[j])
+                            r->state = 1; /* fremde (Xbox-)Signatur: der Client repariert beim Start */
+                }
+                CloseHandle(fh);
+            }
+        }
+        rp_meta(dir, r);
+        n++;
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+    for (i = 1; i < n; i++) /* neueste zuerst (wenige Eintraege: Einfuegesortierung) */
+    {
+        ls_replay t = out[i];
+        for (j = i; j > 0 && rp_newer(&t, &out[j - 1]); j--)
+            out[j] = out[j - 1];
+        out[j] = t;
+    }
+    return n;
+}
+int ls_replay_exists(const wchar_t *hdd, const wchar_t *id)
+{
+    wchar_t f[PATHN], rel[80];
+    DWORD a;
+    if (!hdd || !id || !rp_hex_id(id))
+        return 0;
+    _snwprintf_s(rel, 80, _TRUNCATE, L"UDATA\\43430002\\%s\\st00_0.rep", id);
+    join(f, hdd, rel);
+    a = GetFileAttributesW(f);
+    return a != INVALID_FILE_ATTRIBUTES && !(a & FILE_ATTRIBUTE_DIRECTORY);
+}
+void ls_replay_set_args(const wchar_t *id, int camera, char *out, size_t cap)
+{
+    char a[40];
+    size_t k;
+    for (k = 0; id && id[k] && k + 1 < sizeof a; k++)
+        a[k] = (char)(id[k] < 128 ? id[k] : '?');
+    a[k] = 0;
+    if (camera >= 0 && camera <= 6)
+        _snprintf_s(out, cap, _TRUNCATE, "replay_autoplay=%s;replay_camera=%d", a, camera);
+    else
+        _snprintf_s(out, cap, _TRUNCATE, "replay_autoplay=%s", a);
+}
+void ls_video_res(int res, unsigned *w, unsigned *h)
+{
+    static const unsigned W[LS_VIDEO_RES_N] = {1920, 2560, 3840}, H[LS_VIDEO_RES_N] = {1080, 1440, 2160};
+    if (res < 0 || res >= LS_VIDEO_RES_N)
+        res = 0;
+    *w = W[res];
+    *h = H[res];
+}
+int ls_video_parse(const char *s, int *res, int *fps)
+{
+    int r = -1, f = 30;
+    if (!s)
+        return 0;
+    if (!strncmp(s, "1080p", 5))
+        r = 0;
+    else if (!strncmp(s, "1440p", 5))
+        r = 1;
+    else if (!strncmp(s, "2160p", 5))
+        r = 2;
+    if (r < 0)
+        return 0;
+    if (s[5])
+        f = atoi(s + 5);
+    if (f != 30 && f != 60)
+        return 0;
+    *res = r;
+    *fps = f;
+    return 1;
+}
+int ls_video_set_args(const char *dir_acp, int res, int fps, char *out, size_t cap)
+{
+    unsigned w, h;
+    char d[700];
+    size_t n;
+    ls_video_res(res, &w, &h);
+    if (fps != 60)
+        fps = 30;
+    if (!dir_acp || !dir_acp[0])
+    {
+        strcpy_s(d, sizeof d, "auto");
+    }
+    else
+    {
+        if (strchr(dir_acp, ';') || strchr(dir_acp, '"'))
+            return 1;
+        strcpy_s(d, sizeof d, dir_acp);
+        n = strlen(d);
+        if (n && d[n - 1] != '\\' && d[n - 1] != '/')
+            strcat_s(d, sizeof d, "\\"); /* trailing separator = folder (client picks the name) */
+    }
+    _snprintf_s(out, cap, _TRUNCATE, "video_export=%s;video_width=%u;video_height=%u;video_fps=%d", d, w, h, fps);
+    return 0;
+}
+int ls_replay_selftest(void)
+{
+    static const unsigned char meta[] = {0xFF, 0xFE, 'N', 0, 'a', 0, 'm', 0, 'e', 0, '=', 0, 'M', 0, 'I', 0,
+                                         'S',  0,    '0', 0, '3', 0, ' ', 0, '0', 0, '1', 0, '\r', 0, '\n', 0};
+    static const wchar_t *const ids[3] = {L"0A0B0C0D0E01", L"0A0B0C0D0E02", L"0A0B0C0D0E03"};
+    wchar_t tmp[PATHN], root[PATHN], f[PATHN];
+    unsigned rn = SB_REPLAY_DATA_SIZE + 20u;
+    unsigned char *rd = (unsigned char *)calloc(1, rn);
+    ls_replay v[8];
+    char args[80];
+    int ok = 1, n, k;
+#define RCHECK(x)                                                                                  \
+    do                                                                                             \
+    {                                                                                              \
+        if (!(x))                                                                                  \
+        {                                                                                          \
+            printf("replay-list: check %d failed\n", __LINE__);                                    \
+            ok = 0;                                                                                \
+            goto rdone;                                                                            \
+        }                                                                                          \
+    } while (0)
+    GetTempPathW(PATHN, tmp);
+    _snwprintf_s(root, PATHN, _TRUNCATE, L"%sSB-W254-%lu-%llu-\u00fc", tmp, GetCurrentProcessId(), GetTickCount64());
+    RCHECK(rd && mkdirs(root));
+    RCHECK(ls_replays(root, v, 8) == 0); /* ohne UDATA: leer */
+    /* A: eigenes Replay (Signatur 0) mit Name */
+    join(f, root, L"UDATA\\43430002\\0A0B0C0D0E01\\st00_0.rep");
+    RCHECK(writebytes(f, rd, rn));
+    join(f, root, L"UDATA\\43430002\\0A0B0C0D0E01\\SaveMeta.xbx");
+    RCHECK(writebytes(f, meta, sizeof meta));
+    /* B: fremde Signatur, ohne SaveMeta */
+    rd[rn - 1] = 0x5A;
+    join(f, root, L"UDATA\\43430002\\0A0B0C0D0E02\\st00_0.rep");
+    RCHECK(writebytes(f, rd, rn));
+    /* C: unbekannte Groesse */
+    join(f, root, L"UDATA\\43430002\\0A0B0C0D0E03\\st00_0.rep");
+    RCHECK(writebytes(f, rd, 100));
+    /* ignoriert: kein Hex-Name, Ordner ohne .rep, Datei im Titelordner */
+    join(f, root, L"UDATA\\43430002\\notes\\st00_0.rep");
+    RCHECK(writebytes(f, rd, rn));
+    join(f, root, L"UDATA\\43430002\\0A0B0C0D0E04\\SaveMeta.xbx");
+    RCHECK(writebytes(f, meta, sizeof meta));
+    join(f, root, L"UDATA\\43430002\\TitleMeta.xbx");
+    RCHECK(writebytes(f, meta, sizeof meta));
+    for (k = 0; k < 3; k++) /* Zeiten: A 2026-01, B 2026-02 (neuestes), C 2025-01 */
+    {
+        SYSTEMTIME st = {2026, 1, 4, 1, 12, 0, 0, 0};
+        FILETIME t;
+        HANDLE fh;
+        st.wYear = (WORD)(k == 2 ? 2025 : 2026);
+        st.wMonth = (WORD)(k == 1 ? 2 : 1);
+        SystemTimeToFileTime(&st, &t);
+        _snwprintf_s(f, PATHN, _TRUNCATE, L"%s\\UDATA\\43430002\\%s\\st00_0.rep", root, ids[k]);
+        fh = CreateFileW(f, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+        RCHECK(fh != INVALID_HANDLE_VALUE);
+        SetFileTime(fh, NULL, NULL, &t);
+        CloseHandle(fh);
+    }
+    n = ls_replays(root, v, 8);
+    RCHECK(n == 3);
+    RCHECK(!wcscmp(v[0].id, L"0A0B0C0D0E02") && v[0].state == 1 && v[0].name[0] == 0 && v[0].mission == 0);
+    RCHECK(!wcscmp(v[1].id, L"0A0B0C0D0E01") && v[1].state == 0 && !strcmp(v[1].name, "MIS03 01") &&
+           v[1].mission == 4);
+    RCHECK(!wcscmp(v[2].id, L"0A0B0C0D0E03") && v[2].state == 2 && v[2].size == 100);
+    RCHECK(ls_replays(root, v, 2) == 2); /* Deckel */
+    RCHECK(ls_replay_exists(root, L"0A0B0C0D0E01") && !ls_replay_exists(root, L"0A0B0C0D0E04") &&
+           !ls_replay_exists(root, L"..\\x") && !ls_replay_exists(root, L"notes"));
+    ls_replay_set_args(L"0A0B0C0D0E01", -1, args, sizeof args);
+    RCHECK(!strcmp(args, "replay_autoplay=0A0B0C0D0E01"));
+    ls_replay_set_args(L"0A0B0C0D0E01", 2, args, sizeof args);
+    RCHECK(!strcmp(args, "replay_autoplay=0A0B0C0D0E01;replay_camera=2"));
+    ls_replay_set_args(L"0A0B0C0D0E01", 9, args, sizeof args);
+    RCHECK(!strcmp(args, "replay_autoplay=0A0B0C0D0E01"));
+    { /* W255 VIDEO-EXPORT: Presets, Kurzform, Set-Kette (Ordner mit Umlaut in ANSI, Trenner, verbotene Zeichen) */
+        char va[300];
+        int r = -1, f = 0;
+        RCHECK(!ls_video_set_args("", 0, 30, va, sizeof va) &&
+               !strcmp(va, "video_export=auto;video_width=1920;video_height=1080;video_fps=30"));
+        RCHECK(!ls_video_set_args("C:\\Vid\xFC" "eos", 1, 60, va, sizeof va) &&
+               !strcmp(va, "video_export=C:\\Vid\xFC" "eos\\;video_width=2560;video_height=1440;video_fps=60"));
+        RCHECK(!ls_video_set_args("D:\\V\\", 2, 45, va, sizeof va) &&
+               !strcmp(va, "video_export=D:\\V\\;video_width=3840;video_height=2160;video_fps=30"));
+        RCHECK(ls_video_set_args("C:\\a;b", 0, 30, va, sizeof va) == 1 && ls_video_set_args("C:\\a\"b", 0, 30, va, sizeof va) == 1);
+        RCHECK(ls_video_parse("1440p60", &r, &f) && r == 1 && f == 60);
+        RCHECK(ls_video_parse("2160p", &r, &f) && r == 2 && f == 30);
+        RCHECK(!ls_video_parse("720p30", &r, &f) && !ls_video_parse("1080p50", &r, &f) && !ls_video_parse(NULL, &r, &f));
+    }
+rdone:
+    free(rd);
+    remove_tree(root);
+    return ok ? 0 : 1;
+#undef RCHECK
 }

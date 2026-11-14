@@ -378,9 +378,30 @@ void sb_render_blend(unsigned state, unsigned value)
     }
     rs_blend_cmask = effmask; /* W33 */
     tbq = TB_BEGIN(); /* DIAG(TICK-PERF,W125) */
+    if (g_cfg.blend_obj_cache) {
+        /* W253 DRAW-OPT: eigene Objekt-Tabelle je Blend-Beschreibung statt
+         * CreateBlendState je Wechsel (die Laufzeit liefert fuer gleiche
+         * Beschreibungen ohnehin dasselbe Objekt; hier ohne Geraete-Aufruf).
+         * Die Tabelle haelt eine eigene Referenz, Freigabe unten wie bisher. */
+        static D3D11_BLEND_DESC bc_desc[64];
+        static ID3D11BlendState *bc_obj[64];
+        static unsigned bc_n, bc_next;
+        unsigned q;
+        for (q = 0; q < bc_n; q++) {
+            if (!memcmp(&bc_desc[q], &bd, sizeof bd)) { bs = bc_obj[q]; ID3D11BlendState_AddRef(bs); break; }
+        }
+        if (!bs) {
+            hr = ID3D11Device_CreateBlendState(g_dev, &bd, &bs);
+            if (FAILED(hr)) { return; }
+            q = (bc_n < 64u) ? bc_n++ : (bc_next++ % 64u);
+            if (bc_obj[q]) { ID3D11BlendState_Release(bc_obj[q]); }
+            bc_desc[q] = bd; bc_obj[q] = bs; ID3D11BlendState_AddRef(bs);
+        }
+    } else {
     hr = ID3D11Device_CreateBlendState(g_dev, &bd, &bs);
     if (FAILED(hr)) {
         return;
+    }
     }
     sb_ctx_enter(); /* A6 ctx_lock */
     if (g_cfg.fx_blend_eq) {

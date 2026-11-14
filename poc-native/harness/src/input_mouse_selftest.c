@@ -213,6 +213,7 @@ int imouse_selftest(void)
     test_demo = 0;
     { extern int imouse_w225_selftest(void); fail += imouse_w225_selftest(); }
     { extern int sb_state_w232_selftest(void); fail += sb_state_w232_selftest(); }
+    { extern int imouse_w260_selftest(void); fail += imouse_w260_selftest(); }
     VERIFY(!bad_registration, "foreground-only Raw Input registration");
     VERIFY(physical == 0, "test focus never invokes physical cursor APIs");
     printf("W208 simulated physical calls=%d\n", physical);
@@ -407,5 +408,72 @@ int sb_state_w232_selftest(void)
     }
     w225_set(4, 0x2C, 1, 0);
     printf("W232 STATE-LOADCOUNT: Fehler=%d\n", fail);
+    return fail;
+}
+
+/* ---- W260 MOUSE-WHEEL: Rad-Nachrichten der echten Subclass ----
+ * Rasten werden nur mit Fokus und ohne Menue angenommen; offenes ESC-Menue
+ * laesst das Rad dem Menue (hier: Gatter, im Client nimmt sb_ovl_wndproc
+ * die Nachricht vorher); Maus frei (F10) bzw. Fokusverlust verwirft. */
+static int w260_pend(int d) { return (int)g_wheel.pend[d]; }
+int imouse_w260_selftest(void)
+{
+    int fail = 0, dx, dy, blocked;
+    unsigned m, f = 5000;
+#define W260(c, name) do { int ok_ = (c); printf("W260 %-52s %s\n", name, ok_ ? "OK" : "FAIL"); if (!ok_) fail++; } while (0)
+    foreground = (HWND)(INT_PTR)1;
+    w225_set(4, 0x2C, 1, 0); /* Mission */
+    menu(0); g_want = 1; g_force = 0;
+    event(IMOUSE_MSG_TEST_FOCUS, 1);
+    imap_wheel_clear(&g_wheel);
+    imouse_poll(&dx, &dy, &blocked);
+    W260(g_captured && !blocked, "Mission gefangen, Maus nicht gesperrt");
+    event(WM_MOUSEWHEEL, MAKEWPARAM(0, 120));
+    W260(w260_pend(IMAP_WHEEL_UP) == 1 && w260_pend(IMAP_WHEEL_DOWN) == 0, "Raste hoch -> 1x WHEEL_UP");
+    event(WM_MOUSEWHEEL, MAKEWPARAM(0, (WORD)(SHORT)-240));
+    W260(w260_pend(IMAP_WHEEL_DOWN) == 2 && w260_pend(IMAP_WHEEL_UP) == 1, "2 Rasten runter -> 2x WHEEL_DOWN, hoch getrennt");
+    event(WM_MOUSEHWHEEL, MAKEWPARAM(0, 120));
+    event(WM_MOUSEHWHEEL, MAKEWPARAM(0, (WORD)(SHORT)-120));
+    W260(w260_pend(IMAP_WHEEL_RIGHT) == 1 && w260_pend(IMAP_WHEEL_LEFT) == 1, "Kipprad rechts/links getrennt");
+    m = imouse_wheel_mask(f, blocked);
+    W260(m == 0xFu, "Impuls aller vier Richtungen im selben Frame");
+    W260(imouse_wheel_mask(f, 0) == 0xFu, "gleicher Frame = gleiches Ergebnis");
+    W260(imouse_wheel_mask(f + 1, 0) == 0xFu && imouse_wheel_mask(f + 2, 0) == 0 &&
+         imouse_wheel_mask(f + 3, 0) == 0, "2 Frames gedrueckt, 2 Frames los");
+    W260(imouse_wheel_mask(f + 4, 0) == (1u << IMAP_WHEEL_DOWN) &&
+         imouse_wheel_mask(f + 8, 0) == 0, "2. Raste runter als eigener Impuls, dann Ruhe");
+    f += 20;
+    /* ESC-Menue offen: Rad gehoert dem Menue, nichts angestaut. */
+    menu(1);
+    event(WM_MOUSEWHEEL, MAKEWPARAM(0, 120));
+    event(WM_MOUSEWHEEL, MAKEWPARAM(0, (WORD)(SHORT)-120));
+    W260(w260_pend(IMAP_WHEEL_UP) == 0 && w260_pend(IMAP_WHEEL_DOWN) == 0, "ESC-Menue offen: keine Rasten fuers Spiel");
+    menu(0);
+    W260(imouse_wheel_mask(f, 0) == 0, "nach Menue: kein Nachfeuern");
+    f += 10;
+    /* Angestaute Rasten beim Menue-Oeffnen verwerfen. */
+    event(WM_MOUSEWHEEL, MAKEWPARAM(0, 360));
+    menu(1); menu(0);
+    W260(w260_pend(IMAP_WHEEL_UP) == 0, "Menue-Oeffnen verwirft angestaute Rasten");
+    /* F10: Maus frei in der Mission -> gesperrt, Rasten verworfen. */
+    event(WM_KEYDOWN, VK_F10);
+    imouse_poll(&dx, &dy, &blocked);
+    event(WM_MOUSEWHEEL, MAKEWPARAM(0, 120));
+    W260(!g_captured && blocked, "F10: Maus frei, Spiel-Eingabe gesperrt");
+    W260(imouse_wheel_mask(f, blocked) == 0 && w260_pend(IMAP_WHEEL_UP) == 0, "F10 frei: Raste verworfen");
+    event(WM_KEYDOWN, VK_F10);
+    imouse_poll(&dx, &dy, &blocked);
+    W260(g_captured && !blocked && imouse_wheel_mask(f + 1, blocked) == 0, "F10 wieder gefangen: kein Nachfeuern");
+    f += 10;
+    /* Fokusverlust: verwerfen + ohne Fokus nichts annehmen. */
+    event(WM_MOUSEWHEEL, MAKEWPARAM(0, 120));
+    event(IMOUSE_MSG_TEST_FOCUS, 0);
+    W260(w260_pend(IMAP_WHEEL_UP) == 0, "Fokusverlust verwirft Rasten");
+    event(WM_MOUSEWHEEL, MAKEWPARAM(0, 120));
+    W260(w260_pend(IMAP_WHEEL_UP) == 0, "ohne Fokus keine Rasten");
+    event(IMOUSE_MSG_TEST_FOCUS, 1);
+    imap_wheel_clear(&g_wheel);
+    printf("W260 MOUSE-WHEEL (Fenster): Fehler=%d\n", fail);
+#undef W260
     return fail;
 }

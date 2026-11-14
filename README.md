@@ -51,6 +51,9 @@ an older or weaker PC pick **Original (HD) – Performance** on the
 ### System requirements
 
 - Windows 10 or 11 (64-bit).
+- **Linux / Steam Deck (community-tested, unofficial):** a tester runs it
+  with Proton (proton-cachyos 11.0) into missions at 120 FPS with sound.
+  I can't test Linux myself – reports are very welcome.
 - Microsoft Visual C++ Redistributable 2015–2022, **x86** (32-bit) version –
   also on 64-bit Windows. Without it, Windows reports a missing
   `VCRUNTIME140.dll`.
@@ -172,8 +175,11 @@ are welcome in the existing issue:
 
 - It contains **no game content**: no XBE or disc-image parts, no textures,
   no screenshots, no packs. You need your own copy of the game.
-- It performs **no downloads, updates or telemetry** and has no network
-  access at all. Every tool ships with the release.
+- It performs **no downloads, automatic updates or telemetry**. Every tool
+  ships with the release. The only network access is an optional version
+  check in the launcher: it asks you once and stays off unless you say yes.
+  It then sends one request to the GitHub release list and only tells you
+  when a newer version exists – nothing is downloaded.
 - It does not modify your game copy: your disc image is only ever read.
 
 ## Features

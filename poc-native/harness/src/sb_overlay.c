@@ -171,6 +171,9 @@ static volatile LONG g_ov_welcome_on;    /* W222: Alpha-Hinweis offen (UI-Thread
 static int g_ov_welcome_done;            /* W222: einmal je Programmstart (Render-Thread) */
 static unsigned g_ov_welcome_f0;         /* W222: erstes Bild (Wartezeit auf die Profil-Belegung) */
 static volatile LONG g_fb_bind_known;    /* W222: Feedback-Belegung aus dem Profil uebernommen */
+static volatile LONG g_ov_notice_req;    /* W254: Hinweis angefordert (beliebiger Thread) */
+static int g_ov_notice_on;               /* W254: Hinweis-Bildschirm zeigt g_ov_notice statt Alpha-Hinweis */
+static char g_ov_notice[6][160];         /* W254: Zeilen (UTF-8, schon uebersetzt) */
 static int g_ov_scr = SC_SET;            /* Render-Thread */
 static volatile LONG g_ov_req = -1;      /* UI-Thread: Bildschirm beim Oeffnen */
 static volatile LONG g_ov_textmode;      /* 1 = Texteingabe (WM_CHAR ans Overlay) */
@@ -637,7 +640,10 @@ static void ov_change(int i, int dir)
         g_ov_rts = kSbGfxPreset[SB_GP_RT].v[q];
         g_ov_dyn = g_cfg.rt_scale_dyn = kSbGfxPreset[SB_GP_DYN].v[q];
         g_cfg.fs_interp_match = kSbGfxPreset[SB_GP_MATCH].v[q];
-        ov_status_key(q == SB_GP_PERFORMANCE ? "ovl.st_performance" : "ovl.st_rt");
+        if (!sb_rem_fx_locked(kSbGfxPreset[SB_GP_MFX].key)) { /* W252: Monitor-Effekte live */
+            g_cfg.monitor_fx = kSbGfxPreset[SB_GP_MFX].v[q];
+        }
+        ov_status_key(q == SB_GP_PERFORMANCE ? "ovl.st_performance" : q == SB_GP_CLEAR ? "ovl.st_clear" : "ovl.st_rt");
         hd = kSbGfxPreset[SB_GP_HD].v[q];
         if (hd != (ov_hd_on() ? 1 : 0)) {
             if (g_ov_avail) {
@@ -1227,6 +1233,7 @@ static void ov_close(const char *why)
     InterlockedExchange(&g_ov_textmode, 0);
     InterlockedExchange(&g_ov_peek, 0); /* W193 */
     InterlockedExchange(&g_ov_welcome_on, 0); /* W222 */
+    g_ov_notice_on = 0; /* W254 */
     InterlockedExchange(&g_ov_open, 0);
 }
 
@@ -2525,6 +2532,16 @@ static void ov_frame(unsigned n)
             HLOG_I("CLIP: return feedback result=%d", result);
         } else if (g_ov_open) { ov_close("Clip laeuft"); }
     }
+    if (g_ov_notice_req && !g_ov_open && !sb_clip_active()) { /* W254: Hinweis (Replay-Start) */
+        HWND h = sb_render_hwnd();
+        InterlockedExchange(&g_ov_notice_req, 0);
+        g_ov_notice_on = 1;
+        HLOG_I("NOTICE: Hinweis offen (f=%u)", g_present_no);
+        InterlockedExchange(&g_ov_welcome_on, 1);
+        InterlockedExchange(&g_ov_req, SC_WELCOME);
+        InterlockedExchange(&g_ov_open, 1);
+        if (h) { PostMessageA(h, OV_MSG_OPENED, 0, 0); }
+    }
     if (g_cfg.alpha_welcome && !g_ov_welcome_done) { /* W222: Alpha-Hinweis einmal je Programmstart, sobald Bilder laufen */
         if (!g_ov_welcome_f0) { g_ov_welcome_f0 = n ? n : 1; }
         if (g_ov_open || sb_clip_active()) {
@@ -2932,7 +2949,8 @@ static void ov_value(int i, wchar_t *o, size_t cap)
     }
     case OI_PRESET: { /* W131, W143; W173 LAUNCHER-P4: einheitliches Preset, der Standard heisst nach
                        * der echten Bildrate "Original (HD) - <n> FPS" (PO 7.11.; 30 = Original) */
-        static const char *const pn[SB_GP_NPRE] = { "ovl.v_orig_hd", "ovl.v_subtle", "ovl.v_strong", "ovl.v_performance" };
+        static const char *const pn[SB_GP_NPRE] = { "ovl.v_orig_hd", "ovl.v_subtle", "ovl.v_strong", "ovl.v_performance",
+                                                    "ovl.v_clear" /* W252 */ };
         int q = sb_gfx_preset_match_for(ov_fps_sel(), g_ov_rts >= 0 ? g_ov_rts : g_cfg.rt_scale);
         if (q == 0) {
             char nb[96];
@@ -3199,6 +3217,15 @@ static void ov_paint_menu(void)
         wchar_t kn[24], ds[96];
         static const char *const dk[3] = { "ovl.w_k_shot", "ovl.w_k_clip", "ovl.w_k_menu" };
         int j;
+        if (g_ov_notice_on) { /* W254: Hinweis (z. B. Replay-Start) im selben Bildschirm */
+            wcscpy_s(title, 32, L"\x25A0 ");
+            ov_wkey(title + 2, 30, "ovl.ra_title");
+            ov_wkey(tag, 48, "ovl.ra_tag");
+            for (j = 0; j < 6; j++) { ov_wu8(ln[j], 128, g_ov_notice[j]); }
+            lc[0] = OV_C_HEAD;
+            ov_wkey(hint, 96, "ovl.hint_welcome");
+            break;
+        }
         wcscpy_s(title, 32, L"\x25A0 ");
         ov_wkey(title + 2, 30, "ovl.w_title");
         if (sb_version_str()[0]) { /* PO: echte Release-Version (W219 SB_VERSION) statt Build-Datum */
@@ -4105,4 +4132,19 @@ void sb_ovl_draw(ID3D11RenderTargetView *rtv, int save)
     }
     if (save) { sb_ovl_save_take(&ov_bbsave, rtv, x0, y0, pw, ph); }
     sb_ovl_quad(rtv, ov_srv, x0, y0, pw, ph);
+}
+
+/* W254 REPLAY-LAUNCHER: Hinweis mit bis zu 6 Zeilen (UTF-8, uebersetzt) im
+ * Stil des Alpha-Hinweises (beliebige Taste schliesst, Spiel pausiert). Oeffnet
+ * beim naechsten Bild, sobald kein anderes Menue offen ist. */
+void sb_ovl_notice(const char *const *lines, int n)
+{
+    int j;
+    if (!g_cfg.overlay) {
+        return;
+    }
+    for (j = 0; j < 6; j++) {
+        strcpy_s(g_ov_notice[j], sizeof g_ov_notice[j], (j < n && lines[j]) ? lines[j] : "");
+    }
+    InterlockedExchange(&g_ov_notice_req, 1);
 }

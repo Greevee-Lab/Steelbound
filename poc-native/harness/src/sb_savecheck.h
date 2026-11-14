@@ -30,6 +30,14 @@
  *                                           verschieben (Spiel startet den
  *                                           Eintrag leer, wie nach der Taste)
  *   alles andere laedt das Spiel         -> unveraendert
+ * W248 REPSIG: Gespeicherte Replays UDATA\43430002\<id>\st00_0.rep haben
+ * dasselbe Schema: n = 0xF61EC Datenbytes + Signatur[20] (Xbox und Client
+ * immer 1 008 128 B). Eine fremde Signatur (Replay einer echten Xbox) laesst
+ * die Wiedergabe nach YES scheitern (W241). Reparatur wie oben: Original in
+ * <hdd>\_backup\repair-<zeit>\UDATA\43430002\<id>\, Signatur auf 0, Daten
+ * unveraendert. Andere Groessen (auch zu kurz) bleiben unangetastet: ein
+ * Replay erzeugt keinen Startfehler. ZCACHE (eigenes "Last Replay") wird
+ * nicht geprueft.
  * Hinweis: Implementiert der Client spaeter echte Signaturen (XcSHA), muss
  * sb_sig_expected() dieselbe Rechnung machen. */
 #include <stddef.h>
@@ -40,6 +48,7 @@ extern "C" {
 #endif
 
 #define SB_SAVE_TITLE_W L"43430002"
+#define SB_REPLAY_DATA_SIZE 0xF61EC /* W248 REPSIG: st00_0.rep ohne Signatur */
 
 typedef enum {
     SB_SAVE_OK = 0,
@@ -49,7 +58,8 @@ typedef enum {
 } sb_save_state_t;
 
 typedef struct {
-    int checked;      /* bekannte Spielstand-Dateien */
+    int checked;      /* bekannte Spielstand-Dateien (inkl. Replays) */
+    int replays;      /* W248 REPSIG: davon Replays (UDATA\43430002\<id>\*.rep) */
     int ok;
     int repaired;     /* FOREIGN repariert (Signatur 0) */
     int moved;        /* SHORT in die Sicherung verschoben */
@@ -63,9 +73,15 @@ typedef void (*sb_savecheck_log_fn)(const char *line, void *ctx);
 /* Datengroesse n fuer einen Dateinamen (0 = keine bekannte Spielstand-Datei). */
 unsigned sb_save_data_size(const wchar_t *name);
 
-/* Prueft <hdd_root>\TDATA\43430002\*.sav. apply=0: nur pruefen/melden,
- * apply=1: reparieren (mit Sicherung). Rueckgabe = Anzahl Befunde (0 = alles
- * ok), -1 = Ordner fehlt (frische Installation, nichts zu tun). */
+/* W248 REPSIG: Datengroesse fuer einen Replay-Dateinamen (*.rep), sonst 0.
+ * Bewusst getrennt von sb_save_data_size (der Launcher-Import ordnet damit
+ * TDATA/UDATA zu). */
+unsigned sb_replay_data_size(const wchar_t *name);
+
+/* Prueft <hdd_root>\TDATA\43430002\*.sav und (W248)
+ * <hdd_root>\UDATA\43430002\<id>\*.rep. apply=0: nur pruefen/melden, apply=1: reparieren (mit
+ * Sicherung). Rueckgabe = Anzahl Befunde (0 = alles ok), -1 = beide Ordner
+ * fehlen (frische Installation, nichts zu tun). */
 int sb_savecheck_run(const wchar_t *hdd_root, int apply, sb_savecheck_t *res,
                      sb_savecheck_log_fn log, void *ctx);
 

@@ -176,6 +176,7 @@ u32 __fastcall hook_109770(u32 ecx_this, u32 edx_ign, u32 arg);
 u32 __fastcall hook_1086C0(u32 ecx_this);
 u32 __fastcall hook_108740(u32 ecx_this);
 u32 __fastcall hook_106560(u32 ecx_this);
+void ds_ui_sfx_install(void); /* W258 NAME-SFX (hooks_audio.c) */
 u32 __stdcall hook_XapiMapLetterToDirectory(u32 a1, u32 a2, u32 a3, u32 a4, u32 a5, u32 a6);
 u32 __stdcall hook_XapiMediaCheck(void);
 u32 __stdcall hook_XapiNotifyWrap(u32 reason);

@@ -21,6 +21,8 @@
 #include <wincodec.h>
 #include <string.h>
 #include <stdio.h>
+#include <d3d11_1.h>
+#include "render_dsc.h" /* W253 DRAW-OPT: Zustands-Cache/Zaehler des Immediate-Contexts */
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -218,6 +220,7 @@ void bloom_diag_clear(unsigned flags, unsigned color);
 void bloom_diag_present(unsigned p);
 void fx_present(void);
 int fx_ps_add_c0(float c0[4]); /* FIX(FX-ORIG,W90): PS-Muster (V0+C0)*T0 -> C0 */
+int fx_ps_mul_c0(float c0[4]); /* FIX(LOAD-VT-COLOR,W257): PS-Muster V0*C0 -> C0 (nur explizit gesetzt) */
 /* MONITOR-FX (W105, render_mfx.c): Korn/Scanlines + Signalstoerung der Monitore */
 #define MFX_NONE 0
 #define MFX_WASH 1
@@ -275,6 +278,10 @@ void dd_sum(unsigned f);
 int sb_im_compile(const char *src, const char *target, ID3DBlob **out);
 extern int g_ip_recording;
 extern unsigned g_ip_sigparts[3]; /* DIAG(FPS-INTERP-2): VS/Textur/PS des naechsten rec_draw */
+/* DIAG(W237 LINE-FLICKER2): echte Clip-w der Quell-Vertices des naechsten rec_draw (P2 im RT: Strom hat w=1);
+ * render_im.c setzt sie nur bei interp_eyediag > 0, render_interp.c verbraucht (NULL danach). */
+extern const float *g_ip_tw;
+extern unsigned g_ip_tw_n, g_ip_tw_prim;
 unsigned sb_interp_hash(const void *base, unsigned stride, unsigned n);
 void sb_interp_rec_draw(const im_vertex_t *v, unsigned n, unsigned topo,
                         const float mvp[16], unsigned has_tex, int cls,
@@ -367,6 +374,7 @@ int sb_winmode_current(void);
 void sb_render_present_raw(void);
 void sb_pf_note(float t, unsigned src_frame); /* DIAG(POPIN,W91): Art des naechsten present_raw */
 int sb_pf_active(void); /* DIAG(POPIN,W91): 1 = Bildfolge (pf_ring) laeuft */
+unsigned sb_pf_m0(void); /* DIAG(W251): Present-Nr des Missionsbeginns (pf_ring, 0 = noch nicht) */
 void sb_render_blit(ID3D11Resource *src);
 void sb_edge_apply(ID3D11RenderTargetView *rtv); /* W107 EDGE-MODE (render_edge.c), unter ctx_lock */
 /* W191 UW-PERSP (render_cpersp.c): Cockpit-Perspektive (Desktop, Standard aus) */

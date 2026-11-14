@@ -773,6 +773,21 @@ void sb_phud_tick_end(void)
         pt_visq0 = g_tb_q[TB_VISQ];
         pt_add(now, "T,%.4f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%.3f,%u\n", pt_sec(now), (double)t->period, (double)t->wait,
                (double)t->busy, (double)t->render, (double)t->interp, (double)t->game, (unsigned)t->draws, vq, t->upn);
+        /* W204: separate record, existing T/P/G formats stay unchanged.
+         * Same counters and timestamp as T, no extra per-draw timer. */
+        /* W253: + Render/Spiel (ms) und Zaehler des Immediate-Contexts je Tick
+         * (weitergereichte/entfallene Set-Aufrufe, Map, Draw, Konstanten-Ring
+         * Map/Wiederverwendung). */
+        if (g_cfg.draw_tick_diag) {
+            static unsigned dc_last[DSC_N_MAX];
+            unsigned dc[DSC_N_MAX], q;
+            for (q = 0; q < DSC_N_MAX; q++) { dc[q] = g_dsc.cnt[q] - dc_last[q]; dc_last[q] = g_dsc.cnt[q]; }
+            pt_add(now, "D,%u,%u,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u,%u,%u,%u,%u,%u\n",
+                   g_present_no, (unsigned)t->draws, (double)t->busy,
+                   (double)t->submit, (double)t->vbloop, (double)t->cap,
+                   (double)t->interp, (double)t->tex, (double)t->render, (double)t->game,
+                   dc[DSC_N_FWD], dc[DSC_N_SKIP], dc[DSC_N_MAP], dc[DSC_N_DRAW], dc[DSC_N_CBMAP], dc[DSC_N_CBREUSE]);
+        }
     }
     ph_pres_direct = 0;
     ph_tick_end_q = now;

@@ -6,6 +6,7 @@
 #include "sb_remaster.h" /* W103 REM-FRAME */
 #include "iso_vfs.h"     /* W150 ISO-DIRECT */
 #include "sb_savecheck.h" /* W187 KIA-LOAD */
+#include "sb_rauto.h"     /* W254 REPLAY-LAUNCHER */
 #include <ctype.h>
 #include <intrin.h> /* W187: _AddressOfReturnAddress (FILE delete) */
 
@@ -273,6 +274,13 @@ static int xb_path_to_host(const char *xb, size_t nbytes, char *out, size_t cap)
     return xb_path_to_host_ex(xb, nbytes, out, cap, NULL, 0, NULL);
 }
 
+/* W254 REPLAY-LAUNCHER: Xbox-Pfad (z. B. "U:\<id>\st00_0.rep") wie das Spiel
+ * aufloesen (Spielstand-Schutz, US-Ordner). 0 = ok. */
+int krnl_host_path(const char *xb, char *out, size_t cap)
+{
+    return xb ? xb_path_to_host(xb, strlen(xb), out, cap) : -1;
+}
+
 /* W150: D:-Datei aus dem Abbild oeffnen. Log-Zeilen wie im Ordner-Modus
  * (FILE open '<pfad>' -> xh / -> FEHLER <win32>), damit Meilensteine und
  * logdiff gleich bleiben. */
@@ -365,14 +373,14 @@ void krnl_save_check(void)
         return;
     }
     if (rc == 0) {
-        HLOG_I("SAVECHECK: %d Spielstand-Dateien ok", r.checked);
+        HLOG_I("SAVECHECK: %d Spielstand-Dateien ok (davon %d Replays)", r.checked, r.replays);
     } else {
         char b[700];
         if (!WideCharToMultiByte(CP_ACP, 0, r.backup, -1, b, sizeof b, NULL, NULL)) {
             b[0] = '\0';
         }
-        HLOG_W("SAVECHECK: %d Dateien, %d ok, %d repariert, %d verschoben, %d unveraendert%s%s",
-               r.checked, r.ok, r.repaired, r.moved, r.failed, b[0] ? ", Sicherung " : "", b);
+        HLOG_W("SAVECHECK: %d Dateien (davon %d Replays), %d ok, %d repariert, %d verschoben, %d unveraendert%s%s",
+               r.checked, r.replays, r.ok, r.repaired, r.moved, r.failed, b[0] ? ", Sicherung " : "", b);
     }
 }
 
@@ -547,6 +555,12 @@ static u32 open_by_attrs(u32 pAttr, u32 access, u32 share, u32 disp, u32 options
         }
         if (is_d && g_iso) { /* W150 ISO-DIRECT */
             return vfs_open(host, drel, access, disp, options, out_xh);
+        }
+        if (!is_d && g_cfg.replay_autoplay[0]) { /* W254 REPLAY-LAUNCHER: "Last Replay" lesend aufs gewaehlte Replay */
+            char alt[1024];
+            if (sb_rauto_open_hook(host, access, disp, alt, sizeof alt)) {
+                strcpy_s(host, sizeof host, alt);
+            }
         }
     }
     if (access & 0x80000000u) {
@@ -1351,6 +1365,11 @@ static u32 host_query_dir(ht_entry_t *e, u32 ev, u32 iosb, u32 buf, u32 len,
         }
         if (!strcmp(f->cFileName, ".") || !strcmp(f->cFileName, "..") ||
             !vfs_wild(d->mask, f->cFileName)) {
+            d->pending = 0;
+            continue;
+        }
+        if (g_cfg.replay_autoplay[0] && /* W254 REPLAY-LAUNCHER: nur der gewaehlte Replay-Ordner */
+            sb_rauto_dir_skip(e->path, f->cFileName, (f->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0)) {
             d->pending = 0;
             continue;
         }

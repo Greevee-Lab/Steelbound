@@ -79,6 +79,25 @@ int sb_pack_scan(const char *packs_json, sb_pack_scan_t *out, int cap);
 int sb_pack_check(const char *pkg_path, const char *xbe_sha256,
                   char *reason, unsigned rcap, char *detail, unsigned dcap);
 
+/* W256 PACK-ANYVER: Passung zur aktiven Fassung (V2). Ein Paket fuer eine
+ * bekannte Fassung (EU/US) oder mit game.family "steel-battalion" passt
+ * zu jeder bekannten Fassung; ersetzt wird ohnehin nur bei gleichem
+ * Inhalts-Hash. */
+#define SB_PACK_FIT_NO      (-1) /* passt nicht (fremdes Spiel/unbekannt) */
+#define SB_PACK_FIT_UNKNOWN 0    /* ohne Spielversion geprueft */
+#define SB_PACK_FIT_EXACT   1    /* fuer genau diese Fassung erstellt */
+#define SB_PACK_FIT_OTHER   2    /* fuer andere bekannte Fassung (made_for) */
+#define SB_PACK_FIT_FAMILY  3    /* game.family: alle bekannten Fassungen */
+/* Wie sb_pack_check, zusaetzlich *fit (SB_PACK_FIT_*) und made_for
+ * ("Europe"/"USA" bei FIT_OTHER, sonst ""); fit/made_for duerfen NULL sein. */
+int sb_pack_check_fit(const char *pkg_path, const char *xbe_sha256,
+                      char *reason, unsigned rcap, char *detail,
+                      unsigned dcap, int *fit, char *made_for,
+                      unsigned mcap);
+/* Client: SHA-256 der aktiven default.xbe fuer die Logzeile
+ * "PACK fassung:" (vor sb_pack_init; NULL/leer = unbekannt). */
+void sb_pack_set_game(const char *xbe_sha256);
+
 /* Verdeckungszahlen je Order-Eintrag (Reihenfolge aus packs.json):
  * nentries[i] = Eintraege, shadowed[i] = davon verdeckt (-1 =
  * uebersprungen: aus/fehlend/unlesbar). Rueckgabe: Order-Eintraege

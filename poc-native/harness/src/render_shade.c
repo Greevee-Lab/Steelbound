@@ -433,9 +433,16 @@ static int rq_compile_x(const char *src, const char *target, ID3DBlob **out)
     return sb_im_compile(src, target, out);
 }
 
+/* Zwischenbild-Variante: 1 = Lerp, 2 = + W224 eyefix, | 4 = W237 echte Clip-w (Strom 3/4) fuer die
+ * eyefix-Pruefung, | 8 = W237 homogener Lerp (interp_hlerp=2). */
+static int rq_lerp_flags(void)
+{
+    return (g_cfg.interp_eyefix ? 2 : 1) | (g_cfg.interp_hlerp ? 4 : 0) | (g_cfg.interp_hlerp >= 2 ? 8 : 0);
+}
+
 static int rq_mklayout(const rq_vsent_t *e, int lerp, ID3DBlob *b, ID3D11InputLayout **out, int raw)
 {
-    D3D11_INPUT_ELEMENT_DESC el[4 + 16];
+    D3D11_INPUT_ELEMENT_DESC el[6 + 16];
     unsigned ne = 0, j, nv = raw ? 0u : e->nv;
     memset(el, 0, sizeof el);
     el[ne].SemanticName = "POSITION"; el[ne].Format = DXGI_FORMAT_R32G32B32A32_FLOAT; el[ne].AlignedByteOffset = 0; ne++;
@@ -444,6 +451,10 @@ static int rq_mklayout(const rq_vsent_t *e, int lerp, ID3DBlob *b, ID3D11InputLa
     if (lerp) {
         el[ne].SemanticName = "POSITION"; el[ne].SemanticIndex = 1; el[ne].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
         el[ne].InputSlot = 1; ne++;
+    }
+    if (lerp & 4) { /* FIX(W237): Clip-w Tick N / N-1 (Strom 3/4) */
+        el[ne].SemanticName = "IPW"; el[ne].SemanticIndex = 0; el[ne].Format = DXGI_FORMAT_R32_FLOAT; el[ne].InputSlot = 3; ne++;
+        el[ne].SemanticName = "IPW"; el[ne].SemanticIndex = 1; el[ne].Format = DXGI_FORMAT_R32_FLOAT; el[ne].InputSlot = 4; ne++;
     }
     for (j = 0; j < nv; j++) {
         el[ne].SemanticName = "ATTR"; el[ne].SemanticIndex = j; el[ne].Format = DXGI_FORMAT_R32G32B32A32_FLOAT;
@@ -514,13 +525,14 @@ static int rq_raw_build(rq_vsent_t *e, unsigned handle, const unsigned *st, cons
         HLOG_W("SHADE-PERF: VS 0x%X Roh-Variante nicht uebersetzbar -> CPU-Packen", handle);
         return 0;
     }
-    if (!rqv_hlsl_ex(&e->prog, 1, &e->raw, src, sizeof src, cof, &nc) || !rq_compile(src, "vs_4_0", &bl)) {
+    /* W237: Roh-Variante bekam W224 (eyefix) nie; mit interp_hlerp gleiche Flags wie die gepackte, sonst alt (1) */
+    if (!rqv_hlsl_ex(&e->prog, g_cfg.interp_hlerp ? rq_lerp_flags() : 1, &e->raw, src, sizeof src, cof, &nc) || !rq_compile(src, "vs_4_0", &bl)) {
         b->lpVtbl->Release(b);
         return 0;
     }
     if (FAILED(sb_warm_create_vs(b->lpVtbl->GetBufferPointer(b), b->lpVtbl->GetBufferSize(b), &e->vsr)) ||
         FAILED(sb_warm_create_vs(bl->lpVtbl->GetBufferPointer(bl), bl->lpVtbl->GetBufferSize(bl), &e->vsrl)) ||
-        !rq_mklayout(e, 0, b, &e->layr, 1) || !rq_mklayout(e, 1, bl, &e->layrl, 1)) {
+        !rq_mklayout(e, 0, b, &e->layr, 1) || !rq_mklayout(e, g_cfg.interp_hlerp ? rq_lerp_flags() : 1, bl, &e->layrl, 1)) {
         b->lpVtbl->Release(b); bl->lpVtbl->Release(bl);
         rq_raw_release(e);
         e->rawsig = sig; e->rawok = -1;
@@ -566,14 +578,14 @@ static int rq_packed_build(rq_vsent_t *e)
     q0 = rq_qpc(); /* W137: immer (einmal je Programm) */
     g_shz_n++;
     if (!rqv_hlsl(&e->prog, 0, src, sizeof src, cof, &nc) || !rq_compile(src, "vs_4_0", &b)) { return 0; }
-    if (!rqv_hlsl(&e->prog, g_cfg.interp_eyefix ? 2 : 1, src, sizeof src, cof, &nc) || /* W224 */
+    if (!rqv_hlsl(&e->prog, rq_lerp_flags(), src, sizeof src, cof, &nc) || /* W224/W237 */
         !rq_compile(src, "vs_4_0", &bl)) {
         b->lpVtbl->Release(b);
         return 0;
     }
     if (FAILED(sb_warm_create_vs(b->lpVtbl->GetBufferPointer(b), b->lpVtbl->GetBufferSize(b), &e->vs)) ||
         FAILED(sb_warm_create_vs(bl->lpVtbl->GetBufferPointer(bl), bl->lpVtbl->GetBufferSize(bl), &e->vsl)) ||
-        !rq_mklayout(e, 0, b, &e->lay, 0) || !rq_mklayout(e, 1, bl, &e->layl, 0)) {
+        !rq_mklayout(e, 0, b, &e->lay, 0) || !rq_mklayout(e, rq_lerp_flags(), bl, &e->layl, 0)) {
         b->lpVtbl->Release(b); bl->lpVtbl->Release(bl);
         return 0;
     }

@@ -86,10 +86,14 @@ typedef struct {
     char assist_fixture[1024]; /* W143: shot=5 Fixture (leer = Geraet/keine) */
     int bind_joydemo;          /* W226: --bind-shot=joy (Beispiel-HOTAS) */
     int bind_learn;            /* W228: --bind-learn (Lernmodus im Bild) */
+    int bind_wheeldemo;        /* W260: --bind-shot=wheel (Mausrad-Beispiel) */
     int bind_sel;              /* W159: shot=3 Element-Index vorwaehlen + in
                                 * Sicht scrollen (-1 = Standard: erstes) */
     char state[32];            /* W171: --ui-shot --state NAME (Regelzustand,
                                 * nur im Speicher; leer = keiner) */
+    char replay[40];           /* W254: --gui-start-dry --replay ID (Replay-Startweg) */
+    int replay_cam;            /* W254: --replay-camera N (-1 = wie aufgezeichnet) */
+    char video[16];            /* W255: --video 1080p30|1440p60|2160p30 (Export-Startweg, nur mit --replay) */
 } gui_opts_t;
 
 int gui_main(const char *client_override, const gui_opts_t *o);

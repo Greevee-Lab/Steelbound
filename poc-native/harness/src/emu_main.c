@@ -22,10 +22,13 @@
 #include "d3d11_render.h"
 #include "watch_dr.h" /* W41 WATCHDR */
 #include "sb_gamever.h" /* W150 ISO-DIRECT */
+#include "sb_pack.h"    /* W256 PACK-ANYVER */
 #include "sb_profile.h" /* W229 US-PROFILE */
 #include "sb_feedback.h" /* W188 GAME-MENU */
 #include "sb_userdata.h" /* W150 USER-DATA */
 #include "sb_relaunch.h" /* W186 RESET-TITLE */
+#include "sb_rauto.h" /* W254 REPLAY-LAUNCHER */
+#include "render_vexp.h" /* W255 VIDEO-EXPORT */
 
 static int g_run_seconds;
 static volatile LONG g_wd_waited; /* W186: Sekunden seit Watchdog-Start (Rest-Laufzeit) */
@@ -1564,6 +1567,8 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
      * bleiben unveraendert (Einzelstart-Override). */
     hcfg_apply_set(g_cmdline_set, "cmdline");
     sb_relaunch_after_cfg(); /* W186: nur im Neustart-Kind (Zeile RELAUNCH + Ersatz-Set) */
+    sb_rauto_init(); /* W254 REPLAY-LAUNCHER: nur mit replay_autoplay */
+    sb_vexp_init(); /* W255 VIDEO-EXPORT: nur mit video_export (setzt Groesse/Testtakt vor sb_render_init) */
     sb_rem_fx_start(); /* W151 EFFECT-PACK: Effect-Pack-Parameter auf cfg legen */
     if (sb_userdata_path(SB_UD_CRASH, g_crash_dir, sizeof g_crash_dir) != 1) { /* W150 */
         g_crash_dir[0] = 0;
@@ -1662,6 +1667,7 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     /* Preserve the PAL success log order; only validation moved before parsing. */
     sb_feedback_note_gamever(&gv);
     HLOG_I("%s", gv.text);
+    sb_pack_set_game(gv.sha256); /* W256 PACK-ANYVER: Logzeile "PACK fassung:" */
     if (xbe_map(&img) != 0) {
         ExitProcess(1);
     }

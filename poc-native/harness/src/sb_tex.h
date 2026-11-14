@@ -1,4 +1,5 @@
 #pragma once
+#include <stddef.h> /* W243: size_t (sb_tex_diag_info) */
 /* sb_tex.h - Xbox-Textur-Cache (D3DResource -> D3D11-SRV, M2b).
  * Nur Stage 0 (Titel/Menue). Formate: DXT1/3/5 (linear angenommen),
  * LIN_A8R8G8B8 nur mit USIZE/VSIZE (sonst SKIP+WARN). */
@@ -40,6 +41,7 @@ void sb_tex_evict(unsigned xptr);
 void sb_tex_note_reuse(unsigned va, unsigned len);
 void sb_tex_lockwatch_note(unsigned xptr);   /* W98: LockRect-Textur beobachten */
 void sb_tex_lockwatch_forget(unsigned xptr); /* W98: Release rc=0 */
+void sb_tex_diag_info(unsigned xptr, char *buf, size_t n); /* DIAG(AMMO-HUD,W243) */
 /* W2B-FIX: Linear-Dims direkt aus Header (Norm-Fallback ohne Cache). */
 int sb_tex_hdr_dims(unsigned xptr, unsigned *w, unsigned *h);
 void sb_tex_hdr_info(unsigned xptr, unsigned *c0, unsigned *data, unsigned *fmt, unsigned *size);

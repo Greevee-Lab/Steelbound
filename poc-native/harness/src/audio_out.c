@@ -153,7 +153,15 @@ static audio_voice_t *au_lookup(au32 p)
     return (audio_voice_t *)(uintptr_t)p;
 }
 
+static au32 au_create_ex(au32 kind, au32 desc, au32 retaddr, au32 fixed_id);
 static au32 au_create(au32 kind, au32 desc, au32 retaddr)
+{
+    return au_create_ex(kind, desc, retaddr, 0);
+}
+
+/* fixed_id != 0 (W258): interne Stimme mit eigener Nummer, die Zaehlung der
+ * Spiel-Stimmen (v1..) bleibt unveraendert (Logs/Werkzeuge vergleichbar). */
+static au32 au_create_ex(au32 kind, au32 desc, au32 retaddr, au32 fixed_id)
 {
     audio_voice_t *v;
     wfx_t wfx;
@@ -178,7 +186,7 @@ static au32 au_create(au32 kind, au32 desc, au32 retaddr)
     v->max3d = 1e9f;
     v->g3d = v->pan3l = v->pan3r = 1.0f;
     au_lock();
-    v->id = g_next_id++;
+    v->id = fixed_id ? fixed_id : g_next_id++;
     v->next = g_voices;
     g_voices = v;
     g_stat_voices++;
@@ -209,6 +217,36 @@ static au32 au_create(au32 kind, au32 desc, au32 retaddr)
            v->have_fmt ? (wfx.tag == 105 ? "ADPCM" : "PCM") : "?",
            wfx.ch, wfx.rate, wfx.bits, wfx.align, buflen, flags, retaddr);
     return (au32)(uintptr_t)v;
+}
+
+/* W258 NAME-SFX: Menueton ueber eine interne Puffer-Stimme je Slot (HLE fuer
+ * die DirectMusic-Segmente snk_000..009, s. hooks_audio.c). wfx = WAVEFORMATEX
+ * der Datei, data/bytes = data-Chunk (bleibt beim Aufrufer gueltig). Erneutes
+ * Abspielen desselben Slots startet den Ton von vorn (wie StopEx +
+ * PlaySegmentEx im Spiel), verschiedene Slots ueberlagern sich. */
+#define AU_UI_SLOTS 16
+void audio_ui_play(unsigned slot, const void *wfx, const void *data,
+                   unsigned bytes, int db100)
+{
+    static au32 ui_voice[AU_UI_SLOTS];
+    au32 v;
+    if (slot >= AU_UI_SLOTS || !wfx || !data || !bytes)
+        return;
+    v = ui_voice[slot];
+    if (!v) {
+        au32 desc[8];
+        memset(desc, 0, sizeof desc);
+        desc[0] = 36; /* dwSize (DSBUFFERDESC) */
+        desc[3] = (au32)(uintptr_t)wfx; /* lpwfxFormat */
+        v = au_create_ex(1, (au32)(uintptr_t)desc, 0, 9000u + slot);
+        if (!v)
+            return;
+        audio_set_buffer_data(v, (au32)(uintptr_t)data, bytes);
+        ui_voice[slot] = v;
+    }
+    audio_set_volume(v, db100);
+    audio_set_pos(v, 0);
+    audio_play(v, 0);
 }
 
 au32 audio_buffer_create(au32 desc, au32 retaddr)

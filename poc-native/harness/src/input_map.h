@@ -112,7 +112,37 @@ typedef struct {
      * Slot i hat ein Geraet; 0 = JOY-Quellen tragen nichts bei. */
     imap_joy_state_t joy[IMAP_JOY_MAX];
     unsigned joy_mask;
+    /* W260 MOUSE-WHEEL: aktive Mausrad-Impulse dieses Polls (Bit i =
+     * IMAP_WHEEL_UP/DOWN/LEFT/RIGHT; Hook: imouse_wheel_mask, Test:
+     * gesetzt). 0 = Mausrad traegt nichts bei (bisheriges Verhalten). */
+    unsigned wheel_mask;
 } imap_snap_t;
+
+/* W260 MOUSE-WHEEL: Mausrad-Rasten als Tastenimpulse (Quellen
+ * MOUSE:WHEEL_UP/WHEEL_DOWN/WHEEL_LEFT/WHEEL_RIGHT). Je Raste (120 Delta-
+ * Einheiten, feine Raeder summiert) ein Impuls: IMAP_WHEEL_ON Spiel-Frames
+ * gedrueckt, danach IMAP_WHEEL_OFF Frames los, erst dann die naechste Raste
+ * derselben Richtung (mehrere Rasten = mehrere Impulse, kein Dauerdruck).
+ * Schreiber imap_wheel_add/_clear (UI-Thread), Leser imap_wheel_step
+ * (Spiel-Thread, einmal je Poll; gleicher Frame = gleiches Ergebnis). */
+enum { IMAP_WHEEL_UP, IMAP_WHEEL_DOWN, IMAP_WHEEL_LEFT, IMAP_WHEEL_RIGHT,
+       IMAP_WHEEL_N };
+#define IMAP_WHEEL_ON 2u   /* Frames gedrueckt je Raste */
+#define IMAP_WHEEL_OFF 2u  /* Frames los zwischen zwei Rasten */
+#define IMAP_WHEEL_MAXQ 8  /* hoechstens so viele Rasten je Richtung im Puffer */
+#define IMAP_WHEEL_CODE0 5 /* MOUSEBTN-Code von WHEEL_UP (5..8) */
+typedef struct {
+    volatile long acc[2];             /* Rest-Delta vertikal/horizontal */
+    volatile long pend[IMAP_WHEEL_N]; /* ausstehende Rasten */
+    unsigned f0[IMAP_WHEEL_N];        /* Spiel-Thread: Start des Impulses */
+    int on[IMAP_WHEEL_N];             /* 1 = Impuls (inkl. Pause) laeuft */
+} imap_wheel_t;
+/* horiz = 0: WM_MOUSEWHEEL (+ = hoch), 1: WM_MOUSEHWHEEL (+ = rechts). */
+void imap_wheel_add(imap_wheel_t *w, int horiz, int delta);
+void imap_wheel_clear(imap_wheel_t *w); /* Puffer + Rest verwerfen */
+/* Maske der aktiven Impulse fuer diesen Frame; blocked = 1 verwirft
+ * ausstehende Rasten (kein spaeteres Nachfeuern) und liefert 0. */
+unsigned imap_wheel_step(imap_wheel_t *w, unsigned frame, int blocked);
 
 /* W132 PAD-ARB: einachsiger Arbitrierungs-Zustand (gleiche Logik wie
  * imap_arb_t/W128, ein Geraet gegen die Maus). memset(0) = uninitialisiert. */
@@ -172,7 +202,8 @@ void imap_legacy_apply(imap_block_t *blk, imap_state_t *st,
 /* ---- Profil-System ---- */
 typedef enum {
     IMAP_A_KEY,     /* code = VK (0..512, inkl. Replay-Virtuals) */
-    IMAP_A_MOUSEBTN,/* code 0/1/2 = links/rechts/mitte, 3/4 = X1/X2 (W110) */
+    IMAP_A_MOUSEBTN,/* code 0/1/2 = links/rechts/mitte, 3/4 = X1/X2 (W110),
+                     * 5..8 = Mausrad hoch/runter/links/rechts (W260) */
     IMAP_A_PADBTN,  /* code = IMAP_PAD_*-Bit (ohne D-Pad) */
     IMAP_A_PADDPAD, /* code = IMAP_PAD_DU/DD/DL/DR-Bit */
     IMAP_A_PADTRIG, /* code 0/1 = LT/RT als Taste (Schwelle 50 %) */

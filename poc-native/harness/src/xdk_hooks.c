@@ -474,6 +474,8 @@ void hooks_install(void)
     patch_jmp(0x107E30u, hook_107E30, "107E30(Slot-Fake)");
     patch_jmp(0x109770u, hook_109770, "109770(Null-Guard)");
     patch_jmp(0x106560u, hook_106560, "106560(No-Op)");
+    if (g_cfg.audio && g_cfg.audio_menu_sfx)
+        ds_ui_sfx_install(); /* W258 NAME-SFX: Menuetoene ohne DirectMusic */
     patch_jmp(0x19273Fu, hook_XapiMapLetterToDirectory,
               "XAPI-MapLetter(No-Op)");
     /* Zweit-Einstieg hinter Prolog (Loop umgeht 0x19273F): gleiche No-Op. */

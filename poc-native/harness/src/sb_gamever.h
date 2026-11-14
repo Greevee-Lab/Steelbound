@@ -30,6 +30,17 @@ const char *sb_gamever_region_name(uint32_t region);
 /* 1 = unterstuetzt, 0 = nicht (out->text erklaert). */
 int sb_gamever_check(const uint8_t *xbe, size_t n, sb_gamever_t *out);
 
+/* W256 PACK-ANYVER: Paket-Familie "steel-battalion" = alle bekannten,
+ * unterstuetzten Fassungen (Texturen sind per Inhalts-Hash gleich).
+ * sb_gamever_family_idx: Index der Fassung zum XBE-SHA-256 (64 Hex,
+ * Gross/Klein egal) oder -1 = unbekannt. sb_gamever_family_sha/_name:
+ * SHA (klein) bzw. Kurzname "Europe"/"USA" zum Index (NULL ausserhalb). */
+#define SB_GAMEVER_FAMILY "steel-battalion"
+int sb_gamever_family_count(void);
+int sb_gamever_family_idx(const char *sha256_hex);
+const char *sb_gamever_family_sha(int i);
+const char *sb_gamever_family_name(int i);
+
 #ifdef __cplusplus
 }
 #endif

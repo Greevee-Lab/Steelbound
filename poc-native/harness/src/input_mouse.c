@@ -10,6 +10,7 @@
 #include "hcfg.h"
 #include "hlog.h"
 #include "input_mouse.h"
+#include "input_map.h" /* W260: imap_wheel_t */
 #include "input_tap.h"
 #include "sb_overlay.h" /* W118 REM-OVERLAY */
 #include "sb_perfhud.h" /* W122 PERF-HUD */
@@ -109,6 +110,7 @@ static int imouse_soll(HWND w, int mission, int menu)
 static volatile LONG g_kdown[256];    /* 1 = gedrueckt */
 static volatile LONG g_kpend[256];    /* 1 = Druck vom Spiel noch nicht gesehen */
 static volatile LONG g_kgen;          /* +1 bei Fokusverlust (Tipps verwerfen) */
+static imap_wheel_t g_wheel;          /* W260: Mausrad-Rasten (UI -> Spiel) */
 static unsigned g_kseen[256];         /* Spiel-Frame des ersten Lesens (Spiel-Thread) */
 static LONG g_kseen_gen[256];         /* g_kgen beim Lesen; 0 = ungueltig */
 
@@ -206,6 +208,7 @@ static void imsg_clear(void)
     }
     InterlockedIncrement(&g_kgen);
     itap_clear(); /* W92: angestaute Tipper verwerfen */
+    imap_wheel_clear(&g_wheel); /* W260: angestaute Rad-Rasten verwerfen */
     if (imouse_is_fg(g_mwnd) && GetCapture() == g_mwnd) ReleaseCapture();
 }
 
@@ -468,6 +471,20 @@ static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
                 ReleaseCapture();
         }
         break;
+    case WM_MOUSEWHEEL:
+    case WM_MOUSEHWHEEL:
+        /* W260 MOUSE-WHEEL: Rasten fuer MOUSE:WHEEL_*-Bindungen. Offenes
+         * ESC-Menue/Overlay hat das Rad oben schon genommen (Menue-Scrollen);
+         * ohne Fokus oder bei Spiel-Menue-Gatter nichts anstauen. Die
+         * Sperre "Maus frei" (F10/W225) wirkt im Spiel-Thread (real_blocked). */
+        if (g_focus && !imouse_menu_now()) {
+            imap_wheel_add(&g_wheel, msg == WM_MOUSEHWHEEL,
+                           GET_WHEEL_DELTA_WPARAM(wp));
+            if (g_cfg.input_diag)
+                HLOG_I("INPUT: Mausrad %s delta=%d", msg == WM_MOUSEHWHEEL ? "h" : "v",
+                       (int)GET_WHEEL_DELTA_WPARAM(wp));
+        }
+        break;
     case WM_CAPTURECHANGED:
         break;
     case WM_KEYDOWN:
@@ -607,6 +624,13 @@ int imsg_real_vk(int vk)
     extern unsigned g_frames;
     if (g_cfg.input_source == 1) return imsg_key(vk, g_frames);
     return (GetAsyncKeyState(vk) & 0x8000) != 0;
+}
+
+/* W260: Mausrad-Impulse dieses Polls (Spiel-Thread, nach imouse_poll). */
+unsigned imouse_wheel_mask(unsigned frame, int blocked)
+{
+    if (g_installed != 1) return 0;
+    return imap_wheel_step(&g_wheel, frame, blocked);
 }
 
 int imouse_poll(int *dx, int *dy, int *blocked)

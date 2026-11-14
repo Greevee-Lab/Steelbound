@@ -247,6 +247,7 @@ int rqv_hlsl_ex(const rqv_prog_t *p, int lerp, const rqv_raw_t *raw, char *buf, 
     }
     rqs(&s, "struct VSIN { float4 pos : POSITION0; float4 col : COLOR0; float2 uv : TEXCOORD0;\n");
     if (lerp) { rqs(&s, "  float4 pos0 : POSITION1;\n"); }
+    if (lerp & 4) { rqs(&s, "  float hw1 : IPW0; float hw0 : IPW1;\n"); } /* FIX(W237): echte Clip-w Tick N / N-1 */
     if (raw) {
         rqs(&s, "  uint vid : SV_VertexID;\n");
     } else {
@@ -271,9 +272,25 @@ int rqv_hlsl_ex(const rqv_prog_t *p, int lerp, const rqv_raw_t *raw, char *buf, 
             "VSOUT main(VSIN i) { VSOUT o;\n");
     if (lerp) {
         rqs(&s, "  float4 c0 = mul(i.pos0, mvp0), c1 = mul(i.pos, mvp);\n"
-                "  o.pos = c0 + ip_t * (c1 - c0);\n");
-        if (lerp == 2) { /* FIX(W224 LINE-FLICKER): w-Wechsel N-1/N -> Tick N */
-            rqs(&s, "  if (c0.w * c1.w <= 0.0) { o.pos = c1; }\n");
+                "  float ew0 = c0.w, ew1 = c1.w;\n");
+        if (lerp & 4) { /* FIX(W237 LINE-FLICKER2): P2 im RT (Strom w = 1): echte Clip-w aus Strom 3/4 */
+            rqs(&s, "  ew0 *= i.hw0; ew1 *= i.hw1;\n");
+        }
+        if (lerp & 8) { /* interp_hlerp=2: homogener Lerp im Clip-Raum */
+            rqs(&s, "  bool pre = (c0.w == 1.0 && c1.w == 1.0);\n"
+                    "  c0 *= i.hw0; c1 *= i.hw1;\n");
+        }
+        rqs(&s, "  o.pos = c0 + ip_t * (c1 - c0);\n");
+        if ((lerp & 3) == 2) { /* FIX(W224 LINE-FLICKER): w-Wechsel N-1/N -> Tick N */
+            rqs(&s, "  if (ew0 * ew1 <= 0.0) { o.pos = c1; }\n");
+            if (lerp & 4) { /* FIX(W237): unplausibler Bildsprung vor der Kamera (Nahebene, Fehlpaarung) -> Tick N */
+                rqs(&s, "  else if (ew0 > 0.0 && ew1 > 0.0) {\n"
+                        "    float2 n0 = c0.xy / c0.w, n1 = c1.xy / c1.w;\n"
+                        "    if (any(abs(n1 - n0) > 0.5 * (1.0 + max(abs(n0), abs(n1))))) { o.pos = c1; } }\n");
+            }
+        }
+        if (lerp & 8) { /* W237: wieder durch w teilen -> gleiche Rasterung (w = 1) wie das Tick-Bild */
+            rqs(&s, "  if (pre) { o.pos = float4(o.pos.xyz / o.pos.w, 1.0); }\n");
         }
     } else {
         rqs(&s, "  o.pos = mul(i.pos, mvp);\n");

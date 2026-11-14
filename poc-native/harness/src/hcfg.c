@@ -114,6 +114,7 @@ void hcfg_defaults(void)
     g_cfg.audio_pitch_range = 1; /* W89: weite Pitch-Klemme (Standard an) */
     g_cfg.audio_adpcm_lerp = 1; /* W89: ADPCM linear resamplen (Standard an) */
     g_cfg.audio_3d = 1; /* W89: DS3D-Distanzdaempfung (Standard an) */
+    g_cfg.audio_menu_sfx = 1; /* W258: Menuetoene (snk_*.wav) per HLE statt stummem DirectMusic */
     g_cfg.audio_oneshot_fix = 1; /* W95: Einmal-Toene enden am Datenende (Standard an) */
     g_cfg.audio_filter = 1; /* W102: DLS2-Voice-Filter (Standard an, A/B W102_d1/W102_f1) */
     g_cfg.movie_skip = 0;
@@ -235,10 +236,16 @@ void hcfg_defaults(void)
     g_cfg.interp_maxjump = 0.5f;
     g_cfg.interp_eyefix = 1; /* FIX(W224 LINE-FLICKER) */
     g_cfg.interp_eyediag = 0;
+    g_cfg.interp_hlerp = 0; /* W237 LINE-FLICKER2: Option, Standard aus (Nutzer-Gegenprobe offen) */
     g_cfg.pf_max = 1; /* DIAG(POPIN,W91) */
     g_cfg.interp_inst = 1; /* FIX(POPIN,W91): Instanz-Zuordnung (A/B W91_r6 vs W91_r7) */
     g_cfg.interp_pass = 1; /* FIX(POPIN,W91): Mehrpass-Konsistenz */
+    g_cfg.interp_zcons = 1; /* FIX(W251 INTERP-GROUND): Tiefen-Konsistenz exakt/gelerpt je Ziel */
     g_cfg.im_fast = 1; /* W99 IM-PERF: schneller VB-Pfad (A/B W99_rt0s0/rt1s0b, L0a/L1a, Selbstpruefung W99_chk1) */
+    g_cfg.draw_state_cache = 1; /* W253 DRAW-OPT: redundante Set-Aufrufe entfallen (Bild bitgleich, BERICHT_M2 W253) */
+    g_cfg.im_cb_ring = 1; /* W253 DRAW-OPT: Draw-Konstanten im Ring statt Map(DISCARD) je Draw */
+    g_cfg.blend_obj_cache = 1; /* W253 DRAW-OPT: Blend-Objekt-Tabelle */
+    g_cfg.rtt_lookup_filter = 1; /* W204/W253 DRAW-OPT: RT-Adressfilter */
     g_cfg.im_end_reset = 1; /* W64 EDGE: IM-Batch nach End geschlossen (Fix, kein Geister-Quad im Hor+-Rand) */
     g_cfg.fx_blend_eq = 1; /* W90 FX-ORIG: Blend-Gleichung/-Farbe (Fix) */
     g_cfg.clear_xbflags = 1; /* W101/W177 CLEAR-XB: Xbox-Clear-Flags an (Nacht 8.11. P_N1cf: keine Kosten, Hilfetext korrekt) */
@@ -273,6 +280,7 @@ void hcfg_defaults(void)
     g_cfg.photo_cam_pitch = 25;
     g_cfg.photo_cam_dist = 4;
     g_cfg.photo_rt_max = 8192;          /* W233 SHOT-8K-MONITOR */
+    g_cfg.photo_aa = 2;                 /* W249 PHOTO-PIXEL: Kantenglaettung 2x2 */
     strcpy_s(g_cfg.feedback_repo, sizeof g_cfg.feedback_repo, SB_FEEDBACK_REPO_DEFAULT); /* W188 */
     strcpy_s(g_cfg.lang, sizeof g_cfg.lang, "en"); /* W142: [ui] lang */
     g_cfg.perf_hud = 0;                 /* W122: Leistungs-Overlay aus (Taste aktiv) */
@@ -340,6 +348,7 @@ void hcfg_defaults(void)
     g_cfg.fx_alphakill = 1; /* W98 STARTSEQ-BARS: ALPHAKILL in der Mission (Fix) */
     g_cfg.fx_alphatest = 1; /* W90 FX-ORIG: Alpha-Test (Fix) */
     g_cfg.fx_ps_c0 = 1; /* W90 FX-ORIG: Effekt-PS (V0+C0)*T0 (Fix) */
+    g_cfg.ps_mul_c0 = 1; /* W257 LOAD-VT-COLOR: PS V0*C0 (Drahtgitter-VT-Farbe, Fix) */
     g_cfg.fx_im_uv = 1; /* W90 FX-ORIG: IM-UV aus oT0-Quelle (Fix) */
     g_cfg.fx_soft = 0; /* W133 REM-FX: Effekt-Optionen = Original */
     g_cfg.fx_embers = 0;
@@ -442,6 +451,17 @@ void hcfg_defaults(void)
     g_cfg.screenshot_max = 400;
     g_cfg.replay[0] = '\0';
     g_cfg.replay_steps[0] = '\0';
+    g_cfg.replay_autoplay[0] = '\0'; /* W254 REPLAY-LAUNCHER */
+    g_cfg.replay_camera = -1;
+    g_cfg.replay_autoplay_shots = 0;
+    g_cfg.video_export[0] = '\0'; /* W255 VIDEO-EXPORT */
+    g_cfg.video_width = 1920;
+    g_cfg.video_height = 1080;
+    g_cfg.video_fps = 30;
+    g_cfg.video_kbps = 0;
+    g_cfg.video_audio = 1;
+    g_cfg.video_hw = 1;
+    g_cfg.video_interp = 1;
     g_cfg.turbo_until_frame = 0;
     g_cfg.turbo_until_mode = 0;
     g_cfg.vblank_qpc = 1; /* W73: QPC-Zeitbasis (gleichmaessige 33,3-ms-Fenster, Spieler-Standard; wirkt nur mit vblank_hz>0) */
@@ -582,6 +602,8 @@ static int set_key_overlay(const char *k, const char *v)
     else if (strcmp(k, "photo_cam_dist") == 0) { g_cfg.photo_cam_dist = atoi(v); }
     else if (strcmp(k, "photo_rt_max") == 0) { g_cfg.photo_rt_max = atoi(v); } /* W233 */
     else if (strcmp(k, "photo_rt_fail_test") == 0) { g_cfg.photo_rt_fail_test = atoi(v); } /* TEST(W233) */
+    else if (strcmp(k, "photo_aa") == 0) { g_cfg.photo_aa = atoi(v); } /* W249 */
+    else if (strcmp(k, "photo_diag") == 0) { g_cfg.photo_diag = atoi(v); } /* DIAG(W249) */
     else if (strcmp(k, "repo") == 0 || strcmp(k, "feedback_repo") == 0) { /* W188 [feedback] repo */
         strncpy_s(g_cfg.feedback_repo, sizeof g_cfg.feedback_repo, v, _TRUNCATE);
     }
@@ -800,6 +822,8 @@ static void set_key(const char *k, const char *v)
         g_cfg.audio_filter = atoi(v);
     } else if (strcmp(k, "audio_level_diag") == 0) {
         g_cfg.audio_level_diag = atoi(v);
+    } else if (strcmp(k, "audio_menu_sfx") == 0) {
+        g_cfg.audio_menu_sfx = atoi(v);
     } else if (strcmp(k, "audio_voice_diag") == 0) {
         g_cfg.audio_voice_diag = atoi(v);
     } else if (strcmp(k, "audio_loop_fix") == 0) {
@@ -1088,6 +1112,8 @@ static void set_key(const char *k, const char *v)
         g_cfg.interp_shot_max = atoi(v);
     } else if (strcmp(k, "interp_inst") == 0) {
         g_cfg.interp_inst = atoi(v);
+    } else if (strcmp(k, "interp_zcons") == 0) {
+        g_cfg.interp_zcons = atoi(v);
     } else if (strcmp(k, "interp_pass") == 0) {
         g_cfg.interp_pass = atoi(v);
     } else if (strcmp(k, "pf_ring") == 0) {
@@ -1116,12 +1142,26 @@ static void set_key(const char *k, const char *v)
         g_cfg.movie_skip_delay = atoi(v);
     } else if (strcmp(k, "interp_eyefix") == 0) {
         g_cfg.interp_eyefix = atoi(v);
+    } else if (strcmp(k, "interp_hlerp") == 0) {
+        g_cfg.interp_hlerp = atoi(v);
+    } else if (strcmp(k, "interp_ddrel") == 0) {
+        g_cfg.interp_ddrel = atoi(v);
     } else if (strcmp(k, "interp_eyediag") == 0) {
         g_cfg.interp_eyediag = atoi(v);
     } else if (strcmp(k, "interp_maxjump") == 0) {
         g_cfg.interp_maxjump = (float)atof(v);
     } else if (strcmp(k, "im_fast") == 0) {
         g_cfg.im_fast = atoi(v);
+    } else if (strcmp(k, "rtt_lookup_filter") == 0) {
+        g_cfg.rtt_lookup_filter = atoi(v);
+    } else if (strcmp(k, "draw_tick_diag") == 0) {
+        g_cfg.draw_tick_diag = atoi(v);
+    } else if (strcmp(k, "draw_state_cache") == 0) {
+        g_cfg.draw_state_cache = atoi(v);
+    } else if (strcmp(k, "im_cb_ring") == 0) {
+        g_cfg.im_cb_ring = atoi(v);
+    } else if (strcmp(k, "blend_obj_cache") == 0) {
+        g_cfg.blend_obj_cache = atoi(v);
     } else if (strcmp(k, "im_end_reset") == 0) {
         g_cfg.im_end_reset = atoi(v);
     } else if (strcmp(k, "fx_blend_eq") == 0) {
@@ -1142,6 +1182,8 @@ static void set_key(const char *k, const char *v)
         g_cfg.fx_alphatest = atoi(v);
     } else if (strcmp(k, "fx_ps_c0") == 0) {
         g_cfg.fx_ps_c0 = atoi(v);
+    } else if (strcmp(k, "ps_mul_c0") == 0) {
+        g_cfg.ps_mul_c0 = atoi(v);
     } else if (strcmp(k, "fx_shots") == 0) {
         g_cfg.fx_shots = atoi(v);
     } else if (strcmp(k, "fx_im_uv") == 0) {
@@ -1284,6 +1326,28 @@ static void set_key(const char *k, const char *v)
         g_cfg.screenshot_every = atoi(v);
     } else if (strcmp(k, "screenshot_max") == 0) {
         g_cfg.screenshot_max = atoi(v);
+    } else if (strcmp(k, "replay_autoplay") == 0) { /* W254 REPLAY-LAUNCHER */
+        strncpy_s(g_cfg.replay_autoplay, sizeof g_cfg.replay_autoplay, v, _TRUNCATE);
+    } else if (strcmp(k, "replay_camera") == 0) {
+        g_cfg.replay_camera = atoi(v);
+    } else if (strcmp(k, "replay_autoplay_shots") == 0) {
+        g_cfg.replay_autoplay_shots = atoi(v);
+    } else if (strcmp(k, "video_export") == 0) { /* W255 VIDEO-EXPORT */
+        strncpy_s(g_cfg.video_export, sizeof g_cfg.video_export, v, _TRUNCATE);
+    } else if (strcmp(k, "video_width") == 0) {
+        g_cfg.video_width = (unsigned)atoi(v);
+    } else if (strcmp(k, "video_height") == 0) {
+        g_cfg.video_height = (unsigned)atoi(v);
+    } else if (strcmp(k, "video_fps") == 0) {
+        g_cfg.video_fps = atoi(v);
+    } else if (strcmp(k, "video_kbps") == 0) {
+        g_cfg.video_kbps = atoi(v);
+    } else if (strcmp(k, "video_audio") == 0) {
+        g_cfg.video_audio = atoi(v);
+    } else if (strcmp(k, "video_hw") == 0) {
+        g_cfg.video_hw = atoi(v);
+    } else if (strcmp(k, "video_interp") == 0) {
+        g_cfg.video_interp = atoi(v);
     } else if (strcmp(k, "replay_steps") == 0) {
         strncpy_s(g_cfg.replay_steps, sizeof g_cfg.replay_steps, v,
                   sizeof g_cfg.replay_steps - 1);
@@ -1405,6 +1469,8 @@ static void set_key(const char *k, const char *v)
     } else if (strcmp(k, "replay") == 0) {
         strncpy_s(g_cfg.replay, sizeof g_cfg.replay, v,
                   sizeof g_cfg.replay - 1);
+    } else if (strcmp(k, "update_check") == 0) {
+        /* W250 UPDATE-CHECK: Einstellung nur fuer den Launcher (user.cfg) */
     } else {
         HLOG_W("cfg: unbekannter Key '%s'", k);
     }

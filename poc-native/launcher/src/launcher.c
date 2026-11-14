@@ -24,6 +24,7 @@
 #include "sb_edition.h" /* W116 EDITIONS */
 #include "sb_userdata.h" /* W150 USER-DATA */
 #include "sb_gamever.h" /* W231 US-LAUNCHER: Selbsttest */
+#include "launcher_update.h" /* W250 UPDATE-CHECK */
 
 static void dpi_init(void)
 {
@@ -122,6 +123,8 @@ static void cli_usage(void)
            "  --dry-run               mit --start: nur schreiben, nicht starten\n"
            "  --vr                    mit --start: VR-Start (sonst Bildschirm)\n"
            "  --wait                  mit --start: auf Client warten, Exitcode deuten\n"
+           "  --replay ID             mit --start: gespeichertes Replay direkt abspielen (experimentell)\n"
+           "  --replay-camera N       mit --replay: Kamera fest (0 Cockpit, 1 Vollbild, 2..6 au" U8_SZ "en)\n"
            "  --profile NAME          Profil statt user.cfg als Basis laden\n"
            "  --save-profile NAME     Profil aus Basis + --set speichern\n"
            "  --list-profiles         Profile + Standard-Profil auflisten\n"
@@ -141,12 +144,15 @@ static void cli_usage(void)
            "                          Bildschirms, ohne Fokus\n"
            "  --state NAME            mit --ui-shot: Regelzustand (nodata, fullscreen,\n"
            "                          window43, controller, custom, diag, pack2, pack3,\n"
-           "                          effectpack, ready, ready_controller),\n"
+           "                          effectpack, ready, ready_controller,\n"
+           "                          update_ask, update_new, update_dev),\n"
            "                          nur Anzeige (Packs-Ordner: Umgebung SB_PACKS_DIR)\n"
            "  --dpi N                 mit --ui-shot/--bind-shot: DPI erzwingen\n"
            "                          (144 = 150 %%)\n"
            "  --bg 0|1|beide          mit --ui-shot: Hintergrundbild\n"
            "  --lang en|de            Sprache (statt [ui] lang aus cfg)\n"
+           "  --update-check          Test: einmal auf neue Version pr" U8_UE "fen (W250,\n"
+           "                          --as-version V statt der eingebauten Version)\n"
            "  --gui-start-dry         Test: GUI-Startpfad (user.cfg +\n"
            "                          Spielerbetrieb), Client nicht starten\n");
 }
@@ -204,6 +210,11 @@ void app_load_effective(const char *client_dir, launcher_settings_t *s,
     lcfg_user_cfg_path(client_dir, p, sizeof p); /* W150 USER-DATA */
     if (lcfg_load_file_count(p, s, &keys) == 0) {
         kind = 1;
+        /* W250: eine user.cfg, die nur die Update-Antwort traegt (Frage beim
+         * allerersten Start beantwortet, nie gespeichert), bleibt Erststart. */
+        if (keys == 1 && lupd_cfg_get(p) >= 0) {
+            kind = 0;
+        }
     }
     {
         /* Standard-Profil gewinnt ueber user.cfg (W47). */
@@ -1478,10 +1489,15 @@ static int cli_selftest(const char *client_override)
                 } else if (k == LGK_RT) { b.rt_scale = 4;
                 } else if (k == LGK_DYN) { b.rt_scale_dyn = 1;
                 } else if (k == LGK_MATCH) { b.fs_interp_match = !b.fs_interp_match;
+                } else if (k == LGK_MFX) { b.monitor_fx = !b.monitor_fx; /* W252 */
                 } else {
                     b.remaster = b.hd_textures = !b.hd_textures;
                 }
-                if (lcfg_gfx_preset(&b, 0) != LGP_CUSTOM || lcfg_gfx_base(&b, 0) != p) {
+                /* W252: Klare Sicht und Original liegen zwei Schluessel auseinander;
+                 * bei Gleichstand nennt die Basis das kleinere Preset (p bleibt
+                 * eine der naechsten). */
+                if (lcfg_gfx_preset(&b, 0) != LGP_CUSTOM ||
+                    lcfg_gfx_diff(&b, lcfg_gfx_base(&b, 0), 0, NULL) != lcfg_gfx_diff(&b, p, 0, NULL)) {
                     _snprintf_s(why, sizeof why, _TRUNCATE, "P%d: %s geaendert -> %d/Basis %d", p,
                                 lcfg_gfx_key(k), lcfg_gfx_preset(&b, 0), lcfg_gfx_base(&b, 0));
                 }
@@ -1544,7 +1560,7 @@ static int cli_selftest(const char *client_override)
             }
         }
         if (!why[0]) {
-            T_OK("52 gfx-preset-p4 (4 Presets + Custom, Client-Tabelle, Effect Pack, Etikett)");
+            T_OK("52 gfx-preset-p4 (5 Presets + Custom, Client-Tabelle, Effect Pack, Etikett)");
         } else {
             T_FAIL("52 gfx-preset-p4", "%s", why);
         }
@@ -1584,6 +1600,89 @@ static int cli_selftest(const char *client_override)
         u8_DeleteFile(tmp);
         if (ok) { T_OK("W207 lowend (60 FPS, native RT, save/load, Custom, rules)"); }
         else { T_FAIL("W207 lowend", "%s", "values/persistence/rules"); }
+    }
+
+    /* W252 CLEAR-VIEW: Klare Sicht = Original ohne Weltbeleuchtung und ohne
+     * Monitor-Effekte; Speichern/Laden, Standard unveraendert, alte cfg ohne
+     * monitor_fx = Original, Einzelaenderungen -> Benutzerdefiniert. */
+    {
+        char why[96] = "";
+        int k;
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w252_clear.cfg");
+        u8_DeleteFile(tmp);
+        lcfg_defaults(&a);
+        if (a.monitor_fx != 1 || lcfg_gfx_preset(&a, 0) != LGP_ORIGINAL) { strcpy_s(why, sizeof why, "Standard"); }
+        b = a;
+        lcfg_gfx_apply(&a, LGP_CLEAR);
+        for (k = 0; k < LGK_N && !why[0]; k++) { /* nur shading und monitor_fx anders als Original */
+            if (!lcfg_gfx_owned(k)) { continue; }
+            if ((lcfg_gfx_value(&a, k) != lcfg_gfx_value(&b, k)) != (k == LSHX_SHADING || k == LGK_MFX)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Wert %s", lcfg_gfx_key(k));
+            }
+        }
+        if (!why[0] && (a.shx[LSHX_SHADING] != 0 || a.monitor_fx != 0 || a.interp_fps != 120 ||
+                        a.rt_scale != 0 || !a.fs_interp_match || a.edge_mode != b.edge_mode ||
+                        a.monitor_grain != 100 || a.monitor_glitch != 100 ||
+                        lcfg_gfx_preset(&a, 0) != LGP_CLEAR)) { strcpy_s(why, sizeof why, "Sollwerte"); }
+        if (!why[0] && lcfg_save_user(tmp, &a) != 0) { strcpy_s(why, sizeof why, "speichern"); }
+        if (!why[0]) {
+            FILE *g = NULL;
+            char buf2[16384] = "";
+            if (u8_fopen_s(&g, tmp, "r") == 0 && g) {
+                (void)fread(buf2, 1, sizeof buf2 - 1, g);
+                fclose(g);
+            }
+            lcfg_defaults(&b);
+            lcfg_load_file(tmp, &b);
+            if (memcmp(&a, &b, sizeof a) || lcfg_gfx_preset(&b, 0) != LGP_CLEAR ||
+                !strstr(buf2, "monitor_fx=0") || !strstr(buf2, "shading=0")) {
+                strcpy_s(why, sizeof why, "Rundweg");
+            }
+        }
+        lcfg_defaults(&b); /* alte cfg ohne monitor_fx: Original; 2 (DIAG) = Custom */
+        lcfg_apply_set(&b, "shading=1");
+        if (!why[0] && (b.monitor_fx != 1 || lcfg_gfx_preset(&b, 0) != LGP_ORIGINAL)) { strcpy_s(why, sizeof why, "alt"); }
+        lcfg_apply_set(&b, "monitor_fx=2");
+        if (!why[0] && (b.monitor_fx != 2 || lcfg_gfx_preset(&b, 0) != LGP_CUSTOM)) { strcpy_s(why, sizeof why, "diag 2"); }
+        lcfg_apply_set(&b, "monitor_fx=0"); /* nur Monitor aus: Benutzerdefiniert */
+        if (!why[0] && (lcfg_gfx_preset(&b, 0) != LGP_CUSTOM || lcfg_gfx_base(&b, 0) != LGP_ORIGINAL)) {
+            strcpy_s(why, sizeof why, "nur monitor_fx");
+        }
+        lcfg_apply_set(&b, "shading=0"); /* beide aus = Klare Sicht */
+        if (!why[0] && lcfg_gfx_preset(&b, 0) != LGP_CLEAR) { strcpy_s(why, sizeof why, "beide aus"); }
+        lcfg_gfx_apply(&b, LGP_ORIGINAL);
+        if (!why[0] && (b.monitor_fx != 1 || b.shx[LSHX_SHADING] != 1)) { strcpy_s(why, sizeof why, "zurueck"); }
+        u8_DeleteFile(tmp);
+        if (!why[0]) { T_OK("W252 clear-view (shading 0 + monitor_fx 0, save/load, alt, Custom)"); }
+        else { T_FAIL("W252 clear-view", "%s", why); }
+    }
+
+    /* W259 SETTINGS-RESET: 3-Wege-Abgleich (reine Logik). ui == base ->
+     * Dateiwert (ESC "Als Standard speichern"), ui != base -> Launcher
+     * gewinnt, Pfade bleiben beim Launcher. */
+    {
+        launcher_settings_t ui, base, disk;
+        char why[96] = "";
+        int n;
+        lcfg_defaults(&base);
+        strcpy_s(base.media_root, sizeof base.media_root, "C:/spiel");
+        ui = base;
+        disk = base;
+        disk.shx[LSHX_LWORLD] = 150;   /* im Spiel gespeichert */
+        disk.shx[LSHX_SAT] = 130;      /* im Spiel gespeichert, im Launcher auch geaendert */
+        disk.cockpit_width = 4;
+        strcpy_s(disk.media_root, sizeof disk.media_root, "C:/anders");
+        ui.shx[LSHX_SAT] = 90;         /* Launcher-Aenderung */
+        ui.width = 1600;               /* Launcher-Aenderung, Datei unveraendert */
+        n = lcfg_merge_external(&ui, &base, &disk);
+        if (n != 2) { _snprintf_s(why, sizeof why, _TRUNCATE, "n=%d statt 2", n); }
+        if (!why[0] && (ui.shx[LSHX_LWORLD] != 150 || ui.cockpit_width != 4)) { strcpy_s(why, sizeof why, "Spielwert verloren"); }
+        if (!why[0] && (ui.shx[LSHX_SAT] != 90 || ui.width != 1600)) { strcpy_s(why, sizeof why, "Launcher-Aenderung verloren"); }
+        if (!why[0] && strcmp(ui.media_root, "C:/spiel") != 0) { strcpy_s(why, sizeof why, "Pfad uebernommen"); }
+        if (!why[0] && lcfg_merge_external(&ui, &disk, &disk) != 0) { strcpy_s(why, sizeof why, "zweiter Abgleich nicht leer"); }
+        if (!why[0]) { T_OK("W259 settings-merge (ESC-Wert bleibt, Launcher-Aenderung gewinnt, Pfade beim Launcher)"); }
+        else { T_FAIL("W259 settings-merge", "%s", why); }
     }
 
     /* W223 FPS-RATES: Liste, auto-Aufloesung, Pruefung, Speichern, Preset, R10. */
@@ -3009,7 +3108,35 @@ static int cli_selftest(const char *client_override)
     lrules_selftest(&pass, &fail);
     /* 30-37 (W148): Packs-Seite + Render-Skalierung (launcher_packtest.c). */
     packs_selftest(&pass, &fail);
+    lupd_selftest(&pass, &fail); /* W250 UPDATE-CHECK (ohne Netz) */
+    { /* W250: user.cfg nur mit der Update-Antwort = weiter Erststart */
+        char d[1100], uc[1200];
+        int k1 = -1, k2 = -1;
+        launcher_settings_t s1;
+        u8_GetTempPath(d, sizeof d);
+        strcat_s(d, sizeof d, "w250_firstrun");
+        lcfg_mkdir_p(d);
+        _snprintf_s(uc, sizeof uc, _TRUNCATE, "%s/user.cfg", d);
+        u8_DeleteFile(uc);
+        if (lupd_cfg_set(uc, 0) == 0) {
+            app_load_effective(d, &s1, NULL, 0, &k1, "de");
+        }
+        if ((f = NULL, u8_fopen_s(&f, uc, "a")) == 0 && f) {
+            fputs("width=1280\n", f);
+            fclose(f);
+            app_load_effective(d, &s1, NULL, 0, &k2, "de");
+        }
+        u8_DeleteFile(uc);
+        if (k1 == 0 && k2 == 1 && s1.width == 1280) {
+            T_OK("W250 update: user.cfg nur mit Update-Antwort bleibt Erststart, mit weiteren Werten nicht");
+        } else {
+            T_FAIL("W250 update Erststart", "kind %d/%d", k1, k2);
+        }
+        sb_lang_set("de");
+    }
 
+    if (!ls_replay_selftest()) { T_OK("W254 replay list (folders, SaveMeta name, mission, signature state, order, set args)"); }
+    else { T_FAIL("W254 replay list", "%s", "failed"); }
     if (!ls_selftest()) { T_OK("W199 save-import layouts, conflicts, backup, ZIP roundtrip, rejection"); }
     else { T_FAIL("W199 save-import", "%s", "failed"); }
     st_valid_cleanup(); /* COMM-SELFTEST2 */
@@ -3380,7 +3507,8 @@ int app_launch_client(const char *client_dir, const char *xbe_path,
  * Bildschirm: --set vr_enable=0 (VR immer aus); --vr: vr_enable=1 +
  * Vorschau. 0 = ok. */
 static int cli_start(const char *client_override, const char *profile,
-                     const char *set, int dry_run, int vr, int wait)
+                     const char *set, int dry_run, int vr, int wait,
+                     const char *replay, int replay_cam)
 {
     launcher_settings_t s;
     lcfg_gameinfo_t gi;
@@ -3428,6 +3556,22 @@ static int cli_start(const char *client_override, const char *profile,
     }
     printf("edition: %s%s\n", gi.edition == LCFG_ED_US ? "US (NTSC-U)" : "EU (PAL)",
            gi.needs_allow ? ", experimental (allow_ntsc_u=1)" : "");
+    if (replay && *replay) { /* W254 REPLAY-LAUNCHER: wie "Play replay" im Fenster */
+        char base[1100], hdd[1200], ra[200];
+        wchar_t wh[1200], wid[40];
+        app_hdd_base(client, s.hdd_root, base, sizeof base);
+        lcfg_hdd_for_edition(base, gi.edition, hdd, sizeof hdd);
+        u8_to_w(hdd, wh, 1200);
+        u8_to_w(replay, wid, 40);
+        if (strlen(replay) > 32 || !ls_replay_exists(wh, wid)) {
+            printf("FEHLER: Replay '%s' nicht gefunden (UDATA/43430002/<id>/st00_0.rep).\n", replay);
+            return 1;
+        }
+        ls_replay_set_args(wid, replay_cam, ra, sizeof ra);
+        strcat_s(set_args, sizeof set_args, ";");
+        strcat_s(set_args, sizeof set_args, ra);
+        printf("replay: %s (experimentell)\n", ra);
+    }
     {
         char xbe[1024]; /* W172: im Ordner-Modus abgeleitet */
         lcfg_xbe_effective(&s, xbe, sizeof xbe);
@@ -3584,6 +3728,20 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
     } else if (cli_flag(argc, argv, "--selftest")) {
         cli_console();
         rc = cli_selftest(client_override);
+    } else if (cli_flag(argc, argv, "--update-check")) { /* W250: ein echter Abruf (Beleg) */
+        const char *as = cli_value(argc, argv, "--as-version");
+        lupd_res_t r;
+        cli_console();
+        lupd_fetch(as ? as : lupd_version(), &r);
+        printf("Anfrage-Kopfzeilen:\n%s", r.req_headers);
+        printf("update: eigene Version %s, HTTP %d, %u Bytes, neuestes Release %s%s -> %s%s%s\n",
+               as ? as : (lupd_version()[0] ? lupd_version() : "(keine)"), r.http_status,
+               (unsigned)r.bytes, r.rel.tag[0] ? r.rel.tag : "-", r.rel.prerelease ? " (Prerelease)" : "",
+               r.result == LUPD_R_NEWER ? "NEUER" : r.result == LUPD_R_CURRENT ? "aktuell"
+               : r.result == LUPD_R_NOVER ? "keine Release-Version" : r.result == LUPD_R_HTTP ? "HTTP-Fehler"
+               : r.result == LUPD_R_NET ? "kein Netz" : "unlesbar",
+               r.rel.url[0] ? ", Seite " : "", r.rel.url[0] ? (lupd_url_ok(r.rel.url) ? r.rel.url : "(abgelehnt)") : "");
+        rc = r.result == LUPD_R_NEWER || r.result == LUPD_R_CURRENT ? 0 : 1;
     } else if (cli_value(argc, argv, "--check-image")) { /* W150 ISO-DIRECT */
         char m[1200];
         cli_console();
@@ -3620,13 +3778,24 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
     } else if (cli_flag(argc, argv, "--gui-start-dry")) {
         cli_console();
         o.shot = 4;
+        if (cli_value(argc, argv, "--replay")) { /* W254: Startweg "Play replay" (Trockenlauf) */
+            strcpy_s(o.replay, sizeof o.replay, cli_value(argc, argv, "--replay"));
+            o.replay_cam = cli_value(argc, argv, "--replay-camera")
+                               ? atoi(cli_value(argc, argv, "--replay-camera")) : -1;
+            if (cli_value(argc, argv, "--video")) { /* W255: Startweg "Export video" (Trockenlauf, Standardordner) */
+                strcpy_s(o.video, sizeof o.video, cli_value(argc, argv, "--video"));
+            }
+        }
         rc = gui_main(client_override, &o);
     } else if (cli_flag(argc, argv, "--start")) {
         cli_console();
         rc = cli_start(client_override, profile, cli_value(argc, argv, "--set"),
                        cli_flag(argc, argv, "--dry-run"),
                        cli_flag(argc, argv, "--vr"),
-                       cli_flag(argc, argv, "--wait")); /* W231 */
+                       cli_flag(argc, argv, "--wait"), /* W231 */
+                       cli_value(argc, argv, "--replay"), /* W254 */
+                       cli_value(argc, argv, "--replay-camera")
+                           ? atoi(cli_value(argc, argv, "--replay-camera")) : -1);
     } else if (cli_value(argc, argv, "--write-user-profile")) {
         cli_console();
         rc = cli_write_user_profile(
@@ -3647,6 +3816,9 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
         } else if (bv && strcmp(bv, "joy") == 0) { /* W226: HOTAS-Beispiel */
             o.bind_sel = lctrl_bind_elem_index("pedal_r");
             o.bind_joydemo = 1;
+        } else if (bv && strcmp(bv, "wheel") == 0) { /* W260: Mausrad-Beispiel */
+            o.bind_sel = lctrl_bind_elem_index("tuner.up");
+            o.bind_wheeldemo = 1;
         } else if (bv) {
             o.bind_sel = lctrl_bind_elem_index(bv);
         }

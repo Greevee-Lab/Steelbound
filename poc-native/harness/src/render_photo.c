@@ -615,13 +615,9 @@ static void ph_world_layout(float W, float H, int asp, float *dx, float *dy, flo
     *dy = (H - *dh) * 0.5f;
 }
 
-static int ph_scale_ok(int i, int cockpit)
+/* Ausgabe w x h (bzw. intern gerendert, W249) in den D3D11-Grenzen (Viewport, Welt-RT-Abbildung)? */
+static int ph_dims_ok(unsigned w, unsigned h, int cockpit)
 {
-    unsigned w, h;
-    if (i < 0 || i >= SB_PHOTO_NSCALE) { return 0; }
-    if (i == 0 && cockpit) { return 1; }
-    if (!ph_rec_ok()) { return 0; }
-    ph_out_size(i, cockpit, &w, &h);
     if (w > (unsigned)PH_VPMAX || h > (unsigned)PH_VPMAX) { return 0; }
     if (!cockpit) { /* Welt-RT-Viewport (volles RT, auf die Ausgabe abgebildet) in den D3D11-Grenzen */
         float dx, dy, dw, dh, fx;
@@ -639,6 +635,27 @@ static int ph_scale_ok(int i, int cockpit)
         }
     }
     return 1;
+}
+
+static int ph_scale_ok(int i, int cockpit)
+{
+    unsigned w, h;
+    if (i < 0 || i >= SB_PHOTO_NSCALE) { return 0; }
+    if (i == 0 && cockpit) { return 1; }
+    if (!ph_rec_ok()) { return 0; }
+    ph_out_size(i, cockpit, &w, &h);
+    return ph_dims_ok(w, h, cockpit);
+}
+
+/* W249 PHOTO-PIXEL: Kantenglaettung der gekachelten Aufnahme. Intern s-fach (2 oder 4, photo_aa) rendern und je
+ * s x s Pixel mitteln (Supersampling). Ohne sie hat ein Foto x4/x8 harte 1-Pixel-Treppen an jeder Kante (das Spiel
+ * zeichnet ohne Kantenglaettung) - im Bildbetrachter vergroessert wirkt das wie "pixelig". s sinkt, bis die
+ * interne Groesse in den D3D11-Grenzen liegt (x8 bei grossen Fenstern: ohne). Kacheln 4096x1024 sind durch 2/4 teilbar. */
+static unsigned ph_aa_factor(unsigned w, unsigned h, int cockpit)
+{
+    unsigned s = g_cfg.photo_aa >= 4 ? 4u : g_cfg.photo_aa >= 2 ? 2u : 1u;
+    while (s > 1u && !ph_dims_ok(w * s, h * s, cockpit)) { s /= 2u; }
+    return s;
 }
 
 void sb_photo_enter(void)
@@ -927,6 +944,31 @@ static void ph_copy_rows(const D3D11_MAPPED_SUBRESOURCE *m, DXGI_FORMAT fmt, BYT
     }
 }
 
+/* W249: wie ph_copy_rows, je s x s Quellpixel gemittelt (w, h = Zielpixel; Quelle s*w x s*h) */
+static void ph_copy_rows_aa(const D3D11_MAPPED_SUBRESOURCE *m, DXGI_FORMAT fmt, BYTE *strip, unsigned stride, unsigned x0,
+                            unsigned w, unsigned h, unsigned sf)
+{
+    unsigned x, y, i, j, n = sf * sf;
+    int bgra = fmt == DXGI_FORMAT_B8G8R8A8_UNORM || fmt == DXGI_FORMAT_B8G8R8X8_UNORM;
+    for (y = 0; y < h; y++) {
+        BYTE *d = strip + (size_t)y * stride + (size_t)x0 * 3u;
+        for (x = 0; x < w; x++) {
+            unsigned r = 0, g = 0, b = 0;
+            for (j = 0; j < sf; j++) {
+                const BYTE *s = (const BYTE *)m->pData + (size_t)(y * sf + j) * m->RowPitch + (size_t)x * sf * 4u;
+                for (i = 0; i < sf; i++) {
+                    r += s[i * 4 + (bgra ? 2 : 0)];
+                    g += s[i * 4 + 1];
+                    b += s[i * 4 + (bgra ? 0 : 2)];
+                }
+            }
+            d[x * 3 + 0] = (BYTE)((b + n / 2u) / n);
+            d[x * 3 + 1] = (BYTE)((g + n / 2u) / n);
+            d[x * 3 + 2] = (BYTE)((r + n / 2u) / n);
+        }
+    }
+}
+
 /* ------------------------------------------------------------------ */
 /* Foto-Wiedergabe                                                     */
 /* ------------------------------------------------------------------ */
@@ -1052,6 +1094,7 @@ static unsigned ph_mission_no(int *inm)
 static int ph_capture(ID3D11Resource *still)
 {
     unsigned W, H, TW, TH, ty, tx, n = (unsigned)kPhScale[ph_scale];
+    unsigned sf = 1, IW, IH; /* W249: Kantenglaettung (intern sf-fach, IW x IH) */
     int cockpit = ph_cockpit, direct, ok = 0, inm;
     char dir[600], name[160], path8[800];
     wchar_t wdir[700], wpath[800];
@@ -1072,6 +1115,9 @@ static int ph_capture(ID3D11Resource *still)
     }
     ph_out_size(ph_scale, cockpit, &W, &H);
     direct = cockpit && n == 1u && !(ph_free && ph_rec_ok()); /* Standbild direkt */
+    if (!direct) { sf = ph_aa_factor(W, H, cockpit); }
+    IW = W * sf;
+    IH = H * sf;
     fmt = direct ? ph_fmt_of(still) : cockpit ? ph_fmt_of((ID3D11Resource *)ph_cen.bb_tex) : ph_fmt_of((ID3D11Resource *)ph_cen.w_tex);
     if (fmt != DXGI_FORMAT_R8G8B8A8_UNORM && fmt != DXGI_FORMAT_B8G8R8A8_UNORM && fmt != DXGI_FORMAT_B8G8R8X8_UNORM) {
         HLOG_W("PHOTO: Bildformat %d nicht unterstuetzt", (int)fmt);
@@ -1101,8 +1147,8 @@ static int ph_capture(ID3D11Resource *still)
             if (GetFileAttributesW(wpath) == INVALID_FILE_ATTRIBUTES) { break; }
         }
     }
-    if (direct) { TW = W; TH = H; } else { TW = W < PH_TW ? W : PH_TW; TH = H < PH_TH ? H : PH_TH; }
-    strip = (BYTE *)malloc((size_t)W * 3u * (size_t)TH);
+    if (direct) { TW = W; TH = H; } else { TW = IW < PH_TW ? IW : PH_TW; TH = IH < PH_TH ? IH : PH_TH; } /* intern */
+    strip = (BYTE *)malloc((size_t)W * 3u * (size_t)(TH / sf));
     if (!strip) {
         HLOG_W("PHOTO: kein Speicher fuer Streifen %ux%u", W, TH);
         return 0;
@@ -1119,11 +1165,12 @@ static int ph_capture(ID3D11Resource *still)
     ok = 1;
     memset(&sc_r, 0, sizeof sc_r);
     memset(&sc_pi, 0, sizeof sc_pi);
-    if (!direct && cockpit && n > 1u) { (void)ph_setup_sc(&sc_r, &sc_pi, n); } /* Monitore/Welt scharf */
-    for (ty = 0; ty < H && ok; ty += TH) {
-        unsigned th = H - ty < TH ? H - ty : TH;
-        for (tx = 0; tx < W && ok; tx += TW) {
-            unsigned tw = W - tx < TW ? W - tx : TW;
+    if (sf > 1u) { HLOG_I("PHOTO: Kantenglaettung x%u (intern %ux%u, je %ux%u Pixel gemittelt)", sf, IW, IH, sf, sf); }
+    if (!direct && cockpit && n * sf > 1u) { (void)ph_setup_sc(&sc_r, &sc_pi, n * sf); } /* Monitore/Welt scharf */
+    for (ty = 0; ty < IH && ok; ty += TH) {
+        unsigned th = IH - ty < TH ? IH - ty : TH;
+        for (tx = 0; tx < IW && ok; tx += TW) {
+            unsigned tw = IW - tx < TW ? IW - tx : TW;
             D3D11_MAPPED_SUBRESOURCE m;
             ID3D11Texture2D *src = NULL, *stg = NULL;
             if (direct) {
@@ -1150,12 +1197,12 @@ static int ph_capture(ID3D11Resource *still)
                 if (cockpit) {
                     r.tgt = ph_cen.bb;
                     r.tgtd = ph_cen.bbd;
-                    r.kx = r.ky = (float)n;
+                    r.kx = r.ky = (float)(n * sf);
                     r.ox = -(float)tx;
                     r.oy = -(float)ty;
                     r.cl[0] = 0; r.cl[1] = 0; r.cl[2] = (LONG)tw; r.cl[3] = (LONG)th;
-                    pi.u0 = (float)tx / (float)W; pi.v0 = (float)ty / (float)H;
-                    pi.u1 = (float)(tx + TW) / (float)W; pi.v1 = (float)(ty + TH) / (float)H;
+                    pi.u0 = (float)tx / (float)IW; pi.v0 = (float)ty / (float)IH;
+                    pi.u1 = (float)(tx + TW) / (float)IW; pi.v1 = (float)(ty + TH) / (float)IH;
                     pi.rtv = ph_tile_rtv; pi.w = TW; pi.h = TH;
                     {
                         int q;
@@ -1173,7 +1220,7 @@ static int ph_capture(ID3D11Resource *still)
                     r.ctx = &pi;
                 } else {
                     float dx, dy, dw, dh, fx;
-                    ph_world_layout((float)W, (float)H, ph_asp, &dx, &dy, &dw, &dh, &fx);
+                    ph_world_layout((float)IW, (float)IH, ph_asp, &dx, &dy, &dw, &dh, &fx);
                     ph_rep_world(&r, dx, dy, dw, dh, fx, (float)tx, (float)ty, tw, th);
                 }
                 r.rtv = ph_tile_rtv;
@@ -1190,12 +1237,13 @@ static int ph_capture(ID3D11Resource *still)
                 ok = 0;
                 break;
             }
-            ph_copy_rows(&m, fmt, strip, W * 3u, tx, tw, th);
+            if (sf > 1u) { ph_copy_rows_aa(&m, fmt, strip, W * 3u, tx / sf, tw / sf, th / sf, sf); } /* W249 */
+            else { ph_copy_rows(&m, fmt, strip, W * 3u, tx, tw, th); }
             ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)src, 0);
             if (stg) { ID3D11Texture2D_Release(stg); }
             ntiles++;
         }
-        if (ok && !ph_enc_rows(&enc, th, W * 3u, strip)) { ok = 0; }
+        if (ok && !ph_enc_rows(&enc, th / sf, W * 3u, strip)) { ok = 0; }
     }
     free(strip);
     ph_free_sc(); /* grosse Zwischenziele sofort frei */
@@ -1228,6 +1276,13 @@ ID3D11Resource *sb_photo_pause_image(ID3D11Resource *still, int *raw)
         ph_req = 0;
         ph_last_ok = ph_capture(still) ? 1 : -1;
         ph_nshot++;
+        if (g_cfg.photo_diag & 2) { /* DIAG(W249): dieselbe Aufnahme ohne Kantenglaettung (A/B, Datei _2) */
+            int aa = g_cfg.photo_aa;
+            HLOG_I("PHOTO diag: A/B - folgende Aufnahme mit photo_aa=1 (oben photo_aa=%d)", aa);
+            g_cfg.photo_aa = 1;
+            (void)ph_capture(still);
+            g_cfg.photo_aa = aa;
+        }
     }
     if (!ph_rec_ok() || (ph_cockpit && !ph_free)) {
         ph_view_valid = 0;

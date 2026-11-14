@@ -2635,6 +2635,145 @@ static void run_joy_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
     }
 }
 
+/* W260 MOUSE-WHEEL: Rasten -> Impulse (Profil-Pfad, echte Maus). */
+static void wheel_snap(imap_snap_t *s, unsigned frame, unsigned mask)
+{
+    static const cfgvar_t c = { 1, 0, 0, 1, 4, 0, 0 };
+    make_snap(s, frame, &c);
+    s->replay_active = 0;  /* echter Pfad */
+    s->mouse_raw = 1;      /* keine Cursor-Abfrage */
+    s->real_vk = NULL;
+    s->wheel_mask = mask;
+}
+static int wheel_real_vk(int vk) { (void)vk; return 0; }
+static void run_wheel_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
+{
+    static const char kW[] = "tuner.up = KEY:T, MOUSE:WHEEL_UP\n"
+                             "tuner.down = KEY:G, mouse:wheel_down\n"
+                             "gear.up = MOUSE:WHEEL_RIGHT\n"
+                             "gear.down = MOUSE:Wheel_Left\n"
+                             "bi20 = MOUSE:WHEEL\n"          /* ungueltig */
+                             "bi21 = MOUSE:WHEEL_UPX\n";     /* ungueltig */
+    imap_profile_t p;
+    imap_wheel_t w;
+    imap_block_t b;
+    imap_state_t st;
+    imap_snap_t sn;
+    unsigned f = 200000, m, seq = 0;
+    int i, ok;
+
+    printf("Teil 18: W260 Mausrad\n");
+    set_keys(NULL, 0);
+    CHECK(imap_profile_parse(kW, "wheel", &p) == 0, "wheel: Profil geparst");
+    CHECK(p.tuner_up.n == 2 && p.tuner_up.alt[1].a.kind == IMAP_A_MOUSEBTN &&
+          p.tuner_up.alt[1].a.code == 5, "wheel: MOUSE:WHEEL_UP = Maus-Code 5");
+    CHECK(p.tuner_down.n == 2 && p.tuner_down.alt[1].a.code == 6, "wheel: klein geschrieben, WHEEL_DOWN = 6");
+    CHECK(p.gear_down.n == 1 && p.gear_down.alt[0].a.code == 7 &&
+          p.gear_up.n == 1 && p.gear_up.alt[0].a.code == 8, "wheel: WHEEL_LEFT/RIGHT = 7/8");
+    CHECK(p.btn[20].n == 0 && p.btn[21].n == 0, "wheel: MOUSE:WHEEL / WHEEL_UPX verworfen");
+
+    /* Pulsmaschine: eine Raste = 2 Frames gedrueckt, 2 Frames los. */
+    memset(&w, 0, sizeof w);
+    imap_wheel_add(&w, 0, 120);
+    for (i = 0; i < 6; i++) seq |= (imap_wheel_step(&w, f + i, 0) & 1u) << i;
+    CHECK(seq == 0x03u, "wheel: 1 Raste -> Impuls 2 Frames (Muster %02X)", seq);
+    /* Mehrere Rasten -> mehrere Impulse, kein Dauerdruck. */
+    f += 10; seq = 0;
+    imap_wheel_add(&w, 0, 360);
+    for (i = 0; i < 14; i++) seq |= (imap_wheel_step(&w, f + i, 0) & 1u) << i;
+    CHECK(seq == 0x333u, "wheel: 3 Rasten -> 3 Impulse (Muster %04X)", seq);
+    /* Feines Rad: Teil-Deltas summiert; Richtungswechsel verwirft Rest. */
+    f += 20;
+    for (i = 0; i < 3; i++) imap_wheel_add(&w, 0, 40);
+    CHECK(w.pend[IMAP_WHEEL_UP] == 1 && w.acc[0] == 0, "wheel: 3x40 = 1 Raste");
+    imap_wheel_add(&w, 0, 100);
+    imap_wheel_add(&w, 0, -30);
+    CHECK(w.acc[0] == -30 && w.pend[IMAP_WHEEL_DOWN] == 0, "wheel: Richtungswechsel verwirft Rest (%ld)", w.acc[0]);
+    imap_wheel_clear(&w);
+    /* Puffergrenze. */
+    imap_wheel_add(&w, 0, 120 * 20);
+    CHECK(w.pend[IMAP_WHEEL_UP] == IMAP_WHEEL_MAXQ, "wheel: hoechstens %d Rasten im Puffer", IMAP_WHEEL_MAXQ);
+    /* Gesperrt: verwerfen, kein spaeteres Nachfeuern. */
+    m = imap_wheel_step(&w, f, 1);
+    CHECK(m == 0 && w.pend[IMAP_WHEEL_UP] == 0 && imap_wheel_step(&w, f + 1, 0) == 0,
+          "wheel: gesperrt verwirft Rasten");
+    /* Richtungen getrennt (hoch/runter, links/rechts). */
+    f += 10;
+    imap_wheel_add(&w, 0, -120);
+    imap_wheel_add(&w, 1, 120);
+    m = imap_wheel_step(&w, f, 0);
+    CHECK(m == ((1u << IMAP_WHEEL_DOWN) | (1u << IMAP_WHEEL_RIGHT)), "wheel: runter + rechts getrennt (%X)", m);
+    imap_wheel_clear(&w);
+    memset(&w, 0, sizeof w);
+
+    /* Profil: Raste -> genau eine Tuner-Stufe je Raste (Flanke). */
+    imap_state_init(&st);
+    imap_wheel_add(&w, 0, 120 * 3);
+    f += 10;
+    for (i = 0; i < 16; i++) {
+        wheel_snap(&sn, f + i, imap_wheel_step(&w, f + i, 0));
+        sn.real_vk = wheel_real_vk;
+        imap_profile_apply(&b, &st, &p, &sn);
+    }
+    CHECK(b.tuner == 3, "wheel: 3 Rasten hoch -> Tuner 3 (ist %u)", b.tuner);
+    imap_wheel_add(&w, 0, -120);
+    f += 20;
+    for (i = 0; i < 6; i++) {
+        wheel_snap(&sn, f + i, imap_wheel_step(&w, f + i, 0));
+        sn.real_vk = wheel_real_vk;
+        imap_profile_apply(&b, &st, &p, &sn);
+    }
+    CHECK(b.tuner == 2, "wheel: 1 Raste runter -> Tuner 2 (ist %u)", b.tuner);
+    imap_wheel_add(&w, 1, 120);
+    f += 20;
+    for (i = 0; i < 6; i++) {
+        wheel_snap(&sn, f + i, imap_wheel_step(&w, f + i, 0));
+        sn.real_vk = wheel_real_vk;
+        imap_profile_apply(&b, &st, &p, &sn);
+    }
+    CHECK(b.gear == 9 && b.tuner == 2, "wheel: Kipprad rechts -> Gang N->1 (gear=%u)", b.gear);
+    /* Gatter: gesperrt / ohne mouse_buttons traegt das Rad nichts bei. */
+    imap_state_init(&st);
+    wheel_snap(&sn, f + 40, 1u << IMAP_WHEEL_UP);
+    sn.real_blocked = 1;
+    imap_profile_apply(&b, &st, &p, &sn);
+    CHECK(b.tuner == 0, "wheel: real_blocked -> kein Tuner (ist %u)", b.tuner);
+    imap_state_init(&st);
+    wheel_snap(&sn, f + 41, 1u << IMAP_WHEEL_UP);
+    sn.mouse_buttons = 0;
+    imap_profile_apply(&b, &st, &p, &sn);
+    CHECK(b.tuner == 0, "wheel: mouse_buttons=0 -> kein Tuner (ist %u)", b.tuner);
+    /* Replay: synthetische VKs 329..332 (wie 324..328 fuer die Tasten). */
+    {
+        int kr[] = { 329 };
+        cfgvar_t c = { 1, 0, 0, 1, 4, 0, 0 };
+        imap_state_init(&st);
+        make_snap(&sn, f + 50, &c);
+        set_keys(kr, 1);
+        imap_profile_apply(&b, &st, &p, &sn);
+        set_keys(NULL, 0);
+        CHECK(b.tuner == 1, "wheel: Replay-VK 329 -> WHEEL_UP (Tuner %u)", b.tuner);
+    }
+    /* Standardprofile: Rad nicht belegt -> Rad-Maske aendert nichts. */
+    for (i = 0; i < 2; i++) {
+        const imap_profile_t *dp = i ? xbox : kb;
+        imap_block_t b0, b1;
+        imap_state_t s0, s1;
+        memset(&b0, 0, sizeof b0);
+        memset(&b1, 0, sizeof b1);
+        imap_state_init(&s0);
+        imap_state_init(&s1);
+        wheel_snap(&sn, f + 60, 0);
+        sn.real_vk = wheel_real_vk;
+        imap_profile_apply(&b0, &s0, dp, &sn);
+        wheel_snap(&sn, f + 60, 0xFu);
+        sn.real_vk = wheel_real_vk;
+        imap_profile_apply(&b1, &s1, dp, &sn);
+        ok = memcmp(&b0, &b1, sizeof b0) == 0;
+        CHECK(ok, "wheel: %s ohne Rad-Belegung (Block gleich)", i ? "xbox_pad_default" : "keyboard_default");
+    }
+}
+
 int main(int argc, char **argv)
 {
     imap_profile_t kb_file, kb_in, xbox_file, xbox_in;
@@ -2652,6 +2791,7 @@ int main(int argc, char **argv)
     }
 
     { extern int imouse_selftest(void); CHECK(imouse_selftest() == 0, "W196 mouse/menu"); }
+    { extern int sb_rauto_selftest(void); CHECK(sb_rauto_selftest() == 0, "W254 Replay-Start"); }
 
     printf("input_selftest: Vergleich alt<->neu + Gamepad-Logik\n");
 
@@ -2728,6 +2868,7 @@ int main(int argc, char **argv)
 
     run_simple_cases(rc_kb == 0 ? &kb_file : &kb_in); /* Teil 16: W218 */
     run_joy_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 17: W221 */
+    run_wheel_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 18: W260 */
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;

@@ -165,11 +165,12 @@ int main(int argc, char **argv)
         MultiByteToWideChar(CP_ACP, 0, argv[2], -1, w, 600);
         rc = sb_savecheck_run(w, rep, &r, savecheck_print, NULL);
         if (rc < 0) {
-            printf("SAVECHECK: kein TDATA\\43430002 unter %s\n", argv[2]);
+            printf("SAVECHECK: weder TDATA\\43430002 noch UDATA\\43430002 unter %s\n", argv[2]);
             return 0;
         }
-        printf("SAVECHECK: %d Dateien, %d ok, %d repariert, %d verschoben, %d offen%s%ls\n",
-               r.checked, r.ok, r.repaired, r.moved, r.failed, r.backup[0] ? ", Sicherung " : "", r.backup);
+        printf("SAVECHECK: %d Dateien (davon %d Replays), %d ok, %d repariert, %d verschoben, %d offen%s%ls\n",
+               r.checked, r.replays, r.ok, r.repaired, r.moved, r.failed, r.backup[0] ? ", Sicherung " : "",
+               r.backup);
         return r.failed ? 1 : 0;
     }
     if (argc < 2) {

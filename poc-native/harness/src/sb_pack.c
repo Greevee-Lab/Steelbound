@@ -9,6 +9,7 @@
  * Aufruf nur aus sb_remaster.c unter g_rcs (keine eigene Sperre).
  */
 #include "sb_pack.h"
+#include "sb_gamever.h" /* W256 PACK-ANYVER: Familie */
 #include "hlog.h"
 #include <windows.h>
 #include <stdio.h>
@@ -809,6 +810,8 @@ typedef struct {
     pkent_t *ents;
     int nents;
     int ndrop;      /* verworfene Varianten (Datei fehlt, Pfad, Methode) */
+    int fit;        /* W256: SB_PACK_FIT_* zur aktiven Fassung */
+    char made[16];  /* W256: Fassung bei FIT_OTHER ("Europe"/"USA") */
 } pack_t;
 
 typedef struct {
@@ -909,6 +912,71 @@ static int lvl_of(const char *s)
 }
 
 /* Manifest-Eintraege eines Pakets lesen. 1 = ok (ggf. 0 Eintraege). */
+/* W256 PACK-ANYVER: aktive Fassung (Client, sb_pack_set_game). */
+static char g_game_sha[65];
+
+void sb_pack_set_game(const char *xbe_sha256)
+{
+    g_game_sha[0] = '\0';
+    if (xbe_sha256 && strlen(xbe_sha256) == 64) {
+        strcpy_s(g_game_sha, sizeof g_game_sha, xbe_sha256);
+    }
+}
+
+/* W256: Passung des Manifest-Objekts "game" zur Fassung xbe (64 Hex oder
+ * NULL). Familie vor genau, genau vor andere bekannte Fassung. Gleiche
+ * Regel wie sbpack.game_fit (Python). */
+static int pk_game_fit(const jnode_t *g, const char *xbe, char *made,
+                       size_t mcap)
+{
+    const jnode_t *xl;
+    const char *fam;
+    int act, k, other = -1;
+    if (made && mcap) {
+        made[0] = '\0';
+    }
+    if (!xbe || !xbe[0]) {
+        return SB_PACK_FIT_UNKNOWN;
+    }
+    if (!g || g->kind != 5) {
+        return SB_PACK_FIT_NO;
+    }
+    fam = jstrv(g, "family");
+    xl = jget(g, "xbe_sha256");
+    act = sb_gamever_family_idx(xbe);
+    if (act >= 0 && fam && strcmp(fam, SB_GAMEVER_FAMILY) == 0) {
+        return SB_PACK_FIT_FAMILY;
+    }
+    if (xl && xl->kind == 6) {
+        for (k = 0; k < xl->n; k++) {
+            const jnode_t *x = xl->items[k];
+            int i, same = 1;
+            if (!x || x->kind != 4 || strlen(x->s) != 64) {
+                continue;
+            }
+            for (i = 0; i < 64 && same; i++) {
+                char c = x->s[i], d = xbe[i];
+                if (c >= 'A' && c <= 'F') { c = (char)(c - 'A' + 'a'); }
+                if (d >= 'A' && d <= 'F') { d = (char)(d - 'A' + 'a'); }
+                same = c == d;
+            }
+            if (same) {
+                return SB_PACK_FIT_EXACT;
+            }
+            if (other < 0) {
+                other = sb_gamever_family_idx(x->s);
+            }
+        }
+    }
+    if (act >= 0 && other >= 0) {
+        if (made && mcap) {
+            strncpy_s(made, mcap, sb_gamever_family_name(other), _TRUNCATE);
+        }
+        return SB_PACK_FIT_OTHER;
+    }
+    return SB_PACK_FIT_NO;
+}
+
 static int pack_entries(pack_t *p)
 {
     unsigned char *mj = NULL;
@@ -943,6 +1011,7 @@ static int pack_entries(pack_t *p)
         strncpy_s(p->id, sizeof p->id, id, _TRUNCATE);
         strncpy_s(p->name, sizeof p->name, nm ? nm : id, _TRUNCATE);
         strncpy_s(p->version, sizeof p->version, vs ? vs : "?", _TRUNCATE);
+        p->fit = pk_game_fit(jget(m, "game"), g_game_sha, p->made, sizeof p->made);
     }
     arr = jget(m, "entries");
     if (!arr) {
@@ -1528,6 +1597,24 @@ int sb_pack_init(const char *packs_json, const char *rdir)
         HLOG_I("PACK paket: %s %s \"%s\" eintraege=%d verdeckt=%d verworfen=%d %s",
                g_pk[i].id, g_pk[i].version, g_pk[i].name, g_pk[i].nents,
                shadow, g_pk[i].ndrop, g_pk[i].is_zip ? "(Datei)" : "(Ordner)");
+        switch (g_pk[i].fit) { /* W256 PACK-ANYVER (eigene Zeile, PACK paket bleibt) */
+        case SB_PACK_FIT_FAMILY:
+            HLOG_I("PACK fassung: %s passt (Familie %s, alle Fassungen)", g_pk[i].id, SB_GAMEVER_FAMILY);
+            break;
+        case SB_PACK_FIT_EXACT:
+            HLOG_I("PACK fassung: %s passt (fuer diese Fassung erstellt)", g_pk[i].id);
+            break;
+        case SB_PACK_FIT_OTHER:
+            HLOG_I("PACK fassung: %s passt (erstellt fuer %s, aktiv %s - nur gleiche Texturen)",
+                   g_pk[i].id, g_pk[i].made, sb_gamever_family_name(sb_gamever_family_idx(g_game_sha)));
+            break;
+        case SB_PACK_FIT_NO:
+            HLOG_W("PACK fassung: %s fuer fremdes Spiel/unbekannte Fassung (ersetzt nur gleiche Inhalts-Hashes)", g_pk[i].id);
+            break;
+        default:
+            HLOG_I("PACK fassung: %s ungeprueft (Spielversion unbekannt)", g_pk[i].id);
+            break;
+        }
         nactive++;
     }
     HLOG_I("PACK summe: liste=%d aktiv=%d hashs=%d x2=%d x4=%d", norder, nactive,

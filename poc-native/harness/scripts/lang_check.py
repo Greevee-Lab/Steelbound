@@ -32,6 +32,7 @@ SRC = [
     "creator/src/creator.c",  # W155 PACK-CREATOR
     "creator/src/creator_gui.c",
     "harness/src/emu_main.c",  # W150: Startfehler (Abbild/Version)
+    "harness/src/sb_rauto.c",  # W254 REPLAY-LAUNCHER (Hinweis beim Replay-Start)
 ]
 
 # W180 EXPORT: Quellen, die im Community-Export (noch) fehlen duerfen (Pack

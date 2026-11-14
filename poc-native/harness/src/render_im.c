@@ -790,6 +790,88 @@ static void sb_ta_diag(const im_vertex_t *out, unsigned nout, int rhw)
            rtt_active() ? "RT" : "BB");
 }
 
+/* W253 DRAW-OPT im_cb_ring: Draw-Konstanten der Uebergabe (MVP 64 B + has_tex
+ * 4 B, Rest des 80-B-Puffers) in einen Ring aus 256-B-Plaetzen statt Map(DISCARD)
+ * des 80-B-Puffers g_im_cb je Draw. Map NO_OVERWRITE (DISCARD nur beim Umlauf),
+ * Bindung b0 (VS+PS) per Versatz (D3D11.1 VSSetConstantBuffers1, Fenster 16
+ * Konstanten). Folgesatz gleich dem letzten geschriebenen -> kein Map, gleicher
+ * Platz. Platzrest (Byte 68..255) = 0: Lesezugriffe ausserhalb der 68 Byte
+ * liefern wie beim 80-B-Puffer 0 bzw. die nie geschriebenen Fuellbytes.
+ * Fehlt D3D11.1 (Versatz oder NO_OVERWRITE auf Konstantenpuffern), bleibt der
+ * alte Pfad. Nur Spiel-Thread unter ctx_lock (wie g_im_cb). */
+#define IMCB_SLOTS 4096u /* 1 MB */
+static ID3D11Buffer *g_imcb;
+static ID3D11DeviceContext1 *g_imcb_c1;
+static int g_imcb_st; /* 0 = offen, 1 = bereit, -1 = nicht verfuegbar */
+static unsigned g_imcb_pos, g_imcb_slot = 0xFFFFFFFFu;
+static unsigned g_imcb_data[17];
+static int imcb_init(void)
+{
+    D3D11_FEATURE_DATA_D3D11_OPTIONS fo;
+    D3D11_BUFFER_DESC bd;
+    g_imcb_st = -1;
+    if (!g_dev || !g_ctx) { return 0; }
+    memset(&fo, 0, sizeof fo);
+    if (FAILED(ID3D11Device_CheckFeatureSupport(g_dev, D3D11_FEATURE_D3D11_OPTIONS, &fo, sizeof fo)) ||
+        !fo.ConstantBufferOffsetting || !fo.MapNoOverwriteOnDynamicConstantBuffer) {
+        HLOG_W("DRAWOPT im_cb_ring: D3D11.1-Konstantenfenster fehlen -> alter Pfad");
+        return 0;
+    }
+    if (FAILED(ID3D11DeviceContext_QueryInterface(g_ctx, &IID_ID3D11DeviceContext1, (void **)&g_imcb_c1)) || !g_imcb_c1) {
+        g_imcb_c1 = NULL;
+        HLOG_W("DRAWOPT im_cb_ring: ID3D11DeviceContext1 fehlt -> alter Pfad");
+        return 0;
+    }
+    memset(&bd, 0, sizeof bd);
+    bd.ByteWidth = IMCB_SLOTS * 256u;
+    bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_imcb)) || !g_imcb) {
+        g_imcb = NULL;
+        HLOG_W("DRAWOPT im_cb_ring: Ringpuffer nicht anlegbar -> alter Pfad");
+        return 0;
+    }
+    g_imcb_st = 1;
+    g_dsc.c1 = g_imcb_c1; g_dsc.ring = g_imcb; /* W253: Nachbindung gesicherter Ring-Fenster (render_dsc.h) */
+    HLOG_I("DRAWOPT im_cb_ring: %u Plaetze a 256 B, ctx1%sgleich ctx", IMCB_SLOTS,
+           ((void *)g_imcb_c1 == (void *)g_ctx) ? " " : " un");
+    return 1;
+}
+/* 68 Byte (MVP + has_tex) in den Ring; Rueckgabe Platz oder -1 (alter Pfad). */
+static int imcb_put(const unsigned *d)
+{
+    D3D11_MAPPED_SUBRESOURCE m;
+    unsigned char *p;
+    if (g_imcb_st == 0) { imcb_init(); }
+    if (g_imcb_st < 0) { return -1; }
+    if (g_imcb_slot != 0xFFFFFFFFu && memcmp(d, g_imcb_data, sizeof g_imcb_data) == 0) {
+        g_dsc.cnt[DSC_N_CBREUSE]++;
+        return (int)g_imcb_slot;
+    }
+    if (g_imcb_pos >= IMCB_SLOTS) { g_imcb_pos = 0; }
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_imcb, 0,
+                                       g_imcb_pos ? D3D11_MAP_WRITE_NO_OVERWRITE : D3D11_MAP_WRITE_DISCARD, 0, &m))) {
+        g_imcb_slot = 0xFFFFFFFFu;
+        return -1;
+    }
+    p = (unsigned char *)m.pData + (size_t)g_imcb_pos * 256u;
+    memcpy(p, d, sizeof g_imcb_data);
+    memset(p + sizeof g_imcb_data, 0, 256u - sizeof g_imcb_data);
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_imcb, 0);
+    memcpy(g_imcb_data, d, sizeof g_imcb_data);
+    g_imcb_slot = g_imcb_pos++;
+    g_dsc.cnt[DSC_N_CBMAP]++;
+    return (int)g_imcb_slot;
+}
+static void imcb_bind(int slot)
+{
+    UINT first = (UINT)slot * 16u, num = 16u;
+    g_dsc.ringf[0] = g_dsc.ringf[1] = first;
+    ID3D11DeviceContext1_VSSetConstantBuffers1(g_imcb_c1, 0, 1, &g_imcb, &first, &num);
+    ID3D11DeviceContext1_PSSetConstantBuffers1(g_imcb_c1, 0, 1, &g_imcb, &first, &num);
+}
+
 static void sb_im_submit_body(void);
 
 /* DIAG(IM-PERF,W99, im_fast=2): Selbstpruefung des schnellen Wegs gegen den
@@ -993,6 +1075,7 @@ static void sb_im_submit_body(void)
     unsigned ip_raw = 0, ip_tex = 0; /* FPS-INTERP (W69): Eingangs-Hash, has_tex */
     ID3D11Buffer *ip_vb = NULL;      /* FPS-INTERP (W69): Tick-VB statt IM-Ring */
     ID3D11ShaderResourceView *rq_srv0 = NULL; /* RENDER-QA (W77) */
+    unsigned imcbd[17]; int cb_slot = -1; /* W253 DRAW-OPT im_cb_ring */
     HRESULT hr;
     /* PERF(IM-PERF,W99): fast = VB-Draw kompakt in g_imf (Positionen dort,
      * Farbe/UV schon wie nach der Umwandlung unten); sonst g_im_buf-Slots. */
@@ -1198,6 +1281,10 @@ static void sb_im_submit_body(void)
                 }
                 if (eye_clip == 2) { eye_clip = 0; }
             }
+            static float ip_twb[IM_VB_MAX]; /* W237: echte Clip-w (interp_hlerp / interp_eyediag) */
+            /* W237: echte Clip-w fuer den homogenen Zwischenbild-Lerp (interp_hlerp) bzw. die Diagnose;
+             * eye_clip-Draws tragen w schon im Strom (dort bleibt g_ip_tw leer = w 1). */
+            const int twr = g_ip_recording && (g_cfg.interp_hlerp || g_cfg.interp_eyediag > 0) && !eye_clip && n <= IM_VB_MAX;
             for (i = 0; i < n; i++) {
                 float *pp = IMPOS(i);
                 float x = pp[0], y = pp[1];
@@ -1206,6 +1293,7 @@ static void sb_im_submit_body(void)
                 float cy = x * vsh_mat[1][0] + y * vsh_mat[1][1] + z * vsh_mat[1][2] + w * vsh_mat[1][3];
                 float cz = x * vsh_mat[2][0] + y * vsh_mat[2][1] + z * vsh_mat[2][2] + w * vsh_mat[2][3] + vsh_zadd[2];
                 float cw = x * vsh_mat[3][0] + y * vsh_mat[3][1] + z * vsh_mat[3][2] + w * vsh_mat[3][3];
+                if (twr) { ip_twb[i] = cw; }
                 if (eye_clip) {
                     pp[0] = cx * scx + ofx * cw;
                     pp[1] = cy * scy + ofy * cw;
@@ -1219,6 +1307,7 @@ static void sb_im_submit_body(void)
                     pp[3] = 1.0f;
                 }
             }
+            if (twr) { g_ip_tw = ip_twb; g_ip_tw_n = n; g_ip_tw_prim = g_im_prim; } /* W237 */
             rhw = 1;
         } else {
             /* BB: Clip + Hor+ weiter unten (exakt wie m3d_vs_mvp). */
@@ -1424,6 +1513,23 @@ static void sb_im_submit_body(void)
                     float v = ov[q].col[k2] + fc[k2];
                     ov[q].col[k2] = (v > 1.0f) ? 1.0f : (v < 0.0f ? 0.0f : v);
                 }
+            }
+        }
+    }
+    /* FIX(LOAD-VT-COLOR,W257): PS-Muster Farbe = V0 * C0 im Standardpfad
+     * (Drahtgitter-VT: Vertex weiss, VT-Farbe aus c0); Shading-Pfad rechnet selbst. */
+    if (g_cfg.ps_mul_c0 && !g_rq_active && g_im_pshader) {
+        float fc[4];
+        if (fx_ps_mul_c0(fc)) {
+            unsigned q, k2;
+            static unsigned nlog;
+            if (nlog < 4u) {
+                nlog++;
+                HLOG_I("VTCOL ps=0x%X c0=(%.3f,%.3f,%.3f,%.3f) n=%u prim=%u f=%u", g_im_pshader,
+                       fc[0], fc[1], fc[2], fc[3], n, g_im_prim, g_present_no);
+            }
+            for (q = 0; q < n; q++) {
+                for (k2 = 0; k2 < 4u; k2++) { ov[q].col[k2] *= fc[k2]; }
             }
         }
     }
@@ -1688,26 +1794,8 @@ static void sb_im_submit_body(void)
         }
         /* SHADE-PERF (W80): Shading-Draws binden t0..t3 in rq_bind selbst */
         if (!(g_rq_active && g_cfg.shade_gpuvb)) { ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &srv); }
-        { static LARGE_INTEGER qpf;
-          LARGE_INTEGER qc0, qc1;
-          static unsigned nslow;
-          if (!qpf.QuadPart) { QueryPerformanceFrequency(&qpf); }
-          QueryPerformanceCounter(&qc0);
-        hr = ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_im_cb, 0,
-                                     D3D11_MAP_WRITE_DISCARD, 0, &map);
-          QueryPerformanceCounter(&qc1);
-          if ((qc1.QuadPart - qc0.QuadPart) * 1000 > qpf.QuadPart * 50 &&
-              nslow < 8) {
-              nslow++;
-              HLOG_W("IM-SLOW #%u: MapCB %lldms", nslow,
-                     (qc1.QuadPart - qc0.QuadPart) * 1000 / qpf.QuadPart);
-          }
-        }
-        if (FAILED(hr)) {
-            g_rq_active = 0;
-            return;
-        }
-        memcpy(map.pData, mvp, sizeof mvp);
+        /* W253 DRAW-OPT: Konstanten (MVP + has_tex) erst lokal bestimmen, dann
+         * Ring (im_cb_ring=1) oder wie bisher Map(DISCARD) des 80-B-Puffers. */
         /* FIX(FX-ORIG,W90): Alpha-Test im has_tex-Wort (Bit 0 bleibt has_tex,
          * die Interp-Wiedergabe uebernimmt das Wort unveraendert). */
         if (g_cfg.fx_alphatest && fx_nv(0x300u, 0u)) {
@@ -1737,7 +1825,30 @@ static void sb_im_submit_body(void)
             if (ak & 4u) { has_tex |= 0x1000000u; ip_tex = has_tex; }
         }
         if (fxr_cls) { unsigned fb = fxr_draw_bits(); if (fb) { has_tex |= fb; ip_tex = has_tex; } } /* W133 REM-FX: weicher Partikel */
-        *(unsigned *)((unsigned char *)map.pData + 64) = has_tex;
+        memcpy(imcbd, mvp, sizeof mvp);
+        imcbd[16] = has_tex;
+        cb_slot = g_cfg.im_cb_ring ? imcb_put(imcbd) : -1;
+        if (cb_slot < 0) {
+        { static LARGE_INTEGER qpf;
+          LARGE_INTEGER qc0, qc1;
+          static unsigned nslow;
+          if (!qpf.QuadPart) { QueryPerformanceFrequency(&qpf); }
+          QueryPerformanceCounter(&qc0);
+        hr = ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_im_cb, 0,
+                                     D3D11_MAP_WRITE_DISCARD, 0, &map);
+          QueryPerformanceCounter(&qc1);
+          if ((qc1.QuadPart - qc0.QuadPart) * 1000 > qpf.QuadPart * 50 &&
+              nslow < 8) {
+              nslow++;
+              HLOG_W("IM-SLOW #%u: MapCB %lldms", nslow,
+                     (qc1.QuadPart - qc0.QuadPart) * 1000 / qpf.QuadPart);
+          }
+        }
+        if (FAILED(hr)) {
+            g_rq_active = 0;
+            return;
+        }
+        memcpy(map.pData, imcbd, sizeof imcbd);
         { LARGE_INTEGER qu0, qu1;
           LARGE_INTEGER qpf2;
           QueryPerformanceFrequency(&qpf2);
@@ -1749,6 +1860,7 @@ static void sb_im_submit_body(void)
                      (qu1.QuadPart - qu0.QuadPart) * 1000 / qpf2.QuadPart,
                      nout);
           }
+        }
         }
     }
     IMP_MARK(IMP_CB); /* DIAG(IM-PERF,W99): Textur + Konstanten */
@@ -1771,9 +1883,12 @@ static void sb_im_submit_body(void)
     }
     ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, topo);
     if (!(g_rq_active && g_cfg.shade_gpuvb)) { ID3D11DeviceContext_VSSetShader(g_ctx, g_im_vs, NULL, 0); }
-    ID3D11DeviceContext_VSSetConstantBuffers(g_ctx, 0, 1, &g_im_cb);
     if (!(g_rq_active && g_cfg.shade_gpuvb)) { ID3D11DeviceContext_PSSetShader(g_ctx, g_im_ps, NULL, 0); }
+    if (cb_slot >= 0) { imcb_bind(cb_slot); } /* W253 DRAW-OPT im_cb_ring: b0 VS+PS per Versatz */
+    else {
+    ID3D11DeviceContext_VSSetConstantBuffers(g_ctx, 0, 1, &g_im_cb);
     ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 0, 1, &g_im_cb);
+    }
     if (g_rq_active) { /* RENDER-QA: generierte VS/PS + Stufen 0..3 */
         long long q0 = RQP_FULL ? rq_qpc() : 0;
         int lean = g_cfg.shade_gpuvb;
@@ -2006,6 +2121,7 @@ static void sb_im_submit_body(void)
                                (g_im_pshader * 40503u) ^ g_im_prim,
                            ip_raw, ip_vb ? vb_start : 0xFFFFFFFFu);
         g_phud_in_cap = 0;
+        g_ip_tw = NULL; /* W237 */
         if (RQP_ON) { g_rqp_q[RQP_CAP] += rq_qpc() - q0; }
     }
     { long long q0 = RQP_ON ? rq_qpc() : 0;

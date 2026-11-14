@@ -11,6 +11,7 @@
 #include "sb_edition.h"
 #include "iso_vfs.h"     /* W150 ISO-DIRECT */
 #include "sb_gamever.h"  /* W150 */
+#include "sb_pack.h"     /* W256 PACK-ANYVER: SB_PACK_FIT_* */
 #include "sb_userdata.h" /* W150 USER-DATA */
 #include "sb_gfxpreset.h" /* W173 LAUNCHER-P4: Preset-Werte (wie Client) */
 #include "sb_fpsrate.h" /* W223 FPS-RATES: gueltige Bildraten */
@@ -51,7 +52,7 @@ void lcfg_defaults(launcher_settings_t *s)
     s->mouse_mode = 1;          /* W87: Spieler-Standard absolut */
     s->mouse_sens = 4;          /* W87: wie Client-Standard (hcfg) */
     s->edge_mode = 2;           /* Nutzer 5.11.: Abdunklung als Spieler-Standard (Test-cfg bleibt 0) */
-    s->edge_fade_width = 10;   /* Nutzer 5.11.: 10 % */
+    s->edge_fade_width = 8;    /* Nutzer 14.11.: 8 % (vorher 10 %, 5.11.) */
     s->edge_fade_strength = 100;
     s->cockpit_persp = 0;       /* W191 UW-PERSP: Original */
     s->cockpit_panini = 0;      /* W191: Panini aus */
@@ -65,6 +66,7 @@ void lcfg_defaults(launcher_settings_t *s)
     memset(s->fx, 0, sizeof s->fx); /* W173: Effekte = Original (wie hcfg) */
     s->monitor_grain = 100;     /* W105: Original */
     s->monitor_glitch = 100;    /* W105: Original */
+    s->monitor_fx = 1;          /* W252: Original (wie hcfg) */
     s->vr_enable = 0;           /* W134 VR-PROTO: Standard aus */
     /* W159: VR-Startweg nutzt ein Auge als Standard-Vorschau (einstellbar). */
     strcpy_s(s->vr_preview, sizeof s->vr_preview, "left");
@@ -165,6 +167,7 @@ const char *lcfg_gfx_key(int k)
     if (k == LGK_RT) { return "rt_scale"; }
     if (k == LGK_DYN) { return "rt_scale_dyn"; }
     if (k == LGK_MATCH) { return "fs_interp_match"; }
+    if (k == LGK_MFX) { return "monitor_fx"; } /* W252 */
     return k == LGK_HD ? "hd_textures" : "";
 }
 
@@ -196,6 +199,7 @@ int lcfg_gfx_value(const launcher_settings_t *s, int k)
     if (k == LGK_RT) { return s->rt_scale; }
     if (k == LGK_DYN) { return s->rt_scale_dyn; }
     if (k == LGK_MATCH) { return s->fs_interp_match; }
+    if (k == LGK_MFX) { return s->monitor_fx; } /* W252 */
     if (k == LGK_HD) { return (s->remaster && s->hd_textures) ? 1 : 0; }
     return 0;
 }
@@ -296,6 +300,7 @@ void lcfg_gfx_apply(launcher_settings_t *s, int preset)
         } else if (k == LGK_RT) { s->rt_scale = v;
         } else if (k == LGK_DYN) { s->rt_scale_dyn = v;
         } else if (k == LGK_MATCH) { s->fs_interp_match = v;
+        } else if (k == LGK_MFX) { s->monitor_fx = v; /* W252 */
         } else {
             s->remaster = s->hd_textures = v;
         }
@@ -466,6 +471,9 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         s->monitor_grain = atoi(v);
     } else if (strcmp(k, "monitor_glitch") == 0) {
         s->monitor_glitch = atoi(v);
+    } else if (strcmp(k, "monitor_fx") == 0) { /* W252 */
+        s->monitor_fx = atoi(v);
+        if (s->monitor_fx < 0 || s->monitor_fx > 2) { s->monitor_fx = 1; }
     } else if (strcmp(k, "rt_scale") == 0) { /* W148 */
         s->rt_scale = (_stricmp(v, "auto") == 0) ? 0 : atoi(v);
         if (s->rt_scale < 0) { s->rt_scale = 0; }
@@ -584,6 +592,7 @@ static const char *kManaged[][2] = {
     { "hd_scale", "remaster" },     { "fx_enhanced", "remaster" },
     { "ultrawide", "remaster" },    { "postfx", "remaster" },
     { "monitor_grain", "render" },  { "monitor_glitch", "render" },
+    { "monitor_fx", "render" }, /* W252: gehoert zum Grafik-Preset */
     /* W131 SHADER-OPT2 (Reihenfolge = kShxKey) */
     { "shading", "render" },        { "world_fog", "render" },
     { "world_contrast", "render" }, { "world_gamma", "render" },
@@ -736,6 +745,8 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = s->monitor_grain;
         } else if (strcmp(k, "monitor_glitch") == 0) {
             v = s->monitor_glitch;
+        } else if (strcmp(k, "monitor_fx") == 0) { /* W252 */
+            v = s->monitor_fx;
         } else if (strcmp(k, "rt_scale_dyn") == 0) { /* W148 */
             v = s->rt_scale_dyn;
         } else if (strcmp(k, "vr_enable") == 0) { /* W134 */
@@ -877,6 +888,34 @@ int lcfg_save_user(const char *path, const launcher_settings_t *s)
     free(out_text);
     out_text = NULL;
     return 0;
+}
+
+int lcfg_merge_external(launcher_settings_t *ui, const launcher_settings_t *base,
+                        const launcher_settings_t *disk)
+{
+    /* Entscheidung je Key gegen den unveraenderten Oberflaechenstand (u0),
+     * damit die Reihenfolge der Uebernahmen keine Rolle spielt. */
+    launcher_settings_t u0 = *ui;
+    size_t i;
+    int n = 0;
+    for (i = 0; i < KMANAGED_N; i++) {
+        const char *k = kManaged[i][0];
+        char vu[512], vb[512], vd[512];
+        if (is_path_key(k) || strcmp(k, "aim_turn") == 0) {
+            continue; /* Pfade: Launcher; aim_turn: Altwert ohne eigenes Feld */
+        }
+        key_value(&u0, k, vu, sizeof vu);
+        key_value(base, k, vb, sizeof vb);
+        if (strcmp(vu, vb) != 0) {
+            continue; /* in der Oberflaeche geaendert -> Launcher gewinnt */
+        }
+        key_value(disk, k, vd, sizeof vd);
+        if (strcmp(vd, vu) != 0) {
+            set_key(ui, k, vd);
+            n++;
+        }
+    }
+    return n;
 }
 
 /* W79 INPUT-REAL: Spielerbetrieb-Block. sb_native.cfg ist testorientiert
@@ -1143,6 +1182,44 @@ int lcfg_image_xbe_sha256(const char *image_u8, char hex[65])
     free(xb);
     strcpy_s(hex, 65, gv.sha256);
     return 1;
+}
+
+/* W256 PACK-ANYVER: Fassungs-Kurzname -> Anzeigename. */
+static const char *pk_ver_name(const char *n)
+{
+    if (!n || !n[0]) {
+        return "?";
+    }
+    if (strcmp(n, "Europe") == 0) {
+        return LT("gui.pk_ver_eu");
+    }
+    if (strcmp(n, "USA") == 0) {
+        return LT("gui.pk_ver_us");
+    }
+    return n;
+}
+
+int lcfg_pack_fit_text(int fit, const char *made, const char *active,
+                       char *out, size_t cap)
+{
+    switch (fit) {
+    case SB_PACK_FIT_FAMILY:
+        strncpy_s(out, cap, LT("gui.pk_fit_family"), _TRUNCATE);
+        return 1;
+    case SB_PACK_FIT_EXACT:
+        strncpy_s(out, cap, LT("gui.pk_fit_yes"), _TRUNCATE);
+        return 1;
+    case SB_PACK_FIT_OTHER:
+        _snprintf_s(out, cap, _TRUNCATE, LT("gui.pk_fit_other"),
+                    pk_ver_name(made), pk_ver_name(active));
+        return 1;
+    case SB_PACK_FIT_NO:
+        strncpy_s(out, cap, LT("gui.pk_fit_no"), _TRUNCATE);
+        return 0;
+    default:
+        strncpy_s(out, cap, LT("gui.pk_fit_unk"), _TRUNCATE);
+        return 0;
+    }
 }
 
 /* W231: default.xbe des eingestellten Spiels lesen (Abbild oder Ordner). */

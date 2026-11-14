@@ -619,6 +619,144 @@ static u32 __stdcall hook_DSa_DoWork(void)
     return 0;
 }
 
+/* ---------- W258 NAME-SFX: Menuetoene (DirectMusic-Segmente) ----------
+ * Das Spiel spielt Menue-, Cursor- und Namenseingabe-Toene ueber DirectMusic:
+ * 0x10BF40(id) (rund 290 Aufrufstellen, Menues und Mission) ruft am Objekt
+ * 0x6C9010 erst 0x1065B0 (AudioPath-SetVolume, Pegel [0x6C0BC4] in 1/100 dB)
+ * und dann 0x106640 (IsPlaying/StopEx/PlaySegmentEx auf Segment id). Die
+ * zehn Segmente D:/Media/title/snk_000..009.sgt laedt 0x106560; jedes
+ * enthaelt nur einen Wave-Track mit snk_00N.wav (0 dB, ohne Wiederholung).
+ * 0x106560 ist seit M1 stillgelegt (No-Op), echtes Laden bringt den
+ * DirectMusic-Synth auf die DSound-HLE und stuerzt ab (W258_us1: 0x2258DF
+ * im Synth-Thread) - darum waren alle diese Toene stumm (EU und US).
+ * HLE: 0x106640 spielt snk_00<id>.wav direkt ueber den Mischer (interne
+ * Stimme je id), 0x1065B0 merkt den Pegel. Schalter audio_menu_sfx. */
+#define UI_SFX_N 10
+extern int krnl_host_path(const char *xb, char *out, size_t cap); /* krnl_file.c */
+static struct {
+    int tried;
+    uint8_t *file; /* ganze Datei (malloc) */
+    const uint8_t *wfx, *data;
+    unsigned bytes;
+} g_ui_sfx[UI_SFX_N];
+static volatile LONG g_ui_db100; /* letzter AudioPath-Pegel (1/100 dB) */
+
+static int ui_sfx_parse(unsigned id)
+{
+    uint8_t *b = g_ui_sfx[id].file;
+    unsigned n = g_ui_sfx[id].bytes, o = 12;
+    const uint8_t *wfx = NULL, *data = NULL;
+    unsigned dn = 0;
+    if (!b || n < 12 || memcmp(b, "RIFF", 4) || memcmp(b + 8, "WAVE", 4))
+        return 0;
+    while (o + 8 <= n) {
+        unsigned cn = *(const uint32_t *)(b + o + 4);
+        if (cn > n - o - 8)
+            cn = n - o - 8;
+        if (!memcmp(b + o, "fmt ", 4) && cn >= 16)
+            wfx = b + o + 8;
+        else if (!memcmp(b + o, "data", 4)) {
+            data = b + o + 8;
+            dn = cn;
+        }
+        o += 8 + cn + (cn & 1);
+    }
+    if (!wfx || !data || !dn)
+        return 0;
+    g_ui_sfx[id].wfx = wfx;
+    g_ui_sfx[id].data = data;
+    g_ui_sfx[id].bytes = dn;
+    return 1;
+}
+
+static int ui_sfx_load(unsigned id)
+{
+    char xb[64];
+    unsigned char *buf = NULL;
+    unsigned len = 0;
+    if (g_ui_sfx[id].tried)
+        return g_ui_sfx[id].data != NULL;
+    g_ui_sfx[id].tried = 1;
+    _snprintf_s(xb, sizeof xb, _TRUNCATE, "Media\\title\\snk_%03u.wav", id);
+    if (krnl_vfs_active()) {
+        if (krnl_vfs_read_all(xb, &buf, &len) != 0)
+            buf = NULL;
+    } else {
+        char dx[80], host[1024];
+        FILE *f = NULL;
+        _snprintf_s(dx, sizeof dx, _TRUNCATE, "D:\\%s", xb);
+        if (krnl_host_path(dx, host, sizeof host) == 0 &&
+            fopen_s(&f, host, "rb") == 0 && f) {
+            long sz;
+            fseek(f, 0, SEEK_END);
+            sz = ftell(f);
+            fseek(f, 0, SEEK_SET);
+            if (sz > 0 && sz < 4 * 1024 * 1024) {
+                buf = (unsigned char *)malloc((size_t)sz);
+                if (buf && fread(buf, 1, (size_t)sz, f) == (size_t)sz)
+                    len = (unsigned)sz;
+                else {
+                    free(buf);
+                    buf = NULL;
+                }
+            }
+            fclose(f);
+        }
+    }
+    g_ui_sfx[id].file = buf;
+    g_ui_sfx[id].bytes = len;
+    if (!ui_sfx_parse(id)) {
+        HLOG_W("AUDIO W258 Menueton snk_%03u.wav nicht ladbar (stumm)", id);
+        return 0;
+    }
+    HLOG_I("AUDIO W258 Menueton snk_%03u.wav geladen (%u Bytes Daten)", id,
+           g_ui_sfx[id].bytes);
+    return 1;
+}
+
+/* 0x1065B0 (thiscall, 1 Arg, RET 4): AudioPath->SetVolume(vol, 0). */
+static u32 __fastcall hook_ui_sfx_volume(u32 ecx_this, u32 edx_ign, u32 vol)
+{
+    (void)ecx_this;
+    (void)edx_ign;
+    InterlockedExchange(&g_ui_db100, (LONG)vol);
+    return 0;
+}
+
+/* 0x106640 (thiscall, 1 Arg id, RET 4): Segment id (neu) starten. Original
+ * setzt am Ende [this+0x38+id*4] = 1 (Spiel-Flag "laeuft"), das bleibt. */
+static u32 __fastcall hook_ui_sfx_play(u32 ecx_this, u32 edx_ign, u32 id)
+{
+    static u32 logged;
+    (void)edx_ign;
+    if (g_cfg.audio_sfx_diag > 0) { /* DIAG(UISFX,W258): jeder Aufruf mit Aufrufer von 0x10BF40 */
+        extern unsigned g_present_no;
+        HLOG_I("DIAG(UISFX) id=%u db=%d f=%u caller=0x%X", id, (int)g_ui_db100, g_present_no,
+               ((u32 *)_AddressOfReturnAddress())[2]);
+    }
+    if (id >= UI_SFX_N)
+        return 0;
+    if (ui_sfx_load(id)) {
+        audio_ui_play(id, g_ui_sfx[id].wfx, g_ui_sfx[id].data,
+                      g_ui_sfx[id].bytes, (int)g_ui_db100);
+        if (hlog_throttle(&logged))
+            HLOG_I("AUDIO W258 Menueton snk_%03u (%d/100 dB)", id, (int)g_ui_db100);
+    }
+    if (ecx_this) {
+        __try {
+            *(volatile u32 *)(uintptr_t)(ecx_this + 0x38u + id * 4u) = 1;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
+    return 0;
+}
+
+void ds_ui_sfx_install(void)
+{
+    patch_jmp(0x1065B0u, hook_ui_sfx_volume, "UI-SFX SetVolume (W258)");
+    patch_jmp(0x106640u, hook_ui_sfx_play, "UI-SFX PlaySegment (W258)");
+}
+
 /* Installation aller A7-Hooks (nur bei audio=1). Adressen + RET-N vermessen:
  * Erzeugung/Methoden s. BERICHT W4 (Inventar-Tabelle). */
 void ds_audio_install(void)

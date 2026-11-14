@@ -193,6 +193,10 @@ static void rl_env(const char *path, int left)
          * movie_skip/pad_replay_gate bleiben -> Eingabe bleibt gesperrt. */
         strcpy_s(b, sizeof b, "replay_steps=;replay=");
     }
+    if (g_cfg.replay_autoplay[0]) { /* W254: Replay-Start nur im ersten Prozess */
+        size_t k = strlen(b);
+        _snprintf_s(b + k, sizeof b - k, _TRUNCATE, "%sreplay_autoplay=", k ? ";" : "");
+    }
     if (wm >= 0 && wm != g_cfg.window_mode) {
         size_t k = strlen(b);
         _snprintf_s(b + k, sizeof b - k, _TRUNCATE, "%swindow_mode=%d", k ? ";" : "", wm);

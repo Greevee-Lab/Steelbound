@@ -18,6 +18,42 @@ static const known_t k_known[] = {
       0x43430002u, 4u, "Steel Battalion (Europe, PAL)" },
 };
 
+/* W256 PACK-ANYVER: Familie "steel-battalion" (Reihenfolge = Index). */
+static const struct { const char *sha256, *name; } k_family[] = {
+    { "a8285ca55dee8e770ef180f22665981101b3818e7e00858e60daa766b8b2e8f7", "Europe" },
+    { "1d4e006a2eab0694b32562c453fdeb4c3b077eec8c6ed6b75bd6fe4059d8200a", "USA" },
+};
+#define K_NFAM ((int)(sizeof k_family / sizeof k_family[0]))
+
+int sb_gamever_family_count(void) { return K_NFAM; }
+
+int sb_gamever_family_idx(const char *sha256_hex)
+{
+    int i, k;
+    if (!sha256_hex) {
+        return -1;
+    }
+    for (i = 0; i < K_NFAM; i++) {
+        const char *a = k_family[i].sha256;
+        for (k = 0; k < 64; k++) {
+            char c = sha256_hex[k];
+            if (c >= 'A' && c <= 'F') {
+                c = (char)(c - 'A' + 'a');
+            }
+            if (c != a[k]) {
+                break;
+            }
+        }
+        if (k == 64 && sha256_hex[64] == '\0') {
+            return i;
+        }
+    }
+    return -1;
+}
+
+const char *sb_gamever_family_sha(int i) { return i >= 0 && i < K_NFAM ? k_family[i].sha256 : NULL; }
+const char *sb_gamever_family_name(int i) { return i >= 0 && i < K_NFAM ? k_family[i].name : NULL; }
+
 static uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
 
 const char *sb_gamever_region_name(uint32_t r)

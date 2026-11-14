@@ -5,6 +5,7 @@
 #include "hlock.h"
 #include "audio_out.h"
 #include "sb_perfhud.h" /* W122 PERF-HUD */
+#include "render_vexp.h" /* W255 VIDEO-EXPORT */
 
 /* TURBO bis Ladezaehler (A1): 1 solange u32 an 0x2EEA34 noch unter
  * turbo_until_mode liegt. 0 = Schalter aus. W232: [0x2EEA34] ist ein
@@ -147,6 +148,7 @@ u32 __stdcall hook_BlockUntilVerticalBlank(void)
     static u32 calls, lastlog;
     u32 target, tick;
     if (g_cfg.vblank_hz <= 0) {
+        if (sb_vexp_clock()) { sb_vexp_vblank(); } /* W255 VIDEO-EXPORT: virtueller Takt (1 VBlank) */
         return 0;
     }
     if (g_phud_meas) { sb_phud_wait_enter(); } /* W122 PERF-HUD: Warten */
@@ -210,6 +212,8 @@ u32 __stdcall hook_GetDisplayFieldStatus(u32 out)
     static u32 calls;
     if (g_cfg.vblank_hz > 0) {
         counter = vblank_tick_now();
+    } else if (sb_vexp_clock()) {
+        counter = sb_vexp_field_poll(); /* W255 VIDEO-EXPORT: Poll ohne Fortschritt = 1 VBlank */
     } else {
         counter += 3;
     }

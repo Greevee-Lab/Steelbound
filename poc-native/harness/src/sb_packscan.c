@@ -308,7 +308,12 @@ typedef struct {
     char rule[8], reason[40], detail[220];
 } sbpk_find_t;
 
-typedef struct { sbpk_find_t *v; int n, cap; } sbpk_finds_t;
+typedef struct {
+    sbpk_find_t *v;
+    int n, cap;
+    int fit;       /* W256: SB_PACK_FIT_* (V2) */
+    char made[16]; /* W256: Fassung bei FIT_OTHER */
+} sbpk_finds_t;
 
 static void sbpk_add(sbpk_finds_t *f, int red, const char *rule,
                      const char *reason, const char *detail)
@@ -734,38 +739,30 @@ static void sbpk_validate(sbpk_pk_t *p, const char *xbe, sbpk_finds_t *f)
     g = jget(m, "game");
     {
         const jnode_t *xl = (g && g->kind == 5) ? jget(g, "xbe_sha256") : NULL;
-        int ok = 0;
+        const jnode_t *fv = (g && g->kind == 5) ? jget(g, "family") : NULL;
+        /* W256 PACK-ANYVER: game.family "steel-battalion" = alle bekannten
+         * Fassungen; xbe_sha256 darf dann fehlen oder leer sein. */
+        int fam = fv && fv->kind == 4 && strcmp(fv->s, SB_GAMEVER_FAMILY) == 0;
+        if (fv && !fam) {
+            sbpk_add(f, 1, "V1", "bad_game", "family");
+        }
         if (xl && xl->kind == 6 && xl->n > 0) {
             int k;
-            ok = 1;
             for (k = 0; k < xl->n; k++) {
                 const jnode_t *x = xl->items[k];
                 if (!x || x->kind != 4 || !sbpk_sha64(x->s)) {
-                    ok = 0;
                     sbpk_add(f, 1, "V1", "bad_game", "xbe_sha256 hex");
                     break;
                 }
             }
-        } else {
+        } else if (!fam || (xl && xl->kind != 6)) {
             sbpk_add(f, 1, "V1", "bad_game", "xbe_sha256");
         }
-        (void)ok;
-        /* V2 Spielversion (nur wenn bekannt). */
-        if (xbe && xbe[0] && xl && xl->kind == 6) {
-            int k, hit = 0;
-            char lo[70];
-            for (k = 0; k < xl->n; k++) {
-                const jnode_t *x = xl->items[k];
-                if (!x || x->kind != 4) {
-                    continue;
-                }
-                sbpk_lower(x->s, lo, sizeof lo);
-                if (strcmp(xbe, lo) == 0) {
-                    hit = 1;
-                    break;
-                }
-            }
-            if (!hit) {
+        /* V2 Spielversion (nur wenn bekannt): genau, andere bekannte
+         * Fassung oder Familie passt (W256), sonst rot. */
+        if (xbe && xbe[0] && ((xl && xl->kind == 6) || fam)) {
+            f->fit = pk_game_fit(g, xbe, f->made, sizeof f->made);
+            if (f->fit == SB_PACK_FIT_NO) {
                 char xb[20];
                 strncpy_s(xb, sizeof xb, xbe, 16);
                 xb[16] = '\0';
@@ -1264,6 +1261,15 @@ static int sbpk_quick(sbpk_pk_t *p, char *reason, size_t rcap)
 int sb_pack_check(const char *pkg_path, const char *xbe_sha256,
                   char *reason, unsigned rcap, char *detail, unsigned dcap)
 {
+    return sb_pack_check_fit(pkg_path, xbe_sha256, reason, rcap, detail,
+                             dcap, NULL, NULL, 0);
+}
+
+int sb_pack_check_fit(const char *pkg_path, const char *xbe_sha256,
+                      char *reason, unsigned rcap, char *detail,
+                      unsigned dcap, int *fit, char *made_for,
+                      unsigned mcap)
+{
     sbpk_pk_t p;
     sbpk_finds_t f;
     int i, status = 2;
@@ -1317,6 +1323,13 @@ int sb_pack_check(const char *pkg_path, const char *xbe_sha256,
                 break;
             }
         }
+    }
+    if (fit) {
+        *fit = f.fit;
+    }
+    if (made_for && mcap) {
+        strncpy_s(made_for, mcap, f.fit == SB_PACK_FIT_OTHER ? f.made : "",
+                  _TRUNCATE);
     }
     free(f.v);
     return status;

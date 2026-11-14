@@ -48,6 +48,9 @@
  * GetCursorPos-Pfad (mouse_capture=0, Fenster fehlt noch oder Subclass
  * scheiterte - dann bleibt die Maus wie bisher nutzbar). */
 int imouse_poll(int *dx, int *dy, int *blocked);
+/* W260 MOUSE-WHEEL: Maske der aktiven Mausrad-Impulse (Bit = IMAP_WHEEL_*)
+ * fuer diesen Spiel-Frame; blocked = 1 verwirft angestaute Rasten. */
+unsigned imouse_wheel_mask(unsigned frame, int blocked);
 
 /* 1 = Client-Fenster hat den Fokus (Fenster-Eingabe installiert: logischer
  * Fokus aus Nachrichten/Test-Hook; sonst Vordergrundfenster). */

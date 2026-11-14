@@ -9,6 +9,7 @@
 #include "sb_profile.h" /* W229 SBA() */
 #include "hlog.h"
 #include "hcfg.h"
+#include "sb_tex.h" /* W243 DIAG(AMMO-HUD) */
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
@@ -760,6 +761,43 @@ void diag_combat_tick(unsigned frame)
                    b0k, b0[0], b0[1], b0[2], b0[3], b0[4], b0[5], hy, ed[0],
                    eb[0], ed[1], eb[1]);
         }
+    }
+    /* DIAG(AMMO-HUD,W243): Waffenanzeige links gegen Spielspeicher.
+     * Spiel: Slot [0x356C94], Waffen-IDs [0x354FBC+4i], Munition
+     * [[0x355000]+0x12+2i], Magazine +0x2A+2i, Nachschub [0x356EE4]
+     * (3 = laeuft, FUN_0004CAF0), Versorger [0x6CA6C4]; HUD-Logik
+     * FUN_0009D270: Zustand [0x560F6C]/[0x560F1B], Cache Munition
+     * [0x560F54+4i], Magazine [0x560F60+4i], Modus [0x354F3C], Verteiler
+     * disp = [0x55DEDC] (HUD-Hauptzustand) / [0x561018] (1 = FUN_0009D270 laeuft). Client:
+     * CPU-beschriebene Zieltexturen (gesperrt in FUN_00093210). */
+    {
+        u32 wp = st_read(SBA(0x355000u)), i2;
+        u32 am[3] = { 0xFFFFu, 0xFFFFu, 0xFFFFu }, mg[3] = { 0xFFFFu, 0xFFFFu, 0xFFFFu };
+        u32 sa[3] = { 0xFFFFu, 0xFFFFu, 0xFFFFu }, sm[3] = { 0xFFFFu, 0xFFFFu, 0xFFFFu };
+        static const u32 tx[5] = { 0x3B78FCu, 0x3B7D24u, 0x3B791Cu, 0x3B7914u, 0x3B7900u }; /* Atlas M0, Atlas M1, Ziel/Font M2, Ziel M0 */
+        char ti[5][112];
+        if (wp > 0x10000u && wp < 0x8000000u) {
+            for (i2 = 0; i2 < 3u; i2++) {
+                am[i2] = st_read16(wp + 0x12u + 2u * i2) & 0xFFFFu;
+                mg[i2] = st_read16(wp + 0x2Au + 2u * i2) & 0xFFFFu;
+                sa[i2] = st_read16(wp + 0x18u + 2u * i2) & 0xFFFFu; /* Nebenwaffen (Index [0x356DCC]) */
+                sm[i2] = st_read16(wp + 0x30u + 2u * i2) & 0xFFFFu;
+            }
+        }
+        for (i2 = 0; i2 < 5u; i2++) { sb_tex_diag_info(st_read(SBA(tx[i2])), ti[i2], sizeof ti[i2]); }
+        HLOG_I("AMMOHUD: f=%u mode=%u slot=%u n=%u wid=%u/%u/%u am=%u/%u/%u mg=%u/%u/%u sup=%u v=%u "
+               "sub=%u swid=%u/%u/%u sam=%u/%u/%u smg=%u/%u/%u disp=%u/%u hud=%u/%u/%u efc=%u ed4=%u c_am=%u/%u/%u c_mg=%u/%u/%u | 78FC[%s] 7D24[%s] 791C[%s] 7914[%s] 7900[%s]",
+               frame, st_read(SBA(0x354F3Cu)), st_read(SBA(0x356C94u)), st_read(SBA(0x35211Cu)),
+               st_read(SBA(0x354FBCu)), st_read(SBA(0x354FC0u)), st_read(SBA(0x354FC4u)),
+               am[0], am[1], am[2], mg[0], mg[1], mg[2], st_read(SBA(0x356EE4u)), st_read16(SBA(0x6CA6C4u)) & 0xFFFFu,
+               st_read(SBA(0x356DCCu)), st_read(SBA(0x354FC8u)), st_read(SBA(0x354FCCu)), st_read(SBA(0x354FD0u)),
+               sa[0], sa[1], sa[2], sm[0], sm[1], sm[2],
+               st_read(SBA(0x55DEDCu)) & 0xFFu, st_read(SBA(0x561018u)) & 0xFFu, /* HUD-Verteiler FUN_00093210 / FUN_0009D370 */
+               st_read(SBA(0x560F6Cu)) & 0xFFu, (st_read(SBA(0x560F6Cu)) >> 8) & 0xFFu, (st_read(SBA(0x560F18u)) >> 24) & 0xFFu,
+               st_read(SBA(0x560EFCu)), st_read(SBA(0x560ED4u)),
+               st_read(SBA(0x560F54u)), st_read(SBA(0x560F58u)), st_read(SBA(0x560F5Cu)),
+               st_read(SBA(0x560F60u)), st_read(SBA(0x560F64u)), st_read(SBA(0x560F68u)),
+               ti[0], ti[1], ti[2], ti[3], ti[4]);
     }
 }
 

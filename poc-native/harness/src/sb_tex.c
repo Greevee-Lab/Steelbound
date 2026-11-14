@@ -1153,6 +1153,25 @@ static unsigned tex_full_hash(unsigned data, unsigned size)
     return h ? h : 1u;
 }
 
+/* DIAG(AMMO-HUD,W243): Client-Zustand einer CPU-beschriebenen Textur fuer
+ * die AMMOHUD-Zeile (combat_diag=1): Lockwatch-Mitglied, Cache-Eintrag,
+ * Hash beim letzten Upload/Pruefen gegen den jetzigen Speicher (ungleich
+ * ueber mehrere Zeilen = Anzeige veraltet). Nur lesend. */
+void sb_tex_diag_info(unsigned xptr, char *buf, size_t n)
+{
+    int i;
+    unsigned data = 0, cur = 0;
+    if (!buf || !n) { return; }
+    if (!xptr || xptr < 0x10000u || xptr >= 0x80000000u) { _snprintf_s(buf, n, _TRUNCATE, "x=0"); return; }
+    __try { data = *(unsigned *)(uintptr_t)(xptr + 4); } __except (EXCEPTION_EXECUTE_HANDLER) { data = 0; }
+    i = tex_find(xptr);
+    if (i < 0) { _snprintf_s(buf, n, _TRUNCATE, "x=0x%X lw=%d lwn=%d c=-", xptr, lw_has(xptr), g_lw_n); return; }
+    if (g_cache[i].size && data) { cur = tex_full_hash(sb_tex_hostaddr_x(xptr, data), g_cache[i].size); }
+    _snprintf_s(buf, n, _TRUNCATE, "x=0x%X lw=%d lwn=%d c=%d d=%d data=%s lwf=%u lwh=%08X cur=%08X%s", xptr, lw_has(xptr), g_lw_n, i,
+                (int)g_cache[i].dirty, data == g_cache[i].data ? "=" : "neu", g_cache[i].lw_frame, g_cache[i].lw_hash, cur,
+                (cur && g_cache[i].lw_hash && cur != g_cache[i].lw_hash) ? " ALT" : "");
+}
+
 /* DIAG(PERF-HUD,W122): Zeit in sb_tex_get (Cache, Dirty-Hash, Upload, HD-Ersatz)
  * nur bei g_phud_meas; Pfad unveraendert. */
 long long g_phud_texq;

@@ -7,6 +7,8 @@
 #include "sb_remaster.h" /* W103 REM-FRAME */
 #include "sb_perfhud.h" /* W125 TICK-PERF */
 #include "sb_state.h" /* W232: sb_in_mission */
+#include "sb_rauto.h" /* W254 REPLAY-LAUNCHER */
+#include "render_vexp.h" /* W255 VIDEO-EXPORT */
 
 /* ---------- D3D-Hooks ---------- */
 u32 __stdcall hook_Direct3D_CreateDevice(u32 adapter, u32 devType, u32 hwnd,
@@ -94,6 +96,8 @@ u32 __stdcall hook_D3DDevice_Swap(u32 flags)
     diag_gear_tick(g_frames); /* DIAG(GEAR): Gang-Kette+Position (W141, nur bei gear_diag=1) */
     watch_dr_tick(g_frames); /* WATCHDR (W41): ent:-Reload bei Tabellenwechsel (nur bei watch=...) */
     replay_steps_tick(); /* A4: zustandsgesteuerte Eingaben */
+    sb_rauto_tick(); /* W254 REPLAY-LAUNCHER: Replay-Start (nur mit replay_autoplay) */
+    sb_vexp_swap(); /* W255 VIDEO-EXPORT: Aufnahme/Ende (nur mit video_export) */
     ign_gate_tick(); /* W52 IGNFIX: Gate Bit 2 (nur bei ign_toggle_fix=1) */
     /* DIAG(MEMSCAN): XBE-.data (0x279DC0-0x6ED17C, memory.tsv) alle N Frames
      * nach <out>/memscan/f_NNNNNN.bin -> scripts/memscan.py sucht Adressen,
@@ -306,6 +310,7 @@ u32 __stdcall hook_D3DDevice_GetVertexShaderConstant(u32 reg, u32 pOut,
 
 /* DIAG(TEX3D,W31): letzter Pixelshader + Combiner-Stand (Zensus liest). */
 unsigned g_im_pshader, g_npshader;
+unsigned g_psc_raw[8], g_psc_raw_set; /* FIX(LOAD-VT-COLOR,W257): SetPixelShaderConstant roh (Bit n = cn seit SetPixelShader) */
 unsigned g_tss_n, g_tss_a, g_tss_b, g_tss_c;
 u32 __stdcall hook_D3DDevice_SetPixelShader(u32 handle)
 {
@@ -315,6 +320,7 @@ u32 __stdcall hook_D3DDevice_SetPixelShader(u32 handle)
     }
     g_im_pshader = handle; g_npshader++;
     { extern unsigned g_rq_psconst_set; extern unsigned long long g_rq_rs_set; g_rq_psconst_set = 0; g_rq_rs_set = 0; } /* RENDER-QA: SetPixelShader laedt die Def-Werte */
+    { extern unsigned g_psc_raw_set; g_psc_raw_set = 0; } /* FIX(LOAD-VT-COLOR,W257): Roh-Spiegel ebenso */
     return 0;
 }
 
@@ -982,6 +988,26 @@ u32 __stdcall hook_D3D_PSConst(u32 reg, u32 pData,
     if (g_cfg.bloom_diag) { /* DIAG(SHADE-M2,W117): Aufrufer im Spiel */
         extern unsigned g_psc_ra;
         g_psc_ra = (unsigned)(uintptr_t)_ReturnAddress();
+    }
+    /* FIX(LOAD-VT-COLOR,W257): Roh-Spiegel c0..c7 unabhaengig von shading/
+     * shade_psconst (nur gelesen von fx_ps_mul_c0, Muster R0 = V0 * C0:
+     * Drahtgitter-VT im Ladebild/Nachschub-Menue, Farbe je VT aus c0). */
+    if (g_cfg.ps_mul_c0) {
+        extern unsigned g_psc_raw[8], g_psc_raw_set;
+        u32 k;
+        __try {
+            for (k = 0; k < count && reg + k < 8u; k++) {
+                const float *f = (const float *)(uintptr_t)(pData + k * 16u);
+                float c4[4];
+                unsigned q[4], j;
+                c4[0] = f[0]; c4[1] = f[1]; c4[2] = f[2]; c4[3] = f[3];
+                for (j = 0; j < 4u; j++) { /* wie Original: klemmen [0,1], 8 Bit */
+                    q[j] = !(c4[j] > 0.0f) ? 0u : (c4[j] >= 1.0f ? 255u : (unsigned)(c4[j] * 255.0f + 0.5f));
+                }
+                g_psc_raw[reg + k] = (q[3] << 24) | (q[0] << 16) | (q[1] << 8) | q[2];
+                g_psc_raw_set |= 1u << (reg + k);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
     if ((g_cfg.shading && g_cfg.shade_psconst) || g_cfg.rq_diag) {
         extern unsigned __stdcall hook_D3DDevice_SetPixelShaderConstant(unsigned, unsigned, unsigned);

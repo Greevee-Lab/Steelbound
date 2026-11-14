@@ -860,10 +860,10 @@ typedef struct {
     int expo, tone, bthr, lworld, lckp, focus;               /* W121 Teil 2 */
     int aa, ssao, sat, temp, lift, cgam, gain, shadow, soft; /* W131 */
 } sfx_preset_t;
-static const char *const kSfxName[SB_GP_NPRE] = { "original", "dezent", "stark", "performance" };
+static const char *const kSfxName[SB_GP_NPRE] = { "original", "dezent", "stark", "performance", "klar" };
 
 /* cfg-Feld je Preset-Schluessel (Reihenfolge = kSbGfxPreset). */
-typedef char sb_gp_nkey_chk[(SB_GP_NKEY == 34 && SB_GP_FX0 == 24 && SB_GP_HD == 29) ? 1 : -1];
+typedef char sb_gp_nkey_chk[(SB_GP_NKEY == 35 && SB_GP_FX0 == 24 && SB_GP_HD == 29 && SB_GP_MFX == 34) ? 1 : -1];
 static int *const kGpField[SB_GP_NKEY] = {
     &g_cfg.shading, &g_cfg.world_fog, &g_cfg.world_contrast, &g_cfg.world_gamma, &g_cfg.world_sharpen,
     &g_cfg.bloom_strength, &g_cfg.cockpit_glow, &g_cfg.cockpit_spill, &g_cfg.cockpit_light,
@@ -873,6 +873,7 @@ static int *const kGpField[SB_GP_NKEY] = {
     &g_cfg.fx_soft, &g_cfg.fx_embers, &g_cfg.fx_light, &g_cfg.fx_light_cockpit, &g_cfg.fx_interp,
     &g_cfg.hd_textures,
     &g_cfg.interp_fps, &g_cfg.rt_scale, &g_cfg.rt_scale_dyn, &g_cfg.fs_interp_match,
+    &g_cfg.monitor_fx, /* W252 */
 };
 
 static void gp_range(int part, int *k0, int *k1)
@@ -916,7 +917,7 @@ void sb_gfx_part_apply(int q, int part)
     }
 }
 
-/* Einheitliches Preset: 0..3, -1 = Benutzerdefiniert (gleiche Semantik wie
+/* Einheitliches Preset: 0..4 (W252: 4 = Klare Sicht), -1 = Benutzerdefiniert (gleiche Semantik wie
  * launcher_cfg.c lcfg_gfx_preset). */
 int sb_gfx_preset_match_for(int fps, int rt)
 {
@@ -927,7 +928,9 @@ int sb_gfx_preset_match_for(int fps, int rt)
             fps == kSbGfxPreset[SB_GP_FPS].v[q] &&
             rt == kSbGfxPreset[SB_GP_RT].v[q] &&
             g_cfg.rt_scale_dyn == kSbGfxPreset[SB_GP_DYN].v[q] &&
-            g_cfg.fs_interp_match == kSbGfxPreset[SB_GP_MATCH].v[q]) { return q; }
+            g_cfg.fs_interp_match == kSbGfxPreset[SB_GP_MATCH].v[q] &&
+            (sb_rem_fx_locked(kSbGfxPreset[SB_GP_MFX].key) ||
+             g_cfg.monitor_fx == kSbGfxPreset[SB_GP_MFX].v[q])) { return q; } /* W252 */
     }
     return -1;
 }

@@ -4,6 +4,7 @@
 #include "audio_int.h"
 #include "sb_profile.h" /* W229 SBA() */
 #include "sb_pause.h" /* W188 GAME-MENU: g_sb_paused */
+#include "render_vexp.h" /* W255 VIDEO-EXPORT */
 #include <share.h> /* _SH_DENYNO (W102) */
 
 /* ---------- WAV-Writer (kill-sicher: Header pro Chunk neu) ---------- */
@@ -1281,6 +1282,13 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
         g_mixed_total += mix_n;
         if ((g_mixed_total % (MIXRATE * 60u)) < mix_n) /* alle ~60 s */
             audio_log_stats();
+        if (sb_vexp_audio()) {
+            /* W255 VIDEO-EXPORT: Block an den Encoder, Takt = virtuelle Spielzeit statt Echtzeit */
+            sb_vexp_audio_push(g_outbuf, mix_n);
+            sb_vexp_audio_pace();
+            QueryPerformanceCounter(&last);
+            continue;
+        }
         /* Pace the selected audio block at the unchanged sample rate. */
         QueryPerformanceCounter(&now);
         {

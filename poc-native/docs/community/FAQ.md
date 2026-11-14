@@ -110,6 +110,15 @@ created yourself – and never textures taken from the game. Sharing packs is
 your responsibility; see the legal note in
 [Graphics and packs](GRAPHICS_AND_PACKS.md).
 
+## Does Steelbound connect to the internet?
+
+Only if you allow it. On first start the launcher asks whether it should
+check for new versions; the answer is **No** unless you choose **Yes**, and
+you can change it later under **Advanced** (with **Check now** for a single
+check). The check sends one request to the GitHub release list (GitHub sees
+your IP address), shows a note when a newer version exists and **downloads
+nothing** – updating stays your decision.
+
 ## Where do I change settings?
 
 Everyday settings are on the launcher pages (**Play**, **Display**,

@@ -70,6 +70,8 @@ void sb_ovl_request_photo(const char *why);
  * Requests are ignored while any menu or clip is active. clip: 0 shot, 1 video. */
 void sb_ovl_set_feedback_binding(int clip, const int *vks, int n);
 void sb_ovl_request_feedback(int clip);
+/* W254 REPLAY-LAUNCHER: Hinweis (bis 6 Zeilen UTF-8, uebersetzt), beliebige Taste schliesst. */
+void sb_ovl_notice(const char *const *lines, int n);
 
 /* ---- W122: kleine gemeinsame API (Look + Zeichenweg), genutzt vom
  * Leistungs-Overlay sb_perfhud.c. Farben (GDI COLORREF) und Deckung des

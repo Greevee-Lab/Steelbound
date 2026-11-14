@@ -193,33 +193,135 @@ static const char *state_txt(sb_save_state_t s)
     }
 }
 
+/* W248 REPSIG: Datengroesse eines Replays (UDATA\43430002\<id>\*.rep) oder 0. */
+unsigned sb_replay_data_size(const wchar_t *name)
+{
+    size_t ln = wcslen(name);
+    if (ln < 5 || _wcsicmp(name + ln - 4, L".rep") != 0) {
+        return 0;
+    }
+    return SB_REPLAY_DATA_SIZE;
+}
+
+/* Zustand eines sb_savecheck_run-Laufs (Sicherungsordner wird erst beim
+ * ersten Befund angelegt: <hdd>\_backup\repair-<zeit>\). */
+typedef struct {
+    const wchar_t *hdd;
+    int apply;
+    int found;
+    int broot_bad;
+    wchar_t broot[800];
+    sb_savecheck_t *r;
+    sb_savecheck_log_fn log;
+    void *ctx;
+} sc_run_t;
+
+/* Eine Datei pruefen/reparieren. rel = Pfad relativ zu hdd (z. B.
+ * TDATA\43430002\user01.sav), name = Anzeigename, n = Datengroesse,
+ * is_rep = Replay (zu kurz -> nur melden, nicht verschieben). */
+static void sc_one(sc_run_t *c, const wchar_t *rel, const wchar_t *name, unsigned n, int is_rep)
+{
+    wchar_t path[1100], dst[1100], ddir[1100];
+    char nm[300];
+    unsigned long long sz = 0;
+    sb_save_state_t s;
+    int rc = -1;
+    sb_savecheck_t *r = c->r;
+    r->checked++;
+    if (is_rep) {
+        r->replays++;
+    }
+    _snwprintf_s(path, 1100, _TRUNCATE, L"%s\\%s", c->hdd, rel);
+    s = classify(path, n, &sz);
+    if (s == SB_SAVE_OK || (is_rep && s == SB_SAVE_SHORT)) {
+        /* Replays: Spiel listet/laedt nur vollstaendige Dateien; eine zu
+         * kurze bleibt unangetastet (kein Startfehler wie bei .sav). */
+        r->ok++;
+        return;
+    }
+    c->found++;
+    w2u8(is_rep ? rel : name, nm, sizeof nm);
+    if (!c->apply || s == SB_SAVE_UNREAD) {
+        r->failed++;
+        logf_u8(c->log, c->ctx, "SAVECHECK: %s %s (%llu B, erwartet %u B)%s", nm, state_txt(s), sz,
+                n + SIG_LEN, c->apply ? " - unveraendert" : "");
+        return;
+    }
+    if (!c->broot[0] && !c->broot_bad) {
+        if (make_backup_dir(c->hdd, L"repair", c->broot, 800) != 0) {
+            c->broot[0] = 0;
+            c->broot_bad = 1;
+        }
+    }
+    if (!c->broot[0]) {
+        r->failed++;
+        logf_u8(c->log, c->ctx, "SAVECHECK: %s %s - Sicherungsordner nicht anlegbar, unveraendert", nm,
+                state_txt(s));
+        return;
+    }
+    _snwprintf_s(dst, 1100, _TRUNCATE, L"%s\\%s", c->broot, rel);
+    wcsncpy_s(ddir, 1100, dst, _TRUNCATE);
+    {
+        wchar_t *sl = wcsrchr(ddir, L'\\');
+        if (sl) {
+            *sl = 0;
+        }
+    }
+    mkdir_p_w(ddir);
+    if (s == SB_SAVE_SHORT) {
+        rc = MoveFileExW(path, dst, MOVEFILE_COPY_ALLOWED) ? 0 : -1;
+        if (rc == 0) {
+            r->moved++;
+        }
+    } else if (CopyFileW(path, dst, FALSE)) {
+        rc = write_sig(path, n);
+        if (rc == 0) {
+            r->repaired++;
+        }
+    }
+    if (rc != 0) {
+        r->failed++;
+    }
+    logf_u8(c->log, c->ctx, "SAVECHECK: %s %s (%llu B, erwartet %u B) -> %s", nm, state_txt(s), sz,
+            n + SIG_LEN,
+            rc != 0 ? "FEHLER (unveraendert)"
+            : s == SB_SAVE_SHORT ? "in Sicherung verschoben (Spiel legt den Eintrag neu an)"
+                                 : "Signatur ersetzt (Daten unveraendert)");
+}
+
 int sb_savecheck_run(const wchar_t *hdd_root, int apply, sb_savecheck_t *res,
                      sb_savecheck_log_fn log, void *ctx)
 {
-    wchar_t dir[800], pat[820], bdir[800];
+    wchar_t tdir[800], udir[800], pat[820];
     WIN32_FIND_DATAW fd;
     HANDLE fh;
-    int found = 0;
     sb_savecheck_t r;
+    sc_run_t c;
+    int have_t, have_u;
     memset(&r, 0, sizeof r);
-    bdir[0] = 0;
-    _snwprintf_s(dir, 800, _TRUNCATE, L"%s\\TDATA\\%s", hdd_root, SB_SAVE_TITLE_W);
-    if (!is_dir_w(dir)) {
+    memset(&c, 0, sizeof c);
+    c.hdd = hdd_root;
+    c.apply = apply;
+    c.r = &r;
+    c.log = log;
+    c.ctx = ctx;
+    _snwprintf_s(tdir, 800, _TRUNCATE, L"%s\\TDATA\\%s", hdd_root, SB_SAVE_TITLE_W);
+    _snwprintf_s(udir, 800, _TRUNCATE, L"%s\\UDATA\\%s", hdd_root, SB_SAVE_TITLE_W);
+    have_t = is_dir_w(tdir);
+    have_u = is_dir_w(udir);
+    if (!have_t && !have_u) {
         if (res) {
             *res = r;
         }
         return -1;
     }
-    _snwprintf_s(pat, 820, _TRUNCATE, L"%s\\*.sav", dir);
-    fh = FindFirstFileW(pat, &fd);
+    /* T: Spielstaende TDATA\43430002\*.sav */
+    _snwprintf_s(pat, 820, _TRUNCATE, L"%s\\*.sav", tdir);
+    fh = have_t ? FindFirstFileW(pat, &fd) : INVALID_HANDLE_VALUE;
     if (fh != INVALID_HANDLE_VALUE) {
         do {
-            wchar_t path[1100], dst[1100];
-            char nm[300];
+            wchar_t rel[400];
             unsigned n;
-            unsigned long long sz = 0;
-            sb_save_state_t s;
-            int rc = -1;
             if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
                 continue;
             }
@@ -227,69 +329,55 @@ int sb_savecheck_run(const wchar_t *hdd_root, int apply, sb_savecheck_t *res,
             if (!n) {
                 continue;
             }
-            r.checked++;
-            _snwprintf_s(path, 1100, _TRUNCATE, L"%s\\%s", dir, fd.cFileName);
-            s = classify(path, n, &sz);
-            if (s == SB_SAVE_OK) {
-                r.ok++;
-                continue;
-            }
-            found++;
-            w2u8(fd.cFileName, nm, sizeof nm);
-            if (!apply || s == SB_SAVE_UNREAD) {
-                r.failed++;
-                logf_u8(log, ctx, "SAVECHECK: %s %s (%llu B, erwartet %u B)%s", nm,
-                        state_txt(s), sz, n + SIG_LEN, apply ? " - unveraendert" : "");
-                continue;
-            }
-            if (!bdir[0]) {
-                wchar_t sub[900];
-                if (make_backup_dir(hdd_root, L"repair", bdir, 800) != 0) {
-                    bdir[0] = 0;
-                    r.failed++;
-                    logf_u8(log, ctx, "SAVECHECK: %s %s - Sicherungsordner nicht anlegbar, unveraendert",
-                            nm, state_txt(s));
-                    continue;
-                }
-                _snwprintf_s(sub, 900, _TRUNCATE, L"%s\\TDATA\\%s", bdir, SB_SAVE_TITLE_W);
-                wcsncpy_s(bdir, 800, sub, _TRUNCATE);
-                mkdir_p_w(bdir);
-            }
-            _snwprintf_s(dst, 1100, _TRUNCATE, L"%s\\%s", bdir, fd.cFileName);
-            if (s == SB_SAVE_SHORT) {
-                rc = MoveFileExW(path, dst, MOVEFILE_COPY_ALLOWED) ? 0 : -1;
-                if (rc == 0) {
-                    r.moved++;
-                }
-            } else if (CopyFileW(path, dst, FALSE)) {
-                rc = write_sig(path, n);
-                if (rc == 0) {
-                    r.repaired++;
-                }
-            }
-            if (rc != 0) {
-                r.failed++;
-            }
-            logf_u8(log, ctx, "SAVECHECK: %s %s (%llu B, erwartet %u B) -> %s", nm,
-                    state_txt(s), sz, n + SIG_LEN,
-                    rc != 0 ? "FEHLER (unveraendert)"
-                    : s == SB_SAVE_SHORT ? "in Sicherung verschoben (Spiel legt den Eintrag neu an)"
-                                         : "Signatur ersetzt (Daten unveraendert)");
+            _snwprintf_s(rel, 400, _TRUNCATE, L"TDATA\\%s\\%s", SB_SAVE_TITLE_W, fd.cFileName);
+            sc_one(&c, rel, fd.cFileName, n, 0);
         } while (FindNextFileW(fh, &fd));
         FindClose(fh);
     }
-    if (bdir[0]) {
-        /* Anzeige: Sicherungswurzel (ohne TDATA\<title>) */
-        wchar_t *p = wcsstr(bdir, L"\\TDATA\\");
-        if (p) {
-            *p = 0;
-        }
-        wcsncpy_s(r.backup, 600, bdir, _TRUNCATE);
+    /* W248 REPSIG: U: gespeicherte Replays UDATA\43430002\<id>\*.rep
+     * (XFindFirstSaveGame-Ordner, eine Ebene; ZCACHE = eigenes "Last Replay"). */
+    _snwprintf_s(pat, 820, _TRUNCATE, L"%s\\*", udir);
+    fh = have_u ? FindFirstFileW(pat, &fd) : INVALID_HANDLE_VALUE;
+    if (fh != INVALID_HANDLE_VALUE) {
+        do {
+            wchar_t sub[400], pat2[1100];
+            WIN32_FIND_DATAW fd2;
+            HANDLE fh2;
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+                (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) ||
+                wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) {
+                continue;
+            }
+            _snwprintf_s(sub, 400, _TRUNCATE, L"UDATA\\%s\\%s", SB_SAVE_TITLE_W, fd.cFileName);
+            _snwprintf_s(pat2, 1100, _TRUNCATE, L"%s\\%s\\*.rep", hdd_root, sub);
+            fh2 = FindFirstFileW(pat2, &fd2);
+            if (fh2 == INVALID_HANDLE_VALUE) {
+                continue;
+            }
+            do {
+                wchar_t rel[700];
+                unsigned n;
+                if (fd2.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+                    continue;
+                }
+                n = sb_replay_data_size(fd2.cFileName);
+                if (!n) {
+                    continue;
+                }
+                _snwprintf_s(rel, 700, _TRUNCATE, L"%s\\%s", sub, fd2.cFileName);
+                sc_one(&c, rel, fd2.cFileName, n, 1);
+            } while (FindNextFileW(fh2, &fd2));
+            FindClose(fh2);
+        } while (FindNextFileW(fh, &fd));
+        FindClose(fh);
+    }
+    if (c.broot[0]) {
+        wcsncpy_s(r.backup, 600, c.broot, _TRUNCATE); /* Anzeige: Sicherungswurzel */
     }
     if (res) {
         *res = r;
     }
-    return found;
+    return c.found;
 }
 
 static int has_files(const wchar_t *dir, int depth)
@@ -669,6 +757,25 @@ static int st_good(const wchar_t *dir, const wchar_t *name, unsigned len, unsign
     return ok;
 }
 
+/* W248: Byte an Offset off (-1 = nicht lesbar) */
+static int st_byte_at(const wchar_t *path, unsigned off)
+{
+    unsigned char c = 0;
+    DWORD got = 0;
+    LARGE_INTEGER o;
+    HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        return -1;
+    }
+    o.QuadPart = off;
+    if (!SetFilePointerEx(h, o, NULL, FILE_BEGIN) || !ReadFile(h, &c, 1, &got, NULL) || got != 1) {
+        CloseHandle(h);
+        return -1;
+    }
+    CloseHandle(h);
+    return c;
+}
+
 static void st_rmtree(const wchar_t *dir)
 {
     wchar_t pat[1100];
@@ -703,6 +810,7 @@ static void st_count(const char *line, void *ctx)
 int sb_savecheck_selftest(char *msg, size_t cap)
 {
     wchar_t tmp[MAX_PATH], root[900], td[1000], ud[1000], bk[800], p[1100];
+    wchar_t zc[1000], r1[1100], r2[1100], r3[1100];
     sb_savecheck_t r;
     int nlog = 0, rc, step = 0;
     const char *why = NULL;
@@ -711,6 +819,11 @@ int sb_savecheck_selftest(char *msg, size_t cap)
                  GetCurrentProcessId(), GetTickCount());
     _snwprintf_s(td, 1000, _TRUNCATE, L"%s\\TDATA\\%s", root, SB_SAVE_TITLE_W);
     _snwprintf_s(ud, 1000, _TRUNCATE, L"%s\\UDATA\\%s", root, SB_SAVE_TITLE_W);
+    /* W248 REPSIG: Replay-Ordner wie XFindFirstSaveGame (12 Hex) + ZCACHE */
+    _snwprintf_s(zc, 1000, _TRUNCATE, L"%s\\ZCACHE", root);
+    _snwprintf_s(r1, 1100, _TRUNCATE, L"%s\\0A0B0C0D0E01", ud); /* Xbox: fremde Signatur */
+    _snwprintf_s(r2, 1100, _TRUNCATE, L"%s\\0A0B0C0D0E02", ud); /* eigenes: Signatur 0 */
+    _snwprintf_s(r3, 1100, _TRUNCATE, L"%s\\0A0B0C0D0E03", ud); /* abgeschnitten */
 
 #define ST(c, w)            \
     do {                    \
@@ -726,12 +839,22 @@ int sb_savecheck_selftest(char *msg, size_t cap)
        sb_save_data_size(L"config.sav") == 0x2C && sb_save_data_size(L"sasen00.sav") == 0x15D00 &&
        sb_save_data_size(L"mslog00.sav") == 0xB40 && sb_save_data_size(L"user1.sav") == 0 &&
        sb_save_data_size(L"config00.sav") == 0 && sb_save_data_size(L"death00.bak") == 0 &&
-       sb_save_data_size(L"SaveMeta.xbx") == 0,
+       sb_save_data_size(L"SaveMeta.xbx") == 0 && sb_save_data_size(L"st00_0.rep") == 0,
        "Namensregeln");
-    /* frische Installation: kein TDATA -> -1, nichts angelegt */
+    ST(sb_replay_data_size(L"st00_0.rep") == 0xF61EC && sb_replay_data_size(L"ST00_0.REP") == 0xF61EC &&
+       sb_replay_data_size(L"SaveMeta.xbx") == 0 && sb_replay_data_size(L"user01.sav") == 0 &&
+       sb_replay_data_size(L"rep") == 0,
+       "Namensregeln Replay");
+    /* frische Installation: weder TDATA noch UDATA -> -1, nichts angelegt */
     ST(sb_savecheck_run(root, 1, &r, NULL, NULL) == -1 && !is_dir_w(root), "frisch");
-    mkdir_p_w(td);
+    /* W248: nur UDATA -> wird geprueft (kein -1) */
     mkdir_p_w(ud);
+    ST(sb_savecheck_run(root, 1, &r, NULL, NULL) == 0 && r.checked == 0, "nur UDATA");
+    mkdir_p_w(td);
+    mkdir_p_w(r1);
+    mkdir_p_w(r2);
+    mkdir_p_w(r3);
+    mkdir_p_w(zc);
     ST(st_write(td, L"user99.sav", 0xAE8, 1, SIG_LEN, 0) == 0 &&
        st_write(td, L"user01.sav", 0xAE8, 2, SIG_LEN, 0) == 0 &&
        st_write(td, L"death00.sav", 0x15D00, 3, 0, 0) == 0 &&        /* ohne Signatur: laedt */
@@ -742,17 +865,52 @@ int sb_savecheck_selftest(char *msg, size_t cap)
        st_write(td, L"notes.txt", 5, 6, 0, 0) == 0 &&
        st_write(ud, L"TitleMeta.xbx", 56, 7, 0, 0) == 0,
        "Testdateien");
-    /* nur pruefen: 4 Befunde, nichts veraendert, keine Sicherung */
+    /* W248 REPSIG: Replays (synthetisch, echte Groesse 0xF61EC + 20 Byte) */
+    ST(st_write(r1, L"st00_0.rep", 0xF61EC, 0x21, SIG_LEN, 0x5C) == 0 && /* Xbox-Signatur */
+       st_write(r1, L"SaveMeta.xbx", 48, 0x31, 0, 0) == 0 &&
+       st_write(r2, L"st00_0.rep", 0xF61EC, 0x22, SIG_LEN, 0) == 0 &&    /* eigenes Replay */
+       st_write(r3, L"st00_0.rep", 100, 0x23, 0, 0) == 0 &&              /* zu kurz: bleibt */
+       st_write(ud, L"st00_0.rep", 0xF61EC, 0x24, SIG_LEN, 0x5C) == 0 &&  /* nicht in <id>: nie */
+       st_write(zc, L"st00_0.rep", 0xF61EC, 0x25, SIG_LEN, 0x5C) == 0,    /* ZCACHE: nie */
+       "Testdateien Replay");
+    /* nur pruefen: 4 Befunde (3 .sav + 1 .rep), nichts veraendert, keine Sicherung */
     rc = sb_savecheck_run(root, 0, &r, st_count, &nlog);
-    ST(rc == 3 && r.checked == 7 && r.ok == 4 && r.failed == 3 && nlog == 3 && !r.backup[0],
+    ST(rc == 4 && r.checked == 10 && r.replays == 3 && r.ok == 6 && r.failed == 4 && nlog == 4 &&
+       !r.backup[0],
        "Pruefen");
+    _snwprintf_s(p, 1100, _TRUNCATE, L"%s\\st00_0.rep", r1);
+    ST(st_byte_at(p, 0xF61EC) == 0x5C, "Pruefen laesst Replay-Signatur");
     _snwprintf_s(p, 1100, _TRUNCATE, L"%s\\_backup", root);
     ST(!is_dir_w(p), "Pruefen legt keine Sicherung an");
     /* reparieren */
     nlog = 0;
     rc = sb_savecheck_run(root, 1, &r, st_count, &nlog);
-    ST(rc == 3 && r.repaired == 1 && r.moved == 2 && r.failed == 0 && nlog == 3 && r.backup[0],
+    ST(rc == 4 && r.repaired == 2 && r.moved == 2 && r.failed == 0 && nlog == 4 && r.backup[0],
        "Reparieren");
+    /* W248 REPSIG: Xbox-Replay repariert (Daten gleich, Signatur 0), Original
+     * gesichert; eigenes, kurzes, ZCACHE-Replay und SaveMeta unveraendert */
+    ST(st_good(r1, L"st00_0.rep", 0xF61EC, 0x21), "Replay: Daten erhalten + Signatur 0");
+    ST(st_good(r2, L"st00_0.rep", 0xF61EC, 0x22), "eigenes Replay unveraendert");
+    {
+        WIN32_FILE_ATTRIBUTE_DATA fa;
+        _snwprintf_s(p, 1100, _TRUNCATE, L"%s\\st00_0.rep", r3);
+        ST(GetFileAttributesExW(p, GetFileExInfoStandard, &fa) && fa.nFileSizeLow == 100,
+           "kurzes Replay unveraendert");
+        _snwprintf_s(p, 1100, _TRUNCATE, L"%s\\SaveMeta.xbx", r1);
+        ST(GetFileAttributesExW(p, GetFileExInfoStandard, &fa) && fa.nFileSizeLow == 48,
+           "SaveMeta.xbx unveraendert");
+    }
+    _snwprintf_s(p, 1100, _TRUNCATE, L"%s\\st00_0.rep", zc);
+    ST(st_byte_at(p, 0xF61EC) == 0x5C, "ZCACHE-Replay unangetastet");
+    _snwprintf_s(p, 1100, _TRUNCATE, L"%s\\st00_0.rep", ud);
+    ST(st_byte_at(p, 0xF61EC) == 0x5C, "Replay ausserhalb <id> unangetastet");
+    _snwprintf_s(p, 1100, _TRUNCATE, L"%s\\UDATA\\%s\\0A0B0C0D0E01\\st00_0.rep", r.backup,
+                 SB_SAVE_TITLE_W);
+    ST(st_byte_at(p, 0) == 0x21 && st_byte_at(p, 0xF61EC) == 0x5C && st_byte_at(p, 0xF61EC + 19) == 0x5C,
+       "Original-Replay gesichert");
+    _snwprintf_s(p, 1100, _TRUNCATE, L"%s\\UDATA\\%s\\0A0B0C0D0E02\\st00_0.rep", r.backup,
+                 SB_SAVE_TITLE_W);
+    ST(GetFileAttributesW(p) == INVALID_FILE_ATTRIBUTES, "eigenes Replay nicht gesichert");
     {
         WIN32_FILE_ATTRIBUTE_DATA fa;
         _snwprintf_s(p, 1100, _TRUNCATE, L"%s\\death00.sav", td);
@@ -776,7 +934,8 @@ int sb_savecheck_selftest(char *msg, size_t cap)
            "Original mslog00.sav gesichert");
     }
     /* zweiter Lauf: alles ok */
-    ST(sb_savecheck_run(root, 1, &r, NULL, NULL) == 0 && r.checked == 5 && r.ok == 5, "Wiederholung");
+    ST(sb_savecheck_run(root, 1, &r, NULL, NULL) == 0 && r.checked == 8 && r.ok == 8 && r.replays == 3,
+       "Wiederholung");
     /* Zuruecksetzen */
     {
         char e[200];

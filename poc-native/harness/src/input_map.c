@@ -350,6 +350,68 @@ static int imap_joy_atom_active(int code, const imap_snap_t *snap)
     return 0;
 }
 
+/* ---- W260 MOUSE-WHEEL: Rasten -> Tastenimpulse (s. input_map.h) ---- */
+#define IMAP_WHEEL_DELTA 120 /* WHEEL_DELTA: eine Raste */
+void imap_wheel_add(imap_wheel_t *w, int horiz, int delta)
+{
+    long acc;
+    int pos = horiz ? IMAP_WHEEL_RIGHT : IMAP_WHEEL_UP;
+    int neg = horiz ? IMAP_WHEEL_LEFT : IMAP_WHEEL_DOWN;
+    horiz = horiz ? 1 : 0;
+    if (!w || !delta) return;
+    acc = w->acc[horiz];
+    if ((acc > 0 && delta < 0) || (acc < 0 && delta > 0))
+        acc = 0; /* Richtungswechsel: Rest der anderen Richtung verwerfen */
+    acc += delta;
+    while (acc >= IMAP_WHEEL_DELTA || acc <= -IMAP_WHEEL_DELTA) {
+        int d = acc > 0 ? pos : neg;
+        acc += acc > 0 ? -IMAP_WHEEL_DELTA : IMAP_WHEEL_DELTA;
+        if (InterlockedIncrement(&w->pend[d]) > IMAP_WHEEL_MAXQ)
+            InterlockedDecrement(&w->pend[d]);
+    }
+    InterlockedExchange(&w->acc[horiz], acc);
+}
+
+void imap_wheel_clear(imap_wheel_t *w)
+{
+    int i;
+    if (!w) return;
+    InterlockedExchange(&w->acc[0], 0);
+    InterlockedExchange(&w->acc[1], 0);
+    for (i = 0; i < IMAP_WHEEL_N; i++) InterlockedExchange(&w->pend[i], 0);
+}
+
+unsigned imap_wheel_step(imap_wheel_t *w, unsigned frame, int blocked)
+{
+    unsigned m = 0;
+    int i;
+    if (!w) return 0;
+    for (i = 0; i < IMAP_WHEEL_N; i++) {
+        if (blocked) { /* gesperrt: nichts anstauen, laufenden Impuls beenden */
+            InterlockedExchange(&w->pend[i], 0);
+            w->on[i] = 0;
+            continue;
+        }
+        if (w->on[i]) {
+            unsigned d = frame - w->f0[i];
+            if (d < IMAP_WHEEL_ON) { m |= 1u << i; continue; }
+            if (d < IMAP_WHEEL_ON + IMAP_WHEEL_OFF) continue;
+            w->on[i] = 0;
+        }
+        for (;;) { /* naechste Raste uebernehmen (UI-Thread zaehlt parallel) */
+            long p = w->pend[i];
+            if (p <= 0) break;
+            if (InterlockedCompareExchange(&w->pend[i], p - 1, p) == p) {
+                w->on[i] = 1;
+                w->f0[i] = frame;
+                m |= 1u << i;
+                break;
+            }
+        }
+    }
+    return m;
+}
+
 static int imap_atom_active(const imap_atom_t *a, const imap_snap_t *snap)
 {
     switch (a->kind) {
@@ -360,6 +422,8 @@ static int imap_atom_active(const imap_atom_t *a, const imap_snap_t *snap)
         if (snap->replay_active)
             return snap->key(324 + a->code, snap->ctx) != 0;
         if (snap->real_blocked) return 0; /* W79: kein Fokus/freigegeben */
+        if (a->code >= IMAP_WHEEL_CODE0) /* W260: Mausrad-Impuls */
+            return (snap->wheel_mask >> (a->code - IMAP_WHEEL_CODE0)) & 1u;
         {
             int vk = a->code == 0 ? VK_LBUTTON :
                      a->code == 1 ? VK_RBUTTON :
@@ -1430,6 +1494,18 @@ static int imap_atom_parse_dig(const char *kind, const char *name,
         if (imap_strieq(name, "X2")) {
             a->code = 4;
             return 0;
+        }
+        { /* W260 MOUSE-WHEEL: Rasten als Impuls-Tasten (Code 5..8) */
+            static const char *const wn[IMAP_WHEEL_N] = {
+                "WHEEL_UP", "WHEEL_DOWN", "WHEEL_LEFT", "WHEEL_RIGHT"
+            };
+            int i;
+            for (i = 0; i < IMAP_WHEEL_N; i++) {
+                if (imap_strieq(name, wn[i])) {
+                    a->code = IMAP_WHEEL_CODE0 + i;
+                    return 0;
+                }
+            }
         }
         return -1;
     }

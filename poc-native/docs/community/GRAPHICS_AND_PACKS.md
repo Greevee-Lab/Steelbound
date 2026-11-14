@@ -87,8 +87,16 @@ like the original.
 - **Conflicts**: the selected pack lists covered textures and known
   effect values. An effect pack overrides your own colors and effects
   settings when the game starts (shown as a lock on the Graphics page).
-- **Fits your game** tells whether the pack was made for your game
-  version (yes (PAL), no, or not checked yet).
+- **Fits your game** tells whether the pack works with your copy. Packs
+  work with **every supported version** (Europe and USA): textures are
+  matched by their content, and both versions share the same textures.
+  You'll see for example "yes (all Steel Battalion versions)", "yes (made
+  for your version)" or "yes (made for Europe, works with USA – matching
+  textures only)". A texture that differs between versions is simply left
+  original – never a wrong image. Packs for another game show "no".
+- **Making your own pack**: packs with your own artwork can say
+  `"game": { "family": "steel-battalion" }` in `manifest.json` instead of
+  a game hash; the Pack Creator writes this for you.
 
 ## Legal note
 

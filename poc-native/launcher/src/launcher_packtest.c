@@ -12,6 +12,8 @@
 #include "sb_pack.h"
 #include "sb_sha256.h"
 #include "launcher_cfg.h"
+#include "sb_gamever.h" /* W256 PACK-ANYVER */
+#include "sb_lang.h"
 
 #define P_OK(name) do { printf("PASS %s\n", name); fflush(stdout); \
     (*pass)++; } while (0)
@@ -953,6 +955,119 @@ static void t_coverage(int *pass, int *fail)
     }
 }
 
+/* W256 PACK-ANYVER: Passung ueber Fassungen (EU-Pack auf US, US-Pack auf
+ * EU, Familien-Pack ohne Hash, altes Pack, fremdes Spiel, Anzeige EN/DE). */
+static int pk_regame(const char *name, const char *game_json)
+{
+    char mp[1200], t[4096], out[4400];
+    FILE *f = NULL;
+    size_t n;
+    char *a, *b;
+    _snprintf_s(mp, sizeof mp, _TRUNCATE, "%s/%s/manifest.json", pk_tmp, name);
+    if (fopen_s(&f, mp, "rb") != 0 || !f) {
+        return 0;
+    }
+    n = fread(t, 1, sizeof t - 1, f);
+    fclose(f);
+    t[n] = '\0';
+    a = strstr(t, "\"game\": {");
+    b = a ? strchr(a, '}') : NULL;
+    if (!a || !b) {
+        return 0;
+    }
+    *a = '\0';
+    _snprintf_s(out, sizeof out, _TRUNCATE, "%s\"game\": %s%s", t, game_json, b + 1);
+    return pk_write(mp, out);
+}
+
+static void t_anyver(int *pass, int *fail)
+{
+    const char *eu = sb_gamever_family_sha(0), *us = sb_gamever_family_sha(1);
+    const char *alien = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+    char dir[1100], reason[64], detail[300], made[16], why[200] = "", txt[200], keep[16];
+    char game[400];
+    int st, fit, li;
+    if (!eu || !us || sb_gamever_family_count() != 2 ||
+        strcmp(sb_gamever_family_name(0), "Europe") != 0 ||
+        strcmp(sb_gamever_family_name(1), "USA") != 0 ||
+        sb_gamever_family_idx(us) != 1 || sb_gamever_family_idx(alien) != -1) {
+        P_FAIL("47b packs-anyver", "%s", "Familien-Tabelle");
+        return;
+    }
+#define AV(name, xbe, wst, wfit, wmade, wreason) do { \
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s/%s", pk_tmp, name); \
+        made[0] = '\0'; fit = -9; \
+        st = sb_pack_check_fit(dir, xbe, reason, sizeof reason, detail, \
+                               sizeof detail, &fit, made, sizeof made); \
+        if (!why[0] && (st != (wst) || fit != (wfit) || \
+                        strcmp(made, wmade) != 0 || strcmp(reason, wreason) != 0)) \
+            _snprintf_s(why, sizeof why, _TRUNCATE, "%s: st=%d fit=%d made=%s %s", \
+                        name, st, fit, made, reason); \
+    } while (0)
+    /* 1) altes EU-Pack (nur EU-Hash) auf EU, auf US, ohne Spielversion */
+    pk_green("av_eu", "t.aveu", "a1a1a1a1a1a1a1a1", eu);
+    AV("av_eu", eu, 2, SB_PACK_FIT_EXACT, "", "");
+    AV("av_eu", us, 2, SB_PACK_FIT_OTHER, "Europe", "");
+    AV("av_eu", NULL, 2, SB_PACK_FIT_UNKNOWN, "", "");
+    /* 2) US-Pack auf EU */
+    pk_green("av_us", "t.avus", "a2a2a2a2a2a2a2a2", us);
+    AV("av_us", eu, 2, SB_PACK_FIT_OTHER, "USA", "");
+    AV("av_us", us, 2, SB_PACK_FIT_EXACT, "", "");
+    /* 3) Familien-Pack ohne Hash (EU, US, unbekanntes Spiel) */
+    pk_green("av_fam", "t.avfam", "a3a3a3a3a3a3a3a3", eu);
+    pk_regame("av_fam", "{ \"family\": \"steel-battalion\" }");
+    AV("av_fam", eu, 2, SB_PACK_FIT_FAMILY, "", "");
+    AV("av_fam", us, 2, SB_PACK_FIT_FAMILY, "", "");
+    AV("av_fam", NULL, 2, SB_PACK_FIT_UNKNOWN, "", "");
+    AV("av_fam", alien, 0, SB_PACK_FIT_NO, "", "game_mismatch");
+    /* 3b) Familie + leere Liste; Familie + beide Hashes (Creator) */
+    pk_green("av_fam2", "t.avfam2", "a4a4a4a4a4a4a4a4", eu);
+    pk_regame("av_fam2", "{ \"family\": \"steel-battalion\", \"xbe_sha256\": [] }");
+    AV("av_fam2", us, 2, SB_PACK_FIT_FAMILY, "", "");
+    pk_green("av_fam3", "t.avfam3", "a5a5a5a5a5a5a5a5", eu);
+    _snprintf_s(game, sizeof game, _TRUNCATE,
+                "{ \"family\": \"steel-battalion\", \"xbe_sha256\": [\"%s\", \"%s\"] }", eu, us);
+    pk_regame("av_fam3", game);
+    AV("av_fam3", us, 2, SB_PACK_FIT_FAMILY, "", "");
+    AV("av_fam3", eu, 2, SB_PACK_FIT_FAMILY, "", "");
+    /* 4) fremdes Spiel: Hash unbekannt, ohne Familie -> rot auf EU und US */
+    pk_green("av_alien", "t.avalien", "a6a6a6a6a6a6a6a6", alien);
+    AV("av_alien", eu, 0, SB_PACK_FIT_NO, "", "game_mismatch");
+    AV("av_alien", us, 0, SB_PACK_FIT_NO, "", "game_mismatch");
+    AV("av_alien", alien, 2, SB_PACK_FIT_EXACT, "", ""); /* eigenes Spiel: genau */
+    /* 5) falsche Familie / weder Hash noch Familie -> bad_game */
+    pk_green("av_badfam", "t.avbadfam", "a7a7a7a7a7a7a7a7", eu);
+    pk_regame("av_badfam", "{ \"family\": \"other-game\" }");
+    AV("av_badfam", us, 0, SB_PACK_FIT_UNKNOWN, "", "bad_game");
+    pk_green("av_nogame", "t.avnogame", "a8a8a8a8a8a8a8a8", eu);
+    pk_regame("av_nogame", "{ \"xbe_sha256\": [] }");
+    AV("av_nogame", us, 0, SB_PACK_FIT_NO, "", "bad_game");
+#undef AV
+    /* 6) Anzeige "Fits your game" EN/DE */
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    for (li = 0; li < 2 && !why[0]; li++) {
+        sb_lang_set(li ? "de" : "en");
+        if (!lcfg_pack_fit_text(SB_PACK_FIT_OTHER, "Europe", "USA", txt, sizeof txt) ||
+            !strstr(txt, li ? "f\xC3\xBCr Europa erstellt, l\xC3\xA4uft mit USA"
+                            : "made for Europe, works with USA") ||
+            !strstr(txt, li ? "nur gleiche Texturen" : "matching textures only"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Text other %s: %s", li ? "de" : "en", txt);
+        if (!why[0] && (!lcfg_pack_fit_text(SB_PACK_FIT_FAMILY, "", "USA", txt, sizeof txt) ||
+            !strstr(txt, li ? "alle Steel-Battalion-Fassungen" : "all Steel Battalion versions")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Text family %s: %s", li ? "de" : "en", txt);
+        if (!why[0] && (!lcfg_pack_fit_text(SB_PACK_FIT_EXACT, "", "USA", txt, sizeof txt) ||
+            lcfg_pack_fit_text(SB_PACK_FIT_NO, "", "USA", txt, sizeof txt) ||
+            !strstr(txt, li ? "anderes Spiel" : "another game")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Text exact/no %s: %s", li ? "de" : "en", txt);
+    }
+    sb_lang_set(keep);
+    if (!why[0]) {
+        P_OK("47b packs-anyver (EU-Pack auf US, US-Pack auf EU, Familie ohne Hash, fremdes Spiel rot, Text EN/DE)");
+    } else {
+        P_FAIL("47b packs-anyver", "%s", why);
+    }
+}
+
 void packs_selftest(int *pass, int *fail)
 {
     if (!pk_setup()) {
@@ -971,5 +1086,6 @@ void packs_selftest(int *pass, int *fail)
     t_scan_fx(pass, fail);
     t_check_fx(pass, fail);
     t_coverage(pass, fail);
+    t_anyver(pass, fail);
     pk_rmdir(pk_tmp);
 }

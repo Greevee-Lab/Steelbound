@@ -7,6 +7,7 @@
 #include "input_mouse.h" /* W79 INPUT-REAL: Maus fangen + Fokus-Gatter */
 #include "sb_overlay.h" /* W118 REM-OVERLAY: Eingabesperre */
 #include "vr.h" /* W159: sb_vr_recenter("Belegung") per Aktions-Bindung */
+#include "sb_rauto.h" /* W254 REPLAY-LAUNCHER */
 
 static uint8_t g_fake_input[512];
 unsigned g_last_pstate;
@@ -849,11 +850,16 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                     snap.real_blocked = 1;
                     snap.raw_dx = snap.raw_dy = 0;
                 }
+                /* W260 MOUSE-WHEEL: Rad-Impulse, gleiche Sperre wie die
+                 * Maustasten (Fokus, F10/Maus frei, Overlay, mouse_buttons). */
+                snap.wheel_mask = imouse_wheel_mask(
+                    g_frames, snap.real_blocked || !snap.mouse_buttons);
             } else if (g_cfg.input_source == 1) {
                 /* Fenster-Eingabe auch bei Replay installieren (Nachrichten
                  * kommen an, Abbildung ignoriert sie - Gegenprobe/Hinweis). */
                 int rdx, rdy, rbl;
                 (void)imouse_poll(&rdx, &rdy, &rbl);
+                (void)imouse_wheel_mask(g_frames, 1); /* W260: Rad verwerfen */
             }
         }
         if (!g_leg_init) {
@@ -1037,6 +1043,7 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
         }
     }
     sbc_merge(s); /* W75: USB/Fixture als Zweitquelle (sbc_usb=1) */
+    sb_rauto_apply(s); /* W254 REPLAY-LAUNCHER: Menue-Fuehrung (nur mit replay_autoplay) */
     if (g_aimat_idx && input_replay_active()) {
         aimat_apply(s); /* W59: Ziel-Bot (Testpfad, nur mit Replay) */
     }

@@ -107,6 +107,17 @@ typedef struct {
     /* A4: zustandsgesteuerte Schritte "trigger>vk,len;..." (s. BUILD.md):
      * f+N | file:NAME[+N] | mem:0xADDR=0xVAL[+N]. Leer = aus. */
     char replay_steps[4096];
+    char replay_autoplay[40]; /* W254 REPLAY-LAUNCHER (experimentell): Replay-Ordner-ID unter UDATA/43430002 direkt abspielen, leer = aus */
+    int replay_camera;        /* W254: Ansicht der Wiedergabe fest ([0x3B8CF4]: 0 Cockpit, 1 Vollbild, 2..6 Aussenkameras), -1 = frei */
+    int replay_autoplay_shots; /* W254 DIAG: Bild bei jedem Phasenwechsel des Replay-Starts */
+    /* [video] W255 VIDEO-EXPORT (experimentell): Replay offline als MP4 (H.264/AAC, Media Foundation) */
+    char video_export[520];   /* Zieldatei .mp4 (UTF-8), "auto" = <Fotoordner>\Videos\Steelbound_Replay_<id>_<Zeit>.mp4; leer = aus */
+    unsigned video_width, video_height; /* Ausgabegroesse (Standard 1920x1080; gerade, 320..4096 x 240..2304) */
+    int video_fps;            /* 30 oder 60 (60: Zwischenbilder, video_interp) */
+    int video_kbps;           /* H.264-Zielrate in kbit/s, 0 = auto (0,15 bit/Pixel: 1080p30 ~9,3 Mbit/s, 2160p60 ~75 Mbit/s) */
+    int video_audio;          /* 1 = Spielton offline mitschreiben (AAC 192 kbit/s), 0 = stumm */
+    int video_hw;             /* 1 = Hardware-Encoder erlauben (Rueckfall Software), 0 = nur Software */
+    int video_interp;         /* 1 = bei 60 FPS Zwischenbilder rendern (interp_fps=60), 0 = Tick-Bild doppelt */
     /* A8: OUTWRITE-Hack (Buttons direkt nach Out, d3d11_render.c) */
     int outwrite;       /* 1 = aktiv (wie bisher), 0 = aus (nur Mapper) */
     int outwrite_frame; /* OUTWRITE erst ab Present-Frame N */
@@ -191,6 +202,7 @@ typedef struct {
     int audio_oneshot_fix; /* W95: 1 = Loop-Region-Wrap im Mixer nur bei Schleife (Play LOOPING), Einmal-Ton endet am Datenende; 0 = alt (jede gesetzte Loop-Region wrappt -> Einmal-Toene enden nie) */
     int audio_filter;      /* W102: 1 = Voice-Filter DLS2 (SetFilter Mode 1: resonanter 2-Pol-Tiefpass, Chamberlin-SVF wie MCPX) im Mixer, 0 = aus (alt: SetFilter ignoriert) */
     int audio_level_diag;  /* W102: 1 = DIAG(LVL) Pegel je Stimme und Sekunde -> <out>/voice_levels.csv + DIAG(LVLT)-Rangliste (Laufzeit x Pegel) alle 30 s, 0 = aus */
+    int audio_menu_sfx;    /* W258: 1 = Menue-/Namenseingabe-Toene (DirectMusic snk_000..009) per HLE ueber den Mischer, 0 = stumm (alt) */
     int audio_voice_diag;  /* W95: DIAG(SFXN) aktive Puffer-Stimmen je Sekunde (Zahl/Loop/stumm/Alter + aelteste), 0 = aus */
     int audio_sfx_diag;    /* W89: DIAG(SFX) Ereignis-Spur der Puffer-Stimmen (ohne Bink), Wert = max. Zeilen, 0 = aus */
     int audio_wrap_diag;   /* W83: DIAG(BINKWRAP) Ring-Wrap-Unlocks (Lock-Puffer vs. SetBufferData-Speicher), 0 = aus */
@@ -315,6 +327,7 @@ typedef struct {
     int interp_shot_every; /* Bildfolge alle N Interp-Paare wiederholen (0 = einmal) */
     int interp_shot_max; /* Deckel Bildfolgen (Default 8) */
     int interp_inst; /* FIX(POPIN,W91): 1 = mehrfach gezeichnete Modelle (gleiche Signatur + Eingangsdaten, z. B. Haeuser) dem Vortick-Draw mit kleinstem Bildsprung zuordnen (gegenseitig naechster, eindeutig; sonst exakt), 0 = alt (Reihenfolge -> falsche Instanz, Haeuser poppen in Zwischenbildern) */
+    int interp_zcons; /* FIX(W251 INTERP-GROUND): 1 = exakter Welt-Draw mit Vortick-Partner gleicher Objektraum-Vertices wird per Matrix gelerpt, wenn M_A^-1*M_B zur Kamerabewegung des Ziels passt (gleiche Zwischenkamera, keine Tiefen-Konkurrenz exakt gegen gelerpt); 2 = Versuch Ziel ganz exakt; 0 = alt */
     int interp_pass; /* FIX(POPIN,W91): 1 = Durchgaenge derselben Instanz (gleiches Ziel + Geometrie + Matrix) im Tick gleich behandeln: ist einer exakt, alle exakt (kein Z-Fighting gelerpt gegen exakt in Zwischenbildern), 0 = alt */
     int pf_ring; /* DIAG(POPIN,W91): N = die naechsten N praesentierten Bilder (jedes Present, Spiel- und Zwischenbilder) ab pf_from Spiel-Frames nach Missionsbeginn auf der GPU in einen Ring kopieren (kein CPU-Stall), danach als shots/pf<s>_<i>_<art>.(jpg|bmp) schreiben + Zeilen PF; 0 = aus */
     int pf_mode; /* DIAG(CULL-POPIN,W215): Anker der Bildfolge = Spielmodus [0x2EEA34] (Standard 4 = Mission, 2 = Titel-Demo/Replay) */
@@ -329,9 +342,16 @@ typedef struct {
     int rt_interp_fps; /* TEST(PERF-BENCH,W137): mit rt_from_film/rt_from_mission: interp_fps beim Echtzeit-Wechsel setzen (Weg wie Overlay-Bildratenwechsel; Testtakt davor ohne Zwischenbilder), 0 = unveraendert */
     int movie_skip_delay; /* TEST(PERF-BENCH,W137): movie_skip-Tasten erst N Spiel-Frames nach der Filmerkennung (Film-Messfenster), 0 = bisher */
     int interp_eyefix;    /* FIX(W224 LINE-FLICKER): 1 = Zwischenbild-VS nimmt fuer Vertices mit w-Vorzeichenwechsel zwischen Tick N-1 und N die Tick-N-Position (kein Clip-Lerp durch w=0 -> Linie quer durchs Bild); 0 = alt */
+    int interp_hlerp;     /* FIX(W237 LINE-FLICKER2): echte Clip-w je P2-Vertex im RT (Strom dort schon durch w geteilt, w = 1) in einem Nebenpuffer; 1 = W224-Pruefung (w-Wechsel N-1/N -> Tick-N-Lage) mit der echten w, Lerp sonst unveraendert; 2 = zusaetzlich homogener Lerp im Clip-Raum (Versuch, nicht Standard); 0 = alt */
+    int interp_ddrel;     /* DIAG(W251 INTERP-GROUND): R > 0 (mit pf_ring und interp_diag>=3) = Ticks R..R+2 nach Missionsbeginn: INTERP dd-Zeilen + Draw-ID-Bilder des Welt-RT je Zwischenbild (shots/ipid_<f>_<k>.bmp) */
     int interp_eyediag;   /* DIAG(W224): N = hoechstens N Zeilen INTERP eyex (zwischengerechnete Draws mit w-Wechsel einzelner Vertices) + Summen in INTERP stat2; CPU-Kopie der Clip-w je Vertex */
     float interp_maxjump; /* Plausibilitaet: max. NDC-Sprung eines Draws zwischen zwei Ticks (Default 0.5) */
     int im_fast; /* PERF(IM-PERF,W99): 1 = VB-Draws kompakt dekodieren (40 B statt 256-B-Slots je Vertex), Primitiv-Expansion direkt in den gemappten Puffer (IM-Ring/Tick-VB), keine Zwischenkopien; Bild bitgleich. 0 = alt. Diagnosen (rq_diag/fx_diag/Zensus/sbar_diag/interp_diag>=3) nehmen immer den alten Weg */
+    int rtt_lookup_filter; /* W204/W253 DRAW-OPT: konservativer Negativfilter der RT-Datenadressen vor der Tabellensuche; 2 = Pruefmodus (jede Ablehnung gegen die Tabelle) */
+    int draw_tick_diag; /* W204/W253 DIAG: D-Zeilen je Tick in perf_trace.csv (mit perf_trace=1): Draws, Tick-Last, Submit, Zaehler Set-Aufrufe, Map, Konstanten */
+    int draw_state_cache; /* W253 DRAW-OPT: redundante Set-Aufrufe am Immediate-Context entfallen (Schatten in render_dsc.h); 0 = alle durchreichen */
+    int im_cb_ring; /* W253 DRAW-OPT: Draw-Konstanten (MVP + has_tex) der Uebergabe in einen Ring (NO_OVERWRITE, Bindung per Versatz), gleiche Folgesaetze ohne Map; 0 = Map DISCARD je Draw */
+    int blend_obj_cache; /* W253 DRAW-OPT: Blend-Objekte je Beschreibung in eigener Tabelle (kein CreateBlendState je Blend-Wechsel); 0 = alt */
     int im_end_reset; /* FIX(EDGE,W64): 1 = End() schliesst den IM-Batch (kein Geister-Wiederholdraw beim naechsten VB-Draw), 0 = alt */
     int fx_blend_eq; /* FIX(FX-ORIG,W90): 1 = NV2A BLEND_EQUATION (0x350: ADD/SUB/REVSUB/MIN/MAX) + BLEND_COLOR (0x34C) abbilden, 0 = alt (immer ADD, Faktor 1) */
     int clear_xbflags; /* FIX(CLEAR-XB,W101/W177): 1 = Clear-Flags nach Xbox-D3D8 (TARGET 0xF0, Z 0x1, STENCIL 0x2) inkl. Textebenen-Anpassung (W177), 2 = TEST: Xbox-Flags ohne Textebenen-Anpassung (Stand W101, Hilfetext fehlt), 0 = alt (PC-Werte 1/2/4) */
@@ -341,6 +361,7 @@ typedef struct {
     int tex_lockwatch; /* FIX(STARTSEQ-BARS,W98): 1 = per LockRect gesperrte Texturen einmal je Frame voll hashen + bei Aenderung neu laden (Spiel schreibt ueber behaltenen Lock-Zeiger), 0 = alt */
     int fx_alphakill; /* FIX(STARTSEQ-BARS,W98): 1 = Xbox D3DTSS_ALPHAKILL Stufe 0 (Deferred-TSS 0x21A8DC Bit 2, NV2A TEXTURE_CONTROL0.ALPHAKILLEN): Texel-Alpha 0 -> discard (nicht fuer RT-Texturen), 0 = alt */
     int fx_alphatest; /* FIX(FX-ORIG,W90): 1 = NV2A Alpha-Test (0x300/0x33C/0x340) im IM-Pixelshader (discard), 0 = alt (kein Alpha-Test) */
+    int ps_mul_c0; /* FIX(LOAD-VT-COLOR,W257): 1 = Standardpfad: Combiner-Muster Farbe = V0 * C0 (1 Stufe, ohne Textur; Drahtgitter-VT im Ladebild/Nachschub-Menue) -> Vertexfarbe mit dem explizit gesetzten C0 (SetPixelShaderConstant roh, unabhaengig von shading, bzw. PSCONSTANT0_0) multiplizieren, 0 = alt (nur V0 -> weiss) */
     int fx_ps_c0; /* FIX(FX-ORIG,W90): 1 = Standardpfad (shading=0): Combiner-Muster R0=(V0+C0)*T0 (Effekt-PS) -> C0 zur Vertexfarbe addieren, 0 = alt (nur V0*T0) */
     /* W133 REM-FX: Effekt-Remaster-Optionen (Standard 0 = Original, ESC-Seite "Effekte") */
     int fx_soft;          /* weiche Partikel (Rauch/Explosion schneiden Geometrie weich) 0..200 % Staerke */
@@ -450,6 +471,8 @@ typedef struct {
     int photo_cam_dist;         /* freie Kamera: max. Weg von der Spielkamera (Spiel-Einheiten ~ m, Standard 4) */
     int photo_rt_max;           /* W233: Kante der skalierten Monitor-/Welt-RTs einer Cockpit-Aufnahme xN (Standard 8192, max 16384, 0 = nativ) */
     int photo_rt_fail_test;     /* TEST(W233): so viele Anlegeversuche der Zwischenziele scheitern lassen (Standard 0) */
+    int photo_aa;               /* W249: Kantenglaettung gekachelter Fotos: intern 2- bzw. 4-fach rendern und mitteln (Standard 2; 1 = aus) */
+    int photo_diag;             /* DIAG(W249): Foto-Zensus misst je Welt-Draw die Raster-Lage der Eckpunkte (Standard 0) */
     char feedback_repo[128];    /* [feedback] repo: GitHub-Repo fuer "Neues Issue" (Owner/Name), Standard SB_FEEDBACK_REPO_DEFAULT (sb_feedback.h) */
     /* W122 PERF-HUD (sb_perfhud.c) */
     int perf_hud;               /* 1 = Leistungs-Overlay sichtbar (Taste schaltet und speichert in user.cfg), 0 = aus (Standard) */

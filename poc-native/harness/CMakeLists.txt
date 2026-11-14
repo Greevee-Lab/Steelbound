@@ -68,10 +68,13 @@ add_library(sb_emu SHARED
   src/hooks_xapi.c
   src/hooks_input.c
   src/hooks_bots.c
+  src/sb_rauto.c
+  src/sb_rauto_core.c
   src/fs_emu.c
   src/sctrace.c
   src/d3d11_render.c
   src/render_im.c
+  src/render_dsc.c
   src/render_shader.c
   src/render_state.c
   src/render_rtt.c
@@ -107,6 +110,8 @@ add_library(sb_emu SHARED
   src/sb_pause.c
   src/render_photo.c
   src/render_clip.c
+  src/render_vexp.c
+  src/vexp_enc.c
   src/sb_feedback.c
   src/sb_perfhud.c
   src/sb_watermark.c
@@ -153,6 +158,7 @@ target_compile_options(sbc_probe PRIVATE /W3)
 add_executable(input_selftest
   src/input_selftest.c
   src/input_mouse_selftest.c
+  src/sb_rauto_core.c
   src/sb_profile.c
   src/input_map.c
   src/input_joy.c
@@ -274,6 +280,12 @@ add_custom_target(lang_check ALL
   WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
 # W210: synthetic offscreen capture, MF encoder and fallback (no game).
-add_executable(clip_selftest tests/clip_selftest.c src/render_clip.c)
+add_executable(clip_selftest tests/clip_selftest.c src/render_clip.c src/render_dsc.c)
 target_include_directories(clip_selftest PRIVATE src)
 target_compile_options(clip_selftest PRIVATE /W3)
+
+# W255: Video-Export - Zeitachse, Farbwandlung, synthetische MP4 (kein Spiel, kein Fenster).
+add_executable(vexp_selftest tests/vexp_selftest.c src/vexp_enc.c)
+target_include_directories(vexp_selftest PRIVATE src)
+target_compile_options(vexp_selftest PRIVATE /W3)
+target_link_options(vexp_selftest PRIVATE /LARGEADDRESSAWARE) # wie sb_ldr (4-GB-Adressraum)

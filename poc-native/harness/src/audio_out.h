@@ -28,6 +28,9 @@ void audio_ds_release(au32 o);
 /* Datenpfad Puffer */
 void audio_set_buffer_data(au32 v, au32 pdata, au32 bytes);
 void audio_play(au32 v, au32 flags);
+/* W258 NAME-SFX: interner Menueton (Slot 0..15), s. audio_out.c */
+void audio_ui_play(unsigned slot, const void *wfx, const void *data,
+                   unsigned bytes, int db100);
 void audio_stop(au32 v);
 au32 audio_get_status(au32 v); /* DSBSTATUS-Bits */
 void audio_get_pos(au32 v, au32 pPlay, au32 pWrite);

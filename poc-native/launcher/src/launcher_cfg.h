@@ -48,6 +48,7 @@ typedef struct {
     int postfx;             /* Platzhalter */
     int monitor_grain;      /* W105: Monitor-Korn/Scanlines 0..100 % ([render] monitor_grain, 100 = Original) */
     int monitor_glitch;     /* W105: Monitor-Signalstoerung 0..100 % ([render] monitor_glitch, 100 = Original) */
+    int monitor_fx;         /* W252: Monitor-Effekte 1 = Original, 0 = aus ([render] monitor_fx; 2 = DIAG-Altpfad bleibt) */
     /* W131 SHADER-OPT2: Shader-Optionen ([render], Client hcfg.c; ESC-Menue
      * "Shader"/"Shader 2"). Reihenfolge = lcfg_shx_key(); Standard = Original. */
     int shx[25]; /* W153: + LSHX_LABEL */
@@ -106,7 +107,9 @@ const char *lcfg_fx_key(int i);
  * W207: Bildrate, Welt-Aufloesung/Dynamik und Hz-Anpassung gehoeren dazu.
  * Abgeleitet (kein eigener Schalter): remaster = hd_textures, fx_enhanced =
  * irgendein Effekt > 0, ultrawide/postfx = 0 (Platzhalter). */
-enum { LGP_ORIGINAL = 0, LGP_SUBTLE = 1, LGP_STRONG = 2, LGP_PERFORMANCE = 3, LGP_CUSTOM = 4 };
+enum { LGP_ORIGINAL = 0, LGP_SUBTLE = 1, LGP_STRONG = 2, LGP_PERFORMANCE = 3, LGP_CLEAR = 4, LGP_CUSTOM = 5 };
+/* W252 CLEAR-VIEW: LGP_CLEAR = "Klare Sicht" (Original ohne Weltbeleuchtung
+ * und ohne Monitor-Effekte); das Preset besitzt dazu monitor_fx (LGK_MFX). */
 /* Schluessel-Index k (0..LGK_N-1): 0..LSHX_N-1 = shx[] (LSHX_LABEL gehoert
  * nicht dazu), LGK_FX0.. = fx[], LGK_HD = HD-Texturen. */
 #define LGK_FX0 LSHX_N
@@ -115,7 +118,8 @@ enum { LGP_ORIGINAL = 0, LGP_SUBTLE = 1, LGP_STRONG = 2, LGP_PERFORMANCE = 3, LG
 #define LGK_RT (LGK_HD + 2)
 #define LGK_DYN (LGK_HD + 3)
 #define LGK_MATCH (LGK_HD + 4)
-#define LGK_N (LGK_HD + 5)
+#define LGK_MFX (LGK_HD + 5) /* W252: monitor_fx */
+#define LGK_N (LGK_HD + 6)
 typedef unsigned long long lgp_mask_t; /* Bit k = Schluessel k */
 const char *lcfg_gfx_key(int k);              /* cfg-Name ("" = keiner) */
 int lcfg_gfx_owned(int k);                    /* 1 = gehoert zum Preset */
@@ -130,7 +134,7 @@ int lcfg_gfx_preset(const launcher_settings_t *s, lgp_mask_t lock);
 int lcfg_gfx_diff(const launcher_settings_t *s, int p, lgp_mask_t lock, lgp_mask_t *mask);
 /* Basis von Benutzerdefiniert: Preset mit den wenigsten Abweichungen. */
 int lcfg_gfx_base(const launcher_settings_t *s, lgp_mask_t lock);
-/* Preset 0..3 anwenden (alle Schluessel + Ableitungen; hud_label_avoid
+/* Preset 0..4 anwenden (alle Schluessel + Ableitungen; hud_label_avoid
  * und hd_scale bleiben). */
 void lcfg_gfx_apply(launcher_settings_t *s, int preset);
 /* Ableitungen setzen: remaster = hd_textures = (remaster && hd_textures),
@@ -158,6 +162,16 @@ int lcfg_load_file_count(const char *path, launcher_settings_t *s, int *keys);
 /* user.cfg schreiben; vorhandene fremde Zeilen/Kommentare bleiben erhalten.
  * 0 = ok, -1 = Schreibfehler. */
 int lcfg_save_user(const char *path, const launcher_settings_t *s);
+/* W259 SETTINGS-RESET: 3-Wege-Abgleich vor dem Schreiben. base = Dateistand
+ * beim letzten Lesen/Schreiben durch den Launcher, disk = Dateistand jetzt
+ * (beide als Einstellungen, fehlende Keys = base). Jeder verwaltete Key, den
+ * die Oberflaeche seit base nicht geaendert hat (ui == base), uebernimmt den
+ * Wert aus disk (z. B. im ESC-Menue mit "Als Standard speichern" gesichert);
+ * geaenderte Keys behalten den Oberflaechenwert (Launcher gewinnt). Pfad-Keys
+ * bleiben beim Launcher. Rueckgabe: Anzahl Keys, deren Wert sich in ui
+ * dadurch geaendert hat. */
+int lcfg_merge_external(launcher_settings_t *ui, const launcher_settings_t *base,
+                        const launcher_settings_t *disk);
 /* W79 INPUT-REAL: Spielerbetrieb-Block in user.cfg schreiben (ersetzt
  * vorhandene Zeilen dieser Keys, haengt fehlende an; fremde Zeilen bleiben):
  * replay_steps=, replay=, movie_skip=0, turbo_until_mode/frame=0,
@@ -185,6 +199,11 @@ void lcfg_xbe_effective(const launcher_settings_t *s, char *out, size_t cap);
 int lcfg_image_check(const char *image_u8, char *msg, size_t cap);
 /* W150: SHA-256 (hex) der default.xbe im Abbild. 1 = ok. */
 int lcfg_image_xbe_sha256(const char *image_u8, char hex[65]);
+/* W256 PACK-ANYVER: Klartext "Fits your game" zur Passung fit
+ * (SB_PACK_FIT_*); made/active = Kurzname "Europe"/"USA" (oder ""/NULL).
+ * Rueckgabe 1 = passt, 0 = passt nicht/ungeprueft. */
+int lcfg_pack_fit_text(int fit, const char *made, const char *active,
+                       char *out, size_t cap);
 
 /* W231 US-LAUNCHER: Fassung des Spiels (aus sb_gamever, gleiche Pruefung wie
  * der Client). EU = unterstuetzte PAL-Fassung; US = bekannte NTSC-U-Fassung

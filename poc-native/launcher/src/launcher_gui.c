@@ -45,6 +45,7 @@
 #include <shellapi.h> /* W148: ShellExecuteW (Ordner oeffnen) */
 #include "input_sbc_usb.h"
 #include "sbc_test.h"
+#include "launcher_update.h" /* W250 UPDATE-CHECK */
 
 #define printf cli_printf
 
@@ -205,7 +206,7 @@ int gui_page_from_name(const char *v)
 #define ID_PK_CHECKALL 1070
 #define ID_GFX_PACKS 1071  /* Grafik: Sprung zur Seite Packs (Texturdetail) */
 /* W173 LAUNCHER-P4: ein Grafik-Preset (Konzept 3.3/4.3) */
-#define ID_GP0 1180        /* Original/dezent/stark/Performance/Custom (1180..1184) */
+#define ID_GP0 1180        /* Original/dezent/stark/Performance/Klare Sicht/Custom (1180..1185, W252) */
 #define ID_GP_RESET 1084   /* Benutzerdefiniert: auf die Basis zuruecksetzen */
 #define ID_GFX_LIGHT 1085  /* Weltbeleuchtung (shading) */
 #define ID_GFX_SHADOW 1086 /* Schatten (shade_shadow) */
@@ -218,6 +219,7 @@ int gui_page_from_name(const char *v)
 #define ID_CTRL_ZADIG 1093 /* W185: Einrichtungsanleitung als HTML im Browser */
 #define ID_SAVES_IMPORT 1198
 #define ID_SAVES_EXPORT 1199
+#define ID_SAVES_REPLAYS 1197 /* W254 REPLAY-LAUNCHER: Replays abspielen (experimentell) */
 #define ID_SAVES_RESET 1094 /* W187 KIA-LOAD: Spielstaende zuruecksetzen (mit Sicherung) */
 #define ID_SAVE_LOCK 1095  /* W190 SAVE-LOCK: Spielstaende schuetzen (Testhilfe) */
 #define ID_PH_DIR 1096     /* W195 PHOTO-MODE: Extras - Fotoordner (Feld) */
@@ -233,6 +235,19 @@ int gui_page_from_name(const char *v)
 #define ID_CTRL_AUTOGEAR 1105 /* W218 SIMPLE-CONTROLS: automatischer Gangwechsel */
 #define ID_CTRL_JOY 1106 /* W221 HOTAS (experimentell): Joystick-Dialog */
 #define ID_PAL50 1108 /* W234 PAL50: Spieltakt 25 (wie EU-Konsole am 50-Hz-TV) */
+/* W250 UPDATE-CHECK: Erstabfrage + Hinweis (Spielen), Einstellung (Erweitert) */
+#define ID_UPD_YES 1150
+#define ID_UPD_NO 1151
+#define ID_UPD_OPEN 1152
+#define ID_UPD_AUTO 1153
+#define ID_UPD_NOW 1154
+#define WM_APP_UPD (WM_APP + 21) /* Ergebnis aus dem Abruf-Thread (l = upd_job_t*) */
+#define UPD_TIMER 25             /* Gesamtfrist des Abrufs (LUPD_TIMEOUT_MS) */
+static const char *g_upd_ver = ""; /* eigene Release-Version ("" = ausgeblendet; Shots: Fixture) */
+static int g_upd_cfg = -1;         /* user.cfg update_check: -1 nie gefragt, 0 nein, 1 ja */
+static int g_upd_ask;              /* Erstabfrage sichtbar */
+static int g_upd_busy, g_upd_manual, g_upd_gen;
+static lupd_res_t g_upd_res;       /* letztes Ergebnis (NEWER -> Hinweis) */
 static char g_img_msg[600]; /* W150: Ergebnis der letzten Abbild-Pruefung (UTF-8) */
 static int g_img_ok;
 static void check_image_ex(int status);
@@ -1442,6 +1457,17 @@ static int ui_visible_on(const uictl_t *u, int page)
     if (u->id == ID_ASPECT) {
         return 0;
     }
+    /* W250: Erstabfrage nur unbeantwortet, Hinweis nur bei neuerer Version,
+     * Einstellung nur mit Release-Version (sonst Hinweistext). */
+    if ((u->id == ID_UPD_YES || u->id == ID_UPD_NO) && !g_upd_ask) {
+        return 0;
+    }
+    if (u->id == ID_UPD_OPEN && (g_upd_ask || g_upd_res.result != LUPD_R_NEWER)) {
+        return 0;
+    }
+    if ((u->id == ID_UPD_AUTO || u->id == ID_UPD_NOW) && !g_upd_ver[0]) {
+        return 0;
+    }
     /* W171: Live-Ton liegt in der eingeklappten Diagnose (Erweitert) */
     if (u->id == ID_LIVE && !g_diag_open) {
         return 0;
@@ -1785,6 +1811,33 @@ static void play_setup_rows(psrow_t *rw)
     rw[PSR_FOLDERQ].single = 1; rw[PSR_FOLDERQ].col = C_DIM;
 }
 
+/* W250 UPDATE-CHECK: Karte rechts neben den Startknoepfen (frei auf jeder
+ * Spielen-Ansicht): Erstabfrage (bis beantwortet) oder Hinweis auf eine
+ * neuere Version. Knoepfe ID_UPD_YES/NO/OPEN (build_controls). */
+#define UPD_X (CX0 + 340)
+#define UPD_Y (CY0 + 78)
+#define UPD_W (CW - 340)
+static void upd_tag_disp(const char *tag, char *out, size_t cap)
+{
+    strcpy_s(out, cap, (tag[0] == 'v' || tag[0] == 'V') ? tag + 1 : tag);
+}
+
+static void upd_paint_play(void)
+{
+    char t[256], v[64];
+    if (g_upd_ask) {
+        card(UPD_X, UPD_Y, UPD_W, 134, LT("gui.upd_title"));
+        label(F_TINY, LT("gui.upd_ask"), UPD_X + 18, UPD_Y + 36, UPD_W - 36, 60, C_TEXT);
+    } else if (g_upd_res.result == LUPD_R_NEWER) {
+        card(UPD_X, UPD_Y, UPD_W, 96, LT("gui.upd_new_title"));
+        upd_tag_disp(g_upd_res.rel.tag, v, sizeof v);
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.upd_new"), v);
+        label1(F_SMALL, t, UPD_X + 18, UPD_Y + 34, UPD_W - 36, 20, C_ACCENT_HI);
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.upd_cur"), g_upd_ver);
+        label1(F_TINY, t, UPD_X + 18, UPD_Y + 64, UPD_W - 36 - 168, 24, C_DIM);
+    }
+}
+
 static void paint_play(void)
 {
     int i, y;
@@ -1841,6 +1894,7 @@ static void paint_play(void)
                    C_TEXT);
         }
     }
+    upd_paint_play(); /* W250 */
     /* Primaerfeuer deutlich (nur Tastatur-Standardbelegung, R26) */
     if (!g_rr[26].active) {
         L_fill(CX0, CY0 + 456, CW, 40, C_ACCENT, 46, 10);
@@ -1975,7 +2029,7 @@ static void paint_gfx(void)
 
     card(CX0, CY0 + 352, COLW, 120, LT("gui.gfx_image"));
     gfx_label("gui.gfx_aa", CX0, CY0 + 396, (dm & ((lgp_mask_t)1 << LSHX_AA)) != 0);
-    label1(F_SMALL, LT("gui.gfx_monitor"), CX0 + 18, CY0 + 432, 100, 30, C_DIM);
+    gfx_label("gui.gfx_monitor", CX0, CY0 + 432, (dm & ((lgp_mask_t)1 << LGK_MFX)) != 0); /* W252 */
     label(F_SMALL, LT("gui.gfx_esc_hint"), CX0 + 4, CY0 + 480, COLW - 8, 20,
           C_FAINT);
 
@@ -2107,11 +2161,11 @@ static void paint_ctrl(void)
 static void diag_row(const char *lbl, const char *val, COLORREF c, int y)
 {
     label1(F_TINY, lbl, COL2 + 18, y, COLW - 36, 14, C_DIM);
-    label1(F_SMALL, val, COL2 + 18, y + 14, COLW - 36, 20, c);
+    label1(F_SMALL, val, COL2 + 18, y + 14, COLW - 36, 18, c); /* W250: Zeilen 32 statt 36 */
 }
 
 /* W178 COMM-BG: beide Editionen haben die Launcher-Karte (Hintergrundbild). */
-#define ADV_DIAG_Y (CY0 + 224)
+#define ADV_DIAG_Y (CY0 + 256) /* W250: +32 (Launcher-Karte mit Update-Schalter) */
 #define ADV_DIAG_DY 34 /* W190: Diagnose-Zeilen unter dem Schalter "Spielstaende schuetzen" */
 
 /* W172/P7: Datenort im Klartext (gleiche Quelle wie --userdata:
@@ -2408,7 +2462,10 @@ static void paint_adv(void)
     card(COL2, CY0, COLW, 124, LT("gui.adv_finetune"));
     label1(F_SMALL, LT("gui.adv_vsync"), COL2 + 18, CY0 + 44, 150, 30, C_DIM);
     label1(F_SMALL, LT("gui.adv_fpslimit"), COL2 + 18, CY0 + 82, 150, 30, C_DIM);
-    card(COL2, CY0 + 136, COLW, 76, LT("gui.adv_launcher"));
+    card(COL2, CY0 + 136, COLW, 108, LT("gui.adv_launcher"));
+    if (!g_upd_ver[0]) { /* W250: Build ohne Release-Version -> nur Hinweis */
+        label(F_TINY, LT("gui.upd_dev"), COL2 + 18, CY0 + 208, COLW - 36, 30, C_FAINT);
+    }
 
     card(COL2, ADV_DIAG_Y, COLW, CY0 + 496 - ADV_DIAG_Y, LT("gui.adv_diag"));
     /* W190 SAVE-LOCK: Schalter "Spielstaende schuetzen (Testhilfe)" oben in der
@@ -2419,18 +2476,19 @@ static void paint_adv(void)
               COLW - 36, 32, C_FAINT);
         return;
     }
-    diag_row(LT("gui.path_client_dir"), g_client_disp, C_TEXT, ADV_DIAG_Y + ADV_DIAG_DY + 42);
+    /* W250: Zeilen 32 px (Karte 32 px niedriger) */
+    diag_row(LT("gui.path_client_dir"), g_client_disp, C_TEXT, ADV_DIAG_Y + ADV_DIAG_DY + 36);
     diag_row(LT("gui.path_exe"),
              g_has_ldr ? LT("gui.path_found") : LT("gui.path_missing"),
-             g_has_ldr ? C_OK : C_ERR, ADV_DIAG_Y + ADV_DIAG_DY + 78);
+             g_has_ldr ? C_OK : C_ERR, ADV_DIAG_Y + ADV_DIAG_DY + 68);
     if (sb_userdata_mode() != SB_UD_LEGACY) { /* W150 USER-DATA */
         lcfg_user_cfg_path(g_client_dir, t, sizeof t);
     } else {
         _snprintf_s(t, sizeof t, _TRUNCATE, "%s\\user.cfg", g_client_disp);
     }
-    diag_row(LT("gui.path_usercfg"), t, C_TEXT, ADV_DIAG_Y + ADV_DIAG_DY + 114);
-    diag_row(LT("gui.sum_settings"), g_profile_line, C_TEXT, ADV_DIAG_Y + ADV_DIAG_DY + 150);
-    paint_reason(27, COL2 + 18, ADV_DIAG_Y + ADV_DIAG_DY + 218, COLW - 36, 16);
+    diag_row(LT("gui.path_usercfg"), t, C_TEXT, ADV_DIAG_Y + ADV_DIAG_DY + 100);
+    diag_row(LT("gui.sum_settings"), g_profile_line, C_TEXT, ADV_DIAG_Y + ADV_DIAG_DY + 132);
+    paint_reason(27, COL2 + 18, ADV_DIAG_Y + ADV_DIAG_DY + 192, COLW - 36, 12);
 }
 
 static void paint_packs(void); /* W148: unten definiert (Packs-Engine) */
@@ -3862,6 +3920,8 @@ static void ks_atom(const char *a, char *out, size_t cap, int *src)
             { "LEFT", "gui.svg_m_left" }, { "RIGHT", "gui.svg_m_right" },
             { "MIDDLE", "gui.svg_m_middle" }, { "X1", "gui.svg_m_x1" },
             { "X2", "gui.svg_m_x2" },
+            { "WHEEL_UP", "gui.svg_m_wup" }, { "WHEEL_DOWN", "gui.svg_m_wdown" }, /* W260 */
+            { "WHEEL_LEFT", "gui.svg_m_wleft" }, { "WHEEL_RIGHT", "gui.svg_m_wright" },
         };
         *src = KS_SRC_MOUSE;
         if (_stricmp(nm, "X") == 0 || _stricmp(nm, "Y") == 0) {
@@ -5460,7 +5520,8 @@ static void gfx_name(int p, const launcher_settings_t *s, char *out, size_t cap)
     } else {
         strcpy_s(out, cap, LT(p == LGP_SUBTLE ? "gui.gfx_p_subtle"
                               : p == LGP_STRONG ? "gui.gfx_p_strong"
-                              : p == LGP_PERFORMANCE ? "gui.gfx_p_performance" : "gui.gfx_p_custom"));
+                              : p == LGP_PERFORMANCE ? "gui.gfx_p_performance"
+                              : p == LGP_CLEAR ? "gui.gfx_p_clear" : "gui.gfx_p_custom"));
     }
 }
 
@@ -5492,6 +5553,20 @@ static void ui_settext_if(HWND h, const char *u8)
     }
 }
 
+/* W105 MONITOR-FX: Auswahl -> [render] monitor_grain/monitor_glitch (%). */
+static const int kMonFx[4][2] = { { 100, 100 }, { 100, 0 }, { 0, 100 }, { 0, 0 } };
+static int g_monfx_grain = 100, g_monfx_glitch = 100;
+static int monfx_index(int grain, int glitch)
+{
+    return grain > 0 ? (glitch > 0 ? 0 : 1) : (glitch > 0 ? 2 : 3);
+}
+/* W252 CLEAR-VIEW: Eintrag "Aus" = monitor_fx=0 (gehoert zum Grafik-Preset);
+ * sonst Staerken wie W105 (alte cfg mit 0/0 zeigt ebenfalls "Aus"). */
+static int monfx_sel_now(void)
+{
+    return g_gfx.monitor_fx == 0 ? 3 : monfx_index(g_monfx_grain, g_monfx_glitch);
+}
+
 /* Steuerelemente der Seite Grafik aus g_gfx (Optionsfelder, Einzeloptionen). */
 static void gfx_sync_ui(void)
 {
@@ -5521,7 +5596,8 @@ static void gfx_sync_ui(void)
             gfx_name(i, &cur, n, sizeof n);
             _snprintf_s(t, sizeof t, _TRUNCATE, "%s\n%s", n,
                         LT(i == 0 ? "gui.gfx_p_orig_txt" : i == 1 ? "gui.gfx_p_subtle_txt"
-                                                                 : i == 2 ? "gui.gfx_p_strong_txt" : "gui.gfx_p_performance_txt"));
+                           : i == 2 ? "gui.gfx_p_strong_txt" : i == LGP_PERFORMANCE ? "gui.gfx_p_performance_txt"
+                                                                                    : "gui.gfx_p_clear_txt"));
         } else if (p == LGP_CUSTOM) {
             int base = lcfg_gfx_base(&g_gfx, lock), k, hidden = 0;
             lcfg_gfx_diff(&g_gfx, base, lock, &dm);
@@ -5568,6 +5644,7 @@ static void gfx_sync_ui(void)
     }
     ComboBox_SetCurSel(ctl(ID_GFX_TEX), lcfg_gfx_value(&g_gfx, LGK_HD) ? 1 : 0);
     ComboBox_SetCurSel(ctl(ID_AAMODE), (aa >= 0 && aa <= 3) ? aa : 0);
+    ComboBox_SetCurSel(ctl(ID_MONFX), monfx_sel_now()); /* W252: Preset setzt monitor_fx */
     ui_set_checked(ID_REM_LABEL, g_gfx.shx[LSHX_LABEL] ? 1 : 0); /* nicht im Preset */
     g_updating--;
 }
@@ -5585,13 +5662,6 @@ static void gfx_to_settings(launcher_settings_t *s)
     lcfg_gfx_normalize(s);
 }
 
-/* W105 MONITOR-FX: Auswahl -> [render] monitor_grain/monitor_glitch (%). */
-static const int kMonFx[4][2] = { { 100, 100 }, { 100, 0 }, { 0, 100 }, { 0, 0 } };
-static int g_monfx_grain = 100, g_monfx_glitch = 100;
-static int monfx_index(int grain, int glitch)
-{
-    return grain > 0 ? (glitch > 0 ? 0 : 1) : (glitch > 0 ? 2 : 3);
-}
 
 static void ui_from_settings(const launcher_settings_t *s)
 {
@@ -5750,12 +5820,17 @@ static void ui_to_settings(launcher_settings_t *s)
     else if (sel == 1) { s->rt_scale_dyn = 0; s->rt_scale = 0; }
     else if (sel >= 2 && sel <= 5) { s->rt_scale_dyn = 0; s->rt_scale = sel - 1; }
     sel = ComboBox_GetCurSel(ctl(ID_MONFX));
-    if (sel >= 0 && sel < 4 && sel != monfx_index(g_monfx_grain, g_monfx_glitch)) {
-        s->monitor_grain = kMonFx[sel][0];
-        s->monitor_glitch = kMonFx[sel][1];
-    } else {
-        s->monitor_grain = g_monfx_grain;
-        s->monitor_glitch = g_monfx_glitch;
+    s->monitor_fx = g_gfx.monitor_fx; /* W252: gehoert zum Grafik-Preset */
+    s->monitor_grain = g_monfx_grain;
+    s->monitor_glitch = g_monfx_glitch;
+    if (sel >= 0 && sel < 4 && sel != monfx_sel_now()) { /* Auswahl ohne Ereignis (Tests) */
+        if (sel == 3) {
+            s->monitor_fx = 0;
+        } else {
+            s->monitor_fx = 1;
+            s->monitor_grain = kMonFx[sel][0];
+            s->monitor_glitch = kMonFx[sel][1];
+        }
     }
     sel = ComboBox_GetCurSel(ctl(ID_FSHZ));
     if (sel >= 0 && sel < KFSHZ_N) {
@@ -6278,9 +6353,82 @@ static int ui_confirm(const char *text, const char *title)
 /* ------------------------------------------------------------------ */
 /* Speichern / Starten                                                 */
 /* ------------------------------------------------------------------ */
+static char g_ucfg_test[1200]; /* W259: Selbsttest-Ziel statt der echten user.cfg */
 static void user_cfg_path(char *out, size_t cap)
 {
+    if (g_ucfg_test[0]) {
+        strcpy_s(out, cap, g_ucfg_test);
+        return;
+    }
     lcfg_user_cfg_path(g_client_dir, out, cap); /* W150 USER-DATA */
+}
+
+/* W259 SETTINGS-RESET: Stand der user.cfg beim letzten Lesen/Schreiben durch
+ * den Launcher (Oberflaechenwerte, ueberlagert mit der Datei). Der Launcher
+ * bleibt waehrend des Spiels offen; ohne Abgleich schrieb der naechste Start
+ * die alten Oberflaechenwerte zurueck und verwarf alles, was im ESC-Menue mit
+ * "Als Standard speichern" gesichert wurde (z. B. light_world). */
+static launcher_settings_t g_disk_base;
+static int g_disk_base_ok;
+
+static void disk_base_sync(const launcher_settings_t *s)
+{
+    char upath[1200];
+    user_cfg_path(upath, sizeof upath);
+    g_disk_base = *s;
+    lcfg_load_file(upath, &g_disk_base);
+    g_disk_base_ok = 1;
+}
+
+/* Fremde Aenderungen der user.cfg (Spiel, zweiter Launcher) in s uebernehmen,
+ * soweit die Oberflaeche den Key seit dem letzten Abgleich nicht geaendert
+ * hat. Rueckgabe: Anzahl uebernommener Keys. */
+static int disk_merge(launcher_settings_t *s)
+{
+    char upath[1200];
+    launcher_settings_t disk;
+    if (!g_disk_base_ok) {
+        return 0;
+    }
+    user_cfg_path(upath, sizeof upath);
+    disk = g_disk_base;
+    if (lcfg_load_file(upath, &disk) != 0) {
+        return 0; /* keine Datei: nichts zu uebernehmen */
+    }
+    return lcfg_merge_external(s, &g_disk_base, &disk);
+}
+
+/* Speichern ohne Pruefung (do_save nach lcfg_validate, Selbsttest W259):
+ * abgleichen, schreiben, neuen Basis-Stand merken, Oberflaeche nachziehen. */
+static int save_user_merged(const char *upath)
+{
+    int n = disk_merge(&g_s);
+    if (lcfg_save_user(upath, &g_s) != 0) {
+        return -1;
+    }
+    disk_base_sync(&g_s);
+    if (n > 0) {
+        ui_from_settings(&g_s);
+    }
+    return n;
+}
+
+/* Client beendet: im Spiel gespeicherte Werte gleich anzeigen. */
+static int disk_refresh(void)
+{
+    launcher_settings_t cur = g_s;
+    int n;
+    if (!g_disk_base_ok) {
+        return 0;
+    }
+    ui_to_settings(&cur);
+    n = disk_merge(&cur);
+    if (n > 0) {
+        g_s = cur;
+        ui_from_settings(&g_s);
+        disk_base_sync(&g_s);
+    }
+    return n;
 }
 
 static int do_save(int complain)
@@ -6296,7 +6444,7 @@ static int do_save(int complain)
         return 1;
     }
     user_cfg_path(upath, sizeof upath);
-    if (lcfg_save_user(upath, &g_s) != 0) {
+    if (save_user_merged(upath) < 0) { /* W259: im Spiel gespeicherte Werte bleiben */
         _snprintf_s(err, sizeof err, _TRUNCATE, LT("gui.msg_nowrite"), upath);
         set_status_k(err, 2);
         if (complain) {
@@ -6342,6 +6490,9 @@ static int client_exit_report(unsigned long code, int edition, int show_box)
     return 1;
 }
 
+static int g_vx_pending; /* W255 VIDEO-EXPORT: laufender Export (Meldung beim Client-Ende) */
+static void rp_export_done(unsigned long code);
+
 static void client_exit_poll(void)
 {
     DWORD code = 0;
@@ -6356,10 +6507,25 @@ static void client_exit_poll(void)
     CloseHandle((HANDLE)g_client_proc);
     g_client_proc = NULL;
     KillTimer(g_hwnd, 7);
-    client_exit_report(code, g_client_ed, g_o.shot == 0);
+    if (g_vx_pending) { /* W255 VIDEO-EXPORT: Ergebnis melden (Exit 0 ok, 2 Replay-Start, 3 Encoder) */
+        rp_export_done(code);
+        return;
+    }
+    {
+        /* W259: im ESC-Menue gespeicherte Werte sofort im Launcher zeigen */
+        int n = disk_refresh();
+        if (!client_exit_report(code, g_client_ed, g_o.shot == 0) && n > 0) {
+            char st[300];
+            _snprintf_s(st, sizeof st, _TRUNCATE, LT("gui.msg_ingame_kept"), n);
+            set_status_k(st, 1);
+        }
+        if (n > 0) {
+            redraw_all();
+        }
+    }
 }
 
-static int do_start(int dry, int vr)
+static int do_start_ex(int dry, int vr, const char *extra)
 {
     char err[1400], set_args[1600];
     if (!g_has_ldr) {
@@ -6408,6 +6574,10 @@ static int do_start(int dry, int vr)
         }
         g_client_ed = gi.edition;
     }
+    if (extra && *extra) { /* W254: Replay-Start ("replay_autoplay=<id>;...", nur dieser Start) */
+        strcat_s(set_args, sizeof set_args, ";");
+        strcat_s(set_args, sizeof set_args, extra);
+    }
     strcpy_s(g_start_args, sizeof g_start_args, set_args); /* W171: Trockenlauf-Ausgabe */
     if (dry) {
         set_status_k(LT("gui.msg_dry"),
@@ -6438,6 +6608,11 @@ static int do_start(int dry, int vr)
         set_status_k(st, 1);
     }
     return 0;
+}
+
+static int do_start(int dry, int vr)
+{
+    return do_start_ex(dry, vr, NULL);
 }
 
 static void browse_xbe(void)
@@ -6938,6 +7113,53 @@ static void bind_kind_text(int idx, char *out, size_t cap)
 }
 
 /* W228: Quellen der gewaehlten Aktion, eine Zeile je Quelle (Daten = Pos.). */
+/* W260 MOUSE-WHEEL: Mausrad-Quellen und ihre Anzeigenamen (EN/DE). */
+static const struct { const char *src, *lkey; } kWheelSrc[4] = {
+    { "MOUSE:WHEEL_UP", "gui.svg_m_wup" }, { "MOUSE:WHEEL_DOWN", "gui.svg_m_wdown" },
+    { "MOUSE:WHEEL_LEFT", "gui.svg_m_wleft" }, { "MOUSE:WHEEL_RIGHT", "gui.svg_m_wright" },
+};
+
+/* Lernmodus: Rad-Nachricht -> Quelle (NULL = keine Rasten-Richtung). */
+static const char *bind_wheel_src(UINT msg, WPARAM wp)
+{
+    int d = GET_WHEEL_DELTA_WPARAM(wp);
+    if (d == 0 || (msg != WM_MOUSEWHEEL && msg != WM_MOUSEHWHEEL)) {
+        return NULL;
+    }
+    if (msg == WM_MOUSEWHEEL) {
+        return kWheelSrc[d > 0 ? 0 : 1].src;
+    }
+    return kWheelSrc[d > 0 ? 3 : 2].src;
+}
+
+/* Quellenzeile fuer die Liste: Rohtext, bei Mausrad mit Klartext dahinter
+ * ("MOUSE:WHEEL_UP  (Mouse wheel up)"). */
+static void bind_src_disp(const char *alt, char *out, size_t cap)
+{
+    int i, n = 0;
+    strncpy_s(out, cap, alt, _TRUNCATE);
+    for (i = 0; i < 4; i++) {
+        const char *hit = strstr(alt, kWheelSrc[i].src);
+        size_t L = strlen(kWheelSrc[i].src);
+        if (!hit) {
+            char up[160];
+            size_t k;
+            for (k = 0; alt[k] && k + 1 < sizeof up; k++) {
+                up[k] = (char)toupper((unsigned char)alt[k]);
+            }
+            up[k] = '\0';
+            hit = strstr(up, kWheelSrc[i].src);
+        }
+        if (hit && (hit[L] == '\0' || hit[L] == '+' || hit[L] == ' ' || hit[L] == ':')) {
+            strncat_s(out, cap, n++ ? ", " : "  (", _TRUNCATE);
+            strncat_s(out, cap, LT(kWheelSrc[i].lkey), _TRUNCATE);
+        }
+    }
+    if (n) {
+        strncat_s(out, cap, ")", _TRUNCATE);
+    }
+}
+
 static void bind_src_fill(HWND hd)
 {
     HWND lb = bctl(hd, IDB_SRC);
@@ -6952,7 +7174,9 @@ static void bind_src_fill(HWND hd)
         n = g_bind.row[g_bind_sel].n_alt;
     }
     for (a = 0; a < n; a++) {
-        list_add(lb, g_bind.row[g_bind_sel].alt[a], (LPARAM)a, 1);
+        char disp[256];
+        bind_src_disp(g_bind.row[g_bind_sel].alt[a], disp, sizeof disp); /* W260 */
+        list_add(lb, disp, (LPARAM)a, 1);
     }
     if (n == 0) {
         list_add(lb, LT(g_bind_sel >= 0 ? "gui.bind_nosrc" : "gui.bind_noelem"),
@@ -7371,9 +7595,10 @@ static int bind_apply(HWND hd, const char *src)
     rc = g_cap_mode == 2 ? lctrl_bind_add(&g_bind, g_bind_sel, src)
                          : lctrl_bind_set(&g_bind, g_bind_sel, src);
     if (rc == 0) {
-        char t[256];
+        char t[320], d[256];
+        bind_src_disp(src, d, sizeof d); /* W260: Mausrad mit Klartext */
         _snprintf_s(t, sizeof t, _TRUNCATE, "%s = %s.",
-                    kCtrlElems[g_bind_sel].key, src);
+                    kCtrlElems[g_bind_sel].key, d);
         bind_set_result(hd, t);
     }
     return rc;
@@ -7437,6 +7662,15 @@ static void bind_cap_mouse(HWND hd, UINT msg, WPARAM wp)
                      : msg == WM_MBUTTONDOWN ? "MOUSE:MIDDLE"
                      : HIWORD(wp) == XBUTTON2 ? "MOUSE:X2" : "MOUSE:X1";
     bind_cap_done(hd, bind_apply(hd, nm));
+}
+
+/* W260 MOUSE-WHEEL: Rad drehen bzw. kippen im Lernmodus -> Quelle. */
+static void bind_cap_wheel(HWND hd, UINT msg, WPARAM wp)
+{
+    const char *nm = bind_wheel_src(msg, wp);
+    if (nm) {
+        bind_cap_done(hd, bind_apply(hd, nm));
+    }
 }
 
 /* W159: Original-Controller-Taste aus dem Capture-Thread (WM_APP_BIND_SBC). */
@@ -7743,6 +7977,9 @@ static LRESULT CALLBACK bind_proc(HWND hd, UINT msg, WPARAM wp, LPARAM lp)
             }
         } else if (wp == 10 && !g_cap_mode) { /* W226: Live-Zeile */
             bind_joy_live(hd);
+        } else if (wp == 11 && g_o.shot == 3) { /* W260: Mausrad-Beispiel */
+            KillTimer(hd, 11);
+            PostMessageW(hd, WM_MOUSEWHEEL, MAKEWPARAM(0, WHEEL_DELTA), 0);
         } else if (wp == 9 && g_o.shot == 3) {
             KillTimer(hd, 9);
             bind_shot_save(hd);
@@ -7942,7 +8179,14 @@ static void bind_dialog_modal(const char *base_name, const char *base_path)
     }
     bind_refresh_cur(hd);
     if (g_o.shot == 3 && g_o.bind_learn) { /* W228: --bind-learn */
-        bind_start_capture(hd, 1);
+        bind_start_capture(hd, g_o.bind_wheeldemo ? 2 : 1);
+        if (g_o.bind_wheeldemo) {
+            /* W260: --bind-shot=wheel --bind-learn: nach dem Zeigen eine
+             * Raste hoch an das eigene (unsichtbare) Dialogfenster - laeuft
+             * durch den echten Lernmodus-Pfad der Nachrichtenschleife
+             * (Timer 11, kein SendInput). */
+            SetTimer(hd, 11, 150, NULL);
+        }
     }
     if (g_o.shot == 3) {
         SetTimer(hd, 9, 400, NULL);
@@ -7969,6 +8213,11 @@ static void bind_dialog_modal(const char *base_name, const char *base_path)
         if (g_cap_mode &&
             (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN)) {
             bind_cap_key(hd, (int)msg.wParam, msg.lParam);
+            continue;
+        }
+        if (g_cap_mode && (msg.message == WM_MOUSEWHEEL ||
+                           msg.message == WM_MOUSEHWHEEL)) { /* W260 */
+            bind_cap_wheel(hd, msg.message, msg.wParam);
             continue;
         }
         if (g_cap_mode && (msg.message == WM_LBUTTONDOWN ||
@@ -10579,6 +10828,494 @@ static void joy_dialog_modal(void)
     g_ui_n = ui_mark;
 }
 
+/* ------------------------------------------------------------------ */
+/* W254 REPLAY-LAUNCHER (experimentell): gespeicherte Replays der       */
+/* gewaehlten Fassung auflisten und direkt abspielen. Der Client fuehrt */
+/* das Spielmenue selbst bis zur Wiedergabe ([input] replay_autoplay).  */
+/* Eigener Dialog (die Seite Erweitert hat keinen Platz fuer eine Liste)*/
+/* ------------------------------------------------------------------ */
+#define IDRP_LIST 701
+#define IDRP_INFO 702
+#define IDRP_PLAY 703
+#define IDRP_CLOSE 704
+#define IDRP_EXP 705
+#define IDRP_CAM 706
+#define IDRP_CAMLBL 707
+#define IDRP_REFRESH 708
+#define IDRP_HEAD 709
+#define IDRP_VHEAD 710 /* W255 VIDEO-EXPORT */
+#define IDRP_VRES 711
+#define IDRP_VFPS 712
+#define IDRP_VDIRLBL 713
+#define IDRP_VDIR 714
+#define IDRP_VBROWSE 715
+#define IDRP_VHINT 716
+#define IDRP_VEXPORT 717
+#define RP_MAX 64
+
+static int g_rp_done, g_rp_n, g_rp_demo, g_rp_go; /* g_rp_go: 1 = abspielen, 2 = Video exportieren (W255) */
+static ls_replay g_rp_list[RP_MAX];
+static char g_rp_args[1000];
+/* W255 VIDEO-EXPORT: Auswahl bleibt fuer die Sitzung; laufender Export (Ordner fuer "Open folder") */
+static int g_vx_res, g_vx_fps60;
+static char g_vx_dir[700], g_vx_dir_open[700], g_vx_id[40];
+
+/* Nur Shot-Modus: Beispieleintraege (keine echten Spielstaende im Bild). */
+static void rp_demo_fill(void)
+{
+    static const char *const nm[3] = { "MIS00 00 11/14/26", "MIS04 00 11/2/26", "MIS01 01 11/13/26" };
+    static const int st[3] = { 0, 1, 0 };
+    SYSTEMTIME t = { 2026, 11, 6, 14, 13, 40, 0, 0 };
+    int i;
+    memset(g_rp_list, 0, sizeof g_rp_list);
+    for (i = 0; i < 3; i++) {
+        _snwprintf_s(g_rp_list[i].id, 33, _TRUNCATE, L"0A0B0C0D0E0%d", i + 1);
+        strcpy_s(g_rp_list[i].name, sizeof g_rp_list[i].name, nm[i]);
+        g_rp_list[i].mission = (nm[i][3] - '0') * 10 + (nm[i][4] - '0') + 1;
+        g_rp_list[i].state = st[i];
+        t.wDay = (WORD)(14 - i * 3);
+        t.wHour = (WORD)(13 - i);
+        SystemTimeToFileTime(&t, &g_rp_list[i].time); /* als UTC (nur Bild) */
+    }
+    g_rp_n = 3;
+}
+
+static void rp_time_str(const FILETIME *ft, char *out, size_t cap)
+{
+    FILETIME lt;
+    SYSTEMTIME st;
+    if (!FileTimeToLocalFileTime(ft, &lt) || !FileTimeToSystemTime(&lt, &st)) {
+        strcpy_s(out, cap, "-");
+        return;
+    }
+    _snprintf_s(out, cap, _TRUNCATE, "%04u-%02u-%02u %02u:%02u", st.wYear, st.wMonth, st.wDay,
+                st.wHour, st.wMinute);
+}
+
+static int rp_sel(HWND hd)
+{
+    HWND lb = bctl(hd, IDRP_LIST);
+    int s = ListBox_GetCurSel(lb);
+    int i = s >= 0 ? (int)ListBox_GetItemData(lb, s) : -1;
+    return (i >= 0 && i < g_rp_n) ? i : -1;
+}
+
+static void rp_refresh_info(HWND hd)
+{
+    char t[900], d[40], id8[40];
+    int i = rp_sel(hd);
+    EnableWindow(bctl(hd, IDRP_PLAY), i >= 0 && g_rp_list[i].state != 2);
+    EnableWindow(bctl(hd, IDRP_VEXPORT), i >= 0 && g_rp_list[i].state != 2); /* W255 */
+    if (i < 0) {
+        ui_settext(bctl(hd, IDRP_INFO), g_rp_n ? "" : LT("gui.rp_none"));
+        return;
+    }
+    rp_time_str(&g_rp_list[i].time, d, sizeof d);
+    w_to_u8(g_rp_list[i].id, id8, sizeof id8);
+    t[0] = 0;
+    if (g_rp_list[i].mission > 0) {
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.rp_mission"), g_rp_list[i].mission);
+        strcat_s(t, sizeof t, "\r\n");
+    }
+    if (g_rp_list[i].name[0]) {
+        _snprintf_s(t + strlen(t), sizeof t - strlen(t), _TRUNCATE, LT("gui.rp_i_name"), g_rp_list[i].name);
+        strcat_s(t, sizeof t, "\r\n");
+    }
+    _snprintf_s(t + strlen(t), sizeof t - strlen(t), _TRUNCATE, LT("gui.rp_i_date"), d);
+    strcat_s(t, sizeof t, "\r\n");
+    _snprintf_s(t + strlen(t), sizeof t - strlen(t), _TRUNCATE, LT("gui.rp_i_id"), id8);
+    strcat_s(t, sizeof t, "\r\n\r\n");
+    strcat_s(t, sizeof t, LT(g_rp_list[i].state == 1 ? "gui.rp_st_xbox"
+                             : g_rp_list[i].state == 2 ? "gui.rp_st_bad" : "gui.rp_st_ok"));
+    ui_settext(bctl(hd, IDRP_INFO), t);
+}
+
+static void rp_rescan(HWND hd)
+{
+    HWND lb = bctl(hd, IDRP_LIST);
+    int i;
+    ListBox_ResetContent(lb);
+    if (g_rp_demo) {
+        rp_demo_fill();
+    } else {
+        char hdd[1024];
+        wchar_t w[1024];
+        adv_hdd_path(hdd, sizeof hdd); /* Fassung des eingestellten Spiels (EU/US) */
+        u8_to_w(hdd, w, 1024);
+        g_rp_n = ls_replays(w, g_rp_list, RP_MAX);
+    }
+    for (i = 0; i < g_rp_n; i++) {
+        char e[200], d[40], m[64];
+        rp_time_str(&g_rp_list[i].time, d, sizeof d);
+        if (g_rp_list[i].mission > 0) {
+            _snprintf_s(m, sizeof m, _TRUNCATE, LT("gui.rp_mission"), g_rp_list[i].mission);
+        } else {
+            strcpy_s(m, sizeof m, LT("gui.rp_unknown"));
+        }
+        _snprintf_s(e, sizeof e, _TRUNCATE, "%s \xC2\xB7 %s%s", m, d,
+                    g_rp_list[i].state == 1 ? " \xC2\xB7 Xbox" : "");
+        list_add(lb, e, (LPARAM)i, 1);
+    }
+    if (g_rp_n > 0) {
+        ListBox_SetCurSel(lb, 0);
+    }
+    rp_refresh_info(hd);
+}
+
+static void rp_play(HWND hd)
+{
+    int i = rp_sel(hd), cam = ComboBox_GetCurSel(bctl(hd, IDRP_CAM));
+    char hdd[1024];
+    wchar_t w[1024];
+    if (i < 0) {
+        return;
+    }
+    cam = cam <= 0 ? -1 : cam - 1; /* Eintrag 0 = wie aufgezeichnet, dann Ansicht 0..6 */
+    ls_replay_set_args(g_rp_list[i].id, cam, g_rp_args, sizeof g_rp_args);
+    if (g_rp_demo) {
+        g_rp_go = 1;
+        g_rp_done = 1;
+        return;
+    }
+    if (client_running()) {
+        ui_msgbox(hd, LT("gui.rp_running"), LT("gui.rp_title"), MB_OK | MB_ICONWARNING);
+        return;
+    }
+    adv_hdd_path(hdd, sizeof hdd);
+    u8_to_w(hdd, w, 1024);
+    if (!ls_replay_exists(w, g_rp_list[i].id)) { /* zwischendurch geloescht/verschoben */
+        ui_msgbox(hd, LT("gui.rp_missing"), LT("gui.rp_title"), MB_OK | MB_ICONWARNING);
+        rp_rescan(hd);
+        return;
+    }
+    g_rp_go = 1;
+    g_rp_done = 1;
+}
+
+/* W255 VIDEO-EXPORT: Standard-Videoordner = <Fotoordner>\Videos (wie der Client bei video_export=auto) */
+static void rp_video_default_dir(char *out, size_t cap)
+{
+    char ph[700];
+    extras_dir(ph, sizeof ph);
+    _snprintf_s(out, cap, _TRUNCATE, "%s\\Videos", ph);
+}
+
+/* W255: "Export video..." - Set-Kette Replay + Video, Pruefungen wie "Play replay" */
+static void rp_export(HWND hd)
+{
+    int i = rp_sel(hd), cam = ComboBox_GetCurSel(bctl(hd, IDRP_CAM));
+    char dir[700], def[700], acp[700], va[800], hdd[1024], t[1200];
+    wchar_t w[1024];
+    if (i < 0) {
+        return;
+    }
+    cam = cam <= 0 ? -1 : cam - 1;
+    g_vx_res = ComboBox_GetCurSel(bctl(hd, IDRP_VRES));
+    if (g_vx_res < 0 || g_vx_res >= LS_VIDEO_RES_N) {
+        g_vx_res = 0;
+    }
+    g_vx_fps60 = ComboBox_GetCurSel(bctl(hd, IDRP_VFPS)) == 1;
+    ui_gettext(bctl(hd, IDRP_VDIR), dir, sizeof dir);
+    trim_u8(dir);
+    rp_video_default_dir(def, sizeof def);
+    strcpy_s(g_vx_dir, sizeof g_vx_dir, dir);
+    acp[0] = 0; /* leer bzw. Standardordner -> "auto" (Client rechnet denselben Ordner) */
+    if (dir[0] && _stricmp(dir, def) != 0 && u8_to_acp(dir, acp, sizeof acp) == 2) {
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("cfg.ansi"), LT("gui.rp_vx_what"), dir);
+        ui_msgbox(hd, t, LT("gui.rp_vx_title"), MB_OK | MB_ICONWARNING);
+        return;
+    }
+    if (ls_video_set_args(acp, g_vx_res, g_vx_fps60 ? 60 : 30, va, sizeof va) != 0) {
+        ui_msgbox(hd, LT("gui.rp_vx_badchar"), LT("gui.rp_vx_title"), MB_OK | MB_ICONWARNING);
+        return;
+    }
+    ls_replay_set_args(g_rp_list[i].id, cam, g_rp_args, sizeof g_rp_args);
+    strcat_s(g_rp_args, sizeof g_rp_args, ";");
+    strcat_s(g_rp_args, sizeof g_rp_args, va);
+    strcpy_s(g_vx_dir_open, sizeof g_vx_dir_open, dir[0] ? dir : def);
+    w_to_u8(g_rp_list[i].id, g_vx_id, sizeof g_vx_id);
+    if (g_rp_demo) {
+        g_rp_go = 2;
+        g_rp_done = 1;
+        return;
+    }
+    if (client_running()) {
+        ui_msgbox(hd, LT("gui.rp_running"), LT("gui.rp_vx_title"), MB_OK | MB_ICONWARNING);
+        return;
+    }
+    adv_hdd_path(hdd, sizeof hdd);
+    u8_to_w(hdd, w, 1024);
+    if (!ls_replay_exists(w, g_rp_list[i].id)) {
+        ui_msgbox(hd, LT("gui.rp_missing"), LT("gui.rp_vx_title"), MB_OK | MB_ICONWARNING);
+        rp_rescan(hd);
+        return;
+    }
+    g_rp_go = 2;
+    g_rp_done = 1;
+}
+
+/* W255: Export beendet (Client-Exitcode): Meldung, bei Erfolg "Ordner oeffnen?" */
+static void rp_export_done(unsigned long code)
+{
+    char t[1400];
+    g_vx_pending = 0;
+    if (code == 0) {
+        set_status_k(LT("gui.rp_vx_done_status"), 1);
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.rp_vx_done"), g_vx_dir_open);
+        if (ui_msgbox(g_hwnd, t, LT("gui.rp_vx_title"), MB_YESNO | MB_ICONINFORMATION) == IDYES) {
+            wchar_t wp[700];
+            u8_to_w(g_vx_dir_open, wp, 700);
+            ShellExecuteW(g_hwnd, L"open", wp, NULL, NULL, SW_SHOWNORMAL);
+        }
+        return;
+    }
+    if (g_vx_id[0] && g_vx_dir_open[0]) { /* abgebrochener Client (z. B. beendet): nur eigene Reste dieses Replays */
+        wchar_t pat[800], f[800], *slash;
+        WIN32_FIND_DATAW fd;
+        HANDLE h;
+        char p8[800];
+        _snprintf_s(p8, sizeof p8, _TRUNCATE, "%s\\Steelbound_Replay_%s_*.mp4.part", g_vx_dir_open, g_vx_id);
+        u8_to_w(p8, pat, 800);
+        slash = wcsrchr(pat, L'\\');
+        h = FindFirstFileW(pat, &fd);
+        if (h != INVALID_HANDLE_VALUE && slash) {
+            do {
+                if (!(fd.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT))) {
+                    _snwprintf_s(f, 800, _TRUNCATE, L"%.*s\\%s", (int)(slash - pat), pat, fd.cFileName);
+                    DeleteFileW(f);
+                }
+            } while (FindNextFileW(h, &fd));
+            FindClose(h);
+        }
+    }
+    if (code == 2) {
+        strcpy_s(t, sizeof t, LT("gui.rp_vx_fail2"));
+    } else if (code == 3) {
+        strcpy_s(t, sizeof t, LT("gui.rp_vx_fail3"));
+    } else {
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.rp_vx_failx"), code);
+    }
+    set_status_k(t, 2);
+    ui_msgbox(g_hwnd, t, LT("gui.rp_vx_title"), MB_OK | MB_ICONWARNING);
+}
+
+static LRESULT CALLBACK rp_proc(HWND hd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_COMMAND: {
+        int id = LOWORD(wp), code = HIWORD(wp);
+        if (id == IDRP_CLOSE || id == IDCANCEL) {
+            g_rp_done = 1;
+        } else if (id == IDRP_REFRESH) {
+            rp_rescan(hd);
+        } else if (id == IDRP_PLAY || (id == IDRP_LIST && code == LBN_DBLCLK)) {
+            rp_play(hd);
+        } else if (id == IDRP_VEXPORT) { /* W255 */
+            rp_export(hd);
+        } else if (id == IDRP_VBROWSE) { /* W255: Videoordner waehlen */
+            BROWSEINFOW bi;
+            LPITEMIDLIST pidl;
+            wchar_t wd[MAX_PATH], title[160];
+            if (g_rp_demo || g_o.shot != 0) {
+                printf("[browse] video_dir\n");
+                return 0;
+            }
+            memset(&bi, 0, sizeof bi);
+            bi.hwndOwner = hd;
+            u8_to_w(LT("gui.rp_vx_pick"), title, 160);
+            bi.lpszTitle = title;
+            bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
+            pidl = SHBrowseForFolderW(&bi);
+            if (pidl) {
+                if (SHGetPathFromIDListW(pidl, wd)) { SetWindowTextW(bctl(hd, IDRP_VDIR), wd); }
+                CoTaskMemFree(pidl);
+            }
+        } else if (id == IDRP_LIST && code == LBN_SELCHANGE) {
+            rp_refresh_info(hd);
+        }
+        return 0;
+    }
+    case WM_DRAWITEM:
+        draw_item((const DRAWITEMSTRUCT *)lp);
+        return TRUE;
+    case WM_CTLCOLOREDIT:
+    case WM_CTLCOLORLISTBOX:
+    case WM_CTLCOLORSTATIC:
+        return ctlcolor((HDC)wp, (HWND)lp, msg == WM_CTLCOLORSTATIC);
+    case WM_ERASEBKGND: {
+        RECT r;
+        GetClientRect(hd, &r);
+        if (!g_br_dialog) {
+            g_br_dialog = CreateSolidBrush(C_DIALOG);
+        }
+        FillRect((HDC)wp, &r, g_br_dialog);
+        return 1;
+    }
+    case WM_TIMER:
+        if (wp == 9 && g_rp_demo) {
+            char path[1200];
+            int rc;
+            KillTimer(hd, 9);
+            RedrawWindow(hd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            _snprintf_s(path, sizeof path, _TRUNCATE, "%s/w254_replays_%d.png", g_o.out_dir,
+                        g_dpi * 100 / 96);
+            rc = shot_window(hd, path, 1);
+            printf("replay-shot: %s%s\n", rc == 0 ? "" : "FEHLER ", path);
+            g_rp_done = 1;
+        }
+        return 0;
+    case WM_CLOSE:
+        g_rp_done = 1;
+        return 0;
+    }
+    return DefWindowProcW(hd, msg, wp, lp);
+}
+
+/* Modal; 1 = "Abspielen" gewaehlt (g_rp_args = --set-Teil). shot = Bild mit Beispieldaten. */
+static int replay_dialog_modal(int shot)
+{
+    static int reg;
+    HWND hd, c;
+    RECT rc = { 0, 0, 0, 0 };
+    MSG msg;
+    int ui_mark = g_ui_n, k;
+    DWORD exs = shot ? (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) : 0;
+    int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+    if (!reg) {
+        WNDCLASSW wc;
+        memset(&wc, 0, sizeof wc);
+        wc.lpfnWndProc = rp_proc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.lpszClassName = L"SbReplays";
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        RegisterClassW(&wc);
+        reg = 1;
+    }
+    g_rp_done = 0;
+    g_rp_go = 0;
+    g_rp_demo = shot;
+    g_rp_args[0] = 0;
+    rc.right = SX(640);
+    rc.bottom = SX(552); /* W255: + Video-Export */
+    AdjustWindowRectEx(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, exs);
+    if (shot) {
+        offscreen_pos(&x, &y);
+    } else if (g_hwnd) {
+        RECT pr;
+        GetWindowRect(g_hwnd, &pr);
+        x = pr.left + ((pr.right - pr.left) - (rc.right - rc.left)) / 2;
+        y = pr.top + ((pr.bottom - pr.top) - (rc.bottom - rc.top)) / 2;
+    }
+    {
+        wchar_t title[96];
+        u8_to_w(LT("gui.rp_title"), title, 96);
+        hd = CreateWindowExW(exs, L"SbReplays", title,
+                             WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN, x, y,
+                             rc.right - rc.left, rc.bottom - rc.top, g_hwnd, NULL,
+                             GetModuleHandleW(NULL), NULL);
+    }
+    if (!hd) {
+        return 0;
+    }
+    {
+        BOOL dark = TRUE;
+        DwmSetWindowAttribute(hd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof dark);
+    }
+    mk(hd, K_STATIC, IDRP_EXP, PG_DIALOG, 12, 10, 616, 52, LT("gui.rp_exp"), WS_VISIBLE);
+    mk(hd, K_STATIC, IDRP_HEAD, PG_DIALOG, 12, 72, 300, 18, LT("gui.rp_list"), WS_VISIBLE);
+    mk(hd, K_LIST, IDRP_LIST, PG_DIALOG, 12, 94, 300, 400, "", WS_VISIBLE);
+    mk(hd, K_BTN, IDRP_REFRESH, PG_DIALOG, 12, 510, 130, 30, LT("gui.rp_refresh"), WS_VISIBLE);
+    mk(hd, K_STATIC, IDRP_INFO, PG_DIALOG, 326, 94, 302, 150, "", WS_VISIBLE);
+    mk(hd, K_STATIC, IDRP_CAMLBL, PG_DIALOG, 326, 250, 302, 18, LT("gui.rp_cam"), WS_VISIBLE);
+    c = mk(hd, K_COMBO, IDRP_CAM, PG_DIALOG, 326, 272, 302, 30, "", WS_VISIBLE);
+    combo_add(c, LT("gui.rp_cam_free"));
+    combo_add(c, LT("gui.rp_cam_0"));
+    combo_add(c, LT("gui.rp_cam_1"));
+    for (k = 1; k <= 5; k++) {
+        char t[80];
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.rp_cam_n"), k);
+        combo_add(c, t);
+    }
+    ComboBox_SetCurSel(c, 0);
+    { /* W255 VIDEO-EXPORT (experimentell): Aufloesung, Bildrate, Ordner */
+        char def[700];
+        unsigned vw, vh;
+        mk(hd, K_STATIC, IDRP_VHEAD, PG_DIALOG, 326, 316, 302, 18, LT("gui.rp_vx_head"), WS_VISIBLE);
+        c = mk(hd, K_COMBO, IDRP_VRES, PG_DIALOG, 326, 338, 150, 30, "", WS_VISIBLE);
+        for (k = 0; k < LS_VIDEO_RES_N; k++) {
+            char t[40];
+            ls_video_res(k, &vw, &vh);
+            _snprintf_s(t, sizeof t, _TRUNCATE, "%u \xC3\x97 %u", vw, vh);
+            combo_add(c, t);
+        }
+        ComboBox_SetCurSel(c, g_vx_res);
+        c = mk(hd, K_COMBO, IDRP_VFPS, PG_DIALOG, 482, 338, 146, 30, "", WS_VISIBLE);
+        combo_add(c, LT("gui.rp_vx_fps30"));
+        combo_add(c, LT("gui.rp_vx_fps60"));
+        ComboBox_SetCurSel(c, g_vx_fps60 ? 1 : 0);
+        mk(hd, K_STATIC, IDRP_VDIRLBL, PG_DIALOG, 326, 376, 302, 18, LT("gui.rp_vx_dir"), WS_VISIBLE);
+        if (shot) { /* Bild: neutraler Beispielordner statt echter Nutzerpfade */
+            strcpy_s(def, sizeof def, "D:\\Videos\\Steelbound");
+        } else {
+            rp_video_default_dir(def, sizeof def);
+        }
+        mk(hd, K_EDIT, IDRP_VDIR, PG_DIALOG, 326, 398, 258, 26, g_vx_dir[0] && !shot ? g_vx_dir : def, WS_VISIBLE);
+        mk(hd, K_BTN, IDRP_VBROWSE, PG_DIALOG, 590, 398, 38, 26, "\xE2\x80\xA6", WS_VISIBLE);
+        mk(hd, K_STATIC, IDRP_VHINT, PG_DIALOG, 326, 430, 302, 70, LT("gui.rp_vx_hint"), WS_VISIBLE);
+        mk(hd, K_BTN, IDRP_VEXPORT, PG_DIALOG, 158, 510, 170, 30, LT("gui.rp_vx_btn"), WS_VISIBLE);
+    }
+    mk(hd, K_ACCENT, IDRP_PLAY, PG_DIALOG, 338, 510, 160, 30, LT("gui.rp_play"), WS_VISIBLE);
+    mk(hd, K_BTN, IDRP_CLOSE, PG_DIALOG, 508, 510, 120, 30, LT("gui.btn_close"), WS_VISIBLE);
+    rp_rescan(hd);
+    if (g_hwnd) {
+        EnableWindow(g_hwnd, FALSE);
+    }
+    if (shot) {
+        if (!is_offscreen(hd)) {
+            printf("replay-shot: FEHLER Fenster nicht au" U8_SZ "erhalb des Bildschirms - Abbruch\n");
+            g_rp_done = 1;
+        } else {
+            ShowWindow(hd, SW_SHOWNOACTIVATE);
+            SetTimer(hd, 9, 400, NULL);
+        }
+    } else {
+        ShowWindow(hd, SW_SHOW);
+        SetFocus(bctl(hd, IDRP_LIST));
+    }
+    UpdateWindow(hd);
+    while (!g_rp_done && GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (IsDialogMessageW(hd, &msg)) {
+            continue;
+        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    if (g_hwnd) {
+        EnableWindow(g_hwnd, TRUE);
+        if (!shot) {
+            SetFocus(ctl(ID_SAVES_REPLAYS));
+        }
+    }
+    DestroyWindow(hd);
+    g_ui_n = ui_mark;
+    return shot ? 0 : g_rp_go; /* 1 = abspielen, 2 = Video exportieren (W255) */
+}
+
+static void replay_dialog_open(void)
+{
+    int go = replay_dialog_modal(0);
+    if (go == 1) {
+        if (do_start_ex(0, 0, g_rp_args) == 0) { /* Bildschirmweg, nur dieser Start */
+            set_status_k(LT("gui.rp_started"), 1);
+        }
+    } else if (go == 2) { /* W255: Export - Client unsichtbar (window_hidden setzt er selbst), Meldung am Ende */
+        if (do_start_ex(0, 0, g_rp_args) == 0) {
+            g_vx_pending = g_client_proc != NULL;
+            set_status_k(LT("gui.rp_vx_started"), 1);
+        }
+    }
+}
+
 static void open_bind_dialog(void)
 {
     char prof[64], path[1200];
@@ -10619,7 +11356,9 @@ static int g_pk_ne[PK_MAXN], g_pk_sh[PK_MAXN];
 static int g_pk_chk[PK_MAXN]; /* -2 = ungeprueft, sonst 0/1/2 */
 static char g_pk_chk_reason[PK_MAXN][64];
 static char g_pk_chk_detail[PK_MAXN][300];
-static int g_pk_chk_xbe[PK_MAXN];        /* W172: mit Spielversion geprueft */
+static int g_pk_chk_xbe[PK_MAXN];        /* W172: mit Spielversion geprueft; W256: SB_PACK_FIT_* (>0) */
+static char g_pk_chk_made[PK_MAXN][16];  /* W256: Fassung des Pakets bei FIT_OTHER */
+static char g_pk_chk_act[PK_MAXN][16];   /* W256: aktive Fassung bei der Pruefung */
 static sb_pack_cov_t g_pk_cov[PK_MAXN];  /* W172: Abdeckung je Kategorie */
 static int g_pk_covby[PK_MAXN * PK_MAXN]; /* W172: [i * N + w] = verdeckt durch w */
 static int g_pk_fx_hit[SB_FXN], g_pk_fx_val[SB_FXN]; /* W172: Effektwerte (Gewinner) */
@@ -10852,6 +11591,7 @@ typedef struct {
     char file[600];
     int chk, xbe;
     char reason[64], detail[300];
+    char made[16], act[16]; /* W256 */
 } pk_stash_t;
 
 static void packs_load(void)
@@ -10864,6 +11604,8 @@ static void packs_load(void)
         strcpy_s(old[i].file, sizeof old[i].file, g_pk_ord[i].file);
         old[i].chk = g_pk_chk[i];
         old[i].xbe = g_pk_chk_xbe[i];
+        strcpy_s(old[i].made, sizeof old[i].made, g_pk_chk_made[i]);
+        strcpy_s(old[i].act, sizeof old[i].act, g_pk_chk_act[i]);
         strcpy_s(old[i].reason, sizeof old[i].reason, g_pk_chk_reason[i]);
         strcpy_s(old[i].detail, sizeof old[i].detail, g_pk_chk_detail[i]);
     }
@@ -10896,12 +11638,15 @@ static void packs_load(void)
         int k;
         g_pk_chk[i] = -2;
         g_pk_chk_xbe[i] = 0;
+        g_pk_chk_made[i][0] = g_pk_chk_act[i][0] = '\0';
         g_pk_chk_reason[i][0] = '\0';
         g_pk_chk_detail[i][0] = '\0';
         for (k = 0; k < nold; k++) { /* Pruefstand je Quelle retten */
             if (strcmp(g_pk_ord[i].file, old[k].file) == 0) {
                 g_pk_chk[i] = old[k].chk;
                 g_pk_chk_xbe[i] = old[k].xbe;
+                strcpy_s(g_pk_chk_made[i], 16, old[k].made);
+                strcpy_s(g_pk_chk_act[i], 16, old[k].act);
                 strcpy_s(g_pk_chk_reason[i], 64, old[k].reason);
                 strcpy_s(g_pk_chk_detail[i], 300, old[k].detail);
                 break;
@@ -11370,6 +12115,8 @@ static void packs_del(void)
         g_pk_ord[k] = g_pk_ord[k + 1];
         g_pk_chk[k] = g_pk_chk[k + 1];
         g_pk_chk_xbe[k] = g_pk_chk_xbe[k + 1];
+        strcpy_s(g_pk_chk_made[k], 16, g_pk_chk_made[k + 1]);
+        strcpy_s(g_pk_chk_act[k], 16, g_pk_chk_act[k + 1]);
         strcpy_s(g_pk_chk_reason[k], 64, g_pk_chk_reason[k + 1]);
         strcpy_s(g_pk_chk_detail[k], 300, g_pk_chk_detail[k + 1]);
     }
@@ -11488,7 +12235,7 @@ static void packs_check_idx(int i, int quiet)
     char full[1400], afull[1400], dir[1100];
     char xhex[65], reason[64], detail[300];
     const char *xh;
-    int st;
+    int st, fit = SB_PACK_FIT_UNKNOWN;
     if (i < 0 || i >= g_pk_n) {
         if (!quiet) {
             set_status(LT("gui.pk_nosel"));
@@ -11506,10 +12253,15 @@ static void packs_check_idx(int i, int quiet)
     pk_acp(full, afull, sizeof afull);
     xh = packs_xbe(xhex, sizeof xhex);
     reason[0] = detail[0] = '\0';
-    st = sb_pack_check(afull, xh, reason, sizeof reason, detail,
-                       sizeof detail);
+    st = sb_pack_check_fit(afull, xh, reason, sizeof reason, detail,
+                           sizeof detail, &fit, g_pk_chk_made[i],
+                           sizeof g_pk_chk_made[i]);
     g_pk_chk[i] = st;
-    g_pk_chk_xbe[i] = xh != NULL;
+    g_pk_chk_xbe[i] = xh != NULL && fit > 0 ? fit : 0; /* W256: Passungsart */
+    {
+        const char *an = xh ? sb_gamever_family_name(sb_gamever_family_idx(xh)) : NULL;
+        strcpy_s(g_pk_chk_act[i], sizeof g_pk_chk_act[i], an ? an : "");
+    }
     strcpy_s(g_pk_chk_reason[i], sizeof g_pk_chk_reason[i], reason);
     strcpy_s(g_pk_chk_detail[i], sizeof g_pk_chk_detail[i], detail);
     if (!quiet) {
@@ -11873,7 +12625,11 @@ static void paint_packs(void)
                 fit = LT("gui.pk_fit_no");
                 fc = C_ERR;
             } else if (g_pk_chk[i] >= 1 && g_pk_chk_xbe[i]) {
-                fit = LT("gui.pk_fit_yes");
+                /* W256 PACK-ANYVER: genau / andere Fassung / Familie */
+                static char ft[200];
+                lcfg_pack_fit_text(g_pk_chk_xbe[i], g_pk_chk_made[i],
+                                   g_pk_chk_act[i], ft, sizeof ft);
+                fit = ft;
                 fc = C_OK;
             } else if (g_rr[22].active) {
                 fit = g_rr[22].text;
@@ -12139,6 +12895,11 @@ static void ui_apply_language(void)
     ui_settext(ctl(ID_START_BIG), LT("gui.btn_bigstart"));
     ui_settext(ctl(ID_START_VR), LT("gui.btn_vrstart")); /* W159 */
     ui_settext(ctl(ID_BG), LT("gui.bg"));
+    ui_settext(ctl(ID_UPD_NOW), LT("gui.upd_now")); /* W250 */
+    ui_settext(ctl(ID_UPD_AUTO), LT("gui.upd_auto"));
+    ui_settext(ctl(ID_UPD_YES), LT("gui.upd_yes"));
+    ui_settext(ctl(ID_UPD_NO), LT("gui.upd_no"));
+    ui_settext(ctl(ID_UPD_OPEN), LT("gui.upd_open"));
     /* Grafik-Kombis (Reihenfolge wie build_controls) */
     c = ctl(ID_PRESET);
     if (c) {
@@ -12272,6 +13033,7 @@ static void ui_apply_language(void)
     ui_settext(ctl(ID_DATA_OPEN), LT("gui.adv_open_folder"));
     ui_settext(ctl(ID_SAVES_IMPORT), LT("gui.si_import"));
     ui_settext(ctl(ID_SAVES_EXPORT), LT("gui.si_export"));
+    ui_settext(ctl(ID_SAVES_REPLAYS), LT("gui.rp_btn")); /* W254 */
     ui_settext(ctl(ID_SAVES_RESET), LT("gui.saves_reset"));
     ui_settext(ctl(ID_GFX_PACKS), LT("gui.gfx_to_packs"));
     ui_settext(ctl(ID_PK_UP), "\xE2\x86\x91");
@@ -12465,10 +13227,11 @@ static void build_controls(void)
      * Optionsfelder, Zuruecksetzen, Sprung Packs) + Bild, rechts Welt + HUD.
      * Anlage-Reihenfolge = Tab-Reihenfolge (links oben -> unten, dann rechts). --- */
     for (i = 0; i <= LGP_CUSTOM; i++) {
-        mk(w, K_RADIO, ID_GP0 + i, P_GFX, CX0 + 18, CY0 + 42 + i * 48,
-           i == LGP_CUSTOM ? COLW - 36 - 92 : COLW - 36, 48, "", 0);
+        /* W252: sechs Optionsfelder -> Zeilenhoehe 40 statt 48 (Karte bleibt gleich hoch) */
+        mk(w, K_RADIO, ID_GP0 + i, P_GFX, CX0 + 18, CY0 + 42 + i * 40,
+           i == LGP_CUSTOM ? COLW - 36 - 92 : COLW - 36, 40, "", 0);
     }
-    mk(w, K_BTN, ID_GP_RESET, P_GFX, CX0 + COLW - 18 - 84, CY0 + 42 + LGP_CUSTOM * 48 + 4, 84, 26,
+    mk(w, K_BTN, ID_GP_RESET, P_GFX, CX0 + COLW - 18 - 84, CY0 + 42 + LGP_CUSTOM * 40 + 4, 84, 26,
        LT("gui.gfx_reset"), 0);
     mk(w, K_BTN, ID_GFX_PACKS, P_GFX, CX0 + COLW - 18 - 96, CY0 + 302, 96, 26,
        LT("gui.gfx_to_packs"), 0);
@@ -12642,8 +13405,10 @@ static void build_controls(void)
        LT("gui.adv_open"), 0);
     mk(w, K_BTN, ID_DATA_OPEN, P_ADV, CX0 + COLW - 18 - 112, CY0 + 272, 112, 26,
        LT("gui.adv_open_folder"), 0);
-    mk(w, K_BTN, ID_SAVES_IMPORT, P_ADV, CX0 + 18, CY0 + 308, 140, 28, LT("gui.si_import"), 0);
-    mk(w, K_BTN, ID_SAVES_EXPORT, P_ADV, CX0 + 166, CY0 + 308, COLW - 184, 28, LT("gui.si_export"), 0);
+    /* W254: drei Knoepfe (Import, Export, Replays) im Raster der Zeile darunter */
+    mk(w, K_BTN, ID_SAVES_IMPORT, P_ADV, CX0 + 18, CY0 + 308, 96, 28, LT("gui.si_import"), 0);
+    mk(w, K_BTN, ID_SAVES_EXPORT, P_ADV, CX0 + 122, CY0 + 308, 96, 28, LT("gui.si_export"), 0);
+    mk(w, K_BTN, ID_SAVES_REPLAYS, P_ADV, CX0 + 226, CY0 + 308, COLW - 244, 28, LT("gui.rp_btn"), 0);
     mk(w, K_COMBOEDIT, ID_PROF_COMBO, P_ADV, CX0 + 18, CY0 + 388, COLW - 36, 30,
        "", 0);
     mk(w, K_ACCENT, ID_PROF_LOAD, P_ADV, CX0 + 18, CY0 + 420, 96, 30, LT("gui.adv_setup_load"), 0);
@@ -12664,7 +13429,14 @@ static void build_controls(void)
     mk(w, K_TOGGLE, ID_BG, P_ADV, COL2 + 18, CY0 + 176, COLW - 36, 28, LT("gui.bg"), 0);
     mk(w, K_BTN, ID_DIAG, P_ADV, COL2 + COLW - 18 - 130, ADV_DIAG_Y + 9, 130, 28,
        LT(g_diag_open ? "gui.adv_diag_hide" : "gui.adv_diag_show"), 0);
-    mk(w, K_TOGGLE, ID_LIVE, P_ADV, COL2 + 18, ADV_DIAG_Y + ADV_DIAG_DY + 188, COLW - 36, 28, LT("gui.ton_live"), 0);
+    mk(w, K_TOGGLE, ID_LIVE, P_ADV, COL2 + 18, ADV_DIAG_Y + ADV_DIAG_DY + 164, COLW - 36, 28, LT("gui.ton_live"), 0);
+    /* W250 UPDATE-CHECK: Schalter + "Jetzt pruefen" (Launcher-Karte), Erstabfrage
+     * und Hinweis rechts neben den Startknoepfen (Spielen) */
+    mk(w, K_BTN, ID_UPD_NOW, P_ADV, COL2 + COLW - 18 - 130, CY0 + 136 + 9, 130, 28, LT("gui.upd_now"), 0);
+    mk(w, K_TOGGLE, ID_UPD_AUTO, P_ADV, COL2 + 18, CY0 + 208, COLW - 36, 28, LT("gui.upd_auto"), 0);
+    mk(w, K_BTN, ID_UPD_NO, P_PLAY, UPD_X + UPD_W - 18 - 96, UPD_Y + 96, 96, 28, LT("gui.upd_no"), 0);
+    mk(w, K_BTN, ID_UPD_YES, P_PLAY, UPD_X + UPD_W - 18 - 96 - 8 - 120, UPD_Y + 96, 120, 28, LT("gui.upd_yes"), 0);
+    mk(w, K_BTN, ID_UPD_OPEN, P_PLAY, UPD_X + UPD_W - 18 - 160, UPD_Y + 58, 160, 28, LT("gui.upd_open"), 0);
     /* W190 SAVE-LOCK: immer sichtbar (auch bei eingeklappter Diagnose) */
     mk(w, K_TOGGLE, ID_SAVE_LOCK, P_ADV, COL2 + 18, ADV_DIAG_Y + 40, COLW - 36, 28, LT("gui.save_lock"), 0);
 
@@ -12709,6 +13481,148 @@ static void snap_settings(launcher_settings_t *out)
 {
     *out = g_s;
     ui_to_settings(out);
+}
+
+/* ------------------------------------------------------------------ */
+/* W250 UPDATE-CHECK: Abruf im Hintergrund (Oberflaeche friert nie ein) */
+/* ------------------------------------------------------------------ */
+typedef struct {
+    HWND h;
+    int gen;
+    char ver[64];
+    lupd_res_t r;
+} upd_job_t;
+
+static DWORD WINAPI upd_thread(LPVOID p)
+{
+    upd_job_t *j = (upd_job_t *)p;
+    lupd_fetch(j->ver, &j->r);
+    if (!PostMessageW(j->h, WM_APP_UPD, (WPARAM)j->gen, (LPARAM)j)) {
+        free(j); /* Fenster schon weg */
+    }
+    return 0;
+}
+
+/* Abruf starten. manual = "Jetzt pruefen" (Meldung auch bei Fehlern).
+ * Test-/Shot-Betrieb: nie Netz. */
+static void upd_start(int manual)
+{
+    upd_job_t *j;
+    HANDLE th;
+    if (!g_upd_ver[0] || g_o.shot != 0 || !g_hwnd) {
+        return;
+    }
+    if (g_upd_busy) {
+        g_upd_manual |= manual;
+        return;
+    }
+    j = (upd_job_t *)calloc(1, sizeof *j);
+    if (!j) {
+        return;
+    }
+    j->h = g_hwnd;
+    j->gen = ++g_upd_gen;
+    strcpy_s(j->ver, sizeof j->ver, g_upd_ver);
+    th = CreateThread(NULL, 0, upd_thread, j, 0, NULL);
+    if (!th) {
+        free(j);
+        return;
+    }
+    CloseHandle(th);
+    g_upd_busy = 1;
+    g_upd_manual = manual;
+    SetTimer(g_hwnd, UPD_TIMER, LUPD_TIMEOUT_MS, NULL);
+    if (manual) {
+        set_status(LT("gui.upd_checking"));
+    }
+}
+
+/* Ergebnis anwenden (UI-Thread). Fehler bleiben still, ausser manuell. */
+static void upd_done(const lupd_res_t *r)
+{
+    char t[300], v[64];
+    int manual = g_upd_manual;
+    KillTimer(g_hwnd, UPD_TIMER);
+    g_upd_busy = 0;
+    g_upd_manual = 0;
+    if (r->result == LUPD_R_NEWER || r->result == LUPD_R_CURRENT) {
+        g_upd_res = *r;
+    }
+    if (r->result == LUPD_R_NEWER) {
+        upd_tag_disp(r->rel.tag, v, sizeof v);
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.upd_new"), v);
+        set_status_k(t, 1);
+    } else if (!manual) {
+        /* still */
+    } else if (r->result == LUPD_R_CURRENT) {
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.upd_latest"), g_upd_ver);
+        set_status_k(t, 1);
+    } else if (r->result == LUPD_R_HTTP) {
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.upd_fail_http"), r->http_status);
+        set_status_k(t, 2);
+    } else {
+        set_status_k(LT("gui.upd_fail"), 2);
+    }
+    ui_refresh_visibility();
+    redraw_all();
+}
+
+/* Frist abgelaufen: spaetes Ergebnis wird verworfen (Generationszaehler). */
+static void upd_timeout(void)
+{
+    lupd_res_t r;
+    if (!g_upd_busy) {
+        KillTimer(g_hwnd, UPD_TIMER);
+        return;
+    }
+    g_upd_gen++;
+    memset(&r, 0, sizeof r);
+    r.result = LUPD_R_NET;
+    upd_done(&r);
+}
+
+/* Antwort auf die Erstabfrage bzw. den Schalter merken (user.cfg). */
+static void upd_set_cfg(int on)
+{
+    char p[1200];
+    user_cfg_path(p, sizeof p);
+    g_upd_cfg = on ? 1 : 0;
+    g_upd_ask = 0;
+    ui_set_checked(ID_UPD_AUTO, g_upd_cfg == 1);
+    if (g_o.shot != 0) {
+        return; /* Shots/Selbsttest schreiben nichts */
+    }
+    if (lupd_cfg_set(p, g_upd_cfg) != 0) {
+        set_status_k(LT("gui.upd_save_fail"), 2);
+    }
+}
+
+/* Zustand beim Start (gui_fill): Version, Antwort aus user.cfg. */
+static void upd_init(void)
+{
+    char p[1200];
+    g_upd_ver = lupd_version();
+    user_cfg_path(p, sizeof p);
+    g_upd_cfg = lupd_cfg_get(p);
+    g_upd_ask = lupd_should_ask(g_upd_ver, g_upd_cfg);
+}
+
+/* Release-Seite oeffnen - nur mit festem Praefix (sonst nichts). */
+static void upd_open_page(void)
+{
+    if (g_upd_res.result != LUPD_R_NEWER || !lupd_url_ok(g_upd_res.rel.url)) {
+        set_status_k(LT("gui.upd_badurl"), 2);
+        return;
+    }
+    if (g_o.shot != 0) {
+        printf("[upd] oeffnen: %s\n", g_upd_res.rel.url);
+        return;
+    }
+    {
+        wchar_t w[600];
+        u8_to_w(g_upd_res.rel.url, w, 600);
+        ShellExecuteW(g_hwnd, L"open", w, NULL, NULL, SW_SHOWNORMAL);
+    }
 }
 
 static void on_command_inner(int id, int code);
@@ -12804,6 +13718,31 @@ static void on_command_inner(int id, int code)
             set_status_k(LT("gui.msg_saved"), 1);
         }
         break;
+    case ID_UPD_YES: /* W250: Erstabfrage -> ja, gleich einmal pruefen */
+        upd_set_cfg(1);
+        set_status_k(LT("gui.upd_on"), 1);
+        upd_start(0);
+        ui_refresh_visibility();
+        redraw_all();
+        break;
+    case ID_UPD_NO: /* W250: Erstabfrage -> nein (Standard) */
+        upd_set_cfg(0);
+        set_status_k(LT("gui.upd_off"), 1);
+        ui_refresh_visibility();
+        redraw_all();
+        break;
+    case ID_UPD_AUTO: /* W250: Schalter (wirkt sofort, eigene Zeile in user.cfg) */
+        upd_set_cfg(!ui_checked(ID_UPD_AUTO));
+        set_status_k(LT(g_upd_cfg == 1 ? "gui.upd_on" : "gui.upd_off"), 1);
+        ui_refresh_visibility();
+        redraw_all();
+        break;
+    case ID_UPD_NOW: /* W250: manuell, auch bei Schalter aus */
+        upd_start(1);
+        break;
+    case ID_UPD_OPEN:
+        upd_open_page();
+        break;
     case ID_BG:
         g_bg_on = !g_bg_on;
         ui_set_checked(ID_BG, g_bg_on);
@@ -12872,6 +13811,7 @@ static void on_command_inner(int id, int code)
     case ID_GP0 + 1:
     case ID_GP0 + 2:
     case ID_GP0 + LGP_PERFORMANCE:
+    case ID_GP0 + LGP_CLEAR: /* W252 */
     case ID_GP_RESET: {
         lgp_mask_t lock = gfx_lock_now();
         int was = lcfg_gfx_preset(&g_gfx, lock);
@@ -12913,6 +13853,7 @@ static void on_command_inner(int id, int code)
     case ID_GFX_FX:
     case ID_GFX_TEX:
     case ID_AAMODE:
+    case ID_MONFX: /* W252: "Aus" = monitor_fx 0 (Preset Klare Sicht) */
         if (code == CBN_SELCHANGE && !g_updating) {
             lgp_mask_t lock = gfx_lock_now();
             int sel = ComboBox_GetCurSel(ctl(id));
@@ -12928,6 +13869,15 @@ static void on_command_inner(int id, int code)
             case ID_GFX_SOFT: g_gfx.shx[LSHX_SOFT] = sel ? 1 : 0; break;
             case ID_GFX_FX: if (sel < 3) { lcfg_fx_apply_level(&g_gfx, sel); } break; /* 3 = eigene Werte bleiben */
             case ID_GFX_TEX: g_gfx.remaster = g_gfx.hd_textures = sel ? 1 : 0; break;
+            case ID_MONFX:
+                if (sel == 3) {
+                    g_gfx.monitor_fx = 0;
+                } else if (sel < 3) {
+                    g_gfx.monitor_fx = 1;
+                    g_monfx_grain = kMonFx[sel][0];
+                    g_monfx_glitch = kMonFx[sel][1];
+                }
+                break;
             default: if (sel <= 3) { g_gfx.shx[LSHX_AA] = sel; } break;
             }
             gfx_sync_ui();
@@ -13049,6 +13999,7 @@ static void on_command_inner(int id, int code)
         break;
     case ID_SAVES_IMPORT: adv_saves_transfer(0); break;
     case ID_SAVES_EXPORT: adv_saves_transfer(1); break;
+    case ID_SAVES_REPLAYS: replay_dialog_open(); break; /* W254 */
     case ID_SAVES_RESET: { /* W187 KIA-LOAD */
         char path[1100];
         adv_hdd_path(path, sizeof path);
@@ -13225,6 +14176,7 @@ static void on_command_inner(int id, int code)
             char st[256];
             g_s = ps;
             ui_from_settings(&g_s);
+            disk_base_sync(&g_s); /* W259: Profilwerte gelten als Launcher-Aenderung */
             _snprintf_s(g_profile_line, sizeof g_profile_line, _TRUNCATE, LT("gui.msg_prof_loaded"), name);
             _snprintf_s(st, sizeof st, _TRUNCATE, LT("gui.msg_prof_loaded_s"), name);
             set_status_k(st, 1);
@@ -13388,7 +14340,18 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == 7) {
             client_exit_poll(); /* W231 */
         }
+        if (wp == UPD_TIMER) {
+            upd_timeout(); /* W250 */
+        }
         return 0;
+    case WM_APP_UPD: { /* W250: Ergebnis des Abruf-Threads */
+        upd_job_t *j = (upd_job_t *)lp;
+        if (j && (int)wp == g_upd_gen && g_upd_busy) {
+            upd_done(&j->r);
+        }
+        free(j);
+        return 0;
+    }
     case WM_DPICHANGED:
         if (!g_o.force_dpi) {
             RECT *r = (RECT *)lp;
@@ -13404,6 +14367,10 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_DESTROY:
         KillTimer(h, 1);
         KillTimer(h, 7);
+        KillTimer(h, UPD_TIMER);
+        if (g_upd_ask && g_o.shot == 0) {
+            upd_set_cfg(0); /* W250: Schliessen ohne Antwort = Nein (nie wieder ungefragt) */
+        }
         PostQuitMessage(0);
         return 0;
     }
@@ -13535,6 +14502,7 @@ static const struct {
     int pksel; /* W172: gewaehltes Pack (Shots der Packs-Seite), 0 = erstes */
 } kStates[] = {
     { "performance", "", 0 }, /* W207: shared preset below */
+    { "clearview", "", 0 }, /* W252: Klare Sicht */
     { "nodata", "game_image=;xbe_path=;media_root=", 0 },
     { "fullscreen", "window_mode=2;fs_hz=144;interp_fps=120", 0 },
     { "window43", "window_mode=0;width=1600;height=1200", 0 },
@@ -13555,6 +14523,12 @@ static const struct {
     { "ready_us", "xbe_path=;media_root=", 0 },  /* W231: US-Beispielabbild */
     { "exit8_us", "xbe_path=;media_root=", 0 },  /* W231: + Meldung Exitcode 8 */
     { "ready_controller", "xbe_path=;media_root=;sbc_usb=1;sbc_mouse_off=1;input_profile=", 0 },
+    /* W250 UPDATE-CHECK: Erstabfrage / Hinweis neue Version / Build ohne Version
+     * (Version und Ergebnis sind Fixtures, kein Netz) */
+    { "update_ask", "xbe_path=;media_root=", 0 },
+    { "update_new", "xbe_path=;media_root=", 0 },
+    { "update_dev", "", 0 },
+    { "replays", "", 0 },   /* W254: Seite Erweitert + Replay-Dialog (Beispieldaten) */
     { "pack2", "", 0, 1 },  /* W172: zweites Pack gewaehlt (verdeckt durch ...) */
     { "pack3", "", 0, 2 },  /* W172: drittes Pack (Effekt-Pack mit Schloss) */
     /* W173: Remastered dezent, Effect Pack setzt color_sat/fx_embers (Effect-Pack-
@@ -13586,14 +14560,30 @@ static void gui_apply_state(const char *name)
         /* W231: startbereit mit US-Beispielabbild (Fixture, bereinigt) */
         w220_fixture(W220_ISO_US, 0);
         strcpy_s(g_s.game_image, sizeof g_s.game_image, W220_ISO_US);
-    } else if (strncmp(name, "ready", 5) == 0) { /* W227: Fixture vor dem Regelwerk */
+    } else if (strncmp(name, "ready", 5) == 0 || strncmp(name, "update_", 7) == 0) {
+        /* W227: Fixture vor dem Regelwerk (W250: auch update_*) */
         w220_fixture(W220_ISO, 0);
         strcpy_s(g_s.game_image, sizeof g_s.game_image, W220_ISO);
+    }
+    if (strncmp(name, "update_", 7) == 0) { /* W250: Fixtures, nichts gespeichert */
+        int dev = strcmp(name, "update_dev") == 0;
+        g_upd_ver = dev ? "" : "0.1.0-alpha.7";
+        g_upd_cfg = dev ? -1 : strcmp(name, "update_ask") == 0 ? -1 : 1;
+        g_upd_ask = strcmp(name, "update_ask") == 0;
+        memset(&g_upd_res, 0, sizeof g_upd_res);
+        if (strcmp(name, "update_new") == 0) {
+            g_upd_res.result = LUPD_R_NEWER;
+            strcpy_s(g_upd_res.rel.tag, sizeof g_upd_res.rel.tag, "v0.1.0-alpha.8");
+            strcpy_s(g_upd_res.rel.url, sizeof g_upd_res.rel.url,
+                     LUPD_PAGE_PREFIX "tag/v0.1.0-alpha.8");
+            g_upd_res.rel.prerelease = 1;
+        }
     }
     for (i = 0; i < (int)(sizeof kStates / sizeof kStates[0]); i++) {
         if (strcmp(name, kStates[i].name) == 0) {
             lcfg_apply_set(&g_s, kStates[i].set);
             if (strcmp(name, "performance") == 0) { lcfg_gfx_apply(&g_s, LGP_PERFORMANCE); }
+            if (strcmp(name, "clearview") == 0) { lcfg_gfx_apply(&g_s, LGP_CLEAR); } /* W252 */
             if (kStates[i].diag) {
                 g_diag_open = 1;
             }
@@ -13709,6 +14699,7 @@ static void gui_fill(void)
         _snprintf_s(g_profile_line, sizeof g_profile_line, _TRUNCATE,
                     "%s", LT("gui.fill_nodefaults"));
     }
+    upd_init(); /* W250: vor --state (Shots ueberschreiben im Speicher) */
     if (g_o.state[0]) { /* W171: --state (nur Shots, nie gespeichert) */
         gui_apply_state(g_o.state);
     }
@@ -13718,8 +14709,13 @@ static void gui_fill(void)
     update_sbc_status();
     update_vr_button(); /* W159: VR-Knopf je Runtime */
     ui_from_settings(&g_s);
+    /* W259: Basis fuer den Abgleich. Gewinnt ein Standard-Profil (W47) bzw.
+     * --lang/Erststart, weichen diese Werte von der Datei ab und werden beim
+     * Start weiter geschrieben; --state-Shots speichern nie. */
+    disk_base_sync(&g_s);
     refresh_profiles();
     ui_set_checked(ID_BG, g_bg_on);
+    ui_set_checked(ID_UPD_AUTO, g_upd_cfg == 1); /* W250 */
     update_pad_status();
     update_summary();
     ui_apply_rules();
@@ -13906,7 +14902,25 @@ int gui_main(const char *client_override, const gui_opts_t *o)
     show_page(P_PLAY);
     if (g_o.shot == 4) {
         /* GUI-Startpfad ohne Clientstart (Abnahme: user.cfg-Vergleich). */
-        rc = do_start(1, 0); /* W159: Trockenlauf = Bildschirmweg */
+        if (g_o.replay[0]) { /* W254: Trockenlauf "Play replay" (gleiche Kette wie der Dialog) */
+            wchar_t wid[40];
+            u8_to_w(g_o.replay, wid, 40);
+            ls_replay_set_args(wid, g_o.replay_cam, g_rp_args, sizeof g_rp_args);
+            if (g_o.video[0]) { /* W255: wie "Export video..." mit Standardordner */
+                int vr = 0, vf = 30;
+                char va[300];
+                if (!ls_video_parse(g_o.video, &vr, &vf)) {
+                    printf("gui-start-dry: FEHLER --video '%s' (1080p30, 1440p60, 2160p30 ...)\n", g_o.video);
+                    return 1;
+                }
+                ls_video_set_args("", vr, vf, va, sizeof va);
+                strcat_s(g_rp_args, sizeof g_rp_args, ";");
+                strcat_s(g_rp_args, sizeof g_rp_args, va);
+            }
+            rc = do_start_ex(1, 0, g_rp_args);
+        } else {
+            rc = do_start(1, 0); /* W159: Trockenlauf = Bildschirmweg */
+        }
         printf("gui-start-dry: %s (%s)\n", rc == 0 ? "ok" : "FEHLER",
                g_status);
         if (rc == 0) { /* W171: Startparameter sichtbar (Vergleich vorher/nachher) */
@@ -14007,6 +15021,9 @@ int gui_main(const char *client_override, const gui_opts_t *o)
                 printf("shot: Seite %d (%s) -> %s%s\n", p, kPageKey[p],
                        r ? "FEHLER " : "", path);
                 rc |= r;
+                if (p == P_ADV && strcmp(g_o.state, "replays") == 0) {
+                    replay_dialog_modal(1); /* W254: Replay-Dialog mit Beispieldaten */
+                }
             }
         }
         gui_teardown();
@@ -14016,6 +15033,9 @@ int gui_main(const char *client_override, const gui_opts_t *o)
     UpdateWindow(g_hwnd);
     SetFocus(ctl(ID_START_BIG));
     SetTimer(g_hwnd, 1, 100, NULL); /* Gamepad-Live-Anzeige (10 Hz) */
+    if (lupd_auto_check(g_upd_ver, g_upd_cfg)) {
+        upd_start(0); /* W250: nur nach Zustimmung, still bei Fehlern */
+    }
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
         if (msg.message == WM_KEYDOWN && msg.wParam == VK_TAB &&
             GetKeyState(VK_CONTROL) < 0) {
@@ -14069,6 +15089,55 @@ static void write_file(const char *path, const char *text)
         fputs(text, f);
         fclose(f);
     }
+}
+
+/* W259: Datei ganz lesen (Selbsttest, bis cap-1 Bytes). */
+static void gt_read(const char *path, char *buf, size_t cap)
+{
+    FILE *f = NULL;
+    size_t n = 0;
+    buf[0] = '\0';
+    if (u8_fopen_s(&f, path, "rb") == 0 && f) {
+        n = fread(buf, 1, cap - 1, f);
+        fclose(f);
+    }
+    buf[n] = '\0';
+    { /* CRLF (lcfg_save_user schreibt im Textmodus) -> LF */
+        char *r = buf, *w = buf;
+        for (; *r; r++) {
+            if (*r != '\r') { *w++ = *r; }
+        }
+        *w = '\0';
+    }
+}
+
+/* W259: "Als Standard speichern" im ESC-Menue nachstellen (sb_ovl_cfg_write:
+ * erste Zeile des Keys ersetzen, sonst unter [render] anhaengen). */
+static void gt_cfg_set(const char *path, const char *key, const char *val)
+{
+    static char in[16384], out[17000];
+    char *p, *line;
+    size_t kl = strlen(key), o = 0;
+    int done = 0;
+    gt_read(path, in, sizeof in);
+    for (line = in; *line; line = p) {
+        size_t ll;
+        p = strchr(line, '\n');
+        p = p ? p + 1 : line + strlen(line);
+        ll = (size_t)(p - line);
+        if (!done && strncmp(line, key, kl) == 0 && line[kl] == '=') {
+            o += (size_t)_snprintf_s(out + o, sizeof out - o, _TRUNCATE, "%s=%s\n", key, val);
+            done = 1;
+        } else if (o + ll < sizeof out) {
+            memcpy(out + o, line, ll);
+            o += ll;
+            out[o] = '\0';
+        }
+    }
+    if (!done) {
+        o += (size_t)_snprintf_s(out + o, sizeof out - o, _TRUNCATE, "[render]\n%s=%s\n", key, val);
+    }
+    write_file(path, out);
 }
 
 /* W172: Umgebungsvariable (UTF-8) fuer die Selbsttests setzen. */
@@ -14374,6 +15443,27 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     ok = ok && b.interp_fps == 120 && b.rt_scale == 0 && b.fs_interp_match &&
                          ui_checked(ID_GP0 + LGP_ORIGINAL);
                 }
+                if (ok) { /* W252: Klare Sicht ueber das Optionsfeld; Cockpit-Monitor folgt */
+                    on_command(ID_GP0 + LGP_CLEAR, BN_CLICKED);
+                    lcfg_defaults(&b);
+                    ui_to_settings(&b);
+                    ok = ui_checked(ID_GP0 + LGP_CLEAR) && b.shx[LSHX_SHADING] == 0 && b.monitor_fx == 0 &&
+                         b.interp_fps == 120 &&
+                         ComboBox_GetCurSel(ctl(ID_MONFX)) == 3 && lcfg_gfx_preset(&b, 0) == LGP_CLEAR;
+                    if (!ok) { printf("     (22: Klare Sicht shading=%d mfx=%d sel=%d)\n", b.shx[LSHX_SHADING],
+                                      b.monitor_fx, (int)ComboBox_GetCurSel(ctl(ID_MONFX))); }
+                    if (!ok) { printf("     (22: chk=%d g=%d/%d fps=%d p=%d)\n", ui_checked(ID_GP0 + LGP_CLEAR),
+                                      b.monitor_grain, b.monitor_glitch, b.interp_fps, lcfg_gfx_preset(&b, 0)); }
+                    ComboBox_SetCurSel(ctl(ID_MONFX), 0); /* Monitor wieder an -> Benutzerdefiniert */
+                    on_command(ID_MONFX, CBN_SELCHANGE);
+                    ui_to_settings(&b);
+                    ok = ok && b.monitor_fx == 1 && ui_checked(ID_GP0 + LGP_CUSTOM);
+                    on_command(ID_GP_RESET, BN_CLICKED);
+                    if (!ui_checked(ID_GP0 + LGP_ORIGINAL)) { on_command(ID_GP0 + LGP_ORIGINAL, BN_CLICKED); }
+                    ui_to_settings(&b);
+                    ok = ok && ui_checked(ID_GP0 + LGP_ORIGINAL) && b.monitor_fx == 1 &&
+                         b.shx[LSHX_SHADING] == 1 && ComboBox_GetCurSel(ctl(ID_MONFX)) == 0;
+                }
                 if (!ok) { printf("     (22: Grafik-Preset falsch)\n"); }
                 ui_from_settings(&a);
             }
@@ -14412,13 +15502,13 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                 uictl_t *as = ui_find(ID_ASPECT); /* W173: Platzhalter-Schalter entfernt */
                 ok = as && !ui_visible_on(as, P_DISPLAY);
                 a.edge_mode = 2;
-                a.edge_fade_width = 10;
+                a.edge_fade_width = 8;
                 a.edge_fade_strength = 100;
                 ui_from_settings(&a);
                 lcfg_defaults(&b);
                 ui_to_settings(&b);
                 ok = ok && ComboBox_GetCount(ctl(ID_EDGE_W)) == KEDGEW_N &&
-                     b.edge_fade_width == 10;
+                     b.edge_fade_width == 8;
                 if (!ok) { printf("     (22: B4/B7/B19 falsch)\n"); }
             }
             if (ok) { /* W170 LAUNCHER-P1/B10: Maus-Schalter folgt dem Controller */
@@ -15381,6 +16471,41 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                 if (ok199) { GT_OK("W199 transfer UI: visible, import/export blocked during play"); }
                 else { GT_FAIL("W199 transfer UI", "%s", "running-client guard"); }
             }
+            { /* W254 REPLAY-LAUNCHER: Knopf auf Erweitert, Text, Set-Kette des Startwegs */
+                char t254[80], a254[200];
+                int ok254 = ui_visible_on(ui_find(ID_SAVES_REPLAYS), P_ADV);
+                ui_gettext(ctl(ID_SAVES_REPLAYS), t254, sizeof t254);
+                ok254 = ok254 && strcmp(t254, LT("gui.rp_btn")) == 0;
+                ls_replay_set_args(L"0A0B0C0D0E01", 3, a254, sizeof a254);
+                ok254 = ok254 && strcmp(a254, "replay_autoplay=0A0B0C0D0E01;replay_camera=3") == 0;
+                if (ok254) { GT_OK("W254 replay UI: button on Advanced, start args"); }
+                else { GT_FAIL("W254 replay UI", "%s", t254); }
+            }
+            { /* W255 VIDEO-EXPORT: Standardordner = Fotoordner\Videos, Kette Replay + Video, Exit-Meldungen */
+                char d255[700], p255[700], a255[1000], v255[300];
+                int ok255;
+                extras_dir(p255, sizeof p255);
+                rp_video_default_dir(d255, sizeof d255);
+                ok255 = strlen(d255) == strlen(p255) + 7 && !strncmp(d255, p255, strlen(p255)) &&
+                        !strcmp(d255 + strlen(p255), "\\Videos");
+                ls_replay_set_args(L"0A0B0C0D0E01", -1, a255, sizeof a255);
+                ok255 = ok255 && !ls_video_set_args("", 1, 60, v255, sizeof v255);
+                strcat_s(a255, sizeof a255, ";");
+                strcat_s(a255, sizeof a255, v255);
+                ok255 = ok255 && !strcmp(a255, "replay_autoplay=0A0B0C0D0E01;video_export=auto;video_width=2560;"
+                                               "video_height=1440;video_fps=60");
+                ok255 = ok255 && LT("gui.rp_vx_btn")[0] && strstr(LT("gui.rp_vx_done"), "%s") &&
+                        strstr(LT("gui.rp_vx_failx"), "%lu");
+                strcpy_s(g_vx_dir_open, sizeof g_vx_dir_open, d255);
+                g_vx_pending = 1;
+                rp_export_done(3); /* Testbetrieb: Meldung nur auf der Konsole */
+                ok255 = ok255 && g_vx_pending == 0 && g_status_kind == 2 && !strcmp(g_status, LT("gui.rp_vx_fail3"));
+                rp_export_done(0);
+                ok255 = ok255 && g_status_kind == 1 && !strcmp(g_status, LT("gui.rp_vx_done_status"));
+                set_status_k("", 0);
+                if (ok255) { GT_OK("W255 video export: default folder, start args, result messages"); }
+                else { GT_FAIL("W255 video export", "%s", a255); }
+            }
             /* --- 58 (W190 SAVE-LOCK): Schalter "Spielstaende schuetzen" auf
              * Erweitert (immer sichtbar, auch bei eingeklappter Diagnose),
              * Klick -> Einstellung, user.cfg-Rundweg [game] save_lock,
@@ -15545,6 +16670,155 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     GT_OK("59 photo-extras (Karte Extras, Rundweg Oberflaeche/user.cfg, Umlaut-Pfad, --set, Standardordner)");
                 } else {
                     GT_FAIL("59 photo-extras", "%s", why59);
+                }
+            }
+            /* --- 63 (W250 UPDATE-CHECK): Erstabfrage / Hinweis / Einstellung.
+             * Testbetrieb (shot != 0): kein Netz, nichts wird gespeichert. */
+            {
+                char why63[160] = "";
+                const char *v0 = g_upd_ver;
+                g_upd_ver = "0.1.0-alpha.7";
+                g_upd_cfg = -1;
+                g_upd_ask = 1;
+                memset(&g_upd_res, 0, sizeof g_upd_res);
+                show_page(P_PLAY);
+                pump();
+                if (!IsWindowVisible(ctl(ID_UPD_YES)) || !IsWindowVisible(ctl(ID_UPD_NO)) ||
+                    IsWindowVisible(ctl(ID_UPD_OPEN)))
+                    strcpy_s(why63, sizeof why63, "unbeantwortet: Frage nicht sichtbar");
+                on_command(ID_UPD_NO, BN_CLICKED);
+                pump();
+                if (!why63[0] && (g_upd_ask || g_upd_cfg != 0 || IsWindowVisible(ctl(ID_UPD_NO)) ||
+                                  ui_checked(ID_UPD_AUTO)))
+                    strcpy_s(why63, sizeof why63, "nein: Frage bleibt / Zustand falsch");
+                g_upd_cfg = -1;
+                g_upd_ask = 1;
+                ui_refresh_visibility();
+                on_command(ID_UPD_YES, BN_CLICKED);
+                pump();
+                if (!why63[0] && (g_upd_ask || g_upd_cfg != 1 || !ui_checked(ID_UPD_AUTO) || g_upd_busy ||
+                                  IsWindowVisible(ctl(ID_UPD_YES))))
+                    strcpy_s(why63, sizeof why63, "ja: Zustand falsch oder Abruf im Testbetrieb");
+                on_command(ID_UPD_AUTO, BN_CLICKED);
+                if (!why63[0] && (g_upd_cfg != 0 || ui_checked(ID_UPD_AUTO)))
+                    strcpy_s(why63, sizeof why63, "Schalter aus");
+                /* Hinweis mit fremder Adresse: Knopf sichtbar, Oeffnen verweigert */
+                g_upd_res.result = LUPD_R_NEWER;
+                strcpy_s(g_upd_res.rel.tag, sizeof g_upd_res.rel.tag, "v0.1.0-alpha.8");
+                strcpy_s(g_upd_res.rel.url, sizeof g_upd_res.rel.url,
+                         "https://github.com/someone/Steelbound/releases/tag/v0.1.0-alpha.8");
+                ui_refresh_visibility();
+                pump();
+                if (!why63[0] && !IsWindowVisible(ctl(ID_UPD_OPEN)))
+                    strcpy_s(why63, sizeof why63, "Hinweis: Knopf fehlt");
+                on_command(ID_UPD_OPEN, BN_CLICKED);
+                if (!why63[0] && strcmp(g_status, LT("gui.upd_badurl")) != 0)
+                    strcpy_s(why63, sizeof why63, "fremde URL nicht abgewiesen");
+                /* Erweitert: Schalter + Knopf nur mit Release-Version */
+                show_page(P_ADV);
+                pump();
+                if (!why63[0] && (!IsWindowVisible(ctl(ID_UPD_AUTO)) || !IsWindowVisible(ctl(ID_UPD_NOW))))
+                    strcpy_s(why63, sizeof why63, "Erweitert: Schalter fehlt");
+                g_upd_ver = "";
+                ui_refresh_visibility();
+                pump();
+                if (!why63[0] && (IsWindowVisible(ctl(ID_UPD_AUTO)) || IsWindowVisible(ctl(ID_UPD_NOW))))
+                    strcpy_s(why63, sizeof why63, "ohne Version: Schalter sichtbar");
+                g_upd_ver = v0;
+                g_upd_ask = 0;
+                g_upd_cfg = -1;
+                memset(&g_upd_res, 0, sizeof g_upd_res);
+                ui_refresh_visibility();
+                show_page(P_PLAY);
+                if (!why63[0]) {
+                    GT_OK("63 W250 update-check (Erstabfrage ja/nein, Schalter, Hinweis, fremde URL abgewiesen, ohne Version ausgeblendet)");
+                } else {
+                    GT_FAIL("63 W250 update-check", "%s", why63);
+                }
+            }
+            /* --- 64 (W259 SETTINGS-RESET): Launcher bleibt offen, im Spiel wird
+             * per ESC "Als Standard speichern" gesichert, danach startet derselbe
+             * Launcher erneut. Vorher schrieb er seine alten Werte zurueck
+             * (light_world 150 -> 100); jetzt bleiben Spielwerte, eigene
+             * Aenderungen des Launchers gewinnen, Client-Ende zeigt sie an. --- */
+            {
+                char why64[200] = "", f64[1300], f64b[1300];
+                static char b64[16384];
+                launcher_settings_t a64, o64;
+                int n64;
+                _snprintf_s(f64, sizeof f64, _TRUNCATE, "%sw259_user_%lu.cfg", tmp, GetCurrentProcessId());
+                _snprintf_s(f64b, sizeof f64b, _TRUNCATE, "%sw259_old_%lu.cfg", tmp, GetCurrentProcessId());
+                u8_DeleteFile(f64);
+                lcfg_defaults(&a64);
+                if (lcfg_save_user(f64, &a64) != 0) {
+                    strcpy_s(why64, sizeof why64, "user.cfg anlegen");
+                }
+                strcpy_s(g_ucfg_test, sizeof g_ucfg_test, f64);
+                g_s = a64; /* Launcher-Fenster mit diesem Stand geoeffnet */
+                ui_from_settings(&g_s);
+                disk_base_sync(&g_s);
+                /* 1. Launch (unveraendert) -> Spiel -> ESC speichert */
+                if (!why64[0] && save_user_merged(f64) != 0) {
+                    strcpy_s(why64, sizeof why64, "1. Start: unerwartete Uebernahme");
+                }
+                gt_cfg_set(f64, "light_world", "150");
+                gt_cfg_set(f64, "color_sat", "120");
+                gt_cfg_set(f64, "vr_shell", "0"); /* nicht verwaltet (W242) */
+                /* Vorher-Beleg: alter Weg (lcfg_save_user mit Fensterwerten) */
+                gt_read(f64, b64, sizeof b64);
+                write_file(f64b, b64);
+                o64 = g_s;
+                ui_to_settings(&o64);
+                lcfg_save_user(f64b, &o64);
+                gt_read(f64b, b64, sizeof b64);
+                if (!why64[0] && (!strstr(b64, "\nlight_world=100\n") || !strstr(b64, "\ncolor_sat=100\n"))) {
+                    strcpy_s(why64, sizeof why64, "alter Weg setzt nicht zurueck (Testaufbau?)");
+                }
+                u8_DeleteFile(f64b);
+                /* 2. Launch aus demselben Fenster: Spielwerte bleiben */
+                ui_to_settings(&g_s);
+                n64 = save_user_merged(f64);
+                gt_read(f64, b64, sizeof b64);
+                if (!why64[0] && (n64 != 2 || !strstr(b64, "\nlight_world=150\n") ||
+                                  !strstr(b64, "\ncolor_sat=120\n") || !strstr(b64, "\nvr_shell=0\n"))) {
+                    _snprintf_s(why64, sizeof why64, _TRUNCATE, "2. Start: Spielwerte verloren (n=%d)", n64);
+                }
+                if (!why64[0] && (g_gfx.shx[LSHX_LWORLD] != 150 || g_s.shx[LSHX_SAT] != 120)) {
+                    strcpy_s(why64, sizeof why64, "Oberflaeche zeigt Spielwerte nicht");
+                }
+                /* 3. Launcher-Aenderung gewinnt, andere Spielwerte bleiben */
+                gt_cfg_set(f64, "light_world", "170");
+                gt_cfg_set(f64, "color_sat", "130");
+                g_gfx.shx[LSHX_LWORLD] = 80; /* im Launcher geaendert */
+                ui_to_settings(&g_s);
+                n64 = save_user_merged(f64);
+                gt_read(f64, b64, sizeof b64);
+                if (!why64[0] && (n64 != 1 || !strstr(b64, "\nlight_world=80\n") ||
+                                  !strstr(b64, "\ncolor_sat=130\n"))) {
+                    _snprintf_s(why64, sizeof why64, _TRUNCATE, "3. Start: Vorrang falsch (n=%d)", n64);
+                }
+                /* 4. Client beendet: Launcher zeigt den neuen Spielwert sofort */
+                gt_cfg_set(f64, "light_world", "60");
+                n64 = disk_refresh();
+                if (!why64[0] && (n64 != 1 || g_gfx.shx[LSHX_LWORLD] != 60 || g_s.shx[LSHX_LWORLD] != 60)) {
+                    _snprintf_s(why64, sizeof why64, _TRUNCATE, "Client-Ende: nicht nachgeladen (n=%d)", n64);
+                }
+                ui_to_settings(&g_s);
+                n64 = save_user_merged(f64);
+                gt_read(f64, b64, sizeof b64);
+                if (!why64[0] && (n64 != 0 || !strstr(b64, "\nlight_world=60\n"))) {
+                    _snprintf_s(why64, sizeof why64, _TRUNCATE, "nach Client-Ende: Wert nicht stabil (n=%d)", n64);
+                }
+                u8_DeleteFile(f64);
+                g_ucfg_test[0] = '\0';
+                g_disk_base_ok = 0;
+                lcfg_defaults(&a64);
+                g_s = a64;
+                ui_from_settings(&g_s);
+                if (!why64[0]) {
+                    GT_OK("64 W259 settings-reset (ESC speichert -> gleicher Launcher startet erneut -> Wert bleibt; Launcher-Aenderung gewinnt; Client-Ende laedt nach)");
+                } else {
+                    GT_FAIL("64 W259 settings-reset", "%s", why64);
                 }
             }
             ShowWindow(g_hwnd, SW_HIDE);
@@ -16158,6 +17432,62 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
         sb_lang_set(keep);
         if (ok) { GT_OK("61 unbekannte Version (Ordner/ISO, EN/DE, U/J/PAL/multi, Grenzen)"); }
         else { GT_FAIL("61 unbekannte Version", "%s", "Version/Meldung unvollstaendig"); }
+    }
+    { /* 64 W260 MOUSE-WHEEL: Lernmodus-Quelle, Anzeige EN/DE, Standard ohne Rad */
+        char keep[8], t[256], why[128] = "";
+        int ok = 1, src = 0, i, a, tu = lctrl_bind_elem_index("tuner.up");
+        int td = lctrl_bind_elem_index("tuner.down");
+        lctrl_bind_t b;
+        char conf[8][160];
+        static const struct { UINT m; int d; const char *want; } wc[] = {
+            { WM_MOUSEWHEEL, 120, "MOUSE:WHEEL_UP" }, { WM_MOUSEWHEEL, -120, "MOUSE:WHEEL_DOWN" },
+            { WM_MOUSEWHEEL, 30, "MOUSE:WHEEL_UP" }, { WM_MOUSEWHEEL, -240, "MOUSE:WHEEL_DOWN" },
+            { WM_MOUSEHWHEEL, 120, "MOUSE:WHEEL_RIGHT" }, { WM_MOUSEHWHEEL, -120, "MOUSE:WHEEL_LEFT" },
+        };
+        for (i = 0; i < (int)(sizeof wc / sizeof wc[0]); i++) {
+            const char *got = bind_wheel_src(wc[i].m, MAKEWPARAM(0, (WORD)(SHORT)wc[i].d));
+            if (!got || strcmp(got, wc[i].want) != 0) {
+                ok = 0;
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Lernmodus %d -> %s", i, got ? got : "NULL");
+            }
+        }
+        if (bind_wheel_src(WM_MOUSEWHEEL, 0) || bind_wheel_src(WM_LBUTTONDOWN, MAKEWPARAM(0, 120))) {
+            ok = 0;
+            strcpy_s(why, sizeof why, "Lernmodus ohne Raste liefert Quelle");
+        }
+        strcpy_s(keep, sizeof keep, sb_lang_code());
+        sb_lang_set("en");
+        ks_atom("MOUSE:WHEEL_UP", t, sizeof t, &src);
+        if (strcmp(t, "Mouse wheel up") != 0 || src != KS_SRC_MOUSE) { ok = 0; strcpy_s(why, sizeof why, "EN WHEEL_UP"); }
+        ks_atom("MOUSE:WHEEL_RIGHT", t, sizeof t, &src);
+        if (strcmp(t, "Mouse wheel right") != 0) { ok = 0; strcpy_s(why, sizeof why, "EN WHEEL_RIGHT"); }
+        bind_src_disp("MOUSE:WHEEL_DOWN", t, sizeof t);
+        if (strcmp(t, "MOUSE:WHEEL_DOWN  (Mouse wheel down)") != 0) { ok = 0; strcpy_s(why, sizeof why, "EN Liste"); }
+        bind_src_disp("KEY:T", t, sizeof t);
+        if (strcmp(t, "KEY:T") != 0) { ok = 0; strcpy_s(why, sizeof why, "Liste ohne Rad veraendert"); }
+        sb_lang_set("de");
+        ks_atom("MOUSE:WHEEL_DOWN", t, sizeof t, &src);
+        if (strcmp(t, "Mausrad runter") != 0) { ok = 0; strcpy_s(why, sizeof why, "DE WHEEL_DOWN"); }
+        bind_src_disp("mouse:wheel_up", t, sizeof t);
+        if (strcmp(t, "mouse:wheel_up  (Mausrad hoch)") != 0) { ok = 0; strcpy_s(why, sizeof why, "DE Liste klein"); }
+        sb_lang_set(keep);
+        /* Standard: kein Rad belegt; Rad als Quelle setzbar, Konflikt erkannt. */
+        lctrl_bind_init(&b);
+        for (i = 0; i < LCTRL_ELEM_N; i++) {
+            for (a = 0; a < b.row[i].n_alt; a++) {
+                if (strstr(b.row[i].alt[a], "WHEEL")) { ok = 0; strcpy_s(why, sizeof why, "Standard belegt das Rad"); }
+            }
+        }
+        if (tu < 0 || td < 0 || lctrl_bind_set(&b, tu, "KEY:T, MOUSE:WHEEL_UP") != 0 ||
+            b.row[tu].n_alt != 2 || strcmp(b.row[tu].alt[1], "MOUSE:WHEEL_UP") != 0) {
+            ok = 0; strcpy_s(why, sizeof why, "Rad-Quelle nicht setzbar");
+        }
+        if (td >= 0 && lctrl_bind_set(&b, td, "KEY:G, MOUSE:WHEEL_UP") == 0 &&
+            lctrl_bind_conflicts(&b, conf, 8) < 1) {
+            ok = 0; strcpy_s(why, sizeof why, "Konflikt Rad doppelt nicht erkannt");
+        }
+        if (ok) { GT_OK("64 W260 mouse-wheel (Lernmodus hoch/runter/links/rechts, Anzeige EN/DE, Standard ohne Rad, Konflikt)"); }
+        else { GT_FAIL("64 W260 mouse-wheel", "%s", why); }
     }
     _snprintf_s(p, sizeof p, _TRUNCATE, "%s/default.xbe", dir);
     u8_DeleteFile(p);

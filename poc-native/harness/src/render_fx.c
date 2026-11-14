@@ -288,6 +288,38 @@ int fx_ps_add_c0(float c0[4])
     return 1;
 }
 
+/* FIX(LOAD-VT-COLOR,W257): Pixelshader-Muster "Farbe = V0 * C0" (1 Stufe:
+ * RGB R0 = V0 * C0, Alpha R0.a = V0.a * C0.a, Final = R0, ohne Textur). Das
+ * Spiel zeichnet so die Drahtgitter-VTs (Ladebild FUN_00012140, Nachschub-/
+ * VT-Menue FUN_000D5C40): Vertexfarbe weiss (VB bzw. SetVertexDataColor
+ * 0xFFFFFFFF), die VT-Farbe kommt allein aus SetPixelShaderConstant(c0).
+ * Der Standardpfad (ohne Shading bzw. ausserhalb der Mission) rechnete nur
+ * V0 -> weiss. Liefert C0 nur, wenn das Spiel die Konstante seit
+ * SetPixelShader explizit gesetzt hat (SetPixelShaderConstant oder
+ * PSCONSTANT0_0), sonst 0 = alter Pfad (minimaler Wirkungsbereich). */
+int fx_ps_mul_c0(float c0[4])
+{
+    extern unsigned g_psc_raw[8], g_psc_raw_set;
+    const unsigned *d = NULL;
+    unsigned v = 0, r0, have = 0;
+    if (!fx_ps_def(&d)) { return 0; }
+    __try {
+        if ((d[53] & 0xFFu) != 1u) { return 0; }
+        if (d[34] != 0xC4C10000u || d[0] != 0xD4D11010u) { return 0; } /* St.0: V0*C0 (+0*0) */
+        if (d[45] != 0x000000C0u || d[26] != 0x000000C0u) { return 0; } /* AB -> R0 */
+        if (d[8] != 0x200C0000u || d[9] != 0x00001C80u) { return 0; }  /* Final = R0 */
+        r0 = d[57] & 0xFu;
+        if (r0 < 8u && (g_psc_raw_set & (1u << r0))) { v = g_psc_raw[r0]; have = 1; }
+        if (g_rq_rs_set & (1ull << 10u)) { v = g_rq_rs[10]; have = 1; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    if (!have) { return 0; }
+    c0[0] = (float)((v >> 16) & 0xFFu) / 255.0f;
+    c0[1] = (float)((v >> 8) & 0xFFu) / 255.0f;
+    c0[2] = (float)(v & 0xFFu) / 255.0f;
+    c0[3] = (float)(v >> 24) / 255.0f;
+    return 1;
+}
+
 /* DIAG: Konstanten-Stand des aktuellen PS fuer FXKEY. */
 void fx_ps_diag(unsigned *c0, unsigned *def0, unsigned *src)
 {

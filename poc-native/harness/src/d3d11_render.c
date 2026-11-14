@@ -12,6 +12,7 @@
 #include "sb_remaster.h" /* W103 REM-FRAME */
 #include "render_qa.h"
 #include "render_clip.h"
+#include "render_vexp.h" /* W255 VIDEO-EXPORT */
 #include "sb_overlay.h" /* W118 REM-OVERLAY */
 #include "sb_perfhud.h" /* W122 PERF-HUD */
 #include "hlock.h" /* W119 LOADLOCK */
@@ -814,6 +815,11 @@ int sb_pf_active(void)
     return pf_on;
 }
 
+unsigned sb_pf_m0(void) /* DIAG(W251 INTERP-GROUND) */
+{
+    return pf_m0;
+}
+
 void sb_pf_note(float t, unsigned src_frame)
 {
     pf_note_t = t;
@@ -1024,6 +1030,9 @@ static void sb_render_present_body(unsigned flags)
     }
     if (sb_clip_active() && !g_swap_res) {
         sb_ctx_enter(); sb_clip_frame(g_rtv); sb_ctx_leave();
+    }
+    if (sb_vexp_rec() && !g_swap_res) { /* W255 VIDEO-EXPORT: gezeigtes Bild (wie Clip, vor ESC/F2) */
+        sb_ctx_enter(); sb_vexp_frame(g_rtv); sb_ctx_leave();
     }
     /* W118 REM-OVERLAY: offenes Overlay auf den Spiel-BB (Bereich gesichert,
      * nach dem Present zurueck); mit FPS-INTERP in sb_render_blit. */
@@ -1403,6 +1412,12 @@ void sb_render_blit(ID3D11Resource *src)
         sb_ctx_enter();
         if (!g_swap_rtv) { ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv); }
         sb_clip_frame(g_swap_rtv);
+        sb_ctx_leave();
+    }
+    if (sb_vexp_rec()) { /* W255 VIDEO-EXPORT: jedes gezeigte Bild (Tick- und Zwischenbild) */
+        sb_ctx_enter();
+        if (!g_swap_rtv) { ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv); }
+        sb_vexp_frame(g_swap_rtv);
         sb_ctx_leave();
     }
     if (g_cfg.overlay && (sb_ovl_open() || sb_clip_active())) { /* W118 REM-OVERLAY: auf jedes gezeigte Bild (Kopie ueberschreibt ganz) */

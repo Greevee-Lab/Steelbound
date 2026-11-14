@@ -39,6 +39,7 @@ void lcfg_defaults(launcher_settings_t *s)
     s->sbc_mouse_off = 1;       /* W128: Maus-Achsen aus bei aktivem Controller */
     s->aim_assist = 0;          /* W236 AIM-ASSIST: Standard Original */
     s->auto_gear = 0;
+    s->game_tick = 30;          /* W234 PAL50: Standard 30 Ticks/s */
     s->save_lock = 0;           /* W190 SAVE-LOCK: Original-Verhalten */
     s->photo_dir[0] = '\0';     /* W195 PHOTO-MODE: Standardordner */
     s->photo_scale = 1;
@@ -54,6 +55,7 @@ void lcfg_defaults(launcher_settings_t *s)
     s->edge_fade_strength = 100;
     s->cockpit_persp = 0;       /* W191 UW-PERSP: Original */
     s->cockpit_panini = 0;      /* W191: Panini aus */
+    s->cockpit_width = 0;       /* W235: Original (nicht gestreckt) */
     s->remaster = 0;            /* W103: Original bitgenau */
     s->hd_textures = 0;
     s->hd_scale = 4;
@@ -384,6 +386,8 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         if (atoi(v)) s->aim_assist = 1;
     } else if (strcmp(k, "auto_gear") == 0) { /* W218 */
         s->auto_gear = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "game_tick") == 0) { /* W234 PAL50: nur 25 oder 30 */
+        s->game_tick = atoi(v) == 25 ? 25 : 30;
     } else if (strcmp(k, "save_lock") == 0) { /* W190 */
         s->save_lock = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "photo_dir") == 0) { /* W195 */
@@ -438,6 +442,8 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         s->cockpit_persp = atoi(v);
     } else if (strcmp(k, "cockpit_panini") == 0) { /* W191 */
         s->cockpit_panini = atoi(v);
+    } else if (strcmp(k, "cockpit_width") == 0) { /* W235 */
+        s->cockpit_width = atoi(v);
     } else if (strcmp(k, "edge_fade_width") == 0) {
         s->edge_fade_width = atoi(v);
     } else if (strcmp(k, "edge_fade_strength") == 0) {
@@ -563,6 +569,7 @@ static const char *kManaged[][2] = {
     { "aim_assist", "input" },     { "auto_gear", "input" }, /* W218, W236 */
     { "aim_turn", "input" }, /* W236: Altwert neutralisieren (immer 0) */
     { "save_lock", "game" }, /* W190 */
+    { "game_tick", "game" }, /* W234 PAL50 */
     { "photo_dir", "photo" },       { "photo_scale", "photo" }, /* W195 PHOTO-MODE */
     { "photo_format", "photo" },    { "photo_aspect", "photo" },
     { "interp_fps", "render" },
@@ -572,6 +579,7 @@ static const char *kManaged[][2] = {
     { "edge_fade_strength", "render" },
     { "cockpit_persp", "render" }, /* W191 */
     { "cockpit_panini", "render" }, /* W191 */
+    { "cockpit_width", "render" }, /* W235 */
     { "remaster", "remaster" },     { "hd_textures", "remaster" }, /* W103 */
     { "hd_scale", "remaster" },     { "fx_enhanced", "remaster" },
     { "ultrawide", "remaster" },    { "postfx", "remaster" },
@@ -684,6 +692,8 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = 0;
         } else if (strcmp(k, "auto_gear") == 0) { /* W218 */
             v = s->auto_gear ? 1 : 0;
+        } else if (strcmp(k, "game_tick") == 0) { /* W234 PAL50 */
+            v = s->game_tick == 25 ? 25 : 30;
         } else if (strcmp(k, "save_lock") == 0) { /* W190 */
             v = s->save_lock ? 1 : 0;
         } else if (strcmp(k, "photo_aspect") == 0) { /* W195 */
@@ -708,6 +718,8 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = s->cockpit_persp;
         } else if (strcmp(k, "cockpit_panini") == 0) { /* W191 */
             v = s->cockpit_panini;
+        } else if (strcmp(k, "cockpit_width") == 0) { /* W235 */
+            v = s->cockpit_width;
         } else if (strcmp(k, "remaster") == 0) { /* W103 */
             v = s->remaster;
         } else if (strcmp(k, "hd_textures") == 0) {
@@ -1024,6 +1036,57 @@ static void join_path(char *out, size_t cap, const char *dir, const char *name)
     strcat_s(out, cap, name);
 }
 
+/* W231 US-LAUNCHER: Fassung einordnen (siehe launcher_cfg.h). */
+void lcfg_gameinfo_from(const void *gamever, lcfg_gameinfo_t *gi)
+{
+    const sb_gamever_t *gv = (const sb_gamever_t *)gamever;
+    memset(gi, 0, sizeof *gi);
+    if (!gv || !gv->xbe_ok) {
+        gi->edition = gv && gv->sha256[0] ? LCFG_ED_OTHER : LCFG_ED_NONE;
+        return;
+    }
+    if (gv->title_id == 0x43430002u && gv->region == 1u) {
+        /* NA: bekannt (ntsc_u) bzw. spaeter supported -> startbar */
+        gi->edition = (gv->ntsc_u || gv->supported) ? LCFG_ED_US : LCFG_ED_US_OTHER;
+        gi->startable = gi->edition == LCFG_ED_US;
+        gi->needs_allow = gv->ntsc_u && !gv->supported;
+        return;
+    }
+    if (gv->supported) {
+        gi->edition = LCFG_ED_EU;
+        gi->startable = 1;
+        return;
+    }
+    gi->edition = LCFG_ED_OTHER;
+}
+
+/* W231: Pruefergebnis -> Spielertext. 1 = startbar (msg = "Image OK ..."). */
+int lcfg_gamever_msg(const void *gamever, char *msg, size_t cap)
+{
+    const sb_gamever_t *gv = (const sb_gamever_t *)gamever;
+    lcfg_gameinfo_t gi;
+    char tid[16];
+    lcfg_gameinfo_from(gv, &gi);
+    if (gi.edition == LCFG_ED_US) {
+        _snprintf_s(msg, cap, _TRUNCATE, LT(gi.needs_allow ? "gui.image_ok_us" : "gui.image_ok"),
+                    gv->label);
+        return 1;
+    }
+    if (gi.startable) {
+        _snprintf_s(msg, cap, _TRUNCATE, LT("gui.image_ok"), gv->label);
+        return 1;
+    }
+    _snprintf_s(tid, sizeof tid, _TRUNCATE, "%08X", gv->title_id);
+    if (gi.edition == LCFG_ED_US_OTHER) {
+        _snprintf_s(msg, cap, _TRUNCATE, LT("cfg.image_us_other"), tid,
+                    sb_gamever_region_name(gv->region), gv->version);
+    } else {
+        _snprintf_s(msg, cap, _TRUNCATE, LT("cfg.image_version"), tid,
+                    sb_gamever_region_name(gv->region), gv->version);
+    }
+    return 0;
+}
+
 /* W150 ISO-DIRECT: Abbild pruefen (gleicher Leser wie der Client). */
 int lcfg_image_check(const char *image_u8, char *msg, size_t cap)
 {
@@ -1056,15 +1119,7 @@ int lcfg_image_check(const char *image_u8, char *msg, size_t cap)
     iso_vfs_close(v);
     sb_gamever_check(xb, xn, &gv);
     free(xb);
-    if (!gv.supported) {
-        char tid[16];
-        _snprintf_s(tid, sizeof tid, _TRUNCATE, "%08X", gv.title_id);
-        _snprintf_s(msg, cap, _TRUNCATE, LT("cfg.image_version"), tid,
-                    sb_gamever_region_name(gv.region), gv.version);
-        return 4;
-    }
-    _snprintf_s(msg, cap, _TRUNCATE, LT("gui.image_ok"), gv.label);
-    return 0;
+    return lcfg_gamever_msg(&gv, msg, cap) ? 0 : 4;
 }
 
 int lcfg_image_xbe_sha256(const char *image_u8, char hex[65])
@@ -1088,6 +1143,135 @@ int lcfg_image_xbe_sha256(const char *image_u8, char hex[65])
     free(xb);
     strcpy_s(hex, 65, gv.sha256);
     return 1;
+}
+
+/* W231: default.xbe des eingestellten Spiels lesen (Abbild oder Ordner). */
+static uint8_t *read_game_xbe(const launcher_settings_t *s, uint32_t *n)
+{
+    uint8_t *xb = NULL;
+    *n = 0;
+    if (s->game_image[0]) {
+        char acp[1024], e[320];
+        iso_vfs_t *v;
+        DWORD a = u8_GetFileAttributes(s->game_image);
+        if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY)) {
+            return NULL;
+        }
+        u8_to_acp(s->game_image, acp, sizeof acp);
+        v = iso_vfs_open(acp, e, sizeof e);
+        if (!v) {
+            return NULL;
+        }
+        if (iso_vfs_read_all(v, "default.xbe", &xb, n) != 0) {
+            xb = NULL;
+        }
+        iso_vfs_close(v);
+        return xb;
+    } else {
+        char xbe[1024];
+        FILE *xf = NULL;
+        long xl;
+        lcfg_xbe_effective(s, xbe, sizeof xbe);
+        if (!xbe[0] || u8_fopen_s(&xf, xbe, "rb") != 0 || !xf) {
+            return NULL;
+        }
+        fseek(xf, 0, SEEK_END);
+        xl = ftell(xf);
+        fseek(xf, 0, SEEK_SET);
+        xb = (xl > 0 && xl < 64L * 1024 * 1024) ? (uint8_t *)malloc((size_t)xl) : NULL;
+        if (xb && fread(xb, 1, (size_t)xl, xf) != (size_t)xl) {
+            free(xb);
+            xb = NULL;
+        }
+        fclose(xf);
+        *n = xb ? (uint32_t)xl : 0;
+        return xb;
+    }
+}
+
+int lcfg_game_info(const launcher_settings_t *s, lcfg_gameinfo_t *gi)
+{
+    uint32_t n = 0;
+    uint8_t *xb = read_game_xbe(s, &n);
+    sb_gamever_t gv;
+    memset(gi, 0, sizeof *gi);
+    if (!xb) {
+        return 0;
+    }
+    sb_gamever_check(xb, n, &gv);
+    free(xb);
+    lcfg_gameinfo_from(&gv, gi);
+    return 1;
+}
+
+void lcfg_hdd_for_edition(const char *hdd_base, int edition, char *out, size_t cap)
+{
+    size_t n;
+    strcpy_s(out, cap, hdd_base ? hdd_base : "");
+    if (edition != LCFG_ED_US) {
+        return;
+    }
+    n = strlen(out);
+    while (n > 0 && (out[n - 1] == '\\' || out[n - 1] == '/')) {
+        out[--n] = '\0';
+    }
+    strcat_s(out, cap, n ? "\\us" : "us");
+}
+
+int lcfg_edition_set_args(const lcfg_gameinfo_t *gi, const char *us_hdd_acp,
+                          char *set, size_t cap)
+{
+    char add[1400], esc[1200];
+    size_t i, j = 0;
+    add[0] = '\0';
+    if (!gi || gi->edition != LCFG_ED_US) {
+        return 0;
+    }
+    if (gi->needs_allow) { /* entfaellt, sobald sb_gamever US als supported fuehrt */
+        strcat_s(add, sizeof add, "allow_ntsc_u=1");
+    }
+    if (us_hdd_acp && us_hdd_acp[0]) {
+        for (i = 0; us_hdd_acp[i] && j + 3 < sizeof esc; i++) {
+            if (us_hdd_acp[i] == ';') {
+                esc[j++] = '\\';
+            }
+            esc[j++] = us_hdd_acp[i];
+        }
+        esc[j] = '\0';
+        if (us_hdd_acp[i]) {
+            return 1;
+        }
+        if (add[0]) {
+            strcat_s(add, sizeof add, ";");
+        }
+        if (strlen(add) + 12 + strlen(esc) + 1 > sizeof add) {
+            return 1;
+        }
+        strcat_s(add, sizeof add, "hdd_root_us="); /* W230-Merge: Client nimmt den Ordner so wie er ist */
+        strcat_s(add, sizeof add, esc);
+    }
+    if (!add[0]) {
+        return 0;
+    }
+    if (strlen(set) + 1 + strlen(add) + 1 > cap) {
+        return 1;
+    }
+    if (set[0]) {
+        strcat_s(set, cap, ";");
+    }
+    strcat_s(set, cap, add);
+    return 0;
+}
+
+const char *lcfg_exit_msg_key(unsigned long code, int edition)
+{
+    if (code == 5) {
+        return edition == LCFG_ED_US ? "gui.exit5_us" : "gui.exit5";
+    }
+    if (code == 8) {
+        return "gui.exit8";
+    }
+    return NULL;
 }
 
 /* W150 USER-DATA: zentrale Pfadfunktion (sb_userdata.c) fuer user.cfg. */
@@ -1173,13 +1357,11 @@ int lcfg_validate(const launcher_settings_t *s, char *err, size_t errcap)
             xb = (xn > 0 && xn < 64L * 1024 * 1024) ? (uint8_t *)malloc((size_t)xn) : NULL;
             if (xb && fread(xb, 1, (size_t)xn, xf) == (size_t)xn) {
                 sb_gamever_t gv;
-                if (!sb_gamever_check(xb, (size_t)xn, &gv)) {
-                    char tid[16];
+                sb_gamever_check(xb, (size_t)xn, &gv);
+                if (!lcfg_gamever_msg(&gv, err, errcap)) { /* W231: US experimental startbar */
                     fclose(xf);
                     free(xb);
-                    _snprintf_s(tid, sizeof tid, _TRUNCATE, "%08X", gv.title_id);
-                    FAIL(LT("cfg.image_version"), tid,
-                         sb_gamever_region_name(gv.region), gv.version);
+                    return 1;
                 }
             }
             free(xb);
@@ -1266,6 +1448,9 @@ paths_ok:
     }
     if (s->cockpit_panini < 0 || s->cockpit_panini > 100) { /* W191 */
         FAIL(LT("cfg.bad_cpanini"), s->cockpit_panini);
+    }
+    if (s->cockpit_width < 0 || s->cockpit_width > 10) { /* W235 */
+        FAIL(LT("cfg.bad_cwidth"), s->cockpit_width);
     }
     if (s->fs_hz != 0 && (s->fs_hz < 24 || s->fs_hz > 500)) {
         FAIL(LT("cfg.bad_hz"), s->fs_hz);

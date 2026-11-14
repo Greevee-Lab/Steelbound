@@ -6,6 +6,7 @@
 #ifndef HOOKS_INT_H
 #define HOOKS_INT_H
 #include "xdk_hooks.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "hlog.h"
 #include "hcfg.h"
 #include "fs_emu.h"

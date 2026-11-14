@@ -3,6 +3,7 @@
  * SetRenderTarget-Umleitung, Lookup fuer das Sampling (sb_tex.c).
  * W68 SPLIT: 1:1 aus d3d11_render.c verschoben. */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -168,8 +169,8 @@ static void rtt_shadow_rs(int on, float zscale)
 {
     if (!g_dev || !g_ctx) { return; }
     if (on) { /* Werte setzt das Spiel erst nach SetRenderTarget -> je Draw pruefen (rtt_note_draw) */
-        unsigned k0 = *(volatile unsigned *)(uintptr_t)(0x21AAB0u + 77u * 4u);
-        unsigned k1 = *(volatile unsigned *)(uintptr_t)(0x21AAB0u + 78u * 4u);
+        unsigned k0 = *(volatile unsigned *)(uintptr_t)(SBA(0x21AAB0u) + 77u * 4u);
+        unsigned k1 = *(volatile unsigned *)(uintptr_t)(SBA(0x21AAB0u) + 78u * 4u);
         if (g_rs_shadow && (k0 != g_rs_shadow_key[0] || k1 != g_rs_shadow_key[1])) {
             if (g_rs_shadow_on) { ID3D11DeviceContext_RSSetState(g_ctx, g_rs_norm); g_rs_shadow_on = 0; }
             ID3D11RasterizerState_Release(g_rs_shadow); g_rs_shadow = NULL;
@@ -274,7 +275,7 @@ static unsigned g_rbd_wait_n, g_rbd_why[4];
 static unsigned rtt_rb_game_ptr(void)
 {
     unsigned v = 0;
-    __try { v = *(volatile unsigned *)(uintptr_t)0x35149Cu; } __except (EXCEPTION_EXECUTE_HANDLER) { v = 0; }
+    __try { v = *(volatile unsigned *)(uintptr_t)SBA(0x35149Cu); } __except (EXCEPTION_EXECUTE_HANDLER) { v = 0; }
     return v;
 }
 
@@ -299,7 +300,7 @@ static void rtt_rb_diag_flush(void)
     static unsigned nline;
     unsigned mloop = 0;
     if (!g_cfg.rtt_rb_diag || g_rbd_n < every) { return; }
-    __try { mloop = *(volatile unsigned *)(uintptr_t)0x356F58u; } __except (EXCEPTION_EXECUTE_HANDLER) { mloop = 0; }
+    __try { mloop = *(volatile unsigned *)(uintptr_t)SBA(0x356F58u); } __except (EXCEPTION_EXECUTE_HANDLER) { mloop = 0; }
     if (mloop == 1u && nline < 600) { /* nur laufende Mission */
         nline++;
         HLOG_W("RTTRB f=%u sync=%d n=%u skip=%u alter avg=%.2f max=%u fehlend(B) avg=%.1f max=%u bilder=%u extra(B) avg=%.1f zellen(B) avg=%.0f warten avg=%.3f max=%.3f ms latenz avg=%.3f max=%.3f ms abholung bot/rtt/swap=%u/%u/%u",
@@ -1444,13 +1445,13 @@ have_entry:
         unsigned sg = 0xDEADu, dg = 0xDEADu;
         unsigned t0 = 0xDEADu, t1 = 0xDEADu, t2 = 0xDEADu, t3 = 0xDEADu;
         __try {
-            pin = *(unsigned *)(uintptr_t)0x279EE4u;
-            sg = *(unsigned *)(uintptr_t)0x4C99E0u;
-            dg = *(unsigned *)(uintptr_t)0x4B1960u;
-            t0 = *(unsigned *)(uintptr_t)0x4B99C0u;
-            t1 = *(unsigned *)(uintptr_t)0x4B99C4u;
-            t2 = *(unsigned *)(uintptr_t)0x4B99C8u;
-            t3 = *(unsigned *)(uintptr_t)0x4B99CCu;
+            pin = *(unsigned *)(uintptr_t)SBA(0x279EE4u);
+            sg = *(unsigned *)(uintptr_t)SBA(0x4C99E0u);
+            dg = *(unsigned *)(uintptr_t)SBA(0x4B1960u);
+            t0 = *(unsigned *)(uintptr_t)SBA(0x4B99C0u);
+            t1 = *(unsigned *)(uintptr_t)SBA(0x4B99C4u);
+            t2 = *(unsigned *)(uintptr_t)SBA(0x4B99C8u);
+            t3 = *(unsigned *)(uintptr_t)SBA(0x4B99CCu);
             if (pin && pin >= 0x10000u) {
                 vin0 = *(unsigned *)(uintptr_t)pin;
                 vin1 = *(unsigned *)(uintptr_t)(pin + 4);
@@ -1516,7 +1517,7 @@ void rtt_note_draw(unsigned prim, unsigned n, int rhw, unsigned xptr)
         if (g_rtt[c].isdepth && g_rtt_bound == c) { sb_ctx_enter(); rtt_shadow_rs(1, g_rtt[c].zscale); sb_ctx_leave(); } /* W100: Polygon-Offset je Draw */
         if (g_rtt[c].isdepth) { /* RENDER-QA3 (W100): z-Skala des Tiefenpasses (c[-38].z, Spiegel 0x21BCA8 + 58*16) */
             float zs = 0.0f;
-            __try { zs = *(volatile float *)(uintptr_t)(0x21BCA8u + 58u * 16u + 8u); }
+            __try { zs = *(volatile float *)(uintptr_t)(SBA(0x21BCA8u) + 58u * 16u + 8u); }
             __except (EXCEPTION_EXECUTE_HANDLER) { zs = 0.0f; }
             {   /* DIAG: VS-Spiegel c[-38].z (Befund W100: bleibt 0, Skala kommt aus dem Format) */
                 static unsigned nzl;

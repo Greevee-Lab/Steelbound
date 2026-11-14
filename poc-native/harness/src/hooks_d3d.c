@@ -6,6 +6,7 @@
 #include <intrin.h>
 #include "sb_remaster.h" /* W103 REM-FRAME */
 #include "sb_perfhud.h" /* W125 TICK-PERF */
+#include "sb_state.h" /* W232: sb_in_mission */
 
 /* ---------- D3D-Hooks ---------- */
 u32 __stdcall hook_Direct3D_CreateDevice(u32 adapter, u32 devType, u32 hwnd,
@@ -47,8 +48,8 @@ static void ign_gate_tick(void)
         return;
     }
     __try {
-        mloop = *(volatile u32 *)(uintptr_t)0x356F58u;
-        gate = *(volatile u32 *)(uintptr_t)0x6A37E0u;
+        mloop = *(volatile u32 *)(uintptr_t)SBA(0x356F58u);
+        gate = *(volatile u32 *)(uintptr_t)SBA(0x6A37E0u);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return;
     }
@@ -56,7 +57,7 @@ static void ign_gate_tick(void)
         return;
     }
     __try {
-        *(volatile u32 *)(uintptr_t)0x6A37E0u = gate | 4u;
+        *(volatile u32 *)(uintptr_t)SBA(0x6A37E0u) = gate | 4u;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return;
     }
@@ -108,25 +109,19 @@ u32 __stdcall hook_D3DDevice_Swap(u32 flags)
                     hcfg_out_dir(), g_frames);
         if (fopen_s(&f, path, "wb") == 0 && f) {
             __try {
-                fwrite((const void *)(uintptr_t)0x279DC0u, 1,
-                       0x6ED17Cu - 0x279DC0u, f);
+                fwrite((const void *)(uintptr_t)SBA(0x279DC0u), 1,
+                       SBA(0x6ED17Cu) - SBA(0x279DC0u), f);
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
             fclose(f);
         }
     }
     if (g_cfg.rt_from_mission > 0 && g_cfg.vblank_hz <= 0) {
         /* TEST(POPIN,W91): Menues im Testtakt, Mission in Echtzeit (Szene
-         * 0x2C [0x6B96DC], mloop [0x356F58] = 1 wie ip_mission, dazu Modus
-         * [0x2EEA34] = 4 - die Titel-Demo laeuft ebenfalls in 0x2C/mloop 1). */
+         * 0x2C [0x6B96DC], mloop [0x356F58] = 1 wie ip_mission, ohne Titel-Demo:
+         * W232 sb_in_mission statt Ladezaehler [0x2EEA34] == 4). */
         extern void sb_timing_go_realtime(int hz);
-        u32 sc = 0, ml = 0, md = 0;
-        __try {
-            sc = *(volatile u32 *)(uintptr_t)0x6B96DCu;
-            ml = *(volatile u32 *)(uintptr_t)0x356F58u;
-            md = *(volatile u32 *)(uintptr_t)0x2EEA34u; /* Modus 4 = Mission (Titel-Demo: 2) */
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
         static u32 rt_m0;
-        if (sc == 0x2Cu && ml == 1u && (md == 4u || g_cfg.rt_mission_any) && !rt_m0) { rt_m0 = g_frames; } /* W137: rt_mission_any = Modus egal (Zaehler, SPIELZUSTAENDE) */
+        if ((g_cfg.rt_mission_any ? sb_state_mission_or_demo() : sb_in_mission()) && !rt_m0) { rt_m0 = g_frames; } /* W137: rt_mission_any = auch Titel-Demo; W232: sonst Spielermission statt Ladezaehler == 4 */
         if (rt_m0 && g_frames >= rt_m0 + (u32)(g_cfg.rt_delay > 0 ? g_cfg.rt_delay : 0)) {
             if (g_cfg.vblank_hz <= 0 && g_cfg.rt_interp_fps > 0) { /* TEST(PERF-BENCH,W137) */
                 extern void sb_ovl_request_fps(int fps);
@@ -205,7 +200,7 @@ u32 __stdcall hook_D3DDevice_SetTexture(u32 stage, u32 tex)
 }
 
 static u32 g_cur_vs; /* FIX(COCKPIT,W60): zuletzt gesetzter VS-Handle (GetVertexShader) */
-#define VS_MIRROR_BASE_W60 0x21BCA8u /* = VS_MIRROR_BASE (unten), Original-Device 0x21B050+0xC58 */
+#define VS_MIRROR_BASE_W60 SBA(0x21BCA8u) /* = VS_MIRROR_BASE (unten), Original-Device 0x21B050+0xC58 */
 u32 __stdcall hook_D3DDevice_SetVertexShader(u32 handle)
 {
     static u32 calls;
@@ -337,7 +332,7 @@ u32 __stdcall hook_D3DDevice_SetRenderTarget(u32 surf, u32 depth)
         static unsigned short lastcx;
         static int havecx;
         static unsigned ncx;
-        unsigned short cx = *(unsigned short *)(uintptr_t)0x4C19C0u;
+        unsigned short cx = *(unsigned short *)(uintptr_t)SBA(0x4C19C0u);
         if (!havecx || cx != lastcx) {
             extern unsigned g_present_no;
             havecx = 1; lastcx = cx;
@@ -349,7 +344,7 @@ u32 __stdcall hook_D3DDevice_SetRenderTarget(u32 surf, u32 depth)
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     __try {
-        u32 dev = *(u32 *)(uintptr_t)0x21A8A0u;
+        u32 dev = *(u32 *)(uintptr_t)SBA(0x21A8A0u);
         if (dev) {
             *(u32 *)(uintptr_t)(dev + 0x21B4u) = surf;
             *(u32 *)(uintptr_t)(dev + 0x21B8u) = depth;
@@ -379,7 +374,7 @@ u32 __stdcall hook_D3DDevice_GetBackBuffer2(u32 idx)
      * idx -1 -> Slot 1, 0 -> Slot 0, sonst -> Slot 2; [dev+0x21C0+slot*4]).
      * Rueckgabe bleibt Fake (keine Verhaltensaenderung). */
     __try {
-        u32 dev = *(u32 *)(uintptr_t)0x21A8A0u;
+        u32 dev = *(u32 *)(uintptr_t)SBA(0x21A8A0u);
         if (dev) {
             int ii = (int)idx;
             unsigned slot = (ii == -1) ? 1u : (ii == 0 ? 0u : 2u);
@@ -473,12 +468,12 @@ u32 __stdcall hook_D3DDevice_GetRenderTarget2(void)
 {
     u32 rt = 0;
     __try {
-        u32 dev = *(u32 *)(uintptr_t)0x21A8A0u;
+        u32 dev = *(u32 *)(uintptr_t)SBA(0x21A8A0u);
         if (dev) { rt = *(u32 *)(uintptr_t)(dev + 0x21B4u); }
     } __except (EXCEPTION_EXECUTE_HANDLER) { rt = 0; }
     if (rt) {
         typedef u32 (__stdcall *addref_fn)(u32);
-        __try { ((addref_fn)(uintptr_t)0x210F30u)(rt); }
+        __try { ((addref_fn)(uintptr_t)SBA(0x210F30u))(rt); }
         __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
     return rt;
@@ -863,7 +858,7 @@ u32 __stdcall hook_D3D_SetTileNoWait(u32 a, u32 b)
  * (s. Disasm), Fast nicht. Die Hooks replizieren den CPU-sichtbaren
  * Original-Zustand (vsconst_mirror=1, Default) und zaehlen (DIAG).
  * Naked (M2b-Befund: Compiler-Hook korrumpiert ECX/EDX/MMX). */
-#define VS_MIRROR_BASE 0x21BCA8u
+#define VS_MIRROR_BASE SBA(0x21BCA8u)
 #define VS_MIRROR_NREG 192u
 static unsigned g_nvc1, g_nvc4, g_nvcf;
 static void __cdecl vsconst_mirror_write(unsigned kind, unsigned reg,
@@ -1007,8 +1002,8 @@ u32 __stdcall hook_D3D_MakeSpace(u32 a, u32 b)
     /* M2b: SPIEL-Put/Limit ([0x21B050/54]) auf Pool (C4 schreibt dorthin,
      * nicht ins Fake-Device!). */
     base = (u32)(uintptr_t)g_d3d_pool;
-    *(u32 *)(uintptr_t)0x21B050u = base;
-    *(u32 *)(uintptr_t)0x21B054u = base + (u32)sizeof g_d3d_pool;
+    *(u32 *)(uintptr_t)SBA(0x21B050u) = base;
+    *(u32 *)(uintptr_t)SBA(0x21B054u) = base + (u32)sizeof g_d3d_pool;
     *(u32 *)(g_fake_d3d + 0x0) = base;
     /* EAX = schreibbarer Put (Ring; a=Groesse, 0 -> Seite). */
     size = a ? a : 4096;

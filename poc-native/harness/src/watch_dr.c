@@ -19,6 +19,7 @@
  * DR-Schreiber (M2-DR-Probes sind entfernt, M4).
  */
 #include "watch_dr.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "hlog.h"
 #include "hcfg.h"
 #include "kernel_hle.h"
@@ -29,7 +30,7 @@
 
 #define WDR_MAX 4
 #define WDR_EIPS 64
-#define WDR_TAB_ADDR 0x351828u /* u32, Entity-Tabellen-Zeiger (Heap) */
+#define WDR_TAB_ADDR SBA(0x351828u) /* u32, Entity-Tabellen-Zeiger (Heap) */
 #define WDR_STRIDE 0x5Cu
 #define WDR_XBE_LO 0x12000u /* XBE-Bereich f. Stack-Scan (wie symbolize.py) */
 #define WDR_XBE_HI 0x700000u
@@ -148,6 +149,7 @@ static int wdr_parse_token(const char *tok, wdr_slot_t *s)
         char *end = NULL;
         s->addr = (unsigned)strtoul(parts[0], &end, 0);
         if (!end || end == parts[0]) return 0;
+        s->addr = SBA(s->addr); /* W230: cfg-Adresse ist EU -> Profil */
         i = 1;
     }
     for (; i < np; i++) {

@@ -2,6 +2,7 @@
  * Fenster (A7B), WASAPI-Live-Ausgabe (Ring + Thread) und Mixer-Thread.
  * W68 SPLIT: 1:1 aus audio_out.c verschoben. */
 #include "audio_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "sb_pause.h" /* W188 GAME-MENU: g_sb_paused */
 #include <share.h> /* _SH_DENYNO (W102) */
 
@@ -824,7 +825,7 @@ static void au_render_voice(audio_voice_t *v, au32 n, int bink_start_ready)
         return;
     if (v->kind == 2 && !v->active)
         return;
-    if (!bink_start_ready && v->create_ret == 0x2435FCu && !v->played)
+    if (!bink_start_ready && v->create_ret == SBA(0x2435FCu) && !v->played)
         return;
     for (i = 0; i < n; i++) {
         float l = 0, r = 0;
@@ -953,7 +954,7 @@ static void au_voice_diag(void)
     double sumg = 0.0;
     for (v = g_voices; v; v = v->next) {
         float ge;
-        if (v->kind != 1 || v->create_ret == 0x2435FCu)
+        if (v->kind != 1 || v->create_ret == SBA(0x2435FCu))
             continue;
         tot++;
         if (!v->playing || v->paused)
@@ -1172,7 +1173,7 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
              * a pass crossing those calls cannot separate tracks by 20 ms.
              * Already running tracks and all non-Bink voices are untouched. */
             for (v = g_voices; v; v = v->next)
-                if (v->create_ret == 0x2435FCu && !v->played && !v->playing)
+                if (v->create_ret == SBA(0x2435FCu) && !v->played && !v->playing)
                     bink_start_ready = 0;
         }
         if (g_cfg.audio_sync_diag && !g_sb_paused) {

@@ -41,10 +41,12 @@
  * je Paar die naechste Option aus kSfxSets (Log "SHFX ab #k"). shot_mission=1 ->
  * screenshot_frame zaehlt ab Beginn der Kampagnen-Mission (Modus 4). */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "render_qa.h"
 #include "sb_tex.h"
 #include "sb_gfxpreset.h" /* W173 LAUNCHER-P4: einheitliches Grafik-Preset */
 #include "sb_remaster.h" /* W173: sb_rem_fx_locked (Effect-Pack-Ausnahme) */
+#include "sb_state.h" /* W232: sb_in_mission */
 
 int rq_ab_base(void); /* render_shade.c */
 
@@ -1136,10 +1138,7 @@ void sb_shfx_present(unsigned n)
     if (g_cfg.shot_mission) {
         if (!init) { init = 1; off = g_cfg.screenshot_frame; g_cfg.screenshot_frame = 0; }
         if (!anchored) {
-            unsigned mode = 0;
-            __try { mode = *(volatile unsigned *)(uintptr_t)0x2EEA34u; }
-            __except (EXCEPTION_EXECUTE_HANDLER) { mode = 0; }
-            if (mode == 4u && sfx_mission()) {
+            if (sb_in_mission()) { /* W232: Spielermission statt Ladezaehler == 4 */
                 anchored = 1;
                 g_cfg.screenshot_frame = (int)n + off;
                 HLOG_I("SHFX shot_mission: Missionsbeginn f=%u -> screenshot_frame=%d (every=%d)", n,

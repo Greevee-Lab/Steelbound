@@ -1,5 +1,6 @@
 /* sb_feedback.c - W188 GAME-MENU: Feedback Stufe 1. Beschreibung s. sb_feedback.h. */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "render_qa.h"   /* rq_in_mission */
 #include "kernel_hle.h"  /* krnl_CreateThread */
 #include "sb_edition.h"
@@ -10,6 +11,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <time.h>
+#include "sb_state.h" /* W232: sb_in_mission */
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -386,8 +388,8 @@ int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
     char e1[400], e2[400], e3[400], e4[400], e5[400];
     char *logb;
     size_t logcap = 196608 * 2 + 4096;
-    unsigned mode = fb_rd(0x2EEA34u), scene = fb_rd(0x6B96DCu), tmr = fb_rd(0x3563F0u);
-    int inm = rq_in_mission();
+    unsigned loads = fb_rd(SBA(0x2EEA34u)), scene = fb_rd(SBA(0x6B96DCu)), tmr = fb_rd(SBA(0x3563F0u)); /* W232: Ladezaehler */
+    int inm = sb_in_mission(); /* W232: ohne Titel-Demo */
     SYSTEMTIME lt;
     const char *kn = p->kind ? "idea" : "bug";
     txt8[0] = '\0';
@@ -406,7 +408,7 @@ int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
     } else {
         strcpy_s(game, sizeof game, "?");
     }
-    _snprintf_s(state, sizeof state, _TRUNCATE, "mode=%u scene=0x%X in_mission=%d countdown=%u", mode, scene, inm,
+    _snprintf_s(state, sizeof state, _TRUNCATE, "loadcount=%u scene=0x%X in_mission=%d countdown=%u", loads, scene, inm,
                 tmr);
     _snprintf_s(ver, sizeof ver, _TRUNCATE, "%s edition, build %s", SB_EDITION_NAME, build);
     _snprintf_s(info, sizeof info, _TRUNCATE,

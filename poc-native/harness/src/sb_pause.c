@@ -1,5 +1,6 @@
 /* sb_pause.c - W188 GAME-MENU: Spielpause. Beschreibung s. sb_pause.h. */
 #include <windows.h>
+#include "sb_profile.h" /* W229 SBA() */
 #include <stdint.h>
 #include "hcfg.h"
 #include "hlog.h"
@@ -19,7 +20,7 @@ static volatile LONG g_movie_presented_frame; /* W205: diagnostic snapshot after
 static unsigned pause_tmr(void)
 {
     unsigned v = 0;
-    __try { v = *(volatile unsigned *)(uintptr_t)0x3563F0u; }
+    __try { v = *(volatile unsigned *)(uintptr_t)SBA(0x3563F0u); }
     __except (EXCEPTION_EXECUTE_HANDLER) { v = 0; }
     return v;
 }
@@ -142,8 +143,8 @@ unsigned sb_pause_movie_frame(void)
 {
     unsigned frame = 0;
     __try {
-        const volatile unsigned *b = *(const volatile unsigned *volatile *)(uintptr_t)0x3B8AD0u;
-        if (*(volatile unsigned *)(uintptr_t)0x35642Cu == 2u && b && b[0] && b[1] && b[3] <= b[2]) {
+        const volatile unsigned *b = *(const volatile unsigned *volatile *)(uintptr_t)SBA(0x3B8AD0u);
+        if (*(volatile unsigned *)(uintptr_t)SBA(0x35642Cu) == 2u && b && b[0] && b[1] && b[3] <= b[2]) {
             frame = b[3];
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {}

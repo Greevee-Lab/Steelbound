@@ -12,7 +12,9 @@
  * 0x8008 MAX), 0x354 DEPTH_FUNC (GL), 0x358 COLOR_MASK, 0x35C DEPTH_MASK,
  * 0x388/0x38C POLYGON_OFFSET_SCALE/BIAS, 0x43C POINT_SIZE. */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "render_qa.h"
+#include "sb_state.h" /* W232: sb_in_mission */
 void fx_ps_diag(unsigned *c0, unsigned *def0, unsigned *src);
 
 float g_fx_raw[4][4], g_fx_mat[4][4]; /* DIAG: Rohpositionen/VSH-Matrix des aktuellen Draws (render_im.c) */
@@ -139,7 +141,7 @@ int fx_draw_pre(const im_vertex_t *out, unsigned nout, int rhw, unsigned prim, c
                g_present_no, (unsigned)(e - g_fx), e->vs, e->ps, e->xp, tf, prim, nout, rhw, tgt,
                bon, bs, bd, beq, fx_nv(0x34Cu, 0), ate, af, ar, zf, m3d_zenable, rs_dmask, rs_cmask,
                amin, amax, cmax, fx_nv(0x318u, 0), fx_nv(0x31Cu, 0), fx_nv(0x43Cu, 0),
-               *(volatile unsigned *)(uintptr_t)(0x21AC20u + 26u * 4u),
+               *(volatile unsigned *)(uintptr_t)(SBA(0x21AC20u) + 26u * 4u),
                fx_nv(0x338u, 0), fx_nv(0x38Cu, 0), bx0, bx1, by0, by1, nbeh);
         { unsigned pc0, pd0, psrc; float fc[4]; fx_ps_diag(&pc0, &pd0, &psrc);
           HLOG_W("FXPS k=%u ps=0x%X c0=0x%08X def=0x%08X src=%u fold=%d", (unsigned)(e - g_fx), g_im_pshader, pc0, pd0, psrc, fx_ps_add_c0(fc)); }
@@ -166,9 +168,9 @@ int fx_draw_pre(const im_vertex_t *out, unsigned nout, int rhw, unsigned prim, c
     if (g_cfg.fx_shots > 0) {
         static unsigned nshot, lastf;
         float fc[4];
-        int gate_ok = 1; /* DIAG(FX-HOLE,W106): mit m3d_census_gate=2 nur Kampagnen-Mission (Modus 4) + VT online */
+        int gate_ok = 1; /* DIAG(FX-HOLE,W106): mit m3d_census_gate=2 nur Kampagnen-Mission (W232: sb_in_mission) + VT online */
         if (g_cfg.m3d_census_gate >= 2) {
-            __try { gate_ok = *(volatile unsigned *)(uintptr_t)0x2EEA34u == 4u
+            __try { gate_ok = sb_in_mission()
                               && *(volatile unsigned *)(uintptr_t)M3D_VTONLINE_ADDR == 1u; }
             __except (EXCEPTION_EXECUTE_HANDLER) { gate_ok = 0; }
         }

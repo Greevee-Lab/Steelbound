@@ -11,6 +11,9 @@ typedef struct {
     char hdd_root[512]; /* Partition1 (E:, beschreibbar): TDATA/UDATA */
     char game_image[512]; /* W150 ISO-DIRECT: Spiel-Abbild (XISO/Redump), Vorrang vor media_root/xbe_path; leer = Ordner-Modus */
     int version_check;    /* W150/W202: 1 = unbekannte XBE ablehnen (Standard), 0 = nur warnen (Experten) */
+    int allow_ntsc_u;     /* W229 [expert]: seit W230 ohne Wirkung (US startet automatisch, s. ntsc_u); wird weiter eingelesen */
+    int ntsc_u;           /* W230 [expert]: 1 = USA-Fassung (NTSC-U) mit US-Profil starten (Standard), 0 = Notbremse (abgelehnt wie unbekannte Fassung) */
+    char hdd_root_us[512]; /* W230: Spielstandordner der US-Fassung; leer = <hdd_root>_US (gleiche Title-ID wie EU, nie mischen) */
     int iso_selftest;     /* W150 DIAG: 1 = D:-Selbsttest (Lesen, Schreibschutz) vor dem Spielstart */
     int save_check;       /* W187 KIA-LOAD: Spielstaende (T:) beim Start pruefen: 1 = reparieren (mit Sicherung), 2 = nur melden, 0 = aus */
     int save_lock;        /* W190 SAVE-LOCK: 1 = Spielstaende schuetzen (T:/U: in eine Wegwerf-Arbeitskopie <hdd>\_savelock, beim naechsten Start verworfen), 0 = Original (Standard) */
@@ -38,8 +41,10 @@ typedef struct {
     int winmode_alt_max;  /* Test: Anzahl Schritte (Default 8 = 2 Zyklen Alt+Enter, Fokus weg, Fokus da, Alt+Enter) */
     int fps_limit;        /* 0 = aus */
     int turbo_until_frame; /* fps_limit erst ab Frame N (Menues im Zeitraffer), 0 = aus */
-    int turbo_until_mode; /* fps_limit erst ab Spielmodus N (u32 0x2EEA34), 0 = aus */
+    int turbo_until_mode; /* fps_limit erst ab Ladezaehler N (u32 0x2EEA34, W232: kein Spielmodus), 0 = aus */
     int vblank_qpc; /* W69: 1 = VBlank-Zaehler aus QPC statt GetTickCount (exakte 16,7-ms-Raster statt 15,6-ms-Stufen), 0 = alt */
+    int film_diag; /* TEST(PAL50,W234): 1 = FILMDIAG-Zeilen (Filmbeginn/-ende, Bink-Bilder, Wanddauer), Standard 0 */
+    int game_tick; /* W234 PAL50: Spieltakt 30 (Standard, wie PAL60/NTSC) oder 25 (PAL50: 50 VBlanks/s + PAL-EEPROM -> Spiel waehlt 50-Hz-Pfad) */
     int vblank_hz; /* 0 = aus (VBlank-Waits sofort, Testtakt via run_once.ps1), sonst Ticks/s (Xbox: 60 = Echtzeit, Default) */
     /* [render] - greifen an den D3D-Hooks (M2) */
     float fog_scale;
@@ -202,11 +207,12 @@ typedef struct {
     int cockpit_panini;     /* W191 UW-PERSP: Panini-Projektion der Cockpit-Ansicht (Nachbearbeitung, nur Desktop), 0 = aus, 1..100 = Staerke in % von cockpit_panini_d; Mitte formtreu vergroessert, Raender waagerecht verdichtet */
     int cockpit_panini_d;   /* W191: groesstes Panini-d (x100); mit cockpit_panini_frame=1 begrenzt der Rahmen frueher */
     int cockpit_panini_frame; /* W191: 1 = Radar oben und Frontview unten bleiben voll im Bild (100 % = Grenze ohne Anschnitt), 0 = d = cockpit_panini % x cockpit_panini_d (Experiment) */
+    int cockpit_width;      /* W235 COCKPIT-WIDTH: leichte waagerechte Streckung der Cockpit-Ansicht um die Bildmitte (Nachbearbeitung im Panini-Pass, nur Desktop, in VR aus), 0 = Original (aus), 1..10 = Breite + n %; Nutzer-Option, sonst gilt: nie strecken */
     int cockpit_persp_pause; /* W209: 1 = live camera in pause, 0 = legacy fallback */
     int cockpit_persp_dist; /* W191: Kamera-Weg bei 100 % in mm (Spiel-Einheit ~ 1 m): > 0 = zurueck + engeres Sichtfeld (Tele, Standard 1500; Near-Ebene am alten Auge), < 0 = vor + weiteres Sichtfeld (Breitbildrand fuellen, Experiment) */
     int cockpit_persp_ref;  /* W191: Abstand der festen Ebene (Hauptmonitor/HUD) in mm */
     int cockpit_zoom;       /* W191: zusaetzlicher gleichmaessiger Zoom der Cockpit-Ansicht in % (100 = aus; > 100 schneidet oben/unten ab) */
-    char cockpit_persp_cycle[160]; /* DIAG(UW-PERSP,W191): Liste 'p[/z],p[/z],...' (Prozent Vorschub/Zoom), je Spiel-Bild der naechste Eintrag (Bildpaare aus Folgebildern), leer = aus */
+    char cockpit_persp_cycle[160]; /* DIAG(UW-PERSP,W191): Liste 'p[/z[/n[/w]]],...' (Prozent Vorschub/Zoom/Panini, W235: Breite), je Spiel-Bild der naechste Eintrag (Bildpaare aus Folgebildern), leer = aus */
     char cockpit_persp_shots[64]; /* DIAG(UW-PERSP,W191): Liste 'F1,F2,..' - nach F Bildern Cockpit-Ansicht (Modus 4; -F = auch Titel-Demo) je 2x Zyklus Folgebilder als shots/cpersp_<f>_p<vorschub>_z<zoom>.jpg */
     int cockpit_persp_diag; /* DIAG(UW-PERSP,W191): 1 = Tiefen-/Kanten-Statistik des Cockpit-Meshs (CPERSP mesh) bei jeder Aenderung, 2 = + je Draw-Klasse Zaehler */
     int aspect_mode; /* W18: 1 = 2D in Spiel-Aspect-Box (Pillarbox, schwarze Balken) + 3D Hor+, 0 = alt (2D gestreckt) */
@@ -314,7 +320,7 @@ typedef struct {
     int rt_delay; /* TEST(POPIN,W91): mit rt_from_mission: Echtzeit erst N Spiel-Frames nach Missionsbeginn (Startsequenz im Testtakt) */
     int rt_fps_limit; /* TEST(POPIN,W91): mit rt_from_mission: fps_limit ab Missionsbeginn (0 = unveraendert) */
     int rt_from_film; /* TEST(PERF-BENCH,W137): >0 = Testtakt (vblank_hz=0) bis zum ersten Film (*.bik geoeffnet), dann Echtzeit mit vblank_hz=N; 0 = aus */
-    int rt_mission_any; /* TEST(PERF-BENCH,W137): mit rt_from_mission: erster Missionsbeginn (Szene 0x2C, mloop 1) unabhaengig vom Modus-Zaehler 0x2EEA34 (Kette ohne Titel-Demo), 0 = bisher (Modus 4) */
+    int rt_mission_any; /* TEST(PERF-BENCH,W137): mit rt_from_mission: erster Missionsbeginn (Szene 0x2C, mloop 1) unabhaengig vom Ladezaehler 0x2EEA34, auch Titel-Demo; 0 = Spielermission (W232 sb_in_mission, vorher Ladezaehler 4) */
     int rt_interp_fps; /* TEST(PERF-BENCH,W137): mit rt_from_film/rt_from_mission: interp_fps beim Echtzeit-Wechsel setzen (Weg wie Overlay-Bildratenwechsel; Testtakt davor ohne Zwischenbilder), 0 = unveraendert */
     int movie_skip_delay; /* TEST(PERF-BENCH,W137): movie_skip-Tasten erst N Spiel-Frames nach der Filmerkennung (Film-Messfenster), 0 = bisher */
     int interp_eyefix;    /* FIX(W224 LINE-FLICKER): 1 = Zwischenbild-VS nimmt fuer Vertices mit w-Vorzeichenwechsel zwischen Tick N-1 und N die Tick-N-Position (kein Clip-Lerp durch w=0 -> Linie quer durchs Bild); 0 = alt */
@@ -437,6 +443,8 @@ typedef struct {
     int photo_cam_yaw;          /* freie Kamera: max. Drehung links/rechts (Grad, Standard 35) */
     int photo_cam_pitch;        /* freie Kamera: max. Neigung (Grad, Standard 25) */
     int photo_cam_dist;         /* freie Kamera: max. Weg von der Spielkamera (Spiel-Einheiten ~ m, Standard 4) */
+    int photo_rt_max;           /* W233: Kante der skalierten Monitor-/Welt-RTs einer Cockpit-Aufnahme xN (Standard 8192, max 16384, 0 = nativ) */
+    int photo_rt_fail_test;     /* TEST(W233): so viele Anlegeversuche der Zwischenziele scheitern lassen (Standard 0) */
     char feedback_repo[128];    /* [feedback] repo: GitHub-Repo fuer "Neues Issue" (Owner/Name), Standard SB_FEEDBACK_REPO_DEFAULT (sb_feedback.h) */
     /* W122 PERF-HUD (sb_perfhud.c) */
     int perf_hud;               /* 1 = Leistungs-Overlay sichtbar (Taste schaltet und speichert in user.cfg), 0 = aus (Standard) */

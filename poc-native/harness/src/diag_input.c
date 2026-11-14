@@ -11,6 +11,7 @@
  * Loggt bei JEDER Aenderung und alle 600 Frames einen Heartbeat.
  * Schalter: [input] input_diag=1. Aufruf: eine Zeile im Swap-Hook. */
 #include "diag_input.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "hlog.h"
 #include "hcfg.h"
 #include <stdint.h>
@@ -19,16 +20,16 @@
 
 typedef uint32_t u32;
 
-#define IN_PORT_ADDR 0x352274u
-#define IN_CC0_ADDR 0x3B8CC0u
-#define IN_CE0_ADDR 0x3B8CE0u
-#define IN_ANY_ADDR 0x670E9Cu
-#define IN_MOUT_ADDR 0x4AF9D0u
-#define IN_LATCH_ADDR 0x351518u /* Mapper-Gang-Latch (P3-Copy, Menue+Mission) */
-#define IN_SBC_BASE 0x4AEEFCu
-#define IN_OUT_BASE 0x4AF480u
-#define IN_FLG1_ADDR 0x3B8CB8u
-#define IN_FLG2_ADDR 0x3B8CE8u
+#define IN_PORT_ADDR SBA(0x352274u)
+#define IN_CC0_ADDR SBA(0x3B8CC0u)
+#define IN_CE0_ADDR SBA(0x3B8CE0u)
+#define IN_ANY_ADDR SBA(0x670E9Cu)
+#define IN_MOUT_ADDR SBA(0x4AF9D0u)
+#define IN_LATCH_ADDR SBA(0x351518u) /* Mapper-Gang-Latch (P3-Copy, Menue+Mission) */
+#define IN_SBC_BASE SBA(0x4AEEFCu)
+#define IN_OUT_BASE SBA(0x4AF480u)
+#define IN_FLG1_ADDR SBA(0x3B8CB8u)
+#define IN_FLG2_ADDR SBA(0x3B8CE8u)
 #define IN_HEARTBEAT 600u
 
 /* Blob: port,cc0,ce0,any,mout(je u32) + sbc,out,flg16,sbc0,mout(24/24/16/24/24) */
@@ -50,14 +51,14 @@ typedef uint32_t u32;
 #define IN_OFF_DSP 206    /* Dispatch u32 0x354F3C (3 = Engine-Latch) */
 #define IN_OFF_CKP 210    /* Cockpit u32 0x3520DC (1 = Welt-Pfad) */
 #define IN_OFF_LCK 214   /* W52: Lock u32 0x53831C (1 = Start verriegelt, Toggle-scharf) */
-#define IN_GATE_ADDR 0x6A37E0u
-#define IN_DSP_ADDR 0x354F3Cu
-#define IN_CKP_ADDR 0x3520DCu
-#define IN_LCK_ADDR 0x53831Cu
-#define IN_OUT2_ADDR 0x4AF728u
-#define IN_LAT_ADDR 0x4AF76Cu
-#define IN_SH2_ADDR 0x4AFC80u
-#define IN_ENG_ADDR 0x3516DCu
+#define IN_GATE_ADDR SBA(0x6A37E0u)
+#define IN_DSP_ADDR SBA(0x354F3Cu)
+#define IN_CKP_ADDR SBA(0x3520DCu)
+#define IN_LCK_ADDR SBA(0x53831Cu)
+#define IN_OUT2_ADDR SBA(0x4AF728u)
+#define IN_LAT_ADDR SBA(0x4AF76Cu)
+#define IN_SH2_ADDR SBA(0x4AFC80u)
+#define IN_ENG_ADDR SBA(0x3516DCu)
 
 static uint8_t in_last[IN_BLOB];
 static int in_have_last;

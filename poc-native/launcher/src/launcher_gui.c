@@ -229,8 +229,10 @@ int gui_page_from_name(const char *v)
 #define ID_CPERSP 1102 /* W191 UW-PERSP: Cockpit-Perspektive (Anzeige > Seitenverhaeltnis) */
 #define ID_CPANINI 1103 /* W191 UW-PERSP: Panini der Cockpit-Ansicht */
 #define ID_CTRL_AIMASSIST 1104 /* W236 AIM-ASSIST: Zielhilfe (Original / Rand dreht Sicht / Waffenarm fest) */
+#define ID_CWIDTH 1107 /* W235 COCKPIT-WIDTH: leichte Breitenanpassung der Cockpit-Ansicht */
 #define ID_CTRL_AUTOGEAR 1105 /* W218 SIMPLE-CONTROLS: automatischer Gangwechsel */
 #define ID_CTRL_JOY 1106 /* W221 HOTAS (experimentell): Joystick-Dialog */
+#define ID_PAL50 1108 /* W234 PAL50: Spieltakt 25 (wie EU-Konsole am 50-Hz-TV) */
 static char g_img_msg[600]; /* W150: Ergebnis der letzten Abbild-Pruefung (UTF-8) */
 static int g_img_ok;
 static void check_image_ex(int status);
@@ -317,6 +319,9 @@ static int g_undo_on;
 static int g_setup_force;         /* Spielen: Einrichtungskarte offen halten */
 static int g_bb_setup = -1;       /* W220: Karte im zuletzt gezeichneten Bild (-1 = nicht Spielen) */
 static int g_data_ok = 1;         /* letzte Spieldaten-Pruefung (Regelwerk) */
+static int g_edition;             /* W231: LCFG_ED_* des eingestellten Spiels (Regelwerk) */
+static void *g_client_proc;       /* W231: zuletzt gestarteter Client (Exitcode 5/8) */
+static int g_client_ed;           /* W231: Fassung dieses Starts */
 static int g_firstrun;            /* W217: erster Start (keine user.cfg, kein Standard-Profil) */
 static char g_data_err[300];
 static HWND g_tip;                /* Tooltips (Begruendung gesperrter Elemente) */
@@ -1716,6 +1721,7 @@ static char g_img_path[1024]; /* W220: Pfad, zu dem g_img_msg gehoert */
 static char g_imgfix_path[1024];
 static int g_imgfix_rc;
 static char g_imgfix_msg[600];
+static int g_imgfix_ed; /* W231: Fassung der Fixture (LCFG_ED_*) */
 
 static int img_check(const char *path, char *msg, size_t cap)
 {
@@ -1874,33 +1880,42 @@ static int vrres_index(int pct)
     return best;
 }
 
+/* Nutzer 14.11.: auf der Anzeige-Seite nur Warnungen/Fehler/Sperren zeigen,
+ * reine Erklaerzeilen (Stufe Info) entfallen. */
+static int paint_reason_alert(int rule, int x, int y, int w, int h)
+{
+    if (rule < LR_FIRST || rule > LR_LAST || !g_rr[rule].active || g_rr[rule].level == LR_LVL_INFO) {
+        return 0;
+    }
+    return paint_reason(rule, x, y, w, h);
+}
+
 /* W171: Seite Anzeige (Bildschirm, Bildrate, VR-Vorschau, Bildformat,
  * Render-Skalierung). */
 static void paint_display(void)
 {
-    card(CX0, CY0, COLW, 232, LT("gui.disp_screen"));
+    /* Nutzer 14.11.: Erklaerzeilen weg (nur Warnungen/Sperren), Leistung links
+     * (Bildrate + Render-Skalierung), Bildformat-Karte rechts in voller Hoehe
+     * mit grosser Vorschau. */
+    card(CX0, CY0, COLW, 196, LT("gui.disp_screen"));
     label1(F_SMALL, LT("gui.gfx_winmode"), CX0 + 18, CY0 + 44, 100, 30, C_DIM);
     label1(F_SMALL, LT("gui.disp_hz"), CX0 + 18, CY0 + 80, 100, 30, C_DIM);
-    paint_reason(8, CX0 + 120, CY0 + 112, COLW - 138, 16);
-    label1(F_SMALL, LT("gui.gfx_res"), CX0 + 18, CY0 + 132, 100, 30, C_DIM);
-    label1(F_SMALL, LT("gui.gfx_wh"), CX0 + 18, CY0 + 168, 100, 30, C_DIM);
-    label1(F_BODY, U8_TIMES, CX0 + 215, CY0 + 168, 14, 30, C_DIM);
-    paint_reason(7, CX0 + 18, CY0 + 204, COLW - 36, 16);
+    label1(F_SMALL, LT("gui.gfx_res"), CX0 + 18, CY0 + 116, 100, 30, C_DIM);
+    label1(F_SMALL, LT("gui.gfx_wh"), CX0 + 18, CY0 + 152, 100, 30, C_DIM);
+    label1(F_BODY, U8_TIMES, CX0 + 215, CY0 + 152, 14, 30, C_DIM);
 
-    card(CX0, CY0 + 244, COLW, 112, LT("gui.disp_smooth"));
-    label1(F_SMALL, LT("gui.gfx_ipfps"), CX0 + 18, CY0 + 288, 100, 30, C_DIM);
-    if (!paint_reason(10, CX0 + 18, CY0 + 322, COLW - 36, 30)) {
-        if (!paint_reason(9, CX0 + 18, CY0 + 322, COLW - 36, 30)) { /* W223: sonst Hinweis GPU/Standard */
-            label(F_SMALL, LT("gui.ip_hint"), CX0 + 18, CY0 + 322, COLW - 36, 30, C_DIM);
-        }
+    card(CX0, CY0 + 208, COLW, 150, LT("gui.disp_perf"));
+    label1(F_SMALL, LT("gui.gfx_ipfps"), CX0 + 18, CY0 + 252, 100, 30, C_DIM);
+    label1(F_SMALL, LT("gui.rs_label"), CX0 + 18, CY0 + 288, 100, 30, C_DIM);
+    if (!paint_reason_alert(10, CX0 + 18, CY0 + 322, COLW - 36, 30)) {
+        paint_reason_alert(9, CX0 + 18, CY0 + 322, COLW - 36, 30);
     }
 
-    card(CX0, CY0 + 368, COLW, 128, LT("gui.disp_vr"));
-    label1(F_SMALL, LT("gui.gfx_vr"), CX0 + 18, CY0 + 412, 100, 30, C_DIM);
-    label1(F_SMALL, LT("gui.vr_perf"), CX0 + 18, CY0 + 446, 100, 30, C_DIM); /* W183 */
-    paint_reason(6, CX0 + 18, CY0 + 478, COLW - 36, 16);
+    card(CX0, CY0 + 370, COLW, 118, LT("gui.disp_vr"));
+    label1(F_SMALL, LT("gui.gfx_vr"), CX0 + 18, CY0 + 414, 100, 30, C_DIM);
+    label1(F_SMALL, LT("gui.vr_perf"), CX0 + 18, CY0 + 448, 100, 30, C_DIM); /* W183 */
 
-    card(COL2, CY0, COLW, 376, LT("gui.gfx_aspect"));
+    card(COL2, CY0, COLW, 488, LT("gui.gfx_aspect"));
     /* R13: festes Bildformat (S3.10) als Info, kein Schalter */
     label(F_SMALL, g_rr[13].text, COL2 + 18, CY0 + 42, COLW - 36, 52, C_DIM);
     label1(F_SMALL, LT("gui.gfx_edge"), COL2 + 18, CY0 + 100, 100, 30, C_DIM);
@@ -1908,16 +1923,13 @@ static void paint_display(void)
     if (!paint_reason(11, COL2 + 120, CY0 + 168, COLW - 138, 16)) {
         paint_reason(12, COL2 + 120, CY0 + 168, COLW - 138, 16);
     }
-    /* W191 UW-PERSP: Cockpit-Perspektive + Hinweis "nur Desktop" (R34 bei VR) */
+    /* W191 UW-PERSP: Cockpit-Perspektive; R34 nur als Sperre (VR) */
     label1(F_SMALL, LT("gui.cpersp"), COL2 + 18, CY0 + 186, 100, 30, C_DIM);
-    label1(F_SMALL, LT("gui.cpanini"), COL2 + 18, CY0 + 222, 100, 30, C_DIM); /* W227 */
-    paint_reason(33, COL2 + 120, CY0 + 254, COLW - 138, 16);
-    paint_preview(COL2 + 18, CY0 + 274, COLW - 36, 50);
-    label(F_SMALL, g_aspect_info, COL2 + 18, CY0 + 330, COLW - 36, 44, C_TEXT);
-
-    card(COL2, CY0 + 388, COLW, 108, LT("gui.disp_perf"));
-    label1(F_SMALL, LT("gui.rs_label"), COL2 + 18, CY0 + 432, 100, 30, C_DIM);
-    label(F_TINY, LT("gui.rs_hint"), COL2 + 18, CY0 + 466, COLW - 36, 28, C_DIM);
+    label1(F_SMALL, LT("gui.cpanini"), COL2 + 18, CY0 + 220, 100, 30, C_DIM); /* W227 */
+    label1(F_SMALL, LT("gui.cwidth"), COL2 + 18, CY0 + 254, 100, 30, C_DIM); /* W235 */
+    paint_reason_alert(34, COL2 + 18, CY0 + 286, COLW - 36, 16);
+    paint_preview(COL2 + 18, CY0 + 308, COLW - 36, 104);
+    label(F_SMALL, g_aspect_info, COL2 + 18, CY0 + 418, COLW - 36, 64, C_TEXT);
 }
 
 /* W171: Seite Grafik (Voreinstellungen, Bild, Remaster, HUD). */
@@ -2046,7 +2058,7 @@ static void paint_audio(void)
     label(F_SMALL, LT("gui.audio_dev_txt"), CX0 + 18, CY0 + 90, CW - 36, 40,
           C_DIM);
     /* W195 PHOTO-MODE: Karte "Extras" (Fotoordner, Standard-Aufnahmeaufloesung, Format) */
-    card(CX0, CY0 + 152, CW, 236, LT("gui.extras_card"));
+    card(CX0, CY0 + 152, CW, 228, LT("gui.extras_card"));
     label1(F_TINY, LT("gui.extras_dir"), CX0 + 18, CY0 + 190, CW - 36, 16, C_DIM);
     label1(F_SMALL, LT("gui.extras_res"), CX0 + 18, CY0 + 250, 170, 30, C_DIM);
     label1(F_SMALL, LT("gui.extras_fmt"), CX0 + 380, CY0 + 250, 70, 30, C_DIM);
@@ -2059,6 +2071,9 @@ static void paint_audio(void)
             label(F_TINY, t, CX0 + 18, CY0 + 332, CW - 36, 44, C_DIM);
         }
     }
+    /* W234 PAL50: Karte "Spieltempo" (Schalter + kurze Erklaerung) */
+    card(CX0, CY0 + 390, CW, 106, LT("gui.pal50_card"));
+    label(F_TINY, LT("gui.pal50_txt"), CX0 + 18, CY0 + 464, CW - 36, 30, C_DIM);
 }
 
 static void paint_ctrl(void)
@@ -2119,15 +2134,34 @@ static void adv_data_loc(char *path, size_t cap, const char **mode)
  * Profil-/Portabel-Modus = <Datenordner>\hdd, sonst relativ zum Client). */
 static void adv_hdd_path(char *out, size_t cap)
 {
-    const char *h = g_cur.hdd_root;
-    char p[1024];
-    if (sb_userdata_mode() != SB_UD_LEGACY && strcmp(h, "HDD") == 0 &&
-        sb_userdata_path_peek(SB_UD_HDD, p, sizeof p) == 1) {
-        u8_from_acp(p, out, cap);
-    } else if ((h[0] && h[1] == ':') || h[0] == '\\' || h[0] == '/') {
-        strcpy_s(out, cap, h);
+    /* W231 US-LAUNCHER: US-Spielstaende getrennt in <hdd>\us (gleiche
+     * Title-ID 43430002); Anzeige, Oeffnen, Import/Export und Zuruecksetzen
+     * gelten fuer die Fassung des eingestellten Spiels. */
+    char base[1100];
+    app_hdd_base(g_client_disp, g_cur.hdd_root, base, sizeof base);
+    lcfg_hdd_for_edition(base, g_edition, out, cap);
+}
+
+/* W231 US-LAUNCHER: Import-Hinweis zur Fassung. Spielstaende von EU und US
+ * tragen dieselbe Title-ID und lassen sich nicht unterscheiden; nur ein
+ * Launcher-Exportname ("-us-") verraet die Herkunft. Rein, testbar. */
+static void saves_edition_hint(const char *src_u8, int edition, char *out, size_t cap)
+{
+    const char *b = src_u8 ? src_u8 + strlen(src_u8) : "";
+    int us_name, eu_name;
+    while (src_u8 && b > src_u8 && b[-1] != '\\' && b[-1] != '/') {
+        b--;
+    }
+    us_name = _strnicmp(b, "Steelbound-saves-us-", 20) == 0;
+    eu_name = !us_name && _strnicmp(b, "Steelbound-saves-", 17) == 0 &&
+              b[17] >= '0' && b[17] <= '9';
+    if ((us_name && edition != LCFG_ED_US) || (eu_name && edition == LCFG_ED_US)) {
+        _snprintf_s(out, cap, _TRUNCATE, LT("gui.si_ed_mismatch"),
+                    LT(us_name ? "gui.ed_us" : "gui.ed_eu"),
+                    LT(edition == LCFG_ED_US ? "gui.ed_us" : "gui.ed_eu"));
     } else {
-        _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", g_client_disp, h[0] ? h : "HDD");
+        _snprintf_s(out, cap, _TRUNCATE, LT("gui.si_ed_hint"),
+                    LT(edition == LCFG_ED_US ? "gui.ed_us" : "gui.ed_eu"));
     }
 }
 
@@ -2221,7 +2255,9 @@ static void adv_saves_transfer(int exporting)
     if (exporting)
     {
         GetLocalTime(&tm);
-        _snwprintf_s(file, 1024, _TRUNCATE, L"Steelbound-saves-%04u%02u%02u-%02u%02u%02u.zip",
+        /* W231: US-Export traegt "-us-" im Namen (Daten selbst sind gleich) */
+        _snwprintf_s(file, 1024, _TRUNCATE, L"Steelbound-saves-%s%04u%02u%02u-%02u%02u%02u.zip",
+                     g_edition == LCFG_ED_US ? L"us-" : L"",
                      tm.wYear, tm.wMonth, tm.wDay, tm.wHour, tm.wMinute, tm.wSecond);
         ofn.lpstrFilter = L"ZIP\0*.zip\0\0";
         ofn.lpstrDefExt = L"zip";
@@ -2285,6 +2321,13 @@ static void adv_saves_transfer(int exporting)
     }
     _snprintf_s(msg, sizeof msg, _TRUNCATE, LT("gui.si_preview"), counts.saves, counts.pilots,
                 counts.replays, counts.conflicts);
+    { /* W231: Fassung ist in den Daten nicht erkennbar -> Hinweis (+ Name) */
+        char f8[1100], hint[600];
+        w_to_u8(file, f8, sizeof f8);
+        saves_edition_hint(f8, g_edition, hint, sizeof hint);
+        strcat_s(msg, sizeof msg, "\n\n");
+        strcat_s(msg, sizeof msg, hint);
+    }
     if (counts.conflicts)
     {
         int answer;
@@ -2347,6 +2390,10 @@ static void paint_adv(void)
         const char *mk2;
         adv_data_loc(path, sizeof path, &mk2);
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.adv_data_fmt"), LT(mk2));
+        if (g_edition == LCFG_ED_US) { /* W231: eigener US-Saveordner sichtbar */
+            strcpy_s(t, sizeof t, LT("gui.adv_hdd_us"));
+            adv_hdd_path(path, sizeof path);
+        }
         label1(F_TINY, t, CX0 + 18, CY0 + 270, COLW - 36 - 118, 15, C_DIM);
         L_text(F_TINY, path, CX0 + 18, CY0 + 285, COLW - 36 - 118, 15, C_TEXT,
                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_PATH_ELLIPSIS);
@@ -2758,7 +2805,9 @@ static void ip_fill(HWND c)
         if (v == SB_FPS_AUTO) {
             if (g_disp_hz > 0) { _snprintf_s(b, sizeof b, _TRUNCATE, LT("gui.ip_auto_hz"), g_disp_hz); }
             else { strcpy_s(b, sizeof b, LT("gui.ip_auto")); }
-        } else if (v == 0) { strcpy_s(b, sizeof b, LT("gui.ip_30")); }
+        } else if (v == 0) { /* W234: bei PAL50 ist das Original 25 */
+            strcpy_s(b, sizeof b, LT(ctl(ID_PAL50) && ui_checked(ID_PAL50) ? "gui.ip_25" : "gui.ip_30"));
+        }
         else if (v == 60) { strcpy_s(b, sizeof b, LT("gui.ip_60")); }
         else if (v == 120) { strcpy_s(b, sizeof b, LT("gui.ip_120")); }
         else { _snprintf_s(b, sizeof b, _TRUNCATE, "%d", v); }
@@ -2843,6 +2892,22 @@ static void cpersp_fill(HWND c)
     ComboBox_SetCurSel(c, (sel >= 0 && sel < KCPERSP_N) ? sel : 0);
 }
 
+/* W235 COCKPIT-WIDTH: Original, +1..+10 % in 1er-Schritten ([render] cockpit_width,
+ * gleicher Wert wie im ESC-Menue). Index = Wert. */
+#define KCWIDTH_N 11
+static void cwidth_fill(HWND c)
+{
+    int i, sel = ComboBox_GetCurSel(c);
+    ComboBox_ResetContent(c);
+    combo_add(c, LT("gui.cp_off"));
+    for (i = 1; i < KCWIDTH_N; i++) {
+        char t[16];
+        _snprintf_s(t, sizeof t, _TRUNCATE, "+%d %%", i);
+        combo_add(c, t);
+    }
+    ComboBox_SetCurSel(c, (sel >= 0 && sel < KCWIDTH_N) ? sel : 0);
+}
+
 static void edge_from_settings(const launcher_settings_t *s)
 {
     g_updating++;
@@ -2851,6 +2916,8 @@ static void edge_from_settings(const launcher_settings_t *s)
     edge_pct_set(ctl(ID_EDGE_S), kEdgeS, KEDGES_N, s->edge_fade_strength, LT("gui.edge_s_fmt"));
     ComboBox_SetCurSel(ctl(ID_CPERSP), cpersp_index(s->cockpit_persp)); /* W191 */
     ComboBox_SetCurSel(ctl(ID_CPANINI), cpersp_index(s->cockpit_panini));
+    ComboBox_SetCurSel(ctl(ID_CWIDTH), (s->cockpit_width >= 0 && s->cockpit_width < KCWIDTH_N) ? s->cockpit_width
+                                       : (s->cockpit_width < 0 ? 0 : KCWIDTH_N - 1)); /* W235 */
     g_updating--; /* W171: Freigabe Verlauf = Regel R11/R12 (ui_apply_rules) */
 }
 
@@ -2865,6 +2932,8 @@ static void edge_to_settings(launcher_settings_t *s)
         s->cockpit_persp = (cs >= 0 && cs < KCPERSP_N) ? kCpersp[cs] : 0;
         cs = ComboBox_GetCurSel(ctl(ID_CPANINI));
         s->cockpit_panini = (cs >= 0 && cs < KCPERSP_N) ? kCpersp[cs] : 0;
+        cs = ComboBox_GetCurSel(ctl(ID_CWIDTH)); /* W235 */
+        s->cockpit_width = (cs >= 0 && cs < KCWIDTH_N) ? cs : 0;
     }
 }
 
@@ -5367,7 +5436,7 @@ static void profile_name_from_ui(char *out, size_t cap)
  * Client fs_interp_match=1). */
 static int gfx_fps(const launcher_settings_t *s)
 {
-    int fps = s->interp_fps > 0 ? s->interp_fps : 30;
+    int fps = s->interp_fps > 0 ? s->interp_fps : (s->game_tick == 25 ? 25 : 30); /* W234 */
     if (s->interp_fps == SB_FPS_AUTO) { /* W223: Monitor (auto) */
         fps = sb_fps_auto_from_hz(g_disp_hz);
     }
@@ -5564,6 +5633,8 @@ static void ui_from_settings(const launcher_settings_t *s)
     ComboBox_SetCurSel(ctl(ID_CTRL_AIMASSIST),
                        (s->aim_assist >= 0 && s->aim_assist <= 2) ? s->aim_assist : 0); /* W236 */
     ui_set_checked(ID_CTRL_AUTOGEAR, s->auto_gear);
+    ui_set_checked(ID_PAL50, s->game_tick == 25); /* W234 */
+    ip_fill(ctl(ID_IPFPS)); /* W234: "25 (Original)" bei PAL50 */
     ComboBox_SetCurSel(ctl(ID_IPFPS), ip_sel_of(s->interp_fps)); /* W223 */
     ComboBox_SetCurSel(ctl(ID_WINMODE),
                        (s->window_mode >= 0 && s->window_mode <= 2) ? s->window_mode : 0);
@@ -5654,6 +5725,7 @@ static void ui_to_settings(launcher_settings_t *s)
     s->aim_assist = ComboBox_GetCurSel(ctl(ID_CTRL_AIMASSIST)); /* W236 */
     if (s->aim_assist < 0 || s->aim_assist > 2) s->aim_assist = 0;
     s->auto_gear = ui_checked(ID_CTRL_AUTOGEAR);
+    s->game_tick = ui_checked(ID_PAL50) ? 25 : 30; /* W234 */
     sel = ComboBox_GetCurSel(ctl(ID_IPFPS));
     s->interp_fps = (sel >= 0 && sel < SB_FPS_NCHOICE) ? kSbFpsChoice[sel] : 0; /* W223 */
     sel = ComboBox_GetCurSel(ctl(ID_WINMODE));
@@ -5732,6 +5804,11 @@ static void update_summary(void)
             _snprintf_s(g_sum[0].value, sizeof g_sum[0].value, _TRUNCATE,
                         LT("gui.play_sum_folder"), s.media_root);
         }
+        if (g_edition == LCFG_ED_US || g_edition == LCFG_ED_EU) { /* W231: Fassung */
+            strcat_s(g_sum[0].value, sizeof g_sum[0].value, " \xC2\xB7 ");
+            strcat_s(g_sum[0].value, sizeof g_sum[0].value,
+                     LT(g_edition == LCFG_ED_US ? "gui.ed_us_exp" : "gui.ed_eu"));
+        }
         g_sum[0].col = C_OK;
     } else {
         strcpy_s(g_sum[0].value, sizeof g_sum[0].value,
@@ -5742,7 +5819,7 @@ static void update_summary(void)
     {
         char fpsb[48]; /* W223: alle Raten + Monitor (auto) */
         const char *fps = fpsb;
-        if (s.interp_fps == 0) { fps = LT("gui.sum_30"); }
+        if (s.interp_fps == 0) { fps = LT(s.game_tick == 25 ? "gui.sum_25" : "gui.sum_30"); } /* W234 */
         else if (s.interp_fps == SB_FPS_AUTO) { fps = LT("gui.sum_auto"); }
         else if (s.interp_fps == 60) { fps = LT("gui.sum_60"); }
         else if (s.interp_fps == 120) { fps = LT("gui.sum_120"); }
@@ -5885,8 +5962,10 @@ static void rules_data(const launcher_settings_t *s, lr_env_t *e)
     static int ok = -1;
     static char err[300];
     char k[2200], eff[1024];
-    _snprintf_s(k, sizeof k, _TRUNCATE, "%s|%s|%s|%s|%s", s->game_image,
-                s->xbe_path, s->media_root, s->hdd_root, sb_lang_code());
+    _snprintf_s(k, sizeof k, _TRUNCATE, "%s|%s|%s|%s|%s|%d,%d", s->game_image,
+                s->xbe_path, s->media_root, s->hdd_root, sb_lang_code(),
+                g_imgfix_path[0] && strcmp(s->game_image, g_imgfix_path) == 0 ? g_imgfix_rc : -1,
+                g_imgfix_ed); /* W231: Fixture-Wechsel bei gleichem Pfad neu auswerten */
     if (ok < 0 || strcmp(k, key) != 0) {
         launcher_settings_t t;
         lcfg_defaults(&t);
@@ -5900,8 +5979,12 @@ static void rules_data(const launcher_settings_t *s, lr_env_t *e)
             if (!ok) {
                 strcpy_s(err, sizeof err, g_imgfix_msg);
             }
+            g_edition = g_imgfix_ed;
         } else {
+            lcfg_gameinfo_t gi;
             ok = lcfg_validate(&t, err, sizeof err) == 0;
+            /* W231: Fassung (EU/US) fuer Saves-Ordner, Bereitschaft, Start */
+            g_edition = ok && lcfg_game_info(&t, &gi) ? gi.edition : LCFG_ED_NONE;
         }
         strcpy_s(key, sizeof key, k);
     }
@@ -6229,10 +6312,56 @@ static int do_save(int complain)
  * W159: vr = 1: "Spielen in VR" (vr_enable=1 + Vorschau); vr = 0:
  * Bildschirm (vr_enable=0 immer, egal was gespeichert ist). Die --set-Kette
  * gilt nur fuer diesen Start, user.cfg bleibt unveraendert. */
-static char g_start_args[128]; /* W171: --set-Kette des letzten Starts */
+static char g_start_args[1600]; /* W171: --set-Kette des letzten Starts */
+/* W231: Fassung fuer den Start (Fixture der Shots/Selbsttests, sonst lesen). */
+static void game_info_ui(const launcher_settings_t *s, lcfg_gameinfo_t *gi)
+{
+    if (g_imgfix_path[0] && strcmp(s->game_image, g_imgfix_path) == 0) {
+        memset(gi, 0, sizeof *gi);
+        gi->edition = g_imgfix_ed;
+        gi->startable = g_imgfix_rc == 0;
+        gi->needs_allow = g_imgfix_ed == LCFG_ED_US;
+        return;
+    }
+    lcfg_game_info(s, gi);
+}
+
+/* W231 US-LAUNCHER: Client beendet -> Exitcode 5 (Fassung unbekannt) bzw.
+ * 8 (US-Profilpruefung) verstaendlich melden. show_box: 8 meldet der
+ * Client selbst nicht (nur Log), 5 zeigt er schon an -> nur Statuszeile. */
+static int client_exit_report(unsigned long code, int edition, int show_box)
+{
+    const char *k = lcfg_exit_msg_key(code, edition);
+    if (!k) {
+        return 0;
+    }
+    set_status_k(LT(k), 2);
+    if (show_box && code == 8) {
+        ui_msgbox(g_hwnd, LT(k), LT("gui.btn_start"), MB_ICONWARNING | MB_OK);
+    }
+    return 1;
+}
+
+static void client_exit_poll(void)
+{
+    DWORD code = 0;
+    if (!g_client_proc) {
+        KillTimer(g_hwnd, 7);
+        return;
+    }
+    if (WaitForSingleObject((HANDLE)g_client_proc, 0) != WAIT_OBJECT_0) {
+        return;
+    }
+    GetExitCodeProcess((HANDLE)g_client_proc, &code);
+    CloseHandle((HANDLE)g_client_proc);
+    g_client_proc = NULL;
+    KillTimer(g_hwnd, 7);
+    client_exit_report(code, g_client_ed, g_o.shot == 0);
+}
+
 static int do_start(int dry, int vr)
 {
-    char err[1400], set_args[128];
+    char err[1400], set_args[1600];
     if (!g_has_ldr) {
         _snprintf_s(err, sizeof err, _TRUNCATE, LT("gui.msg_noldr"),
                     g_client_dir);
@@ -6266,6 +6395,19 @@ static int do_start(int dry, int vr)
         }
     }
     app_vr_set_args(vr, g_s.vr_preview, set_args, sizeof set_args);
+    { /* W231 US-LAUNCHER: US -> allow_ntsc_u=1 (solange experimental) + eigener Saveordner */
+        lcfg_gameinfo_t gi;
+        game_info_ui(&g_s, &gi);
+        if (app_edition_start_args(g_client_dir, &g_s, &gi, set_args, sizeof set_args,
+                                   err, sizeof err) != 0) {
+            set_status_k(err, 2);
+            if (!dry) {
+                ui_msgbox(g_hwnd, err, LT("gui.btn_start"), MB_ICONERROR | MB_OK);
+            }
+            return 1;
+        }
+        g_client_ed = gi.edition;
+    }
     strcpy_s(g_start_args, sizeof g_start_args, set_args); /* W171: Trockenlauf-Ausgabe */
     if (dry) {
         set_status_k(LT("gui.msg_dry"),
@@ -6274,12 +6416,20 @@ static int do_start(int dry, int vr)
     }
     {
         char xbe[1024]; /* W172/P6: im Ordner-Modus abgeleitet */
+        void *proc = NULL;
         lcfg_xbe_effective(&g_s, xbe, sizeof xbe);
-        if (app_launch_client_set(g_client_dir, xbe, set_args, err,
-                                  sizeof err) != 0) {
+        if (app_launch_client_proc(g_client_dir, xbe, set_args, err,
+                                   sizeof err, &proc) != 0) {
             set_status_k(err, 2);
             ui_msgbox(g_hwnd, err, LT("gui.btn_start"), MB_ICONERROR | MB_OK);
             return 1;
+        }
+        if (g_client_proc) { /* W231: aelteren Start nicht mehr beobachten */
+            CloseHandle((HANDLE)g_client_proc);
+        }
+        g_client_proc = proc;
+        if (proc) {
+            SetTimer(g_hwnd, 7, 1000, NULL); /* W231: Exitcode 5/8 deuten */
         }
     }
     {
@@ -12034,6 +12184,7 @@ static void ui_apply_language(void)
     combo_refill(ID_EDGE, kEdge, 3);
     if (ctl(ID_CPERSP)) { cpersp_fill(ctl(ID_CPERSP)); } /* W191 */
     if (ctl(ID_CPANINI)) { cpersp_fill(ctl(ID_CPANINI)); }
+    if (ctl(ID_CWIDTH)) { cwidth_fill(ctl(ID_CWIDTH)); } /* W235 */
     if (ctl(ID_VRRES)) { vrres_fill(ctl(ID_VRRES)); } /* W227 */
     c = ctl(ID_EDGE_W);
     if (c) { /* Zahlenformate */
@@ -12098,6 +12249,7 @@ static void ui_apply_language(void)
     ui_settext(ctl(ID_CTRL_MOUSEOFF), LT("gui.ctl_mouseoff"));
     combo_refill(ID_CTRL_AIMASSIST, kAssist, 3); /* W236 */
     ui_settext(ctl(ID_CTRL_AUTOGEAR), LT("gui.ctl_autogear"));
+    ui_settext(ctl(ID_PAL50), LT("gui.pal50")); /* W234 */
     ui_settext(ctl(ID_CTRL_ASSIST), LT("gui.ctl_assist"));
     ui_settext(ctl(ID_CTRL_BROWSER), LT("gui.keys_browser")); /* W179 */
     combo_refill(ID_MOUSE_MODE, kMouse, 2);
@@ -12231,34 +12383,34 @@ static void build_controls(void)
         combo_add(c, kFsHz[i].lkey ? LT(kFsHz[i].lkey) : kFsHz[i].label);
     }
     ComboBox_SetCurSel(c, 0);
-    c = mk(w, K_COMBO, ID_PRESET, P_DISPLAY, CX0 + 120, CY0 + 132, COLW - 138,
+    c = mk(w, K_COMBO, ID_PRESET, P_DISPLAY, CX0 + 120, CY0 + 116, COLW - 138,
            30, "", 0);
     for (i = 0; i < KPRESETS_N; i++) {
         combo_add(c, kPresets[i].lkey ? LT(kPresets[i].lkey) : kPresets[i].label);
     }
-    mk(w, K_EDIT, ID_W, P_DISPLAY, CX0 + 120, CY0 + 168, 90, 30, "",
+    mk(w, K_EDIT, ID_W, P_DISPLAY, CX0 + 120, CY0 + 152, 90, 30, "",
        ES_NUMBER);
-    mk(w, K_EDIT, ID_H, P_DISPLAY, CX0 + 232, CY0 + 168, 90, 30, "",
+    mk(w, K_EDIT, ID_H, P_DISPLAY, CX0 + 232, CY0 + 152, 90, 30, "",
        ES_NUMBER);
     /* Bildrate (Mission) */
-    c = mk(w, K_COMBO, ID_IPFPS, P_DISPLAY, CX0 + 120, CY0 + 288, COLW - 138,
+    c = mk(w, K_COMBO, ID_IPFPS, P_DISPLAY, CX0 + 120, CY0 + 252, COLW - 138,
            30, "", 0);
     ip_fill(c); /* W223 */
     /* W134 VR-PROTO, W159: Vorschau-Art (Reihenfolge = vr_from/to_settings) */
-    c = mk(w, K_COMBO, ID_VR, P_DISPLAY, CX0 + 120, CY0 + 412, COLW - 138, 30, "", 0);
+    c = mk(w, K_COMBO, ID_VR, P_DISPLAY, CX0 + 120, CY0 + 414, COLW - 138, 30, "", 0);
     combo_add(c, LT("gui.vr_prev_sbs"));
     combo_add(c, LT("gui.vr_prev_left"));
     combo_add(c, LT("gui.vr_prev_right"));
     combo_add(c, LT("gui.vr_prev_off"));
     ComboBox_SetCurSel(c, 1);
     /* W183 VR-FIX3: VR-Leistung (Preset) + Render-Aufloesung nebeneinander */
-    c = mk(w, K_COMBO, ID_VRPRESET, P_DISPLAY, CX0 + 120, CY0 + 446, COLW - 138 - 8 - EDGE_W1, 30, "", 0);
+    c = mk(w, K_COMBO, ID_VRPRESET, P_DISPLAY, CX0 + 120, CY0 + 448, COLW - 138 - 8 - EDGE_W1, 30, "", 0);
     combo_add(c, LT("gui.vrp_perf"));
     combo_add(c, LT("gui.vrp_bal"));
     combo_add(c, LT("gui.vrp_qual"));
     combo_add(c, LT("gui.vrp_custom"));
     ComboBox_SetCurSel(c, 1);
-    c = mk(w, K_COMBO, ID_VRRES, P_DISPLAY, CX0 + 120 + COLW - 138 - EDGE_W1, CY0 + 446,
+    c = mk(w, K_COMBO, ID_VRRES, P_DISPLAY, CX0 + 120 + COLW - 138 - EDGE_W1, CY0 + 448,
            EDGE_W1, 30, "", 0);
     vrres_fill(c); /* W227: "Res. 80 %" */
     ComboBox_SetCurSel(c, vrres_index(80));
@@ -12291,12 +12443,16 @@ static void build_controls(void)
     c = mk(w, K_COMBO, ID_CPERSP, P_DISPLAY, COL2 + 120, CY0 + 186, COLW - 138, 30, "", 0);
     cpersp_fill(c);
     ComboBox_SetCurSel(c, 0);
-    c = mk(w, K_COMBO, ID_CPANINI, P_DISPLAY, COL2 + 120, CY0 + 222,
+    c = mk(w, K_COMBO, ID_CPANINI, P_DISPLAY, COL2 + 120, CY0 + 220,
            COLW - 138, 30, "", 0); /* W191: Panini (W227: eigene Zeile mit Beschriftung) */
     cpersp_fill(c);
     ComboBox_SetCurSel(c, 0);
+    c = mk(w, K_COMBO, ID_CWIDTH, P_DISPLAY, COL2 + 120, CY0 + 254,
+           COLW - 138, 30, "", 0); /* W235 COCKPIT-WIDTH: Breite (gleiche Optik wie Kamera/Panini) */
+    cwidth_fill(c);
+    ComboBox_SetCurSel(c, 0);
     /* W148: Render-Skalierung (Index: 0 = Auto dyn, 1 = Auto fest, 2..5 = 1..4) */
-    c = mk(w, K_COMBO, ID_RTSCALE, P_DISPLAY, COL2 + 120, CY0 + 432, COLW - 138, 30, "", 0);
+    c = mk(w, K_COMBO, ID_RTSCALE, P_DISPLAY, CX0 + 120, CY0 + 288, COLW - 138, 30, "", 0);
     combo_add(c, LT("gui.rs_dyn"));
     combo_add(c, LT("gui.rs_autof"));
     combo_add(c, "1");
@@ -12450,6 +12606,8 @@ static void build_controls(void)
     /* --- Ton --- */
     mk(w, K_TOGGLE, ID_AUDIO, P_AUDIO, CX0 + 18, CY0 + 50, 300, 28, LT("gui.ton_on"),
        0);
+    /* W234 PAL50: Spieltempo (wirkt beim naechsten Start, kein ESC-Schalter) */
+    mk(w, K_TOGGLE, ID_PAL50, P_AUDIO, CX0 + 18, CY0 + 432, CW - 36, 28, LT("gui.pal50"), 0);
     /* --- W195 PHOTO-MODE: Extras (Fotoordner, Aufnahme-Aufloesung, Format) --- */
     mk(w, K_EDIT, ID_PH_DIR, P_AUDIO, CX0 + 18, CY0 + 208, CW - 36 - 250, 30, "", 0);
     mk(w, K_BTN, ID_PH_BROWSE, P_AUDIO, CX0 + CW - 18 - 242, CY0 + 208, 112, 30, LT("gui.btn_browse"), 0);
@@ -12696,6 +12854,14 @@ static void on_command_inner(int id, int code)
         ui_set_checked(ID_CTRL_AUTOGEAR, !ui_checked(ID_CTRL_AUTOGEAR));
         set_status(LT(ui_checked(ID_CTRL_AUTOGEAR) ? "gui.ctl_autogear_on" : "gui.ctl_simple_off"));
         break;
+    case ID_PAL50: { /* W234 PAL50: Spieltakt 25/30, Bildratenliste neu beschriften */
+        int s0 = ComboBox_GetCurSel(ctl(ID_IPFPS));
+        ui_set_checked(ID_PAL50, !ui_checked(ID_PAL50));
+        ip_fill(ctl(ID_IPFPS));
+        ComboBox_SetCurSel(ctl(ID_IPFPS), s0);
+        set_status(LT(ui_checked(ID_PAL50) ? "gui.pal50_on" : "gui.pal50_off"));
+        break;
+    }
     case ID_REM_LABEL: { /* W153; W173 (PO 7.11.): eigene Option, nicht im Grafik-Preset */
         g_gfx.shx[LSHX_LABEL] = ui_checked(ID_REM_LABEL) ? 0 : 1;
         ui_set_checked(ID_REM_LABEL, g_gfx.shx[LSHX_LABEL]);
@@ -12778,6 +12944,7 @@ static void on_command_inner(int id, int code)
     case ID_EDGE: /* W107 EDGE-MODE (W171: Verlauf frei per Regel R11/R12) */
     case ID_CPERSP: /* W191 UW-PERSP */
     case ID_CPANINI:
+    case ID_CWIDTH: /* W235 */
     case ID_EDGE_W:
     case ID_EDGE_S:
         if (code == CBN_SELCHANGE && !g_updating) {
@@ -13218,6 +13385,9 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == 1 && g_page == P_CTRL && update_pad_status()) {
             redraw_rect(CX0, CY0 + 392, COLW, 104);
         }
+        if (wp == 7) {
+            client_exit_poll(); /* W231 */
+        }
         return 0;
     case WM_DPICHANGED:
         if (!g_o.force_dpi) {
@@ -13233,6 +13403,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         return 0;
     case WM_DESTROY:
         KillTimer(h, 1);
+        KillTimer(h, 7);
         PostQuitMessage(0);
         return 0;
     }
@@ -13381,6 +13552,8 @@ static const struct {
     { "img_browse_bad", "game_image=;xbe_path=;media_root=", 0 },
     /* W227 LAUNCHER-POLISH: startbereit mit Beispiel-Abbild (Fixture, bereinigt) */
     { "ready", "xbe_path=;media_root=", 0 },
+    { "ready_us", "xbe_path=;media_root=", 0 },  /* W231: US-Beispielabbild */
+    { "exit8_us", "xbe_path=;media_root=", 0 },  /* W231: + Meldung Exitcode 8 */
     { "ready_controller", "xbe_path=;media_root=;sbc_usb=1;sbc_mouse_off=1;input_profile=", 0 },
     { "pack2", "", 0, 1 },  /* W172: zweites Pack gewaehlt (verdeckt durch ...) */
     { "pack3", "", 0, 2 },  /* W172: drittes Pack (Effekt-Pack mit Schloss) */
@@ -13403,12 +13576,17 @@ int gui_state_known(const char *name)
 }
 
 #define W220_ISO "D:\\Games\\Steel Battalion (Europe).iso"
+#define W220_ISO_US "D:\\Games\\Steel Battalion (USA).iso"
 static void w220_fixture(const char *path, int rc);
 
 static void gui_apply_state(const char *name)
 {
     int i;
-    if (strncmp(name, "ready", 5) == 0) { /* W227: Fixture vor dem Regelwerk */
+    if (strcmp(name, "ready_us") == 0 || strcmp(name, "exit8_us") == 0) {
+        /* W231: startbereit mit US-Beispielabbild (Fixture, bereinigt) */
+        w220_fixture(W220_ISO_US, 0);
+        strcpy_s(g_s.game_image, sizeof g_s.game_image, W220_ISO_US);
+    } else if (strncmp(name, "ready", 5) == 0) { /* W227: Fixture vor dem Regelwerk */
         w220_fixture(W220_ISO, 0);
         strcpy_s(g_s.game_image, sizeof g_s.game_image, W220_ISO);
     }
@@ -13427,17 +13605,24 @@ static void gui_apply_state(const char *name)
 
 /* W220 PLAY-LAYOUT: Zustaende der Einrichtungskarte (Shots + Selbsttest 62).
  * Pfade sind bereinigte Beispiele; die Pruefung liefert die Fixture. */
-#define W220_ISO_US "D:\\Games\\Steel Battalion (USA).iso"
+#define W220_ISO_JP "D:\\Games\\Steel Battalion (Japan).iso" /* W231: nicht unterstuetzt */
 #define W220_DIR "D:\\Games\\Steel Battalion"
 static void w220_fixture(const char *path, int rc)
 {
     char m[600];
-    if (rc == 0) {
+    g_imgfix_ed = LCFG_ED_NONE;
+    if (rc == 0 && strcmp(path, W220_ISO_US) == 0) { /* W231: US experimental */
+        _snprintf_s(m, sizeof m, _TRUNCATE, LT("gui.image_ok_us"),
+                    "Steel Battalion (USA, NTSC-U)");
+        g_imgfix_ed = LCFG_ED_US;
+    } else if (rc == 0) {
         _snprintf_s(m, sizeof m, _TRUNCATE, LT("gui.image_ok"),
                     "Steel Battalion (Europe, PAL)");
-    } else if (rc == 4) {
+        g_imgfix_ed = LCFG_ED_EU;
+    } else if (rc == 4) { /* W231: Beispiel Japan (US ist jetzt experimental) */
         _snprintf_s(m, sizeof m, _TRUNCATE, LT("cfg.image_version"), "43430002",
-                    sb_gamever_region_name(1), 0u);
+                    sb_gamever_region_name(2), 0u);
+        g_imgfix_ed = LCFG_ED_OTHER;
     } else {
         _snprintf_s(m, sizeof m, _TRUNCATE, LT("cfg.image_isdir"), path);
     }
@@ -13453,8 +13638,8 @@ static int w220_state(const char *name)
     if (strcmp(name, "img_browse") == 0 || strcmp(name, "img_browse_bad") == 0) {
         /* wie der Nutzer: leere Karte, Durchsuchen, danach Regelwerk (on_command) */
         int bad = name[10] == '_';
-        w220_fixture(bad ? W220_ISO_US : W220_ISO, bad ? 4 : 0);
-        u8_to_w(bad ? W220_ISO_US : W220_ISO, w, 600);
+        w220_fixture(bad ? W220_ISO_JP : W220_ISO, bad ? 4 : 0);
+        u8_to_w(bad ? W220_ISO_JP : W220_ISO, w, 600);
         image_chosen(w);
         ui_apply_rules();
         return 1;
@@ -13468,7 +13653,7 @@ static int w220_state(const char *name)
     } else if (strcmp(name, "img_ok") == 0) {
         path = W220_ISO;
     } else if (strcmp(name, "img_version") == 0) {
-        path = W220_ISO_US;
+        path = W220_ISO_JP;
         rc = 4;
     } else if (strcmp(name, "img_folder") == 0) {
         path = W220_DIR;
@@ -13795,6 +13980,9 @@ int gui_main(const char *client_override, const gui_opts_t *o)
                 show_page(p);
                 if (p == P_PLAY && strncmp(g_o.state, "img_", 4) == 0) {
                     w220_state(g_o.state); /* W220: kein zusaetzliches Neuzeichnen */
+                }
+                if (strcmp(g_o.state, "exit8_us") == 0) {
+                    client_exit_report(8, LCFG_ED_US, 0); /* W231: Meldung wie nach Clientende */
                 }
                 pump();
                 RedrawWindow(g_hwnd, NULL, NULL,
@@ -14627,9 +14815,9 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     { "img_empty", 0, 1, 1, "" },
                     { "img_unchecked", 1, 1, 0, W220_ISO },
                     { "img_ok", 1, 1, 2, W220_ISO },
-                    { "img_version", 0, 1, 3, W220_ISO_US },
+                    { "img_version", 0, 1, 3, W220_ISO_JP },
                     { "img_folder", 0, 1, 3, W220_DIR },
-                    { "img_browse_bad", 0, 1, 3, W220_ISO_US }, /* Start: leer */
+                    { "img_browse_bad", 0, 1, 3, W220_ISO_JP }, /* Start: leer */
                     { "img_browse", 1, 0, 0, W220_ISO },        /* Start: leer */
                 };
                 static const int setup_ids[] = { ID_IMAGE, ID_IMAGE_C, ID_IMAGE_B,
@@ -14754,6 +14942,119 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                 g_img_msg[0] = '\0';
                 g_img_path[0] = '\0';
                 g_setup_force = 0;
+            }
+            { /* --- 63 (W231 US-LAUNCHER): Fixture US/EU/Japan -> Fassung, Bereitschaft,
+               * Saveordner, Startparameter; Exit-Meldungen 5/8; Import-Hinweis --- */
+                static const struct { const char *path; int rc, ed, us; } k63[] = {
+                    { W220_ISO_US, 0, LCFG_ED_US, 1 },
+                    { W220_ISO, 0, LCFG_ED_EU, 0 },
+                    { W220_ISO_JP, 4, LCFG_ED_OTHER, 0 },
+                };
+                char why63[300] = "", hp[1200], args[1600], e63[600], keep63[16];
+                launcher_settings_t s63;
+                lcfg_gameinfo_t gi63;
+                int i63, li63;
+                const lr_env_t *fix63 = g_env_fix;
+                g_env_fix = NULL; /* echter Regelweg (rules_data mit Fixture) */
+                for (i63 = 0; i63 < 3 && !why63[0]; i63++) {
+                    size_t hl;
+                    lcfg_defaults(&s63);
+                    s63.xbe_path[0] = s63.media_root[0] = '\0';
+                    strcpy_s(s63.game_image, sizeof s63.game_image, k63[i63].path);
+                    w220_fixture(k63[i63].path, k63[i63].rc);
+                    show_page(P_PLAY);
+                    ui_from_settings(&s63);
+                    ui_apply_rules();
+                    update_summary();
+                    pump();
+                    adv_hdd_path(hp, sizeof hp);
+                    hl = strlen(hp);
+                    game_info_ui(&s63, &gi63);
+                    strcpy_s(args, sizeof args, "vr_enable=0");
+                    if (g_edition != k63[i63].ed || gi63.edition != k63[i63].ed) {
+                        _snprintf_s(why63, sizeof why63, _TRUNCATE, "%d: Fassung %d/%d", i63,
+                                    g_edition, gi63.edition);
+                    } else if (k63[i63].rc == 0 &&
+                               !strstr(g_sum[0].value, LT(k63[i63].us ? "gui.ed_us_exp" : "gui.ed_eu"))) {
+                        _snprintf_s(why63, sizeof why63, _TRUNCATE, "%d: Bereitschaft '%s'", i63,
+                                    g_sum[0].value);
+                    } else if (k63[i63].rc == 0 && g_sum[0].col != C_OK) {
+                        _snprintf_s(why63, sizeof why63, _TRUNCATE, "%d: Bereitschaft nicht gruen", i63);
+                    } else if (k63[i63].rc != 0 && g_data_ok) {
+                        _snprintf_s(why63, sizeof why63, _TRUNCATE, "%d: Japan startbar", i63);
+                    } else if ((hl > 3 && strcmp(hp + hl - 3, "\\us") == 0) != k63[i63].us) {
+                        _snprintf_s(why63, sizeof why63, _TRUNCATE, "%d: Saveordner '%s'", i63, hp);
+                    } else if (app_edition_start_args(g_client_dir, &s63, &gi63, args, sizeof args,
+                                                      e63, sizeof e63) != 0) {
+                        _snprintf_s(why63, sizeof why63, _TRUNCATE, "%d: Startparameter Fehler", i63);
+                    } else if (k63[i63].us
+                                   ? (strncmp(args, "vr_enable=0;allow_ntsc_u=1;hdd_root_us=", 39) != 0 ||
+                                      strlen(args) < 3 ||
+                                      strcmp(args + strlen(args) - 3, "\\us") != 0)
+                                   : strcmp(args, "vr_enable=0") != 0) {
+                        _snprintf_s(why63, sizeof why63, _TRUNCATE, "%d: Startparameter '%.80s'", i63,
+                                    args);
+                    }
+                }
+                /* Exit-Meldungen (wie nach Clientende, ohne Meldungsfenster) */
+                strcpy_s(keep63, sizeof keep63, sb_lang_code());
+                for (li63 = 0; li63 < 2 && !why63[0]; li63++) {
+                    sb_lang_set(li63 ? "de" : "en");
+                    set_status_k("x", 0);
+                    if (client_exit_report(0, LCFG_ED_US, 0) || client_exit_report(1, LCFG_ED_EU, 0) ||
+                        strcmp(g_status, "x") != 0) {
+                        strcpy_s(why63, sizeof why63, "Exit 0/1 meldet");
+                    } else if (!client_exit_report(8, LCFG_ED_US, 0) ||
+                               strcmp(g_status, LT("gui.exit8")) != 0 || g_status_kind != 2 ||
+                               !strstr(g_status, li63 ? "Exitcode 8" : "exit code 8") ||
+                               !strstr(g_status, li63 ? "US-Fassung" : "US copy")) {
+                        strcpy_s(why63, sizeof why63, "Exit 8");
+                    } else if (!client_exit_report(5, LCFG_ED_US, 0) ||
+                               strcmp(g_status, LT("gui.exit5_us")) != 0 ||
+                               !strstr(g_status, li63 ? "US-Fassung" : "US copy")) {
+                        strcpy_s(why63, sizeof why63, "Exit 5 US");
+                    } else if (!client_exit_report(5, LCFG_ED_EU, 0) ||
+                               strcmp(g_status, LT("gui.exit5")) != 0 ||
+                               !strstr(g_status, li63 ? "Exitcode 5" : "exit code 5")) {
+                        strcpy_s(why63, sizeof why63, "Exit 5 EU");
+                    }
+                }
+                sb_lang_set(keep63);
+                /* Import-Hinweis: Fassung nicht in den Daten erkennbar, nur Exportname */
+                if (!why63[0]) {
+                    static const struct { const char *f; int ed, warn; } h63[] = {
+                        { "X:\\b\\Steelbound-saves-us-20261114-101010.zip", LCFG_ED_EU, 1 },
+                        { "X:\\b\\Steelbound-saves-us-20261114-101010.zip", LCFG_ED_US, 0 },
+                        { "X:\\b\\Steelbound-saves-20261114-101010.zip", LCFG_ED_US, 1 },
+                        { "X:\\b\\Steelbound-saves-20261114-101010.zip", LCFG_ED_EU, 0 },
+                        { "X:\\b\\my saves", LCFG_ED_US, 0 },
+                    };
+                    int h;
+                    for (h = 0; h < 5 && !why63[0]; h++) {
+                        char t63[700], want[700];
+                        saves_edition_hint(h63[h].f, h63[h].ed, t63, sizeof t63);
+                        if (h63[h].warn) {
+                            _snprintf_s(want, sizeof want, _TRUNCATE, LT("gui.si_ed_mismatch"),
+                                        LT(h63[h].ed == LCFG_ED_US ? "gui.ed_eu" : "gui.ed_us"),
+                                        LT(h63[h].ed == LCFG_ED_US ? "gui.ed_us" : "gui.ed_eu"));
+                        } else {
+                            _snprintf_s(want, sizeof want, _TRUNCATE, LT("gui.si_ed_hint"),
+                                        LT(h63[h].ed == LCFG_ED_US ? "gui.ed_us" : "gui.ed_eu"));
+                        }
+                        if (strcmp(t63, want) != 0) {
+                            _snprintf_s(why63, sizeof why63, _TRUNCATE, "Import-Hinweis %d", h);
+                        }
+                    }
+                }
+                imgfix_set(NULL, 0, NULL);
+                g_imgfix_ed = LCFG_ED_NONE;
+                g_env_fix = fix63;
+                set_status_k("", 0);
+                if (!why63[0]) {
+                    GT_OK("63 W231 US-LAUNCHER (US/EU/Japan: Fassung, Bereitschaft, Saveordner, Startparameter; Exit 5/8 EN/DE; Import-Hinweis)");
+                } else {
+                    GT_FAIL("63 W231 US-LAUNCHER", "%s", why63);
+                }
             }
             /* --- 51: Tooltips = Begruendung der Sperre (Muster A) --- */
             {
@@ -15832,7 +16133,8 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                 strcpy_s(cfg.media_root, sizeof cfg.media_root, dir);
                 strcpy_s(cfg.hdd_root, sizeof cfg.hdd_root, dir);
                 if (lcfg_validate(&cfg, msg, sizeof msg) == 0 ||
-                    !strstr(msg, li ? "Diese Spielversion" : "This game version") ||
+                    !strstr(msg, regions[ri] == 1 ? (li ? "Diese US-Fassung" : "This US copy") /* W231 */
+                                                   : (li ? "Diese Spielversion" : "This game version")) ||
                     !strstr(msg, "43430002") || !strstr(msg, "42") ||
                     !strstr(msg, sb_gamever_region_name(regions[ri])) ||
                     !strstr(msg, "Steel Battalion (Europe, PAL)")) ok = 0;
@@ -15840,7 +16142,8 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                 u8_to_acp(iso, acp, sizeof acp);
                 if (iso_vfs_make_test_image(acp, xb, sizeof xb) != 0 ||
                     lcfg_image_check(iso, msg, sizeof msg) != 4 ||
-                    !strstr(msg, li ? "Diese Spielversion" : "This game version") ||
+                    !strstr(msg, regions[ri] == 1 ? (li ? "Diese US-Fassung" : "This US copy") /* W231 */
+                                                   : (li ? "Diese Spielversion" : "This game version")) ||
                     !strstr(msg, "43430002") || !strstr(msg, "42") ||
                     !strstr(msg, sb_gamever_region_name(regions[ri])) ||
                     !strstr(msg, "Steel Battalion (Europe, PAL)")) ok = 0;

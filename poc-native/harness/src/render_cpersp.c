@@ -36,10 +36,13 @@
  * Speicherzugriff mit 0 zurueck, kein Draw wird angefasst (bitgleich).
  */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include <math.h>
 #include "render_cpersp_math.h"
+#include "sb_state.h" /* W232: sb_in_mission */
 
 #define CP_CYC_MAX 8
+#define CP_W_MAX 10 /* W235: Breite hoechstens + 10 % */
 
 static unsigned cp_f = 0xFFFFFFFFu;
 static int cp_on;              /* dieses Bild: Option aktiv (Cockpit-Ansicht) */
@@ -55,8 +58,9 @@ static unsigned cp_ex_f;                /* Bild der letzten Messung (+1, 0 = kei
 static int cp_ex_key[4] = { -1, -1, -1, -1 };
 static unsigned cp_ex_n;
 static int cp_log_k[7];
-static int cp_cyc_n = -1, cp_cyc_p[CP_CYC_MAX], cp_cyc_z[CP_CYC_MAX], cp_cyc_pn[CP_CYC_MAX];
+static int cp_cyc_n = -1, cp_cyc_p[CP_CYC_MAX], cp_cyc_z[CP_CYC_MAX], cp_cyc_pn[CP_CYC_MAX], cp_cyc_w[CP_CYC_MAX];
 static int cp_pn_now;                   /* Panini-Staerke dieses Bildes (%), 0 = aus */
+static int cp_w_now;                    /* W235: Breite dieses Bildes (%), 0 = aus */
 static unsigned cp_cls[4];              /* DIAG: Draws je Klasse im Bild (3d, p2-decal, p2-flach, 2d) */
 static unsigned cp_p2v;                 /* DIAG: P2-Vertices verschoben */
 static LONGLONG cp_q_frame;             /* CPU-Zeit der Option im laufenden Bild (QPC-Ticks) */
@@ -85,9 +89,9 @@ static int cp_cockpit_view(void)
 {
     unsigned b;
     if (cp_rd32(M3D_SCENE_ADDR) != 0x2Cu || cp_rd32(M3D_MLOOP_ADDR) != 1u) { return 0; }
-    if (cp_rd16(0x346FB0u) == 0x80u) { return 0; }
-    b = cp_rd32(0x3520DCu);
-    return cp_rd16(0x3516DCu) == 0u || (b != 0u && b < 0xFFFFFFFEu);
+    if (cp_rd16(SBA(0x346FB0u)) == 0x80u) { return 0; }
+    b = cp_rd32(SBA(0x3520DCu));
+    return cp_rd16(SBA(0x3516DCu)) == 0u || (b != 0u && b < 0xFFFFFFFEu);
 }
 
 static void cp_cycle_parse(void)
@@ -95,16 +99,18 @@ static void cp_cycle_parse(void)
     const char *s = g_cfg.cockpit_persp_cycle;
     cp_cyc_n = 0;
     while (*s && cp_cyc_n < CP_CYC_MAX) {
-        int p = 0, z = 100, pn = 0;
+        int p = 0, z = 100, pn = 0, w = 0;
         char *e = NULL;
         p = (int)strtol(s, &e, 10);
         if (e == s) { break; }
         s = e;
         if (*s == '/') { s++; z = (int)strtol(s, &e, 10); if (e == s) { z = 100; } s = e; }
         if (*s == '/') { s++; pn = (int)strtol(s, &e, 10); if (e == s) { pn = 0; } s = e; }
+        if (*s == '/') { s++; w = (int)strtol(s, &e, 10); if (e == s) { w = 0; } s = e; } /* W235 */
         cp_cyc_p[cp_cyc_n] = p;
         cp_cyc_z[cp_cyc_n] = z;
         cp_cyc_pn[cp_cyc_n] = pn;
+        cp_cyc_w[cp_cyc_n] = w;
         cp_cyc_n++;
         while (*s == ',' || *s == ' ') { s++; }
     }
@@ -159,7 +165,7 @@ static void cp_log_state(unsigned f)
 
 static void cp_eval(void)
 {
-    int pct = g_cfg.cockpit_persp, zm = g_cfg.cockpit_zoom, pn = g_cfg.cockpit_panini;
+    int pct = g_cfg.cockpit_persp, zm = g_cfg.cockpit_zoom, pn = g_cfg.cockpit_panini, cw = g_cfg.cockpit_width;
     cp_on = 0;
     if (g_cfg.cockpit_persp_cycle[0]) {
         if (cp_cyc_n < 0) { cp_cycle_parse(); }
@@ -168,9 +174,11 @@ static void cp_eval(void)
             pct = cp_cyc_p[i];
             zm = cp_cyc_z[i];
             pn = cp_cyc_pn[i];
+            cw = cp_cyc_w[i];
         }
     }
     cp_pn_now = cp_clampi(pn, 0, 100);
+    cp_w_now = cp_clampi(cw, 0, CP_W_MAX);
     pct = cp_clampi(pct, 0, 100);
     zm = cp_clampi(zm <= 0 ? 100 : zm, 100, 200);
     cp_pct_now = pct;
@@ -250,8 +258,9 @@ int sb_cp_frame(void)
 {
     static int hooked;
     if (!hooked) { hooked = 1; sb_interp_set_pause_mvp_hook(cp_pause_hook); }
-    if (!g_cfg.cockpit_persp && g_cfg.cockpit_zoom == 100 && !g_cfg.cockpit_panini && !g_cfg.cockpit_persp_cycle[0]) {
-        cp_view = 0; /* Panini aus */
+    if (!g_cfg.cockpit_persp && g_cfg.cockpit_zoom == 100 && !g_cfg.cockpit_panini && !g_cfg.cockpit_width &&
+        !g_cfg.cockpit_persp_cycle[0]) {
+        cp_view = 0; /* Panini/Breite aus */
         return 0;
     }
     if (cp_f != g_present_no) {
@@ -396,12 +405,14 @@ static void cp_draw_body(float mvp[16], int cls, float *pos, size_t st, unsigned
  * Original relativ zur Kante begann). Nur mit frischer Messung. */
 void sb_cp_edge_box(unsigned *bx, unsigned *by, unsigned *bw, unsigned *bh)
 {
-    float fx, fy, cx, cy, w, h;
-    if (!cp_on || !cp_ex_f || cp_f + 2u < g_present_no || g_present_no + 1u > cp_ex_f + 1200u) { return; }
-    fx = cp_edge_f;
-    fy = cp_zoom;
-    if (fx < 1.0f) { fx = 1.0f; }
-    if (fy < 1.0f) { fy = 1.0f; }
+    float fx = 1.0f, fy = 1.0f, cx, cy, w, h;
+    if (cp_on && cp_ex_f && cp_f + 2u >= g_present_no && g_present_no + 1u <= cp_ex_f + 1200u) {
+        fx = cp_edge_f;
+        fy = cp_zoom;
+        if (fx < 1.0f) { fx = 1.0f; }
+        if (fy < 1.0f) { fy = 1.0f; }
+    }
+    fx *= sb_cp_width(); /* W235: die Breite schiebt die Cockpitkante mit nach aussen (aus: x 1) */
     if (fx == 1.0f && fy == 1.0f) { return; }
     cx = (float)*bx + (float)*bw * 0.5f;
     cy = (float)*by + (float)*bh * 0.5f;
@@ -427,7 +438,6 @@ void sb_cp_present(unsigned n)
 {
     static unsigned cvf, cvf_demo, left, idx, nlist, list[8];
     static int parsed, demo[8];
-    unsigned md;
     if (!g_cfg.cockpit_persp_shots[0]) { return; }
     if (!parsed) {
         const char *s = g_cfg.cockpit_persp_shots;
@@ -445,8 +455,8 @@ void sb_cp_present(unsigned n)
     if (left) {
         char nm[64];
         left--;
-        _snprintf_s(nm, sizeof nm, _TRUNCATE, "cpersp_%06u_p%03d_z%03d_n%03d", n, cp_on ? cp_pct_now : 0, cp_on ? cp_zoom_now : 100,
-                    sb_cp_panini_d() > 0.0f ? cp_pn_now : 0);
+        _snprintf_s(nm, sizeof nm, _TRUNCATE, "cpersp_%06u_p%03d_z%03d_n%03d_w%02d", n, cp_on ? cp_pct_now : 0, cp_on ? cp_zoom_now : 100,
+                    sb_cp_panini_d() > 0.0f ? cp_pn_now : 0, sb_cp_width() > 1.0f ? cp_w_now : 0);
         sb_render_shot_name(nm, NULL);
         if (g_cfg.edge_ab) { sb_edge_ab_shots(nm, NULL); } /* + _e1/_e2: Bildraender mit der verschobenen Kante */
         HLOG_I("CPERSP shot %s: on=%d ansicht=%d staerke=%d%% zoom=%d%% d=%.3f k=%.4f kantenfaktor=%.3f", nm, cp_on, cp_view,
@@ -454,8 +464,7 @@ void sb_cp_present(unsigned n)
         return;
     }
     if (idx >= nlist || cp_f + 1u != n || !cp_view) { return; } /* Draws dieses Bildes liefen mit g_present_no = n - 1 */
-    md = cp_rd32(0x2EEA34u);
-    if (md == 4u) { cvf++; }
+    if (sb_in_mission()) { cvf++; } /* W232: Spielermission (ohne Titel-Demo) statt Ladezaehler == 4 */
     cvf_demo++;
     if ((demo[idx] ? cvf_demo : cvf) >= list[idx]) {
         idx++;
@@ -512,4 +521,17 @@ float sb_cp_panini_d(void)
 float sb_cp_panini_offset(void)
 {
     return cp_pn_o;
+}
+
+/* W235 COCKPIT-WIDTH: Breitenfaktor der Cockpit-Ansicht dieses Bildes (1 = aus).
+ * Nutzer-Option [render] cockpit_width 0..10 %: leichte waagerechte Streckung
+ * um die Bildmitte wie die Community-Referenz (W191 Par. 1: sx 1,08..1,10,
+ * sy 1,00). Gleiches Gate wie Panini (Cockpit-Ansicht der Mission, nie VR);
+ * ohne Zyklus gilt der aktuelle cfg-Wert (live auch im Standbild der Pause).
+ * Die Streckung laeuft im Panini-Pass hinter der Panini-Abbildung. */
+float sb_cp_width(void)
+{
+    int cw = g_cfg.cockpit_persp_cycle[0] ? cp_w_now : g_cfg.cockpit_width;
+    if (!cp_view || g_cfg.vr_enable || cw <= 0 || !g_bb_w || !g_bb_h) { return 1.0f; }
+    return 1.0f + (float)cp_clampi(cw, 0, CP_W_MAX) / 100.0f;
 }

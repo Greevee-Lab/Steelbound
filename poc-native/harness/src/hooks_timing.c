@@ -6,10 +6,13 @@
 #include "audio_out.h"
 #include "sb_perfhud.h" /* W122 PERF-HUD */
 
-/* TURBO bis Spielmodus (A1): 1 solange u32 an 0x2EEA34 (Spielmodus: 1 Logos,
- * 2 Titel, 3 Menues, 4 Missions-Load, memscan M4d) noch unter
- * turbo_until_mode liegt. 0 = Schalter aus. Leseschutz per SEH wie bei
- * mem:-Triggern (Adresse ist XBE-.data, ggf. frueh noch nicht gesetzt). */
+/* TURBO bis Ladezaehler (A1): 1 solange u32 an 0x2EEA34 noch unter
+ * turbo_until_mode liegt. 0 = Schalter aus. W232: [0x2EEA34] ist ein
+ * Ladezaehler (FUN_000F5AF0, +1 je Ladebildschirm inkl. Titel-Demo), kein
+ * Spielmodus. Gemeint ist hier bewusst "N-ter Ladevorgang erreicht": in der
+ * zustandsgesteuerten Testkette (zwei Demos) ist 4 = Missions-Load, Logik
+ * unveraendert (Golden-Takt). Leseschutz per SEH wie bei mem:-Triggern
+ * (Adresse ist XBE-.data, ggf. frueh noch nicht gesetzt). */
 int turbo_mode_active(void)
 {
     static int mode_logged;
@@ -18,7 +21,7 @@ int turbo_mode_active(void)
         return 0;
     }
     __try {
-        mode = *(volatile u32 *)(uintptr_t)0x2EEA34u;
+        mode = *(volatile u32 *)(uintptr_t)SBA(0x2EEA34u);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         mode = 0;
     }
@@ -27,7 +30,7 @@ int turbo_mode_active(void)
     }
     if (!mode_logged) {
         mode_logged = 1;
-        HLOG_I("TURBO: Modus %u erreicht bei Frame %u (Ziel %d)",
+        HLOG_I("TURBO: Modus %u erreicht bei Frame %u (Ziel %d)", /* W232: Modus = Ladezaehler */
                mode, g_frames, g_cfg.turbo_until_mode);
     }
     return 0;
@@ -63,6 +66,7 @@ void sb_timing_go_realtime(int hz)
 {
     u32 now;
     if (hz <= 0 || g_cfg.vblank_hz > 0) { return; }
+    if (g_cfg.game_tick == 25 && hz == 60) { hz = 50; } /* W234 PAL50 */
     g_cfg.vblank_hz = hz;
     now = vblank_tick_raw();
     g_vb_off = g_fs_counter + 4u - now;
@@ -363,7 +367,7 @@ u32 __stdcall hook_BinkWait(u32 movie)
     static u32 previous, previous_frame;
     static int aligned;
     volatile u32 *b = (volatile u32 *)(uintptr_t)movie;
-    u32 result = ((wait_fn)(uintptr_t)0x241430u)(movie);
+    u32 result = ((wait_fn)(uintptr_t)SBA(0x241430u))(movie);
     if (movie && b[0] && b[1] && b[3] <= b[2]) {
         if (movie != previous || (b[3] <= 1u && previous_frame > 1u)) aligned = 0;
         previous = movie;
@@ -374,7 +378,7 @@ u32 __stdcall hook_BinkWait(u32 movie)
             aligned = 1;
             if (g_cfg.audio_sync_diag)
                 HLOG_I("AVSYNC movie-start: frame=%u delay_ms=%u", b[3], delay);
-            result = ((wait_fn)(uintptr_t)0x241430u)(movie);
+            result = ((wait_fn)(uintptr_t)SBA(0x241430u))(movie);
         }
     }
     return result;

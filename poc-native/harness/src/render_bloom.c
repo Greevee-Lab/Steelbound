@@ -18,10 +18,12 @@
  *    nur einmal geschrieben (BLOOM dump ... = <Datei>).
  * Auswertung: scripts/bloom_check.py (CPU-Nachrechnung der Combiner). */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include <d3d11_1.h>
 #include "render_qa.h"
 #include "sb_tex.h"
 #include <stdio.h>
+#include "sb_state.h" /* W232: sb_in_mission */
 
 void sb_render_blend_state(unsigned *on, unsigned *src, unsigned *dst);
 int rq_diag_vertex(unsigned i, float pos[4], float ot[4][4]); /* render_shade.c */
@@ -183,7 +185,7 @@ static int bl_frame_on(void)
     if (r == 0u && g_bl_nfr >= (unsigned)g_cfg.bloom_max) { return 0; }
     if (r == 0u && g_bl_lastp && g_cfg.bloom_every > 0 && p - g_bl_lastp < (unsigned)g_cfg.bloom_every) { return 0; }
     if (bl_u32(M3D_SCENE_ADDR) != 0x2Cu || bl_u32(M3D_MLOOP_ADDR) != 1u) { return 0; }
-    if (g_cfg.bloom_diag == 1 && bl_u32(0x2EEA34u) != 4u) { return 0; }
+    if (g_cfg.bloom_diag == 1 && !sb_in_mission()) { return 0; } /* W232: Spielermission statt Ladezaehler == 4 */
     g_bl_p = p; g_bl_lastp = p;
     if (r == 0u) { g_bl_nfr++; }
     g_bl_i = 0; g_bl_ndump = 0; g_bl_bytes = 0; g_bl_nh = 0; g_bl_wn = 0; g_bl_wdrop = 0; g_bl_n3 = 0;
@@ -392,8 +394,8 @@ void bloom_diag_pre(const im_vertex_t *out, unsigned nout, unsigned nsrc, int rh
                g_vp_game.w, g_vp_game.h, g_vp_game.x, g_vp_game.y, on, bs, bd, rs_cmask);
         for (k = 0; k < 4u; k++) {
             ID3D11ShaderResourceView *s = g_rq_active ? g_rq_rec.srv[k] : (k == 0u ? srv0 : NULL);
-            unsigned au = bl_u32(0x21A8B0u + (k * 32u + 0u) * 4u), av = bl_u32(0x21A8B0u + (k * 32u + 1u) * 4u);
-            unsigned mag = bl_u32(0x21A8B0u + (k * 32u + 3u) * 4u), mn = bl_u32(0x21A8B0u + (k * 32u + 4u) * 4u);
+            unsigned au = bl_u32(SBA(0x21A8B0u) + (k * 32u + 0u) * 4u), av = bl_u32(SBA(0x21A8B0u) + (k * 32u + 1u) * 4u);
+            unsigned mag = bl_u32(SBA(0x21A8B0u) + (k * 32u + 3u) * 4u), mn = bl_u32(SBA(0x21A8B0u) + (k * 32u + 4u) * 4u);
             if (!xp[k] && !s) { continue; }
             if (k > 0u && !((tm >> (k * 5u)) & 0x1Fu) && !s) { continue; }
             {

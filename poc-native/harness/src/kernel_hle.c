@@ -555,6 +555,17 @@ static void __fastcall hle_ObfDereferenceObject(u32 obj)
 static u32 __stdcall hle_ExQueryNonVolatileSetting(u32 a0, u32 a1, u32 a2, u32 a3,
                                                    u32 a4)
 {
+    /* W234 PAL50 (Befund W212): XAPI 0x191164 liest Byte 1 von Einstellung
+     * 0x103 (Videostandard), 0x19118D Bits 16..22 von Einstellung 8
+     * (Videoflags). PAL (3) ohne PAL60-Flag -> Spiel waehlt 50 Hz und die
+     * PAL50-Musik (STRM10..18). Nur mit game_tick=25, sonst unveraendert. */
+    if (g_cfg.game_tick == 25 && (a0 == 0x103u || a0 == 8u) && a2 && a3 >= 4u) {
+        if (a1) { *(u32 *)(uintptr_t)a1 = 4u; }
+        *(u32 *)(uintptr_t)a2 = a0 == 0x103u ? 0x300u : 0u;
+        if (a4) { *(u32 *)(uintptr_t)a4 = 4u; }
+        HLOG_I("ExQueryNonVolatileSetting(idx=0x%X) -> PAL50 (game_tick=25)", a0);
+        return X_STATUS_SUCCESS;
+    }
     HLOG_T("ExQueryNonVolatileSetting(idx=0x%X) -> NOT_FOUND", a0);
     (void)a1; (void)a2; (void)a3; (void)a4;
     return X_STATUS_OBJECT_NAME_NOT_FOUND; /* -> XDK nutzt Defaults */

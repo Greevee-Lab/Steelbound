@@ -231,7 +231,7 @@ u32 __fastcall hook_107E30(u32 ecx_this)
             if (!slots[i]) {
                 slots[i] = (u32)(uintptr_t)g_fake_obj;
             } else {
-                ((fn107CD0_t)(uintptr_t)0x107CD0u)(slots[i]);
+                ((fn107CD0_t)(uintptr_t)SBA(0x107CD0u))(slots[i]);
             }
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -330,5 +330,5 @@ u32 __stdcall hook_XapiNotifyWrap(u32 reason)
 {
     typedef u32(__stdcall * orig_fn)(u32);
     fs_emu_prefill_xapi();
-    return ((orig_fn)(uintptr_t)0x190BC6u)(reason);
+    return ((orig_fn)(uintptr_t)SBA(0x190BC6u))(reason);
 }

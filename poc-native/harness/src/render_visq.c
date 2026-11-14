@@ -241,7 +241,7 @@ done:
             float fl[6] = { 0, 0, 0, 0, 0, 0 };
             static const unsigned ad[6] = { 0x356D58u, 0x351684u, 0x357DCCu, 0x357DD0u, 0x311590u, 0x31158Cu };
             unsigned q;
-            for (q = 0; q < 6u; q++) { __try { fl[q] = *(volatile float *)(uintptr_t)ad[q]; } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+            for (q = 0; q < 6u; q++) { __try { fl[q] = *(volatile float *)(uintptr_t)SBA(ad[q]); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
             nsun[s]++; lastf[s] = g_present_no;
             HLOG_W("VISQ sun f=%u idx=0x%X n=%u blend356D58=%.4f blend351684=%.4f pos357DCC=(%.4f,%.4f) a311590=%.4f b31158C=%.4f",
                    g_present_no, index, *out, fl[0], fl[1], fl[2], fl[3], fl[4], fl[5]);

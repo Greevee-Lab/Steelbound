@@ -17,8 +17,8 @@ Your reports decide what gets fixed first. See also
   Windows – the game runtime is a 32-bit program. The launcher starts
   without it and tells you before the game starts if it is missing
   (`VCRUNTIME140.dll`).
-- Your own disc image of **Steel Battalion (Europe, PAL)** as `.iso` or
-  `.xiso`. No game data is included in this package.
+- Your own disc image of **Steel Battalion (Europe, PAL)** – or the USA
+  (NTSC-U) release, which is experimental – as `.iso` or `.xiso`. No game data is included in this package.
 
 There are no hard minimum specs. On an older or weaker PC choose the
 graphics preset **Original (HD) – Performance** (see below).
@@ -246,9 +246,8 @@ restart. Check the result with **F2**.
   restart the game; your saved progress is kept.
 - **Landscape at the screen edge pops in** in some missions.
 - **Replays:** importing and viewing replays does not fully work yet.
-- **Only the European (PAL) release** of Steel Battalion is supported.
-  Other versions and regions are refused with a message; support for the
-  US release is planned.
+- **Europe (PAL)** is supported, **USA (NTSC-U)** is experimental (own
+  save folder). Other versions and regions are refused with a message.
 - **VR is experimental.** Expect rough edges with headsets, runtimes and
   performance.
 - Steelbound does not use the network: no updates, no telemetry, no

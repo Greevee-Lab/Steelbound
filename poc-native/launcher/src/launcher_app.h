@@ -29,6 +29,18 @@ int app_launch_client(const char *client_dir, const char *xbe_path,
  * user.cfg bleibt unveraendert). set_args darf NULL/leer sein. */
 int app_launch_client_set(const char *client_dir, const char *xbe_path,
                           const char *set_args, char *msg, size_t cap);
+/* W231: wie app_launch_client_set, liefert zusaetzlich den Prozess-Handle
+ * (proc != NULL; Aufrufer schliesst ihn) fuer die Exitcode-Auswertung. */
+int app_launch_client_proc(const char *client_dir, const char *xbe_path,
+                           const char *set_args, char *msg, size_t cap,
+                           void **proc);
+/* W172/P7 + W231: Spielstand-Grundordner wie der Client (UTF-8). */
+void app_hdd_base(const char *client_dir, const char *hdd_root, char *out, size_t cap);
+/* W231 US-LAUNCHER: --set-Zusatz der Spielfassung (US: allow_ntsc_u=1 solange
+ * experimental, hdd_root=<Saves>\us). 0 = ok, 1 = Fehler (Text in err). */
+int app_edition_start_args(const char *client_dir, const launcher_settings_t *s,
+                           const lcfg_gameinfo_t *gi, char *set_args, size_t cap,
+                           char *err, size_t errcap);
 /* W159: Start-Kommandozeile bauen (rein, testbar). */
 void app_client_cmdline(const char *client_dir, const char *xbe_path,
                         const char *set_args, char *out, size_t cap);

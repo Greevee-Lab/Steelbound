@@ -28,6 +28,7 @@
  */
 #define COBJMACROS
 #include "sb_remaster.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "sb_pack.h" /* W140 */
 #include "hlog.h"
 #include "hcfg.h"
@@ -523,7 +524,7 @@ typedef struct {
     unsigned w, h, code, mips;
     int alpha;          /* 0 = keins (alle 255), 1 = 1 Bit (0/255), 2 = voll */
     int dark;           /* Anteil fast schwarzer Texel in % (Luma < 24, nur sichtbare), -1 = unbekannt */
-    unsigned scene, mode, mno, mloop, frame; /* erster Kontext */
+    unsigned scene, mode, mno, mloop, frame; /* erster Kontext (W232: mode = Ladezaehler [0x2EEA34], JSON "first_mode") */
     unsigned uses, uploads, runs, d2, d3;   /* Zaehler (ueber Laeufe) */
     int cpu, png, seen_run, dirty_d;
     char src[96];
@@ -774,8 +775,8 @@ static void dump_texture(unsigned xptr, unsigned fmt, int kind, unsigned w, unsi
     if (isnew) {
         char src[96];
         e->w = w; e->h = h; e->code = code; e->mips = nlev;
-        e->scene = rd32(0x6B96DCu); e->mode = rd32(0x2EEA34u);
-        e->mno = rd16(0x3B89A0u); e->mloop = rd32(0x356F58u);
+        e->scene = rd32(SBA(0x6B96DCu)); e->mode = rd32(SBA(0x2EEA34u));
+        e->mno = rd16(SBA(0x3B89A0u)); e->mloop = rd32(SBA(0x356F58u));
         e->frame = g_present_no;
         e->src[0] = '\0';
         g_nde_new++;

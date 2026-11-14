@@ -4,6 +4,7 @@
  * D3D11-Draw). Schnitt fuer FPS-INTERP: hier entsteht jeder Draw, Present/
  * Backbuffer bleiben in d3d11_render.c. W68 SPLIT: 1:1 aus d3d11_render.c. */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "render_fx_rem.h" /* W133 REM-FX */
 #include "sb_perfhud.h" /* W125 TICK-PERF */
 #include "sb_remaster.h" /* W103 REM-FRAME */
@@ -678,13 +679,13 @@ static void sb_ta_apply(int has_tex)
         /* MONITOR-FX (W105): Wash-UVs 0..330 brauchen den Adressmodus des
          * Spiels (FUN_00016d70/174d0/17710 setzen ADDRESSU/V = 1 WRAP vor
          * dem Draw, danach 3 CLAMP) - auch bei tex_addr=0. */
-        unsigned au = sb_ta_u32(0x21A8B0u), av = sb_ta_u32(0x21A8B4u);
+        unsigned au = sb_ta_u32(SBA(0x21A8B0u)), av = sb_ta_u32(SBA(0x21A8B4u));
         if (au > 5u) { au = 0; }
         if (av > 5u) { av = 0; }
         if (au || av) { want = sb_ta_sampler(au, av); }
         g_ta_mfx = 1;
     } else if (g_cfg.tex_addr && has_tex && rq_in_mission()) {
-        unsigned au = sb_ta_u32(0x21A8B0u), av = sb_ta_u32(0x21A8B4u);
+        unsigned au = sb_ta_u32(SBA(0x21A8B0u)), av = sb_ta_u32(SBA(0x21A8B4u));
         if (au > 5u) { au = 0; }
         if (av > 5u) { av = 0; }
         g_ta_hist[au][av]++;
@@ -706,7 +707,7 @@ void rq_dump_srv(ID3D11ShaderResourceView *srv, unsigned xptr); /* render_combin
 static void sb_ta_diag(const im_vertex_t *out, unsigned nout, int rhw)
 {
     static unsigned keys[80], nk, lastf, epoch, ndump;
-    unsigned au = sb_ta_u32(0x21A8B0u), av = sb_ta_u32(0x21A8B4u);
+    unsigned au = sb_ta_u32(SBA(0x21A8B0u)), av = sb_ta_u32(SBA(0x21A8B4u));
     unsigned key = (g_im_shader * 16777619u) ^ (sb_tex_xptr() * 2654435761u) ^ (au << 4) ^ av ^ ((unsigned)rhw << 9);
     unsigned i, w = 0, h = 0;
     float mnu = 1e30f, mxu = -1e30f, mnv = 1e30f, mxv = -1e30f;
@@ -785,7 +786,7 @@ static void sb_ta_diag(const im_vertex_t *out, unsigned nout, int rhw)
     sb_tex_dims(&w, &h);
     HLOG_W("TEXADDR f=%u vs=0x%X xp=0x%X %ux%u ps=0x%X rhw=%d addr=%u/%u filt=%u/%u n=%u uv=[%.3f,%.3f]x[%.3f,%.3f] tgt=%s",
            g_present_no, g_im_shader, sb_tex_xptr(), w, h, g_im_pshader, rhw, au, av,
-           sb_ta_u32(0x21A8B0u + 3u * 4u), sb_ta_u32(0x21A8B0u + 4u * 4u), nout, mnu, mxu, mnv, mxv,
+           sb_ta_u32(SBA(0x21A8B0u) + 3u * 4u), sb_ta_u32(SBA(0x21A8B0u) + 4u * 4u), nout, mnu, mxu, mnv, mxv,
            rtt_active() ? "RT" : "BB");
 }
 
@@ -1724,7 +1725,7 @@ static void sb_im_submit_body(void)
         if (g_cfg.fx_alphakill && (has_tex & 1u) && !sb_tex_rtt_hit()) {
             unsigned ak = 0, scn = 0, mlp = 0;
             __try {
-                ak = *(volatile unsigned *)(uintptr_t)0x21A8DCu;
+                ak = *(volatile unsigned *)(uintptr_t)SBA(0x21A8DCu);
                 scn = *(volatile unsigned *)(uintptr_t)M3D_SCENE_ADDR;
                 mlp = *(volatile unsigned *)(uintptr_t)M3D_MLOOP_ADDR;
             } __except (EXCEPTION_EXECUTE_HANDLER) { ak = 0; }
@@ -1943,10 +1944,10 @@ static void sb_im_submit_body(void)
             __try {
                 unsigned vr2;
                 for (vr2 = 88u; vr2 < 108u; vr2 += 4u) {
-                    const float *w0 = (const float *)(uintptr_t)(0x21BCA8u + vr2 * 16u);
-                    const float *w1 = (const float *)(uintptr_t)(0x21BCA8u + (vr2 + 1u) * 16u);
-                    const float *w2 = (const float *)(uintptr_t)(0x21BCA8u + (vr2 + 2u) * 16u);
-                    const float *w3 = (const float *)(uintptr_t)(0x21BCA8u + (vr2 + 3u) * 16u);
+                    const float *w0 = (const float *)(uintptr_t)(SBA(0x21BCA8u) + vr2 * 16u);
+                    const float *w1 = (const float *)(uintptr_t)(SBA(0x21BCA8u) + (vr2 + 1u) * 16u);
+                    const float *w2 = (const float *)(uintptr_t)(SBA(0x21BCA8u) + (vr2 + 2u) * 16u);
+                    const float *w3 = (const float *)(uintptr_t)(SBA(0x21BCA8u) + (vr2 + 3u) * 16u);
                     HLOG_W("M3D vcw f=%u i=%u r=%u: %.4f %.4f %.4f %.4f ; %.4f %.4f %.4f %.4f ; %.4f %.4f %.4f %.4f ; %.4f %.4f %.4f %.4f",
                            g_present_no, m3d_ndraw, vr2,
                            w0[0], w0[1], w0[2], w0[3], w1[0], w1[1], w1[2], w1[3],
@@ -1958,9 +1959,9 @@ static void sb_im_submit_body(void)
          * (c-38/-37 = Spiegel 58/59, c42 = Spiegel 138): nur Frames #1+#2. */
         if (g_cfg.vsh_dump && m3d_nframes <= 2u) {
             __try {
-                const float *vm38 = (const float *)(uintptr_t)(0x21BCA8u + 58u * 16u);
-                const float *vm37 = (const float *)(uintptr_t)(0x21BCA8u + 59u * 16u);
-                const float *vc42 = (const float *)(uintptr_t)(0x21BCA8u + 138u * 16u);
+                const float *vm38 = (const float *)(uintptr_t)(SBA(0x21BCA8u) + 58u * 16u);
+                const float *vm37 = (const float *)(uintptr_t)(SBA(0x21BCA8u) + 59u * 16u);
+                const float *vc42 = (const float *)(uintptr_t)(SBA(0x21BCA8u) + 138u * 16u);
                 HLOG_W("M3D vsh f=%u i=%u vs=0x%X: m38=[%.4f %.4f %.4f %.4f] m37=[%.4f %.4f %.4f %.4f] c42=[%.4f %.4f %.4f %.4f]",
                        g_present_no, m3d_ndraw, g_im_shader,
                        vm38[0], vm38[1], vm38[2], vm38[3], vm37[0], vm37[1], vm37[2], vm37[3],

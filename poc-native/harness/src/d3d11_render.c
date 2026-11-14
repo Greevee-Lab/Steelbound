@@ -7,6 +7,7 @@
  * RTT in render_rtt.c, Zensus in render_diag.c (gemeinsam: render_int.h).
  */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "render_fx_rem.h" /* W133 REM-FX */
 #include "sb_remaster.h" /* W103 REM-FRAME */
 #include "render_qa.h"
@@ -47,6 +48,7 @@ static float g_last_game_aspect, g_last_out_aspect;
 #include "sb_pause.h" /* W188 GAME-MENU */
 #include "sb_photo.h" /* W195 PHOTO-MODE */
 #include "sb_watermark.h" /* W219 WATERMARK */
+#include "sb_state.h" /* W232: sb_in_mission */
 int g_vr_blit; /* W134 VR-PROTO: sb_render_blit zeigt ein Augenbild (ohne Nachbearbeitung des Monobilds) */
 
 static LRESULT CALLBACK sb_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
@@ -821,15 +823,17 @@ void sb_pf_note(float t, unsigned src_frame)
 /* Spiel-Present (Render-Thread): Missionsbeginn merken, Folge scharf schalten. */
 static void pf_present_tick(unsigned n)
 {
-    unsigned sc = 0, ml = 0, md = 0;
     if (g_cfg.pf_ring <= 0 || pf_on) { return; }
     if (!pf_m0) {
-        __try {
-            sc = *(volatile unsigned *)(uintptr_t)M3D_SCENE_ADDR;
-            ml = *(volatile unsigned *)(uintptr_t)M3D_MLOOP_ADDR;
-            md = *(volatile unsigned *)(uintptr_t)0x2EEA34u; /* Modus 4 = Mission (Titel-Demo: 2) */
-        } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        if (sc != 0x2Cu || ml != 1u || md != (unsigned)(g_cfg.pf_mode > 0 ? g_cfg.pf_mode : 4)) { return; } /* W215: pf_mode=2 = Titel-Demo/Replay */
+        if (g_cfg.pf_mode > 0) { /* W215: pf_mode=2 = Titel-Demo/Replay (Ladezaehler-Wert gezielt) */
+            unsigned sc = 0, ml = 0, md = 0;
+            __try {
+                sc = *(volatile unsigned *)(uintptr_t)M3D_SCENE_ADDR;
+                ml = *(volatile unsigned *)(uintptr_t)M3D_MLOOP_ADDR;
+                md = *(volatile unsigned *)(uintptr_t)SBA(0x2EEA34u); /* Ladezaehler (W225/W232) */
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            if (sc != 0x2Cu || ml != 1u || md != (unsigned)g_cfg.pf_mode) { return; }
+        } else if (!sb_in_mission()) { return; } /* W232: Spielermission ohne Titel-Demo (statt Ladezaehler == 4) */
         pf_m0 = n;
         pf_next = n + (unsigned)(g_cfg.pf_from > 0 ? g_cfg.pf_from : 0);
         HLOG_I("PF: Missionsbeginn f=%u, Bildfolge ab f=%u (%d Bilder)", n, pf_next, g_cfg.pf_ring);
@@ -993,9 +997,9 @@ static void sb_render_present_body(unsigned flags)
         if (pres) { fxr_post(g_rtv, pres); ID3D11Resource_Release(pres); }
         sb_ctx_leave();
     }
-    if (!g_swap_res && (g_cfg.cockpit_panini || g_cfg.cockpit_persp_cycle[0])) { /* W191 UW-PERSP: Panini der Cockpit-Ansicht vor der Randmaske */
+    if (!g_swap_res && (g_cfg.cockpit_panini || g_cfg.cockpit_width || g_cfg.cockpit_persp_cycle[0])) { /* W191 UW-PERSP: Panini der Cockpit-Ansicht vor der Randmaske (W235: + Breite) */
         float pd = sb_cp_panini_d();
-        if (pd > 0.0f) {
+        if (pd > 0.0f || sb_cp_width() > 1.0f) {
             ID3D11Resource *pres = NULL;
             sb_ctx_enter();
             ID3D11RenderTargetView_GetResource(g_rtv, &pres);
@@ -1121,9 +1125,9 @@ static void sb_render_present_body(unsigned flags)
                 int bi;
                 /* Nur aktiver Port ([0x352274]): Out-Struct (0x2B0+) ist
                  * groesser als Stride (0x154), Ports ueberlappen! */
-                unsigned po = *(volatile unsigned *)(uintptr_t)0x352274u & 3u;
+                unsigned po = *(volatile unsigned *)(uintptr_t)SBA(0x352274u) & 3u;
                 {
-                    unsigned outp = 0x4AF480u + po * 0x154u;
+                    unsigned outp = SBA(0x4AF480u) + po * 0x154u;
                     for (bi = 0; bi < 39; bi++) {
                         if ((bw[bi / 16] >> (bi % 16)) & 1u) {
                             unsigned off = outmap[bi].off;
@@ -1349,7 +1353,8 @@ void sb_render_blit(ID3D11Resource *src)
         sb_ctx_leave();
     }
     sb_gp_mark(GP_HUD); /* DIAG(GPU-COST,W146) */
-    if (!g_vr_blit && (g_cfg.cockpit_panini || g_cfg.cockpit_persp_cycle[0]) && sb_cp_panini_d() > 0.0f) { /* W191 UW-PERSP: Panini auf jedes gezeigte Bild (auch Pause-Standbild) */
+    if (!g_vr_blit && (g_cfg.cockpit_panini || g_cfg.cockpit_width || g_cfg.cockpit_persp_cycle[0]) &&
+        (sb_cp_panini_d() > 0.0f || sb_cp_width() > 1.0f)) { /* W191 UW-PERSP: Panini auf jedes gezeigte Bild (auch Pause-Standbild), W235: + Breite */
         sb_ctx_enter();
         if (!g_swap_rtv &&
             FAILED(ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv))) {

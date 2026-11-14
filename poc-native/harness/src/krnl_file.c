@@ -2,6 +2,7 @@
  * Nt*File/FATX-Datei-I/O, Symlink-Objekte, Seek-Cache (W22 FILMAV).
  * W68 SPLIT: 1:1 aus kernel_hle.c verschoben. */
 #include "krnl_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "sb_remaster.h" /* W103 REM-FRAME */
 #include "iso_vfs.h"     /* W150 ISO-DIRECT */
 #include "sb_savecheck.h" /* W187 KIA-LOAD */
@@ -1595,7 +1596,7 @@ u32 __stdcall hle_NtSetInformationFile_counted(u32 xh, u32 iosb, u32 info,
          * 0x10A350 (Speichern gescheitert). */
         ht_entry_t *e = ht_get(xh);
         u32 *ra = (u32 *)_AddressOfReturnAddress();
-        u32 caller = ra[0] == 0x18E4EAu ? ra[0x40 / 4] : 0;
+        u32 caller = ra[0] == SBA(0x18E4EAu) ? ra[0x40 / 4] : 0;
         HLOG_I("FILE delete '%s' (Disposition, Spiel-Ret=0x%X, DeleteFileA-Aufrufer=0x%X)",
                e && e->kind == HT_FILE ? e->path : "?", ra[0], caller);
     }

@@ -6,6 +6,7 @@
  * sbc_wire_poll/sbc_wire_setstate; sbc_usb=0 laesst beide wirkungslos.
  */
 #include "sbc_wire.h"
+#include "sb_profile.h" /* W229 SBA() */
 
 #include "hcfg.h"
 #include "hlog.h"
@@ -113,7 +114,8 @@ static uint32_t sbc_fix_memread(uint32_t addr)
 {
     uint32_t v = 0;
     __try {
-        v = *(volatile uint32_t *)(uintptr_t)addr;
+        /* W230: Fixture-Anker sind EU-Adressen -> Profil */
+        v = *(volatile uint32_t *)(uintptr_t)SBA(addr);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return v;
 }
@@ -259,7 +261,7 @@ int sbc_wire_status(void)
  * das Spiel laeuft so; daran aendert sbc_usb=1 nichts. Es gibt keine
  * Out->LED-Umsetzung: 20 Bytes kopieren, Header 00 16 voranstellen. */
 
-#define SBC_FB_BASE 0x4AF0C0u
+#define SBC_FB_BASE SBA(0x4AF0C0u)
 #define SBC_FB_STRIDE 0x56u
 #define SBC_FB_PORTS 4u
 #define SBC_FB_LEDS_OFF 66u /* LED-Bytes im Feedback (20 B -> OUT 2..21) */
@@ -276,7 +278,7 @@ static uint32_t sbc_mapper_port(void)
 {
     uint32_t mp = 0;
     __try {
-        mp = *(volatile uint32_t *)(uintptr_t)0x352274u;
+        mp = *(volatile uint32_t *)(uintptr_t)SBA(0x352274u);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     return mp < SBC_FB_PORTS ? mp : 0;
 }

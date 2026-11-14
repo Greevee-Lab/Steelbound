@@ -6,7 +6,7 @@
 [![PayPal](https://img.shields.io/badge/PayPal-Support-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/paypalme/Greevee)
 
 Steelbound is a game preservation project: it keeps the original-Xbox
-classic **Steel Battalion (Europe)** (Capcom, 2002) faithfully playable on
+classic **Steel Battalion** (Capcom, 2002) faithfully playable on
 modern hardware. It is a launcher and a client for **your own copy** of the
 game — an Xbox high-level-emulation layer (32-bit, D3D8 → D3D11) plus a
 starter application. No game content is included or distributed.
@@ -36,8 +36,8 @@ Thank you! ☕
    [Releases](../../releases) page and
    unpack it into a new, empty folder.
 2. **Start `sb_launcher.exe`** and, on the **Play** page under **Set up your
-   game**, choose **your own disc image** of Steel Battalion (Europe/PAL) as
-   `.iso` or `.xiso`, then press **Check**.
+   game**, choose **your own disc image** of Steel Battalion as `.iso` or
+   `.xiso` (Europe/PAL; USA/NTSC-U is experimental), then press **Check**.
 3. **Play:** press **LAUNCH GAME**.
 
 The default preset **Original (HD) – 120 FPS** is the recommended start; on
@@ -54,8 +54,8 @@ an older or weaker PC pick **Original (HD) – Performance** on the
   also on 64-bit Windows. Without it, Windows reports a missing
   `VCRUNTIME140.dll`.
 - A Direct3D 11 capable GPU with current drivers.
-- Your own copy of Steel Battalion (Europe/PAL), see
-  [Supported game version](#supported-game-version).
+- Your own copy of Steel Battalion (Europe/PAL; USA/NTSC-U experimental), see
+  [Which game version?](#which-game-version).
 
 There are no hard minimum specs. The **Original (HD) – Performance** preset
 is made for modest hardware – it runs fine on an 11-year-old laptop.
@@ -69,16 +69,30 @@ programs get this warning until they are known to Windows. Code signing is
 planned. Only download Steelbound from the official
 [Releases](../../releases) page.
 
-## Supported game version
+## Which game version?
 
-Steelbound supports **Steel Battalion (Europe/PAL)** for the original Xbox,
-as a `.iso` or `.xiso` disc image of your own copy (an extracted game folder
-also works, see [Getting started](poc-native/docs/community/GETTING_STARTED.md)).
+| Version | Status |
+|---|---|
+| **Steel Battalion – Europe (PAL)** | supported |
+| **Steel Battalion – USA (NTSC-U)** | experimental |
+| Japan and other releases | not supported |
 
-The launcher checks the image before the first start. Other releases (USA,
-Japan) or unknown images are refused with a clear message: *“This game
-version is not supported. Only the European (PAL) version of Steel Battalion
-is supported.”* Support for the US release is planned.
+Use a `.iso` or `.xiso` disc image of your own copy (an extracted game
+folder also works, see
+[Getting started](poc-native/docs/community/GETTING_STARTED.md)).
+
+The launcher checks the image before the first start and shows the detected
+version on the **Play** page, e.g. *“USA (NTSC-U) – experimental”*. The US
+version starts with its own save folder (`hdd/us` in the data folder), so
+European and US saves never mix; you can see the folder under
+**Advanced → Saves & data**. With the US version some things may still go
+wrong – if something looks different from the European version, tell me via
+**F11** feedback.
+
+Japan and unknown images are refused with a clear message: *“This game
+version … is not supported.”* A US image that differs from the known US
+release is refused with *“This US copy does not match the expected
+version …”*.
 
 ## Reporting bugs
 
@@ -130,8 +144,8 @@ are welcome in the existing issue:
   restart the game; your saved progress is kept.
 - **Landscape at the screen edge pops in** in some missions.
 - **Replays:** importing and viewing replays does not fully work yet.
-- **Only the European (PAL) release** is supported; support for the US
-  release is planned.
+- **The USA (NTSC-U) release is experimental**; Europe (PAL) is the fully
+  supported version.
 - **VR is experimental:** expect rough edges with headsets, runtimes and
   performance.
 

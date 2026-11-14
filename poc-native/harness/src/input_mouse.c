@@ -5,6 +5,7 @@
  * Verhalten bitgenau). */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include "sb_profile.h" /* W229 SBA() */
 #include <stdlib.h>
 #include "hcfg.h"
 #include "hlog.h"
@@ -13,6 +14,7 @@
 #include "sb_overlay.h" /* W118 REM-OVERLAY */
 #include "sb_perfhud.h" /* W122 PERF-HUD */
 #include "vr.h" /* W134 VR-PROTO */
+#include "sb_state.h" /* W232: sb_in_mission (zentrale Missionserkennung) */
 
 #define IMOUSE_MSG_INIT (WM_APP + 0x79)
 #define IMOUSE_MSG_SYNC (WM_APP + 0x7D) /* W225: Spiel-Thread -> UI-Abgleich */
@@ -46,10 +48,10 @@ static unsigned imouse_state_u32(unsigned addr)
 #endif
 }
 /* W225 MOUSE-ARM: Zustandsadressen (SPIELZUSTAENDE). */
-#define IM_ADDR_LOADS 0x2EEA34u /* Ladezaehler 1..23 (nur Diagnose, s. u.) */
-#define IM_ADDR_SCENE 0x6B96DCu /* Szene; 0x2C = Film + Mission */
-#define IM_ADDR_MLOOP 0x356F58u /* Missionsschleife FUN_00045F60 */
-#define IM_ADDR_DEMO  0x3B8CDCu /* 1 = Titel-Demo/Replay, 0 = Kampagne */
+#define IM_ADDR_LOADS SBA(0x2EEA34u) /* Ladezaehler 1..23 (nur Diagnose, s. u.) */
+#define IM_ADDR_SCENE SBA(0x6B96DCu) /* Szene; 0x2C = Film + Mission */
+#define IM_ADDR_MLOOP SBA(0x356F58u) /* Missionsschleife FUN_00045F60 */
+#define IM_ADDR_DEMO  SBA(0x3B8CDCu) /* 1 = Titel-Demo/Replay, 0 = Kampagne */
 static int imouse_in_mission(void)
 {
     /* W225: Szene 0x2C + Missionsschleife, Titel-Demo ausgenommen.
@@ -58,9 +60,7 @@ static int imouse_in_mission(void)
      * Demos: Mission 1 = 4; Spieler, der im Titel sofort START drueckt:
      * Mission 1 = 2 (= Wert der Titel-Demo); Mission 2 = 5 usw. Die Demo
      * erkennt [0x3B8CDC] = 1 (alle CAMP-Logs: Demo 1, Kampagne 0). */
-    return imouse_state_u32(IM_ADDR_SCENE) == 0x2Cu &&
-        imouse_state_u32(IM_ADDR_MLOOP) == 1u &&
-        imouse_state_u32(IM_ADDR_DEMO) != 1u;
+    return sb_in_mission(); /* W232: Logik nach sb_state.c verschoben (Selbsttest: gleiche Test-Lesefunktion) */
 }
 static int imouse_menu_now(void)
 {

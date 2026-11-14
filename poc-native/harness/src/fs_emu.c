@@ -12,6 +12,7 @@
  */
 #include "fs_emu.h"
 #include "hlog.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include <stdlib.h>
 #include <string.h>
 #include <windows.h>
@@ -336,7 +337,7 @@ void fs_emu_patch_all(void)
     n = sizeof g_sites / sizeof g_sites[0];
     for (i = 0; i < n; i++) {
         const fs_site_t *s = &g_sites[i];
-        u8 *p = (u8 *)(uintptr_t)s->va;
+        u8 *p = (u8 *)(uintptr_t)SBA(s->va);
         u32 cell = 0;
         HLOG_T("FS: patch @0x%X kind=%u", s->va, s->kind);
         if (memcmp(p, s->expect, s->elen) != 0) {

@@ -18,6 +18,7 @@ typedef struct {
     uint32_t title_id;
     uint32_t region;      /* Zertifikat: 1 = NA, 2 = Japan, 4 = Rest der Welt (PAL) */
     uint32_t version;
+    int ntsc_u;           /* W229: 1 = bekannte NTSC-U-Fassung (USA); W230: supported=1 (experimentell, US-Profil) */
     char sha256[65];
     char label[64];       /* z. B. "Steel Battalion (Europe, PAL)" oder "" */
     char text[320];       /* Log-Zeile (deutsch, unuebersetzt; Launcher nutzt Schluessel) */

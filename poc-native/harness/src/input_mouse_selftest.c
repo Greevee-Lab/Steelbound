@@ -65,6 +65,8 @@ static BOOL WINAPI test_iconic(HWND w) { (void)w; return minimized; }
 #define CallWindowProcW test_old
 #define IMOUSE_SELFTEST
 #include "input_mouse.c"
+#define SB_STATE_SELFTEST /* W232: sb_in_mission liest ueber imouse_test_state */
+#include "sb_state.c"
 hcfg_t g_cfg;
 unsigned g_frames;
 int sb_ovl_open(void) { return overlay; }
@@ -210,6 +212,7 @@ int imouse_selftest(void)
     fail += check_state("restored", 1);
     test_demo = 0;
     { extern int imouse_w225_selftest(void); fail += imouse_w225_selftest(); }
+    { extern int sb_state_w232_selftest(void); fail += sb_state_w232_selftest(); }
     VERIFY(!bad_registration, "foreground-only Raw Input registration");
     VERIFY(physical == 0, "test focus never invokes physical cursor APIs");
     printf("W208 simulated physical calls=%d\n", physical);
@@ -362,5 +365,47 @@ int imouse_w225_selftest(void)
     event(WM_KEYDOWN, VK_F10); fail += w225_reason("manuell aus", 0, "ausserhalb_mission");
     w225_set(4, 0x2C, 1, 0); event(WM_TIMER, IMOUSE_TIMER_ID);
     printf("W225 MOUSE-ARM: Fehler=%d\n", fail);
+    return fail;
+}
+
+/* W232 STATE-LOADCOUNT: zentrale Missionserkennung sb_in_mission (sb_state.c,
+ * hier mit derselben Test-Lesefunktion wie input_mouse.c). Der Ladezaehler
+ * [0x2EEA34] darf das Ergebnis nie beeinflussen. */
+static int w232_case(const char *name, unsigned counter, unsigned scene, unsigned loop,
+                     unsigned demo, int want, int want_or_demo)
+{
+    int got, god, bad = 0;
+    w225_set(counter, scene, loop, demo);
+    got = sb_in_mission();
+    god = sb_state_mission_or_demo();
+    if (got != want || god != want_or_demo || sb_state_loadcount() != counter ||
+        sb_state_mission_eval(scene, loop, demo) != want) { bad = 1; }
+    printf("W232 %-34s ladezaehler=%-2u szene=0x%02X mloop=%u demo=%u -> mission=%d (soll %d) mission_or_demo=%d %s\n",
+           name, counter, scene, loop, demo, got, want, god, bad ? "FAIL" : "OK");
+    return bad;
+}
+int sb_state_w232_selftest(void)
+{
+    int fail = 0, c;
+    fail += w232_case("Logos", 1, 0x00, 0, 0, 0, 0);
+    fail += w232_case("Titel-Demo (Nutzerweg, Zaehler 2)", 2, 0x2C, 1, 1, 0, 1);
+    fail += w232_case("Titel-Demo 2 (Testkette, Zaehler 3)", 3, 0x2C, 1, 1, 0, 1);
+    fail += w232_case("Spielmenue", 3, 0x0C, 0, 0, 0, 0);
+    fail += w232_case("Missions-Load", 4, 0x2B, 0, 0, 0, 0);
+    fail += w232_case("Mission 1 (Testkette, Zaehler 4)", 4, 0x2C, 1, 0, 1, 1);
+    fail += w232_case("Mission 1 (Nutzerweg, Zaehler 2)", 2, 0x2C, 1, 0, 1, 1);
+    fail += w232_case("Missionsende (mloop 0)", 4, 0x2C, 0, 0, 0, 0);
+    fail += w232_case("Nachbereitung", 4, 0x30, 0, 0, 0, 0);
+    fail += w232_case("Mission 2 (Zaehler 5)", 5, 0x2C, 1, 0, 1, 1);
+    fail += w232_case("Mission neu geladen (Zaehler 6)", 6, 0x2C, 1, 0, 1, 1);
+    /* Wrap 1..23: Kampagne immer Mission, Demo nie. */
+    for (c = 1; c <= 23; c++) {
+        w225_set((unsigned)c, 0x2C, 1, 0);
+        if (!sb_in_mission()) { printf("W232 FAIL Mission ladezaehler=%d\n", c); fail++; }
+        w225_set((unsigned)c, 0x2C, 1, 1);
+        if (sb_in_mission()) { printf("W232 FAIL Titel-Demo ladezaehler=%d\n", c); fail++; }
+    }
+    w225_set(4, 0x2C, 1, 0);
+    printf("W232 STATE-LOADCOUNT: Fehler=%d\n", fail);
     return fail;
 }

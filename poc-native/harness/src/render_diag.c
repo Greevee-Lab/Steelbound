@@ -2,6 +2,7 @@
  * Queries, Present-Tick), Monitor-Slot-Dump (wv_diag), Draw-Drop-Zensus
  * (drawdrop_diag). W68 SPLIT: 1:1 aus d3d11_render.c verschoben. */
 #include "render_int.h"
+#include "sb_state.h" /* W232: sb_in_mission */
 
 /* ---------- MISSION3D-Zensus (W25, m3d_census) ----------
  * Schalter [render] m3d_census=N: nur in der Mission (Szene 0x2C,
@@ -60,10 +61,10 @@ int m3d_vs_mvp_read(float out[16])
 {
     int ok = 0;
     __try {
-        const float *c0 = (const float *)(uintptr_t)(0x21BCA8u + 98u * 16u);
-        const float *c1 = (const float *)(uintptr_t)(0x21BCA8u + 99u * 16u);
-        const float *c2 = (const float *)(uintptr_t)(0x21BCA8u + 100u * 16u);
-        const float *c3 = (const float *)(uintptr_t)(0x21BCA8u + 101u * 16u);
+        const float *c0 = (const float *)(uintptr_t)(SBA(0x21BCA8u) + 98u * 16u);
+        const float *c1 = (const float *)(uintptr_t)(SBA(0x21BCA8u) + 99u * 16u);
+        const float *c2 = (const float *)(uintptr_t)(SBA(0x21BCA8u) + 100u * 16u);
+        const float *c3 = (const float *)(uintptr_t)(SBA(0x21BCA8u) + 101u * 16u);
         unsigned r, c;
         const float *cc[4];
         cc[0] = c0; cc[1] = c1; cc[2] = c2; cc[3] = c3;
@@ -215,9 +216,9 @@ void m3d_present_tick(unsigned f)
             if (g_cfg.m3d_census_gate == 1 && m3d_read_u32(M3D_VTONLINE_ADDR) != 1u) {
                 return;
             }
-            /* DIAG(FRONT-HANGAR,W101): 2 = nur Kampagnen-Mission (Modus 4,
-             * [0x2EEA34]), Titel-Demo (Modus 2) verbraucht keine Frames. */
-            if (g_cfg.m3d_census_gate >= 2 && m3d_read_u32(0x2EEA34u) != 4u) {
+            /* DIAG(FRONT-HANGAR,W101): 2 = nur Kampagnen-Mission, Titel-Demo
+             * verbraucht keine Frames (W232: sb_in_mission statt Ladezaehler == 4). */
+            if (g_cfg.m3d_census_gate >= 2 && !sb_in_mission()) {
                 return;
             }
             /* DIAG(FX-HOLE,W106): 3 = Kampagnen-Mission UND VT online */
@@ -258,7 +259,7 @@ void m3d_present_tick(unsigned f)
                       nvdump++;
                       __try {
                           for (vr = 0; vr < 192u; vr++) {
-                              const float *vc = (const float *)(uintptr_t)(0x21BCA8u + vr * 16u);
+                              const float *vc = (const float *)(uintptr_t)(SBA(0x21BCA8u) + vr * 16u);
                               HLOG_W("M3D vc f=%u r=%u: %.4f %.4f %.4f %.4f", f, vr, vc[0], vc[1], vc[2], vc[3]);
                           }
                       } __except (EXCEPTION_EXECUTE_HANDLER) {

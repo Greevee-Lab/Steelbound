@@ -11,7 +11,8 @@ hardware. No game content is included. See also [Controls](CONTROLS.md),
 - A Direct3D 11 capable GPU.
 - The current Microsoft Visual C++ Redistributable for Visual Studio 2015–2022, **x86** (32-bit) version – the game runtime is a 32-bit program, also on 64-bit Windows.
 - Your own disc image of the PAL release (Steel Battalion, Europe) as
-  `.iso` or `.xiso`. Only this version is supported.
+  `.iso` or `.xiso`. The USA (NTSC-U) release works too but is still
+  experimental.
 
 ## Install
 
@@ -38,8 +39,9 @@ starts in **Borderless fullscreen** instead; change it on **Display**.
 
 1. On the **Play** page, open **Set up your game**.
 2. **Browse …** to your disc image (`.iso` or `.xiso`), then **Check**.
-3. The launcher shows the detected game version. Only the European (PAL)
-   release can start; anything else is refused with a message.
+3. The launcher shows the detected game version: Europe (PAL) is
+   supported, USA (NTSC-U) is experimental (with its own save folder);
+   anything else is refused with a message.
 
 The image is only ever read. It is never modified or unpacked. If you
 have an extracted game folder instead (with `default.xbe` and `Media/`),
@@ -68,8 +70,11 @@ applies immediately.
   checks this before the game starts. Install `vc_redist.x86.exe` from
   Microsoft (x86 also on 64-bit Windows), then press **LAUNCH GAME**
   again.
-- **This game version is not supported.** Only the European (PAL) release
-  of Steel Battalion is supported. No other version or region can start.
+- **This game version is not supported.** Europe (PAL) is supported and
+  USA (NTSC-U) is experimental; other versions or regions cannot start.
+- **This US copy does not match the expected version.** Only the known US
+  release works; use an unmodified image of your own disc, or tell me via
+  feedback.
 - **Judder at 120 FPS.** On a 60 Hz display without VRR, 120 FPS may
   judder; use **Frame rate** 60 on the **Display** page instead. The
   remastered presets (**Remastered subtle**, **Remastered strong**) may

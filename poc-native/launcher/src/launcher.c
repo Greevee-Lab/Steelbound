@@ -23,6 +23,7 @@
 #include "launcher_assist.h" /* W143 Assistent-cfg */
 #include "sb_edition.h" /* W116 EDITIONS */
 #include "sb_userdata.h" /* W150 USER-DATA */
+#include "sb_gamever.h" /* W231 US-LAUNCHER: Selbsttest */
 
 static void dpi_init(void)
 {
@@ -120,6 +121,7 @@ static void cli_usage(void)
            "  --start                 user.cfg schreiben + Client starten\n"
            "  --dry-run               mit --start: nur schreiben, nicht starten\n"
            "  --vr                    mit --start: VR-Start (sonst Bildschirm)\n"
+           "  --wait                  mit --start: auf Client warten, Exitcode deuten\n"
            "  --profile NAME          Profil statt user.cfg als Basis laden\n"
            "  --save-profile NAME     Profil aus Basis + --set speichern\n"
            "  --list-profiles         Profile + Standard-Profil auflisten\n"
@@ -499,6 +501,7 @@ static int cli_selftest(const char *client_override)
     a.edge_fade_strength = 90;
     a.cockpit_persp = 40; /* W191 */
     a.cockpit_panini = 30;
+    a.cockpit_width = 7; /* W235 */
     if (lcfg_save_user(tmp, &a) != 0) {
         T_FAIL("2 roundtrip", "%s", "save scheiterte");
     } else {
@@ -633,6 +636,28 @@ static int cli_selftest(const char *client_override)
         }
     } else {
         T_FAIL("8c cpersp-range", "%s", "Standard != 0 oder 0 abgelehnt");
+    }
+
+    /* 8d (W235 COCKPIT-WIDTH): Cockpit-Breite 0..10 gueltig, -1/11 abgelehnt;
+     * Standard = Original (0) */
+    st_valid_base(&b);
+    lcfg_defaults(&a);
+    b.cockpit_width = 0;
+    if (a.cockpit_width == 0 && lcfg_validate(&b, err, sizeof err) == 0) {
+        b.cockpit_width = 10;
+        if (lcfg_validate(&b, err, sizeof err) == 0) {
+            b.cockpit_width = 11;
+            if (lcfg_validate(&b, err, sizeof err) != 0 && strstr(err, "Cockpit") &&
+                (b.cockpit_width = -1, lcfg_validate(&b, err, sizeof err) != 0)) {
+                T_OK("8d cwidth-range");
+            } else {
+                T_FAIL("8d cwidth-range", "%s", "cockpit_width=11/-1 nicht abgelehnt");
+            }
+        } else {
+            T_FAIL("8d cwidth-range", "%s", "cockpit_width=10 abgelehnt");
+        }
+    } else {
+        T_FAIL("8d cwidth-range", "%s", "Standard != 0 oder 0 abgelehnt");
     }
 
     /* 9 (W47): fehlende + kaputte cfg sind robust */
@@ -815,6 +840,48 @@ static int cli_selftest(const char *client_override)
             T_OK("W236 aim-assist cfg (Altwert aim_turn=1 -> 1, neutralisiert)");
         } else {
             T_FAIL("W236 aim-assist cfg", "%s", "Abbildung/Roundtrip falsch");
+        }
+        u8_DeleteFile(tmp);
+    }
+
+    /* W234 PAL50: game_tick Standard 30, Roundtrip 25 und 30, fremde Werte -> 30 */
+    {
+        int ok = 1;
+        FILE *f = NULL;
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w234_pal50_test.cfg");
+        u8_DeleteFile(tmp);
+        lcfg_defaults(&a);
+        ok = a.game_tick == 30;
+        a.game_tick = 25;
+        if (ok && lcfg_save_user(tmp, &a) == 0) {
+            lcfg_defaults(&b);
+            lcfg_load_file(tmp, &b);
+            ok = b.game_tick == 25;
+            b.game_tick = 30;
+            if (ok && lcfg_save_user(tmp, &b) == 0) {
+                lcfg_defaults(&a);
+                a.game_tick = 25;
+                lcfg_load_file(tmp, &a);
+                ok = a.game_tick == 30;
+            } else {
+                ok = 0;
+            }
+        } else {
+            ok = 0;
+        }
+        if (ok && u8_fopen_s(&f, tmp, "w") == 0 && f) { /* Handwert 50 -> Standard 30 */
+            fputs("[game]\ngame_tick=50\n", f);
+            fclose(f);
+            lcfg_defaults(&a);
+            a.game_tick = 25;
+            lcfg_load_file(tmp, &a);
+            ok = a.game_tick == 30;
+        }
+        if (ok) {
+            T_OK("W234 pal50 cfg (Standard 30, Roundtrip 25/30, 50 -> 30)");
+        } else {
+            T_FAIL("W234 pal50 cfg", "%s", "Werte falsch");
         }
         u8_DeleteFile(tmp);
     }
@@ -2829,6 +2896,112 @@ static int cli_selftest(const char *client_override)
         }
     }
 
+    { /* W231 US-LAUNCHER: Einordnung, Saveordner, Startparameter, Exit-Schluessel,
+       * Spielertexte EN/DE (konstruierte Pruefergebnisse, keine Spielbytes) */
+        sb_gamever_t gv;
+        lcfg_gameinfo_t gi;
+        char why[200] = "", o[1600], m[1200], keep[16];
+        int li;
+        memset(&gv, 0, sizeof gv);
+        gv.xbe_ok = 1; gv.title_id = 0x43430002u; gv.region = 4u; gv.supported = 1;
+        lcfg_gameinfo_from(&gv, &gi);
+        if (gi.edition != LCFG_ED_EU || !gi.startable || gi.needs_allow) strcpy_s(why, sizeof why, "EU");
+        gv.supported = 0; gv.region = 1u; gv.ntsc_u = 1;
+        lcfg_gameinfo_from(&gv, &gi);
+        if (gi.edition != LCFG_ED_US || !gi.startable || !gi.needs_allow) strcpy_s(why, sizeof why, "US exp");
+        gv.supported = 1; gv.ntsc_u = 0; /* spaeter: Client fuehrt US als supported */
+        lcfg_gameinfo_from(&gv, &gi);
+        if (gi.edition != LCFG_ED_US || !gi.startable || gi.needs_allow) strcpy_s(why, sizeof why, "US supported");
+        gv.supported = 0;
+        lcfg_gameinfo_from(&gv, &gi);
+        if (gi.edition != LCFG_ED_US_OTHER || gi.startable) strcpy_s(why, sizeof why, "US fremd");
+        gv.region = 2u;
+        lcfg_gameinfo_from(&gv, &gi);
+        if (gi.edition != LCFG_ED_OTHER || gi.startable) strcpy_s(why, sizeof why, "Japan");
+        gv.region = 4u; gv.title_id = 0x12345678u;
+        lcfg_gameinfo_from(&gv, &gi);
+        if (gi.edition != LCFG_ED_OTHER || gi.startable) strcpy_s(why, sizeof why, "fremdes Spiel");
+        memset(&gv, 0, sizeof gv);
+        lcfg_gameinfo_from(&gv, &gi);
+        if (gi.edition != LCFG_ED_NONE || gi.startable) strcpy_s(why, sizeof why, "leer");
+        /* Saveordner */
+        lcfg_hdd_for_edition("C:\\D\\hdd", LCFG_ED_US, o, sizeof o);
+        if (strcmp(o, "C:\\D\\hdd\\us") != 0) strcpy_s(why, sizeof why, "hdd us");
+        lcfg_hdd_for_edition("C:\\D\\hdd\\", LCFG_ED_US, o, sizeof o);
+        if (strcmp(o, "C:\\D\\hdd\\us") != 0) strcpy_s(why, sizeof why, "hdd us Trenner");
+        lcfg_hdd_for_edition("C:\\D\\hdd", LCFG_ED_EU, o, sizeof o);
+        if (strcmp(o, "C:\\D\\hdd") != 0) strcpy_s(why, sizeof why, "hdd eu");
+        /* Startparameter */
+        memset(&gi, 0, sizeof gi);
+        gi.edition = LCFG_ED_US; gi.startable = 1; gi.needs_allow = 1;
+        strcpy_s(o, sizeof o, "vr_enable=0");
+        if (lcfg_edition_set_args(&gi, "C:\\a;b\\hdd\\us", o, sizeof o) != 0 ||
+            strcmp(o, "vr_enable=0;allow_ntsc_u=1;hdd_root_us=C:\\a\\;b\\hdd\\us") != 0)
+            strcpy_s(why, sizeof why, "args us");
+        gi.needs_allow = 0;
+        strcpy_s(o, sizeof o, "vr_enable=0");
+        if (lcfg_edition_set_args(&gi, "C:\\h\\us", o, sizeof o) != 0 ||
+            strcmp(o, "vr_enable=0;hdd_root_us=C:\\h\\us") != 0)
+            strcpy_s(why, sizeof why, "args us supported (ohne allow)");
+        gi.edition = LCFG_ED_EU;
+        strcpy_s(o, sizeof o, "vr_enable=0");
+        if (lcfg_edition_set_args(&gi, "C:\\h\\us", o, sizeof o) != 0 || strcmp(o, "vr_enable=0") != 0)
+            strcpy_s(why, sizeof why, "args eu");
+        gi.edition = LCFG_ED_US; gi.needs_allow = 1;
+        strcpy_s(o, 24, "vr_enable=0");
+        if (lcfg_edition_set_args(&gi, "C:\\h\\us", o, 24) != 1 || strcmp(o, "vr_enable=0") != 0)
+            strcpy_s(why, sizeof why, "args zu lang");
+        /* Exit-Schluessel */
+        if (strcmp(lcfg_exit_msg_key(5, LCFG_ED_EU) ? lcfg_exit_msg_key(5, LCFG_ED_EU) : "", "gui.exit5") ||
+            strcmp(lcfg_exit_msg_key(5, LCFG_ED_US) ? lcfg_exit_msg_key(5, LCFG_ED_US) : "", "gui.exit5_us") ||
+            strcmp(lcfg_exit_msg_key(8, LCFG_ED_US) ? lcfg_exit_msg_key(8, LCFG_ED_US) : "", "gui.exit8") ||
+            lcfg_exit_msg_key(0, LCFG_ED_US) || lcfg_exit_msg_key(1, LCFG_ED_EU) ||
+            lcfg_exit_msg_key(4, LCFG_ED_US))
+            strcpy_s(why, sizeof why, "exit-Schluessel");
+        /* Spielertexte EN/DE */
+        strcpy_s(keep, sizeof keep, sb_lang_code());
+        for (li = 0; li < 2 && !why[0]; li++) {
+            sb_lang_set(li ? "de" : "en");
+            memset(&gv, 0, sizeof gv);
+            gv.xbe_ok = 1; gv.title_id = 0x43430002u; gv.region = 1u; gv.ntsc_u = 1; gv.version = 7;
+            strcpy_s(gv.label, sizeof gv.label, "Steel Battalion (USA, NTSC-U)");
+            if (!lcfg_gamever_msg(&gv, m, sizeof m) ||
+                !strstr(m, "Steel Battalion (USA, NTSC-U)") ||
+                !strstr(m, li ? "experimentell" : "experimental"))
+                strcpy_s(why, sizeof why, li ? "Text US de" : "Text US en");
+            gv.ntsc_u = 0;
+            if (lcfg_gamever_msg(&gv, m, sizeof m) || !strstr(m, li ? "Diese US-Fassung" : "This US copy") ||
+                !strstr(m, "NTSC-U") || !strstr(m, "43430002"))
+                strcpy_s(why, sizeof why, "Text US fremd");
+            gv.region = 2u;
+            if (lcfg_gamever_msg(&gv, m, sizeof m) ||
+                !strstr(m, li ? "nicht unterst" : "not supported") || !strstr(m, "NTSC-J") ||
+                !strstr(m, "Steel Battalion (Europe, PAL)") || !strstr(m, "Steel Battalion (USA, NTSC-U)"))
+                strcpy_s(why, sizeof why, "Text Japan");
+        }
+        sb_lang_set(keep);
+        { /* optional: echtes US-Abbild (nur lokal, Pfad aus der Umgebung, nie geloggt) */
+            char us[1024];
+            DWORD n = GetEnvironmentVariableA("SB_TEST_US_IMAGE", us, sizeof us);
+            if (!why[0] && n > 0 && n < sizeof us) {
+                launcher_settings_t su;
+                lcfg_defaults(&su);
+                su.xbe_path[0] = su.media_root[0] = '\0';
+                strcpy_s(su.game_image, sizeof su.game_image, us);
+                if (lcfg_image_check(us, m, sizeof m) != 0 || !lcfg_game_info(&su, &gi) ||
+                    gi.edition != LCFG_ED_US || !gi.needs_allow)
+                    strcpy_s(why, sizeof why, "echtes US-Abbild nicht erkannt");
+                else
+                    printf("     (W231: echtes US-Abbild erkannt: %s)\n", m);
+            }
+        }
+        if (!why[0]) {
+            T_OK("W231 US-LAUNCHER: Einordnung EU/US/US-fremd/Japan, Saveordner us, allow_ntsc_u nur solange experimental, Exit 5/8, Texte EN/DE");
+        } else {
+            T_FAIL("W231 US-LAUNCHER", "%s", why);
+        }
+    }
+
     /* 20-25 (W82): UTF-8-Pfade, cfg-ANSI, Oberflaeche, Hintergrundbild,
      * Launcher-Einstellung, Vorschau/Offscreen (launcher_gui.c). */
     gui_selftest(client_override, &pass, &fail);
@@ -3133,17 +3306,64 @@ int app_xr_runtime_present(char *path_out, size_t cap)
 /* Client starten (CWD = Client-Ordner). 0 = ok, 1 = Fehler (Text in err).
  * W82: W-API (Pfade UTF-8). W159: set_args = --set-Kette des Startwegs
  * (Einzelstart-Override, user.cfg bleibt unveraendert). */
-int app_launch_client_set(const char *client_dir, const char *xbe_path,
-                          const char *set_args, char *err, size_t errcap)
+int app_launch_client_proc(const char *client_dir, const char *xbe_path,
+                           const char *set_args, char *err, size_t errcap,
+                           void **proc)
 {
     char cmd[3600];
     unsigned long pid = 0;
     app_client_cmdline(client_dir, xbe_path, set_args, cmd, sizeof cmd);
-    if (!u8_CreateProcess(cmd, client_dir, 0, 0, NULL, 0, &pid, NULL)) {
+    if (proc) {
+        *proc = NULL;
+    }
+    if (!u8_CreateProcess(cmd, client_dir, 0, 0, NULL, 0, &pid, proc)) {
         _snprintf_s(err, errcap, _TRUNCATE, LT("app.launch_fail"), GetLastError());
         return 1;
     }
     _snprintf_s(err, errcap, _TRUNCATE, LT("app.launched"), pid);
+    return 0;
+}
+
+int app_launch_client_set(const char *client_dir, const char *xbe_path,
+                          const char *set_args, char *err, size_t errcap)
+{
+    return app_launch_client_proc(client_dir, xbe_path, set_args, err, errcap, NULL);
+}
+
+/* W172/P7 + W231: Spielstand-Ordner wie der Client (hcfg.c: "HDD" im
+ * Profil-/Portabel-Modus = <Datenordner>\hdd, sonst relativ zum Client). */
+void app_hdd_base(const char *client_dir, const char *hdd_root, char *out, size_t cap)
+{
+    const char *h = hdd_root ? hdd_root : "";
+    char p[1024];
+    if (sb_userdata_mode() != SB_UD_LEGACY && strcmp(h, "HDD") == 0 &&
+        sb_userdata_path_peek(SB_UD_HDD, p, sizeof p) == 1) {
+        u8_from_acp(p, out, cap);
+    } else if ((h[0] && h[1] == ':') || h[0] == '\\' || h[0] == '/') {
+        strcpy_s(out, cap, h);
+    } else {
+        _snprintf_s(out, cap, _TRUNCATE, "%s\\%s", client_dir, h[0] ? h : "HDD");
+    }
+}
+
+/* W231 US-LAUNCHER: --set-Zusatz der Spielfassung an set_args haengen
+ * (US: allow_ntsc_u=1 solange experimental + getrennter Saveordner).
+ * gi = Fassung (lcfg_game_info). 0 = ok, 1 = Fehler (Text in err). */
+int app_edition_start_args(const char *client_dir, const launcher_settings_t *s,
+                           const lcfg_gameinfo_t *gi, char *set_args, size_t cap,
+                           char *err, size_t errcap)
+{
+    char base[1100], hdd[1200], acp[1200];
+    if (!gi || gi->edition != LCFG_ED_US) {
+        return 0;
+    }
+    app_hdd_base(client_dir, s->hdd_root, base, sizeof base);
+    lcfg_hdd_for_edition(base, gi->edition, hdd, sizeof hdd);
+    if (u8_to_acp(hdd, acp, sizeof acp) == 2 ||
+        lcfg_edition_set_args(gi, acp, set_args, cap) != 0) {
+        _snprintf_s(err, errcap, _TRUNCATE, LT("cfg.ansi"), LT("cfg.what_hdd"), hdd);
+        return 1;
+    }
     return 0;
 }
 
@@ -3160,10 +3380,12 @@ int app_launch_client(const char *client_dir, const char *xbe_path,
  * Bildschirm: --set vr_enable=0 (VR immer aus); --vr: vr_enable=1 +
  * Vorschau. 0 = ok. */
 static int cli_start(const char *client_override, const char *profile,
-                     const char *set, int dry_run, int vr)
+                     const char *set, int dry_run, int vr, int wait)
 {
     launcher_settings_t s;
-    char client[1024], upath[1200], err[1400], set_args[128], cmd[3600];
+    lcfg_gameinfo_t gi;
+    void *proc = NULL;
+    char client[1024], upath[1200], err[1400], set_args[1600], cmd[3600];
     int has_ldr;
     lcfg_find_client_dir(client_override, client, sizeof client, &has_ldr);
     if (!has_ldr) {
@@ -3198,6 +3420,14 @@ static int cli_start(const char *client_override, const char *profile,
     printf("ok: %s geschrieben (%ux%u, fps=%d, aspect=%d, Spielerbetrieb).\n",
            upath, s.width, s.height, s.fps_limit, s.aspect_mode);
     app_vr_set_args(vr, s.vr_preview, set_args, sizeof set_args);
+    lcfg_game_info(&s, &gi); /* W231 US-LAUNCHER */
+    if (app_edition_start_args(client, &s, &gi, set_args, sizeof set_args, err,
+                               sizeof err) != 0) {
+        printf("FEHLER: %s\n", err);
+        return 1;
+    }
+    printf("edition: %s%s\n", gi.edition == LCFG_ED_US ? "US (NTSC-U)" : "EU (PAL)",
+           gi.needs_allow ? ", experimental (allow_ntsc_u=1)" : "");
     {
         char xbe[1024]; /* W172: im Ordner-Modus abgeleitet */
         lcfg_xbe_effective(&s, xbe, sizeof xbe);
@@ -3209,12 +3439,22 @@ static int cli_start(const char *client_override, const char *profile,
         printf("cmdline: %s\n", cmd);
         return 0;
     }
-    if (app_launch_client_set(client, s.xbe_path, set_args, err,
-                              sizeof err) != 0) {
+    if (app_launch_client_proc(client, s.xbe_path, set_args, err,
+                               sizeof err, wait ? &proc : NULL) != 0) {
         printf("FEHLER: %s\n", err);
         return 1;
     }
     printf("%s\n", err);
+    if (wait && proc) { /* W231: auf den Client warten, Exitcode deuten */
+        DWORD code = 0;
+        const char *k;
+        WaitForSingleObject((HANDLE)proc, INFINITE);
+        GetExitCodeProcess((HANDLE)proc, &code);
+        CloseHandle((HANDLE)proc);
+        k = lcfg_exit_msg_key(code, gi.edition);
+        printf("client exit=%lu%s%s\n", (unsigned long)code, k ? ": " : "", k ? LT(k) : "");
+        return code == 0 ? 0 : 2;
+    }
     return 0;
 }
 
@@ -3385,7 +3625,8 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
         cli_console();
         rc = cli_start(client_override, profile, cli_value(argc, argv, "--set"),
                        cli_flag(argc, argv, "--dry-run"),
-                       cli_flag(argc, argv, "--vr"));
+                       cli_flag(argc, argv, "--vr"),
+                       cli_flag(argc, argv, "--wait")); /* W231 */
     } else if (cli_value(argc, argv, "--write-user-profile")) {
         cli_console();
         rc = cli_write_user_profile(

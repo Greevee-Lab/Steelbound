@@ -35,9 +35,11 @@
  * Schatten-Ziels an derselben Stelle -> exakte Wiedergabe bitgleich (verify).
  * Eigene Ressourcen: Satz 0 = Spiel-Thread, Satz 1 = Wiedergabe (Render-Thread). */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "render_qa.h"
 #include "render_fx_rem.h"
 #include <math.h>
+#include "sb_state.h" /* W232: sb_in_mission */
 
 void sb_render_shot_name(const char *name, ID3D11Resource *src); /* d3d11_render.c */
 
@@ -955,11 +957,7 @@ void fxr_shot_tick(unsigned n)
         return;
     }
     /* Ausloeser: Explosion im Vorbild (Energie), Abstand >= 45 Bilder */
-    {
-        unsigned mode = 0;
-        __try { mode = *(volatile unsigned *)(uintptr_t)0x2EEA34u; } __except (EXCEPTION_EXECUTE_HANDLER) { mode = 0; }
-        if (mode != 4u) { return; } /* nur Kampagnen-Mission (Titel-Demo zaehlt nicht, wie W106) */
-    }
+    if (!sb_in_mission()) { return; } /* nur Kampagnen-Mission (Titel-Demo zaehlt nicht, wie W106; W232 statt Ladezaehler == 4) */
     if (fx_ab_n < (unsigned)g_cfg.fxr_ab && rq_in_mission() && n - fx_ab_last >= 45u &&
         (fx_lmain > 0.004f || (fx_em_alive >= 6u && (fx_ab_n % 5u) == 1u))) {
         g_fxr_mask = kFxAbMask[fx_ab_n % 5u];

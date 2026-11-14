@@ -21,6 +21,7 @@
  * Alles laeuft auf dem Spiel-/Render-Thread (Presents, Swaps, Hooks); der
  * UI-Thread meldet nur Tasten (Interlocked). */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "render_qa.h"
 #include "sb_overlay.h"
 #include "sb_perfhud.h"
@@ -529,7 +530,7 @@ static double ph_target_ms(void)
 {
     if (g_sb_paused) { return 1000.0 / (double)sb_ovl_pause_fps(); }
     if (g_cfg.interp_fps > 0 && rq_in_mission()) { return 1000.0 / (double)g_cfg.interp_fps; }
-    return 1000.0 / 30.0;
+    return 1000.0 / (double)g_cfg.game_tick; /* W234: 25 bei PAL50 */
 }
 
 static void ph_stats(double win_s, ph_stat_t *s)
@@ -855,7 +856,7 @@ void sb_phud_present_post(long long q_before, int direct)
         ph_fn++;
         if (g_cfg.perf_trace) { /* DIAG(PERF-BENCH,W137): Szene = u32 [0x6B96DC] (0x2C Mission, SPIELZUSTAENDE.md) */
             pt_add(now, "P,%.4f,%.3f,%.3f,%u,%d,%u,%u,%d\n", pt_sec(now), (double)f->ft, (double)f->pres, (unsigned)f->tick,
-                   rq_in_mission(), *(volatile unsigned *)(uintptr_t)0x6B96DCu, g_ip_skip_tot, g_phud_src); /* W138: + Quelle src (0 Spiel-Thread, 1 Takt-Thread, 2 Wiederholung) */
+                   rq_in_mission(), *(volatile unsigned *)(uintptr_t)SBA(0x6B96DCu), g_ip_skip_tot, g_phud_src); /* W138: + Quelle src (0 Spiel-Thread, 1 Takt-Thread, 2 Wiederholung) */
         }
         if (g_cfg.perf_log > 0) { /* DIAG(PERF-HUD,W122): Spitzenbilder einzeln */
             static unsigned nsp;
@@ -1538,6 +1539,10 @@ static void ph_paint(void)
                 size_t l = wcslen(t);
                 if (cps < 0) { _snwprintf_s(t + l, 128 - l, _TRUNCATE, L" CPa %.2fms", cpms); }
                 else { _snwprintf_s(t + l, 128 - l, _TRUNCATE, L" CP%d %.2fms", cps, cpms); }
+            }
+            if (sb_cp_width() > 1.0f) { /* W235 COCKPIT-WIDTH: Breite in % (GPU-Kosten im Panini-Pass, Segment HUD/Post) */
+                size_t l = wcslen(t);
+                _snwprintf_s(t + l, 128 - l, _TRUNCATE, L" CW%d", (int)(sb_cp_width() * 100.0f + 0.5f) - 100);
             }
         }
     }

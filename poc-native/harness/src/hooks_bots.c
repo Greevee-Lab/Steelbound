@@ -192,7 +192,7 @@ static void replay_steps_parse(void)
         } else if (strncmp(tok, "mem:", 4) == 0) {
             char *eq = strchr(tok, '=');
             g_steps[g_nsteps].kind = STEP_MEM;
-            g_steps[g_nsteps].addr = strtoul(tok + 4, NULL, 0);
+            g_steps[g_nsteps].addr = SBA((u32)strtoul(tok + 4, NULL, 0)); /* W230: EU-Adresse -> Profil */
             g_steps[g_nsteps].val = eq ? strtoul(eq + 1, NULL, 0) : 0;
         } else if (strncmp(tok, "memall:", 7) == 0 || strncmp(tok, "memedge:", 8) == 0) {
             /* W21-R2: memall:A1,A2,..=LINIE (alle float > LINIE).
@@ -207,7 +207,7 @@ static void replay_steps_parse(void)
             while (q < end && g_steps[g_nsteps].naddrs < 8) {
                 if (*q == ',' || *q == ' ') { q++; continue; }
                 g_steps[g_nsteps].addrs[g_steps[g_nsteps].naddrs++] =
-                    (u32)strtoul(q, NULL, 0);
+                    SBA((u32)strtoul(q, NULL, 0)); /* W230 */
                 while (q < end && *q != ',') q++;
             }
             if (eq && strchr(eq + 1, '.')) {
@@ -219,7 +219,7 @@ static void replay_steps_parse(void)
         } else if (strncmp(tok, "poke:", 5) == 0) {
             char *eq = strchr(tok, '=');
             g_steps[g_nsteps].kind = STEP_POKE;
-            g_steps[g_nsteps].addr = strtoul(tok + 5, NULL, 0);
+            g_steps[g_nsteps].addr = SBA((u32)strtoul(tok + 5, NULL, 0)); /* W230 */
             g_steps[g_nsteps].val = eq ? strtoul(eq + 1, NULL, 0) : 0;
         } else if (strncmp(tok, "epoke:", 6) == 0) {
             /* W35: epoke:IDX=HP (Entity-HP, Wort an Tabellenbasis).
@@ -473,7 +473,7 @@ void replay_steps_tick(void)
         if (g_steps[s].kind == STEP_EPOKE) {
             /* W35: Entity-HP schreiben (Tabellenbasis dynamisch). */
             __try {
-                u32 base = *(volatile u32 *)(uintptr_t)0x351828u;
+                u32 base = *(volatile u32 *)(uintptr_t)SBA(0x351828u);
                 if (g_steps[s].eword) {
                     /* W39: u32-Wort an +eoff (z. B. Position). */
                     volatile u32 *w = (volatile u32 *)(uintptr_t)(base + g_steps[s].addr * 0x5Cu + g_steps[s].eoff);
@@ -610,10 +610,10 @@ static float aimat_rdf(u32 a, float dflt)
  * [0x358560/64] vergleicht (Radius 48 px [0x25FF14]). 0 = hinter Kamera. */
 static int aimat_project(const float v[3], float *sx, float *sy)
 {
-    const float *w = (const float *)(uintptr_t)0x358070u;
-    const float *vw = (const float *)(uintptr_t)0x357E60u;
-    const float *pr = (const float *)(uintptr_t)0x3B6560u;
-    const u32 *vp = (const u32 *)(uintptr_t)0x293938u;
+    const float *w = (const float *)(uintptr_t)SBA(0x358070u);
+    const float *vw = (const float *)(uintptr_t)SBA(0x357E60u);
+    const float *pr = (const float *)(uintptr_t)SBA(0x3B6560u);
+    const u32 *vp = (const u32 *)(uintptr_t)SBA(0x293938u);
     float a[4], b[4], c[4];
     int i;
     for (i = 0; i < 4; i++)
@@ -632,7 +632,7 @@ static int aimat_project(const float v[3], float *sx, float *sy)
  * 0 = keins (alle Ziele tot oder Tabelle ungueltig). Aufrufer im __try. */
 static u32 campaign_target(u32 tab, u32 n, float mx, float mz)
 {
-    u32 ours = *(volatile uint16_t *)(uintptr_t)0x356E2Cu, i, best = 0;
+    u32 ours = *(volatile uint16_t *)(uintptr_t)SBA(0x356E2Cu), i, best = 0;
     float bd = 1e30f;
     for (i = 1; i < n && i < 4000u; i++) {
         u32 b = tab + i * 0x5Cu;
@@ -653,11 +653,11 @@ static unsigned g_aimat_relf;
 void aimat_apply(sbc_in_t *s)
 {
     __try {
-        u32 tab = *(volatile u32 *)(uintptr_t)0x351828u;
-        u32 n = *(volatile u32 *)(uintptr_t)0x352288u;
+        u32 tab = *(volatile u32 *)(uintptr_t)SBA(0x351828u);
+        u32 n = *(volatile u32 *)(uintptr_t)SBA(0x352288u);
         u32 idx = g_aimat_idx, eb, bone;
-        float mx = aimat_rdf(0x3579B4u, 0), my = aimat_rdf(0x3579B8u, 0);
-        float mz = aimat_rdf(0x3579BCu, 0), hy = aimat_rdf(0x3521C0u, 0);
+        float mx = aimat_rdf(SBA(0x3579B4u), 0), my = aimat_rdf(SBA(0x3579B8u), 0);
+        float mz = aimat_rdf(SBA(0x3579BCu), 0), hy = aimat_rdf(SBA(0x3521C0u), 0);
         float tp[3], dx, dy, dz, dist, d, p, kx, ky, sx, sy, ox, oy;
         float tsx = 0, tsy = 0, chx, chy, smx, smy;
         int ax, ay, onscr = 0, aligned;
@@ -665,7 +665,7 @@ void aimat_apply(sbc_in_t *s)
         if (!tab || n > 100000u) return;
         /* W63: nur in der Missionsschleife (nach Missionsende ist die
          * Entity-Tabelle freigegeben -> Muell-Ziele, W63_c5). */
-        if (g_cfg.aimat_antiwindup && *(volatile u32 *)(uintptr_t)0x356F58u != 1u) return;
+        if (g_cfg.aimat_antiwindup && *(volatile u32 *)(uintptr_t)SBA(0x356F58u) != 1u) return;
         if (idx == 998u) {
             /* W63: naechstes lebendes Missionsziel (M1: 71, danach 67). */
             idx = campaign_target(tab, n, mx, mz);
@@ -673,7 +673,7 @@ void aimat_apply(sbc_in_t *s)
         } else if (idx == 999u) {
             /* auto: naechster lebender, lockbarer Gegner (Kriterien wie
              * FUN_0002E350: HP>0, Flags Bit19 gesetzt, Bit21 frei), ohne uns. */
-            u32 ours = *(volatile uint16_t *)(uintptr_t)0x356E2Cu, i, best = 0;
+            u32 ours = *(volatile uint16_t *)(uintptr_t)SBA(0x356E2Cu), i, best = 0;
             float bd = 1e30f;
             for (i = 1; i < 400u && i < n; i++) {
                 u32 b = tab + i * 0x5Cu, fl;
@@ -705,7 +705,7 @@ void aimat_apply(sbc_in_t *s)
         {
             u32 mdl = *(volatile u32 *)(uintptr_t)(eb + 0x54);
             u32 ty = *(volatile uint16_t *)(uintptr_t)(eb + 0x34);
-            u32 tt = *(volatile u32 *)(uintptr_t)0x4CA034u;
+            u32 tt = *(volatile u32 *)(uintptr_t)SBA(0x4CA034u);
             if (mdl > 0x10000u && ty != 0xFFFFu && tt > 0x10000u) {
                 bone = *(volatile uint8_t *)(uintptr_t)(tt + ty * 0x4E0u + 4u);
                 tp[0] = *(volatile float *)(uintptr_t)(mdl + bone * 0x1A0u + 0x130u);
@@ -719,21 +719,21 @@ void aimat_apply(sbc_in_t *s)
         while (d > 3.14159265f) d -= 6.2831853f;
         while (d < -3.14159265f) d += 6.2831853f;
         p = -(float)atan2((double)dy, (double)(dist > 0.1f ? dist : 0.1f));
-        sx = aimat_rdf(0x260384u, -0.015f);
-        sy = (*(volatile uint16_t *)(uintptr_t)0x356E20u) ?
-             aimat_rdf(0x260380u, -0.0061359f) : aimat_rdf(0x26037Cu, 0.0061359f);
-        kx = aimat_rdf(0x25FCD4u, 1.0f) / aimat_rdf(0x354F90u, 1.0f);
-        ky = aimat_rdf(0x25FCD4u, 1.0f) / aimat_rdf(0x347830u, 1.0f);
+        sx = aimat_rdf(SBA(0x260384u), -0.015f);
+        sy = (*(volatile uint16_t *)(uintptr_t)SBA(0x356E20u)) ?
+             aimat_rdf(SBA(0x260380u), -0.0061359f) : aimat_rdf(SBA(0x26037Cu), 0.0061359f);
+        kx = aimat_rdf(SBA(0x25FCD4u), 1.0f) / aimat_rdf(SBA(0x354F90u), 1.0f);
+        ky = aimat_rdf(SBA(0x25FCD4u), 1.0f) / aimat_rdf(SBA(0x347830u), 1.0f);
         if (!(kx > 0.05f && kx < 50.0f)) kx = 1.0f;
         if (!(ky > 0.05f && ky < 50.0f)) ky = 1.0f;
         /* Schirm-Regler: Fadenkreuz [0x358560/64] auf die projizierte
          * Zielposition ziehen (Vorzeichen belegt W59_aim1: Out_x+ -> ch.x+,
          * Out_y+ -> ch.y+). Integrator, langsam gegen die Spielglaettung
          * (k=0.0625/Frame, FUN_00034BE0). */
-        chx = aimat_rdf(0x358560u, 0);
-        chy = aimat_rdf(0x358564u, 0);
-        smx = aimat_rdf(0x356D08u, 0);
-        smy = aimat_rdf(0x3521BCu, 0);
+        chx = aimat_rdf(SBA(0x358560u), 0);
+        chy = aimat_rdf(SBA(0x358564u), 0);
+        smx = aimat_rdf(SBA(0x356D08u), 0);
+        smy = aimat_rdf(SBA(0x3521BCu), 0);
         onscr = aimat_project(tp, &tsx, &tsy);
         if (g_cfg.aimat_antiwindup && !(onscr && chx > 1.0f && chy > 1.0f &&
                                         chx < 511.0f && chy < 479.0f)) {
@@ -772,8 +772,8 @@ void aimat_apply(sbc_in_t *s)
         s->aiming_x = (uint8_t)ax;
         s->aiming_y = (uint8_t)ay;
         /* LOCK ON tippen (Flanke 48CF0(1,6,1)): 3 Frames an, >=6 Frames aus. */
-        cand = *(volatile u32 *)(uintptr_t)0x357834u;
-        lck = *(volatile u32 *)(uintptr_t)0x34700Cu;
+        cand = *(volatile u32 *)(uintptr_t)SBA(0x357834u);
+        lck = *(volatile u32 *)(uintptr_t)SBA(0x34700Cu);
         if (g_frames - g_aimat_lockf < 3u) {
             s->buttons[0] |= (1u << 2);
         } else if (g_frames - g_aimat_lockf >= 9u && lck != idx &&
@@ -786,11 +786,11 @@ void aimat_apply(sbc_in_t *s)
         /* Autofeuer (aimfire:1): Hauptwaffe nur, wenn gelockt oder das
          * Fadenkreuz im Lock-Radius auf dem Ziel liegt; Magazin leer ->
          * MAGAZINE CHANGE (bi27, Flanke 48CF0(1,6,0) -> 0x181A20). */
-        wp = *(volatile u32 *)(uintptr_t)0x355000u;
-        slot = *(volatile u32 *)(uintptr_t)0x356C94u;
+        wp = *(volatile u32 *)(uintptr_t)SBA(0x355000u);
+        slot = *(volatile u32 *)(uintptr_t)SBA(0x356C94u);
         if (wp > 0x10000u && slot < 4u) {
             ammo = *(volatile uint16_t *)(uintptr_t)(wp + 0x12u + slot * 2u);
-            mags = *(volatile uint16_t *)(uintptr_t)(0x346FFAu + slot * 2u);
+            mags = *(volatile uint16_t *)(uintptr_t)(SBA(0x346FFAu) + slot * 2u);
         }
         aligned = lck == idx ||
                   (onscr && fabsf(tsx - chx) < 24.0f && fabsf(tsy - chy) < 24.0f);
@@ -814,9 +814,9 @@ void aimat_apply(sbc_in_t *s)
              * Abfrage, Spiel-Thread). */
             typedef int (__cdecl *fn21eb0_t)(float, float, int);
             int c21 = -1;
-            short cnt2e = *(volatile short *)(uintptr_t)0x356E2Eu;
+            short cnt2e = *(volatile short *)(uintptr_t)SBA(0x356E2Eu);
             __try {
-                c21 = ((fn21eb0_t)(uintptr_t)0x21EB0u)(
+                c21 = ((fn21eb0_t)(uintptr_t)SBA(0x21EB0u))(
                     *(volatile float *)(uintptr_t)(eb + 0x0C),
                     *(volatile float *)(uintptr_t)(eb + 0x14), 0);
             } __except (EXCEPTION_EXECUTE_HANDLER) { c21 = -2; }
@@ -825,9 +825,9 @@ void aimat_apply(sbc_in_t *s)
              * ([0x35206C]/[0x356D50]); Index = (int)(x*0.2) - cx -
              * 128*((int)(z*-0.2) + cz); Byte 0 != 0 = Zelle aktiv. */
             {
-                u32 P = *(volatile u32 *)(uintptr_t)0x35149Cu;
-                int cxg = *(volatile int *)(uintptr_t)0x35206Cu;
-                int czg = *(volatile int *)(uintptr_t)0x356D50u;
+                u32 P = *(volatile u32 *)(uintptr_t)SBA(0x35149Cu);
+                int cxg = *(volatile int *)(uintptr_t)SBA(0x35206Cu);
+                int czg = *(volatile int *)(uintptr_t)SBA(0x356D50u);
                 float ex0 = *(volatile float *)(uintptr_t)(eb + 0x0C);
                 float ez0 = *(volatile float *)(uintptr_t)(eb + 0x14);
                 int ti = (int)(ex0 * 0.2f) - cxg - (((int)(ez0 * -0.2f) + czg) << 7);
@@ -879,20 +879,20 @@ static int g_drive_man, g_drive_try; /* 0 = Kurs, 1 = rueckwaerts, 2 = ausweiche
 void drive_apply(sbc_in_t *s)
 {
     __try {
-        u32 tab = *(volatile u32 *)(uintptr_t)0x351828u;
-        u32 n = *(volatile u32 *)(uintptr_t)0x352288u;
-        u32 ours = *(volatile uint16_t *)(uintptr_t)0x356E2Cu;
+        u32 tab = *(volatile u32 *)(uintptr_t)SBA(0x351828u);
+        u32 n = *(volatile u32 *)(uintptr_t)SBA(0x352288u);
+        u32 ours = *(volatile uint16_t *)(uintptr_t)SBA(0x356E2Cu);
         u32 idx = g_drive_idx, eb, ob;
         float mx, mz, tx, tz, dx, dz, dist, d, hy, rot;
         int rv, gas;
         if (!tab || n > 100000u || ours == 0 || ours >= n) return;
-        if (*(volatile u32 *)(uintptr_t)0x356F58u != 1u) return; /* nur in der Missionsschleife */
-        if (*(volatile u32 *)(uintptr_t)0x53831Cu != 1u) return; /* nur mit verriegeltem VT (nach START, W52) */
+        if (*(volatile u32 *)(uintptr_t)SBA(0x356F58u) != 1u) return; /* nur in der Missionsschleife */
+        if (*(volatile u32 *)(uintptr_t)SBA(0x53831Cu) != 1u) return; /* nur mit verriegeltem VT (nach START, W52) */
         ob = tab + ours * 0x5Cu;
         if (*(volatile uint16_t *)(uintptr_t)ob == 0) return; /* eigener VT tot */
         mx = *(volatile float *)(uintptr_t)(ob + 0x0C);
         mz = *(volatile float *)(uintptr_t)(ob + 0x14);
-        hy = aimat_rdf(0x3521C0u, 0);
+        hy = aimat_rdf(SBA(0x3521C0u), 0);
         if (idx == 998u) {
             idx = campaign_target(tab, n, mx, mz);
             if (!idx) return;

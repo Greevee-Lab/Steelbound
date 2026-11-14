@@ -1,9 +1,12 @@
 /* diag_states.c - DIAG(STATES): Spielmodus/Szene pro Swap ueberwachen (A3).
- * Grobmodus u32 0x2EEA34 + Szene u32 [0x6B96DC] + Missions-Schleifenflag
+ * Ladezaehler u32 0x2EEA34 (W232: kein Spielmodus, +1 je Ladebildschirm;
+ * Logfeld heisst weiter "mode=" fuer golden.py/milestones.py)
+ * + Szene u32 [0x6B96DC] + Missions-Schleifenflag
  * u32 0x356F58 (1 = 45f60-Schleife laeuft). Loggt bei JEDER Aenderung und
  * alle 600 Frames einen Heartbeat (logdrop-robust fuer milestones.py).
  * Schalter: [log] diag_states=1. Aufruf: eine Zeile im Swap-Hook. */
 #include "diag_states.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "hlog.h"
 #include "hcfg.h"
 #include <stdint.h>
@@ -13,9 +16,9 @@
 
 typedef uint32_t u32;
 
-#define ST_MODE_ADDR 0x2EEA34u
-#define ST_SCENE_ADDR 0x6B96DCu
-#define ST_MLOOP_ADDR 0x356F58u
+#define ST_MODE_ADDR SBA(0x2EEA34u) /* W232: Ladezaehler (Logfeld "mode=") */
+#define ST_SCENE_ADDR SBA(0x6B96DCu)
+#define ST_MLOOP_ADDR SBA(0x356F58u)
 #define ST_HEARTBEAT 600u
 
 static u32 st_last_mode = 0xFFFFFFFFu;
@@ -25,41 +28,41 @@ static u32 st_last_mloop = 0xFFFFFFFFu;
 /* DIAG(STATE) (A11c): Missions-Zustandsadressen, s. docs/SPIELZUSTAENDE.md.
  * Bekannte Felder (W7/W8); Positions-/HP-/Munitions-Adressen folgen, sobald
  * der Memscan sie belegt (§10). Alle Reads SEH-geschuetzt. */
-#define STA_F30_ADDR 0x356F30u   /* float, Missionsende-Bedingung ==1.0 */
-#define STA_FC8_ADDR 0x356FC8u   /* u32, Missionsende-Bedingung ==1 */
-#define STA_B894_ADDR 0x3B8994u  /* u32, Missionsende-Bedingung ==0 */
-#define STA_LMOD_ADDR 0x346FC0u  /* u32, Loader-Modus (0/1/2) */
-#define STA_ACT_ADDR 0x6B96E4u   /* Schleifen-Aktiv-Flag (Wort, u32 gelesen) */
-#define STA_GATE_ADDR 0x669E24u  /* u32, Folge-Gate (==0x65 offen) */
-#define STA_SUB_ADDR 0x66ABF4u   /* u32, Folge-Sub-State */
-#define STA_B89A0_ADDR 0x3B89A0u /* u32, Fall-Weiche/Input-Lock */
-#define STA_PORT_ADDR 0x346FB0u  /* Portmaske (Wort, u32 gelesen) */
-#define STA_LOCK_ADDR 0x686D44u  /* u32, Input-Lock (!=0 sperrt) */
-#define STA_E690_ADDR 0x2E6F90u  /* u32, U5/Load-Unterzustand */
-#define STA_AA8_ADDR 0x3B8AA8u   /* Render-Modus (Wort, u32 gelesen; 8 = Mission) */
+#define STA_F30_ADDR SBA(0x356F30u)   /* float, Missionsende-Bedingung ==1.0 */
+#define STA_FC8_ADDR SBA(0x356FC8u)   /* u32, Missionsende-Bedingung ==1 */
+#define STA_B894_ADDR SBA(0x3B8994u)  /* u32, Missionsende-Bedingung ==0 */
+#define STA_LMOD_ADDR SBA(0x346FC0u)  /* u32, Loader-Modus (0/1/2) */
+#define STA_ACT_ADDR SBA(0x6B96E4u)   /* Schleifen-Aktiv-Flag (Wort, u32 gelesen) */
+#define STA_GATE_ADDR SBA(0x669E24u)  /* u32, Folge-Gate (==0x65 offen) */
+#define STA_SUB_ADDR SBA(0x66ABF4u)   /* u32, Folge-Sub-State */
+#define STA_B89A0_ADDR SBA(0x3B89A0u) /* u32, Fall-Weiche/Input-Lock */
+#define STA_PORT_ADDR SBA(0x346FB0u)  /* Portmaske (Wort, u32 gelesen) */
+#define STA_LOCK_ADDR SBA(0x686D44u)  /* u32, Input-Lock (!=0 sperrt) */
+#define STA_E690_ADDR SBA(0x2E6F90u)  /* u32, U5/Load-Unterzustand */
+#define STA_AA8_ADDR SBA(0x3B8AA8u)   /* Render-Modus (Wort, u32 gelesen; 8 = Mission) */
 /* DIAG(STARTUP) (W21-R2): Start-Minispiel (8AA10), s. SPIELZUSTAENDE.md */
-#define STU_BAR0_ADDR 0x55D19Cu   /* float[5], Balken (Stride 4) */
-#define STU_LINE_ADDR 0x55D244u   /* float, Stabil-Linie (0.7) */
-#define STU_STAGE_ADDR 0x51D8B4u  /* Byte, Stufe (3=Schalter, 0=fertig) */
-#define STU_CNT_ADDR 0x51D92Cu    /* u32, Schalter-Zaehler (0..5) */
-#define STU_S168_ADDR 0x55D168u   /* Byte, Minispiel-Status (2=Balken, 9=nach START) */
-#define STU_ENG_ADDR 0x3516DCu    /* u16, Engine-Flag (37290-Toggle) */
-#define STU_OK_ADDR 0x55D3F4u     /* u32, START-Erfolg (8AA10: alle > Linie) */
-#define STU_FAIL_ADDR 0x55D3F0u   /* u32, START-Fehlschlag */
+#define STU_BAR0_ADDR SBA(0x55D19Cu)   /* float[5], Balken (Stride 4) */
+#define STU_LINE_ADDR SBA(0x55D244u)   /* float, Stabil-Linie (0.7) */
+#define STU_STAGE_ADDR SBA(0x51D8B4u)  /* Byte, Stufe (3=Schalter, 0=fertig) */
+#define STU_CNT_ADDR SBA(0x51D92Cu)    /* u32, Schalter-Zaehler (0..5) */
+#define STU_S168_ADDR SBA(0x55D168u)   /* Byte, Minispiel-Status (2=Balken, 9=nach START) */
+#define STU_ENG_ADDR SBA(0x3516DCu)    /* u16, Engine-Flag (37290-Toggle) */
+#define STU_OK_ADDR SBA(0x55D3F4u)     /* u32, START-Erfolg (8AA10: alle > Linie) */
+#define STU_FAIL_ADDR SBA(0x55D3F0u)   /* u32, START-Fehlschlag */
 /* DIAG(COMBAT) (W35): Entity-Tabelle [0x351828], Stride 0x5C, HP = Wort +0x0,
  * Schadens-Akku = Wort +0x32 (s. FUN_0002F250, SPIELZUSTAENDE.md). */
-#define CMB_N_ADDR 0x352288u    /* u32, Entity-Anzahl (Missionsdaten) */
-#define CMB_TAB_ADDR 0x351828u  /* u32, Tabellen-Zeiger (Heap) */
-#define CMB_OURS_ADDR 0x356E2Cu /* u16, unser VT-Index */
-#define CMB_DMG_ADDR 0x356F10u   /* u32, Schadensbetrag (laufend) */
-#define CMB_PEND_ADDR 0x354F24u  /* u32, Schaden-anstehend-Flag */
-#define CMB_SUM_ADDR 0x6A37D8u   /* u32, Schadenssumme (Master: +400/~250f) */
-#define CMB_CNT_ADDR 0x354FFCu   /* u32, HP-0-Zaehler (bis 90) */
-#define CMB_RSN_ADDR 0x35236Cu   /* u32, Missionsende-Grund (0xD5 = VT tot) */
-#define CMB_B24_ADDR 0x355024u   /* u16, Gruppenstart B */
-#define CMB_B26_ADDR 0x355026u   /* u16, Gruppenz. B */
-#define CMB_B28_ADDR 0x355028u   /* u16, Gruppenstart C (= unser Index) */
-#define CMB_B2A_ADDR 0x35502Au   /* u16, Gruppenz. C */
+#define CMB_N_ADDR SBA(0x352288u)    /* u32, Entity-Anzahl (Missionsdaten) */
+#define CMB_TAB_ADDR SBA(0x351828u)  /* u32, Tabellen-Zeiger (Heap) */
+#define CMB_OURS_ADDR SBA(0x356E2Cu) /* u16, unser VT-Index */
+#define CMB_DMG_ADDR SBA(0x356F10u)   /* u32, Schadensbetrag (laufend) */
+#define CMB_PEND_ADDR SBA(0x354F24u)  /* u32, Schaden-anstehend-Flag */
+#define CMB_SUM_ADDR SBA(0x6A37D8u)   /* u32, Schadenssumme (Master: +400/~250f) */
+#define CMB_CNT_ADDR SBA(0x354FFCu)   /* u32, HP-0-Zaehler (bis 90) */
+#define CMB_RSN_ADDR SBA(0x35236Cu)   /* u32, Missionsende-Grund (0xD5 = VT tot) */
+#define CMB_B24_ADDR SBA(0x355024u)   /* u16, Gruppenstart B */
+#define CMB_B26_ADDR SBA(0x355026u)   /* u16, Gruppenz. B */
+#define CMB_B28_ADDR SBA(0x355028u)   /* u16, Gruppenstart C (= unser Index) */
+#define CMB_B2A_ADDR SBA(0x35502Au)   /* u16, Gruppenz. C */
 #define CMB_STRIDE 0x5Cu
 #define CMB_MAX 64u
 /* DIAG(COMBATX) (W37): Entity-Rohdaten + Eingabe-Spiegel im COMBAT-Takt.
@@ -68,10 +71,10 @@ static u32 st_last_mloop = 0xFFFFFFFFu;
  * COMBATI: Eingabe-Spiegel (decIdx, History-Zeile 14 B, Out-Lane-0-Kopf 16 B
  *   + 0x2A8, Gang-Latch) -> Kette Eingabe->Wirkung pro Tick (H1/H4).
  * Kein eigener Schalter: laeuft unter [log] combat_diag=1 mit. */
-#define CMX_HIST_ADDR 0x3B8D6Cu   /* Decoder-Historie, 14 B/Frame (47730) */
-#define CMX_DEC_ADDR 0x4AEEF0u    /* u32, Missions-Frame-Zaehler (decIdx) */
-#define CMX_OUT_ADDR 0x4AF480u    /* Out-Lane 0 (Mapper-Ziel, Feuer=+3) */
-#define CMX_GEAR_ADDR 0x351518u   /* u32, Mapper-Gang-Latch (W17: 8/9) */
+#define CMX_HIST_ADDR SBA(0x3B8D6Cu)   /* Decoder-Historie, 14 B/Frame (47730) */
+#define CMX_DEC_ADDR SBA(0x4AEEF0u)    /* u32, Missions-Frame-Zaehler (decIdx) */
+#define CMX_OUT_ADDR SBA(0x4AF480u)    /* Out-Lane 0 (Mapper-Ziel, Feuer=+3) */
+#define CMX_GEAR_ADDR SBA(0x351518u)   /* u32, Mapper-Gang-Latch (W17: 8/9) */
 #define CMX_MAXENT 48u /* W39: +Projektil-Pool (200-211) */
 /* DIAG(COMBATH) (W40): Hitpfad-Zustand im COMBAT-Takt (1 Zeile/Tick).
  * gate=[0x356E7C] (20BD0-Eingang, muss !=0), vic=[0x346F80] (Opfer-Index),
@@ -82,25 +85,25 @@ static u32 st_last_mloop = 0xFFFFFFFFu;
  * tur (unsere Turm-Worte +0x40/+0x44), pr0 (erstes lebendes Projektil
  * Typ 0x3A8/HP 120 aus Pool 200-211: Pos + Worte +0x18/+0x1C/+0x20).
  * Kein eigener Schalter: laeuft unter [log] combat_diag=1 mit. */
-#define CMH_AIMX_ADDR 0x4AF48Cu   /* s8, Out+0x0C Aim-X (Mapper-Ziel, W57) */
-#define CMH_AIMY_ADDR 0x4AF48Du   /* s8, Out+0x0D Aim-Y (W57) */
-#define CMH_FROMX_ADDR 0x358400u  /* float[3], Case-1-Strahl Von-Punkt (W57) */
-#define CMH_OFF_ADDR 0x352148u    /* float, Case-1-Strahl Offset (W42/W57) */
-#define CMH_GATE_ADDR 0x356E7Cu   /* u16, 20BD0-Gate (!=0 offen) */
-#define CMH_VIC_ADDR 0x346F80u    /* u32, Opfer-Index (Case 3 setzt) */
-#define CMH_RAY_ADDR 0x4C9B38u    /* u16, 523F0-Treffer-Index */
-#define CMH_304_ADDR 0x352304u    /* u32, 4A9F0-Schadenspfad-Marker */
-#define CMH_AD0_ADDR 0x4C9AD0u    /* u16, Case-4-Opfer (523F0-Slot 2) */
-#define CMH_MZX_ADDR 0x3579B4u    /* float, Muendung/Referenzpunkt X */
-#define CMH_MZY_ADDR 0x3579B8u    /* float, Muendung/Referenzpunkt Y */
-#define CMH_MZZ_ADDR 0x3579BCu    /* float, Muendung/Referenzpunkt Z */
-#define CMH_DMQ_ADDR 0x6CA870u    /* u32, Schadens-Queue-Zaehler (<0x100) */
-#define CMH_M61_ADDR 0x35161Cu    /* u32, Case-0-Hit-Marker */
-#define CMH_B2C_ADDR 0x35502Cu    /* u16, Drain-Untergrenze 1608C0 (W40-offen-4, W42) */
-#define STA_TMR_ADDR 0x3563F0u   /* u32, Missions-Frame-Countdown (W17-scan: 71998->0, -1/Frame) */
-#define STA_MA_ADDR 0x6C8510u    /* u32, Missionswert A (3000->2589->112, W17-Kandidat) */
-#define STA_MB_ADDR 0x6C851Cu    /* u32, Missionswert B (325->12, W17-Kandidat) */
-#define STA_MC_ADDR 0x347174u    /* u32, Missionswert C (1565->1337, W17-Kandidat) */
+#define CMH_AIMX_ADDR SBA(0x4AF48Cu)   /* s8, Out+0x0C Aim-X (Mapper-Ziel, W57) */
+#define CMH_AIMY_ADDR SBA(0x4AF48Du)   /* s8, Out+0x0D Aim-Y (W57) */
+#define CMH_FROMX_ADDR SBA(0x358400u)  /* float[3], Case-1-Strahl Von-Punkt (W57) */
+#define CMH_OFF_ADDR SBA(0x352148u)    /* float, Case-1-Strahl Offset (W42/W57) */
+#define CMH_GATE_ADDR SBA(0x356E7Cu)   /* u16, 20BD0-Gate (!=0 offen) */
+#define CMH_VIC_ADDR SBA(0x346F80u)    /* u32, Opfer-Index (Case 3 setzt) */
+#define CMH_RAY_ADDR SBA(0x4C9B38u)    /* u16, 523F0-Treffer-Index */
+#define CMH_304_ADDR SBA(0x352304u)    /* u32, 4A9F0-Schadenspfad-Marker */
+#define CMH_AD0_ADDR SBA(0x4C9AD0u)    /* u16, Case-4-Opfer (523F0-Slot 2) */
+#define CMH_MZX_ADDR SBA(0x3579B4u)    /* float, Muendung/Referenzpunkt X */
+#define CMH_MZY_ADDR SBA(0x3579B8u)    /* float, Muendung/Referenzpunkt Y */
+#define CMH_MZZ_ADDR SBA(0x3579BCu)    /* float, Muendung/Referenzpunkt Z */
+#define CMH_DMQ_ADDR SBA(0x6CA870u)    /* u32, Schadens-Queue-Zaehler (<0x100) */
+#define CMH_M61_ADDR SBA(0x35161Cu)    /* u32, Case-0-Hit-Marker */
+#define CMH_B2C_ADDR SBA(0x35502Cu)    /* u16, Drain-Untergrenze 1608C0 (W40-offen-4, W42) */
+#define STA_TMR_ADDR SBA(0x3563F0u)   /* u32, Missions-Frame-Countdown (W17-scan: 71998->0, -1/Frame) */
+#define STA_MA_ADDR SBA(0x6C8510u)    /* u32, Missionswert A (3000->2589->112, W17-Kandidat) */
+#define STA_MB_ADDR SBA(0x6C851Cu)    /* u32, Missionswert B (325->12, W17-Kandidat) */
+#define STA_MC_ADDR SBA(0x347174u)    /* u32, Missionswert C (1565->1337, W17-Kandidat) */
 
 static u32 st_read(u32 addr)
 {
@@ -149,6 +152,43 @@ void diag_states_tick(unsigned frame)
 /* DIAG(STATE) (A11c): kompakte Missions-Zustandszeile, 1x/s (wall-clock,
  * fps-unabhaengig). Schalter [log] state_diag=1, Intervall [log]
  * state_every (ms). Format: key=value, parst scripts/state_check.py. */
+/* TEST(PAL50,W234) film_diag=1: Filmdauer gegen die Wanduhr (QPC). Liest
+ * den Bink-Zeiger des Film-Players wie sb_pause_movie_frame (W192):
+ * Width/Height/Frames/FrameNum/LastFrameNum/FrameRate/FrameRateDiv.
+ * Je Film eine start- und eine end-Zeile (Zeiger genullt bzw. gewechselt). */
+static void diag_film_tick(unsigned frame)
+{
+    static const volatile unsigned *cur;
+    static LARGE_INTEGER q0, qf;
+    static unsigned last_fn, frames, rate, div, swaps;
+    const volatile unsigned *b = NULL;
+    LARGE_INTEGER q;
+    __try {
+        b = *(const volatile unsigned *volatile *)(uintptr_t)SBA(0x3B8AD0u);
+        if (!(b && b[0] && b[1] && b[3] <= b[2])) { b = NULL; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { b = NULL; }
+    if (!qf.QuadPart) { QueryPerformanceFrequency(&qf); }
+    QueryPerformanceCounter(&q);
+    if (cur && b != cur) {
+        HLOG_I("FILMDIAG: end f=%u bink=%u/%u rate=%u/%u wall_s=%.3f swaps=%u vblank_hz=%d game_tick=%d", frame,
+               last_fn, frames, rate, div, (double)(q.QuadPart - q0.QuadPart) / (double)qf.QuadPart, swaps,
+               g_cfg.vblank_hz, g_cfg.game_tick);
+        cur = NULL;
+    }
+    if (b && !cur) {
+        cur = b;
+        q0 = q;
+        swaps = 0;
+        __try { frames = b[2]; rate = b[5]; div = b[6]; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        HLOG_I("FILMDIAG: start f=%u frames=%u rate=%u/%u vblank_hz=%d game_tick=%d", frame, frames, rate, div,
+               g_cfg.vblank_hz, g_cfg.game_tick);
+    }
+    if (cur) {
+        swaps++;
+        __try { last_fn = b[3]; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+}
+
 void diag_state_tick(unsigned frame)
 {
     static DWORD sta_last_ms, sta_t0;
@@ -158,6 +198,7 @@ void diag_state_tick(unsigned frame)
     u32 b89a0, port, lock, e690, aa8;
     u32 tmr, ma, mb, mc;
     float f30;
+    if (g_cfg.film_diag) { diag_film_tick(frame); } /* TEST(PAL50,W234) */
     if (!g_cfg.state_diag) {
         return;
     }
@@ -247,12 +288,12 @@ void diag_startup_tick(unsigned frame)
      * [0x356C44] > 2.0 oder [0x35468C]!=0 (0x45A9F..0x45AF6). */
     if (g_cfg.drawdrop_diag) {
         float c44;
-        raw = st_read(0x356C44u);
+        raw = st_read(SBA(0x356C44u));
         memcpy(&c44, &raw, 4);
         HLOG_I("CKP: f=%u eng=%u ckp=%u eec=%u e7c=%u c44=%.3f s68c=%u fb0=0x%X",
-               frame, eng, st_read(0x3520DCu), st_read(0x356EECu),
-               st_read(0x356E7Cu) & 0xFFFFu, c44, st_read(0x35468Cu),
-               st_read(0x346FB0u) & 0xFFFFu);
+               frame, eng, st_read(SBA(0x3520DCu)), st_read(SBA(0x356EECu)),
+               st_read(SBA(0x356E7Cu)) & 0xFFFFu, c44, st_read(SBA(0x35468Cu)),
+               st_read(SBA(0x346FB0u)) & 0xFFFFu);
     }
 }
 /* DIAG(GEAR) (W141): Gang-Kette Block -> Out+0xB -> Mapper-Latch +
@@ -262,10 +303,10 @@ void diag_startup_tick(unsigned frame)
  * Mapper-Ports, out = Out+0xB (Fahr-/Lampen-Byte), latch = [0x351518]
  * (Mapper-intern, -1/0 bei 254/255), x/z = eigene Entity-Position
  * (Fahrtrichtung). Alle Reads SEH-geschuetzt. */
-#define GR_MP_ADDR 0x352274u   /* u32, Mapper-Port (Mission: 3) */
-#define GR_PST_ADDR 0x4AEEF8u  /* pState-Basis, Stride 0x1C, Gang bei +27 */
-#define GR_OUTP_ADDR 0x4AF9D0u /* u32, Out-Lane-Zeiger des Mappers */
-#define GR_LATCH_ADDR 0x351518u /* s32, Mapper-Gang-Latch */
+#define GR_MP_ADDR SBA(0x352274u)   /* u32, Mapper-Port (Mission: 3) */
+#define GR_PST_ADDR SBA(0x4AEEF8u)  /* pState-Basis, Stride 0x1C, Gang bei +27 */
+#define GR_OUTP_ADDR SBA(0x4AF9D0u) /* u32, Out-Lane-Zeiger des Mappers */
+#define GR_LATCH_ADDR SBA(0x351518u) /* s32, Mapper-Gang-Latch */
 void diag_gear_tick(unsigned frame)
 {
     static DWORD gr_last_ms, gr_t0;
@@ -318,7 +359,7 @@ void diag_gear_tick(unsigned frame)
     }
     HLOG_I("GEAR: f=%u mp=%u blk=%u out=%02X latch=%d b8cc0=%u dec=%u x=%.1f z=%.1f",
            frame, mp, blk & 0xFFu, outb & 0xFFu, (int32_t)latch,
-           st_read(0x3B8CC0u), st_read(0x4AEEF0u), xf, zf);
+           st_read(SBA(0x3B8CC0u)), st_read(SBA(0x4AEEF0u)), xf, zf);
 }
 /* DIAG(COMBAT) (W35): Entity-Tabelle im STATE-Takt (wall-clock).
  * Schalter [log] combat_diag=1, Intervall [log] state_every (ms).
@@ -644,20 +685,20 @@ void diag_combat_tick(unsigned frame)
     {
         u32 r; float aimx = 0, aimy = 0, smx = 0, smy = 0, chx = 0, chy = 0;
         float tp[3] = { 0, 0, 0 }, b0[6] = { 0, 0, 0, 0, 0, 0 };
-        u32 cand = st_read(0x357834u), lck = st_read(0x34700Cu);
-        u32 g4f00 = st_read(0x354F00u), g1548 = st_read(0x351548u);
-        u32 g20dc = st_read(0x3520DCu), wp = st_read(0x355000u);
-        u32 wid = 0xFFFFu, am0 = 0xFFFFu, rl0 = st_read16(0x6E449Cu);
-        u32 rl1 = st_read16(0x6E44A6u), nb = 0, b0i = 0xFFu, b0t = 0, b0k = 0;
+        u32 cand = st_read(SBA(0x357834u)), lck = st_read(SBA(0x34700Cu));
+        u32 g4f00 = st_read(SBA(0x354F00u)), g1548 = st_read(SBA(0x351548u));
+        u32 g20dc = st_read(SBA(0x3520DCu)), wp = st_read(SBA(0x355000u));
+        u32 wid = 0xFFFFu, am0 = 0xFFFFu, rl0 = st_read16(SBA(0x6E449Cu));
+        u32 rl1 = st_read16(SBA(0x6E44A6u)), nb = 0, b0i = 0xFFu, b0t = 0, b0k = 0;
         u32 bi; int k;
-        r = st_read(0x356E1Cu); memcpy(&aimx, &r, 4);
-        r = st_read(0x356D38u); memcpy(&aimy, &r, 4);
-        r = st_read(0x356D08u); memcpy(&smx, &r, 4);
-        r = st_read(0x3521BCu); memcpy(&smy, &r, 4);
-        r = st_read(0x358560u); memcpy(&chx, &r, 4);
-        r = st_read(0x358564u); memcpy(&chy, &r, 4);
+        r = st_read(SBA(0x356E1Cu)); memcpy(&aimx, &r, 4);
+        r = st_read(SBA(0x356D38u)); memcpy(&aimy, &r, 4);
+        r = st_read(SBA(0x356D08u)); memcpy(&smx, &r, 4);
+        r = st_read(SBA(0x3521BCu)); memcpy(&smy, &r, 4);
+        r = st_read(SBA(0x358560u)); memcpy(&chx, &r, 4);
+        r = st_read(SBA(0x358564u)); memcpy(&chy, &r, 4);
         for (k = 0; k < 3; k++) {
-            r = st_read(0x35838Cu + (u32)(k * 4));
+            r = st_read(SBA(0x35838Cu) + (u32)(k * 4));
             memcpy(&tp[k], &r, 4);
         }
         if (wp > 0x10000u && wp < 0x8000000u) {
@@ -665,7 +706,7 @@ void diag_combat_tick(unsigned frame)
             am0 = st_read16(wp + 0x12u) & 0xFFFFu;
         }
         for (bi = 0; bi < 60u; bi++) {
-            u32 bb = 0x6D2FD8u + bi * 0x58u;
+            u32 bb = SBA(0x6D2FD8u) + bi * 0x58u;
             if (st_read(bb + 4u) & 1u) {
                 nb++;
                 if (b0i == 0xFFu) {
@@ -684,9 +725,9 @@ void diag_combat_tick(unsigned frame)
         {
             float hy = 0, mz[3] = { 0, 0, 0 }, ed[2] = { -1, -1 }, eb[2] = { 0, 0 };
             int ei;
-            r = st_read(0x3521C0u); memcpy(&hy, &r, 4);
+            r = st_read(SBA(0x3521C0u)); memcpy(&hy, &r, 4);
             for (k = 0; k < 3; k++) {
-                r = st_read(0x3579B4u + (u32)(k * 4));
+                r = st_read(SBA(0x3579B4u) + (u32)(k * 4));
                 memcpy(&mz[k], &r, 4);
             }
             if (tab != 0 && tab != 0xFFFFFFFFu && tab != 0xFFFFFFFEu && n > 71u &&

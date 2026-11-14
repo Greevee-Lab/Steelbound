@@ -33,6 +33,7 @@
  * interp_fps=0: g_ip_recording bleibt 0, sb_interp_swap kehrt sofort mit 0
  * zurueck -> exakt der bisherige Pfad. */
 #include "render_int.h"
+#include "sb_state.h" /* W232: sb_in_mission */
 #include <share.h> /* W174: _fsopen/_SH_DENYNO */
 #include <d3d11_1.h>
 #include "render_qa.h"
@@ -1569,11 +1570,9 @@ static int ip_refbox(const ip_op_t *o, int bb[4])
 static void ip_iwrong_log(const ip_list_t *A, const ip_list_t *B, unsigned i, int found, int best)
 {
     static unsigned nlog;
-    unsigned md = 0;
     int b0[4], b1[4], b2[4];
     const ip_op_t *o = &B->ops[i];
-    __try { md = *(volatile unsigned *)(uintptr_t)0x2EEA34u; } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    if (md != 4u || nlog >= 4000u) { return; } /* nur Mission (Modus 4), gedeckelt */
+    if (!sb_in_mission() || nlog >= 4000u) { return; } /* nur Spielermission (W232 statt Ladezaehler == 4), gedeckelt */
     if (g_cfg.pf_ring > 0 && !sb_pf_active()) { return; } /* mit pf_ring nur waehrend der Bildfolgen */
     nlog++;
     ip_refbox(o, b0);

@@ -98,6 +98,7 @@ add_library(sb_emu SHARED
   src/sb_packscan.c
   src/sb_sha256.c
   src/iso_vfs.c
+  src/sb_profile.c
   src/sb_gamever.c
   src/sb_userdata.c
   src/sb_savecheck.c
@@ -122,6 +123,7 @@ add_library(sb_emu SHARED
   src/input_map.c
   src/input_joy.c
   src/input_mouse.c
+  src/sb_state.c
   src/input_tap.c
   src/hlock.c
   src/vr.c
@@ -150,6 +152,7 @@ target_compile_options(sbc_probe PRIVATE /W3)
 add_executable(input_selftest
   src/input_selftest.c
   src/input_mouse_selftest.c
+  src/sb_profile.c
   src/input_map.c
   src/input_joy.c
   src/input_tap.c

@@ -17,17 +17,19 @@
  * zeichnet einen Tick so ohne erneutes Hochladen nach (render_interp.c).
  * shading=0: kein Aufruf veraendert den bisherigen Pfad (rq_begin -> 0). */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "sb_userdata.h" /* W150 USER-DATA */
 #include <d3d11_1.h>
 #include "render_qa.h"
 #include "render_vsh.h"
 #include "render_psgen.h"
+#include "sb_state.h" /* W232: sb_in_mission */
 
 #define RQ_VS_MAX 96
 #define RQ_PS_MAX 96
 #define RQ_XRING_BYTES (32u << 20)   /* Stream-2-Ring ausserhalb der Aufnahme */
 #define RQ_CRING_CONST (256u * 1024u) /* Konstanten-Ring (4 MB) */
-#define RQ_VMIRROR 0x21BCA8u          /* VS-Konstanten-Spiegel (c-96..95) */
+#define RQ_VMIRROR SBA(0x21BCA8u)          /* VS-Konstanten-Spiegel (c-96..95) */
 
 typedef struct {
     unsigned handle, hash, nslots, chk1;
@@ -1236,7 +1238,7 @@ static void rq_flash_diag(const float *pb)
     rqv_out_t ro;
     if (g_cfg.flash_diag <= 0 || g_cfg.screenshot_max <= 0 || !sf || !ev || p < sf ||
         (p - sf) % ev || (p - sf) / ev >= (unsigned)g_cfg.screenshot_max ||
-        rq_u32(0x2EEA34u) != 4u) { return; }
+        !sb_in_mission()) { return; } /* W232: Spielermission statt Ladezaehler == 4 */
     if (last != p) { last = p; draw = 0; }
     if (draw >= 4096u) { return; }
     n = g_rq_src.use ? g_rq_src.n : g_rq_n;
@@ -1249,7 +1251,7 @@ static void rq_flash_diag(const float *pb)
     /* XDK 0x213CC0 / 0x217E3A: Sekundaerfarbe bei SPECULARENABLE oder
      * PS-Bedarf (Device+8, Bit 6); kein Eingriff in den Hardware-Zustand. */
     HLOG_W("FLASH spec f=%u d=%u rs=%u psneed=%u", p, draw,
-           rq_u32(0x21AC4Cu), (rq_u32(rq_u32(0x21A8A0u) + 8u) >> 6) & 1u);
+           rq_u32(SBA(0x21AC4Cu)), (rq_u32(rq_u32(SBA(0x21A8A0u)) + 8u) >> 6) & 1u);
     __try { memcpy(cc, (const void *)(uintptr_t)RQ_VMIRROR, sizeof cc); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return; }
     for (j = 0; j < g_rq_vse->nc; j++) {
@@ -1315,8 +1317,8 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
     {
         float *fg = &vblk[g_rq_vse->nc * 4u];
         union { unsigned u; float f; } st, en, de;
-        fen = rq_u32(0x21AC20u); ftb = rq_u32(0x21AC24u);
-        st.u = rq_u32(0x21AC28u); en.u = rq_u32(0x21AC2Cu); de.u = rq_u32(0x21AC30u);
+        fen = rq_u32(SBA(0x21AC20u)); ftb = rq_u32(SBA(0x21AC24u));
+        st.u = rq_u32(SBA(0x21AC28u)); en.u = rq_u32(SBA(0x21AC2Cu)); de.u = rq_u32(SBA(0x21AC30u));
         fg[0] = 0.0f; fg[1] = 1.0f; fg[2] = 1.0f; fg[3] = 0.0f;
         if (fen && (mask & 1u)) {
             if (ftb == 0u) { fg[0] = 1.0f; fg[1] = 1.0f; fg[2] = 1.0f; }
@@ -1419,8 +1421,8 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
                 tsc[k * 4u + 1] = 1.0f / (float)h;
             }
         }
-        g_rq_rec.smp[k] = rq_sampler(rq_u32(0x21A8B0u + (k * 32u + 0u) * 4u),
-                                     rq_u32(0x21A8B0u + (k * 32u + 1u) * 4u));
+        g_rq_rec.smp[k] = rq_sampler(rq_u32(SBA(0x21A8B0u) + (k * 32u + 0u) * 4u),
+                                     rq_u32(SBA(0x21A8B0u) + (k * 32u + 1u) * 4u));
     }
     {   /* RENDER-QA3 (W100): pflags = Alpha-Test (x Funktion, y Ref), ALPHAKILL-
          * Maske der Stufen 0..3 (z), DIAG-Term (w); als uint (asuint im PS).
@@ -1435,7 +1437,7 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
         }
         if (g_cfg.fx_alphakill && (g_cfg.fx_alphakill >= 2 || rq_in_mission())) {
             for (k = 0; k < 4u; k++) {
-                if (g_rq_rec.srv[k] && (rq_u32(0x21A8B0u + (k * 32u + 11u) * 4u) & 4u) && !rq_stage_is_rt(k)) {
+                if (g_rq_rec.srv[k] && (rq_u32(SBA(0x21A8B0u) + (k * 32u + 11u) * 4u) & 4u) && !rq_stage_is_rt(k)) {
                     pf[2] |= 1u << k;
                 }
             }
@@ -1514,7 +1516,7 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
                 unsigned ri;
                 rb[0] = 0;
                 for (ri = 0; ri < 92u && ro >= 0 && ro < 560; ri++) {
-                    unsigned rv = rq_u32(0x21AAB0u + ri * 4u);
+                    unsigned rv = rq_u32(SBA(0x21AAB0u) + ri * 4u);
                     if (rv) { ro += _snprintf_s(rb + ro, sizeof rb - (size_t)ro, _TRUNCATE, "%u=%X ", ri, rv); }
                 }
                 HLOG_W("RQRS f=%u ps=0x%X %s", g_present_no, g_im_pshader, rb);
@@ -1529,8 +1531,8 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
             HLOG_W("RQSTAGE f=%u vs=0x%X ps=0x%X C0s0=(%.2f,%.2f,%.2f,%.2f) C0s1=(%.2f,%.2f,%.2f,%.2f) psc=%u/0x%X RS[10..13]=%08X %08X %08X %08X RS[18]=%08X RS[43]=%08X dev4ac=%08X",
                    g_present_no, g_im_shader, g_im_pshader, pblk[0], pblk[1], pblk[2], pblk[3],
                    pblk[4], pblk[5], pblk[6], pblk[7], g_rq_psconst_calls, g_rq_psconst_set,
-                   rq_u32(0x21AAB0u + 40u), rq_u32(0x21AAB0u + 44u), rq_u32(0x21AAB0u + 48u), rq_u32(0x21AAB0u + 52u),
-                   rq_u32(0x21AAB0u + 72u), rq_u32(0x21AAB0u + 172u), rq_u32(rq_u32(0x21A8A0u) + 0x4ACu));
+                   rq_u32(SBA(0x21AAB0u) + 40u), rq_u32(SBA(0x21AAB0u) + 44u), rq_u32(SBA(0x21AAB0u) + 48u), rq_u32(SBA(0x21AAB0u) + 52u),
+                   rq_u32(SBA(0x21AAB0u) + 72u), rq_u32(SBA(0x21AAB0u) + 172u), rq_u32(rq_u32(SBA(0x21A8A0u)) + 0x4ACu));
             HLOG_W("RQSTAGE f=%u vs=0x%X ps=0x%X tgt=%d rhw=%d kind=%u raw=%d tmax0=%.1f xp=0x%X/0x%X/0x%X/0x%X srv=%d%d%d%d tsc0=%.5f fog=%u/%u",
                    g_present_no, g_im_shader, g_im_pshader, rtt_active() ? g_rtt_bound + 1 : 0, rhw, g_rq_kind, g_rq_src.use, g_rq_tmax[0], xp[0], xp[1], xp[2], xp[3],
                    g_rq_rec.srv[0] != NULL, g_rq_rec.srv[1] != NULL, g_rq_rec.srv[2] != NULL,

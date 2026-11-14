@@ -9,6 +9,7 @@
  * W68 SPLIT: hier Stimmen-Verwaltung + DS-API; Formate/Dekoder/FIFO in
  * audio_fmt.c, Mixer/Ausgabe/WAV in audio_mix.c (gemeinsam: audio_int.h). */
 #include "audio_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 
 /* ---------- Globals ---------- */
 static hlock_t g_au_cs; /* W119 LOADLOCK: hlock (atomarer Owner, reentrant) */
@@ -501,7 +502,7 @@ void au_sfx_trace(audio_voice_t *v, const char *what, au32 a, au32 b, au32 c,
     LARGE_INTEGER now;
     LONG n;
     if (g_cfg.audio_sfx_diag <= 0 || !v || v->kind != 1 ||
-        v->create_ret == 0x2435FCu)
+        v->create_ret == SBA(0x2435FCu))
         return;
     n = InterlockedIncrement(&g_sfx_lines);
     if (n > g_cfg.audio_sfx_diag)
@@ -743,7 +744,7 @@ void audio_play(au32 v, au32 flags)
     vp->active = 1;
     vp->play_mix = g_mixed_total; /* W95 DIAG(SFXN) */
     vp->play_flags = flags;
-    if (g_cfg.audio_sync_diag && vp->create_ret == 0x2435FCu && vp->dbg_lock_n <= 16)
+    if (g_cfg.audio_sync_diag && vp->create_ret == SBA(0x2435FCu) && vp->dbg_lock_n <= 16)
         HLOG_I("AVSYNC play: v%u played=%llu fifo=%u front=%llu", vp->id,
                vp->played, vp->fifo_n, vp->ring_front);
     au_unlock();
@@ -827,7 +828,7 @@ void audio_set_pos(au32 v, au32 byteOff)
     if (!vp)
         return;
     au_lock();
-    if (g_cfg.audio_sync_diag && vp->create_ret == 0x2435FCu && vp->dbg_lock_n <= 16)
+    if (g_cfg.audio_sync_diag && vp->create_ret == SBA(0x2435FCu) && vp->dbg_lock_n <= 16)
         HLOG_I("AVSYNC setpos: v%u off=%u played=%llu fifo=%u front=%llu", vp->id,
                byteOff, vp->played, vp->fifo_n, vp->ring_front);
     /* Playhead aus Byte-Offset ableiten (statische Daten) */
@@ -1113,7 +1114,7 @@ au32 audio_unlock(au32 v, au32 p1, au32 b1, au32 p2, au32 b2)
                     while (ao + vp->buflen <= vp->ring_front)
                         ao += vp->buflen;
                     if (g_cfg.audio_bink_sync && g_cfg.audio_ring_overwrite &&
-                        vp->create_ret == 0x2435FCu && vp->fmt.tag == 1 &&
+                        vp->create_ret == SBA(0x2435FCu) && vp->fmt.tag == 1 &&
                         vp->fmt.bits == 16 && vp->src_rate == MIXRATE &&
                         al == (au32)vp->fmt.ch * 2u &&
                         !vp->playing && !vp->played) {
@@ -1145,7 +1146,7 @@ au32 audio_unlock(au32 v, au32 p1, au32 b1, au32 p2, au32 b2)
                     vp->dbg_clip_bytes += skip;
                     g_stat_clip += skip;
                 }
-                if (g_cfg.audio_sync_diag && vp->create_ret == 0x2435FCu && vp->dbg_lock_n <= 16)
+                if (g_cfg.audio_sync_diag && vp->create_ret == SBA(0x2435FCu) && vp->dbg_lock_n <= 16)
                     HLOG_I("AVSYNC unlock: v%u n=%llu part=%u off=%u bytes=%u skip=%u played=%llu fifo=%u front=%llu",
                            vp->id, vp->dbg_lock_n, i, vp->lock_off, b, skip,
                            vp->played, vp->fifo_n, vp->ring_front);

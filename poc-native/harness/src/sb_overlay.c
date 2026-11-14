@@ -18,6 +18,7 @@
  * gestreckt). Lage: oben links in der 4:3-Box (sb_aspect_box), also auch
  * im Ultrawide eingepasst. */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "sb_gfxpreset.h"
 #include "sb_fpsrate.h" /* W223 FPS-RATES */
 #include "render_qa.h"
@@ -40,6 +41,7 @@
 #include <ctype.h> /* W195: toupper (Test-Hook KDN=/KUP=) */
 #include <wchar.h>
 #include <time.h> /* W222: Build-Datum */
+#include "sb_state.h" /* W232: sb_in_mission */
 
 /* ---- Modulgrenzen (andere Dateien) ---- */
 int sb_render_offscreen(void);                 /* d3d11_render.c: 1 = FPS-INTERP-Offscreen-BB */
@@ -66,6 +68,7 @@ enum {
     OI_LABEL, /* W153 HUD-LABEL-OPT (Seite "Shader 2") */
     OI_CPERSP, /* W191 UW-PERSP: Cockpit-Perspektive (Seite "Shader 2") */
     OI_CPANINI, /* W191 UW-PERSP: Panini der Cockpit-Ansicht (Seite "Shader 2") */
+    OI_CWIDTH, /* W235 COCKPIT-WIDTH: Breite der Cockpit-Ansicht (Seite "Shader 2") */
     /* W133 REM-FX: Seite "Effekte" (OV_PAGE_FX) */
     OI_FXPRESET, OI_FXSOFT, OI_FXEMB, OI_FXLIGHT, OI_FXLCKP, OI_FXIP, OI_FXCMP,
     /* W134 VR-PROTO: Seite "VR" (OV_PAGE_VR) */
@@ -93,7 +96,7 @@ static const int kOvPage1[] = { OI_SHADING, OI_MFX, OI_GRAIN, OI_GLITCH,
                                 OI_LCKP, OI_CGLOW, OI_CSPILL, OI_CLIGHT,
                                 OI_ABCMP, OI_SAVE, OI_CLOSE };
 static const int kOvPage2[] = { OI_PRESET, OI_AA, OI_SSAO, OI_CSAT, OI_CTEMP, OI_CLIFT, OI_CGAM, OI_CGAIN,
-                                OI_SHADOW, OI_SHSOFT, OI_VQASYNC, OI_LABEL, OI_CPERSP, OI_CPANINI, OI_ABCMP, OI_SAVE, OI_CLOSE };
+                                OI_SHADOW, OI_SHSOFT, OI_VQASYNC, OI_LABEL, OI_CPERSP, OI_CPANINI, OI_CWIDTH, OI_ABCMP, OI_SAVE, OI_CLOSE };
 #define OV_NP2 ((int)(sizeof kOvPage2 / sizeof kOvPage2[0]))
 /* W133 REM-FX: Seite "Effekte" (Index 3, nach "Shader 2") */
 #define OV_PAGE_FX 3
@@ -337,7 +340,7 @@ static int ov_effective(int i)
     case OI_EXPO: case OI_TONE: case OI_BTHR: case OI_LWORLD: case OI_LCKP: case OI_FOCUS: return g_cfg.shading != 0;
     case OI_SHADOW: case OI_VQASYNC: return g_cfg.shading != 0; /* W131 */
     case OI_SHSOFT: return g_cfg.shading != 0 && g_cfg.shade_shadow != 0;
-    case OI_CPERSP: case OI_CPANINI: return !g_cfg.vr_enable; /* W191: nur Desktop, in VR ohne Wirkung (gedimmt) */
+    case OI_CPERSP: case OI_CPANINI: case OI_CWIDTH: return !g_cfg.vr_enable; /* W191/W235: nur Desktop, in VR ohne Wirkung (gedimmt) */
     default: return ov_enabled(i);
     }
 }
@@ -688,6 +691,12 @@ static void ov_change(int i, int dir)
         sb_render_pause_dirty(); /* W209: redraw on either camera slider */
         ov_status_key(g_cfg.vr_enable ? "ovl.st_cpersp_vr" : "ovl.st_cpanini");
         break;
+    case OI_CWIDTH: /* W235 COCKPIT-WIDTH: 0 (Original) .. 10 % in 1er-Schritten, live (Nachbearbeitung je gezeigtem Bild) */
+        g_cfg.cockpit_width = ov_clamp(g_cfg.cockpit_width + dir, 0, 10);
+        HLOG_I("OVERLAY: cockpit_width -> %d (f=%u)", g_cfg.cockpit_width, g_present_no);
+        sb_render_pause_dirty(); /* wie W209: Standbild-Abgleich der Cockpit-Ansicht */
+        ov_status_key(g_cfg.vr_enable ? "ovl.st_cpersp_vr" : "ovl.st_cwidth");
+        break;
     case OI_LABEL: /* W153: wirkt ab Neustart (Patch beim Start) */
         g_cfg.hud_label_avoid = !g_cfg.hud_label_avoid;
         HLOG_I("OVERLAY: hud_label_avoid -> %d (wirkt nach Neustart, f=%u)", g_cfg.hud_label_avoid, g_present_no);
@@ -888,6 +897,7 @@ static const ov_key_t kOvKeys[] = {
     { "hud_label_avoid", "render" }, /* W153 */
     { "cockpit_persp", "render" }, /* W191 */
     { "cockpit_panini", "render" }, /* W191 */
+    { "cockpit_width", "render" }, /* W235 */
     /* W133 REM-FX */
     { "fx_soft", "render" },        { "fx_embers", "render" },
     { "fx_light", "render" },       { "fx_light_cockpit", "render" },
@@ -940,6 +950,7 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     else if (strcmp(k, "edge_mode") == 0) { v = g_cfg.edge_mode; }
     else if (strcmp(k, "cockpit_persp") == 0) { v = g_cfg.cockpit_persp; } /* W191 */
     else if (strcmp(k, "cockpit_panini") == 0) { v = g_cfg.cockpit_panini; } /* W191 */
+    else if (strcmp(k, "cockpit_width") == 0) { v = g_cfg.cockpit_width; } /* W235 */
     else if (strcmp(k, "edge_fade_width") == 0) { v = g_cfg.edge_fade_width; }
     else if (strcmp(k, "edge_fade_strength") == 0) { v = g_cfg.edge_fade_strength; }
     else if (strcmp(k, "mouse_sens") == 0) { v = g_cfg.mouse_sens; }
@@ -2192,13 +2203,10 @@ static void ov_test_tick(unsigned n)
     HWND h;
     if (!g_cfg.overlay_test[0]) { return; }
     if (!g_ov_test_parsed) { ov_test_parse(); }
-    { /* Mission = Modus 4 ([0x2EEA34], wie diag_states) + Szene 0x2C + mloop 1
-       * (rq_in_mission allein trifft auch die Titel-Demo, Modus 2) */
-        unsigned mode = 0;
-        int in;
-        __try { mode = *(volatile unsigned *)(uintptr_t)0x2EEA34u; }
-        __except (EXCEPTION_EXECUTE_HANDLER) { mode = 0; }
-        in = mode == 4u && rq_in_mission();
+    { /* W232: Mission = sb_in_mission (Szene 0x2C + mloop 1 ohne Titel-Demo;
+       * rq_in_mission allein trifft auch die Demo, der Ladezaehler [0x2EEA34]
+       * war nur in der ersten Mission der Testkette 4) */
+        int in = sb_in_mission();
         if (in && !g_ov_in_mission && g_ov_nmission < 8) {
             g_ov_mission_f[g_ov_nmission++] = n;
             HLOG_I("OVERLAY test: Missionsbeginn #%d f=%u", g_ov_nmission, n);
@@ -2298,7 +2306,7 @@ static void ov_test_tick(unsigned n)
         case OA_STATE: /* W188: Beleg-Zeile Spielzustand */
         {
             unsigned tmr = 0;
-            __try { tmr = *(volatile unsigned *)(uintptr_t)0x3563F0u; }
+            __try { tmr = *(volatile unsigned *)(uintptr_t)SBA(0x3563F0u); }
             __except (EXCEPTION_EXECUTE_HANDLER) { tmr = 0; }
             sb_pause_movie_log("test");
             HLOG_I("MENU test: Zustand f=%u feld=%u tmr=%u pausiert=%d bildschirm=%d offen=%d", g_present_no,
@@ -2696,6 +2704,8 @@ static void ov_label(int i, wchar_t *o, size_t cap)
         "ovl.lb_shsoft", "ovl.lb_vqasync", "ovl.lb_label",
         /* W191 */
         "ovl.lb_cpersp", "ovl.lb_cpanini",
+        /* W235 */
+        "ovl.lb_cwidth",
         /* W133 Seite Effekte (W173: Effekt-Stufe, Teil des Grafik-Presets) */
         "ovl.lb_fxlevel", "ovl.lb_fxsoft", "ovl.lb_fxemb", "ovl.lb_fxlight", "ovl.lb_fxlightckp",
         "ovl.lb_fxip", "ovl.lb_cmp",
@@ -2724,9 +2734,9 @@ static void ov_value(int i, wchar_t *o, size_t cap)
     case OI_FPS:
         if (g_ov_auto) { /* W223: "Monitor (auto, <n>)" */
             char nb[64];
-            _snprintf_s(nb, sizeof nb, _TRUNCATE, LT("ovl.v_fps_auto"), g_ov_fps > 0 ? g_ov_fps : 30);
+            _snprintf_s(nb, sizeof nb, _TRUNCATE, LT("ovl.v_fps_auto"), g_ov_fps > 0 ? g_ov_fps : g_cfg.game_tick);
             ov_wu8(o, cap, nb);
-        } else if (g_ov_fps == 0) { ov_wkey(o, cap, "ovl.v_30orig"); }
+        } else if (g_ov_fps == 0) { ov_wkey(o, cap, g_cfg.game_tick == 25 ? "ovl.v_25orig" : "ovl.v_30orig"); } /* W234 */
         else { _snwprintf_s(o, cap, _TRUNCATE, L"%d", g_ov_fps); }
         break;
     case OI_SHADING: ov_wkey(o, cap, g_cfg.shading ? "ovl.v_on" : "ovl.v_off"); break;
@@ -2872,7 +2882,7 @@ static void ov_value(int i, wchar_t *o, size_t cap)
         int q = sb_gfx_preset_match_for(ov_fps_sel(), g_ov_rts >= 0 ? g_ov_rts : g_cfg.rt_scale);
         if (q == 0) {
             char nb[96];
-            _snprintf_s(nb, sizeof nb, _TRUNCATE, LT("ovl.v_orig_hd"), g_ov_fps > 0 ? g_ov_fps : 30);
+            _snprintf_s(nb, sizeof nb, _TRUNCATE, LT("ovl.v_orig_hd"), g_ov_fps > 0 ? g_ov_fps : g_cfg.game_tick); /* W234: 25 bei PAL50 */
             ov_wu8(o, cap, nb);
         } else {
             ov_wkey(o, cap, q > 0 ? pn[q] : "ovl.v_custom");
@@ -2917,6 +2927,10 @@ static void ov_value(int i, wchar_t *o, size_t cap)
     case OI_CPANINI: /* W191 */
         if (g_cfg.cockpit_panini <= 0) { ov_wkey(o, cap, "ovl.v_orig"); }
         else { _snwprintf_s(o, cap, _TRUNCATE, L"%d %%", g_cfg.cockpit_panini); }
+        break;
+    case OI_CWIDTH: /* W235 */
+        if (g_cfg.cockpit_width <= 0) { ov_wkey(o, cap, "ovl.v_orig"); }
+        else { _snwprintf_s(o, cap, _TRUNCATE, L"+%d %%", g_cfg.cockpit_width); }
         break;
     case OI_LABEL: { /* W153: "*" bei Abweichung vom Startwert (Neustart) */
         char nb[64];

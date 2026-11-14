@@ -10,6 +10,7 @@
 #define RENDER_INT_H
 #define COBJMACROS /* ID3D11Device_* etc. als C-Makros */
 #include "d3d11_render.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "sb_tex.h"
 #include "hlog.h"
 #include "hcfg.h"
@@ -103,12 +104,12 @@ typedef struct {
 } vsh_prog_t;
 
 /* MISSION3D-Zensus (W25, render_diag.c). */
-#define M3D_SCENE_ADDR 0x6B96DCu
-#define M3D_MLOOP_ADDR 0x356F58u
+#define M3D_SCENE_ADDR SBA(0x6B96DCu)
+#define M3D_MLOOP_ADDR SBA(0x356F58u)
 #define M3D_MAXFRAMES 6u
 #define M3D_MAXDRAWS 1600u
 #define M3D_MAXQ 1664u
-#define M3D_VTONLINE_ADDR 0x53831Cu /* u32, 1 = Mech online (nach START, Master-Messung V_MOMs1) */
+#define M3D_VTONLINE_ADDR SBA(0x53831Cu) /* u32, 1 = Mech online (nach START, Master-Messung V_MOMs1) */
 
 /* DIAG(TEX3D,W31): Pixelshader-/Combiner-Stand (hooks_d3d.c). */
 extern unsigned g_im_pshader, g_npshader;
@@ -375,6 +376,7 @@ void sb_interp_rec_cpersp(const float camera[3], const float *pos, size_t st, un
 int sb_cp_pause_begin(const float camera[3]); /* prepare current camera; 1 = vertices/matrices need rebuilding */
 float sb_cp_panini_d(void); /* Panini-d dieses Bildes (0 = aus) */
 float sb_cp_panini_offset(void); /* senkrechte Verschiebung (NDC) nach sb_cp_panini_d */
+float sb_cp_width(void); /* W235 COCKPIT-WIDTH: Breitenfaktor dieses Bildes (1 = aus) */
 float sb_cp_panini_scale(float d); /* render_cpanini.c: Mitte-Vergroesserung */
 void sb_cp_panini_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, float d); /* render_cpanini.c, unter ctx_lock */
 int sb_cp_status(double *ms); /* F2-Overlay: Stufe (-1 Auto, 0 aus) + CPU ms/Bild */

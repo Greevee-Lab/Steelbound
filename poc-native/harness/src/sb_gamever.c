@@ -57,6 +57,14 @@ int sb_gamever_check(const uint8_t *xbe, size_t n, sb_gamever_t *out)
             strcpy_s(out->label, sizeof out->label, k_known[i].label);
         }
     }
+    if (!out->supported && out->xbe_ok && out->title_id == 0x43430002u && out->region == 1u &&
+        strcmp(out->sha256, "1d4e006a2eab0694b32562c453fdeb4c3b077eec8c6ed6b75bd6fe4059d8200a") == 0) {
+        /* W229 US-PROFILE: bekannt; W230 US-PLAY: experimentell unterstuetzt
+         * (Client startet mit US-Profil, Notbremse [expert] ntsc_u=0). */
+        out->ntsc_u = 1;
+        out->supported = 1;
+        strcpy_s(out->label, sizeof out->label, "Steel Battalion (USA, NTSC-U)" /* Launcher haengt "experimental" selbst an (W231) */);
+    }
     if (out->supported) {
         _snprintf_s(out->text, sizeof out->text, _TRUNCATE,
                     "GAMEVER: %s erkannt (Title-ID %08X, Region %s, Version %u, sha256 %.16s...) -> unterstuetzt",

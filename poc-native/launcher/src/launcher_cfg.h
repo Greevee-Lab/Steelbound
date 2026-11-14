@@ -26,6 +26,7 @@ typedef struct {
     int sbc_mouse_off;      /* W128: 1 = Maus-Achsen aus, solange der Controller aktiv ist */
     int aim_assist;         /* W236: Zielhilfe 0 = Original, 1 = Fadenkreuz am Rand dreht die Sicht, 2 = Waffenarm fest (Altwert aim_turn=1 -> 1) */
     int auto_gear;          /* W218: 1 = automatischer Gangwechsel (vereinfachte Steuerung) */
+    int game_tick;          /* W234 PAL50: Spieltakt 30 (Standard) oder 25 (wie EU-Konsole am 50-Hz-TV) */
     int interp_fps;         /* W78: Zwischenbilder 0/60/120 */
     int window_mode;        /* W81: 0 = Fenster, 1 = randloses Vollbild, 2 = exklusives Vollbild */
     int fs_hz;              /* W81: exklusiv: Bildwiederholrate (0 = Desktop) */
@@ -36,6 +37,7 @@ typedef struct {
     int edge_fade_width;    /* Verlaufsbreite in % der 4:3-Boxbreite (0..50) */
     int edge_fade_strength; /* Endabdunklung in % (0..100) */
     int cockpit_panini;     /* W191 UW-PERSP: Panini der Cockpit-Ansicht 0 = aus, 1..100 % ([render] cockpit_panini) */
+    int cockpit_width;      /* W235 COCKPIT-WIDTH: leichte Breitenanpassung der Cockpit-Ansicht 0 = Original, 1..10 % ([render] cockpit_width) */
     int cockpit_persp;      /* W191 UW-PERSP: Cockpit-Perspektive 0 = Original, 1..100 = Staerke in % ([render] cockpit_persp, nur Desktop) */
     /* W103 REM-FRAME: [remaster] (Client: hcfg.c, Standard alles aus) */
     int remaster;           /* Hauptschalter 0 = Original, 1 = Einzelschalter gelten */
@@ -183,6 +185,38 @@ void lcfg_xbe_effective(const launcher_settings_t *s, char *out, size_t cap);
 int lcfg_image_check(const char *image_u8, char *msg, size_t cap);
 /* W150: SHA-256 (hex) der default.xbe im Abbild. 1 = ok. */
 int lcfg_image_xbe_sha256(const char *image_u8, char hex[65]);
+
+/* W231 US-LAUNCHER: Fassung des Spiels (aus sb_gamever, gleiche Pruefung wie
+ * der Client). EU = unterstuetzte PAL-Fassung; US = bekannte NTSC-U-Fassung
+ * (experimental, solange sb_gamever sie nicht als supported fuehrt);
+ * US_OTHER = Steel Battalion mit Region NA, aber unbekannter Hash. */
+enum { LCFG_ED_NONE = 0, LCFG_ED_EU = 1, LCFG_ED_US = 2, LCFG_ED_US_OTHER = 3,
+       LCFG_ED_OTHER = 4 };
+typedef struct {
+    int edition;      /* LCFG_ED_* (NONE = nicht lesbar/kein Spiel gewaehlt) */
+    int startable;    /* 1 = Launcher startet (EU, US) */
+    int needs_allow;  /* 1 = Client braucht [expert] allow_ntsc_u=1 (US, nicht supported) */
+} lcfg_gameinfo_t;
+/* Einordnung eines Pruefergebnisses (rein, testbar). Argument: sb_gamever_t*. */
+void lcfg_gameinfo_from(const void *gamever, lcfg_gameinfo_t *gi);
+/* Spielertext zum Pruefergebnis (sb_gamever_t*): 1 = startbar (msg =
+ * gui.image_ok[_us]), 0 = nicht (msg = cfg.image_version/_us_other). */
+int lcfg_gamever_msg(const void *gamever, char *msg, size_t cap);
+/* Fassung des eingestellten Spiels (Abbild oder Ordner-Modus) lesen.
+ * 1 = gelesen, 0 = kein lesbares Spiel (gi->edition = LCFG_ED_NONE). */
+int lcfg_game_info(const launcher_settings_t *s, lcfg_gameinfo_t *gi);
+/* Spielstand-Ordner je Fassung: EU = base, US = base\us (getrennt, gleiche
+ * Title-ID 43430002 -> sonst vermischt). Rein, testbar. */
+void lcfg_hdd_for_edition(const char *hdd_base, int edition, char *out, size_t cap);
+/* --set-Zusatz je Fassung an die Kette set (Kapazitaet cap) anhaengen:
+ * US: allow_ntsc_u=1 (nur solange needs_allow) und hdd_root_us=<us_hdd_acp>
+ * (";" maskiert als "\;"). EU/sonst: nichts. Rein, testbar. 0 = ok,
+ * 1 = Kette zu lang (unveraendert). */
+int lcfg_edition_set_args(const lcfg_gameinfo_t *gi, const char *us_hdd_acp,
+                          char *set, size_t cap);
+/* Sprachschluessel fuer einen Client-Exitcode (5 = Fassung unbekannt,
+ * 8 = Profilpruefung fehlgeschlagen) je Fassung; NULL = keine Meldung. */
+const char *lcfg_exit_msg_key(unsigned long code, int edition);
 /* W150 USER-DATA: Pfad der Spieler-cfg (legacy: <client>/user.cfg,
  * Profil/portabel: <Datenordner>/user.cfg). */
 void lcfg_user_cfg_path(const char *client_dir, char *out, size_t cap);

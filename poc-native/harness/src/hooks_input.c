@@ -115,7 +115,7 @@ void poll_census_install(void)
     static const uint8_t orig[9] = {0x66, 0x8B, 0x44, 0x24, 0x04, 0x66, 0x3D, 0x01, 0x00};
     uint8_t *t;
     intptr_t rel;
-    if (memcmp((void *)(uintptr_t)0x48CF0u, orig, 9) != 0) {
+    if (memcmp((void *)(uintptr_t)SBA(0x48CF0u), orig, 9) != 0) {
         HLOG_E("PCENS: 0x48CF0 Byte-Mismatch - Zensus aus");
         return;
     }
@@ -126,7 +126,7 @@ void poll_census_install(void)
     }
     memcpy(t, orig, 9);
     t[9] = 0xE9;
-    rel = (intptr_t)0x48CF9 - (intptr_t)(t + 14);
+    rel = (intptr_t)SBA(0x48CF9) - (intptr_t)(t + 14);
     memcpy(t + 10, &rel, 4);
     FlushInstructionCache(GetCurrentProcess(), t, 14);
     g_tramp_48cf0 = (u32 (__cdecl *)(u32, u32, u32))(void *)t;
@@ -170,7 +170,9 @@ u32 __stdcall hook_XInputSetState(u32 h, u32 fb)
 u32 __stdcall hook_XGetDeviceChanges(u32 type, u32 pIns, u32 pRem)
 {
     static u32 calls;
-    if (pIns) {
+    if (g_sba_us && pIns) { /* W229 US: fragt auch andere Geraetetypen ab -> nur SBC (Port 0) melden */
+        *(u32 *)(uintptr_t)pIns = (type == SBA(0x2557A4u)) ? 1u : 0u;
+    } else if (pIns) {
         *(u32 *)(uintptr_t)pIns |= 1u;
     }
     if (pRem) {
@@ -299,12 +301,12 @@ static void w87_seq_diag(const sbc_in_t *s)
     unsigned tog = ((unsigned)s->buttons[2] >> 2) & 0x1Fu;
     memset(cur, 0, sizeof cur);
     __try {
-        cur[0] = (uint8_t)*(volatile u32 *)(uintptr_t)0x356F58u;
-        cur[1] = *(volatile uint8_t *)(uintptr_t)0x51D8B4u;
-        memcpy(cur + 2, (const void *)(uintptr_t)0x51D8B5u, 5);
-        cur[7] = (uint8_t)*(volatile u32 *)(uintptr_t)0x51D92Cu;
-        cur[8] = (uint8_t)*(volatile u32 *)(uintptr_t)0x55D168u;
-        cur[9] = (uint8_t)*(volatile u32 *)(uintptr_t)0x53831Cu;
+        cur[0] = (uint8_t)*(volatile u32 *)(uintptr_t)SBA(0x356F58u);
+        cur[1] = *(volatile uint8_t *)(uintptr_t)SBA(0x51D8B4u);
+        memcpy(cur + 2, (const void *)(uintptr_t)SBA(0x51D8B5u), 5);
+        cur[7] = (uint8_t)*(volatile u32 *)(uintptr_t)SBA(0x51D92Cu);
+        cur[8] = (uint8_t)*(volatile u32 *)(uintptr_t)SBA(0x55D168u);
+        cur[9] = (uint8_t)*(volatile u32 *)(uintptr_t)SBA(0x53831Cu);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return;
     }
@@ -327,7 +329,7 @@ static void w87_seq_diag(const sbc_in_t *s)
         int i;
         __try {
             for (i = 0; i < 5; i++)
-                b[i] = *(volatile float *)(uintptr_t)(0x55D19Cu + 4u * (u32)i);
+                b[i] = *(volatile float *)(uintptr_t)(SBA(0x55D19Cu) + 4u * (u32)i);
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
         HLOG_I("STARTSEQ: f=%u mloop=%u stufe=%u sw=%u%u%u%u%u n=%u "
                "s168=%u online=%u raste=%u%u%u%u%u balken=%.2f/%.2f/%.2f/%.2f/%.2f",
@@ -353,13 +355,13 @@ static void w87_aim_diag(const sbc_in_t *s)
     if (g_frames == lastf) return;
     lastf = g_frames;
     __try {
-        if (*(volatile u32 *)(uintptr_t)0x356F58u != 1u) return;
-        t[0] = *(volatile float *)(uintptr_t)0x356E1Cu;
-        t[1] = *(volatile float *)(uintptr_t)0x356D38u;
-        m[0] = *(volatile float *)(uintptr_t)0x356D08u;
-        m[1] = *(volatile float *)(uintptr_t)0x3521BCu;
-        c[0] = *(volatile float *)(uintptr_t)0x358560u;
-        c[1] = *(volatile float *)(uintptr_t)0x358564u;
+        if (*(volatile u32 *)(uintptr_t)SBA(0x356F58u) != 1u) return;
+        t[0] = *(volatile float *)(uintptr_t)SBA(0x356E1Cu);
+        t[1] = *(volatile float *)(uintptr_t)SBA(0x356D38u);
+        m[0] = *(volatile float *)(uintptr_t)SBA(0x356D08u);
+        m[1] = *(volatile float *)(uintptr_t)SBA(0x3521BCu);
+        c[0] = *(volatile float *)(uintptr_t)SBA(0x358560u);
+        c[1] = *(volatile float *)(uintptr_t)SBA(0x358564u);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return;
     }
@@ -413,25 +415,25 @@ static void w87_aim_abs(sbc_in_t *s, const imap_state_t *st)
     lastf = g_frames;
     osrc = 0;
     __try {
-        if (*(volatile u32 *)(uintptr_t)0x356F58u != 1u) return;
+        if (*(volatile u32 *)(uintptr_t)SBA(0x356F58u) != 1u) return;
         /* nur mit VT online (nach START; Titel-Demo/Startsequenz bleiben
          * beim gelieferten Hebel) */
-        if (*(volatile u32 *)(uintptr_t)0x53831Cu != 1u) return;
-        sy = (*(volatile uint16_t *)(uintptr_t)0x356E20u) ?
-             w87_rdf(0x260380u, -0.0061359f) : w87_rdf(0x26037Cu, 0.0061359f);
+        if (*(volatile u32 *)(uintptr_t)SBA(0x53831Cu) != 1u) return;
+        sy = (*(volatile uint16_t *)(uintptr_t)SBA(0x356E20u)) ?
+             w87_rdf(SBA(0x260380u), -0.0061359f) : w87_rdf(SBA(0x26037Cu), 0.0061359f);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return;
     }
-    k = w87_rdf(0x260284u, 0.0625f);
-    sx = w87_rdf(0x260384u, -0.015f);
-    kx = w87_rdf(0x25FCD4u, 1.0f) / w87_rdf(0x354F90u, 1.0f);
-    ky = w87_rdf(0x25FCD4u, 1.0f) / w87_rdf(0x347830u, 1.0f);
+    k = w87_rdf(SBA(0x260284u), 0.0625f);
+    sx = w87_rdf(SBA(0x260384u), -0.015f);
+    kx = w87_rdf(SBA(0x25FCD4u), 1.0f) / w87_rdf(SBA(0x354F90u), 1.0f);
+    ky = w87_rdf(SBA(0x25FCD4u), 1.0f) / w87_rdf(SBA(0x347830u), 1.0f);
     if (!(k > 0.001f && k <= 1.0f)) return;
     if (!(kx > 0.05f && kx < 50.0f)) kx = 1.0f;
     if (!(ky > 0.05f && ky < 50.0f)) ky = 1.0f;
     if (fabsf(sx) < 1e-5f || fabsf(sy) < 1e-5f) return;
-    smx = w87_rdf(0x356D08u, 0.0f);
-    smy = w87_rdf(0x3521BCu, 0.0f);
+    smx = w87_rdf(SBA(0x356D08u), 0.0f);
+    smy = w87_rdf(SBA(0x3521BCu), 0.0f);
     vx = (float)st->m_ax + st->m_fx;
     vy = (float)st->m_ay + st->m_fy;
     tx = (vx - 127.0f) * kx * sx;
@@ -481,9 +483,9 @@ static void w87_toggle_assist(sbc_in_t *s, imap_state_t *ts, unsigned chg)
     int i;
     if (chg) {
         __try {
-            stage = *(volatile uint8_t *)(uintptr_t)0x51D8B4u;
-            memcpy(sw, (const void *)(uintptr_t)0x51D8B5u, 5);
-            if (*(volatile u32 *)(uintptr_t)0x356F58u != 1u) stage = 0;
+            stage = *(volatile uint8_t *)(uintptr_t)SBA(0x51D8B4u);
+            memcpy(sw, (const void *)(uintptr_t)SBA(0x51D8B5u), 5);
+            if (*(volatile u32 *)(uintptr_t)SBA(0x356F58u) != 1u) stage = 0;
         } __except (EXCEPTION_EXECUTE_HANDLER) {
             stage = 0;
         }
@@ -542,39 +544,39 @@ static void w236_aim_assist(sbc_in_t *s, const imap_state_t *gs)
         return;
     }
     __try {
-        if (*(volatile u32 *)(uintptr_t)0x53831Cu != 1u) {
+        if (*(volatile u32 *)(uintptr_t)SBA(0x53831Cu) != 1u) {
             guide_on = 0;
             return;
         }
-        sy_inv = *(volatile uint16_t *)(uintptr_t)0x356E20u != 0;
-        pit_inv = *(volatile uint16_t *)(uintptr_t)0x346FACu != 0;
+        sy_inv = *(volatile uint16_t *)(uintptr_t)SBA(0x356E20u) != 0;
+        pit_inv = *(volatile uint16_t *)(uintptr_t)SBA(0x346FACu) != 0;
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return;
     }
     memset(&in, 0, sizeof in);
-    in.vyaw = w87_rdf(0x35212Cu, 0.0f);
-    in.vpit = w87_rdf(0x355F04u, 0.0f);
-    fov = w87_rdf(0x352290u, 45.0f);
+    in.vyaw = w87_rdf(SBA(0x35212Cu), 0.0f);
+    in.vpit = w87_rdf(SBA(0x355F04u), 0.0f);
+    fov = w87_rdf(SBA(0x352290u), 45.0f);
     if (!(fov > 1.0f && fov < 170.0f)) fov = 45.0f;
-    in.kv = fov * w87_rdf(0x26024Cu, 0.0222222f) * w87_rdf(0x25FCCCu, 0.0005f);
-    kx = w87_rdf(0x25FCD4u, 1.0f) / w87_rdf(0x354F90u, 1.0f);
-    ky = w87_rdf(0x25FCD4u, 1.0f) / w87_rdf(0x347830u, 1.0f);
+    in.kv = fov * w87_rdf(SBA(0x26024Cu), 0.0222222f) * w87_rdf(SBA(0x25FCCCu), 0.0005f);
+    kx = w87_rdf(SBA(0x25FCD4u), 1.0f) / w87_rdf(SBA(0x354F90u), 1.0f);
+    ky = w87_rdf(SBA(0x25FCD4u), 1.0f) / w87_rdf(SBA(0x347830u), 1.0f);
     if (!(kx > 0.05f && kx < 50.0f)) kx = 1.0f;
     if (!(ky > 0.05f && ky < 50.0f)) ky = 1.0f;
-    in.sx = w87_rdf(0x260384u, -0.015f) * kx;
-    in.sy = (sy_inv ? w87_rdf(0x260380u, -0.0061359f)
-                    : w87_rdf(0x26037Cu, 0.0061359f)) * ky;
-    in.yaw_max = w87_rdf(0x25D254u, 1.5707964f);
-    in.pit_max = w87_rdf(0x260B9Cu, 0.6108652f);
+    in.sx = w87_rdf(SBA(0x260384u), -0.015f) * kx;
+    in.sy = (sy_inv ? w87_rdf(SBA(0x260380u), -0.0061359f)
+                    : w87_rdf(SBA(0x26037Cu), 0.0061359f)) * ky;
+    in.yaw_max = w87_rdf(SBA(0x25D254u), 1.5707964f);
+    in.pit_max = w87_rdf(SBA(0x260B9Cu), 0.6108652f);
     in.pit_dir = pit_inv ? -1 : 1;
     in.pit_rel = W236_PIT_REL;
     in.pit_bias = W236_PIT_BIAS;
     in.dz = W236_SIGHT_DZ;
     /* Arm: geglaetteter Ist-Winkel; mit absoluter Maus (W87-Vorsteuerung
      * auf dieser Achse) erreicht er das Ziel im naechsten Frame. */
-    in.arm_x = w87_rdf(0x356D08u, 0.0f);
-    in.arm_y = w87_rdf(0x3521BCu, 0.0f);
-    ksm = w87_rdf(0x260284u, 0.0625f);
+    in.arm_x = w87_rdf(SBA(0x356D08u), 0.0f);
+    in.arm_y = w87_rdf(SBA(0x3521BCu), 0.0f);
+    ksm = w87_rdf(SBA(0x260284u), 0.0625f);
     if (!(ksm > 0.001f && ksm <= 1.0f)) ksm = 0.0625f;
     abs_on = g_cfg.mouse_mode == 1 && g_cfg.mouse_aim && !g_cfg.mouse_sight &&
              g_sbc_mouse_live;
@@ -648,17 +650,17 @@ static void w218_simple_controls(sbc_in_t *s, imap_state_t *gs, int gear_direct)
     }
     if (g_cfg.overlay && sb_ovl_open()) return;
     __try {
-        u32 tab = *(volatile u32 *)(uintptr_t)0x351828u;
-        u32 n = *(volatile u32 *)(uintptr_t)0x352288u;
-        u32 ours = *(volatile uint16_t *)(uintptr_t)0x356E2Cu;
-        if (*(volatile u32 *)(uintptr_t)0x356F58u == 1u &&
-            *(volatile u32 *)(uintptr_t)0x53831Cu == 1u &&
+        u32 tab = *(volatile u32 *)(uintptr_t)SBA(0x351828u);
+        u32 n = *(volatile u32 *)(uintptr_t)SBA(0x352288u);
+        u32 ours = *(volatile uint16_t *)(uintptr_t)SBA(0x356E2Cu);
+        if (*(volatile u32 *)(uintptr_t)SBA(0x356F58u) == 1u &&
+            *(volatile u32 *)(uintptr_t)SBA(0x53831Cu) == 1u &&
             tab && n <= 100000u && ours && ours < n) {
             u32 ob = tab + ours * 0x5Cu;
             if (*(volatile uint16_t *)(uintptr_t)ob != 0) {
                 x = *(volatile float *)(uintptr_t)(ob + 0x0C);
                 z = *(volatile float *)(uintptr_t)(ob + 0x14);
-                hy = *(volatile float *)(uintptr_t)0x3521C0u;
+                hy = *(volatile float *)(uintptr_t)SBA(0x3521C0u);
                 ok = 1;
             }
         }
@@ -763,7 +765,7 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
         if ((nxp & 0xFFF) == 1) {
             unsigned ra = 0;
             __try { ra = sp0 ? *sp0 : 0; } __except (EXCEPTION_EXECUTE_HANDLER) {}
-            { unsigned pt = (pState >= 0x4AEEF8u && pState < 0x4AEF80u) ? (pState - 0x4AEEF8u) / 0x1Cu : 99u;
+            { unsigned pt = (pState >= SBA(0x4AEEF8u) && pState < SBA(0x4AEF80u)) ? (pState - SBA(0x4AEEF8u)) / 0x1Cu : 99u;
               HLOG_W("XINPORT #%u: port=%u pState=0x%X RA=0x%X", nxp, pt, pState, ra); }
         }
     }
@@ -772,7 +774,7 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
       if (g_frames - lastlog >= 30000u) {
           unsigned mp = 0xEEEEu;
           lastlog = g_frames;
-          __try { mp = *(u32 *)(uintptr_t)0x352274u; }
+          __try { mp = *(u32 *)(uintptr_t)SBA(0x352274u); }
           __except (EXCEPTION_EXECUTE_HANDLER) {}
           HLOG_W("PORTLOG: frame=%u mapper_port=%u", g_frames, mp);
       } }

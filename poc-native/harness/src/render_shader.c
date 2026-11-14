@@ -3,6 +3,7 @@
  * Dekoder, oPos-Muster, Konstanten-Spiegel). W68 SPLIT: 1:1 aus
  * d3d11_render.c verschoben. */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 
 /* ---------- M2b-Geometriepfad (IM -> D3D11) ---------- */
 /* Fixed-Function-Ersatz: Spiel nutzt Vertex-Shader-PROGRAMME (kein FVF).
@@ -633,11 +634,11 @@ int vsh_read_mat(const vsh_prog_t *vp, float m[4][4], float zadd[4])
     __try {
         unsigned r;
         for (r = 0; r < 4u; r++) {
-            const float *c = (const float *)(uintptr_t)(0x21BCA8u + (vp->rowe + r) * 16u);
+            const float *c = (const float *)(uintptr_t)(SBA(0x21BCA8u) + (vp->rowe + r) * 16u);
             m[r][0] = c[0]; m[r][1] = c[1]; m[r][2] = c[2]; m[r][3] = c[3];
         }
         if (vp->zadd) {
-            const float *c = (const float *)(uintptr_t)(0x21BCA8u + vp->zadde * 16u);
+            const float *c = (const float *)(uintptr_t)(SBA(0x21BCA8u) + vp->zadde * 16u);
             zadd[0] = c[0]; zadd[1] = c[1]; zadd[2] = c[2]; zadd[3] = c[3];
         } else {
             zadd[0] = zadd[1] = zadd[2] = zadd[3] = 0.0f;

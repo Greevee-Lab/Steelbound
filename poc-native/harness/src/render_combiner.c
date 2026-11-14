@@ -8,6 +8,7 @@
  *    Tabelle alle rq_every Frames.
  * Teil 2: Shading-Pfad [render] shading=1 (s. Abschnitt "Shading-Pfad"). */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include <d3d11_1.h>
 #include "render_qa.h"
 #include "render_vsh.h"
@@ -18,8 +19,8 @@
  * FOGDENSITY, RANGEFOGENABLE, WRAP0..3, ...), Deferred-TextureStates
  * 0x21A8B0 (4 Stufen x 32 DWORDs: ADDRESSU/V/W, MAG/MIN/MIPFILTER, ...,
  * COLOROP=12 ... TEXCOORDINDEX=28). */
-#define RQ_DRS_BASE 0x21AC20u
-#define RQ_DTS_BASE 0x21A8B0u
+#define RQ_DRS_BASE SBA(0x21AC20u)
+#define RQ_DTS_BASE SBA(0x21A8B0u)
 
 unsigned g_rq_fogcolor;      /* SetRenderState_FogColor (ARGB) */
 unsigned g_rq_fogcolor_set;  /* 1 = vom Spiel gesetzt */
@@ -401,22 +402,22 @@ void rq_dlg_draw(const im_vertex_t *v, unsigned n, int rhw, ID3D11ShaderResource
         unsigned xp = sb_tex_xptr();
         if (xp) { c0 = rq_u32(xp); fmt = rq_u32(xp + 12u); size = rq_u32(xp + 16u); }
         if (g_present_no != g_rq_dlg_lastent) {
-            unsigned cnt = rq_u32(0x4C19C0u) & 0xFFFFu, k2;
+            unsigned cnt = rq_u32(SBA(0x4C19C0u)) & 0xFFFFu, k2;
             char tb[200];
             int o2 = 0;
             g_rq_dlg_lastent = g_present_no;
             tb[0] = 0;
             for (k2 = 0; k2 < cnt && k2 < 24u; k2++) {
                 o2 += _snprintf_s(tb + o2, sizeof tb - (size_t)o2, _TRUNCATE, "%02X/%02X ",
-                                  rq_u32(0x4B99C0u + k2 * 16u + 8u) >> 16 & 0xFFu,
-                                  rq_u32(0x4B99C0u + k2 * 16u + 8u) >> 24 & 0xFFu);
+                                  rq_u32(SBA(0x4B99C0u) + k2 * 16u + 8u) >> 16 & 0xFFu,
+                                  rq_u32(SBA(0x4B99C0u) + k2 * 16u + 8u) >> 24 & 0xFFu);
                 if (o2 < 0) { break; }
             }
             HLOG_W("RQDLGQ f=%u cnt=%u sel[0x340F00]=%u eintraege(+A/+B)=%s", g_present_no, cnt,
-                   rq_u32(0x340F00u) & 0xFFFFu, tb);
+                   rq_u32(SBA(0x340F00u)) & 0xFFFFu, tb);
         }
         HLOG_W("RQDLG f=%u cnt=%u scene=0x%X prim=%u n=%u rhw=%d vs=0x%X ps=0x%X xp=0x%X c0=0x%X fmt=0x%X size=0x%X srv=%d why=%u x=[%.1f,%.1f] y=[%.1f,%.1f] uv=[%.3f,%.3f]x[%.3f,%.3f] col=(%.2f,%.2f,%.2f,%.2f) cm=0x%X",
-               g_present_no, rq_u32(0x4C19C0u) & 0xFFFFu, scene, prim, n, rhw, g_im_shader, g_im_pshader, xp, c0, fmt, size, srv != NULL,
+               g_present_no, rq_u32(SBA(0x4C19C0u)) & 0xFFFFu, scene, prim, n, rhw, g_im_shader, g_im_pshader, xp, c0, fmt, size, srv != NULL,
                sb_tex_why(), x0, x1, y0, y1, u0, u1, w0, w1, v[0].col[0], v[0].col[1], v[0].col[2], v[0].col[3], rs_cmask);
         if (srv && xp) {
             for (i = 0; i < nseen && seenx[i] != xp; i++) {}
@@ -658,6 +659,35 @@ static void rq_text_upload_now(unsigned bits, unsigned pitch, unsigned w, unsign
     }
 }
 
+/* W230: Schreibbarkeit ohne Ausnahme pruefen (VirtualQuery statt IsBadWritePtr).
+ * IsBadWritePtr probt per Zugriff: jeder ungueltige Lock-Zeiger loest eine
+ * Zugriffsverletzung aus, die der VEH sieht (US rastert auch in der Mission je
+ * Glyphe -> Millionen Ausnahmen je Lauf, W230_US2/USK6). Ergebnis gleich:
+ * 1 = ganzer Bereich festgelegt und beschreibbar. */
+static int rq_writable(uintptr_t p, size_t n)
+{
+    uintptr_t end = p + n;
+    if (!p || end < p) {
+        return 0;
+    }
+    while (p < end) {
+        MEMORY_BASIC_INFORMATION mbi;
+        uintptr_t rend;
+        if (!VirtualQuery((const void *)p, &mbi, sizeof mbi) || mbi.State != MEM_COMMIT ||
+            (mbi.Protect & (PAGE_GUARD | PAGE_NOACCESS)) ||
+            !(mbi.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE |
+                             PAGE_EXECUTE_WRITECOPY))) {
+            return 0;
+        }
+        rend = (uintptr_t)mbi.BaseAddress + mbi.RegionSize;
+        if (rend <= p) {
+            return 0;
+        }
+        p = rend;
+    }
+    return 1;
+}
+
 typedef unsigned(__stdcall *rq_fn4_t)(unsigned, unsigned, unsigned, unsigned);
 typedef unsigned(__stdcall *rq_fn10_t)(unsigned, unsigned, unsigned, unsigned, unsigned,
                                        unsigned, unsigned, unsigned, unsigned, unsigned);
@@ -668,13 +698,13 @@ unsigned __stdcall hook_txt_lockrect(unsigned surf, unsigned plr, unsigned prect
     unsigned r, pitch = 0, bits = 0, fixed = 0;
     static unsigned nlog;
     rq_text_lock_note(surf);
-    r = ((rq_fn4_t)0x211080u)(surf, plr, prect, flags);
+    r = ((rq_fn4_t)SBA(0x211080u))(surf, plr, prect, flags);
     __try { pitch = *(unsigned *)(uintptr_t)plr; bits = *(unsigned *)(uintptr_t)(plr + 4u); }
     __except (EXCEPTION_EXECUTE_HANDLER) { pitch = bits = 0; }
     /* Original-Lock liefert fuer Render-Target-Surfaces (Fake-Device) keinen
      * gueltigen Zeiger -> TextOut rasterte nichts. Dann Bits/Pitch aus dem
      * Surface-Kopf wie hook_D3DTexture_LockRect (sb_tex_lockbits). */
-    if (!bits || IsBadWritePtr((void *)(uintptr_t)bits, 4)) {
+    if (!bits || !rq_writable((uintptr_t)bits, 4)) { /* W230: ohne Ausnahme (s. rq_writable) */
         unsigned p2 = 0, b2 = 0;
         if (sb_tex_lockbits(surf, &p2, &b2, flags) && b2) {
             __try { *(unsigned *)(uintptr_t)plr = p2; *(unsigned *)(uintptr_t)(plr + 4u) = b2; fixed = 1; }
@@ -776,13 +806,14 @@ void rq_text_on_clear(unsigned surf, unsigned flags, unsigned color)
 static int dlg_glyph(unsigned font, unsigned chr, unsigned *pg, unsigned *ps)
 {
     int r = -1;
+    unsigned fn194b21 = SBA(0x194B21u); /* W229 */
     __try {
         __asm {
             push ps
             push pg
             mov ecx, font
             mov edx, chr
-            mov eax, 0x194B21
+            mov eax, fn194b21
             call eax
             mov r, eax
         }
@@ -844,7 +875,7 @@ unsigned __stdcall hook_txt_render(unsigned font, unsigned bits, unsigned pitch,
     if (g_cfg.dlg_diag) { before = dlg_count(bits, pitch, w, h, (int)c - 8, (int)d - 8); }
     {
         LONGLONG t0 = g_cfg.dlg_diag ? dlg_qpc() : 0;
-        r = ((rq_fn10_t)0x194C56u)(font, bits, pitch, w, h, fmt, a, b, c, d);
+        r = ((rq_fn10_t)SBA(0x194C56u))(font, bits, pitch, w, h, fmt, a, b, c, d);
         if (g_cfg.dlg_diag) { dlg_perf_add(0, t0); }
     }
     if (g_cfg.dlg_diag) { dlg_diag_call(font, bits, pitch, w, h, fmt, a, b, c, d, r, before); }
@@ -871,7 +902,7 @@ unsigned __stdcall hook_txt_render(unsigned font, unsigned bits, unsigned pitch,
                 typedef int(__fastcall * rq_glyph_fn)(unsigned, unsigned, unsigned *, unsigned *);
                 unsigned gp = 0, gx = 0, fx[24] = { 0 }, gb[6] = { 0 }; int gr = -1;
                 __try { for (i2 = 0; i2 < 24u; i2++) { fx[i2] = *(unsigned *)(uintptr_t)(font + 0x40u + i2 * 4u); } } __except (EXCEPTION_EXECUTE_HANDLER) {}
-                __try { gr = ((rq_glyph_fn)0x194B21u)(font, ch, &gp, &gx); } __except (EXCEPTION_EXECUTE_HANDLER) { gr = -2; }
+                __try { gr = ((rq_glyph_fn)SBA(0x194B21u))(font, ch, &gp, &gx); } __except (EXCEPTION_EXECUTE_HANDLER) { gr = -2; }
                 __try { if (gp) { for (i2 = 0; i2 < 6u; i2++) { gb[i2] = *(unsigned *)(uintptr_t)(gp + i2 * 4u); } } } __except (EXCEPTION_EXECUTE_HANDLER) {}
                 HLOG_W("DLGTXT2 glyph ch=0x%X r=%d glyph=0x%X extra=0x%X bytes=%08X %08X %08X %08X %08X %08X font[40..9C]=%08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X %08X",
                        ch, gr, gp, gx, gb[0], gb[1], gb[2], gb[3], gb[4], gb[5], fx[0], fx[1], fx[2], fx[3], fx[4], fx[5], fx[6], fx[7], fx[8], fx[9], fx[10], fx[11],
@@ -894,7 +925,7 @@ unsigned __stdcall hook_txt_render(unsigned font, unsigned bits, unsigned pitch,
 static void rq_comp_note(unsigned site)
 {
     static unsigned seen[64][2], n, calls, maxcnt;
-    unsigned scene = rq_u32(M3D_SCENE_ADDR), k, c = rq_u32(0x4C19C0u) & 0xFFFFu;
+    unsigned scene = rq_u32(M3D_SCENE_ADDR), k, c = rq_u32(SBA(0x4C19C0u)) & 0xFFFFu;
     if (scene == 0x30u) {
         calls++;
         if (c > maxcnt) { maxcnt = c; }
@@ -905,10 +936,10 @@ static void rq_comp_note(unsigned site)
     for (k = 0; k < n; k++) { if (seen[k][0] == site && seen[k][1] == scene) { return; } }
     if (n < 64u) {
         seen[n][0] = site; seen[n][1] = scene; n++;
-        HLOG_W("RQCOMP site=0x%X scene=0x%X f=%u cnt=%u", site, scene, g_present_no, rq_u32(0x4C19C0u) & 0xFFFFu);
+        HLOG_W("RQCOMP site=0x%X scene=0x%X f=%u cnt=%u", site, scene, g_present_no, rq_u32(SBA(0x4C19C0u)) & 0xFFFFu);
     }
 }
-#define RQ_COMP_WRAP(site) void hook_comp_##site(void) { rq_comp_note(0x##site##u); ((void (*)(void))0x4EF50u)(); }
+#define RQ_COMP_WRAP(site) void hook_comp_##site(void) { rq_comp_note(0x##site##u); ((void (*)(void))SBA(0x4EF50u))(); }
 RQ_COMP_WRAP(13536)
 RQ_COMP_WRAP(1383B)
 RQ_COMP_WRAP(CD715)

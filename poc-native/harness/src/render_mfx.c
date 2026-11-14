@@ -31,21 +31,23 @@
  * monitor_grain / monitor_glitch 0..100 % (Standard 100 = Original).
  * mfx_diag=1: DIAG-Zeilen MFX; mfx_ab=1: A/B-Bildpaare (wie shade_ab). */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "sb_tex.h"
 #include "render_qa.h"
+#include "sb_state.h" /* W232: sb_in_mission */
 int rq_ab_on(void); /* render_shade.c */
 void rq_dump_srv(ID3D11ShaderResourceView *srv, unsigned xptr); /* render_combiner.c */
 
-#define MFX_WASH_TEX   0x3B7B24u
-#define MFX_MON_TEX    0x352144u
-#define MFX_A512       0x352150u
-#define MFX_A256       0x35641Cu
-#define MFX_S256       0x356DBCu
-#define MFX_A128       0x356F54u
-#define MFX_S128       0x35182Cu
-#define MFX_NIGHT      0x351638u
-#define MFX_LEVEL      0x352BD8u
-#define MFX_HIT        0x354F30u
+#define MFX_WASH_TEX   SBA(0x3B7B24u)
+#define MFX_MON_TEX    SBA(0x352144u)
+#define MFX_A512       SBA(0x352150u)
+#define MFX_A256       SBA(0x35641Cu)
+#define MFX_S256       SBA(0x356DBCu)
+#define MFX_A128       SBA(0x356F54u)
+#define MFX_S128       SBA(0x35182Cu)
+#define MFX_NIGHT      SBA(0x351638u)
+#define MFX_LEVEL      SBA(0x352BD8u)
+#define MFX_HIT        SBA(0x354F30u)
 
 int g_mfx_kind;    /* aktueller Draw: MFX_NONE/WASH/LINES */
 int g_mfx_nonorm;  /* 1 = UV-Pixel-Normierung für diesen Draw aus */
@@ -210,10 +212,8 @@ static void mfx_shot_tick(void)
     if (g_mfx_abstate == 1) { g_shot_census = 1; g_mfx_abstate = 2; HLOG_I("MFX shot f=%u alt", g_present_no); return; }
     if (g_mfx_abstate == 2) { g_shot_census = 1; g_mfx_abstate = 0; g_mfx_nshot++; HLOG_I("MFX shot f=%u neu", g_present_no); return; }
     if (g_mfx_seq) { g_mfx_seq--; g_shot_census = 1; HLOG_I("MFX shot f=%u folge", g_present_no); return; }
-    if (g_cfg.shade_ab == 3) { /* DIAG(W121): Paare nur in der Kampagnen-Mission (Modus 4), Titel-Demo zaehlt nicht */
-        unsigned mode = 0;
-        mfx_rd(0x2EEA34u, &mode);
-        if (mode != 4u) { return; }
+    if (g_cfg.shade_ab == 3) { /* DIAG(W121): Paare nur in der Kampagnen-Mission, Titel-Demo zaehlt nicht (W232: sb_in_mission) */
+        if (!sb_in_mission()) { return; }
     }
     if (lines) { g_mfx_linefr++; if (g_mfx_linefr == 2u || g_mfx_linefr == 40u || g_mfx_linefr == 120u || g_mfx_linefr == 400u) { trig = 1; } }
     if (wash && !trig) { g_mfx_washfr++; if ((g_mfx_washfr % 400u) == 30u && g_mfx_nshot < (unsigned)g_cfg.mfx_shots) { trig = 1; } }
@@ -233,7 +233,7 @@ void mfx_present(void)
     {
         unsigned night = 0, mode = 0;
         mfx_rd(MFX_NIGHT, &night);
-        mfx_rd(0x3B8CF4u, &mode);
+        mfx_rd(SBA(0x3B8CF4u), &mode);
         HLOG_I("MFX stat f=%u lvl=%.3f hit=%.3f a512=%.3f a256=%.3f s256=%.3f a128=%.3f s128=%.3f night=%u mode=%u wash=%u/%u lines=%u/%u",
                g_present_no, mfx_rf(MFX_LEVEL), mfx_rf(MFX_HIT), mfx_rf(MFX_A512), mfx_rf(MFX_A256),
                mfx_rf(MFX_S256), mfx_rf(MFX_A128), mfx_rf(MFX_S128), night, mode,

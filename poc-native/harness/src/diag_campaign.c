@@ -14,6 +14,7 @@
  * auch in der naechsten CAMP-Zeile). Alle Reads SEH-geschuetzt.
  * Schalter: [log] campaign_diag=0 (DIAG, Default aus). */
 #include "diag_campaign.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "hlog.h"
 #include "hcfg.h"
 #include <stdint.h>
@@ -23,33 +24,33 @@
 
 typedef uint32_t u32;
 
-#define CPG_MNO_ADDR 0x3B89A0u   /* u16, Missionsnummer (0 = M1) */
-#define CPG_OBJ_ADDR 0x356E74u   /* s32, Zielzaehler (M1: 0x4A820/0x4A900) */
-#define CPG_PH_ADDR 0x66ABF4u    /* u16, Missionsphase (5 = laeuft, 0 = Erfolg, 3/4 = Fehlschlag) */
-#define CPG_RES_ADDR 0x356DD0u   /* u32, Ergebnis (1 = Erfolg, 2 = Fehlschlag; 2C280) */
-#define CPG_FC8_ADDR 0x356FC8u   /* u32, Missionsende-Flag (2C250) */
-#define CPG_RSN_ADDR 0x35236Cu   /* u32, Ende-Grund (0xD5 VT tot/Zeit, 0xD6 Ziel) */
-#define CPG_S88_ADDR 0x356F88u   /* u32, Story-Film-Index (M1-Erfolg setzt 1) */
-#define CPG_CDC_ADDR 0x3B8CDCu   /* u32, Sonderweiche im M1-Frame-Check (==1 -> ohne Film) */
-#define CPG_TUT_ADDR 0x4CA0D4u   /* u32, Tutorial-Flagwort (5F4C0) */
-#define CPG_TC0_ADDR 0x4CA0D0u   /* u32, Tutorial-Framezaehler (Bit 7 bei 150) */
-#define CPG_TD8_ADDR 0x4CA0D8u   /* u32, Zaehler nach [0x538318]&0x20 */
-#define CPG_TDC_ADDR 0x4CA0DCu   /* u32, Zaehler nach [0x538318]&0x40 */
-#define CPG_TE0_ADDR 0x4CA0E0u   /* u32, Zaehler nach Bewegung/Treffer (>450 -> 0x3000) */
-#define CPG_F318_ADDR 0x538318u  /* u32, Ereignisbits (0x20/0x40 -> Tutorial-Stufen) */
-#define CPG_KILL_ADDR 0x356CA0u  /* u32, VT-Abschuesse (1E190) */
-#define CPG_KALL_ADDR 0x356E78u  /* u32, Abschuesse gesamt (1E190) */
-#define CPG_SCENE_ADDR 0x6B96DCu /* u32, Szene */
-#define CPG_MODE_ADDR 0x2EEA34u  /* u32, Grobmodus */
-#define CPG_MLOOP_ADDR 0x356F58u /* u32, Missionsschleife */
-#define CPG_GATE_ADDR 0x669E24u  /* u32, Folge-Gate (0x30-Handler) */
-#define CPG_LOCK_ADDR 0x686D44u  /* u32, Eingabesperre (0x30-Handler) */
-#define CPG_TMR_ADDR 0x3563F0u   /* u32, Missions-Countdown */
-#define CPG_N_ADDR 0x352288u     /* u32, Entity-Anzahl */
-#define CPG_TAB_ADDR 0x351828u   /* u32, Entity-Tabelle (Stride 0x5C) */
-#define CPG_OURS_ADDR 0x356E2Cu  /* u16, unser VT-Index */
-#define CPG_PROG_ADDR 0x69D5DCu  /* u32, Spielstand-Fortschritt (user+0x34) */
-#define CPG_SEL_ADDR 0x69D5E0u   /* u16, Spielstand-Missionswahl (user+0x38) */
+#define CPG_MNO_ADDR SBA(0x3B89A0u)   /* u16, Missionsnummer (0 = M1) */
+#define CPG_OBJ_ADDR SBA(0x356E74u)   /* s32, Zielzaehler (M1: 0x4A820/0x4A900) */
+#define CPG_PH_ADDR SBA(0x66ABF4u)    /* u16, Missionsphase (5 = laeuft, 0 = Erfolg, 3/4 = Fehlschlag) */
+#define CPG_RES_ADDR SBA(0x356DD0u)   /* u32, Ergebnis (1 = Erfolg, 2 = Fehlschlag; 2C280) */
+#define CPG_FC8_ADDR SBA(0x356FC8u)   /* u32, Missionsende-Flag (2C250) */
+#define CPG_RSN_ADDR SBA(0x35236Cu)   /* u32, Ende-Grund (0xD5 VT tot/Zeit, 0xD6 Ziel) */
+#define CPG_S88_ADDR SBA(0x356F88u)   /* u32, Story-Film-Index (M1-Erfolg setzt 1) */
+#define CPG_CDC_ADDR SBA(0x3B8CDCu)   /* u32, Sonderweiche im M1-Frame-Check (==1 -> ohne Film) */
+#define CPG_TUT_ADDR SBA(0x4CA0D4u)   /* u32, Tutorial-Flagwort (5F4C0) */
+#define CPG_TC0_ADDR SBA(0x4CA0D0u)   /* u32, Tutorial-Framezaehler (Bit 7 bei 150) */
+#define CPG_TD8_ADDR SBA(0x4CA0D8u)   /* u32, Zaehler nach [0x538318]&0x20 */
+#define CPG_TDC_ADDR SBA(0x4CA0DCu)   /* u32, Zaehler nach [0x538318]&0x40 */
+#define CPG_TE0_ADDR SBA(0x4CA0E0u)   /* u32, Zaehler nach Bewegung/Treffer (>450 -> 0x3000) */
+#define CPG_F318_ADDR SBA(0x538318u)  /* u32, Ereignisbits (0x20/0x40 -> Tutorial-Stufen) */
+#define CPG_KILL_ADDR SBA(0x356CA0u)  /* u32, VT-Abschuesse (1E190) */
+#define CPG_KALL_ADDR SBA(0x356E78u)  /* u32, Abschuesse gesamt (1E190) */
+#define CPG_SCENE_ADDR SBA(0x6B96DCu) /* u32, Szene */
+#define CPG_MODE_ADDR SBA(0x2EEA34u)  /* u32, Ladezaehler (W232; Logfeld "mode=" fuer campaign_check.py) */
+#define CPG_MLOOP_ADDR SBA(0x356F58u) /* u32, Missionsschleife */
+#define CPG_GATE_ADDR SBA(0x669E24u)  /* u32, Folge-Gate (0x30-Handler) */
+#define CPG_LOCK_ADDR SBA(0x686D44u)  /* u32, Eingabesperre (0x30-Handler) */
+#define CPG_TMR_ADDR SBA(0x3563F0u)   /* u32, Missions-Countdown */
+#define CPG_N_ADDR SBA(0x352288u)     /* u32, Entity-Anzahl */
+#define CPG_TAB_ADDR SBA(0x351828u)   /* u32, Entity-Tabelle (Stride 0x5C) */
+#define CPG_OURS_ADDR SBA(0x356E2Cu)  /* u16, unser VT-Index */
+#define CPG_PROG_ADDR SBA(0x69D5DCu)  /* u32, Spielstand-Fortschritt (user+0x34) */
+#define CPG_SEL_ADDR SBA(0x69D5E0u)   /* u16, Spielstand-Missionswahl (user+0x38) */
 
 static u32 cp_rd(u32 a)
 {

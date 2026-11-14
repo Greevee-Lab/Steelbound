@@ -26,7 +26,7 @@ void xbox_set_last_error(u32 code)
 {
     u32 *slots = fs_emu_tls_slots();
     if (slots) {
-        int idx = *(volatile int *)(uintptr_t)0x6E8A80u;
+        int idx = *(volatile int *)(uintptr_t)SBA(0x6E8A80u);
         if (!g_gle_idx_logged) {
             g_gle_idx_logged = 1;
             HLOG_I("GLE: xdk-idx=[0x6E8A80]=%d", idx);
@@ -63,7 +63,7 @@ static u32 g_fake_pushbuf[16];  /* Fake-Pushbuffer-Zelle (get==put = idle) */
 /* ---------- Hook-Helfer ---------- */
 static void patch_rel(u32 va, void *handler, const char *name, uint8_t op)
 {
-    uint8_t *p = (uint8_t *)(uintptr_t)va;
+    uint8_t *p = (uint8_t *)(uintptr_t)(va = SBA(va)); /* W229: EU unveraendert */
     uint8_t orig[5];
     intptr_t rel;
     memcpy(orig, p, 5);
@@ -104,7 +104,7 @@ void xdk_visq_live(void)
 static void patch_nop(u32 va, u32 len, const char *name, uint8_t first,
                       uint8_t after)
 {
-    uint8_t *p = (uint8_t *)(uintptr_t)va;
+    uint8_t *p = (uint8_t *)(uintptr_t)(va = SBA(va)); /* W229: EU unveraendert */
     if (p[0] != first || p[len] != after) {
         HLOG_E("NOP %s @0x%X: Byte-Mismatch (0x%02X/0x%02X) - ABBRUCH", name,
                va, p[0], p[len]);
@@ -121,7 +121,7 @@ static void patch_nop(u32 va, u32 len, const char *name, uint8_t first,
 static void patch_bytes(u32 va, const uint8_t *expect, const uint8_t *data,
                         u32 len, const char *name)
 {
-    uint8_t *p = (uint8_t *)(uintptr_t)va;
+    uint8_t *p = (uint8_t *)(uintptr_t)(va = SBA(va)); /* W229: EU unveraendert */
     u32 i;
     for (i = 0; i < len; i++) {
         if (p[i] != expect[i]) {
@@ -200,12 +200,12 @@ static float lbl_text_width(const char *s, u32 a6)
     float w = 0.0f;
     unsigned n = 0;
     __try {
-        u32 base = *(volatile u32 *)(uintptr_t)0x354F3Cu * 0xC7u;
+        u32 base = *(volatile u32 *)(uintptr_t)SBA(0x354F3Cu) * 0xC7u;
         unsigned char off = (unsigned char)a6;
         if (!s) { return 0.0f; }
         while (n < 64 && s[n]) {
             unsigned ci = base + (unsigned)(unsigned char)(s[n] + off);
-            w += (float)*(volatile uint16_t *)(uintptr_t)(0x2A46E0u + ci * 2u) + 1.0f;
+            w += (float)*(volatile uint16_t *)(uintptr_t)(SBA(0x2A46E0u) + ci * 2u) + 1.0f;
             n++;
         }
     } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -222,7 +222,7 @@ static void __cdecl hook_label_text(const char *s, float x, float y, u32 color,
                                     u32 a5, u32 a6)
 {
     u32 ra = (u32)(uintptr_t)_ReturnAddress();
-    int line = ra == kLblRA[0] ? LBL_DIST : ra == kLblRA[1] ? LBL_NAME : ra == kLblRA[2] ? LBL_CHAR : -1;
+    int line = ra == SBA(kLblRA[0]) ? LBL_DIST : ra == SBA(kLblRA[1]) ? LBL_NAME : ra == SBA(kLblRA[2]) ? LBL_CHAR : -1;
     float ax, ay, w;
     int mode = 0; /* 0 = Original, 1 = links, 2 = unten */
     if (line < 0) { /* fremder Aufrufer (sollte nicht vorkommen): durchreichen */
@@ -308,13 +308,14 @@ static void __cdecl hook_label_text(const char *s, float x, float y, u32 color,
 static void label_avoid_install(void)
 {
     int i;
+    g_label_orig = (label_text_fn)(uintptr_t)SBA(0x2A140u); /* W229: US-Profil; EU unveraendert */
     for (i = 0; i < 3; i++) {
-        uint8_t *p = (uint8_t *)(uintptr_t)kLblCall[i];
+        uint8_t *p = (uint8_t *)(uintptr_t)SBA(kLblCall[i]);
         int32_t rel;
         u32 tgt;
         memcpy(&rel, p + 1, 4);
-        tgt = kLblCall[i] + 5u + (u32)rel;
-        if (p[0] != 0xE8 || tgt != 0x2A140u) { /* Original-Pruefbytes */
+        tgt = SBA(kLblCall[i]) + 5u + (u32)rel;
+        if (p[0] != 0xE8 || tgt != SBA(0x2A140u)) { /* Original-Pruefbytes */
             HLOG_E("LABEL: @0x%X Byte-Mismatch (0x%02X -> 0x%X statt E8 -> 0x2A140) - ABBRUCH",
                    kLblCall[i], p[0], tgt);
             hlog_close();
@@ -511,7 +512,7 @@ void hooks_install(void)
     /* Globale Audio-Struktur (this=0x6C1740): Feld +0x184 (0x6C18C4) wird nie
      * initialisiert (kein echtes Audio) -> Fake-Objekt (NULLEN), damit Caller
      * ([ptr+0x64]==0 -> "nicht gefunden") statt zu faulten weiterlaufen. */
-    *(u32 *)(uintptr_t)0x6C18C4u = (u32)(uintptr_t)g_fake_obj;
+    *(u32 *)(uintptr_t)SBA(0x6C18C4u) = (u32)(uintptr_t)g_fake_obj;
     HLOG_I("INIT [0x6C18C4] = Fake-Objekt (Audio-Struktur)");
     /* NULLCALL (W13): HRTF-Funktionszeiger vorbelegen (wie
      * DirectSoundUseFullHRTF -> Setter 0x21E067). DirectSoundCreate scheitert
@@ -520,14 +521,14 @@ void hooks_install(void)
      * springt nach 0 (~200x/Mission). Ziele = echte XDK-Funktionen,
      * ABI-vermessen (ret 4 / ret 8, wie die Aufrufstellen). */
     if (g_cfg.hrtf_ptr) {
-        *(u32 *)(uintptr_t)0x23F698u = 0x222FAAu; /* CFullHrtfSource_GetHrtfFilterPair */
-        *(u32 *)(uintptr_t)0x23F694u = 0x22324Fu; /* HRTF-Commit (FUN_002230e1+0x6E) */
+        *(u32 *)(uintptr_t)SBA(0x23F698u) = SBA(0x222FAAu); /* CFullHrtfSource_GetHrtfFilterPair */
+        *(u32 *)(uintptr_t)SBA(0x23F694u) = SBA(0x22324Fu); /* HRTF-Commit (FUN_002230e1+0x6E) */
         HLOG_I("INIT HRTF-Zeiger: [23F698]=0x222FAA [23F694]=0x22324F");
     }
     /* D3D-Device-Struktur ([0x21A8A0], min. 0x255C Bytes): CreateDevice ist
      * gehookt (kein echtes D3D) -> Fake-Struktur (NULLEN), damit
      * BlockUntilVerticalBlank ([EAX+0x2558]) nicht faultet. */
-    *(u32 *)(uintptr_t)0x21A8A0u = (u32)(uintptr_t)g_fake_d3d;
+    *(u32 *)(uintptr_t)SBA(0x21A8A0u) = (u32)(uintptr_t)g_fake_d3d;
     /* Pushbuffer-Zeiger (+0x30=put-Wert, +0x34->get-Zelle): get==put meldet
      * "keine GPU-Arbeit", D3D_BlockOnTime nimmt den Idle-Frühpfad (JNC). */
     g_fake_pushbuf[0] = 0x1000u;

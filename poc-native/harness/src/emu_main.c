@@ -3,6 +3,7 @@
  * Log: <SB_OUT_DIR|out>/sb_harness.log (s. hcfg_out_dir).
  */
 #include <stdio.h>
+#include "sb_profile.h" /* W229 SBA() */
 #include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
@@ -21,6 +22,7 @@
 #include "d3d11_render.h"
 #include "watch_dr.h" /* W41 WATCHDR */
 #include "sb_gamever.h" /* W150 ISO-DIRECT */
+#include "sb_profile.h" /* W229 US-PROFILE */
 #include "sb_feedback.h" /* W188 GAME-MENU */
 #include "sb_userdata.h" /* W150 USER-DATA */
 #include "sb_relaunch.h" /* W186 RESET-TITLE */
@@ -373,9 +375,9 @@ static void veh_tbl_fix(PEXCEPTION_POINTERS ep, DWORD tls,
             if (!known && nc_overflow == 0) {
                 xb_u32 h94 = 0xDEADu, h98 = 0xDEADu, h9C = 0xDEADu;
                 __try {
-                    h94 = *(xb_u32 *)(uintptr_t)0x23F694u;
-                    h98 = *(xb_u32 *)(uintptr_t)0x23F698u;
-                    h9C = *(xb_u32 *)(uintptr_t)0x23F69Cu;
+                    h94 = *(xb_u32 *)(uintptr_t)SBA(0x23F694u);
+                    h98 = *(xb_u32 *)(uintptr_t)SBA(0x23F698u);
+                    h9C = *(xb_u32 *)(uintptr_t)SBA(0x23F69Cu);
                 } __except (EXCEPTION_EXECUTE_HANDLER) {
                 }
                 HLOG_W("NULLCALL #%u: caller=0x%08X ESP=0x%08X "
@@ -439,9 +441,9 @@ static void veh_tbl_fix(PEXCEPTION_POINTERS ep, DWORD tls,
         /* M2c: Verbose-Dump drosseln (Fault-Stuerme, z.B. Hash-Probes). */
         static int nvehav;
         /* M2c: Crash-Stelle 0x2627B IMMER voll dumpen (fataler Treffer). */
-        int vfull = (nvehav < 40) || (addr == (void *)(uintptr_t)0x2627Bu);
+        int vfull = (nvehav < 40) || (addr == (void *)(uintptr_t)SBA(0x2627Bu));
         nvehav++;
-        if (addr == (void *)(uintptr_t)0x262A0u) {
+        if (addr == (void *)(uintptr_t)SBA(0x262A0u)) {
             static unsigned ntbl;
             void *fault = (void *)ep->ExceptionRecord->ExceptionInformation[1];
             MEMORY_BASIC_INFORMATION tqm;
@@ -458,7 +460,7 @@ static void veh_tbl_fix(PEXCEPTION_POINTERS ep, DWORD tls,
                 }
             }
         }
-        if (addr == (void *)(uintptr_t)0x26343u) {
+        if (addr == (void *)(uintptr_t)SBA(0x26343u)) {
             static unsigned ntbl;
             void *fault = (void *)ep->ExceptionRecord->ExceptionInformation[1];
             MEMORY_BASIC_INFORMATION tqm;
@@ -475,7 +477,7 @@ static void veh_tbl_fix(PEXCEPTION_POINTERS ep, DWORD tls,
                 }
             }
         }
-        if (addr == (void *)(uintptr_t)0x2636Cu) {
+        if (addr == (void *)(uintptr_t)SBA(0x2636Cu)) {
             static unsigned ntbl;
             void *fault = (void *)ep->ExceptionRecord->ExceptionInformation[1];
             MEMORY_BASIC_INFORMATION tqm;
@@ -492,7 +494,7 @@ static void veh_tbl_fix(PEXCEPTION_POINTERS ep, DWORD tls,
                 }
             }
         }
-        if (addr == (void *)(uintptr_t)0x26392u) {
+        if (addr == (void *)(uintptr_t)SBA(0x26392u)) {
             static unsigned ntbl;
             void *fault = (void *)ep->ExceptionRecord->ExceptionInformation[1];
             MEMORY_BASIC_INFORMATION tqm;
@@ -581,7 +583,7 @@ static void veh_tbl_fix(PEXCEPTION_POINTERS ep, DWORD tls,
                 }
             }
         }
-        if (addr == (void *)(uintptr_t)0x2627Bu) {
+        if (addr == (void *)(uintptr_t)SBA(0x2627Bu)) {
             static unsigned n2627;
             { static int lg; if (!lg) { lg = 1;
                 void *flt = (void *)ep->ExceptionRecord->ExceptionInformation[1];
@@ -614,11 +616,11 @@ static void veh_tbl_fix(PEXCEPTION_POINTERS ep, DWORD tls,
                 return EXCEPTION_CONTINUE_EXECUTION;
             }
         }
-        if (addr == (void *)(uintptr_t)0x21F7EDu &&
+        if (addr == (void *)(uintptr_t)SBA(0x21F7EDu) &&
             ep->ContextRecord->Esi == 0) {
             /* NULL-Arg (Mission-Load 25k): -> Epilog 0x21F83D (EAX=0). */
             static unsigned n21f;
-            ep->ContextRecord->Eip = 0x21F83Du;
+            ep->ContextRecord->Eip = SBA(0x21F83Du);
             ep->ContextRecord->Eax = 1u;
             TlsSetValue(tls_veh, (void *)0);
             n21f++;
@@ -633,7 +635,7 @@ static void veh_tbl_fix(PEXCEPTION_POINTERS ep, DWORD tls,
             }
             return EXCEPTION_CONTINUE_EXECUTION;
         }
-        if (addr == (void *)(uintptr_t)0x18E904u) {
+        if (addr == (void *)(uintptr_t)SBA(0x18E904u)) {
             /* [EDI+2]<<4 = Rueck-Offset; 0xFFFF = Header leer. */
             static unsigned f904;
             __try {
@@ -648,7 +650,7 @@ static void veh_tbl_fix(PEXCEPTION_POINTERS ep, DWORD tls,
             } __except (EXCEPTION_EXECUTE_HANDLER) {
             }
         }
-        if (addr == (void *)(uintptr_t)0x18E99Fu) {
+        if (addr == (void *)(uintptr_t)SBA(0x18E99Fu)) {
             static unsigned ffx;
             xb_u32 fesi = ep->ContextRecord->Esi;
             __try {
@@ -893,7 +895,7 @@ static int w32_main_in_audiopoll(void)
         return 0;
     if (!krnl_xb_thread_get(0, &h, &rt) || !h)
         return 0;
-    if (rt != 0x1924A8u)
+    if (rt != SBA(0x1924A8u))
         return 0;
     if (SuspendThread((HANDLE)h) == (DWORD)-1)
         return 0;
@@ -905,11 +907,11 @@ static int w32_main_in_audiopoll(void)
             for (i = 0, dist = -1; i < 256; i++) {
                 unsigned v = sp[i];
                 if (dist < 0) {
-                    if (v == 0x1910E7u)
+                    if (v == SBA(0x1910E7u))
                         dist = 0;
                 } else if (++dist > 24) {
                     break;
-                } else if (v == 0x10D93Eu) {
+                } else if (v == SBA(0x10D93Eu)) {
                     ResumeThread((HANDLE)h);
                     return 1;
                 }
@@ -1469,6 +1471,55 @@ static void emu_lang_warn(const char *key)
     HLOG_W("LANG: Schluessel fehlt: %s", key ? key : "?");
 }
 
+/* W229 US-PROFILE: Fehlerzeile vor exit 8 (SBA ohne Tabelleneintrag). */
+static void sba_fatal_log(const char *msg)
+{
+    HLOG_E("%s", msg);
+    hlog_close();
+}
+
+/* W229: US-Profil -> Erstbytes aller Profileintraege im ungepatchten Abbild pruefen;
+ * bei Abweichung klarer Abbruch (exit 8). EU: keine Aktion, keine Logzeile. */
+static void sb_profile_check_or_exit(void)
+{
+    char pm[200];
+    int bad;
+    if (!g_sba_us) {
+        return;
+    }
+    g_sba_fatal = sba_fatal_log;
+    bad = sb_profile_verify(pm, sizeof pm);
+    if (bad) {
+        HLOG_E("%s - %d von %u Eintraegen weichen ab, ABBRUCH (exit 8)", pm, bad, sb_profile_check_entries());
+        hlog_close();
+        ExitProcess(8);
+    }
+    HLOG_I("PROFILE: %s aktiv (%u .text-Eintraege, %u Erstbyte-Pruefungen ok, sonst +0x740)",
+           sb_profile_name(), sb_profile_text_entries(), sb_profile_check_entries());
+}
+
+/* W230 US-PLAY: Die US-Fassung hat dieselbe Title-ID (43430002) wie EU, ihre
+ * Spielstaende (TDATA/UDATA) und der Datei-Cache (ZCACHE) duerfen sich nie mit
+ * EU mischen. Eigener Ordner: [game] hdd_root_us, sonst <hdd_root>_US
+ * (Geschwisterordner, gilt auch fuer SB_HDD_ROOT/Datenordner). EU unveraendert. */
+static void emu_hdd_root_us(void)
+{
+    char d[sizeof g_cfg.hdd_root];
+    if (g_cfg.hdd_root_us[0]) {
+        strcpy_s(d, sizeof d, g_cfg.hdd_root_us);
+    } else {
+        size_t n;
+        strcpy_s(d, sizeof d, g_cfg.hdd_root);
+        n = strlen(d);
+        while (n > 1 && (d[n - 1] == '/' || d[n - 1] == '\\')) {
+            d[--n] = 0;
+        }
+        strcat_s(d, sizeof d, "_US");
+    }
+    strcpy_s(g_cfg.hdd_root, sizeof g_cfg.hdd_root, d);
+    HLOG_I("PROFILE: US-Spielstaende getrennt von EU: hdd_root=%s", g_cfg.hdd_root);
+}
+
 __declspec(dllexport) void __stdcall sb_emulate(void)
 {
     const char *cfg_path = "sb_native.cfg";
@@ -1570,7 +1621,16 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     }
     { /* W150: Spielversion (SHA-256 + Zertifikat); Patch-Adressen gelten nur fuer PAL */
         int gv_ok = sb_gamever_check(img.file, img.file_size, &gv);
-        if (!gv_ok && !g_cfg.version_check) { /* PO: Experten-Ausweg wie W150 (version_check=0) */
+        if (gv_ok && gv.ntsc_u && !g_cfg.ntsc_u) { /* W230: Notbremse [expert] ntsc_u=0 */
+            HLOG_W("GAMEVER: US-Fassung per [expert] ntsc_u=0 abgeschaltet");
+            gv.supported = 0;
+            gv_ok = 0;
+        }
+        if (gv_ok && gv.ntsc_u) { /* W229/W230 US-PROFILE: experimentell unterstuetzt */
+            HLOG_W("%s - Start mit US-Profil (experimentell)", gv.text);
+            sb_profile_select_us();
+            emu_hdd_root_us();
+        } else if (!gv_ok && !g_cfg.version_check) { /* PO: Experten-Ausweg wie W150 (version_check=0) */
             HLOG_W("%s - version_check=0: Start trotzdem (falsche Patch-Adressen moeglich)", gv.text);
         } else if (!gv_ok) {
             char detail[320], tid[16];
@@ -1618,6 +1678,7 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
         krnl_savelock_selftest();
     }
     watch_dr_init(); /* W41 WATCHDR: cfg parsen + DR bewaffnen (nur bei watch=...) */
+    sb_profile_check_or_exit(); /* W229: US-Erstbytes vor Thunks/Hooks pruefen; EU: nichts */
     krnl_install_thunks(&img);
     hooks_install();
     fs_emu_patch_all();

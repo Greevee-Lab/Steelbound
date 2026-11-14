@@ -19,6 +19,7 @@ void hcfg_defaults(void)
     strcpy_s(g_cfg.xbe_path, sizeof g_cfg.xbe_path, SB_DEFAULT_XBE_PATH);
     strcpy_s(g_cfg.media_root, sizeof g_cfg.media_root, SB_DEFAULT_MEDIA_ROOT);
     strcpy_s(g_cfg.hdd_root, sizeof g_cfg.hdd_root, "HDD");
+    g_cfg.ntsc_u = 1; /* W230: USA-Fassung experimentell freigegeben */
     g_cfg.game_image[0] = 0;   /* W150: leer = Ordner-Modus (bisher) */
     g_cfg.version_check = 1;     /* W150: unbekannte Spielversion -> kein Start */
     g_cfg.save_check = 1;        /* W187 KIA-LOAD: Spielstaende pruefen/reparieren */
@@ -134,6 +135,7 @@ void hcfg_defaults(void)
     g_cfg.cockpit_panini = 0; /* W191: Panini aus */
     g_cfg.cockpit_panini_d = 200; /* W191: d hoechstens 2,0 */
     g_cfg.cockpit_panini_frame = 1; /* W191: Rahmen halten */
+    g_cfg.cockpit_width = 0; /* W235 COCKPIT-WIDTH: Original (nicht gestreckt) */
     g_cfg.cockpit_persp_pause = 1; /* W209: coherent pause replay */
     g_cfg.cockpit_persp_ref = 750; /* W191: mm, feste Ebene zwischen Radar (0,80 m) und Frontview (0,71 m) */
     g_cfg.cockpit_zoom = 100; /* W191: aus */
@@ -266,6 +268,7 @@ void hcfg_defaults(void)
     g_cfg.photo_cam_yaw = 35;
     g_cfg.photo_cam_pitch = 25;
     g_cfg.photo_cam_dist = 4;
+    g_cfg.photo_rt_max = 8192;          /* W233 SHOT-8K-MONITOR */
     strcpy_s(g_cfg.feedback_repo, sizeof g_cfg.feedback_repo, SB_FEEDBACK_REPO_DEFAULT); /* W188 */
     strcpy_s(g_cfg.lang, sizeof g_cfg.lang, "en"); /* W142: [ui] lang */
     g_cfg.perf_hud = 0;                 /* W122: Leistungs-Overlay aus (Taste aktiv) */
@@ -435,6 +438,8 @@ void hcfg_defaults(void)
     g_cfg.turbo_until_frame = 0;
     g_cfg.turbo_until_mode = 0;
     g_cfg.vblank_qpc = 1; /* W73: QPC-Zeitbasis (gleichmaessige 33,3-ms-Fenster, Spieler-Standard; wirkt nur mit vblank_hz>0) */
+    g_cfg.game_tick = 30; /* W234 PAL50: Standard 30 Ticks/s */
+    g_cfg.film_diag = 0; /* TEST(PAL50,W234) */
     g_cfg.vblank_hz = 60; /* W48 REALTIME: Spieler-Standard = Xbox-Echtzeit; Tests via run_once.ps1 (vblank_hz=0) */
 }
 
@@ -565,6 +570,8 @@ static int set_key_overlay(const char *k, const char *v)
     else if (strcmp(k, "photo_cam_yaw") == 0) { g_cfg.photo_cam_yaw = atoi(v); }
     else if (strcmp(k, "photo_cam_pitch") == 0) { g_cfg.photo_cam_pitch = atoi(v); }
     else if (strcmp(k, "photo_cam_dist") == 0) { g_cfg.photo_cam_dist = atoi(v); }
+    else if (strcmp(k, "photo_rt_max") == 0) { g_cfg.photo_rt_max = atoi(v); } /* W233 */
+    else if (strcmp(k, "photo_rt_fail_test") == 0) { g_cfg.photo_rt_fail_test = atoi(v); } /* TEST(W233) */
     else if (strcmp(k, "repo") == 0 || strcmp(k, "feedback_repo") == 0) { /* W188 [feedback] repo */
         strncpy_s(g_cfg.feedback_repo, sizeof g_cfg.feedback_repo, v, _TRUNCATE);
     }
@@ -591,6 +598,12 @@ static void set_key(const char *k, const char *v)
         strcpy_s(g_cfg.game_image, sizeof g_cfg.game_image, v);
     } else if (strcmp(k, "version_check") == 0) {
         g_cfg.version_check = atoi(v);
+    } else if (strcmp(k, "allow_ntsc_u") == 0) { /* W229 US-PROFILE */
+        g_cfg.allow_ntsc_u = atoi(v);
+    } else if (strcmp(k, "ntsc_u") == 0) { /* W230 US-PLAY: Notbremse */
+        g_cfg.ntsc_u = atoi(v);
+    } else if (strcmp(k, "hdd_root_us") == 0) { /* W230 US-PLAY */
+        strcpy_s(g_cfg.hdd_root_us, sizeof g_cfg.hdd_root_us, v);
     } else if (strcmp(k, "save_check") == 0) {
         g_cfg.save_check = atoi(v);
     } else if (strcmp(k, "save_lock") == 0) { /* W190 SAVE-LOCK */
@@ -865,6 +878,8 @@ static void set_key(const char *k, const char *v)
         g_cfg.cockpit_panini_d = atoi(v);
     } else if (strcmp(k, "cockpit_panini_frame") == 0) {
         g_cfg.cockpit_panini_frame = atoi(v);
+    } else if (strcmp(k, "cockpit_width") == 0) { /* W235 COCKPIT-WIDTH */
+        g_cfg.cockpit_width = atoi(v);
     } else if (strcmp(k, "cockpit_persp_pause") == 0) {
         g_cfg.cockpit_persp_pause = atoi(v);
     } else if (strcmp(k, "cockpit_persp_dist") == 0) {
@@ -1361,6 +1376,10 @@ static void set_key(const char *k, const char *v)
         g_cfg.vblank_qpc = atoi(v);
     } else if (strcmp(k, "vblank_hz") == 0) {
         g_cfg.vblank_hz = atoi(v);
+    } else if (strcmp(k, "film_diag") == 0) { /* TEST(PAL50,W234) */
+        g_cfg.film_diag = atoi(v);
+    } else if (strcmp(k, "game_tick") == 0) { /* W234 PAL50: nur 25 oder 30 */
+        g_cfg.game_tick = atoi(v) == 25 ? 25 : 30;
     } else if (strcmp(k, "movie_skip") == 0) {
         g_cfg.movie_skip = atoi(v);
     } else if (strcmp(k, "replay") == 0) {
@@ -1536,6 +1555,10 @@ int hcfg_load(const char *path)
         }
     }
     hcfg_apply_env();
+    if (g_cfg.game_tick == 25) { /* W234 PAL50: Echtzeit 60 -> 50 VBlanks/s (Testtakt 0 bleibt) */
+        if (g_cfg.vblank_hz == 60) { g_cfg.vblank_hz = 50; }
+        HLOG_I("cfg: game_tick=25 (PAL50, vblank_hz=%d, PAL-EEPROM)", g_cfg.vblank_hz);
+    }
     HLOG_I("cfg: %s geladen (%ux%u, fps_limit=%d, vblank_hz=%d, fog=%.2f, drawdist=%.2f)",
            path, g_cfg.width, g_cfg.height, g_cfg.fps_limit, g_cfg.vblank_hz,
            g_cfg.fog_scale, g_cfg.draw_distance_scale);

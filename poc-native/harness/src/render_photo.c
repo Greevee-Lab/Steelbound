@@ -14,6 +14,7 @@
  * Kacheln <= 4096 x 1024 (Streifenpuffer fuer WIC, 32-bit-Prozess), Viewport-Grenze 32767 je Seite.
  * Ohne Fotomodus wird hier nichts gerufen (Standardpfad bitgleich). */
 #include "render_int.h"
+#include "sb_profile.h" /* W229 SBA() */
 #include "sb_photo.h"
 #include "sb_userdata.h"
 #include "render_qa.h" /* rq_in_mission */
@@ -334,72 +335,160 @@ static void ph_free_sc(void)
     ph_sc_n = 0;
 }
 
-/* Liste anlegen und in r/pi eintragen. Rueckgabe Anzahl. Speichergrenze ~3 GB (Farbe + Tiefe). */
+/* W233 SHOT-8K-MONITOR: Grenzen der skalierten Zwischenziele aus dem Grafikspeicher der Karte.
+ * D3D11-Einzelressource <= min(max(128 MB, 1/4 VRAM), 2048 MB) (D3D11_REQ_RESOURCE_SIZE_IN_MEGABYTES_EXPRESSION_*),
+ * Summe <= min(3 GB, 60 % VRAM), mindestens 256 MB. Ohne Abfrage: 2048 MB / 3 GB (bisher). */
+static void ph_sc_limits(double *res_max, double *total_max)
+{
+    IDXGIDevice *dx = NULL;
+    IDXGIAdapter *ad = NULL;
+    DXGI_ADAPTER_DESC ds;
+    double vram = 0.0;
+    *res_max = 2048.0 * 1048576.0;
+    *total_max = 3.0e9;
+    if (g_dev && SUCCEEDED(ID3D11Device_QueryInterface(g_dev, &IID_IDXGIDevice, (void **)&dx)) && dx) {
+        if (SUCCEEDED(IDXGIDevice_GetAdapter(dx, &ad)) && ad) {
+            if (SUCCEEDED(IDXGIAdapter_GetDesc(ad, &ds))) { vram = (double)ds.DedicatedVideoMemory; }
+            IDXGIAdapter_Release(ad);
+        }
+        IDXGIDevice_Release(dx);
+    }
+    if (vram > 0.0) {
+        double r = vram * 0.25, t = vram * 0.6;
+        if (r < 128.0 * 1048576.0) { r = 128.0 * 1048576.0; }
+        if (r < *res_max) { *res_max = r; }
+        if (t < 256.0 * 1048576.0) { t = 256.0 * 1048576.0; }
+        if (t < *total_max) { *total_max = t; }
+    }
+}
+
+/* Liste anlegen und in r/pi eintragen. Rueckgabe Anzahl.
+ * W233: Faktor je Ziel (bisher ein gemeinsamer): Kante <= photo_rt_max (Standard 8192, D3D11 <= 16384), Einzel-
+ * ressource und Summe (Farbe + Tiefe) in den Grenzen von ph_sc_limits (groesstes Ziel gibt zuerst nach, bei Gleichstand das kleinere RT).
+ * Schlaegt das Anlegen fehl (Grafikspeicher, 32-bit), werden alle Faktoren eine Stufe kleiner versucht statt
+ * ganz ohne Skalierung (bisher: ein Fehler -> Monitore nativ). Ziele mit Faktor 1 laufen nativ mit. */
 static int ph_setup_sc(sb_ph_rep_t *r, ph_init_t *pi, unsigned n)
 {
-    unsigned i, k = n;
-    double bytes = 0.0;
-    int j = 0;
+    unsigned i, m = 0, cap, idx[PH_NSC], kk[PH_NSC], att, kmax = 1;
+    double res_max, tot_max, bytes = 0.0;
+    int j = 0, q;
+    char lst[400];
     ph_free_sc();
-    for (i = 0; i < ph_cen.n_rt; i++) {
-        unsigned w = ph_cen.rt[i].w, h = ph_cen.rt[i].h;
-        unsigned kk = n;
+    if (g_cfg.photo_rt_max <= 0 || n < 2u) { return 0; } /* 0 = Zwischenziele aus (Vergleich/alter Stand x1) */
+    cap = (unsigned)g_cfg.photo_rt_max;
+    if (cap < 256u) { cap = 256u; }
+    if (cap > 16384u) { cap = 16384u; }
+    ph_sc_limits(&res_max, &tot_max);
+    for (i = 0; i < ph_cen.n_rt && m < PH_NSC; i++) {
+        unsigned w = ph_cen.rt[i].w, h = ph_cen.rt[i].h, k = n;
         if ((w < h ? w : h) < 256u || (int)ph_cen.rt[i].e == ph_cen.bb) { continue; }
-        while (kk > 1u && (w * kk > 16384u || h * kk > 16384u)) { kk--; }
-        if (kk < k) { k = kk; }
-        bytes += (double)w * h * 8.0;
+        while (k > 1u && (w * k > cap || h * k > cap || (double)w * k * h * k * 4.0 > res_max)) { k--; }
+        idx[m] = i;
+        kk[m++] = k;
     }
-    while (k > 1u && bytes * k * k > 3.0e9) { k--; }
-    if (k < 2u) { return 0; }
-    for (i = 0; i < ph_cen.n_rt && j < PH_NSC; i++) {
-        D3D11_TEXTURE2D_DESC td;
-        unsigned w = ph_cen.rt[i].w, h = ph_cen.rt[i].h;
-        if ((w < h ? w : h) < 256u || (int)ph_cen.rt[i].e == ph_cen.bb) { continue; }
-        ID3D11Texture2D_GetDesc(ph_cen.rt[i].tex, &td);
-        td.Width = w * k;
-        td.Height = h * k;
-        td.MipLevels = 1;
-        td.ArraySize = 1;
-        td.SampleDesc.Count = 1;
-        td.SampleDesc.Quality = 0;
-        td.Usage = D3D11_USAGE_DEFAULT;
-        td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
-        td.CPUAccessFlags = 0;
-        td.MiscFlags = 0;
-        if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &ph_sc_t[j])) ||
-            FAILED(ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)ph_sc_t[j], NULL, &ph_sc_rtv[j])) ||
-            FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)ph_sc_t[j], NULL, &ph_sc_srv[j]))) {
-            HLOG_W("PHOTO: Zwischenziel e%d %ux%u nicht anlegbar - ohne Skalierung", ph_cen.rt[i].e, td.Width, td.Height);
-            ph_free_sc();
-            return 0;
-        }
-        if (ph_cen.rt[i].d >= 0) {
-            td.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
-            td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
-            if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &ph_sc_dt[j])) ||
-                FAILED(ID3D11Device_CreateDepthStencilView(g_dev, (ID3D11Resource *)ph_sc_dt[j], NULL, &ph_sc_dsv[j]))) {
-                ph_free_sc();
-                return 0;
+    for (att = 0; att < 8u; att++) {
+        int fail = 0;
+        for (;;) { /* Summe: groesstes Ziel eine Stufe kleiner, bis es passt */
+            int big = -1;
+            double bb = 0.0;
+            bytes = 0.0;
+            for (q = 0; q < (int)m; q++) {
+                double e = (double)ph_cen.rt[idx[q]].w * ph_cen.rt[idx[q]].h * kk[q] * kk[q] *
+                           (ph_cen.rt[idx[q]].d >= 0 ? 8.0 : 4.0);
+                if (kk[q] < 2u) { continue; }
+                bytes += e;
+                /* Gleichstand (+-1 %): kleineres RT gibt zuerst nach (Welt-/Monitor-RT des Hauptmonitors sind die groessten) */
+                if (e > bb * 1.01 || (e > bb * 0.99 && big >= 0 &&
+                                      ph_cen.rt[idx[q]].w * ph_cen.rt[idx[q]].h < ph_cen.rt[idx[big]].w * ph_cen.rt[idx[big]].h)) {
+                    bb = e > bb ? e : bb;
+                    big = q;
+                }
             }
-            ID3D11DeviceContext_ClearDepthStencilView(g_ctx, ph_sc_dsv[j], D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+            if (bytes <= tot_max || big < 0) { break; }
+            kk[big]--;
         }
-        r->sc_e[j] = ph_cen.rt[i].e;
-        r->sc_d[j] = ph_cen.rt[i].d;
-        r->sc_rtv[j] = ph_sc_rtv[j];
-        r->sc_dsv[j] = ph_sc_dsv[j];
-        r->sc_srv[j] = ph_sc_srv[j];
-        r->sc_k[j] = (float)k;
-        r->sc_w[j] = (LONG)(w * k);
-        r->sc_h[j] = (LONG)(h * k);
-        pi->sc_src[j] = ph_cen.rt[i].tex;
-        pi->sc_rtv[j] = ph_sc_rtv[j];
-        pi->sc_w[j] = w * k;
-        pi->sc_h[j] = h * k;
-        j++;
+        j = 0;
+        kmax = 1;
+        lst[0] = 0;
+        for (q = 0; q < (int)m && !fail; q++) {
+            D3D11_TEXTURE2D_DESC td;
+            unsigned k = kk[q];
+            i = idx[q];
+            if (k < 2u) { continue; }
+            ID3D11Texture2D_GetDesc(ph_cen.rt[i].tex, &td);
+            td.Width = ph_cen.rt[i].w * k;
+            td.Height = ph_cen.rt[i].h * k;
+            td.MipLevels = 1;
+            td.ArraySize = 1;
+            td.SampleDesc.Count = 1;
+            td.SampleDesc.Quality = 0;
+            td.Usage = D3D11_USAGE_DEFAULT;
+            td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+            td.CPUAccessFlags = 0;
+            td.MiscFlags = 0;
+            if (g_cfg.photo_rt_fail_test > 0) { /* TEST(W233): Anlegefehler nachstellen (Standard 0) */
+                g_cfg.photo_rt_fail_test--;
+                fail = 1;
+            } else if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &ph_sc_t[j])) ||
+                       FAILED(ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)ph_sc_t[j], NULL, &ph_sc_rtv[j])) ||
+                       FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)ph_sc_t[j], NULL, &ph_sc_srv[j]))) {
+                fail = 1;
+            }
+            if (!fail && ph_cen.rt[i].d >= 0) {
+                td.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+                td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+                if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &ph_sc_dt[j])) ||
+                    FAILED(ID3D11Device_CreateDepthStencilView(g_dev, (ID3D11Resource *)ph_sc_dt[j], NULL, &ph_sc_dsv[j]))) {
+                    fail = 1;
+                } else {
+                    ID3D11DeviceContext_ClearDepthStencilView(g_ctx, ph_sc_dsv[j], D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
+                }
+            }
+            if (fail) {
+                HLOG_W("PHOTO: Zwischenziel e%d %ux%u (x%u) nicht anlegbar - Versuch %u, eine Stufe kleiner", ph_cen.rt[i].e,
+                       td.Width, td.Height, k, att + 1u);
+                break;
+            }
+            r->sc_e[j] = ph_cen.rt[i].e;
+            r->sc_d[j] = ph_cen.rt[i].d;
+            r->sc_rtv[j] = ph_sc_rtv[j];
+            r->sc_dsv[j] = ph_sc_dsv[j];
+            r->sc_srv[j] = ph_sc_srv[j];
+            r->sc_k[j] = (float)k;
+            r->sc_w[j] = (LONG)td.Width;
+            r->sc_h[j] = (LONG)td.Height;
+            pi->sc_src[j] = ph_cen.rt[i].tex;
+            pi->sc_rtv[j] = ph_sc_rtv[j];
+            pi->sc_w[j] = td.Width;
+            pi->sc_h[j] = td.Height;
+            if (k > kmax) { kmax = k; }
+            {
+                size_t ln = strlen(lst);
+                if (ln + 40u < sizeof lst) {
+                    _snprintf_s(lst + ln, sizeof lst - ln, _TRUNCATE, "%se%d %ux%u->%ux%u", ln ? ", " : "", ph_cen.rt[i].e,
+                                ph_cen.rt[i].w, ph_cen.rt[i].h, td.Width, td.Height);
+                }
+            }
+            j++;
+        }
+        if (!fail) { break; }
+        ph_free_sc();
+        memset(r->sc_e, 0, sizeof r->sc_e);
+        j = 0;
+        {
+            int any = 0;
+            for (q = 0; q < (int)m; q++) { if (kk[q] > 1u) { kk[q]--; } if (kk[q] > 1u) { any = 1; } }
+            if (!any) { break; }
+        }
     }
     r->nsc = pi->nsc = ph_sc_n = j;
-    HLOG_I("PHOTO: %d Zwischenziele (Welt/Monitore) x%u fuer die Cockpit-Aufnahme (~%.0f MB)", j, k,
-           bytes * k * k / 1048576.0);
+    if (!j) {
+        if (m) { HLOG_W("PHOTO: keine skalierten Zwischenziele (x%u) - Monitore nativ", n); }
+        return 0;
+    }
+    HLOG_I("PHOTO: %d Zwischenziele (Welt/Monitore) x%u fuer die Cockpit-Aufnahme (~%.0f MB, Grenzen Kante %u, "
+           "Einzel %.0f MB, Summe %.0f MB): %s", j, kmax, bytes / 1048576.0, cap, res_max / 1048576.0,
+           tot_max / 1048576.0, lst);
     return j;
 }
 
@@ -954,7 +1043,7 @@ static unsigned ph_mission_no(int *inm)
 {
     unsigned v = 0;
     *inm = rq_in_mission();
-    __try { v = *(volatile unsigned short *)(uintptr_t)0x3B89A0u; }
+    __try { v = *(volatile unsigned short *)(uintptr_t)SBA(0x3B89A0u); }
     __except (EXCEPTION_EXECUTE_HANDLER) { v = 0; }
     return v + 1u;
 }

@@ -43,6 +43,10 @@
 
 #define VR_PI 3.14159265358979f
 
+/* W242 VR-SHELL (Definition vor xr_frame) */
+static void vs_eye_set(int e, const float q[4], const float pos[3], float tl, float tr, float tu, float td);
+static void vs_draw(const sb_vr_pass_t *p);
+
 static int vr_mode;          /* 0 aus, 1 Vorschau, 2 OpenXR */
 static int vr_prev_kind;     /* 0 sbs, 1 left, 2 right, 3 aus (nur Fenster normal) */
 static int vr_sim_kind;      /* 0 keys, 1 script, 2 still */
@@ -185,6 +189,23 @@ static void vr_game_proj(float *ia, float *ib, float *fov_v)
     *ia = 1.0f / (a * vk);
     *ib = 1.0f / b;
     *fov_v = 2.0f * atanf(1.0f / b);
+}
+
+/* W242: Augenpose im Sitz-Raum (Zeilen 0..2 = Achsen, Zeile 3 = Position in Spiel-Einheiten), wie vr_eye_matrix. */
+static void vr_eye_seat(float M[16], const float q[4], const float pos[3])
+{
+    float RC[16], RCI[16], rq[4], rp[3];
+    float s = (float)g_cfg.vr_world_scale / 100.0f;
+    m4_pose(M, q, pos);
+    q_from_euler(rq, vr_rc_yaw, 0, 0);
+    rp[0] = vr_rc_pos[0]; rp[1] = vr_rc_pos[1]; rp[2] = vr_rc_pos[2];
+    m4_pose(RC, rq, rp);
+    m4_rigid_inv(RCI, RC);
+    m4_mul(M, M, RCI);
+    if (s <= 0.0f) { s = 1.0f; }
+    M[12] *= s;
+    M[13] = (M[13] + (float)g_cfg.vr_seat_height / 1000.0f) * s;
+    M[14] = (M[14] - (float)g_cfg.vr_seat_forward / 1000.0f) * s;
 }
 
 /* Augenpose (Tracking-Raum, Quaternion + Position in Metern) -> E = Sicht x Projektion. */
@@ -438,6 +459,7 @@ static void vr_preview_pass(sb_vr_pass_t *p)
         pos[1] = off[0] * R[1] + off[1] * R[5] + off[2] * R[9] + R[13];
         pos[2] = off[0] * R[2] + off[1] * R[6] + off[2] * R[10] + R[14];
         vr_eye_matrix(p->E[e], q, pos, -tr, tr, tu, -tu);
+        vs_eye_set(e, q, pos, -tr, tr, tu, -tu); /* W242 */
     }
 }
 
@@ -457,6 +479,7 @@ int sb_vr_preview_show(void *A, void *B, float t)
     vr_sim_update();
     vr_preview_pass(&p);
     if (!sb_interp_vr_replay(&p, A, B, t, 0, &tout)) { return 0; }
+    vs_draw(&p); /* W242 VR-SHELL */
     vr_frames++;
     vr_auto_update(&p);
     g_vr_blit = 1;
@@ -1585,6 +1608,11 @@ static int vr_pose_shot_due(const float hq[4], const float hp[3], char *nm, size
     _snprintf_s(nm, cap, _TRUNCATE, "vr_%05u_pose_v%02d_x%+03d_r%+03d_g%+03d", vr_frames + 1u,
                 (int)floorf(-hp[2] * 100.0f + 0.5f), (int)floorf(hp[0] * 100.0f + 0.5f),
                 (int)floorf(vr_q_roll(hq) * 180.0f / VR_PI + 0.5f), (int)floorf(q_yaw(hq) * 180.0f / VR_PI + 0.5f));
+    {   /* W242: Nicken im Namen, wenn vorhanden (Umschau-Posen w242); ohne Nicken Name wie W164 */
+        int pd = (int)floorf(q_pitch(hq) * 180.0f / VR_PI + 0.5f);
+        size_t l = strlen(nm);
+        if (pd != 0 && l < cap) { _snprintf_s(nm + l, cap - l, _TRUNCATE, "_n%+03d", pd); }
+    }
     return 1;
 }
 
@@ -2046,6 +2074,303 @@ static void vm_shot(const sb_vr_pass_t *p, int flags, int screen, const float hq
  *  4 kurz ctx_lock: Wiedergabe ins geteilte Augenziel (Schluessel 0 -> 1),
  *  5 VR-Device: Kopie ins Swapchain-Bild (Schluessel 1 -> 0), xrReleaseSwapchainImage,
  *  6 xrEndFrame. */
+/* ---------- W242 VR-SHELL: dunkle Huelle, Rand-Vignette ----------
+ * Das Original-Cockpit ist nur nach vorn modelliert. Beim Umschauen sieht man
+ * daneben/dahinter Leere (nichts gezeichnet) bzw. grosse, flache Rueckflaechen
+ * des Meshes. Nach der Cockpit-Wiedergabe je Auge zwei Vollbild-Paesse:
+ *  1. Huelle (vr_shell=1): ein schlichter, sehr dunkler Kasten um den Sitz
+ *     (Halbachsen VS_BOX_*, Ecken leicht dunkler, Boden dunkler), per
+ *     Strahl-Kasten-Schnitt vom Augpunkt aus -> echte Stereo-/Bewegungs-
+ *     Parallaxe. Gezeichnet nur, wo das Augenbild leer ist: Tiefentest EQUAL
+ *     gegen die geloeschte Tiefe 1,0 (Cockpit, Instrumente, Monitor bleiben
+ *     unberuehrt).
+ *  2. Vignette (vr_vignette=0..100 %): weltfeste Blende nach Blickrichtung im
+ *     Sitz-Raum (Gieren/Nicken des Strahls, nicht des Kopfes): innerhalb des
+ *     modellierten Bereichs nichts, an seinem Rand weicher Uebergang in die
+ *     Huellenfarbe, dahinter Deckung = Wert %. Kein harter Stopp, nichts
+ *     haengt am Kopf.
+ * Nur im Augenbild (vr_enable=1, Cockpit-Wiedergabe), nicht auf der Leinwand. */
+#define VS_BOX_X 1.50f   /* Halbachsen des Kastens in m (vor world_scale) */
+#define VS_BOX_Y 1.20f
+#define VS_BOX_ZF 2.00f  /* nach vorn (-z) */
+#define VS_BOX_ZB 1.50f  /* nach hinten (+z) */
+/* Rand des modellierten Bereichs (Messung W242, BERICHT): Vignette beginnt bei *0 und erreicht ihre Deckung bei *1 (Grad).
+ * Gemessen (Mock, Augenbild je Blickrichtung): Cockpit-Inhalt seitlich bis +-45 Grad (unabhaengig vom Seitenverhaeltnis,
+ * 21:9 und 16:9 gleich), oben voll bis +25, unten bis -35..-40 Grad; dahinter Leere bzw. flache schwarze Flaechen. */
+#define VS_YAW0 42.0f
+#define VS_YAW1 62.0f
+#define VS_UP0 28.0f
+#define VS_UP1 50.0f
+#define VS_DN0 28.0f
+#define VS_DN1 48.0f
+typedef struct { float c0[4], cx[4], cy[4], eye[4], col[4], box[4], vig[4], vig2[4]; } vs_cb_t;
+static ID3D11VertexShader *vs_vs;
+static ID3D11PixelShader *vs_ps;
+static ID3D11Buffer *vs_cb;
+static ID3D11DepthStencilState *vs_ds_eq;
+static ID3D11BlendState *vs_bs_al;
+static int vs_done, vs_ok, vs_log_shell = -1, vs_log_vig = -1, vs_log_diag = -1;
+static float vs_eq[2][4], vs_ep[2][3], vs_et[2][4]; /* je Auge: Pose (Tracking) und tan-Sichtwinkel l, r, o, u */
+/* GPU-Zeit der Paesse (nur perf_gpass > 0) */
+static ID3D11Query *vs_qd[4], *vs_qa[4], *vs_qb[4];
+static int vs_qst[4];
+static unsigned vs_qi, vs_gn;
+static double vs_gacc;
+static LONGLONG vs_gq0;
+
+static void vs_eye_set(int e, const float q[4], const float pos[3], float tl, float tr, float tu, float td)
+{
+    if (e < 0 || e > 1) { return; }
+    memcpy(vs_eq[e], q, sizeof vs_eq[e]);
+    memcpy(vs_ep[e], pos, sizeof vs_ep[e]);
+    vs_et[e][0] = tl; vs_et[e][1] = tr; vs_et[e][2] = tu; vs_et[e][3] = td;
+}
+
+static int vs_init(void)
+{
+    static const char *vsrc =
+        "struct VO { float4 pos : SV_Position; float2 n : TEXCOORD0; };\n"
+        "VO main(uint id : SV_VertexID) { VO o; float2 t = float2((id << 1) & 2, id & 2);\n"
+        "  o.n = t * float2(2, -2) + float2(-1, 1); o.pos = float4(o.n, 1, 1); return o; }\n";
+    static const char *psrc =
+        "cbuffer C : register(b0) { float4 c0, cx, cy, eye, col, box, vig, vig2; };\n"
+        /* box: x/y Halbachsen, z vorn (-z), w hinten (+z), Spiel-Einheiten; vig2.w Eckenbreite */
+        "float3 shell(float3 d) {\n"
+        "  float3 sg = d >= 0 ? 1.0 : -1.0; float3 dd = sg * max(abs(d), 1e-5);\n"
+        "  float3 b = float3(box.x, box.y, d.z < 0 ? box.z : box.w);\n"
+        "  float3 t = (sg * b - eye.xyz) / dd; float tm = min(t.x, min(t.y, t.z));\n"
+        "  float3 h = eye.xyz + d * tm; float3 q = b - abs(h);\n"
+        "  float f = 1.0, e2;\n"
+        "  if (tm == t.x) { e2 = min(q.y, q.z); }\n"
+        "  else if (tm == t.y) { e2 = min(q.x, q.z); f = d.y > 0 ? 0.92 : 0.72; }\n"
+        "  else { e2 = min(q.x, q.y); f = d.z > 0 ? 0.86 : 1.0; }\n"
+        "  return col.rgb * f * lerp(0.55, 1.0, smoothstep(0.0, vig2.w, e2)); }\n"
+        "float4 main(float4 p : SV_Position, float2 n : TEXCOORD0) : SV_Target {\n"
+        "  float3 d = normalize(c0.xyz + n.x * cx.xyz + n.y * cy.xyz);\n"
+        "  if (col.a > 1.5) { return float4(1, 0, 1, 1); }\n"
+        "  float3 s = shell(d);\n"
+        "  if (col.a > 0.5) { return float4(s, 1); }\n"
+        "  float yaw = abs(atan2(d.x, -d.z)), pit = asin(clamp(d.y, -1.0, 1.0));\n"
+        "  float a = max(smoothstep(vig.x, vig.y, yaw), max(smoothstep(vig.z, vig.w, pit), smoothstep(vig2.x, vig2.y, -pit)));\n"
+        "  return float4(s, a * vig2.z); }\n";
+    ID3DBlob *b = NULL;
+    D3D11_BUFFER_DESC bd;
+    D3D11_DEPTH_STENCIL_DESC dd;
+    D3D11_BLEND_DESC bl;
+    if (vs_done) { return vs_ok; }
+    vs_done = 1;
+    if (!vq_init()) { return 0; } /* Rasterizer (ohne Culling) */
+    if (sb_im_compile(vsrc, "vs_4_0", &b)) {
+        ID3D11Device_CreateVertexShader(g_dev, b->lpVtbl->GetBufferPointer(b), b->lpVtbl->GetBufferSize(b), NULL, &vs_vs);
+        b->lpVtbl->Release(b);
+        b = NULL;
+    }
+    if (sb_im_compile(psrc, "ps_4_0", &b)) {
+        ID3D11Device_CreatePixelShader(g_dev, b->lpVtbl->GetBufferPointer(b), b->lpVtbl->GetBufferSize(b), NULL, &vs_ps);
+        b->lpVtbl->Release(b);
+    }
+    memset(&bd, 0, sizeof bd);
+    bd.ByteWidth = sizeof(vs_cb_t);
+    bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &vs_cb))) { vs_cb = NULL; }
+    memset(&dd, 0, sizeof dd);
+    dd.DepthEnable = TRUE;
+    dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+    dd.DepthFunc = D3D11_COMPARISON_EQUAL; /* nur ungezeichnete Pixel (Tiefe = geloeschte 1,0) */
+    if (FAILED(ID3D11Device_CreateDepthStencilState(g_dev, &dd, &vs_ds_eq))) { vs_ds_eq = NULL; }
+    memset(&bl, 0, sizeof bl);
+    bl.RenderTarget[0].BlendEnable = TRUE;
+    bl.RenderTarget[0].SrcBlend = D3D11_BLEND_SRC_ALPHA;
+    bl.RenderTarget[0].DestBlend = D3D11_BLEND_INV_SRC_ALPHA;
+    bl.RenderTarget[0].BlendOp = D3D11_BLEND_OP_ADD;
+    bl.RenderTarget[0].SrcBlendAlpha = D3D11_BLEND_ZERO;
+    bl.RenderTarget[0].DestBlendAlpha = D3D11_BLEND_ONE;
+    bl.RenderTarget[0].BlendOpAlpha = D3D11_BLEND_OP_ADD;
+    bl.RenderTarget[0].RenderTargetWriteMask = D3D11_COLOR_WRITE_ENABLE_RED | D3D11_COLOR_WRITE_ENABLE_GREEN |
+                                               D3D11_COLOR_WRITE_ENABLE_BLUE;
+    if (FAILED(ID3D11Device_CreateBlendState(g_dev, &bl, &vs_bs_al))) { vs_bs_al = NULL; }
+    vs_ok = vs_vs && vs_ps && vs_cb && vs_ds_eq && vs_bs_al;
+    HLOG_I("VR-SHELL: Shader %s (Kasten %.2f x %.2f m, vorn %.2f / hinten %.2f m; Vignette Gieren %.0f..%.0f, "
+           "hoch %.0f..%.0f, runter %.0f..%.0f Grad)", vs_ok ? "bereit" : "FEHLER", 2.0 * VS_BOX_X, 2.0 * VS_BOX_Y,
+           (double)VS_BOX_ZF, (double)VS_BOX_ZB, (double)VS_YAW0, (double)VS_YAW1, (double)VS_UP0, (double)VS_UP1,
+           (double)VS_DN0, (double)VS_DN1);
+    return vs_ok;
+}
+
+/* GPU-Zeit: fertige Messungen einsammeln (ohne Warten), alle 5 s eine Zeile */
+static void vs_gpu_poll(void)
+{
+    int i;
+    for (i = 0; i < 4; i++) {
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj;
+        UINT64 ta = 0, tb = 0;
+        if (vs_qst[i] != 1) { continue; }
+        if (ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)vs_qd[i], &dj, sizeof dj, D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) {
+            continue;
+        }
+        if (ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)vs_qa[i], &ta, sizeof ta, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
+            ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)vs_qb[i], &tb, sizeof tb, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK &&
+            !dj.Disjoint && dj.Frequency && tb >= ta) {
+            vs_gacc += (double)(tb - ta) * 1000.0 / (double)dj.Frequency;
+            vs_gn++;
+        }
+        vs_qst[i] = 0;
+    }
+    if (!vs_gq0) { vs_gq0 = vr_now(); }
+    if ((double)(vr_now() - vs_gq0) >= 5.0 * (double)vr_qpf.QuadPart) {
+        if (vs_gn) {
+            HLOG_I("VR-SHELL: GPU %.3f ms je VR-Bild (beide Augen, Huelle %d, Vignette %d %%, n=%u)", vs_gacc / (double)vs_gn,
+                   g_cfg.vr_shell, g_cfg.vr_vignette, vs_gn);
+        }
+        vs_gacc = 0.0;
+        vs_gn = 0;
+        vs_gq0 = vr_now();
+    }
+}
+
+/* Je Auge Huelle (Tiefe EQUAL 1,0) und Vignette (Mischen) ins Augenziel. Unter ctx_lock, nach der Cockpit-Wiedergabe. */
+static void vs_draw(const sb_vr_pass_t *p)
+{
+    int shell = g_cfg.vr_shell ? 1 : 0, diag = g_cfg.vr_shell_diag ? 1 : 0, e, gi = -1;
+    int vig = g_cfg.vr_vignette < 0 ? 0 : (g_cfg.vr_vignette > 100 ? 100 : g_cfg.vr_vignette);
+    float s = (float)g_cfg.vr_world_scale / 100.0f;
+    vs_cb_t cb;
+    D3D11_VIEWPORT nvp, svp[1];
+    UINT s_nvp = 1, s_mask = 0, s_sref = 0;
+    ID3D11RenderTargetView *s_rtv = NULL;
+    ID3D11DepthStencilView *s_dsv = NULL;
+    ID3D11BlendState *s_bs = NULL;
+    FLOAT s_bf[4];
+    ID3D11DepthStencilState *s_ds = NULL;
+    ID3D11RasterizerState *s_rs = NULL;
+    ID3D11InputLayout *s_lay = NULL;
+    D3D11_PRIMITIVE_TOPOLOGY s_topo;
+    ID3D11VertexShader *s_vs = NULL;
+    ID3D11PixelShader *s_ps = NULL;
+    ID3D11Buffer *s_pcb = NULL;
+    if (diag) { shell = 1; vig = 0; }
+    if (shell != vs_log_shell || vig != vs_log_vig || diag != vs_log_diag) {
+        HLOG_I("VR-SHELL: Huelle %s, Vignette %d %%%s", shell ? "an" : "aus", vig,
+               diag ? " (DIAG: leere Pixel magenta, ohne Vignette)" : "");
+        vs_log_shell = shell; vs_log_vig = vig; vs_log_diag = diag;
+    }
+    if ((!shell && !vig) || !p || !p->rtv || !vs_init()) { return; }
+    if (s <= 0.0f) { s = 1.0f; }
+    if (g_cfg.perf_gpass > 0) {
+        D3D11_QUERY_DESC qd;
+        vs_gpu_poll();
+        for (e = 0; e < 4; e++) {
+            int i = (int)((vs_qi + (unsigned)e) & 3u);
+            if (vs_qst[i] == 0) { gi = i; break; }
+        }
+        if (gi >= 0 && !vs_qd[gi]) {
+            memset(&qd, 0, sizeof qd);
+            qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+            ID3D11Device_CreateQuery(g_dev, &qd, &vs_qd[gi]);
+            qd.Query = D3D11_QUERY_TIMESTAMP;
+            ID3D11Device_CreateQuery(g_dev, &qd, &vs_qa[gi]);
+            ID3D11Device_CreateQuery(g_dev, &qd, &vs_qb[gi]);
+        }
+        if (gi >= 0 && (!vs_qd[gi] || !vs_qa[gi] || !vs_qb[gi])) { gi = -1; }
+        if (gi >= 0) {
+            ID3D11DeviceContext_Begin(g_ctx, (ID3D11Asynchronous *)vs_qd[gi]);
+            ID3D11DeviceContext_End(g_ctx, (ID3D11Asynchronous *)vs_qa[gi]);
+        }
+    }
+    ID3D11DeviceContext_OMGetRenderTargets(g_ctx, 1, &s_rtv, &s_dsv);
+    ID3D11DeviceContext_OMGetBlendState(g_ctx, &s_bs, s_bf, &s_mask);
+    ID3D11DeviceContext_OMGetDepthStencilState(g_ctx, &s_ds, &s_sref);
+    ID3D11DeviceContext_RSGetState(g_ctx, &s_rs);
+    ID3D11DeviceContext_RSGetViewports(g_ctx, &s_nvp, svp);
+    ID3D11DeviceContext_IAGetInputLayout(g_ctx, &s_lay);
+    ID3D11DeviceContext_IAGetPrimitiveTopology(g_ctx, &s_topo);
+    ID3D11DeviceContext_VSGetShader(g_ctx, &s_vs, NULL, NULL);
+    ID3D11DeviceContext_PSGetShader(g_ctx, &s_ps, NULL, NULL);
+    ID3D11DeviceContext_PSGetConstantBuffers(g_ctx, 0, 1, &s_pcb);
+    ID3D11DeviceContext_RSSetState(g_ctx, vq_rs);
+    ID3D11DeviceContext_IASetInputLayout(g_ctx, NULL);
+    ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_VSSetShader(g_ctx, vs_vs, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(g_ctx, vs_ps, NULL, 0);
+    ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 0, 1, &vs_cb);
+    memset(&cb, 0, sizeof cb);
+    /* sehr dunkles, leicht kuehles Grau (Augenziel UNORM, die Runtime liest sRGB: 0,075 ~ 19/255) */
+    cb.col[0] = 0.072f; cb.col[1] = 0.074f; cb.col[2] = 0.080f;
+    cb.box[0] = VS_BOX_X * s; cb.box[1] = VS_BOX_Y * s; cb.box[2] = VS_BOX_ZF * s; cb.box[3] = VS_BOX_ZB * s;
+    cb.vig[0] = VS_YAW0 * VR_PI / 180.0f; cb.vig[1] = VS_YAW1 * VR_PI / 180.0f;
+    cb.vig[2] = VS_UP0 * VR_PI / 180.0f; cb.vig[3] = VS_UP1 * VR_PI / 180.0f;
+    cb.vig2[0] = VS_DN0 * VR_PI / 180.0f; cb.vig2[1] = VS_DN1 * VR_PI / 180.0f;
+    cb.vig2[2] = (float)vig / 100.0f;
+    cb.vig2[3] = 0.45f * s; /* Eckenbreite */
+    for (e = 0; e < p->neyes && e < 2; e++) {
+        float M[16], X, Y;
+        int pass, k;
+        vr_eye_seat(M, vs_eq[e], vs_ep[e]);
+        /* NDC (x, y) -> Augen-Richtung (x*(r-l)/2 + (r+l)/2, y*(o-u)/2 + (o+u)/2, -1) -> Sitz-Raum (Zeilen von M) */
+        X = 0.5f * (vs_et[e][1] + vs_et[e][0]);
+        Y = 0.5f * (vs_et[e][2] + vs_et[e][3]);
+        for (k = 0; k < 3; k++) {
+            cb.c0[k] = X * M[k] + Y * M[4 + k] - M[8 + k];
+            cb.cx[k] = 0.5f * (vs_et[e][1] - vs_et[e][0]) * M[k];
+            cb.cy[k] = 0.5f * (vs_et[e][2] - vs_et[e][3]) * M[4 + k];
+        }
+        /* Augpunkt im Kasten halten (weit vorgelehnt/aufgestanden) */
+        cb.eye[0] = M[12]; cb.eye[1] = M[13]; cb.eye[2] = M[14];
+        if (cb.eye[0] > 0.9f * cb.box[0]) { cb.eye[0] = 0.9f * cb.box[0]; } else if (cb.eye[0] < -0.9f * cb.box[0]) { cb.eye[0] = -0.9f * cb.box[0]; }
+        if (cb.eye[1] > 0.9f * cb.box[1]) { cb.eye[1] = 0.9f * cb.box[1]; } else if (cb.eye[1] < -0.9f * cb.box[1]) { cb.eye[1] = -0.9f * cb.box[1]; }
+        if (cb.eye[2] < -0.9f * cb.box[2]) { cb.eye[2] = -0.9f * cb.box[2]; } else if (cb.eye[2] > 0.9f * cb.box[3]) { cb.eye[2] = 0.9f * cb.box[3]; }
+        nvp.TopLeftX = p->vp[e][0]; nvp.TopLeftY = p->vp[e][1]; nvp.Width = p->vp[e][2]; nvp.Height = p->vp[e][3];
+        nvp.MinDepth = 0.0f; nvp.MaxDepth = 1.0f;
+        ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &nvp);
+        for (pass = 0; pass < 2; pass++) {
+            D3D11_MAPPED_SUBRESOURCE map;
+            if (pass == 0 && (!shell || !p->dsv)) { continue; }
+            if (pass == 1 && !vig) { continue; }
+            cb.col[3] = pass == 0 ? (diag ? 2.0f : 1.0f) : 0.0f;
+            if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)vs_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) { continue; }
+            memcpy(map.pData, &cb, sizeof cb);
+            ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)vs_cb, 0);
+            if (pass == 0) {
+                ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &p->rtv, p->dsv);
+                ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, vs_ds_eq, 0);
+                ID3D11DeviceContext_OMSetBlendState(g_ctx, NULL, NULL, 0xFFFFFFFFu);
+            } else {
+                ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &p->rtv, NULL);
+                ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, NULL, 0);
+                ID3D11DeviceContext_OMSetBlendState(g_ctx, vs_bs_al, NULL, 0xFFFFFFFFu);
+            }
+            ID3D11DeviceContext_Draw(g_ctx, 3, 0);
+        }
+    }
+    ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 0, 1, &s_pcb);
+    ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &s_rtv, s_dsv);
+    ID3D11DeviceContext_OMSetBlendState(g_ctx, s_bs, s_bf, s_mask);
+    ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, s_ds, s_sref);
+    ID3D11DeviceContext_RSSetState(g_ctx, s_rs);
+    if (s_nvp) { ID3D11DeviceContext_RSSetViewports(g_ctx, 1, svp); }
+    ID3D11DeviceContext_IASetInputLayout(g_ctx, s_lay);
+    ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, s_topo);
+    ID3D11DeviceContext_VSSetShader(g_ctx, s_vs, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(g_ctx, s_ps, NULL, 0);
+    if (s_pcb) { ID3D11Buffer_Release(s_pcb); }
+    if (s_rtv) { ID3D11RenderTargetView_Release(s_rtv); }
+    if (s_dsv) { ID3D11DepthStencilView_Release(s_dsv); }
+    if (s_bs) { ID3D11BlendState_Release(s_bs); }
+    if (s_ds) { ID3D11DepthStencilState_Release(s_ds); }
+    if (s_rs) { ID3D11RasterizerState_Release(s_rs); }
+    if (s_lay) { ID3D11InputLayout_Release(s_lay); }
+    if (s_vs) { ID3D11VertexShader_Release(s_vs); }
+    if (s_ps) { ID3D11PixelShader_Release(s_ps); }
+    if (gi >= 0) {
+        ID3D11DeviceContext_End(g_ctx, (ID3D11Asynchronous *)vs_qb[gi]);
+        ID3D11DeviceContext_End(g_ctx, (ID3D11Asynchronous *)vs_qd[gi]);
+        vs_qst[gi] = 1;
+        vs_qi = (unsigned)(gi + 1);
+    }
+}
+
 static void xr_frame(void)
 {
     XrFrameWaitInfo fwi;
@@ -2191,6 +2516,8 @@ static void xr_frame(void)
                 pos[0] = views[e].pose.position.x; pos[1] = views[e].pose.position.y; pos[2] = views[e].pose.position.z;
                 vr_eye_matrix(p.E[e], q, pos, tanf(views[e].fov.angleLeft), tanf(views[e].fov.angleRight),
                               tanf(views[e].fov.angleUp), tanf(views[e].fov.angleDown));
+                vs_eye_set(e, q, pos, tanf(views[e].fov.angleLeft), tanf(views[e].fov.angleRight),
+                           tanf(views[e].fov.angleUp), tanf(views[e].fov.angleDown)); /* W242 */
                 p.vp[e][0] = (float)(e * xr_ew); p.vp[e][1] = 0; p.vp[e][2] = (float)xr_ew; p.vp[e][3] = (float)xr_eh;
             }
             if (have_img) {
@@ -2220,6 +2547,7 @@ static void xr_frame(void)
                     p.rtv = vr_rtv;
                     p.dsv = vr_dsv;
                     drawn = sb_interp_vr_replay(&p, NULL, NULL, 1.0f, due, &tout);
+                    if (drawn) { vs_draw(&p); } /* W242 VR-SHELL: Huelle + Vignette vor Spiegel/Flaechen/Shots */
                     if (!drawn) {
                         if (vr_canvas_draw(&p)) { cv = 1; } /* W164: Menue/Film/2D auf der Leinwand */
                         else {

@@ -379,6 +379,11 @@ float sb_cp_panini_offset(void); /* senkrechte Verschiebung (NDC) nach sb_cp_pan
 float sb_cp_width(void); /* W235 COCKPIT-WIDTH: Breitenfaktor dieses Bildes (1 = aus) */
 float sb_cp_panini_scale(float d); /* render_cpanini.c: Mitte-Vergroesserung */
 void sb_cp_panini_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, float d); /* render_cpanini.c, unter ctx_lock */
+/* W240 FX-EXPERIMENTAL (render_xfx.c): Drahtgitter / Vaporwave, Standard aus */
+int sb_xfx_wire_begin(int rhw, ID3D11RasterizerState **saved); /* vor dem Draw: 1 = Gitter-RS gebunden */
+void sb_xfx_wire_end(ID3D11RasterizerState *saved);            /* nach dem Draw: vorherigen RS zurueck */
+int sb_xfx_vapor_on(void);                                      /* 1 = Vaporwave-Pass dieses Bild */
+void sb_xfx_vapor_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res); /* unter ctx_lock */
 int sb_cp_status(double *ms); /* F2-Overlay: Stufe (-1 Auto, 0 aus) + CPU ms/Bild */
 void sb_cp_present(unsigned n); /* DIAG cockpit_persp_shots (Present, unter ctx_lock) */
 void sb_cp_edge_box(unsigned *bx, unsigned *by, unsigned *bw, unsigned *bh); /* Bildraender-Box um die Kanten-Verschiebung erweitern */

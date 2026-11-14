@@ -40,6 +40,7 @@ static u32 st_last_mloop = 0xFFFFFFFFu;
 #define STA_LOCK_ADDR SBA(0x686D44u)  /* u32, Input-Lock (!=0 sperrt) */
 #define STA_E690_ADDR SBA(0x2E6F90u)  /* u32, U5/Load-Unterzustand */
 #define STA_AA8_ADDR SBA(0x3B8AA8u)   /* Render-Modus (Wort, u32 gelesen; 8 = Mission) */
+#define STA_DEMO_ADDR SBA(0x3B8CDCu)  /* W239: u32 1 = Titel-Demo/Replay (wie sb_state.h SB_ST_DEMO) */
 /* DIAG(STARTUP) (W21-R2): Start-Minispiel (8AA10), s. SPIELZUSTAENDE.md */
 #define STU_BAR0_ADDR SBA(0x55D19Cu)   /* float[5], Balken (Stride 4) */
 #define STU_LINE_ADDR SBA(0x55D244u)   /* float, Stabil-Linie (0.7) */
@@ -196,7 +197,7 @@ void diag_state_tick(unsigned frame)
     DWORD now, iv;
     u32 mode, scene, mloop, f30raw, fc8, b894, lmod, act, gate, sub;
     u32 b89a0, port, lock, e690, aa8;
-    u32 tmr, ma, mb, mc;
+    u32 tmr, ma, mb, mc, demo;
     float f30;
     if (g_cfg.film_diag) { diag_film_tick(frame); } /* TEST(PAL50,W234) */
     if (!g_cfg.state_diag) {
@@ -231,14 +232,15 @@ void diag_state_tick(unsigned frame)
     ma = st_read(STA_MA_ADDR);
     mb = st_read(STA_MB_ADDR);
     mc = st_read(STA_MC_ADDR);
+    demo = st_read(STA_DEMO_ADDR);
     memcpy(&f30, &f30raw, 4);
     HLOG_I("STATE: f=%u t=%.1f mode=%u scene=0x%X mloop=%u f30=%.3f "
            "fc8=%u b894=%u lmod=%u act=%u gate=0x%X sub=%u b89a0=0x%X "
-           "port=%u lock=%u e690=%u aa8=%u tmr=%u ma=%u mb=%u mc=%u",
+           "port=%u lock=%u e690=%u aa8=%u tmr=%u ma=%u mb=%u mc=%u demo=%u",
            frame,
            (double)(now - sta_t0) / 1000.0, mode, scene, mloop, f30,
            fc8, b894, lmod, act, gate, sub, b89a0, port, lock, e690,
-           aa8, tmr, ma, mb, mc);
+           aa8, tmr, ma, mb, mc, demo);
 }
 
 /* DIAG(STARTUP) (W21-R2): Start-Minispiel-Zeile im STATE-Takt (wall-clock).

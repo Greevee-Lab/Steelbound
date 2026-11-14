@@ -40,6 +40,7 @@ typedef struct {
     unsigned gets;    /* W63 tex_hdr_check: Gets je Eintrag (Refresh-Takt) */
     unsigned lw_frame, lw_hash; /* W98 tex_lockwatch: letzter Pruef-Frame, Voll-Hash */
     int relive; /* W118 REM-OVERLAY: neu hochladen (HD live an/aus), bleibt bis zum Erfolg */
+    int reuse;  /* FIX(WASH-TEX,W244) tex_reuse_inval: Block wiederverwendet -> neu laden, bleibt bis zum Erfolg */
 } tex_entry_t;
 unsigned krnl_phys_to_virt(unsigned phys);
 void krnl_phys_diag(unsigned xptr, unsigned phys, unsigned need); /* DIAG(FILM-WHITE,W177) */
@@ -1156,6 +1157,66 @@ static unsigned tex_full_hash(unsigned data, unsigned size)
  * nur bei g_phud_meas; Pfad unveraendert. */
 long long g_phud_texq;
 unsigned g_phud_texn;
+/* FIX(WASH-TEX,W244) [render] tex_reuse_inval=1: Der Cache ist nach der Kopfadresse
+ * (xptr) geschluesselt. Seit contig_reuse (W214) vergibt MmAllocateContiguousMemory(Ex)
+ * freigegebene Bloecke wieder; das Spiel laedt Pakettexturen per ReadFile hinein
+ * (FUN_0001A640/FUN_0001A7C0, nur Register, kein D3D-Release beim Freigeben ->
+ * TEXLIFE greift nicht). Gleiche Groesse = gleicher Kopf, gleiche Datenadresse,
+ * gleiches Format -> tex_hdr_check sieht nichts, und der Hash-Refresh kommt erst
+ * beim 16. Get. Kurz benutzte Texturen behielten so den alten Inhalt (Taste
+ * WASHING: Wasserbilder Slot 501 zeigten die Boot-Bilder des Untermonitors).
+ * ct_reuse meldet den Block (Low28-Bereich), der naechste Get markiert alle
+ * Eintraege, deren Kopf oder Daten darin liegen. Kernel-Thread -> Ring mit Lock. */
+#define TEX_INV_N 1024u
+static SRWLOCK g_tinv_lock = SRWLOCK_INIT;
+static unsigned g_tinv_lo[TEX_INV_N], g_tinv_len[TEX_INV_N], g_tinv_n;
+static int g_tinv_ovf;
+static volatile LONG g_tinv_pend;
+
+void sb_tex_note_reuse(unsigned va, unsigned len)
+{
+    if (!g_cfg.tex_reuse_inval || !len) { return; }
+    AcquireSRWLockExclusive(&g_tinv_lock);
+    if (g_tinv_n < TEX_INV_N) {
+        g_tinv_lo[g_tinv_n] = va & 0x0FFFFFFFu;
+        g_tinv_len[g_tinv_n] = len;
+        g_tinv_n++;
+    } else {
+        g_tinv_ovf = 1;
+    }
+    InterlockedExchange(&g_tinv_pend, 1);
+    ReleaseSRWLockExclusive(&g_tinv_lock);
+}
+
+static void tex_reuse_drain(void)
+{
+    static unsigned ndrain;
+    unsigned nb, nm = 0, k;
+    int i, ovf;
+    if (!g_tinv_pend) { return; }
+    AcquireSRWLockExclusive(&g_tinv_lock);
+    nb = g_tinv_n;
+    ovf = g_tinv_ovf;
+    for (i = 0; i < g_ncache; i++) {
+        tex_entry_t *e = &g_cache[i];
+        unsigned xl = e->xptr & 0x0FFFFFFFu, dl = e->data & 0x0FFFFFFFu;
+        int hit = ovf;
+        for (k = 0; k < nb && !hit; k++) {
+            if (xl - g_tinv_lo[k] < g_tinv_len[k] || (e->data && dl - g_tinv_lo[k] < g_tinv_len[k])) { hit = 1; }
+        }
+        if (hit) { e->reuse = 1; nm++; }
+    }
+    g_tinv_n = 0;
+    g_tinv_ovf = 0;
+    InterlockedExchange(&g_tinv_pend, 0);
+    ReleaseSRWLockExclusive(&g_tinv_lock);
+    if (nm && (ndrain < 16u || (ndrain & 255u) == 0u)) {
+        HLOG_I("TEX reuse-inval #%u: bloecke=%u%s eintraege=%u f=%u", ndrain + 1u, nb, ovf ? "+" : "", nm,
+               g_present_no);
+    }
+    if (nm) { ndrain++; }
+}
+
 static ID3D11ShaderResourceView *sb_tex_get_body(void);
 ID3D11ShaderResourceView *sb_tex_get(void)
 {
@@ -1175,10 +1236,12 @@ static ID3D11ShaderResourceView *sb_tex_get_body(void)
     int i;
     ID3D11ShaderResourceView *srv;
     static unsigned nget;
+    int was_reuse = 0; /* W244 */
     if (!g_stage0_xptr || !g_tdev) {
         g_get_why = 10;
         return NULL;
     }
+    tex_reuse_drain(); /* FIX(WASH-TEX,W244) */
     /* RTT (W23): Offscreen-gefuellte Textur direkt sampeln (rtt=1);
      * Match-DIAG laeuft auch bei rtt=0. */
     {
@@ -1212,6 +1275,11 @@ static ID3D11ShaderResourceView *sb_tex_get_body(void)
                 goto reupload;
             }
             if (e->relive && data) { /* W118: HD live umgeschaltet (nur nach sb_tex_relive_all) */
+                goto reupload;
+            }
+            if (e->reuse && data) { /* FIX(WASH-TEX,W244): Block neu belegt -> neuer Inhalt */
+                e->reuse = 0;
+                was_reuse = 1;
                 goto reupload;
             }
             if (g_cfg.tex_lockwatch && data && e->srv && e->size && e->lw_frame != g_present_no &&
@@ -1291,6 +1359,7 @@ reupload:
                                      tex_full_hash(sb_tex_hostaddr_x(e->xptr, data), ts) : 0u;
                     e->lw_frame = g_present_no;
                     e->relive = 0; /* W118 */
+                    e->reuse = 0;  /* W244 */
                     if (nref < 32) {
                         nref++;
                         HLOG_I("TEX refresh #%u: xptr=0x%X %ux%u",
@@ -1300,6 +1369,7 @@ reupload:
                 } else if (e->relive && g_up_fail != 2u) {
                     e->relive = 0; /* W118: nur die Drossel wiederholt, echte Fehler nicht */
                 }
+                if (!srv && was_reuse && g_up_fail == 2u) { e->reuse = 1; } /* W244: Drossel -> naechster Get */
                 g_get_why = e->srv ? 0u : (g_up_fail ? g_up_fail : 12u);
                 return e->srv;
             }

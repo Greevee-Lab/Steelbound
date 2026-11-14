@@ -30,7 +30,7 @@ typedef struct {
     char path[512]; /* Dateien: Host-Pfad; Symlinks: Ziel */
     int is_dir;
     int delete_on_close;
-    uint64_t dir_state; /* FindFirst-Handle bei Verzeichnissen */
+    uint64_t dir_state; /* W213: owned host_dir_t pointer, released on NtClose */
     volatile u32 seek_pos; /* W22: Seek-Cache (nur < 4 GB, atomar) */
     volatile int seek_valid;
     unsigned char *stale; /* W63 FATXSTALE: Inhalt vor dem Ueberschreiben */

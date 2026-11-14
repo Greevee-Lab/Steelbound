@@ -18,6 +18,24 @@
  * liefert ACCESS_DENIED wie auf der DVD. */
 static iso_vfs_t *g_iso;
 
+/* W213: A pending host entry survives a short caller buffer. */
+typedef struct {
+    HANDLE find;
+    WIN32_FIND_DATAA data;
+    char mask[260];
+    u32 index;
+    int pending;
+} host_dir_t;
+
+static void host_dir_close(ht_entry_t *e)
+{
+    host_dir_t *d = (host_dir_t *)(uintptr_t)e->dir_state;
+    if (!d) return;
+    if (d->find != INVALID_HANDLE_VALUE) FindClose(d->find);
+    free(d);
+    e->dir_state = 0;
+}
+
 /* Schreibende Zugriffsrechte (NT-Maske): GENERIC_WRITE/ALL, WRITE_DATA,
  * APPEND_DATA, WRITE_EA, WRITE_ATTRIBUTES, DELETE, WRITE_DAC/OWNER. */
 #define VFS_WRITE_MASK (0x40000000u | 0x10000000u | 0x2u | 0x4u | 0x10u | 0x100u | \
@@ -830,6 +848,7 @@ u32 __stdcall hle_NtClose(u32 xh)
     }
     HLOG_T("NtClose(0x%X kind=%d '%s')", xh, e->kind, e->path);
     if (e->kind == HT_FILE) {
+        host_dir_close(e);
         if (!e->vfs) { /* W150: Abbild-Handles haben kein Host-Handle */
             CloseHandle(e->host);
         }
@@ -1186,7 +1205,7 @@ static int vfs_wild(const char *p, const char *s)
 
 /* W150 ISO-DIRECT: Verzeichnis im Abbild auflisten (je Aufruf ein Eintrag,
  * Xbox-FILE_DIRECTORY_INFORMATION mit ANSI-Namen, Klasse 1). Der
- * Ordner-Modus liefert weiter NO_MORE_FILES (M1, unten). */
+ * Host-Verzeichnisse verwenden denselben Xbox-Aufbau (unten). */
 static u32 vfs_query_dir(ht_entry_t *e, u32 ev, u32 iosb, u32 buf, u32 len,
                          u32 cls, u32 pMask, u32 restart)
 {
@@ -1257,6 +1276,126 @@ static u32 vfs_query_dir(ht_entry_t *e, u32 ev, u32 iosb, u32 buf, u32 len,
     return st;
 }
 
+/* W213: XAPI FindFirst/NextFile (and XFindFirst/NextSaveGame inside the
+ * original XBE) require ANSI FILE_DIRECTORY_INFORMATION, not Win32's
+ * Unicode structure. Return one entry per call, in host enumeration order.
+ * The already resolved handle path also covers save_lock's working copy. */
+static u32 host_query_dir(ht_entry_t *e, u32 ev, u32 iosb, u32 buf, u32 len,
+                         u32 cls, u32 pMask, u32 restart)
+{
+    u32 st = X_STATUS_NO_MORE_FILES, count = 0;
+    host_dir_t *d = NULL;
+    xb_ansi_string *m = (xb_ansi_string *)(uintptr_t)pMask;
+    if (!e || e->kind != HT_FILE) {
+        st = X_STATUS_INVALID_HANDLE;
+        goto done;
+    }
+    if (!e->is_dir) { /* is_dir = mit FILE_DIRECTORY_FILE geoeffnet */
+        DWORD a = GetFileAttributesA(e->path);
+        if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) {
+            st = 0xC0000103u; /* NOT_A_DIRECTORY */
+            goto done;
+        }
+    }
+    if (cls != 1) {
+        st = X_STATUS_INVALID_INFO_CLASS;
+        goto done;
+    }
+    d = (host_dir_t *)(uintptr_t)e->dir_state;
+    if (!d) {
+        d = (host_dir_t *)calloc(1, sizeof *d);
+        if (!d) {
+            st = 0xC000009Au; /* INSUFFICIENT_RESOURCES */
+            goto done;
+        }
+        d->find = INVALID_HANDLE_VALUE;
+        strcpy_s(d->mask, sizeof d->mask, "*");
+        if (m && m->length) {
+            if (!m->buffer || m->length >= sizeof d->mask) {
+                free(d);
+                st = 0xC000000Du; /* INVALID_PARAMETER */
+                goto done;
+            }
+            memcpy(d->mask, m->buffer, m->length);
+            d->mask[m->length] = 0;
+        }
+        e->dir_state = (uint64_t)(uintptr_t)d;
+        restart = 1;
+        HLOG_I("FILE dir '%s' mask='%s'", e->path, d->mask);
+    }
+    if (restart & 0xFFu) {
+        char pattern[sizeof e->path + 3];
+        if (d->find != INVALID_HANDLE_VALUE) FindClose(d->find);
+        d->index = 0;
+        sprintf_s(pattern, sizeof pattern, "%s\\*", e->path);
+        d->find = FindFirstFileA(pattern, &d->data);
+        d->pending = d->find != INVALID_HANDLE_VALUE;
+        if (!d->pending && GetLastError() != ERROR_FILE_NOT_FOUND) {
+            st = winerr_to_status(GetLastError());
+            goto done;
+        }
+    }
+    while (d->find != INVALID_HANDLE_VALUE) {
+        WIN32_FIND_DATAA *f = &d->data;
+        u32 nl, *o;
+        uint64_t size, alloc;
+        if (!d->pending) {
+            if (!FindNextFileA(d->find, f)) {
+                DWORD err = GetLastError();
+                FindClose(d->find);
+                d->find = INVALID_HANDLE_VALUE;
+                if (err != ERROR_NO_MORE_FILES) st = winerr_to_status(err);
+                break;
+            }
+            d->pending = 1;
+        }
+        if (!strcmp(f->cFileName, ".") || !strcmp(f->cFileName, "..") ||
+            !vfs_wild(d->mask, f->cFileName)) {
+            d->pending = 0;
+            continue;
+        }
+        nl = (u32)strlen(f->cFileName);
+        if (!buf || len < 0x40 + nl) {
+            st = 0xC0000023u; /* BUFFER_TOO_SMALL; keep pending entry */
+            break;
+        }
+        o = (u32 *)(uintptr_t)buf;
+        memset(o, 0, 0x40);
+        o[1] = d->index++;
+        memcpy(o + 2, &f->ftCreationTime, 8);
+        memcpy(o + 4, &f->ftLastAccessTime, 8);
+        memcpy(o + 6, &f->ftLastWriteTime, 8);
+        memcpy(o + 8, &f->ftLastWriteTime, 8);
+        size = (f->dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ? 0 :
+               ((uint64_t)f->nFileSizeHigh << 32) | f->nFileSizeLow;
+        alloc = (size + 0x3FFFu) & ~0x3FFFull; /* FATX clusters */
+        memcpy(o + 10, &size, 8);
+        memcpy(o + 12, &alloc, 8);
+        o[14] = f->dwFileAttributes & 0x37u; /* FATX attributes */
+        if (!o[14]) o[14] = FILE_ATTRIBUTE_NORMAL;
+        o[15] = nl;
+        memcpy((char *)o + 0x40, f->cFileName, nl);
+        count = 0x40 + nl;
+        d->pending = 0;
+        st = X_STATUS_SUCCESS;
+        if (g_cfg.directory_selftest) {
+            HLOG_I("FILE enum: name='%s' attr=0x%X size=%llu", f->cFileName,
+                   o[14], (unsigned long long)size);
+        }
+        break;
+    }
+done:
+    if (iosb) {
+        ((xb_io_status_block *)(uintptr_t)iosb)->status = st;
+        ((xb_io_status_block *)(uintptr_t)iosb)->information = count;
+    }
+    if (ev) {
+        ht_entry_t *ee = ht_get(ev);
+        if (ee && ee->kind == HT_EVENT && ee->host) SetEvent(ee->host);
+    }
+    return st;
+}
+
 u32 __stdcall hle_NtQueryDirectoryFile(u32 a0, u32 a1, u32 a2, u32 a3, u32 a4,
                                               u32 a5, u32 a6, u32 a7, u32 a8, u32 a9)
 {
@@ -1266,10 +1405,12 @@ u32 __stdcall hle_NtQueryDirectoryFile(u32 a0, u32 a1, u32 a2, u32 a3, u32 a4,
             return vfs_query_dir(e, a1, a4, a5, a6, a7, a8, a9);
         }
     }
-    (void)a0; (void)a1; (void)a2; (void)a3; (void)a4;
-    (void)a5; (void)a6; (void)a7; (void)a8; (void)a9;
-    HLOG_T("NtQueryDirectoryFile -> NO_MORE_FILES (M1)");
-    return X_STATUS_NO_MORE_FILES;
+    (void)a2; (void)a3;
+    if (!g_cfg.host_dir_enum) { /* W241: Notschalter = altes Verhalten (M1) */
+        HLOG_T("NtQueryDirectoryFile -> NO_MORE_FILES (M1)");
+        return X_STATUS_NO_MORE_FILES;
+    }
+    return host_query_dir(ht_get(a0), a1, a4, a5, a6, a7, a8, a9);
 }
 
 u32 __stdcall hle_NtFlushBuffersFile(u32 xh, u32 iosb)
@@ -1625,6 +1766,74 @@ static u32 st_open(const char *p, u32 access, u32 disp, u32 opt, u32 *xh)
     *xh = 0;
     return hle_NtCreateFile((u32)(uintptr_t)xh, access, (u32)(uintptr_t)&oa,
                             (u32)(uintptr_t)&io, 0, 0, 1, disp, opt);
+}
+
+/* W213: isolated synthetic fixture, never touches real save files. */
+int krnl_directory_selftest(void)
+{
+    char path[700], file[720];
+    HANDLE h, event;
+    u32 xh = 0, other = 0, eh, st, n = 0, fail = 0;
+    u32 out[100], first[100];
+    DWORD wrote;
+    xb_io_status_block io;
+    xb_ansi_string mask = { 5, 5, "*.REP" };
+    FILETIME stamp = { 0x12345678, 0x01DA0000 };
+    ht_entry_t *e;
+    sprintf_s(path, sizeof path, "%s\\W213_enum_%lu", g_cfg.hdd_root,
+              GetCurrentProcessId());
+    if (!CreateDirectoryA(path, NULL)) return 1;
+    sprintf_s(file, sizeof file, "%s\\sample.rep", path);
+    h = CreateFileA(file, GENERIC_WRITE, 0, NULL, CREATE_NEW, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) { RemoveDirectoryA(path); return 1; }
+    WriteFile(h, "REP", 3, &wrote, NULL);
+    SetFileTime(h, &stamp, &stamp, &stamp);
+    CloseHandle(h);
+    h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    xh = ht_alloc(HT_FILE, h);
+    e = ht_get(xh);
+    if (!e) { CloseHandle(h); DeleteFileA(file); RemoveDirectoryA(path); return 1; }
+    strcpy_s(e->path, sizeof e->path, path);
+    e->is_dir = 1;
+    event = CreateEventA(NULL, TRUE, FALSE, NULL);
+    eh = ht_alloc(HT_EVENT, event);
+#define DQ(handle, cap, cl, pat, restart) hle_NtQueryDirectoryFile(handle, eh, 0, 0, (u32)(uintptr_t)&io, (u32)(uintptr_t)out, cap, cl, pat, restart)
+#define DC(cond, label) do { n++; if (!(cond)) { fail++; HLOG_E("DIRECTORY-SELFTEST: FAIL %s", label); } } while (0)
+    st = DQ(xh, 8, 1, (u32)(uintptr_t)&mask, 0);
+    DC(st == 0xC0000023u && io.status == st && io.information == 0, "short buffer");
+    DC(WaitForSingleObject(event, 0) == WAIT_OBJECT_0, "event signalled");
+    st = DQ(xh, sizeof out, 1, 0, 0);
+    DC(st == 0 && io.information == 74 && out[15] == 10 &&
+       !memcmp((char *)out + 64, "sample.rep", 10), "ANSI name and retry");
+    DC(out[10] == 3 && out[11] == 0 && out[12] == 0x4000 && out[13] == 0,
+       "file and FATX allocation size");
+    DC(!(out[14] & FILE_ATTRIBUTE_DIRECTORY) && out[2] == stamp.dwLowDateTime &&
+       out[6] == stamp.dwLowDateTime && out[7] == stamp.dwHighDateTime, "attributes and times");
+    memcpy(first, out, sizeof first);
+    DC(DQ(xh, sizeof out, 1, 0, 0) == X_STATUS_NO_MORE_FILES && io.information == 0, "EOF");
+    DC(DQ(xh, sizeof out, 1, 0, 0) == X_STATUS_NO_MORE_FILES, "stable EOF");
+    DC(DQ(xh, sizeof out, 1, 0, 1) == 0 && !memcmp(first, out, 74), "restart");
+    DC(DQ(xh, sizeof out, 2, 0, 0) == X_STATUS_INVALID_INFO_CLASS, "invalid class");
+    DC(DQ(0, sizeof out, 1, 0, 0) == X_STATUS_INVALID_HANDLE, "invalid handle");
+    h = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    NULL, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    other = ht_alloc(HT_FILE, h);
+    e = ht_get(other);
+    if (e) {
+        strcpy_s(e->path, sizeof e->path, path);
+        e->is_dir = 1;
+        DC(DQ(other, sizeof out, 1, 0, 0) == 0 && out[15] == 10, "independent handle and no dots");
+        hle_NtClose(other);
+    } else { CloseHandle(h); DC(0, "second handle"); }
+    hle_NtClose(eh);
+    hle_NtClose(xh); /* closes the still-active enumeration */
+    DeleteFileA(file);
+    DC(RemoveDirectoryA(path), "close and cleanup");
+    HLOG_I("DIRECTORY-SELFTEST: %s (%u/%u)", fail ? "FAIL" : "OK", n - fail, n);
+#undef DQ
+#undef DC
+    return (int)fail;
 }
 
 int krnl_vfs_selftest(void)

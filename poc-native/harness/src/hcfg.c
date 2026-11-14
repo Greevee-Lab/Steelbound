@@ -23,6 +23,7 @@ void hcfg_defaults(void)
     g_cfg.game_image[0] = 0;   /* W150: leer = Ordner-Modus (bisher) */
     g_cfg.version_check = 1;     /* W150: unbekannte Spielversion -> kein Start */
     g_cfg.save_check = 1;        /* W187 KIA-LOAD: Spielstaende pruefen/reparieren */
+    g_cfg.host_dir_enum = 1;     /* W241 REPLAY-LIST: Host-Ordner auflisten (0 = alt, immer leer) */
     g_cfg.xlaunch_self = 1;      /* W186 RESET-TITLE: "Zurueck zum Titel" = Client-Neustart */
     g_cfg.xlaunch_replay = 0;    /* W186: Neustart-Kind ohne Replay-Kette */
     g_cfg.width = 2560;
@@ -93,6 +94,7 @@ void hcfg_defaults(void)
     g_cfg.tex_cache_max = 2048; /* W63 TEXCACHE */
     g_cfg.tex_cache_lru = 1;    /* W63 TEXCACHE */
     g_cfg.tex_hdr_check = 1;    /* W63 TEXCACHE */
+    g_cfg.tex_reuse_inval = 1;  /* W244 WASH-TEX (Fix, 0 = alt) */
     g_cfg.tex_upload_guard = 1;
     g_cfg.screenshot_jpg = 1;
     g_cfg.memscan_every = 0;
@@ -135,6 +137,8 @@ void hcfg_defaults(void)
     g_cfg.cockpit_panini = 0; /* W191: Panini aus */
     g_cfg.cockpit_panini_d = 200; /* W191: d hoechstens 2,0 */
     g_cfg.cockpit_panini_frame = 1; /* W191: Rahmen halten */
+    g_cfg.fx_wireframe = 0; /* W240 FX-EXPERIMENTAL: aus */
+    g_cfg.fx_vaporwave = 0; /* W240 FX-EXPERIMENTAL: aus */
     g_cfg.cockpit_width = 0; /* W235 COCKPIT-WIDTH: Original (nicht gestreckt) */
     g_cfg.cockpit_persp_pause = 1; /* W209: coherent pause replay */
     g_cfg.cockpit_persp_ref = 750; /* W191: mm, feste Ebene zwischen Radar (0,80 m) und Frontview (0,71 m) */
@@ -327,6 +331,9 @@ void hcfg_defaults(void)
     g_cfg.vr_hud_yaw = 26;
     g_cfg.vr_hud_pitch = 19;
     g_cfg.vr_menu_shots = 0;
+    g_cfg.vr_shell = 1;                 /* W242 VR-SHELL (wirkt nur mit vr_enable=1) */
+    g_cfg.vr_vignette = 80;
+    g_cfg.vr_shell_diag = 0;
     g_cfg.perf_trace = 0;               /* W137: DIAG Bild-/Tick-Spur aus */
     g_cfg.contig_fast = 1;              /* W122: low_alloc mit Merkpunkt (0 = alt) */
     g_cfg.mem_wc_strip = 1;             /* W123: WC/NOCACHE nicht ins Host-Mapping (0 = alt) */
@@ -521,6 +528,9 @@ static int set_key_vr(const char *k, const char *v)
     else if (strcmp(k, "vr_hud_yaw") == 0) { g_cfg.vr_hud_yaw = atoi(v); }
     else if (strcmp(k, "vr_hud_pitch") == 0) { g_cfg.vr_hud_pitch = atoi(v); }
     else if (strcmp(k, "vr_menu_shots") == 0) { g_cfg.vr_menu_shots = atoi(v); }
+    else if (strcmp(k, "vr_shell") == 0) { g_cfg.vr_shell = atoi(v); } /* W242 VR-SHELL */
+    else if (strcmp(k, "vr_vignette") == 0) { g_cfg.vr_vignette = atoi(v); }
+    else if (strcmp(k, "vr_shell_diag") == 0) { g_cfg.vr_shell_diag = atoi(v); }
     else { return 0; }
     return 1;
 }
@@ -610,6 +620,10 @@ static void set_key(const char *k, const char *v)
         g_cfg.save_lock = atoi(v);
     } else if (strcmp(k, "savelock_selftest") == 0) {
         g_cfg.savelock_selftest = atoi(v);
+    } else if (strcmp(k, "host_dir_enum") == 0) {
+        g_cfg.host_dir_enum = atoi(v);
+    } else if (strcmp(k, "directory_selftest") == 0) {
+        g_cfg.directory_selftest = atoi(v);
     } else if (strcmp(k, "xlaunch_self") == 0) {
         g_cfg.xlaunch_self = atoi(v);
     } else if (strcmp(k, "xlaunch_replay") == 0) {
@@ -834,6 +848,8 @@ static void set_key(const char *k, const char *v)
         g_cfg.tex_cache_lru = atoi(v);
     } else if (strcmp(k, "tex_hdr_check") == 0) {
         g_cfg.tex_hdr_check = atoi(v);
+    } else if (strcmp(k, "tex_reuse_inval") == 0) {
+        g_cfg.tex_reuse_inval = atoi(v);
     } else if (strcmp(k, "tex_upload_guard") == 0) {
         g_cfg.tex_upload_guard = atoi(v);
     } else if (strcmp(k, "screenshot_jpg") == 0) {
@@ -878,6 +894,10 @@ static void set_key(const char *k, const char *v)
         g_cfg.cockpit_panini_d = atoi(v);
     } else if (strcmp(k, "cockpit_panini_frame") == 0) {
         g_cfg.cockpit_panini_frame = atoi(v);
+    } else if (strcmp(k, "fx_wireframe") == 0) { /* W240 FX-EXPERIMENTAL */
+        g_cfg.fx_wireframe = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "fx_vaporwave") == 0) { /* W240 FX-EXPERIMENTAL */
+        g_cfg.fx_vaporwave = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "cockpit_width") == 0) { /* W235 COCKPIT-WIDTH */
         g_cfg.cockpit_width = atoi(v);
     } else if (strcmp(k, "cockpit_persp_pause") == 0) {

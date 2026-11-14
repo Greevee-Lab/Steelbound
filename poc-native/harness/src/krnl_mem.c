@@ -741,6 +741,7 @@ static int ct_free(u32 va)
  * (Quarantaene fuer spaete Lese-/GPU-Zugriffe), Low28-Bild weiterhin frei. Ohne das wuchsen Adressraum und
  * Commit je Missions-Load (~60 MB) und im Kampf je Effekt weiter (32-Bit-Prozess). Unter g_ct_lock.
  * Rueckgabe Blockadresse, *plen = Blocklaenge (Seiten). */
+void sb_tex_note_reuse(unsigned va, unsigned len); /* sb_tex.c (W244) */
 static void *ct_reuse(u32 size, u32 *plen)
 {
     u32 need = CT_PAGE(size ? size : 0x1000u), bestlen = 0xFFFFFFFFu;
@@ -764,6 +765,7 @@ static void *ct_reuse(u32 size, u32 *plen)
     g_dl[best] = g_dl[--g_dl_n];
     g_ct_dead[k] = 0;
     im_insert(g_ct_va[k] & 0x0FFFFFFFu, g_ct_len[k]);
+    sb_tex_note_reuse(g_ct_va[k], g_ct_len[k]); /* FIX(WASH-TEX,W244): Textur-Cache meldet alten Inhalt ab */
     g_ct_nreuse++;
     g_ct_reuse_bytes += g_ct_len[k];
     if (plen) { *plen = g_ct_len[k]; }

@@ -36,6 +36,8 @@ int sb_tex_pause_nmap(void);
 void sb_tex_pause_clear(void);
 /* TEXLIFE: Eintrag entfernen (Release rc=0 -> Speicher frei, kein Re-Upload). */
 void sb_tex_evict(unsigned xptr);
+/* FIX(WASH-TEX,W244) tex_reuse_inval: Contig-Block va/len (Bytes) neu vergeben (krnl_mem ct_reuse). */
+void sb_tex_note_reuse(unsigned va, unsigned len);
 void sb_tex_lockwatch_note(unsigned xptr);   /* W98: LockRect-Textur beobachten */
 void sb_tex_lockwatch_forget(unsigned xptr); /* W98: Release rc=0 */
 /* W2B-FIX: Linear-Dims direkt aus Header (Norm-Fallback ohne Cache). */

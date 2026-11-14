@@ -2,6 +2,7 @@
 
 [![Download](https://img.shields.io/badge/Download-latest%20alpha-ffb23e)](https://steelbound.dev/download.html)
 [![Website](https://img.shields.io/badge/Website-steelbound.dev-1a2026)](https://steelbound.dev)
+[![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/ExEH3gBbyw)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-ff5e5b?logo=kofi&logoColor=white)](https://ko-fi.com/W7W2U4716)
 [![PayPal](https://img.shields.io/badge/PayPal-Support-00457C?logo=paypal&logoColor=white)](https://www.paypal.com/paypalme/Greevee)
 
@@ -133,7 +134,8 @@ How do the controls, the look and the sound feel? What did you enjoy, what
 feels off? Fill in the 2-minute
 [feedback form](../../discussions/new?category=general), vote in
 [polls](../../discussions/categories/polls) or share ideas in
-[Discussions](../../discussions).
+[Discussions](../../discussions). To chat with other pilots and get a ping
+when a new version is out, join the [Discord](https://discord.gg/ExEH3gBbyw).
 
 ## Known issues
 

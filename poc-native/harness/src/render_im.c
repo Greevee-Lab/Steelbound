@@ -1002,6 +1002,7 @@ static void sb_im_submit_body(void)
     im_vertex_t *ov = fast ? g_imf : out; /* Vertices vor der Expansion */
     long long imq = 0; /* DIAG(IM-PERF,W99) */
     int fxr_on = 0, fxr_cls = 0; /* W133 REM-FX */
+    int xw_on = 0; ID3D11RasterizerState *xw_saved = NULL; /* W240 FX-EXPERIMENTAL: Drahtgitter */
 #define IMPOS(i) (pb + (size_t)(i) * pst)
 #define IMP_MARK(k) do { if (RQP_FULL) { long long t_ = rq_qpc(); g_imp_q[k] += t_ - imq; imq = t_; } } while (0)
     if (!g_dev || n == 0) {
@@ -1986,6 +1987,7 @@ static void sb_im_submit_body(void)
     if (g_cfg.rq_diag) { rq_census_draw(rhw, nout); rq_dlg_draw(out, nout, rhw, rq_srv0, g_im_prim); } /* DIAG(RENDER-QA,W77) */
     /* SIDESMEAR: Selbst-Sampling-Draw auf Aspect-Box clippen. */
     if (self_clip) { sb_selfclip_begin(); }
+    if (g_cfg.fx_wireframe) { xw_on = sb_xfx_wire_begin(rhw, &xw_saved); } /* W240: vor der FPS-INTERP-Aufzeichnung (ip_snap liest den RS) */
     IMP_MARK(IMP_ST); /* DIAG(IM-PERF,W99): Zustaende + Diagnosen */
     if (g_ip_recording) { /* FPS-INTERP (W69): Draw samt Zustand aufzeichnen */
         long long q0 = RQP_ON ? rq_qpc() : 0;
@@ -2018,6 +2020,7 @@ static void sb_im_submit_body(void)
     fx_draw_post(fxq); /* DIAG(FX-ORIG,W90) */
     if (RQP_ON) { g_rqp_q[RQP_DRAW] += rq_qpc() - q0; } } /* DIAG(SHADE-PERF,W80): auch alter Pfad */
     if (g_cfg.sbar_probe[0] && m3d_on) { sbar_probe_after(rhw, nout); } /* DIAG(STARTSEQ-BARS,W98) */
+    if (xw_on) { sb_xfx_wire_end(xw_saved); } /* W240 */
     if (self_clip) { sb_selfclip_end(); }
     if (g_ta_mfx && !g_cfg.tex_addr && !g_rq_active) { /* MONITOR-FX (W105): Wash-Sampler sofort zuruecksetzen (Init-CLAMP) */
         ID3D11SamplerState *d0 = sb_ta_sampler(0, 0);

@@ -86,6 +86,38 @@ static float mfx_pct(int v)
     return (float)v / 100.0f;
 }
 
+/* DIAG(WASH-TEX,W244) mfx_diag=1: Wasser-Draw der Taste WASHING (FUN_00016d70
+ * @0x171BE: SetTexture(0, [0x3B7F9C]) = Pakettextur-Slot 501, Quad mit
+ * rotierenden UVs, Alpha 0,5, solange [0x352074] != 0). Protokolliert Kopf,
+ * Datenadresse und alle RT-Eintraege mit derselben Datenadresse. */
+static void mfx_water_diag(unsigned xp, unsigned prim, unsigned n)
+{
+    static unsigned nw;
+    unsigned wx = 0, c0 = 0, data = 0, fmt = 0, size = 0, tmr = 0;
+    int i;
+    mfx_rd(SBA(0x3B7F9Cu), &wx);
+    if (!wx || xp != wx) { return; }
+    nw++;
+    if (!(nw <= 6u || (nw % 300u) == 0u)) { return; }
+    mfx_rd(xp, &c0); mfx_rd(xp + 4u, &data); mfx_rd(xp + 12u, &fmt); mfx_rd(xp + 16u, &size);
+    mfx_rd(SBA(0x352074u), &tmr);
+    HLOG_I("MFX water #%u f=%u xp=0x%X c0=0x%X data=0x%X fmt=0x%X size=0x%X prim=%u n=%u timer=%u",
+           nw, g_present_no, xp, c0, data, fmt, size, prim, n, tmr);
+    for (i = 0; i < g_rtt_n; i++) {
+        if (g_rtt[i].surf && g_rtt[i].data == data) {
+            HLOG_I("MFX water #%u rt-alias slot %d surf=0x%X %ux%u stale=%d lastset=%u depth=%d",
+                   nw, i, g_rtt[i].surf, g_rtt[i].w, g_rtt[i].h, g_rtt[i].stale, g_rtt[i].lastset, g_rtt[i].isdepth);
+        }
+    }
+    if (nw == 1u || nw == 300u) {
+        ID3D11ShaderResourceView *ws = sb_tex_get();
+        unsigned tw = 0, th = 0;
+        sb_tex_dims(&tw, &th);
+        HLOG_I("MFX water #%u srv=%u %ux%u", nw, ws ? 1u : 0u, tw, th);
+        if (ws) { rq_dump_srv(ws, xp); }
+    }
+}
+
 /* Klassifiziert einen IM-Draw (vor allen Umrechnungen). buf = g_im_buf
  * (Register 0 Position, 1 Farbe, 2 UV – belegt per Disassembly). */
 int mfx_classify(unsigned prim, unsigned n, int is_vb)
@@ -100,6 +132,7 @@ int mfx_classify(unsigned prim, unsigned n, int is_vb)
     else if (g_cfg.mfx_ab && !rq_ab_on()) { return MFX_NONE; }
     xp = sb_tex_xptr();
     if (!xp) { return MFX_NONE; }
+    if (g_cfg.mfx_diag) { mfx_water_diag(xp, prim, n); } /* DIAG(WASH-TEX,W244) */
     mfx_rd(MFX_WASH_TEX, &wt);
     mfx_rd(MFX_MON_TEX, &mt);
     if (xp != wt && xp != mt) { return MFX_NONE; }

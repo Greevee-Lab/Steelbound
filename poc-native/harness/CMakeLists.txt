@@ -87,6 +87,7 @@ add_library(sb_emu SHARED
   src/render_edge.c
   src/render_cpersp.c
   src/render_cpanini.c
+  src/render_xfx.c
   src/render_winmode.c
   src/render_combiner.c
   src/render_shade.c

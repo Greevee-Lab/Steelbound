@@ -1674,6 +1674,7 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     /* Dateipuffer NICHT freigeben: XeLoadSection braucht ihn (M1). */
 
     krnl_init(&img);
+    if (g_cfg.directory_selftest) krnl_directory_selftest();
     if (g_cfg.savelock_selftest) { /* DIAG(SAVE-LOCK,W190) */
         krnl_savelock_selftest();
     }

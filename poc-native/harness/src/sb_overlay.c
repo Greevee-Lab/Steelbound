@@ -81,6 +81,10 @@ enum {
     OI_SAVELOCK, OI_SLCOMMIT,
     /* W218 SIMPLE-CONTROLS: Seite 0 Ziel-Kopplung + Gang-Automatik */
     OI_ASSIST, OI_AUTOGEAR,
+    /* W242 VR-SHELL: Seite "VR" dunkle Huelle + Rand-Vignette */
+    OI_VRSHELL, OI_VRVIG,
+    /* W240 FX-EXPERIMENTAL: Seite "Experimental" (OV_PAGE_XP) */
+    OI_XWIRE, OI_XVAPOR,
     OI_N
 };
 /* Zeilen je Seite (Seite 0 = W118 unveraendert, Testskripte zaehlen DOWN;
@@ -101,12 +105,17 @@ static const int kOvPage2[] = { OI_PRESET, OI_AA, OI_SSAO, OI_CSAT, OI_CTEMP, OI
 /* W133 REM-FX: Seite "Effekte" (Index 3, nach "Shader 2") */
 #define OV_PAGE_FX 3
 #define OV_PAGE_VR 4 /* W134 VR-PROTO: Seite "VR" (nach "Effekte") */
-#define OV_NPAGES 5
+#define OV_PAGE_XP 5 /* W240 FX-EXPERIMENTAL: Seite "Experimental" (nach "VR") */
+#define OV_NPAGES 6
 static const int kOvPageFx[] = { OI_FXPRESET, OI_FXSOFT, OI_FXEMB, OI_FXLIGHT, OI_FXLCKP, OI_FXIP, OI_FXCMP,
                                  OI_SAVE, OI_CLOSE };
 #define OV_NPFX ((int)(sizeof kOvPageFx / sizeof kOvPageFx[0]))
+static const int kOvPageXp[] = { OI_XWIRE, OI_XVAPOR, OI_SAVE, OI_CLOSE }; /* W240 */
+#define OV_NPXP ((int)(sizeof kOvPageXp / sizeof kOvPageXp[0]))
 static const int kOvPageVr[] = { OI_VRON, OI_VRREC, OI_VRSEAT, OI_VRFWD, OI_VRSCALE, OI_VRIPD, OI_VRPREV,
-                                 OI_VRPRESET, OI_VRRES, OI_VRHZ, OI_VRMIRROR, OI_VRWORLD, OI_VRSHADE, OI_SAVE, OI_CLOSE };
+                                 OI_VRPRESET, OI_VRRES, OI_VRHZ, OI_VRMIRROR, OI_VRWORLD, OI_VRSHADE,
+                                 OI_VRSHELL, OI_VRVIG, /* W242 */
+                                 OI_SAVE, OI_CLOSE };
 /* W183: Stufen der Render-Aufloesung (% der Runtime-Empfehlung) und Bildraten der Brille (0 = Runtime) */
 static const int kOvVrRes[] = { 50, 60, 65, 70, 80, 85, 90, 100, 110, 120 };
 static const int kOvVrHz[] = { 0, 72, 80, 90, 120 };
@@ -191,7 +200,7 @@ static int g_fb_hot, g_fb_capture, g_fb_clip_prompt;
 static sb_fb_pkg_t g_fb_pkg;
 /* Trefferflaechen (Backbuffer-Pixel, Render-Thread schreibt beim Zeichnen) */
 static int g_hit_x0, g_hit_y0, g_hit_w, g_hit_h, g_hit_rows_y, g_hit_rowh, g_hit_nrows, g_hit_valx;
-static int g_hit_tab_y0, g_hit_tab_y1, g_hit_tab_x[6];
+static int g_hit_tab_y0, g_hit_tab_y1, g_hit_tab_x[OV_NPAGES + 1];
 static volatile LONG g_ov_mx = -1, g_ov_my = -1, g_ov_mgen; /* letzte Mausposition (UI-Thread) */
 static LONG g_ov_mgen_seen;
 static unsigned g_pad_inject;            /* TEST(W188): Pad-Tasten fuer den naechsten Poll */
@@ -279,6 +288,7 @@ static int ov_nrows(void)
 {
     if (g_ov_page == OV_PAGE_FX) { return OV_NPFX; } /* W133 */
     if (g_ov_page == OV_PAGE_VR) { return OV_NPVR; } /* W134 */
+    if (g_ov_page == OV_PAGE_XP) { return OV_NPXP; } /* W240 */
     return g_ov_page == 2 ? OV_NP2 : g_ov_page ? OV_NP1 : OV_NP0 + (g_cfg.sbc_usb ? 1 : 0);
 }
 static int ov_row(int k)
@@ -288,6 +298,9 @@ static int ov_row(int k)
     }
     if (g_ov_page == OV_PAGE_VR) { /* W134 */
         return kOvPageVr[k];
+    }
+    if (g_ov_page == OV_PAGE_XP) { /* W240 */
+        return kOvPageXp[k];
     }
     if (g_ov_page == 2) {
         return kOvPage2[k];
@@ -328,6 +341,7 @@ static int ov_enabled(int i)
     case OI_HDSCALE: return g_ov_avail != 0 && ov_hd_on();
     case OI_RES: return 0;
     case OI_SLCOMMIT: return krnl_savelock_active(); /* W190: nur mit aktivem Schutz */
+    case OI_XWIRE: case OI_XVAPOR: return !g_cfg.vr_enable; /* W240: in VR gesperrt */
     default: return 1;
     }
 }
@@ -743,6 +757,16 @@ static void ov_change(int i, int dir)
                g_shfx_bypass ? "aus" : "an", g_present_no);
         ov_status_key(g_shfx_bypass ? "ovl.st_cmp_orig" : "ovl.st_cmp_opt");
         break;
+    case OI_XWIRE: /* W240 FX-EXPERIMENTAL: sofort ab dem naechsten Spielbild (FPS-INTERP zeichnet mit) */
+        g_cfg.fx_wireframe = !g_cfg.fx_wireframe;
+        HLOG_I("OVERLAY: fx_wireframe -> %d (f=%u)", g_cfg.fx_wireframe, g_present_no);
+        ov_status_key(!g_cfg.fx_wireframe ? "ovl.st_xp_off" : g_sb_paused ? "ovl.st_xwire_pause" : "ovl.st_xwire");
+        break;
+    case OI_XVAPOR: /* W240 FX-EXPERIMENTAL: Nachbearbeitung, sofort (auch Pause-Standbild) */
+        g_cfg.fx_vaporwave = !g_cfg.fx_vaporwave;
+        HLOG_I("OVERLAY: fx_vaporwave -> %d (f=%u)", g_cfg.fx_vaporwave, g_present_no);
+        ov_status_key(g_cfg.fx_vaporwave ? "ovl.st_xvapor" : "ovl.st_xp_off");
+        break;
     case OI_VRON: /* W134 VR-PROTO: wirkt nach Neustart */
         if (g_ov_vr < 0) { g_ov_vr = g_cfg.vr_enable ? 1 : 0; }
         g_ov_vr = !g_ov_vr;
@@ -832,6 +856,14 @@ static void ov_change(int i, int dir)
         g_cfg.vr_preset = sb_vr_preset_match();
         HLOG_I("OVERLAY: vr_shading -> %d (f=%u)", g_cfg.vr_shading, g_present_no);
         break;
+    case OI_VRSHELL: /* W242 VR-SHELL: wirkt sofort (naechstes VR-Bild) */
+        g_cfg.vr_shell = !g_cfg.vr_shell;
+        HLOG_I("OVERLAY: vr_shell -> %d (f=%u)", g_cfg.vr_shell, g_present_no);
+        break;
+    case OI_VRVIG:
+        g_cfg.vr_vignette = ov_clamp((g_cfg.vr_vignette + 5) / 10 * 10 + dir * 10, 0, 100);
+        HLOG_I("OVERLAY: vr_vignette -> %d (f=%u)", g_cfg.vr_vignette, g_present_no);
+        break;
     case OI_MPAUSE: /* W188 GAME-MENU: wirkt sofort (Wunsch je Bild) */
         g_cfg.menu_pause = !g_cfg.menu_pause;
         HLOG_I("OVERLAY: menu_pause -> %d (f=%u)", g_cfg.menu_pause, g_present_no);
@@ -902,6 +934,7 @@ static const ov_key_t kOvKeys[] = {
     { "fx_soft", "render" },        { "fx_embers", "render" },
     { "fx_light", "render" },       { "fx_light_cockpit", "render" },
     { "fx_interp", "render" },
+    { "fx_wireframe", "render" },   { "fx_vaporwave", "render" }, /* W240 */
     { "mouse_mode", "input" },      { "mouse_sens", "input" },
     { "sbc_mouse_off", "input" }, /* W128 */
     { "aim_assist", "input" },      { "auto_gear", "input" }, /* W218, W236 */
@@ -918,6 +951,7 @@ static const ov_key_t kOvKeys[] = {
     { "vr_mirror", "vr" },          { "vr_mirror_fit", "vr" },
     { "vr_mirror_res", "vr" },      { "vr_world_tick", "vr" },
     { "vr_shading", "vr" },         { "vr_rt_scale", "vr" },
+    { "vr_shell", "vr" },           { "vr_vignette", "vr" }, /* W242 */
     { "menu_pause", "overlay" }, /* W188 */
     { "save_lock", "game" }, /* W190 */
 };
@@ -976,6 +1010,8 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     else if (strcmp(k, "vr_world_tick") == 0) { v = g_cfg.vr_world_tick; }
     else if (strcmp(k, "vr_shading") == 0) { v = g_cfg.vr_shading; }
     else if (strcmp(k, "vr_rt_scale") == 0) { v = g_cfg.vr_rt_scale; }
+    else if (strcmp(k, "vr_shell") == 0) { v = g_cfg.vr_shell; } /* W242 */
+    else if (strcmp(k, "vr_vignette") == 0) { v = g_cfg.vr_vignette; }
     else if (strcmp(k, "world_fog") == 0) { v = g_cfg.world_fog; }
     else if (strcmp(k, "world_contrast") == 0) { v = g_cfg.world_contrast; }
     else if (strcmp(k, "world_gamma") == 0) { v = g_cfg.world_gamma; }
@@ -1006,6 +1042,8 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     else if (strcmp(k, "fx_light") == 0) { v = g_cfg.fx_light; }
     else if (strcmp(k, "fx_light_cockpit") == 0) { v = g_cfg.fx_light_cockpit; }
     else if (strcmp(k, "fx_interp") == 0) { v = g_cfg.fx_interp; }
+    else if (strcmp(k, "fx_wireframe") == 0) { v = g_cfg.fx_wireframe; } /* W240 */
+    else if (strcmp(k, "fx_vaporwave") == 0) { v = g_cfg.fx_vaporwave; } /* W240 */
     else if (strcmp(k, "menu_pause") == 0) { v = g_cfg.menu_pause; } /* W188 */
     else if (strcmp(k, "save_lock") == 0) { v = g_cfg.save_lock; } /* W190 */
     _snprintf_s(out, cap, _TRUNCATE, "%d", v);
@@ -1111,7 +1149,7 @@ static int ov_save(void)
 /* ------------------------------------------------------------------ */
 static const char *ov_page_name(int pg)
 {
-    return pg == OV_PAGE_VR ? "VR" : pg == OV_PAGE_FX ? "Effekte" : pg == 2 ? "Shader 2" : pg ? "Shader" : "Allgemein";
+    return pg == OV_PAGE_XP ? "Experimental" : pg == OV_PAGE_VR ? "VR" : pg == OV_PAGE_FX ? "Effekte" : pg == 2 ? "Shader 2" : pg ? "Shader" : "Allgemein";
 }
 
 /* W188: Seite wechseln (Tab-Zeile, TAB/Umschalt+TAB, Pad LB/RB). tabrow=1: Fokus bleibt auf der Tab-Zeile. */
@@ -1252,6 +1290,9 @@ static void ov_key_set(int vk)
         }
         break;
     case 'B':
+        if (g_ov_page == OV_PAGE_XP) { /* W240: Seite Experimental - kein Vergleich */
+            break;
+        }
         if (g_ov_page == OV_PAGE_FX) { /* W133: Seite Effekte - B = Vergleich Original <-> Effekt-Optionen */
             ov_change(OI_FXCMP, +1);
             g_ov_dirty = 1;
@@ -2720,7 +2761,11 @@ static void ov_label(int i, wchar_t *o, size_t cap)
         /* W190 */
         "ovl.lb_savelock", "ovl.lb_slcommit",
         /* W218 */
-        "ovl.lb_assist", "ovl.lb_autogear" };
+        "ovl.lb_assist", "ovl.lb_autogear",
+        /* W242 */
+        "ovl.lb_vrshell", "ovl.lb_vrvig",
+        /* W240 */
+        "ovl.lb_xwire", "ovl.lb_xvapor" };
     ov_wkey(o, cap, lb[i]);
 }
 
@@ -2802,6 +2847,10 @@ static void ov_value(int i, wchar_t *o, size_t cap)
         break;
     }
     case OI_FXIP: ov_wkey(o, cap, g_cfg.fx_interp ? "ovl.v_interp" : "ovl.v_offorig"); break;
+    case OI_XWIRE: case OI_XVAPOR: /* W240 */
+        ov_wkey(o, cap, g_cfg.vr_enable ? "ovl.v_xp_vr" : (i == OI_XWIRE ? g_cfg.fx_wireframe : g_cfg.fx_vaporwave) ?
+                        "ovl.v_on" : "ovl.v_offorig");
+        break;
     case OI_VRON: { /* W134 VR-PROTO */
         int v = g_ov_vr >= 0 ? g_ov_vr : g_cfg.vr_enable;
         char nb[64];
@@ -2847,6 +2896,11 @@ static void ov_value(int i, wchar_t *o, size_t cap)
         break;
     case OI_VRWORLD: ov_wkey(o, cap, g_cfg.vr_world_tick ? "ovl.v_vrw_tick" : "ovl.v_vrw_frame"); break;
     case OI_VRSHADE: ov_wkey(o, cap, g_cfg.vr_shading ? "ovl.v_on" : "ovl.v_off"); break;
+    case OI_VRSHELL: ov_wkey(o, cap, g_cfg.vr_shell ? "ovl.v_on" : "ovl.v_off"); break; /* W242 */
+    case OI_VRVIG:
+        if (g_cfg.vr_vignette <= 0) { ov_wkey(o, cap, "ovl.v_off"); }
+        else { _snwprintf_s(o, cap, _TRUNCATE, L"%d %%", g_cfg.vr_vignette > 100 ? 100 : g_cfg.vr_vignette); }
+        break;
     case OI_FXCMP: ov_wkey(o, cap, g_fxr_bypass ? "ovl.v_orig" : "ovl.v_opt"); break;
     case OI_EXPO: case OI_LWORLD: case OI_LCKP: case OI_FOCUS: {
         int v = i == OI_EXPO ? g_cfg.world_exposure : i == OI_LWORLD ? g_cfg.light_world :
@@ -3050,7 +3104,7 @@ static int ov_frame_head(int W, int H, const wchar_t *title, const wchar_t *tag)
 static int ov_paint_tabs(int W, int y)
 {
     static const char *const tk[OV_NPAGES] = { "ovl.tab_settings", "ovl.tab_shader", "ovl.tab_shader2", "ovl.tab_fx",
-                                               "ovl.tab_vr" };
+                                               "ovl.tab_vr", "ovl.tab_xp" };
     int pad = S(6.0f), th = S(OV_TABH), gap = S(3.0f), t, x, tw[OV_NPAGES], sum = 0, foc = g_ov_sel < 0;
     wchar_t nm[OV_NPAGES][32];
     for (t = 0; t < OV_NPAGES; t++) {
@@ -3065,6 +3119,10 @@ static int ov_paint_tabs(int W, int y)
         if (avail > sum) {
             int extra = (avail - sum) / OV_NPAGES;
             for (t = 0; t < OV_NPAGES; t++) { tw[t] += extra; }
+        } else if (sum > avail) { /* W240: sechs Reiter - Innenabstand kuerzen, Zeile bleibt im Panel */
+            int cut = (sum - avail + OV_NPAGES - 1) / OV_NPAGES;
+            if (cut > 2 * S(4.0f) - S(1.0f)) { cut = 2 * S(4.0f) - S(1.0f); }
+            for (t = 0; t < OV_NPAGES; t++) { tw[t] -= cut; }
         }
     }
     x = pad;
@@ -3470,7 +3528,8 @@ static void ov_paint(void)
             (g_ov_page == 1 && (i == OI_GLITCH || i == OI_RTS || i == OI_BTHR || i == OI_CLIGHT || i == OI_ABCMP)) ||
             (g_ov_page == 2 && (i == OI_PRESET || i == OI_SSAO || i == OI_CGAIN || i == OI_SHSOFT || i == OI_ABCMP)) ||
             (g_ov_page == OV_PAGE_FX && (i == OI_FXPRESET || i == OI_FXIP || i == OI_FXCMP)) || /* W133 */
-            (g_ov_page == OV_PAGE_VR && (i == OI_VRREC || i == OI_VRIPD || i == OI_VRPREV || i == OI_VRSHADE))) { /* W134, W183 */
+            (g_ov_page == OV_PAGE_VR && (i == OI_VRREC || i == OI_VRIPD || i == OI_VRPREV || i == OI_VRSHADE || i == OI_VRVIG)) || /* W134, W183, W242 */
+            (g_ov_page == OV_PAGE_XP && i == OI_XVAPOR)) { /* W240 */
             ov_fill(pad, y - b / 2, W - pad, y - b / 2 + b, OV_C_DIM);
         }
     }
@@ -3479,7 +3538,9 @@ static void ov_paint(void)
     y += S(3.0f);
     {
         wchar_t foot[64], rst[48], ctl[64];
-        if (g_ov_page) {
+        if (g_ov_page == OV_PAGE_XP) {
+            ov_wkey(foot, 64, "ovl.foot_xp"); /* W240: ohne Vergleich (B) */
+        } else if (g_ov_page) {
             ov_wkey(foot, 64, "ovl.foot1");
         } else {
             ov_wkey(foot, 64, "ovl.foot0"); /* W173: Sprachschluessel statt fester Text */
@@ -3495,7 +3556,9 @@ static void ov_paint(void)
             /* W143: FPS-Hinweis (Remaster-Seiten; VR hat keine solchen Optionen) */
             wchar_t fps[64];
             y += S(11.0f);
-            if (g_sb_paused && g_cfg.pause_live && ov_peek_vk() > 0) { /* W193: in der Pause Hinweis aufs Ausblenden */
+            if (g_ov_page == OV_PAGE_XP) { /* W240: Hinweis "experimental, just for fun" (vor dem Peek-Hinweis) */
+                ov_wkey(fps, 64, g_cfg.vr_enable ? "ovl.xp_note_vr" : "ovl.xp_note");
+            } else if (g_sb_paused && g_cfg.pause_live && ov_peek_vk() > 0) { /* W193: in der Pause Hinweis aufs Ausblenden */
                 char pn[96];
                 _snprintf_s(pn, sizeof pn, _TRUNCATE, LT("ovl.peek_note"), g_cfg.menu_peek_key);
                 ov_wu8(fps, 64, pn);

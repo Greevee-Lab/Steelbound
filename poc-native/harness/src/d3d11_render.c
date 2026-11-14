@@ -1007,6 +1007,13 @@ static void sb_render_present_body(unsigned flags)
             sb_ctx_leave();
         }
     }
+    if (!g_swap_res && g_cfg.fx_vaporwave && sb_xfx_vapor_on()) { /* W240 FX-EXPERIMENTAL: Vaporwave vor der Randmaske */
+        ID3D11Resource *pres = NULL;
+        sb_ctx_enter();
+        ID3D11RenderTargetView_GetResource(g_rtv, &pres);
+        if (pres) { sb_xfx_vapor_apply(g_rtv, pres); ID3D11Resource_Release(pres); }
+        sb_ctx_leave();
+    }
     if (g_cfg.edge_mode > 0 && !g_swap_res) {
         sb_ctx_enter();
         sb_edge_apply(g_rtv);
@@ -1361,6 +1368,15 @@ void sb_render_blit(ID3D11Resource *src)
             g_swap_rtv = NULL;
         }
         sb_cp_panini_apply(g_swap_rtv, g_swap_res, sb_cp_panini_d());
+        sb_ctx_leave();
+    }
+    if (!g_vr_blit && g_cfg.fx_vaporwave && sb_xfx_vapor_on()) { /* W240 FX-EXPERIMENTAL: Vaporwave auf jedes gezeigte Bild (auch Pause-Standbild) */
+        sb_ctx_enter();
+        if (!g_swap_rtv &&
+            FAILED(ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv))) {
+            g_swap_rtv = NULL;
+        }
+        sb_xfx_vapor_apply(g_swap_rtv, g_swap_res);
         sb_ctx_leave();
     }
     if (!g_vr_blit && g_cfg.edge_mode > 0) { /* W107 EDGE-MODE: Maske auf das gezeigte Bild (nach Verify/Wiedergabe) */

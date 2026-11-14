@@ -651,7 +651,7 @@ static XrResult XRAPI_CALL m_BeginFrame(XrSession s, const XrFrameBeginInfo *bi)
  * SB_VR_MOCK_POSE_HOLD Sekunden (Standard 1,5) gehalten, das Programm laeuft ab
  * t = 0 in Schleife (der Client sichert je neue, ruhige Pose ein Augenbild,
  * cfg vr_pose_shots). Vorlehnen = Kopf nach vorn (-z im LOCAL-Raum). */
-typedef struct { const char *name; double lean, x, roll, yaw; } mock_pose_t;
+typedef struct { const char *name; double lean, x, roll, yaw, pitch; } mock_pose_t; /* W242: + Nicken (Grad, + = hoch) */
 static const mock_pose_t kPoses[] = {
     { "gerade", 0.0, 0.0, 0.0, 0.0 },
     { "vor10", 0.10, 0.0, 0.0, 0.0 }, { "vor20", 0.20, 0.0, 0.0, 0.0 }, { "vor30", 0.30, 0.0, 0.0, 0.0 },
@@ -663,41 +663,62 @@ static const mock_pose_t kPoses[] = {
     { "gier+30", 0.0, 0.0, 0.0, 30.0 }, { "gier+60", 0.0, 0.0, 0.0, 60.0 },
     { "links15", 0.0, -0.15, 0.0, 0.0 }, { "rechts15", 0.0, 0.15, 0.0, 0.0 },
 };
-static int m_poses = -1; /* -1 = noch nicht gelesen, 0 = Sinus-Skript, 1 = Posen-Programm */
+/* W242 SB_VR_MOCK_POSES=w242: Umschauen (Gieren bis 180 Grad, Nicken bis +-60 Grad) fuer Huelle/Vignette */
+static const mock_pose_t kPoses242[] = {
+    { "gerade", 0, 0, 0, 0, 0 },
+    { "gier+30", 0, 0, 0, 30, 0 }, { "gier+45", 0, 0, 0, 45, 0 }, { "gier+60", 0, 0, 0, 60, 0 },
+    { "gier+90", 0, 0, 0, 90, 0 }, { "gier+135", 0, 0, 0, 135, 0 }, { "gier180", 0, 0, 0, 180, 0 },
+    { "gier-45", 0, 0, 0, -45, 0 }, { "gier-60", 0, 0, 0, -60, 0 }, { "gier-90", 0, 0, 0, -90, 0 },
+    { "gier-135", 0, 0, 0, -135, 0 },
+    { "hoch20", 0, 0, 0, 0, 20 }, { "hoch40", 0, 0, 0, 0, 40 }, { "hoch60", 0, 0, 0, 0, 60 },
+    { "runter20", 0, 0, 0, 0, -20 }, { "runter40", 0, 0, 0, 0, -40 }, { "runter60", 0, 0, 0, 0, -60 },
+    { "gier+60_hoch30", 0, 0, 0, 60, 30 }, { "vor30_gier+60", 0.30, 0, 0, 60, 0 },
+};
+static int m_poses = -1; /* -1 = noch nicht gelesen, 0 = Sinus-Skript, 1 = Posen-Programm w164, 2 = w242 */
 static double m_pose_hold = 1.5;
 static int m_pose_last = -1;
 
 static int mock_pose_prog(double t, float q[4], float p[3], double *yaw_deg, double *pitch_deg)
 {
     int n = (int)(sizeof kPoses / sizeof kPoses[0]), k;
-    const mock_pose_t *ps;
-    double yaw, roll, cy, sy, cr, sr;
+    const mock_pose_t *ps, *tab = kPoses;
+    double yaw, roll, pitch, cy, sy, cr, sr, cp, sp;
     if (m_poses < 0) {
         const char *e = getenv("SB_VR_MOCK_POSES");
-        m_poses = (e && _stricmp(e, "w164") == 0) ? 1 : 0;
+        m_poses = (e && _stricmp(e, "w164") == 0) ? 1 : (e && _stricmp(e, "w242") == 0) ? 2 : 0;
         if (getenv("SB_VR_MOCK_POSE_HOLD")) { m_pose_hold = atof(getenv("SB_VR_MOCK_POSE_HOLD")); }
         if (m_pose_hold < 0.2) { m_pose_hold = 1.5; }
-        if (m_poses) { mlog("MOCK Posen-Programm w164: %d Posen je %.1f s in Schleife", n, m_pose_hold); }
+        if (m_poses == 2) { n = (int)(sizeof kPoses242 / sizeof kPoses242[0]); }
+        if (m_poses) { mlog("MOCK Posen-Programm %s: %d Posen je %.1f s in Schleife", m_poses == 2 ? "w242" : "w164", n, m_pose_hold); }
     }
     if (!m_poses) { return 0; }
+    if (m_poses == 2) { tab = kPoses242; n = (int)(sizeof kPoses242 / sizeof kPoses242[0]); }
     if (t < 0.0) { t = 0.0; }
     k = (int)(t / m_pose_hold) % n;
-    ps = &kPoses[k];
+    ps = &tab[k];
     if (k != m_pose_last) {
         m_pose_last = k;
-        mlog("MOCK pose %d '%s' t=%.1fs vor=%.2fm x=%.2fm roll=%.1f gier=%.1f", k, ps->name, t, ps->lean, ps->x, ps->roll, ps->yaw);
+        mlog("MOCK pose %d '%s' t=%.1fs vor=%.2fm x=%.2fm roll=%.1f gier=%.1f nicken=%.1f", k, ps->name, t, ps->lean, ps->x,
+             ps->roll, ps->yaw, ps->pitch);
     }
     yaw = ps->yaw * MOCK_PI / 180.0;
     roll = ps->roll * MOCK_PI / 180.0;
+    pitch = ps->pitch * MOCK_PI / 180.0;
     cy = cos(yaw * 0.5); sy = sin(yaw * 0.5); cr = cos(roll * 0.5); sr = sin(roll * 0.5);
-    /* q = q_yaw(y) * q_roll(z), Nicken 0: (0,sy,0,cy)*(0,0,sr,cr) = (sy*sr, sy*cr, cy*sr, cy*cr) */
-    q[0] = (float)(sy * sr);
-    q[1] = (float)(sy * cr);
-    q[2] = (float)(cy * sr);
-    q[3] = (float)(cy * cr);
+    cp = cos(pitch * 0.5); sp = sin(pitch * 0.5);
+    if (ps->pitch != 0.0) {
+        /* W242: q = q_yaw(y) * q_pitch(x), Rollen 0 (wie das Sinus-Skript) */
+        q[0] = (float)(cy * sp); q[1] = (float)(sy * cp); q[2] = (float)(-sy * sp); q[3] = (float)(cy * cp);
+    } else {
+        /* q = q_yaw(y) * q_roll(z), Nicken 0: (0,sy,0,cy)*(0,0,sr,cr) = (sy*sr, sy*cr, cy*sr, cy*cr) */
+        q[0] = (float)(sy * sr);
+        q[1] = (float)(sy * cr);
+        q[2] = (float)(cy * sr);
+        q[3] = (float)(cy * cr);
+    }
     p[0] = (float)ps->x; p[1] = 0.0f; p[2] = (float)(-ps->lean);
     *yaw_deg = ps->yaw;
-    *pitch_deg = 0.0;
+    *pitch_deg = ps->pitch;
     return 1;
 }
 

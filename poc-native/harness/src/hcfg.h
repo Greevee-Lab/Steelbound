@@ -18,6 +18,8 @@ typedef struct {
     int save_check;       /* W187 KIA-LOAD: Spielstaende (T:) beim Start pruefen: 1 = reparieren (mit Sicherung), 2 = nur melden, 0 = aus */
     int save_lock;        /* W190 SAVE-LOCK: 1 = Spielstaende schuetzen (T:/U: in eine Wegwerf-Arbeitskopie <hdd>\_savelock, beim naechsten Start verworfen), 0 = Original (Standard) */
     int savelock_selftest; /* W190 DIAG: 1 = Selbsttest Pilot-Loeschen/death00 ueber die Nt*File-Wege vor dem Spiel */
+    int host_dir_enum;    /* W241 REPLAY-LIST: 1 = NtQueryDirectoryFile listet Host-Ordner (Replays U:), 0 = alt (M1: immer NO_MORE_FILES) */
+    int directory_selftest; /* W213/W241 DIAG: Selbsttest Ordner-Auflistung (synthetisch) */
     int xlaunch_self;     /* W186 RESET-TITLE: XLaunchNewImage auf D:\default.xbe: 1 = Client-Neustart, 2 = sauberes Ende, 0 = ignorieren (alt) */
     int xlaunch_replay;   /* W186: 1 = Neustart-Kind spielt replay_steps/replay erneut ab, 0 = Kind ohne Replay (Standard) */
     /* [display] */
@@ -98,6 +100,7 @@ typedef struct {
     int tex_cache_max;     /* W63: Textur-Cache-Kapazitaet (Default 2048, 256 = alt) */
     int tex_cache_lru;     /* W63: 1 = Cache voll -> laengst unbenutzten Eintrag freigeben, 0 = alt (NULL) */
     int tex_hdr_check;     /* W63: 1 = Cache-Treffer prueft Texturkopf (Data/Format) auf Neubelegung, 0 = alt */
+    int tex_reuse_inval;   /* FIX(WASH-TEX,W244): 1 = Cache-Eintraege in wiederverwendeten Contig-Bloecken (contig_reuse) beim naechsten Get neu laden, 0 = alt */
     int tex_upload_guard;  /* 1 = Upload-Quelle voll per VirtualQuery pruefen (TEXLIFE) */
     /* [input] */
     char replay[4096];   /* "pkt:vk,len;..." (M2b-Test, 0 = aus) */
@@ -207,6 +210,8 @@ typedef struct {
     int cockpit_panini;     /* W191 UW-PERSP: Panini-Projektion der Cockpit-Ansicht (Nachbearbeitung, nur Desktop), 0 = aus, 1..100 = Staerke in % von cockpit_panini_d; Mitte formtreu vergroessert, Raender waagerecht verdichtet */
     int cockpit_panini_d;   /* W191: groesstes Panini-d (x100); mit cockpit_panini_frame=1 begrenzt der Rahmen frueher */
     int cockpit_panini_frame; /* W191: 1 = Radar oben und Frontview unten bleiben voll im Bild (100 % = Grenze ohne Anschnitt), 0 = d = cockpit_panini % x cockpit_panini_d (Experiment) */
+    int fx_wireframe;       /* W240 FX-EXPERIMENTAL: 1 = Welt/Mechs als Drahtgitter (Mission, nicht VR), 0 = Original */
+    int fx_vaporwave;       /* W240 FX-EXPERIMENTAL: 1 = Vaporwave-Nachbearbeitung des Missionsbilds (Farbverlauf, Scanlines, Farbsaum; nicht VR), 0 = Original */
     int cockpit_width;      /* W235 COCKPIT-WIDTH: leichte waagerechte Streckung der Cockpit-Ansicht um die Bildmitte (Nachbearbeitung im Panini-Pass, nur Desktop, in VR aus), 0 = Original (aus), 1..10 = Breite + n %; Nutzer-Option, sonst gilt: nie strecken */
     int cockpit_persp_pause; /* W209: 1 = live camera in pause, 0 = legacy fallback */
     int cockpit_persp_dist; /* W191: Kamera-Weg bei 100 % in mm (Spiel-Einheit ~ 1 m): > 0 = zurueck + engeres Sichtfeld (Tele, Standard 1500; Near-Ebene am alten Auge), < 0 = vor + weiteres Sichtfeld (Breitbildrand fuellen, Experiment) */
@@ -517,6 +522,10 @@ typedef struct {
     int vr_hud_yaw;             /* F2-Flaeche: Richtung rechts der Blickachse in Grad, Standard 26 */
     int vr_hud_pitch;           /* F2-Flaeche: Richtung ueber der Blickachse in Grad, Standard 19 */
     int vr_menu_shots;          /* DIAG(VR-MENU,W197): N > 0 = je neue ruhige Kopfpose/Menue-Zustand bei offenem Menue oder F2 ein Augenbild vr_<n>_menue_* (max N, hoechstens 64) */
+    /* W242 VR-SHELL (nur mit vr_enable=1, nur Augenbild der Cockpit-Wiedergabe) */
+    int vr_shell;               /* 1 = dunkle, schlichte Huelle um den Sitz fuellt leere Bildteile (Standard), 0 = schwarz wie bisher */
+    int vr_vignette;            /* Rand-Vignette 0..100 %: Deckung der weltfesten Blende jenseits des modellierten Cockpits (Standard 80, 0 = aus) */
+    int vr_shell_diag;          /* DIAG(VR-SHELL,W242): 1 = leere Pixel magenta statt Huelle, ohne Vignette (Messung der Abdeckung) */
 } hcfg_t;
 
 extern hcfg_t g_cfg;

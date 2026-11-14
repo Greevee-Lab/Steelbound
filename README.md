@@ -134,7 +134,7 @@ How do the controls, the look and the sound feel? What did you enjoy, what
 feels off? Fill in the 2-minute
 [feedback form](../../discussions/new?category=general), vote in
 [polls](../../discussions/categories/polls) or share ideas in
-[Discussions](../../discussions). To chat with other pilots and get a ping
+[Discussions](../../discussions). To chat with other pilots and get notified
 when a new version is out, join the [Discord](https://discord.gg/ExEH3gBbyw).
 
 ## Known issues

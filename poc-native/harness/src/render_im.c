@@ -65,6 +65,8 @@ void sb_render_im_vdata(unsigned reg, float a, float b, float c, float d)
     }
 }
 
+static int g_im_col_last = -1; /* W215 rbc: zuletzt per SetVertexDataColor gesetztes Register */
+
 void sb_render_im_color(unsigned reg, unsigned color)
 {
     unsigned idx = (reg == 0xFFFFFFFFu) ? 0 : reg;
@@ -76,6 +78,7 @@ void sb_render_im_color(unsigned reg, unsigned color)
         g_im_cur[idx][3] = (float)((color >> 24) & 0xFF) / 255.0f;
         g_im_col_slot = (int)idx;
         g_im_col_written = 1;
+        g_im_col_last = (int)idx; /* W215: Farbregister bleibt ueber Begin hinaus */
     }
     g_im_vdata++;
 }
@@ -84,6 +87,9 @@ void sb_render_im_color(unsigned reg, unsigned color)
 void sb_render_im_end_nolock(void)
 {
     g_submit_vb = 0; /* DIAG(MOVIE): IM-Pfad */
+    if (g_cfg.rtt_rb_sync == 2) { /* W215: Zellenkarte zusaetzlich auf der CPU rastern */
+        sb_rtt_rbc_im(g_im_prim, &g_im_buf[0][0][0], (unsigned)g_im_nverts, IM_SLOTS, g_im_col_last);
+    }
     sb_im_submit();
     /* FIX(EDGE,W64): End() schliesst den Batch (Xbox/cxbx: nach End ist kein
      * Vertex mehr offen). Ohne Reset blieb g_im_nverts stehen; der naechste
@@ -1158,11 +1164,37 @@ static void sb_im_submit_body(void)
              * Fuer diesen Draw homogene Pixelkoordinaten bis zum Rasterizer
              * erhalten. Andere Blendpfade und vollstaendig vordere Draws
              * bleiben bitgleich (keine allgemeine P2-Umstellung). */
-            for (i = 0; flash_blend && flash_src == 2u && flash_dst == 2u && i < n; i++) {
+            /* W224 LINE-FLICKER: Dieselbe Faltung trifft auch nicht-additive
+             * P2-Draws (lange Linie quer ueber den Hauptmonitor in M4).
+             * eye_clip_all=1 (Option, Standard 0): fuer jeden Blendmodus. Die
+             * flackernde Linie war ein Zwischenbild-Fehler (interp_eyefix). */
+            int eye_any = g_cfg.eye_clip_all ||
+                          (flash_blend && flash_src == 2u && flash_dst == 2u);
+            for (i = 0; (eye_any || g_cfg.eyeclip_diag > 0) && i < n; i++) {
                 const float *pp = IMPOS(i);
                 float cw = pp[0] * vsh_mat[3][0] + pp[1] * vsh_mat[3][1] +
                            pp[2] * vsh_mat[3][2] + pp[3] * vsh_mat[3][3];
-                if (cw <= 0.0f) { eye_clip = 1; break; }
+                if (cw <= 0.0f) { eye_clip = eye_any ? 1 : 2; break; }
+            }
+            if (eye_clip && g_cfg.eyeclip_diag > 0) { /* DIAG(W224) */
+                static int ecd_n;
+                if (ecd_n < g_cfg.eyeclip_diag) {
+                    float wmin = 1e30f, wmax = -1e30f;
+                    unsigned nneg = 0, q;
+                    for (q = 0; q < n; q++) {
+                        const float *pp = IMPOS(q);
+                        float cw = pp[0] * vsh_mat[3][0] + pp[1] * vsh_mat[3][1] +
+                                   pp[2] * vsh_mat[3][2] + pp[3] * vsh_mat[3][3];
+                        if (cw < wmin) { wmin = cw; }
+                        if (cw > wmax) { wmax = cw; }
+                        if (cw <= 0.0f) { nneg++; }
+                    }
+                    ecd_n++;
+                    HLOG_W("EYECLIP f=%u fix=%d blend=%u src=%u dst=%u prim=%u n=%u neg=%u w=%.3f..%.3f vs=0x%X",
+                           g_present_no, eye_clip == 1, flash_blend, flash_src, flash_dst,
+                           g_im_prim, n, nneg, wmin, wmax, g_im_shader);
+                }
+                if (eye_clip == 2) { eye_clip = 0; }
             }
             for (i = 0; i < n; i++) {
                 float *pp = IMPOS(i);

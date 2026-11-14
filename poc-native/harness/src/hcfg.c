@@ -119,6 +119,9 @@ void hcfg_defaults(void)
     g_cfg.lin_rhw_range = 1;
     g_cfg.rtt = 1; /* W23: RTT-Umleitung (Menue sichtbar, belegt W23_menu0/rtt1b) */
     g_cfg.rtt_readback = 1; /* W59 COMBAT: RT-Rueckschrieb (Zellenkarte -> Lock-On) */
+    g_cfg.rtt_rb_sync = 2; /* W215 CULL-POPIN: Zellenkarte im selben Bild (2 = CPU-Raster, 1 = GPU-Rueckschrieb mit Warten) */
+    g_cfg.rtt_rb_diag = 0; /* W215 CULL-POPIN: DIAG aus */
+    g_cfg.rtt_rb_cpu_ofs = 0; /* W215: CPU-Raster-Versatz (1/256 px) */
     g_cfg.rtt_stale = 1; /* W124 MAP-RETRY: veraltete RT-Eintraege nach Missions-Neustart nicht mehr sampeln */
     g_cfg.rtt_selfcopy = 1; /* W106 FX-HOLE: Selbst-Sampling liest RT-Kopie, Ziel bleibt das RT (Rauch-Hitzeflimmern stanzte sonst Loecher ins Cockpit) */
     g_cfg.rtt_selfclip = 1; /* W45 SIDESMEAR: Selbst-Sampling-Clip an (Seiten schwarz, Mitte unveraendert) */
@@ -217,11 +220,15 @@ void hcfg_defaults(void)
     g_cfg.rq_every = 3000;
     g_cfg.flash_diag = 0;
     g_cfg.flash_pixel = 0;
+    g_cfg.eye_clip_all = 0; /* W224: Option (H1), Standard aus - Tick-Bilder bitgleich */
+    g_cfg.eyeclip_diag = 0;
     g_cfg.interp_shots = 0;
     g_cfg.interp_shot_ticks = 6;
     g_cfg.interp_shot_every = 0;
     g_cfg.interp_shot_max = 8;
     g_cfg.interp_maxjump = 0.5f;
+    g_cfg.interp_eyefix = 1; /* FIX(W224 LINE-FLICKER) */
+    g_cfg.interp_eyediag = 0;
     g_cfg.pf_max = 1; /* DIAG(POPIN,W91) */
     g_cfg.interp_inst = 1; /* FIX(POPIN,W91): Instanz-Zuordnung (A/B W91_r6 vs W91_r7) */
     g_cfg.interp_pass = 1; /* FIX(POPIN,W91): Mehrpass-Konsistenz */
@@ -412,9 +419,8 @@ void hcfg_defaults(void)
     g_cfg.pad_mouse_wake = 3;
     g_cfg.pad_dz_stick = 0;  /* W143: 0 = Profil-Totzonen unveraendert */
     g_cfg.pad_dz_trig = 0;
-    g_cfg.aim_turn = 0;         /* W218 SIMPLE-CONTROLS: Standard aus */
-    g_cfg.aim_turn_thresh = 60;
-    g_cfg.aim_turn_gain = 100;
+    g_cfg.aim_assist = 0;       /* W236 AIM-ASSIST: Standard Original */
+    g_cfg.aim_assist_edge = 80;
     g_cfg.auto_gear = 0;
     g_cfg.sbc_autocal = 1;     /* W128 (Key sbc_cal): Ruhelage beim Start erfassen */
     g_cfg.sbc_axis_dead = 6;
@@ -724,16 +730,21 @@ static void set_key(const char *k, const char *v)
         g_cfg.pad_dz_stick = atoi(v);
         if (g_cfg.pad_dz_stick < 0) g_cfg.pad_dz_stick = 0;
         if (g_cfg.pad_dz_stick > 90) g_cfg.pad_dz_stick = 90;
-    } else if (strcmp(k, "aim_turn") == 0) { /* W218 */
-        g_cfg.aim_turn = atoi(v) ? 1 : 0;
-    } else if (strcmp(k, "aim_turn_thresh") == 0) {
-        g_cfg.aim_turn_thresh = atoi(v);
-        if (g_cfg.aim_turn_thresh < 0) g_cfg.aim_turn_thresh = 0;
-        if (g_cfg.aim_turn_thresh > 95) g_cfg.aim_turn_thresh = 95;
-    } else if (strcmp(k, "aim_turn_gain") == 0) {
-        g_cfg.aim_turn_gain = atoi(v);
-        if (g_cfg.aim_turn_gain < 0) g_cfg.aim_turn_gain = 0;
-        if (g_cfg.aim_turn_gain > 200) g_cfg.aim_turn_gain = 200;
+    } else if (strcmp(k, "aim_assist") == 0) { /* W236 */
+        g_cfg.aim_assist = atoi(v);
+        if (g_cfg.aim_assist < 0 || g_cfg.aim_assist > 2) g_cfg.aim_assist = 0;
+    } else if (strcmp(k, "aim_assist_edge") == 0) {
+        g_cfg.aim_assist_edge = atoi(v);
+        if (g_cfg.aim_assist_edge < 30) g_cfg.aim_assist_edge = 30;
+        if (g_cfg.aim_assist_edge > 100) g_cfg.aim_assist_edge = 100;
+    } else if (strcmp(k, "aim_turn") == 0) {
+        /* W218-Altwert (alpha.6): "Fadenkreuz am Rand dreht den Mech" ist
+         * entfallen (Nutzer 14.11.); gemeint war die gekoppelte Ziel-/
+         * Blicksteuerung -> Stufe 1. aim_turn=0 laesst aim_assist unberuehrt. */
+        if (atoi(v)) g_cfg.aim_assist = 1;
+    } else if (strcmp(k, "aim_turn_thresh") == 0 ||
+               strcmp(k, "aim_turn_gain") == 0) {
+        /* W218-Altwerte ohne Wirkung (still ignoriert) */
     } else if (strcmp(k, "auto_gear") == 0) {
         g_cfg.auto_gear = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "pad_dz_trig") == 0) {
@@ -826,6 +837,12 @@ static void set_key(const char *k, const char *v)
         g_cfg.rtt = atoi(v);
     } else if (strcmp(k, "rtt_readback") == 0) {
         g_cfg.rtt_readback = atoi(v);
+    } else if (strcmp(k, "rtt_rb_sync") == 0) {
+        g_cfg.rtt_rb_sync = atoi(v);
+    } else if (strcmp(k, "rtt_rb_cpu_ofs") == 0) {
+        g_cfg.rtt_rb_cpu_ofs = atoi(v);
+    } else if (strcmp(k, "rtt_rb_diag") == 0) {
+        g_cfg.rtt_rb_diag = atoi(v);
     } else if (strcmp(k, "rtt_stale") == 0) {
         g_cfg.rtt_stale = atoi(v);
     } else if (strcmp(k, "rtt_selfcopy") == 0) {
@@ -968,6 +985,10 @@ static void set_key(const char *k, const char *v)
         g_cfg.rq_every = atoi(v);
     } else if (strcmp(k, "flash_diag") == 0) {
         g_cfg.flash_diag = atoi(v);
+    } else if (strcmp(k, "eye_clip_all") == 0) {
+        g_cfg.eye_clip_all = atoi(v);
+    } else if (strcmp(k, "eyeclip_diag") == 0) {
+        g_cfg.eyeclip_diag = atoi(v);
     } else if (strcmp(k, "flash_pixel") == 0) {
         g_cfg.flash_pixel = atoi(v);
     } else if (strcmp(k, "interp_bsets") == 0) {
@@ -1036,6 +1057,8 @@ static void set_key(const char *k, const char *v)
         g_cfg.interp_pass = atoi(v);
     } else if (strcmp(k, "pf_ring") == 0) {
         g_cfg.pf_ring = atoi(v);
+    } else if (strcmp(k, "pf_mode") == 0) {
+        g_cfg.pf_mode = atoi(v);
     } else if (strcmp(k, "pf_from") == 0) {
         g_cfg.pf_from = atoi(v);
     } else if (strcmp(k, "pf_every") == 0) {
@@ -1056,6 +1079,10 @@ static void set_key(const char *k, const char *v)
         g_cfg.rt_interp_fps = atoi(v);
     } else if (strcmp(k, "movie_skip_delay") == 0) {
         g_cfg.movie_skip_delay = atoi(v);
+    } else if (strcmp(k, "interp_eyefix") == 0) {
+        g_cfg.interp_eyefix = atoi(v);
+    } else if (strcmp(k, "interp_eyediag") == 0) {
+        g_cfg.interp_eyediag = atoi(v);
     } else if (strcmp(k, "interp_maxjump") == 0) {
         g_cfg.interp_maxjump = (float)atof(v);
     } else if (strcmp(k, "im_fast") == 0) {

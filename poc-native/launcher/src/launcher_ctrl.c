@@ -7,6 +7,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
+#include <math.h>
 #include "launcher_ctrl.h"
 #include "launcher_cfg.h"
 #include "launcher_u8.h"
@@ -784,6 +785,94 @@ int lctrl_bind_conflicts(const lctrl_bind_t *b, char out[][160], int max)
     return n;
 }
 
+/* W228 BIND-DIALOG: Darstellungs-Helfer (Liste gegliedert, Detailbereich). */
+int lctrl_elem_group(int idx)
+{
+    const char *k;
+    if (idx < 0 || idx >= LCTRL_ELEM_N) { return -1; }
+    k = kCtrlElems[idx].key;
+    switch (kCtrlElems[idx].kind) {
+    case LCTRL_AXIS: return 1;
+    case LCTRL_NEG:
+    case LCTRL_POS: return 2;
+    case LCTRL_ACT: return 5;
+    default: break;
+    }
+    if (strncmp(k, "gear.", 5) == 0) { return 3; }
+    if (strncmp(k, "tuner.", 6) == 0) { return 4; }
+    return 0;
+}
+
+int lctrl_helper_axis(int idx)
+{
+    char nm[32];
+    char *dot;
+    if (idx < 0 || idx >= LCTRL_ELEM_N ||
+        (kCtrlElems[idx].kind != LCTRL_NEG && kCtrlElems[idx].kind != LCTRL_POS)) {
+        return -1;
+    }
+    strcpy_s(nm, sizeof nm, kCtrlElems[idx].key);
+    dot = strchr(nm, '.');
+    if (dot) { *dot = '\0'; }
+    return lctrl_bind_elem_index(nm);
+}
+
+unsigned lctrl_bind_detail_vis(const lctrl_bind_t *b, int idx)
+{
+    unsigned v = 0;
+    int a, axis;
+    if (!b || idx < 0 || idx >= LCTRL_ELEM_N) { return 0; }
+    axis = kCtrlElems[idx].kind == LCTRL_AXIS;
+    if (axis && (strncmp(kCtrlElems[idx].key, "aim_", 4) == 0 ||
+                 strncmp(kCtrlElems[idx].key, "sight_", 6) == 0)) {
+        v |= LCTRL_VIS_MOUSE;
+    }
+    for (a = 0; a < b->row[idx].n_alt; a++) {
+        int k = lctrl_joy_src_axis(b->row[idx].alt[a], NULL, NULL);
+        if (k) { v |= LCTRL_VIS_JOY; }
+        if (k == 1) { v |= LCTRL_VIS_JOYDZ; }
+    }
+    if (axis && !(v & LCTRL_VIS_JOY)) { v |= LCTRL_VIS_JOYHINT; }
+    return v;
+}
+
+int lctrl_bind_remove_alt(lctrl_bind_t *b, int idx, int ai)
+{
+    int i;
+    if (!b || idx < 0 || idx >= LCTRL_ELEM_N || ai < 0 || ai >= b->row[idx].n_alt) {
+        return 1;
+    }
+    for (i = ai; i + 1 < b->row[idx].n_alt; i++) {
+        strcpy_s(b->row[idx].alt[i], sizeof b->row[idx].alt[i], b->row[idx].alt[i + 1]);
+    }
+    b->row[idx].n_alt--;
+    b->row[idx].alt[b->row[idx].n_alt][0] = '\0';
+    return 0;
+}
+
+int lctrl_bind_conflicts_for(const lctrl_bind_t *b, int idx,
+                             lctrl_conf1_t *out, int max)
+{
+    int j, m, a, n = 0;
+    if (!b || !out || max <= 0 || idx < 0 || idx >= LCTRL_ELEM_N) { return 0; }
+    for (j = 0; j < b->row[idx].n_alt && n < max; j++) {
+        lctrl_conf1_t c;
+        memset(&c, 0, sizeof c);
+        c.alt = j;
+        for (m = 0; m < LCTRL_ELEM_N; m++) {
+            if (m == idx) { continue; }
+            for (a = 0; a < b->row[m].n_alt; a++) {
+                if (strieq(b->row[m].alt[a], b->row[idx].alt[j])) {
+                    if (c.n < 8) { c.other[c.n++] = m; }
+                    break;
+                }
+            }
+        }
+        if (c.n > 0) { out[n++] = c; }
+    }
+    return n;
+}
+
 int lctrl_bind_save(const char *path, const lctrl_bind_t *b, const char *base,
                     char *err, size_t errcap)
 {
@@ -872,7 +961,7 @@ int lctrl_bind_uses_joy_slot(const lctrl_bind_t *b, int slot)
                 int s = -1;
                 while (*p == ' ' || *p == '\t') { p++; }
                 if (joy_prefix(p, &s) && s == slot) { return 1; }
-                p = strchr(p, '+'); /* Akkord: naechstes Atom */
+                p = (char *)lctrl_chord_plus(p); /* Akkord (W226) */
                 if (!p) { break; }
                 p++;
             }
@@ -889,6 +978,71 @@ static int joy_btn(const imap_joy_state_t *s, int b)
 static int iabs_(int v)
 {
     return v < 0 ? -v : v;
+}
+
+/* W226 JOY-AXIS-DIR: verlangte Bewegungsrichtung je Achsen-Element (wie
+ * die Tastatur-Endlagen der Standardprofile: .pos = rechts bzw. unten).
+ * Zielhebel/Sicht hoch = DirectInput-Minimum (Stick nach vorn). */
+int lctrl_joy_dir_expect(int idx)
+{
+    const char *k;
+    if (idx < 0 || idx >= LCTRL_ELEM_N || kCtrlElems[idx].kind != LCTRL_AXIS) {
+        return 0;
+    }
+    k = kCtrlElems[idx].key;
+    if (strcmp(k, "aim_y") == 0 || strcmp(k, "sight_y") == 0) {
+        return -1;
+    }
+    return 1;
+}
+
+/* Gang-Direktwahl gear.r/n/1..5 (einzige Elemente mit Lern-Zone). */
+static int joy_is_gear_direct(int idx)
+{
+    const char *k = kCtrlElems[idx].key;
+    return strncmp(k, "gear.", 5) == 0 && strcmp(k, "gear.up") != 0 &&
+           strcmp(k, "gear.down") != 0;
+}
+
+const char *lctrl_joy_dir_hint(int idx)
+{
+    int want;
+    if (idx < 0 || idx >= LCTRL_ELEM_N) {
+        return NULL;
+    }
+    if (kCtrlElems[idx].kind == LCTRL_POS || kCtrlElems[idx].kind == LCTRL_NEG) {
+        return LT("gui.joy_hint_dig"); /* analoge Aktion empfehlen */
+    }
+    if (kCtrlElems[idx].kind == LCTRL_DIG && joy_is_gear_direct(idx)) {
+        return LT("gui.joy_hint_gear");
+    }
+    want = lctrl_joy_dir_expect(idx);
+    if (!want) {
+        return NULL;
+    }
+    if (strncmp(kCtrlElems[idx].key, "pedal", 5) == 0) {
+        return LT("gui.joy_hint_pedal");
+    }
+    return LT(want < 0 ? "gui.joy_hint_fwd" : "gui.joy_hint_right");
+}
+
+const char *lctrl_chord_plus(const char *s)
+{
+    const char *p;
+    if (!s) {
+        return NULL;
+    }
+    for (p = strchr(s, '+'); p; p = strchr(p + 1, '+')) {
+        if (p[1] && p[1] != ':' && p[1] != '+') {
+            return p;
+        }
+    }
+    return NULL;
+}
+
+static int joy_pct(int v)
+{
+    return (v + 32768) * 100 / 65535;
 }
 
 int lctrl_joy_learn(const imap_joy_state_t *base, const imap_joy_state_t *prev,
@@ -936,22 +1090,168 @@ int lctrl_joy_learn(const imap_joy_state_t *base, const imap_joy_state_t *prev,
     }
     {
         const char *an = ijoy_axis_name(best);
-        int pct = ((int)cur->axis[best] + 32768) * 100 / 65535;
+        int pct = joy_pct(cur->axis[best]);
+        int rest = joy_pct(base->axis[best]);
+        int lo = -1, hi = -1;
         if (is_axis) {
+            /* W226: Bewegung gegen die verlangte Richtung -> inv=1 (alle
+             * Achsen-Elemente). Pedal aus Mittelstellung (kombinierte
+             * Ruderachse, Stick als Pedal) -> nur diese Haelfte: half=1. */
             int pedal = strncmp(kCtrlElems[idx].key, "pedal", 5) == 0;
-            _snprintf_s(out, cap, _TRUNCATE, "%s:dz=0.05%s", an,
-                        pedal && bestd < 0 ? ":inv=1" : "");
-        } else if (bestd > 0 && pct >= 75) {
-            _snprintf_s(out, cap, _TRUNCATE, "%s+", an);
-        } else if (bestd < 0 && pct <= 25) {
-            _snprintf_s(out, cap, _TRUNCATE, "%s-", an);
-        } else { /* Stellung mitten im Weg (Schubhebel): Zone darum */
-            int lo = pct - 12 < 0 ? 0 : pct - 12;
-            int hi = pct + 12 > 100 ? 100 : pct + 12;
-            _snprintf_s(out, cap, _TRUNCATE, "%s:zone=%d-%d", an, lo, hi);
+            int want = lctrl_joy_dir_expect(idx);
+            int centered = iabs_((int)base->axis[best]) < 8192;
+            _snprintf_s(out, cap, _TRUNCATE, "%s:dz=0.05%s%s", an,
+                        (bestd < 0 ? -1 : 1) != want ? ":inv=1" : "",
+                        pedal && centered ? ":half=1" : "");
+            return 3;
         }
+        if (joy_is_gear_direct(idx)) {
+            /* Gang-Direktwahl: Zone um die gehaltene Stellung (Schubhebel) */
+            lo = pct - 12 < 0 ? 0 : pct - 12;
+            hi = pct + 12 > 100 ? 100 : pct + 12;
+        } else if (bestd > 0) {
+            /* W226: Taste/.pos/.neg = Richtung, nie Zone um die Ruhe */
+            if (pct >= 75 && rest < 75) {
+                _snprintf_s(out, cap, _TRUNCATE, "%s+", an);
+                return 3;
+            }
+            lo = (rest + pct) / 2; /* halber Weg Ruhe -> Spitze */
+            hi = 100;
+        } else {
+            if (pct <= 25 && rest > 25) {
+                _snprintf_s(out, cap, _TRUNCATE, "%s-", an);
+                return 3;
+            }
+            lo = 0;
+            hi = (rest + pct + 1) / 2;
+        }
+        if (lo >= hi || (rest >= lo && (rest < hi || hi >= 100))) {
+            return 4; /* Zone enthielte die Ruhestellung: abgelehnt */
+        }
+        _snprintf_s(out, cap, _TRUNCATE, "%s:zone=%d-%d", an, lo, hi);
     }
     return 3;
+}
+
+void lctrl_joy_learner_reset(lctrl_joy_learner_t *L)
+{
+    if (L) {
+        memset(L, 0, sizeof *L);
+        L->cand = -1;
+    }
+}
+
+int lctrl_joy_learner_step(lctrl_joy_learner_t *L, int ok,
+                           const imap_joy_state_t *cur, unsigned axmask,
+                           int npov, int idx, char *out, size_t cap)
+{
+    int i, cand = -1, cd = 0, moving, released, r;
+    imap_joy_state_t pos;
+    if (!L || !cur || !out || idx < 0 || idx >= LCTRL_ELEM_N) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (!ok) { /* kein gueltiger Stand: nie lernen, Basis neu einschwingen */
+        if (!L->have_base) { L->settle = 0; }
+        return 0;
+    }
+    if (!L->have_base) {
+        int still = L->settle > 0;
+        for (i = 0; i < IJOY_AXES && still; i++) {
+            if ((axmask & (1u << i)) &&
+                iabs_((int)cur->axis[i] - (int)L->prev.axis[i]) > 655) {
+                still = 0;
+            }
+        }
+        L->settle = still ? L->settle + 1 : 1;
+        L->prev = *cur;
+        if (L->settle >= 3) { /* 3 ruhige Abtastungen (~150 ms) */
+            int n = 0, same = 1, v0 = 0;
+            L->base = *cur;
+            L->have_base = 1;
+            for (i = 0; i < IJOY_AXES; i++) {
+                L->peak[i] = cur->axis[i];
+                L->peakd[i] = 0;
+                if (axmask & (1u << i)) {
+                    if (n++ == 0) { v0 = cur->axis[i]; }
+                    else if (cur->axis[i] != v0) { same = 0; }
+                }
+            }
+            /* Alle Achsen exakt gleich (z. B. Startwert vor dem ersten
+             * Geraete-Bericht): Basis je Achse erst mit der ersten
+             * Aenderung bestaetigen (diese zaehlt nicht als Bewegung). */
+            L->unconf = (n >= 2 && same) ? axmask : 0u;
+            L->unext = 0u;
+            for (i = 0; i < IJOY_AXES; i++) {
+                if ((axmask & ~L->unconf & (1u << i)) &&
+                    (cur->axis[i] == -32768 || cur->axis[i] == 32767)) {
+                    L->unext |= 1u << i;
+                }
+            }
+        }
+        return 0;
+    }
+    if (kCtrlElems[idx].kind != LCTRL_AXIS) { /* Taste/POV (Flanke) */
+        r = lctrl_joy_learn(&L->base, &L->prev, cur, 0, npov, idx, out, cap);
+        if (r == 1 || r == 2) {
+            L->prev = *cur;
+            return r;
+        }
+    }
+    for (i = 0; i < IJOY_AXES; i++) {
+        int d;
+        if (!(axmask & (1u << i))) { continue; }
+        if (L->unconf & (1u << i)) {
+            if (cur->axis[i] != L->base.axis[i]) {
+                L->base.axis[i] = cur->axis[i];
+                L->peak[i] = cur->axis[i];
+                L->unconf &= ~(1u << i);
+            }
+            continue;
+        }
+        if ((L->unext & (1u << i)) && cur->axis[i] != L->base.axis[i]) {
+            L->unext &= ~(1u << i); /* erste Aenderung ab Endwert */
+            if (iabs_((int)cur->axis[i] - (int)L->prev.axis[i]) > 16384) {
+                L->base.axis[i] = cur->axis[i];
+                L->peak[i] = cur->axis[i];
+                continue;
+            }
+        }
+        d = (int)cur->axis[i] - (int)L->base.axis[i];
+        if (iabs_(d) > iabs_(L->peakd[i])) {
+            L->peakd[i] = d;
+            L->peak[i] = cur->axis[i];
+        }
+        if (iabs_(L->peakd[i]) > iabs_(cd)) {
+            cd = L->peakd[i];
+            cand = i;
+        }
+    }
+    if (cand < 0 || iabs_(cd) < 26214) {
+        L->stable = 0;
+        L->prev = *cur;
+        return 0;
+    }
+    if (cand != L->cand) {
+        L->cand = cand;
+        L->stable = 0;
+    }
+    moving = iabs_((int)cur->axis[cand] - (int)L->prev.axis[cand]) > 1310;
+    released = iabs_((int)cur->axis[cand] - (int)L->base.axis[cand]) * 2 <
+               iabs_(cd);
+    L->stable = moving ? 0 : L->stable + 1;
+    L->prev = *cur;
+    if (!released && L->stable < 2) {
+        return 0; /* Achse noch in Bewegung */
+    }
+    pos = L->base; /* nur die Kandidaten-Achse zaehlt */
+    pos.axis[cand] = released ? L->peak[cand] : cur->axis[cand];
+    r = lctrl_joy_learn(&L->base, &pos, &pos, 1u << cand, 0, idx, out, cap);
+    if (r == 4) {
+        L->peakd[cand] = 0; /* abgelehnt: neu ansetzen */
+        L->stable = 0;
+    }
+    return r;
 }
 
 /* Spec-Text darf weder Kommentar ('#') noch Trenner enthalten. */
@@ -1031,6 +1331,98 @@ int lctrl_joy_is_axis(const char *alt, int *slot, int *axis)
     return 1;
 }
 
+int lctrl_joy_src_axis(const char *alt, int *slot, int *axis)
+{
+    char nm[16];
+    const char *p, *c;
+    int pl, s = 0, ax;
+    size_t n;
+    if (!alt) { return 0; }
+    while (*alt == ' ' || *alt == '\t') { alt++; }
+    pl = joy_prefix(alt, &s);
+    if (!pl || lctrl_chord_plus(alt)) { return 0; }
+    p = alt + pl;
+    c = strchr(p, ':');
+    n = c ? (size_t)(c - p) : strlen(p);
+    if (n == 0 || n >= sizeof nm) { return 0; }
+    memcpy(nm, p, n);
+    nm[n] = '\0';
+    trim(nm);
+    n = strlen(nm);
+    if (n > 1 && (nm[n - 1] == '+' || nm[n - 1] == '-')) {
+        nm[n - 1] = '\0';
+        ax = ijoy_axis_parse(nm);
+        if (ax < 0) { return 0; }
+        if (slot) { *slot = s; }
+        if (axis) { *axis = ax; }
+        return 2;
+    }
+    ax = ijoy_axis_parse(nm);
+    if (ax < 0) { return 0; }
+    if (slot) { *slot = s; }
+    if (axis) { *axis = ax; }
+    return strstr(alt, "zone=") ? 2 : 1;
+}
+
+int lctrl_joy_eval(const char *alt, int pedal, int raw, float *res)
+{
+    char v[24];
+    int kind = lctrl_joy_src_axis(alt, NULL, NULL);
+    int inv = lctrl_joy_param_get(alt, "inv", v, sizeof v) && atoi(v) != 0;
+    float x, m, sg, dz = 0.0f, curve = 1.0f, sens = 1.0f;
+    if (raw < -32768) { raw = -32768; }
+    if (raw > 32767) { raw = 32767; }
+    if (res) { *res = 0.0f; }
+    if (kind == 2) { /* Achse als Taste: wie imap_joy_atom_active */
+        int lo = 75, hi = 100;
+        float pct = ((float)raw + 32768.0f) * 100.0f / 65535.0f;
+        if (lctrl_joy_param_get(alt, "zone", v, sizeof v)) {
+            const char *mi = strchr(v, '-');
+            lo = atoi(v);
+            hi = mi ? atoi(mi + 1) : 100;
+        } else {
+            const char *p = alt, *c, *e;
+            while (*p == ' ' || *p == '\t') { p++; }
+            p += joy_prefix(p, NULL);
+            c = strchr(p, ':');
+            e = c ? c : p + strlen(p);
+            if (e > p && e[-1] == '-') {
+                lo = 0;
+                hi = 25;
+            }
+        }
+        if (inv) { pct = 100.0f - pct; }
+        if (res) {
+            *res = (pct >= (float)lo &&
+                    (pct < (float)hi || (hi >= 100 && pct <= 100.0f)))
+                       ? 1.0f : 0.0f;
+        }
+        return 2;
+    }
+    if (kind != 1) { return 0; }
+    if (lctrl_joy_param_get(alt, "dz", v, sizeof v)) { dz = (float)atof(v); }
+    if (lctrl_joy_param_get(alt, "curve", v, sizeof v)) { curve = (float)atof(v); }
+    if (lctrl_joy_param_get(alt, "sens", v, sizeof v)) { sens = (float)atof(v); }
+    /* wie imap_joy_value (input_map.c): inv, Totzone, Kurve, sens */
+    x = raw < 0 ? (float)raw / 32768.0f : (float)raw / 32767.0f;
+    if (inv) { x = -x; }
+    if (pedal) {
+        int half = lctrl_joy_param_get(alt, "half", v, sizeof v) && atoi(v);
+        m = half ? (x < 0 ? 0.0f : x) : (x + 1.0f) * 0.5f;
+        sg = 1.0f;
+    } else {
+        sg = x < 0 ? -1.0f : 1.0f;
+        m = x < 0 ? -x : x;
+    }
+    if (m < dz) { return 1; }
+    if (dz > 0.0f && dz < 1.0f) { m = (m - dz) / (1.0f - dz); }
+    if (curve != 1.0f && curve > 0.0f) { m = powf(m, curve); }
+    if (sens > 0.0f && sens != 1.0f) { m *= sens; }
+    if (m > 1.0f) { m = 1.0f; }
+    if (res) { *res = sg * m; }
+    return 1;
+}
+
 int lctrl_joy_param_get(const char *alt, const char *key, char *out,
                         size_t cap)
 {
@@ -1087,7 +1479,22 @@ int lctrl_joy_param_set(char *alt, size_t cap, const char *key,
     return 0;
 }
 
+static int joy_atom_text_raw(const char *atom, char *out, size_t cap);
+
+/* W226: wie bisher, invertierte Achsen-Quellen mit Zusatz "(invertiert)". */
 int lctrl_joy_atom_text(const char *atom, char *out, size_t cap)
+{
+    char v[8];
+    int r = joy_atom_text_raw(atom, out, cap);
+    if (r && lctrl_joy_src_axis(atom, NULL, NULL) &&
+        lctrl_joy_param_get(atom, "inv", v, sizeof v) && atoi(v) != 0) {
+        size_t n = strlen(out);
+        _snprintf_s(out + n, cap - n, _TRUNCATE, " %s", LT("gui.joy_src_inv"));
+    }
+    return r;
+}
+
+static int joy_atom_text_raw(const char *atom, char *out, size_t cap)
 {
     static const char *const dk[4] = { "gui.joy_dir_u", "gui.joy_dir_r",
                                        "gui.joy_dir_d", "gui.joy_dir_l" };

@@ -507,9 +507,127 @@ static void w87_toggle_assist(sbc_in_t *s, imap_state_t *ts, unsigned chg)
     }
 }
 
-/* W218 SIMPLE-CONTROLS (aim_turn / auto_gear, Standard aus): gekoppelte
- * Ziel-/Drehsteuerung und automatischer Gangwechsel (Logik rein in
- * input_map.c, imap_aim_turn / imap_autogear_step). Nur Missionsschleife mit
+/* W236 AIM-ASSIST (aim_assist 1/2, Standard 0 = Original): Cockpit-Sicht
+ * dem Waffenarm nachfuehren (Logik rein in input_map.c, imap_aim_assist).
+ * Spielmodell (FUN_00037290 @0x3796F, BERICHT_M2 W236): Sichthebel =
+ * Rate, Soll vyaw [0x35212C] (+-pi/2), vpit [0x355F04] (+-0.611 rad), je
+ * Frame vyaw -= sight_x*kv, kv = FOV [0x352290]*[0x26024C]*[0x25FCCC];
+ * Nick: Out = ~sight_y (Mapper 0x4A141), vpit -/+= Out*kv je nach
+ * [0x346FAC]; Missions-Mapper 0x4A3E8 setzt |Out| <= 25,6 auf 0 (Totzone).
+ * Zielhebel = Position relativ zum Rumpf ([0x356E1C] = Stufen*[0x260384],
+ * Nick [0x260380]/[0x26037C] je [0x356E20]), geglaettet [0x356D08]/
+ * [0x3521BC] (k = [0x260284]); das Fadenkreuz folgt dem geglaetteten Arm
+ * (Beleglauf W236_a2: Fadenkreuz-px = 618 * tan(Arm - Sicht), Nick: Arm +
+ * Sicht-Nick).
+ * Gatter: Mission ohne Titel-Demo (W225, imouse_assist_allowed: auch kein
+ * eigenes Menue, Maus nicht per F10 frei), VT online [0x53831C]=1,
+ * ESC-Menue zu, kein aktiver Original-Controller. */
+#define W236_PIT_REL (-1)  /* Fadenkreuz-Nick = Arm + Sicht-Nick (gemessen W236_a2) */
+#define W236_PIT_BIAS (-1) /* sight_y = e_y - 1 (Out = ~sight_y) */
+#define W236_SIGHT_DZ 25   /* Totzone Missions-Mapper |Out| <= 25,6 */
+static void w236_aim_assist(sbc_in_t *s, const imap_state_t *gs)
+{
+    static int logged, guide_on, at_stop;
+    static unsigned diag_f, cmd_f;
+    imap_assist_in_t in;
+    float fov, kx, ky, t, ksm;
+    int mask, sy_inv, pit_inv, stop, abs_on;
+    if (g_cfg.sbc_usb) {
+        int sst = sbc_wire_status();
+        if (sst == SBC_WIRE_USB_OK || sst == SBC_WIRE_FIXTURE) return;
+    }
+    if (g_cfg.overlay && sb_ovl_open()) return;
+    if (!imouse_assist_allowed()) {
+        guide_on = 0;
+        return;
+    }
+    __try {
+        if (*(volatile u32 *)(uintptr_t)0x53831Cu != 1u) {
+            guide_on = 0;
+            return;
+        }
+        sy_inv = *(volatile uint16_t *)(uintptr_t)0x356E20u != 0;
+        pit_inv = *(volatile uint16_t *)(uintptr_t)0x346FACu != 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    memset(&in, 0, sizeof in);
+    in.vyaw = w87_rdf(0x35212Cu, 0.0f);
+    in.vpit = w87_rdf(0x355F04u, 0.0f);
+    fov = w87_rdf(0x352290u, 45.0f);
+    if (!(fov > 1.0f && fov < 170.0f)) fov = 45.0f;
+    in.kv = fov * w87_rdf(0x26024Cu, 0.0222222f) * w87_rdf(0x25FCCCu, 0.0005f);
+    kx = w87_rdf(0x25FCD4u, 1.0f) / w87_rdf(0x354F90u, 1.0f);
+    ky = w87_rdf(0x25FCD4u, 1.0f) / w87_rdf(0x347830u, 1.0f);
+    if (!(kx > 0.05f && kx < 50.0f)) kx = 1.0f;
+    if (!(ky > 0.05f && ky < 50.0f)) ky = 1.0f;
+    in.sx = w87_rdf(0x260384u, -0.015f) * kx;
+    in.sy = (sy_inv ? w87_rdf(0x260380u, -0.0061359f)
+                    : w87_rdf(0x26037Cu, 0.0061359f)) * ky;
+    in.yaw_max = w87_rdf(0x25D254u, 1.5707964f);
+    in.pit_max = w87_rdf(0x260B9Cu, 0.6108652f);
+    in.pit_dir = pit_inv ? -1 : 1;
+    in.pit_rel = W236_PIT_REL;
+    in.pit_bias = W236_PIT_BIAS;
+    in.dz = W236_SIGHT_DZ;
+    /* Arm: geglaetteter Ist-Winkel; mit absoluter Maus (W87-Vorsteuerung
+     * auf dieser Achse) erreicht er das Ziel im naechsten Frame. */
+    in.arm_x = w87_rdf(0x356D08u, 0.0f);
+    in.arm_y = w87_rdf(0x3521BCu, 0.0f);
+    ksm = w87_rdf(0x260284u, 0.0625f);
+    if (!(ksm > 0.001f && ksm <= 1.0f)) ksm = 0.0625f;
+    abs_on = g_cfg.mouse_mode == 1 && g_cfg.mouse_aim && !g_cfg.mouse_sight &&
+             g_sbc_mouse_live;
+    in.arm_kx = (abs_on && (gs->m_aim_src & 1u)) ? 1.0f : ksm;
+    in.arm_ky = (abs_on && (gs->m_aim_src & 2u)) ? 1.0f : ksm;
+    /* Sichtbarer Bereich: FOV [0x352290] gilt waagerecht UND senkrecht
+     * (Projektion mit Seitenverhaeltnis 1 auf den 512x422-Monitor; Belege
+     * W236_a2/a1b: 618 px je tan-Einheit waagerecht = 256/tan(22,5 Grad),
+     * ~506 senkrecht = 211/tan(22,5 Grad)). Rand im tan-Raum (% der halben
+     * Breite bzw. Hoehe). */
+    t = tanf(fov * 0.5f * 3.14159265f / 180.0f);
+    in.edge_x = atanf(t * (float)g_cfg.aim_assist_edge / 100.0f);
+    in.edge_y = in.edge_x;
+    in.lock_axes = g_cfg.aim_assist == 2 ? (unsigned)(gs->m_aim_src & 3u) : 0u;
+    if (!logged) {
+        logged = 1;
+        HLOG_I("INPUT: AIM-ASSIST aktiv (Stufe %d, Rand %d%% = %.3f/%.3f rad, "
+               "kv=%.6f sx=%.5f sy=%.5f nick_dir=%d) bei f=%u",
+               g_cfg.aim_assist, g_cfg.aim_assist_edge, in.edge_x, in.edge_y,
+               in.kv, in.sx, in.sy, in.pit_dir, g_frames);
+    }
+    mask = imap_aim_assist((imap_block_t *)s, g_cfg.aim_assist, &in);
+    stop = (fabsf(in.vyaw) >= in.yaw_max - 1e-4f) ? 1 : 0;
+    /* Stufe 1: "an" beim ersten Nachfuehren, "aus" erst nach 15 Frames
+     * ohne Nachfuehren (Schritte der Spiel-Totzone kommen nur alle paar
+     * Frames, sonst flattert die Logzeile). */
+    if (mask) cmd_f = g_frames;
+    if (g_cfg.aim_assist == 1 && mask && !guide_on) {
+        guide_on = 1;
+        HLOG_I("INPUT: Sichtfuehrung an (Rand, aim=%02X%02X sicht=%.3f/%.3f) bei f=%u",
+               s->aiming_x, s->aiming_y, in.vyaw, in.vpit, g_frames);
+    } else if (guide_on && !mask && g_frames - cmd_f > 15u) {
+        guide_on = 0;
+        HLOG_I("INPUT: Sichtfuehrung aus (Rand, aim=%02X%02X sicht=%.3f/%.3f) bei f=%u",
+               s->aiming_x, s->aiming_y, in.vyaw, in.vpit, g_frames);
+    }
+    if (stop != at_stop) {
+        HLOG_I("INPUT: Sichtfuehrung %s (sicht=%.3f, aim=%02X) bei f=%u",
+               stop ? "am Anschlag" : "frei", in.vyaw, s->aiming_x, g_frames);
+        at_stop = stop;
+    }
+    if (g_cfg.input_diag && (g_frames % 15u) == 0u && g_frames != diag_f) {
+        diag_f = g_frames;
+        HLOG_I("INPUT: AIM-ASSIST-Diag f=%u aim=%02X%02X src=%u sight=%d,%d "
+               "sicht=%.4f/%.4f kv=%.6f", g_frames, s->aiming_x, s->aiming_y,
+               (unsigned)(gs->m_aim_src & 3u), (int)s->sight_x,
+               (int)s->sight_y, in.vyaw, in.vpit, in.kv);
+    }
+}
+
+/* W218 SIMPLE-CONTROLS (auto_gear, Standard aus): automatischer
+ * Gangwechsel (Logik rein in input_map.c, imap_autogear_step; die
+ * W218-Ziel-/Drehkopplung ersetzt W236 AIM-ASSIST). Nur Missionsschleife mit
  * VT online, ESC-Menue zu und ohne aktiven Original-Controller (der bleibt
  * immer echt). Geschwindigkeit: Positions-Delta des eigenen VT (Entity-
  * Tabelle wie drive_apply, x +0x0C / z +0x14) je Spiel-Frame, Vorzeichen
@@ -518,9 +636,9 @@ static void w218_simple_controls(sbc_in_t *s, imap_state_t *gs, int gear_direct)
 {
     static imap_autogear_t ag;
     static imap_autogear_cfg_t agc;
-    static int agc_init, turn_on, logged;
+    static int agc_init, logged;
     static unsigned pos_f, npos;
-    static float hx[8], hz[8], v_last, turn_hy0;
+    static float hx[8], hz[8], v_last;
     static unsigned hf[8], ag_diag_f;
     float hy = 0.0f, x = 0.0f, z = 0.0f;
     int ok = 0;
@@ -551,31 +669,13 @@ static void w218_simple_controls(sbc_in_t *s, imap_state_t *gs, int gear_direct)
         /* Missionsende/Neustart/VT offline: Verlauf und gelernte
          * Endgeschwindigkeiten verwerfen (naechster VT kann langsamer sein). */
         npos = 0;
-        turn_on = 0;
         if (ag.init) memset(&ag, 0, sizeof ag);
         return;
     }
     if (!logged) {
         logged = 1;
-        HLOG_I("INPUT: vereinfachte Steuerung aktiv (aim_turn=%d thresh=%d%% "
-               "gain=%d%%, auto_gear=%d) bei f=%u", g_cfg.aim_turn,
-               g_cfg.aim_turn_thresh, g_cfg.aim_turn_gain, g_cfg.auto_gear,
-               g_frames);
-    }
-    if (g_cfg.aim_turn) {
-        int r = imap_aim_turn((imap_block_t *)s, g_cfg.aim_turn_thresh,
-                              g_cfg.aim_turn_gain);
-        if (r && !turn_on) {
-            turn_on = 1;
-            turn_hy0 = hy;
-            HLOG_I("INPUT: Ziel-Kopplung an (aim_x=%02X rot=%d hy=%.3f) bei f=%u",
-                   s->aiming_x, (int)s->rot_lever, hy, g_frames);
-        } else if (!r && turn_on) {
-            turn_on = 0;
-            HLOG_I("INPUT: Ziel-Kopplung aus (aim_x=%02X hy=%.3f, Drehung "
-                   "%.3f rad) bei f=%u", s->aiming_x, hy, hy - turn_hy0,
-                   g_frames);
-        }
+        HLOG_I("INPUT: vereinfachte Steuerung aktiv (auto_gear=%d) bei f=%u",
+               g_cfg.auto_gear, g_frames);
     }
     if (g_cfg.auto_gear && gear_direct) {
         /* W221: Direktwahl (z. B. Schubhebel-Zonen eines HOTAS) aktiv ->
@@ -911,14 +1011,20 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
             if (g_cfg.toggle_assist)
                 w87_toggle_assist(s, ts, chg); /* W87 */
         }
-        if (g_cfg.aim_turn || g_cfg.auto_gear) {
-            /* W218 SIMPLE-CONTROLS: vor der absoluten Vorsteuerung (die
-             * Kopplung sieht den Hebel, nicht die Vorsteuer-Spitzen). */
+        if (g_cfg.auto_gear) {
+            /* W218 SIMPLE-CONTROLS: Gang-Automatik. */
             imap_state_t *gs = (g_cfg.input_profile[0] &&
                                 g_prof_load_rc >= 0) ? &g_prof_st : &g_leg;
             w218_simple_controls(s, gs, g_cfg.input_profile[0] &&
                                             g_prof_load_rc >= 0 &&
                                             g_prof_st.gear_direct_hit);
+        }
+        if (g_cfg.aim_assist) {
+            /* W236 AIM-ASSIST: vor der absoluten Vorsteuerung (sieht den
+             * Hebel = Arm-Soll, nicht die Vorsteuer-Spitzen). */
+            imap_state_t *gs = (g_cfg.input_profile[0] &&
+                                g_prof_load_rc >= 0) ? &g_prof_st : &g_leg;
+            w236_aim_assist(s, gs);
         }
         if (g_cfg.mouse_mode == 1 && g_cfg.mouse_aim && !g_cfg.mouse_sight &&
             g_sbc_mouse_live) {

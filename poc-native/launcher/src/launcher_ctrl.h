@@ -117,6 +117,31 @@ int lctrl_bind_conflicts(const lctrl_bind_t *b, char out[][160], int max);
  * (auch im Akkord "+SBC:..."), sonst 0. Jede SBC-Taste hat eine
  * Spielfunktion (CONTROLLER.md S8): Belegung nur mit Warnung. */
 int lctrl_bind_alt_is_sbc(const char *alt);
+/* --- W228 BIND-DIALOG: Darstellungs-Helfer (rein, testbar) ------------- */
+/* Gruppe einer Aktion fuer die gegliederte Liste (Reihenfolge = Anzeige):
+ * 0 Tasten (bi0-38), 1 Achsen, 2 Tasten fuer Achsen (.neg/.pos), 3 Gaenge,
+ * 4 Tuner, 5 Client-Aktionen. -1 = ungueltig. */
+#define LCTRL_GROUP_N 6
+int lctrl_elem_group(int idx);
+/* Achse zu einem Tasten-Helfer ("rot.pos" -> Index von "rot"), sonst -1. */
+int lctrl_helper_axis(int idx);
+/* Sichtbarkeit im Detailbereich der gewaehlten Aktion (Bitmaske). */
+#define LCTRL_VIS_MOUSE 1   /* Maus X/Y: nur Achsen aim_* / sight_* */
+#define LCTRL_VIS_JOY 2     /* Joystick-Einstellungen: JOY-Achsenquelle da */
+#define LCTRL_VIS_JOYDZ 4   /* Totzone: analoge JOY-Achsenquelle da */
+#define LCTRL_VIS_JOYHINT 8 /* Hinweis: Achse ohne JOY-Achsenquelle */
+unsigned lctrl_bind_detail_vis(const lctrl_bind_t *b, int idx);
+/* Eine Quelle (Position ai) entfernen, Rest rueckt auf. 0 = ok, 1 = nein. */
+int lctrl_bind_remove_alt(lctrl_bind_t *b, int idx, int ai);
+/* Konflikte nur fuer eine Aktion: je eigener Quelle die anderen Aktionen
+ * mit derselben Quelle. Rueckgabe = Anzahl Eintraege (0 = keine). */
+typedef struct {
+    int alt;      /* Position der Quelle in der Zeile idx */
+    int n;        /* Anzahl anderer Aktionen */
+    int other[8]; /* deren Indizes */
+} lctrl_conf1_t;
+int lctrl_bind_conflicts_for(const lctrl_bind_t *b, int idx,
+                             lctrl_conf1_t *out, int max);
 /* Als Profil speichern (nur belegte Zeilen + Kopf). 0 = ok, 1 = Fehler. */
 int lctrl_bind_save(const char *path, const lctrl_bind_t *b, const char *base,
                     char *err, size_t errcap);
@@ -128,11 +153,52 @@ int lctrl_bind_save(const char *path, const lctrl_bind_t *b, const char *base,
  * zu base (Schubhebel/Pedale ruhen nicht in der Mitte). Auf Achsen-
  * Elementen (idx LCTRL_AXIS) nur Achsen -> analoge Quelle "Z:dz=0.05"
  * (Pedal invertiert, wenn der Weg zum Minimum fuehrt); sonst "Z+"/"Z-"
- * bzw. "Z:zone=lo-hi". out = Teil hinter "JOYn:". Rueckgabe 1 = Taste,
+ * bzw. "Z:zone=lo-hi" (W226-Regeln s. u.). out = Teil hinter "JOYn:".
+ * Rueckgabe 1 = Taste, 4 = Zone mit Ruhestellung abgelehnt,
  * 2 = POV, 3 = Achse, 0 = nichts. */
 int lctrl_joy_learn(const imap_joy_state_t *base, const imap_joy_state_t *prev,
                     const imap_joy_state_t *cur, unsigned axmask, int npov,
                     int idx, char *out, size_t cap);
+/* W226 JOY-AXIS-DIR: verlangte Lern-Richtung je Element: +1 = rechts /
+ * Pedal treten / Gas (Wert steigt), -1 = nach vorn/oben (Zielhebel Y,
+ * Sicht Y; DirectInput-Minimum), 0 = kein Achsen-Element. Lernen gegen die
+ * Richtung setzt inv=1; Pedal aus Mittelstellung zusaetzlich half=1.
+ * Tasten/.pos/.neg lernen nur die Richtung ("Z+"/"Z-" bzw. Zone ab halbem
+ * Weg), Zonen um die Stellung nur gear.r/n/1..5; eine Zone, die die
+ * Ruhestellung enthielte, wird abgelehnt (lctrl_joy_learn Rueckgabe 4). */
+int lctrl_joy_dir_expect(int idx);
+/* Hinweistext (LT) fuer den Lern-Prompt, NULL = keiner. */
+const char *lctrl_joy_dir_hint(int idx);
+/* Akkord-'+' wie input_map.c (W226): '+' vor Ende/':'/'+' gehoert zum
+ * Namen ("JOY0:Z+"). Zeiger auf das Trenn-'+' oder NULL. */
+const char *lctrl_chord_plus(const char *s);
+/* W226: Lernmodus ueber mehrere Abtastungen (50 ms): Basis erst nach 3
+ * gueltigen, ruhigen Lesungen (Lesefehler = kein Lernen); sind alle Achsen
+ * exakt gleich (Startwert vor dem ersten Geraete-Bericht), bestaetigt erst
+ * die erste Aenderung je Achse die Basis; steht eine Achse exakt auf
+ * einem Endwert und springt in einer Abtastung um > 25 %, gilt der Sprung
+ * ebenfalls als erster Bericht (neue Basis). Achse wird erst uebernommen,
+ * wenn sie >= 40 % ausgelenkt und 2 Abtastungen ruhig ist (bzw. mit der
+ * Spitzenstellung, wenn sie zurueckfedert). */
+typedef struct {
+    imap_joy_state_t base, prev;
+    int16_t peak[IJOY_AXES];
+    int peakd[IJOY_AXES];
+    unsigned unconf, unext;
+    int settle, have_base, stable, cand;
+} lctrl_joy_learner_t;
+void lctrl_joy_learner_reset(lctrl_joy_learner_t *L);
+/* ok = Lesen erfolgreich. Rueckgabe wie lctrl_joy_learn (0 = weiter). */
+int lctrl_joy_learner_step(lctrl_joy_learner_t *L, int ok,
+                           const imap_joy_state_t *cur, unsigned axmask,
+                           int npov, int idx, char *out, size_t cap);
+/* Einzelne JOY-Achsenquelle: 1 = analog ("JOY0:X:dz=.."), 2 = Achse als
+ * Taste ("Z+", "Z-", "Z:zone=a-b"), 0 = keine. slot/axis optional. */
+int lctrl_joy_src_axis(const char *alt, int *slot, int *axis);
+/* Vorschau wie im Client (input_map.c imap_joy_value bzw. Zone): raw =
+ * DirectInput-Wert. Analog: *res -1..1 (pedal: 0..1), Rueckgabe 1; Taste:
+ * *res 0/1, Rueckgabe 2; 0 = keine JOY-Achsenquelle. */
+int lctrl_joy_eval(const char *alt, int pedal, int raw, float *res);
 /* Slot fuer Geraet dev (Index in list): passende joyN-Zeile, sonst
  * implizit benutzter Slot (N-tes Geraet), sonst naechster freier Slot mit
  * neuer Zeile joyN = <Produktname>[@k] (bzw. {GUID}). -1 = alle belegt. */

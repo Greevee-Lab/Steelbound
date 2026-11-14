@@ -829,7 +829,7 @@ static void pf_present_tick(unsigned n)
             ml = *(volatile unsigned *)(uintptr_t)M3D_MLOOP_ADDR;
             md = *(volatile unsigned *)(uintptr_t)0x2EEA34u; /* Modus 4 = Mission (Titel-Demo: 2) */
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        if (sc != 0x2Cu || ml != 1u || md != 4u) { return; }
+        if (sc != 0x2Cu || ml != 1u || md != (unsigned)(g_cfg.pf_mode > 0 ? g_cfg.pf_mode : 4)) { return; } /* W215: pf_mode=2 = Titel-Demo/Replay */
         pf_m0 = n;
         pf_next = n + (unsigned)(g_cfg.pf_from > 0 ? g_cfg.pf_from : 0);
         HLOG_I("PF: Missionsbeginn f=%u, Bildfolge ab f=%u (%d Bilder)", n, pf_next, g_cfg.pf_ring);

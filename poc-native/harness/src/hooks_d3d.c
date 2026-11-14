@@ -70,6 +70,7 @@ u32 __stdcall hook_D3DDevice_Swap(u32 flags)
 {
     uint64_t now;
     (void)flags;
+    sb_rtt_rb_sync_resolve(3); /* W215: spaetestens am Bildende */
     g_frames++;
     if (g_frames == 1) {
         QueryPerformanceFrequency((LARGE_INTEGER *)&g_qpf);
@@ -1247,6 +1248,10 @@ u32 __stdcall hook_D3D_BlockOnTime(u32 a, u32 b)
     static u32 calls;
     (void)a;
     (void)b;
+    /* FIX(CULL-POPIN,W215): Das Spiel wartet hier auf die GPU (BlockOnFence
+     * nach der Zellenkarte, FUN_000459B0 @0x45B9D) - jetzt den RT-Inhalt in
+     * den Xbox-Speicher holen, wie ihn die Xbox an dieser Stelle sieht. */
+    sb_rtt_rb_sync_resolve(1);
     if (hlog_throttle(&calls)) {
         HLOG_T("D3D BlockOnTime -> no-op (GPU idle)");
     }

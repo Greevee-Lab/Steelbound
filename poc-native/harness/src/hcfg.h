@@ -171,9 +171,8 @@ typedef struct {
     int pad_dz_stick;    /* W143: globale Totzone Sticks in % (0..90, Default 0 = Profilwerte); wirkt als Untergrenze (max) */
     int pad_dz_trig;     /* W143: globale Totzone Trigger in % (0..90, Default 0 = Profilwerte); wirkt als Untergrenze (max) */
     /* W218 SIMPLE-CONTROLS (nur Maus/Tastatur/Gamepad, nie Original-Controller; Standard aus = bitgleich) */
-    int aim_turn;        /* 1 = Zielhebel X ueber der Schwelle steuert den Drehhebel mit (Fadenkreuz an den Rand -> Mech dreht) */
-    int aim_turn_thresh; /* Schwelle in % des Zielhebelwegs (0..95, Default 60) */
-    int aim_turn_gain;   /* Staerke in % (0..200, Default 100 = voller Drehhebel am Anschlag) */
+    int aim_assist;      /* W236: 0 = Original, 1 = Fadenkreuz am Rand dreht die Sicht, 2 = Waffenarm fest (Sicht folgt dem Arm). Altwert aim_turn=1 -> 1 */
+    int aim_assist_edge; /* W236: Rand fuer Stufe 1 in % der halben Bildbreite/-hoehe (30..100, Default 80) */
     int auto_gear;       /* 1 = automatischer Gangwechsel (Gas: hoch/runter nach Geschwindigkeit, Bremse im Stand = R) */
     int audio_ring_overwrite; /* W83: 1 = Ring-Ueberlapp: spaetere Schreibung ersetzt noch nicht gespielte FIFO-Frames (Xbox-Ring), 0 = alt (Clip: erste gewinnt) */
     int audio_ithis_fix;   /* W89: 1 = Puffer-Stop/GetStatus an den I-Wrappern 0x21F53C/0x21F598 hooken (diese rufen C-Ebene mit this-0x1C -> Stimme nie erkannt: Stop wirkungslos, Status immer STOPPED = Stimmenklau), 0 = alt */
@@ -213,6 +212,9 @@ typedef struct {
     int aspect_mode; /* W18: 1 = 2D in Spiel-Aspect-Box (Pillarbox, schwarze Balken) + 3D Hor+, 0 = alt (2D gestreckt) */
     int rtt; /* W23: 1 = Render-to-Texture umleiten (RTV+SRV je Surface) + sampeln, 0 = nur notieren */
     int rtt_readback; /* FIX(COMBAT,W59): 1 = LIN_X8R8G8B8-RTs bis 128x128 (Zellenkarte [0x35149C], Lock-On) nach jeder Session GPU->CPU in den Xbox-Speicher, 2 = + LIN_A8R8G8B8 bis 128x128, 3 = beide bis 512x512, 9 = DIAG ohne Schreiben, 0 = alt (GPU-only) */
+    int rtt_rb_sync; /* FIX(CULL-POPIN,W215): Standard 2. 1 = Zellenkarte (X8R8G8B8 bis 128x128) im selben Spiel-Bild zurueckschreiben (Kopie am Session-Ende, Abholung am BlockOnTime/BlockOnFence des Spiels), 2 = Zellenkarte auf der CPU rastern (kein GPU-Warten, Rueckfall auf 1 bei unbekannten Draws), 0 = alt (asynchron, >= 1 Session alt -> Gelaende fuer aeltere Kamera ausgewaehlt) */
+    int rtt_rb_cpu_ofs; /* W215: Versatz der CPU-Rasterung (rtt_rb_sync=2) in 1/256 Pixel auf die Xbox-Pixelkoordinaten (0 = Pixelmitte bei x+0,5) */
+    int rtt_rb_diag; /* DIAG(CULL-POPIN,W215): N > 0 = alle N Zellenkarten-Sessions Zeile RTTRB (Alter, fehlende Zellen gegen frischen Inhalt, Wartezeit); 1 = 300; blockierender Zusatz-Readback */
     int rtt_stale; /* FIX(MAP-RETRY,W124): 1 = veraltete RT-Eintraege (Textur freigegeben, neue RT auf derselben Datenadresse, Surface mit neuer Datenadresse) beim Sampeln ueberspringen, unter mehreren Treffern den zuletzt gerenderten nehmen, volle Tabelle verdraengt zuerst veraltete; 0 = alt (erster Daten-Treffer, nach Missions-Neustart sampelten Texturen alte RT-Inhalte) */
     int rtt_selfcopy; /* FIX(FX-HOLE,W106): 1 = Draws, die ihr eigenes RT sampeln, zeichnen ins RT und lesen eine Kopie (Xbox: Lesen+Schreiben derselben Flaeche); 0 = alt (Umbinden auf den Backbuffer, Rauch-Hitzeflimmern stanzt Loecher ins Cockpit) */
     int rtt_selfclip; /* FIX(SIDESMEAR,W45): 1 = Draws, die ihr eigenes RT sampeln, per Scissor auf Aspect-Box clippen (Seiten schwarz, Mitte exakt wie bisher), 0 = alt (Vollbild-Schmier) */
@@ -267,6 +269,8 @@ typedef struct {
     int rq_diag; /* DIAG(RENDER-QA,W77): 1 = Zensus Pixel-/Vertex-Shader, Nebel-/Stufen-Zustand (RQPS/RQVS/RQFOG/RQTSS/RQCOMBO) */
     int rq_every; /* DIAG(RENDER-QA,W77): RQCOMBO-Tabelle alle N Frames (Default 3000) */
     int flash_diag; /* DIAG(W194): 1..6 Vertexproben je Draw in Screenshot-Bildern, Standard 0 */
+    int eye_clip_all; /* OPTION(W224, H1; Standard 0): 1 = P2-Renderziel-Draws mit Ecke w<=0 behalten fuer ALLE Blendmodi homogene Koordinaten bis zum Rasterizer (Augenebenen-Clipping); 0 = alt (nur additiv ONE+ONE, W194) */
+    int eyeclip_diag; /* DIAG(W224): N = hoechstens N Zeilen EYECLIP je P2-Renderziel-Draw mit Ecke w<=0 (Blend, Primitiv, w-Bereich, Shader); 0 = aus */
     int flash_pixel; /* DIAG(W194): 1+x+65536*y, Pixelspur mit bloom_diag; 0 = aus */
     int interp_verify; /* DIAG(FPS-INTERP): N = jeden N-ten Tick exakte Wiedergabe gegen Spiel-Bild pruefen (INTERP verify), 0 = aus */
     int interp_bsets;  /* PERF(TICK-PERF,W125): N = Reserve-Saetze Tick-Puffer (VB/Stream2/Konstanten) mit GPU-Fence; die Aufnahme nimmt einen Satz, den die GPU nicht mehr liest (kein Warten im DISCARD-Map). 0 = alt (Puffer je Liste) */
@@ -302,6 +306,7 @@ typedef struct {
     int interp_inst; /* FIX(POPIN,W91): 1 = mehrfach gezeichnete Modelle (gleiche Signatur + Eingangsdaten, z. B. Haeuser) dem Vortick-Draw mit kleinstem Bildsprung zuordnen (gegenseitig naechster, eindeutig; sonst exakt), 0 = alt (Reihenfolge -> falsche Instanz, Haeuser poppen in Zwischenbildern) */
     int interp_pass; /* FIX(POPIN,W91): 1 = Durchgaenge derselben Instanz (gleiches Ziel + Geometrie + Matrix) im Tick gleich behandeln: ist einer exakt, alle exakt (kein Z-Fighting gelerpt gegen exakt in Zwischenbildern), 0 = alt */
     int pf_ring; /* DIAG(POPIN,W91): N = die naechsten N praesentierten Bilder (jedes Present, Spiel- und Zwischenbilder) ab pf_from Spiel-Frames nach Missionsbeginn auf der GPU in einen Ring kopieren (kein CPU-Stall), danach als shots/pf<s>_<i>_<art>.(jpg|bmp) schreiben + Zeilen PF; 0 = aus */
+    int pf_mode; /* DIAG(CULL-POPIN,W215): Anker der Bildfolge = Spielmodus [0x2EEA34] (Standard 4 = Mission, 2 = Titel-Demo/Replay) */
     int pf_from; /* DIAG(POPIN,W91): Start der Bildfolge in Spiel-Frames nach Missionsbeginn (Szene 0x2C, mloop=1) */
     int pf_every; /* DIAG(POPIN,W91): weitere Bildfolge alle N Spiel-Frames (0 = nur eine) */
     int pf_max; /* DIAG(POPIN,W91): Deckel Bildfolgen (Default 1) */
@@ -312,6 +317,8 @@ typedef struct {
     int rt_mission_any; /* TEST(PERF-BENCH,W137): mit rt_from_mission: erster Missionsbeginn (Szene 0x2C, mloop 1) unabhaengig vom Modus-Zaehler 0x2EEA34 (Kette ohne Titel-Demo), 0 = bisher (Modus 4) */
     int rt_interp_fps; /* TEST(PERF-BENCH,W137): mit rt_from_film/rt_from_mission: interp_fps beim Echtzeit-Wechsel setzen (Weg wie Overlay-Bildratenwechsel; Testtakt davor ohne Zwischenbilder), 0 = unveraendert */
     int movie_skip_delay; /* TEST(PERF-BENCH,W137): movie_skip-Tasten erst N Spiel-Frames nach der Filmerkennung (Film-Messfenster), 0 = bisher */
+    int interp_eyefix;    /* FIX(W224 LINE-FLICKER): 1 = Zwischenbild-VS nimmt fuer Vertices mit w-Vorzeichenwechsel zwischen Tick N-1 und N die Tick-N-Position (kein Clip-Lerp durch w=0 -> Linie quer durchs Bild); 0 = alt */
+    int interp_eyediag;   /* DIAG(W224): N = hoechstens N Zeilen INTERP eyex (zwischengerechnete Draws mit w-Wechsel einzelner Vertices) + Summen in INTERP stat2; CPU-Kopie der Clip-w je Vertex */
     float interp_maxjump; /* Plausibilitaet: max. NDC-Sprung eines Draws zwischen zwei Ticks (Default 0.5) */
     int im_fast; /* PERF(IM-PERF,W99): 1 = VB-Draws kompakt dekodieren (40 B statt 256-B-Slots je Vertex), Primitiv-Expansion direkt in den gemappten Puffer (IM-Ring/Tick-VB), keine Zwischenkopien; Bild bitgleich. 0 = alt. Diagnosen (rq_diag/fx_diag/Zensus/sbar_diag/interp_diag>=3) nehmen immer den alten Weg */
     int im_end_reset; /* FIX(EDGE,W64): 1 = End() schliesst den IM-Batch (kein Geister-Wiederholdraw beim naechsten VB-Draw), 0 = alt */

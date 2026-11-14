@@ -192,6 +192,9 @@ typedef enum {
 #define IMAP_JOY_IDX(c) (((c) >> 14) & 0xFF)
 #define IMAP_JOY_LO(c) (((c) >> 7) & 0x7F)
 #define IMAP_JOY_HI(c) ((c) & 0x7F)
+/* W226 JOY-AXIS-DIR: Achsen-Zone auf invertiertem Weg (":inv=1" an Z+/Z-/
+ * zone): Stellung% wird gespiegelt (100 - p), 0 % = Maximum. Freies Bit. */
+#define IMAP_JOY_INVF (1 << 22)
 
 typedef struct {
     imap_atom_kind_t kind;
@@ -355,14 +358,52 @@ int imap_arb_pad1(imap_arb1_t *a, int mouse, int pad, float mpos,
  * Nur Maus/Tastatur/Gamepad; mit aktivem Original-Controller ruft der Hook
  * beides nicht auf. Rein (ohne Spielspeicher), im input_selftest geprueft.
  *
- * imap_aim_turn: gekoppelte Ziel-/Drehsteuerung. Liegt der Zielhebel X
- * (aiming_x, Mitte 0x7F/0x80) betragsmaessig ueber thresh_pct % seines
- * Wegs, wird der Drehhebel anteilig mitgesteuert: Restweg ueber der
- * Schwelle (0..1) * gain_pct % * 127, Vorzeichen wie der Zielhebel
- * (rechts = +). Eine staerkere vorhandene Drehhebel-Auslenkung (A/D,
- * Stick) bleibt (betragsgroesste gewinnt). Rueckgabe: gesetzter
- * Drehhebel-Anteil (0 = keine Kopplung). */
-int imap_aim_turn(imap_block_t *blk, int thresh_pct, int gain_pct);
+ * W236 AIM-ASSIST (ersetzt die W218-Kopplung Zielhebel -> Drehhebel):
+ * imap_aim_assist fuehrt die COCKPIT-SICHT (Sichthebel sight_x/sight_y)
+ * dem Waffenarm (Zielhebel) nach. Spielmodell (FUN_00037290 @0x3796F,
+ * BERICHT_M2 W236): Der Sichthebel ist eine RATEN-Steuerung, je Spiel-Frame
+ * vyaw -= e_x * kv und vpit += pit_dir * e_y * kv mit e_x = sight_x,
+ * e_y = sight_y - pit_bias (Mapper: Out = ~sight_y), Totzone |e| <= dz
+ * (Missions-Mapper 0x4A3E8: |Out| <= 25,6 -> 0), kv = FOV [0x352290] *
+ * [0x26024C] * [0x25FCCC]; Anschlaege vyaw +-pi/2, vpit +-0.611 rad. Der
+ * Zielhebel ist eine POSITIONS-Steuerung relativ zum Rumpf (Ziel t =
+ * Stufen * sx bzw. sy), das Spiel glaettet ihn (arm += k*(t - arm),
+ * k = 0,0625; mit absoluter Maus W87 erreicht arm t im naechsten Frame,
+ * k = 1). Das Fadenkreuz steht im Bild um (arm - Sicht) neben der Mitte
+ * (Nick: arm - pit_rel*vpit, gemessen pit_rel = -1).
+ *   mode 1 "Rand dreht die Sicht": liegt (Arm - Sicht) ueber edge, wird die
+ *          Sicht so weit nachgefuehrt, dass das Fadenkreuz genau am Rand
+ *          bleibt (Totband = ganzer Bereich innerhalb des Rands, kein
+ *          Pendeln).
+ *   mode 2 "Waffenarm fest": auf Achsen mit Bit in lock_axes folgt die
+ *          Sicht dem Arm vollstaendig (Fadenkreuz in der Bildmitte); am
+ *          Sicht-Anschlag bewegt sich nur noch der Arm. Achsen ohne Bit
+ *          (Pad/Tasten) verhalten sich wie mode 1.
+ * Gesteuert wird auf den Sollwert der Sicht und den fuer das Frameende
+ * vorhergesagten Arm (arm + k*(t - arm)); der Arm haengt nicht von der
+ * Sicht ab, also kein Regelkreis. Sichthebel = (Soll - Ist)/kv, gerundet,
+ * +-127; Reste innerhalb der Totzone werden auf den kleinsten wirksamen
+ * Schritt (dz+1) gerundet oder verworfen (unter halbem Schritt) - so
+ * entsteht kein Pendeln. Eine eigene Sicht-Eingabe (sight_x/y != 0,
+ * Pfeile/Stick) gewinnt je Achse.
+ * Rueckgabe: Bit 0 = X gesteuert, Bit 1 = Y gesteuert (0 = nichts). */
+typedef struct {
+    float vyaw, vpit;   /* Sicht-Soll [0x35212C] / [0x355F04] (rad) */
+    float kv;           /* rad je Sichthebel-Stufe und Spiel-Frame */
+    float sx, sy;       /* rad je Zielhebel-Stufe (X -0.015, Y +-0.006136) */
+    float arm_x, arm_y; /* Arm geglaettet [0x356D08] / [0x3521BC] (rad) */
+    float arm_kx, arm_ky; /* Glaettung je Frame (0,0625; 1 = absolute Maus) */
+    int dz;             /* Totzone des Sichthebels im Spiel (25) */
+    float yaw_max;      /* Sicht-Anschlag Gierung (pi/2) */
+    float pit_max;      /* Sicht-Anschlag Nick (0.611) */
+    float edge_x;       /* Rand (rad Arm-Sicht), mode 1 */
+    float edge_y;
+    int pit_dir;        /* +1/-1: Wirkung e_y auf vpit ([0x346FAC]) */
+    int pit_rel;        /* +1/-1: Sicht-Nick im Vorzeichen des Arm-Nicks */
+    int pit_bias;       /* sight_y = e_y + pit_bias (Mapper Out = ~sight_y: -1) */
+    unsigned lock_axes; /* mode 2: Bit 0 X, Bit 1 Y (Achse kam von der Maus) */
+} imap_assist_in_t;
+int imap_aim_assist(imap_block_t *blk, int mode, const imap_assist_in_t *in);
 
 /* imap_autogear: automatischer Gangwechsel. Eingang je Poll: Block nach der
  * Abbildung (Gas = pedal_r, Bremse = pedal_m, Gang = gear 7=R 8=N 9..13 =

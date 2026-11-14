@@ -172,6 +172,25 @@ unsigned g_ip_sigparts[3]; /* DIAG: VS/Textur/PS des naechsten rec_draw (render_
 /* DIAG (interp_diag>=3): CPU-Kopie der Positionen je Liste (Ausreisser-Analyse) */
 static float (*ip_cpos[IP_LISTS])[4];
 static unsigned ip_ccap[IP_LISTS];
+/* DIAG(W224): Clip-w je Tick-VB-Vertex (nur interp_eyediag > 0) */
+static float *ip_cw[IP_LISTS];
+static unsigned ip_cwcap[IP_LISTS];
+static unsigned st_eyex_draws, st_eyex_verts, st_eyex_ln;
+static void ip_cw_rec(int li, unsigned vbcap, unsigned vstart, unsigned n, const float mvp[16],
+                      const im_vertex_t *v, const im_vertex_t *src, unsigned prim, unsigned nsrc)
+{
+    unsigned k;
+    if (ip_cwcap[li] < vbcap) {
+        free(ip_cw[li]);
+        ip_cw[li] = (float *)malloc((size_t)vbcap * sizeof(float));
+        ip_cwcap[li] = ip_cw[li] ? vbcap : 0u;
+    }
+    if (!ip_cw[li] || vstart + n > ip_cwcap[li]) { return; }
+    for (k = 0; k < n; k++) {
+        const float *p = v ? v[k].pos : src[sb_im_exp_src(prim, nsrc, k)].pos;
+        ip_cw[li][vstart + k] = p[0] * mvp[3] + p[1] * mvp[7] + p[2] * mvp[11] + p[3] * mvp[15];
+    }
+}
 
 static ip_list_t g_ipl[IP_LISTS];
 static ip_sh_t g_ish[IP_SH_MAX];
@@ -934,6 +953,9 @@ static const char *kIP_VS =
     "VSOUT main(VSIN i) { VSOUT o;\n"
     "  float4 c0 = mul(i.pos0, mvp0), c1 = mul(i.pos, mvp);\n"
     "  o.pos = c0 + ip_t * (c1 - c0);\n" /* gleiche Komponenten bleiben bitgenau (W73) */
+    "#ifdef IP_EYE\n" /* FIX(W224 LINE-FLICKER): w-Wechsel -> Tick N (kein Lauf durch w=0) */
+    "  if (c0.w * c1.w <= 0.0) { o.pos = c1; }\n"
+    "#endif\n"
     "  o.col = i.col; o.uv = i.uv; return o; }\n";
 
 static int ip_init(void)
@@ -949,7 +971,13 @@ static int ip_init(void)
     ip_init_done = 1;
     ip_init_fail = 1;
     for (i = 0; i < IP_LISTS; i++) { g_ipl[i].bbref = -1; }
-    if (!sb_im_compile(kIP_VS, "vs_4_0", &vsb)) { return 0; }
+    {
+        /* FIX(W224 LINE-FLICKER): interp_eyefix=1 -> Variante mit IP_EYE */
+        char ipsrc[2048];
+        _snprintf_s(ipsrc, sizeof ipsrc, _TRUNCATE, "%s%s",
+                    g_cfg.interp_eyefix ? "#define IP_EYE 1\n" : "", kIP_VS);
+        if (!sb_im_compile(ipsrc, "vs_4_0", &vsb)) { return 0; }
+    }
     hr = ID3D11Device_CreateVertexShader(g_dev, vsb->lpVtbl->GetBufferPointer(vsb),
                                          vsb->lpVtbl->GetBufferSize(vsb), NULL, &ip_vs2);
     if (FAILED(hr)) { vsb->lpVtbl->Release(vsb); return 0; }
@@ -1055,6 +1083,7 @@ void sb_interp_rec_draw(const im_vertex_t *v, unsigned n, unsigned topo,
         if (!sb_interp_vb_write(v, n, &vb, &vstart)) { L->overflow = 1; return; }
     }
     for (q = 0; q < 4u; q++) { memcpy(pref[q], v[(n - 1u) * q / 3u].pos, sizeof pref[q]); }
+    if (g_cfg.interp_eyediag > 0) { ip_cw_rec(ip_rec, L->vbcap, vstart, n, mvp, v, NULL, 0, 0); } /* DIAG(W224) */
     ip_rec_draw_core((const float (*)[4])pref, sb_interp_hash(v, sizeof *v, n), n, topo, mvp,
                      has_tex, cls, sig, rawhash, vstart, q0);
 }
@@ -1112,6 +1141,7 @@ void sb_interp_rec_draw_src(const im_vertex_t *src, unsigned prim, unsigned nsrc
     for (q = 0; q < 4u; q++) {
         memcpy(pref[q], src[sb_im_exp_src(prim, nsrc, (n - 1u) * q / 3u)].pos, sizeof pref[q]);
     }
+    if (g_cfg.interp_eyediag > 0) { ip_cw_rec(ip_rec, L->vbcap, vstart, n, mvp, NULL, src, prim, nsrc); } /* DIAG(W224) */
     step = n > 64u ? n / 64u : 1u; /* Stichprobe exakt wie sb_interp_hash */
     for (i = 0; i < n; i += step) {
         const unsigned *w = (const unsigned *)src[sb_im_exp_src(prim, nsrc, i)].pos;
@@ -1716,6 +1746,40 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
         }
         st_ipass += npass;
         if (npass <= nlerp) { nlerp -= npass; }
+    }
+    if (g_cfg.interp_eyediag > 0) {
+        /* DIAG(W224 LINE-FLICKER): zwischengerechnete Draws, in denen einzelne
+         * Vertices zwischen Tick N-1 und N die Augenebene kreuzen (w-Wechsel).
+         * Clip-Lerp laeuft dort durch w=0 -> Projektion ins Unendliche. */
+        const float *WA = ip_cw[(int)(A - g_ipl)], *WB = ip_cw[(int)(B - g_ipl)];
+        for (i = 0; WA && WB && i < B->nops; i++) {
+            const ip_op_t *o = &B->ops[i];
+            const ip_op_t *a;
+            unsigned k, nx = 0, ref = 0;
+            float wn = 0.0f, wa = 0.0f;
+            if (o->kind != IP_DRAW || !o->flag || o->match < 0) { continue; }
+            a = &A->ops[o->match];
+            if (a->nv != o->nv) { continue; }
+            if (a->vstart + a->nv > ip_cwcap[(int)(A - g_ipl)] ||
+                o->vstart + o->nv > ip_cwcap[(int)(B - g_ipl)]) { continue; }
+            for (k = 0; k < o->nv; k++) {
+                float w0 = WA[a->vstart + k], w1 = WB[o->vstart + k];
+                if (w0 * w1 <= 0.0f) {
+                    if (!nx) { wa = w0; wn = w1; ref = k; }
+                    nx++;
+                }
+            }
+            if (!nx) { continue; }
+            st_eyex_draws++;
+            st_eyex_verts += nx;
+            if (st_eyex_ln < (unsigned)g_cfg.interp_eyediag) {
+                st_eyex_ln++;
+                HLOG_I("INTERP eyex f=%u i=%u why=%s cls=%u rt=%d n=%u nx=%u k=%u w=%.3f->%.3f topo=%u vs=%X",
+                       B->frame, i, o->why == IP_W_LERP ? "lerp" : o->why == IP_W_RAWLERP ? "rawlerp" :
+                       o->why == IP_W_RT2DLERP ? "rt2dlerp" : "?", o->cls, o->rtv != g_rtv, o->nv, nx,
+                       ref, wa, wn, o->topo, o->pvs);
+            }
+        }
     }
     st_lerp += nlerp; st_static += nstatic; st_nomatch += nnomatch;
     st_rawchg += nrawchg; st_reject += nreject; st_2d += n2d; st_rawlerp += nrawlerp;
@@ -2784,7 +2848,10 @@ static const char *kIP_VR_VS =
     "VSOUT main(VSIN i) { VSOUT o;\n"
     "  float4 c = mul(i.pos, mvp);\n"
     "#ifdef VR_LERP\n"
-    "  float4 c0 = mul(i.pos0, mvp0); c = c0 + ip_t * (c - c0);\n"
+    "  float4 c0 = mul(i.pos0, mvp0); float4 cn = c; c = c0 + ip_t * (c - c0);\n"
+    "#ifdef IP_EYE\n" /* FIX(W224) wie kIP_VS */
+    "  if (c0.w * cn.w <= 0.0) { c = cn; }\n"
+    "#endif\n"
     "#endif\n"
     "  float2 n = c.xy / c.w; float zn = c.z / c.w; float3 v; float md = 0.0;\n"
     "  if (k2.z > 1.5) { float d = clamp(k.z + k.w * (zn - k2.x), k.z - k2.y, k.z + k2.y);\n"
@@ -2809,7 +2876,8 @@ static int ip_vr_init(void)
         b->lpVtbl->Release(b);
         b = NULL;
     }
-    _snprintf_s(src, sizeof src, _TRUNCATE, "#define VR_LERP 1\n%s", kIP_VR_VS);
+    _snprintf_s(src, sizeof src, _TRUNCATE, "#define VR_LERP 1\n%s%s",
+                g_cfg.interp_eyefix ? "#define IP_EYE 1\n" : "", kIP_VR_VS); /* W224 */
     if (sb_im_compile(src, "vs_4_0", &b)) {
         ID3D11Device_CreateVertexShader(g_dev, b->lpVtbl->GetBufferPointer(b), b->lpVtbl->GetBufferSize(b), NULL, &ip_vr_vs2);
         b->lpVtbl->Release(b);
@@ -4745,6 +4813,11 @@ static void ip_stat_log(void)
            st_r_n ? st_r_ms / st_r_n : 0.0, st_r_max, st_lat_n ? st_lat_ms / st_lat_n : 0.0,
            st_verify - st_verify_bad, st_verify);
     HLOG_I("INTERP stat2: geo=%u (Geometrie-Partner, in lerp enthalten)", st_geo);
+    if (g_cfg.interp_eyediag > 0) { /* DIAG(W224) */
+        HLOG_I("INTERP eyesum: draws=%u verts=%u (w-Wechsel in zwischengerechneten Draws, eyefix=%d)",
+               st_eyex_draws, st_eyex_verts, g_cfg.interp_eyefix);
+        st_eyex_draws = st_eyex_verts = 0;
+    }
     HLOG_I("INTERP inst: multi=%u wrong=%u amb=%u pass=%u (interp_inst=%d interp_pass=%d)", st_imulti,
            st_iwrong, st_iamb, st_ipass, g_cfg.interp_inst, g_cfg.interp_pass); /* POPIN (W91) */
     if (ip_rt_ok) { /* W126 RENDER-THREAD */

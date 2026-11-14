@@ -272,6 +272,9 @@ int rqv_hlsl_ex(const rqv_prog_t *p, int lerp, const rqv_raw_t *raw, char *buf, 
     if (lerp) {
         rqs(&s, "  float4 c0 = mul(i.pos0, mvp0), c1 = mul(i.pos, mvp);\n"
                 "  o.pos = c0 + ip_t * (c1 - c0);\n");
+        if (lerp == 2) { /* FIX(W224 LINE-FLICKER): w-Wechsel N-1/N -> Tick N */
+            rqs(&s, "  if (c0.w * c1.w <= 0.0) { o.pos = c1; }\n");
+        }
     } else {
         rqs(&s, "  o.pos = mul(i.pos, mvp);\n");
     }

@@ -72,6 +72,8 @@ typedef struct {
     char lang[8];      /* W142: --lang en|de (leer = aus cfg) */
     char assist_mode[16];      /* W143: shot=5 Modus */
     char assist_fixture[1024]; /* W143: shot=5 Fixture (leer = Geraet/keine) */
+    int bind_joydemo;          /* W226: --bind-shot=joy (Beispiel-HOTAS) */
+    int bind_learn;            /* W228: --bind-learn (Lernmodus im Bild) */
     int bind_sel;              /* W159: shot=3 Element-Index vorwaehlen + in
                                 * Sicht scrollen (-1 = Standard: erstes) */
     char state[32];            /* W171: --ui-shot --state NAME (Regelzustand,

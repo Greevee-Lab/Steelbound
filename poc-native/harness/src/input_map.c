@@ -343,6 +343,7 @@ static int imap_joy_atom_active(int code, const imap_snap_t *snap)
         int lo = IMAP_JOY_LO(code), hi = IMAP_JOY_HI(code);
         if (idx >= IJOY_AXES) return 0;
         p = ((float)js->axis[idx] + 32768.0f) * 100.0f / 65535.0f;
+        if (code & IMAP_JOY_INVF) p = 100.0f - p; /* W226: inv=1 */
         return p >= (float)lo && (p < (float)hi || (hi >= 100 && p <= 100.0f));
     }
     }
@@ -1467,6 +1468,18 @@ static int imap_atom_parse_dig(const char *kind, const char *name,
     }
 }
 
+/* W226: Akkord-'+' suchen. Ein '+' direkt vor Ende, ':' oder '+' gehoert
+ * zum Namen (JOY-Achse als Taste "JOY0:Z+", "JOY0:Z+:inv=1", Akkord
+ * "JOY0:Z++JOY0:B1"); vorher wurde "JOY0:Z+" als leerer Akkord verworfen. */
+static char *imap_chord_plus(char *s)
+{
+    char *p;
+    for (p = strchr(s, '+'); p; p = strchr(p + 1, '+')) {
+        if (p[1] && p[1] != ':' && p[1] != '+') return p;
+    }
+    return NULL;
+}
+
 /* Eine Alternative "SRC[+SRC][:param...]" an eine Bindung haengen. */
 static int imap_bind_add(imap_bind_t *b, const char *text, int *has_pad,
                          int *has_sbc)
@@ -1475,7 +1488,7 @@ static int imap_bind_add(imap_bind_t *b, const char *text, int *has_pad,
     imap_chord_t c;
     memset(&c, 0, sizeof c);
     strncpy_s(work, sizeof work, text, sizeof work - 1);
-    plus = strchr(work, '+');
+    plus = imap_chord_plus(work);
     params = NULL;
     if (plus) {
         /* Akkord: Parameter nur am zweiten Atom (in der Praxis ungenutzt). */
@@ -1538,7 +1551,15 @@ static int imap_bind_add(imap_bind_t *b, const char *text, int *has_pad,
                     hi = atoi(mi + 1);
                     if (lo < 0 || hi > 100 || lo >= hi) return -1;
                     za->code = IMAP_JOY_CODE(IMAP_JOY_SLOT(za->code), 2,
-                                             IMAP_JOY_IDX(za->code), lo, hi);
+                                             IMAP_JOY_IDX(za->code), lo, hi) |
+                               (za->code & IMAP_JOY_INVF);
+                } else if (imap_strieq(p, "inv")) {
+                    /* W226: Achsen-Zone bzw. Z+/Z- auf invertiertem Weg */
+                    imap_atom_t *za = c.chord ? &c.b : &c.a;
+                    if (za->kind != IMAP_A_JOY || IMAP_JOY_TYP(za->code) != 2)
+                        return -1;
+                    if (atoi(eq) != 0) za->code |= IMAP_JOY_INVF;
+                    else za->code &= ~IMAP_JOY_INVF;
                 } else {
                     return -1; /* unbekannter Param */
                 }
@@ -2208,26 +2229,77 @@ void imap_arb_axes(imap_arb_t *a, const imap_arb_in_t *in, int out[IMAP_ARB_N])
     }
 }
 
-/* ---- W218 SIMPLE-CONTROLS (s. input_map.h) ---- */
-int imap_aim_turn(imap_block_t *blk, int thresh_pct, int gain_pct)
+/* ---- W236 AIM-ASSIST (s. input_map.h) ---- */
+static float imap_clampf(float v, float lo, float hi)
 {
-    int ax = blk->aiming_x, r;
-    float dev, t, e;
-    if (thresh_pct < 0) thresh_pct = 0;
-    if (thresh_pct > 95) thresh_pct = 95;
-    if (gain_pct < 0) gain_pct = 0;
-    if (gain_pct > 200) gain_pct = 200;
-    /* Hebel-Kennlinie: 0x7F/0x80 = Mitte, 0x00 = -1, 0xFF = +1 */
-    dev = ax >= 0x80 ? (float)(ax - 0x80) / 127.0f : (float)(ax - 0x7F) / 127.0f;
-    t = (float)thresh_pct / 100.0f;
-    if (fabsf(dev) <= t || gain_pct == 0) return 0;
-    e = (fabsf(dev) - t) / (1.0f - t);
-    r = (int)lroundf(e * (float)gain_pct / 100.0f * 127.0f);
-    r = imap_clampi(r, 0, 127);
-    if (dev < 0.0f) r = -r;
-    if (r == 0) return 0;
-    if (abs(r) > abs((int)blk->rot_lever)) blk->rot_lever = (int8_t)r;
-    return r;
+    return v < lo ? lo : (v > hi ? hi : v);
+}
+
+/* Sicht-Soll einer Achse: Arm a, Sicht v (beide im selben Vorzeichen),
+ * lock = Sicht folgt dem Arm ganz, sonst nur ueber den Rand edge hinaus. */
+static float imap_assist_target(float a, float v, int lock, float edge,
+                                float vmax)
+{
+    float vd = v, rel = a - v;
+    if (lock) vd = a;
+    else if (rel > edge) vd = a - edge;
+    else if (rel < -edge) vd = a + edge;
+    return imap_clampf(vd, -vmax, vmax);
+}
+
+/* Wirksamer Sichthebel-Wert fuer die gewuenschte Aenderung du (Einheiten
+ * kv): gerundet; in der Spiel-Totzone (|q| <= dz) entweder der kleinste
+ * wirksame Schritt (ab halbem Schritt) oder 0 - Restfehler <= halber
+ * Schritt, kein Grenzzyklus. */
+static long imap_assist_q(float du, int dz)
+{
+    long q = lroundf(du);
+    if (dz > 0 && labs(q) <= dz)
+        q = (2.0f * fabsf(du) >= (float)(dz + 1)) ? (du < 0 ? -(dz + 1) : dz + 1) : 0;
+    if (q > 127) q = 127;
+    if (q < -127) q = -127;
+    return q;
+}
+
+int imap_aim_assist(imap_block_t *blk, int mode, const imap_assist_in_t *in)
+{
+    int mask = 0;
+    if ((mode != 1 && mode != 2) || !in || !(in->kv > 1e-7f)) return 0;
+    if (blk->sight_x == 0 && in->sx != 0.0f) {
+        int ax = blk->aiming_x;
+        int nx = ax >= 0x80 ? ax - 0x80 : ax - 0x7F; /* Totzone 0x7F/0x80 */
+        float t = (float)nx * in->sx;
+        float a = in->arm_x + in->arm_kx * (t - in->arm_x); /* Arm am Frameende */
+        int lock = mode == 2 && (in->lock_axes & 1u);
+        float vd = imap_assist_target(a, in->vyaw, lock, in->edge_x,
+                                      in->yaw_max);
+        /* vyaw' = vyaw - sight_x * kv */
+        long q = imap_assist_q((in->vyaw - vd) / in->kv, in->dz);
+        if (q) {
+            blk->sight_x = (int8_t)q;
+            mask |= 1;
+        }
+    }
+    if (blk->sight_y == 0 && in->sy != 0.0f && in->pit_dir && in->pit_rel) {
+        int ay = blk->aiming_y;
+        int ny = ay <= 0x7F ? 0x7F - ay : 0x80 - ay; /* Hebel 0x00-Seite = + */
+        float t = (float)ny * in->sy;
+        float b = in->arm_y + in->arm_ky * (t - in->arm_y);
+        float w = (float)in->pit_rel * in->vpit;
+        int lock = mode == 2 && (in->lock_axes & 2u);
+        float wd = imap_assist_target(b, w, lock, in->edge_y, in->pit_max);
+        /* vpit' = vpit + pit_dir * e_y * kv, sight_y = e_y + pit_bias */
+        float dv = (float)in->pit_rel * wd - in->vpit;
+        long e = imap_assist_q(dv / ((float)in->pit_dir * in->kv), in->dz);
+        if (e) {
+            long q = e + in->pit_bias;
+            if (q > 127) q = 127;
+            if (q < -127) q = -127;
+            blk->sight_y = (int8_t)q;
+            mask |= 2;
+        }
+    }
+    return mask;
 }
 
 void imap_autogear_defaults(imap_autogear_cfg_t *c)

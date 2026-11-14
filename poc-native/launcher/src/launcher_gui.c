@@ -228,7 +228,7 @@ int gui_page_from_name(const char *v)
 #define ID_PH_ASP 1101     /* W195: Bildformat ohne Cockpit */
 #define ID_CPERSP 1102 /* W191 UW-PERSP: Cockpit-Perspektive (Anzeige > Seitenverhaeltnis) */
 #define ID_CPANINI 1103 /* W191 UW-PERSP: Panini der Cockpit-Ansicht */
-#define ID_CTRL_AIMTURN 1104 /* W218 SIMPLE-CONTROLS: Fadenkreuz am Rand dreht den Mech */
+#define ID_CTRL_AIMASSIST 1104 /* W236 AIM-ASSIST: Zielhilfe (Original / Rand dreht Sicht / Waffenarm fest) */
 #define ID_CTRL_AUTOGEAR 1105 /* W218 SIMPLE-CONTROLS: automatischer Gangwechsel */
 #define ID_CTRL_JOY 1106 /* W221 HOTAS (experimentell): Joystick-Dialog */
 static char g_img_msg[600]; /* W150: Ergebnis der letzten Abbild-Pruefung (UTF-8) */
@@ -341,6 +341,9 @@ static void xbe_derived(const launcher_settings_t *s, char *out, size_t cap);
 static int path_eq(const char *a, const char *b);
 static void tips_place(void);
 static int ui_refresh_visibility(void);
+/* W227: Breite der linken Auswahl in den Zeilen Verlauf/Cockpit (Anzeige);
+ * die rechte ("Strength 100 %") bekommt den Rest. */
+#define EDGE_W1 88
 static void show_page(int p);
 static int ui_confirm(const char *text, const char *title);
 static void set_status_k(const char *msg, int kind); /* W187 */
@@ -1462,7 +1465,7 @@ static void keys_tabstops(void)
     GetTextMetricsW(dc, &tm);
     SelectObject(dc, o);
     ReleaseDC(e, dc);
-    du = MulDiv(SX(112), 4, tm.tmAveCharWidth ? tm.tmAveCharWidth : 7);
+    du = MulDiv(SX(100), 4, tm.tmAveCharWidth ? tm.tmAveCharWidth : 7); /* W227: 112 -> 100, zweite Spalte passt */
     SendMessageW(e, EM_SETTABSTOPS, 1, (LPARAM)&du);
 }
 
@@ -1772,7 +1775,7 @@ static void play_setup_rows(psrow_t *rw)
     rw[PSR_FOLDERQ].text = LT("gui.play_folder_q");
     rw[PSR_FOLDERQ].font = F_SMALL;
     rw[PSR_FOLDERQ].x = CX0 + 18; rw[PSR_FOLDERQ].y = CY0 + 400;
-    rw[PSR_FOLDERQ].w = CW - 36 - 196; rw[PSR_FOLDERQ].h = 24;
+    rw[PSR_FOLDERQ].w = CW - 36 - 240; rw[PSR_FOLDERQ].h = 24; /* W227: Knopf 230 */
     rw[PSR_FOLDERQ].single = 1; rw[PSR_FOLDERQ].col = C_DIM;
 }
 
@@ -1846,6 +1849,22 @@ static void paint_play(void)
 /* W183 VR-FIX3: Stufen der VR-Render-Aufloesung (Kombi ID_VRRES) */
 static const int kVrRes[] = { 50, 60, 65, 70, 80, 85, 90, 100, 120 };
 #define KVRRES_N ((int)(sizeof kVrRes / sizeof kVrRes[0]))
+static void combo_add(HWND cb, const char *u8);
+/* W227: Eintraege mit Beschriftung ("Res. 80 %"), auch beim Sprachwechsel */
+static void vrres_fill(HWND c)
+{
+    int i, sel = ComboBox_GetCurSel(c);
+    ComboBox_ResetContent(c);
+    for (i = 0; i < KVRRES_N; i++) {
+        char t[32];
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.vr_res_fmt"), kVrRes[i]);
+        combo_add(c, t);
+    }
+    if (sel >= 0) {
+        ComboBox_SetCurSel(c, sel);
+    }
+}
+
 static int vrres_index(int pct)
 {
     int k, best = 0;
@@ -1891,9 +1910,10 @@ static void paint_display(void)
     }
     /* W191 UW-PERSP: Cockpit-Perspektive + Hinweis "nur Desktop" (R34 bei VR) */
     label1(F_SMALL, LT("gui.cpersp"), COL2 + 18, CY0 + 186, 100, 30, C_DIM);
-    paint_reason(33, COL2 + 120, CY0 + 218, COLW - 138, 16);
-    paint_preview(COL2 + 18, CY0 + 244, COLW - 36, 60);
-    label(F_SMALL, g_aspect_info, COL2 + 18, CY0 + 308, COLW - 36, 64, C_TEXT);
+    label1(F_SMALL, LT("gui.cpanini"), COL2 + 18, CY0 + 222, 100, 30, C_DIM); /* W227 */
+    paint_reason(33, COL2 + 120, CY0 + 254, COLW - 138, 16);
+    paint_preview(COL2 + 18, CY0 + 274, COLW - 36, 50);
+    label(F_SMALL, g_aspect_info, COL2 + 18, CY0 + 330, COLW - 36, 44, C_TEXT);
 
     card(COL2, CY0 + 388, COLW, 108, LT("gui.disp_perf"));
     label1(F_SMALL, LT("gui.rs_label"), COL2 + 18, CY0 + 432, 100, 30, C_DIM);
@@ -2063,7 +2083,7 @@ static void paint_ctrl(void)
     label1(F_SEMI, LT("gui.ctl_prim_keys"), COL2 + 32, CY0 + 68, COLW - 60, 24,
            C_TEXT);
     label1(F_SMALL, LT("gui.ctl_mouse"), COL2 + 18, CY0 + 108, 56, 30, C_DIM);
-    label1(F_SMALL, LT("gui.ctl_sens"), COL2 + COLW - 18 - 70 - 52, CY0 + 108,
+    label1(F_SMALL, LT("gui.ctl_sens"), COL2 + COLW - 18 - 54 - 48, CY0 + 108,
            48, 30, C_DIM);
     paint_reason(24, COL2 + 18, CY0 + 142, COLW - 36, 16);
 }
@@ -2334,8 +2354,8 @@ static void paint_adv(void)
 
     /* Gespeicherte Einstellungen (Glossar: "Saved setup") */
     card(CX0, CY0 + 354, COLW, 142, LT("gui.adv_setups"));
-    if (!paint_reason(28, CX0 + 18, CY0 + 484, COLW - 36, 12)) {
-        label1(F_TINY, g_prof_info, CX0 + 18, CY0 + 484, COLW - 36, 12, C_DIM);
+    if (!paint_reason(28, CX0 + 18, CY0 + 479, COLW - 36, 12)) {
+        label1(F_TINY, g_prof_info, CX0 + 18, CY0 + 479, COLW - 36, 12, C_DIM);
     }
 
     card(COL2, CY0, COLW, 124, LT("gui.adv_finetune"));
@@ -3837,7 +3857,7 @@ static void ks_alt(const char *alt, char *out, size_t cap, int *src)
     for (;;) {
         char t[64];
         int s;
-        plus = strchr(p, '+');
+        plus = (char *)lctrl_chord_plus(p); /* W226: "JOY0:Z+" */
         if (plus) {
             *plus = '\0';
         }
@@ -5541,7 +5561,8 @@ static void ui_from_settings(const launcher_settings_t *s)
     refresh_ctrl_profiles(s->input_profile);
     ui_set_checked(ID_CTRL_SBC, s->sbc_usb);
     ui_set_checked(ID_CTRL_MOUSEOFF, s->sbc_mouse_off);
-    ui_set_checked(ID_CTRL_AIMTURN, s->aim_turn);   /* W218 */
+    ComboBox_SetCurSel(ctl(ID_CTRL_AIMASSIST),
+                       (s->aim_assist >= 0 && s->aim_assist <= 2) ? s->aim_assist : 0); /* W236 */
     ui_set_checked(ID_CTRL_AUTOGEAR, s->auto_gear);
     ComboBox_SetCurSel(ctl(ID_IPFPS), ip_sel_of(s->interp_fps)); /* W223 */
     ComboBox_SetCurSel(ctl(ID_WINMODE),
@@ -5630,7 +5651,8 @@ static void ui_to_settings(launcher_settings_t *s)
     ctrl_profile_from_ui(s->input_profile, sizeof s->input_profile);
     s->sbc_usb = ui_checked(ID_CTRL_SBC);
     s->sbc_mouse_off = ui_checked(ID_CTRL_MOUSEOFF);
-    s->aim_turn = ui_checked(ID_CTRL_AIMTURN);   /* W218 */
+    s->aim_assist = ComboBox_GetCurSel(ctl(ID_CTRL_AIMASSIST)); /* W236 */
+    if (s->aim_assist < 0 || s->aim_assist > 2) s->aim_assist = 0;
     s->auto_gear = ui_checked(ID_CTRL_AUTOGEAR);
     sel = ComboBox_GetCurSel(ctl(ID_IPFPS));
     s->interp_fps = (sel >= 0 && sel < SB_FPS_NCHOICE) ? kSbFpsChoice[sel] : 0; /* W223 */
@@ -6484,9 +6506,36 @@ static void browse_media(void)
 #define IDB_JLBL 517   /* W221: Joystick-Achse Totzone/Invertierung */
 #define IDB_JDZ 518
 #define IDB_JINV 519
-#define IDB_JAPPLY 520
+#define IDB_JLIVE 521  /* W226: Live Roh -> Ergebnis */
+/* W228 BIND-DIALOG: Detailbereich + Fusszeile */
+#define IDB_DNAME 522  /* Ueberschrift = Anzeigename der Aktion */
+#define IDB_SRC 523    /* Quellen der Aktion, eine Zeile je Quelle */
+#define IDB_SRCL 524
+#define IDB_JHINT 525  /* Achse ohne JOY-Quelle: Hinweis */
+#define IDB_CONFL 526  /* Konflikte: Ueberschrift bzw. "Keine Konflikte" */
+#define IDB_FSTAT 527  /* Fusszeile: Speichern/Pruefen */
+#define IDB_NAMEL 528
+#define IDB_INI 529
+#define IDB_JDZL 530
+#define IDB_JNOW 531
+/* Rahmen (logische Punkte, SX skaliert) */
+#define BD_W 860
+#define BD_H 680
+#define BD_LX 16   /* Liste */
+#define BD_LW 340
+#define BD_TOP 40
+#define BD_BOT 594
+#define BD_CX 368  /* Detail-Karte */
+#define BD_CW 476
+#define BD_IX 384  /* Karte innen */
+#define BD_IW 444
+#define BD_FSEP 606 /* Trennlinie Fusszeile */
+#define BD_ROW_H 24
 
 static lctrl_bind_t g_bind, g_bind_base;
+static lctrl_bind_t g_bind_clean; /* W228: Stand beim Oeffnen/Speichern */
+static int g_bind_nconf, g_bind_lay = -1, g_bind_src_reset, g_bind_joyset;
+static int g_bind_lb_prev = -1;
 static char g_bind_base_name[64];
 static char g_bind_saved[64];
 static int g_bind_sel = -1;
@@ -6503,7 +6552,11 @@ static volatile LONG g_cap_sbc_stop;
 /* W221 HOTAS: Joystick-Lernmodus (Ruhestellung beim Start, letzter Poll). */
 static int g_cap_jn;
 static ijoy_info_t g_cap_jl[IJOY_MAX_DEV];
-static imap_joy_state_t g_cap_jbase[IJOY_MAX_DEV], g_cap_jprev[IJOY_MAX_DEV];
+/* W226: Lernen ueber mehrere Abtastungen (Basis einschwingen, Spitze). */
+static lctrl_joy_learner_t g_cap_jlrn[IJOY_MAX_DEV];
+/* W226: Live-Zeile im Belegungs-Dialog (Roh -> Ergebnis, Timer 10). */
+static int g_live_scanned, g_live_n, g_bind_joydemo;
+static ijoy_info_t g_live_jl[IJOY_MAX_DEV];
 
 static DWORD WINAPI bind_sbc_thread(LPVOID arg)
 {
@@ -6546,6 +6599,19 @@ static HWND bctl(HWND hd, int id)
     return GetDlgItem(hd, id);
 }
 
+/* W228: Ergebniszeile im Detailbereich; leer = ausgeblendet (keine Luecke). */
+static int g_bind_res_on;
+static void bind_layout(HWND hd);
+static void bind_set_result(HWND hd, const char *u8)
+{
+    int on = u8 && *u8;
+    ui_settext(bctl(hd, IDB_RESULT), u8 ? u8 : "");
+    if (on != g_bind_res_on) {
+        g_bind_res_on = on;
+        bind_layout(hd);
+    }
+}
+
 /* W221 HOTAS: Totzone/Invertierung der JOY-Achsenquellen der gewaehlten
  * Belegung anzeigen (erste JOY-Achse gibt die Werte vor). */
 static void bind_joy_row(HWND hd)
@@ -6556,10 +6622,13 @@ static void bind_joy_row(HWND hd)
     if (g_bind_sel >= 0 && g_bind_sel < LCTRL_ELEM_N) {
         for (a = 0; a < g_bind.row[g_bind_sel].n_alt && !has; a++) {
             const char *alt = g_bind.row[g_bind_sel].alt[a];
-            if (lctrl_joy_is_axis(alt, NULL, NULL)) {
+            int k = lctrl_joy_src_axis(alt, NULL, NULL); /* W226 */
+            if (k) {
                 char v[16];
-                has = 1;
-                if (!lctrl_joy_param_get(alt, "dz", dz, sizeof dz)) {
+                has = k;
+                if (k == 2) {
+                    dz[0] = '\0'; /* Achse als Taste: keine Totzone */
+                } else if (!lctrl_joy_param_get(alt, "dz", dz, sizeof dz)) {
                     strcpy_s(dz, sizeof dz, "0");
                 }
                 inv = lctrl_joy_param_get(alt, "inv", v, sizeof v) &&
@@ -6568,21 +6637,93 @@ static void bind_joy_row(HWND hd)
         }
     }
     en = has && !g_cap_mode;
+    g_bind_joyset = 1; /* W228: EN_CHANGE beim Setzen nicht uebernehmen */
     ui_settext(bctl(hd, IDB_JDZ), has ? dz : "");
+    g_bind_joyset = 0;
     if (u) {
         u->checked = inv;
         InvalidateRect(u->h, NULL, FALSE);
     }
-    EnableWindow(bctl(hd, IDB_JDZ), en);
+    EnableWindow(bctl(hd, IDB_JDZ), en && has == 1);
     EnableWindow(bctl(hd, IDB_JINV), en);
-    EnableWindow(bctl(hd, IDB_JAPPLY), en);
 }
 
 static void bind_refresh_cur(HWND hd);
+static void bind_refresh(HWND hd, int keep_joy);
 static void bind_refresh_conf(HWND hd);
+static void list_add(HWND lb, const char *u8, LPARAM data, int with_data);
+
+/* W226: Live-Zeile "Roh -> Ergebnis" fuer die erste JOY-Achsenquelle der
+ * gewaehlten Belegung (Timer 10, 100 ms; Geraete einmal bei Bedarf suchen,
+ * im Shot-Modus Beispielwert ohne DirectInput). */
+static void bind_joy_live(HWND hd)
+{
+    char t[200], r[48];
+    const char *alt = NULL;
+    int a, slot = 0, ax = 0, kind = 0, raw = 0, have = 0, pedal;
+    float v = 0.0f;
+    if (g_bind_sel < 0 || g_bind_sel >= LCTRL_ELEM_N) {
+        ui_settext(bctl(hd, IDB_JLIVE), "");
+        return;
+    }
+    for (a = 0; a < g_bind.row[g_bind_sel].n_alt && !kind; a++) {
+        alt = g_bind.row[g_bind_sel].alt[a];
+        kind = lctrl_joy_src_axis(alt, &slot, &ax);
+    }
+    if (!kind) {
+        ui_settext(bctl(hd, IDB_JLIVE), "");
+        return;
+    }
+    if (g_bind_joydemo) {
+        raw = 32767; /* Beispiel: umgekehrter Schubhebel in Ruhe */
+        have = 1;
+    } else if (!g_o.shot) {
+        int dev;
+        imap_joy_state_t st;
+        if (!g_live_scanned) {
+            int i, n;
+            g_live_scanned = 1;
+            g_live_n = 0;
+            if (ijoy_init() == 0) {
+                n = ijoy_scan();
+                for (i = 0; i < n && i < IJOY_MAX_DEV; i++) {
+                    const ijoy_info_t *in = ijoy_info(i);
+                    if (!in) {
+                        break;
+                    }
+                    g_live_jl[i] = *in;
+                    g_live_n = i + 1;
+                }
+            }
+        }
+        dev = ijoy_match_list(g_live_jl, g_live_n, g_bind.joy[slot], slot);
+        if (dev >= 0 && ijoy_read(dev, &st)) {
+            raw = st.axis[ax];
+            have = 1;
+        }
+    }
+    if (!have) {
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.joy_live_none"), slot + 1);
+        ui_settext(bctl(hd, IDB_JLIVE), t);
+        return;
+    }
+    pedal = strncmp(kCtrlElems[g_bind_sel].key, "pedal", 5) == 0;
+    kind = lctrl_joy_eval(alt, pedal, raw, &v);
+    if (kind == 2) {
+        strcpy_s(r, sizeof r, LT(v > 0.5f ? "gui.joy_live_on" : "gui.joy_live_off"));
+    } else if (pedal) {
+        _snprintf_s(r, sizeof r, _TRUNCATE, "%.0f %%", v * 100.0f);
+    } else {
+        _snprintf_s(r, sizeof r, _TRUNCATE, "%+.0f %%", v * 100.0f);
+    }
+    _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.joy_live_val"), slot + 1,
+                ijoy_axis_name(ax), raw, r);
+    ui_settext(bctl(hd, IDB_JLIVE), t);
+}
 
 /* W221: Totzone (0..0.9) + Invertierung in alle JOY-Achsenquellen der
- * gewaehlten Belegung schreiben (dz=0 entfernt den Parameter). */
+ * gewaehlten Belegung schreiben (dz=0 entfernt den Parameter). W228: wirkt
+ * sofort (Eingabe/Schalter), das Eingabefeld bleibt dabei unangetastet. */
 static void bind_joy_apply(HWND hd)
 {
     char t[32], dz[16], res[256];
@@ -6602,16 +6743,19 @@ static void bind_joy_apply(HWND hd)
     }
     v = t[0] ? atof(t) : 0.0;
     if (v < 0.0 || v > 0.9) {
-        ui_settext(bctl(hd, IDB_RESULT), LT("gui.joy_baddz"));
+        bind_set_result(hd, LT("gui.joy_baddz"));
         return;
     }
     _snprintf_s(dz, sizeof dz, _TRUNCATE, "%.2f", v);
     inv = u ? u->checked : 0;
     for (a = 0; a < g_bind.row[g_bind_sel].n_alt; a++) {
         char *alt = g_bind.row[g_bind_sel].alt[a];
-        if (lctrl_joy_is_axis(alt, NULL, NULL)) {
+        int k = lctrl_joy_src_axis(alt, NULL, NULL); /* W226 */
+        if (k == 1) {
             lctrl_joy_param_set(alt, sizeof g_bind.row[0].alt[0], "dz",
                                 v > 0.0 ? dz : NULL);
+        }
+        if (k) { /* Invertieren auch fuer Z+/Z-/Zone (Weg gespiegelt) */
             lctrl_joy_param_set(alt, sizeof g_bind.row[0].alt[0], "inv",
                                 inv ? "1" : NULL);
         }
@@ -6621,49 +6765,119 @@ static void bind_joy_apply(HWND hd)
         char line[400];
         _snprintf_s(line, sizeof line, _TRUNCATE, "%s = %s.",
                     kCtrlElems[g_bind_sel].key, res);
-        ui_settext(bctl(hd, IDB_RESULT), line);
+        bind_set_result(hd, line);
     }
-    bind_refresh_cur(hd);
-    bind_refresh_conf(hd);
+    bind_refresh(hd, 1);
+}
+
+/* W228: Art der Aktion + internes Kuerzel (Zeile unter der Ueberschrift). */
+static void bind_kind_text(int idx, char *out, size_t cap)
+{
+    const lctrl_elem_t *e = &kCtrlElems[idx];
+    int ax = lctrl_helper_axis(idx);
+    if (e->kind == LCTRL_ACT) {
+        _snprintf_s(out, cap, _TRUNCATE, LT("gui.bind_kind_act"), e->key);
+    } else if (e->kind == LCTRL_AXIS) {
+        _snprintf_s(out, cap, _TRUNCATE, LT("gui.bind_kind_axis"), e->key);
+    } else if (ax >= 0) {
+        _snprintf_s(out, cap, _TRUNCATE, LT("gui.bind_kind_helper"), e->key,
+                    LT(kCtrlElems[ax].lkey), LT(kCtrlElems[ax].lkey));
+    } else {
+        _snprintf_s(out, cap, _TRUNCATE, LT("gui.bind_kind_btn"), e->key);
+    }
+}
+
+/* W228: Quellen der gewaehlten Aktion, eine Zeile je Quelle (Daten = Pos.). */
+static void bind_src_fill(HWND hd)
+{
+    HWND lb = bctl(hd, IDB_SRC);
+    int keep = ListBox_GetCurSel(lb), a, n = 0;
+    if (g_bind_src_reset) {
+        keep = 0;
+        g_bind_src_reset = 0;
+    }
+    SendMessageW(lb, WM_SETREDRAW, FALSE, 0);
+    ListBox_ResetContent(lb);
+    if (g_bind_sel >= 0 && g_bind_sel < LCTRL_ELEM_N) {
+        n = g_bind.row[g_bind_sel].n_alt;
+    }
+    for (a = 0; a < n; a++) {
+        list_add(lb, g_bind.row[g_bind_sel].alt[a], (LPARAM)a, 1);
+    }
+    if (n == 0) {
+        list_add(lb, LT(g_bind_sel >= 0 ? "gui.bind_nosrc" : "gui.bind_noelem"),
+                 (LPARAM)-1, 1);
+    } else {
+        keep = keep < 0 ? 0 : (keep >= n ? n - 1 : keep);
+        ListBox_SetCurSel(lb, keep);
+    }
+    SendMessageW(lb, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(lb, NULL, TRUE);
+}
+
+/* W228: gewaehlte Quelle (Position) oder -1. */
+static int bind_src_sel(HWND hd)
+{
+    HWND lb = bctl(hd, IDB_SRC);
+    int at = ListBox_GetCurSel(lb);
+    int a = at >= 0 ? (int)ListBox_GetItemData(lb, at) : -1;
+    if (g_bind_sel < 0 || a < 0 || a >= g_bind.row[g_bind_sel].n_alt) {
+        return -1;
+    }
+    return a;
+}
+
+static void bind_enable(HWND hd)
+{
+    unsigned vis = g_bind_sel >= 0 ? lctrl_bind_detail_vis(&g_bind, g_bind_sel) : 0;
+    int en = !g_cap_mode, act = en && g_bind_sel >= 0;
+    EnableWindow(bctl(hd, IDB_SET), act);
+    EnableWindow(bctl(hd, IDB_ADD), act);
+    EnableWindow(bctl(hd, IDB_MX), act && (vis & LCTRL_VIS_MOUSE));
+    EnableWindow(bctl(hd, IDB_MY), act && (vis & LCTRL_VIS_MOUSE));
+    EnableWindow(bctl(hd, IDB_DEL), act && bind_src_sel(hd) >= 0);
+    EnableWindow(bctl(hd, IDB_RST), act);
+    EnableWindow(bctl(hd, IDB_LIST), en);
+    EnableWindow(bctl(hd, IDB_SRC), en);
+    EnableWindow(bctl(hd, IDB_NAME), en);
+    EnableWindow(bctl(hd, IDB_SAVE), en);
+    EnableWindow(bctl(hd, IDB_CHECK), en);
 }
 
 static void bind_refresh_cur(HWND hd)
 {
-    char t[512], row[420];
+    bind_refresh(hd, 0);
+}
+
+/* W228: Detailbereich der gewaehlten Aktion neu fuellen (keep_joy = das
+ * Totzonen-Feld nicht ueberschreiben, z. B. waehrend der Eingabe). */
+static void bind_refresh(HWND hd, int keep_joy)
+{
+    char t[600];
     HWND lb = bctl(hd, IDB_LIST);
-    int sel = ListBox_GetCurSel(lb);
+    int sel = ListBox_GetCurSel(lb), prev = g_bind_sel;
     g_bind_sel = (sel >= 0) ? (int)ListBox_GetItemData(lb, sel) : -1;
     if (g_bind_sel < 0 || g_bind_sel >= LCTRL_ELEM_N) {
-        int ids[9] = { IDB_SET, IDB_ADD, IDB_MX, IDB_MY, IDB_DEL, IDB_RST,
-                       IDB_JDZ, IDB_JINV, IDB_JAPPLY };
-        int i;
-        ui_settext(bctl(hd, IDB_CUR), LT("gui.bind_noelem"));
-        for (i = 0; i < 9; i++) {
-            EnableWindow(bctl(hd, ids[i]), FALSE);
-        }
-        return;
+        g_bind_sel = -1;
     }
-    bind_joy_row(hd);
-    lctrl_bind_row_text(&g_bind, g_bind_sel, row, sizeof row);
-    _snprintf_s(t, sizeof t, _TRUNCATE, "%s (%s): %s",
-                kCtrlElems[g_bind_sel].key, LT(kCtrlElems[g_bind_sel].lkey), row);
-    ui_settext(bctl(hd, IDB_CUR), t);
-    {
-        int is_axis = kCtrlElems[g_bind_sel].kind == LCTRL_AXIS;
-        int is_aimsight =
-            is_axis && (strncmp(kCtrlElems[g_bind_sel].key, "aim_", 4) == 0 ||
-                        strncmp(kCtrlElems[g_bind_sel].key, "sight_", 6) == 0);
-        int en = !g_cap_mode;
-        EnableWindow(bctl(hd, IDB_SET), en);
-        EnableWindow(bctl(hd, IDB_ADD), en);
-        EnableWindow(bctl(hd, IDB_MX), en && is_aimsight);
-        EnableWindow(bctl(hd, IDB_MY), en && is_aimsight);
-        EnableWindow(bctl(hd, IDB_DEL), en);
-        EnableWindow(bctl(hd, IDB_RST), en);
-        EnableWindow(bctl(hd, IDB_LIST), en);
-        EnableWindow(bctl(hd, IDB_SAVE), en);
-        EnableWindow(bctl(hd, IDB_CHECK), en);
+    if (g_bind_sel != prev) {
+        g_bind_src_reset = 1;
     }
+    if (g_bind_sel < 0) {
+        ui_settext(bctl(hd, IDB_DNAME), LT("gui.bind_noelem"));
+        ui_settext(bctl(hd, IDB_CUR), "");
+    } else {
+        ui_settext(bctl(hd, IDB_DNAME), LT(kCtrlElems[g_bind_sel].lkey));
+        bind_kind_text(g_bind_sel, t, sizeof t);
+        ui_settext(bctl(hd, IDB_CUR), t);
+    }
+    bind_src_fill(hd);
+    if (!keep_joy) {
+        bind_joy_row(hd);
+    }
+    bind_joy_live(hd); /* W226 */
+    bind_enable(hd);
+    bind_refresh_conf(hd);
 }
 
 static void list_add(HWND lb, const char *u8, LPARAM data, int with_data)
@@ -6676,20 +6890,230 @@ static void list_add(HWND lb, const char *u8, LPARAM data, int with_data)
     }
 }
 
-static void bind_refresh_conf(HWND hd)
+/* W228: Element verschieben (logisch) und zeigen bzw. verbergen. */
+static void bplace(HWND hd, int id, int x, int y, int w, int h, int show)
 {
-    char conf[32][160];
-    HWND lb = bctl(hd, IDB_CONF);
-    int n, i;
-    ListBox_ResetContent(lb);
-    n = lctrl_bind_conflicts(&g_bind, conf, 32);
-    if (n == 0) {
-        list_add(lb, LT("gui.bind_noconf"), 0, 0);
+    uictl_t *u = ui_by_hwnd(bctl(hd, id));
+    if (!u) {
         return;
     }
-    for (i = 0; i < n; i++) {
-        list_add(lb, conf[i], 0, 0);
+    if (show) {
+        u->x = x;
+        u->y = y;
+        u->w = w;
+        u->h_ = h;
+        ui_place(u);
+        if (id == IDB_DNAME || id == IDB_JLBL || (id == IDB_CONFL && g_bind_nconf > 0)) {
+            SendMessageW(u->h, WM_SETFONT, (WPARAM)g_f[F_SEMI], FALSE);
+        }
     }
+    ShowWindow(u->h, show ? SW_SHOWNA : SW_HIDE);
+}
+
+/* W228: Detailbereich je Aktionsart anordnen (nur Sichtbares, ohne Luecken):
+ * Ueberschrift, Art, Quellen, Belegen/Hinzufuegen, Entfernen/Standard,
+ * [Maus X/Y], Hinweis/Lernmodus, Ergebnis, [Joystick], Konflikte. */
+static void bind_layout(HWND hd)
+{
+    unsigned vis = g_bind_sel >= 0 ? lctrl_bind_detail_vis(&g_bind, g_bind_sel) : 0;
+    int sig = (int)vis | (g_bind_nconf > 0 ? 0x100 : 0) | (g_bind_sel >= 0 ? 0x200 : 0) |
+              (g_bind_res_on ? 0x400 : 0);
+    int tall = g_bind_sel >= 0 && lctrl_helper_axis(g_bind_sel) >= 0; /* 3 Zeilen */
+    int dy = tall ? 16 : 0;
+    int x = BD_IX, w = BD_IW, half = (BD_IW - 8) / 2, y, joy, hint, ch;
+    sig |= tall ? 0x800 : 0;
+    if (sig == g_bind_lay) {
+        return;
+    }
+    g_bind_lay = sig;
+    joy = (vis & LCTRL_VIS_JOY) != 0;
+    hint = (vis & LCTRL_VIS_JOYHINT) != 0;
+    bplace(hd, IDB_DNAME, x, 52, w, 24, 1);
+    bplace(hd, IDB_CUR, x, 78, w, 34 + dy, 1); /* Tasten-Helfer: 3 Zeilen */
+    bplace(hd, IDB_SRCL, x, 116 + dy, w, 18, 1);
+    bplace(hd, IDB_SRC, x, 136 + dy, w, 72, 1);
+    bplace(hd, IDB_SET, x, 216 + dy, half, 30, 1);
+    bplace(hd, IDB_ADD, x + half + 8, 216 + dy, half, 30, 1);
+    bplace(hd, IDB_DEL, x, 252 + dy, half, 30, 1);
+    bplace(hd, IDB_RST, x + half + 8, 252 + dy, half, 30, 1);
+    y = 290 + dy;
+    bplace(hd, IDB_MX, x, y, half, 30, (vis & LCTRL_VIS_MOUSE) != 0);
+    bplace(hd, IDB_MY, x + half + 8, y, half, 30, (vis & LCTRL_VIS_MOUSE) != 0);
+    if (vis & LCTRL_VIS_MOUSE) {
+        y += 38;
+    }
+    bplace(hd, IDB_PROMPT, x, y, w, 40, 1);
+    y += 44;
+    bplace(hd, IDB_RESULT, x, y, w, 34, g_bind_res_on);
+    if (g_bind_res_on) {
+        y += 40;
+    }
+    bplace(hd, IDB_JLBL, x, y, w, 20, joy || hint);
+    if (joy || hint) {
+        y += 24;
+    }
+    bplace(hd, IDB_JDZL, x, y + 5, 70, 18, joy);
+    bplace(hd, IDB_JDZ, x + 74, y, 64, 28, joy);
+    bplace(hd, IDB_JINV, x + 150, y, 130, 28, joy);
+    bplace(hd, IDB_JNOW, x + 288, y + 5, w - 288, 18, joy);
+    bplace(hd, IDB_JLIVE, x, y + 34, w, 18, joy);
+    bplace(hd, IDB_JHINT, x, y, w, 34, hint);
+    if (joy) {
+        y += 60;
+    } else if (hint) {
+        y += 40;
+    }
+    bplace(hd, IDB_CONFL, x, y, w, 20, g_bind_sel >= 0);
+    ch = BD_BOT - 8 - (y + 24);
+    bplace(hd, IDB_CONF, x, y + 24, w, ch < 64 ? ch : 64, g_bind_nconf > 0);
+    RedrawWindow(hd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN);
+}
+
+/* W228: Konflikte nur der gewaehlten Aktion ("Quelle - auch auf: ..."). */
+static void bind_refresh_conf(HWND hd)
+{
+    lctrl_conf1_t cf[LCTRL_ALT_N];
+    HWND lb = bctl(hd, IDB_CONF);
+    int n = 0, i, j;
+    ListBox_ResetContent(lb);
+    if (g_bind_sel >= 0) {
+        n = lctrl_bind_conflicts_for(&g_bind, g_bind_sel, cf, LCTRL_ALT_N);
+    }
+    for (i = 0; i < n; i++) {
+        char who[400], t[560];
+        size_t wl = 0;
+        who[0] = '\0';
+        for (j = 0; j < cf[i].n; j++) {
+            int r = _snprintf_s(who + wl, sizeof who - wl, _TRUNCATE, "%s%s",
+                                j ? ", " : "", LT(kCtrlElems[cf[i].other[j]].lkey));
+            if (r < 0) {
+                break;
+            }
+            wl += (size_t)r;
+        }
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.bind_conf_row"),
+                    g_bind.row[g_bind_sel].alt[cf[i].alt], who);
+        list_add(lb, t, 0, 0);
+    }
+    if (g_bind_nconf != n) {
+        InvalidateRect(bctl(hd, IDB_CONFL), NULL, TRUE); /* Farbe */
+    }
+    g_bind_nconf = n;
+    ui_settext(bctl(hd, IDB_CONFL),
+               LT(n ? "gui.bind_conf_hdr" : "gui.bind_conf_none"));
+    bind_layout(hd);
+}
+
+/* W228: Zeile der gegliederten Liste (Daten >= 0 = Aktion, <= -100 = Gruppe):
+ * Anzeigename vorn, Art-Marke (Achse / Taste fuer Achse), Kuerzel grau. */
+static const char *const kBindGrpKey[LCTRL_GROUP_N] = {
+    "gui.bind_grp0", "gui.bind_grp1", "gui.bind_grp2",
+    "gui.bind_grp3", "gui.bind_grp4", "gui.bind_grp5"
+};
+
+static void bind_draw_row(const DRAWITEMSTRUCT *d)
+{
+    canvas_t c;
+    int w = d->rcItem.right - d->rcItem.left, h = d->rcItem.bottom - d->rcItem.top;
+    int i = (int)d->itemData, sel = (d->itemState & ODS_SELECTED) != 0;
+    int dis = !IsWindowEnabled(d->hwndItem);
+    if ((int)d->itemID < 0 || w <= 0 || h <= 0) {
+        return;
+    }
+    memset(&c, 0, sizeof c);
+    if (!cv_make(&c, w, h)) {
+        return;
+    }
+    GdiFlush();
+    cv_fill(&c, 0, 0, w, h, C_INPUT, 255, 0);
+    if (i <= -100 && -(i + 100) < LCTRL_GROUP_N) {
+        cv_text(&c, g_f[F_SEMI], LT(kBindGrpKey[-(i + 100)]), SX(8), 0,
+                w - SX(16), h - SX(3), dis ? C_FAINT : C_ACCENT,
+                DT_LEFT | DT_BOTTOM | DT_SINGLELINE | DT_END_ELLIPSIS);
+        cv_fill(&c, SX(8), h - 1, w - SX(16), 1, C_ACCENT, 80, 0);
+    } else if (i >= 0 && i < LCTRL_ELEM_N) {
+        const lctrl_elem_t *e = &kCtrlElems[i];
+        int cw = SX(76), cx = w - SX(6) - cw, nx = SX(18), nr = cx - SX(4);
+        if (sel) {
+            cv_fill(&c, SX(2), SX(1), w - SX(4), h - SX(2), RGB(255, 255, 255),
+                    dis ? 10 : 20, SX(4));
+            cv_fill(&c, SX(2), SX(5), SX(3), h - SX(10), C_ACCENT, 255, SX(1));
+        }
+        if (e->kind == LCTRL_AXIS || e->kind == LCTRL_NEG || e->kind == LCTRL_POS) {
+            int ax = e->kind == LCTRL_AXIS, tw = SX(70), th = SX(16);
+            int tx = cx - SX(4) - tw, ty = (h - th) / 2;
+            cv_fill(&c, tx, ty, tw, th, ax && !dis ? C_ACCENT : RGB(255, 255, 255),
+                    ax && !dis ? 46 : 12, th / 2);
+            cv_text(&c, g_f[F_TINY], LT(ax ? "gui.bind_tag_axis" : "gui.bind_tag_key"),
+                    tx, ty, tw, th, dis ? C_FAINT : (ax ? C_ACCENT_HI : C_DIM),
+                    DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            nr = tx - SX(6);
+        }
+        cv_text(&c, g_f[F_SMALL], LT(e->lkey), nx, 0, nr - nx, h,
+                dis ? C_FAINT : C_TEXT,
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        cv_text(&c, g_f[F_TINY], e->key, cx, 0, cw, h, C_FAINT,
+                DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if ((d->itemState & ODS_FOCUS) && !(d->itemState & ODS_NOFOCUSRECT)) {
+            cv_ring(&c, SX(1), 0, w - SX(2), h, C_ACCENT, 140, SX(4), 1);
+        }
+    }
+    GdiFlush();
+    BitBlt(d->hDC, d->rcItem.left, d->rcItem.top, w, h, c.dc, 0, 0, SRCCOPY);
+    cv_free(&c);
+}
+
+/* W228: Gruppenzeilen sind nicht waehlbar - in Bewegungsrichtung weiter. */
+static void bind_list_skip_header(HWND hd)
+{
+    HWND lb = bctl(hd, IDB_LIST);
+    int n = ListBox_GetCount(lb), at = ListBox_GetCurSel(lb), dir, k;
+    if (at < 0 || (int)ListBox_GetItemData(lb, at) > -100) {
+        g_bind_lb_prev = at;
+        return;
+    }
+    dir = (g_bind_lb_prev >= 0 && at < g_bind_lb_prev) ? -1 : 1;
+    for (k = at + dir; k >= 0 && k < n; k += dir) {
+        if ((int)ListBox_GetItemData(lb, k) > -100) {
+            break;
+        }
+    }
+    if (k < 0 || k >= n) { /* Rand: andere Richtung */
+        for (k = at - dir; k >= 0 && k < n; k -= dir) {
+            if ((int)ListBox_GetItemData(lb, k) > -100) {
+                break;
+            }
+        }
+    }
+    if (k >= 0 && k < n) {
+        ListBox_SetCurSel(lb, k);
+        if (dir < 0 && k > 0 && ListBox_GetTopIndex(lb) > k - 1) {
+            ListBox_SetTopIndex(lb, k - 1); /* Gruppenkopf mit zeigen */
+        }
+    }
+    g_bind_lb_prev = ListBox_GetCurSel(lb);
+}
+
+/* W228: Belegung gleich (Zeilen + Geraete)? Fuer "ungespeichert". */
+static int bind_same(const lctrl_bind_t *a, const lctrl_bind_t *b)
+{
+    int i, j;
+    for (i = 0; i < LCTRL_ELEM_N; i++) {
+        if (a->row[i].n_alt != b->row[i].n_alt) {
+            return 0;
+        }
+        for (j = 0; j < a->row[i].n_alt; j++) {
+            if (strcmp(a->row[i].alt[j], b->row[i].alt[j]) != 0) {
+                return 0;
+            }
+        }
+    }
+    for (i = 0; i < IMAP_JOY_MAX; i++) {
+        if (strcmp(a->joy[i], b->joy[i]) != 0) {
+            return 0;
+        }
+    }
+    return 1;
 }
 
 static void bind_end_capture(HWND hd, const char *prompt)
@@ -6703,7 +7127,8 @@ static void bind_end_capture(HWND hd, const char *prompt)
         g_cap_sbc_thr = NULL;
     }
     ui_settext(bctl(hd, IDB_PROMPT),
-         prompt ? prompt : LT("gui.bind_pick"));
+         prompt ? prompt : LT("gui.bind_idle"));
+    InvalidateRect(bctl(hd, IDB_PROMPT), NULL, TRUE); /* W228: Farbe */
     ui_settext(bctl(hd, IDB_CLOSE), LT("gui.btn_close"));
     bind_refresh_cur(hd);
 }
@@ -6716,6 +7141,19 @@ static void bind_start_capture(HWND hd, int mode)
         return;
     }
     g_cap_mode = mode;
+    if (g_o.shot) { /* W228: nur Anzeige im Bild, keine Geraete/Timer */
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.bind_press"),
+                    kCtrlElems[g_bind_sel].key, LT(kCtrlElems[g_bind_sel].lkey));
+        ui_settext(bctl(hd, IDB_PROMPT), t);
+        {
+            const char *hint = lctrl_joy_dir_hint(g_bind_sel);
+            bind_set_result(hd, hint ? hint : "");
+        }
+        ui_settext(bctl(hd, IDB_CLOSE), LT("gui.btn_cancel"));
+        InvalidateRect(bctl(hd, IDB_PROMPT), NULL, TRUE);
+        bind_refresh_cur(hd);
+        return;
+    }
     g_cap_have_pad = lctrl_pad_first(&cur) >= 0;
     g_cap_prev = cur;
     /* W159: Original-Controller nur bei angeschlossenem Geraet (kurz
@@ -6736,16 +7174,19 @@ static void bind_start_capture(HWND hd, int mode)
                 break;
             }
             g_cap_jl[i] = *in;
-            memset(&g_cap_jbase[i], 0, sizeof g_cap_jbase[i]);
-            (void)ijoy_read(i, &g_cap_jbase[i]);
-            g_cap_jprev[i] = g_cap_jbase[i];
+            lctrl_joy_learner_reset(&g_cap_jlrn[i]);
             g_cap_jn = i + 1;
         }
     }
     _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.bind_press"),
                 kCtrlElems[g_bind_sel].key, LT(kCtrlElems[g_bind_sel].lkey));
     ui_settext(bctl(hd, IDB_PROMPT), t);
+    { /* W226: Richtungs-Hinweis fuer Joystick-Achsen */
+        const char *hint = lctrl_joy_dir_hint(g_bind_sel);
+        bind_set_result(hd, hint ? hint : "");
+    }
     ui_settext(bctl(hd, IDB_CLOSE), LT("gui.btn_cancel"));
+    InvalidateRect(bctl(hd, IDB_PROMPT), NULL, TRUE); /* W228: Farbe */
     bind_refresh_cur(hd);
     SetTimer(hd, 7, 50, NULL);
 }
@@ -6783,7 +7224,7 @@ static int bind_apply(HWND hd, const char *src)
         char t[256];
         _snprintf_s(t, sizeof t, _TRUNCATE, "%s = %s.",
                     kCtrlElems[g_bind_sel].key, src);
-        ui_settext(bctl(hd, IDB_RESULT), t);
+        bind_set_result(hd, t);
     }
     return rc;
 }
@@ -6894,14 +7335,14 @@ static void bind_cap_joy(HWND hd)
     for (i = 0; i < g_cap_jn && g_cap_mode; i++) {
         imap_joy_state_t cur;
         char part[48], src[64];
-        int r;
-        if (!ijoy_read(i, &cur)) {
+        int r, ok = ijoy_read(i, &cur);
+        r = lctrl_joy_learner_step(&g_cap_jlrn[i], ok, &cur,
+                                   g_cap_jl[i].axmask, g_cap_jl[i].npov,
+                                   g_bind_sel, part, sizeof part);
+        if (r == 4) { /* W226: Zone enthielte die Ruhestellung */
+            bind_set_result(hd, LT("gui.joy_restzone"));
             continue;
         }
-        r = lctrl_joy_learn(&g_cap_jbase[i], &g_cap_jprev[i], &cur,
-                            g_cap_jl[i].axmask, g_cap_jl[i].npov, g_bind_sel,
-                            part, sizeof part);
-        g_cap_jprev[i] = cur;
         if (r) {
             char keep[IMAP_JOY_MAX][96];
             int slot, rc;
@@ -6917,26 +7358,34 @@ static void bind_cap_joy(HWND hd)
                 memcpy(g_bind.joy, keep, sizeof keep);
             }
             bind_cap_done(hd, rc);
+            if (rc == 0 && r == 3 && strstr(part, "inv=1")) {
+                char t[300];
+                _snprintf_s(t, sizeof t, _TRUNCATE, "%s = %s. %s",
+                            kCtrlElems[g_bind_sel].key, src,
+                            LT("gui.joy_learn_inv"));
+                bind_set_result(hd, t);
+            }
             return;
         }
     }
 }
 
-static void bind_save(HWND hd)
+/* W228: 0 = gespeichert, sonst nicht (Meldung in der Fusszeile). */
+static int bind_save(HWND hd)
 {
     char rest[64], fn[72], pname[68], dir[1100], path[1200], err[512];
     ui_gettext(bctl(hd, IDB_NAME), rest, sizeof rest);
     trim_u8(rest);
     if (!lctrl_user_rest_ok(rest)) {
-        ui_settext(bctl(hd, IDB_RESULT), LT("gui.bind_badname"));
-        return;
+        ui_settext(bctl(hd, IDB_FSTAT), LT("gui.bind_badname"));
+        return 1;
     }
     lctrl_user_filename(rest, fn, sizeof fn);
     strcpy_s(pname, sizeof pname, fn);
     pname[strlen(pname) - 4] = '\0';
     if (lctrl_name_shipped(pname)) {
-        ui_settext(bctl(hd, IDB_RESULT), LT("gui.bind_shipped"));
-        return;
+        ui_settext(bctl(hd, IDB_FSTAT), LT("gui.bind_shipped"));
+        return 1;
     }
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s/profiles", g_client_dir);
     lcfg_mkdir_p(dir);
@@ -6945,40 +7394,91 @@ static void bind_save(HWND hd)
         char q[300];
         _snprintf_s(q, sizeof q, _TRUNCATE, LT("gui.bind_overwrite"),
                     pname);
-        if (ui_msgbox(hd, q, LT("gui.title_profsave"),
+        if (ui_msgbox(hd, q, LT("gui.bind_save2"),
                       MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
-            return;
+            return 1;
         }
     }
     if (lctrl_bind_save(path, &g_bind, g_bind_base_name, err, sizeof err) !=
         0) {
-        ui_settext(bctl(hd, IDB_RESULT), err);
-        return;
+        ui_settext(bctl(hd, IDB_FSTAT), err);
+        return 1;
     }
+    g_bind_clean = g_bind; /* W228: Stand fuer "ungespeichert" */
     strcpy_s(g_bind_saved, sizeof g_bind_saved, pname);
     {
         char t[256];
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.bind_saved"), fn);
-        ui_settext(bctl(hd, IDB_RESULT), t);
+        ui_settext(bctl(hd, IDB_FSTAT), t);
     }
     refresh_ctrl_profiles(pname);
     update_ctrl_overview();
+    return 0;
 }
 
 static void bind_check(HWND hd)
 {
     char t[512];
     if (!g_bind_saved[0]) {
-        ui_settext(bctl(hd, IDB_RESULT), LT("gui.bind_savefirst"));
+        ui_settext(bctl(hd, IDB_FSTAT), LT("gui.bind_savefirst"));
         return;
     }
-    ui_settext(bctl(hd, IDB_RESULT), LT("gui.bind_checking"));
+    ui_settext(bctl(hd, IDB_FSTAT), LT("gui.bind_checking"));
     UpdateWindow(hd);
     (void)lctrl_run_dump(g_client_dir, g_bind_saved, t, sizeof t);
-    ui_settext(bctl(hd, IDB_RESULT), t);
+    ui_settext(bctl(hd, IDB_FSTAT), t);
+}
+
+/* W228: Schliessen (Knopf, ESC, X): Lernmodus nur abbrechen; ungespeicherte
+ * Aenderungen erst nachfragen (Ja = speichern, Nein = verwerfen). */
+static void bind_try_close(HWND hd)
+{
+    if (g_cap_mode) {
+        bind_end_capture(hd, LT("gui.bind_abort"));
+        return;
+    }
+    if (!g_o.shot && !bind_same(&g_bind, &g_bind_clean)) {
+        int r = ui_msgbox(hd, LT("gui.bind_unsaved"), LT("gui.bind_title"),
+                          MB_ICONQUESTION | MB_YESNOCANCEL);
+        if (r == IDCANCEL) {
+            return;
+        }
+        if (r == IDYES && bind_save(hd) != 0) {
+            SetFocus(bctl(hd, IDB_NAME));
+            return;
+        }
+    }
+    g_bind_done = 1;
 }
 
 static int bind_shot_save(HWND hd);
+
+/* W228: Rahmen der Liste, Detail-Karte, Trennlinie der Fusszeile. */
+static void bind_paint_bg(HWND hd, HDC dc)
+{
+    RECT r;
+    canvas_t c;
+    GetClientRect(hd, &r);
+    memset(&c, 0, sizeof c);
+    if (!cv_make(&c, r.right, r.bottom)) {
+        if (!g_br_dialog) {
+            g_br_dialog = CreateSolidBrush(C_DIALOG);
+        }
+        FillRect(dc, &r, g_br_dialog);
+        return;
+    }
+    GdiFlush();
+    cv_fill(&c, 0, 0, r.right, r.bottom, C_DIALOG, 255, 0);
+    cv_ring(&c, SX(BD_LX) - 1, SX(BD_TOP) - 1, SX(BD_LX + BD_LW) - SX(BD_LX) + 2,
+            SX(BD_BOT) - SX(BD_TOP) + 2, C_INPUT_BRD, 255, SX(4), 1);
+    cv_ring(&c, SX(BD_CX), SX(BD_TOP), SX(BD_CX + BD_CW) - SX(BD_CX),
+            SX(BD_BOT) - SX(BD_TOP), C_INPUT_BRD, 255, SX(8), 1);
+    cv_fill(&c, SX(BD_LX), SX(BD_FSEP), SX(BD_CX + BD_CW) - SX(BD_LX), 1,
+            C_INPUT_BRD, 255, 0);
+    GdiFlush();
+    BitBlt(dc, 0, 0, r.right, r.bottom, c.dc, 0, 0, SRCCOPY);
+    cv_free(&c);
+}
 
 static LRESULT CALLBACK bind_proc(HWND hd, UINT msg, WPARAM wp, LPARAM lp)
 {
@@ -6986,16 +7486,15 @@ static LRESULT CALLBACK bind_proc(HWND hd, UINT msg, WPARAM wp, LPARAM lp)
     case WM_COMMAND: {
         int id = LOWORD(wp), code = HIWORD(wp);
         if (id == IDB_CLOSE || id == IDCANCEL) {
-            if (g_cap_mode) {
-                bind_end_capture(hd, LT("gui.bind_abort"));
-            } else {
-                g_bind_done = 1;
-            }
+            bind_try_close(hd);
         } else if (id == IDB_LIST && code == LBN_SELCHANGE) {
             if (g_cap_mode) {
                 bind_end_capture(hd, LT("gui.bind_abort_sel"));
             }
+            bind_list_skip_header(hd); /* W228 */
             bind_refresh_cur(hd);
+        } else if (id == IDB_SRC && code == LBN_SELCHANGE) {
+            bind_enable(hd); /* W228: Entfernen gilt der gewaehlten Quelle */
         } else if (id == IDB_SET) {
             bind_start_capture(hd, 1);
         } else if (id == IDB_ADD) {
@@ -7011,55 +7510,89 @@ static LRESULT CALLBACK bind_proc(HWND hd, UINT msg, WPARAM wp, LPARAM lp)
                             id == IDB_MX ? "X" : "Y", mode);
                 lctrl_bind_set(&g_bind, g_bind_sel, src);
                 bind_refresh_cur(hd);
-                bind_refresh_conf(hd);
             }
-        } else if (id == IDB_DEL) {
-            lctrl_bind_clear(&g_bind, g_bind_sel);
-            bind_refresh_cur(hd);
-            bind_refresh_conf(hd);
+        } else if (id == IDB_DEL) { /* W228: nur die gewaehlte Quelle */
+            int a = bind_src_sel(hd);
+            if (a >= 0 && lctrl_bind_remove_alt(&g_bind, g_bind_sel, a) == 0) {
+                bind_refresh_cur(hd);
+            }
         } else if (id == IDB_RST) {
             if (g_bind_sel >= 0) {
                 g_bind.row[g_bind_sel] = g_bind_base.row[g_bind_sel];
                 bind_refresh_cur(hd);
-                bind_refresh_conf(hd);
             }
         } else if (id == IDB_SAVE) {
             bind_save(hd);
         } else if (id == IDB_CHECK) {
             bind_check(hd);
-        } else if (id == IDB_JINV) { /* W221: Schalter Invertieren */
+        } else if (id == IDB_JINV) { /* W221: Schalter Invertieren, W228 sofort */
             uictl_t *u = ui_by_hwnd(bctl(hd, IDB_JINV));
             if (u) {
                 u->checked = !u->checked;
                 InvalidateRect(u->h, NULL, FALSE);
             }
-        } else if (id == IDB_JAPPLY) {
             bind_joy_apply(hd);
+        } else if (id == IDB_JDZ && code == EN_CHANGE && !g_bind_joyset &&
+                   !g_cap_mode) {
+            bind_joy_apply(hd); /* W228: Totzone wirkt sofort */
         }
         return 0;
     }
-    case WM_DRAWITEM:
-        draw_item((const DRAWITEMSTRUCT *)lp);
+    case WM_MEASUREITEM: { /* W228: gegliederte Liste (eigene Zeichnung) */
+        MEASUREITEMSTRUCT *m = (MEASUREITEMSTRUCT *)lp;
+        if (m->CtlType == ODT_LISTBOX) {
+            m->itemHeight = (UINT)SX(BD_ROW_H);
+            return TRUE;
+        }
+        break;
+    }
+    case WM_DRAWITEM: {
+        const DRAWITEMSTRUCT *d = (const DRAWITEMSTRUCT *)lp;
+        if (d->CtlType == ODT_LISTBOX && d->CtlID == IDB_LIST) {
+            bind_draw_row(d);
+        } else {
+            draw_item(d);
+        }
         return TRUE;
+    }
+    case WM_CTLCOLORSTATIC: { /* W228: Hinweise gedimmt, Lernmodus/Konflikt farbig */
+        LRESULT br = ctlcolor((HDC)wp, (HWND)lp, 1);
+        int cid = GetDlgCtrlID((HWND)lp), set = 1;
+        COLORREF col = C_DIM;
+        switch (cid) {
+        case IDB_TITLE: case IDB_CUR: case IDB_SRCL: case IDB_JHINT:
+        case IDB_JNOW: case IDB_NAMEL: case IDB_INI: case IDB_JDZL:
+        case IDB_FSTAT: case IDB_JLIVE:
+            break;
+        case IDB_PROMPT:
+            col = g_cap_mode ? C_ACCENT_HI : C_DIM;
+            break;
+        case IDB_CONFL:
+            col = g_bind_nconf ? C_WARN : C_DIM;
+            break;
+        default:
+            set = 0;
+            break;
+        }
+        if (set) {
+            SetTextColor((HDC)wp, col);
+        }
+        return br;
+    }
     case WM_CTLCOLOREDIT:
     case WM_CTLCOLORLISTBOX:
-    case WM_CTLCOLORSTATIC:
-        return ctlcolor((HDC)wp, (HWND)lp, msg == WM_CTLCOLORSTATIC);
-    case WM_ERASEBKGND: {
-        RECT r;
-        GetClientRect(hd, &r);
-        if (!g_br_dialog) {
-            g_br_dialog = CreateSolidBrush(C_DIALOG);
-        }
-        FillRect((HDC)wp, &r, g_br_dialog);
+        return ctlcolor((HDC)wp, (HWND)lp, 0);
+    case WM_ERASEBKGND:
+        bind_paint_bg(hd, (HDC)wp);
         return 1;
-    }
     case WM_TIMER:
         if (wp == 7 && g_cap_mode) {
             bind_cap_pad(hd);
             if (g_cap_mode) {
                 bind_cap_joy(hd); /* W221 */
             }
+        } else if (wp == 10 && !g_cap_mode) { /* W226: Live-Zeile */
+            bind_joy_live(hd);
         } else if (wp == 9 && g_o.shot == 3) {
             KillTimer(hd, 9);
             bind_shot_save(hd);
@@ -7072,63 +7605,84 @@ static LRESULT CALLBACK bind_proc(HWND hd, UINT msg, WPARAM wp, LPARAM lp)
         }
         return 0;
     case WM_CLOSE:
-        if (g_cap_mode) {
-            bind_end_capture(hd, LT("gui.bind_abort"));
-        } else {
-            g_bind_done = 1;
-        }
+        bind_try_close(hd);
         return 0;
     }
     return DefWindowProcW(hd, msg, wp, lp);
 }
 
+/* W228: Aufbau. Reihenfolge = Tab-Reihenfolge: Liste, Quellen, Aktionen,
+ * Joystick, Konflikte, dann Fusszeile (Name, Pruefen, Speichern, Schliessen).
+ * Positionen im Detailbereich setzt bind_layout je Aktionsart. */
 static void bind_build(HWND hd, const char *base_name)
 {
     HWND lb;
     char t[200];
-    int i;
-    _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.bind_base"),
+    int g, i;
+    _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.bind_base2"),
                 base_name && *base_name ? base_name : LT("gui.bind_empty"), LCTRL_ELEM_N);
-    mk(hd, K_STATIC, IDB_TITLE, PG_DIALOG, 12, 10, 620, 18, t, WS_VISIBLE);
-    lb = mk(hd, K_LIST, IDB_LIST, PG_DIALOG, 12, 34, 250, 400, "", WS_VISIBLE);
-    for (i = 0; i < LCTRL_ELEM_N; i++) {
-        char e[128];
-        if (kCtrlElems[i].kind == LCTRL_ACT && /* W159: Gruppe VR */
-            (i == 0 || kCtrlElems[i - 1].kind != LCTRL_ACT)) {
-            list_add(lb, LT("gui.bind_group_vr"), (LPARAM)-2, 1);
+    mk(hd, K_STATIC, IDB_TITLE, PG_DIALOG, BD_LX, 12, BD_CX + BD_CW - BD_LX, 20, t,
+       WS_VISIBLE);
+    lb = mk(hd, K_PKLIST, IDB_LIST, PG_DIALOG, BD_LX, BD_TOP, BD_LW, BD_BOT - BD_TOP,
+            "", WS_VISIBLE);
+    SendMessageW(lb, LB_SETITEMHEIGHT, 0, SX(BD_ROW_H));
+    for (g = 0; g < LCTRL_GROUP_N; g++) { /* Gruppen in Anzeige-Reihenfolge */
+        list_add(lb, "", (LPARAM)(-100 - g), 1);
+        for (i = 0; i < LCTRL_ELEM_N; i++) {
+            if (lctrl_elem_group(i) == g) {
+                list_add(lb, "", (LPARAM)i, 1);
+            }
         }
-        _snprintf_s(e, sizeof e, _TRUNCATE, "%s " U8_DASH " %s",
-                    kCtrlElems[i].key, LT(kCtrlElems[i].lkey));
-        list_add(lb, e, (LPARAM)i, 1);
     }
-    ListBox_SetCurSel(lb, 0);
-    mk(hd, K_STATIC, -1, PG_DIALOG, 274, 34, 350, 18, LT("gui.bind_current"),
+    ListBox_SetCurSel(lb, 1); /* erste Aktion (Zeile 0 = Gruppenkopf) */
+    g_bind_lb_prev = 1;
+    /* Detailbereich (Platz setzt bind_layout) */
+    mk(hd, K_STATIC, IDB_DNAME, PG_DIALOG, BD_IX, 52, BD_IW, 24, "", WS_VISIBLE);
+    mk(hd, K_STATIC, IDB_CUR, PG_DIALOG, BD_IX, 78, BD_IW, 34, "", WS_VISIBLE);
+    mk(hd, K_STATIC, IDB_SRCL, PG_DIALOG, BD_IX, 118, BD_IW, 18, LT("gui.bind_sources"),
        WS_VISIBLE);
-    mk(hd, K_STATIC, IDB_CUR, PG_DIALOG, 274, 54, 354, 36, "", WS_VISIBLE);
-    mk(hd, K_ACCENT, IDB_SET, PG_DIALOG, 274, 94, 172, 30, LT("gui.bind_replace"), WS_VISIBLE);
-    mk(hd, K_BTN, IDB_ADD, PG_DIALOG, 456, 94, 172, 30, LT("gui.bind_add"), WS_VISIBLE);
-    mk(hd, K_BTN, IDB_MX, PG_DIALOG, 274, 130, 108, 30, LT("gui.bind_mousex"), WS_VISIBLE);
-    mk(hd, K_BTN, IDB_MY, PG_DIALOG, 392, 130, 108, 30, LT("gui.bind_mousey"), WS_VISIBLE);
-    mk(hd, K_BTN, IDB_DEL, PG_DIALOG, 510, 130, 118, 30, LT("gui.btn_delete"),
+    mk(hd, K_LIST, IDB_SRC, PG_DIALOG, BD_IX, 138, BD_IW, 80, "", WS_VISIBLE);
+    mk(hd, K_ACCENT, IDB_SET, PG_DIALOG, BD_IX, 226, 218, 30, LT("gui.bind_replace"),
        WS_VISIBLE);
-    mk(hd, K_BTN, IDB_RST, PG_DIALOG, 274, 166, 172, 30, LT("gui.bind_reset"), WS_VISIBLE);
-    mk(hd, K_STATIC, IDB_PROMPT, PG_DIALOG, 274, 204, 354, 40, LT("gui.bind_pick"), WS_VISIBLE);
-    mk(hd, K_STATIC, -1, PG_DIALOG, 274, 248, 354, 18, LT("gui.bind_conflicts"), WS_VISIBLE);
-    mk(hd, K_LIST, IDB_CONF, PG_DIALOG, 274, 268, 354, 88, "", WS_VISIBLE);
-    mk(hd, K_STATIC, -1, PG_DIALOG, 274, 368, 72, 18, LT("gui.bind_name"),
+    mk(hd, K_BTN, IDB_ADD, PG_DIALOG, BD_IX + 226, 226, 218, 30, LT("gui.bind_add"),
        WS_VISIBLE);
-    mk(hd, K_EDIT, IDB_NAME, PG_DIALOG, 350, 364, 190, 24, "",
-       WS_VISIBLE | WS_BORDER);
-    mk(hd, K_STATIC, -1, PG_DIALOG, 546, 368, 40, 18, ".ini", WS_VISIBLE);
-    mk(hd, K_ACCENT, IDB_SAVE, PG_DIALOG, 274, 396, 170, 30, LT("gui.title_profsave"), WS_VISIBLE);
-    mk(hd, K_BTN, IDB_CHECK, PG_DIALOG, 454, 396, 174, 30, LT("gui.btn_check"), WS_VISIBLE);
-    mk(hd, K_STATIC, IDB_RESULT, PG_DIALOG, 274, 432, 354, 34, "", WS_VISIBLE);
-    mk(hd, K_BTN, IDB_CLOSE, PG_DIALOG, 12, 446, 130, 30, LT("gui.btn_close"), WS_VISIBLE);
+    mk(hd, K_BTN, IDB_DEL, PG_DIALOG, BD_IX, 262, 218, 30, LT("gui.bind_remove"),
+       WS_VISIBLE);
+    mk(hd, K_BTN, IDB_RST, PG_DIALOG, BD_IX + 226, 262, 218, 30, LT("gui.bind_reset2"),
+       WS_VISIBLE);
+    mk(hd, K_BTN, IDB_MX, PG_DIALOG, BD_IX, 300, 218, 30, LT("gui.bind_mousex"), 0);
+    mk(hd, K_BTN, IDB_MY, PG_DIALOG, BD_IX + 226, 300, 218, 30, LT("gui.bind_mousey"), 0);
+    mk(hd, K_STATIC, IDB_PROMPT, PG_DIALOG, BD_IX, 338, BD_IW, 40, LT("gui.bind_idle"),
+       WS_VISIBLE);
+    mk(hd, K_STATIC, IDB_RESULT, PG_DIALOG, BD_IX, 382, BD_IW, 34, "", WS_VISIBLE);
     /* W221 HOTAS (experimentell): Totzone/Invertierung fuer JOY-Achsen */
-    mk(hd, K_STATIC, IDB_JLBL, PG_DIALOG, 12, 492, 300, 18, LT("gui.joy_axrow"), WS_VISIBLE);
-    mk(hd, K_EDIT, IDB_JDZ, PG_DIALOG, 318, 488, 56, 24, "", WS_VISIBLE | WS_BORDER);
-    mk(hd, K_TOGGLE, IDB_JINV, PG_DIALOG, 384, 486, 140, 28, LT("gui.joy_inv"), WS_VISIBLE);
-    mk(hd, K_BTN, IDB_JAPPLY, PG_DIALOG, 528, 485, 100, 30, LT("gui.joy_apply"), WS_VISIBLE);
+    mk(hd, K_STATIC, IDB_JLBL, PG_DIALOG, BD_IX, 422, BD_IW, 20, LT("gui.bind_joyhdr"), 0);
+    mk(hd, K_STATIC, IDB_JDZL, PG_DIALOG, BD_IX, 451, 70, 18, LT("gui.bind_dz"), 0);
+    mk(hd, K_EDIT, IDB_JDZ, PG_DIALOG, BD_IX + 74, 446, 64, 28, "", WS_BORDER);
+    mk(hd, K_TOGGLE, IDB_JINV, PG_DIALOG, BD_IX + 150, 446, 150, 28, LT("gui.joy_inv"), 0);
+    mk(hd, K_STATIC, IDB_JNOW, PG_DIALOG, BD_IX + 306, 451, BD_IW - 306, 18,
+       LT("gui.bind_joynow"), 0);
+    mk(hd, K_STATIC, IDB_JLIVE, PG_DIALOG, BD_IX, 480, BD_IW, 18, "", 0); /* W226 */
+    mk(hd, K_STATIC, IDB_JHINT, PG_DIALOG, BD_IX, 446, BD_IW, 34, LT("gui.bind_joyhint"), 0);
+    mk(hd, K_STATIC, IDB_CONFL, PG_DIALOG, BD_IX, 506, BD_IW, 20, "", WS_VISIBLE);
+    mk(hd, K_LIST, IDB_CONF, PG_DIALOG, BD_IX, 530, BD_IW, 56, "", 0);
+    /* Fusszeile: Belegung als Datei (gilt fuer den ganzen Dialog) */
+    mk(hd, K_STATIC, IDB_NAMEL, PG_DIALOG, BD_LX, 623, 84, 18, LT("gui.bind_name"),
+       WS_VISIBLE);
+    mk(hd, K_EDIT, IDB_NAME, PG_DIALOG, BD_LX + 84, 618, 150, 28, "",
+       WS_VISIBLE | WS_BORDER);
+    mk(hd, K_STATIC, IDB_INI, PG_DIALOG, BD_LX + 238, 623, 30, 18, ".ini", WS_VISIBLE);
+    mk(hd, K_BTN, IDB_CHECK, PG_DIALOG, BD_LX + 272, 617, 160, 30, LT("gui.bind_check2"),
+       WS_VISIBLE);
+    mk(hd, K_ACCENT, IDB_SAVE, PG_DIALOG, BD_CX + BD_CW - 124 - 8 - 170, 617, 170, 30,
+       LT("gui.bind_save2"), WS_VISIBLE);
+    mk(hd, K_BTN, IDB_CLOSE, PG_DIALOG, BD_CX + BD_CW - 124, 617, 124, 30,
+       LT("gui.btn_close"), WS_VISIBLE);
+    mk(hd, K_STATIC, IDB_FSTAT, PG_DIALOG, BD_LX, 654, BD_CX + BD_CW - BD_LX, 18, "",
+       WS_VISIBLE);
+    g_bind_lay = -1;
+    g_bind_nconf = 0;
+    g_bind_res_on = 0;
 }
 
 /* Offscreen-Position (rechts ausserhalb aller Monitore). */
@@ -7184,8 +7738,8 @@ static void bind_dialog_modal(const char *base_name, const char *base_path)
     g_bind_sel = -1;
     g_cap_mode = 0;
     g_bind_done = 0;
-    rc.right = SX(640);
-    rc.bottom = SX(528); /* W221: + Joystick-Zeile */
+    rc.right = SX(BD_W); /* W228: Liste + Detail-Karte + Fusszeile */
+    rc.bottom = SX(BD_H);
     AdjustWindowRectEx(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE,
                        exs);
     if (shot) {
@@ -7216,6 +7770,14 @@ static void bind_dialog_modal(const char *base_name, const char *base_path)
                               &dark, sizeof dark);
     }
     bind_build(hd, base_name);
+    g_bind_clean = g_bind; /* W228: ungespeichert = Abweichung hiervon */
+    g_live_scanned = 0;
+    g_bind_joydemo = g_o.shot == 3 && g_o.bind_joydemo;
+    if (g_bind_joydemo && g_o.bind_sel >= 0) { /* W226: --bind-shot=joy */
+        strcpy_s(g_bind.joy[0], sizeof g_bind.joy[0], "Example HOTAS Throttle");
+        lctrl_bind_set(&g_bind, g_o.bind_sel, "KEY:W, JOY0:Z:dz=0.05:inv=1");
+        bind_set_result(hd, lctrl_joy_dir_hint(g_o.bind_sel));
+    }
     if (g_o.shot == 3 && g_o.bind_sel >= 0) { /* W159: --bind-shot=vr */
         HWND lb = bctl(hd, IDB_LIST);
         int n = ListBox_GetCount(lb), at;
@@ -7223,14 +7785,19 @@ static void bind_dialog_modal(const char *base_name, const char *base_path)
             if ((int)ListBox_GetItemData(lb, at) == g_o.bind_sel) {
                 ListBox_SetCurSel(lb, at);
                 ListBox_SetTopIndex(lb, at > 1 ? at - 1 : 0);
+                g_bind_lb_prev = at;
                 break;
             }
         }
     }
     bind_refresh_cur(hd);
-    bind_refresh_conf(hd);
+    if (g_o.shot == 3 && g_o.bind_learn) { /* W228: --bind-learn */
+        bind_start_capture(hd, 1);
+    }
     if (g_o.shot == 3) {
         SetTimer(hd, 9, 400, NULL);
+    } else {
+        SetTimer(hd, 10, 100, NULL); /* W226: Live-Zeile */
     }
     if (g_hwnd) {
         EnableWindow(g_hwnd, FALSE);
@@ -7265,6 +7832,12 @@ static void bind_dialog_modal(const char *base_name, const char *base_path)
             } else {
                 bind_cap_mouse(hd, msg.message, msg.wParam);
             }
+            continue;
+        }
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN &&
+            GetFocus() == bctl(hd, IDB_NAME)) { /* W228: Enter im Namen = Speichern */
+            SendMessageW(hd, WM_COMMAND, MAKEWPARAM(IDB_SAVE, BN_CLICKED),
+                         (LPARAM)bctl(hd, IDB_SAVE));
             continue;
         }
         if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN) {
@@ -11326,6 +11899,21 @@ static void show_page(int p)
     if (p == P_ADV) {
         refresh_profiles();
     }
+    { /* W227: auf Spielen fehlt Launch in der Fussleiste -> Speichern und
+       * Rueckgaengig an die rechte Kante statt mittig im Leeren */
+        static const int ids[2] = { ID_SAVE, ID_UNDO };
+        int k, dx = p == P_PLAY ? 150 + 12 : 0;
+        for (k = 0; k < 2; k++) {
+            uictl_t *u = ui_find(ids[k]);
+            int x0 = ids[k] == ID_SAVE ? WIN_W - 28 - 150 - 12 - 130
+                                       : WIN_W - 28 - 150 - 12 - 130 - 10 - 112;
+            if (u && u->x != x0 + dx) {
+                u->x = x0 + dx;
+                SetWindowPos(u->h, NULL, SX(u->x), SX(u->y), 0, 0,
+                             SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+        }
+    }
     ui_apply_rules(); /* W171 */
     redraw_all();
 }
@@ -11387,6 +11975,8 @@ static void ui_apply_language(void)
     static const char *const kVr[] = { "gui.vr_prev_sbs", "gui.vr_prev_left", "gui.vr_prev_right", "gui.vr_prev_off" };
     static const char *const kVrPre[] = { "gui.vrp_perf", "gui.vrp_bal", "gui.vrp_qual", "gui.vrp_custom" }; /* W183 */
     static const char *const kMouse[] = { "gui.mouse_abs", "gui.mouse_rel" };
+    static const char *const kAssist[] = { "gui.ctl_assist0", "gui.ctl_assist1",
+                                           "gui.ctl_assist2" }; /* W236 */
     static const char *const kLang[] = { "gui.lang_en", "gui.lang_de" };
     HWND c;
     int i, sel;
@@ -11444,6 +12034,7 @@ static void ui_apply_language(void)
     combo_refill(ID_EDGE, kEdge, 3);
     if (ctl(ID_CPERSP)) { cpersp_fill(ctl(ID_CPERSP)); } /* W191 */
     if (ctl(ID_CPANINI)) { cpersp_fill(ctl(ID_CPANINI)); }
+    if (ctl(ID_VRRES)) { vrres_fill(ctl(ID_VRRES)); } /* W227 */
     c = ctl(ID_EDGE_W);
     if (c) { /* Zahlenformate */
         sel = ComboBox_GetCurSel(c);
@@ -11505,7 +12096,7 @@ static void ui_apply_language(void)
     ui_settext(ctl(ID_CTRL_SBC), LT("gui.sbc"));
     ui_settext(ctl(ID_CTRL_SBCCHK), LT("gui.btn_check"));
     ui_settext(ctl(ID_CTRL_MOUSEOFF), LT("gui.ctl_mouseoff"));
-    ui_settext(ctl(ID_CTRL_AIMTURN), LT("gui.ctl_aimturn"));   /* W218 */
+    combo_refill(ID_CTRL_AIMASSIST, kAssist, 3); /* W236 */
     ui_settext(ctl(ID_CTRL_AUTOGEAR), LT("gui.ctl_autogear"));
     ui_settext(ctl(ID_CTRL_ASSIST), LT("gui.ctl_assist"));
     ui_settext(ctl(ID_CTRL_BROWSER), LT("gui.keys_browser")); /* W179 */
@@ -11619,7 +12210,7 @@ static void build_controls(void)
     mk(w, K_EDIT, ID_IMAGE, P_PLAY, CX0 + 18, CY0 + 276, CW - 300, 32, "", 0);
     mk(w, K_BTN, ID_IMAGE_C, P_PLAY, CX0 + CW - 272, CY0 + 276, 122, 32, LT("gui.btn_check"), 0);
     mk(w, K_BTN, ID_IMAGE_B, P_PLAY, CX0 + CW - 140, CY0 + 276, 122, 32, LT("gui.btn_browse"), 0);
-    mk(w, K_BTN, ID_PLAY_FOLDER, P_PLAY, CX0 + CW - 18 - 186, CY0 + 396, 186, 30,
+    mk(w, K_BTN, ID_PLAY_FOLDER, P_PLAY, CX0 + CW - 18 - 230, CY0 + 396, 230, 30,
        LT("gui.play_use_folder"), 0);
     /* W172/P6: Bereitschaft: "Aendern" je Zeile springt zur Ursache */
     for (i = 0; i < SUM_GO_N; i++) {
@@ -11661,19 +12252,15 @@ static void build_controls(void)
     combo_add(c, LT("gui.vr_prev_off"));
     ComboBox_SetCurSel(c, 1);
     /* W183 VR-FIX3: VR-Leistung (Preset) + Render-Aufloesung nebeneinander */
-    c = mk(w, K_COMBO, ID_VRPRESET, P_DISPLAY, CX0 + 120, CY0 + 446, (COLW - 138 - 8) * 3 / 5, 30, "", 0);
+    c = mk(w, K_COMBO, ID_VRPRESET, P_DISPLAY, CX0 + 120, CY0 + 446, COLW - 138 - 8 - EDGE_W1, 30, "", 0);
     combo_add(c, LT("gui.vrp_perf"));
     combo_add(c, LT("gui.vrp_bal"));
     combo_add(c, LT("gui.vrp_qual"));
     combo_add(c, LT("gui.vrp_custom"));
     ComboBox_SetCurSel(c, 1);
-    c = mk(w, K_COMBO, ID_VRRES, P_DISPLAY, CX0 + 120 + (COLW - 138 - 8) * 3 / 5 + 8, CY0 + 446,
-           (COLW - 138 - 8) - (COLW - 138 - 8) * 3 / 5, 30, "", 0);
-    for (i = 0; i < KVRRES_N; i++) {
-        char t[16];
-        _snprintf_s(t, sizeof t, _TRUNCATE, "%d %%", kVrRes[i]);
-        combo_add(c, t);
-    }
+    c = mk(w, K_COMBO, ID_VRRES, P_DISPLAY, CX0 + 120 + COLW - 138 - EDGE_W1, CY0 + 446,
+           EDGE_W1, 30, "", 0);
+    vrres_fill(c); /* W227: "Res. 80 %" */
     ComboBox_SetCurSel(c, vrres_index(80));
     /* Bildformat: fest (S3.10), Schalter bleibt nur fuer den Roundtrip */
     mk(w, K_TOGGLE, ID_ASPECT, P_DISPLAY, COL2 + 18, CY0 + 46, COLW - 36, 28, "", 0);
@@ -11685,15 +12272,15 @@ static void build_controls(void)
     combo_add(c, LT("gui.edge_fade"));
     ComboBox_SetCurSel(c, 0);
     c = mk(w, K_COMBO, ID_EDGE_W, P_DISPLAY, COL2 + 120, CY0 + 136,
-           (COLW - 138 - 8) / 2, 30, "", 0);
+           EDGE_W1, 30, "", 0);
     for (i = 0; i < KEDGEW_N; i++) {
         char t[32];
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.edge_w_fmt"), kEdgeW[i]);
         combo_add(c, t);
     }
     ComboBox_SetCurSel(c, 2);
-    c = mk(w, K_COMBO, ID_EDGE_S, P_DISPLAY, COL2 + 120 + (COLW - 138 - 8) / 2 + 8,
-           CY0 + 136, (COLW - 138 - 8) / 2, 30, "", 0);
+    c = mk(w, K_COMBO, ID_EDGE_S, P_DISPLAY, COL2 + 120 + EDGE_W1 + 8,
+           CY0 + 136, COLW - 138 - 8 - EDGE_W1, 30, "", 0);
     for (i = 0; i < KEDGES_N; i++) {
         char t[32];
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.edge_s_fmt"), kEdgeS[i]);
@@ -11701,11 +12288,11 @@ static void build_controls(void)
     }
     ComboBox_SetCurSel(c, KEDGES_N - 1);
     /* W191 UW-PERSP: Cockpit-Perspektive (Kamera vor, Hauptmonitor fest, nie gestreckt) */
-    c = mk(w, K_COMBO, ID_CPERSP, P_DISPLAY, COL2 + 120, CY0 + 186, (COLW - 138 - 8) / 2, 30, "", 0);
+    c = mk(w, K_COMBO, ID_CPERSP, P_DISPLAY, COL2 + 120, CY0 + 186, COLW - 138, 30, "", 0);
     cpersp_fill(c);
     ComboBox_SetCurSel(c, 0);
-    c = mk(w, K_COMBO, ID_CPANINI, P_DISPLAY, COL2 + 120 + (COLW - 138 - 8) / 2 + 8, CY0 + 186,
-           (COLW - 138 - 8) / 2, 30, "", 0); /* W191: Panini */
+    c = mk(w, K_COMBO, ID_CPANINI, P_DISPLAY, COL2 + 120, CY0 + 222,
+           COLW - 138, 30, "", 0); /* W191: Panini (W227: eigene Zeile mit Beschriftung) */
     cpersp_fill(c);
     ComboBox_SetCurSel(c, 0);
     /* W148: Render-Skalierung (Index: 0 = Auto dyn, 1 = Auto fest, 2..5 = 1..4) */
@@ -11830,12 +12417,12 @@ static void build_controls(void)
        26, LT("gui.joy_btn"), 0);
     /* W87: Maus-Zielen absolut/relativ + Empfindlichkeit */
     c = mk(w, K_COMBO, ID_MOUSE_MODE, P_CTRL, COL2 + 78, CY0 + 108,
-           COLW - 18 - 70 - 52 - 8 - 78, 30, "", 0);
+           COLW - 18 - 54 - 48 - 8 - 78, 30, "", 0);
     SendMessageW(c, CB_SETDROPPEDWIDTH, (WPARAM)SX(240), 0);
     combo_add(c, LT("gui.mouse_abs"));
     combo_add(c, LT("gui.mouse_rel"));
-    c = mk(w, K_COMBO, ID_MOUSE_SENS, P_CTRL, COL2 + COLW - 18 - 70,
-           CY0 + 108, 70, 30, "", 0);
+    c = mk(w, K_COMBO, ID_MOUSE_SENS, P_CTRL, COL2 + COLW - 18 - 54,
+           CY0 + 108, 54, 30, "", 0);
     {
         char t[8];
         for (i = 1; i <= 16; i++) {
@@ -11845,7 +12432,13 @@ static void build_controls(void)
     }
     /* W218 SIMPLE-CONTROLS: vereinfachte Steuerung (Standard aus; nur
      * Maus/Tastatur/Gamepad, mit aktivem Original-Controller ohne Wirkung) */
-    mk(w, K_TOGGLE, ID_CTRL_AIMTURN, P_CTRL, COL2 + 18, CY0 + 160, COLW - 36, 28, LT("gui.ctl_aimturn"), 0);
+    /* W236 AIM-ASSIST: Zielhilfe als Auswahl (ersetzt W218 "Fadenkreuz dreht
+     * Mech"); Erklaerung je Stufe in der Statuszeile. */
+    c = mk(w, K_COMBO, ID_CTRL_AIMASSIST, P_CTRL, COL2 + 18, CY0 + 158, COLW - 36, 30, "", 0);
+    SendMessageW(c, CB_SETDROPPEDWIDTH, (WPARAM)SX(360), 0);
+    combo_add(c, LT("gui.ctl_assist0"));
+    combo_add(c, LT("gui.ctl_assist1"));
+    combo_add(c, LT("gui.ctl_assist2"));
     mk(w, K_TOGGLE, ID_CTRL_AUTOGEAR, P_CTRL, COL2 + 18, CY0 + 192, COLW - 36, 28, LT("gui.ctl_autogear"), 0);
     mk(w, K_MEMO, ID_KEYS, P_CTRL, COL2 + 18, CY0 + 228, COLW - 36, 210,
        "", 0);
@@ -11895,10 +12488,10 @@ static void build_controls(void)
     mk(w, K_BTN, ID_SAVES_EXPORT, P_ADV, CX0 + 166, CY0 + 308, COLW - 184, 28, LT("gui.si_export"), 0);
     mk(w, K_COMBOEDIT, ID_PROF_COMBO, P_ADV, CX0 + 18, CY0 + 388, COLW - 36, 30,
        "", 0);
-    mk(w, K_ACCENT, ID_PROF_LOAD, P_ADV, CX0 + 18, CY0 + 422, 96, 30, LT("gui.adv_setup_load"), 0);
-    mk(w, K_BTN, ID_PROF_SAVE, P_ADV, CX0 + 122, CY0 + 422, 96, 30, LT("gui.adv_setup_save"), 0);
-    mk(w, K_BTN, ID_PROF_DEL, P_ADV, CX0 + 226, CY0 + 422, 96, 30, LT("gui.btn_delete"), 0);
-    mk(w, K_TOGGLE, ID_PROF_DFLT, P_ADV, CX0 + 18, CY0 + 456, COLW - 36, 28,
+    mk(w, K_ACCENT, ID_PROF_LOAD, P_ADV, CX0 + 18, CY0 + 420, 96, 30, LT("gui.adv_setup_load"), 0);
+    mk(w, K_BTN, ID_PROF_SAVE, P_ADV, CX0 + 122, CY0 + 420, 96, 30, LT("gui.adv_setup_save"), 0);
+    mk(w, K_BTN, ID_PROF_DEL, P_ADV, CX0 + 226, CY0 + 420, 96, 30, LT("gui.btn_delete"), 0);
+    mk(w, K_TOGGLE, ID_PROF_DFLT, P_ADV, CX0 + 18, CY0 + 452, COLW - 36, 28,
        LT("gui.adv_setup_auto"), 0);
     c = mk(w, K_COMBO, ID_VSYNC, P_ADV, COL2 + 170, CY0 + 44, COLW - 188,
            30, "", 0);
@@ -12091,9 +12684,13 @@ static void on_command_inner(int id, int code)
     case ID_CTRL_MOUSEOFF:
         ui_set_checked(ID_CTRL_MOUSEOFF, !ui_checked(ID_CTRL_MOUSEOFF));
         break;
-    case ID_CTRL_AIMTURN: /* W218 */
-        ui_set_checked(ID_CTRL_AIMTURN, !ui_checked(ID_CTRL_AIMTURN));
-        set_status(LT(ui_checked(ID_CTRL_AIMTURN) ? "gui.ctl_aimturn_on" : "gui.ctl_simple_off"));
+    case ID_CTRL_AIMASSIST: /* W236 */
+        if (code == CBN_SELCHANGE && !g_updating) {
+            static const char *const kTip[3] = { "gui.ctl_assist0_on", "gui.ctl_assist1_on",
+                                                 "gui.ctl_assist2_on" };
+            int sel = ComboBox_GetCurSel(ctl(ID_CTRL_AIMASSIST));
+            set_status(LT(kTip[(sel >= 0 && sel <= 2) ? sel : 0]));
+        }
         break;
     case ID_CTRL_AUTOGEAR: /* W218 */
         ui_set_checked(ID_CTRL_AUTOGEAR, !ui_checked(ID_CTRL_AUTOGEAR));
@@ -12782,6 +13379,9 @@ static const struct {
     { "img_folder", "game_image=;xbe_path=;media_root=", 0 },
     { "img_browse", "game_image=;xbe_path=;media_root=", 0 },
     { "img_browse_bad", "game_image=;xbe_path=;media_root=", 0 },
+    /* W227 LAUNCHER-POLISH: startbereit mit Beispiel-Abbild (Fixture, bereinigt) */
+    { "ready", "xbe_path=;media_root=", 0 },
+    { "ready_controller", "xbe_path=;media_root=;sbc_usb=1;sbc_mouse_off=1;input_profile=", 0 },
     { "pack2", "", 0, 1 },  /* W172: zweites Pack gewaehlt (verdeckt durch ...) */
     { "pack3", "", 0, 2 },  /* W172: drittes Pack (Effekt-Pack mit Schloss) */
     /* W173: Remastered dezent, Effect Pack setzt color_sat/fx_embers (Effect-Pack-
@@ -12802,9 +13402,16 @@ int gui_state_known(const char *name)
     return 0;
 }
 
+#define W220_ISO "D:\\Games\\Steel Battalion (Europe).iso"
+static void w220_fixture(const char *path, int rc);
+
 static void gui_apply_state(const char *name)
 {
     int i;
+    if (strncmp(name, "ready", 5) == 0) { /* W227: Fixture vor dem Regelwerk */
+        w220_fixture(W220_ISO, 0);
+        strcpy_s(g_s.game_image, sizeof g_s.game_image, W220_ISO);
+    }
     for (i = 0; i < (int)(sizeof kStates / sizeof kStates[0]); i++) {
         if (strcmp(name, kStates[i].name) == 0) {
             lcfg_apply_set(&g_s, kStates[i].set);
@@ -12820,7 +13427,6 @@ static void gui_apply_state(const char *name)
 
 /* W220 PLAY-LAYOUT: Zustaende der Einrichtungskarte (Shots + Selbsttest 62).
  * Pfade sind bereinigte Beispiele; die Pruefung liefert die Fixture. */
-#define W220_ISO "D:\\Games\\Steel Battalion (Europe).iso"
 #define W220_ISO_US "D:\\Games\\Steel Battalion (USA).iso"
 #define W220_DIR "D:\\Games\\Steel Battalion"
 static void w220_fixture(const char *path, int rc)
@@ -12986,11 +13592,34 @@ static int window_pixels(HWND w, canvas_t *out)
                 }
             }
             if (lit > n / 97 / 4) {
-                return 0;
+                break;
             }
             pump();
             Sleep(150);
         }
+    }
+    { /* W227: DWM liefert nach einem Seitenwechsel gelegentlich noch das
+       * vorige Bild -> erneut sichern, bis zwei Aufnahmen gleich sind. */
+        canvas_t t;
+        int tries;
+        memset(&t, 0, sizeof t);
+        if (!cv_make(&t, bw, bh)) {
+            return 0;
+        }
+        for (tries = 0; tries < 8; tries++) {
+            pump();
+            Sleep(80);
+            DwmFlush();
+            if (!PrintWindow(w, t.dc, 2 /* PW_RENDERFULLCONTENT */)) {
+                PrintWindow(w, t.dc, 0);
+            }
+            GdiFlush();
+            if (memcmp(t.px, out->px, (size_t)bw * (size_t)bh * 4) == 0) {
+                break;
+            }
+            memcpy(out->px, t.px, (size_t)bw * (size_t)bh * 4);
+        }
+        cv_free(&t);
     }
     return 0;
 }
@@ -13045,6 +13674,10 @@ static int bind_shot_save(HWND hd)
 {
     char path[1200];
     int rc;
+    /* W228: alle Kinder fertig zeichnen (Umordnen invalidiert sie). */
+    RedrawWindow(hd, NULL, NULL,
+                 RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+    pump();
     UpdateWindow(hd);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s/w78_bind.bmp", g_o.out_dir);
     rc = shot_window(hd, path, 0);

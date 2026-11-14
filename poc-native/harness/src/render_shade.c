@@ -564,7 +564,8 @@ static int rq_packed_build(rq_vsent_t *e)
     q0 = rq_qpc(); /* W137: immer (einmal je Programm) */
     g_shz_n++;
     if (!rqv_hlsl(&e->prog, 0, src, sizeof src, cof, &nc) || !rq_compile(src, "vs_4_0", &b)) { return 0; }
-    if (!rqv_hlsl(&e->prog, 1, src, sizeof src, cof, &nc) || !rq_compile(src, "vs_4_0", &bl)) {
+    if (!rqv_hlsl(&e->prog, g_cfg.interp_eyefix ? 2 : 1, src, sizeof src, cof, &nc) || /* W224 */
+        !rq_compile(src, "vs_4_0", &bl)) {
         b->lpVtbl->Release(b);
         return 0;
     }

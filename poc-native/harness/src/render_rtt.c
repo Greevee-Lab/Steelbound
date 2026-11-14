@@ -3,6 +3,9 @@
  * SetRenderTarget-Umleitung, Lookup fuer das Sampling (sb_tex.c).
  * W68 SPLIT: 1:1 aus d3d11_render.c verschoben. */
 #include "render_int.h"
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 rtt_entry_t g_rtt[RTT_MAX];
 int g_rtt_n;
@@ -238,6 +241,469 @@ static unsigned char g_rtt_stage_pend[RTT_MAX]; /* Kopie der Vor-Session liegt b
 static unsigned g_rtt_stage_host[RTT_MAX], g_rtt_stage_pitch[RTT_MAX];
 unsigned krnl_phys_to_virt(unsigned phys);
 static unsigned krnl_phys_to_virt_rb(unsigned phys) { return krnl_phys_to_virt(phys); }
+
+/* FIX(CULL-POPIN,W215) rtt_rb_sync: Zellenkarte im selben Spiel-Bild.
+ * Das Spiel rendert die 128x128-Sicht-Zellenkarte (FUN_00030190: Faecher um
+ * die Kamera-Gierung [0x356FAC], halber Winkel [0x346F34] = 30 Grad, Radius
+ * 52 Zellen = 260u), setzt danach einen Fence ([0x35640C]) und wartet in
+ * FUN_000459B0 @0x45B9D per D3DDevice_BlockOnFence darauf, bevor Gelaende
+ * (FUN_00025E20, Byte 0) und Objekte (FUN_00021EB0) die Karte lesen - die
+ * Auswahl gilt auf der Xbox also fuer DIESES Bild. Der asynchrone W59-Pfad
+ * lieferte den Inhalt >= 1 Session spaeter (bei GPU-Rueckstand mehrere):
+ * Gelaende wurde fuer eine aeltere Gierung/Position ausgewaehlt und fehlte
+ * beim Drehen am vorderen Bildrand (Spiel-Frustum 4:3 = +-29 Grad, Sektor
+ * +-30 Grad - kaum Reserve). Mit rtt_rb_sync=1 wird die Kopie am
+ * Session-Ende abgesetzt (Flush) und beim naechsten Warten des Spiels auf
+ * die GPU (D3D_BlockOnTime, Ziel von BlockOnFence; spaetestens vor der
+ * naechsten RT-Session bzw. am Swap) abgeholt und in den Xbox-Speicher
+ * geschrieben. ctx_lock wird zwischen den Abfragen abgegeben. */
+static int g_rb_sync_c = -1;              /* Slot mit anhaengiger Sync-Kopie */
+static unsigned g_rb_sync_host, g_rb_sync_pitch, g_rb_sync_w, g_rb_sync_h;
+static LARGE_INTEGER g_rb_sync_t0;
+static unsigned g_rb_sess;                 /* DIAG: Sessions der Zellenkarte */
+static unsigned g_rb_stage_sess[RTT_MAX];  /* DIAG: Session der Kopie im Staging (Alter) */
+static ID3D11Texture2D *g_rb_diag_stage;   /* DIAG: frische Kopie (blockierend) */
+/* DIAG(CULL-POPIN,W215): Statistik je rtt_rb_diag Sessions */
+static unsigned g_rbd_n, g_rbd_skip, g_rbd_age_sum, g_rbd_age_max, g_rbd_age_n;
+static unsigned g_rbd_miss_sum, g_rbd_miss_max, g_rbd_miss_n1, g_rbd_extra_sum, g_rbd_cells_sum;
+static double g_rbd_wait_sum, g_rbd_wait_max, g_rbd_lat_sum, g_rbd_lat_max;
+static unsigned g_rbd_wait_n, g_rbd_why[4];
+
+/* DIAG(W215): pBits, ueber die das Spiel die Zellenkarte liest (Dauer-
+ * LockRect, FUN_0002D320 -> [0x35149C]); 0 = noch nicht gesetzt. */
+static unsigned rtt_rb_game_ptr(void)
+{
+    unsigned v = 0;
+    __try { v = *(volatile unsigned *)(uintptr_t)0x35149Cu; } __except (EXCEPTION_EXECUTE_HANDLER) { v = 0; }
+    return v;
+}
+
+static void rtt_rb_sync_drop(int idx)
+{
+    if (g_rb_sync_c == idx) { g_rb_sync_c = -1; }
+}
+
+static double rtt_rb_ms_since(const LARGE_INTEGER *t0)
+{
+    LARGE_INTEGER t, f;
+    QueryPerformanceCounter(&t);
+    QueryPerformanceFrequency(&f);
+    return f.QuadPart ? (double)(t.QuadPart - t0->QuadPart) * 1000.0 / (double)f.QuadPart : 0.0;
+}
+
+/* DIAG: Statistikzeile, sobald rtt_rb_diag Sessions gezaehlt sind (1 = 300). */
+static void rtt_rb_diag_flush(void)
+{
+    int dv = g_cfg.rtt_rb_diag < 0 ? -g_cfg.rtt_rb_diag : g_cfg.rtt_rb_diag; /* < 0: ohne Vergleich */
+    unsigned every = (unsigned)(dv > 1 ? dv : 300);
+    static unsigned nline;
+    unsigned mloop = 0;
+    if (!g_cfg.rtt_rb_diag || g_rbd_n < every) { return; }
+    __try { mloop = *(volatile unsigned *)(uintptr_t)0x356F58u; } __except (EXCEPTION_EXECUTE_HANDLER) { mloop = 0; }
+    if (mloop == 1u && nline < 600) { /* nur laufende Mission */
+        nline++;
+        HLOG_W("RTTRB f=%u sync=%d n=%u skip=%u alter avg=%.2f max=%u fehlend(B) avg=%.1f max=%u bilder=%u extra(B) avg=%.1f zellen(B) avg=%.0f warten avg=%.3f max=%.3f ms latenz avg=%.3f max=%.3f ms abholung bot/rtt/swap=%u/%u/%u",
+               g_present_no, g_cfg.rtt_rb_sync, g_rbd_n, g_rbd_skip,
+               g_rbd_age_n ? (double)g_rbd_age_sum / g_rbd_age_n : 0.0, g_rbd_age_max,
+               g_rbd_n ? (double)g_rbd_miss_sum / g_rbd_n : 0.0, g_rbd_miss_max, g_rbd_miss_n1,
+               g_rbd_n ? (double)g_rbd_extra_sum / g_rbd_n : 0.0,
+               g_rbd_n ? (double)g_rbd_cells_sum / g_rbd_n : 0.0,
+               g_rbd_wait_n ? g_rbd_wait_sum / g_rbd_wait_n : 0.0, g_rbd_wait_max,
+               g_rbd_wait_n ? g_rbd_lat_sum / g_rbd_wait_n : 0.0, g_rbd_lat_max,
+               g_rbd_why[1], g_rbd_why[2], g_rbd_why[3]);
+    }
+    g_rbd_n = g_rbd_skip = g_rbd_age_sum = g_rbd_age_max = g_rbd_age_n = 0;
+    g_rbd_miss_sum = g_rbd_miss_max = g_rbd_miss_n1 = g_rbd_extra_sum = g_rbd_cells_sum = 0;
+    g_rbd_wait_sum = g_rbd_wait_max = g_rbd_lat_sum = g_rbd_lat_max = 0.0;
+    g_rbd_wait_n = 0; g_rbd_why[1] = g_rbd_why[2] = g_rbd_why[3] = 0;
+}
+
+static void rtt_rb_diag_stage_ensure(void)
+{
+    D3D11_TEXTURE2D_DESC dd;
+    if (g_rb_diag_stage || !g_dev) { return; }
+    memset(&dd, 0, sizeof dd);
+    dd.Width = 128; dd.Height = 128; dd.MipLevels = 1; dd.ArraySize = 1;
+    dd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; dd.SampleDesc.Count = 1;
+    dd.Usage = D3D11_USAGE_STAGING; dd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &dd, NULL, &g_rb_diag_stage))) { g_rb_diag_stage = NULL; }
+}
+
+/* DIAG(W215): Zellenkarte Byte 0 als BMP (128x128, x4): weiss = frisch und
+ * Speicher, rot = nur frisch (fehlend), blau = nur Speicher (veraltet). */
+static void rtt_rb_dump_bmp(const unsigned char *cmp)
+{
+    static unsigned ndump;
+    char path[MAX_PATH];
+    unsigned char hdr[54];
+    unsigned char *row;
+    FILE *fp;
+    unsigned x, y, k, W = 512u, H = 512u, sz;
+    if (ndump >= 8u) { return; }
+    ndump++;
+    _snprintf_s(path, sizeof path, _TRUNCATE, "%s/shots/rtrb_%06u.bmp", hcfg_out_dir(), g_present_no);
+    if (fopen_s(&fp, path, "wb") != 0 || !fp) { return; }
+    sz = 54u + W * H * 3u;
+    memset(hdr, 0, sizeof hdr);
+    hdr[0] = 'B'; hdr[1] = 'M';
+    hdr[2] = (unsigned char)sz; hdr[3] = (unsigned char)(sz >> 8); hdr[4] = (unsigned char)(sz >> 16); hdr[5] = (unsigned char)(sz >> 24);
+    hdr[10] = 54; hdr[14] = 40;
+    hdr[18] = (unsigned char)W; hdr[19] = (unsigned char)(W >> 8);
+    hdr[22] = (unsigned char)H; hdr[23] = (unsigned char)(H >> 8);
+    hdr[26] = 1; hdr[28] = 24;
+    fwrite(hdr, 1, sizeof hdr, fp);
+    row = (unsigned char *)malloc(W * 3u);
+    if (row) {
+        for (y = 0; y < H; y++) {
+            unsigned cy = 127u - (y / 4u); /* BMP von unten */
+            for (x = 0; x < W; x++) {
+                unsigned v = cmp[cy * 128u + x / 4u];
+                unsigned char r = 0, g = 0, b = 0;
+                if (v == 3u) { r = g = b = 200; }
+                else if (v == 1u) { r = 255; }
+                else if (v == 2u) { b = 255; g = 96; }
+                if (x / 4u == 64u && cy == 64u) { r = 0; g = 255; b = 0; } /* eigene Zelle */
+                k = x * 3u; row[k] = b; row[k + 1u] = g; row[k + 2u] = r;
+            }
+            fwrite(row, 1, W * 3u, fp);
+        }
+        free(row);
+    }
+    fclose(fp);
+    HLOG_W("RTTRB dump %s", path);
+}
+
+/* DIAG: frischen RT-Inhalt (blockierend gelesen) mit dem vergleichen, was die
+ * CPU jetzt im Xbox-Speicher sieht. fehlend(B) = Zellen mit Byte 0 frisch != 0,
+ * im Speicher 0 = Gelaende/Objekte, die das Spiel faelschlich aussortiert.
+ * Nur mit rtt_rb_diag (zusaetzlicher GPU-Stall, aendert das Timing). */
+static void rtt_rb_diag_compare(int c, unsigned host, unsigned pitch, unsigned w, unsigned h)
+{
+    D3D11_TEXTURE2D_DESC dd;
+    D3D11_MAPPED_SUBRESOURCE m;
+    unsigned x, y, miss = 0, extra = 0, cells = 0;
+    static unsigned char cmp[128u * 128u];
+    rtt_entry_t *e = &g_rtt[c];
+    if (g_cfg.rtt_rb_diag <= 0 || !e->tex || !host || w != 128u || h != 128u) { return; } /* < 0: nur Alter/Skip/Warten, kein Zusatz-Readback */
+    (void)dd;
+    rtt_rb_diag_stage_ensure();
+    sb_ctx_enter();
+    if (g_rb_diag_stage) {
+        ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_rb_diag_stage, (ID3D11Resource *)e->tex);
+        if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_rb_diag_stage, 0, D3D11_MAP_READ, 0, &m))) {
+            __try {
+                for (y = 0; y < h; y++) {
+                    const unsigned char *f = (const unsigned char *)m.pData + (size_t)y * m.RowPitch;
+                    const unsigned char *o = (const unsigned char *)(uintptr_t)(host + y * pitch);
+                    for (x = 0; x < w; x++) {
+                        unsigned fb = f[x * 4u], ob = o[x * 4u];
+                        if (fb) { cells++; }
+                        cmp[y * 128u + x] = (unsigned char)((fb ? 1u : 0u) | (ob ? 2u : 0u));
+                        if (fb && !ob) { miss++; }
+                        if (!fb && ob) { extra++; }
+                    }
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                miss = extra = 0;
+            }
+            ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_rb_diag_stage, 0);
+        }
+    }
+    sb_ctx_leave();
+    g_rbd_miss_sum += miss; g_rbd_extra_sum += extra; g_rbd_cells_sum += cells;
+    if (miss > g_rbd_miss_max) { g_rbd_miss_max = miss; }
+    if (miss) { g_rbd_miss_n1++; }
+    if (miss >= 16u) { rtt_rb_dump_bmp(cmp); }
+    if (miss >= 8u) { /* einzelne Session mit vielen fehlenden Zellen (Bild zuordnen) */
+        static unsigned nmiss;
+        if (nmiss < 300) { nmiss++; HLOG_W("RTTRB miss f=%u fehlend(B)=%u extra(B)=%u zellen(B)=%u", g_present_no, miss, extra, cells); }
+    }
+}
+
+/* Anhaengige Sync-Kopie abholen (blockierend, ctx_lock zwischen den Abfragen
+ * frei) und in den Xbox-Speicher schreiben. why: 1 = BlockOnTime (Spiel wartet
+ * auf die GPU, Originalpunkt), 2 = vor der naechsten RT-Session, 3 = Swap. */
+void sb_rtt_rb_sync_resolve(int why)
+{
+    D3D11_MAPPED_SUBRESOURCE m;
+    HRESULT hr;
+    LARGE_INTEGER tw;
+    int c = g_rb_sync_c, spins = 0;
+    unsigned y;
+    static unsigned nfail;
+    if (c < 0) { return; }
+    g_rb_sync_c = -1;
+    if (c >= g_rtt_n || !g_rtt_stage[c] || !g_ctx) { return; }
+    QueryPerformanceCounter(&tw);
+    for (;;) {
+        sb_ctx_enter();
+        hr = ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_rtt_stage[c], 0,
+                                     D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
+        if (hr != DXGI_ERROR_WAS_STILL_DRAWING) { break; }
+        if (rtt_rb_ms_since(&tw) > 250.0) { /* Sicherung: blockierend */
+            hr = ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_rtt_stage[c], 0, D3D11_MAP_READ, 0, &m);
+            break;
+        }
+        sb_ctx_leave();
+        /* aktiv warten (wie BlockOnFence auf der Xbox); erst nach 2 ms den Kern
+         * abgeben - SwitchToThread auf dem geteilten Xbox-Kern kostete bis 5 ms */
+        if (++spins < 64 || rtt_rb_ms_since(&tw) < 2.0) { YieldProcessor(); } else { SwitchToThread(); }
+    }
+    if (SUCCEEDED(hr)) {
+        __try {
+            for (y = 0; y < g_rb_sync_h; y++) {
+                memcpy((void *)(uintptr_t)(g_rb_sync_host + y * g_rb_sync_pitch),
+                       (const unsigned char *)m.pData + (size_t)y * m.RowPitch,
+                       (size_t)g_rb_sync_w * 4u);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            if (nfail < 4) { nfail++; HLOG_W("RTT readback: Ziel 0x%X nicht schreibbar (sync)", g_rb_sync_host); }
+        }
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_rtt_stage[c], 0);
+    } else if (nfail < 4) {
+        nfail++; HLOG_W("RTT readback: Map (sync) fehlgeschlagen (hr=0x%lX)", (unsigned long)hr);
+    }
+    sb_ctx_leave();
+    if (g_cfg.rtt_rb_diag) {
+        double wms = rtt_rb_ms_since(&tw), lms = rtt_rb_ms_since(&g_rb_sync_t0);
+        g_rbd_wait_sum += wms; if (wms > g_rbd_wait_max) { g_rbd_wait_max = wms; }
+        g_rbd_lat_sum += lms; if (lms > g_rbd_lat_max) { g_rbd_lat_max = lms; }
+        g_rbd_wait_n++;
+        if (why >= 1 && why <= 3) { g_rbd_why[why]++; }
+        g_rbd_age_n++; /* Alter 0: Inhalt dieser Session */
+        rtt_rb_diag_compare(c, g_rb_sync_host, g_rb_sync_pitch, g_rb_sync_w, g_rb_sync_h);
+        rtt_rb_diag_flush();
+    }
+}
+
+/* FIX(CULL-POPIN,W215) rtt_rb_sync=2: Zellenkarte auf der CPU rastern.
+ * Die fuenf Faecher der Karte (FUN_00030190) kommen als IM-Draws
+ * (Begin/SetVertexData4f/End) in Pixelkoordinaten 0..128 mit Vertexfarbe in
+ * v1; alle Leser pruefen nur Byte != 0 (FUN_00021EB0/22090/22230/25E20).
+ * Wir rastern dieselben Dreiecke (D3D11-Regeln: 1/256-Subpixel, Pixelmitte,
+ * top-left) in einen CPU-Schatten und schreiben ihn am Session-Ende direkt in
+ * den Xbox-Speicher - ohne GPU-Warten. Die GPU zeichnet weiter wie bisher.
+ * Passt eine Session nicht ins Muster (andere Draw-Art, Primitiv), gilt fuer
+ * sie der GPU-Pfad (rtt_rb_sync=1). DIAG rtt_rb_diag>0 vergleicht den
+ * Schatten mit dem frischen GPU-Inhalt (Kanal fuer Kanal, != 0). */
+#define RBC_W 128u
+static unsigned *g_rbc_buf[2];           /* [0] = Standard, [1] = DIAG anderer Versatz */
+static int g_rbc_slot = -1;              /* Slot der Karte (aktuelle Session) */
+static unsigned g_rbc_imdraws, g_rbc_bad; /* IM-Draws / nicht abbildbar in der Session */
+static unsigned g_rbcd_n, g_rbcd_diff[2], g_rbcd_diffmax[2], g_rbcd_val, g_rbcd_bad, g_rbcd_sess;
+
+static int rbc_candidate(int c)
+{
+    rtt_entry_t *e;
+    unsigned data = 0, fmt = 0, size = 0;
+    if (c < 0 || c >= g_rtt_n) { return 0; }
+    e = &g_rtt[c];
+    if (e->w != RBC_W || e->h != RBC_W || e->isdepth) { return 0; }
+    if (!rtt_hdr(e->surf, &data, &fmt, &size)) { return 0; }
+    return ((fmt >> 8) & 0xFFu) == 0x1Eu;
+}
+
+/* Session-Beginn (Slot wird aktuelles Ziel). */
+static void rbc_session_begin(int idx)
+{
+    g_rbc_slot = -1;
+    if (g_cfg.rtt_rb_sync != 2 || !g_cfg.rtt_readback || g_cfg.rtt_readback == 9 || !rbc_candidate(idx)) { return; }
+    if (!g_rbc_buf[0]) { g_rbc_buf[0] = (unsigned *)calloc(RBC_W * RBC_W, 4); }
+    if (g_cfg.rtt_rb_diag > 0 && !g_rbc_buf[1]) { g_rbc_buf[1] = (unsigned *)calloc(RBC_W * RBC_W, 4); }
+    if (!g_rbc_buf[0]) { return; }
+    g_rbc_slot = idx;
+    g_rbc_imdraws = 0;
+    g_rbc_bad = 0;
+}
+
+static void rbc_clear(unsigned color)
+{
+    unsigned k, i;
+    for (k = 0; k < 2; k++) {
+        if (!g_rbc_buf[k]) { continue; }
+        for (i = 0; i < RBC_W * RBC_W; i++) { g_rbc_buf[k][i] = color; }
+    }
+}
+
+static int rbc_topleft(long long dx, long long dy)
+{
+    return (dy == 0 && dx > 0) || dy < 0;
+}
+
+/* Ein Dreieck; p = x,y in Xbox-Pixeln, col = Bytes B,G,R,A je Vertex. */
+static void rbc_tri(unsigned *buf, const float *p0, const float *p1, const float *p2,
+                    const unsigned char *c0, const unsigned char *c1, const unsigned char *c2,
+                    unsigned mask, int ofs256)
+{
+    long long X0 = (long long)floor(p0[0] * 256.0 + 0.5) + ofs256, Y0 = (long long)floor(p0[1] * 256.0 + 0.5) + ofs256;
+    long long X1 = (long long)floor(p1[0] * 256.0 + 0.5) + ofs256, Y1 = (long long)floor(p1[1] * 256.0 + 0.5) + ofs256;
+    long long X2 = (long long)floor(p2[0] * 256.0 + 0.5) + ofs256, Y2 = (long long)floor(p2[1] * 256.0 + 0.5) + ofs256;
+    long long area = (X1 - X0) * (Y2 - Y0) - (Y1 - Y0) * (X2 - X0);
+    long long minx, maxx, miny, maxy, px, py;
+    int tl0, tl1, tl2;
+    if (area == 0) { return; }
+    if (area < 0) { /* Orientierung angleichen (keine Rueckseiten-Unterdrueckung) */
+        long long tx = X1, ty = Y1; const unsigned char *tc = c1;
+        X1 = X2; Y1 = Y2; c1 = c2; X2 = tx; Y2 = ty; c2 = tc;
+        area = -area;
+    }
+    tl0 = rbc_topleft(X2 - X1, Y2 - Y1); /* Kante v1->v2 (gegenueber v0) */
+    tl1 = rbc_topleft(X0 - X2, Y0 - Y2);
+    tl2 = rbc_topleft(X1 - X0, Y1 - Y0);
+    minx = X0 < X1 ? X0 : X1; if (X2 < minx) { minx = X2; }
+    maxx = X0 > X1 ? X0 : X1; if (X2 > maxx) { maxx = X2; }
+    miny = Y0 < Y1 ? Y0 : Y1; if (Y2 < miny) { miny = Y2; }
+    maxy = Y0 > Y1 ? Y0 : Y1; if (Y2 > maxy) { maxy = Y2; }
+    minx = minx >> 8; maxx = (maxx >> 8) + 1; miny = miny >> 8; maxy = (maxy >> 8) + 1;
+    if (minx < 0) { minx = 0; }
+    if (miny < 0) { miny = 0; }
+    if (maxx > (long long)RBC_W - 1) { maxx = RBC_W - 1; }
+    if (maxy > (long long)RBC_W - 1) { maxy = RBC_W - 1; }
+    for (py = miny; py <= maxy; py++) {
+        long long sy = py * 256 + 128;
+        for (px = minx; px <= maxx; px++) {
+            long long sx = px * 256 + 128;
+            long long w0 = (X2 - X1) * (sy - Y1) - (Y2 - Y1) * (sx - X1);
+            long long w1 = (X0 - X2) * (sy - Y2) - (Y0 - Y2) * (sx - X2);
+            long long w2 = (X1 - X0) * (sy - Y0) - (Y1 - Y0) * (sx - X0);
+            unsigned v, k, out;
+            if (w0 < 0 || w1 < 0 || w2 < 0) { continue; }
+            if ((w0 == 0 && !tl0) || (w1 == 0 && !tl1) || (w2 == 0 && !tl2)) { continue; }
+            out = buf[py * RBC_W + px];
+            for (k = 0; k < 4; k++) {
+                double f;
+                if (!(mask & (0xFFu << (8u * k)))) { continue; }
+                f = ((double)w0 * c0[k] + (double)w1 * c1[k] + (double)w2 * c2[k]) / (double)area;
+                v = (unsigned)(f + 0.5);
+                if (v > 255u) { v = 255u; }
+                out = (out & ~(0xFFu << (8u * k))) | (v << (8u * k));
+            }
+            buf[py * RBC_W + px] = out;
+        }
+    }
+}
+
+/* IM-Draw ins aktuelle Ziel (aus sb_render_im_end_nolock): verts = g_im_buf
+ * (n Vertices zu je slots*4 Floats), Position Register 0, Farbe Register colreg
+ * (RGBA 0..1, wie sb_render_im_color). */
+void sb_rtt_rbc_im(unsigned prim, const float *verts, unsigned n, unsigned slots, int colreg)
+{
+    unsigned i, k, ntri = 0;
+    unsigned char col[3][4];
+    const float *v[3];
+    if (g_rbc_slot < 0 || g_rbc_slot != g_rtt_cur) { return; }
+    g_rbc_imdraws++;
+    if (colreg < 0 || (unsigned)colreg >= slots || n < 3u || (prim != 5u && prim != 6u && prim != 7u)) { g_rbc_bad++; return; }
+    if (prim == 5u) { ntri = n / 3u; } else { ntri = n - 2u; }
+    for (i = 0; i < ntri; i++) {
+        unsigned a, b, c, j;
+        if (prim == 5u) { a = 3u * i; b = a + 1u; c = a + 2u; }
+        else if (prim == 6u) { a = i; b = i + 1u; c = i + 2u; }
+        else { a = 0; b = i + 1u; c = i + 2u; }
+        v[0] = verts + (size_t)a * slots * 4u;
+        v[1] = verts + (size_t)b * slots * 4u;
+        v[2] = verts + (size_t)c * slots * 4u;
+        for (j = 0; j < 3; j++) {
+            const float *cc = v[j] + (size_t)colreg * 4u; /* R,G,B,A */
+            float f[4];
+            f[0] = cc[2]; f[1] = cc[1]; f[2] = cc[0]; f[3] = cc[3]; /* -> B,G,R,A (Speicherfolge) */
+            for (k = 0; k < 4; k++) {
+                float t = f[k] * 255.0f + 0.5f;
+                col[j][k] = (unsigned char)(t < 0.0f ? 0 : (t > 255.0f ? 255 : (int)t));
+            }
+        }
+        for (k = 0; k < 2; k++) {
+            if (!g_rbc_buf[k]) { continue; }
+            rbc_tri(g_rbc_buf[k], v[0], v[1], v[2], col[0], col[1], col[2], rs_cmask,
+                    k == 0 ? g_cfg.rtt_rb_cpu_ofs : (g_cfg.rtt_rb_cpu_ofs ? 0 : 128));
+        }
+    }
+}
+
+/* Session-Ende: Schatten schreiben, wenn die Session ganz abbildbar war.
+ * Rueckgabe 1 = erledigt (kein GPU-Rueckschrieb noetig). */
+static int rbc_session_end(int c, unsigned host, unsigned pitch)
+{
+    rtt_entry_t *e = &g_rtt[c];
+    unsigned y;
+    static unsigned nlog;
+    if (g_rbc_slot != c) { return 0; }
+    g_rbc_slot = -1;
+    if (g_rbc_bad || g_rbc_imdraws != e->draws) {
+        if (nlog < 8) { nlog++; HLOG_W("RTT rbc: Session nicht abbildbar (im=%u draws=%u bad=%u) -> GPU-Rueckschrieb", g_rbc_imdraws, e->draws, g_rbc_bad); }
+        if (g_cfg.rtt_rb_diag > 0) { g_rbcd_bad++; }
+        return 0;
+    }
+    __try {
+        for (y = 0; y < RBC_W; y++) {
+            memcpy((void *)(uintptr_t)(host + y * pitch), g_rbc_buf[0] + y * RBC_W, RBC_W * 4u);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return 1;
+}
+
+/* DIAG: Schatten gegen frischen GPU-Inhalt (blockierend). */
+static void rbc_diag_compare(int c)
+{
+    D3D11_MAPPED_SUBRESOURCE m;
+    unsigned x, y, k, d[2] = {0, 0}, val = 0, dc[4] = {0, 0, 0, 0}, dg[4] = {0, 0, 0, 0};
+    static unsigned char cmpb[RBC_W * RBC_W];
+    rtt_entry_t *e = &g_rtt[c];
+    static unsigned nline, nch;
+    if (g_cfg.rtt_rb_diag <= 0 || !g_rbc_buf[0] || !e->tex) { return; }
+    rtt_rb_diag_stage_ensure();
+    if (!g_rb_diag_stage) { return; }
+    sb_ctx_enter();
+    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_rb_diag_stage, (ID3D11Resource *)e->tex);
+    if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_rb_diag_stage, 0, D3D11_MAP_READ, 0, &m))) {
+        for (y = 0; y < RBC_W; y++) {
+            const unsigned char *f = (const unsigned char *)m.pData + (size_t)y * m.RowPitch;
+            for (x = 0; x < RBC_W; x++) {
+                for (k = 0; k < 2; k++) {
+                    unsigned s, ch;
+                    if (!g_rbc_buf[k]) { continue; }
+                    s = g_rbc_buf[k][y * RBC_W + x];
+                    for (ch = 0; ch < 4; ch++) {
+                        unsigned fb = f[x * 4u + ch], sb = (s >> (8u * ch)) & 0xFFu;
+                        if ((fb != 0) != (sb != 0)) {
+                            if (ch < 3) { d[k]++; }
+                            if (k == 0) { if (sb) { dc[ch]++; } else { dg[ch]++; } }
+                        }
+                        else if (k == 0 && ch < 3 && fb != sb) { val++; }
+                        if (k == 0 && ch == 0) { cmpb[y * RBC_W + x] = (unsigned char)((fb ? 2u : 0u) | (sb ? 1u : 0u)); }
+                    }
+                }
+            }
+        }
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_rb_diag_stage, 0);
+    }
+    sb_ctx_leave();
+    if (d[0] && nch < 40) {
+        nch++;
+        HLOG_W("RTTRB cpu abw f=%u nur_cpu B/G/R/A=%u/%u/%u/%u nur_gpu B/G/R/A=%u/%u/%u/%u", g_present_no,
+               dc[0], dc[1], dc[2], dc[3], dg[0], dg[1], dg[2], dg[3]);
+        if (dc[0] + dg[0] >= 16u) { rtt_rb_dump_bmp(cmpb); } /* B: weiss beide, rot nur CPU, blau nur GPU */
+    }
+    g_rbcd_n++;
+    for (k = 0; k < 2; k++) {
+        g_rbcd_diff[k] += d[k];
+        if (d[k] > g_rbcd_diffmax[k]) { g_rbcd_diffmax[k] = d[k]; }
+    }
+    g_rbcd_val += val;
+    if (g_rbcd_n >= (unsigned)(g_cfg.rtt_rb_diag > 1 ? g_cfg.rtt_rb_diag : 300)) {
+        if (nline < 600) {
+            nline++;
+            HLOG_W("RTTRB cpu f=%u n=%u abdeckung_abweichend(Kanal-Zellen) versatz%d=%u (max %u) versatz%d=%u (max %u) wertabw=%u nicht_abbildbar=%u",
+                   g_present_no, g_rbcd_n, g_cfg.rtt_rb_cpu_ofs, g_rbcd_diff[0], g_rbcd_diffmax[0],
+                   g_cfg.rtt_rb_cpu_ofs ? 0 : 128, g_rbcd_diff[1], g_rbcd_diffmax[1], g_rbcd_val, g_rbcd_bad);
+        }
+        g_rbcd_n = 0; g_rbcd_diff[0] = g_rbcd_diff[1] = g_rbcd_diffmax[0] = g_rbcd_diffmax[1] = 0;
+        g_rbcd_val = 0; g_rbcd_bad = 0;
+    }
+}
+
 static void rtt_readback(int c)
 {
     rtt_entry_t *e;
@@ -275,6 +741,42 @@ static void rtt_readback(int c)
             return;
         }
     }
+    /* FIX(CULL-POPIN,W215): Zellenkarte (X8R8G8B8 bis 128x128) synchron -
+     * Kopie jetzt absetzen, Abholung am naechsten BlockOnTime des Spiels. */
+    if (g_cfg.rtt_rb_sync && g_cfg.rtt_readback != 9 && xf == 0x1Eu && e->w <= 128u && e->h <= 128u) {
+        if (g_cfg.rtt_rb_sync == 2 && rbc_session_end(c, host, pitch)) { /* CPU-Raster: kein GPU-Warten */
+            if (g_cfg.rtt_rb_diag) {
+                g_rb_sess++; g_rbd_n++; g_rbd_age_n++;
+                rbc_diag_compare(c);
+                rtt_rb_diag_compare(c, host, pitch, e->w, e->h);
+                rtt_rb_diag_flush();
+            }
+            return;
+        }
+        if (g_rb_sync_c >= 0) { sb_rtt_rb_sync_resolve(2); }
+        sb_ctx_enter();
+        g_rtt_stage_pend[c] = 0; /* evtl. alte asynchrone Kopie verwerfen */
+        ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_rtt_stage[c],
+                                         (ID3D11Resource *)e->tex);
+        ID3D11DeviceContext_Flush(g_ctx);
+        sb_ctx_leave();
+        if (e->w == 128u && e->h == 128u) { /* W215: liest das Spiel dort, wohin wir schreiben? */
+            static unsigned nmis;
+            unsigned gp = rtt_rb_game_ptr();
+            if (gp && gp != host && nmis < 4) { nmis++; HLOG_W("RTT readback: Spiel liest Zellenkarte bei 0x%X, Rueckschrieb nach 0x%X (surf=0x%X)", gp, host, e->surf); }
+        }
+        g_rb_sync_c = c;
+        g_rb_sync_host = host; g_rb_sync_pitch = pitch;
+        g_rb_sync_w = e->w; g_rb_sync_h = e->h;
+        QueryPerformanceCounter(&g_rb_sync_t0);
+        if (g_cfg.rtt_rb_diag) { g_rb_sess++; g_rbd_n++; }
+        if (nlog < 8) {
+            nlog++;
+            HLOG_I("RTT readback #%u: surf=0x%X data=0x%X host=0x%X %ux%u fmt=0x%02X pitch=%u draws=%u f=%u (sync) spiel=0x%X",
+                   nlog, e->surf, data, host, e->w, e->h, xf, pitch, e->draws, g_present_no, rtt_rb_game_ptr());
+        }
+        return;
+    }
     /* Verzoegert um eine Session (kein GPU-Stall): erst die Kopie der
      * vorigen Session abholen (laengst fertig), dann neu kopieren. Die
      * CPU sieht den RT-Inhalt damit ein Bild spaeter - fuer die Zellen-
@@ -289,6 +791,11 @@ static void rtt_readback(int c)
                                      D3D11_MAP_READ, D3D11_MAP_FLAG_DO_NOT_WAIT, &m);
         if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
             sb_ctx_leave();
+            if (g_cfg.rtt_rb_diag && xf == 0x1Eu) { /* DIAG(W215): Speicher bleibt noch aelter */
+                g_rb_sess++; g_rbd_n++; g_rbd_skip++;
+                rtt_rb_diag_compare(c, g_rtt_stage_host[c], g_rtt_stage_pitch[c], e->w, e->h);
+                rtt_rb_diag_flush();
+            }
             return;
         }
         if (SUCCEEDED(hr) && g_rtt_stage_host[c] != host) {
@@ -327,8 +834,22 @@ static void rtt_readback(int c)
                        g_present_no, e->w, e->h, nb, mb, ng, mg, nr, mr);
             }
             ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_rtt_stage[c], 0);
+            if (g_cfg.rtt_rb_diag && xf == 0x1Eu && h0) { /* DIAG(W215): Alter + fehlende Zellen */
+                unsigned age;
+                g_rb_sess++; g_rbd_n++;
+                age = g_rb_sess - g_rb_stage_sess[c];
+                g_rbd_age_sum += age; g_rbd_age_n++;
+                if (age > g_rbd_age_max) { g_rbd_age_max = age; }
+                sb_ctx_leave();
+                rtt_rb_diag_compare(c, h0, p0, e->w, e->h);
+                rtt_rb_diag_flush();
+                sb_ctx_enter();
+            }
         }
+    } else if (g_cfg.rtt_rb_diag && xf == 0x1Eu) {
+        g_rb_sess++; g_rbd_n++; /* erste Session: noch nichts im Speicher */
     }
+    g_rb_stage_sess[c] = g_rb_sess;
     ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_rtt_stage[c],
                                      (ID3D11Resource *)e->tex);
     g_rtt_stage_pend[c] = 1;
@@ -337,8 +858,8 @@ static void rtt_readback(int c)
     sb_ctx_leave();
     if (nlog < 8) {
         nlog++;
-        HLOG_I("RTT readback #%u: surf=0x%X data=0x%X host=0x%X %ux%u fmt=0x%02X pitch=%u draws=%u f=%u",
-               nlog, e->surf, data, host, e->w, e->h, xf, pitch, e->draws, g_present_no);
+        HLOG_I("RTT readback #%u: surf=0x%X data=0x%X host=0x%X %ux%u fmt=0x%02X pitch=%u draws=%u f=%u spiel=0x%X",
+               nlog, e->surf, data, host, e->w, e->h, xf, pitch, e->draws, g_present_no, rtt_rb_game_ptr());
     }
 }
 
@@ -349,6 +870,7 @@ static void rtt_release_entry(int idx)
     rtt_keep_release_idx(idx);
     if (g_rtt_stage[idx]) { ID3D11Texture2D_Release(g_rtt_stage[idx]); g_rtt_stage[idx] = NULL; }
     g_rtt_stage_pend[idx] = 0;
+    rtt_rb_sync_drop(idx); /* W215 */
     if (e->srv) { ID3D11ShaderResourceView_Release(e->srv); }
     if (e->rtv) { ID3D11RenderTargetView_Release(e->rtv); }
     if (e->dsv) { ID3D11DepthStencilView_Release(e->dsv); }
@@ -449,6 +971,7 @@ int rtt_unscale(int idx)
     if (g_rtt_bound == idx) { rtt_bind_bb(); }
     if (g_rtt_stage[idx]) { ID3D11Texture2D_Release(g_rtt_stage[idx]); g_rtt_stage[idx] = NULL; }
     g_rtt_stage_pend[idx] = 0;
+    rtt_rb_sync_drop(idx); /* W215 */
     if (e->srv) { ID3D11ShaderResourceView_Release(e->srv); e->srv = NULL; }
     if (e->rtv) { ID3D11RenderTargetView_Release(e->rtv); e->rtv = NULL; }
     if (e->dsv) { ID3D11DepthStencilView_Release(e->dsv); e->dsv = NULL; }
@@ -673,6 +1196,7 @@ static int rtt_rescale_keep(unsigned n)
         if (cur < 1u || cur > 4u || e->pw != e->w * cur) { continue; }
         if (g_rtt_stage[i]) { ID3D11Texture2D_Release(g_rtt_stage[i]); g_rtt_stage[i] = NULL; }
         g_rtt_stage_pend[i] = 0;
+        rtt_rb_sync_drop(i); /* W215 */
         if (g_rtt_keep[i][cur].ok) { rtt_set_release(&g_rtt_keep[i][cur]); }
         rtt_entry_to_set(e, &g_rtt_keep[i][cur]);
         rtt_set_to_entry(&g_rtt_keep[i][n], e);
@@ -703,6 +1227,7 @@ int sb_rtt_rescale(unsigned n)
         if (!e->surf || !e->w || !e->h || e->pw == e->w || e->pw == e->w * n) { continue; }
         if (g_rtt_stage[i]) { ID3D11Texture2D_Release(g_rtt_stage[i]); g_rtt_stage[i] = NULL; }
         g_rtt_stage_pend[i] = 0;
+        rtt_rb_sync_drop(i); /* W215 */
         if (e->srv) { ID3D11ShaderResourceView_Release(e->srv); e->srv = NULL; }
         if (e->rtv) { ID3D11RenderTargetView_Release(e->rtv); e->rtv = NULL; }
         if (e->dsv) { ID3D11DepthStencilView_Release(e->dsv); e->dsv = NULL; }
@@ -903,6 +1428,7 @@ have_entry:
     g_rtt[idx].fprim = 0; g_rtt[idx].fn = 0; g_rtt[idx].frhw = 0;
     g_rtt[idx].fxptr = 0;
     g_rtt_cur = idx;
+    rbc_session_begin(idx); /* W215 rtt_rb_sync=2 */
     g_rtt_dummy = 0; /* FIX(MONITORVIEW,W36): gueltiges RT = kein Dummy */
     for (k = 0; k < nseen && seen[k] != surf; k++) {}
     if (k == nseen && nseen < 64) {
@@ -1025,6 +1551,9 @@ void rtt_note_clear(unsigned flags, unsigned color)
 {
     int c = g_rtt_cur;
     if (c >= 0 && c < g_rtt_n) { g_rtt[c].wgen++; } /* W106 rtt_selfcopy */
+    /* W215 rtt_rb_sync=2: Farb-Clear (Xbox 0xF0 je Kanal; D3D11 loescht das ganze
+     * Ziel, sb_render_clear) auch im CPU-Schatten der Zellenkarte. */
+    if (c >= 0 && c == g_rbc_slot && (flags & (XBX_CLEAR_TARGET | XB_CLEAR_TARGET))) { rbc_clear(color); }
     if (c >= 0 && c < g_rtt_n && (flags & XB_CLEAR_TARGET)) {
         g_rtt[c].clears++;
         g_rtt[c].clr = color;

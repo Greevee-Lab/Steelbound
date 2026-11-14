@@ -25,7 +25,8 @@
  * Teil 13 (W188 GAME-MENU): Aktion pause (Standard KEY:PAUSE, Tasten nur
  *         ueber das Fenster, Pad-Flanke im Hook, imap_bind_keys).
  * Teil 14 (W193 PAUSE-LIVE): imap_key_name fuer menu_peek_key.
- * Teil 16 (W218 SIMPLE-CONTROLS): Kopplung Zielhebel -> Drehhebel und
+ * Teil 16 (W218 SIMPLE-CONTROLS, W236 AIM-ASSIST): Sichtfuehrung (Rand dreht
+ * die Sicht, Waffenarm fest, Anschlag, Rueckweg, Aus bitgleich) und
  *   Gang-Automatik gegen ein einfaches Fahrzeugmodell.
  * Teil 17 (W221 HOTAS, experimentell): simulierte DirectInput-Geraete
  *   (imap_snap_t.joy): Abbildung, Totzone, Invertierung, Kurve/sens,
@@ -36,6 +37,7 @@
  */
 #include <stdio.h>
 #include <string.h>
+#include <math.h>
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -1917,7 +1919,7 @@ static void run_feedback_clip_cases(const imap_profile_t *kb, const imap_profile
     CHECK(imap_key_name("F9") == VK_F9, "feedback_clip: Tastenname F9");
 }
 
-/* ---- Teil 16: W218 SIMPLE-CONTROLS (Kopplung Ziel->Drehhebel, Automatik) ---- */
+/* ---- Teil 16: W236 AIM-ASSIST (Sichtfuehrung) + W218 Automatik ---- */
 static void blk_neutral(imap_block_t *b)
 {
     memset(b, 0, sizeof *b);
@@ -1949,57 +1951,197 @@ static void run_simple_cases(const imap_profile_t *kb)
     unsigned f = 1000;
     int r, i, ups = 0, downs = 0, maxg = 0, g, prev;
 
-    printf("Teil 16: W218 SIMPLE-CONTROLS\n");
-    /* -- Kopplung Zielhebel -> Drehhebel -- */
-    blk_neutral(&b);
-    CHECK(imap_aim_turn(&b, 60, 100) == 0 && b.rot_lever == 0, "aim_turn: Mitte 0x7F -> 0");
-    b.aiming_x = 0x80;
-    CHECK(imap_aim_turn(&b, 60, 100) == 0 && b.rot_lever == 0, "aim_turn: Mitte 0x80 -> 0");
-    b.aiming_x = 0x80 + 76; /* 59,8 % */
-    CHECK(imap_aim_turn(&b, 60, 100) == 0 && b.rot_lever == 0, "aim_turn: unter Schwelle -> 0");
-    b.aiming_x = 0xFF;
-    CHECK(imap_aim_turn(&b, 60, 100) == 127 && b.rot_lever == 127, "aim_turn: Anschlag rechts -> +127");
-    blk_neutral(&b);
-    b.aiming_x = 0x00;
-    CHECK(imap_aim_turn(&b, 60, 100) == -127 && b.rot_lever == -127, "aim_turn: Anschlag links -> -127");
-    blk_neutral(&b);
-    b.aiming_x = 0x80 + 102; /* 80,3 % -> (0,803-0,6)/0,4 = 0,51 */
-    r = imap_aim_turn(&b, 60, 100);
-    CHECK(r >= 60 && r <= 70 && b.rot_lever == r, "aim_turn: anteilig (r=%d)", r);
-    blk_neutral(&b);
-    b.aiming_x = 0xFF;
-    CHECK(imap_aim_turn(&b, 60, 50) == 64, "aim_turn: Staerke 50 %% -> 64");
-    blk_neutral(&b);
-    b.aiming_x = 0xFF;
-    CHECK(imap_aim_turn(&b, 60, 0) == 0 && b.rot_lever == 0, "aim_turn: Staerke 0 -> aus");
-    blk_neutral(&b);
-    b.aiming_x = 0xFF;
-    b.rot_lever = -127; /* A gehalten: gleich starke Auslenkung bleibt */
-    CHECK(imap_aim_turn(&b, 60, 100) == 127 && b.rot_lever == -127, "aim_turn: A/D gewinnt bei Gleichstand");
-    blk_neutral(&b);
-    b.aiming_x = 0xFF;
-    b.rot_lever = 30;
-    CHECK(imap_aim_turn(&b, 60, 100) == 127 && b.rot_lever == 127, "aim_turn: Kopplung staerker als Stick");
-    blk_neutral(&b);
-    b.aiming_x = 0xFF;
-    CHECK(imap_aim_turn(&b, 0, 100) == 127, "aim_turn: Schwelle 0");
-    blk_neutral(&b);
-    b.aiming_x = 0x80 + 64;
-    CHECK(imap_aim_turn(&b, 99, 100) == 0, "aim_turn: Schwelle geklemmt 95 %%");
-    { /* Tastatur RIGHT (keyboard_default) -> Zielhebel 0xFF -> Drehhebel +127 */
-        imap_state_t st;
-        imap_snap_t sn;
-        cfgvar_t cv = { 1, 1, 0, 1, 4, 0, 0 };
-        int k = VK_RIGHT;
-        imap_state_init(&st);
-        set_keys(&k, 1);
-        make_snap(&sn, 5, &cv);
+    printf("Teil 16: W218 SIMPLE-CONTROLS (Automatik) + W236 AIM-ASSIST\n");
+    /* -- W236 AIM-ASSIST: Sicht dem Waffenarm nachfuehren. Spielmodell wie
+     * FUN_00037290/FUN_00034BE0 (BERICHT_M2 W236): Arm as += k*(t - as);
+     * Sicht vyaw -= e_x*kv (+-pi/2), vpit += dir*e_y*kv (+-0.611), e_y =
+     * sight_y + 1 (Out = ~sight_y), Totzone |e| <= 25; Fadenkreuz im Bild:
+     * X = Arm - Sicht, Nick = Arm + Sicht-Nick (pit_rel -1). -- */
+    {
+        imap_assist_in_t in;
+        imap_block_t b0;
+        float vy = 0.0f, vp = 0.0f, as = 0.0f, ap = 0.0f, rel, tol, mx;
+        int n, flips, last, ok, ex, ey;
+        memset(&in, 0, sizeof in);
+        in.kv = 45.0f * 0.0222222f * 0.0005f; /* FOV 45 */
+        in.sx = -0.015f;
+        in.sy = 0.0061359f;
+        in.yaw_max = 1.5707964f;
+        in.pit_max = 0.6108652f;
+        in.edge_x = 0.30f;
+        in.edge_y = 0.25f;
+        in.pit_dir = 1;
+        in.pit_rel = -1;
+        in.pit_bias = -1;
+        in.dz = 25;
+        in.arm_kx = in.arm_ky = 1.0f;
+        tol = 13.5f * in.kv + 1e-6f; /* halber kleinster Schritt (26 kv) */
+#define AA_T(ax_) ((float)((ax_) >= 0x80 ? (ax_) - 0x80 : (ax_) - 0x7F) * in.sx)
+#define AA_TP(ay_) ((float)((ay_) <= 0x7F ? 0x7F - (ay_) : 0x80 - (ay_)) * in.sy)
+#define AA_STEP(mode_, ax_, ay_) do { \
+            blk_neutral(&b); b.aiming_x = (uint8_t)(ax_); b.aiming_y = (uint8_t)(ay_); \
+            in.vyaw = vy; in.vpit = vp; in.arm_x = as; in.arm_y = ap; \
+            r = imap_aim_assist(&b, (mode_), &in); \
+            ex = b.sight_x; if (ex <= 25 && ex >= -25) ex = 0; \
+            ey = b.sight_y - in.pit_bias; if (ey <= 25 && ey >= -25) ey = 0; \
+            vy -= (float)ex * in.kv; \
+            if (vy > in.yaw_max) vy = in.yaw_max; \
+            if (vy < -in.yaw_max) vy = -in.yaw_max; \
+            vp += (float)in.pit_dir * (float)ey * in.kv; \
+            if (vp > in.pit_max) vp = in.pit_max; \
+            if (vp < -in.pit_max) vp = -in.pit_max; \
+            as += in.arm_kx * (AA_T(ax_) - as); \
+            ap += in.arm_ky * (AA_TP(ay_) - ap); } while (0)
+        /* Aus/Original: Block bitgleich, auch mit Arm am Anschlag */
+        ok = 1;
+        for (i = 0; i < 256; i += 15) {
+            blk_neutral(&b);
+            b.aiming_x = (uint8_t)i;
+            b.aiming_y = (uint8_t)(255 - i);
+            b0 = b;
+            in.vyaw = 0.3f;
+            in.vpit = -0.2f;
+            in.arm_x = 1.0f;
+            in.arm_y = -0.5f;
+            if (imap_aim_assist(&b, 0, &in) != 0 || memcmp(&b, &b0, sizeof b) != 0) ok = 0;
+            if (imap_aim_assist(&b, 1, NULL) != 0 || memcmp(&b, &b0, sizeof b) != 0) ok = 0;
+            if (imap_aim_assist(&b, 3, &in) != 0 || memcmp(&b, &b0, sizeof b) != 0) ok = 0;
+        }
+        CHECK(ok, "assist: Aus/Original (Stufe 0, ungueltig, NULL) -> Block bitgleich");
+        /* Totzone: Rest 20 kv -> kleinster wirksamer Schritt 26, Rest 10 kv -> 0 */
+        in.lock_axes = 1;
         blk_neutral(&b);
-        imap_profile_apply(&b, &st, kb, &sn);
-        r = imap_aim_turn(&b, 60, 100);
-        CHECK(b.aiming_x == 0xFF && r == 127 && b.rot_lever == 127,
-              "aim_turn: RIGHT -> aim %02X rot %d", b.aiming_x, (int)b.rot_lever);
-        set_keys(NULL, 0);
+        b.aiming_x = 0x80 + 20;
+        in.arm_x = AA_T(0x80 + 20);
+        in.vyaw = in.arm_x + 20.0f * in.kv;
+        imap_aim_assist(&b, 2, &in);
+        CHECK(b.sight_x == 26, "assist: Rest 20 kv in der Totzone -> Schritt 26 (sx=%d)", (int)b.sight_x);
+        blk_neutral(&b);
+        b.aiming_x = 0x80 + 20;
+        in.vyaw = in.arm_x - 10.0f * in.kv;
+        imap_aim_assist(&b, 2, &in);
+        CHECK(b.sight_x == 0, "assist: Rest 10 kv (< halber Schritt) -> 0 (sx=%d)", (int)b.sight_x);
+        in.lock_axes = 0;
+        /* Stufe 1, innerhalb des Rands: nichts */
+        vy = vp = as = ap = 0.0f;
+        AA_STEP(1, 0x80 + 19, 0x7F); /* Arm -0,285 rad < Rand 0,30 */
+        CHECK(r == 0 && b.sight_x == 0 && b.sight_y == 0, "assist1: innerhalb des Rands -> Sicht unberuehrt (r=%d sx=%d sy=%d)",
+              r, (int)b.sight_x, (int)b.sight_y);
+        /* Stufe 1, geglaetteter Arm (relative Maus, k 0,0625): Rand -> Sicht folgt */
+        in.arm_kx = in.arm_ky = 0.0625f;
+        vy = vp = as = ap = 0.0f;
+        flips = 0; last = 0; mx = 0.0f;
+        for (n = 0; n < 150; n++) {
+            AA_STEP(1, 0x80 + 40, 0x7F);
+            if (b.sight_x && last && ((b.sight_x > 0) != (last > 0))) flips++;
+            if (b.sight_x) last = b.sight_x;
+            rel = as - vy;
+            if (-rel > mx) mx = -rel;
+        }
+        rel = as - vy;
+        CHECK(fabsf(rel + in.edge_x) <= tol && b.sight_x == 0 && flips == 0 && mx <= in.edge_x + tol,
+              "assist1: Fadenkreuz bleibt am Rand (rel=%.4f, max=%.4f, Pendeln=%d)", rel, mx, flips);
+        /* Rueckweg: Arm zur Mitte -> Sicht bleibt stehen */
+        rel = vy;
+        for (n = 0; n < 150; n++) AA_STEP(1, 0x7F, 0x7F);
+        CHECK(fabsf(vy - rel) < 1e-6f, "assist1: Rueckweg zur Mitte -> Sicht steht (vy=%.3f)", vy);
+        /* weiter links ueber den linken Rand -> Sicht dreht links */
+        for (n = 0; n < 200; n++) AA_STEP(1, 0x7F - 40, 0x7F);
+        rel = as - vy;
+        CHECK(fabsf(rel - in.edge_x) <= tol && vy > 0.29f, "assist1: linker Rand -> Sicht links (vy=%.3f rel=%.4f)", vy, rel);
+        /* Stufe 2 ohne Maus-Bit (Pad/Tasten) = Stufe 1 */
+        in.arm_kx = in.arm_ky = 1.0f;
+        vy = vp = as = ap = 0.0f;
+        in.lock_axes = 0;
+        AA_STEP(2, 0x80 + 19, 0x7F);
+        CHECK(b.sight_x == 0, "assist2 ohne Maus-Achse: wie Stufe 1 (innerhalb Rand, sx=%d)", (int)b.sight_x);
+        /* Stufe 2 (Maus, relativ k 0,0625): Fadenkreuz waehrend der ganzen
+         * Bewegung in der Mitte (Sicht folgt dem geglaetteten Arm) */
+        in.lock_axes = 3;
+        in.arm_kx = in.arm_ky = 0.0625f;
+        vy = vp = as = ap = 0.0f;
+        flips = 0; last = 0; mx = 0.0f;
+        for (n = 0; n < 150; n++) {
+            AA_STEP(2, 0x80 + 20, 0x7F);
+            if (b.sight_x && last && ((b.sight_x > 0) != (last > 0))) flips++;
+            if (b.sight_x) last = b.sight_x;
+            if (fabsf(as - vy) > mx) mx = fabsf(as - vy);
+        }
+        CHECK(mx <= tol && flips == 0, "assist2 relativ: Fadenkreuz in der Mitte (max |rel|=%.5f <= %.5f, Pendeln=%d)",
+              mx, tol, flips);
+        /* absolute Maus (k 1): Arm 20 -> 60 Stufen, je Frame +1 Stufe */
+        in.arm_kx = in.arm_ky = 1.0f;
+        mx = 0.0f;
+        for (n = 20; n <= 60; n++) {
+            AA_STEP(2, 0x80 + n, 0x7F);
+            if (fabsf(as - vy) > mx) mx = fabsf(as - vy);
+        }
+        CHECK(mx <= tol, "assist2 absolut: Sicht folgt jede Stufe im selben Frame (max |rel|=%.5f)", mx);
+        /* Anschlag: Arm ganz rechts -> Sicht am Anschlag, Rest nur der Arm */
+        for (n = 0; n < 60; n++) AA_STEP(2, 0xFF, 0x7F);
+        rel = as - vy;
+        CHECK(fabsf(vy + in.yaw_max) < 1e-4f && rel < -0.30f && b.sight_x == 0,
+              "assist2: Sicht am Anschlag (vy=%.4f), Arm allein weiter (rel=%.3f)", vy, rel);
+        /* Rueckweg: zuerst der Arm (Sicht bleibt am Anschlag), dann die Sicht */
+        AA_STEP(2, 0x80 + 106, 0x7F); /* -1,59 rad: noch jenseits des Anschlags */
+        CHECK(b.sight_x == 0 && fabsf(vy + in.yaw_max) < 1e-4f,
+              "assist2: Rueckweg erst Arm (Sicht bleibt %.4f)", vy);
+        AA_STEP(2, 0x80 + 100, 0x7F); /* -1,50 rad: jetzt folgt die Sicht */
+        last = b.sight_x;
+        AA_STEP(2, 0x80 + 100, 0x7F); /* 0,07 rad > 127*kv: zweiter Frame */
+        rel = as - vy;
+        CHECK(last < 0 && fabsf(rel) <= tol, "assist2: dann Sicht zurueck (sx=%d rel=%.5f)", last, rel);
+        /* Nick: Arm (Hebel 0x00-Seite) -> Sicht-Nick gegenlaeufig, Fadenkreuz Mitte */
+        vy = vp = as = ap = 0.0f;
+        for (n = 0; n < 40; n++) AA_STEP(2, 0x7F, 0x7F - 40);
+        rel = ap + vp;
+        CHECK(fabsf(rel) <= tol && vp < -0.2f && b.sight_y == 0,
+              "assist2: Nick folgt dem Arm (Arm %.3f Sicht %.3f, Ruhe sy=%d)", ap, vp, (int)b.sight_y);
+        for (n = 0; n < 80; n++) AA_STEP(2, 0x7F, 0x00); /* 127 Stufen = 0,78 rad > 0,611 */
+        CHECK(fabsf(vp + in.pit_max) < 1e-4f && ap + vp > 0.1f,
+              "assist2: Nick-Anschlag %.4f, Arm allein weiter (%.3f)", vp, ap);
+        for (n = 0; n < 80; n++) AA_STEP(2, 0x7F, 0xFF); /* Gegenrichtung */
+        CHECK(fabsf(vp - in.pit_max) <= tol, "assist2: Nick-Anschlag Gegenseite %.4f", vp);
+        /* Nick, Stufe 1 innerhalb des Rands: sight_y unberuehrt */
+        vp = ap = 0.0f;
+        AA_STEP(1, 0x7F, 0x7F - 20);
+        CHECK(b.sight_y == 0 && !(r & 2), "assist1: Nick innerhalb Rand unberuehrt (sy=%d)", (int)b.sight_y);
+        /* eigene Sicht-Eingabe (Pfeile/Stick) gewinnt je Achse */
+        blk_neutral(&b);
+        b.aiming_x = 0xFF;
+        b.sight_x = -50;
+        in.vyaw = 0.0f;
+        in.arm_x = 0.0f;
+        r = imap_aim_assist(&b, 2, &in);
+        CHECK(b.sight_x == -50 && !(r & 1), "assist: eigene Sicht-Eingabe gewinnt (sx=%d)", (int)b.sight_x);
+        { /* Tastatur RIGHT (keyboard_default): Pfeil treibt Arm UND Sicht -> unveraendert */
+            imap_state_t st;
+            imap_snap_t sn;
+            cfgvar_t cv = { 1, 1, 0, 1, 4, 0, 0 };
+            int k = VK_RIGHT;
+            imap_state_init(&st);
+            set_keys(&k, 1);
+            make_snap(&sn, 5, &cv);
+            blk_neutral(&b);
+            imap_profile_apply(&b, &st, kb, &sn);
+            b0 = b;
+            in.vyaw = 0.0f;
+            r = imap_aim_assist(&b, 1, &in);
+            CHECK(b.aiming_x == 0xFF && b.sight_x == 127 && memcmp(&b, &b0, sizeof b) == 0,
+                  "assist: RIGHT -> aim %02X sight %d unveraendert", b.aiming_x, (int)b.sight_x);
+            set_keys(NULL, 0);
+        }
+        /* Zoom: kleiner FOV -> kleinere Rate, gleiche Endlage */
+        in.kv = 10.0f * 0.0222222f * 0.0005f;
+        tol = 13.5f * in.kv + 1e-6f;
+        in.lock_axes = 1;
+        vy = as = 0.0f;
+        for (n = 0; n < 300; n++) AA_STEP(2, 0x80 + 30, 0x7F);
+        rel = as - vy;
+        CHECK(fabsf(rel) <= tol, "assist2: Zoom (FOV 10) gleiche Endlage (rel=%.5f)", rel);
+#undef AA_STEP
+#undef AA_T
+#undef AA_TP
     }
 
     /* -- Automatik: Anfahren und Hochschalten 1..5 -- */
@@ -2397,6 +2539,69 @@ static void run_joy_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
             imap_profile_apply(&b, &st, &m, &s);
         }
         CHECK(b.aiming_x == 0x7F + 64, "joy: Stick schlaegt ruhende Maus (%02X)", b.aiming_x);
+    }
+
+    /* W226 JOY-AXIS-DIR: umgekehrter Schubhebel (Ruhe = Maximum 32767).
+     * Analog per inv=1; Achse als Taste Z+ (vorher als leerer Akkord
+     * verworfen); inv=1 an Z+/zone spiegelt den Weg (0 % = Maximum). */
+    {
+        static const char kI[] = "joy0 = Throttle\n"
+                                 "pedal_r = JOY0:Z:inv=1\n"
+                                 "bi18 = JOY0:Z+\n"
+                                 "bi19 = JOY0:Z+:inv=1\n"
+                                 "bi20 = JOY0:Z++JOY0:B1\n"
+                                 "bi21 = KEY:A:inv=1\n"  /* ungueltig */
+                                 "bi22 = JOY0:B2:inv=1\n" /* ungueltig */
+                                 "gear.r = JOY0:Z:zone=0-10:inv=1\n"
+                                 "gear.5 = JOY0:Z:inv=1:zone=90-100\n";
+        static const char kI0[] = "joy0 = Throttle\n"
+                                  "pedal_r = JOY0:Z:inv=1\n"
+                                  "bi18 = JOY0:Z+\n"
+                                  "bi19 = JOY0:Z+:inv=0\n"
+                                  "bi20 = JOY0:Z++JOY0:B1\n"
+                                  "gear.r = JOY0:Z:zone=0-10:inv=1\n"
+                                  "gear.5 = JOY0:Z:inv=1:zone=90-100\n";
+        imap_profile_t q, q2;
+        CHECK(imap_profile_parse(kI, "joyinv", &q) == 0 && q.joy_used == 1u, "w226: parse");
+        CHECK(q.btn[18].n == 1 && q.btn[18].alt[0].a.kind == IMAP_A_JOY &&
+                  IMAP_JOY_LO(q.btn[18].alt[0].a.code) == 75 &&
+                  IMAP_JOY_HI(q.btn[18].alt[0].a.code) == 100,
+              "w226: JOY0:Z+ geparst (oberes Viertel)");
+        CHECK(q.btn[19].n == 1 && (q.btn[19].alt[0].a.code & IMAP_JOY_INVF) != 0 &&
+                  (q.btn[18].alt[0].a.code & IMAP_JOY_INVF) == 0,
+              "w226: Z+:inv=1 traegt Spiegel-Bit");
+        CHECK(q.btn[20].n == 1 && q.btn[20].alt[0].chord, "w226: Akkord Z++B1");
+        CHECK(q.btn[21].n == 0 && q.btn[22].n == 0, "w226: inv an Taste abgelehnt");
+        CHECK(q.gear_direct[0].n == 1 && q.gear_direct[6].n == 1 &&
+                  (q.gear_direct[0].alt[0].a.code & IMAP_JOY_INVF) &&
+                  (q.gear_direct[6].alt[0].a.code & IMAP_JOY_INVF) &&
+                  IMAP_JOY_LO(q.gear_direct[6].alt[0].a.code) == 90,
+              "w226: zone+inv in beiden Reihenfolgen");
+        CHECK(imap_profile_parse(kI0, "joyinv0", &q2) == 0 && imap_profile_equal(&q, &q2) != 0,
+              "w226: Vergleich sieht inv an Zone");
+        imap_state_init(&st);
+        joy_snap(&s, f++);
+        s.joy_mask = 1u;
+        s.joy[0].axis[2] = 32767; /* Schub in Ruhe (Maximum) */
+        imap_profile_apply(&b, &st, &q, &s);
+        CHECK(b.pedal_r == 0, "w226: Schub Ruhe 32767 + inv -> 0 (%u)", b.pedal_r);
+        CHECK((b.buttons[1] & (1u << 2)) != 0 && (b.buttons[1] & (1u << 3)) == 0,
+              "w226: Z+ roh oben an, Z+:inv aus (%04X)", b.buttons[1]);
+        CHECK(b.gear == 7 && st.gear_direct_hit, "w226: zone 0-10 inv -> R bei Ruhe (%u)", b.gear);
+        joy_btn(&s, 0, 1, 1);
+        imap_profile_apply(&b, &st, &q, &s);
+        CHECK((b.buttons[1] & (1u << 4)) != 0, "w226: Akkord Z++B1 -> an");
+        joy_btn(&s, 0, 1, 0);
+        s.joy[0].axis[2] = -32768; /* Vollgas (Minimum) */
+        imap_profile_apply(&b, &st, &q, &s);
+        CHECK(b.pedal_r == 0xFF, "w226: Vollgas -32768 + inv -> 255 (%u)", b.pedal_r);
+        CHECK((b.buttons[1] & (1u << 2)) == 0 && (b.buttons[1] & (1u << 3)) != 0 &&
+                  (b.buttons[1] & (1u << 4)) == 0,
+              "w226: Z+ aus, Z+:inv an (%04X)", b.buttons[1]);
+        CHECK(b.gear == 13, "w226: zone 90-100 inv -> Gang 5 bei Vollgas (%u)", b.gear);
+        s.joy[0].axis[2] = joy_pos(-0.2f); /* roh 40 % = logisch 60 % */
+        imap_profile_apply(&b, &st, &q, &s);
+        CHECK((b.buttons[1] & (3u << 2)) == 0, "w226: Mitte-vorn weder Z+ noch Z+:inv");
     }
 
     /* Geraete-Zuordnung (rein, ohne DirectInput). */

@@ -37,7 +37,7 @@ void lcfg_defaults(launcher_settings_t *s)
     s->input_profile[0] = '\0'; /* W78: leer = Legacy-Tastatur */
     s->sbc_usb = 0;             /* W78: USB-Controller aus */
     s->sbc_mouse_off = 1;       /* W128: Maus-Achsen aus bei aktivem Controller */
-    s->aim_turn = 0;            /* W218 SIMPLE-CONTROLS: Standard aus */
+    s->aim_assist = 0;          /* W236 AIM-ASSIST: Standard Original */
     s->auto_gear = 0;
     s->save_lock = 0;           /* W190 SAVE-LOCK: Original-Verhalten */
     s->photo_dir[0] = '\0';     /* W195 PHOTO-MODE: Standardordner */
@@ -375,8 +375,13 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         s->sbc_usb = atoi(v);
     } else if (strcmp(k, "sbc_mouse_off") == 0) {
         s->sbc_mouse_off = atoi(v);
-    } else if (strcmp(k, "aim_turn") == 0) { /* W218 */
-        s->aim_turn = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "aim_assist") == 0) { /* W236 */
+        s->aim_assist = atoi(v);
+        if (s->aim_assist < 0 || s->aim_assist > 2) s->aim_assist = 0;
+    } else if (strcmp(k, "aim_turn") == 0) {
+        /* W218-Altwert: "Fadenkreuz dreht Mech" entfallen -> Stufe 1
+         * (Fadenkreuz am Rand dreht die Sicht); 0 laesst aim_assist stehen. */
+        if (atoi(v)) s->aim_assist = 1;
     } else if (strcmp(k, "auto_gear") == 0) { /* W218 */
         s->auto_gear = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "save_lock") == 0) { /* W190 */
@@ -555,7 +560,8 @@ static const char *kManaged[][2] = {
     { "audio_live", "audio" },      { "aspect_mode", "render" },
     { "input_profile", "input" },   { "sbc_usb", "input" },
     { "sbc_mouse_off", "input" }, /* W128 */
-    { "aim_turn", "input" },       { "auto_gear", "input" }, /* W218 */
+    { "aim_assist", "input" },     { "auto_gear", "input" }, /* W218, W236 */
+    { "aim_turn", "input" }, /* W236: Altwert neutralisieren (immer 0) */
     { "save_lock", "game" }, /* W190 */
     { "photo_dir", "photo" },       { "photo_scale", "photo" }, /* W195 PHOTO-MODE */
     { "photo_format", "photo" },    { "photo_aspect", "photo" },
@@ -672,8 +678,10 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = s->sbc_usb;
         } else if (strcmp(k, "sbc_mouse_off") == 0) {
             v = s->sbc_mouse_off;
-        } else if (strcmp(k, "aim_turn") == 0) { /* W218 */
-            v = s->aim_turn ? 1 : 0;
+        } else if (strcmp(k, "aim_assist") == 0) { /* W236 */
+            v = (s->aim_assist >= 0 && s->aim_assist <= 2) ? s->aim_assist : 0;
+        } else if (strcmp(k, "aim_turn") == 0) { /* W236: Altwert, immer 0 */
+            v = 0;
         } else if (strcmp(k, "auto_gear") == 0) { /* W218 */
             v = s->auto_gear ? 1 : 0;
         } else if (strcmp(k, "save_lock") == 0) { /* W190 */

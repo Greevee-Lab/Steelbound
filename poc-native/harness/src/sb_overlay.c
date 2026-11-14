@@ -77,7 +77,7 @@ enum {
     /* W190 SAVE-LOCK: Seite 0 "Spielstaende schuetzen" + "Geschuetzte Aenderungen uebernehmen" */
     OI_SAVELOCK, OI_SLCOMMIT,
     /* W218 SIMPLE-CONTROLS: Seite 0 Ziel-Kopplung + Gang-Automatik */
-    OI_AIMTURN, OI_AUTOGEAR,
+    OI_ASSIST, OI_AUTOGEAR,
     OI_N
 };
 /* Zeilen je Seite (Seite 0 = W118 unveraendert, Testskripte zaehlen DOWN;
@@ -85,7 +85,7 @@ enum {
 static const int kOvPage0[] = { OI_FPS, OI_SHADING, OI_MFX, OI_GRAIN, OI_GLITCH, OI_EDGE, OI_EDGEW, OI_EDGES,
                                 OI_MMODE, OI_MSENS, OI_HD, OI_HDSCALE, OI_WINMODE, OI_RES, OI_PRESET, OI_MPAUSE,
                                 OI_SAVELOCK, OI_SLCOMMIT, /* W190 */
-                                OI_AIMTURN, OI_AUTOGEAR, /* W218 */
+                                OI_ASSIST, OI_AUTOGEAR, /* W218 */
                                 OI_SAVE, OI_CLOSE }; /* W188: + ESC-Menue pausiert */
 static const int kOvPage1[] = { OI_SHADING, OI_MFX, OI_GRAIN, OI_GLITCH,
                                 OI_EXPO, OI_TONE, OI_WGAM, OI_WSHARP, OI_FOCUS, OI_WCON, OI_FOG, OI_LWORLD, OI_RTS,
@@ -494,9 +494,11 @@ static void ov_change(int i, int dir)
         g_cfg.mouse_sens = ov_clamp(g_cfg.mouse_sens + dir, 1, 16);
         HLOG_I("OVERLAY: mouse_sens -> %d (f=%u)", g_cfg.mouse_sens, g_present_no);
         break;
-    case OI_AIMTURN: /* W218: wirkt sofort (Hook liest g_cfg je Poll) */
-        g_cfg.aim_turn = !g_cfg.aim_turn;
-        HLOG_I("OVERLAY: aim_turn -> %d (f=%u)", g_cfg.aim_turn, g_present_no);
+    case OI_ASSIST: /* W236: 3 Stufen, wirkt sofort (Hook liest g_cfg je Poll) */
+        g_cfg.aim_assist = (g_cfg.aim_assist + (dir > 0 ? 1 : 2)) % 3;
+        HLOG_I("OVERLAY: aim_assist -> %d (f=%u)", g_cfg.aim_assist, g_present_no);
+        ov_status_key(g_cfg.aim_assist == 2 ? "ovl.st_assist2" :
+                      g_cfg.aim_assist == 1 ? "ovl.st_assist1" : "ovl.st_assist0");
         break;
     case OI_AUTOGEAR: /* W218 */
         g_cfg.auto_gear = !g_cfg.auto_gear;
@@ -892,7 +894,8 @@ static const ov_key_t kOvKeys[] = {
     { "fx_interp", "render" },
     { "mouse_mode", "input" },      { "mouse_sens", "input" },
     { "sbc_mouse_off", "input" }, /* W128 */
-    { "aim_turn", "input" },        { "auto_gear", "input" }, /* W218 */
+    { "aim_assist", "input" },      { "auto_gear", "input" }, /* W218, W236 */
+    { "aim_turn", "input" }, /* W236: Altwert neutralisieren (immer 0) */
     { "remaster", "remaster" },     { "hd_textures", "remaster" },
     { "hd_scale", "remaster" },     { "window_mode", "display" },
     /* W134 VR-PROTO */
@@ -941,7 +944,8 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     else if (strcmp(k, "edge_fade_strength") == 0) { v = g_cfg.edge_fade_strength; }
     else if (strcmp(k, "mouse_sens") == 0) { v = g_cfg.mouse_sens; }
     else if (strcmp(k, "sbc_mouse_off") == 0) { v = g_cfg.sbc_mouse_off; }
-    else if (strcmp(k, "aim_turn") == 0) { v = g_cfg.aim_turn; } /* W218 */
+    else if (strcmp(k, "aim_assist") == 0) { v = g_cfg.aim_assist; } /* W236 */
+    else if (strcmp(k, "aim_turn") == 0) { v = 0; } /* W236: Altwert (W218) neutral */
     else if (strcmp(k, "auto_gear") == 0) { v = g_cfg.auto_gear; }
     else if (strcmp(k, "remaster") == 0) { v = g_cfg.remaster; }
     else if (strcmp(k, "hd_textures") == 0) { v = g_cfg.hd_textures; }
@@ -2706,7 +2710,7 @@ static void ov_label(int i, wchar_t *o, size_t cap)
         /* W190 */
         "ovl.lb_savelock", "ovl.lb_slcommit",
         /* W218 */
-        "ovl.lb_aimturn", "ovl.lb_autogear" };
+        "ovl.lb_assist", "ovl.lb_autogear" };
     ov_wkey(o, cap, lb[i]);
 }
 
@@ -2741,7 +2745,10 @@ static void ov_value(int i, wchar_t *o, size_t cap)
     case OI_MMODE: ov_wkey(o, cap, g_cfg.mouse_mode ? "ovl.v_abs" : "ovl.v_rel"); break;
     case OI_MSENS: _snwprintf_s(o, cap, _TRUNCATE, L"%d", g_cfg.mouse_sens); break;
     case OI_SBCMOUSE: ov_wkey(o, cap, g_cfg.sbc_mouse_off ? "ovl.v_mouseoff" : "ovl.v_parallel"); break;
-    case OI_AIMTURN: ov_wkey(o, cap, g_cfg.aim_turn ? "ovl.v_on" : "ovl.v_off"); break; /* W218 */
+    case OI_ASSIST: /* W236 */
+        ov_wkey(o, cap, g_cfg.aim_assist == 2 ? "ovl.v_assist2" :
+                        g_cfg.aim_assist == 1 ? "ovl.v_assist1" : "ovl.v_offorig");
+        break;
     case OI_AUTOGEAR: ov_wkey(o, cap, g_cfg.auto_gear ? "ovl.v_on" : "ovl.v_off"); break;
     case OI_HD:
         if (!g_ov_avail) { ov_wkey(o, cap, "ovl.v_nopkg"); }

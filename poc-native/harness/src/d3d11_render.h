@@ -87,6 +87,8 @@ int sb_render_census_on(void);
 struct ID3D11ShaderResourceView;
 void sb_rtt_note_backbuffer(unsigned surf);
 void sb_rtt_on_set_target(unsigned surf, unsigned depth, unsigned caller);
+void sb_rtt_rbc_im(unsigned prim, const float *verts, unsigned n, unsigned slots, int colreg); /* W215 rtt_rb_sync=2 */
+void sb_rtt_rb_sync_resolve(int why); /* W215 CULL-POPIN: anhaengigen Zellenkarten-Rueckschrieb abholen */
 /* Offscreen-Textur zu xptr? 1 = Treffer (SRV + Dims), 0 = nein.
  * Loggt pro xptr einmal TEX rt-match (auch bei rtt=0, reiner DIAG). */
 int sb_rtt_lookup(unsigned xptr, struct ID3D11ShaderResourceView **srv,

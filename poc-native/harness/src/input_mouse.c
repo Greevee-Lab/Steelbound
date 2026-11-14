@@ -15,6 +15,7 @@
 #include "vr.h" /* W134 VR-PROTO */
 
 #define IMOUSE_MSG_INIT (WM_APP + 0x79)
+#define IMOUSE_MSG_SYNC (WM_APP + 0x7D) /* W225: Spiel-Thread -> UI-Abgleich */
 #define IMOUSE_TIMER_ID 0x7901
 #define IMSG_MIN_FRAMES 2u /* kurzer Tipp bleibt >= 2 Spiel-Frames sichtbar */
 
@@ -30,6 +31,10 @@ static volatile LONG g_focus;         /* logischer Fokus (Nachrichten/Test) */
 static volatile LONG g_test_focus;    /* 1 = Fokus per Test-Hook simuliert */
 /* W208: UI-thread-owned menu gate; g_want is only the manual preference. */
 static int g_menu_open;
+static volatile LONG g_force;         /* W225: F10 faengt ausserhalb der Mission */
+static volatile LONG g_sync_pending;  /* W225: Abgleich vom Spiel-Thread angefordert */
+static int g_last_mission = -1;       /* W225: UI-Thread, Missionsflanke */
+static int imouse_is_fg(HWND w);
 static unsigned imouse_state_u32(unsigned addr)
 {
 #ifdef IMOUSE_SELFTEST
@@ -40,17 +45,63 @@ static unsigned imouse_state_u32(unsigned addr)
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
 #endif
 }
+/* W225 MOUSE-ARM: Zustandsadressen (SPIELZUSTAENDE). */
+#define IM_ADDR_LOADS 0x2EEA34u /* Ladezaehler 1..23 (nur Diagnose, s. u.) */
+#define IM_ADDR_SCENE 0x6B96DCu /* Szene; 0x2C = Film + Mission */
+#define IM_ADDR_MLOOP 0x356F58u /* Missionsschleife FUN_00045F60 */
+#define IM_ADDR_DEMO  0x3B8CDCu /* 1 = Titel-Demo/Replay, 0 = Kampagne */
 static int imouse_in_mission(void)
 {
-    /* Same mission markers as the overlay; mode excludes the title demo. */
-    return imouse_state_u32(0x2EEA34u) == 4u &&
-        imouse_state_u32(0x6B96DCu) == 0x2Cu &&
-        imouse_state_u32(0x356F58u) == 1u;
+    /* W225: Szene 0x2C + Missionsschleife, Titel-Demo ausgenommen.
+     * [0x2EEA34] ist KEIN Missionsmerkmal: FUN_000F5AF0 zaehlt ihn bei
+     * jedem Ladebildschirm hoch (auch je Titel-Demo). Testkette mit zwei
+     * Demos: Mission 1 = 4; Spieler, der im Titel sofort START drueckt:
+     * Mission 1 = 2 (= Wert der Titel-Demo); Mission 2 = 5 usw. Die Demo
+     * erkennt [0x3B8CDC] = 1 (alle CAMP-Logs: Demo 1, Kampagne 0). */
+    return imouse_state_u32(IM_ADDR_SCENE) == 0x2Cu &&
+        imouse_state_u32(IM_ADDR_MLOOP) == 1u &&
+        imouse_state_u32(IM_ADDR_DEMO) != 1u;
+}
+static int imouse_menu_now(void)
+{
+    return g_menu_open || sb_ovl_open();
+}
+int imouse_assist_allowed(void)
+{
+    if (imouse_menu_now() || !imouse_in_mission()) return 0;
+    if (g_cfg.mouse_capture && !g_want) return 0; /* F10: Maus frei */
+    return 1;
 }
 static int imouse_allowed(void)
 {
-    return !g_menu_open && !sb_ovl_open() &&
+    return !imouse_menu_now() &&
         (g_cfg.mouse_capture_outside_mission || imouse_in_mission());
+}
+
+/* W225: Soll-Zustand jedes Mal vollstaendig aus dem aktuellen Zustand
+ * ableiten (Grund = erste zutreffende Regel). Ab IMR_MISSION = gefangen. */
+enum {
+    IMR_OPTION, IMR_WINDOW, IMR_FOCUS, IMR_ICONIC, IMR_MENU, IMR_F10,
+    IMR_OUTSIDE, IMR_MISSION, IMR_MANUAL, IMR_ANYWHERE
+};
+#define IMR_CAPTURE(r) ((r) >= IMR_MISSION)
+static const char *const k_imr_name[] = {
+    "option_aus", "kein_fenster", "kein_fokus", "minimiert", "menue",
+    "f10_frei", "ausserhalb_mission", "mission", "f10_manuell",
+    "option_ueberall"
+};
+static int imouse_soll(HWND w, int mission, int menu)
+{
+    if (!g_cfg.mouse_capture) return IMR_OPTION;
+    if (!w) return IMR_WINDOW;
+    if (!g_focus) return IMR_FOCUS;
+    if (IsIconic(w)) return IMR_ICONIC;
+    if (menu) return IMR_MENU;
+    if (mission) return g_want ? IMR_MISSION : IMR_F10;
+    if (g_force) return IMR_MANUAL;
+    if (g_cfg.mouse_capture_outside_mission)
+        return g_want ? IMR_ANYWHERE : IMR_F10;
+    return IMR_OUTSIDE;
 }
 
 /* Nachrichten-Tastenzustand (input_source=1). Schreiber: UI-Thread
@@ -114,10 +165,9 @@ static void imouse_clip(HWND w)
     ClipCursor(&rc);
 }
 
+/* Nur aus imouse_reconcile (Soll = gefangen). */
 static void imouse_capture_on(HWND w, const char *why)
 {
-    if (!g_cfg.mouse_capture || !g_want || !g_focus ||
-        !imouse_allowed() || IsIconic(w)) return;
     imouse_clip(w);
     if (imouse_is_fg(w)) SetCursor(NULL);
     if (!g_captured) {
@@ -217,10 +267,40 @@ static void imouse_register_raw(HWND w)
         HLOG_W("INPUT: Raw Input nicht registriert (GLE=%lu)", GetLastError());
 }
 
+/* W225: Diagnose bei jedem Wechsel des Soll-Zustands (UI-Thread). */
+static void imouse_diag(HWND w, int r, int mission, int menu)
+{
+    static int lr = -1, lmi = -1, lme = -1, lfo = -1, lmo = -1;
+    int fo = g_focus != 0, mo = g_cfg.mouse_mode == 1;
+    if (r == lr && mission == lmi && menu == lme && fo == lfo && mo == lmo)
+        return;
+    lr = r; lmi = mission; lme = menu; lfo = fo; lmo = mo;
+    HLOG_I("MOUSE: soll=%s grund=%s mission=%d menue=%d fokus=%d modus=%s "
+           "szene=0x%X mloop=%u demo=%u ladezaehler=%u wunsch=%d manuell=%d "
+           "test=%d physisch=%d",
+           IMR_CAPTURE(r) ? "gefangen" : "frei", k_imr_name[r], mission, menu,
+           fo, mo ? "absolut" : "relativ", imouse_state_u32(IM_ADDR_SCENE),
+           imouse_state_u32(IM_ADDR_MLOOP), imouse_state_u32(IM_ADDR_DEMO),
+           imouse_state_u32(IM_ADDR_LOADS), (int)g_want, (int)g_force,
+           (int)g_test_focus, imouse_is_fg(w));
+}
+
+/* W225: einzige Stelle, die fangen/freigeben entscheidet (UI-Thread). */
 static void imouse_reconcile(HWND w, const char *why)
 {
-    if (w && g_focus && g_want && g_cfg.mouse_capture &&
-        imouse_allowed() && !IsIconic(w))
+    int mission = imouse_in_mission(), menu = imouse_menu_now(), r;
+    if (mission != g_last_mission) {
+        /* Manuelles F10-Fangen gilt nur bis zur naechsten Missionsflanke;
+         * beim Eintritt geht es in den normalen Missionswunsch ueber. */
+        if (g_force) {
+            if (mission) InterlockedExchange(&g_want, 1);
+            InterlockedExchange(&g_force, 0);
+        }
+        g_last_mission = mission;
+    }
+    r = imouse_soll(w, mission, menu);
+    imouse_diag(w, r, mission, menu);
+    if (IMR_CAPTURE(r))
         imouse_capture_on(w, why);
     else
         imouse_capture_off(why);
@@ -243,7 +323,7 @@ static void imouse_focus_lose(const char *why)
         HLOG_I("INPUT: Fenster-Fokus verloren (%s) -> Tasten geloest", why);
     }
     imsg_clear();
-    imouse_capture_off(why);
+    imouse_reconcile(g_mwnd, why); /* W225: Soll = frei (kein_fokus), mit Diagnose */
     /* Test isolation survives loss and subsequent WM_ACTIVATE/SETFOCUS. */
 }
 
@@ -297,6 +377,11 @@ static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         if (imouse_is_fg(w)) imouse_focus_gain(w, "Start");
         return 0;
     }
+    case IMOUSE_MSG_SYNC:
+        /* W225: Spiel-Thread hat eine Abweichung Soll/Ist gesehen; der
+         * Abgleich oben (imouse_menu_capture) ist schon gelaufen. */
+        InterlockedExchange(&g_sync_pending, 0);
+        return 0;
     case WM_INPUT: {
         RAWINPUT ri;
         UINT sz = sizeof ri;
@@ -389,13 +474,19 @@ static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case WM_SYSKEYDOWN:
         if (wp == VK_F10) {
             if (!(lp & 0x40000000)) { /* keine Autowiederholung */
-                if (g_want) {
-                    InterlockedExchange(&g_want, 0);
-                    imouse_capture_off("F10");
+                int mission = imouse_in_mission(), menu = imouse_menu_now();
+                if (!mission && !menu && !g_cfg.mouse_capture_outside_mission) {
+                    /* W225: ausserhalb der Mission manuell fangen/freigeben
+                     * (Rueckfallweg, falls die Missionserkennung irrt). */
+                    InterlockedExchange(&g_force, !g_force);
+                    if (g_force) InterlockedExchange(&g_want, 1);
                 } else {
-                    InterlockedExchange(&g_want, 1);
-                    if (g_focus) imouse_capture_on(w, "F10");
+                    InterlockedExchange(&g_want, !g_want);
+                    InterlockedExchange(&g_force, 0);
                 }
+                HLOG_I("MOUSE: F10 -> wunsch=%d manuell=%d (mission=%d menue=%d)",
+                       (int)g_want, (int)g_force, mission, menu);
+                imouse_reconcile(w, "F10");
             }
             return 0; /* F10 nicht an DefWindowProc (Menue-Modus) */
         }
@@ -527,7 +618,15 @@ int imouse_poll(int *dx, int *dy, int *blocked)
     if ((g_cfg.mouse_capture || g_cfg.input_source == 1) && !g_installed)
         imouse_install();
     if (g_cfg.mouse_capture && g_installed == 1) {
+        HWND w = g_mwnd;
         raw = 1;
+        /* W225: Soll-Zustand jeden Poll (= jeden Spiel-Frame) ableiten; bei
+         * Abweichung den UI-Thread anstossen (Fangen/Cursor gehoeren ihm). */
+        if (w && IMR_CAPTURE(imouse_soll(w, imouse_in_mission(),
+                                          imouse_menu_now())) != (g_captured != 0) &&
+            !InterlockedExchange(&g_sync_pending, 1) &&
+            !PostMessageA(w, IMOUSE_MSG_SYNC, 0, 0))
+            InterlockedExchange(&g_sync_pending, 0);
         *dx = (int)InterlockedExchange(&g_raw_dx, 0);
         *dy = (int)InterlockedExchange(&g_raw_dy, 0);
         if (g_suppress_btn &&

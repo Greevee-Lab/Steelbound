@@ -9,11 +9,19 @@
 static int physical, overlay, minimized;
 static HCURSOR cursor_value;
 static HWND foreground = (HWND)(INT_PTR)1;
-unsigned test_mode, test_scene, test_loop;
+unsigned test_mode, test_scene, test_loop, test_demo;
 unsigned imouse_test_state(unsigned addr)
 {
-    return addr == 0x2EEA34u ? test_mode : addr == 0x6B96DCu ? test_scene : test_loop;
+    return addr == 0x2EEA34u ? test_mode : addr == 0x6B96DCu ? test_scene :
+        addr == 0x3B8CDCu ? test_demo : test_loop;
 }
+/* W225: PostMessage spy (game-thread sync request), no real window. */
+static UINT posted_msg;
+static int posted_n;
+static BOOL WINAPI test_post(HWND w, UINT m, WPARAM a, LPARAM b)
+{ (void)w; (void)a; (void)b; posted_msg = m; posted_n++; return TRUE; }
+#define PostMessageA test_post
+static char last_mouse[512]; /* last "MOUSE: soll=" diagnostic line */
 static HWND WINAPI test_foreground(void) { return foreground; }
 static BOOL WINAPI test_clip(const RECT *r) { (void)r; physical++; return TRUE; }
 static HCURSOR WINAPI test_cursor(HCURSOR c) { physical++; cursor_value = c; return c; }
@@ -69,6 +77,11 @@ void hlog_msg(int level, const char *fmt, ...)
     if (strncmp(fmt, "MOUSE-FOCUS:", 12) == 0) {
         va_list ap;
         va_start(ap, fmt); vprintf(fmt, ap); va_end(ap); putchar('\n');
+    }
+    if (strncmp(fmt, "MOUSE: soll=", 12) == 0) {
+        va_list ap;
+        va_start(ap, fmt); vsnprintf(last_mouse, sizeof last_mouse, fmt, ap); va_end(ap);
+        printf("  %s\n", last_mouse);
     }
 }
 
@@ -182,19 +195,21 @@ int imouse_selftest(void)
         test_scene = i; event(WM_TIMER, IMOUSE_TIMER_ID);
         VERIFY(!g_captured, "outside mission free");
     }
-    test_mode = 2; test_scene = 0x2C;
+    test_mode = 2; test_scene = 0x2C; test_demo = 1;
     fail += check_state("title demo", 0);
     g_cfg.mouse_capture_outside_mission = 1;
     event(WM_TIMER, IMOUSE_TIMER_ID); fail += check_state("explicit outside opt-in", 1);
     menu(1); fail += check_state("opt-in still respects menu", 0);
     menu(0); g_cfg.mouse_capture_outside_mission = 0;
     event(WM_TIMER, IMOUSE_TIMER_ID); fail += check_state("default outside free", 0);
-    test_mode = 4; event(WM_TIMER, IMOUSE_TIMER_ID);
+    test_mode = 4; test_demo = 0; event(WM_TIMER, IMOUSE_TIMER_ID);
     fail += check_state("mission entry automatic", 1);
     minimized = 1; event(WM_ACTIVATE, MAKEWPARAM(WA_INACTIVE, 1));
     fail += check_state("minimized", 0);
     minimized = 0; event(WM_ACTIVATE, WA_ACTIVE);
     fail += check_state("restored", 1);
+    test_demo = 0;
+    { extern int imouse_w225_selftest(void); fail += imouse_w225_selftest(); }
     VERIFY(!bad_registration, "foreground-only Raw Input registration");
     VERIFY(physical == 0, "test focus never invokes physical cursor APIs");
     printf("W208 simulated physical calls=%d\n", physical);
@@ -216,5 +231,136 @@ int imouse_selftest(void)
     event(WM_KILLFOCUS, 0); event(WM_SETFOCUS, 0);
     VERIFY(physical == before, "no physical capture without foreground");
     printf("W208 MOUSE-FOCUS: Fehler=%d\n", fail);
+    return fail;
+}
+
+/* ---- W225 MOUSE-ARM: real user flow from the alpha.5 log ----
+ * Title -> START without title demo -> menus -> mission at load counter 2
+ * (not 4!), ESC/settings/feedback/photo/welcome, Alt-Tab, F10, both mouse
+ * modes, title demo, mission 2 (counter 5), F10 outside the mission. */
+static int w225_reason(const char *step, int capture, const char *why)
+{
+    int bad = check_state(step, capture);
+    char want[64];
+    snprintf(want, sizeof want, "soll=%s grund=%s ", capture ? "gefangen" : "frei", why);
+    if (!strstr(last_mouse, want)) {
+        printf("W225 FAIL %s: erwartet '%s', Diagnose '%s'\n", step, want, last_mouse);
+        bad++;
+    }
+    return bad;
+}
+static void w225_set(unsigned counter, unsigned scene, unsigned loop, unsigned demo)
+{
+    test_mode = counter; test_scene = scene; test_loop = loop; test_demo = demo;
+}
+/* Game-thread poll sees the new state; UI thread applies it on the posted
+ * sync message only (no other window message in between). */
+static int w225_poll_sync(const char *step, int capture)
+{
+    int dx, dy, blocked, n0 = posted_n, bad = 0;
+    imouse_poll(&dx, &dy, &blocked);
+    if (posted_n != n0 + 1 || posted_msg != IMOUSE_MSG_SYNC) {
+        printf("W225 FAIL %s: kein Abgleich vom Spiel-Thread angefordert\n", step);
+        bad++;
+    }
+    imouse_poll(&dx, &dy, &blocked);
+    if (posted_n != n0 + 1) {
+        printf("W225 FAIL %s: Abgleich doppelt angefordert\n", step);
+        bad++;
+    }
+    imouse_wndproc(g_mwnd, IMOUSE_MSG_SYNC, 0, 0);
+    if (g_captured != capture || g_sync_pending) {
+        printf("W225 FAIL %s: nach Abgleich capture=%d\n", step, (int)g_captured);
+        bad++;
+    }
+    printf("W225 %s: capture=%d %s\n", step, (int)g_captured, bad ? "FAIL" : "OK");
+    return bad;
+}
+static int w225_mission_block(const char *mode)
+{
+    int fail = 0, i;
+    const char *pages[] = { "ESC", "Einstellungen", "Feedback", "Foto", "Willkommen" };
+    char name[96];
+    printf("W225 Mission (%s)\n", mode);
+    fail += w225_reason("mission (ladezaehler 2)", 1, "mission");
+    if (!strstr(last_mouse, g_cfg.mouse_mode ? "modus=absolut" : "modus=relativ")) {
+        printf("W225 FAIL modus in Diagnose: %s\n", last_mouse); fail++;
+    }
+    for (i = 0; i < 5; i++) {
+        snprintf(name, sizeof name, "%s auf", pages[i]); menu(1);
+        fail += w225_reason(name, 0, "menue");
+        snprintf(name, sizeof name, "%s zu", pages[i]); menu(0);
+        fail += w225_reason(name, 1, "mission");
+    }
+    /* Alt-Tab away and back (real message order WM_ACTIVATE, WM_KILLFOCUS). */
+    event(WM_ACTIVATE, WA_INACTIVE); event(WM_KILLFOCUS, 0); event(WM_ACTIVATEAPP, 0);
+    fail += w225_reason("Alt-Tab weg", 0, "kein_fokus");
+    event(WM_ACTIVATE, WA_ACTIVE); event(WM_SETFOCUS, 0);
+    fail += w225_reason("Alt-Tab zurueck", 1, "mission");
+    /* Alt-Tab away, menu opened meanwhile (controller pause), back, close. */
+    event(WM_KILLFOCUS, 0); menu(1); event(WM_SETFOCUS, 0);
+    fail += w225_reason("zurueck ins offene Menue", 0, "menue");
+    menu(0); fail += w225_reason("Menue zu nach Rueckkehr", 1, "mission");
+    event(WM_KEYDOWN, VK_F10); fail += w225_reason("F10 frei", 0, "f10_frei");
+    event(WM_KEYDOWN, VK_F10); fail += w225_reason("F10 fangen", 1, "mission");
+    event(IMOUSE_MSG_TEST_MOVE, 5);
+    { int dx, dy, blocked; imouse_poll(&dx, &dy, &blocked);
+      if (dx != 5 || blocked) { printf("W225 FAIL Zielhebel-Delta %d\n", dx); fail++; } }
+    return fail;
+}
+int imouse_w225_selftest(void)
+{
+    int fail = 0, mode, c;
+    for (mode = 0; mode < 2; mode++) {
+        g_cfg.mouse_mode = mode;
+        printf("W225 Nutzerablauf mouse_mode=%s\n", mode ? "absolute" : "relative");
+        menu(0); g_want = 1; g_force = 0;
+        event(IMOUSE_MSG_TEST_FOCUS, 1);
+        w225_set(1, 0, 0, 0);
+        event(WM_TIMER, IMOUSE_TIMER_ID);
+        fail += w225_reason("Titel", 0, "ausserhalb_mission");
+        menu(1); fail += w225_reason("Willkommen im Titel", 0, "menue");
+        menu(0); fail += w225_reason("Willkommen zu", 0, "ausserhalb_mission");
+        event(WM_KEYDOWN, VK_F10); fail += w225_reason("F10 im Titel", 1, "f10_manuell");
+        event(WM_KEYDOWN, VK_F10); fail += w225_reason("F10 im Titel zurueck", 0, "ausserhalb_mission");
+        event(WM_LBUTTONDOWN, 0); event(WM_LBUTTONUP, 0); imsg_clear();
+        fail += w225_reason("Klick im Spielmenue", 0, "ausserhalb_mission");
+        w225_set(1, 0x1, 0, 0); event(WM_TIMER, IMOUSE_TIMER_ID);
+        w225_set(1, 0xC, 0, 0); event(WM_TIMER, IMOUSE_TIMER_ID);
+        fail += w225_reason("Spielmenue", 0, "ausserhalb_mission");
+        w225_set(2, 0x2B, 0, 0); event(WM_TIMER, IMOUSE_TIMER_ID);
+        fail += w225_reason("Missions-Load", 0, "ausserhalb_mission");
+        /* Mission at load counter 2 (old code: never captured). Applied by
+         * the per-frame game-thread check without any other window message. */
+        w225_set(2, 0x2C, 1, 0);
+        fail += w225_poll_sync("Missionsbeginn per Frame-Abgleich", 1);
+        fail += w225_mission_block(mode ? "absolut" : "relativ");
+        w225_set(2, 0x2C, 0, 0);
+        fail += w225_poll_sync("Missionsende per Frame-Abgleich", 0);
+    }
+    g_cfg.mouse_mode = 0;
+    /* Title demo stays free at any counter; campaign missions capture at
+     * any counter (mission 2 = 5 after mission 1, wrap 1..23). */
+    for (c = 1; c <= 23; c++) {
+        w225_set(c, 0x2C, 1, 1); event(WM_TIMER, IMOUSE_TIMER_ID);
+        if (g_captured) { printf("W225 FAIL Titel-Demo ladezaehler=%d gefangen\n", c); fail++; }
+        w225_set(c, 0x2C, 1, 0); event(WM_TIMER, IMOUSE_TIMER_ID);
+        if (!g_captured) { printf("W225 FAIL Mission ladezaehler=%d frei\n", c); fail++; }
+    }
+    w225_set(2, 0x2C, 1, 1); fail += w225_reason("Titel-Demo", 0, "ausserhalb_mission");
+    w225_set(5, 0x2C, 1, 0); fail += w225_reason("Mission 2 (ladezaehler 5)", 1, "mission");
+    /* Manual F10 capture in a game menu ends at the next mission edge. */
+    w225_set(5, 0x30, 0, 0); fail += w225_reason("Nachbereitung", 0, "ausserhalb_mission");
+    event(WM_KEYDOWN, VK_F10); fail += w225_reason("F10 Nachbereitung", 1, "f10_manuell");
+    w225_set(6, 0x2C, 1, 0); fail += w225_reason("F10 -> Mission 3", 1, "mission");
+    w225_set(6, 0x2C, 0, 0); fail += w225_reason("nach Mission 3 frei", 0, "ausserhalb_mission");
+    event(WM_KEYDOWN, VK_F10); menu(1);
+    fail += w225_reason("F10 manuell, dann Menue", 0, "menue");
+    menu(0); fail += w225_reason("Menue zu, manuell bleibt", 1, "f10_manuell");
+    event(WM_KILLFOCUS, 0); fail += w225_reason("manuell ohne Fokus", 0, "kein_fokus");
+    event(WM_SETFOCUS, 0); fail += w225_reason("manuell Fokus zurueck", 1, "f10_manuell");
+    event(WM_KEYDOWN, VK_F10); fail += w225_reason("manuell aus", 0, "ausserhalb_mission");
+    w225_set(4, 0x2C, 1, 0); event(WM_TIMER, IMOUSE_TIMER_ID);
+    printf("W225 MOUSE-ARM: Fehler=%d\n", fail);
     return fail;
 }

@@ -24,7 +24,7 @@ typedef struct {
     char input_profile[64]; /* W78: Eingabe-Profil (profiles/<name>.ini), leer = Legacy-Tastatur */
     int sbc_usb;            /* W78: 1 = Original-Controller per WinUSB lesen */
     int sbc_mouse_off;      /* W128: 1 = Maus-Achsen aus, solange der Controller aktiv ist */
-    int aim_turn;           /* W218: 1 = Fadenkreuz am Rand dreht den Mech mit (vereinfachte Steuerung) */
+    int aim_assist;         /* W236: Zielhilfe 0 = Original, 1 = Fadenkreuz am Rand dreht die Sicht, 2 = Waffenarm fest (Altwert aim_turn=1 -> 1) */
     int auto_gear;          /* W218: 1 = automatischer Gangwechsel (vereinfachte Steuerung) */
     int interp_fps;         /* W78: Zwischenbilder 0/60/120 */
     int window_mode;        /* W81: 0 = Fenster, 1 = randloses Vollbild, 2 = exklusives Vollbild */

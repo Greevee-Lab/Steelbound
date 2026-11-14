@@ -130,6 +130,7 @@ static void cli_usage(void)
            "  --write-user-profile R    Benutzerprofil user_R.ini schreiben\n"
            "                            (Basis --from B, --set-bind \"e=a;...\", --force)\n"
            "  --bind-shot[=AKTION]    Test: Belegungs-Dialog sichern (BMP+PNG)\n"
+           "  --bind-learn            mit --bind-shot: Lernmodus im Bild (W228)\n"
            "  --joy-shot              Test: Joystick/HOTAS-Dialog sichern (PNG, Beispieldaten)\n"
            "  --ui-shot SEITE|alle    Test: Seiten als PNG (play, display, graphics, packs,\n"
            "                          controls, audio, advanced; alte Namen start, grafik,\n"
@@ -138,7 +139,7 @@ static void cli_usage(void)
            "                          Bildschirms, ohne Fokus\n"
            "  --state NAME            mit --ui-shot: Regelzustand (nodata, fullscreen,\n"
            "                          window43, controller, custom, diag, pack2, pack3,\n"
-           "                          effectpack),\n"
+           "                          effectpack, ready, ready_controller),\n"
            "                          nur Anzeige (Packs-Ordner: Umgebung SB_PACKS_DIR)\n"
            "  --dpi N                 mit --ui-shot/--bind-shot: DPI erzwingen\n"
            "                          (144 = 150 %%)\n"
@@ -417,6 +418,35 @@ static void st_valid_cleanup(void)
         RemoveDirectoryW(w);
         g_st_game[0] = '\0';
     }
+}
+
+/* W226: Lerner mit einer Folge von Abtastungen einer Achse fuettern (alle
+ * anderen Achsen ruhen auf rest_other). Rueckgabe = erstes Ergebnis != 0,
+ * *at = Index der Abtastung (-1 = nichts gelernt). */
+static int w226_feed(lctrl_joy_learner_t *L, int idx, unsigned mask, int ax,
+                     int rest_other, const int *v, int n, char *o, size_t cap,
+                     int *at)
+{
+    int k, i;
+    for (k = 0; k < n; k++) {
+        imap_joy_state_t st;
+        int r;
+        memset(&st, 0, sizeof st);
+        for (i = 0; i < IJOY_POVS; i++) {
+            st.pov[i] = -1;
+        }
+        for (i = 0; i < IJOY_AXES; i++) {
+            st.axis[i] = (int16_t)rest_other;
+        }
+        st.axis[ax] = (int16_t)v[k];
+        r = lctrl_joy_learner_step(L, 1, &st, mask, 0, idx, o, cap);
+        if (r) {
+            *at = k;
+            return r;
+        }
+    }
+    *at = -1;
+    return 0;
 }
 
 static int cli_selftest(const char *client_override)
@@ -727,19 +757,19 @@ static int cli_selftest(const char *client_override)
         strcat_s(tmp, sizeof tmp, "w218_simple_test.cfg");
         u8_DeleteFile(tmp);
         lcfg_defaults(&a);
-        ok = a.aim_turn == 0 && a.auto_gear == 0;
-        a.aim_turn = 1;
+        ok = a.aim_assist == 0 && a.auto_gear == 0;
+        a.aim_assist = 2;
         a.auto_gear = 1;
         if (ok && lcfg_save_user(tmp, &a) == 0) {
             lcfg_defaults(&b);
             lcfg_load_file(tmp, &b);
-            ok = b.aim_turn == 1 && b.auto_gear == 1;
-            b.aim_turn = 0;
+            ok = b.aim_assist == 2 && b.auto_gear == 1;
+            b.aim_assist = 0;
             if (ok && lcfg_save_user(tmp, &b) == 0) {
                 lcfg_defaults(&a);
-                a.aim_turn = 1;
+                a.aim_assist = 1;
                 lcfg_load_file(tmp, &a);
-                ok = a.aim_turn == 0 && a.auto_gear == 1;
+                ok = a.aim_assist == 0 && a.auto_gear == 1;
             } else {
                 ok = 0;
             }
@@ -750,6 +780,41 @@ static int cli_selftest(const char *client_override)
             T_OK("W218 simple-controls cfg (Standard 0, Roundtrip)");
         } else {
             T_FAIL("W218 simple-controls cfg", "%s", "Werte falsch");
+        }
+        u8_DeleteFile(tmp);
+    }
+
+    /* W236 AIM-ASSIST: Altwert aim_turn=1 (alpha.6) -> Stufe 1; Speichern
+     * schreibt aim_assist und neutralisiert aim_turn (=0). */
+    {
+        int ok = 0;
+        FILE *f = NULL;
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w236_assist_test.cfg");
+        u8_DeleteFile(tmp);
+        if (u8_fopen_s(&f, tmp, "wb") == 0 && f) {
+            fputs("[input]\r\naim_turn=1\r\n", f);
+            fclose(f);
+            lcfg_defaults(&a);
+            lcfg_load_file(tmp, &a);
+            ok = a.aim_assist == 1;
+            if (ok && lcfg_save_user(tmp, &a) == 0) {
+                lcfg_defaults(&b);
+                lcfg_load_file(tmp, &b);
+                ok = b.aim_assist == 1;
+                b.aim_assist = 0;
+                ok = ok && lcfg_save_user(tmp, &b) == 0;
+                lcfg_defaults(&a);
+                lcfg_load_file(tmp, &a);
+                ok = ok && a.aim_assist == 0; /* aim_turn=0 geschrieben */
+            } else {
+                ok = 0;
+            }
+        }
+        if (ok) {
+            T_OK("W236 aim-assist cfg (Altwert aim_turn=1 -> 1, neutralisiert)");
+        } else {
+            T_FAIL("W236 aim-assist cfg", "%s", "Abbildung/Roundtrip falsch");
         }
         u8_DeleteFile(tmp);
     }
@@ -1466,12 +1531,14 @@ static int cli_selftest(const char *client_override)
         lr_res_t rr[LR_N];
         for (i = 0; i < SB_FPS_NCHOICE; i++) {
             if (kSbFpsChoice[i] != want[i] || sb_fps_choice_idx(want[i]) != i) { ok = 0; strcpy_s(why, sizeof why, "list"); }
-            lcfg_defaults(&a);
+            /* W227: gueltige Basis beider Editionen (community: Test-Spielordner
+             * wie Fall 5; der Standard dort hat bewusst keine Spieldateien) */
+            st_valid_base(&a);
             a.interp_fps = want[i];
-            if (lcfg_validate(&a, e, sizeof e) != 0) { ok = 0; strcpy_s(why, sizeof why, "valid"); }
+            if (lcfg_validate(&a, e, sizeof e) != 0) { ok = 0; _snprintf_s(why, sizeof why, _TRUNCATE, "valid %d: %.60s", want[i], e); }
         }
         for (i = 0; i < (int)(sizeof bad / sizeof bad[0]); i++) {
-            lcfg_defaults(&a);
+            st_valid_base(&a); /* W227: sonst lehnt community schon die Spieldaten ab */
             a.interp_fps = bad[i];
             if (lcfg_validate(&a, e, sizeof e) == 0) { ok = 0; strcpy_s(why, sizeof why, "invalid accepted"); }
         }
@@ -2343,7 +2410,7 @@ static int cli_selftest(const char *client_override)
             if (!why[0] && r != 0) { /* Taste/POV auf Achsen-Element: nichts */
                 _snprintf_s(why, sizeof why, _TRUNCATE, "Taste auf Achse: %d '%s'", r, o);
             }
-            /* Schubhebel ruht am Minimum: Vollgas -> Z+, Mitte -> Zone */
+            /* Schubhebel ruht am Minimum: Gang-Direktwahl -> Zone um die Stellung */
             jb0 = jpv = jc = (imap_joy_state_t){ 0 };
             for (i = 0; i < IJOY_POVS; i++) {
                 jb0.pov[i] = jpv.pov[i] = jc.pov[i] = -1;
@@ -2351,8 +2418,8 @@ static int cli_selftest(const char *client_override)
             jb0.axis[2] = jpv.axis[2] = -32768;
             jc.axis[2] = 32767;
             r = lctrl_joy_learn(&jb0, &jpv, &jc, 0xFF, 0, g3, o, sizeof o);
-            if (!why[0] && (r != 3 || strcmp(o, "Z+") != 0)) {
-                _snprintf_s(why, sizeof why, _TRUNCATE, "Z+: %d '%s'", r, o);
+            if (!why[0] && (r != 3 || strcmp(o, "Z:zone=88-100") != 0)) { /* W226: Gang = Zone */
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Gang voll: %d '%s'", r, o);
             }
             jc.axis[2] = 0;
             r = lctrl_joy_learn(&jb0, &jpv, &jc, 0xFF, 0, g3, o, sizeof o);
@@ -2456,6 +2523,309 @@ static int cli_selftest(const char *client_override)
             T_OK("W221 HOTAS: joyN-Zeilen + JOY-Belegungen erhalten, Lernhilfe, Slots, dz/inv, lesbar");
         } else {
             T_FAIL("W221 HOTAS", "%s", why);
+        }
+    }
+    /* W226 JOY-AXIS-DIR: Lern-Richtung (inv automatisch), Richtung statt
+     * Zone bei Tasten/.pos/.neg, Basis einschwingen, Spitze/Stabilitaet,
+     * Vorschau Roh -> Ergebnis wie im Client. Ohne Hardware. */
+    {
+        char why[240] = "", o[48], t[200];
+        imap_joy_state_t b0, c0;
+        lctrl_joy_learner_t L;
+        int pr = lctrl_bind_elem_index("pedal_r");
+        int pl = lctrl_bind_elem_index("pedal_l");
+        int ax = lctrl_bind_elem_index("aim_x");
+        int ay = lctrl_bind_elem_index("aim_y");
+        int rot = lctrl_bind_elem_index("rot");
+        int rp = lctrl_bind_elem_index("rot.pos");
+        int rn = lctrl_bind_elem_index("rot.neg");
+        int b0i = lctrl_bind_elem_index("bi0");
+        int g2 = lctrl_bind_elem_index("gear.2");
+        int r, i, at;
+        float v;
+        memset(&b0, 0, sizeof b0);
+        for (i = 0; i < IJOY_POVS; i++) {
+            b0.pov[i] = -1;
+        }
+        c0 = b0;
+        /* 1. Umgekehrter Schubhebel: Ruhe 32767, Vollgas -32768 -> inv=1 */
+        b0.axis[2] = 32767;
+        c0.axis[2] = -32768;
+        r = lctrl_joy_learn(&b0, &b0, &c0, 0xFF, 0, pr, o, sizeof o);
+        if (r != 3 || strcmp(o, "Z:dz=0.05:inv=1") != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Schub umgekehrt: %d '%s'", r, o);
+        }
+        /* Schubhebel richtig herum (Ruhe -32768) -> kein inv */
+        b0.axis[2] = -32768;
+        c0.axis[2] = 32767;
+        r = lctrl_joy_learn(&b0, &b0, &c0, 0xFF, 0, pr, o, sizeof o);
+        if (!why[0] && (r != 3 || strcmp(o, "Z:dz=0.05") != 0)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Schub richtig: %d '%s'", r, o);
+        }
+        b0.axis[2] = c0.axis[2] = 0;
+        /* 2. Zentrierte Achse nach links, verlangt rechts -> inv=1 */
+        c0.axis[0] = -30000;
+        r = lctrl_joy_learn(&b0, &b0, &c0, 0xFF, 0, ax, o, sizeof o);
+        if (!why[0] && (r != 3 || strcmp(o, "X:dz=0.05:inv=1") != 0)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "X links: %d '%s'", r, o);
+        }
+        c0.axis[0] = 30000; /* richtig -> kein inv */
+        r = lctrl_joy_learn(&b0, &b0, &c0, 0xFF, 0, ax, o, sizeof o);
+        if (!why[0] && (r != 3 || strcmp(o, "X:dz=0.05") != 0)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "X rechts: %d '%s'", r, o);
+        }
+        c0.axis[0] = 0;
+        c0.axis[1] = -30000; /* Zielhebel Y: vorn verlangt, vorn = Minimum */
+        r = lctrl_joy_learn(&b0, &b0, &c0, 0xFF, 0, ay, o, sizeof o);
+        if (!why[0] && (r != 3 || strcmp(o, "Y:dz=0.05") != 0)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Y vorn: %d '%s'", r, o);
+        }
+        c0.axis[1] = 30000; /* gezogen -> inv */
+        r = lctrl_joy_learn(&b0, &b0, &c0, 0xFF, 0, ay, o, sizeof o);
+        if (!why[0] && (r != 3 || strcmp(o, "Y:dz=0.05:inv=1") != 0)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Y gezogen: %d '%s'", r, o);
+        }
+        c0.axis[1] = 0;
+        /* Kombinierte Ruderachse (Ruhe Mitte) auf Pedal: half=1, links inv */
+        c0.axis[5] = -30000;
+        r = lctrl_joy_learn(&b0, &b0, &c0, 0xFF, 0, pl, o, sizeof o);
+        if (!why[0] && (r != 3 || strcmp(o, "RZ:dz=0.05:inv=1:half=1") != 0)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Ruder: %d '%s'", r, o);
+        }
+        c0.axis[5] = 0;
+        /* 3. .pos/.neg/Taste: Richtung, nie Zone um die Ruhe */
+        c0.axis[5] = 32767;
+        r = lctrl_joy_learn(&b0, &b0, &c0, 0xFF, 0, rp, o, sizeof o);
+        if (!why[0] && (r != 3 || strcmp(o, "RZ+") != 0)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "rot.pos: %d '%s'", r, o);
+        }
+        c0.axis[5] = -32768;
+        r = lctrl_joy_learn(&b0, &b0, &c0, 0xFF, 0, rn, o, sizeof o);
+        if (!why[0] && (r != 3 || strcmp(o, "RZ-") != 0)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "rot.neg: %d '%s'", r, o);
+        }
+        /* Schub ruht am Minimum, nur bis Mitte bewegt: Taste -> Zone ab
+         * halbem Weg (Ruhe ausserhalb), Gang -> Zone um die Stellung */
+        b0.axis[2] = -32768;
+        c0 = b0;
+        c0.axis[2] = 0; /* 50 % */
+        r = lctrl_joy_learn(&b0, &b0, &c0, 0xFF, 0, b0i, o, sizeof o);
+        if (!why[0] && (r != 3 || strcmp(o, "Z:zone=25-100") != 0)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Taste halb: %d '%s'", r, o);
+        }
+        r = lctrl_joy_learn(&b0, &b0, &c0, 0xFF, 0, g2, o, sizeof o);
+        if (!why[0] && (r != 3 || strcmp(o, "Z:zone=38-62") != 0)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Gang-Zone: %d '%s'", r, o);
+        }
+        /* 4. Nutzerbefund: Basis veraltet (alle Achsen -32768 vor dem ersten
+         * Geraete-Bericht), Drehachse ruht bei 55 %. Einmal-Lernen alt:
+         * Zone 43-67 um die Ruhe. Lerner: erste Aenderung = neue Basis,
+         * danach Drehen nach rechts -> RZ+. */
+        {
+            static const int seqA[] = { -32768, -32768, -32768, -32768, 3277,
+                                        3277, 9000, 20000, 30000, 32767,
+                                        32767, 32767 };
+            lctrl_joy_learner_reset(&L);
+            r = w226_feed(&L, rp, 0x3F, 5, -32768, seqA, 12, o, sizeof o, &at);
+            if (!why[0] && (r != 3 || strcmp(o, "RZ+") != 0 || at < 10)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "veraltete Basis: %d '%s' @%d", r, o, at);
+            }
+        }
+        /* Einzelachse exakt am Endwert, Sprung > 25 % = erster Bericht */
+        {
+            static const int seqB[] = { -32768, -32768, -32768, 3277, 3277,
+                                        3277, 3277 };
+            lctrl_joy_learner_reset(&L);
+            r = w226_feed(&L, rp, 0x01, 0, 0, seqB, 7, o, sizeof o, &at);
+            if (!why[0] && r != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Endwert-Sprung: %d '%s'", r, o);
+            }
+        }
+        /* Umgekehrter Schubhebel langsam geschoben (Ruhe 32767 exakt): kein
+         * Fehl-Rebase, erst bei Ruhe uebernehmen -> inv=1 */
+        {
+            static const int seqC[] = { 32767, 32767, 32767, 28000, 20000,
+                                        8000, -6000, -20000, -32768, -32768,
+                                        -32768 };
+            lctrl_joy_learner_reset(&L);
+            r = w226_feed(&L, pr, 0x07, 2, 0, seqC, 11, o, sizeof o, &at);
+            if (!why[0] && (r != 3 || strcmp(o, "Z:dz=0.05:inv=1") != 0 || at < 9)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Schub langsam: %d '%s' @%d", r, o, at);
+            }
+        }
+        /* In Bewegung (erster Wert > 40 %) nicht uebernehmen; Achse federt
+         * zurueck -> Spitze zaehlt (rot.pos -> RZ+) */
+        {
+            static const int seqD[] = { 0, 0, 0, 27000, 32767, 12000, 0, 0 };
+            lctrl_joy_learner_reset(&L);
+            r = w226_feed(&L, rp, 0x3F, 5, 100, seqD, 8, o, sizeof o, &at);
+            if (!why[0] && (r != 3 || strcmp(o, "RZ+") != 0 || at != 5)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "zurueckgefedert: %d '%s' @%d", r, o, at);
+            }
+        }
+        /* Unruhige Basis bzw. Lesefehler: kein Lernen */
+        {
+            static const int seqE[] = { 0, 30000, -30000, 30000, -30000 };
+            imap_joy_state_t z;
+            lctrl_joy_learner_reset(&L);
+            r = w226_feed(&L, ax, 0x01, 0, 0, seqE, 5, o, sizeof o, &at);
+            memset(&z, 0, sizeof z);
+            for (i = 0; i < 10 && !r; i++) {
+                r = lctrl_joy_learner_step(&L, 0, &z, 0x01, 0, ax, o, sizeof o);
+            }
+            if (!why[0] && (r != 0 || L.have_base)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "ohne Basis gelernt: %d '%s'", r, o);
+            }
+        }
+        /* 5. Vorschau Roh -> Ergebnis (wie input_map.c) */
+        if (!why[0]) {
+            int k1 = lctrl_joy_eval("JOY0:Z:inv=1", 1, 32767, &v);
+            int ok = k1 == 1 && v < 0.01f;
+            ok = ok && lctrl_joy_eval("JOY0:Z:inv=1", 1, -32768, &v) == 1 && v > 0.99f;
+            ok = ok && lctrl_joy_eval("JOY0:X:dz=0.05", 0, -32768, &v) == 1 && v < -0.99f;
+            ok = ok && lctrl_joy_eval("JOY0:X:dz=0.05:inv=1", 0, 32767, &v) == 1 && v < -0.99f;
+            ok = ok && lctrl_joy_eval("JOY0:RZ:half=1:inv=1", 1, -32768, &v) == 1 && v > 0.99f;
+            ok = ok && lctrl_joy_eval("JOY0:Z+", 0, 32767, &v) == 2 && v > 0.5f;
+            ok = ok && lctrl_joy_eval("JOY0:Z+:inv=1", 0, 32767, &v) == 2 && v < 0.5f;
+            ok = ok && lctrl_joy_eval("JOY0:Z+:inv=1", 0, -32768, &v) == 2 && v > 0.5f;
+            ok = ok && lctrl_joy_eval("JOY0:Z:zone=0-10:inv=1", 0, 32767, &v) == 2 && v > 0.5f;
+            ok = ok && lctrl_joy_eval("JOY0:B3", 0, 0, &v) == 0;
+            if (!ok) {
+                strcpy_s(why, sizeof why, "lctrl_joy_eval");
+            }
+        }
+        /* 6. inv an Achse-als-Taste setzen, lesbar markiert, Hinweise */
+        if (!why[0]) {
+            char a[96] = "JOY0:Z+";
+            lctrl_joy_param_set(a, sizeof a, "inv", "1");
+            if (strcmp(a, "JOY0:Z+:inv=1") != 0 ||
+                lctrl_joy_src_axis(a, NULL, NULL) != 2 ||
+                lctrl_joy_src_axis("JOY0:Z++JOY0:B1", NULL, NULL) != 0 ||
+                lctrl_joy_src_axis("JOY1:RZ:dz=0.1", NULL, NULL) != 1 ||
+                !lctrl_joy_atom_text("JOY0:X:inv=1", t, sizeof t) ||
+                !strstr(t, LT("gui.joy_src_inv")) ||
+                !lctrl_joy_atom_text("JOY0:X", t, sizeof t) ||
+                strstr(t, LT("gui.joy_src_inv")) ||
+                !lctrl_joy_dir_hint(rot) || !lctrl_joy_dir_hint(rp) ||
+                strcmp(lctrl_joy_dir_hint(rp), LT("gui.joy_hint_dig")) != 0 ||
+                lctrl_joy_dir_hint(b0i) != NULL ||
+                lctrl_joy_dir_expect(ay) != -1 || lctrl_joy_dir_expect(pr) != 1) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "inv/Text/Hinweis: '%s' '%s'", a, t);
+            }
+        }
+        if (!why[0]) {
+            T_OK("W226 JOY-AXIS-DIR: Lern-Richtung/inv, Richtung statt Zone, Basis einschwingen, Vorschau");
+        } else {
+            T_FAIL("W226 JOY-AXIS-DIR", "%s", why);
+        }
+    }
+
+    /* W228 BIND-DIALOG: Gruppen der Liste, Sichtbarkeit im Detailbereich je
+     * Aktionsart (Maus X/Y, Joystick, Hinweis), Quelle einzeln entfernen,
+     * Konflikte nur der gewaehlten Aktion. Reine Logik, ohne Fenster. */
+    {
+        static lctrl_bind_t b;
+        lctrl_conf1_t cf[LCTRL_ALT_N];
+        char why[240] = "";
+        int cnt[LCTRL_GROUP_N] = { 0 }, i, n;
+        int bi0 = lctrl_bind_elem_index("bi0"), bi1 = lctrl_bind_elem_index("bi1");
+        int bi2 = lctrl_bind_elem_index("bi2"), ax = lctrl_bind_elem_index("aim_x");
+        int ay = lctrl_bind_elem_index("aim_y"), rot = lctrl_bind_elem_index("rot");
+        int rp = lctrl_bind_elem_index("rot.pos"), pr = lctrl_bind_elem_index("pedal_r");
+        int g1 = lctrl_bind_elem_index("gear.1"), tu = lctrl_bind_elem_index("tuner.up");
+        int pa = lctrl_bind_elem_index("pause"), ph = lctrl_bind_elem_index("photo");
+        unsigned v;
+        for (i = 0; i < LCTRL_ELEM_N; i++) {
+            int g = lctrl_elem_group(i);
+            if (g < 0 || g >= LCTRL_GROUP_N) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Gruppe %s = %d", kCtrlElems[i].key, g);
+                break;
+            }
+            cnt[g]++;
+        }
+        if (!why[0] && (lctrl_elem_group(bi0) != 0 || lctrl_elem_group(rot) != 1 ||
+                        lctrl_elem_group(rp) != 2 || lctrl_elem_group(g1) != 3 ||
+                        lctrl_elem_group(tu) != 4 || lctrl_elem_group(pa) != 5 ||
+                        lctrl_elem_group(ph) != 5 || cnt[0] != 39 || cnt[1] != 8 ||
+                        cnt[2] != 10 || cnt[3] != 9 || cnt[4] != 2 ||
+                        lctrl_elem_group(-1) != -1 || lctrl_elem_group(LCTRL_ELEM_N) != -1)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Gruppen %d/%d/%d/%d/%d/%d", cnt[0],
+                        cnt[1], cnt[2], cnt[3], cnt[4], cnt[5]);
+        }
+        if (!why[0] && (lctrl_helper_axis(rp) != rot ||
+                        lctrl_helper_axis(lctrl_bind_elem_index("aim_x.neg")) != ax ||
+                        lctrl_helper_axis(bi0) != -1 || lctrl_helper_axis(rot) != -1)) {
+            strcpy_s(why, sizeof why, "Achse zum Tasten-Helfer");
+        }
+        /* Sichtbarkeit je Aktionsart */
+        lctrl_bind_init(&b);
+        lctrl_bind_set(&b, bi0, "KEY:SPACE, MOUSE:LEFT, PAD:A");
+        lctrl_bind_set(&b, ax, "MOUSE:X:mode=aim");
+        lctrl_bind_set(&b, pr, "KEY:W, JOY0:Z:dz=0.05:inv=1");
+        lctrl_bind_set(&b, rp, "KEY:D, JOY0:Z+");
+        lctrl_bind_set(&b, ay, "MOUSE:Y:mode=aim, JOY0:Y:dz=0.10");
+        if (!why[0] && (v = lctrl_bind_detail_vis(&b, bi0)) != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Taste: vis=%u (Maus/Joystick sichtbar)", v);
+        }
+        if (!why[0] && (v = lctrl_bind_detail_vis(&b, ax)) !=
+                           (LCTRL_VIS_MOUSE | LCTRL_VIS_JOYHINT)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "aim_x ohne JOY: vis=%u", v);
+        }
+        if (!why[0] && (v = lctrl_bind_detail_vis(&b, rot)) != LCTRL_VIS_JOYHINT) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "rot leer: vis=%u (Maus nur aim/sight)", v);
+        }
+        if (!why[0] && (v = lctrl_bind_detail_vis(&b, pr)) !=
+                           (LCTRL_VIS_JOY | LCTRL_VIS_JOYDZ)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "pedal_r mit JOY: vis=%u", v);
+        }
+        if (!why[0] && (v = lctrl_bind_detail_vis(&b, rp)) != LCTRL_VIS_JOY) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "rot.pos mit JOY0:Z+: vis=%u", v);
+        }
+        if (!why[0] && (v = lctrl_bind_detail_vis(&b, ay)) !=
+                           (LCTRL_VIS_MOUSE | LCTRL_VIS_JOY | LCTRL_VIS_JOYDZ)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "aim_y Maus+JOY: vis=%u", v);
+        }
+        if (!why[0] && (lctrl_bind_detail_vis(&b, pa) != 0 ||
+                        lctrl_bind_detail_vis(&b, -1) != 0 ||
+                        lctrl_bind_detail_vis(NULL, bi0) != 0)) {
+            strcpy_s(why, sizeof why, "Client-Aktion/ungueltig: vis != 0");
+        }
+        /* Konflikte nur der gewaehlten Aktion (Gross/klein egal) */
+        lctrl_bind_set(&b, bi1, "key:space");
+        n = lctrl_bind_conflicts_for(&b, bi0, cf, LCTRL_ALT_N);
+        if (!why[0] && (n != 1 || cf[0].alt != 0 || cf[0].n != 1 || cf[0].other[0] != bi1)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Konflikte bi0: n=%d", n);
+        }
+        if (!why[0] && lctrl_bind_conflicts_for(&b, bi2, cf, LCTRL_ALT_N) != 0) {
+            strcpy_s(why, sizeof why, "Konflikte bi2 (unbelegt) != 0");
+        }
+        /* Quelle einzeln entfernen: Rest rueckt auf, Grenzen */
+        if (!why[0] && (lctrl_bind_remove_alt(&b, bi0, 1) != 0 || b.row[bi0].n_alt != 2 ||
+                        strcmp(b.row[bi0].alt[0], "KEY:SPACE") != 0 ||
+                        strcmp(b.row[bi0].alt[1], "PAD:A") != 0)) {
+            strcpy_s(why, sizeof why, "Entfernen MOUSE:LEFT (Mitte)");
+        }
+        if (!why[0] && (lctrl_bind_remove_alt(&b, bi0, 2) != 1 ||
+                        lctrl_bind_remove_alt(&b, bi0, -1) != 1 ||
+                        lctrl_bind_remove_alt(NULL, bi0, 0) != 1)) {
+            strcpy_s(why, sizeof why, "Entfernen ausserhalb nicht abgelehnt");
+        }
+        if (!why[0] && (lctrl_bind_remove_alt(&b, pr, 1) != 0 ||
+                        lctrl_bind_detail_vis(&b, pr) != LCTRL_VIS_JOYHINT)) {
+            strcpy_s(why, sizeof why, "JOY-Quelle entfernt: Hinweis statt Joystick");
+        }
+        if (!why[0] && (lctrl_bind_remove_alt(&b, bi0, 0) != 0 ||
+                        lctrl_bind_remove_alt(&b, bi0, 0) != 0 || b.row[bi0].n_alt != 0 ||
+                        lctrl_bind_remove_alt(&b, bi0, 0) != 1)) {
+            strcpy_s(why, sizeof why, "Entfernen bis leer");
+        }
+        if (!why[0] && lctrl_bind_conflicts_for(&b, bi1, cf, LCTRL_ALT_N) != 0) {
+            strcpy_s(why, sizeof why, "Konflikt nach Entfernen nicht weg");
+        }
+        if (!why[0]) {
+            T_OK("W228 BIND-DIALOG: Gruppen, Sichtbarkeit Maus/Joystick je Art, Quelle einzeln entfernen, Konflikte je Aktion");
+        } else {
+            T_FAIL("W228 BIND-DIALOG", "%s", why);
         }
     }
 
@@ -3033,9 +3403,13 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
         o.shot = 3;
         if (bv && strcmp(bv, "vr") == 0) { /* W159: VR-Gruppe in Sicht */
             o.bind_sel = lctrl_bind_elem_index("vr_recenter");
+        } else if (bv && strcmp(bv, "joy") == 0) { /* W226: HOTAS-Beispiel */
+            o.bind_sel = lctrl_bind_elem_index("pedal_r");
+            o.bind_joydemo = 1;
         } else if (bv) {
             o.bind_sel = lctrl_bind_elem_index(bv);
         }
+        o.bind_learn = cli_flag(argc, argv, "--bind-learn"); /* W228 */
         shot_dir(argc, argv, &o);
         rc = gui_main(client_override, &o);
     } else if (cli_flag(argc, argv, "--joy-shot")) {
@@ -3089,7 +3463,7 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
         }
         if (st) {
             if (!gui_state_known(st)) {
-                printf("FEHLER: --state braucht nodata|fullscreen|window43|img_*|"
+                printf("FEHLER: --state braucht nodata|fullscreen|window43|ready|img_*|"
                        "controller|custom|diag.\n");
                 return 1;
             }

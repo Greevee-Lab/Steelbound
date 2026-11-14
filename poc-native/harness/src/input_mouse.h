@@ -14,6 +14,14 @@
  * gibt sofort frei. Fokus-Rueckkehr und Menue-Schliessen fangen automatisch,
  * ausser nach manueller F10-Freigabe. F10 oder Klick faengt dann wieder (der Klick selbst feuert
  * nicht: Maustasten bleiben bis zum Loslassen gesperrt).
+ * W225 MOUSE-ARM: Mission = Szene [0x6B96DC]=0x2C + Missionsschleife
+ * [0x356F58]=1, ohne Titel-Demo ([0x3B8CDC]=1); der Ladezaehler [0x2EEA34]
+ * ist kein Missionsmerkmal (Mission 1 ohne vorherige Demo = 2). Der Soll-
+ * Zustand wird bei jeder Fenster-Nachricht und jedem Spiel-Poll neu
+ * abgeleitet (Abweichung -> IMOUSE_MSG_SYNC an den UI-Thread). F10 ausserhalb
+ * der Mission faengt/gibt manuell frei (bis zur naechsten Missionsflanke).
+ * Log bei jedem Wechsel: MOUSE: soll=gefangen|frei grund=... mission=...
+ * menue=... fokus=... modus=absolut|relativ (+ Rohwerte der Zustandsadressen).
  * input_focus_only=1: echte Tasten/Maus nur bei Fokus des Client-Fensters.
  * input_test_hook=1 (nur Tests): IMOUSE_MSG_TEST_FOCUS (wParam 1/0) setzt
  * den Fokus logisch (Simulation bleibt auch bei Verlust aktiv), IMOUSE_MSG_TEST_MOVE (wParam=dx, lParam=dy, signed)
@@ -52,6 +60,11 @@ int imsg_key(int vk, unsigned frame);
 /* Echte Taste/Maustaste vk: input_source=1 -> imsg_key(vk, g_frames),
  * sonst GetAsyncKeyState (bisher). */
 int imsg_real_vk(int vk);
+
+/* W236 AIM-ASSIST: 1 = Steuerhilfen duerfen wirken (Spiel-Thread): Mission
+ * ohne Titel-Demo (W225-Merkmale), kein eigenes Menue offen und die Maus
+ * nicht per F10 freigegeben (mouse_capture=1). */
+int imouse_assist_allowed(void);
 
 /* W196: UI thread, idempotent aggregate state for all own menus/panels. */
 void imouse_menu_capture(int open);

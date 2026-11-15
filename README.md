@@ -41,8 +41,8 @@ Thank you! ☕
    `.xiso` (Europe/PAL; USA/NTSC-U is experimental), then press **Check**.
 3. **Play:** press **LAUNCH GAME**.
 
-The default preset **Original (HD) – 120 FPS** is the recommended start; on
-an older or weaker PC pick **Original (HD) – Performance** on the
+The default preset **Original** (at your monitor's refresh rate) is the
+recommended start; on an older or weaker PC pick **Performance** on the
 **Graphics** page. More: [Getting started](poc-native/docs/community/GETTING_STARTED.md),
 [Controls](poc-native/docs/community/CONTROLS.md),
 [Alpha testing](poc-native/docs/community/ALPHA_TESTING.md),
@@ -61,7 +61,7 @@ an older or weaker PC pick **Original (HD) – Performance** on the
 - Your own copy of Steel Battalion (Europe/PAL; USA/NTSC-U experimental), see
   [Which game version?](#which-game-version).
 
-There are no hard minimum specs. The **Original (HD) – Performance** preset
+There are no hard minimum specs. The **Performance** preset
 is made for modest hardware – it runs fine on an 11-year-old laptop.
 
 ### Windows may warn on first start
@@ -140,19 +140,47 @@ feels off? Fill in the 2-minute
 [Discussions](../../discussions). To chat with other pilots and get notified
 when a new version is out, join the [Discord](https://discord.gg/ExEH3gBbyw).
 
+## Known issues" in editions/community/README.md (wird im Export zu README.md).
+Der englische Block unten ersetzt den bisherigen Abschnitt vollständig (von "## Known issues"
+bis vor "## What Steelbound is"). Darunter: Änderungsliste und Diff zur Prüfung.
+-->
+
 ## Known issues
 
 Current state of the alpha – no need to report these again, but new details
 are welcome in the existing issue:
 
-- **Textures or shaders break after several missions in a row.** Quit and
-  restart the game; your saved progress is kept.
-- **Landscape at the screen edge pops in** in some missions.
-- **Replays:** importing and viewing replays does not fully work yet.
+- **Bright patches or thin lines at frame rates above 30.** They only appear
+  in the in-between frames, are much rarer than in earlier alphas and I am
+  working on the remaining cases. With **30 (original)** the picture is
+  always clean. A report with **F9** (short video) helps most.
+- **HD texture packs are experimental**
+  ([#4](../../issues/4), [#5](../../issues/5)). If you see white boxes, flat
+  untextured parts or garish colours, press **Shift+F8** in the game to
+  compare with the original look, or use **Back to original** on the
+  launcher's Play page. Setting the frame rate to **30 (original)** also
+  helps to narrow it down. An **F11** report taken right when it is visible
+  helps me a lot.
+- **Line of Contact is not startable yet.** The launcher tab prepares it (disc
+  check, save folder); System Link works in my local tests, playing a mission
+  is the next step. Online play comes later.
 - **The USA (NTSC-U) release is experimental**; Europe (PAL) is the fully
   supported version.
+- **Camera on rising terrain** (Mission 9): the VT height changes in small
+  steps on slopes. This comes from the game's own movement logic; I am still
+  checking whether the original console shows the same.
+- **Hide cockpit with widescreen sides:** parts of the cockpit stay visible
+  left and right of the 4:3 view – the game's own IGNITION+START trick does
+  the same.
+- **Joysticks, HOTAS and the original controller** were developed without
+  all the real hardware; some fixes were tested with simulated devices only.
+  Please tell me how your device behaves.
 - **VR is experimental:** expect rough edges with headsets, runtimes and
   performance.
+- **Replays from the launcher and video export are experimental.**
+- **Unconfirmed reports** (each reported once, not reproduced yet – an F11
+  report right when it happens helps a lot): white hills on the
+  main monitor in Mission 02, supply points not credited after Mission 05.
 
 ## What Steelbound is
 
@@ -184,15 +212,17 @@ are welcome in the existing issue:
 
 ## Features
 
-- Faithful **original look** (default, pixel-checked against references) and
-  optional remaster presets.
-- **120 FPS** via interpolated frames on a real-time tick.
+- Faithful **original look** in 4:3 (default, pixel-checked against references)
+  and optional **experimental** presets.
+- Smooth frame rates up to your monitor's refresh rate via interpolated frames
+  on a real-time tick.
 - Any resolution with correct aspect ratio everywhere: 2D screens, movies
-  and menus get black bars (never stretched); the mission view uses true
-  Hor+ widescreen.
+  and menus get black bars (never stretched); widescreen sides in missions
+  (true Hor+) are available as an experimental option.
 - Shading and lighting after the original GPU semantics, monitor effects,
   image borders.
-- In-game settings menu (ESC) and performance overlay (F2).
+- In-game settings menu (ESC) and performance overlay (F2), quick screenshots
+  up to 8K (F12) and a photo mode (Shift+F12).
 - Controls: keyboard/mouse, gamepads, and the original Steel Battalion
   controller over USB (you install the WinUSB driver yourself).
 - Window, borderless and exclusive-fullscreen modes.

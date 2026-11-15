@@ -4,6 +4,7 @@
 #include "sb_overlay.h"
 #include "sb_photo.h"
 #include "sb_watermark.h"
+#include "render_vexp.h" /* W290: watermark_media */
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
@@ -52,7 +53,8 @@ static void wm_text_init(void)
 
 int sb_wm_on(void)
 {
-    return g_cfg.watermark && !g_cfg.vr_enable && !sb_photo_active();
+    /* W290: watermark_media=0 -> nicht im Video-Export (Export-Fenster ist unsichtbar, nur das Video zaehlt) */
+    return g_cfg.watermark && !g_cfg.vr_enable && !sb_photo_active() && !(!g_cfg.watermark_media && sb_vexp_on());
 }
 
 /* 4:3-Box fuer ein Bild w x h (gleiche Formel wie sb_aspect_box, ohne Log) */

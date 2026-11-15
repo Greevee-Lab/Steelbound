@@ -123,10 +123,76 @@ typedef struct {
     GUID inst;
     ijoy_info_t info;
     int fails;
+    LONG lo[IJOY_AXES], hi[IJOY_AXES]; /* W282: tatsaechlicher Bereich */
+    DIOBJECTDATAFORMAT *odf;           /* W282: eigenes Format (Rueckfall) */
 } ijoy_dev_t;
 
 static ijoy_dev_t g_dev[IJOY_MAX_DEV];
 static int g_ndev;
+/* W282: uebersprungene XInput-Geraete der letzten Aufzaehlung */
+static char g_skip_nm[8][96];
+static int g_nskip;
+
+int16_t ijoy_norm_axis(long v, long lo, long hi)
+{
+    long long r;
+    if (lo == -32768 && hi == 32767) { /* Normalfall: bitgleich wie bisher */
+        if (v < -32768) v = -32768;
+        if (v > 32767) v = 32767;
+        return (int16_t)v;
+    }
+    if (hi <= lo) return 0;
+    if (v < lo) v = lo;
+    if (v > hi) v = hi;
+    r = ((long long)(v - lo) * 65535 + (long long)(hi - lo) / 2) / (long long)(hi - lo) - 32768;
+    if (r < -32768) r = -32768;
+    if (r > 32767) r = 32767;
+    return (int16_t)r;
+}
+
+unsigned ijoy_plan_axes(const int *kind, int n, int *slot)
+{
+    static const int kFree[IJOY_AXES] = {6, 7, 2, 3, 4, 5, 0, 1};
+    unsigned used = 0;
+    int i, k;
+    for (i = 0; i < n; i++) slot[i] = -1;
+    for (i = 0; i < n; i++) { /* 1. Standard-Achsen auf ihren Slot */
+        if (kind[i] >= 0 && kind[i] <= 5 && !(used & (1u << kind[i]))) {
+            slot[i] = kind[i];
+            used |= 1u << kind[i];
+        }
+    }
+    for (i = 0; i < n; i++) { /* 2. Slider auf S0/S1 */
+        if (kind[i] == 6) {
+            for (k = 6; k <= 7; k++) {
+                if (!(used & (1u << k))) {
+                    slot[i] = k;
+                    used |= 1u << k;
+                    break;
+                }
+            }
+        }
+    }
+    for (i = 0; i < n; i++) { /* 3. Rest (unbekannt, doppelt) auf freie Slots */
+        if (slot[i] >= 0) continue;
+        for (k = 0; k < IJOY_AXES; k++) {
+            if (!(used & (1u << kFree[k]))) {
+                slot[i] = kFree[k];
+                used |= 1u << kFree[k];
+                break;
+            }
+        }
+    }
+    return used;
+}
+
+int ijoy_skipped_xinput(char names[][96], int max)
+{
+    int i;
+    for (i = 0; i < g_nskip && i < max; i++)
+        strncpy_s(names[i], 96, g_skip_nm[i], _TRUNCATE);
+    return g_nskip;
+}
 
 static void ijoy_build_format(void)
 {
@@ -138,7 +204,11 @@ static void ijoy_build_format(void)
         g_odf[n].pguid = axg[i];
         g_odf[n].dwOfs = (DWORD)(FIELD_OFFSET(ijoy_raw_t, ax) + i * sizeof(LONG));
         g_odf[n].dwType = DIDFT_AXIS | DIDFT_ANYINSTANCE | DIDFT_OPTIONAL;
-        g_odf[n].dwFlags = DIDOI_ASPECTPOSITION;
+        /* W282 ISSUE6: ohne Aspekt-Zwang (wie c_dfDIJoystick). Mit
+         * DIDOI_ASPECTPOSITION fielen Achsen von Treibern, die keinen
+         * Aspekt melden (aeltere Geraete), aus dem Format - Tasten gingen,
+         * Achsen nicht (Tester-Befund Wingman, Hypothese). */
+        g_odf[n].dwFlags = 0;
     }
     for (i = 0; i < IJOY_POVS; i++, n++) {
         g_odf[n].pguid = &kG_POV;
@@ -235,30 +305,154 @@ static int ijoy_is_xinput(LPDIRECTINPUTDEVICE8W dev)
     return 0;
 }
 
-static int ijoy_open_dev(const DIDEVICEINSTANCEW *di, ijoy_dev_t *d)
+/* W282 ISSUE6: Achsen-Objekte fuer den Rueckfall (eigenes Format). */
+typedef struct {
+    int n;
+    int kind[IJOY_AXES * 2];
+    DWORD type[IJOY_AXES * 2];
+} ijoy_axenum_t;
+
+static BOOL CALLBACK ijoy_axobj_cb(LPCDIDEVICEOBJECTINSTANCEW oi, LPVOID ctx)
 {
-    LPDIRECTINPUTDEVICE8W dev = NULL;
-    DIPROPRANGE rg;
-    DIDEVCAPS caps;
-    int i;
-    memset(d, 0, sizeof *d);
-    if (FAILED(IDirectInput8_CreateDevice(g_di, &di->guidInstance, &dev, NULL)) ||
-        !dev)
-        return 0;
-    if (ijoy_is_xinput(dev) ||
-        FAILED(IDirectInputDevice8_SetDataFormat(dev, &g_df))) {
-        IDirectInputDevice8_Release(dev);
-        return 0;
+    ijoy_axenum_t *a = (ijoy_axenum_t *)ctx;
+    static const GUID *const g[6] = {&kG_X, &kG_Y, &kG_Z, &kG_RX, &kG_RY, &kG_RZ};
+    int k, kind = 7;
+    if (a->n >= IJOY_AXES * 2) return DIENUM_STOP;
+    for (k = 0; k < 6; k++) {
+        if (IsEqualGUID(&oi->guidType, g[k])) kind = k;
     }
-    /* Ohne SetCooperativeLevel: nicht-exklusiv + Hintergrund (Standard),
-     * kein Fenster noetig, kein Fokus-Bezug. */
+    if (IsEqualGUID(&oi->guidType, &kG_SL)) kind = 6;
+    a->kind[a->n] = kind;
+    a->type[a->n] = oi->dwType;
+    a->n++;
+    return DIENUM_CONTINUE;
+}
+
+static unsigned ijoy_axmask_of(LPDIRECTINPUTDEVICE8W dev)
+{
+    unsigned m = 0;
+    int i;
+    for (i = 0; i < IJOY_AXES; i++) {
+        DIDEVICEOBJECTINSTANCEW oi;
+        memset(&oi, 0, sizeof oi);
+        oi.dwSize = sizeof oi;
+        if (SUCCEEDED(IDirectInputDevice8_GetObjectInfo(
+                dev, &oi, (DWORD)(FIELD_OFFSET(ijoy_raw_t, ax) + i * sizeof(LONG)),
+                DIPH_BYOFFSET)))
+            m |= 1u << i;
+    }
+    return m;
+}
+
+static int ijoy_popcount(unsigned m)
+{
+    int n = 0;
+    for (; m; m &= m - 1) n++;
+    return n;
+}
+
+/* Rueckfall: meldet der Treiber mehr Achsen, als das Standard-Format
+ * (GUID X..RZ, Slider) erfasst, werden die Achsen einzeln per Instanz
+ * zugeordnet (ijoy_plan_axes). Tasten/POV bleiben wie im Standard. */
+static void ijoy_try_remap(ijoy_dev_t *d, int ncaps)
+{
+    ijoy_axenum_t ae;
+    DIOBJECTDATAFORMAT *odf;
+    DIDATAFORMAT df;
+    int slot[IJOY_AXES * 2], i, n = 0;
+    memset(&ae, 0, sizeof ae);
+    if (ncaps <= ijoy_popcount(d->info.axmask)) return;
+    IDirectInputDevice8_EnumObjects(d->dev, ijoy_axobj_cb, &ae, DIDFT_AXIS);
+    if (ae.n <= ijoy_popcount(d->info.axmask)) return;
+    ijoy_plan_axes(ae.kind, ae.n, slot);
+    odf = (DIOBJECTDATAFORMAT *)calloc(IJOY_AXES * 2 + IJOY_POVS + IJOY_BTNS,
+                                       sizeof *odf);
+    if (!odf) return;
+    for (i = 0; i < ae.n; i++) {
+        if (slot[i] < 0) continue;
+        odf[n].pguid = NULL;
+        odf[n].dwOfs = (DWORD)(FIELD_OFFSET(ijoy_raw_t, ax) + slot[i] * sizeof(LONG));
+        odf[n].dwType = DIDFT_AXIS | DIDFT_MAKEINSTANCE(DIDFT_GETINSTANCE(ae.type[i])) |
+                        DIDFT_OPTIONAL;
+        odf[n].dwFlags = 0;
+        n++;
+    }
+    for (i = IJOY_AXES; i < IJOY_AXES + IJOY_POVS + IJOY_BTNS; i++) {
+        odf[n++] = g_odf[i]; /* POV + Tasten wie im Standard-Format */
+    }
+    df = g_df;
+    df.dwNumObjs = (DWORD)n;
+    df.rgodf = odf;
+    if (SUCCEEDED(IDirectInputDevice8_SetDataFormat(d->dev, &df))) {
+        unsigned m = ijoy_axmask_of(d->dev);
+        if (ijoy_popcount(m) > ijoy_popcount(d->info.axmask)) {
+            d->odf = odf;
+            d->info.axmask = m;
+            d->info.axremap = 1;
+            return;
+        }
+    }
+    IDirectInputDevice8_SetDataFormat(d->dev, &g_df); /* zurueck */
+    free(odf);
+}
+
+/* Bereich je Achse: erst geraeteweit setzen (wie bisher), dann je Achse
+ * setzen und tatsaechlich zuruecklesen. Bleibt ein anderer Bereich (Treiber
+ * nimmt DIPROP_RANGE nicht an), rechnet ijoy_read per Software um - vorher
+ * wurden solche Werte auf +-32767 abgeschnitten. */
+static void ijoy_ranges(ijoy_dev_t *d)
+{
+    DIPROPRANGE rg;
+    int i;
     memset(&rg, 0, sizeof rg);
     rg.diph.dwSize = sizeof rg;
     rg.diph.dwHeaderSize = sizeof(DIPROPHEADER);
     rg.diph.dwHow = DIPH_DEVICE;
     rg.lMin = -32768;
     rg.lMax = 32767;
-    IDirectInputDevice8_SetProperty(dev, DIPROP_RANGE, &rg.diph);
+    IDirectInputDevice8_SetProperty(d->dev, DIPROP_RANGE, &rg.diph);
+    for (i = 0; i < IJOY_AXES; i++) {
+        d->lo[i] = -32768;
+        d->hi[i] = 32767;
+        if (!(d->info.axmask & (1u << i))) continue;
+        memset(&rg, 0, sizeof rg);
+        rg.diph.dwSize = sizeof rg;
+        rg.diph.dwHeaderSize = sizeof(DIPROPHEADER);
+        rg.diph.dwObj = (DWORD)(FIELD_OFFSET(ijoy_raw_t, ax) + i * sizeof(LONG));
+        rg.diph.dwHow = DIPH_BYOFFSET;
+        rg.lMin = -32768;
+        rg.lMax = 32767;
+        IDirectInputDevice8_SetProperty(d->dev, DIPROP_RANGE, &rg.diph);
+        rg.lMin = rg.lMax = 0;
+        if (SUCCEEDED(IDirectInputDevice8_GetProperty(d->dev, DIPROP_RANGE, &rg.diph)) &&
+            rg.lMax > rg.lMin && (rg.lMin != -32768 || rg.lMax != 32767)) {
+            d->lo[i] = rg.lMin;
+            d->hi[i] = rg.lMax;
+            d->info.axnorm |= 1u << i;
+        }
+    }
+}
+
+/* 1 = geoeffnet, 2 = XInput (uebersprungen, Pad-Pfad), 0 = Fehler. */
+static int ijoy_open_dev(const DIDEVICEINSTANCEW *di, ijoy_dev_t *d)
+{
+    LPDIRECTINPUTDEVICE8W dev = NULL;
+    DIDEVCAPS caps;
+    int ncaps = 0;
+    memset(d, 0, sizeof *d);
+    if (FAILED(IDirectInput8_CreateDevice(g_di, &di->guidInstance, &dev, NULL)) ||
+        !dev)
+        return 0;
+    if (ijoy_is_xinput(dev)) {
+        IDirectInputDevice8_Release(dev);
+        return 2;
+    }
+    if (FAILED(IDirectInputDevice8_SetDataFormat(dev, &g_df))) {
+        IDirectInputDevice8_Release(dev);
+        return 0;
+    }
+    /* Ohne SetCooperativeLevel: nicht-exklusiv + Hintergrund (Standard),
+     * kein Fenster noetig, kein Fokus-Bezug. */
     d->dev = dev;
     d->inst = di->guidInstance;
     ijoy_w2u8(di->tszInstanceName, d->info.name, sizeof d->info.name);
@@ -270,18 +464,25 @@ static int ijoy_open_dev(const DIDEVICEINSTANCEW *di, ijoy_dev_t *d)
     if (SUCCEEDED(IDirectInputDevice8_GetCapabilities(dev, &caps))) {
         d->info.nbtn = (int)(caps.dwButtons > IJOY_BTNS ? IJOY_BTNS : caps.dwButtons);
         d->info.npov = (int)(caps.dwPOVs > IJOY_POVS ? IJOY_POVS : caps.dwPOVs);
+        ncaps = (int)caps.dwAxes;
     }
-    for (i = 0; i < IJOY_AXES; i++) {
-        DIDEVICEOBJECTINSTANCEW oi;
-        memset(&oi, 0, sizeof oi);
-        oi.dwSize = sizeof oi;
-        if (SUCCEEDED(IDirectInputDevice8_GetObjectInfo(
-                dev, &oi, (DWORD)(FIELD_OFFSET(ijoy_raw_t, ax) + i * sizeof(LONG)),
-                DIPH_BYOFFSET)))
-            d->info.axmask |= 1u << i;
-    }
+    d->info.ncaps_axes = ncaps;
+    d->info.axmask = ijoy_axmask_of(dev);
+    ijoy_try_remap(d, ncaps);
+    ijoy_ranges(d);
     IDirectInputDevice8_Acquire(dev);
     return 1;
+}
+
+static void ijoy_release(ijoy_dev_t *d)
+{
+    if (d->dev) {
+        IDirectInputDevice8_Unacquire(d->dev);
+        IDirectInputDevice8_Release(d->dev);
+        d->dev = NULL;
+    }
+    free(d->odf);
+    d->odf = NULL;
 }
 
 int ijoy_scan(void)
@@ -292,6 +493,7 @@ int ijoy_scan(void)
     if (ijoy_init() != 0) return 0;
     e = (ijoy_enum_t *)calloc(1, sizeof *e);
     if (!e) return g_ndev;
+    g_nskip = 0;
     IDirectInput8_EnumDevices(g_di, DI8DEVCLASS_GAMECTRL, ijoy_enum_cb, e,
                               DIEDFL_ATTACHEDONLY);
     for (i = 0; i < e->n && nn < IJOY_MAX_DEV; i++) {
@@ -304,13 +506,20 @@ int ijoy_scan(void)
                 break;
             }
         }
-        if (!kept && ijoy_open_dev(&e->inst[i], &nd[nn])) nn++;
+        if (!kept) {
+            int rc = ijoy_open_dev(&e->inst[i], &nd[nn]);
+            if (rc == 1) {
+                nn++;
+            } else if (rc == 2 && g_nskip < 8) { /* W282: fuer die Geraeteliste */
+                ijoy_w2u8(e->inst[i].tszProductName[0] ? e->inst[i].tszProductName
+                                                       : e->inst[i].tszInstanceName,
+                          g_skip_nm[g_nskip], sizeof g_skip_nm[g_nskip]);
+                g_nskip++;
+            }
+        }
     }
     for (j = 0; j < g_ndev; j++) {
-        if (g_dev[j].dev) {
-            IDirectInputDevice8_Unacquire(g_dev[j].dev);
-            IDirectInputDevice8_Release(g_dev[j].dev);
-        }
+        if (g_dev[j].dev) ijoy_release(&g_dev[j]);
     }
     memcpy(g_dev, nd, sizeof(ijoy_dev_t) * (size_t)nn);
     g_ndev = nn;
@@ -346,11 +555,12 @@ int ijoy_read(int i, imap_joy_state_t *st)
     }
     g_dev[i].fails = 0;
     for (k = 0; k < IJOY_AXES; k++) {
-        LONG v = r.ax[k];
-        if (!(g_dev[i].info.axmask & (1u << k))) v = 0;
-        if (v < -32768) v = -32768;
-        if (v > 32767) v = 32767;
-        st->axis[k] = (int16_t)v;
+        if (!(g_dev[i].info.axmask & (1u << k))) {
+            st->axis[k] = 0;
+            continue;
+        }
+        /* W282: Geraetebereich -> -32768..32767 (Normalfall bitgleich) */
+        st->axis[k] = ijoy_norm_axis(r.ax[k], g_dev[i].lo[k], g_dev[i].hi[k]);
     }
     for (k = 0; k < IJOY_POVS; k++) {
         DWORD p = r.pov[k];
@@ -368,11 +578,7 @@ void ijoy_shutdown(void)
 {
     int j;
     for (j = 0; j < g_ndev; j++) {
-        if (g_dev[j].dev) {
-            IDirectInputDevice8_Unacquire(g_dev[j].dev);
-            IDirectInputDevice8_Release(g_dev[j].dev);
-            g_dev[j].dev = NULL;
-        }
+        ijoy_release(&g_dev[j]);
     }
     g_ndev = 0;
 }

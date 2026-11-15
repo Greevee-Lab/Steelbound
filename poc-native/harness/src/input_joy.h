@@ -45,7 +45,27 @@ typedef struct {
     char pguid[40];   /* Produkt-GUID (Data1 = PID<<16 | VID) */
     unsigned axmask;  /* Bit i = Achse i vorhanden */
     int nbtn, npov;
+    /* W282 ISSUE6: Diagnose fuer die Geraeteliste. */
+    int ncaps_axes;   /* Achsen laut Treiber (DIDEVCAPS.dwAxes) */
+    unsigned axnorm;  /* Bit i = Achse i per Software auf -32768..32767
+                       * umgerechnet (Treiber nahm DIPROP_RANGE nicht an) */
+    int axremap;      /* 1 = Achsen per Objekt-Liste zugeordnet (Treiber
+                       * meldete Achsen ausserhalb der Standard-GUIDs) */
 } ijoy_info_t;
+
+/* W282 ISSUE6 (rein, testbar): Rohwert aus dem Geraetebereich lo..hi auf
+ * -32768..32767; lo/hi = -32768/32767 ist bitgleich (Wert nur begrenzt). */
+int16_t ijoy_norm_axis(long v, long lo, long hi);
+/* W282 ISSUE6 (rein, testbar): Achsen-Objekte eines Geraets auf die 8
+ * Slots verteilen. kind: 0..5 = X Y Z RX RY RZ, 6 = Slider, 7 = sonstige
+ * Achse (unbekannte GUID). Standard-Achsen auf ihren Slot, Slider auf
+ * S0/S1, Rest bzw. Doppelte auf freie Slots (S0, S1, Z, RX, RY, RZ, X,
+ * Y). slot[i] = Slot von Objekt i oder -1 (kein Platz). Rueckgabe Maske. */
+unsigned ijoy_plan_axes(const int *kind, int n, int *slot);
+/* W282 ISSUE6: Xbox-kompatible Geraete (XInput), die die letzte
+ * Aufzaehlung bewusst uebersprungen hat (sie laufen ueber den Pad-Pfad
+ * PAD:...). Rueckgabe Anzahl, Namen in names (max Eintraege). */
+int ijoy_skipped_xinput(char names[][96], int max);
 
 /* Achsen-/POV-Namen fuer das Profil ("X","Y","Z","RX","RY","RZ","S0","S1"). */
 const char *ijoy_axis_name(int ax);

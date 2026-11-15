@@ -16,6 +16,7 @@
 #include "sb_overlay.h" /* W118 REM-OVERLAY */
 #include "sb_perfhud.h" /* W122 PERF-HUD */
 #include "hlock.h" /* W119 LOADLOCK */
+#include "loc_render.h" /* W285 LOC-RENDER */
 #include <intrin.h> /* W138 DIAG pd_diag: _ReturnAddress */
 
 int imouse_subclassed(void); /* input_mouse.c (W118) */
@@ -49,6 +50,7 @@ static float g_last_game_aspect, g_last_out_aspect;
 #include "sb_pause.h" /* W188 GAME-MENU */
 #include "sb_photo.h" /* W195 PHOTO-MODE */
 #include "sb_watermark.h" /* W219 WATERMARK */
+#include "sb_origview.h" /* W278 ORIG-FLAG: Einblendung */
 #include "sb_state.h" /* W232: sb_in_mission */
 int g_vr_blit; /* W134 VR-PROTO: sb_render_blit zeigt ein Augenbild (ohne Nachbearbeitung des Monobilds) */
 
@@ -616,6 +618,9 @@ static void sb_update_rig(void)
     unsigned i;
     if (g_vp_game.w && g_vp_game.h) {
         game_aspect = (float)g_vp_game.w / (float)g_vp_game.h;
+        if (g_game_fb_w != 640u || g_game_fb_h != 480u) { /* W277 LoC: Pixelseitenverhaeltnis (720x480 = 4:3) */
+            game_aspect *= (4.0f / 3.0f) / ((float)g_game_fb_w / (float)g_game_fb_h);
+        }
     }
     out_aspect = (float)g_bb_w / (float)(g_bb_h ? g_bb_h : 1);
     k = game_aspect / out_aspect;
@@ -645,9 +650,17 @@ static void sb_update_rig(void)
     }
 }
 
+unsigned g_game_fb_w = 640u, g_game_fb_h = 480u; /* W277: SB fest 640x480 */
+
 void sb_render_on_create_device(unsigned want_w, unsigned want_h)
 {
     sb_render_init();
+    if (g_sba_loc && want_w >= 320u && want_w <= 1920u && want_h >= 240u && want_h <= 1080u) {
+        g_game_fb_w = want_w; /* W277 LOC-DISC: LoC 720x480 (nur LoC-Profil) */
+        g_game_fb_h = want_h;
+        HLOG_I("render: LoC-Framebuffer %ux%u -> 2D in die 4:3-Box (Xbox-Ausgabe 4:3, Pixel %.3f:1)", want_w, want_h,
+               (4.0f / 3.0f) / ((float)want_w / (float)want_h));
+    }
     /* Spiel wuenscht 640x480 — Backbuffer bleibt cfg-Groesse (Hor+ statt
      * Stretch). Echte Resize-Anforderung (Menue-Option o.ae.) spaeter (M2b). */
     (void)want_w;
@@ -955,6 +968,7 @@ static void sb_render_present_body(unsigned flags)
     sb_shfx_shading_watch(); /* FIX(SHADE-FX,W121) shade_live_reset: Bloom-Akkumulatoren beim Pfadwechsel leeren */
     if (g_cfg.pf_ring > 0) { pf_present_tick(n_present); } /* DIAG(POPIN,W91) */
     if (g_cfg.tex_dump || g_cfg.remaster) { sb_rem_present(n_present); } /* W103 REM-FRAME */
+    if (g_sba_loc) { loc_render_frame(n_present); } /* W285 LOC-RENDER (vor dem Zensus-Tick) */
     if (g_cfg.m3d_census > 0) { m3d_present_tick(n_present); }
     if (g_cfg.rq_diag) { rq_census_present(n_present); } /* DIAG(RENDER-QA,W77) */
     if (g_cfg.rq_perf) { rq_perf_present(n_present); } /* DIAG(SHADE-PERF,W80) */
@@ -1027,6 +1041,9 @@ static void sb_render_present_body(unsigned flags)
     }
     if (sb_wm_on() && !g_swap_res) { /* W219 WATERMARK: vor dem Clip-Abgriff (im Clip sichtbar), Bereich gesichert */
         sb_ctx_enter(); sb_wm_draw(g_rtv, 1); sb_ctx_leave();
+    }
+    if (sb_ov_toast_on() && !g_swap_res) { /* W278 ORIG-FLAG: Einblendung (nur solange sie laeuft), Bereich gesichert */
+        sb_ctx_enter(); sb_ov_toast_draw(g_rtv, 1); sb_ctx_leave();
     }
     if (sb_clip_active() && !g_swap_res) {
         sb_ctx_enter(); sb_clip_frame(g_rtv); sb_ctx_leave();
@@ -1197,6 +1214,7 @@ static void sb_render_present_body(unsigned flags)
         sb_ctx_leave();
         sb_ovl_present_end();
     }
+    sb_ov_toast_restore(); /* W278: vor dem Wasserzeichen zurueck (danach gesichert); ohne Sicherung sofort zurueck, kein Lock */
     if (g_cfg.watermark) { /* W219 WATERMARK: zuletzt zurueck (zuerst gesichert) */
         sb_ctx_enter();
         sb_wm_restore();
@@ -1406,6 +1424,12 @@ void sb_render_blit(ID3D11Resource *src)
         sb_ctx_enter();
         if (!g_swap_rtv) { ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv); }
         sb_wm_draw(g_swap_rtv, 0);
+        sb_ctx_leave();
+    }
+    if (sb_ov_toast_on()) { /* W278 ORIG-FLAG: Einblendung auf das gezeigte Bild */
+        sb_ctx_enter();
+        if (!g_swap_rtv) { ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv); }
+        sb_ov_toast_draw(g_swap_rtv, 0);
         sb_ctx_leave();
     }
     if (sb_clip_active()) {
@@ -1670,6 +1694,7 @@ void sb_render_pause_frame(void)
         {
             ID3D11Resource *show = (ID3D11Resource *)(g_pl_use && g_pause_live ? g_pause_live : g_pause_snap);
             int raw = 0, vb0 = g_vr_blit;
+            if (sb_photo_quick_pending()) { sb_photo_quick_run(show); } /* W290 QUICK-SHOT: Aufnahme ohne Panel */
             if (sb_photo_active()) { show = sb_photo_pause_image(show, &raw); } /* W195 PHOTO-MODE: Vorschau/Aufnahme */
             if (raw) { g_vr_blit = 1; } /* Aussenwelt ohne Endbild-Nachbearbeitung (Cockpit-Licht, Bildraender ...) */
             sb_render_blit(show);
@@ -1679,6 +1704,7 @@ void sb_render_pause_frame(void)
         sb_ctx_leave();
         return;
     }
+    if (sb_photo_quick_pending()) { sb_photo_quick_run((ID3D11Resource *)g_pause_snap); } /* W290 QUICK-SHOT */
     if (sb_photo_active()) { (void)sb_photo_pause_image((ID3D11Resource *)g_pause_snap, NULL); } /* W195: x1 aus der Kopie */
     {
         ID3D11Resource *bb = NULL;

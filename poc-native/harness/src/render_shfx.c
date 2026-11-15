@@ -863,7 +863,8 @@ typedef struct {
 static const char *const kSfxName[SB_GP_NPRE] = { "original", "dezent", "stark", "performance", "klar" };
 
 /* cfg-Feld je Preset-Schluessel (Reihenfolge = kSbGfxPreset). */
-typedef char sb_gp_nkey_chk[(SB_GP_NKEY == 35 && SB_GP_FX0 == 24 && SB_GP_HD == 29 && SB_GP_MFX == 34) ? 1 : -1];
+typedef char sb_gp_nkey_chk[(SB_GP_NKEY == 38 && SB_GP_FX0 == 24 && SB_GP_HD == 29 && SB_GP_MFX == 34 &&
+                              SB_GP_EDGE == 35 && SB_GP_EDGE + SB_GP_NEDGE == SB_GP_NKEY) ? 1 : -1];
 static int *const kGpField[SB_GP_NKEY] = {
     &g_cfg.shading, &g_cfg.world_fog, &g_cfg.world_contrast, &g_cfg.world_gamma, &g_cfg.world_sharpen,
     &g_cfg.bloom_strength, &g_cfg.cockpit_glow, &g_cfg.cockpit_spill, &g_cfg.cockpit_light,
@@ -874,6 +875,7 @@ static int *const kGpField[SB_GP_NKEY] = {
     &g_cfg.hd_textures,
     &g_cfg.interp_fps, &g_cfg.rt_scale, &g_cfg.rt_scale_dyn, &g_cfg.fs_interp_match,
     &g_cfg.monitor_fx, /* W252 */
+    &g_cfg.edge_mode, &g_cfg.edge_fade_width, &g_cfg.edge_fade_strength, /* W266 */
 };
 
 static void gp_range(int part, int *k0, int *k1)
@@ -917,6 +919,27 @@ void sb_gfx_part_apply(int q, int part)
     }
 }
 
+/* W266 PRESET-EDGE: Breitbild-Raender (edge_mode/-width/-strength) wie Preset q? */
+int sb_gfx_edge_is(int q)
+{
+    int k;
+    if (q < 0 || q >= SB_GP_NPRE) { return 0; }
+    for (k = SB_GP_EDGE; k < SB_GP_EDGE + SB_GP_NEDGE; k++) {
+        if (!sb_rem_fx_locked(kSbGfxPreset[k].key) && *kGpField[k] != kSbGfxPreset[k].v[q]) { return 0; }
+    }
+    return 1;
+}
+
+/* W266: Breitbild-Raender des Presets q setzen (live: edge_* wird je Present gelesen). */
+void sb_gfx_edge_apply(int q)
+{
+    int k;
+    if (q < 0 || q >= SB_GP_NPRE) { return; }
+    for (k = SB_GP_EDGE; k < SB_GP_EDGE + SB_GP_NEDGE; k++) {
+        if (!sb_rem_fx_locked(kSbGfxPreset[k].key)) { *kGpField[k] = kSbGfxPreset[k].v[q]; }
+    }
+}
+
 /* Einheitliches Preset: 0..4 (W252: 4 = Klare Sicht), -1 = Benutzerdefiniert (gleiche Semantik wie
  * launcher_cfg.c lcfg_gfx_preset). */
 int sb_gfx_preset_match_for(int fps, int rt)
@@ -930,7 +953,8 @@ int sb_gfx_preset_match_for(int fps, int rt)
             g_cfg.rt_scale_dyn == kSbGfxPreset[SB_GP_DYN].v[q] &&
             g_cfg.fs_interp_match == kSbGfxPreset[SB_GP_MATCH].v[q] &&
             (sb_rem_fx_locked(kSbGfxPreset[SB_GP_MFX].key) ||
-             g_cfg.monitor_fx == kSbGfxPreset[SB_GP_MFX].v[q])) { return q; } /* W252 */
+             g_cfg.monitor_fx == kSbGfxPreset[SB_GP_MFX].v[q]) && /* W252 */
+            sb_gfx_edge_is(q)) { return q; }
     }
     return -1;
 }

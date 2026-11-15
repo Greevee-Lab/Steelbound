@@ -70,6 +70,8 @@ add_library(sb_emu SHARED
   src/hooks_bots.c
   src/sb_rauto.c
   src/sb_rauto_core.c
+  src/sb_mauto.c
+  src/sb_mauto_core.c
   src/fs_emu.c
   src/sctrace.c
   src/d3d11_render.c
@@ -104,6 +106,11 @@ add_library(sb_emu SHARED
   src/iso_vfs.c
   src/sb_profile.c
   src/sb_gamever.c
+  src/loc_boot.c
+  src/loc_mem.c
+  src/loc_render.c
+  src/loc_pad.c
+  src/krnl_loc.c
   src/sb_userdata.c
   src/sb_savecheck.c
   src/sb_overlay.c
@@ -113,8 +120,11 @@ add_library(sb_emu SHARED
   src/render_vexp.c
   src/vexp_enc.c
   src/sb_feedback.c
+  src/sb_diagcore.c
+  src/sb_crash.c
   src/sb_perfhud.c
   src/sb_watermark.c
+  src/sb_origview.c
   src/audio_out.c
   src/audio_fmt.c
   src/audio_mix.c
@@ -136,8 +146,23 @@ add_library(sb_emu SHARED
 )
 target_include_directories(sb_emu PRIVATE src ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(sb_emu PRIVATE d3d11 dxgi dxguid dbghelp windowscodecs ole32 oleaut32 uuid winmm setupapi winusb synchronization)
+# W286 LOC-SYSLINK / W292 LOC-COMM: Netz-HLE (Winsock, nur Loopback/private LAN-Adressen, kein Bind auf
+# alle Schnittstellen, kein DNS, nur mit loc_boot=1) in beiden Fassungen (Nutzer 15.11.: "keine Geheimnisse").
+# Community: clean_check-Freigaben in editions/clean_allow.tsv (Kategorie netz); der LoC-Start im Launcher
+# bleibt dort gesperrt (lgame_loc_client_ready).
+target_sources(sb_emu PRIVATE src/loc_net.c src/loc_net_core.c)
+target_link_libraries(sb_emu PRIVATE ws2_32)
 target_compile_options(sb_emu PRIVATE /Zi)
-target_link_options(sb_emu PRIVATE /DEBUG:FASTLINK)
+# W279 DIAG-CRASH: Release (community) mit vollstaendiger PDB - FASTLINK-PDBs
+# verweisen auf die .obj-Dateien und taugen spaeter nicht zum Aufloesen von
+# Minidumps (crash_symbolize.py). Private Builds bleiben schnell (FASTLINK),
+# ausser -DSB_PDB_FULL=ON.
+option(SB_PDB_FULL "Vollstaendige PDB (/DEBUG:FULL) statt FASTLINK" OFF)
+if(SB_EDITION STREQUAL "community" OR SB_PDB_FULL)
+  target_link_options(sb_emu PRIVATE /DEBUG:FULL)
+else()
+  target_link_options(sb_emu PRIVATE /DEBUG:FASTLINK)
+endif()
 target_link_options(sb_emu PRIVATE "/BASE:0x30000000" "/DYNAMICBASE:NO" "/STACK:8388608" "/MAP")
 target_compile_options(sb_emu PRIVATE /W3)
 
@@ -159,6 +184,7 @@ add_executable(input_selftest
   src/input_selftest.c
   src/input_mouse_selftest.c
   src/sb_rauto_core.c
+  src/sb_mauto_core.c
   src/sb_profile.c
   src/input_map.c
   src/input_joy.c
@@ -204,6 +230,15 @@ add_custom_command(TARGET vr_mock_runtime POST_BUILD
     ${CMAKE_CURRENT_SOURCE_DIR}/tests/vr_mock_runtime.json
     $<TARGET_FILE_DIR:vr_mock_runtime>/vr_mock_runtime.json)
 endif()
+
+# ---- loc_net_selftest: System-Link-Netz-HLE LoC, zwei Instanzen ueber Loopback (W286; seit W292 beide Fassungen) ----
+add_executable(loc_net_selftest
+  tests/loc_net_selftest.c
+  src/loc_net_core.c
+)
+target_include_directories(loc_net_selftest PRIVATE src)
+target_link_libraries(loc_net_selftest PRIVATE ws2_32)
+target_compile_options(loc_net_selftest PRIVATE /W3)
 
 # ---- render_selftest: VSH-Interpreter/-Uebersetzung + Combiner (W77 RENDER-QA) ----
 # W152 COMM-SELFTEST: privat mit render_selftest_data.h (Spiel-Testvektoren),

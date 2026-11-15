@@ -12,12 +12,15 @@
  *    Andere RT-Paesse (Sub-Monitore, S40-Komposition) laufen nativ mit.
  *  - freie Kamera: Welt-Draws des Welt-RT mit Sicht-Delta (render_interp.c ip_ph_cam_matrix).
  * Kacheln <= 4096 x 1024 (Streifenpuffer fuer WIC, 32-bit-Prozess), Viewport-Grenze 32767 je Seite.
- * Ohne Fotomodus wird hier nichts gerufen (Standardpfad bitgleich). */
+ * W290: Cockpit-Pfad mit Ausschnitt (4:3-Rahmen der Vollbild-Ansicht bzw. bei edge_mode=1) und Faktor K auch
+ * gebrochen (4K/8K exakt); Schnell-Screenshot ueber sb_photo_quick_run.
+ * Ohne Fotomodus/Schnell-Screenshot wird hier nichts gerufen (Standardpfad bitgleich). */
 #include "render_int.h"
 #include "sb_profile.h" /* W229 SBA() */
 #include "sb_photo.h"
 #include "sb_userdata.h"
 #include "render_qa.h" /* rq_in_mission */
+#include "sb_pause.h" /* W290: sb_pause_count */
 #include <math.h>
 #include <stdlib.h>
 
@@ -28,14 +31,24 @@ int sb_render_offscreen(void); /* d3d11_render.c: 1 = FPS-INTERP-Offscreen-BB */
 #define PH_VPMAX 32767.0f
 #define PH_PI 3.14159265f
 
-static const int kPhScale[SB_PHOTO_NSCALE] = { 1, 2, 4, 8 };
 
 static int ph_on;
-static int ph_saved_monitor_fx, ph_saved_shading; /* W198: session-only overrides */
-static int ph_cockpit = 1, ph_free;
+static int ph_saved_monitor_fx, ph_saved_shading; /* W198: Stand bei Pausenbeginn (Hinweis "vor der Pause einschalten") */
+static int ph_free;
 static float ph_yaw, ph_pitch, ph_t[3];
-static int ph_scale, ph_jpg, ph_init, ph_asp;
 static int ph_req;
+/* W290 QUICK-SHOT: Ansicht/Groesse/Format/Bildformat leben in g_cfg ([photo], eine Konfiguration fuer
+ * Fotomodus und Schnell-Screenshot). Hier nur Laufzeitstand. */
+const int kSbPhotoSize[SB_PHOTO_NSIZE] = { 1, -4, -8, 2, 4, 8 };
+static int ph_fl_held;             /* Fotomodus haelt die Vollbild-Anforderung (Ansicht ohne Cockpit) */
+static int ph_step;                /* Ansicht wird umgeschaltet: Pause kurz aufgehoben */
+static ULONGLONG ph_step_t0;
+static unsigned ph_pause_seen;     /* sb_pause_count() beim letzten Zensus (neue Pause -> neuer Zensus) */
+static volatile LONG ph_qreq;      /* Schnell-Screenshot im naechsten Pausenbild */
+static volatile LONG ph_qdone;     /* Ergebnis liegt bereit */
+static sb_photo_qres_t ph_qres;
+static int ph_cap_quick;           /* laufende Aufnahme ist ein Schnell-Screenshot (eigene Logzeile) */
+static int ph_cap_notes;           /* SB_QS_NOTE_* der laufenden Aufnahme */
 static int ph_dirty = 1;
 static unsigned ph_hash_last;
 static sb_ph_census_t ph_cen;
@@ -561,11 +574,30 @@ void sb_photo_cam_reset(void)
 /* ------------------------------------------------------------------ */
 /* Zustand / UI                                                        */
 /* ------------------------------------------------------------------ */
-static int ph_scale_idx_of(int n)
+/* W290: wirksame Groesse ([photo] photo_size; nicht gesetzt -> photo_scale > 1 (alt), sonst 4K) */
+int sb_photo_size_eff(void)
+{
+    int v = g_cfg.photo_size;
+    if (v == 1 || v == 2 || v == 4 || v == 8 || v == -4 || v == -8) { return v; }
+    if (g_cfg.photo_scale == 2 || g_cfg.photo_scale == 4 || g_cfg.photo_scale == 8) { return g_cfg.photo_scale; }
+    return -4;
+}
+
+static int ph_size_idx_of(int v)
 {
     int i;
-    for (i = 0; i < SB_PHOTO_NSCALE; i++) { if (kPhScale[i] == n) { return i; } }
+    for (i = 0; i < SB_PHOTO_NSIZE; i++) { if (kSbPhotoSize[i] == v) { return i; } }
     return 0;
+}
+
+static int ph_pview(void)
+{
+    return g_cfg.photo_view >= SB_PV_GAME && g_cfg.photo_view <= SB_PV_WORLD ? g_cfg.photo_view : SB_PV_GAME;
+}
+
+static int ph_asp_cfg(void)
+{
+    return g_cfg.photo_aspect >= 0 && g_cfg.photo_aspect <= 2 ? g_cfg.photo_aspect : 2;
 }
 
 /* Seitenverhaeltnis des Kamerabilds: so, wie das Spiel es auf dem Hauptmonitor zeigt (Zensus: Komposition
@@ -577,22 +609,70 @@ static float ph_aspect(void)
     return 4.0f / 3.0f;
 }
 
-/* Ausgabegroesse der Stufe i (Cockpit an: Fenster x N, aus: Fensterhoehe x N im Seitenverhaeltnis der Projektion) */
-static void ph_out_size(int i, int cockpit, unsigned *w, unsigned *h)
-{
-    unsigned n = (unsigned)kPhScale[i];
-    if (cockpit || ph_asp != 2) { /* Bildschirmformat (Cockpit, ohne Cockpit Ausschnitt/weit) */
-        *w = g_bb_w * n;
-        *h = g_bb_h * n;
-    } else {
-        *h = g_bb_h * n;
-        *w = (unsigned)((float)*h * ph_aspect() + 0.5f) & ~1u;
-    }
-}
-
 static int ph_rec_ok(void)
 {
     return ph_cen_ok && !g_cfg.vr_enable;
+}
+
+/* W290: Geometrie einer Aufnahme. Cockpit-Pfad (Ansicht wie im Spiel / ohne Cockpit): Ausschnitt (bx,by,bw,bh)
+ * des Spielbilds, Faktor K (Ausgabe = Ausschnitt x K). Zugeschnitten auf den 4:3-Rahmen, wenn das Spiel die
+ * Vollbild-Ansicht zeigt (deren 4:3-Bild; daneben zeichnet das Spiel im Breitbild Cockpit-Reste, W268) oder
+ * die Bildraender auf 4:3 stehen (edge_mode=1: so sieht der Spieler das Bild). Nie gestreckt.
+ * Nur Aussenwelt: Hoehe = Fensterhoehe x N bzw. 2160/4320, Breite nach Bildformat. */
+typedef struct {
+    unsigned W, H;             /* Ausgabe */
+    float K;                   /* Cockpit-Pfad: Ausgabe-Pixel je Spielbild-Pixel */
+    unsigned bx, by, bw, bh;   /* Cockpit-Pfad: Ausschnitt im Spielbild */
+    int crop;
+} ph_geo_t;
+
+static void ph_box43(unsigned w, unsigned h, unsigned *bx, unsigned *by, unsigned *bw, unsigned *bh)
+{
+    if ((float)w / (float)(h ? h : 1) > 4.0f / 3.0f) {
+        *bh = h;
+        *bw = ((unsigned)((float)h * 4.0f / 3.0f + 0.5f)) & ~1u;
+        if (*bw > w) { *bw = w; }
+        *bx = (w - *bw) / 2u;
+        *by = 0;
+    } else {
+        *bw = w;
+        *bh = ((unsigned)((float)w * 3.0f / 4.0f + 0.5f)) & ~1u;
+        if (*bh > h) { *bh = h; }
+        *bx = 0;
+        *by = (h - *bh) / 2u;
+    }
+}
+
+static int ph_crop_now(void)
+{
+    return sb_flat_now() || g_cfg.edge_mode == 1;
+}
+
+static void ph_geo(int cockpit, int size, int crop, ph_geo_t *g)
+{
+    memset(g, 0, sizeof *g);
+    g->crop = crop;
+    if (cockpit) {
+        if (crop) { ph_box43(g_bb_w, g_bb_h, &g->bx, &g->by, &g->bw, &g->bh); }
+        else { g->bw = g_bb_w; g->bh = g_bb_h; }
+        if (size > 0) {
+            g->K = (float)size;
+        } else { /* 4K/8K: 4:3-Rahmen exakt 2160/4320 hoch, sonst kleinster ganzzahliger Faktor mit Hoehe >= Ziel */
+            float tgt = size == -8 ? 4320.0f : 2160.0f;
+            g->K = crop ? tgt / (float)(g->bh ? g->bh : 1) : ceilf(tgt / (float)(g->bh ? g->bh : 1));
+            if (g->K < 1.0f) { g->K = 1.0f; }
+        }
+        g->W = ((unsigned)((float)g->bw * g->K + 0.5f)) & ~1u;
+        g->H = (unsigned)((float)g->bh * g->K + 0.5f);
+        if (g->K == 1.0f) { g->W = g->bw; g->H = g->bh; }
+    } else {
+        int asp = ph_asp_cfg();
+        g->H = size > 0 ? g_bb_h * (unsigned)size : size == -8 ? 4320u : 2160u;
+        if (asp == 2) { g->W = (unsigned)((float)g->H * ph_aspect() + 0.5f) & ~1u; }
+        else if (size > 0) { g->W = g_bb_w * (unsigned)size; }
+        else { g->W = (unsigned)((float)g->H * (float)g_bb_w / (float)(g_bb_h ? g_bb_h : 1) + 0.5f) & ~1u; }
+        g->K = (float)g->H / (float)(g_bb_h ? g_bb_h : 1);
+    }
 }
 
 /* Abbildung des Kamerabilds (Spiel-Viewport des Welt-RT) in eine Ausgabe W x H je Bildformat:
@@ -615,14 +695,17 @@ static void ph_world_layout(float W, float H, int asp, float *dx, float *dy, flo
     *dy = (H - *dh) * 0.5f;
 }
 
-/* Ausgabe w x h (bzw. intern gerendert, W249) in den D3D11-Grenzen (Viewport, Welt-RT-Abbildung)? */
-static int ph_dims_ok(unsigned w, unsigned h, int cockpit)
+/* Ausgabe w x h (bzw. intern gerendert, W249) in den D3D11-Grenzen (Viewport, Welt-RT-Abbildung)?
+ * Cockpit-Pfad: k = interner Faktor je Spielbild-Pixel (der BB-Viewport wird ganz skaliert). */
+static int ph_dims_ok(unsigned w, unsigned h, int cockpit, float k)
 {
     if (w > (unsigned)PH_VPMAX || h > (unsigned)PH_VPMAX) { return 0; }
-    if (!cockpit) { /* Welt-RT-Viewport (volles RT, auf die Ausgabe abgebildet) in den D3D11-Grenzen */
+    if (cockpit) {
+        if ((float)g_bb_w * k > PH_VPMAX || (float)g_bb_h * k > PH_VPMAX) { return 0; }
+    } else { /* Welt-RT-Viewport (volles RT, auf die Ausgabe abgebildet) in den D3D11-Grenzen */
         float dx, dy, dw, dh, fx;
         float kx, ky, vx, vy, vw, vh;
-        ph_world_layout((float)w, (float)h, ph_asp, &dx, &dy, &dw, &dh, &fx);
+        ph_world_layout((float)w, (float)h, ph_asp_cfg(), &dx, &dy, &dw, &dh, &fx);
         kx = dw / (float)(ph_cen.g_w ? ph_cen.g_w : 1);
         ky = dh / (float)(ph_cen.g_h ? ph_cen.g_h : 1);
         vw = (float)ph_cen.w_lw * kx;
@@ -637,25 +720,77 @@ static int ph_dims_ok(unsigned w, unsigned h, int cockpit)
     return 1;
 }
 
-static int ph_scale_ok(int i, int cockpit)
+/* Groesse moeglich? Fenstergroesse im Cockpit-Pfad ohne freie Kamera immer (Standbild direkt). */
+static int ph_size_ok(int size, int cockpit, int crop)
 {
-    unsigned w, h;
-    if (i < 0 || i >= SB_PHOTO_NSCALE) { return 0; }
-    if (i == 0 && cockpit) { return 1; }
+    ph_geo_t g;
+    if (cockpit && size == 1 && !ph_free) { return 1; }
     if (!ph_rec_ok()) { return 0; }
-    ph_out_size(i, cockpit, &w, &h);
-    return ph_dims_ok(w, h, cockpit);
+    ph_geo(cockpit, size, crop, &g);
+    return ph_dims_ok(g.W, g.H, cockpit, g.K);
 }
 
 /* W249 PHOTO-PIXEL: Kantenglaettung der gekachelten Aufnahme. Intern s-fach (2 oder 4, photo_aa) rendern und je
  * s x s Pixel mitteln (Supersampling). Ohne sie hat ein Foto x4/x8 harte 1-Pixel-Treppen an jeder Kante (das Spiel
  * zeichnet ohne Kantenglaettung) - im Bildbetrachter vergroessert wirkt das wie "pixelig". s sinkt, bis die
  * interne Groesse in den D3D11-Grenzen liegt (x8 bei grossen Fenstern: ohne). Kacheln 4096x1024 sind durch 2/4 teilbar. */
-static unsigned ph_aa_factor(unsigned w, unsigned h, int cockpit)
+static unsigned ph_aa_factor(unsigned w, unsigned h, int cockpit, float k)
 {
     unsigned s = g_cfg.photo_aa >= 4 ? 4u : g_cfg.photo_aa >= 2 ? 2u : 1u;
-    while (s > 1u && !ph_dims_ok(w * s, h * s, cockpit)) { s /= 2u; }
+    while (s > 1u && !ph_dims_ok(w * s, h * s, cockpit, k * (float)s)) { s /= 2u; }
     return s;
+}
+
+/* W290: Ansicht ohne Cockpit im Fotomodus: Vollbild-Ansicht anfordern bzw. freigeben; dazu laeuft das Spiel kurz
+ * weiter (Pause aufgehoben, sb_photo_stepping), bis es die Ansicht gezeichnet und aufgezeichnet hat. */
+static void ph_view_sync(void)
+{
+    int want = ph_on && ph_pview() == SB_PV_FLAT;
+    if (want && !ph_fl_held) {
+        if (sb_flat_now()) { return; } /* schon flach (Option Cockpit aus / Spieler-Kniff) */
+        sb_flat_request(1);
+        ph_fl_held = 1;
+        ph_step = 1;
+        ph_step_t0 = GetTickCount64();
+        HLOG_I("PHOTO: Ansicht ohne Cockpit -> Vollbild-Ansicht anfordern (f=%u)", g_present_no);
+    } else if (!want && ph_fl_held) {
+        sb_flat_request(0);
+        ph_fl_held = 0;
+        if (ph_on) {
+            ph_step = 1;
+            ph_step_t0 = GetTickCount64();
+        }
+        HLOG_I("PHOTO: Vollbild-Ansicht freigegeben (f=%u)", g_present_no);
+    }
+}
+
+int sb_photo_stepping(void)
+{
+    return ph_step;
+}
+
+void sb_photo_step_tick(void)
+{
+    ULONGLONG dt;
+    if (!ph_step) { return; }
+    dt = GetTickCount64() - ph_step_t0;
+    if (ph_fl_held) {
+        int st = sb_flat_state();
+        if (st == 1 || st < 0 || dt > 3000u) {
+            if (st != 1) {
+                HLOG_I("PHOTO: ohne Cockpit hier nicht moeglich (%s) - wie im Spiel", st < 0 ? "Bedingung" : "Zeit");
+                sb_flat_request(0);
+                ph_fl_held = 0;
+                g_cfg.photo_view = SB_PV_GAME;
+            }
+            ph_step = 0;
+            ph_dirty = 1;
+        }
+    } else if ((!sb_flat_now() && dt >= 250u) || dt > 3000u) {
+        ph_step = 0;
+        ph_dirty = 1;
+    }
+    if (!ph_step) { HLOG_I("PHOTO: Ansicht umgeschaltet nach %u ms (f=%u)", (unsigned)dt, g_present_no); }
 }
 
 void sb_photo_enter(void)
@@ -664,14 +799,7 @@ void sb_photo_enter(void)
     ph_saved_monitor_fx = g_cfg.monitor_fx;
     ph_saved_shading = g_cfg.shading;
     HLOG_I("PHOTO opts: saved monitor_fx=%d shading=%d", g_cfg.monitor_fx, g_cfg.shading);
-    if (!ph_init) {
-        ph_init = 1;
-        ph_scale = ph_scale_idx_of(g_cfg.photo_scale);
-        ph_jpg = g_cfg.photo_jpg ? 1 : 0;
-        ph_asp = g_cfg.photo_aspect >= 0 && g_cfg.photo_aspect <= 2 ? g_cfg.photo_aspect : 1;
-    }
     ph_on = 1;
-    ph_cockpit = 1;
     ph_free = 0;
     ph_yaw = ph_pitch = 0.0f;
     ph_t[0] = ph_t[1] = ph_t[2] = 0.0f;
@@ -679,25 +807,30 @@ void sb_photo_enter(void)
     ph_req = 0;
     ph_cen_ok = 0;
     ph_cen_tried = 0;
+    ph_pause_seen = sb_pause_count();
     ph_last_ok = 0;
     ph_nprev = 0;
+    ph_step = 0;
     {
-        char d[600];
-        sb_photo_dir(d, sizeof d);
-        HLOG_I("PHOTO: an (f=%u, Stufe x%d, %s, Ordner %s)", g_present_no, kPhScale[ph_scale], ph_jpg ? "JPG" : "PNG", d);
+        int sz = sb_photo_size_eff();
+        HLOG_I("PHOTO: an (f=%u, Ansicht %d, Groesse %s%d%s, %s)", g_present_no, ph_pview(), sz > 0 ? "x" : "",
+               sz > 0 ? sz : -sz, sz > 0 ? "" : "K", g_cfg.photo_jpg ? "JPG" : "PNG");
     }
+    ph_view_sync();
 }
 
 void sb_photo_leave(void)
 {
     if (!ph_on) { return; }
-    g_cfg.monitor_fx = ph_saved_monitor_fx;
+    /* W290: Monitor-Effekt ist die Live-Einstellung (gilt weiter wie im ESC-Menue); Shader wie bisher zurueck */
     g_cfg.shading = ph_saved_shading;
     sb_render_pause_dirty();
     HLOG_I("PHOTO opts: restored monitor_fx=%d shading=%d", g_cfg.monitor_fx, g_cfg.shading);
     ph_req = 0;
     ph_on = 0;
     ph_view_valid = 0;
+    ph_view_sync(); /* Vollbild-Anforderung freigeben */
+    ph_step = 0;
     HLOG_I("PHOTO: aus (f=%u, %u Vorschau-Neuzeichnungen)", g_present_no, ph_nprev);
 }
 
@@ -706,7 +839,7 @@ int sb_photo_active(void)
     return ph_on;
 }
 
-/* Both replay paths (pause and tiled capture) read these temporary values. */
+/* Both replay paths (pause and tiled capture) read these values. W290: monitor_fx is the live setting. */
 void sb_photo_set_effect(int shader, int on)
 {
     if (!ph_on) { return; }
@@ -717,13 +850,16 @@ void sb_photo_set_effect(int shader, int on)
     HLOG_I("PHOTO opts: monitor_fx=%d shading=%d", g_cfg.monitor_fx, g_cfg.shading);
 }
 
-void sb_photo_set_cockpit(int on)
+void sb_photo_set_view(int v)
 {
-    if (!on && !ph_rec_ok()) { return; }
-    if (ph_cockpit != (on ? 1 : 0)) {
-        ph_cockpit = on ? 1 : 0;
+    static const char *const nm[3] = { "wie im Spiel", "ohne Cockpit (Vollbild-Ansicht)", "nur Aussenwelt" };
+    v = (v % 3 + 3) % 3;
+    if (v == SB_PV_WORLD && !ph_rec_ok()) { v = SB_PV_GAME; }
+    if (v != ph_pview()) {
+        g_cfg.photo_view = v;
         ph_dirty = 1;
-        HLOG_I("PHOTO: Cockpit %s (f=%u)", ph_cockpit ? "an" : "aus", g_present_no);
+        HLOG_I("PHOTO: Ansicht -> %s (f=%u)", nm[v], g_present_no);
+        ph_view_sync();
     }
 }
 
@@ -738,39 +874,43 @@ void sb_photo_set_freecam(int on)
     }
 }
 
-void sb_photo_set_scale(int idx)
+void sb_photo_set_size(int idx)
 {
-    ph_scale = (idx % SB_PHOTO_NSCALE + SB_PHOTO_NSCALE) % SB_PHOTO_NSCALE;
+    idx = (idx % SB_PHOTO_NSIZE + SB_PHOTO_NSIZE) % SB_PHOTO_NSIZE;
+    g_cfg.photo_size = kSbPhotoSize[idx];
 }
 
 void sb_photo_set_jpg(int jpg)
 {
-    ph_jpg = jpg ? 1 : 0;
+    g_cfg.photo_jpg = jpg ? 1 : 0;
 }
 
 void sb_photo_set_aspect(int a)
 {
     a = (a % 3 + 3) % 3;
-    if (a != ph_asp) {
-        static const char *const nm[3] = { "Bildschirm (Ausschnitt)", "Bildschirm (weit)", "Kamera (wie Monitor)" };
-        ph_asp = a;
+    if (a != ph_asp_cfg()) {
+        static const char *const nm[3] = { "Bildschirm (Ausschnitt)", "breit (experimentell)", "4:3 (wie Monitor)" };
+        g_cfg.photo_aspect = a;
         ph_dirty = 1;
-        HLOG_I("PHOTO: Bildformat ohne Cockpit -> %s (f=%u)", nm[a], g_present_no);
+        HLOG_I("PHOTO: Bildformat nur Aussenwelt -> %s (f=%u)", nm[a], g_present_no);
     }
 }
 
 void sb_photo_get(sb_photo_ui_t *u)
 {
-    int i;
+    int i, cockpit, crop;
     memset(u, 0, sizeof *u);
     u->active = ph_on;
     u->monitor_fx = g_cfg.monitor_fx;
     u->shading = g_cfg.shading;
-    u->effect_pending = (g_cfg.shading && (!ph_saved_shading || (ph_cen_ok && !ph_cen.n_wrq))) ||
-                        (g_cfg.monitor_fx && ph_saved_monitor_fx != 1);
+    u->effect_pending = (g_cfg.monitor_fx && ph_saved_monitor_fx != 1);
     u->rec = ph_rec_ok();
     u->vr = g_cfg.vr_enable != 0;
-    u->cockpit = ph_cockpit;
+    u->view = ph_pview();
+    u->cockpit = cockpit = !(u->view == SB_PV_WORLD && u->rec);
+    u->flat = sb_flat_now();
+    u->stepping = ph_step;
+    crop = cockpit && ph_crop_now();
     u->freecam = ph_free;
     u->yaw = ph_yaw;
     u->pitch = ph_pitch;
@@ -778,12 +918,15 @@ void sb_photo_get(sb_photo_ui_t *u)
     u->max_yaw = ph_max_yaw();
     u->max_pitch = ph_max_pitch();
     u->max_dist = ph_max_dist();
-    u->scale = ph_scale;
-    u->jpg = ph_jpg;
-    u->aspect = ph_asp;
-    for (i = 0; i < SB_PHOTO_NSCALE; i++) {
-        ph_out_size(i, ph_cockpit, &u->sw[i], &u->sh[i]);
-        u->savail[i] = ph_scale_ok(i, ph_cockpit);
+    u->size = ph_size_idx_of(sb_photo_size_eff());
+    u->jpg = g_cfg.photo_jpg ? 1 : 0;
+    u->aspect = ph_asp_cfg();
+    for (i = 0; i < SB_PHOTO_NSIZE; i++) {
+        ph_geo_t g;
+        ph_geo(cockpit, kSbPhotoSize[i], crop, &g);
+        u->sw[i] = g.W;
+        u->sh[i] = g.H;
+        u->savail[i] = ph_size_ok(kSbPhotoSize[i], cockpit, crop);
     }
     u->busy = ph_req;
     u->last_ok = ph_last_ok;
@@ -797,8 +940,28 @@ void sb_photo_get(sb_photo_ui_t *u)
 int sb_photo_request(void)
 {
     if (!ph_on || g_cfg.vr_enable) { return 0; }
+    if (ph_step) { return 0; } /* W290: Ansicht wird gerade umgeschaltet */
     ph_req = 1;
     HLOG_I("PHOTO: Aufnahme angefordert (f=%u)", g_present_no);
+    return 1;
+}
+
+/* W290 QUICK-SHOT */
+void sb_photo_quick_arm(void)
+{
+    InterlockedExchange(&ph_qdone, 0);
+    InterlockedExchange(&ph_qreq, 1);
+}
+
+int sb_photo_quick_pending(void)
+{
+    return ph_qreq != 0;
+}
+
+int sb_photo_quick_result(sb_photo_qres_t *r)
+{
+    if (!InterlockedExchange(&ph_qdone, 0)) { return 0; }
+    if (r) { *r = ph_qres; }
     return 1;
 }
 
@@ -927,14 +1090,14 @@ static int ph_enc_end(ph_enc_t *e)
     return SUCCEEDED(hr);
 }
 
-/* Textur-Kachel (mapped) -> Streifen (BGR), Spalten x0..x0+w */
+/* Textur-Kachel (mapped) -> Streifen (BGR), Spalten x0..x0+w; Quelle ab (sx, sy) (W290: Ausschnitt des Standbilds) */
 static void ph_copy_rows(const D3D11_MAPPED_SUBRESOURCE *m, DXGI_FORMAT fmt, BYTE *strip, unsigned stride, unsigned x0,
-                         unsigned w, unsigned h)
+                         unsigned w, unsigned h, unsigned sx, unsigned sy)
 {
     unsigned x, y;
     int bgra = fmt == DXGI_FORMAT_B8G8R8A8_UNORM || fmt == DXGI_FORMAT_B8G8R8X8_UNORM;
     for (y = 0; y < h; y++) {
-        const BYTE *s = (const BYTE *)m->pData + (size_t)y * m->RowPitch;
+        const BYTE *s = (const BYTE *)m->pData + (size_t)(y + sy) * m->RowPitch + (size_t)sx * 4u;
         BYTE *d = strip + (size_t)y * stride + (size_t)x0 * 3u;
         for (x = 0; x < w; x++) {
             d[x * 3 + 0] = s[x * 4 + (bgra ? 0 : 2)];
@@ -996,6 +1159,8 @@ static void ph_rep_base(sb_ph_rep_t *r)
     memset(r, 0, sizeof *r);
     r->tgt = r->tgtd = -1;
     r->wld = ph_cen.wld;
+    r->mon = ph_cen_ok ? ph_cen.mon : -1; /* W290: HUD aus (Monitor-RT des Hauptmonitors) */
+    r->hud_off = !g_cfg.photo_hud;
     r->cam = ph_free && (ph_yaw != 0.0f || ph_pitch != 0.0f || ph_t[0] != 0.0f || ph_t[1] != 0.0f || ph_t[2] != 0.0f);
     r->wcx = 1.0f;
     ph_cam_delta(r->cam_d);
@@ -1043,7 +1208,7 @@ static DXGI_FORMAT ph_fmt_of(ID3D11Resource *res)
 }
 
 /* Vorschau neu rechnen (Fenstergroesse). 1 = ph_view gueltig. */
-static int ph_preview(ID3D11Resource *still)
+static int ph_preview(ID3D11Resource *still, int cockpit)
 {
     sb_ph_rep_t r;
     sb_pl_info_t inf;
@@ -1054,9 +1219,9 @@ static int ph_preview(ID3D11Resource *still)
     float zero[4] = { 0.0f, 0.0f, 0.0f, 1.0f };
     if (!ph_ensure_view(ph_fmt_of(still))) { return 0; }
     ph_rep_base(&r);
-    if (!ph_cockpit) {
+    if (!cockpit) {
         float bw = (float)g_bb_w, bh = (float)g_bb_h, dx, dy, dw, dh, fx;
-        ph_world_layout(bw, bh, ph_asp, &dx, &dy, &dw, &dh, &fx); /* Fenster = Bildschirmformat; Kamera eingepasst */
+        ph_world_layout(bw, bh, ph_asp_cfg(), &dx, &dy, &dw, &dh, &fx); /* Fenster = Bildschirmformat; Kamera eingepasst */
         ID3D11DeviceContext_ClearRenderTargetView(g_ctx, ph_view_rtv, zero);
         ID3D11DeviceContext_ClearDepthStencilView(g_ctx, ph_view_dsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
         ph_rep_world(&r, dx, dy, dw, dh, fx, 0.0f, 0.0f, g_bb_w, g_bb_h);
@@ -1075,7 +1240,7 @@ static int ph_preview(ID3D11Resource *still)
     if (ph_nprev <= 3u || (ph_nprev % 30u) == 0u) {
         HLOG_I("PHOTO: Vorschau #%u (cockpit=%d frei=%d yaw=%.1f pitch=%.1f weg=(%.2f,%.2f,%.2f) welt-draws mit kamera=%u "
                "umgelenkt=%u, %.2f ms)",
-               ph_nprev, ph_cockpit, ph_free, (double)ph_yaw, (double)ph_pitch, (double)ph_t[0], (double)ph_t[1],
+               ph_nprev, cockpit, ph_free, (double)ph_yaw, (double)ph_pitch, (double)ph_t[0], (double)ph_t[1],
                (double)ph_t[2], ncam, nred, (double)(q1 - q0) * 1000.0 / (double)qf.QuadPart);
     }
     return 1;
@@ -1090,12 +1255,24 @@ static unsigned ph_mission_no(int *inm)
     return v + 1u;
 }
 
-/* Foto aufnehmen. 1 = geschrieben. */
+/* Kleinere Groesse als Rueckfall (8K -> 4K -> Fenster, xN -> xN/2). 0 = keine. */
+static int ph_size_smaller(int size)
+{
+    if (size == -8) { return -4; }
+    if (size == -4) { return 1; }
+    if (size > 1) { return size / 2; }
+    return 0;
+}
+
+/* Foto aufnehmen. 1 = geschrieben. W290: Ansicht/Groesse/Format aus g_cfg ([photo]); cockpit = Cockpit-Pfad
+ * (wie im Spiel / ohne Cockpit), sonst nur Aussenwelt. Zuschnitt auf den 4:3-Rahmen s. ph_geo. */
 static int ph_capture(ID3D11Resource *still)
 {
-    unsigned W, H, TW, TH, ty, tx, n = (unsigned)kPhScale[ph_scale];
+    unsigned W, H, TW, TH, ty, tx;
     unsigned sf = 1, IW, IH; /* W249: Kantenglaettung (intern sf-fach, IW x IH) */
-    int cockpit = ph_cockpit, direct, ok = 0, inm;
+    int cockpit, direct, ok = 0, inm, size, crop, jpg = g_cfg.photo_jpg ? 1 : 0, asp = ph_asp_cfg();
+    float K, KS;
+    ph_geo_t g;
     char dir[600], name[160], path8[800];
     wchar_t wdir[700], wpath[800];
     SYSTEMTIME lt;
@@ -1107,15 +1284,30 @@ static int ph_capture(ID3D11Resource *still)
     unsigned ntiles = 0, ncam_tot = 0, mno;
     sb_ph_rep_t sc_r;
     ph_init_t sc_pi;
-    if (!ph_scale_ok(ph_scale, cockpit)) {
-        HLOG_W("PHOTO: Stufe x%u hier nicht moeglich -> x1", n);
-        ph_scale = 0;
-        n = 1;
-        if (!ph_scale_ok(0, cockpit)) { return 0; }
+    cockpit = !(ph_pview() == SB_PV_WORLD && ph_rec_ok());
+    if (ph_pview() == SB_PV_WORLD && cockpit) { ph_cap_notes |= SB_QS_NOTE_NOREC; }
+    crop = cockpit && ph_crop_now();
+    size = sb_photo_size_eff();
+    while (!ph_size_ok(size, cockpit, crop)) {
+        int sm = ph_size_smaller(size);
+        if (!ph_rec_ok()) { ph_cap_notes |= SB_QS_NOTE_NOREC; sm = 1; }
+        else { ph_cap_notes |= SB_QS_NOTE_SMALLER; }
+        HLOG_W("PHOTO: Groesse %d hier nicht moeglich -> %d", size, sm);
+        if (!sm || sm == size) {
+            if (!ph_size_ok(1, cockpit, crop)) { return 0; }
+            size = 1;
+            break;
+        }
+        size = sm;
     }
-    ph_out_size(ph_scale, cockpit, &W, &H);
-    direct = cockpit && n == 1u && !(ph_free && ph_rec_ok()); /* Standbild direkt */
-    if (!direct) { sf = ph_aa_factor(W, H, cockpit); }
+    ph_geo(cockpit, size, crop, &g);
+    W = g.W;
+    H = g.H;
+    K = g.K;
+    direct = cockpit && size == 1 && !(ph_free && ph_rec_ok()) && (g_cfg.photo_hud || !ph_rec_ok()); /* Standbild direkt (Ausschnitt) */
+    if (cockpit && !g_cfg.photo_hud && !ph_rec_ok()) { ph_cap_notes |= SB_QS_NOTE_NOREC; } /* W290: HUD aus braucht die Aufzeichnung */
+    if (!direct) { sf = ph_aa_factor(W, H, cockpit, K); }
+    KS = K * (float)sf;
     IW = W * sf;
     IH = H * sf;
     fmt = direct ? ph_fmt_of(still) : cockpit ? ph_fmt_of((ID3D11Resource *)ph_cen.bb_tex) : ph_fmt_of((ID3D11Resource *)ph_cen.w_tex);
@@ -1137,10 +1329,10 @@ static int ph_capture(ID3D11Resource *still)
             if (k > 1) { _snprintf_s(sfx, sizeof sfx, _TRUNCATE, "_%d", k); }
             if (inm) {
                 _snprintf_s(name, sizeof name, _TRUNCATE, "Steelbound_%04u-%02u-%02u_%02u-%02u-%02u_M%02u%s.%s", lt.wYear,
-                            lt.wMonth, lt.wDay, lt.wHour, lt.wMinute, lt.wSecond, mno, sfx, ph_jpg ? "jpg" : "png");
+                            lt.wMonth, lt.wDay, lt.wHour, lt.wMinute, lt.wSecond, mno, sfx, jpg ? "jpg" : "png");
             } else {
                 _snprintf_s(name, sizeof name, _TRUNCATE, "Steelbound_%04u-%02u-%02u_%02u-%02u-%02u_Menue%s.%s", lt.wYear,
-                            lt.wMonth, lt.wDay, lt.wHour, lt.wMinute, lt.wSecond, sfx, ph_jpg ? "jpg" : "png");
+                            lt.wMonth, lt.wDay, lt.wHour, lt.wMinute, lt.wSecond, sfx, jpg ? "jpg" : "png");
             }
             _snprintf_s(path8, sizeof path8, _TRUNCATE, "%s\\%s", dir, name);
             ph_widen(path8, wpath, 800);
@@ -1153,7 +1345,7 @@ static int ph_capture(ID3D11Resource *still)
         HLOG_W("PHOTO: kein Speicher fuer Streifen %ux%u", W, TH);
         return 0;
     }
-    if (!ph_enc_begin(&enc, wpath, ph_jpg, W, H)) {
+    if (!ph_enc_begin(&enc, wpath, jpg, W, H)) {
         free(strip);
         return 0;
     }
@@ -1166,7 +1358,7 @@ static int ph_capture(ID3D11Resource *still)
     memset(&sc_r, 0, sizeof sc_r);
     memset(&sc_pi, 0, sizeof sc_pi);
     if (sf > 1u) { HLOG_I("PHOTO: Kantenglaettung x%u (intern %ux%u, je %ux%u Pixel gemittelt)", sf, IW, IH, sf, sf); }
-    if (!direct && cockpit && n * sf > 1u) { (void)ph_setup_sc(&sc_r, &sc_pi, n * sf); } /* Monitore/Welt scharf */
+    if (!direct && cockpit && KS > 1.0f) { (void)ph_setup_sc(&sc_r, &sc_pi, (unsigned)ceilf(KS - 0.001f)); } /* Monitore/Welt scharf */
     for (ty = 0; ty < IH && ok; ty += TH) {
         unsigned th = IH - ty < TH ? IH - ty : TH;
         for (tx = 0; tx < IW && ok; tx += TW) {
@@ -1195,14 +1387,17 @@ static int ph_capture(ID3D11Resource *still)
                 ID3D11DeviceContext_ClearRenderTargetView(g_ctx, ph_tile_rtv, zero);
                 ID3D11DeviceContext_ClearDepthStencilView(g_ctx, ph_tile_dsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 1.0f, 0);
                 if (cockpit) {
+                    /* Spielbild x KS, Ausschnitt (bx,by) zuerst: Kachel (tx,ty) der internen Ausgabe */
+                    float ox = (float)g.bx * KS + (float)tx, oy = (float)g.by * KS + (float)ty;
+                    float FW = (float)g_bb_w * KS, FH = (float)g_bb_h * KS;
                     r.tgt = ph_cen.bb;
                     r.tgtd = ph_cen.bbd;
-                    r.kx = r.ky = (float)(n * sf);
-                    r.ox = -(float)tx;
-                    r.oy = -(float)ty;
+                    r.kx = r.ky = KS;
+                    r.ox = -ox;
+                    r.oy = -oy;
                     r.cl[0] = 0; r.cl[1] = 0; r.cl[2] = (LONG)tw; r.cl[3] = (LONG)th;
-                    pi.u0 = (float)tx / (float)IW; pi.v0 = (float)ty / (float)IH;
-                    pi.u1 = (float)(tx + TW) / (float)IW; pi.v1 = (float)(ty + TH) / (float)IH;
+                    pi.u0 = ox / FW; pi.v0 = oy / FH;
+                    pi.u1 = (ox + (float)TW) / FW; pi.v1 = (oy + (float)TH) / FH;
                     pi.rtv = ph_tile_rtv; pi.w = TW; pi.h = TH;
                     {
                         int q;
@@ -1220,7 +1415,7 @@ static int ph_capture(ID3D11Resource *still)
                     r.ctx = &pi;
                 } else {
                     float dx, dy, dw, dh, fx;
-                    ph_world_layout((float)IW, (float)IH, ph_asp, &dx, &dy, &dw, &dh, &fx);
+                    ph_world_layout((float)IW, (float)IH, asp, &dx, &dy, &dw, &dh, &fx);
                     ph_rep_world(&r, dx, dy, dw, dh, fx, (float)tx, (float)ty, tw, th);
                 }
                 r.rtv = ph_tile_rtv;
@@ -1238,7 +1433,8 @@ static int ph_capture(ID3D11Resource *still)
                 break;
             }
             if (sf > 1u) { ph_copy_rows_aa(&m, fmt, strip, W * 3u, tx / sf, tw / sf, th / sf, sf); } /* W249 */
-            else { ph_copy_rows(&m, fmt, strip, W * 3u, tx, tw, th); }
+            else if (direct) { ph_copy_rows(&m, fmt, strip, W * 3u, 0, W, H, g.bx, g.by); } /* W290: Ausschnitt */
+            else { ph_copy_rows(&m, fmt, strip, W * 3u, tx, tw, th, 0, 0); }
             ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)src, 0);
             if (stg) { ID3D11Texture2D_Release(stg); }
             ntiles++;
@@ -1255,25 +1451,80 @@ static int ph_capture(ID3D11Resource *still)
         strcpy_s(ph_last_name, sizeof ph_last_name, name);
         ph_last_w = W;
         ph_last_h = H;
-        HLOG_I("PHOTO: gespeichert %s (%ux%u, x%u, %s, cockpit=%d bildformat=%d frei=%d yaw=%.1f pitch=%.1f weg=%.2f, %u Kacheln %ux%u, "
-               "welt-draws mit kamera=%u, %.0f ms) -> %s",
-               name, W, H, n, ph_jpg ? "JPG" : "PNG", cockpit, ph_asp, ph_free, (double)ph_yaw, (double)ph_pitch,
-               (double)sqrtf(ph_t[0] * ph_t[0] + ph_t[1] * ph_t[1] + ph_t[2] * ph_t[2]), ntiles, TW, TH, ncam_tot,
-               ph_last_ms, dir);
+        if (ph_cap_quick) { /* W290: Logzeile ohne Ordner (Pfad koennte den Nutzernamen enthalten) */
+            HLOG_I("QUICKSHOT: gespeichert %s (%ux%u, %s, ansicht=%d vollbild=%d zuschnitt=%d faktor=%.3f, %u Kacheln, %.0f ms)",
+                   name, W, H, jpg ? "JPG" : "PNG", ph_pview(), sb_flat_now(), crop, (double)K, ntiles, ph_last_ms);
+        } else {
+            HLOG_I("PHOTO: gespeichert %s (%ux%u, x%.0f, %s, cockpit=%d bildformat=%d frei=%d yaw=%.1f pitch=%.1f weg=%.2f, %u Kacheln %ux%u, "
+                   "welt-draws mit kamera=%u, %.0f ms) -> %s",
+                   name, W, H, (double)K, jpg ? "JPG" : "PNG", cockpit, asp, ph_free, (double)ph_yaw, (double)ph_pitch,
+                   (double)sqrtf(ph_t[0] * ph_t[0] + ph_t[1] * ph_t[1] + ph_t[2] * ph_t[2]), ntiles, TW, TH, ncam_tot,
+                   ph_last_ms, dir);
+        }
     } else {
-        HLOG_W("PHOTO: Aufnahme fehlgeschlagen (%ux%u, x%u, nach %u Kacheln)", W, H, n, ntiles);
+        HLOG_W("PHOTO: Aufnahme fehlgeschlagen (%ux%u, x%.2f, nach %u Kacheln)", W, H, (double)K, ntiles);
     }
     return ok;
+}
+
+/* Neue Pause (z. B. nach dem Umschalten der Ansicht): Zensus des neuen Ticks */
+static void ph_pause_check(void)
+{
+    unsigned pc = sb_pause_count();
+    if (pc != ph_pause_seen) {
+        ph_pause_seen = pc;
+        ph_cen_tried = 0;
+        ph_cen_ok = 0;
+        ph_dirty = 1;
+        ph_view_valid = 0;
+    }
+}
+
+/* W290 QUICK-SHOT: Aufnahme im Pausenbild mit den [photo]-Einstellungen, ohne Panel und ohne freie Kamera. */
+void sb_photo_quick_run(ID3D11Resource *still)
+{
+    int saved_free = ph_free;
+    sb_photo_qres_t r;
+    if (!InterlockedExchange(&ph_qreq, 0)) { return; }
+    memset(&r, 0, sizeof r);
+    if (!still || !g_dev) {
+        ph_qres = r;
+        InterlockedExchange(&ph_qdone, 1);
+        return;
+    }
+    ph_cen_tried = 0;
+    ph_cen_ok = 0;
+    ph_census();
+    ph_free = 0;
+    ph_cap_quick = 1;
+    ph_cap_notes = 0;
+    if (ph_pview() == SB_PV_FLAT && !sb_flat_now()) { ph_cap_notes |= SB_QS_NOTE_NOFLAT; }
+    r.ok = ph_capture(still);
+    r.notes = ph_cap_notes;
+    ph_cap_quick = 0;
+    ph_free = saved_free;
+    ph_cen_tried = 0; /* der Fotomodus zaehlt neu */
+    if (r.ok) {
+        strcpy_s(r.name, sizeof r.name, ph_last_name);
+        r.w = ph_last_w;
+        r.h = ph_last_h;
+    }
+    r.ms = ph_last_ms;
+    ph_qres = r;
+    InterlockedExchange(&ph_qdone, 1);
 }
 
 ID3D11Resource *sb_photo_pause_image(ID3D11Resource *still, int *raw)
 {
     unsigned h;
+    int cockpit;
     if (raw) { *raw = 0; }
     if (!ph_on || !still || !g_dev) { return still; }
+    ph_pause_check();
     ph_census();
     if (ph_req) {
         ph_req = 0;
+        ph_cap_notes = 0;
         ph_last_ok = ph_capture(still) ? 1 : -1;
         ph_nshot++;
         if (g_cfg.photo_diag & 2) { /* DIAG(W249): dieselbe Aufnahme ohne Kantenglaettung (A/B, Datei _2) */
@@ -1284,7 +1535,8 @@ ID3D11Resource *sb_photo_pause_image(ID3D11Resource *still, int *raw)
             g_cfg.photo_aa = aa;
         }
     }
-    if (!ph_rec_ok() || (ph_cockpit && !ph_free)) {
+    cockpit = !(ph_pview() == SB_PV_WORLD && ph_rec_ok());
+    if (!ph_rec_ok() || (cockpit && !ph_free && g_cfg.photo_hud)) { /* W290: HUD aus -> Vorschau neu gezeichnet */
         ph_view_valid = 0;
         return still;
     }
@@ -1292,9 +1544,9 @@ ID3D11Resource *sb_photo_pause_image(ID3D11Resource *still, int *raw)
     if (ph_dirty || !ph_view_valid || h != ph_hash_last) {
         ph_dirty = 0;
         ph_hash_last = h;
-        ph_view_valid = ph_preview(still);
+        ph_view_valid = ph_preview(still, cockpit);
     }
     if (!ph_view_valid) { return still; }
-    if (raw) { *raw = !ph_cockpit; }
+    if (raw) { *raw = !cockpit; }
     return (ID3D11Resource *)ph_view;
 }

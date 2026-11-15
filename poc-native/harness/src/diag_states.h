@@ -14,6 +14,8 @@ void diag_startup_tick(unsigned frame);
 
 /* DIAG(COMBAT): Entity-Tabelle HP/Schaden (W35, s. .c). */
 void diag_combat_tick(unsigned frame);
+void diag_cam_tick(unsigned frame);
+void diag_cam_note_view(const float *m16);
 
 /* DIAG(GEAR): Gang-Kette Block->Out->Latch + eigene Position (W141, s. .c). */
 void diag_gear_tick(unsigned frame);

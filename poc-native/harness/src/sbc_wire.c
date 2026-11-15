@@ -259,7 +259,17 @@ int sbc_wire_status(void)
  * wie im Manager). dwStatus (fb+0, 0x3E5 = ERROR_IO_PENDING bei Neuigkeit)
  * wird nur gelesen, nie geschrieben - der Hook gab bisher 0 zurueck und
  * das Spiel laeuft so; daran aendert sbc_usb=1 nichts. Es gibt keine
- * Out->LED-Umsetzung: 20 Bytes kopieren, Header 00 16 voranstellen. */
+ * Out->LED-Umsetzung: 20 Bytes kopieren, Header 00 16 voranstellen.
+ *
+ * W267 (COMM-LED): Bis W266 verglich die 50-ms-Drossel mit dem zuletzt
+ * GESEHENEN Report - ein gedrosselter Stand galt danach als "unveraendert"
+ * und ging nie raus. Das Spiel blendet LEDs in Tick-Schritten (~33 ms) aus
+ * (Comm nach dem Funkruf: 0xA1E30 setzt Comm1-5 auf Modus 2, Manager
+ * 0x49520 zieht je Tick 2 ab: ..3 -> 1 -> 0), also fiel oft genau der
+ * letzte Schritt in die Drossel: Lampe blieb auf Stufe 1 statt aus.
+ * Jetzt Sendetor sbc_led_gate_* (Vergleich mit dem GESENDETEN Stand, faellig
+ * bleibt faellig; SetState kommt jeden Poll, also spaetestens nach 50 ms +
+ * 1 Poll nachgesendet). Log-Zeilen unveraendert (jede Spiel-Aenderung). */
 
 #define SBC_FB_BASE SBA(0x4AF0C0u)
 #define SBC_FB_STRIDE 0x56u
@@ -268,9 +278,9 @@ int sbc_wire_status(void)
 #define SBC_FB_LEDS_LEN 20u
 #define SBC_LED_MIN_MS 50u /* Mindestabstand zweier LED-Sendungen */
 
-static uint8_t g_led_last[SBC_FB_PORTS][SBC_USB_OUT_LEN];
+static uint8_t g_led_last[SBC_FB_PORTS][SBC_USB_OUT_LEN]; /* gesehen (Log) */
 static int g_led_have[SBC_FB_PORTS];
-static ULONGLONG g_led_sent_ms;
+static sbc_led_gate_t g_led_gate; /* W267: gesendet (Geraet, Mapper-Port) */
 static int g_led_rsv_logged;
 static uint32_t g_led_err_n;
 
@@ -283,11 +293,23 @@ static uint32_t sbc_mapper_port(void)
     return mp < SBC_FB_PORTS ? mp : 0;
 }
 
+static void sbc_led_log(uint32_t port, const uint8_t rep[SBC_USB_OUT_LEN])
+{
+    char hex[2 * SBC_USB_OUT_LEN + 1];
+    unsigned i;
+    if (!g_cfg.input_diag) {
+        return;
+    }
+    for (i = 0; i < SBC_USB_OUT_LEN; i++) {
+        sprintf_s(hex + 2 * i, 3, "%02X", rep[i]);
+    }
+    HLOG_I("SBC-LED: port=%u f=%u fb=%s", port, g_frames, hex);
+}
+
 void sbc_wire_setstate(uint32_t fb)
 {
     uint8_t rep[SBC_USB_OUT_LEN];
     uint32_t port;
-    unsigned i;
     /* Nur Feedback-Structs der Poll-Loop (falsche Adressen ignorieren). */
     if (fb < SBC_FB_BASE ||
         fb >= SBC_FB_BASE + SBC_FB_PORTS * SBC_FB_STRIDE ||
@@ -303,17 +325,10 @@ void sbc_wire_setstate(uint32_t fb)
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         return;
     }
-    if (g_led_have[port] && memcmp(g_led_last[port], rep, sizeof rep) == 0) {
-        return; /* unveraendert: nichts tun (Drossel, kein Poll-Spam) */
-    }
-    memcpy(g_led_last[port], rep, sizeof rep);
-    g_led_have[port] = 1;
-    if (g_cfg.input_diag) {
-        char hex[2 * SBC_USB_OUT_LEN + 1];
-        for (i = 0; i < SBC_USB_OUT_LEN; i++) {
-            sprintf_s(hex + 2 * i, 3, "%02X", rep[i]);
-        }
-        HLOG_I("SBC-LED: port=%u f=%u fb=%s", port, g_frames, hex);
+    if (!g_led_have[port] || memcmp(g_led_last[port], rep, sizeof rep) != 0) {
+        memcpy(g_led_last[port], rep, sizeof rep);
+        g_led_have[port] = 1;
+        sbc_led_log(port, rep); /* jede Spiel-Aenderung (input_diag) */
     }
     /* LEDs folgen dem Port, den das Spiel gerade liest (Mapper-Port). */
     if (port != sbc_mapper_port()) {
@@ -322,26 +337,29 @@ void sbc_wire_setstate(uint32_t fb)
     if (!g_sbc_dev) {
         return; /* Fixture/kein Geraet: nur loggen (s. o.) */
     }
-    if ((rep[17] & 0x0Fu) || rep[21]) {
-        if (!g_led_rsv_logged) {
-            g_led_rsv_logged = 1;
-            HLOG_I("SBC-LED: reservierte Bits gesetzt "
-                   "(Byte17low=%X, Byte21=%02X) - entfallen",
-                   rep[17] & 0x0Fu, rep[21]);
-        }
-    }
     {
         ULONGLONG now = GetTickCount64();
         sbc_leds_t leds;
-        if (g_led_sent_ms && now - g_led_sent_ms < SBC_LED_MIN_MS) {
-            return; /* gedrosselt */
-        }
-        g_led_sent_ms = now;
-        if (sbc_usb_parse_led_report(rep, &leds) != SBC_OK) {
+        int ok;
+        /* W267: Vergleich mit dem gesendeten Stand, Drossel mit Nachsenden. */
+        if (!sbc_led_gate_due(&g_led_gate, rep, now, SBC_LED_MIN_MS)) {
             return;
         }
-        if (sbc_usb_set_leds(g_sbc_dev, &leds) != SBC_OK &&
-            hlog_throttle(&g_led_err_n)) {
+        if ((rep[17] & 0x0Fu) || rep[21]) {
+            if (!g_led_rsv_logged) {
+                g_led_rsv_logged = 1;
+                HLOG_I("SBC-LED: reservierte Bits gesetzt "
+                       "(Byte17low=%X, Byte21=%02X) - entfallen",
+                       rep[17] & 0x0Fu, rep[21]);
+            }
+        }
+        if (sbc_usb_parse_led_report(rep, &leds) != SBC_OK) {
+            sbc_led_gate_mark(&g_led_gate, rep, now, 1); /* nie gueltig: nicht wiederholen */
+            return;
+        }
+        ok = sbc_usb_set_leds(g_sbc_dev, &leds) == SBC_OK;
+        sbc_led_gate_mark(&g_led_gate, rep, now, ok);
+        if (!ok && hlog_throttle(&g_led_err_n)) {
             HLOG_W("SBC-LED: senden scheitert");
         }
     }

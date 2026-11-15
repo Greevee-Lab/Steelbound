@@ -27,14 +27,17 @@
 #define DSC_SRV 8 /* VS/PS-SRV-Plaetze */
 #define DSC_SMP 8 /* VS/PS-Sampler-Plaetze */
 
-enum { DSC_N_FWD, DSC_N_SKIP, DSC_N_MAP, DSC_N_DRAW, DSC_N_CBMAP, DSC_N_CBREUSE, DSC_N_MAX };
+/* W264 DRAW-OPT2: DSC_N_IDX = Draws ueber den Strip-Indexpuffer, DSC_N_STRIP = Strip/Fan/Quad-Draws des
+ * schnellen Wegs, DSC_N_VBV = dort hochgeladene Vertices (E-Zeile, draw_tick_diag=1) */
+enum { DSC_N_FWD, DSC_N_SKIP, DSC_N_MAP, DSC_N_DRAW, DSC_N_CBMAP, DSC_N_CBREUSE, DSC_N_IDX, DSC_N_STRIP, DSC_N_VBV, DSC_N_MAX };
 
 typedef struct {
     /* gueltig-Bits: 0 = unbekannt (naechster Aufruf wird weitergereicht) */
-    unsigned v_lay, v_topo, v_vs, v_ps, v_bl, v_ds, v_rs;
+    unsigned v_lay, v_topo, v_vs, v_ps, v_bl, v_ds, v_rs, v_ib;
     unsigned v_vb, v_vcb, v_pcb, v_vsrv, v_psrv, v_vsmp, v_psmp; /* Bitmasken je Platz */
     ID3D11InputLayout *lay;
     D3D11_PRIMITIVE_TOPOLOGY topo;
+    ID3D11Buffer *ib; DXGI_FORMAT ibf; UINT ibo; /* W264 DRAW-OPT2: Indexpuffer */
     ID3D11VertexShader *vs;
     ID3D11PixelShader *ps;
     ID3D11Buffer *vb[DSC_VB]; UINT vbs[DSC_VB], vbo[DSC_VB];
@@ -66,7 +69,7 @@ void sb_dsc_reset(void); /* alles unbekannt (Device neu, Diagnose) */
 static __inline void dsc_inval_srv(void) { g_dsc.v_vsrv = 0; g_dsc.v_psrv = 0; }
 static __inline void dsc_inval_all(void)
 {
-    g_dsc.v_lay = g_dsc.v_topo = g_dsc.v_vs = g_dsc.v_ps = g_dsc.v_bl = g_dsc.v_ds = g_dsc.v_rs = 0;
+    g_dsc.v_lay = g_dsc.v_topo = g_dsc.v_vs = g_dsc.v_ps = g_dsc.v_bl = g_dsc.v_ds = g_dsc.v_rs = g_dsc.v_ib = 0;
     g_dsc.v_vb = g_dsc.v_vcb = g_dsc.v_pcb = g_dsc.v_vsrv = g_dsc.v_psrv = g_dsc.v_vsmp = g_dsc.v_psmp = 0;
 }
 
@@ -86,6 +89,14 @@ static __inline void dsc_IASetPrimitiveTopology(ID3D11DeviceContext *c, D3D11_PR
         g_dsc.topo = t; g_dsc.v_topo = 1; g_dsc.cnt[DSC_N_FWD]++;
     }
     c->lpVtbl->IASetPrimitiveTopology(c, t);
+}
+static __inline void dsc_IASetIndexBuffer(ID3D11DeviceContext *c, ID3D11Buffer *b, DXGI_FORMAT f, UINT o)
+{
+    if (DSC_ME(c)) {
+        if (g_dsc.v_ib && g_dsc.ib == b && g_dsc.ibf == f && g_dsc.ibo == o && DSC_ON()) { g_dsc.cnt[DSC_N_SKIP]++; return; }
+        g_dsc.ib = b; g_dsc.ibf = f; g_dsc.ibo = o; g_dsc.v_ib = 1; g_dsc.cnt[DSC_N_FWD]++;
+    }
+    c->lpVtbl->IASetIndexBuffer(c, b, f, o);
 }
 static __inline void dsc_IASetVertexBuffers(ID3D11DeviceContext *c, UINT s, UINT n, ID3D11Buffer *const *b,
                                             const UINT *st, const UINT *of)
@@ -312,6 +323,12 @@ static __inline void dsc_Draw(ID3D11DeviceContext *c, UINT n, UINT s)
     c->lpVtbl->Draw(c, n, s);
 }
 
+static __inline void dsc_DrawIndexed(ID3D11DeviceContext *c, UINT n, UINT s, INT b)
+{
+    if (DSC_ME(c)) { g_dsc.cnt[DSC_N_DRAW]++; }
+    c->lpVtbl->DrawIndexed(c, n, s, b);
+}
+
 #undef ID3D11DeviceContext_IASetInputLayout
 #define ID3D11DeviceContext_IASetInputLayout(c, a) dsc_IASetInputLayout(c, a)
 #undef ID3D11DeviceContext_IASetPrimitiveTopology
@@ -359,5 +376,9 @@ static __inline void dsc_Draw(ID3D11DeviceContext *c, UINT n, UINT s)
 #define ID3D11DeviceContext_Map(c, a, b, d, e, f) dsc_Map(c, a, b, d, e, f)
 #undef ID3D11DeviceContext_Draw
 #define ID3D11DeviceContext_Draw(c, a, b) dsc_Draw(c, a, b)
+#undef ID3D11DeviceContext_DrawIndexed
+#define ID3D11DeviceContext_DrawIndexed(c, a, b, d) dsc_DrawIndexed(c, a, b, d)
+#undef ID3D11DeviceContext_IASetIndexBuffer
+#define ID3D11DeviceContext_IASetIndexBuffer(c, a, b, d) dsc_IASetIndexBuffer(c, a, b, d)
 
 #endif

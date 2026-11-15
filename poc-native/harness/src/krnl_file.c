@@ -281,6 +281,40 @@ int krnl_host_path(const char *xb, char *out, size_t cap)
     return xb ? xb_path_to_host(xb, strlen(xb), out, cap) : -1;
 }
 
+/* W272 ALPHA-TEST: D:-Datei (rel zur Laufwerkswurzel, z. B. "Media\BIN\TEX05.BIN")
+ * ganz lesen - aus dem Abbild (game_image) oder dem Ordner (media_root). Nur
+ * lesend; *buf per malloc (Aufrufer gibt frei). 0 = ok. */
+int krnl_read_d(const char *rel, unsigned char **buf, unsigned *len)
+{
+    char host[1024];
+    HANDLE h;
+    DWORD sz, got = 0;
+    unsigned char *b;
+    if (!rel || !buf || !len) return -1;
+    *buf = NULL;
+    *len = 0;
+    if (g_iso) {
+        uint8_t *p = NULL;
+        uint32_t n = 0;
+        if (iso_vfs_read_all(g_iso, rel, &p, &n) != 0) return -1;
+        *buf = p;
+        *len = n;
+        return 0;
+    }
+    _snprintf_s(host, sizeof host, _TRUNCATE, "%s\\%s", g_cfg.media_root, rel);
+    h = CreateFileA(host, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return -1;
+    sz = GetFileSize(h, NULL);
+    if (sz == INVALID_FILE_SIZE || sz > 64u * 1024u * 1024u) { CloseHandle(h); return -1; }
+    b = (unsigned char *)malloc(sz ? sz : 1);
+    if (!b) { CloseHandle(h); return -1; }
+    if (!ReadFile(h, b, sz, &got, NULL) || got != sz) { free(b); CloseHandle(h); return -1; }
+    CloseHandle(h);
+    *buf = b;
+    *len = sz;
+    return 0;
+}
+
 /* W150: D:-Datei aus dem Abbild oeffnen. Log-Zeilen wie im Ordner-Modus
  * (FILE open '<pfad>' -> xh / -> FEHLER <win32>), damit Meilensteine und
  * logdiff gleich bleiben. */
@@ -522,6 +556,33 @@ static u32 winerr_to_status(DWORD e)
     }
 }
 
+/* W275 LOC-BOOT: LoC wiederholt einen fehlenden Disc-Zugriff (z. B.
+ * TEXTURE.BIN) ohne Pause -> Logflut. Nur im LoC-Profil: dieselbe
+ * fehlgeschlagene Datei direkt hintereinander nur beim 1., 10., 100., ...
+ * Mal protokollieren (Zaehler in einer eigenen Zeile). SB unveraendert. */
+static int loc_open_fail_log(const char *host)
+{
+    static char last[512];
+    static unsigned long n;
+    static LONG lk;
+    int show;
+    while (InterlockedExchange(&lk, 1)) {
+        SwitchToThread();
+    }
+    if (strcmp(last, host) == 0) {
+        n++;
+    } else {
+        strncpy_s(last, sizeof last, host, _TRUNCATE);
+        n = 1;
+    }
+    show = n == 1 || n == 10 || n == 100 || n == 1000 || n % 10000 == 0;
+    if (show && n > 1) {
+        HLOG_I("LOCFILE: '%s' fehlt weiter (%lu Versuche in Folge)", host, n);
+    }
+    InterlockedExchange(&lk, 0);
+    return show;
+}
+
 static u32 open_by_attrs(u32 pAttr, u32 access, u32 share, u32 disp, u32 options,
                          u32 *out_xh)
 {
@@ -635,8 +696,10 @@ static u32 open_by_attrs(u32 pAttr, u32 access, u32 share, u32 disp, u32 options
     if (h == INVALID_HANDLE_VALUE) {
         DWORD e = GetLastError();
         if (stale) { free(stale); stale = NULL; }
-        HLOG_I("FILE open '%s' (disp=%u opt=0x%X) -> FEHLER %lu", host, disp,
-               options, e);
+        if (!g_sba_loc || loc_open_fail_log(host)) { /* W275: LoC drosselt Wiederholungen */
+            HLOG_I("FILE open '%s' (disp=%u opt=0x%X) -> FEHLER %lu", host, disp,
+                   options, e);
+        }
         {   /* A4: auch fehlgeschlagene Opens sind Spielzustand (mslog00.sav) */
             extern void replay_note_file(const char *path);
             replay_note_file(host);

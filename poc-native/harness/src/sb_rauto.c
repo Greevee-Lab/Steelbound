@@ -79,6 +79,17 @@ static int ra_path(void)
     return g_ra_path_state == 1;
 }
 
+/* W277 LOC-DISC: im LoC-Profil nie aktiv (SB-Menuefolge/Szenen, Hinweis pausiert). */
+void sb_rauto_disable(void)
+{
+    if (g_ra.phase != RA_OFF) {
+        HLOG_I("REPLAY-AUTO: im LoC-Profil abgeschaltet");
+    }
+    memset(&g_ra, 0, sizeof g_ra);
+    g_ra.phase = RA_OFF;
+    g_cfg.replay_autoplay[0] = 0;
+}
+
 void sb_rauto_init(void)
 {
     if (!g_cfg.replay_autoplay[0]) {

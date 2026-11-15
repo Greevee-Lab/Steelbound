@@ -101,6 +101,16 @@ int sb_gamever_check(const uint8_t *xbe, size_t n, sb_gamever_t *out)
         out->supported = 1;
         strcpy_s(out->label, sizeof out->label, "Steel Battalion (USA, NTSC-U)" /* Launcher haengt "experimental" selbst an (W231) */);
     }
+    if (!out->supported && out->xbe_ok && out->title_id == SB_GAMEVER_LOC_TITLE &&
+        strcmp(out->sha256, SB_GAMEVER_LOC_SHA) == 0) {
+        /* W275 LOC-BOOT: Line of Contact erkannt; eigenes Profil, nicht SB. */
+        out->loc = 1;
+        strcpy_s(out->label, sizeof out->label, "Line of Contact (World)");
+        _snprintf_s(out->text, sizeof out->text, _TRUNCATE,
+                    "GAMEVER: %s erkannt (Title-ID %08X, Region %s, Version %u, sha256 %.16s...) -> LoC-Profil (experimentell, [expert] loc_boot=1)",
+                    out->label, out->title_id, sb_gamever_region_name(out->region), out->version, out->sha256);
+        return 0;
+    }
     if (out->supported) {
         _snprintf_s(out->text, sizeof out->text, _TRUNCATE,
                     "GAMEVER: %s erkannt (Title-ID %08X, Region %s, Version %u, sha256 %.16s...) -> unterstuetzt",

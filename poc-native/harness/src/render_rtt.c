@@ -3,6 +3,7 @@
  * SetRenderTarget-Umleitung, Lookup fuer das Sampling (sb_tex.c).
  * W68 SPLIT: 1:1 aus d3d11_render.c verschoben. */
 #include "render_int.h"
+#include "loc_render.h" /* W285 */
 #include "sb_profile.h" /* W229 SBA() */
 #include <math.h>
 #include <stdio.h>
@@ -963,6 +964,21 @@ static int rtt_ensure(int idx)
     }
     ID3D11Texture2D_Release(ds);
     if (FAILED(hr) || !e->dsv) { return 0; }
+    if (g_cfg.rt_init_clear && g_ctx) {
+        /* FIX(HD-PACK-ART,W262): Neue D3D11-Texturen haben undefinierten Inhalt. Der Treiber vergibt
+         * Speicher frei gewordener Ressourcen desselben Prozesses neu (mit HD-Paket: viele grosse
+         * Ersatztexturen angelegt/freigegeben). Liest das Spiel einen RT-Bereich, den es (noch) nie
+         * beschrieben hat, sah man bisher diesen Altinhalt (grelle Flaechen) statt Schwarz. Einmal
+         * beim Anlegen auf lauter Null-Bytes setzen (Farbe 0, Tiefe 0, Stencil 0) = Zustand frisch
+         * genullten Speichers, den das Spiel ohne Paket praktisch immer bekam (Standard bitgleich).
+         * 2 = DIAG: Farbe magenta, um nie beschriebene Bereiche sichtbar zu machen. */
+        static const float z4[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        static const float m4[4] = { 1.0f, 0.0f, 1.0f, 1.0f };
+        sb_ctx_enter();
+        ID3D11DeviceContext_ClearRenderTargetView(g_ctx, e->rtv, g_cfg.rt_init_clear == 2 ? m4 : z4);
+        ID3D11DeviceContext_ClearDepthStencilView(g_ctx, e->dsv, D3D11_CLEAR_DEPTH | D3D11_CLEAR_STENCIL, 0.0f, 0);
+        sb_ctx_leave();
+    }
     if (nlog < (unsigned)RTT_MAX) {
         nlog++;
         if (e->pw != e->w || e->ph != e->h) {
@@ -1674,6 +1690,7 @@ int sb_rtt_lookup(unsigned xptr, ID3D11ShaderResourceView **srv,
     if (w) { *w = 0; }
     if (h) { *h = 0; }
     if (!xptr) { return 0; }
+    if (g_sba_loc && loc_render_bb_lookup(xptr, srv, w, h)) { return 1; } /* W285 LOC-RENDER: Backbuffer als Textur */
     __try { data = *(unsigned *)(uintptr_t)(xptr + 4); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
     if (!data) { return 0; }

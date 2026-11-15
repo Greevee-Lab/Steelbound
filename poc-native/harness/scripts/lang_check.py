@@ -26,6 +26,10 @@ SRC = [
     "launcher/src/launcher.c",
     "launcher/src/launcher_saves.c",  # W199 SAVE-IMPORT
     "launcher/src/launcher_rules.c",  # W171 LAUNCHER-P2P3 (gui.rule_*)
+    "launcher/src/launcher_alpha.c",  # W272 ALPHA-TEST (gui.alpha_*)
+    "launcher/src/launcher_alpha.inc",  # W272: Seite Alpha Test
+    "launcher/src/launcher_games.c",  # W276 LOC-LAUNCH (gui.loc_*)
+    "launcher/src/launcher_diag.inc",  # W279 DIAG-CRASH (gui.dg_*)
     "harness/src/sb_overlay.c",
     "harness/src/render_fx_rem.c",
     "harness/src/vr.c",
@@ -33,6 +37,10 @@ SRC = [
     "creator/src/creator_gui.c",
     "harness/src/emu_main.c",  # W150: Startfehler (Abbild/Version)
     "harness/src/sb_rauto.c",  # W254 REPLAY-LAUNCHER (Hinweis beim Replay-Start)
+    "harness/src/sb_mauto.c",  # W272 ALPHA-TEST (Hinweis beim Teststart)
+    "harness/src/sb_origflag.h",  # W278 ORIG-FLAG (Gruppennamen, ovl.of_g_*)
+    "harness/src/sb_origview.c",  # W278 (Einblendung, ovl.of_*)
+    "launcher/src/launcher_orig.c",  # W278 (Hinweis, gui.of_*)
 ]
 
 # W180 EXPORT: Quellen, die im Community-Export (noch) fehlen duerfen (Pack

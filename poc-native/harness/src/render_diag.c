@@ -3,6 +3,8 @@
  * (drawdrop_diag). W68 SPLIT: 1:1 aus d3d11_render.c verschoben. */
 #include "render_int.h"
 #include "sb_state.h" /* W232: sb_in_mission */
+#include "loc_render.h" /* W285: LoC-Zensus-Ausloeser */
+#include "sb_profile.h" /* W285: g_sba_loc */
 
 /* ---------- MISSION3D-Zensus (W25, m3d_census) ----------
  * Schalter [render] m3d_census=N: nur in der Mission (Szene 0x2C,
@@ -208,10 +210,12 @@ void m3d_present_tick(unsigned f)
         }
     }
     /* 3. Neu triggern? (nur Mission: Szene 0x2C, mloop=1) */
-    if (g_cfg.m3d_census > 0 && m3d_nframes < M3D_MAXFRAMES) {
+    if (g_cfg.m3d_census > 0 && m3d_nframes < (g_sba_loc ? 16u : M3D_MAXFRAMES)) { /* W285: LoC 16 Bilder (DIAG) */
         unsigned scene = m3d_read_u32(M3D_SCENE_ADDR);
         unsigned mloop = m3d_read_u32(M3D_MLOOP_ADDR);
-        if (scene == 0x2Cu && mloop == 1u) {
+        /* W285 DIAG(LOC-RENDER): im LoC-Profil liest scene/mloop die Null-Seite -> Frame-Ausloeser */
+        int loc_go = loc_render_census_go(f);
+        if ((scene == 0x2Cu && mloop == 1u) || loc_go) {
             /* DIAG(MONITORVIEW,W36): Gate ab VT-online (nach START). */
             if (g_cfg.m3d_census_gate == 1 && m3d_read_u32(M3D_VTONLINE_ADDR) != 1u) {
                 return;

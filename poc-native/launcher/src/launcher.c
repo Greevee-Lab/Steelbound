@@ -25,6 +25,11 @@
 #include "sb_userdata.h" /* W150 USER-DATA */
 #include "sb_gamever.h" /* W231 US-LAUNCHER: Selbsttest */
 #include "launcher_update.h" /* W250 UPDATE-CHECK */
+#include "launcher_alpha.h" /* W272 ALPHA-TEST: Teststart Mission + VT */
+#include "launcher_games.h" /* W276 LOC-LAUNCH */
+#include "launcher_diag.h" /* W279 DIAG-CRASH */
+#include "launcher_orig.h" /* W278 ORIG-FLAG */
+#include "launcher_layout.h" /* W281 LAUNCHER-SIZE */
 
 static void dpi_init(void)
 {
@@ -122,9 +127,15 @@ static void cli_usage(void)
            "  --start                 user.cfg schreiben + Client starten\n"
            "  --dry-run               mit --start: nur schreiben, nicht starten\n"
            "  --vr                    mit --start: VR-Start (sonst Bildschirm)\n"
+           "  --game sb|loc           mit --start: Spiel (loc = Line of Contact: noch\n"
+           "                          gesperrt, Meldung + Exit 3, W276)\n"
            "  --wait                  mit --start: auf Client warten, Exitcode deuten\n"
            "  --replay ID             mit --start: gespeichertes Replay direkt abspielen (experimentell)\n"
            "  --replay-camera N       mit --replay: Kamera fest (0 Cockpit, 1 Vollbild, 2..6 au" U8_SZ "en)\n"
+           "  --alpha-mission N       mit --start/--gui-start-dry: Teststart Mission N (0 Training, 1..23)\n"
+           "  --alpha-vt V            dazu VT-Modell (1..22, -1 = Vorgabe der Mission)\n"
+           "  --alpha-diff D          dazu Schwierigkeit (-1 Spielvorgabe, 0 Rookie..5 Armageddon)\n"
+           "  --alpha-skip-intro      dazu Intro/Startsequenz " U8_UE "berspringen (wo m" U8_OE "glich)\n"
            "  --profile NAME          Profil statt user.cfg als Basis laden\n"
            "  --save-profile NAME     Profil aus Basis + --set speichern\n"
            "  --list-profiles         Profile + Standard-Profil auflisten\n"
@@ -145,14 +156,25 @@ static void cli_usage(void)
            "  --state NAME            mit --ui-shot: Regelzustand (nodata, fullscreen,\n"
            "                          window43, controller, custom, diag, pack2, pack3,\n"
            "                          effectpack, ready, ready_controller,\n"
-           "                          update_ask, update_new, update_dev),\n"
+           "                          update_ask, update_new, update_dev, crash,\n"
+           "                          loc_empty, loc_ok, loc_sb, loc_start = Bereich\n"
+           "                          Line of Contact, W276, loc_exp = loc_ok mit\n"
+           "                          Hinweisband, W293, advanced = Anzeige/Grafik\n"
+           "                          mit Feinreglern, W291, fade = Breitbild\n"
+           "                          Fade out mit Verlaufszeile, W296),\n"
            "                          nur Anzeige (Packs-Ordner: Umgebung SB_PACKS_DIR)\n"
            "  --dpi N                 mit --ui-shot/--bind-shot: DPI erzwingen\n"
+           "  --layout 0|a|b          W281 Entwurf: Layout (0 = heute, a = groesser,\n"
+           "                          b = mehr Platz); sonst launcher_ui.cfg launcher_layout,\n"
+           "                          Standard a/normal\n"
+           "  --ui-size compact|normal|large  W281: UI-Groesse (a/b)\n"
+           "  --work WxH              W281: Arbeitsflaeche in Pixeln (Einpassen testen)\n"
            "                          (144 = 150 %%)\n"
            "  --bg 0|1|beide          mit --ui-shot: Hintergrundbild\n"
            "  --lang en|de            Sprache (statt [ui] lang aus cfg)\n"
            "  --update-check          Test: einmal auf neue Version pr" U8_UE "fen (W250,\n"
            "                          --as-version V statt der eingebauten Version)\n"
+           "  --diag-package          Diagnosepaket (ZIP im Datenordner, bereinigt, W279)\n"
            "  --gui-start-dry         Test: GUI-Startpfad (user.cfg +\n"
            "                          Spielerbetrieb), Client nicht starten\n");
 }
@@ -170,6 +192,38 @@ static const char *cli_value(int argc, char **argv, const char *flag)
         }
     }
     return NULL;
+}
+
+/* W272: --alpha-* lesen (fehlt -> Standard, keine Zahl -> -9999 = ungueltig).
+ * 1 = --alpha-mission angegeben (Teststart). */
+static int cli_alpha(int argc, char **argv, la_sel_t *a)
+{
+    static const char *const k[3] = { "--alpha-mission", "--alpha-vt", "--alpha-diff" };
+    int *dst[3], i, j, on = 0;
+    dst[0] = &a->mission;
+    dst[1] = &a->vt;
+    dst[2] = &a->diff;
+    a->mission = 0;
+    a->vt = -1;
+    a->diff = -1;
+    a->skip_intro = 0;
+    for (i = 0; i < 3; i++) {
+        for (j = 1; j < argc; j++) {
+            if (strcmp(argv[j], k[i]) == 0) {
+                const char *v = j + 1 < argc ? argv[j + 1] : "";
+                char *e = NULL;
+                long n = strtol(v, &e, 10);
+                *dst[i] = (v[0] && e && !*e && n > -1000 && n < 1000) ? (int)n : -9999;
+                on |= i == 0;
+            }
+        }
+    }
+    for (j = 1; j < argc; j++) {
+        if (strcmp(argv[j], "--alpha-skip-intro") == 0) {
+            a->skip_intro = 1;
+        }
+    }
+    return on;
 }
 
 static int cli_flag(int argc, char **argv, const char *flag)
@@ -208,6 +262,7 @@ void app_load_effective(const char *client_dir, launcher_settings_t *s,
         s->rt_scale_dyn = d.rt_scale_dyn;
     }
     lcfg_user_cfg_path(client_dir, p, sizeof p); /* W150 USER-DATA */
+    s->gfx_preset_rev = 0; /* W296 PRESET-ORIG: Stand kommt aus user.cfg (fehlt = vor W296) */
     if (lcfg_load_file_count(p, s, &keys) == 0) {
         kind = 1;
         /* W250: eine user.cfg, die nur die Update-Antwort traegt (Frage beim
@@ -216,6 +271,7 @@ void app_load_effective(const char *client_dir, launcher_settings_t *s,
             kind = 0;
         }
     }
+    lcfg_gfx_migrate_fps(s); /* W296: altes "Original - 120 FPS" -> Original (Monitor auto); jede andere Rate bleibt */
     {
         /* Standard-Profil gewinnt ueber user.cfg (W47). */
         char dflt[64], err[512];
@@ -460,6 +516,19 @@ static int w226_feed(lctrl_joy_learner_t *L, int idx, unsigned mask, int ax,
     }
     *at = -1;
     return 0;
+}
+
+/* W281: Meldungen des reinen Layout-Selbsttests zaehlen */
+static int g_llay_pass, g_llay_fail;
+static void llay_rep(const char *name, int ok, const char *detail)
+{
+    if (ok) {
+        printf("PASS %s\n", name);
+        g_llay_pass++;
+    } else {
+        printf("FAIL %s: %s\n", name, detail ? detail : "");
+        g_llay_fail++;
+    }
 }
 
 static int cli_selftest(const char *client_override)
@@ -818,6 +887,117 @@ static int cli_selftest(const char *client_override)
             T_FAIL("W218 simple-controls cfg", "%s", "Werte falsch");
         }
         u8_DeleteFile(tmp);
+    }
+
+    /* W268 COCKPIT-HIDE: cockpit_hide Standard 0, Roundtrip 1 -> 0 ([render]) */
+    {
+        int ok;
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w268_chide_test.cfg");
+        u8_DeleteFile(tmp);
+        lcfg_defaults(&a);
+        ok = a.cockpit_hide == 0;
+        a.cockpit_hide = 1;
+        if (ok && lcfg_save_user(tmp, &a) == 0) {
+            lcfg_defaults(&b);
+            lcfg_load_file(tmp, &b);
+            ok = b.cockpit_hide == 1;
+            b.cockpit_hide = 0;
+            if (ok && lcfg_save_user(tmp, &b) == 0) {
+                lcfg_defaults(&a);
+                a.cockpit_hide = 1;
+                lcfg_load_file(tmp, &a);
+                ok = a.cockpit_hide == 0;
+            } else {
+                ok = 0;
+            }
+        } else {
+            ok = 0;
+        }
+        if (ok) {
+            T_OK("W268 cockpit_hide cfg (Standard 0, Roundtrip)");
+        } else {
+            T_FAIL("W268 cockpit_hide cfg", "%s", "Werte falsch");
+        }
+        u8_DeleteFile(tmp);
+    }
+    /* W271 STICK-RELATIVE: stick_aim/stick_aim_sens (Standard position/4,
+     * Roundtrip, Klemmung) + Stick-Modus je Quelle im Belegungsdialog
+     * (lctrl_stick_mode_get/_set) + Aktion aim_center. */
+    {
+        static lctrl_bind_t sb;
+        int ok = 1, ix, ir, ic;
+        char why[96] = "";
+        FILE *f = NULL;
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w271_stick_test.cfg");
+        u8_DeleteFile(tmp);
+        lcfg_defaults(&a);
+        if (a.stick_aim != 0 || a.stick_aim_sens != 4) { ok = 0; strcpy_s(why, sizeof why, "Standard"); }
+        a.stick_aim = 1;
+        a.stick_aim_sens = 9;
+        if (ok && lcfg_save_user(tmp, &a) == 0) {
+            char buf[8192];
+            size_t n = 0;
+            lcfg_defaults(&b);
+            lcfg_load_file(tmp, &b);
+            if (b.stick_aim != 1 || b.stick_aim_sens != 9) { ok = 0; strcpy_s(why, sizeof why, "Roundtrip"); }
+            if (u8_fopen_s(&f, tmp, "rb") == 0 && f) {
+                n = fread(buf, 1, sizeof buf - 1, f);
+                fclose(f);
+            }
+            buf[n] = '\0';
+            if (ok && !strstr(buf, "relative")) { ok = 0; strcpy_s(why, sizeof why, "Datei ohne relative"); }
+        } else if (ok) {
+            ok = 0;
+            strcpy_s(why, sizeof why, "speichern");
+        }
+        if (ok && (f = NULL, u8_fopen_s(&f, tmp, "wb") == 0) && f) {
+            fputs("[input]\nstick_aim=position\nstick_aim_sens=99\n", f);
+            fclose(f);
+            lcfg_defaults(&b);
+            b.stick_aim = 1;
+            lcfg_load_file(tmp, &b);
+            if (b.stick_aim != 0 || b.stick_aim_sens != 16) { ok = 0; strcpy_s(why, sizeof why, "position/Klemmung"); }
+        }
+        u8_DeleteFile(tmp);
+        memset(&sb, 0, sizeof sb);
+        ix = lctrl_bind_elem_index("aim_x");
+        ir = lctrl_bind_elem_index("rot");
+        ic = lctrl_bind_elem_index("aim_center");
+        if (ok && (ix < 0 || ir < 0 || ic < 0 || kCtrlElems[ic].kind != LCTRL_ACT)) {
+            ok = 0; strcpy_s(why, sizeof why, "Elemente");
+        }
+        if (ok) {
+            lctrl_bind_set(&sb, ix, "MOUSE:X:mode=aim, PAD:LX:dz=0.15:curve=1.5, JOY0:X:dz=0.05");
+            lctrl_bind_set(&sb, ir, "PAD:RX:dz=0.12");
+            if (lctrl_stick_mode_get(&sb, ix) != 0 || lctrl_stick_mode_get(&sb, ir) != -1 ||
+                !(lctrl_bind_detail_vis(&sb, ix) & LCTRL_VIS_SMODE) ||
+                (lctrl_bind_detail_vis(&sb, ir) & LCTRL_VIS_SMODE)) {
+                ok = 0; strcpy_s(why, sizeof why, "get/vis");
+            }
+        }
+        if (ok && (lctrl_stick_mode_set(&sb, ix, 2) != 0 || lctrl_stick_mode_get(&sb, ix) != 2 ||
+                   strcmp(sb.row[ix].alt[0], "MOUSE:X:mode=aim") != 0 ||
+                   strcmp(sb.row[ix].alt[1], "PAD:LX:dz=0.15:curve=1.5:mode=rate") != 0 ||
+                   strcmp(sb.row[ix].alt[2], "JOY0:X:dz=0.05:mode=rate") != 0)) {
+            ok = 0; _snprintf_s(why, sizeof why, _TRUNCATE, "set rate: %s", sb.row[ix].alt[1]);
+        }
+        if (ok && (lctrl_stick_mode_set(&sb, ix, 1) != 0 || lctrl_stick_mode_get(&sb, ix) != 1 ||
+                   !strstr(sb.row[ix].alt[2], ":mode=position"))) {
+            ok = 0; strcpy_s(why, sizeof why, "set position");
+        }
+        if (ok && (lctrl_stick_mode_set(&sb, ix, 0) != 0 || lctrl_stick_mode_get(&sb, ix) != 0 ||
+                   strstr(sb.row[ix].alt[1], "mode=") || lctrl_stick_mode_set(&sb, ir, 2) == 0 ||
+                   lctrl_stick_src("PAD:LT:dz=0.05") || lctrl_stick_src("JOY0:Z+") ||
+                   !lctrl_stick_src("PAD:RY:inv=1"))) {
+            ok = 0; strcpy_s(why, sizeof why, "global/rot/Quellen");
+        }
+        if (ok) {
+            T_OK("W271 stick-aim cfg + Stick-Modus je Quelle + aim_center");
+        } else {
+            T_FAIL("W271 stick-aim", "%s", why);
+        }
     }
 
     /* W236 AIM-ASSIST: Altwert aim_turn=1 (alpha.6) -> Stufe 1; Speichern
@@ -1490,6 +1670,9 @@ static int cli_selftest(const char *client_override)
                 } else if (k == LGK_DYN) { b.rt_scale_dyn = 1;
                 } else if (k == LGK_MATCH) { b.fs_interp_match = !b.fs_interp_match;
                 } else if (k == LGK_MFX) { b.monitor_fx = !b.monitor_fx; /* W252 */
+                } else if (k == LGK_EDGE) { b.edge_mode = b.edge_mode == 2 ? 0 : 2; /* W266 */
+                } else if (k == LGK_EDGEW) { b.edge_fade_width += 4;
+                } else if (k == LGK_EDGES) { b.edge_fade_strength -= 10;
                 } else {
                     b.remaster = b.hd_textures = !b.hd_textures;
                 }
@@ -1591,7 +1774,7 @@ static int cli_selftest(const char *client_override)
         lrules_eval(&env, rr);
         if (!rr[14].active || lcfg_gfx_base(&b, 0) != LGP_PERFORMANCE) { ok = 0; }
         lcfg_gfx_apply(&b, LGP_ORIGINAL);
-        if (b.interp_fps != 120 || b.rt_scale != 0 || !b.fs_interp_match) { ok = 0; }
+        if (b.interp_fps != SB_FPS_AUTO || b.rt_scale != 0 || !b.fs_interp_match) { ok = 0; } /* W296: Original = auto */
         /* Legacy values remain valid and unchanged when loaded. */
         lcfg_defaults(&b);
         lcfg_apply_set(&b, "interp_fps=60;rt_scale=3;rt_scale_dyn=1");
@@ -1616,7 +1799,7 @@ static int cli_selftest(const char *client_override)
         b = a;
         lcfg_gfx_apply(&a, LGP_CLEAR);
         for (k = 0; k < LGK_N && !why[0]; k++) { /* nur shading und monitor_fx anders als Original */
-            if (!lcfg_gfx_owned(k)) { continue; }
+            if (!lcfg_gfx_owned(k) || k == LGK_FPS) { continue; } /* W296: Original auto, Klare Sicht weiter 120 */
             if ((lcfg_gfx_value(&a, k) != lcfg_gfx_value(&b, k)) != (k == LSHX_SHADING || k == LGK_MFX)) {
                 _snprintf_s(why, sizeof why, _TRUNCATE, "Wert %s", lcfg_gfx_key(k));
             }
@@ -1649,13 +1832,198 @@ static int cli_selftest(const char *client_override)
         if (!why[0] && (lcfg_gfx_preset(&b, 0) != LGP_CUSTOM || lcfg_gfx_base(&b, 0) != LGP_ORIGINAL)) {
             strcpy_s(why, sizeof why, "nur monitor_fx");
         }
-        lcfg_apply_set(&b, "shading=0"); /* beide aus = Klare Sicht */
+        lcfg_apply_set(&b, "shading=0;interp_fps=120"); /* beide aus = Klare Sicht (W296: mit ihrer Rate 120) */
         if (!why[0] && lcfg_gfx_preset(&b, 0) != LGP_CLEAR) { strcpy_s(why, sizeof why, "beide aus"); }
         lcfg_gfx_apply(&b, LGP_ORIGINAL);
         if (!why[0] && (b.monitor_fx != 1 || b.shx[LSHX_SHADING] != 1)) { strcpy_s(why, sizeof why, "zurueck"); }
         u8_DeleteFile(tmp);
         if (!why[0]) { T_OK("W252 clear-view (shading 0 + monitor_fx 0, save/load, alt, Custom)"); }
         else { T_FAIL("W252 clear-view", "%s", why); }
+    }
+
+    /* W266 PRESET-EDGE: Breitbild-Raender (Ausblenden, 8 %, 100 %) gehoeren zu
+     * allen Grafik-Presets; Standard = Original; alte cfg mit anderen Rand-
+     * werten = Benutzerdefiniert (Basis Original, nur Rand-Schluessel weichen
+     * ab); Preset-Wahl setzt die Raender; Rundweg user.cfg; Namen ohne "(HD)". */
+    {
+        char why[96] = "", keep[8];
+        int p, li;
+        lgp_mask_t dm = 0;
+        const lgp_mask_t em = ((lgp_mask_t)1 << LGK_EDGE) | ((lgp_mask_t)1 << LGK_EDGEW) |
+                              ((lgp_mask_t)1 << LGK_EDGES);
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w266_edge.cfg");
+        u8_DeleteFile(tmp);
+        lcfg_defaults(&a);
+        if (a.edge_mode != 1 || a.edge_fade_width != 8 || a.edge_fade_strength != 100 || /* W278: 4:3 */
+            lcfg_gfx_preset(&a, 0) != LGP_ORIGINAL) { strcpy_s(why, sizeof why, "Standard"); }
+        for (p = 0; p < SB_GP_NPRE && !why[0]; p++) {
+            b = a;
+            b.edge_mode = 0;
+            b.edge_fade_width = 12;
+            b.edge_fade_strength = 60;
+            lcfg_gfx_apply(&b, p);
+            if (b.edge_mode != 1 || b.edge_fade_width != 8 || b.edge_fade_strength != 100 || /* W278: 4:3 */
+                lcfg_gfx_preset_value(p, LGK_EDGE) != 1 || lcfg_gfx_preset_value(p, LGK_EDGEW) != 8 ||
+                lcfg_gfx_preset_value(p, LGK_EDGES) != 100 || lcfg_gfx_preset(&b, 0) != p) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Preset %d setzt Raender nicht", p);
+            }
+        }
+        lcfg_defaults(&b); /* alte cfg (vor W266): Rand aus bzw. 10/12 % -> Benutzerdefiniert, Basis Original */
+        lcfg_apply_set(&b, "edge_mode=0;edge_fade_width=12;edge_fade_strength=100");
+        if (!why[0] && (lcfg_gfx_preset(&b, 0) != LGP_CUSTOM || lcfg_gfx_base(&b, 0) != LGP_ORIGINAL ||
+                        lcfg_gfx_diff(&b, LGP_ORIGINAL, 0, &dm) != 2 || (dm & ~em) != 0)) {
+            strcpy_s(why, sizeof why, "alte cfg aus/12");
+        }
+        lcfg_defaults(&b);
+        lcfg_apply_set(&b, "edge_mode=2;edge_fade_width=10");
+        if (!why[0] && (lcfg_gfx_preset(&b, 0) != LGP_CUSTOM || lcfg_gfx_base(&b, 0) != LGP_ORIGINAL)) {
+            strcpy_s(why, sizeof why, "alte cfg 10 %");
+        }
+        lcfg_gfx_apply(&b, LGP_PERFORMANCE); /* Wahl setzt die Raender */
+        if (!why[0] && (b.edge_fade_width != 8 || lcfg_gfx_preset(&b, 0) != LGP_PERFORMANCE)) {
+            strcpy_s(why, sizeof why, "Wahl Performance");
+        }
+        if (!why[0] && lcfg_save_user(tmp, &b) != 0) { strcpy_s(why, sizeof why, "speichern"); }
+        if (!why[0]) {
+            FILE *g = NULL;
+            char buf2[16384] = "";
+            if (u8_fopen_s(&g, tmp, "r") == 0 && g) {
+                (void)fread(buf2, 1, sizeof buf2 - 1, g);
+                fclose(g);
+            }
+            lcfg_defaults(&a);
+            lcfg_load_file(tmp, &a);
+            if (memcmp(&a, &b, sizeof a) || lcfg_gfx_preset(&a, 0) != LGP_PERFORMANCE ||
+                !strstr(buf2, "edge_mode=1") || !strstr(buf2, "edge_fade_width=8") || /* W278 */
+                !strstr(buf2, "edge_fade_strength=100")) {
+                strcpy_s(why, sizeof why, "Rundweg");
+            }
+        }
+        strcpy_s(keep, sizeof keep, sb_lang_code()); /* Namen EN/DE ohne "(HD)" (W296: "Original" / "Performance") */
+        for (li = 0; li < 2 && !why[0]; li++) {
+            static const char *const nk[4] = { "gui.gfx_p_orig", "gui.gfx_p_performance", "ovl.v_orig_hd",
+                                               "ovl.v_performance" };
+            int i;
+            sb_lang_set(li ? "de" : "en");
+            for (i = 0; i < 4 && !why[0]; i++) {
+                const char *t = LT(nk[i]);
+                if (strstr(t, "(HD)") || strcmp(t, (i & 1) ? "Performance" : "Original") != 0) {
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "Name %s %s", li ? "de" : "en", nk[i]);
+                }
+            }
+        }
+        sb_lang_set(keep);
+        u8_DeleteFile(tmp);
+        if (!why[0]) { T_OK("W266 preset-edge (Raender 1/8/100 = 4:3 seit W278 in allen Presets, alte cfg Custom, Rundweg, Namen)"); }
+        else { T_FAIL("W266 preset-edge", "%s", why); }
+    }
+
+    /* W296 PRESET-ORIG: ein "Original" (Name ohne Bildrate) = Monitor (auto);
+     * alte Dateien (ohne gfx_preset_rev) mit dem bisherigen Original 120 +
+     * fs_interp_match=1 werden beim Laden Original (auto), jede andere Rate und
+     * jede neue Datei bleiben; "Performance" heisst so und bleibt 60. */
+    {
+        char why[120] = "", keep[8], buf2[16384] = "";
+        int p, li;
+        launcher_settings_t c;
+        FILE *g = NULL;
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w296_orig.cfg");
+        lcfg_defaults(&a);
+        if (a.interp_fps != SB_FPS_AUTO || a.gfx_preset_rev != SB_GP_REV || lcfg_gfx_preset(&a, 0) != LGP_ORIGINAL ||
+            lcfg_gfx_preset_value(LGP_ORIGINAL, LGK_FPS) != SB_FPS_AUTO) {
+            strcpy_s(why, sizeof why, "Standard/Original != auto");
+        }
+        for (p = 1; p < SB_GP_NPRE && !why[0]; p++) { /* uebrige Presets wie bisher */
+            if (lcfg_gfx_preset_value(p, LGK_FPS) != (p == LGP_PERFORMANCE ? 60 : 120)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Preset %d Bildrate %d", p, lcfg_gfx_preset_value(p, LGK_FPS));
+            }
+        }
+        b = a;
+        b.interp_fps = 60;
+        lcfg_gfx_apply(&b, LGP_ORIGINAL);
+        if (!why[0] && (b.interp_fps != SB_FPS_AUTO || b.fs_interp_match != 1 || lcfg_gfx_preset(&b, 0) != LGP_ORIGINAL)) {
+            strcpy_s(why, sizeof why, "Wahl Original setzt auto nicht");
+        }
+        lcfg_gfx_apply(&b, LGP_PERFORMANCE);
+        if (!why[0] && (b.interp_fps != 60 || lcfg_gfx_preset(&b, 0) != LGP_PERFORMANCE)) {
+            strcpy_s(why, sizeof why, "Performance 60");
+        }
+        /* Migration: alte Datei = gespeichert und Zeile gfx_preset_rev entfernt */
+        for (p = 0; p < 6 && !why[0]; p++) {
+            /* 0: altes Original 120+Match -> auto; 1: alte 60 bleibt; 2: alte 120 ohne Match bleibt;
+             * 3: alte 120 mit Breitbild bleibt; 4: neue Datei mit 120 bleibt (bewusst);
+             * 5: alte 144 bleibt */
+            static const int fps_in[6] = { 120, 60, 120, 120, 120, 144 };
+            const int want = p == 0 ? SB_FPS_AUTO : fps_in[p];
+            FILE *w = NULL;
+            char line[512], tmp2[1100];
+            int drop = p != 4, mig;
+            lcfg_defaults(&a);
+            a.interp_fps = fps_in[p];
+            if (p == 2) { a.fs_interp_match = 0; }
+            if (p == 3) { a.edge_mode = 2; }
+            u8_DeleteFile(tmp);
+            if (lcfg_save_user(tmp, &a) != 0) { strcpy_s(why, sizeof why, "speichern"); break; }
+            _snprintf_s(tmp2, sizeof tmp2, _TRUNCATE, "%s.old", tmp);
+            u8_DeleteFile(tmp2);
+            if (u8_fopen_s(&g, tmp, "r") == 0 && g && u8_fopen_s(&w, tmp2, "w") == 0 && w) {
+                while (fgets(line, sizeof line, g)) {
+                    if (drop && strncmp(line, SB_GP_REV_KEY "=", strlen(SB_GP_REV_KEY) + 1) == 0) { continue; }
+                    fputs(line, w);
+                }
+            }
+            if (g) { fclose(g); g = NULL; }
+            if (w) { fclose(w); }
+            lcfg_defaults(&b);
+            b.gfx_preset_rev = 0; /* wie app_load_effective / lcfg_profile_load */
+            lcfg_load_file(tmp2, &b);
+            c = b;
+            mig = lcfg_gfx_migrate_fps(&b);
+            if (b.interp_fps != want || b.gfx_preset_rev != SB_GP_REV || mig != (p == 0) ||
+                c.gfx_preset_rev != (drop ? 0 : SB_GP_REV)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Migration Fall %d: %d -> %d (rev %d, mig %d)", p, fps_in[p],
+                            b.interp_fps, c.gfx_preset_rev, mig);
+            }
+            if (!why[0] && p == 0 && lcfg_gfx_preset(&b, 0) != LGP_ORIGINAL) { strcpy_s(why, sizeof why, "altes Original != Original"); }
+            if (!why[0] && p == 4 && (lcfg_gfx_preset(&b, 0) != LGP_CUSTOM || lcfg_gfx_base(&b, 0) != LGP_ORIGINAL)) {
+                strcpy_s(why, sizeof why, "bewusste 120: Custom/Basis Original");
+            }
+            if (!why[0] && p == 1 && lcfg_gfx_preset(&b, 0) != LGP_CUSTOM) { strcpy_s(why, sizeof why, "alte 60 Custom"); }
+            u8_DeleteFile(tmp2);
+        }
+        if (!why[0]) { /* gespeicherte Datei traegt den Stand, Rundweg auto */
+            lcfg_defaults(&a);
+            u8_DeleteFile(tmp);
+            lcfg_save_user(tmp, &a);
+            if (u8_fopen_s(&g, tmp, "r") == 0 && g) {
+                (void)fread(buf2, 1, sizeof buf2 - 1, g);
+                fclose(g);
+            }
+            lcfg_defaults(&b);
+            b.gfx_preset_rev = 0;
+            lcfg_load_file(tmp, &b);
+            if (!strstr(buf2, "interp_fps=-1") || !strstr(buf2, SB_GP_REV_KEY "=1") || memcmp(&a, &b, sizeof a)) {
+                strcpy_s(why, sizeof why, "Rundweg auto/gfx_preset_rev");
+            }
+        }
+        strcpy_s(keep, sizeof keep, sb_lang_code()); /* Namen EN/DE: ohne Bildrate */
+        for (li = 0; li < 2 && !why[0]; li++) {
+            static const char *const nk[3] = { "gui.gfx_p_orig", "ovl.v_orig_hd", "gui.gfx_p_orig_txt" };
+            int i;
+            sb_lang_set(li ? "de" : "en");
+            for (i = 0; i < 3 && !why[0]; i++) {
+                const char *t = LT(nk[i]);
+                if (strstr(t, "%") || strstr(t, "FPS") || strstr(t, "120") || (i < 2 && strcmp(t, "Original") != 0)) {
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "Name %s %s", li ? "de" : "en", nk[i]);
+                }
+            }
+        }
+        sb_lang_set(keep);
+        u8_DeleteFile(tmp);
+        if (!why[0]) { T_OK("W296 preset-orig (Original = Monitor auto, Name ohne FPS EN/DE, altes Original 120 -> auto, bewusste 60/120/144 bleiben, Performance 60, gfx_preset_rev)"); }
+        else { T_FAIL("W296 preset-orig", "%s", why); }
     }
 
     /* W259 SETTINGS-RESET: 3-Wege-Abgleich (reine Logik). ui == base ->
@@ -1711,13 +2079,13 @@ static int cli_selftest(const char *client_override)
         for (i = 0; i < (int)(sizeof hz_in / sizeof hz_in[0]); i++) {
             if (sb_fps_auto_from_hz(hz_in[i]) != hz_out[i]) { ok = 0; strcpy_s(why, sizeof why, "auto hz"); }
         }
-        /* Speichern/Laden: auto und 144; Standard bleibt 120/Original. */
+        /* Speichern/Laden: 120 und 144 (W296: feste Raten = Benutzerdefiniert); Standard auto/Original (W296). */
         u8_GetTempPath(tmp, sizeof tmp);
         strcat_s(tmp, sizeof tmp, "w223_fps.cfg");
         for (i = 0; i < 2; i++) {
             u8_DeleteFile(tmp);
             lcfg_defaults(&a);
-            a.interp_fps = i ? 144 : SB_FPS_AUTO;
+            a.interp_fps = i ? 144 : 120; /* W296: auto ist jetzt Original */
             if (lcfg_save_user(tmp, &a) != 0) { ok = 0; }
             lcfg_defaults(&b);
             lcfg_load_file(tmp, &b);
@@ -1728,7 +2096,7 @@ static int cli_selftest(const char *client_override)
         }
         u8_DeleteFile(tmp);
         lcfg_defaults(&b);
-        if (b.interp_fps != 120 || lcfg_gfx_preset(&b, 0) != LGP_ORIGINAL) { ok = 0; strcpy_s(why, sizeof why, "default"); }
+        if (b.interp_fps != SB_FPS_AUTO || lcfg_gfx_preset(&b, 0) != LGP_ORIGINAL) { ok = 0; strcpy_s(why, sizeof why, "default"); } /* W296 */
         lcfg_gfx_apply(&b, LGP_PERFORMANCE);
         if (b.interp_fps != 60) { ok = 0; strcpy_s(why, sizeof why, "performance"); }
         lcfg_apply_set(&b, "interp_fps=-1");
@@ -2396,9 +2764,9 @@ static int cli_selftest(const char *client_override)
         } else if (_strnicmp(up, root, strlen(root)) != 0) {
             strcpy_s(why, sizeof why, "user.cfg nicht in der frischen Wurzel");
         } else if (fs.game_image[0] || fs.window_mode != 0 || fs.input_profile[0] ||
-                   fs.sbc_usb != 0 || fs.interp_fps != 120 || fs.aspect_mode != 1 ||
+                   fs.sbc_usb != 0 || fs.interp_fps != SB_FPS_AUTO || fs.aspect_mode != 1 || /* W296: Original = auto */
                    lcfg_gfx_preset(&fs, 0) != LGP_ORIGINAL) {
-            strcpy_s(why, sizeof why, "Standardwerte (Abbild leer, Fenster, Tastatur, Original (HD) 120)");
+            strcpy_s(why, sizeof why, "Standardwerte (Abbild leer, Fenster, Tastatur, Original auto)");
         }
         if (!why[0]) { /* Erststart-Regeln: Sprache + Fenster passt / randlos */
             f2 = fs;
@@ -2948,7 +3316,8 @@ static int cli_selftest(const char *client_override)
             _snprintf_s(why, sizeof why, _TRUNCATE, "rot.pos mit JOY0:Z+: vis=%u", v);
         }
         if (!why[0] && (v = lctrl_bind_detail_vis(&b, ay)) !=
-                           (LCTRL_VIS_MOUSE | LCTRL_VIS_JOY | LCTRL_VIS_JOYDZ)) {
+                           (LCTRL_VIS_MOUSE | LCTRL_VIS_JOY | LCTRL_VIS_JOYDZ |
+                            LCTRL_VIS_SMODE)) { /* W271: Stick-Modus (JOY-Achse auf aim_y) */
             _snprintf_s(why, sizeof why, _TRUNCATE, "aim_y Maus+JOY: vis=%u", v);
         }
         if (!why[0] && (lctrl_bind_detail_vis(&b, pa) != 0 ||
@@ -3109,6 +3478,12 @@ static int cli_selftest(const char *client_override)
     /* 30-37 (W148): Packs-Seite + Render-Skalierung (launcher_packtest.c). */
     packs_selftest(&pass, &fail);
     lupd_selftest(&pass, &fail); /* W250 UPDATE-CHECK (ohne Netz) */
+    lgame_selftest(&pass, &fail); /* W276 LOC-LAUNCH (Spielauswahl, LoC-Abbild, Startsperre) */
+    lorig_selftest(&pass, &fail); /* W278 ORIG-FLAG (Einordnung, Hinweis, Back to original, 4:3, Einmal-Start) */
+    g_llay_pass = g_llay_fail = 0; /* W281 LAUNCHER-SIZE: Layout 0/a/b (rein) */
+    llay_selftest(llay_rep);
+    pass += g_llay_pass;
+    fail += g_llay_fail;
     { /* W250: user.cfg nur mit der Update-Antwort = weiter Erststart */
         char d[1100], uc[1200];
         int k1 = -1, k2 = -1;
@@ -3135,6 +3510,13 @@ static int cli_selftest(const char *client_override)
         sb_lang_set("de");
     }
 
+    la_selftest(&pass, &fail); /* W272 ALPHA-TEST: VT-Liste, Pruefung, Kette, Testordner, A/B */
+    alpha_gui_selftest(client_override, &pass, &fail); /* W272: Seite Alpha Test */
+    ld_selftest(&pass, &fail); /* W279 DIAG-CRASH: Erkennung, einmalig, Issue-Link, Paket, Bereinigung */
+    dg_gui_selftest(client_override, &pass, &fail); /* W279: Absturz-Karte */
+    w282_gui_selftest(client_override, &pass, &fail); /* W282 ISSUE6 */
+    w283_gui_selftest(client_override, &pass, &fail); /* W283 ORIG-KEY-BIND */
+    w290_gui_selftest(client_override, &pass, &fail); /* W290 QUICK-SHOT */
     if (!ls_replay_selftest()) { T_OK("W254 replay list (folders, SaveMeta name, mission, signature state, order, set args)"); }
     else { T_FAIL("W254 replay list", "%s", "failed"); }
     if (!ls_selftest()) { T_OK("W199 save-import layouts, conflicts, backup, ZIP roundtrip, rejection"); }
@@ -3506,6 +3888,7 @@ int app_launch_client(const char *client_dir, const char *xbe_path,
  * schreiben, nicht starten; die Start-Kommandozeile wird gezeigt). W159:
  * Bildschirm: --set vr_enable=0 (VR immer aus); --vr: vr_enable=1 +
  * Vorschau. 0 = ok. */
+static const la_sel_t *g_cli_alpha; /* W272: --alpha-mission (NULL = normaler Start) */
 static int cli_start(const char *client_override, const char *profile,
                      const char *set, int dry_run, int vr, int wait,
                      const char *replay, int replay_cam)
@@ -3534,6 +3917,9 @@ static int cli_start(const char *client_override, const char *profile,
     if (lcfg_validate(&s, err, sizeof err) != 0) {
         printf("FEHLER: %s\n", err);
         return 1;
+    }
+    if (g_cli_alpha && la_cli_check(&s, g_cli_alpha) != 0) { /* W272: ungueltig -> nichts schreiben */
+        return 3;
     }
     lcfg_user_cfg_path(client, upath, sizeof upath); /* W150 USER-DATA */
     if (lcfg_save_user(upath, &s) != 0) {
@@ -3571,6 +3957,12 @@ static int cli_start(const char *client_override, const char *profile,
         strcat_s(set_args, sizeof set_args, ";");
         strcat_s(set_args, sizeof set_args, ra);
         printf("replay: %s (experimentell)\n", ra);
+    }
+    if (g_cli_alpha) { /* W272 ALPHA-TEST: Testordner + Kette hinter der Fassung */
+        int ar = la_cli_apply(client, &s, g_cli_alpha, dry_run, set_args, sizeof set_args);
+        if (ar != 0) {
+            return ar;
+        }
     }
     {
         char xbe[1024]; /* W172: im Ordner-Modus abgeleitet */
@@ -3697,6 +4089,31 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
             }
         }
     }
+    { /* W281 LAUNCHER-SIZE: Layout-Vorschau (Entwurf) - GUI und Shots */
+        const char *lv = cli_value(argc, argv, "--layout");
+        const char *sz = cli_value(argc, argv, "--ui-size");
+        const char *wk = cli_value(argc, argv, "--work");
+        if (lv) {
+            if (llay_parse(lv) < 0) {
+                cli_console();
+                printf("FEHLER: --layout braucht 0|a|b.\n");
+                return 1;
+            }
+            strncpy_s(o.layout, sizeof o.layout, lv, _TRUNCATE);
+        }
+        if (sz) {
+            if (llay_size_parse(sz) < 0) {
+                cli_console();
+                printf("FEHLER: --ui-size braucht compact|normal|large.\n");
+                return 1;
+            }
+            strncpy_s(o.ui_size, sizeof o.ui_size, sz, _TRUNCATE);
+        }
+        gui_layout_override(o.layout, o.ui_size);
+        if (wk && sscanf_s(wk, "%dx%d", &o.lay_work_w, &o.lay_work_h) != 2) {
+            o.lay_work_w = o.lay_work_h = 0;
+        }
+    }
     { /* W142: Sprache (lang/ neben der Exe; Code folgt aus cfg/--lang). */
         const char *lg = cli_value(argc, argv, "--lang");
         char exe[1024], ldir[1150];
@@ -3747,6 +4164,9 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
         cli_console();
         rc = lcfg_image_check(cli_value(argc, argv, "--check-image"), m, sizeof m);
         printf("%s\n", m);
+    } else if (cli_flag(argc, argv, "--diag-package")) { /* W279 DIAG-CRASH: Diagnosepaket ohne Fenster */
+        cli_console();
+        rc = gui_diag_package_cli(client_override);
     } else if (cli_flag(argc, argv, "--userdata")) { /* W150 USER-DATA */
         static const char *const kn[7] = { "root", "user.cfg", "hdd", "packs", "shadercache", "logs", "crash" };
         char p[1024];
@@ -3778,6 +4198,16 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
     } else if (cli_flag(argc, argv, "--gui-start-dry")) {
         cli_console();
         o.shot = 4;
+        { /* W272: Startweg "Start test" (Trockenlauf) */
+            la_sel_t as;
+            if (cli_alpha(argc, argv, &as)) {
+                o.alpha_on = 1;
+                o.alpha_mission = as.mission;
+                o.alpha_vt = as.vt;
+                o.alpha_diff = as.diff;
+                o.alpha_skip = as.skip_intro;
+            }
+        }
         if (cli_value(argc, argv, "--replay")) { /* W254: Startweg "Play replay" (Trockenlauf) */
             strcpy_s(o.replay, sizeof o.replay, cli_value(argc, argv, "--replay"));
             o.replay_cam = cli_value(argc, argv, "--replay-camera")
@@ -3787,8 +4217,24 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
             }
         }
         rc = gui_main(client_override, &o);
-    } else if (cli_flag(argc, argv, "--start")) {
+    } else if (cli_flag(argc, argv, "--start") && cli_value(argc, argv, "--game") &&
+               lgame_from_key(cli_value(argc, argv, "--game")) == LGAME_LOC) {
+        /* W276 LOC-LAUNCH: Line of Contact startet der Client noch nicht ->
+         * Meldung statt Startversuch (Exit 3); nichts wird geschrieben. */
+        char m[600];
         cli_console();
+        if (cli_value(argc, argv, "--lang")) {
+            sb_lang_set(cli_value(argc, argv, "--lang"));
+        }
+        if (lgame_loc_start_gate(NULL, m, sizeof m) == 0) {
+            strcpy_s(m, sizeof m, LT("gui.loc_start_noimg"));
+        }
+        printf("%s\n", m);
+        rc = 3;
+    } else if (cli_flag(argc, argv, "--start")) {
+        la_sel_t as; /* W272: --alpha-mission N [--alpha-vt V] [--alpha-diff D] [--alpha-skip-intro] */
+        cli_console();
+        g_cli_alpha = cli_alpha(argc, argv, &as) ? &as : NULL;
         rc = cli_start(client_override, profile, cli_value(argc, argv, "--set"),
                        cli_flag(argc, argv, "--dry-run"),
                        cli_flag(argc, argv, "--vr"),
@@ -3816,6 +4262,9 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
         } else if (bv && strcmp(bv, "joy") == 0) { /* W226: HOTAS-Beispiel */
             o.bind_sel = lctrl_bind_elem_index("pedal_r");
             o.bind_joydemo = 1;
+        } else if (bv && strcmp(bv, "stick") == 0) { /* W271: Stick-Modus-Beispiel */
+            o.bind_sel = lctrl_bind_elem_index("aim_x");
+            o.bind_stickdemo = 1;
         } else if (bv && strcmp(bv, "wheel") == 0) { /* W260: Mausrad-Beispiel */
             o.bind_sel = lctrl_bind_elem_index("tuner.up");
             o.bind_wheeldemo = 1;
@@ -3869,7 +4318,7 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
             o.page = gui_page_from_name(v);
             if (o.page < 0) {
                 printf("FEHLER: --ui-shot braucht play|display|graphics|packs|"
-                       "controls|audio|advanced|alle (alt: start|grafik|remaster|"
+                       "controls|audio|advanced|alpha|alle (alt: start|grafik|remaster|"
                        "ton|steuerung|profile|pfade).\n");
                 return 1;
             }
@@ -3899,7 +4348,7 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
         if (v && strcmp(v, "alle") != 0) {
             o.page = atoi(v);
             if (o.page < 0 || o.page >= gui_page_count()) {
-                printf("FEHLER: --shot braucht 0..6 oder 'alle'.\n");
+                printf("FEHLER: --shot braucht 0..7 oder 'alle'.\n");
                 return 1;
             }
         }

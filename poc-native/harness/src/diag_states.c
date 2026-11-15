@@ -12,6 +12,7 @@
 #include "sb_tex.h" /* W243 DIAG(AMMO-HUD) */
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
 #include <math.h>
 #include <windows.h>
 
@@ -801,3 +802,141 @@ void diag_combat_tick(unsigned frame)
     }
 }
 
+
+/* DIAG(CAMD) (W269 CAM-ELEVATION): Kamera gegen eigene VT-Lage, alle
+ * [log] cam_diag Missions-Frames (mloop=1). View [0x357E60] und Projektion
+ * [0x3B6560] sind die Spielmatrizen des Fadenkreuz-Projektors (SPIELZUSTAENDE
+ * §23.1, D3DX-Zeilenvektoren: Auge = -t * R^T). Eigene VT-Lage aus der
+ * Entity-Tabelle (+0x0C/+0x10/+0x14), Rumpf-Gierung [0x3521C0], Kamera-Gierung
+ * [0x356FAC], Neigung [0x352124]. Nur lesend, SEH-geschuetzt. */
+extern unsigned g_camd_fold_draws, g_camd_fold_verts; /* render_im.c */
+extern float g_camd_best_m[4][4];
+extern unsigned g_camd_best_n, g_camd_best_vp;
+static float cam_rdf(u32 a)
+{
+    u32 r = st_read(a);
+    float f;
+    memcpy(&f, &r, 4);
+    return f;
+}
+
+/* Je Spiel-Bild bis zu 4 verschiedene SetTransform(VIEW): Auge + Blickrichtung. */
+static float g_camd_vw[4][6];
+static unsigned g_camd_nv, g_camd_nset;
+void diag_cam_note_view(const float *m16)
+{
+    float e[6];
+    unsigned i;
+    int k;
+    __try {
+        for (k = 0; k < 3; k++) {
+            e[k] = -(m16[12] * m16[k * 4 + 0] + m16[13] * m16[k * 4 + 1] + m16[14] * m16[k * 4 + 2]);
+            e[3 + k] = m16[k * 4 + 2];
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    g_camd_nset++;
+    for (i = 0; i < g_camd_nv; i++) {
+        if (memcmp(g_camd_vw[i], e, sizeof e) == 0) {
+            return;
+        }
+    }
+    if (g_camd_nv < 4u) {
+        memcpy(g_camd_vw[g_camd_nv++], e, sizeof e);
+    }
+}
+
+void diag_cam_tick(unsigned frame)
+{
+    float v[16], p[16], pos[3] = { 0, 0, 0 }, eye[3], fwd[3], up[3];
+    float hy, cy, pt, zn = 0, zf = 0;
+    u32 n, tab, ours;
+    int k;
+    if (g_cfg.cam_diag <= 0) {
+        return;
+    }
+    if ((frame % (unsigned)g_cfg.cam_diag) != 0 || st_read(ST_MLOOP_ADDR) != 1u) {
+        g_camd_nv = g_camd_nset = 0; /* Views gelten je Spiel-Bild */
+        g_camd_best_n = 0;
+        return;
+    }
+    for (k = 0; k < 16; k++) {
+        v[k] = cam_rdf(SBA(0x357E60u) + (u32)(k * 4));
+        p[k] = cam_rdf(SBA(0x3B6560u) + (u32)(k * 4));
+    }
+    n = st_read(CMB_N_ADDR);
+    tab = st_read(CMB_TAB_ADDR);
+    ours = st_read16(CMB_OURS_ADDR) & 0xFFFFu;
+    if (tab != 0 && tab != 0xFFFFFFFFu && tab != 0xFFFFFFFEu && n < 100000u && ours < n) {
+        for (k = 0; k < 3; k++) {
+            pos[k] = cam_rdf(tab + ours * CMB_STRIDE + 0x0Cu + (u32)(k * 4));
+        }
+    }
+    /* View = [R | 0; t 1] (Zeilen 0..2 = Basis in Spalten): Auge = -(t . Spalte j) */
+    for (k = 0; k < 3; k++) {
+        eye[k] = -(v[12] * v[k * 4 + 0] + v[13] * v[k * 4 + 1] + v[14] * v[k * 4 + 2]);
+        fwd[k] = v[k * 4 + 2];
+        up[k] = v[k * 4 + 1];
+    }
+    if (p[10] < 0.0f && p[10] != -1.0f) { /* rechtshaendig: _33 = zf/(zn-zf), _43 = zn*zf/(zn-zf) */
+        zn = p[14] / p[10];
+        zf = p[14] / (1.0f + p[10]);
+    } else if (p[10] > 0.0f && p[10] != 1.0f) { /* linkshaendig */
+        zn = -p[14] / p[10];
+        zf = p[14] / (1.0f - p[10]);
+    }
+    hy = cam_rdf(SBA(0x3521C0u));
+    cy = cam_rdf(SBA(0x356FACu));
+    pt = cam_rdf(SBA(0x352124u));
+    HLOG_I("CAMD: f=%u pos=%.2f,%.2f,%.2f eye=%.2f,%.2f,%.2f dy=%.2f fwd=%.4f,%.4f,%.4f "
+           "up=%.4f,%.4f,%.4f hy=%.4f cy=%.4f pt=%.4f p11=%.4f p22=%.4f zn=%.3f zf=%.1f mdl=%u fold=%u/%u p33=%.5f p43=%.5f vt=%u",
+           frame, pos[0], pos[1], pos[2], eye[0], eye[1], eye[2], eye[1] - pos[1],
+           fwd[0], fwd[1], fwd[2], up[0], up[1], up[2], hy, cy, pt, p[0], p[5], zn, zf,
+           st_read16(SBA(0x3B8AA8u)) & 0xFFFFu, g_camd_fold_draws, g_camd_fold_verts, p[10], p[14], ours);
+    g_camd_fold_draws = g_camd_fold_verts = 0;
+    {
+        char vb[512];
+        size_t o = 0;
+        unsigned i;
+        vb[0] = 0;
+        for (i = 0; i < g_camd_nv && o < sizeof vb - 96; i++) {
+            o += (size_t)_snprintf_s(vb + o, sizeof vb - o, _TRUNCATE, " v%u=%.2f,%.2f,%.2f/%.4f,%.4f,%.4f", i,
+                                     g_camd_vw[i][0], g_camd_vw[i][1], g_camd_vw[i][2],
+                                     g_camd_vw[i][3], g_camd_vw[i][4], g_camd_vw[i][5]);
+        }
+        /* Auge aus der WVP (Zeilen x, y, w = 0; Welt des Draws als Einheit angenommen),
+         * Blickrichtung = Gradient von w. M[r][c] wirkt auf (x,y,z,1) als Spaltenvektor. */
+        if (g_camd_best_n > 0) {
+            double a[3][4];
+            int r, c, rr[3] = { 0, 1, 3 };
+            double det, ex = 0, ey = 0, ez = 0, fl;
+            for (r = 0; r < 3; r++) {
+                for (c = 0; c < 4; c++) {
+                    a[r][c] = g_camd_best_m[rr[r]][c];
+                }
+            }
+            det = a[0][0] * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) -
+                  a[0][1] * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+                  a[0][2] * (a[1][0] * a[2][1] - a[1][1] * a[2][0]);
+            if (det != 0.0) {
+                double b0 = -a[0][3], b1 = -a[1][3], b2 = -a[2][3];
+                ex = (b0 * (a[1][1] * a[2][2] - a[1][2] * a[2][1]) - a[0][1] * (b1 * a[2][2] - a[1][2] * b2) +
+                      a[0][2] * (b1 * a[2][1] - a[1][1] * b2)) / det;
+                ey = (a[0][0] * (b1 * a[2][2] - a[1][2] * b2) - b0 * (a[1][0] * a[2][2] - a[1][2] * a[2][0]) +
+                      a[0][2] * (a[1][0] * b2 - b1 * a[2][0])) / det;
+                ez = (a[0][0] * (a[1][1] * b2 - b1 * a[2][1]) - a[0][1] * (a[1][0] * b2 - b1 * a[2][0]) +
+                      b0 * (a[1][0] * a[2][1] - a[1][1] * a[2][0])) / det;
+            }
+            fl = sqrt(a[2][0] * a[2][0] + a[2][1] * a[2][1] + a[2][2] * a[2][2]);
+            if (fl <= 0.0) { fl = 1.0; }
+            o += (size_t)_snprintf_s(vb + o, sizeof vb - o, _TRUNCATE,
+                                     " cam=%.3f,%.3f,%.3f/%.4f,%.4f,%.4f n=%u vp=%ux%u",
+                                     ex, ey, ez, a[2][0] / fl, a[2][1] / fl, a[2][2] / fl,
+                                     g_camd_best_n, g_camd_best_vp >> 16, g_camd_best_vp & 0xFFFFu);
+        }
+        HLOG_I("CAMV: f=%u nset=%u%s", frame, g_camd_nset, vb);
+        g_camd_best_n = 0;
+        g_camd_nv = g_camd_nset = 0;
+    }
+}

@@ -22,13 +22,17 @@
 #include "d3d11_render.h"
 #include "watch_dr.h" /* W41 WATCHDR */
 #include "sb_gamever.h" /* W150 ISO-DIRECT */
+#include "loc_boot.h" /* W275 LOC-BOOT */
+#include "loc_mem.h" /* W277 LOC-DISC */
 #include "sb_pack.h"    /* W256 PACK-ANYVER */
 #include "sb_profile.h" /* W229 US-PROFILE */
 #include "sb_feedback.h" /* W188 GAME-MENU */
 #include "sb_userdata.h" /* W150 USER-DATA */
 #include "sb_relaunch.h" /* W186 RESET-TITLE */
 #include "sb_rauto.h" /* W254 REPLAY-LAUNCHER */
+#include "sb_mauto.h" /* W272 ALPHA-TEST */
 #include "render_vexp.h" /* W255 VIDEO-EXPORT */
+#include "sb_crash.h" /* W279 DIAG-CRASH */
 
 static int g_run_seconds;
 static volatile LONG g_wd_waited; /* W186: Sekunden seit Watchdog-Start (Rest-Laufzeit) */
@@ -164,8 +168,19 @@ static void crash_report(EXCEPTION_POINTERS *ep, const char *why)
             CloseHandle(lf);
         }
     }
-    f = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
-                    FILE_ATTRIBUTE_NORMAL, NULL);
+    /* W279 DIAG-CRASH: Ordner crash\<zeit>-crash\ mit Text (bereinigt), Minidump,
+     * info.txt, log_tail.txt; bisherige Einzeldatei nur noch als Rueckfall. */
+    {
+        char cpath[800];
+        if (sb_crash_report(ep, why, g_crash_buf, (int)k, strstr(why, "erste Chance") == NULL, cpath,
+                            sizeof cpath) && cpath[0]) {
+            strcpy_s(path, sizeof path, cpath);
+            f = INVALID_HANDLE_VALUE;
+        } else {
+            f = CreateFileA(path, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS,
+                            FILE_ATTRIBUTE_NORMAL, NULL);
+        }
+    }
     if (f != INVALID_HANDLE_VALUE) {
         WriteFile(f, g_crash_buf, (DWORD)strlen(g_crash_buf), &w, NULL);
         FlushFileBuffers(f);
@@ -336,6 +351,17 @@ static void veh_tbl_fix(PEXCEPTION_POINTERS ep, DWORD tls,
                 TlsSetValue(tls_veh, (void *)0);
                 return EXCEPTION_CONTINUE_SEARCH;
             }
+        }
+        /* W275 LOC-BOOT: SB-Korrekturen (adressgebunden) nie auf LoC-Code
+         * anwenden - kurz melden, Absturzbericht, Spiel-SEH entscheidet. */
+        if (g_sba_loc) {
+            xb_u32 ripl = (xb_u32)ep->ContextRecord->Eip;
+            loc_boot_veh_note(ep);
+            if (ripl >= 0x10000u && ripl < 0x2810000u) {
+                crash_report(ep, "VEH: LoC-Code-Ausnahme (erste Chance)");
+            }
+            TlsSetValue(tls_veh, (void *)0);
+            return EXCEPTION_CONTINUE_SEARCH;
         }
         /* DIAG(NULLCALL, W13): Sprung auf Adresse 0 (call ueber NULL-Zeiger).
          * Der generische Dump ist hier nutzlos (RIP=0) und nach 40 Fehlern
@@ -937,7 +963,7 @@ static int wd_syminit;
 static unsigned char *wd_snap;
 static DWORD wd_snap_lo, wd_snap_n;
 
-static void wd_sym_init(void)
+void wd_sym_init(void) /* W279: auch sb_crash.c (Haenger-Stacks) */
 {
     if (!wd_syminit) {
         wd_syminit = 1;
@@ -1133,7 +1159,9 @@ static DWORD WINAPI watchdog(LPVOID unused)
         waited += 5;
         InterlockedExchange(&g_wd_waited, waited); /* W186 */
         HLOG_I("watchdog: %.0fs, Frames=%u", (double)waited, hooks_frame_count());
+        if (g_sba_loc) { loc_boot_tick(waited); } /* W275 LOC-BOOT */
         threadwatch(waited);
+        sb_crash_tick(waited); /* W279 DIAG-CRASH: Test-Schalter, Haenger-Bericht, Erholung */
         { extern void sb_vr_watch(void); sb_vr_watch(); } /* W145: VR-Runtime-Haenger (vr_enable=0: sofort zurueck) */
         /* M2c: Stall-Forensik (read-only, kein SetThreadContext!). */
         {
@@ -1553,8 +1581,12 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
      * Neustart verloren). Nur beim ersten Oeffnen, best effort. */
     if (!sb_relaunch_child()) { /* W186: Neustart haengt an (Log des alten Prozesses bleibt davor) */
         char prev[620];
+        char prev2[620]; /* W279: drittes Log fuer das Diagnosepaket */
         _snprintf_s(prev, sizeof prev, _TRUNCATE, "%s/sb_harness.prev.log",
                     hcfg_out_dir());
+        _snprintf_s(prev2, sizeof prev2, _TRUNCATE, "%s/sb_harness.prev2.log",
+                    hcfg_out_dir());
+        MoveFileExA(prev, prev2, MOVEFILE_REPLACE_EXISTING);
         MoveFileExA(log_path, prev, MOVEFILE_REPLACE_EXISTING);
     }
     strcpy_s(g_log_path, sizeof g_log_path, log_path);
@@ -1568,11 +1600,14 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     hcfg_apply_set(g_cmdline_set, "cmdline");
     sb_relaunch_after_cfg(); /* W186: nur im Neustart-Kind (Zeile RELAUNCH + Ersatz-Set) */
     sb_rauto_init(); /* W254 REPLAY-LAUNCHER: nur mit replay_autoplay */
+    sb_mauto_init(); /* W272 ALPHA-TEST: nur mit mission_autostart */
+    if (g_cfg.loc_boot) { loc_mem_prereserve(); } /* W277: Contig-Bereich < 256 MB vor D3D sichern (nur [expert] loc_boot=1) */
     sb_vexp_init(); /* W255 VIDEO-EXPORT: nur mit video_export (setzt Groesse/Testtakt vor sb_render_init) */
     sb_rem_fx_start(); /* W151 EFFECT-PACK: Effect-Pack-Parameter auf cfg legen */
     if (sb_userdata_path(SB_UD_CRASH, g_crash_dir, sizeof g_crash_dir) != 1) { /* W150 */
         g_crash_dir[0] = 0;
     }
+    sb_crash_init(g_crash_dir, g_cmdline_set); /* W279 DIAG-CRASH */
     { /* W142: Spielertexte (lang/ neben sb_ldr.exe, Code aus [ui] lang) */
         char exe[1024], *s, ldir[1150];
         if (GetModuleFileNameA(NULL, exe, sizeof exe) && (s = strrchr(exe, '\\')) != NULL) {
@@ -1626,12 +1661,18 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     }
     { /* W150: Spielversion (SHA-256 + Zertifikat); Patch-Adressen gelten nur fuer PAL */
         int gv_ok = sb_gamever_check(img.file, img.file_size, &gv);
+        if (!(gv.loc && g_cfg.loc_boot)) {
+            loc_mem_drop_prereserve(); /* W277: kein LoC -> Vorab-Reservierung sofort frei (SB unberuehrt) */
+        }
         if (gv_ok && gv.ntsc_u && !g_cfg.ntsc_u) { /* W230: Notbremse [expert] ntsc_u=0 */
             HLOG_W("GAMEVER: US-Fassung per [expert] ntsc_u=0 abgeschaltet");
             gv.supported = 0;
             gv_ok = 0;
         }
-        if (gv_ok && gv.ntsc_u) { /* W229/W230 US-PROFILE: experimentell unterstuetzt */
+        if (!gv_ok && gv.loc && g_cfg.loc_boot) { /* W275 LOC-BOOT: Line of Contact, eigenes Profil */
+            HLOG_W("%s - Start mit LoC-Profil (experimentell, loc_boot=1)", gv.text);
+            loc_boot_select();
+        } else if (gv_ok && gv.ntsc_u) { /* W229/W230 US-PROFILE: experimentell unterstuetzt */
             HLOG_W("%s - Start mit US-Profil (experimentell)", gv.text);
             sb_profile_select_us();
             emu_hdd_root_us();
@@ -1667,6 +1708,7 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     /* Preserve the PAL success log order; only validation moved before parsing. */
     sb_feedback_note_gamever(&gv);
     HLOG_I("%s", gv.text);
+    sb_crash_note_game(&gv); /* W279: feste Angaben fuer Absturzberichte */
     sb_pack_set_game(gv.sha256); /* W256 PACK-ANYVER: Logzeile "PACK fassung:" */
     if (xbe_map(&img) != 0) {
         ExitProcess(1);
@@ -1687,8 +1729,12 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     watch_dr_init(); /* W41 WATCHDR: cfg parsen + DR bewaffnen (nur bei watch=...) */
     sb_profile_check_or_exit(); /* W229: US-Erstbytes vor Thunks/Hooks pruefen; EU: nichts */
     krnl_install_thunks(&img);
-    hooks_install();
-    fs_emu_patch_all();
+    if (g_sba_loc) { /* W275 LOC-BOOT: eigene Hook-Liste, keine SB-Spiel-/MMIO-/Datei-Patches */
+        loc_boot_install();
+    } else {
+        hooks_install();
+        fs_emu_patch_all();
+    }
     /* BINKPATCH-AUS (Bink-Completion noetig: TEXMOVIE/effect.efp-Load
      * wartet auf Bink-Textur. Patch -> Deadlock. Original -> langsam). */
 #if 0
@@ -1721,6 +1767,7 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     wd = krnl_CreateThread(watchdog, NULL, 0, NULL);
     if (wd) {
         CloseHandle(wd);
+        sb_crash_start(); /* W279: Hilfs-Thread fuer den Minidump */
     } else {
         HLOG_E("watchdog-Thread nicht erstellbar (GLE=%lu)", GetLastError());
     }

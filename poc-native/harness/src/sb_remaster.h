@@ -21,6 +21,8 @@ void sb_rem_fx_start(void);
 int sb_rem_fx_locked(const char *key);
 /* 1 = Dump oder Ersatz aktiv (sonst kostet nichts). */
 int sb_rem_active(void);
+/* W290: 1 = REPLAY-Schriftzug oder Logo aus (Upload-Hash nur fuer den Schrift-/UI-Atlas) */
+int sb_rpf_wanted(void);
 /* Aus tex_upload nach erfolgreichem Erzeugen der Original-SRV.
  * kind: 1 = DXT (pix = Bloecke, pitch = Bytes je Blockzeile), 2 = linear
  * (pix = Zeilen mit pitch), 3 = 0x06 ent-swizzelt (pitch = w*4).

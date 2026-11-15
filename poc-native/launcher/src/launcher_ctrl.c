@@ -131,6 +131,60 @@ int lctrl_name_shipped(const char *name)
                     strcmp(name, "xbox_pad_default") == 0);
 }
 
+int lctrl_vk_is_gamepad(int vk)
+{
+    return vk >= 0xC3 && vk <= 0xDA; /* VK_GAMEPAD_A .. RIGHT_THUMBSTICK_LEFT */
+}
+
+int lctrl_vk_is_modifier(int vk)
+{
+    return vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT || vk == VK_CONTROL ||
+           vk == VK_LCONTROL || vk == VK_RCONTROL || vk == VK_MENU || vk == VK_LMENU ||
+           vk == VK_RMENU;
+}
+
+int lctrl_bind_combo_row(int idx)
+{
+    return idx >= 0 && idx < LCTRL_ELEM_N &&
+           (strcmp(kCtrlElems[idx].key, "orig_view") == 0 || strcmp(kCtrlElems[idx].key, "photo") == 0 ||
+            strcmp(kCtrlElems[idx].key, "quick_shot") == 0); /* W290: photo, quick_shot */
+}
+
+int lctrl_bind_empty_line_row(int idx)
+{
+    return idx >= 0 && idx < LCTRL_ELEM_N &&
+           (strcmp(kCtrlElems[idx].key, "orig_view") == 0 || strcmp(kCtrlElems[idx].key, "quick_shot") == 0);
+}
+
+void lctrl_key_combo(int mod_vk, int vk, char *out, size_t cap)
+{
+    char k[32];
+    const char *m = NULL;
+    lctrl_key_name(vk, k, sizeof k);
+    if (mod_vk == VK_SHIFT || mod_vk == VK_LSHIFT || mod_vk == VK_RSHIFT) { m = "SHIFT"; }
+    else if (mod_vk == VK_CONTROL || mod_vk == VK_LCONTROL || mod_vk == VK_RCONTROL) { m = "CTRL"; }
+    else if (mod_vk == VK_MENU || mod_vk == VK_LMENU || mod_vk == VK_RMENU) { m = "ALT"; }
+    if (m && !lctrl_vk_is_modifier(vk)) {
+        _snprintf_s(out, cap, _TRUNCATE, "KEY:%s+KEY:%s", m, k);
+    } else {
+        _snprintf_s(out, cap, _TRUNCATE, "KEY:%s", k);
+    }
+}
+
+int lctrl_user_rest_of(const char *profile, char *out, size_t cap)
+{
+    if (!out || cap == 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (!profile || strncmp(profile, "user_", 5) != 0 ||
+        !lctrl_user_rest_ok(profile + 5) || strlen(profile + 5) >= cap) {
+        return 0;
+    }
+    strcpy_s(out, cap, profile + 5);
+    return 1;
+}
+
 /* --- SBC-USB-Status ---------------------------------------------------- */
 
 int lctrl_sbc_status(char *out, size_t cap)
@@ -393,6 +447,7 @@ void lctrl_key_name(int vk, char *out, size_t cap)
         { VK_F7, "F7" }, { VK_F8, "F8" }, { VK_F9, "F9" },
         { VK_F10, "F10" }, { VK_F11, "F11" }, { VK_F12, "F12" },
         { VK_PAUSE, "PAUSE" }, /* W188 */
+        { VK_SNAPSHOT, "SNAPSHOT" }, /* W290: Druck-Taste (Schnell-Screenshot) */
         { 0, NULL }
     };
     int i;
@@ -496,6 +551,14 @@ const lctrl_elem_t kCtrlElems[LCTRL_ELEM_N] = {
     { "feedback_shot", "-", "bind.feedback_shot", LCTRL_ACT },
     { "feedback_clip", "-", "bind.feedback_clip", LCTRL_ACT },
     { "photo", "-", "bind.photo", LCTRL_ACT },
+    /* W290 QUICK-SHOT: Schnell-Screenshot mit den Foto-Einstellungen (Abschnitt [client], Standard F12;
+     * photo seit W290 Standard Shift+F12). */
+    { "quick_shot", "-", "bind.quick_shot", LCTRL_ACT },
+    /* W271 STICK-RELATIVE: Client-Aktion Waffenarm zur Mitte (Abschnitt [client]). */
+    { "aim_center", "-", "bind.aim_center", LCTRL_ACT },
+    /* W283 ORIG-KEY-BIND: Vergleichstaste Original <-> eigene Einstellungen
+     * (Abschnitt [client], Standard KEY:SHIFT+KEY:F8, Rueckfall orig_key). */
+    { "orig_view", "-", "bind.orig_view", LCTRL_ACT },
 };
 
 /* W159: kanonische SBC-Quellnamen bi0..38 (parserstabil, s. kBiAlias). */
@@ -647,16 +710,16 @@ void lctrl_bind_row_text(const lctrl_bind_t *b, int idx, char *out, size_t cap)
 /* Eine Profilzeile auswerten (Semantik wie imap_profile_parse: '#'
  * inline, ';'/'[' ueberspringen, element = alt, alt; unbekannt = still
  * ignorieren, letzte Zeile gewinnt). line wird veraendert. */
-static void bind_parse_line(char *line, lctrl_bind_t *b)
+static int bind_parse_line(char *line, lctrl_bind_t *b)
 {
     char *h, *eq, *val, *one, *ctx = NULL;
     int idx;
     h = strchr(line, '#');
     if (h) { *h = '\0'; } /* Kommentar ab '#' (wie Client) */
     trim(line);
-    if (!line[0] || line[0] == ';' || line[0] == '[') { return; }
+    if (!line[0] || line[0] == ';' || line[0] == '[') { return -1; }
     eq = strchr(line, '=');
-    if (!eq) { return; }
+    if (!eq) { return -1; }
     *eq = '\0';
     trim(line);
     /* W221 HOTAS: Geraete-Zuordnung joy0..joy3 = <spec> erhalten */
@@ -667,10 +730,10 @@ static void bind_parse_line(char *line, lctrl_bind_t *b)
         strncpy_s(spec, sizeof spec, eq + 1, _TRUNCATE);
         trim(spec);
         strcpy_s(b->joy[line[3] - '0'], sizeof b->joy[0], spec);
-        return;
+        return -1;
     }
     idx = lctrl_bind_elem_index(line);
-    if (idx < 0) { return; } /* unbekannt: ignorieren */
+    if (idx < 0) { return -1; } /* unbekannt: ignorieren */
     val = eq + 1;
     b->row[idx].n_alt = 0; /* letzte Zeile gewinnt */
     for (one = strtok_s(val, ",", &ctx); one;
@@ -682,18 +745,58 @@ static void bind_parse_line(char *line, lctrl_bind_t *b)
                  sizeof b->row[idx].alt[0], one);
         b->row[idx].n_alt++;
     }
+    return idx;
+}
+
+/* W283: Profil ohne orig_view-Zeile (aeltere Benutzerprofile) -> der Client
+ * nimmt den Rueckfall orig_key (Standard Shift+F8); der Dialog zeigt das
+ * als Standardbelegung und schreibt die Zeile beim Speichern ausdruecklich. */
+static void bind_orig_default(lctrl_bind_t *b, int seen)
+{
+    int ov = lctrl_bind_elem_index("orig_view");
+    if (!seen && ov >= 0) {
+        lctrl_bind_set(b, ov, LCTRL_ORIG_VIEW_DEFAULT);
+    }
+}
+
+/* W290 QUICK-SHOT: Profil ohne quick_shot-Zeile -> Uebergang wie im Client (imap_quick_shot_migrate). */
+static void bind_quick_default(lctrl_bind_t *b, int seen)
+{
+    int qs = lctrl_bind_elem_index("quick_shot"), ph = lctrl_bind_elem_index("photo"), a, f12 = 0;
+    if (seen || qs < 0 || ph < 0) {
+        return;
+    }
+    if (b->row[ph].n_alt == 1 && _stricmp(b->row[ph].alt[0], "KEY:F12") == 0) {
+        lctrl_bind_set(b, ph, LCTRL_PHOTO_DEFAULT);
+        lctrl_bind_set(b, qs, LCTRL_QUICK_SHOT_DEFAULT);
+        return;
+    }
+    for (a = 0; a < b->row[ph].n_alt; a++) {
+        if (_stricmp(b->row[ph].alt[a], "KEY:F12") == 0) {
+            f12 = 1;
+        }
+    }
+    if (!f12) {
+        lctrl_bind_set(b, qs, LCTRL_QUICK_SHOT_DEFAULT);
+    }
 }
 
 int lctrl_bind_load_file(const char *path, lctrl_bind_t *b)
 {
     FILE *f;
     char line[512];
+    int ov = lctrl_bind_elem_index("orig_view"), seen = 0;
+    int qs = lctrl_bind_elem_index("quick_shot"), qseen = 0; /* W290 */
     lctrl_bind_init(b);
     if (u8_fopen_s(&f, path, "r") != 0 || !f) { return 1; }
     while (fgets(line, sizeof line, f)) {
-        bind_parse_line(line, b);
+        int r = bind_parse_line(line, b);
+        if (r == ov) { seen = 1; }
+        if (r == qs) { qseen = 1; }
     }
     fclose(f);
+    bind_orig_default(b, seen);
+    bind_quick_default(b, qseen);
     return 0;
 }
 
@@ -703,17 +806,24 @@ int lctrl_bind_load_text(const char *text, lctrl_bind_t *b)
 {
     char line[512];
     const char *p = text;
+    int ov = lctrl_bind_elem_index("orig_view"), seen = 0;
+    int qs = lctrl_bind_elem_index("quick_shot"), qseen = 0; /* W290 */
     lctrl_bind_init(b);
     if (!text) { return 1; }
     while (*p) {
         size_t n = strcspn(p, "\r\n");
         size_t c = n < sizeof line - 1 ? n : sizeof line - 1;
+        int r;
         memcpy(line, p, c);
         line[c] = '\0';
-        bind_parse_line(line, b);
+        r = bind_parse_line(line, b);
+        if (r == ov) { seen = 1; }
+        if (r == qs) { qseen = 1; }
         p += n;
         while (*p == '\r' || *p == '\n') { p++; }
     }
+    bind_orig_default(b, seen);
+    bind_quick_default(b, qseen);
     return 0;
 }
 
@@ -833,7 +943,68 @@ unsigned lctrl_bind_detail_vis(const lctrl_bind_t *b, int idx)
         if (k == 1) { v |= LCTRL_VIS_JOYDZ; }
     }
     if (axis && !(v & LCTRL_VIS_JOY)) { v |= LCTRL_VIS_JOYHINT; }
+    if (lctrl_stick_mode_get(b, idx) >= 0) { v |= LCTRL_VIS_SMODE; } /* W271 */
     return v;
+}
+
+/* W271 STICK-RELATIVE (s. Header). */
+int lctrl_stick_src(const char *alt)
+{
+    if (!alt) { return 0; }
+    while (*alt == ' ' || *alt == '\t') { alt++; }
+    if (lctrl_chord_plus(alt)) { return 0; }
+    if (_strnicmp(alt, "PAD:", 4) == 0) {
+        const char *n = alt + 4;
+        if ((n[0] == 'L' || n[0] == 'R' || n[0] == 'l' || n[0] == 'r') &&
+            (n[1] == 'X' || n[1] == 'Y' || n[1] == 'x' || n[1] == 'y') &&
+            (n[2] == '\0' || n[2] == ':')) {
+            return 1;
+        }
+        return 0;
+    }
+    return lctrl_joy_src_axis(alt, NULL, NULL) == 1;
+}
+
+static int stick_aim_row(int idx)
+{
+    return idx >= 0 && idx < LCTRL_ELEM_N && kCtrlElems[idx].kind == LCTRL_AXIS &&
+           (strcmp(kCtrlElems[idx].key, "aim_x") == 0 ||
+            strcmp(kCtrlElems[idx].key, "aim_y") == 0);
+}
+
+int lctrl_stick_mode_get(const lctrl_bind_t *b, int idx)
+{
+    int a;
+    if (!b || !stick_aim_row(idx)) { return -1; }
+    for (a = 0; a < b->row[idx].n_alt; a++) {
+        const char *alt = b->row[idx].alt[a];
+        char v[16];
+        if (!lctrl_stick_src(alt)) { continue; }
+        if (!lctrl_joy_param_get(alt, "mode", v, sizeof v)) { return 0; }
+        if (_stricmp(v, "rate") == 0 || _stricmp(v, "relative") == 0 ||
+            _stricmp(v, "rel") == 0) {
+            return 2;
+        }
+        if (_stricmp(v, "position") == 0 || _stricmp(v, "pos") == 0) { return 1; }
+        return 0;
+    }
+    return -1;
+}
+
+int lctrl_stick_mode_set(lctrl_bind_t *b, int idx, int mode)
+{
+    static const char *const kv[3] = { NULL, "position", "rate" };
+    int a, any = 0;
+    if (!b || !stick_aim_row(idx) || mode < 0 || mode > 2) { return 1; }
+    for (a = 0; a < b->row[idx].n_alt; a++) {
+        char *alt = b->row[idx].alt[a];
+        if (!lctrl_stick_src(alt)) { continue; }
+        if (lctrl_joy_param_set(alt, sizeof b->row[idx].alt[a], "mode", kv[mode]) != 0) {
+            return 1;
+        }
+        any = 1;
+    }
+    return any ? 0 : 1;
 }
 
 int lctrl_bind_remove_alt(lctrl_bind_t *b, int idx, int ai)
@@ -848,6 +1019,43 @@ int lctrl_bind_remove_alt(lctrl_bind_t *b, int idx, int ai)
     b->row[idx].n_alt--;
     b->row[idx].alt[b->row[idx].n_alt][0] = '\0';
     return 0;
+}
+
+int lctrl_bind_clear_game(lctrl_bind_t *b)
+{
+    unsigned used = 0;
+    int i, a, n = 0;
+    if (!b) {
+        return 0;
+    }
+    for (i = 0; i < LCTRL_ELEM_N; i++) {
+        if (kCtrlElems[i].kind == LCTRL_ACT) {
+            continue; /* Client-Aktionen bleiben (ESC-Menue, Foto, Feedback) */
+        }
+        if (b->row[i].n_alt > 0) {
+            n++;
+        }
+        lctrl_bind_clear(b, i);
+    }
+    /* joyN-Zeilen, die keine verbliebene Quelle (auch im Akkord) nutzt */
+    for (i = 0; i < LCTRL_ELEM_N; i++) {
+        for (a = 0; a < b->row[i].n_alt; a++) {
+            const char *p;
+            for (p = b->row[i].alt[a]; *p; p++) {
+                if ((p[0] == 'J' || p[0] == 'j') && (p[1] == 'O' || p[1] == 'o') &&
+                    (p[2] == 'Y' || p[2] == 'y') && p[3] >= '0' &&
+                    p[3] < '0' + IMAP_JOY_MAX && p[4] == ':') {
+                    used |= 1u << (p[3] - '0');
+                }
+            }
+        }
+    }
+    for (i = 0; i < IMAP_JOY_MAX; i++) {
+        if (!(used & (1u << i))) {
+            b->joy[i][0] = '\0';
+        }
+    }
+    return n;
 }
 
 int lctrl_bind_conflicts_for(const lctrl_bind_t *b, int idx,
@@ -913,7 +1121,9 @@ int lctrl_bind_save(const char *path, const lctrl_bind_t *b, const char *base,
             kCtrlElems[i].kind == LCTRL_DIG && i < 39 ? "buttons" :
             kCtrlElems[i].kind == LCTRL_DIG ? "gear" : "axes";
         int a;
-        if (b->row[i].n_alt == 0) { continue; } /* unbelegt: keine Zeile */
+        if (b->row[i].n_alt == 0 && !lctrl_bind_empty_line_row(i)) {
+            continue; /* unbelegt: keine Zeile */
+        } /* W283: orig_view leer -> "orig_view =" (aus, kein Rueckfall auf orig_key); W290: quick_shot ebenso */
         if (!sec || strcmp(sec, want) != 0) {
             sec = want;
             fprintf(f, "\n[%s]\n", sec);

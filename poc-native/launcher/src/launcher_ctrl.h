@@ -23,6 +23,33 @@ int lctrl_user_rest_ok(const char *rest);
 int lctrl_user_filename(const char *rest, char *out, size_t cap);
 /* 1 = mitgeliefertes Standardprofil (nie ueberschreiben). */
 int lctrl_name_shipped(const char *name);
+/* W282 ISSUE6: Profilname "user_<rest>" -> rest (fuer das Namensfeld des
+ * Belegungsdialogs beim Oeffnen eines eigenen Layouts). 1 = ok, 0 = kein
+ * gueltiges Benutzerprofil (out leer). */
+int lctrl_user_rest_of(const char *profile, char *out, size_t cap);
+/* W282 ISSUE6: VK_GAMEPAD_* (0xC3..0xDA, Windows-Tastenmeldungen von
+ * Xbox-kompatiblen Geraeten) -> 1; im Lernmodus keine Tastaturquelle. */
+int lctrl_vk_is_gamepad(int vk);
+/* W283 ORIG-KEY-BIND: Umschalt/Strg/Alt (auch links/rechts) -> 1. */
+int lctrl_vk_is_modifier(int vk);
+/* W283: 1 = Zeile idx lernt Zusatztaste + Taste als Akkord (KEY:SHIFT+KEY:F8);
+ * Vergleichstaste orig_view und (W290) Fotomodus photo / Schnell-Screenshot quick_shot
+ * (Fenster wertet Zusatztasten aus). */
+int lctrl_bind_combo_row(int idx);
+/* W290: 1 = eine leere Zeile wird als "<name> =" gespeichert (aus, kein Rueckfall/Uebergang im Client):
+ * orig_view, quick_shot. */
+int lctrl_bind_empty_line_row(int idx);
+/* W283: Quelle "KEY:<Zusatz>+KEY:<Taste>" (mod_vk = 0: nur "KEY:<Taste>").
+ * Zusatztasten werden auf SHIFT/CTRL/ALT gefaltet (wie der Client). */
+void lctrl_key_combo(int mod_vk, int vk, char *out, size_t cap);
+/* W283: Standardbelegung der Vergleichstaste (fehlt die Zeile im Profil,
+ * setzen die Lader sie; eine leere Zeile "orig_view =" heisst aus). */
+#define LCTRL_ORIG_VIEW_DEFAULT "KEY:SHIFT+KEY:F8"
+/* W290 QUICK-SHOT: Standardbelegung Schnell-Screenshot / Fotomodus. Fehlt quick_shot im Profil, gilt der
+ * Uebergang wie im Client (imap_quick_shot_migrate): photo genau KEY:F12 -> photo Shift+F12, quick_shot F12;
+ * sonst quick_shot F12, wenn F12 frei ist. */
+#define LCTRL_QUICK_SHOT_DEFAULT "KEY:F12"
+#define LCTRL_PHOTO_DEFAULT "KEY:SHIFT+KEY:F12"
 
 /* --- SBC-USB-Status ---------------------------------------------------- */
 /* Geraet kurz oeffnen (wie sbc_probe) und wieder schliessen.
@@ -72,7 +99,7 @@ typedef struct {
     lctrl_kind_t kind;
 } lctrl_elem_t;
 
-#define LCTRL_ELEM_N 73 /* W188: + Client-Aktion pause, W195: + photo */
+#define LCTRL_ELEM_N 76 /* W188: + Client-Aktion pause, W195: + photo, W271: + aim_center, W283: + orig_view, W290: + quick_shot */
 extern const lctrl_elem_t kCtrlElems[LCTRL_ELEM_N];
 /* W159: Original-Controller-Tasten als Belegungs-Quellen (SBC:<name>).
  * Kanonische Namen bi0..38, parserstabil wie input_map.c (kBiAlias).
@@ -130,9 +157,25 @@ int lctrl_helper_axis(int idx);
 #define LCTRL_VIS_JOY 2     /* Joystick-Einstellungen: JOY-Achsenquelle da */
 #define LCTRL_VIS_JOYDZ 4   /* Totzone: analoge JOY-Achsenquelle da */
 #define LCTRL_VIS_JOYHINT 8 /* Hinweis: Achse ohne JOY-Achsenquelle */
+#define LCTRL_VIS_SMODE 16  /* W271: Stick-Modus (aim_x/aim_y mit Stick-/JOY-Achse) */
 unsigned lctrl_bind_detail_vis(const lctrl_bind_t *b, int idx);
+/* W271 STICK-RELATIVE: zentrierte Analogquelle (PAD:LX/LY/RX/RY oder analoge
+ * JOY-Achse, kein Akkord/Zone) -> 1. */
+int lctrl_stick_src(const char *alt);
+/* Modus der Stick-Quellen einer Zielhebel-Zeile (aim_x/aim_y): 0 = globaler
+ * Schalter, 1 = position, 2 = rate (erste Stick-Quelle zaehlt); -1 = keine
+ * Stick-Quelle oder keine Zielhebel-Zeile. */
+int lctrl_stick_mode_get(const lctrl_bind_t *b, int idx);
+/* Modus in alle Stick-Quellen der Zeile schreiben (0 entfernt ":mode=").
+ * 0 = ok, 1 = nicht moeglich. */
+int lctrl_stick_mode_set(lctrl_bind_t *b, int idx, int mode);
 /* Eine Quelle (Position ai) entfernen, Rest rueckt auf. 0 = ok, 1 = nein. */
 int lctrl_bind_remove_alt(lctrl_bind_t *b, int idx, int ai);
+/* W282 ISSUE6: leeres Layout - alle Spiel-Elemente (Tasten, Achsen, Gang,
+ * Tuner) ohne Quelle; Client-Aktionen (LCTRL_ACT: Pause, Foto, Feedback,
+ * VR, Mitte) behalten ihre Tasten. joyN-Zeilen, die danach keine Quelle
+ * mehr nutzt, entfallen. Rueckgabe = Anzahl geleerter Elemente. */
+int lctrl_bind_clear_game(lctrl_bind_t *b);
 /* Konflikte nur fuer eine Aktion: je eigener Quelle die anderen Aktionen
  * mit derselben Quelle. Rueckgabe = Anzahl Eintraege (0 = keine). */
 typedef struct {

@@ -90,6 +90,8 @@ typedef struct {
     float mvp[16];
     unsigned has_tex;
     unsigned vstart, nv;
+    unsigned ib1, nsv;  /* W264 DRAW-OPT2: Indexpuffer-Abschnitt+1 (0 = Liste, Draw(nv)); Vertices im Tick-VB (indiziert: Quell-Vertices) */
+    int rzb;          /* FIX(W284) interp_rawzc: Lerp-Strom N-1 aus B (Tick-N-Vertices mit Matrix N-1) statt aus A */
     float pref[4][4]; /* 4 Bezugs-Vertices (erster, 1/3, 2/3, letzter): Plausibilitaet */
     float rn[4][3];   /* POPIN (W91): deren NDC x/y + w (einmal je Draw, fuer ip_cost) */
     unsigned sig, rawhash, outhash;
@@ -160,6 +162,8 @@ typedef struct {
     ID3D11Buffer *wb; /* GPU-Kopie (Strom 3/4 der Lerp-Draws) */
     unsigned wbcap;
     int wb_ok;        /* wb traegt die w dieses Ticks */
+    unsigned rh[6];   /* DIAG(W273) interp_rhash Bit 2: GPU-Inhalt am Swap (vb, vbg, rqx, rqxg, rqc, wb) */
+    int ddsel;        /* DIAG(W284) interp_ddfile: Tick gewaehlt -> Draw-ID-Bilder je Wiedergabe */
 } ip_list_t;
 
 typedef struct {
@@ -176,6 +180,7 @@ typedef struct {
 int g_ip_recording; /* 1 = Draws/Clears dieses Ticks werden aufgezeichnet */
 unsigned g_ip_skip_tot; /* W122 PERF-HUD: verfallene Zwischenbilder gesamt */
 unsigned g_ip_sigparts[3]; /* DIAG: VS/Textur/PS des naechsten rec_draw (render_im.c) */
+unsigned g_ip_ib1; /* W264 DRAW-OPT2: Indexpuffer-Abschnitt+1 des naechsten rec_draw_src (render_im.c) */
 
 /* DIAG (interp_diag>=3): CPU-Kopie der Positionen je Liste (Ausreisser-Analyse) */
 static float (*ip_cpos[IP_LISTS])[4];
@@ -318,6 +323,44 @@ static ID3D11Buffer *ip_cb0, *ip_cb1;
 static ID3D11PixelShader *ip_dbg_ps; /* DIAG: Klassifikationsbild (interp_diag>=3) */
 static ID3D11PixelShader *ip_id_ps;  /* DIAG(W251 INTERP-GROUND): Draw-ID-Bild (nur SV_Position, Farbe aus b1) */
 static unsigned ip_dd_lo, ip_dd_ser; /* DIAG(W251): Listen B (Serien lo..ser), deren Bilder ID-Bilder bekommen (interp_ddrel) */
+/* DIAG(W284 INTERP-RAWCHG) interp_ddfile: Tick-Liste (relativ zum Missionsbeginn) statt eines Bereichs */
+static unsigned *ip_ddf_t, ip_ddf_n;
+static int ip_ddf_state; /* 0 = nicht geladen, 1 = geladen, -1 = aus */
+static int ip_dd_on(void) { return g_cfg.interp_ddrel > 0 || g_cfg.interp_ddfile[0] != 0; }
+static int ip_ddf_has(unsigned rel)
+{
+    unsigned k;
+    if (ip_ddf_state == 0) {
+        FILE *f = NULL;
+        unsigned cap = 0;
+        ip_ddf_state = -1;
+        if (fopen_s(&f, g_cfg.interp_ddfile, "r") == 0 && f) {
+            int c, have = 0;
+            unsigned v = 0;
+            for (;;) {
+                c = fgetc(f);
+                if (c >= '0' && c <= '9') { v = v * 10u + (unsigned)(c - '0'); have = 1; continue; }
+                if (have) {
+                    if (ip_ddf_n >= cap) {
+                        unsigned nc = cap ? cap * 2u : 256u;
+                        unsigned *nn = (unsigned *)realloc(ip_ddf_t, nc * sizeof *nn);
+                        if (!nn) { break; }
+                        ip_ddf_t = nn; cap = nc;
+                    }
+                    ip_ddf_t[ip_ddf_n++] = v;
+                }
+                v = 0; have = 0;
+                if (c == EOF) { break; }
+            }
+            fclose(f);
+            ip_ddf_state = ip_ddf_n ? 1 : -1;
+        }
+        HLOG_I("INTERP ddfile: %u Ticks geladen", ip_ddf_n);
+    }
+    if (ip_ddf_state <= 0) { return 0; }
+    for (k = 0; k < ip_ddf_n; k++) { if (ip_ddf_t[k] == rel) { return 1; } }
+    return 0;
+}
 static ID3D11Buffer *ip_dbg_cb;
 static LARGE_INTEGER ip_qpf;
 static int ip_K = 1;
@@ -345,6 +388,7 @@ static unsigned st_ticks, st_pairs, st_presents, st_lerp, st_static, st_nomatch,
 /* POPIN (W91): Instanz-Zuordnung (gleiche Signatur + gleiche Eingangsdaten,
  * mehrere Kandidaten = mehrfach gezeichnetes Modell, z. B. Haeuser) */
 static unsigned st_imulti, st_iwrong, st_iamb, st_ipass;
+static unsigned st_ipass_false; /* W273: Fehltreffer der alten 16-Bit-Maske (mit interp_pass_exact verworfen) */
 static double st_rec_ms, st_rep_ms, st_rep_max, st_pres_ms, st_r_ms, st_r_max, st_lat_ms;
 static unsigned st_r_n, st_rep_n, st_lat_n;
 static LONGLONG st_cap_q, st_t0;
@@ -429,6 +473,7 @@ static void ip_list_reset(ip_list_t *L)
     L->nodisc = 0;
     L->gpu_ok = 0; /* W174 */
     L->ipw_bad = 0; L->wb_ok = 0; /* W237 */
+    L->ddsel = 0; /* W284 */
     if (L->smp0) { ID3D11SamplerState_Release(L->smp0); L->smp0 = NULL; } /* W126 */
 }
 
@@ -1070,9 +1115,16 @@ static const char *kIP_VS =
     "#endif\n"
     "};\n"
     "struct VSOUT { float4 pos : SV_Position; float4 col : COLOR0;\n"
-    "               float2 uv : TEXCOORD0; };\n"
+    "               float2 uv : TEXCOORD0;\n"
+    "#ifdef IP_GUARD\n" /* FIX(W265 LINE-GUARD): Lagen fuer den Dreieck-Waechter (GS) */
+    "               float4 g1 : IPGA; float4 g0 : IPGB; float2 gw : IPGW;\n"
+    "#endif\n"
+    "};\n"
     "VSOUT main(VSIN i) { VSOUT o;\n"
     "  float4 c0 = mul(i.pos0, mvp0), c1 = mul(i.pos, mvp);\n"
+    "#ifdef IP_GUARD\n"
+    "  o.g0 = c0; o.g1 = c1;\n" /* Strom-Lagen N-1/N (g1 = exakt die Tick-N-Ausgabe) */
+    "#endif\n"
     "  float ew0 = c0.w, ew1 = c1.w;\n" /* w fuer die W224-Pruefung */
     "#ifdef IP_HW\n" /* FIX(W237 LINE-FLICKER2): P2 im RT (Strom w = 1): echte Clip-w aus Strom 3/4 */
     "  ew0 *= i.hw0; ew1 *= i.hw1;\n"
@@ -1093,7 +1145,116 @@ static const char *kIP_VS =
     "#ifdef IP_HWH\n" /* W237: wieder durch w teilen -> gleiche Rasterung (w = 1, affine Attribute) wie das Tick-Bild */
     "  if (pre) { o.pos = float4(o.pos.xyz / o.pos.w, 1.0); }\n"
     "#endif\n"
+    "#ifdef IP_GUARD\n"
+    "  o.gw = float2(ew0, ew1);\n"
+    "#endif\n"
     "  o.col = i.col; o.uv = i.uv; return o; }\n";
+
+/* FIX(W265 LINE-GUARD): Dreieck-Waechter fuer gelerpte Dreiecke im Zwischenbild (Geometry Shader).
+ * Der Lerp-VS (IM bzw. Shading, IP_GUARD/Flag 16) liefert je Vertex zusaetzlich die Strom-Lagen
+ * g0 (Tick N-1) und g1 (Tick N, bitgleich zur exakten Ausgabe) sowie die (echten) w beider Ticks.
+ * Je Dreieck: Regel 1 = ein Vertex wechselt zwischen N-1 und N das w-Vorzeichen; liegen alle
+ * Vertices in beiden Ticks vor der Kamera, Regel 2 = Bildflaeche bei t > k_A * max(Flaeche N-1,
+ * Flaeche N) + A_min, Regel 4 = Umklappen (N-1 und N gleiche Orientierung, t umgekehrt),
+ * Regel 8 = eine Kante bei t > k_E * max(Laenge N-1, Laenge N) + L_min (NDC). Trifft eine Regel
+ * aus GMASK, wird das GANZE Dreieck in Tick-N-Lage gezeichnet (nicht verworfen: keine Loecher,
+ * Sichtbarkeit/Umlauf wie im Tick-Bild). Flaechenverhaeltnisse sind unabhaengig vom
+ * Seitenverhaeltnis. GDIAG: Treffer der Regelmaske als zusaetzliches, entartetes Dreieck ausserhalb
+ * des Bildes (Pipeline-Statistik GSPrimitives - GSInvocations = Treffer, Bild unveraendert). */
+static const char *kIP_GS =
+    "#ifdef GS_SHADE\n"
+    "#define GSX float4 spec : COLOR1; float4 t0 : TEXCOORD1; float4 t1 : TEXCOORD2; float4 t2 : TEXCOORD3; float4 t3 : TEXCOORD4; float fog : TEXCOORD5;\n"
+    "#define GSCP(o, v) o.spec = v.spec; o.t0 = v.t0; o.t1 = v.t1; o.t2 = v.t2; o.t3 = v.t3; o.fog = v.fog;\n"
+    "#else\n"
+    "#define GSX\n"
+    "#define GSCP(o, v)\n"
+    "#endif\n"
+    "struct GSI { float4 pos : SV_Position; float4 col : COLOR0; float2 uv : TEXCOORD0; GSX\n"
+    "             float4 g1 : IPGA; float4 g0 : IPGB; float2 gw : IPGW; };\n"
+    "struct GSO { float4 pos : SV_Position; float4 col : COLOR0; float2 uv : TEXCOORD0; GSX };\n"
+    "float gar(float2 a, float2 b, float2 c) { return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x); }\n"
+    "uint grules(GSI i[3]) {\n"
+    "  uint r = 0u; int k;\n"
+    "  [unroll] for (k = 0; k < 3; k++) { if (i[k].gw.x * i[k].gw.y <= 0.0) r |= 1u; }\n"
+    "  float wm = min(min(min(i[0].g0.w, i[1].g0.w), i[2].g0.w), min(min(i[0].g1.w, i[1].g1.w), i[2].g1.w));\n"
+    "  float wt = min(min(i[0].pos.w, i[1].pos.w), i[2].pos.w);\n"
+    "  if (wm <= GW_EPS || wt <= GW_EPS) return r;\n"
+    "  float2 p0[3], p1[3], pt[3];\n"
+    "  [unroll] for (k = 0; k < 3; k++) { p0[k] = i[k].g0.xy / i[k].g0.w; p1[k] = i[k].g1.xy / i[k].g1.w;\n"
+    "    pt[k] = i[k].pos.xy / i[k].pos.w; }\n"
+    "  float a0 = gar(p0[0], p0[1], p0[2]), a1 = gar(p1[0], p1[1], p1[2]), at = gar(pt[0], pt[1], pt[2]);\n"
+    "  if (abs(at) > GK_A * max(abs(a0), abs(a1)) + GA_MIN) r |= 2u;\n"
+    "  if (a0 * a1 > 0.0 && at * a0 < 0.0 && abs(at) > GA_MIN) r |= 4u;\n"
+    "  [unroll] for (k = 0; k < 3; k++) { int j = k == 2 ? 0 : k + 1;\n"
+    "    float lt = length(pt[j] - pt[k]), lm = max(length(p0[j] - p0[k]), length(p1[j] - p1[k]));\n"
+    "    if (lt > GK_E * lm + GL_MIN) r |= 8u; }\n"
+    "  return r; }\n"
+    "[maxvertexcount(GMAXV)]\n"
+    "void main(triangle GSI i[3], inout TriangleStream<GSO> s) {\n"
+    "  uint r = grules(i);\n"
+    "  bool g = (r & GMASK) != 0u;\n"
+    "  [unroll] for (int k = 0; k < 3; k++) { GSO o; o.pos = g ? i[k].g1 : i[k].pos; o.col = i[k].col; o.uv = i[k].uv;\n"
+    "    GSCP(o, i[k]) s.Append(o); }\n"
+    "#if GDIAG\n"
+    "  if ((r & GDIAG) != 0u) { s.RestartStrip(); GSO z = (GSO)0; z.pos = float4(4.0, 4.0, 0.5, 1.0);\n"
+    "    s.Append(z); s.Append(z); s.Append(z); }\n"
+    "#endif\n"
+    "}\n";
+static ID3D11GeometryShader *ip_gd_im, *ip_gd_sh; /* W265: IM- bzw. Shading-Ausgabe */
+/* W265 DIAG: Pipeline-Statistik je Zwischenbild-Wiedergabe (nur Immediate) */
+#define IP_GD_Q 64
+static ID3D11Query *ip_gd_q[IP_GD_Q];
+static volatile int ip_gd_qbusy[IP_GD_Q]; /* 0 frei, sonst ip_gd_qi beim End (Verfall nach 4*IP_GD_Q Wiedergaben) */
+static volatile unsigned ip_gd_qi;
+static unsigned long long st_gd_tris, st_gd_hit;
+static unsigned st_gd_frames, st_gd_fhit, st_gd_max, st_gd_lost;
+
+static ID3D11GeometryShader *ip_gd_make(int shade)
+{
+    char src[6144];
+    ID3DBlob *b = NULL;
+    ID3D11GeometryShader *gs = NULL;
+    int ge = g_cfg.interp_guard, dm = g_cfg.interp_guard_diag & 15;
+    unsigned gmask = ((ge & 1) ? 14u : 0u) | ((ge & 2) ? 1u : 0u);
+    _snprintf_s(src, sizeof src, _TRUNCATE,
+                "%s#define GW_EPS 1e-5\n#define GA_MIN 0.002\n#define GL_MIN 0.03\n#define GK_A %d.0\n#define GK_E %.2f\n"
+                "#define GMASK %uu\n#define GDIAG %du\n#define GMAXV %d\n%s",
+                shade ? "#define GS_SHADE 1\n" : "", g_cfg.interp_guard_ka > 0 ? g_cfg.interp_guard_ka : 4,
+                (g_cfg.interp_guard_ke > 0 ? g_cfg.interp_guard_ke : 20) / 10.0, gmask, dm, dm ? 6 : 3, kIP_GS);
+    if (!sb_im_compile(src, "gs_4_0", &b)) { HLOG_W("INTERP guard: GS (%s) nicht uebersetzbar", shade ? "Shading" : "IM"); return NULL; }
+    if (FAILED(ID3D11Device_CreateGeometryShader(g_dev, b->lpVtbl->GetBufferPointer(b), b->lpVtbl->GetBufferSize(b), NULL, &gs))) { gs = NULL; }
+    b->lpVtbl->Release(b);
+    return gs;
+}
+
+/* W265: GS nur fuer gelerpte Dreiecks-Draws (Liste/Strip) binden; *cur = gebundener GS (Cache). */
+static void ip_gd_bind(ID3D11DeviceContext *c, ID3D11GeometryShader **cur, ID3D11GeometryShader *want)
+{
+    if (*cur != want) { ID3D11DeviceContext_GSSetShader(c, want, NULL, 0); *cur = want; }
+}
+
+static void ip_gd_poll(void)
+{
+    unsigned k;
+    for (k = 0; k < IP_GD_Q; k++) {
+        D3D11_QUERY_DATA_PIPELINE_STATISTICS ps;
+        if (!ip_gd_qbusy[k]) { continue; }
+        if (ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)ip_gd_q[k], &ps, sizeof ps,
+                                        D3D11_ASYNC_GETDATA_DONOTFLUSH) != S_OK) {
+            if (ip_gd_qi - (unsigned)ip_gd_qbusy[k] > 4u * IP_GD_Q) { ip_gd_qbusy[k] = 0; st_gd_lost++; } /* nie ausgefuehrt */
+            continue;
+        }
+        ip_gd_qbusy[k] = 0;
+        {
+            unsigned long long hit = ps.GSPrimitives > ps.GSInvocations ? ps.GSPrimitives - ps.GSInvocations : 0ull;
+            st_gd_tris += ps.GSInvocations;
+            st_gd_hit += hit;
+            st_gd_frames++;
+            if (hit) { st_gd_fhit++; }
+            if (hit > st_gd_max) { st_gd_max = (unsigned)hit; }
+        }
+    }
+}
 
 static int ip_init(void)
 {
@@ -1110,8 +1271,9 @@ static int ip_init(void)
     for (i = 0; i < IP_LISTS; i++) { g_ipl[i].bbref = -1; }
     {
         /* FIX(W224 LINE-FLICKER): interp_eyefix=1 -> Variante mit IP_EYE */
-        char ipsrc[2048];
-        _snprintf_s(ipsrc, sizeof ipsrc, _TRUNCATE, "%s%s%s%s",
+        char ipsrc[3072];
+        _snprintf_s(ipsrc, sizeof ipsrc, _TRUNCATE, "%s%s%s%s%s",
+                    (g_cfg.interp_guard || g_cfg.interp_guard_diag) ? "#define IP_GUARD 1\n" : "", /* W265 */
                     g_cfg.interp_eyefix ? "#define IP_EYE 1\n" : "",
                     g_cfg.interp_hlerp ? "#define IP_HW 1\n#define IP_JUMP 0.5\n" : "",
                     g_cfg.interp_hlerp >= 2 ? "#define IP_HWH 1\n" : "", kIP_VS); /* W237 */
@@ -1178,7 +1340,7 @@ static int ip_init(void)
         }
         bd.ByteWidth = 16;
         if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &ip_dbg_cb))) { ip_dbg_cb = NULL; }
-        if (g_cfg.interp_ddrel > 0) { /* DIAG(W251): passt zu jedem VS (liest nur SV_Position) */
+        if (ip_dd_on()) { /* DIAG(W251): passt zu jedem VS (liest nur SV_Position) */
             static const char *kIP_ID_PS =
                 "cbuffer D : register(b1) { float4 dcol; };\n"
                 "float4 main(float4 p : SV_Position) : SV_Target { return float4(dcol.rgb, 1.0); }\n";
@@ -1188,6 +1350,22 @@ static int ip_init(void)
                 psb->lpVtbl->Release(psb);
             }
         }
+    }
+    if (g_cfg.interp_guard || g_cfg.interp_guard_diag) { /* FIX(W265 LINE-GUARD) */
+        ip_gd_im = ip_gd_make(0);
+        ip_gd_sh = ip_gd_make(1);
+        if (g_cfg.interp_guard_diag) {
+            D3D11_QUERY_DESC qd;
+            int k;
+            memset(&qd, 0, sizeof qd);
+            qd.Query = D3D11_QUERY_PIPELINE_STATISTICS;
+            for (k = 0; k < IP_GD_Q; k++) {
+                if (FAILED(ID3D11Device_CreateQuery(g_dev, &qd, &ip_gd_q[k]))) { ip_gd_q[k] = NULL; }
+            }
+        }
+        HLOG_I("INTERP guard: modus=%d k_A=%d k_E=%d diag=%d GS IM=%s Shading=%s", g_cfg.interp_guard,
+               g_cfg.interp_guard_ka, g_cfg.interp_guard_ke, g_cfg.interp_guard_diag,
+               ip_gd_im ? "ok" : "FEHLT", ip_gd_sh ? "ok" : "FEHLT");
     }
     ip_init_fail = 0;
     st_t0 = ip_now();
@@ -1231,7 +1409,8 @@ unsigned sb_im_exp_src(unsigned prim, unsigned n, unsigned k)
 
 static void ip_rec_draw_core(const float pref[4][4], unsigned outhash, unsigned n, unsigned topo,
                              const float mvp[16], unsigned has_tex, int cls,
-                             unsigned sig, unsigned rawhash, unsigned vstart, LONGLONG q0);
+                             unsigned sig, unsigned rawhash, unsigned vstart, LONGLONG q0,
+                             unsigned ib1, unsigned nsv);
 
 void sb_interp_rec_draw(const im_vertex_t *v, unsigned n, unsigned topo,
                         const float mvp[16], unsigned has_tex, int cls,
@@ -1259,7 +1438,7 @@ void sb_interp_rec_draw(const im_vertex_t *v, unsigned n, unsigned topo,
         if (g_cfg.interp_eyediag > 0) { ip_cw_rec(ip_rec, L->vbcap, vstart, n, mvp, v, NULL, 0, 0, tw, twn, twp); } /* DIAG(W224) */
     }
     ip_rec_draw_core((const float (*)[4])pref, sb_interp_hash(v, sizeof *v, n), n, topo, mvp,
-                     has_tex, cls, sig, rawhash, vstart, q0);
+                     has_tex, cls, sig, rawhash, vstart, q0, 0u, n);
 }
 
 /* Save originals before the active camera modifies them. The next VB upload
@@ -1306,6 +1485,8 @@ void sb_interp_rec_draw_src(const im_vertex_t *src, unsigned prim, unsigned nsrc
     LONGLONG q0;
     float pref[4][4];
     unsigned q, h = 2166136261u, i, step;
+    const unsigned ib1 = g_ip_ib1, nsv = ib1 ? nsrc : n; /* W264 DRAW-OPT2: indiziert -> nsrc Quell-Vertices im Tick-VB */
+    g_ip_ib1 = 0;
     if (ip_live) { ip_in_rec = 1; ip_poll(); ip_in_rec = 0; } /* W122: in cap */
     if (ip_rec < 0 || !n) { return; }
     L = &g_ipl[ip_rec];
@@ -1319,7 +1500,7 @@ void sb_interp_rec_draw_src(const im_vertex_t *src, unsigned prim, unsigned nsrc
         const float *tw = g_ip_tw;
         unsigned twn = g_ip_tw_n, twp = g_ip_tw_prim;
         g_ip_tw = NULL;
-        if (g_cfg.interp_hlerp) { ip_w_rec(L, vstart, n, tw, twn, twp); }
+        if (g_cfg.interp_hlerp) { ip_w_rec(L, vstart, nsv, tw, twn, ib1 ? 5u : twp); } /* W264: indiziert w je Quell-Vertex */
         if (g_cfg.interp_eyediag > 0) { ip_cw_rec(ip_rec, L->vbcap, vstart, n, mvp, NULL, src, prim, nsrc, tw, twn, twp); } /* DIAG(W224) */
     }
     step = n > 64u ? n / 64u : 1u; /* Stichprobe exakt wie sb_interp_hash */
@@ -1331,12 +1512,13 @@ void sb_interp_rec_draw_src(const im_vertex_t *src, unsigned prim, unsigned nsrc
         h = (h ^ w[3]) * 16777619u;
     }
     ip_rec_draw_core((const float (*)[4])pref, h ^ n, n, topo, mvp, has_tex, cls, sig, rawhash,
-                     vstart, q0);
+                     vstart, q0, ib1, nsv);
 }
 
 static void ip_rec_draw_core(const float pref[4][4], unsigned outhash, unsigned n, unsigned topo,
                              const float mvp[16], unsigned has_tex, int cls,
-                             unsigned sig, unsigned rawhash, unsigned vstart, LONGLONG q0)
+                             unsigned sig, unsigned rawhash, unsigned vstart, LONGLONG q0,
+                             unsigned ib1, unsigned nsv)
 {
     ip_list_t *L = &g_ipl[ip_rec];
     ip_op_t *o;
@@ -1349,6 +1531,7 @@ static void ip_rec_draw_core(const float pref[4][4], unsigned outhash, unsigned 
     o->has_tex = has_tex;
     o->vstart = vstart;
     o->nv = n;
+    o->ib1 = ib1; o->nsv = nsv; /* W264 DRAW-OPT2 */
     {
         unsigned q;
         for (q = 0; q < 4u; q++) {
@@ -1816,6 +1999,99 @@ static unsigned ip_mvpkey(const ip_op_t *o)
     return (h ^ (h >> 16)) & 0xFFFFu;
 }
 
+
+/* FIX(W284 INTERP-RAWCHG) interp_rawzc: Kamerabewegungen D = M_A^-1 * M_B der (bis zu) 8 groessten
+ * plausibel gelerpten Welt-Draws eines Ziels (wie interp_zcons, dort im Block). Rueckgabe: Anzahl. */
+/* PERF(W284): die 8 groessten plausibel gelerpten Welt-Draws je Ziel (rtv, dsv) in EINEM Durchlauf
+ * ueber B (vorher ein Durchlauf je Ziel, ~0,2 ms je Tick); gleiche Auswahl und Reihenfolge wie dort. */
+enum { RZ_PT = 32 };
+static ID3D11RenderTargetView *rz_prt[RZ_PT];
+static ID3D11DepthStencilView *rz_pds[RZ_PT];
+static int rz_prr[RZ_PT][8], rz_pn, rz_povf;
+static void rz_cam_pre(const ip_list_t *A, const ip_list_t *B)
+{
+    unsigned q;
+    int x;
+    rz_pn = 0; rz_povf = 0;
+    for (q = 0; q < B->nops; q++) {
+        const ip_op_t *r = &B->ops[q];
+        int w, t = -1, *rr;
+        if (r->kind != IP_DRAW || r->why != IP_W_LERP || !r->flag || r->match < 0 || (unsigned)r->match >= A->nops) { continue; }
+        for (x = 0; x < rz_pn; x++) { if (rz_prt[x] == r->rtv && rz_pds[x] == r->dsv) { t = x; break; } }
+        if (t < 0) {
+            if (rz_pn >= RZ_PT) { rz_povf = 1; continue; }
+            t = rz_pn++;
+            rz_prt[t] = r->rtv; rz_pds[t] = r->dsv;
+            for (x = 0; x < 8; x++) { rz_prr[t][x] = -1; }
+        }
+        rr = rz_prr[t];
+        for (w = 0; w < 8; w++) {
+            if (rr[w] < 0 || r->nv > B->ops[rr[w]].nv) {
+                int z;
+                for (z = 7; z > w; z--) { rr[z] = rr[z - 1]; }
+                rr[w] = (int)q;
+                break;
+            }
+        }
+    }
+}
+/* Kamerabewegungen D = M_A^-1 * M_B des Ziels von o (nach rz_cam_pre). Rueckgabe: Anzahl. */
+static int rz_cam(const ip_list_t *A, const ip_list_t *B, const ip_op_t *o, double D[8][16])
+{
+    int x, t = -1, n = 0;
+    for (x = 0; x < rz_pn; x++) { if (rz_prt[x] == o->rtv && rz_pds[x] == o->dsv) { t = x; break; } }
+    if (t < 0) { return 0; }
+    for (x = 0; x < 8 && rz_prr[t][x] >= 0; x++) {
+        const ip_op_t *r = &B->ops[rz_prr[t][x]];
+        if (zc_dmat(D[n], A->ops[r->match].mvp, r->mvp)) { n++; }
+    }
+    return n;
+}
+
+/* FIX(W284) interp_rawzc: Bezugs-Vertices von o = die von a + fester Vektor d (w = 1)?
+ * Toleranz: Rundung von p + d in float (relativ 1e-5 zum Betrag). 1 = ja, d gesetzt. */
+static int rz_offset(const ip_op_t *a, const ip_op_t *o, float d[3])
+{
+    int q, c;
+    for (q = 0; q < 4; q++) {
+        if (a->pref[q][3] != 1.0f || o->pref[q][3] != 1.0f) { return 0; }
+    }
+    for (c = 0; c < 3; c++) { d[c] = o->pref[0][c] - a->pref[0][c]; }
+    for (q = 1; q < 4; q++) {
+        for (c = 0; c < 3; c++) {
+            float e = o->pref[q][c] - a->pref[q][c] - d[c], m = fabsf(o->pref[q][c]) + fabsf(a->pref[q][c]) + fabsf(d[c]);
+            if (fabsf(e) > 1e-5f * (1.0f + m)) { return 0; }
+        }
+    }
+    return 1;
+}
+/* FIX(W284) interp_rawzc=2: Hash-Kette der Vortick-Draws nach sig0 (Signatur ohne Vertexzahl), bei Bedarf je Tick */
+static int rz_s0head[1u << IP_HBITS], *rz_s0next;
+static unsigned rz_s0cap;
+static int rz_s0_build(const ip_list_t *A)
+{
+    unsigned j;
+    if (rz_s0cap < A->nops) {
+        int *nn = (int *)realloc(rz_s0next, A->nops * sizeof *nn);
+        if (!nn) { return 0; }
+        rz_s0next = nn;
+        rz_s0cap = A->nops;
+    }
+    memset(rz_s0head, 0xFF, sizeof rz_s0head);
+    for (j = A->nops; j-- > 0;) {
+        const ip_op_t *a = &A->ops[j];
+        unsigned h;
+        if (a->kind != IP_DRAW) { continue; }
+        h = IP_HB(a->sig0);
+        rz_s0next[j] = rz_s0head[h];
+        rz_s0head[h] = (int)j;
+    }
+    return 1;
+}
+static unsigned st_rz_nm, st_rz_nmno, st_rz_nmcam, st_rz_n;
+static double st_rz_ms, st_rz_max; /* W284: Zeit des rawzc-Blocks je Tick */
+static unsigned st_rz_relw, st_rz_rel, st_rz_noofs, st_rz_cam, st_rz_nocam, st_rz_other, st_rz_ln; /* FIX(W284) interp_rawzc: Zaehler */
+
 static int ip_match(ip_list_t *A, ip_list_t *B, int log)
 {
     unsigned i, jp = 0, ndraw = 0, nclr = 0, nworld = 0, nmatch = 0, nlerp = 0,
@@ -1833,6 +2109,7 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
         int found = -1, sigonly = -1, iwbest = -1;
         o->match = -1;
         o->flag = 0;
+        o->rzb = 0; /* W284 */
         o->why = IP_W_NONE;
         if (o->kind != IP_DRAW) { nclr++; continue; }
         ndraw++;
@@ -1940,6 +2217,135 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
             if (iwbest >= 0 && o->why == IP_W_LERP) { ip_iwrong_log(A, B, i, found, iwbest); } /* DIAG(POPIN,W91) */
         }
     }
+    if (g_cfg.interp_rawzc) {
+        /* FIX(W284 INTERP-RAWCHG): "rawchg" = gleiche Signatur, neue Eingangsdaten, Vertex-Lerp an
+         * ip_plausible gescheitert (Bezugs-Vertices wechseln die Augenebene oder springen weit) -> bisher
+         * exakt (Tick N) zwischen gelerpten Nachbarn = W251-Tiefenmischung (W273_id2: Wasser/Fels-Draw
+         * n=42, Eingangsdaten um (0,0,-5) verschoben, gewinnt bei t=0,25 gegen die gelerpte Strasse).
+         * Ist die Aenderung eine reine Verschiebung p_B = p_A + d (Gelaende kamera-relativ neu
+         * gebacken), gilt p_B*M_B = p_A*(T(d)*M_B): derselbe Fall wie interp_zcons mit M_B' = T(d)*M_B.
+         * Passt M_A^-1*M_B' zur Kamerabewegung des Ziels, ist der Vertex-Lerp i <-> i exakt die
+         * Zwischenkamera des uebrigen Bildes (auch fuer Vertices hinter der Kamera: linear im
+         * Clip-Raum, die Hardware schneidet an der Nahebene). Vor interp_pass, damit weitere
+         * Durchgaenge derselben Instanz nicht wegen dieses Draws exakt werden. */
+        enum { RZ_T = 8 };
+        ID3D11RenderTargetView *zr[RZ_T];
+        ID3D11DepthStencilView *zd[RZ_T];
+        double zD[RZ_T][8][16];
+        int znr[RZ_T], s0ok = 0;
+        unsigned nz = 0, k;
+        LONGLONG rzq0 = ip_now();
+        rz_cam_pre(A, B); /* Quellen = vor diesem Block gelerpte Draws (in diesem Block umgestellte zaehlen nicht mit) */
+        for (i = 0; i < B->nops; i++) {
+            ip_op_t *o = &B->ops[i];
+            ip_op_t *a;
+            float d[3] = { 0, 0, 0 };
+            double Dx[16], e = 1.0, e0 = 1.0;
+            float MBf[16];
+            int t = -1, x, c, ofs;
+            if (o->kind != IP_DRAW || !o->cls || o->flag || !o->dsv) { continue; }
+            if (o->why == IP_W_NOMATCH) {
+                /* nomatch: kein Vortick-Draw gleicher Signatur und Vertexzahl (z. B. Gelaende-Stueck mit anderer
+                 * Vertexzahl, W284 pf7_0540). Welt-Test mit Kandidaten gleicher Signatur ohne Vertexzahl (sig0):
+                 * passt M_A^-1*M_B zur Kamera, ruht das Objekt in der Welt -> Matrix-Lerp der Tick-N-Vertices. */
+                int j, cand = -1, nc = 0;
+                double eb = 1.0;
+                if (g_cfg.interp_rawzc < 2 || g_cfg.vr_enable) { continue; }
+                if (!s0ok) {
+                    s0ok = rz_s0_build(A) ? 1 : -1;
+                }
+                if (s0ok < 0) { continue; }
+                for (k = 0; k < nz; k++) { if (zr[k] == o->rtv && zd[k] == o->dsv) { t = (int)k; break; } }
+                if (t < 0) {
+                    if (nz >= RZ_T) { st_rz_other++; continue; }
+                    t = (int)nz++;
+                    zr[t] = o->rtv; zd[t] = o->dsv;
+                    znr[t] = rz_cam(A, B, o, zD[t]);
+                }
+                if (!znr[t]) { st_rz_nocam++; continue; }
+                for (j = rz_s0head[IP_HB(o->sig0)]; j >= 0 && nc < 16; j = rz_s0next[j]) {
+                    const ip_op_t *c2 = &A->ops[j];
+                    double ex = 1.0;
+                    if (c2->sig0 != o->sig0 || !c2->cls || c2->rtv != o->rtv || c2->dsv != o->dsv || c2->topo != o->topo) { continue; }
+                    nc++;
+                    if (!zc_dmat(Dx, c2->mvp, o->mvp)) { continue; }
+                    for (x = 0; x < znr[t]; x++) { double e2 = zc_derr(Dx, zD[t][x]); if (e2 < ex) { ex = e2; } }
+                    if (ex < eb) { eb = ex; cand = j; }
+                }
+                if (!nc) { st_rz_nmno++; continue; }
+                if (cand < 0 || eb > 1e-3) { st_rz_nmcam++; continue; }
+                o->match = cand;
+                o->rzb = 1;
+                o->flag = 1;
+                o->why = IP_W_LERP;
+                st_rz_nm++;
+                nnomatch--;
+                nlerp++;
+                continue;
+            }
+            if (o->why != IP_W_RAWCHG) { continue; }
+            if (o->match < 0 || (unsigned)o->match >= A->nops) { st_rz_other++; continue; }
+            a = &A->ops[o->match];
+            if (a->kind != IP_DRAW || !a->cls || a->rtv != o->rtv || a->dsv != o->dsv ||
+                a->topo != o->topo) { st_rz_other++; continue; }
+            for (k = 0; k < nz; k++) { if (zr[k] == o->rtv && zd[k] == o->dsv) { t = (int)k; break; } }
+            if (t < 0) {
+                if (nz >= RZ_T) { st_rz_other++; continue; }
+                t = (int)nz++;
+                zr[t] = o->rtv; zd[t] = o->dsv;
+                znr[t] = rz_cam(A, B, o, zD[t]);
+            }
+            if (!znr[t]) { st_rz_nocam++; continue; }
+            /* e0: Objekt ruht in der Welt, nur sein Gitter wurde verschoben (Weltmatrix gleich) -> D = M_A^-1*M_B
+             *     passt zur Kamera; richtig ist dann der Matrix-Lerp der Tick-N-Vertices (p_B*M_A -> p_B*M_B).
+             * e1: Ursprung verschoben (p_B = p_A + d, Weltmatrix gleicht d aus) -> D = M_A^-1*(T(d)*M_B) passt;
+             *     richtig ist der Vertex-Lerp i <-> i (p_A*M_A -> p_B*M_B). */
+            if (zc_dmat(Dx, a->mvp, o->mvp)) {
+                for (x = 0; x < znr[t]; x++) { double ex = zc_derr(Dx, zD[t][x]); if (ex < e0) { e0 = ex; } }
+            }
+            /* Welt-Fall zuerst; der Versatz-Test (zweite Inversion) nur, wenn er scheitert (W284: Zeit je Tick halbiert) */
+            ofs = (e0 > 1e-3 || g_cfg.vr_enable) && !a->taken && a->nv == o->nv && rz_offset(a, o, d); /* Vertex-Lerp braucht den Partner exklusiv */
+            if (ofs) {
+                /* M_B' = T(d) * M_B (Zeilenvektoren): Zeilen 0..2 wie M_B, Zeile 3 = d*M_B[0..2] + M_B[3] */
+                for (c = 0; c < 16; c++) { MBf[c] = o->mvp[c]; }
+                for (c = 0; c < 4; c++) {
+                    MBf[12 + c] = (float)((double)d[0] * o->mvp[c] + (double)d[1] * o->mvp[4 + c] + (double)d[2] * o->mvp[8 + c] + o->mvp[12 + c]);
+                }
+                if (zc_dmat(Dx, a->mvp, MBf)) {
+                    for (x = 0; x < znr[t]; x++) { double ex = zc_derr(Dx, zD[t][x]); if (ex < e) { e = ex; } }
+                }
+            }
+            if (g_cfg.interp_diag >= 1 && (g_cfg.pf_ring <= 0 || sb_pf_active()) &&
+                (g_cfg.interp_ddrel > 0 ? (sb_pf_m0() && B->frame >= sb_pf_m0() + (unsigned)g_cfg.interp_ddrel &&
+                                           B->frame < sb_pf_m0() + (unsigned)g_cfg.interp_ddrel + 3u)
+                                        : st_rz_ln < 400u)) { /* DIAG(W284) */
+                st_rz_ln++;
+                HLOG_I("INTERP rzd f=%u i=%u n=%u/%u m=%d versatz=%d d=%.3f,%.3f,%.3f fehler_welt=%.6f fehler_versatz=%.6f", B->frame, i,
+                       o->nv, a->nv, o->match, ofs, (double)d[0], (double)d[1], (double)d[2], e0, e);
+            }
+            if (e0 <= 1e-3 && e0 <= e && !g_cfg.vr_enable) {
+                o->rzb = 1; /* Matrix-Lerp der Tick-N-Vertices */
+                st_rz_relw++;
+            } else if (e <= 1e-3 && ofs) {
+                st_rz_rel++;
+            } else {
+                if (!ofs) { st_rz_noofs++; }
+                st_rz_cam++;
+                continue;
+            }
+            a->taken = 1;
+            o->flag = 1;
+            o->why = IP_W_RAWLERP;
+            nrawchg--;
+            nlerp++;
+            nrawlerp++;
+        }
+        {
+            double ms = ip_ms(rzq0, ip_now());
+            st_rz_ms += ms; st_rz_n++;
+            if (ms > st_rz_max) { st_rz_max = ms; }
+        }
+    }
     if (g_cfg.interp_pass) {
         /* POPIN (W91): Mehrpass-Konsistenz. Durchgaenge derselben Instanz
          * (gleiches Ziel, gleiche Geometrie = gkey, gleiche Matrix) muessen
@@ -1947,9 +2353,24 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
          * Eingangsdaten, unplausibel), wird ein gelerpter zweiter Durchgang
          * gegen ihn verschoben gezeichnet -> Z-Fighting-Streifen/Aufblitzen
          * in Zwischenbildern. Dann alle Durchgaenge der Instanz exakt. */
+        /* FIX(W273 INTERP-RACE) interp_pass_exact=1: Die alte 16-Bit-Bitmaske (ip_mvpkey) kollidiert
+         * (~600 exakte Eintraege je Tick in 65536 Bit -> ~1 % der gelerpten Draws faelschlich exakt),
+         * und weil gkey den Host-Zeiger der RTV enthaelt, trifft es je Lauf andere Draws: exakte Draws
+         * zwischen gelerpten (Tiefenmischung W251) = helle Keile, die in einem Lauf erscheinen und im
+         * anderen nicht (W265-Streuung). Jetzt Eimer per Schluessel, Mitglied nur bei voller Gleichheit
+         * (Ziel, Geometrie, Vertexzahl, Matrix) -> zeigerunabhaengig und ohne Fehltreffer. */
         static unsigned char ex[1u << 13]; /* 65536 Bit */
-        unsigned npass = 0;
+        static int ph[1u << 16];
+        static int *pn;
+        static unsigned pcap;
+        unsigned npass = 0, nfalse = 0;
+        int exact = g_cfg.interp_pass_exact > 0;
+        if (exact && pcap < B->nops) {
+            int *nn = (int *)realloc(pn, B->nops * sizeof *nn);
+            if (nn) { pn = nn; pcap = B->nops; } else { exact = 0; }
+        }
         memset(ex, 0, sizeof ex);
+        if (exact) { memset(ph, 0xFF, sizeof ph); }
         for (i = 0; i < B->nops; i++) {
             const ip_op_t *o = &B->ops[i];
             unsigned k;
@@ -1957,15 +2378,28 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
             if (o->why != IP_W_NOMATCH && o->why != IP_W_RAWCHG && o->why != IP_W_REJECT) { continue; }
             k = ip_mvpkey(o);
             ex[k >> 3] |= (unsigned char)(1u << (k & 7u));
+            if (exact) { pn[i] = ph[k]; ph[k] = (int)i; }
         }
         for (i = 0; i < B->nops; i++) {
             ip_op_t *o = &B->ops[i];
             unsigned k;
+            int hit;
             if (o->kind != IP_DRAW || !o->cls || !o->flag) { continue; }
             k = ip_mvpkey(o);
-            if (ex[k >> 3] & (1u << (k & 7u))) { o->flag = 0; npass++; }
+            hit = (ex[k >> 3] & (1u << (k & 7u))) != 0;
+            if (exact && hit) {
+                int j, same = 0;
+                for (j = ph[k]; j >= 0; j = pn[j]) {
+                    const ip_op_t *e = &B->ops[j];
+                    if (e->gkey == o->gkey && e->rtv == o->rtv && e->rawhash == o->rawhash && e->nv == o->nv &&
+                        memcmp(e->mvp, o->mvp, sizeof o->mvp) == 0) { same = 1; break; }
+                }
+                if (!same) { nfalse++; hit = 0; }
+            }
+            if (hit) { o->flag = 0; npass++; }
         }
         st_ipass += npass;
+        st_ipass_false += nfalse;
         if (npass <= nlerp) { nlerp -= npass; }
     }
     if (g_cfg.interp_zcons == 1) {
@@ -2080,6 +2514,11 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
         }
         if (nz) { st_zc_ticks++; st_zc_draws += nzd; }
         if (nzd <= nlerp) { nlerp -= nzd; }
+    }
+    for (i = 0; i < B->nops; i++) { /* W264 DRAW-OPT2: Lerp nur zwischen gleich abgelegten Draws (beide Liste oder beide indiziert) */
+        ip_op_t *o = &B->ops[i];
+        if (o->kind == IP_DRAW && o->flag && o->match >= 0 && (unsigned)o->match < A->nops &&
+            A->ops[o->match].ib1 != o->ib1) { o->flag = 0; if (nlerp) { nlerp--; } }
     }
     if (g_cfg.interp_eyediag > 0) { /* DIAG(W237): Zuordnungs-Ergebnis der Welt-Draws (cls=1) */
         for (i = 0; i < B->nops; i++) {
@@ -3221,7 +3660,22 @@ static const char *kIP_VR_VS =
     "#endif\n"
     "};\n"
     "struct VSOUT { float4 pos : SV_Position; float4 col : COLOR0;\n"
-    "               float2 uv : TEXCOORD0; };\n"
+    "               float2 uv : TEXCOORD0;\n"
+    "#if defined(VR_LERP) && defined(IP_GUARD)\n" /* FIX(W265 LINE-GUARD): Lagen N/N-1 im Augenraum fuer den GS */
+    "               float4 g1 : IPGA; float4 g0 : IPGB; float2 gw : IPGW;\n"
+    "#endif\n"
+    "};\n"
+    "float4 vrpos(float4 c) {\n" /* Spiel-Clip -> Augen-Clip (je Draw-Klasse, s. oben) */
+    "  float2 n = c.xy / c.w; float zn = c.z / c.w; float3 v; float md = 0.0; float4 p;\n"
+    "  if (k2.z > 1.5) { float d = clamp(k.z + k.w * (zn - k2.x), k.z - k2.y, k.z + k2.y);\n"
+    "    if (k2.w > 1.5 && zn > 0.2 && zn < 0.999) { d = min(10.0 / (100.0 - 99.9 * zn), 90.0); md = 1.0; }\n"
+    "    v = float3(n.x * d * k.x, n.y * d * k.y, -d); }\n"
+    "  else if (k2.z > 0.5) { v = float3(c.x * k.x, c.y * k.y, -c.w); }\n"
+    "  else { v = float3(n.x * k.z * k.x, n.y * k.z * k.y, -k.z); }\n"
+    "  p = mul(float4(v, 1.0), E);\n"
+    "  if (md > 0.5) { p.z -= 2e-5 * p.w; }\n"
+    "  else if (k2.w < 0.5 || k2.w > 1.5) { p.z = zn * p.w; }\n"
+    "  return p; }\n"
     "VSOUT main(VSIN i) { VSOUT o;\n"
     "  float4 c = mul(i.pos, mvp);\n"
     "#ifdef VR_LERP\n"
@@ -3229,16 +3683,11 @@ static const char *kIP_VR_VS =
     "#ifdef IP_EYE\n" /* FIX(W224) wie kIP_VS */
     "  if (c0.w * cn.w <= 0.0) { c = cn; }\n"
     "#endif\n"
+    "#ifdef IP_GUARD\n"
+    "  o.g0 = vrpos(c0); o.g1 = vrpos(cn); o.gw = float2(c0.w, cn.w);\n"
     "#endif\n"
-    "  float2 n = c.xy / c.w; float zn = c.z / c.w; float3 v; float md = 0.0;\n"
-    "  if (k2.z > 1.5) { float d = clamp(k.z + k.w * (zn - k2.x), k.z - k2.y, k.z + k2.y);\n"
-    "    if (k2.w > 1.5 && zn > 0.2 && zn < 0.999) { d = min(10.0 / (100.0 - 99.9 * zn), 90.0); md = 1.0; }\n"
-    "    v = float3(n.x * d * k.x, n.y * d * k.y, -d); }\n"
-    "  else if (k2.z > 0.5) { v = float3(c.x * k.x, c.y * k.y, -c.w); }\n"
-    "  else { v = float3(n.x * k.z * k.x, n.y * k.z * k.y, -k.z); }\n"
-    "  o.pos = mul(float4(v, 1.0), E);\n"
-    "  if (md > 0.5) { o.pos.z -= 2e-5 * o.pos.w; }\n"
-    "  else if (k2.w < 0.5 || k2.w > 1.5) { o.pos.z = zn * o.pos.w; }\n"
+    "#endif\n"
+    "  o.pos = vrpos(c);\n"
     "  o.col = i.col; o.uv = i.uv; return o; }\n";
 
 static int ip_vr_init(void)
@@ -3253,8 +3702,9 @@ static int ip_vr_init(void)
         b->lpVtbl->Release(b);
         b = NULL;
     }
-    _snprintf_s(src, sizeof src, _TRUNCATE, "#define VR_LERP 1\n%s%s",
-                g_cfg.interp_eyefix ? "#define IP_EYE 1\n" : "", kIP_VR_VS); /* W224 */
+    _snprintf_s(src, sizeof src, _TRUNCATE, "#define VR_LERP 1\n%s%s%s",
+                g_cfg.interp_eyefix ? "#define IP_EYE 1\n" : "", /* W224 */
+                (g_cfg.interp_guard || g_cfg.interp_guard_diag) ? "#define IP_GUARD 1\n" : "", kIP_VR_VS); /* W265 */
     if (sb_im_compile(src, "vs_4_0", &b)) {
         ID3D11Device_CreateVertexShader(g_dev, b->lpVtbl->GetBufferPointer(b), b->lpVtbl->GetBufferSize(b), NULL, &ip_vr_vs2);
         b->lpVtbl->Release(b);
@@ -3270,6 +3720,21 @@ static int ip_vr_init(void)
 }
 
 /* P2 im BB: render_im.c setzt mvp = diag(vk, 1, 1, 1) (Clip liegt per CPU vor). */
+/* FIX(W265 LINE-GUARD): braucht dieser gelerpte Dreiecks-Draw den Waechter? Nicht noetig ist er nur
+ * fuer einen Matrix-Lerp gleicher Objektraum-Vertices mit echter Perspektive (IP_W_LERP, Matrizen
+ * verschieden, w haengt von der Lage ab): dort ist der Clip-Lerp exakt die Transformation mit der
+ * Zwischenmatrix M_t (ein Dreieck bleibt ein Dreieck, die Rasterung clippt an der Nahebene). Alles
+ * andere - neue Eingangsdaten (Vertex i <-> i), gleiche Matrix mit neuem Strom, vorab durch w
+ * geteilte P2-/2D-Stroeme (w-Spalte 0, Lerp im Bildraum) - bekommt den GS. interp_guard Bit 4: alle. */
+static int ip_gd_need(const ip_op_t *o, const ip_op_t *a)
+{
+    if (o->topo != 4u && o->topo != 5u) { return 0; } /* GS nur fuer Dreiecks-Liste/Strip */
+    if (g_cfg.interp_guard & 4) { return 1; }
+    if (o->why != IP_W_LERP || !a) { return 1; }
+    if (!memcmp(a->mvp, o->mvp, sizeof o->mvp)) { return 1; }
+    return o->mvp[3] == 0.0f && o->mvp[7] == 0.0f && o->mvp[11] == 0.0f;
+}
+
 static int ip_vr_isp2(const float m[16])
 {
     return m[1] == 0.0f && m[2] == 0.0f && m[3] == 0.0f && m[4] == 0.0f && m[5] == 1.0f && m[6] == 0.0f &&
@@ -3336,6 +3801,19 @@ static void ip_vr_cb_write(const ip_cx_t *x, const sb_vr_pass_t *p, int e, int k
 
 /* Nicht-Shading-Draw je Auge. VS/Layout/Streams des bisherigen Pfads sind
  * gebunden (mode 0 = exakt, 1 = Lerp); P2 bindet den VR-VS und setzt mode = -1. */
+/* W264 DRAW-OPT2: Draw eines aufgezeichneten Ops - indiziert (o->ib1) ueber den
+ * festen Strip/Fan/Quad-Indexpuffer, sonst als Liste; base = erster Vertex
+ * (0, wenn die Stroeme per Versatz gebunden sind). */
+static void ip_draw_op(ID3D11DeviceContext *c, const ip_op_t *o, unsigned n, unsigned base)
+{
+    if (o->ib1) {
+        sb_im_ib_bind(c);
+        ID3D11DeviceContext_DrawIndexed(c, n, o->ib1 - 1u, (INT)base);
+    } else {
+        ID3D11DeviceContext_Draw(c, n, base);
+    }
+}
+
 static void ip_vr_draw(const ip_cx_t *x, sb_vr_pass_t *p, const ip_op_t *o, const ip_op_t *a, int kind,
                        float t, int lerp, int *mode)
 {
@@ -3351,8 +3829,8 @@ static void ip_vr_draw(const ip_cx_t *x, sb_vr_pass_t *p, const ip_op_t *o, cons
     for (e = 0; e < p->neyes; e++) {
         ip_vr_eye_target(x, p, e, o);
         ip_vr_cb_write(x, p, e, kind);
-        if (lerp) { ID3D11DeviceContext_Draw(x->c, o->nv, 0); }
-        else { ID3D11DeviceContext_Draw(x->c, o->nv, o->vstart); }
+        if (lerp) { ip_draw_op(x->c, o, o->nv, 0); }
+        else { ip_draw_op(x->c, o, o->nv, o->vstart); }
     }
 }
 
@@ -3464,6 +3942,17 @@ static ID3D11ShaderResourceView *ip_ph_srv(ID3D11ShaderResourceView *s); /* W195
  *    Spielkamera -> verschobene/gedrehte Sicht -> Clip), M je Draw aus seinem Spiel-Viewport. */
 static sb_ph_rep_t ip_ph;
 static unsigned ip_ph_ncam, ip_ph_nred, ip_ph_nclr;
+static unsigned ip_ph_nhud; /* W290: ausgelassene HUD-Draws (hud_off) */
+
+/* W290 QUICK-SHOT: HUD-Draw des Hauptmonitors (nur Foto-Wiedergabe mit hud_off): 2D-Draw in das Monitor-RT, das
+ * nicht das Welt-RT kopiert und kein Korn/Stoerzeilen-Draw (W105, o->nolerp) ist. */
+static int ip_ph_is_hud(const ip_op_t *o)
+{
+    if (!ip_ph.hud_off || ip_ph.mon < 0 || o->kind != IP_DRAW || o->cls || o->nolerp) { return 0; }
+    if (o->sh_rtv != g_ish[ip_ph.mon].rtv) { return 0; }
+    if (ip_ph.wld >= 0 && o->sh_srv && o->sh_srv == g_ish[ip_ph.wld].srv) { return 0; }
+    return 1;
+}
 static ID3D11ShaderResourceView *ip_ph_shsrv[8]; /* Schatten-SRV der skalierten Eintraege (gesetzt in ip_pl_render) */
 
 static ID3D11ShaderResourceView *ip_ph_srv(ID3D11ShaderResourceView *s)
@@ -3532,6 +4021,121 @@ static int ip_ph_is_world(const ip_op_t *o)
     return o->rn[0][2] > 1.001f || o->rn[0][2] < 0.999f || o->rn[3][2] > 1.001f || o->rn[3][2] < 0.999f;
 }
 
+/* ---------- DIAG(W273 INTERP-RACE) interp_rhash ----------
+ * Bit 1: je Zwischenbild-Wiedergabe (0<t<1, beide Contexte) Pruefsummen der CPU-Eingangsdaten
+ *        (ohne Zeigerwerte): hB = Draws von B, hM = Zuordnung, hA = Partner aus A, hS = Puffer-
+ *        wahl/Startkopien. Vergleich zwischen zwei Laeufen je (Tick-Bild-Nr, t).
+ * Bit 2: GPU-Inhalt der Tick-Puffer per Ruecklesen (Staging): am Swap von L gemerkt und vor den
+ *        Zwischenbildern von (A, B) erneut gelesen -> Abweichung = Puffer nach dem Swap ueberschrieben.
+ * Nur Diagnose, Bild unveraendert (Ruecklesen nur im Spiel-Thread, synchron). */
+static unsigned ip_rh_fnv(unsigned h, const void *p, size_t n)
+{
+    const unsigned char *b = (const unsigned char *)p;
+    size_t i;
+    for (i = 0; i < n; i++) { h = (h ^ b[i]) * 16777619u; }
+    return h;
+}
+static ID3D11Buffer *ip_rh_stg;
+static unsigned ip_rh_stgcap;
+static unsigned st_rh_chk, st_rh_bad[6];
+static unsigned ip_rh_buf(ID3D11Buffer *b, unsigned bytes)
+{
+    D3D11_BOX bx;
+    D3D11_MAPPED_SUBRESOURCE m;
+    unsigned h = 2166136261u, i, n;
+    const unsigned *w;
+    if (!b || !bytes) { return 0u; }
+    if (!ip_rh_stg || ip_rh_stgcap < bytes) {
+        D3D11_BUFFER_DESC bd;
+        if (ip_rh_stg) { ID3D11Buffer_Release(ip_rh_stg); ip_rh_stg = NULL; }
+        memset(&bd, 0, sizeof bd);
+        bd.ByteWidth = bytes + bytes / 2u;
+        bd.Usage = D3D11_USAGE_STAGING;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &ip_rh_stg))) { ip_rh_stg = NULL; ip_rh_stgcap = 0; return 1u; }
+        ip_rh_stgcap = bd.ByteWidth;
+    }
+    memset(&bx, 0, sizeof bx);
+    bx.right = bytes; bx.bottom = 1; bx.back = 1;
+    ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)ip_rh_stg, 0, 0, 0, 0, (ID3D11Resource *)b, 0, &bx);
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)ip_rh_stg, 0, D3D11_MAP_READ, 0, &m))) { return 2u; }
+    w = (const unsigned *)m.pData;
+    n = bytes / 4u;
+    for (i = 0; i < n; i++) { h = (h ^ w[i]) * 16777619u; }
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)ip_rh_stg, 0);
+    return h | 16u; /* nie 0..15 (Fehlercodes) */
+}
+static void ip_rh_take(const ip_list_t *L, unsigned out[6])
+{
+    out[0] = ip_rh_buf(L->vb, L->nverts * (unsigned)sizeof(im_vertex_t));
+    out[1] = (L->gpu_ok & 1u) ? ip_rh_buf(L->vbg, L->nverts * (unsigned)sizeof(im_vertex_t)) : 0u;
+    out[2] = ip_rh_buf(L->rqx, L->rqxpos > L->rqxcap ? L->rqxcap : L->rqxpos);
+    out[3] = (L->gpu_ok & 2u) ? ip_rh_buf(L->rqxg, L->rqxpos > L->rqxcap ? L->rqxcap : L->rqxpos) : 0u;
+    out[4] = ip_rh_buf(L->rqc, L->rqcpos * 16u);
+    out[5] = L->wb_ok ? ip_rh_buf(L->wb, L->nverts * (unsigned)sizeof(float)) : 0u;
+}
+static void ip_rh_check(const ip_list_t *L, const char *who, unsigned fr, int k)
+{
+    static const char *const nm[6] = { "vb", "vbg", "rqx", "rqxg", "rqc", "wb" };
+    unsigned now[6];
+    int q;
+    if (!L || !L->ready) { return; }
+    ip_rh_take(L, now);
+    st_rh_chk++;
+    for (q = 0; q < 6; q++) {
+        if (now[q] != L->rh[q]) {
+            st_rh_bad[q]++;
+            if (st_rh_bad[q] <= 40u) {
+                HLOG_W("INTERP rhash: Puffer %s von %s (Tick f=%u ser=%u) geaendert seit Swap: %08X -> %08X (Bild f=%u k=%d)",
+                       nm[q], who, L->frame, L->serial, L->rh[q], now[q], fr, k);
+            }
+        }
+    }
+    if ((st_rh_chk % 2000u) == 0u) {
+        HLOG_I("INTERP rhash: %u Pruefungen, geaendert vb=%u vbg=%u rqx=%u rqxg=%u rqc=%u wb=%u", st_rh_chk,
+               st_rh_bad[0], st_rh_bad[1], st_rh_bad[2], st_rh_bad[3], st_rh_bad[4], st_rh_bad[5]);
+    }
+}
+static void ip_rh_inputs(const ip_list_t *B, int bi, const ip_list_t *A, int ai, float t, const ip_cx_t *x,
+                         int vbgA, int vbgB, int ring)
+{
+    unsigned hB = 2166136261u, hM = 2166136261u, hA = 2166136261u, hS = 2166136261u, i, nl = 0;
+    int j;
+    for (i = 0; i < B->nops; i++) {
+        const ip_op_t *o = &B->ops[i];
+        unsigned v[10];
+        v[0] = o->kind; v[1] = o->topo; v[2] = o->vstart; v[3] = o->nv; v[4] = o->ib1; v[5] = o->nsv;
+        v[6] = o->has_tex; v[7] = o->outhash; v[8] = o->rq; v[9] = o->nolerp;
+        hB = ip_rh_fnv(hB, v, sizeof v);
+        hB = ip_rh_fnv(hB, o->mvp, sizeof o->mvp);
+        if (o->kind != IP_DRAW) { continue; }
+        v[0] = o->flag; v[1] = o->why; v[2] = (unsigned)o->match; v[3] = (unsigned)o->rzb;
+        hM = ip_rh_fnv(hM, v, (o->rzb ? 4 : 3) * sizeof v[0]); /* W284: rzb nur wenn gesetzt (Pruefsumme sonst wie bisher) */
+        if (o->flag && o->match >= 0 && (unsigned)o->match < A->nops) {
+            const ip_op_t *a = &A->ops[o->match];
+            v[0] = a->vstart; v[1] = a->nv; v[2] = a->ib1; v[3] = a->nsv; v[4] = a->outhash;
+            hA = ip_rh_fnv(hA, v, 5 * sizeof v[0]);
+            hA = ip_rh_fnv(hA, a->mvp, sizeof a->mvp);
+            nl++;
+        }
+    }
+    {
+        unsigned v[8];
+        v[0] = (unsigned)vbgA; v[1] = (unsigned)vbgB; v[2] = (unsigned)ring; v[3] = A->gpu_ok; v[4] = B->gpu_ok;
+        v[5] = (unsigned)A->wb_ok | ((unsigned)B->wb_ok << 1); v[6] = B->nverts; v[7] = A->nverts;
+        hS = ip_rh_fnv(hS, v, sizeof v);
+    }
+    for (j = 0; j < B->nrefs; j++) {
+        const ip_sh_t *e = &g_ish[B->refs[j]];
+        unsigned v[2];
+        v[0] = (unsigned)B->refs[j];
+        v[1] = (ai >= 0 && e->bakser[ai] == A->serial) ? 1u : (e->bakser[bi] == B->serial ? 2u : 0u);
+        hS = ip_rh_fnv(hS, v, sizeof v);
+    }
+    HLOG_I("INTERP rhash f=%u t=%.3f ctx=%d ops=%u lerp=%u hB=%08X hM=%08X hA=%08X hS=%08X", B->frame, (double)t,
+           x->deferred, B->nops, nl, hB, hM, hA, hS);
+}
+
 static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, int dbg, const ip_cx_t *x)
 {
     int cps = -1; /* DIAG: 1 = Diagnose-PS gebunden */
@@ -3564,6 +4168,8 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
     int ring = 0, vbgB = 0, vbgA = 0; /* PERF(PERF-M2,W174) */
     unsigned *rofs = NULL;
     ID3D11Buffer *bvb, *avb = NULL; /* W174: Tick-VB von B/A (GPU-Kopie oder DYNAMIC) */
+    ID3D11GeometryShader *cgd = NULL; /* FIX(W265 LINE-GUARD): gebundener Waechter-GS */
+    int gdon, gdq = -1;
     fxr_rep_begin(&fxs);
     memset(&rc, 0, sizeof rc);
     if (!dbg && !vrp) {
@@ -3577,6 +4183,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
     vbgB = vbgB && (B->gpu_ok & 1u);
     bvb = (ip_pl_on && ip_pl_vb) ? ip_pl_vb : ip_vbsel(B, vbgB);
     if (A) { avb = ip_vbsel(A, vbgA); }
+    if ((g_cfg.interp_rhash & 1) && lerp_ok && !dbg) { ip_rh_inputs(B, bi, A, ai, t, x, vbgA, vbgB, ring); } /* DIAG(W273) */
     rc.var = var;
     rc.nops = B->nops;
     rc.nverts = B->nverts;
@@ -3584,6 +4191,16 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
     rc.vbg = (unsigned)vbgB;
     memset(&cvp, 0xFF, sizeof cvp);
     memset(&csc, 0xFF, sizeof csc);
+    gdon = lerp_ok && (ip_gd_im || ip_gd_sh); /* W265: Waechter nur in Zwischenbildern (t < 1) */
+    if (gdon && g_cfg.interp_guard_diag && !dbg) { /* DIAG(W265): Pipeline-Statistik dieser Wiedergabe (auch Deferred) */
+        unsigned q = ip_gd_qi % IP_GD_Q;
+        if (!x->deferred) { ip_gd_poll(); }
+        if (ip_gd_q[q] && !ip_gd_qbusy[q]) {
+            gdq = (int)q;
+            ID3D11DeviceContext_Begin(x->c, (ID3D11Asynchronous *)ip_gd_q[gdq]);
+        } else { st_gd_lost++; }
+        ip_gd_qi++;
+    }
     if (!x->deferred) {
         ip_state_save(&sv);
         if (!dbg) { ip_gs_begin(t); } /* DIAG(TICK-PERF,W125) */
@@ -3626,6 +4243,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
         int phred = 0; /* W195: Viewport/Scissor dieser Op schon umgelenkt gesetzt */
         if ((ccm & 16) && cc_skip[i]) { continue; } /* W146 GPU-COST: ruhiges Ziel (Tick-Endstand kopiert) */
         if (ip_pl_on && o->nolerp && (ip_pl_mfx & (o->nolerp == MFX_WASH ? 1u : 2u))) { ip_pl_nmfx++; continue; } /* W193: monitor_fx aus */
+        if (ip_ph.on && ip_ph.hud_off && ip_ph_is_hud(o)) { ip_ph_nhud++; continue; } /* W290: HUD aus (nur Foto) */
         if (vtk && vt_skip[i]) { continue; } /* W183 VR-FIX3: RT-Op, Ziel hat den Tick-Endstand */
         if ((ccm & 3) && i < (unsigned)cc_pfx) { /* W146 GPU-COST: BB-Anfang aus dem Cockpit-Cache */
             if ((ccm & 3) == 2 && (o->rtv == g_rtv || (cc_bdsv && o->dsv == cc_bdsv))) { continue; }
@@ -3933,7 +4551,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             if (lerp) {
                 const ip_op_t *a = &A->ops[o->match];
                 ID3D11Buffer *cbs2[2];
-                UINT o1 = a->vstart * stride;
+                UINT o1 = (o->rzb ? o->vstart : a->vstart) * stride; /* W284 rzb: Strom N-1 = Tick-N-Vertices */
                 if (ring) { ip_ring_bind(x, rofs[2u * i + 1u], 1, rcur, &rc); }
                 else if (var != 4u) { ip_cb_write(x, x->cb1, a->mvp, 0, t, 1); rc.nmap++; }
                 ID3D11DeviceContext_IASetInputLayout(x->c, r->layl);
@@ -3941,9 +4559,11 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
                 cbs2[0] = x->cb0; cbs2[1] = x->cb1;
                 if (!ring) { ID3D11DeviceContext_VSSetConstantBuffers(x->c, 0, 2, cbs2); }
                 ID3D11DeviceContext_IASetVertexBuffers(x->c, 0, 1, &bvb, &st2, &o0);
-                ID3D11DeviceContext_IASetVertexBuffers(x->c, 1, 1, &avb, &st2, &o1);
-                ip_hw_bind(x->c, B, A, o->vstart, a->vstart); /* FIX(W237) interp_hlerp */
+                ID3D11DeviceContext_IASetVertexBuffers(x->c, 1, 1, o->rzb ? &bvb : &avb, &st2, &o1);
+                ip_hw_bind(x->c, B, o->rzb ? B : A, o->vstart, o->rzb ? o->vstart : a->vstart); /* FIX(W237) interp_hlerp */
+                if (gdon) { ip_gd_bind(x->c, &cgd, ip_gd_need(o, a) ? ip_gd_sh : NULL); } /* FIX(W265) */
             } else {
+                if (cgd) { ip_gd_bind(x->c, &cgd, NULL); } /* W265 */
                 ID3D11DeviceContext_IASetInputLayout(x->c, r->lay);
                 ID3D11DeviceContext_VSSetShader(x->c, r->vs, NULL, 0);
                 if (!ring) { ID3D11DeviceContext_VSSetConstantBuffers(x->c, 0, 1, &x->cb0); }
@@ -3957,12 +4577,12 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
                     ip_vr_mat3d(m, o->mvp, vrp, e);
                     ip_cb_write(x, x->cb0, m, o->has_tex, 0.0f, 0);
                     if (lerp) { ip_vr_mat3d(m, A->ops[o->match].mvp, vrp, e); ip_cb_write(x, x->cb1, m, 0, t, 1); }
-                    ID3D11DeviceContext_Draw(x->c, o->nv, 0);
+                    ip_draw_op(x->c, o, o->nv, 0);
                 }
                 crtv = (ID3D11RenderTargetView *)1; cdsv = (ID3D11DepthStencilView *)1;
                 memset(&cvp, 0xFF, sizeof cvp); memset(&csc, 0xFF, sizeof csc);
             } else {
-                if (var != 8u) { WD_CALL("ip_draw_rq", x->c, ID3D11DeviceContext_Draw(x->c, var == 2u && o->nv > 3u ? 3u : o->nv, 0)); } /* DIAG(PERF-WARM,W139); W174 ip_ablate */
+                if (var != 8u) { WD_CALL("ip_draw_rq", x->c, ip_draw_op(x->c, o, var == 2u && o->nv > 3u ? 3u : o->nv, 0)); } /* DIAG(PERF-WARM,W139); W174 ip_ablate */
             }
             mode = -1;      /* naechster alter Draw bindet VS/Layout/Streams neu */
             rq_dirty = 1;   /* ... und PS/Sampler/Stufen */
@@ -4009,19 +4629,21 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
                 if (!ring) { ID3D11DeviceContext_VSSetConstantBuffers(x->c, 0, 2, cbs2); }
                 mode = 1;
             }
-            vbs[0] = bvb; vbs[1] = avb;
+            vbs[0] = bvb; vbs[1] = o->rzb ? bvb : avb; /* W284 rzb */
             strides[0] = stride; strides[1] = stride;
-            offs[0] = o->vstart * stride; offs[1] = a->vstart * stride;
+            offs[0] = o->vstart * stride; offs[1] = (o->rzb ? o->vstart : a->vstart) * stride;
             ID3D11DeviceContext_IASetVertexBuffers(x->c, 0, 2, vbs, strides, offs);
-            ip_hw_bind(x->c, B, A, o->vstart, a->vstart); /* FIX(W237) interp_hlerp */
+            ip_hw_bind(x->c, B, o->rzb ? B : A, o->vstart, o->rzb ? o->vstart : a->vstart); /* FIX(W237) interp_hlerp */
+            if (gdon) { ip_gd_bind(x->c, &cgd, ip_gd_need(o, a) ? ip_gd_im : NULL); } /* FIX(W265); VR: Lagen im Augenraum */
             if (vrbb) { /* W134 VR-PROTO */
                 ip_vr_draw(x, vrp, o, a, vrkind, t, 1, &mode);
                 crtv = (ID3D11RenderTargetView *)1; cdsv = (ID3D11DepthStencilView *)1;
                 memset(&cvp, 0xFF, sizeof cvp); memset(&csc, 0xFF, sizeof csc);
             } else {
-                if (var != 8u) { WD_CALL("ip_draw_lerp", x->c, ID3D11DeviceContext_Draw(x->c, var == 2u && o->nv > 3u ? 3u : o->nv, 0)); } /* W174 ip_ablate */
+                if (var != 8u) { WD_CALL("ip_draw_lerp", x->c, ip_draw_op(x->c, o, var == 2u && o->nv > 3u ? 3u : o->nv, 0)); } /* W174 ip_ablate */
             }
         } else {
+            if (cgd) { ip_gd_bind(x->c, &cgd, NULL); } /* W265 */
             if (mode != 0) {
                 ID3D11Buffer *nb = NULL;
                 ID3D11DeviceContext_IASetInputLayout(x->c, g_im_layout);
@@ -4036,11 +4658,13 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
                 crtv = (ID3D11RenderTargetView *)1; cdsv = (ID3D11DepthStencilView *)1;
                 memset(&cvp, 0xFF, sizeof cvp); memset(&csc, 0xFF, sizeof csc);
             } else {
-                if (var != 8u) { WD_CALL("ip_draw", x->c, ID3D11DeviceContext_Draw(x->c, var == 2u && o->nv > 3u ? 3u : o->nv, o->vstart)); } /* W174 ip_ablate */
+                if (var != 8u) { WD_CALL("ip_draw", x->c, ip_draw_op(x->c, o, var == 2u && o->nv > 3u ? 3u : o->nv, o->vstart)); } /* W174 ip_ablate */
             }
         }
     }
     if ((ccm & 3) == 1) { cc_store(A, B, x); } /* W146: BB-Anfang = alle BB-Ops */
+    if (cgd) { ip_gd_bind(x->c, &cgd, NULL); } /* W265: Spiel-Draws nie mit GS */
+    if (gdq >= 0) { ID3D11DeviceContext_End(x->c, (ID3D11Asynchronous *)ip_gd_q[gdq]); ip_gd_qbusy[gdq] = (int)ip_gd_qi; } /* DIAG(W265) */
     if (cps >= 0) {
         ID3D11Buffer *nb = NULL;
         ID3D11DeviceContext_PSSetConstantBuffers(x->c, 1, 1, &nb);
@@ -4095,7 +4719,7 @@ static void ip_diag_tick(ip_list_t *A, int ai, ip_list_t *B, int bi)
     static unsigned ndone;
     unsigned i, cnt[IP_W_N];
     float (*PA)[4] = ip_cpos[ai], (*PB)[4] = ip_cpos[bi];
-    if (!PA || !PB || ndone >= 48u) { return; }
+    if (!PA || !PB || (ndone >= 48u && !g_cfg.interp_ddfile[0])) { return; } /* W284: mit Tick-Liste ohne Grenze */
     ndone++;
     memset(cnt, 0, sizeof cnt);
     for (i = 0; i < B->nops; i++) {
@@ -4181,7 +4805,7 @@ static void ip_diag_tick(ip_list_t *A, int ai, ip_list_t *B, int bi)
                ba[0], ba[1], ba[2], ba[3], behA,
                (o->match >= 0 && (unsigned)o->match < A->nops &&
                 memcmp(A->ops[o->match].mvp, o->mvp, sizeof o->mvp) == 0) ? 1 : 0, extra);
-        if (g_cfg.interp_ddrel > 0) { /* DIAG(W251 INTERP-GROUND): Zustand + Huelle des Lerps bei t=0,25 */
+        if (ip_dd_on()) { /* DIAG(W251 INTERP-GROUND): Zustand + Huelle des Lerps bei t=0,25 */
             float tb[4] = { 1e30f, 1e30f, -1e30f, -1e30f };
             unsigned tbeh = 0;
             const ip_op_t *a = (o->match >= 0 && (unsigned)o->match < A->nops) ? &A->ops[o->match] : NULL;
@@ -4879,7 +5503,7 @@ static void ip_show(ip_list_t *A, ip_list_t *B, float t, const char *tag)
             ip_replay(B, bi, A, ai, t); /* gezeigtes Bild wiederherstellen */
         }
     }
-    if (ip_dd_ser && B->serial >= ip_dd_lo && B->serial <= ip_dd_ser && ip_id_ps && A) { ip_id_dump(A, ai, B, bi, t); } /* DIAG(W251) */
+    if (((ip_dd_ser && B->serial >= ip_dd_lo && B->serial <= ip_dd_ser) || B->ddsel) && ip_id_ps && A) { ip_id_dump(A, ai, B, bi, t); } /* DIAG(W251, W284) */
     sb_render_blit(img);
     if (gpm) { sb_gp_end(); } /* DIAG(GPU-COST,W146) */
     dy_end(); /* W146 rt_scale_dyn */
@@ -5317,9 +5941,26 @@ static void ip_stat_log(void)
         HLOG_I("INTERP hlerp: ticks=%u fehl=%u draws=%u ersatz=%u (homogener Zwischenbild-Lerp, w-Puffer je Tick)",
                st_hw_up, st_hw_fail, st_hw_draws, st_hw_one);
     }
+    if (g_cfg.interp_guard_diag) { /* DIAG(W265 LINE-GUARD) */
+        ip_gd_poll();
+        HLOG_I("INTERP guard: modus=%d maske=%d bilder=%u dreiecke=%llu treffer=%llu (%.4f%%) bilder_mit_treffer=%u max_je_bild=%u ohne_abfrage=%u",
+               g_cfg.interp_guard, g_cfg.interp_guard_diag, st_gd_frames, st_gd_tris, st_gd_hit,
+               st_gd_tris ? 100.0 * (double)st_gd_hit / (double)st_gd_tris : 0.0, st_gd_fhit, st_gd_max, st_gd_lost);
+    }
     if (g_cfg.interp_zcons) { /* FIX(W251 INTERP-GROUND) */
         HLOG_I("INTERP zcons: modus=%d relerp=%u ohne_partner=%u kamera_abw=%u ziele_ok=%u ticks_exakt=%u draws_exakt=%u (Tiefen-Konsistenz)",
                g_cfg.interp_zcons, st_zc_rel, st_zc_nocand, st_zc_cam, st_zc_tgt, st_zc_ticks, st_zc_draws);
+    }
+    if (g_cfg.interp_rawzc) { /* FIX(W284 INTERP-RAWCHG) */
+        HLOG_I("INTERP rawzc: relerp_welt=%u relerp_versatz=%u ohne_versatz=%u kamera_abw=%u ohne_kamera=%u sonst=%u zeit=%.3fms(max %.3f, n=%u) (verschobene Eingangsdaten)",
+               st_rz_relw, st_rz_rel, st_rz_noofs, st_rz_cam, st_rz_nocam, st_rz_other,
+               st_rz_n ? st_rz_ms / st_rz_n : 0.0, st_rz_max, st_rz_n);
+        st_rz_ms = st_rz_max = 0.0; st_rz_n = 0;
+        if (g_cfg.interp_rawzc >= 2) {
+            HLOG_I("INTERP rawzc nomatch: relerp_welt=%u ohne_kandidat=%u kamera_abw=%u", st_rz_nm, st_rz_nmno, st_rz_nmcam);
+            st_rz_nm = st_rz_nmno = st_rz_nmcam = 0;
+        }
+        st_rz_relw = st_rz_rel = st_rz_noofs = st_rz_cam = st_rz_nocam = st_rz_other = 0;
     }
     if (g_cfg.interp_eyediag > 0) { /* DIAG(W224) */
         HLOG_I("INTERP eyesum: draws=%u verts=%u (w-Wechsel in zwischengerechneten Draws, eyefix=%d)",
@@ -5337,6 +5978,10 @@ static void ip_stat_log(void)
     }
     HLOG_I("INTERP inst: multi=%u wrong=%u amb=%u pass=%u (interp_inst=%d interp_pass=%d)", st_imulti,
            st_iwrong, st_iamb, st_ipass, g_cfg.interp_inst, g_cfg.interp_pass); /* POPIN (W91) */
+    if (g_cfg.interp_pass && g_cfg.interp_pass_exact > 0) { /* W273 */
+        HLOG_I("INTERP pass_exact: Fehltreffer der 16-Bit-Maske verworfen=%u", st_ipass_false);
+        st_ipass_false = 0;
+    }
     if (ip_rt_ok) { /* W126 RENDER-THREAD */
         HLOG_I("INTERP rt: auftraege=%u vorbereitet=%u nachgefordert=%u gewartet=%u verworfen=%u fehl=%u aufzeichnung=%.2fms(max %.2f, Render-Thread) spiel: holen=%.2fms ausfuehren=%.2fms je Bild",
                st_rt_n, st_rt_hit, st_rt_miss, st_rt_wait, st_rt_stale, st_rt_fail,
@@ -5587,9 +6232,9 @@ static int ip_pl_cpersp(ip_list_t *B)
         ip_op_t *o = &B->ops[i];
         memcpy(ip_pl_mvp[i], o->mvp, sizeof o->mvp);
         if (o->kind == IP_DRAW && o->rtv == g_rtv) {
-            if (o->vstart > B->nverts || o->nv > B->nverts - o->vstart) { goto done; }
+            if (o->vstart > B->nverts || o->nsv > B->nverts - o->vstart) { goto done; }
             if (ip_pl_hook(ip_pl_mvp[i], o->cls, v[o->vstart].pos,
-                           sizeof *v / sizeof(float), o->nv)) { ip_pl_nhook++; }
+                           sizeof *v / sizeof(float), o->nsv)) { ip_pl_nhook++; } /* W264: Vertices im Tick-VB */
         }
     }
     bd.Usage = D3D11_USAGE_IMMUTABLE; bd.CPUAccessFlags = 0; bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
@@ -5615,7 +6260,12 @@ ID3D11Resource *sb_interp_photo_render(const sb_ph_rep_t *ph, sb_pl_info_t *inf,
 {
     ID3D11Resource *r;
     ip_ph_ncam = ip_ph_nred = ip_ph_nclr = 0;
+    ip_ph_nhud = 0;
     r = ip_pl_render(inf, ph);
+    if (ph && ph->hud_off && (ip_ph_nhud || ph->mon < 0)) { /* W290 */
+        static unsigned nlog;
+        if (nlog++ < 4u) { HLOG_I("PHOTO: HUD aus - %u HUD-Draws im Monitor-RT e%d ausgelassen", ip_ph_nhud, ph->mon); }
+    }
     if (ncam) { *ncam = ip_ph_ncam; }
     if (nred) { *nred = ip_ph_nred + ip_ph_nclr; }
     return r;
@@ -5760,7 +6410,7 @@ static void ip_ph_dump_draw(ip_list_t *B, const ip_op_t *o, const char *what, fl
     D3D11_BOX bx;
     D3D11_MAPPED_SUBRESOURCE m;
     ID3D11Buffer *stg = NULL;
-    unsigned n = bbx ? (o->nv < 65536u ? o->nv : 65536u) : (o->nv < 6u ? o->nv : 6u), q; /* Grenzen ueber alle Vertices */
+    unsigned n = bbx ? (o->nsv < 65536u ? o->nsv : 65536u) : (o->nsv < 6u ? o->nsv : 6u), q; /* Grenzen ueber alle Vertices (W264: im Tick-VB) */
     char line[900];
     size_t pos = 0;
     if (!B->vb || !n) { return; }
@@ -5850,7 +6500,7 @@ static void ip_ph_quant(ip_list_t *B, int best, unsigned w_tw, unsigned w_lw)
         int pix;
         float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f, r0[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
         if (o->kind != IP_DRAW || o->sh_rtv != g_ish[best].rtv || !o->nv) { continue; }
-        n = o->nv < 65536u ? o->nv : 65536u;
+        n = o->nsv < 65536u ? o->nsv : 65536u; /* W264: Vertices im Tick-VB */
         vp = o->pvs ? vsh_program(o->pvs) : NULL;
         pix = o->mvp[3] == 0.0f && o->mvp[7] == 0.0f && o->mvp[11] == 0.0f && o->mvp[15] == 1.0f;
         kc = (vp && vp->kind == 1) ? 2u : (vp && vp->kind == 2) ? 3u : pix ? 1u : 0u;
@@ -5954,6 +6604,20 @@ int sb_interp_photo_census(sb_ph_census_t *c, int log)
     }
     c->bbd = bd;
     c->wld = best;
+    c->mon = -1;
+    if (best >= 0) { /* W290: Monitor-RT = groesstes Ziel (ohne BB), das das Welt-RT liest (wie der Beleg unten) */
+        unsigned mw = 0;
+        for (i = 0; i < B->nops; i++) {
+            const ip_op_t *o = &B->ops[i];
+            int e;
+            if (o->kind != IP_DRAW || !o->sh_srv || o->sh_srv != g_ish[best].srv || o->sh_rtv == g_ish[best].rtv) { continue; }
+            e = ip_ph_ent_rtv(o->sh_rtv);
+            if (e >= 0 && e != B->bbref && g_ish[e].sh) {
+                ID3D11Texture2D_GetDesc(g_ish[e].sh, &td);
+                if (td.Width > mw) { mw = td.Width; c->mon = e; }
+            }
+        }
+    }
     if (g_ish[B->bbref].sh) {
         ID3D11Texture2D_GetDesc(g_ish[B->bbref].sh, &td);
         c->bb_w = td.Width;
@@ -6088,6 +6752,7 @@ int sb_interp_swap(void)
     t0 = ip_now();
     sb_ctx_enter();
     ip_gpu_poll();
+    if (g_cfg.interp_guard_diag) { ip_gd_poll(); } /* DIAG(W265) */
     mission = ip_mission();
     ip_K = g_cfg.interp_fps / 30;
     if (ip_K < 1) { ip_K = 1; }
@@ -6120,6 +6785,7 @@ int sb_interp_swap(void)
         L->ready = 1;
         if (g_cfg.ip_vb_gpu > 0) { ip_gpu_copy(L); } /* PERF(PERF-M2,W174) */
         ip_w_upload(L); /* FIX(W237) interp_hlerp */
+        if (g_cfg.interp_rhash & 2) { ip_rh_take(L, L->rh); } /* DIAG(W273) */
         A = ip_nhist ? &g_ipl[ip_hist[ip_nhist - 1]] : NULL;
         /* 2. Zuordnung gegen den Vortick. */
         if (A) {
@@ -6196,6 +6862,12 @@ int sb_interp_swap(void)
                 ip_dd_ser = L->serial;
                 ip_diag_tick(A, ip_list_index(A), L, li);
             }
+        } else if (A && g_cfg.interp_diag >= 3 && g_cfg.interp_ddfile[0]) { /* DIAG(W284 INTERP-RAWCHG) */
+            unsigned m0 = sb_pf_m0();
+            if (m0 && L->frame >= m0 && ip_ddf_has(L->frame - m0)) {
+                L->ddsel = 1;
+                ip_diag_tick(A, ip_list_index(A), L, li);
+            }
         } else if (A && g_cfg.interp_diag >= 3 && ip_shot_ser == L->serial) {
             ip_diag_tick(A, ip_list_index(A), L, li);
         }
@@ -6238,12 +6910,14 @@ int sb_interp_swap(void)
         if (g_cfg.vblank_hz <= 0) {
             if (A) {
                 char tag[8];
+                if (g_cfg.interp_rhash & 2) { ip_rh_check(A, "A", L->frame, 0); ip_rh_check(L, "B", L->frame, 0); } /* DIAG(W273) */
                 for (k = 1; k <= ip_K; k++) {
                     _snprintf_s(tag, sizeof tag, _TRUNCATE, "%d", k);
                     if (ip_rt_ok && k + 1 < ip_K) { ip_rt_nA = A; ip_rt_nB = L; ip_rt_nt = (float)(k + 1) / (float)ip_K; } /* W126 */
                     ip_show(A, L, k >= ip_K ? 1.0f : (float)k / (float)ip_K, tag);
                     ip_rt_nA = NULL;
                 }
+                if (g_cfg.interp_rhash & 2) { ip_rh_check(A, "A", L->frame, 9); } /* DIAG(W273): nach den Bildern */
                 took = 1;
             }
         } else if (ip_nhist >= 2) {

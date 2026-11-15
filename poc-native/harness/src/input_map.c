@@ -549,6 +549,18 @@ static int imap_src_centered(int src)
     return (src >= 0 && src <= 3) || src >= IMAP_SRC_JOY;
 }
 
+/* W271 STICK-RELATIVE: Quelle wirkt relativ (Geschwindigkeit) - nur
+ * zentrierte Quellen auf aim_x/aim_y; ":mode=" vor globalem stick_aim. */
+static int imap_src_rate(imap_axis_t ax, const imap_analog_t *a,
+                         const imap_snap_t *snap)
+{
+    if (ax != IMAP_AX_AIM_X && ax != IMAP_AX_AIM_Y) return 0;
+    if (!imap_src_centered(a->src)) return 0;
+    if (a->amode == IMAP_AMODE_RATE) return 1;
+    if (a->amode == IMAP_AMODE_POSITION) return 0;
+    return snap->stick_aim != 0;
+}
+
 /* W221 HOTAS: JOY-Achse -> zentriert -1..1 (pedal = 0) bzw. Pedal 0..1
  * (pedal = 1: voller Weg Minimum -> 0, Maximum -> 1; half = nur positive
  * Haelfte). Reihenfolge: Invertierung, Totzone (reskaliert; Pedal: am
@@ -702,6 +714,84 @@ int imap_arb_pad1(imap_arb1_t *a, int mouse, int pad, float mpos,
     return a->owns ? pad : mouse;
 }
 
+/* W271: Achse hat in diesem Poll eine relative Quelle mit Geraet. */
+static int imap_axis_rate_on(imap_axis_t ax, const imap_state_t *st)
+{
+    if (ax == IMAP_AX_AIM_X) return (st->m_rate_src & 1u) != 0;
+    if (ax == IMAP_AX_AIM_Y) return (st->m_rate_src & 2u) != 0;
+    return 0;
+}
+
+/* W271 STICK-RELATIVE: relative Quellen (Pad-Stick/JOY-Achse auf aim_x/
+ * aim_y, s. imap_src_rate) einmal je Spiel-Frame integrieren: Auslenkung
+ * (Totzone >= IMAP_STICK_RATE_DZ, Kurve, Invertierung wie immer) * Rate
+ * (* Beschleunigung) -> auf den virtuellen Hebel m_ax+m_fx bzw. m_ay+m_fy
+ * (derselbe wie die Maus: beide addieren, kein Sprung beim Geraetewechsel),
+ * geklemmt 0..255. Loslassen = Stellung bleibt. Setzt m_rate_src. */
+static void imap_stick_rate_step(imap_state_t *st, const imap_profile_t *prof,
+                                 const imap_snap_t *snap)
+{
+    unsigned dt;
+    int k;
+    float rate = snap->stick_aim_rate > 0.0f ? snap->stick_aim_rate
+                                             : 4.0f * IMAP_STICK_RATE_PER_SENS;
+    st->m_rate_src = 0;
+    st->m_rate_move = 0;
+    if (!st->s_have) dt = 1u;
+    else if (snap->frame == st->s_frame) dt = 0u;
+    else {
+        dt = snap->frame - st->s_frame;
+        if (dt > 4u) dt = 4u; /* Pause/Stall: kein Satz */
+    }
+    for (k = 0; k < 2; k++) {
+        imap_axis_t ax = k ? IMAP_AX_AIM_Y : IMAP_AX_AIM_X;
+        const imap_axis_map_t *m = &prof->axis[ax];
+        float rv = 0.0f;
+        int i, has = 0;
+        for (i = 0; i < 2; i++) {
+            imap_analog_t a = m->pad[i];
+            float v;
+            if (!imap_src_rate(ax, &a, snap) || !imap_src_live(a.src, snap))
+                continue;
+            has = 1;
+            if (a.dz < IMAP_STICK_RATE_DZ) a.dz = IMAP_STICK_RATE_DZ;
+            v = imap_analog_value(&a, snap);
+            if ((v < 0 ? -v : v) > (rv < 0 ? -rv : rv)) rv = v;
+        }
+        if (!has) {
+            st->s_hold[k] = 0;
+            continue;
+        }
+        st->m_rate_src |= (uint8_t)(1u << k);
+        if (!dt) continue;
+        if ((rv < 0 ? -rv : rv) >= 0.95f) st->s_hold[k] += (int)dt;
+        else st->s_hold[k] = 0;
+        if (rv != 0.0f) {
+            float mult = 1.0f, d, vv, *fp;
+            int *ip;
+            if (snap->stick_aim_accel > 0) {
+                float r = (float)(st->s_hold[k] - 6) / 15.0f;
+                if (r < 0.0f) r = 0.0f;
+                if (r > 1.0f) r = 1.0f;
+                mult += 0.5f * (float)snap->stick_aim_accel * r;
+            }
+            d = rv * rate * mult * (float)dt;
+            ip = k ? &st->m_ay : &st->m_ax;
+            fp = k ? &st->m_fy : &st->m_fx;
+            vv = (float)*ip + *fp + d;
+            if (vv > 255.0f) vv = 255.0f;
+            if (vv < 0.0f) vv = 0.0f;
+            *ip = (int)(vv + 0.5f);
+            *fp = vv - (float)*ip;
+            st->m_rate_move |= (uint8_t)(1u << k);
+        }
+    }
+    if (dt) {
+        st->s_frame = snap->frame;
+        st->s_have = 1;
+    }
+}
+
 /* Zentrierte Achse (Aiming/Rotation/Sight): digital voll, Maus-Akku,
  * Pad-Analog; groesste Auslenkung gewinnt (Gleichstand: digital > Maus
  * > Pad). raw_dig unterdrueckt die Maus auch bei verfehlter SHIFT-
@@ -742,8 +832,25 @@ static int imap_axis_centered(imap_axis_t ax, const imap_axis_map_t *m,
             }
         }
     }
+    if (!mcon && imap_axis_rate_on(ax, st)) {
+        /* W271: relativer Stick ohne Maus-Kandidat (Maus aus, Maus auf der
+         * Sicht, Achse ohne MOUSE-Quelle): der virtuelle Hebel ist Quelle
+         * wie die Maus (haelt die Stellung, auch bei Pfeil+SHIFT). */
+        mc = (ax == IMAP_AX_AIM_X ? st->m_ax : st->m_ay) - 0x7F;
+        mcon = 1;
+        mvalid = !have;
+        if (mc != 0) {
+            moff = mc < 0 ? -mc : mc;
+            if (!have || moff > (best < 0 ? -best : best)) {
+                best = mc;
+                have = 1;
+                mwon = 1;
+            }
+        }
+    }
     for (i = 0; i < 2; i++) {
-        if (imap_src_centered(m->pad[i].src)) {
+        if (imap_src_centered(m->pad[i].src) &&
+            !imap_src_rate(ax, &m->pad[i], snap)) { /* W271: nur Position */
             pbound = 1;
             if (imap_src_live(m->pad[i].src, snap)) plive = 1;
         }
@@ -751,7 +858,8 @@ static int imap_axis_centered(imap_axis_t ax, const imap_axis_map_t *m,
     if (plive) { /* W221: Pad- oder JOY-Quelle mit Geraet */
         for (i = 0; i < 2; i++) {
             if (!imap_src_centered(m->pad[i].src) ||
-                !imap_src_live(m->pad[i].src, snap))
+                !imap_src_live(m->pad[i].src, snap) ||
+                imap_src_rate(ax, &m->pad[i], snap))
                 continue;
             {
                 float v = imap_analog_value(&m->pad[i], snap);
@@ -966,6 +1074,21 @@ void imap_profile_apply(imap_block_t *blk, imap_state_t *st,
     (void)x1;
     (void)x2;
 
+    /* W271: Aktion aim_center (steigende Flanke) -> virtueller Hebel von
+     * Maus und relativem Stick zur Mitte; danach relative Sticks. */
+    st->aim_centered = 0;
+    if (prof->aim_center.n) {
+        int lvl = imap_bind_active(&prof->aim_center, snap) ? 1 : 0;
+        if (lvl && !st->prev_aim_center) {
+            st->m_ax = 0x7F;
+            st->m_ay = 0x7F;
+            st->m_fx = st->m_fy = 0.0f;
+            st->aim_centered = 1;
+        }
+        st->prev_aim_center = lvl;
+    }
+    imap_stick_rate_step(st, prof, snap);
+
     /* Achsen. */
     {
         int fmx = 0, fmy = 0;
@@ -1122,6 +1245,110 @@ int imap_action_feedback_clip(const imap_profile_t *prof, imap_state_t *st,
     return hit;
 }
 
+/* W283 ORIG-KEY-BIND: Aktion "orig_view" (Pad/Controller/Joystick, Flanke). */
+int imap_action_orig_view(const imap_profile_t *prof, imap_state_t *st,
+                          const imap_snap_t *snap)
+{
+    imap_snap_t loc;
+    int lvl, hit;
+    if (prof->orig_view.n == 0) {
+        st->prev_orig_view = 0;
+        return 0;
+    }
+    loc = *snap;
+    loc.key = imap_key_off;
+    imap_collect_suppression(prof, &loc);
+    lvl = imap_bind_active(&prof->orig_view, &loc) ? 1 : 0;
+    hit = (lvl && !st->prev_orig_view) ? 1 : 0;
+    st->prev_orig_view = lvl;
+    return hit;
+}
+
+/* W290 QUICK-SHOT: Aktion "quick_shot" (Pad/Controller/Joystick, Flanke). */
+int imap_action_quick_shot(const imap_profile_t *prof, imap_state_t *st,
+                           const imap_snap_t *snap)
+{
+    imap_snap_t loc;
+    int lvl, hit;
+    if (prof->quick_shot.n == 0) {
+        st->prev_quick_shot = 0;
+        return 0;
+    }
+    loc = *snap;
+    loc.key = imap_key_off;
+    imap_collect_suppression(prof, &loc);
+    lvl = imap_bind_active(&prof->quick_shot, &loc) ? 1 : 0;
+    hit = (lvl && !st->prev_quick_shot) ? 1 : 0;
+    st->prev_quick_shot = lvl;
+    return hit;
+}
+
+/* W283: Umschalt/Strg/Alt-Tasten -> Bit (0 = keine Zusatztaste). */
+static int imap_vk_mod_bit(int vk)
+{
+    switch (vk) {
+    case VK_SHIFT: case VK_LSHIFT: case VK_RSHIFT: return 1;
+    case VK_CONTROL: case VK_LCONTROL: case VK_RCONTROL: return 2;
+    case VK_MENU: case VK_LMENU: case VK_RMENU: return 4;
+    default: return 0;
+    }
+}
+
+int imap_bind_key_combos(const imap_bind_t *b, int *vks, int *mods, int cap)
+{
+    int i, n = 0;
+    for (i = 0; b && i < b->n && n < cap; i++) {
+        const imap_chord_t *c = &b->alt[i];
+        if (c->a.kind != IMAP_A_KEY || c->a.code <= 0 || c->a.code >= 256) continue;
+        if (!c->chord) {
+            vks[n] = c->a.code;
+            mods[n++] = 0;
+        } else if (c->b.kind == IMAP_A_KEY && c->b.code > 0 && c->b.code < 256) {
+            int ma = imap_vk_mod_bit(c->a.code), mb = imap_vk_mod_bit(c->b.code);
+            if (ma && !mb) { /* SHIFT+F8 */
+                vks[n] = c->b.code;
+                mods[n++] = ma;
+            } else if (mb && !ma) { /* F8+SHIFT (gleichwertig) */
+                vks[n] = c->a.code;
+                mods[n++] = mb;
+            }
+        }
+    }
+    return n;
+}
+
+int imap_orig_key_is_default(const char *k)
+{
+    char t[32];
+    int n = 0;
+    if (!k) return 0;
+    for (; *k && n < (int)sizeof t - 1; k++) {
+        if (*k == ' ' || *k == 9) continue; /* Leerzeichen, Tab */
+        t[n++] = (char)((*k >= 'a' && *k <= 'z') ? *k - 32 : *k);
+    }
+    t[n] = 0;
+    return strcmp(t, "SHIFT+F8") == 0;
+}
+
+int imap_orig_view_is_default(const imap_bind_t *b)
+{
+    int vk, mod;
+    if (!b || b->n != 1 || b->alt[0].cond) return 0;
+    if (imap_bind_key_combos(b, &vk, &mod, 1) != 1) return 0;
+    return b->alt[0].chord && vk == VK_F8 && mod == 1;
+}
+
+int imap_orig_view_resolve(imap_profile_t *prof, const char *orig_key)
+{
+    if (prof->orig_view_set &&
+        !(imap_orig_view_is_default(&prof->orig_view) && orig_key &&
+          !imap_orig_key_is_default(orig_key))) {
+        return 1;
+    }
+    prof->orig_view.n = 0; /* Rueckfall orig_key: nur das Fenster wertet aus */
+    return 0;
+}
+
 int imap_bind_keys(const imap_bind_t *b, int *vks, int cap, unsigned *padmask)
 {
     int i, n = 0;
@@ -1180,6 +1407,7 @@ static int imap_key_code(const char *name)
         {"F5", VK_F5}, {"F6", VK_F6}, {"F7", VK_F7}, {"F8", VK_F8},
         {"F9", VK_F9}, {"F10", VK_F10}, {"F11", VK_F11}, {"F12", VK_F12},
         {"PAUSE", VK_PAUSE}, /* W188 GAME-MENU */
+        {"SNAPSHOT", VK_SNAPSHOT}, /* W290: Druck-Taste (Schnell-Screenshot belegbar) */
         {NULL, 0}
     };
     int i;
@@ -1268,7 +1496,10 @@ enum {
     IMAP_ACT_PAUSE = 1, /* W188 GAME-MENU */
     IMAP_ACT_PHOTO = 2, /* W195 PHOTO-MODE */
     IMAP_ACT_FEEDBACK_SHOT = 3,
-    IMAP_ACT_FEEDBACK_CLIP = 4
+    IMAP_ACT_FEEDBACK_CLIP = 4,
+    IMAP_ACT_AIM_CENTER = 5, /* W271: Waffenarm zur Mitte */
+    IMAP_ACT_ORIG_VIEW = 6,  /* W283: Original-Optik <-> eigene Einstellungen */
+    IMAP_ACT_QUICK_SHOT = 7  /* W290: Schnell-Screenshot */
 };
 
 /* Elementname -> Ziel. btn_i >= 0: Taste; axis >= 0 (+negpos 0/1/2 =
@@ -1298,6 +1529,18 @@ static int imap_elem_parse(const char *name, imap_elem_t *e)
     }
     if (imap_strieq(name, "feedback_shot")) { e->action = IMAP_ACT_FEEDBACK_SHOT; return 0; }
     if (imap_strieq(name, "feedback_clip")) { e->action = IMAP_ACT_FEEDBACK_CLIP; return 0; }
+    if (imap_strieq(name, "aim_center")) { /* W271: Arm zur Mitte */
+        e->action = IMAP_ACT_AIM_CENTER;
+        return 0;
+    }
+    if (imap_strieq(name, "orig_view")) { /* W283: Vergleichstaste */
+        e->action = IMAP_ACT_ORIG_VIEW;
+        return 0;
+    }
+    if (imap_strieq(name, "quick_shot")) { /* W290: Schnell-Screenshot */
+        e->action = IMAP_ACT_QUICK_SHOT;
+        return 0;
+    }
     if (imap_strieq(name, "photo")) { /* W195: Fotomodus */
         e->action = IMAP_ACT_PHOTO;
         return 0;
@@ -1651,9 +1894,30 @@ static int imap_bind_add(imap_bind_t *b, const char *text, int *has_pad,
 }
 
 /* Analog-Alternative "PAD:SRC[:dz=..:curve=..:inv=..]" oder "MOUSE:X/Y[:mode=..]". */
-static int imap_axis_add_analog(imap_axis_map_t *m, const char *text,
-                                int *has_pad)
+/* W271: ":mode=position|rate" an Pad-/Joystick-Achsen (nur aim_x/aim_y
+ * wirksam; auf anderen Achsen still ignoriert). 0 = ok, -1 = unbekannt. */
+static int imap_amode_parse(const char *v, int *out)
 {
+    if (imap_strieq(v, "position") || imap_strieq(v, "pos")) {
+        *out = IMAP_AMODE_POSITION;
+        return 0;
+    }
+    if (imap_strieq(v, "rate") || imap_strieq(v, "relative") ||
+        imap_strieq(v, "rel")) {
+        *out = IMAP_AMODE_RATE;
+        return 0;
+    }
+    if (imap_strieq(v, "global") || imap_strieq(v, "auto")) {
+        *out = IMAP_AMODE_GLOBAL;
+        return 0;
+    }
+    return -1;
+}
+
+static int imap_axis_add_analog(imap_axis_map_t *m, const char *text,
+                                int *has_pad, int axis)
+{
+    int aim_axis = axis == IMAP_AX_AIM_X || axis == IMAP_AX_AIM_Y;
     char work[128], *c1, *c2, *params;
     strncpy_s(work, sizeof work, text, sizeof work - 1);
     c1 = strchr(work, ':');
@@ -1720,6 +1984,10 @@ static int imap_axis_add_analog(imap_axis_map_t *m, const char *text,
                 an.inv = atoi(eq) != 0;
             } else if (imap_strieq(p, "half")) {
                 an.half = atoi(eq) != 0;
+            } else if (imap_strieq(p, "mode")) { /* W271 */
+                int am;
+                if (imap_amode_parse(eq, &am) != 0) return -1;
+                if (aim_axis) an.amode = am;
             } else {
                 return -1;
             }
@@ -1736,7 +2004,7 @@ static int imap_axis_add_analog(imap_axis_map_t *m, const char *text,
     if (imap_strieq(work, "PAD")) {
         int src = imap_analog_src(c1), slot;
         float dz = 0.0f, curve = 1.0f;
-        int inv = 0;
+        int inv = 0, amode = IMAP_AMODE_GLOBAL;
         char *p;
         if (src < 0) return -1;
         p = params;
@@ -1755,6 +2023,10 @@ static int imap_axis_add_analog(imap_axis_map_t *m, const char *text,
                 if (curve < 0.5f || curve > 3.0f) return -1;
             } else if (imap_strieq(p, "inv")) {
                 inv = atoi(eq) != 0;
+            } else if (imap_strieq(p, "mode")) { /* W271 */
+                int am;
+                if (imap_amode_parse(eq, &am) != 0) return -1;
+                if (aim_axis && src <= 3) amode = am; /* Trigger: nie */
             } else {
                 return -1;
             }
@@ -1768,6 +2040,7 @@ static int imap_axis_add_analog(imap_axis_map_t *m, const char *text,
                 m->pad[slot].inv = inv;
                 m->pad[slot].sens = 1.0f; /* W221: nur JOY wertet aus */
                 m->pad[slot].half = 0;
+                m->pad[slot].amode = amode; /* W271 */
                 *has_pad = 1;
                 return 0;
             }
@@ -1808,6 +2081,9 @@ static unsigned imap_profile_joy_used(const imap_profile_t *p)
     m |= imap_bind_joy_used(&p->vr_recenter) | imap_bind_joy_used(&p->pause);
     m |= imap_bind_joy_used(&p->photo) | imap_bind_joy_used(&p->feedback_shot);
     m |= imap_bind_joy_used(&p->feedback_clip);
+    m |= imap_bind_joy_used(&p->aim_center); /* W271 */
+    m |= imap_bind_joy_used(&p->orig_view);  /* W283 */
+    m |= imap_bind_joy_used(&p->quick_shot); /* W290 */
     return m;
 }
 
@@ -1858,6 +2134,14 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
             continue;
         }
         if (imap_elem_parse(line, &e) != 0) continue; /* unbekannt: weiter */
+        if (e.action == IMAP_ACT_ORIG_VIEW) { /* W283: letzte Zeile gewinnt, leer = aus */
+            out->orig_view.n = 0;
+            out->orig_view_set = 1;
+        }
+        if (e.action == IMAP_ACT_QUICK_SHOT) { /* W290: letzte Zeile gewinnt, leer = aus */
+            out->quick_shot.n = 0;
+            out->quick_shot_set = 1;
+        }
         for (alt = strtok_s(val, ",", &ctx); alt;
              alt = strtok_s(NULL, ",", &ctx)) {
             int rc;
@@ -1876,12 +2160,18 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
                 rc = imap_bind_add(&out->feedback_shot, alt, &out->has_pad, &out->has_sbc);
             } else if (e.action == IMAP_ACT_FEEDBACK_CLIP) {
                 rc = imap_bind_add(&out->feedback_clip, alt, &out->has_pad, &out->has_sbc);
+            } else if (e.action == IMAP_ACT_AIM_CENTER) { /* W271 */
+                rc = imap_bind_add(&out->aim_center, alt, &out->has_pad, &out->has_sbc);
+            } else if (e.action == IMAP_ACT_ORIG_VIEW) { /* W283 */
+                rc = imap_bind_add(&out->orig_view, alt, &out->has_pad, &out->has_sbc);
+            } else if (e.action == IMAP_ACT_QUICK_SHOT) { /* W290 */
+                rc = imap_bind_add(&out->quick_shot, alt, &out->has_pad, &out->has_sbc);
             } else if (e.btn_i >= 0) {
                 rc = imap_bind_add(&out->btn[e.btn_i], alt, &out->has_pad,
                                    &out->has_sbc);
             } else if (e.axis >= 0 && e.negpos == 0) {
                 rc = imap_axis_add_analog(&out->axis[e.axis], alt,
-                                          &out->has_pad);
+                                          &out->has_pad, e.axis);
                 if (rc != 0) {
                     /* Kein Analog-Atom (z. B. KEY:S auf Pedal):
                      * digitale Vollauslenkung. */
@@ -1913,7 +2203,30 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
             (void)rc; /* fehlerhafte Alternative: ignorieren */
         }
     }
+    if (!out->quick_shot_set) { (void)imap_quick_shot_migrate(out); } /* W290: Uebergang alter Profile */
     out->joy_used = imap_profile_joy_used(out);
+    return 0;
+}
+
+/* W290 QUICK-SHOT: Uebergang (Beschreibung s. input_map.h). */
+int imap_quick_shot_migrate(imap_profile_t *prof)
+{
+    int vks[8], mods[8], n, i, f12 = 0;
+    int dummy_pad = 0, dummy_sbc = 0;
+    if (prof->quick_shot_set) return 0;
+    prof->quick_shot.n = 0;
+    if (prof->photo.n == 1 && !prof->photo.alt[0].chord && !prof->photo.alt[0].cond &&
+        prof->photo.alt[0].a.kind == IMAP_A_KEY && prof->photo.alt[0].a.code == VK_F12) {
+        prof->photo.n = 0;
+        (void)imap_bind_add(&prof->photo, "KEY:SHIFT+KEY:F12", &dummy_pad, &dummy_sbc);
+        (void)imap_bind_add(&prof->quick_shot, "KEY:F12", &dummy_pad, &dummy_sbc);
+        return 1;
+    }
+    n = imap_bind_key_combos(&prof->photo, vks, mods, 8);
+    for (i = 0; i < n; i++) {
+        if (vks[i] == VK_F12 && mods[i] == 0) f12 = 1;
+    }
+    if (!f12) (void)imap_bind_add(&prof->quick_shot, "KEY:F12", &dummy_pad, &dummy_sbc);
     return 0;
 }
 
@@ -1963,7 +2276,9 @@ static const char kBuiltinKeyboard[] =
     "pause = KEY:PAUSE\n"
     "feedback_shot = KEY:F11\n"
     "feedback_clip = KEY:F9\n"
-    "photo = KEY:F12\n";
+    "photo = KEY:SHIFT+KEY:F12\n"
+    "quick_shot = KEY:F12\n"
+    "orig_view = KEY:SHIFT+KEY:F8\n"; /* W283; W290 photo/quick_shot */
 
 static const char kBuiltinXbox[] =
     "# xbox_pad_default - Xbox-Gamepad + Tastatur parallel (OR / Max-Abs).\n"
@@ -2023,7 +2338,9 @@ static const char kBuiltinXbox[] =
     "pause = KEY:PAUSE\n"
     "feedback_shot = KEY:F11\n"
     "feedback_clip = KEY:F9\n"
-    "photo = KEY:F12\n";
+    "photo = KEY:SHIFT+KEY:F12\n"
+    "quick_shot = KEY:F12\n"
+    "orig_view = KEY:SHIFT+KEY:F8\n"; /* W283; W290 photo/quick_shot */
 
 int imap_profile_builtin(const char *name, imap_profile_t *out)
 {
@@ -2148,6 +2465,7 @@ static int imap_axis_equal(const imap_axis_map_t *a, const imap_axis_map_t *b)
         if (a->pad[i].dz != b->pad[i].dz) return 1;
         if (a->pad[i].curve != b->pad[i].curve) return 1;
         if (a->pad[i].inv != b->pad[i].inv) return 1;
+        if (a->pad[i].amode != b->pad[i].amode) return 1; /* W271 */
         if (a->pad[i].src >= IMAP_SRC_JOY && /* W221 */
             (a->pad[i].sens != b->pad[i].sens || a->pad[i].half != b->pad[i].half))
             return 1;
@@ -2177,6 +2495,11 @@ int imap_profile_equal(const imap_profile_t *a, const imap_profile_t *b)
     if (imap_bind_equal(&a->feedback_shot, &b->feedback_shot)) return 1;
     if (imap_bind_equal(&a->feedback_clip, &b->feedback_clip)) return 1;
     if (imap_bind_equal(&a->photo, &b->photo)) return 1; /* W195 */
+    if (imap_bind_equal(&a->aim_center, &b->aim_center)) return 1; /* W271 */
+    if (imap_bind_equal(&a->orig_view, &b->orig_view)) return 1; /* W283 */
+    if (imap_bind_equal(&a->quick_shot, &b->quick_shot)) return 1; /* W290 */
+    if (a->quick_shot_set != b->quick_shot_set) return 1;
+    if (a->orig_view_set != b->orig_view_set) return 1;
     if (a->has_pad != b->has_pad) return 1;
     if (a->has_sbc != b->has_sbc) return 1; /* W159 */
     if (a->joy_used != b->joy_used) return 1; /* W221 */

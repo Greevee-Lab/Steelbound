@@ -25,14 +25,15 @@ Releases page of the project.
 ## My PC is old or weak. Will it run?
 
 There are no hard minimum specs. Choose the graphics preset **Original
-(HD) – Performance** on the **Graphics** page: original look, 60 FPS and
+– Performance** on the **Graphics** page: original look, 60 FPS and
 native world resolution. It runs fine on an 11-year-old laptop. Press
 **F2** in game to check the frame rate.
 
 ## How do I get 120 FPS?
 
-Select **Frame rate** 120 on the **Display** page (part of the default
-preset **Original (HD) – 120 FPS**). The game logic still runs at 30;
+The default preset **Original** uses **Monitor (auto)**: the frame rate
+follows your display (120 on a 120 Hz screen). You can also pick a fixed
+**Frame rate** such as 120 on the **Display** page. The game logic still runs at 30;
 the extra frames are smooth in-between frames. On a 60 Hz display
 without VRR, 120 FPS may judder; use 60 then. Press **F2** in game to
 check the frame rate.
@@ -52,20 +53,33 @@ submit. Nothing is sent automatically. Please add the mission, the VT,
 the steps and your settings. Details:
 [Alpha testing](ALPHA_TESTING.md#sending-a-report).
 
+## The game crashed or froze. What now?
+
+Open the launcher again: it shows **"The last session crashed"** once,
+with **Report on GitHub** (packs the report into a ZIP and opens a
+pre-filled bug report – you drag the ZIP in yourself) and **Open report
+folder**. For anything else, **Alpha Test › Create diagnostic package**
+makes one cleaned ZIP with system info, versions, changed settings, packs,
+the last logs and crash reports – no saves, no inputs, no user names or
+paths. Nothing is uploaded automatically. Details:
+[Reporting crashes and glitches](ALPHA_TESTING.md#reporting-crashes-and-glitches).
+
 ## Which keys are there besides driving and fighting?
 
 **Esc** game menu (pauses), **Pause** pause/continue, **F11** / **F9**
-feedback, **F12** photo mode, **F2** performance overlay, **F10** free
+feedback, **F12** quick screenshot, **Shift + F12** photo mode, **F2** performance overlay, **F10** free
 the mouse, **Alt + Enter** window/fullscreen. All are listed in
 [Alpha testing](ALPHA_TESTING.md#hotkeys-at-a-glance) and
 [Controls](CONTROLS.md).
 
 ## How does photo mode work?
 
-Press **F12** (or **Esc → Photo mode**); the game pauses and the photo
-panel opens. **F12** again or **Take photo** saves the picture. The photo
-folder is shown on the launcher page **Audio & extras**. Not available in
-VR yet.
+**F12** saves a screenshot right away (no menu). **Shift + F12** (or
+**Esc → Photo mode**) pauses the game and opens the photo panel; **F12** or
+**Take photo** saves the picture. Both use the same settings (view, size up
+to 8K, format), also on the launcher page **Audio & extras**. "Without
+cockpit" keeps the monitor effect and the HUD, like the game's full-screen
+view. Not available in VR yet.
 
 ## Where are my saves?
 
@@ -90,12 +104,31 @@ Diagnostics**, or in game **Esc › Settings › General**); the session then
 plays on a throw-away copy of your saves. See
 [Alpha testing](ALPHA_TESTING.md#protecting-your-pilot-while-testing).
 
+## I see artefacts (at the sides, on textures). What can I do?
+
+Most artefacts come from **experimental** options: widescreen sides, HD
+texture packs, extra lighting or effects. The original look (the
+default) is 4:3 with black bars. Try this:
+
+1. In game press **Shift + F8**: it switches live between the original
+   look and your settings. If the artefact disappears in the original
+   look, an experimental option causes it.
+2. On the **Play** page, **Start original once** starts one game without
+   any experimental option and without packs; your settings stay.
+3. **Back to original** on the **Play** page resets only the graphics
+   options; frame rate and controls stay.
+
+Please mention in your bug report whether the artefact also happens in
+the original look.
+
 ## I see less of the cockpit on my wide monitor.
 
-Missions use the full width (Hor+, never stretched). **Cockpit** on the
-**Display** page (or **Cockpit: camera back** in **Esc › Settings**)
-moves the camera back so more of the cockpit monitors stays visible.
-**Original** is the unchanged view. Desktop only, no effect in VR.
+The original picture is 4:3 with black bars. Widescreen sides (**Display**
+page) are experimental: missions then use the full width (Hor+, never
+stretched). **Cockpit** on the **Display** page (or **Cockpit: camera
+back** in **Esc › Settings**) moves the camera back so more of the
+cockpit monitors stays visible. **Original** is the unchanged view.
+Desktop only, no effect in VR.
 
 ## Do I need the original controller?
 

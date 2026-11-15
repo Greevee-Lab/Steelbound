@@ -19,6 +19,9 @@ typedef struct {
     uint32_t region;      /* Zertifikat: 1 = NA, 2 = Japan, 4 = Rest der Welt (PAL) */
     uint32_t version;
     int ntsc_u;           /* W229: 1 = bekannte NTSC-U-Fassung (USA); W230: supported=1 (experimentell, US-Profil) */
+    int loc;              /* W275 LOC-BOOT: 1 = Line of Contact (World-Disc, Title-ID 43430009) erkannt.
+                           * supported bleibt 0 (SB-Profil gilt nicht); der Client startet LoC nur mit
+                           * [expert] loc_boot=1 ueber das eigene LoC-Profil. */
     char sha256[65];
     char label[64];       /* z. B. "Steel Battalion (Europe, PAL)" oder "" */
     char text[320];       /* Log-Zeile (deutsch, unuebersetzt; Launcher nutzt Schluessel) */
@@ -29,6 +32,10 @@ const char *sb_gamever_region_name(uint32_t region);
 
 /* 1 = unterstuetzt, 0 = nicht (out->text erklaert). */
 int sb_gamever_check(const uint8_t *xbe, size_t n, sb_gamever_t *out);
+
+/* W275 LOC-BOOT: SHA-256 der bekannten LoC-default.xbe (World-Disc). */
+#define SB_GAMEVER_LOC_SHA "696db4056941039934f22e9b8bcbc1407575b64749c14c6032e2a049b34d8957"
+#define SB_GAMEVER_LOC_TITLE 0x43430009u
 
 /* W256 PACK-ANYVER: Paket-Familie "steel-battalion" = alle bekannten,
  * unterstuetzten Fassungen (Texturen sind per Inhalts-Hash gleich).

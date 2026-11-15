@@ -174,6 +174,35 @@ void sbc_usb_leds_all(sbc_leds_t *leds, uint8_t level)
     }
 }
 
+int sbc_led_gate_due(const sbc_led_gate_t *g, const uint8_t rep[SBC_USB_OUT_LEN],
+                     uint64_t now_ms, unsigned min_ms)
+{
+    if (!g || !rep) {
+        return 0;
+    }
+    if (g->have && memcmp(g->sent, rep, SBC_USB_OUT_LEN) == 0) {
+        return 0; /* Geraet hat diesen Stand schon */
+    }
+    if (g->tried && now_ms - g->sent_ms < (uint64_t)min_ms) {
+        return 0; /* gedrosselt - bleibt faellig */
+    }
+    return 1;
+}
+
+void sbc_led_gate_mark(sbc_led_gate_t *g, const uint8_t rep[SBC_USB_OUT_LEN],
+                       uint64_t now_ms, int ok)
+{
+    if (!g || !rep) {
+        return;
+    }
+    g->sent_ms = now_ms;
+    g->tried = 1;
+    if (ok) {
+        memcpy(g->sent, rep, SBC_USB_OUT_LEN);
+        g->have = 1;
+    }
+}
+
 /* ---- WinUSB-Geraetezugriff ---- */
 
 /* 4 Hexziffern ab p lesen (gross/klein), -1 bei Fehler. */

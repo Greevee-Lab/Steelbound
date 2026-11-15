@@ -738,6 +738,7 @@ static const uint8_t kCombat[SBC_USB_IN_LEN] = {
 };
 
 static void selftest_w128(void); /* W128, s. unten */
+static void selftest_w267(void); /* W267, s. unten */
 
 static int run_selftest(void)
 {
@@ -891,6 +892,7 @@ static int run_selftest(void)
     }
 
     selftest_w128(); /* W128: Kalibrierung, Lampenfolge, Dump/Watch, --test */
+    selftest_w267(); /* W267: LED-Sendetor (Comm geht ganz aus) */
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;
@@ -1946,4 +1948,140 @@ int main(int argc, char **argv)
         return 1;
     }
     return cmd_live(-1);
+}
+
+/* ---- W267 (COMM-LED): LED-Sendetor ----
+ * Nachbildung des Spiels (Disassembly): nach dem Funkruf setzt 0xA1E30
+ * Comm1-5 auf Modus 2, der Manager 0x49520 zieht je Spiel-Tick 2 ab und
+ * klemmt bei 0 (15,13,..,3,1,0); die Poll-Loop ruft SetState jeden Tick mit
+ * dem aktuellen Stand. Geprueft wird, was am Geraet ankommt. */
+#define W267_MIN_MS 50u
+
+/* Alte Logik bis W266: Vergleich mit dem zuletzt GESEHENEN Report. */
+typedef struct {
+    uint8_t last[SBC_USB_OUT_LEN];
+    int have;
+    uint64_t sent_ms;
+    uint8_t dev[SBC_USB_OUT_LEN]; /* Stand am Geraet */
+} w267_old_t;
+
+static void w267_old_step(w267_old_t *o, const uint8_t rep[SBC_USB_OUT_LEN],
+                          uint64_t now)
+{
+    if (o->have && memcmp(o->last, rep, SBC_USB_OUT_LEN) == 0) {
+        return;
+    }
+    memcpy(o->last, rep, SBC_USB_OUT_LEN);
+    o->have = 1;
+    if (o->sent_ms && now - o->sent_ms < W267_MIN_MS) {
+        return;
+    }
+    o->sent_ms = now;
+    memcpy(o->dev, rep, SBC_USB_OUT_LEN);
+}
+
+/* Neue Logik: Tor; *nsend zaehlt Sendungen. */
+static void w267_new_step(sbc_led_gate_t *g, uint8_t dev[SBC_USB_OUT_LEN],
+                          const uint8_t rep[SBC_USB_OUT_LEN], uint64_t now,
+                          int *nsend)
+{
+    if (sbc_led_gate_due(g, rep, now, W267_MIN_MS)) {
+        memcpy(dev, rep, SBC_USB_OUT_LEN);
+        sbc_led_gate_mark(g, rep, now, 1);
+        (*nsend)++;
+    }
+}
+
+static void w267_comm_rep(uint8_t rep[SBC_USB_OUT_LEN], int level)
+{
+    sbc_leds_t l;
+    memset(&l, 0, sizeof l);
+    l.level[SBC_LED_COMM1] = (uint8_t)level;
+    l.level[SBC_LED_COMM2] = (uint8_t)level;
+    l.level[SBC_LED_COMM3] = (uint8_t)level;
+    l.level[SBC_LED_COMM4] = (uint8_t)level;
+    l.level[SBC_LED_COMM5] = (uint8_t)level;
+    l.level[SBC_LED_GEAR_1] = 0xF; /* Ganganzeige steht dabei */
+    sbc_usb_build_led_report(&l, rep);
+}
+
+static void selftest_w267(void)
+{
+    static const unsigned kTick[] = { 33u, 16u, 20u, 40u };
+    unsigned ti;
+    int old_stuck = 0, new_bad = 0, runs = 0, max_lag = 0;
+    for (ti = 0; ti < sizeof kTick / sizeof kTick[0]; ti++) {
+        unsigned start, phase;
+        for (start = 15; start >= 9; start--) {      /* Startwert (Blink-Rest) */
+            for (phase = 0; phase < W267_MIN_MS; phase += 7) { /* letzte Sendung davor */
+                w267_old_t o;
+                sbc_led_gate_t g;
+                uint8_t dev[SBC_USB_OUT_LEN], rep[SBC_USB_OUT_LEN];
+                uint64_t t = 1000, t_off = 0;
+                int lvl = (int)start, k, nsend = 0, off_seen = 0;
+                memset(&o, 0, sizeof o);
+                memset(&g, 0, sizeof g);
+                memset(dev, 0, sizeof dev);
+                /* Vorlauf: voller Stand, zuletzt gesendet 'phase' ms vor Tick 0. */
+                w267_comm_rep(rep, lvl);
+                w267_old_step(&o, rep, t - phase);
+                w267_new_step(&g, dev, rep, t - phase, &nsend);
+                /* Ausblenden (Modus 2, -2/Tick) + 10 Ticks Ruhe auf 0. */
+                for (k = 0; k < 40; k++, t += kTick[ti]) {
+                    lvl = lvl - 2 < 0 ? 0 : lvl - 2;
+                    if (lvl == 0 && !t_off) {
+                        t_off = t;
+                    }
+                    w267_comm_rep(rep, lvl);
+                    w267_old_step(&o, rep, t);
+                    w267_new_step(&g, dev, rep, t, &nsend);
+                    if (!off_seen && lvl == 0 && memcmp(dev, rep, sizeof rep) == 0) {
+                        off_seen = 1;
+                        if ((int)(t - t_off) > max_lag) {
+                            max_lag = (int)(t - t_off);
+                        }
+                    }
+                }
+                runs++;
+                w267_comm_rep(rep, 0);
+                if (memcmp(o.dev, rep, sizeof rep) != 0) {
+                    old_stuck++;
+                }
+                if (memcmp(dev, rep, sizeof rep) != 0 || !off_seen) {
+                    new_bad++;
+                }
+                /* Drossel haelt: nie zwei Sendungen unter 50 ms (nsend <= Dauer/50+2). */
+                if ((uint64_t)nsend > (40u * kTick[ti]) / W267_MIN_MS + 2u) {
+                    new_bad++;
+                }
+            }
+        }
+    }
+    printf("  W267: %d Ausblend-Laeufe, alt haengen geblieben %d, neu falsch %d, "
+           "max. Nachlauf %d ms\n", runs, old_stuck, new_bad, max_lag);
+    CHECK(old_stuck > 0, "w267 alte Logik zeigt den Fehler (%d)", old_stuck);
+    CHECK(new_bad == 0, "w267 Comm geht immer ganz aus (%d falsch)", new_bad);
+    CHECK(max_lag <= (int)W267_MIN_MS + 40, "w267 Nachlauf %d ms", max_lag);
+
+    /* Tor-Einzelfaelle: gleicher Stand -> nie erneut; Fehlschlag -> Wiederholung. */
+    {
+        sbc_led_gate_t g;
+        uint8_t a[SBC_USB_OUT_LEN], b[SBC_USB_OUT_LEN];
+        memset(&g, 0, sizeof g);
+        w267_comm_rep(a, 0xF);
+        w267_comm_rep(b, 0x1);
+        CHECK(sbc_led_gate_due(&g, a, 0, W267_MIN_MS) == 1, "w267 erstes Senden");
+        sbc_led_gate_mark(&g, a, 0, 1);
+        CHECK(sbc_led_gate_due(&g, a, 500, W267_MIN_MS) == 0, "w267 gleicher Stand");
+        CHECK(sbc_led_gate_due(&g, b, 10, W267_MIN_MS) == 0, "w267 gedrosselt");
+        CHECK(sbc_led_gate_due(&g, b, 50, W267_MIN_MS) == 1, "w267 faellig nach 50 ms");
+        sbc_led_gate_mark(&g, b, 50, 0); /* Senden scheitert */
+        CHECK(sbc_led_gate_due(&g, b, 60, W267_MIN_MS) == 0, "w267 Retry gedrosselt");
+        CHECK(sbc_led_gate_due(&g, b, 100, W267_MIN_MS) == 1, "w267 Retry nach Fehler");
+        sbc_led_gate_mark(&g, b, 100, 1);
+        CHECK(sbc_led_gate_due(&g, a, 120, W267_MIN_MS) == 0 &&
+              sbc_led_gate_due(&g, b, 999, W267_MIN_MS) == 0, "w267 Zustand nach Erfolg");
+        CHECK(sbc_led_gate_due(NULL, a, 0, W267_MIN_MS) == 0 &&
+              sbc_led_gate_due(&g, NULL, 0, W267_MIN_MS) == 0, "w267 NULL");
+    }
 }

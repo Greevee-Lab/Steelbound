@@ -25,6 +25,7 @@
 #include "render_psgen.h"
 #include "render_cpersp_math.h"
 #include "sb_edition.h"
+#include "sb_texhash.h" /* W288 PACK-ZERO-TEX */
 #if SB_EDITION_COMMUNITY
 #include "render_selftest_xbe.h"
 /* Gleiche Formen wie in render_selftest_data.h, aber mit Lade-Puffern
@@ -445,9 +446,13 @@ static void test_vs_raw(void)
                 for (q = 0; q < nn; q++) { float v = frand(-1, 1); memcpy(vdata + 8 + rep * stride + of[r2] + 4 * q, &v, 4); }
             }
         }
-        for (rep = 0; rep < 12u; rep++) {
+        for (rep = 0; rep < 20u; rep++) {
             static const unsigned prims[6] = { 5, 6, 7, 8, 9, 3 };
-            unsigned prim = prims[rep % 6u], n = 8, indexed = (rep >= 6u), id, si, vi, q;
+            static const unsigned ibprims[4] = { 6, 7, 8, 9 };
+            /* W264 DRAW-OPT2: rep 12..19 = DrawIndexed ueber das Strip/Fan/Quad-Muster (Index k = Quell-Vertex
+             * des expandierten Vertex k), rq_raw.z = 5 -> SV_VertexID = Index; ab rep 16 mit Indexliste */
+            unsigned ibm = (rep >= 12u);
+            unsigned prim = ibm ? ibprims[rep % 4u] : prims[rep % 6u], n = 8, indexed = ibm ? (rep >= 16u) : (rep >= 6u), id, si, vi, q;
             unsigned idx[16];
             float vin[16][4], c[192][4], cc[192][4], vcb[(192 + 4 + 16) * 4], mvp[20], got[NRT][4];
             float s0[64 * 10];
@@ -477,7 +482,7 @@ static void test_vs_raw(void)
             vcb[nc * 4 + 0] = 1.0f; vcb[nc * 4 + 1] = 1.0f; vcb[nc * 4 + 2] = 1.0f;
             vcb[nc * 4 + 4] = 1.0f; vcb[nc * 4 + 5] = 1.0f; vcb[nc * 4 + 6] = 1.0f;
             vu = (unsigned *)&vcb[(nc + 2) * 4];
-            vu[0] = 8; vu[1] = stride; vu[2] = prim; vu[3] = n;
+            vu[0] = 8; vu[1] = stride; vu[2] = ibm ? 5u : prim; vu[3] = n;
             vu[4] = indexed ? 1024u : 0xFFFFFFFFu;
             for (q = 0; q < 16u; q++) {
                 if ((p.vinmask & (1u << q)) && raw.fmt[q] == 0) { memcpy(&vcb[(nc + 4 + raw.inl[q]) * 4], cur[q], 16); }
@@ -512,6 +517,16 @@ static void test_vs_raw(void)
                 float z[4] = { -9, -9, -9, -9 };
                 for (q = 0; q < NRT; q++) { ID3D11DeviceContext_ClearRenderTargetView(g_c, g_rtv[q], z); }
             }
+            if (ibm) { /* W264: letzter Punkt = Index id = Quell-Vertex si */
+                unsigned ibd[16];
+                ID3D11Buffer *ib;
+                for (q = 0; q < 16u; q++) { ibd[q] = raw_src(prim, q, n); }
+                ib = mkbuf(D3D11_BIND_INDEX_BUFFER, ibd, sizeof ibd);
+                ID3D11DeviceContext_IASetIndexBuffer(g_c, ib, DXGI_FORMAT_R32_UINT, 0);
+                ID3D11DeviceContext_DrawIndexed(g_c, id + 1u, 0, 0);
+                ID3D11DeviceContext_IASetIndexBuffer(g_c, NULL, DXGI_FORMAT_R32_UINT, 0);
+                ID3D11Buffer_Release(ib);
+            } else
             ID3D11DeviceContext_Draw(g_c, id + 1u, 0); /* letzter Punkt (vid = id) gewinnt */
             for (q = 0; q < NRT; q++) { readrt((int)q, got[q]); }
             {
@@ -523,8 +538,8 @@ static void test_vs_raw(void)
                     !near4(got[4], wfog, 2e-4f) || !near4(got[5], out.o[RQV_OT2], 2e-4f) ||
                     !near4(got[6], out.o[RQV_OT3], 2e-4f)) {
                     prog_ok = 0;
-                    snprintf(line, sizeof line, "VSRAW vs=0x%X prim=%u id=%u idx=%u FAIL oD0 gpu=(%g,%g,%g,%g) cpu=(%g,%g,%g,%g) oT0 gpu=(%g,%g,%g,%g) cpu=(%g,%g,%g,%g)",
-                             st_vs[t].handle, prim, id, indexed, got[0][0], got[0][1], got[0][2], got[0][3],
+                    snprintf(line, sizeof line, "VSRAW%s vs=0x%X prim=%u id=%u idx=%u FAIL oD0 gpu=(%g,%g,%g,%g) cpu=(%g,%g,%g,%g) oT0 gpu=(%g,%g,%g,%g) cpu=(%g,%g,%g,%g)",
+                             ibm ? "-IB" : "", st_vs[t].handle, prim, id, indexed, got[0][0], got[0][1], got[0][2], got[0][3],
                              wcol[0], wcol[1], wcol[2], wcol[3], got[2][0], got[2][1], got[2][2], got[2][3],
                              out.o[RQV_OT0][0], out.o[RQV_OT0][1], out.o[RQV_OT0][2], out.o[RQV_OT0][3]);
                     st_log(line);
@@ -547,7 +562,7 @@ static void test_vs_raw(void)
         ID3D11InputLayout_Release(lay);
         ID3D11VertexShader_Release(vs);
     }
-    snprintf(line, sizeof line, "VSRAW: %u ok, %u FAIL (%u Faelle: Formate, Expansion LIST/STRIP/FAN/QUADS/QUADSTRIP/LINELOOP, mit/ohne Index)", ok, bad, ncase);
+    snprintf(line, sizeof line, "VSRAW: %u ok, %u FAIL (%u Faelle: Formate, Expansion LIST/STRIP/FAN/QUADS/QUADSTRIP/LINELOOP, mit/ohne Index, W264 DrawIndexed-Muster)", ok, bad, ncase);
     st_log(line);
     ID3D11PixelShader_Release(ps);
 }
@@ -801,6 +816,75 @@ static void test_cpersp(void)
     g_fail += fail;
 }
 
+/* W288 PACK-ZERO-TEX: Null-Texturen bekommen keinen HD-Ersatz.
+ * Prueft den Client-Code aus sb_texhash.h (Hash, Null-Pruefung, Tor):
+ * (a) die beiden W262-Pack-Hashes sind genau genullte LIN_A8R8G8B8 256x256/64x64,
+ * (b) Nachbildung von sb_rem_upload mit einem Schein-Pack, das den Null-Hash und
+ *     den Hash derselben Textur mit Daten enthaelt: Null -> kein Ersatz, mit
+ *     Daten -> Ersatz, hd_zero_skip=0 -> alter Weg (Null wird ersetzt),
+ * (c) Pitch-Polster zaehlt nicht, ein einzelnes Byte am Ende zaehlt,
+ *     DXT1/ent-swizzelt ebenso. */
+static int tz_replaced(int zero_skip, int kind, unsigned code, unsigned w, unsigned h,
+                       const unsigned char *pix, unsigned pitch,
+                       const unsigned long long *pack, int npack)
+{
+    int ok = 0, i;
+    unsigned long long hv = tex_content_hash(kind, code, w, h, pix, pitch, &ok);
+    int zero = zero_skip ? tex_mip0_zero(kind, code, w, h, pix, pitch) : 0;
+    if (!ok || !tex_hd_gate(zero_skip, 0, zero)) { return 0; }
+    for (i = 0; i < npack; i++) { if (pack[i] == hv) { return 1; } }
+    return 0;
+}
+
+static void test_texzero(void)
+{
+    static unsigned char buf[256 * 4 * 256 + 64 * 256];
+    unsigned long long pack[4];
+    int ok = 0, fail = 0, n = 0;
+    unsigned pitch;
+    /* (a) W262-Fund: Hash genullten Speichers */
+    memset(buf, 0, sizeof buf);
+    n++; if (tex_content_hash(2, 0x12u, 256, 256, buf, 1024, &ok) != 0x3c2dbd7a7c6c2a55ull || !ok) { fail++; }
+    n++; if (tex_content_hash(2, 0x12u, 64, 64, buf, 256, &ok) != 0x338471d56d184e05ull || !ok) { fail++; }
+    n++; if (!tex_mip0_zero(2, 0x12u, 256, 256, buf, 1024)) { fail++; }
+    /* (b) Schein-Pack: W262-Null-Eintraege + dieselbe 256x256 mit Daten */
+    pack[0] = 0x3c2dbd7a7c6c2a55ull;
+    pack[1] = 0x338471d56d184e05ull;
+    buf[1024 * 100 + 37] = 0x80;
+    pack[2] = tex_content_hash(2, 0x12u, 256, 256, buf, 1024, &ok);
+    pack[3] = 0;
+    memset(buf, 0, sizeof buf);
+    n++; if (tz_replaced(1, 2, 0x12u, 256, 256, buf, 1024, pack, 3)) { fail++; }      /* Null: kein Ersatz */
+    n++; if (tz_replaced(1, 2, 0x12u, 64, 64, buf, 256, pack, 3)) { fail++; }
+    n++; if (!tz_replaced(0, 2, 0x12u, 256, 256, buf, 1024, pack, 3)) { fail++; }     /* alt: Null ersetzt */
+    buf[1024 * 100 + 37] = 0x80;                                                       /* Daten kommen an */
+    n++; if (!tz_replaced(1, 2, 0x12u, 256, 256, buf, 1024, pack, 3)) { fail++; }     /* neuer Hash: Ersatz */
+    n++; if (tex_mip0_zero(2, 0x12u, 256, 256, buf, 1024)) { fail++; }
+    /* (c) Pitch-Polster ausserhalb des gehashten Bereichs */
+    memset(buf, 0, sizeof buf);
+    pitch = 64 * 4 + 64;
+    {
+        unsigned y;
+        for (y = 0; y < 64; y++) { memset(buf + (size_t)y * pitch + 64 * 4, 0xAB, 64); }
+    }
+    n++; if (!tex_mip0_zero(2, 0x12u, 64, 64, buf, pitch)) { fail++; }
+    n++; if (tex_content_hash(2, 0x12u, 64, 64, buf, pitch, &ok) != 0x338471d56d184e05ull) { fail++; }
+    buf[63 * pitch + 64 * 4 - 1] = 1; /* letztes gehashtes Byte */
+    n++; if (tex_mip0_zero(2, 0x12u, 64, 64, buf, pitch)) { fail++; }
+    /* DXT1 64x64 (16 Zeilen a 128 B) und ent-swizzelt 32 Bit 16x16 */
+    memset(buf, 0, sizeof buf);
+    n++; if (!tex_mip0_zero(1, 0x0Cu, 64, 64, buf, 128)) { fail++; }
+    n++; if (tex_content_hash(1, 0x0Cu, 64, 64, buf, 128, &ok) != 0x8268e1d073b9b31bull) { fail++; }
+    n++; if (!tex_mip0_zero(3, 0x06u, 16, 16, buf, 64)) { fail++; }
+    buf[15 * 128 + 127] = 0x10;
+    n++; if (tex_mip0_zero(1, 0x0Cu, 64, 64, buf, 128)) { fail++; }
+    /* Tor: per CPU beschrieben nie, leerer Bereich nie "null" */
+    n++; if (tex_hd_gate(1, 1, 0) || tex_hd_gate(0, 1, 0) || !tex_hd_gate(1, 0, 0) || !tex_hd_gate(0, 0, 1)) { fail++; }
+    n++; if (tex_mip0_zero(2, 0x12u, 0, 0, buf, 0) || tex_mip0_zero(2, 0x12u, 4, 4, NULL, 16)) { fail++; }
+    printf("TEXZERO (W288): %d Faelle (Null-Hash W262, Schein-Pack, Polster, DXT1/swz, Tor): %d Fehler\n", n, fail);
+    g_fail += fail;
+}
+
 int main(int argc, char **argv)
 {
     HMODULE dc;
@@ -840,6 +924,7 @@ int main(int argc, char **argv)
     printf("== 3. Register-Combiner -> HLSL\n");
     test_ps();
     test_cpersp();
+    test_texzero();
     printf("== ERGEBNIS: %d Fehler\n", g_fail);
     return g_fail ? 1 : 0;
 }

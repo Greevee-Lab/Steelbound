@@ -86,6 +86,10 @@ static void rp_outmap(rps_t *s, unsigned map, const char *v)
     rps(s, "clamp(%s, -1.0, 1.0)", b);
 }
 
+/* W285 LOC-RENDER: 1 = Texturmodus 6 (BUMPENVMAP) wie PROJECT2D abtasten (ohne
+ * du/dv-Verschiebung). Nur im LoC-Profil gesetzt (loc_render.c, loc_bumpenv). */
+int g_rqp_bump_as_2d;
+
 int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_info_t *info)
 {
     rps_t s;
@@ -101,6 +105,7 @@ int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_
     mux_msb = (cnt & 0x10000u) != 0;
     for (i = 0; i < 4u; i++) {
         tm[i] = (d[54] >> (i * 5u)) & 0x1Fu;
+        if (tm[i] == 6u && g_rqp_bump_as_2d) { tm[i] = 1u; } /* W285: LoC-Gelaende (Naeherung) */
         info->texmode[i] = tm[i];
         if (tm[i] != 0u && tm[i] != 1u && tm[i] != 2u && tm[i] != 4u && tm[i] != 5u) {
             info->unsupported = 1 + (int)i;

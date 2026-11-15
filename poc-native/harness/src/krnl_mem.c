@@ -2,6 +2,7 @@
  * Ex-/Mem-Regionen, Contiguous/System/Pool-Speicher, Mm*-Abfragen).
  * W68 SPLIT: 1:1 aus kernel_hle.c verschoben. */
 #include "krnl_int.h"
+#include "loc_mem.h" /* W277 LOC-DISC */
 
 static int in_game_region(u32 va, u32 size)
 {
@@ -936,6 +937,11 @@ void krnl_contig_stats(void)
 u32 __stdcall hle_MmAllocateContiguousMemory(u32 size)
 { 
     static unsigned nreu;
+    if (loc_mem_active()) { /* W277: LoC - Contig mit Xbox-Spiegel (SB nie) */
+        u32 lr = loc_mem_alloc(size ? size : 0x1000, 0x1000, 0);
+        if (lr) { exreg_add(lr, size ? size : 0x1000); }
+        return lr;
+    }
     int na = g_cfg.contig_noalias; /* FIX(FILM-WHITE,W177) */
     void *r = NULL;
     u32 rlen = 0; /* W214 contig_reuse: Laenge des wiederverwendeten Blocks (0 = neu) */
@@ -975,6 +981,12 @@ u32 __stdcall hle_MmAllocateContiguousMemoryEx(u32 size, u32 low, u32 high,
     int na = g_cfg.contig_noalias; /* FIX(FILM-WHITE,W177) */
     (void)low;
     (void)high;
+    if (loc_mem_active()) { /* W277: LoC - Contig mit Xbox-Spiegel (SB nie), Schutz bleibt RW */
+        u32 lr = loc_mem_alloc(size ? size : 0x1000, align > 0x1000u ? align : 0x1000u, 0);
+        (void)prot;
+        if (lr) { exreg_add(lr, size ? size : 0x1000); }
+        return lr;
+    }
     (void)align;
     if (na) { AcquireSRWLockExclusive(&g_ct_lock); r = ct_reuse(size, &rlen); }
     if (!r) { r = na ? ct_low_alloc(size ? size : 0x1000) : low_alloc(size ? size : 0x1000); }
@@ -1016,6 +1028,7 @@ u32 __stdcall hle_MmFreeContiguousMemory(u32 va)
     /* M2c: pures Leak (Xbox: freier Contig-Speicher behaelt Inhalt; das
      * Spiel sampelt stale Structs!). Session-begrenzt, kein LRU (PoC). */
     static unsigned nfree;
+    if (loc_mem_active() && loc_mem_free(va)) { return 0; } /* W277: LoC - Block in die Wiederverwendung */
     if (nfree < 8) { nfree++; HLOG_I("MmContig free: va=0x%X (behalten)", va); }
     if (g_cfg.contig_noalias && g_cfg.contig_free) { (void)ct_free(va); } /* FIX(SEQ-RENDER,W214): Bild frei, Speicher bleibt */
     return 0;
@@ -1085,6 +1098,10 @@ u32 __stdcall hle_ExQueryPoolBlockSize(u32 va)
 u32 __stdcall hle_MmQueryAllocationSize(u32 va)
 {
     MEMORY_BASIC_INFORMATION mbi;
+    if (loc_mem_active()) { /* W277: LoC-Contig-Block */
+        u32 ls = loc_mem_size(va);
+        if (ls) { return ls; }
+    }
     if (!VirtualQuery((LPCVOID)(uintptr_t)va, &mbi, sizeof mbi)) {
         return 0;
     }

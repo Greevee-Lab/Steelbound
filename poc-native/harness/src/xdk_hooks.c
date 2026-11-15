@@ -25,6 +25,11 @@ static int g_gle_idx_logged;
 void xbox_set_last_error(u32 code)
 {
     u32 *slots = fs_emu_tls_slots();
+    if (g_sba_loc) { /* W277 LOC-DISC: XDK 5788 (eigener Pfad, SB unveraendert) */
+        loc_set_last_error(slots, code);
+        SetLastError(code);
+        return;
+    }
     if (slots) {
         int idx = *(volatile int *)(uintptr_t)SBA(0x6E8A80u);
         if (!g_gle_idx_logged) {

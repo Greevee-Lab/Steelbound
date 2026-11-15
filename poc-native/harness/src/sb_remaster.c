@@ -27,9 +27,11 @@
  * damit ausgenommen.
  */
 #define COBJMACROS
+#include "sb_crash.h" /* W279 */
 #include "sb_remaster.h"
 #include "sb_profile.h" /* W229 SBA() */
 #include "sb_pack.h" /* W140 */
+#include "sb_texhash.h" /* W288 */
 #include "hlog.h"
 #include "hcfg.h"
 #include "render_int.h"
@@ -51,65 +53,9 @@ static CRITICAL_SECTION g_rcs;
 /* ------------------------------------------------------------------ */
 /* Hash                                                                */
 /* ------------------------------------------------------------------ */
-#define FNV64_INIT 0xcbf29ce484222325ull
-#define FNV64_PRIME 0x100000001b3ull
-static u64 fnv64(u64 h, const void *p, size_t n)
-{
-    const unsigned char *b = (const unsigned char *)p;
-    size_t i;
-    for (i = 0; i < n; i++) {
-        h ^= b[i];
-        h *= FNV64_PRIME;
-    }
-    return h;
-}
-
+/* W288: fnv64, mip0_rows, tex_content_hash (unveraendert) und die Null-Pruefung
+ * liegen in sb_texhash.h (auch vom render_selftest benutzt). */
 static unsigned fmt_code(unsigned fmt) { return (fmt & 0xFF00u) >> 8; }
-static unsigned lin_bpp(unsigned code) { return code == 0x1Cu ? 2u : 4u; }
-
-/* Bytes je Zeile (dicht) und Zeilenzahl der Mip-0-Daten. */
-static void mip0_rows(int kind, unsigned code, unsigned w, unsigned h,
-                      unsigned *rowbytes, unsigned *rows)
-{
-    if (kind == 1) {
-        unsigned blk = (code == 0x0Cu) ? 8u : 16u;
-        *rowbytes = (w / 4u) * blk; /* wie tex_upload */
-        *rows = h / 4u;
-    } else if (kind == 3) {
-        *rowbytes = w * 4u;
-        *rows = h;
-    } else {
-        *rowbytes = w * lin_bpp(code);
-        *rows = h;
-    }
-}
-
-static u64 tex_content_hash(int kind, unsigned code, unsigned w, unsigned h,
-                            const void *pix, unsigned pitch, int *ok)
-{
-    unsigned hdr[5], rb, rows, y;
-    u64 hv = FNV64_INIT;
-    *ok = 0;
-    hdr[0] = 0x31544253u; /* "SBT1" */
-    hdr[1] = code;
-    hdr[2] = w;
-    hdr[3] = h;
-    hdr[4] = 0; /* Palettenlaenge (P8 nicht im Spiel) */
-    hv = fnv64(hv, hdr, sizeof hdr);
-    mip0_rows(kind, code, w, h, &rb, &rows);
-    if (!pix || !rb || !rows) {
-        return 0;
-    }
-    __try {
-        for (y = 0; y < rows; y++) {
-            hv = fnv64(hv, (const unsigned char *)pix + (size_t)y * pitch, rb);
-        }
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        return 0;
-    }
-    *ok = 1;
-    return hv ? hv : 1ull;
-}
 
 /* ------------------------------------------------------------------ */
 /* BCn / Format -> RGBA8                                               */
@@ -533,6 +479,7 @@ static dent_t *g_de;
 static int g_nde;
 static int *g_deh; /* Hash-Index (-1 = leer) */
 static int g_idx_dirty, g_nde_new, g_npng, g_npng_fail, g_nskip_cpu;
+static unsigned g_nskip_zero; /* W288: Mip 0 nur Null-Bytes -> nicht gedumpt */
 static unsigned g_idx_last_flush;
 
 static int de_find(u64 hv, int add)
@@ -734,9 +681,10 @@ static void idx_save(const char *why)
     if (!MoveFileExA(pt, p, MOVEFILE_REPLACE_EXISTING)) { return; }
     g_idx_dirty = 0;
     HLOG_I("REMASTER dump: index.json geschrieben (%s): eintraege=%d neu=%d png=%d png_fehler=%d cpu_skip=%d "
-           "kat font_hud=%d cockpit=%d ground=%d buildings=%d vehicles=%d effects=%d menu=%d world=%d cpu=%d unknown=%d",
+           "kat font_hud=%d cockpit=%d ground=%d buildings=%d vehicles=%d effects=%d menu=%d world=%d cpu=%d unknown=%d "
+           "null_skip=%u",
            why, g_nde, g_nde_new, g_npng, g_npng_fail, g_nskip_cpu,
-           ncat[0], ncat[1], ncat[2], ncat[3], ncat[4], ncat[5], ncat[6], ncat[7], ncat[8], ncat[9]);
+           ncat[0], ncat[1], ncat[2], ncat[3], ncat[4], ncat[5], ncat[6], ncat[7], ncat[8], ncat[9], g_nskip_zero);
 }
 
 static int dark_pct(const unsigned char *rgba, unsigned n)
@@ -839,6 +787,7 @@ static int g_nhd;
 static int *g_hdh;
 static unsigned long long g_hd_bytes;
 static unsigned g_hd_tick, g_hd_hits, g_hd_miss, g_hd_rej, g_hd_cpu, g_hd_load, g_hd_evict, g_hd_last_log;
+static unsigned g_hd_zero; /* W288: Mip 0 nur Null-Bytes -> keine HD-Suche */
 static int g_hd_logdirty;
 
 static int hd_find(u64 hv, int add)
@@ -1510,6 +1459,7 @@ static void rem_pack_start(void)
         HLOG_I("REMASTER pack: %s fehlt -> keine Pakete (Original)", pl);
         pl[0] = '\0';
     }
+    sb_crash_note_packs(pl); /* W279 DIAG-CRASH: aktive Packs + Pruefsumme fuer Absturzberichte */
     sb_pack_init(pl, g_rdir);
 }
 
@@ -1556,6 +1506,7 @@ void sb_rem_init(ID3D11Device *dev)
 }
 
 int sb_rem_active(void) { return g_dump_on || g_hd_on; }
+int sb_rpf_wanted(void) { return !g_cfg.replay_label || !g_cfg.replay_logo; } /* W290 */
 
 /* W118 REM-OVERLAY: vorhandene Paket-Stufen (1 = textures/x2, 2 = textures/x4). */
 int sb_rem_live_avail(void)
@@ -1621,15 +1572,55 @@ int sb_rem_live_set(int on, int scale)
     return 1;
 }
 
+/* W288: gedeckelte Logzeile je Null-Textur (Render-Thread, ausserhalb g_rcs) */
+static void zero_log(unsigned xptr, unsigned code, unsigned w, unsigned h, u64 hv)
+{
+    static volatile LONG n;
+    LONG k = InterlockedIncrement(&n);
+    if (k <= 16) {
+        HLOG_I("REMASTER null #%ld: xptr=0x%X %ux%u code=0x%02X hash=%016llx (Mip 0 nur Null-Bytes -> kein Ersatz, kein Dump)",
+               (long)k, xptr, w, h, code, hv);
+    }
+}
+
+/* W290 QUICK-SHOT: REPLAY-Schriftzug und Spiel-Logo der Wiedergabe liegen im Schrift-/UI-Atlas des Spiels
+ * (DXT3 256x256 aus ZCACHE/TEXOBJ.BIN, Inhalts-Hash wie W103, EU belegt). Nur wenn replay_label=0 oder
+ * replay_logo=0: beim Upload einer DXT3-256x256-Textur den Hash bilden und die Adresse des Atlas merken
+ * (render_mfx.c sb_rpf_skip laesst dann genau die Quads dieser Atlas-Bereiche aus). Sonst nichts. */
+#define RPF_ATLAS_HASH 0x32f1c04c11f5ef59ull
+volatile unsigned g_rpf_atlas_xptr;
+static void rpf_note_upload(unsigned xptr, unsigned code, int kind, unsigned w, unsigned h, const void *pix,
+                            unsigned pitch)
+{
+    int ok = 0;
+    u64 hv;
+    if (g_cfg.replay_label && g_cfg.replay_logo) { return; }
+    if (code != 14u || w != 256u || h != 256u) { /* DXT3 */
+        if (xptr == g_rpf_atlas_xptr) { g_rpf_atlas_xptr = 0; }
+        return;
+    }
+    hv = tex_content_hash(kind, code, w, h, pix, pitch, &ok);
+    if (ok && hv == RPF_ATLAS_HASH) {
+        if (g_rpf_atlas_xptr != xptr) {
+            HLOG_I("REPLAY-FX: Schrift-/UI-Atlas erkannt (xptr=0x%X) - REPLAY-Schriftzug %s, Logo %s", xptr,
+                   g_cfg.replay_label ? "an" : "aus", g_cfg.replay_logo ? "an" : "aus");
+        }
+        g_rpf_atlas_xptr = xptr;
+    } else if (xptr == g_rpf_atlas_xptr) {
+        g_rpf_atlas_xptr = 0;
+    }
+}
+
 ID3D11ShaderResourceView *sb_rem_upload(unsigned xptr, unsigned fmt, int kind, unsigned w, unsigned h,
                                         const void *pix, unsigned pitch, unsigned nlev,
                                         ID3D11ShaderResourceView *orig)
 {
     u64 hv;
-    int ok = 0;
+    int ok = 0, zero;
     xmap_t *xm;
     ID3D11ShaderResourceView *rep = NULL;
     unsigned code = fmt_code(fmt);
+    if (orig && pix) { rpf_note_upload(xptr, code, kind, w, h, pix, pitch); } /* W290 (nur mit Schalter aus) */
     if ((!g_dump_on && !g_hd_on) || !orig || !w || !h) { return orig; }
     /* PERF(FILM-FPS,W123) hd_cpu_nohash: per CPU beschriebene Texturen (Bink-
      * Film: jedes Filmbild ein Upload) werden nie ersetzt und - ausser beim
@@ -1651,11 +1642,21 @@ ID3D11ShaderResourceView *sb_rem_upload(unsigned xptr, unsigned fmt, int kind, u
     }
     hv = tex_content_hash(kind, code, w, h, pix, pitch, &ok);
     if (!ok) { return orig; }
+    /* W288 PACK-ZERO-TEX hd_zero_skip: Mip 0 nur Null-Bytes = noch nicht geladener
+     * bzw. geleerter Block. Nie ersetzen und nie dumpen (W262: zwei Pack-Eintraege
+     * trugen den Hash genullten Speichers und trafen so jede frisch angelegte
+     * Textur gleicher Groesse). Kein Merker je xptr: bekommt die Textur Daten,
+     * laedt der Cache neu (neuer Hash) und es wird normal gesucht. Bricht beim
+     * ersten Nicht-Null-Byte ab. */
+    zero = g_cfg.hd_zero_skip ? tex_mip0_zero(kind, code, w, h, pix, pitch) : 0;
+    if (zero) { zero_log(xptr, code, w, h, hv); }
     EnterCriticalSection(&g_rcs);
     xm = xm_get(xptr, 1);
     if (xm) { xm->hash = hv; xm->de = -1; }
     if (g_dump_on) {
-        if (xm && xm->cpu && kind == 2) {
+        if (zero) {
+            g_nskip_zero++; /* W288: Null-Textur nie in den Dump (Pack-Erstellung) */
+        } else if (xm && xm->cpu && kind == 2) {
             g_nskip_cpu++; /* Film/CPU-Textebene: nie dumpen */
         } else if (xm && xm->cpu && xm->cpu_dumped) {
             g_nskip_cpu++; /* per CPU beschrieben: nur erster Stand je xptr */
@@ -1667,6 +1668,9 @@ ID3D11ShaderResourceView *sb_rem_upload(unsigned xptr, unsigned fmt, int kind, u
     if (g_hd_on) {
         if (xm && xm->cpu) {
             g_hd_cpu++;
+        } else if (!tex_hd_gate(g_cfg.hd_zero_skip, 0, zero)) {
+            g_hd_zero++; /* W288 */
+            g_hd_logdirty = 1;
         } else {
             rep = hd_lookup(hv, w, h);
         }
@@ -1729,8 +1733,9 @@ void sb_rem_present(unsigned frame)
     if (g_hd_on && g_hd_logdirty && frame - g_hd_last_log >= 300u) {
         g_hd_last_log = frame;
         g_hd_logdirty = 0;
-        HLOG_I("REMASTER hd stat: f=%u geladen=%u vram=%.1f MB treffer=%u fehlend=%u abgelehnt=%u cpu=%u verdraengt=%u",
-               frame, g_hd_load, (double)g_hd_bytes / 1048576.0, g_hd_hits, g_hd_miss, g_hd_rej, g_hd_cpu, g_hd_evict);
+        HLOG_I("REMASTER hd stat: f=%u geladen=%u vram=%.1f MB treffer=%u fehlend=%u abgelehnt=%u cpu=%u verdraengt=%u null=%u",
+               frame, g_hd_load, (double)g_hd_bytes / 1048576.0, g_hd_hits, g_hd_miss, g_hd_rej, g_hd_cpu, g_hd_evict,
+               g_hd_zero);
     }
     LeaveCriticalSection(&g_rcs);
 }
@@ -1742,8 +1747,8 @@ void sb_rem_shutdown(void)
     if (!TryEnterCriticalSection(&g_rcs)) { Sleep(50); if (!TryEnterCriticalSection(&g_rcs)) { return; } }
     if (g_dump_on) { idx_save("ende"); }
     if (g_hd_on) {
-        HLOG_I("REMASTER hd stat: ende geladen=%u vram=%.1f MB treffer=%u fehlend=%u abgelehnt=%u cpu=%u verdraengt=%u",
-               g_hd_load, (double)g_hd_bytes / 1048576.0, g_hd_hits, g_hd_miss, g_hd_rej, g_hd_cpu, g_hd_evict);
+        HLOG_I("REMASTER hd stat: ende geladen=%u vram=%.1f MB treffer=%u fehlend=%u abgelehnt=%u cpu=%u verdraengt=%u null=%u",
+               g_hd_load, (double)g_hd_bytes / 1048576.0, g_hd_hits, g_hd_miss, g_hd_rej, g_hd_cpu, g_hd_evict, g_hd_zero);
         HLOG_I("REMASTER sel stat: ende eintraege=%d wahl_original=%u x4_zu_x2=%u stufe=%d", g_nsel, g_sel_orig,
                g_sel_x2, g_cfg.hd_scale == 2 ? 2 : 4);
         if (g_man_dir) {

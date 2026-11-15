@@ -1067,3 +1067,41 @@ u32 __stdcall hle_KeWaitForSingleObject(u32 obj, u32 reason, u32 mode, u32 alert
     }
     return X_STATUS_SUCCESS;
 }
+
+/* W275 LOC-BOOT: KeWaitForMultipleObjects (nur LoC importiert es, SB nie).
+ * Wie KeWaitForSingleObject: KEVENTs ueber kev_get; Objekte ohne Host-Event
+ * gelten als signalisiert (M1-Prinzip). WaitAll = 0, WaitAny = 1. */
+u32 __stdcall hle_KeWaitForMultipleObjects(u32 count, u32 objs, u32 waitType, u32 reason,
+                                           u32 mode, u32 alertable, u32 timeout, u32 blocks)
+{
+    HANDLE hs[MAXIMUM_WAIT_OBJECTS];
+    u32 i, map[MAXIMUM_WAIT_OBJECTS], n = 0;
+    DWORD ms, wr;
+    (void)reason; (void)mode; (void)alertable; (void)blocks;
+    if (count == 0 || count > MAXIMUM_WAIT_OBJECTS) {
+        return X_STATUS_INVALID_PARAMETER;
+    }
+    for (i = 0; i < count; i++) {
+        u32 o = 0;
+        HANDLE h;
+        __try { o = ((u32 *)(uintptr_t)objs)[i]; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { return X_STATUS_INVALID_PARAMETER; }
+        h = kev_get(o, 1);
+        if (h) {
+            hs[n] = h;
+            map[n] = i;
+            n++;
+        } else if (waitType == 1) {
+            return X_STATUS_SUCCESS + i; /* WaitAny: Objekt ohne Event = signalisiert */
+        }
+    }
+    if (n == 0) {
+        return X_STATUS_SUCCESS;
+    }
+    ms = xb_timeout_ms((const int64_t *)(uintptr_t)timeout);
+    wr = WaitForMultipleObjects(n, hs, waitType == 0, ms);
+    if (wr >= WAIT_OBJECT_0 && wr < WAIT_OBJECT_0 + n) {
+        return waitType == 0 ? X_STATUS_SUCCESS : X_STATUS_SUCCESS + map[wr - WAIT_OBJECT_0];
+    }
+    return wait_result(wr);
+}

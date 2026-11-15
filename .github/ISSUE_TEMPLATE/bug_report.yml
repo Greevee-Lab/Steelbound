@@ -53,7 +53,7 @@ body:
     attributes:
       label: Settings
       description: Graphics preset, display mode, resolution, frame rate, controller type – anything you changed. info.txt from the feedback folder covers most of this.
-      placeholder: "e.g. Original (HD) – 120 FPS, borderless, 2560x1440, keyboard/mouse"
+      placeholder: "e.g. Original, borderless, 2560x1440, keyboard/mouse"
   - type: textarea
     id: files
     attributes:

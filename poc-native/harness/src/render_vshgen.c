@@ -258,7 +258,9 @@ int rqv_hlsl_ex(const rqv_prog_t *p, int lerp, const rqv_raw_t *raw, char *buf, 
     rqs(&s, "};\n"
             "struct VSOUT { float4 pos : SV_Position; float4 col : COLOR0; float2 uv : TEXCOORD0;\n"
             "  float4 spec : COLOR1; float4 t0 : TEXCOORD1; float4 t1 : TEXCOORD2;\n"
-            "  float4 t2 : TEXCOORD3; float4 t3 : TEXCOORD4; float fog : TEXCOORD5; };\n"
+            "  float4 t2 : TEXCOORD3; float4 t3 : TEXCOORD4; float fog : TEXCOORD5;\n");
+    if (lerp & 16) { rqs(&s, "  float4 g1 : IPGA; float4 g0 : IPGB; float2 gw : IPGW;\n"); } /* FIX(W265 LINE-GUARD): Lagen fuer den Dreieck-Waechter (GS) */
+    rqs(&s, "};\n"
             "float rq_rcp(float x) { return x == 1.0 ? 1.0 : 1.0 / x; }\n"
             "float rq_rcc(float x) { if (x == 1.0) return 1.0; float r = 1.0 / x;\n"
             "  return r >= 0.0 ? clamp(r, 5.42101e-020, 1.884467e+019) : clamp(r, -1.884467e+019, -5.42101e-020); }\n"
@@ -273,6 +275,7 @@ int rqv_hlsl_ex(const rqv_prog_t *p, int lerp, const rqv_raw_t *raw, char *buf, 
     if (lerp) {
         rqs(&s, "  float4 c0 = mul(i.pos0, mvp0), c1 = mul(i.pos, mvp);\n"
                 "  float ew0 = c0.w, ew1 = c1.w;\n");
+        if (lerp & 16) { rqs(&s, "  o.g0 = c0; o.g1 = c1;\n"); } /* FIX(W265): Strom-Lagen N-1/N (g1 = exakt die Tick-N-Ausgabe) */
         if (lerp & 4) { /* FIX(W237 LINE-FLICKER2): P2 im RT (Strom w = 1): echte Clip-w aus Strom 3/4 */
             rqs(&s, "  ew0 *= i.hw0; ew1 *= i.hw1;\n");
         }
@@ -292,6 +295,7 @@ int rqv_hlsl_ex(const rqv_prog_t *p, int lerp, const rqv_raw_t *raw, char *buf, 
         if (lerp & 8) { /* W237: wieder durch w teilen -> gleiche Rasterung (w = 1) wie das Tick-Bild */
             rqs(&s, "  if (pre) { o.pos = float4(o.pos.xyz / o.pos.w, 1.0); }\n");
         }
+        if (lerp & 16) { rqs(&s, "  o.gw = float2(ew0, ew1);\n"); } /* W265 */
     } else {
         rqs(&s, "  o.pos = mul(i.pos, mvp);\n");
     }

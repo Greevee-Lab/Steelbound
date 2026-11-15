@@ -64,7 +64,10 @@ void sb_ovl_set_pause_binding(const int *vks, int n, unsigned padmask);
 void sb_ovl_request_pause(const char *why);
 /* W195 PHOTO-MODE: Foto-Tasten der Profil-Aktion "photo" (hooks_input.c, n=0 -> F12) und Foto-Aktion aus
  * Pad/Controller (Spiel-Thread): oeffnet den Fotomodus (bei offenem Menue: dorthin wechseln/Foto). */
-void sb_ovl_set_photo_binding(const int *vks, int n, unsigned padmask);
+void sb_ovl_set_photo_binding(const int *vks, const int *mods, int n, unsigned padmask); /* W290: mods (Bit 0 Shift, 1 Strg, 2 Alt) */
+/* W290 QUICK-SHOT: Tasten der Aktion "quick_shot" (Standard F12), Anforderung aus Fenster/Pad/Test (Spiel-Thread ok). */
+void sb_ovl_set_qshot_binding(const int *vks, const int *mods, int n, unsigned padmask);
+void sb_ovl_request_qshot(const char *why);
 void sb_ovl_request_photo(const char *why);
 /* W211: attachment hotkeys; empty profile bindings disable the action.
  * Requests are ignored while any menu or clip is active. clip: 0 shot, 1 video. */
@@ -72,6 +75,7 @@ void sb_ovl_set_feedback_binding(int clip, const int *vks, int n);
 void sb_ovl_request_feedback(int clip);
 /* W254 REPLAY-LAUNCHER: Hinweis (bis 6 Zeilen UTF-8, uebersetzt), beliebige Taste schliesst. */
 void sb_ovl_notice(const char *const *lines, int n);
+void sb_ovl_notice_ex(const char *title_key, const char *tag_key, const char *const *lines, int n); /* W272 */
 
 /* ---- W122: kleine gemeinsame API (Look + Zeichenweg), genutzt vom
  * Leistungs-Overlay sb_perfhud.c. Farben (GDI COLORREF) und Deckung des

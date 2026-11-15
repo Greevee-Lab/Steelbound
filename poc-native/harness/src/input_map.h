@@ -116,6 +116,16 @@ typedef struct {
      * IMAP_WHEEL_UP/DOWN/LEFT/RIGHT; Hook: imouse_wheel_mask, Test:
      * gesetzt). 0 = Mausrad traegt nichts bei (bisheriges Verhalten). */
     unsigned wheel_mask;
+    /* W271 STICK-RELATIVE: globaler Modus der Pad-/Joystick-Quellen auf dem
+     * Zielhebel (aim_x/aim_y gemeinsam): 0 = Position (Standard, bitgleich
+     * wie bisher), 1 = relativ ("wie eine Maus": Auslenkung = Geschwindigkeit,
+     * integriert in den virtuellen Hebel m_ax/m_ay, Loslassen haelt). Eine
+     * Quelle mit ":mode=position|rate" hat Vorrang. stick_aim_rate = Hebel-
+     * stufen je Spiel-Frame bei vollem Ausschlag (0 -> 4*25/60), stick_aim_accel
+     * 0..4 = Beschleunigung bei gehaltenem Vollausschlag (0 = aus). */
+    int stick_aim;
+    float stick_aim_rate;
+    int stick_aim_accel;
 } imap_snap_t;
 
 /* W260 MOUSE-WHEEL: Mausrad-Rasten als Tastenimpulse (Quellen
@@ -178,6 +188,18 @@ typedef struct {
     uint8_t gear_direct_hit; /* W221: Direktwahl (gear.r/n/1..5, z. B.
                               * Schubhebel-Zonen) war in diesem Poll aktiv;
                               * der Hook laesst auto_gear dann aus */
+    /* W271 STICK-RELATIVE (relativer Stick auf dem Zielhebel): */
+    unsigned s_frame;     /* letzter integrierter Spiel-Frame */
+    uint8_t s_have;       /* 1 = s_frame gueltig */
+    uint8_t m_rate_src;   /* Bit0/Bit1 = aim_x/aim_y hat eine relative Quelle
+                           * mit Geraet (Hook: Vorsteuerung wie W87) */
+    uint8_t m_rate_move;  /* Bit0/Bit1 = relative Quelle hat in diesem Poll
+                           * den virtuellen Hebel bewegt */
+    int s_hold[2];        /* Frames mit Vollausschlag (Beschleunigung) */
+    int prev_aim_center;  /* Pegel der Aktion aim_center im Vor-Poll */
+    uint8_t aim_centered; /* 1 = aim_center hat in diesem Poll zentriert */
+    int prev_orig_view;   /* W283: Pegel der Aktion orig_view (ohne Tasten) im Vor-Poll */
+    int prev_quick_shot;  /* W290: Pegel der Aktion quick_shot (ohne Tasten) im Vor-Poll */
 } imap_state_t;
 
 void imap_state_init(imap_state_t *st); /* gear=8(N), tuner=0, Akkus Mitte */
@@ -256,7 +278,12 @@ typedef struct {
     float sens;  /* W221 (nur JOY): Empfindlichkeit 0.1..4 (1 = linear) */
     int half;    /* W221 (nur JOY auf Pedal): 1 = nur positive Haelfte,
                   * 0 = voller Weg (Minimum = 0, Maximum = 255) */
+    int amode;   /* W271 (nur aim_x/aim_y, ":mode="): 0 = globaler Schalter
+                  * stick_aim, 1 = position, 2 = rate (relativ) */
 } imap_analog_t;
+#define IMAP_AMODE_GLOBAL 0
+#define IMAP_AMODE_POSITION 1
+#define IMAP_AMODE_RATE 2
 #define IMAP_SRC_JOY 16
 
 typedef struct {
@@ -292,6 +319,24 @@ typedef struct {
     /* W211: feedback attachments, default F11 (shot) / F9 (5-second clip). */
     imap_bind_t feedback_shot;
     imap_bind_t feedback_clip;
+    /* W271: Client-Aktion "aim_center" (Waffenarm zur Mitte: virtueller
+     * Hebel von Maus und relativem Stick auf 0x7F, steigende Flanke,
+     * Abschnitt [client], Standard unbelegt). */
+    imap_bind_t aim_center;
+    /* W283 ORIG-KEY-BIND: Client-Aktion "orig_view" (Original-Optik <->
+     * eigene Einstellungen live, W278), Abschnitt [client], Standard
+     * KEY:SHIFT+KEY:F8. Tasten (auch Umschalt/Strg/Alt + Taste) wertet das
+     * Fenster aus, Pad/Controller/Joystick der Hook (Flanke).
+     * orig_view_set = 1: Zeile steht im Profil (auch leer = aus); sonst gilt
+     * der Rueckfall [overlay] orig_key (imap_orig_view_resolve). */
+    imap_bind_t orig_view;
+    int orig_view_set;
+    /* W290 QUICK-SHOT: Client-Aktion "quick_shot" (Schnell-Screenshot mit den Foto-Einstellungen, Abschnitt
+     * [client], Standard KEY:F12; "photo" ist seit W290 KEY:SHIFT+KEY:F12). Tasten (auch mit Zusatztaste)
+     * wertet das Fenster aus, Pad/Controller/Joystick der Hook (Flanke). quick_shot_set = 1: Zeile steht im
+     * Profil (auch leer = aus). Fehlt sie, gilt der Uebergang aus imap_profile_parse (s. imap_quick_shot_migrate). */
+    imap_bind_t quick_shot;
+    int quick_shot_set;
     int has_pad; /* 1 = Profil referenziert Pad-Quellen */
     int has_sbc; /* 1 = Profil referenziert SBC-Quellen */
     /* W221 HOTAS (experimentell): Geraete-Zuordnung je Slot ("joy0 = <Name
@@ -341,6 +386,40 @@ int imap_action_feedback_clip(const imap_profile_t *prof, imap_state_t *st, cons
 /* W195: photo, non-keyboard rising edge (like pause). */
 int imap_action_photo(const imap_profile_t *prof, imap_state_t *st,
                       const imap_snap_t *snap);
+/* W283 ORIG-KEY-BIND: Aktion "orig_view", Pad/Controller/Joystick-Flanke
+ * (Tasten wertet das Fenster aus, wie photo). Unbelegt -> 0. */
+int imap_action_orig_view(const imap_profile_t *prof, imap_state_t *st,
+                          const imap_snap_t *snap);
+/* W290 QUICK-SHOT: Aktion "quick_shot", Pad/Controller/Joystick-Flanke (Tasten: Fenster). Unbelegt -> 0. */
+int imap_action_quick_shot(const imap_profile_t *prof, imap_state_t *st,
+                           const imap_snap_t *snap);
+/* W290: Uebergang fuer Profile ohne quick_shot-Zeile (von imap_profile_parse gerufen):
+ *   photo genau KEY:F12 (alter Standard) -> photo = KEY:SHIFT+KEY:F12, quick_shot = KEY:F12;
+ *   sonst bleibt photo, quick_shot = KEY:F12, wenn F12 (ohne Zusatztaste) frei ist, sonst leer.
+ * Rueckgabe 1 = photo umgestellt, 0 = sonst. */
+int imap_quick_shot_migrate(imap_profile_t *prof);
+/* W283: Tasten einer Bindung fuer die Fenster-Auswertung: einfache KEY-Atome
+ * (mods 0) und Akkorde "Umschalt/Strg/Alt + Taste" (mods Bit 0 Shift, 1 Ctrl,
+ * 2 Alt, gleiche Bits wie sb_origview). Andere Akkorde zaehlen nicht.
+ * Rueckgabe: Anzahl Eintraege (<= cap). */
+int imap_bind_key_combos(const imap_bind_t *b, int *vks, int *mods, int cap);
+/* W283: 1 = cfg-Wert orig_key ist die Standardbelegung ("SHIFT+F8",
+ * Gross/Klein und Leerzeichen egal). */
+int imap_orig_key_is_default(const char *orig_key);
+/* W283: 1 = Bindung ist genau die Standardbelegung KEY:SHIFT+KEY:F8. */
+int imap_orig_view_is_default(const imap_bind_t *b);
+/* W283: Quelle der Vergleichstaste festlegen. Profil hat Vorrang, wenn es
+ * eine orig_view-Zeile hat - ausser dort steht nur die Standardbelegung und
+ * die cfg hat orig_key bewusst geaendert (bestehende cfgs gehen weiter).
+ * Rueckgabe 1 = Profil (prof->orig_view gilt), 0 = Rueckfall orig_key
+ * (prof->orig_view wird geleert, damit der Hook nichts doppelt ausloest). */
+int imap_orig_view_resolve(imap_profile_t *prof, const char *orig_key);
+/* W271 STICK-RELATIVE: Standard-Rate (Hebelstufen je Spiel-Frame bei vollem
+ * Ausschlag) je Empfindlichkeitsstufe: sens * 25/60 (Stufe 4 = 1,67: Mitte ->
+ * Monitorrand, ~25 Stufen, in ~0,5 s). */
+#define IMAP_STICK_RATE_PER_SENS (25.0f / 60.0f)
+/* Mindest-Totzone relativer Quellen (Drift wuerde sonst integriert). */
+#define IMAP_STICK_RATE_DZ 0.05f
 /* W193: Tastenname (wie im Profil, z. B. "H", "F9", "0x48") -> VK, -1 = unbekannt */
 int imap_key_name(const char *name);
 

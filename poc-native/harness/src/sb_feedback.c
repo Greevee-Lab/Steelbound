@@ -7,6 +7,7 @@
 #include "sb_feedback.h"
 #include "sb_pause.h"
 #include "sb_userdata.h"
+#include "sb_diagcore.h" /* W279 */
 #include <shellapi.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -30,169 +31,21 @@ void sb_feedback_note_gamever(const sb_gamever_t *gv)
 /* ------------------------------------------------------------------ */
 /* Bereinigen                                                          */
 /* ------------------------------------------------------------------ */
-static int fb_ieq(char a, char b)
-{
-    if (a == '/') { a = '\\'; }
-    if (b == '/') { b = '\\'; }
-    if (a >= 'A' && a <= 'Z') { a = (char)(a + 32); }
-    if (b >= 'A' && b <= 'Z') { b = (char)(b + 32); }
-    return a == b;
-}
-
 static int fb_alnum(char c)
 {
     return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9');
 }
 
-/* Alle Vorkommen von needle (ohne Gross/Klein, / == \) durch rep ersetzen.
- * word=1: nur ohne Buchstabe/Ziffer davor/danach. */
-static int fb_replace(char *s, size_t cap, const char *needle, const char *rep, int word)
-{
-    size_t nl = needle ? strlen(needle) : 0, rl = strlen(rep), i = 0, sl = strlen(s);
-    int n = 0;
-    if (nl < 2) { return 0; }
-    while (i + nl <= sl) {
-        size_t k;
-        for (k = 0; k < nl && fb_ieq(s[i + k], needle[k]); k++) {}
-        if (k == nl && (!word || ((i == 0 || !fb_alnum(s[i - 1])) && !fb_alnum(s[i + nl])))) {
-            if (sl - nl + rl + 1 > cap) { break; }
-            memmove(s + i + rl, s + i + nl, sl - i - nl + 1);
-            memcpy(s + i, rep, rl);
-            sl = sl - nl + rl;
-            i += rl;
-            n++;
-        } else {
-            i++;
-        }
-    }
-    return n;
-}
-
-static int fb_count(const char *s, const char *needle)
-{
-    size_t nl = needle ? strlen(needle) : 0, i, k;
-    int n = 0;
-    if (nl < 3) { return 0; }
-    for (i = 0; s[i]; i++) {
-        for (k = 0; k < nl && s[i + k] && fb_ieq(s[i + k], needle[k]); k++) {}
-        if (k == nl) { n++; }
-    }
-    return n;
-}
-
-static int fb_pathch(char c)
-{
-    return c && c != ' ' && c != '\t' && c != '\r' && c != '\n' && c != '"' && c != '\'' && c != '<' && c != '>' &&
-           c != '|' && c != ',' && c != ';' && c != '(' && c != ')' && c != '[' && c != ']';
-}
-
-/* Absolute Pfade (X:\..., X:/..., \\host\...) -> <pfad>\<datei> bzw. <pfad>. */
-static int fb_abs_paths(char *s, size_t cap)
-{
-    size_t i = 0, sl = strlen(s);
-    int n = 0;
-    while (s[i]) {
-        size_t st = i, en, b;
-        int abs = 0;
-        if (((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z')) && s[i + 1] == ':' &&
-            (s[i + 2] == '\\' || s[i + 2] == '/') && (i == 0 || !fb_alnum(s[i - 1]))) {
-            abs = 1;
-        } else if (s[i] == '\\' && s[i + 1] == '\\' && fb_alnum(s[i + 2]) && (i == 0 || s[i - 1] != '\\')) {
-            abs = 1;
-        }
-        if (!abs) { i++; continue; }
-        if (st > 0 && (s[st - 1] == '\'' || s[st - 1] == '"')) { /* in Anfuehrung: bis zum Ende (Leerzeichen im Pfad) */
-            char q = s[st - 1];
-            for (en = st + 2; s[en] && s[en] != q && s[en] != '\n' && s[en] != '\r'; en++) {}
-        } else {
-            for (en = st + 2; fb_pathch(s[en]); en++) {}
-        }
-        /* Dateiname = letzter Teil mit Punkt (Endung); Ordner -> nur <pfad> */
-        for (b = en; b > st && s[b - 1] != '\\' && s[b - 1] != '/'; b--) {}
-        {
-            char rep[96];
-            size_t bl = en - b, rl;
-            if (bl > 0 && bl < 48 && memchr(s + b, '.', bl) && b > st + 3) {
-                _snprintf_s(rep, sizeof rep, _TRUNCATE, "<pfad>\\%.*s", (int)bl, s + b);
-            } else {
-                strcpy_s(rep, sizeof rep, "<pfad>");
-            }
-            rl = strlen(rep);
-            if (sl - (en - st) + rl + 1 > cap) { break; }
-            memmove(s + st + rl, s + en, sl - en + 1);
-            memcpy(s + st, rep, rl);
-            sl = sl - (en - st) + rl;
-            i = st + rl;
-            n++;
-        }
-    }
-    return n;
-}
-
-static void fb_env(const char *name, char *o, size_t cap, UINT cp)
-{
-    wchar_t wn[64], value[600];
-    DWORD r;
-    o[0] = '\0';
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, wn, 64)) { return; }
-    r = GetEnvironmentVariableW(wn, value, 600);
-    if (r && r < 600) {
-        if (cp == CP_ACP) {
-            DWORD i;
-            for (i = 0; i < r && value[i] < 128; ++i) {}
-            if (i == r || GetACP() == CP_UTF8) { return; } /* schon im UTF-8-Durchgang bereinigt */
-        }
-        WideCharToMultiByte(cp, 0, value, -1, o, (int)cap, NULL, NULL);
-    }
-}
-
+/* W279: Regeln jetzt in sb_diagcore.c (gemeinsam mit Absturzbericht und Launcher-Diagnosepaket). */
 int sb_feedback_sanitize(char *s, size_t cap)
 {
-    static const char *const envp[][2] = {
-        { "LOCALAPPDATA", "%LOCALAPPDATA%" }, { "APPDATA", "%APPDATA%" }, { "TEMP", "%TEMP%" },
-        { "TMP", "%TEMP%" }, { "OneDrive", "%OneDrive%" }, { "USERPROFILE", "%USERPROFILE%" },
-        { "PUBLIC", "%PUBLIC%" },
-    };
-    char v[600];
-    size_t i;
-    unsigned pass;
-    unsigned passes;
-    int n = 0;
-    if (!s || !cap) { return 0; }
-    /* UTF-8-Eingabe und alte ANSI-Logzeilen beide bereinigen. */
-    passes = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, NULL, 0) ? 1u : 2u;
-    for (pass = 0; pass < passes; ++pass) {
-        UINT cp = pass ? CP_ACP : CP_UTF8;
-        for (i = 0; i < sizeof envp / sizeof envp[0]; i++) {
-            fb_env(envp[i][0], v, sizeof v, cp);
-            if (strlen(v) >= 4) { n += fb_replace(s, cap, v, envp[i][1], 0); }
-        }
-        fb_env("USERNAME", v, sizeof v, cp);
-        if (strlen(v) >= 2) { n += fb_replace(s, cap, v, "<user>", strlen(v) < 4); }
-        fb_env("COMPUTERNAME", v, sizeof v, cp);
-        if (strlen(v) >= 3) { n += fb_replace(s, cap, v, "<pc>", strlen(v) < 5); }
-        fb_env("USERDOMAIN", v, sizeof v, cp);
-        if (strlen(v) >= 3) { n += fb_replace(s, cap, v, "<pc>", strlen(v) < 5); }
-    }
-    n += fb_abs_paths(s, cap);
-    return n;
+    return sb_diag_sanitize(s, cap, NULL, 0);
 }
 
 /* Nachpruefung: Benutzername bzw. Profilpfad noch enthalten? */
 static int fb_clean_hits(const char *s)
 {
-    char v[600];
-    int n = 0;
-    unsigned pass;
-    unsigned passes = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, NULL, 0) ? 1u : 2u;
-    for (pass = 0; pass < passes; ++pass) {
-        UINT cp = pass ? CP_ACP : CP_UTF8;
-        fb_env("USERNAME", v, sizeof v, cp);
-        if (strlen(v) >= 4) { n += fb_count(s, v); }
-        fb_env("USERPROFILE", v, sizeof v, cp);
-        if (strlen(v) >= 4) { n += fb_count(s, v); }
-    }
-    return n;
+    return sb_diag_clean_hits(s);
 }
 
 /* ------------------------------------------------------------------ */

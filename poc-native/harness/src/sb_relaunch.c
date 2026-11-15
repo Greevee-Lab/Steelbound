@@ -197,6 +197,10 @@ static void rl_env(const char *path, int left)
         size_t k = strlen(b);
         _snprintf_s(b + k, sizeof b - k, _TRUNCATE, "%sreplay_autoplay=", k ? ";" : "");
     }
+    if (g_cfg.mission_autostart >= 0) { /* W272: Teststart nur im ersten Prozess (Testordner bleibt) */
+        size_t k = strlen(b);
+        _snprintf_s(b + k, sizeof b - k, _TRUNCATE, "%smission_autostart=-1", k ? ";" : "");
+    }
     if (wm >= 0 && wm != g_cfg.window_mode) {
         size_t k = strlen(b);
         _snprintf_s(b + k, sizeof b - k, _TRUNCATE, "%swindow_mode=%d", k ? ";" : "", wm);

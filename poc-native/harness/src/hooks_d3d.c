@@ -2,12 +2,14 @@
  * Texturen/Shader, RenderTarget, RenderStates, VertexData, Viewport,
  * Transform, Release, GPU-Register, Shader-Konstanten, Streams/Draws,
  * LockRect, KickOff). W68 SPLIT: 1:1 aus xdk_hooks.c verschoben. */
+#include "loc_mem.h" /* W277 LOC-DISC */
 #include "hooks_int.h"
 #include <intrin.h>
 #include "sb_remaster.h" /* W103 REM-FRAME */
 #include "sb_perfhud.h" /* W125 TICK-PERF */
 #include "sb_state.h" /* W232: sb_in_mission */
 #include "sb_rauto.h" /* W254 REPLAY-LAUNCHER */
+#include "sb_mauto.h" /* W272 ALPHA-TEST */
 #include "render_vexp.h" /* W255 VIDEO-EXPORT */
 
 /* ---------- D3D-Hooks ---------- */
@@ -69,6 +71,228 @@ static void ign_gate_tick(void)
     }
 }
 
+/* W268 COCKPIT-HIDE: Komfort-Option "Cockpit ausblenden" ([render]
+ * cockpit_hide, Standard 0 = kein Schreiben, bitgleich). Wirkung wie der
+ * Spiel-Kniff IGNITION+START (W263): Vollbild-Flag u16 [0x3516DC]=1, dann
+ * zeichnet FUN_000459B0 den flachen Pfad (Welt im 4:3-Bild, HUD, Radar,
+ * FRONT VIEW) statt Monitore + Schale. Geschrieben wird nur, wenn das Spiel
+ * den Toggle selbst erlauben wuerde (ohne die Freischaltung Gate Bit 2):
+ * Live-Mission (Szene 0x2C, mloop 1, keine Titel-Demo/Replay [0x3B8CDC]!=1,
+ * keine Wiedergabe [0x3B8CC0]!=1), VT verriegelt [0x53831C]==1 (vorher waere
+ * das Bild grau, W44), kein Treffer-Cockpit ckp [0x3520DC]==0. Einmal je
+ * Mission (bzw. je Einschalten im ESC-Menue): Schaltet der Spieler danach
+ * per IGNITION+START zurueck, bleibt das so (kein Zurueckzwingen). Beim
+ * Ausschalten im Menue einmal 0, wenn noch unser Wert steht. In VR ohne
+ * Wirkung (flache Leinwand statt Cockpit). Replays/Video-Export: dort gilt
+ * die Kamera der Wiedergabe (replay_camera), kein Schreiben. Laeuft im
+ * Spiel-Thread am Bildende wie ign_gate_tick. */
+static int ch_live(void)
+{
+    u32 scene = 0, mloop = 0, demo = 1, rep = 1;
+    __try {
+        scene = *(volatile u32 *)(uintptr_t)SBA(0x6B96DCu);
+        mloop = *(volatile u32 *)(uintptr_t)SBA(0x356F58u);
+        demo = *(volatile u32 *)(uintptr_t)SBA(0x3B8CDCu);
+        rep = *(volatile u32 *)(uintptr_t)SBA(0x3B8CC0u);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return scene == 0x2Cu && mloop == 1u && demo != 1u && rep != 1u;
+}
+
+static void cockpit_hide_tick(void)
+{
+    static int prev_on, applied, ours;
+    int on = g_cfg.cockpit_hide && !g_cfg.vr_enable;
+    u32 lock = 0, ckp = 1;
+    unsigned short eng = 0;
+    if (!on && !prev_on && !ours) {
+        return; /* Standard: nichts lesen, nichts schreiben */
+    }
+    if (!ch_live()) {
+        applied = 0; /* naechste Mission/Neustart: wieder einmal setzen */
+        ours = 0;
+        prev_on = on;
+        return;
+    }
+    __try {
+        lock = *(volatile u32 *)(uintptr_t)SBA(0x53831Cu);
+        ckp = *(volatile u32 *)(uintptr_t)SBA(0x3520DCu);
+        eng = *(volatile unsigned short *)(uintptr_t)SBA(0x3516DCu);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    if (ours && eng == 0u) {
+        ours = 0; /* Spieler hat per IGNITION+START zurueckgeschaltet */
+    }
+    if (lock != 1u || (on && !prev_on)) {
+        applied = 0; /* VT (wieder) nicht verriegelt, z. B. Neustart, oder im ESC-Menue eingeschaltet */
+    }
+    if (!on && prev_on) {
+        if (ours && eng == 1u) {
+            __try {
+                *(volatile unsigned short *)(uintptr_t)SBA(0x3516DCu) = 0;
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            HLOG_I("COCKPIT-HIDE: aus -> Cockpit wieder an (Frame %u)", g_frames);
+        }
+        ours = 0;
+        applied = 0;
+    }
+    prev_on = on;
+    if (!on || applied || lock != 1u || ckp != 0u) {
+        return;
+    }
+    applied = 1;
+    if (eng != 0u) {
+        HLOG_I("COCKPIT-HIDE: Vollbild schon aktiv (Spieler-Kniff), nichts geschrieben (Frame %u)", g_frames);
+        return;
+    }
+    __try {
+        *(volatile unsigned short *)(uintptr_t)SBA(0x3516DCu) = 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    ours = 1;
+    HLOG_I("COCKPIT-HIDE: Cockpit ausgeblendet (Vollbild-Flag 1) bei Frame %u", g_frames);
+}
+
+/* W290 QUICK-SHOT: Vollbild-Ansicht des Spiels fuer eine Aufnahme anfordern ("ohne Cockpit").
+ * Dasselbe Flag wie W268 (u16 [0x3516DC]=1, FUN_000459B0 zeichnet dann den flachen Pfad: Monitorbild
+ * im 4:3-Rahmen mit HUD, Monitor-Effekt, FRONT VIEW, Radar), nur waehrend der Anforderung und nur unter
+ * denselben Bedingungen (Live-Mission, VT verriegelt, kein Treffer-Cockpit). In der Wiedergabe eines
+ * Replays ([0x3B8CC0]==1) waehlt die Replay-Kamera die Ansicht: Kamera 0 (Cockpit) -> 1 (Vollbild,
+ * W254). Zurueckgesetzt wird nur, was hier geschrieben wurde und noch steht. Ohne Anforderung: kein
+ * Lesen, kein Schreiben (Standardpfad bitgleich). Spiel-Thread am Bildende (Swap-Hook). */
+static volatile LONG g_fl_want;     /* 1 = angefordert (Overlay/Fotomodus) */
+static volatile LONG g_fl_state;    /* 0 wartet, 1 bereit, -1 nicht moeglich */
+static int g_fl_ours, g_fl_cam_ours; /* 1 = Flag bzw. Replay-Kamera von hier gesetzt */
+static u32 g_fl_cam0;                /* Replay-Kamera vor der Anforderung */
+static u32 g_fl_frame;               /* Bild, ab dem die Ansicht flach ist */
+static int g_fl_active;
+
+static int fl_rd32(u32 a, u32 *v)
+{
+    __try { *v = *(volatile u32 *)(uintptr_t)SBA(a); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return 1;
+}
+
+/* 1 = das Spiel zeichnet gerade die flache Vollbild-Ansicht (Mission, Flag 1, kein Treffer-Cockpit). */
+int sb_flat_now(void)
+{
+    u32 scene = 0, mloop = 0, ckp = 1;
+    unsigned short eng = 0;
+    if (!fl_rd32(0x6B96DCu, &scene) || !fl_rd32(0x356F58u, &mloop) || !fl_rd32(0x3520DCu, &ckp)) { return 0; }
+    __try { eng = *(volatile unsigned short *)(uintptr_t)SBA(0x3516DCu); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return scene == 0x2Cu && mloop == 1u && eng == 1u && ckp == 0u;
+}
+
+void sb_flat_request(int on)
+{
+    if (on) {
+        InterlockedExchange(&g_fl_state, 0);
+        InterlockedExchange(&g_fl_want, 1);
+    } else {
+        InterlockedExchange(&g_fl_want, 0);
+    }
+}
+
+int sb_flat_state(void)
+{
+    return (int)g_fl_state;
+}
+
+static void flat_capture_tick(void)
+{
+    int want = g_fl_want != 0;
+    u32 scene = 0, mloop = 0, demo = 1, rep = 0, lock = 0, ckp = 1, cam = 0;
+    unsigned short eng = 0;
+    if (!want && !g_fl_active) { return; }
+    fl_rd32(0x6B96DCu, &scene);
+    fl_rd32(0x356F58u, &mloop);
+    fl_rd32(0x3B8CDCu, &demo);
+    fl_rd32(0x3B8CC0u, &rep);
+    fl_rd32(0x53831Cu, &lock);
+    fl_rd32(0x3520DCu, &ckp);
+    __try { eng = *(volatile unsigned short *)(uintptr_t)SBA(0x3516DCu); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { eng = 0; }
+    if (!want) { /* freigeben: nur zuruecknehmen, was von hier stammt und noch steht */
+        if (g_fl_cam_ours && rep == 1u && fl_rd32(0x3B8CF4u, &cam) && cam == 1u) {
+            __try { *(volatile u32 *)(uintptr_t)SBA(0x3B8CF4u) = g_fl_cam0; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
+        if (g_fl_ours && eng == 1u) {
+            __try { *(volatile unsigned short *)(uintptr_t)SBA(0x3516DCu) = 0; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        }
+        if (g_fl_ours || g_fl_cam_ours) { HLOG_I("QUICKSHOT: Vollbild-Ansicht freigegeben (Frame %u)", g_frames); }
+        g_fl_ours = g_fl_cam_ours = 0;
+        g_fl_active = 0;
+        InterlockedExchange(&g_fl_state, 0);
+        return;
+    }
+    if (!g_fl_active) { /* neue Anforderung */
+        g_fl_active = 1;
+        g_fl_frame = 0;
+        if (g_cfg.vr_enable || scene != 0x2Cu || mloop != 1u) {
+            InterlockedExchange(&g_fl_state, -1);
+            HLOG_I("QUICKSHOT: Vollbild-Ansicht hier nicht moeglich (ausserhalb der Mission/VR, Frame %u)", g_frames);
+            return;
+        }
+        if (eng == 1u && ckp == 0u) {
+            g_fl_frame = g_frames; /* schon flach (Option/Spieler-Kniff/Replay-Kamera) */
+        } else if (rep == 1u && (lock != 1u || ckp != 0u)) { /* W290_rp7: vor dem VT-Start zeigt der Monitor nichts */
+            InterlockedExchange(&g_fl_state, -1);
+            HLOG_I("QUICKSHOT: Vollbild-Ansicht im Replay hier nicht moeglich (%s, Frame %u)",
+                   lock != 1u ? "VT noch nicht gestartet" : "Treffer-Cockpit", g_frames);
+            return;
+        } else if (rep == 1u) {
+            if (fl_rd32(0x3B8CF4u, &cam) && cam == 0u) {
+                /* Kamera 1 (Vollbild) und das Vollbild-Flag selbst: der Ansichtswaehler wertet die Kamera nur beim
+                 * Umschalten aus (W290_rp6: Kamera 1, Flag blieb 0) */
+                __try {
+                    *(volatile u32 *)(uintptr_t)SBA(0x3B8CF4u) = 1;
+                    *(volatile unsigned short *)(uintptr_t)SBA(0x3516DCu) = 1;
+                } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                g_fl_cam0 = cam;
+                g_fl_cam_ours = 1;
+                g_fl_ours = 1;
+                HLOG_I("QUICKSHOT: Replay-Kamera 0 -> 1 (Vollbild) fuer die Aufnahme (Frame %u)", g_frames);
+            }
+        } else if (demo == 1u || lock != 1u || ckp != 0u) {
+            InterlockedExchange(&g_fl_state, -1);
+            HLOG_I("QUICKSHOT: Vollbild-Ansicht hier nicht moeglich (%s, Frame %u)",
+                   demo == 1u ? "Titel-Demo" : lock != 1u ? "VT noch nicht gestartet" : "Treffer-Cockpit", g_frames);
+            return;
+        } else {
+            __try { *(volatile unsigned short *)(uintptr_t)SBA(0x3516DCu) = 1; }
+            __except (EXCEPTION_EXECUTE_HANDLER) { InterlockedExchange(&g_fl_state, -1); return; }
+            g_fl_ours = 1;
+            HLOG_I("QUICKSHOT: Vollbild-Flag 1 fuer die Aufnahme (Frame %u)", g_frames);
+        }
+        return;
+    }
+    if (g_cfg.photo_diag & 8) { /* DIAG(W290): Zustand je Bild waehrend der Anforderung */
+        u32 c2 = 0;
+        fl_rd32(0x3B8CF4u, &c2);
+        HLOG_I("QUICKSHOT diag: f=%u szene=0x%X mloop=%u rep=%u demo=%u lock=%u ckp=%u eng=%u kamera=%u", g_frames, scene, mloop,
+               rep, demo, lock, ckp, (unsigned)eng, c2);
+    }
+    if (g_fl_cam_ours && rep == 1u) { /* die Wiedergabe setzt ihre Kamera je Bild neu (wie W254 replay_camera) */
+        __try {
+            *(volatile u32 *)(uintptr_t)SBA(0x3B8CF4u) = 1;
+            *(volatile unsigned short *)(uintptr_t)SBA(0x3516DCu) = 1;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    }
+    if (g_fl_state != 0) { return; }
+    if (!g_fl_frame) {
+        if (eng == 1u && ckp == 0u) { g_fl_frame = g_frames; }
+        return;
+    }
+    if (g_frames >= g_fl_frame + 2u) { /* zwei Spielbilder flach gezeichnet (und aufgezeichnet) */
+        InterlockedExchange(&g_fl_state, 1);
+    }
+}
+
 u32 __stdcall hook_D3DDevice_Swap(u32 flags)
 {
     uint64_t now;
@@ -92,13 +316,17 @@ u32 __stdcall hook_D3DDevice_Swap(u32 flags)
     diag_state_tick(g_frames); /* DIAG(STATE): Missionszustand 1x/s (A11c, nur bei state_diag=1) */
     diag_startup_tick(g_frames); /* DIAG(STARTUP): Balken/Linie/Engine (W21-R2, nur bei startup_diag=1) */
     diag_combat_tick(g_frames); /* DIAG(COMBAT): Entity-HP/Schaden (W35, nur bei combat_diag=1) */
+    diag_cam_tick(g_frames); /* DIAG(CAMD): Kamera gegen Gelaende (W269, nur bei cam_diag>0) */
     diag_campaign_tick(g_frames); /* DIAG(CAMPAIGN): Missionsziel/Phase (W63, nur bei campaign_diag=1) */
     diag_gear_tick(g_frames); /* DIAG(GEAR): Gang-Kette+Position (W141, nur bei gear_diag=1) */
     watch_dr_tick(g_frames); /* WATCHDR (W41): ent:-Reload bei Tabellenwechsel (nur bei watch=...) */
     replay_steps_tick(); /* A4: zustandsgesteuerte Eingaben */
     sb_rauto_tick(); /* W254 REPLAY-LAUNCHER: Replay-Start (nur mit replay_autoplay) */
+    sb_mauto_tick(); /* W272 ALPHA-TEST: Teststart (nur mit mission_autostart) */
     sb_vexp_swap(); /* W255 VIDEO-EXPORT: Aufnahme/Ende (nur mit video_export) */
     ign_gate_tick(); /* W52 IGNFIX: Gate Bit 2 (nur bei ign_toggle_fix=1) */
+    cockpit_hide_tick(); /* W268 COCKPIT-HIDE: Vollbild-Flag (nur bei cockpit_hide=1) */
+    flat_capture_tick(); /* W290 QUICK-SHOT: Vollbild-Ansicht fuer eine Aufnahme (nur auf Anforderung) */
     /* DIAG(MEMSCAN): XBE-.data (0x279DC0-0x6ED17C, memory.tsv) alle N Frames
      * nach <out>/memscan/f_NNNNNN.bin -> scripts/memscan.py sucht Adressen,
      * die sich genau an Bildschirmwechseln aendern (Menuezustand fuer
@@ -519,6 +747,9 @@ u32 __stdcall hook_D3DDevice_SetTransform(u32 state, u32 pMat)
     }
     if (pMat) {
         const float *m = (const float *)(uintptr_t)pMat;
+        if (g_cfg.cam_diag > 0 && state == (g_cfg.xbox_transform ? XX_D3DTS_VIEW : XB_D3DTS_VIEW)) {
+            diag_cam_note_view(m); /* DIAG(CAMD,W269) */
+        }
         if (g_cfg.xbox_transform) {
             if (state == XX_D3DTS_VIEW) {
                 sb_render_set_view(m);
@@ -1062,6 +1293,19 @@ static u32 create_res2(u32 len)
     u32 *r, *d;
     if (!len) {
         len = 4;
+    }
+    if (loc_mem_active()) { /* W277: LoC liest [res+4]|0x80000000 -> Daten im gespiegelten Bereich */
+        u32 ld = loc_mem_alloc(len, 16, 1);
+        if (!ld) {
+            return 0;
+        }
+        r = (u32 *)calloc(2, sizeof(u32));
+        if (!r) {
+            return 0;
+        }
+        r[0] = 0;
+        r[1] = ld;
+        return (u32)(uintptr_t)r;
     }
     r = (u32 *)calloc(2, sizeof(u32));
     if (!r) {

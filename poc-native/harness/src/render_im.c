@@ -5,6 +5,7 @@
  * Backbuffer bleiben in d3d11_render.c. W68 SPLIT: 1:1 aus d3d11_render.c. */
 #include "render_int.h"
 #include "sb_profile.h" /* W229 SBA() */
+#include "loc_render.h" /* W285 LOC-RENDER */
 #include "render_fx_rem.h" /* W133 REM-FX */
 #include "sb_perfhud.h" /* W125 TICK-PERF */
 #include "sb_remaster.h" /* W103 REM-FRAME */
@@ -18,6 +19,11 @@
 #define IM_MAX_VERTS 65536
 unsigned g_im_draws, g_im_vdata, g_im_prim_hist[16];
 unsigned g_im_tris, g_im_rhw, g_im_3d;
+/* DIAG(CAMD,W269): Zaehler fuer diag_cam_tick (nur mit cam_diag > 0) */
+unsigned g_camd_fold_draws, g_camd_fold_verts;
+float g_camd_best_m[4][4];
+unsigned g_camd_best_n, g_camd_best_vp;
+
 static int g_im_col_slot;
 static int g_im_col_written; /* FIX(MONITORVIEW,W36): 1 = Draw rief SetVertexDataColor (sonst stale Slot-Inhalt) */
 unsigned g_im_texd, g_im_notex;
@@ -881,6 +887,7 @@ static void sb_im_submit_body(void);
  * Kappung) gegen im_fast_expand; c) Interp-Stichproben (Hash ueber die
  * expandierten Vertices gegen die Quell-Abbildung). Zeile IMCHK. */
 static unsigned g_ichk_draws, g_ichk_dec, g_ichk_exp, g_ichk_cnt, g_ichk_hash, g_ichk_slot;
+static unsigned g_ichk_ibd, g_ichk_ib; /* W264: Draws mit Indexpuffer-Muster / davon abweichend */
 static im_vertex_t g_ichk_a[IM_VB_MAX * 3], g_ichk_b[IM_VB_MAX];
 static void im_fast_check_decode(unsigned n)
 {
@@ -942,6 +949,19 @@ static void im_fast_check_expand(const im_vertex_t *src, unsigned prim, unsigned
         g_ichk_exp++;
         if (nlog < 8) { nlog++; HLOG_W("IMCHK exp f=%u prim=%u n=%u nout=%u", g_present_no, prim, n, nout); }
     }
+    if (sb_im_ib_first(prim) != 0xFFFFFFFFu) { /* W264: Indexpuffer-Muster (Index k = sb_im_exp_src(prim, IM_VB_MAX, k)) gegen die alte Liste */
+        unsigned k, bad = 0;
+        g_ichk_ibd++;
+        for (k = 0; k < nout; k++) {
+            unsigned s = sb_im_exp_src(prim, IM_VB_MAX, k);
+            if (s >= n || memcmp(&g_ichk_a[k], &src[s], sizeof src[s])) { bad++; }
+        }
+        if (bad) {
+            static unsigned nlog2;
+            g_ichk_ib++;
+            if (nlog2 < 8) { nlog2++; HLOG_W("IMCHK2 ib f=%u prim=%u n=%u nout=%u bad=%u", g_present_no, prim, n, nout, bad); }
+        }
+    }
     step = nout > 64u ? nout / 64u : 1u;
     for (i = 0; i < nout; i += step) {
         const unsigned *w = (const unsigned *)src[sb_im_exp_src(prim, n, i)].pos;
@@ -957,6 +977,7 @@ void im_fast_check_present(unsigned f)
     if (g_cfg.im_fast != 2 || (f % 300u) != 0u || !g_ichk_draws) { return; }
     HLOG_I("IMCHK f=%u draws=%u dec_diff=%u exp_diff=%u count_diff=%u hash_diff=%u uvslot2=%u",
            f, g_ichk_draws, g_ichk_dec, g_ichk_exp, g_ichk_cnt, g_ichk_hash, g_ichk_slot);
+    HLOG_I("IMCHK2 f=%u ib_draws=%u ib_diff=%u (W264 Indexpuffer-Muster gegen Liste)", f, g_ichk_ibd, g_ichk_ib);
 }
 
 /* PERF(IM-PERF,W99): die ersten nout Vertices der Primitiv-Expansion von src
@@ -998,6 +1019,67 @@ static void im_fast_expand(im_vertex_t *dst, const im_vertex_t *src, unsigned pr
         return;
     }
     for (; e < nout; e++) { dst[e] = src[sb_im_exp_src(prim, n, e)]; } /* Rest bei Kappung */
+}
+
+/* W264 DRAW-OPT2 (im_strip_ib=1): fester Indexpuffer mit dem Strip/Fan/Quad->
+ * Liste-Muster, vier Abschnitte zu IM_VB_MAX Indizes (16 Bit): Index k =
+ * sb_im_exp_src(prim, *, k) - fuer STRIP/FAN/POLYGON/QUADS/QUADSTRIP unabhaengig
+ * von n, groesster Wert 43 691. Ein Draw ohne Shading-Pfad laedt nur seine n
+ * Quell-Vertices (statt nout = ~3n expandierter) und zeichnet
+ * DrawIndexed(nout, Abschnitt, Basis): gleiche Dreiecke in gleicher Vertex-
+ * Reihenfolge wie die Liste, auch bei Kappung (Rest-Indizes wie im_fast_expand). */
+static ID3D11Buffer *g_im_ib;
+static int g_im_ib_st; /* 0 = noch nicht angelegt, 1 = da, -1 = nicht anlegbar (alter Pfad) */
+unsigned sb_im_ib_first(unsigned prim)
+{
+    switch (prim) {
+    case 6: return 0u;
+    case 7: case 10: return IM_VB_MAX;
+    case 8: return 2u * IM_VB_MAX;
+    case 9: return 3u * IM_VB_MAX;
+    default: return 0xFFFFFFFFu;
+    }
+}
+static int im_ib_ensure(void)
+{
+    static const unsigned char pr[4] = { 6, 7, 8, 9 };
+    D3D11_BUFFER_DESC bd;
+    D3D11_SUBRESOURCE_DATA sd;
+    unsigned short *d;
+    unsigned s, k, mx = 0;
+    if (g_im_ib_st) { return g_im_ib_st > 0; }
+    if (!g_dev) { return 0; }
+    g_im_ib_st = -1;
+    d = (unsigned short *)malloc((size_t)4u * IM_VB_MAX * sizeof *d);
+    if (!d) { HLOG_W("DRAWOPT2 im_strip_ib: kein Speicher -> alter Pfad"); return 0; }
+    for (s = 0; s < 4u; s++) {
+        for (k = 0; k < IM_VB_MAX; k++) {
+            unsigned v = sb_im_exp_src(pr[s], IM_VB_MAX, k);
+            if (v > 0xFFFFu) { free(d); HLOG_W("DRAWOPT2 im_strip_ib: Index %u > 16 Bit -> alter Pfad", v); return 0; }
+            if (v > mx) { mx = v; }
+            d[s * IM_VB_MAX + k] = (unsigned short)v;
+        }
+    }
+    memset(&bd, 0, sizeof bd);
+    bd.ByteWidth = 4u * IM_VB_MAX * (UINT)sizeof *d;
+    bd.Usage = D3D11_USAGE_IMMUTABLE;
+    bd.BindFlags = D3D11_BIND_INDEX_BUFFER;
+    memset(&sd, 0, sizeof sd);
+    sd.pSysMem = d;
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, &sd, &g_im_ib))) {
+        g_im_ib = NULL;
+        free(d);
+        HLOG_W("DRAWOPT2 im_strip_ib: Indexpuffer nicht anlegbar -> alter Pfad");
+        return 0;
+    }
+    free(d);
+    g_im_ib_st = 1;
+    HLOG_I("DRAWOPT2 im_strip_ib: Indexpuffer %u Indizes (R16, max %u) fuer STRIP/FAN/QUADS/QUADSTRIP", 4u * IM_VB_MAX, mx);
+    return 1;
+}
+void sb_im_ib_bind(ID3D11DeviceContext *c)
+{
+    ID3D11DeviceContext_IASetIndexBuffer(c, g_im_ib, DXGI_FORMAT_R16_UINT, 0);
 }
 
 /* DIAG(STARTSEQ-BARS,W98): sbar_probe=x1:y1:x2:y2 -> im Zensus-Frame nach
@@ -1049,6 +1131,7 @@ void sb_im_submit(void)
     long long q0;
     int z0 = g_ph_zone; /* DIAG(PERF-TICK,W168) */
     g_ph_zone = 1;
+    if (g_sba_loc) { g_loc_draws++; } /* W285 DIAG(LOC-RENDER): Draws je Bild (nur LoC) */
     if (!RQP_ON) { sb_im_submit_body(); mfx_end(); g_ph_zone = z0; return; }
     q0 = rq_qpc();
     sb_im_submit_body();
@@ -1076,6 +1159,7 @@ static void sb_im_submit_body(void)
     ID3D11Buffer *ip_vb = NULL;      /* FPS-INTERP (W69): Tick-VB statt IM-Ring */
     ID3D11ShaderResourceView *rq_srv0 = NULL; /* RENDER-QA (W77) */
     unsigned imcbd[17]; int cb_slot = -1; /* W253 DRAW-OPT im_cb_ring */
+    unsigned ibf = 0xFFFFFFFFu, nvb; /* W264 DRAW-OPT2: Indexpuffer-Abschnitt (0xFFFFFFFF = Liste auf der CPU), Vertices im VB */
     HRESULT hr;
     /* PERF(IM-PERF,W99): fast = VB-Draw kompakt in g_imf (Positionen dort,
      * Farbe/UV schon wie nach der Umwandlung unten); sonst g_im_buf-Slots. */
@@ -1201,8 +1285,24 @@ static void sb_im_submit_body(void)
         if (inrange) {
             unsigned ffmt = 0; int ftlin = 0;
             static unsigned nfix;
-            sb_tex_get(); /* Prefetch: Cache fuellen */
+            ID3D11ShaderResourceView *fsrv = sb_tex_get(); /* Prefetch: Cache fuellen */
             sb_tex_fmt(&ffmt, &ftlin);
+            if (g_cfg.film_tex_keep && (!ftlin || !fsrv) && sb_tex_hdr_linear(sb_tex_xptr())) {
+                /* W261 FILM-ALTTAB: Upload der Film-Textur gescheitert (Lock-Ersatz, lin-skip,
+                 * Drossel, Cache voll). Bisher: Cache ohne Linear-Eintrag -> 3D-Pfad, Pixel-
+                 * koordinaten als NDC -> weisse Flaeche (keine SRV) im rechten oberen Viertel
+                 * auf Schwarz (Tester-Befund nach Alt-Tab). Jetzt: Draw auslassen - der Film
+                 * loescht das Ziel nie, das letzte gute Bild bleibt stehen. */
+                static unsigned nkeep, nkeep_f;
+                nkeep++;
+                if (nkeep <= 4u || g_present_no - nkeep_f >= 600u) {
+                    nkeep_f = g_present_no;
+                    HLOG_W("FILM-TEX: Quad ohne Textur ausgelassen #%u xptr=0x%X f=%u (Cache linear=%d srv=%d Grund=%u)",
+                           nkeep, sb_tex_xptr(), g_present_no, ftlin, fsrv ? 1 : 0, sb_tex_why());
+                }
+                g_rq_active = 0;
+                return;
+            }
             if (ftlin) {
                 unsigned r;
                 rhw = 1;
@@ -1255,11 +1355,21 @@ static void sb_im_submit_body(void)
              * flackernde Linie war ein Zwischenbild-Fehler (interp_eyefix). */
             int eye_any = g_cfg.eye_clip_all ||
                           (flash_blend && flash_src == 2u && flash_dst == 2u);
-            for (i = 0; (eye_any || g_cfg.eyeclip_diag > 0) && i < n; i++) {
+            for (i = 0; (eye_any || g_cfg.eyeclip_diag > 0 || g_cfg.cam_diag > 0) && i < n; i++) {
                 const float *pp = IMPOS(i);
                 float cw = pp[0] * vsh_mat[3][0] + pp[1] * vsh_mat[3][1] +
                            pp[2] * vsh_mat[3][2] + pp[3] * vsh_mat[3][3];
                 if (cw <= 0.0f) { eye_clip = eye_any ? 1 : 2; break; }
+            }
+            if (g_cfg.cam_diag > 0 && n > g_camd_best_n) { /* DIAG(CAMD,W269): WVP des groessten P2-RT-Draws */
+                memcpy(g_camd_best_m, vsh_mat, sizeof g_camd_best_m);
+                g_camd_best_n = n;
+                g_camd_best_vp = ((unsigned)g_vp_game.w << 16) | (unsigned)g_vp_game.h;
+            }
+            if (eye_clip && g_cfg.cam_diag > 0) { /* DIAG(CAMD,W269): P2-RT-Draws mit Ecke w <= 0 */
+                g_camd_fold_draws++;
+                g_camd_fold_verts += n;
+                if (eye_clip == 2 && g_cfg.eyeclip_diag <= 0) { eye_clip = 0; }
             }
             if (eye_clip && g_cfg.eyeclip_diag > 0) { /* DIAG(W224) */
                 static int ecd_n;
@@ -1339,7 +1449,8 @@ static void sb_im_submit_body(void)
         float nL = -1.0f, nR = 1.0f, nT = 1.0f, nB = -1.0f;
         if (g_cfg.aspect_mode && !rtt_active()) {
             /* Feste 640x480-Referenz (RHW = Framebuffer-Pixel, s.o.). */
-            vw = 640.0f; vh = 480.0f;
+            vw = (float)g_game_fb_w; vh = (float)g_game_fb_h; /* W277: SB 640x480, LoC 720x480 */
+            if (g_sba_loc && loc_render_is_bbtex(sb_tex_xptr())) { vw *= 2.0f; } /* W285: LoC-Komposition im 1440er-Puffer */
             unsigned bx, by, bw, bh;
             sb_aspect_box(&bx, &by, &bw, &bh);
             nL = (float)bx / (float)g_bb_w * 2.0f - 1.0f;
@@ -1401,8 +1512,17 @@ static void sb_im_submit_body(void)
     }
     /* W191 UW-PERSP: Cockpit-Perspektive (nur BB, Cockpit-Ansicht; Standard
      * aus -> sb_cp_frame() = 0 ohne Speicherzugriff, MVP/Vertices unveraendert). */
-    if (!rtt_active() && sb_cp_frame()) {
-        sb_cp_draw(mvp, vsh_p2bb ? 1 : (rhw ? 2 : 0), rhw ? NULL : pb, pst, n, g_im_prim);
+    /* W264 DRAW-OPT2 im_strip_ib (Bit 0 = Draws ohne, Bit 1 = mit Shading-Pfad):
+     * Strip/Fan/Quad -> Quell-Vertices + Indexpuffer. Shading-Pfad: Strom 2 in
+     * Quell-Reihenfolge bzw. Roh-VS mit rq_raw.z = 5 (SV_VertexID = Index).
+     * Aus bei den Diagnosen, die je expandiertem Vertex im Tick-VB zaehlen. */
+    if (fast && (g_cfg.im_strip_ib & (g_rq_active ? 2 : 1)) && g_cfg.interp_eyediag <= 0 && g_cfg.interp_diag < 3 &&
+        g_cfg.interp_ddrel <= 0) {
+        ibf = sb_im_ib_first(g_im_prim);
+        if (ibf != 0xFFFFFFFFu && !im_ib_ensure()) { ibf = 0xFFFFFFFFu; }
+    }
+    if (!rtt_active() && sb_cp_frame()) { /* W264: indiziert liegen die Quell-Vertices 1:1 im Tick-VB (wie Liste) */
+        sb_cp_draw(mvp, vsh_p2bb ? 1 : (rhw ? 2 : 0), rhw ? NULL : pb, pst, n, ibf != 0xFFFFFFFFu ? 5u : g_im_prim);
     }
     if (g_cfg.shadow_diag) { extern float g_im_diag_mvp[16]; memcpy(g_im_diag_mvp, mvp, sizeof g_im_diag_mvp); } /* DIAG(SHADOWBUF,W127) */
     IMP_MARK(IMP_P1); /* DIAG(IM-PERF,W99): RHW-Heuristik, VSH-Emulation, MVP */
@@ -1587,6 +1707,7 @@ static void sb_im_submit_body(void)
         }
       }
     }
+    if (sb_rpf_skip(sb_tex_xptr(), ov, n)) { g_rq_active = 0; return; } /* W290: REPLAY-Schriftzug/Logo aus (nur mit Schalter) */
     IMP_MARK(IMP_P2); /* DIAG(IM-PERF,W99): UV-Slot, Umwandlung, C0, UV-Norm */
     /* Primitiv-Expansion (Xbox -> D3D11). Cull ist aus (Winding egal). */
     {
@@ -1673,9 +1794,15 @@ static void sb_im_submit_body(void)
         g_rq_active = 0;
         return;
     }
+    nvb = (ibf != 0xFFFFFFFFu) ? n : nout;
+    if (fast) { /* W264: Zaehler der E-Zeile */
+        if (sb_im_ib_first(g_im_prim) != 0xFFFFFFFFu) { g_dsc.cnt[DSC_N_STRIP]++; }
+        if (ibf != 0xFFFFFFFFu) { g_dsc.cnt[DSC_N_IDX]++; }
+        g_dsc.cnt[DSC_N_VBV] += nvb;
+    }
     if (g_rq_active) { /* RENDER-QA: Stream 2 */
         long long q0 = RQP_FULL ? rq_qpc() : 0;
-        rq_expand_upload(g_im_prim, n, nout);
+        rq_expand_upload(g_im_prim, n, nout, ibf != 0xFFFFFFFFu);
         if (RQP_FULL) { g_rqp_q[RQP_EXP] += rq_qpc() - q0; }
     }
     if (RQP_FULL) { g_rqp_draws++; g_rqp_vin += n; g_rqp_vout += nout; if (g_rq_active) { g_rqp_shaded++; } }
@@ -1687,13 +1814,14 @@ static void sb_im_submit_body(void)
     if (fast && g_cfg.im_fast == 2) { im_fast_check_expand(ov, g_im_prim, n, nout); } /* DIAG(IM-PERF,W99) */
     if (fast) { /* PERF(IM-PERF,W99): Expansion direkt in Tick-VB bzw. IM-Ring */
         im_vertex_t *dst = NULL;
-        if (g_ip_recording) { dst = sb_interp_vb_begin(nout, &ip_vb, &vb_start); }
+        if (g_ip_recording) { dst = sb_interp_vb_begin(nvb, &ip_vb, &vb_start); }
         if (dst) {
-            im_fast_expand(dst, ov, g_im_prim, n, nout);
-            sb_interp_vb_end(nout);
+            if (ibf != 0xFFFFFFFFu) { memcpy(dst, ov, (size_t)n * sizeof *dst); } /* W264: Quell-Vertices */
+            else { im_fast_expand(dst, ov, g_im_prim, n, nout); }
+            sb_interp_vb_end(nvb);
         } else {
             ip_vb = NULL;
-            if (g_cfg.im_ring && g_im_vb_pos + nout <= IM_VB_MAX) {
+            if (g_cfg.im_ring && g_im_vb_pos + nvb <= IM_VB_MAX) {
                 hr = ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_im_vb, 0,
                                              g_im_vb_pos ? D3D11_MAP_WRITE_NO_OVERWRITE
                                                          : D3D11_MAP_WRITE_DISCARD,
@@ -1708,9 +1836,10 @@ static void sb_im_submit_body(void)
                 return;
             }
             vb_start = g_im_vb_pos;
-            im_fast_expand((im_vertex_t *)map.pData + vb_start, ov, g_im_prim, n, nout);
+            if (ibf != 0xFFFFFFFFu) { memcpy((im_vertex_t *)map.pData + vb_start, ov, (size_t)n * sizeof *ov); } /* W264 */
+            else { im_fast_expand((im_vertex_t *)map.pData + vb_start, ov, g_im_prim, n, nout); }
             ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_im_vb, 0);
-            g_im_vb_pos = g_cfg.im_ring ? vb_start + nout : 0;
+            g_im_vb_pos = g_cfg.im_ring ? vb_start + nvb : 0;
         }
     } else
     if (g_ip_recording && sb_interp_vb_write(out, nout, &ip_vb, &vb_start)) {
@@ -2111,6 +2240,7 @@ static void sb_im_submit_body(void)
         g_ip_sigparts[1] = sb_tex_xptr();
         g_ip_sigparts[2] = g_im_pshader;
         if (fast) { /* PERF(IM-PERF,W99): Stichproben aus den Quell-Vertices */
+            g_ip_ib1 = (ibf != 0xFFFFFFFFu) ? ibf + 1u : 0u; /* W264 DRAW-OPT2 */
             sb_interp_rec_draw_src(ov, g_im_prim, n, nout, topo, mvp, ip_tex, (!rhw || vsh_em == 2) ? 1 : 0,
                                    (g_im_shader * 16777619u) ^ (sb_tex_xptr() * 2654435761u) ^
                                        (g_im_pshader * 40503u) ^ g_im_prim,
@@ -2129,7 +2259,11 @@ static void sb_im_submit_body(void)
     if (g_cfg.bloom_diag) { bloom_diag_pre(out, nout, n, rhw, g_im_prim, rq_srv0); } /* DIAG(SHADE-BLOOM,W112) */
     { extern int g_visq_on; if (g_visq_on) { extern void sb_visq_draw_note(void); sb_visq_draw_note(); } } /* FIX(SHADE-M2,W117) vis_query: Draws im Sichtbarkeitstest */
     if (fxr_cls) { fxr_bind(); } else if (fxr_on) { fxr_note_other(); } /* W133 REM-FX: Tiefen-Kopie, Effekt-PS */
-    if (g_rq_active) { rq_draw(ip_vb ? ip_vb : g_im_vb, nout, vb_start); } /* RENDER-QA */
+    if (g_rq_active) { rq_draw(ip_vb ? ip_vb : g_im_vb, nout, vb_start, ibf); } /* RENDER-QA; W264 ibf */
+    else if (ibf != 0xFFFFFFFFu) { /* W264 DRAW-OPT2: Strip/Fan/Quad ueber festen Indexpuffer */
+        sb_im_ib_bind(g_ctx);
+        WD_CALL("draw_im", g_ctx, ID3D11DeviceContext_DrawIndexed(g_ctx, nout, ibf, (INT)vb_start));
+    }
     else { WD_CALL("draw_im", g_ctx, ID3D11DeviceContext_Draw(g_ctx, nout, vb_start)); }
     if (fxr_cls) { fxr_after(fast ? ov : out, fast ? n : nout); } /* W133 REM-FX: Glut/Licht, Energie */
     if (g_cfg.bloom_diag) { bloom_diag_post(); } /* DIAG(SHADE-BLOOM,W112) */

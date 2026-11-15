@@ -32,7 +32,9 @@ while the game window has focus.
 | Game menu (Continue, Settings, Feedback, Quit; pauses the game) | ESC |
 | Pause / continue | Pause key (assignable: Controls page, "pause") |
 | Feedback with screenshot / with 5-second clip | F11 / F9 |
-| Photo mode (open / take photo) | F12 |
+| Screenshot (quick, uses the photo-mode settings, no menu) | F12 |
+| Photo mode (menu; in photo mode F12 takes the photo) | Shift+F12 |
+| Original look ↔ your settings (compare live) | Shift + F8 (assignable: Controls page, "orig_view") |
 | Performance overlay | F2 (Shift + F2 moves it) |
 | Window / fullscreen | Alt + Enter |
 | VR: recenter view | F8 |
@@ -41,6 +43,14 @@ Mouse aiming is **Absolute** by default (the crosshair follows the
 mouse); **Sensitivity** (1–16) is on the **Controls** page next to the
 mode. EJECT has no key in the Standard layout. Own layouts can be edited
 with **Assign …** on the **Controls** page.
+
+The comparison key (**Original look ↔ your settings**) is listed with the
+client keys in **Assign …**. To learn a combination, hold Shift, Ctrl or
+Alt and press the key; releasing Shift, Ctrl or Alt on its own assigns
+just that key. A gamepad, joystick or original-controller button also
+works. **Clear all …** keeps it, like the other client keys. Layouts saved
+before this change keep working: without their own entry, Shift + F8 (or
+`orig_key` in `user.cfg`) applies.
 
 ## Gamepad (XInput)
 

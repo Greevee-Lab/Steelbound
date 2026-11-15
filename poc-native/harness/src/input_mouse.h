@@ -37,6 +37,12 @@
 #define IMOUSE_MSG_TEST_FOCUS (0x8000 + 0x7A) /* WM_APP + 0x7A */
 #define IMOUSE_MSG_TEST_STATE (0x8000 + 0x7C) /* W196: logical capture/cursor evidence */
 #define IMOUSE_MSG_TEST_MOVE  (0x8000 + 0x7B) /* WM_APP + 0x7B */
+/* W271 STICK-RELATIVE (nur input_test_hook=1): simuliertes Gamepad fuer
+ * Beleglaeufe ohne Geraet. wParam = LX | (LY << 16) (je int16), lParam =
+ * Tasten (IMAP_PAD_*) | (1 << 16) = Pad an; lParam = 0 = Pad wieder aus. */
+#define IMOUSE_MSG_TEST_PAD   (0x8000 + 0x7E) /* WM_APP + 0x7E */
+/* W271: 1 = simuliertes Pad aktiv (*lx/*ly/*buttons gueltig), sonst 0. */
+int imouse_test_pad(short *lx, short *ly, unsigned short *buttons);
 
 /* Pro XInput-Poll (Spiel-Thread): installiert bei Bedarf die Fenster-
  * Eingabe (einmal, sobald das Fenster existiert; input_source=1 oder

@@ -20,6 +20,7 @@
 #include "diag_campaign.h"
 #include "diag_input.h"
 #include "watch_dr.h" /* W41 WATCHDR */
+#include "loc_boot.h" /* W277 loc_set_last_error */
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>

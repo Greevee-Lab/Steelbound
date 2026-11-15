@@ -86,6 +86,15 @@ add_executable(sb_launcher WIN32
   src/launcher_packtest.c
   src/launcher_rules.c
   src/launcher_update.c
+  src/launcher_alpha.c
+  src/launcher_alpha.h
+  src/launcher_alpha.inc
+  src/launcher_diag.c
+  src/launcher_diag.h
+  src/launcher_diag.inc
+  src/launcher_games.c
+  src/launcher_orig.c
+  src/launcher_layout.c
   ../harness/src/input_sbc_usb.c
   ../harness/src/input_joy.c
   ../harness/src/sbc_fixture.c
@@ -97,6 +106,7 @@ add_executable(sb_launcher WIN32
   ../harness/src/sb_gamever.c
   ../harness/src/sb_userdata.c
   ../harness/src/sb_savecheck.c
+  ../harness/src/sb_diagcore.c
   src/hlog_stub.c
 )
 target_include_directories(sb_launcher PRIVATE src ../harness/src ${CMAKE_CURRENT_BINARY_DIR})

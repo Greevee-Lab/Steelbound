@@ -50,8 +50,8 @@ select it under **Advanced** → **Game files (advanced)**.
 ## First launch
 
 1. On the **Play** page, press **LAUNCH GAME**.
-2. The recommended preset is **Original (HD) – 120 FPS** (the default):
-   the unchanged Xbox look, sharp and smooth.
+2. The recommended preset is **Original** (the default): the unchanged
+   Xbox look, smooth at your monitor's refresh rate.
 3. Start the mech as described in [Controls](CONTROLS.md): hatch, ignition,
    the five toggle switches, then START.
 
@@ -78,7 +78,7 @@ applies immediately.
 - **Judder at 120 FPS.** On a 60 Hz display without VRR, 120 FPS may
   judder; use **Frame rate** 60 on the **Display** page instead. The
   remastered presets (**Remastered subtle**, **Remastered strong**) may
-  reduce FPS. On an older or weaker PC use **Original (HD) –
+  reduce FPS. On an older or weaker PC use **Original –
   Performance** (60 FPS, native world resolution). **Render
   scaling** on **Auto** lowers the resolution briefly under load.
   Press **F2** in game to check the frame rate (see

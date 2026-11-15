@@ -87,6 +87,7 @@ typedef struct {
     int bind_joydemo;          /* W226: --bind-shot=joy (Beispiel-HOTAS) */
     int bind_learn;            /* W228: --bind-learn (Lernmodus im Bild) */
     int bind_wheeldemo;        /* W260: --bind-shot=wheel (Mausrad-Beispiel) */
+    int bind_stickdemo;        /* W271: --bind-shot=stick (Stick wie eine Maus) */
     int bind_sel;              /* W159: shot=3 Element-Index vorwaehlen + in
                                 * Sicht scrollen (-1 = Standard: erstes) */
     char state[32];            /* W171: --ui-shot --state NAME (Regelzustand,
@@ -94,13 +95,20 @@ typedef struct {
     char replay[40];           /* W254: --gui-start-dry --replay ID (Replay-Startweg) */
     int replay_cam;            /* W254: --replay-camera N (-1 = wie aufgezeichnet) */
     char video[16];            /* W255: --video 1080p30|1440p60|2160p30 (Export-Startweg, nur mit --replay) */
+    int alpha_on;              /* W272: --gui-start-dry --alpha-mission N (Teststart-Weg) */
+    int alpha_mission, alpha_vt, alpha_diff, alpha_skip; /* W272: Wahl wie auf der Seite Alpha Test */
+    char layout[4];            /* W281: --layout 0|a|b (leer = launcher_ui.cfg) */
+    char ui_size[12];          /* W281: --ui-size compact|normal|large */
+    int lay_work_w, lay_work_h; /* W281: --work WxH (Einpassen testen, Pixel) */
 } gui_opts_t;
 
 int gui_main(const char *client_override, const gui_opts_t *o);
-/* W171 LAUNCHER-P2P3: Seiten (7) fuer CLI/Tests. gui_page_from_name kennt
- * die neuen Namen (play|display|graphics|packs|controls|audio|advanced),
+/* W281 LAUNCHER-SIZE: Layout-Vorgabe aus der CLI (auch fuer --selftest). */
+void gui_layout_override(const char *layout, const char *size);
+/* W171 LAUNCHER-P2P3: Seiten (8, W272: + alpha) fuer CLI/Tests. gui_page_from_name kennt
+ * die neuen Namen (play|display|graphics|packs|controls|audio|advanced|alpha),
  * die alten --ui-shot-Namen als Aliase (start, grafik, remaster, ton,
- * steuerung, profile, pfade) und Ziffern 0..6. -1 = unbekannt. */
+ * steuerung, profile, pfade) und Ziffern 0..7. -1 = unbekannt. */
 int gui_page_count(void);
 const char *gui_page_key(int p);
 int gui_page_from_name(const char *v);
@@ -112,6 +120,17 @@ int gui_state_known(const char *name);
 void gui_selftest(const char *client_override, int *pass, int *fail);
 /* W148 PACK-LAUNCHER: Selbsttest Packs-Seite + Render-Skalierung (launcher_packtest.c). */
 void packs_selftest(int *pass, int *fail);
+/* W272 ALPHA-TEST: Selbsttest der Seite "Alpha Test" (launcher_alpha.inc). */
+void alpha_gui_selftest(const char *client_override, int *pass, int *fail);
+/* W279 DIAG-CRASH (launcher_diag.inc) */
+void dg_gui_selftest(const char *client_override, int *pass, int *fail);
+int gui_diag_package_cli(const char *client_override);
+/* W282 ISSUE6: Faelle zu GitHub-Issue #6 (SBC-Kurznamen, ISO-Fehler/Ordner,
+ * Layoutname, leeres Layout, Mehrgeraete-Achsen) - Ende von launcher_gui.c. */
+void w282_gui_selftest(const char *client_override, int *pass, int *fail);
+/* W283 ORIG-KEY-BIND: Vergleichstaste im Belegungsdialog (Ende von launcher_gui.c). */
+void w283_gui_selftest(const char *client_override, int *pass, int *fail);
+void w290_gui_selftest(const char *client_override, int *pass, int *fail); /* W290 QUICK-SHOT */
 
 #ifdef __cplusplus
 }

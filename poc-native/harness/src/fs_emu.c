@@ -327,6 +327,82 @@ void fs_emu_prefill_xapi(void)
     }
 }
 
+/* Eine Stelle nach kind patchen (gemeinsam fuer feste SB-Stellen und den
+ * W275-Musterscan). */
+static void fs_patch_one(u8 *p, u8 elen, u8 kind)
+{
+    u32 cell = 0;
+    switch (kind) {
+    case 0: { /* MOV EAX,prcb-imm32 + NOP (Adresse, nicht Inhalt!) */
+        u32 prcb = (u32)(uintptr_t)g_fake_prcb;
+        p[0] = 0xB8;
+        memcpy(p + 1, &prcb, 4);
+        p[5] = 0x90;
+        return;
+    }
+    case 1: /* XOR EAX,EAX + NOPs */
+        p[0] = 0x31;
+        p[1] = 0xC0;
+        memset(p + 2, 0x90, elen - 2);
+        return;
+    case 2:
+        cell = (u32)(uintptr_t)(g_pool + POOL_OFF_C28);
+        break;
+    case 3:
+        cell = (u32)(uintptr_t)(g_pool + POOL_OFF_C4C);
+        break;
+    default:
+        cell = (u32)(uintptr_t)(g_pool + POOL_OFF_C4D);
+        break;
+    }
+    p[0] = 0xFF; /* CALL [cell] + NOPs */
+    p[1] = 0x15;
+    memcpy(p + 2, &cell, 4);
+    memset(p + 6, 0x90, elen - 6);
+}
+
+/* W275 LOC-BOOT: dieselben sechs FS-Befehlsformen per exaktem Bytemuster in
+ * [lo, hi) suchen und wie die festen SB-Stellen patchen (fuer Spiele ohne
+ * Stellentabelle, z. B. Line of Contact). SEH (FS:[0]) bleibt nativ.
+ * Rueckgabe: Zahl gepatchter Stellen. Wird fuer SB nie aufgerufen. */
+unsigned fs_emu_patch_scan(u32 lo, u32 hi)
+{
+    static const struct { u8 pat[8]; u8 len; u8 kind; const char *name; } k_pat[] = {
+        { FS_MOV_EAX_20, 6, 0, "mov eax,fs:[20]" },
+        { FS_MOVZX_24, 8, 1, "movzx eax,fs:[24]" },
+        { FS_MOV_EAX_28, 6, 2, "mov eax,fs:[28]" },
+        { FS_MOV_ECX_04, 7, 3, "mov ecx,fs:[4]" },
+        { FS_MOV_EDI_04, 7, 4, "mov edi,fs:[4]" },
+        { FS_MOV_EAX_58, 6, 1, "mov eax,fs:[58]" },
+    };
+    unsigned cnt[6] = { 0 }, total = 0, k;
+    u32 va;
+    if (!g_pool) {
+        HLOG_E("FS: scan ohne init!");
+        ExitProcess(7);
+    }
+    for (va = lo; va + 8u <= hi; va++) {
+        u8 *p = (u8 *)(uintptr_t)va;
+        if (p[0] != 0x64) {
+            continue;
+        }
+        for (k = 0; k < 6; k++) {
+            if (memcmp(p, k_pat[k].pat, k_pat[k].len) == 0) {
+                fs_patch_one(p, k_pat[k].len, k_pat[k].kind);
+                HLOG_T("FS: scan @0x%X %s", va, k_pat[k].name);
+                cnt[k]++;
+                total++;
+                va += k_pat[k].len - 1u;
+                break;
+            }
+        }
+    }
+    FlushInstructionCache(GetCurrentProcess(), NULL, 0);
+    HLOG_I("FS: Musterscan 0x%X-0x%X: %u Stellen (fs:20 %u, fs:24 %u, fs:28 %u, fs:4/ecx %u, fs:4/edi %u, fs:58 %u)",
+           lo, hi, total, cnt[0], cnt[1], cnt[2], cnt[3], cnt[4], cnt[5]);
+    return total;
+}
+
 void fs_emu_patch_all(void)
 {
     size_t i, n;

@@ -26,8 +26,14 @@ typedef struct {
     int sbc_mouse_off;      /* W128: 1 = Maus-Achsen aus, solange der Controller aktiv ist */
     int aim_assist;         /* W236: Zielhilfe 0 = Original, 1 = Fadenkreuz am Rand dreht die Sicht, 2 = Waffenarm fest (Altwert aim_turn=1 -> 1) */
     int auto_gear;          /* W218: 1 = automatischer Gangwechsel (vereinfachte Steuerung) */
+    int cockpit_hide;       /* W268 COCKPIT-HIDE: 1 = Cockpit in der Mission ausblenden ([render] cockpit_hide, Standard 0) */
+    int fx_wireframe;       /* W278 ORIG-FLAG: Spass-Effekte (W240, nur ESC-Menue); der Launcher kennt sie fuer Hinweis/Zuruecksetzen */
+    int fx_vaporwave;
+    int stick_aim;          /* W271: Stick auf dem Zielhebel 0 = Position (Original), 1 = relativ ("wie eine Maus") */
+    int stick_aim_sens;     /* W271: Empfindlichkeit relativer Stick 1..16 (Standard 4) */
     int game_tick;          /* W234 PAL50: Spieltakt 30 (Standard) oder 25 (wie EU-Konsole am 50-Hz-TV) */
-    int interp_fps;         /* W78: Zwischenbilder 0/60/120 */
+    int interp_fps;         /* W78: Zwischenbilder 0/60/120 (W223: -1 = Monitor auto) */
+    int gfx_preset_rev;     /* W296 PRESET-ORIG: [render] gfx_preset_rev der geladenen Datei (0 = alt); Speichern schreibt immer SB_GP_REV */
     int window_mode;        /* W81: 0 = Fenster, 1 = randloses Vollbild, 2 = exklusives Vollbild */
     int fs_hz;              /* W81: exklusiv: Bildwiederholrate (0 = Desktop) */
     int mouse_mode;         /* W87: 1 = absolut (Fadenkreuz folgt der Maus), 0 = relativ */
@@ -83,8 +89,18 @@ typedef struct {
     char photo_dir[400];      /* Fotoordner (UTF-8 intern, ANSI in der Datei); leer = Standard (<Nutzerdaten>\Screenshots) */
     int photo_scale;          /* Standard-Aufnahmeaufloesung 1/2/4/8 x Fenster */
     int photo_jpg;            /* 0 = PNG, 1 = JPG */
-    int photo_aspect;         /* Bildformat ohne Cockpit: 0 Bildschirm (Ausschnitt), 1 Bildschirm (weit), 2 Kamera (wie Monitor) */
+    int photo_aspect;         /* Bildformat nur Aussenwelt: 0 Ausschnitt (nur cfg), 1 breit (experimentell), 2 4:3 wie Monitor (Standard, W290) */
+    /* W290 QUICK-SHOT: eine Aufnahme-Konfiguration fuer Fotomodus und Schnell-Screenshot */
+    int photo_view;           /* 0 wie im Spiel, 1 ohne Cockpit (Vollbild-Ansicht), 2 nur Aussenwelt */
+    int photo_size;           /* 1/2/4/8 = x Fenster, -4 = 4K (Standard), -8 = 8K; alte cfg ohne photo_size: photo_scale > 1 */
+    int photo_hud;            /* [photo] photo_hud: 1 = HUD im Foto, 0 = HUD des Hauptmonitors weglassen */
+    int replay_label;         /* [render] replay_label: 1 = REPLAY-Schriftzug der Wiedergabe zeigen (Original) */
+    int replay_logo;          /* [render] replay_logo: 1 = Spiel-Logo der Wiedergabe zeigen (Original) */
+    int watermark_media;      /* [overlay] watermark_media: 1 = Wasserzeichen auch im Video-Export */
 } launcher_settings_t;
+
+/* W290: wirksame Aufnahmegroesse (photo_size geprueft, sonst 4K) */
+int lcfg_photo_size_eff(const launcher_settings_t *s);
 
 /* W131 SHADER-OPT2: Shader-Keys (Index in shx[]) */
 enum {
@@ -105,6 +121,7 @@ const char *lcfg_fx_key(int i);
  * wie im Client/ESC-Menue). Nicht dabei: hud_label_avoid (eigene Option
  * Grafik > HUD), Ausgabeformat, Cockpit-Monitor, Texturdetail.
  * W207: Bildrate, Welt-Aufloesung/Dynamik und Hz-Anpassung gehoeren dazu.
+ * W266: Breitbild-Raender (edge_mode, edge_fade_width/-strength) ebenfalls.
  * Abgeleitet (kein eigener Schalter): remaster = hd_textures, fx_enhanced =
  * irgendein Effekt > 0, ultrawide/postfx = 0 (Platzhalter). */
 enum { LGP_ORIGINAL = 0, LGP_SUBTLE = 1, LGP_STRONG = 2, LGP_PERFORMANCE = 3, LGP_CLEAR = 4, LGP_CUSTOM = 5 };
@@ -119,7 +136,11 @@ enum { LGP_ORIGINAL = 0, LGP_SUBTLE = 1, LGP_STRONG = 2, LGP_PERFORMANCE = 3, LG
 #define LGK_DYN (LGK_HD + 3)
 #define LGK_MATCH (LGK_HD + 4)
 #define LGK_MFX (LGK_HD + 5) /* W252: monitor_fx */
-#define LGK_N (LGK_HD + 6)
+/* W266 PRESET-EDGE: Breitbild-Raender (Seite Anzeige) gehoeren zum Preset */
+#define LGK_EDGE (LGK_HD + 6)  /* edge_mode */
+#define LGK_EDGEW (LGK_HD + 7) /* edge_fade_width */
+#define LGK_EDGES (LGK_HD + 8) /* edge_fade_strength */
+#define LGK_N (LGK_HD + 9)
 typedef unsigned long long lgp_mask_t; /* Bit k = Schluessel k */
 const char *lcfg_gfx_key(int k);              /* cfg-Name ("" = keiner) */
 int lcfg_gfx_owned(int k);                    /* 1 = gehoert zum Preset */
@@ -143,6 +164,11 @@ void lcfg_gfx_normalize(launcher_settings_t *s);
 /* Alte Dateien: remaster=1 + fx_enhanced=1 ohne fx-Werte bedeutete im
  * Client "Effekte dezent" (render_fx_rem.c fx_cfg_once) -> explizit. */
 void lcfg_gfx_migrate(launcher_settings_t *s);
+/* W296 PRESET-ORIG: alte Datei (gfx_preset_rev < SB_GP_REV) mit dem bisherigen
+ * Original (alles Original, interp_fps=120, fs_interp_match=1) -> interp_fps
+ * auto; jede andere Rate bleibt. Setzt danach gfx_preset_rev = SB_GP_REV.
+ * 1 = umgestellt. */
+int lcfg_gfx_migrate_fps(launcher_settings_t *s);
 /* Effekt-Stufe allein (0..2, LGP_CUSTOM = eigene Werte), gesperrte zaehlen nicht. */
 int lcfg_fx_level(const launcher_settings_t *s, lgp_mask_t lock);
 void lcfg_fx_apply_level(launcher_settings_t *s, int level);

@@ -787,6 +787,9 @@ void sb_phud_tick_end(void)
                    (double)t->submit, (double)t->vbloop, (double)t->cap,
                    (double)t->interp, (double)t->tex, (double)t->render, (double)t->game,
                    dc[DSC_N_FWD], dc[DSC_N_SKIP], dc[DSC_N_MAP], dc[DSC_N_DRAW], dc[DSC_N_CBMAP], dc[DSC_N_CBREUSE]);
+            /* W264 DRAW-OPT2: eigene Zeile (D bleibt unveraendert): indizierte Draws, Strip/Fan/Quad-Draws
+             * des schnellen Wegs, dort hochgeladene Vertices */
+            pt_add(now, "E,%u,%u,%u,%u\n", g_present_no, dc[DSC_N_IDX], dc[DSC_N_STRIP], dc[DSC_N_VBV]);
         }
     }
     ph_pres_direct = 0;

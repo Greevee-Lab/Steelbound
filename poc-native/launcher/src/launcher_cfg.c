@@ -40,19 +40,29 @@ void lcfg_defaults(launcher_settings_t *s)
     s->sbc_mouse_off = 1;       /* W128: Maus-Achsen aus bei aktivem Controller */
     s->aim_assist = 0;          /* W236 AIM-ASSIST: Standard Original */
     s->auto_gear = 0;
+    s->cockpit_hide = 0; /* W268 */
+    s->stick_aim = 0;           /* W271 STICK-RELATIVE: Standard Position (Original) */
+    s->stick_aim_sens = 4;
     s->game_tick = 30;          /* W234 PAL50: Standard 30 Ticks/s */
     s->save_lock = 0;           /* W190 SAVE-LOCK: Original-Verhalten */
     s->photo_dir[0] = '\0';     /* W195 PHOTO-MODE: Standardordner */
     s->photo_scale = 1;
     s->photo_jpg = 0;
-    s->photo_aspect = 1; /* W195: Bildschirm (weit) */
-    s->interp_fps = 120;        /* W78: Spieler-Standard wie Client (hcfg) */
+    s->photo_aspect = 2; /* W290: 4:3 wie Monitor (W195: 1 = weit) */
+    s->photo_view = 0;   /* W290 QUICK-SHOT: wie im Spiel */
+    s->photo_size = -4;  /* W290: 4K (alte cfg mit photo_scale > 1 ohne photo_size: dieser Faktor) */
+    s->photo_hud = 1;    /* W290: HUD im Foto */
+    s->replay_label = 1; /* W290: Original */
+    s->replay_logo = 1;
+    s->watermark_media = 1;
+    s->interp_fps = SB_FPS_AUTO; /* W296 PRESET-ORIG: Standard = Original = Monitor (auto); vorher 120 (W78) */
+    s->gfx_preset_rev = SB_GP_REV; /* W296: neuer Stand; Laden der Nutzer-cfg setzt vorher 0 (app_load_effective, Profile) */
     s->window_mode = 0;         /* W81: Fenster (Client-Standard) */
     s->fs_hz = 0;               /* W81: Desktop-Rate */
     s->mouse_mode = 1;          /* W87: Spieler-Standard absolut */
     s->mouse_sens = 4;          /* W87: wie Client-Standard (hcfg) */
-    s->edge_mode = 2;           /* Nutzer 5.11.: Abdunklung als Spieler-Standard (Test-cfg bleibt 0) */
-    s->edge_fade_width = 8;    /* Nutzer 14.11.: 8 % (vorher 10 %, 5.11.) */
+    s->edge_mode = 1;           /* W278 ORIG-FLAG (Nutzer 15.11.): 4:3 mit schwarzen Balken = Original (vorher 2 = Abdunklung, 5.11.); Test-cfg bleibt 0 */
+    s->edge_fade_width = 8;    /* Nutzer 14.11.: 8 % (vorher 10 %, 5.11.); gilt, sobald jemand Breitbild (Abdunklung) waehlt */
     s->edge_fade_strength = 100;
     s->cockpit_persp = 0;       /* W191 UW-PERSP: Original */
     s->cockpit_panini = 0;      /* W191: Panini aus */
@@ -168,6 +178,9 @@ const char *lcfg_gfx_key(int k)
     if (k == LGK_DYN) { return "rt_scale_dyn"; }
     if (k == LGK_MATCH) { return "fs_interp_match"; }
     if (k == LGK_MFX) { return "monitor_fx"; } /* W252 */
+    if (k == LGK_EDGE) { return "edge_mode"; } /* W266 */
+    if (k == LGK_EDGEW) { return "edge_fade_width"; }
+    if (k == LGK_EDGES) { return "edge_fade_strength"; }
     return k == LGK_HD ? "hd_textures" : "";
 }
 
@@ -200,6 +213,9 @@ int lcfg_gfx_value(const launcher_settings_t *s, int k)
     if (k == LGK_DYN) { return s->rt_scale_dyn; }
     if (k == LGK_MATCH) { return s->fs_interp_match; }
     if (k == LGK_MFX) { return s->monitor_fx; } /* W252 */
+    if (k == LGK_EDGE) { return s->edge_mode; } /* W266 */
+    if (k == LGK_EDGEW) { return s->edge_fade_width; }
+    if (k == LGK_EDGES) { return s->edge_fade_strength; }
     if (k == LGK_HD) { return (s->remaster && s->hd_textures) ? 1 : 0; }
     return 0;
 }
@@ -288,10 +304,11 @@ void lcfg_gfx_apply(launcher_settings_t *s, int preset)
         return; /* Benutzerdefiniert: Einzelwerte bleiben */
     }
     for (k = 0; k < LGK_N; k++) {
-        int v = lcfg_gfx_preset_value(preset, k);
-        if (v < 0) {
+        int v;
+        if (gfx_row(k) < 0) { /* W296: nicht im Preset (-1 ist jetzt ein Wert: interp_fps auto) */
             continue;
         }
+        v = lcfg_gfx_preset_value(preset, k);
         if (k < LSHX_N) {
             s->shx[k] = v;
         } else if (k < LGK_FX0 + LFX_N) {
@@ -301,6 +318,9 @@ void lcfg_gfx_apply(launcher_settings_t *s, int preset)
         } else if (k == LGK_DYN) { s->rt_scale_dyn = v;
         } else if (k == LGK_MATCH) { s->fs_interp_match = v;
         } else if (k == LGK_MFX) { s->monitor_fx = v; /* W252 */
+        } else if (k == LGK_EDGE) { s->edge_mode = v; /* W266 */
+        } else if (k == LGK_EDGEW) { s->edge_fade_width = v;
+        } else if (k == LGK_EDGES) { s->edge_fade_strength = v;
         } else {
             s->remaster = s->hd_textures = v;
         }
@@ -319,6 +339,23 @@ void lcfg_gfx_migrate(launcher_settings_t *s)
     if (s->remaster && s->fx_enhanced && !any) {
         lcfg_fx_apply_level(s, LGP_SUBTLE);
     }
+}
+
+int lcfg_gfx_migrate_fps(launcher_settings_t *s)
+{
+    int done = 0;
+    if (s->gfx_preset_rev < SB_GP_REV && s->interp_fps == SB_GP_LEGACY_ORIG_FPS && s->fs_interp_match == 1) {
+        /* Erkennung ohne Effect-Pack-Sperre: gespeicherte Werte muessen selbst
+         * Original sein (ein Pack aendert sie nie, er gilt nur im Spiel). */
+        launcher_settings_t t = *s;
+        t.interp_fps = SB_FPS_AUTO;
+        if (lcfg_gfx_diff(&t, LGP_ORIGINAL, 0, NULL) == 0) {
+            s->interp_fps = SB_FPS_AUTO;
+            done = 1;
+        }
+    }
+    s->gfx_preset_rev = SB_GP_REV;
+    return done;
 }
 
 int lcfg_fx_level(const launcher_settings_t *s, lgp_mask_t lock)
@@ -391,6 +428,19 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         if (atoi(v)) s->aim_assist = 1;
     } else if (strcmp(k, "auto_gear") == 0) { /* W218 */
         s->auto_gear = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "cockpit_hide") == 0) { /* W268 */
+        s->cockpit_hide = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "fx_wireframe") == 0) { /* W278 */
+        s->fx_wireframe = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "fx_vaporwave") == 0) { /* W278 */
+        s->fx_vaporwave = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "stick_aim") == 0) { /* W271: position|relative (wie hcfg) */
+        s->stick_aim = (_stricmp(v, "relative") == 0 || _stricmp(v, "rate") == 0 ||
+                        _stricmp(v, "relativ") == 0 || atoi(v) == 1) ? 1 : 0;
+    } else if (strcmp(k, "stick_aim_sens") == 0) { /* W271 */
+        s->stick_aim_sens = atoi(v);
+        if (s->stick_aim_sens < 1) s->stick_aim_sens = 1;
+        if (s->stick_aim_sens > 16) s->stick_aim_sens = 16;
     } else if (strcmp(k, "game_tick") == 0) { /* W234 PAL50: nur 25 oder 30 */
         s->game_tick = atoi(v) == 25 ? 25 : 30;
     } else if (strcmp(k, "save_lock") == 0) { /* W190 */
@@ -400,13 +450,30 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
     } else if (strcmp(k, "photo_scale") == 0) {
         int n = atoi(v);
         s->photo_scale = (n == 2 || n == 4 || n == 8) ? n : 1;
+        if (s->photo_scale > 1 && s->photo_size == -4) { s->photo_size = s->photo_scale; } /* W290: alte cfg */
     } else if (strcmp(k, "photo_format") == 0) {
         s->photo_jpg = (_stricmp(v, "jpg") == 0 || _stricmp(v, "jpeg") == 0) ? 1 : 0;
     } else if (strcmp(k, "photo_aspect") == 0) {
         int n = atoi(v);
-        s->photo_aspect = (n >= 0 && n <= 2) ? n : 1;
+        s->photo_aspect = (n >= 0 && n <= 2) ? n : 2;
+    } else if (strcmp(k, "photo_view") == 0) { /* W290 QUICK-SHOT */
+        int n = atoi(v);
+        s->photo_view = (n >= 0 && n <= 2) ? n : 0;
+    } else if (strcmp(k, "photo_size") == 0) { /* W290 */
+        int n = (_stricmp(v, "4k") == 0) ? -4 : (_stricmp(v, "8k") == 0) ? -8 : atoi(v);
+        s->photo_size = (n == 1 || n == 2 || n == 4 || n == 8 || n == -4 || n == -8) ? n : -4;
+    } else if (strcmp(k, "photo_hud") == 0) { /* W290 */
+        s->photo_hud = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "replay_label") == 0) { /* W290 */
+        s->replay_label = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "replay_logo") == 0) { /* W290 */
+        s->replay_logo = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "watermark_media") == 0) { /* W290 */
+        s->watermark_media = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "interp_fps") == 0) {
         s->interp_fps = atoi(v);
+    } else if (strcmp(k, SB_GP_REV_KEY) == 0) { /* W296 */
+        s->gfx_preset_rev = atoi(v);
     } else if (strcmp(k, "vr_enable") == 0) { /* W134 */
         s->vr_enable = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "vr_preview") == 0) {
@@ -499,6 +566,12 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
     /* Unbekannte Keys: ignorieren (gehoeren dem Client). */
 }
 
+int lcfg_photo_size_eff(const launcher_settings_t *s)
+{
+    int n = s->photo_size;
+    return (n == 1 || n == 2 || n == 4 || n == 8 || n == -4 || n == -8) ? n : -4;
+}
+
 static int is_path_key(const char *k)
 {
     return strcmp(k, "xbe_path") == 0 || strcmp(k, "media_root") == 0 ||
@@ -510,7 +583,7 @@ int lcfg_load_file_count(const char *path, launcher_settings_t *s, int *keys)
 {
     FILE *f;
     char line[4096];
-    int n = 0;
+    int n = 0, saw_view = 0, saw_asp = 0; /* W290: Altwert photo_aspect=1 */
 
     if (keys) {
         *keys = 0;
@@ -549,8 +622,13 @@ int lcfg_load_file_count(const char *path, launcher_settings_t *s, int *keys)
         } else {
             set_key(s, k, v);
         }
+        if (strcmp(k, "photo_view") == 0) { saw_view = 1; } /* W290 */
+        if (strcmp(k, "photo_aspect") == 0) { saw_asp = 1; }
         n++;
     }
+    /* W290: Bis W290 schrieb der Launcher immer photo_aspect=1 (damaliger Standard "weit"). Ohne photo_view stammt
+     * der Wert aus dieser Zeit und war keine Wahl: neuer Standard 4:3 (2). */
+    if (saw_asp && !saw_view && s->photo_aspect == 1) { s->photo_aspect = 2; }
     fclose(f);
     if (keys) {
         *keys = n;
@@ -576,11 +654,17 @@ static const char *kManaged[][2] = {
     { "sbc_mouse_off", "input" }, /* W128 */
     { "aim_assist", "input" },     { "auto_gear", "input" }, /* W218, W236 */
     { "aim_turn", "input" }, /* W236: Altwert neutralisieren (immer 0) */
+    { "stick_aim", "input" },      { "stick_aim_sens", "input" }, /* W271 */
     { "save_lock", "game" }, /* W190 */
     { "game_tick", "game" }, /* W234 PAL50 */
     { "photo_dir", "photo" },       { "photo_scale", "photo" }, /* W195 PHOTO-MODE */
     { "photo_format", "photo" },    { "photo_aspect", "photo" },
+    { "photo_view", "photo" },      { "photo_size", "photo" }, /* W290 QUICK-SHOT */
+    { "photo_hud", "photo" }, /* W290 */
+    { "replay_label", "render" },   { "replay_logo", "render" }, /* W290 */
+    { "watermark_media", "overlay" }, /* W290 */
     { "interp_fps", "render" },
+    { SB_GP_REV_KEY, "render" }, /* W296 PRESET-ORIG: Stand der Preset-Tabelle (immer SB_GP_REV) */
     { "window_mode", "display" },   { "fs_hz", "display" },
     { "mouse_mode", "input" },      { "mouse_sens", "input" },
     { "edge_mode", "render" },      { "edge_fade_width", "render" }, /* W107 */
@@ -588,6 +672,8 @@ static const char *kManaged[][2] = {
     { "cockpit_persp", "render" }, /* W191 */
     { "cockpit_panini", "render" }, /* W191 */
     { "cockpit_width", "render" }, /* W235 */
+    { "cockpit_hide", "render" }, /* W268 */
+    { "fx_wireframe", "render" },   { "fx_vaporwave", "render" }, /* W278: Hinweis/Zuruecksetzen */
     { "remaster", "remaster" },     { "hd_textures", "remaster" }, /* W103 */
     { "hd_scale", "remaster" },     { "fx_enhanced", "remaster" },
     { "ultrawide", "remaster" },    { "postfx", "remaster" },
@@ -663,10 +749,16 @@ static void key_value(const launcher_settings_t *s, const char *k,
         u8_to_acp(s->photo_dir, out, cap);
     } else if (strcmp(k, "photo_format") == 0) {
         strcpy_s(out, cap, s->photo_jpg ? "jpg" : "png");
+    } else if (strcmp(k, "photo_size") == 0) { /* W290: 4k/8k/1/2/4/8 (Client: hcfg) */
+        int n = lcfg_photo_size_eff(s);
+        if (n < 0) { _snprintf_s(out, cap, _TRUNCATE, "%dk", -n); }
+        else { _snprintf_s(out, cap, _TRUNCATE, "%d", n); }
     } else if (strcmp(k, "input_profile") == 0) {
         strcpy_s(out, cap, s->input_profile);
     } else if (strcmp(k, "mouse_mode") == 0) {
         strcpy_s(out, cap, s->mouse_mode ? "absolute" : "relative");
+    } else if (strcmp(k, "stick_aim") == 0) { /* W271 */
+        strcpy_s(out, cap, s->stick_aim ? "relative" : "position");
     } else if (strcmp(k, "vr_preview") == 0) { /* W134, W159: Standard ein Auge */
         strcpy_s(out, cap, s->vr_preview[0] ? s->vr_preview : "left");
     } else if (strcmp(k, "lang") == 0) { /* W142 */
@@ -701,16 +793,36 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = 0;
         } else if (strcmp(k, "auto_gear") == 0) { /* W218 */
             v = s->auto_gear ? 1 : 0;
+        } else if (strcmp(k, "cockpit_hide") == 0) { /* W268 */
+            v = s->cockpit_hide ? 1 : 0;
+        } else if (strcmp(k, "fx_wireframe") == 0) { /* W278 */
+            v = s->fx_wireframe ? 1 : 0;
+        } else if (strcmp(k, "fx_vaporwave") == 0) {
+            v = s->fx_vaporwave ? 1 : 0;
+        } else if (strcmp(k, "stick_aim_sens") == 0) { /* W271 */
+            v = (s->stick_aim_sens >= 1 && s->stick_aim_sens <= 16) ? s->stick_aim_sens : 4;
         } else if (strcmp(k, "game_tick") == 0) { /* W234 PAL50 */
             v = s->game_tick == 25 ? 25 : 30;
         } else if (strcmp(k, "save_lock") == 0) { /* W190 */
             v = s->save_lock ? 1 : 0;
         } else if (strcmp(k, "photo_aspect") == 0) { /* W195 */
-            v = (s->photo_aspect >= 0 && s->photo_aspect <= 2) ? s->photo_aspect : 1;
+            v = (s->photo_aspect >= 0 && s->photo_aspect <= 2) ? s->photo_aspect : 2;
+        } else if (strcmp(k, "photo_view") == 0) { /* W290 */
+            v = (s->photo_view >= 0 && s->photo_view <= 2) ? s->photo_view : 0;
+        } else if (strcmp(k, "photo_hud") == 0) { /* W290 */
+            v = s->photo_hud ? 1 : 0;
+        } else if (strcmp(k, "replay_label") == 0) { /* W290 */
+            v = s->replay_label ? 1 : 0;
+        } else if (strcmp(k, "replay_logo") == 0) {
+            v = s->replay_logo ? 1 : 0;
+        } else if (strcmp(k, "watermark_media") == 0) {
+            v = s->watermark_media ? 1 : 0;
         } else if (strcmp(k, "photo_scale") == 0) { /* W195 */
             v = (s->photo_scale == 2 || s->photo_scale == 4 || s->photo_scale == 8) ? s->photo_scale : 1;
         } else if (strcmp(k, "interp_fps") == 0) {
             v = s->interp_fps;
+        } else if (strcmp(k, SB_GP_REV_KEY) == 0) { /* W296: wer speichert, kennt Original = auto */
+            v = SB_GP_REV;
         } else if (strcmp(k, "window_mode") == 0) {
             v = s->window_mode;
         } else if (strcmp(k, "fs_hz") == 0) {
@@ -942,6 +1054,7 @@ static const char *const kPlayer[][3] = {
     { "screenshot_frame", "capture", "0" },  /* keine Auto-Screenshots */
     { "screenshot_every", "capture", "0" },
     { "audio_capture", "audio", "0" },       /* kein audio.wav-Mitschnitt */
+    { "orig_hint", "overlay", "1" },         /* W278 ORIG-FLAG: Start-Hinweis bei experimenteller Grafik */
     /* W170 LAUNCHER-P1/B12: rt_scale gehoert dem Spieler (UI-Wahl aus
      * lcfg_save_user: auto oder fest 1-4) und wird hier nicht mehr auf
      * auto zurueckgesetzt. Spieler-Standard bleibt auto (lcfg_defaults);
@@ -1701,10 +1814,12 @@ int lcfg_profile_load(const char *client_dir, const char *name,
     }
     lcfg_profile_path(client_dir, name, path, sizeof path);
     lcfg_defaults(s);
+    s->gfx_preset_rev = 0; /* W296: Stand kommt aus der Datei (fehlt = alt) */
     if (lcfg_load_file(path, s) != 0) {
         _snprintf_s(err, errcap, _TRUNCATE, LT("cfg.prof_notfound"), name, path);
         return 1;
     }
+    lcfg_gfx_migrate_fps(s); /* W296 PRESET-ORIG: altes Original 120 -> auto */
     return 0;
 }
 

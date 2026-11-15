@@ -46,6 +46,12 @@
 #include "input_sbc_usb.h"
 #include "sbc_test.h"
 #include "launcher_update.h" /* W250 UPDATE-CHECK */
+#include "launcher_alpha.h" /* W272 ALPHA-TEST: Seite "Alpha Test" (launcher_alpha.inc) */
+#include "launcher_diag.h" /* W279 DIAG-CRASH: Absturz-Karte + Diagnosepaket (launcher_diag.inc) */
+#include "launcher_games.h" /* W276 LOC-LAUNCH */
+#include "launcher_orig.h" /* W278 ORIG-FLAG */
+#include "sb_origflag.h" /* W278: SB_OFG_* */
+#include "launcher_layout.h" /* W281 LAUNCHER-SIZE: Layout 0/a/b (Entwurf) */
 
 #define printf cli_printf
 
@@ -70,7 +76,7 @@
 
 /* W171 LAUNCHER-P2P3: sieben Seiten (UX-Konzept 3.2). Remaster, Profile
  * und Pfade sind in Grafik, Packs und Erweitert aufgegangen. */
-enum { P_PLAY, P_DISPLAY, P_GFX, P_PACKS, P_CTRL, P_AUDIO, P_ADV, P_N };
+enum { P_PLAY, P_DISPLAY, P_GFX, P_PACKS, P_CTRL, P_AUDIO, P_ADV, P_ALPHA, P_N }; /* W272: + Alpha Test */
 #define PG_ALL (-1)
 #define PG_NOTPLAY (-2)
 #define PG_DIALOG (-3)
@@ -78,13 +84,31 @@ enum { P_PLAY, P_DISPLAY, P_GFX, P_PACKS, P_CTRL, P_AUDIO, P_ADV, P_N };
 /* W142: Sprachschluessel (Anzeige via LT), nicht direkt ausgeben. */
 static const char *const kPageName[P_N] = {
     "gui.page_play", "gui.page_display", "gui.page_graphics", "gui.page_packs",
-    "gui.page_controls", "gui.page_audio_extras", "gui.page_advanced" /* W195: Ton & Extras */
+    "gui.page_controls", "gui.page_audio_extras", "gui.page_advanced", /* W195: Ton & Extras */
+    "gui.alpha_page" /* W272 */
 };
 static const char *const kPageKey[P_N] = {
-    "play", "display", "graphics", "packs", "controls", "audio", "advanced"
+    "play", "display", "graphics", "packs", "controls", "audio", "advanced", "alpha"
 };
 static const wchar_t kPageIcon[P_N] = { 0xE768, 0xE7F4, 0xE790, 0xE7B8,
-                                        0xE7FC, 0xE767, 0xE713 };
+                                        0xE7FC, 0xE767, 0xE713, 0xEBE8 };
+/* W272 ALPHA-TEST: Seite "Alpha Test" (launcher_alpha.inc, vor den Selbsttests) */
+static int g_alpha_tools = 1; /* launcher_ui.cfg alpha_tools (0 = Seite aus, spaetere Beta) */
+static int g_show_adv; /* W291 ESC-REWORK: launcher_ui.cfg show_advanced (Feinregler auf Anzeige/Grafik zeigen) */
+static void paint_alpha(void);
+static void alpha_build_controls(HWND w);
+static void alpha_page_shown(void);
+static int alpha_on_command(int id, int code);
+static void alpha_relabel(void);
+static int alpha_start(int dry, const la_sel_t *sel);
+/* W279 DIAG-CRASH (launcher_diag.inc) */
+static void dg_init(void);
+static int dg_ctl_visible(int id);
+static int dg_paint_play(void);
+static void dg_paint_alpha(int y, int h);
+static void dg_build_controls(HWND w);
+static void dg_relabel(void);
+static int dg_on_command(int id);
 /* Alte --ui-shot-Namen (bis W170, acht Seiten) -> neue Zielseite. */
 static const struct {
     const char *name;
@@ -235,6 +259,14 @@ int gui_page_from_name(const char *v)
 #define ID_CTRL_AUTOGEAR 1105 /* W218 SIMPLE-CONTROLS: automatischer Gangwechsel */
 #define ID_CTRL_JOY 1106 /* W221 HOTAS (experimentell): Joystick-Dialog */
 #define ID_PAL50 1108 /* W234 PAL50: Spieltakt 25 (wie EU-Konsole am 50-Hz-TV) */
+#define ID_CHIDE 1109 /* W268 COCKPIT-HIDE: Cockpit ausblenden (Grafik > HUD & Cockpit) */
+#define ID_STICK_AIM 1111  /* W271 (Merge: 1109 belegt durch W268) STICK-RELATIVE: Stick-Zielen Position / wie eine Maus */
+#define ID_STICK_SENS 1112 /* W271: Empfindlichkeit relativer Stick 1..16 */
+#define ID_PH_VIEW 1113    /* W290 QUICK-SHOT: Ansicht der Aufnahme (wie im Spiel / ohne Cockpit / nur Aussenwelt) */
+#define ID_RP_LABEL 1114   /* W290: REPLAY-Schriftzug der Wiedergabe zeigen */
+#define ID_RP_LOGO 1115    /* W290: Spiel-Logo der Wiedergabe zeigen */
+#define ID_WM_MEDIA 1116   /* W290: Wasserzeichen im Video-Export */
+#define ID_PH_HUD 1117     /* W290: HUD im Foto */
 /* W250 UPDATE-CHECK: Erstabfrage + Hinweis (Spielen), Einstellung (Erweitert) */
 #define ID_UPD_YES 1150
 #define ID_UPD_NO 1151
@@ -278,7 +310,8 @@ enum {
     K_RADIO, /* W173: Optionsfeld mit Erklaerung ("Titel\nHilfe") */
     K_EDIT = 10, K_COMBO, K_COMBOEDIT, K_MEMO, K_STATIC, K_LIST,
     K_TRACK = 17, /* W143: Schieberegler (Totzonen) */
-    K_PKLIST = 18 /* W172: Packs-Liste (eigene Zeichnung, Ziehen) */
+    K_PKLIST = 18, /* W172: Packs-Liste (eigene Zeichnung, Ziehen) */
+    K_ICON = 19 /* W287: Symbol mit Tooltip (Static, eigene Zeichnung, Text = zugaenglicher Name) */
 };
 
 typedef struct {
@@ -292,7 +325,7 @@ typedef struct {
     int hover;
 } uictl_t;
 
-#define UI_MAX 200
+#define UI_MAX 240 /* W287: + Symbole */
 static uictl_t g_ui[UI_MAX];
 static int g_ui_n;
 
@@ -300,6 +333,11 @@ static int g_ui_n;
 static gui_opts_t g_o;
 static HWND g_hwnd;
 static int g_dpi = 96;
+/* W281 LAUNCHER-SIZE: g_dpi = Geometrie (Monitor-DPI x Layout-Skalierung),
+ * g_dpi_font = Schrift, g_dpi_mon = Monitor. Layout 0: alle gleich. */
+static int g_dpi_mon = 96;
+static int g_dpi_font = 96;
+static llay_t g_lay = { LLAY_0, LLAY_SZ_NORMAL, 100, 100, LLAY_DW, LLAY_DH, LLAY_NAV, 0, 0, 0 };
 static int g_page;
 static int g_updating;
 static char g_client_dir[1024];
@@ -367,6 +405,40 @@ static int ui_refresh_visibility(void);
 static void show_page(int p);
 static int ui_confirm(const char *text, const char *title);
 static void set_status_k(const char *msg, int kind); /* W187 */
+/* W276 LOC-LAUNCH: Spielauswahl (Block "W276 LOCTAB" vor build_controls) */
+static int g_game;                 /* LGAME_SB | LGAME_LOC */
+static int loctab_visible(const uictl_t *u, int page); /* -1 = keine Vorgabe */
+static void paint_loc_play(void);
+/* W278 ORIG-FLAG: Hinweis "nicht die Original-Optik" (Block "W278 ORIGFLAG" vor build_controls) */
+#define ID_ORIG_RESET 2780     /* Spielen: "Back to original" (nur Grafik) */
+#define ID_ORIG_ONCE 2781      /* Spielen: Einmal-Start im Original-Modus */
+#define ID_ORIG_RESET_LOC 2782 /* LoC-Spielen: "Back to original" (W293: im Band unten) */
+/* W287 EXP-ICON: Experimentell-Symbol (Kolben) an den Karten, Warn-Symbol am Hinweis */
+#define ID_XEXP_DISP 2783  /* Anzeige: Seitenverhaeltnis */
+#define ID_XEXP_IMAGE 2784 /* Grafik: Bild */
+#define ID_XEXP_WORLD 2785 /* Grafik: Welt */
+#define ID_XEXP_HUD 2786   /* Grafik: HUD & Cockpit */
+#define ID_XEXP_PACKS 2787 /* Packs: installierte Packs */
+#define ID_XWARN_SB 2788   /* Spielen (SB): Hinweisband */
+#define ID_XWARN_LOC 2789  /* Spielen (LoC): Hinweisband (W293: unten wie SB) */
+#define ID_XEXP_FIRST ID_XEXP_DISP
+#define ID_XEXP_LAST ID_XEXP_PACKS
+#define ID_LAYOUT_LBL 2790 /* W287: Beschriftung "Groesse" vor der Layout-Kombi */
+#define ID_XEXP_PHOTO 2791 /* W290: Kolben an der Karte "Fotos & Screenshots" (breit, REPLAY/Logo aus) */
+#define ID_SHOWADV 2792    /* W291 ESC-REWORK: "Erweiterte Einstellungen zeigen" (Anzeige + Grafik) */
+static unsigned g_orig_mask;   /* SB_OFG_* der abweichenden Gruppen (ui_apply_rules) */
+static int orig_visible(int id, int page); /* -1 = keine Vorgabe */
+static void orig_paint_play(int loc);
+static int orig_banner_on(void); /* W293 */
+static void xicon_texts(void); /* W287 */
+static void xtip_text(int id, char *out, size_t cap);
+static void orig_relabel(void);
+static int loctab_command(int id, int code);
+static void loctab_relabel(void);
+/* W281 LAUNCHER-SIZE (Block bei on_dpi) */
+static void lay_switch(int id, int size);
+static void lay_cfg_save(void);
+static void lay_combo_fill(HWND c);
 
 /* W116 EDITIONS: Remaster-Paket lokal vorhanden? Die Seite Remaster zeigt
  * ihre Inhalte nur dann. Ordner wie im Client (sb_remaster.c,
@@ -486,6 +558,7 @@ enum { F_BODY, F_SMALL, F_SEMI, F_CARD, F_BRAND, F_HERO, F_BIG, F_ICON,
        F_MONO, F_TINY, F_ICONSM, F_N };
 static HFONT g_f[F_N];
 static int g_has_icons;
+static int g_icon_fluent; /* W287: Segoe Fluent Icons (Kolben U+F196 nur dort) */
 static wchar_t g_face_body[64];
 
 #define SX(v) (MulDiv((v), g_dpi, 96))
@@ -791,8 +864,58 @@ static void cv_textw(canvas_t *c, HFONT f, const wchar_t *wt, int n, int x,
 }
 
 /* Logische Wrapper auf das fertige Bild g_bb. */
+/* W281: Layout b bildet das Entwurfsraster ab (launcher_layout.c). */
+static int lay_b(void)
+{
+    return g_lay.id == LLAY_B;
+}
+static int lay_tw(void)
+{
+    return lay_b() ? g_lay.tw : WIN_W;
+}
+static int lay_th(void)
+{
+    return lay_b() ? g_lay.th : WIN_H;
+}
+static int lay_nav(void)
+{
+    return lay_b() ? g_lay.nav : NAV_W;
+}
+/* Pixel-Rechteck eines Entwurfs-Rechtecks (sw/sh: Breite/Hoehe strecken). */
+static void lay_px(int x, int y, int w, int h, int sw, int sh, RECT *r)
+{
+    int o[4];
+    if (lay_b()) {
+        llay_map_rect(&g_lay, x, y, w, h, sw, sh, o);
+        x = o[0];
+        y = o[1];
+        w = o[2];
+        h = o[3];
+    }
+    r->left = SX(x);
+    r->top = SX(y);
+    r->right = SX(x + w);
+    r->bottom = SX(y + h);
+}
+/* Gezeichnete Flaeche/Text (Streckregel llay_map_paint). */
+static void lay_paint_px(int x, int y, int w, int h, RECT *r)
+{
+    int o[4];
+    llay_map_paint(&g_lay, x, y, w, h, o);
+    r->left = SX(o[0]);
+    r->top = SX(o[1]);
+    r->right = SX(o[0] + o[2]);
+    r->bottom = SX(o[1] + o[3]);
+}
+
 static void L_fill(int x, int y, int w, int h, COLORREF c, int a, int r)
 {
+    if (lay_b()) {
+        RECT q;
+        lay_paint_px(x, y, w, h, &q);
+        cv_fill(&g_bb, q.left, q.top, q.right - q.left, q.bottom - q.top, c, a, SX(r));
+        return;
+    }
     cv_fill(&g_bb, SX(x), SX(y), SX(x + w) - SX(x), SX(y + h) - SX(y), c, a,
             SX(r));
 }
@@ -800,6 +923,12 @@ static void L_fill(int x, int y, int w, int h, COLORREF c, int a, int r)
 static void L_ring(int x, int y, int w, int h, COLORREF c, int a, int r)
 {
     int t = SX(1) < 1 ? 1 : SX(1);
+    if (lay_b()) {
+        RECT q;
+        lay_paint_px(x, y, w, h, &q);
+        cv_ring(&g_bb, q.left, q.top, q.right - q.left, q.bottom - q.top, c, a, SX(r), t);
+        return;
+    }
     cv_ring(&g_bb, SX(x), SX(y), SX(x + w) - SX(x), SX(y + h) - SX(y), c, a,
             SX(r), t);
 }
@@ -807,6 +936,27 @@ static void L_ring(int x, int y, int w, int h, COLORREF c, int a, int r)
 static void L_text(int font, const char *u8, int x, int y, int w, int h,
                    COLORREF c, UINT fmt)
 {
+    if (lay_b()) {
+        RECT q;
+        lay_paint_px(x, y, w, h, &q);
+        if ((fmt & DT_WORDBREAK) && h >= 28 && u8 && *u8 && g_bb.dc) {
+            /* W281: Absatz waechst mit der Flaeche (wie Karten) und darf in den
+             * leeren Entwurfsabstand darunter (16) laufen - weniger Abschneiden. */
+            wchar_t *wt = u8_wdup(u8);
+            RECT m = { 0, 0, q.right - q.left, 0 };
+            int cap = SX(llay_mapy(&g_lay, y + h + 16)) - q.top;
+            int st = SX(llay_mapy(&g_lay, y + h)) - q.top;
+            if (wt) {
+                SelectObject(g_bb.dc, g_f[font]);
+                DrawTextW(g_bb.dc, wt, -1, &m, DT_CALCRECT | DT_WORDBREAK | DT_NOPREFIX);
+                free(wt);
+                q.bottom = q.top + (st > m.bottom ? st : (m.bottom < cap ? m.bottom : cap));
+            }
+        }
+        cv_text(&g_bb, g_f[font], u8, q.left, q.top, q.right - q.left, q.bottom - q.top, c,
+                fmt);
+        return;
+    }
     cv_text(&g_bb, g_f[font], u8, SX(x), SX(y), SX(x + w) - SX(x),
             SX(y + h) - SX(y), c, fmt);
 }
@@ -822,7 +972,7 @@ static HFONT mkfont(const wchar_t *const *faces, int pt10, int weight,
     int i;
     for (i = 0; faces[i]; i++) {
         wchar_t got[64];
-        f = CreateFontW(-MulDiv(pt10, g_dpi, 720), 0, 0, 0, weight, FALSE,
+        f = CreateFontW(-MulDiv(pt10, g_dpi_font, 720), 0, 0, 0, weight, FALSE, /* W281 */
                         FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                         CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
                         DEFAULT_PITCH | FF_DONTCARE, faces[i]);
@@ -901,6 +1051,7 @@ static void fonts_make(void)
     g_f[F_ICONSM] = mkfont(icon, 75, FW_NORMAL, NULL, 0);
     g_has_icons = _wcsicmp(used, L"Segoe Fluent Icons") == 0 ||
                   _wcsicmp(used, L"Segoe MDL2 Assets") == 0;
+    g_icon_fluent = _wcsicmp(used, L"Segoe Fluent Icons") == 0;
 }
 
 /* ------------------------------------------------------------------ */
@@ -1181,6 +1332,33 @@ static int ui_cfg_load_key(const char *client_dir, const char *key, int dflt)
     return v;
 }
 
+/* W281 LAUNCHER-SIZE: Text-Wert aus der UI-cfg (leer, wenn er fehlt). */
+static void ui_cfg_load_str(const char *client_dir, const char *key, char *out, size_t cap)
+{
+    char p[1200], line[256];
+    FILE *f = NULL;
+    size_t kl = strlen(key);
+    out[0] = '\0';
+    ui_cfg_path(client_dir, p, sizeof p);
+    if (u8_fopen_s(&f, p, "r") == 0 && f) {
+        while (fgets(line, sizeof line, f)) {
+            if (strncmp(line, key, kl) == 0 && line[kl] == '=') {
+                char *v = line + kl + 1, *e = v + strlen(v);
+                while (e > v && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ')) {
+                    *--e = '\0';
+                }
+                strncpy_s(out, cap, v, _TRUNCATE);
+            }
+        }
+        fclose(f);
+    }
+}
+
+/* W281: gemerkte Layout-Wahl (launcher_ui.cfg launcher_layout / ui_size);
+ * -1 = nie gewaehlt (dann schreibt ui_cfg_save_bg nichts dazu, Layout 0
+ * bleibt byte-gleich). */
+static int g_lay_cfg_id = -1, g_lay_cfg_size = -1;
+
 static int ui_cfg_load_bg(const char *client_dir)
 {
     return ui_cfg_load_key(client_dir, "bg_image", 1); /* Standard: an */
@@ -1197,8 +1375,14 @@ static int ui_cfg_save_bg(const char *client_dir, int bg)
     /* W171: + diag_open (Erweitert > Diagnose aufgeklappt) */
     fprintf(f, "# Launcher-Oberflaeche (W82), nicht vom Client gelesen\n"
                "bg_image=%d\n"
-               "diag_open=%d\n",
-            bg ? 1 : 0, g_diag_open ? 1 : 0);
+               "diag_open=%d\n"
+               "alpha_tools=%d\n" /* W272: Seite Alpha Test (0 = aus) */
+               "show_advanced=%d\n", /* W291: Feinregler auf Anzeige/Grafik */
+            bg ? 1 : 0, g_diag_open ? 1 : 0, g_alpha_tools ? 1 : 0, g_show_adv ? 1 : 0);
+    if (g_lay_cfg_id >= 0) { /* W281: Layout-Vorschau 0|a|b + UI-Groesse */
+        fprintf(f, "launcher_layout=%s\nui_size=%s\n", llay_name(g_lay_cfg_id),
+                llay_size_name(g_lay_cfg_size >= 0 ? g_lay_cfg_size : LLAY_SZ_NORMAL));
+    }
     fclose(f);
     return 0;
 }
@@ -1314,6 +1498,10 @@ static HWND mk(HWND parent, int kind, int id, int page, int x, int y, int w,
         cls = L"STATIC";
         st |= SS_LEFT | SS_NOPREFIX;
         break;
+    case K_ICON: /* W287: Symbol; SS_NOTIFY = Maus fuer den Tooltip, kein Tabstopp */
+        cls = L"STATIC";
+        st |= SS_OWNERDRAW | SS_NOTIFY | SS_NOPREFIX;
+        break;
     case K_LIST:
         cls = L"LISTBOX";
         st |= LBS_NOTIFY | WS_VSCROLL | WS_HSCROLL | WS_BORDER | WS_TABSTOP | /* W148: +HScroll */
@@ -1374,11 +1562,62 @@ static HWND mk(HWND parent, int kind, int id, int page, int x, int y, int w,
     return hw;
 }
 
+/* W281 LAUNCHER-SIZE: Layout b ordnet die Spielen-Seite neu (Start-Bereich,
+ * Statuskarten). Entwurfs-Rechteck je Element, 0 = keine Vorgabe. */
+#define ID_LAYOUT 1290 /* W281: Layout-Vorschau (Navigation unten, nur a/b) */
+static int lay_b_override(int id, int o[4])
+{
+    if (!lay_b()) {
+        return 0;
+    }
+    if (id == ID_START_BIG) {
+        llay_b_start_big(o);
+        return 1;
+    }
+    if (id == ID_START_VR) {
+        llay_b_start_vr(o);
+        return 1;
+    }
+    if (id >= ID_SUM_GO0 && id < ID_SUM_GO0 + SUM_GO_N) {
+        llay_b_card_go(id - ID_SUM_GO0, o);
+        return 1;
+    }
+    return 0;
+}
+
+/* W281: Pixel-Rechteck eines Elements (Layout 0/a wie bisher SX). */
+static void ui_px_rect(const uictl_t *u, RECT *r)
+{
+    int o[4], sh;
+    if (!lay_b() || u->parent != g_hwnd) {
+        r->left = SX(u->x);
+        r->top = SX(u->y);
+        r->right = SX(u->x + u->w);
+        r->bottom = SX(u->y + u->h_);
+        return;
+    }
+    if (!lay_b_override(u->id, o)) {
+        o[0] = u->x;
+        o[1] = u->y;
+        o[2] = u->w;
+        o[3] = u->h_;
+    }
+    /* Listen/Memos strecken mit, Knoepfe/Kombis/Felder behalten die Hoehe */
+    sh = u->kind == K_MEMO || u->kind == K_LIST || u->kind == K_PKLIST ||
+         (u->kind == K_STATIC && o[3] >= 48);
+    lay_px(o[0], o[1], o[2], o[3], 1, sh, r);
+}
+
 /* Pixel-Rechteck eines Elements (Rahmen; Edits liegen innen). */
 static void ui_place(uictl_t *u)
 {
-    int x = SX(u->x), y = SX(u->y), w = SX(u->x + u->w) - SX(u->x),
-        h = SX(u->y + u->h_) - SX(u->y);
+    RECT pr;
+    int x, y, w, h;
+    ui_px_rect(u, &pr);
+    x = pr.left;
+    y = pr.top;
+    w = pr.right - pr.left;
+    h = pr.bottom - pr.top;
     HFONT f = g_f[F_BODY];
     if (u->kind == K_MEMO) {
         f = g_f[F_SMALL];
@@ -1415,10 +1654,95 @@ static void ui_place(uictl_t *u)
     }
 }
 
+/* W291 ESC-REWORK: Feinregler (nur mit "Erweiterte Einstellungen zeigen"),
+ * gleiche Einteilung wie die Feinregler unter "Erweitert" im ESC-Menue.
+ * W296 PRESET-ORIG: Verlaufsbreite/Abdunklung (ID_EDGE_W/S) gehoeren wieder zur
+ * Breitbild-Zeile und stehen sichtbar, sobald "Fade out" gewaehlt ist
+ * (edge_fade_shown), mit "Erweitert" wie bisher immer. */
+static int lay_adv_ctl(int id)
+{
+    return id == ID_GFX_SOFT || id == ID_REM_LABEL || id == ID_CPERSP || id == ID_CPANINI || id == ID_CWIDTH;
+}
+
+/* W296: Verlaufszeile der Karte Breitbild sichtbar? (Fade out = Index 2 = edge_mode 2) */
+static int edge_fade_shown(void)
+{
+    HWND c = ctl(ID_EDGE);
+    return g_show_adv || (c && ComboBox_GetCurSel(c) == 2);
+}
+
+/* W296: Lage der Vorschau auf der Karte Breitbild (Entwurfseinheiten ab CY0):
+ * mit Erweitert unter Cockpit-Kamera/Panini/Breite, sonst unter der
+ * Verlaufszeile (+ Regelzeile R11/R12) bzw. direkt unter der Rand-Auswahl. */
+static int disp_preview_y(void)
+{
+    return g_show_adv ? 308 : edge_fade_shown() ? 194 : 150;
+}
+
+/* W291: Kartenlage der Seite Grafik (rechte Spalte rueckt ohne Feinregler zusammen) */
+typedef struct { int cm_y, cm_h, wl_y, wl_h, wl_rr, fx_y, fx_h; } lay_gfx_t;
+static void lay_gfx(lay_gfx_t *l)
+{
+    l->cm_y = CY0;
+    l->cm_h = g_show_adv ? 160 : 124;          /* Monitor-Effekt, Cockpit, [Zieletikett] */
+    l->wl_y = l->cm_y + l->cm_h + 12;
+    l->wl_rr = g_show_adv ? 152 : 116;          /* Begruendungszeile unter den Zeilen */
+    l->wl_h = l->wl_rr + 24;                    /* Weltbeleuchtung, Schatten, [Weiche Schatten] */
+    l->fx_y = l->wl_y + l->wl_h + 12;
+    l->fx_h = 132;                              /* Effekte, Kantenglaettung, Begruendung */
+}
+
+#define XI_W 30 /* W287: Experimentell-Symbol in der Kartenkopfzeile (wie unten) */
+#define LAY_TEX_Y (CY0 + 316)  /* W291: Karte Texturen (links unter der Voreinstellung) */
+#define LAY_ADV_Y (CY0 + 470)  /* W291: Schalter "Erweiterte Einstellungen zeigen" */
+
+static void ui_move_xy(int id, int x, int y)
+{
+    uictl_t *u = ui_find(id);
+    RECT q;
+    if (!u || (u->x == x && u->y == y)) {
+        return;
+    }
+    u->x = x;
+    u->y = y;
+    ui_px_rect(u, &q);
+    SetWindowPos(u->h, NULL, q.left, q.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+/* W291: Steuerelemente der Grafik-Seite an die aktuelle Kartenlage setzen */
+static void lay_gfx_apply(void)
+{
+    lay_gfx_t l;
+    lay_gfx(&l);
+    ui_move_xy(ID_MONFX, COL2 + 120, l.cm_y + 44);
+    ui_move_xy(ID_CHIDE, COL2 + 18, l.cm_y + 80);
+    ui_move_xy(ID_REM_LABEL, COL2 + 18, l.cm_y + 116);
+    ui_move_xy(ID_XEXP_HUD, COL2 + COLW - 18 - XI_W, l.cm_y + 12);
+    ui_move_xy(ID_GFX_LIGHT, COL2 + 120, l.wl_y + 44);
+    ui_move_xy(ID_GFX_SHADOW, COL2 + 120, l.wl_y + 80);
+    ui_move_xy(ID_GFX_SOFT, COL2 + 120, l.wl_y + 116);
+    ui_move_xy(ID_XEXP_WORLD, COL2 + COLW - 18 - XI_W, l.wl_y + 12);
+    ui_move_xy(ID_GFX_FX, COL2 + 120, l.fx_y + 44);
+    ui_move_xy(ID_AAMODE, COL2 + 120, l.fx_y + 80);
+    ui_move_xy(ID_XEXP_IMAGE, COL2 + COLW - 18 - XI_W, l.fx_y + 12);
+}
+
 static int ui_visible_on(const uictl_t *u, int page)
 {
     if (!u) { /* W201: edition-specific controls need not exist. */
         return 0;
+    }
+    { /* W278 ORIG-FLAG: Knoepfe am Hinweis (beide Bereiche) */
+        int ov = orig_visible(u->id, page);
+        if (ov >= 0) {
+            return ov;
+        }
+    }
+    { /* W276: Bereich Line of Contact (LoC-Seite statt SB-Spielen, ohne Packs/Erweitert) */
+        int lv = loctab_visible(u, page);
+        if (lv >= 0) {
+            return lv;
+        }
     }
     /* W173 LAUNCHER-P4: "Zuruecksetzen" nur bei Benutzerdefiniert. Die
      * Texturen-Auswahl bleibt immer sichtbar (ohne Pack: Hinweis R30). */
@@ -1428,6 +1752,16 @@ static int ui_visible_on(const uictl_t *u, int page)
     /* W172/P5: Texturstufe nur noch auf der Seite Packs (Texturdetail);
      * die alte Kombi bleibt unsichtbar als Traeger fuer hd_scale. */
     if (u->id == ID_REM_SCALE) {
+        return 0;
+    }
+    /* W291 ESC-REWORK: Schalter nur auf Anzeige und Grafik; Feinregler nur mit "Erweitert" */
+    if (u->id == ID_SHOWADV) {
+        return page == P_DISPLAY || page == P_GFX;
+    }
+    if (!g_show_adv && lay_adv_ctl(u->id)) {
+        return 0;
+    }
+    if ((u->id == ID_EDGE_W || u->id == ID_EDGE_S) && !edge_fade_shown()) { /* W296 PRESET-ORIG */
         return 0;
     }
     /* W172/P6: Spielen zeigt entweder die Einrichtungskarte (Disc-Abbild)
@@ -1457,6 +1791,9 @@ static int ui_visible_on(const uictl_t *u, int page)
     if (u->id == ID_ASPECT) {
         return 0;
     }
+    if (!dg_ctl_visible(u->id)) { /* W279: Absturz-Karte (Knoepfe nur mit Karte, Update-Karte weicht) */
+        return 0;
+    }
     /* W250: Erstabfrage nur unbeantwortet, Hinweis nur bei neuerer Version,
      * Einstellung nur mit Release-Version (sonst Hinweistext). */
     if ((u->id == ID_UPD_YES || u->id == ID_UPD_NO) && !g_upd_ask) {
@@ -1474,6 +1811,9 @@ static int ui_visible_on(const uictl_t *u, int page)
     }
     /* W171: Rueckgaengig nur, solange ein automatisches Umschalten offen ist */
     if (u->id == ID_UNDO && !g_undo_on) {
+        return 0;
+    }
+    if ((u->id == ID_LAYOUT || u->id == ID_LAYOUT_LBL) && g_lay.id == LLAY_0) { /* W281: Layout 0 bleibt wie heute */
         return 0;
     }
     return u->page == PG_ALL || u->page == page ||
@@ -1517,7 +1857,7 @@ static void ui_relayout(void)
 /* ------------------------------------------------------------------ */
 static void base_build(void)
 {
-    int W = SX(WIN_W), H = SX(WIN_H), x, y;
+    int W = SX(lay_tw()), H = SX(lay_th()), x, y, NW = SX(lay_nav()); /* W281 */
     if (!cv_make(&g_base, W, H)) {
         return;
     }
@@ -1538,19 +1878,19 @@ static void base_build(void)
     }
     /* Titelleiste, Navigation, Fussleiste: halbtransparente Flaechen. */
     cv_fill(&g_base, 0, 0, W, SX(TITLE_H), RGB(4, 5, 7), 150, 0);
-    cv_fill(&g_base, 0, SX(TITLE_H), SX(NAV_W), H - SX(TITLE_H),
+    cv_fill(&g_base, 0, SX(TITLE_H), NW, H - SX(TITLE_H),
             RGB(6, 7, 10), 165, 0);
-    cv_fill(&g_base, SX(NAV_W) - 1, SX(TITLE_H), 1, H - SX(TITLE_H),
+    cv_fill(&g_base, NW - 1, SX(TITLE_H), 1, H - SX(TITLE_H),
             RGB(255, 255, 255), 16, 0);
     cv_fill(&g_base, 0, SX(TITLE_H) - 1, W, 1, RGB(255, 255, 255), 16, 0);
-    cv_fill(&g_base, SX(NAV_W), H - SX(BOT_H), W - SX(NAV_W), SX(BOT_H),
+    cv_fill(&g_base, NW, H - SX(BOT_H), W - NW, SX(BOT_H),
             RGB(4, 5, 7), 120, 0);
-    cv_fill(&g_base, SX(NAV_W), H - SX(BOT_H), W - SX(NAV_W), 1,
+    cv_fill(&g_base, NW, H - SX(BOT_H), W - NW, 1,
             RGB(255, 255, 255), 14, 0);
     /* Marke in der Titelleiste */
     cv_fill(&g_base, SX(20), SX(17), SX(4), SX(14), C_ACCENT, 255, SX(1));
     SetTextCharacterExtra(g_base.dc, SX(2));
-    cv_text(&g_base, g_f[F_BRAND], "STEEL BATTALION", SX(32), 0, SX(260),
+    cv_text(&g_base, g_f[F_BRAND], g_game == LGAME_LOC ? "LINE OF CONTACT" : "STEEL BATTALION", SX(32), 0, SX(260),
             SX(TITLE_H), C_TEXT, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     SetTextCharacterExtra(g_base.dc, 0);
     cv_text(&g_base, g_f[F_SMALL], "Game Preservation Project",
@@ -1563,10 +1903,12 @@ static void base_build(void)
     cv_text(&g_base, g_f[F_TINY], SB_EDITION_BADGE, SX(398), SX(14), SX(160),
             SX(20), C_ACCENT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     SetTextCharacterExtra(g_base.dc, 0);
-    /* Fuss der Navigation */
-    cv_text(&g_base, g_f[F_TINY], LT("gui.foot_hint"),
-            SX(20), H - SX(58), SX(NAV_W - 28), SX(44), C_FAINT,
-            DT_LEFT | DT_WORDBREAK);
+    /* Fuss der Navigation (W281: in a/b steht dort die Layout-Vorschau) */
+    if (g_lay.id == LLAY_0) {
+        cv_text(&g_base, g_f[F_TINY], LT("gui.foot_hint"),
+                SX(20), H - SX(58), SX(NAV_W - 28), SX(44), C_FAINT,
+                DT_LEFT | DT_WORDBREAK);
+    }
 }
 
 static void card(int x, int y, int w, int h, const char *title)
@@ -1617,17 +1959,28 @@ static void paint_preview(int x, int y, int w, int h)
 {
     L_fill(x, y, w, h, RGB(0, 0, 0), 235, 8);
     if (g_prev_w > 0 && g_prev_h > 0) {
-        int ow = SX(w) - SX(20), oh = SX(h) - SX(20);
+        RECT pr; /* W281: Flaeche wie L_fill (Layout b abgebildet) */
+        int ow, oh;
         long pw = (long)g_prev_w, ph = (long)g_prev_h;
         int ox, oy;
         unsigned bw, bh;
+        if (lay_b()) {
+            lay_paint_px(x, y, w, h, &pr);
+        } else {
+            pr.left = SX(x);
+            pr.top = SX(y);
+            pr.right = SX(x) + SX(w);
+            pr.bottom = SX(y) + SX(h);
+        }
+        ow = (pr.right - pr.left) - SX(20);
+        oh = (pr.bottom - pr.top) - SX(20);
         if ((long)ow * ph > (long)oh * pw) {
             ow = (int)((long)oh * pw / ph);
         } else {
             oh = (int)((long)ow * ph / pw);
         }
-        ox = SX(x) + (SX(w) - ow) / 2;
-        oy = SX(y) + (SX(h) - oh) / 2;
+        ox = pr.left + ((pr.right - pr.left) - ow) / 2;
+        oy = pr.top + ((pr.bottom - pr.top) - oh) / 2;
         cv_fill(&g_bb, ox, oy, ow, oh, RGB(10, 10, 10), 255, 0);
         aspect_box_for((unsigned)ow, (unsigned)oh, &bw, &bh);
         { /* W107: Hor+-Rand der Mission je nach Bildraender-Einstellung */
@@ -1705,7 +2058,9 @@ static int paint_reason(int rule, int x, int y, int w, int h)
                                   : C_DIM;
     if (r->level == LR_LVL_LOCK && g_has_icons) { /* Muster D: Schloss */
         wchar_t ic = 0xE72E;
-        cv_textw(&g_bb, g_f[F_ICONSM], &ic, 1, SX(x), SX(y), SX(14), SX(16), c,
+        RECT q; /* W281 */
+        lay_px(x, y, 14, 16, 0, 0, &q);
+        cv_textw(&g_bb, g_f[F_ICONSM], &ic, 1, q.left, q.top, SX(14), SX(16), c,
                  DT_LEFT | DT_TOP | DT_SINGLELINE);
         tx += 16;
     }
@@ -1825,6 +2180,9 @@ static void upd_tag_disp(const char *tag, char *out, size_t cap)
 static void upd_paint_play(void)
 {
     char t[256], v[64];
+    if (dg_paint_play()) { /* W279: "The last session crashed" hat Vorrang */
+        return;
+    }
     if (g_upd_ask) {
         card(UPD_X, UPD_Y, UPD_W, 134, LT("gui.upd_title"));
         label(F_TINY, LT("gui.upd_ask"), UPD_X + 18, UPD_Y + 36, UPD_W - 36, 60, C_TEXT);
@@ -1838,10 +2196,90 @@ static void upd_paint_play(void)
     }
 }
 
+/* W281 LAUNCHER-SIZE: Spielen in Layout b - Start-Bereich (Knoepfe links,
+ * Kurzstand rechts) und sechs Statuskarten (Spiel, Grafik, Anzeige, Packs,
+ * Steuerung, Primaerfeuer); Einrichtungskarte wie heute. Rechtecke im
+ * Entwurfsraster aus launcher_layout.c (llay_b_*). */
+static void paint_play_b(void)
+{
+    int i, r[4], sa[4], hn[4];
+    static const int kBig[] = { 4, 3 }, kVr[] = { 5 };
+    SetTextCharacterExtra(g_bb.dc, SX(3));
+    L_text(F_HERO, "STEEL BATTALION", CX0 - 2, CY0 - 2, CW, 50, C_TEXT,
+           DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    SetTextCharacterExtra(g_bb.dc, 0);
+    label1(F_BODY, LT("gui.start_sub"), CX0, CY0 + 50, CW, 22, C_DIM);
+    llay_b_start_area(sa);
+    card(sa[0], sa[1], sa[2], sa[3], NULL);
+    llay_b_start_hint(hn);
+    {
+        int rr = first_rule(kBig, 2);
+        if (!rr) {
+            rr = first_rule(kVr, 1);
+        }
+        if (rr) {
+            paint_reason(rr, hn[0], hn[1], hn[2], hn[3]);
+        } else {
+            label1(F_TINY, g_vr_hint, hn[0], hn[1], hn[2], hn[3], C_DIM);
+        }
+    }
+    if (!g_upd_ask && g_upd_res.result != LUPD_R_NEWER) { /* Platz der Update-Karte */
+        int x = sa[0] + 372, w = sa[0] + sa[2] - 18 - x;
+        dot(x, sa[1] + 27, g_sum[0].col);
+        label1(F_CARD, LT(launch_blocked() ? "gui.play_setup" : "gui.sum_title"), x + 18,
+               sa[1] + 18, w - 18, 26, C_TEXT);
+        label(F_SMALL, g_sum[0].value, x, sa[1] + 52, w, 40, C_DIM);
+        label(F_TINY, LT("gui.foot_hint"), x, sa[1] + 98, w, 34, C_FAINT);
+    }
+    upd_paint_play();
+    if (play_setup_shown()) { /* wie paint_play (Einrichtungskarte) */
+        psrow_t rw[PSR_N];
+        int k;
+        play_setup_rows(rw);
+        card(CX0, CY0 + 216, CW, 232, LT("gui.play_setup"));
+        for (k = 0; k < PSR_N; k++) {
+            if (!rw[k].text) {
+                continue;
+            }
+            if (rw[k].reason) {
+                paint_reason(3, rw[k].x, rw[k].y, rw[k].w, rw[k].h);
+            } else if (rw[k].single) {
+                label1(rw[k].font, rw[k].text, rw[k].x, rw[k].y, rw[k].w, rw[k].h,
+                       rw[k].col);
+            } else {
+                label(rw[k].font, rw[k].text, rw[k].x, rw[k].y, rw[k].w, rw[k].h,
+                      rw[k].col);
+            }
+        }
+        return;
+    }
+    for (i = 0; i < SUM_N && i < LLAY_BCARD_N - 1; i++) {
+        llay_b_card(i, r);
+        card(r[0], r[1], r[2], r[3], NULL);
+        dot(r[0] + 18, r[1] + 20, g_sum[i].col);
+        label1(F_SEMI, g_sum[i].label, r[0] + 36, r[1] + 13, r[2] - 54, 24, C_TEXT);
+        label(F_SMALL, g_sum[i].value, r[0] + 18, r[1] + 44, r[2] - 36, 44, C_DIM);
+    }
+    llay_b_card(LLAY_BCARD_N - 1, r);
+    if (!g_rr[26].active) { /* Primaerfeuer (nur Tastatur-Standardbelegung, R26) */
+        L_fill(r[0], r[1], r[2], r[3], C_ACCENT, 46, 10);
+        L_ring(r[0], r[1], r[2], r[3], C_ACCENT, 140, 10);
+        label1(F_SEMI, LT("gui.primfeuer"), r[0] + 18, r[1] + 13, r[2] - 36, 24, C_ACCENT_HI);
+        label(F_BODY, LT("gui.primfeuer_hint"), r[0] + 18, r[1] + 44, r[2] - 36, 72, C_TEXT);
+    } else {
+        card(r[0], r[1], r[2], r[3], NULL);
+        label(F_SMALL, g_sum[4].value, r[0] + 18, r[1] + 44, r[2] - 36, 44, C_DIM);
+    }
+}
+
 static void paint_play(void)
 {
     int i, y;
     static const int kBig[] = { 4, 3 }, kVr[] = { 5 };
+    if (lay_b()) { /* W281 */
+        paint_play_b();
+        return;
+    }
     SetTextCharacterExtra(g_bb.dc, SX(3));
     L_text(F_HERO, "STEEL BATTALION", CX0 - 2, CY0 - 2, CW, 50, C_TEXT,
            DT_LEFT | DT_SINGLELINE | DT_VCENTER);
@@ -1895,6 +2333,9 @@ static void paint_play(void)
         }
     }
     upd_paint_play(); /* W250 */
+    if (g_orig_mask && !play_setup_shown()) { /* W278: Hinweis statt Primaerfeuer (neue Installation = Original, ohne Hinweis) */
+        orig_paint_play(0);
+    } else
     /* Primaerfeuer deutlich (nur Tastatur-Standardbelegung, R26) */
     if (!g_rr[26].active) {
         L_fill(CX0, CY0 + 456, CW, 40, C_ACCENT, 46, 10);
@@ -1948,42 +2389,47 @@ static int paint_reason_alert(int rule, int x, int y, int w, int h)
  * Render-Skalierung). */
 static void paint_display(void)
 {
-    /* Nutzer 14.11.: Erklaerzeilen weg (nur Warnungen/Sperren), Leistung links
-     * (Bildrate + Render-Skalierung), Bildformat-Karte rechts in voller Hoehe
-     * mit grosser Vorschau. */
-    card(CX0, CY0, COLW, 196, LT("gui.disp_screen"));
+    /* Nutzer 14.11.: Erklaerzeilen weg (nur Warnungen/Sperren). W291 ESC-REWORK:
+     * links eine Karte "Anzeige" (Bildschirm, Bildrate, Render-Skalierung) und
+     * VR, rechts "Breitbild"; Verlauf und Cockpit-Ansicht nur mit "Erweitert"
+     * (wie das ESC-Menue). */
+    int adv = g_show_adv, py = disp_preview_y(); /* W296: Verlauf bei "Fade out" auch ohne Erweitert */
+    card(CX0, CY0, COLW, 300, LT("gui.grp_display"));
     label1(F_SMALL, LT("gui.gfx_winmode"), CX0 + 18, CY0 + 44, 100, 30, C_DIM);
     label1(F_SMALL, LT("gui.disp_hz"), CX0 + 18, CY0 + 80, 100, 30, C_DIM);
     label1(F_SMALL, LT("gui.gfx_res"), CX0 + 18, CY0 + 116, 100, 30, C_DIM);
     label1(F_SMALL, LT("gui.gfx_wh"), CX0 + 18, CY0 + 152, 100, 30, C_DIM);
     label1(F_BODY, U8_TIMES, CX0 + 215, CY0 + 152, 14, 30, C_DIM);
-
-    card(CX0, CY0 + 208, COLW, 150, LT("gui.disp_perf"));
-    label1(F_SMALL, LT("gui.gfx_ipfps"), CX0 + 18, CY0 + 252, 100, 30, C_DIM);
-    label1(F_SMALL, LT("gui.rs_label"), CX0 + 18, CY0 + 288, 100, 30, C_DIM);
-    if (!paint_reason_alert(10, CX0 + 18, CY0 + 322, COLW - 36, 30)) {
-        paint_reason_alert(9, CX0 + 18, CY0 + 322, COLW - 36, 30);
+    label1(F_SMALL, LT("gui.gfx_ipfps"), CX0 + 18, CY0 + 188, 100, 30, C_DIM);
+    label1(F_SMALL, LT("gui.rs_label"), CX0 + 18, CY0 + 224, 100, 30, C_DIM);
+    if (!paint_reason_alert(10, CX0 + 18, CY0 + 258, COLW - 36, 30)) {
+        paint_reason_alert(9, CX0 + 18, CY0 + 258, COLW - 36, 30);
     }
 
-    card(CX0, CY0 + 370, COLW, 118, LT("gui.disp_vr"));
-    label1(F_SMALL, LT("gui.gfx_vr"), CX0 + 18, CY0 + 414, 100, 30, C_DIM);
-    label1(F_SMALL, LT("gui.vr_perf"), CX0 + 18, CY0 + 448, 100, 30, C_DIM); /* W183 */
+    card(CX0, CY0 + 312, COLW, 118, LT("gui.disp_vr"));
+    label1(F_SMALL, LT("gui.gfx_vr"), CX0 + 18, CY0 + 356, 100, 30, C_DIM);
+    label1(F_SMALL, LT("gui.vr_perf"), CX0 + 18, CY0 + 390, 100, 30, C_DIM); /* W183 */
 
-    card(COL2, CY0, COLW, 488, LT("gui.gfx_aspect"));
+    card(COL2, CY0, COLW, 488, LT("gui.disp_wide"));
+    /* W278/W287: Breitbild/Cockpit-Ansicht experimentell = Symbol ID_XEXP_DISP */
     /* R13: festes Bildformat (S3.10) als Info, kein Schalter */
     label(F_SMALL, g_rr[13].text, COL2 + 18, CY0 + 42, COLW - 36, 52, C_DIM);
     label1(F_SMALL, LT("gui.gfx_edge"), COL2 + 18, CY0 + 100, 100, 30, C_DIM);
-    label1(F_SMALL, LT("gui.gfx_edgefade"), COL2 + 18, CY0 + 136, 100, 30, C_DIM);
-    if (!paint_reason(11, COL2 + 120, CY0 + 168, COLW - 138, 16)) {
-        paint_reason(12, COL2 + 120, CY0 + 168, COLW - 138, 16);
+    if (adv || edge_fade_shown()) { /* W296 PRESET-ORIG: Verlaufszeile gehoert zu "Fade out" */
+        label1(F_SMALL, LT("gui.gfx_edgefade"), COL2 + 18, CY0 + 136, 100, 30, C_DIM);
+        if (!paint_reason(11, COL2 + 120, CY0 + 168, COLW - 138, 16)) {
+            paint_reason(12, COL2 + 120, CY0 + 168, COLW - 138, 16);
+        }
     }
-    /* W191 UW-PERSP: Cockpit-Perspektive; R34 nur als Sperre (VR) */
-    label1(F_SMALL, LT("gui.cpersp"), COL2 + 18, CY0 + 186, 100, 30, C_DIM);
-    label1(F_SMALL, LT("gui.cpanini"), COL2 + 18, CY0 + 220, 100, 30, C_DIM); /* W227 */
-    label1(F_SMALL, LT("gui.cwidth"), COL2 + 18, CY0 + 254, 100, 30, C_DIM); /* W235 */
-    paint_reason_alert(34, COL2 + 18, CY0 + 286, COLW - 36, 16);
-    paint_preview(COL2 + 18, CY0 + 308, COLW - 36, 104);
-    label(F_SMALL, g_aspect_info, COL2 + 18, CY0 + 418, COLW - 36, 64, C_TEXT);
+    if (adv) {
+        /* W191 UW-PERSP: Cockpit-Perspektive; R34 nur als Sperre (VR) */
+        label1(F_SMALL, LT("gui.cpersp"), COL2 + 18, CY0 + 186, 100, 30, C_DIM);
+        label1(F_SMALL, LT("gui.cpanini"), COL2 + 18, CY0 + 220, 100, 30, C_DIM); /* W227 */
+        label1(F_SMALL, LT("gui.cwidth"), COL2 + 18, CY0 + 254, 100, 30, C_DIM); /* W235 */
+        paint_reason_alert(34, COL2 + 18, CY0 + 286, COLW - 36, 16);
+    }
+    paint_preview(COL2 + 18, CY0 + py, COLW - 36, 104);
+    label(F_SMALL, g_aspect_info, COL2 + 18, CY0 + py + 110, COLW - 36, 64, C_TEXT);
 }
 
 /* W171: Seite Grafik (Voreinstellungen, Bild, Remaster, HUD). */
@@ -2001,6 +2447,8 @@ static void paint_gfx(void)
     lgp_mask_t lock = gfx_lock_now(), dm = 0;
     int p = lcfg_gfx_preset(&g_gfx, lock);
     int fxbits = 0, k;
+    lay_gfx_t l;
+    lay_gfx(&l);
     if (p == LGP_CUSTOM) {
         lcfg_gfx_diff(&g_gfx, lcfg_gfx_base(&g_gfx, lock), lock, &dm);
     }
@@ -2009,11 +2457,17 @@ static void paint_gfx(void)
             fxbits = 1;
         }
     }
-    card(CX0, CY0, COLW, 340, LT("gui.gfx_preset_card"));
+    /* W291 ESC-REWORK: Karten mit den Gruppennamen des ESC-Menues in dessen
+     * Reihenfolge: links Voreinstellung + Texturen, rechts Cockpit & Monitor,
+     * Welt & Licht, Effekte. Feinregler nur mit "Erweiterte Einstellungen". */
+    card(CX0, CY0, COLW, 304, LT("gui.gfx_preset_card"));
     if (g_rr[20].active) { /* Muster D an der Voreinstellung */
-        L_text(F_TINY, g_rr[20].text2, CX0 + 18, CY0 + 286, COLW - 36, 18, C_ACCENT_HI,
+        L_text(F_TINY, g_rr[20].text2, CX0 + 18, CY0 + 284, COLW - 36, 18, C_ACCENT_HI,
                DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
     }
+
+    card(CX0, LAY_TEX_Y, COLW, 124, LT("gui.gfx_tex"));
+    gfx_label("gui.gfx_tex", CX0, LAY_TEX_Y + 44, (dm & ((lgp_mask_t)1 << LGK_HD)) != 0);
     { /* Texturen-Zeile (Konzept 4.3): Quelle und Detail, Sprung zu Packs */
         char t[240];
         if (!lcfg_gfx_value(&g_gfx, LGK_HD)) {
@@ -2024,37 +2478,30 @@ static void paint_gfx(void)
             _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.gfx_tex_on"), packs_level_word(),
                         g_tex_src);
         }
-        label(F_TINY, t, CX0 + 18, CY0 + 304, COLW - 36 - 104, 30, C_DIM);
+        label(F_TINY, t, CX0 + 18, LAY_TEX_Y + 80, COLW - 36 - 104, 30, C_DIM);
+    }
+    label(F_SMALL, LT("gui.gfx_esc_hint"), CX0 + 4, LAY_TEX_Y + 130, COLW - 8, 20, C_FAINT);
+
+    card(COL2, l.cm_y, COLW, l.cm_h, LT("gui.grp_cockpit"));
+    /* W287: Symbol ID_XEXP_HUD */
+    gfx_label("gui.gfx_monitor", COL2, l.cm_y + 44, (dm & ((lgp_mask_t)1 << LGK_MFX)) != 0); /* W252 */
+
+    card(COL2, l.wl_y, COLW, l.wl_h, LT("gui.grp_world"));
+    /* W287: Symbol ID_XEXP_WORLD */
+    gfx_label("gui.gfx_light", COL2, l.wl_y + 44, (dm & ((lgp_mask_t)1 << LSHX_SHADING)) != 0);
+    gfx_label("gui.gfx_shadow", COL2, l.wl_y + 80, (dm & ((lgp_mask_t)1 << LSHX_SHADOW)) != 0);
+    if (g_show_adv) {
+        gfx_label("gui.gfx_soft", COL2, l.wl_y + 116, (dm & ((lgp_mask_t)1 << LSHX_SOFT)) != 0);
+    }
+    if (!paint_reason(15, COL2 + 18, l.wl_y + l.wl_rr, COLW - 36, 16) && g_show_adv) {
+        paint_reason(16, COL2 + 18, l.wl_y + l.wl_rr, COLW - 36, 16);
     }
 
-    card(CX0, CY0 + 352, COLW, 120, LT("gui.gfx_image"));
-    gfx_label("gui.gfx_aa", CX0, CY0 + 396, (dm & ((lgp_mask_t)1 << LSHX_AA)) != 0);
-    gfx_label("gui.gfx_monitor", CX0, CY0 + 432, (dm & ((lgp_mask_t)1 << LGK_MFX)) != 0); /* W252 */
-    label(F_SMALL, LT("gui.gfx_esc_hint"), CX0 + 4, CY0 + 480, COLW - 8, 20,
-          C_FAINT);
-
-    card(COL2, CY0, COLW, 292, LT("gui.gfx_world"));
-    gfx_label("gui.gfx_light", COL2, CY0 + 44, (dm & ((lgp_mask_t)1 << LSHX_SHADING)) != 0);
-    gfx_label("gui.gfx_shadow", COL2, CY0 + 80, (dm & ((lgp_mask_t)1 << LSHX_SHADOW)) != 0);
-    gfx_label("gui.gfx_soft", COL2, CY0 + 116, (dm & ((lgp_mask_t)1 << LSHX_SOFT)) != 0);
-    gfx_label("gui.gfx_fx", COL2, CY0 + 152, fxbits);
-    label(F_TINY, LT("gui.gfx_fx_txt"), COL2 + 120, CY0 + 184, COLW - 138, 28, C_DIM);
-    gfx_label("gui.gfx_tex", COL2, CY0 + 212, (dm & ((lgp_mask_t)1 << LGK_HD)) != 0);
-    { /* Begruendungen (Muster A/D): hoechstens zwei Zeilen; eine allein
-       * darf umbrechen */
-        static const int rr[3] = { 20, 15, 16 };
-        int i, y = CY0 + 248, na = 0;
-        for (i = 0; i < 3; i++) {
-            na += g_rr[rr[i]].active;
-        }
-        for (i = 0; i < 3 && y < CY0 + 284; i++) {
-            y += paint_reason(rr[i], COL2 + 18, y, COLW - 36, na == 1 ? 34 : 16) ? 18 : 0;
-        }
-    }
-
-    card(COL2, CY0 + 304, COLW, 192, LT("gui.gfx_hud"));
-    label(F_SMALL, LT("gui.rem_label_txt"), COL2 + 18, CY0 + 384, COLW - 36, 104,
-          C_DIM);
+    card(COL2, l.fx_y, COLW, l.fx_h, LT("gui.gfx_fx"));
+    /* W287: Symbol ID_XEXP_IMAGE */
+    gfx_label("gui.gfx_fx", COL2, l.fx_y + 44, fxbits);
+    gfx_label("gui.gfx_aa", COL2, l.fx_y + 80, (dm & ((lgp_mask_t)1 << LSHX_AA)) != 0);
+    paint_reason(20, COL2 + 18, l.fx_y + 112, COLW - 36, 16);
 }
 
 /* W195 PHOTO-MODE: Standard-Fotoordner (wie der Client: <Nutzerdaten>\Screenshots, legacy <Client>\out\Screenshots) */
@@ -2108,26 +2555,30 @@ static void extras_dir(char *out, size_t cap)
 
 static void paint_audio(void)
 {
-    card(CX0, CY0, CW, 140, LT("gui.audio_card"));
-    label(F_SMALL, LT("gui.audio_dev_txt"), CX0 + 18, CY0 + 90, CW - 36, 40,
+    /* W290: Ton und Spieltempo nebeneinander, darunter die groessere Karte "Fotos & Screenshots" */
+    card(CX0, CY0, COLW, 140, LT("gui.audio_card"));
+    label(F_SMALL, LT("gui.audio_dev_txt"), CX0 + 18, CY0 + 86, COLW - 36, 48,
           C_DIM);
-    /* W195 PHOTO-MODE: Karte "Extras" (Fotoordner, Standard-Aufnahmeaufloesung, Format) */
-    card(CX0, CY0 + 152, CW, 228, LT("gui.extras_card"));
+    /* W234 PAL50: Karte "Spieltempo" (Schalter + kurze Erklaerung) */
+    card(COL2, CY0, COLW, 140, LT("gui.pal50_card"));
+    label(F_TINY, LT("gui.pal50_txt"), COL2 + 18, CY0 + 86, COLW - 36, 48, C_DIM);
+    /* W195 PHOTO-MODE / W290 QUICK-SHOT: Karte "Fotos & Screenshots" (eine Konfiguration fuer Fotomodus und
+     * Schnell-Screenshot: Ordner, Ansicht, Groesse, Format, Bildformat der Aussenwelt; Replays & Video-Export) */
+    card(CX0, CY0 + 152, CW, 344, LT("gui.extras_card"));
     label1(F_TINY, LT("gui.extras_dir"), CX0 + 18, CY0 + 190, CW - 36, 16, C_DIM);
-    label1(F_SMALL, LT("gui.extras_res"), CX0 + 18, CY0 + 250, 170, 30, C_DIM);
-    label1(F_SMALL, LT("gui.extras_fmt"), CX0 + 380, CY0 + 250, 70, 30, C_DIM);
-    label1(F_SMALL, LT("gui.extras_asp"), CX0 + 18, CY0 + 290, 170, 30, C_DIM);
+    label1(F_SMALL, LT("gui.extras_view"), CX0 + 18, CY0 + 250, 110, 30, C_DIM);
+    label1(F_SMALL, LT("gui.extras_res"), CX0 + 372, CY0 + 250, 66, 30, C_DIM);
+    label1(F_SMALL, LT("gui.extras_fmt"), CX0 + 18, CY0 + 290, 110, 30, C_DIM);
+    label1(F_SMALL, LT("gui.extras_asp"), CX0 + 250, CY0 + 290, 188, 30, C_DIM);
+    label1(F_TINY, LT("gui.extras_rp"), CX0 + 18, CY0 + 330, CW - 36, 16, C_DIM);
     {
         char d[600], t[900];
         extras_default_dir(d, sizeof d);
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.extras_txt"), d);
-        if (!paint_reason(33, CX0 + 18, CY0 + 332, CW - 36, 44)) { /* W195 R33: Ordner nicht nutzbar */
-            label(F_TINY, t, CX0 + 18, CY0 + 332, CW - 36, 44, C_DIM);
+        if (!paint_reason(33, CX0 + 18, CY0 + 420, CW - 36, 44)) { /* W195 R33: Ordner nicht nutzbar */
+            label(F_TINY, t, CX0 + 18, CY0 + 420, CW - 36, 44, C_DIM);
         }
     }
-    /* W234 PAL50: Karte "Spieltempo" (Schalter + kurze Erklaerung) */
-    card(CX0, CY0 + 390, CW, 106, LT("gui.pal50_card"));
-    label(F_TINY, LT("gui.pal50_txt"), CX0 + 18, CY0 + 464, CW - 36, 30, C_DIM);
 }
 
 static void paint_ctrl(void)
@@ -2155,6 +2606,10 @@ static void paint_ctrl(void)
     label1(F_SMALL, LT("gui.ctl_sens"), COL2 + COLW - 18 - 54 - 48, CY0 + 108,
            48, 30, C_DIM);
     paint_reason(24, COL2 + 18, CY0 + 142, COLW - 36, 16);
+    /* W271 STICK-RELATIVE: Stick-Zielen wie die Maus-Zeile */
+    label1(F_SMALL, LT("gui.ctl_stick"), COL2 + 18, CY0 + 228, 56, 30, C_DIM);
+    label1(F_SMALL, LT("gui.ctl_sens"), COL2 + COLW - 18 - 54 - 48, CY0 + 228,
+           48, 30, C_DIM);
 }
 
 /* Erweitert: Diagnose-Zeile (Bezeichnung klein, Wert darunter). */
@@ -2419,9 +2874,29 @@ static void adv_saves_transfer(int exporting)
     }
 }
 
+/* Erweitert, rechte Spalte oben: Feinabstimmung (VSync, FPS-Grenze) und
+ * Launcher (Hintergrund, Update-Pruefung). Gilt fuer beide Spiele
+ * (W293: auch im Bereich LoC sichtbar). */
+static void paint_adv_shared(void)
+{
+    card(COL2, CY0, COLW, 124, LT("gui.adv_finetune"));
+    label1(F_SMALL, LT("gui.adv_vsync"), COL2 + 18, CY0 + 44, 150, 30, C_DIM);
+    label1(F_SMALL, LT("gui.adv_fpslimit"), COL2 + 18, CY0 + 82, 150, 30, C_DIM);
+    card(COL2, CY0 + 136, COLW, 108, LT("gui.adv_launcher"));
+    if (!g_upd_ver[0]) { /* W250: Build ohne Release-Version -> nur Hinweis */
+        label(F_TINY, LT("gui.upd_dev"), COL2 + 18, CY0 + 208, COLW - 36, 30, C_FAINT);
+    }
+}
+
+static void paint_loc_adv(void); /* W293: Bereich LoC (Block "W276 LOCTAB") */
+
 static void paint_adv(void)
 {
     char t[1400];
+    if (g_game == LGAME_LOC) { /* W293 LOC-LAYOUT: LoC-Karten links, gemeinsame rechts */
+        paint_loc_adv();
+        return;
+    }
     /* Spieldateien (Ordner-Modus, Konzept 4.7) */
     card(CX0, CY0, COLW, 184, LT("gui.adv_files"));
     label1(F_TINY, LT("gui.adv_files_txt"), CX0 + 18, CY0 + 38, COLW - 36, 16, C_DIM);
@@ -2459,13 +2934,7 @@ static void paint_adv(void)
         label1(F_TINY, g_prof_info, CX0 + 18, CY0 + 479, COLW - 36, 12, C_DIM);
     }
 
-    card(COL2, CY0, COLW, 124, LT("gui.adv_finetune"));
-    label1(F_SMALL, LT("gui.adv_vsync"), COL2 + 18, CY0 + 44, 150, 30, C_DIM);
-    label1(F_SMALL, LT("gui.adv_fpslimit"), COL2 + 18, CY0 + 82, 150, 30, C_DIM);
-    card(COL2, CY0 + 136, COLW, 108, LT("gui.adv_launcher"));
-    if (!g_upd_ver[0]) { /* W250: Build ohne Release-Version -> nur Hinweis */
-        label(F_TINY, LT("gui.upd_dev"), COL2 + 18, CY0 + 208, COLW - 36, 30, C_FAINT);
-    }
+    paint_adv_shared();
 
     card(COL2, ADV_DIAG_Y, COLW, CY0 + 496 - ADV_DIAG_Y, LT("gui.adv_diag"));
     /* W190 SAVE-LOCK: Schalter "Spielstaende schuetzen (Testhilfe)" oben in der
@@ -2494,7 +2963,7 @@ static void paint_adv(void)
 static void paint_packs(void); /* W148: unten definiert (Packs-Engine) */
 static void compose(void)
 {
-    int W = SX(WIN_W), H = SX(WIN_H), i;
+    int W = SX(lay_tw()), H = SX(lay_th()), i; /* W281 */
     if (!g_base.px || g_base.w != W || g_base.h != H) {
         base_build();
     }
@@ -2505,13 +2974,14 @@ static void compose(void)
     memcpy(g_bb.px, g_base.px, (size_t)W * H * 4);
     g_bb_setup = g_page == P_PLAY ? play_setup_shown() : -1; /* W220 */
     switch (g_page) {
-    case P_PLAY: paint_play(); break;
+    case P_PLAY: if (g_game == LGAME_LOC) { paint_loc_play(); } else { paint_play(); } break; /* W276 */
     case P_DISPLAY: paint_display(); break;
     case P_GFX: paint_gfx(); break;
     case P_PACKS: paint_packs(); break;
     case P_CTRL: paint_ctrl(); break;
     case P_AUDIO: paint_audio(); break;
     case P_ADV: paint_adv(); break;
+    case P_ALPHA: paint_alpha(); break; /* W272 */
     }
     /* Eingabefelder: Rahmen (Fokus = Akzent) */
     for (i = 0; i < g_ui_n; i++) {
@@ -2521,6 +2991,16 @@ static void compose(void)
         }
         if (u->kind == K_EDIT || u->kind == K_MEMO) {
             int en = IsWindowEnabled(u->h);
+            if (lay_b()) { /* W281: Rahmen = Element-Rechteck */
+                RECT q;
+                int t = SX(1) < 1 ? 1 : SX(1);
+                ui_px_rect(u, &q);
+                cv_fill(&g_bb, q.left, q.top, q.right - q.left, q.bottom - q.top, C_INPUT,
+                        255, SX(6));
+                cv_ring(&g_bb, q.left, q.top, q.right - q.left, q.bottom - q.top,
+                        g_focus_id == u->id ? C_ACCENT : C_INPUT_BRD, en ? 255 : 120, SX(6), t);
+                continue;
+            }
             L_fill(u->x, u->y, u->w, u->h_, C_INPUT, 255, 6);
             L_ring(u->x, u->y, u->w, u->h_,
                    g_focus_id == u->id ? C_ACCENT : C_INPUT_BRD,
@@ -2531,7 +3011,7 @@ static void compose(void)
      * Grund unter der Statuszeile, Statuszeile darueber. */
     {
         int lw = WIN_W - NAV_W - 28 - 330 - (g_undo_on ? 122 : 0);
-        int blk = g_page != P_PLAY && launch_blocked();
+        int blk = g_page != P_PLAY && g_game != LGAME_LOC && launch_blocked(); /* W276: SB-Sperre nicht im Bereich LoC */
         if (blk) {
             static const int kBlk[] = { 4, 3 };
             paint_reason(first_rule(kBlk, 2), NAV_W + 28, WIN_H - 22, lw, 16);
@@ -2540,7 +3020,7 @@ static void compose(void)
         wchar_t *wt = u8_wdup(g_status);
         if (wt) {
             RECT r;
-            int bw = SX(lw), th;
+            int bw = SX(lw + lay_tw() - WIN_W), th; /* W281: b breiter */
             int area = blk ? SX(BOT_H) - SX(22) : SX(BOT_H);
             r.left = 0;
             r.top = 0;
@@ -2553,8 +3033,8 @@ static void compose(void)
             if (th > area - SX(8)) {
                 th = area - SX(8);
             }
-            cv_textw(&g_bb, g_f[F_SMALL], wt, -1, SX(NAV_W + 28),
-                     SX(WIN_H - BOT_H) + (area - th) / 2, bw, th,
+            cv_textw(&g_bb, g_f[F_SMALL], wt, -1, SX(lay_nav() + 28),
+                     SX(lay_th() - BOT_H) + (area - th) / 2, bw, th,
                      g_status_kind == 2   ? C_ERR
                      : g_status_kind == 1 ? C_OK
                                           : C_DIM,
@@ -2579,10 +3059,7 @@ static void redraw_rect(int x, int y, int w, int h)
 {
     RECT r;
     compose();
-    r.left = SX(x);
-    r.top = SX(y);
-    r.right = SX(x + w);
-    r.bottom = SX(y + h);
+    lay_px(x, y, w, h, 1, 1, &r); /* W281 */
     if (g_hwnd) {
         InvalidateRect(g_hwnd, &r, FALSE);
     }
@@ -2626,6 +3103,95 @@ static void set_status(const char *msg)
 /* ------------------------------------------------------------------ */
 /* Eigene Knoepfe zeichnen                                             */
 /* ------------------------------------------------------------------ */
+/* ------------------------------------------------------------------ */
+/* W287 EXP-ICON: Experimentell-Symbol (Kolben, Akzentfarbe) und Warn-  */
+/* Symbol (Dreieck, gelb). Ohne passende Symbolschrift: kurze Plakette  */
+/* "EXP" bzw. "!" im Ring. Die Bedeutung haengt nie nur an der Farbe:   */
+/* Form + Tooltip + zugaenglicher Name (Fenstertext).                   */
+/* ------------------------------------------------------------------ */
+static int xicon_glyph_ok(int warn)
+{
+    return warn ? g_has_icons : g_icon_fluent;
+}
+
+static void xicon_paint(canvas_t *c, int x, int y, int w, int h, int warn, int big)
+{
+    COLORREF col = warn ? C_WARN : C_ACCENT_HI;
+    if (xicon_glyph_ok(warn)) {
+        wchar_t ic = warn ? 0xE7BA : 0xF196;
+        cv_textw(c, g_f[big ? F_ICON : F_ICONSM], &ic, 1, x, y, w, h, col,
+                 DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        return;
+    }
+    if (warn) {
+        int d = (w < h ? w : h) - SX(4);
+        cv_ring(c, x + (w - d) / 2, y + (h - d) / 2, d, d, col, 255, d / 2, SX(2) < 2 ? 2 : SX(2));
+        cv_textw(c, g_f[F_SEMI], L"!", 1, x, y, w, h, col, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    } else {
+        wchar_t t[16];
+        int ph = SX(16) < h ? SX(16) : h;
+        u8_to_w(LT("gui.exp_short"), t, 16);
+        cv_fill(c, x, y + (h - ph) / 2, w, ph, col, 40, SX(3));
+        cv_ring(c, x, y + (h - ph) / 2, w, ph, col, 150, SX(3), 1);
+        cv_textw(c, g_f[F_TINY], t, -1, x, y, w, h, col, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+/* Gruppen, die auf einer Seite eingestellt werden (Warn-Symbol in der
+ * Navigation). Effect Packs: Packs; Breitbild/Cockpit-Ansicht: Anzeige;
+ * Rest (Licht, Nachbearbeitung, Effekte, Monitor, HD, Cockpit, HUD): Grafik. */
+static unsigned xwarn_page_mask(int page)
+{
+    unsigned wide = 1u << SB_OFG_WIDE, packs = 1u << SB_OFG_PACKS;
+    switch (page) {
+    case P_DISPLAY: return g_orig_mask & wide;
+    case P_GFX: return g_orig_mask & ~(wide | packs);
+    case P_PACKS: return g_game == LGAME_LOC ? 0 : (g_orig_mask & packs);
+    default: return 0;
+    }
+}
+
+/* Preset (LGP_*) experimentell? (Tabelle sb_origflag.h ueber lorig;
+ * die Presets sind fest, darum einmal gerechnet) */
+static int xexp_preset(int p)
+{
+    static int done;
+    static unsigned m[LGP_CUSTOM];
+    if (!done) {
+        int i;
+        for (i = 0; i < LGP_CUSTOM; i++) {
+            m[i] = lorig_preset_mask(i);
+        }
+        done = 1;
+    }
+    return p >= 0 && p < LGP_CUSTOM && m[p] != 0;
+}
+
+/* " (experimental)": steht im Fenstertext der experimentellen Presets
+ * (zugaenglicher Name), gezeichnet wird statt dessen das Symbol. */
+static void xexp_sfx(char *out, size_t cap)
+{
+    _snprintf_s(out, cap, _TRUNCATE, " (%s)", LT("gui.exp_word"));
+}
+
+/* Sichtbare Laenge des Titels eines Preset-Optionsfelds (ohne Suffix). */
+static int xexp_title_len(int id, const wchar_t *txt, int n1)
+{
+    char s8[80];
+    wchar_t sfx[80];
+    int sl;
+    if (id < ID_GP0 || id >= ID_GP0 + LGP_CUSTOM || !xexp_preset(id - ID_GP0)) {
+        return n1;
+    }
+    xexp_sfx(s8, sizeof s8);
+    u8_to_w(s8, sfx, 80);
+    sl = (int)wcslen(sfx);
+    if (sl > 0 && n1 >= sl && wcsncmp(txt + n1 - sl, sfx, sl) == 0) {
+        return n1 - sl;
+    }
+    return n1;
+}
+
 static void draw_item(const DRAWITEMSTRUCT *d)
 {
     uictl_t *u = ui_by_hwnd(d->hwndItem);
@@ -2678,11 +3244,24 @@ static void draw_item(const DRAWITEMSTRUCT *d)
                      sel ? C_ACCENT_HI : C_DIM,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
         }
-        cv_textw(&c, sel ? g_f[F_SEMI] : g_f[F_BODY], txt, n,
-                 SX(g_has_icons ? 46 : 18), 0, w, h, sel ? C_TEXT : C_DIM,
-                 DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+        { /* W287: zweite Zeile = zugaenglicher Hinweis (nicht gezeichnet), Warn-Symbol rechts */
+            wchar_t *nl = wcschr(txt, L'\n');
+            int warn = xwarn_page_mask(u->id - ID_NAV0) != 0;
+            if (nl) {
+                n = (int)(nl - txt);
+            }
+            cv_textw(&c, sel ? g_f[F_SEMI] : g_f[F_BODY], txt, n,
+                     SX(g_has_icons ? 46 : 18), 0, w - SX(g_has_icons ? 46 : 18) - (warn ? SX(34) : 0), h,
+                     sel ? C_TEXT : C_DIM, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            if (warn) {
+                xicon_paint(&c, w - SX(32), 0, SX(24), h, 1, 0);
+            }
+        }
         break;
     }
+    case K_ICON: /* W287 */
+        xicon_paint(&c, 0, 0, w, h, u->id == ID_XWARN_SB || u->id == ID_XWARN_LOC, 1);
+        break;
     case K_TBMIN:
     case K_TBCLOSE: {
         if (u->hover) {
@@ -2724,7 +3303,7 @@ static void draw_item(const DRAWITEMSTRUCT *d)
         break;
     }
     case K_RADIO: { /* W173: Kreis + Titel, darunter Hilfe (gedimmt) */
-        int d0 = SX(18), rx = SX(2), ry = SX(3), tx = d0 + SX(14), n1 = n;
+        int d0 = SX(18), rx = SX(2), ry = SX(3), tx = d0 + SX(14), n1 = n, nt, xi = 0;
         wchar_t *nl = wcschr(txt, L'\n');
         COLORREF ring = u->checked ? C_ACCENT : RGB(120, 128, 140);
         if (nl) {
@@ -2742,9 +3321,24 @@ static void draw_item(const DRAWITEMSTRUCT *d)
             cv_ring(&c, 0, ry - SX(2), d0 + SX(4), d0 + SX(4), C_ACCENT_HI, 200,
                     d0 / 2 + SX(2), 1);
         }
-        cv_textw(&c, g_f[u->checked ? F_SEMI : F_BODY], txt, n1, tx, 0, w - tx, SX(24),
+        nt = xexp_title_len(u->id, txt, n1);
+        if (u->id >= ID_GP0 && u->id < ID_GP0 + LGP_CUSTOM && xexp_preset(u->id - ID_GP0)) {
+            /* W287: "(experimental)" bleibt im Fenstertext (zugaenglicher Name),
+             * gezeichnet wird statt dessen das Symbol hinter dem Namen */
+            SIZE sz;
+            SelectObject(c.dc, g_f[u->checked ? F_SEMI : F_BODY]);
+            GetTextExtentPoint32W(c.dc, txt, nt, &sz);
+            xi = sz.cx;
+            if (xi > w - tx - SX(36)) {
+                xi = w - tx - SX(36);
+            }
+        }
+        cv_textw(&c, g_f[u->checked ? F_SEMI : F_BODY], txt, nt, tx, 0, xi ? xi + SX(2) : w - tx, SX(24),
                  dis ? C_FAINT : C_TEXT,
                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        if (xi) {
+            xicon_paint(&c, tx + xi + SX(6), 0, xicon_glyph_ok(0) ? SX(22) : SX(30), SX(24), 0, 1);
+        }
         if (nl) {
             cv_textw(&c, g_f[F_TINY], nl + 1, n - n1 - 1, tx, SX(21), w - tx, h - SX(21),
                      C_DIM, DT_LEFT | DT_TOP | DT_WORDBREAK | DT_END_ELLIPSIS);
@@ -2834,6 +3428,26 @@ static unsigned get_num(int id)
     char b[32];
     ui_gettext(ctl(id), b, sizeof b);
     return (unsigned)atoi(b);
+}
+
+/* W281 LAUNCHER-SIZE / W287: Groessen von Layout A (Nutzerwahl 15.11.):
+ * Kompakt, Normal, Gross; Index = LLAY_SZ_*. Layout 0 und b bleiben nur
+ * ueber --layout bzw. cfg (Selbsttests). */
+static void lay_combo_fill(HWND c)
+{
+    static const char *const kSz[LLAY_SZ_N] = { "gui.lay_sz_compact", "gui.lay_sz_normal",
+                                                "gui.lay_sz_large" };
+    int sz;
+    if (!c) {
+        return;
+    }
+    g_updating++;
+    ComboBox_ResetContent(c);
+    for (sz = 0; sz < LLAY_SZ_N; sz++) {
+        combo_add(c, LT(kSz[sz]));
+    }
+    ComboBox_SetCurSel(c, g_lay.size);
+    g_updating--;
 }
 
 static void combo_add(HWND cb, const char *u8)
@@ -2966,12 +3580,23 @@ static void cwidth_fill(HWND c)
     ComboBox_SetCurSel(c, (sel >= 0 && sel < KCWIDTH_N) ? sel : 0);
 }
 
-static void edge_from_settings(const launcher_settings_t *s)
+/* W266 PRESET-EDGE: nur die drei Rand-Auswahlen (auch beim Waehlen eines Grafik-Presets). */
+static void edge_ui_set(int mode, int width, int strength)
 {
     g_updating++;
-    ComboBox_SetCurSel(ctl(ID_EDGE), (s->edge_mode >= 0 && s->edge_mode <= 2) ? s->edge_mode : 0);
-    edge_pct_set(ctl(ID_EDGE_W), kEdgeW, KEDGEW_N, s->edge_fade_width, LT("gui.edge_w_fmt"));
-    edge_pct_set(ctl(ID_EDGE_S), kEdgeS, KEDGES_N, s->edge_fade_strength, LT("gui.edge_s_fmt"));
+    ComboBox_SetCurSel(ctl(ID_EDGE), (mode >= 0 && mode <= 2) ? mode : 0);
+    edge_pct_set(ctl(ID_EDGE_W), kEdgeW, KEDGEW_N, width, LT("gui.edge_w_fmt"));
+    edge_pct_set(ctl(ID_EDGE_S), kEdgeS, KEDGES_N, strength, LT("gui.edge_s_fmt"));
+    g_updating--;
+    if (g_page == P_DISPLAY && ui_refresh_visibility()) { /* W296: Verlaufszeile folgt "Fade out" (Preset, Rueckgaengig) */
+        redraw_rect(COL2, CY0, COLW, 488);
+    }
+}
+
+static void edge_from_settings(const launcher_settings_t *s)
+{
+    edge_ui_set(s->edge_mode, s->edge_fade_width, s->edge_fade_strength);
+    g_updating++;
     ComboBox_SetCurSel(ctl(ID_CPERSP), cpersp_index(s->cockpit_persp)); /* W191 */
     ComboBox_SetCurSel(ctl(ID_CPANINI), cpersp_index(s->cockpit_panini));
     ComboBox_SetCurSel(ctl(ID_CWIDTH), (s->cockpit_width >= 0 && s->cockpit_width < KCWIDTH_N) ? s->cockpit_width
@@ -3626,7 +4251,9 @@ static const char ks_legacy_text[] =
     "pause = KEY:PAUSE\n"
     "feedback_shot = KEY:F11\n"
     "feedback_clip = KEY:F9\n"
-    "photo = KEY:F12\n";
+    "photo = KEY:SHIFT+KEY:F12\n"
+    "quick_shot = KEY:F12\n"
+    "orig_view = KEY:SHIFT+KEY:F8\n"; /* W283; W290 photo/quick_shot */
 
 /* Formen der Zeichnung. KS_LEDR/G/B = Taste mit roter/gruener/blauer
  * Leuchtleiste (3x3-Raster im Mittelblock). */
@@ -4937,7 +5564,10 @@ static void keyshtml_build(const char *memo, const char *profile,
         lctrl_bind_load_text(has_prof ? (prof_text ? prof_text : "") : ks_legacy_text, &bindings);
         for (i = 0; i < kh_n; ++i) {
             const char *action = !strcmp(kh_rows[i].act, LT("bind.feedback_shot")) ? "feedback_shot" :
-                                 !strcmp(kh_rows[i].act, LT("bind.feedback_clip")) ? "feedback_clip" : NULL;
+                                 !strcmp(kh_rows[i].act, LT("bind.feedback_clip")) ? "feedback_clip" :
+                                 !strcmp(kh_rows[i].act, LT("bind.orig_view")) ? "orig_view" : /* W283 */
+                                 !strcmp(kh_rows[i].act, LT("bind.photo")) ? "photo" :
+                                 !strcmp(kh_rows[i].act, LT("bind.quick_shot")) ? "quick_shot" : NULL; /* W290 */
             if (action) {
                 lctrl_bind_row_text(&bindings, lctrl_bind_elem_index(action), kh_rows[i].key, sizeof kh_rows[i].key);
             }
@@ -5423,6 +6053,37 @@ static void update_vr_button(void)
     _snprintf_s(g_vr_hint, sizeof g_vr_hint, _TRUNCATE, "%s", LT("gui.vr_hint"));
 }
 
+/* W282 ISSUE6: DirectInput-Joysticks auch in der Gamepad-Karte nennen
+ * (vorher nur im HOTAS-Dialog sichtbar). Einmal beim ersten Oeffnen der
+ * Steuerungsseite und nach dem HOTAS-Dialog; nie offscreen (Shots,
+ * Selbsttest: keine echte Hardware). */
+static int is_offscreen(HWND h);
+static char g_joy_card_names[400];
+static int g_joy_card_n;
+
+static void joy_card_scan(void)
+{
+    int i, n;
+    g_joy_card_n = 0;
+    g_joy_card_names[0] = 0;
+    if (g_o.shot || !g_hwnd || is_offscreen(g_hwnd) || ijoy_init() != 0) {
+        return;
+    }
+    n = ijoy_scan();
+    for (i = 0; i < n; i++) {
+        const ijoy_info_t *in = ijoy_info(i);
+        if (!in) {
+            break;
+        }
+        if (g_joy_card_names[0]) {
+            strcat_s(g_joy_card_names, sizeof g_joy_card_names, ", ");
+        }
+        strncat_s(g_joy_card_names, sizeof g_joy_card_names,
+                  in->product[0] ? in->product : in->name, _TRUNCATE);
+        g_joy_card_n = i + 1;
+    }
+}
+
 static int update_pad_status(void)
 {
     lctrl_pad_t p;
@@ -5434,6 +6095,13 @@ static int update_pad_status(void)
     } else {
         _snprintf_s(a, sizeof a, _TRUNCATE, LT("gui.pad_on"), port);
         lctrl_pad_format(&p, b, sizeof b);
+    }
+    if (g_joy_card_n > 0) { /* W282 */
+        size_t o = strlen(a);
+        _snprintf_s(a + o, sizeof a - o, _TRUNCATE, LT("gui.pad_joy_n"), g_joy_card_n);
+        if (port < 0) {
+            _snprintf_s(b, sizeof b, _TRUNCATE, LT("gui.pad_joy_names"), g_joy_card_names);
+        }
     }
     if (strcmp(a, g_pad_txt) == 0 && strcmp(b, g_padlive_txt) == 0) {
         return 0;
@@ -5491,38 +6159,17 @@ static void profile_name_from_ui(char *out, size_t cap)
  * anderen Werte (Feinregler aus dem ESC-Menue) bleiben erhalten und zaehlen
  * fuer Benutzerdefiniert. */
 
-/* Echte Bildrate fuer den Namen des Standards (PO 7.11.): 30 = Original,
- * sonst Zwischenbilder; exklusiv folgt sie der Bildwiederholrate (R9,
- * Client fs_interp_match=1). */
-static int gfx_fps(const launcher_settings_t *s)
-{
-    int fps = s->interp_fps > 0 ? s->interp_fps : (s->game_tick == 25 ? 25 : 30); /* W234 */
-    if (s->interp_fps == SB_FPS_AUTO) { /* W223: Monitor (auto) */
-        fps = sb_fps_auto_from_hz(g_disp_hz);
-    }
-    if (s->window_mode == 2 && (s->fs_interp_match || s->interp_fps == SB_FPS_AUTO) && s->interp_fps != 0) {
-        int hz = s->fs_hz > 0 ? s->fs_hz : g_disp_hz;
-        if (hz >= 60 && hz <= 240) {
-            fps = hz;
-        }
-    }
-    return fps;
-}
-
-/* Name eines Presets (LGP_*), Original mit Bildrate. */
+/* Name eines Presets (LGP_*). W296 PRESET-ORIG (Nutzer 15.11.): nur ein
+ * "Original" ohne Bildrate (es laeuft mit der Monitor-Rate), Spalte 3 heisst
+ * "Performance". Vorher (PO 7.11.) "Original - <echte Rate> FPS". */
 static void gfx_name(int p, const launcher_settings_t *s, char *out, size_t cap)
 {
-    if (p == LGP_ORIGINAL) {
-        launcher_settings_t original = *s;
-        original.interp_fps = 120;
-        original.fs_interp_match = 1;
-        _snprintf_s(out, cap, _TRUNCATE, LT("gui.gfx_p_orig"), gfx_fps(&original));
-    } else {
-        strcpy_s(out, cap, LT(p == LGP_SUBTLE ? "gui.gfx_p_subtle"
-                              : p == LGP_STRONG ? "gui.gfx_p_strong"
-                              : p == LGP_PERFORMANCE ? "gui.gfx_p_performance"
-                              : p == LGP_CLEAR ? "gui.gfx_p_clear" : "gui.gfx_p_custom"));
-    }
+    (void)s;
+    strcpy_s(out, cap, LT(p == LGP_ORIGINAL ? "gui.gfx_p_orig"
+                          : p == LGP_SUBTLE ? "gui.gfx_p_subtle"
+                          : p == LGP_STRONG ? "gui.gfx_p_strong"
+                          : p == LGP_PERFORMANCE ? "gui.gfx_p_performance"
+                          : p == LGP_CLEAR ? "gui.gfx_p_clear" : "gui.gfx_p_custom"));
 }
 
 /* Name des aktuellen Zustands (Bereitschaft, Statuszeile): Preset bzw.
@@ -5589,11 +6236,23 @@ static void gfx_sync_ui(void)
       g_gfx.rt_scale_dyn = sel == 0;
       g_gfx.rt_scale = sel >= 2 && sel <= 5 ? sel - 1 : 0;
     }
+    if (ctl(ID_EDGE)) { /* W266 PRESET-EDGE: Breitbild-Raender (Seite Anzeige) gehoeren zum Preset */
+        launcher_settings_t e = g_gfx;
+        edge_to_settings(&e);
+        g_gfx.edge_mode = e.edge_mode;
+        g_gfx.edge_fade_width = e.edge_fade_width;
+        g_gfx.edge_fade_strength = e.edge_fade_strength;
+    }
     p = lcfg_gfx_preset(&g_gfx, lock);
     g_updating++;
     for (i = 0; i <= LGP_CUSTOM; i++) {
         if (i < LGP_CUSTOM) {
             gfx_name(i, &cur, n, sizeof n);
+            if (xexp_preset(i)) { /* W287: zugaenglicher Name, sichtbar ist das Symbol */
+                char sfx[80];
+                xexp_sfx(sfx, sizeof sfx);
+                strncat_s(n, sizeof n, sfx, _TRUNCATE);
+            }
             _snprintf_s(t, sizeof t, _TRUNCATE, "%s\n%s", n,
                         LT(i == 0 ? "gui.gfx_p_orig_txt" : i == 1 ? "gui.gfx_p_subtle_txt"
                            : i == 2 ? "gui.gfx_p_strong_txt" : i == LGP_PERFORMANCE ? "gui.gfx_p_performance_txt"
@@ -5693,9 +6352,17 @@ static void ui_from_settings(const launcher_settings_t *s)
     ui_set_checked(ID_LIVE, s->audio_live);
     ui_set_checked(ID_SAVE_LOCK, s->save_lock); /* W190 */
     ui_settext(ctl(ID_PH_DIR), s->photo_dir); /* W195 PHOTO-MODE */
-    ComboBox_SetCurSel(ctl(ID_PH_RES), s->photo_scale == 8 ? 3 : s->photo_scale == 4 ? 2 : s->photo_scale == 2 ? 1 : 0);
+    { /* W290 QUICK-SHOT: Groesse Fenster/4K/8K/x2/x4/x8, Ansicht, Bildformat 4:3/breit, Replay-Schalter */
+        int sz = lcfg_photo_size_eff(s);
+        ComboBox_SetCurSel(ctl(ID_PH_RES), sz == -4 ? 1 : sz == -8 ? 2 : sz == 2 ? 3 : sz == 4 ? 4 : sz == 8 ? 5 : 0);
+        ComboBox_SetCurSel(ctl(ID_PH_VIEW), (s->photo_view >= 0 && s->photo_view <= 2) ? s->photo_view : 0);
+        ComboBox_SetCurSel(ctl(ID_PH_ASP), s->photo_aspect == 1 ? 1 : 0);
+        ui_set_checked(ID_RP_LABEL, s->replay_label);
+        ui_set_checked(ID_RP_LOGO, s->replay_logo);
+        ui_set_checked(ID_WM_MEDIA, s->watermark_media);
+        ui_set_checked(ID_PH_HUD, s->photo_hud);
+    }
     ComboBox_SetCurSel(ctl(ID_PH_FMT), s->photo_jpg ? 1 : 0);
-    ComboBox_SetCurSel(ctl(ID_PH_ASP), (s->photo_aspect >= 0 && s->photo_aspect <= 2) ? s->photo_aspect : 1);
     ui_set_checked(ID_ASPECT, s->aspect_mode ? 1 : 0);
     refresh_ctrl_profiles(s->input_profile);
     ui_set_checked(ID_CTRL_SBC, s->sbc_usb);
@@ -5703,6 +6370,11 @@ static void ui_from_settings(const launcher_settings_t *s)
     ComboBox_SetCurSel(ctl(ID_CTRL_AIMASSIST),
                        (s->aim_assist >= 0 && s->aim_assist <= 2) ? s->aim_assist : 0); /* W236 */
     ui_set_checked(ID_CTRL_AUTOGEAR, s->auto_gear);
+    ui_set_checked(ID_CHIDE, s->cockpit_hide); /* W268 */
+    ComboBox_SetCurSel(ctl(ID_STICK_AIM), s->stick_aim ? 1 : 0); /* W271 */
+    ComboBox_SetCurSel(ctl(ID_STICK_SENS),
+                       (s->stick_aim_sens >= 1 && s->stick_aim_sens <= 16)
+                           ? s->stick_aim_sens - 1 : 3);
     ui_set_checked(ID_PAL50, s->game_tick == 25); /* W234 */
     ip_fill(ctl(ID_IPFPS)); /* W234: "25 (Original)" bei PAL50 */
     ComboBox_SetCurSel(ctl(ID_IPFPS), ip_sel_of(s->interp_fps)); /* W223 */
@@ -5777,15 +6449,21 @@ static void ui_to_settings(launcher_settings_t *s)
     s->audio = ui_checked(ID_AUDIO);
     s->audio_live = ui_checked(ID_LIVE);
     s->save_lock = ui_checked(ID_SAVE_LOCK); /* W190 */
-    { /* W195 PHOTO-MODE */
-        static const int ph_map[4] = { 1, 2, 4, 8 };
+    { /* W195 PHOTO-MODE; W290 QUICK-SHOT: eine Konfiguration fuer Fotomodus und Schnell-Screenshot */
+        static const int ph_map[6] = { 1, -4, -8, 2, 4, 8 };
         ui_gettext(ctl(ID_PH_DIR), s->photo_dir, sizeof s->photo_dir);
         trim_u8(s->photo_dir);
         sel = ComboBox_GetCurSel(ctl(ID_PH_RES));
-        s->photo_scale = (sel >= 0 && sel < 4) ? ph_map[sel] : 1;
+        s->photo_size = (sel >= 0 && sel < 6) ? ph_map[sel] : -4;
+        s->photo_scale = s->photo_size > 0 ? s->photo_size : 1; /* alter Schluessel (W195) passend mitschreiben */
         s->photo_jpg = ComboBox_GetCurSel(ctl(ID_PH_FMT)) == 1 ? 1 : 0;
-        sel = ComboBox_GetCurSel(ctl(ID_PH_ASP));
-        s->photo_aspect = (sel >= 0 && sel <= 2) ? sel : 1;
+        sel = ComboBox_GetCurSel(ctl(ID_PH_VIEW));
+        s->photo_view = (sel >= 0 && sel <= 2) ? sel : 0;
+        s->photo_aspect = ComboBox_GetCurSel(ctl(ID_PH_ASP)) == 1 ? 1 : 2;
+        s->replay_label = ui_checked(ID_RP_LABEL) ? 1 : 0;
+        s->replay_logo = ui_checked(ID_RP_LOGO) ? 1 : 0;
+        s->watermark_media = ui_checked(ID_WM_MEDIA) ? 1 : 0;
+        s->photo_hud = ui_checked(ID_PH_HUD) ? 1 : 0;
     }
     /* Bildformat fest (S3.10, nie strecken). */
     s->aspect_mode = 1;
@@ -5795,6 +6473,10 @@ static void ui_to_settings(launcher_settings_t *s)
     s->aim_assist = ComboBox_GetCurSel(ctl(ID_CTRL_AIMASSIST)); /* W236 */
     if (s->aim_assist < 0 || s->aim_assist > 2) s->aim_assist = 0;
     s->auto_gear = ui_checked(ID_CTRL_AUTOGEAR);
+    s->cockpit_hide = ui_checked(ID_CHIDE) ? 1 : 0; /* W268 */
+    s->stick_aim = ComboBox_GetCurSel(ctl(ID_STICK_AIM)) == 1 ? 1 : 0; /* W271 */
+    sel = ComboBox_GetCurSel(ctl(ID_STICK_SENS));
+    s->stick_aim_sens = (sel >= 0 && sel < 16) ? sel + 1 : 4;
     s->game_tick = ui_checked(ID_PAL50) ? 25 : 30; /* W234 */
     sel = ComboBox_GetCurSel(ctl(ID_IPFPS));
     s->interp_fps = (sel >= 0 && sel < SB_FPS_NCHOICE) ? kSbFpsChoice[sel] : 0; /* W223 */
@@ -6222,10 +6904,7 @@ static void tips_place(void)
             ti.cbSize = sizeof ti;
             ti.hwnd = g_hwnd;
             ti.uId = (UINT_PTR)u->id;
-            ti.rect.left = SX(u->x);
-            ti.rect.top = SX(u->y);
-            ti.rect.right = SX(u->x + u->w);
-            ti.rect.bottom = SX(u->y + u->h_);
+            ui_px_rect(u, &ti.rect); /* W281 */
             SendMessageW(g_tip, TTM_NEWTOOLRECTW, 0, (LPARAM)&ti);
         }
     }
@@ -6237,10 +6916,7 @@ static void tips_place(void)
             ti.cbSize = sizeof ti;
             ti.hwnd = g_hwnd;
             ti.uId = (UINT_PTR)u->id;
-            ti.rect.left = SX(u->x);
-            ti.rect.top = SX(u->y);
-            ti.rect.right = SX(u->x + u->w);
-            ti.rect.bottom = SX(u->y + u->h_);
+            ui_px_rect(u, &ti.rect); /* W281 */
             SendMessageW(g_tip, TTM_NEWTOOLRECTW, 0, (LPARAM)&ti);
         }
     }
@@ -6278,16 +6954,42 @@ static void tips_build(void)
             }
         }
     }
+    { /* W287 EXP-ICON: Symbole, Preset-Optionsfelder und Navigation tragen
+       * ihren Tooltip selbst (aktiv, Maus am Element; leer = kein Tooltip) */
+        int j;
+        for (j = 0; j < g_ui_n; j++) {
+            uictl_t *u = &g_ui[j];
+            TTTOOLINFOW ti;
+            if (u->parent != g_hwnd ||
+                !(u->kind == K_ICON || (u->id >= ID_GP0 && u->id < ID_GP0 + LGP_CUSTOM) ||
+                  u->id == ID_CHIDE || u->id == ID_REM_LABEL || /* W291: Erklaerung als Tooltip statt Textzeile */
+                  u->id == ID_NAV0 + P_DISPLAY || u->id == ID_NAV0 + P_GFX || u->id == ID_NAV0 + P_PACKS)) {
+                continue;
+            }
+            memset(&ti, 0, sizeof ti);
+            ti.cbSize = sizeof ti;
+            ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
+            ti.hwnd = g_hwnd;
+            ti.uId = (UINT_PTR)u->h;
+            ti.lpszText = LPSTR_TEXTCALLBACKW;
+            SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+        }
+    }
     tips_place();
 }
 
 /* TTN_GETDISPINFOW: Text erst beim Zeigen (Sprache/Regelstand aktuell). */
 static void tips_dispinfo(NMTTDISPINFOW *di)
 {
-    static wchar_t wbuf[400];
-    char t[400];
-    tip_text((int)di->hdr.idFrom, t, sizeof t);
-    u8_to_w(t, wbuf, 400);
+    static wchar_t wbuf[800];
+    char t[800];
+    if (di->uFlags & TTF_IDISHWND) { /* W287: Werkzeug am Element */
+        uictl_t *u = ui_by_hwnd((HWND)di->hdr.idFrom);
+        xtip_text(u ? u->id : 0, t, sizeof t);
+    } else {
+        tip_text((int)di->hdr.idFrom, t, sizeof t);
+    }
+    u8_to_w(t, wbuf, 800);
     di->lpszText = wbuf;
 }
 
@@ -6305,6 +7007,23 @@ static void ui_apply_rules(void)
     memcpy(old, g_rr, sizeof old);
     rules_env(&e, &s);
     lrules_eval(&e, g_rr);
+    { /* W278 ORIG-FLAG: experimentelle Grafik (Hinweis auf Spielen, beide Bereiche) */
+        unsigned om = lorig_mask(&s, e.fx_pack[0] != 0);
+        if (e.tex_packs + e.legacy_tex <= 0) { /* HD an, aber kein Texturpaket: nichts sichtbar anders */
+            om &= ~(1u << SB_OFG_HD);
+        }
+        if (om != g_orig_mask) {
+            int p;
+            g_orig_mask = om;
+            xicon_texts(); /* W287: Warn-Tooltips/Namen, Navigation */
+            for (p = 0; p < P_N; p++) {
+                if (ctl(ID_NAV0 + p)) {
+                    InvalidateRect(ctl(ID_NAV0 + p), NULL, FALSE);
+                }
+            }
+            if (g_page == P_PLAY) { redraw_all(); }
+        }
+    }
     if (g_page == P_PLAY) { /* W220: Bereitschaft folgt dem aktuellen Stand */
         update_summary();
     }
@@ -6324,6 +7043,9 @@ static void ui_apply_rules(void)
                         break;
                     }
                 }
+            }
+            if (g_game == LGAME_LOC && (id == ID_START || id == ID_START_MENU)) {
+                en = 1; /* W276: im Bereich LoC meldet Launch "Coming soon" (keine SB-Sperre) */
             }
             if (ctl(id) && (IsWindowEnabled(ctl(id)) != FALSE) != en) {
                 EnableWindow(ctl(id), en ? TRUE : FALSE);
@@ -6574,6 +7296,11 @@ static int do_start_ex(int dry, int vr, const char *extra)
         }
         g_client_ed = gi.edition;
     }
+    { /* W291 ESC-REWORK: ESC-Gruppe Debug nur mit Alpha-Tools (nur dieser Start, nicht in user.cfg) */
+        char ed[24];
+        _snprintf_s(ed, sizeof ed, _TRUNCATE, "%sesc_debug=%d", set_args[0] ? ";" : "", g_alpha_tools ? 1 : 0);
+        strcat_s(set_args, sizeof set_args, ed);
+    }
     if (extra && *extra) { /* W254: Replay-Start ("replay_autoplay=<id>;...", nur dieser Start) */
         strcat_s(set_args, sizeof set_args, ";");
         strcat_s(set_args, sizeof set_args, extra);
@@ -6779,6 +7506,29 @@ static void setup_auto_sync(int from_list)
     ui_set_checked(ID_PROF_DFLT, name[0] && strcmp(name, g_dflt_setup) == 0);
 }
 
+/* W282 ISSUE6: Der Ordner-Modus loest ein ungueltiges Abbild ab. Steht im
+ * Abbild-Feld ein Pfad, den die letzte Pruefung abgelehnt hat (R3, kein
+ * gueltiges Spiel), wuerde er den gewaehlten Spielordner ueberdecken
+ * (Abbild hat Vorrang) - Feld leeren, Meldung verwerfen. Ein gueltiges
+ * Abbild bleibt (dann ist der Ordner-Modus ohnehin per R1 gesperrt).
+ * Rueckgabe 1 = geleert. */
+static int media_drop_bad_image(void)
+{
+    char img[1024];
+    if (!ctl(ID_IMAGE)) {
+        return 0;
+    }
+    ui_gettext(ctl(ID_IMAGE), img, sizeof img);
+    if (!img[0] || g_data_ok) {
+        return 0;
+    }
+    ui_settext(ctl(ID_IMAGE), "");
+    g_img_msg[0] = 0;
+    g_img_path[0] = 0;
+    g_img_ok = 0;
+    return 1;
+}
+
 static void browse_media(void)
 {
     BROWSEINFOW bi;
@@ -6797,6 +7547,7 @@ static void browse_media(void)
         if (SHGetPathFromIDListW(pidl, dir)) {
             char cur[1024];
             SetWindowTextW(ctl(ID_MEDIA), dir);
+            media_drop_bad_image(); /* W282 ISSUE6 */
             /* W172 (R2): Programmdatei wird aus dem Spielordner abgeleitet;
              * ein Feld, das auf keine Datei zeigt, wird geleert (= automatisch). */
             ui_gettext(ctl(ID_XBE), cur, sizeof cur);
@@ -6843,6 +7594,8 @@ static void browse_media(void)
 #define IDB_INI 529
 #define IDB_JDZL 530
 #define IDB_JNOW 531
+#define IDB_SMODE 532  /* W271: Stick-Modus der Zielhebel-Zeile (global/Position/wie Maus) */
+#define IDB_CLEAR 533  /* W282 ISSUE6: leeres Layout (alle Spiel-Elemente leeren) */
 /* Rahmen (logische Punkte, SX skaliert) */
 #define BD_W 860
 #define BD_H 680
@@ -6863,8 +7616,12 @@ static int g_bind_nconf, g_bind_lay = -1, g_bind_src_reset, g_bind_joyset;
 static int g_bind_lb_prev = -1;
 static char g_bind_base_name[64];
 static char g_bind_saved[64];
+/* W282 ISSUE6 Selbsttest: einmal nach dem Aufbau des (offscreen)
+ * Belegungsdialogs aufgerufen, danach schliesst der Dialog sofort. */
+static void (*g_bind_testfn)(HWND hd);
 static int g_bind_sel = -1;
 static int g_cap_mode; /* 0 = idle, 1 = ersetzen, 2 = hinzu */
+static int g_cap_mod;  /* W283: gedrueckte Zusatztaste (Zeile orig_view), 0 = keine */
 static lctrl_pad_t g_cap_prev;
 static int g_cap_have_pad;
 static int g_bind_done;
@@ -6937,6 +7694,35 @@ static void bind_set_result(HWND hd, const char *u8)
     }
 }
 
+/* W271 STICK-RELATIVE: Knopf "Stick: ..." der Zielhebel-Zeile beschriften. */
+static void bind_smode_text(HWND hd)
+{
+    static const char *const kK[3] = { "gui.bind_smode0", "gui.bind_smode1", "gui.bind_smode2" };
+    int m = g_bind_sel >= 0 ? lctrl_stick_mode_get(&g_bind, g_bind_sel) : -1;
+    ui_settext(bctl(hd, IDB_SMODE), LT(kK[m >= 0 && m <= 2 ? m : 0]));
+    EnableWindow(bctl(hd, IDB_SMODE), m >= 0 && !g_cap_mode);
+}
+
+static void bind_refresh(HWND hd, int keep_joy);
+/* W271: Klick schaltet global -> Position -> wie eine Maus -> global. */
+static void bind_smode_cycle(HWND hd)
+{
+    char res[256], line[400];
+    int m;
+    if (g_bind_sel < 0) {
+        return;
+    }
+    m = lctrl_stick_mode_get(&g_bind, g_bind_sel);
+    if (m < 0 || lctrl_stick_mode_set(&g_bind, g_bind_sel, (m + 1) % 3) != 0) {
+        return;
+    }
+    lctrl_bind_row_text(&g_bind, g_bind_sel, res, sizeof res);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "%s = %s.", kCtrlElems[g_bind_sel].key, res);
+    bind_set_result(hd, line);
+    bind_refresh(hd, 1);
+    bind_smode_text(hd);
+}
+
 /* W221 HOTAS: Totzone/Invertierung der JOY-Achsenquellen der gewaehlten
  * Belegung anzeigen (erste JOY-Achse gibt die Werte vor). */
 static void bind_joy_row(HWND hd)
@@ -6971,6 +7757,7 @@ static void bind_joy_row(HWND hd)
     }
     EnableWindow(bctl(hd, IDB_JDZ), en && has == 1);
     EnableWindow(bctl(hd, IDB_JINV), en);
+    bind_smode_text(hd); /* W271 */
 }
 
 static void bind_refresh_cur(HWND hd);
@@ -7316,6 +8103,10 @@ static void bind_layout(HWND hd)
     if (vis & LCTRL_VIS_MOUSE) {
         y += 38;
     }
+    bplace(hd, IDB_SMODE, x, y, w, 30, (vis & LCTRL_VIS_SMODE) != 0); /* W271 */
+    if (vis & LCTRL_VIS_SMODE) {
+        y += 38;
+    }
     bplace(hd, IDB_PROMPT, x, y, w, 40, 1);
     y += 44;
     bplace(hd, IDB_RESULT, x, y, w, 34, g_bind_res_on);
@@ -7493,6 +8284,7 @@ static int bind_same(const lctrl_bind_t *a, const lctrl_bind_t *b)
 static void bind_end_capture(HWND hd, const char *prompt)
 {
     g_cap_mode = 0;
+    g_cap_mod = 0;
     KillTimer(hd, 7);
     if (g_cap_sbc_thr) { /* W159: SBC-Thread stoppen (max. 1 Poll ~100 ms) */
         InterlockedExchange(&g_cap_sbc_stop, 1);
@@ -7515,12 +8307,14 @@ static void bind_start_capture(HWND hd, int mode)
         return;
     }
     g_cap_mode = mode;
+    g_cap_mod = 0;
     if (g_o.shot) { /* W228: nur Anzeige im Bild, keine Geraete/Timer */
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.bind_press"),
                     kCtrlElems[g_bind_sel].key, LT(kCtrlElems[g_bind_sel].lkey));
         ui_settext(bctl(hd, IDB_PROMPT), t);
         {
             const char *hint = lctrl_joy_dir_hint(g_bind_sel);
+            if (!hint && lctrl_bind_combo_row(g_bind_sel)) { hint = LT("gui.bind_combo_hint"); } /* W283 */
             bind_set_result(hd, hint ? hint : "");
         }
         ui_settext(bctl(hd, IDB_CLOSE), LT("gui.btn_cancel"));
@@ -7557,6 +8351,7 @@ static void bind_start_capture(HWND hd, int mode)
     ui_settext(bctl(hd, IDB_PROMPT), t);
     { /* W226: Richtungs-Hinweis fuer Joystick-Achsen */
         const char *hint = lctrl_joy_dir_hint(g_bind_sel);
+        if (!hint && lctrl_bind_combo_row(g_bind_sel)) { hint = LT("gui.bind_combo_hint"); } /* W283 */
         bind_set_result(hd, hint ? hint : "");
     }
     ui_settext(bctl(hd, IDB_CLOSE), LT("gui.btn_cancel"));
@@ -7650,9 +8445,47 @@ static void bind_cap_key(HWND hd, int vk, LPARAM lp)
     if (vk == VK_LBUTTON || vk == VK_RBUTTON || vk == VK_MBUTTON) {
         return;
     }
+    if (lctrl_vk_is_gamepad(vk)) {
+        /* W282 ISSUE6: Windows meldet Xbox-kompatible Geraete zusaetzlich
+         * als VK_GAMEPAD_*-Tasten (KEY:201 = linker Trigger, 209 = linker
+         * Stick-Knopf ...). Keine Tastatur: ignorieren, der Pad-Pfad
+         * (PAD:..., Timer 7) lernt dieselbe Eingabe richtig. */
+        return;
+    }
+    if (lctrl_bind_combo_row(g_bind_sel)) {
+        /* W283 ORIG-KEY-BIND: Vergleichstaste lernt Zusatztaste + Taste
+         * (Shift+F8). Zusatztaste allein: erst beim Loslassen (bind_cap_keyup). */
+        if (lctrl_vk_is_modifier(vk)) {
+            g_cap_mod = vk;
+            return;
+        }
+        lctrl_key_combo(g_cap_mod, vk, src, sizeof src);
+        g_cap_mod = 0;
+        bind_cap_done(hd, bind_apply(hd, src));
+        return;
+    }
     lctrl_key_name(vk, nm, sizeof nm);
     _snprintf_s(src, sizeof src, _TRUNCATE, "KEY:%s", nm);
     bind_cap_done(hd, bind_apply(hd, src));
+}
+
+/* W283: Loslassen im Lernmodus. Zusatztaste ohne weitere Taste -> allein
+ * belegen (KEY:SHIFT). 1 = verarbeitet. */
+static int bind_cap_keyup(HWND hd, int vk)
+{
+    char src[48];
+    if (g_cap_mode && vk == VK_SNAPSHOT) { /* W290: Windows meldet die Druck-Taste nur beim Loslassen */
+        bind_cap_key(hd, VK_SNAPSHOT, 0);
+        return 1;
+    }
+    if (!g_cap_mode || !g_cap_mod || !lctrl_bind_combo_row(g_bind_sel) ||
+        !lctrl_vk_is_modifier(vk)) {
+        return 0;
+    }
+    lctrl_key_combo(0, g_cap_mod, src, sizeof src); /* g_cap_mod: Strg schon links/rechts */
+    g_cap_mod = 0;
+    bind_cap_done(hd, bind_apply(hd, src));
+    return 1;
 }
 
 static void bind_cap_mouse(HWND hd, UINT msg, WPARAM wp)
@@ -7754,6 +8587,28 @@ static void bind_cap_joy(HWND hd)
     }
 }
 
+/* W282 ISSUE6: leeres Layout - nach Rueckfrage alle Spiel-Elemente
+ * leeren (Client-Aktionen bleiben), danach nur Benoetigtes belegen.
+ * Gespeichert wird erst mit "Belegung speichern". */
+static void bind_clear_all(HWND hd)
+{
+    char t[256];
+    int n;
+    if (g_cap_mode) {
+        bind_end_capture(hd, NULL);
+    }
+    if (!g_o.shot &&
+        ui_msgbox(hd, LT("gui.bind_clear_q"), LT("gui.bind_title"),
+                  MB_ICONQUESTION | MB_YESNO | MB_DEFBUTTON2) != IDYES) {
+        return;
+    }
+    n = lctrl_bind_clear_game(&g_bind);
+    bind_refresh_cur(hd);
+    bind_refresh_conf(hd);
+    _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.bind_cleared"), n);
+    ui_settext(bctl(hd, IDB_FSTAT), t);
+}
+
 /* W228: 0 = gespeichert, sonst nicht (Meldung in der Fusszeile). */
 static int bind_save(HWND hd)
 {
@@ -7774,7 +8629,10 @@ static int bind_save(HWND hd)
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%s/profiles", g_client_dir);
     lcfg_mkdir_p(dir);
     _snprintf_s(path, sizeof path, _TRUNCATE, "%s/%s", dir, fn);
-    if (u8_GetFileAttributes(path) != INVALID_FILE_ATTRIBUTES) {
+    /* W282 ISSUE6: das geoeffnete eigene Layout unter seinem Namen
+     * speichern = erwartetes Ueberschreiben, keine Rueckfrage. */
+    if (u8_GetFileAttributes(path) != INVALID_FILE_ATTRIBUTES &&
+        strcmp(pname, g_bind_base_name) != 0) {
         char q[300];
         _snprintf_s(q, sizeof q, _TRUNCATE, LT("gui.bind_overwrite"),
                     pname);
@@ -7905,10 +8763,14 @@ static LRESULT CALLBACK bind_proc(HWND hd, UINT msg, WPARAM wp, LPARAM lp)
                 g_bind.row[g_bind_sel] = g_bind_base.row[g_bind_sel];
                 bind_refresh_cur(hd);
             }
+        } else if (id == IDB_CLEAR) { /* W282 ISSUE6: leeres Layout */
+            bind_clear_all(hd);
         } else if (id == IDB_SAVE) {
             bind_save(hd);
         } else if (id == IDB_CHECK) {
             bind_check(hd);
+        } else if (id == IDB_SMODE) { /* W271: Stick-Modus umschalten */
+            bind_smode_cycle(hd);
         } else if (id == IDB_JINV) { /* W221: Schalter Invertieren, W228 sofort */
             uictl_t *u = ui_by_hwnd(bctl(hd, IDB_JINV));
             if (u) {
@@ -8039,6 +8901,7 @@ static void bind_build(HWND hd, const char *base_name)
        WS_VISIBLE);
     mk(hd, K_BTN, IDB_MX, PG_DIALOG, BD_IX, 300, 218, 30, LT("gui.bind_mousex"), 0);
     mk(hd, K_BTN, IDB_MY, PG_DIALOG, BD_IX + 226, 300, 218, 30, LT("gui.bind_mousey"), 0);
+    mk(hd, K_BTN, IDB_SMODE, PG_DIALOG, BD_IX, 338, BD_IW, 30, LT("gui.bind_smode0"), 0); /* W271 */
     mk(hd, K_STATIC, IDB_PROMPT, PG_DIALOG, BD_IX, 338, BD_IW, 40, LT("gui.bind_idle"),
        WS_VISIBLE);
     mk(hd, K_STATIC, IDB_RESULT, PG_DIALOG, BD_IX, 382, BD_IW, 34, "", WS_VISIBLE);
@@ -8059,8 +8922,10 @@ static void bind_build(HWND hd, const char *base_name)
     mk(hd, K_EDIT, IDB_NAME, PG_DIALOG, BD_LX + 84, 618, 150, 28, "",
        WS_VISIBLE | WS_BORDER);
     mk(hd, K_STATIC, IDB_INI, PG_DIALOG, BD_LX + 238, 623, 30, 18, ".ini", WS_VISIBLE);
-    mk(hd, K_BTN, IDB_CHECK, PG_DIALOG, BD_LX + 272, 617, 160, 30, LT("gui.bind_check2"),
+    mk(hd, K_BTN, IDB_CHECK, PG_DIALOG, BD_LX + 272, 617, 128, 30, LT("gui.bind_check2"),
        WS_VISIBLE);
+    mk(hd, K_BTN, IDB_CLEAR, PG_DIALOG, BD_LX + 406, 617, 112, 30, LT("gui.bind_clear"),
+       WS_VISIBLE); /* W282 ISSUE6: leeres Layout */
     mk(hd, K_ACCENT, IDB_SAVE, PG_DIALOG, BD_CX + BD_CW - 124 - 8 - 170, 617, 170, 30,
        LT("gui.bind_save2"), WS_VISIBLE);
     mk(hd, K_BTN, IDB_CLOSE, PG_DIALOG, BD_CX + BD_CW - 124, 617, 124, 30,
@@ -8157,6 +9022,12 @@ static void bind_dialog_modal(const char *base_name, const char *base_path)
                               &dark, sizeof dark);
     }
     bind_build(hd, base_name);
+    { /* W282 ISSUE6: eigenes Layout geoeffnet -> Name bleibt im Feld */
+        char rest[64];
+        if (lctrl_user_rest_of(base_name, rest, sizeof rest)) {
+            ui_settext(bctl(hd, IDB_NAME), rest);
+        }
+    }
     g_bind_clean = g_bind; /* W228: ungespeichert = Abweichung hiervon */
     g_live_scanned = 0;
     g_bind_joydemo = g_o.shot == 3 && g_o.bind_joydemo;
@@ -8164,6 +9035,10 @@ static void bind_dialog_modal(const char *base_name, const char *base_path)
         strcpy_s(g_bind.joy[0], sizeof g_bind.joy[0], "Example HOTAS Throttle");
         lctrl_bind_set(&g_bind, g_o.bind_sel, "KEY:W, JOY0:Z:dz=0.05:inv=1");
         bind_set_result(hd, lctrl_joy_dir_hint(g_o.bind_sel));
+    }
+    if (g_o.shot == 3 && g_o.bind_stickdemo && g_o.bind_sel >= 0) { /* W271: --bind-shot=stick */
+        lctrl_bind_set(&g_bind, g_o.bind_sel,
+                       "MOUSE:X:mode=aim, PAD:LX:dz=0.15:curve=1.5:mode=rate");
     }
     if (g_o.shot == 3 && g_o.bind_sel >= 0) { /* W159: --bind-shot=vr */
         HWND lb = bctl(hd, IDB_LIST);
@@ -8209,10 +9084,18 @@ static void bind_dialog_modal(const char *base_name, const char *base_path)
         SetFocus(bctl(hd, IDB_LIST));
     }
     UpdateWindow(hd);
+    if (g_bind_testfn && shot) { /* W282: Selbsttest im offscreen-Dialog */
+        g_bind_testfn(hd);
+        g_bind_done = 1;
+    }
     while (!g_bind_done && GetMessageW(&msg, NULL, 0, 0) > 0) {
         if (g_cap_mode &&
             (msg.message == WM_KEYDOWN || msg.message == WM_SYSKEYDOWN)) {
             bind_cap_key(hd, (int)msg.wParam, msg.lParam);
+            continue;
+        }
+        if (g_cap_mode && (msg.message == WM_KEYUP || msg.message == WM_SYSKEYUP) &&
+            bind_cap_keyup(hd, (int)msg.wParam)) { /* W283 */
             continue;
         }
         if (g_cap_mode && (msg.message == WM_MOUSEWHEEL ||
@@ -8585,9 +9468,12 @@ static const char *const kLedShort[SBC_LED_COUNT] = {
     "COMM5", "GEAR R", "GEAR N", "G1", "G2", "G3", "G4", "G5"
 };
 
-/* W148: Kurznamen Tastenraster (volle Namen: Hover-Status, Testliste, Export). */
+/* W148: Kurznamen Tastenraster (volle Namen: Hover-Status, Testliste, Export).
+ * W282 ISSUE6: bi0 = Report "MainWeapon" (Hauptwaffe, Daumentaste oben),
+ * bi1 = Report "Fire" (Sub-Waffe, Abzug vorn) - frueher vertauscht als
+ * "TRIG"/"FIRE" beschriftet (Tester-Befund). Funktion unveraendert. */
 static const char *const kBtnShort[39] = {
-    "TRIG", "FIRE", "LOCK", "EJECT", "HATCH", "IGN",
+    "MAIN", "SUB", "LOCK","EJECT", "HATCH", "IGN",
     "START", "OPEN", "MAPZM", "MODE", "SUBMON",
     "ZMIN", "ZMOUT", "FSS", "MANIP",
     "LINE", "WASH", "EXTING", "CHAFF", "TANK",
@@ -10455,6 +11341,10 @@ static void open_assist_dialog(void)
 static int g_joy_done, g_joy_n, g_joy_ok, g_joy_demo, g_joy_have;
 static HWND g_joy_dlg_hd;
 static ijoy_info_t g_joy_list[IJOY_MAX_DEV];
+/* W282 ISSUE6: Xbox-kompatible Geraete (XInput), die die Liste bewusst
+ * ueberspringt - mit Erklaerung statt stillem Fehlen (Listen-Daten 1000+k). */
+static char g_joy_xi[8][96];
+static int g_joy_nxi;
 static imap_joy_state_t g_joy_st;
 
 static int shot_window(HWND w, const char *path, int png);
@@ -10494,12 +11384,26 @@ static int joy_sel(HWND hd)
     return (i >= 0 && i < g_joy_n) ? i : -1;
 }
 
+/* W282: gewaehlter XInput-Eintrag (0..) oder -1. */
+static int joy_sel_xi(HWND hd)
+{
+    HWND lb = bctl(hd, IDJ_LIST);
+    int s = ListBox_GetCurSel(lb);
+    int i = s >= 0 ? (int)ListBox_GetItemData(lb, s) - 1000 : -1;
+    return (i >= 0 && i < g_joy_nxi) ? i : -1;
+}
+
 static void joy_refresh_info(HWND hd)
 {
     char t[320];
     int i = joy_sel(hd);
     if (i < 0) {
-        ui_settext(bctl(hd, IDJ_INFO), "");
+        int k = joy_sel_xi(hd);
+        t[0] = 0;
+        if (k >= 0) {
+            _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.joy_xinput"), g_joy_xi[k]);
+        }
+        ui_settext(bctl(hd, IDJ_INFO), t);
         g_joy_have = 0;
     } else {
         int na = 0, b;
@@ -10511,6 +11415,10 @@ static void joy_refresh_info(HWND hd)
         _snprintf_s(t + strlen(t), sizeof t - strlen(t), _TRUNCATE,
                     LT("gui.joy_info"), na, g_joy_list[i].nbtn,
                     g_joy_list[i].npov);
+        if (g_joy_list[i].ncaps_axes > na) { /* W282: Treiber meldet mehr */
+            _snprintf_s(t + strlen(t), sizeof t - strlen(t), _TRUNCATE,
+                        LT("gui.joy_info_drv"), g_joy_list[i].ncaps_axes);
+        }
         ui_settext(bctl(hd, IDJ_INFO), t);
         if (!g_joy_demo) {
             g_joy_have = ijoy_read(i, &g_joy_st);
@@ -10552,7 +11460,22 @@ static void joy_rescan(HWND hd)
                                           : g_joy_list[i].product);
         list_add(lb, e, (LPARAM)i, 1);
     }
-    if (g_joy_n == 0) {
+    /* W282: uebersprungene Xbox-kompatible Geraete mit Hinweis listen */
+    if (g_joy_demo) {
+        strcpy_s(g_joy_xi[0], sizeof g_joy_xi[0], "Example Flight Stick");
+        g_joy_nxi = 1;
+    } else {
+        g_joy_nxi = g_joy_ok ? ijoy_skipped_xinput(g_joy_xi, 8) : 0;
+        if (g_joy_nxi > 8) {
+            g_joy_nxi = 8;
+        }
+    }
+    for (i = 0; i < g_joy_nxi; i++) {
+        char e[160];
+        _snprintf_s(e, sizeof e, _TRUNCATE, LT("gui.joy_xinput"), g_joy_xi[i]);
+        list_add(lb, e, (LPARAM)(1000 + i), 1);
+    }
+    if (g_joy_n == 0 && g_joy_nxi == 0) {
         list_add(lb, LT(g_joy_ok || g_joy_demo ? "gui.joy_none" : "gui.joy_nodi"),
                  (LPARAM)-1, 1);
     }
@@ -10567,8 +11490,9 @@ static void joy_text(HDC dc, int font, COLORREF c, int x, int y, int w, int h,
     RECT r = { SX(x), SX(y), SX(x + w), SX(y + h) };
     SelectObject(dc, g_f[font]);
     SetTextColor(dc, c);
-    DrawTextW(dc, wt ? wt : L"", -1, &r, fl | DT_NOPREFIX | DT_SINGLELINE |
-              DT_VCENTER | DT_END_ELLIPSIS);
+    DrawTextW(dc, wt ? wt : L"", -1, &r, (fl & DT_WORDBREAK) /* W282: mehrzeilig */
+              ? (fl | DT_NOPREFIX)
+              : (fl | DT_NOPREFIX | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS));
     free(wt);
 }
 
@@ -10593,6 +11517,10 @@ static void joy_paint_live(HDC dc)
     SetBkMode(dc, TRANSPARENT);
     joy_text(dc, F_SEMI, C_TEXT, X, Y, JOY_LIVE_W, 22, LT("gui.joy_live"), DT_LEFT);
     if (i < 0) {
+        if (g_joy_dlg_hd && joy_sel_xi(g_joy_dlg_hd) >= 0) { /* W282 */
+            joy_text(dc, F_SMALL, C_DIM, X, Y + 26, JOY_LIVE_W, 240,
+                     LT("gui.joy_xinput_info"), DT_LEFT | DT_WORDBREAK);
+        }
         return;
     }
     if (!g_joy_have) {
@@ -12554,6 +13482,7 @@ static void paint_packs(void)
     char t[700];
     /* --- links oben: installierte Packs --- */
     card(CX0, CY0, PKL_W, 284, LT("gui.pk_list"));
+    /* W287: Packs experimentell = Symbol ID_XEXP_PACKS */
     if (g_pk_n > 0) {
         if (!paint_reason(31, CX0 + 18, CY0 + 38, PKL_W - 36, 16)) {
             label1(F_TINY, LT("gui.pk_list_hint"), CX0 + 18, CY0 + 38, PKL_W - 36,
@@ -12693,7 +13622,9 @@ static void paint_packs(void)
                 }
                 if (g_has_icons) {
                     wchar_t ic = 0xE72E;
-                    cv_textw(&g_bb, g_f[F_ICONSM], &ic, 1, SX(x), SX(y), SX(14), SX(16),
+                    RECT q; /* W281 */
+                    lay_px(x, y, 14, 16, 0, 0, &q);
+                    cv_textw(&g_bb, g_f[F_ICONSM], &ic, 1, q.left, q.top, SX(14), SX(16),
                              C_ACCENT_HI, DT_LEFT | DT_TOP | DT_SINGLELINE);
                 }
                 y = pk_line(F_TINY, t, x + 16, y, w - 16, C_TEXT);
@@ -12775,6 +13706,12 @@ static void show_page(int p)
     if (p < 0 || p >= P_N) {
         p = P_PLAY;
     }
+    if (p == P_ALPHA && !g_alpha_tools) { /* W272: Seite ausgeblendet */
+        p = P_ADV;
+    }
+    if (g_game == LGAME_LOC && p == P_PACKS) {
+        p = P_PLAY; /* W276: nur Steel Battalion (W293: Erweitert gibt es auch fuer LoC) */
+    }
     g_page = p;
     g_setup_force = 0; /* W172: Einrichtungskarte nur, wenn Regel R3 greift */
     for (i = 0; i < g_ui_n; i++) {
@@ -12789,6 +13726,7 @@ static void show_page(int p)
         if (!once) {
             once = 1;
             update_sbc_status();
+            joy_card_scan(); /* W282 */
         }
         update_pad_status();
     }
@@ -12805,6 +13743,9 @@ static void show_page(int p)
     if (p == P_ADV) {
         refresh_profiles();
     }
+    if (p == P_ALPHA) {
+        alpha_page_shown(); /* W272: VT-Liste, A/B-Werte */
+    }
     { /* W227: auf Spielen fehlt Launch in der Fussleiste -> Speichern und
        * Rueckgaengig an die rechte Kante statt mittig im Leeren */
         static const int ids[2] = { ID_SAVE, ID_UNDO };
@@ -12814,8 +13755,10 @@ static void show_page(int p)
             int x0 = ids[k] == ID_SAVE ? WIN_W - 28 - 150 - 12 - 130
                                        : WIN_W - 28 - 150 - 12 - 130 - 10 - 112;
             if (u && u->x != x0 + dx) {
+                RECT q; /* W281: Layout b am rechten Rand */
                 u->x = x0 + dx;
-                SetWindowPos(u->h, NULL, SX(u->x), SX(u->y), 0, 0,
+                ui_px_rect(u, &q);
+                SetWindowPos(u->h, NULL, q.left, q.top, 0, 0,
                              SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             }
         }
@@ -12827,7 +13770,11 @@ static void show_page(int p)
 /* W171: Strg+Tab / Strg+Umschalt+Tab = naechste/vorige Seite (zyklisch). */
 static int nav_next(int page, int dir)
 {
-    return (page + (dir < 0 ? P_N - 1 : 1)) % P_N;
+    int p = (page + (dir < 0 ? P_N - 1 : 1)) % P_N;
+    if (p == P_ALPHA && !g_alpha_tools) { /* W272: ausgeblendete Seite ueberspringen */
+        p = (p + (dir < 0 ? P_N - 1 : 1)) % P_N;
+    }
+    return p;
 }
 
 /* W142: Fenster-Texte in der aktiven Sprache neu setzen (ohne Neustart).
@@ -12881,6 +13828,7 @@ static void ui_apply_language(void)
     static const char *const kVr[] = { "gui.vr_prev_sbs", "gui.vr_prev_left", "gui.vr_prev_right", "gui.vr_prev_off" };
     static const char *const kVrPre[] = { "gui.vrp_perf", "gui.vrp_bal", "gui.vrp_qual", "gui.vrp_custom" }; /* W183 */
     static const char *const kMouse[] = { "gui.mouse_abs", "gui.mouse_rel" };
+    static const char *const kStick[] = { "gui.stick_pos", "gui.stick_rel" }; /* W271 */
     static const char *const kAssist[] = { "gui.ctl_assist0", "gui.ctl_assist1",
                                            "gui.ctl_assist2" }; /* W236 */
     static const char *const kLang[] = { "gui.lang_en", "gui.lang_de" };
@@ -12942,6 +13890,7 @@ static void ui_apply_language(void)
     combo_refill(ID_GFX_TEX, kTex, 2);
     ui_settext(ctl(ID_GP_RESET), LT("gui.gfx_reset"));
     ui_settext(ctl(ID_REM_LABEL), LT("gui.rem_label"));
+    ui_settext(ctl(ID_CHIDE), LT("gui.chide")); /* W268 */
     combo_refill(ID_EDGE, kEdge, 3);
     if (ctl(ID_CPERSP)) { cpersp_fill(ctl(ID_CPERSP)); } /* W191 */
     if (ctl(ID_CPANINI)) { cpersp_fill(ctl(ID_CPANINI)); }
@@ -12990,13 +13939,29 @@ static void ui_apply_language(void)
     ui_settext(ctl(ID_PH_BROWSE), LT("gui.btn_browse")); /* W195 */
     ui_settext(ctl(ID_PH_OPEN), LT("gui.extras_open"));
     {
-        static const char *const kPhRes[] = { "gui.extras_res_1", "gui.extras_res_2", "gui.extras_res_4", "gui.extras_res_8" };
-        combo_refill(ID_PH_RES, kPhRes, 4);
+        HWND c = ctl(ID_PH_RES); /* W290: Fenster, 4K, 8K, x2, x4, x8 */
+        if (c) {
+            int cur = ComboBox_GetCurSel(c);
+            ComboBox_ResetContent(c);
+            combo_add(c, LT("gui.extras_res_1"));
+            combo_add(c, "4K");
+            combo_add(c, "8K");
+            combo_add(c, LT("gui.extras_res_2"));
+            combo_add(c, LT("gui.extras_res_4"));
+            combo_add(c, LT("gui.extras_res_8"));
+            ComboBox_SetCurSel(c, cur);
+        }
     }
     {
-        static const char *const kPhAsp[] = { "ovl.ph_asp_crop", "ovl.ph_asp_wide", "ovl.ph_asp_square" };
-        combo_refill(ID_PH_ASP, kPhAsp, 3);
+        static const char *const kPhAsp[] = { "ovl.ph_asp_square", "ovl.ph_asp_wide" }; /* W290: 4:3 / breit */
+        static const char *const kPhView[] = { "ovl.ph_v_game", "ovl.ph_v_flat", "ovl.ph_v_world" };
+        combo_refill(ID_PH_ASP, kPhAsp, 2);
+        combo_refill(ID_PH_VIEW, kPhView, 3);
     }
+    ui_settext(ctl(ID_RP_LABEL), LT("gui.rp_label"));
+    ui_settext(ctl(ID_RP_LOGO), LT("gui.rp_logo"));
+    ui_settext(ctl(ID_WM_MEDIA), LT("gui.wm_media"));
+    ui_settext(ctl(ID_PH_HUD), LT("gui.ph_hud"));
     ui_settext(ctl(ID_DIAG), LT(g_diag_open ? "gui.adv_diag_hide" : "gui.adv_diag_show"));
     ui_settext(ctl(ID_UNDO), LT("gui.undo"));
     /* Steuerung */
@@ -13014,6 +13979,7 @@ static void ui_apply_language(void)
     ui_settext(ctl(ID_CTRL_ASSIST), LT("gui.ctl_assist"));
     ui_settext(ctl(ID_CTRL_BROWSER), LT("gui.keys_browser")); /* W179 */
     combo_refill(ID_MOUSE_MODE, kMouse, 2);
+    combo_refill(ID_STICK_AIM, kStick, 2); /* W271 */
     /* Profile + Pfade + Fussleiste */
     ui_settext(ctl(ID_PROF_LOAD), LT("gui.adv_setup_load"));
     ui_settext(ctl(ID_PROF_SAVE), LT("gui.adv_setup_save"));
@@ -13034,6 +14000,8 @@ static void ui_apply_language(void)
     ui_settext(ctl(ID_SAVES_IMPORT), LT("gui.si_import"));
     ui_settext(ctl(ID_SAVES_EXPORT), LT("gui.si_export"));
     ui_settext(ctl(ID_SAVES_REPLAYS), LT("gui.rp_btn")); /* W254 */
+    alpha_relabel(); /* W272 */
+    dg_relabel(); /* W279 */
     ui_settext(ctl(ID_SAVES_RESET), LT("gui.saves_reset"));
     ui_settext(ctl(ID_GFX_PACKS), LT("gui.gfx_to_packs"));
     ui_settext(ctl(ID_PK_UP), "\xE2\x86\x91");
@@ -13053,6 +14021,10 @@ static void ui_apply_language(void)
     xbe_cue_update();
     packs_refresh_lists();
     ui_settext(ctl(ID_START), LT("gui.btn_start"));
+    loctab_relabel(); /* W276 */
+    orig_relabel(); /* W278 */
+    lay_combo_fill(ctl(ID_LAYOUT)); /* W281 */
+    ui_settext(ctl(ID_LAYOUT_LBL), LT("gui.lay_size")); /* W287 */
     /* Sprachwahl selbst */
     ui_settext(ctl(ID_LANG_LBL), LT("gui.lang_label"));
     combo_refill(ID_LANG, kLang, 2);
@@ -13091,6 +14063,800 @@ static void ui_apply_language(void)
     redraw_all();
 }
 
+/* ------------------------------------------------------------------ */
+/* W276 LOCTAB: Spielauswahl Steel Battalion | Line of Contact          */
+/* Umschalter in der Titelleiste (gemerkt in user.cfg, launcher_games). */
+/* Gemeinsam: Anzeige, Grafik, Steuerung, Ton (dieselben Elemente und   */
+/* dieselben user.cfg-Werte). Nur Steel Battalion: Spielen-Inhalt,      */
+/* Packs, Erweitert (Spielstaende, Datenort, Diagnose). Nur LoC: eigene */
+/* Spielen-Seite mit Abbild, Datenordner <Daten>\loc, Online-Platzhalter*/
+/* und gesperrtem Start ("Coming soon"), bis der Client LoC startet.    */
+/* W293: LoC-Spielen wie SB (Bereitschaft + Band unten), Abbild/Ordner/  */
+/* Online auf LoC > Erweitert (dort SB-Teile aus, gemeinsame Teile an).  */
+/* ------------------------------------------------------------------ */
+#define ID_GAME_SB 2760
+#define ID_GAME_LOC 2761
+#define ID_LOC_START 2762
+#define ID_LOC_IMAGE 2763
+#define ID_LOC_CHECK 2764
+#define ID_LOC_BROWSE 2765
+#define ID_LOC_FOLDER 2766
+#define ID_LOC_GO0 2767 /* W293: "Change" je Bereitschaftszeile (LOC_SUM_N) */
+#define LOC_SUM_N 5
+#define ID_LOC_FIRST ID_LOC_START
+#define ID_LOC_LAST (ID_LOC_GO0 + LOC_SUM_N - 1)
+/* W293 LOC-LAYOUT: Spielen = Kopf, Start, Bereitschaft (wie SB), Hinweisband
+ * unten; Disc, Spielstaende & Daten und Online liegen links auf Erweitert
+ * (rechts die gemeinsamen Teile Feinabstimmung + Launcher). */
+#define LOC_SUM_Y (CY0 + 216) /* Karte "Ready to play" (wie SB) */
+#define LOC_SUM_H 220         /* 8 px Luft bis zum Band (OB_Y_LOC) */
+#define LOC_DISC_Y CY0        /* Erweitert: Disc-Karte */
+#define LOC_DISC_H 220
+#define LOC_DATA_Y (CY0 + 232)
+#define LOC_DATA_H 118
+#define LOC_ONL_Y (CY0 + 362)
+#define LOC_ONL_H 134 /* bis CY0 + 496 wie die SB-Karten */
+
+static lgame_state_t g_loc;        /* LoC-Einstellungen (user.cfg launcher_*) */
+static lgame_img_t g_loc_res;      /* letzte Abbild-Pruefung */
+static char g_loc_res_path[512];   /* ... gilt nur fuer diesen Pfad */
+static int g_loc_checked;
+static char g_locfix_path[512];    /* Shots/Selbsttest: Pruef-Fixture fuer genau einen Pfad */
+static lgame_img_t g_locfix;
+static char g_loc_last_cmd[1600];  /* Selbsttest: Startweg (Trockenlauf) */
+#define LOC_ISO "D:\\Games\\Line of Contact.iso"
+#define LOC_SB_ISO "D:\\Games\\Steel Battalion (Europe).iso"
+
+static int loctab_may_write(void)
+{
+    return g_o.shot == 0 || g_ucfg_test[0]; /* Shots speichern nie (Selbsttest: Temp-Datei) */
+}
+
+static void loctab_load(void)
+{
+    char up[1200];
+    user_cfg_path(up, sizeof up);
+    lgame_cfg_load(up, &g_loc);
+    g_game = g_loc.game;
+    g_loc_checked = 0;
+    g_loc_res_path[0] = '\0';
+}
+
+static void loctab_save(void)
+{
+    char up[1200];
+    if (!loctab_may_write()) {
+        return;
+    }
+    user_cfg_path(up, sizeof up);
+    g_loc.game = g_game;
+    if (lgame_cfg_save(up, &g_loc) != 0) {
+        set_status_k(LT("gui.loc_save_err"), 2);
+    }
+}
+
+/* LoC-Datenordner: <Datenordner>\loc (Profil/portabel), legacy <Client>\loc. */
+static void loctab_data_dir(char *out, size_t cap)
+{
+    char acp[1024], base[1100];
+    if (sb_userdata_path_peek(SB_UD_ROOT, acp, sizeof acp) == 1) {
+        u8_from_acp(acp, base, sizeof base);
+    } else {
+        strcpy_s(base, sizeof base, g_client_dir);
+    }
+    lgame_loc_dir(base, out, cap);
+}
+
+/* W293: Erweitert-Elemente, die auch fuer LoC gelten (gemeinsame user.cfg-
+ * bzw. Launcher-Einstellungen). SB-Teile (Spieldateien, Spielstaende,
+ * Gespeicherte Setups, Diagnose mit Spielstand-Schutz) bleiben bei LoC weg. */
+static int loctab_adv_shared(int id)
+{
+    return id == ID_VSYNC || id == ID_FPS || id == ID_BG || id == ID_UPD_NOW || id == ID_UPD_AUTO;
+}
+
+static int loctab_visible(const uictl_t *u, int page)
+{
+    if (u->id >= ID_LOC_FIRST && u->id <= ID_LOC_LAST) {
+        return g_game == LGAME_LOC && page == u->page; /* W293: Start/Change auf Spielen, Disc/Ordner auf Erweitert */
+    }
+    if (u->id == ID_GAME_SB || u->id == ID_GAME_LOC) {
+        return -1;
+    }
+    if (g_game != LGAME_LOC) {
+        return -1;
+    }
+    if (u->id == ID_NAV0 + P_PACKS) {
+        return 0;
+    }
+    if (u->page == P_PLAY) {
+        return 0; /* SB-Spielen (Start, VR, Abbild, Bereitschaft, Update-Karte) */
+    }
+    if (u->page == P_ADV) { /* W293: nur die gemeinsamen Teile (Feinabstimmung, Launcher) */
+        return loctab_adv_shared(u->id) ? -1 : 0;
+    }
+    return -1;
+}
+
+/* Navigation ohne Luecke (LoC: Packs ausgeblendet, W293: Erweitert bleibt). */
+static void loctab_nav_layout(void)
+{
+    int i, k = 0;
+    for (i = 0; i < P_N; i++) {
+        uictl_t *u = ui_find(ID_NAV0 + i);
+        int hide = g_game == LGAME_LOC && i == P_PACKS;
+        if (!u) {
+            continue;
+        }
+        if (!hide) {
+            int y = TITLE_H + 16 + k * 44;
+            if (u->y != y) {
+                u->y = y;
+                ui_place(u);
+            }
+            k++;
+        }
+    }
+    ui_set_checked(ID_GAME_SB, g_game == LGAME_SB);
+    ui_set_checked(ID_GAME_LOC, g_game == LGAME_LOC);
+    if (ctl(ID_LOC_START)) {
+        EnableWindow(ctl(ID_LOC_START), lgame_loc_client_ready() ? TRUE : FALSE);
+    }
+}
+
+static void loctab_set_game(int game)
+{
+    game = game == LGAME_LOC ? LGAME_LOC : LGAME_SB;
+    if (game == g_game) {
+        loctab_nav_layout();
+        return;
+    }
+    g_game = game;
+    loctab_save();
+    loctab_nav_layout();
+    base_build(); /* Marke oben links: STEEL BATTALION / LINE OF CONTACT */
+    show_page(g_page); /* Packs/Erweitert -> Spielen; Sichtbarkeit + Bild neu */
+    set_status_k(LT(game == LGAME_LOC ? "gui.loc_switched" : "gui.loc_switched_sb"), 0);
+}
+
+static void loctab_check(void)
+{
+    char p[512];
+    ui_gettext(ctl(ID_LOC_IMAGE), p, sizeof p);
+    if (g_locfix_path[0] && strcmp(p, g_locfix_path) == 0) {
+        g_loc_res = g_locfix;
+    } else {
+        lgame_loc_check(p, &g_loc_res);
+    }
+    strcpy_s(g_loc_res_path, sizeof g_loc_res_path, p);
+    g_loc_checked = 1;
+    strcpy_s(g_loc.loc_image, sizeof g_loc.loc_image, p);
+    loctab_save();
+    redraw_rect(CX0, LOC_DISC_Y, COLW, LOC_DISC_H);
+}
+
+static void loctab_browse(void)
+{
+    OPENFILENAMEW ofn;
+    static wchar_t file[1024], filter[220], title[128];
+    char cur[1024];
+    wchar_t f1[128], f2[64];
+    size_t n1, n2;
+    if (g_o.shot != 0) { /* Test/Shot: nie ein Dialog */
+        printf("[browse] LoC\n");
+        return;
+    }
+    ui_gettext(ctl(ID_LOC_IMAGE), cur, sizeof cur);
+    u8_to_w(cur, file, 1024);
+    u8_to_w(LT("gui.loc_dlg_filter"), f1, 128);
+    u8_to_w(LT("gui.dlg_allfiles"), f2, 64);
+    u8_to_w(LT("gui.loc_dlg_title"), title, 128);
+    n1 = wcslen(f1) + 1;
+    n2 = wcslen(f2) + 1;
+    memset(filter, 0, sizeof filter);
+    if (n1 + 19 + n2 + 5 < 220) { /* "<f1>|*.iso;*.xiso;*.xbe|<f2>|*.*||" */
+        wcscpy_s(filter, 220, f1);
+        wcscpy_s(filter + n1, 220 - n1, L"*.iso;*.xiso;*.xbe");
+        wcscpy_s(filter + n1 + 19, 220 - n1 - 19, f2);
+        wcscpy_s(filter + n1 + 19 + n2, 220 - n1 - 19 - n2, L"*.*");
+    }
+    memset(&ofn, 0, sizeof ofn);
+    ofn.lStructSize = sizeof ofn;
+    ofn.hwndOwner = g_hwnd;
+    ofn.lpstrFile = file;
+    ofn.nMaxFile = 1024;
+    ofn.lpstrFilter = filter;
+    ofn.lpstrTitle = title;
+    ofn.nFilterIndex = 1;
+    ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+    if (GetOpenFileNameW(&ofn)) {
+        SetWindowTextW(ctl(ID_LOC_IMAGE), file);
+        loctab_check();
+    }
+}
+
+static void loctab_open_folder(void)
+{
+    char d[1200];
+    wchar_t w[1200];
+    loctab_data_dir(d, sizeof d);
+    if (g_o.shot != 0) { /* Test/Shot: nie ein Explorer-Fenster, nichts anlegen */
+        printf("[open] %s\n", d);
+        return;
+    }
+    lcfg_mkdir_p(d);
+    u8_to_w(d, w, 1200);
+    ShellExecuteW(g_hwnd, L"open", w, NULL, NULL, SW_SHOWNORMAL);
+}
+
+/* Start im Bereich LoC: gesperrt mit Meldung, solange der Client LoC nicht
+ * startet (lgame_loc_client_ready). Danach: Abbild + eigener Datenordner. */
+static void loctab_start(void)
+{
+    char m[600];
+    const lgame_img_t *r = (g_loc_checked && strcmp(g_loc_res_path, g_loc.loc_image) == 0)
+                               ? &g_loc_res : NULL;
+    g_loc_last_cmd[0] = '\0';
+    if (lgame_loc_start_gate(r, m, sizeof m) != 0) {
+        set_status_k(m, lgame_loc_client_ready() ? 2 : 0);
+        return;
+    }
+    { /* spaeterer Weg (heute nur mit SB_TEST_LOC_READY=1 erreichbar) */
+        char d[1200], acp[1200], set[1400];
+        loctab_data_dir(d, sizeof d);
+        strcat_s(d, sizeof d, "\\hdd");
+        u8_to_acp(d, acp, sizeof acp);
+        _snprintf_s(set, sizeof set, _TRUNCATE, "vr_enable=0;hdd_root=%s", acp);
+        app_client_cmdline(g_client_dir, g_loc.loc_image, set, g_loc_last_cmd,
+                           sizeof g_loc_last_cmd);
+        if (g_o.shot != 0) {
+            printf("[loc-start] %s\n", g_loc_last_cmd);
+            return;
+        }
+        lcfg_mkdir_p(d);
+        if (app_launch_client_set(g_client_dir, g_loc.loc_image, set, m, sizeof m) == 0) {
+            set_status_k(m, 1);
+        } else {
+            set_status_k(m, 2);
+        }
+    }
+}
+
+/* W293: Bereitschaft LoC: Spiel, Grafik, Anzeige, Steuerung, Online (spaeter).
+ * "Change" fuehrt zur Seite der Ursache (Spiel/Online = LoC > Erweitert). */
+static const int kLocSumPage[LOC_SUM_N] = { P_ADV, P_GFX, P_DISPLAY, P_CTRL, P_ADV };
+
+static int loctab_command(int id, int code)
+{
+    if (id >= ID_LOC_GO0 && id < ID_LOC_GO0 + LOC_SUM_N) {
+        if (code == BN_CLICKED) {
+            show_page(kLocSumPage[id - ID_LOC_GO0]);
+        }
+        return 1;
+    }
+    switch (id) {
+    case ID_GAME_SB:
+    case ID_GAME_LOC:
+        loctab_set_game(id == ID_GAME_LOC ? LGAME_LOC : LGAME_SB);
+        return 1;
+    case ID_LOC_CHECK:
+        loctab_check();
+        return 1;
+    case ID_LOC_BROWSE:
+        loctab_browse();
+        return 1;
+    case ID_LOC_FOLDER:
+        loctab_open_folder();
+        return 1;
+    case ID_LOC_START:
+        loctab_start();
+        return 1;
+    case ID_LOC_IMAGE:
+        if (code == EN_SETFOCUS || code == EN_KILLFOCUS) {
+            g_focus_id = code == EN_SETFOCUS ? id : 0;
+            redraw_all();
+        } else if (code == EN_CHANGE && id == ID_LOC_IMAGE && !g_updating) {
+            redraw_rect(CX0, LOC_DISC_Y, COLW, LOC_DISC_H); /* Ergebnis gilt nur fuer den geprueften Pfad */
+        }
+        return 1;
+    case IDOK:
+    case ID_START_BIG:
+    case ID_START:
+    case ID_START_VR:
+    case ID_START_MENU:
+        if (g_game == LGAME_LOC) { /* nie Steel Battalion starten, solange LoC gewaehlt ist */
+            if (id == IDOK) {
+                HWND f = GetFocus();
+                wchar_t cls[32] = { 0 };
+                if (f) {
+                    GetClassNameW(f, cls, 32);
+                }
+                if (_wcsicmp(cls, L"Edit") == 0) {
+                    if (f == ctl(ID_LOC_IMAGE)) {
+                        loctab_check();
+                    }
+                    return 1;
+                }
+            }
+            loctab_start();
+            return 1;
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+/* Ergebniszeile der LoC-Disc-Karte: Text + Farbe. */
+static void loctab_result(char *msg, size_t cap, COLORREF *col)
+{
+    char p[512];
+    int k;
+    ui_gettext(ctl(ID_LOC_IMAGE), p, sizeof p);
+    if (!g_loc_checked || strcmp(p, g_loc_res_path) != 0) {
+        strcpy_s(msg, cap, LT(p[0] ? "gui.loc_unchecked" : "gui.loc_img_none"));
+        *col = C_DIM;
+        return;
+    }
+    k = lgame_img_msg(&g_loc_res, g_loc_res_path, msg, cap);
+    *col = k == 1 ? C_OK : k == 2 ? C_ERR : k == 3 ? C_WARN : C_DIM;
+}
+
+/* W293 LOC-LAYOUT: Bereitschaftszeilen LoC. Spiel = Disc-Status (kein
+ * Abbild / erkannt mit Title-ID / Fehler), Grafik/Anzeige/Steuerung wie SB
+ * (gemeinsame Werte, update_summary), Online kommt spaeter (grau). */
+typedef struct {
+    const char *label;
+    char value[400];
+    COLORREF col;
+} loc_sumrow_t;
+
+static void loctab_sum_game(char *out, size_t cap, COLORREF *col)
+{
+    char p[512];
+    p[0] = 0;
+    if (ctl(ID_LOC_IMAGE)) {
+        ui_gettext(ctl(ID_LOC_IMAGE), p, sizeof p);
+    }
+    if (!p[0]) {
+        strcpy_s(out, cap, LT("gui.loc_sum_none"));
+        *col = C_WARN;
+    } else if (!g_loc_checked || strcmp(p, g_loc_res_path) != 0) {
+        strcpy_s(out, cap, LT("gui.loc_sum_unchecked"));
+        *col = C_WARN;
+    } else {
+        switch (g_loc_res.kind) {
+        case LGAME_IMG_LOC:
+            _snprintf_s(out, cap, _TRUNCATE, LT("gui.loc_sum_ok"), g_loc_res.title_id);
+            *col = C_OK;
+            break;
+        case LGAME_IMG_LOC_JP:
+            _snprintf_s(out, cap, _TRUNCATE, LT("gui.loc_sum_jp"), g_loc_res.title_id);
+            *col = C_WARN;
+            break;
+        case LGAME_IMG_SB:
+            strcpy_s(out, cap, LT("gui.loc_sum_sb"));
+            *col = C_WARN;
+            break;
+        case LGAME_IMG_MISSING:
+        case LGAME_IMG_UNREADABLE:
+            strcpy_s(out, cap, LT("gui.loc_sum_err"));
+            *col = C_ERR;
+            break;
+        case LGAME_IMG_NONE:
+            strcpy_s(out, cap, LT("gui.loc_sum_none"));
+            *col = C_WARN;
+            break;
+        default:
+            _snprintf_s(out, cap, _TRUNCATE, LT("gui.loc_sum_other"), g_loc_res.title_id);
+            *col = C_ERR;
+            break;
+        }
+    }
+}
+
+static void loctab_sum_rows(loc_sumrow_t *r)
+{
+    static const int kShared[3] = { 1, 2, 4 }; /* g_sum: Grafik, Anzeige, Steuerung */
+    int i;
+    memset(r, 0, sizeof(loc_sumrow_t) * LOC_SUM_N);
+    r[0].label = LT("gui.sum_game");
+    loctab_sum_game(r[0].value, sizeof r[0].value, &r[0].col);
+    for (i = 0; i < 3; i++) {
+        const sumrow_t *g = &g_sum[kShared[i]];
+        r[1 + i].label = g->label ? g->label : "";
+        strcpy_s(r[1 + i].value, sizeof r[1 + i].value, g->value);
+        r[1 + i].col = g->col;
+    }
+    r[4].label = LT("gui.loc_sum_online");
+    strcpy_s(r[4].value, sizeof r[4].value, LT("gui.loc_server_cue"));
+    r[4].col = C_FAINT; /* grauer Punkt: kommt spaeter */
+}
+
+static void paint_loc_play(void)
+{
+    SetTextCharacterExtra(g_bb.dc, SX(3));
+    L_text(F_HERO, "LINE OF CONTACT", CX0 - 2, CY0 - 2, CW, 50, C_TEXT,
+           DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    SetTextCharacterExtra(g_bb.dc, 0);
+    /* "In development" als Plakette vor der Unterzeile */
+    L_fill(CX0, CY0 + 52, 132, 20, C_ACCENT, 46, 3);
+    L_fill(CX0, CY0 + 52, 2, 20, C_ACCENT, 255, 0);
+    L_text(F_TINY, LT("gui.loc_badge"), CX0, CY0 + 52, 132, 20, C_ACCENT_HI,
+           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    label1(F_BODY, LT("gui.loc_sub"), CX0 + 144, CY0 + 50, CW - 144, 22, C_DIM);
+    /* Sperre unter dem Startknopf (Muster D: Schloss) */
+    if (!lgame_loc_client_ready()) {
+        if (g_has_icons) {
+            wchar_t ic = 0xE72E;
+            RECT q; /* W281 */
+            lay_px(CX0, CY0 + 148, 14, 16, 0, 0, &q);
+            cv_textw(&g_bb, g_f[F_ICONSM], &ic, 1, q.left, q.top, SX(14), SX(16),
+                     C_ACCENT_HI, DT_LEFT | DT_TOP | DT_SINGLELINE);
+        }
+        label(F_TINY, LT("gui.loc_soon"), CX0 + 18, CY0 + 146, 312, 40, C_ACCENT_HI);
+    }
+    /* rechts: was gemeinsam ist (W293: der Hinweis steht jetzt unten als Band wie bei SB) */
+    card(UPD_X, UPD_Y, UPD_W, 134, LT("gui.loc_shared_title"));
+    label(F_TINY, LT("gui.loc_shared_text"), UPD_X + 18, UPD_Y + 38, UPD_W - 36, 56, C_TEXT);
+    label(F_TINY, LT("gui.loc_shared_hint"), UPD_X + 18, UPD_Y + 96, UPD_W - 36, 32, C_DIM);
+    /* W293: Bereitschaft wie SB (Punkt, Bezeichnung, Wert, "Change") */
+    {
+        loc_sumrow_t r[LOC_SUM_N];
+        int i, y;
+        loctab_sum_rows(r);
+        card(CX0, LOC_SUM_Y, CW, LOC_SUM_H, LT("gui.sum_title"));
+        for (i = 0, y = LOC_SUM_Y + 40; i < LOC_SUM_N; i++, y += 36) {
+            dot(CX0 + 20, y + 6, r[i].col);
+            label1(F_SMALL, r[i].label, CX0 + 40, y, 100, 22, C_DIM);
+            label1(F_SMALL, r[i].value, CX0 + 142, y, CW - 142 - 18 - 112, 22,
+                   r[i].col == C_FAINT ? C_DIM : C_TEXT);
+        }
+    }
+    if (orig_banner_on()) { /* W278/W293: Hinweisband unten wie bei SB */
+        orig_paint_play(1);
+    }
+}
+
+/* W293 LOC-LAYOUT: Erweitert im Bereich LoC. Links die LoC-eigenen Karten
+ * (Disc, Spielstaende & Daten, Online spaeter), rechts die gemeinsamen
+ * Teile (Feinabstimmung, Launcher). */
+static void paint_loc_adv(void)
+{
+    char t[1200];
+    COLORREF col;
+    /* Disc: Pfad, Check/Browse, Ergebnis, Hinweis */
+    card(CX0, LOC_DISC_Y, COLW, LOC_DISC_H, LT("gui.loc_disc_title"));
+    loctab_result(t, sizeof t, &col);
+    label(F_SMALL, t, CX0 + 18, LOC_DISC_Y + 118, COLW - 36, 38, col);
+    label(F_TINY, LT("gui.loc_disc_hint"), CX0 + 18, LOC_DISC_Y + 160, COLW - 36, 50, C_DIM);
+    /* Spielstaende & Daten (getrennt von Steel Battalion) */
+    card(CX0, LOC_DATA_Y, COLW, LOC_DATA_H, LT("gui.loc_data_title"));
+    label1(F_TINY, LT("gui.loc_data_text"), CX0 + 18, LOC_DATA_Y + 38, COLW - 36, 18, C_DIM);
+    loctab_data_dir(t, sizeof t);
+    L_text(F_SMALL, t, CX0 + 18, LOC_DATA_Y + 56, COLW - 36, 22, C_TEXT,
+           DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_PATH_ELLIPSIS);
+    /* Online (spaeter) */
+    card(CX0, LOC_ONL_Y, COLW, LOC_ONL_H, LT("gui.loc_online_title"));
+    label1(F_SMALL, LT("gui.loc_server"), CX0 + 18, LOC_ONL_Y + 40, 70, 28, C_DIM);
+    /* Platzhalter-Feld (gesperrt, noch keine Eingabe): Adresse bzw. "kommt spaeter" */
+    L_fill(CX0 + 90, LOC_ONL_Y + 40, COLW - 108, 28, C_INPUT, 120, 6);
+    L_ring(CX0 + 90, LOC_ONL_Y + 40, COLW - 108, 28, C_INPUT_BRD, 120, 6);
+    label1(F_SMALL, g_loc.loc_server[0] ? g_loc.loc_server : LT("gui.loc_server_cue"),
+           CX0 + 100, LOC_ONL_Y + 40, COLW - 128, 28, C_FAINT);
+    label(F_TINY, LT("gui.loc_online_text"), CX0 + 18, LOC_ONL_Y + 76, COLW - 36, 50, C_DIM);
+    paint_adv_shared();
+}
+
+static void loctab_build(HWND w)
+{
+    int i;
+    /* Titelleiste: Umschalter (zwischen Edition und Fensterknoepfen) */
+    mk(w, K_SEG, ID_GAME_SB, PG_ALL, WIN_W - 92 - 8 - 2 * 136 - 4, 10, 136, 28,
+       LT("gui.loc_game_sb"), 0);
+    mk(w, K_SEG, ID_GAME_LOC, PG_ALL, WIN_W - 92 - 8 - 136, 10, 136, 28, LT("gui.loc_game_loc"), 0);
+    /* Seite Spielen (LoC): Start, "Change" je Bereitschaftszeile (wie SB) */
+    mk(w, K_BIG, ID_LOC_START, P_PLAY, CX0, CY0 + 84, 308, 56, LT("gui.loc_btn_start"), 0);
+    for (i = 0; i < LOC_SUM_N; i++) {
+        mk(w, K_BTN, ID_LOC_GO0 + i, P_PLAY, CX0 + CW - 18 - 104, LOC_SUM_Y + 36 + i * 36, 104, 28,
+           LT("gui.play_change"), 0);
+    }
+    /* W293: Seite Erweitert (LoC): Disc und Datenordner */
+    mk(w, K_EDIT, ID_LOC_IMAGE, P_ADV, CX0 + 18, LOC_DISC_Y + 42, COLW - 36, 32, g_loc.loc_image, 0);
+    mk(w, K_BTN, ID_LOC_CHECK, P_ADV, CX0 + 18, LOC_DISC_Y + 80, 122, 30, LT("gui.btn_check"), 0);
+    mk(w, K_BTN, ID_LOC_BROWSE, P_ADV, CX0 + 18 + 130, LOC_DISC_Y + 80, 122, 30, LT("gui.btn_browse"), 0);
+    mk(w, K_BTN, ID_LOC_FOLDER, P_ADV, CX0 + 18, LOC_DATA_Y + 82, 150, 28, LT("gui.loc_open_folder"), 0);
+    loctab_nav_layout();
+}
+
+static void loctab_relabel(void)
+{
+    ui_settext(ctl(ID_GAME_SB), LT("gui.loc_game_sb"));
+    ui_settext(ctl(ID_GAME_LOC), LT("gui.loc_game_loc"));
+    ui_settext(ctl(ID_LOC_START), LT("gui.loc_btn_start"));
+    ui_settext(ctl(ID_LOC_CHECK), LT("gui.btn_check"));
+    ui_settext(ctl(ID_LOC_BROWSE), LT("gui.btn_browse"));
+    ui_settext(ctl(ID_LOC_FOLDER), LT("gui.loc_open_folder"));
+    {
+        int i;
+        for (i = 0; i < LOC_SUM_N; i++) { /* W293 */
+            ui_settext(ctl(ID_LOC_GO0 + i), LT("gui.play_change"));
+        }
+    }
+}
+
+/* Nach gui_fill: LoC gewaehlt -> Navigation + Statuszeile passend. */
+static void loctab_fill_done(void)
+{
+    loctab_nav_layout();
+    if (!g_loc_checked && g_loc.loc_image[0] &&
+        u8_GetFileAttributes(g_loc.loc_image) != INVALID_FILE_ATTRIBUTES) {
+        lgame_loc_check(g_loc.loc_image, &g_loc_res); /* gemerktes Abbild gleich pruefen (nur lesen) */
+        strcpy_s(g_loc_res_path, sizeof g_loc_res_path, g_loc.loc_image);
+        g_loc_checked = 1;
+    }
+    if (g_game == LGAME_LOC) {
+        show_page(g_page);
+        if (g_has_ldr) { /* fehlender Client bleibt als Fehler stehen */
+            set_status_k(LT("gui.loc_switched"), 0);
+        }
+    }
+}
+
+/* --ui-shot --state loc_*: Bereich LoC mit Pruef-Fixture (bereinigte
+ * Beispielpfade, kein echtes Abbild, nichts gespeichert). Vor build_controls. */
+static int loctab_apply_state(const char *name)
+{
+    if (strncmp(name, "loc_", 4) != 0) {
+        return 0;
+    }
+    g_game = LGAME_LOC;
+    g_loc.game = LGAME_LOC;
+    memset(&g_locfix, 0, sizeof g_locfix);
+    g_locfix_path[0] = '\0';
+    if (strcmp(name, "loc_ok") == 0 || strcmp(name, "loc_start") == 0 || strcmp(name, "loc_exp") == 0) {
+        strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_ISO);
+        g_locfix.kind = LGAME_IMG_LOC;
+        g_locfix.title_id = LGAME_TID_LOC;
+    } else if (strcmp(name, "loc_sb") == 0) {
+        strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_SB_ISO);
+        g_locfix.kind = LGAME_IMG_SB;
+        g_locfix.title_id = LGAME_TID_SB;
+    }
+    strcpy_s(g_loc.loc_image, sizeof g_loc.loc_image, g_locfix_path);
+    return 1;
+}
+
+/* Nach dem Aufbau (Shot): Pruefung bzw. Startversuch wie der Nutzer. */
+static void loctab_state_after(const char *name)
+{
+    if (strncmp(name, "loc_", 4) != 0 || (g_page != P_PLAY && g_page != P_ADV)) { /* W293: Disc auf Erweitert */
+        return;
+    }
+    if (g_locfix_path[0]) {
+        loctab_check();
+    }
+    if (strcmp(name, "loc_start") == 0) {
+        loctab_start();
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* W278 ORIG-FLAG: Hinweis "nicht die Original-Optik" auf Spielen (beide */
+/* Bereiche), "Back to original" (nur experimentelle Grafik), Einmal-    */
+/* Start im Original-Modus (--set nur fuer diesen Start), Plaketten      */
+/* "EXPERIMENTAL" an den Karten. Logik: launcher_orig.c, Tabelle:        */
+/* harness/src/sb_origflag.h.                                            */
+/* ------------------------------------------------------------------ */
+#define OB_Y (CY0 + 456) /* SB: Band an der Stelle des Primaerfeuer-Hinweises */
+#define OB_H 40
+/* W293 LOC-LAYOUT: LoC-Band unten wie SB, eine Zeile hoeher fuer "These
+ * settings are shared with Steel Battalion." (ohne Einmal-Start) */
+#define OB_Y_LOC (CY0 + 444)
+#define OB_H_LOC 52
+#define OB_BTN_ONCE_W 172
+#define OB_BTN_RESET_W 150
+#define XI_W 30 /* W287: Experimentell-Symbol in der Kartenkopfzeile */
+#define XI_H 24
+
+static int orig_banner_on(void)
+{
+    return g_orig_mask != 0 && (g_game == LGAME_LOC || !play_setup_shown());
+}
+
+static int orig_visible(int id, int page)
+{
+    if (id != ID_ORIG_RESET && id != ID_ORIG_ONCE && id != ID_ORIG_RESET_LOC && id != ID_XWARN_SB &&
+        id != ID_XWARN_LOC) {
+        return -1;
+    }
+    if (page != P_PLAY || !orig_banner_on()) {
+        return 0;
+    }
+    return (id == ID_ORIG_RESET_LOC || id == ID_XWARN_LOC) ? g_game == LGAME_LOC : g_game != LGAME_LOC;
+}
+
+/* W287 EXP-ICON: Texte der Symbole (Tooltip = zugaenglicher Name).      */
+/* Experimentell-Symbol: gemeinsame Beschreibung + Grund der Karte bzw.  */
+/* die Gruppen, die ein Preset aendert. Warn-Symbol: aktive Gruppen.     */
+static void xtip_text(int id, char *out, size_t cap)
+{
+    char list[400];
+    out[0] = '\0';
+    if (id >= ID_XEXP_FIRST && id <= ID_XEXP_LAST) {
+        static const char *const kWhy[] = { "gui.exp_tip_wide", "gui.exp_tip_image", "gui.exp_tip_world",
+                                            "gui.exp_tip_hud", "gui.exp_tip_packs" };
+        _snprintf_s(out, cap, _TRUNCATE, "%s\n%s", LT("gui.exp_tip"), LT(kWhy[id - ID_XEXP_FIRST]));
+    } else if (id == ID_CHIDE || id == ID_REM_LABEL) { /* W291: frueher Textzeilen in der Karte */
+        strcpy_s(out, cap, LT(id == ID_CHIDE ? "gui.chide_txt" : "gui.rem_label_txt"));
+    } else if (id == ID_XEXP_PHOTO) { /* W290: breit (Aussenwelt), REPLAY/Logo aus */
+        _snprintf_s(out, cap, _TRUNCATE, "%s\n%s", LT("gui.exp_tip"), LT("gui.exp_tip_photo"));
+    } else if (id == ID_XWARN_SB || id == ID_XWARN_LOC) {
+        if (g_orig_mask) {
+            lorig_list_sep(g_orig_mask, "\n", "\xE2\x80\xA2 ", list, sizeof list); /* ein Punkt je Zeile */
+            _snprintf_s(out, cap, _TRUNCATE, LT("gui.exp_warn_tip"), list);
+        }
+    } else if (id >= ID_GP0 && id < ID_GP0 + LGP_CUSTOM) {
+        if (xexp_preset(id - ID_GP0)) {
+            char ch[440];
+            lorig_list(lorig_preset_mask(id - ID_GP0), list, sizeof list);
+            _snprintf_s(ch, sizeof ch, _TRUNCATE, LT("gui.exp_tip_preset"), list);
+            _snprintf_s(out, cap, _TRUNCATE, "%s\n%s", LT("gui.exp_tip"), ch);
+        }
+    } else if (id >= ID_NAV0 && id < ID_NAV0 + P_N) {
+        unsigned m = xwarn_page_mask(id - ID_NAV0);
+        if (m) {
+            lorig_list(m, list, sizeof list);
+            _snprintf_s(out, cap, _TRUNCATE, LT("gui.exp_warn_nav"), list);
+        }
+    }
+}
+
+/* Fenstertexte nachziehen (Sprache, Maske): Symbole und Navigation
+ * (zweite Zeile = Hinweis fuer Bildschirmleser, gezeichnet wird das Symbol). */
+static void xicon_texts(void)
+{
+    static const int kNav[] = { P_DISPLAY, P_GFX, P_PACKS };
+    char t[700];
+    int id, i;
+    for (id = ID_XEXP_FIRST; id <= ID_XWARN_LOC; id++) {
+        xtip_text(id, t, sizeof t);
+        if (ctl(id)) {
+            ui_settext_if(ctl(id), t);
+        }
+    }
+    if (ctl(ID_XEXP_PHOTO)) { /* W290 */
+        xtip_text(ID_XEXP_PHOTO, t, sizeof t);
+        ui_settext_if(ctl(ID_XEXP_PHOTO), t);
+    }
+    for (i = 0; i < (int)(sizeof kNav / sizeof kNav[0]); i++) {
+        HWND h = ctl(ID_NAV0 + kNav[i]);
+        char n[760];
+        if (!h) {
+            continue;
+        }
+        xtip_text(ID_NAV0 + kNav[i], t, sizeof t);
+        if (t[0]) {
+            _snprintf_s(n, sizeof n, _TRUNCATE, "%s\n%s", LT(kPageName[kNav[i]]), t);
+        } else {
+            strcpy_s(n, sizeof n, LT(kPageName[kNav[i]]));
+        }
+        ui_settext_if(h, n);
+    }
+}
+
+/* loc = 0: Band unten auf SB-Spielen; 1: Band unten auf LoC-Spielen (W293:
+ * gleiche Optik, statt der Karte oben rechts; Zusatzzeile "gemeinsam"). */
+static void orig_paint_play(int loc)
+{
+    char list[300], t[420];
+    int y = loc ? OB_Y_LOC : OB_Y, h = loc ? OB_H_LOC : OB_H;
+    int tw = loc ? CW - 44 - 12 - OB_BTN_RESET_W - 12 /* ohne Einmal-Start */
+                 : CW - 44 - 12 - OB_BTN_ONCE_W - 8 - OB_BTN_RESET_W - 12;
+    lorig_list(g_orig_mask, list, sizeof list);
+    _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.of_banner_l"), list);
+    /* W287: Warn-Symbol (ID_XWARN_SB/_LOC) vorn, Text dahinter */
+    L_fill(CX0, y, CW, h, C_WARN, 34, 10);
+    L_ring(CX0, y, CW, h, C_WARN, 130, 10);
+    label1(F_SMALL, LT("gui.of_banner_t"), CX0 + 44, y + 2, tw, 19, C_WARN);
+    label1(F_TINY, t, CX0 + 44, y + 21, tw, 16, C_TEXT);
+    if (loc) {
+        label1(F_TINY, LT("gui.of_banner_loc"), CX0 + 44, y + 35, tw, 15, C_DIM);
+    }
+}
+
+static void orig_build(HWND w)
+{
+    mk(w, K_BTN, ID_ORIG_RESET, P_PLAY, CX0 + CW - 12 - OB_BTN_ONCE_W - 8 - OB_BTN_RESET_W, OB_Y + 6,
+       OB_BTN_RESET_W, 28, LT("gui.of_btn_reset"), 0);
+    mk(w, K_BTN, ID_ORIG_ONCE, P_PLAY, CX0 + CW - 12 - OB_BTN_ONCE_W, OB_Y + 6, OB_BTN_ONCE_W, 28,
+       LT("gui.of_btn_once"), 0);
+    mk(w, K_BTN, ID_ORIG_RESET_LOC, P_PLAY, CX0 + CW - 12 - OB_BTN_RESET_W, OB_Y_LOC + (OB_H_LOC - 28) / 2,
+       OB_BTN_RESET_W, 28, LT("gui.of_btn_reset"), 0); /* W293: rechts im Band (kein Einmal-Start) */
+    /* W287 EXP-ICON: Kolben rechts in der Kopfzeile der Karten mit experimentellen
+     * Einstellungen (statt der Plakette), Warn-Symbol vorn im Hinweis */
+    mk(w, K_ICON, ID_XEXP_DISP, P_DISPLAY, COL2 + COLW - 18 - XI_W, CY0 + 12, XI_W, XI_H, "", 0);
+    mk(w, K_ICON, ID_XEXP_IMAGE, P_GFX, CX0 + COLW - 18 - XI_W, CY0 + 352 + 12, XI_W, XI_H, "", 0);
+    mk(w, K_ICON, ID_XEXP_WORLD, P_GFX, COL2 + COLW - 18 - XI_W, CY0 + 12, XI_W, XI_H, "", 0);
+    mk(w, K_ICON, ID_XEXP_HUD, P_GFX, COL2 + COLW - 18 - XI_W, CY0 + 304 + 12, XI_W, XI_H, "", 0);
+    mk(w, K_ICON, ID_XEXP_PACKS, P_PACKS, CX0 + PKL_W - 18 - 150 - 8 - XI_W, CY0 + 12, XI_W, XI_H, "", 0); /* links neben "Pack hinzufuegen" */
+    mk(w, K_ICON, ID_XEXP_PHOTO, P_AUDIO, CX0 + CW - 18 - XI_W, CY0 + 152 + 12, XI_W, XI_H, "", 0); /* W290 */
+    mk(w, K_ICON, ID_XWARN_SB, P_PLAY, CX0 + 10, OB_Y + 8, 26, 24, "", 0);
+    mk(w, K_ICON, ID_XWARN_LOC, P_PLAY, CX0 + 10, OB_Y_LOC + 8, 26, 24, "", 0); /* W293: wie ID_XWARN_SB */
+    xicon_texts();
+}
+
+static void orig_relabel(void)
+{
+    ui_settext(ctl(ID_ORIG_RESET), LT("gui.of_btn_reset"));
+    ui_settext(ctl(ID_ORIG_ONCE), LT("gui.of_btn_once"));
+    ui_settext(ctl(ID_ORIG_RESET_LOC), LT("gui.of_btn_reset"));
+    xicon_texts(); /* W287 */
+}
+
+/* "Back to original": nur experimentelle Grafik, dann speichern (sonst
+ * verschwaende der Hinweis, ohne dass etwas gesichert ist); Rueckgaengig
+ * bleibt (Muster C). Shots speichern nie. */
+static void orig_reset_now(void)
+{
+    launcher_settings_t before, s;
+    snap_settings(&before);
+    s = before;
+    lorig_reset(&s);
+    g_s = s;
+    ui_from_settings(&s);
+    update_aspect_info();
+    gfx_sync_ui();
+    {
+        int saved = 0;
+        if (g_o.shot == 0 || g_ucfg_test[0]) {
+            saved = do_save(0) == 0; /* ohne gueltige Spieldaten: nicht speichern, keine Meldebox */
+        }
+        set_status_undo(LT(saved ? "gui.of_reset_done" : "gui.of_reset_unsaved"), &before);
+    }
+    ui_refresh_visibility();
+    redraw_all();
+}
+
+/* Einmal-Start: Override nur fuer diesen Start (user.cfg bekommt nur den
+ * ueblichen Stand der Oberflaeche + Spielerbetrieb-Block). dry = Test. */
+static int orig_once_start(int dry)
+{
+    char set[2048];
+    int rc;
+    if (lorig_once_args(set, sizeof set) != 0) {
+        return 1;
+    }
+    rc = do_start_ex(dry, 0, set);
+    if (rc == 0) {
+        set_status_k(LT("gui.of_once_done"), 1);
+    }
+    return rc;
+}
+
+static int orig_command(int id, int code)
+{
+    if (id != ID_ORIG_RESET && id != ID_ORIG_ONCE && id != ID_ORIG_RESET_LOC) {
+        return 0;
+    }
+    if (code != BN_CLICKED) {
+        return 1;
+    }
+    if (id == ID_ORIG_ONCE) {
+        if (g_game == LGAME_LOC) {
+            set_status_k(LT("gui.loc_soon"), 1);
+        } else if (launch_blocked()) { /* wie Launch: Grund statt Startversuch */
+            static const int kBlk[] = { 4, 3 };
+            set_status_k(g_rr[first_rule(kBlk, 2)].text, 2);
+        } else {
+            orig_once_start(0);
+        }
+    } else {
+        orig_reset_now();
+    }
+    return 1;
+}
+
 static void build_controls(void)
 {
     HWND c;
@@ -13115,6 +14881,10 @@ static void build_controls(void)
     combo_add(c, LT("gui.lang_en"));
     combo_add(c, LT("gui.lang_de"));
     ComboBox_SetCurSel(c, 0);
+    /* W281 LAUNCHER-SIZE: Layout-Vorschau (nur in a/b sichtbar, wirkt sofort) */
+    mk(w, K_STATIC, ID_LAYOUT_LBL, PG_ALL, 12, WIN_H - 52, 54, 30, LT("gui.lay_size"), SS_CENTERIMAGE); /* W287 */
+    c = mk(w, K_COMBO, ID_LAYOUT, PG_ALL, 70, WIN_H - 52, NAV_W - 82, 30, "", 0);
+    lay_combo_fill(c);
 
     /* --- Spielen: Startknoepfe (W159: Bildschirm + VR), Disc-Abbild --- */
     mk(w, K_BIG, ID_START_BIG, P_PLAY, CX0, CY0 + 84, 308, 56, LT("gui.btn_bigstart"), 0);
@@ -13155,24 +14925,24 @@ static void build_controls(void)
     mk(w, K_EDIT, ID_H, P_DISPLAY, CX0 + 232, CY0 + 152, 90, 30, "",
        ES_NUMBER);
     /* Bildrate (Mission) */
-    c = mk(w, K_COMBO, ID_IPFPS, P_DISPLAY, CX0 + 120, CY0 + 252, COLW - 138,
+    c = mk(w, K_COMBO, ID_IPFPS, P_DISPLAY, CX0 + 120, CY0 + 188, COLW - 138, /* W291: Karte Anzeige */
            30, "", 0);
     ip_fill(c); /* W223 */
     /* W134 VR-PROTO, W159: Vorschau-Art (Reihenfolge = vr_from/to_settings) */
-    c = mk(w, K_COMBO, ID_VR, P_DISPLAY, CX0 + 120, CY0 + 414, COLW - 138, 30, "", 0);
+    c = mk(w, K_COMBO, ID_VR, P_DISPLAY, CX0 + 120, CY0 + 356, COLW - 138, 30, "", 0); /* W291 */
     combo_add(c, LT("gui.vr_prev_sbs"));
     combo_add(c, LT("gui.vr_prev_left"));
     combo_add(c, LT("gui.vr_prev_right"));
     combo_add(c, LT("gui.vr_prev_off"));
     ComboBox_SetCurSel(c, 1);
     /* W183 VR-FIX3: VR-Leistung (Preset) + Render-Aufloesung nebeneinander */
-    c = mk(w, K_COMBO, ID_VRPRESET, P_DISPLAY, CX0 + 120, CY0 + 448, COLW - 138 - 8 - EDGE_W1, 30, "", 0);
+    c = mk(w, K_COMBO, ID_VRPRESET, P_DISPLAY, CX0 + 120, CY0 + 390, COLW - 138 - 8 - EDGE_W1, 30, "", 0); /* W291 */
     combo_add(c, LT("gui.vrp_perf"));
     combo_add(c, LT("gui.vrp_bal"));
     combo_add(c, LT("gui.vrp_qual"));
     combo_add(c, LT("gui.vrp_custom"));
     ComboBox_SetCurSel(c, 1);
-    c = mk(w, K_COMBO, ID_VRRES, P_DISPLAY, CX0 + 120 + COLW - 138 - EDGE_W1, CY0 + 448,
+    c = mk(w, K_COMBO, ID_VRRES, P_DISPLAY, CX0 + 120 + COLW - 138 - EDGE_W1, CY0 + 390,
            EDGE_W1, 30, "", 0);
     vrres_fill(c); /* W227: "Res. 80 %" */
     ComboBox_SetCurSel(c, vrres_index(80));
@@ -13214,7 +14984,7 @@ static void build_controls(void)
     cwidth_fill(c);
     ComboBox_SetCurSel(c, 0);
     /* W148: Render-Skalierung (Index: 0 = Auto dyn, 1 = Auto fest, 2..5 = 1..4) */
-    c = mk(w, K_COMBO, ID_RTSCALE, P_DISPLAY, CX0 + 120, CY0 + 288, COLW - 138, 30, "", 0);
+    c = mk(w, K_COMBO, ID_RTSCALE, P_DISPLAY, CX0 + 120, CY0 + 224, COLW - 138, 30, "", 0); /* W291 */
     combo_add(c, LT("gui.rs_dyn"));
     combo_add(c, LT("gui.rs_autof"));
     combo_add(c, "1");
@@ -13233,8 +15003,8 @@ static void build_controls(void)
     }
     mk(w, K_BTN, ID_GP_RESET, P_GFX, CX0 + COLW - 18 - 84, CY0 + 42 + LGP_CUSTOM * 40 + 4, 84, 26,
        LT("gui.gfx_reset"), 0);
-    mk(w, K_BTN, ID_GFX_PACKS, P_GFX, CX0 + COLW - 18 - 96, CY0 + 302, 96, 26,
-       LT("gui.gfx_to_packs"), 0);
+    mk(w, K_BTN, ID_GFX_PACKS, P_GFX, CX0 + COLW - 18 - 96, LAY_TEX_Y + 82, 96, 26,
+       LT("gui.gfx_to_packs"), 0); /* W291: Karte Texturen */
     c = mk(w, K_COMBO, ID_AAMODE, P_GFX, CX0 + 120, CY0 + 396, COLW - 138,
            30, "", 0); /* W131: aa_mode 0..3 */
     combo_add(c, LT("gui.aa_off"));
@@ -13267,19 +15037,22 @@ static void build_controls(void)
     combo_add(c, LT("gui.gfx_fx_subtle"));
     combo_add(c, LT("gui.gfx_fx_strong"));
     ComboBox_SetCurSel(c, 0);
-    c = mk(w, K_COMBO, ID_GFX_TEX, P_GFX, COL2 + 120, CY0 + 212, COLW - 138, 30, "", 0);
+    c = mk(w, K_COMBO, ID_GFX_TEX, P_GFX, CX0 + 120, LAY_TEX_Y + 44, COLW - 138, 30, "", 0); /* W291 */
     combo_add(c, LT("gui.gfx_tex_o"));
     combo_add(c, LT("gui.gfx_tex_hd"));
     ComboBox_SetCurSel(c, 0);
     SendMessageW(c, CB_SETDROPPEDWIDTH, (WPARAM)SX(260), 0);
     /* W172/P5: Texturdetail nur auf Packs; die Kombi bleibt unsichtbar als
      * Traeger fuer hd_scale. */
-    c = mk(w, K_COMBO, ID_REM_SCALE, P_GFX, COL2 + 120, CY0 + 212,
+    c = mk(w, K_COMBO, ID_REM_SCALE, P_GFX, CX0 + 120, LAY_TEX_Y + 44,
            COLW - 138, 30, "", 0);
     combo_add(c, LT("gui.scale2"));
     combo_add(c, LT("gui.scale4"));
     ComboBox_SetCurSel(c, 1);
     mk(w, K_TOGGLE, ID_REM_LABEL, P_GFX, COL2 + 18, CY0 + 348, COLW - 36, 28, LT("gui.rem_label"), 0); /* W153 */
+    mk(w, K_TOGGLE, ID_CHIDE, P_GFX, COL2 + 18, CY0 + 426, COLW - 36, 28, LT("gui.chide"), 0); /* W268 */
+    /* W291 ESC-REWORK: Feinregler zeigen (Anzeige + Grafik, gemerkt in launcher_ui.cfg) */
+    mk(w, K_TOGGLE, ID_SHOWADV, PG_ALL, CX0 + 4, LAY_ADV_Y, COLW - 8, 28, LT("gui.show_adv"), 0);
 
     /* --- Packs (W172 LAUNCHER-P5): Liste links, Texturdetail links unten,
      * gewaehltes Pack rechts (Tab: Hinzufuegen, Liste, Fuss, Detail) --- */
@@ -13359,7 +15132,23 @@ static void build_controls(void)
     combo_add(c, LT("gui.ctl_assist1"));
     combo_add(c, LT("gui.ctl_assist2"));
     mk(w, K_TOGGLE, ID_CTRL_AUTOGEAR, P_CTRL, COL2 + 18, CY0 + 192, COLW - 36, 28, LT("gui.ctl_autogear"), 0);
-    mk(w, K_MEMO, ID_KEYS, P_CTRL, COL2 + 18, CY0 + 228, COLW - 36, 210,
+    /* W271 STICK-RELATIVE: Gamepad-/Joystick-Stick auf dem Zielhebel
+     * (Position = Original, "wie eine Maus" = haelt beim Loslassen) */
+    c = mk(w, K_COMBO, ID_STICK_AIM, P_CTRL, COL2 + 78, CY0 + 228,
+           COLW - 18 - 54 - 48 - 8 - 78, 30, "", 0);
+    SendMessageW(c, CB_SETDROPPEDWIDTH, (WPARAM)SX(300), 0);
+    combo_add(c, LT("gui.stick_pos"));
+    combo_add(c, LT("gui.stick_rel"));
+    c = mk(w, K_COMBO, ID_STICK_SENS, P_CTRL, COL2 + COLW - 18 - 54,
+           CY0 + 228, 54, 30, "", 0);
+    {
+        char t[8];
+        for (i = 1; i <= 16; i++) {
+            _snprintf_s(t, sizeof t, _TRUNCATE, "%d", i);
+            combo_add(c, t);
+        }
+    }
+    mk(w, K_MEMO, ID_KEYS, P_CTRL, COL2 + 18, CY0 + 266, COLW - 36, 172,
        "", 0);
 
     /* W179 KEYS-HTML: Tastenuebersicht als HTML (immer aktiv, ohne Regel) */
@@ -13367,26 +15156,36 @@ static void build_controls(void)
        LT("gui.keys_browser"), 0);
 
     /* --- Ton --- */
-    mk(w, K_TOGGLE, ID_AUDIO, P_AUDIO, CX0 + 18, CY0 + 50, 300, 28, LT("gui.ton_on"),
+    mk(w, K_TOGGLE, ID_AUDIO, P_AUDIO, CX0 + 18, CY0 + 50, COLW - 36, 28, LT("gui.ton_on"),
        0);
-    /* W234 PAL50: Spieltempo (wirkt beim naechsten Start, kein ESC-Schalter) */
-    mk(w, K_TOGGLE, ID_PAL50, P_AUDIO, CX0 + 18, CY0 + 432, CW - 36, 28, LT("gui.pal50"), 0);
+    /* W234 PAL50: Spieltempo (wirkt beim naechsten Start, kein ESC-Schalter); W290: rechte Spalte */
+    mk(w, K_TOGGLE, ID_PAL50, P_AUDIO, COL2 + 18, CY0 + 50, COLW - 36, 28, LT("gui.pal50"), 0);
     /* --- W195 PHOTO-MODE: Extras (Fotoordner, Aufnahme-Aufloesung, Format) --- */
     mk(w, K_EDIT, ID_PH_DIR, P_AUDIO, CX0 + 18, CY0 + 208, CW - 36 - 250, 30, "", 0);
     mk(w, K_BTN, ID_PH_BROWSE, P_AUDIO, CX0 + CW - 18 - 242, CY0 + 208, 112, 30, LT("gui.btn_browse"), 0);
     mk(w, K_BTN, ID_PH_OPEN, P_AUDIO, CX0 + CW - 18 - 122, CY0 + 208, 122, 30, LT("gui.extras_open"), 0);
-    c = mk(w, K_COMBO, ID_PH_RES, P_AUDIO, CX0 + 190, CY0 + 250, 170, 30, "", 0);
+    /* W290 QUICK-SHOT: Ansicht | Groesse, Format | Bildformat (nur Aussenwelt), Replays & Video-Export */
+    c = mk(w, K_COMBO, ID_PH_VIEW, P_AUDIO, CX0 + 130, CY0 + 250, 226, 30, "", 0);
+    combo_add(c, LT("ovl.ph_v_game"));
+    combo_add(c, LT("ovl.ph_v_flat"));
+    combo_add(c, LT("ovl.ph_v_world"));
+    c = mk(w, K_COMBO, ID_PH_RES, P_AUDIO, CX0 + 440, CY0 + 250, CW - 18 - 440, 30, "", 0);
     combo_add(c, LT("gui.extras_res_1"));
+    combo_add(c, "4K");
+    combo_add(c, "8K");
     combo_add(c, LT("gui.extras_res_2"));
     combo_add(c, LT("gui.extras_res_4"));
     combo_add(c, LT("gui.extras_res_8"));
-    c = mk(w, K_COMBO, ID_PH_FMT, P_AUDIO, CX0 + 450, CY0 + 250, 110, 30, "", 0);
+    c = mk(w, K_COMBO, ID_PH_FMT, P_AUDIO, CX0 + 130, CY0 + 290, 104, 30, "", 0);
     combo_add(c, "PNG");
     combo_add(c, "JPG");
-    c = mk(w, K_COMBO, ID_PH_ASP, P_AUDIO, CX0 + 190, CY0 + 290, 240, 30, "", 0);
-    combo_add(c, LT("ovl.ph_asp_crop"));
-    combo_add(c, LT("ovl.ph_asp_wide"));
+    c = mk(w, K_COMBO, ID_PH_ASP, P_AUDIO, CX0 + 440, CY0 + 290, CW - 18 - 440, 30, "", 0);
     combo_add(c, LT("ovl.ph_asp_square"));
+    combo_add(c, LT("ovl.ph_asp_wide"));
+    mk(w, K_TOGGLE, ID_RP_LABEL, P_AUDIO, CX0 + 18, CY0 + 348, COLW - 36, 28, LT("gui.rp_label"), 0);
+    mk(w, K_TOGGLE, ID_RP_LOGO, P_AUDIO, COL2 + 18, CY0 + 348, COLW - 36, 28, LT("gui.rp_logo"), 0);
+    mk(w, K_TOGGLE, ID_WM_MEDIA, P_AUDIO, CX0 + 18, CY0 + 382, COLW - 36, 28, LT("gui.wm_media"), 0);
+    mk(w, K_TOGGLE, ID_PH_HUD, P_AUDIO, COL2 + 18, CY0 + 382, COLW - 36, 28, LT("gui.ph_hud"), 0); /* W290 */
 
     /* --- Erweitert: Spieldateien (Ordner-Modus), Spielstaende, gespeicherte
      * Einstellungen, Feinabstimmung, Launcher, Diagnose --- */
@@ -13439,6 +15238,8 @@ static void build_controls(void)
     mk(w, K_BTN, ID_UPD_OPEN, P_PLAY, UPD_X + UPD_W - 18 - 160, UPD_Y + 58, 160, 28, LT("gui.upd_open"), 0);
     /* W190 SAVE-LOCK: immer sichtbar (auch bei eingeklappter Diagnose) */
     mk(w, K_TOGGLE, ID_SAVE_LOCK, P_ADV, COL2 + 18, ADV_DIAG_Y + 40, COLW - 36, 28, LT("gui.save_lock"), 0);
+    alpha_build_controls(w); /* W272 ALPHA-TEST */
+    dg_build_controls(w); /* W279 DIAG-CRASH */
 
     /* --- Fussleiste: Rueckgaengig, Speichern, Launch v --- */
     mk(w, K_BTN, ID_UNDO, PG_ALL, WIN_W - 28 - 150 - 12 - 130 - 10 - 112,
@@ -13449,6 +15250,10 @@ static void build_controls(void)
        WIN_H - BOT_H + 14, 118, 36, LT("gui.btn_start"), 0);
     mk(w, K_ACCENT, ID_START_MENU, PG_NOTPLAY, WIN_W - 28 - 30,
        WIN_H - BOT_H + 14, 30, 36, "", 0);
+    loctab_build(w); /* W276: Spielauswahl + LoC-Seite */
+    orig_build(w); /* W278 ORIG-FLAG */
+    ui_set_checked(ID_SHOWADV, g_show_adv); /* W291 */
+    lay_gfx_apply(); /* W291: Kartenlage der Grafik-Seite (Symbole aus orig_build) */
     keys_tabstops();
 }
 
@@ -13633,6 +15438,12 @@ static void on_command(int id, int code)
         show_page(id - ID_NAV0);
         return;
     }
+    if (alpha_on_command(id, code)) { /* W272: Seite Alpha Test */
+        return;
+    }
+    if (dg_on_command(id)) { /* W279: Absturz-Karte, Diagnosepaket */
+        return;
+    }
     on_command_inner(id, code);
     /* W171: nach jeder Bedienung Regelwerk neu (Freigaben + Begruendungen) */
     if (!g_updating && id != ID_CLOSE && id != ID_MIN) {
@@ -13642,6 +15453,12 @@ static void on_command(int id, int code)
 
 static void on_command_inner(int id, int code)
 {
+    if (loctab_command(id, code)) { /* W276: Spielauswahl, LoC-Seite, LoC-Startsperre */
+        return;
+    }
+    if (orig_command(id, code)) { /* W278 ORIG-FLAG: Back to original, Einmal-Start */
+        return;
+    }
     switch (id) {
     case ID_MIN:
         ShowWindow(g_hwnd, SW_MINIMIZE);
@@ -13750,6 +15567,17 @@ static void on_command_inner(int id, int code)
         base_build();
         redraw_all();
         break;
+    case ID_LAYOUT: /* W281: Layout-Vorschau wirkt sofort, gemerkt in launcher_ui.cfg */
+        if (code == CBN_SELCHANGE && !g_updating) {
+            int k = ComboBox_GetCurSel(ctl(ID_LAYOUT));
+            if (k >= 0 && k < LLAY_SZ_N) { /* W287: nur noch Groessen von Layout A */
+                lay_switch(LLAY_A, k);
+                if (g_o.shot == 0) {
+                    lay_cfg_save();
+                }
+            }
+        }
+        break;
     case ID_LANG: /* W142: Sprache wirkt sofort (Speichern/Starten persistiert) */
         if (code == CBN_SELCHANGE && !g_updating) {
             int de = ComboBox_GetCurSel(ctl(ID_LANG)) == 1;
@@ -13770,6 +15598,12 @@ static void on_command_inner(int id, int code)
     case ID_LIVE:
         ui_set_checked(ID_LIVE, !ui_checked(ID_LIVE));
         break;
+    case ID_RP_LABEL: /* W290: Replay-Schalter (live, Foto, Video-Export) */
+    case ID_RP_LOGO:
+    case ID_WM_MEDIA:
+    case ID_PH_HUD:
+        ui_set_checked(id, !ui_checked(id));
+        break;
     case ID_SAVE_LOCK: /* W190 SAVE-LOCK: wirkt ab dem naechsten Spielstart */
         ui_set_checked(ID_SAVE_LOCK, !ui_checked(ID_SAVE_LOCK));
         set_status_k(LT(ui_checked(ID_SAVE_LOCK) ? "gui.save_lock_txt" : "gui.save_lock_off"), 0);
@@ -13789,6 +15623,12 @@ static void on_command_inner(int id, int code)
             set_status(LT(kTip[(sel >= 0 && sel <= 2) ? sel : 0]));
         }
         break;
+    case ID_STICK_AIM: /* W271 */
+        if (code == CBN_SELCHANGE && !g_updating) {
+            set_status(LT(ComboBox_GetCurSel(ctl(ID_STICK_AIM)) == 1 ? "gui.stick_rel_on"
+                                                                     : "gui.stick_pos_on"));
+        }
+        break;
     case ID_CTRL_AUTOGEAR: /* W218 */
         ui_set_checked(ID_CTRL_AUTOGEAR, !ui_checked(ID_CTRL_AUTOGEAR));
         set_status(LT(ui_checked(ID_CTRL_AUTOGEAR) ? "gui.ctl_autogear_on" : "gui.ctl_simple_off"));
@@ -13801,6 +15641,18 @@ static void on_command_inner(int id, int code)
         set_status(LT(ui_checked(ID_PAL50) ? "gui.pal50_on" : "gui.pal50_off"));
         break;
     }
+    case ID_SHOWADV: /* W291 ESC-REWORK: Feinregler zeigen/verbergen, gemerkt in launcher_ui.cfg */
+        g_show_adv = !g_show_adv;
+        ui_set_checked(ID_SHOWADV, g_show_adv);
+        ui_cfg_save_bg(g_client_dir, g_bg_on);
+        lay_gfx_apply();
+        show_page(g_page);
+        set_status(LT(g_show_adv ? "gui.show_adv_on" : "gui.show_adv_off"));
+        break;
+    case ID_CHIDE: /* W268 COCKPIT-HIDE: eigene Option, nicht im Grafik-Preset */
+        ui_set_checked(ID_CHIDE, !ui_checked(ID_CHIDE));
+        set_status(LT(ui_checked(ID_CHIDE) ? "gui.chide_on" : "gui.chide_off"));
+        break;
     case ID_REM_LABEL: { /* W153; W173 (PO 7.11.): eigene Option, nicht im Grafik-Preset */
         g_gfx.shx[LSHX_LABEL] = ui_checked(ID_REM_LABEL) ? 0 : 1;
         ui_set_checked(ID_REM_LABEL, g_gfx.shx[LSHX_LABEL]);
@@ -13829,6 +15681,8 @@ static void on_command_inner(int id, int code)
         lcfg_gfx_apply(&g_gfx, sel);
         ComboBox_SetCurSel(ctl(ID_IPFPS), ip_sel_of(g_gfx.interp_fps)); /* W223 */
         ComboBox_SetCurSel(ctl(ID_RTSCALE), g_gfx.rt_scale + 1);
+        edge_ui_set(g_gfx.edge_mode, g_gfx.edge_fade_width, g_gfx.edge_fade_strength); /* W266 */
+        update_aspect_info();
         gfx_sync_ui();
         gfx_name(sel, &before, nm, sizeof nm);
         if (was == LGP_CUSTOM) { /* Muster C: eigene Werte ersetzt -> Rueckgaengig */
@@ -13899,7 +15753,8 @@ static void on_command_inner(int id, int code)
     case ID_EDGE_S:
         if (code == CBN_SELCHANGE && !g_updating) {
             update_aspect_info();
-            redraw_rect(COL2, CY0, COLW, 376);
+            ui_refresh_visibility(); /* W296 PRESET-ORIG: Verlaufszeile bei "Fade out" */
+            redraw_rect(COL2, CY0, COLW, 488);
         }
         break;
     case ID_VRPRESET: /* W183 VR-FIX3: Preset -> Aufloesung mitfuehren */
@@ -13960,6 +15815,13 @@ static void on_command_inner(int id, int code)
     case ID_IMAGE: /* W150 */
         if (code == EN_SETFOCUS || code == EN_KILLFOCUS) {
             g_focus_id = code == EN_SETFOCUS ? id : 0;
+            if (code == EN_KILLFOCUS && id == ID_MEDIA && !g_updating) {
+                char m[1024]; /* W282: getippter Ordner loest ungueltiges Abbild ab */
+                ui_gettext(ctl(ID_MEDIA), m, sizeof m);
+                if (m[0]) {
+                    media_drop_bad_image();
+                }
+            }
             redraw_all();
         } else if (code == EN_CHANGE && id == ID_MEDIA && !g_updating) {
             xbe_cue_update(); /* W172: "automatisch: <Ordner>\default.xbe" */
@@ -14078,6 +15940,10 @@ static void on_command_inner(int id, int code)
         break;
     case ID_CTRL_JOY: /* W221 HOTAS (experimentell) */
         joy_dialog_modal();
+        joy_card_scan(); /* W282: Karte folgt dem Dialog (Neu suchen) */
+        if (update_pad_status()) {
+            redraw_rect(CX0, CY0 + 392, COLW, 104);
+        }
         break;
     case ID_CTRL_SBCCHK:
         update_sbc_status();
@@ -14255,12 +16121,174 @@ static void on_command_inner(int id, int code)
     }
 }
 
+/* W281 LAUNCHER-SIZE: Geometrie-/Schrift-DPI aus Monitor-DPI und Layout. */
+static void lay_set_dpi(int mon)
+{
+    g_dpi_mon = mon;
+    if (g_lay.id == LLAY_0) {
+        g_dpi = mon;
+        g_dpi_font = mon;
+    } else {
+        g_dpi = MulDiv(mon, g_lay.geo_pct, 100);
+        g_dpi_font = MulDiv(mon, g_lay.font_pct, 100);
+    }
+}
+
+/* W281: Arbeitsflaeche des Monitors unter dem Fenster (bzw. Hauptmonitor). */
+static void lay_work_area(HWND h, RECT *wa)
+{
+    MONITORINFO mi;
+    HMONITOR m = h ? MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST)
+                   : MonitorFromPoint((POINT){ 0, 0 }, MONITOR_DEFAULTTOPRIMARY);
+    memset(&mi, 0, sizeof mi);
+    mi.cbSize = sizeof mi;
+    if (m && GetMonitorInfoW(m, &mi)) {
+        *wa = mi.rcWork;
+    } else {
+        SystemParametersInfoW(SPI_GETWORKAREA, 0, wa, 0);
+    }
+}
+
+/* W281: Layout (neu) anwenden: Tabelle -> Einpassen -> DPI. Ohne Fenster
+ * (h = NULL) nur rechnen. Shots/Tests (offscreen) passen nur bei
+ * --work WxH ein, damit die Bilder nicht vom Testrechner abhaengen. */
+static int g_lay_work_w, g_lay_work_h; /* --work (Test), 0 = echte Arbeitsflaeche */
+static void lay_choose(int id, int size, int mon_dpi, HWND h, int offscreen)
+{
+    llay_init(&g_lay, id, size);
+    if (g_lay_work_w > 0 && g_lay_work_h > 0) {
+        llay_fit(&g_lay, mon_dpi, g_lay_work_w, g_lay_work_h);
+    } else if (!offscreen) {
+        RECT wa;
+        lay_work_area(h, &wa);
+        llay_fit(&g_lay, mon_dpi, wa.right - wa.left, wa.bottom - wa.top);
+    }
+    lay_set_dpi(mon_dpi);
+}
+
 static void on_dpi(int dpi)
 {
-    g_dpi = dpi;
+    if (g_lay.id != LLAY_0) { /* W281: Skalierung je Monitor neu einpassen */
+        int tw = g_lay.tw, th = g_lay.th;
+        lay_choose(g_lay.id, g_lay.size, dpi, g_hwnd, g_o.shot != 0);
+        if (lay_b() && tw <= g_lay.tw && th <= g_lay.th) { /* gezogene Groesse behalten */
+            g_lay.tw = tw < g_lay.min_w ? g_lay.min_w : tw;
+            g_lay.th = th < g_lay.min_h ? g_lay.min_h : th;
+        }
+    } else {
+        g_dpi = dpi;
+        g_dpi_mon = dpi;
+        g_dpi_font = dpi;
+    }
     fonts_make();
     ui_relayout();
     base_build();
+}
+
+/* W281: Layout zur Laufzeit wechseln (Vorschau-Kombi, Selbsttest): wie ein
+ * DPI-Wechsel - Schriften, Elemente, Grundbild, Fenstergroesse. */
+static void lay_switch(int id, int size)
+{
+    RECT wr;
+    int W, H;
+    DWORD st;
+    lay_choose(id, size, g_dpi_mon, g_hwnd, g_o.shot != 0);
+    fonts_make();
+    ui_relayout();
+    base_build();
+    if (g_hwnd) {
+        st = (DWORD)GetWindowLongPtrW(g_hwnd, GWL_STYLE);
+        st = lay_b() ? (st | WS_THICKFRAME | WS_MAXIMIZEBOX) : (st & ~(DWORD)(WS_THICKFRAME | WS_MAXIMIZEBOX));
+        SetWindowLongPtrW(g_hwnd, GWL_STYLE, (LONG_PTR)st);
+        GetWindowRect(g_hwnd, &wr);
+        W = SX(lay_tw());
+        H = SX(lay_th());
+        if (g_o.shot == 0) { /* sichtbar: auf der Arbeitsflaeche halten */
+            RECT wa;
+            lay_work_area(g_hwnd, &wa);
+            if (wr.left + W > wa.right) {
+                wr.left = wa.right - W;
+            }
+            if (wr.top + H > wa.bottom) {
+                wr.top = wa.bottom - H;
+            }
+            if (wr.left < wa.left) {
+                wr.left = wa.left;
+            }
+            if (wr.top < wa.top) {
+                wr.top = wa.top;
+            }
+        }
+        SetWindowPos(g_hwnd, NULL, wr.left, wr.top, W, H,
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_FRAMECHANGED);
+        ui_refresh_visibility();
+        lay_combo_fill(ctl(ID_LAYOUT));
+        redraw_all();
+    }
+}
+
+/* W281: Layout-Wahl: --layout/--ui-size (CLI) > launcher_ui.cfg > 0/normal.
+ * gui_layout_override gilt auch fuer --selftest (g_o ist dort leer). */
+static char g_lay_ovr[4], g_lay_ovr_size[12];
+void gui_layout_override(const char *layout, const char *size)
+{
+    strncpy_s(g_lay_ovr, sizeof g_lay_ovr, layout ? layout : "", _TRUNCATE);
+    strncpy_s(g_lay_ovr_size, sizeof g_lay_ovr_size, size ? size : "", _TRUNCATE);
+}
+
+static int lay_cfg_id(void)
+{
+    char v[32];
+    int id = llay_parse(g_o.layout);
+    if (id < 0) {
+        id = llay_parse(g_lay_ovr);
+    }
+    if (id >= 0) {
+        return id;
+    }
+    ui_cfg_load_str(g_client_dir, "launcher_layout", v, sizeof v);
+    id = llay_parse(v);
+    if (id == LLAY_0 || id == LLAY_B) { /* W287: alte Vorschau-Wahl 0/b -> A (Groesse bleibt, beim naechsten Speichern "a") */
+        id = LLAY_A;
+    }
+    g_lay_cfg_id = id;
+    /* Nutzer 15.11.: ohne Wahl gilt Layout A in Groesse Normal (W281-Auswahl) */
+    return id >= 0 ? id : LLAY_A;
+}
+
+static int lay_cfg_size(void)
+{
+    char v[32];
+    int sz = llay_size_parse(g_o.ui_size);
+    if (sz < 0) {
+        sz = llay_size_parse(g_lay_ovr_size);
+    }
+    if (sz >= 0) {
+        return sz;
+    }
+    ui_cfg_load_str(g_client_dir, "ui_size", v, sizeof v);
+    sz = llay_size_parse(v);
+    g_lay_cfg_size = sz;
+    return sz >= 0 ? sz : LLAY_SZ_NORMAL;
+}
+
+static void lay_cfg_save(void)
+{
+    g_lay_cfg_id = g_lay.id;
+    g_lay_cfg_size = g_lay.size;
+    ui_cfg_save_bg(g_client_dir, g_bg_on);
+}
+
+/* W281: Shot-Dateiname je Layout ("" = heute, unveraenderte Namen). */
+static const char *lay_shot_tag(void)
+{
+    static char t[24];
+    if (g_lay.id == LLAY_0) {
+        return "";
+    }
+    _snprintf_s(t, sizeof t, _TRUNCATE, "_%s%s", llay_name(g_lay.id),
+                g_lay.size == LLAY_SZ_NORMAL ? "" : g_lay.size == LLAY_SZ_COMPACT ? "c" : "l");
+    return t;
 }
 
 static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
@@ -14276,6 +16304,23 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_NCHITTEST: {
         POINT p = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
         ScreenToClient(h, &p);
+        if (g_lay.resizable && !IsZoomed(h)) { /* W281: b ziehbar (randlos: eigene Raender) */
+            RECT cr;
+            int e = SX(6), l, r, t, b;
+            GetClientRect(h, &cr);
+            l = p.x < e;
+            r = p.x >= cr.right - e;
+            t = p.y < e;
+            b = p.y >= cr.bottom - e;
+            if (t && l) { return HTTOPLEFT; }
+            if (t && r) { return HTTOPRIGHT; }
+            if (b && l) { return HTBOTTOMLEFT; }
+            if (b && r) { return HTBOTTOMRIGHT; }
+            if (l) { return HTLEFT; }
+            if (r) { return HTRIGHT; }
+            if (t) { return HTTOP; }
+            if (b) { return HTBOTTOM; }
+        }
         if (p.y >= 0 && p.y < SX(TITLE_H)) {
             return HTCAPTION; /* Ziehen, Aero-Snap */
         }
@@ -14356,11 +16401,35 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (!g_o.force_dpi) {
             RECT *r = (RECT *)lp;
             on_dpi(HIWORD(wp));
-            SetWindowPos(h, NULL, r->left, r->top, r->right - r->left,
-                         r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+            if (g_lay.id != LLAY_0) { /* W281: Groesse aus dem Layout (eingepasst) */
+                SetWindowPos(h, NULL, r->left, r->top, SX(lay_tw()), SX(lay_th()),
+                             SWP_NOZORDER | SWP_NOACTIVATE);
+            } else {
+                SetWindowPos(h, NULL, r->left, r->top, r->right - r->left,
+                             r->bottom - r->top, SWP_NOZORDER | SWP_NOACTIVATE);
+            }
             redraw_all();
         }
         return 0;
+    case WM_GETMINMAXINFO: /* W281: Mindestgroesse b */
+        if (g_lay.resizable) {
+            MINMAXINFO *mm = (MINMAXINFO *)lp;
+            mm->ptMinTrackSize.x = SX(g_lay.min_w);
+            mm->ptMinTrackSize.y = SX(g_lay.min_h);
+            return 0;
+        }
+        break;
+    case WM_SIZE: /* W281: b passt das Layout der neuen Groesse an */
+        if (lay_b() && wp != SIZE_MINIMIZED) {
+            int w = LOWORD(lp), hh = HIWORD(lp);
+            if (w > 0 && hh > 0 && (w != SX(lay_tw()) || hh != SX(lay_th()))) {
+                llay_resize_px(&g_lay, g_dpi_mon, w, hh);
+                ui_relayout();
+                base_build();
+                redraw_all();
+            }
+        }
+        break;
     case WM_CLOSE:
         DestroyWindow(h);
         return 0;
@@ -14441,9 +16510,10 @@ static HWND gui_create(int offscreen)
                           : NULL;
         g_dpi = fn ? (int)fn() : 96;
     }
+    lay_choose(lay_cfg_id(), lay_cfg_size(), g_dpi, NULL, offscreen); /* W281 */
     fonts_make();
-    W = SX(WIN_W);
-    H = SX(WIN_H);
+    W = SX(lay_tw());
+    H = SX(lay_th());
     if (offscreen) {
         offscreen_pos(&x, &y);
     } else {
@@ -14455,7 +16525,8 @@ static HWND gui_create(int offscreen)
     g_hwnd = CreateWindowExW(exs, L"SbLauncher2",
                              L"Steel Battalion \x2013 Launcher",
                              WS_POPUP | WS_CAPTION | WS_SYSMENU |
-                                 WS_MINIMIZEBOX | WS_CLIPCHILDREN,
+                                 WS_MINIMIZEBOX | WS_CLIPCHILDREN |
+                                 (g_lay.resizable ? WS_THICKFRAME | WS_MAXIMIZEBOX : 0), /* W281 */
                              x, y, W, H, NULL, NULL, GetModuleHandleW(NULL),
                              NULL);
     if (!g_hwnd) {
@@ -14481,11 +16552,11 @@ static HWND gui_create(int offscreen)
         WinDpiFn fn = u32 ? (WinDpiFn)GetProcAddress(u32, "GetDpiForWindow")
                           : NULL;
         int d = fn ? (int)fn(g_hwnd) : 96;
-        if (d >= 96 && d <= 576 && d != g_dpi) {
-            g_dpi = d;
+        if (d >= 96 && d <= 576 && d != g_dpi_mon) {
+            lay_choose(g_lay.id, g_lay.size, d, g_hwnd, offscreen); /* W281 */
             fonts_make();
-            W = SX(WIN_W);
-            H = SX(WIN_H);
+            W = SX(lay_tw());
+            H = SX(lay_th());
             SetWindowPos(g_hwnd, NULL, x, y, W, H,
                          SWP_NOZORDER | SWP_NOACTIVATE);
         }
@@ -14529,10 +16600,20 @@ static const struct {
     { "update_new", "xbe_path=;media_root=", 0 },
     { "update_dev", "", 0 },
     { "replays", "", 0 },   /* W254: Seite Erweitert + Replay-Dialog (Beispieldaten) */
+    { "alpha_demo", "", 0 }, /* W272: Alpha Test mit Beispielwahl + Schalter interp_guard (Layout) */
+    { "advanced", "", 0 }, /* W291: Anzeige/Grafik mit "Erweiterte Einstellungen zeigen" */
+    { "fade", "xbe_path=;media_root=;edge_mode=2", 0 }, /* W296: Breitbild "Fade out" mit Verlaufszeile ohne Erweitert */
+    { "crash", "xbe_path=;media_root=", 0 }, /* W279: Karte "The last session crashed" (Fixture) */
     { "pack2", "", 0, 1 },  /* W172: zweites Pack gewaehlt (verdeckt durch ...) */
     { "pack3", "", 0, 2 },  /* W172: drittes Pack (Effekt-Pack mit Schloss) */
     /* W173: Remastered dezent, Effect Pack setzt color_sat/fx_embers (Effect-Pack-
      * Ausnahme: Anzeige bleibt "dezent", Schloss an Preset und Effekten) */
+    /* W276 LOC-LAUNCH: Bereich Line of Contact (Pruef-Fixture, bereinigte Pfade) */
+    { "loc_empty", "", 0 },
+    { "loc_ok", "", 0 },
+    { "loc_sb", "", 0 },
+    { "loc_start", "", 0 },
+    { "loc_exp", "edge_mode=2;cockpit_hide=1", 0 }, /* W293: wie loc_ok, mit Hinweisband (Breitbild, Cockpit aus) */
     { "effectpack", "shading=1;world_sharpen=60;aa_mode=3;ssao=25;color_sat=110;color_gain=103;"
                     "shade_shadow=1;fx_soft=60;fx_embers=160;fx_light=40;fx_light_cockpit=30;"
                     "fx_interp=1;remaster=1;hd_textures=1", 0 },
@@ -14556,11 +16637,12 @@ static void w220_fixture(const char *path, int rc);
 static void gui_apply_state(const char *name)
 {
     int i;
+    loctab_apply_state(name); /* W276: loc_* */
     if (strcmp(name, "ready_us") == 0 || strcmp(name, "exit8_us") == 0) {
         /* W231: startbereit mit US-Beispielabbild (Fixture, bereinigt) */
         w220_fixture(W220_ISO_US, 0);
         strcpy_s(g_s.game_image, sizeof g_s.game_image, W220_ISO_US);
-    } else if (strncmp(name, "ready", 5) == 0 || strncmp(name, "update_", 7) == 0) {
+    } else if (strncmp(name, "ready", 5) == 0 || strncmp(name, "update_", 7) == 0 || strcmp(name, "crash") == 0) {
         /* W227: Fixture vor dem Regelwerk (W250: auch update_*) */
         w220_fixture(W220_ISO, 0);
         strcpy_s(g_s.game_image, sizeof g_s.game_image, W220_ISO);
@@ -14700,8 +16782,13 @@ static void gui_fill(void)
                     "%s", LT("gui.fill_nodefaults"));
     }
     upd_init(); /* W250: vor --state (Shots ueberschreiben im Speicher) */
+    dg_init(); /* W279: neuer Absturzbericht seit dem letzten Hinweis? */
+    loctab_load(); /* W276: gewaehltes Spiel + LoC-Abbild (user.cfg) */
     if (g_o.state[0]) { /* W171: --state (nur Shots, nie gespeichert) */
         gui_apply_state(g_o.state);
+        if (strcmp(g_o.state, "advanced") == 0) { /* W291: Bild mit Feinreglern (nicht gespeichert) */
+            g_show_adv = 1; /* build_controls setzt Haken und Kartenlage */
+        }
     }
     build_controls();
     tips_build(); /* W172: Begruendungen als Tooltip */
@@ -14727,6 +16814,7 @@ static void gui_fill(void)
                    : !g_data_ok ? LT(g_firstrun ? "gui.fill_welcome" : "gui.fill_setup")
                                 : LT("gui.fill_ready"));
     }
+    loctab_fill_done(); /* W276: Bereich LoC -> Navigation + Statuszeile */
 }
 
 static void gui_teardown(void)
@@ -14893,6 +16981,10 @@ int gui_main(const char *client_override, const gui_opts_t *o)
     }
     g_bg_on = g_o.bg >= 0 ? g_o.bg : ui_cfg_load_bg(g_client_dir);
     g_diag_open = ui_cfg_load_key(g_client_dir, "diag_open", 0); /* W171 */
+    g_alpha_tools = ui_cfg_load_key(g_client_dir, "alpha_tools", 1); /* W272 */
+    g_show_adv = ui_cfg_load_key(g_client_dir, "show_advanced", 0); /* W291 */
+    g_lay_work_w = g_o.lay_work_w; /* W281: --work WxH (Test des Einpassens) */
+    g_lay_work_h = g_o.lay_work_h;
     if (!gui_create(g_o.shot != 0)) {
         ui_msgbox(NULL, LT("gui.err_nowindow"), LT("gui.title_launcher"),
                   MB_ICONERROR | MB_OK);
@@ -14902,7 +16994,14 @@ int gui_main(const char *client_override, const gui_opts_t *o)
     show_page(P_PLAY);
     if (g_o.shot == 4) {
         /* GUI-Startpfad ohne Clientstart (Abnahme: user.cfg-Vergleich). */
-        if (g_o.replay[0]) { /* W254: Trockenlauf "Play replay" (gleiche Kette wie der Dialog) */
+        if (g_o.alpha_on) { /* W272: Trockenlauf "Start test" (gleiche Kette wie die Seite) */
+            la_sel_t as;
+            as.mission = g_o.alpha_mission;
+            as.vt = g_o.alpha_vt;
+            as.diff = g_o.alpha_diff;
+            as.skip_intro = g_o.alpha_skip;
+            rc = alpha_start(1, &as);
+        } else if (g_o.replay[0]) { /* W254: Trockenlauf "Play replay" (gleiche Kette wie der Dialog) */
             wchar_t wid[40];
             u8_to_w(g_o.replay, wid, 40);
             ls_replay_set_args(wid, g_o.replay_cam, g_rp_args, sizeof g_rp_args);
@@ -14979,6 +17078,11 @@ int gui_main(const char *client_override, const gui_opts_t *o)
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE);
         printf("shot: dpi=%d (%d %%), Schrift '%ls', Symbole %s\n", g_dpi,
                g_dpi * 100 / 96, g_face_body, g_has_icons ? "ja" : "nein");
+        if (g_lay.id != LLAY_0) { /* W281 */
+            printf("shot: layout=%s size=%s geo=%d%% schrift=%d%% flaeche=%dx%d fenster=%dx%d\n",
+                   llay_name(g_lay.id), llay_size_name(g_lay.size), g_lay.geo_pct,
+                   g_lay.font_pct, g_lay.tw, g_lay.th, SX(lay_tw()), SX(lay_th()));
+        }
         for (pass = 0; pass < nbg; pass++) {
             if (nbg == 2) {
                 g_bg_on = pass == 0;
@@ -14988,10 +17092,14 @@ int gui_main(const char *client_override, const gui_opts_t *o)
             for (p = 0; p < P_N; p++) {
                 char path[1200];
                 int r;
-                if (g_o.page >= 0 && g_o.page != p) {
+                if ((g_o.page >= 0 && g_o.page != p) || (p == P_ALPHA && !g_alpha_tools)) {
                     continue;
                 }
+                if (g_game == LGAME_LOC && p == P_PACKS) {
+                    continue; /* W276: im Bereich LoC ausgeblendet (W293: Erweitert bleibt) */
+                }
                 show_page(p);
+                loctab_state_after(g_o.state); /* W276 */
                 if (p == P_PLAY && strncmp(g_o.state, "img_", 4) == 0) {
                     w220_state(g_o.state); /* W220: kein zusaetzliches Neuzeichnen */
                 }
@@ -15008,14 +17116,14 @@ int gui_main(const char *client_override, const gui_opts_t *o)
                                 "%s/w47_shot_%d.bmp", g_o.out_dir, p);
                 } else if (g_o.state[0]) { /* W171: Regelzustand im Namen */
                     _snprintf_s(path, sizeof path, _TRUNCATE,
-                                "%s/w82_%s_%s_%s_%d.png", g_o.out_dir,
-                                kPageKey[p], g_o.state, g_bg_on ? "bg" : "ohne",
-                                g_dpi * 100 / 96);
+                                "%s/w82_%s%s_%s_%s_%d.png", g_o.out_dir,
+                                kPageKey[p], lay_shot_tag(), g_o.state, g_bg_on ? "bg" : "ohne",
+                                g_dpi_mon * 100 / 96);
                 } else {
                     _snprintf_s(path, sizeof path, _TRUNCATE,
-                                "%s/w82_%s_%s_%d.png", g_o.out_dir,
-                                kPageKey[p], g_bg_on ? "bg" : "ohne",
-                                g_dpi * 100 / 96);
+                                "%s/w82_%s%s_%s_%d.png", g_o.out_dir,
+                                kPageKey[p], lay_shot_tag(), g_bg_on ? "bg" : "ohne",
+                                g_dpi_mon * 100 / 96);
                 }
                 r = shot_window(g_hwnd, path, g_o.shot == 2);
                 printf("shot: Seite %d (%s) -> %s%s\n", p, kPageKey[p],
@@ -15067,6 +17175,9 @@ int gui_main(const char *client_override, const gui_opts_t *o)
     fonts_free();
     return (int)msg.wParam;
 }
+
+#include "launcher_alpha.inc" /* W272 ALPHA-TEST: Seite "Alpha Test" */
+#include "launcher_diag.inc" /* W279 DIAG-CRASH: Absturz-Karte + Diagnosepaket */
 
 /* ------------------------------------------------------------------ */
 /* Selbsttest (Faelle 20-25)                                            */
@@ -15147,6 +17258,1271 @@ static void gt_setenv(const char *name, const char *v)
     u8_to_w(name, wn, 64);
     u8_to_w(v, wv, 1100);
     SetEnvironmentVariableW(wn, wv);
+}
+
+/* --- 65 (W276 LOC-LAUNCH): Umschalten, getrennte Abbild-/Datenpfade,
+ * gemeinsame Einstellungen, LoC-Start gesperrt mit Meldung (EN/DE).
+ * Laeuft im offenen Test-Fenster (ausserhalb des Bildschirms, ohne Fokus);
+ * user.cfg = Temp-Datei (g_ucfg_test), Abbilder = Pruef-Fixture. --- */
+static void loctab_vis(int id, int want, const char *what, char *why, size_t cap)
+{
+    HWND h = ctl(id);
+    int has = h && (GetWindowLongW(h, GWL_STYLE) & WS_VISIBLE) != 0;
+    if (!why[0] && has != want) {
+        _snprintf_s(why, cap, _TRUNCATE, "%s: %s %s", what, id >= ID_NAV0 && id < ID_NAV0 + P_N
+                    ? kPageKey[id - ID_NAV0] : "Element", want ? "unsichtbar" : "sichtbar");
+    }
+}
+
+static void loctab_gui_selftest(int *pass, int *fail)
+{
+    char why[300] = "", tmp[1024], cfg[1200], buf[8192], t[1200], hp[1200], keep[16];
+    launcher_settings_t s0, s1;
+    COLORREF col = 0;
+    int k;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw276_gui_user.cfg", tmp);
+    {
+        FILE *f = NULL;
+        if (u8_fopen_s(&f, cfg, "w") == 0 && f) {
+            fputs("[display]\nwidth=1280\n# fremde Zeile\n", f);
+            fclose(f);
+        }
+    }
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    sb_lang_set("en");
+    ui_apply_language();
+    loctab_load();
+    g_game = LGAME_SB;
+    loctab_nav_layout();
+    /* SB-Abbild auf der SB-Seite (eigener Pfad) */
+    lcfg_defaults(&s0);
+    s0.xbe_path[0] = s0.media_root[0] = '\0';
+    strcpy_s(s0.game_image, sizeof s0.game_image, LOC_SB_ISO);
+    s0.width = 1600;
+    s0.height = 900;
+    ui_from_settings(&s0);
+    show_page(P_DISPLAY);
+    pump();
+    /* 1: Umschalten auf LoC */
+    on_command(ID_GAME_LOC, BN_CLICKED);
+    pump();
+    if (g_game != LGAME_LOC || !ui_checked(ID_GAME_LOC) || ui_checked(ID_GAME_SB)) {
+        strcpy_s(why, sizeof why, "Umschalter LoC: Zustand");
+    }
+    if (!why[0] && g_page != P_DISPLAY) {
+        strcpy_s(why, sizeof why, "Umschalten verlaesst die gemeinsame Seite Anzeige");
+    }
+    loctab_vis(ID_NAV0 + P_PACKS, 0, "LoC", why, sizeof why);
+    for (k = 0; k < P_N; k++) { /* gemeinsame Seiten bleiben, W293: Erweitert auch */
+        if (k != P_PACKS) {
+            loctab_vis(ID_NAV0 + k, 1, "LoC", why, sizeof why);
+        }
+    }
+    if (!why[0]) { /* Navigation ohne Luecke: Steuerung rutscht nach oben */
+        uictl_t *c = ui_find(ID_NAV0 + P_CTRL), *a = ui_find(ID_NAV0 + P_AUDIO);
+        if (!c || !a || c->y != TITLE_H + 16 + 3 * 44 || a->y != TITLE_H + 16 + 4 * 44) {
+            strcpy_s(why, sizeof why, "Navigation LoC: Luecke");
+        }
+    }
+    loctab_vis(ID_WINMODE, 1, "LoC Anzeige (gemeinsam)", why, sizeof why);
+    gt_read(cfg, buf, sizeof buf);
+    if (!why[0] && (!strstr(buf, "launcher_game=loc\n") || !strstr(buf, "# fremde Zeile\n"))) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "Wahl nicht gemerkt: %.120s", buf);
+    }
+    /* Packs im Bereich LoC -> Spielen (LoC-Seite); W293: Erweitert erreichbar */
+    if (!why[0]) {
+        show_page(P_PACKS);
+        pump();
+        if (g_page != P_PLAY) {
+            strcpy_s(why, sizeof why, "LoC: Packs erreichbar");
+        }
+    }
+    loctab_vis(ID_LOC_START, 1, "LoC-Spielen", why, sizeof why);
+    loctab_vis(ID_LOC_GO0, 1, "LoC-Spielen (Bereitschaft)", why, sizeof why);
+    loctab_vis(ID_LOC_IMAGE, 0, "LoC-Spielen (Disc liegt auf Erweitert)", why, sizeof why);
+    loctab_vis(ID_LOC_FOLDER, 0, "LoC-Spielen (Ordner liegt auf Erweitert)", why, sizeof why);
+    loctab_vis(ID_START_BIG, 0, "LoC-Spielen (SB-Start)", why, sizeof why);
+    loctab_vis(ID_START_VR, 0, "LoC-Spielen (SB-VR)", why, sizeof why);
+    loctab_vis(ID_IMAGE, 0, "LoC-Spielen (SB-Abbild)", why, sizeof why);
+    loctab_vis(ID_SUM_GO0, 0, "LoC-Spielen (SB-Bereitschaft)", why, sizeof why);
+    if (!why[0] && IsWindowEnabled(ctl(ID_LOC_START))) {
+        strcpy_s(why, sizeof why, "LoC-Start nicht gesperrt");
+    }
+    if (!why[0]) { /* W293: Disc/Ordner auf LoC > Erweitert */
+        show_page(P_ADV);
+        pump();
+        if (g_page != P_ADV) {
+            strcpy_s(why, sizeof why, "LoC: Erweitert nicht erreichbar");
+        }
+    }
+    loctab_vis(ID_LOC_IMAGE, 1, "LoC-Erweitert", why, sizeof why);
+    loctab_vis(ID_LOC_CHECK, 1, "LoC-Erweitert", why, sizeof why);
+    loctab_vis(ID_LOC_FOLDER, 1, "LoC-Erweitert", why, sizeof why);
+    /* 2: getrennte Abbild-Pfade (Fixture: LoC erkannt) */
+    if (!why[0]) {
+        strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_ISO);
+        memset(&g_locfix, 0, sizeof g_locfix);
+        g_locfix.kind = LGAME_IMG_LOC;
+        g_locfix.title_id = LGAME_TID_LOC;
+        ui_settext(ctl(ID_LOC_IMAGE), LOC_ISO);
+        on_command(ID_LOC_CHECK, BN_CLICKED);
+        pump();
+        loctab_result(t, sizeof t, &col);
+        if (!g_loc_checked || g_loc_res.kind != LGAME_IMG_LOC || !strstr(t, "43430009") ||
+            col != C_OK) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "LoC-Pruefung: '%s'", t);
+        }
+    }
+    if (!why[0]) { /* Ergebnis gilt nur fuer den geprueften Pfad */
+        ui_settext(ctl(ID_LOC_IMAGE), "D:\\Games\\anders.iso");
+        loctab_result(t, sizeof t, &col);
+        if (strcmp(t, LT("gui.loc_unchecked")) != 0) {
+            strcpy_s(why, sizeof why, "altes Ergebnis bei neuem Pfad");
+        }
+        ui_settext(ctl(ID_LOC_IMAGE), LOC_ISO);
+    }
+    ui_to_settings(&s1);
+    if (!why[0] && strcmp(s1.game_image, LOC_SB_ISO) != 0) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "SB-Abbild veraendert: '%s'", s1.game_image);
+    }
+    gt_read(cfg, buf, sizeof buf);
+    if (!why[0] && !strstr(buf, "launcher_loc_image=" LOC_ISO "\n")) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "LoC-Abbild nicht gemerkt: %.160s", buf);
+    }
+    /* getrennte Datenordner: LoC = <...>\loc, SB-Spielstaende anderswo */
+    if (!why[0]) {
+        size_t n;
+        loctab_data_dir(t, sizeof t);
+        adv_hdd_path(hp, sizeof hp);
+        n = strlen(t);
+        if (n < 4 || strcmp(t + n - 4, "\\loc") != 0 || _stricmp(t, hp) == 0 ||
+            _strnicmp(hp, t, n) == 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Datenordner LoC '%s' / SB '%s'", t, hp);
+        }
+    }
+    /* 3: LoC-Start gesperrt mit Meldung (alle Startwege), kein SB-Start */
+    if (!why[0]) {
+        static const int ids[] = { ID_LOC_START, ID_START, ID_START_MENU, ID_START_BIG, IDOK };
+        int li;
+        for (li = 0; li < 2 && !why[0]; li++) {
+            sb_lang_set(li ? "de" : "en");
+            ui_apply_language();
+            for (k = 0; k < 5 && !why[0]; k++) {
+                set_status_k("x", 0);
+                if (ids[k] == IDOK) {
+                    SetFocus(NULL);
+                }
+                on_command(ids[k], BN_CLICKED);
+                if (strcmp(g_status, LT("gui.loc_soon")) != 0 || g_loc_last_cmd[0] ||
+                    !strstr(g_status, li ? "Demn" : "Coming soon")) {
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "%s Start %d: '%s'", li ? "de" : "en",
+                                ids[k], g_status);
+                }
+            }
+            ui_gettext(ctl(ID_GAME_LOC), t, sizeof t);
+            if (!why[0] && strcmp(t, "Line of Contact") != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Umschalter-Text '%s'", t);
+            }
+            ui_gettext(ctl(ID_LOC_START), t, sizeof t);
+            if (!why[0] && strcmp(t, LT("gui.loc_btn_start")) != 0) {
+                strcpy_s(why, sizeof why, "Startknopf-Text");
+            }
+        }
+        sb_lang_set("en");
+        ui_apply_language();
+    }
+    /* spaeterer Weg: Client bereit -> Startweg mit LoC-Abbild + eigenem Datenordner */
+    if (!why[0]) {
+        gt_setenv("SB_TEST_LOC_READY", "1");
+        on_command(ID_LOC_START, BN_CLICKED);
+        SetEnvironmentVariableA("SB_TEST_LOC_READY", NULL);
+        if (!strstr(g_loc_last_cmd, LOC_ISO) || !strstr(g_loc_last_cmd, "\\loc\\hdd")) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "bereit: Startweg '%.160s'", g_loc_last_cmd);
+        }
+        g_loc_last_cmd[0] = '\0';
+    }
+    /* 4: zurueck zu Steel Battalion: alles wie vorher, gemeinsame Werte gleich */
+    if (!why[0]) {
+        show_page(P_DISPLAY);
+        on_command(ID_GAME_SB, BN_CLICKED);
+        pump();
+        ui_to_settings(&s1);
+        if (g_game != LGAME_SB || !ui_checked(ID_GAME_SB)) {
+            strcpy_s(why, sizeof why, "zurueck: Zustand");
+        } else if (s1.width != 1600 || s1.height != 900 || strcmp(s1.game_image, LOC_SB_ISO) != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "gemeinsame Werte/SB-Abbild: %ux%u '%s'", s1.width,
+                        s1.height, s1.game_image);
+        }
+    }
+    for (k = 0; k < P_N; k++) {
+        loctab_vis(ID_NAV0 + k, 1, "SB", why, sizeof why);
+    }
+    if (!why[0]) {
+        uictl_t *c = ui_find(ID_NAV0 + P_CTRL);
+        if (!c || c->y != TITLE_H + 16 + P_CTRL * 44) {
+            strcpy_s(why, sizeof why, "Navigation SB verschoben");
+        }
+    }
+    if (!why[0]) {
+        show_page(P_PLAY);
+        pump();
+    }
+    loctab_vis(ID_START_BIG, 1, "SB-Spielen", why, sizeof why);
+    loctab_vis(ID_LOC_START, 0, "SB-Spielen (LoC-Start)", why, sizeof why);
+    loctab_vis(ID_LOC_IMAGE, 0, "SB-Spielen (LoC-Abbild)", why, sizeof why);
+    gt_read(cfg, buf, sizeof buf);
+    if (!why[0] && (!strstr(buf, "launcher_game=sb\n") ||
+                    !strstr(buf, "launcher_loc_image=" LOC_ISO "\n"))) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "zurueck: user.cfg %.160s", buf);
+    }
+    /* Neustart des Launchers liest die Wahl */
+    if (!why[0]) {
+        g_game = LGAME_LOC;
+        loctab_load();
+        if (g_game != LGAME_SB || strcmp(g_loc.loc_image, LOC_ISO) != 0) {
+            strcpy_s(why, sizeof why, "Laden nach Neustart");
+        }
+    }
+    /* aufraeumen */
+    g_game = LGAME_SB;
+    loctab_nav_layout();
+    g_locfix_path[0] = '\0';
+    g_loc_checked = 0;
+    lgame_defaults(&g_loc);
+    ui_settext(ctl(ID_LOC_IMAGE), "");
+    u8_DeleteFile(cfg);
+    g_ucfg_test[0] = '\0';
+    sb_lang_set(keep);
+    ui_apply_language();
+    lcfg_defaults(&s0);
+    ui_from_settings(&s0);
+    show_page(P_PLAY);
+    if (!why[0]) {
+        GT_OK("65 W276 LOC-LAUNCH (Umschalten + gemerkt, Navigation, getrennte Abbild-/Datenpfade, gemeinsame Einstellungen, LoC-Start gesperrt EN/DE, spaeterer Startweg)");
+    } else {
+        GT_FAIL("65 W276 LOC-LAUNCH", "%s", why);
+    }
+}
+
+/* --- 66 (W278 ORIG-FLAG): Hinweis an/aus auf Spielen (SB + LoC), "Back to
+ * original" setzt nur Grafik zurueck und speichert, Einmal-Start (Trockenlauf)
+ * schreibt die Original-Werte nur in die --set-Kette, nie in user.cfg.
+ * user.cfg = Temp-Datei (g_ucfg_test). Community ohne Spieldaten: Startweg
+ * gesperrt -> Knoepfe unsichtbar (Einrichtungskarte), Trockenlauf entfaellt. --- */
+static int orig_file_has(const char *path, const char *line)
+{
+    FILE *f = NULL;
+    char ln[600];
+    size_t n = strlen(line);
+    int hit = 0;
+    if (u8_fopen_s(&f, path, "r") != 0 || !f) {
+        return 0;
+    }
+    while (fgets(ln, sizeof ln, f)) {
+        if (strncmp(ln, line, n) == 0 && (ln[n] == '\r' || ln[n] == '\n' || ln[n] == '\0')) {
+            hit = 1;
+        }
+    }
+    fclose(f);
+    return hit;
+}
+
+static void orig_gui_selftest(int *pass, int *fail)
+{
+    char why[300] = "", tmp[1024], cfg[1200], keep[16];
+    launcher_settings_t s, r;
+    const lr_env_t *fix = g_env_fix;
+    int setup;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw278_gui_user.cfg", tmp);
+    {
+        FILE *f = NULL;
+        if (u8_fopen_s(&f, cfg, "w") == 0 && f) {
+            fputs("[render]\nedge_mode=2\nedge_fade_width=10\nworld_sharpen=60\ncockpit_hide=1\n"
+                  "interp_fps=60\nrt_scale=2\n[input]\naim_assist=1\n# fremde Zeile\n", f);
+            fclose(f);
+        }
+    }
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    sb_lang_set("en");
+    ui_apply_language();
+    g_env_fix = NULL;
+    g_game = LGAME_SB;
+    loctab_nav_layout();
+    /* 1: alte cfg mit Breitbild -> Hinweis + Knoepfe */
+    lcfg_defaults(&s);
+    lcfg_load_file(cfg, &s);
+    g_s = s;
+    ui_from_settings(&s);
+    show_page(P_PLAY);
+    ui_apply_rules();
+    pump();
+    setup = play_setup_shown();
+    if (!(g_orig_mask & (1u << SB_OFG_WIDE)) || !(g_orig_mask & (1u << SB_OFG_COCKPIT)) ||
+        !(g_orig_mask & (1u << SB_OFG_POST))) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "Maske 0x%X ohne Breitbild/Cockpit/Nachbearbeitung", g_orig_mask);
+    }
+    loctab_vis(ID_ORIG_RESET, !setup, "Back to original (SB)", why, sizeof why);
+    loctab_vis(ID_ORIG_ONCE, !setup, "Einmal-Start (SB)", why, sizeof why);
+    loctab_vis(ID_ORIG_RESET_LOC, 0, "Back to original (LoC) im SB-Bereich", why, sizeof why);
+    /* 2: Einmal-Start (Trockenlauf): Kette mit Original-Werten, user.cfg behaelt Breitbild */
+    if (!why[0] && !launch_blocked()) {
+        g_start_args[0] = '\0';
+        if (orig_once_start(1) != 0) {
+            strcpy_s(why, sizeof why, "Einmal-Start (Trockenlauf) gescheitert");
+        } else if (!strstr(g_start_args, "edge_mode=1;") || !strstr(g_start_args, "cockpit_hide=0;") ||
+                   !strstr(g_start_args, "world_sharpen=0;") || !strstr(g_start_args, "pack_list=;") ||
+                   !strstr(g_start_args, "orig_once=1") || strstr(g_start_args, "interp_fps")) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Kette falsch: %.180s", g_start_args);
+        } else if (!orig_file_has(cfg, "edge_mode=2") || orig_file_has(cfg, "edge_mode=1") ||
+                   !orig_file_has(cfg, "cockpit_hide=1") || orig_file_has(cfg, "orig_once=1") ||
+                   !orig_file_has(cfg, "# fremde Zeile")) {
+            strcpy_s(why, sizeof why, "Einmal-Start hat user.cfg veraendert");
+        } else if (strlen(g_start_args) > 1400) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Kette zu lang (%u)", (unsigned)strlen(g_start_args));
+        }
+    }
+    /* 3: LoC-Bereich zeigt den Hinweis ebenfalls (ohne Einmal-Start) */
+    if (!why[0]) {
+        g_game = LGAME_LOC;
+        loctab_nav_layout();
+        show_page(P_PLAY);
+        ui_apply_rules();
+        pump();
+        loctab_vis(ID_ORIG_RESET_LOC, 1, "Back to original (LoC)", why, sizeof why);
+        loctab_vis(ID_ORIG_ONCE, 0, "Einmal-Start im LoC-Bereich", why, sizeof why);
+        g_game = LGAME_SB;
+        loctab_nav_layout();
+        show_page(P_PLAY);
+    }
+    /* 4: Back to original: nur Grafik, gespeichert, Hinweis weg */
+    if (!why[0]) {
+        on_command(ID_ORIG_RESET, BN_CLICKED);
+        pump();
+        r = g_s;
+        ui_to_settings(&r);
+        if (g_orig_mask != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "nach Back to original Maske 0x%X", g_orig_mask);
+        } else if (r.edge_mode != 1 || r.cockpit_hide != 0 || r.shx[LSHX_SHARP] != 0) {
+            strcpy_s(why, sizeof why, "Grafik nicht zurueckgesetzt");
+        } else if (r.interp_fps != 60 || r.rt_scale != 2 || r.aim_assist != 1) {
+            strcpy_s(why, sizeof why, "Bildrate/Aufloesung/Steuerung veraendert");
+        } else if (!setup && (!orig_file_has(cfg, "edge_mode=1") || !orig_file_has(cfg, "cockpit_hide=0") ||
+                              !orig_file_has(cfg, "interp_fps=60") || !orig_file_has(cfg, "aim_assist=1") ||
+                              !orig_file_has(cfg, "# fremde Zeile"))) {
+            strcpy_s(why, sizeof why, "user.cfg nach Back to original falsch");
+        } else if (!g_undo_on) {
+            strcpy_s(why, sizeof why, "kein Rueckgaengig");
+        }
+        loctab_vis(ID_ORIG_RESET, 0, "Back to original nach dem Zuruecksetzen", why, sizeof why);
+        loctab_vis(ID_ORIG_ONCE, 0, "Einmal-Start nach dem Zuruecksetzen", why, sizeof why);
+    }
+    /* aufraeumen */
+    u8_DeleteFile(cfg);
+    g_ucfg_test[0] = '\0';
+    g_env_fix = fix;
+    sb_lang_set(keep);
+    ui_apply_language();
+    lcfg_defaults(&s);
+    g_s = s;
+    ui_from_settings(&s);
+    show_page(P_PLAY);
+    if (!why[0]) {
+        GT_OK(setup ? "66 W278 ORIG-FLAG (Hinweis SB/LoC, Back to original nur Grafik; ohne Spieldaten: Knoepfe verborgen, kein Speichern/Trockenlauf)"
+                    : "66 W278 ORIG-FLAG (Hinweis SB/LoC, Einmal-Start nur per --set (user.cfg unveraendert), Back to original nur Grafik + gespeichert)");
+    } else {
+        GT_FAIL("66 W278 ORIG-FLAG", "%s", why);
+    }
+}
+
+/* --- 67 (W281 LAUNCHER-SIZE): Layout 0/a/b umschalten (Vorschau-Kombi),
+ * Fenster passt auf eine kleine Arbeitsflaeche, keine ueberlappenden
+ * sichtbaren Elemente je Seite (echte Fensterrechtecke), Elemente im
+ * Fenster, b auch bei Mindest- und grosser Flaeche, UI-cfg-Roundtrip. */
+static int lay_gt_page_check(char *why, size_t cap, const char *tag)
+{
+    RECT cr, r[UI_MAX];
+    int id[UI_MAX], n = 0, i, j, p;
+    GetClientRect(g_hwnd, &cr);
+    for (p = 0; p < P_N; p++) {
+        if (p == P_ALPHA && !g_alpha_tools) {
+            continue;
+        }
+        if (g_game == LGAME_LOC && p == P_PACKS) { /* W293: Erweitert gibt es auch fuer LoC */
+            continue;
+        }
+        show_page(p);
+        pump();
+        n = 0;
+        for (i = 0; i < g_ui_n && n < UI_MAX; i++) {
+            uictl_t *u = &g_ui[i];
+            RECT q;
+            if (u->parent != g_hwnd || !IsWindowVisible(u->h)) {
+                continue;
+            }
+            GetWindowRect(u->h, &q);
+            MapWindowPoints(NULL, g_hwnd, (POINT *)&q, 2);
+            if (q.right <= q.left || q.bottom <= q.top) {
+                continue;
+            }
+            if (q.left < 0 || q.top < 0 || q.right > cr.right || q.bottom > cr.bottom) {
+                _snprintf_s(why, cap, _TRUNCATE, "%s Seite %s: Element %d ausserhalb (%ld,%ld-%ld,%ld)",
+                            tag, kPageKey[p], u->id, q.left, q.top, q.right, q.bottom);
+                return 0;
+            }
+            r[n] = q;
+            id[n++] = u->id;
+        }
+        if (n < 4) { /* Pruefung greift nur mit sichtbaren Elementen */
+            _snprintf_s(why, cap, _TRUNCATE, "%s Seite %s: nur %d sichtbare Elemente", tag,
+                        kPageKey[p], n);
+            return 0;
+        }
+        for (i = 0; i < n; i++) {
+            for (j = 0; j < i; j++) {
+                RECT x;
+                if (IntersectRect(&x, &r[i], &r[j])) {
+                    _snprintf_s(why, cap, _TRUNCATE, "%s Seite %s: Elemente %d/%d ueberlappen",
+                                tag, kPageKey[p], id[i], id[j]);
+                    return 0;
+                }
+            }
+        }
+    }
+    return 1;
+}
+
+/* --- 68 (W287 EXP-ICON): Experimentell-Symbol (Kolben) statt Plakette nur an
+ * experimentellen Einstellungen (Karten, Presets) mit Tooltip und
+ * zugaenglichem Namen; Warn-Symbol an Hinweis (SB/LoC) und Navigation nur bei
+ * aktiven experimentellen Einstellungen; keine sichtbare Textplakette;
+ * Groessen-Kombi 3 Eintraege, alte Wahl 0/b -> A (Groesse bleibt). */
+static void xicon_gt_vis(int id, int want, const char *what, char *why, size_t cap)
+{
+    HWND h = ctl(id);
+    int has = h && IsWindowVisible(h);
+    if (!why[0] && has != want) {
+        _snprintf_s(why, cap, _TRUNCATE, "%s: %s", what, want ? "unsichtbar" : "sichtbar");
+    }
+}
+
+/* Sichtbarer Text eines Elements (Navigation/Presets: wie gezeichnet). */
+static void xicon_gt_shown(uictl_t *u, char *out, size_t cap)
+{
+    wchar_t w[600], *nl;
+    int n = GetWindowTextW(u->h, w, 600), n1;
+    nl = wcschr(w, L'\n');
+    n1 = nl ? (int)(nl - w) : n;
+    if (u->kind == K_NAV) {
+        w[n1] = 0;
+    } else if (u->kind == K_RADIO) {
+        int nt = xexp_title_len(u->id, w, n1);
+        if (nt != n1) {
+            memmove(w + nt, w + n1, (size_t)(n - n1 + 1) * sizeof(wchar_t));
+        }
+    } else if (u->kind == K_ICON) {
+        w[0] = 0; /* gezeichnet wird nur das Symbol */
+    }
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)cap, NULL, NULL);
+}
+
+static void xicon_gt_noplaque(const char *tag, char *why, size_t cap)
+{
+    static const char *const kBad[] = { "EXPERIMENTAL", "EXPERIMENTELL", "(experimental)", "(experimentell)" };
+    int i, k;
+    for (i = 0; i < g_ui_n && !why[0]; i++) {
+        uictl_t *u = &g_ui[i];
+        char t[1200];
+        if (u->parent != g_hwnd || !IsWindowVisible(u->h)) {
+            continue;
+        }
+        xicon_gt_shown(u, t, sizeof t);
+        for (k = 0; k < 4; k++) {
+            if (strstr(t, kBad[k])) {
+                _snprintf_s(why, cap, _TRUNCATE, "%s: Element %d zeigt '%s'", tag, u->id, kBad[k]);
+                break;
+            }
+        }
+    }
+}
+
+static void xicon_gui_selftest(int *pass, int *fail)
+{
+    char why[300] = "", t[800], keep[16], tmp[1024], dir[1100];
+    launcher_settings_t s0 = g_s, s;
+    const lr_env_t *fix = g_env_fix;
+    int setup, i, p;
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    g_env_fix = NULL;
+    g_game = LGAME_SB;
+    loctab_nav_layout();
+    for (i = 0; i < 2 && !why[0]; i++) { /* EN, DE */
+        const char *lc = i ? "de" : "en";
+        char tag[24];
+        sb_lang_set(lc);
+        ui_apply_language();
+        /* 1: Original -> kein Warn-Symbol, keine Warnung in der Navigation */
+        lcfg_defaults(&s);
+        g_s = s;
+        ui_from_settings(&s);
+        show_page(P_PLAY);
+        ui_apply_rules();
+        pump();
+        if (g_orig_mask != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "%s Original: Maske 0x%X", lc, g_orig_mask);
+        }
+        xicon_gt_vis(ID_XWARN_SB, 0, "Warn-Symbol (SB) bei Original", why, sizeof why);
+        xicon_gt_vis(ID_XWARN_LOC, 0, "Warn-Symbol (LoC) bei Original", why, sizeof why);
+        for (p = 0; p < P_N && !why[0]; p++) {
+            xtip_text(ID_NAV0 + p, t, sizeof t);
+            ui_gettext(ctl(ID_NAV0 + p), tmp, sizeof tmp);
+            if (xwarn_page_mask(p) || t[0] || strchr(tmp, '\n')) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s Original: Navigation %s warnt", lc, kPageKey[p]);
+            }
+        }
+        /* Kolben nur an experimentellen Karten/Presets, mit Tooltip = Name */
+        show_page(P_GFX);
+        pump();
+        xicon_gt_vis(ID_XEXP_IMAGE, 1, "Symbol Bild", why, sizeof why);
+        xicon_gt_vis(ID_XEXP_WORLD, 1, "Symbol Welt", why, sizeof why);
+        xicon_gt_vis(ID_XEXP_HUD, 1, "Symbol HUD", why, sizeof why);
+        xicon_gt_vis(ID_XEXP_DISP, 0, "Symbol Anzeige auf Grafik", why, sizeof why);
+        xicon_gt_vis(ID_XEXP_PACKS, 0, "Symbol Packs auf Grafik", why, sizeof why);
+        for (p = 0; p < LGP_CUSTOM && !why[0]; p++) { /* Original/Performance ohne, dezent/stark/Klare Sicht mit */
+            int want = p == LGP_SUBTLE || p == LGP_STRONG || p == LGP_CLEAR;
+            char sfx[80];
+            wchar_t w[600];
+            int n;
+            xtip_text(ID_GP0 + p, t, sizeof t);
+            ui_gettext(ctl(ID_GP0 + p), tmp, sizeof tmp);
+            n = GetWindowTextW(ctl(ID_GP0 + p), w, 600);
+            xexp_sfx(sfx, sizeof sfx);
+            if (xexp_preset(p) != want || (t[0] != 0) != want || (strstr(tmp, sfx) != NULL) != want) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s Preset %d: Symbol/Tooltip/Name falsch", lc, p);
+            } else if (want && (!strstr(t, LT("gui.exp_tip")) || xexp_title_len(ID_GP0 + p, w,
+                                (int)(wcschr(w, L'\n') ? wcschr(w, L'\n') - w : n)) ==
+                                (int)(wcschr(w, L'\n') ? wcschr(w, L'\n') - w : n))) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s Preset %d: Suffix sichtbar oder Tooltip ohne Beschreibung", lc, p);
+            }
+        }
+        for (p = ID_XEXP_FIRST; p <= ID_XEXP_LAST && !why[0]; p++) {
+            xtip_text(p, t, sizeof t);
+            ui_gettext(ctl(p), tmp, sizeof tmp);
+            if (!strstr(t, LT("gui.exp_tip")) || strcmp(tmp, t) != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s Symbol %d: Tooltip/Name '%.60s'", lc, p, tmp);
+            }
+        }
+        _snprintf_s(tag, sizeof tag, _TRUNCATE, "%s Grafik", lc);
+        xicon_gt_noplaque(tag, why, sizeof why);
+        show_page(P_DISPLAY);
+        pump();
+        xicon_gt_vis(ID_XEXP_DISP, 1, "Symbol Anzeige", why, sizeof why);
+        xicon_gt_vis(ID_XEXP_IMAGE, 0, "Symbol Bild auf Anzeige", why, sizeof why);
+        _snprintf_s(tag, sizeof tag, _TRUNCATE, "%s Anzeige", lc);
+        xicon_gt_noplaque(tag, why, sizeof why);
+        show_page(P_PACKS);
+        pump();
+        xicon_gt_vis(ID_XEXP_PACKS, 1, "Symbol Packs", why, sizeof why);
+        /* 2: Breitbild + Cockpit aus -> Warn-Symbol am Hinweis, Navigation Grafik + Anzeige */
+        lcfg_defaults(&s);
+        lcfg_apply_set(&s, "edge_mode=2;cockpit_hide=1");
+        g_s = s;
+        ui_from_settings(&s);
+        show_page(P_PLAY);
+        ui_apply_rules();
+        pump();
+        setup = play_setup_shown();
+        if (!why[0] && g_orig_mask != ((1u << SB_OFG_WIDE) | (1u << SB_OFG_COCKPIT))) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "%s Breitbild+Cockpit: Maske 0x%X", lc, g_orig_mask);
+        }
+        xicon_gt_vis(ID_XWARN_SB, !setup, "Warn-Symbol (SB) bei Experimentellem", why, sizeof why);
+        xicon_gt_vis(ID_XWARN_LOC, 0, "Warn-Symbol (LoC) im SB-Bereich", why, sizeof why);
+        xtip_text(ID_XWARN_SB, t, sizeof t);
+        ui_gettext(ctl(ID_XWARN_SB), tmp, sizeof tmp);
+        if (!why[0] && (!strstr(t, LT("ovl.of_g_wide")) || !strstr(t, LT("ovl.of_g_cockpit")) ||
+                        !strchr(t, '\n') || strcmp(tmp, t) != 0)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "%s Warn-Tooltip '%.80s'", lc, t);
+        }
+        for (p = 0; p < P_N && !why[0]; p++) {
+            int want = p == P_GFX || p == P_DISPLAY;
+            xtip_text(ID_NAV0 + p, t, sizeof t);
+            ui_gettext(ctl(ID_NAV0 + p), tmp, sizeof tmp);
+            if ((xwarn_page_mask(p) != 0) != want || (t[0] != 0) != want || (strchr(tmp, '\n') != NULL) != want) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s Breitbild+Cockpit: Navigation %s warnt=%d", lc,
+                            kPageKey[p], !want);
+            }
+        }
+        if (!why[0]) {
+            xtip_text(ID_NAV0 + P_DISPLAY, t, sizeof t);
+            if (!strstr(t, LT("ovl.of_g_wide")) || strstr(t, LT("ovl.of_g_cockpit"))) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s Navigation Anzeige: '%.80s'", lc, t);
+            }
+        }
+        _snprintf_s(tag, sizeof tag, _TRUNCATE, "%s Spielen", lc);
+        xicon_gt_noplaque(tag, why, sizeof why);
+        /* LoC-Bereich: Warn-Symbol an der Hinweiskarte */
+        if (!why[0]) {
+            g_game = LGAME_LOC;
+            loctab_nav_layout();
+            show_page(P_PLAY);
+            ui_apply_rules();
+            pump();
+            xicon_gt_vis(ID_XWARN_LOC, 1, "Warn-Symbol (LoC)", why, sizeof why);
+            xicon_gt_vis(ID_XWARN_SB, 0, "Warn-Symbol (SB) im LoC-Bereich", why, sizeof why);
+            g_game = LGAME_SB;
+            loctab_nav_layout();
+            show_page(P_PLAY);
+        }
+        /* 3: zurueck auf Original -> alles weg */
+        lcfg_defaults(&s);
+        g_s = s;
+        ui_from_settings(&s);
+        ui_apply_rules();
+        pump();
+        xicon_gt_vis(ID_XWARN_SB, 0, "Warn-Symbol nach Original", why, sizeof why);
+        ui_gettext(ctl(ID_NAV0 + P_GFX), tmp, sizeof tmp);
+        if (!why[0] && strchr(tmp, '\n')) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "%s nach Original: Navigation warnt", lc);
+        }
+    }
+    /* 4: Groessen-Kombi 3 Eintraege (Groesse von A), alte Wahl 0/b -> A */
+    if (!why[0]) {
+        HWND c = ctl(ID_LAYOUT);
+        char o_lay[4], o_sz[12], o_ovr[4], o_ovr_sz[12], o_dir[1024];
+        int id0 = g_lay.id, sz0 = g_lay.size, cid0 = g_lay_cfg_id, csz0 = g_lay_cfg_size, shot0 = g_o.shot;
+        static const struct { const char *lay, *sz; int want_sz; } kOld[] = {
+            { "b", "compact", LLAY_SZ_COMPACT }, { "0", "large", LLAY_SZ_LARGE }, { "a", "normal", LLAY_SZ_NORMAL },
+        };
+        g_o.shot = 2;
+        if (!c || ComboBox_GetCount(c) != LLAY_SZ_N) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Groessen-Kombi: %d Eintraege", c ? ComboBox_GetCount(c) : -1);
+        } else {
+            wchar_t wt[80] = L"";
+            SendMessageW(c, CB_GETLBTEXT, 0, (LPARAM)wt);
+            WideCharToMultiByte(CP_UTF8, 0, wt, -1, t, (int)sizeof t, NULL, NULL);
+            if (strcmp(t, LT("gui.lay_sz_compact")) != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Groessen-Kombi: erster Eintrag '%s'", t);
+            }
+        }
+        if (!why[0]) {
+            lay_switch(LLAY_A, LLAY_SZ_NORMAL);
+            ui_gettext(ctl(ID_LAYOUT_LBL), tmp, sizeof tmp);
+            xicon_gt_vis(ID_LAYOUT, 1, "Groessen-Kombi in A", why, sizeof why);
+            xicon_gt_vis(ID_LAYOUT_LBL, 1, "Beschriftung Groesse in A", why, sizeof why);
+            if (!why[0] && (strcmp(tmp, LT("gui.lay_size")) != 0 || ComboBox_GetCurSel(c) != LLAY_SZ_NORMAL)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Groessen-Kombi: Beschriftung '%s' / Wahl %d", tmp,
+                            ComboBox_GetCurSel(c));
+            }
+        }
+        strcpy_s(o_lay, sizeof o_lay, g_o.layout);
+        strcpy_s(o_sz, sizeof o_sz, g_o.ui_size);
+        strcpy_s(o_ovr, sizeof o_ovr, g_lay_ovr);
+        strcpy_s(o_ovr_sz, sizeof o_ovr_sz, g_lay_ovr_size);
+        strcpy_s(o_dir, sizeof o_dir, g_client_dir);
+        g_o.layout[0] = g_o.ui_size[0] = g_lay_ovr[0] = g_lay_ovr_size[0] = '\0';
+        u8_GetTempPath(tmp, sizeof tmp);
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw287_uicfg_%lu", tmp, GetCurrentProcessId());
+        lcfg_mkdir_p(dir);
+        strcpy_s(g_client_dir, sizeof g_client_dir, dir);
+        for (i = 0; i < 3 && !why[0]; i++) {
+            char pth[1200];
+            FILE *f = NULL;
+            int id, sz;
+            ui_cfg_path(dir, pth, sizeof pth);
+            if (u8_fopen_s(&f, pth, "w") == 0 && f) {
+                fprintf(f, "bg_image=1\nlauncher_layout=%s\nui_size=%s\n", kOld[i].lay, kOld[i].sz);
+                fclose(f);
+            }
+            id = lay_cfg_id();
+            sz = lay_cfg_size();
+            if (id != LLAY_A || sz != kOld[i].want_sz || g_lay_cfg_id != LLAY_A) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "alte Wahl %s/%s -> Layout %d Groesse %d (cfg %d)", kOld[i].lay,
+                            kOld[i].sz, id, sz, g_lay_cfg_id);
+            }
+            u8_DeleteFile(pth);
+        }
+        { wchar_t wd[1100]; u8_to_w(dir, wd, 1100); RemoveDirectoryW(wd); }
+        strcpy_s(g_client_dir, sizeof g_client_dir, o_dir);
+        strcpy_s(g_o.layout, sizeof g_o.layout, o_lay);
+        strcpy_s(g_o.ui_size, sizeof g_o.ui_size, o_sz);
+        strcpy_s(g_lay_ovr, sizeof g_lay_ovr, o_ovr);
+        strcpy_s(g_lay_ovr_size, sizeof g_lay_ovr_size, o_ovr_sz);
+        g_lay_cfg_id = cid0;
+        g_lay_cfg_size = csz0;
+        lay_switch(id0, sz0);
+        g_o.shot = shot0;
+    }
+    /* aufraeumen */
+    g_env_fix = fix;
+    sb_lang_set(keep);
+    ui_apply_language();
+    g_s = s0;
+    ui_from_settings(&s0);
+    ui_apply_rules();
+    show_page(P_PLAY);
+    if (!why[0]) {
+        GT_OK("68 W287 EXP-ICON (Kolben nur an experimentellen Karten/Presets mit Tooltip + Name, Warn-Symbol an "
+              "Hinweis SB/LoC und Navigation nur bei Aktivem, keine Textplakette, EN/DE, Groessen-Kombi 3, alte Wahl 0/b -> A)");
+    } else {
+        GT_FAIL("68 W287 EXP-ICON", "%s", why);
+    }
+}
+
+static void lay_gui_selftest(int *pass, int *fail)
+{
+    char why[300] = "", tmp[1024], dir[1100];
+    int shot0 = g_o.shot, id0 = g_lay.id, sz0 = g_lay.size, cid0 = g_lay_cfg_id,
+        csz0 = g_lay_cfg_size, ww0 = g_lay_work_w, wh0 = g_lay_work_h, k;
+    static const int kSet[][2] = { { LLAY_0, LLAY_SZ_NORMAL }, { LLAY_A, LLAY_SZ_COMPACT },
+                                   { LLAY_A, LLAY_SZ_NORMAL },  { LLAY_A, LLAY_SZ_LARGE },
+                                   { LLAY_B, LLAY_SZ_NORMAL },  { LLAY_B, LLAY_SZ_LARGE } };
+    g_o.shot = 2; /* nichts speichern, Einpassen nur mit --work */
+    g_lay_work_w = g_lay_work_h = 0;
+    /* Ueberlappung/innen je Layout und Seite */
+    for (k = 0; k < (int)(sizeof kSet / sizeof kSet[0]) && !why[0]; k++) {
+        char tag[32];
+        _snprintf_s(tag, sizeof tag, _TRUNCATE, "%s/%s", llay_name(kSet[k][0]),
+                    llay_size_name(kSet[k][1]));
+        lay_switch(kSet[k][0], kSet[k][1]);
+        if (g_lay.id != kSet[k][0] || g_lay.size != kSet[k][1]) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Layout nicht gewechselt", tag);
+            break;
+        }
+        if (IsWindowVisible(ctl(ID_LAYOUT)) != (kSet[k][0] != LLAY_0)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Layout-Kombi sichtbar=%d", tag,
+                        IsWindowVisible(ctl(ID_LAYOUT)));
+            break;
+        }
+        lay_gt_page_check(why, sizeof why, tag);
+    }
+    /* b: Mindestflaeche und grosse Flaeche (Ziehen nachgestellt) */
+    if (!why[0]) {
+        static const int kSz[2][2] = { { 1040, 660 }, { 1700, 1040 } };
+        lay_switch(LLAY_B, LLAY_SZ_NORMAL);
+        for (k = 0; k < 2 && !why[0]; k++) {
+            RECT cr;
+            char tag[32];
+            SetWindowPos(g_hwnd, NULL, 0, 0, SX(kSz[k][0]), SX(kSz[k][1]),
+                         SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+            pump();
+            GetClientRect(g_hwnd, &cr);
+            if (g_lay.tw < kSz[k][0] - 1 || g_lay.th < kSz[k][1] - 1) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "b gezogen %dx%d: Flaeche %dx%d",
+                            kSz[k][0], kSz[k][1], g_lay.tw, g_lay.th);
+                break;
+            }
+            _snprintf_s(tag, sizeof tag, _TRUNCATE, "b %dx%d", kSz[k][0], kSz[k][1]);
+            lay_gt_page_check(why, sizeof why, tag);
+        }
+    }
+    /* Groessen-Kombi (W287): nur Layout A, Index = Groesse (wie der Nutzer) */
+    if (!why[0]) {
+        HWND c = ctl(ID_LAYOUT);
+        ComboBox_SetCurSel(c, LLAY_SZ_LARGE);
+        on_command(ID_LAYOUT, CBN_SELCHANGE);
+        if (g_lay.id != LLAY_A || g_lay.size != LLAY_SZ_LARGE || ComboBox_GetCount(c) != LLAY_SZ_N) {
+            strcpy_s(why, sizeof why, "Kombi: a/gross nicht gewaehlt");
+        }
+        ComboBox_SetCurSel(c, LLAY_SZ_COMPACT);
+        on_command(ID_LAYOUT, CBN_SELCHANGE);
+        if (!why[0] && (g_lay.id != LLAY_A || g_lay.size != LLAY_SZ_COMPACT)) {
+            strcpy_s(why, sizeof why, "Kombi: a/kompakt nicht gewaehlt");
+        }
+    }
+    /* Kleine Arbeitsflaeche (1366x768, 100 %): Fenster passt (a und b) */
+    if (!why[0]) {
+        int id;
+        g_lay_work_w = 1366;
+        g_lay_work_h = 728;
+        for (id = LLAY_A; id <= LLAY_B && !why[0]; id++) {
+            int sz;
+            for (sz = 0; sz < LLAY_SZ_N && !why[0]; sz++) {
+                RECT wr;
+                lay_switch(id, sz);
+                GetWindowRect(g_hwnd, &wr);
+                if (wr.right - wr.left > 1366 || wr.bottom - wr.top > 728) {
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "%s/%s: Fenster %ldx%ld > 1366x728",
+                                llay_name(id), llay_size_name(sz), wr.right - wr.left,
+                                wr.bottom - wr.top);
+                }
+            }
+        }
+        if (!why[0]) {
+            lay_switch(LLAY_A, LLAY_SZ_NORMAL);
+            lay_gt_page_check(why, sizeof why, "a 1366x728");
+        }
+        g_lay_work_w = g_lay_work_h = 0;
+    }
+    /* launcher_ui.cfg: launcher_layout/ui_size schreiben + lesen (Temp-Ordner) */
+    if (!why[0]) {
+        char v1[16], v2[16];
+        u8_GetTempPath(tmp, sizeof tmp);
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw281_uicfg_%lu", tmp, GetCurrentProcessId());
+        lcfg_mkdir_p(dir);
+        g_lay_cfg_id = LLAY_B;
+        g_lay_cfg_size = LLAY_SZ_LARGE;
+        ui_cfg_save_bg(dir, 1);
+        ui_cfg_load_str(dir, "launcher_layout", v1, sizeof v1);
+        ui_cfg_load_str(dir, "ui_size", v2, sizeof v2);
+        if (strcmp(v1, "b") != 0 || strcmp(v2, "large") != 0 || ui_cfg_load_bg(dir) != 1) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "UI-cfg: '%s' '%s'", v1, v2);
+        }
+        g_lay_cfg_id = -1; /* nie gewaehlt: keine Zeilen (Layout 0 byte-gleich) */
+        ui_cfg_save_bg(dir, 1);
+        ui_cfg_load_str(dir, "launcher_layout", v1, sizeof v1);
+        if (!why[0] && v1[0]) {
+            strcpy_s(why, sizeof why, "UI-cfg: Layoutzeile ohne Wahl");
+        }
+        {
+            char pth[1200];
+            ui_cfg_path(dir, pth, sizeof pth);
+            u8_DeleteFile(pth);
+            { wchar_t wd[1100]; u8_to_w(dir, wd, 1100); RemoveDirectoryW(wd); }
+        }
+    }
+    /* zurueck */
+    g_lay_cfg_id = cid0;
+    g_lay_cfg_size = csz0;
+    g_lay_work_w = ww0;
+    g_lay_work_h = wh0;
+    lay_switch(id0, sz0);
+    g_o.shot = shot0;
+    show_page(P_PLAY);
+    if (!why[0]) {
+        GT_OK("67 W281 LAUNCHER-SIZE (Layout 0/a/b + Groessen umschalten, keine Ueberlappung je Seite, b gezogen, Vorschau-Kombi, passt auf 1366x768, UI-cfg)");
+    } else {
+        GT_FAIL("67 W281 LAUNCHER-SIZE", "%s", why);
+    }
+}
+
+/* W291 ESC-REWORK (Fall 69): "Erweiterte Einstellungen zeigen" blendet nur
+ * Feinregler auf Anzeige/Grafik ein und aus (wie "Erweitert" im ESC-Menue),
+ * merkt die Wahl in launcher_ui.cfg und aendert keinen Wert. */
+static void adv_gui_selftest(int *pass, int *fail)
+{
+    static const int kAdv[] = { ID_GFX_SOFT, ID_REM_LABEL, ID_CPERSP, ID_CPANINI, ID_CWIDTH }; /* W296: Verlauf s. Fall 71 */
+    static const int kMain[] = { ID_GFX_LIGHT, ID_GFX_SHADOW, ID_GFX_FX, ID_AAMODE, ID_GFX_TEX, ID_MONFX, ID_CHIDE,
+                                 ID_EDGE, ID_IPFPS, ID_RTSCALE };
+    char why[300] = "", tmp[1024], dir[1100], cd0[sizeof g_client_dir];
+    launcher_settings_t s0, s1;
+    int adv0 = g_show_adv, shot0 = g_o.shot, round, k;
+    strcpy_s(cd0, sizeof cd0, g_client_dir);
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw291_uicfg_%lu", tmp, GetCurrentProcessId());
+    lcfg_mkdir_p(dir);
+    strcpy_s(g_client_dir, sizeof g_client_dir, dir); /* launcher_ui.cfg nur im Temp-Ordner */
+    g_o.shot = 0;
+    memset(&s0, 0, sizeof s0);
+    memset(&s1, 0, sizeof s1);
+    ui_to_settings(&s0);
+    for (round = 0; round < 3 && !why[0]; round++) {
+        int want = round == 1; /* aus -> an -> aus */
+        if (g_show_adv != want) {
+            on_command(ID_SHOWADV, BN_CLICKED);
+            pump();
+        }
+        if (g_show_adv != want || ui_checked(ID_SHOWADV) != want) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Schalter %d statt %d", g_show_adv, want);
+            break;
+        }
+        if (round > 0 && ui_cfg_load_key(dir, "show_advanced", -1) != want) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "launcher_ui.cfg show_advanced != %d", want);
+            break;
+        }
+        for (k = 0; k < (int)(sizeof kAdv / sizeof kAdv[0]) && !why[0]; k++) {
+            uictl_t *u = ui_find(kAdv[k]);
+            if (!u) { continue; }
+            show_page(u->page);
+            pump();
+            if ((IsWindowVisible(u->h) != 0) != want) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Feinregler %d sichtbar=%d (Erweitert %d)", kAdv[k],
+                            IsWindowVisible(u->h) != 0, want);
+            }
+            if (!why[0] && !IsWindowVisible(ctl(ID_SHOWADV))) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Schalter fehlt auf Seite %s", kPageKey[u->page]);
+            }
+        }
+        for (k = 0; k < (int)(sizeof kMain / sizeof kMain[0]) && !why[0]; k++) {
+            uictl_t *u = ui_find(kMain[k]);
+            if (!u) { continue; }
+            show_page(u->page);
+            pump();
+            if (!IsWindowVisible(u->h)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Hauptregler %d unsichtbar (Erweitert %d)", kMain[k], want);
+            }
+        }
+        if (!why[0]) {
+            show_page(P_PLAY);
+            pump();
+            if (IsWindowVisible(ctl(ID_SHOWADV))) {
+                strcpy_s(why, sizeof why, "Schalter auf Spielen sichtbar");
+            }
+        }
+        if (!why[0]) {
+            lay_gt_page_check(why, sizeof why, want ? "erweitert" : "einfach");
+        }
+    }
+    ui_to_settings(&s1);
+    if (!why[0] && memcmp(&s0, &s1, sizeof s0) != 0) {
+        strcpy_s(why, sizeof why, "Werte nach dem Umschalten veraendert");
+    }
+    if (g_show_adv != adv0) { /* zurueck */
+        on_command(ID_SHOWADV, BN_CLICKED);
+    }
+    {
+        char pth[1200];
+        wchar_t wd[1100];
+        ui_cfg_path(dir, pth, sizeof pth);
+        u8_DeleteFile(pth);
+        u8_to_w(dir, wd, 1100);
+        RemoveDirectoryW(wd);
+    }
+    strcpy_s(g_client_dir, sizeof g_client_dir, cd0);
+    g_o.shot = shot0;
+    show_page(P_PLAY);
+    if (!why[0]) {
+        GT_OK("69 W291 ADVANCED (Schalter nur auf Anzeige/Grafik, Feinregler aus/an/aus, Hauptregler immer, launcher_ui.cfg, "
+              "keine Ueberlappung, Werte unveraendert)");
+    } else {
+        GT_FAIL("69 W291 ADVANCED", "%s", why);
+    }
+}
+
+/* --- 71 (W296 PRESET-ORIG): Grafik-Seite "Original" ohne Bildrate (Wahl
+ * setzt Monitor auto), "Performance"; Anzeige: Verlaufsregler bei "Fade out"
+ * auch ohne "Erweitert" sichtbar, bei 4:3 nicht; Vorschau darunter, keine
+ * Ueberlappung in Layout A Kompakt/Normal/Gross. Nichts gespeichert. --- */
+static void porig_gui_selftest(int *pass, int *fail)
+{
+    static const int kSz[3] = { LLAY_SZ_COMPACT, LLAY_SZ_NORMAL, LLAY_SZ_LARGE };
+    char why[300] = "", t[600], tmp[1024], dir[1100], cd0[sizeof g_client_dir];
+    launcher_settings_t s0, s1;
+    int adv0 = g_show_adv, shot0 = g_o.shot, conf0 = g_confirm_auto, id0 = g_lay.id, sz0 = g_lay.size, k, m;
+    strcpy_s(cd0, sizeof cd0, g_client_dir);
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw296_uicfg_%lu", tmp, GetCurrentProcessId());
+    lcfg_mkdir_p(dir);
+    strcpy_s(g_client_dir, sizeof g_client_dir, dir); /* launcher_ui.cfg nur im Temp-Ordner */
+    g_o.shot = 2; /* nichts speichern */
+    g_confirm_auto = 1;
+    memset(&s0, 0, sizeof s0);
+    memset(&s1, 0, sizeof s1);
+    ui_to_settings(&s0);
+    /* Grafik: Namen und Wahl */
+    show_page(P_GFX);
+    on_command(ID_GP0 + LGP_PERFORMANCE, BN_CLICKED);
+    pump();
+    if (ComboBox_GetCurSel(ctl(ID_IPFPS)) != ip_sel_of(60) || !ui_checked(ID_GP0 + LGP_PERFORMANCE)) {
+        strcpy_s(why, sizeof why, "Performance: 60 nicht gesetzt");
+    }
+    on_command(ID_GP0, BN_CLICKED);
+    pump();
+    if (!why[0] && (ComboBox_GetCurSel(ctl(ID_IPFPS)) != ip_sel_of(SB_FPS_AUTO) || !ui_checked(ID_GP0))) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "Original: Bildrate Index %d statt auto", ComboBox_GetCurSel(ctl(ID_IPFPS)));
+    }
+    for (k = 0; k < 2 && !why[0]; k++) {
+        const char *want = k ? LT("gui.gfx_p_performance") : LT("gui.gfx_p_orig");
+        size_t n = strlen(want);
+        ui_gettext(ctl(ID_GP0 + (k ? LGP_PERFORMANCE : LGP_ORIGINAL)), t, sizeof t);
+        if (strncmp(t, want, n) != 0 || t[n] != '\n' || /* Name ohne Bildrate (der Text darf "60 FPS" nennen) */
+            strcmp(want, k ? "Performance" : "Original") != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Optionsfeld %d: '%.60s'", k, t);
+        }
+    }
+    /* Anzeige: Verlaufszeile folgt "Fade out" ohne Erweitert */
+    g_show_adv = 0;
+    lay_gfx_apply();
+    for (k = 0; k < 3 && !why[0]; k++) {
+        char tag[48];
+        lay_switch(LLAY_A, kSz[k]);
+        for (m = 0; m < 3 && !why[0]; m++) { /* Fade out ohne / 4:3 ohne / 4:3 mit Erweitert */
+            const int fade = m == 0, adv = m == 2, want = fade || adv;
+            g_show_adv = adv;
+            lay_gfx_apply();
+            show_page(P_DISPLAY);
+            ComboBox_SetCurSel(ctl(ID_EDGE), fade ? 2 : 1);
+            on_command(ID_EDGE, CBN_SELCHANGE);
+            pump();
+            _snprintf_s(tag, sizeof tag, _TRUNCATE, "a/%s %s%s", llay_size_name(kSz[k]), fade ? "fade" : "4:3",
+                        adv ? "+erweitert" : "");
+            if ((IsWindowVisible(ctl(ID_EDGE_W)) != 0) != want || (IsWindowVisible(ctl(ID_EDGE_S)) != 0) != want) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Verlauf sichtbar=%d/%d", tag,
+                            IsWindowVisible(ctl(ID_EDGE_W)) != 0, IsWindowVisible(ctl(ID_EDGE_S)) != 0);
+                break;
+            }
+            if (fade && (!IsWindowEnabled(ctl(ID_EDGE_W)) || !IsWindowEnabled(ctl(ID_EDGE_S)))) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Verlauf gesperrt", tag);
+                break;
+            }
+            if (want && !adv && disp_preview_y() < 136 + 30 + 16 + 8) { /* Zeile 136..166, Regelzeile 168..184 */
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Vorschau %d ueber der Verlaufszeile", tag, disp_preview_y());
+                break;
+            }
+            if (!want && disp_preview_y() != 150) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Vorschau %d statt 150", tag, disp_preview_y());
+                break;
+            }
+            if (m != 1) { /* Ueberlappung/innen je Seite (4:3 ohne Erweitert pruefen Fall 67/69) */
+                lay_gt_page_check(why, sizeof why, tag);
+            }
+        }
+    }
+    /* zurueck: Werte, Erweitert, Layout */
+    g_show_adv = adv0;
+    lay_gfx_apply();
+    lay_switch(id0, sz0);
+    ui_from_settings(&s0);
+    gfx_sync_ui();
+    ui_to_settings(&s1);
+    if (!why[0] && memcmp(&s0, &s1, sizeof s0) != 0) {
+        strcpy_s(why, sizeof why, "Werte nach dem Test veraendert");
+    }
+    {
+        char pth[1200];
+        wchar_t wd[1100];
+        ui_cfg_path(dir, pth, sizeof pth);
+        u8_DeleteFile(pth);
+        u8_to_w(dir, wd, 1100);
+        RemoveDirectoryW(wd);
+    }
+    strcpy_s(g_client_dir, sizeof g_client_dir, cd0);
+    g_o.shot = shot0;
+    g_confirm_auto = conf0;
+    show_page(P_PLAY);
+    if (!why[0]) {
+        GT_OK("71 W296 PRESET-ORIG (Original ohne FPS = Monitor auto, Performance 60, Verlauf bei Fade out ohne Erweitert "
+              "sichtbar, bei 4:3 nicht, Vorschau darunter, keine Ueberlappung a/kompakt/normal/gross)");
+    } else {
+        GT_FAIL("71 W296 PRESET-ORIG", "%s", why);
+    }
+}
+
+/* --- 70 (W293 LOC-LAYOUT): LoC-Spielen wie SB - Bereitschaft (Spiel,
+ * Grafik, Anzeige, Steuerung, Online spaeter) mit "Change", Hinweisband
+ * unten (ohne Einmal-Start), Erweitert bei LoC erreichbar mit den LoC-Karten
+ * (Disc, Datenordner) und den gemeinsamen Teilen, ohne SB-Teile; Start grau;
+ * keine Ueberlappung in Layout A (alle Groessen). user.cfg = Temp-Datei. --- */
+static void locl_gt_row(const loc_sumrow_t *r, int i, const char *label, const char *val_part, COLORREF col,
+                        const char *tag, char *why, size_t cap)
+{
+    if (why[0]) {
+        return;
+    }
+    if (!r[i].label || !label || strcmp(r[i].label, label) != 0 || !r[i].value[0] || !strstr(r[i].value, val_part) ||
+        r[i].col != col) {
+        _snprintf_s(why, cap, _TRUNCATE, "%s Zeile %d: '%s' '%s' Farbe %06lX", tag, i, r[i].label ? r[i].label : "-",
+                    r[i].value, (unsigned long)r[i].col);
+    }
+}
+
+static void locl_gui_selftest(int *pass, int *fail)
+{
+    static const int kAdvLoc[] = { ID_LOC_IMAGE, ID_LOC_CHECK, ID_LOC_BROWSE, ID_LOC_FOLDER, ID_VSYNC, ID_FPS, ID_BG };
+    static const int kAdvSb[] = { ID_MEDIA, ID_MEDIA_B, ID_XBE, ID_HDD, ID_HDD_OPEN, ID_DATA_OPEN, ID_SAVES_RESET,
+                                  ID_SAVES_IMPORT, ID_SAVES_EXPORT, ID_SAVES_REPLAYS, ID_PROF_COMBO, ID_PROF_LOAD,
+                                  ID_PROF_SAVE, ID_PROF_DEL, ID_PROF_DFLT, ID_DIAG, ID_SAVE_LOCK, ID_LIVE };
+    static const int kGo[LOC_SUM_N] = { P_ADV, P_GFX, P_DISPLAY, P_CTRL, P_ADV };
+    char why[300] = "", tmp[1024], cfg[1200], keep[16], dir[1100], cd0[sizeof g_client_dir];
+    launcher_settings_t s;
+    loc_sumrow_t r[LOC_SUM_N];
+    int k, li, id0 = g_lay.id, sz0 = g_lay.size, shot0 = g_o.shot;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw293_gui_user.cfg", tmp);
+    {
+        FILE *f = NULL;
+        if (u8_fopen_s(&f, cfg, "w") == 0 && f) { /* experimentell: Breitbild + Cockpit aus */
+            fputs("[render]\nedge_mode=2\ncockpit_hide=1\n# fremde Zeile\n", f);
+            fclose(f);
+        }
+    }
+    strcpy_s(cd0, sizeof cd0, g_client_dir);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw293_uicfg_%lu", tmp, GetCurrentProcessId());
+    lcfg_mkdir_p(dir);
+    strcpy_s(g_client_dir, sizeof g_client_dir, dir); /* launcher_ui.cfg nur im Temp-Ordner */
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    sb_lang_set("en");
+    ui_apply_language();
+    g_o.shot = 2; /* Layoutwechsel ohne Speichern */
+    lay_switch(LLAY_A, LLAY_SZ_NORMAL);
+    lcfg_defaults(&s);
+    lcfg_load_file(cfg, &s);
+    g_s = s;
+    ui_from_settings(&s);
+    g_game = LGAME_LOC;
+    g_loc_checked = 0;
+    g_locfix_path[0] = '\0';
+    ui_settext(ctl(ID_LOC_IMAGE), "");
+    loctab_nav_layout();
+    show_page(P_PLAY);
+    ui_apply_rules();
+    pump();
+    /* 1: Bereitschaft (ohne Abbild) + "Change" je Zeile; SB-Teile weg */
+    loctab_sum_rows(r);
+    locl_gt_row(r, 0, LT("gui.sum_game"), LT("gui.loc_sum_none"), C_WARN, "en", why, sizeof why);
+    locl_gt_row(r, 1, g_sum[1].label, g_sum[1].value, g_sum[1].col, "en", why, sizeof why);
+    locl_gt_row(r, 2, g_sum[2].label, g_sum[2].value, g_sum[2].col, "en", why, sizeof why);
+    locl_gt_row(r, 3, g_sum[4].label, g_sum[4].value, g_sum[4].col, "en", why, sizeof why);
+    locl_gt_row(r, 4, LT("gui.loc_sum_online"), LT("gui.loc_server_cue"), C_FAINT, "en", why, sizeof why);
+    if (!why[0] && (strcmp(r[1].label, LT("gui.page_graphics")) != 0 || strcmp(r[3].label, LT("gui.page_controls")) != 0)) {
+        strcpy_s(why, sizeof why, "Zeilen Grafik/Steuerung falsch belegt");
+    }
+    for (k = 0; k < LOC_SUM_N; k++) {
+        loctab_vis(ID_LOC_GO0 + k, 1, "LoC-Bereitschaft Change", why, sizeof why);
+        loctab_vis(ID_SUM_GO0 + k, 0, "SB-Bereitschaft im LoC-Bereich", why, sizeof why);
+    }
+    loctab_vis(ID_LOC_START, 1, "LoC-Start", why, sizeof why);
+    if (!why[0] && IsWindowEnabled(ctl(ID_LOC_START))) {
+        strcpy_s(why, sizeof why, "LoC-Start nicht grau");
+    }
+    /* 2: Hinweisband unten wie SB (nach der Liste), ohne Einmal-Start */
+    if (!why[0] && (!g_orig_mask || !orig_banner_on())) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "kein Hinweis (Maske 0x%X)", g_orig_mask);
+    }
+    loctab_vis(ID_ORIG_RESET_LOC, 1, "Back to original (LoC)", why, sizeof why);
+    loctab_vis(ID_XWARN_LOC, 1, "Warn-Symbol (LoC)", why, sizeof why);
+    loctab_vis(ID_ORIG_ONCE, 0, "Einmal-Start im LoC-Bereich", why, sizeof why);
+    loctab_vis(ID_ORIG_RESET, 0, "Back to original (SB) im LoC-Bereich", why, sizeof why);
+    if (!why[0]) {
+        uictl_t *b = ui_find(ID_ORIG_RESET_LOC), *wi = ui_find(ID_XWARN_LOC), *g = ui_find(ID_LOC_GO0 + LOC_SUM_N - 1);
+        if (!b || !wi || !g || b->y < LOC_SUM_Y + LOC_SUM_H || wi->y < LOC_SUM_Y + LOC_SUM_H ||
+            b->y + b->h_ > OB_Y_LOC + OB_H_LOC || g->y + g->h_ > LOC_SUM_Y + LOC_SUM_H ||
+            b->x + b->w != CX0 + CW - 12 || wi->x != CX0 + 10) {
+            strcpy_s(why, sizeof why, "Band nicht unten unter der Liste");
+        }
+    }
+    if (!why[0]) { /* Tooltip/Name des Warn-Symbols wie SB: eine Gruppe je Zeile */
+        char tt[700];
+        ui_gettext(ctl(ID_XWARN_LOC), tt, sizeof tt);
+        if (!strstr(tt, "\xE2\x80\xA2")) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Warn-Tooltip LoC '%.120s'", tt);
+        }
+    }
+    /* 3: "Change" fuehrt zur Seite der Ursache */
+    for (k = 0; k < LOC_SUM_N && !why[0]; k++) {
+        show_page(P_PLAY);
+        on_command(ID_LOC_GO0 + k, BN_CLICKED);
+        pump();
+        if (g_page != kGo[k] || g_game != LGAME_LOC) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Change %d -> Seite %d (soll %d)", k, g_page, kGo[k]);
+        }
+    }
+    /* 4: Erweitert bei LoC: LoC-Karten + gemeinsame Teile, keine SB-Teile */
+    if (!why[0]) {
+        show_page(P_ADV);
+        pump();
+        if (g_page != P_ADV) {
+            strcpy_s(why, sizeof why, "Erweitert bei LoC nicht erreichbar");
+        }
+    }
+    loctab_vis(ID_NAV0 + P_ADV, 1, "LoC", why, sizeof why);
+    loctab_vis(ID_NAV0 + P_PACKS, 0, "LoC", why, sizeof why);
+    for (k = 0; k < (int)(sizeof kAdvLoc / sizeof kAdvLoc[0]); k++) {
+        loctab_vis(kAdvLoc[k], 1, "LoC-Erweitert", why, sizeof why);
+    }
+    for (k = 0; k < (int)(sizeof kAdvSb / sizeof kAdvSb[0]); k++) {
+        if (ctl(kAdvSb[k])) {
+            loctab_vis(kAdvSb[k], 0, "LoC-Erweitert (SB-Teil)", why, sizeof why);
+        }
+    }
+    loctab_vis(ID_LOC_START, 0, "LoC-Erweitert (Start)", why, sizeof why);
+    /* 5: Disc erkannt (Fixture) -> Spiel-Zeile gruen mit Title-ID, EN/DE */
+    if (!why[0]) {
+        strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_ISO);
+        memset(&g_locfix, 0, sizeof g_locfix);
+        g_locfix.kind = LGAME_IMG_LOC;
+        g_locfix.title_id = LGAME_TID_LOC;
+        ui_settext(ctl(ID_LOC_IMAGE), LOC_ISO);
+        on_command(ID_LOC_CHECK, BN_CLICKED);
+        for (li = 0; li < 2 && !why[0]; li++) {
+            sb_lang_set(li ? "de" : "en");
+            ui_apply_language();
+            show_page(P_PLAY);
+            pump();
+            loctab_sum_rows(r);
+            locl_gt_row(r, 0, LT("gui.sum_game"), "43430009", C_OK, li ? "de" : "en", why, sizeof why);
+            locl_gt_row(r, 4, LT("gui.loc_sum_online"), LT("gui.loc_server_cue"), C_FAINT, li ? "de" : "en", why,
+                        sizeof why);
+            if (!why[0]) {
+                char tb[64];
+                ui_gettext(ctl(ID_LOC_GO0), tb, sizeof tb);
+                if (strcmp(tb, LT("gui.play_change")) != 0) {
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "%s Change-Text '%s'", li ? "de" : "en", tb);
+                }
+            }
+        }
+        sb_lang_set("en");
+        ui_apply_language();
+        ui_settext(ctl(ID_LOC_IMAGE), "D:\\Games\\anders.iso"); /* Ergebnis gilt nur fuer den geprueften Pfad */
+        loctab_sum_rows(r);
+        locl_gt_row(r, 0, LT("gui.sum_game"), LT("gui.loc_sum_unchecked"), C_WARN, "neu", why, sizeof why);
+        g_locfix.kind = LGAME_IMG_SB; /* SB-Abbild: Hinweis */
+        g_locfix.title_id = LGAME_TID_SB;
+        ui_settext(ctl(ID_LOC_IMAGE), LOC_ISO);
+        on_command(ID_LOC_CHECK, BN_CLICKED);
+        loctab_sum_rows(r);
+        locl_gt_row(r, 0, LT("gui.sum_game"), LT("gui.loc_sum_sb"), C_WARN, "sb", why, sizeof why);
+        g_locfix.kind = LGAME_IMG_UNREADABLE; /* Fehler */
+        on_command(ID_LOC_CHECK, BN_CLICKED);
+        loctab_sum_rows(r);
+        locl_gt_row(r, 0, LT("gui.sum_game"), LT("gui.loc_sum_err"), C_ERR, "kaputt", why, sizeof why);
+    }
+    /* 6: keine Ueberlappung, alles im Fenster: Layout A in allen Groessen (mit Band) */
+    for (k = LLAY_SZ_COMPACT; k <= LLAY_SZ_LARGE && !why[0]; k++) {
+        char tag[40];
+        lay_switch(LLAY_A, k);
+        _snprintf_s(tag, sizeof tag, _TRUNCATE, "LoC a/%s", llay_size_name(k));
+        lay_gt_page_check(why, sizeof why, tag);
+    }
+    /* 7: Original -> kein Band, Liste bleibt */
+    if (!why[0]) {
+        lcfg_defaults(&s);
+        g_s = s;
+        ui_from_settings(&s);
+        show_page(P_PLAY);
+        ui_apply_rules();
+        pump();
+        loctab_vis(ID_ORIG_RESET_LOC, 0, "Back to original (LoC) bei Original", why, sizeof why);
+        loctab_vis(ID_XWARN_LOC, 0, "Warn-Symbol (LoC) bei Original", why, sizeof why);
+        loctab_vis(ID_LOC_GO0, 1, "LoC-Bereitschaft bei Original", why, sizeof why);
+    }
+    /* aufraeumen (die Wahl LoC wurde nur in die Temp-Datei geschrieben) */
+    lay_switch(id0, sz0);
+    g_o.shot = shot0;
+    g_game = LGAME_SB;
+    loctab_nav_layout();
+    g_locfix_path[0] = '\0';
+    g_loc_checked = 0;
+    lgame_defaults(&g_loc);
+    ui_settext(ctl(ID_LOC_IMAGE), "");
+    u8_DeleteFile(cfg);
+    g_ucfg_test[0] = '\0';
+    {
+        char pth[1200];
+        wchar_t wd[1100];
+        ui_cfg_path(dir, pth, sizeof pth);
+        u8_DeleteFile(pth);
+        u8_to_w(dir, wd, 1100);
+        RemoveDirectoryW(wd);
+    }
+    strcpy_s(g_client_dir, sizeof g_client_dir, cd0);
+    sb_lang_set(keep);
+    ui_apply_language();
+    lcfg_defaults(&s);
+    g_s = s;
+    ui_from_settings(&s);
+    ui_apply_rules();
+    show_page(P_PLAY);
+    if (!why[0]) {
+        GT_OK("70 W293 LOC-LAYOUT (LoC-Bereitschaft Spiel/Grafik/Anzeige/Steuerung/Online mit Change, Band unten ohne "
+              "Einmal-Start, Erweitert bei LoC mit Disc/Ordner + gemeinsamen Teilen ohne SB-Teile, Start grau, EN/DE, "
+              "keine Ueberlappung in Layout A Kompakt/Normal/Gross)");
+    } else {
+        GT_FAIL("70 W293 LOC-LAYOUT", "%s", why);
+    }
 }
 
 void gui_selftest(const char *client_override, int *pass, int *fail)
@@ -15413,9 +18789,10 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     on_command(ID_REM_LABEL, BN_CLICKED);
                     ok = ok && g_gfx.shx[LSHX_LABEL] == 0;
                 }
-                if (ok) { /* Name nach echter Bildrate: exklusiv 144 Hz -> 144 FPS */
+                if (ok) { /* W296 PRESET-ORIG: Name ohne Bildrate (vorher exklusiv 144 Hz -> "144 FPS") */
                     ui_gettext(ctl(ID_GP0), t, sizeof t);
-                    ok = strstr(t, "144 FPS") != NULL;
+                    ok = strncmp(t, LT("gui.gfx_p_orig"), strlen(LT("gui.gfx_p_orig"))) == 0 && !strstr(t, "FPS") &&
+                         !strstr(t, "144");
                     if (!ok) { printf("     (22: Name '%s')\n", t); }
                 }
                 if (ok) { /* W207: actual radio -> display controls -> save model. */
@@ -15440,7 +18817,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     on_command(ID_GP_RESET, BN_CLICKED);
                     on_command(ID_GP0 + LGP_ORIGINAL, BN_CLICKED);
                     ui_to_settings(&b);
-                    ok = ok && b.interp_fps == 120 && b.rt_scale == 0 && b.fs_interp_match &&
+                    ok = ok && b.interp_fps == SB_FPS_AUTO && b.rt_scale == 0 && b.fs_interp_match && /* W296 */
                          ui_checked(ID_GP0 + LGP_ORIGINAL);
                 }
                 if (ok) { /* W252: Klare Sicht ueber das Optionsfeld; Cockpit-Monitor folgt */
@@ -15463,6 +18840,39 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     ui_to_settings(&b);
                     ok = ok && ui_checked(ID_GP0 + LGP_ORIGINAL) && b.monitor_fx == 1 &&
                          b.shx[LSHX_SHADING] == 1 && ComboBox_GetCurSel(ctl(ID_MONFX)) == 0;
+                }
+                if (ok) { /* W266 PRESET-EDGE: Raender (Seite Anzeige) gehoeren zum Preset */
+                    edge_ui_set(1, 12, 60); /* Rand auf der Seite Anzeige geaendert -> Benutzerdefiniert */
+                    ui_apply_rules();
+                    lcfg_defaults(&b);
+                    ui_to_settings(&b);
+                    ok = b.edge_mode == 1 && ui_checked(ID_GP0 + LGP_CUSTOM) &&
+                         lcfg_gfx_base(&b, 0) == LGP_ORIGINAL;
+                    on_command(ID_GP0 + LGP_STRONG, BN_CLICKED); /* Wahl setzt die Raender (nach R14-Rueckfrage) */
+                    if (!ui_checked(ID_GP0 + LGP_STRONG)) { on_command(ID_GP_RESET, BN_CLICKED);
+                                                            on_command(ID_GP0 + LGP_STRONG, BN_CLICKED); }
+                    ui_to_settings(&b);
+                    /* W278: alle Presets 4:3 (edge_mode 1, Verlauf gesperrt); Breitbild ist eigene Wahl */
+                    ok = ok && ui_checked(ID_GP0 + LGP_STRONG) && b.edge_mode == 1 &&
+                         b.edge_fade_width == 8 && b.edge_fade_strength == 100 &&
+                         ComboBox_GetCurSel(ctl(ID_EDGE)) == 1 && IsWindowEnabled(ctl(ID_EDGE_W)) == FALSE;
+                    ComboBox_SetCurSel(ctl(ID_EDGE), 2); /* Breitbild (Abdunklung) -> Benutzerdefiniert, Verlauf frei */
+                    on_command(ID_EDGE, CBN_SELCHANGE);
+                    ComboBox_SetCurSel(ctl(ID_EDGE_W), 0); /* 5 % */
+                    on_command(ID_EDGE_W, CBN_SELCHANGE);
+                    ui_to_settings(&b);
+                    ok = ok && b.edge_mode == 2 && b.edge_fade_width == 5 && ui_checked(ID_GP0 + LGP_CUSTOM) &&
+                         IsWindowEnabled(ctl(ID_EDGE_W)) != FALSE;
+                    on_command(ID_GP_RESET, BN_CLICKED); /* Zuruecksetzen -> 4:3, 8 % */
+                    ui_to_settings(&b);
+                    ok = ok && b.edge_mode == 1 && b.edge_fade_width == 8 && ui_checked(ID_GP0 + LGP_STRONG);
+                    on_command(ID_GP0 + LGP_ORIGINAL, BN_CLICKED);
+                    ui_to_settings(&b);
+                    ui_gettext(ctl(ID_GP0), t, sizeof t);
+                    ok = ok && ui_checked(ID_GP0 + LGP_ORIGINAL) && b.edge_mode == 1 && b.edge_fade_width == 8 &&
+                         !strstr(t, "(HD)");
+                    if (!ok) { printf("     (22: W266 Raender edge=%d/%d/%d '%s')\n", b.edge_mode, b.edge_fade_width,
+                                      b.edge_fade_strength, t); }
                 }
                 if (!ok) { printf("     (22: Grafik-Preset falsch)\n"); }
                 ui_from_settings(&a);
@@ -15642,10 +19052,11 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     { "advanced", P_ADV }, { "start", P_PLAY }, { "grafik", P_DISPLAY },
                     { "remaster", P_GFX }, { "ton", P_AUDIO }, { "steuerung", P_CTRL },
                     { "profile", P_ADV }, { "pfade", P_ADV }, { "6", P_ADV },
-                    { "7", -1 }, { "xyz", -1 },
+                    { "alpha", P_ALPHA }, { "7", P_ALPHA }, /* W272 */
+                    { "8", -1 }, { "xyz", -1 },
                 };
                 int seen[P_N] = { 0 }, cur = P_PLAY, n;
-                ok44 = gui_page_count() == 7;
+                ok44 = gui_page_count() == 8; /* W272: + Alpha Test */
                 for (i = 0; i < (int)(sizeof al / sizeof al[0]); i++) {
                     if (gui_page_from_name(al[i].n) != al[i].p) {
                         ok44 = 0;
@@ -15659,7 +19070,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                 for (n = 0; n < P_N; n++) {
                     ok44 = ok44 && seen[n];
                 }
-                ok44 = ok44 && cur == P_PLAY && nav_next(P_PLAY, -1) == P_ADV;
+                ok44 = ok44 && cur == P_PLAY && nav_next(P_PLAY, -1) == P_ALPHA; /* W272 */
                 for (p = 0; p < P_N && ok44; p++) {
                     int vis = 0;
                     for (i = 0; i < g_ui_n; i++) {
@@ -15744,9 +19155,9 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
             GT_FAIL("43 rules-ui", "%s", why43);
         }
         if (ok44) {
-            GT_OK("44 nav-7pages (Aliase, Strg+Tab-Zyklus)");
+            GT_OK("44 nav-8pages (Aliase, Strg+Tab-Zyklus, W272 Alpha Test)");
         } else {
-            GT_FAIL("44 nav-7pages", "%s", why44);
+            GT_FAIL("44 nav-8pages", "%s", why44);
         }
         if (ok45) {
             GT_OK("45 tab-order");
@@ -16618,13 +20029,14 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                 if (ok59) { /* Einstellung -> Oberflaeche -> Einstellung */
                     strcpy_s(a59.photo_dir, sizeof a59.photo_dir, "C:\\Fotos \xC3\xBC" "ber\\SB");
                     a59.photo_scale = 4;
+                    a59.photo_size = 4; /* W290: Groesse = photo_size (photo_scale wird passend mitgeschrieben) */
                     a59.photo_jpg = 1;
                     a59.photo_aspect = 2;
                     ui_from_settings(&a59);
                     lcfg_defaults(&b59);
                     ui_to_settings(&b59);
-                    if (strcmp(b59.photo_dir, a59.photo_dir) != 0 || b59.photo_scale != 4 || b59.photo_jpg != 1 ||
-                        b59.photo_aspect != 2) {
+                    if (strcmp(b59.photo_dir, a59.photo_dir) != 0 || b59.photo_scale != 4 || b59.photo_size != 4 ||
+                        b59.photo_jpg != 1 || b59.photo_aspect != 2) {
                         ok59 = 0;
                         strcpy_s(why59, sizeof why59, "Oberflaeche-Rundweg");
                     }
@@ -16736,6 +20148,13 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     GT_FAIL("63 W250 update-check", "%s", why63);
                 }
             }
+            loctab_gui_selftest(pass, fail); /* W276 LOC-LAUNCH (Fall 65) */
+            orig_gui_selftest(pass, fail); /* W278 ORIG-FLAG (Fall 66) */
+            lay_gui_selftest(pass, fail); /* W281 LAUNCHER-SIZE (Fall 67) */
+            xicon_gui_selftest(pass, fail); /* W287 EXP-ICON (Fall 68) */
+            adv_gui_selftest(pass, fail); /* W291 ESC-REWORK (Fall 69) */
+            locl_gui_selftest(pass, fail); /* W293 LOC-LAYOUT (Fall 70) */
+            porig_gui_selftest(pass, fail); /* W296 PRESET-ORIG (Fall 71) */
             /* --- 64 (W259 SETTINGS-RESET): Launcher bleibt offen, im Spiel wird
              * per ESC "Als Standard speichern" gesichert, danach startet derselbe
              * Launcher erneut. Vorher schrieb er seine alten Werte zurueck
@@ -17500,3 +20919,823 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
         RemoveDirectoryW(w);
     }
 }
+
+/* ------------------------------------------------------------------ */
+/* W282 ISSUE6: Selbsttest-Faelle zu GitHub-Issue #6                   */
+/* ------------------------------------------------------------------ */
+#define W282_OK(name) do { printf("PASS %s\n", name); (*pass)++; } while (0)
+#define W282_FAIL(name, why) do { printf("FAIL %s: %s\n", name, why); (*fail)++; } while (0)
+
+/* Punkt 2: Kurznamen im Controller-Test folgen der Funktion (bi0 =
+ * Report "MainWeapon" = Hauptwaffe/Daumentaste oben, bi1 = Report "Fire"
+ * = Sub-Waffe/Abzug), Zeichnung: bi0 oben, bi1 vorn darunter. */
+static void w282_sbc_labels(int *pass, int *fail)
+{
+    char why[160] = "";
+    const ks_elem_t *e0 = NULL, *e1 = NULL;
+    int i;
+    for (i = 0; i < (int)(sizeof ks_elems / sizeof ks_elems[0]); i++) {
+        if (strcmp(ks_elems[i].id, "bi0") == 0) e0 = &ks_elems[i];
+        if (strcmp(ks_elems[i].id, "bi1") == 0) e1 = &ks_elems[i];
+    }
+    if (strcmp(kBtnShort[0], "MAIN") != 0 || strcmp(kBtnShort[1], "SUB") != 0) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "Kurznamen '%s'/'%s'", kBtnShort[0], kBtnShort[1]);
+    } else if (!lctrl_sbc_btn_name(0) || strcmp(lctrl_sbc_btn_name(0), "MAINWEAPON") != 0 ||
+               !lctrl_sbc_btn_name(1) || strcmp(lctrl_sbc_btn_name(1), "SUBWEAPON") != 0) {
+        strcpy_s(why, sizeof why, "SBC-Quellnamen bi0/bi1");
+    } else if (strcmp(kCtrlElems[0].key, "bi0") != 0 || strcmp(kCtrlElems[0].lkey, "bind.bi0") != 0 ||
+               strcmp(kCtrlElems[1].key, "bi1") != 0 || strcmp(kCtrlElems[1].lkey, "bind.bi1") != 0) {
+        strcpy_s(why, sizeof why, "Elementtabelle bi0/bi1");
+    } else if (!e0 || !e1 || e0->y >= e1->y || strcmp(e0->lkey, "bind.bi0") != 0 ||
+               strcmp(e1->lkey, "bind.bi1") != 0) {
+        strcpy_s(why, sizeof why, "Zeichnung: Hauptwaffe nicht oben bzw. Namen vertauscht");
+    } else {
+        const char *keep = sb_lang_code();
+        char k[8];
+        strcpy_s(k, sizeof k, keep);
+        sb_lang_set("en");
+        if (strcmp(LT("bind.bi0"), "Main weapon") != 0 || strcmp(LT("bind.bi1"), "Sub-weapon") != 0)
+            strcpy_s(why, sizeof why, "Texte bind.bi0/bi1 en");
+        sb_lang_set(k);
+    }
+    if (!why[0]) W282_OK("W282 ISSUE6 sbc-labels (bi0 MAIN = Hauptwaffe/Daumentaste oben, bi1 SUB = Sub-Waffe/Abzug, Funktion unveraendert)");
+    else W282_FAIL("W282 ISSUE6 sbc-labels", why);
+}
+
+/* Punkt 3: ungueltiges Abbild sperrt die Ordnerwahl unter Erweitert nicht
+ * mehr (echter Regelweg, kein Fixture-Umfeld); ein getippter/gewaehlter
+ * Ordner loest das ungueltige Abbild ab; gueltiges Abbild sperrt weiter
+ * (R1), ein danach ungueltiges gibt wieder frei - alles ohne Neustart. */
+static void w282_iso_recover(const char *client_override, int *pass, int *fail)
+{
+    char tmp[1024], dir[1100], bad[1200], xbe[1200], t[1200], why[200] = "";
+    launcher_settings_t s;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw282_iso_folder", tmp);
+    lcfg_mkdir_p(dir);
+    _snprintf_s(xbe, sizeof xbe, _TRUNCATE, "%s/default.xbe", dir);
+    write_file(xbe, "XBEH");
+    _snprintf_s(bad, sizeof bad, _TRUNCATE, "%sw282_kein_spiel.iso", tmp);
+    write_file(bad, "das ist kein Xbox-Abbild");
+    if (!(gui_init(client_override) && gui_create(1))) {
+        strcpy_s(why, sizeof why, "Fenster nicht erzeugt");
+    } else {
+        build_controls();
+        tips_build();
+        ShowWindow(g_hwnd, SW_SHOWNOACTIVATE); /* ausserhalb des Bildschirms */
+        g_env_fix = NULL; /* echter Regelweg: lcfg_validate auf dem Abbild */
+        lcfg_defaults(&s);
+        s.xbe_path[0] = s.media_root[0] = 0;
+        strcpy_s(s.game_image, sizeof s.game_image, bad);
+        show_page(P_ADV);
+        ui_from_settings(&s);
+        ui_apply_rules();
+        pump();
+        if (g_data_ok || !g_rr[3].active) {
+            strcpy_s(why, sizeof why, "ungueltiges Abbild nicht abgelehnt");
+        } else if (g_rr[1].disable || !IsWindowEnabled(ctl(ID_MEDIA)) ||
+                   !IsWindowEnabled(ctl(ID_MEDIA_B)) || !IsWindowEnabled(ctl(ID_XBE_B))) {
+            strcpy_s(why, sizeof why, "Ordnerwahl bei ungueltigem Abbild gesperrt (Befund Issue #6)");
+        }
+        if (!why[0]) { /* Ordner tippen + Feld verlassen = loest Abbild ab */
+            ui_settext(ctl(ID_MEDIA), dir);
+            on_command(ID_MEDIA, EN_KILLFOCUS);
+            pump();
+            ui_gettext(ctl(ID_IMAGE), t, sizeof t);
+            if (t[0] || g_cur.game_image[0] || strcmp(g_cur.media_root, dir) != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Abbild nicht abgeloest ('%.60s')", t);
+            } else if (g_rr[1].active || !IsWindowEnabled(ctl(ID_MEDIA))) {
+                strcpy_s(why, sizeof why, "Ordner-Modus nach Abloesung gesperrt");
+            }
+        }
+        if (!why[0]) { /* gueltiges Abbild (Fixture) sperrt weiter ... */
+            w220_fixture(W220_ISO, 0);
+            ui_settext(ctl(ID_IMAGE), W220_ISO);
+            on_command(ID_IMAGE_C, BN_CLICKED);
+            pump();
+            if (!g_data_ok || !g_rr[1].disable || IsWindowEnabled(ctl(ID_MEDIA_B))) {
+                strcpy_s(why, sizeof why, "gueltiges Abbild sperrt den Ordner-Modus nicht mehr");
+            } else {
+                on_command(ID_MEDIA, EN_KILLFOCUS); /* gueltiges Abbild bleibt */
+                ui_gettext(ctl(ID_IMAGE), t, sizeof t);
+                if (strcmp(t, W220_ISO) != 0) {
+                    strcpy_s(why, sizeof why, "gueltiges Abbild wurde geleert");
+                }
+            }
+        }
+        if (!why[0]) { /* ... und ein danach ungueltiges gibt ohne Neustart frei */
+            ui_settext(ctl(ID_IMAGE), bad);
+            on_command(ID_IMAGE_C, BN_CLICKED);
+            pump();
+            if (g_data_ok || g_rr[1].disable || !IsWindowEnabled(ctl(ID_MEDIA_B))) {
+                strcpy_s(why, sizeof why, "Ordnerwahl erholt sich nicht ohne Neustart");
+            }
+        }
+        g_imgfix_path[0] = 0;
+        ShowWindow(g_hwnd, SW_HIDE);
+        gui_teardown();
+    }
+    u8_DeleteFile(bad);
+    u8_DeleteFile(xbe);
+    {
+        wchar_t w[1200];
+        u8_to_w(dir, w, 1200);
+        RemoveDirectoryW(w);
+    }
+    if (!why[0]) W282_OK("W282 ISSUE6 iso-recover (ungueltiges Abbild sperrt Ordnerwahl nicht, Ordner loest es ab, gueltiges sperrt weiter, Erholung ohne Neustart)");
+    else W282_FAIL("W282 ISSUE6 iso-recover", why);
+}
+
+/* Punkte 6+7: Belegungsdialog (offscreen, Temp-Client-Ordner). */
+static char g_w282_why[200];
+static int g_w282_stage;
+static char g_w282_prof[1200];
+
+static void w282_bind_probe(HWND hd)
+{
+    char t[128];
+    int i, bad = 0;
+    lctrl_bind_t rb;
+    ui_gettext(bctl(hd, IDB_NAME), t, sizeof t);
+    if (g_w282_stage == 2) { /* mitgeliefertes Layout: Feld bleibt leer */
+        if (t[0]) {
+            _snprintf_s(g_w282_why, sizeof g_w282_why, _TRUNCATE,
+                        "Name bei keyboard_default vorbelegt ('%s')", t);
+        }
+        return;
+    }
+    if (strcmp(t, "w282Test2") != 0) { /* Punkt 6 */
+        _snprintf_s(g_w282_why, sizeof g_w282_why, _TRUNCATE,
+                    "Name nach Oeffnen '%s' statt 'w282Test2'", t);
+        return;
+    }
+    if (!bctl(hd, IDB_CLEAR) || !IsWindowEnabled(bctl(hd, IDB_CLEAR))) {
+        strcpy_s(g_w282_why, sizeof g_w282_why, "Knopf Alle leeren fehlt");
+        return;
+    }
+    SendMessageW(hd, WM_COMMAND, MAKEWPARAM(IDB_CLEAR, BN_CLICKED),
+                 (LPARAM)bctl(hd, IDB_CLEAR)); /* Punkt 7 */
+    for (i = 0; i < LCTRL_ELEM_N; i++) {
+        if (kCtrlElems[i].kind != LCTRL_ACT && g_bind.row[i].n_alt) bad++;
+    }
+    i = lctrl_bind_elem_index("pause");
+    if (bad || i < 0 || g_bind.row[i].n_alt != 1 || g_bind.joy[0][0]) {
+        _snprintf_s(g_w282_why, sizeof g_w282_why, _TRUNCATE,
+                    "Leeren: %d Spiel-Elemente belegt, pause %d, joy0 '%s'", bad,
+                    i >= 0 ? g_bind.row[i].n_alt : -1, g_bind.joy[0]);
+        return;
+    }
+    ui_gettext(bctl(hd, IDB_NAME), t, sizeof t);
+    if (strcmp(t, "w282Test2") != 0) {
+        strcpy_s(g_w282_why, sizeof g_w282_why, "Name nach Leeren verloren");
+        return;
+    }
+    if (bind_save(hd) != 0) { /* gleicher Name: ohne Rueckfrage */
+        strcpy_s(g_w282_why, sizeof g_w282_why, "Speichern unter dem geoeffneten Namen scheiterte");
+        return;
+    }
+    lctrl_bind_load_file(g_w282_prof, &rb);
+    for (i = 0, bad = 0; i < LCTRL_ELEM_N; i++) {
+        if (kCtrlElems[i].kind != LCTRL_ACT && rb.row[i].n_alt) bad++;
+    }
+    i = lctrl_bind_elem_index("pause");
+    if (bad || rb.row[i].n_alt != 1 || strcmp(rb.row[i].alt[0], "KEY:PAUSE") != 0 ||
+        rb.joy[0][0]) {
+        _snprintf_s(g_w282_why, sizeof g_w282_why, _TRUNCATE,
+                    "Datei nach Speichern: %d Spiel-Elemente, pause %d", bad, rb.row[i].n_alt);
+    }
+}
+
+static void w282_bind_dialog(const char *client_override, int *pass, int *fail)
+{
+    char tmp[1024], dir[1100], pd[1200], keepdir[sizeof g_client_dir];
+    gui_opts_t keepo = g_o;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw282_bind", tmp);
+    _snprintf_s(pd, sizeof pd, _TRUNCATE, "%s/profiles", dir);
+    lcfg_mkdir_p(pd);
+    _snprintf_s(g_w282_prof, sizeof g_w282_prof, _TRUNCATE, "%s/user_w282Test2.ini", pd);
+    write_file(g_w282_prof, "[joystick]\njoy0 = Example Stick\n[buttons]\n"
+                            "bi0 = KEY:SPACE, JOY0:B1\nbi1 = KEY:F\n[axes]\n"
+                            "rot = JOY0:RZ:dz=0.05\n[client]\npause = KEY:PAUSE\n");
+    g_w282_why[0] = 0;
+    if (!(gui_init(client_override) && gui_create(1))) {
+        strcpy_s(g_w282_why, sizeof g_w282_why, "Fenster nicht erzeugt");
+    } else {
+        build_controls();
+        tips_build();
+        ShowWindow(g_hwnd, SW_SHOWNOACTIVATE); /* ausserhalb des Bildschirms */
+        strcpy_s(keepdir, sizeof keepdir, g_client_dir);
+        strcpy_s(g_client_dir, sizeof g_client_dir, dir); /* nie das echte Profil */
+        g_o.shot = 3; /* Dialog offscreen, ohne Aktivierung, ohne Rueckfragen */
+        g_o.bind_sel = -1;
+        g_o.bind_learn = g_o.bind_joydemo = g_o.bind_stickdemo = g_o.bind_wheeldemo = 0;
+        g_bind_testfn = w282_bind_probe;
+        g_w282_stage = 1;
+        bind_dialog_modal("user_w282Test2", g_w282_prof);
+        if (!g_w282_why[0]) {
+            g_w282_stage = 2;
+            bind_dialog_modal("keyboard_default", NULL);
+        }
+        g_bind_testfn = NULL;
+        g_o = keepo;
+        strcpy_s(g_client_dir, sizeof g_client_dir, keepdir);
+        ShowWindow(g_hwnd, SW_HIDE);
+        gui_teardown();
+    }
+    { /* Pure Helfer: Namensableitung */
+        char r[64];
+        if (!g_w282_why[0] &&
+            (!lctrl_user_rest_of("user_abc-1", r, sizeof r) || strcmp(r, "abc-1") != 0 ||
+             lctrl_user_rest_of("keyboard_default", r, sizeof r) || r[0] ||
+             lctrl_user_rest_of("user_", r, sizeof r) || lctrl_user_rest_of("user_a b", r, sizeof r) ||
+             lctrl_user_rest_of(NULL, r, sizeof r))) {
+            strcpy_s(g_w282_why, sizeof g_w282_why, "lctrl_user_rest_of");
+        }
+    }
+    u8_DeleteFile(g_w282_prof);
+    {
+        wchar_t w[1200];
+        u8_to_w(pd, w, 1200);
+        RemoveDirectoryW(w);
+        u8_to_w(dir, w, 1200);
+        RemoveDirectoryW(w);
+    }
+    if (!g_w282_why[0]) W282_OK("W282 ISSUE6 bind-name+empty (Name des geoeffneten Layouts bleibt, Alle leeren: Spiel-Elemente leer, Client-Tasten bleiben, joyN entfaellt, Speichern ohne Rueckfrage, Datei leer)");
+    else W282_FAIL("W282 ISSUE6 bind-name+empty", g_w282_why);
+}
+
+/* Punkte 4+5: Mehrgeraete-Achsen mit simulierten DirectInput-Zustaenden.
+ * Geraet A = Arduino-artig (Standardbereich, Mitte 0), Geraet B =
+ * Wingman-artig (Treiber nimmt DIPROP_RANGE nicht an: Rohbereich
+ * 0..65535 bzw. 0..1023). Beide Lerner laufen wie bind_cap_joy je Takt. */
+static int w282_learn2(long blo, long bhi, int bmove, int normalize, char *out, size_t cap,
+                       int *who)
+{
+    lctrl_joy_learner_t la, lb;
+    imap_joy_state_t sa, sb;
+    int idx = lctrl_bind_elem_index("aim_x"), t, r;
+    long bc = (blo + bhi) / 2, bv;
+    lctrl_joy_learner_reset(&la);
+    lctrl_joy_learner_reset(&lb);
+    *who = -1;
+    out[0] = 0;
+    for (t = 0; t < 20; t++) {
+        memset(&sa, 0, sizeof sa);
+        memset(&sb, 0, sizeof sb);
+        memset(sa.pov, 0xFF, sizeof sa.pov);
+        memset(sb.pov, 0xFF, sizeof sb.pov);
+        sa.axis[0] = 120; sa.axis[1] = -80; sa.axis[2] = -32768; /* A ruht */
+        bv = (bmove && t >= 6) ? bhi : bc; /* B: X ab Takt 6 ganz rechts */
+        if (normalize) {
+            sb.axis[0] = ijoy_norm_axis(bv, blo, bhi);
+            sb.axis[1] = ijoy_norm_axis(bc, blo, bhi);
+            sb.axis[6] = ijoy_norm_axis(blo, blo, bhi); /* Slider am Anschlag */
+        } else { /* alter Weg: Rohwert nur auf int16 begrenzt */
+            sb.axis[0] = (int16_t)(bv > 32767 ? 32767 : bv < -32768 ? -32768 : bv);
+            sb.axis[1] = (int16_t)(bc > 32767 ? 32767 : bc < -32768 ? -32768 : bc);
+            sb.axis[6] = (int16_t)(blo > 32767 ? 32767 : blo < -32768 ? -32768 : blo);
+        }
+        r = lctrl_joy_learner_step(&la, 1, &sa, 0x07, 0, idx, out, cap);
+        if (r) { *who = 0; return r; }
+        r = lctrl_joy_learner_step(&lb, 1, &sb, 0x43, 0, idx, out, cap);
+        if (r) { *who = 1; return r; }
+    }
+    return 0;
+}
+
+static void w282_joy_multi(int *pass, int *fail)
+{
+    char why[200] = "", out[64];
+    int who, r, slot[16], i;
+    { /* Bereichs-Umrechnung */
+        if (ijoy_norm_axis(-40000, -32768, 32767) != -32768 || ijoy_norm_axis(1234, -32768, 32767) != 1234 ||
+            ijoy_norm_axis(40000, -32768, 32767) != 32767)
+            strcpy_s(why, sizeof why, "Normalbereich nicht bitgleich");
+        else if (ijoy_norm_axis(0, 0, 255) != -32768 || ijoy_norm_axis(255, 0, 255) != 32767 ||
+                 abs(ijoy_norm_axis(128, 0, 255)) > 200 || ijoy_norm_axis(65535, 0, 65535) != 32767 ||
+                 abs(ijoy_norm_axis(32768, 0, 65535)) > 1 || ijoy_norm_axis(5, 7, 7) != 0)
+            strcpy_s(why, sizeof why, "Umrechnung 0..255 / 0..65535");
+    }
+    if (!why[0]) { /* Achsen-Zuordnung (Rueckfall bei unbekannten GUIDs) */
+        static const int k1[4] = {0, 1, 7, 6}; /* X Y unbekannt Slider */
+        static const int k2[3] = {0, 0, 1};    /* doppelte X-Achse */
+        static const int k3[10] = {0, 1, 2, 3, 4, 5, 6, 6, 7, 7};
+        unsigned m1 = ijoy_plan_axes(k1, 4, slot);
+        if (m1 != 0xC3 || slot[0] != 0 || slot[1] != 1 || slot[2] != 7 || slot[3] != 6)
+            strcpy_s(why, sizeof why, "Plan X/Y/unbekannt/Slider");
+        else if (ijoy_plan_axes(k2, 3, slot) != 0x43 || slot[1] != 6)
+            strcpy_s(why, sizeof why, "Plan doppelte Achse");
+        else if (ijoy_plan_axes(k3, 10, slot) != 0xFF || slot[8] != -1 || slot[9] != -1)
+            strcpy_s(why, sizeof why, "Plan mehr als 8 Achsen");
+    }
+    if (!why[0]) { /* Wingman-Befund nachgestellt: Rohbereich 0..65535 */
+        r = w282_learn2(0, 65535, 1, 0, out, sizeof out, &who);
+        if (r != 0) /* Gegenprobe alter Weg: Achse rechts wird nie gelernt */
+            _snprintf_s(why, sizeof why, _TRUNCATE, "alter Weg lernte '%s' (Nachstellung falsch)", out);
+        r = w282_learn2(0, 65535, 1, 1, out, sizeof out, &who);
+        if (!why[0] && (r != 3 || who != 1 || strncmp(out, "X:", 2) != 0 || strstr(out, "inv=1")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Geraet B (0..65535) r=%d who=%d '%s'", r, who, out);
+        r = w282_learn2(0, 1023, 1, 1, out, sizeof out, &who);
+        if (!why[0] && (r != 3 || who != 1 || strncmp(out, "X:", 2) != 0))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Geraet B (0..1023) r=%d who=%d '%s'", r, who, out);
+        r = w282_learn2(0, 1023, 0, 1, out, sizeof out, &who);
+        if (!why[0] && r != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Ruhe lernte '%s' (Geraet %d)", out, who);
+    }
+    if (!why[0]) { /* Slot fuer Geraet 2 bekommt eigene joyN-Zeile */
+        lctrl_bind_t b;
+        ijoy_info_t L[2];
+        int s;
+        memset(L, 0, sizeof L);
+        strcpy_s(L[0].product, sizeof L[0].product, "Arduino Leonardo");
+        strcpy_s(L[0].name, sizeof L[0].name, "Arduino Leonardo");
+        strcpy_s(L[1].product, sizeof L[1].product, "Logitech WingMan Extreme Digital 3D");
+        strcpy_s(L[1].name, sizeof L[1].name, "Logitech WingMan Extreme Digital 3D");
+        lctrl_bind_init(&b);
+        s = lctrl_joy_slot_for(&b, L, 2, 1);
+        if (s < 0 || !strstr(b.joy[s], "WingMan"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Slot Geraet 2: %d '%s'", s, s >= 0 ? b.joy[s] : "");
+    }
+    if (!why[0]) { /* Gamepad-Tastencodes (Hori: KEY:201/209) */
+        static const int g[] = {0xC3, 201, 209, 211, 0xDA};
+        static const int k[] = {VK_SPACE, VK_F1, VK_PRIOR, VK_NEXT, 0xC2, 0xDB, 'A'};
+        for (i = 0; i < 5; i++) if (!lctrl_vk_is_gamepad(g[i])) strcpy_s(why, sizeof why, "VK_GAMEPAD nicht erkannt");
+        for (i = 0; i < 7; i++) if (lctrl_vk_is_gamepad(k[i])) strcpy_s(why, sizeof why, "Tastatur als Gamepad erkannt");
+    }
+    if (!why[0]) W282_OK("W282 ISSUE6 joy-multi (zwei Geraete: Rohbereich 0..65535/0..1023 umgerechnet und gelernt, alter Weg nachgestellt, Achsen-Plan, Slot 2, VK_GAMEPAD ignoriert)");
+    else W282_FAIL("W282 ISSUE6 joy-multi", why);
+}
+
+void w282_gui_selftest(const char *client_override, int *pass, int *fail)
+{
+    w282_joy_multi(pass, fail);
+    w282_sbc_labels(pass, fail);
+    w282_iso_recover(client_override, pass, fail);
+    w282_bind_dialog(client_override, pass, fail);
+}
+
+/* --- W283 ORIG-KEY-BIND: Vergleichstaste im Belegungsdialog ---------------
+ * Offscreen-Dialog im Temp-Client-Ordner (nie echte Profile): altes Profil
+ * ohne orig_view zeigt die Standardbelegung, Lernen von Zusatztaste + Taste,
+ * Zusatztaste allein, einfache Taste, Hinzufuegen, andere Zeilen lernen
+ * Umschalt weiter sofort, "Alle leeren" behaelt die Zeile, Speichern schreibt
+ * sie (leer = "orig_view =", kein Rueckfall). Tastenliste zeigt die Belegung. */
+static char g_w283_why[220];
+static char g_w283_prof[1200];
+
+#define W283_WHY(...) do { if (!g_w283_why[0]) _snprintf_s(g_w283_why, sizeof g_w283_why, _TRUNCATE, __VA_ARGS__); } while (0)
+
+static int w283_row_is(int idx, const char *want)
+{
+    char t[256];
+    lctrl_bind_row_text(&g_bind, idx, t, sizeof t);
+    return strcmp(t, want) == 0;
+}
+
+static void w283_row_why(const char *what, int idx)
+{
+    char t[256];
+    lctrl_bind_row_text(&g_bind, idx, t, sizeof t);
+    W283_WHY("%s: '%s' (cap=%d)", what, t, g_cap_mode);
+}
+
+/* Zeile idx in der Liste waehlen (bind_refresh_cur liest die Auswahl). */
+static void w283_select(HWND hd, int idx)
+{
+    HWND lb = bctl(hd, IDB_LIST);
+    int n = ListBox_GetCount(lb), at;
+    for (at = 0; at < n; at++) {
+        if ((int)ListBox_GetItemData(lb, at) == idx) {
+            ListBox_SetCurSel(lb, at);
+            g_bind_lb_prev = at;
+            break;
+        }
+    }
+    g_bind_sel = idx;
+}
+
+static void w283_learn(HWND hd, int idx, int mode, const int *vk, int n, int up_vk)
+{
+    int i;
+    w283_select(hd, idx);
+    bind_start_capture(hd, mode);
+    for (i = 0; i < n && g_cap_mode; i++) {
+        bind_cap_key(hd, vk[i], 0);
+    }
+    if (up_vk && g_cap_mode) {
+        bind_cap_keyup(hd, up_vk);
+    }
+}
+
+static void w283_bind_probe(HWND hd)
+{
+    static const int k_ctrl_f7[] = { VK_CONTROL, VK_F7 }, k_shift[] = { VK_SHIFT }, k_f6[] = { VK_F6 },
+                     k_shift_f8[] = { VK_SHIFT, VK_F8 };
+    int ov = lctrl_bind_elem_index("orig_view"), pz = lctrl_bind_elem_index("pause");
+    char buf[4096];
+    lctrl_bind_t rb;
+    lctrl_conf1_t cf[4];
+    HWND lb = bctl(hd, IDB_LIST);
+    int i, n, found = 0;
+    FILE *f;
+    if (ov < 0 || pz < 0) { W283_WHY("orig_view/pause fehlt in kCtrlElems"); return; }
+    for (i = 0, n = ListBox_GetCount(lb); i < n; i++) {
+        if ((int)ListBox_GetItemData(lb, i) == ov) found = 1;
+    }
+    if (!found) { W283_WHY("orig_view nicht in der Liste des Dialogs"); return; }
+    if (!w283_row_is(ov, "KEY:SHIFT+KEY:F8")) { w283_row_why("altes Profil ohne Zeile", ov); return; }
+    /* Strg (VK_CONTROL ohne Ext-Bit = links) + F7 */
+    w283_learn(hd, ov, 1, k_ctrl_f7, 2, 0);
+    if (g_cap_mode || !w283_row_is(ov, "KEY:CTRL+KEY:F7")) { w283_row_why("Lernen Strg+F7", ov); return; }
+    /* Umschalt gedrueckt: Lernen laeuft weiter */
+    w283_select(hd, ov);
+    bind_start_capture(hd, 1);
+    bind_cap_key(hd, VK_SHIFT, 0);
+    if (!g_cap_mode || !w283_row_is(ov, "KEY:CTRL+KEY:F7")) { w283_row_why("Umschalt-Druck beendete das Lernen", ov); return; }
+    bind_end_capture(hd, NULL);
+    /* Umschalt allein: beim Loslassen */
+    w283_learn(hd, ov, 1, k_shift, 1, VK_SHIFT);
+    if (g_cap_mode || !w283_row_is(ov, "KEY:SHIFT")) { w283_row_why("Umschalt allein", ov); return; }
+    /* einfache Taste, dann hinzufuegen Umschalt+F8 */
+    w283_learn(hd, ov, 1, k_f6, 1, 0);
+    w283_learn(hd, ov, 2, k_shift_f8, 2, 0);
+    if (!w283_row_is(ov, "KEY:F6, KEY:SHIFT+KEY:F8")) { w283_row_why("F6 + hinzu Umschalt+F8", ov); return; }
+    /* andere Zeile (pause): Umschalt wird sofort gelernt wie bisher */
+    w283_learn(hd, pz, 1, k_shift_f8, 2, 0);
+    if (!w283_row_is(pz, "KEY:SHIFT")) { w283_row_why("pause (Verhalten anderer Zeilen)", pz); return; }
+    lctrl_bind_set(&g_bind, pz, "KEY:PAUSE");
+    /* Konflikte: F8 (vr_recenter) und Umschalt+F8 sind verschieden */
+    if (lctrl_bind_conflicts_for(&g_bind, ov, cf, 4) != 0) { W283_WHY("Konflikt gemeldet fuer F6/Umschalt+F8"); return; }
+    SendMessageW(hd, WM_COMMAND, MAKEWPARAM(IDB_CLEAR, BN_CLICKED), (LPARAM)bctl(hd, IDB_CLEAR));
+    if (!w283_row_is(ov, "KEY:F6, KEY:SHIFT+KEY:F8")) { w283_row_why("Alle leeren", ov); return; }
+    if (bind_save(hd) != 0) { W283_WHY("Speichern scheiterte"); return; }
+    buf[0] = 0;
+    if (u8_fopen_s(&f, g_w283_prof, "rb") == 0 && f) {
+        size_t got = fread(buf, 1, sizeof buf - 1, f);
+        buf[got] = 0;
+        fclose(f);
+    }
+    if (!strstr(buf, "[client]") || !strstr(buf, "orig_view = KEY:F6, KEY:SHIFT+KEY:F8")) {
+        W283_WHY("Datei ohne orig_view-Zeile in [client]");
+        return;
+    }
+    lctrl_bind_clear(&g_bind, ov); /* leer = aus */
+    if (bind_save(hd) != 0) { W283_WHY("Speichern (leer) scheiterte"); return; }
+    lctrl_bind_load_file(g_w283_prof, &rb);
+    if (rb.row[ov].n_alt != 0) { W283_WHY("leere Zeile nach Laden wieder belegt (%d)", rb.row[ov].n_alt); return; }
+}
+
+static void w283_bind_dialog(const char *client_override, int *pass, int *fail)
+{
+    char tmp[1024], dir[1100], pd[1200], keepdir[sizeof g_client_dir];
+    gui_opts_t keepo = g_o;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw283_bind", tmp);
+    _snprintf_s(pd, sizeof pd, _TRUNCATE, "%s/profiles", dir);
+    lcfg_mkdir_p(pd);
+    _snprintf_s(g_w283_prof, sizeof g_w283_prof, _TRUNCATE, "%s/user_w283Test.ini", pd);
+    write_file(g_w283_prof, "[buttons]\nbi0 = KEY:SPACE\n[client]\npause = KEY:PAUSE\nphoto = KEY:F12\n");
+    g_w283_why[0] = 0;
+    if (!(gui_init(client_override) && gui_create(1))) {
+        strcpy_s(g_w283_why, sizeof g_w283_why, "Fenster nicht erzeugt");
+    } else {
+        build_controls();
+        tips_build();
+        ShowWindow(g_hwnd, SW_SHOWNOACTIVATE); /* ausserhalb des Bildschirms */
+        strcpy_s(keepdir, sizeof keepdir, g_client_dir);
+        strcpy_s(g_client_dir, sizeof g_client_dir, dir); /* nie das echte Profil */
+        g_o.shot = 3;
+        g_o.bind_sel = -1;
+        g_o.bind_learn = g_o.bind_joydemo = g_o.bind_stickdemo = g_o.bind_wheeldemo = 0;
+        g_bind_testfn = w283_bind_probe;
+        bind_dialog_modal("user_w283Test", g_w283_prof);
+        g_bind_testfn = NULL;
+        g_o = keepo;
+        strcpy_s(g_client_dir, sizeof g_client_dir, keepdir);
+        ShowWindow(g_hwnd, SW_HIDE);
+        gui_teardown();
+    }
+    u8_DeleteFile(g_w283_prof);
+    {
+        wchar_t w[1200];
+        u8_to_w(pd, w, 1200);
+        RemoveDirectoryW(w);
+        u8_to_w(dir, w, 1200);
+        RemoveDirectoryW(w);
+    }
+    if (!g_w283_why[0]) W282_OK("W283 ORIGKEY bind-dialog (altes Profil -> Standard Shift+F8, Lernen Strg+F7 / Umschalt allein / F6 + hinzu Umschalt+F8, pause lernt Umschalt sofort, kein Konflikt mit F8, Alle leeren behaelt, Datei [client], leer bleibt leer)");
+    else W282_FAIL("W283 ORIGKEY bind-dialog", g_w283_why);
+}
+
+static void w283_pure(int *pass, int *fail)
+{
+    static const struct { int m, k; const char *want; } kc[] = {
+        { VK_LSHIFT, VK_F8, "KEY:SHIFT+KEY:F8" }, { VK_SHIFT, VK_F8, "KEY:SHIFT+KEY:F8" },
+        { VK_RCONTROL, 'O', "KEY:CTRL+KEY:O" }, { VK_LCONTROL, VK_F7, "KEY:CTRL+KEY:F7" },
+        { VK_MENU, VK_F8, "KEY:ALT+KEY:F8" }, { 0, VK_F6, "KEY:F6" },
+        { 0, VK_LCONTROL, "KEY:LCTRL" }, { VK_SHIFT, VK_SHIFT, "KEY:SHIFT" },
+        { VK_SHIFT, VK_RCONTROL, "KEY:RCTRL" },
+    };
+    char why[200] = "", t[64], *html;
+    int ov = lctrl_bind_elem_index("orig_view"), i;
+    lctrl_bind_t b;
+    for (i = 0; i < (int)(sizeof kc / sizeof kc[0]) && !why[0]; i++) {
+        lctrl_key_combo(kc[i].m, kc[i].k, t, sizeof t);
+        if (strcmp(t, kc[i].want) != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "lctrl_key_combo(%d,%d)='%s' statt '%s'", kc[i].m, kc[i].k, t, kc[i].want);
+    }
+    if (!why[0] && (ov < 0 || kCtrlElems[ov].kind != LCTRL_ACT || lctrl_elem_group(ov) != 5 ||
+                    strcmp(kCtrlElems[ov].lkey, "bind.orig_view") != 0 || !LT("bind.orig_view")[0] ||
+                    strcmp(LT("bind.orig_view"), "bind.orig_view") == 0 ||
+                    strcmp(LT("gui.bind_combo_hint"), "gui.bind_combo_hint") == 0))
+        strcpy_s(why, sizeof why, "orig_view: Element/Gruppe/Text");
+    if (!why[0]) {
+        for (i = 0; i < LCTRL_ELEM_N; i++)
+            if (lctrl_bind_combo_row(i) != (i == ov || i == lctrl_bind_elem_index("photo") || i == lctrl_bind_elem_index("quick_shot"))) {
+                strcpy_s(why, sizeof why, "lctrl_bind_combo_row nicht nur orig_view/photo/quick_shot (W290)");
+                break;
+            }
+    }
+    if (!why[0] && (!lctrl_vk_is_modifier(VK_SHIFT) || !lctrl_vk_is_modifier(VK_RMENU) ||
+                    !lctrl_vk_is_modifier(VK_LCONTROL) || lctrl_vk_is_modifier(VK_F8) || lctrl_vk_is_modifier('A')))
+        strcpy_s(why, sizeof why, "lctrl_vk_is_modifier");
+    if (!why[0]) { /* Laden: fehlt -> Standard, vorhanden -> wie Datei, leer -> aus */
+        lctrl_bind_load_text("pause = KEY:PAUSE\n", &b);
+        if (b.row[ov].n_alt != 1 || strcmp(b.row[ov].alt[0], LCTRL_ORIG_VIEW_DEFAULT) != 0)
+            strcpy_s(why, sizeof why, "Laden ohne Zeile -> kein Standard");
+        lctrl_bind_load_text("orig_view = KEY:F6, PAD:BACK+PAD:Y\n", &b);
+        if (!why[0] && (b.row[ov].n_alt != 2 || strcmp(b.row[ov].alt[1], "PAD:BACK+PAD:Y") != 0))
+            strcpy_s(why, sizeof why, "Laden mit Zeile");
+        lctrl_bind_load_text("orig_view =\n", &b);
+        if (!why[0] && b.row[ov].n_alt != 0)
+            strcpy_s(why, sizeof why, "Laden leere Zeile -> nicht aus");
+    }
+    html = (char *)malloc(600000);
+    if (!why[0] && html) { /* Tastenliste: Zeile mit der echten Belegung (Akkord als zwei kbd) */
+        static const char kdef[] = "<kbd>KEY:SHIFT</kbd>+<kbd>KEY:F8</kbd>";
+        keyshtml_build(LT("gui.keys_memo"), "", NULL, NULL, LT("gui.mouse_abs"), 4, "", "", "", html, 600000);
+        if (!strstr(html, LT("bind.orig_view")) || !strstr(html, kdef))
+            strcpy_s(why, sizeof why, "Tastenliste Standard ohne Vergleichstaste");
+        keyshtml_build(LT("gui.keys_memo"), "w283_test", "orig_view = KEY:F6\n", NULL, LT("gui.mouse_abs"), 4, "", "", "",
+                       html, 600000);
+        if (!why[0] && (!strstr(html, LT("bind.orig_view")) || !strstr(html, "KEY:F6") || strstr(html, kdef)))
+            strcpy_s(why, sizeof why, "Tastenliste zeigt die Profil-Belegung nicht");
+        keyshtml_build(LT("gui.keys_memo"), "w283_old", "pause = KEY:PAUSE\n", NULL, LT("gui.mouse_abs"), 4, "", "", "",
+                       html, 600000);
+        if (!why[0] && !strstr(html, kdef))
+            strcpy_s(why, sizeof why, "Tastenliste altes Profil ohne Standard");
+    }
+    free(html);
+    if (!why[0]) W282_OK("W283 ORIGKEY pure (Kombinationsnamen, Element/Gruppe/Text, nur orig_view lernt Kombinationen, Laden Standard/Datei/leer, Tastenliste mit Belegung)");
+    else W282_FAIL("W283 ORIGKEY pure", why);
+}
+
+void w283_gui_selftest(const char *client_override, int *pass, int *fail)
+{
+    w283_pure(pass, fail);
+    w283_bind_dialog(client_override, pass, fail);
+}
+#undef W283_WHY
+
+/* --- W290 QUICK-SHOT: Schnell-Screenshot + Fotomodus im Belegungsdialog, Karte "Fotos & Screenshots" ---------
+ * Rein: Uebergang alter Profile (photo=F12 -> Shift+F12 + quick_shot=F12), eigene Belegung bleibt, leere Zeile =
+ * aus ("quick_shot =" beim Speichern), "Alle leeren" behaelt beide, Tastenliste mit der echten Belegung.
+ * Dialog (offscreen, Temp-Client-Ordner): Zeilen vorhanden, Lernen Strg+F12 / Druck auf quick_shot und
+ * Umschalt+F12 auf photo (Akkord), kein Konflikt F12 <-> Umschalt+F12, Datei [client].
+ * Oberflaeche: Karte auf Ton & Extras (Elemente, Groessen-Liste, Rundweg Oberflaeche/user.cfg, alte cfg). */
+static char g_w290_why[220];
+static char g_w290_prof[1200];
+#define W290_WHY(...) do { if (!g_w290_why[0]) _snprintf_s(g_w290_why, sizeof g_w290_why, _TRUNCATE, __VA_ARGS__); } while (0)
+
+static int w290_row(const lctrl_bind_t *b, const char *key, const char *want)
+{
+    char t[256];
+    lctrl_bind_row_text(b, lctrl_bind_elem_index(key), t, sizeof t);
+    return strcmp(t, want) == 0;
+}
+
+static void w290_pure(int *pass, int *fail)
+{
+    char why[220] = "", *html;
+    int qs = lctrl_bind_elem_index("quick_shot"), ph = lctrl_bind_elem_index("photo");
+    lctrl_bind_t b;
+    if (qs < 0 || ph < 0 || kCtrlElems[qs].kind != LCTRL_ACT || lctrl_elem_group(qs) != lctrl_elem_group(ph) ||
+        !lctrl_bind_combo_row(qs) || !lctrl_bind_combo_row(ph) || !lctrl_bind_empty_line_row(qs) ||
+        lctrl_bind_empty_line_row(ph) || strcmp(LT("bind.quick_shot"), "bind.quick_shot") == 0)
+        strcpy_s(why, sizeof why, "quick_shot: Element/Gruppe/Akkord/Text");
+    if (!why[0]) {
+        lctrl_bind_load_text("[client]\npause = KEY:PAUSE\nphoto = KEY:F12\n", &b);
+        if (!w290_row(&b, "photo", "KEY:SHIFT+KEY:F12") || !w290_row(&b, "quick_shot", "KEY:F12"))
+            strcpy_s(why, sizeof why, "Uebergang photo=F12 -> Shift+F12 + quick_shot=F12");
+    }
+    if (!why[0]) {
+        lctrl_bind_load_text("photo = KEY:F7\n", &b);
+        if (!w290_row(&b, "photo", "KEY:F7") || !w290_row(&b, "quick_shot", "KEY:F12"))
+            strcpy_s(why, sizeof why, "eigene photo-Taste bleibt, quick_shot=F12");
+    }
+    if (!why[0]) {
+        lctrl_bind_load_text("photo = KEY:F12, PAD:Y\n", &b);
+        if (!w290_row(&b, "photo", "KEY:F12, PAD:Y") || b.row[qs].n_alt != 0)
+            strcpy_s(why, sizeof why, "photo mit F12 + Pad bleibt, quick_shot leer");
+    }
+    if (!why[0]) {
+        lctrl_bind_load_text("photo = KEY:SHIFT+KEY:F12\nquick_shot =\n", &b);
+        if (b.row[qs].n_alt != 0 || !w290_row(&b, "photo", "KEY:SHIFT+KEY:F12"))
+            strcpy_s(why, sizeof why, "leere quick_shot-Zeile = aus");
+    }
+    if (!why[0]) {
+        lctrl_bind_load_text("quick_shot = KEY:CTRL+KEY:F12, PAD:BACK+PAD:X\nphoto = KEY:SHIFT+KEY:F12\nbi0 = KEY:SPACE\n", &b);
+        lctrl_bind_clear_game(&b);
+        if (!w290_row(&b, "quick_shot", "KEY:CTRL+KEY:F12, PAD:BACK+PAD:X") || !w290_row(&b, "photo", "KEY:SHIFT+KEY:F12") ||
+            b.row[0].n_alt != 0)
+            strcpy_s(why, sizeof why, "Alle leeren behaelt quick_shot/photo nicht");
+    }
+    html = (char *)malloc(600000);
+    if (!why[0] && html) { /* Tastenliste: F12 / Shift+F12 mit der echten Belegung */
+        keyshtml_build(LT("gui.keys_memo"), "", NULL, NULL, LT("gui.mouse_abs"), 4, "", "", "", html, 600000);
+        if (!strstr(html, LT("bind.quick_shot")) || !strstr(html, LT("bind.photo")) ||
+            !strstr(html, "<kbd>KEY:SHIFT</kbd>+<kbd>KEY:F12</kbd>"))
+            strcpy_s(why, sizeof why, "Tastenliste Standard ohne Schnell-Screenshot/Fotomodus");
+        keyshtml_build(LT("gui.keys_memo"), "w290_test", "quick_shot = KEY:F7\nphoto = KEY:F6\n", NULL, LT("gui.mouse_abs"), 4,
+                       "", "", "", html, 600000);
+        if (!why[0] && (!strstr(html, "KEY:F7") || !strstr(html, "KEY:F6") ||
+                        strstr(html, "<kbd>KEY:SHIFT</kbd>+<kbd>KEY:F12</kbd>")))
+            strcpy_s(why, sizeof why, "Tastenliste zeigt die Profil-Belegung nicht");
+    }
+    free(html);
+    if (!why[0]) W282_OK("W290 QUICKSHOT pure (Element/Gruppe/Akkord, Uebergang alter Profile, eigene Belegung bleibt, leer = aus, Alle leeren behaelt, Tastenliste F12/Shift+F12)");
+    else W282_FAIL("W290 QUICKSHOT pure", why);
+}
+
+static void w290_bind_probe(HWND hd)
+{
+    static const int k_ctrl_f12[] = { VK_CONTROL, VK_F12 }, k_shift_f12[] = { VK_SHIFT, VK_F12 }, k_snap[] = { VK_SNAPSHOT };
+    int qs = lctrl_bind_elem_index("quick_shot"), ph = lctrl_bind_elem_index("photo");
+    char buf[4096];
+    lctrl_bind_t rb;
+    lctrl_conf1_t cf[4];
+    HWND lb = bctl(hd, IDB_LIST);
+    int i, n, fq = 0, fp = 0;
+    FILE *f;
+    for (i = 0, n = ListBox_GetCount(lb); i < n; i++) {
+        if ((int)ListBox_GetItemData(lb, i) == qs) fq = 1;
+        if ((int)ListBox_GetItemData(lb, i) == ph) fp = 1;
+    }
+    if (!fq || !fp) { W290_WHY("quick_shot/photo nicht in der Liste des Dialogs"); return; }
+    if (!w290_row(&g_bind, "photo", "KEY:SHIFT+KEY:F12") || !w290_row(&g_bind, "quick_shot", "KEY:F12")) {
+        W290_WHY("altes Profil (photo=F12) nicht auf F12/Shift+F12 gehoben");
+        return;
+    }
+    if (lctrl_bind_conflicts_for(&g_bind, qs, cf, 4) != 0) { W290_WHY("Konflikt F12 <-> Shift+F12 gemeldet"); return; }
+    w283_learn(hd, qs, 1, k_ctrl_f12, 2, 0);
+    if (g_cap_mode || !w290_row(&g_bind, "quick_shot", "KEY:CTRL+KEY:F12")) { W290_WHY("Lernen Strg+F12 auf quick_shot"); return; }
+    w283_learn(hd, qs, 2, k_snap, 1, 0);
+    if (!w290_row(&g_bind, "quick_shot", "KEY:CTRL+KEY:F12, KEY:SNAPSHOT")) { W290_WHY("hinzu Druck-Taste auf quick_shot"); return; }
+    w283_learn(hd, ph, 1, k_shift_f12, 2, 0);
+    if (g_cap_mode || !w290_row(&g_bind, "photo", "KEY:SHIFT+KEY:F12")) { W290_WHY("Lernen Umschalt+F12 auf photo"); return; }
+    SendMessageW(hd, WM_COMMAND, MAKEWPARAM(IDB_CLEAR, BN_CLICKED), (LPARAM)bctl(hd, IDB_CLEAR));
+    if (!w290_row(&g_bind, "quick_shot", "KEY:CTRL+KEY:F12, KEY:SNAPSHOT") || !w290_row(&g_bind, "photo", "KEY:SHIFT+KEY:F12")) {
+        W290_WHY("Alle leeren hat quick_shot/photo geleert");
+        return;
+    }
+    if (bind_save(hd) != 0) { W290_WHY("Speichern scheiterte"); return; }
+    buf[0] = 0;
+    if (u8_fopen_s(&f, g_w290_prof, "rb") == 0 && f) {
+        size_t got = fread(buf, 1, sizeof buf - 1, f);
+        buf[got] = 0;
+        fclose(f);
+    }
+    if (!strstr(buf, "[client]") || !strstr(buf, "quick_shot = KEY:CTRL+KEY:F12, KEY:SNAPSHOT") ||
+        !strstr(buf, "photo = KEY:SHIFT+KEY:F12")) {
+        W290_WHY("Datei ohne quick_shot/photo in [client]");
+        return;
+    }
+    lctrl_bind_clear(&g_bind, qs);
+    if (bind_save(hd) != 0) { W290_WHY("Speichern (leer) scheiterte"); return; }
+    lctrl_bind_load_file(g_w290_prof, &rb);
+    if (rb.row[qs].n_alt != 0) { W290_WHY("leere quick_shot-Zeile nach Laden wieder belegt (%d)", rb.row[qs].n_alt); return; }
+}
+
+/* Karte "Fotos & Screenshots" (Fenster muss gebaut sein) */
+static void w290_card(void)
+{
+    static const int ids[] = { ID_PH_DIR, ID_PH_VIEW, ID_PH_RES, ID_PH_FMT, ID_PH_ASP, ID_RP_LABEL, ID_RP_LOGO, ID_WM_MEDIA, ID_PH_HUD, ID_XEXP_PHOTO };
+    launcher_settings_t a, b;
+    char f[1300], tmp[1024], t[1200];
+    int k;
+    for (k = 0; k < (int)(sizeof ids / sizeof ids[0]); k++) {
+        uictl_t *u = ui_find(ids[k]);
+        if (!u || !ui_visible_on(u, P_AUDIO) || ui_visible_on(u, P_GFX)) { W290_WHY("Element %d fehlt/falsche Seite", ids[k]); return; }
+    }
+    if (ComboBox_GetCount(ctl(ID_PH_RES)) != 6 || ComboBox_GetCount(ctl(ID_PH_VIEW)) != 3 || ComboBox_GetCount(ctl(ID_PH_ASP)) != 2) {
+        W290_WHY("Listen Groesse/Ansicht/Bildformat (%d/%d/%d)", ComboBox_GetCount(ctl(ID_PH_RES)),
+                 ComboBox_GetCount(ctl(ID_PH_VIEW)), ComboBox_GetCount(ctl(ID_PH_ASP)));
+        return;
+    }
+    GetWindowTextA(ctl(ID_XEXP_PHOTO), t, sizeof t);
+    if (!t[0]) { W290_WHY("Kolben ohne Tooltip-Text"); return; }
+    lcfg_defaults(&a);
+    if (a.photo_view != 0 || lcfg_photo_size_eff(&a) != -4 || a.photo_aspect != 2 || !a.replay_label || !a.replay_logo ||
+        !a.watermark_media) {
+        W290_WHY("Standard nicht wie im Spiel/4K/4:3/Original");
+        return;
+    }
+    a.photo_view = 1;
+    a.photo_size = -8;
+    a.photo_aspect = 1;
+    a.photo_jpg = 1;
+    a.replay_label = 0;
+    a.replay_logo = 0;
+    a.watermark_media = 0;
+    a.photo_hud = 0;
+    ui_from_settings(&a);
+    lcfg_defaults(&b);
+    ui_to_settings(&b);
+    if (b.photo_view != 1 || b.photo_size != -8 || b.photo_aspect != 1 || b.photo_jpg != 1 || b.replay_label || b.replay_logo ||
+        b.watermark_media || b.photo_hud || b.photo_scale != 1) {
+        W290_WHY("Rundweg Oberflaeche");
+        return;
+    }
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(f, sizeof f, _TRUNCATE, "%sw290_user_%lu.cfg", tmp, GetCurrentProcessId());
+    u8_DeleteFile(f);
+    if (lcfg_save_user(f, &b) != 0) { W290_WHY("lcfg_save_user"); return; }
+    {
+        FILE *fp;
+        char buf[60000];
+        size_t got = 0;
+        buf[0] = 0;
+        if (u8_fopen_s(&fp, f, "rb") == 0 && fp) { got = fread(buf, 1, sizeof buf - 1, fp); buf[got] = 0; fclose(fp); }
+        if (!strstr(buf, "photo_size=8k") || !strstr(buf, "photo_view=1") || !strstr(buf, "replay_label=0") ||
+            !strstr(buf, "replay_logo=0") || !strstr(buf, "watermark_media=0") || !strstr(buf, "photo_hud=0")) {
+            W290_WHY("user.cfg ohne photo_size=8k/photo_view/replay_*/watermark_media");
+        }
+    }
+    lcfg_defaults(&a);
+    if (!g_w290_why[0] && (lcfg_load_file(f, &a) != 0 || a.photo_size != -8 || a.photo_view != 1 || a.replay_label || a.watermark_media))
+        W290_WHY("Rundweg user.cfg");
+    u8_DeleteFile(f);
+    if (!g_w290_why[0]) { /* alte cfg: photo_scale=4 ohne photo_size -> x4; photo_size gewinnt */
+        write_file(f, "[photo]\nphoto_scale=4\nphoto_format=jpg\nphoto_aspect=1\n");
+        lcfg_defaults(&a);
+        if (lcfg_load_file(f, &a) != 0 || a.photo_size != 4) W290_WHY("alte cfg photo_scale=4 -> x4 (%d)", a.photo_size);
+        if (!g_w290_why[0] && a.photo_aspect != 2) W290_WHY("alte cfg photo_aspect=1 ohne photo_view -> 4:3 (%d)", a.photo_aspect);
+        write_file(f, "[photo]\nphoto_view=2\nphoto_aspect=1\n");
+        lcfg_defaults(&a);
+        if (!g_w290_why[0] && (lcfg_load_file(f, &a) != 0 || a.photo_aspect != 1)) W290_WHY("photo_aspect=1 mit photo_view bleibt breit");
+        write_file(f, "[photo]\nphoto_scale=4\nphoto_size=4k\n");
+        lcfg_defaults(&a);
+        if (!g_w290_why[0] && (lcfg_load_file(f, &a) != 0 || a.photo_size != -4)) W290_WHY("photo_size gewinnt");
+        u8_DeleteFile(f);
+    }
+    lcfg_defaults(&a);
+    ui_from_settings(&a);
+}
+
+void w290_gui_selftest(const char *client_override, int *pass, int *fail)
+{
+    char tmp[1024], dir[1100], pd[1200], keepdir[sizeof g_client_dir];
+    gui_opts_t keepo = g_o;
+    w290_pure(pass, fail);
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw290_bind", tmp);
+    _snprintf_s(pd, sizeof pd, _TRUNCATE, "%s/profiles", dir);
+    lcfg_mkdir_p(pd);
+    _snprintf_s(g_w290_prof, sizeof g_w290_prof, _TRUNCATE, "%s/user_w290Test.ini", pd);
+    write_file(g_w290_prof, "[buttons]\nbi0 = KEY:SPACE\n[client]\npause = KEY:PAUSE\nphoto = KEY:F12\n");
+    g_w290_why[0] = 0;
+    if (!(gui_init(client_override) && gui_create(1))) {
+        strcpy_s(g_w290_why, sizeof g_w290_why, "Fenster nicht erzeugt");
+    } else {
+        build_controls();
+        tips_build();
+        ShowWindow(g_hwnd, SW_SHOWNOACTIVATE); /* ausserhalb des Bildschirms */
+        w290_card();
+        strcpy_s(keepdir, sizeof keepdir, g_client_dir);
+        strcpy_s(g_client_dir, sizeof g_client_dir, dir); /* nie das echte Profil */
+        g_o.shot = 3;
+        g_o.bind_sel = -1;
+        g_o.bind_learn = g_o.bind_joydemo = g_o.bind_stickdemo = g_o.bind_wheeldemo = 0;
+        if (!g_w290_why[0]) {
+            g_bind_testfn = w290_bind_probe;
+            bind_dialog_modal("user_w290Test", g_w290_prof);
+            g_bind_testfn = NULL;
+        }
+        g_o = keepo;
+        strcpy_s(g_client_dir, sizeof g_client_dir, keepdir);
+        ShowWindow(g_hwnd, SW_HIDE);
+        gui_teardown();
+    }
+    u8_DeleteFile(g_w290_prof);
+    {
+        wchar_t w[1200];
+        u8_to_w(pd, w, 1200);
+        RemoveDirectoryW(w);
+        u8_to_w(dir, w, 1200);
+        RemoveDirectoryW(w);
+    }
+    if (!g_w290_why[0]) W282_OK("W290 QUICKSHOT gui (Karte Fotos & Screenshots auf Ton & Extras: Elemente, Kolben, Listen, Standard, Rundweg Oberflaeche/user.cfg, alte cfg; Belegungsdialog: altes Profil -> F12/Shift+F12, Lernen Strg+F12 / Druck / Umschalt+F12, kein Konflikt, Alle leeren behaelt, Datei [client], leer bleibt leer)");
+    else W282_FAIL("W290 QUICKSHOT gui", g_w290_why);
+}
+#undef W290_WHY

@@ -98,6 +98,29 @@ int sbc_usb_state_to_block(const sbc_state_t *st, uint8_t blk[24]);
 /* Alle LEDs auf einen Wert setzen (0x0 = aus, 0xF = voll). */
 void sbc_usb_leds_all(sbc_leds_t *leds, uint8_t level);
 
+/* ---- W267 (COMM-LED): Sendetor fuer LED-Reports ----
+ * Drossel mit Nachsenden: verglichen wird mit dem zuletzt GESENDETEN Report
+ * (nicht mit dem zuletzt gesehenen). Ein gedrosselter Stand bleibt faellig
+ * und geht beim naechsten Aufruf nach Ablauf von min_ms raus - so kann der
+ * letzte Schritt eines Ausblendens (z. B. Comm 1->0) nicht verloren gehen.
+ * Das Spiel ruft SetState jeden Poll (0x49BDA), der Aufrufer prueft also
+ * laufend. Rein (keine Geraete-/Zeitabhaengigkeit), sbc_probe --selftest. */
+typedef struct {
+    uint8_t sent[SBC_USB_OUT_LEN]; /* zuletzt erfolgreich gesendet */
+    int have;                      /* 1 = sent gueltig */
+    uint64_t sent_ms;              /* letzter Sendeversuch */
+    int tried;                     /* 1 = sent_ms gueltig */
+} sbc_led_gate_t;
+
+/* 1 = rep jetzt senden (weicht vom gesendeten Stand ab, Drossel abgelaufen),
+ * 0 = nichts tun. */
+int sbc_led_gate_due(const sbc_led_gate_t *g, const uint8_t rep[SBC_USB_OUT_LEN],
+                     uint64_t now_ms, unsigned min_ms);
+/* Nach dem Sendeversuch: Zeit merken; Inhalt nur bei Erfolg (ok != 0),
+ * sonst erneuter Versuch nach min_ms. */
+void sbc_led_gate_mark(sbc_led_gate_t *g, const uint8_t rep[SBC_USB_OUT_LEN],
+                       uint64_t now_ms, int ok);
+
 /* ---- W128 (SBC-LIVE): Roh-Zugriff fuer sbc_probe --dump/--watch/--test ---- */
 
 #define SBC_USB_RAW_MAX 32 /* max. Paketgroesse EP IN/OUT (Deskriptor) */

@@ -126,8 +126,11 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
     int aa = s->shx[LSHX_AA];
     memset(out, 0, sizeof(lr_res_t) * LR_N);
 
-    /* R1: Ordner-Modus (Advanced) nur ohne Disc-Abbild */
-    if (s->game_image[0]) {
+    /* R1: Ordner-Modus (Advanced) nur ohne Disc-Abbild. W282 ISSUE6: nur
+     * ein gueltiges Abbild sperrt den Ordner-Modus - ein ungueltiges
+     * (falsche Datei, falsches Spiel) liess die Ordnerwahl bis zum
+     * Launcher-Neustart grau (Tester-Befund Issue #6). */
+    if (s->game_image[0] && e->data_ok) {
         hit(&out[1], 1, LR_LVL_INFO);
         strcpy_s(out[1].text, sizeof out[1].text, LT("gui.rule_r1"));
     }
@@ -179,7 +182,8 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
         strcpy_s(out[8].text, sizeof out[8].text, LT("gui.rule_r8"));
     }
     /* R9: W207 Performance keeps 60 FPS even in exclusive fullscreen. */
-    if (s->window_mode == 2 && s->fs_interp_match && s->interp_fps > 0) {
+    /* W296: Monitor (auto, -1 = Standard Original) folgt exklusiv ebenfalls dem Modus (W223) */
+    if (s->window_mode == 2 && ((s->fs_interp_match && s->interp_fps > 0) || s->interp_fps == -1)) {
         hit(&out[9], 9, LR_LVL_INFO);
         strcpy_s(out[9].text, sizeof out[9].text, LT("gui.rule_r9"));
     }
@@ -350,7 +354,8 @@ void lrules_fixture(int rule, int v, launcher_settings_t *s, lr_env_t *e)
     case 8: s->window_mode = v ? 0 : 2; break;
     case 9: s->window_mode = v ? 2 : 0; break;
     case 10: s->interp_fps = 120; s->window_mode = 0; e->display_hz = v ? 60 : 144; break;
-    case 11: s->window_mode = 0; s->width = v ? 1600 : 1920; s->height = v ? 1200 : 1080; break;
+    case 11: s->window_mode = 0; s->width = v ? 1600 : 1920; s->height = v ? 1200 : 1080;
+             s->edge_mode = 2; break; /* W278: Standard 4:3 (1) -> sonst sperrt R12 den Verlauf */
     case 12: s->window_mode = 0; s->width = 1920; s->height = 1080;
              s->edge_mode = v ? 1 : 2; break;
     case 13: break;
@@ -447,6 +452,25 @@ void lrules_selftest(int *pass, int *fail)
             if (r2[14].active) { bad++; }
             if (bad && !why[0]) {
                 strcpy_s(why, sizeof why, "Zusatz: R14 mit Effect-Pack-Sperre");
+            }
+        }
+        { /* W282 ISSUE6: ungueltiges Abbild -> Ordner-Modus frei (R1 aus) */
+            launcher_settings_t t;
+            lr_env_t e2;
+            lr_res_t r2[LR_N];
+            lcfg_defaults(&t);
+            strcpy_s(t.game_image, sizeof t.game_image, "C:/falsch.iso");
+            lrules_env_default(&e2, &t);
+            e2.data_ok = 0;
+            strcpy_s(e2.data_err, sizeof e2.data_err, "x");
+            lrules_eval(&e2, r2);
+            if (r2[1].active || r2[1].disable || !r2[3].active) {
+                if (!bad) {
+                    _snprintf_s(why, sizeof why, _TRUNCATE,
+                                "Zusatz W282: R1 bei ungueltigem Abbild %d/%d, R3 %d",
+                                r2[1].active, r2[1].disable, r2[3].active);
+                }
+                bad++;
             }
         }
         if (!r[20].text2[0] || !r[21].active || r[21].disable ||

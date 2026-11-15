@@ -17,6 +17,7 @@
  * zeichnet einen Tick so ohne erneutes Hochladen nach (render_interp.c).
  * shading=0: kein Aufruf veraendert den bisherigen Pfad (rq_begin -> 0). */
 #include "render_int.h"
+#include "loc_render.h" /* W285 */
 #include "sb_profile.h" /* W229 SBA() */
 #include "sb_userdata.h" /* W150 USER-DATA */
 #include <d3d11_1.h>
@@ -434,10 +435,14 @@ static int rq_compile_x(const char *src, const char *target, ID3DBlob **out)
 }
 
 /* Zwischenbild-Variante: 1 = Lerp, 2 = + W224 eyefix, | 4 = W237 echte Clip-w (Strom 3/4) fuer die
- * eyefix-Pruefung, | 8 = W237 homogener Lerp (interp_hlerp=2). */
+ * eyefix-Pruefung, | 8 = W237 homogener Lerp (interp_hlerp=2), | 16 = W265 Lagen fuer den Dreieck-Waechter (GS). */
+static int rq_guard_flag(void)
+{
+    return (g_cfg.interp_guard || g_cfg.interp_guard_diag) ? 16 : 0; /* FIX(W265 LINE-GUARD); DIAG zaehlt auch ohne Korrektur */
+}
 static int rq_lerp_flags(void)
 {
-    return (g_cfg.interp_eyefix ? 2 : 1) | (g_cfg.interp_hlerp ? 4 : 0) | (g_cfg.interp_hlerp >= 2 ? 8 : 0);
+    return (g_cfg.interp_eyefix ? 2 : 1) | (g_cfg.interp_hlerp ? 4 : 0) | (g_cfg.interp_hlerp >= 2 ? 8 : 0) | rq_guard_flag();
 }
 
 static int rq_mklayout(const rq_vsent_t *e, int lerp, ID3DBlob *b, ID3D11InputLayout **out, int raw)
@@ -526,13 +531,13 @@ static int rq_raw_build(rq_vsent_t *e, unsigned handle, const unsigned *st, cons
         return 0;
     }
     /* W237: Roh-Variante bekam W224 (eyefix) nie; mit interp_hlerp gleiche Flags wie die gepackte, sonst alt (1) */
-    if (!rqv_hlsl_ex(&e->prog, g_cfg.interp_hlerp ? rq_lerp_flags() : 1, &e->raw, src, sizeof src, cof, &nc) || !rq_compile(src, "vs_4_0", &bl)) {
+    if (!rqv_hlsl_ex(&e->prog, g_cfg.interp_hlerp ? rq_lerp_flags() : (1 | rq_guard_flag()), &e->raw, src, sizeof src, cof, &nc) || !rq_compile(src, "vs_4_0", &bl)) {
         b->lpVtbl->Release(b);
         return 0;
     }
     if (FAILED(sb_warm_create_vs(b->lpVtbl->GetBufferPointer(b), b->lpVtbl->GetBufferSize(b), &e->vsr)) ||
         FAILED(sb_warm_create_vs(bl->lpVtbl->GetBufferPointer(bl), bl->lpVtbl->GetBufferSize(bl), &e->vsrl)) ||
-        !rq_mklayout(e, 0, b, &e->layr, 1) || !rq_mklayout(e, g_cfg.interp_hlerp ? rq_lerp_flags() : 1, bl, &e->layrl, 1)) {
+        !rq_mklayout(e, 0, b, &e->layr, 1) || !rq_mklayout(e, g_cfg.interp_hlerp ? rq_lerp_flags() : (1 | rq_guard_flag()), bl, &e->layrl, 1)) {
         b->lpVtbl->Release(b); bl->lpVtbl->Release(bl);
         rq_raw_release(e);
         e->rawsig = sig; e->rawok = -1;
@@ -733,6 +738,7 @@ static rq_psent_t *rq_ps_get_slow0(unsigned handle)
     { long long qg = rq_qpc(); int okg; g_shz_n++; /* DIAG(PERF-BENCH,W137) */
       okg = rqp_hlsl(d, 0xF, src, sizeof src, &e->info);
       g_shz_gen += rq_qpc() - qg;
+      if (g_sba_loc && g_cfg.loc_psdump) { loc_render_dump_ps(handle, d, 60u, okg ? src : NULL); } /* W285 DIAG(LOC-RENDER) */
       if (okg && rq_compile(src, "ps_4_0", &b)) {
           if (SUCCEEDED(sb_warm_create_ps(b->lpVtbl->GetBufferPointer(b), b->lpVtbl->GetBufferSize(b), &e->ps))) {
               e->ok = 2; /* gleich unten auf 1 */
@@ -787,6 +793,7 @@ static int rq_ab_skip(void)
 
 int rq_in_mission(void)
 {
+    if (g_sba_loc) { return g_cfg.loc_shading; } /* W285: LoC hat keine SB-Szenenadressen (Null-Seite) */
     return rq_u32(M3D_SCENE_ADDR) == 0x2Cu && rq_u32(M3D_MLOOP_ADDR) == 1u;
 }
 
@@ -831,6 +838,7 @@ int rq_begin(const float (*vin)[16][4], unsigned n, int vb)
     if (g_cfg.shade_ab && rq_ab_skip()) { return 0; } /* DIAG(W100/W112): A/B-Bildpaare */
     if (!rq_init()) { return 0; }
     if (g_cfg.shade_scope == 0 && !rq_in_mission()) { g_rq_stat_skip[0]++; g_rq_why = 0u; return 0; }
+    if (g_sba_loc && !g_cfg.loc_glow && loc_render_is_bbtex(sb_tex_xptr())) { g_rq_why = 14u; return 0; } /* W285: LoC-Glow mit Backbuffer-Textur -> alter Pfad (Szene korrekt, Glow offen) */
     if (rs_cmask == 0u) { g_rq_stat_skip[1]++; g_rq_why = 1u; return 0; } /* reiner Tiefenpass */
     if (g_im_shader < 0x10000u || !g_im_pshader) { g_rq_stat_skip[2]++; g_rq_why = 2u; return 0; }
     g_rq_vse = rq_vs_get(g_im_shader);
@@ -978,7 +986,7 @@ static int rq_raw_upload(unsigned prim, unsigned n)
     return 1;
 }
 
-int rq_expand_upload(unsigned prim, unsigned n, unsigned nout)
+int rq_expand_upload(unsigned prim, unsigned n, unsigned nout, int idx)
 {
     unsigned nv, stride, e = 0, i, bytes;
     const float *P = g_rq_pack;
@@ -993,8 +1001,10 @@ int rq_expand_upload(unsigned prim, unsigned n, unsigned nout)
     if (rq_expand_count(prim, n) != nout) { g_rq_active = 0; g_rq_stat_skip[5]++; g_rq_why = 5u; return 0; } /* Abbildung weicht ab -> alter Pfad */
     if (g_rq_src.use) {
         if (!rq_raw_upload(prim, n)) { g_rq_active = 0; g_rq_why = 12u; return 0; }
+        if (idx) { g_rq_rawx[2] = 5u; } /* W264 DRAW-OPT2: rq_src(SV_VertexID) = Index = Quell-Vertex */
         return 1;
     }
+    if (idx) { prim = 5u; nout = n; } /* W264 DRAW-OPT2: Strom 2 in Quell-Reihenfolge, der Indexpuffer expandiert */
     g_rq_rec.xsrv = NULL;
     if (!g_cfg.shade_gpuvb) { X = g_rq_xexp; } /* W77-Weg: erst expandieren, dann kopieren */
     else { /* SHADE-PERF (W80): direkt in den Puffer expandieren */
@@ -1428,7 +1438,12 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
              * WRAP) adressiert normiert - wie g_mfx_nonorm im alten Pfad; die
              * Texel-Skala 1/128 machte aus dem Korn einen glatten Schleier. */
             int mfx_norm = (k == 0u && g_mfx_nonorm && g_cfg.shade_mfx && !isrt);
-            if (isrt || (!mfx_norm && g_rq_tmax[k] > 1.5f && (lin || rhw))) {
+            int rtscale = isrt;
+            if (g_sba_loc && isrt && g_cfg.loc_rtuv) { /* W285: LoC sampelt RTs auch normiert (UV 0..1) -> Skala nur bei Texel-UV */
+                if (g_rq_tmax[k] < 0.0f) { g_rq_tmax[k] = rq_raw_tmax(k); }
+                rtscale = g_rq_tmax[k] > 1.5f;
+            }
+            if (rtscale || (!mfx_norm && g_rq_tmax[k] > 1.5f && (lin || rhw))) {
                 tsc[k * 4u + 0] = 1.0f / (float)w;
                 tsc[k * 4u + 1] = 1.0f / (float)h;
             }
@@ -1581,12 +1596,16 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
 /* Draw mit Stream-0-Versatz (statt StartVertex, damit Stream 2 frei liegen
  * kann) und Rueckbau auf den bisherigen Zustand (Sampler s0, t1..t3, b3/b4
  * stoeren den alten PS nicht). */
-void rq_draw(ID3D11Buffer *vb0, unsigned nout, unsigned vb_start)
+void rq_draw(ID3D11Buffer *vb0, unsigned nout, unsigned vb_start, unsigned ibf)
 {
     UINT st = sizeof(im_vertex_t), off = vb_start * (UINT)sizeof(im_vertex_t), z = 0;
     ID3D11ShaderResourceView *nul[3] = { NULL, NULL, NULL };
     ID3D11Buffer *nb = NULL;
     ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 1, &vb0, &st, &off);
+    if (ibf != 0xFFFFFFFFu) { /* W264 DRAW-OPT2: Strip/Fan/Quad ueber den festen Indexpuffer */
+        sb_im_ib_bind(g_ctx);
+        WD_CALL("draw_rq", g_ctx, ID3D11DeviceContext_DrawIndexed(g_ctx, nout, ibf, 0));
+    } else
     WD_CALL("draw_rq", g_ctx, ID3D11DeviceContext_Draw(g_ctx, nout, 0)); /* DIAG(PERF-WARM,W139) */
     if (g_cfg.shade_gpuvb) {
         /* SHADE-PERF (W80): nur zuruecksetzen, was der naechste alte Draw nicht

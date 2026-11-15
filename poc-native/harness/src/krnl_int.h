@@ -45,8 +45,14 @@ typedef struct {
 #define XB_HANDLE_BASE 0x100u
 #define XB_HANDLE_MAX 2048
 
-/* Steel Battalion (Europe): Title-ID aus dem XBE-Zertifikat (fuer T:/U:). */
-#define XB_TITLE_ID_STR "43430002"
+/* Steel Battalion (Europe): Title-ID aus dem XBE-Zertifikat (fuer T:/U:).
+ * W275 LOC-BOOT: als Variable (Standard "43430002"); nur das LoC-Profil
+ * setzt "43430009" (krnl_loc_enable). */
+extern char g_xb_title_id_str[9];
+#define XB_TITLE_ID_STR g_xb_title_id_str
+/* W275: Kernel-Erweiterung je Ordinal (NULL = keine, SB). Liefert Ziel oder
+ * NULL; *is_var = 1 bei Kernel-Variable. */
+extern void *(*g_krnl_ext)(unsigned ord, int *is_var);
 
 /* ---- Geteilte Globals ---- */
 extern xbe_image_t *g_img;

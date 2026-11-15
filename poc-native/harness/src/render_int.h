@@ -87,6 +87,8 @@ typedef struct {
 typedef struct {
     float pos[4], col[4], uv[2];
 } im_vertex_t;
+/* W290: REPLAY-Schriftzug/Spiel-Logo auslassen (render_mfx.c; 1 = Draw auslassen) */
+int sb_rpf_skip(unsigned xptr, const im_vertex_t *v, unsigned n);
 
 #define IM_VB_MAX 65536
 
@@ -200,6 +202,10 @@ void sb_pd_start(void);           /* Takt-Thread einmalig starten (Spiel-Thread)
 int sb_render_offscreen(void);     /* 1 = FPS-INTERP-Offscreen-BB (d3d11_render.c) */
 int sb_pd_on(void);               /* 1 = Takt-Thread fuehrt den Bildtakt (Echtzeit, Offscreen-BB) */
 void sb_aspect_box(unsigned *bx, unsigned *by, unsigned *bw, unsigned *bh);
+/* W277 LOC-DISC: Framebuffer-Groesse des Spiels fuer die 2D-Abbildung (RHW) in die
+ * 4:3-Box. SB: fest 640x480; LoC: 720x480 aus CreateDevice (Xbox gibt 720x480 auf
+ * 4:3 aus -> nicht-quadratische Pixel, Breite 720 fuellt die 4:3-Box). */
+extern unsigned g_game_fb_w, g_game_fb_h;
 void sb_im_submit(void);
 void sb_im_init(void);
 const vsh_prog_t *vsh_program(unsigned handle);
@@ -248,7 +254,9 @@ enum { SB_GFX_SHADER = 0, SB_GFX_FX = 1, SB_GFX_ALL = 2 };
 int sb_gfx_part_is(int q, int part);  /* 1 = Teil entspricht Preset q (Effect-Pack-Schluessel zaehlen nicht) */
 void sb_gfx_part_apply(int q, int part); /* Shader/Effekte; HD, Rate/Skala ueber ESC-Lebenszyklus */
 int sb_gfx_preset_match_for(int fps, int rt); /* pending ESC choices */
-int sb_gfx_preset_match(void);        /* 0..3, -1 = Benutzerdefiniert */
+int sb_gfx_edge_is(int q);            /* W266: Breitbild-Raender wie Preset q */
+void sb_gfx_edge_apply(int q);        /* W266: Breitbild-Raender des Presets q setzen (live) */
+int sb_gfx_preset_match(void);        /* 0..4, -1 = Benutzerdefiniert */
 void sb_shfx_shading_watch(void);
 int mfx_apply(float (*buf)[16][4], unsigned *n, unsigned *prim, unsigned nmax);
 void mfx_end(void);
@@ -291,6 +299,12 @@ int sb_interp_vb_write(const im_vertex_t *v, unsigned n, ID3D11Buffer **vb, unsi
 im_vertex_t *sb_interp_vb_begin(unsigned n, ID3D11Buffer **vb, unsigned *start);
 void sb_interp_vb_end(unsigned n);
 unsigned sb_im_exp_src(unsigned prim, unsigned n, unsigned k);
+/* W264 DRAW-OPT2 (im_strip_ib, render_im.c): fester Indexpuffer mit dem Strip/Fan/Quad->Liste-Muster.
+ * sb_im_ib_first: erster Index des Abschnitts fuer prim (0xFFFFFFFF = kein Muster); sb_im_ib_bind: an c
+ * binden (R16_UINT). g_ip_ib1: Abschnitt+1 des naechsten rec_draw_src (0 = Liste im Tick-VB), dort verbraucht. */
+unsigned sb_im_ib_first(unsigned prim);
+void sb_im_ib_bind(ID3D11DeviceContext *c);
+extern unsigned g_ip_ib1;
 void im_fast_check_present(unsigned f); /* DIAG(IM-PERF,W99): Zeile IMCHK (im_fast=2) */
 void sb_interp_rec_draw_src(const im_vertex_t *src, unsigned prim, unsigned nsrc, unsigned n,
                             unsigned topo, const float mvp[16], unsigned has_tex, int cls,
@@ -344,6 +358,9 @@ typedef struct {
     ID3D11ShaderResourceView *sc_srv[8];
     float sc_k[8];
     LONG sc_w[8], sc_h[8];
+    /* W290 QUICK-SHOT: HUD aus bei Monitor-Effekt an: 2D-Draws in das Monitor-RT des Hauptmonitors (Eintrag mon),
+     * die weder das Welt-RT kopieren noch Korn/Stoerzeilen sind (o->nolerp), werden ausgelassen */
+    int hud_off, mon;
 } sb_ph_rep_t;
 typedef struct {
     int ok;
@@ -358,6 +375,7 @@ typedef struct {
     ID3D11Texture2D *bb_tex, *w_tex;
     unsigned n_rt;                   /* RT-Ziele des Ticks (ohne BB), hoechstens 16 */
     struct { int e, d; unsigned w, h, nd; ID3D11Texture2D *tex; } rt[16];
+    int mon;                         /* W290: Monitor-RT des Hauptmonitors (groesstes Ziel, das das Welt-RT liest; -1 = keins) */
 } sb_ph_census_t;
 int sb_interp_photo_census(sb_ph_census_t *c, int log);
 ID3D11Resource *sb_interp_photo_render(const sb_ph_rep_t *ph, sb_pl_info_t *inf, unsigned *ncam, unsigned *nred);

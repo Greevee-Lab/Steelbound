@@ -32,6 +32,8 @@ static volatile LONG g_raw_dx, g_raw_dy;
 static volatile LONG g_raw_n;         /* Anzahl Raw-Pakete (Beleg/Log) */
 static volatile LONG g_focus;         /* logischer Fokus (Nachrichten/Test) */
 static volatile LONG g_test_focus;    /* 1 = Fokus per Test-Hook simuliert */
+static volatile LONG g_test_pad_xy;   /* W271: simuliertes Pad LX | LY<<16 */
+static volatile LONG g_test_pad_btn;  /* W271: Tasten | 1<<16 (an), 0 = aus */
 /* W208: UI-thread-owned menu gate; g_want is only the manual preference. */
 static int g_menu_open;
 static volatile LONG g_force;         /* W225: F10 faengt ausserhalb der Mission */
@@ -138,6 +140,19 @@ static HWND imouse_find_window(void)
 static int imouse_is_fg(HWND w)
 {
     return !g_test_focus && w && GetForegroundWindow() == w;
+}
+
+int imouse_test_pad(short *lx, short *ly, unsigned short *buttons)
+{
+    LONG b, xy;
+    if (!g_cfg.input_test_hook) return 0;
+    b = g_test_pad_btn;
+    if (!(b & 0x10000)) return 0;
+    xy = g_test_pad_xy;
+    *lx = (short)(xy & 0xFFFF);
+    *ly = (short)((xy >> 16) & 0xFFFF);
+    *buttons = (unsigned short)(b & 0xFFFF);
+    return 1;
 }
 
 int imouse_has_focus(void)
@@ -541,6 +556,12 @@ static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
             } else {
                 imouse_focus_lose("Test-Fokus weg");
             }
+            return 0;
+        }
+        if (g_cfg.input_test_hook && msg == IMOUSE_MSG_TEST_PAD) {
+            /* W271 Test-Hook: simuliertes Gamepad (Stick + Tasten). */
+            InterlockedExchange(&g_test_pad_xy, (LONG)(DWORD)wp);
+            InterlockedExchange(&g_test_pad_btn, (LONG)(DWORD)lp);
             return 0;
         }
         if (g_cfg.input_test_hook && msg == IMOUSE_MSG_TEST_MOVE) {

@@ -32,6 +32,9 @@
  *   (imap_snap_t.joy): Abbildung, Totzone, Invertierung, Kurve/sens,
  *   Tasten->Achse, Tasten->Gang, Achsen-Zonen->Gang, POV, mehrere Geraete,
  *   Geraete-Zuordnung (ijoy_match_list).
+ * Teil 19 (W271 STICK-RELATIVE): relativer Stick auf dem Zielhebel (Bewegung,
+ *   Loslassen haelt, Klemmung, Totzone, Invertierung, aim_center, Maus+Stick,
+ *   Beschleunigung, :mode= je Quelle, Standard bitgleich).
  * Teil 15 (W195 PHOTO-MODE): Aktion photo (Standard KEY:F12, Tasten nur ueber
  *         das Fenster, Pad-Flanke im Hook, imap_bind_keys, Profilvergleich).
  */
@@ -1765,11 +1768,13 @@ static void run_photo_cases(const imap_profile_t *kb, const imap_profile_t *xbox
     unsigned fr = 320000, pm = 0;
     int vks[4], n;
     printf("Teil 15: W195 Aktion photo\n");
-    CHECK(kb->photo.n == 1 && kb->photo.alt[0].a.kind == IMAP_A_KEY && kb->photo.alt[0].a.code == VK_F12,
-          "photo: kb KEY:F12");
-    CHECK(xbox->photo.n == 1 && xbox->photo.alt[0].a.code == VK_F12, "photo: xbox KEY:F12");
+    /* W290: Standard ist jetzt KEY:SHIFT+KEY:F12 (F12 = Schnell-Screenshot, Teil 21) */
+    CHECK(kb->photo.n == 1 && kb->photo.alt[0].chord && kb->photo.alt[0].a.code == VK_SHIFT &&
+          kb->photo.alt[0].b.code == VK_F12, "photo: kb KEY:SHIFT+KEY:F12");
+    CHECK(xbox->photo.n == 1 && xbox->photo.alt[0].chord && xbox->photo.alt[0].b.code == VK_F12,
+          "photo: xbox KEY:SHIFT+KEY:F12");
     n = imap_bind_keys(&kb->photo, vks, 4, &pm);
-    CHECK(n == 1 && vks[0] == VK_F12 && pm == 0, "photo: bind_keys kb (n=%d)", n);
+    CHECK(n == 0 && pm == 0, "photo: bind_keys kb ohne einfache Taste (n=%d)", n);
     CHECK(imap_profile_parse("photo = KEY:F11, PAD:BACK+PAD:LB, PAD:X\n", "t", &p) == 0, "photo: parse");
     CHECK(p.photo.n == 3 && p.pause.n == 0, "photo: n=3 (ist %d), pause unberuehrt", p.photo.n);
     n = imap_bind_keys(&p.photo, vks, 4, &pm);
@@ -1860,6 +1865,217 @@ static void run_feedback_shot_cases(const imap_profile_t *kb, const imap_profile
               "feedback_shot: Vergleich erkennt Unterschied");
     }
     CHECK(imap_key_name("F11") == VK_F11, "feedback_shot: Tastenname F11");
+}
+
+/* Teil 20: W283 ORIG-KEY-BIND - Aktion orig_view (Vergleichstaste), Standard,
+ * Rueckfall orig_key, gelernte Quellen aus dem Launcher-Dialog. */
+static void run_origview_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
+{
+    imap_profile_t p, q;
+    imap_state_t st;
+    imap_snap_t s;
+    cfgvar_t c = { 1, 0, 0, 0, 4, 0, 0 };
+    unsigned fr = 330000;
+    int vks[4], mods[4], n;
+    printf("Teil 20: W283 Aktion orig_view\n");
+    /* Standardbelegung in beiden mitgelieferten Profilen */
+    CHECK(kb->orig_view_set == 1 && kb->orig_view.n == 1 && kb->orig_view.alt[0].chord &&
+          kb->orig_view.alt[0].a.kind == IMAP_A_KEY && kb->orig_view.alt[0].a.code == VK_SHIFT &&
+          kb->orig_view.alt[0].b.kind == IMAP_A_KEY && kb->orig_view.alt[0].b.code == VK_F8,
+          "orig_view: kb Standard KEY:SHIFT+KEY:F8");
+    CHECK(xbox->orig_view_set == 1 && imap_orig_view_is_default(&xbox->orig_view),
+          "orig_view: xbox Standard KEY:SHIFT+KEY:F8");
+    CHECK(imap_orig_view_is_default(&kb->orig_view), "orig_view: kb ist Standard");
+    n = imap_bind_key_combos(&kb->orig_view, vks, mods, 4);
+    CHECK(n == 1 && vks[0] == VK_F8 && mods[0] == 1, "orig_view: Fenster-Taste F8 + Shift (n=%d)", n);
+    {
+        int pk[4];
+        unsigned pm = 0;
+        CHECK(imap_bind_keys(&kb->orig_view, pk, 4, &pm) == 0 && pm == 0,
+              "orig_view: Akkord ist keine einfache Taste (Pause/Foto-Weg unberuehrt)");
+    }
+    /* Tastatur wertet das Fenster aus: im Hook keine Flanke */
+    {
+        int kf[] = { VK_SHIFT, VK_F8 };
+        imap_state_init(&st);
+        make_snap(&s, fr++, &c);
+        set_keys(kf, 2);
+        CHECK(imap_action_orig_view(kb, &st, &s) == 0, "orig_view: Shift+F8 im Hook -> 0 (Fenster)");
+        set_keys(NULL, 0);
+    }
+    /* Rueckfall / Alias orig_key */
+    CHECK(imap_orig_key_is_default("SHIFT+F8") && imap_orig_key_is_default(" shift + f8 ") &&
+          !imap_orig_key_is_default("F8") && !imap_orig_key_is_default("CTRL+F8") &&
+          !imap_orig_key_is_default("OFF") && !imap_orig_key_is_default("") && !imap_orig_key_is_default(NULL),
+          "orig_view: orig_key Standard erkannt");
+    CHECK(imap_profile_parse("pause = KEY:PAUSE\n", "alt", &p) == 0 && p.orig_view_set == 0 && p.orig_view.n == 0,
+          "orig_view: altes Profil ohne Zeile -> nicht gesetzt");
+    CHECK(imap_orig_view_resolve(&p, "SHIFT+F8") == 0 && p.orig_view.n == 0, "orig_view: ohne Zeile -> orig_key");
+    p = *kb;
+    CHECK(imap_orig_view_resolve(&p, "SHIFT+F8") == 1 && p.orig_view.n == 1, "orig_view: Standard + orig_key Standard -> Profil");
+    p = *kb;
+    CHECK(imap_orig_view_resolve(&p, "F6") == 0 && p.orig_view.n == 0,
+          "orig_view: Standard im Profil + orig_key=F6 (bestehende cfg) -> orig_key, Hook leer");
+    CHECK(imap_profile_parse("orig_view = KEY:F7\n", "t", &p) == 0 && imap_orig_view_resolve(&p, "F6") == 1 &&
+          p.orig_view.n == 1 && p.orig_view.alt[0].a.code == VK_F7,
+          "orig_view: eigene Belegung schlaegt orig_key");
+    CHECK(imap_profile_parse("orig_view =\npause = KEY:PAUSE\n", "t", &p) == 0 && p.orig_view_set == 1 &&
+          p.orig_view.n == 0 && p.pause.n == 1 && imap_orig_view_resolve(&p, "SHIFT+F8") == 1 &&
+          imap_bind_key_combos(&p.orig_view, vks, mods, 4) == 0,
+          "orig_view: leere Zeile = aus (kein Rueckfall)");
+    CHECK(imap_profile_parse("orig_view = KEY:F6\norig_view = KEY:F7\n", "t", &p) == 0 && p.orig_view.n == 1 &&
+          p.orig_view.alt[0].a.code == VK_F7, "orig_view: letzte Zeile gewinnt");
+    /* Gelernte Quellen (Formate des Launcher-Lernmodus) */
+    CHECK(imap_profile_parse("orig_view = KEY:CTRL+KEY:F7, KEY:F6, PAD:BACK+PAD:Y, SBC:CHAFF\n", "t", &p) == 0 &&
+          p.orig_view.n == 4 && p.has_pad && p.has_sbc, "orig_view: gelernt 4 Quellen (n=%d)", p.orig_view.n);
+    n = imap_bind_key_combos(&p.orig_view, vks, mods, 4);
+    CHECK(n == 2 && vks[0] == VK_F7 && mods[0] == 2 && vks[1] == VK_F6 && mods[1] == 0,
+          "orig_view: Fenster-Tasten Ctrl+F7, F6 (n=%d)", n);
+    CHECK(imap_orig_view_resolve(&p, "SHIFT+F8") == 1 && !imap_orig_view_is_default(&p.orig_view),
+          "orig_view: gelernt -> Profil");
+    CHECK(imap_profile_parse("orig_view = KEY:ALT+KEY:O, KEY:F8+KEY:SHIFT, KEY:A+KEY:B, KEY:LCTRL\n", "t", &p) == 0 &&
+          imap_bind_key_combos(&p.orig_view, vks, mods, 4) == 3 && vks[0] == 'O' && mods[0] == 4 &&
+          vks[1] == VK_F8 && mods[1] == 1 && vks[2] == VK_LCONTROL && mods[2] == 0,
+          "orig_view: Alt+O, F8+Shift, A+B zaehlt nicht, LCTRL allein");
+    CHECK(imap_profile_parse("orig_view = KEY:SHIFT+KEY:F8, PAD:Y\n", "t", &p) == 0 &&
+          !imap_orig_view_is_default(&p.orig_view), "orig_view: Standard + Pad ist eigene Belegung");
+    imap_profile_parse("orig_view = KEY:CTRL+KEY:F7, PAD:BACK+PAD:Y, SBC:CHAFF\n", "t", &p);
+    imap_state_init(&st);
+    make_snap(&s, fr++, &c);
+    set_keys(NULL, 0);
+    CHECK(imap_action_orig_view(&p, &st, &s) == 0, "orig_view: Ruhe -> 0");
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = IMAP_PAD_BACK | IMAP_PAD_Y;
+    s.pad_present = 1;
+    CHECK(imap_action_orig_view(&p, &st, &s) == 1, "orig_view: Pad BACK+Y -> Flanke");
+    CHECK(imap_action_orig_view(&p, &st, &s) == 0, "orig_view: halten -> 0");
+    s.pad.buttons = 0;
+    CHECK(imap_action_orig_view(&p, &st, &s) == 0, "orig_view: los");
+    s.pad.buttons = IMAP_PAD_Y;
+    CHECK(imap_action_orig_view(&p, &st, &s) == 0, "orig_view: Y ohne BACK -> 0");
+    s.pad.buttons = 0;
+    {
+        imap_profile_t r;
+        imap_state_t st2;
+        CHECK(imap_profile_parse("orig_view = SBC:CHAFF\n", "t", &r) == 0 && r.orig_view.n == 1 && r.has_sbc,
+              "orig_view: SBC-Quelle");
+        imap_state_init(&st2);
+        make_snap(&s, fr++, &c);
+        s.sbc_present = 1;
+        s.sbc[0] = s.sbc[2] = 0;
+        s.sbc[1] = (uint16_t)(1u << 2); /* bi18 CHAFF = Wort 1 Bit 2 (wie Teil 12) */
+        n = imap_action_orig_view(&r, &st2, &s);
+        s.sbc[1] = 0;
+        s.sbc_present = 0;
+        CHECK(n == 1, "orig_view: SBC CHAFF -> Flanke");
+    }
+    p.orig_view.n = 0;
+    CHECK(imap_action_orig_view(&p, &st, &s) == 0 && st.prev_orig_view == 0, "orig_view: leer setzt Flanke zurueck");
+    /* Joystick-Slot und Vergleich */
+    CHECK(imap_profile_parse("orig_view = JOY1:B3\n", "t", &p) == 0 && (p.joy_used & 2u) != 0,
+          "orig_view: JOY1 zaehlt fuer joy_used (0x%X)", p.joy_used);
+    CHECK(imap_profile_parse("orig_view = KEY:F6\n", "t", &p) == 0 &&
+          imap_profile_parse("orig_view = KEY:F7\n", "t", &q) == 0 && imap_profile_equal(&p, &q) != 0,
+          "orig_view: Vergleich erkennt Unterschied");
+    CHECK(imap_profile_parse("orig_view =\n", "t", &p) == 0 && imap_profile_parse("pause =\n", "t", &q) == 0 &&
+          imap_profile_equal(&p, &q) != 0, "orig_view: Vergleich erkennt leere Zeile");
+}
+
+/* ---- Teil 21: W290 Aktion quick_shot (Schnell-Screenshot) ---- */
+static void run_quickshot_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
+{
+    imap_profile_t p, q;
+    imap_state_t st;
+    imap_snap_t s;
+    cfgvar_t c = { 1, 0, 0, 0, 4, 0, 0 };
+    unsigned fr = 340000, pm = 0;
+    int vks[4], mods[4], n;
+    printf("Teil 21: W290 Aktion quick_shot\n");
+    /* Standardbelegung: F12 = Schnell-Screenshot, Shift+F12 = Fotomodus */
+    CHECK(kb->quick_shot_set == 1 && kb->quick_shot.n == 1 && !kb->quick_shot.alt[0].chord &&
+          kb->quick_shot.alt[0].a.kind == IMAP_A_KEY && kb->quick_shot.alt[0].a.code == VK_F12,
+          "quick_shot: kb Standard KEY:F12");
+    CHECK(xbox->quick_shot_set == 1 && xbox->quick_shot.n == 1 && xbox->quick_shot.alt[0].a.code == VK_F12,
+          "quick_shot: xbox Standard KEY:F12");
+    n = imap_bind_key_combos(&kb->quick_shot, vks, mods, 4);
+    CHECK(n == 1 && vks[0] == VK_F12 && mods[0] == 0, "quick_shot: Fenster-Taste F12 ohne Zusatztaste (n=%d)", n);
+    n = imap_bind_key_combos(&kb->photo, vks, mods, 4);
+    CHECK(n == 1 && vks[0] == VK_F12 && mods[0] == 1, "quick_shot: photo Fenster-Taste F12 + Shift (n=%d)", n);
+    CHECK(imap_bind_keys(&kb->quick_shot, vks, 4, &pm) == 1 && vks[0] == VK_F12 && pm == 0,
+          "quick_shot: einfache Taste F12");
+    {
+        int kf[] = { VK_F12 };
+        imap_state_init(&st);
+        make_snap(&s, fr++, &c);
+        set_keys(kf, 1);
+        CHECK(imap_action_quick_shot(kb, &st, &s) == 0, "quick_shot: F12 im Hook -> 0 (Fenster)");
+        set_keys(NULL, 0);
+    }
+    /* Uebergang alter Profile (ohne quick_shot-Zeile) */
+    CHECK(imap_profile_parse("pause = KEY:PAUSE\nphoto = KEY:F12\n", "alt", &p) == 0 && p.quick_shot_set == 0,
+          "quick_shot: altes Profil ohne Zeile");
+    n = imap_bind_key_combos(&p.photo, vks, mods, 4);
+    CHECK(n == 1 && vks[0] == VK_F12 && mods[0] == 1, "quick_shot: alter Standard photo=F12 -> Shift+F12 (n=%d)", n);
+    n = imap_bind_key_combos(&p.quick_shot, vks, mods, 4);
+    CHECK(n == 1 && vks[0] == VK_F12 && mods[0] == 0, "quick_shot: alter Standard -> quick_shot=F12 (n=%d)", n);
+    CHECK(imap_profile_parse("photo = KEY:F7\n", "t", &p) == 0 && p.photo.n == 1 && p.photo.alt[0].a.code == VK_F7 &&
+          p.quick_shot.n == 1 && p.quick_shot.alt[0].a.code == VK_F12,
+          "quick_shot: eigene photo-Taste bleibt, F12 frei -> quick_shot=F12");
+    CHECK(imap_profile_parse("photo = KEY:F12, PAD:Y\n", "t", &p) == 0 && p.photo.n == 2 &&
+          p.photo.alt[0].a.code == VK_F12 && p.quick_shot.n == 0,
+          "quick_shot: eigene photo-Belegung mit F12 bleibt, quick_shot leer (kein Konflikt)");
+    CHECK(imap_profile_parse("photo = KEY:F12\nquick_shot =\n", "t", &p) == 0 && p.quick_shot_set == 1 &&
+          p.quick_shot.n == 0 && p.photo.n == 1 && !p.photo.alt[0].chord && p.photo.alt[0].a.code == VK_F12,
+          "quick_shot: leere Zeile = aus, photo unveraendert");
+    CHECK(imap_profile_parse("quick_shot = KEY:F6\nquick_shot = KEY:F7\n", "t", &p) == 0 && p.quick_shot.n == 1 &&
+          p.quick_shot.alt[0].a.code == VK_F7, "quick_shot: letzte Zeile gewinnt");
+    /* Gelernte Quellen (Formate des Launcher-Lernmodus, mit Zusatztaste wie W283) */
+    CHECK(imap_profile_parse("quick_shot = KEY:CTRL+KEY:F12, KEY:SNAPSHOT, PAD:BACK+PAD:X, SBC:CHAFF\n", "t", &p) == 0 &&
+          p.quick_shot.n == 4 && p.has_pad && p.has_sbc, "quick_shot: gelernt 4 Quellen (n=%d)", p.quick_shot.n);
+    n = imap_bind_key_combos(&p.quick_shot, vks, mods, 4);
+    CHECK(n == 2 && vks[0] == VK_F12 && mods[0] == 2 && vks[1] == VK_SNAPSHOT && mods[1] == 0,
+          "quick_shot: Fenster-Tasten Ctrl+F12, Druck (n=%d)", n);
+    CHECK(imap_profile_parse("photo = KEY:ALT+KEY:P\nquick_shot = KEY:F12+KEY:SHIFT\n", "t", &p) == 0 &&
+          imap_bind_key_combos(&p.photo, vks, mods, 4) == 1 && vks[0] == 'P' && mods[0] == 4 &&
+          imap_bind_key_combos(&p.quick_shot, vks, mods, 4) == 1 && vks[0] == VK_F12 && mods[0] == 1,
+          "quick_shot: Alt+P / F12+Shift (umgekehrt belegt)");
+    imap_profile_parse("quick_shot = KEY:CTRL+KEY:F12, PAD:BACK+PAD:X, SBC:CHAFF\n", "t", &p);
+    imap_state_init(&st);
+    make_snap(&s, fr++, &c);
+    set_keys(NULL, 0);
+    CHECK(imap_action_quick_shot(&p, &st, &s) == 0, "quick_shot: Ruhe -> 0");
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = IMAP_PAD_BACK | IMAP_PAD_X;
+    s.pad_present = 1;
+    CHECK(imap_action_quick_shot(&p, &st, &s) == 1, "quick_shot: Pad BACK+X -> Flanke");
+    CHECK(imap_action_quick_shot(&p, &st, &s) == 0, "quick_shot: halten -> 0");
+    s.pad.buttons = 0;
+    CHECK(imap_action_quick_shot(&p, &st, &s) == 0, "quick_shot: los");
+    {
+        imap_profile_t r;
+        imap_state_t st2;
+        CHECK(imap_profile_parse("quick_shot = SBC:CHAFF\n", "t", &r) == 0 && r.quick_shot.n == 1 && r.has_sbc,
+              "quick_shot: SBC-Quelle");
+        imap_state_init(&st2);
+        make_snap(&s, fr++, &c);
+        s.sbc_present = 1;
+        s.sbc[0] = s.sbc[2] = 0;
+        s.sbc[1] = (uint16_t)(1u << 2); /* bi18 CHAFF */
+        n = imap_action_quick_shot(&r, &st2, &s);
+        s.sbc[1] = 0;
+        s.sbc_present = 0;
+        CHECK(n == 1, "quick_shot: SBC CHAFF -> Flanke");
+    }
+    p.quick_shot.n = 0;
+    CHECK(imap_action_quick_shot(&p, &st, &s) == 0 && st.prev_quick_shot == 0, "quick_shot: leer setzt Flanke zurueck");
+    CHECK(imap_profile_parse("quick_shot = JOY2:B1\n", "t", &p) == 0 && (p.joy_used & 4u) != 0,
+          "quick_shot: JOY2 zaehlt fuer joy_used (0x%X)", p.joy_used);
+    CHECK(imap_profile_parse("quick_shot = KEY:F6\n", "t", &p) == 0 &&
+          imap_profile_parse("quick_shot = KEY:F7\n", "t", &q) == 0 && imap_profile_equal(&p, &q) != 0,
+          "quick_shot: Vergleich erkennt Unterschied");
+    CHECK(imap_profile_parse("quick_shot =\n", "t", &p) == 0 && imap_profile_parse("pause =\n", "t", &q) == 0 &&
+          imap_profile_equal(&p, &q) != 0, "quick_shot: Vergleich erkennt leere Zeile");
+    CHECK(imap_key_name("SNAPSHOT") == VK_SNAPSHOT, "quick_shot: Tastenname SNAPSHOT");
 }
 
 static void run_feedback_clip_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
@@ -2774,6 +2990,292 @@ static void run_wheel_cases(const imap_profile_t *kb, const imap_profile_t *xbox
     }
 }
 
+/* ---- Teil 19: W271 STICK-RELATIVE - Stick "wie eine Maus" auf dem Zielhebel ---- */
+typedef struct {
+    int stick_aim, accel, mouse_aim, pad_present;
+    float rate;
+} sr_cfg_t;
+
+static void sr_poll(imap_block_t *b, imap_state_t *st, const imap_profile_t *p,
+                    unsigned frame, int lx, int ly, const sr_cfg_t *c)
+{
+    imap_snap_t s;
+    static const cfgvar_t cv = {1, 1, 0, 1, 4, 0, 0};
+    make_snap(&s, frame, &cv);
+    s.mouse_aim = c->mouse_aim;
+    s.pad_axis_arb = 1;
+    s.pad_arb_dead = 8;
+    s.pad_mouse_wake = 3;
+    s.pad_present = c->pad_present;
+    s.pad.lx = (int16_t)lx;
+    s.pad.ly = (int16_t)ly;
+    s.stick_aim = c->stick_aim;
+    s.stick_aim_rate = c->rate;
+    s.stick_aim_accel = c->accel;
+    imap_profile_apply(b, st, p, &s);
+}
+
+static const char kSrProf[] =
+    "aim_x = MOUSE:X:mode=aim, PAD:LX:dz=0.15:curve=1.5\n"
+    "aim_y = MOUSE:Y:mode=aim, PAD:LY:dz=0.15:curve=1.5:inv=1\n"
+    "aim_x.neg = KEY:LEFT:cond=!SHIFT\n"
+    "aim_x.pos = KEY:RIGHT:cond=!SHIFT\n"
+    "rot = PAD:RX:dz=0.12:curve=1.3:mode=rate\n" /* auf rot ignoriert */
+    "[client]\n"
+    "aim_center = KEY:B, PAD:BACK+PAD:RT\n";
+
+static void run_stickrel_cases(const imap_profile_t *xbox)
+{
+    imap_profile_t p, q;
+    imap_state_t st, st2;
+    imap_block_t b, b2;
+    sr_cfg_t c = {1, 0, 1, 1, 4.0f * IMAP_STICK_RATE_PER_SENS};
+    unsigned f = 70000;
+    int i, ok;
+    float exp;
+    printf("Teil 19: W271 STICK-RELATIVE\n");
+
+    CHECK(imap_profile_parse(kSrProf, "sr", &p) == 0, "sr: parse");
+    CHECK(p.axis[IMAP_AX_AIM_X].pad[0].amode == IMAP_AMODE_GLOBAL &&
+              p.axis[IMAP_AX_ROT].pad[0].amode == IMAP_AMODE_GLOBAL &&
+              p.axis[IMAP_AX_ROT].pad[0].src == 2,
+          "sr: mode=rate auf rot ignoriert (Quelle bleibt)");
+    CHECK(p.aim_center.n == 2, "sr: aim_center 2 Quellen (%d)", p.aim_center.n);
+    CHECK(xbox->aim_center.n == 0, "sr: Standardprofil ohne aim_center");
+
+    /* 1. Auslenkung -> Bewegung: LX voll rechts 10 Frames, Rate 1,667/Frame. */
+    imap_state_init(&st);
+    for (i = 0; i < 10; i++) sr_poll(&b, &st, &p, f++, 32767, 0, &c);
+    exp = 127.0f + 10.0f * c.rate;
+    CHECK(fabsf((float)st.m_ax + st.m_fx - exp) < 0.01f && b.aiming_x == 0x90,
+          "sr: 10 Frames voll rechts -> Hebel %.2f (soll %.2f), aim_x 0x%02X (soll 0x90)",
+          (float)st.m_ax + st.m_fx, exp, b.aiming_x);
+    CHECK(st.m_rate_src == 3 && (st.m_aim_src & 1), "sr: m_rate_src=3 (%u), X vom Hebel (%u)",
+          st.m_rate_src, st.m_aim_src);
+    /* gleicher Frame zweimal gepollt -> keine Doppel-Integration */
+    sr_poll(&b, &st, &p, f - 1, 32767, 0, &c);
+    CHECK(fabsf((float)st.m_ax + st.m_fx - exp) < 0.01f, "sr: gleicher Frame integriert nicht doppelt");
+
+    /* 2. Loslassen haelt die Stellung. */
+    for (i = 0; i < 20; i++) sr_poll(&b, &st, &p, f++, 0, 0, &c);
+    CHECK(b.aiming_x == 0x90 && b.aiming_y == 0x7F, "sr: Loslassen haelt (aim=%02X%02X)",
+          b.aiming_x, b.aiming_y);
+
+    /* 3. Halbe Auslenkung: (0.5-0.15)/0.85 ^1.5 = 0.2643 * 1.667 = 0.4405/Frame */
+    {
+        float v0 = (float)st.m_ax + st.m_fx, m = powf((0.5f - 0.15f) / 0.85f, 1.5f);
+        for (i = 0; i < 10; i++) sr_poll(&b, &st, &p, f++, 16384, 0, &c);
+        CHECK(fabsf((float)st.m_ax + st.m_fx - (v0 + 10.0f * m * c.rate)) < 0.05f,
+              "sr: halbe Auslenkung -> Geschwindigkeit nach Kurve (%.2f soll %.2f)",
+              (float)st.m_ax + st.m_fx, v0 + 10.0f * m * c.rate);
+    }
+
+    /* 4. Klemmung an beiden Enden. */
+    for (i = 0; i < 200; i++) sr_poll(&b, &st, &p, f++, 32767, 0, &c);
+    CHECK(st.m_ax == 255 && b.aiming_x == 0xFF, "sr: Klemmung rechts (m_ax %d, aim 0x%02X)",
+          st.m_ax, b.aiming_x);
+    for (i = 0; i < 20; i++) sr_poll(&b, &st, &p, f++, -32768, 0, &c);
+    CHECK(b.aiming_x < 0xFF && b.aiming_x > 0xD0, "sr: sofort zurueck nach Klemmung (0x%02X)", b.aiming_x);
+    for (i = 0; i < 300; i++) sr_poll(&b, &st, &p, f++, -32768, 0, &c);
+    CHECK(st.m_ax == 0 && b.aiming_x == 0x00, "sr: Klemmung links (m_ax %d)", st.m_ax);
+
+    /* 5. Totzone: LX 2000 (6 %) < dz 0,15 -> keine Bewegung. */
+    imap_state_init(&st);
+    for (i = 0; i < 30; i++) sr_poll(&b, &st, &p, f++, 2000, -2500, &c);
+    CHECK(st.m_ax == 0x7F && st.m_ay == 0x7F && st.m_fx == 0.0f && b.aiming_x == 0x7F,
+          "sr: Totzone haelt still (m %d/%d)", st.m_ax, st.m_ay);
+
+    /* 6. Invertierung wie Position: LY hoch (inv=1) -> aim_y sinkt (Position: 0x00). */
+    for (i = 0; i < 10; i++) sr_poll(&b, &st, &p, f++, 0, 32767, &c);
+    CHECK(b.aiming_y == 0x6E,
+          "sr: LY hoch -> aim_y sinkt (0x%02X, soll 0x6E)", b.aiming_y);
+
+    /* 7. Zentrieren-Taste (Flanke): B -> Mitte; gehalten zentriert nicht erneut. */
+    g_keys['B'] = 1;
+    sr_poll(&b, &st, &p, f++, 0, 0, &c);
+    CHECK(b.aiming_x == 0x7F && b.aiming_y == 0x7F && st.aim_centered == 1 &&
+              st.m_fx == 0.0f && st.m_fy == 0.0f,
+          "sr: aim_center -> Mitte (aim=%02X%02X)", b.aiming_x, b.aiming_y);
+    for (i = 0; i < 5; i++) sr_poll(&b, &st, &p, f++, 32767, 0, &c);
+    CHECK(b.aiming_x > 0x7F && st.aim_centered == 0, "sr: gehaltene Taste zentriert nicht erneut");
+    g_keys['B'] = 0;
+    sr_poll(&b, &st, &p, f++, 0, 0, &c);
+    {
+        unsigned char held = b.aiming_x;
+        g_keys['B'] = 1;
+        sr_poll(&b, &st, &p, f++, 0, 0, &c);
+        g_keys['B'] = 0;
+        CHECK(held > 0x7F && b.aiming_x == 0x7F, "sr: zweite Flanke zentriert erneut");
+    }
+
+    /* 8. Maus und Stick addieren im selben Frame (gleicher virtueller Hebel). */
+    imap_state_init(&st);
+    g_keys[320] = 1; /* synthetische Maus +1 Count -> +4 Stufen (Replay-Pfad) */
+    sr_poll(&b, &st, &p, f++, 32767, 0, &c);
+    g_keys[320] = 0;
+    exp = 127.0f + 4.0f + c.rate;
+    CHECK(fabsf((float)st.m_ax + st.m_fx - exp) < 0.01f,
+          "sr: Maus + Stick addieren (%.2f soll %.2f)", (float)st.m_ax + st.m_fx, exp);
+    /* Maus allein danach bewegt weiter vom gehaltenen Punkt (kein Sprung). */
+    g_keys[321] = 1;
+    sr_poll(&b, &st, &p, f++, 0, 0, &c);
+    g_keys[321] = 0;
+    CHECK(fabsf((float)st.m_ax + st.m_fx - (exp - 4.0f)) < 0.01f && b.aiming_x == st.m_ax,
+          "sr: Maus links danach ohne Sprung (%.2f)", (float)st.m_ax + st.m_fx);
+
+    /* 9. Digital (Pfeil) gewinnt, Loslassen -> zurueck zur gehaltenen Stellung. */
+    imap_state_init(&st);
+    for (i = 0; i < 6; i++) sr_poll(&b, &st, &p, f++, 32767, 0, &c);
+    ok = b.aiming_x;
+    g_keys[VK_LEFT] = 1;
+    sr_poll(&b, &st, &p, f++, 0, 0, &c);
+    g_keys[VK_LEFT] = 0;
+    CHECK(b.aiming_x == 0x00, "sr: Pfeil links gewinnt (0x%02X)", b.aiming_x);
+    sr_poll(&b, &st, &p, f++, 0, 0, &c);
+    CHECK(b.aiming_x == ok, "sr: nach Pfeil zurueck auf 0x%02X (ist 0x%02X)", ok, b.aiming_x);
+
+    /* 10. Ohne Maus-Kandidat (mouse_aim=0): virtueller Hebel bleibt Quelle. */
+    {
+        sr_cfg_t c2 = c;
+        c2.mouse_aim = 0;
+        imap_state_init(&st);
+        for (i = 0; i < 10; i++) sr_poll(&b, &st, &p, f++, 32767, 0, &c2);
+        for (i = 0; i < 5; i++) sr_poll(&b, &st, &p, f++, 0, 0, &c2);
+        CHECK(b.aiming_x == 0x90 && (st.m_aim_src & 1), "sr: ohne Maus haelt (0x%02X)", b.aiming_x);
+    }
+
+    /* 11. Kein Pad -> nichts, m_rate_src = 0. */
+    {
+        sr_cfg_t c3 = c;
+        c3.pad_present = 0;
+        imap_state_init(&st);
+        for (i = 0; i < 5; i++) sr_poll(&b, &st, &p, f++, 32767, 0, &c3);
+        CHECK(st.m_rate_src == 0 && b.aiming_x == 0x7F, "sr: ohne Pad keine Wirkung");
+    }
+
+    /* 12. Beschleunigung: 40 Frames Vollausschlag, accel 2 > accel 0. */
+    {
+        sr_cfg_t ca = c;
+        float d0, d2;
+        ca.accel = 2;
+        imap_state_init(&st);
+        imap_state_init(&st2);
+        for (i = 0; i < 40; i++, f++) {
+            sr_poll(&b, &st, &p, f, -32768, 0, &c);
+            sr_poll(&b2, &st2, &p, f, -32768, 0, &ca);
+        }
+        d0 = 127.0f - ((float)st.m_ax + st.m_fx);
+        d2 = 127.0f - ((float)st2.m_ax + st2.m_fx);
+        /* accel 0: 40*1,667 = 66,7; accel 2: Rampe ab Frame 7 bis 2x ab Frame 21 */
+        CHECK(fabsf(d0 - 40.0f * c.rate) < 0.05f && d2 > d0 * 1.5f && d2 < d0 * 2.0f,
+              "sr: Beschleunigung (accel0 %.1f, accel2 %.1f)", d0, d2);
+    }
+
+    /* 13. Standard stick_aim=0: Position wie bisher (bitgleich mit leeren W271-Feldern). */
+    {
+        sr_cfg_t c0 = {0, 0, 1, 1, 0.0f}, cz = {0, 3, 1, 1, 6.0f};
+        int same = 1;
+        unsigned g = 90000;
+        imap_state_init(&st);
+        imap_state_init(&st2);
+        for (i = 0; i < 400; i++, g++) {
+            int lx = (int)((i * 7919) % 65535) - 32768, ly = (int)((i * 104729) % 65535) - 32768;
+            if (i % 50 > 40) lx = ly = 0;
+            g_keys[320 + (i % 4)] = (i % 3) == 0;
+            sr_poll(&b, &st, xbox, g, lx, ly, &c0);
+            sr_poll(&b2, &st2, xbox, g, lx, ly, &cz);
+            if (memcmp(&b, &b2, sizeof b) != 0 || st.m_ax != st2.m_ax || st.m_ay != st2.m_ay) same = 0;
+        }
+        memset(g_keys, 0, sizeof g_keys);
+        CHECK(same && st.m_rate_src == 0, "sr: stick_aim=0 bitgleich (Rate/accel ohne Wirkung)");
+        /* Position: LX voll -> 0xFF, losgelassen -> 0x7F (federt zurueck). */
+        imap_state_init(&st);
+        sr_poll(&b, &st, xbox, g++, 0, 0, &c0); /* W132: Ruhe zuerst */
+        sr_poll(&b, &st, xbox, g++, 32767, 0, &c0);
+        sr_poll(&b2, &st, xbox, g++, 0, 0, &c0);
+        CHECK(b.aiming_x == 0xFF && b2.aiming_x == 0x7F, "sr: Position federt zurueck (0x%02X/0x%02X)",
+              b.aiming_x, b2.aiming_x);
+    }
+
+    /* 14. Je Quelle ueberschreiben: global Position, LX:mode=rate -> X relativ, Y Position. */
+    CHECK(imap_profile_parse("aim_x = PAD:LX:dz=0.15:mode=rate\n"
+                             "aim_y = PAD:LY:dz=0.15:inv=1\n", "q", &q) == 0 &&
+              q.axis[IMAP_AX_AIM_X].pad[0].amode == IMAP_AMODE_RATE,
+          "sr: parse mode=rate");
+    {
+        sr_cfg_t c0 = c;
+        c0.stick_aim = 0;
+        imap_state_init(&st);
+        for (i = 0; i < 10; i++) sr_poll(&b, &st, &q, f++, 32767, 32767, &c0);
+        CHECK(b.aiming_y == 0x00, "sr: Y Position voll (0x%02X)", b.aiming_y);
+        sr_poll(&b, &st, &q, f++, 0, 0, &c0);
+        CHECK(b.aiming_x > 0x7F + 15 && b.aiming_y == 0x7F && st.m_rate_src == 1,
+              "sr: mode=rate haelt X, Y federt (aim=%02X%02X)", b.aiming_x, b.aiming_y);
+    }
+    /* global relativ, JOY-Hebel :mode=position bleibt Position. */
+    CHECK(imap_profile_parse("aim_x = JOY0:X:mode=position, PAD:LX:dz=0.15\n", "q2", &q) == 0 &&
+              q.axis[IMAP_AX_AIM_X].pad[0].amode == IMAP_AMODE_POSITION &&
+              q.axis[IMAP_AX_AIM_X].pad[1].amode == IMAP_AMODE_GLOBAL,
+          "sr: parse JOY mode=position");
+    {
+        imap_snap_t s;
+        static const cfgvar_t cv = {1, 0, 0, 1, 4, 0, 0};
+        imap_state_init(&st);
+        for (i = 0; i < 3; i++) {
+            make_snap(&s, f++, &cv);
+            s.stick_aim = 1;
+            s.pad_present = 1;
+            s.joy_mask = 1;
+            s.joy[0].axis[0] = joy_pos(0.5f);
+            imap_profile_apply(&b, &st, &q, &s);
+        }
+        CHECK(b.aiming_x == 0x7F + 64, "sr: JOY mode=position = Position (0x%02X)", b.aiming_x);
+        make_snap(&s, f++, &cv);
+        s.stick_aim = 1;
+        s.pad_present = 1;
+        s.joy_mask = 1;
+        imap_profile_apply(&b, &st, &q, &s);
+        CHECK(b.aiming_x == 0x7F, "sr: JOY-Hebel losgelassen -> Mitte (0x%02X)", b.aiming_x);
+        /* JOY mit dz 0: Mindest-Totzone 0,05 gegen Drift bei mode=rate */
+        CHECK(imap_profile_parse("aim_x = JOY0:X:mode=rate\n", "q3", &q) == 0, "sr: parse JOY rate");
+        imap_state_init(&st);
+        for (i = 0; i < 30; i++) {
+            make_snap(&s, f++, &cv);
+            s.joy_mask = 1;
+            s.joy[0].axis[0] = joy_pos(0.03f);
+            imap_profile_apply(&b, &st, &q, &s);
+        }
+        CHECK(st.m_ax == 0x7F && st.m_fx == 0.0f && st.m_rate_src == 1,
+              "sr: Drift 3 %% unter Mindest-Totzone (m_ax %d)", st.m_ax);
+    }
+    /* Profilvergleich erkennt den Modus; unbekannter Modus verwirft die Alternative. */
+    {
+        imap_profile_t a1, a2;
+        imap_profile_parse("aim_x = PAD:LX:mode=rate\n", "a1", &a1);
+        imap_profile_parse("aim_x = PAD:LX\n", "a2", &a2);
+        CHECK(imap_profile_equal(&a1, &a2) != 0, "sr: equal unterscheidet mode");
+        imap_profile_parse("aim_x = PAD:LX:mode=quatsch\n", "a3", &a1);
+        CHECK(a1.axis[IMAP_AX_AIM_X].pad[0].src < 0, "sr: mode=quatsch verworfen");
+        imap_profile_parse("pedal_r = PAD:RT:mode=rate\n", "a4", &a1);
+        CHECK(a1.axis[IMAP_AX_PEDAL_R].pad[0].src == 5 &&
+                  a1.axis[IMAP_AX_PEDAL_R].pad[0].amode == IMAP_AMODE_GLOBAL,
+              "sr: mode auf Pedal ignoriert");
+    }
+    /* Pad-Akkord BACK+RT als aim_center (Pad-Quelle). */
+    {
+        imap_snap_t s;
+        static const cfgvar_t cv = {1, 1, 0, 1, 4, 0, 0};
+        imap_state_init(&st);
+        st.m_ax = 0xA0;
+        make_snap(&s, f++, &cv);
+        s.pad_present = 1;
+        s.pad.buttons = IMAP_PAD_BACK;
+        s.pad.rt = 255;
+        imap_profile_apply(&b, &st, &p, &s);
+        CHECK(st.aim_centered == 1 && b.aiming_x == 0x7F, "sr: aim_center per BACK+RT");
+    }
+}
+
 int main(int argc, char **argv)
 {
     imap_profile_t kb_file, kb_in, xbox_file, xbox_in;
@@ -2792,6 +3294,7 @@ int main(int argc, char **argv)
 
     { extern int imouse_selftest(void); CHECK(imouse_selftest() == 0, "W196 mouse/menu"); }
     { extern int sb_rauto_selftest(void); CHECK(sb_rauto_selftest() == 0, "W254 Replay-Start"); }
+    { extern int sb_mauto_selftest(void); CHECK(sb_mauto_selftest() == 0, "W272 Teststart"); }
 
     printf("input_selftest: Vergleich alt<->neu + Gamepad-Logik\n");
 
@@ -2869,6 +3372,9 @@ int main(int argc, char **argv)
     run_simple_cases(rc_kb == 0 ? &kb_file : &kb_in); /* Teil 16: W218 */
     run_joy_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 17: W221 */
     run_wheel_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 18: W260 */
+    run_stickrel_cases(rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 19: W271 */
+    run_origview_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 20: W283 */
+    run_quickshot_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 21: W290 */
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;

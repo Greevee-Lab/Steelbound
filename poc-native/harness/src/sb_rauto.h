@@ -64,6 +64,7 @@ const char *ra_phase_name(int phase);
 int sb_rauto_selftest(void);
 
 /* ---- Client-Anbindung (sb_rauto.c) ---- */
+void sb_rauto_disable(void);  /* W277: LoC-Profil */
 void sb_rauto_init(void);     /* nach cfg + --set (emu_main) */
 void sb_rauto_tick(void);     /* je Swap (hooks_d3d) */
 void sb_rauto_apply(void *sbc_block); /* je Eingabe-Abfrage, sbc_in_t* (hooks_input) */

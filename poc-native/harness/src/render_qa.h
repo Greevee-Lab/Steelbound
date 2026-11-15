@@ -68,9 +68,12 @@ extern struct ID3D11DeviceContext1 *g_rq_ctx1;
 
 /* render_shade.c */
 int rq_begin(const float (*vin)[16][4], unsigned n, int vb);
-int rq_expand_upload(unsigned prim, unsigned n, unsigned nout);
+/* W264 DRAW-OPT2: idx = Draw laeuft ueber den Strip-Indexpuffer -> Strom 2/Roh-Eingaenge in
+ * Quell-Reihenfolge (Roh-VS: rq_raw.z = 5, SV_VertexID = Index = Quell-Vertex); rq_draw ibf =
+ * Indexpuffer-Abschnitt (0xFFFFFFFF = Draw als Liste). */
+int rq_expand_upload(unsigned prim, unsigned n, unsigned nout, int idx);
 int rq_bind(ID3D11ShaderResourceView *srv0, int rhw);
-void rq_draw(ID3D11Buffer *vb0, unsigned nout, unsigned vb_start);
+void rq_draw(ID3D11Buffer *vb0, unsigned nout, unsigned vb_start, unsigned ibf);
 void rq_stat_log(unsigned f);
 ID3D11SamplerState *rq_default_sampler(void);
 void rq_dump_srv(ID3D11ShaderResourceView *srv, unsigned xptr); /* DIAG: Textur als BMP */

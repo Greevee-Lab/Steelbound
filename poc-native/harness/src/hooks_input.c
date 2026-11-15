@@ -6,8 +6,10 @@
 #include "input_map.h" /* W76 CTRL-MAP: Legacy-Abbildung + Profile */
 #include "input_mouse.h" /* W79 INPUT-REAL: Maus fangen + Fokus-Gatter */
 #include "sb_overlay.h" /* W118 REM-OVERLAY: Eingabesperre */
+#include "sb_origview.h" /* W283 ORIG-KEY-BIND: Vergleichstaste aus dem Profil */
 #include "vr.h" /* W159: sb_vr_recenter("Belegung") per Aktions-Bindung */
 #include "sb_rauto.h" /* W254 REPLAY-LAUNCHER */
+#include "sb_mauto.h" /* W272 ALPHA-TEST */
 
 static uint8_t g_fake_input[512];
 unsigned g_last_pstate;
@@ -400,17 +402,21 @@ static float w87_rdf(u32 a, float dflt)
  * Nur Missionsschleife und nur Achsen, die in diesem Poll von der Maus
  * kamen (Pfeiltasten/Pad behalten ihr Verhalten). Einmal je Frame
  * gerechnet; weitere Polls desselben Frames bekommen dieselben Werte. */
-static void w87_aim_abs(sbc_in_t *s, const imap_state_t *st)
+/* W271: src = Achsen, die vorgesteuert werden (Bit0 X, Bit1 Y): absolute
+ * Maus (W87) und/oder relativer Stick (beide fuehren den virtuellen Hebel
+ * m_ax+m_fx / m_ay+m_fy, s. w271_ff_mask). */
+static void w87_aim_abs(sbc_in_t *s, const imap_state_t *st, unsigned src)
 {
     static unsigned lastf = 0xFFFFFFFFu;
     static uint8_t oax = 0x7F, oay = 0x7F, osrc;
     static int logged;
     float k, sx, sy, kx, ky, smx, smy, vx, vy, tx, ty, ux, uy;
     long ax, ay;
-    if (!(st->m_aim_src & 3u)) return;
+    src &= 3u;
+    if (!src) return;
     if (g_frames == lastf) {
-        if (osrc & st->m_aim_src & 1u) s->aiming_x = oax;
-        if (osrc & st->m_aim_src & 2u) s->aiming_y = oay;
+        if (osrc & src & 1u) s->aiming_x = oax;
+        if (osrc & src & 2u) s->aiming_y = oay;
         return;
     }
     lastf = g_frames;
@@ -454,7 +460,7 @@ static void w87_aim_abs(sbc_in_t *s, const imap_state_t *st)
     if (ay > 0xFF) ay = 0xFF;
     oax = (uint8_t)ax;
     oay = (uint8_t)ay;
-    osrc = st->m_aim_src;
+    osrc = (uint8_t)src;
     if (osrc & 1u) s->aiming_x = oax;
     if (osrc & 2u) s->aiming_y = oay;
     if (!logged) {
@@ -463,6 +469,21 @@ static void w87_aim_abs(sbc_in_t *s, const imap_state_t *st)
                "k=%.4f, sx=%.5f sy=%.5f kx=%.3f ky=%.3f) bei f=%u",
                k, sx, sy, kx, ky, g_frames);
     }
+}
+
+/* W271 STICK-RELATIVE: Achsen mit Vorsteuerung auf die Spielglaettung -
+ * absolute Maus (W87, wie bisher) plus Achsen, deren Stellung vom virtuellen
+ * Hebel kommt, waehrend ein relativer Stick darauf liegt (Stick "wie eine
+ * Maus" reagiert direkt; der Hebel haelt nach dem Loslassen). Ohne relative
+ * Quelle (Standard stick_aim=0) bitgleich wie bisher. */
+static unsigned w271_ff_mask(const imap_state_t *st)
+{
+    unsigned m = 0;
+    if (g_cfg.mouse_mode == 1 && g_cfg.mouse_aim && !g_cfg.mouse_sight &&
+        g_sbc_mouse_live)
+        m |= st->m_aim_src & 3u;
+    m |= st->m_aim_src & st->m_rate_src & 3u;
+    return m;
 }
 
 /* W87 toggle_assist (nur key_toggles=1, Spielerbetrieb): Die Schalterphase
@@ -579,10 +600,9 @@ static void w236_aim_assist(sbc_in_t *s, const imap_state_t *gs)
     in.arm_y = w87_rdf(SBA(0x3521BCu), 0.0f);
     ksm = w87_rdf(SBA(0x260284u), 0.0625f);
     if (!(ksm > 0.001f && ksm <= 1.0f)) ksm = 0.0625f;
-    abs_on = g_cfg.mouse_mode == 1 && g_cfg.mouse_aim && !g_cfg.mouse_sight &&
-             g_sbc_mouse_live;
-    in.arm_kx = (abs_on && (gs->m_aim_src & 1u)) ? 1.0f : ksm;
-    in.arm_ky = (abs_on && (gs->m_aim_src & 2u)) ? 1.0f : ksm;
+    abs_on = (int)w271_ff_mask(gs); /* W87 Maus absolut / W271 Stick relativ */
+    in.arm_kx = (abs_on & 1) ? 1.0f : ksm;
+    in.arm_ky = (abs_on & 2) ? 1.0f : ksm;
     /* Sichtbarer Bereich: FOV [0x352290] gilt waagerecht UND senkrecht
      * (Projektion mit Seitenverhaeltnis 1 auf den 512x422-Monitor; Belege
      * W236_a2/a1b: 618 px je tan-Einheit waagerecht = 256/tan(22,5 Grad),
@@ -800,6 +820,9 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
         snap.pad_mouse_wake = g_cfg.pad_mouse_wake;
         snap.pad_dz_stick = g_cfg.pad_dz_stick / 100.0f; /* W143 */
         snap.pad_dz_trig = g_cfg.pad_dz_trig / 100.0f;
+        snap.stick_aim = g_cfg.stick_aim; /* W271 STICK-RELATIVE */
+        snap.stick_aim_rate = (float)g_cfg.stick_aim_sens * IMAP_STICK_RATE_PER_SENS;
+        snap.stick_aim_accel = g_cfg.stick_aim_accel;
         /* W128 sbc_mouse_off: Original-Controller aktiv (Geraet offen bzw.
          * Fixture) -> Maus-Achsen aus, Maustasten nach sbc_mouse_buttons. */
         g_sbc_mouse_live = 1;
@@ -888,13 +911,33 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                     unsigned pm = 0;
                     int pn = imap_bind_keys(&g_prof.pause, pvk, 4, &pm);
                     sb_ovl_set_pause_binding(pvk, pn, pm);
-                    /* W195 PHOTO-MODE: Tasten der Aktion "photo" (Standard F12) */
-                    pn = imap_bind_keys(&g_prof.photo, pvk, 4, &pm);
-                    sb_ovl_set_photo_binding(pvk, pn, pm);
+                    /* W195 PHOTO-MODE: Tasten der Aktion "photo" (W290: Standard Shift+F12, mit Zusatztasten) */
+                    {
+                        int cvk[4], cmod[4], cn;
+                        (void)imap_bind_keys(&g_prof.photo, pvk, 4, &pm);
+                        cn = imap_bind_key_combos(&g_prof.photo, cvk, cmod, 4);
+                        sb_ovl_set_photo_binding(cvk, cmod, cn, pm);
+                        /* W290 QUICK-SHOT: Aktion "quick_shot" (Standard F12; leere Zeile = aus) */
+                        (void)imap_bind_keys(&g_prof.quick_shot, pvk, 4, &pm);
+                        cn = imap_bind_key_combos(&g_prof.quick_shot, cvk, cmod, 4);
+                        sb_ovl_set_qshot_binding(cvk, cmod, cn, pm);
+                    }
                     pn = imap_bind_keys(&g_prof.feedback_shot, pvk, 4, &pm);
                     sb_ovl_set_feedback_binding(0, pvk, pn);
                     pn = imap_bind_keys(&g_prof.feedback_clip, pvk, 4, &pm);
                     sb_ovl_set_feedback_binding(1, pvk, pn);
+                }
+                if (g_prof_load_rc >= 0) {
+                    /* W283 ORIG-KEY-BIND: Aktion "orig_view" (Standard
+                     * Shift+F8) oder Rueckfall [overlay] orig_key. */
+                    if (imap_orig_view_resolve(&g_prof, g_cfg.orig_key)) {
+                        int ovk[4], omod[4], on;
+                        on = imap_bind_key_combos(&g_prof.orig_view, ovk, omod, 4);
+                        sb_ov_set_keys(ovk, omod, on, g_prof.orig_view.n > on);
+                    } else {
+                        HLOG_I("ORIGFLAG: Profil ohne eigene orig_view-Zeile "
+                               "(oder Standard bei geaendertem orig_key) -> orig_key");
+                    }
                 }
             }
             if (g_prof_load_rc >= 0 && g_prof.has_pad &&
@@ -907,7 +950,17 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                     HLOG_I("INPUT: gamepad ignoriert (Replay aktiv, pad_replay_gate=1)");
                 }
             } else if (g_prof_load_rc >= 0 && g_prof.has_pad) {
+                short tlx, tly;
+                unsigned short tbt;
                 snap.pad_present = imap_pad_poll(g_frames, &snap.pad);
+                if (imouse_test_pad(&tlx, &tly, &tbt)) {
+                    /* W271 Test-Hook (input_test_hook=1): simuliertes Pad */
+                    memset(&snap.pad, 0, sizeof snap.pad);
+                    snap.pad.lx = tlx;
+                    snap.pad.ly = tly;
+                    snap.pad.buttons = tbt;
+                    snap.pad_present = 1;
+                }
                 if (g_cfg.overlay && sb_ovl_open())
                     snap.pad_present = 0; /* W118: Overlay offen -> Pad nicht ans Spiel */
                 if (!g_pad_logged) {
@@ -980,6 +1033,20 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
             if (g_prof_load_rc >= 0) {
                 imap_profile_apply((imap_block_t *)s, &g_prof_st, &g_prof,
                                    &snap);
+                { /* W271 STICK-RELATIVE: Hinweise (einmal bzw. je Zentrieren) */
+                    static int sr_logged;
+                    if (g_prof_st.m_rate_src && !sr_logged) {
+                        sr_logged = 1;
+                        HLOG_I("INPUT: Stick relativ aktiv (Zielhebel, stick_aim=%d "
+                               "sens=%d accel=%d achsen=%u, Vorsteuerung) bei f=%u",
+                               g_cfg.stick_aim, g_cfg.stick_aim_sens,
+                               g_cfg.stick_aim_accel, (unsigned)g_prof_st.m_rate_src,
+                               g_frames);
+                    }
+                    if (g_prof_st.aim_centered)
+                        HLOG_I("INPUT: Zielhebel zentriert (aim_center) bei f=%u",
+                               g_frames);
+                }
                 /* W159: Aktions-Bindung "vr_recenter" (Flanke) -> Blick
                  * zentrieren. Legacy-Pfad: nur die cfg-Taste (vr.c). */
                 if (imap_action_vr_recenter(&g_prof, &g_prof_st, &snap)) {
@@ -994,6 +1061,14 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                 /* W195 PHOTO-MODE: Aktion "photo" aus Pad/Controller (Flanke) */
                 if (g_cfg.overlay && imap_action_photo(&g_prof, &g_prof_st, &snap)) {
                     sb_ovl_request_photo("Belegung");
+                }
+                /* W290 QUICK-SHOT: quick_shot aus Pad/Controller (Flanke) */
+                if (g_cfg.overlay && imap_action_quick_shot(&g_prof, &g_prof_st, &snap)) {
+                    sb_ovl_request_qshot("Belegung");
+                }
+                /* W283 ORIG-KEY-BIND: orig_view aus Pad/Controller (Flanke) */
+                if (g_cfg.overlay && imap_action_orig_view(&g_prof, &g_prof_st, &snap)) {
+                    sb_ov_request();
                 }
             } else
                 imap_legacy_apply((imap_block_t *)s, &g_leg, &snap);
@@ -1034,16 +1109,18 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                                 g_prof_load_rc >= 0) ? &g_prof_st : &g_leg;
             w236_aim_assist(s, gs);
         }
-        if (g_cfg.mouse_mode == 1 && g_cfg.mouse_aim && !g_cfg.mouse_sight &&
-            g_sbc_mouse_live) {
-            /* W87: absolute Maus (Vorsteuerung auf die Spielglaettung). */
+        {
+            /* W87: absolute Maus (Vorsteuerung auf die Spielglaettung);
+             * W271: ebenso Achsen mit relativem Stick. */
             imap_state_t *as = (g_cfg.input_profile[0] &&
                                 g_prof_load_rc >= 0) ? &g_prof_st : &g_leg;
-            w87_aim_abs(s, as);
+            unsigned ffm = w271_ff_mask(as);
+            if (ffm) w87_aim_abs(s, as, ffm);
         }
     }
     sbc_merge(s); /* W75: USB/Fixture als Zweitquelle (sbc_usb=1) */
     sb_rauto_apply(s); /* W254 REPLAY-LAUNCHER: Menue-Fuehrung (nur mit replay_autoplay) */
+    sb_mauto_apply(s); /* W272 ALPHA-TEST: Menue-Fuehrung (nur mit mission_autostart) */
     if (g_aimat_idx && input_replay_active()) {
         aimat_apply(s); /* W59: Ziel-Bot (Testpfad, nur mit Replay) */
     }

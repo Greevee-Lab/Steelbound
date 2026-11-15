@@ -120,6 +120,47 @@ static void mfx_water_diag(unsigned xp, unsigned prim, unsigned n)
 
 /* Klassifiziert einen IM-Draw (vor allen Umrechnungen). buf = g_im_buf
  * (Register 0 Position, 1 Farbe, 2 UV – belegt per Disassembly). */
+/* W290 QUICK-SHOT: REPLAY-Schriftzug / Spiel-Logo der Wiedergabe weglassen (replay_label=0 / replay_logo=0).
+ * Beide liegen im Schrift-/UI-Atlas (sb_remaster.c rpf_note_upload); ein Draw mit dieser Textur, dessen UVs
+ * alle im Bereich des Schriftzugs (Texel 176..256 x 160..176) bzw. des Logos (176..256 x 176..256) liegen,
+ * wird ausgelassen - vor der Aufzeichnung, also live, im Foto und im Video-Export gleich. HUD-Schrift
+ * desselben Atlas liegt ausserhalb dieser Bereiche und bleibt. Standard (beide an): kein Lesen. */
+extern volatile unsigned g_rpf_atlas_xptr;
+static unsigned g_rpf_n[2];
+int sb_rpf_skip(unsigned xptr, const im_vertex_t *v, unsigned n)
+{
+    float u0 = 2.0f, v0 = 2.0f, u1 = -1.0f, v1 = -1.0f;
+    unsigned i;
+    int k;
+    if ((g_cfg.replay_label && g_cfg.replay_logo) || !xptr || xptr != g_rpf_atlas_xptr || n < 3u || n > 256u) { return 0; }
+    for (i = 0; i < n; i++) {
+        if (v[i].uv[0] < u0) { u0 = v[i].uv[0]; }
+        if (v[i].uv[0] > u1) { u1 = v[i].uv[0]; }
+        if (v[i].uv[1] < v0) { v0 = v[i].uv[1]; }
+        if (v[i].uv[1] > v1) { v1 = v[i].uv[1]; }
+    }
+    k = -1;
+    /* echte Flaeche Pflicht: HUD-Balken/-Rahmen samplen einen einzelnen Texel (1,1) des Atlas */
+    if (u1 - u0 < 8.0f / 256.0f || v1 - v0 < 6.0f / 256.0f) { k = -2; }
+    else if (!g_cfg.replay_label && u0 >= 174.0f / 256.0f && u1 <= 1.002f && v0 >= 156.0f / 256.0f && v1 <= 178.0f / 256.0f) { k = 0; }
+    else if (!g_cfg.replay_logo && u0 >= 172.0f / 256.0f && u1 <= 1.002f && v0 >= 174.0f / 256.0f && v1 >= 0.9f &&
+             v1 <= 1.002f) { k = 1; } /* gemessen: Logo-Quad (0,6875;0,6875)-(1;1), Schriftzug (0,688;0,625)-(1;0,688) */
+    if (k < 0) {
+        static unsigned ndg;
+        if ((g_cfg.photo_diag & 4) && k == -1 && ndg < 60u) { /* DIAG(W290): Atlas-Draws ausserhalb der Bereiche */
+            ndg++;
+            HLOG_I("REPLAY-FX diag: Atlas-Draw n=%u uv=(%.4f,%.4f)-(%.4f,%.4f) f=%u", n, (double)u0, (double)v0, (double)u1,
+                   (double)v1, g_present_no);
+        }
+        return 0;
+    }
+    if (++g_rpf_n[k] <= 2u || (g_rpf_n[k] % 3000u) == 0u) {
+        HLOG_I("REPLAY-FX: %s ausgelassen #%u (f=%u, uv=(%.3f,%.3f)-(%.3f,%.3f))", k ? "Logo" : "REPLAY-Schriftzug", g_rpf_n[k],
+               g_present_no, (double)u0, (double)v0, (double)u1, (double)v1);
+    }
+    return 1;
+}
+
 int mfx_classify(unsigned prim, unsigned n, int is_vb)
 {
     unsigned xp, wt = 0, mt = 0;

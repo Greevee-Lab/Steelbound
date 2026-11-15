@@ -695,7 +695,7 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
                 g_up_fail = 7;
                 return NULL;
             }
-            if (sb_rem_active()) { /* W103 REM-FRAME: Dump/Ersatz (Standard aus) */
+            if (sb_rem_active() || sb_rpf_wanted()) { /* W103 REM-FRAME: Dump/Ersatz (Standard aus); W290 REPLAY-FX */
                 srv = sb_rem_upload(xptr, fmt, 2, w, h, (const void *)(uintptr_t)data, lpitch, 1, srv);
             }
             HLOG_I("TEX lin-upload: xptr=0x%X %ux%u", xptr, w,
@@ -872,7 +872,7 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
         if (swzlin) { free(swzlin); }
         return NULL;
     }
-    if (sb_rem_active()) { /* W103 REM-FRAME: Dump/Ersatz (Standard aus) */
+    if (sb_rem_active() || sb_rpf_wanted()) { /* W103 REM-FRAME: Dump/Ersatz (Standard aus); W290 REPLAY-FX */
         srv = sb_rem_upload(xptr, fmt, kind3 == 3 ? 3 : 1, w, h,
                             (kind3 == 3) ? (const void *)swzlin : (const void *)(uintptr_t)data,
                             init.SysMemPitch, dd.MipLevels, srv);
@@ -1667,6 +1667,19 @@ int sb_tex_hdr_dims(unsigned xptr, unsigned *w, unsigned *h)
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
     data = sb_tex_hostaddr_x(xptr, data);
     return tex_lin_dims(xptr, data, w, h, &pitch);
+}
+
+/* W261 FILM-ALTTAB: Linear-Klasse direkt aus dem Texturkopf (ohne Cache). Der
+ * Cache kennt sie nur nach einem gelungenen Upload (fehlgeschlagener Erst-
+ * Upload legt einen Eintrag mit linear=0 an, gar keinen bei vollem Cache). */
+int sb_tex_hdr_linear(unsigned xptr)
+{
+    unsigned fmt = 0, blk = 0, w = 0, h = 0;
+    DXGI_FORMAT df;
+    if (!xptr || xptr < 0x10000u || xptr >= 0x80000000u) { return 0; }
+    __try { fmt = *(unsigned *)(uintptr_t)(xptr + 0xC); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return tex_decode_fmt(fmt, &df, &blk, &w, &h) == 2 ? 1 : 0;
 }
 
 /* Texturkopf + Quellbytes-Sonde (MONITORVIEW). */

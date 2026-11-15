@@ -44,6 +44,8 @@ void sb_tex_lockwatch_forget(unsigned xptr); /* W98: Release rc=0 */
 void sb_tex_diag_info(unsigned xptr, char *buf, size_t n); /* DIAG(AMMO-HUD,W243) */
 /* W2B-FIX: Linear-Dims direkt aus Header (Norm-Fallback ohne Cache). */
 int sb_tex_hdr_dims(unsigned xptr, unsigned *w, unsigned *h);
+/* W261 FILM-ALTTAB: 1 = Texturkopf meldet ein lineares Format (ohne Cache). */
+int sb_tex_hdr_linear(unsigned xptr);
 void sb_tex_hdr_info(unsigned xptr, unsigned *c0, unsigned *data, unsigned *fmt, unsigned *size);
 
 #ifdef __cplusplus

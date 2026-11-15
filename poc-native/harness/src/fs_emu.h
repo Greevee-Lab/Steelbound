@@ -21,6 +21,10 @@ void fs_emu_alloc_thread(void);
  * harter Abbruch (Exit-Code 7), da ein uebersehener Patch spaeter crasht. */
 void fs_emu_patch_all(void);
 
+/* W275 LOC-BOOT: dieselben FS-Befehlsformen per Bytemuster in [lo, hi)
+ * patchen (Spiele ohne feste Stellentabelle). Rueckgabe: Zahl der Stellen. */
+unsigned fs_emu_patch_scan(uint32_t lo, uint32_t hi);
+
 /* Slot[0]-Prefill, siehe fs_emu.c (nach Startup, vor Spiel-Routine). */
 void fs_emu_prefill_xapi(void);
 

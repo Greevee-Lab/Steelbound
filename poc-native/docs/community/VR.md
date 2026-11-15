@@ -49,5 +49,5 @@ Seat height, world scale and eye distance can be adjusted on the ESC
 - During the mission, the ESC menu appears only in the monitor/preview
   picture, not in the headset.
 - The canvas shows the monitor picture 1:1, including the 4:3 bars.
-- VR is demanding. If the picture stutters, use the **Original (HD) –
+- VR is demanding. If the picture stutters, use the **Original –
   120 FPS** preset and check the load with **F2** on the monitor.

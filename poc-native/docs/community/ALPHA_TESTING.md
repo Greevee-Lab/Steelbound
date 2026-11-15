@@ -21,7 +21,7 @@ Your reports decide what gets fixed first. See also
   (NTSC-U) release, which is experimental – as `.iso` or `.xiso`. No game data is included in this package.
 
 There are no hard minimum specs. On an older or weaker PC choose the
-graphics preset **Original (HD) – Performance** (see below).
+graphics preset **Performance** (see below).
 
 **Windows warning on first start:** Windows Defender SmartScreen may show
 *“Windows protected your PC”* for `sb_launcher.exe`. Click **More info →
@@ -59,7 +59,8 @@ planned. Only use the archive from the official Releases page.
 | **Esc** | Game menu: Continue, Settings, Photo mode, Feedback, Quit (pauses the game) |
 | **F11** | Feedback with a screenshot |
 | **F9** | Feedback with a 5-second video clip |
-| **F12** | Photo mode: open / take photo (also Esc → Photo mode) |
+| **F12** | Screenshot (quick, no menu; uses the photo-mode settings) |
+| **Shift + F12** | Photo mode (also Esc → Photo mode); in photo mode F12 takes the photo |
 | **Pause** | Pause / continue the game |
 | **F2** | Performance overlay (Shift + F2 moves it) |
 | **F10** | Free / capture the mouse |
@@ -82,13 +83,13 @@ Please tell me what you tried, even if everything worked.
 5. **Display modes:** window, borderless and exclusive fullscreen; 60
    and 120 FPS; your monitor's aspect ratio (4:3 menus, wider missions,
    never stretched).
-6. **Graphics presets:** Original (HD) – 120 FPS, Original (HD) –
-   Performance, Remastered subtle, Remastered strong – look and frame
-   rate (press **F2** in game).
+6. **Graphics presets:** Original (monitor refresh rate), Performance,
+   Remastered subtle, Remastered strong – look and frame rate (press
+   **F2** in game).
 7. **Controls:** keyboard/mouse, an XInput gamepad, and – if you have
    one – the original Steel Battalion controller (see
    [Controls](CONTROLS.md)).
-8. **In-game menu:** pause, settings, photo mode (F12), feedback (F11/F9).
+8. **In-game menu:** pause, settings, photo mode (Shift+F12), feedback (F11/F9); quick screenshot F12.
 9. **Cockpit perspective** on wide monitors (see below).
 10. **Optional:** importing saves, VR (experimental), texture/effect packs.
 
@@ -108,8 +109,10 @@ Inside the data folder:
 
 | Folder / file | Content |
 |---|---|
-| `logs/sb_harness.log` | Log of the last game start (overwritten at each start) |
-| `crash/crash_<date>_<time>_<n>.txt` | Short crash report (error address, module, registers) |
+| `logs/sb_harness.log` | Log of the last game start (the two before it: `sb_harness.prev.log`, `sb_harness.prev2.log`) |
+| `crash/<date>-<time>-crash/` | Crash report: `crash_1.txt` (error address, module, registers), `crash_1.dmp` (small minidump), `info.txt` (version, game, GPU and driver, game state, packs, changed settings), `log_tail.txt` |
+| `crash/<date>-<time>-hang/` | Freeze report (no new picture for 20 s, pause does not count): `hang.txt` (where each game thread waits), `hang.dmp`, `info.txt`, `log_tail.txt` |
+| `diagnostics/` | Diagnostic packages you created in the launcher |
 | `user.cfg` | Your settings |
 
 Default data location: `%LOCALAPPDATA%\Steelbound\`. In portable mode
@@ -137,8 +140,8 @@ Please add to the issue:
 **By hand:**
 
 1. Right after the problem, open the data folder (see above).
-2. Copy `logs/sb_harness.log` and any new file from `crash/`. Do not
-   start the game again first – the log is overwritten at each start.
+2. Copy `logs/sb_harness.log` and the newest folder from `crash/` – or
+   simply create a diagnostic package (see below).
 3. Open a new issue with the **Bug report** template on the project's
    GitHub page, attach the files and add `VERSION.txt` from the program
    folder, your Windows version and your GPU model.
@@ -147,6 +150,41 @@ The files contain settings, file paths on your PC (for example your
 Windows user name) and technical data. They contain no game data. Look
 through them before sending if you are unsure, and remove anything you
 do not want to share.
+
+## Reporting crashes and glitches
+
+**Nothing is ever uploaded automatically.** You decide what you share and
+where.
+
+- **After a crash or freeze** the game leaves a report in the data folder
+  (`crash/…`, see above). The next time you open the launcher it says
+  **"The last session crashed"** – once per report – with three buttons:
+  - **Open report folder** – look at what was saved.
+  - **Report on GitHub** – packs the report into a ZIP next to it, opens
+    that folder and a pre-filled *Bug report* page in your browser. Drag the
+    ZIP into the *Attachments* field, add what you were doing, submit.
+  - **Dismiss** – hide the card. The report stays in the folder.
+- **Diagnostic package:** launcher › **Alpha Test** › *Problem reports* ›
+  **Create diagnostic package**. It first lists what goes in, then writes
+  `diagnostics/steelbound-diag-<date-time>.zip` and opens the folder:
+  Windows version, CPU, RAM, graphics card and driver, monitors with
+  resolution and refresh rate, launcher and client version, the settings you
+  changed, active packs with checksums, the last 3 game logs, the last 3
+  crash reports and your binding profile.
+  **Not included:** save games, replays, game files, screenshots, and no
+  record of what you pressed – log lines about single inputs are removed.
+- **Graphics glitches** (flicker, wrong colours, missing parts, white lines):
+  press **F11** in the game right when you see it – the screenshot shows us
+  the problem better than any description. Add the mission, the place and
+  whether it happens again. If the game also crashed or froze, attach the
+  diagnostic package too.
+
+Everything is cleaned before it is written: your Windows user name, the
+computer name and folder paths are replaced (`<data>` = data folder,
+`<client>` = program folder, `<user>`, `<pc>`, `<pfad>` = some other
+folder). The minidump only holds the thread stacks and the memory they
+point to – no full memory dump, no game files. Please have a quick look
+anyway before you post it publicly.
 
 ## "Unable to load … Record" at the title screen
 
@@ -208,13 +246,39 @@ Under **Advanced › Saves & data** in the launcher:
 Close the game before importing. Foreign signatures are repaired by the
 save check on the next start.
 
+## Alpha Test page (test start)
+
+The launcher page **Alpha Test** collects tools that only exist to make
+testing easier. They are not part of the original game.
+
+- **Test start (mission + VT):** pick a mission (Training or Mission
+  01–23), a VT and optionally a difficulty, then press **Start test**. The
+  game creates a fresh test pilot by itself and goes straight into the
+  mission – please don't touch the controls until the mission has loaded.
+  Everything happens in a separate test folder (`alpha_test` in your
+  Steelbound data folder), which is emptied on every test start. **Your
+  normal saves are never touched.** *Skip intro film* skips the long film
+  before the Training; later missions start without a film anyway. The
+  VT start-up sequence in the cockpit stays, it is part of the game.
+- In the original campaign you can't pick every VT for every mission, so
+  some combinations were never played on a real Xbox. If something looks
+  odd, please mention the mission and VT in your report so I can rebuild
+  your setup and compare it with the normal VT.
+- **Frame interpolation fixes (A/B):** switches for testing white lines
+  above 30 FPS. They apply on the next start; change one, start, and look
+  at the same spot.
+
 ## Photo mode
 
-Press **F12** in game (or **Esc → Photo mode**). The game pauses and the
-photo panel opens; **F12** again or **Take photo** saves the picture. The
-photo folder, resolution and format are on the launcher page **Audio &
-extras** (card *Extras – photo mode*), which also shows the default
-folder. Photo mode is not available in VR yet.
+Press **F12** in game for a quick screenshot: no menu, a short "Screenshot
+saved" notice. **Shift + F12** (or **Esc → Photo mode**) pauses the game and
+opens the photo panel: view (as in the game / without cockpit / outside world
+only), monitor effect, free camera, size (window, 4K, 8K, ×2–×8) and format;
+**F12** or **Take photo** saves the picture. "Without cockpit" is the game's own
+full-screen view: same picture as the cockpit monitor, with the monitor effect
+and the HUD. The settings are shared with the quick screenshot and are also on
+the launcher page **Audio & extras** (card *Photos & screenshots*), which shows
+the default folder. Not available in VR yet.
 
 ## Pause and in-game menu
 
@@ -226,16 +290,29 @@ folder. Photo mode is not available in VR yet.
 
 ## Cockpit perspective (wide monitors)
 
-On wide and ultrawide monitors the mission view uses the full width
-(Hor+, never stretched). **Cockpit** on the launcher page **Display**
+The original picture is 4:3 with black bars (default). If you choose
+widescreen sides on the launcher page **Display** (experimental), the
+mission view uses the full width on wide and ultrawide monitors (Hor+,
+never stretched). **Cockpit** on the launcher page **Display**
 (card *Aspect ratio*) moves the cockpit camera back and zooms in, so more
 of the cockpit monitors stays visible. **Original** is the unchanged view.
 In game the same setting is **Cockpit: camera back** under
 **Esc › Settings**. It has no effect in VR.
 
+## Original look vs. experimental options
+
+Everything that changes the original picture (lighting and effects,
+widescreen sides, HD texture packs, effect packs, hide cockpit) is marked
+**Experimental** in the launcher and **EXP** in the ESC menu. When you
+see an artefact, press **Shift + F8** in game: it switches live between
+the original look and your settings. Please note in your report whether
+the artefact also shows in the original look. **Start original once** on
+the **Play** page starts one game without experimental options and packs
+(see [Graphics and packs](GRAPHICS_AND_PACKS.md)).
+
 ## Performance preset
 
-**Original (HD) – Performance** on the launcher page **Graphics** (also in
+**Performance** on the launcher page **Graphics** (also in
 **Esc › Settings**) is meant for older or weaker PCs: original look,
 60 FPS and native world resolution. Resolution changes apply after a
 restart. Check the result with **F2**.

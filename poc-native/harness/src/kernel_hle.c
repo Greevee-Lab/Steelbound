@@ -157,6 +157,8 @@ typedef struct {
 } krnl_meta_t;
 
 static krnl_meta_t g_meta[512];
+char g_xb_title_id_str[9] = "43430002"; /* W275: siehe krnl_int.h */
+void *(*g_krnl_ext)(unsigned ord, int *is_var) = NULL; /* W275: nur LoC */
 
 #define K_STUB_0(o) stub_##o
 #define K_STUB_1(o) stubc_##o
@@ -1145,6 +1147,19 @@ void krnl_install_thunks(xbe_image_t *img)
         if (ord >= 512) {
             HLOG_E("KRNL: Ordinal %u ausserhalb - ABBRUCH", ord);
             ExitProcess(9);
+        }
+        {
+            int ext_var = 0;
+            void *ext = g_krnl_ext ? g_krnl_ext(ord, &ext_var) : NULL; /* W275: nur LoC */
+            if (ext) {
+                target = ext;
+                if (!ext_var && sctrace_active()) {
+                    target = sctrace_wrap(ord, target);
+                }
+                kt[i] = (u32)(uintptr_t)target;
+                n++;
+                continue;
+            }
         }
         if (g_meta[ord].is_var) {
             target = krnl_var_ptr(ord);

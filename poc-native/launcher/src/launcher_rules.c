@@ -9,6 +9,7 @@
 #include "launcher_app.h"
 #include "sb_lang.h"
 #include "sb_edition.h"
+#include "sb_fpsrate.h" /* W309: sb_fps_flags */
 
 #define printf cli_printf
 
@@ -188,9 +189,10 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
         strcpy_s(out[9].text, sizeof out[9].text, LT("gui.rule_r9"));
     }
     /* R10: Bildrate ueber der Bildwiederholrate auf Fenster/randlos (W223:
-     * jede feste Rate, nicht nur 120; auto folgt dem Monitor) */
+     * jede feste Rate, nicht nur 120; auto folgt dem Monitor). W309: auch
+     * eine Rate, die die Monitorrate nicht glatt teilt (120 auf 165 Hz). */
     if (s->interp_fps > 0 && s->window_mode != 2 && e->display_hz > 0 &&
-        e->display_hz + 1 < s->interp_fps) {
+        sb_fps_flags(e->display_hz, s->interp_fps) != 0) {
         hit(&out[10], 10, LR_LVL_WARN);
         _snprintf_s(out[10].text, sizeof out[10].text, _TRUNCATE,
                     LT("gui.rule_r10"), e->display_hz, s->interp_fps);
@@ -353,7 +355,7 @@ void lrules_fixture(int rule, int v, launcher_settings_t *s, lr_env_t *e)
     case 7: s->window_mode = v ? 1 : 0; break;
     case 8: s->window_mode = v ? 0 : 2; break;
     case 9: s->window_mode = v ? 2 : 0; break;
-    case 10: s->interp_fps = 120; s->window_mode = 0; e->display_hz = v ? 60 : 144; break;
+    case 10: s->interp_fps = 120; s->window_mode = 0; e->display_hz = v ? 60 : 240; break; /* W309: 240 = 2 x 120 */
     case 11: s->window_mode = 0; s->width = v ? 1600 : 1920; s->height = v ? 1200 : 1080;
              s->edge_mode = 2; break; /* W278: Standard 4:3 (1) -> sonst sperrt R12 den Verlauf */
     case 12: s->window_mode = 0; s->width = 1920; s->height = 1080;

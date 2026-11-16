@@ -31,3 +31,8 @@ unsigned sb_state_loadcount(void)
 {
     return st_rd(SB_ST_LOADCOUNT);
 }
+
+unsigned sb_state_scene(void)
+{
+    return st_rd(SB_ST_SCENE);
+}

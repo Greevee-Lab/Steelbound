@@ -337,6 +337,24 @@ static const ln_hook k_hooks[] = {
     {0x1580CFu, {0x53, 0x56, 0x33, 0xDB, 0xB8, 0x00, 0x00, 0x00}, (void *)ln_XOnlineCleanup, "XOnlineCleanup"},
 };
 
+/* W297: Netz-Zustand fuer LoC-Testfolgen (loc_steps): 0 = nicht bereit. */
+int loc_net_test_state(long *accepts, long *connects, int out, unsigned typ)
+{
+    if (!g_ln.ready) {
+        return 0;
+    }
+    if (accepts) *accepts = g_ln.st.accepts;
+    if (connects) *connects = g_ln.st.connects;
+    if (typ < 256) {
+        return (g_ln.st.typ_seen[out ? 1 : 0][typ >> 5] >> (typ & 31)) & 1 ? 2 : 1;
+    }
+    if (typ == 512) { /* Lockstep aktiv: eigener 0x34-Rahmen in der letzten Sekunde gesendet */
+        LONG t = g_ln.st.last34_ms;
+        return (t && (LONG)(GetTickCount() - (DWORD)t) < 1000) ? 3 : 1;
+    }
+    return 1;
+}
+
 int loc_net_install(void)
 {
     unsigned i, n = (unsigned)(sizeof k_hooks / sizeof k_hooks[0]);
@@ -390,6 +408,9 @@ static void ln_sample(void)
         }
         HLOG_I("LOCNETDIAG: Menue [%08X %08X %08X %08X %08X %08X] Logon [%08X %08X]", v[0], v[1], v[2], v[3], v[4],
                v[5], (*(const u32 *const *)(uintptr_t)0x27CFECu)[0], (*(const u32 *const *)(uintptr_t)0x27CFECu)[1]);
+        /* W297: Spielmodus-Flags (Netzspiel [0x3070D8], Ablauf [0x306B30], Modus [0x306B60], Sim-Tick) */
+        HLOG_I("LOCNETDIAG: Netzspiel=%u Ablauf=%u Modus=%u Tick=%u", *(const u32 *)(uintptr_t)0x3070D8u,
+               *(const u32 *)(uintptr_t)0x306B30u, *(const u32 *)(uintptr_t)0x306B60u, *(const u32 *)(uintptr_t)0x3070F4u);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     for (i = 0; i < n; i++) {
         void *h = NULL;

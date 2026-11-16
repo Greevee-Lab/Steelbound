@@ -20,12 +20,15 @@ typedef struct {
     int fps_limit;        /* 0 = aus */
     int audio;            /* 0 = stumm, 1 = an */
     int audio_live;       /* 0 = nur Capture, 1 = Live-Ton */
+    /* W303 AUDIO-VOLUME: [audio] volume_master/_music/_sfx/_voice, 0..100 % (Standard 100 = Original), SB und LoC */
+    int volume_master, volume_music, volume_sfx, volume_voice;
     int aspect_mode;      /* W47: 1 = Pillarbox + Hor+ (nie strecken, S3.10) */
     char input_profile[64]; /* W78: Eingabe-Profil (profiles/<name>.ini), leer = Legacy-Tastatur */
     int sbc_usb;            /* W78: 1 = Original-Controller per WinUSB lesen */
     int sbc_mouse_off;      /* W128: 1 = Maus-Achsen aus, solange der Controller aktiv ist */
     int aim_assist;         /* W236: Zielhilfe 0 = Original, 1 = Fadenkreuz am Rand dreht die Sicht, 2 = Waffenarm fest (Altwert aim_turn=1 -> 1) */
     int auto_gear;          /* W218: 1 = automatischer Gangwechsel (vereinfachte Steuerung) */
+    int monitor_view;       /* W319 MONITOR-VIEW: 1 = Monitoransicht, 2 = + Radar/FRONT VIEW ([render] monitor_view, Standard 0) */
     int cockpit_hide;       /* W268 COCKPIT-HIDE: 1 = Cockpit in der Mission ausblenden ([render] cockpit_hide, Standard 0) */
     int fx_wireframe;       /* W278 ORIG-FLAG: Spass-Effekte (W240, nur ESC-Menue); der Launcher kennt sie fuer Hinweis/Zuruecksetzen */
     int fx_vaporwave;

@@ -37,6 +37,7 @@ static const ov_field_t kOvField[] = {
     { "edge_fade_strength", &g_cfg.edge_fade_strength },
     { "cockpit_persp", &g_cfg.cockpit_persp }, { "cockpit_panini", &g_cfg.cockpit_panini },
     { "cockpit_width", &g_cfg.cockpit_width }, { "cockpit_hide", &g_cfg.cockpit_hide },
+    { "monitor_view", &g_cfg.monitor_view }, /* W319 */
     { "hud_label_avoid", &g_cfg.hud_label_avoid },
 };
 #define OV_NFIELD ((int)(sizeof kOvField / sizeof kOvField[0]))

@@ -97,6 +97,35 @@ int fx_draw_pre(const im_vertex_t *out, unsigned nout, int rhw, unsigned prim, c
     fx_ent_t *e = NULL;
     int all = (g_cfg.fx_diag >= 2);
     if (!g_cfg.fx_diag || !fx_in_mission()) { return 0; }
+    /* DIAG(W300 M12-FRAME): Linien/Punkte je Spiel-Caller (IM: Ruecksprung aus
+     * D3DDevice_End, VB: DrawVertices-Caller) - erster Draw und Draw 10/100/1000/
+     * 10000 je Caller+Prim mit Farbe, Ziel und NDC-Ausdehnung (fx_diag=1; 3 = alle Primitive). */
+    if (prim <= 4u || g_cfg.fx_diag >= 3) { /* 3 = alle Primitive */
+        extern unsigned g_im_end_caller, dd_caller;
+        static unsigned lc_key[512], lc_n[512], lc_cnt;
+        unsigned c = g_submit_vb ? dd_caller : g_im_end_caller, lk = c ^ (prim << 28) ^ ((unsigned)g_submit_vb << 27), li;
+        for (li = 0; li < lc_cnt; li++) { if (lc_key[li] == lk) { break; } }
+        if (li == lc_cnt && lc_cnt < 512u) { lc_key[lc_cnt++] = lk; }
+        if (li < 512u) {
+            unsigned q = ++lc_n[li];
+            if (q == 1u || q == 10u || q == 100u || q == 1000u || q == 10000u) {
+                float x0 = 1e30f, x1 = -1e30f, y0 = 1e30f, y1 = -1e30f; unsigned j, beh = 0;
+                for (j = 0; j < nout; j++) {
+                    const float *pp = out[j].pos;
+                    float X = pp[0]*mvp[0]+pp[1]*mvp[4]+pp[2]*mvp[8]+pp[3]*mvp[12];
+                    float Y = pp[0]*mvp[1]+pp[1]*mvp[5]+pp[2]*mvp[9]+pp[3]*mvp[13];
+                    float W = pp[0]*mvp[3]+pp[1]*mvp[7]+pp[2]*mvp[11]+pp[3]*mvp[15];
+                    if (W > 1e-6f) { X /= W; Y /= W; if (X < x0) { x0 = X; } if (X > x1) { x1 = X; } if (Y < y0) { y0 = Y; } if (Y > y1) { y1 = Y; } }
+                    else { beh++; }
+                }
+                if (x1 < x0) { x0 = x1 = y0 = y1 = 0.0f; }
+                HLOG_W("FXLINE f=%u caller=0x%X %s p=%u n=%u #%u rhw=%d vs=0x%X xp=0x%X tgt=%d col0=(%.2f,%.2f,%.2f,%.2f) ndc=[%.2f,%.2f]x[%.2f,%.2f] beh=%u",
+                       g_present_no, c, g_submit_vb ? "VB" : "IM", prim, nout, q, rhw, g_im_shader, sb_tex_xptr(),
+                       rtt_active() ? g_rtt_bound : -1, nout ? out[0].col[0] : 0.0f, nout ? out[0].col[1] : 0.0f,
+                       nout ? out[0].col[2] : 0.0f, nout ? out[0].col[3] : 0.0f, x0, x1, y0, y1, beh);
+            }
+        }
+    }
     fx_poll();
     sb_render_blend_state(&bon, &bs, &bd);
     ate = fx_nv(0x300u, 0); af = fx_nv(0x33Cu, 0x207u); ar = fx_nv(0x340u, 0);
@@ -247,7 +276,7 @@ static int fx_ps_def(const unsigned **pd)
     if (!g_im_pshader) { return 0; }
     __try {
         pdef = *(unsigned *)(uintptr_t)((g_im_pshader & ~1u) + 8u);
-        if (pdef < 0x10000u || pdef >= 0x80000000u) { return 0; }
+        if (pdef < 0x10000u || pdef >= SB_HOST_LIM()) { return 0; } /* W315 host_hi_addr */
         *pd = (const unsigned *)(uintptr_t)pdef;
         (void)(*pd)[59];
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
@@ -332,4 +361,130 @@ void fx_ps_diag(unsigned *c0, unsigned *def0, unsigned *src)
         *c0 = fx_ps_c0_stage0(d);
         *src = ((r0 < 8u && (g_rq_psconst_set & (1u << r0))) ? 1u : 0u) | ((g_rq_rs_set & (1ull << 10u)) ? 2u : 0u);
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+/* ---------- W313 P2-ZTEST ----------
+ * P2-Draws (VS-Programm mit Clip/Tail, render_im.c vsh_em == 2) laufen in
+ * Spiel-RTs als Bildschirm-Pixel (rhw = 1, z = z/w aus dem Programm). Die NV2A
+ * testet auch solche Vertices gegen den Z-Puffer, wenn das Spiel ZENABLE setzt
+ * und das RT eine Tiefenflaeche hat (SetRenderTarget(rt, z)); ohne Tiefenflaeche
+ * kein Test. Bisher schaltete rs_apply_ds fuer rhw immer ab -> Feuer/Partikel
+ * vor Gebaeuden. Der Schattenpuffer (isdepth) ist in rs_apply_ds schon frei.
+ * Draws im Sichtbarkeitstest (Sonne/Flares W304, Objekt-Vorpass FUN_00025790
+ * mit Farbmaske 0) bleiben bei vis_ztest (W304-Entscheidung unberuehrt). */
+int p2z_scene_mission(void) { return fx_in_mission(); } /* DIAG(W313): shot_mission=2-Anker (Szene 0x2C, Missionsschleife, auch Titel-Demo) */
+
+int p2z_ztest(void)
+{
+    extern int sb_visq_in_test(void);
+    return m3d_zenable && g_rtt_zsurf && !g_rtt_dummy && !sb_visq_in_test() && !g_sba_loc; /* LoC: nicht geprueft */
+}
+
+/* DIAG(P2-ZTEST,W313, p2z_diag=1): Zensus aller Draws in Spiel-RTs der
+ * Kampagnen-Mission je Zustand: VS/PS/Textur (erste)/Ziel, Tiefenflaeche,
+ * ZENABLE (Spiegel 0x20CF40 und NV 0x30C), ZFUNC, Tiefenmaske, Blend,
+ * Alpha-Test, P2/rhw, Tiefentest angewendet; je Schluessel z-Bereich (NDC
+ * nach mvp) und Pixel nach Tiefentest (Occlusion-Query: erste 32, dann jeder 64. Draw). */
+#define P2Z_KEYS 384u
+typedef struct {
+    unsigned key, vs, ps, xp, prim, rhw, em, tgt, rw, rh, zs, zen, zen30c, zf, dm, cm, bon, bs, bd, ate, zt, po;
+    unsigned draws, verts, pix, pixq, last;
+    float zmin, zmax;
+} p2z_ent_t;
+static p2z_ent_t g_p2z[P2Z_KEYS];
+static unsigned g_p2z_n;
+static ID3D11Query *g_p2z_q[16];
+static int g_p2z_qk[16], g_p2z_qbusy[16], g_p2z_qcur = -1;
+
+static void p2z_poll(void)
+{
+    int i;
+    for (i = 0; i < 16; i++) {
+        UINT64 v = 0;
+        if (!g_p2z_qbusy[i] || !g_p2z_q[i]) { continue; }
+        if (ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)g_p2z_q[i], &v, sizeof v,
+                                        D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK) {
+            g_p2z[g_p2z_qk[i]].pix += (unsigned)v; g_p2z[g_p2z_qk[i]].pixq++;
+            g_p2z_qbusy[i] = 0;
+        }
+    }
+}
+
+void p2z_note(const im_vertex_t *out, unsigned nout, int rhw, int em, unsigned prim, int zt, const float *mvp)
+{
+    unsigned bon = 0, bs = 0, bd = 0, key, i, tgt, rw = 0, rh = 0, zs, ate, zf, z30c, po;
+    float zmin = 1e30f, zmax = -1e30f;
+    p2z_ent_t *e = NULL;
+    g_p2z_qcur = -1;
+    if (!rtt_active() || !fx_in_mission()) { return; }
+    p2z_poll();
+    sb_render_blend_state(&bon, &bs, &bd);
+    tgt = (unsigned)g_rtt_bound; rtt_cur_dims(&rw, &rh);
+    zs = g_rtt_zsurf ? 1u : 0u; ate = fx_nv(0x300u, 0); zf = fx_nv(0x354u, 0x203u); z30c = fx_nv(0x30Cu, 0xFFu);
+    po = fx_nv(0x338u, 0);
+    key = g_im_shader * 16777619u ^ g_im_pshader * 40503u ^ (prim << 24) ^ (bs << 4) ^ (bd << 8) ^ (bon << 12)
+        ^ (ate << 13) ^ (rs_dmask << 14) ^ (tgt << 16) ^ (zf * 13u) ^ ((unsigned)rhw << 15) ^ ((unsigned)em << 28)
+        ^ (m3d_zenable << 30) ^ (zs << 31) ^ ((unsigned)zt << 27) ^ (z30c * 977u) ^ (po << 26) ^ (rs_cmask * 2246822519u);
+    for (i = 0; i < g_p2z_n; i++) { if (g_p2z[i].key == key) { e = &g_p2z[i]; break; } }
+    for (i = 0; i < nout; i++) {
+        const float *p = out[i].pos;
+        float Z = p[0]*mvp[2]+p[1]*mvp[6]+p[2]*mvp[10]+p[3]*mvp[14];
+        float W = p[0]*mvp[3]+p[1]*mvp[7]+p[2]*mvp[11]+p[3]*mvp[15];
+        if (W > 1e-6f) { Z /= W; if (Z < zmin) { zmin = Z; } if (Z > zmax) { zmax = Z; } }
+    }
+    if (!e) {
+        if (g_p2z_n >= P2Z_KEYS) { return; }
+        e = &g_p2z[g_p2z_n++];
+        memset(e, 0, sizeof *e);
+        e->key = key; e->vs = g_im_shader; e->ps = g_im_pshader; e->xp = sb_tex_xptr(); e->prim = prim;
+        e->rhw = (unsigned)rhw; e->em = (unsigned)em; e->tgt = tgt; e->rw = rw; e->rh = rh; e->zs = zs;
+        e->zen = m3d_zenable; e->zen30c = z30c; e->zf = zf; e->dm = rs_dmask; e->cm = rs_cmask; e->bon = bon; e->bs = bs; e->bd = bd;
+        e->ate = ate; e->zt = (unsigned)zt; e->po = po; e->zmin = zmin; e->zmax = zmax;
+        HLOG_W("P2Z key f=%u k=%u vs=0x%X ps=0x%X xp=0x%X p=%u n=%u rhw=%d em=%d tgt=%u %ux%u zs=%u zen=%u nv30c=0x%X zf=0x%X dm=%u cm=0x%X bl=%u/%u/%u at=%u po=%u zt=%d z=[%.5f,%.5f]",
+               g_present_no, (unsigned)(e - g_p2z), e->vs, e->ps, e->xp, prim, nout, rhw, em, tgt, rw, rh, zs,
+               m3d_zenable, z30c, zf, rs_dmask, rs_cmask, bon, bs, bd, ate, po, zt, zmin, zmax);
+    }
+    e->draws++; e->verts += nout;
+    if (zmin < e->zmin) { e->zmin = zmin; }
+    if (zmax > e->zmax) { e->zmax = zmax; }
+    if (e->pixq < 32u || (e->draws & 63u) == 0u) { /* erste 32, danach jeder 64. Draw */
+        int q;
+        for (q = 0; q < 16; q++) { if (!g_p2z_qbusy[q]) { break; } }
+        if (q < 16) {
+            if (!g_p2z_q[q]) {
+                D3D11_QUERY_DESC qd; qd.Query = D3D11_QUERY_OCCLUSION; qd.MiscFlags = 0;
+                if (FAILED(ID3D11Device_CreateQuery(g_dev, &qd, &g_p2z_q[q]))) { g_p2z_q[q] = NULL; }
+            }
+            if (g_p2z_q[q]) {
+                ID3D11DeviceContext_Begin(g_ctx, (ID3D11Asynchronous *)g_p2z_q[q]);
+                g_p2z_qk[q] = (int)(e - g_p2z); g_p2z_qbusy[q] = 1; g_p2z_qcur = q;
+            }
+        }
+    }
+}
+
+void p2z_post(void)
+{
+    if (g_p2z_qcur >= 0) {
+        ID3D11DeviceContext_End(g_ctx, (ID3D11Asynchronous *)g_p2z_q[g_p2z_qcur]);
+        g_p2z_qcur = -1;
+    }
+}
+
+/* Je 1500 Bilder Summenzeile je Schluessel mit neuen Draws. */
+void p2z_present(void)
+{
+    static unsigned last;
+    unsigned i;
+    if (!g_cfg.p2z_diag) { return; }
+    p2z_poll();
+    if (g_present_no - last < 1500u) { return; }
+    last = g_present_no;
+    for (i = 0; i < g_p2z_n; i++) {
+        p2z_ent_t *e = &g_p2z[i];
+        if (e->draws == e->last) { continue; }
+        e->last = e->draws;
+        HLOG_W("P2Z sum f=%u k=%u draws=%u verts=%u pixq=%u pix/q=%u z=[%.5f,%.5f]",
+               g_present_no, i, e->draws, e->verts, e->pixq, e->pixq ? e->pix / e->pixq : 0u, e->zmin, e->zmax);
+    }
 }

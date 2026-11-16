@@ -86,6 +86,7 @@ typedef struct {
     char assist_fixture[1024]; /* W143: shot=5 Fixture (leer = Geraet/keine) */
     int bind_joydemo;          /* W226: --bind-shot=joy (Beispiel-HOTAS) */
     int bind_learn;            /* W228: --bind-learn (Lernmodus im Bild) */
+    int joy_cal;               /* W312: --joy-shot --joy-cal (Kalibrierung im Bild) */
     int bind_wheeldemo;        /* W260: --bind-shot=wheel (Mausrad-Beispiel) */
     int bind_stickdemo;        /* W271: --bind-shot=stick (Stick wie eine Maus) */
     int bind_sel;              /* W159: shot=3 Element-Index vorwaehlen + in
@@ -98,6 +99,7 @@ typedef struct {
     int alpha_on;              /* W272: --gui-start-dry --alpha-mission N (Teststart-Weg) */
     int alpha_mission, alpha_vt, alpha_diff, alpha_skip; /* W272: Wahl wie auf der Seite Alpha Test */
     char layout[4];            /* W281: --layout 0|a|b (leer = launcher_ui.cfg) */
+    char sim_mon[64];          /* W309: --sim-monitors "165" | "60/144,165" (Selbsttest/Shots; leer = echt) */
     char ui_size[12];          /* W281: --ui-size compact|normal|large */
     int lay_work_w, lay_work_h; /* W281: --work WxH (Einpassen testen, Pixel) */
 } gui_opts_t;
@@ -131,6 +133,8 @@ void w282_gui_selftest(const char *client_override, int *pass, int *fail);
 /* W283 ORIG-KEY-BIND: Vergleichstaste im Belegungsdialog (Ende von launcher_gui.c). */
 void w283_gui_selftest(const char *client_override, int *pass, int *fail);
 void w290_gui_selftest(const char *client_override, int *pass, int *fail); /* W290 QUICK-SHOT */
+void w303_gui_selftest(const char *client_override, int *pass, int *fail); /* W303 AUDIO-VOLUME */
+void w299_bind_selftest(int *pass, int *fail); /* W299 REPLAY: Zeile "Replay beenden" */
 
 #ifdef __cplusplus
 }

@@ -214,6 +214,7 @@ int imouse_selftest(void)
     { extern int imouse_w225_selftest(void); fail += imouse_w225_selftest(); }
     { extern int sb_state_w232_selftest(void); fail += sb_state_w232_selftest(); }
     { extern int imouse_w260_selftest(void); fail += imouse_w260_selftest(); }
+    { extern int imouse_w299_selftest(void); fail += imouse_w299_selftest(); }
     VERIFY(!bad_registration, "foreground-only Raw Input registration");
     VERIFY(physical == 0, "test focus never invokes physical cursor APIs");
     printf("W208 simulated physical calls=%d\n", physical);
@@ -475,5 +476,91 @@ int imouse_w260_selftest(void)
     imap_wheel_clear(&g_wheel);
     printf("W260 MOUSE-WHEEL (Fenster): Fehler=%d\n", fail);
 #undef W260
+    return fail;
+}
+
+/* W299 REPLAY: Fokus-Klick (Fenster per Klick aktiviert) geht nicht ans Spiel. Nur Fenster-Nachrichten,
+ * keine echte Maus, kein Fokuswechsel. */
+int imouse_w299_selftest(void)
+{
+    int fail = 0, saved_eat = g_cfg.focus_click_eat, saved_cap = g_cfg.mouse_capture;
+#define W299(c, name) do { if (!(c)) { printf("W299 FAIL: %s\n", name); fail++; } else { printf("W299 ok: %s\n", name); } } while (0)
+    menu(0);
+    g_cfg.focus_click_eat = 1;
+    g_cfg.mouse_capture = 0; /* reine Nachrichten-Tasten, keine Fang-Logik */
+    g_cfg.input_source = 1;
+    event(IMOUSE_MSG_TEST_FOCUS, 1);
+    imsg_clear();
+    g_eat_arm = 0; g_eat_up = 0; g_ma_nc = 0;
+    {
+        unsigned n0 = g_eat_n;
+        imouse_wndproc(g_mwnd, WM_MOUSEACTIVATE, (WPARAM)g_mwnd, MAKELPARAM(HTCLIENT, WM_LBUTTONDOWN));
+        event(WM_ACTIVATEAPP, TRUE); event(WM_ACTIVATE, WA_CLICKACTIVE); event(WM_SETFOCUS, 0);
+        event(WM_LBUTTONDOWN, MK_LBUTTON);
+        W299(!g_kdown[VK_LBUTTON] && g_eat_n == n0 + 1, "Klick-Aktivierung: Druck verschluckt");
+        event(WM_LBUTTONUP, 0);
+        W299(!g_kdown[VK_LBUTTON] && g_eat_up == 0, "Klick-Aktivierung: Loslassen verschluckt");
+        event(WM_LBUTTONDOWN, MK_LBUTTON);
+        W299(g_kdown[VK_LBUTTON] && g_eat_n == n0 + 1, "naechster Klick geht ans Spiel");
+        event(WM_LBUTTONUP, 0);
+        W299(!g_kdown[VK_LBUTTON], "naechster Klick losgelassen");
+    }
+    /* Tastatur-Aktivierung (Alt-Tab zurueck): erster Klick ist ein echter Klick. */
+    event(WM_ACTIVATE, WA_INACTIVE); event(WM_KILLFOCUS, 0);
+    event(IMOUSE_MSG_TEST_FOCUS, 1);
+    event(WM_ACTIVATE, WA_ACTIVE); event(WM_SETFOCUS, 0);
+    event(WM_LBUTTONDOWN, MK_LBUTTON);
+    W299(g_kdown[VK_LBUTTON], "Alt-Tab (WA_ACTIVE): erster Klick geht ans Spiel");
+    event(WM_LBUTTONUP, 0);
+    /* Klick auf Titel/Rahmen aktiviert: kein Client-Klick zu verschlucken. */
+    imouse_wndproc(g_mwnd, WM_MOUSEACTIVATE, (WPARAM)g_mwnd, MAKELPARAM(HTCAPTION, WM_LBUTTONDOWN));
+    event(WM_ACTIVATE, WA_CLICKACTIVE);
+    event(WM_LBUTTONDOWN, MK_LBUTTON);
+    W299(g_kdown[VK_LBUTTON], "Aktivierung ueber Titelleiste: Klick danach geht ans Spiel");
+    event(WM_LBUTTONUP, 0);
+    event(WM_ACTIVATE, WA_CLICKACTIVE);
+    event(WM_NCLBUTTONDOWN, HTCAPTION);
+    event(WM_LBUTTONDOWN, MK_LBUTTON);
+    W299(g_kdown[VK_LBUTTON], "Rahmen-Klick verwirft die Sperre");
+    event(WM_LBUTTONUP, 0);
+    /* Rechte Taste: eigenes Loslassen, linke bleibt unberuehrt. */
+    event(WM_ACTIVATE, WA_CLICKACTIVE);
+    event(WM_RBUTTONDOWN, MK_RBUTTON);
+    W299(!g_kdown[VK_RBUTTON] && g_eat_up == 2u, "Klick-Aktivierung rechts verschluckt");
+    event(WM_LBUTTONDOWN, MK_LBUTTON);
+    W299(g_kdown[VK_LBUTTON], "linke Taste danach normal");
+    event(WM_LBUTTONUP, 0); event(WM_RBUTTONUP, 0);
+    W299(!g_kdown[VK_LBUTTON] && !g_kdown[VK_RBUTTON] && g_eat_up == 0, "beide losgelassen");
+    /* Seitentaste X2. */
+    event(WM_ACTIVATE, WA_CLICKACTIVE);
+    event(WM_XBUTTONDOWN, MAKEWPARAM(0, XBUTTON2));
+    W299(!g_kdown[VK_XBUTTON2] && g_eat_up == 16u, "Klick-Aktivierung Seitentaste verschluckt");
+    event(WM_XBUTTONUP, MAKEWPARAM(0, XBUTTON2));
+    W299(g_eat_up == 0, "Seitentaste losgelassen");
+    /* Zeitablauf: kommt der Klick erst spaeter, ist er ein echter Klick. */
+    event(WM_ACTIVATE, WA_CLICKACTIVE);
+    g_eat_arm -= IMOUSE_EAT_MS + 10u; /* simuliert: Aktivierung liegt > 1 s zurueck */
+    event(WM_LBUTTONDOWN, MK_LBUTTON);
+    W299(g_kdown[VK_LBUTTON], "Zeitablauf: spaeter Klick geht ans Spiel");
+    event(WM_LBUTTONUP, 0);
+    /* Fokusverlust verwirft die Sperre. */
+    event(WM_ACTIVATE, WA_CLICKACTIVE);
+    event(WM_ACTIVATE, WA_INACTIVE);
+    event(IMOUSE_MSG_TEST_FOCUS, 1);
+    event(WM_LBUTTONDOWN, MK_LBUTTON);
+    W299(g_kdown[VK_LBUTTON], "Fokusverlust verwirft die Sperre");
+    event(WM_LBUTTONUP, 0);
+    /* Schalter aus: wie bisher. */
+    g_cfg.focus_click_eat = 0;
+    event(WM_ACTIVATE, WA_CLICKACTIVE);
+    event(WM_LBUTTONDOWN, MK_LBUTTON);
+    W299(g_kdown[VK_LBUTTON], "focus_click_eat=0: Klick-Aktivierung geht ans Spiel (bisher)");
+    event(WM_LBUTTONUP, 0);
+    imsg_clear();
+    g_eat_arm = 0; g_eat_up = 0;
+    g_cfg.focus_click_eat = saved_eat;
+    g_cfg.mouse_capture = saved_cap;
+    printf("W299 Fokus-Klick (Fenster): Fehler=%d\n", fail);
+#undef W299
     return fail;
 }

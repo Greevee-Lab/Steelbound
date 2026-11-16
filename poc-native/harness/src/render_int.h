@@ -159,6 +159,7 @@ extern rtt_entry_t g_rtt[RTT_MAX];
 extern int g_rtt_n;
 extern int g_rtt_bound;
 extern int g_rtt_dummy;
+extern unsigned g_rtt_zsurf; /* W313 P2-ZTEST */
 extern unsigned m3d_nframes;
 extern int m3d_on;
 extern unsigned m3d_ndraw;
@@ -219,11 +220,25 @@ int fx_nv_has(unsigned m);
 unsigned fx_nv(unsigned m, unsigned def);
 int fx_draw_pre(const im_vertex_t *out, unsigned nout, int rhw, unsigned prim, const float *mvp);
 void fx_draw_post(int q);
+int p2z_ztest(void); /* W313 P2-ZTEST */
+int p2z_scene_mission(void); /* DIAG(W313) */
+void p2z_note(const im_vertex_t *out, unsigned nout, int rhw, int em, unsigned prim, int zt, const float *mvp); /* DIAG(P2-ZTEST,W313) */
+void p2z_post(void);
+void p2z_present(void);
 /* DIAG(SHADE-BLOOM,W112, render_bloom.c): Bloom-Kette Draw fuer Draw */
 void bloom_diag_pre(const im_vertex_t *out, unsigned nout, unsigned nsrc, int rhw, unsigned prim, ID3D11ShaderResourceView *srv0);
 void bloom_diag_post(void);
 void bloom_diag_clear(unsigned flags, unsigned color);
 void bloom_diag_present(unsigned p);
+/* W302 AMD-ARTIFACTS (render_d3ddbg.c): Debug-Layer/WARP, nur Diagnose */
+UINT sb_d3ddbg_create_flags(void);
+D3D_DRIVER_TYPE sb_d3ddbg_driver(void);
+void sb_d3ddbg_init(ID3D11Device *dev, HRESULT create_hr_debug);
+void sb_d3ddbg_drain(unsigned present, const char *where);
+void sb_d3ddbg_stat(unsigned present, int force);
+void sb_d3ddbg_present(unsigned present);
+const char *sb_nan_hlsl_c(void); /* W302: NaN-Markierung/-Bereinigung vor "return c;" */
+void sb_nanmark_verts(const void *verts, unsigned n, unsigned prim, int rt);
 void fx_present(void);
 int fx_ps_add_c0(float c0[4]); /* FIX(FX-ORIG,W90): PS-Muster (V0+C0)*T0 -> C0 */
 int fx_ps_mul_c0(float c0[4]); /* FIX(LOAD-VT-COLOR,W257): PS-Muster V0*C0 -> C0 (nur explizit gesetzt) */
@@ -396,6 +411,9 @@ unsigned sb_pf_m0(void); /* DIAG(W251): Present-Nr des Missionsbeginns (pf_ring,
 void sb_render_blit(ID3D11Resource *src);
 void sb_edge_apply(ID3D11RenderTargetView *rtv); /* W107 EDGE-MODE (render_edge.c), unter ctx_lock */
 /* W191 UW-PERSP (render_cpersp.c): Cockpit-Perspektive (Desktop, Standard aus) */
+int sb_mv_frame(void);   /* W319 MONITOR-VIEW: 1 = dieses Bild Monitoransicht wirksam (0 ohne Speicherzugriff, wenn aus) */
+int sb_mv_draw(float mvp[16], int cls, const float *pos, size_t st, unsigned n, unsigned xp); /* 1 = Draw auslassen */
+int sb_mv_on(void);      /* W319: Monitoransicht sichtbar (Bildraender/Panini aus) */
 int sb_cp_frame(void);   /* 1 = dieses Bild Cockpit-Ansicht mit aktiver Option (0 ohne Speicherzugriff, wenn aus) */
 void sb_cp_draw(float mvp[16], int cls, float *pos, size_t st, unsigned n, unsigned prim); /* cls 0 = mesh, 1 = P2, 2 = RHW */
 void sb_interp_rec_cpersp(const float camera[3], const float *pos, size_t st, unsigned prim, unsigned nsrc);

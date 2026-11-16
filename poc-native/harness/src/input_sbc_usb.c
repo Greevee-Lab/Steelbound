@@ -814,3 +814,149 @@ void sbc_usb_autocal_build(const sbc_autocal_t *ac, const sbc_cal_t *cfg,
         }
     }
 }
+
+/* ---- W305 (JOY-HOTPLUG): Verbindungs-Automat (s. Header) ---- */
+
+static int link_usb_open(void *ctx, sbc_usb_dev_t **out)
+{
+    (void)ctx;
+    return sbc_usb_open(out);
+}
+
+static void link_usb_close(void *ctx, sbc_usb_dev_t *dev)
+{
+    (void)ctx;
+    sbc_usb_close(dev);
+}
+
+static int link_usb_poll(void *ctx, sbc_usb_dev_t *dev, sbc_state_t *st)
+{
+    (void)ctx;
+    return sbc_usb_poll(dev, st);
+}
+
+const sbc_link_ops_t sbc_link_usb_ops = {link_usb_open, link_usb_close,
+                                         link_usb_poll, NULL};
+
+void sbc_link_init(sbc_link_t *l, sbc_usb_dev_t *dev)
+{
+    if (!l) {
+        return;
+    }
+    memset(l, 0, sizeof *l);
+    l->dev = dev;
+    l->open_due = 1;
+    l->last_open_rc = dev ? SBC_OK : SBC_ERR_NODEVICE;
+    if (dev) {
+        l->ever_up = 1;
+        l->opens = 1;
+    }
+}
+
+unsigned sbc_link_step(sbc_link_t *l, const sbc_link_ops_t *ops, uint64_t now_ms,
+                       sbc_state_t *st, unsigned *sleep_ms)
+{
+    sbc_state_t s;
+    unsigned ev = 0;
+    int rc, k;
+    if (sleep_ms) {
+        *sleep_ms = 0;
+    }
+    if (!l || !ops || !st || !sleep_ms) {
+        return 0;
+    }
+    if (!l->dev) {
+        sbc_usb_dev_t *dev = NULL;
+        if (!l->open_due && (int64_t)(now_ms - l->next_open_ms) < 0) {
+            uint64_t w = l->next_open_ms - now_ms;
+            *sleep_ms = (unsigned)(w > SBC_LINK_RETRY_MS ? SBC_LINK_RETRY_MS : w);
+            return 0;
+        }
+        l->open_due = 0;
+        l->open_tries++;
+        rc = ops->open(ops->ctx, &dev);
+        l->last_open_rc = rc;
+        if (rc == SBC_OK && dev) {
+            l->dev = dev;
+            l->io_err = 0;
+            l->opens++;
+            l->ever_up = 1;
+            l->lost = 1; /* erster Report: Taster-Sperre + SBC_LEV_BACK */
+            return SBC_LEV_OPENED;
+        }
+        l->next_open_ms = now_ms + SBC_LINK_RETRY_MS;
+        *sleep_ms = SBC_LINK_RETRY_MS;
+        return SBC_LEV_OPENFAIL;
+    }
+    memset(&s, 0, sizeof s);
+    rc = ops->poll(ops->ctx, l->dev, &s);
+    l->last_poll_rc = rc;
+    if (rc == SBC_OK) {
+        l->io_err = 0;
+        l->last = s;
+        l->have_last = 1;
+        if (l->lost) {
+            /* Wiederverbindung: gedrueckte Taster sperren bis Loslassen. */
+            l->lost = 0;
+            l->guard[0] = s.buttons[0];
+            l->guard[1] = s.buttons[1];
+            l->guard[2] = (uint16_t)(s.buttons[2] & SBC_MOMENT_MASK2);
+            ev |= SBC_LEV_BACK;
+        }
+        for (k = 0; k < 3; k++) {
+            l->guard[k] &= s.buttons[k];
+            s.buttons[k] &= (uint16_t)~l->guard[k];
+        }
+        *st = s;
+        return ev | SBC_LEV_STATE;
+    }
+    if (rc == SBC_ERR_TIMEOUT) {
+        return 0; /* Idle (NAK): kein Fehler, Stand unveraendert */
+    }
+    *sleep_ms = SBC_LINK_ERR_MS;
+    if (rc != SBC_ERR_IO) {
+        return 0; /* Report-Fehler: wie bisher nur Pause, kein Schliessen */
+    }
+    l->io_err++;
+    if (!l->lost) {
+        l->lost = 1;
+        ev |= SBC_LEV_LOST;
+    }
+    if (l->io_err >= SBC_LINK_IO_MAX) {
+        ops->close(ops->ctx, l->dev);
+        l->dev = NULL;
+        l->closes++;
+        l->io_err = 0;
+        l->open_due = 0;
+        l->next_open_ms = now_ms + SBC_LINK_RETRY_MS;
+        ev |= SBC_LEV_CLOSED;
+    }
+    return ev;
+}
+
+void sbc_link_shutdown(sbc_link_t *l, const sbc_link_ops_t *ops)
+{
+    if (!l || !ops) {
+        return;
+    }
+    if (l->dev) {
+        ops->close(ops->ctx, l->dev);
+        l->dev = NULL;
+        l->closes++;
+    }
+}
+
+void sbc_usb_neutral_hold(const sbc_state_t *last, int have_last, sbc_state_t *out)
+{
+    if (!out) {
+        return;
+    }
+    memset(out, 0, sizeof *out);
+    out->aiming_x = 0x80;
+    out->aiming_y = 0x80;
+    out->tuner = 0xFF; /* > 12: Hook behaelt den Tastatur-/letzten Tuner */
+    if (last && have_last) {
+        out->buttons[2] = (uint16_t)(last->buttons[2] & SBC_TOGGLE_MASK2);
+        out->tuner = last->tuner;
+    }
+}

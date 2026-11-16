@@ -728,6 +728,12 @@ static void cfg_key(const char *path, const char *key, char *o, size_t cap)
     free(b);
 }
 
+static const char *g_ld_devices; /* W312 */
+void ld_pkg_set_devices(const char *txt)
+{
+    g_ld_devices = txt;
+}
+
 int ld_pkg_build(const char *client_dir, const char *packs_json, ld_pkg_t *r)
 {
     char crash[LD_P], logs[LD_P], data[LD_P], uc[LD_P], base[LD_P], t[LD_P], stamp[32];
@@ -770,6 +776,10 @@ int ld_pkg_build(const char *client_dir, const char *packs_json, ld_pkg_t *r)
                     SB_EDITION_COMMUNITY ? "community" : "private", v && v[0] ? v : "dev", e1, e2,
                     sb_userdata_mode_name(sb_userdata_mode()), sb_userdata_mode_source());
         z_add_clean(z, r, &rt, "system.txt", big, bigcap, 0);
+    }
+    if (g_ld_devices && g_ld_devices[0]) { /* W312: Geraetezeilen ohne Werte */
+        _snprintf_s(big, bigcap, _TRUNCATE, "%s", g_ld_devices);
+        z_add_clean(z, r, &rt, "devices.txt", big, bigcap, 0);
     }
     /* settings_changed.txt */
     {

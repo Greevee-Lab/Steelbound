@@ -49,6 +49,10 @@ void audio_set_notify(au32 v, au32 count, au32 pNotifies);
 void audio_set_loop(au32 v, au32 start, au32 len);
 void audio_set_mixbins(au32 v, au32 pMixBins); /* volle Zuweisung (A7B audio_pan) */
 void audio_set_mixbin_volumes(au32 v, au32 pMixBins); /* Update (A7B audio_pan) */
+void audio_set_pan(au32 v, float l, float r); /* W298: Pan direkt (nur LoC-XACT-HLE) */
+/* W303 AUDIO-VOLUME: Lautstaerke-Kategorie der Stimme festlegen (AVOL_* aus
+ * audio_vol.h, 0 = automatisch aus Art/Kanaelen); LoC setzt sie je Cue. */
+void audio_set_ucat(au32 v, int cat);
 void audio_set_headroom(au32 v, au32 headroom); /* zusaetzliche Daempfung (audio_pan) */
 void audio_set_pitch(au32 v, int pitch); /* Xbox-Pitch -> Frequenz (audio_freq) */
 void audio_set_play_region(au32 v, au32 start, au32 len);

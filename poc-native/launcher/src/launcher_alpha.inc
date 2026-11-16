@@ -1,5 +1,5 @@
-/* launcher_alpha.inc - W272 ALPHA-TEST: Seite "Alpha Test" (Testwerkzeuge
- * der Alpha, nicht Teil des Originalspiels). Eingebunden in launcher_gui.c
+/* launcher_alpha.inc - W272 ALPHA-TEST: Seite "Test tools" (W301 BETA-VERSION,
+ * vorher "Alpha Test"; Testwerkzeuge, nicht Teil des Originalspiels). Eingebunden in launcher_gui.c
  * an einer Stelle vor den Selbsttests (nutzt die statischen Helfer: mk,
  * card, label, do_start_ex, client_running, user_cfg_path, nav_next ...;
  * Vorwaertsdeklarationen oben in launcher_gui.c). Logik ohne Fenster:
@@ -10,7 +10,9 @@
  *  - A/B-Schalter der Zwischenbild-Fixes (interp_zcons, interp_hlerp,
  *    interp_guard nur wenn der Client ihn kennt) in user.cfg; das ESC-Menue
  *    bietet sie nicht live an, sie gelten beim naechsten Start.
- *  - launcher_ui.cfg alpha_tools=0 blendet die Seite aus (spaetere Beta). */
+ *  - launcher_ui.cfg test_tools=0 blendet die Seite aus (W301; alte cfg mit
+ *    alpha_tools=0 gelten weiter, ui_cfg_load_tools). Seitenname "tools",
+ *    Alias "alpha" (--ui-shot/--page). */
 
 #define ID_AL_MIS 1300
 #define ID_AL_VT 1301
@@ -222,7 +224,7 @@ static void alpha_ab_toggle(int id, const char *key)
     set_status_k(LT("gui.alpha_ab_saved"), 1);
 }
 
-/* launcher_ui.cfg alpha_tools: 0 = Seite + Navigation aus. */
+/* launcher_ui.cfg test_tools (Rueckfall alpha_tools): 0 = Seite + Navigation aus. */
 static void alpha_tools_apply(void)
 {
     uictl_t *n = ui_find(ID_NAV0 + P_ALPHA);
@@ -260,7 +262,7 @@ static void paint_alpha(void)
     /* Kopf: klar als Testwerkzeug gekennzeichnet */
     card(CX0, CY0, CW, 66, LT("gui.alpha_head"));
     L_fill(CX0 + CW - 18 - 64, CY0 + 14, 64, 20, C_ACCENT, 34, 3);
-    L_text(F_TINY, "ALPHA", CX0 + CW - 18 - 64, CY0 + 14, 64, 20, C_ACCENT,
+    L_text(F_TINY, "BETA", CX0 + CW - 18 - 64, /* W301: Beta statt Alpha */ CY0 + 14, 64, 20, C_ACCENT,
            DT_CENTER | DT_VCENTER | DT_SINGLELINE);
     label1(F_SMALL, LT("gui.alpha_notice"), CX0 + 18, CY0 + 36, CW - 36, 20, C_WARN);
 
@@ -439,7 +441,8 @@ void alpha_gui_selftest(const char *client_override, int *pass, int *fail)
         }
         if (ok && (nav_next(P_ADV, 1) != P_ALPHA || nav_next(P_ALPHA, 1) != P_PLAY ||
                    nav_next(P_PLAY, -1) != P_ALPHA || gui_page_from_name("alpha") != P_ALPHA ||
-                   strcmp(gui_page_key(P_ALPHA), "alpha") != 0)) {
+                   gui_page_from_name("tools") != P_ALPHA || /* W301: neuer Name + alter Alias */
+                   strcmp(gui_page_key(P_ALPHA), "tools") != 0)) {
             ok = 0;
             strcpy_s(why, sizeof why, "Navigation/Name");
         }
@@ -536,15 +539,36 @@ void alpha_gui_selftest(const char *client_override, int *pass, int *fail)
             g_alpha_tools = 0;
             ui_cfg_save_bg(d, 1);
             g_alpha_tools = 1;
-            if (ui_cfg_load_key(d, "alpha_tools", 1) != 0 || ui_cfg_load_bg(d) != 1) {
+            if (ui_cfg_load_tools(d) != 0 || ui_cfg_load_key(d, "test_tools", 1) != 0 || ui_cfg_load_bg(d) != 1) {
                 ok = 0;
-                strcpy_s(why, sizeof why, "launcher_ui.cfg alpha_tools");
+                strcpy_s(why, sizeof why, "launcher_ui.cfg test_tools");
             }
             ui_cfg_path(d, p, sizeof p);
             u8_DeleteFile(p);
-            if (ok && ui_cfg_load_key(d, "alpha_tools", 1) != 1) {
+            if (ok && ui_cfg_load_tools(d) != 1) {
                 ok = 0;
-                strcpy_s(why, sizeof why, "alpha_tools Standard");
+                strcpy_s(why, sizeof why, "test_tools Standard");
+            }
+            /* W301: alte launcher_ui.cfg (nur alpha_tools) gilt weiter; test_tools gewinnt */
+            if (ok) {
+                FILE *f = NULL;
+                if (u8_fopen_s(&f, p, "w") == 0 && f) {
+                    fputs("bg_image=1\nalpha_tools=0\n", f);
+                    fclose(f);
+                }
+                if (ui_cfg_load_tools(d) != 0) {
+                    ok = 0;
+                    strcpy_s(why, sizeof why, "alte cfg alpha_tools=0 nicht gelesen");
+                }
+                if (ok && u8_fopen_s(&f, p, "w") == 0 && f) {
+                    fputs("alpha_tools=0\ntest_tools=1\n", f);
+                    fclose(f);
+                }
+                if (ok && ui_cfg_load_tools(d) != 1) {
+                    ok = 0;
+                    strcpy_s(why, sizeof why, "test_tools gewinnt nicht");
+                }
+                u8_DeleteFile(p);
             }
             {
                 wchar_t wd[1100];
@@ -559,7 +583,7 @@ void alpha_gui_selftest(const char *client_override, int *pass, int *fail)
         strcpy_s(why, sizeof why, "Fenster");
     }
     if (ok) {
-        printf("PASS W272 alpha page (navigation after Advanced, lists, page start args, no start when invalid/running, A/B -> user.cfg, alpha_tools=0 hides)\n");
+        printf("PASS W272 test tools page (navigation after Advanced, name tools + alias alpha, lists, page start args, no start when invalid/running, A/B -> user.cfg, test_tools=0 hides, old alpha_tools read)\n");
         (*pass)++;
     } else {
         printf("FAIL W272 alpha page: %s\n", why);

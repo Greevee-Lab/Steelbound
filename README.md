@@ -1,6 +1,6 @@
 # Steelbound
 
-[![Download](https://img.shields.io/badge/Download-latest%20alpha-ffb23e)](https://steelbound.dev/download.html)
+[![Download](https://img.shields.io/badge/Download-latest%20beta-ffb23e)](https://steelbound.dev/download.html)
 [![Website](https://img.shields.io/badge/Website-steelbound.dev-1a2026)](https://steelbound.dev)
 [![Discord](https://img.shields.io/badge/Discord-Join-5865F2?logo=discord&logoColor=white)](https://discord.gg/ExEH3gBbyw)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-Support-ff5e5b?logo=kofi&logoColor=white)](https://ko-fi.com/W7W2U4716)
@@ -45,7 +45,7 @@ The default preset **Original** (at your monitor's refresh rate) is the
 recommended start; on an older or weaker PC pick **Performance** on the
 **Graphics** page. More: [Getting started](poc-native/docs/community/GETTING_STARTED.md),
 [Controls](poc-native/docs/community/CONTROLS.md),
-[Alpha testing](poc-native/docs/community/ALPHA_TESTING.md),
+[Beta testing](poc-native/docs/community/BETA_TESTING.md),
 [FAQ](poc-native/docs/community/FAQ.md).
 
 ### System requirements
@@ -129,7 +129,7 @@ What helps us most:
 - what you expected and what happened instead.
 
 **Never attach game files** (ISO, XBE, extracted game data, saves).
-More details: [Alpha testing](poc-native/docs/community/ALPHA_TESTING.md).
+More details: [Beta testing](poc-native/docs/community/BETA_TESTING.md).
 
 ### Not a bug? Tell us how it feels
 
@@ -147,11 +147,11 @@ bis vor "## What Steelbound is"). Darunter: Änderungsliste und Diff zur Prüfun
 
 ## Known issues
 
-Current state of the alpha – no need to report these again, but new details
+Current state of the beta – no need to report these again, but new details
 are welcome in the existing issue:
 
 - **Bright patches or thin lines at frame rates above 30.** They only appear
-  in the in-between frames, are much rarer than in earlier alphas and I am
+  in the in-between frames, are much rarer than in earlier versions and I am
   working on the remaining cases. With **30 (original)** the picture is
   always clean. A report with **F9** (short video) helps most.
 - **HD texture packs are experimental**
@@ -235,7 +235,7 @@ are welcome in the existing issue:
 
 Player guides (English) are in `poc-native/docs/community/` (in a release
 archive: `docs/`): Getting started, Controls, Graphics and packs, VR, FAQ,
-and Alpha testing (what to test, where logs and crash reports are).
+and Beta testing (what to test, where logs and crash reports are).
 
 ## Packs
 

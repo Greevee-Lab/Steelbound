@@ -8,3 +8,6 @@
  * W275-Stubs "Netz nicht bereit". */
 int loc_net_install(void);
 void loc_net_tick(int waited_s);
+/* W297: Netz-Zustand fuer Testfolgen: 0 = Netz aus, 1 = Typ nicht gesehen, 2 = Typ gesehen (typ >= 256: nur Zaehler);
+ * typ 512: 3 = Lockstep aktiv (eigener 0x34-Rahmen < 1 s alt). */
+int loc_net_test_state(long *accepts, long *connects, int out, unsigned typ);

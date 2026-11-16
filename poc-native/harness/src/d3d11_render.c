@@ -7,6 +7,7 @@
  * RTT in render_rtt.c, Zensus in render_diag.c (gemeinsam: render_int.h).
  */
 #include "render_int.h"
+#include "sb_texhealth.h" /* W315 */
 #include "sb_profile.h" /* W229 SBA() */
 #include "render_fx_rem.h" /* W133 REM-FX */
 #include "sb_remaster.h" /* W103 REM-FRAME */
@@ -52,6 +53,7 @@ static float g_last_game_aspect, g_last_out_aspect;
 #include "sb_watermark.h" /* W219 WATERMARK */
 #include "sb_origview.h" /* W278 ORIG-FLAG: Einblendung */
 #include "sb_state.h" /* W232: sb_in_mission */
+#include "sbc_wire.h" /* W305 */
 int g_vr_blit; /* W134 VR-PROTO: sb_render_blit zeigt ein Augenbild (ohne Nachbearbeitung des Monobilds) */
 
 static LRESULT CALLBACK sb_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
@@ -75,6 +77,7 @@ static LRESULT CALLBACK sb_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CLOSE:
         sb_winmode_on_close(); /* W81: Exklusiv-Vollbild verlassen */
         HLOG_I("render: Fenster geschlossen -> Exit(0)");
+        sbc_wire_log_summary("Ende"); /* W305: nur sbc_usb=1 */
         hlog_close();
         ExitProcess(0);
         return 0;
@@ -521,9 +524,19 @@ void sb_render_init(void)
                     (g_cfg.window_mode == 0 && g_cfg.alt_enter_mode == 2)))
                        ? DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH : 0u;
     sd.Flags = g_swap_flags;
-    hr = D3D11CreateDeviceAndSwapChain(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0,
-                                       levels, 3, D3D11_SDK_VERSION, &sd,
-                                       &g_swap, &g_dev, &got, &g_ctx);
+    {   /* W302 AMD-ARTIFACTS: d3d_debug/d3d_warp (Standard 0 = Hardware ohne Flags wie bisher) */
+        HRESULT hdbg = S_OK;
+        hr = D3D11CreateDeviceAndSwapChain(NULL, sb_d3ddbg_driver(), NULL, sb_d3ddbg_create_flags(),
+                                           levels, 3, D3D11_SDK_VERSION, &sd,
+                                           &g_swap, &g_dev, &got, &g_ctx);
+        if (FAILED(hr) && sb_d3ddbg_create_flags()) { /* SDK-Schicht fehlt -> ohne Debug */
+            hdbg = hr;
+            hr = D3D11CreateDeviceAndSwapChain(NULL, sb_d3ddbg_driver(), NULL, 0,
+                                               levels, 3, D3D11_SDK_VERSION, &sd,
+                                               &g_swap, &g_dev, &got, &g_ctx);
+        }
+        if (SUCCEEDED(hr)) { sb_d3ddbg_init(g_dev, hdbg); }
+    }
     if (FAILED(hr)) {
         HLOG_E("render: D3D11CreateDeviceAndSwapChain (hr=0x%lX)", (long)hr);
         ExitProcess(7);
@@ -709,6 +722,7 @@ void sb_render_clear(unsigned flags, unsigned color, float z, unsigned stencil)
     rtt_note_clear(flags, color); /* RTT-Session (beide Modi) */
     if (g_cfg.bloom_diag) { bloom_diag_clear(flags, color); } /* DIAG(SHADE-BLOOM,W112) */
     if (g_cfg.dlg_text_upload && rtt_active()) { rq_text_on_clear(g_rtt[g_rtt_bound].surf, flags, color); } /* FIX(DLGTEXT2,W97) */
+    if (g_sba_loc && rtt_active()) { loc_render_on_clear(g_rtt[g_rtt_bound].surf, flags, color); } /* W297: LoC-Textebene */
     /* FIX(CLEAR-XB,W101/W177): Xbox-Clear-Flags (TARGET = 0xF0 je Kanal
      * R/G/B/A 0x10..0x80, ZBUFFER = 0x1, STENCIL = 0x2; Beleg W177: eigene
      * Disassembly D3DDevice_Clear 0x20DF80, s. render_int.h) statt PC-Werten
@@ -974,6 +988,7 @@ static void sb_render_present_body(unsigned flags)
     if (g_cfg.rq_perf) { rq_perf_present(n_present); } /* DIAG(SHADE-PERF,W80) */
     if (g_cfg.im_fast == 2) { im_fast_check_present(n_present); } /* DIAG(IM-PERF,W99) */
     if (g_cfg.fx_diag) { sb_ctx_enter(); fx_present(); sb_ctx_leave(); } /* DIAG(FX-ORIG,W90) */
+    if (g_cfg.p2z_diag) { sb_ctx_enter(); p2z_present(); sb_ctx_leave(); } /* DIAG(P2-ZTEST,W313) */
     if (g_cfg.mfx_diag || g_cfg.mfx_shots) { mfx_present(); } /* DIAG(MONITOR-FX,W105) */
     if (g_cfg.shot_mission || g_cfg.shfx_diag || g_cfg.shfx_ab) { sb_shfx_present(n_present); } /* DIAG(SHADE-FX,W121) */
     if (g_cfg.fxr_diag) { fxr_present(n_present); } /* DIAG(REM-FX,W133) */
@@ -1010,14 +1025,14 @@ static void sb_render_present_body(unsigned flags)
         if (pres) { sb_shfx_post(g_rtv, pres); ID3D11Resource_Release(pres); }
         sb_ctx_leave();
     }
-    if (!g_swap_res && fxr_ckp_active()) { /* W133 REM-FX: Explosions-Licht Cockpit (wie Cockpit-Licht W121) */
+    if (!g_swap_res && fxr_ckp_active() && !sb_mv_on()) { /* W319: kein Cockpit-Licht ohne Cockpit */ /* W133 REM-FX: Explosions-Licht Cockpit (wie Cockpit-Licht W121) */
         ID3D11Resource *pres = NULL;
         sb_ctx_enter();
         ID3D11RenderTargetView_GetResource(g_rtv, &pres);
         if (pres) { fxr_post(g_rtv, pres); ID3D11Resource_Release(pres); }
         sb_ctx_leave();
     }
-    if (!g_swap_res && (g_cfg.cockpit_panini || g_cfg.cockpit_width || g_cfg.cockpit_persp_cycle[0])) { /* W191 UW-PERSP: Panini der Cockpit-Ansicht vor der Randmaske (W235: + Breite) */
+    if (!g_swap_res && (g_cfg.cockpit_panini || g_cfg.cockpit_width || g_cfg.cockpit_persp_cycle[0]) && !sb_mv_on()) { /* W191 UW-PERSP: Panini der Cockpit-Ansicht vor der Randmaske (W235: + Breite) */
         float pd = sb_cp_panini_d();
         if (pd > 0.0f || sb_cp_width() > 1.0f) {
             ID3D11Resource *pres = NULL;
@@ -1034,7 +1049,7 @@ static void sb_render_present_body(unsigned flags)
         if (pres) { sb_xfx_vapor_apply(g_rtv, pres); ID3D11Resource_Release(pres); }
         sb_ctx_leave();
     }
-    if (g_cfg.edge_mode > 0 && !g_swap_res) {
+    if ((g_cfg.edge_mode > 0 || sb_mv_on()) && !g_swap_res) { /* W319: Monitoransicht immer mit schwarzem Rand ausserhalb der 4:3-Box */
         sb_ctx_enter();
         sb_edge_apply(g_rtv);
         sb_ctx_leave();
@@ -1095,6 +1110,8 @@ static void sb_render_present_body(unsigned flags)
     }
     if (g_shot_census) { g_shot_census = 0; sb_render_screenshot(n_present); }
     if (g_cfg.bloom_diag) { bloom_diag_present(n_present); } /* DIAG(SHADE-BLOOM,W112) */
+    if (g_cfg.d3d_debug || g_cfg.interp_shots_mrel > 0 || g_cfg.interp_shots_scene[0]) { sb_d3ddbg_present(n_present); } /* DIAG(AMD-ARTIFACTS,W302; W315 Szene) */
+    sb_th_present(n_present); /* W315 Textur-Gesundheit: VRAM alle 1800 Presents */
     sb_ctx_leave();
     /* M2c: alle 100 Presents (fps120_probe nutzt "IM draws="). */
     if ((n_present % 100) == 0) {
@@ -1377,7 +1394,7 @@ void sb_render_blit(ID3D11Resource *src)
         sb_ctx_leave();
     }
     sb_gp_mark(GP_FXPOST); /* DIAG(GPU-COST,W146) */
-    if (!g_vr_blit && fxr_ckp_active()) { /* W133 REM-FX: Explosions-Licht Cockpit auf jedes gezeigte Bild */
+    if (!g_vr_blit && fxr_ckp_active() && !sb_mv_on()) { /* W133 REM-FX: Explosions-Licht Cockpit auf jedes gezeigte Bild (W319: nicht in der Monitoransicht) */
         sb_ctx_enter();
         if (!g_swap_rtv &&
             FAILED(ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv))) {
@@ -1387,7 +1404,7 @@ void sb_render_blit(ID3D11Resource *src)
         sb_ctx_leave();
     }
     sb_gp_mark(GP_HUD); /* DIAG(GPU-COST,W146) */
-    if (!g_vr_blit && (g_cfg.cockpit_panini || g_cfg.cockpit_width || g_cfg.cockpit_persp_cycle[0]) &&
+    if (!g_vr_blit && (g_cfg.cockpit_panini || g_cfg.cockpit_width || g_cfg.cockpit_persp_cycle[0]) && !sb_mv_on() &&
         (sb_cp_panini_d() > 0.0f || sb_cp_width() > 1.0f)) { /* W191 UW-PERSP: Panini auf jedes gezeigte Bild (auch Pause-Standbild), W235: + Breite */
         sb_ctx_enter();
         if (!g_swap_rtv &&
@@ -1406,7 +1423,7 @@ void sb_render_blit(ID3D11Resource *src)
         sb_xfx_vapor_apply(g_swap_rtv, g_swap_res);
         sb_ctx_leave();
     }
-    if (!g_vr_blit && g_cfg.edge_mode > 0) { /* W107 EDGE-MODE: Maske auf das gezeigte Bild (nach Verify/Wiedergabe) */
+    if (!g_vr_blit && (g_cfg.edge_mode > 0 || sb_mv_on())) { /* W319: Monitoransicht immer mit schwarzem Rand */ /* W107 EDGE-MODE: Maske auf das gezeigte Bild (nach Verify/Wiedergabe) */
         sb_ctx_enter();
         if (!g_swap_rtv &&
             FAILED(ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv))) {
@@ -1490,6 +1507,7 @@ void sb_render_present_raw(void)
     HRESULT hr;
     long long q0 = g_phud_meas ? rq_qpc() : 0;
     if (pf_on) { pf_capture(pf_note_t >= 1.0f ? 'x' : 'i'); } /* DIAG(POPIN,W91), unter ctx_lock */
+    if (g_cfg.gpu_burn > 0) { extern void sb_gpu_burn(void); sb_gpu_burn(); } /* DIAG(PERF-SPIKE,W318) */
     if (g_phud_meas) { sb_phud_present_pre(); } /* W122 PERF-HUD */
     hr = IDXGISwapChain_Present(g_swap, 0, 0);
     g_pd_last_q = rq_qpc(); /* W138 */

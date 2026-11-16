@@ -108,7 +108,10 @@ static int read_all(const char *path, char **buf, size_t *len)
 /* Eigene Zeilen setzen (lines NULL/n 0 = nur entfernen). Datei bleibt sonst
  * bytegleich (Zeilenenden je Zeile erhalten; neue Zeilen im Stil der Datei,
  * Default \n). */
-static int cfg_rewrite(const char *user_cfg, const char lines[][96], int n)
+typedef int (*cfg_owns_fn)(const char *key); /* W312: Zeilen-Besitzer */
+
+static int cfg_rewrite(const char *user_cfg, const char lines[][96], int n,
+                       cfg_owns_fn owns)
 {
     char *old_txt = NULL, *out = NULL, key[96];
     size_t old_len = 0, out_cap, out_len = 0;
@@ -206,7 +209,7 @@ static int cfg_rewrite(const char *user_cfg, const char lines[][96], int n)
             }
         }
         /* Eigene Keys in [input] entfernen (Ersatz folgt unten gebuendelt). */
-        if (in_input && line_key(lb, key, sizeof key) && assist_cfg_owns(key)) {
+        if (in_input && line_key(lb, key, sizeof key) && owns(key)) {
             continue;
         }
         if (out_len + sp[i].len + sp[i].tlen + 1 > out_cap) {
@@ -330,15 +333,15 @@ int assist_cfg_apply(const char *user_cfg, const char lines[][96], int n)
             return 1;
         }
     }
-    return cfg_rewrite(user_cfg, lines, n);
+    return cfg_rewrite(user_cfg, lines, n, assist_cfg_owns);
 }
 
 int assist_cfg_reset(const char *user_cfg)
 {
-    return cfg_rewrite(user_cfg, NULL, 0);
+    return cfg_rewrite(user_cfg, NULL, 0, assist_cfg_owns);
 }
 
-int assist_cfg_read(const char *user_cfg, char lines[][96], int cap)
+static int cfg_read_own(const char *user_cfg, char lines[][96], int cap, cfg_owns_fn owns)
 {
     char *txt = NULL, key[96];
     size_t len = 0, p = 0;
@@ -377,7 +380,7 @@ int assist_cfg_read(const char *user_cfg, char lines[][96], int cap)
             continue;
         }
         if (in_input && line_key(lb, key, sizeof key) &&
-            assist_cfg_owns(key)) {
+            owns(key)) {
             /* Wert normalisieren ("key=value", ohne Kommentar). */
             const char *eq = strchr(lb, '=');
             const char *v;
@@ -396,6 +399,43 @@ int assist_cfg_read(const char *user_cfg, char lines[][96], int cap)
     }
     free(txt);
     return n;
+}
+
+int assist_cfg_read(const char *user_cfg, char lines[][96], int cap)
+{
+    return cfg_read_own(user_cfg, lines, cap, assist_cfg_owns);
+}
+
+/* W312 JOY-CALIB: Joystick-Kalibrierung joy_cal0..joy_cal31 (HOTAS-Dialog). */
+int joycal_cfg_owns(const char *key)
+{
+    char *e;
+    long k;
+    if (!key || strncmp(key, "joy_cal", 7) != 0 || !key[7]) {
+        return 0;
+    }
+    k = strtol(key + 7, &e, 10);
+    return *e == '\0' && k >= 0 && k < 32 && key[7] >= '0' && key[7] <= '9';
+}
+
+int joycal_cfg_apply(const char *user_cfg, const char lines[][96], int n)
+{
+    int i;
+    if (n < 0) {
+        return 1;
+    }
+    for (i = 0; i < n; i++) {
+        char k[96];
+        if (!line_key(lines[i], k, sizeof k) || !joycal_cfg_owns(k)) {
+            return 1;
+        }
+    }
+    return cfg_rewrite(user_cfg, lines, n, joycal_cfg_owns);
+}
+
+int joycal_cfg_read(const char *user_cfg, char lines[][96], int cap)
+{
+    return cfg_read_own(user_cfg, lines, cap, joycal_cfg_owns);
 }
 
 /* ======================================================================

@@ -115,11 +115,24 @@ u32 __stdcall hook_DS_Wrapper106DE0(u32 a1, u32 a2, u32 a3,
 u32 __stdcall hook_DS_SetI3DL2Listener(u32 a1, u32 a2, u32 a3)
 {
     static u32 calls;
-    (void)a1;
-    (void)a2;
-    (void)a3;
     if (hlog_throttle(&calls)) {
         HLOG_T("DSB SetI3DL2Listener -> S_OK (stumm)");
+    }
+    if (g_cfg.audio_level_diag) { /* DIAG(W300 M1-START-SFX): angeforderter Hall-Raum (DSI3DL2LISTENER) */
+        static u32 last[12], nlog;
+        u32 d[12];
+        int ok = 0;
+        __try { memcpy(d, (const void *)(uintptr_t)a2, sizeof d); ok = 1; }
+        __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+        if (ok && memcmp(d, last, sizeof d) != 0 && nlog < 64u) {
+            nlog++;
+            memcpy(last, d, sizeof d);
+            HLOG_I("DIAG(I3DL2L) this=0x%X apply=%u room=%d roomhf=%d rolloff=%.2f decay=%.2f hfratio=%.2f "
+                   "refl=%d refldelay=%.3f reverb=%d revdelay=%.3f diff=%.1f dens=%.1f hfref=%.0f",
+                   a1, a3, (int)d[0], (int)d[1], *(float *)&d[2], *(float *)&d[3], *(float *)&d[4],
+                   (int)d[5], *(float *)&d[6], (int)d[7], *(float *)&d[8], *(float *)&d[9],
+                   *(float *)&d[10], *(float *)&d[11]);
+        }
     }
     return 0; /* S_OK */
 }

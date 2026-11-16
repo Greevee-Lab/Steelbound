@@ -40,6 +40,7 @@
 #include "sb_perfhud.h" /* W122 PERF-HUD */
 #include "render_fx_rem.h" /* W133 REM-FX */
 #include "vr.h" /* W134 VR-PROTO */
+#include "render_reproj.h" /* W295 WORLD-REPROJ */
 #include <math.h>
 
 #define IP_LISTS 4
@@ -92,6 +93,8 @@ typedef struct {
     unsigned vstart, nv;
     unsigned ib1, nsv;  /* W264 DRAW-OPT2: Indexpuffer-Abschnitt+1 (0 = Liste, Draw(nv)); Vertices im Tick-VB (indiziert: Quell-Vertices) */
     int rzb;          /* FIX(W284) interp_rawzc: Lerp-Strom N-1 aus B (Tick-N-Vertices mit Matrix N-1) statt aus A */
+    int rzm;          /* W317 INTERP-PAIR: Matrix N-1 = mva statt A->ops[match].mvp (nur mit rzb; Kamera-Bewegung bzw. Matrix des Mehrpass-Leiters) */
+    float mva[16];    /* W317: Matrix N-1 bei rzm */
     float pref[4][4]; /* 4 Bezugs-Vertices (erster, 1/3, 2/3, letzter): Plausibilitaet */
     float rn[4][3];   /* POPIN (W91): deren NDC x/y + w (einmal je Draw, fuer ip_cost) */
     unsigned sig, rawhash, outhash;
@@ -113,6 +116,8 @@ typedef struct {
     unsigned short vpg[4], rtl[2];
     float prj[4];
 } ip_op_t;
+/* W317 INTERP-PAIR: Matrix N-1 eines gelerpten Draws (rzm: eigene Matrix, sonst die des Partners a) */
+#define IP_AMVP(o, a) ((o)->rzm ? (o)->mva : (a)->mvp)
 
 /* W209: sparse originals, allocated only for CPU-shifted P2 draws. */
 typedef struct ip_cp_s {
@@ -520,13 +525,26 @@ static unsigned ip_bs_ser;
 unsigned g_ip_bs_idle, g_ip_bs_busy, g_ip_bs_new; /* DIAG(TICK-PERF,W125): TICKBLK */
 static int g_ip_bs_last_idle;
 
+/* PERF(PERF-SPIKE,W318) interp_bsets_imm=N: ohne Render-Thread (render_thread=0,
+ * AMD-Weg W302 ohne treibereigene Command Lists) spielt der Takt-Thread die
+ * Zwischenbilder direkt auf dem Immediate-Context ab; bei GPU-Last liest die GPU
+ * dann laenger an den Tick-Puffern, beide Reserve-Saetze sind belegt und das
+ * DISCARD-Map der 40-64-MB-Puffer blockiert den Spiel-Thread (W318_g50r0:
+ * ipmap 9-12 ms/Tick, 25,9 Ticks/s, 16,8 s Stillstand im Kampf M1). Dort gilt
+ * mindestens N Saetze (Standard 4 = IP_BS_MAX). interp_bsets=0 bleibt "aus". */
+static int ip_bsets_n(void)
+{
+    int n = g_cfg.interp_bsets;
+    if (n > 0 && g_cfg.render_thread <= 0 && g_cfg.interp_bsets_imm > n) { n = g_cfg.interp_bsets_imm; }
+    return n > IP_BS_MAX ? IP_BS_MAX : n;
+}
+
 static void ip_bset_rotate(ip_list_t *L)
 {
-    int n = g_cfg.interp_bsets, i, best = -1, empty = -1;
+    int n = ip_bsets_n(), i, best = -1, empty = -1; /* W318: interp_bsets_imm */
     unsigned bser = 0xFFFFFFFFu;
     ip_bset_t t;
     if (n <= 0) { return; }
-    if (n > IP_BS_MAX) { n = IP_BS_MAX; }
     if (!L->vb && !L->rqx && !L->rqc) { return; } /* erster Lauf: Liste legt neu an */
     for (i = 0; i < n; i++) {
         BOOL done = FALSE;
@@ -918,7 +936,7 @@ void sb_interp_prealloc(void)
         nl++;
         ip_gpu_alloc(L, 0); /* PERF(PERF-M2,W174) ip_vb_gpu: GPU-Kopien gleich mit anlegen */
     }
-    n = g_cfg.interp_bsets > IP_BS_MAX ? IP_BS_MAX : g_cfg.interp_bsets;
+    n = ip_bsets_n(); /* W318: interp_bsets_imm */
     for (k = 0; k < n && nl == IP_LISTS; k++) {
         if (ip_bs[k].used) { continue; }
         memset(&T, 0, sizeof T);
@@ -1321,7 +1339,7 @@ static int ip_init(void)
         bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     }
-    if (g_cfg.interp_diag >= 3) {
+    if (g_cfg.interp_diag >= 3 || sb_rp_want()) { /* W295: Draw-ID-Shader auch fuer interp_mode=reproj */
         static const char *kIP_DBG_PS =
             "cbuffer CB : register(b0) { row_major float4x4 mvp; uint has_tex; };\n"
             "cbuffer D : register(b1) { float4 dcol; };\n"
@@ -1340,7 +1358,7 @@ static int ip_init(void)
         }
         bd.ByteWidth = 16;
         if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &ip_dbg_cb))) { ip_dbg_cb = NULL; }
-        if (ip_dd_on()) { /* DIAG(W251): passt zu jedem VS (liest nur SV_Position) */
+        if (ip_dd_on() || sb_rp_want()) { /* DIAG(W251): passt zu jedem VS (liest nur SV_Position) */
             static const char *kIP_ID_PS =
                 "cbuffer D : register(b1) { float4 dcol; };\n"
                 "float4 main(float4 p : SV_Position) : SV_Target { return float4(dcol.rgb, 1.0); }\n";
@@ -2008,23 +2026,102 @@ enum { RZ_PT = 32 };
 static ID3D11RenderTargetView *rz_prt[RZ_PT];
 static ID3D11DepthStencilView *rz_pds[RZ_PT];
 static int rz_prr[RZ_PT][8], rz_pn, rz_povf;
+static unsigned rz_prc[RZ_PT][8]; /* W294 Bit 1: Anzahl Draws je Matrix-Paar der Eintraege */
+/* FIX(W294 LINE-STREAK) interp_streak Bit 1: traegt das Paar a (N-1) -> r (N) eine Kamerabewegung?
+ * P2-Draws im RT haben eine affine Bildraum-Matrix (die Kamera steckt schon in den Vertices), gleiche
+ * Matrizen liefern D = I. In P2-lastigen Zielen (M2: Meer, Boot) waren die 8 groessten gelerpten Draws
+ * alle so -> keine 3D-Kachel bestand den Welt-Test, obwohl sie in der Welt ruht. */
+static int ip_mvp_affine(const float m[16]) { return m[3] == 0.0f && m[7] == 0.0f && m[11] == 0.0f; }
+static int zc_cam_src(const ip_op_t *a, const ip_op_t *r)
+{
+    if (r->rzm) { return 0; } /* W317: mit der Kamera bewegt bzw. Folge-Durchgang traegt keine eigene Kamera */
+    if (!(g_cfg.interp_streak & 1)) { return 1; }
+    return !ip_mvp_affine(r->mvp) && memcmp(a->mvp, r->mvp, sizeof r->mvp) != 0;
+}
+/* W294 Bit 2: Kamera je Renderziel (Tiefenpuffer egal), damit auch Welt-Draws ohne Tiefenpuffer
+ * (Meeres-Kacheln) den Welt-Test bekommen. */
+static ID3D11DepthStencilView *rz_dkey(const ip_op_t *o) { return (g_cfg.interp_streak & 2) ? NULL : o->dsv; }
+static unsigned st_sk_rl, st_sk_rlcam, st_sk_rlofs, st_sk_nod, st_sk_ln; /* W294: Zaehler */
+
+/* W294 Bit 1: Kamera-Kandidaten nach Mehrheit statt Groesse. Ruhende Welt-Geometrie mit Matrix = VP
+ * (Kacheln, Gelaendestreifen) teilt sich bitgenau dasselbe Matrix-Paar (M_A, M_B); in M2 faehrt die Kamera
+ * mit dem Landungsboot, die groessten 3D-Draws sind Boot-Teile (D ~ I) und fahrende Mechs. Gezaehlt wird je
+ * Paar (gleiche Matrizen N und N-1) unter den gelerpten Kandidaten; die 8 haeufigsten Paare je Ziel
+ * (Gleichstand: groesseres n, dann Reihenfolge) liefern D. */
+enum { RZ_HB = 4096 };
+static int rz_hq[RZ_HB];
+static unsigned rz_hn[RZ_HB];
+static unsigned rz_pkey(const ip_list_t *A, const ip_op_t *r)
+{
+    const unsigned *u = (const unsigned *)r->mvp, *v = (const unsigned *)A->ops[r->match].mvp;
+    unsigned h = 2166136261u;
+    int i;
+    for (i = 0; i < 16; i++) { h = (h ^ u[i]) * 16777619u; h = (h ^ v[i]) * 16777619u; }
+    return h;
+}
+static int rz_psame(const ip_list_t *A, const ip_list_t *B, int q1, const ip_op_t *r)
+{
+    const ip_op_t *o1 = &B->ops[q1];
+    return memcmp(o1->mvp, r->mvp, sizeof r->mvp) == 0 &&
+           memcmp(A->ops[o1->match].mvp, A->ops[r->match].mvp, sizeof r->mvp) == 0;
+}
+static unsigned rz_pcount(const ip_list_t *A, const ip_list_t *B, const ip_op_t *r, int add, int q)
+{
+    unsigned h = rz_pkey(A, r) & (RZ_HB - 1u), k;
+    for (k = 0; k < RZ_HB; k++, h = (h + 1u) & (RZ_HB - 1u)) {
+        if (rz_hq[h] < 0) {
+            if (!add) { return 0; }
+            rz_hq[h] = q; rz_hn[h] = 1;
+            return 1;
+        }
+        if (rz_psame(A, B, rz_hq[h], r)) { if (add) { rz_hn[h]++; } return rz_hn[h]; }
+    }
+    return 0;
+}
+
 static void rz_cam_pre(const ip_list_t *A, const ip_list_t *B)
 {
     unsigned q;
     int x;
+    int maj = (g_cfg.interp_streak & 1) != 0; /* W294 */
     rz_pn = 0; rz_povf = 0;
+    if (maj) {
+        memset(rz_hq, 0xFF, sizeof rz_hq);
+        for (q = 0; q < B->nops; q++) {
+            const ip_op_t *r = &B->ops[q];
+            if (r->kind != IP_DRAW || r->why != IP_W_LERP || !r->flag || r->match < 0 || (unsigned)r->match >= A->nops) { continue; }
+            if (!zc_cam_src(&A->ops[r->match], r)) { continue; }
+            rz_pcount(A, B, r, 1, (int)q);
+        }
+    }
     for (q = 0; q < B->nops; q++) {
         const ip_op_t *r = &B->ops[q];
         int w, t = -1, *rr;
         if (r->kind != IP_DRAW || r->why != IP_W_LERP || !r->flag || r->match < 0 || (unsigned)r->match >= A->nops) { continue; }
-        for (x = 0; x < rz_pn; x++) { if (rz_prt[x] == r->rtv && rz_pds[x] == r->dsv) { t = x; break; } }
+        if (!zc_cam_src(&A->ops[r->match], r)) { continue; } /* W294 Bit 1 */
+        for (x = 0; x < rz_pn; x++) { if (rz_prt[x] == r->rtv && rz_pds[x] == rz_dkey(r)) { t = x; break; } }
         if (t < 0) {
             if (rz_pn >= RZ_PT) { rz_povf = 1; continue; }
             t = rz_pn++;
-            rz_prt[t] = r->rtv; rz_pds[t] = r->dsv;
+            rz_prt[t] = r->rtv; rz_pds[t] = rz_dkey(r);
             for (x = 0; x < 8; x++) { rz_prr[t][x] = -1; }
         }
         rr = rz_prr[t];
+        if (maj) { /* W294 Bit 1: haeufigste Matrix-Paare, je Paar ein Eintrag */
+            unsigned c = rz_pcount(A, B, r, 0, 0), *rc = rz_prc[t];
+            int dup = 0;
+            for (w = 0; w < 8 && rr[w] >= 0; w++) { if (rc[w] == c && rz_psame(A, B, rr[w], r)) { dup = 1; break; } }
+            if (dup) { continue; }
+            for (w = 0; w < 8; w++) {
+                if (rr[w] < 0 || c > rc[w] || (c == rc[w] && r->nv > B->ops[rr[w]].nv)) {
+                    int z;
+                    for (z = 7; z > w; z--) { rr[z] = rr[z - 1]; rc[z] = rc[z - 1]; }
+                    rr[w] = (int)q; rc[w] = c;
+                    break;
+                }
+            }
+            continue;
+        }
         for (w = 0; w < 8; w++) {
             if (rr[w] < 0 || r->nv > B->ops[rr[w]].nv) {
                 int z;
@@ -2039,7 +2136,7 @@ static void rz_cam_pre(const ip_list_t *A, const ip_list_t *B)
 static int rz_cam(const ip_list_t *A, const ip_list_t *B, const ip_op_t *o, double D[8][16])
 {
     int x, t = -1, n = 0;
-    for (x = 0; x < rz_pn; x++) { if (rz_prt[x] == o->rtv && rz_pds[x] == o->dsv) { t = x; break; } }
+    for (x = 0; x < rz_pn; x++) { if (rz_prt[x] == o->rtv && rz_pds[x] == rz_dkey(o)) { t = x; break; } }
     if (t < 0) { return 0; }
     for (x = 0; x < 8 && rz_prr[t][x] >= 0; x++) {
         const ip_op_t *r = &B->ops[rz_prr[t][x]];
@@ -2062,6 +2159,28 @@ static int rz_offset(const ip_op_t *a, const ip_op_t *o, float d[3])
             float e = o->pref[q][c] - a->pref[q][c] - d[c], m = fabsf(o->pref[q][c]) + fabsf(a->pref[q][c]) + fabsf(d[c]);
             if (fabsf(e) > 1e-5f * (1.0f + m)) { return 0; }
         }
+    }
+    return 1;
+}
+/* FIX(W294) interp_streak Bit 4: Versatz-Test fuer neu gelegte Gitter (Boden-/Wasserkacheln). Das Spiel legt
+ * Gelaende- und Meeresgitter in festen Schritten (5, 10, ...) neu um die Kamera; der Partner gleicher Signatur
+ * ist dann ein anderes Gitterstueck: waagerecht (x, z) um d verschoben, die Hoehe y aber verschieden
+ * (M2: Wellen bis ~0,01, M4: Gelaendereihe bis ~0,4). rz_offset (Toleranz ~1e-3 in allen Achsen) lehnte
+ * diese ab -> Vertex-Lerp ueber das Gitter = Kachel wandert/verformt sich, Naht zum Nachbarn. Hier:
+ * d = Versatz des ersten Bezugs-Vertex, x/z aller vier Bezugs-Vertices innerhalb 0,01 + 2 % von |d_xz|,
+ * y frei. rzb nutzt nur die Tick-N-Vertices und die Matrix N-1; der genaue Versatz geht nicht ein. */
+static int rz_offset_grid(const ip_op_t *a, const ip_op_t *o, float d[3])
+{
+    int q;
+    float tol;
+    for (q = 0; q < 4; q++) {
+        if (a->pref[q][3] != 1.0f || o->pref[q][3] != 1.0f) { return 0; }
+    }
+    d[0] = o->pref[0][0] - a->pref[0][0]; d[1] = o->pref[0][1] - a->pref[0][1]; d[2] = o->pref[0][2] - a->pref[0][2];
+    if (fabsf(d[0]) < 0.5f && fabsf(d[2]) < 0.5f) { return 0; } /* kein Gitterschritt (Wellen/Animation: Vertex-Lerp richtig) */
+    tol = 0.01f + 0.02f * (fabsf(d[0]) > fabsf(d[2]) ? fabsf(d[0]) : fabsf(d[2]));
+    for (q = 1; q < 4; q++) {
+        if (fabsf(o->pref[q][0] - a->pref[q][0] - d[0]) > tol || fabsf(o->pref[q][2] - a->pref[q][2] - d[2]) > tol) { return 0; }
     }
     return 1;
 }
@@ -2092,6 +2211,383 @@ static unsigned st_rz_nm, st_rz_nmno, st_rz_nmcam, st_rz_n;
 static double st_rz_ms, st_rz_max; /* W284: Zeit des rawzc-Blocks je Tick */
 static unsigned st_rz_relw, st_rz_rel, st_rz_noofs, st_rz_cam, st_rz_nocam, st_rz_other, st_rz_ln; /* FIX(W284) interp_rawzc: Zaehler */
 
+/* ---------- W317 INTERP-PAIR: robuste Zuordnung der Welt-Draws zwischen Tick N-1 und N ----------
+ * Befund W295/W294: Die Paarung nach Reihenfolge (gleiche Signatur, andere Eingangsdaten: ip_pick) bzw. nach
+ * rohem Bildsprung (interp_inst) vertauscht gleichartige Instanzen (Kacheln, neu gelegte Gitter, je Tick neu
+ * erzeugte Boden-Quads); ohne Partner wird exakt (Tick N) zwischen gelerpten Nachbarn gezeichnet (W251-Mischung).
+ * Hier (Bit 1): Kamerabewegung D = M_A^-1*M_B je Ziel aus der Mehrheit der Matrix-Paare (W294 Bit 1); fuer jeden
+ * Welt-Draw o die Lage seiner 4 Bezugs-Vertices in N-1, WENN er in der Welt ruht: c_pred = p_B*M_B*D^-1. Kosten zu
+ * einem Kandidaten a (gleiche Signatur und Ziel) = groesste Abweichung c_pred <-> p_A*M_A (Clip-Raum, je |w|
+ * normiert). Ruhende Objekte haben beim richtigen Partner Kosten ~0, falsche Instanzen nicht - unabhaengig von
+ * der Schwenkgeschwindigkeit. Zuordnung global gierig nach Kosten (sortiert, eindeutig): <= interp_pair_thr
+ * immer (ersetzt auch eine bestehende Paarung), bis interp_pair_mov nur gegenseitig beste/eindeutige Wahl und nur
+ * fuer bisher exakte Draws (bewegte Objekte). Ohne neuen Partner bleibt die alte Paarung (Ergebnis von W91/W251/
+ * W284/W294); bisher exakte werden mit der Kamera bewegt (Matrix N-1 = M_B*D^-1 auf die Tick-N-Vertices, rzm)
+ * statt exakt. Bit 2: Durchgaenge derselben Instanz folgen ihrem ersten Durchgang (gleiche Matrix N-1).
+ * Zensus (interp_pair_diag): Endstand der alten Zuordnung je Klasse x Ergebnis.
+ * Deterministisch: Kandidatenmengen haengen nicht von der Hash-Reihenfolge ab, Gleichstand nach Index. */
+enum { PR_NC = 6, PR_NO = 7, PR_T = 32, PR_HB = 14, PR_CMAX = 24 }; /* PR_CMAX: Kandidaten je Draw (Deckel, Zellen mit vielen gleichartigen Draws) */
+static const char *const kPR_CLS[PR_NC] = { "inst", "gitter", "quad", "vorab", "einzel", "ohne_kamera" };
+static const char *const kPR_OUT[PR_NO] = { "ok", "falsch", "verpasst", "neu", "bewegt", "exakt", "statisch" };
+static unsigned st_pz[PR_NC][PR_NO];
+static unsigned st_pr_ticks, st_pr_set, st_pr_pair, st_pr_raw, st_pr_cam, st_pr_keep, st_pr_follow,
+                st_pr_chg, st_pr_still, st_pr_ln, st_pr_lnd;
+static double st_pr_ms, st_pr_max, st_pr_ms1, st_pr_ms2, st_pr_ms3; /* W317: Zeit gesamt bzw. Kamera+A, Kandidaten, Zuordnung */
+typedef struct { ID3D11RenderTargetView *rtv; ID3D11DepthStencilView *dk; int ok, ref; unsigned nstat; double Di[16]; } pr_tg_t;
+static pr_tg_t pr_tg[PR_T];
+static int pr_ntg;
+typedef struct { float c; int o, a; } pr_pair_t;
+static float (*pr_pc)[4][4], (*pr_ac)[4][4], *pr_c1, *pr_c2, *pr_ac1, *pr_ac2;
+static int *pr_b1, *pr_ab1, *pr_hn, *pr_tgo, *pr_old;
+static unsigned *pr_hk;
+static int (*pr_acl)[3]; /* Rasterzelle (x, y, vor der Kamera) je A-Draw */
+static unsigned char *pr_in, *pr_at, *pr_orzb;
+static unsigned pr_capb, pr_capa, pr_cpp;
+static pr_pair_t *pr_pp;
+static int pr_hh[1u << PR_HB];
+
+static int pr_grow(void **p, unsigned n, size_t sz) { void *q = realloc(*p, (size_t)n * sz); if (!q) { return 0; } *p = q; return 1; }
+static int pr_tgt(const ip_op_t *o)
+{
+    int x;
+    ID3D11DepthStencilView *dk = rz_dkey(o);
+    for (x = 0; x < pr_ntg; x++) { if (pr_tg[x].rtv == o->rtv && pr_tg[x].dk == dk) { return x; } }
+    if (pr_ntg >= PR_T) { return -1; }
+    memset(&pr_tg[pr_ntg], 0, sizeof pr_tg[0]);
+    pr_tg[pr_ntg].rtv = o->rtv; pr_tg[pr_ntg].dk = dk; pr_tg[pr_ntg].ref = -1;
+    return pr_ntg++;
+}
+/* vorab transformiert (Clip-w = 1 an allen Bezugs-Vertices) bzw. affine Bildraum-Matrix (P2) */
+static int pr_pre(const ip_op_t *o)
+{
+    int q;
+    if (ip_mvp_affine(o->mvp)) { return 1; }
+    for (q = 0; q < 4; q++) { if (!(o->rn[q][2] > 0.999f && o->rn[q][2] < 1.001f)) { return 0; } }
+    return 1;
+}
+static float pr_cost(const float pc[4][4], const float ac[4][4])
+{
+    int q;
+    float m = 0.0f;
+    for (q = 0; q < 4; q++) {
+        float wa = ac[q][3], wp = pc[q][3], den, d;
+        if ((wa > 1e-6f) != (wp > 1e-6f)) { return IP_COST_INF; } /* Augenebene gekreuzt */
+        den = fmaxf(fabsf(wa), fabsf(wp));
+        if (den < 1e-3f) { den = 1e-3f; }
+        d = fmaxf(fabsf(pc[q][0] - ac[q][0]), fmaxf(fabsf(pc[q][1] - ac[q][1]), fabsf(pc[q][3] - ac[q][3]))) / den;
+        if (d > m) { m = d; }
+    }
+    return m;
+}
+/* Raster der Lage von Bezugs-Vertex 0 (Zellen 0,25 NDC, ausserhalb +-8 geklemmt) */
+static void pr_cell(const float c[4], int *cx, int *cy, int *s)
+{
+    float den = fmaxf(fabsf(c[3]), 1e-3f), x = c[0] / den, y = c[1] / den;
+    x = fminf(fmaxf(x, -8.0f), 8.0f); y = fminf(fmaxf(y, -8.0f), 8.0f);
+    *cx = (int)floorf(x * 4.0f); *cy = (int)floorf(y * 4.0f); *s = c[3] > 1e-6f;
+}
+static unsigned pr_hkey(unsigned sig, int cx, int cy, int s)
+{
+    unsigned h = sig * 2654435761u;
+    h ^= (unsigned)(cx + 64) * 40503u; h = (h ^ (h >> 13)) * 16777619u;
+    h ^= (unsigned)(cy + 64) * 9973u + (unsigned)s * 7919u;
+    return (h ^ (h >> 15)) & ((1u << PR_HB) - 1u);
+}
+static int pr_pcmp(const void *x, const void *y)
+{
+    const pr_pair_t *p = (const pr_pair_t *)x, *q = (const pr_pair_t *)y;
+    if (p->c != q->c) { return p->c < q->c ? -1 : 1; }
+    if (p->o != q->o) { return p->o < q->o ? -1 : 1; }
+    return p->a < q->a ? -1 : (p->a > q->a);
+}
+static void pr_push(unsigned *npp, float c, int o, int a)
+{
+    if (*npp >= pr_cpp) {
+        unsigned nc = pr_cpp ? 2u * pr_cpp : 4096u;
+        if (!pr_grow((void **)&pr_pp, nc, sizeof *pr_pp)) { return; }
+        pr_cpp = nc;
+    }
+    pr_pp[*npp].c = c; pr_pp[*npp].o = o; pr_pp[*npp].a = a; (*npp)++;
+}
+static int pr_cand_a(const ip_op_t *a) { return a->kind == IP_DRAW && a->cls && !a->nolerp; }
+static void pr_mul_di(float out[16], const float m[16], const double Di[16])
+{
+    int r, c;
+    for (r = 0; r < 4; r++) {
+        for (c = 0; c < 4; c++) {
+            out[r * 4 + c] = (float)(m[r * 4 + 0] * Di[0 * 4 + c] + m[r * 4 + 1] * Di[1 * 4 + c] +
+                                     m[r * 4 + 2] * Di[2 * 4 + c] + m[r * 4 + 3] * Di[3 * 4 + c]);
+        }
+    }
+}
+static const char *pr_why(unsigned w)
+{
+    return w == IP_W_LERP ? "lerp" : w == IP_W_RAWLERP ? "rawlerp" : w == IP_W_NOMATCH ? "nomatch" :
+           w == IP_W_RAWCHG ? "rawchg" : w == IP_W_REJECT ? "reject" : w == IP_W_STATIC ? "static" : "?";
+}
+
+static void ip_pair_robust(ip_list_t *A, ip_list_t *B)
+{
+    const int on = g_cfg.interp_pair & 1, diag = g_cfg.interp_pair_diag > 0;
+    const float thr = g_cfg.interp_pair_thr, mov = g_cfg.interp_pair_mov;
+    unsigned i, j, npp = 0;
+    int x;
+    LONGLONG q0 = ip_now(), q1;
+    if (g_cfg.vr_enable || g_cfg.interp_mode != 0 || !(g_cfg.interp_streak & 1)) { return; }
+    if (pr_capb < B->nops) {
+        if (!pr_grow((void **)&pr_pc, B->nops, sizeof *pr_pc) || !pr_grow((void **)&pr_c1, B->nops, sizeof *pr_c1) ||
+            !pr_grow((void **)&pr_c2, B->nops, sizeof *pr_c2) || !pr_grow((void **)&pr_b1, B->nops, sizeof *pr_b1) ||
+            !pr_grow((void **)&pr_in, B->nops, sizeof *pr_in) || !pr_grow((void **)&pr_tgo, B->nops, sizeof *pr_tgo) ||
+            !pr_grow((void **)&pr_old, B->nops, sizeof *pr_old) || !pr_grow((void **)&pr_orzb, B->nops, sizeof *pr_orzb)) { return; }
+        pr_capb = B->nops;
+    }
+    if (pr_capa < A->nops) {
+        if (!pr_grow((void **)&pr_ac, A->nops, sizeof *pr_ac) || !pr_grow((void **)&pr_ac1, A->nops, sizeof *pr_ac1) ||
+            !pr_grow((void **)&pr_ac2, A->nops, sizeof *pr_ac2) || !pr_grow((void **)&pr_ab1, A->nops, sizeof *pr_ab1) ||
+            !pr_grow((void **)&pr_hn, A->nops, sizeof *pr_hn) || !pr_grow((void **)&pr_hk, A->nops, sizeof *pr_hk) ||
+            !pr_grow((void **)&pr_at, A->nops, sizeof *pr_at) || !pr_grow((void **)&pr_acl, A->nops, sizeof *pr_acl)) { return; }
+        pr_capa = A->nops;
+    }
+    /* 1. Kamera je Ziel: haeufigstes Matrix-Paar gelerpter 3D-Draws (W294 Bit 1); steht die Kamera (mehr ruhende
+     *    als bewegte Welt-Draws), D = I. */
+    rz_cam_pre(A, B);
+    pr_ntg = 0;
+    for (i = 0; i < B->nops; i++) {
+        const ip_op_t *o = &B->ops[i];
+        pr_tgo[i] = -1;
+        if (o->kind != IP_DRAW || !o->cls || o->nolerp) { continue; }
+        pr_tgo[i] = pr_tgt(o);
+        if (pr_tgo[i] >= 0 && o->why == IP_W_STATIC && !pr_pre(o)) { pr_tg[pr_tgo[i]].nstat++; }
+    }
+    for (x = 0; x < pr_ntg; x++) {
+        pr_tg_t *g = &pr_tg[x];
+        int t, k;
+        unsigned cnt = 0;
+        for (t = 0; t < rz_pn; t++) { if (rz_prt[t] == g->rtv && rz_pds[t] == g->dk) { break; } }
+        if (t < rz_pn && rz_prr[t][0] >= 0) { cnt = rz_prc[t][0]; }
+        if (cnt >= 4u && cnt >= g->nstat) {
+            const ip_op_t *r = &B->ops[rz_prr[t][0]];
+            if (zc_dmat(g->Di, r->mvp, A->ops[r->match].mvp)) { g->ok = 1; g->ref = r->match; } /* D^-1 = M_B^-1*M_A */
+        } else if (g->nstat >= 8u) {
+            for (k = 0; k < 16; k++) { g->Di[k] = (k % 5) == 0 ? 1.0 : 0.0; }
+            for (i = 0; i < B->nops && g->ref < 0; i++) { /* Bezug fuer match: ein ruhender Draw des Ziels */
+                const ip_op_t *o = &B->ops[i];
+                if (pr_tgo[i] == x && o->why == IP_W_STATIC && o->match >= 0 && (unsigned)o->match < A->nops) { g->ref = o->match; }
+            }
+            g->ok = g->ref >= 0;
+        }
+    }
+    /* 2. Lagen: A tatsaechlich (N-1), Raster ueber A */
+    memset(pr_hh, 0xFF, sizeof pr_hh);
+    for (j = A->nops; j-- > 0;) {
+        const ip_op_t *a = &A->ops[j];
+        int q, cx, cy, s;
+        pr_at[j] = 0; pr_ac1[j] = pr_ac2[j] = IP_COST_INF; pr_ab1[j] = -1;
+        if (!pr_cand_a(a) || pr_pre(a)) { continue; }
+        for (q = 0; q < 4; q++) { /* Clip x/y/w aus den beim Aufzeichnen berechneten NDC (z geht nicht ein) */
+            float w = a->rn[q][2];
+            if (w > 1e-6f) { pr_ac[j][q][0] = a->rn[q][0] * w; pr_ac[j][q][1] = a->rn[q][1] * w; pr_ac[j][q][2] = 0.0f; pr_ac[j][q][3] = w; }
+            else { ip_clip(a->pref[q], a->mvp, pr_ac[j][q]); }
+        }
+        pr_cell(pr_ac[j][0], &cx, &cy, &s);
+        pr_acl[j][0] = cx; pr_acl[j][1] = cy; pr_acl[j][2] = s;
+        pr_hk[j] = pr_hkey(a->sig, cx, cy, s);
+        pr_hn[j] = pr_hh[pr_hk[j]];
+        pr_hh[pr_hk[j]] = (int)j;
+    }
+    q1 = ip_now();
+    st_pr_ms1 += ip_ms(q0, q1);
+    /* Menge: Welt-3D-Draws mit Kamera (ohne P2/vorab, Effekte, statisch, Geometrie-Partner W73). Reserviert bleiben
+     * die Partner aller anderen Draws. */
+    for (i = 0; i < B->nops; i++) {
+        ip_op_t *o = &B->ops[i];
+        int in;
+        pr_in[i] = 0; pr_old[i] = -1; pr_b1[i] = -1; pr_c1[i] = pr_c2[i] = IP_COST_INF;
+        if (o->kind != IP_DRAW) { continue; }
+        in = o->cls && !o->nolerp && !o->fxk && pr_tgo[i] >= 0 && pr_tg[pr_tgo[i]].ok && !pr_pre(o) && o->why != IP_W_STATIC &&
+             !(o->why == IP_W_LERP && o->match >= 0 && A->ops[o->match].rawhash != o->rawhash);
+        if (in) {
+            pr_in[i] = 1;
+            pr_orzb[i] = (unsigned char)(o->rzb != 0);
+            if (o->flag && o->match >= 0) { pr_old[i] = o->match; }
+        } else if (o->match >= 0 && (unsigned)o->match < A->nops && o->why != IP_W_RAWCHG && o->why != IP_W_NOMATCH) {
+            pr_at[o->match] = 1;
+        }
+    }
+    /* 3. Kandidaten (9 Rasterzellen um die vorhergesagte Lage) und Kosten */
+    for (i = 0; i < B->nops; i++) {
+        ip_op_t *o = &B->ops[i];
+        float Mp[16];
+        int q, cx, cy, s, dx, dy, ncand = 0, nsame = 0;
+        if (!pr_in[i] && !(diag && o->kind == IP_DRAW && o->cls && !o->nolerp && pr_tgo[i] >= 0 && pr_tg[pr_tgo[i]].ok && !pr_pre(o))) { continue; }
+        pr_mul_di(Mp, o->mvp, pr_tg[pr_tgo[i]].Di);
+        for (q = 0; q < 4; q++) { ip_clip(o->pref[q], Mp, pr_pc[i][q]); }
+        pr_cell(pr_pc[i][0], &cx, &cy, &s);
+        for (dy = -1; dy <= 1 && ncand < PR_CMAX; dy++) {
+            for (dx = -1; dx <= 1 && ncand < PR_CMAX; dx++) {
+                unsigned h = pr_hkey(o->sig, cx + dx, cy + dy, s);
+                int jj;
+                for (jj = pr_hh[h]; jj >= 0 && ncand < PR_CMAX; jj = pr_hn[jj]) {
+                    const ip_op_t *a;
+                    float c;
+                    if (pr_acl[jj][0] != cx + dx || pr_acl[jj][1] != cy + dy || pr_acl[jj][2] != s) { continue; } /* Hash-Kollision */
+                    a = &A->ops[jj];
+                    if (a->sig != o->sig || a->rtv != o->rtv || a->nv != o->nv || a->topo != o->topo) { continue; }
+                    ncand++;
+                    if (a->rawhash == o->rawhash) { nsame++; }
+                    c = pr_cost(pr_pc[i], pr_ac[jj]);
+                    if (c < pr_c1[i] || (c == pr_c1[i] && jj < pr_b1[i])) { pr_c2[i] = pr_c1[i]; pr_c1[i] = c; pr_b1[i] = jj; }
+                    else if (c < pr_c2[i]) { pr_c2[i] = c; }
+                    if (!pr_in[i] || pr_at[jj] || c > mov) { continue; }
+                    if (c < pr_ac1[jj] || (c == pr_ac1[jj] && (int)i < pr_ab1[jj])) { pr_ac2[jj] = pr_ac1[jj]; pr_ac1[jj] = c; pr_ab1[jj] = (int)i; }
+                    else if (c < pr_ac2[jj]) { pr_ac2[jj] = c; }
+                    if (c <= thr) { pr_push(&npp, c, (int)i, jj); } /* Welt-Partner; bewegte nur als bester (unten) */
+                }
+            }
+        }
+        if (pr_in[i] && pr_old[i] < 0 && pr_c1[i] > thr && pr_c1[i] <= mov && pr_b1[i] >= 0 && !pr_at[pr_b1[i]]) { /* bewegt: nur fuer bisher exakte */
+            pr_push(&npp, pr_c1[i], (int)i, pr_b1[i]);
+        }
+        if (diag) { /* Zensus: Klasse und Ergebnis der bisherigen Zuordnung */
+            int cl, out;
+            const ip_op_t *m = (o->match >= 0 && (unsigned)o->match < A->nops) ? &A->ops[o->match] : NULL;
+            float cm = IP_COST_INF, dd[3];
+            if (nsame >= 2) { cl = 0; }
+            else if (m && m->rawhash != o->rawhash && m->nv == o->nv && pr_cand_a(m) && !pr_pre(m) && rz_offset_grid(m, o, dd)) { cl = 1; }
+            else if (o->nv <= 12u && !nsame) { cl = 2; }
+            else { cl = 4; }
+            if (m && o->flag && pr_cand_a(m) && !pr_pre(m)) {
+                float mc[4][4];
+                const ip_op_t *mm = o->rzb ? o : m; /* rzb: Tick-N-Vertices mit Matrix N-1 */
+                for (q = 0; q < 4; q++) { ip_clip(mm->pref[q], o->rzb ? IP_AMVP(o, m) : m->mvp, mc[q]); }
+                cm = pr_cost(pr_pc[i], mc);
+            }
+            if (o->why == IP_W_STATIC) { out = 6; }
+            else if (o->flag) { out = cm <= thr ? 0 : (pr_c1[i] <= thr ? 1 : 4); }
+            else { out = pr_c1[i] <= thr ? 2 : (!ncand ? 3 : 5); }
+            st_pz[cl][out]++;
+            if (g_cfg.interp_pair_diag >= 2 && out != 0 && out != 6 && st_pr_ln < 400u && (g_cfg.pf_ring <= 0 || sb_pf_active())) {
+                st_pr_ln++;
+                HLOG_I("INTERP pzd f=%u i=%u n=%u why=%s rzb=%d klasse=%s ergebnis=%s m=%d kosten_alt=%.4f best=%d kosten=%.4f zweit=%.4f kand=%d gleich=%d",
+                       B->frame, i, o->nv, pr_why(o->why), o->rzb, kPR_CLS[cl], kPR_OUT[out], o->match, (double)cm,
+                       pr_b1[i], (double)pr_c1[i], (double)pr_c2[i], ncand, nsame);
+            }
+        }
+    }
+    for (i = 0; diag && i < B->nops; i++) { /* Zensus: vorab transformierte und Ziele ohne Kamera nach altem Ergebnis */
+        const ip_op_t *o = &B->ops[i];
+        int cl, out;
+        if (o->kind != IP_DRAW || !o->cls || o->nolerp || pr_tgo[i] < 0) { continue; }
+        if (pr_pre(o)) { cl = 3; } else if (!pr_tg[pr_tgo[i]].ok) { cl = 5; } else { continue; }
+        out = o->why == IP_W_STATIC ? 6 : (o->flag ? 0 : 5);
+        st_pz[cl][out]++;
+    }
+    st_pr_ms2 += ip_ms(q1, ip_now());
+    q1 = ip_now();
+    if (!on) { goto done; }
+    /* 4. global gierig nach Kosten */
+    if (npp > 1u) { qsort(pr_pp, npp, sizeof *pr_pp, pr_pcmp); }
+    for (i = 0; i < B->nops; i++) { if (pr_in[i]) { B->ops[i].match = -1; } }
+    for (j = 0; j < npp; j++) {
+        const pr_pair_t *p = &pr_pp[j];
+        ip_op_t *o = &B->ops[p->o];
+        const ip_op_t *a = &A->ops[p->a];
+        if (o->match >= 0 || pr_at[p->a]) { continue; }
+        if (p->c > thr) { /* bewegter Partner: nur gegenseitig beste und eindeutige Wahl */
+            float lim = 2.0f * p->c + 0.01f;
+            if (pr_b1[p->o] != p->a || pr_ab1[p->a] != p->o || pr_c2[p->o] < lim || pr_ac2[p->a] < lim) { continue; }
+            if (!ip_plausible(a, o, g_cfg.interp_maxjump * (a->rawhash == o->rawhash ? 1.0f : 0.3f))) { continue; }
+        }
+        if (a->rawhash != o->rawhash && a->ib1 != o->ib1) { continue; } /* Vertex-Lerp nur gleich abgelegt (W264) */
+        o->match = p->a;
+        pr_at[p->a] = 1;
+    }
+    /* 5. Ergebnis je Draw */
+    for (i = 0; i < B->nops; i++) {
+        ip_op_t *o = &B->ops[i];
+        unsigned char oldwhy;
+        if (!pr_in[i]) { continue; }
+        st_pr_set++;
+        oldwhy = o->why;
+        o->rzb = 0; o->rzm = 0;
+        if (o->match >= 0) {
+            const ip_op_t *a = &A->ops[o->match];
+            if (a->rawhash == o->rawhash) {
+                if ((a->outhash == o->outhash && memcmp(a->mvp, o->mvp, sizeof o->mvp) == 0) || ip_still(a, o)) {
+                    o->flag = 0; o->why = IP_W_STATIC; st_pr_still++;
+                } else {
+                    o->flag = 1; o->why = IP_W_LERP; st_pr_pair++;
+                    if (a->ib1 != o->ib1) { o->rzb = 1; } /* gleiche Daten, anders abgelegt: Tick-N-Vertices mit Matrix N-1 (W264-Pruefung) */
+                }
+            } else { o->flag = 1; o->why = IP_W_RAWLERP; st_pr_raw++; }
+            if (pr_old[i] != o->match) { st_pr_chg++; }
+            continue;
+        }
+        if (pr_old[i] >= 0) { /* alte Paarung bleibt (bewegtes Objekt; Partner ggf. mit einem weltkonsistenten Draw geteilt) */
+            o->match = pr_old[i];
+            pr_at[pr_old[i]] = 1;
+            o->flag = 1;
+            o->rzb = pr_orzb[i]; /* W284/W294: Tick-N-Vertices mit Matrix N-1 des alten Partners */
+            o->why = oldwhy;
+            st_pr_keep++;
+            continue;
+        }
+        /* mit der Kamera bewegen: Matrix N-1 = M_B * D^-1 auf die Tick-N-Vertices */
+        pr_mul_di(o->mva, o->mvp, pr_tg[pr_tgo[i]].Di);
+        o->match = pr_tg[pr_tgo[i]].ref;
+        o->rzm = 1; o->rzb = 1; o->flag = 1; o->why = IP_W_LERP;
+        st_pr_cam++;
+        if (oldwhy == IP_W_LERP || oldwhy == IP_W_RAWLERP) { st_pr_chg++; }
+    }
+    for (i = 0; g_cfg.interp_pair_diag >= 2 && i < B->nops; i++) { /* DIAG: geaenderte Entscheidungen */
+        const ip_op_t *o = &B->ops[i];
+        if (!pr_in[i] || st_pr_lnd >= 2000u || (g_cfg.pf_ring > 0 && !sb_pf_active())) { continue; }
+        if (o->match == pr_old[i] && !o->rzm) { continue; }
+        st_pr_lnd++;
+        HLOG_I("INTERP prd f=%u i=%u n=%u alt=%d neu=%s/%d kamera=%d kosten=%.4f zweit=%.4f", B->frame, i, o->nv, pr_old[i], pr_why(o->why), o->match,
+               o->rzm, (double)pr_c1[i], (double)pr_c2[i]);
+    }
+    /* 6. Bit 2: Durchgaenge derselben Instanz (Ziel, Geometrie, Matrix) folgen dem ersten Durchgang */
+    if (g_cfg.interp_pair & 2) {
+        static int gh[1u << IP_HBITS];
+        memset(gh, 0xFF, sizeof gh);
+        for (i = 0; i < B->nops; i++) { /* pr_old wird hier Hash-Kette */
+            ip_op_t *o = &B->ops[i];
+            const ip_op_t *L, *la;
+            const float *Mprev;
+            unsigned h;
+            int k, lead = -1;
+            if (!pr_in[i]) { continue; } /* Gruppen innerhalb der Menge (Leiter = erster Durchgang darin) */
+            h = IP_HB(ip_mvpkey(o) ^ (o->gkey << 4));
+            for (k = gh[h]; k >= 0; k = pr_old[k]) {
+                const ip_op_t *e = &B->ops[k];
+                if (e->gkey == o->gkey && e->rtv == o->rtv && e->rawhash == o->rawhash && e->nv == o->nv &&
+                    memcmp(e->mvp, o->mvp, sizeof o->mvp) == 0) { lead = k; break; }
+            }
+            if (lead < 0) { pr_old[i] = gh[h]; gh[h] = (int)i; continue; }
+            L = &B->ops[lead];
+            if (!L->flag || L->match < 0 || (unsigned)L->match >= A->nops) { continue; }
+            la = &A->ops[L->match];
+            if (!L->rzb && la->rawhash != L->rawhash) { continue; } /* Leiter mit Vertex-Lerp: keine gemeinsame Matrix */
+            Mprev = IP_AMVP(L, la);
+            if (o->flag && o->match >= 0 && !o->rzb && A->ops[o->match].rawhash == o->rawhash &&
+                memcmp(A->ops[o->match].mvp, Mprev, sizeof o->mvp) == 0) { continue; } /* schon gleich */
+            memcpy(o->mva, Mprev, sizeof o->mva);
+            o->match = L->match;
+            o->rzm = 1; o->rzb = 1; o->flag = 1; o->why = IP_W_LERP;
+            st_pr_follow++;
+        }
+    }
+    st_pr_ms3 += ip_ms(q1, ip_now());
+done:
+    st_pr_ticks++;
+    {
+        double ms = ip_ms(q0, ip_now());
+        st_pr_ms += ms;
+        if (ms > st_pr_max) { st_pr_max = ms; }
+    }
+}
+
 static int ip_match(ip_list_t *A, ip_list_t *B, int log)
 {
     unsigned i, jp = 0, ndraw = 0, nclr = 0, nworld = 0, nmatch = 0, nlerp = 0,
@@ -2110,6 +2606,7 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
         o->match = -1;
         o->flag = 0;
         o->rzb = 0; /* W284 */
+        o->rzm = 0; /* W317 */
         o->why = IP_W_NONE;
         if (o->kind != IP_DRAW) { nclr++; continue; }
         ndraw++;
@@ -2243,7 +2740,42 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
             double Dx[16], e = 1.0, e0 = 1.0;
             float MBf[16];
             int t = -1, x, c, ofs;
-            if (o->kind != IP_DRAW || !o->cls || o->flag || !o->dsv) { continue; }
+            if (o->kind != IP_DRAW || !o->cls) { continue; }
+            if (!o->dsv && !(g_cfg.interp_streak & 2)) { continue; }
+            if (o->flag) {
+                /* FIX(W294 LINE-STREAK) interp_streak Bit 4: "rawlerp" mit reinem Eingangs-Versatz d != 0
+                 * (M2-Meer: Kacheln n=6, Gitter in 5er-Schritten neu um die Kamera gelegt, Partner nach
+                 * Reihenfolge). Der Vertex-Lerp schiebt die Kachel um d durch das Zwischenbild, die
+                 * rawchg-Nachbarn stehen in Tick-N-Lage -> Naht zwischen den Kachelreihen, durch die der
+                 * Hintergrund scheint (heller Strich, Breite ~ (1-t)). Passt M_A^-1*M_B zur Kamera (Kachel
+                 * ruht in der Welt), wie rawchg: Matrix-Lerp der Tick-N-Vertices (rzb). */
+                if (!(g_cfg.interp_streak & 4) || o->why != IP_W_RAWLERP || o->rzb || g_cfg.vr_enable ||
+                    o->match < 0 || (unsigned)o->match >= A->nops || ip_mvp_affine(o->mvp)) { continue; }
+                a = &A->ops[o->match];
+                if (a->kind != IP_DRAW || !a->cls || a->rtv != o->rtv || a->dsv != o->dsv || a->topo != o->topo ||
+                    !rz_offset_grid(a, o, d)) { continue; }
+                st_sk_rlofs++;
+                for (k = 0; k < nz; k++) { if (zr[k] == o->rtv && zd[k] == rz_dkey(o)) { t = (int)k; break; } }
+                if (t < 0) {
+                    if (nz >= RZ_T) { continue; }
+                    t = (int)nz++;
+                    zr[t] = o->rtv; zd[t] = rz_dkey(o);
+                    znr[t] = rz_cam(A, B, o, zD[t]);
+                }
+                if (znr[t] && zc_dmat(Dx, a->mvp, o->mvp)) {
+                    for (x = 0; x < znr[t]; x++) { double ex = zc_derr(Dx, zD[t][x]); if (ex < e0) { e0 = ex; } }
+                }
+                if (g_cfg.interp_diag >= 1 && st_sk_ln < 300u && (g_cfg.pf_ring <= 0 || sb_pf_active())) { /* DIAG(W294) */
+                    st_sk_ln++;
+                    HLOG_I("INTERP skd f=%u i=%u n=%u m=%d d=%.3f,%.3f,%.3f kameras=%d fehler_welt=%.6f", B->frame, i, o->nv, o->match,
+                           (double)d[0], (double)d[1], (double)d[2], znr[t], e0);
+                }
+                if (e0 > 1e-3) { st_sk_rlcam++; continue; }
+                o->rzb = 1;
+                st_sk_rl++;
+                continue;
+            }
+            if (!o->dsv) { st_sk_nod++; }
             if (o->why == IP_W_NOMATCH) {
                 /* nomatch: kein Vortick-Draw gleicher Signatur und Vertexzahl (z. B. Gelaende-Stueck mit anderer
                  * Vertexzahl, W284 pf7_0540). Welt-Test mit Kandidaten gleicher Signatur ohne Vertexzahl (sig0):
@@ -2255,11 +2787,11 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
                     s0ok = rz_s0_build(A) ? 1 : -1;
                 }
                 if (s0ok < 0) { continue; }
-                for (k = 0; k < nz; k++) { if (zr[k] == o->rtv && zd[k] == o->dsv) { t = (int)k; break; } }
+                for (k = 0; k < nz; k++) { if (zr[k] == o->rtv && zd[k] == rz_dkey(o)) { t = (int)k; break; } }
                 if (t < 0) {
                     if (nz >= RZ_T) { st_rz_other++; continue; }
                     t = (int)nz++;
-                    zr[t] = o->rtv; zd[t] = o->dsv;
+                    zr[t] = o->rtv; zd[t] = rz_dkey(o);
                     znr[t] = rz_cam(A, B, o, zD[t]);
                 }
                 if (!znr[t]) { st_rz_nocam++; continue; }
@@ -2288,11 +2820,11 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
             a = &A->ops[o->match];
             if (a->kind != IP_DRAW || !a->cls || a->rtv != o->rtv || a->dsv != o->dsv ||
                 a->topo != o->topo) { st_rz_other++; continue; }
-            for (k = 0; k < nz; k++) { if (zr[k] == o->rtv && zd[k] == o->dsv) { t = (int)k; break; } }
+            for (k = 0; k < nz; k++) { if (zr[k] == o->rtv && zd[k] == rz_dkey(o)) { t = (int)k; break; } }
             if (t < 0) {
                 if (nz >= RZ_T) { st_rz_other++; continue; }
                 t = (int)nz++;
-                zr[t] = o->rtv; zd[t] = o->dsv;
+                zr[t] = o->rtv; zd[t] = rz_dkey(o);
                 znr[t] = rz_cam(A, B, o, zD[t]);
             }
             if (!znr[t]) { st_rz_nocam++; continue; }
@@ -2442,6 +2974,7 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
                     int w;
                     if (r->kind != IP_DRAW || r->why != IP_W_LERP || !r->flag || r->rtv != o->rtv || r->dsv != o->dsv ||
                         r->match < 0 || (unsigned)r->match >= A->nops) { continue; }
+                    if (!zc_cam_src(&A->ops[r->match], r)) { continue; } /* W294 Bit 1 */
                     for (w = 0; w < ZC_R; w++) {
                         if (rr[w] < 0 || r->nv > B->ops[rr[w]].nv) {
                             int z;
@@ -2515,10 +3048,11 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
         if (nz) { st_zc_ticks++; st_zc_draws += nzd; }
         if (nzd <= nlerp) { nlerp -= nzd; }
     }
+    if (g_cfg.interp_pair || g_cfg.interp_pair_diag) { ip_pair_robust(A, B); } /* W317 INTERP-PAIR: nach W284/W294/W91/W251 (deren Ergebnis = alte Zuordnung) */
     for (i = 0; i < B->nops; i++) { /* W264 DRAW-OPT2: Lerp nur zwischen gleich abgelegten Draws (beide Liste oder beide indiziert) */
         ip_op_t *o = &B->ops[i];
         if (o->kind == IP_DRAW && o->flag && o->match >= 0 && (unsigned)o->match < A->nops &&
-            A->ops[o->match].ib1 != o->ib1) { o->flag = 0; if (nlerp) { nlerp--; } }
+            A->ops[o->match].ib1 != o->ib1 && !(o->rzb && (g_cfg.interp_streak & 4))) { o->flag = 0; if (nlerp) { nlerp--; } } /* W294: rzb liest nur B */
     }
     if (g_cfg.interp_eyediag > 0) { /* DIAG(W237): Zuordnungs-Ergebnis der Welt-Draws (cls=1) */
         for (i = 0; i < B->nops; i++) {
@@ -3052,7 +3586,7 @@ static int ip_ring_fill(const ip_cx_t *x, const ip_list_t *B, const ip_list_t *A
         }
         R->ofs[2u * i] = last0;
         if (lerp_ok && o->flag && o->match >= 0 && (unsigned)o->match < A->nops) {
-            memcpy(r, A->ops[o->match].mvp, 64);
+            memcpy(r, IP_AMVP(o, &A->ops[o->match]), 64); /* W317 rzm */
             memcpy(r + 64, &t, 4);
             if (last1 == 0xFFFFFFFFu || memcmp(r, p1, 80) != 0) {
                 memcpy(d + (size_t)n * IP_RING_SLOT, r, 80);
@@ -3824,7 +4358,7 @@ static void ip_vr_draw(const ip_cx_t *x, sb_vr_pass_t *p, const ip_op_t *o, cons
     ID3D11DeviceContext_VSSetShader(x->c, lerp ? ip_vr_vs2 : ip_vr_vs1, NULL, 0);
     cbs[0] = x->cb0; cbs[1] = x->cb1; cbs[2] = ip_vr_cb;
     ID3D11DeviceContext_VSSetConstantBuffers(x->c, 0, 3, cbs);
-    if (lerp) { ip_cb_write(x, x->cb1, a->mvp, 0, t, 1); }
+    if (lerp) { ip_cb_write(x, x->cb1, IP_AMVP(o, a), 0, t, 1); }
     *mode = -1;
     for (e = 0; e < p->neyes; e++) {
         ip_vr_eye_target(x, p, e, o);
@@ -4136,6 +4670,16 @@ static void ip_rh_inputs(const ip_list_t *B, int bi, const ip_list_t *A, int ai,
            x->deferred, B->nops, nl, hB, hM, hA, hS);
 }
 
+/* W295 WORLD-REPROJ (interp_mode=reproj): je Liste Welt-Schatten-Eintrag, Tiefe, letzte Welt-Op; waehrend der
+ * Vorbereitung am Swap: Teil-Wiedergaben bis zur letzten Welt-Op (ip_rp_prep, ip_rp_stop). */
+static int ip_rp_we[IP_LISTS] = { -1, -1, -1, -1 }, ip_rp_wd[IP_LISTS] = { -1, -1, -1, -1 };
+static unsigned ip_rp_last[IP_LISTS], ip_rp_ser[IP_LISTS];
+static unsigned st_rp_skip[4]; /* W295 DIAG: Ticks ohne Reprojektion (kein Welt-RT, keine Tiefe, kein Durchgang, Ressourcen) */
+static ID3D11RenderTargetView *ip_rp_idrtv; /* Welt-Schatten waehrend der Vorbereitung (ID-Durchgang: auf 0 loeschen) */
+static int ip_rp_prep;      /* Vorbereitung am Swap: 1 = exakte Teil-Wiedergabe (Farbe/Tiefe), 2 = Draw-ID */
+static unsigned ip_rp_stop; /* ... nur Ops 0..ip_rp_stop (bis zur letzten Welt-Op vor der Komposition) */
+#define IP_RP_ISW(o, rw, rd) ((((o)->kind == IP_DRAW || (o)->kind == IP_CLR_RTV) && (o)->sh_rtv && (o)->sh_rtv == (rw)) ||     ((rd) && !(o)->sh_rtv && (o)->kind != IP_CLR_RTV && (o)->sh_dsv == (rd)))
+
 static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, int dbg, const ip_cx_t *x)
 {
     int cps = -1; /* DIAG: 1 = Diagnose-PS gebunden */
@@ -4170,6 +4714,9 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
     ID3D11Buffer *bvb, *avb = NULL; /* W174: Tick-VB von B/A (GPU-Kopie oder DYNAMIC) */
     ID3D11GeometryShader *cgd = NULL; /* FIX(W265 LINE-GUARD): gebundener Waechter-GS */
     int gdon, gdq = -1;
+    ID3D11RenderTargetView *rpw = NULL; /* W295 WORLD-REPROJ: Welt-Schatten (Welt-Ops bis rplast durch den Warp ersetzen) */
+    ID3D11DepthStencilView *rpd = NULL;
+    unsigned rplast = 0xFFFFFFFFu;
     fxr_rep_begin(&fxs);
     memset(&rc, 0, sizeof rc);
     if (!dbg && !vrp) {
@@ -4210,7 +4757,13 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
          * eigenen Sampler) -> s0 des Spiels beim Aufnahme-Start von B. */
         ID3D11DeviceContext_PSSetSamplers(x->c, 0, 1, &B->smp0);
     }
-    if (!x->deferred && !vrp && !dbg) { cc_prep(B, bi, lerp_ok); } /* W146 GPU-COST: Scan + Startkopie-Maske */
+    if (lerp_ok && !dbg && !vrp && !ip_pl_on && !ip_ph.on && g_cfg.interp_mode == 1 && ip_rp_ser[bi] == B->serial &&
+             ip_rp_we[bi] >= 0 && sb_rp_ready(bi, B->serial)) {
+        rpw = g_ish[ip_rp_we[bi]].rtv;
+        rpd = ip_rp_wd[bi] >= 0 ? g_ish[ip_rp_wd[bi]].dsv : NULL;
+        rplast = ip_rp_last[bi];
+    }
+    if (!x->deferred && !vrp && !dbg && !ip_rp_prep) { cc_prep(B, bi, lerp_ok); } /* W146 GPU-COST: Scan + Startkopie-Maske */
     if (vrp && vrp->wtick) { /* W183 VR-FIX3: Aussenwelt im Spieltakt (Tick-Endstand), nur BB-Ops je Auge */
         static int vt_have;
         if (!vt_have || vt_ser != B->serial) { vt_scan(B, bi); vt_have = 1; }
@@ -4221,6 +4774,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
     }
     ip_sh_start(B, bi, A, ai, x);
     ip_sh_noskip = NULL;
+    if (ip_rp_prep == 2 && ip_rp_idrtv) { static const float k0[4] = { 0, 0, 0, 0 }; ID3D11DeviceContext_ClearRenderTargetView(x->c, ip_rp_idrtv, k0); } /* W295: ID 0 */
     if (ip_ph.on && ip_ph.init && ip_ph.tgt >= 0) { ip_ph.init(ip_ph.ctx, g_ish[ip_ph.tgt].sh); } /* W195: Kachel vorbelegen */
     if (vtk) {
         int k;
@@ -4228,7 +4782,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             if (vt_wr[k]) { ID3D11DeviceContext_CopyResource(x->c, (ID3D11Resource *)g_ish[k].sh, (ID3D11Resource *)g_ish[k].bak[bi]); }
         }
     }
-    if (!x->deferred && !vrp && !dbg) { ccm = cc_begin(B, bi, A, lerp_ok, x); } /* W146 GPU-COST */
+    if (!x->deferred && !vrp && !dbg && !ip_rp_prep) { ccm = cc_begin(B, bi, A, lerp_ok, x); } /* W146 GPU-COST */
     if (ip_gs_n >= 0) { ip_gs_mark((ID3D11RenderTargetView *)2); } /* DIAG(TICK-PERF,W125): Kopien fertig */
     if (ring) { /* PERF(PERF-M2,W174) ip_cb_ring: alle Draw-Konstanten in einem Map */
         ring = ip_ring_fill(x, B, A, lerp_ok, t, &rc);
@@ -4242,6 +4796,22 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
         int lerp;
         int phred = 0; /* W195: Viewport/Scissor dieser Op schon umgelenkt gesetzt */
         if ((ccm & 16) && cc_skip[i]) { continue; } /* W146 GPU-COST: ruhiges Ziel (Tick-Endstand kopiert) */
+        if (ip_rp_prep && i > ip_rp_stop) { break; } /* W295: Vorbereitung nur bis zur letzten Welt-Op vor der Komposition */
+        if (rpw && i <= rplast) { /* W295 WORLD-REPROJ: Welt-Ops bis zur Komposition durch die Reprojektion ersetzen */
+            if (IP_RP_ISW(o, rpw, rpd)) {
+                if (i == rplast) {
+                    sb_rp_warp(x->c, bi, rpw, g_ish[ip_rp_we[bi]].sh, t);
+                    crtv = (ID3D11RenderTargetView *)1; cdsv = (ID3D11DepthStencilView *)1; cbs = (ID3D11BlendState *)1;
+                    cds = (ID3D11DepthStencilState *)1; csref = 0xFFFFFFFFu; crs = (ID3D11RasterizerState *)1;
+                    csrv = (ID3D11ShaderResourceView *)1; csmp = (ID3D11SamplerState *)1; ctopo = 0xFFFFFFFFu;
+                    memset(&cvp, 0xFF, sizeof cvp); memset(&csc, 0xFF, sizeof csc);
+                    mode = -1; rq_dirty = 1; fxs.dirty = 1; cgd = NULL;
+                    rcur[0] = rcur[1] = rcur[2] = 0xFFFFFFFFu;
+                    if (!ring) { ID3D11DeviceContext_PSSetConstantBuffers(x->c, 0, 1, &x->cb0); }
+                }
+                continue;
+            }
+        }
         if (ip_pl_on && o->nolerp && (ip_pl_mfx & (o->nolerp == MFX_WASH ? 1u : 2u))) { ip_pl_nmfx++; continue; } /* W193: monitor_fx aus */
         if (ip_ph.on && ip_ph.hud_off && ip_ph_is_hud(o)) { ip_ph_nhud++; continue; } /* W290: HUD aus (nur Foto) */
         if (vtk && vt_skip[i]) { continue; } /* W183 VR-FIX3: RT-Op, Ziel hat den Tick-Endstand */
@@ -4553,7 +5123,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
                 ID3D11Buffer *cbs2[2];
                 UINT o1 = (o->rzb ? o->vstart : a->vstart) * stride; /* W284 rzb: Strom N-1 = Tick-N-Vertices */
                 if (ring) { ip_ring_bind(x, rofs[2u * i + 1u], 1, rcur, &rc); }
-                else if (var != 4u) { ip_cb_write(x, x->cb1, a->mvp, 0, t, 1); rc.nmap++; }
+                else if (var != 4u) { ip_cb_write(x, x->cb1, IP_AMVP(o, a), 0, t, 1); rc.nmap++; }
                 ID3D11DeviceContext_IASetInputLayout(x->c, r->layl);
                 ID3D11DeviceContext_VSSetShader(x->c, r->vsl, NULL, 0);
                 cbs2[0] = x->cb0; cbs2[1] = x->cb1;
@@ -4619,7 +5189,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             ID3D11Buffer *vbs[2];
             UINT strides[2], offs[2];
             if (ring) { ip_ring_bind(x, rofs[2u * i + 1u], 1, rcur, &rc); } /* PERF(PERF-M2,W174) */
-            else if (var != 4u) { ip_cb_write(x, x->cb1, a->mvp, 0, t, 1); rc.nmap++; }
+            else if (var != 4u) { ip_cb_write(x, x->cb1, IP_AMVP(o, a), 0, t, 1); rc.nmap++; }
             if (mode != 1) {
                 ID3D11Buffer *cbs2[2];
                 ID3D11DeviceContext_IASetInputLayout(x->c, ip_lay2);
@@ -5448,6 +6018,7 @@ static void ip_show(ip_list_t *A, ip_list_t *B, float t, const char *tag)
     double ms;
     int gpm = 0; /* DIAG(GPU-COST,W146) perf_gpass: Messung dieses Bildes */
     if (B->bbref < 0) { return; }
+    if ((g_cfg.reproj_opt & 16) && A && t < 1.0f) { t = 0.001f; } /* W295 DIAG: Zwischenbild ~ Tick N-1 (Pruefmass Bewegung) */
     if (g_cfg.vr_enable && sb_vr_preview_active() && sb_vr_preview_show(A, B, t)) {
         /* W134 VR-PROTO: Desktop-Vorschau (beide Augen bzw. ein Auge aus derselben Aufzeichnung) */
         t1 = ip_now();
@@ -5559,7 +6130,15 @@ static int ip_gpu_behind(void)
     if (g_cfg.interp_gpu_q <= 0) { return 0; }
     /* interp_gpu_tight=T: war der letzte Tick laenger als T ms, gilt Grenze 1
      * (nur Bilder einreihen, wenn die GPU alles Gezeigte fertig hat). */
-    if (f > 1u && g_cfg.interp_gpu_tight > 0 && ip_r_last_ms > (double)g_cfg.interp_gpu_tight) { f = 1u; g_ip_gtight++; }
+    {
+        /* PERF(PERF-SPIKE,W318) interp_gpu_tight_imm: ohne Render-Thread (render_thread=0, AMD-Weg) gilt die
+         * Grenze 1 ab T ms Tick (Standard 30), wenn interp_gpu_tight nicht gesetzt ist - zusammen mit
+         * interp_bsets_imm bleibt die GPU-Warteschlange flach und der Takt-Thread blockiert nicht unter
+         * ctx_lock (W318_v2 gegen g50r0: Spiel wartet 0,2 statt 2,1 s je 10 s, 30,0 statt 25,9 Ticks/s) */
+        int tight = g_cfg.interp_gpu_tight;
+        if (tight <= 0 && g_cfg.render_thread <= 0) { tight = g_cfg.interp_gpu_tight_imm; }
+        if (f > 1u && tight > 0 && ip_r_last_ms > (double)tight) { f = 1u; g_ip_gtight++; }
+    }
     if (ip_ev_n < f) { return 0; }
     if (f > IP_EV_N - 1u) { f = IP_EV_N - 1u; }
     q = ip_ev[(ip_ev_n - f) % IP_EV_N];
@@ -5922,6 +6501,11 @@ static int ip_mission(void)
 
 static void ip_stat_log(void)
 {
+    if (g_cfg.interp_mode == 1) { /* W295 WORLD-REPROJ */
+        if (g_cfg.reproj_diag >= 1) { HLOG_I("REPROJ ohne: welt=%u tiefe=%u durchgang=%u ressourcen=%u", st_rp_skip[0], st_rp_skip[1], st_rp_skip[2], st_rp_skip[3]); }
+        memset(st_rp_skip, 0, sizeof st_rp_skip);
+        sb_rp_stat_log();
+    }
     LONGLONG now = ip_now();
     double secs = ip_ms(st_t0, now) / 1000.0;
     if (secs <= 0.0) { secs = 1e-3; }
@@ -5961,6 +6545,28 @@ static void ip_stat_log(void)
             st_rz_nm = st_rz_nmno = st_rz_nmcam = 0;
         }
         st_rz_relw = st_rz_rel = st_rz_noofs = st_rz_cam = st_rz_nocam = st_rz_other = 0;
+    }
+    if (g_cfg.interp_pair || g_cfg.interp_pair_diag) { /* W317 INTERP-PAIR */
+        HLOG_I("INTERP pair2: modus=%d ticks=%u menge=%u partner=%u vertex=%u ruhend=%u alt_frei=%u kamera=%u folge=%u geaendert=%u zeit=%.3fms(max %.3f; kamera+A %.3f, kandidaten %.3f, zuordnung %.3f)",
+               g_cfg.interp_pair, st_pr_ticks, st_pr_set, st_pr_pair, st_pr_raw, st_pr_still, st_pr_keep, st_pr_cam, st_pr_follow, st_pr_chg,
+               st_pr_ticks ? st_pr_ms / st_pr_ticks : 0.0, st_pr_max, st_pr_ticks ? st_pr_ms1 / st_pr_ticks : 0.0,
+               st_pr_ticks ? st_pr_ms2 / st_pr_ticks : 0.0, st_pr_ticks ? st_pr_ms3 / st_pr_ticks : 0.0);
+        if (g_cfg.interp_pair_diag) {
+            int c;
+            for (c = 0; c < PR_NC; c++) {
+                const unsigned *z = st_pz[c];
+                HLOG_I("INTERP pairz: klasse=%s ok=%u falsch=%u verpasst=%u neu=%u bewegt=%u exakt=%u statisch=%u",
+                       kPR_CLS[c], z[0], z[1], z[2], z[3], z[4], z[5], z[6]);
+            }
+            memset(st_pz, 0, sizeof st_pz);
+        }
+        st_pr_ticks = st_pr_set = st_pr_pair = st_pr_raw = st_pr_still = st_pr_keep = st_pr_cam = st_pr_follow = st_pr_chg = 0;
+        st_pr_ms = st_pr_max = st_pr_ms1 = st_pr_ms2 = st_pr_ms3 = 0.0;
+    }
+    if (g_cfg.interp_streak) { /* FIX(W294 LINE-STREAK) */
+        HLOG_I("INTERP streak: modus=%d rawlerp_versatz=%u davon_welt=%u kamera_abw=%u rawchg_ohne_tiefe=%u",
+               g_cfg.interp_streak, st_sk_rlofs, st_sk_rl, st_sk_rlcam, st_sk_nod);
+        st_sk_rlofs = st_sk_rl = st_sk_rlcam = st_sk_nod = 0;
     }
     if (g_cfg.interp_eyediag > 0) { /* DIAG(W224) */
         HLOG_I("INTERP eyesum: draws=%u verts=%u (w-Wechsel in zwischengerechneten Draws, eyefix=%d)",
@@ -6740,6 +7346,122 @@ int sb_interp_photo_census(sb_ph_census_t *c, int log)
     return c->ok;
 }
 
+/* W295 WORLD-REPROJ: Tick B (Liste bi) fuer die Reprojektion vorbereiten (Spiel-Thread, ctx_lock, Immediate):
+ * Welt-RT wie der Foto-Zensus (meiste 3D-Draws, >= 8), Draw-ID-Wiedergabe nur der Welt-Ops (t = 1), Bewegungsdaten
+ * je Welt-Draw an render_reproj.c. Die naechste Wiedergabe setzt alle Schatten per Startkopie zurueck. */
+static sb_rp_op_t *ip_rp_ops;
+static unsigned ip_rp_cap;
+static void ip_rp_tick(ip_list_t *A, int ai, ip_list_t *B, int bi)
+{
+    unsigned cnt3[IP_SH_MAX], dcnt[IP_SH_MAX], i, n = 0, last = 0, nshare = 0;
+    int k, we = -1, wd = -1;
+    ID3D11RenderTargetView *rw;
+    ID3D11DepthStencilView *rd;
+    ip_rp_ser[bi] = 0;
+    ip_rp_we[bi] = ip_rp_wd[bi] = -1;
+    if (B->bbref < 0 || !ip_id_ps || !ip_dbg_cb) { return; }
+    memset(cnt3, 0, sizeof cnt3);
+    memset(dcnt, 0, sizeof dcnt);
+    for (i = 0; i < B->nops; i++) {
+        const ip_op_t *o = &B->ops[i];
+        if (o->kind == IP_DRAW && o->cls && (k = ip_ph_ent_rtv(o->sh_rtv)) >= 0 && k != B->bbref) { cnt3[k]++; }
+    }
+    { /* Hauptmonitor-Welt = flaechengroesstes RT mit >= 8 3D-Draws (Frontsicht/Sub-Monitore sind kleiner) */
+        unsigned ba = 0;
+        static int lastwe = -2;
+        for (k = 0; k < IP_SH_MAX; k++) {
+            D3D11_TEXTURE2D_DESC td;
+            unsigned ar;
+            if (cnt3[k] < 8u || !g_ish[k].sh) { continue; }
+            ID3D11Texture2D_GetDesc(g_ish[k].sh, &td);
+            ar = td.Width * td.Height;
+            if (we < 0 || ar > ba || (ar == ba && cnt3[k] > cnt3[we])) { we = k; ba = ar; }
+        }
+        if (we != lastwe && g_cfg.reproj_diag >= 1) {
+            static unsigned nl;
+            if (nl++ < 40u) { HLOG_I("REPROJ welt f=%u ser=%u: Welt-RT e%d (Flaeche %u, 3D-Draws %u), vorher e%d", B->frame, B->serial, we, ba, we >= 0 ? cnt3[we] : 0u, lastwe); }
+            lastwe = we;
+        }
+    }
+    if (we < 0 || !g_ish[we].sh || !g_ish[we].bak[bi] || g_ish[we].bakser[bi] != B->serial) { st_rp_skip[0]++; return; }
+    rw = g_ish[we].rtv;
+    for (i = 0; i < B->nops; i++) {
+        const ip_op_t *o = &B->ops[i];
+        if (o->kind == IP_DRAW && o->sh_rtv == rw && (k = ip_ph_ent_dsv(o->sh_dsv)) >= 0) { dcnt[k]++; }
+    }
+    for (k = 0; k < IP_SH_MAX; k++) { if (dcnt[k] && (wd < 0 || dcnt[k] > dcnt[wd])) { wd = k; } }
+    if (wd < 0 || !g_ish[wd].bak[bi] || g_ish[wd].bakser[bi] != B->serial) { st_rp_skip[1]++; return; }
+    rd = g_ish[wd].dsv;
+    if (ip_rp_cap < B->nops) {
+        sb_rp_op_t *p = (sb_rp_op_t *)realloc(ip_rp_ops, B->nops * sizeof *p);
+        if (!p) { return; }
+        ip_rp_ops = p;
+        ip_rp_cap = B->nops;
+    }
+    { /* Welt-Durchgang = Welt-Ops bis zur ersten Op, die das Welt-RT liest (Komposition ins Monitor-RT). Spaetere
+       * Welt-Ops (z. B. weitere Kamera derselben RT-Ressource) laufen wie bisher. */
+        unsigned first_rd = 0xFFFFFFFFu, after = 0;
+        ID3D11ShaderResourceView *ws = g_ish[we].srv;
+        last = 0xFFFFFFFFu;
+        for (i = 0; i < B->nops; i++) {
+            const ip_op_t *o = &B->ops[i];
+            int w = IP_RP_ISW(o, rw, rd);
+            int rdw = o->kind == IP_DRAW && ws && (o->sh_srv == ws || (o->rq && (o->rq_shsrv[1] == ws || o->rq_shsrv[2] == ws || o->rq_shsrv[3] == ws)));
+            if (rdw && !w && first_rd == 0xFFFFFFFFu) { first_rd = i; }
+            if (w) { if (first_rd == 0xFFFFFFFFu) { last = i; } else { after++; } }
+            else if (first_rd == 0xFFFFFFFFu && o->sh_dsv == rd && o->kind != IP_CLR_RTV) { nshare++; } /* Welt-Tiefe fremd */
+        }
+        if (last == 0xFFFFFFFFu) { st_rp_skip[2]++; return; }
+        if (g_cfg.reproj_diag >= 1) {
+            static unsigned nl2;
+            if (nl2++ < 6u) {
+                HLOG_I("REPROJ zensus ser=%u Welt e%d Tiefe e%d: Welt-Durchgang bis Op %u, Komposition Op %u, spaetere Welt-Ops %u, "
+                       "Tiefe fremd benutzt %u, ops %u", B->serial, we, wd, last, first_rd, after, nshare, B->nops);
+            }
+        }
+    }
+    for (i = 0; i <= last; i++) {
+        const ip_op_t *o = &B->ops[i];
+        sb_rp_op_t *r;
+        if (o->kind != IP_DRAW || !IP_RP_ISW(o, rw, rd)) { continue; }
+        r = &ip_rp_ops[n++];
+        memset(r, 0, sizeof *r);
+        r->idx = i;
+        r->lerp = B->pair_ok && o->flag && o->match >= 0 && (unsigned)o->match < A->nops;
+        r->same = r->lerp && (o->rzb || A->ops[o->match].rawhash == o->rawhash);
+        r->stat = o->why == IP_W_STATIC;
+        r->flat = !o->cls && o->rn[0][2] > 0.999f && o->rn[0][2] < 1.001f && o->rn[3][2] > 0.999f && o->rn[3][2] < 1.001f;
+        r->pre = o->cls && o->rn[0][2] > 0.999f && o->rn[0][2] < 1.001f && o->rn[3][2] > 0.999f && o->rn[3][2] < 1.001f;
+        r->nv = o->nv;
+        memcpy(r->mvp, o->mvp, sizeof r->mvp);
+        memcpy(r->pref, o->pref, sizeof r->pref);
+        if (r->lerp) {
+            const ip_op_t *a = &A->ops[o->match];
+            memcpy(r->amvp, IP_AMVP(o, a), sizeof r->amvp); /* W317 rzm */
+            memcpy(r->apref, o->rzb ? o->pref : a->pref, sizeof r->apref); /* rzb: Tick-N-Vertices mit Matrix N-1 */
+        }
+        r->vp[0] = o->vp.TopLeftX; r->vp[1] = o->vp.TopLeftY; r->vp[2] = o->vp.Width; r->vp[3] = o->vp.Height;
+        r->vp[4] = o->vp.MinDepth; r->vp[5] = o->vp.MaxDepth;
+    }
+    /* exakte Teil-Wiedergabe (t = 1) bis zur letzten Welt-Op: Farbe + Tiefe des Welt-Durchgangs; danach dieselbe mit
+     * dem Draw-ID-Shader. Die naechste Wiedergabe setzt alle Schatten per Startkopie zurueck. */
+    ip_rp_stop = last;
+    ip_rp_idrtv = rw;
+    ip_rp_prep = 1;
+    ip_replay_ex(B, bi, A, ai, 1.0f, 0, ip_cx_imm());
+    ip_rp_prep = 0;
+    if (!g_ish[wd].sh || !sb_rp_begin(bi, g_ish[we].sh, g_ish[wd].sh)) { ip_rp_idrtv = NULL; st_rp_skip[3]++; return; }
+    ip_rp_prep = 2;
+    ip_replay_ex(B, bi, A, ai, 1.0f, 2, ip_cx_imm());
+    ip_rp_prep = 0;
+    ip_rp_idrtv = NULL;
+    if (!sb_rp_tick(bi, B->serial, ip_rp_ops, n, B->nops, g_ish[we].sh)) { return; }
+    ip_rp_we[bi] = we;
+    ip_rp_wd[bi] = wd;
+    ip_rp_last[bi] = last;
+    ip_rp_ser[bi] = B->serial;
+}
+
 /* Swap N (sb_render_present, vor dem Present). 1 = Present uebernommen. */
 int sb_interp_swap(void)
 {
@@ -6879,6 +7601,7 @@ int sb_interp_swap(void)
             else { ip_replay(L, li, A, ip_list_index(A), 1.0f); }
             ip_verify_check(L, li);
         }
+        if (A && g_cfg.interp_mode == 1 && L->pair_ok && sb_rp_want()) { ip_rp_tick(A, ip_list_index(A), L, li); } /* W295 WORLD-REPROJ */
     }
     /* 6. Naechste Aufnahme (freie Liste). */
     if (mission) {

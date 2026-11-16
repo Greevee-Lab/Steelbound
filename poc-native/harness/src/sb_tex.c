@@ -10,6 +10,9 @@
 #include "hcfg.h"
 #include "d3d11_render.h"
 #include "sb_remaster.h" /* W103 REM-FRAME */
+#include "sb_profile.h" /* W297: g_sba_loc (V8U8 nur LoC) */
+#include "hlock.h" /* W308 SUSP-CTLOCK */
+#include "sb_texhealth.h" /* W315 TEX-WHITE-AMD: Zaehler */
 int sb_ctx_release_all(void); /* W138 d3d11_render.c */
 void sb_ctx_reacquire(int r);
 #include <windows.h>
@@ -41,6 +44,8 @@ typedef struct {
     unsigned lw_frame, lw_hash; /* W98 tex_lockwatch: letzter Pruef-Frame, Voll-Hash */
     int relive; /* W118 REM-OVERLAY: neu hochladen (HD live an/aus), bleibt bis zum Erfolg */
     int reuse;  /* FIX(WASH-TEX,W244) tex_reuse_inval: Block wiederverwendet -> neu laden, bleibt bis zum Erfolg */
+    int thr;    /* FIX(TEX-WHITE-UI,W307) tex_throttle_retry: noch nie hochgeladen, letzter Versuch an der Drossel gescheitert */
+    unsigned nnull; /* DIAG(TEX-WHITE-UI,W307): Gets ohne SRV in Folge (Log ab 90) */
 } tex_entry_t;
 unsigned krnl_phys_to_virt(unsigned phys);
 void krnl_phys_diag(unsigned xptr, unsigned phys, unsigned need); /* DIAG(FILM-WHITE,W177) */
@@ -232,6 +237,23 @@ static void tex_unswizzle32(unsigned *dst, const unsigned *src, unsigned w, unsi
     }
 }
 
+/* W297 LOC-MISSION: 16-Bit-Texel (V8U8) ent-swizzeln, gleiche Maskenvergabe wie 32 Bit. */
+static void tex_unswizzle16(unsigned short *dst, const unsigned short *src, unsigned w, unsigned h)
+{
+    unsigned x, y, i, j, mx = 0, my = 0;
+    j = 1; i = 1;
+    while (i < w || i < h) {
+        if (i < w) { mx |= j; j <<= 1; }
+        if (i < h) { my |= j; j <<= 1; }
+        i <<= 1;
+    }
+    for (y = 0; y < h; y++) {
+        for (x = 0; x < w; x++) {
+            dst[y * w + x] = src[tex_swz_spread(x, mx) | tex_swz_spread(y, my)];
+        }
+    }
+}
+
 static int tex_decode_fmt(unsigned fmt, DXGI_FORMAT *out, unsigned *blk,
                           unsigned *w, unsigned *h)
 {
@@ -271,6 +293,11 @@ static int tex_decode_fmt(unsigned fmt, DXGI_FORMAT *out, unsigned *blk,
         *out = DXGI_FORMAT_BC3_UNORM;
         *blk = 16;
         return 1;
+    case 0x28: /* W297 LOC-MISSION: swizzled V8U8 (Bump-Karte des LoC-Gelaendes), nur LoC + loc_bumpenv>=2 */
+        if (!g_sba_loc || g_cfg.loc_bumpenv < 2) { return 0; }
+        *out = DXGI_FORMAT_R8G8_SNORM; /* Byte 0 = U, Byte 1 = V (vorzeichenbehaftet) */
+        *blk = 2;
+        return 4;
     default:
         return 0;
     }
@@ -299,7 +326,7 @@ static int tex_range_writable(unsigned data, unsigned size)
     if (!data || !size || end < q || size > 0x1000000u) {
         return 0;
     }
-    if (data < 0x10000u || data >= 0x80000000u) return 0;
+    if (data < 0x10000u || data >= SB_HOST_LIM()) return 0; /* W315 host_hi_addr */
     while (q < end) {
         if (!VirtualQuery(q, &mbi, sizeof mbi)) {
             return 0;
@@ -406,7 +433,7 @@ static int tex_range_ok(unsigned data, unsigned size)
     if (!data || !size || end < q || size > 0x1000000u) {
         return 0;
     }
-    if (data < 0x10000u || data >= 0x80000000u) return 0; /* kernel/low raus */
+    if (data < 0x10000u || data >= SB_HOST_LIM()) return 0; /* kernel/low raus (W315 host_hi_addr: LAA bis 4 GB) */
     /* TEXLIFE (tex_upload_guard=1): Quelle VOLLSTAENDIG per VirtualQuery
      * pruefen. Stichproben (unten) uebersehen entfernte Seiten mitten im
      * Puffer -> Treiber-AV beim Upload aus freigegebenem Speicher. */
@@ -590,7 +617,7 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
      * kostet us * Millionen!). last_ok=Fastpath, sonst Range+memreg. */
     if (xptr != last_ok) {
         int ok = 0;
-        if (xptr >= 0x10000u && xptr < 0x80000000u) {
+        if (xptr >= 0x10000u && xptr < SB_HOST_LIM()) { /* W315 host_hi_addr: Kopf in Contig-HIGH-Block >= 2 GB */
             if (xptr < 0x10000000u) { ok = 1; } /* Xbox-Mask (Heap!) */
             else if (krnl_memreg_find(xptr, NULL, NULL)) { ok = 1; }
         }
@@ -598,13 +625,14 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
         last_ok = xptr;
     }
     if (g_present_no != up_frame) { up_frame = g_present_no; up_count = 0; }
-    if (up_count >= 12u && !g_tex_pause_up) {
+    if (up_count >= (g_cfg.tex_up_budget > 0 ? (unsigned)g_cfg.tex_up_budget : 12u) && !g_tex_pause_up) { /* W307: tex_up_budget (DIAG, Standard 12) */
         up_skip++;
         if (g_present_no - up_logf >= 600u) {
             up_logf = g_present_no;
             HLOG_W("TEX throttle: frame=%u skip_total=%u", g_present_no, up_skip);
         }
         g_up_fail = 2;
+        sb_th_throttle(g_present_no); /* W315: Textur-Gesundheit */
         return NULL;
     }
     up_count++;
@@ -679,6 +707,7 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
             if (FAILED(hr) || !tex) {
                 HLOG_W("TEX lin-upload fehlgeschlagen (0x%X)",
                        xptr);
+                sb_th_create_fail(2, (long)hr, (unsigned)dfmt, w, h, fmt, xptr); /* W315 */
                 g_up_fail = 7;
                 return NULL;
             }
@@ -692,6 +721,7 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
             if (FAILED(hr) || !srv) {
                 HLOG_W("TEX lin-srv fehlgeschlagen (0x%X)",
                        xptr);
+                sb_th_create_fail(3, (long)hr, (unsigned)dfmt, w, h, fmt, xptr); /* W315 */
                 g_up_fail = 7;
                 return NULL;
             }
@@ -718,6 +748,15 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
         }
         g_up_fail = 4; g_up_fmt = fmt; /* DIAG(TEX3D): Format merken */
         return NULL;
+    }
+    if (kind3 == 4) { /* W297: V8U8 -> linear (16 Bit) */
+        if (w == 0 || h == 0 || w > 4096 || h > 4096 || !tex_range_ok(data, w * h * 2u)) {
+            g_up_fail = 8;
+            return NULL;
+        }
+        swzlin = (unsigned *)malloc(w * h * 2u);
+        if (!swzlin) { g_up_fail = 9; return NULL; }
+        tex_unswizzle16((unsigned short *)swzlin, (const unsigned short *)(uintptr_t)data, w, h);
     }
     if (kind3 == 3) { /* W38: 0x06 MORTON -> linear (Range zuerst, Quelle nie direkt samplen) */
         if (w == 0 || h == 0 || w > 4096 || h > 4096 || w * h > (65536u * 1024u / 4u) || !tex_range_ok(data, w * h * 4u)) {
@@ -761,9 +800,9 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
     dd.SampleDesc.Count = 1;
     dd.Usage = D3D11_USAGE_DEFAULT;
     dd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    init.pSysMem = (kind3 == 3) ? (const void *)swzlin : (const void *)(uintptr_t)data;
-    init.SysMemPitch = (kind3 == 3) ? w * 4u : (w / 4) * blk;
-    init.SysMemSlicePitch = (kind3 == 3) ? init.SysMemPitch * h : init.SysMemPitch * (h / 4);
+    init.pSysMem = (kind3 >= 3) ? (const void *)swzlin : (const void *)(uintptr_t)data;
+    init.SysMemPitch = (kind3 == 3) ? w * 4u : (kind3 == 4) ? w * 2u : (w / 4) * blk;
+    init.SysMemSlicePitch = (kind3 >= 3) ? init.SysMemPitch * h : init.SysMemPitch * (h / 4);
     /* Upload-Versuch (Orakel: tex_compare RX_TRY-Metadaten). */
     {
         static unsigned ntry;
@@ -805,7 +844,7 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
         if (g_cfg.tex_mips && nlev > 1u) {
             for (lv = 0; lv < nlev; lv++) {
                 unsigned lw = (w >> lv) ? (w >> lv) : 1u, lh = (h >> lv) ? (h >> lv) : 1u;
-                total += (kind3 == 3) ? lw * lh * 4u : ((lw + 3u) / 4u) * ((lh + 3u) / 4u) * blk;
+                total += (kind3 == 3) ? lw * lh * 4u : (kind3 == 4) ? lw * lh * 2u : ((lw + 3u) / 4u) * ((lh + 3u) / 4u) * blk;
             }
             if (!tex_range_ok(data, total)) { nlev = 1; }
         } else {
@@ -827,6 +866,17 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
                         mi[lv].SysMemSlicePitch = lw * lh * 4u;
                     }
                     off += lw * lh * 4u;
+                } else if (kind3 == 4) { /* W297: V8U8-Stufen einzeln swizzled */
+                    if (lv == 0) { mi[0] = init; }
+                    else {
+                        mbuf[lv] = (unsigned *)malloc(lw * lh * 2u);
+                        if (!mbuf[lv]) { ok = 0; break; }
+                        tex_unswizzle16((unsigned short *)mbuf[lv], (const unsigned short *)(uintptr_t)(data + off), lw, lh);
+                        mi[lv].pSysMem = mbuf[lv];
+                        mi[lv].SysMemPitch = lw * 2u;
+                        mi[lv].SysMemSlicePitch = lw * lh * 2u;
+                    }
+                    off += lw * lh * 2u;
                 } else {
                     unsigned bw = (lw + 3u) / 4u, bh = (lh + 3u) / 4u;
                     mi[lv].pSysMem = (const void *)(uintptr_t)(data + off);
@@ -852,6 +902,7 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
     if (!tex) { hr = ID3D11Device_CreateTexture2D(g_tdev, &dd, &init, &tex); }
     if (FAILED(hr) || !tex) {
         HLOG_W("TEX upload fehlgeschlagen (0x%X %ux%u)", xptr, w, h);
+        sb_th_create_fail(0, (long)hr, (unsigned)dfmt, w, h, fmt, xptr); /* W315 */
         g_up_fail = 9;
         if (swzlin) { free(swzlin); }
         return NULL;
@@ -868,11 +919,12 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
     ID3D11Texture2D_Release(tex);
     if (FAILED(hr) || !srv) {
         HLOG_W("TEX srv fehlgeschlagen (0x%X)", xptr);
+        sb_th_create_fail(1, (long)hr, (unsigned)dfmt, w, h, fmt, xptr); /* W315 */
         g_up_fail = 9;
         if (swzlin) { free(swzlin); }
         return NULL;
     }
-    if (sb_rem_active() || sb_rpf_wanted()) { /* W103 REM-FRAME: Dump/Ersatz (Standard aus); W290 REPLAY-FX */
+    if (kind3 != 4 && (sb_rem_active() || sb_rpf_wanted())) { /* W103 REM-FRAME: Dump/Ersatz (Standard aus); W290 REPLAY-FX; W297: V8U8 nie */
         srv = sb_rem_upload(xptr, fmt, kind3 == 3 ? 3 : 1, w, h,
                             (kind3 == 3) ? (const void *)swzlin : (const void *)(uintptr_t)data,
                             init.SysMemPitch, dd.MipLevels, srv);
@@ -912,7 +964,7 @@ static int tex_range_ok_m(const MEMORY_BASIC_INFORMATION *m, unsigned a, unsigne
         b = (uintptr_t)m->BaseAddress;
         e = b + m->RegionSize;
         if ((uintptr_t)a >= b && (uintptr_t)a + len <= e && len && (m->State & MEM_COMMIT) &&
-            !(m->Protect & (PAGE_NOACCESS | PAGE_GUARD)) && a >= 0x10000u && a < 0x80000000u) {
+            !(m->Protect & (PAGE_NOACCESS | PAGE_GUARD)) && a >= 0x10000u && a < SB_HOST_LIM()) { /* W315 */
             g_tex_last_data = a; g_tex_last_size = len;
             return 1;
         }
@@ -978,7 +1030,7 @@ static unsigned tex_data_hash(unsigned data, unsigned size)
     MEMORY_BASIC_INFORMATION vm2;
     if (g_cfg.tex_hash_fast) { /* PERF(PERF-TICK,W168): Region aus sb_tex_hostaddr_x bzw. eine eigene Abfrage */
         if (g_vqm_addr && data == g_vqm_addr) { vm = &g_vqm; }
-        else if (data >= 0x10000u && data < 0x80000000u && g_cfg.tex_upload_guard &&
+        else if (data >= 0x10000u && data < SB_HOST_LIM() && g_cfg.tex_upload_guard && /* W315 */
                  VirtualQuery((LPCVOID)(uintptr_t)data, &vm2, sizeof vm2)) { vm = &vm2; }
         g_vqm_addr = 0;
     }
@@ -988,7 +1040,7 @@ static unsigned tex_data_hash(unsigned data, unsigned size)
     { static unsigned bad[256]; static unsigned nbad; static unsigned nc; unsigned b;
       if (((++nc) & 0xFFFFFu) == 0) nbad = 0; /* selten leeren (Addr-Reuse!) */
       for (b = 0; b < nbad && b < 256; b++) if (bad[b] == data) return 0;
-      if (data < 0x10000u || data >= 0x80000000u ||
+      if (data < 0x10000u || data >= SB_HOST_LIM() || /* W315 */
           (data >= 0x10000000u && !krnl_memreg_find(data, NULL, NULL))) {
           if (nbad < 256) bad[nbad++] = data;
           return 0;
@@ -1162,7 +1214,7 @@ void sb_tex_diag_info(unsigned xptr, char *buf, size_t n)
     int i;
     unsigned data = 0, cur = 0;
     if (!buf || !n) { return; }
-    if (!xptr || xptr < 0x10000u || xptr >= 0x80000000u) { _snprintf_s(buf, n, _TRUNCATE, "x=0"); return; }
+    if (!xptr || xptr < 0x10000u || xptr >= SB_HOST_LIM()) { _snprintf_s(buf, n, _TRUNCATE, "x=0"); return; } /* W315 */
     __try { data = *(unsigned *)(uintptr_t)(xptr + 4); } __except (EXCEPTION_EXECUTE_HANDLER) { data = 0; }
     i = tex_find(xptr);
     if (i < 0) { _snprintf_s(buf, n, _TRUNCATE, "x=0x%X lw=%d lwn=%d c=-", xptr, lw_has(xptr), g_lw_n); return; }
@@ -1187,7 +1239,7 @@ unsigned g_phud_texn;
  * ct_reuse meldet den Block (Low28-Bereich), der naechste Get markiert alle
  * Eintraege, deren Kopf oder Daten darin liegen. Kernel-Thread -> Ring mit Lock. */
 #define TEX_INV_N 1024u
-static SRWLOCK g_tinv_lock = SRWLOCK_INIT;
+static hlock_t g_tinv_lock; /* W308 SUSP-CTLOCK: hlock (SUSPSAFE sieht den Owner; Xbox-Threads) */
 static unsigned g_tinv_lo[TEX_INV_N], g_tinv_len[TEX_INV_N], g_tinv_n;
 static int g_tinv_ovf;
 static volatile LONG g_tinv_pend;
@@ -1195,7 +1247,7 @@ static volatile LONG g_tinv_pend;
 void sb_tex_note_reuse(unsigned va, unsigned len)
 {
     if (!g_cfg.tex_reuse_inval || !len) { return; }
-    AcquireSRWLockExclusive(&g_tinv_lock);
+    hlock_enter(&g_tinv_lock);
     if (g_tinv_n < TEX_INV_N) {
         g_tinv_lo[g_tinv_n] = va & 0x0FFFFFFFu;
         g_tinv_len[g_tinv_n] = len;
@@ -1204,7 +1256,7 @@ void sb_tex_note_reuse(unsigned va, unsigned len)
         g_tinv_ovf = 1;
     }
     InterlockedExchange(&g_tinv_pend, 1);
-    ReleaseSRWLockExclusive(&g_tinv_lock);
+    hlock_leave(&g_tinv_lock);
 }
 
 static void tex_reuse_drain(void)
@@ -1213,7 +1265,7 @@ static void tex_reuse_drain(void)
     unsigned nb, nm = 0, k;
     int i, ovf;
     if (!g_tinv_pend) { return; }
-    AcquireSRWLockExclusive(&g_tinv_lock);
+    hlock_enter(&g_tinv_lock);
     nb = g_tinv_n;
     ovf = g_tinv_ovf;
     for (i = 0; i < g_ncache; i++) {
@@ -1228,7 +1280,7 @@ static void tex_reuse_drain(void)
     g_tinv_n = 0;
     g_tinv_ovf = 0;
     InterlockedExchange(&g_tinv_pend, 0);
-    ReleaseSRWLockExclusive(&g_tinv_lock);
+    hlock_leave(&g_tinv_lock);
     if (nm && (ndrain < 16u || (ndrain & 255u) == 0u)) {
         HLOG_I("TEX reuse-inval #%u: bloecke=%u%s eintraege=%u f=%u", ndrain + 1u, nb, ovf ? "+" : "", nm,
                g_present_no);
@@ -1237,17 +1289,51 @@ static void tex_reuse_drain(void)
 }
 
 static ID3D11ShaderResourceView *sb_tex_get_body(void);
+static int g_get_ent = -1; /* DIAG(TEX-WHITE-UI,W307): Cache-Eintrag des letzten Gets (-1 = keiner/RT) */
+/* DIAG(TEX-WHITE-UI,W307): Eintrag bleibt dauerhaft ohne SRV (Draw ohne Textur:
+ * weisse Stufe bzw. Vertexfarbe) -> einmal je Eintrag ins Log, mit Grund. Nur
+ * Log, keine Wirkung aufs Bild. why: 2 Drossel, 4 Format, 5/6 linear, 7/9
+ * Anlegen, 8 Bereich, 12 Eintrag ohne SRV. */
+static void tex_null_watch(ID3D11ShaderResourceView *r)
+{
+    tex_entry_t *e;
+    if (g_get_ent < 0 || g_get_ent >= g_ncache) { return; }
+    e = &g_cache[g_get_ent];
+    if (r) { e->nnull = 0; return; }
+    if (++e->nnull == 90u) {
+        static unsigned nlog;
+        if (nlog < 16u || (nlog & 255u) == 0u) {
+            HLOG_W("TEX dauer-ohne-srv #%u: xptr=0x%X fmt=0x%X %ux%u why=%u thr=%d f=%u", nlog + 1u, e->xptr, e->hfmt,
+                   e->w, e->h, g_get_why, e->thr, g_present_no);
+        }
+        nlog++;
+        sb_th_dauer(); /* W315 */
+    }
+}
+/* W315 Textur-Gesundheit: Eintraege, die noch auf den Erst-Upload warten (an der Drossel
+ * gescheitert, thr) bzw. ohne SRV sind. Nur fuer Berichte (Schleife ueber den Cache). */
+unsigned sb_tex_thr_pending(unsigned *entries)
+{
+    int i;
+    unsigned n = 0, z = 0;
+    for (i = 0; i < g_ncache; i++) {
+        if (!g_cache[i].srv) { z++; if (g_cache[i].thr) { n++; } }
+    }
+    if (entries) { *entries = z; }
+    return n;
+}
 ID3D11ShaderResourceView *sb_tex_get(void)
 {
     extern volatile int g_phud_meas;
     LARGE_INTEGER a, b;
     ID3D11ShaderResourceView *r;
-    if (!g_phud_meas) { return sb_tex_get_body(); }
+    if (!g_phud_meas) { r = sb_tex_get_body(); tex_null_watch(r); return r; }
     QueryPerformanceCounter(&a);
     r = sb_tex_get_body();
     QueryPerformanceCounter(&b);
     g_phud_texq += b.QuadPart - a.QuadPart;
     g_phud_texn++;
+    tex_null_watch(r);
     return r;
 }
 static ID3D11ShaderResourceView *sb_tex_get_body(void)
@@ -1256,6 +1342,7 @@ static ID3D11ShaderResourceView *sb_tex_get_body(void)
     ID3D11ShaderResourceView *srv;
     static unsigned nget;
     int was_reuse = 0; /* W244 */
+    g_get_ent = -1; /* DIAG(W307) */
     if (!g_stage0_xptr || !g_tdev) {
         g_get_why = 10;
         return NULL;
@@ -1274,13 +1361,16 @@ static ID3D11ShaderResourceView *sb_tex_get_body(void)
     nget++;
     g_tex_tick++;
     i = tex_find(g_stage0_xptr);
+    g_get_ent = i; /* DIAG(W307) */
     if (i >= 0) {
         {
             tex_entry_t *e = &g_cache[i];
             unsigned data = 0;
             e->lastuse = g_tex_tick;
-            if (g_stage0_xptr < 0x10000u || g_stage0_xptr >= 0x80000000u)
+            if (g_stage0_xptr < 0x10000u || g_stage0_xptr >= SB_HOST_LIM()) { /* W315 host_hi_addr: sonst Kopf >= 2 GB nie neu geladen */
+                g_get_why = e->srv ? 0u : 1u; /* W315 DIAG: Grund fuer Textur-Gesundheit/tex_missing_mark */
                 return e->srv; /* stale xptr (kein Fault!) */
+            }
             __try {
                 data = *(unsigned *)(uintptr_t)(g_stage0_xptr + 4);
             } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1294,6 +1384,21 @@ static ID3D11ShaderResourceView *sb_tex_get_body(void)
                 goto reupload;
             }
             if (e->relive && data) { /* W118: HD live umgeschaltet (nur nach sb_tex_relive_all) */
+                goto reupload;
+            }
+            if (e->thr && !e->srv && data && g_cfg.tex_throttle_retry) {
+                /* FIX(TEX-WHITE-UI,W307): Erst-Upload scheiterte an der Drossel
+                 * (12/Bild) -> beim naechsten Get erneut statt erst beim 16.
+                 * Eintraege, die im selben Bild angelegt wurden, zaehlen ihre
+                 * Gets im Gleichschritt; ihre Neuversuche fielen immer in
+                 * dasselbe Bild und dort wieder hinter dieselben Uploads ->
+                 * die Textur kam nie an die Reihe, der Draw lief ohne SRV
+                 * (Stufe weiss, Flaeche = Vertexfarbe; Steelbound#14/#25/#26). */
+                static unsigned nthr;
+                if (nthr < 16u || (nthr & 1023u) == 0u) {
+                    HLOG_I("TEX drossel-retry #%u: xptr=0x%X gets=%u f=%u", nthr + 1u, g_stage0_xptr, e->gets, g_present_no);
+                }
+                nthr++;
                 goto reupload;
             }
             if (e->reuse && data) { /* FIX(WASH-TEX,W244): Block neu belegt -> neuer Inhalt */
@@ -1389,6 +1494,7 @@ reupload:
                     e->relive = 0; /* W118: nur die Drossel wiederholt, echte Fehler nicht */
                 }
                 if (!srv && was_reuse && g_up_fail == 2u) { e->reuse = 1; } /* W244: Drossel -> naechster Get */
+                e->thr = (!e->srv && g_up_fail == 2u) ? 1 : 0; /* W307 tex_throttle_retry */
                 g_get_why = e->srv ? 0u : (g_up_fail ? g_up_fail : 12u);
                 return e->srv;
             }
@@ -1412,6 +1518,7 @@ reupload:
         } __except (EXCEPTION_EXECUTE_HANDLER) {
         }
         g_cache[g_ncache].xptr = g_stage0_xptr;
+        if (g_stage0_xptr >= 0x80000000u) { sb_th_hi_entry(); } /* W315 Textur-Gesundheit */
         g_cache[g_ncache].srv = srv;
         g_cache[g_ncache].w = tw;
         g_cache[g_ncache].h = th;
@@ -1422,6 +1529,9 @@ reupload:
         }
         g_cache[g_ncache].dirty = 0;
         g_cache[g_ncache].relive = 0; /* W118 */
+        g_cache[g_ncache].thr = (!srv && g_up_fail == 2u) ? 1 : 0; /* W307 tex_throttle_retry */
+        g_cache[g_ncache].nnull = 0; /* DIAG(W307) */
+        g_get_ent = g_ncache;
         g_cache[g_ncache].fmt = g_up_fmt;
         g_cache[g_ncache].linear = g_up_lin;
         g_cache[g_ncache].lastuse = g_tex_tick;
@@ -1676,7 +1786,7 @@ int sb_tex_hdr_linear(unsigned xptr)
 {
     unsigned fmt = 0, blk = 0, w = 0, h = 0;
     DXGI_FORMAT df;
-    if (!xptr || xptr < 0x10000u || xptr >= 0x80000000u) { return 0; }
+    if (!xptr || xptr < 0x10000u || xptr >= SB_HOST_LIM()) { return 0; } /* W315 */
     __try { fmt = *(unsigned *)(uintptr_t)(xptr + 0xC); }
     __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
     return tex_decode_fmt(fmt, &df, &blk, &w, &h) == 2 ? 1 : 0;

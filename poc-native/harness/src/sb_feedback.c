@@ -4,15 +4,19 @@
 #include "render_qa.h"   /* rq_in_mission */
 #include "kernel_hle.h"  /* krnl_CreateThread */
 #include "sb_edition.h"
+#include "sb_watermark.h" /* W301: sb_version_str */
 #include "sb_feedback.h"
+#include "sbc_wire.h" /* W305: Controller-Diagnose */
 #include "sb_pause.h"
 #include "sb_userdata.h"
 #include "sb_diagcore.h" /* W279 */
+#include "sb_fpsrate.h" /* W309: monitor_hz */
 #include <shellapi.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <time.h>
 #include "sb_state.h" /* W232: sb_in_mission */
+#include "sb_texhealth.h" /* W315 */
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -218,6 +222,15 @@ static void fb_urlenc(char *o, size_t cap, const char *s)
     o[n] = '\0';
 }
 
+HWND sb_render_hwnd(void); /* d3d11_render.c */
+
+/* W309 FPS-MONITOR: Rate des Spielmonitors (0 = unbekannt); vblank_hz ist die Xbox-Zeitbasis. */
+static int fb_monitor_hz(void)
+{
+    HWND h = sb_render_hwnd();
+    return sb_fps_monitor_hz(h ? MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY) : NULL);
+}
+
 /* Repo "Owner/Name" nur aus [A-Za-z0-9._-] mit genau einem '/'; sonst Standard. */
 static const char *fb_repo(void)
 {
@@ -237,7 +250,7 @@ static const char *fb_repo(void)
 
 int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
 {
-    char gpu[200], build[40], txt8[1024], title[160], info[4096], game[200], state[160], ver[120];
+    char gpu[200], build[40], txt8[1024], title[160], info[8192], game[200], state[160], ver[120];
     char e1[400], e2[400], e3[400], e4[400], e5[400];
     char *logb;
     size_t logcap = 196608 * 2 + 4096;
@@ -263,7 +276,9 @@ int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
     }
     _snprintf_s(state, sizeof state, _TRUNCATE, "loadcount=%u scene=0x%X in_mission=%d countdown=%u", loads, scene, inm,
                 tmr);
-    _snprintf_s(ver, sizeof ver, _TRUNCATE, "%s edition, build %s", SB_EDITION_NAME, build);
+    /* W301 BETA-VERSION: Release-Version vorn (Issue-Feld "Client version"), dann Edition + Build */
+    _snprintf_s(ver, sizeof ver, _TRUNCATE, "%s, %s edition, build %s",
+                sb_version_str()[0] ? sb_version_str() : "dev", SB_EDITION_NAME, build);
     _snprintf_s(info, sizeof info, _TRUNCATE,
                 "Steelbound feedback package (W188, stage 1)\r\n"
                 "kind: %s\r\n"
@@ -271,14 +286,14 @@ int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
                 "client: %s\r\n"
                 "game_image: %s\r\n"
                 "gpu: %s\r\n"
-                "display: %ux%u window_mode=%d interp_fps=%d vblank_hz=%d\r\n"
+                "display: %ux%u window_mode=%d interp_fps=%d vblank_hz=%d monitor_hz=%d\r\n"
                 "state: %s present=%u pauses=%u\r\n"
                 "settings: shading=%d monitor_fx=%d edge_mode=%d aa_mode=%d ssao=%d remaster=%d hd_textures=%d "
                 "hd_scale=%d vr_enable=%d lang=%s input_profile=%s menu_pause=%d\r\n"
                 "contents: screenshot.jpg (game image only, never the desktop), log.txt (end of the client log, "
                 "user name/computer name/paths replaced), info.txt, text.txt\r\n",
                 kn, lt.wYear, lt.wMonth, lt.wDay, lt.wHour, lt.wMinute, lt.wSecond, ver, game, gpu, g_bb_w, g_bb_h,
-                g_cfg.window_mode, g_cfg.interp_fps, g_cfg.vblank_hz, state, g_present_no, sb_pause_count(),
+                g_cfg.window_mode, g_cfg.interp_fps, g_cfg.vblank_hz, fb_monitor_hz(), state, g_present_no, sb_pause_count(),
                 g_cfg.shading, g_cfg.monitor_fx, g_cfg.edge_mode, g_cfg.aa_mode, g_cfg.ssao, g_cfg.remaster,
                 g_cfg.hd_textures, g_cfg.hd_scale, g_cfg.vr_enable, g_cfg.lang[0] ? g_cfg.lang : "en",
                 g_cfg.input_profile[0] ? g_cfg.input_profile : "(legacy)", g_cfg.menu_pause);
@@ -289,6 +304,20 @@ int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
                     p->clip == 1 ? "clip.mp4 (H264)" : p->clip == 2 ? "clip_000.jpg..clip_049.jpg (MP4 unavailable)" :
                     p->clip < 0 ? "failed" : "none", p->clip_bytes, p->clip_w, p->clip_h,
                     p->clip > 0 ? "5 seconds; see clip.txt" : "not attached");
+    }
+    if (g_cfg.sbc_usb) { /* W305: Original-Controller-Pfad (nur Zustaende/Anzahlen) */
+        size_t used = strlen(info);
+        char sb[400];
+        sbc_wire_summary(sb, sizeof sb);
+        _snprintf_s(info + used, sizeof info - used, _TRUNCATE, "controller: %s\r\n", sb);
+    }
+    { /* W315 TEX-WHITE-AMD: Block "texture health" (nur Technikdaten) */
+        size_t used = strlen(info);
+        if (used + 3 < sizeof info) {
+            info[used++] = '\r'; info[used++] = '\n'; info[used] = 0;
+            sb_th_format(info + used, sizeof info - used, 1);
+        }
+        sb_th_log("F11");
     }
     p->repl += sb_feedback_sanitize(info, sizeof info);
     fb_write(p->dir, "info.txt", info);

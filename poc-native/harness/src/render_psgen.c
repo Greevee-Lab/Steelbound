@@ -36,6 +36,8 @@
 
 typedef struct { char *p; size_t n, o; int ovf; } rps_t;
 
+int g_rqp_nan_mark; /* W302 AMD-ARTIFACTS: = [render] shader_nan_mark (vom Client gesetzt; Selbsttest 0) */
+
 static void rps(rps_t *s, const char *fmt, ...)
 {
     va_list ap;
@@ -105,16 +107,17 @@ int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_
     mux_msb = (cnt & 0x10000u) != 0;
     for (i = 0; i < 4u; i++) {
         tm[i] = (d[54] >> (i * 5u)) & 0x1Fu;
-        if (tm[i] == 6u && g_rqp_bump_as_2d) { tm[i] = 1u; } /* W285: LoC-Gelaende (Naeherung) */
+        if (tm[i] == 6u && g_rqp_bump_as_2d == 1) { tm[i] = 1u; } /* W285: LoC-Gelaende (Naeherung) */
         info->texmode[i] = tm[i];
-        if (tm[i] != 0u && tm[i] != 1u && tm[i] != 2u && tm[i] != 4u && tm[i] != 5u) {
+        if (tm[i] != 0u && tm[i] != 1u && tm[i] != 2u && tm[i] != 4u && tm[i] != 5u &&
+            !(tm[i] == 6u && i > 0u && g_rqp_bump_as_2d == 2)) { /* W297: Modus 6 echt (LoC, loc_bumpenv=2) */
             info->unsupported = 1 + (int)i;
             return 0;
         }
     }
     info->nstages = nst;
     rps(&s, "cbuffer PC : register(b4) { float4 pc0[8]; float4 pc1[8]; float4 fc0; float4 fc1;\n"
-            "  float4 fogc; float4 tsc[4]; float4 pflags; float4 sfx0; float4 sfx1; float4 sfx2; float4 sfx3; };\n"
+            "  float4 fogc; float4 tsc[4]; float4 pflags; float4 sfx0; float4 sfx1; float4 sfx2; float4 sfx3;%s };\n"
             "Texture2D tx0 : register(t0); Texture2D tx1 : register(t1);\n"
             "Texture2D tx2 : register(t2); Texture2D tx3 : register(t3);\n"
             "SamplerState sm0 : register(s0); SamplerState sm1 : register(s1);\n"
@@ -200,7 +203,8 @@ int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_
              * Spekular V1, Umgebungslicht C0 je Stufe) VOR den Combiner-Klemmungen -
              * so kommen ueberstrahlte Details zurueck. Nebelfarbe bleibt. */
             "  if ((asuint(sfx0.x) & 0xA00u) != 0u) { V0.rgb = saturate(i.col.rgb * sfx2.z); V1.rgb = saturate(i.spec.rgb * sfx2.z); }\n"
-            "  float4 T0 = 0, T1 = 0, T2 = 0, T3 = 0;\n");
+            "  float4 T0 = 0, T1 = 0, T2 = 0, T3 = 0;\n",
+            g_rqp_bump_as_2d == 2 ? " float4 bm[4];" : "");
     for (i = 0; i < 4u; i++) {
         static const char *tn[4] = { "tx0", "tx1", "tx2", "tx3" };
         static const char *sn[4] = { "sm0", "sm1", "sm2", "sm3" };
@@ -229,6 +233,17 @@ int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_
                 1u << i, i, i);
             info->sample_mask |= 1u << i;
             break;
+        case 6u: { /* W297 LOC-MISSION: BUMPENVMAP - uv += M * T(src).rg (V8U8 als SNORM),
+                    * M = bm[i] (M00, M01, M10, M11), Quelle nach PSInputTexture (d[56]). */
+            unsigned src = i == 1u ? 0u : i == 2u ? ((d[56] >> 16) & 1u) : ((d[56] >> 20) & 3u);
+            if (src >= i) { src = 0u; }
+            rps(&s, "  if (tsc[%u].z != 0.0) { float iw%u = %s.w != 0.0 ? 1.0 / %s.w : 1.0;\n"
+                    "    float2 uv%u = %s.xy * iw%u * tsc[%u].xy + float2(dot(bm[%u].xz, T%u.rg), dot(bm[%u].yw, T%u.rg));\n"
+                    "    T%u = %s.Sample(%s, uv%u); } else { T%u = float4(1, 1, 1, 1); }\n",
+                i, i, cn[i], cn[i], i, cn[i], i, i, i, src, i, src, i, tn[i], sn[i], i, i);
+            info->sample_mask |= 1u << i;
+            break;
+        }
         case 4u:
             rps(&s, "  T%u = saturate(%s);\n", i, cn[i]);
             break;
@@ -356,7 +371,11 @@ int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_
             "    else if (sfx2.y == 2.0) { x *= 0.6; x = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14); }\n"
             "    if ((asuint(sfx0.x) & 0x400u) != 0u) { x = pow(saturate(x), sfx2.w); }\n"
             "    o.rgb = x; }\n");
-    rps(&s, "  float4 res = saturate(o);\n"
+    rps(&s, "  float4 res = saturate(o);\n");
+    if (g_rqp_nan_mark) { /* DIAG(AMD-ARTIFACTS,W302): nicht endliche Combiner-Ausgabe magenta (saturate machte 0 daraus) */
+        rps(&s, "  if (any((asuint(o) & 0x7F800000u) == 0x7F800000u)) { res = float4(1.0, 0.0, 1.0, 1.0); }\n");
+    }
+    rps(&s, ""
             "  { uint af = asuint(pflags.x); if (af != 0u) { uint a8 = (uint)(res.a * 255.0 + 0.5); uint r8 = asuint(pflags.y);\n"
             "    bool ok = (af == 2u) ? (a8 < r8) : (af == 3u) ? (a8 == r8) : (af == 4u) ? (a8 <= r8) :\n"
             "              (af == 5u) ? (a8 > r8) : (af == 6u) ? (a8 != r8) : (af == 7u) ? (a8 >= r8) : (af == 8u);\n"

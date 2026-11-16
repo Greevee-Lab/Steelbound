@@ -53,6 +53,9 @@ static unsigned wm_save_cw, wm_save_ch; /* Backbuffer = Client vor dem Vollbild 
 static int wm_interp_saved = -1;    /* interp_fps vor fs_interp_match */
 static HMONITOR wm_fps_mon;         /* W223: Monitor der letzten auto-Aufloesung */
 static volatile LONG wm_fps_pend;   /* W223: WM_DISPLAYCHANGE -> auto neu pruefen */
+static HMONITOR wm_fix_mon;          /* W309: Monitor der letzten Pruefung bei fester Rate */
+static int wm_fix_hz;                /* W309: dessen Rate (0 = unbekannt) */
+static int wm_fix_fps = -2;          /* W309: zuletzt bewertete feste Rate (-2 = neu bewerten) */
 static unsigned wm_nswitch, wm_test_steps;
 /* Zaehler (UI-Thread erhoeht, Render-Thread loggt: hlog verwirft Zeilen
  * bei Schloss-Konkurrenz, daher keine Logs auf dem UI-Thread + kumulative
@@ -866,7 +869,27 @@ static void wm_fps_follow(unsigned n)
 {
     HMONITOR hm;
     int hz;
-    if (!g_cfg.interp_auto || (wm_cur == 2 && wm_fs_on)) { return; }
+    if (wm_cur == 2 && wm_fs_on) { return; }
+    if (!g_cfg.interp_auto) { /* W309 FPS-MONITOR: feste Rate nur pruefen und melden, Verhalten unveraendert */
+        if ((n & 31u) != 0u && !wm_fps_pend) { return; }
+        hm = MonitorFromWindow(wm_hwnd, MONITOR_DEFAULTTOPRIMARY);
+        if (hm != wm_fix_mon || wm_fps_pend) { /* Hz nur bei Monitor- bzw. Anzeigewechsel lesen */
+            hz = sb_fps_monitor_hz(hm);
+            InterlockedExchange(&wm_fps_pend, 0);
+            sb_ovl_monitor_hz(hz);
+            if (hm != wm_fix_mon || hz != wm_fix_hz) { wm_fix_fps = -2; }
+            wm_fix_mon = hm;
+            wm_fix_hz = hz;
+        }
+        if (g_cfg.interp_fps != wm_fix_fps) { /* einmal je Rate und Monitor melden */
+            wm_fix_fps = g_cfg.interp_fps;
+            if (wm_fix_fps > 0 && (sb_fps_flags(wm_fix_hz, wm_fix_fps) & SB_FPS_F_ABOVE)) {
+                HLOG_W("WINMODE: interp_fps %d ueber der Monitorrate %d Hz (ohne VRR ungleichmaessig, unveraendert, f=%u)",
+                       wm_fix_fps, wm_fix_hz, n);
+            }
+        }
+        return;
+    }
     if ((n & 31u) != 0u && !wm_fps_pend) { return; }
     hm = MonitorFromWindow(wm_hwnd, MONITOR_DEFAULTTOPRIMARY);
     if (hm == wm_fps_mon && !wm_fps_pend) { return; }

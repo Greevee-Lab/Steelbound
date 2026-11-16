@@ -1165,7 +1165,7 @@ void sb_shfx_present(unsigned n)
     if (g_cfg.shot_mission) {
         if (!init) { init = 1; off = g_cfg.screenshot_frame; g_cfg.screenshot_frame = 0; }
         if (!anchored) {
-            if (sb_in_mission()) { /* W232: Spielermission statt Ladezaehler == 4 */
+            if (g_cfg.shot_mission == 2 ? p2z_scene_mission() : sb_in_mission()) { /* W232: Spielermission statt Ladezaehler == 4; W313: 2 = erstes Missionsbild inkl. Titel-Demo */
                 anchored = 1;
                 g_cfg.screenshot_frame = (int)n + off;
                 HLOG_I("SHFX shot_mission: Missionsbeginn f=%u -> screenshot_frame=%d (every=%d)", n,

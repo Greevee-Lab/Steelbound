@@ -35,6 +35,7 @@ while the game window has focus.
 | Screenshot (quick, uses the photo-mode settings, no menu) | F12 |
 | Photo mode (menu; in photo mode F12 takes the photo) | Shift+F12 |
 | Original look ↔ your settings (compare live) | Shift + F8 (assignable: Controls page, "orig_view") |
+| Exit a running replay (the mouse no longer ends replays; gamepad, original controller and joystick work as in the original) | Backspace (assignable: Controls page, "replay_exit") |
 | Performance overlay | F2 (Shift + F2 moves it) |
 | Window / fullscreen | Alt + Enter |
 | VR: recenter view | F8 |

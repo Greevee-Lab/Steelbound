@@ -52,5 +52,9 @@ void hlock_susp_unmark(DWORD tid);
 extern volatile LONG g_hlock_backoff;
 /* DIAG(LOADLOCK): Injektion nur in diesem Thread (letztes Suspend-Ziel). */
 extern volatile DWORD g_hlock_inject_tid;
+/* W308 SUSP-CTLOCK: Haelt tid irgendeine registrierte hlock (jede je einmal
+ * erworbene)? Liefert die erste gefundene (NULL = keine). SUSPSAFE prueft
+ * damit auch Sperren ohne eigenen Eintrag in susp_held_lock (Netz). */
+const hlock_t *hlock_owned_by(DWORD tid);
 
 #endif

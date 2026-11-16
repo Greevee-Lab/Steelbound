@@ -63,7 +63,7 @@ body:
     id: version
     attributes:
       label: Client version
-      description: Filled in by the game (edition and build), or see VERSION.txt in the program folder.
+      description: Filled in by the game (version, edition and build), or see VERSION.txt in the program folder.
   - type: input
     id: game
     attributes:

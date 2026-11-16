@@ -192,10 +192,30 @@ static int dg_package(int ask)
         return 0;
     }
     packs_json_path(pj, sizeof pj);
+    { /* W312: Joystick-Geraetezeilen (Metadaten, keine Werte) */
+        static char dev[32768];
+        dev[0] = 0;
+        if (!g_o.shot && ijoy_init() == 0) {
+            int i;
+            g_joy_demo = 0;
+            g_joy_n = ijoy_scan();
+            if (g_joy_n > IJOY_MAX_DEV) { g_joy_n = IJOY_MAX_DEV; }
+            for (i = 0; i < g_joy_n; i++) {
+                const ijoy_info_t *in = ijoy_info(i);
+                if (in) { g_joy_list[i] = *in; }
+            }
+            g_joy_nxi = ijoy_skipped_xinput(g_joy_xi, 8);
+            if (g_joy_nxi > 8) { g_joy_nxi = 8; }
+            joy_devinfo_all(dev, (int)sizeof dev, -1);
+        }
+        ld_pkg_set_devices(dev);
+    }
     if (!ld_pkg_build(g_client_disp, pj, &r)) {
+        ld_pkg_set_devices(NULL);
         set_status_k(LT("gui.dg_pkg_fail"), 2);
         return 0;
     }
+    ld_pkg_set_devices(NULL);
     _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.dg_pkg_done"), r.files, (unsigned)((r.bytes + 1023) / 1024));
     set_status_k(t, 1);
     dg_explore(r.zip, 1);

@@ -36,3 +36,6 @@ int sb_state_mission_or_demo(void);
 
 /* Ladezaehler [0x2EEA34] (nur Diagnose/Log und Testketten). */
 unsigned sb_state_loadcount(void);
+
+/* Szene [0x6B96DC] (W315: Diagnose, z. B. Bildfolgen je Szene). */
+unsigned sb_state_scene(void);

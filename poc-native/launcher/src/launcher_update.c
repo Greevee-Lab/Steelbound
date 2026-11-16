@@ -9,6 +9,7 @@
 #include "launcher_update.h"
 #include "launcher_app.h"
 #include "launcher_u8.h"
+#include "sb_version.h" /* W301 BETA-VERSION: Phase + Anzeigetext (Selbsttest) */
 
 #define printf cli_printf
 
@@ -652,6 +653,15 @@ void lupd_selftest(int *pass, int *fail)
         { "0.1.0-alpha.1", "0.1.0-alpha.beta", -1 },
         { "0.1.0+build.5", "0.1.0", 0 },
         { "0.1.0-alpha.010", "0.1.0-alpha.9", 1 },
+        /* W301 BETA-VERSION: Kette alpha.9 < 0.2.0 < 0.2.1 < 0.3.0 < 1.0.0 */
+        { "0.1.0-alpha.9", "0.2.0", -1 },
+        { "0.2.0", "0.1.0-alpha.9", 1 },
+        { "0.2.0", "0.2.1", -1 },
+        { "0.2.1", "0.3.0", -1 },
+        { "0.3.0", "1.0.0", -1 },
+        { "v0.2.0", "0.2.0", 0 },
+        { "0.2.0-rc.1", "0.2.0", -1 },
+        { "0.2.10", "0.2.9", 1 },
     };
     static const char *const kBadVer[] = {
         "", "dev", "0.1", "0.1.0.1", "0.1.0-", "0.1.0-alpha..1", "0.1.0 alpha",
@@ -668,7 +678,7 @@ void lupd_selftest(int *pass, int *fail)
         }
     }
     if (!why[0]) {
-        printf("PASS W250 update: Versionsvergleich (alpha.10 > alpha.9, gleich, aelter, beta > alpha, Release > Prerelease, ungueltige Formen)\n");
+        printf("PASS W250 update: Versionsvergleich (alpha.10 > alpha.9, gleich, aelter, beta > alpha, Release > Prerelease, ungueltige Formen; W301: 0.1.0-alpha.9 < 0.2.0 < 0.2.1 < 0.3.0 < 1.0.0)\n");
         (*pass)++;
     } else {
         printf("FAIL W250 update Versionsvergleich: %s\n", why);
@@ -744,6 +754,88 @@ void lupd_selftest(int *pass, int *fail)
         (*pass)++;
     } else {
         printf("FAIL W250 update JSON-Auswahl: %s\n", why);
+        (*fail)++;
+    }
+
+    /* b2) W301 BETA-VERSION: normale Releases (prerelease=false) und alte
+     * Alpha-Prereleases gemischt - die hoechste Version gewinnt, egal in
+     * welcher Reihenfolge GitHub sie liefert und ob sie Prerelease ist. */
+    why[0] = '\0';
+    {
+        static const char kMix[] =
+            "[{\"tag_name\":\"v0.2.0\",\"html_url\":\"https://github.com/Greevee-Lab/Steelbound/releases/tag/v0.2.0\","
+            "\"draft\":false,\"prerelease\":false},"
+            "{\"tag_name\":\"v0.3.0\",\"html_url\":\"https://github.com/Greevee-Lab/Steelbound/releases/tag/v0.3.0\","
+            "\"draft\":true,\"prerelease\":false},"
+            "{\"tag_name\":\"v0.2.1\",\"html_url\":\"https://github.com/Greevee-Lab/Steelbound/releases/tag/v0.2.1\","
+            "\"draft\":false,\"prerelease\":false},"
+            "{\"tag_name\":\"v0.1.0-alpha.10\",\"html_url\":\"https://github.com/Greevee-Lab/Steelbound/releases/tag/v0.1.0-alpha.10\","
+            "\"draft\":false,\"prerelease\":true},"
+            "{\"tag_name\":\"v0.1.0-alpha.9\",\"html_url\":\"https://github.com/Greevee-Lab/Steelbound/releases/tag/v0.1.0-alpha.9\","
+            "\"draft\":false,\"prerelease\":true}]";
+        static const char kPreNewer[] =
+            "[{\"tag_name\":\"v0.2.0\",\"html_url\":\"https://github.com/Greevee-Lab/Steelbound/releases/tag/v0.2.0\","
+            "\"draft\":false,\"prerelease\":false},"
+            "{\"tag_name\":\"v0.3.0-rc.1\",\"html_url\":\"https://github.com/Greevee-Lab/Steelbound/releases/tag/v0.3.0-rc.1\","
+            "\"draft\":false,\"prerelease\":true}]";
+        static const struct { const char *v, *stage, *label; } kStage[] = {
+            { "0.2.0", "BETA", "Steelbound 0.2.0 \xC2\xB7 BETA" },
+            { "0.3.4", "BETA", "Steelbound 0.3.4 \xC2\xB7 BETA" },
+            { "0.1.0-alpha.9", "ALPHA", "Steelbound 0.1.0-alpha.9 \xC2\xB7 ALPHA" },
+            { "0.2.0-rc.1", "RC", "Steelbound 0.2.0-rc.1 \xC2\xB7 RC" },
+            { "1.0.0", "", "Steelbound 1.0.0" },
+            { "1.2.0-beta.1", "BETA", "Steelbound 1.2.0-beta.1 \xC2\xB7 BETA" },
+            { "0.2.0+build-7", "BETA", "Steelbound 0.2.0+build-7 \xC2\xB7 BETA" },
+            { "", "", "Steelbound dev" },
+        };
+        lupd_rel_t r;
+        lupd_res_t res;
+        char lb[96];
+        int n = lupd_pick(kMix, sizeof kMix - 1, &r);
+        if (n != 4 || strcmp(r.tag, "v0.2.1") != 0 || r.prerelease ||
+            strcmp(r.url, "https://github.com/Greevee-Lab/Steelbound/releases/tag/v0.2.1") != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "gemischt: n=%d tag=%s", n, r.tag);
+        }
+        if (!why[0]) {
+            memset(&res, 0, sizeof res);
+            lupd_eval("0.1.0-alpha.9", kMix, sizeof kMix - 1, &res);
+            if (res.result != LUPD_R_NEWER || strcmp(res.rel.tag, "v0.2.1") != 0)
+                strcpy_s(why, sizeof why, "alpha.9 -> nicht NEWER 0.2.1");
+        }
+        if (!why[0]) {
+            memset(&res, 0, sizeof res);
+            lupd_eval("0.2.0", kMix, sizeof kMix - 1, &res);
+            if (res.result != LUPD_R_NEWER) strcpy_s(why, sizeof why, "0.2.0 -> nicht NEWER");
+        }
+        if (!why[0]) {
+            memset(&res, 0, sizeof res);
+            lupd_eval("0.2.1", kMix, sizeof kMix - 1, &res);
+            if (res.result != LUPD_R_CURRENT) strcpy_s(why, sizeof why, "0.2.1 -> nicht CURRENT (Entwurf 0.3.0 gezaehlt?)");
+        }
+        if (!why[0]) {
+            memset(&res, 0, sizeof res);
+            lupd_eval("0.2.0", kPreNewer, sizeof kPreNewer - 1, &res);
+            if (res.result != LUPD_R_NEWER || strcmp(res.rel.tag, "v0.3.0-rc.1") != 0 || !res.rel.prerelease)
+                strcpy_s(why, sizeof why, "0.2.0 vs 0.3.0-rc.1 -> nicht NEWER");
+        }
+        if (!why[0]) {
+            memset(&res, 0, sizeof res);
+            lupd_eval("1.0.0", kPreNewer, sizeof kPreNewer - 1, &res);
+            if (res.result != LUPD_R_CURRENT) strcpy_s(why, sizeof why, "1.0.0 -> nicht CURRENT");
+        }
+        for (i = 0; i < (int)(sizeof kStage / sizeof kStage[0]) && !why[0]; i++) {
+            sb_version_label(lb, sizeof lb, kStage[i].v);
+            if (strcmp(sb_release_stage(kStage[i].v), kStage[i].stage) != 0 || strcmp(lb, kStage[i].label) != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Phase/Text '%s' -> '%s' / '%s'", kStage[i].v,
+                            sb_release_stage(kStage[i].v), lb);
+            }
+        }
+    }
+    if (!why[0]) {
+        printf("PASS W301 update: Beta-Versionen (normale Releases + alte Alpha-Prereleases gemischt -> hoechste, Entwurf nie, rc als Prerelease; Phase/Wasserzeichen-Text 0.2.0 = BETA, alpha = ALPHA, 1.0.0 ohne, dev)\n");
+        (*pass)++;
+    } else {
+        printf("FAIL W301 update Beta-Versionen: %s\n", why);
         (*fail)++;
     }
 

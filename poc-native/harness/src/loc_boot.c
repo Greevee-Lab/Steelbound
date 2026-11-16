@@ -29,8 +29,13 @@
 #include "sb_rauto.h"
 #include "loc_mem.h"
 #include "sb_mauto.h"
+#include "sb_cchain.h"
 #include "loc_net.h"
 #include "loc_pad.h"
+#include "loc_audio.h"
+#include "loc_sync.h"
+#include "sb_tex.h" /* W297: Texttextur nach Lock neu hochladen */
+#include "loc_render.h" /* W297: Textebene */
 
 #include <stdio.h>
 #include <string.h>
@@ -96,6 +101,7 @@ void loc_boot_select(void)
      * Fehlschlag einen pausierenden Hinweis (LOCISO1: Stillstand ab f=14). */
     sb_rauto_disable();
     sb_mauto_disable();
+    sb_cchain_disable(); /* W303 */
     /* W277: Contig/VB-Daten mit Xbox-Spiegel (LoC liest [res+4]|0x80000000). */
     if (!loc_mem_init()) {
         HLOG_E("LOCBOOT: Contig-Spiegel nicht verfuegbar - ABBRUCH (exit 8)");
@@ -447,6 +453,20 @@ static u32 __stdcall ls_D3DSurface_LockRect(u32 surf, u32 plocked, u32 prect, u3
 {
     static volatile LONG n;
     u32 r = ((loc_lock2d_t)(uintptr_t)0x18B940u)(surf, 0, 0, plocked, prect, flags);
+    { /* W297 LOC-MISSION: XFONT schreibt nach dem Lock per CPU in die Texttextur (Parent, z. B.
+       * 0x7264E4, 640x480 LIN). Ohne Markierung blieb die einmal hochgeladene Kopie stehen ->
+       * Fragetexte der YES/NO-Dialoge unsichtbar, nur fruehe Texte (Laufschrift) sichtbar. */
+        u32 parent = 0;
+        __try { parent = ((const u32 *)(uintptr_t)surf)[5]; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        if (parent) { sb_tex_mark_dirty(parent); }
+        sb_tex_mark_dirty(surf);
+        { /* Textebene merken (CPU-Clear bei D3D-Clear, loc_render.c) */
+            u32 lp = 0, lb = 0;
+            __try { lp = ((u32 *)(uintptr_t)plocked)[0]; lb = ((u32 *)(uintptr_t)plocked)[1]; }
+            __except (EXCEPTION_EXECUTE_HANDLER) {}
+            loc_render_text_lock(surf, lb, lp);
+        }
+    }
     if (InterlockedIncrement(&n) <= 12) {
         u32 pitch = 0, bits = 0, f[6];
         memset(f, 0xEE, sizeof f);
@@ -595,6 +615,12 @@ void loc_boot_install(void)
     loc_hook(0x211130u, hook_D3D_CreateIB2, "D3D-CreateIB2");
     loc_hook(0x211170u, hook_D3D_CreateVB2, "D3D-CreateVB2");
     loc_hook(0x20E4C0u, hook_D3D_QueryStatus, "D3D-QueryStatus(ready)");
+    if (g_cfg.loc_visq == 1) { /* W297: echte Sichtbarkeitstests (render_visq.c, W117) - Objekte der
+                                * Entity-Tabelle zeichnet FUN_000462A0 nur bei Pixelzahl > Schwelle */
+        loc_hook(0x20EA80u, hook_D3D_BeginVisTest, "D3D-BeginVisibilityTest(query)");
+        loc_hook(0x20EB20u, hook_D3D_EndVisTest, "D3D-EndVisibilityTest(query)");
+        g_visq_on = 1;
+    }
     loc_hook(0x20F750u, hook_D3D_SetStream, "D3D-SetStream");
     loc_hook(0x20E9B0u, hook_D3D_SetIndices, "D3D-SetIndices");
     loc_hook(0x210740u, hook_D3D_DrawIdx, "D3D-DrawIdx");
@@ -677,8 +703,10 @@ void loc_boot_install(void)
     LOC_STUB(D3DDevice_SetRenderState_MultiSampleRenderTargetMode);
     LOC_STUB(D3DDevice_SetRenderState_MultiSampleAntiAlias);
     LOC_STUB(XSetProcessQuantumLength);
+    loc_audio_install(); /* W298: XACT-HLE ueberschreibt die stummen Audio-Stubs (loc_audio.c) */
     if (loc_net_install()) { /* W286: System-Link-Netz-HLE (loc_net.c) + Menue-Gamepad (loc_pad.c) */
         loc_pad_install();
+        loc_sync_install(); /* W297: Lockstep-Zustandshash (loc_sync=1) */
     } else { /* sonst "Netz nicht bereit" wie W275 */
         LOC_STUB(XNetStartup);
         LOC_STUB(WSAStartup);
@@ -724,6 +752,8 @@ void loc_boot_tick(int waited_s)
         HLOG_I("LOCBOOT: t=%ds Frames=%u Threads=%d Null-Seite=%u", waited_s, hooks_frame_count(),
                krnl_xb_thread_count(), sb_profile_loc_misses());
         loc_net_tick(waited_s); /* W286 */
+        loc_audio_tick(waited_s); /* W298 */
+        loc_sync_tick(waited_s); /* W297 */
         if (waited_s % 30 == 0) {
             loc_mem_stats();
         }

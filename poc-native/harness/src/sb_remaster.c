@@ -862,6 +862,45 @@ static size_t lvl_bytes(unsigned bc, unsigned w, unsigned h, unsigned *pitch)
     return (size_t)w * h * 4u;
 }
 
+/* DIAG(AMD-ARTIFACTS,W302) hd_mark=1: gruener Rand (4 Texel bzw. ein Block) in jeder
+ * Mip-Stufe einer per Pack ersetzten Textur -> im Bild sichtbar, welche Flaechen aus
+ * dem HD-Pack kommen. Schreibt in den (eigenen) Dateipuffer vor dem Anlegen.
+ * BC1-3: Farbblock c0 = c1 = Gruen 565, Indizes 0 (BC2/3: Alpha voll); BC7: Modus 6,
+ * beide Endpunkte Gruen/opak, Indizes 0; 32 bpp: Kanalreihenfolge nach Format. */
+static void hd_mark_block(unsigned char *b, unsigned bc, DXGI_FORMAT df)
+{
+    memset(b, 0, bc);
+    if (df == DXGI_FORMAT_BC7_UNORM) {
+        /* Bits LSB zuerst: Modus 6 (Bit 6), R0 R1 G0 G1 B0 B1 A0 A1 je 7 Bit, P0, P1, Indizes 0 */
+        unsigned long long lo = 0x40ull, hi = 0;
+        lo |= 0ull << 7;  lo |= 0ull << 14;              /* R0, R1 = 0 */
+        lo |= 127ull << 21; lo |= 127ull << 28;           /* G0, G1 = 127 */
+        lo |= 0ull << 35; lo |= 0ull << 42;               /* B0, B1 = 0 */
+        lo |= 127ull << 49; lo |= 127ull << 56;           /* A0, A1 = 127 */
+        lo |= 1ull << 63; hi |= 1ull;                     /* P0 = P1 = 1 */
+        memcpy(b, &lo, 8); memcpy(b + 8, &hi, 8);
+        return;
+    }
+    {
+        unsigned char *c = (bc == 16u) ? b + 8 : b;   /* BC2/3: Farbteil hinten */
+        if (bc == 16u) { memset(b, 0xFF, 8); if (df == DXGI_FORMAT_BC3_UNORM) { b[0] = 0xFF; b[1] = 0xFF; memset(b + 2, 0, 6); } }
+        c[0] = 0xE0; c[1] = 0x07; c[2] = 0xE0; c[3] = 0x07; /* 0x07E0 = Gruen; c0 == c1 -> Indizes 0 = c0 */
+        memset(c + 4, 0, 4);
+    }
+}
+static void hd_mark_level(unsigned char *p, unsigned pitch, unsigned w, unsigned h, unsigned bc, DXGI_FORMAT df)
+{
+    unsigned x, y, bw = bc ? (w + 3u) / 4u : w, bh = bc ? (h + 3u) / 4u : h, edge = bc ? 1u : 4u;
+    for (y = 0; y < bh; y++) {
+        for (x = 0; x < bw; x++) {
+            unsigned char *q;
+            if (x >= edge && y >= edge && x + edge < bw && y + edge < bh) { continue; }
+            if (bc) { hd_mark_block(p + (size_t)y * pitch + (size_t)x * bc, bc, df); continue; }
+            q = p + (size_t)y * pitch + (size_t)x * 4u;
+            q[0] = 0; q[1] = 0xFF; q[2] = 0; q[3] = 0xFF; /* RGBA bzw. BGRA: Gruen in beiden an Stelle 1 */
+        }
+    }
+}
 /* DDS -> SRV. Liefert NULL bei Fehler (Grund im Log). */
 static ID3D11ShaderResourceView *dds_load_mem(unsigned char *d, size_t n, const char *disp,
                                               unsigned ow, unsigned oh, unsigned *outw, unsigned *outh,
@@ -945,6 +984,12 @@ static ID3D11ShaderResourceView *dds_load_mem(unsigned char *d, size_t n, const 
     }
     if (lv == 0u) { *reject = 1; goto bad; }
     mips = lv;
+    if (g_cfg.hd_mark) { /* DIAG(AMD-ARTIFACTS,W302): gruener Rand je Stufe */
+        for (lv = 0; lv < mips; lv++) {
+            hd_mark_level((unsigned char *)sr[lv].pSysMem, sr[lv].SysMemPitch, (w >> lv) ? (w >> lv) : 1u,
+                          (h >> lv) ? (h >> lv) : 1u, bc, df);
+        }
+    }
     memset(&td, 0, sizeof td);
     td.Width = w;
     td.Height = h;
@@ -1738,6 +1783,17 @@ void sb_rem_present(unsigned frame)
                g_hd_zero);
     }
     LeaveCriticalSection(&g_rcs);
+}
+
+/* W315 Textur-Gesundheit: HD-Pack-Zaehler als Text (ohne Lock, nur lesend; "" = Pack aus). */
+void sb_rem_hd_stats(char *o, size_t cap)
+{
+    if (!o || !cap) { return; }
+    o[0] = 0;
+    if (!g_hd_on) { return; }
+    _snprintf_s(o, cap, _TRUNCATE, "loaded=%u vram=%.1f MB hits=%u missing=%u rejected=%u cpu=%u evicted=%u zero=%u",
+                g_hd_load, (double)g_hd_bytes / 1048576.0, g_hd_hits, g_hd_miss, g_hd_rej, g_hd_cpu, g_hd_evict,
+                g_hd_zero);
 }
 
 void sb_rem_shutdown(void)

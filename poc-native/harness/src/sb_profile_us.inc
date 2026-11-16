@@ -8,7 +8,7 @@
 #define SB_US_DATA_DELTA 0x740u
 #define SB_US_CHECK_LEN 8u
 
-static const sb_text_map_t k_us_text[90] = {
+static const sb_text_map_t k_us_text[92] = {
     { 0x00013536u, 0x00013536u },
     { 0x0001383Bu, 0x0001383Bu },
     { 0x00013E37u, 0x00013E37u },
@@ -25,6 +25,8 @@ static const sb_text_map_t k_us_text[90] = {
     { 0x0002AA52u, 0x0002A8E2u },
     { 0x0002AA9Eu, 0x0002A92Eu },
     { 0x0002AAA3u, 0x0002A933u },
+    { 0x0002C250u, 0x0002C0E0u },
+    { 0x0002C280u, 0x0002C110u },
     { 0x00046E7Du, 0x00046D0Du },
     { 0x00048CF0u, 0x00048B80u },
     { 0x00048CF9u, 0x00048B89u },
@@ -101,7 +103,7 @@ static const sb_text_map_t k_us_text[90] = {
     { 0x002051F1u, 0x00205921u },
 };
 
-static const sb_check_t k_us_check[438] = {
+static const sb_check_t k_us_check[440] = {
     { 0x00013536u, 0x22E5557Du },
     { 0x0001383Bu, 0xEE2F310Eu },
     { 0x00013E37u, 0x0F80590Fu },
@@ -118,6 +120,8 @@ static const sb_check_t k_us_check[438] = {
     { 0x0002A8E2u, 0x4697837Au },
     { 0x0002A92Eu, 0xA759CAEAu },
     { 0x0002A933u, 0xAB42FFD6u },
+    { 0x0002C0E0u, 0xB5C44EE4u },
+    { 0x0002C110u, 0x38F8587Du },
     { 0x00046D0Du, 0xBC980FFBu },
     { 0x00048B80u, 0xCB7197C2u },
     { 0x00048B89u, 0x95E95F9Eu },

@@ -107,9 +107,9 @@ static const char kFXR_PS[] =
     "    float zs = dep.Load(int3(i.pos.xy, 0));\n"
     "    float wp = fxp.y / (i.pos.z - fxp.x); float ws = fxp.y / (zs - fxp.x);\n"
     "    float f = (zs >= 1.0) ? 1.0 : saturate((ws - wp) * fxp.z);\n"
-    "    c.a *= f; if ((has_tex & 0x04000000u) != 0u) { c.rgb *= f; } }\n"
-    "  return c;\n"
-    "}\n";
+    "    c.a *= f; if ((has_tex & 0x04000000u) != 0u) { c.rgb *= f; } }\n";
+/* W302 AMD-ARTIFACTS: Schluss mit shader_nan_mark / post_sanitize (sb_nan_hlsl_c) */
+static const char kFXR_PS_END[] = "  return c;\n}\n";
 
 /* Cockpit-Licht (Nachbearbeitung): Vollbild-Dreieck, Blend DEST_COLOR/ONE. */
 static const char kFXR_PVS[] =
@@ -154,7 +154,11 @@ static int fx_init(void)
     if (fx_state) { return fx_state > 0; }
     fx_state = -1;
     if (!g_dev) { return 0; }
-    if (!sb_im_compile(kFXR_PS, "ps_4_0", &b)) { HLOG_E("FXR: Effekt-PS nicht uebersetzt -> Optionen wirkungslos"); return 0; }
+    {   /* W302: Effekt-PS mit NaN-Schluss (shader_nan_mark / post_sanitize) */
+        static char src[sizeof kFXR_PS + 512];
+        _snprintf_s(src, sizeof src, _TRUNCATE, "%s%s%s", kFXR_PS, sb_nan_hlsl_c(), kFXR_PS_END);
+        if (!sb_im_compile(src, "ps_4_0", &b)) { HLOG_E("FXR: Effekt-PS nicht uebersetzt -> Optionen wirkungslos"); return 0; }
+    }
     hr = ID3D11Device_CreatePixelShader(g_dev, FXR_BPTR(b), FXR_BSIZE(b), NULL, &fx_ps);
     FXR_BREL(b); b = NULL;
     if (SUCCEEDED(hr) && sb_im_compile(kFXR_PVS, "vs_4_0", &b)) {

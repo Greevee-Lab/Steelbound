@@ -54,6 +54,9 @@ typedef struct {
 int ld_pkg_build(const char *client_dir, const char *packs_json, ld_pkg_t *r);
 /* Systeminfo (OS, CPU, RAM, GPU+Treiber, Monitore) als Text. */
 void ld_sysinfo(char *out, size_t cap);
+/* W312 JOY-CALIB: Geraetezeilen (Joystick-Metadaten, NIE Eingabewerte) fuer
+ * das naechste Paket als devices.txt; NULL = keine Datei. */
+void ld_pkg_set_devices(const char *txt);
 
 /* Selbsttests (reine Logik, Temp-Ordner): Erkennung + einmalig, Paket-Inhalt,
  * Bereinigung (Testpfade mit Benutzername), Eingabe-Zeilen, URL. */

@@ -10,6 +10,9 @@
 #include "vr.h" /* W159: sb_vr_recenter("Belegung") per Aktions-Bindung */
 #include "sb_rauto.h" /* W254 REPLAY-LAUNCHER */
 #include "sb_mauto.h" /* W272 ALPHA-TEST */
+#include "loc_pad.h" /* W297: Pfeile in LoC-Menues ans Pad */
+#include "sb_profile.h" /* W297: g_sba_loc */
+#include "sb_cchain.h" /* W303 CAMPAIGN-CHAIN */
 
 static uint8_t g_fake_input[512];
 unsigned g_last_pstate;
@@ -42,6 +45,18 @@ static uint8_t active_gear(void)
 static int hook_key_down(int vk, void *ctx)
 {
     (void)ctx;
+    return key_down(vk);
+}
+
+/* W297 LOC-MISSION: In den LoC-Netzmenues liest die Sammelabfrage (0x125F70) den
+ * SBC-Hebel vertikal umgekehrt zum Pad. Ausserhalb des Locksteps gehen Pfeil
+ * hoch/runter daher nur ans Menue-Pad (loc_pad.c), nicht an den SBC-Hebel. */
+static int hook_key_down_loc(int vk, void *ctx)
+{
+    (void)ctx;
+    if ((vk == VK_UP || vk == VK_DOWN) && loc_pad_menu_arrows()) {
+        return 0;
+    }
     return key_down(vk);
 }
 
@@ -199,6 +214,22 @@ u32 __stdcall hook_XGetDeviceChanges(u32 type, u32 pIns, u32 pRem)
 /* W128: 1 = Maus liefert in diesem Poll Achsen (0 = per sbc_mouse_off
  * abgeschaltet, weil der Original-Controller aktiv ist). */
 static int g_sbc_mouse_live = 1;
+
+/* W299 REPLAY: laeuft gerade eine Spiel-Replay-Wiedergabe (REPLAY LOAD, kein Titel-Demo)?
+ * FUN_00049AE0 (Wiedergabe-Zweig [0x3B8CC0]==1): Titel-Demo ([0x670E9C]==1) endet mit jeder
+ * Taste ("-PRESS MAIN WEAPON BUTTON-"), das Spieler-Replay ([0x670E9C]==0) nur mit der
+ * Hauptwaffe bi0 (-> [0x3B8CB8] -> FUN_000486D0 [0x3B8CD0]=1). [0x3B8CDC]==1 = Demo/Replay. */
+static int w299_game_replay(void)
+{
+    unsigned cc0 = 0, cdc = 0, any = 1;
+    if (g_sba_loc) return 0;
+    __try {
+        cc0 = *(volatile unsigned *)(uintptr_t)SBA(0x3B8CC0u);
+        cdc = *(volatile unsigned *)(uintptr_t)SBA(0x3B8CDCu);
+        any = *(volatile unsigned *)(uintptr_t)SBA(0x670E9Cu);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return cc0 == 1u && cdc == 1u && any == 0u;
+}
 static uint8_t g_sbc_gear = 8; /* letzter USB-Gang != 0 */
 static int g_sbc_gear_init;
 
@@ -803,7 +834,7 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
     { /* W76: Snapshot bauen, Legacy- oder Profil-Abbildung fahren. */
         imap_snap_t snap;
         memset(&snap, 0, sizeof snap);
-        snap.key = hook_key_down;
+        snap.key = g_sba_loc ? hook_key_down_loc : hook_key_down; /* W297 */
         snap.ctx = NULL;
         snap.replay_active = input_replay_active();
         snap.frame = g_frames;
@@ -883,6 +914,18 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                 int rdx, rdy, rbl;
                 (void)imouse_poll(&rdx, &rdy, &rbl);
                 (void)imouse_wheel_mask(g_frames, 1); /* W260: Rad verwerfen */
+            }
+        }
+        { /* W299 REPLAY: im Spiel-Replay beendet die Maus (Hauptwaffe) nichts */
+            static int w299_last = -1;
+            int rp = !snap.replay_active && w299_game_replay();
+            snap.bi0_nomouse = rp && !g_cfg.replay_mouse_exit;
+            if (rp != w299_last) {
+                if (rp || w299_last == 1)
+                    HLOG_I("REPLAY: Wiedergabe %s (f=%u, Maus beendet %s, Abbruch: Aktion replay_exit, "
+                           "Pad/Original-Controller/Joystick wie im Original)", rp ? "laeuft" : "beendet",
+                           g_frames, g_cfg.replay_mouse_exit ? "wie im Original" : "nicht");
+                w299_last = rp;
             }
         }
         if (!g_leg_init) {
@@ -1033,6 +1076,15 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
             if (g_prof_load_rc >= 0) {
                 imap_profile_apply((imap_block_t *)s, &g_prof_st, &g_prof,
                                    &snap);
+                { /* W299 REPLAY: Aktion replay_exit -> Hauptwaffe, nur waehrend der Wiedergabe */
+                    static int re_prev;
+                    int lvl = !snap.replay_active && imap_action_replay_exit(&g_prof, &snap) &&
+                              w299_game_replay();
+                    if (lvl) s->buttons[0] |= 1u;
+                    if (lvl && !re_prev)
+                        HLOG_I("REPLAY: Aktion replay_exit -> Wiedergabe beenden (f=%u)", g_frames);
+                    re_prev = lvl;
+                }
                 { /* W271 STICK-RELATIVE: Hinweise (einmal bzw. je Zentrieren) */
                     static int sr_logged;
                     if (g_prof_st.m_rate_src && !sr_logged) {
@@ -1121,6 +1173,7 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
     sbc_merge(s); /* W75: USB/Fixture als Zweitquelle (sbc_usb=1) */
     sb_rauto_apply(s); /* W254 REPLAY-LAUNCHER: Menue-Fuehrung (nur mit replay_autoplay) */
     sb_mauto_apply(s); /* W272 ALPHA-TEST: Menue-Fuehrung (nur mit mission_autostart) */
+    sb_cchain_apply(s); /* W303 CAMPAIGN-CHAIN: Folgebildschirme (nur mit campaign_chain) */
     if (g_aimat_idx && input_replay_active()) {
         aimat_apply(s); /* W59: Ziel-Bot (Testpfad, nur mit Replay) */
     }

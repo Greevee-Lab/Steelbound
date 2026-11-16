@@ -230,6 +230,76 @@ int sbc_usb_autocal_feed(sbc_autocal_t *ac, const sbc_state_t *st);
 void sbc_usb_autocal_build(const sbc_autocal_t *ac, const sbc_cal_t *cfg,
                            int axis_dead, int pedal_dead, sbc_cal_t *out);
 
+/* ---- W305 (JOY-HOTPLUG): Verbindungs-Automat Abziehen/Wieder-Einstecken ----
+ * Rein (Geraete-Zugriff ueber ops, Zeit von aussen), sbc_probe --selftest.
+ * Ablauf je Schritt (Lese-Thread in sbc_wire.c):
+ *  - kein Geraet: hoechstens alle SBC_LINK_RETRY_MS ein open-Versuch
+ *    (auch "beim Start nicht eingesteckt"), dazwischen Schlaf -> kein
+ *    Busy-Spin;
+ *  - Geraet offen: poll. TIMEOUT (Idle/NAK) ist kein Fehler. SBC_ERR_IO
+ *    macht die Verbindung sofort "verloren" (Spiel bekommt den neutralen
+ *    Stand), nach SBC_LINK_IO_MAX Fehlern in Folge wird das Geraet
+ *    geschlossen (WinUsb_Free/CloseHandle) und gedrosselt neu geoeffnet;
+ *  - erster gueltiger Report nach "verloren": Wiederverbindungs-Sperre
+ *    fuer Taster (bi0-33), die in diesem Moment gedrueckt sind - sie gehen
+ *    erst nach einmal Loslassen ans Spiel (keine ungewollte Flanke).
+ *    Kippschalter (bi34-38) sind Pegel und gehen sofort durch. */
+#define SBC_LINK_IO_MAX 3        /* IO-Fehler in Folge bis zum Schliessen */
+#define SBC_LINK_ERR_MS 200u     /* Pause nach IO-/Report-Fehler */
+#define SBC_LINK_RETRY_MS 1500u  /* Abstand der open-Versuche ohne Geraet */
+#define SBC_TOGGLE_MASK2 0x007Cu /* buttons[2]: Kippschalter bi34-38 */
+#define SBC_MOMENT_MASK2 0x0003u /* buttons[2]: Taster bi32-33 */
+
+typedef struct {
+    int (*open)(void *ctx, sbc_usb_dev_t **out);
+    void (*close)(void *ctx, sbc_usb_dev_t *dev);
+    int (*poll)(void *ctx, sbc_usb_dev_t *dev, sbc_state_t *st);
+    void *ctx;
+} sbc_link_ops_t;
+
+/* Echte Geraete-Funktionen (sbc_usb_open/_close/_poll). */
+extern const sbc_link_ops_t sbc_link_usb_ops;
+
+typedef struct {
+    sbc_usb_dev_t *dev;  /* offen (nur der Lese-Thread schreibt) */
+    int io_err;          /* IO-Fehler in Folge */
+    int lost;            /* 1 = verloren (Fehler/geschlossen), bis gueltiger Report */
+    int ever_up;         /* mindestens einmal offen gewesen */
+    int have_last;       /* last gueltig */
+    sbc_state_t last;    /* letzter gueltiger Stand (Halten: Kippschalter/Tuner) */
+    uint16_t guard[3];   /* Wiederverbindungs-Sperre (Taster bis Loslassen) */
+    uint64_t next_open_ms;
+    int open_due;        /* 1 = naechster open-Versuch ohne Wartezeit */
+    int last_open_rc, last_poll_rc;
+    unsigned opens, closes, open_tries; /* Zaehler (Log/Test) */
+} sbc_link_t;
+
+/* Ereignis-Bits von sbc_link_step. */
+#define SBC_LEV_STATE 0x01u    /* *st = neuer gueltiger Stand (Sperre angewandt) */
+#define SBC_LEV_OPENED 0x02u   /* Geraet geoeffnet (erstmals oder wieder) */
+#define SBC_LEV_LOST 0x04u     /* Verbindung gerade verloren (erster IO-Fehler) */
+#define SBC_LEV_CLOSED 0x08u   /* Geraet geschlossen (IO-Fehler anhaltend) */
+#define SBC_LEV_BACK 0x10u     /* erster gueltiger Report nach "verloren" */
+#define SBC_LEV_OPENFAIL 0x20u /* open-Versuch gescheitert (last_open_rc) */
+
+/* Initialisieren; dev = bereits offenes Geraet oder NULL (dann sofortiger
+ * erster open-Versuch). */
+void sbc_link_init(sbc_link_t *l, sbc_usb_dev_t *dev);
+/* Ein Schritt; *sleep_ms = empfohlene Pause vor dem naechsten (0 = sofort
+ * weiter, poll blockiert selbst bis ~100 ms). Rueckgabe Ereignis-Bits. */
+unsigned sbc_link_step(sbc_link_t *l, const sbc_link_ops_t *ops, uint64_t now_ms,
+                       sbc_state_t *st, unsigned *sleep_ms);
+/* Geraet schliessen (Prozess-Ende/Test). */
+void sbc_link_shutdown(sbc_link_t *l, const sbc_link_ops_t *ops);
+
+/* Neutraler Stand waehrend der Trennung (Spiel-Einheiten, ohne
+ * Kalibrierung): Zielhebel 0x80/0x80, Dreh-/Sichthebel 0, Pedale 0, alle
+ * Taster los, Gang 0 (= "dazwischen": Spiel und Hook halten den letzten
+ * Gang). Gehalten aus last (falls have_last): Kippschalter bi34-38 (AUS
+ * waere nicht neutral: OXYGEN aus erstickt den Piloten, BUFFER aus laesst
+ * das Bild wackeln - SPIELWISSEN) und Tuner (Drehwahl, Stellung bleibt). */
+void sbc_usb_neutral_hold(const sbc_state_t *last, int have_last, sbc_state_t *out);
+
 /* Fehlercode -> Text (statisch, nie NULL). */
 const char *sbc_usb_strerror(int err);
 

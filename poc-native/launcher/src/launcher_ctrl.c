@@ -153,7 +153,8 @@ int lctrl_bind_combo_row(int idx)
 int lctrl_bind_empty_line_row(int idx)
 {
     return idx >= 0 && idx < LCTRL_ELEM_N &&
-           (strcmp(kCtrlElems[idx].key, "orig_view") == 0 || strcmp(kCtrlElems[idx].key, "quick_shot") == 0);
+           (strcmp(kCtrlElems[idx].key, "orig_view") == 0 || strcmp(kCtrlElems[idx].key, "quick_shot") == 0 ||
+            strcmp(kCtrlElems[idx].key, "replay_exit") == 0); /* W299: leer = aus (sonst Standard) */
 }
 
 void lctrl_key_combo(int mod_vk, int vk, char *out, size_t cap)
@@ -429,6 +430,136 @@ int lctrl_pad_deflected(const lctrl_pad_t *p, char *name, size_t cap)
     }
     return 0;
 }
+/* W312 JOY-CALIB: Pad-Lerner mit Ruhestellung (s. launcher_ctrl.h). */
+void lctrl_pad_learner_reset(lctrl_pad_learner_t *L)
+{
+    if (L) {
+        memset(L, 0, sizeof *L);
+    }
+}
+
+int lctrl_pad_learner_axis(lctrl_pad_learner_t *L, const lctrl_pad_t *cur,
+                           char *name, size_t cap)
+{
+    double v[4];
+    int hot = -1, i, n_hot = 0, half = 0;
+    if (!L || !cur || !name) {
+        return 0;
+    }
+    if (!L->have_base) {
+        int still = L->settle > 0 &&
+                    abs(cur->lx - L->prev.lx) <= 655 && abs(cur->ly - L->prev.ly) <= 655 &&
+                    abs(cur->rx - L->prev.rx) <= 655 && abs(cur->ry - L->prev.ry) <= 655 &&
+                    abs((int)cur->lt - (int)L->prev.lt) <= 5 &&
+                    abs((int)cur->rt - (int)L->prev.rt) <= 5;
+        L->settle = still ? L->settle + 1 : 1;
+        L->prev = *cur;
+        if (L->settle >= 3) {
+            L->base = *cur;
+            L->have_base = 1;
+        }
+        return 0;
+    }
+    L->prev = *cur;
+    v[0] = (cur->lx - L->base.lx) / 32768.0;
+    v[1] = (cur->ly - L->base.ly) / 32768.0;
+    v[2] = (cur->rx - L->base.rx) / 32768.0;
+    v[3] = (cur->ry - L->base.ry) / 32768.0;
+    for (i = 0; i < 4; i++) {
+        if (dabs(v[i]) > 0.7) {
+            hot = i;
+            n_hot++;
+        } else if (dabs(v[i]) > 0.3) {
+            half = 1;
+        }
+    }
+    if (n_hot == 1 && !half) {
+        static const char *nm[4] = { "LX", "LY", "RX", "RY" };
+        strcpy_s(name, cap, nm[hot]);
+        return 1;
+    }
+    if (n_hot == 0 && !half) {
+        int dl = (int)cur->lt - (int)L->base.lt, dr = (int)cur->rt - (int)L->base.rt;
+        int lt = abs(dl) > 160, rt = abs(dr) > 160;
+        int lt_half = abs(dl) > 40 && !lt, rt_half = abs(dr) > 40 && !rt;
+        if (!lt_half && !rt_half && (lt ^ rt)) {
+            strcpy_s(name, cap, lt ? "LT" : "RT");
+            return 1;
+        }
+    }
+    return 0;
+}
+
+int lctrl_axis_partner(int idx)
+{
+    static const char *const pr[2][2] = { { "aim_x", "aim_y" }, { "sight_x", "sight_y" } };
+    int p, k, j;
+    if (idx < 0 || idx >= LCTRL_ELEM_N) {
+        return -1;
+    }
+    for (p = 0; p < 2; p++) {
+        for (k = 0; k < 2; k++) {
+            if (strcmp(kCtrlElems[idx].key, pr[p][k]) == 0) {
+                for (j = 0; j < LCTRL_ELEM_N; j++) {
+                    if (strcmp(kCtrlElems[j].key, pr[p][1 - k]) == 0) {
+                        return j;
+                    }
+                }
+            }
+        }
+    }
+    return -1;
+}
+
+/* "PAD:LX:dz=.." -> "PAD:LX", "JOY0:X:.." / "JOY:X" -> "JOY0:X"; "" sonst
+ * (Achse als Taste "Z+"/Zone zaehlt nicht als Analogachse). */
+static void alt_axis_key(const char *a, char *out, size_t cap)
+{
+    int slot = 0, axis = -1;
+    out[0] = '\0';
+    if (!a) {
+        return;
+    }
+    while (*a == ' ' || *a == '\t') {
+        a++;
+    }
+    if (_strnicmp(a, "PAD:", 4) == 0) {
+        static const char *const st[4] = { "LX", "LY", "RX", "RY" };
+        int k;
+        for (k = 0; k < 4; k++) {
+            if (_strnicmp(a + 4, st[k], 2) == 0 && (a[6] == '\0' || a[6] == ':')) {
+                _snprintf_s(out, cap, _TRUNCATE, "PAD:%s", st[k]);
+            }
+        }
+        return;
+    }
+    if (lctrl_joy_is_axis(a, &slot, &axis) && axis >= 0) {
+        _snprintf_s(out, cap, _TRUNCATE, "JOY%d:%s", slot < 0 ? 0 : slot, ijoy_axis_name(axis));
+    }
+}
+
+int lctrl_alt_same_axis(const char *a, const char *b)
+{
+    char ka[32], kb[32];
+    alt_axis_key(a, ka, sizeof ka);
+    alt_axis_key(b, kb, sizeof kb);
+    return ka[0] && strcmp(ka, kb) == 0;
+}
+
+int lctrl_bind_axis_used_by(const lctrl_bind_t *b, int idx, const char *src)
+{
+    int a;
+    if (!b || idx < 0 || idx >= LCTRL_ELEM_N || !src) {
+        return 0;
+    }
+    for (a = 0; a < b->row[idx].n_alt; a++) {
+        if (lctrl_alt_same_axis(b->row[idx].alt[a], src)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* --- Tasten-Namen ------------------------------------------------------ */
 
 void lctrl_key_name(int vk, char *out, size_t cap)
@@ -559,6 +690,9 @@ const lctrl_elem_t kCtrlElems[LCTRL_ELEM_N] = {
     /* W283 ORIG-KEY-BIND: Vergleichstaste Original <-> eigene Einstellungen
      * (Abschnitt [client], Standard KEY:SHIFT+KEY:F8, Rueckfall orig_key). */
     { "orig_view", "-", "bind.orig_view", LCTRL_ACT },
+    /* W299 REPLAY: laufendes Spiel-Replay beenden (Abschnitt [client], Standard Ruecktaste; die Maus
+     * beendet Replays nicht, Pad/Original-Controller/Joystick wie im Original). */
+    { "replay_exit", "-", "bind.replay_exit", LCTRL_ACT },
 };
 
 /* W159: kanonische SBC-Quellnamen bi0..38 (parserstabil, s. kBiAlias). */
@@ -781,22 +915,34 @@ static void bind_quick_default(lctrl_bind_t *b, int seen)
     }
 }
 
+/* W299 REPLAY: Profil ohne replay_exit-Zeile -> Standard wie im Client (imap_profile_parse). */
+static void bind_replay_exit_default(lctrl_bind_t *b, int seen)
+{
+    int re = lctrl_bind_elem_index("replay_exit");
+    if (!seen && re >= 0) {
+        lctrl_bind_set(b, re, LCTRL_REPLAY_EXIT_DEFAULT);
+    }
+}
+
 int lctrl_bind_load_file(const char *path, lctrl_bind_t *b)
 {
     FILE *f;
     char line[512];
     int ov = lctrl_bind_elem_index("orig_view"), seen = 0;
     int qs = lctrl_bind_elem_index("quick_shot"), qseen = 0; /* W290 */
+    int re = lctrl_bind_elem_index("replay_exit"), rseen = 0; /* W299 */
     lctrl_bind_init(b);
     if (u8_fopen_s(&f, path, "r") != 0 || !f) { return 1; }
     while (fgets(line, sizeof line, f)) {
         int r = bind_parse_line(line, b);
         if (r == ov) { seen = 1; }
         if (r == qs) { qseen = 1; }
+        if (r == re) { rseen = 1; }
     }
     fclose(f);
     bind_orig_default(b, seen);
     bind_quick_default(b, qseen);
+    bind_replay_exit_default(b, rseen);
     return 0;
 }
 
@@ -808,6 +954,7 @@ int lctrl_bind_load_text(const char *text, lctrl_bind_t *b)
     const char *p = text;
     int ov = lctrl_bind_elem_index("orig_view"), seen = 0;
     int qs = lctrl_bind_elem_index("quick_shot"), qseen = 0; /* W290 */
+    int re = lctrl_bind_elem_index("replay_exit"), rseen = 0; /* W299 */
     lctrl_bind_init(b);
     if (!text) { return 1; }
     while (*p) {
@@ -819,11 +966,13 @@ int lctrl_bind_load_text(const char *text, lctrl_bind_t *b)
         r = bind_parse_line(line, b);
         if (r == ov) { seen = 1; }
         if (r == qs) { qseen = 1; }
+        if (r == re) { rseen = 1; }
         p += n;
         while (*p == '\r' || *p == '\n') { p++; }
     }
     bind_orig_default(b, seen);
     bind_quick_default(b, qseen);
+    bind_replay_exit_default(b, rseen);
     return 0;
 }
 

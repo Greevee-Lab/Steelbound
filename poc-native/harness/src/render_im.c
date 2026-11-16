@@ -10,6 +10,7 @@
 #include "sb_perfhud.h" /* W125 TICK-PERF */
 #include "sb_remaster.h" /* W103 REM-FRAME */
 #include "render_qa.h"
+#include "sb_texhealth.h" /* W315 */
 
 /* ---------- Immediate-Mode (Xbox Begin/End, M2b-Geometrie) ----------
  * Semantik (Cxbx XbVertexBuffer.cpp): Register -1 (VERTEX) -> Slot 0
@@ -19,6 +20,7 @@
 #define IM_MAX_VERTS 65536
 unsigned g_im_draws, g_im_vdata, g_im_prim_hist[16];
 unsigned g_im_tris, g_im_rhw, g_im_3d;
+static int g_im_p2zt; /* W313 P2-ZTEST: aktueller Draw mit Tiefentest (Diag) */
 /* DIAG(CAMD,W269): Zaehler fuer diag_cam_tick (nur mit cam_diag > 0) */
 unsigned g_camd_fold_draws, g_camd_fold_verts;
 float g_camd_best_m[4][4];
@@ -210,7 +212,7 @@ static const vb_decl_t *sb_vb_decl(unsigned handle)
                 if (stream != 0 || fmt == 0x02u) {
                     continue; /* nur Stream 0; 0x02 = NONE */
                 }
-                if (i == 0 && (fmt == 0x22u || fmt == 0x32u || fmt == 0x42u)) {
+                if (i == 0 && (fmt == 0x22u || fmt == 0x32u || fmt == 0x42u || (g_sba_loc && g_cfg.loc_short3 && fmt == 0x35u))) { /* W311: LoC-Modelle SHORT3 */
                     d->pos.off = off; d->pos.fmt = fmt; d->pos.ok = 1;
                 } else if (fmt == 0x40u && !d->col.ok) {
                     d->col.off = off; d->col.fmt = fmt; d->col.ok = 1;
@@ -233,6 +235,7 @@ static const vb_decl_t *sb_vb_decl(unsigned handle)
     }
 }
 
+static int s_im_vb_short3; /* W311: laufender VB-Draw mit SHORT3-Position (nur LoC) */
 static void sb_vb_pos(float out[4], const unsigned char *v,
                       const vb_field_t *f)
 {
@@ -244,6 +247,11 @@ static void sb_vb_pos(float out[4], const unsigned char *v,
     case 0x32u:
         out[0] = fl[0]; out[1] = fl[1]; out[2] = fl[2]; out[3] = 1.0f;
         break;
+    case 0x35u: { /* W311: SHORT3 roh (NV2A, w = 1; nur LoC-Profil, loc_short3) */
+        const short *sh = (const short *)(v + f->off);
+        out[0] = (float)sh[0]; out[1] = (float)sh[1]; out[2] = (float)sh[2]; out[3] = 1.0f;
+        break;
+    }
     default: /* 0x42u */
         out[0] = fl[0]; out[1] = fl[1]; out[2] = fl[2]; out[3] = fl[3];
         break;
@@ -490,11 +498,13 @@ static void sb_render_vb_draw_body(unsigned prim, const unsigned char *vdata,
     sb_ctx_enter(); /* A6 ctx_lock (VB-Submit; keine Returns bis leave) */
     g_im_col_slot = 3;
     g_im_col_written = 1; /* VB-Farben sind explizit (Decl/Weiss), nie stale */
-    g_im_force3d = (!d->is_rhw && (d->pos.fmt == 0x32u || d->pos.fmt == 0x42u)) ? 1 : 0;
+    g_im_force3d = (!d->is_rhw && (d->pos.fmt == 0x32u || d->pos.fmt == 0x42u || d->pos.fmt == 0x35u)) ? 1 : 0; /* W311: SHORT3 (nur LoC, loc_short3) = Modellkoordinaten */
+    s_im_vb_short3 = (d->pos.fmt == 0x35u); /* W311: nie UI-/Film-Quad (lin_rhw_range) */
     g_submit_vb = 1; /* DIAG(MOVIE): VB-Pfad */
     sb_im_submit();
     g_im_nverts = 0;
     g_im_force3d = 0;
+    s_im_vb_short3 = 0;
     g_im_fast = 0; /* PERF(IM-PERF,W99) */
     if (g_cfg.shading) { rq_vb_raw_clear(); } /* SHADE-PERF (W80) */
     sb_ctx_leave();
@@ -536,7 +546,7 @@ static int ps_stage0_none(void)
     __try {
         unsigned base = g_im_pshader & ~1u;
         unsigned pdef = *(unsigned *)(uintptr_t)(base + 8u);
-        if (pdef >= 0x10000u && pdef < 0x80000000u) {
+        if (pdef >= 0x10000u && pdef < SB_HOST_LIM()) { /* W315 */
             unsigned tm = *(unsigned *)(uintptr_t)(pdef + 0xD8u);
             none = ((tm & 0x1Fu) == 0u) ? 1 : 0;
         }
@@ -1132,6 +1142,10 @@ void sb_im_submit(void)
     int z0 = g_ph_zone; /* DIAG(PERF-TICK,W168) */
     g_ph_zone = 1;
     if (g_sba_loc) { g_loc_draws++; } /* W285 DIAG(LOC-RENDER): Draws je Bild (nur LoC) */
+    /* W297 LOC-MISSION: Schatten-Tiefenpass der LoC-Mission (1800x1800, Aufrufer 0x32546) bindet eine
+     * Dummy-Farbflaeche (Data=0) und schreibt Farbe (Maske 0x01010101). Auf der Xbox unsichtbar, bei uns
+     * landete er im Backbuffer und deckte die untere Box graublau ab (Zensus A9). Nur LoC-Profil. */
+    if (g_sba_loc && g_cfg.loc_nodummy && g_rtt_dummy) { g_ph_zone = z0; return; }
     if (!RQP_ON) { sb_im_submit_body(); mfx_end(); g_ph_zone = z0; return; }
     q0 = rq_qpc();
     sb_im_submit_body();
@@ -1273,7 +1287,7 @@ static void sb_im_submit_body(void)
      * ein UI-Quad (Movie!), kein 3D: RHW statt degeneriertem 3D-MVP.
      * Z/W-Test greift hier nicht (Spiel normalisiert UI-Z/W anders).
      * Prefetch fuellt Cache VOR Check+Norm (heilt Early-Miss). */
-    if (!vsh_em && g_cfg.lin_rhw_range && !rhw && g_submit_vb &&
+    if (!vsh_em && g_cfg.lin_rhw_range && !rhw && g_submit_vb && !s_im_vb_short3 &&
         (g_im_prim == 4 || g_im_prim == 6)) {
         unsigned q; int inrange = 1;
         for (q = 0; inrange && q < n; q++) {
@@ -1324,6 +1338,11 @@ static void sb_im_submit_body(void)
      * Optionen aus -> fxr_active() = 0, nichts geaendert. */
     fxr_on = fxr_active();
     if (fxr_on) { fxr_cls = fxr_pre(vsh_em, (const float (*)[4])vsh_mat, vsh_zadd, pb, pst, n, rhw, g_im_prim); }
+    if (g_cfg.vis_diag && g_im_prim == 1u) { /* DIAG(FLARE-OCCL,W304): Rohdaten des Testpunkts */
+        extern float g_vqd_raw[4], g_vqd_mat[4][4]; extern int g_vqd_em, g_vqd_rowe; extern unsigned g_vqd_vs;
+        memcpy(g_vqd_raw, IMPOS(0), sizeof g_vqd_raw); memcpy(g_vqd_mat, vsh_mat, sizeof g_vqd_mat);
+        g_vqd_em = vsh_em; g_vqd_rowe = vsh_p ? (int)vsh_p->rowe : -1; g_vqd_vs = g_im_shader;
+    }
     /* VSH2D: Positionen emulieren (P1 = Pixel, P2 = Clip/Tail). */
     if (vsh_em == 1) {
         for (i = 0; i < n; i++) {
@@ -1516,12 +1535,14 @@ static void sb_im_submit_body(void)
      * Strip/Fan/Quad -> Quell-Vertices + Indexpuffer. Shading-Pfad: Strom 2 in
      * Quell-Reihenfolge bzw. Roh-VS mit rq_raw.z = 5 (SV_VertexID = Index).
      * Aus bei den Diagnosen, die je expandiertem Vertex im Tick-VB zaehlen. */
+    /* W319 MONITOR-VIEW: Monitor-Netze vergroessern, uebrige Cockpit-Draws auslassen (Standard aus -> 0 ohne Speicherzugriff) */
+    if (!rtt_active() && sb_mv_frame() && sb_mv_draw(mvp, vsh_p2bb ? 1 : (rhw ? 2 : 0), rhw ? NULL : pb, pst, n, sb_tex_xptr())) { g_rq_active = 0; return; }
     if (fast && (g_cfg.im_strip_ib & (g_rq_active ? 2 : 1)) && g_cfg.interp_eyediag <= 0 && g_cfg.interp_diag < 3 &&
         g_cfg.interp_ddrel <= 0) {
         ibf = sb_im_ib_first(g_im_prim);
         if (ibf != 0xFFFFFFFFu && !im_ib_ensure()) { ibf = 0xFFFFFFFFu; }
     }
-    if (!rtt_active() && sb_cp_frame()) { /* W264: indiziert liegen die Quell-Vertices 1:1 im Tick-VB (wie Liste) */
+    if (!rtt_active() && !sb_mv_on() && sb_cp_frame()) { /* W264: indiziert liegen die Quell-Vertices 1:1 im Tick-VB (wie Liste) */
         sb_cp_draw(mvp, vsh_p2bb ? 1 : (rhw ? 2 : 0), rhw ? NULL : pb, pst, n, ibf != 0xFFFFFFFFu ? 5u : g_im_prim);
     }
     if (g_cfg.shadow_diag) { extern float g_im_diag_mvp[16]; memcpy(g_im_diag_mvp, mvp, sizeof g_im_diag_mvp); } /* DIAG(SHADOWBUF,W127) */
@@ -1707,6 +1728,7 @@ static void sb_im_submit_body(void)
         }
       }
     }
+    if (g_cfg.shader_nan_mark) { sb_nanmark_verts(ov, n, g_im_prim, g_rtt_bound); } /* DIAG(AMD-ARTIFACTS,W302) */
     if (sb_rpf_skip(sb_tex_xptr(), ov, n)) { g_rq_active = 0; return; } /* W290: REPLAY-Schriftzug/Logo aus (nur mit Schalter) */
     IMP_MARK(IMP_P2); /* DIAG(IM-PERF,W99): UV-Slot, Umwandlung, C0, UV-Norm */
     /* Primitiv-Expansion (Xbox -> D3D11). Cull ist aus (Winding egal). */
@@ -1893,6 +1915,12 @@ static void sb_im_submit_body(void)
             srv = NULL;
             has_tex = 0u;
         }
+        /* W315 TEX-WHITE-AMD: Stufe 0 belegt, aber keine SRV -> zaehlen (Textur-Gesundheit);
+         * tex_missing_mark=1 (DIAG) bindet stattdessen eine Markierungsfarbe je Grund. */
+        if (!srv && sb_tex_xptr() && !ps_stage0_none()) {
+            srv = sb_th_missing(sb_tex_why(), g_present_no);
+            has_tex = srv ? 1u : 0u;
+        }
         if (g_cfg.bloom_diag && !srv && sb_tex_xptr() && rtt_active() && rq_in_mission() && !ps_stage0_none()) {
             /* DIAG(SHADE-BLOOM,W112): Stufe 0 belegt, aber keine SRV (Shading: T0 = 1) */
             static unsigned nx[64], nn;
@@ -2000,7 +2028,11 @@ static void sb_im_submit_body(void)
     }
     /* COLORMASK (W33): Blend-Maske + DepthStencil aus Spiel-States;
      * rs_*=0 nimmt exakt den alten Pfad (RHW->off, sonst on). */
-    rs_apply_states(rhw);
+    { int rhw_ds = rhw; /* W304 FLARE-OCCL: Testpunkt im Sichtbarkeitstest (P2 ins RT) mit Tiefentest wie NV2A */
+      if (rhw && g_im_prim == 1u && vsh_em == 2 && rtt_active()) { extern int sb_visq_ztest(void); if (sb_visq_ztest()) { rhw_ds = 0; } }
+      g_im_p2zt = 0; /* W313 P2-ZTEST: P2-Pixel ins Spiel-RT mit Tiefenflaeche -> Tiefenzustand des Spiels wie NV2A */
+      if (rhw_ds && vsh_em == 2 && rtt_active() && g_cfg.p2_ztest && p2z_ztest()) { rhw_ds = 0; g_im_p2zt = 1; }
+      rs_apply_states(rhw_ds); }
     g_im_submits++;
     /* SHADE-PERF (W80): Shading-Draws (shade_gpuvb=1) setzen Layout/Stream 0/
      * VS/PS/t0 in rq_bind/rq_draw selbst -> hier nicht doppelt (bei
@@ -2170,7 +2202,7 @@ static void sb_im_submit_body(void)
                   HLOG_W("TEX3D ps=0x%X: raw=[%08X %08X %08X %08X %08X %08X %08X %08X]",
                          g_im_pshader, hd3[0], hd3[1], hd3[2], hd3[3],
                          hd3[4], hd3[5], hd3[6], hd3[7]);
-                  if (pdef >= 0x10000u && pdef < 0x80000000u) {
+                  if (pdef >= 0x10000u && pdef < SB_HOST_LIM()) { /* W315 */
                       unsigned *pd = (unsigned *)(uintptr_t)pdef;
                       HLOG_W("TEX3D ps=0x%X def=0x%X: combiner=%u texmodes=0x%08X rgbin0=0x%08X finalABCD=0x%08X inputTex=0x%X",
                              g_im_pshader, pdef, pd[0xD4u / 4u], pd[0xD8u / 4u],
@@ -2256,8 +2288,10 @@ static void sb_im_submit_body(void)
     }
     { long long q0 = RQP_ON ? rq_qpc() : 0;
     int fxq = g_cfg.fx_diag ? fx_draw_pre(out, nout, rhw, g_im_prim, mvp) : 0; /* DIAG(FX-ORIG,W90) */
+    if (g_cfg.p2z_diag) { p2z_note(out, nout, rhw, vsh_em, g_im_prim, g_im_p2zt, mvp); } /* DIAG(P2-ZTEST,W313) */
     if (g_cfg.bloom_diag) { bloom_diag_pre(out, nout, n, rhw, g_im_prim, rq_srv0); } /* DIAG(SHADE-BLOOM,W112) */
     { extern int g_visq_on; if (g_visq_on) { extern void sb_visq_draw_note(void); sb_visq_draw_note(); } } /* FIX(SHADE-M2,W117) vis_query: Draws im Sichtbarkeitstest */
+    if (g_cfg.vis_diag) { extern void sb_visq_draw_diag(const im_vertex_t *v, unsigned n, int rhw, unsigned prim, unsigned tex); sb_visq_draw_diag(ov, n, rhw, g_im_prim, ip_tex); } /* DIAG(FLARE-OCCL,W304) */
     if (fxr_cls) { fxr_bind(); } else if (fxr_on) { fxr_note_other(); } /* W133 REM-FX: Tiefen-Kopie, Effekt-PS */
     if (g_rq_active) { rq_draw(ip_vb ? ip_vb : g_im_vb, nout, vb_start, ibf); } /* RENDER-QA; W264 ibf */
     else if (ibf != 0xFFFFFFFFu) { /* W264 DRAW-OPT2: Strip/Fan/Quad ueber festen Indexpuffer */
@@ -2268,6 +2302,7 @@ static void sb_im_submit_body(void)
     if (fxr_cls) { fxr_after(fast ? ov : out, fast ? n : nout); } /* W133 REM-FX: Glut/Licht, Energie */
     if (g_cfg.bloom_diag) { bloom_diag_post(); } /* DIAG(SHADE-BLOOM,W112) */
     fx_draw_post(fxq); /* DIAG(FX-ORIG,W90) */
+    if (g_cfg.p2z_diag) { p2z_post(); } /* DIAG(P2-ZTEST,W313) */
     if (RQP_ON) { g_rqp_q[RQP_DRAW] += rq_qpc() - q0; } } /* DIAG(SHADE-PERF,W80): auch alter Pfad */
     if (g_cfg.sbar_probe[0] && m3d_on) { sbar_probe_after(rhw, nout); } /* DIAG(STARTSEQ-BARS,W98) */
     if (xw_on) { sb_xfx_wire_end(xw_saved); } /* W240 */

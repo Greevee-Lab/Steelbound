@@ -25,6 +25,7 @@
 #include "render_vsh.h"
 #include "render_psgen.h"
 #include "sb_state.h" /* W232: sb_in_mission */
+#include "sb_texhealth.h" /* W315 */
 
 #define RQ_VS_MAX 96
 #define RQ_PS_MAX 96
@@ -481,6 +482,52 @@ static void rq_raw_release(rq_vsent_t *e)
     e->rawsig = 0;
 }
 
+/* PERF(PERF-SPIKE,W318) shade_par_compile=1: Jede VS-Variante braucht zwei
+ * Programme (Spielbild + Lerp/W224). Bei kaltem Shader-Cache uebersetzte der
+ * Spiel-Thread beide nacheinander (je 60-100 ms D3DCompile, W318: 49 neue
+ * Programme im M1-Kampf = 7,5 s Tick-Stillstand, Tick-Last bis 777 ms). Jetzt
+ * das zweite auf einem Hilfs-Thread parallel zum ersten: gleicher Quelltext,
+ * gleicher Compiler, gleiche Flags -> bytegleiche Blobs (Cache-Datei je
+ * Quelltext-Hash wie bisher). Der Spiel-Thread wartet auf beide (keine
+ * Ausweichdarstellung, Bilder deterministisch). 0 = nacheinander (alt). */
+typedef struct {
+    const char *src;
+    ID3DBlob *out;
+    int ok;
+} rq_pc_job_t;
+static DWORD WINAPI rq_pc_main(LPVOID p)
+{
+    rq_pc_job_t *j = (rq_pc_job_t *)p;
+    j->ok = rq_compile_x(j->src, "vs_4_0", &j->out);
+    return 0;
+}
+static int rq_compile_vs2(const char *s1, const char *s2, ID3DBlob **o1, ID3DBlob **o2, int *fail1)
+{
+    *o1 = NULL; *o2 = NULL; *fail1 = 0;
+    if (g_cfg.shade_par_compile) {
+        rq_pc_job_t j;
+        HANDLE th;
+        j.src = s2; j.out = NULL; j.ok = 0;
+        th = CreateThread(NULL, 1u << 20, rq_pc_main, &j, 0, NULL);
+        if (th) {
+            int ok1 = rq_compile(s1, "vs_4_0", o1);
+            long long qw = rq_qpc();
+            WaitForSingleObject(th, INFINITE);
+            CloseHandle(th);
+            g_shz_comp += rq_qpc() - qw; /* DIAG(W137): Warten auf die zweite Uebersetzung */
+            if (ok1 && j.ok) { *o2 = j.out; return 1; }
+            if (ok1 && *o1) { (*o1)->lpVtbl->Release(*o1); }
+            if (j.ok && j.out) { j.out->lpVtbl->Release(j.out); }
+            *o1 = NULL;
+            *fail1 = !ok1;
+            return 0;
+        }
+    }
+    if (!rq_compile(s1, "vs_4_0", o1)) { *o1 = NULL; *fail1 = 1; return 0; }
+    if (!rq_compile(s2, "vs_4_0", o2)) { (*o1)->lpVtbl->Release(*o1); *o1 = NULL; *o2 = NULL; return 0; }
+    return 1;
+}
+
 /* SHADE-PERF (W80): Roh-Variante fuer die Decl dieses Handles (Stream 0,
  * Stride des Draws). 1 = bereit. */
 static int rq_raw_build(rq_vsent_t *e, unsigned handle, const unsigned *st, const unsigned *of,
@@ -515,24 +562,28 @@ static int rq_raw_variant(rq_vsent_t *e, unsigned handle)
 static int rq_raw_build(rq_vsent_t *e, unsigned handle, const unsigned *st, const unsigned *of,
                         const unsigned *fm, unsigned sig)
 {
-    static char src[96 * 1024];
+    static char src[96 * 1024], src2[96 * 1024]; /* W318: zweiter Quelltext fuer die parallele Uebersetzung */
     unsigned char cof[RQV_NCONST];
     unsigned nc = 0, s;
     ID3DBlob *b = NULL, *bl = NULL;
     long long q0;
+    int fail1 = 0;
     rq_raw_release(e);
     e->rawsig = sig;
     e->rawok = -1;
     if (!rqv_raw_build(st, of, fm, e->prog.vinmask, &e->raw)) { return 0; }
     q0 = rq_qpc(); /* W137: immer (einmal je Variante) */
     g_shz_n++;
-    if (!rqv_hlsl_ex(&e->prog, 0, &e->raw, src, sizeof src, cof, &nc) || nc != e->nc || !rq_compile(src, "vs_4_0", &b)) {
+    if (!rqv_hlsl_ex(&e->prog, 0, &e->raw, src, sizeof src, cof, &nc) || nc != e->nc) {
         HLOG_W("SHADE-PERF: VS 0x%X Roh-Variante nicht uebersetzbar -> CPU-Packen", handle);
         return 0;
     }
     /* W237: Roh-Variante bekam W224 (eyefix) nie; mit interp_hlerp gleiche Flags wie die gepackte, sonst alt (1) */
-    if (!rqv_hlsl_ex(&e->prog, g_cfg.interp_hlerp ? rq_lerp_flags() : (1 | rq_guard_flag()), &e->raw, src, sizeof src, cof, &nc) || !rq_compile(src, "vs_4_0", &bl)) {
-        b->lpVtbl->Release(b);
+    if (!rqv_hlsl_ex(&e->prog, g_cfg.interp_hlerp ? rq_lerp_flags() : (1 | rq_guard_flag()), &e->raw, src2, sizeof src2, cof, &nc)) {
+        return 0;
+    }
+    if (!rq_compile_vs2(src, src2, &b, &bl, &fail1)) { /* W318 shade_par_compile */
+        if (fail1) { HLOG_W("SHADE-PERF: VS 0x%X Roh-Variante nicht uebersetzbar -> CPU-Packen", handle); }
         return 0;
     }
     if (FAILED(sb_warm_create_vs(b->lpVtbl->GetBufferPointer(b), b->lpVtbl->GetBufferSize(b), &e->vsr)) ||
@@ -574,20 +625,18 @@ static int rq_packed_variant(rq_vsent_t *e)
 }
 static int rq_packed_build(rq_vsent_t *e)
 {
-    static char src[96 * 1024];
+    static char src[96 * 1024], src2[96 * 1024]; /* W318: zweiter Quelltext fuer die parallele Uebersetzung */
     unsigned char cof[RQV_NCONST];
     unsigned nc = 0;
     ID3DBlob *b = NULL, *bl = NULL;
     long long q0;
+    int fail1 = 0;
     e->pkok = -1;
     q0 = rq_qpc(); /* W137: immer (einmal je Programm) */
     g_shz_n++;
-    if (!rqv_hlsl(&e->prog, 0, src, sizeof src, cof, &nc) || !rq_compile(src, "vs_4_0", &b)) { return 0; }
-    if (!rqv_hlsl(&e->prog, rq_lerp_flags(), src, sizeof src, cof, &nc) || /* W224/W237 */
-        !rq_compile(src, "vs_4_0", &bl)) {
-        b->lpVtbl->Release(b);
-        return 0;
-    }
+    if (!rqv_hlsl(&e->prog, 0, src, sizeof src, cof, &nc)) { return 0; }
+    if (!rqv_hlsl(&e->prog, rq_lerp_flags(), src2, sizeof src2, cof, &nc)) { return 0; } /* W224/W237 */
+    if (!rq_compile_vs2(src, src2, &b, &bl, &fail1)) { return 0; } /* W318 shade_par_compile */
     if (FAILED(sb_warm_create_vs(b->lpVtbl->GetBufferPointer(b), b->lpVtbl->GetBufferSize(b), &e->vs)) ||
         FAILED(sb_warm_create_vs(bl->lpVtbl->GetBufferPointer(bl), bl->lpVtbl->GetBufferSize(bl), &e->vsl)) ||
         !rq_mklayout(e, 0, b, &e->lay, 0) || !rq_mklayout(e, rq_lerp_flags(), bl, &e->layl, 0)) {
@@ -716,7 +765,7 @@ static rq_psent_t *rq_ps_get_slow0(unsigned handle)
     ID3DBlob *b = NULL;
     __try {
         pdef = *(unsigned *)(uintptr_t)((handle & ~1u) + 8u);
-        if (pdef < 0x10000u || pdef >= 0x80000000u) { return NULL; }
+        if (pdef < 0x10000u || pdef >= SB_HOST_LIM()) { return NULL; } /* W315 host_hi_addr */
         memcpy(d, (const void *)(uintptr_t)pdef, sizeof d);
     } __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
     for (i = 0; i < g_rqps_n; i++) {
@@ -736,6 +785,7 @@ static rq_psent_t *rq_ps_get_slow0(unsigned handle)
     e->handle = handle;
     memcpy(e->d, d, sizeof d);
     { long long qg = rq_qpc(); int okg; g_shz_n++; /* DIAG(PERF-BENCH,W137) */
+      g_rqp_nan_mark = g_cfg.shader_nan_mark; /* W302 DIAG */
       okg = rqp_hlsl(d, 0xF, src, sizeof src, &e->info);
       g_shz_gen += rq_qpc() - qg;
       if (g_sba_loc && g_cfg.loc_psdump) { loc_render_dump_ps(handle, d, 60u, okg ? src : NULL); } /* W285 DIAG(LOC-RENDER) */
@@ -1311,7 +1361,7 @@ static void rq_flash_diag(const float *pb)
 
 int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
 {
-    float vblk[(RQV_NCONST + 4 + 16) * 4], pblk[28 * 4]; /* W121: +sfx0..sfx3 (Fenster bleibt 32) */
+    float vblk[(RQV_NCONST + 4 + 16) * 4], pblk[32 * 4]; /* W121: +sfx0..sfx3 (Fenster bleibt 32); W297: 28..31 = LoC-Bump-Matrix (sonst 0) */
     const unsigned *d;
     unsigned k, mask = (unsigned)g_cfg.shade_mask, fen, ftb, vn;
     float *tsc;
@@ -1320,7 +1370,7 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
     if (g_cfg.shade_pbconst >= 2) { /* DIAG(W80): PSDef-Konstanten im Speicher je Draw vs. Eintrag */
         unsigned pdef = rq_u32((g_im_pshader & ~1u) + 8u), q;
         g_rq_pdchk++;
-        if (pdef >= 0x10000u && pdef < 0x80000000u) {
+        if (pdef >= 0x10000u && pdef < SB_HOST_LIM()) { /* W315 host_hi_addr */
             for (q = 10u; q < 45u; q++) {
                 unsigned lv;
                 if (q >= 26u && q < 43u) { continue; }
@@ -1401,7 +1451,13 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
         tsc[k * 4u + 0] = 1.0f; tsc[k * 4u + 1] = 1.0f; tsc[k * 4u + 2] = 0.0f; tsc[k * 4u + 3] = 0.0f;
         g_rq_rec.srv[k] = NULL;
         g_rq_rec.smp[k] = g_rq_defsmp;
-        if (tm != 1u && tm != 2u) { continue; }
+        if (tm == 6u && k > 0u) { /* W297 LOC-MISSION: BUMPENVMAP (nur LoC, loc_bumpenv=2) */
+            extern unsigned g_rq_bumpenv[4][6];
+            memcpy(&pblk[(28u + k) * 4u + 0u], &g_rq_bumpenv[k][0], 4); /* M00 */
+            memcpy(&pblk[(28u + k) * 4u + 1u], &g_rq_bumpenv[k][1], 4); /* M01 */
+            memcpy(&pblk[(28u + k) * 4u + 2u], &g_rq_bumpenv[k][3], 4); /* M10 */
+            memcpy(&pblk[(28u + k) * 4u + 3u], &g_rq_bumpenv[k][2], 4); /* M11 */
+        } else if (tm != 1u && tm != 2u) { continue; }
         if (k == 0) {
             s = srv0;
             if (s) { sb_tex_dims(&w, &h); { unsigned f = 0; sb_tex_fmt(&f, &lin); } }
@@ -1425,6 +1481,10 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
                 s = NULL; w = h = 0;
             }
             s = sb_tex_get_stage(k, &w, &h, &lin);
+            /* W315 DIAG tex_missing_mark: Stufe 1..3 belegt ohne SRV (nicht Tiefenformat 13/leer 10) */
+            if (!s && g_cfg.tex_missing_mark && g_tex_stage_why != 10u && g_tex_stage_why != 13u) {
+                s = sb_th_mark(g_tex_stage_why);
+            }
         }
         if (!s) { continue; }
         g_rq_rec.srv[k] = s;
@@ -1507,7 +1567,7 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
         }
     }
     if (g_cfg.bloom_diag) { memcpy(g_rq_lastpb, pblk, sizeof g_rq_lastpb); g_rq_lastnst = g_rq_pse->info.nstages; } /* DIAG(SHADE-BLOOM,W112) */
-    if (!rq_consts(vblk, vn, pblk, 28u)) { g_rq_active = 0; g_rq_why = 9u; return 0; }
+    if (!rq_consts(vblk, vn, pblk, 32u)) { g_rq_active = 0; g_rq_why = 9u; return 0; }
     if (g_rq_src.use) {
         g_rq_rec.vs = g_rq_vse->vsr; g_rq_rec.vsl = g_rq_vse->vsrl;
         g_rq_rec.lay = g_rq_vse->layr; g_rq_rec.layl = g_rq_vse->layrl;

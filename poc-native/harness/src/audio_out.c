@@ -199,6 +199,19 @@ static au32 au_create_ex(au32 kind, au32 desc, au32 retaddr, au32 fixed_id)
         au32 dd[6];
         if (au_probe_read(desc, dd, sizeof dd))
             v->desc_bins = kind == 2 ? dd[5] : dd[4];
+        if (g_cfg.audio_level_diag && v->desc_bins) { /* DIAG(W300): Desc-Mixbins {dwCount, lpPairs{bin, lVolume}} */
+            au32 hb[2], pr[16];
+            static au32 nlog;
+            if (nlog < 64u && au_probe_read(v->desc_bins, hb, sizeof hb) && hb[0] && hb[0] <= 8u &&
+                au_probe_read(hb[1], pr, hb[0] * 8u)) {
+                nlog++;
+                HLOG_I("DIAG(DSMIX) v%u kind=%d ch=%u n=%u: %d/%d %d/%d %d/%d %d/%d %d/%d %d/%d %d/%d %d/%d",
+                       v->id, kind, wfx.ch, hb[0], (int)pr[0], (int)pr[1], (int)pr[2], (int)pr[3],
+                       hb[0] > 2 ? (int)pr[4] : -1, hb[0] > 2 ? (int)pr[5] : 0, hb[0] > 3 ? (int)pr[6] : -1, hb[0] > 3 ? (int)pr[7] : 0,
+                       hb[0] > 4 ? (int)pr[8] : -1, hb[0] > 4 ? (int)pr[9] : 0, hb[0] > 5 ? (int)pr[10] : -1, hb[0] > 5 ? (int)pr[11] : 0,
+                       hb[0] > 6 ? (int)pr[12] : -1, hb[0] > 6 ? (int)pr[13] : 0, hb[0] > 7 ? (int)pr[14] : -1, hb[0] > 7 ? (int)pr[15] : 0);
+            }
+        }
     }
     if (wfx.rate) {
         v->fmt = wfx;
@@ -1592,6 +1605,32 @@ void audio_set_mixbins(au32 v, au32 pMixBins)
     audio_voice_t *vp = au_lookup(v);
     if (vp)
         au_mixbins_apply(vp, pMixBins, 1);
+}
+
+/* W298 LOC-AUDIO: Stereo-Pan direkt setzen (XACT-HLE fuer Line of Contact;
+ * der SB-Pfad ruft das nie). Werte wie au_mixbins_apply (0..~1,7 je Seite). */
+void audio_set_pan(au32 v, float l, float r)
+{
+    audio_voice_t *vp = au_lookup(v);
+    if (!vp)
+        return;
+    if (!(l >= 0.0f) || l > 4.0f)
+        l = 1.0f;
+    if (!(r >= 0.0f) || r > 4.0f)
+        r = 1.0f;
+    au_lock();
+    vp->pan_l = l;
+    vp->pan_r = r;
+    au_unlock();
+}
+
+/* W303 AUDIO-VOLUME: Nutzerkategorie (Mischer liest sie je Durchgang). */
+void audio_set_ucat(au32 v, int cat)
+{
+    audio_voice_t *vp = au_lookup(v);
+    if (!vp)
+        return;
+    vp->ucat = cat;
 }
 
 void audio_set_mixbin_volumes(au32 v, au32 pMixBins)

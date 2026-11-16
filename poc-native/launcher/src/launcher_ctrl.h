@@ -49,6 +49,9 @@ void lctrl_key_combo(int mod_vk, int vk, char *out, size_t cap);
  * Uebergang wie im Client (imap_quick_shot_migrate): photo genau KEY:F12 -> photo Shift+F12, quick_shot F12;
  * sonst quick_shot F12, wenn F12 frei ist. */
 #define LCTRL_QUICK_SHOT_DEFAULT "KEY:F12"
+/* W299 REPLAY: Standard "Replay beenden" (Client: IMAP_REPLAY_EXIT_DEFAULT). Fehlt die Zeile, gilt er; eine
+ * leere Zeile "replay_exit =" heisst aus. */
+#define LCTRL_REPLAY_EXIT_DEFAULT "KEY:BACKSPACE"
 #define LCTRL_PHOTO_DEFAULT "KEY:SHIFT+KEY:F12"
 
 /* --- SBC-USB-Status ---------------------------------------------------- */
@@ -78,6 +81,30 @@ int lctrl_pad_new_press(const lctrl_pad_t *prev, const lctrl_pad_t *cur,
 /* Ausgelenkte Analogachse (ein Stick > 0.7, Rest ruhig): Name in name
  * ("LX", "LY", "RX", "RY", "LT", "RT"). 1 = gefunden, 0 = nichts. */
 int lctrl_pad_deflected(const lctrl_pad_t *p, char *name, size_t cap);
+/* W312 JOY-CALIB: Pad-Lerner MIT Ruhestellung (wie der Joystick-Lerner).
+ * lctrl_pad_deflected wertet absolute Stellungen aus: ein Stick-/Trigger-
+ * Kanal, der am Anschlag ruht (Schubhebel/Ruder eines Flugsticks im Xbox-
+ * Modus), galt sofort als "ausgelenkt" und wurde fuer JEDES Achsen-Element
+ * gelernt (aim_x und aim_y auf dieselbe Achse -> Ziel nur diagonal).
+ * Basis nach 3 ruhigen Abtastungen, danach zaehlt die Auslenkung ab Ruhe
+ * mit denselben Schwellen (0.7 / 0.3; Trigger 200/40 -> Delta 160/40). */
+typedef struct {
+    lctrl_pad_t base, prev;
+    int settle, have_base;
+} lctrl_pad_learner_t;
+void lctrl_pad_learner_reset(lctrl_pad_learner_t *L);
+/* 1 = Achse erkannt (Name wie lctrl_pad_deflected), 0 = weiter. */
+int lctrl_pad_learner_axis(lctrl_pad_learner_t *L, const lctrl_pad_t *cur,
+                           char *name, size_t cap);
+/* W312: Partner-Element eines 2D-Paars (aim_x <-> aim_y, sight_x <->
+ * sight_y), sonst -1. */
+int lctrl_axis_partner(int idx);
+/* W312: 1 = beide Alternativen lesen dieselbe Analogachse (PAD:LX.. bzw.
+ * JOYn:<Achse>, Parameter egal). */
+int lctrl_alt_same_axis(const char *a, const char *b);
+/* W312: 1 = Element idx hat schon eine Alternative mit derselben Achse wie
+ * src (Name des Elements in who). */
+int lctrl_bind_axis_used_by(const struct lctrl_bind_s *b, int idx, const char *src);
 
 /* --- Tasten-Namen (wie input_map.c imap_key_code, Rueckrichtung) ------- */
 /* VK -> "A", "SPACE", "F5", sonst dezimal ("165"). */
@@ -99,7 +126,7 @@ typedef struct {
     lctrl_kind_t kind;
 } lctrl_elem_t;
 
-#define LCTRL_ELEM_N 76 /* W188: + Client-Aktion pause, W195: + photo, W271: + aim_center, W283: + orig_view, W290: + quick_shot */
+#define LCTRL_ELEM_N 77 /* W188: + Client-Aktion pause, W195: + photo, W271: + aim_center, W283: + orig_view, W290: + quick_shot, W299: + replay_exit */
 extern const lctrl_elem_t kCtrlElems[LCTRL_ELEM_N];
 /* W159: Original-Controller-Tasten als Belegungs-Quellen (SBC:<name>).
  * Kanonische Namen bi0..38, parserstabil wie input_map.c (kBiAlias).
@@ -112,7 +139,7 @@ typedef struct {
     int n_alt;
 } lctrl_row_t;
 
-typedef struct {
+typedef struct lctrl_bind_s {
     lctrl_row_t row[LCTRL_ELEM_N];
     /* W221 HOTAS: Geraete-Zuordnung "joyN = <spec>" je Slot (leer = keine
      * Zeile; dann gilt im Client das N-te aufgezaehlte Geraet). Wird beim

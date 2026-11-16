@@ -72,6 +72,8 @@ add_library(sb_emu SHARED
   src/sb_rauto_core.c
   src/sb_mauto.c
   src/sb_mauto_core.c
+  src/sb_cchain.c
+  src/sb_cchain_core.c
   src/fs_emu.c
   src/sctrace.c
   src/d3d11_render.c
@@ -86,11 +88,14 @@ add_library(sb_emu SHARED
   src/render_shfx.c
   src/render_fx_rem.c
   src/render_bloom.c
+  src/render_d3ddbg.c
+  src/sb_texhealth.c
   src/render_visq.c
   src/render_interp.c
   src/render_warm.c
   src/render_edge.c
   src/render_cpersp.c
+  src/render_monview.c
   src/render_cpanini.c
   src/render_xfx.c
   src/render_winmode.c
@@ -110,12 +115,16 @@ add_library(sb_emu SHARED
   src/loc_mem.c
   src/loc_render.c
   src/loc_pad.c
+  src/loc_audio.c
+  src/loc_xact_fmt.c
+  src/loc_sync.c
   src/krnl_loc.c
   src/sb_userdata.c
   src/sb_savecheck.c
   src/sb_overlay.c
   src/sb_pause.c
   src/render_photo.c
+  src/render_reproj.c
   src/render_clip.c
   src/render_vexp.c
   src/vexp_enc.c
@@ -185,6 +194,8 @@ add_executable(input_selftest
   src/input_mouse_selftest.c
   src/sb_rauto_core.c
   src/sb_mauto_core.c
+  src/sb_cchain_core.c
+  src/audio_vol.c
   src/sb_profile.c
   src/input_map.c
   src/input_joy.c
@@ -239,6 +250,15 @@ add_executable(loc_net_selftest
 target_include_directories(loc_net_selftest PRIVATE src)
 target_link_libraries(loc_net_selftest PRIVATE ws2_32)
 target_compile_options(loc_net_selftest PRIVATE /W3)
+
+# ---- loc_audio_selftest: XACT-1-Parser (XWB/XSB) + Wave-Bank-Dekodierung, synthetische Daten (W298) ----
+add_executable(loc_audio_selftest
+  tests/loc_audio_selftest.c
+  src/loc_xact_fmt.c
+  src/audio_fmt.c
+)
+target_include_directories(loc_audio_selftest PRIVATE src)
+target_compile_options(loc_audio_selftest PRIVATE /W3)
 
 # ---- render_selftest: VSH-Interpreter/-Uebersetzung + Combiner (W77 RENDER-QA) ----
 # W152 COMM-SELFTEST: privat mit render_selftest_data.h (Spiel-Testvektoren),

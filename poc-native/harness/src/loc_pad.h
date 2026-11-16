@@ -9,3 +9,5 @@ void loc_pad_device_changes(uint32_t pIns, uint32_t pRem);
 uint32_t loc_pad_open(uint32_t type, uint32_t port); /* 0 = kein Gamepad-Typ */
 int loc_pad_is_handle(uint32_t h);
 uint32_t loc_pad_get_state(uint32_t pState);
+/* W297: 1 = Pfeil hoch/runter gehoeren dem Menue-Pad (LoC-Netzmenue, kein Lockstep aktiv) */
+int loc_pad_menu_arrows(void);

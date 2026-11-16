@@ -17,6 +17,7 @@
 #include "hcfg.h"
 #include "hlog.h"
 #include "sb_profile.h"
+#include "loc_net.h"
 
 #include <string.h>
 #include <intrin.h>
@@ -76,6 +77,23 @@ int loc_pad_is_handle(u32 h)
 
 /* XINPUT_STATE: u32 dwPacketNumber; XINPUT_GAMEPAD { u16 wButtons; u8 bAnalogButtons[8];
  * s16 sThumbLX, sThumbLY, sThumbRX, sThumbRY } (22 B). */
+/* W297 LOC-MISSION: Pfeil hoch/runter in den Netzmenues eindeutig. Die Sammelabfrage (0x125F70)
+ * wertet SBC-Hebel Y (id 0x25, > 0x40 = hoch) entgegen unserer Pfeil-Abbildung aus; Pad und SBC
+ * zusammen hoben sich auf (W286K-T). Solange kein Lockstep laeuft (Lobby, VT-Wahl, Briefing,
+ * Ergebnis), gehen die Pfeile daher ans Pad-Steuerkreuz und nicht an den Hebel; in Karte und
+ * Mission (0x34-Rahmen) wieder an den SBC (Startpunkt, Zielen). */
+int loc_pad_menu_arrows(void)
+{
+    u32 mport = 0xFFFFFFFFu;
+    if (!s_on || !g_cfg.loc_pad_keys) {
+        return 0;
+    }
+    __try { /* Menue-Controller-Port (FUN_0011F400): erst nach "System Link Play" = Pad */
+        mport = *(const u32 *)(uintptr_t)0x3071FCu;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return mport == LOC_PAD_PORT && loc_net_test_state(NULL, NULL, 0, 512) != 3;
+}
+
 u32 loc_pad_get_state(u32 pState)
 {
     uint8_t st[22];
@@ -93,6 +111,10 @@ u32 loc_pad_get_state(u32 pState)
      * hoben sich auf (W286K-T). */
     if (key_down(VK_NUMPAD8)) b |= 0x0001;
     if (key_down(VK_NUMPAD2)) b |= 0x0002;
+    if (loc_pad_menu_arrows()) { /* W297: Pfeile ausserhalb des Locksteps = Steuerkreuz */
+        if (key_down(VK_UP)) b |= 0x0001;
+        if (key_down(VK_DOWN)) b |= 0x0002;
+    }
     if (key_down(VK_NUMPAD4)) b |= 0x0004;
     if (key_down(VK_NUMPAD6)) b |= 0x0008;
     if (key_down(VK_RETURN)) b |= 0x0010; /* START */

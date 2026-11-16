@@ -63,7 +63,7 @@ static void rq_dump_ps(unsigned ps)
     __try {
         unsigned base = ps & ~1u;
         unsigned pdef = *(unsigned *)(uintptr_t)(base + 8u);
-        if (pdef >= 0x10000u && pdef < 0x80000000u) {
+        if (pdef >= 0x10000u && pdef < SB_HOST_LIM()) { /* W315 host_hi_addr */
             const unsigned *d = (const unsigned *)(uintptr_t)pdef;
             unsigned r;
             for (r = 0; r < 60u; r += 12u) {
@@ -390,6 +390,9 @@ void rq_dlg_draw(const im_vertex_t *v, unsigned n, int rhw, ID3D11ShaderResource
     static unsigned seenx[64], nseen, lastf, nf;
     if (g_cfg.rq_diag < 2 || !n) { return; }
     scene = rq_u32(M3D_SCENE_ADDR);
+    if (g_cfg.dlg_scene_diag) { /* DIAG(DLG-TEXTOUT,W316): mit rq_diag=2 nur in Szene dlg_scene_diag, je 20. Bild */
+        if (scene != (unsigned)g_cfg.dlg_scene_diag || (g_present_no % 20u) != 0u) { return; }
+    } else
     if (scene == 0x2Cu || (g_present_no % 2000u) != 0u) { return; }
     if (g_present_no != lastf) { lastf = g_present_no; if (++nf > 40u) { return; } }
     for (i = 0; i < n; i++) {
@@ -520,6 +523,11 @@ static int dlg_tmp_grow(size_t need)
     g_sh_ok = 0;
     return g_dlg_tmp != NULL;
 }
+static int dlg_scene_on(void) /* DIAG(DLG-TEXTOUT,W316): dlg_scene_diag - Szene passt, je 20. Bild */
+{
+    return g_cfg.dlg_scene_diag && rq_u32(M3D_SCENE_ADDR) == (unsigned)g_cfg.dlg_scene_diag && (g_present_no % 20u) == 0u;
+}
+static int dlg_scene_up_cap(void) { static unsigned n; return dlg_scene_on() && n++ < 200u; }
 static void rq_text_upload_now(unsigned bits, unsigned pitch, unsigned w, unsigned h, unsigned fmt)
 {
     unsigned data = 0, i;
@@ -537,6 +545,31 @@ static void rq_text_upload_now(unsigned bits, unsigned pitch, unsigned w, unsign
     if (!data) { return; }
     for (i = 0; i < (unsigned)g_rtt_n; i++) {
         if (g_rtt[i].surf && g_rtt[i].data == data && !g_rtt[i].isdepth && g_rtt[i].tex && g_rtt[i].w >= w && g_rtt[i].h >= h) { break; }
+    }
+    if (g_cfg.dlg_text_rtsel && i < (unsigned)g_rtt_n) {
+        /* FIX(DLG-TEXTOUT,W316): Ziel wie der Draw waehlen (sb_rtt_lookup, rtt_stale).
+         * Nach dem Missionsende bindet FUN_0004EF50 die Textebene ueber ein NEUES
+         * Surface-Objekt auf derselben Datenadresse (RTT veraltet: alter Slot stale).
+         * Der erste Datentreffer war der veraltete Slot -> Text landete dort, gesampelt
+         * wurde der neue, leere Slot (Szene 0x36 schwarz, Briefing-Hinweis M20 nur
+         * abgedunkelt, Truppenwahl ohne Frage). Jetzt: nicht veraltet vor veraltet,
+         * eigene Surface vor fremder, zuletzt gebunden vor frueher. */
+        unsigned j, best = i;
+        for (j = i; j < (unsigned)g_rtt_n; j++) {
+            const rtt_entry_t *e = &g_rtt[j], *b = &g_rtt[best];
+            if (!e->surf || e->data != data || e->isdepth || !e->tex || e->w < w || e->h < h) { continue; }
+            if (b->stale != e->stale) { if (!e->stale) { best = j; } continue; }
+            if ((b->surf == g_dlg_surf) != (e->surf == g_dlg_surf)) { if (e->surf == g_dlg_surf) { best = j; } continue; }
+            if (e->lastset > b->lastset) { best = j; }
+        }
+        if (best != i) {
+            static unsigned nsel;
+            if (nsel++ < 16u) {
+                HLOG_I("DLGTEXT rtsel #%u: data=0x%X RT%u (stale=%d surf=0x%X) statt RT%u (stale=%d surf=0x%X) f=%u", nsel, data,
+                       best, g_rtt[best].stale, g_rtt[best].surf, i, g_rtt[i].stale, g_rtt[i].surf, g_present_no);
+            }
+            i = best;
+        }
     }
     if (i >= (unsigned)g_rtt_n) {
         if (g_dlg_n++ < 4u) {
@@ -645,7 +678,8 @@ static void rq_text_upload_now(unsigned bits, unsigned pitch, unsigned w, unsign
             if (g_cfg.dlg_diag) { g_dlg_tick[3] += dlg_qpc() - t0; g_dlg_cnt[3]++; }
         }
     }
-    if (g_dlg_up++ < 24u || (g_dlg_up % 500u) == 0u) {
+    if (g_dlg_up++ < 24u || (g_dlg_up % 500u) == 0u ||
+        dlg_scene_up_cap()) { /* DIAG(DLG-TEXTOUT,W316) */
         unsigned nz = 0, nrgb = 0, y, x, first = 0;
         for (y = 0; y < h; y++) {
             const unsigned *row = (const unsigned *)(tmp + (size_t)y * pitch);
@@ -749,6 +783,7 @@ void rq_text_on_clear(unsigned surf, unsigned flags, unsigned color)
     int k, ok = 1;
     static unsigned nlog;
     if (((g_cfg.clear_xbflags == 2 ? flags : sb_clear_eff(flags)) & XB_CLEAR_TARGET) && rq_txt_slot(surf, 0) >= 0) /* TEST(W177): =2 = Stand W101 (Textebene ohne Anpassung) */ { g_dlg_gpu_clr = 1; g_dlg_gpu_clr_col = color; g_dlg_gpu_clr_data = rq_u32(surf + 4u); } /* FIX(DLGTEXT3,W85); W177: wirksame Bits */
+    if (dlg_scene_on()) { static unsigned nsc; if (nsc++ < 200u) { HLOG_I("DLGSCENE Clear f=%u surf=0x%X data=0x%X flags=0x%X color=0x%08X slot=%d", g_present_no, surf, rq_u32(surf + 4u), flags, color, rq_txt_slot(surf, 0)); } } /* DIAG(DLG-TEXTOUT,W316) */
     if (!g_cfg.dlg_text_upload || !g_cfg.dlg_text_clear || !surf || !(flags & 0xF0u)) { return; }
     k = rq_txt_slot(surf, 0);
     if (k < 0) { return; }
@@ -914,6 +949,12 @@ unsigned __stdcall hook_txt_render(unsigned font, unsigned bits, unsigned pitch,
                    fo[0], fo[1], fo[2], fo[3], fo[4], fo[5], fo[6], fo[7], fo[8], fo[9], fo[10], fo[11], fo[12], fo[13], fo[14], fo[15],
                    g_present_no);
         }
+    }
+    if (dlg_scene_on()) { /* DIAG(DLG-TEXTOUT,W316) */
+        static unsigned nsd;
+        unsigned ch = 0;
+        __try { ch = *(const unsigned short *)(uintptr_t)a; } __except (EXCEPTION_EXECUTE_HANDLER) { ch = 0xFFFFFFFFu; }
+        if (nsd++ < 400u) { HLOG_I("DLGSCENE TextOut f=%u surf=0x%X data=0x%X ch=0x%04X len=%d x=%d y=%d ret=0x%X", g_present_no, g_dlg_surf, rq_u32(g_dlg_surf + 4u), ch, (int)b, (int)c, (int)d, r); }
     }
     rq_text_upload(bits, pitch, w, h, fmt);
     return r;

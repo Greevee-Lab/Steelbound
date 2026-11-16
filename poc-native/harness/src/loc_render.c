@@ -6,6 +6,7 @@
 #include "hcfg.h"
 #include "sb_profile.h"
 #include "hlog.h"
+#include "loc_sync.h"
 
 unsigned g_loc_draws;
 static unsigned s_prev_draws;
@@ -14,12 +15,44 @@ extern int g_rqp_bump_as_2d; /* render_psgen.c */
 
 void loc_render_frame(unsigned f)
 {
-    g_rqp_bump_as_2d = g_sba_loc && g_cfg.loc_bumpenv; /* W285: BUMPENVMAP-Naeherung */
+    /* W285: 1 = BUMPENVMAP-Naeherung (wie 2D); W297: 2 = echt (V8U8 + Bump-Matrix) */
+    g_rqp_bump_as_2d = g_sba_loc ? (g_cfg.loc_bumpenv >= 2 ? 2 : g_cfg.loc_bumpenv ? 1 : 0) : 0;
     if (g_cfg.loc_census_from > 0 && (f % 10u) == 0u) { /* DIAG: Draws je Bild (Szenenwahl) */
         HLOG_I("LOCDRAWS f=%u n=%u", f, g_loc_draws);
     }
+    if (g_sba_loc && g_cfg.loc_census_from > 0 && (f % 150u) == 0u) { /* W311 DIAG: Sichtkarte (Zellen != 0 je Kanal) */
+        unsigned b = 0, p = 0, x, y, n0 = 0, n1 = 0;
+        __try {
+            p = *(volatile const unsigned *)(uintptr_t)0x300D6Cu;
+            b = *(volatile const unsigned *)(uintptr_t)0x300D70u;
+            if (b && p >= 1024u && p <= 4096u) {
+                for (y = 0; y < 256u; y++) {
+                    const unsigned char *r = (const unsigned char *)(uintptr_t)(b + y * p);
+                    for (x = 0; x < 256u; x++) { n0 += r[x * 4u] != 0; n1 += r[x * 4u + 1u] != 0; }
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { b = 0; }
+        HLOG_I("LOCVIS f=%u karte=%s zellen0=%u zellen1=%u vismap=%d", f, b ? "ja" : "nein", n0, n1, g_cfg.loc_vismap);
+        { /* W311 DIAG: Schalter des Bildaufbaus FUN_00029320 (Cockpit/HUD-Zweig) und Objektliste */
+            static const unsigned k_g[] = { 0x306A84u, 0x307264u, 0x3069E0u, 0x306738u, 0x306758u, 0x30698Cu,
+                                            0x306BA8u, 0x2FF4C4u, 0x3067FCu, 0x306B54u };
+            unsigned v[10] = { 0 }, i, fl = 0, fl0 = 0;
+            __try {
+                for (i = 0; i < 10u; i++) { v[i] = *(volatile const unsigned *)(uintptr_t)k_g[i]; }
+                if (v[0] < 10u) {
+                    fl = *(volatile const unsigned *)(uintptr_t)(0x5C517Cu + v[0] * 0xAE8u);
+                    fl0 = *(volatile const unsigned *)(uintptr_t)(0x5C516Cu + v[0] * 0xAE8u);
+                }
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            HLOG_I("LOCHUD f=%u spieler=%u flags=0x%08X/0x%08X b264=%u b9e0=%u b738=%u b758=%u b98c=%u bba8=%u obj=%u visq=%u b54=%u",
+                   f, v[0], fl, fl0, v[1], v[2], v[3], v[4], v[5], v[6], v[7], v[8], v[9]);
+        }
+    }
     s_prev_draws = g_loc_draws;
     g_loc_draws = 0;
+    if (g_sba_loc) {
+        loc_sync_frame(f); /* W297: Testfolge loc_steps (nur mit loc_sync=1 geparst) */
+    }
 }
 
 /* DIAG(LOC-RENDER): Zensus-Ausloeser im LoC-Profil. Die SB-Szenenadressen lesen
@@ -183,6 +216,62 @@ int loc_render_bb_lookup(unsigned xptr, ID3D11ShaderResourceView **srv, unsigned
     return 1;
 }
 
+/* ---------------------------------------------------------------------------
+ * W297 LOC-MISSION: Textebene der Menues/Dialoge (XFONT, 640x480 LIN_A8R8G8B8).
+ * Ablauf je Bild (Log RTT/LOCLOCK, Aufrufer 0x1156E7): neue Surface auf denselben Speicher
+ * (Data 0x06551000) als Renderziel, D3D-Clear, dann TextOut per CPU (Lock 0x18B940, Bits =
+ * 0xF0000000|phys). Unser Clear traf nur die GPU-Kopie -> alte Glyphen blieben im Speicher und
+ * ueberlagerten sich (Hilfezeile, A10). Wie SB W97 (DLGTEXT2), aber nach Datenadresse, weil LoC
+ * jedes Bild ein neues Surface-Objekt anlegt. Nur LoC-Profil (loc_text_clear, Standard 1).
+ * ------------------------------------------------------------------------- */
+#define LOC_TXT_MAX 4
+static struct { unsigned data, bits, pitch, w, h; } s_txt[LOC_TXT_MAX];
+static unsigned s_ntxt;
+extern int rtt_dims(unsigned fmt, unsigned size, unsigned *w, unsigned *h);
+void sb_tex_mark_dirty(unsigned xptr);
+
+void loc_render_text_lock(unsigned surf, unsigned bits, unsigned pitch)
+{
+    unsigned data = 0, fmt = 0, size = 0, w = 0, h = 0, k;
+    if (!g_sba_loc || !surf || !bits) { return; }
+    __try {
+        data = *(const unsigned *)(uintptr_t)(surf + 4u);
+        fmt = *(const unsigned *)(uintptr_t)(surf + 12u);
+        size = *(const unsigned *)(uintptr_t)(surf + 16u);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (!data || ((fmt >> 8) & 0xFFu) != 0x12u || !rtt_dims(fmt, size, &w, &h) || pitch < w * 4u || w > 1024u || h > 1024u) {
+        return;
+    }
+    for (k = 0; k < s_ntxt && s_txt[k].data != data; k++) {}
+    if (k == s_ntxt) {
+        if (s_ntxt >= LOC_TXT_MAX) { return; }
+        s_ntxt++;
+        HLOG_I("LOCTEXT: Textebene #%u data=0x%X %ux%u (CPU-Clear bei D3D-Clear)", k, data, w, h);
+    }
+    s_txt[k].data = data; s_txt[k].bits = bits; s_txt[k].pitch = pitch; s_txt[k].w = w; s_txt[k].h = h;
+}
+
+void loc_render_on_clear(unsigned surf, unsigned flags, unsigned color)
+{
+    unsigned data = 0, parent = 0, k, y, x;
+    if (!g_sba_loc || !g_cfg.loc_text_clear || !surf || !(flags & 0xF0u) || !s_ntxt) { return; }
+    __try {
+        data = *(const unsigned *)(uintptr_t)(surf + 4u);
+        parent = *(const unsigned *)(uintptr_t)(surf + 20u);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    for (k = 0; k < s_ntxt && s_txt[k].data != data; k++) {}
+    if (k == s_ntxt) { return; }
+    __try {
+        for (y = 0; y < s_txt[k].h; y++) {
+            unsigned *row = (unsigned *)(uintptr_t)(s_txt[k].bits + y * s_txt[k].pitch);
+            if (!color) { memset(row, 0, (size_t)s_txt[k].w * 4u); }
+            else { for (x = 0; x < s_txt[k].w; x++) { row[x] = color; } }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { s_txt[k].data = 0; return; }
+    if (parent) { sb_tex_mark_dirty(parent); }
+    sb_tex_mark_dirty(surf);
+}
+
 void loc_render_dump_ps(unsigned handle, const unsigned *d, unsigned nd, const char *src)
 {
     char path[600];
@@ -197,4 +286,31 @@ void loc_render_dump_ps(unsigned handle, const unsigned *d, unsigned nd, const c
     for (i = 0; i < nd; i++) { fprintf(f, "d[%u]=%08X%s", i, d[i], (i % 6u) == 5u ? "\n" : " "); }
     fprintf(f, "\n---\n%s\n", src ? src : "(nicht unterstuetzt)");
     fclose(f);
+}
+
+/* ---------------------------------------------------------------------------
+ * W311 LOC-MISSION-RENDER: Sichtkarte (Gelaende-Zellen und Objektlisten).
+ * FUN_00038B80: CreateTexture2(256, 256, 1, RENDERTARGET, 0x12 LIN_A8R8G8B8) -> [0x300FF4],
+ * GetSurfaceLevel2 -> [0x2FF340], D3DTexture_LockRect(tex, 0, 0x300D6C, 0, 0) als Dauer-Lock
+ * (Pitch [0x300D6C], pBits [0x300D70]). Je Bild zeichnet das Spiel die Sichtfaecher um die Kamera
+ * in dieses RT (Byte 0 = Hauptsicht, Byte 1 = zweite Sicht, Farbmaske je Kanal), wartet per
+ * BlockOnFence (FUN_00029320) und liest danach per CPU: Objektlisten FUN_00046840 (Byte 0) /
+ * FUN_00046A00 (Byte 1), Gelaende-Streifen FUN_0002F5E0 (Byte != 0 je Zelle), jeweils ab
+ * pBits + 0x20200 (Mitte = Kamerazelle). Ohne Rueckschrieb blieb die Karte 0 -> kein nahes
+ * Gelaende, keine VTs/Objekte (nur Himmel und ferne Reste). Rueckgabe 1 = Sichtkarte;
+ * host/pitch = Zeiger, ueber den das Spiel liest (0 = noch kein Lock). Nur LoC-Profil.
+ * ------------------------------------------------------------------------- */
+int loc_render_vismap(unsigned surf, unsigned *host, unsigned *pitch)
+{
+    unsigned s = 0, p = 0, b = 0;
+    if (!g_sba_loc || !g_cfg.loc_vismap || !surf) { return 0; }
+    __try {
+        s = *(volatile const unsigned *)(uintptr_t)0x2FF340u;
+        p = *(volatile const unsigned *)(uintptr_t)0x300D6Cu;
+        b = *(volatile const unsigned *)(uintptr_t)0x300D70u;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    if (s != surf) { return 0; }
+    if (host) { *host = b; }
+    if (pitch) { *pitch = (p >= 256u * 4u && p <= 4096u) ? p : 0u; }
+    return 1;
 }

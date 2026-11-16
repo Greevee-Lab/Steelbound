@@ -606,3 +606,14 @@ void sb_warm_gpu_step(LONGLONG now)
         wg_stat_q = now;
     }
 }
+
+/* DIAG(PERF-SPIKE,W318) gpu_burn=N: N volle Warm-GPU-Einheiten vor jedem
+ * Interp-Present (Spiel- und Zwischenbild, unter ctx_lock) - bildet eine
+ * langsamere GPU nach (feste Zusatzlast je gezeigtem Bild wie Rauch-Overdraw).
+ * Braucht warm_gpu > 0 (Einheit). */
+void sb_gpu_burn(void)
+{
+    int u;
+    if (g_cfg.gpu_burn <= 0 || !wg_ready || !wg_cl) { return; }
+    for (u = 0; u < g_cfg.gpu_burn; u++) { ID3D11DeviceContext_ExecuteCommandList(g_ctx, wg_cl, TRUE); }
+}

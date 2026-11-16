@@ -94,6 +94,7 @@ void sb_rtt_rb_sync_resolve(int why); /* W215 CULL-POPIN: anhaengigen Zellenkart
 int sb_rtt_lookup(unsigned xptr, struct ID3D11ShaderResourceView **srv,
                   unsigned *w, unsigned *h);
 void sb_rtt_release_surf(unsigned surf); /* Notiz bei Release rc=0 loeschen */
+void sb_rtt_cpu_lock(unsigned xptr); /* W310 rtt_lock_stale: CPU-Schreib-Lock -> nicht lebende RT-Eintraege mit gleicher Datenadresse veraltet */
 void sb_rtt_release_data(unsigned res); /* W124 rtt_stale: freigegebene Textur -> RT-Eintraege mit gleicher Datenadresse veraltet */
 const sb_eye *sb_render_eye(int idx); /* idx 0..1, mono: nur 0 gueltig */
 unsigned sb_render_backbuffer_w(void);

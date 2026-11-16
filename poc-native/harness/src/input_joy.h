@@ -51,7 +51,83 @@ typedef struct {
                        * umgerechnet (Treiber nahm DIPROP_RANGE nicht an) */
     int axremap;      /* 1 = Achsen per Objekt-Liste zugeordnet (Treiber
                        * meldete Achsen ausserhalb der Standard-GUIDs) */
+    /* W312 JOY-CALIB: Geraeteinfo (nur Metadaten, nie Eingabewerte). */
+    unsigned short vid, pid; /* aus der Produkt-GUID */
+    unsigned devtype, capflags; /* DIDEVCAPS.dwDevType / dwFlags */
+    int ncaps_btn, ncaps_pov;   /* laut Treiber (ungekuerzt) */
+    int fmt;          /* 0 = Standard-Format, 1 = Achsen-Rueckfall (W282),
+                       * 2 = eigenes Format je Objekt (W312) */
+    long open_hr;     /* letzter Fehlercode von Acquire (0 = ok) */
 } ijoy_info_t;
+
+/* W312 JOY-CALIB: ein DirectInput-Objekt des Geraets - NUR Metadaten
+ * (Typ, Usage, Flags, Bereich, wohin es gelesen wird), nie Werte. */
+#define IJOY_OBJ_MAX 64
+enum {
+    IJOY_K_X = 0, IJOY_K_Y, IJOY_K_Z, IJOY_K_RX, IJOY_K_RY, IJOY_K_RZ,
+    IJOY_K_SLIDER = 6, /* GUID_Slider */
+    IJOY_K_AXIS = 7,   /* Achse mit unbekannter GUID (Vendor-Usage, Aileron, ...) */
+    IJOY_K_POV = 8,
+    IJOY_K_BTN = 9,
+    IJOY_K_OTHER = 10  /* Kollektion, Ausgabe/Aktor ohne Daten, ... */
+};
+typedef struct {
+    int kind;                    /* IJOY_K_* */
+    unsigned type, flags;        /* dwType, dwFlags (DIDFT_* / DIDOI_*) */
+    unsigned short upage, usage; /* HID-Usage (0 = unbekannt) */
+    char name[48];               /* tszName (UTF-8) */
+    long lo, hi;                 /* DIPROP_RANGE nach Einrichtung (Achsen) */
+    long llo, lhi;               /* DIPROP_LOGICALRANGE (lo == hi: unbekannt) */
+    int read;                    /* gelesen in: Achsen-Slot 0..7, POV 0..3,
+                                  * Taste 0..127; -1 = nicht gelesen */
+} ijoy_obj_t;
+
+/* W312 (rein, testbar): Was das Standard-Format (GUID X..RZ, 2 Slider,
+ * 4 POV, 128 Tasten, je "erstes freies passendes Objekt") von dieser
+ * Objektliste erfasst. read[i] wie ijoy_obj_t.read. Rueckgabe Achsmaske. */
+unsigned ijoy_std_capture(const ijoy_obj_t *o, int n, int *read);
+/* W312 (rein, testbar): eigener Plan je Objekt - JEDE Achse (auch ohne
+ * Standard-GUID) auf einen Slot (ijoy_plan_axes), POVs der Reihe nach,
+ * Tasten der Reihe nach. Rueckgabe Achsmaske. */
+unsigned ijoy_plan_objects(const ijoy_obj_t *o, int n, int *read);
+/* W312 (rein): 1 = der Plan liest mehr Objekte als das Standard-Format
+ * (dann eigenes Format je Objekt), 0 = Standard genuegt (bitgleich). */
+int ijoy_need_own_format(const ijoy_obj_t *o, int n);
+/* W312: Objektliste eines geoeffneten Geraets (Anzahl, *out bleibt gueltig
+ * bis zur naechsten Aufzaehlung). */
+int ijoy_objects(int i, const ijoy_obj_t **out);
+/* W312 (rein): Geraeteinfo als Text fuer "Geraeteinfo kopieren" und das
+ * Diagnosepaket - Name, VID/PID, Zahlen, Objektliste. NIE Eingabewerte.
+ * Rueckgabe Laenge. */
+int ijoy_devinfo_text(const ijoy_info_t *in, const ijoy_obj_t *o, int n,
+                      char *out, int cap);
+
+/* W312 JOY-CALIB: Kalibrierung je Geraet (VID/PID) und Achsen-Slot. Werte
+ * im normierten Bereich -32768..32767 (nach DIPROP_RANGE). mid =
+ * IJOY_CAL_NOMID: linear lo..hi (Schubhebel/Pedal), sonst Mitte. dz =
+ * Totzone in Prozent (0..50; mittig um die Mitte, linear am lo-Ende).
+ * Ohne Eintrag bleibt jeder Wert bitgleich. */
+#define IJOY_CAL_NOMID (-99999)
+#define IJOY_CAL_MAX 32
+typedef struct {
+    int lo, mid, hi, dz, inv;
+} ijoy_cal_t;
+int16_t ijoy_cal_apply(const ijoy_cal_t *c, int16_t v);
+/* "046D:C283,X,lo,mid|-,hi,dz,inv" <-> Eintrag. 1 = ok. */
+int ijoy_cal_parse(const char *val, unsigned short *vid, unsigned short *pid,
+                   int *axis, ijoy_cal_t *c);
+int ijoy_cal_format(unsigned short vid, unsigned short pid, int axis,
+                    const ijoy_cal_t *c, char *out, int cap);
+/* Tabelle (Client: aus user.cfg joy_calN=..., Launcher: Dialog). c NULL =
+ * Eintrag entfernen. 0 = ok, -1 = voll/ungueltig. */
+int ijoy_cal_set(unsigned short vid, unsigned short pid, int axis,
+                 const ijoy_cal_t *c);
+int ijoy_cal_get(unsigned short vid, unsigned short pid, int axis,
+                 ijoy_cal_t *c); /* 1 = vorhanden */
+int ijoy_cal_count(void);
+int ijoy_cal_entry(int k, unsigned short *vid, unsigned short *pid, int *axis,
+                   ijoy_cal_t *c); /* 1 = ok */
+void ijoy_cal_clear(void);
 
 /* W282 ISSUE6 (rein, testbar): Rohwert aus dem Geraetebereich lo..hi auf
  * -32768..32767; lo/hi = -32768/32767 ist bitgleich (Wert nur begrenzt). */
@@ -84,6 +160,9 @@ int ijoy_scan(void);       /* (neu) aufzaehlen + oeffnen; Anzahl */
 int ijoy_count(void);
 const ijoy_info_t *ijoy_info(int i);
 int ijoy_read(int i, imap_joy_state_t *st); /* 1 = ok, 0 = verloren */
+/* W312: wie ijoy_read, zusaetzlich (raw != NULL) der Stand OHNE
+ * Kalibrierung (Launcher: Live-Ansicht, Kalibrieren). Nur Anzeige. */
+int ijoy_read2(int i, imap_joy_state_t *st, imap_joy_state_t *raw);
 void ijoy_shutdown(void);
 
 /* ---- Client: Slot-Leser im Hintergrund-Thread ----
@@ -96,6 +175,26 @@ int ijoy_slots_start(const char specs[IMAP_JOY_MAX][96], unsigned used);
 unsigned ijoy_slots_get(imap_joy_state_t out[IMAP_JOY_MAX]);
 /* Fuer Log: Name des Geraets in Slot i ("" = keins). */
 void ijoy_slot_name(int i, char *out, int cap);
+
+/* W305 (JOY-HOTPLUG): Test-Schnittstelle - NUR Selbsttest (input_selftest).
+ * Ersetzt DirectInput durch nfake Fake-Geraete und fuehrt den Slot-Takt mit
+ * simulierter Zeit (kein Thread). Nie im Spieler- oder Launcher-Pfad. */
+typedef struct {
+    unsigned scans, opens, releases, read_fails;
+    unsigned bad_release, bad_read; /* Doppel-Freigabe / Lesen nach Freigabe */
+} ijoy_test_stats_t;
+void ijoy_test_begin(int nfake, const char specs[IMAP_JOY_MAX][96], unsigned used);
+void ijoy_test_plug(int k, int present); /* 0 = abziehen, 1 = einstecken (neue Generation) */
+void ijoy_test_axis(int k, long v);
+void ijoy_test_run(unsigned ms);
+void ijoy_test_stats(ijoy_test_stats_t *out);
+void ijoy_test_end(void);
+/* W312: Fake-Geraet k mit dieser Objektliste (Wingman/Hori/HOTAS) statt
+ * fester X/Y - Aufzaehlung, Format-Entscheidung, Lesen ueber den Plan.
+ * Werte je Objekt per ijoy_test_obj_value (Achse: Rohwert im Objekt-
+ * bereich lo..hi, Taste 0/1, POV Hundertstel Grad / -1). */
+void ijoy_test_objects(int k, const ijoy_obj_t *o, int n);
+void ijoy_test_obj_value(int k, int obj, long v);
 
 #ifdef __cplusplus
 }

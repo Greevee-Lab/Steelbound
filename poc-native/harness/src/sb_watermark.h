@@ -1,12 +1,14 @@
 #pragma once
-/* sb_watermark.h - W219 WATERMARK: temporaeres Alpha-Wasserzeichen.
+/* sb_watermark.h - W219 WATERMARK: temporaeres Versions-Wasserzeichen.
  *
  * Kleiner halbtransparenter Text unten rechts in der 4:3-Spielbox
  * (sb_aspect_box: liegt bei jedem Seitenverhaeltnis im Bild, nie in den
  * schwarzen Balken), Schrift wie F2 (Consolas, GDI -> vormultiplizierte
- * Textur, 1:1 per sb_ovl_quad). Text: "Steelbound <Version> . ALPHA" aus dem
+ * Textur, 1:1 per sb_ovl_quad). Text: "Steelbound <Version> . BETA" aus dem
  * Build-Define SB_VERSION_STR (CMake -DSB_VERSION=..., gesetzt von
- * make_alpha.py/release.sh); ohne Version "Steelbound dev".
+ * make_alpha.py/release.sh, Standard poc-native/VERSION); Phase nach
+ * sb_release_stage (W301: 0.x = BETA, 0.1.0-alpha.N = ALPHA, ab 1.0.0 ohne);
+ * ohne Version "Steelbound dev".
  *
  * Schalter [overlay] watermark: 0 = aus (Code-Standard, Test-cfg
  * sb_native.cfg -> Golden bitgleich), 1 = an (Spieler-cfg sb_player.cfg =

@@ -739,6 +739,7 @@ static const uint8_t kCombat[SBC_USB_IN_LEN] = {
 
 static void selftest_w128(void); /* W128, s. unten */
 static void selftest_w267(void); /* W267, s. unten */
+static void selftest_w305(void); /* W305, s. unten */
 
 static int run_selftest(void)
 {
@@ -893,6 +894,7 @@ static int run_selftest(void)
 
     selftest_w128(); /* W128: Kalibrierung, Lampenfolge, Dump/Watch, --test */
     selftest_w267(); /* W267: LED-Sendetor (Comm geht ganz aus) */
+    selftest_w305(); /* W305: Abziehen/Wieder-Einstecken (simuliert) */
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;
@@ -2084,4 +2086,302 @@ static void selftest_w267(void)
         CHECK(sbc_led_gate_due(NULL, a, 0, W267_MIN_MS) == 0 &&
               sbc_led_gate_due(&g, NULL, 0, W267_MIN_MS) == 0, "w267 NULL");
     }
+}
+
+/* ---- W305 (JOY-HOTPLUG): Abziehen/Wieder-Einstecken ohne Geraet ----
+ * Simuliertes Geraet hinter sbc_link_ops_t: "abgezogen" -> poll liefert
+ * SBC_ERR_IO (wie WinUsb_ReadPipe nach dem Abziehen), das alte Handle bleibt
+ * auch nach dem Wieder-Einstecken tot (neue Generation), open scheitert
+ * ohne Geraet mit SBC_ERR_NODEVICE. Der Treiber spiegelt den Lese-Thread
+ * aus sbc_wire.c (Cache/Verbindung je Ereignis) und fuehrt die Zeit. */
+typedef struct {
+    int present;       /* eingesteckt */
+    unsigned gen;      /* Steck-Generation (alte Handles tot) */
+    unsigned hgen;     /* Generation des offenen Handles */
+    int open_now;      /* offene Handles (0/1) */
+    int double_open, double_close, poll_closed;
+    unsigned open_calls, closes, polls;
+    int mode;          /* 0 = Reports, 1 = Idle (TIMEOUT), 2 = BADREPORT, 3 = 1x IO */
+    sbc_state_t phys;  /* physischer Stand */
+} w305_fake_t;
+
+#define W305_DEV ((sbc_usb_dev_t *)(uintptr_t)0x305u)
+
+static int w305_open(void *ctx, sbc_usb_dev_t **out)
+{
+    w305_fake_t *f = (w305_fake_t *)ctx;
+    f->open_calls++;
+    *out = NULL;
+    if (!f->present) {
+        return SBC_ERR_NODEVICE;
+    }
+    if (f->open_now) {
+        f->double_open++;
+    }
+    f->open_now = 1;
+    f->hgen = f->gen;
+    *out = W305_DEV;
+    return SBC_OK;
+}
+
+static void w305_close(void *ctx, sbc_usb_dev_t *dev)
+{
+    w305_fake_t *f = (w305_fake_t *)ctx;
+    if (!f->open_now || dev != W305_DEV) {
+        f->double_close++;
+    }
+    f->open_now = 0;
+    f->closes++;
+}
+
+static int w305_poll(void *ctx, sbc_usb_dev_t *dev, sbc_state_t *st)
+{
+    w305_fake_t *f = (w305_fake_t *)ctx;
+    f->polls++;
+    if (!f->open_now || dev != W305_DEV) {
+        f->poll_closed++;
+        return SBC_ERR_ARG;
+    }
+    if (!f->present || f->hgen != f->gen) {
+        return SBC_ERR_IO;
+    }
+    if (f->mode == 1) {
+        return SBC_ERR_TIMEOUT;
+    }
+    if (f->mode == 2) {
+        return SBC_ERR_BADREPORT;
+    }
+    if (f->mode == 3) {
+        f->mode = 0;
+        return SBC_ERR_IO;
+    }
+    *st = f->phys;
+    return SBC_OK;
+}
+
+typedef struct {
+    sbc_link_t l;
+    sbc_link_ops_t ops;
+    w305_fake_t f;
+    uint64_t now;
+    sbc_state_t cache;
+    int have, conn;          /* wie sbc_wire.c: 1 = verbunden, 2 = getrennt */
+    unsigned n_lost, n_back, n_closed, n_opened, steps;
+    unsigned spin;           /* Schritte ohne Pause und ohne Blockieren */
+    uint64_t t_lost, t_back; /* Zeitpunkt der letzten Ereignisse */
+} w305_sim_t;
+
+static void w305_sim_init(w305_sim_t *s, int present_at_start)
+{
+    sbc_usb_dev_t *dev = NULL;
+    memset(s, 0, sizeof *s);
+    s->ops.open = w305_open;
+    s->ops.close = w305_close;
+    s->ops.poll = w305_poll;
+    s->ops.ctx = &s->f;
+    s->now = 10000;
+    s->f.present = present_at_start;
+    s->f.phys.aiming_x = 0x80;
+    s->f.phys.aiming_y = 0x80;
+    s->f.phys.gear = 8;
+    /* wie sbc_usb_ensure: erster Versuch synchron, sonst Thread nach 1,5 s */
+    if (w305_open(&s->f, &dev) != SBC_OK) {
+        dev = NULL;
+    }
+    sbc_link_init(&s->l, dev);
+    if (dev) {
+        s->conn = 1;
+    } else {
+        s->l.open_due = 0;
+        s->l.open_tries = 1;
+        s->l.next_open_ms = s->now + SBC_LINK_RETRY_MS;
+    }
+}
+
+/* dur_ms simulierte Zeit laufen lassen. */
+static void w305_run(w305_sim_t *s, unsigned dur_ms)
+{
+    uint64_t end = s->now + dur_ms;
+    while (s->now < end) {
+        sbc_state_t st;
+        unsigned sl = 0, ev;
+        int prc;
+        unsigned pre_polls = s->f.polls;
+        ev = sbc_link_step(&s->l, &s->ops, s->now, &st, &sl);
+        s->steps++;
+        if (ev & SBC_LEV_OPENED) s->n_opened++;
+        if (ev & SBC_LEV_STATE) {
+            s->cache = st;
+            s->have = 1;
+            if (ev & SBC_LEV_BACK) {
+                s->n_back++;
+                s->t_back = s->now;
+            }
+            s->conn = 1;
+        }
+        if (ev & SBC_LEV_LOST) {
+            sbc_usb_neutral_hold(&s->l.last, s->l.have_last, &s->cache);
+            s->have = 1;
+            s->conn = 2;
+            s->n_lost++;
+            s->t_lost = s->now;
+        }
+        if (ev & SBC_LEV_CLOSED) s->n_closed++;
+        /* Zeit: Report ~4 ms (250 Hz), TIMEOUT blockiert 100 ms, sonst Pause. */
+        prc = s->l.last_poll_rc;
+        if (s->f.polls != pre_polls && prc == SBC_OK) {
+            s->now += 4;
+        } else if (s->f.polls != pre_polls && prc == SBC_ERR_TIMEOUT) {
+            s->now += 100;
+        } else if (sl) {
+            s->now += sl;
+        } else if (ev & SBC_LEV_OPENED) {
+            s->now += 2; /* open dauert (SetupDi), naechster Schritt pollt */
+        } else {
+            s->spin++; /* weder blockiert noch geschlafen */
+            s->now += 1;
+        }
+    }
+}
+
+static int w305_is_neutral(const sbc_state_t *c, uint16_t tog, uint8_t tuner)
+{
+    return c->aiming_x == 0x80 && c->aiming_y == 0x80 && c->rot_lever == 0 &&
+           c->sight_x == 0 && c->sight_y == 0 && c->pedal_l == 0 &&
+           c->pedal_m == 0 && c->pedal_r == 0 && c->buttons[0] == 0 &&
+           c->buttons[1] == 0 && c->buttons[2] == tog && c->gear == 0 &&
+           c->tuner == tuner;
+}
+
+static void selftest_w305(void)
+{
+    w305_sim_t *s = (w305_sim_t *)calloc(1, sizeof *s);
+    unsigned oc, steps0, polls0;
+    uint64_t t_plug;
+    if (!s) {
+        CHECK(0, "w305: calloc");
+        return;
+    }
+    /* A) Geraet beim Start: Fahrt mit Gas, Drehhebel, Feuer, Kippschaltern. */
+    w305_sim_init(s, 1);
+    CHECK(s->conn == 1 && s->l.dev && s->f.open_now == 1, "w305 A: Start offen");
+    s->f.phys.buttons[0] = 0x0021;  /* bi0 Feuer + bi5 Zuendung (rastend gesehen) */
+    s->f.phys.buttons[1] = 0x0004;  /* bi18 Chaff */
+    s->f.phys.buttons[2] = 0x007D;  /* Kippschalter bi34-38 + bi32 Comm5 */
+    s->f.phys.pedal_r = 0xC0;
+    s->f.phys.rot_lever = 100;
+    s->f.phys.sight_x = -50;
+    s->f.phys.aiming_x = 0x30;
+    s->f.phys.gear = 11;
+    s->f.phys.tuner = 5;
+    w305_run(s, 500);
+    CHECK(s->have && s->cache.pedal_r == 0xC0 && s->cache.buttons[0] == 0x0021 &&
+              s->cache.buttons[2] == 0x007D && s->n_lost == 0 && s->n_back == 0,
+          "w305 A: Stand kommt durch (Start-Geraet ohne Taster-Sperre)");
+    /* B) Abziehen: sofort neutral, nach 3 IO-Fehlern geschlossen. */
+    s->f.present = 0;
+    w305_run(s, 100);
+    CHECK(s->n_lost == 1 && s->conn == 2, "w305 B: Trennung sofort erkannt (lost=%u)",
+          s->n_lost);
+    CHECK(w305_is_neutral(&s->cache, 0x007C, 5),
+          "w305 B: neutral (Achsen Mitte, Pedale 0, Taster los, Kippschalter+Tuner "
+          "gehalten, Gang 0) - btn=%04X %04X %04X ped=%u rot=%d gear=%u tun=%u",
+          s->cache.buttons[0], s->cache.buttons[1], s->cache.buttons[2],
+          s->cache.pedal_r, s->cache.rot_lever, s->cache.gear, s->cache.tuner);
+    w305_run(s, 900);
+    CHECK(s->n_closed == 1 && s->f.closes == 1 && s->f.open_now == 0 && !s->l.dev,
+          "w305 B: nach anhaltendem IO geschlossen (closed=%u)", s->n_closed);
+    /* C) 5 s abgezogen: gedrosselte Versuche, kein Busy-Spin, kein Log-Sturm. */
+    oc = s->f.open_calls;
+    steps0 = s->steps;
+    polls0 = s->f.polls;
+    w305_run(s, 5000);
+    CHECK(s->f.open_calls - oc >= 3 && s->f.open_calls - oc <= 4,
+          "w305 C: open-Versuche gedrosselt (5 s -> %u, erwartet 3-4)",
+          s->f.open_calls - oc);
+    CHECK(s->spin == 0 && s->steps - steps0 <= 8 && s->f.polls == polls0,
+          "w305 C: kein Busy-Spin (%u Schritte, spin=%u, polls+%u)",
+          s->steps - steps0, s->spin, s->f.polls - polls0);
+    CHECK(w305_is_neutral(&s->cache, 0x007C, 5) && s->conn == 2,
+          "w305 C: neutral bleibt waehrend der Luecke");
+    /* D) Wieder einstecken, Feuer noch gedrueckt, Gas los: Sperre bis Loslassen. */
+    s->f.present = 1;
+    s->f.gen++;
+    t_plug = s->now;
+    s->f.phys.pedal_r = 0x40;
+    s->f.phys.rot_lever = 0;
+    w305_run(s, 1600);
+    CHECK(s->n_opened == 1 && s->n_back == 1 && s->conn == 1 && s->f.open_now == 1 &&
+              s->f.double_open == 0,
+          "w305 D: neu geoeffnet + wieder verbunden (opened=%u back=%u)", s->n_opened,
+          s->n_back);
+    CHECK(s->t_back - t_plug <= SBC_LINK_RETRY_MS + 20,
+          "w305 D: Wiederverbindung binnen Versuchsabstand (%llu ms nach Einstecken)",
+          (unsigned long long)(s->t_back - t_plug));
+    CHECK(s->cache.buttons[0] == 0 && s->cache.buttons[1] == 0 &&
+              s->cache.buttons[2] == 0x007C && s->cache.pedal_r == 0x40 &&
+              s->cache.gear == 11,
+          "w305 D: gehaltene Taster gesperrt, Kippschalter/Pedal/Gang sofort "
+          "(btn=%04X %04X %04X)", s->cache.buttons[0], s->cache.buttons[1],
+          s->cache.buttons[2]);
+    s->f.phys.buttons[0] = 0x0020; /* Feuer los (Zuendung rastet weiter) */
+    s->f.phys.buttons[1] = 0;
+    s->f.phys.buttons[2] = 0x007C;
+    w305_run(s, 50);
+    s->f.phys.buttons[0] = 0x0021; /* Feuer erneut */
+    w305_run(s, 50);
+    CHECK(s->cache.buttons[0] == 0x0001,
+          "w305 D: Feuer nach Loslassen wieder aktiv, rastende Zuendung bleibt "
+          "gesperrt bis zum Betaetigen (btn0=%04X)", s->cache.buttons[0]);
+    /* F) Einzelner IO-Fehler: kurz neutral, kein Schliessen, Sperre danach. */
+    oc = s->f.closes;
+    s->f.mode = 3;
+    w305_run(s, 400);
+    CHECK(s->n_lost == 2 && s->n_back == 2 && s->f.closes == oc && s->conn == 1,
+          "w305 F: kurzer Fehler ohne Schliessen (lost=%u back=%u)", s->n_lost,
+          s->n_back);
+    /* G) Idle (TIMEOUT) ist kein Fehler; BADREPORT schliesst nicht. */
+    s->f.mode = 1;
+    w305_run(s, 2000);
+    CHECK(s->n_lost == 2 && s->f.closes == oc && s->conn == 1,
+          "w305 G: Idle ohne Trennung");
+    s->f.mode = 2;
+    w305_run(s, 2000);
+    CHECK(s->n_lost == 2 && s->f.closes == oc && s->spin == 0,
+          "w305 G: BADREPORT ohne Trennung, gedrosselt");
+    /* H) Abziehen im Idle (TIMEOUT dazwischen setzt den Zaehler nicht zurueck). */
+    s->f.mode = 1;
+    s->f.present = 0;
+    w305_run(s, 1000);
+    CHECK(s->n_lost == 3 && s->f.closes == oc + 1 && s->f.double_close == 0 &&
+              s->f.poll_closed == 0,
+          "w305 H: zweite Trennung sauber (closes=%u dclose=%d pclosed=%d)",
+          s->f.closes, s->f.double_close, s->f.poll_closed);
+    sbc_link_shutdown(&s->l, &s->ops);
+    CHECK(s->f.open_now == 0 && s->f.double_close == 0, "w305 H: shutdown ohne Doppel-Close");
+
+    /* E) Beim Start nicht eingesteckt, nach 4 s eingesteckt. */
+    w305_sim_init(s, 0);
+    CHECK(s->conn == 0 && !s->l.dev, "w305 E: Start ohne Geraet");
+    w305_run(s, 4000);
+    CHECK(s->f.open_calls >= 3 && s->f.open_calls <= 4 && s->spin == 0 &&
+              s->steps <= 6 && !s->have,
+          "w305 E: gedrosselt suchen (open=%u steps=%u spin=%u)", s->f.open_calls,
+          s->steps, s->spin);
+    s->f.present = 1;
+    s->f.phys.buttons[2] = 0x007C;
+    s->f.phys.buttons[0] = 0x0010; /* Luke gehalten beim Einstecken */
+    w305_run(s, 1600);
+    CHECK(s->n_opened == 1 && s->n_back == 1 && s->conn == 1 && s->have &&
+              s->cache.buttons[0] == 0 && s->cache.buttons[2] == 0x007C,
+          "w305 E: spaet eingesteckt -> verbunden, gehaltene Taste gesperrt");
+    sbc_link_shutdown(&s->l, &s->ops);
+
+    /* J) Neutral ohne bekannten Stand: Kippschalter 0, Tuner unveraendert (>12). */
+    {
+        sbc_state_t nz;
+        sbc_usb_neutral_hold(NULL, 0, &nz);
+        CHECK(w305_is_neutral(&nz, 0, 0xFF), "w305 J: neutral ohne letzten Stand");
+    }
+    free(s);
 }

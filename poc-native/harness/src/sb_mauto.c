@@ -124,7 +124,7 @@ void sb_mauto_init(void)
         ma_init(&g_ma, g_cfg.mission_skip_intro);
     }
     g_cfg.alpha_welcome = 0; /* kein Willkommens-Hinweis (pausiert) vor dem Teststart */
-    if (g_cfg.replay_steps[0] || g_cfg.replay[0]) { /* Testketten wuerden mitdruecken */
+    if ((g_cfg.replay_steps[0] || g_cfg.replay[0]) && !g_cfg.mission_autostart_steps) { /* Testketten wuerden mitdruecken (W315: TEST-Schalter laesst sie an) */
         g_cfg.replay_steps[0] = 0;
         g_cfg.replay[0] = 0;
         HLOG_I("MISSION-AUTO: replay_steps/replay fuer den Teststart abgeschaltet");

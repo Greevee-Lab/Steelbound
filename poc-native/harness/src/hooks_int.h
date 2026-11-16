@@ -98,6 +98,7 @@ void poll_census_install(void);
 void replay_steps_tick(void);
 int input_replay_active(void);
 int key_down(int vk);
+void replay_inject(int vk, int len); /* W297: Test-Slot ab jetzt (LoC loc_replay_tick) */
 void aimat_apply(sbc_in_t *s);
 void drive_apply(sbc_in_t *s);
 

@@ -505,7 +505,12 @@ static DWORD g_ct_dtick[CT_MAX];
 static unsigned g_ct_nreuse;
 static unsigned long long g_ct_reuse_bytes;
 static volatile LONG g_ct_n;
-static SRWLOCK g_ct_lock = SRWLOCK_INIT;
+/* W308 FIX(SUSP-CTLOCK): hlock statt SRWLOCK. Contig-Allokationen laufen auf Xbox-Threads (Lader) und
+ * halten die Sperre ueber die HIGH-Suche (VirtualQuery-Schleife, bis 1,5 ms). Suspendierte das Spiel den
+ * Lader dort (NtSuspendThread), sah SUSPSAFE die rohe SRW-Sperre nicht -> ct_free eines anderen Threads
+ * wartete ewig (GitHub #27, SB-HANG). Als hlock: Owner-Tid sichtbar (susp_held_lock -> Retry), SUSPMARK. */
+static hlock_t g_ct_lock;
+const hlock_t *krnl_ct_hlock(void) { return &g_ct_lock; }
 static u32 *g_im_lo, *g_im_hi; /* belegte Low28-Bilder, sortiert, disjunkt (nur unter g_ct_lock) */
 static unsigned g_im_n, g_im_cap;
 static unsigned g_ct_quar, g_ct_alias, g_ct_high; /* stillgelegt, trotzdem ueberlappend, gezielt HIGH */
@@ -707,12 +712,12 @@ static int ct_free(u32 va)
     LONG k, n;
     u32 bm, len;
     if (!va) { return 0; }
-    AcquireSRWLockExclusive(&g_ct_lock);
+    hlock_enter(&g_ct_lock);
     n = g_ct_n;
     for (k = n - 1; k >= 0; k--) {
         if (g_ct_va[k] == va && !g_ct_dead[k]) { break; }
     }
-    if (k < 0) { g_ct_nfree_miss++; ReleaseSRWLockExclusive(&g_ct_lock); return 0; }
+    if (k < 0) { g_ct_nfree_miss++; hlock_leave(&g_ct_lock); return 0; }
     g_ct_dead[k] = 1;
     bm = va & 0x0FFFFFFFu;
     len = g_ct_len[k];
@@ -733,7 +738,7 @@ static int ct_free(u32 va)
         if (nd) { g_dl = nd; g_dl_cap = nc; }
     }
     if (g_dl_n < g_dl_cap) { g_dl[g_dl_n++] = k; }
-    ReleaseSRWLockExclusive(&g_ct_lock);
+    hlock_leave(&g_ct_lock);
     return 1;
 }
 /* FIX(SEQ-RENDER,W214) [kernel] contig_reuse=1: Anforderung aus einem freigegebenen Block bedienen (wie
@@ -809,15 +814,21 @@ static LONGLONG g_ct_qsum, g_ct_qmax; /* QPC in ct_high_alloc (Summe/Max) */
  * meist frei -> 1-2 Abfragen statt Dutzender (W177_n6: Start an der Probe kostete
  * im Mittel ~1,4 Mio. Zyklen). Findet die Suche ab dort nichts, einmal von unten. */
 static u32 g_ct_cursor = 0x10000000u;
-static void *ct_high_alloc_from(u32 size, DWORD prot, unsigned *pq, unsigned long long p);
+/* W308 PERF(SUSP-CTLOCK): Zaehler der HIGH-Suche (krnl_contig_stats): Abfragen gesamt, Bild-Spruenge ohne
+ * Abfrage, Cursor-Fehlschlaege (Suche ab Cursor ohne Treffer -> zweite Suche von unten). */
+static unsigned long long g_ct_qtot, g_ct_qimg;
+static unsigned g_ct_curfail;
+static void *ct_high_alloc_from(u32 size, DWORD prot, unsigned *pq, unsigned long long p, unsigned long long lim);
 static void *ct_high_alloc_q(u32 size, DWORD prot, unsigned *pq)
 {
-    void *r = ct_high_alloc_from(size, prot, pq, g_ct_cursor);
-    if (!r && g_ct_cursor > 0x10000000u) { r = ct_high_alloc_from(size, prot, pq, 0x10000000ull); }
+    void *r = ct_high_alloc_from(size, prot, pq, g_ct_cursor, 0x7FFF0000ull);
+    /* W308: Die Suche ab dem Cursor hat [Cursor, Ende) schon ohne Treffer geprueft -> die zweite Suche von
+     * unten endet am Cursor (vorher lief sie den ganzen Bereich noch einmal ab). */
+    if (!r && g_ct_cursor > 0x10000000u) { g_ct_curfail++; r = ct_high_alloc_from(size, prot, pq, 0x10000000ull, g_ct_cursor); }
     if (r) { g_ct_cursor = (u32)CT_G64((unsigned long long)(uintptr_t)r + CT_PAGE(size)); }
     return r;
 }
-static void *ct_high_alloc_from(u32 size, DWORD prot, unsigned *pq, unsigned long long p)
+static void *ct_high_alloc_from(u32 size, DWORD prot, unsigned *pq, unsigned long long p, unsigned long long lim)
 {
     u32 need = CT_PAGE(size);
     unsigned it;
@@ -832,20 +843,24 @@ static void *ct_high_alloc_from(u32 size, DWORD prot, unsigned *pq, unsigned lon
             if (a > p) { p = a; }
         }
     }
-    for (it = 0; it < 200000u && p + need <= 0x7FFF0000ull; it++) {
+    for (it = 0; it < 200000u && p + need <= (lim > 0x80000000ull ? lim : 0x7FFF0000ull) && CT_G64(p) < lim; it++) { /* W315 contig_hi_test: Suche oberhalb 2 GB */
         MEMORY_BASIC_INFORMATION mi;
         unsigned long long re, c, win, q;
         void *r;
-        if (!VirtualQuery((LPCVOID)(uintptr_t)p, &mi, sizeof mi)) { break; }
-        (*pq)++;
-        re = (unsigned long long)(uintptr_t)mi.BaseAddress + mi.RegionSize;
-        if (mi.State != MEM_FREE) { p = re; continue; }
+        /* W308 PERF(SUSP-CTLOCK): erst das Low28-Bild pruefen (reine Speicherrechnung), dann VirtualQuery.
+         * Ergebnis gleich: alle uebersprungenen 64-KB-Stellen [c, win+q) haben ein belegtes Bild und waeren
+         * auch nach der Abfrage verworfen worden (im_first_free liefert die erste passende Stelle >= c). */
         c = CT_G64(p);
-        if (c + need > re) { p = re; continue; }
         win = c & 0xF0000000ull;
         q = im_first_free((u32)(c - win), need);
-        if (q + need > 0x10000000ull) { p = win + 0x10000000ull; continue; }
-        if (win + q != c) { p = win + q; continue; }
+        if (q + need > 0x10000000ull) { p = win + 0x10000000ull; g_ct_qimg++; continue; }
+        if (win + q != c) { p = win + q; g_ct_qimg++; continue; }
+        if (!VirtualQuery((LPCVOID)(uintptr_t)p, &mi, sizeof mi)) { break; }
+        (*pq)++;
+        g_ct_qtot++;
+        re = (unsigned long long)(uintptr_t)mi.BaseAddress + mi.RegionSize;
+        if (mi.State != MEM_FREE) { p = re; continue; }
+        if (c + need > re) { p = re; continue; }
         r = VirtualAlloc((LPVOID)(uintptr_t)c, size, MEM_COMMIT | MEM_RESERVE, prot);
         if (r) { g_ct_high++; res = r; break; }
         p = c + 0x10000ull;
@@ -878,6 +893,17 @@ static void *ct_high_alloc(u32 size, DWORD prot)
                    (double)d * 1000.0 / (double)g_qpc_freq_ct(), (double)cy / 1000.0, nq, size, (u32)(uintptr_t)r);
         }
     }
+    return r;
+}
+/* TEST(TEX-WHITE-AMD,W315) contig_hi_test=1: Contig-Block oberhalb 2 GB (Low28-Bild frei, wie die gezielte
+ * HIGH-Suche). Stellt die Lage bei AMD-Testern nach (Logs: Texturkoepfe 0x8D74000C ...), wo der Treiber den
+ * Adressraum unter 2 GB belegt. Kein Treffer -> normaler Weg. */
+static void *ct_hi_test_alloc(u32 size, DWORD prot)
+{
+    static unsigned nlog;
+    unsigned nq = 0;
+    void *r = ct_high_alloc_from(size, prot, &nq, 0x80000000ull, 0xFFFE0000ull);
+    if (nlog < 8u) { nlog++; HLOG_W("CONTIG hi-test #%u: size=0x%X -> 0x%X", nlog, size, (u32)(uintptr_t)r); }
     return r;
 }
 /* TEST(FILM-WHITE,W177) [kernel] contig_alias_test=<Groesse>: stellt die
@@ -932,6 +958,8 @@ void krnl_contig_stats(void)
            g_ct_qn ? (double)g_ct_qsum * 1000.0 / (double)g_qpc_freq_ct() / (double)g_ct_qn : 0.0,
            g_ct_qn ? (double)g_ct_cysum / 1000.0 / (double)g_ct_qn : 0.0,
            (double)g_ct_qmax * 1000.0 / (double)g_qpc_freq_ct(), (double)g_ct_cymax / 1000.0, g_ct_qslow);
+    HLOG_I("KRNL CONTIG HIGH-Suche (W308): %llu Abfragen, %llu Bild-Spruenge ohne Abfrage, %u Cursor-Fehlschlaege",
+           g_ct_qtot, g_ct_qimg, g_ct_curfail);
 }
 
 u32 __stdcall hle_MmAllocateContiguousMemory(u32 size)
@@ -945,8 +973,9 @@ u32 __stdcall hle_MmAllocateContiguousMemory(u32 size)
     int na = g_cfg.contig_noalias; /* FIX(FILM-WHITE,W177) */
     void *r = NULL;
     u32 rlen = 0; /* W214 contig_reuse: Laenge des wiederverwendeten Blocks (0 = neu) */
-    if (na) { AcquireSRWLockExclusive(&g_ct_lock); r = ct_reuse(size, &rlen); }
+    if (na) { hlock_enter(&g_ct_lock); r = ct_reuse(size, &rlen); }
     if (r) { DWORD oo; VirtualProtect(r, rlen, PAGE_READWRITE, &oo); } /* Block war evtl. WC (W123) */
+    if (!r && g_cfg.contig_hi_test && na) { r = ct_hi_test_alloc(size ? size : 0x1000, PAGE_READWRITE); } /* TEST(W315) */
     if (!r) { r = na ? ct_low_alloc(size ? size : 0x1000) : low_alloc(size ? size : 0x1000); }
     {
         static unsigned nhifall;
@@ -960,7 +989,7 @@ u32 __stdcall hle_MmAllocateContiguousMemory(u32 size)
     if (r) { exreg_add((u32)(uintptr_t)r, size ? size : 0x1000); }
     if (na) {
         if (r && !rlen) { ct_register((u32)(uintptr_t)r, size ? size : 0x1000); }
-        ReleaseSRWLockExclusive(&g_ct_lock);
+        hlock_leave(&g_ct_lock);
     }
     {
         static unsigned nhia; /* DIAG(W73): Lage aller Contig-Bloecke (nicht-Ex) */
@@ -988,7 +1017,8 @@ u32 __stdcall hle_MmAllocateContiguousMemoryEx(u32 size, u32 low, u32 high,
         return lr;
     }
     (void)align;
-    if (na) { AcquireSRWLockExclusive(&g_ct_lock); r = ct_reuse(size, &rlen); }
+    if (na) { hlock_enter(&g_ct_lock); r = ct_reuse(size, &rlen); }
+    if (!r && g_cfg.contig_hi_test && na) { r = ct_hi_test_alloc(size ? size : 0x1000, PAGE_READWRITE); } /* TEST(W315) */
     if (!r) { r = na ? ct_low_alloc(size ? size : 0x1000) : low_alloc(size ? size : 0x1000); }
     if (prot) { prot = host_prot("MmContigEx", (u32)(uintptr_t)r, size, prot); } /* W123 */
     if (r && rlen) { /* W214: wiederverwendeter Block - Schutz immer neu setzen (vorher evtl. WC) */
@@ -1007,7 +1037,7 @@ u32 __stdcall hle_MmAllocateContiguousMemoryEx(u32 size, u32 low, u32 high,
     if (r) { exreg_add((u32)(uintptr_t)r, size ? size : 0x1000); }
     if (na) {
         if (r && !rlen) { ct_register((u32)(uintptr_t)r, size ? size : 0x1000); }
-        ReleaseSRWLockExclusive(&g_ct_lock);
+        hlock_leave(&g_ct_lock);
     }
     {
         /* DIAG(W73): Lage der High-Bloecke (Absturz 0x24E1D3 schrieb bis an

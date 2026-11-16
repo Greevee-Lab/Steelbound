@@ -32,6 +32,7 @@
 #include "sb_lang.h"
 #include "launcher_res.h"
 #include "sb_edition.h" /* W116 EDITIONS: Badge, Hintergrund, Remaster-Paket */
+#include "sb_version.h" /* W301 BETA-VERSION: Phase-Badge, Fenstertitel */
 #include "launcher_assist.h" /* W143 CTRL-ASSIST: Controller-Test-Dialog */
 #include "sb_pack.h" /* W148 PACK-LAUNCHER: Seite "Packs" (Scan/Pruefen/packs.json) */
 #include "sb_gamever.h"
@@ -88,12 +89,12 @@ static const char *const kPageName[P_N] = {
     "gui.alpha_page" /* W272 */
 };
 static const char *const kPageKey[P_N] = {
-    "play", "display", "graphics", "packs", "controls", "audio", "advanced", "alpha"
+    "play", "display", "graphics", "packs", "controls", "audio", "advanced", "tools" /* W301 (alt: alpha) */
 };
 static const wchar_t kPageIcon[P_N] = { 0xE768, 0xE7F4, 0xE790, 0xE7B8,
                                         0xE7FC, 0xE767, 0xE713, 0xEBE8 };
-/* W272 ALPHA-TEST: Seite "Alpha Test" (launcher_alpha.inc, vor den Selbsttests) */
-static int g_alpha_tools = 1; /* launcher_ui.cfg alpha_tools (0 = Seite aus, spaetere Beta) */
+/* W272 ALPHA-TEST: Seite "Test tools" (W301, vorher "Alpha Test"; launcher_alpha.inc, vor den Selbsttests) */
+static int g_alpha_tools = 1; /* launcher_ui.cfg test_tools (W301; Rueckfall alpha_tools), 0 = Seite aus */
 static int g_show_adv; /* W291 ESC-REWORK: launcher_ui.cfg show_advanced (Feinregler auf Anzeige/Grafik zeigen) */
 static void paint_alpha(void);
 static void alpha_build_controls(HWND w);
@@ -117,6 +118,7 @@ static const struct {
     { "start", P_PLAY },     { "grafik", P_DISPLAY }, { "remaster", P_GFX },
     { "ton", P_AUDIO },      { "steuerung", P_CTRL }, { "profile", P_ADV },
     { "pfade", P_ADV },
+    { "alpha", P_ALPHA }, /* W301 BETA-VERSION: Seite heisst jetzt "tools" */
 };
 
 int gui_page_count(void)
@@ -259,7 +261,7 @@ int gui_page_from_name(const char *v)
 #define ID_CTRL_AUTOGEAR 1105 /* W218 SIMPLE-CONTROLS: automatischer Gangwechsel */
 #define ID_CTRL_JOY 1106 /* W221 HOTAS (experimentell): Joystick-Dialog */
 #define ID_PAL50 1108 /* W234 PAL50: Spieltakt 25 (wie EU-Konsole am 50-Hz-TV) */
-#define ID_CHIDE 1109 /* W268 COCKPIT-HIDE: Cockpit ausblenden (Grafik > HUD & Cockpit) */
+#define ID_CHIDE 1109 /* W268 COCKPIT-HIDE: Cockpit ausblenden (Grafik > HUD & Cockpit); W319: Auswahl Cockpit / Vollbild-Ansicht / Monitoransicht (+ Felder) */
 #define ID_STICK_AIM 1111  /* W271 (Merge: 1109 belegt durch W268) STICK-RELATIVE: Stick-Zielen Position / wie eine Maus */
 #define ID_STICK_SENS 1112 /* W271: Empfindlichkeit relativer Stick 1..16 */
 #define ID_PH_VIEW 1113    /* W290 QUICK-SHOT: Ansicht der Aufnahme (wie im Spiel / ohne Cockpit / nur Aussenwelt) */
@@ -267,6 +269,16 @@ int gui_page_from_name(const char *v)
 #define ID_RP_LOGO 1115    /* W290: Spiel-Logo der Wiedergabe zeigen */
 #define ID_WM_MEDIA 1116   /* W290: Wasserzeichen im Video-Export */
 #define ID_PH_HUD 1117     /* W290: HUD im Foto */
+/* W303 AUDIO-VOLUME: Lautstaerke Gesamt/Musik/Effekte/Sprache-Funk (Ton & Extras, Karte Ton) */
+#define ID_VOL_MASTER 1118
+#define ID_VOL_MUSIC 1119
+#define ID_VOL_SFX 1120
+#define ID_VOL_VOICE 1121
+#define VOL_N 21           /* Listen 100 %, 95 %, ... 0 % (5er-Schritte, wie ESC) */
+#define EXY 18             /* W303: Karte "Fotos & Screenshots" 18 tiefer (Platz fuer die Lautstaerke) */
+static const int kVolId[4] = { ID_VOL_MASTER, ID_VOL_MUSIC, ID_VOL_SFX, ID_VOL_VOICE };
+static const char *const kVolKey[4] = { "gui.vol_master", "gui.vol_music", "gui.vol_sfx", "gui.vol_voice" };
+static int g_vol_raw[4] = { 100, 100, 100, 100 }; /* W303: geladener Wert (nicht auf 5 gerundet bleibt erhalten) */
 /* W250 UPDATE-CHECK: Erstabfrage + Hinweis (Spielen), Einstellung (Erweitert) */
 #define ID_UPD_YES 1150
 #define ID_UPD_NO 1151
@@ -363,6 +375,8 @@ static const lr_env_t *g_env_fix; /* Selbsttest: feste Umgebung statt Messung */
 static int g_diag_open;           /* Erweitert: Diagnose aufgeklappt (UI-cfg) */
 static int g_sbc_rc = -1;         /* lctrl_sbc_status: 0 = gefunden, -1 = ungeprueft */
 static int g_disp_hz;             /* Bildwiederholrate des Hauptmonitors */
+static int g_disp_hz_max;         /* W309: hoechste Rate des Hauptmonitors (aktuelle Aufloesung) */
+static int g_mon_alt_hz;          /* W309: Rate eines anderen Monitors, falls abweichend (0 = keiner) */
 static unsigned g_mon_w, g_mon_h; /* Aufloesung des Hauptmonitors */
 static char g_dflt_setup[64];     /* Standard-Profil (profiles/standard.txt) */
 static int g_confirm_auto;        /* Selbsttest: Rueckfragen mit Ja beantworten */
@@ -1359,6 +1373,14 @@ static void ui_cfg_load_str(const char *client_dir, const char *key, char *out, 
  * bleibt byte-gleich). */
 static int g_lay_cfg_id = -1, g_lay_cfg_size = -1;
 
+/* W301 BETA-VERSION: Seite "Test tools" - neuer Schluessel test_tools, alte
+ * launcher_ui.cfg mit alpha_tools gelten weiter (Rueckfall), Standard 1. */
+static int ui_cfg_load_tools(const char *client_dir)
+{
+    int v = ui_cfg_load_key(client_dir, "test_tools", -1);
+    return v >= 0 ? v : ui_cfg_load_key(client_dir, "alpha_tools", 1);
+}
+
 static int ui_cfg_load_bg(const char *client_dir)
 {
     return ui_cfg_load_key(client_dir, "bg_image", 1); /* Standard: an */
@@ -1376,7 +1398,7 @@ static int ui_cfg_save_bg(const char *client_dir, int bg)
     fprintf(f, "# Launcher-Oberflaeche (W82), nicht vom Client gelesen\n"
                "bg_image=%d\n"
                "diag_open=%d\n"
-               "alpha_tools=%d\n" /* W272: Seite Alpha Test (0 = aus) */
+               "test_tools=%d\n" /* W272/W301: Seite Test tools (0 = aus; alte cfg: alpha_tools) */
                "show_advanced=%d\n", /* W291: Feinregler auf Anzeige/Grafik */
             bg ? 1 : 0, g_diag_open ? 1 : 0, g_alpha_tools ? 1 : 0, g_show_adv ? 1 : 0);
     if (g_lay_cfg_id >= 0) { /* W281: Layout-Vorschau 0|a|b + UI-Groesse */
@@ -1715,7 +1737,7 @@ static void lay_gfx_apply(void)
     lay_gfx_t l;
     lay_gfx(&l);
     ui_move_xy(ID_MONFX, COL2 + 120, l.cm_y + 44);
-    ui_move_xy(ID_CHIDE, COL2 + 18, l.cm_y + 80);
+    ui_move_xy(ID_CHIDE, COL2 + 120, l.cm_y + 80); /* W319: Auswahl statt Schalter */
     ui_move_xy(ID_REM_LABEL, COL2 + 18, l.cm_y + 116);
     ui_move_xy(ID_XEXP_HUD, COL2 + COLW - 18 - XI_W, l.cm_y + 12);
     ui_move_xy(ID_GFX_LIGHT, COL2 + 120, l.wl_y + 44);
@@ -1897,11 +1919,24 @@ static void base_build(void)
             SX(214), 0, SX(300), SX(TITLE_H), C_DIM,
             DT_LEFT | DT_VCENTER | DT_SINGLELINE);
     /* W116 EDITIONS: Edition sichtbar (Badge rechts neben dem Untertitel) */
-    cv_fill(&g_base, SX(398), SX(14), SX(160), SX(20), C_ACCENT, 34, SX(3));
-    cv_fill(&g_base, SX(398), SX(14), SX(2), SX(20), C_ACCENT, 255, 0);
     SetTextCharacterExtra(g_base.dc, SX(1));
-    cv_text(&g_base, g_f[F_TINY], SB_EDITION_BADGE, SX(398), SX(14), SX(160),
-            SX(20), C_ACCENT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    if (!g_upd_ver[0]) {
+        cv_fill(&g_base, SX(398), SX(14), SX(160), SX(20), C_ACCENT, 34, SX(3));
+        cv_fill(&g_base, SX(398), SX(14), SX(2), SX(20), C_ACCENT, 255, 0);
+        cv_text(&g_base, g_f[F_TINY], SB_EDITION_BADGE, SX(398), SX(14), SX(160),
+                SX(20), C_ACCENT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    } else { /* W301 BETA-VERSION: Release-Build -> "COMMUNITY | BETA 0.2.0" (endet vor den Spiel-Tabs bei x=584) */
+        char vb[64];
+        const char *st = sb_release_stage(g_upd_ver);
+        _snprintf_s(vb, sizeof vb, _TRUNCATE, "%s%s%s", st, st[0] ? " " : "", g_upd_ver);
+        cv_fill(&g_base, SX(366), SX(14), SX(212), SX(20), C_ACCENT, 34, SX(3));
+        cv_fill(&g_base, SX(366), SX(14), SX(2), SX(20), C_ACCENT, 255, 0);
+        cv_text(&g_base, g_f[F_TINY], SB_EDITION_COMMUNITY ? "COMMUNITY" : "PRIVATE", SX(368), SX(14), SX(98),
+                SX(20), C_ACCENT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        cv_fill(&g_base, SX(468), SX(14), SX(110), SX(20), C_ACCENT_HI, 60, SX(3));
+        cv_text(&g_base, g_f[F_TINY], vb, SX(468), SX(14), SX(110), SX(20), C_ACCENT_HI,
+                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
     SetTextCharacterExtra(g_base.dc, 0);
     /* Fuss der Navigation (W281: in a/b steht dort die Layout-Vorschau) */
     if (g_lay.id == LLAY_0) {
@@ -2485,6 +2520,7 @@ static void paint_gfx(void)
     card(COL2, l.cm_y, COLW, l.cm_h, LT("gui.grp_cockpit"));
     /* W287: Symbol ID_XEXP_HUD */
     gfx_label("gui.gfx_monitor", COL2, l.cm_y + 44, (dm & ((lgp_mask_t)1 << LGK_MFX)) != 0); /* W252 */
+    gfx_label("gui.gfx_cview", COL2, l.cm_y + 80, ctl(ID_CHIDE) && ComboBox_GetCurSel(ctl(ID_CHIDE)) > 0); /* W319 */
 
     card(COL2, l.wl_y, COLW, l.wl_h, LT("gui.grp_world"));
     /* W287: Symbol ID_XEXP_WORLD */
@@ -2556,27 +2592,34 @@ static void extras_dir(char *out, size_t cap)
 static void paint_audio(void)
 {
     /* W290: Ton und Spieltempo nebeneinander, darunter die groessere Karte "Fotos & Screenshots" */
-    card(CX0, CY0, COLW, 140, LT("gui.audio_card"));
-    label(F_SMALL, LT("gui.audio_dev_txt"), CX0 + 18, CY0 + 86, COLW - 36, 48,
-          C_DIM);
+    /* W303 AUDIO-VOLUME: Karte "Ton & Lautstaerke" (158 hoch): Schalter + Ausgabe, darunter 2x2 Regler */
+    card(CX0, CY0, COLW, 140 + EXY, LT("gui.audio_card"));
+    label(F_TINY, LT("gui.audio_dev_txt"), CX0 + 178, CY0 + 46, COLW - 196, 30, C_DIM);
+    {
+        int k;
+        for (k = 0; k < 4; k++) { /* Gesamt | Musik / Effekte | Sprache/Funk */
+            label1(F_SMALL, LT(kVolKey[k]), CX0 + 18 + (k & 1) * 152, CY0 + 82 + (k >> 1) * 36, k & 1 ? 74 : 66, 30,
+                   C_DIM);
+        }
+    }
     /* W234 PAL50: Karte "Spieltempo" (Schalter + kurze Erklaerung) */
-    card(COL2, CY0, COLW, 140, LT("gui.pal50_card"));
+    card(COL2, CY0, COLW, 140 + EXY, LT("gui.pal50_card"));
     label(F_TINY, LT("gui.pal50_txt"), COL2 + 18, CY0 + 86, COLW - 36, 48, C_DIM);
     /* W195 PHOTO-MODE / W290 QUICK-SHOT: Karte "Fotos & Screenshots" (eine Konfiguration fuer Fotomodus und
      * Schnell-Screenshot: Ordner, Ansicht, Groesse, Format, Bildformat der Aussenwelt; Replays & Video-Export) */
-    card(CX0, CY0 + 152, CW, 344, LT("gui.extras_card"));
-    label1(F_TINY, LT("gui.extras_dir"), CX0 + 18, CY0 + 190, CW - 36, 16, C_DIM);
-    label1(F_SMALL, LT("gui.extras_view"), CX0 + 18, CY0 + 250, 110, 30, C_DIM);
-    label1(F_SMALL, LT("gui.extras_res"), CX0 + 372, CY0 + 250, 66, 30, C_DIM);
-    label1(F_SMALL, LT("gui.extras_fmt"), CX0 + 18, CY0 + 290, 110, 30, C_DIM);
-    label1(F_SMALL, LT("gui.extras_asp"), CX0 + 250, CY0 + 290, 188, 30, C_DIM);
-    label1(F_TINY, LT("gui.extras_rp"), CX0 + 18, CY0 + 330, CW - 36, 16, C_DIM);
+    card(CX0, CY0 + 152 + EXY, CW, 344 - EXY, LT("gui.extras_card"));
+    label1(F_TINY, LT("gui.extras_dir"), CX0 + 18, CY0 + 190 + EXY, CW - 36, 16, C_DIM);
+    label1(F_SMALL, LT("gui.extras_view"), CX0 + 18, CY0 + 250 + EXY, 110, 30, C_DIM);
+    label1(F_SMALL, LT("gui.extras_res"), CX0 + 372, CY0 + 250 + EXY, 66, 30, C_DIM);
+    label1(F_SMALL, LT("gui.extras_fmt"), CX0 + 18, CY0 + 290 + EXY, 110, 30, C_DIM);
+    label1(F_SMALL, LT("gui.extras_asp"), CX0 + 250, CY0 + 290 + EXY, 188, 30, C_DIM);
+    label1(F_TINY, LT("gui.extras_rp"), CX0 + 18, CY0 + 330 + EXY, CW - 36, 16, C_DIM);
     {
         char d[600], t[900];
         extras_default_dir(d, sizeof d);
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.extras_txt"), d);
-        if (!paint_reason(33, CX0 + 18, CY0 + 420, CW - 36, 44)) { /* W195 R33: Ordner nicht nutzbar */
-            label(F_TINY, t, CX0 + 18, CY0 + 420, CW - 36, 44, C_DIM);
+        if (!paint_reason(33, CX0 + 18, CY0 + 420 + EXY, CW - 36, 44)) { /* W195 R33: Ordner nicht nutzbar */
+            label(F_TINY, t, CX0 + 18, CY0 + 420 + EXY, CW - 36, 44, C_DIM);
         }
     }
 }
@@ -3457,34 +3500,158 @@ static void combo_add(HWND cb, const char *u8)
     free(w);
 }
 
-/* W223 FPS-RATES: Listenposition einer Bildrate (kSbFpsChoice); unbekannte
- * Werte wie bisher auf 30 (Original), die Pruefung meldet sie. */
-static int ip_sel_of(int v)
+/* W309 FPS-MONITOR: Monitore fuer die Bildratenliste. "a/b,c" = Simulation
+ * (--sim-monitors, Selbsttest/Shots): erster Eintrag = Hauptmonitor = Start-
+ * monitor mit aktueller Rate a und Hoechstrate b, weitere = andere Monitore.
+ * 0 = gueltig. */
+static int mon_sim_apply(const char *spec)
 {
-    int i = sb_fps_choice_idx(v);
-    return i >= 0 ? i : sb_fps_choice_idx(0);
+    int k = 0, hz = 0, mx = 0, alt = 0;
+    const char *p = spec;
+    if (!p || !*p) { return 1; }
+    while (*p) {
+        int a = atoi(p), b;
+        if (a < 0 || a > 1000) { return 1; }
+        while (*p >= '0' && *p <= '9') { p++; }
+        b = a;
+        if (*p == '/') {
+            p++;
+            b = atoi(p);
+            while (*p >= '0' && *p <= '9') { p++; }
+        }
+        if (k == 0) { hz = a; mx = b > a ? b : a; }
+        else if (alt == 0 && a > 0 && sb_fps_nominal_hz(a) != sb_fps_nominal_hz(hz)) { alt = a; }
+        k++;
+        if (*p == ',') { p++; } else if (*p) { return 1; }
+    }
+    g_disp_hz = hz;
+    g_disp_hz_max = mx;
+    g_mon_alt_hz = alt;
+    return 0;
 }
 
-/* W223: Bildraten-Liste fuellen: Monitor (auto, n Hz), 30 (Original), 60,
- * 75, 90, 100, 120 (getesteter Standard), 144, 165, 240. */
+static BOOL CALLBACK mon_alt_cb(HMONITOR hm, HDC dc, LPRECT rc, LPARAM lp)
+{
+    MONITORINFO mi;
+    int hz;
+    (void)dc;
+    (void)rc;
+    (void)lp;
+    memset(&mi, 0, sizeof mi);
+    mi.cbSize = sizeof mi;
+    if (!GetMonitorInfoW(hm, &mi) || (mi.dwFlags & MONITORINFOF_PRIMARY)) { return TRUE; }
+    hz = sb_fps_monitor_hz(hm);
+    if (hz > 0 && g_mon_alt_hz == 0 && sb_fps_nominal_hz(hz) != sb_fps_nominal_hz(g_disp_hz)) {
+        g_mon_alt_hz = hz;
+    }
+    return TRUE;
+}
+
+/* W309: Hoechstrate des Hauptmonitors und abweichende Rate eines weiteren
+ * Monitors (Hinweis; die Liste richtet sich nach dem Startmonitor). */
+static void mon_detect_rates(void)
+{
+    POINT o;
+    o.x = 0;
+    o.y = 0;
+    g_disp_hz_max = sb_fps_monitor_max_hz(MonitorFromPoint(o, MONITOR_DEFAULTTOPRIMARY));
+    g_mon_alt_hz = 0;
+    EnumDisplayMonitors(NULL, NULL, mon_alt_cb, 0);
+    if (g_o.sim_mon[0] && mon_sim_apply(g_o.sim_mon) != 0) {
+        g_disp_hz_max = g_disp_hz;
+    }
+}
+
+/* W309 FPS-MONITOR: angebotene Bildraten (sb_fps_list nach der Rate des
+ * Startmonitors). Der Client oeffnet sein Fenster mit CW_USEDEFAULT auf dem
+ * Hauptmonitor (fs_monitor verwaltet der Launcher nicht), auto folgt danach
+ * live dem Fenster-Monitor (W223). g_ip_keep = Wert aus cfg/Preset, der
+ * angeboten bleibt, auch wenn er ueber der Monitorrate liegt. */
+static SbFpsItem g_ip[SB_FPS_LIST_MAX];
+static int g_ip_n;
+static int g_ip_keep = SB_FPS_AUTO;
+
+/* W223: Listenposition einer Bildrate; W309: in der angebotenen Liste.
+ * Fehlt sie, wie bisher die Position von 30 (Original). */
+static int ip_sel_of(int v)
+{
+    int i = sb_fps_list_idx(g_ip, g_ip_n, v);
+    return i >= 0 ? i : sb_fps_list_idx(g_ip, g_ip_n, 0);
+}
+
+/* W309: Wert eines Listeneintrags (sel < 0 bzw. leer: dflt). */
+static int ip_val(int sel, int dflt)
+{
+    return (sel >= 0 && sel < g_ip_n) ? g_ip[sel].v : dflt;
+}
+
+/* W223: Bildraten-Liste fuellen: Monitor (auto, n Hz), 30 (Original), feste
+ * Werte. W309: nur bis zur Monitorrate; kein glatter Teiler = "(kann
+ * ruckeln)", alter Wert ueber dem Monitor = "(ueber Monitorrate)". Die
+ * aktuelle Wahl bleibt erhalten (nie still geaendert). */
 static void ip_fill(HWND c)
 {
-    int i;
+    int i, cur = ComboBox_GetCount(c) > 0 ? ip_val(ComboBox_GetCurSel(c), g_ip_keep) : g_ip_keep;
     char b[96];
+    g_ip_n = sb_fps_list(g_disp_hz, cur, g_ip, SB_FPS_LIST_MAX);
     ComboBox_ResetContent(c);
-    for (i = 0; i < SB_FPS_NCHOICE; i++) {
-        int v = kSbFpsChoice[i];
+    for (i = 0; i < g_ip_n; i++) {
+        int v = g_ip[i].v, f = g_ip[i].flags;
         if (v == SB_FPS_AUTO) {
             if (g_disp_hz > 0) { _snprintf_s(b, sizeof b, _TRUNCATE, LT("gui.ip_auto_hz"), g_disp_hz); }
             else { strcpy_s(b, sizeof b, LT("gui.ip_auto")); }
         } else if (v == 0) { /* W234: bei PAL50 ist das Original 25 */
             strcpy_s(b, sizeof b, LT(ctl(ID_PAL50) && ui_checked(ID_PAL50) ? "gui.ip_25" : "gui.ip_30"));
         }
+        else if (f & SB_FPS_F_ABOVE) { _snprintf_s(b, sizeof b, _TRUNCATE, LT("gui.ip_above"), v); } /* W309 */
+        else if (f & SB_FPS_F_JUDDER) { _snprintf_s(b, sizeof b, _TRUNCATE, LT("gui.ip_judder"), v); } /* W309 */
         else if (v == 60) { strcpy_s(b, sizeof b, LT("gui.ip_60")); }
         else if (v == 120) { strcpy_s(b, sizeof b, LT("gui.ip_120")); }
         else { _snprintf_s(b, sizeof b, _TRUNCATE, "%d", v); }
         combo_add(c, b);
     }
+    i = sb_fps_list_idx(g_ip, g_ip_n, cur);
+    if (i >= 0) { ComboBox_SetCurSel(c, i); }
+}
+
+/* W309: Bildrate waehlen (Laden, Preset, Test). Ein Wert, der nicht (mehr)
+ * angeboten wird, kommt als eigener Eintrag dazu statt still auf 30. */
+static void ip_set(int v)
+{
+    HWND c = ctl(ID_IPFPS);
+    if (!c) { return; }
+    if (sb_fps_choice_idx(v) >= 0) {
+        g_ip_keep = v;
+        if (sb_fps_list_idx(g_ip, g_ip_n, v) < 0 || ComboBox_GetCount(c) != g_ip_n) {
+            ComboBox_SetCurSel(c, -1);
+            ip_fill(c);
+        }
+    }
+    ComboBox_SetCurSel(c, ip_sel_of(v));
+}
+
+/* W309: Statuszeile nach einer Bildraten-Wahl (warum ein Wert ruckeln kann;
+ * Hinweis auf einen zweiten Monitor mit anderer Rate). */
+static void ip_status(void)
+{
+    int sel = ComboBox_GetCurSel(ctl(ID_IPFPS)), v = ip_val(sel, SB_FPS_AUTO);
+    int f = (sel >= 0 && sel < g_ip_n) ? g_ip[sel].flags : 0;
+    char t[400];
+    size_t n;
+    t[0] = 0;
+    if (f & SB_FPS_F_ABOVE) {
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.ip_st_above"), v, g_disp_hz);
+    } else if (f & SB_FPS_F_JUDDER) {
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.ip_st_judder"), v, g_disp_hz);
+    } else if (g_disp_hz > 0 && g_disp_hz_max > g_disp_hz + 1) {
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.ip_st_max"), g_disp_hz, g_disp_hz_max);
+    }
+    if (g_mon_alt_hz > 0 && g_disp_hz > 0) {
+        n = strlen(t);
+        if (n) { strcat_s(t, sizeof t, " "); n++; }
+        _snprintf_s(t + n, sizeof t - n, _TRUNCATE, LT("gui.ip_st_multi"), g_disp_hz, g_mon_alt_hz);
+    }
+    if (t[0]) { set_status(t); }
 }
 
 static void sync_preset(void)
@@ -4253,7 +4420,8 @@ static const char ks_legacy_text[] =
     "feedback_clip = KEY:F9\n"
     "photo = KEY:SHIFT+KEY:F12\n"
     "quick_shot = KEY:F12\n"
-    "orig_view = KEY:SHIFT+KEY:F8\n"; /* W283; W290 photo/quick_shot */
+    "orig_view = KEY:SHIFT+KEY:F8\n"
+    "replay_exit = KEY:BACKSPACE\n"; /* W283; W290 photo/quick_shot; W299 replay_exit */
 
 /* Formen der Zeichnung. KS_LEDR/G/B = Taste mit roter/gruener/blauer
  * Leuchtleiste (3x3-Raster im Mittelblock). */
@@ -5567,7 +5735,8 @@ static void keyshtml_build(const char *memo, const char *profile,
                                  !strcmp(kh_rows[i].act, LT("bind.feedback_clip")) ? "feedback_clip" :
                                  !strcmp(kh_rows[i].act, LT("bind.orig_view")) ? "orig_view" : /* W283 */
                                  !strcmp(kh_rows[i].act, LT("bind.photo")) ? "photo" :
-                                 !strcmp(kh_rows[i].act, LT("bind.quick_shot")) ? "quick_shot" : NULL; /* W290 */
+                                 !strcmp(kh_rows[i].act, LT("bind.quick_shot")) ? "quick_shot" : /* W290 */
+                                 !strcmp(kh_rows[i].act, LT("bind.replay_exit")) ? "replay_exit" : NULL; /* W299 */
             if (action) {
                 lctrl_bind_row_text(&bindings, lctrl_bind_elem_index(action), kh_rows[i].key, sizeof kh_rows[i].key);
             }
@@ -6227,7 +6396,7 @@ static void gfx_sync_ui(void)
     cur = g_cur;
     if (ctl(ID_IPFPS)) { /* aktuelle Bildrate der Oberflaeche */
         int sel = ComboBox_GetCurSel(ctl(ID_IPFPS));
-        cur.interp_fps = (sel >= 0 && sel < SB_FPS_NCHOICE) ? kSbFpsChoice[sel] : cur.interp_fps; /* W223 */
+        cur.interp_fps = ip_val(sel, cur.interp_fps); /* W223, W309 */
         sel = ComboBox_GetCurSel(ctl(ID_WINMODE));
         cur.window_mode = (sel >= 0 && sel <= 2) ? sel : cur.window_mode;
     }
@@ -6322,6 +6491,14 @@ static void gfx_to_settings(launcher_settings_t *s)
 }
 
 
+/* W319 MONITOR-VIEW: Auswahl "Cockpit" (Grafik > HUD & Cockpit): 0 Cockpit (Original), 1 Vollbild-Ansicht
+ * des Spiels (cockpit_hide=1), 2 Monitoransicht, 3 + Radar/FRONT VIEW (monitor_view 1/2; hat Vorrang). */
+static int cview_sel(int cockpit_hide, int monitor_view)
+{
+    if (monitor_view >= 1 && monitor_view <= 2) { return 1 + monitor_view; }
+    return cockpit_hide ? 1 : 0;
+}
+
 static void ui_from_settings(const launcher_settings_t *s)
 {
     HWND c;
@@ -6350,6 +6527,15 @@ static void ui_from_settings(const launcher_settings_t *s)
                           : s->fps_limit == 120 ? 3 : 0);
     ui_set_checked(ID_AUDIO, s->audio);
     ui_set_checked(ID_LIVE, s->audio_live);
+    { /* W303 AUDIO-VOLUME: auf 5 gerundet anzeigen, Rohwert merken (ui_to_settings behaelt ihn, wenn unveraendert) */
+        const int vv[4] = { s->volume_master, s->volume_music, s->volume_sfx, s->volume_voice };
+        int k;
+        for (k = 0; k < 4; k++) {
+            int v = vv[k] < 0 ? 0 : (vv[k] > 100 ? 100 : vv[k]);
+            g_vol_raw[k] = v;
+            ComboBox_SetCurSel(ctl(kVolId[k]), (100 - (v + 2) / 5 * 5) / 5);
+        }
+    }
     ui_set_checked(ID_SAVE_LOCK, s->save_lock); /* W190 */
     ui_settext(ctl(ID_PH_DIR), s->photo_dir); /* W195 PHOTO-MODE */
     { /* W290 QUICK-SHOT: Groesse Fenster/4K/8K/x2/x4/x8, Ansicht, Bildformat 4:3/breit, Replay-Schalter */
@@ -6370,14 +6556,16 @@ static void ui_from_settings(const launcher_settings_t *s)
     ComboBox_SetCurSel(ctl(ID_CTRL_AIMASSIST),
                        (s->aim_assist >= 0 && s->aim_assist <= 2) ? s->aim_assist : 0); /* W236 */
     ui_set_checked(ID_CTRL_AUTOGEAR, s->auto_gear);
-    ui_set_checked(ID_CHIDE, s->cockpit_hide); /* W268 */
+    ComboBox_SetCurSel(ctl(ID_CHIDE), cview_sel(s->cockpit_hide, s->monitor_view)); /* W268, W319 */
     ComboBox_SetCurSel(ctl(ID_STICK_AIM), s->stick_aim ? 1 : 0); /* W271 */
     ComboBox_SetCurSel(ctl(ID_STICK_SENS),
                        (s->stick_aim_sens >= 1 && s->stick_aim_sens <= 16)
                            ? s->stick_aim_sens - 1 : 3);
     ui_set_checked(ID_PAL50, s->game_tick == 25); /* W234 */
+    ComboBox_SetCurSel(ctl(ID_IPFPS), -1); /* W309: Liste nach dem geladenen Wert */
+    g_ip_keep = s->interp_fps;
     ip_fill(ctl(ID_IPFPS)); /* W234: "25 (Original)" bei PAL50 */
-    ComboBox_SetCurSel(ctl(ID_IPFPS), ip_sel_of(s->interp_fps)); /* W223 */
+    ip_set(s->interp_fps); /* W223 */
     ComboBox_SetCurSel(ctl(ID_WINMODE),
                        (s->window_mode >= 0 && s->window_mode <= 2) ? s->window_mode : 0);
     /* W159: Kombi = Vorschau-Art (Startweg entscheidet an/aus, s. do_start) */
@@ -6448,6 +6636,14 @@ static void ui_to_settings(launcher_settings_t *s)
     s->fps_limit = (sel >= 0 && sel < 4) ? fps_map[sel] : 0;
     s->audio = ui_checked(ID_AUDIO);
     s->audio_live = ui_checked(ID_LIVE);
+    { /* W303 AUDIO-VOLUME */
+        int *vp[4] = { &s->volume_master, &s->volume_music, &s->volume_sfx, &s->volume_voice };
+        int k;
+        for (k = 0; k < 4; k++) {
+            int sl = ComboBox_GetCurSel(ctl(kVolId[k])), v = (sl >= 0 && sl < VOL_N) ? 100 - sl * 5 : 100;
+            *vp[k] = (v == (g_vol_raw[k] + 2) / 5 * 5) ? g_vol_raw[k] : v;
+        }
+    }
     s->save_lock = ui_checked(ID_SAVE_LOCK); /* W190 */
     { /* W195 PHOTO-MODE; W290 QUICK-SHOT: eine Konfiguration fuer Fotomodus und Schnell-Screenshot */
         static const int ph_map[6] = { 1, -4, -8, 2, 4, 8 };
@@ -6473,13 +6669,15 @@ static void ui_to_settings(launcher_settings_t *s)
     s->aim_assist = ComboBox_GetCurSel(ctl(ID_CTRL_AIMASSIST)); /* W236 */
     if (s->aim_assist < 0 || s->aim_assist > 2) s->aim_assist = 0;
     s->auto_gear = ui_checked(ID_CTRL_AUTOGEAR);
-    s->cockpit_hide = ui_checked(ID_CHIDE) ? 1 : 0; /* W268 */
+    sel = ComboBox_GetCurSel(ctl(ID_CHIDE)); /* W268, W319: 0 Cockpit, 1 Vollbild-Ansicht, 2/3 Monitoransicht (+ Felder) */
+    s->cockpit_hide = sel == 1 ? 1 : 0;
+    s->monitor_view = sel >= 2 && sel <= 3 ? sel - 1 : 0;
     s->stick_aim = ComboBox_GetCurSel(ctl(ID_STICK_AIM)) == 1 ? 1 : 0; /* W271 */
     sel = ComboBox_GetCurSel(ctl(ID_STICK_SENS));
     s->stick_aim_sens = (sel >= 0 && sel < 16) ? sel + 1 : 4;
     s->game_tick = ui_checked(ID_PAL50) ? 25 : 30; /* W234 */
     sel = ComboBox_GetCurSel(ctl(ID_IPFPS));
-    s->interp_fps = (sel >= 0 && sel < SB_FPS_NCHOICE) ? kSbFpsChoice[sel] : 0; /* W223 */
+    s->interp_fps = ip_val(sel, 0); /* W223, W309 */
     sel = ComboBox_GetCurSel(ctl(ID_WINMODE));
     s->window_mode = (sel >= 0 && sel <= 2) ? sel : 0;
     /* W159: Kombi setzt nur die Vorschau-Art; s->vr_enable bleibt wie
@@ -7624,6 +7822,8 @@ static int g_cap_mode; /* 0 = idle, 1 = ersetzen, 2 = hinzu */
 static int g_cap_mod;  /* W283: gedrueckte Zusatztaste (Zeile orig_view), 0 = keine */
 static lctrl_pad_t g_cap_prev;
 static int g_cap_have_pad;
+static lctrl_pad_learner_t g_cap_plrn; /* W312: Pad-Achsen ab Ruhestellung */
+static void joy_cal_load(void);        /* W312: Kalibrierung aus user.cfg */
 static int g_bind_done;
 static HWND g_bind_hd;
 /* W159: Original-Controller als Quelle (eigener Thread: sbc_usb_poll
@@ -8324,6 +8524,7 @@ static void bind_start_capture(HWND hd, int mode)
     }
     g_cap_have_pad = lctrl_pad_first(&cur) >= 0;
     g_cap_prev = cur;
+    lctrl_pad_learner_reset(&g_cap_plrn); /* W312 */
     /* W159: Original-Controller nur bei angeschlossenem Geraet (kurz
      * oeffnen wie die Statuszeile, Poll laeuft im Thread). */
     g_cap_sbc_thr = NULL;
@@ -8335,7 +8536,9 @@ static void bind_start_capture(HWND hd, int mode)
      * Auslenkung zaehlt relativ dazu; Schubhebel ruhen nicht mittig). */
     g_cap_jn = 0;
     if (ijoy_init() == 0) {
-        int i, n = ijoy_scan();
+        int i, n;
+        joy_cal_load(); /* W312: Lerner sieht kalibrierte Achsen */
+        n = ijoy_scan();
         for (i = 0; i < n && i < IJOY_MAX_DEV; i++) {
             const ijoy_info_t *in = ijoy_info(i);
             if (!in) {
@@ -8532,11 +8735,21 @@ static void bind_cap_pad(HWND hd)
         bind_cap_done(hd, bind_apply(hd, src));
         return;
     }
+    /* W312: ab Ruhestellung (vorher absolut: am Anschlag ruhende Kanaele
+     * wurden sofort fuer jedes Achsen-Element gelernt). */
     if (g_bind_sel >= 0 && kCtrlElems[g_bind_sel].kind == LCTRL_AXIS &&
-        lctrl_pad_deflected(&cur, nm, sizeof nm)) {
+        lctrl_pad_learner_axis(&g_cap_plrn, &cur, nm, sizeof nm)) {
         char src[64];
+        int pt = lctrl_axis_partner(g_bind_sel);
         bind_ana_default(g_bind_sel, nm, src, sizeof src);
         g_cap_prev = cur;
+        if (pt >= 0 && lctrl_bind_axis_used_by(&g_bind, pt, src)) {
+            char t[400];
+            _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.bind_same_axis"), nm, kCtrlElems[pt].key);
+            bind_set_result(hd, t);
+            lctrl_pad_learner_reset(&g_cap_plrn);
+            return;
+        }
         bind_cap_done(hd, bind_apply(hd, src));
         return;
     }
@@ -8570,6 +8783,25 @@ static void bind_cap_joy(HWND hd)
                 return;
             }
             _snprintf_s(src, sizeof src, _TRUNCATE, "JOY%d:%s", slot, part);
+            if (r == 3 && kCtrlElems[g_bind_sel].kind == LCTRL_AXIS) {
+                /* W312: dieselbe Achse schon beim Partner (aim_x/aim_y) ->
+                 * im Spiel bewegten sich beide nur diagonal: ablehnen. */
+                int pt = lctrl_axis_partner(g_bind_sel);
+                if (pt >= 0 && lctrl_bind_axis_used_by(&g_bind, pt, src)) {
+                    char t[400], an[24];
+                    const char *c = strchr(part, ':');
+                    size_t L = c ? (size_t)(c - part) : strlen(part);
+                    if (L >= sizeof an) { L = sizeof an - 1; }
+                    memcpy(an, part, L);
+                    an[L] = 0;
+                    memcpy(g_bind.joy, keep, sizeof keep);
+                    _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.bind_same_axis"), an,
+                                kCtrlElems[pt].key);
+                    bind_set_result(hd, t);
+                    lctrl_joy_learner_reset(&g_cap_jlrn[i]);
+                    return;
+                }
+            }
             rc = bind_apply(hd, src);
             if (rc != 0) {
                 memcpy(g_bind.joy, keep, sizeof keep);
@@ -11332,10 +11564,23 @@ static void open_assist_dialog(void)
 #define IDJ_CLOSE 604
 #define IDJ_EXP 605
 #define IDJ_DEVH 606
+/* W312 JOY-CALIB: Geraeteinfo kopieren + Kalibrierung je Achse */
+#define IDJ_COPY 607
+#define IDJ_CAXL 608
+#define IDJ_CAX 609
+#define IDJ_CREC 610
+#define IDJ_CMID 611
+#define IDJ_CDZL 612
+#define IDJ_CDZ 613
+#define IDJ_CINV 614
+#define IDJ_CLIN 615
+#define IDJ_CSAVE 616
+#define IDJ_CRESET 617
+#define IDJ_CSTAT 618
 #define JOY_LIVE_X 274
 #define JOY_LIVE_Y 118
-#define JOY_LIVE_W 354
-#define JOY_LIVE_H 290
+#define JOY_LIVE_W 474
+#define JOY_LIVE_H 330
 #define JOY_TIMER 11
 
 static int g_joy_done, g_joy_n, g_joy_ok, g_joy_demo, g_joy_have;
@@ -11346,6 +11591,12 @@ static ijoy_info_t g_joy_list[IJOY_MAX_DEV];
 static char g_joy_xi[8][96];
 static int g_joy_nxi;
 static imap_joy_state_t g_joy_st;
+/* W312 JOY-CALIB: Rohstand (ohne Kalibrierung, nur Anzeige - nie Log/Datei)
+ * und die gerade bearbeitete Kalibrierung (Geraet g_jc_dev, Slot g_jc_ax). */
+static imap_joy_state_t g_joy_raw;
+static int g_jc_dev = -1, g_jc_ax = -1, g_jc_rec, g_jc_slots[IJOY_AXES], g_jc_nslots;
+static ijoy_cal_t g_jc;
+static int g_joy_calshot; /* --joy-shot --joy-cal: Kalibrierzustand im Bild */
 
 static int shot_window(HWND w, const char *path, int png);
 
@@ -11374,6 +11625,10 @@ static void joy_demo_fill(void)
     g_joy_st.pov[0] = 9000;
     g_joy_st.pov[1] = g_joy_st.pov[2] = g_joy_st.pov[3] = -1;
     g_joy_have = 1;
+    g_joy_raw = g_joy_st; /* W312: Beispiel - roh = kalibriert, ausser X */
+    g_joy_raw.axis[0] = 3000;
+    g_joy_list[0].vid = 0x044F;
+    g_joy_list[0].pid = 0xB10A;
 }
 
 static int joy_sel(HWND hd)
@@ -11391,6 +11646,231 @@ static int joy_sel_xi(HWND hd)
     int s = ListBox_GetCurSel(lb);
     int i = s >= 0 ? (int)ListBox_GetItemData(lb, s) - 1000 : -1;
     return (i >= 0 && i < g_joy_nxi) ? i : -1;
+}
+
+/* ---- W312 JOY-CALIB: Kalibrierung (user.cfg joy_calN) ---- */
+static void joy_cal_load(void)
+{
+    char uc[1100], lines[IJOY_CAL_MAX][96];
+    int n, k;
+    if (g_o.shot || !g_client_dir[0]) {
+        return;
+    }
+    lcfg_user_cfg_path(g_client_dir, uc, sizeof uc);
+    n = joycal_cfg_read(uc, lines, IJOY_CAL_MAX);
+    ijoy_cal_clear();
+    for (k = 0; k < n; k++) {
+        const char *eq = strchr(lines[k], '=');
+        unsigned short v, p;
+        int ax;
+        ijoy_cal_t c;
+        if (eq && ijoy_cal_parse(eq + 1, &v, &p, &ax, &c)) {
+            ijoy_cal_set(v, p, ax, &c);
+        }
+    }
+}
+
+/* Tabelle -> user.cfg (alle joy_cal-Zeilen ersetzt). 0 = ok. */
+static int joy_cal_store(const char *user_cfg)
+{
+    char lines[IJOY_CAL_MAX][96];
+    int k, n = 0;
+    for (k = 0; k < ijoy_cal_count() && n < IJOY_CAL_MAX; k++) {
+        unsigned short v, p;
+        int ax;
+        ijoy_cal_t c;
+        char val[80];
+        if (ijoy_cal_entry(k, &v, &p, &ax, &c) && ijoy_cal_format(v, p, ax, &c, val, sizeof val)) {
+            _snprintf_s(lines[n], sizeof lines[n], _TRUNCATE, "joy_cal%d=%s", n, val);
+            n++;
+        }
+    }
+    return joycal_cfg_apply(user_cfg, lines, n);
+}
+
+/* Geraeteinfo aller Geraete (Metadaten, nie Werte): Knopf + Diagnosepaket. */
+static int joy_devinfo_all(char *out, int cap, int only)
+{
+    int len = 0, i, k;
+    if (cap <= 0) {
+        return 0;
+    }
+    len = _snprintf_s(out, (size_t)cap, _TRUNCATE,
+                      "Steelbound device info (no input values)\r\nDirectInput devices: %d\r\n",
+                      g_joy_n);
+    if (len < 0) { len = 0; }
+    for (i = 0; i < g_joy_n && len < cap - 64; i++) {
+        const ijoy_obj_t *ob = NULL;
+        int no;
+        if (only >= 0 && i != only) {
+            continue;
+        }
+        no = g_joy_demo ? 0 : ijoy_objects(i, &ob);
+        len += _snprintf_s(out + len, (size_t)(cap - len), _TRUNCATE, "\r\n[device %d]\r\n", i + 1) > 0
+                   ? (int)strlen(out + len) : 0;
+        len += ijoy_devinfo_text(&g_joy_list[i], ob, no, out + len, cap - len);
+    }
+    for (k = 0; k < g_joy_nxi && len < cap - 64; k++) {
+        int r = _snprintf_s(out + len, (size_t)(cap - len), _TRUNCATE,
+                            "\r\nXbox-compatible (XInput, gamepad path): %s\r\n", g_joy_xi[k]);
+        len += r > 0 ? r : 0;
+    }
+    return len;
+}
+
+static int joy_clip_u8(HWND hd, const char *u8)
+{
+    int n = MultiByteToWideChar(CP_UTF8, 0, u8, -1, NULL, 0);
+    HGLOBAL hg;
+    wchar_t *w;
+    if (n <= 0 || !OpenClipboard(hd)) {
+        return 0;
+    }
+    EmptyClipboard();
+    hg = GlobalAlloc(GMEM_MOVEABLE, (SIZE_T)n * sizeof(wchar_t));
+    if (!hg) {
+        CloseClipboard();
+        return 0;
+    }
+    w = (wchar_t *)GlobalLock(hg);
+    MultiByteToWideChar(CP_UTF8, 0, u8, -1, w, n);
+    GlobalUnlock(hg);
+    if (!SetClipboardData(CF_UNICODETEXT, hg)) {
+        GlobalFree(hg);
+        CloseClipboard();
+        return 0;
+    }
+    CloseClipboard();
+    return 1;
+}
+
+static void joy_cal_status(HWND hd, const char *u8)
+{
+    ui_settext(bctl(hd, IDJ_CSTAT), u8);
+}
+
+/* Achsen-Auswahl fuer die Kalibrierung (nur gelesene Achsen). */
+static void joy_cal_fill(HWND hd)
+{
+    HWND cb = bctl(hd, IDJ_CAX);
+    int i = g_joy_dlg_hd ? joy_sel(hd) : -1, a;
+    g_updating++;
+    ComboBox_ResetContent(cb);
+    g_jc_nslots = 0;
+    if (i >= 0) {
+        for (a = 0; a < IJOY_AXES; a++) {
+            if ((g_joy_list[i].axmask >> a) & 1) {
+                combo_add(cb, ijoy_axis_name(a));
+                g_jc_slots[g_jc_nslots++] = a;
+            }
+        }
+    }
+    if (g_jc_nslots > 0) {
+        ComboBox_SetCurSel(cb, 0);
+    }
+    g_updating--;
+    g_jc_rec = 0;
+    g_jc_dev = i;
+    g_jc_ax = g_jc_nslots > 0 ? g_jc_slots[0] : -1;
+}
+
+/* Kalibrierung der gewaehlten Achse in die Bedienelemente laden. */
+static void joy_cal_select(HWND hd)
+{
+    int s = ComboBox_GetCurSel(bctl(hd, IDJ_CAX));
+    char t[16];
+    g_jc_ax = (s >= 0 && s < g_jc_nslots) ? g_jc_slots[s] : -1;
+    g_jc_rec = 0;
+    ui_settext(bctl(hd, IDJ_CREC), LT("gui.joy_cal_rec"));
+    memset(&g_jc, 0, sizeof g_jc);
+    g_jc.lo = -32768;
+    g_jc.hi = 32767;
+    g_jc.mid = 0;
+    if (g_jc_dev >= 0 && g_jc_ax >= 0 &&
+        ijoy_cal_get(g_joy_list[g_jc_dev].vid, g_joy_list[g_jc_dev].pid, g_jc_ax, &g_jc)) {
+        joy_cal_status(hd, LT("gui.joy_cal_have"));
+    } else {
+        joy_cal_status(hd, g_jc_ax >= 0 ? LT("gui.joy_cal_none") : "");
+    }
+    _snprintf_s(t, sizeof t, _TRUNCATE, "%d", g_jc.dz);
+    ui_settext(bctl(hd, IDJ_CDZ), t);
+    ui_set_checked(IDJ_CINV, g_jc.inv);
+    ui_set_checked(IDJ_CLIN, g_jc.mid == IJOY_CAL_NOMID);
+}
+
+static void joy_cal_cmd(HWND hd, int id)
+{
+    char t[300], uc[1100];
+    int raw;
+    if (g_jc_dev < 0 || g_jc_ax < 0) {
+        joy_cal_status(hd, LT("gui.joy_cal_noaxis"));
+        return;
+    }
+    raw = g_joy_raw.axis[g_jc_ax];
+    if (id == IDJ_CREC) {
+        if (!g_jc_rec) {
+            g_jc_rec = 1;
+            g_jc.lo = g_jc.hi = raw;
+            ui_settext(bctl(hd, IDJ_CREC), LT("gui.joy_cal_stop"));
+            joy_cal_status(hd, LT("gui.joy_cal_moving"));
+        } else {
+            g_jc_rec = 0;
+            ui_settext(bctl(hd, IDJ_CREC), LT("gui.joy_cal_rec"));
+            if (g_jc.hi - g_jc.lo < 2000) {
+                joy_cal_status(hd, LT("gui.joy_cal_small"));
+            } else {
+                joy_cal_status(hd, LT("gui.joy_cal_recdone"));
+            }
+        }
+    } else if (id == IDJ_CMID) {
+        if (raw <= g_jc.lo || raw >= g_jc.hi) {
+            joy_cal_status(hd, LT("gui.joy_cal_midbad"));
+        } else {
+            g_jc.mid = raw;
+            ui_set_checked(IDJ_CLIN, 0);
+            joy_cal_status(hd, LT("gui.joy_cal_midok"));
+        }
+    } else if (id == IDJ_CINV || id == IDJ_CLIN) {
+        ui_set_checked(id, !ui_checked(id));
+        if (id == IDJ_CLIN && !ui_checked(IDJ_CLIN) && g_jc.mid == IJOY_CAL_NOMID) {
+            g_jc.mid = (g_jc.lo + g_jc.hi) / 2;
+        }
+    } else if (id == IDJ_CSAVE || id == IDJ_CRESET) {
+        int ok;
+        if (id == IDJ_CSAVE) {
+            ijoy_cal_t c = g_jc;
+            ui_gettext(bctl(hd, IDJ_CDZ), t, sizeof t);
+            c.dz = atoi(t);
+            if (c.dz < 0) { c.dz = 0; }
+            if (c.dz > 50) { c.dz = 50; }
+            c.inv = ui_checked(IDJ_CINV);
+            if (ui_checked(IDJ_CLIN)) {
+                c.mid = IJOY_CAL_NOMID;
+            } else if (c.mid <= c.lo || c.mid >= c.hi) {
+                c.mid = (c.lo + c.hi) / 2;
+            }
+            if (c.hi - c.lo < 2000) {
+                joy_cal_status(hd, LT("gui.joy_cal_small"));
+                return;
+            }
+            g_jc_rec = 0;
+            ui_settext(bctl(hd, IDJ_CREC), LT("gui.joy_cal_rec"));
+            g_jc = c;
+            ok = ijoy_cal_set(g_joy_list[g_jc_dev].vid, g_joy_list[g_jc_dev].pid, g_jc_ax, &c) == 0;
+        } else {
+            ijoy_cal_set(g_joy_list[g_jc_dev].vid, g_joy_list[g_jc_dev].pid, g_jc_ax, NULL);
+            ok = 1;
+        }
+        if (ok && !g_joy_demo) {
+            lcfg_user_cfg_path(g_client_dir, uc, sizeof uc);
+            ok = joy_cal_store(uc) == 0;
+        }
+        if (id == IDJ_CRESET) {
+            joy_cal_select(hd);
+        }
+        joy_cal_status(hd, LT(!ok ? "gui.joy_cal_err" : id == IDJ_CSAVE ? "gui.joy_cal_saved"
+                                                                     : "gui.joy_cal_reset"));
+    }
 }
 
 static void joy_refresh_info(HWND hd)
@@ -11421,8 +11901,12 @@ static void joy_refresh_info(HWND hd)
         }
         ui_settext(bctl(hd, IDJ_INFO), t);
         if (!g_joy_demo) {
-            g_joy_have = ijoy_read(i, &g_joy_st);
+            g_joy_have = ijoy_read2(i, &g_joy_st, &g_joy_raw); /* W312 */
         }
+    }
+    if (i != g_jc_dev || (i < 0 && g_jc_nslots)) { /* W312: Kalibrier-Achsen */
+        joy_cal_fill(hd);
+        joy_cal_select(hd);
     }
     {
         RECT r = { SX(JOY_LIVE_X), SX(JOY_LIVE_Y), SX(JOY_LIVE_X + JOY_LIVE_W),
@@ -11440,6 +11924,10 @@ static void joy_rescan(HWND hd)
         joy_demo_fill();
     } else {
         g_joy_ok = ijoy_init() == 0;
+        if (g_joy_ok) {
+            joy_cal_load(); /* W312 */
+        }
+        g_jc_dev = -1;
         g_joy_n = g_joy_ok ? ijoy_scan() : 0;
         if (g_joy_n > IJOY_MAX_DEV) {
             g_joy_n = IJOY_MAX_DEV;
@@ -11531,19 +12019,35 @@ static void joy_paint_live(HDC dc)
     for (a = 0; a < IJOY_AXES; a++) {
         int on = (g_joy_list[i].axmask >> a) & 1;
         int pct = ((int)g_joy_st.axis[a] + 32768) * 100 / 65535;
-        int bw = 250;
+        int rpct = ((int)g_joy_raw.axis[a] + 32768) * 100 / 65535; /* W312 */
+        int bw = 300;
         y = Y + 28 + a * 24;
-        joy_text(dc, F_SMALL, on ? C_TEXT : C_FAINT, X, y, 34, 18,
+        joy_text(dc, F_SMALL, on ? (a == g_jc_ax ? C_ACCENT_HI : C_TEXT) : C_FAINT, X, y, 34, 18,
                  ijoy_axis_name(a), DT_LEFT);
         joy_fill(dc, X + 38, y + 3, bw, 12, on ? C_INPUT_BRD : C_PANEL);
         if (on) {
             joy_fill(dc, X + 39, y + 4, (bw - 2) * pct / 100, 10, C_ACCENT);
             joy_fill(dc, X + 38 + bw / 2, y + 1, 1, 16, C_TEXT); /* Mitte */
-            _snprintf_s(t, sizeof t, _TRUNCATE, "%d %%", pct);
+            /* W312: Rohstellung (weisse Marke) und Kalibriergrenzen */
+            joy_fill(dc, X + 38 + (bw - 2) * rpct / 100, y, 2, 18, C_TEXT);
+            if (a == g_jc_ax) {
+                int lp = (g_jc.lo + 32768) * 100 / 65535, hp = (g_jc.hi + 32768) * 100 / 65535;
+                joy_fill(dc, X + 38 + (bw - 2) * lp / 100, y - 1, 2, 20, C_WARN);
+                joy_fill(dc, X + 38 + (bw - 2) * hp / 100, y - 1, 2, 20, C_WARN);
+                if (g_jc.mid != IJOY_CAL_NOMID && !ui_checked(IDJ_CLIN)) {
+                    int mp = (g_jc.mid + 32768) * 100 / 65535;
+                    joy_fill(dc, X + 38 + (bw - 2) * mp / 100, y - 1, 1, 20, C_ACCENT_HI);
+                }
+            }
+            if (rpct != pct) {
+                _snprintf_s(t, sizeof t, _TRUNCATE, "%d " "\xE2\x86\x92" " %d %%", rpct, pct);
+            } else {
+                _snprintf_s(t, sizeof t, _TRUNCATE, "%d %%", pct);
+            }
         } else {
             strcpy_s(t, sizeof t, "-");
         }
-        joy_text(dc, F_SMALL, on ? C_DIM : C_FAINT, X + 296, y, 58, 18, t,
+        joy_text(dc, F_SMALL, on ? C_DIM : C_FAINT, X + 346, y, 124, 18, t,
                  DT_RIGHT);
     }
     y = Y + 28 + IJOY_AXES * 24 + 6;
@@ -11580,6 +12084,21 @@ static void joy_paint_live(HDC dc)
         joy_text(dc, F_SMALL, p >= 0 ? C_ACCENT_HI : C_DIM, X, y, JOY_LIVE_W,
                  20, t, DT_LEFT);
     }
+    { /* W312: Objekte, die der Treiber meldet, aber nicht gelesen werden */
+        const ijoy_obj_t *ob = NULL;
+        int no = g_joy_demo ? 0 : ijoy_objects(i, &ob), o2, any = 0;
+        size_t L = (size_t)_snprintf_s(t, sizeof t, _TRUNCATE, "%s ", LT("gui.joy_unread"));
+        for (o2 = 0; o2 < no && L < sizeof t - 8; o2++) {
+            if (ob[o2].read < 0 && ob[o2].kind != IJOY_K_OTHER) {
+                L += (size_t)_snprintf_s(t + L, sizeof t - L, _TRUNCATE, "%s%s", any ? ", " : "",
+                                         ob[o2].name[0] ? ob[o2].name : "?");
+                any = 1;
+            }
+        }
+        if (any) {
+            joy_text(dc, F_SMALL, C_WARN, X, y + 22, JOY_LIVE_W, 20, t, DT_LEFT);
+        }
+    }
     if (g_joy_demo) {
         joy_text(dc, F_TINY, C_FAINT, X, Y + JOY_LIVE_H - 18, JOY_LIVE_W, 16,
                  LT("gui.joy_demo"), DT_LEFT);
@@ -11597,6 +12116,15 @@ static LRESULT CALLBACK joy_proc(HWND hd, UINT msg, WPARAM wp, LPARAM lp)
             joy_rescan(hd);
         } else if (id == IDJ_LIST && code == LBN_SELCHANGE) {
             joy_refresh_info(hd);
+        } else if (id == IDJ_COPY) { /* W312: Geraeteinfo (ohne Werte) */
+            static char info[32768];
+            joy_devinfo_all(info, (int)sizeof info, -1);
+            joy_cal_status(hd, LT(joy_clip_u8(hd, info) ? "gui.joy_copy_ok" : "gui.joy_copy_err"));
+        } else if (id == IDJ_CAX && code == CBN_SELCHANGE && !g_updating) {
+            joy_cal_select(hd);
+        } else if (id == IDJ_CREC || id == IDJ_CMID || id == IDJ_CINV || id == IDJ_CLIN ||
+                   id == IDJ_CSAVE || id == IDJ_CRESET) {
+            joy_cal_cmd(hd, id);
         }
         return 0;
     }
@@ -11637,7 +12165,12 @@ static LRESULT CALLBACK joy_proc(HWND hd, UINT msg, WPARAM wp, LPARAM lp)
                 RECT r = { SX(JOY_LIVE_X), SX(JOY_LIVE_Y),
                            SX(JOY_LIVE_X + JOY_LIVE_W),
                            SX(JOY_LIVE_Y + JOY_LIVE_H) };
-                g_joy_have = ijoy_read(i, &g_joy_st);
+                g_joy_have = ijoy_read2(i, &g_joy_st, &g_joy_raw); /* W312 */
+                if (g_joy_have && g_jc_rec && g_jc_ax >= 0 && i == g_jc_dev) {
+                    int v = g_joy_raw.axis[g_jc_ax]; /* nur Anzeige/Kalibrierung */
+                    if (v < g_jc.lo) { g_jc.lo = v; }
+                    if (v > g_jc.hi) { g_jc.hi = v; }
+                }
                 InvalidateRect(hd, &r, FALSE);
             }
         } else if (wp == 9 && g_o.shot == 6) {
@@ -11646,7 +12179,8 @@ static LRESULT CALLBACK joy_proc(HWND hd, UINT msg, WPARAM wp, LPARAM lp)
             KillTimer(hd, 9);
             RedrawWindow(hd, NULL, NULL,
                          RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
-            _snprintf_s(path, sizeof path, _TRUNCATE, "%s/w221_hotas_%d.png",
+            _snprintf_s(path, sizeof path, _TRUNCATE, g_joy_calshot ? "%s/w312_joycal_%d.png"
+                                                                    : "%s/w221_hotas_%d.png",
                         g_o.out_dir, g_dpi * 100 / 96);
             rc = shot_window(hd, path, 1);
             printf("joy-shot: %s%s\n", rc == 0 ? "" : "FEHLER ", path);
@@ -11682,9 +12216,10 @@ static void joy_dialog_modal(void)
     }
     g_joy_done = 0;
     g_joy_demo = g_o.shot == 6;
+    g_joy_calshot = g_joy_demo && g_o.joy_cal; /* W312 */
     g_joy_have = 0;
-    rc.right = SX(640);
-    rc.bottom = SX(460);
+    rc.right = SX(760);  /* W312: Platz fuer Kalibrierung (vorher 640x460) */
+    rc.bottom = SX(620);
     AdjustWindowRectEx(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, exs);
     if (shot) {
         offscreen_pos(&x, &y);
@@ -11712,13 +12247,36 @@ static void joy_dialog_modal(void)
         DwmSetWindowAttribute(hd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */,
                               &dark, sizeof dark);
     }
-    mk(hd, K_STATIC, IDJ_EXP, PG_DIALOG, 12, 10, 616, 52, LT("gui.joy_exp"), WS_VISIBLE);
+    mk(hd, K_STATIC, IDJ_EXP, PG_DIALOG, 12, 10, 736, 52, LT("gui.joy_exp"), WS_VISIBLE);
     mk(hd, K_STATIC, IDJ_DEVH, PG_DIALOG, 12, 72, 250, 18, LT("gui.joy_devices"), WS_VISIBLE);
     mk(hd, K_LIST, IDJ_LIST, PG_DIALOG, 12, 94, 250, 300, "", WS_VISIBLE);
-    mk(hd, K_BTN, IDJ_SCAN, PG_DIALOG, 12, 404, 130, 30, LT("gui.joy_scan"), WS_VISIBLE);
-    mk(hd, K_STATIC, IDJ_INFO, PG_DIALOG, 274, 72, 354, 40, "", WS_VISIBLE);
-    mk(hd, K_BTN, IDJ_CLOSE, PG_DIALOG, 498, 418, 130, 30, LT("gui.btn_close"), WS_VISIBLE);
+    mk(hd, K_BTN, IDJ_SCAN, PG_DIALOG, 12, 404, 120, 30, LT("gui.joy_scan"), WS_VISIBLE);
+    mk(hd, K_BTN, IDJ_COPY, PG_DIALOG, 138, 404, 124, 30, LT("gui.joy_copy"), WS_VISIBLE); /* W312 */
+    mk(hd, K_STATIC, IDJ_INFO, PG_DIALOG, 274, 72, 474, 40, "", WS_VISIBLE);
+    /* W312 JOY-CALIB: Kalibrierung der gewaehlten Achse */
+    mk(hd, K_STATIC, IDJ_CAXL, PG_DIALOG, 12, 464, 120, 22, LT("gui.joy_cal_axis"), WS_VISIBLE);
+    mk(hd, K_COMBO, IDJ_CAX, PG_DIALOG, 136, 458, 80, 30, "", WS_VISIBLE);
+    mk(hd, K_BTN, IDJ_CREC, PG_DIALOG, 226, 458, 170, 30, LT("gui.joy_cal_rec"), WS_VISIBLE);
+    mk(hd, K_BTN, IDJ_CMID, PG_DIALOG, 404, 458, 130, 30, LT("gui.joy_cal_mid"), WS_VISIBLE);
+    mk(hd, K_STATIC, IDJ_CDZL, PG_DIALOG, 544, 464, 120, 22, LT("gui.joy_cal_dz"), WS_VISIBLE);
+    mk(hd, K_EDIT, IDJ_CDZ, PG_DIALOG, 668, 460, 60, 26, "0", WS_VISIBLE);
+    mk(hd, K_TOGGLE, IDJ_CINV, PG_DIALOG, 12, 500, 160, 28, LT("gui.joy_cal_inv"), WS_VISIBLE);
+    mk(hd, K_TOGGLE, IDJ_CLIN, PG_DIALOG, 180, 500, 300, 28, LT("gui.joy_cal_lin"), WS_VISIBLE);
+    mk(hd, K_BTN, IDJ_CSAVE, PG_DIALOG, 488, 498, 126, 30, LT("gui.joy_cal_save"), WS_VISIBLE);
+    mk(hd, K_BTN, IDJ_CRESET, PG_DIALOG, 622, 498, 126, 30, LT("gui.joy_cal_reset_btn"), WS_VISIBLE);
+    mk(hd, K_STATIC, IDJ_CSTAT, PG_DIALOG, 12, 540, 600, 40, "", WS_VISIBLE);
+    mk(hd, K_BTN, IDJ_CLOSE, PG_DIALOG, 618, 578, 130, 30, LT("gui.btn_close"), WS_VISIBLE);
+    g_jc_dev = -1;
     joy_rescan(hd);
+    if (shot && g_joy_calshot) { /* W312: Kalibrierzustand mit Beispielwerten */
+        g_jc_rec = 1;
+        g_jc.lo = -26000;
+        g_jc.hi = 30500;
+        g_jc.mid = 1500;
+        ui_settext(bctl(hd, IDJ_CREC), LT("gui.joy_cal_stop"));
+        ui_settext(bctl(hd, IDJ_CDZ), "5");
+        joy_cal_status(hd, LT("gui.joy_cal_moving"));
+    }
     if (g_hwnd) {
         EnableWindow(g_hwnd, FALSE);
     }
@@ -13818,6 +14376,7 @@ static void ui_apply_language(void)
     static const char *const kVsync[] = { "gui.off", "gui.on" };
     static const char *const kWinmode[] = { "gui.wm_win", "gui.wm_borderless", "gui.wm_excl" };
     static const char *const kMonfx[] = { "gui.monfx_orig", "gui.monfx_grain", "gui.monfx_glitch", "gui.off" };
+    static const char *const kCview[] = { "gui.cview_orig", "gui.cview_flat", "gui.cview_mon", "gui.cview_mon2" }; /* W319 */
     static const char *const kAa[] = { "gui.aa_off", "gui.aa_final", "gui.aa_world", "gui.aa_both" };
     static const char *const kLight[] = { "gui.gfx_light_on", "gui.gfx_light_off" }; /* W173 */
     static const char *const kOnOff[] = { "gui.off", "gui.on" };
@@ -13872,10 +14431,8 @@ static void ui_apply_language(void)
     }
     combo_refill(ID_WINMODE, kWinmode, 3);
     combo_set0(ID_FSHZ, "gui.fshz_desktop");
-    if (ctl(ID_IPFPS)) { /* W223 */
-        sel = ComboBox_GetCurSel(ctl(ID_IPFPS));
+    if (ctl(ID_IPFPS)) { /* W223; W309: ip_fill behaelt die Wahl */
         ip_fill(ctl(ID_IPFPS));
-        ComboBox_SetCurSel(ctl(ID_IPFPS), (sel >= 0 && sel < SB_FPS_NCHOICE) ? sel : ip_sel_of(120));
     }
     combo_refill(ID_MONFX, kMonfx, 4);
     combo_refill(ID_AAMODE, kAa, 4);
@@ -13890,7 +14447,7 @@ static void ui_apply_language(void)
     combo_refill(ID_GFX_TEX, kTex, 2);
     ui_settext(ctl(ID_GP_RESET), LT("gui.gfx_reset"));
     ui_settext(ctl(ID_REM_LABEL), LT("gui.rem_label"));
-    ui_settext(ctl(ID_CHIDE), LT("gui.chide")); /* W268 */
+    combo_refill(ID_CHIDE, kCview, 4); /* W268, W319 */
     combo_refill(ID_EDGE, kEdge, 3);
     if (ctl(ID_CPERSP)) { cpersp_fill(ctl(ID_CPERSP)); } /* W191 */
     if (ctl(ID_CPANINI)) { cpersp_fill(ctl(ID_CPANINI)); }
@@ -14688,7 +15245,11 @@ static void xtip_text(int id, char *out, size_t cap)
                                             "gui.exp_tip_hud", "gui.exp_tip_packs" };
         _snprintf_s(out, cap, _TRUNCATE, "%s\n%s", LT("gui.exp_tip"), LT(kWhy[id - ID_XEXP_FIRST]));
     } else if (id == ID_CHIDE || id == ID_REM_LABEL) { /* W291: frueher Textzeilen in der Karte */
-        strcpy_s(out, cap, LT(id == ID_CHIDE ? "gui.chide_txt" : "gui.rem_label_txt"));
+        if (id == ID_CHIDE) { /* W319: Vollbild-Ansicht und Monitoransicht erklaert */
+            _snprintf_s(out, cap, _TRUNCATE, "%s\n%s", LT("gui.chide_txt"), LT("gui.mview_txt"));
+        } else {
+            strcpy_s(out, cap, LT("gui.rem_label_txt"));
+        }
     } else if (id == ID_XEXP_PHOTO) { /* W290: breit (Aussenwelt), REPLAY/Logo aus */
         _snprintf_s(out, cap, _TRUNCATE, "%s\n%s", LT("gui.exp_tip"), LT("gui.exp_tip_photo"));
     } else if (id == ID_XWARN_SB || id == ID_XWARN_LOC) {
@@ -14780,7 +15341,7 @@ static void orig_build(HWND w)
     mk(w, K_ICON, ID_XEXP_WORLD, P_GFX, COL2 + COLW - 18 - XI_W, CY0 + 12, XI_W, XI_H, "", 0);
     mk(w, K_ICON, ID_XEXP_HUD, P_GFX, COL2 + COLW - 18 - XI_W, CY0 + 304 + 12, XI_W, XI_H, "", 0);
     mk(w, K_ICON, ID_XEXP_PACKS, P_PACKS, CX0 + PKL_W - 18 - 150 - 8 - XI_W, CY0 + 12, XI_W, XI_H, "", 0); /* links neben "Pack hinzufuegen" */
-    mk(w, K_ICON, ID_XEXP_PHOTO, P_AUDIO, CX0 + CW - 18 - XI_W, CY0 + 152 + 12, XI_W, XI_H, "", 0); /* W290 */
+    mk(w, K_ICON, ID_XEXP_PHOTO, P_AUDIO, CX0 + CW - 18 - XI_W, CY0 + 152 + EXY + 12, XI_W, XI_H, "", 0); /* W290, W303 */
     mk(w, K_ICON, ID_XWARN_SB, P_PLAY, CX0 + 10, OB_Y + 8, 26, 24, "", 0);
     mk(w, K_ICON, ID_XWARN_LOC, P_PLAY, CX0 + 10, OB_Y_LOC + 8, 26, 24, "", 0); /* W293: wie ID_XWARN_SB */
     xicon_texts();
@@ -15050,7 +15611,13 @@ static void build_controls(void)
     combo_add(c, LT("gui.scale4"));
     ComboBox_SetCurSel(c, 1);
     mk(w, K_TOGGLE, ID_REM_LABEL, P_GFX, COL2 + 18, CY0 + 348, COLW - 36, 28, LT("gui.rem_label"), 0); /* W153 */
-    mk(w, K_TOGGLE, ID_CHIDE, P_GFX, COL2 + 18, CY0 + 426, COLW - 36, 28, LT("gui.chide"), 0); /* W268 */
+    c = mk(w, K_COMBO, ID_CHIDE, P_GFX, COL2 + 120, CY0 + 80, COLW - 138, 30, "", 0); /* W268; W319: Auswahl */
+    combo_add(c, LT("gui.cview_orig"));
+    combo_add(c, LT("gui.cview_flat"));
+    combo_add(c, LT("gui.cview_mon"));
+    combo_add(c, LT("gui.cview_mon2"));
+    ComboBox_SetCurSel(c, 0);
+    SendMessageW(c, CB_SETDROPPEDWIDTH, (WPARAM)SX(300), 0);
     /* W291 ESC-REWORK: Feinregler zeigen (Anzeige + Grafik, gemerkt in launcher_ui.cfg) */
     mk(w, K_TOGGLE, ID_SHOWADV, PG_ALL, CX0 + 4, LAY_ADV_Y, COLW - 8, 28, LT("gui.show_adv"), 0);
 
@@ -15156,36 +15723,49 @@ static void build_controls(void)
        LT("gui.keys_browser"), 0);
 
     /* --- Ton --- */
-    mk(w, K_TOGGLE, ID_AUDIO, P_AUDIO, CX0 + 18, CY0 + 50, COLW - 36, 28, LT("gui.ton_on"),
+    /* W303: Schalter schmal (rechts daneben die Ausgabe), darunter die Lautstaerke-Regler */
+    mk(w, K_TOGGLE, ID_AUDIO, P_AUDIO, CX0 + 18, CY0 + 46, 150, 28, LT("gui.ton_on"),
        0);
+    { /* W303 AUDIO-VOLUME: 2x2 Listen 100..0 % (Gesamt | Musik / Effekte | Sprache/Funk), wirken bei SB und LoC */
+        int k, j;
+        for (k = 0; k < 4; k++) {
+            c = mk(w, K_COMBO, kVolId[k], P_AUDIO, k & 1 ? CX0 + COLW - 18 - 72 : CX0 + 86, CY0 + 82 + (k >> 1) * 36,
+                   72, 30, "", 0);
+            for (j = 0; j < VOL_N; j++) {
+                char t[16];
+                _snprintf_s(t, sizeof t, _TRUNCATE, "%d %%", 100 - j * 5);
+                combo_add(c, t);
+            }
+        }
+    }
     /* W234 PAL50: Spieltempo (wirkt beim naechsten Start, kein ESC-Schalter); W290: rechte Spalte */
     mk(w, K_TOGGLE, ID_PAL50, P_AUDIO, COL2 + 18, CY0 + 50, COLW - 36, 28, LT("gui.pal50"), 0);
-    /* --- W195 PHOTO-MODE: Extras (Fotoordner, Aufnahme-Aufloesung, Format) --- */
-    mk(w, K_EDIT, ID_PH_DIR, P_AUDIO, CX0 + 18, CY0 + 208, CW - 36 - 250, 30, "", 0);
-    mk(w, K_BTN, ID_PH_BROWSE, P_AUDIO, CX0 + CW - 18 - 242, CY0 + 208, 112, 30, LT("gui.btn_browse"), 0);
-    mk(w, K_BTN, ID_PH_OPEN, P_AUDIO, CX0 + CW - 18 - 122, CY0 + 208, 122, 30, LT("gui.extras_open"), 0);
+    /* --- W195 PHOTO-MODE: Extras (Fotoordner, Aufnahme-Aufloesung, Format); W303: EXY tiefer --- */
+    mk(w, K_EDIT, ID_PH_DIR, P_AUDIO, CX0 + 18, CY0 + 208 + EXY, CW - 36 - 250, 30, "", 0);
+    mk(w, K_BTN, ID_PH_BROWSE, P_AUDIO, CX0 + CW - 18 - 242, CY0 + 208 + EXY, 112, 30, LT("gui.btn_browse"), 0);
+    mk(w, K_BTN, ID_PH_OPEN, P_AUDIO, CX0 + CW - 18 - 122, CY0 + 208 + EXY, 122, 30, LT("gui.extras_open"), 0);
     /* W290 QUICK-SHOT: Ansicht | Groesse, Format | Bildformat (nur Aussenwelt), Replays & Video-Export */
-    c = mk(w, K_COMBO, ID_PH_VIEW, P_AUDIO, CX0 + 130, CY0 + 250, 226, 30, "", 0);
+    c = mk(w, K_COMBO, ID_PH_VIEW, P_AUDIO, CX0 + 130, CY0 + 250 + EXY, 226, 30, "", 0);
     combo_add(c, LT("ovl.ph_v_game"));
     combo_add(c, LT("ovl.ph_v_flat"));
     combo_add(c, LT("ovl.ph_v_world"));
-    c = mk(w, K_COMBO, ID_PH_RES, P_AUDIO, CX0 + 440, CY0 + 250, CW - 18 - 440, 30, "", 0);
+    c = mk(w, K_COMBO, ID_PH_RES, P_AUDIO, CX0 + 440, CY0 + 250 + EXY, CW - 18 - 440, 30, "", 0);
     combo_add(c, LT("gui.extras_res_1"));
     combo_add(c, "4K");
     combo_add(c, "8K");
     combo_add(c, LT("gui.extras_res_2"));
     combo_add(c, LT("gui.extras_res_4"));
     combo_add(c, LT("gui.extras_res_8"));
-    c = mk(w, K_COMBO, ID_PH_FMT, P_AUDIO, CX0 + 130, CY0 + 290, 104, 30, "", 0);
+    c = mk(w, K_COMBO, ID_PH_FMT, P_AUDIO, CX0 + 130, CY0 + 290 + EXY, 104, 30, "", 0);
     combo_add(c, "PNG");
     combo_add(c, "JPG");
-    c = mk(w, K_COMBO, ID_PH_ASP, P_AUDIO, CX0 + 440, CY0 + 290, CW - 18 - 440, 30, "", 0);
+    c = mk(w, K_COMBO, ID_PH_ASP, P_AUDIO, CX0 + 440, CY0 + 290 + EXY, CW - 18 - 440, 30, "", 0);
     combo_add(c, LT("ovl.ph_asp_square"));
     combo_add(c, LT("ovl.ph_asp_wide"));
-    mk(w, K_TOGGLE, ID_RP_LABEL, P_AUDIO, CX0 + 18, CY0 + 348, COLW - 36, 28, LT("gui.rp_label"), 0);
-    mk(w, K_TOGGLE, ID_RP_LOGO, P_AUDIO, COL2 + 18, CY0 + 348, COLW - 36, 28, LT("gui.rp_logo"), 0);
-    mk(w, K_TOGGLE, ID_WM_MEDIA, P_AUDIO, CX0 + 18, CY0 + 382, COLW - 36, 28, LT("gui.wm_media"), 0);
-    mk(w, K_TOGGLE, ID_PH_HUD, P_AUDIO, COL2 + 18, CY0 + 382, COLW - 36, 28, LT("gui.ph_hud"), 0); /* W290 */
+    mk(w, K_TOGGLE, ID_RP_LABEL, P_AUDIO, CX0 + 18, CY0 + 348 + EXY, COLW - 36, 28, LT("gui.rp_label"), 0);
+    mk(w, K_TOGGLE, ID_RP_LOGO, P_AUDIO, COL2 + 18, CY0 + 348 + EXY, COLW - 36, 28, LT("gui.rp_logo"), 0);
+    mk(w, K_TOGGLE, ID_WM_MEDIA, P_AUDIO, CX0 + 18, CY0 + 382 + EXY, COLW - 36, 28, LT("gui.wm_media"), 0);
+    mk(w, K_TOGGLE, ID_PH_HUD, P_AUDIO, COL2 + 18, CY0 + 382 + EXY, COLW - 36, 28, LT("gui.ph_hud"), 0); /* W290 */
 
     /* --- Erweitert: Spieldateien (Ordner-Modus), Spielstaende, gespeicherte
      * Einstellungen, Feinabstimmung, Launcher, Diagnose --- */
@@ -15598,6 +16178,14 @@ static void on_command_inner(int id, int code)
     case ID_LIVE:
         ui_set_checked(ID_LIVE, !ui_checked(ID_LIVE));
         break;
+    case ID_VOL_MASTER: /* W303 AUDIO-VOLUME */
+    case ID_VOL_MUSIC:
+    case ID_VOL_SFX:
+    case ID_VOL_VOICE:
+        if (code == CBN_SELCHANGE && !g_updating) {
+            set_status(LT("gui.vol_status"));
+        }
+        break;
     case ID_RP_LABEL: /* W290: Replay-Schalter (live, Foto, Video-Export) */
     case ID_RP_LOGO:
     case ID_WM_MEDIA:
@@ -15634,10 +16222,8 @@ static void on_command_inner(int id, int code)
         set_status(LT(ui_checked(ID_CTRL_AUTOGEAR) ? "gui.ctl_autogear_on" : "gui.ctl_simple_off"));
         break;
     case ID_PAL50: { /* W234 PAL50: Spieltakt 25/30, Bildratenliste neu beschriften */
-        int s0 = ComboBox_GetCurSel(ctl(ID_IPFPS));
         ui_set_checked(ID_PAL50, !ui_checked(ID_PAL50));
-        ip_fill(ctl(ID_IPFPS));
-        ComboBox_SetCurSel(ctl(ID_IPFPS), s0);
+        ip_fill(ctl(ID_IPFPS)); /* W309: behaelt die Wahl */
         set_status(LT(ui_checked(ID_PAL50) ? "gui.pal50_on" : "gui.pal50_off"));
         break;
     }
@@ -15649,9 +16235,13 @@ static void on_command_inner(int id, int code)
         show_page(g_page);
         set_status(LT(g_show_adv ? "gui.show_adv_on" : "gui.show_adv_off"));
         break;
-    case ID_CHIDE: /* W268 COCKPIT-HIDE: eigene Option, nicht im Grafik-Preset */
-        ui_set_checked(ID_CHIDE, !ui_checked(ID_CHIDE));
-        set_status(LT(ui_checked(ID_CHIDE) ? "gui.chide_on" : "gui.chide_off"));
+    case ID_CHIDE: /* W268 COCKPIT-HIDE / W319 MONITOR-VIEW: eigene Option, nicht im Grafik-Preset */
+        if (code == CBN_SELCHANGE && !g_updating) {
+            static const char *const kSt[] = { "gui.chide_off", "gui.chide_on", "gui.mview_on", "gui.mview2_on" };
+            int sel = ComboBox_GetCurSel(ctl(ID_CHIDE));
+            if (sel >= 0 && sel <= 3) { set_status(LT(kSt[sel])); }
+            redraw_rect(COL2, CY0, COLW, 488);
+        }
         break;
     case ID_REM_LABEL: { /* W153; W173 (PO 7.11.): eigene Option, nicht im Grafik-Preset */
         g_gfx.shx[LSHX_LABEL] = ui_checked(ID_REM_LABEL) ? 0 : 1;
@@ -15679,7 +16269,7 @@ static void on_command_inner(int id, int code)
             break; /* R14: Rueckfrage "Nein" -> eigene Werte bleiben */
         }
         lcfg_gfx_apply(&g_gfx, sel);
-        ComboBox_SetCurSel(ctl(ID_IPFPS), ip_sel_of(g_gfx.interp_fps)); /* W223 */
+        ip_set(g_gfx.interp_fps); /* W223, W309 */
         ComboBox_SetCurSel(ctl(ID_RTSCALE), g_gfx.rt_scale + 1);
         edge_ui_set(g_gfx.edge_mode, g_gfx.edge_fade_width, g_gfx.edge_fade_strength); /* W266 */
         update_aspect_info();
@@ -15777,6 +16367,11 @@ static void on_command_inner(int id, int code)
             g_updating++;
             ComboBox_SetCurSel(ctl(ID_VRPRESET), m >= 1 ? m - 1 : 3);
             g_updating--;
+        }
+        break;
+    case ID_IPFPS: /* W309 FPS-MONITOR: Hinweis zur gewaehlten Rate */
+        if (code == CBN_SELCHANGE && !g_updating) {
+            ip_status();
         }
         break;
     case ID_WINMODE: /* W171: Hz/Aufloesung frei per Regel R7/R8 */
@@ -16490,6 +17085,7 @@ static int gui_init(const char *client_override)
             g_mon_h = dm.dmPelsHeight;
             g_disp_hz = dm.dmDisplayFrequency > 1 ? (int)dm.dmDisplayFrequency : 0;
         }
+        mon_detect_rates(); /* W309: Hoechstrate + weitere Monitore; --sim-monitors */
     }
     g_inited = 1;
     return 1;
@@ -16531,6 +17127,15 @@ static HWND gui_create(int offscreen)
                              NULL);
     if (!g_hwnd) {
         return NULL;
+    }
+    if (lupd_version()[0]) { /* W301 BETA-VERSION: Release-Version im Fenstertitel (Taskleiste) */
+        char lb[96];
+        wchar_t wt[128], wl[96];
+        sb_version_label(lb, sizeof lb, lupd_version());
+        if (MultiByteToWideChar(CP_UTF8, 0, lb, -1, wl, 96)) {
+            _snwprintf_s(wt, 128, _TRUNCATE, L"Steel Battalion \x2013 Launcher (%s)", wl);
+            SetWindowTextW(g_hwnd, wt);
+        }
     }
     {
         MARGINS m = { 0, 0, 1, 0 };
@@ -16603,6 +17208,8 @@ static const struct {
     { "alpha_demo", "", 0 }, /* W272: Alpha Test mit Beispielwahl + Schalter interp_guard (Layout) */
     { "advanced", "", 0 }, /* W291: Anzeige/Grafik mit "Erweiterte Einstellungen zeigen" */
     { "fade", "xbe_path=;media_root=;edge_mode=2", 0 }, /* W296: Breitbild "Fade out" mit Verlaufszeile ohne Erweitert */
+    { "fpslist", "xbe_path=;media_root=;window_mode=0;interp_fps=120", 0 }, /* W309: Bildratenliste offen (120 gewaehlt) */
+    { "fpslist_auto", "xbe_path=;media_root=;window_mode=0;interp_fps=-1", 0 }, /* W309: Bildratenliste offen (auto) */
     { "crash", "xbe_path=;media_root=", 0 }, /* W279: Karte "The last session crashed" (Fixture) */
     { "pack2", "", 0, 1 },  /* W172: zweites Pack gewaehlt (verdeckt durch ...) */
     { "pack3", "", 0, 2 },  /* W172: drittes Pack (Effekt-Pack mit Schloss) */
@@ -16649,16 +17256,16 @@ static void gui_apply_state(const char *name)
     }
     if (strncmp(name, "update_", 7) == 0) { /* W250: Fixtures, nichts gespeichert */
         int dev = strcmp(name, "update_dev") == 0;
-        g_upd_ver = dev ? "" : "0.1.0-alpha.7";
+        g_upd_ver = dev ? "" : "0.2.0"; /* W301: erste Beta */
         g_upd_cfg = dev ? -1 : strcmp(name, "update_ask") == 0 ? -1 : 1;
         g_upd_ask = strcmp(name, "update_ask") == 0;
         memset(&g_upd_res, 0, sizeof g_upd_res);
         if (strcmp(name, "update_new") == 0) {
             g_upd_res.result = LUPD_R_NEWER;
-            strcpy_s(g_upd_res.rel.tag, sizeof g_upd_res.rel.tag, "v0.1.0-alpha.8");
+            strcpy_s(g_upd_res.rel.tag, sizeof g_upd_res.rel.tag, "v0.2.1");
             strcpy_s(g_upd_res.rel.url, sizeof g_upd_res.rel.url,
-                     LUPD_PAGE_PREFIX "tag/v0.1.0-alpha.8");
-            g_upd_res.rel.prerelease = 1;
+                     LUPD_PAGE_PREFIX "tag/v0.2.1");
+            g_upd_res.rel.prerelease = 0; /* W301: Betas ab 0.2.0 sind normale Releases */
         }
     }
     for (i = 0; i < (int)(sizeof kStates / sizeof kStates[0]); i++) {
@@ -16921,6 +17528,63 @@ static int bmp_save(const canvas_t *c, const char *path)
     return ok ? 0 : 1;
 }
 
+/* W309 FPS-MONITOR: Seite mit aufgeklappter Bildratenliste sichern
+ * (--state fpslist*). Die Liste der Combo wird unter der Combo gezeigt,
+ * ohne Aktivierung und wie das Fenster ausserhalb des Bildschirms, per
+ * PrintWindow gesichert und in das Seitenbild kopiert, danach versteckt. */
+static int ip_list_shot(const char *path)
+{
+    canvas_t c, lc;
+    COMBOBOXINFO ci;
+    RECT wr, cr, vr, lr;
+    HWND cb = ctl(ID_IPFPS), lb;
+    int n, ih, w, h, rc = 1, x0, y0, yy;
+    memset(&c, 0, sizeof c);
+    memset(&lc, 0, sizeof lc);
+    memset(&ci, 0, sizeof ci);
+    ci.cbSize = sizeof ci;
+    if (!cb || !GetComboBoxInfo(cb, &ci) || !ci.hwndList) { return 1; }
+    lb = ci.hwndList;
+    GetWindowRect(g_hwnd, &wr);
+    GetWindowRect(cb, &cr);
+    n = ComboBox_GetCount(cb);
+    ih = (int)SendMessageW(lb, LB_GETITEMHEIGHT, 0, 0);
+    w = cr.right - cr.left;
+    h = n * ih + 2;
+    vr.left = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    vr.top = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    vr.right = vr.left + GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    vr.bottom = vr.top + GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    SetRect(&lr, cr.left, cr.bottom, cr.left + w, cr.bottom + h);
+    if (n <= 0 || ih <= 0 || IntersectRect(&vr, &vr, &lr)) {
+        printf("shot: FEHLER Bildratenliste nicht au" U8_SZ "erhalb des Bildschirms - nichts gesichert\n");
+        return 1;
+    }
+    if (window_pixels(g_hwnd, &c) != 0) { return 1; }
+    SetWindowPos(lb, NULL, lr.left, lr.top, w, h, SWP_NOACTIVATE | SWP_NOZORDER | SWP_SHOWWINDOW);
+    SendMessageW(lb, LB_SETCURSEL, (WPARAM)ComboBox_GetCurSel(cb), 0);
+    RedrawWindow(lb, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_UPDATENOW);
+    pump();
+    if (window_pixels(lb, &lc) == 0) {
+        x0 = lr.left - wr.left;
+        y0 = lr.top - wr.top;
+        for (yy = 0; yy < lc.h; yy++) {
+            int ty = y0 + yy, xa = x0 < 0 ? -x0 : 0, xb = lc.w;
+            if (ty < 0 || ty >= c.h) { continue; }
+            if (x0 + xb > c.w) { xb = c.w - x0; }
+            if (xb > xa) {
+                memcpy(&c.px[(size_t)ty * (size_t)c.w + (size_t)(x0 + xa)], &lc.px[(size_t)yy * (size_t)lc.w + (size_t)xa],
+                       (size_t)(xb - xa) * 4);
+            }
+        }
+        rc = png_save(c.px, c.w, c.h, path);
+    }
+    ShowWindow(lb, SW_HIDE);
+    cv_free(&lc);
+    cv_free(&c);
+    return rc;
+}
+
 static int shot_window(HWND w, const char *path, int png)
 {
     canvas_t c;
@@ -16981,7 +17645,7 @@ int gui_main(const char *client_override, const gui_opts_t *o)
     }
     g_bg_on = g_o.bg >= 0 ? g_o.bg : ui_cfg_load_bg(g_client_dir);
     g_diag_open = ui_cfg_load_key(g_client_dir, "diag_open", 0); /* W171 */
-    g_alpha_tools = ui_cfg_load_key(g_client_dir, "alpha_tools", 1); /* W272 */
+    g_alpha_tools = ui_cfg_load_tools(g_client_dir); /* W272, W301: test_tools, Rueckfall alpha_tools */
     g_show_adv = ui_cfg_load_key(g_client_dir, "show_advanced", 0); /* W291 */
     g_lay_work_w = g_o.lay_work_w; /* W281: --work WxH (Test des Einpassens) */
     g_lay_work_h = g_o.lay_work_h;
@@ -17129,6 +17793,16 @@ int gui_main(const char *client_override, const gui_opts_t *o)
                 printf("shot: Seite %d (%s) -> %s%s\n", p, kPageKey[p],
                        r ? "FEHLER " : "", path);
                 rc |= r;
+                if (p == P_DISPLAY && g_o.shot == 2 && strncmp(g_o.state, "fpslist", 7) == 0) { /* W309 */
+                    size_t pl = strlen(path);
+                    if (pl > 4) {
+                        _snprintf_s(path + pl - 4, sizeof path - (pl - 4), _TRUNCATE, "_list_%dhz.png", g_disp_hz);
+                        r = ip_list_shot(path);
+                        printf("shot: Bildratenliste (%d Hz, %d Eintraege) -> %s%s\n", g_disp_hz,
+                               ComboBox_GetCount(ctl(ID_IPFPS)), r ? "FEHLER " : "", path);
+                        rc |= r;
+                    }
+                }
                 if (p == P_ADV && strcmp(g_o.state, "replays") == 0) {
                     replay_dialog_modal(1); /* W254: Replay-Dialog mit Beispieldaten */
                 }
@@ -18195,6 +18869,147 @@ static void adv_gui_selftest(int *pass, int *fail)
  * setzt Monitor auto), "Performance"; Anzeige: Verlaufsregler bei "Fade out"
  * auch ohne "Erweitert" sichtbar, bei 4:3 nicht; Vorschau darunter, keine
  * Ueberlappung in Layout A Kompakt/Normal/Gross. Nichts gespeichert. --- */
+/* --- 72 (W309 FPS-MONITOR): Bildratenliste der Seite Anzeige mit simulierten
+ * Monitoren (60/144/165/240 Hz, zwei Monitore, Alt-cfg 240 auf 144 Hz):
+ * Eintraege, Kennzeichen, Auswahl bleibt, Speichern ohne Datenverlust, R10,
+ * Statuszeile. Nichts gespeichert. --- */
+static void ip_item_text(int i, char *o, size_t cap)
+{
+    wchar_t w[128];
+    o[0] = 0;
+    if (SendMessageW(ctl(ID_IPFPS), CB_GETLBTEXTLEN, (WPARAM)i, 0) < 120 &&
+        SendMessageW(ctl(ID_IPFPS), CB_GETLBTEXT, (WPARAM)i, (LPARAM)w) != CB_ERR) {
+        w_to_u8(w, o, (int)cap);
+    }
+}
+
+static __declspec(noinline) void fpsmon_gui_selftest(int *pass, int *fail)
+{
+    static const struct { const char *sim; int n; } kL[] = {
+        { "60", 3 }, { "144", 8 }, { "165", 9 }, { "240", 10 }, { "60/144,165", 3 }, { "0", 10 },
+    };
+    char why[300] = "", t[300], f[400], cd0[sizeof g_client_dir], tmp[1024], dir[1100];
+    static launcher_settings_t s0, s1, b; /* static: Stapel der Selbsttest-Kette ist knapp */
+    int hz0 = g_disp_hz, mx0 = g_disp_hz_max, alt0 = g_mon_alt_hz, shot0 = g_o.shot, keep0 = g_ip_keep, k;
+    strcpy_s(cd0, sizeof cd0, g_client_dir);
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw309_uicfg_%lu", tmp, GetCurrentProcessId());
+    lcfg_mkdir_p(dir);
+    strcpy_s(g_client_dir, sizeof g_client_dir, dir); /* launcher_ui.cfg nur im Temp-Ordner */
+    g_o.shot = 2; /* nichts speichern */
+    memset(&s0, 0, sizeof s0);
+    ui_to_settings(&s0);
+    show_page(P_DISPLAY);
+    for (k = 0; k < (int)(sizeof kL / sizeof kL[0]) && !why[0]; k++) {
+        s1 = s0;
+        s1.interp_fps = SB_FPS_AUTO;
+        mon_sim_apply(kL[k].sim);
+        ui_from_settings(&s1);
+        if (ComboBox_GetCount(ctl(ID_IPFPS)) != kL[k].n || ComboBox_GetCurSel(ctl(ID_IPFPS)) != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "%s Hz: %d Eintraege (Wahl %d) statt %d", kL[k].sim,
+                        ComboBox_GetCount(ctl(ID_IPFPS)), ComboBox_GetCurSel(ctl(ID_IPFPS)), kL[k].n);
+        }
+    }
+    /* 165 Hz: 60/120 gekennzeichnet, 165 ohne Kennzeichen */
+    if (!why[0]) {
+        mon_sim_apply("165");
+        s1 = s0;
+        s1.interp_fps = 120;
+        s1.window_mode = 0;
+        ui_from_settings(&s1);
+        ip_item_text(ComboBox_GetCurSel(ctl(ID_IPFPS)), t, sizeof t);
+        _snprintf_s(f, sizeof f, _TRUNCATE, LT("gui.ip_judder"), 120);
+        if (strcmp(t, f) != 0) { _snprintf_s(why, sizeof why, _TRUNCATE, "165 Hz: 120 als '%s'", t); }
+        ip_item_text(ip_sel_of(165), t, sizeof t);
+        if (!why[0] && strcmp(t, "165") != 0) { _snprintf_s(why, sizeof why, _TRUNCATE, "165 Hz: 165 als '%s'", t); }
+        ip_item_text(ip_sel_of(60), t, sizeof t);
+        _snprintf_s(f, sizeof f, _TRUNCATE, LT("gui.ip_judder"), 60);
+        if (!why[0] && strcmp(t, f) != 0) { _snprintf_s(why, sizeof why, _TRUNCATE, "165 Hz: 60 als '%s'", t); }
+        ui_apply_rules();
+        if (!why[0] && !g_rr[10].active) { strcpy_s(why, sizeof why, "165 Hz: R10 fehlt bei 120"); }
+        ComboBox_SetCurSel(ctl(ID_IPFPS), ip_sel_of(165));
+        on_command(ID_IPFPS, CBN_SELCHANGE);
+        if (!why[0] && g_rr[10].active) { strcpy_s(why, sizeof why, "165 Hz: R10 bei 165"); }
+        ComboBox_SetCurSel(ctl(ID_IPFPS), ip_sel_of(120));
+        on_command(ID_IPFPS, CBN_SELCHANGE);
+        _snprintf_s(f, sizeof f, _TRUNCATE, LT("gui.ip_st_judder"), 120, 165);
+        if (!why[0] && strcmp(g_status, f) != 0) { _snprintf_s(why, sizeof why, _TRUNCATE, "Status 120@165 '%.80s'", g_status); }
+    }
+    /* Alt-cfg 240 auf 144 Hz: eigener Eintrag, gewaehlt, Speichern behaelt 240 */
+    if (!why[0]) {
+        mon_sim_apply("144");
+        s1 = s0;
+        s1.interp_fps = 240;
+        s1.window_mode = 0;
+        ui_from_settings(&s1);
+        ip_item_text(ComboBox_GetCurSel(ctl(ID_IPFPS)), t, sizeof t);
+        _snprintf_s(f, sizeof f, _TRUNCATE, LT("gui.ip_above"), 240);
+        if (strcmp(t, f) != 0 || ComboBox_GetCount(ctl(ID_IPFPS)) != 9) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Alt-cfg 240@144: '%s' (%d Eintraege)", t, ComboBox_GetCount(ctl(ID_IPFPS)));
+        }
+        ip_fill(ctl(ID_IPFPS)); /* z. B. Sprachwechsel: Wahl bleibt */
+        ui_to_settings(&b);
+        if (!why[0] && b.interp_fps != 240) { _snprintf_s(why, sizeof why, _TRUNCATE, "Alt-cfg 240 -> %d", b.interp_fps); }
+        ui_apply_rules();
+        if (!why[0] && !g_rr[10].active) { strcpy_s(why, sizeof why, "Alt-cfg 240@144: R10 fehlt"); }
+        on_command(ID_IPFPS, CBN_SELCHANGE);
+        _snprintf_s(f, sizeof f, _TRUNCATE, LT("gui.ip_st_above"), 240, 144);
+        if (!why[0] && strcmp(g_status, f) != 0) { _snprintf_s(why, sizeof why, _TRUNCATE, "Status 240@144 '%.80s'", g_status); }
+        ComboBox_SetCurSel(ctl(ID_IPFPS), ip_sel_of(144)); /* bewusst gewechselt */
+        on_command(ID_IPFPS, CBN_SELCHANGE);
+        ui_to_settings(&b);
+        if (!why[0] && b.interp_fps != 144) { _snprintf_s(why, sizeof why, _TRUNCATE, "144 gewaehlt -> %d", b.interp_fps); }
+    }
+    /* Zwei Monitore: Hauptmonitor 60 Hz (bis 144), zweiter 165 Hz -> Liste nach dem Startmonitor, Hinweis */
+    if (!why[0]) {
+        char f2[300];
+        mon_sim_apply("60/144,165");
+        s1 = s0;
+        s1.interp_fps = 60;
+        s1.window_mode = 0;
+        ui_from_settings(&s1);
+        on_command(ID_IPFPS, CBN_SELCHANGE);
+        _snprintf_s(f, sizeof f, _TRUNCATE, LT("gui.ip_st_max"), 60, 144);
+        _snprintf_s(f2, sizeof f2, _TRUNCATE, LT("gui.ip_st_multi"), 60, 165);
+        if (g_disp_hz != 60 || g_disp_hz_max != 144 || g_mon_alt_hz != 165 || ComboBox_GetCount(ctl(ID_IPFPS)) != 3 ||
+            strncmp(g_status, f, strlen(f)) != 0 || !strstr(g_status, f2)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "2 Monitore: hz %d/%d alt %d, %d Eintraege, Status '%.90s'", g_disp_hz,
+                        g_disp_hz_max, g_mon_alt_hz, ComboBox_GetCount(ctl(ID_IPFPS)), g_status);
+        }
+        mon_sim_apply("144,144"); /* gleiche Rate: kein Hinweis auf einen zweiten Monitor */
+        if (!why[0] && g_mon_alt_hz != 0) { strcpy_s(why, sizeof why, "144,144: zweiter Monitor gemeldet"); }
+        mon_sim_apply("143,144");
+        if (!why[0] && g_mon_alt_hz != 0) { strcpy_s(why, sizeof why, "143,144: zweiter Monitor gemeldet"); }
+        if (!why[0] && mon_sim_apply("abc") == 0) { strcpy_s(why, sizeof why, "Sim 'abc' angenommen"); }
+    }
+    g_disp_hz = hz0;
+    g_disp_hz_max = mx0;
+    g_mon_alt_hz = alt0;
+    g_ip_keep = keep0;
+    ComboBox_SetCurSel(ctl(ID_IPFPS), -1);
+    ui_from_settings(&s0);
+    ui_apply_rules();
+    g_o.shot = shot0;
+    strcpy_s(g_client_dir, sizeof g_client_dir, cd0);
+    {
+        char pth[1200];
+        wchar_t wd[1100];
+        ui_cfg_path(dir, pth, sizeof pth);
+        u8_DeleteFile(pth);
+        u8_to_w(dir, wd, 1100);
+        RemoveDirectoryW(wd);
+    }
+    ui_to_settings(&s1);
+    if (!why[0] && memcmp(&s0, &s1, sizeof s0) != 0) {
+        strcpy_s(why, sizeof why, "Werte nach dem Test veraendert");
+    }
+    if (!why[0]) {
+        GT_OK("72 W309 fps-monitor (Liste 60/144/165/240 Hz + 2 Monitore, Kennzeichen, Alt-cfg 240 bleibt, R10, Status)");
+    } else {
+        GT_FAIL("72 W309 fps-monitor", "%s", why);
+    }
+}
+
 static void porig_gui_selftest(int *pass, int *fail)
 {
     static const int kSz[3] = { LLAY_SZ_COMPACT, LLAY_SZ_NORMAL, LLAY_SZ_LARGE };
@@ -18802,7 +19617,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     ok = ui_checked(ID_GP0 + LGP_PERFORMANCE) && b.interp_fps == 60 &&
                          b.rt_scale == 1 && !b.rt_scale_dyn && !b.fs_interp_match &&
                          lcfg_gfx_preset(&b, 0) == LGP_PERFORMANCE && !g_rr[9].active;
-                    ComboBox_SetCurSel(ctl(ID_IPFPS), ip_sel_of(120));
+                    ip_set(120); /* W309 */
                     ui_apply_rules();
                     ui_to_settings(&b);
                     ok = ok && ui_checked(ID_GP0 + LGP_CUSTOM) &&
@@ -19155,7 +19970,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
             GT_FAIL("43 rules-ui", "%s", why43);
         }
         if (ok44) {
-            GT_OK("44 nav-8pages (Aliase, Strg+Tab-Zyklus, W272 Alpha Test)");
+            GT_OK("44 nav-8pages (Aliase, Strg+Tab-Zyklus, W272/W301 Test tools)");
         } else {
             GT_FAIL("44 nav-8pages", "%s", why44);
         }
@@ -20089,7 +20904,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
             {
                 char why63[160] = "";
                 const char *v0 = g_upd_ver;
-                g_upd_ver = "0.1.0-alpha.7";
+                g_upd_ver = "0.2.0"; /* W301 */
                 g_upd_cfg = -1;
                 g_upd_ask = 1;
                 memset(&g_upd_res, 0, sizeof g_upd_res);
@@ -20116,9 +20931,9 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     strcpy_s(why63, sizeof why63, "Schalter aus");
                 /* Hinweis mit fremder Adresse: Knopf sichtbar, Oeffnen verweigert */
                 g_upd_res.result = LUPD_R_NEWER;
-                strcpy_s(g_upd_res.rel.tag, sizeof g_upd_res.rel.tag, "v0.1.0-alpha.8");
+                strcpy_s(g_upd_res.rel.tag, sizeof g_upd_res.rel.tag, "v0.2.1");
                 strcpy_s(g_upd_res.rel.url, sizeof g_upd_res.rel.url,
-                         "https://github.com/someone/Steelbound/releases/tag/v0.1.0-alpha.8");
+                         "https://github.com/someone/Steelbound/releases/tag/v0.2.1");
                 ui_refresh_visibility();
                 pump();
                 if (!why63[0] && !IsWindowVisible(ctl(ID_UPD_OPEN)))
@@ -20155,6 +20970,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
             adv_gui_selftest(pass, fail); /* W291 ESC-REWORK (Fall 69) */
             locl_gui_selftest(pass, fail); /* W293 LOC-LAYOUT (Fall 70) */
             porig_gui_selftest(pass, fail); /* W296 PRESET-ORIG (Fall 71) */
+            fpsmon_gui_selftest(pass, fail); /* W309 FPS-MONITOR (Fall 72) */
             /* --- 64 (W259 SETTINGS-RESET): Launcher bleibt offen, im Spiel wird
              * per ESC "Als Standard speichern" gesichert, danach startet derselbe
              * Launcher erneut. Vorher schrieb er seine alten Werte zurueck
@@ -21693,6 +22509,74 @@ static void w290_card(void)
     ui_from_settings(&a);
 }
 
+/* --- W299 REPLAY: Client-Taste "Replay beenden" (replay_exit) im Belegungsdialog -------------------------------
+ * Rein: Element/Gruppe 5/Text, fehlende Zeile -> Standard Ruecktaste, eigene Belegung, leere Zeile bleibt beim
+ * Speichern "replay_exit =" (sonst Standard im Client), "Alle leeren" behaelt sie, Tastenliste zeigt die Belegung. */
+void w299_bind_selftest(int *pass, int *fail)
+{
+    char why[220] = "", tmp[1024], path[1200], *html, *txt;
+    int re = lctrl_bind_elem_index("replay_exit");
+    lctrl_bind_t b, rb;
+    if (re < 0 || kCtrlElems[re].kind != LCTRL_ACT || lctrl_elem_group(re) != 5 || lctrl_bind_combo_row(re) ||
+        !lctrl_bind_empty_line_row(re) || strcmp(LT("bind.replay_exit"), "bind.replay_exit") == 0)
+        strcpy_s(why, sizeof why, "replay_exit: Element/Gruppe/Text");
+    if (!why[0]) {
+        lctrl_bind_load_text("[client]\npause = KEY:PAUSE\n", &b);
+        if (!w290_row(&b, "replay_exit", LCTRL_REPLAY_EXIT_DEFAULT))
+            strcpy_s(why, sizeof why, "altes Profil ohne Zeile -> Standard Ruecktaste");
+    }
+    if (!why[0]) {
+        lctrl_bind_load_text("replay_exit = KEY:END, PAD:BACK+PAD:A\n", &b);
+        if (!w290_row(&b, "replay_exit", "KEY:END, PAD:BACK+PAD:A"))
+            strcpy_s(why, sizeof why, "eigene Belegung");
+    }
+    if (!why[0]) {
+        lctrl_bind_load_text("replay_exit =\n", &b);
+        if (b.row[re].n_alt != 0) strcpy_s(why, sizeof why, "leere Zeile = aus");
+    }
+    if (!why[0]) {
+        lctrl_bind_load_text("replay_exit = KEY:END\nbi0 = KEY:SPACE\n", &b);
+        lctrl_bind_clear_game(&b);
+        if (!w290_row(&b, "replay_exit", "KEY:END") || b.row[0].n_alt != 0)
+            strcpy_s(why, sizeof why, "Alle leeren behaelt replay_exit nicht");
+    }
+    if (!why[0]) { /* Rundweg Datei: leer bleibt leer, Standard bleibt Standard, Abschnitt [client] */
+        u8_GetTempPath(tmp, sizeof tmp);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%sw299_bind_test.ini", tmp);
+        lctrl_bind_load_text("replay_exit =\n", &b);
+        if (lctrl_bind_save(path, &b, "test", NULL, 0) != 0 || lctrl_bind_load_file(path, &rb) != 0 || rb.row[re].n_alt != 0)
+            strcpy_s(why, sizeof why, "geleert gespeichert -> nach dem Laden nicht mehr leer");
+        txt = (char *)malloc(65536);
+        if (!why[0] && txt) {
+            FILE *f = NULL;
+            size_t n = 0;
+            lctrl_bind_load_text("[client]\npause = KEY:PAUSE\n", &b);
+            if (lctrl_bind_save(path, &b, "test", NULL, 0) == 0 && u8_fopen_s(&f, path, "rb") == 0 && f) {
+                n = fread(txt, 1, 65535, f);
+                fclose(f);
+            }
+            txt[n] = 0;
+            if (!strstr(txt, "[client]") || !strstr(txt, "replay_exit = KEY:BACKSPACE"))
+                strcpy_s(why, sizeof why, "Standard nicht als replay_exit-Zeile in [client] gespeichert");
+        }
+        free(txt);
+        u8_DeleteFile(path);
+    }
+    html = (char *)malloc(600000);
+    if (!why[0] && html) {
+        keyshtml_build(LT("gui.keys_memo"), "", NULL, NULL, LT("gui.mouse_abs"), 4, "", "", "", html, 600000);
+        if (!strstr(html, LT("bind.replay_exit")) || !strstr(html, "KEY:BACKSPACE"))
+            strcpy_s(why, sizeof why, "Tastenliste Standard ohne Replay beenden");
+        keyshtml_build(LT("gui.keys_memo"), "w299_test", "replay_exit = KEY:F7\n", NULL, LT("gui.mouse_abs"), 4,
+                       "", "", "", html, 600000);
+        if (!why[0] && (!strstr(html, "KEY:F7") || strstr(html, "KEY:BACKSPACE")))
+            strcpy_s(why, sizeof why, "Tastenliste zeigt die Profil-Belegung nicht");
+    }
+    free(html);
+    if (!why[0]) W282_OK("W299 REPLAYEXIT bind (Element/Gruppe 5, Standard Ruecktaste, eigene Belegung, leer = aus, Rundweg Datei, Alle leeren behaelt, Tastenliste)");
+    else W282_FAIL("W299 REPLAYEXIT bind", why);
+}
+
 void w290_gui_selftest(const char *client_override, int *pass, int *fail)
 {
     char tmp[1024], dir[1100], pd[1200], keepdir[sizeof g_client_dir];
@@ -21739,3 +22623,96 @@ void w290_gui_selftest(const char *client_override, int *pass, int *fail)
     else W282_FAIL("W290 QUICKSHOT gui", g_w290_why);
 }
 #undef W290_WHY
+
+/* ---- W303 AUDIO-VOLUME: Karte "Ton & Lautstaerke" (Seite Ton & Extras) ----
+ * Elemente auf der Seite, Listen 100..0 %, Standard 100 (Original), Lage
+ * ueber der Karte "Fotos & Screenshots", Rundweg Oberflaeche <-> user.cfg,
+ * nicht auf 5 gerundete Werte bleiben, Klemmen beim Laden. */
+static char g_w303_why[300];
+#define W303_WHY(...) do { if (!g_w303_why[0]) _snprintf_s(g_w303_why, sizeof g_w303_why, _TRUNCATE, __VA_ARGS__); } while (0)
+static void w303_card(void)
+{
+    launcher_settings_t a, b;
+    char f[1300], tmp[1024];
+    int k;
+    for (k = 0; k < 4; k++) {
+        uictl_t *u = ui_find(kVolId[k]);
+        if (!u || !ui_visible_on(u, P_AUDIO) || ui_visible_on(u, P_GFX)) { W303_WHY("Regler %d fehlt/falsche Seite", kVolId[k]); return; }
+        if (ComboBox_GetCount(u->h) != VOL_N) { W303_WHY("Regler %d: %d Eintraege", kVolId[k], ComboBox_GetCount(u->h)); return; }
+        if (u->y + u->h_ > CY0 + 140 + EXY || u->y + u->h_ > CY0 + 152 + EXY) { W303_WHY("Regler %d ragt in die Fotokarte", kVolId[k]); return; }
+    }
+    {
+        uictl_t *d = ui_find(ID_PH_DIR), *t = ui_find(ID_AUDIO);
+        if (!d || d->y < CY0 + 152 + EXY || !t || t->y + t->h_ > CY0 + 82) { W303_WHY("Lage Ton-Schalter/Fotokarte"); return; }
+    }
+    lcfg_defaults(&a);
+    if (a.volume_master != 100 || a.volume_music != 100 || a.volume_sfx != 100 || a.volume_voice != 100) {
+        W303_WHY("Standard nicht 100 (Original)");
+        return;
+    }
+    ui_from_settings(&a);
+    for (k = 0; k < 4; k++) {
+        if (ComboBox_GetCurSel(ctl(kVolId[k])) != 0) { W303_WHY("Standard-Auswahl %d nicht 100 %%", kVolId[k]); return; }
+    }
+    a.volume_master = 80;
+    a.volume_music = 45;
+    a.volume_sfx = 0;
+    a.volume_voice = 83; /* nicht auf 5: Anzeige 85, Wert bleibt */
+    ui_from_settings(&a);
+    lcfg_defaults(&b);
+    ui_to_settings(&b);
+    if (b.volume_master != 80 || b.volume_music != 45 || b.volume_sfx != 0 || b.volume_voice != 83) {
+        W303_WHY("Rundweg Oberflaeche (%d/%d/%d/%d)", b.volume_master, b.volume_music, b.volume_sfx, b.volume_voice);
+        return;
+    }
+    if (ComboBox_GetCurSel(ctl(ID_VOL_VOICE)) != 3) { W303_WHY("83 nicht als 85 %% angezeigt"); return; }
+    ComboBox_SetCurSel(ctl(ID_VOL_VOICE), 2); /* Nutzer waehlt 90 % */
+    ui_to_settings(&b);
+    if (b.volume_voice != 90) { W303_WHY("Auswahl 90 %% -> %d", b.volume_voice); return; }
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(f, sizeof f, _TRUNCATE, "%sw303_user_%lu.cfg", tmp, GetCurrentProcessId());
+    u8_DeleteFile(f);
+    if (lcfg_save_user(f, &b) != 0) { W303_WHY("lcfg_save_user"); return; }
+    {
+        FILE *fp;
+        char buf[60000];
+        size_t got;
+        buf[0] = 0;
+        if (u8_fopen_s(&fp, f, "rb") == 0 && fp) { got = fread(buf, 1, sizeof buf - 1, fp); buf[got] = 0; fclose(fp); }
+        if (!strstr(buf, "volume_master=80") || !strstr(buf, "volume_music=45") || !strstr(buf, "volume_sfx=0") ||
+            !strstr(buf, "volume_voice=90") || !strstr(buf, "[audio]")) {
+            W303_WHY("user.cfg ohne volume_* unter [audio]");
+        }
+    }
+    lcfg_defaults(&a);
+    if (!g_w303_why[0] && (lcfg_load_file(f, &a) != 0 || a.volume_master != 80 || a.volume_music != 45 || a.volume_sfx != 0 ||
+                           a.volume_voice != 90))
+        W303_WHY("Rundweg user.cfg");
+    if (!g_w303_why[0]) {
+        write_file(f, "[audio]\nvolume_master=150\nvolume_music=-3\nvolume_sfx=abc\n");
+        lcfg_defaults(&a);
+        if (lcfg_load_file(f, &a) != 0 || a.volume_master != 100 || a.volume_music != 0 || a.volume_sfx != 0 ||
+            a.volume_voice != 100)
+            W303_WHY("Klemmen (%d/%d/%d/%d)", a.volume_master, a.volume_music, a.volume_sfx, a.volume_voice);
+    }
+    u8_DeleteFile(f);
+    lcfg_defaults(&a);
+    ui_from_settings(&a);
+}
+
+void w303_gui_selftest(const char *client_override, int *pass, int *fail)
+{
+    g_w303_why[0] = 0;
+    if (!(gui_init(client_override) && gui_create(1))) {
+        strcpy_s(g_w303_why, sizeof g_w303_why, "Fenster nicht erzeugt");
+    } else {
+        build_controls();
+        ShowWindow(g_hwnd, SW_SHOWNOACTIVATE); /* ausserhalb des Bildschirms */
+        w303_card();
+        ShowWindow(g_hwnd, SW_HIDE);
+        gui_teardown();
+    }
+    if (!g_w303_why[0]) W282_OK("W303 AUDIO-VOLUME gui (Karte Ton & Lautstaerke: 4 Regler auf Ton & Extras, Listen 100..0 %, Standard 100 = Original, Lage ueber Fotokarte, Rundweg Oberflaeche/user.cfg [audio], Rohwert 83 bleibt, Klemmen)");
+    else W282_FAIL("W303 AUDIO-VOLUME gui", g_w303_why);
+}
+#undef W303_WHY

@@ -16,6 +16,7 @@ typedef struct {
 /* d = 60 DWORDs D3DPIXELSHADERDEF. PS-Konstantenpuffer b4:
  * pc0[8], pc1[8], fc0, fc1, fogc, tsc[4] (xy = Koordinatenskala, z = Textur
  * vorhanden), pflags. Rueckgabe 1 = ok, 0 = nicht unterstuetzt/zu lang. */
+extern int g_rqp_nan_mark; /* W302: nicht endliche Ausgabe magenta (DIAG) */
 int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_info_t *info);
 
 #endif /* RENDER_PSGEN_H */

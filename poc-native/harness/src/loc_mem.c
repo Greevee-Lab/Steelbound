@@ -17,6 +17,7 @@
  * das nie. */
 #include "loc_mem.h"
 #include "hlog.h"
+#include "hlock.h" /* W308 SUSP-CTLOCK */
 
 #include <windows.h>
 #include <string.h>
@@ -38,7 +39,7 @@ static u32 g_lo;   /* untere Ansicht */
 static u32 g_off;  /* Fuellstand */
 static loc_blk_t *g_blk;
 static unsigned g_nblk, g_capblk;
-static SRWLOCK g_lock = SRWLOCK_INIT;
+static hlock_t g_lock; /* W308 SUSP-CTLOCK: hlock statt SRWLOCK (Xbox-Threads, SUSPSAFE sieht den Owner) */
 static unsigned g_nalloc, g_nreuse, g_nfree, g_nfull;
 static unsigned long long g_bytes_reuse;
 
@@ -231,7 +232,7 @@ u32 loc_mem_alloc(u32 size, u32 align, int zero)
     if (align & (align - 1u)) {
         align = 4096u;
     }
-    AcquireSRWLockExclusive(&g_lock);
+    hlock_enter(&g_lock);
     /* Wiederverwendung: freier Block gleicher Groesse und passender Ausrichtung (neueste zuerst). */
     for (i = g_nblk; i-- > 0;) {
         if (!g_blk[i].used && g_blk[i].size == size && !(g_blk[i].va & (align - 1u))) {
@@ -252,7 +253,7 @@ u32 loc_mem_alloc(u32 size, u32 align, int zero)
             g_nalloc++;
         }
     }
-    ReleaseSRWLockExclusive(&g_lock);
+    hlock_leave(&g_lock);
     if (!r) {
         static volatile LONG nlog;
         if (InterlockedIncrement(&nlog) <= 8) {
@@ -290,13 +291,13 @@ int loc_mem_free(u32 va)
     if (!g_lo || !loc_mem_owns(va)) {
         return 0;
     }
-    AcquireSRWLockExclusive(&g_lock);
+    hlock_enter(&g_lock);
     k = blk_find(va);
     if (k >= 0 && g_blk[k].used) {
         g_blk[k].used = 0;
         g_nfree++;
     }
-    ReleaseSRWLockExclusive(&g_lock);
+    hlock_leave(&g_lock);
     return 1;
 }
 
@@ -307,12 +308,12 @@ u32 loc_mem_size(u32 va)
     if (!g_lo || !loc_mem_owns(va)) {
         return 0;
     }
-    AcquireSRWLockShared(&g_lock);
+    hlock_enter(&g_lock);
     k = blk_find(va);
     if (k >= 0) {
         s = g_blk[k].size;
     }
-    ReleaseSRWLockShared(&g_lock);
+    hlock_leave(&g_lock);
     return s;
 }
 

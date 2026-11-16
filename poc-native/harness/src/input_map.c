@@ -274,7 +274,7 @@ void imap_legacy_apply(imap_block_t *blk, imap_state_t *st,
     }
     st->m_aim_src = 0;
     imap_mouse_update(st, snap, &lb, &rb, &mb, &x1, &x2);
-    if (lb) imap_btn(blk, 0);
+    if (lb && !snap->bi0_nomouse) imap_btn(blk, 0); /* W299: Maus beendet das Spiel-Replay nicht */
     if (rb) imap_btn(blk, 1);
     if (mb) imap_btn(blk, 2);
     if (x1 || x2) blk->pedal_l = 0xFF; /* W110: Slide-Step (Seitentasten) */
@@ -511,6 +511,18 @@ static int imap_bind_active(const imap_bind_t *b, const imap_snap_t *snap)
     int i;
     for (i = 0; i < b->n; i++) {
         if (imap_chord_active(&b->alt[i], snap, 0, 0)) return 1;
+    }
+    return 0;
+}
+
+/* W299 REPLAY: wie imap_bind_active, aber Alternativen mit Maustaste zaehlen nicht. */
+static int imap_bind_active_nomouse(const imap_bind_t *b, const imap_snap_t *snap)
+{
+    int i;
+    for (i = 0; i < b->n; i++) {
+        const imap_chord_t *c = &b->alt[i];
+        if (c->a.kind == IMAP_A_MOUSEBTN || (c->chord && c->b.kind == IMAP_A_MOUSEBTN)) continue;
+        if (imap_chord_active(c, snap, 0, 0)) return 1;
     }
     return 0;
 }
@@ -1029,6 +1041,10 @@ void imap_profile_apply(imap_block_t *blk, imap_state_t *st,
     /* Tasten (ODER aller Quellen). */
     for (bi = 0; bi < 39; bi++) {
         if (bi == 4 || bi == 5) continue; /* I/H unten (Taster/Toggle) */
+        if (bi == 0 && snap->bi0_nomouse) { /* W299: Maus beendet das Spiel-Replay nicht */
+            if (imap_bind_active_nomouse(&prof->btn[0], snap)) imap_btn(blk, 0);
+            continue;
+        }
         if (imap_bind_active(&prof->btn[bi], snap)) imap_btn(blk, bi);
     }
     /* Replay-Virtuals 256+bi (Test-Infrastruktur, wie Legacy direkt). */
@@ -1283,6 +1299,16 @@ int imap_action_quick_shot(const imap_profile_t *prof, imap_state_t *st,
     return hit;
 }
 
+/* W299 REPLAY: Aktion "replay_exit" (Pegel, alle Quellen inkl. Tastatur; der Hook prueft die Wiedergabe). */
+int imap_action_replay_exit(const imap_profile_t *prof, const imap_snap_t *snap)
+{
+    imap_snap_t loc;
+    if (prof->replay_exit.n == 0) return 0;
+    loc = *snap;
+    imap_collect_suppression(prof, &loc);
+    return imap_bind_active(&prof->replay_exit, &loc) ? 1 : 0;
+}
+
 /* W283: Umschalt/Strg/Alt-Tasten -> Bit (0 = keine Zusatztaste). */
 static int imap_vk_mod_bit(int vk)
 {
@@ -1499,7 +1525,8 @@ enum {
     IMAP_ACT_FEEDBACK_CLIP = 4,
     IMAP_ACT_AIM_CENTER = 5, /* W271: Waffenarm zur Mitte */
     IMAP_ACT_ORIG_VIEW = 6,  /* W283: Original-Optik <-> eigene Einstellungen */
-    IMAP_ACT_QUICK_SHOT = 7  /* W290: Schnell-Screenshot */
+    IMAP_ACT_QUICK_SHOT = 7, /* W290: Schnell-Screenshot */
+    IMAP_ACT_REPLAY_EXIT = 8 /* W299: Spiel-Replay beenden */
 };
 
 /* Elementname -> Ziel. btn_i >= 0: Taste; axis >= 0 (+negpos 0/1/2 =
@@ -1539,6 +1566,10 @@ static int imap_elem_parse(const char *name, imap_elem_t *e)
     }
     if (imap_strieq(name, "quick_shot")) { /* W290: Schnell-Screenshot */
         e->action = IMAP_ACT_QUICK_SHOT;
+        return 0;
+    }
+    if (imap_strieq(name, "replay_exit")) { /* W299: Replay beenden */
+        e->action = IMAP_ACT_REPLAY_EXIT;
         return 0;
     }
     if (imap_strieq(name, "photo")) { /* W195: Fotomodus */
@@ -2084,6 +2115,7 @@ static unsigned imap_profile_joy_used(const imap_profile_t *p)
     m |= imap_bind_joy_used(&p->aim_center); /* W271 */
     m |= imap_bind_joy_used(&p->orig_view);  /* W283 */
     m |= imap_bind_joy_used(&p->quick_shot); /* W290 */
+    m |= imap_bind_joy_used(&p->replay_exit); /* W299 */
     return m;
 }
 
@@ -2142,6 +2174,10 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
             out->quick_shot.n = 0;
             out->quick_shot_set = 1;
         }
+        if (e.action == IMAP_ACT_REPLAY_EXIT) { /* W299: letzte Zeile gewinnt, leer = aus */
+            out->replay_exit.n = 0;
+            out->replay_exit_set = 1;
+        }
         for (alt = strtok_s(val, ",", &ctx); alt;
              alt = strtok_s(NULL, ",", &ctx)) {
             int rc;
@@ -2166,6 +2202,8 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
                 rc = imap_bind_add(&out->orig_view, alt, &out->has_pad, &out->has_sbc);
             } else if (e.action == IMAP_ACT_QUICK_SHOT) { /* W290 */
                 rc = imap_bind_add(&out->quick_shot, alt, &out->has_pad, &out->has_sbc);
+            } else if (e.action == IMAP_ACT_REPLAY_EXIT) { /* W299 */
+                rc = imap_bind_add(&out->replay_exit, alt, &out->has_pad, &out->has_sbc);
             } else if (e.btn_i >= 0) {
                 rc = imap_bind_add(&out->btn[e.btn_i], alt, &out->has_pad,
                                    &out->has_sbc);
@@ -2204,6 +2242,11 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
         }
     }
     if (!out->quick_shot_set) { (void)imap_quick_shot_migrate(out); } /* W290: Uebergang alter Profile */
+    if (!out->replay_exit_set) { /* W299: Profil ohne Zeile (aeltere eigene Profile) -> Standard */
+        int dp = 0, ds = 0;
+        out->replay_exit.n = 0;
+        (void)imap_bind_add(&out->replay_exit, IMAP_REPLAY_EXIT_DEFAULT, &dp, &ds);
+    }
     out->joy_used = imap_profile_joy_used(out);
     return 0;
 }
@@ -2278,7 +2321,8 @@ static const char kBuiltinKeyboard[] =
     "feedback_clip = KEY:F9\n"
     "photo = KEY:SHIFT+KEY:F12\n"
     "quick_shot = KEY:F12\n"
-    "orig_view = KEY:SHIFT+KEY:F8\n"; /* W283; W290 photo/quick_shot */
+    "orig_view = KEY:SHIFT+KEY:F8\n"
+    "replay_exit = KEY:BACKSPACE\n"; /* W283; W290 photo/quick_shot; W299 replay_exit */
 
 static const char kBuiltinXbox[] =
     "# xbox_pad_default - Xbox-Gamepad + Tastatur parallel (OR / Max-Abs).\n"
@@ -2340,7 +2384,8 @@ static const char kBuiltinXbox[] =
     "feedback_clip = KEY:F9\n"
     "photo = KEY:SHIFT+KEY:F12\n"
     "quick_shot = KEY:F12\n"
-    "orig_view = KEY:SHIFT+KEY:F8\n"; /* W283; W290 photo/quick_shot */
+    "orig_view = KEY:SHIFT+KEY:F8\n"
+    "replay_exit = KEY:BACKSPACE\n"; /* W283; W290 photo/quick_shot; W299 replay_exit */
 
 int imap_profile_builtin(const char *name, imap_profile_t *out)
 {
@@ -2499,6 +2544,8 @@ int imap_profile_equal(const imap_profile_t *a, const imap_profile_t *b)
     if (imap_bind_equal(&a->orig_view, &b->orig_view)) return 1; /* W283 */
     if (imap_bind_equal(&a->quick_shot, &b->quick_shot)) return 1; /* W290 */
     if (a->quick_shot_set != b->quick_shot_set) return 1;
+    if (imap_bind_equal(&a->replay_exit, &b->replay_exit)) return 1; /* W299 */
+    if (a->replay_exit_set != b->replay_exit_set) return 1;
     if (a->orig_view_set != b->orig_view_set) return 1;
     if (a->has_pad != b->has_pad) return 1;
     if (a->has_sbc != b->has_sbc) return 1; /* W159 */

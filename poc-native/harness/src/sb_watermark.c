@@ -1,9 +1,10 @@
-/* sb_watermark.c - W219 WATERMARK: temporaeres Alpha-Wasserzeichen.
+/* sb_watermark.c - W219 WATERMARK: temporaeres Versions-Wasserzeichen (W301: BETA).
  * Beschreibung s. sb_watermark.h. Quelltext ASCII (Mittelpunkt per Zeichencode 0x00B7). */
 #include "render_int.h"
 #include "sb_overlay.h"
 #include "sb_photo.h"
 #include "sb_watermark.h"
+#include "sb_version.h" /* W301: Phase ALPHA/BETA */
 #include "render_vexp.h" /* W290: watermark_media */
 #include <stdlib.h>
 #include <string.h>
@@ -37,17 +38,13 @@ static wchar_t wm_txt[96];
 
 static void wm_text_init(void)
 {
-    const char *v = SB_VERSION_STR;
-    wchar_t wv[48];
+    char lb[128];
     if (wm_txt[0]) { return; }
-    if (!v[0] || !MultiByteToWideChar(CP_UTF8, 0, v, -1, wv, 48)) {
+    /* W301 BETA-VERSION: gemeinsamer Text (sb_version.h, Launcher-Selbsttest prueft ihn):
+     * 0.x ohne Suffix = ". BETA", 0.1.0-alpha.N = ". ALPHA", ab 1.0.0 ohne, sonst "Steelbound dev" */
+    sb_version_label(lb, sizeof lb, SB_VERSION_STR);
+    if (!MultiByteToWideChar(CP_UTF8, 0, lb, -1, wm_txt, 96)) {
         wcscpy_s(wm_txt, 96, L"Steelbound dev");
-    } else if (strstr(v, "alpha")) {
-        _snwprintf_s(wm_txt, 96, _TRUNCATE, L"Steelbound %s %c ALPHA", wv, (wchar_t)0x00B7);
-    } else if (strstr(v, "beta")) {
-        _snwprintf_s(wm_txt, 96, _TRUNCATE, L"Steelbound %s %c BETA", wv, (wchar_t)0x00B7);
-    } else {
-        _snwprintf_s(wm_txt, 96, _TRUNCATE, L"Steelbound %s", wv);
     }
 }
 

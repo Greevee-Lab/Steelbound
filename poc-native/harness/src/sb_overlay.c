@@ -95,6 +95,9 @@ enum {
     OI_SMON, OI_STEX, OI_SLIGHT, OI_SSHADOW, OI_SBLOOM, OI_SGLOW, OI_SLOOK,
     OI_ADV, OI_RESET, OI_TEXINFO,
     OI_RPLABEL, OI_RPLOGO, OI_WMMEDIA, /* W290-Schalter (REPLAY-Hinweis, Logo, Wasserzeichen im Video) */
+    OI_VOLM, OI_VOLMU, OI_VOLSFX, OI_VOLVOX, /* W303 AUDIO-VOLUME: Gesamt, Musik, Effekte, Sprache/Funk */
+    OI_RPFX, /* W299 REPLAY-FX: Replay-Bildfilter live (Vollbild-Ansicht, experimentell) */
+    OI_MONVIEW, /* W319 MONITOR-VIEW: Monitoransicht (Gruppe Cockpit, nach "Cockpit") */
     OI_N
 };
 /* W291 ESC-REWORK: Gruppen statt Seiten (Namen und Reihenfolge wie die
@@ -103,23 +106,26 @@ enum {
  * "Als Standard speichern". Die Schnellseite enthaelt nur Verknuepfungen auf
  * Zeilen anderer Gruppen (Ausnahme: Preset). VR nur bei VR, Debug nur mit
  * Alpha-Tools (esc_debug) oder aktivem Spass-Effekt. */
-enum { OG_QUICK, OG_GAME, OG_DISP, OG_CKP, OG_WORLD, OG_FX, OG_COLOR, OG_TEX, OG_VR, OG_DEBUG, OG_N };
+enum { OG_QUICK, OG_GAME, OG_DISP, OG_CKP, OG_WORLD, OG_FX, OG_COLOR, OG_TEX, OG_AUDIO, OG_VR, OG_DEBUG, OG_N };
 #define OV_NPAGES OG_N
 static const short kOgQuick[] = { OI_PRESET, OI_FPS, OI_WINMODE, OI_CHIDE, OI_SMON, OI_STEX };
 static const short kOgGame[] = { OI_ASSIST, OI_AUTOGEAR, OI_MMODE, OI_MSENS, OI_STICKAIM, OI_STICKSENS };
 static const short kOgGameA[] = { OI_SBCMOUSE, OI_MPAUSE, OI_SAVELOCK, OI_SLCOMMIT };
 static const short kOgDisp[] = { OI_FPS, OI_WINMODE, OI_RES, OI_RTS, OI_EDGE };
 static const short kOgDispA[] = { OI_EDGEW, OI_EDGES, OI_CPERSP, OI_CPANINI, OI_CWIDTH, OI_VRON }; /* Breitbild wie Launcher */
-static const short kOgCkp[] = { OI_CHIDE, OI_SMON };
+static const short kOgCkp[] = { OI_CHIDE, OI_MONVIEW, OI_SMON }; /* + W319 */
 static const short kOgCkpA[] = { OI_GRAIN, OI_GLITCH, OI_LABEL, OI_RPLABEL, OI_RPLOGO, OI_WMMEDIA }; /* Korn/Stoerung unter Monitor-Effekt; + W290 */
 static const short kOgWorld[] = { OI_SHADING, OI_SLIGHT, OI_SSHADOW, OI_FOG, OI_SBLOOM, OI_SGLOW };
 static const short kOgWorldA[] = { OI_EXPO, OI_TONE, OI_WGAM, OI_WCON, OI_LWORLD, OI_LCKP, OI_CLIGHT, OI_CGLOW, OI_CSPILL,
                                    OI_BLOOM, OI_BTHR }; /* Schatten: Sammelregler ist die Einstellung (wie Launcher) */
 static const short kOgFx[] = { OI_FXPRESET, OI_AA, OI_SSAO, OI_WSHARP };
-static const short kOgFxA[] = { OI_FXSOFT, OI_FXEMB, OI_FXLIGHT, OI_FXLCKP, OI_FXIP, OI_FOCUS };
+static const short kOgFxA[] = { OI_FXSOFT, OI_FXEMB, OI_FXLIGHT, OI_FXLCKP, OI_FXIP, OI_FOCUS, OI_RPFX }; /* + W299 */
 static const short kOgColor[] = { OI_SLOOK };
 static const short kOgColorA[] = { OI_CSAT, OI_CTEMP, OI_CLIFT, OI_CGAM, OI_CGAIN };
 static const short kOgTex[] = { OI_STEX, OI_TEXINFO };
+/* W303 AUDIO-VOLUME: Gruppe "Ton" (Launcher "Ton & Extras"); hinter Texturen, damit die Seitenleisten-
+ * Indizes der Test-Hooks (MTAB2 = Anzeige) gleich bleiben. Lautstaerke ist neutral (kein Kolben). */
+static const short kOgAudio[] = { OI_VOLM, OI_VOLMU, OI_VOLSFX, OI_VOLVOX };
 static const short kOgVr[] = { OI_VRPRESET, OI_VRREC, OI_VRSEAT, OI_VRFWD, OI_VRSCALE, OI_VRMIRROR };
 static const short kOgVrA[] = { OI_VRIPD, OI_VRPREV, OI_VRRES, OI_VRHZ, OI_VRWORLD, OI_VRSHADE, OI_VRSHELL, OI_VRVIG };
 static const short kOgDebug[] = { OI_XWIRE, OI_XVAPOR, OI_VQASYNC, OI_ABCMP, OI_FXCMP };
@@ -139,6 +145,7 @@ static const ov_grp_t kOvGrp[OG_N] = {
     { "ovl.grp_fx", "Effekte", OG_ROWS(kOgFx), OG_ROWS(kOgFxA), 1 },
     { "ovl.grp_color", "Farbe", OG_ROWS(kOgColor), OG_ROWS(kOgColorA), 1 },
     { "ovl.grp_tex", "Texturen", OG_ROWS(kOgTex), NULL, 0, 1 },
+    { "ovl.grp_audio", "Ton", OG_ROWS(kOgAudio), NULL, 0, 1 }, /* W303: "Auf Original" = alle 100 % */
     { "ovl.grp_vr", "VR", OG_ROWS(kOgVr), OG_ROWS(kOgVrA), 0 },
     { "ovl.grp_debug", "Debug", OG_ROWS(kOgDebug), NULL, 0, 1 },
 };
@@ -169,6 +176,7 @@ static int g_ov_init;
 static int g_ov_fps;                    /* gewaehlte Bildrate (0 = 30, sonst Bilder/s; bei auto die aufgeloeste Rate) */
 static int g_ov_auto;                   /* W223: 1 = Monitor (auto) gewaehlt */
 static int g_ov_fps_pend;               /* 1 = Wechsel am Present-Ende faellig */
+static volatile LONG g_ov_mon_hz;       /* W309: letzte bekannte Rate des Spielmonitors (0 = unbekannt) */
 static int g_ov_winmode;                /* Darstellung (nach Neustart) */
 static int g_ov_label0;                  /* W153: hud_label_avoid beim Start ("*" bei Abweichung) */
 static int g_ov_avail;                  /* HD-Paket: 1 = x2, 2 = x4 */
@@ -440,6 +448,7 @@ static int ov_enabled(int i)
     case OI_SLCOMMIT: return krnl_savelock_active(); /* W190: nur mit aktivem Schutz */
     case OI_XWIRE: case OI_XVAPOR: return !g_cfg.vr_enable; /* W240: in VR gesperrt */
     case OI_CHIDE: return !g_cfg.vr_enable; /* W268: in VR gesperrt (flache Leinwand statt Cockpit) */
+    case OI_MONVIEW: return !g_cfg.vr_enable; /* W319: in VR gesperrt */
     default: return 1;
     }
 }
@@ -454,6 +463,8 @@ static int ov_effective(int i)
     case OI_SLIGHT: case OI_SBLOOM: case OI_SSHADOW: return g_cfg.shading != 0; /* W291: Sammel wie die Einzelwerte */
     case OI_SHSOFT: return g_cfg.shading != 0 && g_cfg.shade_shadow != 0;
     case OI_CPERSP: case OI_CPANINI: case OI_CWIDTH: return !g_cfg.vr_enable; /* W191/W235: nur Desktop, in VR ohne Wirkung (gedimmt) */
+    case OI_RPFX: return g_cfg.cockpit_hide && !g_cfg.vr_enable && g_cfg.monitor_view <= 0; /* W299: wirkt nur in der Vollbild-Ansicht */
+    case OI_CHIDE: return !g_cfg.vr_enable && g_cfg.monitor_view <= 0; /* W319: Monitoransicht hat Vorrang (gedimmt) */
     default: return ov_enabled(i);
     }
 }
@@ -658,7 +669,7 @@ static void ov_tex_change(int dir)
  * gespeichert wird erst mit "Als Standard speichern". */
 static const struct { const char *key; unsigned char og; } kOvKeyGrp[] = {
     { "edge_mode", OG_DISP }, { "edge_fade_width", OG_DISP }, { "edge_fade_strength", OG_DISP },
-    { "cockpit_hide", OG_CKP }, { "monitor_fx", OG_CKP }, { "monitor_grain", OG_CKP }, { "monitor_glitch", OG_CKP },
+    { "cockpit_hide", OG_CKP }, { "monitor_view", OG_CKP }, { "monitor_fx", OG_CKP }, { "monitor_grain", OG_CKP }, { "monitor_glitch", OG_CKP },
     { "cockpit_persp", OG_DISP }, { "cockpit_panini", OG_DISP }, { "cockpit_width", OG_DISP },
     { "hud_label_avoid", OG_CKP }, { "replay_label", OG_CKP }, { "replay_logo", OG_CKP },
     { "shading", OG_WORLD }, { "world_fog", OG_WORLD }, { "world_contrast", OG_WORLD }, { "world_gamma", OG_WORLD },
@@ -675,6 +686,7 @@ static const struct { const char *key; unsigned char og; } kOvKeyGrp[] = {
 };
 static int g_ov_undo;                    /* 1 = "Zurueck zum Original" lief, Zeile heisst "Rueckgaengig" */
 static int g_ov_usnap[SB_OF_NKEY], g_ov_usnap_rem, g_ov_usnap_hd;
+static int g_ov_usnap_rpfx; /* W299: replay_fx_live (kein Tabellen-Schluessel) */
 
 static int ov_key_grp(const char *key)
 {
@@ -695,6 +707,12 @@ static void ov_reset(int og)
         }
         g_ov_usnap_rem = g_cfg.remaster;
         g_ov_usnap_hd = g_cfg.hd_textures;
+        g_ov_usnap_rpfx = g_cfg.replay_fx_live;
+    }
+    if ((og == OG_QUICK || og == OG_FX) && g_cfg.replay_fx_live) { /* W299: Replay-Filter live ist nicht original */
+        g_cfg.replay_fx_live = 0;
+        HLOG_I("OVERLAY: replay_fx_live -> 0 (f=%u)", g_present_no);
+        n++;
     }
     for (i = 0; i < SB_OF_NKEY; i++) {
         const char *k = kSbOrigFlag[i].key;
@@ -712,6 +730,12 @@ static void ov_reset(int og)
         if (g_ov_avail) { ov_hd_apply(0, ov_hd_scale(), "Original:"); }
         else { g_cfg.hd_textures = 0; }
         n++;
+    }
+    if (og == OG_AUDIO) { /* W303: Lautstaerke (nicht in kSbOrigFlag, neutral) -> 100 % */
+        int *vp[4] = { &g_cfg.volume_master, &g_cfg.volume_music, &g_cfg.volume_sfx, &g_cfg.volume_voice };
+        for (i = 0; i < 4; i++) {
+            if (*vp[i] != 100) { *vp[i] = 100; n++; }
+        }
     }
     if (og == OG_QUICK || og == OG_DEBUG) { /* Vergleich (B) gehoert zum Debug */
         g_shfx_bypass = 0;
@@ -735,6 +759,7 @@ static void ov_undo(void)
     if (hd_want && !ov_hd_on() && g_ov_avail) { ov_hd_apply(1, ov_hd_scale(), "Rueckgaengig:"); }
     g_cfg.remaster = g_ov_usnap_rem;
     g_cfg.hd_textures = g_ov_usnap_hd;
+    g_cfg.replay_fx_live = g_ov_usnap_rpfx; /* W299 */
     g_ov_undo = 0;
     sb_render_pause_dirty();
     HLOG_I("OVERLAY: Rueckgaengig (eigene Werte zurueck, f=%u)", g_present_no);
@@ -751,7 +776,16 @@ static int ov_fps_sel(void)
 static int ov_monitor_hz(void)
 {
     HWND h = sb_render_hwnd();
-    return sb_fps_monitor_hz(h ? MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY) : NULL);
+    int hz = sb_fps_monitor_hz(h ? MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY) : NULL);
+    InterlockedExchange(&g_ov_mon_hz, hz); /* W309: Kennzeichen in der Anzeige */
+    return hz;
+}
+
+/* W309 FPS-MONITOR: Rate des Spielmonitors aus sb_winmode_tick (feste Rate,
+ * Monitorwechsel); nur gemerkt fuer das Kennzeichen in der Anzeige. */
+void sb_ovl_monitor_hz(int hz)
+{
+    InterlockedExchange(&g_ov_mon_hz, hz);
 }
 
 static void ov_change(int i, int dir)
@@ -759,25 +793,29 @@ static void ov_change(int i, int dir)
     int k;
     if (!ov_enabled(i)) { return; }
     switch (i) {
-    case OI_FPS: { /* W223 FPS-RATES: Monitor (auto), 30, 60, 75, 90, 100, 120, 144, 165, 240 */
-        int k0 = g_ov_auto ? 0 : sb_fps_choice_idx(g_ov_fps);
+    case OI_FPS: { /* W223 FPS-RATES: Monitor (auto), 30, 60 ... 240; W309: nur bis zur Monitorrate */
+        SbFpsItem fl[SB_FPS_LIST_MAX];
+        int hz0 = ov_monitor_hz(), nl = sb_fps_list(hz0, ov_fps_sel(), fl, SB_FPS_LIST_MAX);
+        int k0 = sb_fps_list_idx(fl, nl, ov_fps_sel());
         if (k0 < 0) { /* alter Sonderwert (z. B. aus der cfg): naechster Listenwert darueber */
-            for (k0 = 1; k0 < SB_FPS_NCHOICE - 1 && kSbFpsChoice[k0] < g_ov_fps; k0++) {}
+            for (k0 = 1; k0 < nl - 1 && fl[k0].v < g_ov_fps; k0++) {}
         }
-        k = ov_clamp(k0 + dir, 0, SB_FPS_NCHOICE - 1);
+        k = ov_clamp(k0 + dir, 0, nl - 1);
         if (k == k0) { return; }
-        if (kSbFpsChoice[k] == SB_FPS_AUTO) {
+        if (fl[k].v == SB_FPS_AUTO) {
             int hz = ov_monitor_hz();
             g_ov_auto = 1;
             g_ov_fps = sb_fps_auto_from_hz(hz);
             HLOG_I("OVERLAY: Bildrate auto -> %d (Monitor %d Hz, f=%u)", g_ov_fps, hz, g_present_no);
         } else {
             g_ov_auto = 0;
-            g_ov_fps = kSbFpsChoice[k];
+            g_ov_fps = fl[k].v;
         }
         g_ov_fps_pend = 1;
         HLOG_I("OVERLAY: Bildrate -> %d (interp_fps, f=%u)", g_ov_fps ? g_ov_fps : 30, g_present_no);
-        ov_status_key("ovl.st_fps");
+        /* W309: Statuszeile nennt, warum ein Wert ruckeln kann (ueber Monitor / kein Teiler) */
+        ov_status_key((fl[k].flags & SB_FPS_F_ABOVE) ? "ovl.st_fps_above" :
+                      (fl[k].flags & SB_FPS_F_JUDDER) ? "ovl.st_fps_judder" : "ovl.st_fps");
         break;
     }
     case OI_SHADING:
@@ -1043,6 +1081,12 @@ static void ov_change(int i, int dir)
         HLOG_I("OVERLAY: cockpit_hide -> %d (f=%u)", g_cfg.cockpit_hide, g_present_no);
         ov_status_key(g_cfg.cockpit_hide ? "ovl.st_chide_on" : "ovl.st_chide_off");
         break;
+    case OI_MONVIEW: /* W319 MONITOR-VIEW: Aus / Hauptmonitor / + Radar und FRONT VIEW (Umlauf), wirkt ab dem naechsten Spielbild */
+        g_cfg.monitor_view = (g_cfg.monitor_view + dir + 3) % 3;
+        HLOG_I("OVERLAY: monitor_view -> %d (f=%u)", g_cfg.monitor_view, g_present_no);
+        ov_status_key(g_cfg.vr_enable ? "ovl.st_mview_vr" : g_cfg.monitor_view == 2 ? "ovl.st_mview_2" :
+                      g_cfg.monitor_view == 1 ? "ovl.st_mview_1" : "ovl.st_mview_0");
+        break;
     case OI_LABEL: /* W153: wirkt ab Neustart (Patch beim Start) */
         g_cfg.hud_label_avoid = !g_cfg.hud_label_avoid;
         HLOG_I("OVERLAY: hud_label_avoid -> %d (wirkt nach Neustart, f=%u)", g_cfg.hud_label_avoid, g_present_no);
@@ -1231,6 +1275,18 @@ static void ov_change(int i, int dir)
         g_cfg.watermark_media = !g_cfg.watermark_media;
         HLOG_I("OVERLAY: watermark_media -> %d (f=%u)", g_cfg.watermark_media, g_present_no);
         break;
+    case OI_VOLM: case OI_VOLMU: case OI_VOLSFX: case OI_VOLVOX: { /* W303: 5er-Schritte, Mischer liest laufend */
+        int *vp = i == OI_VOLM ? &g_cfg.volume_master : i == OI_VOLMU ? &g_cfg.volume_music :
+                  i == OI_VOLSFX ? &g_cfg.volume_sfx : &g_cfg.volume_voice;
+        *vp = ov_clamp((*vp + dir * 5) / 5 * 5, 0, 100);
+        HLOG_I("OVERLAY: %s -> %d (f=%u)", i == OI_VOLM ? "volume_master" : i == OI_VOLMU ? "volume_music" :
+               i == OI_VOLSFX ? "volume_sfx" : "volume_voice", *vp, g_present_no);
+        break;
+    }
+    case OI_RPFX: /* W299 REPLAY-FX: Aus, EFFECT #1..#8 (Umlauf), wirkt ab dem naechsten Bild */
+        g_cfg.replay_fx_live = (g_cfg.replay_fx_live + dir + 9) % 9;
+        HLOG_I("OVERLAY: replay_fx_live -> %d (f=%u)", g_cfg.replay_fx_live, g_present_no);
+        break;
     case OI_STEX: ov_tex_change(dir); break; /* W291 */
     case OI_SLIGHT: case OI_SSHADOW: case OI_SBLOOM: case OI_SGLOW: case OI_SLOOK: /* W291 */
         ov_sum_change(ov_sum_idx(i), dir);
@@ -1284,10 +1340,12 @@ static const ov_key_t kOvKeys[] = {
     { "hud_label_avoid", "render" }, /* W153 */
     { "replay_label", "render" },   { "replay_logo", "render" }, /* W290-Schalter (Abschnitte wie launcher_cfg.c) */
     { "watermark_media", "overlay" },
+    { "replay_fx_live", "render" }, /* W299 */
     { "cockpit_persp", "render" }, /* W191 */
     { "cockpit_panini", "render" }, /* W191 */
     { "cockpit_width", "render" }, /* W235 */
     { "cockpit_hide", "render" }, /* W268 */
+    { "monitor_view", "render" }, /* W319 */
     /* W133 REM-FX */
     { "fx_soft", "render" },        { "fx_embers", "render" },
     { "fx_light", "render" },       { "fx_light_cockpit", "render" },
@@ -1313,6 +1371,8 @@ static const ov_key_t kOvKeys[] = {
     { "vr_shell", "vr" },           { "vr_vignette", "vr" }, /* W242 */
     { "menu_pause", "overlay" }, /* W188 */
     { "save_lock", "game" }, /* W190 */
+    { "volume_master", "audio" },   { "volume_music", "audio" }, /* W303 AUDIO-VOLUME */
+    { "volume_sfx", "audio" },      { "volume_voice", "audio" },
 };
 #define OV_NKEYS (sizeof kOvKeys / sizeof kOvKeys[0])
 
@@ -1350,6 +1410,7 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     else if (strcmp(k, "cockpit_panini") == 0) { v = g_cfg.cockpit_panini; } /* W191 */
     else if (strcmp(k, "cockpit_width") == 0) { v = g_cfg.cockpit_width; } /* W235 */
     else if (strcmp(k, "cockpit_hide") == 0) { v = g_cfg.cockpit_hide ? 1 : 0; } /* W268 */
+    else if (strcmp(k, "monitor_view") == 0) { v = g_cfg.monitor_view; } /* W319 */
     else if (strcmp(k, "edge_fade_width") == 0) { v = g_cfg.edge_fade_width; }
     else if (strcmp(k, "edge_fade_strength") == 0) { v = g_cfg.edge_fade_strength; }
     else if (strcmp(k, "mouse_sens") == 0) { v = g_cfg.mouse_sens; }
@@ -1405,6 +1466,7 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     else if (strcmp(k, "replay_label") == 0) { v = g_cfg.replay_label ? 1 : 0; } /* W290-Schalter */
     else if (strcmp(k, "replay_logo") == 0) { v = g_cfg.replay_logo ? 1 : 0; }
     else if (strcmp(k, "watermark_media") == 0) { v = g_cfg.watermark_media ? 1 : 0; }
+    else if (strcmp(k, "replay_fx_live") == 0) { v = g_cfg.replay_fx_live; } /* W299 */
     else if (strcmp(k, "vis_query_async") == 0) { v = g_cfg.vis_query_async; }
     else if (strcmp(k, "fx_soft") == 0) { v = g_cfg.fx_soft; } /* W133 */
     else if (strcmp(k, "fx_embers") == 0) { v = g_cfg.fx_embers; }
@@ -1415,6 +1477,10 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     else if (strcmp(k, "fx_vaporwave") == 0) { v = g_cfg.fx_vaporwave; } /* W240 */
     else if (strcmp(k, "menu_pause") == 0) { v = g_cfg.menu_pause; } /* W188 */
     else if (strcmp(k, "save_lock") == 0) { v = g_cfg.save_lock; } /* W190 */
+    else if (strcmp(k, "volume_master") == 0) { v = g_cfg.volume_master; } /* W303 */
+    else if (strcmp(k, "volume_music") == 0) { v = g_cfg.volume_music; }
+    else if (strcmp(k, "volume_sfx") == 0) { v = g_cfg.volume_sfx; }
+    else if (strcmp(k, "volume_voice") == 0) { v = g_cfg.volume_voice; }
     _snprintf_s(out, cap, _TRUNCATE, "%d", v);
 }
 
@@ -2256,10 +2322,16 @@ static const char *ov_oi_home(int i)
     case OI_XWIRE: return "fx_wireframe";
     case OI_XVAPOR: return "fx_vaporwave";
     case OI_CHIDE: return "cockpit_hide";
+    case OI_MONVIEW: return "monitor_view"; /* W319 */
     case OI_SMON: return "monitor_fx";
     case OI_RPLABEL: return "replay_label";
     case OI_RPLOGO: return "replay_logo";
     case OI_WMMEDIA: return "watermark_media";
+    case OI_VOLM: return "volume_master"; /* W303 */
+    case OI_VOLMU: return "volume_music";
+    case OI_VOLSFX: return "volume_sfx";
+    case OI_VOLVOX: return "volume_voice";
+    case OI_RPFX: return "replay_fx_live"; /* W299 */
     case OI_STEX: return "remaster,hd_textures,hd_scale";
     default: return "";
     }
@@ -2928,6 +3000,7 @@ static void ov_test_parse(void)
         else if (_stricmp(act, "SIZERES") == 0) { s->act = OA_WMSG; s->vk = 3; }
         else if (_stricmp(act, "ICONIC") == 0) { s->act = OA_WMSG; s->vk = 4; }
         else if (_stricmp(act, "UNICONIC") == 0) { s->act = OA_WMSG; s->vk = 5; }
+        else if (_stricmp(act, "CLICKACT") == 0) { s->act = OA_WMSG; s->vk = 6; } /* W299: Fenster per Linksklick aktivieren (Fokus-Klick) */
         else if (_strnicmp(act, "KDN=", 4) == 0 && act[4]) { s->act = OA_KDN; s->vk = toupper((unsigned char)act[4]); }
         else if (_strnicmp(act, "KUP=", 4) == 0 && act[4]) { s->act = OA_KUP; s->vk = toupper((unsigned char)act[4]); }
         else if (_strnicmp(act, "MDRAG", 5) == 0 && act[5]) { s->act = OA_MDRAG; strcpy_s(s->txt, sizeof s->txt, act + 5); }
@@ -3099,6 +3172,13 @@ static void ov_test_tick(unsigned n)
                 PostMessageA(h, WM_SIZE, SIZE_MINIMIZED, 0);
             } else if (s->vk == 3) {
                 PostMessageA(h, WM_SIZE, SIZE_RESTORED, MAKELPARAM(rc.right, rc.bottom));
+            } else if (s->vk == 6) { /* W299: Reihenfolge wie Windows bei Klick in das inaktive Fenster */
+                PostMessageA(h, WM_MOUSEACTIVATE, (WPARAM)h, MAKELPARAM(HTCLIENT, WM_LBUTTONDOWN));
+                PostMessageA(h, WM_ACTIVATEAPP, TRUE, 0);
+                PostMessageA(h, WM_ACTIVATE, WA_CLICKACTIVE, 0);
+                PostMessageA(h, WM_SETFOCUS, 0, 0);
+                PostMessageA(h, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM(rc.right / 2, rc.bottom / 2));
+                PostMessageA(h, WM_LBUTTONUP, 0, MAKELPARAM(rc.right / 2, rc.bottom / 2));
             } else if (g_cfg.window_hidden) { /* echtes Minimieren nur am unsichtbaren Testfenster, nie aktivierend */
                 ShowWindow(h, s->vk == 4 ? SW_SHOWMINNOACTIVE : SW_SHOWNOACTIVATE);
             } else {
@@ -3498,6 +3578,15 @@ void sb_ovl_present_begin(unsigned n)
     if (!g_cfg.overlay) { return; }
     if (!g_ov_init) { ov_init_state(); }
     sb_ov_tick(n); /* W278 ORIG-FLAG: Umschalten (Taste), Start-Hinweis; vor dem Menue-Takt */
+    if (g_cfg.sbc_usb) { /* W305 JOY-HOTPLUG: Original-Controller getrennt/verbunden */
+        int sev = sbc_wire_take_event();
+        if (sev) {
+            wchar_t t1[160], t2[200];
+            sb_lang_w(sev == 1 ? "ovl.sbc_lost" : "ovl.sbc_back", t1, 160);
+            sb_lang_w(sev == 1 ? "ovl.sbc_lost2" : "ovl.sbc_back2", t2, 200);
+            sb_ov_toast_msg(t1, t2, sev == 1 ? 6000u : 3000u);
+        }
+    }
     ov_frame(n + g_ov_vframes); /* W188: Test-Takt zaehlt die Pausenbilder mit */
 }
 
@@ -3523,6 +3612,7 @@ int sb_ovl_fps_monitor(int hz)
 {
     int v;
     if (!g_ov_init) { return 0; }
+    InterlockedExchange(&g_ov_mon_hz, hz); /* W309 */
     if (!g_ov_auto) { return 1; }
     v = sb_fps_auto_from_hz(hz);
     if (v != g_ov_fps) {
@@ -3711,7 +3801,7 @@ static int ov_exp_state(int i)
         { OI_CSAT, "color_sat" }, { OI_CTEMP, "color_temp" }, { OI_CLIFT, "color_lift" },
         { OI_CGAM, "color_gamma" }, { OI_CGAIN, "color_gain" }, { OI_SHADOW, "shade_shadow" },
         { OI_SHSOFT, "shadow_soft" }, { OI_LABEL, "hud_label_avoid" }, { OI_CPERSP, "cockpit_persp" },
-        { OI_CPANINI, "cockpit_panini" }, { OI_CWIDTH, "cockpit_width" }, { OI_CHIDE, "cockpit_hide" },
+        { OI_CPANINI, "cockpit_panini" }, { OI_CWIDTH, "cockpit_width" }, { OI_CHIDE, "cockpit_hide" }, { OI_MONVIEW, "monitor_view" },
         { OI_FXSOFT, "fx_soft" }, { OI_FXEMB, "fx_embers" }, { OI_FXLIGHT, "fx_light" },
         { OI_FXLCKP, "fx_light_cockpit" }, { OI_FXIP, "fx_interp" }, { OI_XWIRE, "fx_wireframe" },
         { OI_XVAPOR, "fx_vaporwave" },
@@ -3733,6 +3823,7 @@ static int ov_exp_state(int i)
         return a > b2 ? (a > c2 ? a : c2) : (b2 > c2 ? b2 : c2);
     }
     if (i == OI_STEX) { return sb_ov_key_state("hd_textures"); }
+    if (i == OI_RPFX) { return g_cfg.replay_fx_live ? 2 : 1; } /* W299: experimentell (Kolben, bernstein wenn an) */
     if (i == OI_ADV) { /* W291: Feinregler der Gruppe zusammengefasst */
         const ov_grp_t *gp = &kOvGrp[g_ov_page];
         int st = 0, q;
@@ -3800,7 +3891,13 @@ static void ov_label(int i, wchar_t *o, size_t cap)
         "ovl.lb_smon", "ovl.lb_hd", "ovl.lb_slight", "ovl.lb_shadow", "ovl.lb_sbloom", "ovl.lb_sglow", "ovl.lb_slook",
         "ovl.lb_adv", "ovl.lb_reset_grp", "ovl.lb_texinfo",
         /* W290-Schalter (Namen wie im Launcher, Karte "Fotos & Screenshots") */
-        "ovl.lb_rplabel", "ovl.lb_rplogo", "ovl.lb_wmmedia" };
+        "ovl.lb_rplabel", "ovl.lb_rplogo", "ovl.lb_wmmedia",
+        /* W303 AUDIO-VOLUME */
+        "ovl.lb_volm", "ovl.lb_volmu", "ovl.lb_volsfx", "ovl.lb_volvox",
+        /* W299 */
+        "ovl.lb_rpfx",
+        /* W319 */
+        "ovl.lb_monview" };
     ov_wkey(o, cap, lb[i]);
 }
 
@@ -3817,7 +3914,15 @@ static void ov_value(int i, wchar_t *o, size_t cap)
             _snprintf_s(nb, sizeof nb, _TRUNCATE, LT("ovl.v_fps_auto"), g_ov_fps > 0 ? g_ov_fps : g_cfg.game_tick);
             ov_wu8(o, cap, nb);
         } else if (g_ov_fps == 0) { ov_wkey(o, cap, g_cfg.game_tick == 25 ? "ovl.v_25orig" : "ovl.v_30orig"); } /* W234 */
-        else { _snwprintf_s(o, cap, _TRUNCATE, L"%d", g_ov_fps); }
+        else { /* W309: "120 (kann ruckeln)" / "240 (ueber Monitor)" nach der Rate des Spielmonitors */
+            int f = sb_fps_flags((int)g_ov_mon_hz, g_ov_fps);
+            char nb[64];
+            if (f) {
+                _snprintf_s(nb, sizeof nb, _TRUNCATE, LT((f & SB_FPS_F_ABOVE) ? "ovl.v_fps_above" : "ovl.v_fps_judder"),
+                            g_ov_fps);
+                ov_wu8(o, cap, nb);
+            } else { _snwprintf_s(o, cap, _TRUNCATE, L"%d", g_ov_fps); }
+        }
         break;
     case OI_SHADING: ov_wkey(o, cap, g_cfg.shading ? "ovl.v_on" : "ovl.v_off"); break;
     case OI_MPAUSE: ov_wkey(o, cap, g_cfg.menu_pause ? "ovl.v_on" : "ovl.v_off"); break; /* W188 */
@@ -3886,9 +3991,24 @@ static void ov_value(int i, wchar_t *o, size_t cap)
     case OI_CHIDE: /* W268; W291: "Cockpit: An (Original) / Aus (Vollbild-Ansicht)" wie W290 */
         ov_wkey(o, cap, g_cfg.vr_enable ? "ovl.v_xp_vr" : g_cfg.cockpit_hide ? "ovl.v_ckp_off" : "ovl.v_ckp_on");
         break;
+    case OI_MONVIEW: /* W319 */
+        ov_wkey(o, cap, g_cfg.vr_enable ? "ovl.v_xp_vr" : g_cfg.monitor_view == 2 ? "ovl.v_mview_2" :
+                        g_cfg.monitor_view == 1 ? "ovl.v_mview_1" : "ovl.v_offorig");
+        break;
     case OI_RPLABEL: ov_wkey(o, cap, g_cfg.replay_label ? "ovl.v_onorig" : "ovl.v_off"); break; /* W290-Schalter */
     case OI_RPLOGO: ov_wkey(o, cap, g_cfg.replay_logo ? "ovl.v_onorig" : "ovl.v_off"); break;
     case OI_WMMEDIA: ov_wkey(o, cap, g_cfg.watermark_media ? "ovl.v_on" : "ovl.v_off"); break;
+    case OI_VOLM: _snwprintf_s(o, cap, _TRUNCATE, L"%d %%", g_cfg.volume_master); break; /* W303 */
+    case OI_VOLMU: _snwprintf_s(o, cap, _TRUNCATE, L"%d %%", g_cfg.volume_music); break;
+    case OI_VOLSFX: _snwprintf_s(o, cap, _TRUNCATE, L"%d %%", g_cfg.volume_sfx); break;
+    case OI_VOLVOX: _snwprintf_s(o, cap, _TRUNCATE, L"%d %%", g_cfg.volume_voice); break;
+    case OI_RPFX: { /* W299: Namen der Spiel-Filter ("EFFECT #n") mit Beschreibung */
+        static const char *const fk[9] = { "ovl.v_offorig", "ovl.v_rpfx1", "ovl.v_rpfx2", "ovl.v_rpfx3", "ovl.v_rpfx4",
+                                           "ovl.v_rpfx5", "ovl.v_rpfx6", "ovl.v_rpfx7", "ovl.v_rpfx8" };
+        int k = g_cfg.replay_fx_live;
+        ov_wkey(o, cap, fk[k >= 0 && k <= 8 ? k : 0]);
+        break;
+    }
     case OI_SMON: { /* W291 */
         static const char *const mk[4] = { "ovl.v_orig", "ovl.v_mon_grain", "ovl.v_mon_glitch", "ovl.v_off" };
         int q = ov_mon_stage();
@@ -4675,7 +4795,8 @@ static void ov_paint(void)
             int st = sbc_wire_status();
             y += S(11.0f);
             ov_wkey(ctl, 64, st == SBC_WIRE_USB_OK ? "ovl.ctl_usb" : st == SBC_WIRE_FIXTURE ? "ovl.ctl_fixture" :
-                              st == SBC_WIRE_PENDING ? "ovl.ctl_search" : "ovl.ctl_none");
+                              st == SBC_WIRE_PENDING ? "ovl.ctl_search" :
+                              st == SBC_WIRE_LOST ? "ovl.ctl_lost" : "ovl.ctl_none"); /* W305 */
             ov_text(pad + S(2.0f), y, ctl,
                     st == SBC_WIRE_USB_OK || st == SBC_WIRE_FIXTURE ? OV_C_TXT : OV_C_DIM, 0);
         }

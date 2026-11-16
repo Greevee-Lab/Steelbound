@@ -22,6 +22,8 @@ typedef struct locnet_peer {
 
 typedef struct locnet_stats {
     volatile LONG tx, rx, bc, drop, sockets, accepts, connects;
+    volatile LONG last34_ms; /* W297: GetTickCount des letzten gesendeten 0x34-Rahmens (Lockstep aktiv) */
+    volatile LONG typ_seen[2][8]; /* W297: Rahmentyp < 256 gesehen (Bit), [0] empfangen, [1] gesendet - nur Typ, kein Inhalt */
 } locnet_stats;
 
 typedef void (*locnet_log_fn)(const char *msg);

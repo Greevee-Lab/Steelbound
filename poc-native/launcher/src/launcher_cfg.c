@@ -34,6 +34,7 @@ void lcfg_defaults(launcher_settings_t *s)
     s->fps_limit = 120;
     s->audio = 1;
     s->audio_live = 1;
+    s->volume_master = s->volume_music = s->volume_sfx = s->volume_voice = 100; /* W303 AUDIO-VOLUME */
     s->aspect_mode = 1; /* W47: Pillarbox + Hor+, nie strecken (S3.10) */
     s->input_profile[0] = '\0'; /* W78: leer = Legacy-Tastatur */
     s->sbc_usb = 0;             /* W78: USB-Controller aus */
@@ -41,6 +42,7 @@ void lcfg_defaults(launcher_settings_t *s)
     s->aim_assist = 0;          /* W236 AIM-ASSIST: Standard Original */
     s->auto_gear = 0;
     s->cockpit_hide = 0; /* W268 */
+    s->monitor_view = 0; /* W319 */
     s->stick_aim = 0;           /* W271 STICK-RELATIVE: Standard Position (Original) */
     s->stick_aim_sens = 4;
     s->game_tick = 30;          /* W234 PAL50: Standard 30 Ticks/s */
@@ -410,6 +412,14 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         s->audio = atoi(v);
     } else if (strcmp(k, "audio_live") == 0) {
         s->audio_live = atoi(v);
+    } else if (strcmp(k, "volume_master") == 0 || strcmp(k, "volume_music") == 0 || /* W303 AUDIO-VOLUME */
+               strcmp(k, "volume_sfx") == 0 || strcmp(k, "volume_voice") == 0) {
+        int vol = atoi(v); /* 0..100 klemmen (wie hcfg) */
+        vol = vol < 0 ? 0 : (vol > 100 ? 100 : vol);
+        if (strcmp(k, "volume_master") == 0) { s->volume_master = vol; }
+        else if (strcmp(k, "volume_music") == 0) { s->volume_music = vol; }
+        else if (strcmp(k, "volume_sfx") == 0) { s->volume_sfx = vol; }
+        else { s->volume_voice = vol; }
     } else if (strcmp(k, "aspect_mode") == 0) {
         s->aspect_mode = atoi(v);
     } else if (strcmp(k, "input_profile") == 0) {
@@ -430,6 +440,9 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         s->auto_gear = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "cockpit_hide") == 0) { /* W268 */
         s->cockpit_hide = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "monitor_view") == 0) { /* W319 */
+        s->monitor_view = atoi(v);
+        if (s->monitor_view < 0 || s->monitor_view > 2) s->monitor_view = 0;
     } else if (strcmp(k, "fx_wireframe") == 0) { /* W278 */
         s->fx_wireframe = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "fx_vaporwave") == 0) { /* W278 */
@@ -650,6 +663,8 @@ static const char *kManaged[][2] = {
     { "fs_interp_match", "render" },
     { "fps_limit", "display" },     { "audio", "audio" },
     { "audio_live", "audio" },      { "aspect_mode", "render" },
+    { "volume_master", "audio" },   { "volume_music", "audio" }, /* W303 AUDIO-VOLUME */
+    { "volume_sfx", "audio" },      { "volume_voice", "audio" },
     { "input_profile", "input" },   { "sbc_usb", "input" },
     { "sbc_mouse_off", "input" }, /* W128 */
     { "aim_assist", "input" },     { "auto_gear", "input" }, /* W218, W236 */
@@ -673,6 +688,7 @@ static const char *kManaged[][2] = {
     { "cockpit_panini", "render" }, /* W191 */
     { "cockpit_width", "render" }, /* W235 */
     { "cockpit_hide", "render" }, /* W268 */
+    { "monitor_view", "render" }, /* W319 */
     { "fx_wireframe", "render" },   { "fx_vaporwave", "render" }, /* W278: Hinweis/Zuruecksetzen */
     { "remaster", "remaster" },     { "hd_textures", "remaster" }, /* W103 */
     { "hd_scale", "remaster" },     { "fx_enhanced", "remaster" },
@@ -781,6 +797,14 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = s->audio;
         } else if (strcmp(k, "audio_live") == 0) {
             v = s->audio_live;
+        } else if (strcmp(k, "volume_master") == 0) { /* W303 AUDIO-VOLUME */
+            v = s->volume_master < 0 ? 0 : (s->volume_master > 100 ? 100 : s->volume_master);
+        } else if (strcmp(k, "volume_music") == 0) {
+            v = s->volume_music < 0 ? 0 : (s->volume_music > 100 ? 100 : s->volume_music);
+        } else if (strcmp(k, "volume_sfx") == 0) {
+            v = s->volume_sfx < 0 ? 0 : (s->volume_sfx > 100 ? 100 : s->volume_sfx);
+        } else if (strcmp(k, "volume_voice") == 0) {
+            v = s->volume_voice < 0 ? 0 : (s->volume_voice > 100 ? 100 : s->volume_voice);
         } else if (strcmp(k, "aspect_mode") == 0) {
             v = s->aspect_mode;
         } else if (strcmp(k, "sbc_usb") == 0) {
@@ -795,6 +819,8 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = s->auto_gear ? 1 : 0;
         } else if (strcmp(k, "cockpit_hide") == 0) { /* W268 */
             v = s->cockpit_hide ? 1 : 0;
+        } else if (strcmp(k, "monitor_view") == 0) { /* W319 */
+            v = (s->monitor_view >= 0 && s->monitor_view <= 2) ? s->monitor_view : 0;
         } else if (strcmp(k, "fx_wireframe") == 0) { /* W278 */
             v = s->fx_wireframe ? 1 : 0;
         } else if (strcmp(k, "fx_vaporwave") == 0) {

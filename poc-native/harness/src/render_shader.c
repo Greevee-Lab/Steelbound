@@ -40,8 +40,9 @@ static void sb_im_ps_source(void)
         "    bool ok = (af == 2u) ? (a8 < r8) : (af == 3u) ? (a8 == r8) : (af == 4u) ? (a8 <= r8) :\n"
         "              (af == 5u) ? (a8 > r8) : (af == 6u) ? (a8 != r8) : (af == 7u) ? (a8 >= r8) : (af == 8u);\n"
         "    if (!ok) { discard; } }\n"
+        "%s" /* W302 AMD-ARTIFACTS: shader_nan_mark / post_sanitize */
         "  return c;\n"
-        "}\n");
+        "}\n", sb_nan_hlsl_c());
 }
 
 ID3D11VertexShader *g_im_vs;

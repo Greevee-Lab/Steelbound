@@ -126,6 +126,10 @@ typedef struct {
     int stick_aim;
     float stick_aim_rate;
     int stick_aim_accel;
+    /* W299 REPLAY: 1 = Maustasten tragen nicht zur Hauptwaffe (bi0) bei (Hook setzt es waehrend einer
+     * Spiel-Replay-Wiedergabe mit replay_mouse_exit=0). Andere Maus-Bindungen, Tastatur, Pad, Original-
+     * Controller und Joystick bleiben. 0 = bisheriges Verhalten bitgenau. */
+    int bi0_nomouse;
 } imap_snap_t;
 
 /* W260 MOUSE-WHEEL: Mausrad-Rasten als Tastenimpulse (Quellen
@@ -337,6 +341,12 @@ typedef struct {
      * Profil (auch leer = aus). Fehlt sie, gilt der Uebergang aus imap_profile_parse (s. imap_quick_shot_migrate). */
     imap_bind_t quick_shot;
     int quick_shot_set;
+    /* W299 REPLAY: Client-Aktion "replay_exit" (laufendes Spiel-Replay beenden, Abschnitt [client], Standard
+     * KEY:BACKSPACE). Der Hook wertet sie selbst aus (Pegel, alle Quellen) und drueckt waehrend der
+     * Wiedergabe die Hauptwaffe (bi0) - das ist im Spiel-Replay die einzige Abbruchtaste. replay_exit_set = 1:
+     * Zeile steht im Profil (auch leer = aus); fehlt sie, gilt der Standard (imap_profile_parse). */
+    imap_bind_t replay_exit;
+    int replay_exit_set;
     int has_pad; /* 1 = Profil referenziert Pad-Quellen */
     int has_sbc; /* 1 = Profil referenziert SBC-Quellen */
     /* W221 HOTAS (experimentell): Geraete-Zuordnung je Slot ("joy0 = <Name
@@ -393,6 +403,9 @@ int imap_action_orig_view(const imap_profile_t *prof, imap_state_t *st,
 /* W290 QUICK-SHOT: Aktion "quick_shot", Pad/Controller/Joystick-Flanke (Tasten: Fenster). Unbelegt -> 0. */
 int imap_action_quick_shot(const imap_profile_t *prof, imap_state_t *st,
                            const imap_snap_t *snap);
+/* W299 REPLAY: Pegel der Aktion "replay_exit" (alle Quellen inkl. Tastatur). Unbelegt -> 0. */
+int imap_action_replay_exit(const imap_profile_t *prof, const imap_snap_t *snap);
+#define IMAP_REPLAY_EXIT_DEFAULT "KEY:BACKSPACE"
 /* W290: Uebergang fuer Profile ohne quick_shot-Zeile (von imap_profile_parse gerufen):
  *   photo genau KEY:F12 (alter Standard) -> photo = KEY:SHIFT+KEY:F12, quick_shot = KEY:F12;
  *   sonst bleibt photo, quick_shot = KEY:F12, wenn F12 (ohne Zusatztaste) frei ist, sonst leer.

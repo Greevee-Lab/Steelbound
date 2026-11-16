@@ -13,6 +13,8 @@
 #include "sb_crash.h"
 #include "sb_diagcore.h"
 #include "sb_edition.h"
+#include "sb_fpsrate.h" /* W309: monitor_hz */
+#include "sb_texhealth.h" /* W315 */
 #include "sb_pack.h"
 #include "sb_pause.h"
 #include "sb_profile.h"
@@ -216,6 +218,16 @@ static void gpu_desc(char *o, size_t cap)
     IDXGIDevice_Release(dx);
 }
 
+HWND sb_render_hwnd(void); /* d3d11_render.c */
+
+/* W309 FPS-MONITOR: Rate des Spielmonitors (Fenster, sonst Hauptmonitor; 0 = unbekannt).
+ * vblank_hz ist die Xbox-Zeitbasis, nicht der Monitor. */
+static int crash_monitor_hz(void)
+{
+    HWND h = sb_render_hwnd();
+    return sb_fps_monitor_hz(h ? MonitorFromWindow(h, MONITOR_DEFAULTTOPRIMARY) : NULL);
+}
+
 void sb_crash_note_game(const sb_gamever_t *gv)
 {
     char build[64], pdb_emu[200], pdb_ldr[200], gpu[300], game[300];
@@ -238,11 +250,11 @@ void sb_crash_note_game(const sb_gamever_t *gv)
                 "build-id: %s | loader %s\r\n"
                 "game: %s\r\n"
                 "gpu: %s\r\n"
-                "settings: %ux%u window_mode=%d interp_fps=%d vblank_hz=%d shading=%d monitor_fx=%d edge_mode=%d "
+                "settings: %ux%u window_mode=%d interp_fps=%d vblank_hz=%d monitor_hz=%d shading=%d monitor_fx=%d edge_mode=%d "
                 "aa_mode=%d remaster=%d hd_textures=%d vr_enable=%d lang=%s input_profile=%s\r\n"
                 "data-location: %s (%s)\r\n",
                 SB_EDITION_NAME, sb_version_str()[0] ? sb_version_str() : "dev", build, pdb_emu, pdb_ldr, game, gpu,
-                g_cfg.width, g_cfg.height, g_cfg.window_mode, g_cfg.interp_fps, g_cfg.vblank_hz, g_cfg.shading,
+                g_cfg.width, g_cfg.height, g_cfg.window_mode, g_cfg.interp_fps, g_cfg.vblank_hz, crash_monitor_hz(), g_cfg.shading,
                 g_cfg.monitor_fx, g_cfg.edge_mode, g_cfg.aa_mode, g_cfg.remaster, g_cfg.hd_textures, g_cfg.vr_enable,
                 g_cfg.lang[0] ? g_cfg.lang : "en", g_cfg.input_profile[0] ? g_cfg.input_profile : "(legacy)",
                 sb_userdata_mode_name(sb_userdata_mode()), sb_userdata_mode_source());
@@ -495,8 +507,10 @@ static void write_info(const char *dir, const char *kind, const char *status, co
 {
     SYSTEMTIME lt;
     char st[400];
+    static char th[2048]; /* W315: Textur-Gesundheit (letzter Stand, keine DXGI-Abfrage im Absturz) */
     GetLocalTime(&lt);
     state_line(st, sizeof st);
+    __try { sb_th_format(th, sizeof th, 0); } __except (EXCEPTION_EXECUTE_HANDLER) { strcpy_s(th, sizeof th, "[texture health] (unavailable)\r\n"); }
     _snprintf_s(g_buf, sizeof g_buf, _TRUNCATE,
                 "Steelbound %s report (W279)\r\n"
                 "status: %s\r\n"
@@ -506,6 +520,7 @@ static void write_info(const char *dir, const char *kind, const char *status, co
                 "%s\r\n"
                 "%s"
                 "%s%s"
+                "\r\n%s"
                 "\r\n[active packs]\r\n%s"
                 "\r\n[settings changed from sb_native.cfg]\r\n%s"
                 "\r\n[files]\r\n"
@@ -516,7 +531,7 @@ static void write_info(const char *dir, const char *kind, const char *status, co
                 kind, status, lt.wYear, lt.wMonth, lt.wDay, lt.wHour, lt.wMinute, lt.wSecond, reason,
                 exc && exc[0] ? exc : "", exc && exc[0] ? "\r\n" : "", st,
                 g_fixed[0] ? g_fixed : "client: (start not finished - no fixed details yet)\r\n",
-                dumpnote && dumpnote[0] ? dumpnote : "", dumpnote && dumpnote[0] ? "\r\n" : "",
+                dumpnote && dumpnote[0] ? dumpnote : "", dumpnote && dumpnote[0] ? "\r\n" : "", th,
                 g_packs[0] ? g_packs : "(none loaded)\r\n", g_cfgdiff[0] ? g_cfgdiff : "(not known yet)\r\n",
                 "info.txt",
                 strcmp(kind, "hang") == 0 ? "hang.txt = stacks of all game threads; hang.dmp = minidump"

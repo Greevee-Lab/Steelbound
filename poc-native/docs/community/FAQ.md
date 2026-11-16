@@ -51,25 +51,25 @@ clip) or **Esc → Feedback**. The game creates a feedback package and
 opens a pre-filled GitHub issue plus the folder; drag the files in and
 submit. Nothing is sent automatically. Please add the mission, the VT,
 the steps and your settings. Details:
-[Alpha testing](ALPHA_TESTING.md#sending-a-report).
+[Beta testing](BETA_TESTING.md#sending-a-report).
 
 ## The game crashed or froze. What now?
 
 Open the launcher again: it shows **"The last session crashed"** once,
 with **Report on GitHub** (packs the report into a ZIP and opens a
 pre-filled bug report – you drag the ZIP in yourself) and **Open report
-folder**. For anything else, **Alpha Test › Create diagnostic package**
+folder**. For anything else, **Test tools › Create diagnostic package**
 makes one cleaned ZIP with system info, versions, changed settings, packs,
 the last logs and crash reports – no saves, no inputs, no user names or
 paths. Nothing is uploaded automatically. Details:
-[Reporting crashes and glitches](ALPHA_TESTING.md#reporting-crashes-and-glitches).
+[Reporting crashes and glitches](BETA_TESTING.md#reporting-crashes-and-glitches).
 
 ## Which keys are there besides driving and fighting?
 
 **Esc** game menu (pauses), **Pause** pause/continue, **F11** / **F9**
 feedback, **F12** quick screenshot, **Shift + F12** photo mode, **F2** performance overlay, **F10** free
 the mouse, **Alt + Enter** window/fullscreen. All are listed in
-[Alpha testing](ALPHA_TESTING.md#hotkeys-at-a-glance) and
+[Beta testing](BETA_TESTING.md#hotkeys-at-a-glance) and
 [Controls](CONTROLS.md).
 
 ## How does photo mode work?
@@ -94,7 +94,7 @@ Yes: **Advanced › Saves & data › Import…** takes a folder, a ZIP or a SAV
 file. Your current saves are backed up first, and you decide whether
 conflicting files are overwritten or kept. **Export…** writes all saves
 and replays into a ZIP. See
-[Alpha testing](ALPHA_TESTING.md#importing-and-exporting-saves).
+[Beta testing](BETA_TESTING.md#importing-and-exporting-saves).
 
 ## How do I protect my pilot while testing?
 
@@ -102,7 +102,7 @@ A pilot who dies without ejecting is deleted – that is the original game
 rule. Switch on **Protect saves (test aid)** (launcher **Advanced ›
 Diagnostics**, or in game **Esc › Settings › General**); the session then
 plays on a throw-away copy of your saves. See
-[Alpha testing](ALPHA_TESTING.md#protecting-your-pilot-while-testing).
+[Beta testing](BETA_TESTING.md#protecting-your-pilot-while-testing).
 
 ## I see artefacts (at the sides, on textures). What can I do?
 

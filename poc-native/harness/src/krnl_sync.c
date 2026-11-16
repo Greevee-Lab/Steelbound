@@ -546,6 +546,7 @@ u32 __stdcall hle_NtWaitForMultipleObjectsEx(u32 count, u32 pHandles, u32 waitTy
  * (TryEnter+Drop) und die fair_cs-Spiel-Sperren (Spiel-Protokoll, gaelte
  * auch auf Xbox) sind ausgenommen. */
 static int susp_nlog;
+static volatile LONG susp_n_held_ct, susp_n_held_hl; /* W308: Ziel hielt g_ct_lock / andere registrierte hlock */
 
 /* Fremdmodul-Sperren (dort definiert, Owner-Tid oder 0 = frei/uninit). */
 extern unsigned long sb_ctx_owner_tid(void);
@@ -553,6 +554,7 @@ extern unsigned long audio_lock_owner_tid(void);
 extern const hlock_t *sb_ctx_hlock(void);
 extern const hlock_t *audio_hlock(void);
 extern hlock_t g_tsc_lock; /* W192: pausierbarer XAPI-Counter */
+extern const hlock_t *krnl_ct_hlock(void); /* W308: Contig-Tabelle (krnl_mem.c) */
 
 /* W119 LOADLOCK: Host-Sperren sind hlocks; Owner-Tid wird beim Erwerb
  * atomar mit der Uebernahme gesetzt (vorher CRITICAL_SECTION.OwningThread:
@@ -601,6 +603,15 @@ static const char *susp_held_lock(DWORD tid)
     if (audio_lock_owner_tid() == tid) {
         return "g_au_cs";
     }
+    /* W308 FIX(SUSP-CTLOCK): Contig-Sperre (GitHub #27: Lader in der HIGH-Suche
+     * suspendiert, ct_free wartete ewig), dann jede weitere registrierte hlock
+     * (Textur-Ring, LoC-Speicher, LoC-Audio ...) als Netz. */
+    if (hlock_owner(krnl_ct_hlock()) == tid) {
+        return "g_ct_lock";
+    }
+    if (hlock_owned_by(tid)) {
+        return "hlock";
+    }
     return NULL;
 }
 
@@ -620,18 +631,19 @@ static const char *susp_owner_str(DWORD tid, char *buf, size_t cap)
  * Fenster), SuspendCount + EIP aller Xbox-Threads, letzter NtSuspendThread. */
 void krnl_lock_diag(void)
 {
-    char b_ht[16], b_cm[16], b_ui[16], b_cx[16], b_au[16];
-    char l_ht[48], l_cm[48], l_ui[48], l_cx[48], l_au[48];
+    char b_ht[16], b_cm[16], b_ui[16], b_cx[16], b_au[16], b_ct[16];
+    char l_ht[48], l_cm[48], l_ui[48], l_cx[48], l_au[48], l_ct[48];
     unsigned i, n = 0;
     int t;
-    HLOG_W("DIAG(LOADLOCK): hlock ht=%s csmap=%s unimpl=%s ctx=%s au=%s (Modell %d, inject=%d, injiziert=%ld, sync=%d)",
+    HLOG_W("DIAG(LOADLOCK): hlock ht=%s csmap=%s unimpl=%s ctx=%s au=%s (Modell %d, inject=%d, injiziert=%ld, sync=%d) ct=%s",
            hlock_str(&g_ht_cs, l_ht, sizeof l_ht),
            hlock_str(&g_csmap_cs, l_cm, sizeof l_cm),
            hlock_str(&g_unimpl_cs, l_ui, sizeof l_ui),
            hlock_str(sb_ctx_hlock(), l_cx, sizeof l_cx),
            hlock_str(audio_hlock(), l_au, sizeof l_au),
            g_cfg.diag_lock_model, g_cfg.diag_lock_inject,
-           (long)g_hlock_injected, g_cfg.safe_suspend_sync);
+           (long)g_hlock_injected, g_cfg.safe_suspend_sync,
+           hlock_str(krnl_ct_hlock(), l_ct, sizeof l_ct));
     HLOG_W("DIAG(LOADLOCK): letzter NtSuspendThread: Ziel T%04x EIP=0x%08X prev=%ld vor %lu ms",
            g_susp_last_tid & 0xFFFFu, g_susp_last_eip, (long)g_susp_last_ret,
            g_susp_last_tid ? GetTickCount() - g_susp_last_ms : 0ul);
@@ -651,12 +663,13 @@ void krnl_lock_diag(void)
                t, g_xb_threads[t].routine, GetThreadId(h) & 0xFFFFu, sc, eip,
                sc ? " (SUSPENDIERT)" : "");
     }
-    HLOG_W("DIAG(SUSPSAFE): Host-Sperren: ht=%s csmap=%s unimpl=%s ctx=%s au=%s",
+    HLOG_W("DIAG(SUSPSAFE): Host-Sperren: ht=%s csmap=%s unimpl=%s ctx=%s au=%s ct=%s",
            susp_owner_str(susp_cs_owner(&g_ht_cs), b_ht, sizeof b_ht),
            susp_owner_str(susp_cs_owner(&g_csmap_cs), b_cm, sizeof b_cm),
            susp_owner_str(susp_cs_owner(&g_unimpl_cs), b_ui, sizeof b_ui),
            susp_owner_str((DWORD)sb_ctx_owner_tid(), b_cx, sizeof b_cx),
-           susp_owner_str((DWORD)audio_lock_owner_tid(), b_au, sizeof b_au));
+           susp_owner_str((DWORD)audio_lock_owner_tid(), b_au, sizeof b_au),
+           susp_owner_str(hlock_owner(krnl_ct_hlock()), b_ct, sizeof b_ct));
     for (i = 0; i < CS_MAP_MAX && n < 8; i++) {
         if (g_csmap[i].xaddr && g_csmap[i].f.owner) {
             HLOG_W("DIAG(SUSPSAFE): Spiel-CS 0x%X haelt T%04x", g_csmap[i].xaddr,
@@ -671,12 +684,13 @@ void krnl_lock_diag(void)
  * Watchdogs (emu_main.c). Rueckgabe = Anzahl (doppelte Tids nur einmal). */
 int krnl_lock_foreign_owners(unsigned long *tids, const char **names, int cap)
 {
-    const hlock_t *locks[6];
-    const char *ln[6] = { "ht", "csmap", "unimpl", "ctx", "au", "tsc" };
+    const hlock_t *locks[7];
+    const char *ln[7] = { "ht", "csmap", "unimpl", "ctx", "au", "tsc", "ct" };
     int i, j, t, n = 0;
     locks[0] = &g_ht_cs; locks[1] = &g_csmap_cs; locks[2] = &g_unimpl_cs;
     locks[3] = sb_ctx_hlock(); locks[4] = audio_hlock(); locks[5] = &g_tsc_lock;
-    for (i = 0; i < 6 && n < cap; i++) {
+    locks[6] = krnl_ct_hlock(); /* W308 */
+    for (i = 0; i < 7 && n < cap; i++) {
         DWORD o = hlock_owner(locks[i]);
         int dup = 0, xb = 0;
         if (!o) { continue; }
@@ -695,19 +709,22 @@ int krnl_lock_foreign_owners(unsigned long *tids, const char **names, int cap)
 /* DIAG(LOADLOCK): Konkurrenz je Host-Sperre (Laufende, krnl_dump_stats). */
 void krnl_lock_stats(void)
 {
-    const hlock_t *L[5];
-    static const char *nm[5] = {"ht", "csmap", "unimpl", "ctx", "au"};
+    const hlock_t *L[6];
+    static const char *nm[6] = {"ht", "csmap", "unimpl", "ctx", "au", "ct"};
     int i;
     L[0] = &g_ht_cs;
     L[1] = &g_csmap_cs;
     L[2] = &g_unimpl_cs;
     L[3] = sb_ctx_hlock();
     L[4] = audio_hlock();
-    for (i = 0; i < 5; i++) {
+    L[5] = krnl_ct_hlock(); /* W308 */
+    for (i = 0; i < 6; i++) {
         HLOG_I("KRNL LOADLOCK hlock %s: Konkurrenz=%ld Waits=%ld (spin=%d)",
                nm[i], (long)L[i]->n_cont, (long)L[i]->n_wait,
                g_cfg.hlock_spin);
     }
+    HLOG_I("KRNL SUSPSAFE W308: Ziel hielt beim Suspend g_ct_lock %ld x, andere registrierte hlock %ld x",
+           (long)susp_n_held_ct, (long)susp_n_held_hl);
 }
 
 u32 __stdcall hle_NtSuspendThread(u32 xh, u32 pPrev)
@@ -764,6 +781,9 @@ u32 __stdcall hle_NtSuspendThread(u32 xh, u32 pPrev)
         if (tt != 0 && tt != me) {
             int i = 0, dead = 0;
             const char *held = susp_held_lock(tt);
+            const char *held0 = held; /* W308: Name fuer die Retry-Zeile */
+            if (held && !strcmp(held, "g_ct_lock")) { InterlockedIncrement(&susp_n_held_ct); }
+            else if (held && !strcmp(held, "hlock")) { InterlockedIncrement(&susp_n_held_hl); }
             while (held && i < 200) {
                 i++;
                 if (ResumeThread(e->host) == (DWORD)-1) {
@@ -797,8 +817,8 @@ u32 __stdcall hle_NtSuspendThread(u32 xh, u32 pPrev)
                        xh, tt & 0xFFFFu, held);
             } else if (i > 0 && !dead && susp_nlog < 8) {
                 susp_nlog++;
-                HLOG_I("DIAG(SUSPSAFE): NtSuspendThread(0x%X): Ziel T%04x hielt Host-Sperre, nach %d Retry(s) sauber (#%d)",
-                       xh, tt & 0xFFFFu, i, susp_nlog);
+                HLOG_I("DIAG(SUSPSAFE): NtSuspendThread(0x%X): Ziel T%04x hielt Host-Sperre, nach %d Retry(s) sauber (#%d) [%s]",
+                       xh, tt & 0xFFFFu, i, susp_nlog, held0 ? held0 : "?");
             }
         }
     }

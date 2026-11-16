@@ -370,11 +370,85 @@ static int imouse_any_btn_down(void)
         g_kdown[VK_XBUTTON2];
 }
 
+/* W299 REPLAY: Fokus-Klick. Aktiviert ein Mausklick das Fenster (WM_ACTIVATE mit WA_CLICKACTIVE,
+ * z. B. nach Alt-Tab zurueck ins Spiel), ist der folgende Tastendruck im Client-Bereich nur das
+ * Zurueckholen des Fensters: Druck und das zugehoerige Loslassen gehen weder ans Spiel noch ans
+ * ESC-Menue. Gilt hoechstens IMOUSE_EAT_MS nach der Aktivierung; ein Klick auf Rahmen/Titel
+ * (WM_MOUSEACTIVATE ausserhalb HTCLIENT, WM_NC*BUTTONDOWN) verwirft die Sperre. Alles nur auf dem
+ * UI-Thread. Schalter [input] focus_click_eat (Standard 1). Kein Protokoll von Eingaben, nur ein
+ * Hinweis je verschlucktem Fokus-Klick. */
+#define IMOUSE_EAT_MS 1000u
+static DWORD g_eat_arm;      /* GetTickCount() der Klick-Aktivierung, 0 = keine Sperre */
+static unsigned g_eat_up;    /* Bit = Loslassen dieser Taste noch verschlucken (1 L, 2 R, 4 M, 8 X1, 16 X2) */
+static DWORD g_ma_nc;        /* GetTickCount() eines WM_MOUSEACTIVATE ausserhalb des Client-Bereichs */
+static unsigned g_eat_n;     /* Zaehler (Test-Hook/Log) */
+
+static unsigned imouse_btn_bit(UINT msg, WPARAM wp)
+{
+    switch (msg) {
+    case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_LBUTTONDBLCLK: return 1u;
+    case WM_RBUTTONDOWN: case WM_RBUTTONUP: case WM_RBUTTONDBLCLK: return 2u;
+    case WM_MBUTTONDOWN: case WM_MBUTTONUP: case WM_MBUTTONDBLCLK: return 4u;
+    case WM_XBUTTONDOWN: case WM_XBUTTONUP: case WM_XBUTTONDBLCLK:
+        return HIWORD(wp) == XBUTTON2 ? 16u : 8u;
+    default: return 0u;
+    }
+}
+
+/* 1 = Nachricht verschlucken (nicht weiterreichen). */
+static int imouse_focus_click(HWND w, UINT msg, WPARAM wp, LPARAM lp)
+{
+    unsigned bit;
+    (void)w;
+    if (!g_cfg.focus_click_eat) return 0;
+    switch (msg) {
+    case WM_MOUSEACTIVATE:
+        if ((short)LOWORD(lp) != HTCLIENT) { DWORD t = GetTickCount(); g_ma_nc = t ? t : 1u; } /* 0 = keiner */
+        return 0;
+    case WM_ACTIVATE:
+        if (LOWORD(wp) == WA_CLICKACTIVE && !HIWORD(wp)) {
+            DWORD now = GetTickCount();
+            /* Zeitstempel nie in der Zukunft (kein "| 1": sonst laeuft now - arm unsigned ueber). */
+            if (g_ma_nc && now - g_ma_nc < IMOUSE_EAT_MS) g_eat_arm = 0; /* Klick auf Rahmen/Titel */
+            else g_eat_arm = now ? now : 1u;
+        } else if (LOWORD(wp) == WA_INACTIVE) {
+            g_eat_arm = 0;
+        }
+        g_ma_nc = 0;
+        return 0;
+    case WM_NCLBUTTONDOWN: case WM_NCRBUTTONDOWN: case WM_NCMBUTTONDOWN: case WM_NCXBUTTONDOWN:
+        g_eat_arm = 0;
+        return 0;
+    case WM_LBUTTONDOWN: case WM_RBUTTONDOWN: case WM_MBUTTONDOWN: case WM_XBUTTONDOWN:
+    case WM_LBUTTONDBLCLK: case WM_RBUTTONDBLCLK: case WM_MBUTTONDBLCLK: case WM_XBUTTONDBLCLK:
+        if (!g_eat_arm) return 0;
+        bit = imouse_btn_bit(msg, wp);
+        if (GetTickCount() - g_eat_arm >= IMOUSE_EAT_MS) { g_eat_arm = 0; return 0; }
+        g_eat_arm = 0;
+        g_eat_up |= bit;
+        g_eat_n++;
+        HLOG_I("INPUT: Fokus-Klick verschluckt (Fenster per Klick aktiviert, nicht ans Spiel; #%u)", g_eat_n);
+        return 1;
+    case WM_LBUTTONUP: case WM_RBUTTONUP: case WM_MBUTTONUP: case WM_XBUTTONUP:
+        bit = imouse_btn_bit(msg, wp);
+        if (g_eat_up & bit) {
+            g_eat_up &= ~bit;
+            return 1;
+        }
+        return 0;
+    default:
+        return 0;
+    }
+}
+
 static LRESULT CALLBACK imouse_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 {
     /* Reconcile also controller pause requests on the UI thread, before
      * any input or cursor handling. Repeated open calls are idempotent. */
     imouse_menu_capture(sb_ovl_open());
+    /* W299 REPLAY: Fokus-Klick weder ans Spiel noch ans Overlay (vor allen Abnehmern). */
+    if (imouse_focus_click(w, msg, wp, lp)) return (msg == WM_XBUTTONDOWN || msg == WM_XBUTTONUP ||
+                                                    msg == WM_XBUTTONDBLCLK) ? TRUE : 0;
     /* W118 REM-OVERLAY: ESC und (bei offenem Overlay) Tasten/Maustasten
      * gehen ans Overlay, nicht an die Spiel-Eingabe. */
     if (sb_phud_wndproc(w, msg, wp, lp)) return 0; /* W122 PERF-HUD: F2 */

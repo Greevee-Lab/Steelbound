@@ -31,6 +31,7 @@ static void rtt_data_note(unsigned data)
 static int g_rtt_cur = -1;
 int rtt_cur_slot(void) { return g_rtt_cur; } /* DIAG(SHADE-BLOOM,W112): Session-Ziel */
 int g_rtt_bound = -1;
+unsigned g_rtt_zsurf; /* W313 P2-ZTEST: Tiefenflaeche des letzten SetRenderTarget (0 = ohne, NV2A testet dann nicht) */
 int g_rtt_dummy; /* FIX(MONITORVIEW,W36): 1 = Dummy-Surface (Data=0) gebunden (Tiefenpass, kein sichtbares Ziel) */
 static unsigned g_rtt_bb[4];
 static int g_rtt_nbb;
@@ -116,10 +117,11 @@ int rtt_dims(unsigned fmt, unsigned size, unsigned *w, unsigned *h)
  * die D3D11-Textur, der Tiefenpuffer und der D3D11-Viewport sind N-fach. */
 static unsigned g_rt_dyn; /* W146 rt_scale_dyn: aktueller Faktor (0 = statisch) */
 static int rtt_ensure(int idx);
-static unsigned rtt_scale_for(unsigned w, unsigned h, unsigned fmt)
+static unsigned rtt_scale_for(unsigned w, unsigned h, unsigned fmt, unsigned surf)
 {
     unsigned n, xf = (fmt >> 8) & 0xFFu, mn = (unsigned)(g_cfg.rt_scale_min > 0 ? g_cfg.rt_scale_min : 1);
     if (g_cfg.rt_scale == 1) { return 1u; }
+    if (loc_render_vismap(surf, NULL, NULL)) { return 1u; } /* W311: LoC-Sichtkarte liest die CPU (1:1) */
     if (w < mn || h < mn || w > 512u || h > 512u) { return 1u; }
     if (g_cfg.rtt_readback && (xf == 0x1Eu || (g_cfg.rtt_readback >= 2 && g_cfg.rtt_readback != 9 && xf == 0x12u))) {
         unsigned lim = (g_cfg.rtt_readback == 3) ? 512u : 128u;
@@ -227,6 +229,7 @@ static void rtt_bind_bb(void)
     sb_ctx_enter();
     rtt_shadow_rs(0, 0.0f); /* W100 */
     ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &g_rtv, g_dsv);
+    if (g_cfg.d3d_debug >= 2) { sb_d3ddbg_drain(g_present_no, "@bb"); } /* DIAG(AMD-ARTIFACTS,W302) */
     dvp.TopLeftX = 0.0f; dvp.TopLeftY = 0.0f;
     dvp.Width = (float)g_bb_w; dvp.Height = (float)g_bb_h;
     dvp.MinDepth = 0.0f; dvp.MaxDepth = 1.0f;
@@ -726,7 +729,8 @@ static void rbc_diag_compare(int c)
 static void rtt_readback(int c)
 {
     rtt_entry_t *e;
-    unsigned data = 0, fmt = 0, size = 0, xf, host, pitch, y;
+    unsigned data = 0, fmt = 0, size = 0, xf, host, pitch, y, lhost = 0, lpitch = 0;
+    int lvm;
     D3D11_TEXTURE2D_DESC dd;
     D3D11_MAPPED_SUBRESOURCE m;
     HRESULT hr;
@@ -736,15 +740,17 @@ static void rtt_readback(int c)
     if (!e->tex || (!e->draws && !e->clears)) { return; }
     if (!rtt_hdr(e->surf, &data, &fmt, &size)) { return; }
     xf = (fmt >> 8) & 0xFFu;
+    lvm = loc_render_vismap(e->surf, &lhost, &lpitch); /* W311: LoC-Sichtkarte (256x256 A8R8G8B8) */
     if (xf != 0x12u && xf != 0x1Eu) { return; } /* nur LIN_A8R8G8B8 / LIN_X8R8G8B8 */
-    if ((g_cfg.rtt_readback == 1 || g_cfg.rtt_readback == 9) && xf != 0x1Eu) { return; } /* 1: nur X8R8G8B8 (Zellenkarte); 9 = DIAG wie 1 ohne Schrieb */
-    if (g_cfg.rtt_readback <= 2 && (e->w > 128u || e->h > 128u)) { return; }
+    if (!lvm && (g_cfg.rtt_readback == 1 || g_cfg.rtt_readback == 9) && xf != 0x1Eu) { return; } /* 1: nur X8R8G8B8 (Zellenkarte); 9 = DIAG wie 1 ohne Schrieb */
+    if (!lvm && g_cfg.rtt_readback <= 2 && (e->w > 128u || e->h > 128u)) { return; }
     if (e->w > 512u || e->h > 512u) { return; }
     if (e->pw != e->w || e->ph != e->h) { return; } /* W88: skaliertes RT nie per CPU (rtt_scale_for schliesst das aus) */
     host = krnl_phys_to_virt_rb(data);
     if (!host) { host = data; }
     pitch = size ? ((((size >> 24) & 0xFFu) + 1u) * 64u) : e->w * 4u;
     if (pitch < e->w * 4u) { pitch = e->w * 4u; }
+    if (lvm && lhost) { host = lhost; if (lpitch) { pitch = lpitch; } } /* W311: dorthin, wo das Spiel liest (Dauer-Lock) */
     if (!g_rtt_stage[c]) {
         memset(&dd, 0, sizeof dd);
         dd.Width = e->w; dd.Height = e->h;
@@ -762,7 +768,7 @@ static void rtt_readback(int c)
     }
     /* FIX(CULL-POPIN,W215): Zellenkarte (X8R8G8B8 bis 128x128) synchron -
      * Kopie jetzt absetzen, Abholung am naechsten BlockOnTime des Spiels. */
-    if (g_cfg.rtt_rb_sync && g_cfg.rtt_readback != 9 && xf == 0x1Eu && e->w <= 128u && e->h <= 128u) {
+    if (g_cfg.rtt_rb_sync && g_cfg.rtt_readback != 9 && ((xf == 0x1Eu && e->w <= 128u && e->h <= 128u) || lvm)) {
         if (g_cfg.rtt_rb_sync == 2 && rbc_session_end(c, host, pitch)) { /* CPU-Raster: kein GPU-Warten */
             if (g_cfg.rtt_rb_diag) {
                 g_rb_sess++; g_rbd_n++; g_rbd_age_n++;
@@ -1315,6 +1321,7 @@ void sb_rtt_on_set_target(unsigned surf, unsigned depth, unsigned caller)
     unsigned data = 0, fmt = 0, size = 0, w = 0, h = 0;
     unsigned k;
     int idx;
+    g_rtt_zsurf = depth; /* W313 P2-ZTEST */
     if (m3d_on) { /* DIAG(FX-HOLE,W106): Zielwechsel im Zensus-Frame */
         unsigned hd3 = 0, hd1 = 0;
         __try { if (surf) { hd1 = *(unsigned *)(uintptr_t)(surf + 4u); hd3 = *(unsigned *)(uintptr_t)(surf + 12u); } }
@@ -1322,6 +1329,20 @@ void sb_rtt_on_set_target(unsigned surf, unsigned depth, unsigned caller)
         HLOG_W("RTSET f=%u i=%u surf=0x%X depth=0x%X caller=0x%X bb=%d data=0x%X fmt=0x%08X slot=%d",
                g_present_no, m3d_ndraw, surf, depth, caller, (!surf || rtt_is_bb(surf)) ? 1 : 0, hd1, hd3,
                surf ? rtt_find(surf) : -1);
+    }
+    if (g_sba_loc && g_cfg.loc_vpreset) {
+        /* W297 LOC-MISSION: D3D setzt beim SetRenderTarget den Viewport auf die volle Zielgroesse.
+         * Unser Hook ersetzt die XDK-Funktion ganz; LoC verlaesst sich darauf (Weltpass nach dem
+         * 1800x1800-Tiefenpass ohne eigenes SetViewport -> Szene 2,5-fach vergroessert, Zensus A9).
+         * Nur LoC-Profil; ein spaeteres SetViewport des Spiels ueberschreibt das wie auf der Xbox. */
+        sb_viewport fv;
+        unsigned fw = 0, fh = 0, d0 = 0, f0 = 0, s0 = 0;
+        if (!surf || rtt_is_bb(surf)) { fw = g_game_fb_w; fh = g_game_fb_h; }
+        else if (rtt_hdr(surf, &d0, &f0, &s0)) { rtt_dims(f0, s0, &fw, &fh); }
+        if (fw && fh) {
+            fv.x = 0; fv.y = 0; fv.w = fw; fv.h = fh; fv.minz = 0.0f; fv.maxz = 1.0f;
+            sb_render_set_viewport(&fv);
+        }
     }
     if (!surf || rtt_is_bb(surf)) {
         rtt_session_end(surf, "BB");
@@ -1396,7 +1417,7 @@ shadow_fail:
         g_rtt[idx].surf = surf; g_rtt[idx].data = data;
         rtt_data_note(data);
         g_rtt[idx].w = w; g_rtt[idx].h = h;
-        { unsigned sc = rtt_scale_for(w, h, fmt); g_rtt[idx].pw = w * sc; g_rtt[idx].ph = h * sc; }
+        { unsigned sc = rtt_scale_for(w, h, fmt, surf); g_rtt[idx].pw = w * sc; g_rtt[idx].ph = h * sc; }
     }
     if (idx < 0) {
         if (g_rtt_n < RTT_MAX) { idx = g_rtt_n++; }
@@ -1432,7 +1453,7 @@ shadow_fail:
         g_rtt[idx].surf = surf; g_rtt[idx].data = data;
         rtt_data_note(data);
         g_rtt[idx].w = w; g_rtt[idx].h = h;
-        { unsigned sc = rtt_scale_for(w, h, fmt); g_rtt[idx].pw = w * sc; g_rtt[idx].ph = h * sc; }
+        { unsigned sc = rtt_scale_for(w, h, fmt, surf); g_rtt[idx].pw = w * sc; g_rtt[idx].ph = h * sc; }
         g_rtt[idx].tex = NULL; g_rtt[idx].rtv = NULL;
         g_rtt[idx].srv = NULL; g_rtt[idx].dsv = NULL;
     }
@@ -1515,8 +1536,32 @@ have_entry:
         D3D11_VIEWPORT dvp;
         sb_ctx_enter();
         rtt_shadow_rs(g_rtt[idx].isdepth, g_rtt[idx].zscale); /* W100: Polygon-Offset nur im Schattenpuffer */
+        if (g_cfg.rt_hazard_unbind && g_rtt[idx].srv) {
+            /* FIX(AMD-ARTIFACTS,W302): Ziel noch als PS-Textur gebunden (Debug-Layer id 9/7, rt 512x512:
+             * Monitor-Komposition des Vorbilds) -> selbst loesen, statt es die Laufzeit erzwingen zu lassen.
+             * Gleiche Wirkung wie die Laufzeit (Platz wird NULL), aber definiert und ohne Warnung. */
+            /* Echte Bindung abfragen: der DSC-Schatten verwirft seine SRV-Gueltigkeit bei jedem
+             * OMSetRenderTargets und kennt die Belegung danach oft nicht (nur je Zielwechsel). */
+            static ID3D11ShaderResourceView *const nul = NULL;
+            ID3D11ShaderResourceView *cur[DSC_SRV];
+            UINT k;
+            memset(cur, 0, sizeof cur);
+            ID3D11DeviceContext_PSGetShaderResources(g_ctx, 0, DSC_SRV, cur);
+            for (k = 0; k < DSC_SRV; k++) {
+                if (cur[k] && cur[k] == g_rtt[idx].srv) {
+                    ID3D11DeviceContext_PSSetShaderResources(g_ctx, k, 1, &nul);
+                }
+                if (cur[k]) { ID3D11ShaderResourceView_Release(cur[k]); }
+            }
+        }
         ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &g_rtt[idx].rtv,
                                                g_rtt[idx].dsv);
+        if (g_cfg.d3d_debug >= 2) { /* DIAG(AMD-ARTIFACTS,W302): Hazard-Meldungen dem Ziel zuordnen */
+            char w[48];
+            _snprintf_s(w, sizeof w, _TRUNCATE, "@rt%d %ux%u%s", idx, g_rtt[idx].w, g_rtt[idx].h,
+                        g_rtt[idx].isdepth ? " tiefe" : "");
+            sb_d3ddbg_drain(g_present_no, w);
+        }
         dvp.TopLeftX = 0.0f; dvp.TopLeftY = 0.0f;
         dvp.Width = (float)g_rtt[idx].pw; dvp.Height = (float)g_rtt[idx].ph; /* W88: D3D11-Groesse */
         dvp.MinDepth = 0.0f; dvp.MaxDepth = 1.0f;
@@ -1915,6 +1960,39 @@ have_match:
     if (w) { *w = g_rtt[i].w; }
     if (h) { *h = g_rtt[i].h; }
     return 1;
+}
+
+/* FIX(CAMPAIGN-END,W310, rtt_lock_stale): Das Spiel sperrt eine Textur per
+ * D3DTexture_LockRect zum Schreiben -> ihr Inhalt kommt von der CPU. Liegt
+ * ein RT-Eintrag auf derselben Datenadresse, der im aktuellen/vorigen Bild
+ * kein Ziel war, ist sein Speicher wiederverwendet (das Spiel gibt RT-
+ * Surfaces nicht einzeln frei). Beleg: Endtext ED01_00.bik (640x480) nach
+ * Mission 10 bekam die Datenadresse des Ladebild-RT (640x480, Missionsladen,
+ * Aufrufer 0xC83A6) -> TEX rt-match, der Film-Quad zeigte das alte Ladebild
+ * (Drahtgitter-VT) statt des Films. Lebende RTs (Ziel in diesem/vorigem
+ * Bild) bleiben unberuehrt; wird ein veraltetes RT wieder Ziel, gilt es
+ * wieder (have_entry). */
+void sb_rtt_cpu_lock(unsigned xptr)
+{
+    unsigned data = 0;
+    int i;
+    if (!g_cfg.rtt_lock_stale || !g_cfg.rtt_stale || !xptr) { return; }
+    __try { data = *(unsigned *)(uintptr_t)(xptr + 4); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (!data) { return; }
+    for (i = 0; i < g_rtt_n; i++) {
+        if (g_rtt[i].surf && !g_rtt[i].stale && !g_rtt[i].isdepth && g_rtt[i].data == data &&
+            g_rtt[i].lastset + 1u < g_present_no) {
+            static unsigned nlk;
+            g_rtt[i].stale = 1;
+            if (nlk < 32u) {
+                nlk++;
+                HLOG_I("RTT cpu-lock #%u: slot %d surf=0x%X data=0x%X %ux%u (tex=0x%X, zuletzt Ziel f=%u) f=%u",
+                       nlk, i, g_rtt[i].surf, data, g_rtt[i].w, g_rtt[i].h, xptr,
+                       g_rtt[i].lastset ? g_rtt[i].lastset - 1u : 0u, g_present_no);
+            }
+        }
+    }
 }
 
 /* FIX(MAP-RETRY,W124, rtt_stale): Textur/Surface per Release rc=0 freigegeben

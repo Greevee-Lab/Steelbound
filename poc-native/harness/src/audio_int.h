@@ -154,6 +154,7 @@ typedef struct audio_voice {
     double lv_etot; /* Energie gesamt */
     au32 lv_secs; /* Sekunden mit Pegel > -60 dBFS */
     au32 mix_pass; /* PERF(PERF-TICK,W168) audio_mix_yield: in diesem Mischdurchgang schon gemischt */
+    int ucat; /* W303 AUDIO-VOLUME: explizite Nutzerkategorie (AVOL_*, audio_vol.h; 0 = automatisch) */
     struct audio_voice *next;
 } audio_voice_t;
 

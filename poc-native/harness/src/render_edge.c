@@ -150,6 +150,7 @@ static int eg_init(void)
 
 /* Maske (mode 1/2) auf rtv (Groesse g_bb_w x g_bb_h) zeichnen; quiet = ohne
  * Log (A/B-Bilder). Aufruf unter ctx_lock. */
+static int eg_mv; /* W319 MONITOR-VIEW: harter Schnitt an der 4:3-Box, ohne Cockpit-Kante */
 static void eg_apply(ID3D11RenderTargetView *rtv, int mode, int quiet)
 {
     unsigned bx, by, bw, bh, nv = 0, i;
@@ -176,7 +177,7 @@ static void eg_apply(ID3D11RenderTargetView *rtv, int mode, int quiet)
     if (mode <= 0 || !rtv || !g_ctx) { return; }
     if (!eg_init()) { return; }
     sb_aspect_box(&bx, &by, &bw, &bh);
-    sb_cp_edge_box(&bx, &by, &bw, &bh); /* W191 UW-PERSP: Rand beginnt an der verschobenen Cockpitkante (aus: unveraendert) */
+    if (!eg_mv) { sb_cp_edge_box(&bx, &by, &bw, &bh); } /* W319: Monitoransicht = reine 4:3-Box; W191 UW-PERSP: Rand beginnt an der verschobenen Cockpitkante (aus: unveraendert) */
     if (bw >= g_bb_w && bh >= g_bb_h) { return; } /* 4:3-Ausgabe: nichts ausserhalb */
     if (mode == 1) {
         wpx = 0.0f;
@@ -297,6 +298,12 @@ static void eg_apply(ID3D11RenderTargetView *rtv, int mode, int quiet)
 
 void sb_edge_apply(ID3D11RenderTargetView *rtv)
 {
+    if (sb_mv_on()) { /* W319: ausserhalb des Monitors (4:3) stuende sonst alter Cockpit-Inhalt (das Spiel loescht nur seinen Viewport) */
+        eg_mv = 1;
+        eg_apply(rtv, 1, 0);
+        eg_mv = 0;
+        return;
+    }
     eg_apply(rtv, g_cfg.edge_mode, 0);
 }
 

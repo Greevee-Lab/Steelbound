@@ -527,6 +527,22 @@ void replay_steps_tick(void)
     }
 }
 
+/* W297 LOC-MISSION (Test): Slot ab dem aktuellen Frame anhaengen - fuer Tastenfolgen, die an
+ * den LoC-Lockstep-Rahmen statt an Bildzaehler gekoppelt sind (loc_sync.c, loc_replay_tick). */
+void replay_inject(int vk, int len)
+{
+    replay_parse();
+    if (g_replay_n < 0)
+        g_replay_n = 0;
+    if (g_replay_n < REPLAY_MAX) {
+        g_replay[g_replay_n].start = (int)g_frames;
+        g_replay[g_replay_n].vk = vk;
+        g_replay[g_replay_n].len = len;
+        g_replay[g_replay_n].logged = 0;
+        g_replay_n++;
+    }
+}
+
 /* A8: Replay aktiv = Slots vorhanden oder Steps konfiguriert (Steps haengen
  * Slots erst zur Laufzeit an, darum zaehlt auch die blosse Konfiguration).
  * Echte Tastatur/Maus nur ohne Replay (M2b: Phantom-Inputs verfaelschen
@@ -563,8 +579,9 @@ int key_down(int vk)
         if (down && i == rec_n && rec_n < 8) {
             rec_vk[rec_n] = vk; rec_start[rec_n] = g_frames; rec_n++;
         } else if (!down && i < rec_n) {
-            HLOG_I("XIN record: %u:%d,%u", rec_start[i], vk,
-                   g_frames - rec_start[i]);
+            if (g_cfg.input_rec_log) /* keine Eingaben loggen ohne Entwickler-Schalter */
+                HLOG_I("XIN record: %u:%d,%u", rec_start[i], vk,
+                       g_frames - rec_start[i]);
             rec_vk[i] = rec_vk[rec_n - 1];
             rec_start[i] = rec_start[rec_n - 1]; rec_n--;
         }
@@ -603,6 +620,30 @@ static float aimat_rdf(u32 a, float dflt)
     __except (EXCEPTION_EXECUTE_HANDLER) { f = dflt; }
     if (!(f == f) || f > 1e6f || f < -1e6f) f = dflt;
     return f;
+}
+/* W300 BOT-AIMAT: Plausibilitaet dynamischer Spielzeiger (Entity-Tabelle,
+ * Modell/Knochen, Typtabelle, Waffe, Zellengitter) vor dem Lesen. Bisher fing
+ * nur das eigene __try ungueltige Zeiger ab; die VEH meldete vorher je Lauf bis
+ * zu 6x VEH-OWN (W274, 15 Missionen). Bereich [a, a+len) muss vollstaendig
+ * committet und lesbar sein. Nur Testpfad (replay_steps aimat:). */
+static unsigned g_aimat_bad;
+static int aimat_rd_ok(u32 a, u32 len, const char *what)
+{
+    MEMORY_BASIC_INFORMATION mb;
+    u32 p = a, end = a + len;
+    if (a < 0x10000u || end < a) goto bad;
+    while (p < end) {
+        if (!VirtualQuery((LPCVOID)(uintptr_t)p, &mb, sizeof mb) || mb.State != MEM_COMMIT ||
+            (mb.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || !mb.Protect)
+            goto bad;
+        p = (u32)(uintptr_t)mb.BaseAddress + (u32)mb.RegionSize;
+        if (p <= (u32)(uintptr_t)mb.BaseAddress) break; /* Ueberlauf am Adressende */
+    }
+    return 1;
+bad:
+    if (g_aimat_bad++ < 8u || (g_aimat_bad & 1023u) == 0u)
+        HLOG_I("AIMAT Zeiger ungueltig #%u: %s a=0x%X len=0x%X f=%u", g_aimat_bad, what, a, len, g_frames);
+    return 0;
 }
 /* Projektion wie das Spiel (FUN_00014F10 -> D3DXVec3Project 0x193B7C mit
  * World [0x358070], View [0x357E60], Proj [0x3B6560], Viewport 0x293938):
@@ -663,6 +704,7 @@ void aimat_apply(sbc_in_t *s)
         int ax, ay, onscr = 0, aligned;
         u32 cand, lck, wp, slot, ammo = 0, mags = 0;
         if (!tab || n > 100000u) return;
+        if (!aimat_rd_ok(tab, (n < 4000u ? (n ? n : 1u) : 4000u) * 0x5Cu, "tab")) return; /* W300: gelesener Bereich */
         /* W63: nur in der Missionsschleife (nach Missionsende ist die
          * Entity-Tabelle freigegeben -> Muell-Ziele, W63_c5). */
         if (g_cfg.aimat_antiwindup && *(volatile u32 *)(uintptr_t)SBA(0x356F58u) != 1u) return;
@@ -696,6 +738,7 @@ void aimat_apply(sbc_in_t *s)
             HLOG_I("AIMAT Ziel -> %u bei f=%u", idx, g_frames);
         }
         eb = tab + idx * 0x5Cu;
+        if (!aimat_rd_ok(eb, 0x5Cu, "entity")) return; /* W300 */
         if (*(volatile uint16_t *)(uintptr_t)eb == 0) return; /* tot */
         /* Zielpunkt = Lock-Knochen wie FUN_00020AE0 (+0x130): Modell [e+0x54]
          * + Knochen-Index aus Typtabelle [0x4CA034]+[e+0x34]*0x4E0+4. */
@@ -706,8 +749,10 @@ void aimat_apply(sbc_in_t *s)
             u32 mdl = *(volatile u32 *)(uintptr_t)(eb + 0x54);
             u32 ty = *(volatile uint16_t *)(uintptr_t)(eb + 0x34);
             u32 tt = *(volatile u32 *)(uintptr_t)SBA(0x4CA034u);
-            if (mdl > 0x10000u && ty != 0xFFFFu && tt > 0x10000u) {
-                bone = *(volatile uint8_t *)(uintptr_t)(tt + ty * 0x4E0u + 4u);
+            if (mdl > 0x10000u && ty != 0xFFFFu && tt > 0x10000u &&
+                aimat_rd_ok(tt + ty * 0x4E0u + 4u, 1u, "typ") && /* W300 */
+                (bone = *(volatile uint8_t *)(uintptr_t)(tt + ty * 0x4E0u + 4u),
+                 aimat_rd_ok(mdl + bone * 0x1A0u + 0x130u, 12u, "knochen"))) {
                 tp[0] = *(volatile float *)(uintptr_t)(mdl + bone * 0x1A0u + 0x130u);
                 tp[1] = *(volatile float *)(uintptr_t)(mdl + bone * 0x1A0u + 0x134u);
                 tp[2] = *(volatile float *)(uintptr_t)(mdl + bone * 0x1A0u + 0x138u);
@@ -788,7 +833,7 @@ void aimat_apply(sbc_in_t *s)
          * MAGAZINE CHANGE (bi27, Flanke 48CF0(1,6,0) -> 0x181A20). */
         wp = *(volatile u32 *)(uintptr_t)SBA(0x355000u);
         slot = *(volatile u32 *)(uintptr_t)SBA(0x356C94u);
-        if (wp > 0x10000u && slot < 4u) {
+        if (wp > 0x10000u && slot < 4u && aimat_rd_ok(wp + 0x12u + slot * 2u, 2u, "waffe")) { /* W300 */
             ammo = *(volatile uint16_t *)(uintptr_t)(wp + 0x12u + slot * 2u);
             mags = *(volatile uint16_t *)(uintptr_t)(SBA(0x346FFAu) + slot * 2u);
         }
@@ -833,9 +878,13 @@ void aimat_apply(sbc_in_t *s)
                 int ti = (int)(ex0 * 0.2f) - cxg - (((int)(ez0 * -0.2f) + czg) << 7);
                 int oi = (int)(mx * 0.2f) - cxg - (((int)(mz * -0.2f) + czg) << 7);
                 int tv = -1, ov = -1, nz = 0, k;
-                if (P > 0x10000u) {
-                    tv = *(volatile uint8_t *)(uintptr_t)(P + 0x8100u + (u32)(ti * 4));
-                    ov = *(volatile uint8_t *)(uintptr_t)(P + 0x8100u + (u32)(oi * 4));
+                /* W300: Zellindex ausserhalb des 128x128-Gitters (fernes Ziel)
+                 * las vorher hinter das Gitter; Gitter selbst pruefen. */
+                if (P > 0x10000u && aimat_rd_ok(P, 128u * 128u * 4u, "gitter")) {
+                    if (ti >= -0x2040 && ti < 0x1FC0)
+                        tv = *(volatile uint8_t *)(uintptr_t)(P + 0x8100u + (u32)(ti * 4));
+                    if (oi >= -0x2040 && oi < 0x1FC0)
+                        ov = *(volatile uint8_t *)(uintptr_t)(P + 0x8100u + (u32)(oi * 4));
                     for (k = 0; k < 128 * 128; k++)
                         if (*(volatile uint8_t *)(uintptr_t)(P + (u32)k * 4u)) nz++;
                 }

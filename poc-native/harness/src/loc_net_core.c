@@ -237,6 +237,12 @@ static void ln_seen(locnet *n, SOCKET s, int out, const char *buf, int len)
         return;
     }
     typ = (uint8_t)buf[0] | ((uint8_t)buf[1] << 8);
+    if (typ < 256) { /* W297: Typ-Merkliste fuer Testfolgen (loc_steps rx:/tx:) */
+        InterlockedOr(&n->st.typ_seen[out ? 1 : 0][typ >> 5], (LONG)(1u << (typ & 31)));
+        if (out && typ == 0x34) {
+            InterlockedExchange(&n->st.last34_ms, (LONG)(GetTickCount() | 1u));
+        }
+    }
     getsockopt(s, SOL_SOCKET, SO_TYPE, (char *)&sock_type, &tl);
     me.sin_port = 0;
     getsockname(s, (struct sockaddr *)&me, &l);

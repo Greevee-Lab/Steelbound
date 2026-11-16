@@ -5,6 +5,7 @@
 #include "sb_profile.h" /* W229 SBA() */
 #include "sb_pause.h" /* W188 GAME-MENU: g_sb_paused */
 #include "render_vexp.h" /* W255 VIDEO-EXPORT */
+#include "audio_vol.h" /* W303 AUDIO-VOLUME */
 #include <share.h> /* _SH_DENYNO (W102) */
 
 /* ---------- WAV-Writer (kill-sicher: Header pro Chunk neu) ---------- */
@@ -820,6 +821,19 @@ static void au_render_voice(audio_voice_t *v, au32 n, int bink_start_ready)
         return;
     au3d_update(v); /* W89: DS3D-Daempfung/Pan (audio_3d; sonst 1/1/1) */
     g *= v->g3d;
+    { /* W303 AUDIO-VOLUME: Nutzerlautstaerke (Kategorie x Gesamt), laufend aus g_cfg (ESC wirkt
+       * sofort). Alle Regler 100 = Original: keine Rechnung, keine Multiplikation (bitgleich). */
+        int vm = g_cfg.volume_master, vmu = g_cfg.volume_music, vs = g_cfg.volume_sfx, vv = g_cfg.volume_voice;
+        if (!avol_all100(vm, vmu, vs, vv)) {
+            /* Bink-Filmton = nur Gesamt; Streams mono = Sprache, sonst Musik (die 6-kanaligen
+             * 3D-Streams 0x1071F8 landen damit auch bei Musik - bekannte Unschaerfe); Rest Effekte */
+            int film = !g_sba_loc && v->create_ret != 0 && v->create_ret == SBA(0x2435FCu); /* LoC: Kategorie je Cue */
+            float vf = avol_factor(avol_category(v->ucat, (int)v->kind, v->have_fmt ? (int)v->fmt.ch : 0, film),
+                                   vm, vmu, vs, vv);
+            if (vf != 1.0f)
+                g *= vf;
+        }
+    }
     /* Puffer brauchen Play(); Streams laufen sobald aktiv (Xbox: Process
      * startet den Fluss implizit, Play gibt es fuer Streams nicht). */
     if (v->kind == 1 && !v->playing)
@@ -1324,7 +1338,11 @@ void au_ensure_thread(void)
         g_mix_thread = (HANDLE)krnl_CreateThread(au_mix_thread, NULL, 0, &tid);
         if (g_mix_thread)
             HLOG_I("AUDIO Mixer-Thread startet (T%04x, 20-ms-Takt)", tid);
-        else
+        if (g_mix_thread && !avol_all100(g_cfg.volume_master, g_cfg.volume_music, g_cfg.volume_sfx,
+                                         g_cfg.volume_voice)) /* W303: nur bei Abweichung */
+            HLOG_I("AUDIO-VOL: gesamt=%d musik=%d effekte=%d sprache=%d", g_cfg.volume_master,
+                   g_cfg.volume_music, g_cfg.volume_sfx, g_cfg.volume_voice);
+        if (!g_mix_thread)
             HLOG_E("AUDIO Mixer-CreateThread FEHLER %lu", GetLastError());
     }
     au_unlock();

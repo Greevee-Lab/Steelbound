@@ -1,6 +1,7 @@
 /* hcfg.c - Mini-INI-Parser (key=value, # Kommentar, [section] egal). */
 #include "sb_crash.h" /* W279: sb_crash_cfg_key */
 #include "hcfg.h"
+#include "input_joy.h" /* W312: joy_calN */
 #include "hlog.h"
 #include "sb_edition.h"
 #include "sb_userdata.h" /* W150 USER-DATA */
@@ -29,6 +30,7 @@ void hcfg_defaults(void)
     g_cfg.loc_net_port = 1000;
     strcpy_s(g_cfg.loc_net_peers, sizeof g_cfg.loc_net_peers, "auto");
     g_cfg.loc_net_rtt = 10;
+    g_cfg.loc_sync_every = 150;  /* W297: LOCSYNC alle 150 Rahmen (nur mit loc_sync=1) */
     g_cfg.loc_pad_keys = 1;      /* W286: Ziffernblock/SPACE/Backspace/Enter auch an das Menue-Gamepad */
     g_cfg.save_check = 1;        /* W187 KIA-LOAD: Spielstaende pruefen/reparieren */
     g_cfg.host_dir_enum = 1;     /* W241 REPLAY-LIST: Host-Ordner auflisten (0 = alt, immer leer) */
@@ -89,6 +91,7 @@ void hcfg_defaults(void)
     g_cfg.res_refcount = 1;
     g_cfg.fatx_stale_extend = 1; /* W63 FATXSTALE */
     g_cfg.contig_alias_test = 0; /* TEST(W177) */
+    g_cfg.host_hi_addr = 1; g_cfg.contig_hi_test = 0; /* W315 TEX-WHITE-AMD (Fix / Test) */
     g_cfg.contig_noalias = 1; /* W177 FILM-WHITE: Contig ohne Low28-Ueberlappung (Fix, 0 = alt) */
     g_cfg.contig_free = 1; /* W214 SEQ-RENDER: Low28-Bild bei MmFreeContiguousMemory frei (Fix, 0 = alt) */
     g_cfg.contig_reuse = 1; /* W214 SEQ-RENDER: freigegebene Bloecke wiederverwenden (Fix, 0 = alt) */
@@ -103,7 +106,13 @@ void hcfg_defaults(void)
     g_cfg.tex_cache_lru = 1;    /* W63 TEXCACHE */
     g_cfg.tex_hdr_check = 1;    /* W63 TEXCACHE */
     g_cfg.tex_reuse_inval = 1;  /* W244 WASH-TEX (Fix, 0 = alt) */
+    g_cfg.tex_throttle_retry = 1; /* W307 TEX-WHITE-UI (Fix, 0 = alt) */
+    g_cfg.tex_up_budget = 12;     /* W307 DIAG: Upload-Drossel je Bild */
+    g_cfg.tex_missing_mark = 0; g_cfg.interp_shots_sdelay = 45; /* W315 DIAG */
     g_cfg.rt_init_clear = 1;    /* W262 HD-PACK-ART (Fix, 0 = alt, 2 = DIAG magenta) */
+    g_cfg.d3d_debug = 0; g_cfg.d3d_warp = 0; g_cfg.d3d_warp_core = 26; g_cfg.shader_nan_mark = 0; g_cfg.hd_mark = 0; /* W302 DIAG */
+    g_cfg.post_sanitize = 1; /* W302 AMD-ARTIFACTS (Fix, 0 = alt) */
+    g_cfg.rt_hazard_unbind = 1; /* W302 AMD-ARTIFACTS (Fix, 0 = alt) */
     g_cfg.tex_upload_guard = 1;
     g_cfg.screenshot_jpg = 1;
     g_cfg.memscan_every = 0;
@@ -123,6 +132,8 @@ void hcfg_defaults(void)
     g_cfg.audio_pitch_range = 1; /* W89: weite Pitch-Klemme (Standard an) */
     g_cfg.audio_adpcm_lerp = 1; /* W89: ADPCM linear resamplen (Standard an) */
     g_cfg.audio_3d = 1; /* W89: DS3D-Distanzdaempfung (Standard an) */
+    g_cfg.loc_audio = 1; /* W298 LOC-AUDIO: XACT-HLE (wirkt nur im LoC-Profil) */
+    g_cfg.volume_master = g_cfg.volume_music = g_cfg.volume_sfx = g_cfg.volume_voice = 100; /* W303 AUDIO-VOLUME */
     g_cfg.audio_menu_sfx = 1; /* W258: Menuetoene (snk_*.wav) per HLE statt stummem DirectMusic */
     g_cfg.audio_oneshot_fix = 1; /* W95: Einmal-Toene enden am Datenende (Standard an) */
     g_cfg.audio_filter = 1; /* W102: DLS2-Voice-Filter (Standard an, A/B W102_d1/W102_f1) */
@@ -136,6 +147,7 @@ void hcfg_defaults(void)
     g_cfg.rtt_rb_sync = 2; /* W215 CULL-POPIN: Zellenkarte im selben Bild (2 = CPU-Raster, 1 = GPU-Rueckschrieb mit Warten) */
     g_cfg.rtt_rb_diag = 0; /* W215 CULL-POPIN: DIAG aus */
     g_cfg.rtt_rb_cpu_ofs = 0; /* W215: CPU-Raster-Versatz (1/256 px) */
+    g_cfg.rtt_lock_stale = 1; /* W310 CAMPAIGN-END: CPU-gesperrte Textur auf alter RT-Datenadresse -> RT veraltet */
     g_cfg.rtt_stale = 1; /* W124 MAP-RETRY: veraltete RT-Eintraege nach Missions-Neustart nicht mehr sampeln */
     g_cfg.rtt_selfcopy = 1; /* W106 FX-HOLE: Selbst-Sampling liest RT-Kopie, Ziel bleibt das RT (Rauch-Hitzeflimmern stanzte sonst Loecher ins Cockpit) */
     g_cfg.rtt_selfclip = 1; /* W45 SIDESMEAR: Selbst-Sampling-Clip an (Seiten schwarz, Mitte unveraendert) */
@@ -151,7 +163,10 @@ void hcfg_defaults(void)
     g_cfg.fx_wireframe = 0; /* W240 FX-EXPERIMENTAL: aus */
     g_cfg.fx_vaporwave = 0; /* W240 FX-EXPERIMENTAL: aus */
     g_cfg.cockpit_width = 0; /* W235 COCKPIT-WIDTH: Original (nicht gestreckt) */
+    g_cfg.monitor_view = 0; /* W319 MONITOR-VIEW: aus (Original) */
+    g_cfg.monitor_view_diag = 0;
     g_cfg.cockpit_hide = 0; /* W268 COCKPIT-HIDE: Original (Cockpit sichtbar) */
+    g_cfg.replay_fx_live = 0; /* W299 REPLAY-FX: aus */
     g_cfg.cockpit_persp_pause = 1; /* W209: coherent pause replay */
     g_cfg.cockpit_persp_ref = 750; /* W191: mm, feste Ebene zwischen Radar (0,80 m) und Frontview (0,71 m) */
     g_cfg.cockpit_zoom = 100; /* W191: aus */
@@ -162,6 +177,12 @@ void hcfg_defaults(void)
     g_cfg.m3d_census_gate = 0; /* W36 MONITORVIEW: Zensus-Gate aus (DIAG) */
     g_cfg.loc_bbtex = 1; /* W285 LOC-RENDER: Backbuffer als Textur (nur LoC) */
     g_cfg.loc_bumpenv = 1; /* W285 LOC-RENDER: BUMPENVMAP-Naeherung (nur LoC) */
+    g_cfg.loc_visq = 0; /* W297 LOC-MISSION: Sichtbarkeitstests wie bisher (1 Pixel); 1 = echt, 2 = alles sichtbar (DIAG, nur LoC) */
+    g_cfg.loc_text_clear = 1; /* W297 LOC-MISSION: Textebene beim Clear leeren (nur LoC) */
+    g_cfg.loc_vpreset = 1; /* W297 LOC-MISSION: Viewport-Reset bei SetRenderTarget (nur LoC) */
+    g_cfg.loc_vismap = 1; /* W311 LOC-MISSION-RENDER: Sichtkarte synchron zurueckschreiben (nur LoC) */
+    g_cfg.loc_short3 = 1; /* W311 LOC-MISSION-RENDER: SHORT3-Positionen (nur LoC) */
+    g_cfg.loc_nodummy = 1; /* W297 LOC-MISSION: Schatten-Tiefenpass nicht in den Backbuffer (nur LoC) */
     g_cfg.loc_shading = 1; /* W285 LOC-RENDER: Shading-Pfad im LoC-Profil (nur LoC) */
     g_cfg.loc_rtuv = 1; /* W285 LOC-RENDER: RT-UV normiert/texel nach Bereich (nur LoC) */
     g_cfg.loc_glow = 0; /* W285 LOC-RENDER: Glow-Komposition (Test, nur LoC) */
@@ -207,6 +228,7 @@ void hcfg_defaults(void)
     g_cfg.interp_bsets_nod = 1; /* W125 TICK-PERF: wirkt nur mit interp_bsets>0 */
     g_cfg.render_thread = 1; /* W126 RENDER-THREAD; W168 PERF-TICK: Standard 1 (ctx_lock-Warten des Spiel-Threads, verify 47/47 diff=0) */
     g_cfg.render_thread_core = -1; /* W126: frei */
+    g_cfg.render_thread_emul = 1; /* W302 AMD-ARTIFACTS (Fix, 0 = alt) */
     g_cfg.present_decouple = 1; /* W138 PERF-FIX: Present-Takt-Thread (nur Echtzeit mit interp_fps>0) */
     g_cfg.present_core = -1; /* W138: frei */
     g_cfg.warm_gpu = 16;     /* W139 PERF-WARM: GPU-Takt in der Ladephase halten (0 = aus) */
@@ -215,6 +237,10 @@ void hcfg_defaults(void)
     g_cfg.pd_gpu_wait = 50;     /* PO: bisheriger Wert bis gemessen; W165 GPU-COST2: Wartefenster bei GPU-Rueckstau in % der Bildperiode (W138: 50) */
     g_cfg.warm_gpu_soft = 1;    /* PO 7.11.: A/B P_W165s0/s1 (3440+4K): Retry-Spitzen 2->0, sonst gleich; W165 GPU-COST2: Bits 1 Entprellung (Retry-Blips ohne Last), 2 Start 1/8, 4 Last nach dem Bild */
     g_cfg.warm_gpu_delay = 100; /* W165: ms Ladephase vor der ersten Last */
+    g_cfg.gpu_burn = 0; /* DIAG(PERF-SPIKE,W318) */
+    g_cfg.interp_gpu_tight_imm = 30; /* W318 PERF-SPIKE: render_thread=0 (AMD-Weg) Grenze 1 ab 30-ms-Tick (0 = aus) */
+    g_cfg.interp_bsets_imm = 4; /* W318 PERF-SPIKE: render_thread=0 (AMD-Weg) mit 4 Reserve-Saetzen (0 = wie interp_bsets) */
+    g_cfg.shade_par_compile = 1; /* W318 PERF-SPIKE: VS-Variantenpaar parallel uebersetzen (0 = alt) */
     g_cfg.warm_shaders = 1;  /* W139: Shader-Cache vorab laden/anlegen */
     g_cfg.warm_vbpre = 1;    /* W139: Tick-Puffer beim Start anlegen */
     g_cfg.shading = 1; /* W77 RENDER-QA: Shading-Pfad; Standard 1 seit 5.11. (Master, nach W112/W117/W121, Golden mission neu) */
@@ -226,6 +252,10 @@ void hcfg_defaults(void)
     g_cfg.shade_ab = 0; /* W100: DIAG */
     g_cfg.shade_texskip = 1; /* W112: FIX(SHADE-BLOOM), wirkt nur mit shading=1 */
     g_cfg.vis_query = 1; /* W117: FIX(SHADE-M2), 1 = nur mit shading=1 */
+    g_cfg.vis_query_all = 2; /* W304: FIX(FLARE-OCCL), Sonne + Licht-Flares echt */
+    g_cfg.vis_ztest = 0; /* W304: Testpunkte mit Tiefentest; Standard aus bis Sonne-im-Bild belegt */
+    g_cfg.p2_ztest = 1; /* W313 P2-ZTEST: FIX, P2-Draws in Spiel-RTs mit Tiefentest des Spiels wie NV2A (Feuer/Lichter nicht mehr durch Waende) */
+    g_cfg.p2z_diag = 0; /* W313: DIAG(P2-ZTEST) */
     g_cfg.bloom_diag = 0; g_cfg.bloom_frame = 0; g_cfg.bloom_max = 4; g_cfg.bloom_every = 0; /* W112: DIAG(SHADE-BLOOM) */
     g_cfg.shade_shadow = 0; /* W100 RENDER-QA3: Schattenpuffer (nur shading=1); 0 bis die 120-FPS-Paarung mit dem Tiefenpass geklaert ist (W100_oni2: pairs=0) */
     g_cfg.shadow_diag = 0; g_cfg.shadow_ab = 0; /* W127: DIAG(SHADOWBUF) */
@@ -239,6 +269,8 @@ void hcfg_defaults(void)
     g_cfg.dlg_diag = 0; /* W85 DLGTEXT: Diagnose aus */
     g_cfg.dlg_text_raster = 1; /* FIX(DLGTEXT3,W85): rep stosd 0x196033 bleibt (mit dlg_text_upload=1) */
     g_cfg.dlg_text_clear = 1; /* FIX(DLGTEXT2,W97): Xbox-Clear loescht auch den CPU-Speicher der Textebene */
+    g_cfg.dlg_text_rtsel = 1; /* FIX(DLG-TEXTOUT,W316): Text-Upload in den gesampelten RT-Slot */
+    g_cfg.dlg_scene_diag = 0; /* DIAG(DLG-TEXTOUT,W316) */
     g_cfg.rq_perf = 0; /* W80 SHADE-PERF: Messung aus (DIAG) */
     g_cfg.rq_diag = 0; /* W77 RENDER-QA: Zensus aus (DIAG) */
     g_cfg.rq_every = 3000;
@@ -264,7 +296,15 @@ void hcfg_defaults(void)
     g_cfg.interp_rhash = 0; /* W273 DIAG */
     g_cfg.interp_pass_exact = 1; /* FIX(W273 INTERP-RACE): zeigerunabhaengige Mehrpass-Konsistenz */
     g_cfg.interp_zcons = 1; /* FIX(W251 INTERP-GROUND): Tiefen-Konsistenz exakt/gelerpt je Ziel */
+    g_cfg.interp_mode = 0; /* W295 WORLD-REPROJ: Standard Neuzeichnen (reproj nur experimentell) */
+    g_cfg.reproj_tear = 2.0f; /* W295 */
+    g_cfg.reproj_maxobj = 0.0f; /* W295: Pruefung verschlechterte das Vorhersagemass (0,53 -> 0,60), daher aus */
     g_cfg.interp_rawzc = 2; /* FIX(W284 INTERP-RAWCHG): rawchg/nomatch-Welt-Draws mit Kamera-Pruefung lerpen (2 = rawchg + nomatch) */
+    g_cfg.interp_streak = 7; /* FIX(W294 LINE-STREAK): Kachel-/Gitter-Naehte in Zwischenbildern (Bits 1/2/4; M2 60 -> 4 Streifen, M4 7 -> 2) */
+    g_cfg.interp_pair = 0; /* W317 INTERP-PAIR */
+    g_cfg.interp_pair_diag = 0;
+    g_cfg.interp_pair_thr = 0.004f;
+    g_cfg.interp_pair_mov = 0.1f;
     g_cfg.im_fast = 1; /* W99 IM-PERF: schneller VB-Pfad (A/B W99_rt0s0/rt1s0b, L0a/L1a, Selbstpruefung W99_chk1) */
     g_cfg.draw_state_cache = 1; /* W253 DRAW-OPT: redundante Set-Aufrufe entfallen (Bild bitgleich, BERICHT_M2 W253) */
     g_cfg.im_strip_ib = 3; /* W264 DRAW-OPT2: Strips/Fans/Quads ueber festen Indexpuffer statt CPU-Expansion (Bit 0 ohne, Bit 1 mit Shading-Pfad) */
@@ -453,6 +493,7 @@ void hcfg_defaults(void)
     g_cfg.mouse_capture_outside_mission = 0;
     g_cfg.mouse_capture = 0;    /* W79: Spieler-Standard per Launcher (user.cfg) */
     g_cfg.input_focus_only = 0; /* W79 */
+    g_cfg.input_rec_log = 0; /* keine Eingaben loggen (Nutzerregel) */
     g_cfg.key_toggles = 0;      /* W79 */
     g_cfg.mouse_mode = 0;       /* W87: 0 = relativ (alt); Launcher schreibt absolute */
     g_cfg.aim_diag = 0;         /* W87: DIAG(AIMSTEP) aus */
@@ -491,6 +532,8 @@ void hcfg_defaults(void)
     g_cfg.replay_steps[0] = '\0';
     g_cfg.replay_autoplay[0] = '\0'; /* W254 REPLAY-LAUNCHER */
     g_cfg.replay_camera = -1;
+    g_cfg.replay_mouse_exit = 0; /* W299 REPLAY */
+    g_cfg.focus_click_eat = 1;   /* W299 REPLAY */
     g_cfg.replay_autoplay_shots = 0;
     g_cfg.mission_autostart = -1; /* W272 ALPHA-TEST */
     g_cfg.mission_vt = -1;
@@ -498,6 +541,13 @@ void hcfg_defaults(void)
     g_cfg.mission_skip_intro = 0;
     g_cfg.mission_nav_name[0] = 0;
     g_cfg.mission_autostart_shots = 0;
+    g_cfg.campaign_chain = 0; /* W303 CAMPAIGN-CHAIN */
+    g_cfg.campaign_chain_branch = 0;
+    g_cfg.campaign_chain_hold = 150;
+    g_cfg.campaign_chain_load = 0;
+    g_cfg.campaign_chain_exit = 10;
+    g_cfg.campaign_chain_shots = 1;
+    g_cfg.campaign_chain_chapter = 0;
     g_cfg.video_export[0] = '\0'; /* W255 VIDEO-EXPORT */
     g_cfg.video_width = 1920;
     g_cfg.video_height = 1080;
@@ -714,6 +764,14 @@ static void set_key(const char *k, const char *v)
         g_cfg.loc_net_rtt = atoi(v);
     } else if (strcmp(k, "loc_net_diag") == 0) { /* W286 DIAG */
         g_cfg.loc_net_diag = atoi(v);
+    } else if (strcmp(k, "loc_sync") == 0) { /* W297 DIAG */
+        g_cfg.loc_sync = atoi(v);
+    } else if (strcmp(k, "loc_steps") == 0) { /* W297 TEST */
+        strcpy_s(g_cfg.loc_steps, sizeof g_cfg.loc_steps, v);
+    } else if (strcmp(k, "loc_replay_tick") == 0) { /* W297 TEST */
+        strcpy_s(g_cfg.loc_replay_tick, sizeof g_cfg.loc_replay_tick, v);
+    } else if (strcmp(k, "loc_sync_every") == 0) { /* W297 */
+        g_cfg.loc_sync_every = atoi(v);
     } else if (strcmp(k, "loc_pad_keys") == 0) { /* W286 LOC-SYSLINK */
         g_cfg.loc_pad_keys = atoi(v);
     } else if (strcmp(k, "save_check") == 0) {
@@ -915,6 +973,16 @@ static void set_key(const char *k, const char *v)
         g_cfg.audio_filter = atoi(v);
     } else if (strcmp(k, "audio_level_diag") == 0) {
         g_cfg.audio_level_diag = atoi(v);
+    } else if (strcmp(k, "loc_audio") == 0) { /* W298 LOC-AUDIO */
+        g_cfg.loc_audio = atoi(v);
+    } else if (strcmp(k, "volume_master") == 0 || strcmp(k, "volume_music") == 0 || /* W303 AUDIO-VOLUME */
+               strcmp(k, "volume_sfx") == 0 || strcmp(k, "volume_voice") == 0) {
+        int vol = atoi(v); /* 0..100 klemmen */
+        vol = vol < 0 ? 0 : (vol > 100 ? 100 : vol);
+        if (strcmp(k, "volume_master") == 0) { g_cfg.volume_master = vol; }
+        else if (strcmp(k, "volume_music") == 0) { g_cfg.volume_music = vol; }
+        else if (strcmp(k, "volume_sfx") == 0) { g_cfg.volume_sfx = vol; }
+        else { g_cfg.volume_voice = vol; }
     } else if (strcmp(k, "audio_menu_sfx") == 0) {
         g_cfg.audio_menu_sfx = atoi(v);
     } else if (strcmp(k, "audio_voice_diag") == 0) {
@@ -935,6 +1003,10 @@ static void set_key(const char *k, const char *v)
         g_cfg.im_ring = atoi(v);
     } else if (strcmp(k, "res_refcount") == 0) {
         g_cfg.res_refcount = atoi(v);
+    } else if (strcmp(k, "host_hi_addr") == 0) { /* FIX(TEX-WHITE-AMD,W315) */
+        g_cfg.host_hi_addr = atoi(v);
+    } else if (strcmp(k, "contig_hi_test") == 0) { /* TEST(W315) */
+        g_cfg.contig_hi_test = atoi(v);
     } else if (strcmp(k, "contig_alias_test") == 0) {
         g_cfg.contig_alias_test = (int)strtoul(v, NULL, 0);
     } else if (strcmp(k, "contig_noalias") == 0) {
@@ -967,6 +1039,45 @@ static void set_key(const char *k, const char *v)
         g_cfg.tex_hdr_check = atoi(v);
     } else if (strcmp(k, "rt_init_clear") == 0) {
         g_cfg.rt_init_clear = atoi(v);
+    } else if (strcmp(k, "tex_throttle_retry") == 0) { /* FIX(TEX-WHITE-UI,W307) */
+        g_cfg.tex_throttle_retry = atoi(v);
+    } else if (strcmp(k, "tex_up_budget") == 0) { /* DIAG(TEX-WHITE-UI,W307) */
+        g_cfg.tex_up_budget = atoi(v);
+    } else if (strcmp(k, "d3d_debug") == 0) { /* DIAG(AMD-ARTIFACTS,W302) */
+        g_cfg.d3d_debug = atoi(v);
+    } else if (strcmp(k, "d3d_warp") == 0) {
+        g_cfg.d3d_warp = atoi(v);
+    } else if (strcmp(k, "interp_shots_mrel") == 0) { /* DIAG(W302) */
+        g_cfg.interp_shots_mrel = atoi(v);
+    } else if (strcmp(k, "interp_shots_scene") == 0) { /* DIAG(W315): Liste "0x1B,0x2F" */
+        const char *q = v;
+        int i;
+        for (i = 0; i < 4; i++) {
+            char *e = NULL;
+            g_cfg.interp_shots_scene[i] = (unsigned)strtoul(q, &e, 0);
+            if (!e || e == q) { g_cfg.interp_shots_scene[i] = 0; break; }
+            q = e;
+            while (*q == ',' || *q == ' ') { q++; }
+        }
+        for (; i < 4; i++) { g_cfg.interp_shots_scene[i] = 0; }
+    } else if (strcmp(k, "interp_shots_sdelay") == 0) { /* DIAG(W315) */
+        g_cfg.interp_shots_sdelay = atoi(v);
+    } else if (strcmp(k, "mission_autostart_steps") == 0) { /* TEST(W315) */
+        g_cfg.mission_autostart_steps = atoi(v);
+    } else if (strcmp(k, "tex_missing_mark") == 0) { /* DIAG(TEX-WHITE-AMD,W315) */
+        g_cfg.tex_missing_mark = atoi(v);
+    } else if (strcmp(k, "d3d_no_threadopt") == 0) { /* DIAG(W302) */
+        g_cfg.d3d_no_threadopt = atoi(v);
+    } else if (strcmp(k, "d3d_warp_core") == 0) {
+        g_cfg.d3d_warp_core = atoi(v);
+    } else if (strcmp(k, "shader_nan_mark") == 0) {
+        g_cfg.shader_nan_mark = atoi(v);
+    } else if (strcmp(k, "hd_mark") == 0) {
+        g_cfg.hd_mark = atoi(v);
+    } else if (strcmp(k, "post_sanitize") == 0) { /* FIX(AMD-ARTIFACTS,W302) */
+        g_cfg.post_sanitize = atoi(v);
+    } else if (strcmp(k, "rt_hazard_unbind") == 0) { /* FIX(AMD-ARTIFACTS,W302) */
+        g_cfg.rt_hazard_unbind = atoi(v);
     } else if (strcmp(k, "tex_reuse_inval") == 0) {
         g_cfg.tex_reuse_inval = atoi(v);
     } else if (strcmp(k, "tex_upload_guard") == 0) {
@@ -993,6 +1104,8 @@ static void set_key(const char *k, const char *v)
         g_cfg.rtt_rb_cpu_ofs = atoi(v);
     } else if (strcmp(k, "rtt_rb_diag") == 0) {
         g_cfg.rtt_rb_diag = atoi(v);
+    } else if (strcmp(k, "rtt_lock_stale") == 0) { /* W310 */
+        g_cfg.rtt_lock_stale = atoi(v);
     } else if (strcmp(k, "rtt_stale") == 0) {
         g_cfg.rtt_stale = atoi(v);
     } else if (strcmp(k, "rtt_selfcopy") == 0) {
@@ -1021,6 +1134,14 @@ static void set_key(const char *k, const char *v)
         g_cfg.fx_vaporwave = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "cockpit_width") == 0) { /* W235 COCKPIT-WIDTH */
         g_cfg.cockpit_width = atoi(v);
+    } else if (strcmp(k, "replay_fx_live") == 0) { /* W299 REPLAY-FX */
+        g_cfg.replay_fx_live = atoi(v);
+        if (g_cfg.replay_fx_live < 0 || g_cfg.replay_fx_live > 8) { g_cfg.replay_fx_live = 0; }
+    } else if (strcmp(k, "monitor_view") == 0) { /* W319 MONITOR-VIEW */
+        g_cfg.monitor_view = atoi(v);
+        if (g_cfg.monitor_view < 0 || g_cfg.monitor_view > 2) { g_cfg.monitor_view = 0; }
+    } else if (strcmp(k, "monitor_view_diag") == 0) { /* DIAG(W319) */
+        g_cfg.monitor_view_diag = atoi(v);
     } else if (strcmp(k, "cockpit_hide") == 0) { /* W268 COCKPIT-HIDE */
         g_cfg.cockpit_hide = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "cockpit_persp_pause") == 0) {
@@ -1055,6 +1176,18 @@ static void set_key(const char *k, const char *v)
         g_cfg.loc_census_from = atoi(v);
     } else if (strcmp(k, "loc_bbtex") == 0) { /* W285 LOC-RENDER */
         g_cfg.loc_bbtex = atoi(v);
+    } else if (strcmp(k, "loc_visq") == 0) { /* W297 LOC-MISSION */
+        g_cfg.loc_visq = atoi(v);
+    } else if (strcmp(k, "loc_text_clear") == 0) { /* W297 LOC-MISSION */
+        g_cfg.loc_text_clear = atoi(v);
+    } else if (strcmp(k, "loc_vpreset") == 0) { /* W297 LOC-MISSION */
+        g_cfg.loc_vpreset = atoi(v);
+    } else if (strcmp(k, "loc_vismap") == 0) { /* W311 LOC-MISSION-RENDER */
+        g_cfg.loc_vismap = atoi(v);
+    } else if (strcmp(k, "loc_short3") == 0) { /* W311 LOC-MISSION-RENDER */
+        g_cfg.loc_short3 = atoi(v);
+    } else if (strcmp(k, "loc_nodummy") == 0) { /* W297 LOC-MISSION */
+        g_cfg.loc_nodummy = atoi(v);
     } else if (strcmp(k, "loc_bumpenv") == 0) { /* W285 LOC-RENDER */
         g_cfg.loc_bumpenv = atoi(v);
     } else if (strcmp(k, "loc_psdump") == 0) { /* W285 LOC-RENDER (DIAG) */
@@ -1153,6 +1286,10 @@ static void set_key(const char *k, const char *v)
         g_cfg.dlg_text_raster = atoi(v);
     } else if (strcmp(k, "dlg_text_clear") == 0) {
         g_cfg.dlg_text_clear = atoi(v);
+    } else if (strcmp(k, "dlg_text_rtsel") == 0) { /* W316 DLG-TEXTOUT */
+        g_cfg.dlg_text_rtsel = atoi(v);
+    } else if (strcmp(k, "dlg_scene_diag") == 0) { /* DIAG(DLG-TEXTOUT,W316) */
+        g_cfg.dlg_scene_diag = (int)strtol(v, NULL, 0);
     } else if (strcmp(k, "rq_perf") == 0) {
         g_cfg.rq_perf = atoi(v);
     } else if (strcmp(k, "rq_diag") == 0) {
@@ -1175,6 +1312,8 @@ static void set_key(const char *k, const char *v)
         g_cfg.interp_gpu_tight = atoi(v);
     } else if (strcmp(k, "render_thread") == 0) {
         g_cfg.render_thread = atoi(v);
+    } else if (strcmp(k, "render_thread_emul") == 0) { /* FIX(AMD-ARTIFACTS,W302) */
+        g_cfg.render_thread_emul = atoi(v);
     } else if (strcmp(k, "render_thread_core") == 0) {
         g_cfg.render_thread_core = atoi(v);
     } else if (strcmp(k, "present_decouple") == 0) {
@@ -1203,6 +1342,14 @@ static void set_key(const char *k, const char *v)
         g_cfg.warm_gpu_soft = atoi(v);
     } else if (strcmp(k, "warm_gpu_delay") == 0) {
         g_cfg.warm_gpu_delay = atoi(v);
+    } else if (strcmp(k, "gpu_burn") == 0) { /* DIAG(PERF-SPIKE,W318) */
+        g_cfg.gpu_burn = atoi(v);
+    } else if (strcmp(k, "interp_gpu_tight_imm") == 0) { /* PERF(PERF-SPIKE,W318) */
+        g_cfg.interp_gpu_tight_imm = atoi(v);
+    } else if (strcmp(k, "interp_bsets_imm") == 0) { /* PERF(PERF-SPIKE,W318) */
+        g_cfg.interp_bsets_imm = atoi(v);
+    } else if (strcmp(k, "shade_par_compile") == 0) { /* PERF(PERF-SPIKE,W318) */
+        g_cfg.shade_par_compile = atoi(v);
     } else if (strcmp(k, "warm_vbpre") == 0) {
         g_cfg.warm_vbpre = atoi(v);
     } else if (strcmp(k, "warm_diag") == 0) {
@@ -1243,8 +1390,30 @@ static void set_key(const char *k, const char *v)
         g_cfg.interp_guard_diag = atoi(v);
     } else if (strcmp(k, "interp_zcons") == 0) {
         g_cfg.interp_zcons = atoi(v);
+    } else if (strcmp(k, "interp_mode") == 0) { /* W295 WORLD-REPROJ */
+        g_cfg.interp_mode = _stricmp(v, "reproj") == 0 ? 1 : (_stricmp(v, "redraw") == 0 ? 0 : atoi(v));
+    } else if (strcmp(k, "reproj_maxobj") == 0) { /* W295 */
+        g_cfg.reproj_maxobj = (float)atof(v);
+    } else if (strcmp(k, "reproj_tear") == 0) { /* W295 */
+        g_cfg.reproj_tear = (float)atof(v);
+    } else if (strcmp(k, "reproj_opt") == 0) { /* W295 DIAG */
+        g_cfg.reproj_opt = atoi(v);
+    } else if (strcmp(k, "reproj_dframe") == 0) { /* W295 DIAG */
+        g_cfg.reproj_dframe = atoi(v);
+    } else if (strcmp(k, "reproj_diag") == 0) { /* W295 DIAG */
+        g_cfg.reproj_diag = atoi(v);
     } else if (strcmp(k, "interp_rawzc") == 0) { /* W284 */
         g_cfg.interp_rawzc = atoi(v);
+    } else if (strcmp(k, "interp_streak") == 0) { /* W294 */
+        g_cfg.interp_streak = atoi(v);
+    } else if (strcmp(k, "interp_pair") == 0) { /* W317 */
+        g_cfg.interp_pair = atoi(v);
+    } else if (strcmp(k, "interp_pair_diag") == 0) {
+        g_cfg.interp_pair_diag = atoi(v);
+    } else if (strcmp(k, "interp_pair_thr") == 0) {
+        g_cfg.interp_pair_thr = (float)atof(v);
+    } else if (strcmp(k, "interp_pair_mov") == 0) {
+        g_cfg.interp_pair_mov = (float)atof(v);
     } else if (strcmp(k, "interp_pass") == 0) {
         g_cfg.interp_pass = atoi(v);
     } else if (strcmp(k, "pf_ring") == 0) {
@@ -1422,6 +1591,12 @@ static void set_key_b(const char *k, const char *v)
         g_cfg.vis_query = atoi(v);
     } else if (strcmp(k, "vis_query_all") == 0) { /* W117 */
         g_cfg.vis_query_all = atoi(v);
+    } else if (strcmp(k, "vis_ztest") == 0) { /* W304 FLARE-OCCL */
+        g_cfg.vis_ztest = atoi(v);
+    } else if (strcmp(k, "p2_ztest") == 0) { /* W313 P2-ZTEST */
+        g_cfg.p2_ztest = atoi(v);
+    } else if (strcmp(k, "p2z_diag") == 0) { /* DIAG(P2-ZTEST,W313) */
+        g_cfg.p2z_diag = atoi(v);
     } else if (strcmp(k, "vis_diag") == 0) { /* DIAG(SHADE-M2,W117) */
         g_cfg.vis_diag = atoi(v);
     } else if (strcmp(k, "bloom_diag") == 0) { /* DIAG(SHADE-BLOOM,W112) */
@@ -1474,6 +1649,10 @@ static void set_key_b(const char *k, const char *v)
         strncpy_s(g_cfg.replay_autoplay, sizeof g_cfg.replay_autoplay, v, _TRUNCATE);
     } else if (strcmp(k, "replay_camera") == 0) {
         g_cfg.replay_camera = atoi(v);
+    } else if (strcmp(k, "replay_mouse_exit") == 0) { /* W299 REPLAY */
+        g_cfg.replay_mouse_exit = atoi(v);
+    } else if (strcmp(k, "focus_click_eat") == 0) { /* W299 REPLAY */
+        g_cfg.focus_click_eat = atoi(v);
     } else if (strcmp(k, "replay_autoplay_shots") == 0) {
         g_cfg.replay_autoplay_shots = atoi(v);
     } else if (strcmp(k, "mission_autostart") == 0) { /* W272 ALPHA-TEST */
@@ -1488,6 +1667,20 @@ static void set_key_b(const char *k, const char *v)
         strncpy_s(g_cfg.mission_nav_name, sizeof g_cfg.mission_nav_name, v, _TRUNCATE);
     } else if (strcmp(k, "mission_autostart_shots") == 0) {
         g_cfg.mission_autostart_shots = atoi(v);
+    } else if (strcmp(k, "campaign_chain") == 0) { /* W303 CAMPAIGN-CHAIN (Testwerkzeug) */
+        g_cfg.campaign_chain = atoi(v);
+    } else if (strcmp(k, "campaign_chain_branch") == 0) {
+        g_cfg.campaign_chain_branch = atoi(v);
+    } else if (strcmp(k, "campaign_chain_hold") == 0) {
+        g_cfg.campaign_chain_hold = atoi(v);
+    } else if (strcmp(k, "campaign_chain_load") == 0) {
+        g_cfg.campaign_chain_load = atoi(v);
+    } else if (strcmp(k, "campaign_chain_chapter") == 0) {
+        g_cfg.campaign_chain_chapter = atoi(v);
+    } else if (strcmp(k, "campaign_chain_shots") == 0) {
+        g_cfg.campaign_chain_shots = atoi(v);
+    } else if (strcmp(k, "campaign_chain_exit") == 0) {
+        g_cfg.campaign_chain_exit = atoi(v);
     } else if (strcmp(k, "video_export") == 0) { /* W255 VIDEO-EXPORT */
         strncpy_s(g_cfg.video_export, sizeof g_cfg.video_export, v, _TRUNCATE);
     } else if (strcmp(k, "video_width") == 0) {
@@ -1539,6 +1732,8 @@ static void set_key_b(const char *k, const char *v)
         g_cfg.mouse_capture_outside_mission = atoi(v) != 0;
     } else if (strcmp(k, "mouse_capture") == 0) {
         g_cfg.mouse_capture = atoi(v);
+    } else if (strcmp(k, "input_rec_log") == 0) { /* nur Entwickler */
+        g_cfg.input_rec_log = atoi(v);
     } else if (strcmp(k, "input_focus_only") == 0) {
         g_cfg.input_focus_only = atoi(v);
     } else if (strcmp(k, "input_source") == 0) {
@@ -1629,6 +1824,15 @@ static void set_key_b(const char *k, const char *v)
         /* W250 UPDATE-CHECK: Einstellung nur fuer den Launcher (user.cfg) */
     } else if (sb_crash_cfg_key(k, v)) {
         /* W279 DIAG-CRASH: crash_dump, hang_report, hang_secs, crash_test, hang_test (sb_crash.c) */
+    } else if (strncmp(k, "joy_cal", 7) == 0) {
+        /* W312 JOY-CALIB: Achsen-Kalibrierung je Geraet (Launcher, HOTAS-Dialog) */
+        unsigned short jv, jp;
+        int jax;
+        ijoy_cal_t jc;
+        if (ijoy_cal_parse(v, &jv, &jp, &jax, &jc) && ijoy_cal_set(jv, jp, jax, &jc) == 0)
+            HLOG_I("cfg: %s: Kalibrierung %04X:%04X %s", k, jv, jp, ijoy_axis_name(jax));
+        else
+            HLOG_W("cfg: %s ungueltig - ignoriert", k);
     } else if (strncmp(k, "launcher_", 9) == 0) {
         /* W276 LOC-LAUNCH: Spielauswahl/LoC-Einstellungen nur fuer den Launcher */
     } else {

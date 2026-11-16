@@ -161,9 +161,13 @@ static void cli_usage(void)
            "                          Line of Contact, W276, loc_exp = loc_ok mit\n"
            "                          Hinweisband, W293, advanced = Anzeige/Grafik\n"
            "                          mit Feinreglern, W291, fade = Breitbild\n"
-           "                          Fade out mit Verlaufszeile, W296),\n"
+           "                          Fade out mit Verlaufszeile, W296, fpslist/\n"
+           "                          fpslist_auto = Bildratenliste offen, W309),\n"
            "                          nur Anzeige (Packs-Ordner: Umgebung SB_PACKS_DIR)\n"
            "  --dpi N                 mit --ui-shot/--bind-shot: DPI erzwingen\n"
+           "  --sim-monitors LISTE    W309: simulierte Monitore fuer --ui-shot/Tests,\n"
+           "                          z. B. 165 oder 60/144,165 (erster = Startmonitor,\n"
+           "                          /N = Hoechstrate)\n"
            "  --layout 0|a|b          W281 Entwurf: Layout (0 = heute, a = groesser,\n"
            "                          b = mehr Platz); sonst launcher_ui.cfg launcher_layout,\n"
            "                          Standard a/normal\n"
@@ -529,6 +533,278 @@ static void llay_rep(const char *name, int ok, const char *detail)
         printf("FAIL %s: %s\n", name, detail ? detail : "");
         g_llay_fail++;
     }
+}
+
+/* W309 FPS-MONITOR: angebotene Liste je Monitorrate (sb_fps_list, gleich in
+ * Launcher und ESC), Kennzeichen, alter cfg-Wert ueber dem Monitor, R10.
+ * Eigene Funktion (noinline, Puffer static): der Stapelrahmen von
+ * cli_selftest ist bereits gross, die GUI-Faelle laufen darunter. */
+static __declspec(noinline) void st_w309_fpsmon(int *pass_, int *fail_)
+{
+#define ST_OK(name) do { printf("PASS %s\n", name); (*pass_)++; } while (0)
+#define ST_FAIL(name, fmt, ...) do { printf("FAIL %s: " fmt "\n", name, __VA_ARGS__); (*fail_)++; } while (0)
+    static launcher_settings_t a, b;
+    static char tmp[1024];
+    /* Erwartung je Monitor: Wert (J = kann ruckeln, A = ueber Monitor, nur keep) */
+    static const struct { int hz, keep; const char *want; } c[] = {
+        { 60, -1, "auto 0 60" },
+        { 59, -1, "auto 0 60" },                                      /* 59,94 Hz (abgeschnitten) */
+        { 144, -1, "auto 0 60J 75J 90J 100J 120J 144" },
+        { 143, -1, "auto 0 60J 75J 90J 100J 120J 144" },
+        { 165, -1, "auto 0 60J 75J 90J 100J 120J 144J 165" },         /* Tester: 60/120 ruckeln, 165 nicht */
+        { 164, -1, "auto 0 60J 75J 90J 100J 120J 144J 165" },
+        { 240, -1, "auto 0 60 75J 90J 100J 120 144J 165J 240" },
+        { 120, -1, "auto 0 60 75J 90J 100J 120" },
+        { 50, -1, "auto 0" },
+        { 0, -1, "auto 0 60 75 90 100 120 144 165 240" },              /* unbekannt: wie bisher */
+        { 144, 240, "auto 0 60J 75J 90J 100J 120J 144 240A" },         /* Alt-cfg 240 bleibt */
+        { 60, 165, "auto 0 60 165A" },
+        { 144, 0, "auto 0 60J 75J 90J 100J 120J 144" },
+    };
+    int ok = 1, i, k;
+    char why[200] = "";
+    lr_env_t env;
+    lr_res_t rr[LR_N];
+    for (i = 0; i < (int)(sizeof c / sizeof c[0]) && ok; i++) {
+        SbFpsItem l[SB_FPS_LIST_MAX];
+        char got[160] = "";
+        int n = sb_fps_list(c[i].hz, c[i].keep, l, SB_FPS_LIST_MAX);
+        for (k = 0; k < n; k++) {
+            char t[16];
+            if (l[k].v == SB_FPS_AUTO) { strcpy_s(t, sizeof t, "auto"); }
+            else { _snprintf_s(t, sizeof t, _TRUNCATE, "%d%s%s", l[k].v, (l[k].flags & SB_FPS_F_JUDDER) ? "J" : "",
+                               (l[k].flags & SB_FPS_F_ABOVE) ? "A" : ""); }
+            if (k) { strcat_s(got, sizeof got, " "); }
+            strcat_s(got, sizeof got, t);
+        }
+        if (strcmp(got, c[i].want) != 0) {
+            ok = 0;
+            _snprintf_s(why, sizeof why, _TRUNCATE, "%d Hz keep %d: '%s' statt '%s'", c[i].hz, c[i].keep, got, c[i].want);
+        }
+    }
+    /* Alt-cfg mit zu hohem Wert: Laden/Speichern aendert ihn nicht (keine stille Migration) */
+    if (ok) {
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w309_fps.cfg");
+        u8_DeleteFile(tmp);
+        lcfg_defaults(&a);
+        a.interp_fps = 240;
+        if (lcfg_save_user(tmp, &a) != 0) { ok = 0; strcpy_s(why, sizeof why, "save 240"); }
+        lcfg_defaults(&b);
+        lcfg_load_file(tmp, &b);
+        lcfg_gfx_migrate_fps(&b);
+        if (b.interp_fps != 240) { ok = 0; _snprintf_s(why, sizeof why, _TRUNCATE, "240 geladen als %d", b.interp_fps); }
+        st_valid_base(&b);
+        b.interp_fps = 240;
+        {
+            char e[256];
+            if (lcfg_validate(&b, e, sizeof e) != 0) { ok = 0; _snprintf_s(why, sizeof why, _TRUNCATE, "240 ungueltig: %.60s", e); }
+        }
+        u8_DeleteFile(tmp);
+    }
+    /* R10 (Fenster/randlos): ueber Monitor oder kein glatter Teiler warnt */
+    if (ok) {
+        static const struct { int hz, fps, warn; } r[] = {
+            { 165, 120, 1 }, { 165, 60, 1 }, { 165, 165, 0 }, { 164, 165, 0 }, { 144, 240, 1 },
+            { 240, 120, 0 }, { 240, 60, 0 }, { 120, 60, 0 }, { 59, 60, 0 }, { 144, 120, 1 }, { 60, 0, 0 },
+            { 165, SB_FPS_AUTO, 0 },
+        };
+        lcfg_defaults(&b);
+        b.window_mode = 0;
+        lrules_env_default(&env, &b);
+        for (i = 0; i < (int)(sizeof r / sizeof r[0]); i++) {
+            env.display_hz = r[i].hz;
+            b.interp_fps = r[i].fps;
+            lrules_eval(&env, rr);
+            if (rr[10].active != r[i].warn) {
+                ok = 0;
+                _snprintf_s(why, sizeof why, _TRUNCATE, "r10 %d@%d = %d", r[i].fps, r[i].hz, rr[10].active);
+                break;
+            }
+        }
+        b.window_mode = 2; /* exklusiv: Rate folgt dem Modus (R9), keine R10 */
+        env.display_hz = 165;
+        b.interp_fps = 120;
+        lrules_eval(&env, rr);
+        if (ok && rr[10].active) { ok = 0; strcpy_s(why, sizeof why, "r10 exklusiv"); }
+    }
+    if (ok) { ST_OK("W309 fps-monitor (Liste 60/144/165/240/120/50/unbekannt Hz, Kennzeichen, Alt-cfg 240, R10)"); }
+    else { ST_FAIL("W309 fps-monitor", "%s", why); }
+#undef ST_OK
+#undef ST_FAIL
+}
+
+/* W312 JOY-CALIB: Pad-Lerner ab Ruhestellung (Hori-Diagonale), Partner-
+ * Pruefung aim_x/aim_y, joy_cal-Zeilen in user.cfg (Temp), Kalibrierung im
+ * Joystick-Lerner. Nur reine Logik, keine Geraete, keine echten Dateien. */
+static __declspec(noinline) void st_w312_joycalib(int *pass_, int *fail_)
+{
+#define W312_OK(name) do { printf("PASS %s\n", name); (*pass_)++; } while (0)
+#define W312_FAIL(name, fmt, ...) do { printf("FAIL %s: " fmt "\n", name, __VA_ARGS__); (*fail_)++; } while (0)
+    static char tmp[1024], buf[4096], lines[8][96], back[40][96];
+    /* 1: Flugstick im Xbox-Modus, Schub auf RY am Anschlag (-32768) */
+    {
+        lctrl_pad_t rest, cur;
+        lctrl_pad_learner_t L;
+        char nm[16], nx[16] = "", ny[16] = "";
+        int i, old_rest, new_rest = 0, ok;
+        memset(&rest, 0, sizeof rest);
+        rest.ry = -32768;
+        old_rest = lctrl_pad_deflected(&rest, nm, sizeof nm) && strcmp(nm, "RY") == 0;
+        /* aim_x lernen: 3 ruhige Abtastungen, dann Stick rechts */
+        lctrl_pad_learner_reset(&L);
+        for (i = 0; i < 6; i++) {
+            new_rest |= lctrl_pad_learner_axis(&L, &rest, nm, sizeof nm);
+        }
+        cur = rest;
+        cur.lx = 32000;
+        if (lctrl_pad_learner_axis(&L, &cur, nm, sizeof nm)) {
+            strcpy_s(nx, sizeof nx, nm);
+        }
+        /* aim_y lernen: Stick vorn */
+        lctrl_pad_learner_reset(&L);
+        for (i = 0; i < 4; i++) {
+            new_rest |= lctrl_pad_learner_axis(&L, &rest, nm, sizeof nm);
+        }
+        cur = rest;
+        cur.ly = 31000;
+        if (lctrl_pad_learner_axis(&L, &cur, nm, sizeof nm)) {
+            strcpy_s(ny, sizeof ny, nm);
+        }
+        ok = old_rest && !new_rest && strcmp(nx, "LX") == 0 && strcmp(ny, "LY") == 0;
+        if (ok) {
+            W312_OK("W312 JOY-CALIB pad-rest (alt: Ruhe-Schub RY sofort gelernt -> diagonal; neu: LX/LY)");
+        } else {
+            W312_FAIL("W312 JOY-CALIB pad-rest", "old=%d new_rest=%d x=%s y=%s", old_rest, new_rest, nx, ny);
+        }
+    }
+    /* 2: normales Pad unveraendert (Mitte ruht), Diagonale bleibt uneindeutig,
+     * Trigger ab Ruhe, gehaltene Auslenkung beim Start lernt nicht sofort */
+    {
+        lctrl_pad_t z, c;
+        lctrl_pad_learner_t L;
+        char nm[16];
+        int i, ok = 1;
+        memset(&z, 0, sizeof z);
+        lctrl_pad_learner_reset(&L);
+        for (i = 0; i < 3; i++) { lctrl_pad_learner_axis(&L, &z, nm, sizeof nm); }
+        c = z; c.rx = -30000;
+        ok = ok && lctrl_pad_learner_axis(&L, &c, nm, sizeof nm) && strcmp(nm, "RX") == 0;
+        c = z; c.lx = 25000; c.ly = 25000; /* diagonal: zwei heisse Achsen */
+        ok = ok && !lctrl_pad_learner_axis(&L, &c, nm, sizeof nm);
+        c = z; c.rt = 250;
+        ok = ok && lctrl_pad_learner_axis(&L, &c, nm, sizeof nm) && strcmp(nm, "RT") == 0;
+        c = z; c.lx = 32000; /* beim Start gehalten -> Basis, kein Lernen */
+        lctrl_pad_learner_reset(&L);
+        for (i = 0; i < 5; i++) { ok = ok && !lctrl_pad_learner_axis(&L, &c, nm, sizeof nm); }
+        if (ok) {
+            W312_OK("W312 JOY-CALIB pad-normal (Mitte/Diagonale/Trigger/gehalten)");
+        } else {
+            W312_FAIL("W312 JOY-CALIB pad-normal", "%s", "Abweichung");
+        }
+    }
+    /* 3: Partner-Pruefung (gleiche Achse auf aim_x und aim_y) */
+    {
+        lctrl_bind_t b;
+        int ax = lctrl_bind_elem_index("aim_x"), ay = lctrl_bind_elem_index("aim_y");
+        int sx = lctrl_bind_elem_index("sight_x"), sy = lctrl_bind_elem_index("sight_y");
+        int ok = ax >= 0 && ay >= 0 && lctrl_axis_partner(ax) == ay && lctrl_axis_partner(ay) == ax &&
+                 lctrl_axis_partner(sx) == sy && lctrl_axis_partner(lctrl_bind_elem_index("rot")) == -1;
+        ok = ok && lctrl_alt_same_axis("PAD:RY:dz=0.15:curve=1.5:inv=1", "PAD:RY:dz=0.15:curve=1.5") &&
+             !lctrl_alt_same_axis("PAD:RY", "PAD:LY") &&
+             lctrl_alt_same_axis("JOY0:X:dz=0.05", "JOY0:X:dz=0.05:inv=1") &&
+             !lctrl_alt_same_axis("JOY0:X", "JOY1:X") && !lctrl_alt_same_axis("JOY0:X+", "JOY0:X") &&
+             !lctrl_alt_same_axis("KEY:LEFT", "KEY:LEFT");
+        lctrl_bind_init(&b);
+        lctrl_bind_set(&b, ax, "JOY0:Y:dz=0.05, KEY:RIGHT");
+        ok = ok && lctrl_bind_axis_used_by(&b, ax, "JOY0:Y:dz=0.05:inv=1") &&
+             !lctrl_bind_axis_used_by(&b, ax, "JOY0:X:dz=0.05") && !lctrl_bind_axis_used_by(&b, ay, "JOY0:Y");
+        if (ok) {
+            W312_OK("W312 JOY-CALIB same-axis (aim_x/aim_y, sight_x/sight_y)");
+        } else {
+            W312_FAIL("W312 JOY-CALIB same-axis", "ax=%d ay=%d", ax, ay);
+        }
+    }
+    /* 4: joy_cal-Zeilen in user.cfg (Temp): fremde Zeilen und Assistent bleiben */
+    {
+        FILE *f = NULL;
+        int ok = 1, n, k;
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w312_joycal_test.cfg");
+        u8_DeleteFile(tmp);
+        if (u8_fopen_s(&f, tmp, "w") != 0 || !f) {
+            ok = 0;
+        } else {
+            fputs("# Kopf\r\n[input]\r\nsbc_usb=1\r\npad_dz_stick=10\r\njoy_cal5=0001:0002,X,-1,-,1,0,0\r\n"
+                  "joy_calx=fremd\r\n\r\n[audio]\r\nvol=80\r\n", f);
+            fclose(f);
+        }
+        strcpy_s(lines[0], sizeof lines[0], "joy_cal0=046D:C283,X,-26000,1500,30500,5,0");
+        strcpy_s(lines[1], sizeof lines[1], "joy_cal1=046D:C283,S0,-32000,-,32000,0,1");
+        ok = ok && joycal_cfg_apply(tmp, lines, 2) == 0;
+        memset(buf, 0, sizeof buf);
+        if (u8_fopen_s(&f, tmp, "r") == 0 && f) {
+            (void)fread(buf, 1, sizeof buf - 1, f);
+            fclose(f);
+        }
+        ok = ok && strstr(buf, "joy_cal0=046D:C283,X") && strstr(buf, "joy_cal1=046D:C283,S0") &&
+             !strstr(buf, "joy_cal5=") && strstr(buf, "joy_calx=fremd") && strstr(buf, "pad_dz_stick=10") &&
+             strstr(buf, "sbc_usb=1") && strstr(buf, "[audio]") && strstr(buf, "vol=80") && strstr(buf, "# Kopf");
+        n = joycal_cfg_read(tmp, back, 40);
+        ok = ok && n == 2;
+        for (k = 0; k < n && ok; k++) {
+            unsigned short v, p;
+            int a;
+            ijoy_cal_t c;
+            const char *eq = strchr(back[k], '=');
+            ok = eq && ijoy_cal_parse(eq + 1, &v, &p, &a, &c) && v == 0x046D && p == 0xC283;
+        }
+        ok = ok && assist_cfg_read(tmp, back, 8) == 1; /* Assistent sieht nur pad_dz_stick */
+        ok = ok && joycal_cfg_apply(tmp, lines, 0) == 0 && joycal_cfg_read(tmp, back, 40) == 0 &&
+             assist_cfg_read(tmp, back, 8) == 1;
+        strcpy_s(lines[2], sizeof lines[2], "pad_dz_stick=3"); /* fremder Key -> abgelehnt */
+        ok = ok && joycal_cfg_apply(tmp, (const char (*)[96])lines + 2, 1) != 0 &&
+             !joycal_cfg_owns("joy_cal32") && !joycal_cfg_owns("joy_calx") && joycal_cfg_owns("joy_cal31");
+        u8_DeleteFile(tmp);
+        if (ok) {
+            W312_OK("W312 JOY-CALIB cfg (joy_calN ersetzt, fremde Zeilen/Assistent intakt)");
+        } else {
+            W312_FAIL("W312 JOY-CALIB cfg", "n=%d", n);
+        }
+    }
+    /* 5: Kalibrierung im Joystick-Lerner: Achse mit kleinem Weg (+-12000,
+     * Treiber/Windows-Kalibrierung daneben) lernt erst kalibriert */
+    {
+        lctrl_joy_learner_t L;
+        imap_joy_state_t st;
+        ijoy_cal_t c = { -12000, 0, 12000, 0, 0 };
+        char out[48] = "", out2[48] = "";
+        int idx = lctrl_bind_elem_index("aim_x"), i, r_raw = 0, r_cal = 0, v;
+        for (i = 0; i < 2; i++) {
+            lctrl_joy_learner_reset(&L);
+            for (v = 0; v < 12; v++) {
+                int r;
+                memset(&st, 0, sizeof st);
+                st.axis[0] = (int16_t)(v < 4 ? 0 : 12000); /* Ruhe, dann voll rechts (roh) */
+                st.axis[1] = 100;
+                if (i == 1) {
+                    st.axis[0] = ijoy_cal_apply(&c, st.axis[0]);
+                }
+                r = lctrl_joy_learner_step(&L, 1, &st, 0x03, 0, idx, i ? out2 : out, 48);
+                if (r) {
+                    if (i) { r_cal = r; } else { r_raw = r; }
+                    break;
+                }
+            }
+        }
+        if (r_raw == 0 && r_cal == 3 && strncmp(out2, "X:", 2) == 0) {
+            W312_OK("W312 JOY-CALIB cal-learn (roh 12000 nicht lernbar, kalibriert X)");
+        } else {
+            W312_FAIL("W312 JOY-CALIB cal-learn", "raw=%d cal=%d '%s'", r_raw, r_cal, out2);
+        }
+    }
+#undef W312_OK
+#undef W312_FAIL
 }
 
 static int cli_selftest(const char *client_override)
@@ -918,6 +1194,44 @@ static int cli_selftest(const char *client_override)
             T_OK("W268 cockpit_hide cfg (Standard 0, Roundtrip)");
         } else {
             T_FAIL("W268 cockpit_hide cfg", "%s", "Werte falsch");
+        }
+        u8_DeleteFile(tmp);
+    }
+    /* W319 MONITOR-VIEW: monitor_view Standard 0, Roundtrip 2 -> 1 -> 0, ungueltige Werte -> 0 ([render]) */
+    {
+        int ok, k;
+        static const int kv[3] = { 2, 1, 0 };
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w319_mview_test.cfg");
+        lcfg_defaults(&a);
+        ok = a.monitor_view == 0;
+        for (k = 0; k < 3 && ok; k++) {
+            u8_DeleteFile(tmp);
+            lcfg_defaults(&a);
+            a.monitor_view = kv[k];
+            ok = lcfg_save_user(tmp, &a) == 0;
+            lcfg_defaults(&b);
+            b.monitor_view = 7;
+            if (ok) { lcfg_load_file(tmp, &b); }
+            ok = ok && b.monitor_view == kv[k];
+        }
+        if (ok) { /* ungueltiger Wert in der Datei -> 0 */
+            FILE *f = NULL;
+            u8_DeleteFile(tmp);
+            if (u8_fopen_s(&f, tmp, "w") == 0 && f) {
+                fputs("[render]\nmonitor_view=5\n", f);
+                fclose(f);
+                lcfg_defaults(&b);
+                lcfg_load_file(tmp, &b);
+                ok = b.monitor_view == 0;
+            } else {
+                ok = 0;
+            }
+        }
+        if (ok) {
+            T_OK("W319 monitor_view cfg (Standard 0, Roundtrip 2/1/0, Klemmung)");
+        } else {
+            T_FAIL("W319 monitor_view cfg", "%s", "Werte falsch");
         }
         u8_DeleteFile(tmp);
     }
@@ -2123,6 +2437,9 @@ static int cli_selftest(const char *client_override)
         if (ok) { T_OK("W223 fps-rates (auto + 30..240, validate, save/load, Custom, R10)"); }
         else { T_FAIL("W223 fps-rates", "%s", why); }
     }
+
+    st_w309_fpsmon(&pass, &fail); /* W309 FPS-MONITOR */
+    st_w312_joycalib(&pass, &fail); /* W312 JOY-CALIB */
 
     /* 29 (W143): Assistent-cfg Speichern/Zuruecksetzen erhaelt fremde Zeilen */
     {
@@ -3517,6 +3834,8 @@ static int cli_selftest(const char *client_override)
     w282_gui_selftest(client_override, &pass, &fail); /* W282 ISSUE6 */
     w283_gui_selftest(client_override, &pass, &fail); /* W283 ORIG-KEY-BIND */
     w290_gui_selftest(client_override, &pass, &fail); /* W290 QUICK-SHOT */
+    w303_gui_selftest(client_override, &pass, &fail); /* W303 AUDIO-VOLUME */
+    w299_bind_selftest(&pass, &fail); /* W299 REPLAY */
     if (!ls_replay_selftest()) { T_OK("W254 replay list (folders, SaveMeta name, mission, signature state, order, set args)"); }
     else { T_FAIL("W254 replay list", "%s", "failed"); }
     if (!ls_selftest()) { T_OK("W199 save-import layouts, conflicts, backup, ZIP roundtrip, rejection"); }
@@ -4089,6 +4408,10 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
             }
         }
     }
+    { /* W309 FPS-MONITOR: simulierte Monitore fuer --ui-shot/--selftest (erster = Startmonitor) */
+        const char *sm = cli_value(argc, argv, "--sim-monitors");
+        if (sm) { strncpy_s(o.sim_mon, sizeof o.sim_mon, sm, _TRUNCATE); }
+    }
     { /* W281 LAUNCHER-SIZE: Layout-Vorschau (Entwurf) - GUI und Shots */
         const char *lv = cli_value(argc, argv, "--layout");
         const char *sz = cli_value(argc, argv, "--ui-size");
@@ -4278,6 +4601,7 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
         /* W221 HOTAS: Joystick-Dialog offscreen (Beispielgeraete, nie sichtbar) */
         cli_console();
         o.shot = 6;
+        o.joy_cal = cli_flag(argc, argv, "--joy-cal"); /* W312: Kalibrierzustand */
         shot_dir(argc, argv, &o);
         rc = gui_main(client_override, &o);
     } else if (cli_value(argc, argv, "--assist-shot")) {

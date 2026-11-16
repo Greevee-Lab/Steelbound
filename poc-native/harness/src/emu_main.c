@@ -2,6 +2,7 @@
  * Export: void __stdcall sb_emulate(void). Liest eigene Commandline.
  * Log: <SB_OUT_DIR|out>/sb_harness.log (s. hcfg_out_dir).
  */
+#include "sb_texhealth.h" /* W315 */
 #include <stdio.h>
 #include "sb_profile.h" /* W229 SBA() */
 #include <stdarg.h>
@@ -18,6 +19,7 @@
 #include "xbe_loader.h"
 #include "kernel_hle.h"
 #include "xdk_hooks.h"
+#include "sbc_wire.h" /* W305: SBC-Diagnosezeile am Ende */
 #include "fs_emu.h"
 #include "d3d11_render.h"
 #include "watch_dr.h" /* W41 WATCHDR */
@@ -31,6 +33,10 @@
 #include "sb_relaunch.h" /* W186 RESET-TITLE */
 #include "sb_rauto.h" /* W254 REPLAY-LAUNCHER */
 #include "sb_mauto.h" /* W272 ALPHA-TEST */
+#include "sb_watermark.h" /* W301: sb_version_str */
+#include "sb_version.h"   /* W301: sb_release_stage */
+#include "sb_edition.h"   /* W301: SB_EDITION_NAME */
+#include "sb_cchain.h" /* W303 CAMPAIGN-CHAIN */
 #include "render_vexp.h" /* W255 VIDEO-EXPORT */
 #include "sb_crash.h" /* W279 DIAG-CRASH */
 
@@ -1325,6 +1331,8 @@ static DWORD WINAPI watchdog(LPVOID unused)
         }
         if (g_run_seconds > 0 && waited >= g_run_seconds) {
             HLOG_I("watchdog: --run-seconds erreicht, Exit(0)");
+            sbc_wire_log_summary("Ende"); /* W305: nur sbc_usb=1 */
+            sb_th_log("Ende"); /* W315: Textur-Gesundheit ins Log */
             sb_rem_shutdown(); /* W103: index.json/VRAM-Zeile */
             krnl_dump_stats();
             hlog_close();
@@ -1332,6 +1340,15 @@ static DWORD WINAPI watchdog(LPVOID unused)
         }
     }
     /* unreachable */
+}
+
+/* W303 CAMPAIGN-CHAIN: Testlauf nach Kettenende ueber den normalen
+ * --run-seconds-Ausgang beenden (Watchdog, Exit(0) mit Abschlusszeilen). */
+void emu_run_seconds_end_now(void)
+{
+    if (g_run_seconds > 0) {
+        g_run_seconds = 1;
+    }
 }
 
 /* W186 RESET-TITLE: Rest eines Testlaufs (--run-seconds) in Sekunden,
@@ -1348,6 +1365,8 @@ int emu_run_seconds_left(void)
  * Log schliessen); ExitProcess macht der Aufrufer. */
 void emu_shutdown_for_exit(void)
 {
+    sbc_wire_log_summary("Ende"); /* W305: nur sbc_usb=1 */
+    sb_th_log("Ende"); /* W315 */
     sb_rem_shutdown();
     krnl_dump_stats();
     hlog_close();
@@ -1593,6 +1612,10 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     if (sb_relaunch_child()) { hlog_init_append(log_path, HLOG_INFO); }
     else { hlog_init(log_path, HLOG_INFO); }
     HLOG_I("sb_emu: Harness startet (DLL=0x%p)", GetModuleHandleA("sb_emu.dll"));
+    { /* W301 BETA-VERSION: Release-Version (poc-native/VERSION via -DSB_VERSION) + Phase */
+        const char *rv = sb_version_str(), *st = sb_release_stage(rv);
+        HLOG_I("VERSION: Steelbound %s%s%s (%s edition)", rv[0] ? rv : "dev", st[0] ? " " : "", st, SB_EDITION_NAME);
+    }
     hcfg_load(cfg_path);
     /* W159: Start-Parameter --set "k=v;..." (Launcher: vr_enable je Startweg).
      * Gewinnt ueber sb_native.cfg, user.cfg und SB_CFG_SET; die Dateien
@@ -1601,6 +1624,7 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     sb_relaunch_after_cfg(); /* W186: nur im Neustart-Kind (Zeile RELAUNCH + Ersatz-Set) */
     sb_rauto_init(); /* W254 REPLAY-LAUNCHER: nur mit replay_autoplay */
     sb_mauto_init(); /* W272 ALPHA-TEST: nur mit mission_autostart */
+    sb_cchain_init(); /* W303 CAMPAIGN-CHAIN: nur mit campaign_chain (Testwerkzeug) */
     if (g_cfg.loc_boot) { loc_mem_prereserve(); } /* W277: Contig-Bereich < 256 MB vor D3D sichern (nur [expert] loc_boot=1) */
     sb_vexp_init(); /* W255 VIDEO-EXPORT: nur mit video_export (setzt Groesse/Testtakt vor sb_render_init) */
     sb_rem_fx_start(); /* W151 EFFECT-PACK: Effect-Pack-Parameter auf cfg legen */

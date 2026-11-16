@@ -2078,6 +2078,116 @@ static void run_quickshot_cases(const imap_profile_t *kb, const imap_profile_t *
     CHECK(imap_key_name("SNAPSHOT") == VK_SNAPSHOT, "quick_shot: Tastenname SNAPSHOT");
 }
 
+/* ---- Teil 23: W299 REPLAY - Aktion replay_exit, Maus beendet das Spiel-Replay nicht (bi0_nomouse) ---- */
+static void run_replayexit_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
+{
+    imap_profile_t p, q;
+    imap_state_t st;
+    imap_snap_t s;
+    imap_block_t b;
+    cfgvar_t c = { 1, 0, 0, 1, 4, 0, 0 }; /* Maustasten an (synthetische VKs 324.. im Replay-Pfad) */
+    unsigned fr = 360000;
+    printf("Teil 23: W299 Aktion replay_exit / Maus im Replay\n");
+    CHECK(kb->replay_exit_set == 1 && kb->replay_exit.n == 1 && !kb->replay_exit.alt[0].chord &&
+          kb->replay_exit.alt[0].a.kind == IMAP_A_KEY && kb->replay_exit.alt[0].a.code == VK_BACK,
+          "replay_exit: kb Standard KEY:BACKSPACE");
+    CHECK(xbox->replay_exit_set == 1 && xbox->replay_exit.n == 1 && xbox->replay_exit.alt[0].a.code == VK_BACK,
+          "replay_exit: xbox Standard KEY:BACKSPACE");
+    CHECK(imap_profile_parse("pause = KEY:PAUSE\n", "alt", &p) == 0 && p.replay_exit_set == 0 &&
+          p.replay_exit.n == 1 && p.replay_exit.alt[0].a.code == VK_BACK,
+          "replay_exit: altes Profil ohne Zeile -> Standard Ruecktaste");
+    CHECK(imap_profile_parse("replay_exit =\n", "t", &p) == 0 && p.replay_exit_set == 1 && p.replay_exit.n == 0,
+          "replay_exit: leere Zeile = aus");
+    CHECK(imap_profile_parse("replay_exit = KEY:F6\nreplay_exit = KEY:END\n", "t", &p) == 0 && p.replay_exit.n == 1 &&
+          p.replay_exit.alt[0].a.code == VK_END, "replay_exit: letzte Zeile gewinnt");
+    CHECK(imap_profile_parse("replay_exit = KEY:CTRL+KEY:L, PAD:BACK+PAD:A, SBC:CHAFF, JOY1:B3\n", "t", &p) == 0 &&
+          p.replay_exit.n == 4 && p.has_pad && p.has_sbc && (p.joy_used & 2u) != 0,
+          "replay_exit: gelernt 4 Quellen (n=%d joy=0x%X)", p.replay_exit.n, p.joy_used);
+    /* Pegel (alle Quellen inkl. Tastatur; die Wiedergabe prueft der Hook). */
+    make_snap(&s, fr++, &c);
+    set_keys(NULL, 0);
+    CHECK(imap_action_replay_exit(kb, &s) == 0, "replay_exit: Ruhe -> 0");
+    { int k[] = { VK_BACK }; set_keys(k, 1); }
+    CHECK(imap_action_replay_exit(kb, &s) == 1, "replay_exit: Ruecktaste -> 1");
+    CHECK(imap_action_replay_exit(kb, &s) == 1, "replay_exit: gehalten -> 1 (Pegel)");
+    set_keys(NULL, 0);
+    CHECK(imap_action_replay_exit(kb, &s) == 0, "replay_exit: los -> 0");
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = IMAP_PAD_BACK | IMAP_PAD_A;
+    s.pad_present = 1;
+    CHECK(imap_action_replay_exit(&p, &s) == 1, "replay_exit: Pad BACK+A -> 1");
+    s.pad.buttons = 0;
+    s.pad_present = 0;
+    s.sbc_present = 1;
+    s.sbc[1] = (uint16_t)(1u << 2); /* bi18 CHAFF */
+    CHECK(imap_action_replay_exit(&p, &s) == 1, "replay_exit: SBC CHAFF -> 1");
+    s.sbc[1] = 0;
+    s.sbc_present = 0;
+    imap_profile_parse("replay_exit =\n", "t", &q);
+    { int k[] = { VK_BACK }; set_keys(k, 1); }
+    CHECK(imap_action_replay_exit(&q, &s) == 0, "replay_exit: aus -> Ruecktaste wirkungslos");
+    set_keys(NULL, 0);
+    CHECK(imap_profile_parse("replay_exit = KEY:F6\n", "t", &p) == 0 &&
+          imap_profile_parse("replay_exit = KEY:F7\n", "t", &q) == 0 && imap_profile_equal(&p, &q) != 0,
+          "replay_exit: Vergleich erkennt Unterschied");
+    CHECK(imap_profile_parse("replay_exit =\n", "t", &p) == 0 && imap_profile_parse("pause =\n", "t", &q) == 0 &&
+          imap_profile_equal(&p, &q) != 0, "replay_exit: Vergleich erkennt leere Zeile");
+    /* bi0_nomouse: Maus (links) traegt im Spiel-Replay nicht zur Hauptwaffe bei. */
+    imap_state_init(&st);
+    make_snap(&s, fr++, &c);
+    g_keys[324] = 1; /* MOUSE:LEFT */
+    imap_profile_apply(&b, &st, kb, &s);
+    CHECK((b.buttons[0] & 1u) != 0, "nomouse aus: Mausklick -> Hauptwaffe (bisher)");
+    s.bi0_nomouse = 1;
+    s.frame = fr++;
+    imap_profile_apply(&b, &st, kb, &s);
+    CHECK((b.buttons[0] & 1u) == 0, "nomouse an: Mausklick -> keine Hauptwaffe");
+    g_keys[324] = 0;
+    g_keys[325] = 1; /* MOUSE:RIGHT -> Subwaffe (Effekte im Replay) bleibt */
+    s.frame = fr++;
+    imap_profile_apply(&b, &st, kb, &s);
+    CHECK((b.buttons[0] & 3u) == 2u, "nomouse an: rechte Maustaste -> Subwaffe bleibt");
+    g_keys[325] = 0;
+    g_keys[VK_SPACE] = 1;
+    s.frame = fr++;
+    imap_profile_apply(&b, &st, kb, &s);
+    CHECK((b.buttons[0] & 1u) != 0, "nomouse an: Leertaste -> Hauptwaffe bleibt");
+    g_keys[VK_SPACE] = 0;
+    CHECK(imap_profile_parse("bi0 = MOUSE:LEFT, SBC:MAINWEAPON, PAD:A\n", "t", &p) == 0, "nomouse: Testprofil");
+    s.sbc_present = 1;
+    s.sbc[0] = 1u; /* Original-Controller Hauptwaffe */
+    s.frame = fr++;
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK((b.buttons[0] & 1u) != 0, "nomouse an: Original-Controller -> Hauptwaffe (wie im Original)");
+    s.sbc[0] = 0;
+    s.sbc_present = 0;
+    s.pad_present = 1;
+    s.pad.buttons = IMAP_PAD_A;
+    s.frame = fr++;
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK((b.buttons[0] & 1u) != 0, "nomouse an: Pad A -> Hauptwaffe (wie im Original)");
+    s.pad.buttons = 0;
+    s.pad_present = 0;
+    g_keys[324] = 1;
+    s.frame = fr++;
+    imap_profile_apply(&b, &st, &p, &s);
+    CHECK((b.buttons[0] & 1u) == 0, "nomouse an: Testprofil Mausklick -> keine Hauptwaffe");
+    /* Legacy-Pfad (ohne Profil) */
+    {
+        imap_state_t lg;
+        imap_state_init(&lg);
+        s.bi0_nomouse = 0;
+        s.frame = fr++;
+        imap_legacy_apply(&b, &lg, &s);
+        CHECK((b.buttons[0] & 1u) != 0, "Legacy nomouse aus: Mausklick -> Hauptwaffe");
+        s.bi0_nomouse = 1;
+        s.frame = fr++;
+        imap_legacy_apply(&b, &lg, &s);
+        CHECK((b.buttons[0] & 1u) == 0, "Legacy nomouse an: Mausklick -> keine Hauptwaffe");
+    }
+    set_keys(NULL, 0);
+}
+
 static void run_feedback_clip_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
 {
     imap_profile_t p;
@@ -3276,6 +3386,415 @@ static void run_stickrel_cases(const imap_profile_t *xbox)
     }
 }
 
+/* ---- Teil 22: W305 JOY-HOTPLUG - Joystick abziehen/wieder einstecken ----
+ * Fake-DirectInput (ijoy_test_*): abgezogen -> GetDeviceState scheitert,
+ * wieder eingesteckt -> gleiche guidInstance, altes Objekt bleibt tot. Bis
+ * W304 behielt ijoy_scan das tote Objekt (gleiche GUID) - Slot blieb bis zum
+ * Neustart ohne Geraet. Belegt: neutral sofort, Freigabe, neu aufzaehlen,
+ * wieder lesbar, gedrosselte Suche, gesunde Geraete nie neu geoeffnet. */
+static void run_joyhotplug_cases(void)
+{
+    char specs[IMAP_JOY_MAX][96];
+    imap_joy_state_t js[IMAP_JOY_MAX];
+    ijoy_test_stats_t t0, ts;
+    char nm[96];
+    unsigned m;
+    int i, miss;
+    printf("Teil 22: W305 Joystick-Hotplug (Fake-DirectInput)\n");
+    memset(specs, 0, sizeof specs);
+    ijoy_test_begin(1, (const char (*)[96])specs, 1u);
+    ijoy_test_run(100);
+    m = ijoy_slots_get(js);
+    ijoy_slot_name(0, nm, sizeof nm);
+    ijoy_test_stats(&t0);
+    CHECK(m == 1u && js[0].axis[0] == 1000 && (js[0].btn[0] & 1u) &&
+              strstr(nm, "Test Stick 0") != NULL && t0.scans == 1 && t0.opens == 1,
+          "w305 joy: Start verbunden (m=%u ax=%d scans=%u opens=%u)", m, js[0].axis[0],
+          t0.scans, t0.opens);
+    /* Abziehen: im naechsten Takt neutral (kein eingefrorener Stand). */
+    ijoy_test_plug(0, 0);
+    ijoy_test_run(8);
+    m = ijoy_slots_get(js);
+    CHECK(m == 0u && js[0].axis[0] == 0 && js[0].axis[1] == 0 && js[0].btn[0] == 0 &&
+              js[0].pov[0] == -1,
+          "w305 joy: abgezogen -> sofort neutral (m=%u ax=%d)", m, js[0].axis[0]);
+    ijoy_test_run(5000);
+    ijoy_test_stats(&ts);
+    m = ijoy_slots_get(js);
+    CHECK(ts.releases == 1 && ts.bad_release == 0 && ts.bad_read == 0,
+          "w305 joy: totes Objekt genau einmal freigegeben (rel=%u bad=%u/%u)",
+          ts.releases, ts.bad_release, ts.bad_read);
+    CHECK(ts.scans - t0.scans >= 3 && ts.scans - t0.scans <= 6 && m == 0u,
+          "w305 joy: Suche gedrosselt, kein Busy-Spin (5 s -> %u Aufzaehlungen)",
+          ts.scans - t0.scans);
+    CHECK(ts.read_fails <= 30,
+          "w305 joy: kein Dauerlesen am toten Objekt (%u Fehl-Lesungen)", ts.read_fails);
+    /* Wieder einstecken (gleiche guidInstance, neue Generation). */
+    ijoy_test_axis(0, -2000);
+    ijoy_test_plug(0, 1);
+    ijoy_test_run(3100);
+    m = ijoy_slots_get(js);
+    ijoy_test_stats(&ts);
+    CHECK(m == 1u && js[0].axis[0] == -2000 && ts.opens == 2 && ts.bad_read == 0,
+          "w305 joy: wieder eingesteckt -> neu geoeffnet + lesbar (m=%u ax=%d opens=%u)",
+          m, js[0].axis[0], ts.opens);
+    /* Schnelles Umstecken (vor jeder Aufzaehlung): alter Code behielt das
+     * tote Objekt wegen gleicher GUID -> Endlosschleife. */
+    ijoy_test_plug(0, 0);
+    ijoy_test_run(40);
+    ijoy_test_plug(0, 1);
+    ijoy_test_run(1500);
+    m = ijoy_slots_get(js);
+    ijoy_test_stats(&ts);
+    CHECK(m == 1u && ts.opens == 3 && ts.releases == 2 && ts.bad_release == 0,
+          "w305 joy: schnell umgesteckt -> tot erkannt, neu geoeffnet (m=%u opens=%u rel=%u)",
+          m, ts.opens, ts.releases);
+    /* Gesundes Geraet 10 s: nie neu geoeffnet, keine Aufzaehlung. */
+    t0 = ts;
+    ijoy_test_run(10000);
+    ijoy_test_stats(&ts);
+    CHECK(ts.opens == t0.opens && ts.scans == t0.scans && ts.releases == t0.releases &&
+              ijoy_slots_get(js) == 1u,
+          "w305 joy: gesundes Geraet ohne Aussetzer (opens %u->%u, scans %u->%u)",
+          t0.opens, ts.opens, t0.scans, ts.scans);
+    ijoy_test_end();
+
+    /* Zwei Geraete: Slot 1 abziehen, Slot 0 laeuft ohne Aussetzer weiter. */
+    memset(specs, 0, sizeof specs);
+    strcpy_s(specs[1], sizeof specs[1], "Test Stick 1");
+    ijoy_test_begin(2, (const char (*)[96])specs, 3u);
+    ijoy_test_run(100);
+    CHECK(ijoy_slots_get(js) == 3u && js[0].axis[0] == 1000 && js[1].axis[0] == 2000,
+          "w305 joy: zwei Slots verbunden");
+    ijoy_test_plug(1, 0);
+    miss = 0;
+    for (i = 0; i < 1000; i++) { /* 4 s im Takt pruefen */
+        ijoy_test_run(4);
+        m = ijoy_slots_get(js);
+        if (!(m & 1u) || js[0].axis[0] != 1000) miss++;
+    }
+    ijoy_test_stats(&ts);
+    CHECK(miss == 0 && !(m & 2u) && js[1].axis[0] == 0 && ts.opens == 2,
+          "w305 joy: Slot 0 unberuehrt (Aussetzer %d), Slot 1 neutral, kein Neu-Oeffnen "
+          "(opens=%u)", miss, ts.opens);
+    ijoy_test_plug(1, 1);
+    ijoy_test_run(3100);
+    ijoy_test_stats(&ts);
+    CHECK(ijoy_slots_get(js) == 3u && js[1].axis[0] == 2000 && ts.opens == 3,
+          "w305 joy: Slot 1 zurueck, Spec-Zuordnung stimmt (opens=%u)", ts.opens);
+    ijoy_slot_name(1, nm, sizeof nm);
+    CHECK(strstr(nm, "Test Stick 1") != NULL, "w305 joy: Slot-Name nach Wiederkehr (%s)", nm);
+    ijoy_test_end();
+}
+
+/* ---- Teil 24: W312 JOY-CALIB - simulierte DirectInput-Objektlisten ----
+ * Wingman Force 3D (Tester: Schub geht, Stick X/Y nicht), Hori PS4-Modus,
+ * Standard-HOTAS. Format-Entscheidung (Standard vs. eigenes Format je
+ * Objekt), Lesen ueber den Plan (Fake-DirectInput), Geraeteinfo ohne Werte,
+ * Kalibrierung, Diagonale/Totzone im Client (je Achse). */
+#define W312_ABS 0x02u
+#define W312_BTN 0x04u
+#define W312_POV 0x10u
+#define W312_COLL 0x40u
+#define W312_NODATA 0x80u
+#define W312_FFA 0x01000000u
+#define W312_INST(n) ((unsigned)(n) << 8)
+#define W312_ASP 0x100u
+
+static int w312_add(ijoy_obj_t *o, int n, int kind, unsigned type, unsigned flags,
+                    unsigned short up, unsigned short u, const char *nm, long lo, long hi)
+{
+    memset(&o[n], 0, sizeof o[n]);
+    o[n].kind = kind;
+    o[n].type = type;
+    o[n].flags = flags;
+    o[n].upage = up;
+    o[n].usage = u;
+    strncpy_s(o[n].name, sizeof o[n].name, nm, _TRUNCATE);
+    o[n].lo = lo;
+    o[n].hi = hi;
+    o[n].read = -1;
+    return n + 1;
+}
+
+static int w312_buttons(ijoy_obj_t *o, int n, int count, int inst0)
+{
+    int b;
+    for (b = 0; b < count; b++) {
+        char nm[24];
+        _snprintf_s(nm, sizeof nm, _TRUNCATE, "Button %d", b + 1);
+        n = w312_add(o, n, IJOY_K_BTN, W312_BTN | W312_INST(inst0 + b), 0, 0x09,
+                     (unsigned short)(b + 1), nm, 0, 0);
+    }
+    return n;
+}
+
+/* Wingman-artig: Stick als Simulation Aileron/Elevator (unbekannte GUID),
+ * Schub als Simulation Throttle (GUID_Slider), Bereiche 0..1023 / 0..255
+ * (DIPROP_RANGE abgelehnt), Hat, 9 Tasten, FF-Ausgabe-Kollektion. */
+static int w312_wingman(ijoy_obj_t *o)
+{
+    int n = 0;
+    n = w312_add(o, n, IJOY_K_AXIS, W312_ABS | W312_INST(0), 0, 0x02, 0xB0, "Aileron", 0, 1023);
+    n = w312_add(o, n, IJOY_K_AXIS, W312_ABS | W312_INST(1), 0, 0x02, 0xB8, "Elevator", 0, 1023);
+    n = w312_add(o, n, IJOY_K_SLIDER, W312_ABS | W312_INST(2), 0, 0x02, 0xBB, "Throttle", 0, 255);
+    n = w312_add(o, n, IJOY_K_POV, W312_POV | W312_INST(0), 0, 0x01, 0x39, "Hat Switch", 0, 0);
+    n = w312_buttons(o, n, 9, 0);
+    n = w312_add(o, n, IJOY_K_OTHER, W312_COLL | W312_NODATA | W312_INST(0), 0, 0x0F, 0x21,
+                 "Force feedback", 0, 0);
+    return n;
+}
+
+static int w312_hotas(ijoy_obj_t *o) /* Standard-HOTAS-Stick */
+{
+    int n = 0;
+    n = w312_add(o, n, IJOY_K_X, W312_ABS | W312_INST(0), W312_ASP, 0x01, 0x30, "X Axis", 0, 0);
+    n = w312_add(o, n, IJOY_K_Y, W312_ABS | W312_INST(1), W312_ASP, 0x01, 0x31, "Y Axis", 0, 0);
+    n = w312_add(o, n, IJOY_K_RZ, W312_ABS | W312_INST(5), W312_ASP, 0x01, 0x35, "Z Rotation", 0, 0);
+    n = w312_add(o, n, IJOY_K_SLIDER, W312_ABS | W312_INST(6), W312_ASP, 0x01, 0x36, "Slider", 0, 0);
+    n = w312_add(o, n, IJOY_K_POV, W312_POV | W312_INST(0), 0, 0x01, 0x39, "Hat Switch", 0, 0);
+    return w312_buttons(o, n, 16, 0);
+}
+
+static int w312_hori(ijoy_obj_t *o) /* PS4-Modus (DS4-Deskriptor) */
+{
+    int n = 0;
+    n = w312_add(o, n, IJOY_K_X, W312_ABS | W312_INST(0), W312_ASP, 0x01, 0x30, "X Axis", 0, 0);
+    n = w312_add(o, n, IJOY_K_Y, W312_ABS | W312_INST(1), W312_ASP, 0x01, 0x31, "Y Axis", 0, 0);
+    n = w312_add(o, n, IJOY_K_Z, W312_ABS | W312_INST(2), W312_ASP, 0x01, 0x32, "Z Axis", 0, 0);
+    n = w312_add(o, n, IJOY_K_RZ, W312_ABS | W312_INST(5), W312_ASP, 0x01, 0x35, "Z Rotation", 0, 0);
+    n = w312_add(o, n, IJOY_K_RX, W312_ABS | W312_INST(3), W312_ASP, 0x01, 0x33, "X Rotation", 0, 0);
+    n = w312_add(o, n, IJOY_K_RY, W312_ABS | W312_INST(4), W312_ASP, 0x01, 0x34, "Y Rotation", 0, 0);
+    n = w312_add(o, n, IJOY_K_POV, W312_POV | W312_INST(0), 0, 0x01, 0x39, "Hat Switch", 0, 0);
+    return w312_buttons(o, n, 14, 0); /* B14 = Touchpad-Taste */
+}
+
+static int w312_count_read(const int *rd, int n)
+{
+    int i, c = 0;
+    for (i = 0; i < n; i++) c += rd[i] >= 0;
+    return c;
+}
+
+static void run_joycalib_cases(void)
+{
+    ijoy_obj_t o[IJOY_OBJ_MAX];
+    int rd[IJOY_OBJ_MAX], rp[IJOY_OBJ_MAX], n, i;
+    unsigned m, mp;
+    char specs[IMAP_JOY_MAX][96];
+    imap_joy_state_t js[IMAP_JOY_MAX];
+    const ijoy_info_t *in;
+    printf("Teil 24: W312 JOY-CALIB (simulierte Objektlisten, Kalibrierung)\n");
+    memset(specs, 0, sizeof specs);
+
+    /* A: Standard-HOTAS -> Standard-Format genuegt (bitgleich zu bisher). */
+    n = w312_hotas(o);
+    m = ijoy_std_capture(o, n, rd);
+    mp = ijoy_plan_objects(o, n, rp);
+    CHECK(m == 0x63u && rd[0] == 0 && rd[1] == 1 && rd[2] == 5 && rd[3] == 6 && rd[4] == 0 &&
+              rd[5] == 0 && rd[20] == 15,
+          "w312 hotas: Standard liest X Y RZ S0, POV1, B1..B16 (m=%02X)", m);
+    CHECK(!ijoy_need_own_format(o, n) && mp == m && memcmp(rd, rp, sizeof(int) * (size_t)n) == 0,
+          "w312 hotas: Plan == Standard, kein eigenes Format");
+
+    /* B: Wingman-artig -> Standard liest NUR den Schub (Tester-Befund). */
+    n = w312_wingman(o);
+    m = ijoy_std_capture(o, n, rd);
+    CHECK(m == 0x40u && rd[0] < 0 && rd[1] < 0 && rd[2] == 6 && rd[3] == 0 && rd[12] == 8 && rd[13] < 0,
+          "w312 wingman: Standard-Format liest nur Schub S0 (m=%02X) - Stick X/Y fehlen", m);
+    CHECK(ijoy_need_own_format(o, n), "w312 wingman: eigenes Format noetig");
+    mp = ijoy_plan_objects(o, n, rp);
+    CHECK(mp == 0x43u && rp[0] == 0 && rp[1] == 1 && rp[2] == 6 && rp[3] == 0 &&
+              w312_count_read(rp, n) == 13,
+          "w312 wingman: Plan liest Aileron->X, Elevator->Y, Schub->S0, Hat, 9 Tasten (m=%02X)", mp);
+    {
+        /* W282-Ausloeser (DIDEVCAPS.dwAxes > erfasste Achsen) greift nicht,
+         * wenn der Treiber nur die erfassten Achsen zaehlt; W312 schon. */
+        int ncaps_under = 1;
+        CHECK(!(ncaps_under > 1) && ijoy_need_own_format(o, n),
+              "w312 wingman: Treiber zaehlt 1 Achse -> W282 greift nicht, W312 schon");
+        /* W282-Plan ohne Usage-Hinweis: Stick landete auf S1/Z (lernbar, aber falsch benannt). */
+        {
+            int kind[3] = {IJOY_K_AXIS, IJOY_K_AXIS, IJOY_K_SLIDER}, sl[3];
+            ijoy_plan_axes(kind, 3, sl);
+            CHECK(sl[0] == 7 && sl[1] == 2 && sl[2] == 6,
+                  "w312 wingman: ohne Usage-Hinweis S1/Z (alt), mit Hinweis X/Y (neu)");
+        }
+    }
+    /* Fake-Geraet: Werte kommen am richtigen Slot an, Bereich umgerechnet. */
+    ijoy_test_begin(1, (const char (*)[96])specs, 1u);
+    ijoy_test_objects(0, o, n);
+    ijoy_test_obj_value(0, 0, 1023); /* Aileron voll rechts */
+    ijoy_test_obj_value(0, 1, 0);    /* Elevator voll vorn  */
+    ijoy_test_obj_value(0, 2, 255);  /* Schub voll          */
+    ijoy_test_obj_value(0, 3, 9000); /* Hat rechts          */
+    ijoy_test_obj_value(0, 4 + 8, 1); /* Taste 9            */
+    ijoy_test_run(40);
+    m = ijoy_slots_get(js);
+    in = ijoy_info(0);
+    CHECK(m == 1u && in && in->fmt == 2 && in->axmask == 0x43u && in->axnorm == 0x43u &&
+              js[0].axis[0] == 32767 && js[0].axis[1] == -32768 && js[0].axis[6] == 32767,
+          "w312 wingman: X=%d Y=%d S0=%d (fmt=%d mask=%02X norm=%02X)", js[0].axis[0],
+          js[0].axis[1], js[0].axis[6], in ? in->fmt : -1, in ? in->axmask : 0,
+          in ? in->axnorm : 0);
+    CHECK(js[0].pov[0] == 9000 && (js[0].btn[0] & (1u << 8)) && in && in->nbtn == 9 && in->npov == 1,
+          "w312 wingman: Hat=%d, Taste 9 gelesen (nbtn=%d npov=%d)", js[0].pov[0],
+          in ? in->nbtn : -1, in ? in->npov : -1);
+    ijoy_test_obj_value(0, 0, 512);
+    ijoy_test_obj_value(0, 1, 512);
+    ijoy_test_run(8);
+    ijoy_slots_get(js);
+    CHECK(js[0].axis[0] >= -64 && js[0].axis[0] <= 64 && js[0].axis[1] >= -64 && js[0].axis[1] <= 64,
+          "w312 wingman: Mitte 512 -> ~0 (%d/%d)", js[0].axis[0], js[0].axis[1]);
+    {
+        /* Geraeteinfo: Metadaten ja, Werte nie. */
+        static char txt[8192];
+        const ijoy_obj_t *ob = NULL;
+        int no = ijoy_objects(0, &ob), len;
+        ijoy_test_obj_value(0, 0, 777);
+        ijoy_test_obj_value(0, 2, 199);
+        ijoy_test_run(8);
+        ijoy_slots_get(js);
+        len = ijoy_devinfo_text(in, ob, no, txt, (int)sizeof txt);
+        CHECK(no == n && len > 200 && strstr(txt, "Aileron") && strstr(txt, "02:B0") &&
+                  strstr(txt, "0..1023") && strstr(txt, "per object") && strstr(txt, "| X\r\n") &&
+                  strstr(txt, "Button 9") && strstr(txt, "POV1"),
+              "w312 info: Objektliste mit Usage, Bereich, Zuordnung (%d Objekte, %d Zeichen)", no, len);
+        CHECK(!strstr(txt, "777") && !strstr(txt, "199") && !strstr(txt, "9000") &&
+                  !strstr(txt, "32767 |"),
+              "w312 info: keine Eingabewerte im Text");
+    }
+    ijoy_test_end();
+
+    /* C: Hori im PS4-Modus (DS4-Deskriptor) -> alles im Standard-Format,
+     * Touchpad = B14 wird gelesen (fehlt sie, laeuft der Stick als XInput). */
+    n = w312_hori(o);
+    m = ijoy_std_capture(o, n, rd);
+    CHECK(m == 0x3Fu && !ijoy_need_own_format(o, n) && rd[n - 1] == 13,
+          "w312 hori: 6 Achsen, POV, Touchpad = B14 gelesen (m=%02X)", m);
+    ijoy_test_begin(1, (const char (*)[96])specs, 1u);
+    ijoy_test_objects(0, o, n);
+    ijoy_test_obj_value(0, 0, 32767); /* nur X rechts */
+    ijoy_test_obj_value(0, n - 1, 1); /* Touchpad */
+    ijoy_test_run(40);
+    ijoy_slots_get(js);
+    in = ijoy_info(0);
+    CHECK(in && in->fmt == 0 && js[0].axis[0] == 32767 && js[0].axis[1] == 0 &&
+              (js[0].btn[0] & (1u << 13)),
+          "w312 hori: X allein -> nur X (Y=%d), B14 gedrueckt", js[0].axis[1]);
+    ijoy_test_end();
+
+    /* D: Standard-HOTAS ueber das Fake-Geraet: bitgleich (Standard-Format). */
+    n = w312_hotas(o);
+    ijoy_test_begin(1, (const char (*)[96])specs, 1u);
+    ijoy_test_objects(0, o, n);
+    ijoy_test_obj_value(0, 0, -12345);
+    ijoy_test_obj_value(0, 2, 23456);
+    ijoy_test_run(40);
+    ijoy_slots_get(js);
+    in = ijoy_info(0);
+    CHECK(in && in->fmt == 0 && in->axnorm == 0 && js[0].axis[0] == -12345 && js[0].axis[5] == 23456,
+          "w312 hotas: Werte unveraendert durchgereicht (X=%d RZ=%d)", js[0].axis[0], js[0].axis[5]);
+
+    /* E: Kalibrierung - ohne Eintrag bitgleich, mit Eintrag angewendet. */
+    {
+        ijoy_cal_t c = {-20000, 1000, 22000, 10, 0}, c2;
+        unsigned short v = 0, p = 0;
+        int ax = -1;
+        char line[96];
+        imap_joy_state_t st, raw;
+        CHECK(ijoy_cal_apply(&c, 1000) == 0 && ijoy_cal_apply(&c, 22000) == 32767 &&
+                  ijoy_cal_apply(&c, -20000) == -32768 && ijoy_cal_apply(&c, 3000) == 0 &&
+                  ijoy_cal_apply(&c, 30000) == 32767,
+              "w312 cal: Mitte/Enden/Totzone (%d %d %d %d)", ijoy_cal_apply(&c, 1000),
+              ijoy_cal_apply(&c, 22000), ijoy_cal_apply(&c, -20000), ijoy_cal_apply(&c, 3000));
+        {
+            int16_t h = ijoy_cal_apply(&c, 11500 + 1050); /* halber Weg + halbe Totzone */
+            CHECK(h > 15000 && h < 19000, "w312 cal: Totzone reskaliert (%d)", h);
+        }
+        c.inv = 1;
+        CHECK(ijoy_cal_apply(&c, 22000) == -32767 && ijoy_cal_apply(&c, -20000) == 32767,
+              "w312 cal: invertiert");
+        c.inv = 0;
+        c.mid = IJOY_CAL_NOMID;
+        c.dz = 0;
+        c.lo = -30000;
+        c.hi = 30000;
+        CHECK(ijoy_cal_apply(&c, -30000) == -32768 && ijoy_cal_apply(&c, 30000) == 32767 &&
+                  ijoy_cal_apply(&c, 0) >= -1 && ijoy_cal_apply(&c, 0) <= 0,
+              "w312 cal: linear (Schub) %d..%d", ijoy_cal_apply(&c, -30000), ijoy_cal_apply(&c, 30000));
+        c.mid = 1000;
+        c.dz = 10;
+        c.lo = -20000;
+        c.hi = 22000;
+        CHECK(ijoy_cal_format(0x046D, 0xC283, 1, &c, line, sizeof line) &&
+                  strcmp(line, "046D:C283,Y,-20000,1000,22000,10,0") == 0 &&
+                  ijoy_cal_parse(line, &v, &p, &ax, &c2) && v == 0x046D && p == 0xC283 && ax == 1 &&
+                  memcmp(&c, &c2, sizeof c) == 0,
+              "w312 cal: Zeile hin und zurueck (%s)", line);
+        CHECK(ijoy_cal_parse("046D:C283,S0,-32768,-,32767,5,1", &v, &p, &ax, &c2) && ax == 6 &&
+                  c2.mid == IJOY_CAL_NOMID && c2.inv == 1 &&
+                  !ijoy_cal_parse("046D:C283,Q,0,-,100,5,0", &v, &p, &ax, &c2) &&
+                  !ijoy_cal_parse("046D:C283,X,100,-,50,5,0", &v, &p, &ax, &c2) &&
+                  !ijoy_cal_parse("046D:C283,X,0,-,100,80,0", &v, &p, &ax, &c2),
+              "w312 cal: Parser (Schub ohne Mitte, ungueltige abgelehnt)");
+        /* am Geraet: Eintrag fuer VID/PID des Fake-Geraets 0 (046D:5678) */
+        ijoy_cal_clear();
+        CHECK(ijoy_read2(0, &st, &raw) == 1 && st.axis[0] == raw.axis[0] && st.axis[0] == -12345,
+              "w312 cal: ohne Eintrag bitgleich (%d)", st.axis[0]);
+        c.lo = -20000;
+        c.mid = -12345;
+        c.hi = 20000;
+        c.dz = 5;
+        CHECK(ijoy_cal_set(0x046D, 0x5678, 0, &c) == 0 && ijoy_cal_count() == 1, "w312 cal: Eintrag gesetzt");
+        CHECK(ijoy_read2(0, &st, &raw) == 1 && st.axis[0] == 0 && raw.axis[0] == -12345 &&
+                  st.axis[5] == 23456,
+              "w312 cal: angewendet (Mitte -> %d, roh %d, andere Achse unberuehrt)", st.axis[0],
+              raw.axis[0]);
+        ijoy_test_run(8);
+        ijoy_slots_get(js);
+        CHECK(js[0].axis[0] == 0, "w312 cal: Client-Slot liest kalibriert (%d)", js[0].axis[0]);
+        ijoy_cal_set(0x046D, 0x5678, 0, NULL);
+        CHECK(ijoy_cal_count() == 0, "w312 cal: Eintrag entfernt");
+        ijoy_cal_clear();
+    }
+    ijoy_test_end();
+
+    /* F: Diagonale/Totzone im Client - je Achse, keine Achse verlangt die andere. */
+    {
+        static const char kProf[] = "joy0 = Hori\naim_x = JOY0:X:dz=0.1\naim_y = JOY0:Y:dz=0.1:inv=1\n";
+        imap_profile_t p;
+        imap_snap_t s;
+        imap_block_t b;
+        imap_state_t st;
+        CHECK(imap_profile_parse(kProf, "w312", &p) == 0, "w312 diag: Profil");
+        imap_state_init(&st);
+        joy_snap(&s, 900001);
+        s.joy_mask = 1u;
+        s.joy[0].axis[0] = 32767; /* nur rechts */
+        s.joy[0].axis[1] = 0;
+        imap_profile_apply(&b, &st, &p, &s);
+        CHECK(b.aiming_x == 0xFF && b.aiming_y == 0x7F, "w312 diag: nur X -> X voll, Y Mitte (%02X/%02X)",
+              b.aiming_x, b.aiming_y);
+        s.joy[0].axis[0] = 0;
+        s.joy[0].axis[1] = -32768; /* nur vorn */
+        imap_profile_apply(&b, &st, &p, &s);
+        CHECK(b.aiming_x == 0x7F && b.aiming_y == 0xFF, "w312 diag: nur Y -> Y voll, X Mitte (%02X/%02X)",
+              b.aiming_x, b.aiming_y);
+        s.joy[0].axis[0] = joy_pos(0.15f); /* knapp ueber der Totzone, Y in Ruhe */
+        s.joy[0].axis[1] = joy_pos(0.05f);
+        imap_profile_apply(&b, &st, &p, &s);
+        CHECK(b.aiming_x > 0x7F && b.aiming_y == 0x7F, "w312 diag: X knapp ueber Totzone wirkt allein (%02X/%02X)",
+              b.aiming_x, b.aiming_y);
+        s.joy[0].axis[0] = joy_pos(0.7f);
+        s.joy[0].axis[1] = joy_pos(-0.7f);
+        imap_profile_apply(&b, &st, &p, &s);
+        CHECK(b.aiming_x > 0xC0 && b.aiming_y > 0xC0, "w312 diag: diagonal -> beide (%02X/%02X)",
+              b.aiming_x, b.aiming_y);
+    }
+    (void)i;
+}
+
 int main(int argc, char **argv)
 {
     imap_profile_t kb_file, kb_in, xbox_file, xbox_in;
@@ -3295,6 +3814,8 @@ int main(int argc, char **argv)
     { extern int imouse_selftest(void); CHECK(imouse_selftest() == 0, "W196 mouse/menu"); }
     { extern int sb_rauto_selftest(void); CHECK(sb_rauto_selftest() == 0, "W254 Replay-Start"); }
     { extern int sb_mauto_selftest(void); CHECK(sb_mauto_selftest() == 0, "W272 Teststart"); }
+    { extern int sb_cchain_selftest(void); CHECK(sb_cchain_selftest() == 0, "W303 Kampagnen-Kette"); }
+    { extern int avol_selftest(void); CHECK(avol_selftest() == 0, "W303 Lautstaerke"); }
 
     printf("input_selftest: Vergleich alt<->neu + Gamepad-Logik\n");
 
@@ -3375,6 +3896,9 @@ int main(int argc, char **argv)
     run_stickrel_cases(rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 19: W271 */
     run_origview_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 20: W283 */
     run_quickshot_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 21: W290 */
+    run_joyhotplug_cases(); /* Teil 22: W305 */
+    run_replayexit_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 23: W299 */
+    run_joycalib_cases(); /* Teil 24: W312 */
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;

@@ -33,6 +33,7 @@ static int *lorig_field(launcher_settings_t *s, const char *k)
     if (strcmp(k, "cockpit_panini") == 0) { return &s->cockpit_panini; }
     if (strcmp(k, "cockpit_width") == 0) { return &s->cockpit_width; }
     if (strcmp(k, "cockpit_hide") == 0) { return &s->cockpit_hide; }
+    if (strcmp(k, "monitor_view") == 0) { return &s->monitor_view; } /* W319 */
     return NULL;
 }
 

@@ -279,7 +279,7 @@ void m3d_present_tick(unsigned f)
  * dem M3D-Zensus) verworfen werden, waren bisher nur 3x/Lauf geloggt. Zaehler
  * je Grund (s. d3d11_render.h) + im Zensus-Frame jede Verwerfung mit Caller. */
 static unsigned dd_cnt[6];
-static unsigned dd_caller; /* Caller des laufenden VB-Draws (sb_render_drawcall) */
+unsigned dd_caller; /* Caller des laufenden VB-Draws (sb_render_drawcall); W300: auch fuer FXLINE */
 int sb_render_census_on(void) { return m3d_on; }
 void sb_render_drawdrop(unsigned why, unsigned vs, unsigned n, unsigned caller)
 {

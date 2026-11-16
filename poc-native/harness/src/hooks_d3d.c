@@ -10,6 +10,7 @@
 #include "sb_state.h" /* W232: sb_in_mission */
 #include "sb_rauto.h" /* W254 REPLAY-LAUNCHER */
 #include "sb_mauto.h" /* W272 ALPHA-TEST */
+#include "sb_cchain.h" /* W303 CAMPAIGN-CHAIN */
 #include "render_vexp.h" /* W255 VIDEO-EXPORT */
 
 /* ---------- D3D-Hooks ---------- */
@@ -103,7 +104,7 @@ static int ch_live(void)
 static void cockpit_hide_tick(void)
 {
     static int prev_on, applied, ours;
-    int on = g_cfg.cockpit_hide && !g_cfg.vr_enable;
+    int on = g_cfg.cockpit_hide && !g_cfg.vr_enable && g_cfg.monitor_view <= 0; /* W319: Monitoransicht hat Vorrang */
     u32 lock = 0, ckp = 1;
     unsigned short eng = 0;
     if (!on && !prev_on && !ours) {
@@ -323,6 +324,7 @@ u32 __stdcall hook_D3DDevice_Swap(u32 flags)
     replay_steps_tick(); /* A4: zustandsgesteuerte Eingaben */
     sb_rauto_tick(); /* W254 REPLAY-LAUNCHER: Replay-Start (nur mit replay_autoplay) */
     sb_mauto_tick(); /* W272 ALPHA-TEST: Teststart (nur mit mission_autostart) */
+    sb_cchain_tick(); /* W303 CAMPAIGN-CHAIN: Kampagnen-Kette (nur mit campaign_chain) */
     sb_vexp_swap(); /* W255 VIDEO-EXPORT: Aufnahme/Ende (nur mit video_export) */
     ign_gate_tick(); /* W52 IGNFIX: Gate Bit 2 (nur bei ign_toggle_fix=1) */
     cockpit_hide_tick(); /* W268 COCKPIT-HIDE: Vollbild-Flag (nur bei cockpit_hide=1) */
@@ -397,9 +399,11 @@ u32 __stdcall hook_D3DDevice_Clear(u32 count, u32 rects, u32 flags, u32 color,
     return 0;
 }
 
+static void w299_fx_draw_gate(u32 ret); /* W299 REPLAY-FX (unten, bei SetPixelShader) */
 u32 __stdcall hook_D3DDevice_Begin(u32 prim)
 {
     static u32 calls;
+    if (g_cfg.replay_fx_live) { w299_fx_draw_gate((u32)(uintptr_t)_ReturnAddress()); }
     if (hlog_throttle(&calls)) {
         HLOG_T("D3D Begin(%u)", prim);
     }
@@ -540,9 +544,53 @@ u32 __stdcall hook_D3DDevice_GetVertexShaderConstant(u32 reg, u32 pOut,
 unsigned g_im_pshader, g_npshader;
 unsigned g_psc_raw[8], g_psc_raw_set; /* FIX(LOAD-VT-COLOR,W257): SetPixelShaderConstant roh (Bit n = cn seit SetPixelShader) */
 unsigned g_tss_n, g_tss_a, g_tss_b, g_tss_c;
+/* W299 REPLAY-FX (experimentell, [render] replay_fx_live=1..8): Das Spiel hat im Replay acht Bildfilter
+ * ("EFFECT #1".."#8", Subwaffe in einer Aussenkamera). FUN_000297C0 zeichnet die Vollbild-Ansicht als
+ * 640x480-Quad aus dem Welt-RT und waehlt dafuer den Pixelshader aus der Tabelle [0x3B8B7C + 4*k]
+ * (k = [0x3B8CF0], nur bei Kamera [0x3B8CF4] >= 2). Live (Mission, Vollbild-Ansicht = Cockpit aus) setzt
+ * es immer [0x3B8B7C]. Hier wird genau dieser Aufruf (Ruecksprung in FUN_000297C0, Shader = Normalshader)
+ * auf den Effekt-Shader des Spiels umgelenkt - gleicher Shader, gleiche Stelle wie im Replay (dort filtert
+ * er auch Radar und FRONT VIEW). Kein Speicher des Spiels wird geschrieben. Nur EU (Codeadressen), nicht
+ * LoC, nicht in Replay/Titel-Demo (dort entscheidet das Spiel). 0 = aus (bitgleich). */
+static u32 g_w299_fx_h, g_w299_fx_base; /* aktiver Tausch (0 = keiner) */
+#define W299_IN_297C0(r) ((r) >= 0x297C0u && (r) < 0x297C0u + 934u) /* FUN_000297C0 (functions.tsv: 934 B) */
+/* Die Draws von FUN_000297C0 (Welt-Quad, Radar, FRONT VIEW) behalten den Effekt wie im Replay; der naechste
+ * Draw von anderswo (HUD ohne eigenes SetPixelShader) bekommt wieder den Normalshader - live gibt es das HUD,
+ * das im Replay fehlt. */
+static void w299_fx_draw_gate(u32 ret)
+{
+    extern unsigned g_im_pshader;
+    if (!g_w299_fx_h || W299_IN_297C0(ret)) { return; }
+    if (g_im_pshader == g_w299_fx_h) { g_im_pshader = g_w299_fx_base; }
+    g_w299_fx_h = 0;
+}
+static u32 w299_fx_live(u32 handle, u32 ret)
+{
+    static int logged = -1;
+    u32 base = 0, fx = 0;
+    int k = g_cfg.replay_fx_live;
+    if (k < 1 || k > 8 || g_sba_loc || g_sba_us) { return handle; }
+    g_w299_fx_h = 0;
+    if (!W299_IN_297C0(ret)) { return handle; }
+    if (!sb_in_mission()) { return handle; }
+    __try {
+        base = *(volatile u32 *)(uintptr_t)SBA(0x3B8B7Cu);
+        fx = *(volatile u32 *)(uintptr_t)(SBA(0x3B8B7Cu) + 4u * (u32)k);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return handle; }
+    if (handle != base || !fx) { return handle; }
+    if (logged != k) {
+        logged = k;
+        HLOG_I("REPLAY-FX: live EFFECT #%d in der Vollbild-Ansicht (PS 0x%X -> 0x%X, f=%u)", k, handle, fx, g_frames);
+    }
+    g_w299_fx_h = fx;
+    g_w299_fx_base = handle;
+    return fx;
+}
+
 u32 __stdcall hook_D3DDevice_SetPixelShader(u32 handle)
 {
     static u32 calls;
+    if (g_cfg.replay_fx_live) { handle = w299_fx_live(handle, (u32)(uintptr_t)_ReturnAddress()); }
     if (hlog_throttle(&calls)) {
         HLOG_T("D3D SetPixelShader(0x%X)", handle);
     }
@@ -917,7 +965,25 @@ D3D_STATE1(SetRenderState_TextureFactor)
 D3D_STATE1(SetRenderState_LineWidth)
 D3D_STATE1(SetRenderState_Dxt1NoiseEnable)
 D3D_STATE2(SetTextureState_TexCoordIndex)
-D3D_STATE3(SetTextureState_BumpEnv)
+/* W297 LOC-MISSION: Bump-Matrix je Stufe merken (X_D3DTSS 0x16 M00, 0x17 M01, 0x18 M11,
+ * 0x19 M10, 0x1A LSCALE, 0x1B LOFFSET); genutzt nur vom LoC-Bump-Pfad (loc_bumpenv=2). */
+u32 g_rq_bumpenv[4][6];
+u32 __stdcall hook_D3D_SetTextureState_BumpEnv(u32 a, u32 b, u32 c)
+{
+    static u32 la, lb, lc;
+    static int have;
+    if (a < 4u && b >= 0x16u && b <= 0x1Bu) {
+        g_rq_bumpenv[a][b - 0x16u] = c;
+    }
+    if (!have || a != la || b != lb || c != lc) {
+        have = 1;
+        la = a;
+        lb = b;
+        lc = c;
+        HLOG_T("D3D SetTextureState_BumpEnv(0x%X, 0x%X, 0x%X)", a, b, c);
+    }
+    return 0;
+}
 D3D_STATE2(SetTextureState_BorderColor)
 D3D_STATE2(SetTextureState_ColorKeyColor)
 /* DIAG(TEX3D,W31): Combiner-Weg mit Stand (statt D3D_STATE3-Makro). */
@@ -1366,6 +1432,7 @@ u32 __stdcall hook_D3D_DrawUP(u32 prim, u32 count, u32 pData,
                                      u32 stride)
 {
     static u32 calls;
+    if (g_cfg.replay_fx_live) { w299_fx_draw_gate(0); } /* W299: nie aus FUN_000297C0 */
     g_last_draw_kind = 2;
     g_last_draw_prim = prim;
     g_last_draw_a = count;
@@ -1404,6 +1471,9 @@ u32 __stdcall hook_D3D_QueryStatus(u32 id, u32 out, u32 exp)
             }
             return 0;
         }
+    }
+    if (g_sba_loc && g_cfg.loc_visq == 2) { /* W297: LoC "alles sichtbar" (Objekte nie verworfen) */
+        v = 65535u;
     }
     if (out) {
         __try {
@@ -1461,6 +1531,7 @@ u32 __stdcall hook_D3D_SetIndices(u32 a, u32 b)
 /* DrawIndexedVertices (0x210740): RET 0xC, 3 Args (prim,vcount,pIndex). */
 u32 __stdcall hook_D3D_DrawIdx(u32 prim, u32 vcount, u32 pIndex)
 {
+    if (g_cfg.replay_fx_live) { w299_fx_draw_gate(0); } /* W299 */
     sb_render_drawcall(1, prim, vcount, (unsigned)(uintptr_t)_ReturnAddress()); /* DIAG(COCKPIT,W60) */
     static u32 calls;
     g_last_draw_kind = 1;
@@ -1543,6 +1614,7 @@ u32 __stdcall hook_D3DTexture_LockRect(u32 pThis, u32 level,
     if (ok) {
         sb_tex_mark_dirty(pThis); /* TEXDIRTY: Neu-Upload beim naechsten Get */
         if (!(flags & 0x10u)) { sb_tex_lockwatch_note(pThis); } /* W98: nicht D3DLOCK_READONLY */
+        if (!(flags & 0x10u)) { sb_rtt_cpu_lock(pThis); } /* W310: CPU-Inhalt auf alter RT-Datenadresse */
         if (!(flags & 0x10u)) { sb_rem_note_cpu(pThis); } /* W103: CPU-beschrieben -> nie ersetzen */
     }
     if (!ok) {
@@ -1605,6 +1677,7 @@ u32 __fastcall hook_D3D_KickOff(u32 ecx_dev)
  * M2c: submitttet via sb_render_vb_draw (Decl aus aktivem VS). */
 u32 __stdcall hook_D3D_DrawVertices(u32 prim, u32 start, u32 count)
 {
+    if (g_cfg.replay_fx_live) { w299_fx_draw_gate(0); } /* W299 */
     sb_render_drawcall(0, prim, count, (unsigned)(uintptr_t)_ReturnAddress()); /* DIAG(COCKPIT,W60) */
     static u32 calls;
     g_last_draw_kind = 0;

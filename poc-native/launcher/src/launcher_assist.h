@@ -126,6 +126,12 @@ int assist_cfg_reset(const char *user_cfg);
 int assist_cfg_read(const char *user_cfg, char lines[][96], int cap);
 /* 1 = Key gehoert dem Assistenten (sbc_cal_xx, sbc_dead_xx, pad_dz_xx). */
 int assist_cfg_owns(const char *key);
+/* W312 JOY-CALIB: dieselbe Mechanik fuer joy_cal0..joy_cal31 ("joy_calN=
+ * VVVV:PPPP,Achse,lo,mitte|-,hi,totzone,inv"); apply ersetzt ALLE eigenen
+ * joy_cal-Zeilen durch lines (n = 0: alle entfernen). */
+int joycal_cfg_owns(const char *key);
+int joycal_cfg_apply(const char *user_cfg, const char lines[][96], int n);
+int joycal_cfg_read(const char *user_cfg, char lines[][96], int cap);
 
 #ifdef __cplusplus
 }

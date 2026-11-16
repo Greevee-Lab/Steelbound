@@ -105,6 +105,21 @@ static int hl_holds_other(const hlock_t *l, DWORD me)
     return 0;
 }
 
+const hlock_t *hlock_owned_by(DWORD tid)
+{
+    LONG i, n = g_nreg;
+    if (!tid) {
+        return NULL;
+    }
+    for (i = 0; i < n && i < HL_REG_MAX; i++) {
+        hlock_t *o = g_reg[i];
+        if (o && (DWORD)o->owner == tid) {
+            return o;
+        }
+    }
+    return NULL;
+}
+
 static void hl_release(hlock_t *l, int m1)
 {
     volatile LONG *w;

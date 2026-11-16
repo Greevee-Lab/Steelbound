@@ -32,9 +32,22 @@ enum {
     SBC_WIRE_PENDING = 1,  /* noch nicht geoeffnet (kein Poll bisher) */
     SBC_WIRE_USB_OK = 2,   /* Geraet offen */
     SBC_WIRE_NODEV = 3,    /* nicht gefunden / Treiber fehlt */
-    SBC_WIRE_FIXTURE = 4   /* Fixture-Datei statt Geraet */
+    SBC_WIRE_FIXTURE = 4,  /* Fixture-Datei statt Geraet */
+    SBC_WIRE_LOST = 5      /* W305: war verbunden, abgezogen - wird gesucht
+                              (sbc_wire_poll liefert neutralen Stand) */
 };
 int sbc_wire_status(void);
+
+/* W305 (JOY-HOTPLUG): Verbindungs-Ereignis fuer einen Hinweis im Overlay
+ * abholen und zuruecksetzen: 0 = nichts, 1 = getrennt, 2 = verbunden. */
+int sbc_wire_take_event(void);
+
+/* W305: Diagnose (Pfad WinUSB/Fixture/aus, Geraetezustand, LED-Ausgabe,
+ * Anzahl LED-Aufrufe/-Sendungen/-Fehler, Oeffnungen). Nie Tasten- oder
+ * Achsenwerte. sbc_wire_log_summary loggt nur mit sbc_usb=1. */
+#include <stddef.h>
+void sbc_wire_summary(char *out, size_t cap);
+void sbc_wire_log_summary(const char *why);
 
 #ifdef __cplusplus
 }

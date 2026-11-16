@@ -107,6 +107,7 @@ static const sb_of_key_t kSbOrigFlag[] = {
     { "cockpit_width",      0, SB_OFG_WIDE, 1, 1 },
     /* Cockpit ausblenden, HUD */
     { "cockpit_hide",       0, SB_OFG_COCKPIT, 1, 1 },
+    { "monitor_view",       0, SB_OFG_COCKPIT, 1, 1 }, /* W319 MONITOR-VIEW */
     { "hud_label_avoid",    0, SB_OFG_HUD, 1, 0 }, /* Patch beim Start */
 };
 #define SB_OF_NKEY ((int)(sizeof kSbOrigFlag / sizeof kSbOrigFlag[0]))

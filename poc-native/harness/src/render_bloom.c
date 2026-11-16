@@ -287,7 +287,7 @@ static unsigned bl_nstages(unsigned ps, unsigned *tm)
 {
     unsigned pdef = ps ? bl_u32((ps & ~1u) + 8u) : 0u;
     if (tm) { *tm = 0; }
-    if (pdef < 0x10000u || pdef >= 0x80000000u) { return 0; }
+    if (pdef < 0x10000u || pdef >= SB_HOST_LIM()) { return 0; } /* W315 host_hi_addr */
     if (tm) { *tm = bl_u32(pdef + 0xD8u); }
     return bl_u32(pdef + 0xD4u) & 0xFFu;
 }

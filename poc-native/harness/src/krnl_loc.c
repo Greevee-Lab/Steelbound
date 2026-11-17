@@ -239,6 +239,8 @@ static u32 __stdcall loc_IoSynchronousDeviceIoControlRequest(u32 a, u32 b, u32 c
     return LOC_ST_INVALID_DEVICE_REQUEST;
 }
 
+static struct { u32 va, len; } s_kst[16]; /* W330 */
+static unsigned s_nkst;
 static u32 __stdcall loc_MmCreateKernelStack(u32 size, u32 dbg)
 {
     uint8_t *p;
@@ -248,7 +250,21 @@ static u32 __stdcall loc_MmCreateKernelStack(u32 size, u32 dbg)
         size = 0x4000u;
     }
     p = (uint8_t *)VirtualAlloc(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (p && s_nkst < 16) { /* W330: fuer den Rollback-Zustand (Lesefunktion loc_kstack_get) */
+        s_kst[s_nkst].va = (u32)(uintptr_t)p;
+        s_kst[s_nkst].len = size;
+        s_nkst++;
+    }
     return p ? (u32)(uintptr_t)(p + size) : 0; /* Stack-Basis = oberes Ende */
+}
+
+/* W330 LOC-ROLLBACK-R1: per MmCreateKernelStack angelegte Bereiche (nicht im Allokationsregister) */
+int loc_kstack_get(unsigned i, unsigned *va, unsigned *len)
+{
+    if (i >= s_nkst || !s_kst[i].va) return 0;
+    *va = s_kst[i].va;
+    *len = s_kst[i].len;
+    return 1;
 }
 
 static u32 __stdcall loc_MmDeleteKernelStack(u32 base, u32 limit)
@@ -256,6 +272,8 @@ static u32 __stdcall loc_MmDeleteKernelStack(u32 base, u32 limit)
     (void)base;
     loc_first(170, "MmDeleteKernelStack");
     if (limit) {
+        unsigned i;
+        for (i = 0; i < s_nkst; i++) if (s_kst[i].va == limit) s_kst[i].va = 0; /* W330 */
         VirtualFree((void *)(uintptr_t)limit, 0, MEM_RELEASE);
     }
     return 0;

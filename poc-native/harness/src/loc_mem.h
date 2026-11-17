@@ -15,6 +15,7 @@ uint32_t loc_mem_alloc(uint32_t size, uint32_t align, int zero); /* 0 = voll */
 int loc_mem_free(uint32_t va);                           /* 1 = gehoerte uns */
 uint32_t loc_mem_size(uint32_t va);                      /* 0 = nicht unserer */
 int loc_mem_owns(uint32_t va);
+int loc_mem_range(uint32_t *lo, uint32_t *size, uint32_t *used); /* W330: untere Ansicht, Groesse, Fuellstand */
 void loc_mem_stats(void);
 
 #ifdef __cplusplus

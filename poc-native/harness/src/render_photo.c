@@ -43,6 +43,8 @@ const int kSbPhotoSize[SB_PHOTO_NSIZE] = { 1, -4, -8, 2, 4, 8 };
 static int ph_fl_held;             /* Fotomodus haelt die Vollbild-Anforderung (Ansicht ohne Cockpit) */
 static int ph_step;                /* Ansicht wird umgeschaltet: Pause kurz aufgehoben */
 static ULONGLONG ph_step_t0;
+static int ph_recw;                /* ISSUE-PHOTO: Schritt wartet auf die Bedarfs-Aufzeichnung (interp_fps=0) */
+static ULONGLONG ph_qr_t0;         /* ISSUE-PHOTO: Schnell-Screenshot wartet seit */
 static unsigned ph_pause_seen;     /* sb_pause_count() beim letzten Zensus (neue Pause -> neuer Zensus) */
 static volatile LONG ph_qreq;      /* Schnell-Screenshot im naechsten Pausenbild */
 static volatile LONG ph_qdone;     /* Ergebnis liegt bereit */
@@ -769,11 +771,69 @@ int sb_photo_stepping(void)
     return ph_step;
 }
 
+/* ISSUE-PHOTO: Ohne FPS-INTERP (interp_fps=0) gibt es keine Tick-Aufzeichnung; Fotos ueber Fenstergroesse, nur
+ * Aussenwelt, HUD aus und freie Kamera brauchen sie. Dann werden bei Bedarf zwei Ticks aufgezeichnet
+ * (sb_interp_rec1_*; A = Anfangsstand, B = Foto): im Fotomodus als Schritt (Pause kurz aufgehoben, wie beim
+ * Umschalten der Ansicht), beim Schnell-Screenshot vor der Pause. Die Pause beginnt am Ende von B (Standbild = B). */
+static int ph_rec_od(void)
+{
+    return !sb_render_offscreen() && !g_cfg.vr_enable && rq_in_mission();
+}
+
+static void ph_rec_begin(void)
+{
+    sb_interp_rec1_request();
+    ph_recw = 1;
+    ph_step = 1;
+    ph_step_t0 = GetTickCount64();
+    HLOG_I("PHOTO: ohne FPS-INTERP - Tick-Aufzeichnung bei Bedarf angefordert (f=%u)", g_present_no);
+}
+
+/* Aufzeichnung laeuft im aktuellen Tick (Pause ab dessen Ende) bzw. fertig/nicht moeglich: Warten vorbei. */
+static int ph_rec_settled(ULONGLONG t0)
+{
+    int st = sb_interp_rec1_state();
+    return st == SB_REC1_RUN || st == SB_REC1_READY || st == SB_REC1_FAIL || st == SB_REC1_NONE ||
+           GetTickCount64() - t0 > 1500u;
+}
+
+/* Schnell-Screenshot (sb_overlay.c): 1 = Aufzeichnung angefordert (vor der Pause abwarten: sb_photo_quick_rec_wait). */
+int sb_photo_quick_rec_begin(void)
+{
+    int need = sb_photo_size_eff() != 1 || ph_pview() == SB_PV_WORLD || !g_cfg.photo_hud;
+    if (!need || !ph_rec_od()) { return 0; }
+    sb_interp_rec1_request();
+    ph_qr_t0 = GetTickCount64();
+    HLOG_I("QUICKSHOT: ohne FPS-INTERP - Tick-Aufzeichnung bei Bedarf angefordert (f=%u)", g_present_no);
+    return 1;
+}
+
+int sb_photo_quick_rec_wait(void)
+{
+    return ph_rec_settled(ph_qr_t0);
+}
+
+/* Nach dem Schnell-Screenshot: Aufzeichnung frei (im Fotomodus erst beim Verlassen). */
+void sb_photo_quick_rec_free(void)
+{
+    if (!ph_on) { sb_interp_rec1_free(); }
+}
+
 void sb_photo_step_tick(void)
 {
     ULONGLONG dt;
     if (!ph_step) { return; }
     dt = GetTickCount64() - ph_step_t0;
+    if (ph_recw) { /* ISSUE-PHOTO */
+        if (ph_rec_settled(ph_step_t0)) {
+            ph_recw = 0;
+            ph_step = 0;
+            ph_dirty = 1;
+            HLOG_I("PHOTO: Tick-Aufzeichnung bei Bedarf: Zustand %d nach %u ms (f=%u)", sb_interp_rec1_state(), (unsigned)dt,
+                   g_present_no);
+        }
+        return;
+    }
     if (ph_fl_held) {
         int st = sb_flat_state();
         if (st == 1 || st < 0 || dt > 3000u) {
@@ -790,7 +850,10 @@ void sb_photo_step_tick(void)
         ph_step = 0;
         ph_dirty = 1;
     }
-    if (!ph_step) { HLOG_I("PHOTO: Ansicht umgeschaltet nach %u ms (f=%u)", (unsigned)dt, g_present_no); }
+    if (!ph_step) {
+        HLOG_I("PHOTO: Ansicht umgeschaltet nach %u ms (f=%u)", (unsigned)dt, g_present_no);
+        if (ph_on && ph_rec_od()) { ph_rec_begin(); } /* ISSUE-PHOTO: neue Ansicht aufzeichnen */
+    }
 }
 
 void sb_photo_enter(void)
@@ -816,7 +879,9 @@ void sb_photo_enter(void)
         HLOG_I("PHOTO: an (f=%u, Ansicht %d, Groesse %s%d%s, %s)", g_present_no, ph_pview(), sz > 0 ? "x" : "",
                sz > 0 ? sz : -sz, sz > 0 ? "" : "K", g_cfg.photo_jpg ? "JPG" : "PNG");
     }
+    ph_recw = 0;
     ph_view_sync();
+    if (!ph_step && ph_rec_od()) { ph_rec_begin(); } /* ISSUE-PHOTO (sonst nach dem Umschalten der Ansicht) */
 }
 
 void sb_photo_leave(void)
@@ -831,6 +896,8 @@ void sb_photo_leave(void)
     ph_view_valid = 0;
     ph_view_sync(); /* Vollbild-Anforderung freigeben */
     ph_step = 0;
+    ph_recw = 0;
+    sb_interp_rec1_free(); /* ISSUE-PHOTO: Bedarfs-Aufzeichnung frei (mit FPS-INTERP ohne Wirkung) */
     HLOG_I("PHOTO: aus (f=%u, %u Vorschau-Neuzeichnungen)", g_present_no, ph_nprev);
 }
 
@@ -1139,11 +1206,23 @@ static void ph_census(void)
 {
     if (ph_cen_tried) { return; }
     ph_cen_tried = 1;
-    ph_cen_ok = sb_render_offscreen() && !g_cfg.vr_enable && sb_interp_photo_census(&ph_cen, 1);
+    ph_cen_ok = (sb_render_offscreen() || sb_interp_rec1_state() == SB_REC1_READY) && !g_cfg.vr_enable &&
+                sb_interp_photo_census(&ph_cen, 1); /* ISSUE-PHOTO: interp_fps=0 mit Bedarfs-Aufzeichnung */
     if (!ph_cen_ok) {
         HLOG_I("PHOTO: keine Aufzeichnung des Ticks (%s) - nur Cockpit-Bild x1",
                g_cfg.vr_enable ? "VR" : !sb_render_offscreen() ? "interp_fps=0" : "ausserhalb der Mission");
     } else {
+        if (!sb_render_offscreen()) { /* ISSUE-PHOTO: Korrektheitsanker wie W193 - Neuzeichnung (t = 1) gegen den gesicherten BB */
+            sb_pl_info_t inf;
+            unsigned nd = 0, mx = 0;
+            ID3D11Resource *img = sb_interp_pause_render(&inf);
+            if (img && sb_interp_pause_cmp(img, &nd, &mx)) {
+                HLOG_I("PHOTO: Abgleich Neuzeichnung vs. Spiel-Bild (Aufzeichnung bei Bedarf) diff=%u px max=%u (%s)", nd, mx,
+                       nd ? "ABWEICHUNG" : "bitgleich");
+            } else {
+                HLOG_W("PHOTO: Abgleich Neuzeichnung vs. Spiel-Bild (Aufzeichnung bei Bedarf) nicht moeglich");
+            }
+        }
         HLOG_I("PHOTO: Aussenwelt = Welt-RT e%d (Kamerabild des Hauptmonitors), Spiel-Viewport %ux%u im RT %ux%u, "
                "Monitor zeigt es %.4f:1 -> Foto-Seitenverhaeltnis %.4f (Spiel-Viewport %.4f, g_proj_game b/a %.4f), "
                "freie Kamera a=%.4f b=%.4f",

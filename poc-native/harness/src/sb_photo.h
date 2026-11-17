@@ -49,7 +49,7 @@ extern const int kSbPhotoSize[SB_PHOTO_NSIZE];
 typedef struct {
     int monitor_fx, shading, effect_pending; /* W198: temporary options, missing recorded state */
     int active;        /* Fotomodus offen */
-    int rec;           /* Aufzeichnung des Ticks vorhanden (Mission + FPS-INTERP): Aussenwelt, freie Kamera, > Fenster */
+    int rec;           /* Aufzeichnung des Ticks vorhanden (Mission; FPS-INTERP bzw. ISSUE-PHOTO bei Bedarf): Aussenwelt, freie Kamera, > Fenster */
     int vr;            /* VR-Betrieb: Fotomodus aus */
     int cockpit;       /* 1 = Cockpit-Pfad (Ansicht wie im Spiel / ohne Cockpit), 0 = nur Aussenwelt */
     int view;          /* W290: SB_PV_* (gewaehlt) */
@@ -103,6 +103,12 @@ void sb_photo_quick_arm(void);
 int sb_photo_quick_pending(void);
 void sb_photo_quick_run(struct ID3D11Resource *still);
 int sb_photo_quick_result(sb_photo_qres_t *r);
+/* ISSUE-PHOTO: ohne FPS-INTERP (interp_fps=0) vor der Pause zwei Ticks aufzeichnen, wenn die Einstellungen sie
+ * brauchen (Groesse ueber Fenster, nur Aussenwelt, HUD aus). begin: 1 = angefordert; wait: 1 = Pause darf kommen
+ * (Tick laeuft bzw. fertig/nicht moeglich/Zeit); free: danach freigeben (im Fotomodus erst beim Verlassen). */
+int sb_photo_quick_rec_begin(void);
+int sb_photo_quick_rec_wait(void);
+void sb_photo_quick_rec_free(void);
 /* W290: wirksame Groesse ([photo] photo_size; nicht gesetzt -> photo_scale > 1, sonst 4K) */
 int sb_photo_size_eff(void);
 /* W290: Vollbild-Ansicht fuer eine Aufnahme (hooks_d3d.c, W268-Flag). state: 0 wartet, 1 bereit, -1 nicht moeglich */

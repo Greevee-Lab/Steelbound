@@ -1,6 +1,7 @@
 /* krnl_file.c - Kernel-HLE: Symlink-Tabelle, Xbox-Pfad -> Host-Pfad,
  * Nt*File/FATX-Datei-I/O, Symlink-Objekte, Seek-Cache (W22 FILMAV).
  * W68 SPLIT: 1:1 aus kernel_hle.c verschoben. */
+#include "loc_rollback.h" /* W330: LOC_RB_PREWRITE */
 #include "krnl_int.h"
 #include "sb_profile.h" /* W229 SBA() */
 #include "sb_remaster.h" /* W103 REM-FRAME */
@@ -774,6 +775,7 @@ u32 __stdcall hle_NtReadFile(u32 xh, u32 ev, u32 apc, u32 apcCtx, u32 iosb,
     if (!e || e->kind != HT_FILE) {
         return X_STATUS_INVALID_HANDLE;
     }
+    LOC_RB_PREWRITE(buf, len); /* W330: Kernel schreibt in den Gast-Puffer (Rollback-Schreibschutz) */
     if (ev || apc) {
         static u32 warned;
         if (!warned) {

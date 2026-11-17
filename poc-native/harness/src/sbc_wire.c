@@ -406,20 +406,55 @@ int sbc_wire_status(void)
 
 static uint8_t g_led_last[SBC_FB_PORTS][SBC_USB_OUT_LEN]; /* gesehen (Log) */
 static int g_led_have[SBC_FB_PORTS];
-static sbc_led_gate_t g_led_gate; /* W267: gesendet (Geraet, Mapper-Port) */
+static sbc_led_gate_t g_led_gate; /* W267: gesendet (Geraet, Spiel-Port) */
 static int g_led_rsv_logged;
 static uint32_t g_led_err_n;
 /* W305: Zaehler fuer die Diagnosezeile (nur Anzahlen, nie Werte). */
 static volatile LONG g_led_calls, g_led_chg, g_led_sent, g_led_fail, g_led_nodev,
     g_led_otherport;
 
-static uint32_t sbc_mapper_port(void)
+/* ISSUE-GEARLED: Bis hier filterte "port != [0x352274]" - beim SetState-Aufruf
+ * steht dort aber immer der aufrufende Port (0x49BCE schreibt ihn direkt
+ * davor), der Filter liess also alle offenen Ports durch. Unser HLE meldet
+ * den Controller auf mehreren Ports (Mapper-Port wandert von 0 auf 3), nur
+ * der letzte Port eines Durchgangs bekommt vom LED-Manager neue Werte, die
+ * anderen Puffer stehen auf altem Stand (z. B. Gang N vom Boot). Bis W266
+ * fiel das kaum auf (Vergleich je Port mit dem zuletzt gesehenen Stand:
+ * stehende Puffer gingen nie raus). Seit W267 vergleicht das Sendetor mit
+ * dem zuletzt GESENDETEN Stand - jeder abweichende Fremd-Puffer wurde so
+ * alle 50 ms faellig und der Controller wechselte zwischen aktuellem und
+ * altem Stand: Gang-LED blinkt staendig (Tester alpha.9). Jetzt nur der
+ * Port, dessen Puffer das Spiel pflegt (sbc_led_port_*, input_sbc_usb.h). */
+static sbc_led_port_t g_led_port = {-1, -1};
+
+/* ISSUE-GEARLED DIAG (input_diag=1, ohne Geraet, z. B. Fixture): Trockenlauf
+ * der Sendelogik alt (W267: alle Ports) gegen neu (nur Spiel-Port) mit
+ * gleicher Drossel. Gezaehlt werden nur Sendungen und Wechsel der Gang-LEDs
+ * am gedachten Geraet (Anzahlen, keine Eingaben). */
+typedef struct {
+    sbc_led_gate_t gate;
+    uint8_t dev[SBC_USB_OUT_LEN];
+    long sent, gear_chg;
+} led_dry_t;
+static led_dry_t g_dry_old, g_dry_new;
+
+static int led_gear_differs(const uint8_t a[SBC_USB_OUT_LEN], const uint8_t b[SBC_USB_OUT_LEN])
 {
-    uint32_t mp = 0;
-    __try {
-        mp = *(volatile uint32_t *)(uintptr_t)SBA(0x352274u);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {}
-    return mp < SBC_FB_PORTS ? mp : 0;
+    /* Gang-LEDs: Byte 17 high (R), Bytes 18-20 (N, 1-5) */
+    return (a[17] & 0xF0u) != (b[17] & 0xF0u) || memcmp(a + 18, b + 18, 3) != 0;
+}
+
+static void led_dry_step(led_dry_t *d, const uint8_t rep[SBC_USB_OUT_LEN], uint64_t now)
+{
+    if (!sbc_led_gate_due(&d->gate, rep, now, SBC_LED_MIN_MS)) {
+        return;
+    }
+    sbc_led_gate_mark(&d->gate, rep, now, 1);
+    if (d->sent && led_gear_differs(d->dev, rep)) {
+        d->gear_chg++;
+    }
+    memcpy(d->dev, rep, SBC_USB_OUT_LEN);
+    d->sent++;
 }
 
 static void sbc_led_log(uint32_t port, const uint8_t rep[SBC_USB_OUT_LEN])
@@ -461,10 +496,20 @@ void sbc_wire_setstate(uint32_t fb)
         InterlockedIncrement(&g_led_chg);
         sbc_led_log(port, rep); /* jede Spiel-Aenderung (input_diag) */
     }
-    /* LEDs folgen dem Port, den das Spiel gerade liest (Mapper-Port). */
-    if (port != sbc_mapper_port()) {
-        InterlockedIncrement(&g_led_otherport);
-        return;
+    /* ISSUE-GEARLED: nur der Port, dessen Puffer der LED-Manager pflegt. */
+    {
+        int live = sbc_led_port_feed(&g_led_port, port);
+        if (g_cfg.input_diag && !g_sbc_dev) {
+            uint64_t now = GetTickCount64();
+            led_dry_step(&g_dry_old, rep, now); /* alt: jeder Port */
+            if (live) {
+                led_dry_step(&g_dry_new, rep, now);
+            }
+        }
+        if (!live) {
+            InterlockedIncrement(&g_led_otherport);
+            return;
+        }
     }
     if (!g_sbc_dev || InterlockedCompareExchange(&g_sbc_conn, 0, 0) != 1) {
         InterlockedIncrement(&g_led_nodev);
@@ -487,6 +532,10 @@ void sbc_wire_setstate(uint32_t fb)
         int ok;
         /* W267: Vergleich mit dem gesendeten Stand, Drossel mit Nachsenden. */
         if (!sbc_led_gate_due(&g_led_gate, rep, now, SBC_LED_MIN_MS)) {
+            /* ISSUE-GEARLED: Sperre freigeben (bis hier blieb sie bei jedem
+             * nicht faelligen Poll geteilt belegt - wire_close haette beim
+             * Abziehen ewig auf die exklusive Sperre gewartet). */
+            ReleaseSRWLockShared(&g_sbc_devlk);
             return;
         }
         if ((rep[17] & 0x0Fu) || rep[21]) {
@@ -550,4 +599,11 @@ void sbc_wire_log_summary(const char *why)
     }
     sbc_wire_summary(b, sizeof b);
     HLOG_I("CTRL: SBC-Diagnose (%s) %s", why ? why : "-", b);
+    if (g_cfg.input_diag && (g_dry_old.sent || g_dry_new.sent)) {
+        /* ISSUE-GEARLED DIAG: nur Anzahlen (Sendungen, Gang-LED-Wechsel am Geraet). */
+        HLOG_I("SBC-LED-TROCKEN (%s): alt alle Ports gesendet=%ld gang_wechsel=%ld | "
+               "neu Spiel-Port %d gesendet=%ld gang_wechsel=%ld",
+               why ? why : "-", g_dry_old.sent, g_dry_old.gear_chg, g_led_port.live,
+               g_dry_new.sent, g_dry_new.gear_chg);
+    }
 }

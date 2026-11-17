@@ -11,6 +11,11 @@
  *   launcher_game=sb|loc        gewaehlter Bereich (fehlt = sb)
  *   launcher_loc_image=<Pfad>   LoC-Abbild (UTF-8)
  *   launcher_loc_server=<Adr.>  Platzhalter fuer den eigenen Dienst (spaeter)
+ *   loc_widescreen=0|1|2        W326 LOC-WIDE: Bildformat des Spiels - ein
+ *                               Client-Schluessel (kein launcher_*), den der
+ *                               Client nur im LoC-Profil auswertet, beim Start
+ *                               (0 = 4:3 Original, 1 = 16:9 Spielmodus,
+ *                               2 = 720p; fehlt/ungueltig = 0)
  * Datenordner LoC: <Datenordner>\loc (Profil/portabel) bzw. <Client>\loc
  * (legacy) - getrennt von den SB-Spielstaenden (<...>\hdd).
  *
@@ -30,6 +35,18 @@ enum { LGAME_SB = 0, LGAME_LOC = 1, LGAME_N = 2 };
 #define LGAME_KEY_GAME "launcher_game"
 #define LGAME_KEY_LOC_IMAGE "launcher_loc_image"
 #define LGAME_KEY_LOC_SERVER "launcher_loc_server"
+#define LGAME_KEY_LOC_WIDE "loc_widescreen" /* W326: liest der Client (hcfg) */
+
+/* W326 LOC-WIDE: Bildformat im LoC-Profil. 16:9 und 720p sind experimentell
+ * (nicht das Originalbild). LOC_WIDE_720P = 0 nimmt den Eintrag "720p (16:9)"
+ * aus der Auswahl (gespeichertes 2 gilt dann als 4:3) - die einzige Stelle.
+ * W326-Befund: 720p nicht angeboten - das Spiel gibt Menue-/HUD-Schrift in
+ * 640x480-Pixelkoordinaten aus (ohne Supersampling-Skalierung unskaliert oben
+ * links im 1280x720-Bild, LOC_BOOT §23). Client-Wert 2 bleibt fuer Tests. */
+#ifndef LOC_WIDE_720P
+#define LOC_WIDE_720P 0
+#endif
+enum { LGAME_WIDE_43 = 0, LGAME_WIDE_169 = 1, LGAME_WIDE_720P = 2 };
 
 /* Title-IDs (XBE-Zertifikat) */
 #define LGAME_TID_SB 0x43430002u      /* Steel Battalion */
@@ -40,16 +57,25 @@ typedef struct {
     int game;              /* LGAME_SB | LGAME_LOC */
     char loc_image[512];   /* UTF-8, leer = nicht gewaehlt */
     char loc_server[128];  /* leer = Standard (spaeter) */
+    int loc_widescreen;    /* W326: LGAME_WIDE_* (nur angebotene Modi) */
 } lgame_state_t;
 
 void lgame_defaults(lgame_state_t *st);
 const char *lgame_key(int game);       /* "sb" | "loc" */
 int lgame_from_key(const char *v);     /* unbekannt/leer -> LGAME_SB */
 
+/* W326 LOC-WIDE: Anzahl der angebotenen Bildformate (3, ohne 720p 2; der
+ * Index in der Auswahl ist der Wert), Wert pruefen (ungueltig oder nicht
+ * angeboten -> 0 = 4:3), experimentell (!= 4:3), Sprachschluessel. */
+int lgame_wide_count(void);
+int lgame_wide_clamp(int v);
+int lgame_wide_experimental(int v);
+const char *lgame_wide_label_key(int v);
+
 /* user.cfg lesen (fehlende Datei/Schluessel = Standard). 0 = Datei gelesen,
  * 1 = fehlt. Letzte Zeile je Schluessel gewinnt (wie hcfg). */
 int lgame_cfg_load(const char *usercfg_path, lgame_state_t *st);
-/* Die drei Schluessel in user.cfg schreiben (ersetzt vorhandene Zeilen,
+/* Die vier Schluessel (W326: + loc_widescreen) in user.cfg schreiben (ersetzt vorhandene Zeilen,
  * entfernt Doppelte, haengt fehlende an; fremde Zeilen bleiben). 0 = ok,
  * -1 = Schreibfehler. Leere Werte werden als "key=" geschrieben. */
 int lgame_cfg_save(const char *usercfg_path, const lgame_state_t *st);

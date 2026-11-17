@@ -246,3 +246,9 @@ int hlog_throttle(uint32_t *counter)
     *counter = c + 1;
     return c < HLOG_CALL_MAX_FIRST || (c % 1000) == 0;
 }
+
+/* W330 LOC-ROLLBACK-R1: haelt tid gerade die Log-Sperre? (vor dem Liegenlassen eines angehaltenen Threads) */
+int hlog_lock_held_by(unsigned long tid)
+{
+    return g_cs_init && (unsigned long)(uintptr_t)g_cs.OwningThread == tid && g_cs.LockCount != -1;
+}

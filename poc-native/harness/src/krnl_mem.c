@@ -1,6 +1,7 @@
 /* krnl_mem.c - Kernel-HLE: Speicher (NtAllocateVirtualMemory, LIFO-Reuse,
  * Ex-/Mem-Regionen, Contiguous/System/Pool-Speicher, Mm*-Abfragen).
  * W68 SPLIT: 1:1 aus kernel_hle.c verschoben. */
+#include "loc_rollback.h" /* W330: Write-Watch/Freigabe-Meldung */
 #include "krnl_int.h"
 #include "loc_mem.h" /* W277 LOC-DISC */
 
@@ -97,6 +98,7 @@ u32 __stdcall hle_NtAllocateVirtualMemory(u32 pBase, u32 zeroBits, u32 pSize,
     if (type == 0) {
         type = (base == 0) ? (MEM_COMMIT | MEM_RESERVE) : MEM_COMMIT;
     }
+    if (g_loc_rb_ww && (type & MEM_RESERVE)) { type |= MEM_WRITE_WATCH; } /* W330: nur LoC mit loc_rb=1 */
     if (base == 0) {
         u32 want = (size + 0xFFFu) & ~0xFFFu;
         u32 re = lifo_pop(want);
@@ -114,6 +116,7 @@ u32 __stdcall hle_NtAllocateVirtualMemory(u32 pBase, u32 zeroBits, u32 pSize,
         /* Loader-Region: Seiten gehoeren uns, nur RWX + nullen */
         DWORD old;
         VirtualProtect((LPVOID)(uintptr_t)base, size, PAGE_EXECUTE_READWRITE, &old);
+        if (g_loc_rb_prewrite) { InterlockedIncrement(&g_loc_rb_memev); } /* W330: Schutz im Abbild geaendert */
         memset((void *)(uintptr_t)base, 0, size);
         r = (void *)(uintptr_t)base;
     } else {
@@ -173,6 +176,7 @@ u32 __stdcall hle_NtFreeVirtualMemory(u32 pBase, u32 pSize, u32 type)
         HLOG_W("NtFreeVirtualMemory(0x%X) FEHLER %lu", base, GetLastError());
     } else {
         *(u32 *)(uintptr_t)pSize = size;
+        if (g_loc_rb_prewrite) { InterlockedIncrement(&g_loc_rb_memev); } /* W330: Bereich weg -> Rollback-Bereiche neu */
         if (type & MEM_RELEASE) { low_alloc_note_free(base); } /* W122: Suchwissen von low_alloc verwerfen (nur RELEASE macht Adressraum frei) */
     }
     return ok ? X_STATUS_SUCCESS : X_STATUS_INVALID_PARAMETER;
@@ -241,6 +245,13 @@ static void memreg_add(u32 va, u32 size, u32 kind)
     g_exreg[g_exreg_n % EXREG_MAX].len = size;
     g_exreg[g_exreg_n % EXREG_MAX].kind = kind;
     g_exreg_n++;
+}
+/* W325 LOC-ROLLBACK-SPIKE: Registereintrag i lesen (nur Diagnose, loc_rollback.c). */
+int krnl_memreg_get(unsigned i, unsigned *va, unsigned *len, unsigned *kind)
+{
+    if (i >= EXREG_MAX || i >= g_exreg_n) { return 0; }
+    *va = g_exreg[i].vaddr; *len = g_exreg[i].len; *kind = g_exreg[i].kind;
+    return 1;
 }
 /* PERF(PERF-M2,W174) krnl_reg_cache=1: krnl_phys_to_virt/krnl_memreg_find durchsuchen das
  * Register (bis 8192 Eintraege) linear - je Textur-/RT-Zugriff (M2-Kampf: 12 % bzw. 3 % der
@@ -633,10 +644,26 @@ static void ct_diag_note(LONG n)
            g_ct_alias, g_ct_nfree, (double)g_ct_free_bytes / 1048576.0, g_ct_nfree_miss, g_ct_nreuse,
            (double)g_ct_reuse_bytes / 1048576.0, g_present_no);
 }
+/* FIX(ISSUE-TEX) [kernel] contig_img0_guard=1: Das Low28-Bild 0..0xFFFF gilt als belegt. Ein Contig-Block an
+ * einem 256-MB-Fensteranfang (0x10000000, 0x20000000, ..., 0x80000000) haette Phys = VA & 0x0FFFFFFF = 0 fuer
+ * sein erstes Byte; das Spiel und der Client lesen Data = 0 als "keine Daten" (Render-Ziel/Textur ohne Speicher:
+ * RTT unlesbar, TEX dauer-ohne-srv mit data=0x0, Flaeche ohne Textur). Auf der Xbox liegt dort der Kernel, eine
+ * Contig-Anforderung bekommt nie Phys 0. Unter g_ct_lock; ohne Block an einem Fensteranfang ohne Wirkung. */
+static int g_img0_done;
+static unsigned g_img0_hits;
+static void ct_img0_guard(void)
+{
+    if (g_cfg.contig_img0_guard && !g_img0_done) { g_img0_done = 1; im_insert(0u, 0x10000u); }
+}
 static void ct_register(u32 va, u32 size)
 {
     LONG n = g_ct_n;
     u32 len = CT_PAGE(size ? size : 0x1000u);
+    if ((va & 0x0FFFFFFFu) < 0x10000u && g_img0_hits++ < 8u) { /* DIAG(ISSUE-TEX): Block mit Phys 0..0xFFFF */
+        HLOG_W("CONTIG bild0 #%u: va=0x%X len=0x%X -> Phys 0x%X (Data 0 = keine Daten; contig_img0_guard=%d)",
+               g_img0_hits, va, len, va & 0x0FFFFFFFu, g_cfg.contig_img0_guard);
+    }
+    ct_img0_guard();
     g_ct_bytes += len;
     if (im_overlap(va & 0x0FFFFFFFu, len)) {
         g_ct_alias++;
@@ -754,6 +781,7 @@ static void *ct_reuse(u32 size, u32 *plen)
     DWORD now = GetTickCount(), q = (DWORD)(g_cfg.contig_reuse_ms > 0 ? g_cfg.contig_reuse_ms : 0);
     unsigned i, best = 0xFFFFFFFFu;
     LONG k;
+    ct_img0_guard(); /* ISSUE-TEX: wiederverwendeter Block am Fensteranfang zaehlt als ueberlappend */
     if (!g_cfg.contig_free || !g_cfg.contig_reuse || !g_dl_n) { return NULL; }
     for (i = 0; i < g_dl_n; i++) {
         u32 len;
@@ -819,20 +847,54 @@ static u32 g_ct_cursor = 0x10000000u;
 static unsigned long long g_ct_qtot, g_ct_qimg;
 static unsigned g_ct_curfail;
 static void *ct_high_alloc_from(u32 size, DWORD prot, unsigned *pq, unsigned long long p, unsigned long long lim);
+/* FIX(ISSUE-TEX, Steelbound#37/#42/#43) [kernel] contig_hi_place=1: Findet die gezielte Suche unter 2 GB keine
+ * Stelle mit freiem Low28-Bild, wird oberhalb 2 GB gezielt gesucht (Prozess /LARGEADDRESSAWARE, Fenster
+ * 0x8..0xF; braucht host_hi_addr=1, sonst wuerden Texturen dort verworfen). Alt fiel ct_high_alloc auf
+ * VirtualAlloc(NULL) zurueck: Bei AMD-Testern belegt der Treiber den Adressraum unter 2 GB so, dass die Suche
+ * oft scheitert (Tester-Log alpha.9: 343 HIGH-Anforderungen, 52 gezielt), der Block landet irgendwo und sein
+ * Bild ueberlappt lebende Bloecke ("CONTIG noalias: ... ueberlappt trotzdem", 13x je Sitzung). Phys->Virt
+ * liefert fuer den ueberlappten Bereich dann den juengsten Block -> fremde/leere Texturdaten (schwarze
+ * Figuren, fehlende Wand-/Bildschirmtexturen). Auf Rechnern, deren Suche unter 2 GB gelingt, ohne Wirkung.
+ * TEST contig_lowq_test=1: Suche unter 2 GB auslassen (Tester-Lage nachstellen). */
+static u32 g_ct_cursor_hi = 0x80000000u;
+static unsigned g_ct_hiplace, g_ct_lowq_skip;
 static void *ct_high_alloc_q(u32 size, DWORD prot, unsigned *pq)
 {
-    void *r = ct_high_alloc_from(size, prot, pq, g_ct_cursor, 0x7FFF0000ull);
-    /* W308: Die Suche ab dem Cursor hat [Cursor, Ende) schon ohne Treffer geprueft -> die zweite Suche von
-     * unten endet am Cursor (vorher lief sie den ganzen Bereich noch einmal ab). */
-    if (!r && g_ct_cursor > 0x10000000u) { g_ct_curfail++; r = ct_high_alloc_from(size, prot, pq, 0x10000000ull, g_ct_cursor); }
-    if (r) { g_ct_cursor = (u32)CT_G64((unsigned long long)(uintptr_t)r + CT_PAGE(size)); }
+    void *r = NULL;
+    if (!g_cfg.contig_lowq_test) {
+        r = ct_high_alloc_from(size, prot, pq, g_ct_cursor, 0x7FFF0000ull);
+        /* W308: Die Suche ab dem Cursor hat [Cursor, Ende) schon ohne Treffer geprueft -> die zweite Suche von
+         * unten endet am Cursor (vorher lief sie den ganzen Bereich noch einmal ab). */
+        if (!r && g_ct_cursor > 0x10000000u) { g_ct_curfail++; r = ct_high_alloc_from(size, prot, pq, 0x10000000ull, g_ct_cursor); }
+        if (r) { g_ct_cursor = (u32)CT_G64((unsigned long long)(uintptr_t)r + CT_PAGE(size)); }
+    } else {
+        g_ct_lowq_skip++; /* TEST: wie eine gescheiterte Suche unter 2 GB */
+    }
+    if (!r && g_cfg.contig_hi_place && g_cfg.host_hi_addr) { /* FIX(ISSUE-TEX) */
+        r = ct_high_alloc_from(size, prot, pq, g_ct_cursor_hi, 0xFFFE0000ull);
+        if (!r && g_ct_cursor_hi > 0x80000000u) { r = ct_high_alloc_from(size, prot, pq, 0x80000000ull, g_ct_cursor_hi); }
+        if (r) {
+            g_ct_cursor_hi = (u32)CT_G64((unsigned long long)(uintptr_t)r + CT_PAGE(size));
+            if (g_ct_hiplace++ < 8u) {
+                HLOG_I("CONTIG hi-place #%u: size=0x%X -> 0x%X (Suche unter 2 GB ohne Treffer, Bild frei)",
+                       g_ct_hiplace, size, (u32)(uintptr_t)r);
+            }
+        }
+    }
     return r;
+}
+/* ISSUE-TEX: Zaehler fuer den Textur-Gesundheitsbericht (gezielt oberhalb 2 GB, trotzdem ueberlappend). */
+void krnl_contig_place_stats(unsigned *hiplace, unsigned *overlap)
+{
+    if (hiplace) { *hiplace = g_ct_hiplace; }
+    if (overlap) { *overlap = g_ct_alias; }
 }
 static void *ct_high_alloc_from(u32 size, DWORD prot, unsigned *pq, unsigned long long p, unsigned long long lim)
 {
     u32 need = CT_PAGE(size);
     unsigned it;
     void *res = NULL;
+    ct_img0_guard(); /* ISSUE-TEX */
     if (p <= 0x10000000ull) { /* nur bei Suche von unten: Suchbeginn wie der alte HIGH-Fallback: VirtualAlloc(NULL) liefert die niedrigste
        * freie Luecke dieser Groesse (Kernel-Suche, schnell); alles darunter ist zu klein.
        * Nur reservieren, sofort freigeben, dann ab dort Bild-frei suchen. */
@@ -852,7 +914,10 @@ static void *ct_high_alloc_from(u32 size, DWORD prot, unsigned *pq, unsigned lon
          * auch nach der Abfrage verworfen worden (im_first_free liefert die erste passende Stelle >= c). */
         c = CT_G64(p);
         win = c & 0xF0000000ull;
-        q = im_first_free((u32)(c - win), need);
+        /* ISSUE-TEX: oberhalb 2 GB nie am Fensteranfang (Bild 0..0xFFFF): Phys = VA & 0x0FFFFFFF waere 0 bzw.
+         * ein Nullseiten-Wert, und das Spiel/der Client lesen Data = 0 als "keine Daten" (Beleg IT_m14_fix: 4-MB-
+         * Block bei 0x80000000 -> RT-Flaeche 0x4C19C8 mit data=0, Dauer ohne SRV). Unter 2 GB unveraendert. */
+        q = im_first_free((u32)((lim > 0x80000000ull && c - win < 0x10000ull) ? 0x10000ull : (c - win)), need);
         if (q + need > 0x10000000ull) { p = win + 0x10000000ull; g_ct_qimg++; continue; }
         if (win + q != c) { p = win + q; g_ct_qimg++; continue; }
         if (!VirtualQuery((LPCVOID)(uintptr_t)p, &mi, sizeof mi)) { break; }
@@ -960,6 +1025,8 @@ void krnl_contig_stats(void)
            (double)g_ct_qmax * 1000.0 / (double)g_qpc_freq_ct(), (double)g_ct_cymax / 1000.0, g_ct_qslow);
     HLOG_I("KRNL CONTIG HIGH-Suche (W308): %llu Abfragen, %llu Bild-Spruenge ohne Abfrage, %u Cursor-Fehlschlaege",
            g_ct_qtot, g_ct_qimg, g_ct_curfail);
+    HLOG_I("KRNL CONTIG ueber 2 GB (ISSUE-TEX): %u gezielt (contig_hi_place=%d host_hi_addr=%d), %u trotzdem ueberlappend, Test-Auslassungen %u, Bloecke mit Phys < 0x10000: %u (contig_img0_guard=%d)",
+           g_ct_hiplace, g_cfg.contig_hi_place, g_cfg.host_hi_addr, g_ct_alias, g_ct_lowq_skip, g_img0_hits, g_cfg.contig_img0_guard);
 }
 
 u32 __stdcall hle_MmAllocateContiguousMemory(u32 size)
@@ -1182,6 +1249,7 @@ u32 __stdcall hle_MmSetAddressProtect(u32 va, u32 size, u32 prot)
 {
     DWORD old;
     prot = host_prot("MmSetProt", va, size, prot); /* W123 */
+    if (g_loc_rb_prewrite) { InterlockedIncrement(&g_loc_rb_memev); } /* W330: Schutzwechsel -> Rollback-Bereiche neu */
     if (!VirtualProtect((LPVOID)(uintptr_t)va, size, prot, &old)) {
         HLOG_W("MmSetAddressProtect(0x%X) FEHLER", va);
         return 0xC0000045u; /* INVALID_PAGE_PROTECTION */

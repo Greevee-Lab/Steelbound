@@ -232,7 +232,7 @@ int la_check(const la_sel_t *sel, const la_vtlist_t *l, la_check_t *res)
 static void mis_label(int m, char *out, size_t cap)
 {
     if (m == 0) {
-        strcpy_s(out, cap, LT("gui.alpha_mis_training"));
+        strncpy_s(out, cap, LT("gui.alpha_mis_training"), _TRUNCATE);
     } else {
         _snprintf_s(out, cap, _TRUNCATE, LT("gui.alpha_mis_n"), m);
     }
@@ -241,7 +241,7 @@ static void mis_label(int m, char *out, size_t cap)
 static void vt_label(int v, char *out, size_t cap)
 {
     if (v < 1) {
-        strcpy_s(out, cap, LT("gui.alpha_vt_default"));
+        strncpy_s(out, cap, LT("gui.alpha_vt_default"), _TRUNCATE);
     } else {
         _snprintf_s(out, cap, _TRUNCATE, "%d %s", v, la_vt_name(v));
     }
@@ -250,7 +250,7 @@ static void vt_label(int v, char *out, size_t cap)
 static void diff_label(int d, char *out, size_t cap)
 {
     if (d < 0) {
-        strcpy_s(out, cap, LT("gui.alpha_diff_default"));
+        strncpy_s(out, cap, LT("gui.alpha_diff_default"), _TRUNCATE);
     } else {
         _snprintf_s(out, cap, _TRUNCATE, "%d %s", d, la_diff_name(d));
     }
@@ -259,7 +259,7 @@ static void diff_label(int d, char *out, size_t cap)
 void la_check_text(const la_sel_t *sel, const la_check_t *res, char *out, size_t cap)
 {
     char a[160], b[160], c[400], d[160], line[600];
-    strcpy_s(out, cap, LT("gui.alpha_inv_head"));
+    strncpy_s(out, cap, LT("gui.alpha_inv_head"), _TRUNCATE);
     if (res->bad_mission) {
         _snprintf_s(line, sizeof line, _TRUNCATE, LT("gui.alpha_err_mission"), sel->mission);
         strcat_s(out, cap, "\n");

@@ -34,6 +34,7 @@
 #include "loc_pad.h"
 #include "loc_audio.h"
 #include "loc_sync.h"
+#include "loc_rollback.h" /* W325 */
 #include "sb_tex.h" /* W297: Texttextur nach Lock neu hochladen */
 #include "loc_render.h" /* W297: Textebene */
 
@@ -90,6 +91,27 @@ void loc_boot_select(void)
     /* SB-spezifische Spielstand-Pruefung/-Schutz gelten nicht fuer LoC. */
     g_cfg.save_check = 0;
     g_cfg.save_lock = 0;
+    /* W320 LOC-PERF: Die LoC-Mission taktet selbst mit 20 Hz (FUN_00033050(3), 3 VBlank-Felder je Bild)
+     * und hat keine Zwischenbilder. Mit interp_fps>0 wiederholte der Present-Takt das Bild nur (120/s,
+     * GPU-Last) und verschob den Swap des Spiel-Render-Threads um 0-25 ms (Ruckeln, W320 P1/J1).
+     * loc_direct_present=1: Bild direkt praesentieren (Offscreen-BB weg, wie interp_fps=0 von Anfang an). */
+    if (g_cfg.loc_interp && g_cfg.interp_fps > 0) {
+        /* W323 LOC-INTERP: Zwischenbilder im 20-Hz-Missionstakt (render_interp.c, Weiche loc_render_interp_mission).
+         * interp_fps bleibt; Menue/Lobby praesentiert das Spiel direkt (keine Wiederhol-Presents im LoC-Profil). */
+        extern int sb_render_offscreen(void);
+        HLOG_I("LOCBOOT: interp_fps %d bleibt (loc_interp, Zwischenbilder im %d-Hz-Missionstakt), offscreen=%d",
+               g_cfg.interp_fps, loc_render_tick_hz(), sb_render_offscreen());
+    } else if (g_cfg.loc_direct_present && g_cfg.interp_fps > 0) {
+        extern int sb_render_views_rebuild(const char *why);
+        extern int sb_render_offscreen(void);
+        int was = g_cfg.interp_fps;
+        g_cfg.interp_fps = 0;
+        if (sb_render_offscreen() && !sb_render_views_rebuild("LoC: direkt praesentieren")) {
+            g_cfg.interp_fps = was;
+        }
+        HLOG_I("LOCBOOT: interp_fps %d -> %d (loc_direct_present, LoC ohne Zwischenbilder), offscreen=%d", was,
+               g_cfg.interp_fps, sb_render_offscreen());
+    }
     /* SB-Replay-Ketten (Menuefolge Steel Battalion) nie in LoC einspeisen. */
     g_cfg.replay_steps[0] = 0;
     g_cfg.replay[0] = 0;
@@ -707,6 +729,8 @@ void loc_boot_install(void)
     if (loc_net_install()) { /* W286: System-Link-Netz-HLE (loc_net.c) + Menue-Gamepad (loc_pad.c) */
         loc_pad_install();
         loc_sync_install(); /* W297: Lockstep-Zustandshash (loc_sync=1) */
+        loc_pace_install(); /* W320: Missionstakt (loc_pace_diag/loc_fields, Standard aus) */
+        loc_rb_install(); /* W325: Rollback-Spike (loc_rb_spike, Standard aus) */
     } else { /* sonst "Netz nicht bereit" wie W275 */
         LOC_STUB(XNetStartup);
         LOC_STUB(WSAStartup);
@@ -754,6 +778,7 @@ void loc_boot_tick(int waited_s)
         loc_net_tick(waited_s); /* W286 */
         loc_audio_tick(waited_s); /* W298 */
         loc_sync_tick(waited_s); /* W297 */
+        loc_rb_tick(waited_s); /* W325 */
         if (waited_s % 30 == 0) {
             loc_mem_stats();
         }

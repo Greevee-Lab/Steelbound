@@ -224,7 +224,7 @@ static volatile LONG g_ov_qs_vk[4] = { VK_F12, 0, 0, 0 };
 static volatile LONG g_ov_qs_mod[4] = { 0, 0, 0, 0 };
 static volatile LONG g_ov_qs_pad;        /* Pad-Tasten der Aktion "quick_shot" (bei offenem Fotomodus = Foto) */
 static volatile LONG g_qs_req;           /* 1 = Schnell-Screenshot angefordert (Fenster/Hook/Test) */
-enum { QS_IDLE, QS_FLAT, QS_PAUSE };
+enum { QS_IDLE, QS_FLAT, QS_PAUSE, QS_REC }; /* ISSUE-PHOTO: QS_REC = Tick-Aufzeichnung bei Bedarf (interp_fps=0) */
 static int g_qs_state, g_qs_notes;
 static unsigned g_qs_t0;                 /* Present-Nr. beim Start (Zeitgrenze Vollbild-Ansicht) */
 static ULONGLONG g_qs_ms0;
@@ -449,6 +449,7 @@ static int ov_enabled(int i)
     case OI_XWIRE: case OI_XVAPOR: return !g_cfg.vr_enable; /* W240: in VR gesperrt */
     case OI_CHIDE: return !g_cfg.vr_enable; /* W268: in VR gesperrt (flache Leinwand statt Cockpit) */
     case OI_MONVIEW: return !g_cfg.vr_enable; /* W319: in VR gesperrt */
+    case OI_FPS: return !(g_sba_loc && !g_cfg.loc_interp); /* W323: LoC ohne Zwischenbilder -> fest 20 Hz (Original) */
     default: return 1;
     }
 }
@@ -3371,6 +3372,14 @@ static void ov_qs_toast(const sb_photo_qres_t *r)
     sb_ov_toast_msg(t1, t2, r->notes ? 3500u : 2200u);
 }
 
+/* ISSUE-PHOTO: vor der Pause ggf. einen Tick aufzeichnen (interp_fps=0), sonst gleich pausieren */
+static void ov_qs_to_pause(void)
+{
+    if (sb_photo_quick_rec_begin()) { g_qs_state = QS_REC; return; }
+    g_qs_state = QS_PAUSE;
+    sb_photo_quick_arm();
+}
+
 static void ov_qs_tick(unsigned n)
 {
     if (g_qs_req && g_qs_state == QS_IDLE) {
@@ -3390,8 +3399,7 @@ static void ov_qs_tick(unsigned n)
                 sb_flat_request(1);
                 g_qs_state = QS_FLAT;
             } else {
-                g_qs_state = QS_PAUSE;
-                sb_photo_quick_arm();
+                ov_qs_to_pause();
             }
         }
     }
@@ -3399,19 +3407,22 @@ static void ov_qs_tick(unsigned n)
         int st = sb_flat_state();
         if (st == 1) {
             HLOG_I("QUICKSHOT: Vollbild-Ansicht bereit nach %u ms", (unsigned)(GetTickCount64() - g_qs_ms0));
-            g_qs_state = QS_PAUSE;
-            sb_photo_quick_arm();
+            ov_qs_to_pause();
         } else if (st < 0 || GetTickCount64() - g_qs_ms0 > 3000u) {
             sb_flat_request(0);
             g_qs_notes |= SB_QS_NOTE_NOFLAT;
-            g_qs_state = QS_PAUSE;
-            sb_photo_quick_arm();
+            ov_qs_to_pause();
         }
+    }
+    if (g_qs_state == QS_REC && sb_photo_quick_rec_wait()) { /* ISSUE-PHOTO: Pause am Ende des aufgezeichneten Ticks */
+        g_qs_state = QS_PAUSE;
+        sb_photo_quick_arm();
     }
     if (g_qs_state == QS_PAUSE) {
         sb_photo_qres_t r;
         if (sb_photo_quick_result(&r)) {
             sb_flat_request(0);
+            sb_photo_quick_rec_free(); /* ISSUE-PHOTO */
             g_qs_state = QS_IDLE;
             r.notes |= g_qs_notes;
             if (r.ok) {
@@ -3646,6 +3657,12 @@ void sb_ovl_present_end(void)
     if (!g_ov_fps_pend) { return; }
     g_ov_fps_pend = 0;
     g_cfg.interp_auto = g_ov_auto; /* W223: Auswahl auto/fest (Rate selbst folgt unten) */
+    if (g_sba_loc && !g_cfg.loc_interp && g_ov_fps > 0) { /* W323: ohne loc_interp kaemen nur Wiederhol-Presents (W320) */
+        HLOG_I("OVERLAY: Bildrate %d im LoC-Profil ohne loc_interp -> 20 Hz (Original)", g_ov_fps);
+        g_ov_fps = 0;
+        g_ov_auto = 0;
+        g_cfg.interp_auto = 0;
+    }
     if (g_ov_fps == g_cfg.interp_fps) { return; }
     if (g_ov_fps > 0 && !sb_render_offscreen()) {
         g_cfg.interp_fps = g_ov_fps;
@@ -3913,7 +3930,9 @@ static void ov_value(int i, wchar_t *o, size_t cap)
             char nb[64];
             _snprintf_s(nb, sizeof nb, _TRUNCATE, LT("ovl.v_fps_auto"), g_ov_fps > 0 ? g_ov_fps : g_cfg.game_tick);
             ov_wu8(o, cap, nb);
-        } else if (g_ov_fps == 0) { ov_wkey(o, cap, g_cfg.game_tick == 25 ? "ovl.v_25orig" : "ovl.v_30orig"); } /* W234 */
+        } else if (g_ov_fps == 0) { /* W234; W323: LoC-Mission taktet mit 20 Hz */
+            ov_wkey(o, cap, g_sba_loc ? "ovl.v_20orig" : g_cfg.game_tick == 25 ? "ovl.v_25orig" : "ovl.v_30orig");
+        }
         else { /* W309: "120 (kann ruckeln)" / "240 (ueber Monitor)" nach der Rate des Spielmonitors */
             int f = sb_fps_flags((int)g_ov_mon_hz, g_ov_fps);
             char nb[64];

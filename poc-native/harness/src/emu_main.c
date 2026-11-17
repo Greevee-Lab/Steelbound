@@ -239,6 +239,66 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     return TRUE;
 }
 
+/* FIX(OOB-CMP,W321): Lese-AV in Spielcode, dessen Seite BULKFIX nicht
+ * anlegen kann (z. B. freier, aber unbelegbarer Rest einer 64-KB-Granule
+ * hinter einer fremden Allokation: VirtualAlloc rundet die Reservierung auf
+ * die Granule ab und scheitert). Ist der Befehl ein reiner Vergleich
+ * `cmp [mem], imm` (80/81/83 /7, optional 66), wird er mit Speicherwert 0
+ * ausgefuehrt - genau das Ergebnis, das eine von BULKFIX frisch angelegte
+ * (genullte) Seite liefern wuerde. Kein Register ausser EFLAGS/EIP aendert
+ * sich. Rueckgabe: Befehlslaenge, 0 = nicht behandelt.
+ * Anlass: M07-Skript 0x4AD5C (und M17 0x4B9E3) prueft den Typ des letzten
+ * Strahl-Opfers [0x346F80] ohne Abfrage auf 0x7FFF (Original-Fehler, das
+ * Spiel selbst prueft es z. B. in 0x173E46) und liest ~3 MB hinter der
+ * Entity-Tabelle (GitHub #35). */
+static unsigned veh_oob_cmp(CONTEXT *cx, xb_u32 rip)
+{
+    unsigned char b[12];
+    unsigned i = 0, osz = 32, len, rm, mod;
+    xb_u32 imm, mask, r;
+    DWORD f;
+    __try { memcpy(b, (const void *)(uintptr_t)rip, sizeof b); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    if (b[0] == 0x66u) { osz = 16; i = 1; }
+    if (b[i] != 0x80u && b[i] != 0x81u && b[i] != 0x83u) { return 0; }
+    if (b[i] == 0x80u) { if (i) { return 0; } osz = 8; }
+    mod = b[i + 1] >> 6;
+    rm = b[i + 1] & 7u;
+    if (mod == 3u || ((b[i + 1] >> 3) & 7u) != 7u) { return 0; } /* nur CMP mit Speicheroperand */
+    len = i + 2;
+    if (rm == 4u) { /* SIB */
+        unsigned sbase = b[len] & 7u;
+        len++;
+        if (mod == 0u && sbase == 5u) { len += 4; }
+    } else if (mod == 0u && rm == 5u) {
+        len += 4;
+    }
+    if (mod == 1u) { len += 1; } else if (mod == 2u) { len += 4; }
+    if (b[i] == 0x83u) { /* imm8, vorzeichenerweitert */
+        imm = (xb_u32)(int)(signed char)b[len]; len += 1;
+    } else if (osz == 8) {
+        imm = b[len]; len += 1;
+    } else if (osz == 16) {
+        imm = (xb_u32)b[len] | ((xb_u32)b[len + 1] << 8); len += 2;
+    } else {
+        imm = (xb_u32)b[len] | ((xb_u32)b[len + 1] << 8) | ((xb_u32)b[len + 2] << 16) | ((xb_u32)b[len + 3] << 24);
+        len += 4;
+    }
+    if (len > sizeof b) { return 0; }
+    mask = (osz == 32) ? 0xFFFFFFFFu : ((1u << osz) - 1u);
+    imm &= mask;
+    r = (0u - imm) & mask; /* cmp 0, imm */
+    f = cx->EFlags & ~(DWORD)0x8D5u; /* CF PF AF ZF SF OF */
+    if (imm) { f |= 0x001u; }                                   /* CF: Borgen */
+    { unsigned p = r & 0xFFu; p ^= p >> 4; p ^= p >> 2; p ^= p >> 1; if (!(p & 1u)) { f |= 0x004u; } } /* PF */
+    if ((imm ^ r) & 0x10u) { f |= 0x010u; }                     /* AF */
+    if (!r) { f |= 0x040u; }                                    /* ZF */
+    if (r & (1u << (osz - 1))) { f |= 0x080u; }                 /* SF */
+    if ((imm & r) & (1u << (osz - 1))) { f |= 0x800u; }         /* OF */
+    cx->EFlags = f;
+    return len;
+}
+
 static unsigned g_flt0;
 static void veh_tbl_fix(PEXCEPTION_POINTERS ep, DWORD tls,
                         unsigned *n)
@@ -582,6 +642,25 @@ static void veh_tbl_fix(PEXCEPTION_POINTERS ep, DWORD tls,
                         }
                         TlsSetValue(tls_veh, (void *)0);
                         return EXCEPTION_CONTINUE_EXECUTION;
+                    }
+                    { /* W321: Seite nicht anlegbar -> Diagnose (erste 8) + FIX(OOB-CMP) */
+                        static unsigned nbf;
+                        DWORD gle = GetLastError();
+                        unsigned ilen = g_cfg.veh_oob_cmp ? veh_oob_cmp(ep->ContextRecord, rip0) : 0u;
+                        if (nbf < 8u) {
+                            nbf++;
+                            HLOG_W("VEH commit fehlgeschlagen (W321): RIP=0x%X Fault=0x%p qr=%u state=0x%X prot=0x%X type=0x%X "
+                                   "allocbase=0x%p region=0x%p+0x%X GLE=%lu -> %s", rip0, flt, (unsigned)qr,
+                                   qr ? (unsigned)mi.State : 0u, qr ? (unsigned)mi.Protect : 0u, qr ? (unsigned)mi.Type : 0u,
+                                   qr ? mi.AllocationBase : NULL, qr ? mi.BaseAddress : NULL,
+                                   qr ? (unsigned)mi.RegionSize : 0u, gle,
+                                   ilen ? "cmp mit 0 (veh_oob_cmp)" : "unbehandelt");
+                        }
+                        if (ilen) {
+                            ep->ContextRecord->Eip += ilen;
+                            TlsSetValue(tls_veh, (void *)0);
+                            return EXCEPTION_CONTINUE_EXECUTION;
+                        }
                     }
                 }
                 if (qr == 0 || mi.State != MEM_COMMIT) {

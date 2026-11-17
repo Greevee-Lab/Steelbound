@@ -22,11 +22,35 @@ typedef struct {
     int loc_net_port;     /* W286: Portbasis (Standard 1000 = Original: TCP 1000, UDP 1201/1202, VDP 1203 -> Basis+0/+201/+202/+203) */
     char loc_net_peers[512]; /* W286: Mitspieler "ip[:basis],..." ("auto" = 127.0.0.2-127.0.0.9 ohne sich selbst); nur Loopback/privat */
     int loc_net_rtt;      /* W286: gemeldete QoS-Rundlaufzeit in ms (XNetQosLookup, Standard 10) */
+    int loc_net_nodelay;  /* W322: 1 = TCP_NODELAY auf den LoC-Spielverbindungen (kein Nagle-Stau ueber Strecken mit Laufzeit; Standard), 0 = Host-Standard */
+    char loc_netsim[256]; /* W322 DIAG/TEST: Verzoegerungsstufe im Netz-HLE, z. B. "dsl", "eu-jp,nagle:0", "rtt:300,jitter:20" (leer = aus, Standard) */
+    char loc_transport[8]; /* W324 LOC-NETPLAY: "tcp" = Original (Standard), "udp" = eigener UDP-Transport mit Redundanz unter dem Spiel */
+    int loc_transport_port;   /* W324: eigener UDP-Port des Transports (0 = frei) */
+    char loc_transport_peers[256]; /* W324 TEST: feste Mitspieler "ip:port,..." ohne Treffpunkt (nur Loopback/privat) */
+    int loc_transport_proxy;  /* W324: Portbasis der lokalen Stellvertreter der Mitspieler (Standard 21000) */
+    int loc_transport_red;    /* W324: Redundanz N (0 = adaptiv 2..8, Standard) */
+    int loc_transport_gap;    /* W324: Abstand der Kopien in ms (Standard 15) */
+    int loc_transport_hold;   /* W324: Jitter-Puffer, Mindest-Haltezeit in ms (Standard 0) */
+    int loc_transport_qos;    /* W324: Reserve fuer die gemeldete QoS-RTT in ms (Standard 100) */
+    int loc_transport_nodirect; /* W324 TEST: 1 = kein direkter Weg (Relay erzwingen) */
+    char loc_lobby[128];      /* W324: Treffpunkt steelnet "host:port" (leer = System Link wie bisher, Standard) */
+    char loc_lobby_room[33];  /* W324: Lobby-Name beim Treffpunkt (Standard "loc") */
+    char loc_lobby_pilot[17]; /* W324: Pilotname beim Treffpunkt (Standard "Pilot") */
+    char loc_lobby_role[8];   /* W324: "auto" (beitreten, sonst anlegen), "host", "join" */
+    char loc_relays[256];     /* W324: zusaetzliche Relays "name=host:port,..." (der Treffpunkt nennt seine selbst) */
     int loc_net_diag;     /* W286 DIAG: 1 = alle 10 s Spiel-Threads abtasten (EIP + LoC-Ruecksprungadressen), Standard 0 */
     int loc_sync;         /* W297 DIAG: 1 = Lockstep-Zustandshash je 0x34-Rahmen loggen (LOCSYNC, nur LoC + Netz), Standard 0 */
     char loc_replay_tick[1024]; /* W297 TEST: Tastenfolge "rahmen:vk,len;..." an Lockstep-Rahmen gekoppelt (braucht loc_sync=1), leer = aus */
     char loc_steps[1024]; /* W297 TEST: zustandsgesteuerte Testtasten "acc>=1+400>98,8;rx:0xF+150>100,10;sync>=60>32,8;f+50>..." (braucht loc_sync=1) */
     int loc_sync_every;   /* W297: LOCSYNC-Logzeile alle n Rahmen (Standard 150) */
+    int loc_pace_diag;    /* W320 DIAG: 1 = Missionstakt FUN_00033050 messen (LOCPACE alle 10 s), Standard 0 */
+    int loc_direct_present; /* W320 LOC-PERF: 1 = LoC-Profil praesentiert direkt (interp_fps=0, keine Wiederhol-Presents), Standard 1 */
+    int loc_widescreen;   /* W326 LOC-WIDE: Bildformat des Spiels: 0 = 4:3 (Original, Standard), 1 = 16:9 (Spiel meldet WIDESCREEN, 720x480 anamorph), 2 = 720p (1280x720 progressiv, HDTV-AV-Pack) - nur LoC, wirkt beim Start */
+    int loc_interp;       /* W323 LOC-INTERP: 1 = Zwischenbilder in der LoC-Mission (20-Hz-Takt, interp_fps bleibt), 0 = wie W320 direkt */
+    int loc_rb_spike;     /* W325 DIAG: Rollback-Machbarkeit messen (1 = Zustand je Tick, 2 = Determinismus-Zyklen), Standard 0 */
+    char loc_rb_opts[128]; /* W325 DIAG: Optionen zu loc_rb_spike, z. B. "k=1,2,4,8;render=0;warm=300;max=0;census=1" */
+    int loc_rb;           /* W330 LOC-ROLLBACK-R1: 1 = Zustandsring je Tick (inkrementell, Ruhe aller Threads), nur LoC-Profil, Standard 0 */
+    int loc_fields;       /* W320 TEST: Felder je Missionsbild statt 3 (aendert Spielgeschwindigkeit, nur Messung), 0 = Original */
     int loc_pad_keys;     /* W286: 1 = Tastatur auch auf das virtuelle Menue-Gamepad (Ziffernblock 8/2/4/6, SPACE/0, Backspace, Enter; Standard), 0 = Pad nur anwesend (neutral) */
     int iso_selftest;     /* W150 DIAG: 1 = D:-Selbsttest (Lesen, Schreibschutz) vor dem Spielstart */
     int save_check;       /* W187 KIA-LOAD: Spielstaende (T:) beim Start pruefen: 1 = reparieren (mit Sicherung), 2 = nur melden, 0 = aus */
@@ -83,6 +107,7 @@ typedef struct {
     int poll_census; /* DIAG(POLLCENSUS,W59): 48CF0-Aufrufer-Zensus (RA/Port/Gruppe/Button, Treffer != 0) */
     int nullcall_diag; /* DIAG(NULLCALL): Sprung auf 0: Aufrufer+SEH je einmal, 0 = alter VEH-Dump */
     int contig_fast; /* PERF(PERF-HUD,W122): 1 = low_alloc (MmAllocateContiguousMemory) ueberspringt belegte Allokationen am Stueck (gleiche Adresse, viel weniger VirtualQuery), 2 = Pruefmodus (alte Suche vergleicht, Zeile LOWALLOC), 3 = EXPERIMENT Merkpunkt (nicht exakt), 0 = alt */
+    int veh_oob_cmp; /* FIX(OOB-CMP,W321): 1 = Lese-AV in Spielcode, deren Seite BULKFIX nicht anlegen kann: reiner Vergleich cmp [mem],imm wird mit Speicherwert 0 ausgefuehrt (= Ergebnis einer frisch angelegten Seite; M07-Skript 0x4AD6E, GitHub #35), 0 = alt (Absturz) */
     int mem_wc_strip; /* PERF(FILM-FPS,W123): 1 = PAGE_WRITECOMBINE/PAGE_NOCACHE der Xbox-Speicheranforderungen (MmAllocateContiguousMemoryEx, NtAllocateVirtualMemory, MmSetAddressProtect) beim Host-Mapping weglassen (CPU-Lesen aus WC-Speicher ist ungecacht: Film-Textur-Hashes ~75 ms/Bild), 0 = alt */
     int contig_diag; /* DIAG(PHYSALIAS,W86): 1 = Contig-Blockliste (alle MmContig(Ex) Block + D3D TexLock neu + PHYSALIAS), 0 = aus (nur PHYSALIAS, max 16) */
     char watch[256]; /* WATCHDR (W41): DR0-3-Watchpoints "ADDR[:len][:w|rw],..." oder "ent:IDX+OFF...", leer = aus */
@@ -96,6 +121,9 @@ typedef struct {
     int hlock_spin;        /* LOADLOCK(W119): Spin-Runden (pause) vor WaitOnAddress bei belegter hlock, 0 = 64 */
     int diag_lock_inject;  /* DIAG(LOADLOCK,W119): >0 = jedes N-te hlock-Erwerb/-Freigabe Sleep(1) im Fenster (Modell 1) bzw. in der Region (Modell 0), 0 = aus */
     int host_hi_addr;      /* FIX(TEX-WHITE-AMD,W315): 1 = Host-Adressen ab 2 GB (Prozess /LARGEADDRESSAWARE, Contig-HIGH-Bloecke) fuer Texturkoepfe/-daten und Pixelshader-Definitionen gueltig (bis 0xFFFE0000); 0 = alt (ab 0x80000000 verworfen -> Textur nie hochgeladen, Flaeche weiss/Vertexfarbe) */
+    int contig_hi_place;   /* FIX(ISSUE-TEX, Steelbound#37/#42/#43): 1 = scheitert die gezielte Contig-HIGH-Suche unter 2 GB, gezielt oberhalb 2 GB suchen (Low28-Bild frei, braucht host_hi_addr=1) statt VirtualAlloc(NULL) mit ueberlappendem Bild (fremde/leere Texturdaten); 0 = alt */
+    int contig_img0_guard; /* FIX(ISSUE-TEX): 1 = Low28-Bild 0..0xFFFF fuer Contig-Bloecke gesperrt (kein Block an einem 256-MB-Fensteranfang -> nie Phys/Data 0 = "keine Daten"); 0 = alt */
+    int contig_lowq_test;  /* TEST(ISSUE-TEX): 1 = gezielte Contig-HIGH-Suche unter 2 GB auslassen (AMD-Tester-Lage: Adressraum unter 2 GB vom Treiber belegt); 0 = aus */
     int contig_hi_test;    /* TEST(W315): 1 = Contig-Bloecke (MmAllocateContiguousMemory[Ex]) zuerst oberhalb 2 GB platzieren (Low28-Bild frei) -> Lage bei AMD-Testern nachstellen; 0 = aus */
     int contig_alias_test; /* TEST(FILM-WHITE,W177): >0 = Contig-Anforderung genau dieser Groesse bekommt vorher einen 12-KB-Koeder mit gleichem Low28-Anfang (Lage V_C30isokill nachstellen), 0 = aus */
     int contig_reuse;      /* FIX(SEQ-RENDER,W214): 1 = freigegebene Contig-Bloecke (contig_free) nach contig_reuse_ms Quarantaene fuer passende Anforderungen wiederverwenden (Adressraum/Commit wachsen nicht je Mission/Effekt), 0 = immer neu */
@@ -146,6 +174,8 @@ typedef struct {
     int mission_difficulty;    /* W272: Schwierigkeit 0..5 (ROOKIE..ARMAGEDDON), -1 = wie im Spiel gewaehlt */
     int mission_skip_intro;    /* W272: 1 = Einfuehrungsfilm (Training) per Lock-On ueberspringen */
     char mission_nav_name[160]; /* W272 DIAG: Tastenfolge der Namenseingabe (OK,B,U,D,L,R,bN), leer = Standard */
+    int bloom_vsc; /* DIAG(ISSUE-LIGHT): 1 = mit bloom_diag je Welt-Draw Licht-Konstanten + Vertex 0 (BLOOM vsc) */
+    int test_god; /* TEST(ISSUE-LIGHT): 1 = HP des eigenen VT (Entity [0x356E2C]) nie unter den Missionsstartwert fallen lassen (Beleglaeufe in spaeten Missionen), 0 = aus (Standard) */
     int mission_autostart_steps; /* TEST(W315): 1 = replay_steps bleiben beim Teststart an (Startsequenz per Kette ohne Titel-Demos, z. B. WARP), 0 = abgeschaltet (Standard) */
     int mission_autostart_shots; /* W272 DIAG: Bild bei jeder Taste/jedem Phasenwechsel des Teststarts */
     int campaign_chain;        /* W303 CAMPAIGN-CHAIN (Testwerkzeug): N Siege in Folge per Missionsende-Testhook, 0 = aus */
@@ -466,6 +496,8 @@ typedef struct {
     int tex_lockwatch; /* FIX(STARTSEQ-BARS,W98): 1 = per LockRect gesperrte Texturen einmal je Frame voll hashen + bei Aenderung neu laden (Spiel schreibt ueber behaltenen Lock-Zeiger), 0 = alt */
     int fx_alphakill; /* FIX(STARTSEQ-BARS,W98): 1 = Xbox D3DTSS_ALPHAKILL Stufe 0 (Deferred-TSS 0x21A8DC Bit 2, NV2A TEXTURE_CONTROL0.ALPHAKILLEN): Texel-Alpha 0 -> discard (nicht fuer RT-Texturen), 0 = alt */
     int fx_alphatest; /* FIX(FX-ORIG,W90): 1 = NV2A Alpha-Test (0x300/0x33C/0x340) im IM-Pixelshader (discard), 0 = alt (kein Alpha-Test) */
+    int psconst_ab; /* DIAG(ISSUE-LIGHT): 1 = im Screenshot-Bild psconst_store wirkungslos (Ablage 0 wie vorher), Partnerbild +1 wird mitgeschossen -> A/B-Paar aus einem Lauf */
+    int psconst_store; /* FIX(ISSUE-LIGHT): 1 = SetPixelShaderConstant legt den Wert wie das XDK-Original (0x2103B5) als ARGB im Geraet ab ([[0x21A8A0]+0x4AC+4*r]), damit D3DDevice_GetPixelShaderConstant (0x20FCD0, nicht gehookt) ihn liefert - Sonder-Material FUN_00023D70/00024410 sichert und stellt C0 (Umgebungslicht) damit wieder her; 0 = alt (Get lieferte 0 -> Umgebungslicht 0 bis zum naechsten Material-Setup) */
     int ps_mul_c0; /* FIX(LOAD-VT-COLOR,W257): 1 = Standardpfad: Combiner-Muster Farbe = V0 * C0 (1 Stufe, ohne Textur; Drahtgitter-VT im Ladebild/Nachschub-Menue) -> Vertexfarbe mit dem explizit gesetzten C0 (SetPixelShaderConstant roh, unabhaengig von shading, bzw. PSCONSTANT0_0) multiplizieren, 0 = alt (nur V0 -> weiss) */
     int fx_ps_c0; /* FIX(FX-ORIG,W90): 1 = Standardpfad (shading=0): Combiner-Muster R0=(V0+C0)*T0 (Effekt-PS) -> C0 zur Vertexfarbe addieren, 0 = alt (nur V0*T0) */
     /* W133 REM-FX: Effekt-Remaster-Optionen (Standard 0 = Original, ESC-Seite "Effekte") */

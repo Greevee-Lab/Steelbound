@@ -17,6 +17,8 @@ int loc_render_census_go(unsigned f);
  * 1 = Treffer; srv = Kopie der 4:3-Box (kann NULL sein), w/h = Texel-Groesse des Xbox-Puffers. */
 struct ID3D11ShaderResourceView;
 int loc_render_is_bbtex(unsigned xptr);
+/* W326 LOC-WIDE: Present-Parameter aus Direct3D_CreateDevice (Seitenverhaeltnis, Supersampling). */
+void loc_render_on_present_params(unsigned pp);
 /* DIAG(loc_psdump): PS-Def-Woerter + HLSL (src NULL = nicht unterstuetzt) in eine Datei. */
 void loc_render_dump_ps(unsigned handle, const unsigned *d, unsigned nd, const char *src);
 int loc_render_bb_lookup(unsigned xptr, struct ID3D11ShaderResourceView **srv, unsigned *w, unsigned *h);
@@ -26,6 +28,10 @@ void loc_render_text_lock(unsigned surf, unsigned bits, unsigned pitch);
 void loc_render_on_clear(unsigned surf, unsigned flags, unsigned color);
 /* W311: 1 = surf ist die LoC-Sichtkarte (loc_vismap); host/pitch = Lesezeiger des Spiels (Dauer-Lock, 0 = keiner). */
 int loc_render_vismap(unsigned surf, unsigned *host, unsigned *pitch);
+/* W323 LOC-INTERP: 1 = dieser Swap ist ein Missionsbild (Zwischenbilder, nur LoC-Profil + loc_interp). */
+int loc_render_interp_mission(void);
+/* W323: Missionstakt in Hz (vblank_hz / Felder je Bild, Original 60/3 = 20). */
+int loc_render_tick_hz(void);
 
 #ifdef __cplusplus
 }

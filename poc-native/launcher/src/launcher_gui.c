@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h> /* W328: Ablauf des Spielschluessels */
 #include "launcher_app.h"
 #include "launcher_cfg.h"
 #include "launcher_ctrl.h"
@@ -50,6 +51,7 @@
 #include "launcher_alpha.h" /* W272 ALPHA-TEST: Seite "Alpha Test" (launcher_alpha.inc) */
 #include "launcher_diag.h" /* W279 DIAG-CRASH: Absturz-Karte + Diagnosepaket (launcher_diag.inc) */
 #include "launcher_games.h" /* W276 LOC-LAUNCH */
+#include "launcher_account.h" /* W328 STEELNET-ACCOUNT: Pilotenkonto */
 #include "launcher_orig.h" /* W278 ORIG-FLAG */
 #include "sb_origflag.h" /* W278: SB_OFG_* */
 #include "launcher_layout.h" /* W281 LAUNCHER-SIZE: Layout 0/a/b (Entwurf) */
@@ -423,6 +425,7 @@ static void set_status_k(const char *msg, int kind); /* W187 */
 static int g_game;                 /* LGAME_SB | LGAME_LOC */
 static int loctab_visible(const uictl_t *u, int page); /* -1 = keine Vorgabe */
 static void paint_loc_play(void);
+static int loctab_wide_val(void); /* W326: LoC-Bildformat (LGAME_WIDE_*) fuer den Experimental-Hinweis */
 /* W278 ORIG-FLAG: Hinweis "nicht die Original-Optik" (Block "W278 ORIGFLAG" vor build_controls) */
 #define ID_ORIG_RESET 2780     /* Spielen: "Back to original" (nur Grafik) */
 #define ID_ORIG_ONCE 2781      /* Spielen: Einmal-Start im Original-Modus */
@@ -448,6 +451,8 @@ static void xicon_texts(void); /* W287 */
 static void xtip_text(int id, char *out, size_t cap);
 static void orig_relabel(void);
 static int loctab_command(int id, int code);
+static void acc_page_shown(void); /* W328 STEELNET-ACCOUNT */
+static void acc_apply_state(const char *name); /* W328: Shot-Zustaende loc_acc_* */
 static void loctab_relabel(void);
 /* W281 LAUNCHER-SIZE (Block bei on_dpi) */
 static void lay_switch(int id, int size);
@@ -2506,7 +2511,7 @@ static void paint_gfx(void)
     { /* Texturen-Zeile (Konzept 4.3): Quelle und Detail, Sprung zu Packs */
         char t[240];
         if (!lcfg_gfx_value(&g_gfx, LGK_HD)) {
-            strcpy_s(t, sizeof t, LT("gui.gfx_tex_orig"));
+            strncpy_s(t, sizeof t, LT("gui.gfx_tex_orig"), _TRUNCATE);
         } else if (g_rr[30].active) {
             strcpy_s(t, sizeof t, g_rr[30].text);
         } else {
@@ -2963,7 +2968,7 @@ static void paint_adv(void)
         adv_data_loc(path, sizeof path, &mk2);
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.adv_data_fmt"), LT(mk2));
         if (g_edition == LCFG_ED_US) { /* W231: eigener US-Saveordner sichtbar */
-            strcpy_s(t, sizeof t, LT("gui.adv_hdd_us"));
+            strncpy_s(t, sizeof t, LT("gui.adv_hdd_us"), _TRUNCATE);
             adv_hdd_path(path, sizeof path);
         }
         label1(F_TINY, t, CX0 + 18, CY0 + 270, COLW - 36 - 118, 15, C_DIM);
@@ -3599,14 +3604,15 @@ static void ip_fill(HWND c)
         int v = g_ip[i].v, f = g_ip[i].flags;
         if (v == SB_FPS_AUTO) {
             if (g_disp_hz > 0) { _snprintf_s(b, sizeof b, _TRUNCATE, LT("gui.ip_auto_hz"), g_disp_hz); }
-            else { strcpy_s(b, sizeof b, LT("gui.ip_auto")); }
-        } else if (v == 0) { /* W234: bei PAL50 ist das Original 25 */
-            strcpy_s(b, sizeof b, LT(ctl(ID_PAL50) && ui_checked(ID_PAL50) ? "gui.ip_25" : "gui.ip_30"));
+            else { strncpy_s(b, sizeof b, LT("gui.ip_auto"), _TRUNCATE); }
+        } else if (v == 0) { /* W234: bei PAL50 ist das Original 25; W323: LoC-Mission taktet mit 20 Hz */
+            strncpy_s(b, sizeof b, LT(g_game == LGAME_LOC ? "gui.ip_20" :
+                                     ctl(ID_PAL50) && ui_checked(ID_PAL50) ? "gui.ip_25" : "gui.ip_30"), _TRUNCATE);
         }
         else if (f & SB_FPS_F_ABOVE) { _snprintf_s(b, sizeof b, _TRUNCATE, LT("gui.ip_above"), v); } /* W309 */
         else if (f & SB_FPS_F_JUDDER) { _snprintf_s(b, sizeof b, _TRUNCATE, LT("gui.ip_judder"), v); } /* W309 */
-        else if (v == 60) { strcpy_s(b, sizeof b, LT("gui.ip_60")); }
-        else if (v == 120) { strcpy_s(b, sizeof b, LT("gui.ip_120")); }
+        else if (v == 60) { strncpy_s(b, sizeof b, LT("gui.ip_60"), _TRUNCATE); }
+        else if (v == 120) { strncpy_s(b, sizeof b, LT("gui.ip_120"), _TRUNCATE); }
         else { _snprintf_s(b, sizeof b, _TRUNCATE, "%d", v); }
         combo_add(c, b);
     }
@@ -3804,7 +3810,7 @@ static void update_aspect_info(void)
     g_prev_w = w;
     g_prev_h = h;
     if (bw == 0) {
-        strcpy_s(g_aspect_info, sizeof g_aspect_info, LT("gui.aspect_bad"));
+        strncpy_s(g_aspect_info, sizeof g_aspect_info, LT("gui.aspect_bad"), _TRUNCATE);
     } else if (bw == w && bh == h) {
         _snprintf_s(g_aspect_info, sizeof g_aspect_info, _TRUNCATE, LT("gui.aspect_43"),
                     w, h);
@@ -6259,8 +6265,8 @@ static int update_pad_status(void)
     int port = lctrl_pad_first(&p);
     char a[160], b[512];
     if (port < 0) {
-        strcpy_s(a, sizeof a, LT("gui.pad_off"));
-        strcpy_s(b, sizeof b, LT("gui.pad_none"));
+        strncpy_s(a, sizeof a, LT("gui.pad_off"), _TRUNCATE);
+        strncpy_s(b, sizeof b, LT("gui.pad_none"), _TRUNCATE);
     } else {
         _snprintf_s(a, sizeof a, _TRUNCATE, LT("gui.pad_on"), port);
         lctrl_pad_format(&p, b, sizeof b);
@@ -6334,11 +6340,11 @@ static void profile_name_from_ui(char *out, size_t cap)
 static void gfx_name(int p, const launcher_settings_t *s, char *out, size_t cap)
 {
     (void)s;
-    strcpy_s(out, cap, LT(p == LGP_ORIGINAL ? "gui.gfx_p_orig"
+    strncpy_s(out, cap, LT(p == LGP_ORIGINAL ? "gui.gfx_p_orig"
                           : p == LGP_SUBTLE ? "gui.gfx_p_subtle"
                           : p == LGP_STRONG ? "gui.gfx_p_strong"
                           : p == LGP_PERFORMANCE ? "gui.gfx_p_performance"
-                          : p == LGP_CLEAR ? "gui.gfx_p_clear" : "gui.gfx_p_custom"));
+                          : p == LGP_CLEAR ? "gui.gfx_p_clear" : "gui.gfx_p_custom"), _TRUNCATE);
 }
 
 /* Name des aktuellen Zustands (Bereitschaft, Statuszeile): Preset bzw.
@@ -6766,8 +6772,8 @@ static void update_summary(void)
         }
         g_sum[0].col = C_OK;
     } else {
-        strcpy_s(g_sum[0].value, sizeof g_sum[0].value,
-                 g_data_err[0] ? g_data_err : LT("gui.rule_r3"));
+        strncpy_s(g_sum[0].value, sizeof g_sum[0].value,
+                 g_data_err[0] ? g_data_err : LT("gui.rule_r3"), _TRUNCATE);
         g_sum[0].col = C_ERR;
     }
     g_sum[2].label = LT("gui.page_display");
@@ -6810,10 +6816,10 @@ static void update_summary(void)
             tex += !packs_is_fx(i);
         }
         if (packs_count() == 0) {
-            strcpy_s(g_sum[3].value, sizeof g_sum[3].value, LT("gui.play_sum_nopacks"));
+            strncpy_s(g_sum[3].value, sizeof g_sum[3].value, LT("gui.play_sum_nopacks"), _TRUNCATE);
             g_sum[3].col = C_FAINT;
         } else if (act == 0) {
-            strcpy_s(g_sum[3].value, sizeof g_sum[3].value, LT("gui.play_sum_packsoff"));
+            strncpy_s(g_sum[3].value, sizeof g_sum[3].value, LT("gui.play_sum_packsoff"), _TRUNCATE);
             g_sum[3].col = bad ? C_WARN : C_FAINT;
         } else {
             char lv[32];
@@ -7063,7 +7069,7 @@ static void tip_text(int id, char *out, size_t cap)
     HWND h = ctl(id);
     if (id == ID_CTRL_BROWSER) { /* W179: immer aktiv, fester Hinweistext */
         if (h && (GetWindowLongW(h, GWL_STYLE) & WS_VISIBLE)) {
-            strcpy_s(out, cap, LT("gui.keys_browser_tip"));
+            strncpy_s(out, cap, LT("gui.keys_browser_tip"), _TRUNCATE);
         } else {
             out[0] = '\0';
         }
@@ -7209,6 +7215,9 @@ static void ui_apply_rules(void)
         unsigned om = lorig_mask(&s, e.fx_pack[0] != 0);
         if (e.tex_packs + e.legacy_tex <= 0) { /* HD an, aber kein Texturpaket: nichts sichtbar anders */
             om &= ~(1u << SB_OFG_HD);
+        }
+        if (g_game == LGAME_LOC && loctab_wide_val() != LGAME_WIDE_43) { /* W326: LoC-Bildformat 16:9/720p = Breitbild (experimentell) */
+            om |= 1u << SB_OFG_WIDE;
         }
         if (om != g_orig_mask) {
             int p;
@@ -7675,7 +7684,7 @@ static void xbe_cue_update(void)
     if (x[0]) {
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.adv_xbe_cue"), x);
     } else {
-        strcpy_s(t, sizeof t, LT("gui.adv_xbe_cue0"));
+        strncpy_s(t, sizeof t, LT("gui.adv_xbe_cue0"), _TRUNCATE);
     }
     u8_to_w(t, w, 1500);
     SendMessageW(e, EM_SETCUEBANNER, TRUE, (LPARAM)w);
@@ -8022,7 +8031,7 @@ static void bind_joy_live(HWND hd)
     pedal = strncmp(kCtrlElems[g_bind_sel].key, "pedal", 5) == 0;
     kind = lctrl_joy_eval(alt, pedal, raw, &v);
     if (kind == 2) {
-        strcpy_s(r, sizeof r, LT(v > 0.5f ? "gui.joy_live_on" : "gui.joy_live_off"));
+        strncpy_s(r, sizeof r, LT(v > 0.5f ? "gui.joy_live_on" : "gui.joy_live_off"), _TRUNCATE);
     } else if (pedal) {
         _snprintf_s(r, sizeof r, _TRUNCATE, "%.0f %%", v * 100.0f);
     } else {
@@ -9594,13 +9603,13 @@ static void assist_step_name(const sbc_test_step_t *st, char *buf, size_t cap)
                     ax >= 0 ? LT(kAxKey[ax]) : "?");
         break;
     case SBC_TK_TUNER:
-        strcpy_s(buf, cap, LT("as.k_tuner"));
+        strncpy_s(buf, cap, LT("as.k_tuner"), _TRUNCATE);
         break;
     case SBC_TK_GEAR:
-        strcpy_s(buf, cap, LT("as.k_gear"));
+        strncpy_s(buf, cap, LT("as.k_gear"), _TRUNCATE);
         break;
     default:
-        strcpy_s(buf, cap, LT("as.k_led"));
+        strncpy_s(buf, cap, LT("as.k_led"), _TRUNCATE);
         break;
     }
 }
@@ -9633,13 +9642,13 @@ static void assist_step_prompt(int idx, char *out, size_t cap)
         }
         break;
     case SBC_TK_TUNER:
-        strcpy_s(out, cap, LT("as.p_tuner"));
+        strncpy_s(out, cap, LT("as.p_tuner"), _TRUNCATE);
         break;
     case SBC_TK_GEAR:
-        strcpy_s(out, cap, LT("as.p_gear"));
+        strncpy_s(out, cap, LT("as.p_gear"), _TRUNCATE);
         break;
     default:
-        strcpy_s(out, cap, LT("as.p_led"));
+        strncpy_s(out, cap, LT("as.p_led"), _TRUNCATE);
         break;
     }
 }
@@ -10339,7 +10348,7 @@ static void assist_src_text(HWND hd)
     char t[320];
     int src = g_ad.as ? assist_source(g_ad.as) : ASSIST_SRC_NONE;
     if (src == ASSIST_SRC_DEVICE) {
-        strcpy_s(t, sizeof t, LT("as.src_device"));
+        strncpy_s(t, sizeof t, LT("as.src_device"), _TRUNCATE);
     } else if (src == ASSIST_SRC_FIXTURE) {
         const char *b = strrchr(g_ad.fx_path, '\\');
         const char *b2 = strrchr(g_ad.fx_path, '/');
@@ -10349,7 +10358,7 @@ static void assist_src_text(HWND hd)
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("as.src_fixture"),
                     b ? b + 1 : g_ad.fx_path);
     } else {
-        strcpy_s(t, sizeof t, LT("as.src_none"));
+        strncpy_s(t, sizeof t, LT("as.src_none"), _TRUNCATE);
     }
     ui_settext(actl(hd, IDA_SRC), t);
     if (g_ad.mode == AM_LIVE) {
@@ -12436,7 +12445,7 @@ static void rp_rescan(HWND hd)
         if (g_rp_list[i].mission > 0) {
             _snprintf_s(m, sizeof m, _TRUNCATE, LT("gui.rp_mission"), g_rp_list[i].mission);
         } else {
-            strcpy_s(m, sizeof m, LT("gui.rp_unknown"));
+            strncpy_s(m, sizeof m, LT("gui.rp_unknown"), _TRUNCATE);
         }
         _snprintf_s(e, sizeof e, _TRUNCATE, "%s \xC2\xB7 %s%s", m, d,
                     g_rp_list[i].state == 1 ? " \xC2\xB7 Xbox" : "");
@@ -12575,9 +12584,9 @@ static void rp_export_done(unsigned long code)
         }
     }
     if (code == 2) {
-        strcpy_s(t, sizeof t, LT("gui.rp_vx_fail2"));
+        strncpy_s(t, sizeof t, LT("gui.rp_vx_fail2"), _TRUNCATE);
     } else if (code == 3) {
-        strcpy_s(t, sizeof t, LT("gui.rp_vx_fail3"));
+        strncpy_s(t, sizeof t, LT("gui.rp_vx_fail3"), _TRUNCATE);
     } else {
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.rp_vx_failx"), code);
     }
@@ -14304,6 +14313,9 @@ static void show_page(int p)
     if (p == P_ALPHA) {
         alpha_page_shown(); /* W272: VT-Liste, A/B-Werte */
     }
+    if (p == P_ADV && g_game == LGAME_LOC) {
+        acc_page_shown(); /* W328: Pilotenkonto laden, Status holen */
+    }
     { /* W227: auf Spielen fehlt Launch in der Fussleiste -> Speichern und
        * Rueckgaengig an die rechte Kante statt mittig im Leeren */
         static const int ids[2] = { ID_SAVE, ID_UNDO };
@@ -14640,8 +14652,10 @@ static void ui_apply_language(void)
 #define ID_LOC_FOLDER 2766
 #define ID_LOC_GO0 2767 /* W293: "Change" je Bereitschaftszeile (LOC_SUM_N) */
 #define LOC_SUM_N 5
+#define ID_LOC_WIDE 2772    /* W326 LOC-WIDE: Auswahl Bildformat (LoC > Erweitert) */
+#define ID_LOC_WIDE_XI 2773 /* W326: Experimentell-Symbol an der Karte "Bildformat" */
 #define ID_LOC_FIRST ID_LOC_START
-#define ID_LOC_LAST (ID_LOC_GO0 + LOC_SUM_N - 1)
+#define ID_LOC_LAST ID_LOC_WIDE_XI /* = ID_LOC_GO0 + LOC_SUM_N - 1 + 2 (lueckenlos) */
 /* W293 LOC-LAYOUT: Spielen = Kopf, Start, Bereitschaft (wie SB), Hinweisband
  * unten; Disc, Spielstaende & Daten und Online liegen links auf Erweitert
  * (rechts die gemeinsamen Teile Feinabstimmung + Launcher). */
@@ -14653,7 +14667,10 @@ static void ui_apply_language(void)
 #define LOC_DATA_H 118
 #define LOC_ONL_Y (CY0 + 362)
 #define LOC_ONL_H 134 /* bis CY0 + 496 wie die SB-Karten */
-
+/* W326 LOC-WIDE: Karte "Bildformat" rechts unter Feinabstimmung/Launcher
+ * (dort, wo im SB-Bereich die Diagnose steht), unten buendig mit Online. */
+#define LOC_WIDE_Y (CY0 + 256)
+#define LOC_WIDE_H 240
 static lgame_state_t g_loc;        /* LoC-Einstellungen (user.cfg launcher_*) */
 static lgame_img_t g_loc_res;      /* letzte Abbild-Pruefung */
 static char g_loc_res_path[512];   /* ... gilt nur fuer diesen Pfad */
@@ -14663,6 +14680,11 @@ static lgame_img_t g_locfix;
 static char g_loc_last_cmd[1600];  /* Selbsttest: Startweg (Trockenlauf) */
 #define LOC_ISO "D:\\Games\\Line of Contact.iso"
 #define LOC_SB_ISO "D:\\Games\\Steel Battalion (Europe).iso"
+
+static void loctab_wide_sync(void); /* W326 */
+static int acc_visible(int id, int page); /* W328 */
+static int acc_view_active(void);        /* W328 */
+static wchar_t *acc_launch_env(char *set, size_t cap); /* W328 */
 
 static int loctab_may_write(void)
 {
@@ -14677,19 +14699,73 @@ static void loctab_load(void)
     g_game = g_loc.game;
     g_loc_checked = 0;
     g_loc_res_path[0] = '\0';
+    loctab_wide_sync(); /* W326 (vor build_controls: nur Wert pruefen) */
 }
 
-static void loctab_save(void)
+static int loctab_save(void) /* 0 = gespeichert, 1 = nicht geschrieben (Shot), -1 = Fehler */
 {
     char up[1200];
     if (!loctab_may_write()) {
-        return;
+        return 1;
     }
     user_cfg_path(up, sizeof up);
     g_loc.game = g_game;
     if (lgame_cfg_save(up, &g_loc) != 0) {
         set_status_k(LT("gui.loc_save_err"), 2);
+        return -1;
     }
+    return 0;
+}
+
+/* W326 LOC-WIDE: Auswahl "Bildformat" (LoC > Erweitert). Eintraege = die
+ * angebotenen Modi (lgame_wide_count; Index = Wert loc_widescreen). Die Wahl
+ * wird sofort in user.cfg gemerkt (wie Abbild/Spielwahl) und wirkt beim
+ * naechsten Spielstart; 16:9/720p sind experimentell (Kolben an der Karte,
+ * Warnzeile darunter). */
+static void loctab_wide_fill(void)
+{
+    HWND c = ctl(ID_LOC_WIDE);
+    int i, n = lgame_wide_count();
+    if (!c) {
+        return;
+    }
+    g_updating++;
+    ComboBox_ResetContent(c);
+    for (i = 0; i < n; i++) {
+        combo_add(c, LT(lgame_wide_label_key(i)));
+    }
+    ComboBox_SetCurSel(c, lgame_wide_clamp(g_loc.loc_widescreen));
+    g_updating--;
+}
+
+static void loctab_wide_sync(void)
+{
+    HWND c = ctl(ID_LOC_WIDE);
+    g_loc.loc_widescreen = lgame_wide_clamp(g_loc.loc_widescreen);
+    if (c && ComboBox_GetCurSel(c) != g_loc.loc_widescreen) {
+        g_updating++;
+        ComboBox_SetCurSel(c, g_loc.loc_widescreen);
+        g_updating--;
+    }
+}
+
+static int loctab_wide_val(void)
+{
+    return lgame_wide_clamp(g_loc.loc_widescreen);
+}
+
+static void loctab_wide_pick(void)
+{
+    int v = lgame_wide_clamp(ComboBox_GetCurSel(ctl(ID_LOC_WIDE)));
+    if (v == g_loc.loc_widescreen) {
+        return;
+    }
+    g_loc.loc_widescreen = v;
+    if (loctab_save() == 0) {
+        set_status_k(LT("gui.loc_wide_saved"), 1);
+    }
+    ui_apply_rules(); /* W326: Experimental-Hinweis (Breitbild) im LoC-Tab */
+    redraw_rect(COL2, LOC_WIDE_Y, COLW, LOC_WIDE_H);
 }
 
 /* LoC-Datenordner: <Datenordner>\loc (Profil/portabel), legacy <Client>\loc. */
@@ -14714,7 +14790,16 @@ static int loctab_adv_shared(int id)
 
 static int loctab_visible(const uictl_t *u, int page)
 {
+    { /* W328: Pilotenkonto (Karte bzw. Verwaltungsansicht auf LoC > Erweitert) */
+        int av = acc_visible(u->id, page);
+        if (av >= 0) {
+            return av;
+        }
+    }
     if (u->id >= ID_LOC_FIRST && u->id <= ID_LOC_LAST) {
+        if (page == P_ADV && acc_view_active()) {
+            return 0; /* W328: Verwaltungsansicht deckt die Seite */
+        }
         return g_game == LGAME_LOC && page == u->page; /* W293: Start/Change auf Spielen, Disc/Ordner auf Erweitert */
     }
     if (u->id == ID_GAME_SB || u->id == ID_GAME_LOC) {
@@ -14730,6 +14815,9 @@ static int loctab_visible(const uictl_t *u, int page)
         return 0; /* SB-Spielen (Start, VR, Abbild, Bereitschaft, Update-Karte) */
     }
     if (u->page == P_ADV) { /* W293: nur die gemeinsamen Teile (Feinabstimmung, Launcher) */
+        if (acc_view_active()) {
+            return 0; /* W328: Verwaltungsansicht */
+        }
         return loctab_adv_shared(u->id) ? -1 : 0;
     }
     return -1;
@@ -14771,6 +14859,8 @@ static void loctab_set_game(int game)
     g_game = game;
     loctab_save();
     loctab_nav_layout();
+    ui_apply_rules(); /* W326: Experimental-Hinweis haengt am Bereich (LoC-Bildformat) */
+    if (ctl(ID_IPFPS)) { ip_fill(ctl(ID_IPFPS)); } /* W323: "20 (Original)" im LoC-Profil, Wahl bleibt */
     base_build(); /* Marke oben links: STEEL BATTALION / LINE OF CONTACT */
     show_page(g_page); /* Packs/Erweitert -> Spielen; Sichtbarkeit + Bild neu */
     set_status_k(LT(game == LGAME_LOC ? "gui.loc_switched" : "gui.loc_switched_sb"), 0);
@@ -14863,20 +14953,708 @@ static void loctab_start(void)
         loctab_data_dir(d, sizeof d);
         strcat_s(d, sizeof d, "\\hdd");
         u8_to_acp(d, acp, sizeof acp);
+        wchar_t *env;
         _snprintf_s(set, sizeof set, _TRUNCATE, "vr_enable=0;hdd_root=%s", acp);
+        env = acc_launch_env(set, sizeof set); /* W328: Pilotname + SB_LOC_AUTH nur im Kindprozess */
         app_client_cmdline(g_client_dir, g_loc.loc_image, set, g_loc_last_cmd,
                            sizeof g_loc_last_cmd);
         if (g_o.shot != 0) {
             printf("[loc-start] %s\n", g_loc_last_cmd);
+            if (env) {
+                printf("[loc-env] SB_LOC_AUTH (nur Kindprozess)\n");
+            }
+            free(env);
             return;
         }
         lcfg_mkdir_p(d);
-        if (app_launch_client_set(g_client_dir, g_loc.loc_image, set, m, sizeof m) == 0) {
+        if (app_launch_client_env(g_client_dir, g_loc.loc_image, set, env, m, sizeof m) == 0) {
             set_status_k(m, 1);
         } else {
             set_status_k(m, 2);
         }
+        if (env) {
+            SecureZeroMemory(env, wcslen(env) * sizeof(wchar_t)); /* erster Eintrag (Rest ohne Geheimnis) */
+            free(env);
+        }
     }
+}
+
+
+/* ------------------------------------------------------------------ */
+/* W328 STEELNET-ACCOUNT: Pilotenkonto im Bereich LoC (Logik + Netz in  */
+/* launcher_account.c). Karte "Pilot" auf LoC > Erweitert (statt des    */
+/* Platzhalters "Online spielen (spaeter)", sobald der Dienst einge-    */
+/* richtet ist = Fingerabdruck gesetzt) und eine Verwaltungsansicht auf */
+/* derselben Seite ("Konto verwalten" / "Auf diesem PC anmelden").      */
+/* Netzaufrufe laufen in einem Thread (WM_APP_ACC), nie im UI-Thread.   */
+/* Test-/Shot-Betrieb: kein Netz (Fixture-Zustaende loc_acc_*).         */
+/* ------------------------------------------------------------------ */
+#define WM_APP_ACC (WM_APP + 22) /* Ergebnis eines Konto-Auftrags (l = acc_job_t*) */
+#define ID_ACC_NAME 2850       /* Karte: Pilotname */
+#define ID_ACC_CREATE 2851     /* Karte: Konto anlegen */
+#define ID_ACC_CHECK 2852      /* Karte: Verfuegbarkeit pruefen */
+#define ID_ACC_SIGNIN 2853     /* Karte: Auf diesem PC anmelden (-> Ansicht) */
+#define ID_ACC_DISCORD 2854    /* Karte: Mit Discord verbinden */
+#define ID_ACC_MANAGE 2855     /* Karte: Konto verwalten (-> Ansicht) */
+#define ID_ACC_BACK 2856       /* Ansicht: Zurueck */
+#define ID_ACC_V_DISCORD 2857  /* Ansicht: Discord verbinden / anmelden */
+#define ID_ACC_V_LOGIN 2858    /* Ansicht: Login-Name */
+#define ID_ACC_V_PASS 2859     /* Ansicht: Passwort (maskiert) */
+#define ID_ACC_V_LOGINBTN 2860 /* Ansicht: sichern / Passwort aendern / anmelden */
+#define ID_ACC_V_CODE 2861     /* Ansicht: Uebertragungscode */
+#define ID_ACC_V_CODEBTN 2862
+#define ID_ACC_V_REC 2863      /* Ansicht (ohne Konto): Wiederherstellungscode eingeben */
+#define ID_ACC_V_RECBTN 2864
+#define ID_ACC_V_RECSHOW 2865  /* Ansicht (mit Konto): Code anzeigen */
+#define ID_ACC_V_RECCOPY 2866  /* Ansicht (mit Konto): Code kopieren */
+#define ID_ACC_V_DELETE 2867   /* Ansicht: Konto loeschen (Rueckfrage) */
+#define ID_ACC_V_FORGET 2868   /* Ansicht: auf diesem PC abmelden */
+#define ID_ACC_FIRST ID_ACC_NAME
+#define ID_ACC_LAST ID_ACC_V_FORGET
+/* Ansicht: Kartenraster (links/rechts wie Erweitert) */
+#define ACC_A_Y CY0
+#define ACC_A_H 150
+#define ACC_B_Y (CY0 + 162)
+#define ACC_B_H 206
+#define ACC_C_Y (CY0 + 380)
+#define ACC_C_H 116
+
+enum { ACC_OP_STATUS = 1, ACC_OP_CHECK, ACC_OP_CREATE, ACC_OP_DISCORD_LINK, ACC_OP_DISCORD_LOGIN,
+       ACC_OP_LOGIN_SET, ACC_OP_LOGIN, ACC_OP_TRANSFER, ACC_OP_RECOVERY, ACC_OP_DELETE };
+
+typedef struct {
+    HWND h;
+    int op, gen;
+    char a[64];          /* Name / Login / Code */
+    char b[300];         /* Passwort (wird geloescht) */
+    char dir[1200];
+    lacc_srv_t srv;
+    lacc_store_t st;     /* Eingang: aktuelles Konto; Ausgang: neues Konto */
+    lacc_status_t status;
+    int avail, rc;
+    char err[64];
+} acc_job_t;
+
+static lacc_store_t g_acc;        /* gespeichertes Konto (K nur im Speicher, nie angezeigt) */
+static int g_acc_loaded;          /* Ladeversuch gemacht */
+static lacc_status_t g_acc_st;    /* Status vom Dienst */
+static int g_acc_st_ok;           /* 1 = Status geladen */
+static int g_acc_view;            /* 1 = Verwaltungsansicht auf LoC > Erweitert */
+static int g_acc_busy;            /* Auftrag laeuft */
+static int g_acc_gen;             /* Auftragszaehler (veraltete Ergebnisse verwerfen) */
+static int g_acc_fixture;         /* Shots/Selbsttest: Zustand vorgegeben, kein Netz */
+static int g_acc_fix_srv;         /* Fixture: Dienst gilt als eingerichtet */
+static int g_acc_avail = -1;      /* Pruefergebnis des Namens: -1 unbekannt, 0 vergeben, 1 frei */
+static char g_acc_avail_name[40];
+static char g_acc_rec[48];        /* angezeigter Wiederherstellungscode ("" = verdeckt) */
+static char g_acc_dir_test[1200]; /* Selbsttest: eigener Profilordner */
+static volatile long g_acc_cancel;
+static int g_acc_last_op, g_acc_last_rc; /* Selbsttest: letztes Ergebnis */
+static char g_acc_last_err[64];
+
+static void acc_dir(char *out, size_t cap)
+{
+    if (g_acc_dir_test[0]) {
+        strcpy_s(out, cap, g_acc_dir_test);
+        return;
+    }
+    lacc_default_dir(g_client_dir, out, cap);
+}
+
+static int acc_srv_on(void)
+{
+    lacc_srv_t s;
+    if (g_acc_fixture) {
+        return g_acc_fix_srv;
+    }
+    return lacc_server(&s);
+}
+
+static void acc_load(void)
+{
+    char d[1200];
+    if (g_acc_loaded || g_acc_fixture) {
+        return;
+    }
+    g_acc_loaded = 1;
+    acc_dir(d, sizeof d);
+    if (lacc_store_load(d, &g_acc) != 1) {
+        memset(&g_acc, 0, sizeof g_acc);
+    }
+}
+
+static int acc_secured(void)
+{
+    return g_acc_st_ok && (g_acc_st.discord || g_acc_st.login);
+}
+
+/* Fehlercode -> Text (aktive Sprache) */
+static void acc_err_text(const char *code, char *out, size_t cap)
+{
+    static const struct {
+        const char *code, *key;
+    } kErr[] = {
+        { "net", "gui.acc_err_net" },           { "pin", "gui.acc_err_pin" },
+        { "off", "gui.acc_err_off" },           { "accounts_off", "gui.acc_err_off" },
+        { "invalid_name", "gui.acc_err_name" }, { "name_taken", "gui.acc_err_taken" },
+        { "invalid_login", "gui.acc_err_login" }, { "login_taken", "gui.acc_err_login_taken" },
+        { "weak_password", "gui.acc_err_pw" },  { "login_failed", "gui.acc_err_login_failed" },
+        { "code_invalid", "gui.acc_err_code" }, { "not_found", "gui.acc_err_not_found" },
+        { "discord_in_use", "gui.acc_err_discord_in_use" }, { "discord_failed", "gui.acc_err_discord" },
+        { "discord_off", "gui.acc_err_discord_off" }, { "denied", "gui.acc_err_denied" },
+        { "state", "gui.acc_err_denied" },      { "timeout", "gui.acc_err_timeout" },
+        { "cancel", "gui.acc_err_cancel" },     { "port_busy", "gui.acc_err_port" },
+        { "rate_limited", "gui.acc_err_rate" }, { "auth_failed", "gui.acc_err_auth" },
+        { "no_account", "gui.acc_err_auth" },   { "server_busy", "gui.acc_err_busy" },
+        { "store", "gui.acc_err_store" },       { "browser", "gui.acc_err_browser" },
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof kErr / sizeof kErr[0]); i++) {
+        if (strcmp(code, kErr[i].code) == 0) {
+            strncpy_s(out, cap, LT(kErr[i].key), _TRUNCATE);
+            return;
+        }
+    }
+    _snprintf_s(out, cap, _TRUNCATE, LT("gui.acc_err_other"), code);
+}
+
+static void acc_refresh(void)
+{
+    if (!g_hwnd) {
+        return;
+    }
+    ui_refresh_visibility();
+    {
+        static const int kBtn[] = { ID_ACC_CREATE, ID_ACC_CHECK, ID_ACC_SIGNIN, ID_ACC_DISCORD, ID_ACC_MANAGE,
+                                    ID_ACC_V_DISCORD, ID_ACC_V_LOGINBTN, ID_ACC_V_CODEBTN, ID_ACC_V_RECBTN,
+                                    ID_ACC_V_DELETE, ID_ACC_V_FORGET };
+        int i;
+        for (i = 0; i < (int)(sizeof kBtn / sizeof kBtn[0]); i++) {
+            HWND b = ctl(kBtn[i]);
+            BOOL en = !g_acc_busy;
+            if ((kBtn[i] == ID_ACC_DISCORD || kBtn[i] == ID_ACC_V_DISCORD) && g_acc.have && g_acc_st_ok &&
+                g_acc_st.discord) {
+                en = FALSE; /* schon verbunden */
+            }
+            if (b) {
+                EnableWindow(b, en);
+            }
+        }
+    }
+    if (ctl(ID_ACC_DISCORD)) {
+        ui_settext(ctl(ID_ACC_DISCORD), LT(g_acc_st_ok && g_acc_st.discord ? "gui.acc_discord_done" : "gui.acc_discord_link"));
+    }
+    if (ctl(ID_ACC_V_DISCORD)) {
+        ui_settext(ctl(ID_ACC_V_DISCORD),
+                   LT(!g_acc.have ? "gui.acc_discord_login" : g_acc_st_ok && g_acc_st.discord ? "gui.acc_discord_done"
+                                                                                               : "gui.acc_discord_link"));
+    }
+    if (ctl(ID_ACC_V_LOGINBTN)) {
+        ui_settext(ctl(ID_ACC_V_LOGINBTN),
+                   LT(!g_acc.have ? "gui.acc_login_go" : g_acc_st_ok && g_acc_st.login ? "gui.acc_login_change"
+                                                                                       : "gui.acc_login_save"));
+    }
+    redraw_all();
+}
+
+static DWORD WINAPI acc_thread(LPVOID p)
+{
+    acc_job_t *j = (acc_job_t *)p;
+    char *e = j->err;
+    size_t ec = sizeof j->err;
+    switch (j->op) {
+    case ACC_OP_STATUS: j->rc = lacc_op_status(&j->srv, &j->st, &j->status, e, ec); break;
+    case ACC_OP_CHECK: j->rc = lacc_op_check(&j->srv, j->a, &j->avail, e, ec); break;
+    case ACC_OP_CREATE: j->rc = lacc_op_create(&j->srv, j->dir, j->a, &j->st, e, ec); break;
+    case ACC_OP_DISCORD_LINK: j->rc = lacc_op_discord(&j->srv, j->dir, 0, &j->st, 180000, &g_acc_cancel, e, ec); break;
+    case ACC_OP_DISCORD_LOGIN: j->rc = lacc_op_discord(&j->srv, j->dir, 1, &j->st, 180000, &g_acc_cancel, e, ec); break;
+    case ACC_OP_LOGIN_SET: j->rc = lacc_op_login_set(&j->srv, &j->st, j->a, j->b, e, ec); break;
+    case ACC_OP_LOGIN: j->rc = lacc_op_login(&j->srv, j->dir, j->a, j->b, &j->st, e, ec); break;
+    case ACC_OP_TRANSFER: j->rc = lacc_op_transfer(&j->srv, j->dir, j->a, &j->st, e, ec); break;
+    case ACC_OP_RECOVERY: j->rc = lacc_op_recovery(&j->srv, j->dir, j->a, &j->st, e, ec); break;
+    case ACC_OP_DELETE: j->rc = lacc_op_delete(&j->srv, j->dir, &j->st, e, ec); break;
+    default: j->rc = 1; strcpy_s(e, ec, "bad"); break;
+    }
+    SecureZeroMemory(j->b, sizeof j->b);
+    if (!PostMessageW(j->h, WM_APP_ACC, (WPARAM)j->gen, (LPARAM)j)) {
+        SecureZeroMemory(j, sizeof *j);
+        free(j);
+    }
+    return 0;
+}
+
+/* Auftrag starten (a/b duerfen NULL sein). 0 = gestartet. */
+static int acc_start(int op, const char *a, const char *b)
+{
+    acc_job_t *j;
+    HANDLE th;
+    if (g_acc_busy || !g_hwnd) {
+        return 1;
+    }
+    if (g_acc_fixture || (g_o.shot != 0 && !g_acc_dir_test[0])) { /* Shots: nie Netz */
+        printf("[acc] Auftrag %d (Testmodus, kein Netz)\n", op);
+        return 1;
+    }
+    j = (acc_job_t *)calloc(1, sizeof *j);
+    if (!j) {
+        return 1;
+    }
+    j->h = g_hwnd;
+    j->op = op;
+    j->gen = ++g_acc_gen;
+    if (a) strcpy_s(j->a, sizeof j->a, a);
+    if (b) strcpy_s(j->b, sizeof j->b, b);
+    acc_dir(j->dir, sizeof j->dir);
+    lacc_server(&j->srv);
+    j->st = g_acc;
+    g_acc_cancel = 0;
+    th = CreateThread(NULL, 0, acc_thread, j, 0, NULL);
+    if (!th) {
+        SecureZeroMemory(j, sizeof *j);
+        free(j);
+        return 1;
+    }
+    CloseHandle(th);
+    g_acc_busy = op;
+    if (op != ACC_OP_STATUS) {
+        set_status_k(LT(op == ACC_OP_DISCORD_LINK || op == ACC_OP_DISCORD_LOGIN ? "gui.acc_wait_discord"
+                                                                                  : "gui.acc_working"), 0);
+    }
+    acc_refresh();
+    return 0;
+}
+
+/* Ergebnis (UI-Thread) */
+static void acc_done(acc_job_t *j)
+{
+    char m[400], e[300];
+    int op = j->op;
+    g_acc_busy = 0;
+    g_acc_last_op = op;
+    g_acc_last_rc = j->rc;
+    strcpy_s(g_acc_last_err, sizeof g_acc_last_err, j->rc ? j->err : "");
+    if (j->rc != 0) {
+        acc_err_text(j->err, e, sizeof e);
+        if (op == ACC_OP_STATUS) {
+            if (strcmp(j->err, "auth_failed") == 0) { /* Konto geloescht/abgemeldet (neue Generation) */
+                set_status_k(LT("gui.acc_err_auth"), 2);
+            }
+        } else {
+            set_status_k(e, 2);
+        }
+        acc_refresh();
+        return;
+    }
+    switch (op) {
+    case ACC_OP_STATUS:
+        g_acc_st = j->status;
+        g_acc_st_ok = 1;
+        break;
+    case ACC_OP_CHECK:
+        g_acc_avail = j->avail;
+        strcpy_s(g_acc_avail_name, sizeof g_acc_avail_name, j->a);
+        _snprintf_s(m, sizeof m, _TRUNCATE, LT(j->avail ? "gui.acc_name_free" : "gui.acc_name_taken"), j->a);
+        set_status_k(m, j->avail ? 1 : 2);
+        break;
+    case ACC_OP_CREATE:
+    case ACC_OP_DISCORD_LOGIN:
+    case ACC_OP_LOGIN:
+    case ACC_OP_TRANSFER:
+    case ACC_OP_RECOVERY:
+        g_acc = j->st;
+        g_acc_st_ok = 0;
+        g_acc_rec[0] = '\0';
+        g_acc_avail = -1;
+        _snprintf_s(m, sizeof m, _TRUNCATE, LT(op == ACC_OP_CREATE ? "gui.acc_created" : "gui.acc_signed_in"), g_acc.name);
+        set_status_k(m, 1);
+        if (ctl(ID_ACC_V_PASS)) ui_settext(ctl(ID_ACC_V_PASS), "");
+        if (ctl(ID_ACC_V_CODE)) ui_settext(ctl(ID_ACC_V_CODE), "");
+        if (ctl(ID_ACC_V_REC)) ui_settext(ctl(ID_ACC_V_REC), "");
+        if (op != ACC_OP_CREATE) g_acc_view = 0; /* zurueck zur Karte */
+        break;
+    case ACC_OP_DISCORD_LINK:
+        g_acc_st.discord = 1;
+        set_status_k(LT("gui.acc_discord_ok"), 1);
+        break;
+    case ACC_OP_LOGIN_SET:
+        g_acc_st.login = 1;
+        strcpy_s(g_acc_st.login_name, sizeof g_acc_st.login_name, j->a);
+        if (ctl(ID_ACC_V_PASS)) ui_settext(ctl(ID_ACC_V_PASS), "");
+        set_status_k(LT("gui.acc_login_ok"), 1);
+        break;
+    case ACC_OP_DELETE:
+        memset(&g_acc, 0, sizeof g_acc);
+        memset(&g_acc_st, 0, sizeof g_acc_st);
+        g_acc_st_ok = 0;
+        g_acc_rec[0] = '\0';
+        g_acc_view = 0;
+        set_status_k(LT("gui.acc_deleted"), 1);
+        break;
+    }
+    acc_refresh();
+    /* nach einer Anmeldung gleich den Status holen (gesichert?) */
+    if (g_acc.have && !g_acc_st_ok && op != ACC_OP_STATUS) {
+        acc_start(ACC_OP_STATUS, NULL, NULL);
+    }
+}
+
+/* Seite LoC > Erweitert gezeigt: Konto laden, Status einmal holen. */
+static void acc_page_shown(void)
+{
+    acc_load();
+    if (g_acc.have && !g_acc_st_ok && !g_acc_busy && acc_srv_on() && g_o.shot == 0) {
+        acc_start(ACC_OP_STATUS, NULL, NULL);
+    }
+}
+
+/* Sichtbarkeit (-1 = nicht zustaendig) */
+static int acc_visible(int id, int page)
+{
+    int on, have, view;
+    if (id < ID_ACC_FIRST || id > ID_ACC_LAST) {
+        return -1;
+    }
+    if (g_game != LGAME_LOC || page != P_ADV) {
+        return 0;
+    }
+    on = acc_srv_on();
+    have = g_acc.have;
+    view = g_acc_view && on;
+    switch (id) {
+    case ID_ACC_NAME: case ID_ACC_CREATE: case ID_ACC_CHECK: case ID_ACC_SIGNIN:
+        return on && !view && !have;
+    case ID_ACC_DISCORD: case ID_ACC_MANAGE:
+        return on && !view && have;
+    case ID_ACC_BACK: case ID_ACC_V_DISCORD: case ID_ACC_V_LOGIN: case ID_ACC_V_PASS: case ID_ACC_V_LOGINBTN:
+    case ID_ACC_V_CODE: case ID_ACC_V_CODEBTN:
+        return view;
+    case ID_ACC_V_REC: case ID_ACC_V_RECBTN:
+        return view && !have;
+    case ID_ACC_V_RECSHOW: case ID_ACC_V_RECCOPY: case ID_ACC_V_DELETE: case ID_ACC_V_FORGET:
+        return view && have;
+    }
+    return 0;
+}
+
+/* In der Verwaltungsansicht: alle uebrigen Elemente der Seite aus. */
+static int acc_view_active(void)
+{
+    return g_game == LGAME_LOC && g_acc_view && acc_srv_on();
+}
+
+static void acc_open_view(int on)
+{
+    g_acc_view = on;
+    g_acc_rec[0] = '\0';
+    if (!on) {
+        g_acc_cancel = 1; /* laufendes Discord-Warten abbrechen */
+        if (ctl(ID_ACC_V_PASS)) ui_settext(ctl(ID_ACC_V_PASS), "");
+    } else if (g_acc.have && g_acc_st_ok && g_acc_st.login && ctl(ID_ACC_V_LOGIN)) {
+        ui_settext(ctl(ID_ACC_V_LOGIN), g_acc_st.login_name);
+    }
+    acc_refresh();
+}
+
+static void acc_copy_code(void)
+{
+    char c[48];
+    wchar_t w[48];
+    HGLOBAL hg;
+    if (!g_acc.have) {
+        return;
+    }
+    lacc_recovery_code(g_acc.account, g_acc.key, c, sizeof c);
+    if (g_o.shot != 0) { /* Test: Zwischenablage des Nutzers nie anfassen */
+        printf("[clipboard] Wiederherstellungscode (%u Zeichen)\n", (unsigned)strlen(c));
+        SecureZeroMemory(c, sizeof c);
+        return;
+    }
+    u8_to_w(c, w, 48);
+    SecureZeroMemory(c, sizeof c);
+    if (OpenClipboard(g_hwnd)) {
+        EmptyClipboard();
+        hg = GlobalAlloc(GMEM_MOVEABLE, (wcslen(w) + 1) * sizeof(wchar_t));
+        if (hg) {
+            memcpy(GlobalLock(hg), w, (wcslen(w) + 1) * sizeof(wchar_t));
+            GlobalUnlock(hg);
+            if (!SetClipboardData(CF_UNICODETEXT, hg)) GlobalFree(hg);
+        }
+        CloseClipboard();
+        set_status_k(LT("gui.acc_rec_copied"), 1);
+    }
+    SecureZeroMemory(w, sizeof w);
+}
+
+static int acc_command(int id, int code)
+{
+    char a[80], b[300], q[400];
+    if (id < ID_ACC_FIRST || id > ID_ACC_LAST) {
+        return 0;
+    }
+    if (id == ID_ACC_NAME || id == ID_ACC_V_LOGIN || id == ID_ACC_V_PASS || id == ID_ACC_V_CODE ||
+        id == ID_ACC_V_REC) {
+        if (code == EN_SETFOCUS || code == EN_KILLFOCUS) {
+            g_focus_id = code == EN_SETFOCUS ? id : 0;
+            redraw_all();
+        } else if (code == EN_CHANGE && id == ID_ACC_NAME && g_acc_avail >= 0) {
+            g_acc_avail = -1;
+            redraw_rect(CX0, LOC_ONL_Y, COLW, LOC_ONL_H);
+        }
+        return 1;
+    }
+    if (code != BN_CLICKED) {
+        return 1;
+    }
+    switch (id) {
+    case ID_ACC_CHECK:
+    case ID_ACC_CREATE:
+        ui_gettext(ctl(ID_ACC_NAME), a, sizeof a);
+        if (!lacc_valid_name(a)) {
+            set_status_k(LT("gui.acc_err_name"), 2);
+            return 1;
+        }
+        acc_start(id == ID_ACC_CHECK ? ACC_OP_CHECK : ACC_OP_CREATE, a, NULL);
+        return 1;
+    case ID_ACC_SIGNIN:
+    case ID_ACC_MANAGE:
+        acc_open_view(1);
+        return 1;
+    case ID_ACC_BACK:
+        acc_open_view(0);
+        return 1;
+    case ID_ACC_DISCORD:
+    case ID_ACC_V_DISCORD:
+        acc_start(g_acc.have ? ACC_OP_DISCORD_LINK : ACC_OP_DISCORD_LOGIN, NULL, NULL);
+        return 1;
+    case ID_ACC_V_LOGINBTN:
+        ui_gettext(ctl(ID_ACC_V_LOGIN), a, sizeof a);
+        ui_gettext(ctl(ID_ACC_V_PASS), b, sizeof b);
+        if (!g_acc.have) {
+            acc_start(ACC_OP_LOGIN, a, b);
+        } else if (!lacc_valid_login(a)) {
+            set_status_k(LT("gui.acc_err_login"), 2);
+        } else if (!lacc_valid_password(b)) {
+            set_status_k(LT("gui.acc_err_pw"), 2);
+        } else {
+            acc_start(ACC_OP_LOGIN_SET, a, b);
+        }
+        SecureZeroMemory(b, sizeof b);
+        return 1;
+    case ID_ACC_V_CODEBTN:
+        ui_gettext(ctl(ID_ACC_V_CODE), a, sizeof a);
+        if (g_acc.have) {
+            _snprintf_s(q, sizeof q, _TRUNCATE, LT("gui.acc_transfer_q"), g_acc.name);
+            if (!ui_confirm(q, LT("gui.acc_transfer_title"))) return 1;
+        }
+        acc_start(ACC_OP_TRANSFER, a, NULL);
+        return 1;
+    case ID_ACC_V_RECBTN:
+        ui_gettext(ctl(ID_ACC_V_REC), a, sizeof a);
+        acc_start(ACC_OP_RECOVERY, a, NULL);
+        return 1;
+    case ID_ACC_V_RECSHOW:
+        if (g_acc_rec[0]) {
+            SecureZeroMemory(g_acc_rec, sizeof g_acc_rec);
+        } else if (g_acc.have) {
+            lacc_recovery_code(g_acc.account, g_acc.key, g_acc_rec, sizeof g_acc_rec);
+        }
+        ui_settext(ctl(ID_ACC_V_RECSHOW), LT(g_acc_rec[0] ? "gui.acc_rec_hide" : "gui.acc_rec_show"));
+        redraw_rect(COL2, ACC_A_Y, COLW, ACC_A_H);
+        return 1;
+    case ID_ACC_V_RECCOPY:
+        acc_copy_code();
+        return 1;
+    case ID_ACC_V_DELETE:
+        _snprintf_s(q, sizeof q, _TRUNCATE, LT("gui.acc_delete_q"), g_acc.name);
+        if (ui_confirm(q, LT("gui.acc_delete_title"))) {
+            acc_start(ACC_OP_DELETE, NULL, NULL);
+        }
+        return 1;
+    case ID_ACC_V_FORGET:
+        if (ui_confirm(LT(acc_secured() ? "gui.acc_forget_q" : "gui.acc_forget_q_unsec"), LT("gui.acc_forget"))) {
+            char d[1200];
+            acc_dir(d, sizeof d);
+            if (!g_acc_fixture) lacc_store_forget(d);
+            SecureZeroMemory(&g_acc, sizeof g_acc);
+            g_acc_st_ok = 0;
+            g_acc_view = 0;
+            set_status_k(LT("gui.acc_forgotten"), 1);
+            acc_refresh();
+        }
+        return 1;
+    }
+    return 1;
+}
+
+static void acc_build(HWND w)
+{
+    int x = CX0 + 18, y = LOC_ONL_Y;
+    /* Karte "Pilot" (LoC > Erweitert, Platz der Online-Karte) */
+    mk(w, K_EDIT, ID_ACC_NAME, P_ADV, CX0 + 104, y + 40, 128, 28, "", 0);
+    mk(w, K_ACCENT, ID_ACC_CREATE, P_ADV, CX0 + 238, y + 40, 84, 28, LT("gui.acc_create"), 0);
+    mk(w, K_BTN, ID_ACC_CHECK, P_ADV, x, y + 76, 112, 26, LT("gui.acc_check"), 0);
+    mk(w, K_BTN, ID_ACC_SIGNIN, P_ADV, x + 118, y + 76, COLW - 36 - 118, 26, LT("gui.acc_signin"), 0);
+    mk(w, K_ACCENT, ID_ACC_DISCORD, P_ADV, x, y + 94, 168, 28, LT("gui.acc_discord_link"), 0);
+    mk(w, K_BTN, ID_ACC_MANAGE, P_ADV, x + 174, y + 94, COLW - 36 - 174, 28, LT("gui.acc_manage"), 0);
+    /* Verwaltungsansicht */
+    mk(w, K_BTN, ID_ACC_BACK, P_ADV, CX0 + COLW - 18 - 96, ACC_A_Y + 10, 96, 26, LT("gui.acc_back"), 0);
+    mk(w, K_ACCENT, ID_ACC_V_DISCORD, P_ADV, x, ACC_A_Y + 108, 200, 28, LT("gui.acc_discord_link"), 0);
+    mk(w, K_EDIT, ID_ACC_V_LOGIN, P_ADV, x, ACC_B_Y + 56, COLW - 36, 28, "", 0);
+    mk(w, K_EDIT, ID_ACC_V_PASS, P_ADV, x, ACC_B_Y + 108, COLW - 36, 28, "", ES_PASSWORD);
+    mk(w, K_ACCENT, ID_ACC_V_LOGINBTN, P_ADV, x, ACC_B_Y + 142, 170, 28, LT("gui.acc_login_save"), 0);
+    mk(w, K_BTN, ID_ACC_V_DELETE, P_ADV, x, ACC_C_Y + 78, 146, 28, LT("gui.acc_delete"), 0);
+    mk(w, K_BTN, ID_ACC_V_FORGET, P_ADV, x + 152, ACC_C_Y + 78, COLW - 36 - 152, 28, LT("gui.acc_forget"), 0);
+    mk(w, K_BTN, ID_ACC_V_RECSHOW, P_ADV, COL2 + 18, ACC_A_Y + 108, 120, 28, LT("gui.acc_rec_show"), 0);
+    mk(w, K_BTN, ID_ACC_V_RECCOPY, P_ADV, COL2 + 18 + 126, ACC_A_Y + 108, 120, 28, LT("gui.acc_rec_copy"), 0);
+    mk(w, K_EDIT, ID_ACC_V_REC, P_ADV, COL2 + 18, ACC_A_Y + 104, 196, 28, "", 0);
+    mk(w, K_ACCENT, ID_ACC_V_RECBTN, P_ADV, COL2 + 220, ACC_A_Y + 104, COLW - 238, 28, LT("gui.acc_redeem"), 0);
+    mk(w, K_EDIT, ID_ACC_V_CODE, P_ADV, COL2 + 18, ACC_B_Y + 104, 196, 28, "", 0);
+    mk(w, K_ACCENT, ID_ACC_V_CODEBTN, P_ADV, COL2 + 220, ACC_B_Y + 104, COLW - 238, 28, LT("gui.acc_redeem"), 0);
+    if (ctl(ID_ACC_NAME)) SendMessageW(ctl(ID_ACC_NAME), EM_LIMITTEXT, 16, 0);
+    if (ctl(ID_ACC_V_LOGIN)) SendMessageW(ctl(ID_ACC_V_LOGIN), EM_LIMITTEXT, 32, 0);
+    if (ctl(ID_ACC_V_PASS)) SendMessageW(ctl(ID_ACC_V_PASS), EM_LIMITTEXT, 256, 0);
+    if (ctl(ID_ACC_V_CODE)) SendMessageW(ctl(ID_ACC_V_CODE), EM_LIMITTEXT, 20, 0);
+    if (ctl(ID_ACC_V_REC)) SendMessageW(ctl(ID_ACC_V_REC), EM_LIMITTEXT, 48, 0);
+}
+
+static void acc_relabel(void)
+{
+    static const struct {
+        int id;
+        const char *key;
+    } kL[] = {
+        { ID_ACC_CREATE, "gui.acc_create" }, { ID_ACC_CHECK, "gui.acc_check" }, { ID_ACC_SIGNIN, "gui.acc_signin" },
+        { ID_ACC_MANAGE, "gui.acc_manage" }, { ID_ACC_BACK, "gui.acc_back" }, { ID_ACC_V_DELETE, "gui.acc_delete" },
+        { ID_ACC_V_FORGET, "gui.acc_forget" }, { ID_ACC_V_RECCOPY, "gui.acc_rec_copy" },
+        { ID_ACC_V_RECBTN, "gui.acc_redeem" }, { ID_ACC_V_CODEBTN, "gui.acc_redeem" },
+    };
+    int i;
+    for (i = 0; i < (int)(sizeof kL / sizeof kL[0]); i++) {
+        if (ctl(kL[i].id)) ui_settext(ctl(kL[i].id), LT(kL[i].key));
+    }
+    if (ctl(ID_ACC_V_RECSHOW)) ui_settext(ctl(ID_ACC_V_RECSHOW), LT(g_acc_rec[0] ? "gui.acc_rec_hide" : "gui.acc_rec_show"));
+    acc_refresh();
+}
+
+/* Start LoC: mit gespeichertem Konto Pilotname (--set) + Umgebungsblock mit
+ * SB_LOC_AUTH=<account>:<exp>:<G> (nur Kindprozess, nie Datei/Kommandozeile).
+ * Ohne Konto: NULL (Client meldet sich als Gast). Transport/Treffpunkt bleiben. */
+static wchar_t *acc_launch_env(char *set, size_t cap)
+{
+    char a[200];
+    wchar_t *env;
+    acc_load();
+    if (!g_acc.have) {
+        return NULL;
+    }
+    _snprintf_s(set + strlen(set), cap - strlen(set), _TRUNCATE, ";loc_lobby_pilot=%s", g_acc.name);
+    lacc_game_auth(&g_acc, (long long)time(NULL), a, sizeof a);
+    env = lacc_env_block(LACC_ENV_AUTH, a);
+    SecureZeroMemory(a, sizeof a);
+    return env;
+}
+
+/* Statuszeile "Pilot" (Spielen > Bereitschaft, Zeile Online) */
+static int acc_sum_row(char *val, size_t cap, COLORREF *col)
+{
+    if (!acc_srv_on()) {
+        return 0;
+    }
+    acc_load();
+    if (!g_acc.have) {
+        strncpy_s(val, cap, LT("gui.acc_sum_none"), _TRUNCATE);
+        *col = C_WARN;
+    } else {
+        _snprintf_s(val, cap, _TRUNCATE, LT(acc_secured() ? "gui.acc_sum_ok" : "gui.acc_sum_unsec"), g_acc.name);
+        *col = acc_secured() ? C_OK : C_WARN;
+    }
+    return 1;
+}
+
+/* Karte "Pilot" (statt Online-Platzhalter). 0 = Dienst nicht eingerichtet (alte Karte zeichnen). */
+static int acc_paint_card(void)
+{
+    char t[300];
+    int y = LOC_ONL_Y;
+    if (!acc_srv_on()) {
+        return 0;
+    }
+    acc_load();
+    card(CX0, y, COLW, LOC_ONL_H, LT("gui.acc_title"));
+    if (!g_acc.have) {
+        label1(F_SMALL, LT("gui.acc_name"), CX0 + 18, y + 40, 84, 28, C_DIM);
+        if (g_acc_avail >= 0) {
+            _snprintf_s(t, sizeof t, _TRUNCATE, LT(g_acc_avail ? "gui.acc_name_free" : "gui.acc_name_taken"),
+                        g_acc_avail_name);
+            label1(F_TINY, t, CX0 + 18, y + 106, COLW - 36, 22, g_acc_avail ? C_OK : C_ERR);
+        } else {
+            label1(F_TINY, LT("gui.acc_first_hint"), CX0 + 18, y + 106, COLW - 36, 22, C_DIM);
+        }
+        return 1;
+    }
+    _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.acc_signed_as"), g_acc.name);
+    label1(F_SMALL, t, CX0 + 18, y + 40, COLW - 36, 22, C_TEXT);
+    if (!g_acc_st_ok) {
+        label1(F_TINY, LT(g_acc_busy == ACC_OP_STATUS ? "gui.acc_st_loading" : "gui.acc_st_unknown"), CX0 + 18,
+               y + 64, COLW - 36, 22, C_DIM);
+    } else if (acc_secured()) {
+        _snprintf_s(t, sizeof t, _TRUNCATE, "%s%s%s", LT("gui.acc_secured"),
+                    g_acc_st.discord ? LT("gui.acc_sec_discord") : "", g_acc_st.login ? LT("gui.acc_sec_login") : "");
+        label1(F_TINY, t, CX0 + 18, y + 64, COLW - 36, 22, C_OK);
+    } else {
+        label1(F_TINY, LT("gui.acc_unsecured"), CX0 + 18, y + 64, COLW - 36, 22, C_WARN);
+    }
+    return 1;
+}
+
+/* Verwaltungsansicht (ganze Seite). */
+static void acc_paint_view(void)
+{
+    char t[300];
+    int have = g_acc.have;
+    /* links oben: Pilot bzw. Anmelden */
+    card(CX0, ACC_A_Y, COLW, ACC_A_H, LT(have ? "gui.acc_title" : "gui.acc_signin_title"));
+    if (have) {
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.acc_signed_as"), g_acc.name);
+        label1(F_SMALL, t, CX0 + 18, ACC_A_Y + 40, COLW - 36, 22, C_TEXT);
+        _snprintf_s(t, sizeof t, _TRUNCATE, "%s %s", LT("gui.acc_row_discord"),
+                    !g_acc_st_ok ? "-" : LT(g_acc_st.discord ? "gui.acc_yes" : "gui.acc_no"));
+        label1(F_TINY, t, CX0 + 18, ACC_A_Y + 62, COLW - 36, 20, g_acc_st_ok && g_acc_st.discord ? C_OK : C_DIM);
+        if (g_acc_st_ok && g_acc_st.login) {
+            _snprintf_s(t, sizeof t, _TRUNCATE, "%s %s (%s)", LT("gui.acc_row_login"), LT("gui.acc_yes"),
+                        g_acc_st.login_name);
+        } else {
+            _snprintf_s(t, sizeof t, _TRUNCATE, "%s %s", LT("gui.acc_row_login"),
+                        !g_acc_st_ok ? "-" : LT("gui.acc_no"));
+        }
+        label1(F_TINY, t, CX0 + 18, ACC_A_Y + 82, COLW - 36, 20, g_acc_st_ok && g_acc_st.login ? C_OK : C_DIM);
+    } else {
+        label(F_TINY, LT("gui.acc_signin_text"), CX0 + 18, ACC_A_Y + 40, COLW - 36, 60, C_DIM);
+    }
+    /* links Mitte: Login und Passwort */
+    card(CX0, ACC_B_Y, COLW, ACC_B_H, LT("gui.acc_login_title"));
+    label1(F_TINY, LT("gui.acc_login_name"), CX0 + 18, ACC_B_Y + 36, COLW - 36, 20, C_DIM);
+    label1(F_TINY, LT(have ? "gui.acc_pw_rule" : "gui.acc_pw"), CX0 + 18, ACC_B_Y + 88, COLW - 36, 20, C_DIM);
+    label(F_TINY, LT(have ? "gui.acc_pw_forget" : "gui.acc_pw_forget2"), CX0 + 18, ACC_B_Y + 174, COLW - 36, 30,
+          C_DIM);
+    /* links unten: Konto loeschen / abmelden (nur mit Konto) */
+    if (have) {
+        card(CX0, ACC_C_Y, COLW, ACC_C_H, LT("gui.acc_danger_title"));
+        label(F_TINY, LT("gui.acc_danger_text"), CX0 + 18, ACC_C_Y + 38, COLW - 36, 36, C_DIM);
+    }
+    /* rechts oben: Wiederherstellungscode */
+    card(COL2, ACC_A_Y, COLW, ACC_A_H, LT(have ? "gui.acc_rec_title" : "gui.acc_rec_in_title"));
+    label(F_TINY, LT(have ? "gui.acc_rec_text" : "gui.acc_rec_in_text"), COL2 + 18, ACC_A_Y + 38, COLW - 36, 36,
+          C_DIM);
+    if (have) {
+        L_text(F_MONO, g_acc_rec[0] ? g_acc_rec : "\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2-\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2-\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2-\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2",
+               COL2 + 18, ACC_A_Y + 76, COLW - 36, 26, g_acc_rec[0] ? C_TEXT : C_FAINT,
+               DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    }
+    /* rechts Mitte: Uebertragungscode */
+    card(COL2, ACC_B_Y, COLW, ACC_B_H, LT("gui.acc_transfer_title"));
+    label(F_TINY, LT("gui.acc_transfer_text"), COL2 + 18, ACC_B_Y + 38, COLW - 36, 60, C_DIM);
+    label(F_TINY, LT("gui.acc_privacy"), COL2 + 18, ACC_B_Y + 142, COLW - 36, 56, C_FAINT);
 }
 
 /* W293: Bereitschaft LoC: Spiel, Grafik, Anzeige, Steuerung, Online (spaeter).
@@ -14885,6 +15663,9 @@ static const int kLocSumPage[LOC_SUM_N] = { P_ADV, P_GFX, P_DISPLAY, P_CTRL, P_A
 
 static int loctab_command(int id, int code)
 {
+    if (acc_command(id, code)) { /* W328 */
+        return 1;
+    }
     if (id >= ID_LOC_GO0 && id < ID_LOC_GO0 + LOC_SUM_N) {
         if (code == BN_CLICKED) {
             show_page(kLocSumPage[id - ID_LOC_GO0]);
@@ -14907,6 +15688,11 @@ static int loctab_command(int id, int code)
         return 1;
     case ID_LOC_START:
         loctab_start();
+        return 1;
+    case ID_LOC_WIDE: /* W326 LOC-WIDE */
+        if (code == CBN_SELCHANGE && !g_updating) {
+            loctab_wide_pick();
+        }
         return 1;
     case ID_LOC_IMAGE:
         if (code == EN_SETFOCUS || code == EN_KILLFOCUS) {
@@ -14951,7 +15737,7 @@ static void loctab_result(char *msg, size_t cap, COLORREF *col)
     int k;
     ui_gettext(ctl(ID_LOC_IMAGE), p, sizeof p);
     if (!g_loc_checked || strcmp(p, g_loc_res_path) != 0) {
-        strcpy_s(msg, cap, LT(p[0] ? "gui.loc_unchecked" : "gui.loc_img_none"));
+        strncpy_s(msg, cap, LT(p[0] ? "gui.loc_unchecked" : "gui.loc_img_none"), _TRUNCATE);
         *col = C_DIM;
         return;
     }
@@ -14976,10 +15762,10 @@ static void loctab_sum_game(char *out, size_t cap, COLORREF *col)
         ui_gettext(ctl(ID_LOC_IMAGE), p, sizeof p);
     }
     if (!p[0]) {
-        strcpy_s(out, cap, LT("gui.loc_sum_none"));
+        strncpy_s(out, cap, LT("gui.loc_sum_none"), _TRUNCATE);
         *col = C_WARN;
     } else if (!g_loc_checked || strcmp(p, g_loc_res_path) != 0) {
-        strcpy_s(out, cap, LT("gui.loc_sum_unchecked"));
+        strncpy_s(out, cap, LT("gui.loc_sum_unchecked"), _TRUNCATE);
         *col = C_WARN;
     } else {
         switch (g_loc_res.kind) {
@@ -14992,16 +15778,16 @@ static void loctab_sum_game(char *out, size_t cap, COLORREF *col)
             *col = C_WARN;
             break;
         case LGAME_IMG_SB:
-            strcpy_s(out, cap, LT("gui.loc_sum_sb"));
+            strncpy_s(out, cap, LT("gui.loc_sum_sb"), _TRUNCATE);
             *col = C_WARN;
             break;
         case LGAME_IMG_MISSING:
         case LGAME_IMG_UNREADABLE:
-            strcpy_s(out, cap, LT("gui.loc_sum_err"));
+            strncpy_s(out, cap, LT("gui.loc_sum_err"), _TRUNCATE);
             *col = C_ERR;
             break;
         case LGAME_IMG_NONE:
-            strcpy_s(out, cap, LT("gui.loc_sum_none"));
+            strncpy_s(out, cap, LT("gui.loc_sum_none"), _TRUNCATE);
             *col = C_WARN;
             break;
         default:
@@ -15026,8 +15812,10 @@ static void loctab_sum_rows(loc_sumrow_t *r)
         r[1 + i].col = g->col;
     }
     r[4].label = LT("gui.loc_sum_online");
-    strcpy_s(r[4].value, sizeof r[4].value, LT("gui.loc_server_cue"));
-    r[4].col = C_FAINT; /* grauer Punkt: kommt spaeter */
+    if (!acc_sum_row(r[4].value, sizeof r[4].value, &r[4].col)) { /* W328: Pilot, sobald der Dienst eingerichtet ist */
+        strncpy_s(r[4].value, sizeof r[4].value, LT("gui.loc_server_cue"), _TRUNCATE);
+        r[4].col = C_FAINT; /* grauer Punkt: kommt spaeter */
+    }
 }
 
 static void paint_loc_play(void)
@@ -15082,6 +15870,10 @@ static void paint_loc_adv(void)
 {
     char t[1200];
     COLORREF col;
+    if (acc_view_active()) { /* W328: Verwaltungsansicht Pilotenkonto */
+        acc_paint_view();
+        return;
+    }
     /* Disc: Pfad, Check/Browse, Ergebnis, Hinweis */
     card(CX0, LOC_DISC_Y, COLW, LOC_DISC_H, LT("gui.loc_disc_title"));
     loctab_result(t, sizeof t, &col);
@@ -15093,16 +15885,27 @@ static void paint_loc_adv(void)
     loctab_data_dir(t, sizeof t);
     L_text(F_SMALL, t, CX0 + 18, LOC_DATA_Y + 56, COLW - 36, 22, C_TEXT,
            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_PATH_ELLIPSIS);
-    /* Online (spaeter) */
-    card(CX0, LOC_ONL_Y, COLW, LOC_ONL_H, LT("gui.loc_online_title"));
-    label1(F_SMALL, LT("gui.loc_server"), CX0 + 18, LOC_ONL_Y + 40, 70, 28, C_DIM);
-    /* Platzhalter-Feld (gesperrt, noch keine Eingabe): Adresse bzw. "kommt spaeter" */
-    L_fill(CX0 + 90, LOC_ONL_Y + 40, COLW - 108, 28, C_INPUT, 120, 6);
-    L_ring(CX0 + 90, LOC_ONL_Y + 40, COLW - 108, 28, C_INPUT_BRD, 120, 6);
-    label1(F_SMALL, g_loc.loc_server[0] ? g_loc.loc_server : LT("gui.loc_server_cue"),
-           CX0 + 100, LOC_ONL_Y + 40, COLW - 128, 28, C_FAINT);
-    label(F_TINY, LT("gui.loc_online_text"), CX0 + 18, LOC_ONL_Y + 76, COLW - 36, 50, C_DIM);
+    /* W328: Karte "Pilot", sonst Online-Platzhalter (Dienst noch nicht eingerichtet) */
+    if (!acc_paint_card()) {
+        card(CX0, LOC_ONL_Y, COLW, LOC_ONL_H, LT("gui.loc_online_title"));
+        label1(F_SMALL, LT("gui.loc_server"), CX0 + 18, LOC_ONL_Y + 40, 70, 28, C_DIM);
+        /* Platzhalter-Feld (gesperrt, noch keine Eingabe): Adresse bzw. "kommt spaeter" */
+        L_fill(CX0 + 90, LOC_ONL_Y + 40, COLW - 108, 28, C_INPUT, 120, 6);
+        L_ring(CX0 + 90, LOC_ONL_Y + 40, COLW - 108, 28, C_INPUT_BRD, 120, 6);
+        label1(F_SMALL, g_loc.loc_server[0] ? g_loc.loc_server : LT("gui.loc_server_cue"),
+               CX0 + 100, LOC_ONL_Y + 40, COLW - 128, 28, C_FAINT);
+        label(F_TINY, LT("gui.loc_online_text"), CX0 + 18, LOC_ONL_Y + 76, COLW - 36, 50, C_DIM);
+    }
     paint_adv_shared();
+    /* W326 LOC-WIDE: Bildformat (Auswahl ID_LOC_WIDE, Kolben ID_LOC_WIDE_XI im Kopf) */
+    {
+        int v = lgame_wide_clamp(g_loc.loc_widescreen);
+        card(COL2, LOC_WIDE_Y, COLW, LOC_WIDE_H, LT("gui.loc_wide_title"));
+        label(F_TINY, LT("gui.loc_wide_txt"), COL2 + 18, LOC_WIDE_Y + 84, COLW - 36, 48, C_DIM);
+        label(F_TINY, LT(v == LGAME_WIDE_720P ? "gui.loc_wide_exp720"
+                         : v == LGAME_WIDE_169 ? "gui.loc_wide_exp" : "gui.loc_wide_orig"),
+              COL2 + 18, LOC_WIDE_Y + 140, COLW - 36, 64, v ? C_WARN : C_DIM);
+    }
 }
 
 static void loctab_build(HWND w)
@@ -15123,6 +15926,11 @@ static void loctab_build(HWND w)
     mk(w, K_BTN, ID_LOC_CHECK, P_ADV, CX0 + 18, LOC_DISC_Y + 80, 122, 30, LT("gui.btn_check"), 0);
     mk(w, K_BTN, ID_LOC_BROWSE, P_ADV, CX0 + 18 + 130, LOC_DISC_Y + 80, 122, 30, LT("gui.btn_browse"), 0);
     mk(w, K_BTN, ID_LOC_FOLDER, P_ADV, CX0 + 18, LOC_DATA_Y + 82, 150, 28, LT("gui.loc_open_folder"), 0);
+    /* W326 LOC-WIDE: Bildformat rechts (Auswahl ueber die Kartenbreite, Kolben im Kopf) */
+    mk(w, K_COMBO, ID_LOC_WIDE, P_ADV, COL2 + 18, LOC_WIDE_Y + 44, COLW - 36, 30, "", 0);
+    mk(w, K_ICON, ID_LOC_WIDE_XI, P_ADV, COL2 + COLW - 18 - XI_W, LOC_WIDE_Y + 12, XI_W, 24 /* XI_H */, "", 0);
+    loctab_wide_fill();
+    acc_build(w); /* W328 */
     loctab_nav_layout();
 }
 
@@ -15134,6 +15942,8 @@ static void loctab_relabel(void)
     ui_settext(ctl(ID_LOC_CHECK), LT("gui.btn_check"));
     ui_settext(ctl(ID_LOC_BROWSE), LT("gui.btn_browse"));
     ui_settext(ctl(ID_LOC_FOLDER), LT("gui.loc_open_folder"));
+    loctab_wide_fill(); /* W326: Eintraege in der neuen Sprache, Wahl bleibt */
+    acc_relabel(); /* W328 */
     {
         int i;
         for (i = 0; i < LOC_SUM_N; i++) { /* W293 */
@@ -15145,6 +15955,7 @@ static void loctab_relabel(void)
 /* Nach gui_fill: LoC gewaehlt -> Navigation + Statuszeile passend. */
 static void loctab_fill_done(void)
 {
+    loctab_wide_sync(); /* W326 */
     loctab_nav_layout();
     if (!g_loc_checked && g_loc.loc_image[0] &&
         u8_GetFileAttributes(g_loc.loc_image) != INVALID_FILE_ATTRIBUTES) {
@@ -15171,7 +15982,10 @@ static int loctab_apply_state(const char *name)
     g_loc.game = LGAME_LOC;
     memset(&g_locfix, 0, sizeof g_locfix);
     g_locfix_path[0] = '\0';
-    if (strcmp(name, "loc_ok") == 0 || strcmp(name, "loc_start") == 0 || strcmp(name, "loc_exp") == 0) {
+    /* W326: loc_wide = Erweitert mit "16:9 (Spielmodus)" (Warnzeile), sonst 4:3 */
+    g_loc.loc_widescreen = strcmp(name, "loc_wide") == 0 ? LGAME_WIDE_169 : LGAME_WIDE_43;
+    if (strcmp(name, "loc_ok") == 0 || strcmp(name, "loc_start") == 0 || strcmp(name, "loc_exp") == 0 ||
+        strcmp(name, "loc_wide") == 0) {
         strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_ISO);
         g_locfix.kind = LGAME_IMG_LOC;
         g_locfix.title_id = LGAME_TID_LOC;
@@ -15181,7 +15995,46 @@ static int loctab_apply_state(const char *name)
         g_locfix.title_id = LGAME_TID_SB;
     }
     strcpy_s(g_loc.loc_image, sizeof g_loc.loc_image, g_locfix_path);
+    acc_apply_state(name); /* W328: loc_acc_* */
     return 1;
+}
+
+/* W328: Fixture-Konto fuer Shots/Selbsttest (Beispielschluessel, kein echtes Konto). */
+static void acc_fixture(int srv, int have, int discord, int login, int view)
+{
+    int i;
+    g_acc_fixture = 1;
+    g_acc_fix_srv = srv;
+    g_acc_loaded = 1;
+    memset(&g_acc, 0, sizeof g_acc);
+    memset(&g_acc_st, 0, sizeof g_acc_st);
+    g_acc_st_ok = 0;
+    g_acc_rec[0] = '\0';
+    g_acc_avail = -1;
+    g_acc_view = view;
+    if (have) {
+        g_acc.have = 1;
+        g_acc.account = 4711;
+        g_acc.gen = 1;
+        strcpy_s(g_acc.name, sizeof g_acc.name, "Ace Pilot");
+        strcpy_s(g_acc.host, sizeof g_acc.host, "127.0.0.1:47001");
+        for (i = 0; i < 32; i++) g_acc.key[i] = (uint8_t)(0x11 * (i % 15) + i);
+        g_acc_st_ok = 1;
+        g_acc_st.discord = discord;
+        g_acc_st.login = login;
+        if (login) strcpy_s(g_acc_st.login_name, sizeof g_acc_st.login_name, "ace-login");
+    }
+}
+
+static void acc_apply_state(const char *name)
+{
+    if (strcmp(name, "loc_acc_none") == 0) acc_fixture(1, 0, 0, 0, 0);
+    else if (strcmp(name, "loc_acc_unsec") == 0) acc_fixture(1, 1, 0, 0, 0);
+    else if (strcmp(name, "loc_acc_ok") == 0) acc_fixture(1, 1, 1, 1, 0);
+    else if (strcmp(name, "loc_acc_view") == 0) {
+        acc_fixture(1, 1, 1, 0, 1);
+        lacc_recovery_code(g_acc.account, g_acc.key, g_acc_rec, sizeof g_acc_rec);
+    } else if (strcmp(name, "loc_acc_signin") == 0) acc_fixture(1, 0, 0, 0, 1);
 }
 
 /* Nach dem Aufbau (Shot): Pruefung bzw. Startversuch wie der Nutzer. */
@@ -15192,6 +16045,12 @@ static void loctab_state_after(const char *name)
     }
     if (g_locfix_path[0]) {
         loctab_check();
+    }
+    if (strncmp(name, "loc_acc", 7) == 0) {
+        acc_refresh(); /* W328: Knopftexte/Sichtbarkeit zum Fixture */
+        if (g_acc_rec[0] && ctl(ID_ACC_V_RECSHOW)) ui_settext(ctl(ID_ACC_V_RECSHOW), LT("gui.acc_rec_hide"));
+        if (g_acc_st.login && ctl(ID_ACC_V_LOGIN)) ui_settext(ctl(ID_ACC_V_LOGIN), g_acc_st.login_name);
+        if (!g_acc.have && !g_acc_view && ctl(ID_ACC_NAME)) ui_settext(ctl(ID_ACC_NAME), "Ace Pilot");
     }
     if (strcmp(name, "loc_start") == 0) {
         loctab_start();
@@ -15248,10 +16107,12 @@ static void xtip_text(int id, char *out, size_t cap)
         if (id == ID_CHIDE) { /* W319: Vollbild-Ansicht und Monitoransicht erklaert */
             _snprintf_s(out, cap, _TRUNCATE, "%s\n%s", LT("gui.chide_txt"), LT("gui.mview_txt"));
         } else {
-            strcpy_s(out, cap, LT("gui.rem_label_txt"));
+            strncpy_s(out, cap, LT("gui.rem_label_txt"), _TRUNCATE);
         }
     } else if (id == ID_XEXP_PHOTO) { /* W290: breit (Aussenwelt), REPLAY/Logo aus */
         _snprintf_s(out, cap, _TRUNCATE, "%s\n%s", LT("gui.exp_tip"), LT("gui.exp_tip_photo"));
+    } else if (id == ID_LOC_WIDE_XI) { /* W326 LOC-WIDE: Bildformat 16:9/720p (LoC) */
+        _snprintf_s(out, cap, _TRUNCATE, "%s\n%s", LT("gui.exp_tip"), LT("gui.exp_tip_locwide"));
     } else if (id == ID_XWARN_SB || id == ID_XWARN_LOC) {
         if (g_orig_mask) {
             lorig_list_sep(g_orig_mask, "\n", "\xE2\x80\xA2 ", list, sizeof list); /* ein Punkt je Zeile */
@@ -15290,6 +16151,10 @@ static void xicon_texts(void)
         xtip_text(ID_XEXP_PHOTO, t, sizeof t);
         ui_settext_if(ctl(ID_XEXP_PHOTO), t);
     }
+    if (ctl(ID_LOC_WIDE_XI)) { /* W326 */
+        xtip_text(ID_LOC_WIDE_XI, t, sizeof t);
+        ui_settext_if(ctl(ID_LOC_WIDE_XI), t);
+    }
     for (i = 0; i < (int)(sizeof kNav / sizeof kNav[0]); i++) {
         HWND h = ctl(ID_NAV0 + kNav[i]);
         char n[760];
@@ -15300,7 +16165,7 @@ static void xicon_texts(void)
         if (t[0]) {
             _snprintf_s(n, sizeof n, _TRUNCATE, "%s\n%s", LT(kPageName[kNav[i]]), t);
         } else {
-            strcpy_s(n, sizeof n, LT(kPageName[kNav[i]]));
+            strncpy_s(n, sizeof n, LT(kPageName[kNav[i]]), _TRUNCATE);
         }
         ui_settext_if(h, n);
     }
@@ -15364,6 +16229,11 @@ static void orig_reset_now(void)
     snap_settings(&before);
     s = before;
     lorig_reset(&s);
+    if (g_game == LGAME_LOC && g_loc.loc_widescreen != LGAME_WIDE_43) { /* W326: LoC-Bildformat zurueck auf 4:3 */
+        g_loc.loc_widescreen = LGAME_WIDE_43;
+        (void)loctab_save();
+        if (ctl(ID_LOC_WIDE)) { ComboBox_SetCurSel(ctl(ID_LOC_WIDE), 0); }
+    }
     g_s = s;
     ui_from_settings(&s);
     update_aspect_info();
@@ -16984,6 +17854,17 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             upd_timeout(); /* W250 */
         }
         return 0;
+    case WM_APP_ACC: { /* W328: Ergebnis eines Konto-Auftrags */
+        acc_job_t *j = (acc_job_t *)lp;
+        if (j && (int)wp == g_acc_gen && g_acc_busy) {
+            acc_done(j);
+        }
+        if (j) {
+            SecureZeroMemory(j, sizeof *j);
+            free(j);
+        }
+        return 0;
+    }
     case WM_APP_UPD: { /* W250: Ergebnis des Abruf-Threads */
         upd_job_t *j = (upd_job_t *)lp;
         if (j && (int)wp == g_upd_gen && g_upd_busy) {
@@ -17221,6 +18102,13 @@ static const struct {
     { "loc_sb", "", 0 },
     { "loc_start", "", 0 },
     { "loc_exp", "edge_mode=2;cockpit_hide=1", 0 }, /* W293: wie loc_ok, mit Hinweisband (Breitbild, Cockpit aus) */
+    { "loc_wide", "", 0 }, /* W326: wie loc_ok, Bildformat "16:9 (Spielmodus)" (Seite Erweitert) */
+    /* W328 STEELNET-ACCOUNT: Pilotenkonto (Fixture, kein Netz, nichts gespeichert; Seite Erweitert) */
+    { "loc_acc_none", "", 0 },   /* Dienst eingerichtet, noch kein Pilot (Name + Anlegen) */
+    { "loc_acc_unsec", "", 0 },  /* Pilot angelegt, nicht gesichert (Hinweis) */
+    { "loc_acc_ok", "", 0 },     /* Pilot mit Discord + Login gesichert */
+    { "loc_acc_view", "", 0 },   /* Verwaltungsansicht (Code angezeigt) */
+    { "loc_acc_signin", "", 0 }, /* Ansicht "Auf diesem PC anmelden" (ohne Pilot) */
     { "effectpack", "shading=1;world_sharpen=60;aa_mode=3;ssao=25;color_sat=110;color_gain=103;"
                     "shade_shadow=1;fx_soft=60;fx_embers=160;fx_light=40;fx_light_cockpit=30;"
                     "fx_interp=1;remaster=1;hd_textures=1", 0 },
@@ -17374,7 +18262,7 @@ static void gui_fill(void)
         if (app_firstrun_defaults(&g_s, g_o.lang[0] ? 0u : (unsigned)GetUserDefaultUILanguage(),
                                   ww, wh) & 1) {
             sb_lang_set(g_s.lang);
-            strcpy_s(note, sizeof note, LT("app.no_usercfg"));
+            strncpy_s(note, sizeof note, LT("app.no_usercfg"), _TRUNCATE);
         }
     }
     strcpy_s(g_note, sizeof g_note, note);
@@ -18883,6 +19771,469 @@ static void ip_item_text(int i, char *o, size_t cap)
     }
 }
 
+/* --- 73 (W323 LOC-INTERP): Bildrate im LoC-Profil - "Original" heisst dort "20 (Original)" (Missionstakt
+ * 20 Hz), in SB "30 (Original)"; die gewaehlte Rate bleibt beim Spielwechsel. Nichts gespeichert. --- */
+static __declspec(noinline) void locip_gui_selftest(int *pass, int *fail)
+{
+    char why[200] = "", t[200];
+    int g0 = g_game, keep0 = g_ip_keep, pal = ctl(ID_PAL50) && ui_checked(ID_PAL50);
+    HWND c = ctl(ID_IPFPS);
+    if (!c) {
+        GT_FAIL("73 W323 LOC-INTERP", "%s", "ID_IPFPS fehlt");
+        return;
+    }
+    ip_set(120);
+    g_game = LGAME_LOC;
+    ip_fill(c);
+    ip_item_text(ip_sel_of(0), t, sizeof t);
+    if (strcmp(t, LT("gui.ip_20")) != 0) { _snprintf_s(why, sizeof why, _TRUNCATE, "LoC: Original als '%s'", t); }
+    if (!why[0] && ip_val(ComboBox_GetCurSel(c), -2) != 120) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "LoC: Wahl %d statt 120", ip_val(ComboBox_GetCurSel(c), -2));
+    }
+    g_game = LGAME_SB;
+    ip_fill(c);
+    ip_item_text(ip_sel_of(0), t, sizeof t);
+    if (!why[0] && strcmp(t, LT(pal ? "gui.ip_25" : "gui.ip_30")) != 0) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "SB: Original als '%s'", t);
+    }
+    if (!why[0] && ip_val(ComboBox_GetCurSel(c), -2) != 120) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "SB: Wahl %d statt 120", ip_val(ComboBox_GetCurSel(c), -2));
+    }
+    g_game = g0;
+    g_ip_keep = keep0;
+    ip_set(keep0);
+    if (!why[0]) {
+        GT_OK("73 W323 LOC-INTERP (Bildrate: LoC 20 (Original), SB 30/25 (Original), Wahl bleibt beim Spielwechsel)");
+    } else {
+        GT_FAIL("73 W323 LOC-INTERP", "%s", why);
+    }
+}
+
+/* --- 74 (W326 LOC-WIDE): Bildformat im LoC-Profil (LoC > Erweitert):
+ * Eintraege = angebotene Modi (3, ohne LOC_WIDE_720P 2), Texte EN/DE, Wahl
+ * bleibt beim Sprachwechsel; Rundweg 0/1/2 ueber die Auswahl in die user.cfg-
+ * Testdatei (loc_widescreen, fremde Zeilen bleiben, keine Doppelten); fehlt
+ * = 0, ungueltig = 0; Kolben (experimentell) mit Tooltip, keine Textplakette;
+ * nur im Bereich LoC auf Erweitert sichtbar, nichts ueberlappt. --- */
+static int locwide_cfg_count(const char *buf, const char *line)
+{
+    int n = 0;
+    const char *p = buf;
+    size_t l = strlen(line);
+    while ((p = strstr(p, line)) != NULL) {
+        if (p == buf || p[-1] == '\n') {
+            n++;
+        }
+        p += l;
+    }
+    return n;
+}
+
+/* W328 STEELNET-ACCOUNT (Fall 75/76): Karte/Ansicht je Zustand (Fixture), Sichtbarkeit,
+ * Wiederherstellungscode, Eingabepruefung ohne Netz, Startweg (Pilot + SB_LOC_AUTH nur im
+ * Kindblock); 76 nur mit SB_STEELNET_API (lokaler Dienst): Anlegen/Status/Loeschen ueber den
+ * UI-Thread-Weg (Auftrag + WM_APP_ACC). */
+static int acc_gt_vis(int id)
+{
+    HWND h = ctl(id);
+    return h && IsWindowVisible(h);
+}
+
+static int acc_gt_wait(int ms)
+{
+    ULONGLONG end = GetTickCount64() + (ULONGLONG)ms;
+    while (g_acc_busy && GetTickCount64() < end) {
+        pump();
+        Sleep(20);
+    }
+    pump();
+    return !g_acc_busy;
+}
+
+static __declspec(noinline) void acc_gui_selftest(int *pass, int *fail)
+{
+    char why[300] = "", keep[16], set[400], t[200];
+    int g0 = g_game, p0 = g_page;
+    lacc_store_t a0 = g_acc;
+    wchar_t *env;
+    if (!ctl(ID_ACC_NAME) || !ctl(ID_ACC_V_PASS)) {
+        GT_FAIL("75 W328 STEELNET-ACCOUNT", "%s", "Elemente fehlen");
+        return;
+    }
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    sb_lang_set("en");
+    ui_apply_language();
+    g_game = LGAME_LOC;
+    loctab_nav_layout();
+    /* a: Dienst nicht eingerichtet -> alte Karte, keine Konto-Elemente */
+    acc_fixture(0, 0, 0, 0, 0);
+    show_page(P_ADV);
+    pump();
+    if (acc_gt_vis(ID_ACC_NAME) || acc_gt_vis(ID_ACC_MANAGE) || acc_gt_vis(ID_ACC_V_LOGIN) || !acc_gt_vis(ID_LOC_IMAGE))
+        strcpy_s(why, sizeof why, "ohne Dienst: Konto-Elemente sichtbar");
+    {
+        COLORREF c = 0;
+        if (!why[0] && acc_sum_row(t, sizeof t, &c)) strcpy_s(why, sizeof why, "ohne Dienst: Zeile Online belegt");
+    }
+    /* b: eingerichtet, kein Pilot -> Name/Anlegen/Pruefen/Anmelden */
+    acc_fixture(1, 0, 0, 0, 0);
+    acc_refresh();
+    pump();
+    if (!why[0] && (!acc_gt_vis(ID_ACC_NAME) || !acc_gt_vis(ID_ACC_CREATE) || !acc_gt_vis(ID_ACC_CHECK) ||
+                    !acc_gt_vis(ID_ACC_SIGNIN) || acc_gt_vis(ID_ACC_DISCORD) || acc_gt_vis(ID_ACC_V_LOGIN) ||
+                    !acc_gt_vis(ID_LOC_IMAGE)))
+        strcpy_s(why, sizeof why, "kein Pilot: Karte falsch");
+    {
+        COLORREF c = 0;
+        if (!why[0] && (!acc_sum_row(t, sizeof t, &c) || strcmp(t, LT("gui.acc_sum_none")) != 0 || c != C_WARN))
+            strcpy_s(why, sizeof why, "kein Pilot: Zeile Online");
+    }
+    /* ungueltiger Name: Meldung, kein Auftrag */
+    ui_settext(ctl(ID_ACC_NAME), "Guest-Ace");
+    on_command(ID_ACC_CREATE, BN_CLICKED);
+    if (!why[0] && (g_acc_busy || strcmp(g_status, LT("gui.acc_err_name")) != 0))
+        strcpy_s(why, sizeof why, "Guest-Name nicht abgewiesen");
+    /* c: Pilot ungesichert -> Discord + Verwalten, Hinweis in der Zeile */
+    acc_fixture(1, 1, 0, 0, 0);
+    acc_refresh();
+    pump();
+    if (!why[0] && (acc_gt_vis(ID_ACC_NAME) || !acc_gt_vis(ID_ACC_DISCORD) || !acc_gt_vis(ID_ACC_MANAGE) ||
+                    !IsWindowEnabled(ctl(ID_ACC_DISCORD))))
+        strcpy_s(why, sizeof why, "Pilot: Karte falsch");
+    {
+        COLORREF c = 0;
+        char want[200];
+        _snprintf_s(want, sizeof want, _TRUNCATE, LT("gui.acc_sum_unsec"), "Ace Pilot");
+        if (!why[0] && (!acc_sum_row(t, sizeof t, &c) || strcmp(t, want) != 0 || c != C_WARN))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "ungesichert: Zeile '%s'", t);
+    }
+    /* d: Verwaltungsansicht deckt die Seite, Code anzeigen/verbergen, Passwort maskiert */
+    on_command(ID_ACC_MANAGE, BN_CLICKED);
+    pump();
+    if (!why[0] && (!g_acc_view || acc_gt_vis(ID_LOC_IMAGE) || acc_gt_vis(ID_LOC_WIDE) || acc_gt_vis(ID_VSYNC) ||
+                    acc_gt_vis(ID_ACC_DISCORD) || !acc_gt_vis(ID_ACC_V_LOGIN) || !acc_gt_vis(ID_ACC_V_PASS) ||
+                    !acc_gt_vis(ID_ACC_V_DELETE) || !acc_gt_vis(ID_ACC_V_RECSHOW) || acc_gt_vis(ID_ACC_V_REC) ||
+                    !acc_gt_vis(ID_ACC_BACK) || !acc_gt_vis(ID_ACC_V_CODE)))
+        strcpy_s(why, sizeof why, "Ansicht: Sichtbarkeit");
+    if (!why[0] && !(GetWindowLongW(ctl(ID_ACC_V_PASS), GWL_STYLE) & ES_PASSWORD))
+        strcpy_s(why, sizeof why, "Passwortfeld nicht maskiert");
+    if (!why[0] && g_acc_rec[0]) strcpy_s(why, sizeof why, "Code ohne Klick sichtbar");
+    on_command(ID_ACC_V_RECSHOW, BN_CLICKED);
+    {
+        char want[48];
+        lacc_recovery_code(4711, g_acc.key, want, sizeof want);
+        if (!why[0] && strcmp(g_acc_rec, want) != 0) strcpy_s(why, sizeof why, "Code anzeigen");
+    }
+    on_command(ID_ACC_V_RECSHOW, BN_CLICKED);
+    if (!why[0] && g_acc_rec[0]) strcpy_s(why, sizeof why, "Code verbergen");
+    /* zu kurzes Passwort: Meldung, kein Auftrag */
+    ui_settext(ctl(ID_ACC_V_LOGIN), "ace-login");
+    ui_settext(ctl(ID_ACC_V_PASS), "kurz");
+    on_command(ID_ACC_V_LOGINBTN, BN_CLICKED);
+    if (!why[0] && (g_acc_busy || strcmp(g_status, LT("gui.acc_err_pw")) != 0))
+        strcpy_s(why, sizeof why, "kurzes Passwort nicht abgewiesen");
+    ui_settext(ctl(ID_ACC_V_PASS), "");
+    /* e: zurueck */
+    on_command(ID_ACC_BACK, BN_CLICKED);
+    pump();
+    if (!why[0] && (g_acc_view || !acc_gt_vis(ID_LOC_IMAGE) || !acc_gt_vis(ID_ACC_MANAGE)))
+        strcpy_s(why, sizeof why, "Zurueck");
+    /* f: Anmelden-Ansicht ohne Pilot (Wiederherstellungscode eingeben statt anzeigen) */
+    acc_fixture(1, 0, 0, 0, 1);
+    acc_refresh();
+    pump();
+    if (!why[0] && (!acc_gt_vis(ID_ACC_V_REC) || !acc_gt_vis(ID_ACC_V_RECBTN) || acc_gt_vis(ID_ACC_V_RECSHOW) ||
+                    acc_gt_vis(ID_ACC_V_DELETE) || !acc_gt_vis(ID_ACC_V_DISCORD)))
+        strcpy_s(why, sizeof why, "Anmelden-Ansicht");
+    {
+        char lbl[64];
+        ui_gettext(ctl(ID_ACC_V_LOGINBTN), lbl, sizeof lbl);
+        if (!why[0] && strcmp(lbl, LT("gui.acc_login_go")) != 0) strcpy_s(why, sizeof why, "Knopf Anmelden");
+    }
+    /* g: Startweg: mit Pilot -> loc_lobby_pilot + SB_LOC_AUTH nur im Kindblock; ohne -> nichts */
+    acc_fixture(1, 0, 0, 0, 0);
+    strcpy_s(set, sizeof set, "vr_enable=0");
+    env = acc_launch_env(set, sizeof set);
+    if (!why[0] && (env || strcmp(set, "vr_enable=0") != 0)) strcpy_s(why, sizeof why, "ohne Pilot: Startweg veraendert");
+    free(env);
+    acc_fixture(1, 1, 1, 1, 0);
+    env = acc_launch_env(set, sizeof set);
+    if (!why[0] && (!env || strcmp(set, "vr_enable=0;loc_lobby_pilot=Ace Pilot") != 0))
+        _snprintf_s(why, sizeof why, _TRUNCATE, "mit Pilot: Startweg '%s'", set);
+    if (!why[0]) {
+        wchar_t *p;
+        int n = 0;
+        char u8[600], kh[65];
+        lacc_hex(g_acc.key, 32, kh);
+        for (p = env; *p; p += wcslen(p) + 1) {
+            w_to_u8(p, u8, sizeof u8);
+            if (strncmp(u8, "SB_LOC_AUTH=4711:", 17) == 0 && strlen(u8) == 17 + 10 + 1 + 64) n++;
+            if (strstr(u8, kh)) n = 100;
+        }
+        if (n != 1) _snprintf_s(why, sizeof why, _TRUNCATE, "Kindblock SB_LOC_AUTH (%d)", n);
+        if (!why[0] && GetEnvironmentVariableA("SB_LOC_AUTH", u8, 8) > 0) strcpy_s(why, sizeof why, "Launcher-Umgebung veraendert");
+    }
+    if (env) free(env);
+    /* Aufraeumen */
+    g_acc_fixture = 0;
+    g_acc_loaded = 0;
+    g_acc_view = 0;
+    g_acc = a0;
+    g_game = g0;
+    loctab_nav_layout();
+    show_page(p0);
+    sb_lang_set(keep);
+    ui_apply_language();
+    if (!why[0]) {
+        GT_OK("75 W328 STEELNET-ACCOUNT pilot card/manage view (fixtures: no service, no pilot, unsecured, view, sign-in), recovery code show/hide, input checks, start path with SB_LOC_AUTH only in child env");
+    } else {
+        GT_FAIL("75 W328 STEELNET-ACCOUNT", "%s", why);
+    }
+    /* 76: optional gegen den lokalen Dienst (SB_STEELNET_API/SB_STEELNET_PIN) */
+    {
+        lacc_srv_t s;
+        char tmp[1024], nm[40];
+        why[0] = '\0';
+        if (!lacc_server(&s) || !s.test) {
+            printf("PASS 76 W328 account UI over the network (skipped: no SB_STEELNET_API)\n");
+            (*pass)++;
+            return;
+        }
+        u8_GetTempPath(tmp, sizeof tmp);
+        _snprintf_s(g_acc_dir_test, sizeof g_acc_dir_test, _TRUNCATE, "%sw328_gui_%lu", tmp, GetCurrentProcessId());
+        lacc_store_forget(g_acc_dir_test);
+        g_acc_fixture = 0;
+        g_acc_loaded = 1;
+        memset(&g_acc, 0, sizeof g_acc);
+        g_acc_st_ok = 0;
+        g_game = LGAME_LOC;
+        loctab_nav_layout();
+        show_page(P_ADV);
+        _snprintf_s(nm, sizeof nm, _TRUNCATE, "Gui%lu", GetCurrentProcessId() % 100000);
+        ui_settext(ctl(ID_ACC_NAME), nm);
+        on_command(ID_ACC_CREATE, BN_CLICKED);
+        if (!acc_gt_wait(20000) || !g_acc.have || strcmp(g_acc.name, nm) != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "anlegen (%s)", g_acc_last_err);
+        if (!why[0] && (!acc_gt_wait(20000) || !g_acc_st_ok || g_acc_st.discord || g_acc_st.login))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Status (%s)", g_acc_last_err);
+        if (!why[0]) {
+            lacc_store_t chk;
+            if (lacc_store_load(g_acc_dir_test, &chk) != 1 || chk.account != g_acc.account)
+                strcpy_s(why, sizeof why, "Schluessel nicht im Testprofil");
+            SecureZeroMemory(&chk, sizeof chk);
+        }
+        if (!why[0]) {
+            int c0 = g_confirm_auto;
+            g_confirm_auto = 1;
+            g_acc_view = 1;
+            on_command(ID_ACC_V_DELETE, BN_CLICKED);
+            g_confirm_auto = c0;
+            if (!acc_gt_wait(20000) || g_acc.have || g_acc_view)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "loeschen (%s)", g_acc_last_err);
+        }
+        {
+            lacc_store_t chk;
+            if (!why[0] && lacc_store_load(g_acc_dir_test, &chk) != 0) strcpy_s(why, sizeof why, "Datei nach dem Loeschen noch da");
+        }
+        lacc_store_forget(g_acc_dir_test);
+        {
+            wchar_t w[1200];
+            u8_to_w(g_acc_dir_test, w, 1200);
+            RemoveDirectoryW(w);
+        }
+        g_acc_dir_test[0] = '\0';
+        g_acc_loaded = 0;
+        g_acc_view = 0;
+        g_acc = a0;
+        g_game = g0;
+        loctab_nav_layout();
+        show_page(p0);
+        if (!why[0]) {
+            GT_OK("76 W328 account UI over the network (create via worker thread + WM_APP_ACC, status, key in test profile, delete with confirm)");
+        } else {
+            GT_FAIL("76 W328 account UI", "%s", why);
+        }
+    }
+}
+
+static __declspec(noinline) void locwide_gui_selftest(int *pass, int *fail)
+{
+    static char buf[16384];
+    char why[300] = "", tmp[1024], cfg[1200], t[400], keep[16];
+    int g0 = g_game, i, n, li;
+    lgame_state_t loc0 = g_loc, rd;
+    HWND c = ctl(ID_LOC_WIDE);
+    if (!c || !ctl(ID_LOC_WIDE_XI)) {
+        GT_FAIL("74 W326 LOC-WIDE", "%s", "ID_LOC_WIDE/ID_LOC_WIDE_XI fehlt");
+        return;
+    }
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw326_gui_user_%lu.cfg", tmp, GetCurrentProcessId());
+    write_file(cfg, "[display]\nwidth=1280\n# fremde Zeile\n");
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    sb_lang_set("en");
+    ui_apply_language();
+    /* 1: fehlender Schluessel -> 4:3 (Original) */
+    g_loc.loc_widescreen = LGAME_WIDE_169;
+    loctab_load();
+    g_game = LGAME_LOC;
+    loctab_nav_layout();
+    if (g_loc.loc_widescreen != LGAME_WIDE_43 || ComboBox_GetCurSel(c) != 0) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "fehlt: Wert %d, Auswahl %d", g_loc.loc_widescreen,
+                    ComboBox_GetCurSel(c));
+    }
+    /* 2: Eintraege = angebotene Modi, Texte EN/DE, Wahl bleibt beim Sprachwechsel */
+    n = ComboBox_GetCount(c);
+    if (!why[0] && (n != lgame_wide_count() || n != (LOC_WIDE_720P ? 3 : 2))) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "%d Eintraege (erwartet %d)", n, LOC_WIDE_720P ? 3 : 2);
+    }
+    ComboBox_SetCurSel(c, 1);
+    on_command(ID_LOC_WIDE, CBN_SELCHANGE);
+    for (li = 0; li < 2 && !why[0]; li++) {
+        static const char *const kWant[2][3] = { { "4:3 (Original)", "16:9 (game mode)", "720p (16:9)" },
+                                                 { "4:3 (Original)", "16:9 (Spielmodus)", "720p (16:9)" } };
+        sb_lang_set(li ? "de" : "en");
+        ui_apply_language();
+        for (i = 0; i < n && !why[0]; i++) {
+            wchar_t w[128];
+            t[0] = 0;
+            if (SendMessageW(c, CB_GETLBTEXTLEN, (WPARAM)i, 0) < 120 &&
+                SendMessageW(c, CB_GETLBTEXT, (WPARAM)i, (LPARAM)w) != CB_ERR) {
+                w_to_u8(w, t, (int)sizeof t);
+            }
+            if (strcmp(t, kWant[li][i]) != 0 || strcmp(t, LT(lgame_wide_label_key(i))) != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s Eintrag %d '%s'", li ? "de" : "en", i, t);
+            }
+        }
+        if (!why[0] && (ComboBox_GetCount(c) != n || ComboBox_GetCurSel(c) != 1)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Wahl %d nach Sprachwechsel", li ? "de" : "en",
+                        ComboBox_GetCurSel(c));
+        }
+    }
+    sb_lang_set("en");
+    ui_apply_language();
+    /* 3: Rundweg ueber die Auswahl -> user.cfg (1 -> 2 -> 0 -> 1, jeder Schritt eine Aenderung) */
+    for (i = 0; i < 3 && !why[0]; i++) {
+        static const int kSeq[3] = { 2, 0, 1 };
+        int v = kSeq[i];
+        char line[40];
+        if (v >= n) {
+            continue; /* 720p nicht angeboten */
+        }
+        ComboBox_SetCurSel(c, v);
+        on_command(ID_LOC_WIDE, CBN_SELCHANGE);
+        gt_read(cfg, buf, sizeof buf);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "loc_widescreen=%d\n", v);
+        if (locwide_cfg_count(buf, line) != 1 || locwide_cfg_count(buf, "loc_widescreen=") != 1) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Wahl %d: user.cfg '%.120s'", v, buf);
+        } else if (!strstr(buf, "width=1280\n") || !strstr(buf, "# fremde Zeile\n")) {
+            strcpy_s(why, sizeof why, "fremde Zeilen verloren");
+        } else if (lgame_cfg_load(cfg, &rd) != 0 || rd.loc_widescreen != v || g_loc.loc_widescreen != v) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Wahl %d: geladen %d", v, rd.loc_widescreen);
+        } else if (v && (g_status_kind != 1 || strcmp(g_status, LT("gui.loc_wide_saved")) != 0)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Wahl %d: Statuszeile '%s'", v, g_status);
+        }
+        if (!why[0]) { /* Rueckweg: Datei -> Oberflaeche */
+            g_loc.loc_widescreen = -1;
+            loctab_load();
+            g_game = LGAME_LOC;
+            if (g_loc.loc_widescreen != v || ComboBox_GetCurSel(c) != v) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Wahl %d: neu geladen %d/%d", v, g_loc.loc_widescreen,
+                            ComboBox_GetCurSel(c));
+            }
+        }
+    }
+    /* 4: ungueltige Werte -> 0 (auch 2, wenn 720p nicht angeboten wird) */
+    {
+        static const char *const kBad[] = { "7", "-1", "abc", "", "3", LOC_WIDE_720P ? "99" : "2" };
+        for (i = 0; i < (int)(sizeof kBad / sizeof kBad[0]) && !why[0]; i++) {
+            char body[200];
+            _snprintf_s(body, sizeof body, _TRUNCATE, "[display]\nwidth=1280\nloc_widescreen=1\nloc_widescreen = %s\n",
+                        kBad[i]);
+            write_file(cfg, body);
+            loctab_load();
+            g_game = LGAME_LOC;
+            if (g_loc.loc_widescreen != 0 || ComboBox_GetCurSel(c) != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "ungueltig '%s' -> %d", kBad[i], g_loc.loc_widescreen);
+            }
+        }
+        if (!why[0] && (lgame_wide_clamp(1) != 1 || lgame_wide_clamp(2) != (LOC_WIDE_720P ? 2 : 0) ||
+                        lgame_wide_experimental(0) || !lgame_wide_experimental(1) ||
+                        lgame_wide_experimental(2) != LOC_WIDE_720P)) {
+            strcpy_s(why, sizeof why, "lgame_wide_clamp/experimental");
+        }
+    }
+    /* 5: Sichtbarkeit (nur LoC > Erweitert), Kolben mit Tooltip, keine Textplakette, keine Ueberlappung */
+    if (!why[0]) {
+        ComboBox_SetCurSel(c, 1);
+        on_command(ID_LOC_WIDE, CBN_SELCHANGE);
+        show_page(P_ADV);
+        pump();
+        loctab_vis(ID_LOC_WIDE, 1, "Bildformat (LoC Erweitert)", why, sizeof why);
+        loctab_vis(ID_LOC_WIDE_XI, 1, "Kolben Bildformat (LoC Erweitert)", why, sizeof why);
+        xicon_gt_noplaque("LoC Erweitert 16:9", why, sizeof why);
+        if (!why[0]) {
+            char tt[800];
+            GetWindowTextA(ctl(ID_LOC_WIDE_XI), tt, sizeof tt); /* zugaenglicher Name (ASCII-Teil reicht) */
+            xtip_text(ID_LOC_WIDE_XI, t, sizeof t);
+            if (!strstr(t, LT("gui.exp_tip")) || !strstr(t, LT("gui.exp_tip_locwide")) || !tt[0]) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Kolben-Tooltip '%.80s'", t);
+            }
+        }
+        if (!why[0]) {
+            lay_gt_page_check(why, sizeof why, "LoC W326");
+        }
+        if (!why[0]) { /* W326: 16:9/720p = Breitbild im Experimental-Hinweis, nur im LoC-Bereich */
+            unsigned m0, m1, ms;
+            int w0 = g_loc.loc_widescreen;
+            g_loc.loc_widescreen = LGAME_WIDE_43;
+            ui_apply_rules();
+            m0 = g_orig_mask;
+            g_loc.loc_widescreen = LGAME_WIDE_169;
+            ui_apply_rules();
+            m1 = g_orig_mask;
+            g_game = LGAME_SB;
+            ui_apply_rules();
+            ms = g_orig_mask;
+            g_game = LGAME_LOC;
+            if (!(m1 & (1u << SB_OFG_WIDE)) || ((ms ^ m0) & (1u << SB_OFG_WIDE))) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Hinweis-Maske 4:3 0x%X / 16:9 0x%X / SB 0x%X", m0, m1, ms);
+            }
+            g_loc.loc_widescreen = w0;
+            ui_apply_rules();
+        }
+        show_page(P_DISPLAY);
+        pump();
+        loctab_vis(ID_LOC_WIDE, 0, "Bildformat auf Anzeige", why, sizeof why);
+        g_game = LGAME_SB;
+        loctab_nav_layout();
+        show_page(P_ADV);
+        pump();
+        loctab_vis(ID_LOC_WIDE, 0, "Bildformat im SB-Bereich", why, sizeof why);
+        loctab_vis(ID_LOC_WIDE_XI, 0, "Kolben Bildformat im SB-Bereich", why, sizeof why);
+    }
+    /* aufraeumen (nur die Temp-Datei wurde geschrieben) */
+    u8_DeleteFile(cfg);
+    g_ucfg_test[0] = '\0';
+    g_loc = loc0;
+    g_game = g0;
+    sb_lang_set(keep);
+    ui_apply_language();
+    loctab_wide_sync();
+    loctab_nav_layout();
+    ui_apply_rules();
+    show_page(P_PLAY);
+    if (!why[0]) {
+        _snprintf_s(t, sizeof t, _TRUNCATE,
+                    "74 W326 LOC-WIDE (Bildformat %d Eintraege EN/DE, Rundweg ueber user.cfg, fehlt/ungueltig = 4:3, "
+                    "Kolben + Tooltip, Experimental-Hinweis nur LoC, nur LoC > Erweitert, keine Ueberlappung)", n);
+        GT_OK(t);
+    } else {
+        GT_FAIL("74 W326 LOC-WIDE", "%s", why);
+    }
+}
+
 static __declspec(noinline) void fpsmon_gui_selftest(int *pass, int *fail)
 {
     static const struct { const char *sim; int n; } kL[] = {
@@ -19144,6 +20495,9 @@ static void locl_gui_selftest(int *pass, int *fail)
     launcher_settings_t s;
     loc_sumrow_t r[LOC_SUM_N];
     int k, li, id0 = g_lay.id, sz0 = g_lay.size, shot0 = g_o.shot;
+    int af0 = g_acc_fixture, as0 = g_acc_fix_srv;
+    g_acc_fixture = 1; /* W328: Online-Zeile wie vor dem Konto (Dienst gilt als nicht eingerichtet, auch mit SB_STEELNET_API) */
+    g_acc_fix_srv = 0;
     u8_GetTempPath(tmp, sizeof tmp);
     _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw293_gui_user.cfg", tmp);
     {
@@ -19331,6 +20685,8 @@ static void locl_gui_selftest(int *pass, int *fail)
     ui_from_settings(&s);
     ui_apply_rules();
     show_page(P_PLAY);
+    g_acc_fixture = af0;
+    g_acc_fix_srv = as0;
     if (!why[0]) {
         GT_OK("70 W293 LOC-LAYOUT (LoC-Bereitschaft Spiel/Grafik/Anzeige/Steuerung/Online mit Change, Band unten ohne "
               "Einmal-Start, Erweitert bei LoC mit Disc/Ordner + gemeinsamen Teilen ohne SB-Teile, Start grau, EN/DE, "
@@ -20971,6 +22327,9 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
             locl_gui_selftest(pass, fail); /* W293 LOC-LAYOUT (Fall 70) */
             porig_gui_selftest(pass, fail); /* W296 PRESET-ORIG (Fall 71) */
             fpsmon_gui_selftest(pass, fail); /* W309 FPS-MONITOR (Fall 72) */
+            locip_gui_selftest(pass, fail); /* W323 LOC-INTERP (Fall 73) */
+            locwide_gui_selftest(pass, fail); /* W326 LOC-WIDE (Fall 74) */
+            acc_gui_selftest(pass, fail); /* W328 STEELNET-ACCOUNT (Fall 75/76) */
             /* --- 64 (W259 SETTINGS-RESET): Launcher bleibt offen, im Spiel wird
              * per ESC "Als Standard speichern" gesichert, danach startet derselbe
              * Launcher erneut. Vorher schrieb er seine alten Werte zurueck

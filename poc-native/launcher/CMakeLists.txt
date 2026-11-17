@@ -95,6 +95,7 @@ add_executable(sb_launcher WIN32
   src/launcher_games.c
   src/launcher_orig.c
   src/launcher_layout.c
+  src/launcher_account.c
   ../harness/src/input_sbc_usb.c
   ../harness/src/input_joy.c
   ../harness/src/sbc_fixture.c
@@ -130,7 +131,7 @@ else()
     SB_HARNESS_DIR_DEFAULT="${CMAKE_CURRENT_SOURCE_DIR}/../harness/build/Release")
 endif()
 target_link_libraries(sb_launcher PRIVATE comdlg32 shell32 ole32 comctl32 setupapi winusb
-  uxtheme dwmapi windowscodecs winhttp)
+  uxtheme dwmapi windowscodecs winhttp crypt32 bcrypt ws2_32)
 # W250 UPDATE-CHECK: Release-Version wie beim Client (make_alpha.py setzt
 # -DSB_VERSION=0.1.0-alpha.N fuer beide Komponenten); leer = Entwickler-Build,
 # dann ist der Update-Hinweis ausgeblendet (nichts zu vergleichen).

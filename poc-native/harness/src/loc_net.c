@@ -9,10 +9,14 @@
  * Argumentzahlen = "ret N"/4 der Thunks bzw. XDK-Signatur (Thunks mit Frame). */
 #include "loc_net_core.h"
 #include "loc_net.h"
+#include "loc_netsim.h"
+#include "loc_tun.h"
 #include "hcfg.h"
 #include "hlog.h"
 #include "kernel_hle.h"
 
+#include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <intrin.h>
 
@@ -260,6 +264,9 @@ static u32 __stdcall ln_send(u32 s, u32 buf, u32 len, u32 flags)
 {
     int r;
     FIRST(25, "send");
+    if (g_ln.sim) { /* W322: ueber die Verzoegerungsstufe */
+        return (u32)locnet_send(&g_ln, (SOCKET)s, (const char *)(uintptr_t)buf, (int)len, (int)flags);
+    }
     r = send((SOCKET)s, (const char *)(uintptr_t)buf, (int)len, (int)flags);
     if (r > 0) {
         int e = WSAGetLastError();
@@ -369,9 +376,62 @@ int loc_net_install(void)
             ExitProcess(7);
         }
     }
-    if (!locnet_init(&g_ln, g_cfg.loc_net_addr, g_cfg.loc_net_port, g_cfg.loc_net_peers, g_cfg.loc_net_rtt,
-                     ln_log)) {
-        return 0;
+    {
+        /* W324 LOC-NETPLAY: mit eigenem Transport kommen die Mitspieler vom Transport; mit Treffpunkt eine
+         * zufaellige virtuelle Adresse (eindeutig auch zwischen Rechnern). Ohne loc_transport=udp wie bisher. */
+        int udp = _stricmp(g_cfg.loc_transport, "udp") == 0;
+        const char *addr = g_cfg.loc_net_addr;
+        if (udp && g_cfg.loc_lobby[0] && _stricmp(addr, "auto") == 0) {
+            addr = "random";
+        }
+        if (!locnet_init(&g_ln, addr, g_cfg.loc_net_port, udp ? "none" : g_cfg.loc_net_peers, g_cfg.loc_net_rtt,
+                         ln_log)) {
+            return 0;
+        }
+    }
+    g_ln.nodelay = g_cfg.loc_net_nodelay ? 1 : 0; /* W322: TCP_NODELAY auf den Spiel-Verbindungen */
+    if (g_cfg.loc_netsim[0]) { /* W322 LOC-NETLAT (DIAG/TEST, Standard aus) */
+        locnetsim_cfg sc;
+        char err[96];
+        if (locnetsim_parse(g_cfg.loc_netsim, &sc, err, (int)sizeof err)) {
+            if (!sc.nagle_set) {
+                sc.nagle = g_ln.nodelay ? 0 : 1; /* Modell folgt dem echten Socket */
+            }
+            g_ln.sim = locnetsim_start(&sc, ln_log);
+            /* QoS wie gemessen: mindestens die Strecken-RTT (Startverzoegerung des Spiels); mit Transport misst
+             * dieser selbst (W324) */
+            if (g_ln.sim && _stricmp(g_cfg.loc_transport, "udp") != 0 && sc.rtt_ms + 2.0 * sc.jitter_ms > g_ln.rtt_ms) {
+                g_ln.rtt_ms = (int)(sc.rtt_ms + 2.0 * sc.jitter_ms + 0.5);
+                HLOG_I("LOCNETSIM: QoS-RTT -> %d ms (Strecke)", g_ln.rtt_ms);
+            }
+        } else if (err[0]) {
+            HLOG_W("LOCNETSIM: loc_netsim=\"%s\" ungueltig (%s) - Stufe aus", g_cfg.loc_netsim, err);
+        }
+    }
+    if (_stricmp(g_cfg.loc_transport, "udp") == 0) { /* W324 LOC-NETPLAY */
+        loctun_cfg tc;
+        const char *od = getenv("SB_OUT_DIR");
+        loctun_cfg_default(&tc);
+        tc.port = (uint16_t)(g_cfg.loc_transport_port > 0 && g_cfg.loc_transport_port < 65536 ? g_cfg.loc_transport_port : 0);
+        tc.proxy_base = (uint16_t)g_cfg.loc_transport_proxy;
+        tc.red_fixed = g_cfg.loc_transport_red;
+        tc.gap_ms = g_cfg.loc_transport_gap;
+        tc.hold_ms = g_cfg.loc_transport_hold;
+        tc.qos_reserve_ms = g_cfg.loc_transport_qos;
+        tc.nodirect = g_cfg.loc_transport_nodirect;
+        tc.allow_public = g_cfg.loc_lobby[0] ? 1 : 0;
+        strncpy_s(tc.peers, sizeof tc.peers, g_cfg.loc_transport_peers, _TRUNCATE);
+        strncpy_s(tc.lobby, sizeof tc.lobby, g_cfg.loc_lobby, _TRUNCATE);
+        strncpy_s(tc.room, sizeof tc.room, g_cfg.loc_lobby_room, _TRUNCATE);
+        strncpy_s(tc.pilot, sizeof tc.pilot, g_cfg.loc_lobby_pilot, _TRUNCATE);
+        strncpy_s(tc.role, sizeof tc.role, g_cfg.loc_lobby_role, _TRUNCATE);
+        strncpy_s(tc.relays, sizeof tc.relays, g_cfg.loc_relays, _TRUNCATE);
+        _snprintf_s(tc.status_path, sizeof tc.status_path, _TRUNCATE, "%s%sloc_net_status.txt", od ? od : "",
+                    od ? "/" : "");
+        g_ln.tun = loctun_start(&tc, &g_ln, g_ln.sim, ln_log);
+        if (!g_ln.tun) {
+            HLOG_W("LOCTUN: Transport nicht gestartet - keine Mitspieler (loc_transport=tcp fuer System Link)");
+        }
     }
     for (i = 0; i < n; i++) {
         uint8_t *p = (uint8_t *)(uintptr_t)k_hooks[i].va;
@@ -450,6 +510,19 @@ void loc_net_tick(int waited_s)
 {
     if (g_cfg.loc_net_diag && waited_s % 10 == 0) {
         ln_sample();
+    }
+    if (g_ln.sim) { /* W322: Statistik der Verzoegerungsstufe alle 10 s */
+        if (waited_s % 10 == 0) {
+            const locnetsim_stats *ss = locnetsim_get_stats(g_ln.sim);
+            HLOG_I("LOCNETSIM: t=%ds RTT=%.0f eingereiht=%ld zugestellt=%ld offen=%ld B (max %ld) Verweil p50=%d "
+                   "p99=%d max=%ld ms TCP-Wdh=%ld UDP-verloren=%ld Nagle=%ld Fehler=%ld voll=%ld",
+                   waited_s, locnetsim_rtt_now(g_ln.sim), ss->queued, ss->sent, ss->q_bytes, ss->q_bytes_max,
+                   locnetsim_lat_pct(g_ln.sim, 50), locnetsim_lat_pct(g_ln.sim, 99), ss->lat_max_ms, ss->tcp_retx,
+                   ss->udp_lost, ss->nagle_held, ss->send_err, ss->overflow);
+        }
+    }
+    if (g_ln.tun && waited_s % 10 == 0) { /* W324: Weg, RTT, Verlust, Redundanz je Mitspieler */
+        loctun_log_stats(g_ln.tun, waited_s);
     }
     if (g_ln.ready && waited_s % 30 == 0) {
         HLOG_I("LOCNET: t=%ds Sockets=%ld gesendet=%ld empfangen=%ld Broadcasts=%ld verworfen=%ld connect=%ld "

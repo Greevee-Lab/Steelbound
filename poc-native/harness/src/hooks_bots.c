@@ -347,8 +347,33 @@ static void replay_movieskip_tick(void)
     g_skip_n++;
 }
 
+/* TEST(ISSUE-LIGHT): test_god=1 haelt die HP des eigenen VT (Entity [0x356E2C], Tabelle [0x351828], HP-Wort +0)
+ * auf dem Missionsstartwert, damit Beleglaeufe in spaeten Missionen (One-Shot-Tod vor Ende der Startsequenz) die
+ * Szene erreichen. Nur mit Schalter; Standard 0 = kein Schrieb. */
+static void test_god_tick(void)
+{
+    static u32 s_base, s_idx;
+    static unsigned s_hp0;
+    __try {
+        u32 base, idx;
+        volatile unsigned short *hp;
+        if (*(volatile u32 *)(uintptr_t)SBA(0x356F58u) != 1u) { s_base = 0; return; } /* nur in der Missionsschleife */
+        base = *(volatile u32 *)(uintptr_t)SBA(0x351828u);
+        idx = *(volatile uint16_t *)(uintptr_t)SBA(0x356E2Cu);
+        if (base < 0x10000u || idx == 0u || idx > 4096u) { return; }
+        hp = (volatile unsigned short *)(uintptr_t)(base + idx * 0x5Cu);
+        if (base != s_base || idx != s_idx) {
+            s_base = base; s_idx = idx; s_hp0 = *hp;
+            HLOG_I("TEST-GOD: ent[%u] hp0=%u", idx, s_hp0);
+            return;
+        }
+        if (s_hp0 > 0u && s_hp0 < 0x7FFFu && *hp < s_hp0) { *hp = (unsigned short)s_hp0; }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+
 void replay_steps_tick(void)
 {
+    if (g_cfg.test_god) { test_god_tick(); }
     replay_movieskip_tick(); /* W14: Film-Skip (Testpfad) */
     if (g_cfg.rt_from_film > 0 && g_cfg.vblank_hz <= 0) {
         /* TEST(PERF-BENCH,W137): Testtakt bis zum ersten Film, dann Echtzeit

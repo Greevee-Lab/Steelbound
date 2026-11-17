@@ -3,6 +3,7 @@
  * Transform, Release, GPU-Register, Shader-Konstanten, Streams/Draws,
  * LockRect, KickOff). W68 SPLIT: 1:1 aus xdk_hooks.c verschoben. */
 #include "loc_mem.h" /* W277 LOC-DISC */
+#include "loc_render.h" /* W326 LOC-WIDE */
 #include "hooks_int.h"
 #include <intrin.h>
 #include "sb_remaster.h" /* W103 REM-FRAME */
@@ -32,6 +33,7 @@ u32 __stdcall hook_Direct3D_CreateDevice(u32 adapter, u32 devType, u32 hwnd,
     if (ppDev) {
         *(u32 *)(uintptr_t)ppDev = (u32)(uintptr_t)g_fake_device;
     }
+    if (g_sba_loc) { loc_render_on_present_params(pParams); } /* W326 LOC-WIDE: 16:9/720p (nur LoC) */
     sb_render_on_create_device(w, h); /* M2a: echtes Fenster + Swapchain */
     return 0; /* S_OK */
 }
@@ -593,6 +595,16 @@ u32 __stdcall hook_D3DDevice_SetPixelShader(u32 handle)
     if (g_cfg.replay_fx_live) { handle = w299_fx_live(handle, (u32)(uintptr_t)_ReturnAddress()); }
     if (hlog_throttle(&calls)) {
         HLOG_T("D3D SetPixelShader(0x%X)", handle);
+    }
+    if (g_cfg.bloom_vsc) { /* DIAG(ISSUE-LIGHT, bloom_vsc): Aufrufer je PS-Handle (bis 256 Paare Handle/Aufrufer) */
+        static u32 seen[256][2]; static unsigned nseen;
+        u32 ra = (u32)(uintptr_t)_ReturnAddress(), q;
+        for (q = 0; q < nseen; q++) { if (seen[q][0] == handle && seen[q][1] == ra) { break; } }
+        if (q == nseen && nseen < 256u) {
+            seen[nseen][0] = handle; seen[nseen][1] = ra; nseen++;
+            extern unsigned g_present_no;
+            HLOG_W("PSSET ps=0x%X ra=0x%X f=%u", handle, ra, g_present_no);
+        }
     }
     g_im_pshader = handle; g_npshader++;
     { extern unsigned g_rq_psconst_set; extern unsigned long long g_rq_rs_set; g_rq_psconst_set = 0; g_rq_rs_set = 0; } /* RENDER-QA: SetPixelShader laedt die Def-Werte */
@@ -1285,6 +1297,35 @@ u32 __stdcall hook_D3D_PSConst(u32 reg, u32 pData,
     if (g_cfg.bloom_diag) { /* DIAG(SHADE-M2,W117): Aufrufer im Spiel */
         extern unsigned g_psc_ra;
         g_psc_ra = (unsigned)(uintptr_t)_ReturnAddress();
+    }
+    /* FIX(ISSUE-LIGHT, psconst_store=1): Das XDK-Original klemmt jede Komponente auf [0,1], rundet auf 8 Bit
+     * (x*255+0,5) und legt den Wert als ARGB (A = w) im Geraet ab: [[0x21A8A0] + 0x4AC + 4*reg] (0x2103B5).
+     * D3DDevice_GetPixelShaderConstant (0x20FCD0, ungehookt) liest genau dort. Das Sonder-Material
+     * (FUN_00023D70 @0x23F70/0x24029, FUN_00024410) sichert so C0 = Umgebungslicht nach 0x35225C und stellt es
+     * nach dem Draw per SetPixelShaderConstant(0, 0x35225C) wieder her (@0x241C2). Ohne Ablage lieferte Get 0 ->
+     * Welt-Draws danach ohne Umgebungslicht, bis das naechste Material-Setup (0x22C42) C0 neu setzt
+     * (Steelbound#36/#39/#41/#44: Hauptmonitor dunkler als der zweite Pass, Helligkeit haengt am Manipulator).
+     * Nur SB (LoC hat eigene Adressen). */
+    if (g_cfg.psconst_store && !g_sba_loc && pData) {
+        __try {
+            u32 dev = *(volatile u32 *)(uintptr_t)SBA(0x21A8A0u), k;
+            if (dev >= 0x10000u) {
+                for (k = 0; k < count && reg + k < 8u; k++) {
+                    const float *f = (const float *)(uintptr_t)(pData + k * 16u);
+                    unsigned q[4], j;
+                    for (j = 0; j < 4u; j++) {
+                        float x = f[j];
+                        q[j] = !(x > 0.0f) ? 0u : (x >= 1.0f ? 255u : (unsigned)(x * 255.0f + 0.5f));
+                    }
+                    {   /* DIAG(ISSUE-LIGHT) psconst_ab=1: im Screenshot-Bild wie vorher (Ablage bleibt 0), Partnerbild +1 mit Fix */
+                        extern int rq_ab_base(void);
+                        u32 v = (q[3] << 24) | (q[0] << 16) | (q[1] << 8) | q[2];
+                        if (g_cfg.psconst_ab && rq_ab_base()) { v = 0u; }
+                        *(volatile u32 *)(uintptr_t)(dev + 0x4ACu + (reg + k) * 4u) = v;
+                    }
+                }
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
     }
     /* FIX(LOAD-VT-COLOR,W257): Roh-Spiegel c0..c7 unabhaengig von shading/
      * shade_psconst (nur gelesen von fx_ps_mul_c0, Muster R0 = V0 * C0:

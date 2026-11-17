@@ -18,6 +18,7 @@
  * Annahmen (W, im Bericht): XSB-Eintrag +4 = Daempfung in 1/10 dB, +6 =
  * Tonhoehe in 1/4096 Oktave, +0xA = Kategorie (= Index fuer SetMasterVolume/
  * GlobalPause); Schleife = Schleifen-Flag des Wave-Bank-Eintrags. */
+#include "loc_rollback.h" /* W330: LOC_RB_PREWRITE */
 #include "loc_audio.h"
 #include "loc_xact_fmt.h"
 #include "loc_stub_va.h"
@@ -196,6 +197,7 @@ static int la_read_at(u32 xh, uint64_t off, void *buf, u32 len)
 {
     unsigned long got = 0;
     long long o = (long long)off;
+    LOC_RB_PREWRITE(buf, len); /* W330: Rollback-Schreibschutz (falls Gast-Puffer) */
     if (krnl_vfs_handle(xh)) {
         return krnl_vfs_read(xh, &o, buf, len, &got, NULL, 0) && got == len;
     } else {

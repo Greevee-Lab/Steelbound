@@ -121,6 +121,27 @@ int sbc_led_gate_due(const sbc_led_gate_t *g, const uint8_t rep[SBC_USB_OUT_LEN]
 void sbc_led_gate_mark(sbc_led_gate_t *g, const uint8_t rep[SBC_USB_OUT_LEN],
                        uint64_t now_ms, int ok);
 
+/* ISSUE-GEARLED: Welcher Port traegt den LED-Stand des Spiels?
+ * Die Poll-Schleife (0x49AE0) laeuft je Durchgang aufsteigend ueber alle
+ * offenen Ports: GetState, dann [0x352274] = Port, dann XInputSetState mit
+ * dem LED-Puffer DIESES Ports. [0x352274] ist beim SetState-Aufruf also
+ * immer gleich dem aufrufenden Port (taugt nicht als Filter). Der
+ * LED-Manager 0x49520 laeuft danach und schreibt nur in den Puffer von
+ * [0x352274] = letzter offener Port des Durchgangs; die Puffer der anderen
+ * Ports bleiben auf altem Stand stehen. Im Original haengt der Controller
+ * an genau diesem Port und bekommt nur diesen Puffer.
+ * Der Verfolger erkennt den Durchgangswechsel (Port <= vorheriger Port) und
+ * merkt sich den letzten Port des abgeschlossenen Durchgangs. */
+typedef struct {
+    int last; /* Port des vorigen Aufrufs, -1 = noch keiner */
+    int live; /* letzter Port des vorigen Durchgangs, -1 = unbekannt */
+} sbc_led_port_t;
+
+void sbc_led_port_init(sbc_led_port_t *t);
+/* Je SetState-Aufruf: 1 = dieser Port traegt den LED-Stand des Spiels
+ * (senden), 0 = veralteter Puffer eines weiteren Ports (nicht senden). */
+int sbc_led_port_feed(sbc_led_port_t *t, unsigned port);
+
 /* ---- W128 (SBC-LIVE): Roh-Zugriff fuer sbc_probe --dump/--watch/--test ---- */
 
 #define SBC_USB_RAW_MAX 32 /* max. Paketgroesse EP IN/OUT (Deskriptor) */

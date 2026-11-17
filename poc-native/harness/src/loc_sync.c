@@ -121,8 +121,11 @@ static void ls_st_parse(const char *p)
     }
 }
 
+static void lp_swap(void); /* W320 LOC-PERF */
+
 void loc_sync_frame(unsigned f)
 {
+    lp_swap(); /* W320: Swap-Zeitpunkt (nur loc_pace_diag) */
     while (s_st_cur < s_st_n) {
         int hit = 0;
         long acc = 0, con = 0;
@@ -166,6 +169,77 @@ static unsigned long long fnv_u32(unsigned long long h, u32 v)
     return h;
 }
 
+/* W322 LOC-NETLAT: Abstand der Lockstep-Rahmen (= neue Spielbilder, Soll 50 ms) als Histogramm in
+ * 1-ms-Klassen, dazu Spanne der Eingabeverzoegerung. Nur Ganzzahlen (QPC), alle 10 s LOCLAT. */
+#define NL_H 4001
+static LONG s_nl_hist[NL_H];
+static LONG s_nl_prev[NL_H];
+static long long s_nl_last, s_nl_qpf;
+static volatile LONG s_nl_max, s_nl_vmin = 0x7FFFFFFF, s_nl_vmax;
+static u32 s_nl_stallf0;
+
+static void nl_record(u32 delay)
+{
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    if (!s_nl_qpf) {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        s_nl_qpf = f.QuadPart;
+    }
+    if (s_nl_last) {
+        long long ms = (q.QuadPart - s_nl_last) * 1000 / s_nl_qpf;
+        if (ms > s_nl_max) s_nl_max = (LONG)ms;
+        if (ms >= NL_H) ms = NL_H - 1;
+        InterlockedIncrement(&s_nl_hist[ms]);
+    }
+    s_nl_last = q.QuadPart;
+    if ((LONG)delay < s_nl_vmin) s_nl_vmin = (LONG)delay;
+    if ((LONG)delay > s_nl_vmax) s_nl_vmax = (LONG)delay;
+}
+
+static int nl_pct(const LONG *h, long long tot, int pct)
+{
+    long long acc = 0, need = (tot * pct + 99) / 100;
+    int i;
+    if (need < 1) need = 1;
+    for (i = 0; i < NL_H; i++) {
+        acc += h[i];
+        if (acc >= need) return i;
+    }
+    return NL_H - 1;
+}
+
+static void nl_log(int waited_s)
+{
+    static LONG win[NL_H];
+    long long nw = 0, na = 0, wait = 0;
+    int i, over = 0, overa = 0, over100 = 0;
+    u32 stallf = 0;
+    LONG mx = InterlockedExchange(&s_nl_max, 0), vmin = InterlockedExchange(&s_nl_vmin, 0x7FFFFFFF),
+         vmax = InterlockedExchange(&s_nl_vmax, 0);
+    for (i = 0; i < NL_H; i++) {
+        LONG c = s_nl_hist[i];
+        win[i] = c - s_nl_prev[i];
+        s_nl_prev[i] = c;
+        nw += win[i];
+        na += c;
+        if (i > 75) { over += win[i]; overa += c; }
+        if (i > 100) over100 += win[i]; /* W324: Haenger > 100 ms */
+        if (i > 50) wait += (long long)win[i] * (i - 50);
+    }
+    __try { stallf = *(const u32 *)(uintptr_t)LS_STALLF; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (!nw) {
+        return;
+    }
+    HLOG_I("LOCLAT: t=%ds Rahmen=%lld Abstand p50=%d p95=%d p99=%d max=%ld ms >75ms=%d Warten=%lld ms Verz=%ld..%ld "
+           "Stauframes=+%u | gesamt Rahmen=%lld p50=%d p99=%d >75ms=%d | >100ms=%d",
+           waited_s, nw, nl_pct(win, nw, 50), nl_pct(win, nw, 95), nl_pct(win, nw, 99), mx, over, wait,
+           vmin == 0x7FFFFFFF ? 0 : vmin, vmax, stallf - s_nl_stallf0, na, nl_pct(s_nl_hist, na, 50),
+           nl_pct(s_nl_hist, na, 99), overa, over100);
+    s_nl_stallf0 = stallf;
+}
+
 /* cdecl, aus dem Thunk (alle Register gesichert). Nur Ganzzahlarithmetik: der x87-Stapel des
  * Spiels bleibt unberuehrt. */
 static void __cdecl ls_record(void)
@@ -184,6 +258,7 @@ static void __cdecl ls_record(void)
         act = *(const u32 *)(uintptr_t)LS_ACTIVE;
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     n = InterlockedIncrement(&s_frames);
+    nl_record(delay); /* W322 */
     s_hash = fnv_u32(fnv_u32(s_hash, acc), tick);
     s_last_tick = tick;
     while (s_rt_cur < s_rt_n && s_rt[s_rt_cur].at <= n) { /* Testtasten am Lockstep-Rahmen */
@@ -247,9 +322,244 @@ int loc_sync_install(void)
     return 1;
 }
 
+static void lp_log(void); /* W320 LOC-PERF */
+
 void loc_sync_tick(int waited_s)
 {
+    lp_log(); /* W320: LOCPACE alle 10 s (nur loc_pace_diag) */
+    if (s_on) {
+        nl_log(waited_s); /* W322: LOCLAT alle 10 s */
+    }
     if (s_on && waited_s % 30 == 0) {
         HLOG_I("LOCSYNC: t=%ds Rahmen=%ld Tick=%u Hash=%016llX", waited_s, s_frames, s_last_tick, s_hash);
     }
+}
+
+/* ---- W320 LOC-PERF: Bildtakt der Mission messen (loc_pace_diag) / Gegenprobe (loc_fields) ----
+ *
+ * Befund (LoC-VAs, nur gelesen): Die Missionsschleife (FUN_0002F100) endet je Bild mit
+ * "push 3; call FUN_00033050" @0x2F2F7. FUN_00033050(N) pollt GetDisplayFieldStatus und kehrt erst
+ * zurueck, wenn seit dem zuletzt gesehenen Feld N VBlank-Felder vergangen sind (dazwischen
+ * SwitchToThread, je Feldwechsel FUN_00087A10/FUN_0006A730). Mission = 3 Felder = 20 Bilder/s bei
+ * 60 Hz; Menue/Lobby (@0x3C193) = 2 Felder = 30 Bilder/s. Die Simulation rechnet einen Schritt je
+ * Bild -> 20 Hz ist der Original-Takt der LoC-Mission, kein Leistungsengpass.
+ *
+ * loc_pace_diag=1 (DIAG, Standard 0): Der CALL @0x2F2F9 laeuft ueber einen Thunk, der Eintritt und
+ * Ruecksprung per QPC stempelt (nur Ganzzahlen, x87 des Spiels unberuehrt). Alle 10 s eine Zeile
+ * LOCPACE mit Warten/Arbeit/Periode/Feldphase/Swap-Abstand (p50/p99/max in ms).
+ * loc_fields=N (TEST, Standard 0 = Original 3): Der Thunk uebergibt N statt 3. Das aendert die
+ * Spielgeschwindigkeit (ein Tick je Bild), nur zur Messung; beide Clients brauchen denselben Wert. */
+#define LP_CALL_VA 0x2F2F7u /* push 3; call FUN_00033050 */
+#define LP_WAIT_FN 0x33050u
+#define LP_N 4096
+typedef struct {
+    unsigned n, ns, nr;
+    u32 wait[LP_N], work[LP_N], per[LP_N], phase[LP_N], soff[LP_N], sper[LP_N], pick[LP_N], rdur[LP_N];
+} lp_win_t;
+static lp_win_t s_lp[2];
+static volatile LONG s_lp_cur;
+static int s_lp_on;
+static u32 s_lp_fn = LP_WAIT_FN;
+static long long s_lp_qpf = 1, s_lp_enter, s_lp_leave, s_lp_swap;
+static u32 s_lp_arg;
+#define LP_RCALL_VA 0x2C59Bu /* Render-Thread (Start 0x2C580), Zustand [0x306EEC]=1: call FUN_00029320 */
+static u32 s_lp_rfn = 0x29320u;
+static long long s_lp_renter;
+
+static long long lp_now(void)
+{
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    return q.QuadPart;
+}
+
+static u32 lp_us(long long d)
+{
+    return d <= 0 ? 0u : (u32)(d * 1000000 / s_lp_qpf);
+}
+
+static void __cdecl lp_enter(void)
+{
+    lp_win_t *w = &s_lp[s_lp_cur & 1];
+    s_lp_enter = lp_now();
+    if (s_lp_on && s_lp_leave && w->n < LP_N) { w->work[w->n] = lp_us(s_lp_enter - s_lp_leave); }
+}
+
+static void __cdecl lp_leave(void)
+{
+    lp_win_t *w = &s_lp[s_lp_cur & 1];
+    long long t = lp_now();
+    unsigned hz = g_cfg.vblank_hz > 0 ? (unsigned)g_cfg.vblank_hz : 60u;
+    if (s_lp_on && s_lp_leave && w->n < LP_N) {
+        unsigned long long qh = (unsigned long long)t * hz;
+        w->wait[w->n] = lp_us(t - s_lp_enter);
+        w->per[w->n] = lp_us(t - s_lp_leave);
+        w->phase[w->n] = (u32)((qh % (unsigned long long)s_lp_qpf) * 1000000ull / ((unsigned long long)s_lp_qpf * hz));
+        w->n++;
+    }
+    s_lp_leave = t;
+}
+
+static void lp_swap(void)
+{
+    lp_win_t *w;
+    long long t;
+    if (!s_lp_on) return;
+    w = &s_lp[s_lp_cur & 1];
+    t = lp_now();
+    if (s_lp_leave && s_lp_swap && w->ns < LP_N) {
+        w->soff[w->ns] = lp_us(t - s_lp_leave); /* Swap nach Ende des Feld-Wartens */
+        w->sper[w->ns] = lp_us(t - s_lp_swap);
+        w->ns++;
+    }
+    s_lp_swap = t;
+}
+
+static void __cdecl lp_renter(void)
+{
+    lp_win_t *w = &s_lp[s_lp_cur & 1];
+    s_lp_renter = lp_now();
+    if (s_lp_leave && w->nr < LP_N) { w->pick[w->nr] = lp_us(s_lp_renter - s_lp_leave); } /* Abholung nach Takt-Ende */
+}
+
+static void __cdecl lp_rleave(void)
+{
+    lp_win_t *w = &s_lp[s_lp_cur & 1];
+    if (s_lp_leave && w->nr < LP_N) { w->rdur[w->nr] = lp_us(lp_now() - s_lp_renter); w->nr++; }
+}
+
+static __declspec(naked) void lp_rthunk(void)
+{
+    __asm {
+        pushad
+        pushfd
+        call lp_renter
+        popfd
+        popad
+        call dword ptr [s_lp_rfn]
+        pushad
+        pushfd
+        call lp_rleave
+        popfd
+        popad
+        ret
+    }
+}
+
+static __declspec(naked) void lp_thunk(void)
+{
+    __asm {
+        pushad
+        pushfd
+        call lp_enter
+        popfd
+        popad
+        mov eax, [esp + 4]
+        cmp dword ptr [s_lp_arg], 0
+        je lp_k
+        mov eax, dword ptr [s_lp_arg]
+    lp_k:
+        push eax
+        call dword ptr [s_lp_fn]
+        add esp, 4
+        pushad
+        pushfd
+        call lp_leave
+        popfd
+        popad
+        ret
+    }
+}
+
+int loc_pace_install(void)
+{
+    static const uint8_t expect[7] = {0x6A, 0x03, 0xE8, 0x52, 0x3D, 0x00, 0x00}; /* push 3; call 0x33050 */
+    uint8_t *p = (uint8_t *)(uintptr_t)LP_CALL_VA;
+    intptr_t rel;
+    DWORD old;
+    LARGE_INTEGER f;
+    if (!g_cfg.loc_pace_diag && g_cfg.loc_fields <= 0) {
+        return 0;
+    }
+    if (memcmp(p, expect, sizeof expect) != 0) {
+        HLOG_E("LOCBYTES LOCPACE @0x%X: Byte-Mismatch - ABBRUCH (exit 7)", LP_CALL_VA);
+        hlog_close();
+        ExitProcess(7);
+    }
+    QueryPerformanceFrequency(&f);
+    s_lp_qpf = f.QuadPart ? f.QuadPart : 1;
+    s_lp_arg = (g_cfg.loc_fields > 0 && g_cfg.loc_fields <= 6) ? (u32)g_cfg.loc_fields : 0u;
+    rel = (uint8_t *)(void *)lp_thunk - (p + 7);
+    VirtualProtect(p, 7, PAGE_EXECUTE_READWRITE, &old);
+    memcpy(p + 3, &rel, 4);
+    VirtualProtect(p, 7, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), p, 7);
+    s_lp_on = g_cfg.loc_pace_diag ? 1 : 0;
+    if (s_lp_on) {
+        static const uint8_t rexp[5] = {0xE8, 0x80, 0xCD, 0xFF, 0xFF}; /* call 0x29320 */
+        uint8_t *r = (uint8_t *)(uintptr_t)LP_RCALL_VA;
+        if (memcmp(r, rexp, sizeof rexp) != 0) {
+            HLOG_E("LOCBYTES LOCPACE @0x%X: Byte-Mismatch - ABBRUCH (exit 7)", LP_RCALL_VA);
+            hlog_close();
+            ExitProcess(7);
+        }
+        rel = (uint8_t *)(void *)lp_rthunk - (r + 5);
+        VirtualProtect(r, 5, PAGE_EXECUTE_READWRITE, &old);
+        memcpy(r + 1, &rel, 4);
+        VirtualProtect(r, 5, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), r, 5);
+    }
+    HLOG_I("LOCPACE: Missionstakt FUN_00033050 @0x%X (Diag=%d), Felder je Bild %s%u", LP_CALL_VA, s_lp_on,
+           s_lp_arg ? "TEST loc_fields=" : "Original ", s_lp_arg ? s_lp_arg : 3u);
+    return 1;
+}
+
+static int lp_cmp(const void *a, const void *b)
+{
+    u32 x = *(const u32 *)a, y = *(const u32 *)b;
+    return x < y ? -1 : x > y;
+}
+
+static void lp_q(u32 *v, unsigned n, double *o)
+{
+    if (!n) { o[0] = o[1] = o[2] = 0; return; }
+    qsort(v, n, sizeof *v, lp_cmp);
+    o[0] = v[n / 2] / 1000.0;
+    o[1] = v[(n * 99u) / 100u] / 1000.0;
+    o[2] = v[n - 1] / 1000.0;
+}
+
+static void lp_log(void)
+{
+    lp_win_t *w;
+    double a[24];
+    unsigned n, ns, nr, i, j55 = 0;
+    if (!s_lp_on) return;
+    w = &s_lp[s_lp_cur & 1];
+    InterlockedExchange(&s_lp_cur, (s_lp_cur + 1) & 1); /* Spiel schreibt ab jetzt ins andere Fenster */
+    Sleep(5);
+    n = w->n;
+    ns = w->ns;
+    nr = w->nr;
+    if (n) {
+        for (i = 0; i < ns; i++) { if (w->sper[i] > 55000u) j55++; }
+        lp_q(w->per, n, a + 0);
+        lp_q(w->wait, n, a + 3);
+        lp_q(w->work, n, a + 6);
+        lp_q(w->phase, n, a + 9);
+        lp_q(w->soff, ns, a + 12);
+        lp_q(w->sper, ns, a + 15);
+        HLOG_I("LOCPACE: n=%u Felder=%u | Takt-Periode p50/p99/max=%.2f/%.2f/%.2f ms | Warten=%.2f/%.2f/%.2f | "
+               "Arbeit=%.2f/%.2f/%.2f | Feldphase=%.2f/%.2f/%.2f | Swap nach Warten=%.2f/%.2f/%.2f | "
+               "Swap-Periode=%.2f/%.2f/%.2f (>55ms: %u von %u)",
+               n, s_lp_arg ? s_lp_arg : 3u, a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8], a[9], a[10], a[11],
+               a[12], a[13], a[14], a[15], a[16], a[17], j55, ns);
+        lp_q(w->pick, nr, a + 18);
+        lp_q(w->rdur, nr, a + 21);
+        HLOG_I("LOCPACE: Render-Thread n=%u | Abholung nach Takt-Ende p50/p99/max=%.2f/%.2f/%.2f ms | Renderdauer=%.2f/%.2f/%.2f",
+               nr, a[18], a[19], a[20], a[21], a[22], a[23]);
+    }
+    w->n = 0;
+    w->ns = 0;
+    w->nr = 0;
 }

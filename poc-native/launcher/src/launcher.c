@@ -30,6 +30,7 @@
 #include "launcher_diag.h" /* W279 DIAG-CRASH */
 #include "launcher_orig.h" /* W278 ORIG-FLAG */
 #include "launcher_layout.h" /* W281 LAUNCHER-SIZE */
+#include "launcher_account.h" /* W328 STEELNET-ACCOUNT */
 
 static void dpi_init(void)
 {
@@ -120,6 +121,7 @@ static void cli_usage(void)
     printf("sb_launcher - Steel-Battalion-Launcher (A10, Welle 3)\n"
            "Ohne Argumente: Fenster. Mit Argumenten (Exit 0 = ok):\n"
            "  --selftest              alle CLI-Tests (Exit 0 = gr" U8_UE "n)\n"
+           "  --steelnet AKTION ...   W328 Pilotenkonto (create|check|status|login|...; Test: SB_STEELNET_API/PIN, SB_ACCOUNT_DIR)\n"
            "  --check                 effektive Einstellungen + Validierung\n"
            "  --check-image PFAD      Spiel-Abbild pruefen (Version, lesbar)\n"
            "  --userdata              Datenorte (Modus, Pfade) + Selbsttest\n"
@@ -159,10 +161,12 @@ static void cli_usage(void)
            "                          update_ask, update_new, update_dev, crash,\n"
            "                          loc_empty, loc_ok, loc_sb, loc_start = Bereich\n"
            "                          Line of Contact, W276, loc_exp = loc_ok mit\n"
-           "                          Hinweisband, W293, advanced = Anzeige/Grafik\n"
+           "                          Hinweisband, W293, loc_wide = loc_ok mit\n"
+           "                          Bildformat 16:9, W326, advanced = Anzeige/Grafik\n"
            "                          mit Feinreglern, W291, fade = Breitbild\n"
            "                          Fade out mit Verlaufszeile, W296, fpslist/\n"
-           "                          fpslist_auto = Bildratenliste offen, W309),\n"
+           "                          fpslist_auto = Bildratenliste offen, W309,\n"
+           "                          loc_acc_none|unsec|ok|view|signin = Pilotenkonto, W328),\n"
            "                          nur Anzeige (Packs-Ordner: Umgebung SB_PACKS_DIR)\n"
            "  --dpi N                 mit --ui-shot/--bind-shot: DPI erzwingen\n"
            "  --sim-monitors LISTE    W309: simulierte Monitore fuer --ui-shot/Tests,\n"
@@ -304,7 +308,7 @@ void app_load_effective(const char *client_dir, launcher_settings_t *s,
             _snprintf_s(user_info, user_cap, _TRUNCATE,
                         LT("app.usercfg_loaded"), keys);
         } else {
-            strcpy_s(user_info, user_cap, LT("app.no_usercfg"));
+            strncpy_s(user_info, user_cap, LT("app.no_usercfg"), _TRUNCATE);
         }
     }
     if (kind_out) {
@@ -533,6 +537,24 @@ static void llay_rep(const char *name, int ok, const char *detail)
         printf("FAIL %s: %s\n", name, detail ? detail : "");
         g_llay_fail++;
     }
+}
+
+/* Fix Tastenbelegung (Community 17.11.): Ersetzen/Hinzufuegen stuerzte ohne
+ * Original-Controller ab - gui.sbc_none (258 Byte) passte nicht in den
+ * 256-Byte-Puffer, strcpy_s beendete den Prozess. Uebersetzte Texte werden
+ * jetzt gekuerzt; jede Pufferlaenge muss ohne Absturz durchgehen. */
+static __declspec(noinline) void st_sbc_trunc(int *pass_, int *fail_)
+{
+    static const size_t caps[] = {1, 2, 8, 16, 64, 128, 256};
+    char buf[256];
+    int i, ok = 1;
+    for (i = 0; i < (int)(sizeof caps / sizeof caps[0]); i++) {
+        memset(buf, 'x', sizeof buf);
+        (void)lctrl_sbc_status(buf, caps[i]);
+        if (strlen(buf) >= caps[i]) { ok = 0; }
+    }
+    if (ok) { printf("PASS sbc_status_trunc\n"); (*pass_)++; }
+    else { printf("FAIL sbc_status_trunc: Text nicht gekuerzt\n"); (*fail_)++; }
 }
 
 /* W309 FPS-MONITOR: angebotene Liste je Monitorrate (sb_fps_list, gleich in
@@ -2439,6 +2461,7 @@ static int cli_selftest(const char *client_override)
     }
 
     st_w309_fpsmon(&pass, &fail); /* W309 FPS-MONITOR */
+    st_sbc_trunc(&pass, &fail); /* Tastenbelegung ohne SBC */
     st_w312_joycalib(&pass, &fail); /* W312 JOY-CALIB */
 
     /* 29 (W143): Assistent-cfg Speichern/Zuruecksetzen erhaelt fremde Zeilen */
@@ -3796,6 +3819,7 @@ static int cli_selftest(const char *client_override)
     packs_selftest(&pass, &fail);
     lupd_selftest(&pass, &fail); /* W250 UPDATE-CHECK (ohne Netz) */
     lgame_selftest(&pass, &fail); /* W276 LOC-LAUNCH (Spielauswahl, LoC-Abbild, Startsperre) */
+    lacc_selftest(&pass, &fail); /* W328 STEELNET-ACCOUNT (Krypto, Pin, DPAPI, Discord-Rueckleitung, Kind-Umgebung) */
     lorig_selftest(&pass, &fail); /* W278 ORIG-FLAG (Einordnung, Hinweis, Back to original, 4:3, Einmal-Start) */
     g_llay_pass = g_llay_fail = 0; /* W281 LAUNCHER-SIZE: Layout 0/a/b (rein) */
     llay_selftest(llay_rep);
@@ -4152,6 +4176,21 @@ int app_launch_client_proc(const char *client_dir, const char *xbe_path,
     return 0;
 }
 
+/* W328: Start mit eigenem Umgebungsblock (SB_LOC_AUTH nur im Kindprozess). */
+int app_launch_client_env(const char *client_dir, const char *xbe_path, const char *set_args,
+                          const void *env_w, char *err, size_t errcap)
+{
+    char cmd[3600];
+    unsigned long pid = 0;
+    app_client_cmdline(client_dir, xbe_path, set_args, cmd, sizeof cmd);
+    if (!u8_CreateProcessEnv(cmd, client_dir, 0, 0, NULL, 0, env_w, &pid, NULL)) {
+        _snprintf_s(err, errcap, _TRUNCATE, LT("app.launch_fail"), GetLastError());
+        return 1;
+    }
+    _snprintf_s(err, errcap, _TRUNCATE, LT("app.launched"), pid);
+    return 0;
+}
+
 int app_launch_client_set(const char *client_dir, const char *xbe_path,
                           const char *set_args, char *err, size_t errcap)
 {
@@ -4468,6 +4507,12 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
     } else if (cli_flag(argc, argv, "--selftest")) {
         cli_console();
         rc = cli_selftest(client_override);
+    } else if (cli_flag(argc, argv, "--steelnet")) { /* W328: Pilotenkonto ohne Fenster (Durchspieltest) */
+        int ai;
+        cli_console();
+        for (ai = 1; ai < argc && strcmp(argv[ai], "--steelnet") != 0; ai++) {
+        }
+        rc = lacc_cli(client_override, argc - ai - 1, argv + ai + 1);
     } else if (cli_flag(argc, argv, "--update-check")) { /* W250: ein echter Abruf (Beleg) */
         const char *as = cli_value(argc, argv, "--as-version");
         lupd_res_t r;
@@ -4550,7 +4595,7 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
             sb_lang_set(cli_value(argc, argv, "--lang"));
         }
         if (lgame_loc_start_gate(NULL, m, sizeof m) == 0) {
-            strcpy_s(m, sizeof m, LT("gui.loc_start_noimg"));
+            strncpy_s(m, sizeof m, LT("gui.loc_start_noimg"), _TRUNCATE);
         }
         printf("%s\n", m);
         rc = 3;

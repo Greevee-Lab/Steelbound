@@ -207,6 +207,14 @@ void sb_aspect_box(unsigned *bx, unsigned *by, unsigned *bw, unsigned *bh);
  * 4:3-Box. SB: fest 640x480; LoC: 720x480 aus CreateDevice (Xbox gibt 720x480 auf
  * 4:3 aus -> nicht-quadratische Pixel, Breite 720 fuellt die 4:3-Box). */
 extern unsigned g_game_fb_w, g_game_fb_h;
+/* W326 LOC-WIDE: Anzeige-Seitenverhaeltnis des Spielbilds (Aspect-Box, Hor+-Basis). SB fest
+ * 640/480; LoC 16/9, wenn das Spiel D3DPRESENTFLAG_WIDESCREEN setzt (loc_widescreen). */
+extern float g_game_disp_aspect;
+/* W326: 1 = LoC im nativen 16:9-Modus (Raender hart schwarz, kein Hor+ zusaetzlich); SB immer 0. */
+extern int g_loc_wide;
+/* W326: horizontaler Supersampling-Faktor des LoC-Xbox-Backbuffers (2 bei MultiSampleType 0x41121,
+ * 1 bei 1280x720); SB ungenutzt. */
+extern unsigned g_loc_ss;
 void sb_im_submit(void);
 void sb_im_init(void);
 const vsh_prog_t *vsh_program(unsigned handle);
@@ -330,6 +338,21 @@ void sb_interp_rec_clear(ID3D11RenderTargetView *rtv, const float c[4],
 int sb_interp_swap(void);
 unsigned sb_interp_pairs(void); /* W81 Test: Interp-Paare seit Start (Missionsbeleg) */
 void sb_interp_reset(const char *why); /* W81: alle Listen/Schatten/Staging frei (vor ResizeBuffers) */
+/* ISSUE-PHOTO: ohne FPS-INTERP (interp_fps=0) fuer ein Foto zwei Ticks aufzeichnen (render_interp.c): A liefert den
+ * Anfangsstand der Ziele, B ist das Foto. request: Wunsch; arm: sb_render_present nach sb_pause_point (naechster Tick
+ * zeichnet auf); end: am Swap vor der Endbild-Nachbearbeitung (direkter BB) sichern -> Historie A, B (Foto-Wiedergabe
+ * wie mit FPS-INTERP); RUN meldet erst der Tick B (Pause danach = Standbild B);
+ * free: Listen, Schatten, Tick-Puffer frei. Ohne Wunsch: keine Aufzeichnung, keine Puffer. Spiel-Thread. */
+#define SB_REC1_FAIL (-1)
+#define SB_REC1_NONE 0
+#define SB_REC1_WAIT 1  /* angefordert, Tick beginnt nach dem naechsten Present */
+#define SB_REC1_RUN 2   /* dieser Tick wird aufgezeichnet (am naechsten Swap fertig) */
+#define SB_REC1_READY 3 /* Liste bereit (sb_interp_photo_census/_render) */
+void sb_interp_rec1_request(void);
+int sb_interp_rec1_state(void);
+void sb_interp_rec1_arm(void);
+void sb_interp_rec1_end(void);
+void sb_interp_rec1_free(void);
 /* W193 PAUSE-LIVE: juengsten Tick (t = 1) mit den aktuellen Einstellungen neu zeichnen
  * (Spiel-Thread in der Pause, unter ctx_lock). Rueckgabe Schatten-BB bzw. NULL. */
 typedef struct {

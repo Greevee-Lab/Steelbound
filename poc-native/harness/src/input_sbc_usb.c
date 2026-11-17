@@ -203,6 +203,26 @@ void sbc_led_gate_mark(sbc_led_gate_t *g, const uint8_t rep[SBC_USB_OUT_LEN],
     }
 }
 
+void sbc_led_port_init(sbc_led_port_t *t)
+{
+    if (t) {
+        t->last = -1;
+        t->live = -1;
+    }
+}
+
+int sbc_led_port_feed(sbc_led_port_t *t, unsigned port)
+{
+    if (!t || port > 3u) {
+        return 0;
+    }
+    if (t->last >= 0 && (int)port <= t->last) {
+        t->live = t->last; /* neuer Durchgang: voriger endete mit t->last */
+    }
+    t->last = (int)port;
+    return t->live >= 0 && (int)port == t->live;
+}
+
 /* ---- WinUSB-Geraetezugriff ---- */
 
 /* 4 Hexziffern ab p lesen (gross/klein), -1 bei Fehler. */

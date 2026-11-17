@@ -1,0 +1,79 @@
+/* loc_tun.h - W324 LOC-NETPLAY: eigener UDP-Transport unter dem LoC-Netz-HLE (loc_transport=udp).
+ *
+ * Das Spiel behaelt seine echten Sockets (Loopback). Jeder Mitspieler wird lokal durch eine virtuelle
+ * Adresse (vip, 127/8) vertreten; der Transport haelt dafuer Stellvertreter-Sockets auf
+ * vip:proxy_base+(Spielport-1000) und traegt die Daten ueber EINE eigene UDP-Verbindung je Mitspieler:
+ *  - TCP des Spiels (Port 1000, Lockstep 0x34 und Lobby-Rahmen bis 0x100C): Bytestrom unveraendert,
+ *    geordnete Zustellung, jede Nachricht wird in bis zu N Paketen mitgeschickt (Redundanz, N adaptiv
+ *    nach gemeldetem Verlust), Wiederholung nach RTO, kumulative Bestaetigung.
+ *  - UDP des Spiels (Suche 1201, Beitritt 1202, VDP 1203): als Datagramm, in N Paketen mitgeschickt,
+ *    beim Empfaenger entdoppelt (keine Wiederholung darueber hinaus, wie UDP).
+ *  - Wege: direkt (NAT-Durchstich SBP1 wie steelnet/PROTOKOLL.md) oder ueber ein steelnet-Relay
+ *    (SBN1 RELAY mit link_id, Bindung per Ticket des Treffpunkts). Die Wahl trifft der Treffpunkt
+ *    (route) anhand der gemessenen Pings (kleinste maximale paarweise Latenz).
+ *  - Treffpunkt (loc_lobby=host:port): steelnet-Steuerkanal (JSON-Zeilen) im selben Thread.
+ * Keine Spiellogik, keine Inhalte im Log (nur Zaehler, Zeiten, Wege). Testbar ohne Spielspeicher
+ * (loc_net_selftest). */
+#pragma once
+#include <winsock2.h>
+#include <stdint.h>
+
+struct locnet;
+struct locnetsim;
+
+typedef void (*loctun_log_fn)(const char *msg);
+
+typedef struct loctun_cfg {
+    uint16_t port;        /* eigener UDP-Port des Transports (0 = frei waehlen) */
+    uint16_t proxy_base;  /* Stellvertreter der Mitspieler: vip:proxy_base+(Spielport-1000) (Standard 21000) */
+    int red_fixed;        /* 0 = Redundanz N adaptiv (2..red_max), sonst fest */
+    int red_max;          /* obere Grenze fuer N (Standard 8) */
+    int gap_ms;           /* Mindestabstand zweier Kopien derselben Nachricht (Standard 15) */
+    int hold_ms;          /* Jitter-Puffer: Mindest-Haltezeit vor der Zustellung (Standard 0) */
+    int qos_reserve_ms;   /* QoS-RTT = SRTT + 4*RTTVAR + Reserve (Standard 100) */
+    int nodirect;         /* TEST: kein direkter Weg (Durchstich aus) -> Relay */
+    int allow_public;     /* 1 = Mitspieler-/Relay-Adressen ausserhalb Loopback/privat erlaubt (nur mit Treffpunkt) */
+    char peers[256];      /* TEST ohne Treffpunkt: "ip:port,..." (nur Loopback/privat) */
+    char lobby[128];      /* Treffpunkt host:port (leer = keiner) */
+    char room[33];        /* Lobby-Name beim Treffpunkt (Standard "loc") */
+    char pilot[17];       /* Pilotname beim Treffpunkt (Standard "Pilot") */
+    char role[8];         /* "auto" (beitreten, sonst anlegen), "host", "join" */
+    char relays[256];     /* zusaetzliche Relays "name=host:port,..." (der Treffpunkt nennt seine selbst) */
+    char status_path[260];/* Statusdatei fuer den Launcher (leer = keine) */
+    char auth[100];       /* W328: Konto "account:exp:G-hex64" (leer = aus Umgebung SB_LOC_AUTH lesen, dann Gast) */
+} loctun_cfg;
+
+typedef struct loctun_stats {
+    volatile LONG pkt_tx, pkt_rx, msg_new, msg_copy, msg_rto, msg_rx, msg_dup, msg_saved, dg_tx, dg_rx, dg_dup,
+        dg_drop, streams, bad;
+} loctun_stats;
+
+struct loctun;
+typedef struct loctun loctun;
+
+void loctun_cfg_default(loctun_cfg *c);
+/* 1 = Transport vorhanden (private Fassung), 0 = Platzhalter (Community, loc_tun_stub.c). */
+int loctun_available(void);
+/* Startet Socket + Thread. n = Netz-Kern (fuer eigene vip/Basis und Mitspielerliste), sim = optionale
+ * Verzoegerungsstufe fuer die AUSGEHENDEN Transportpakete (W322-Pruefstand). NULL bei Fehler. */
+loctun *loctun_start(const loctun_cfg *c, struct locnet *n, struct locnetsim *sim, loctun_log_fn log);
+void loctun_stop(loctun *t);
+
+/* Spiel-UDP (aus dem Spiel-Thread): dst_vip = virtuelle Adresse des Mitspielers oder INADDR_BROADCAST
+ * (an alle verbundenen), Ports als Spielports. Rueckgabe len (wie UDP: angenommen) oder -1 (kein Weg). */
+int loctun_dgram(loctun *t, uint32_t dst_vip, uint16_t src_gp, uint16_t dst_gp, const char *buf, int len);
+/* 1 = vip gehoert einem verbundenen Mitspieler. */
+int loctun_is_peer(loctun *t, uint32_t vip);
+
+/* Zustand fuer Log/Launcher/Selbsttest. */
+int loctun_links_up(loctun *t);
+/* Weg und RTT des i-ten Mitspielers: path 0 = keiner, 1 = direkt, 2 = Relay. 0 = kein solcher Eintrag. */
+int loctun_link_info(loctun *t, int i, int *path, double *srtt_ms, int *red, uint32_t *vip, char *relay, int rlen);
+const loctun_stats *loctun_get_stats(loctun *t);
+uint16_t loctun_port(loctun *t);
+/* Logzeilen LOCTUN (je Mitspieler) und Statusdatei; aus loc_net_tick alle 10 s. */
+void loctun_log_stats(loctun *t, int waited_s);
+/* Treffpunkt-Zustand: 0 aus, 1 verbinde, 2 angemeldet, 3 in Lobby. */
+int loctun_lobby_state(loctun *t);
+/* W328: Konto-Anmeldung am Treffpunkt: 0 keine (Gast), 1 laeuft, 2 angenommen, -1 abgelehnt. */
+int loctun_auth_state(loctun *t);

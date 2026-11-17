@@ -1125,3 +1125,9 @@ u32 __stdcall hle_KeWaitForMultipleObjects(u32 count, u32 objs, u32 waitType, u3
     }
     return wait_result(wr);
 }
+
+/* W330 LOC-ROLLBACK-R1: SUSPSAFE-Pruefung fuer den Rollback (angehaltener Thread haelt eine Host-Sperre?) */
+const char *krnl_susp_held_lock(unsigned long tid)
+{
+    return susp_held_lock((DWORD)tid);
+}

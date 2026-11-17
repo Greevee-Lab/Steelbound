@@ -24,6 +24,7 @@ void hlog_flush(void);       /* W168: Puffer leeren (bis 200 ms), ohne hlog_asyn
 /* Drossel: loggt die ersten 3 + jeden 1000. Aufruf einer Stelle */
 #define HLOG_CALL_MAX_FIRST 3
 int hlog_throttle(uint32_t *counter);
+int hlog_lock_held_by(unsigned long tid); /* W330: 1 = tid haelt die Log-Sperre */
 
 #define HLOG_E(...) hlog_msg(HLOG_ERROR, __VA_ARGS__)
 #define HLOG_W(...) hlog_msg(HLOG_WARN, __VA_ARGS__)

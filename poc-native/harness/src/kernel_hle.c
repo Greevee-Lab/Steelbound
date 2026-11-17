@@ -5,6 +5,7 @@
  * Ke/Hal/Av/Xe/Xc/Dbg, Init + Thunk-Installation; Handles/Threads/Sync in
  * krnl_sync.c, Pfade/Dateien in krnl_file.c, Speicher in krnl_mem.c. */
 #include "krnl_int.h"
+#include "sb_profile.h" /* W326: g_sba_loc */
 
 /* Vorwaerts: XBE-Bild (Definition unten bei den Implementierungen) */
 xbe_image_t *g_img;
@@ -557,6 +558,21 @@ static void __fastcall hle_ObfDereferenceObject(u32 obj)
 static u32 __stdcall hle_ExQueryNonVolatileSetting(u32 a0, u32 a1, u32 a2, u32 a3,
                                                    u32 a4)
 {
+    /* W326 LOC-WIDE (nur LoC-Profil): XGetVideoFlags (LoC 0x12A9EB) liest
+     * Einstellung 8, nimmt (Wert >> 16) & 0x5F und loescht 0x0E (720p/1080i/
+     * 480p), ausser XGetAVPack() == 1 (HDTV, HalBootSMCVideoMode) und
+     * Videostandard != PAL. FUN_0001DCD0 waehlt danach aus 9 Modi:
+     * 0x01 -> 720x480 16:9 (anamorph), 0x01|0x02|0x08 + HDTV -> 1280x720p. */
+    if (g_sba_loc && g_cfg.loc_widescreen && a0 == 8u && a2 && a3 >= 4u) {
+        u32 fl = g_cfg.loc_widescreen == 2 ? 0x0Bu : 0x01u; /* WIDESCREEN (+HDTV_720p +HDTV_480p) */
+        if (g_cfg.loc_widescreen == 2) { g_hal_boot_smc_video_mode = 1u; } /* AV-Pack HDTV */
+        if (a1) { *(u32 *)(uintptr_t)a1 = 4u; }
+        *(u32 *)(uintptr_t)a2 = fl << 16;
+        if (a4) { *(u32 *)(uintptr_t)a4 = 4u; }
+        HLOG_I("ExQueryNonVolatileSetting(idx=8) -> Videoflags 0x%X (loc_widescreen=%d, AV-Pack %u)", fl,
+               g_cfg.loc_widescreen, g_hal_boot_smc_video_mode);
+        return X_STATUS_SUCCESS;
+    }
     /* W234 PAL50 (Befund W212): XAPI 0x191164 liest Byte 1 von Einstellung
      * 0x103 (Videostandard), 0x19118D Bits 16..22 von Einstellung 8
      * (Videoflags). PAL (3) ohne PAL60-Flag -> Spiel waehlt 50 Hz und die

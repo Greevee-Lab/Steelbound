@@ -304,6 +304,10 @@ void sb_edge_apply(ID3D11RenderTargetView *rtv)
         eg_mv = 0;
         return;
     }
+    if (g_loc_wide) { /* W326 LOC-WIDE: nativer 16:9-Modus - ausserhalb der 16:9-Box hart schwarz (kein Hor+) */
+        eg_apply(rtv, 1, 0);
+        return;
+    }
     eg_apply(rtv, g_cfg.edge_mode, 0);
 }
 

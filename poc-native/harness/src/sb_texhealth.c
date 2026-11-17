@@ -214,16 +214,18 @@ static const char *th_why_name(unsigned w)
     }
 }
 
+void krnl_contig_place_stats(unsigned *hiplace, unsigned *overlap); /* krnl_mem.c, ISSUE-TEX */
 void sb_th_format(char *o, size_t cap, int live)
 {
     size_t u;
-    unsigned w, pend_e = 0, pend = 0;
+    unsigned w, pend_e = 0, pend = 0, ct_hi = 0, ct_ov = 0;
     int i;
     char hd[200];
     if (!o || !cap) { return; }
     o[0] = '\0';
     if (live) { th_vram_query(); }
     __try { pend = sb_tex_thr_pending(&pend_e); } __except (EXCEPTION_EXECUTE_HANDLER) { pend = 0; pend_e = 0; }
+    krnl_contig_place_stats(&ct_hi, &ct_ov); /* ISSUE-TEX */
     hd[0] = '\0';
     __try { sb_rem_hd_stats(hd, sizeof hd); } __except (EXCEPTION_EXECUTE_HANDLER) { strcpy_s(hd, sizeof hd, "?"); }
     _snprintf_s(o, cap, _TRUNCATE,
@@ -249,10 +251,11 @@ void sb_th_format(char *o, size_t cap, int live)
                 "\r\nupload throttle: budget=%d/frame skipped=%u frames=%u peak=%u/frame (present %u) "
                 "waiting_now=%u (entries without srv %u) retry_fix=%d\r\n"
                 "texture headers above 2 GB: %u (host_hi_addr=%d)\r\n"
+                "contig blocks: placed above 2 GB %u (contig_hi_place=%d), overlapping %u\r\n"
                 "permanently without srv (TEX dauer-ohne-srv): %u\r\n"
                 "draws expecting a texture without srv: %u in %u frames, peak %u/frame (present %u)",
                 g_cfg.tex_up_budget > 0 ? g_cfg.tex_up_budget : 12, g_th_thr_total, g_th_thr_frames, g_th_thr_max,
-                g_th_thr_max_f, pend, pend_e, g_cfg.tex_throttle_retry, g_th_hi, g_cfg.host_hi_addr, g_th_dauer, g_th_miss_total, g_th_miss_frames,
+                g_th_thr_max_f, pend, pend_e, g_cfg.tex_throttle_retry, g_th_hi, g_cfg.host_hi_addr, ct_hi, g_cfg.contig_hi_place, ct_ov, g_th_dauer, g_th_miss_total, g_th_miss_frames,
                 g_th_miss_max, g_th_miss_max_f);
     for (w = 0; w < 16u; w++) {
         if (!g_th_miss_why[w]) { continue; }

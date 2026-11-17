@@ -740,6 +740,7 @@ static const uint8_t kCombat[SBC_USB_IN_LEN] = {
 static void selftest_w128(void); /* W128, s. unten */
 static void selftest_w267(void); /* W267, s. unten */
 static void selftest_w305(void); /* W305, s. unten */
+static void selftest_gearled(void); /* ISSUE-GEARLED, s. unten */
 
 static int run_selftest(void)
 {
@@ -895,6 +896,7 @@ static int run_selftest(void)
     selftest_w128(); /* W128: Kalibrierung, Lampenfolge, Dump/Watch, --test */
     selftest_w267(); /* W267: LED-Sendetor (Comm geht ganz aus) */
     selftest_w305(); /* W305: Abziehen/Wieder-Einstecken (simuliert) */
+    selftest_gearled(); /* ISSUE-GEARLED: nur der Spiel-Port geht an den Controller */
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;
@@ -2384,4 +2386,252 @@ static void selftest_w305(void)
         CHECK(w305_is_neutral(&nz, 0, 0xFF), "w305 J: neutral ohne letzten Stand");
     }
     free(s);
+}
+
+/* ---- ISSUE-GEARLED: Gang-LED blinkt staendig (Tester alpha.9) ----
+ * Nachbildung ohne Geraet:
+ * 1. LED-Logik des Spiels fuer die Gang-LEDs (Disassembly 0x49520): Haupt-
+ *    schleife -1 je Tick (Modus 0, kein Setter fuer die Gang-"Tasten"
+ *    0x3C-0x43), danach Gang-Teil 0x49772: passende LED +4, andere -4,
+ *    Klemme 0..F; [0x347840] = 1 (Hebel zwischen den Gaengen, Rohwert 0)
+ *    -> alle Gang-LEDs -4. Ergebnis: stetiges Leuchten, nie Blinken.
+ * 2. Poll-Schleife 0x49AE0: je Durchgang alle offenen Ports aufsteigend,
+ *    [0x352274] = Port direkt vor XInputSetState(Puffer dieses Ports); der
+ *    LED-Manager pflegt danach nur den Puffer des letzten Ports. Die anderen
+ *    Puffer stehen (Port 0: Gang N vom Boot, sonst 0).
+ * Alt (W267..0.2.0): Filter "Port == [0x352274]" (immer wahr) + W267-Tor ->
+ * der Controller bekommt abwechselnd aktuelle und alte Puffer. Neu:
+ * sbc_led_port_feed + Tor -> nur der gepflegte Puffer. */
+#define GL_NG 7 /* R, N, 1..5 */
+
+static const int kGlLed[GL_NG] = {SBC_LED_GEAR_R, SBC_LED_GEAR_N, SBC_LED_GEAR_1,
+                                  SBC_LED_GEAR_2, SBC_LED_GEAR_3, SBC_LED_GEAR_4,
+                                  SBC_LED_GEAR_5};
+
+/* Ein Tick der Spiel-Logik; gear = 0..6 (R..5), -1 = zwischen den Gaengen. */
+static void gl_game_tick(uint8_t nib[GL_NG], int gear)
+{
+    int i;
+    for (i = 0; i < GL_NG; i++) {
+        int v = nib[i] - 1; /* Hauptschleife, Modus 0 */
+        if (v < 0) {
+            v = 0;
+        }
+        v += (gear >= 0 && i == gear) ? 4 : -4; /* Gang-Teil 0x49772 */
+        if (v < 0) {
+            v = 0;
+        }
+        if (v > 15) {
+            v = 15;
+        }
+        nib[i] = (uint8_t)v;
+    }
+}
+
+static void gl_rep(uint8_t rep[SBC_USB_OUT_LEN], const uint8_t nib[GL_NG])
+{
+    sbc_leds_t l;
+    int i;
+    memset(&l, 0, sizeof l);
+    for (i = 0; i < GL_NG; i++) {
+        l.level[kGlLed[i]] = nib[i];
+    }
+    sbc_usb_build_led_report(&l, rep);
+}
+
+static void gl_dev_nib(const uint8_t rep[SBC_USB_OUT_LEN], uint8_t nib[GL_NG])
+{
+    sbc_leds_t l;
+    int i;
+    memset(&l, 0, sizeof l);
+    sbc_usb_parse_led_report(rep, &l);
+    for (i = 0; i < GL_NG; i++) {
+        nib[i] = l.level[kGlLed[i]];
+    }
+}
+
+typedef struct {
+    int bad_steady; /* Proben im Ruhefenster, in denen das Geraet abweicht */
+    int dev_chg;    /* Gang-LED-Wechsel am Geraet im Ruhefenster */
+    int probes;
+    int sends;
+} gl_res_t;
+
+/* Ein Lauf: offene Ports laut Maske, Poll-/Tickabstand tick_ms, drei Phasen
+ * (N, 1. Gang, R) je 3 s. use_new = 0: alte Logik, 1: neue Logik. */
+static gl_res_t gl_run(unsigned port_mask, unsigned tick_ms, int use_new)
+{
+    static const int kPhase[3] = {1, 2, 0};
+    uint8_t buf[4][SBC_USB_OUT_LEN];
+    uint8_t live_nib[GL_NG], dev_rep[SBC_USB_OUT_LEN], prev_dev[GL_NG];
+    sbc_led_gate_t gate;
+    sbc_led_port_t tr;
+    gl_res_t r;
+    uint64_t t = 1000;
+    int last_open = 0, p, ph, k, have_dev = 0;
+    memset(&r, 0, sizeof r);
+    memset(&gate, 0, sizeof gate);
+    memset(live_nib, 0, sizeof live_nib);
+    memset(prev_dev, 0, sizeof prev_dev);
+    memset(dev_rep, 0, sizeof dev_rep);
+    sbc_led_port_init(&tr);
+    for (p = 0; p < 4; p++) {
+        uint8_t z[GL_NG];
+        memset(z, 0, sizeof z);
+        if (p == 0) {
+            z[1] = 0xF; /* Port 0: Gang N vom Boot */
+        }
+        gl_rep(buf[p], z);
+        if (port_mask & (1u << p)) {
+            last_open = p;
+        }
+    }
+    for (ph = 0; ph < 3; ph++) {
+        unsigned ticks = 3000u / tick_ms;
+        for (k = 0; k < (int)ticks; k++, t += tick_ms) {
+            unsigned at = (unsigned)k * tick_ms;
+            /* Poll-Schleife: offene Ports aufsteigend, SetState je Port. */
+            for (p = 0; p < 4; p++) {
+                int pass;
+                if (!(port_mask & (1u << p))) {
+                    continue;
+                }
+                pass = use_new ? sbc_led_port_feed(&tr, (unsigned)p) : 1;
+                if (pass && sbc_led_gate_due(&gate, buf[p], t, W267_MIN_MS)) {
+                    memcpy(dev_rep, buf[p], sizeof dev_rep);
+                    sbc_led_gate_mark(&gate, buf[p], t, 1);
+                    have_dev = 1;
+                    r.sends++;
+                }
+            }
+            /* LED-Manager danach: nur der Puffer von [0x352274] = letzter Port. */
+            gl_game_tick(live_nib, kPhase[ph]);
+            gl_rep(buf[last_open], live_nib);
+            if (!have_dev) {
+                continue;
+            }
+            if (at >= 500u) { /* Ruhefenster ab 500 ms nach Phasenbeginn */
+                uint8_t dn[GL_NG];
+                gl_dev_nib(dev_rep, dn);
+                r.probes++;
+                if (memcmp(dn, live_nib, GL_NG) != 0) {
+                    r.bad_steady++;
+                }
+                if (memcmp(dn, prev_dev, GL_NG) != 0) {
+                    r.dev_chg++;
+                }
+                memcpy(prev_dev, dn, GL_NG);
+            } else {
+                gl_dev_nib(dev_rep, prev_dev);
+            }
+        }
+    }
+    return r;
+}
+
+static void selftest_gearled(void)
+{
+    /* 1. Spiel-Logik: Gang-LED stetig, kein Blinken; zwischen den Gaengen dunkel. */
+    {
+        uint8_t nib[GL_NG];
+        int i, k, n, rises = 0, falls = 0, prev = 0;
+        memset(nib, 0, sizeof nib);
+        for (k = 0; k < 60; k++) { /* 2 s im 1. Gang */
+            gl_game_tick(nib, 2);
+            if (nib[2] > prev) {
+                rises++;
+            }
+            if (nib[2] < prev) {
+                falls++;
+            }
+            prev = nib[2];
+        }
+        CHECK(nib[2] == 0xF && falls == 0 && rises == 5,
+              "gearled Spiel: 1. Gang blendet in 5 Ticks auf F, nie ab (%X r%d f%d)",
+              nib[2], rises, falls);
+        for (i = 0, n = 0; i < GL_NG; i++) {
+            n += (i != 2 && nib[i] != 0);
+        }
+        CHECK(n == 0, "gearled Spiel: nur die Gang-LED leuchtet (%d andere)", n);
+        for (k = 0; k < 10; k++) {
+            gl_game_tick(nib, -1);
+        }
+        for (i = 0, n = 0; i < GL_NG; i++) {
+            n += nib[i] != 0;
+        }
+        CHECK(n == 0, "gearled Spiel: zwischen den Gaengen alle Gang-LEDs aus (%d an)", n);
+        gl_game_tick(nib, 0);
+        CHECK(nib[0] == 4, "gearled Spiel: R blendet ein (%X)", nib[0]);
+    }
+
+    /* 2. Port-Verfolger (Durchgang = offene Ports aufsteigend). */
+    {
+        sbc_led_port_t t;
+        int a, b, c, d;
+        sbc_led_port_init(&t);
+        a = sbc_led_port_feed(&t, 0);
+        b = sbc_led_port_feed(&t, 1);
+        c = sbc_led_port_feed(&t, 3);
+        CHECK(a == 0 && b == 0 && c == 0, "gearled Port: erster Durchgang unbekannt");
+        a = sbc_led_port_feed(&t, 0);
+        b = sbc_led_port_feed(&t, 1);
+        c = sbc_led_port_feed(&t, 3);
+        CHECK(a == 0 && b == 0 && c == 1 && t.live == 3,
+              "gearled Port: Ports 0,1,3 -> nur 3 (%d%d%d live=%d)", a, b, c, t.live);
+        sbc_led_port_feed(&t, 0); /* Port 3 geschlossen */
+        sbc_led_port_feed(&t, 1);
+        c = sbc_led_port_feed(&t, 0);
+        d = sbc_led_port_feed(&t, 1);
+        CHECK(c == 0 && d == 1 && t.live == 1, "gearled Port: Port 3 zu -> 1 (live=%d)",
+              t.live);
+        sbc_led_port_feed(&t, 2); /* Port 2 neu */
+        sbc_led_port_feed(&t, 0);
+        sbc_led_port_feed(&t, 1);
+        d = sbc_led_port_feed(&t, 2);
+        CHECK(d == 1 && t.live == 2, "gearled Port: Port 2 dazu -> 2 (live=%d)", t.live);
+        sbc_led_port_init(&t);
+        a = sbc_led_port_feed(&t, 2);
+        b = sbc_led_port_feed(&t, 2);
+        c = sbc_led_port_feed(&t, 2);
+        CHECK(a == 0 && b == 1 && c == 1, "gearled Port: ein Port -> ab 2. Aufruf");
+        CHECK(sbc_led_port_feed(&t, 4) == 0 && sbc_led_port_feed(NULL, 0) == 0,
+              "gearled Port: ungueltig");
+    }
+
+    /* 3. Poll-Schleife + Sendetor: alt blinkt bei mehreren Ports, neu nie. */
+    {
+        static const unsigned kMask[] = {0x1u, 0x8u, 0x9u, 0xBu, 0xFu, 0x3u};
+        static const unsigned kTickMs[] = {16u, 33u};
+        unsigned mi, ti;
+        int old_multi_blink = 0, old_single_bad = 0, new_bad = 0, new_chg = 0, runs = 0;
+        int old_chg_max = 0;
+        for (mi = 0; mi < sizeof kMask / sizeof kMask[0]; mi++) {
+            int multi = (kMask[mi] & (kMask[mi] - 1u)) != 0;
+            for (ti = 0; ti < sizeof kTickMs / sizeof kTickMs[0]; ti++) {
+                gl_res_t o = gl_run(kMask[mi], kTickMs[ti], 0);
+                gl_res_t n = gl_run(kMask[mi], kTickMs[ti], 1);
+                runs++;
+                if (multi && o.dev_chg > 10) {
+                    old_multi_blink++;
+                }
+                if (!multi && (o.bad_steady || o.dev_chg)) {
+                    old_single_bad++;
+                }
+                if (o.dev_chg > old_chg_max) {
+                    old_chg_max = o.dev_chg;
+                }
+                new_bad += n.bad_steady + (n.probes == 0);
+                new_chg += n.dev_chg;
+            }
+        }
+        printf("  GEARLED: %d Laeufe, alt blinkt bei mehreren Ports %d/8 (max. %d "
+               "Wechsel im Ruhefenster), neu abweichend %d, neu Wechsel %d\n",
+               runs, old_multi_blink, old_chg_max, new_bad, new_chg);
+        CHECK(old_multi_blink == 8, "gearled alt: Blinken nachgestellt (%d/8)",
+              old_multi_blink);
+        CHECK(old_single_bad == 0, "gearled alt: ein Port ok (%d)", old_single_bad);
+        CHECK(new_bad == 0, "gearled neu: Geraet zeigt den Spielstand (%d Abweichungen)",
+              new_bad);
+        CHECK(new_chg == 0, "gearled neu: kein Blinken (%d Wechsel)", new_chg);
+    }
 }

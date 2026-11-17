@@ -265,6 +265,13 @@ int u8_CreateProcess(const char *cmdline, const char *cwd, unsigned long flags,
                      int inherit, void *si_stdout, int hide,
                      unsigned long *out_pid, void **out_proc)
 {
+    return u8_CreateProcessEnv(cmdline, cwd, flags, inherit, si_stdout, hide, NULL, out_pid, out_proc);
+}
+
+int u8_CreateProcessEnv(const char *cmdline, const char *cwd, unsigned long flags,
+                        int inherit, void *si_stdout, int hide, const void *env_w,
+                        unsigned long *out_pid, void **out_proc)
+{
     wchar_t *wc = u8_wdup(cmdline);
     wchar_t wd[2048];
     STARTUPINFOW si;
@@ -288,8 +295,11 @@ int u8_CreateProcess(const char *cmdline, const char *cwd, unsigned long flags,
         si.hStdError = NULL;
     }
     memset(&pi, 0, sizeof pi);
+    if (env_w) {
+        flags |= CREATE_UNICODE_ENVIRONMENT;
+    }
     ok = CreateProcessW(NULL, wc, NULL, NULL, inherit ? TRUE : FALSE, flags,
-                        NULL, (cwd && *cwd) ? wd : NULL, &si, &pi);
+                        (LPVOID)env_w, (cwd && *cwd) ? wd : NULL, &si, &pi);
     free(wc);
     if (!ok) {
         return 0;

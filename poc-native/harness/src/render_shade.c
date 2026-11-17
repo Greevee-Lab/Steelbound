@@ -1484,6 +1484,20 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
             /* W315 DIAG tex_missing_mark: Stufe 1..3 belegt ohne SRV (nicht Tiefenformat 13/leer 10) */
             if (!s && g_cfg.tex_missing_mark && g_tex_stage_why != 10u && g_tex_stage_why != 13u) {
                 s = sb_th_mark(g_tex_stage_why);
+                { /* DIAG(ISSUE-TEX): markierte Stufe 1..3 einmal je xptr ins Log (Kopf, Grund, Shader) */
+                    static unsigned mx[64], mn;
+                    unsigned sxp[4], snn[4], q, hh[5] = { 0, 0, 0, 0, 0 };
+                    sb_tex_stages(sxp, snn);
+                    for (q = 0; q < mn && mx[q] != sxp[k]; q++) {}
+                    if (q == mn && mn < 64u) {
+                        mx[mn++] = sxp[k];
+                        __try { for (q = 0; q < 5u; q++) { hh[q] = *(unsigned *)(uintptr_t)(sxp[k] + q * 4u); } }
+                        __except (EXCEPTION_EXECUTE_HANDLER) {}
+                        HLOG_W("TEXMARK stufe=%u f=%u xp=0x%X hdr=[%08X %08X %08X %08X %08X] why=%u vs=0x%X ps=0x%X st=0x%X/0x%X/0x%X/0x%X",
+                               k, g_present_no, sxp[k], hh[0], hh[1], hh[2], hh[3], hh[4], g_tex_stage_why, g_im_shader,
+                               g_im_pshader, sxp[0], sxp[1], sxp[2], sxp[3]);
+                    }
+                }
             }
         }
         if (!s) { continue; }

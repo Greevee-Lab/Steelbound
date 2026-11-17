@@ -197,9 +197,32 @@ static ID3D11ShaderResourceView *bbc_copy(void)
     if (nlog < 3u) {
         nlog++;
         HLOG_I("LOCRENDER: Backbuffer als Textur #%u: Box %ux%u@%u,%u (BB %ux%u, %u Samples) -> Texel %ux%u f=%u",
-               nlog, bw, bh, bx, by, bd.Width, bd.Height, bd.SampleDesc.Count, g_game_fb_w * 2u, g_game_fb_h, g_present_no);
+               nlog, bw, bh, bx, by, bd.Width, bd.Height, bd.SampleDesc.Count, g_game_fb_w * g_loc_ss, g_game_fb_h, g_present_no);
     }
     return s_bbc_srv;
+}
+
+/* W326 LOC-WIDE: Present-Parameter der Geraeteanlage (FUN_0001DCD0, X_D3DPRESENT_PARAMETERS:
+ * MultiSampleType @16, Flags @40). WIDESCREEN (0x10) -> Aspect-Box 16:9 statt 4:3 (der
+ * 720x480-Framebuffer ist dann anamorph), Raender hart schwarz (kein Hor+ im nativen Modus).
+ * 1280x720 hat kein Supersampling (Texel-Raum 1280 statt 1440). Nur LoC-Profil. */
+unsigned g_loc_ss = 2u;
+void loc_render_on_present_params(unsigned pp)
+{
+    unsigned w = 0, h = 0, ms = 0, fl = 0;
+    if (!g_sba_loc || !pp) { return; }
+    __try {
+        w = *(const unsigned *)(uintptr_t)(pp + 0u);
+        h = *(const unsigned *)(uintptr_t)(pp + 4u);
+        ms = *(const unsigned *)(uintptr_t)(pp + 16u);
+        fl = *(const unsigned *)(uintptr_t)(pp + 40u);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    g_loc_ss = ms == 0x41121u ? 2u : 1u;
+    g_loc_wide = (fl & 0x10u) ? 1 : 0;
+    g_game_disp_aspect = g_loc_wide ? 16.0f / 9.0f : 640.0f / 480.0f;
+    HLOG_I("LOCWIDE: Geraet %ux%u ms=0x%X flags=0x%X (%s%s) -> Box %s, Supersampling %ux, loc_widescreen=%d",
+           w, h, ms, fl, (fl & 0x40u) ? "progressiv" : "interlaced", g_loc_wide ? ", WIDESCREEN" : "",
+           g_loc_wide ? "16:9" : "4:3", g_loc_ss, g_cfg.loc_widescreen);
 }
 
 int loc_render_is_bbtex(unsigned xptr)
@@ -210,7 +233,7 @@ int loc_render_is_bbtex(unsigned xptr)
 int loc_render_bb_lookup(unsigned xptr, ID3D11ShaderResourceView **srv, unsigned *w, unsigned *h)
 {
     if (!loc_render_is_bbtex(xptr)) { return 0; }
-    if (w) { *w = g_game_fb_w * 2u; } /* Xbox-Backbuffer 2x horizontal (Supersampling) */
+    if (w) { *w = g_game_fb_w * g_loc_ss; } /* Xbox-Backbuffer 2x horizontal (Supersampling; W326: 720p 1x) */
     if (h) { *h = g_game_fb_h; }
     if (srv) { *srv = bbc_copy(); }
     return 1;
@@ -313,4 +336,37 @@ int loc_render_vismap(unsigned surf, unsigned *host, unsigned *pitch)
     if (host) { *host = b; }
     if (pitch) { *pitch = (p >= 256u * 4u && p <= 4096u) ? p : 0u; }
     return 1;
+}
+
+/* ---------------------------------------------------------------------------
+ * W323 LOC-INTERP: Zwischenbilder fuer die LoC-Mission (render_interp.c, nur LoC-Profil).
+ * Mission = Lockstep aktiv ([0x306830] != 0) und Render-Auftrag [0x306EEC] == 1: Der Spiel-Render-Thread
+ * (Start 0x2C580) zeichnet das Missionsbild in FUN_00029320 und swappt darin, der Auftrag steht dabei auf 1
+ * (danach 0). Menue/Lobby swappen im Haupt-Thread (0x3C18E) mit Auftrag 0 -> keine Zwischenbilder.
+ * Wird am Swap gefragt (sb_interp_swap), also im Thread, der das Bild aufgezeichnet hat.
+ * Takt: FUN_00033050(3) wartet je Missionsbild auf 3 VBlank-Felder -> 60/3 = 20 Hz (loc_fields: TEST). */
+int loc_render_interp_mission(void)
+{
+    static int last = -1;
+    unsigned act = 0, job = 0;
+    int m;
+    if (!g_sba_loc || !g_cfg.loc_interp) { return 0; }
+    __try {
+        act = *(volatile const unsigned *)(uintptr_t)0x306830u;
+        job = *(volatile const unsigned *)(uintptr_t)0x306EECu;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    m = (act != 0u && job == 1u) ? 1 : 0;
+    if (m != last) {
+        HLOG_I("LOCINTERP: Missionsbild %s (aktiv=0x%X auftrag=%u, Takt %d Hz, f=%u)", m ? "an" : "aus", act, job,
+               loc_render_tick_hz(), g_present_no);
+        last = m;
+    }
+    return m;
+}
+
+int loc_render_tick_hz(void)
+{
+    int fields = (g_cfg.loc_fields > 0 && g_cfg.loc_fields <= 6) ? g_cfg.loc_fields : 3;
+    int hz = g_cfg.vblank_hz > 0 ? g_cfg.vblank_hz : 60;
+    return hz / fields > 0 ? hz / fields : 1;
 }

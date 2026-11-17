@@ -41,6 +41,8 @@
 #include "render_fx_rem.h" /* W133 REM-FX */
 #include "vr.h" /* W134 VR-PROTO */
 #include "render_reproj.h" /* W295 WORLD-REPROJ */
+#include "sb_profile.h" /* W323 LOC-INTERP: g_sba_loc */
+#include "loc_render.h" /* W323 LOC-INTERP: Missions-Weiche und 20-Hz-Takt */
 #include <math.h>
 
 #define IP_LISTS 4
@@ -422,6 +424,21 @@ static LONGLONG ip_now(void)
  * verteilten Vertices + n. Stichprobe genuegt: "gleich" heisst nur "exakt
  * aus Tick N zeichnen" bzw. "Vertex i auf Vertex i lerpen" - beides bleibt
  * bei einem unentdeckten Unterschied wohldefiniert. */
+/* W323 LOC-INTERP: Spieltakt der Zwischenbilder. SB: 30 Hz (unveraendert). LoC-Profil: Missionstakt
+ * 20 Hz (FUN_00033050(3) = 3 VBlank-Felder je Bild). Nur fuer K (Testtakt: K Bilder je Tick) und Logs;
+ * der Echtzeit-Takt ist zeitbasiert (t aus den Zustandszeiten), braucht also keine Taktannahme. */
+static int ip_tick_hz(void)
+{
+    return g_sba_loc ? loc_render_tick_hz() : 30;
+}
+
+/* W323: Zeit des letzten Feldwechsels. Im LoC-Profil schreibt der Haupt-Thread (Feld-Poll) und liest der
+ * Spiel-Render-Thread (Swap) -> 64 Bit atomar (x86-32). SB: ein Thread, unveraendert. */
+static LONGLONG ip_vb_get(void)
+{
+    return g_sba_loc ? InterlockedCompareExchange64(&ip_vb_qpc, 0, 0) : ip_vb_qpc;
+}
+
 unsigned sb_interp_hash(const void *base, unsigned stride, unsigned n)
 {
     const unsigned char *b = (const unsigned char *)base;
@@ -1388,7 +1405,7 @@ static int ip_init(void)
     ip_init_fail = 0;
     st_t0 = ip_now();
     HLOG_I("INTERP: bereit (interp_fps=%d, K=%d, vblank_hz=%d, vblank_qpc=%d, Takt=%s)",
-           g_cfg.interp_fps, g_cfg.interp_fps / 30 < 1 ? 1 : g_cfg.interp_fps / 30,
+           g_cfg.interp_fps, g_cfg.interp_fps / ip_tick_hz() < 1 ? 1 : g_cfg.interp_fps / ip_tick_hz(),
            g_cfg.vblank_hz, g_cfg.vblank_qpc,
            g_cfg.vblank_hz > 0 ? "Echtzeit" : "Testtakt (K Bilder am Swap)");
     return 1;
@@ -6010,6 +6027,20 @@ static void ip_id_dump(ip_list_t *A, int ai, ip_list_t *B, int bi, float t)
 
 /* Bild zwischen A und B zeigen: t >= 1 (oder ohne A) -> gesichertes Spiel-Bild
  * von B; sonst Wiedergabe in die Schatten. tag = Name fuer Bildfolgen. */
+/* W323 LOC-INTERP: Zaehler der gezeigten Bilder im LoC-Profil (Zeile LOCINTERP alle 10 s, pd_stat_log). */
+static unsigned li_mid, li_exact, li_same, li_ticks, li_dev2, li_kept;
+static double li_dev_max; /* Abweichung des Zustandsabstands vom Spieltakt (ms): Anker-Guete */
+static unsigned li_last_ser;
+static float li_last_t = -1.0f;
+static void li_note(const ip_list_t *A, const ip_list_t *B, float t)
+{
+    float tt = (t >= 1.0f || !A) ? 1.0f : t;
+    if (tt >= 1.0f) { li_exact++; } else { li_mid++; }
+    if (B->serial == li_last_ser && tt == li_last_t) { li_same++; } /* Wiederhol-Present: dasselbe Bild erneut */
+    li_last_ser = B->serial;
+    li_last_t = tt;
+}
+
 static void ip_show(ip_list_t *A, ip_list_t *B, float t, const char *tag)
 {
     int bi = ip_list_index(B), ai = A ? ip_list_index(A) : -1;
@@ -6079,6 +6110,7 @@ static void ip_show(ip_list_t *A, ip_list_t *B, float t, const char *tag)
     if (gpm) { sb_gp_end(); } /* DIAG(GPU-COST,W146) */
     dy_end(); /* W146 rt_scale_dyn */
     sb_pf_note((t >= 1.0f || !A) ? 1.0f : t, B->frame); /* DIAG(POPIN,W91): pf_ring */
+    if (g_sba_loc) { li_note(A, B, t); } /* W323 */
     t0 = ip_now();
     if (GetCurrentThreadId() == g_pd_tid) { g_phud_src = 1; } /* W138 perf_trace */
     sb_render_present_raw();
@@ -6193,6 +6225,16 @@ static void ip_poll(void)
     ip_in_poll = 1;
     ip_pair_at(ip_tnext, &A, &B, &t, &hold);
     if (hold) { st_hold++; }
+    if (g_sba_loc && (hold || !A || t >= 1.0f) && B->serial == li_last_ser && li_last_t >= 1.0f) {
+        /* W323 LOC-INTERP: naechster Tick noch nicht da und das juengste Bild steht schon exakt -> nicht erneut
+         * praesentieren (keine Wiederhol-Presents im LoC-Profil, W320); das Fenster zeigt es ohnehin weiter. */
+        li_kept++;
+        ip_tnext += ip_dt;
+        now = ip_now();
+        while (ip_tnext <= now) { ip_tnext += ip_dt; st_skip++; g_ip_skip_tot++; }
+        ip_in_poll = 0;
+        return;
+    }
     _snprintf_s(tag, sizeof tag, _TRUNCATE, "t%03u", (unsigned)(t * 1000.0f + 0.5f));
     sb_ctx_enter();
     if (A && t < 1.0f && ip_gpu_behind()) { /* PERF(TICK-PERF,W125): GPU hinterher -> Zwischenbild verfaellt */
@@ -6276,6 +6318,15 @@ static void pd_stat_log(LONGLONG now)
         g_ctxw_q = 0; g_ctxw_n = 0; g_ctxw_tick_max = 0;
         pd_hold_ms = pd_hold_max = 0.0; pd_hold_n05 = 0;
     }
+    if (pd_stat_q && g_sba_loc && (li_mid || li_exact)) { /* W323 LOC-INTERP */
+        HLOG_I("LOCINTERP stat: %.1fs takt=%dHz interp_fps=%d ticks=%u bilder=%u zwischen=%u exakt=%u wiederholt=%u "
+               "gehalten=%u L=%.1fms r=%.1fms zustand_abw>2ms=%u (max %.1fms)",
+               secs, ip_tick_hz(), g_cfg.interp_fps, li_ticks, li_mid + li_exact, li_mid, li_exact, li_same, li_kept,
+               (double)ip_lat * 1000.0 / (double)ip_qpf.QuadPart, ip_rbar * 1000.0 / (double)ip_qpf.QuadPart,
+               li_dev2, li_dev_max);
+        li_mid = li_exact = li_same = li_ticks = li_dev2 = li_kept = 0;
+        li_dev_max = 0.0;
+    }
     pd_stat_q = now;
     pd_n_ip = pd_n_hold = pd_n_late = pd_n_lockw = pd_n_iter = pd_n_gw = pd_n_gw_ok = 0;
     pd_lockw_ms = pd_lockw_max = pd_late_max = pd_wake_err_max = pd_gw_ms = 0.0;
@@ -6353,6 +6404,11 @@ static void pd_step(void)
         pd_deadline = ip_tnext;
         return;
     }
+    if (g_sba_loc) { /* W323 LOC-INTERP: keine Wiederhol-Presents im LoC-Profil (W320: Ruckeln); Menue/Lobby und
+                      * die ersten Missionsbilder praesentiert das Spiel selbst */
+        pd_deadline = now + dt;
+        return;
+    }
     {
         LONGLONG hp = dt + ip_qpf.QuadPart / 2000; /* 1/interp_fps + 0,5 ms */
         if (g_pd_last_q && now - g_pd_last_q >= hp) {
@@ -6368,6 +6424,28 @@ static void pd_step(void)
             pd_deadline = g_pd_last_q ? g_pd_last_q + hp : now + dt;
         }
     }
+}
+
+/* W330 LOC-ROLLBACK-R1 (nur LoC-Profil): Present-Takt-Thread ruht, solange der Rollback den Gast-Speicher
+ * laedt und Ticks neu rechnet (W325 D2: sonst Absturz im Treiber, Render-Thread der Zwischenbilder).
+ * on=1 wartet, bis ein laufender Schritt und ein offener Auftrag des Render-Threads fertig sind
+ * (hoechstens 200 ms). Rueckgabe 1 = ruhig. */
+static volatile LONG pd_rb_pause, pd_rb_busy;
+int sb_interp_rb_pause(int on)
+{
+    LONGLONG t0;
+    if (!on) {
+        InterlockedExchange(&pd_rb_pause, 0);
+        return 1;
+    }
+    InterlockedExchange(&pd_rb_pause, 1);
+    if (!ip_qpf.QuadPart) { QueryPerformanceFrequency(&ip_qpf); }
+    t0 = ip_now();
+    while (InterlockedCompareExchange(&pd_rb_busy, 0, 0) || InterlockedCompareExchange(&ip_rtj.st, 0, 0) == IP_RT_REQ) {
+        if (ip_now() - t0 > ip_qpf.QuadPart / 5) { return 0; }
+        SwitchToThread();
+    }
+    return 1;
 }
 
 static DWORD WINAPI pd_main(LPVOID p)
@@ -6401,6 +6479,14 @@ static DWORD WINAPI pd_main(LPVOID p)
             continue;
         }
         q0 = ip_now();
+        if (g_sba_loc) { /* W330 LOC-ROLLBACK-R1: Ruhe beim Laden/Neurechnen (sb_interp_rb_pause) */
+            InterlockedExchange(&pd_rb_busy, 1);
+            if (pd_rb_pause) {
+                InterlockedExchange(&pd_rb_busy, 0);
+                pd_deadline = now + (ip_dt > 0 ? ip_dt : ip_qpf.QuadPart / 120);
+                continue;
+            }
+        }
         pd_lock();
         w = ip_ms(q0, ip_now());
         if (w > 0.05) {
@@ -6412,6 +6498,7 @@ static DWORD WINAPI pd_main(LPVOID p)
         q0 = ip_now();
         pd_step();
         sb_ctx_leave();
+        if (g_sba_loc) { InterlockedExchange(&pd_rb_busy, 0); } /* W330 */
         if (g_cfg.ctx_wait_diag) { /* DIAG(PERF-TICK,W168): Haltezeit des Takt-Threads */
             double hm = ip_ms(q0, ip_now());
             pd_hold_ms += hm;
@@ -6467,9 +6554,30 @@ void sb_interp_field(unsigned counter)
     static unsigned last;
     if (counter != last) {
         last = counter;
-        ip_vb_qpc = ip_now(); /* Feldwechsel: Spiel-Warten endet hier */
+        if (g_sba_loc) { /* W323: Leser ist der Spiel-Render-Thread -> 64 Bit atomar. Anker = Feldgrenze selbst
+                          * (vblank_qpc: Feld k beginnt bei QPC k*f/hz), nicht der Zeitpunkt, zu dem der Haupt-Thread
+                          * sie sieht - der sieht sie unter Last bis ~15 ms spaet (A1/A2, ein Kern je Client). */
+            LONGLONG now = ip_now(), vb = now;
+            if (g_cfg.vblank_qpc && g_cfg.vblank_hz > 0 && ip_qpf.QuadPart > 0) {
+                unsigned long long hz = (unsigned long long)g_cfg.vblank_hz, f = (unsigned long long)ip_qpf.QuadPart;
+                unsigned long long k = (unsigned long long)now * hz / f;
+                vb = (LONGLONG)(k * f / hz);
+                if (vb > now || now - vb > (LONGLONG)(f / hz)) { vb = now; }
+            }
+            InterlockedExchange64(&ip_vb_qpc, vb);
+        }
+        else { ip_vb_qpc = ip_now(); } /* Feldwechsel: Spiel-Warten endet hier */
     }
-    if (ip_live) { ip_poll(); }
+    if (ip_live) {
+        if (g_sba_loc) { /* W323 LOC-INTERP: Feld-Poll (Haupt-Thread) und Swap (Spiel-Render-Thread) laufen
+                          * nebeneinander -> Paarwahl nur unter ctx_lock. Mit Takt-Thread zeigt nur er die Bilder:
+                          * dann gar nicht sperren (sonst sieht der Haupt-Thread den Feldwechsel bis 15 ms spaet, A1) */
+            if (pd_owns_clock()) { return; }
+            sb_ctx_enter();
+            ip_poll();
+            sb_ctx_leave();
+        } else { ip_poll(); }
+    }
 }
 
 void sb_interp_idle(unsigned max_ms)
@@ -6490,6 +6598,7 @@ void sb_interp_idle(unsigned max_ms)
 static int ip_mission(void)
 {
     unsigned scene = 0, mloop = 0;
+    if (g_sba_loc) { return loc_render_interp_mission(); } /* W323 LOC-INTERP: LoC-Missionsbild (Spiel-Render-Thread) */
     __try {
         scene = *(volatile unsigned *)(uintptr_t)M3D_SCENE_ADDR;
         mloop = *(volatile unsigned *)(uintptr_t)M3D_MLOOP_ADDR;
@@ -7476,7 +7585,7 @@ int sb_interp_swap(void)
     ip_gpu_poll();
     if (g_cfg.interp_guard_diag) { ip_gd_poll(); } /* DIAG(W265) */
     mission = ip_mission();
-    ip_K = g_cfg.interp_fps / 30;
+    ip_K = g_cfg.interp_fps / ip_tick_hz(); /* W323: LoC-Mission 20 Hz (120 -> K=6), SB 30 */
     if (ip_K < 1) { ip_K = 1; }
     if (ip_K > 8) { ip_K = 8; }
     ip_dt = ip_qpf.QuadPart / g_cfg.interp_fps;
@@ -7505,6 +7614,7 @@ int sb_interp_swap(void)
     }
     if (L) {
         L->ready = 1;
+        if (g_sba_loc) { li_ticks++; } /* W323 */
         if (g_cfg.ip_vb_gpu > 0) { ip_gpu_copy(L); } /* PERF(PERF-M2,W174) */
         ip_w_upload(L); /* FIX(W237) interp_hlerp */
         if (g_cfg.interp_rhash & 2) { ip_rh_take(L, L->rh); } /* DIAG(W273) */
@@ -7544,17 +7654,23 @@ int sb_interp_swap(void)
         /* 3. Zustandszeit: Fensteranfang (Feldwechsel) + mittlere Rechenzeit r
          *    (regelmaessiger als die Swap-Zeit selbst); Testtakt: Swap-Zeit. */
         L->tstate = t0;
-        if (g_cfg.vblank_hz > 0 && ip_vb_qpc && t0 - ip_vb_qpc < ip_qpf.QuadPart / 10) {
-            double r = (double)(t0 - ip_vb_qpc);
+        LONGLONG vb = ip_vb_get(); /* W323: LoC schreibt der Haupt-Thread */
+        if (g_cfg.vblank_hz > 0 && vb && t0 - vb < ip_qpf.QuadPart / 10) {
+            double r = (double)(t0 - vb);
             double rms = r * 1000.0 / (double)ip_qpf.QuadPart;
             ip_rbar = ip_rbar > 0.0 ? ip_rbar * 0.9 + r * 0.1 : r;
-            L->tstate = ip_vb_qpc + (LONGLONG)ip_rbar;
+            L->tstate = vb + (LONGLONG)ip_rbar;
             st_r_ms += rms;
             if (rms > st_r_max) { st_r_max = rms; }
             st_r_n++;
             ip_r_last_ms = rms; /* PERF(TICK-PERF,W125): interp_gpu_tight */
         }
         if (A && L->tstate <= A->tstate) { L->tstate = A->tstate + 1; }
+        if (g_sba_loc && A) { /* W323: Zustandsabstand gegen 1/Takt */
+            double dv = fabs(ip_ms(A->tstate, L->tstate) - 1000.0 / (double)ip_tick_hz());
+            if (dv > li_dev_max) { li_dev_max = dv; }
+            if (dv > 2.0) { li_dev2++; }
+        }
         /* 4. Latenz L = max(Swap_N - Zustand_N-1) der letzten 32 Ticks + 1 ms. */
         if (A) {
             unsigned w;
@@ -7659,4 +7775,146 @@ int sb_interp_swap(void)
     if (ip_live) { ip_poll(); }
     if (g_cfg.interp_diag >= 1 && st_ticks >= 300u) { sb_ctx_enter(); ip_stat_log(); sb_ctx_leave(); } /* W138: Zaehler auch vom Takt-Thread */
     return took;
+}
+
+/* ---------- ISSUE-PHOTO: Aufzeichnung bei Bedarf ohne FPS-INTERP (interp_fps=0) ----------
+ * Fotos ueber Fenstergroesse (4K/8K/xN), "nur Aussenwelt", HUD aus und die freie Kamera brauchen die Draw-Liste
+ * eines Ticks (sb_interp_photo_render). Mit interp_fps=0 zeichnet sb_interp_swap nichts auf; auf Wunsch des
+ * Fotomodus bzw. Schnell-Screenshots (render_photo.c) werden hier ZWEI Ticks aufgezeichnet - derselbe Weg wie
+ * mit FPS-INTERP (g_ip_recording, Tick-VB, Schatten), nur ohne Zwischenbilder, ohne Zuordnung und ohne
+ * Offscreen-BB: das Spiel zeichnet weiter direkt in den Swapchain-BB, gesichert wird am Swap vor der
+ * Endbild-Nachbearbeitung. Der erste Tick (A) liefert nur den Anfangsstand der Ziele fuer den zweiten (B, das
+ * Foto) - wie der Vortick mit FPS-INTERP; mit B allein startet die Wiedergabe vom Endstand von B, und Ziele, die
+ * das Spiel nicht loescht, sondern ueberblendet, weichen ab (Messung: 4600-9100 px, max 4-7). Ohne Wunsch je
+ * Present zwei Vergleiche, keine Aufzeichnung, keine Puffer (Standardpfad bitgleich). Spiel-Thread. */
+static volatile LONG ip_r1_want;
+static int ip_r1_st;     /* SB_REC1_* (ohne WAIT) */
+static int ip_r1_n;      /* fertige Ticks dieser Aufzeichnung (0 = A laeuft, 1 = B laeuft bzw. folgt) */
+static int ip_r1_next;   /* A fertig: B beginnt nach dem naechsten Present */
+static LONGLONG ip_r1_t0;
+
+void sb_interp_rec1_request(void)
+{
+    InterlockedExchange(&ip_r1_want, 1);
+}
+
+int sb_interp_rec1_state(void)
+{
+    if (ip_r1_want || ip_r1_next) { return SB_REC1_WAIT; }
+    if (ip_r1_st == SB_REC1_RUN && ip_rec < 0) { return SB_REC1_FAIL; } /* zwischendurch sb_interp_reset */
+    if (ip_r1_st == SB_REC1_RUN && ip_r1_n == 0) { return SB_REC1_WAIT; } /* erst A; die Pause gilt nach B */
+    if (ip_r1_st == SB_REC1_READY && !(ip_nhist >= 1 && g_ipl[ip_hist[ip_nhist - 1]].ready)) { return SB_REC1_NONE; }
+    return ip_r1_st;
+}
+
+/* Naechste Liste aufnehmen (k = Listen-Index). 1 = laeuft. Unter ctx_lock. */
+static int ip_r1_start(int k)
+{
+    ip_list_reset(&g_ipl[k]);
+    ip_rec = (ip_vb_ensure(&g_ipl[k]) && ip_rq_ensure(&g_ipl[k])) ? k : -1;
+    g_ip_recording = (ip_rec >= 0);
+    ip_r1_st = g_ip_recording ? SB_REC1_RUN : SB_REC1_FAIL;
+    return g_ip_recording;
+}
+
+/* sb_render_present nach sb_pause_point: der folgende Tick wird aufgezeichnet (A bzw. nach A B). */
+void sb_interp_rec1_arm(void)
+{
+    int mission, ok = 0;
+    if (!ip_r1_want && !ip_r1_next) { return; }
+    if (ip_r1_next) { /* B direkt nach A */
+        ip_r1_next = 0;
+        if (ip_rec >= 0 || g_cfg.interp_fps > 0 || sb_render_offscreen()) { ip_r1_st = SB_REC1_FAIL; return; }
+        sb_ctx_enter();
+        ok = ip_r1_start(1);
+        sb_ctx_leave();
+        if (!ok) { HLOG_W("PHOTO: Aufzeichnung bei Bedarf: Tick-Puffer fuer B fehlgeschlagen"); }
+        return;
+    }
+    InterlockedExchange(&ip_r1_want, 0);
+    ip_r1_st = SB_REC1_FAIL;
+    if (g_cfg.interp_fps > 0 || sb_render_offscreen() || ip_rec >= 0) { return; } /* FPS-INTERP zeichnet selbst auf */
+    if (!ip_init()) {
+        HLOG_W("PHOTO: Aufzeichnung bei Bedarf nicht moeglich (INTERP-Init)");
+        return;
+    }
+    sb_ctx_enter();
+    mission = ip_mission();
+    if (mission) {
+        ip_hist_clear(); /* alte Bedarfs-Listen */
+        ip_r1_n = 0;
+        ok = ip_r1_start(0);
+        ip_r1_t0 = ip_now();
+    }
+    sb_ctx_leave();
+    HLOG_I("PHOTO: Aufzeichnung bei Bedarf (interp_fps=0): %s (f=%u)",
+           !mission ? "ausserhalb der Mission - keine" : ok ? "die naechsten 2 Ticks" : "Tick-Puffer fehlgeschlagen",
+           g_present_no);
+}
+
+/* Swap (sb_render_present_body, direkter BB vor der Endbild-Nachbearbeitung): Tick sichern. */
+void sb_interp_rec1_end(void)
+{
+    ip_list_t *L;
+    int li, ok = 0;
+    unsigned nops, nverts;
+    if (ip_r1_st != SB_REC1_RUN) { return; }
+    if (ip_rec < 0 || g_cfg.interp_fps > 0 || sb_render_offscreen()) { ip_r1_st = SB_REC1_FAIL; return; }
+    sb_ctx_enter();
+    li = ip_rec;
+    L = &g_ipl[li];
+    ip_rec = -1;
+    g_ip_recording = 0;
+    L->frame = g_present_no;
+    L->serial = ++ip_serial;
+    L->tswap = L->tstate = ip_now();
+    nops = L->nops;
+    nverts = L->nverts;
+    if (ip_mission() && !L->overflow && L->nops) {
+        ip_list_snap(L, li);
+        ok = L->snap_ok;
+    }
+    if (ok) {
+        L->ready = 1;
+        ip_hist[ip_r1_n] = li;
+        ip_nhist = ip_r1_n + 1;
+        ip_r1_n++;
+        if (ip_r1_n >= 2) { ip_r1_st = SB_REC1_READY; } else { ip_r1_next = 1; } /* A fertig -> B */
+    } else {
+        ip_list_reset(L);
+        ip_r1_st = SB_REC1_FAIL;
+    }
+    sb_ctx_leave();
+    HLOG_I("PHOTO: Aufzeichnung bei Bedarf %s %s: Tick f=%u ops=%u vertices=%u ziele=%d ueberlauf=%d (%.1f ms)",
+           li ? "B" : "A", ok ? "fertig" : "fehlgeschlagen", L->frame, nops, nverts, ok ? L->nrefs : 0, L->overflow,
+           ip_ms(ip_r1_t0, ip_now()));
+}
+
+/* Nach dem Foto bzw. beim Verlassen des Fotomodus: Listen, Schatten und Tick-Puffer frei (keine Dauerkosten). */
+void sb_interp_rec1_free(void)
+{
+    int i;
+    InterlockedExchange(&ip_r1_want, 0);
+    ip_r1_next = 0;
+    ip_r1_n = 0;
+    if (ip_r1_st == SB_REC1_NONE || !ip_init_done || g_cfg.interp_fps > 0 || sb_render_offscreen()) {
+        ip_r1_st = SB_REC1_NONE;
+        return;
+    }
+    sb_ctx_enter();
+    sb_interp_reset("Foto: Aufzeichnung bei Bedarf frei");
+    for (i = 0; i < IP_LISTS; i++) {
+        ip_list_t *L = &g_ipl[i];
+        if (L->vb) { ID3D11Buffer_Release(L->vb); L->vb = NULL; }
+        if (L->rqxsrv) { ID3D11ShaderResourceView_Release(L->rqxsrv); L->rqxsrv = NULL; }
+        if (L->rqx) { ID3D11Buffer_Release(L->rqx); L->rqx = NULL; }
+        if (L->rqc) { ID3D11Buffer_Release(L->rqc); L->rqc = NULL; }
+        if (L->wb) { ID3D11Buffer_Release(L->wb); L->wb = NULL; }
+        free(L->ipw);
+        L->ipw = NULL;
+        L->vbcap = L->rqxcap = L->rqccap = L->wbcap = L->ipwcap = 0;
+        L->nodisc = 0;
+    }
+    ip_r1_st = SB_REC1_NONE;
+    sb_ctx_leave();
 }

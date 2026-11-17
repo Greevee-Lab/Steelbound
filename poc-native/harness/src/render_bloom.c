@@ -364,6 +364,29 @@ void bloom_diag_pre(const im_vertex_t *out, unsigned nout, unsigned nsrc, int rh
             } else if (!w) { g_bl_wdrop++; }
             if (w) { w->n++; w->verts += nout; w->i1 = g_bl_i; }
         }
+        if (g_cfg.bloom_vsc && g_rq_active && rs_cmask != 0u && tslot >= 0 && g_rtt[tslot].w >= 256u) {
+            /* DIAG(ISSUE-LIGHT): je Welt-Draw die Licht-Konstanten des Spiels (Spiegel 0x21BCA8, c = Index - 96)
+             * und Vertex 0 (CPU-Interpreter: Position, oD0/oD1) - Hauptpass gegen zweiten Pass vergleichen. */
+            static const int creg[8] = { 0, 1, 10, 40, 4, 5, 13, 14 };
+            float cv[8][4], pos[4], ot[4][4];
+            extern float g_rq_diag_od[3][4];
+            unsigned q;
+            for (q = 0; q < 8u; q++) {
+                __try { memcpy(cv[q], (const void *)(uintptr_t)(SBA(0x21BCA8u) + (unsigned)(creg[q] + 96) * 16u), 16); }
+                __except (EXCEPTION_EXECUTE_HANDLER) { memset(cv[q], 0, 16); }
+            }
+            memset(pos, 0, sizeof pos);
+            if (nsrc) { rq_diag_vertex(0, pos, ot); }
+            HLOG_W("BLOOM vsc p=%u i=%u tgt=%d vs=0x%X ps=0x%X n=%u v0=(%.2f,%.2f,%.2f) oD0=(%.3f,%.3f,%.3f) oD1=(%.3f,%.3f,%.3f) "
+                   "c0=(%.3f,%.3f,%.3f,%.3f) c1=(%.3f,%.3f,%.3f,%.3f) c10=(%.3f,%.3f,%.3f,%.3f) c40=(%.3f,%.3f,%.3f,%.3f) "
+                   "c4=(%.3f,%.3f,%.3f,%.3f) c5=(%.3f,%.3f,%.3f,%.3f) c13=(%.3f,%.3f,%.3f,%.3f) c14=(%.3f,%.3f,%.3f,%.3f)",
+                   g_bl_p, g_bl_i, tslot, g_im_shader, g_im_pshader, nsrc, pos[0], pos[1], pos[2],
+                   g_rq_diag_od[0][0], g_rq_diag_od[0][1], g_rq_diag_od[0][2], g_rq_diag_od[1][0], g_rq_diag_od[1][1], g_rq_diag_od[1][2],
+                   cv[0][0], cv[0][1], cv[0][2], cv[0][3], cv[1][0], cv[1][1], cv[1][2], cv[1][3],
+                   cv[2][0], cv[2][1], cv[2][2], cv[2][3], cv[3][0], cv[3][1], cv[3][2], cv[3][3],
+                   cv[4][0], cv[4][1], cv[4][2], cv[4][3], cv[5][0], cv[5][1], cv[5][2], cv[5][3],
+                   cv[6][0], cv[6][1], cv[6][2], cv[6][3], cv[7][0], cv[7][1], cv[7][2], cv[7][3]);
+        }
         if (g_cfg.shadow_diag > 0 && g_rq_active && !rel) {
             /* DIAG(SHADOWBUF,W127): Draws mit Schattenpuffer-Stufe (tsc[k].w != 0,
              * Tiefen-SRV) protokollieren - je Diag-Bild hoechstens shadow_diag;

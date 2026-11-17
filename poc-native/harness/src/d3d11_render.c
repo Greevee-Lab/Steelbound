@@ -627,12 +627,12 @@ int sb_render_is_open(void)
  * Debug koennen jederzeit beide einsehen). */
 static void sb_update_rig(void)
 {
-    float game_aspect = 640.0f / 480.0f, out_aspect, k;
+    float game_aspect = g_game_disp_aspect, out_aspect, k; /* W326: SB 640/480 wie bisher */
     unsigned i;
     if (g_vp_game.w && g_vp_game.h) {
         game_aspect = (float)g_vp_game.w / (float)g_vp_game.h;
-        if (g_game_fb_w != 640u || g_game_fb_h != 480u) { /* W277 LoC: Pixelseitenverhaeltnis (720x480 = 4:3) */
-            game_aspect *= (4.0f / 3.0f) / ((float)g_game_fb_w / (float)g_game_fb_h);
+        if (g_game_fb_w != 640u || g_game_fb_h != 480u) { /* W277 LoC: Pixelseitenverhaeltnis (720x480 = 4:3; W326: 16:9 anamorph) */
+            game_aspect *= g_game_disp_aspect / ((float)g_game_fb_w / (float)g_game_fb_h);
         }
     }
     out_aspect = (float)g_bb_w / (float)(g_bb_h ? g_bb_h : 1);
@@ -664,6 +664,8 @@ static void sb_update_rig(void)
 }
 
 unsigned g_game_fb_w = 640u, g_game_fb_h = 480u; /* W277: SB fest 640x480 */
+float g_game_disp_aspect = 640.0f / 480.0f; /* W326 LOC-WIDE: SB fest 4:3, LoC 16:9 bei WIDESCREEN */
+int g_loc_wide; /* W326: LoC nativ 16:9 (nur LoC-Profil) */
 
 void sb_render_on_create_device(unsigned want_w, unsigned want_h)
 {
@@ -955,6 +957,7 @@ void sb_render_present(unsigned flags)
     sb_render_present_body(flags);
     g_ph_zone = z0;
     sb_pause_point(); /* W188 GAME-MENU: bei Pause-Wunsch steht der Spiel-Thread hier (sonst sofort zurueck) */
+    sb_interp_rec1_arm(); /* ISSUE-PHOTO: Foto-Wunsch ohne FPS-INTERP -> naechster Tick zeichnet auf (sonst sofort zurueck) */
 }
 static void sb_render_present_body(unsigned flags)
 {
@@ -1013,6 +1016,7 @@ static void sb_render_present_body(unsigned flags)
             sb_ctx_leave();
         }
     }
+    if (!g_swap_res) { sb_interp_rec1_end(); } /* ISSUE-PHOTO: Bedarfs-Aufzeichnung sichern (vor Nachbearbeitung/Overlay; sonst sofort zurueck) */
     /* W107 EDGE-MODE: Bildraender ausserhalb der 4:3-Box (vor dem
      * Screenshot). Mit FPS-INTERP (g_swap_res) erst nach der Kopie in den
      * Swapchain-BB (sb_render_blit) - Aufzeichnung/Verify bleiben unmaskiert. */
@@ -1049,7 +1053,7 @@ static void sb_render_present_body(unsigned flags)
         if (pres) { sb_xfx_vapor_apply(g_rtv, pres); ID3D11Resource_Release(pres); }
         sb_ctx_leave();
     }
-    if ((g_cfg.edge_mode > 0 || sb_mv_on()) && !g_swap_res) { /* W319: Monitoransicht immer mit schwarzem Rand ausserhalb der 4:3-Box */
+    if ((g_cfg.edge_mode > 0 || sb_mv_on() || g_loc_wide) && !g_swap_res) { /* W326: LoC nativ 16:9 ohne Hor+ */ /* W319: Monitoransicht immer mit schwarzem Rand ausserhalb der 4:3-Box */
         sb_ctx_enter();
         sb_edge_apply(g_rtv);
         sb_ctx_leave();
@@ -1094,7 +1098,7 @@ static void sb_render_present_body(unsigned flags)
                 n_present <= (unsigned)g_cfg.screenshot_frame +
                     (unsigned)g_cfg.screenshot_max * (unsigned)g_cfg.screenshot_every) {
                 sb_render_screenshot(n_present);
-            } else if (((g_cfg.shade_ab && g_cfg.shading) || g_cfg.mfx_ab || g_cfg.shfx_ab || g_cfg.shadow_ab) && /* W127 shadow_ab */ /* DIAG(RENDER-QA3,W100 / MONITOR-FX,W105 / SHADE-FX,W121): Partnerbild */
+            } else if (((g_cfg.shade_ab && g_cfg.shading) || g_cfg.mfx_ab || g_cfg.shfx_ab || g_cfg.shadow_ab || g_cfg.psconst_ab) && /* W127 shadow_ab, ISSUE-LIGHT psconst_ab */ /* DIAG(RENDER-QA3,W100 / MONITOR-FX,W105 / SHADE-FX,W121): Partnerbild */
                        ((n_present - (unsigned)g_cfg.screenshot_frame) % (unsigned)g_cfg.screenshot_every == 1u ||
                         (g_cfg.shfx_ab == 5 && (n_present - (unsigned)g_cfg.screenshot_frame) % (unsigned)g_cfg.screenshot_every == 2u)) && /* W131 Preset-Tripel: +2 */
                        n_present <= (unsigned)g_cfg.screenshot_frame + 1u +
@@ -1423,7 +1427,7 @@ void sb_render_blit(ID3D11Resource *src)
         sb_xfx_vapor_apply(g_swap_rtv, g_swap_res);
         sb_ctx_leave();
     }
-    if (!g_vr_blit && (g_cfg.edge_mode > 0 || sb_mv_on())) { /* W319: Monitoransicht immer mit schwarzem Rand */ /* W107 EDGE-MODE: Maske auf das gezeigte Bild (nach Verify/Wiedergabe) */
+    if (!g_vr_blit && (g_cfg.edge_mode > 0 || sb_mv_on() || g_loc_wide)) { /* W326 */ /* W319: Monitoransicht immer mit schwarzem Rand */ /* W107 EDGE-MODE: Maske auf das gezeigte Bild (nach Verify/Wiedergabe) */
         sb_ctx_enter();
         if (!g_swap_rtv &&
             FAILED(ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv))) {
@@ -1722,13 +1726,15 @@ void sb_render_pause_frame(void)
         sb_ctx_leave();
         return;
     }
-    if (sb_photo_quick_pending()) { sb_photo_quick_run((ID3D11Resource *)g_pause_snap); } /* W290 QUICK-SHOT */
-    if (sb_photo_active()) { (void)sb_photo_pause_image((ID3D11Resource *)g_pause_snap, NULL); } /* W195: x1 aus der Kopie */
     {
-        ID3D11Resource *bb = NULL;
+        ID3D11Resource *bb = NULL, *show = (ID3D11Resource *)g_pause_snap;
+        if (sb_photo_quick_pending()) { sb_photo_quick_run((ID3D11Resource *)g_pause_snap); } /* W290 QUICK-SHOT */
+        /* W195: x1 aus der Kopie; ISSUE-PHOTO: mit Bedarfs-Aufzeichnung die Vorschau (freie Kamera, nur Aussenwelt,
+         * HUD aus) wie mit FPS-INTERP - sonst liefert sb_photo_pause_image die Kopie zurueck (unveraendert) */
+        if (sb_photo_active()) { show = sb_photo_pause_image(show, NULL); }
         ID3D11RenderTargetView_GetResource(g_rtv, &bb);
         if (bb) {
-            ID3D11DeviceContext_CopyResource(g_ctx, bb, (ID3D11Resource *)g_pause_snap);
+            ID3D11DeviceContext_CopyResource(g_ctx, bb, show);
             ID3D11Resource_Release(bb);
         }
     }
@@ -1838,7 +1844,7 @@ long sb_render_device_reason(void)
  * und Inhalt fressen; 2D lebt immer im 640x480-Framebuffer. */
 void sb_aspect_box(unsigned *bx, unsigned *by, unsigned *bw, unsigned *bh)
 {
-    float ga = 640.0f / 480.0f, ba;
+    float ga = g_game_disp_aspect, ba; /* W326: SB 640/480, LoC 16:9 nativ */
     ba = (float)g_bb_w / (float)(g_bb_h ? g_bb_h : 1);
     if (ga >= ba) { /* Letterbox (oder Vollbild bei Gleichheit) */
         *bw = g_bb_w;

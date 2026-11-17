@@ -4,3 +4,4 @@
 int loc_sync_install(void);
 void loc_sync_tick(int waited_s);
 void loc_sync_frame(unsigned f); /* je Present (Testfolge loc_steps) */
+int loc_pace_install(void); /* W320 LOC-PERF: Missionstakt messen (loc_pace_diag) / Gegenprobe (loc_fields) */

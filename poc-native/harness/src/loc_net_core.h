@@ -41,15 +41,28 @@ typedef struct locnet {
     int rtt_ms;
     locnet_stats st;
     locnet_log_fn log;
+    struct locnetsim *sim; /* W322 LOC-NETLAT: Verzoegerungsstufe (NULL = aus, Standard) */
+    int nodelay;           /* W322: 1 = TCP_NODELAY auf den Spiel-TCP-Verbindungen (kein Nagle-Stau) */
+    struct loctun *tun;    /* W324 LOC-NETPLAY: eigener UDP-Transport (NULL = Original-TCP/UDP, Standard) */
+    /* W329: Host-UDP-Ports, die das Spiel an der eigenen Adresse gebunden hat (Bit je Port). Der Transport stellt
+     * Datagramme von Mitspielern nur an diese Ports zu - nie an fremde Dienste auf Loopback. */
+    volatile LONG udp_bound[65536 / 32];
 } locnet;
 
 /* 1 = Loopback (127/8), privat (10/8, 172.16/12, 192.168/16) oder link-local (169.254/16). */
 int locnet_ip_allowed(uint32_t ip_net);
 
-/* addr: "auto" oder IPv4; peers: "auto" oder "ip[:basis],..."; base 1000..64000.
+/* addr: "auto", "random" (W324: zufaellige 127.64-127.127.x.y, eindeutig ueber Rechner hinweg) oder IPv4;
+ * peers: "auto", "none" (W324: Liste kommt vom Transport) oder "ip[:basis],..."; base 1000..64000.
  * Rueckgabe 1 = bereit. Ruft WSAStartup selbst. */
 int locnet_init(locnet *n, const char *addr, int base, const char *peers, int rtt_ms, locnet_log_fn log);
 void locnet_shutdown(locnet *n);
+/* W324: Mitspieler zur Laufzeit ergaenzen (Transport: vip mit Stellvertreter-Basis). Thread-sicher fuer
+ * gleichzeitige Leser (Eintrag erst schreiben, dann Zahl erhoehen). Vorhandene ip: Basis aktualisieren. */
+void locnet_peer_add(locnet *n, uint32_t ip, uint16_t base);
+
+/* W329: 1 = das Spiel hat UDP <self_ip>:host_port gebunden (locnet_bind bzw. implizit beim ersten sendto). */
+int locnet_udp_bound(const locnet *n, uint16_t host_port);
 
 /* Portabbildung (Host-Byte-Reihenfolge). */
 uint16_t locnet_port_out(const locnet *n, uint32_t ip_net, uint16_t game_port);
@@ -64,6 +77,7 @@ int locnet_bind(locnet *n, SOCKET s, const struct sockaddr *a, int len);
 int locnet_connect(locnet *n, SOCKET s, const struct sockaddr *a, int len);
 SOCKET locnet_accept(locnet *n, SOCKET s, struct sockaddr *a, int *len);
 int locnet_sendto(locnet *n, SOCKET s, const char *buf, int len, int flags, const struct sockaddr *to, int tolen);
+int locnet_send(locnet *n, SOCKET s, const char *buf, int len, int flags); /* W322: TCP send (ueber sim, falls aktiv) */
 int locnet_recvfrom(locnet *n, SOCKET s, char *buf, int len, int flags, struct sockaddr *from, int *fromlen);
 
 /* XNADDR (36 B): ina, inaOnline, wPortOnline, abEnet[6], abOnline[20]. */

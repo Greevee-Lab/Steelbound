@@ -106,6 +106,7 @@ unsigned sb_render_backbuffer_h(void);
 /* FPS-INTERP (W69, render_interp.c): Zwischenbilder in der VBlank-Warte-
  * schleife zeigen (Spiel-Thread). Nur bei [render] interp_fps>0 aktiv. */
 int sb_interp_pending(void);          /* 1 = Bilder des laufenden Ticks offen */
+int sb_interp_rb_pause(int on);       /* W330 LOC-ROLLBACK-R1: Present-Takt ruhen lassen (nur LoC), 1 = ruhig */
 void sb_interp_idle(unsigned max_ms); /* faelliges Bild zeigen oder schlafen (<= max_ms) */
 void sb_interp_field(unsigned counter); /* Feld-Poll: Wechsel merken (Anker), faelliges Bild zeigen */
 

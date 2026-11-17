@@ -335,3 +335,13 @@ void loc_mem_stats(void)
            g_nalloc, g_nreuse, (double)g_bytes_reuse / 1048576.0, g_nfree, (double)g_off / 1048576.0,
            LOC_MEM_SIZE >> 20, g_nfull ? " - VOLL erreicht" : "");
 }
+
+/* W330 LOC-ROLLBACK-R1: untere Ansicht + Groesse + Fuellstand (Spiegel: lo|0x80000000, lo|0xF0000000) */
+int loc_mem_range(uint32_t *lo, uint32_t *size, uint32_t *used)
+{
+    if (!g_lo) return 0;
+    *lo = g_lo;
+    *size = LOC_MEM_SIZE;
+    *used = g_off;
+    return 1;
+}

@@ -133,37 +133,37 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
      * Launcher-Neustart grau (Tester-Befund Issue #6). */
     if (s->game_image[0] && e->data_ok) {
         hit(&out[1], 1, LR_LVL_INFO);
-        strcpy_s(out[1].text, sizeof out[1].text, LT("gui.rule_r1"));
+        strncpy_s(out[1].text, sizeof out[1].text, LT("gui.rule_r1"), _TRUNCATE);
     }
     /* R2: Programmdatei aus dem Spielordner (Hinweis) */
     if (!s->game_image[0] && e->xbe_auto) {
         hit(&out[2], 2, LR_LVL_INFO);
-        strcpy_s(out[2].text, sizeof out[2].text, LT("gui.rule_r2"));
+        strncpy_s(out[2].text, sizeof out[2].text, LT("gui.rule_r2"), _TRUNCATE);
     }
     /* R3: Start nur mit gueltigen Spieldateien */
     if (!e->data_ok) {
         hit(&out[3], 3, LR_LVL_ERR);
         if (!s->game_image[0] && !s->xbe_path[0] && !s->media_root[0]) {
-            strcpy_s(out[3].text, sizeof out[3].text, LT("gui.rule_r3"));
+            strncpy_s(out[3].text, sizeof out[3].text, LT("gui.rule_r3"), _TRUNCATE);
         } else if (e->data_err[0]) {
             strcpy_s(out[3].text, sizeof out[3].text, e->data_err);
         } else {
-            strcpy_s(out[3].text, sizeof out[3].text, LT("gui.rule_r3"));
+            strncpy_s(out[3].text, sizeof out[3].text, LT("gui.rule_r3"), _TRUNCATE);
         }
     }
     /* R4: Start nur mit Client */
     if (!e->has_ldr) {
         hit(&out[4], 4, LR_LVL_ERR);
-        strcpy_s(out[4].text, sizeof out[4].text, LT("gui.rule_r4"));
+        strncpy_s(out[4].text, sizeof out[4].text, LT("gui.rule_r4"), _TRUNCATE);
     }
     /* R5: VR nur mit OpenXR-Runtime */
     if (!e->vr_runtime) {
         hit(&out[5], 5, LR_LVL_INFO);
-        strcpy_s(out[5].text, sizeof out[5].text, LT("gui.rule_r5"));
+        strncpy_s(out[5].text, sizeof out[5].text, LT("gui.rule_r5"), _TRUNCATE);
     }
     /* R6: Vorschau wirkt nur beim VR-Start (immer Hinweis) */
     hit(&out[6], 6, LR_LVL_INFO);
-    strcpy_s(out[6].text, sizeof out[6].text, LT("gui.rule_r6"));
+    strncpy_s(out[6].text, sizeof out[6].text, LT("gui.rule_r6"), _TRUNCATE);
     /* R7: Aufloesung nur im Fenster */
     if (s->window_mode == 1 || s->window_mode == 2) {
         char res[48];
@@ -180,13 +180,13 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
     /* R8: Bildwiederholrate nur exklusiv */
     if (s->window_mode != 2) {
         hit(&out[8], 8, LR_LVL_INFO);
-        strcpy_s(out[8].text, sizeof out[8].text, LT("gui.rule_r8"));
+        strncpy_s(out[8].text, sizeof out[8].text, LT("gui.rule_r8"), _TRUNCATE);
     }
     /* R9: W207 Performance keeps 60 FPS even in exclusive fullscreen. */
     /* W296: Monitor (auto, -1 = Standard Original) folgt exklusiv ebenfalls dem Modus (W223) */
     if (s->window_mode == 2 && ((s->fs_interp_match && s->interp_fps > 0) || s->interp_fps == -1)) {
         hit(&out[9], 9, LR_LVL_INFO);
-        strcpy_s(out[9].text, sizeof out[9].text, LT("gui.rule_r9"));
+        strncpy_s(out[9].text, sizeof out[9].text, LT("gui.rule_r9"), _TRUNCATE);
     }
     /* R10: Bildrate ueber der Bildwiederholrate auf Fenster/randlos (W223:
      * jede feste Rate, nicht nur 120; auto folgt dem Monitor). W309: auch
@@ -204,7 +204,7 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
         if (w > 0 && h > 0 && (unsigned long long)w * 3 ==
                                   (unsigned long long)h * 4) {
             hit(&out[11], 11, LR_LVL_INFO);
-            strcpy_s(out[11].text, sizeof out[11].text, LT("gui.rule_r11"));
+            strncpy_s(out[11].text, sizeof out[11].text, LT("gui.rule_r11"), _TRUNCATE);
         }
     }
     /* R12: Verlaufsbreite/-staerke nur bei "Ausblenden" */
@@ -215,39 +215,39 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
     }
     /* R13: Seitenverhaeltnis fest (S3.10) */
     hit(&out[13], 13, LR_LVL_INFO);
-    strcpy_s(out[13].text, sizeof out[13].text, LT("gui.rule_r13"));
+    strncpy_s(out[13].text, sizeof out[13].text, LT("gui.rule_r13"), _TRUNCATE);
     /* R14: Voreinstellung waehlen ersetzt Benutzerdefiniert (Rueckfrage);
      * W173: ein Preset, Schluessel des Effect Packs zaehlen nicht */
     if (lcfg_gfx_preset(s, e->gfx_lock) == LGP_CUSTOM) {
         hit(&out[14], 14, LR_LVL_INFO);
-        strcpy_s(out[14].text, sizeof out[14].text, LT("gui.rule_r14"));
+        strncpy_s(out[14].text, sizeof out[14].text, LT("gui.rule_r14"), _TRUNCATE);
     }
     /* R15 (W173): Schatten, weiche Schatten und FXAA "Welt" nur mit
      * Weltbeleuchtung (Schatten-Elemente grau; FXAA-Auswahl: Zusatz) */
     if (s->shx[LSHX_SHADING] != 1) {
         hit(&out[15], 15, LR_LVL_INFO);
-        strcpy_s(out[15].text, sizeof out[15].text,
-                 LT((aa == 2 || aa == 3) ? "gui.rule_r15_aa" : "gui.rule_r15"));
+        strncpy_s(out[15].text, sizeof out[15].text,
+                 LT((aa == 2 || aa == 3) ? "gui.rule_r15_aa" : "gui.rule_r15"), _TRUNCATE);
     }
     /* R16: weiche Schatten nur mit Schatten (W173: Element im Launcher) */
     if (!s->shx[LSHX_SHADOW] && !out[15].active) {
         hit(&out[16], 16, LR_LVL_INFO);
-        strcpy_s(out[16].text, sizeof out[16].text, LT("gui.rule_r16"));
+        strncpy_s(out[16].text, sizeof out[16].text, LT("gui.rule_r16"), _TRUNCATE);
     }
     /* R17: HD-Texturen an, aber keine Texturquelle */
     if (s->remaster && s->hd_textures && tex_any == 0) {
         hit(&out[17], 17, LR_LVL_INFO);
-        strcpy_s(out[17].text, sizeof out[17].text, LT("gui.rule_r17"));
+        strncpy_s(out[17].text, sizeof out[17].text, LT("gui.rule_r17"), _TRUNCATE);
     }
     /* R18: Texturdetail nur mit aktivem Textur-Pack */
     if (e->tex_packs == 0) {
         hit(&out[18], 18, LR_LVL_INFO);
-        strcpy_s(out[18].text, sizeof out[18].text, LT("gui.rule_r18"));
+        strncpy_s(out[18].text, sizeof out[18].text, LT("gui.rule_r18"), _TRUNCATE);
     }
     /* R19: Kategorie-Grenzen nur bei Texturdetail 2x/4x */
     if (e->pk_level == 0) {
         hit(&out[19], 19, LR_LVL_INFO);
-        strcpy_s(out[19].text, sizeof out[19].text, LT("gui.rule_r19"));
+        strncpy_s(out[19].text, sizeof out[19].text, LT("gui.rule_r19"), _TRUNCATE);
     }
     /* R20: Effekt-Pack setzt Effekte/Farben (Pack gewinnt beim Start) */
     if (e->fx_pack[0]) {
@@ -268,33 +268,33 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
     /* R22: Pruefung ohne Spielversion (kein Abbild/keine XBE) */
     if (!e->game_for_check) {
         hit(&out[22], 22, LR_LVL_INFO);
-        strcpy_s(out[22].text, sizeof out[22].text, LT("gui.rule_r22"));
+        strncpy_s(out[22].text, sizeof out[22].text, LT("gui.rule_r22"), _TRUNCATE);
     }
     /* R23: Maus-aus-Schalter nur mit Original-Controller */
     if (!s->sbc_usb) {
         hit(&out[23], 23, LR_LVL_INFO);
-        strcpy_s(out[23].text, sizeof out[23].text, LT("gui.rule_r23"));
+        strncpy_s(out[23].text, sizeof out[23].text, LT("gui.rule_r23"), _TRUNCATE);
     }
     /* R24: Maus-Zielen wirkungslos bei Controller + Maus aus */
     if (s->sbc_usb && s->sbc_mouse_off) {
         hit(&out[24], 24, LR_LVL_INFO);
-        strcpy_s(out[24].text, sizeof out[24].text, LT("gui.rule_r24"));
+        strncpy_s(out[24].text, sizeof out[24].text, LT("gui.rule_r24"), _TRUNCATE);
     }
     /* R25: Controller gewaehlt, Geraet nicht gefunden */
     if (s->sbc_usb && e->sbc_found == 0) {
         hit(&out[25], 25, LR_LVL_WARN);
-        strcpy_s(out[25].text, sizeof out[25].text, LT("gui.rule_r25"));
+        strncpy_s(out[25].text, sizeof out[25].text, LT("gui.rule_r25"), _TRUNCATE);
     }
     /* R26: Tastatur-Starthilfe nur mit Standardbelegung ohne Controller */
     if (s->sbc_usb || s->input_profile[0]) {
         hit(&out[26], 26, LR_LVL_INFO);
-        strcpy_s(out[26].text, sizeof out[26].text,
-                 LT(s->sbc_usb ? "gui.rule_r26_pad" : "gui.rule_r26_layout"));
+        strncpy_s(out[26].text, sizeof out[26].text,
+                 LT(s->sbc_usb ? "gui.rule_r26_pad" : "gui.rule_r26_layout"), _TRUNCATE);
     }
     /* R27: Live-Ton nur mit Ton */
     if (!s->audio) {
         hit(&out[27], 27, LR_LVL_INFO);
-        strcpy_s(out[27].text, sizeof out[27].text, LT("gui.rule_r27"));
+        strncpy_s(out[27].text, sizeof out[27].text, LT("gui.rule_r27"), _TRUNCATE);
     }
     /* R28: gespeicherte Einstellung wird beim Launcher-Start geladen */
     if (e->default_setup[0]) {
@@ -305,28 +305,28 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
     /* R29: noch keine Packs */
     if (e->n_packs == 0) {
         hit(&out[29], 29, LR_LVL_INFO);
-        strcpy_s(out[29].text, sizeof out[29].text, LT(SB_EDITION_COMMUNITY ? "gui.rule_r29_community" : "gui.rule_r29"));
+        strncpy_s(out[29].text, sizeof out[29].text, LT(SB_EDITION_COMMUNITY ? "gui.rule_r29_community" : "gui.rule_r29"), _TRUNCATE);
     }
     /* R30: Remaster ohne Texturquelle -> nur Licht/Effekte */
     if (s->remaster && tex_any == 0) {
         hit(&out[30], 30, LR_LVL_INFO);
-        strcpy_s(out[30].text, sizeof out[30].text, LT("gui.rule_r30"));
+        strncpy_s(out[30].text, sizeof out[30].text, LT("gui.rule_r30"), _TRUNCATE);
     }
     /* R31 (W172): Pack-Grenze erreicht -> Hinzufuegen gesperrt */
     if (e->n_packs >= 32) {
         hit(&out[31], 31, LR_LVL_INFO);
-        strcpy_s(out[31].text, sizeof out[31].text, LT("gui.rule_r31"));
+        strncpy_s(out[31].text, sizeof out[31].text, LT("gui.rule_r31"), _TRUNCATE);
     }
     /* R34 (W191 UW-PERSP): Cockpit-Perspektive nur am Monitor (immer Hinweis
      * wie R6: VR ist ein Startweg, kein Schalter; beim VR-Start schaltet der
      * Client die Option ab, die VR-Projektion bleibt physikalisch korrekt) */
     hit(&out[34], 34, LR_LVL_INFO);
-    strcpy_s(out[34].text, sizeof out[34].text, LT("gui.rule_r34"));
+    strncpy_s(out[34].text, sizeof out[34].text, LT("gui.rule_r34"), _TRUNCATE);
     /* R32 (W172): Pack Creator liegt nicht neben dem Launcher -> Erklaerung
      * statt Knopf (PO-Entscheidung 6) */
     if (!SB_EDITION_COMMUNITY && !e->has_creator) {
         hit(&out[32], 32, LR_LVL_INFO);
-        strcpy_s(out[32].text, sizeof out[32].text, LT("gui.rule_r32"));
+        strncpy_s(out[32].text, sizeof out[32].text, LT("gui.rule_r32"), _TRUNCATE);
     }
     /* R33 (W195 PHOTO-MODE): eingestellter Fotoordner nicht nutzbar (nicht absolut bzw.
      * weder vorhanden noch anlegbar) -> Hinweis; der Client faellt dann nicht still zurueck,

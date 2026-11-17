@@ -29,6 +29,10 @@ int app_launch_client(const char *client_dir, const char *xbe_path,
  * user.cfg bleibt unveraendert). set_args darf NULL/leer sein. */
 int app_launch_client_set(const char *client_dir, const char *xbe_path,
                           const char *set_args, char *msg, size_t cap);
+/* W328: wie app_launch_client_set, mit eigenem Unicode-Umgebungsblock (env_w,
+ * lacc_env_block; NULL = geerbt). */
+int app_launch_client_env(const char *client_dir, const char *xbe_path, const char *set_args,
+                          const void *env_w, char *msg, size_t cap);
 /* W231: wie app_launch_client_set, liefert zusaetzlich den Prozess-Handle
  * (proc != NULL; Aufrufer schliesst ihn) fuer die Exitcode-Auswertung. */
 int app_launch_client_proc(const char *client_dir, const char *xbe_path,

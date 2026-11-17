@@ -1469,7 +1469,7 @@ static void sb_im_submit_body(void)
         if (g_cfg.aspect_mode && !rtt_active()) {
             /* Feste 640x480-Referenz (RHW = Framebuffer-Pixel, s.o.). */
             vw = (float)g_game_fb_w; vh = (float)g_game_fb_h; /* W277: SB 640x480, LoC 720x480 */
-            if (g_sba_loc && loc_render_is_bbtex(sb_tex_xptr())) { vw *= 2.0f; } /* W285: LoC-Komposition im 1440er-Puffer */
+            if (g_sba_loc && loc_render_is_bbtex(sb_tex_xptr())) { vw *= (float)g_loc_ss; } /* W285: LoC-Komposition im 1440er-Puffer (W326: 720p 1:1) */
             unsigned bx, by, bw, bh;
             sb_aspect_box(&bx, &by, &bw, &bh);
             nL = (float)bx / (float)g_bb_w * 2.0f - 1.0f;
@@ -1496,7 +1496,7 @@ static void sb_im_submit_body(void)
         if (g_cfg.m3d_vs_mvp && m3d_vs_mvp_read(tmp)) {
             if (!rtt_active()) {
                 float oa = (float)g_bb_w / (float)(g_bb_h ? g_bb_h : 1);
-                float vk = (4.0f / 3.0f) / (oa > 0.0f ? oa : 1.0f);
+                float vk = g_game_disp_aspect / (oa > 0.0f ? oa : 1.0f); /* W326: SB 4:3 */
                 tmp[0] *= vk; tmp[4] *= vk; tmp[8] *= vk; tmp[12] *= vk;
             }
             memcpy(mvp, tmp, sizeof mvp);
@@ -1508,7 +1508,7 @@ static void sb_im_submit_body(void)
         if (vsh_p2bb) {
             /* VSH2D: Clip liegt vor (DP4), nur Hor+ (x-Spalte, 4:3-Basis). */
             float oa = (float)g_bb_w / (float)(g_bb_h ? g_bb_h : 1);
-            float vk = (4.0f / 3.0f) / (oa > 0.0f ? oa : 1.0f);
+            float vk = g_game_disp_aspect / (oa > 0.0f ? oa : 1.0f); /* W326: SB 4:3 */
             memset(mvp, 0, sizeof mvp);
             mvp[0] = vk; mvp[5] = 1.0f; mvp[10] = 1.0f; mvp[15] = 1.0f;
         } else if (g_cfg.rt_vp_clip && rtt_active()) {
@@ -1920,6 +1920,18 @@ static void sb_im_submit_body(void)
         if (!srv && sb_tex_xptr() && !ps_stage0_none()) {
             srv = sb_th_missing(sb_tex_why(), g_present_no);
             has_tex = srv ? 1u : 0u;
+            if (srv) { /* DIAG(ISSUE-TEX, nur mit tex_missing_mark): markierte Stufe 0 einmal je xptr ins Log */
+                static unsigned mx0[64], mn0;
+                unsigned q, xp0 = sb_tex_xptr(), hh[5] = { 0, 0, 0, 0, 0 };
+                for (q = 0; q < mn0 && mx0[q] != xp0; q++) {}
+                if (q == mn0 && mn0 < 64u) {
+                    mx0[mn0++] = xp0;
+                    __try { for (q = 0; q < 5u; q++) { hh[q] = *(unsigned *)(uintptr_t)(xp0 + q * 4u); } }
+                    __except (EXCEPTION_EXECUTE_HANDLER) {}
+                    HLOG_W("TEXMARK stufe=0 f=%u xp=0x%X hdr=[%08X %08X %08X %08X %08X] why=%u vs=0x%X ps=0x%X",
+                           g_present_no, xp0, hh[0], hh[1], hh[2], hh[3], hh[4], sb_tex_why(), g_im_shader, g_im_pshader);
+                }
+            }
         }
         if (g_cfg.bloom_diag && !srv && sb_tex_xptr() && rtt_active() && rq_in_mission() && !ps_stage0_none()) {
             /* DIAG(SHADE-BLOOM,W112): Stufe 0 belegt, aber keine SRV (Shading: T0 = 1) */

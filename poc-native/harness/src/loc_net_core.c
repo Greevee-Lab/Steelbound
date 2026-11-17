@@ -3,6 +3,8 @@
  * Loopback/private Ziele, verwirft Pakete/Verbindungen fremder Absender. */
 #define _CRT_RAND_S
 #include "loc_net_core.h"
+#include "loc_netsim.h"
+#include "loc_tun.h"
 #include <ws2tcpip.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -76,6 +78,30 @@ static uint16_t ln_base_of(const locnet *n, uint32_t ip_net)
     return n->base;
 }
 
+/* W329: gebundene Spiel-UDP-Ports merken (Socket an self_ip, Typ DGRAM). on = 0: vergessen. */
+static void ln_udp_mark(locnet *n, SOCKET s, int on)
+{
+    struct sockaddr_in me;
+    int l = sizeof me, st = 0, tl = sizeof st, e = WSAGetLastError();
+    uint16_t p;
+    if (getsockopt(s, SOL_SOCKET, SO_TYPE, (char *)&st, &tl) == 0 && st == SOCK_DGRAM &&
+        getsockname(s, (struct sockaddr *)&me, &l) == 0 && me.sin_family == AF_INET &&
+        me.sin_addr.s_addr == n->self_ip && me.sin_port != 0) {
+        p = ntohs(me.sin_port);
+        if (on) {
+            InterlockedOr(&n->udp_bound[p >> 5], (LONG)(1u << (p & 31)));
+        } else {
+            InterlockedAnd(&n->udp_bound[p >> 5], (LONG)~(1u << (p & 31)));
+        }
+    }
+    WSASetLastError(e);
+}
+
+int locnet_udp_bound(const locnet *n, uint16_t host_port)
+{
+    return (n->udp_bound[host_port >> 5] >> (host_port & 31)) & 1;
+}
+
 uint16_t locnet_port_out(const locnet *n, uint32_t ip_net, uint16_t gp)
 {
     if (gp >= LN_GAME_PORT_LO && gp <= LN_GAME_PORT_HI) {
@@ -136,6 +162,23 @@ static void ln_add_peer(locnet *n, uint32_t ip, uint16_t base)
     }
 }
 
+void locnet_peer_add(locnet *n, uint32_t ip, uint16_t base)
+{
+    int i;
+    for (i = 0; i < n->npeers; i++) {
+        if (n->peers[i].ip == ip) {
+            n->peers[i].base = base;
+            return;
+        }
+    }
+    if (n->npeers < LOCNET_MAX_PEERS && locnet_ip_allowed(ip)) {
+        n->peers[n->npeers].ip = ip;
+        n->peers[n->npeers].base = base;
+        MemoryBarrier();
+        n->npeers++;
+    }
+}
+
 int locnet_init(locnet *n, const char *addr, int base, const char *peers, int rtt_ms, locnet_log_fn log)
 {
     WSADATA wd;
@@ -154,7 +197,26 @@ int locnet_init(locnet *n, const char *addr, int base, const char *peers, int rt
         ln_logf(n, "LOCNET: Host-WSAStartup fehlgeschlagen (%d) - Netz aus", WSAGetLastError());
         return 0;
     }
-    if (!addr || !addr[0] || _stricmp(addr, "auto") == 0) {
+    if (addr && _stricmp(addr, "random") == 0) { /* W324: eindeutig auch zwischen Rechnern (Transport) */
+        for (i = 0; i < 32 && n->claim == INVALID_SOCKET; i++) {
+            unsigned r = 0;
+            uint32_t ip;
+            rand_s(&r);
+            ip = htonl(0x7F400000u | (r & 0x003FFFFFu));
+            if ((ntohl(ip) & 0xFFu) == 0u || (ntohl(ip) & 0xFFu) == 255u) {
+                continue;
+            }
+            n->claim = ln_claim(ip, (uint16_t)(n->base + LN_CLAIM_OFF));
+            if (n->claim != INVALID_SOCKET) {
+                n->self_ip = ip;
+            }
+        }
+        n->auto_addr = 1;
+        if (n->claim == INVALID_SOCKET) {
+            ln_logf(n, "LOCNET: keine freie Zufallsadresse in 127.64/10 - Netz aus");
+            return 0;
+        }
+    } else if (!addr || !addr[0] || _stricmp(addr, "auto") == 0) {
         n->auto_addr = 1;
         for (i = 2; i <= 9 && n->claim == INVALID_SOCKET; i++) {
             uint32_t ip = htonl(0x7F000000u | (uint32_t)i);
@@ -179,7 +241,9 @@ int locnet_init(locnet *n, const char *addr, int base, const char *peers, int rt
             return 0;
         }
     }
-    if (!peers || !peers[0] || _stricmp(peers, "auto") == 0) {
+    if (peers && _stricmp(peers, "none") == 0) {
+        /* W324: Mitspieler kommen vom Transport (locnet_peer_add) */
+    } else if (!peers || !peers[0] || _stricmp(peers, "auto") == 0) {
         for (i = 2; i <= 9; i++) {
             ln_add_peer(n, htonl(0x7F000000u | (uint32_t)i), n->base);
         }
@@ -214,6 +278,14 @@ int locnet_init(locnet *n, const char *addr, int base, const char *peers, int rt
 
 void locnet_shutdown(locnet *n)
 {
+    if (n->tun) { /* W324: Transport vor der Stufe beenden (sendet ueber sie) */
+        loctun_stop(n->tun);
+        n->tun = NULL;
+    }
+    if (n->sim) { /* W322: Rest zustellen, Thread beenden */
+        locnetsim_stop(n->sim);
+        n->sim = NULL;
+    }
     if (n->claim != INVALID_SOCKET) {
         closesocket(n->claim);
         n->claim = INVALID_SOCKET;
@@ -226,27 +298,22 @@ void locnet_shutdown(locnet *n)
 
 /* Erste Sichtung je (Richtung, Port-Art, Rahmentyp u16) protokollieren - nur Typ und
  * Laenge, nie Inhalte (Rahmen tragen Pilot-/Eingabedaten). */
-static void ln_seen(locnet *n, SOCKET s, int out, const char *buf, int len)
+static void ln_seen_one(locnet *n, int out, int typ, int len, int sock_type, uint16_t lport)
 {
     static volatile LONG tab[128];
     static volatile LONG cnt;
-    struct sockaddr_in me;
-    int l = sizeof me, typ, i, sock_type = 0, tl = sizeof sock_type;
+    int i;
     LONG key;
-    if (!buf || len < 2) {
-        return;
-    }
-    typ = (uint8_t)buf[0] | ((uint8_t)buf[1] << 8);
     if (typ < 256) { /* W297: Typ-Merkliste fuer Testfolgen (loc_steps rx:/tx:) */
         InterlockedOr(&n->st.typ_seen[out ? 1 : 0][typ >> 5], (LONG)(1u << (typ & 31)));
         if (out && typ == 0x34) {
             InterlockedExchange(&n->st.last34_ms, (LONG)(GetTickCount() | 1u));
+            if (n->sim) {
+                locnetsim_mark_start(n->sim, GetTickCount()); /* W322: Lockstep-Start (nur erster) fuer Stufen */
+            }
         }
     }
-    getsockopt(s, SOL_SOCKET, SO_TYPE, (char *)&sock_type, &tl);
-    me.sin_port = 0;
-    getsockname(s, (struct sockaddr *)&me, &l);
-    key = (LONG)((out << 30) | ((sock_type & 3) << 28) | ((ntohs(me.sin_port) & 0xFFF) << 16) | (typ & 0xFFFF));
+    key = (LONG)((out << 30) | ((sock_type & 3) << 28) | ((lport & 0xFFF) << 16) | (typ & 0xFFFF));
     if (sock_type == SOCK_STREAM) {
         key &= ~(0xFFF << 16); /* TCP: Port der Gegenstelle egal */
     }
@@ -263,6 +330,125 @@ static void ln_seen(locnet *n, SOCKET s, int out, const char *buf, int len)
     }
 }
 
+/* W324: TCP 1000 ist ein Bytestrom aus Rahmen [u16 Typ] ohne Laengenfeld, Laenge fest je Typ (LOC_RE1 §6.4,
+ * Tabelle FUN_0004EFE0). Ein recv kann mehrere Rahmen oder Teile davon liefern (Netz, eigener Transport);
+ * fuer die Typ-Merkliste der Testfolgen wird der Strom daher je Socket und Richtung zerlegt. 0 = unbekannt. */
+static int ln_tcp_frame_len(int typ)
+{
+    switch (typ) {
+    case 0x0A: return 100;
+    case 0x0B: case 0x0D: return 0x308;
+    case 0x0C: return 0x34;
+    case 0x0E: case 0x30: return 0x1A0;
+    case 0x0F: case 0x10: case 0x11: case 0x12: return 4;
+    case 0x13: return 0x16C;
+    case 0x14: return 0x10;
+    case 0x1B: return 0x4F8;
+    case 0x20: case 0x2E: return 0x1008;
+    case 0x22: return 0x100C;
+    case 0x27: return 0x2A8;
+    case 0x2C: case 0x2D: return 0x10;
+    case 0x31: case 0x32: case 0x37: return 4;
+    case 0x34: return 26; /* 12 + 14 n, n = 1 */
+    case 0x35: case 0x36: return 8;
+    default: return 0;
+    }
+}
+
+typedef struct ln_walk {
+    SOCKET s;
+    uint32_t rem; /* Restbytes des laufenden Rahmens */
+    int half;     /* 1 = erstes Typbyte liegt in lo */
+    uint8_t lo;
+} ln_walk;
+static ln_walk s_walk[2][32];
+static volatile LONG s_walk_lock;
+
+static void ln_walk_lock(void)
+{
+    while (InterlockedExchange(&s_walk_lock, 1)) {
+        YieldProcessor();
+    }
+}
+
+/* Zustand eines Sockets vergessen (neue Verbindung, Schliessen). */
+static void ln_walk_reset(SOCKET s)
+{
+    int d, i;
+    ln_walk_lock();
+    for (d = 0; d < 2; d++) {
+        for (i = 0; i < 32; i++) {
+            if (s_walk[d][i].s == s) {
+                memset(&s_walk[d][i], 0, sizeof s_walk[d][i]);
+            }
+        }
+    }
+    InterlockedExchange(&s_walk_lock, 0);
+}
+
+static void ln_seen(locnet *n, SOCKET s, int out, const char *buf, int len)
+{
+    struct sockaddr_in me;
+    int l = sizeof me, sock_type = 0, tl = sizeof sock_type, pos = 0, i, fr = -1;
+    ln_walk *w = NULL;
+    if (!buf || len < 1) {
+        return;
+    }
+    getsockopt(s, SOL_SOCKET, SO_TYPE, (char *)&sock_type, &tl);
+    me.sin_port = 0;
+    getsockname(s, (struct sockaddr *)&me, &l);
+    if (sock_type != SOCK_STREAM) { /* UDP: ein Rahmen je Datagramm */
+        if (len >= 2) {
+            ln_seen_one(n, out, (uint8_t)buf[0] | ((uint8_t)buf[1] << 8), len, sock_type, ntohs(me.sin_port));
+        }
+        return;
+    }
+    ln_walk_lock();
+    for (i = 0; i < 32; i++) {
+        if (s_walk[out ? 1 : 0][i].s == s) {
+            w = &s_walk[out ? 1 : 0][i];
+            break;
+        }
+        if (fr < 0 && s_walk[out ? 1 : 0][i].s == 0) {
+            fr = i;
+        }
+    }
+    if (!w) {
+        w = &s_walk[out ? 1 : 0][fr >= 0 ? fr : (int)((uintptr_t)s % 32)];
+        memset(w, 0, sizeof *w);
+        w->s = s;
+    }
+    while (pos < len) {
+        int typ, fl;
+        if (w->rem > 0) {
+            int k = (int)w->rem < len - pos ? (int)w->rem : len - pos;
+            w->rem -= (uint32_t)k;
+            pos += k;
+            continue;
+        }
+        if (w->half) {
+            typ = w->lo | ((uint8_t)buf[pos] << 8);
+            w->half = 0;
+            pos += 1;
+        } else if (len - pos >= 2) {
+            typ = (uint8_t)buf[pos] | ((uint8_t)buf[pos + 1] << 8);
+            pos += 2;
+        } else {
+            w->lo = (uint8_t)buf[pos];
+            w->half = 1;
+            break;
+        }
+        fl = ln_tcp_frame_len(typ);
+        ln_seen_one(n, out, typ, fl ? fl : len - pos + 2, sock_type, ntohs(me.sin_port));
+        if (!fl) { /* unbekannter Typ: Rest dieses Puffers ueberspringen, naechster beginnt neu (wie vor W324) */
+            w->rem = 0;
+            break;
+        }
+        w->rem = (uint32_t)(fl - 2);
+    }
+    InterlockedExchange(&s_walk_lock, 0);
+}
+
 /* ---------- Sockets ---------- */
 /* Ungebundene Sockets (TCP-connect, UDP-sendto) an die eigene Adresse binden, sonst
  * waehlt Windows 127.0.0.1 als Absender und der Mitspieler sieht eine falsche Identitaet. */
@@ -277,7 +463,23 @@ static void ln_bind_self(locnet *n, SOCKET s)
     memset(&me, 0, sizeof me);
     me.sin_family = AF_INET;
     me.sin_addr.s_addr = n->self_ip;
-    bind(s, (struct sockaddr *)&me, sizeof me);
+    if (bind(s, (struct sockaddr *)&me, sizeof me) == 0) {
+        ln_udp_mark(n, s, 1); /* W329 */
+    }
+}
+
+/* W322: Die Spielrahmen (0x34: 26 B je Tick) sind klein. Mit Nagle haelt der Host-TCP-Stapel jeden
+ * weiteren kleinen Rahmen zurueck, bis das vorige Segment bestaetigt ist (bis zu einer RTT). Auf
+ * Loopback/LAN unmerklich, ueber eine Strecke mit Laufzeit (z. B. VPN mit privaten Adressen) addiert
+ * es sich zur Eingabeverzoegerung (W322 §20). Die Spiel-Logik bleibt unberuehrt. */
+static void ln_nodelay(locnet *n, SOCKET s)
+{
+    int st = 0, tl = sizeof st, e = WSAGetLastError();
+    BOOL on = TRUE;
+    if (n->nodelay && getsockopt(s, SOL_SOCKET, SO_TYPE, (char *)&st, &tl) == 0 && st == SOCK_STREAM) {
+        setsockopt(s, IPPROTO_TCP, TCP_NODELAY, (const char *)&on, sizeof on);
+    }
+    WSASetLastError(e);
 }
 
 SOCKET locnet_socket(locnet *n, int af, int type, int proto)
@@ -307,7 +509,11 @@ void locnet_note_stream(locnet *n, SOCKET s, int out, const char *buf, int len)
 
 int locnet_closesocket(locnet *n, SOCKET s)
 {
-    (void)n;
+    ln_walk_reset(s); /* W324 */
+    ln_udp_mark(n, s, 0); /* W329 */
+    if (n->sim && locnetsim_close(n->sim, s)) {
+        return 0; /* W322: offene Sendungen noch zustellen, dann schliesst die Stufe */
+    }
     return closesocket(s);
 }
 
@@ -342,6 +548,9 @@ int locnet_bind(locnet *n, SOCKET s, const struct sockaddr *a, int len)
     in.sin_port = htons(locnet_port_out(n, n->self_ip, ntohs(in.sin_port)));
     r = bind(s, (struct sockaddr *)&in, sizeof in);
     e = r ? WSAGetLastError() : 0;
+    if (r == 0) {
+        ln_udp_mark(n, s, 1); /* W329 */
+    }
     ln_logf(n, "LOCNET: bind Spielport %u -> %s:%u%s", ntohs(((const struct sockaddr_in *)a)->sin_port),
             locnet_ip_str(n->self_ip, ipb), ntohs(in.sin_port), r ? " FEHLER" : "");
     if (r) {
@@ -364,9 +573,17 @@ int locnet_connect(locnet *n, SOCKET s, const struct sockaddr *a, int len)
         WSASetLastError(WSAEHOSTUNREACH);
         return SOCKET_ERROR;
     }
+    if (n->tun && in.sin_addr.s_addr != n->self_ip && !loctun_is_peer(n->tun, in.sin_addr.s_addr)) {
+        /* W324: mit Transport nur zu verbundenen Mitspielern (sonst ginge es am Transport vorbei) */
+        ln_logf(n, "LOCNET: connect zu %s verweigert (kein verbundener Mitspieler)", locnet_ip_str(in.sin_addr.s_addr, ipb));
+        WSASetLastError(WSAEHOSTUNREACH);
+        return SOCKET_ERROR;
+    }
     in.sin_port = htons(locnet_port_out(n, in.sin_addr.s_addr, ntohs(in.sin_port)));
     ln_bind_self(n, s);
+    ln_nodelay(n, s);
     InterlockedIncrement(&n->st.connects);
+    ln_walk_reset(s); /* W324: neuer Strom */
     r = connect(s, (struct sockaddr *)&in, sizeof in);
     e = r ? WSAGetLastError() : 0;
     ln_logf(n, "LOCNET: connect %s:%u (Spielport %u) -> %d (%d)", locnet_ip_str(in.sin_addr.s_addr, ipb),
@@ -394,6 +611,8 @@ SOCKET locnet_accept(locnet *n, SOCKET s, struct sockaddr *a, int *len)
         return INVALID_SOCKET;
     }
     in.sin_port = htons(locnet_port_in(n, in.sin_addr.s_addr, ntohs(in.sin_port)));
+    ln_nodelay(n, c);
+    ln_walk_reset(c); /* W324: neuer Strom */
     if (a && len && *len >= (int)sizeof in) {
         memcpy(a, &in, sizeof in);
         *len = sizeof in;
@@ -403,13 +622,37 @@ SOCKET locnet_accept(locnet *n, SOCKET s, struct sockaddr *a, int *len)
     return c;
 }
 
+/* W322: Senden direkt oder ueber die Verzoegerungsstufe (loc_netsim, Standard aus). */
+static int ln_tx(locnet *n, SOCKET s, const char *buf, int len, int flags, const struct sockaddr_in *to)
+{
+    if (n->sim && !n->tun) { /* W324: mit Transport wirkt die Stufe auf dessen Pakete, nicht auf Loopback */
+        int st = 0, tl = sizeof st;
+        getsockopt(s, SOL_SOCKET, SO_TYPE, (char *)&st, &tl);
+        return locnetsim_send(n->sim, s, st == SOCK_STREAM, buf, len, flags, to);
+    }
+    return to ? sendto(s, buf, len, flags, (const struct sockaddr *)to, sizeof *to) : send(s, buf, len, flags);
+}
+
+int locnet_send(locnet *n, SOCKET s, const char *buf, int len, int flags)
+{
+    int r = ln_tx(n, s, buf, len, flags, NULL);
+    if (r > 0) {
+        int e = WSAGetLastError();
+        InterlockedIncrement(&n->st.tx);
+        ln_seen(n, s, 1, buf, r);
+        WSASetLastError(e);
+    }
+    return r;
+}
+
 int locnet_sendto(locnet *n, SOCKET s, const char *buf, int len, int flags, const struct sockaddr *to, int tolen)
 {
     struct sockaddr_in in;
     uint16_t gp;
     int i, r;
     if (!to || tolen < (int)sizeof in || to->sa_family != AF_INET) {
-        r = sendto(s, buf, len, flags, to, tolen); /* verbundener Socket (TCP 1000) */
+        r = n->sim ? ln_tx(n, s, buf, len, flags, NULL)
+                   : sendto(s, buf, len, flags, to, tolen); /* verbundener Socket (TCP 1000) */
         if (r > 0) {
             InterlockedIncrement(&n->st.tx);
             ln_seen(n, s, 1, buf, r);
@@ -419,6 +662,23 @@ int locnet_sendto(locnet *n, SOCKET s, const char *buf, int len, int flags, cons
     memcpy(&in, to, sizeof in);
     gp = ntohs(in.sin_port);
     ln_bind_self(n, s);
+    if (n->tun && in.sin_addr.s_addr != n->self_ip) {
+        /* W324: Spiel-UDP ueber den eigenen Transport (Broadcast = an alle verbundenen Mitspieler) */
+        struct sockaddr_in me;
+        int l = sizeof me;
+        uint16_t sgp = 0;
+        if (getsockname(s, (struct sockaddr *)&me, &l) == 0) {
+            sgp = locnet_port_in(n, n->self_ip, ntohs(me.sin_port));
+        }
+        r = loctun_dgram(n->tun, in.sin_addr.s_addr, sgp, gp, buf, len);
+        if (r > 0) {
+            InterlockedIncrement(in.sin_addr.s_addr == INADDR_BROADCAST ? &n->st.bc : &n->st.tx);
+            ln_seen(n, s, 1, buf, len);
+        } else {
+            InterlockedIncrement(&n->st.drop);
+        }
+        return len; /* UDP: gilt als gesendet */
+    }
     if (in.sin_addr.s_addr == INADDR_BROADCAST) {
         /* System-Link-Suche/Host-Info: Unicast an jeden Mitspieler */
         for (i = 0; i < n->npeers; i++) {
@@ -426,7 +686,7 @@ int locnet_sendto(locnet *n, SOCKET s, const char *buf, int len, int flags, cons
             in.sin_port = htons((uint16_t)(gp >= LN_GAME_PORT_LO && gp <= LN_GAME_PORT_HI
                                                ? n->peers[i].base + (gp - LN_GAME_PORT_LO)
                                                : gp));
-            sendto(s, buf, len, flags, (struct sockaddr *)&in, sizeof in);
+            ln_tx(n, s, buf, len, flags, &in);
         }
         InterlockedIncrement(&n->st.bc);
         ln_seen(n, s, 1, buf, len);
@@ -437,7 +697,7 @@ int locnet_sendto(locnet *n, SOCKET s, const char *buf, int len, int flags, cons
         return len; /* still verwerfen (nie ins Internet) */
     }
     in.sin_port = htons(locnet_port_out(n, in.sin_addr.s_addr, gp));
-    r = sendto(s, buf, len, flags, (struct sockaddr *)&in, sizeof in);
+    r = ln_tx(n, s, buf, len, flags, &in);
     if (r > 0) {
         InterlockedIncrement(&n->st.tx);
         ln_seen(n, s, 1, buf, r);

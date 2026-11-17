@@ -461,3 +461,15 @@ void fs_emu_patch_all(void)
     FlushInstructionCache(GetCurrentProcess(), NULL, 0);
     HLOG_I("FS: %u Stellen gepatcht (SEH bleibt nativ)", (unsigned)n);
 }
+
+/* W330 LOC-ROLLBACK-R1: TLS-Puffer des aufrufenden Threads (Headroom + Daten, ohne Guard-Seite) */
+int fs_emu_tls_range(unsigned *va, unsigned *len)
+{
+    xbox_thread_t *xt;
+    if (g_fs_wintls == TLS_OUT_OF_INDEXES) return 0;
+    xt = TlsGetValue(g_fs_wintls);
+    if (!xt || !xt->tlsbuf_ptr) return 0;
+    *va = xt->tlsbuf_ptr - FS_TLS_HEADROOM;
+    *len = FS_TLS_HEADROOM + FS_TLS_DATA;
+    return 1;
+}

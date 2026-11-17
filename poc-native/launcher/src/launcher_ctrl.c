@@ -194,16 +194,16 @@ int lctrl_sbc_status(char *out, size_t cap)
     int rc = sbc_usb_open(&dev);
     if (rc == SBC_OK) {
         sbc_usb_close(dev);
-        strcpy_s(out, cap, LT("gui.sbc_ok"));
+        strncpy_s(out, cap, LT("gui.sbc_ok"), _TRUNCATE);
         return 0;
     }
     if (rc == SBC_ERR_DRIVER) {
         /* W128: Hinweis auf Zadig + gefuehrte Pruefung sbc_probe --test */
-        strcpy_s(out, cap, LT("gui.sbc_driver"));
+        strncpy_s(out, cap, LT("gui.sbc_driver"), _TRUNCATE);
         return rc;
     }
     if (rc == SBC_ERR_NODEVICE) {
-        strcpy_s(out, cap, LT("gui.sbc_none"));
+        strncpy_s(out, cap, LT("gui.sbc_none"), _TRUNCATE);
         return rc;
     }
     _snprintf_s(out, cap, _TRUNCATE, LT("gui.sbc_error"),
@@ -832,7 +832,7 @@ void lctrl_bind_row_text(const lctrl_bind_t *b, int idx, char *out, size_t cap)
     out[0] = '\0';
     if (!b || idx < 0 || idx >= LCTRL_ELEM_N) { return; }
     if (b->row[idx].n_alt == 0) {
-        strcpy_s(out, cap, LT("gui.bind_unset"));
+        strncpy_s(out, cap, LT("gui.bind_unset"), _TRUNCATE);
         return;
     }
     for (i = 0; i < b->row[idx].n_alt; i++) {
@@ -1237,7 +1237,7 @@ int lctrl_bind_save(const char *path, const lctrl_bind_t *b, const char *base,
     int i;
     const char *sec = NULL;
     if (!b || !path || !*path) {
-        if (err) { strcpy_s(err, errcap, LT("gui.bind_nopath")); }
+        if (err) { strncpy_s(err, errcap, LT("gui.bind_nopath"), _TRUNCATE); }
         return 1;
     }
     if (u8_fopen_s(&f, path, "w") != 0 || !f) {
@@ -1944,7 +1944,7 @@ int lctrl_run_dump(const char *client_dir, const char *profile, char *out,
         h = CreateFileW(wtmp, GENERIC_WRITE, FILE_SHARE_READ, &sa,
                         CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY, NULL);
         if (h == INVALID_HANDLE_VALUE) {
-            strcpy_s(out, cap, LT("gui.bind_notmp"));
+            strncpy_s(out, cap, LT("gui.bind_notmp"), _TRUNCATE);
             return 2;
         }
         if (!u8_CreateProcess(cmd, client_dir, CREATE_NO_WINDOW, 1, h, 1,

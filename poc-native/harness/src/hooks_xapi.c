@@ -1,6 +1,7 @@
 /* hooks_xapi.c - XDK-Hooks: XAPI/Datei (Cache-Partition, XLaunch, Utility-
  * Drive, ReadFile, Aktivitaets-Zaehler, Null-Guards/No-Ops 106xxx-109xxx,
  * MapLetter, MediaCheck, XapiNotify). W68 SPLIT: 1:1 aus xdk_hooks.c. */
+#include "loc_rollback.h" /* W330: LOC_RB_PREWRITE */
 #include "hooks_int.h"
 #include "sb_remaster.h" /* W103 REM-FRAME */
 #include "sb_relaunch.h" /* W186 RESET-TITLE */
@@ -129,6 +130,7 @@ u32 __stdcall hook_ReadFile(u32 hFile, u32 buf, u32 len, u32 pRead,
     static u32 calls;
     g_act_reads++;
     if ((host || vfs) && buf && len) {
+        LOC_RB_PREWRITE(buf, len); /* W330: Kernel schreibt in den Gast-Puffer (Rollback-Schreibschutz) */
         g_rd_h = hFile;
         g_rd_len = len;
         g_rd_ov = ov;

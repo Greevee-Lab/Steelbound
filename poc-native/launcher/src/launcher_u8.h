@@ -74,6 +74,11 @@ void u8_find_close(u8_find_t *fd);
 int u8_CreateProcess(const char *cmdline, const char *cwd, unsigned long flags,
                      int inherit, void *si_stdout, int hide,
                      unsigned long *out_pid, void **out_proc);
+/* W328: wie u8_CreateProcess, mit eigenem Unicode-Umgebungsblock (env_w =
+ * wchar_t-Block, NULL = geerbt). Fuer SB_LOC_AUTH nur im Kindprozess. */
+int u8_CreateProcessEnv(const char *cmdline, const char *cwd, unsigned long flags,
+                        int inherit, void *si_stdout, int hide, const void *env_w,
+                        unsigned long *out_pid, void **out_proc);
 
 #ifdef __cplusplus
 }

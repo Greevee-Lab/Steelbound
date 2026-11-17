@@ -118,6 +118,8 @@ add_library(sb_emu SHARED
   src/loc_audio.c
   src/loc_xact_fmt.c
   src/loc_sync.c
+  src/loc_rollback.c
+  src/loc_rb_ring.c
   src/krnl_loc.c
   src/sb_userdata.c
   src/sb_savecheck.c
@@ -159,7 +161,15 @@ target_link_libraries(sb_emu PRIVATE d3d11 dxgi dxguid dbghelp windowscodecs ole
 # alle Schnittstellen, kein DNS, nur mit loc_boot=1) in beiden Fassungen (Nutzer 15.11.: "keine Geheimnisse").
 # Community: clean_check-Freigaben in editions/clean_allow.tsv (Kategorie netz); der LoC-Start im Launcher
 # bleibt dort gesperrt (lgame_loc_client_ready).
-target_sources(sb_emu PRIVATE src/loc_net.c src/loc_net_core.c)
+target_sources(sb_emu PRIVATE src/loc_net.c src/loc_net_core.c src/loc_netsim.c)
+# W324 LOC-NETPLAY: eigener UDP-Transport mit Internet-Treffpunkt (DNS, Relays) vorerst nur privat;
+# Community bekommt den Platzhalter (loc_transport=udp -> Hinweis im Log, Original-Transport).
+if(SB_EDITION_COMMUNITY)
+  set(SB_LOC_TUN_SRC src/loc_tun_stub.c)
+else()
+  set(SB_LOC_TUN_SRC src/loc_tun.c)
+endif()
+target_sources(sb_emu PRIVATE ${SB_LOC_TUN_SRC})
 target_link_libraries(sb_emu PRIVATE ws2_32)
 target_compile_options(sb_emu PRIVATE /Zi)
 # W279 DIAG-CRASH: Release (community) mit vollstaendiger PDB - FASTLINK-PDBs
@@ -246,9 +256,12 @@ endif()
 add_executable(loc_net_selftest
   tests/loc_net_selftest.c
   src/loc_net_core.c
+  src/loc_netsim.c
+  ${SB_LOC_TUN_SRC}
+  src/sb_sha256.c
 )
 target_include_directories(loc_net_selftest PRIVATE src)
-target_link_libraries(loc_net_selftest PRIVATE ws2_32)
+target_link_libraries(loc_net_selftest PRIVATE ws2_32 winmm)
 target_compile_options(loc_net_selftest PRIVATE /W3)
 
 # ---- loc_audio_selftest: XACT-1-Parser (XWB/XSB) + Wave-Bank-Dekodierung, synthetische Daten (W298) ----
@@ -259,6 +272,14 @@ add_executable(loc_audio_selftest
 )
 target_include_directories(loc_audio_selftest PRIVATE src)
 target_compile_options(loc_audio_selftest PRIVATE /W3)
+
+# ---- loc_rb_selftest: Zustandsring fuer Rollback (Write-Watch + Schreibschutz-Verfolgung), synthetischer Speicher (W330) ----
+add_executable(loc_rb_selftest
+  tests/loc_rb_selftest.c
+  src/loc_rb_ring.c
+)
+target_include_directories(loc_rb_selftest PRIVATE src)
+target_compile_options(loc_rb_selftest PRIVATE /W3)
 
 # ---- render_selftest: VSH-Interpreter/-Uebersetzung + Combiner (W77 RENDER-QA) ----
 # W152 COMM-SELFTEST: privat mit render_selftest_data.h (Spiel-Testvektoren),

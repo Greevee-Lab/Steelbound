@@ -63,8 +63,34 @@ static void trim_val(const char *v, char *out, size_t cap)
     }
 }
 
-static const char *const kKeys[3] = { LGAME_KEY_GAME, LGAME_KEY_LOC_IMAGE,
-                                      LGAME_KEY_LOC_SERVER };
+#define LGAME_NKEYS 4
+static const char *const kKeys[LGAME_NKEYS] = { LGAME_KEY_GAME, LGAME_KEY_LOC_IMAGE,
+                                                LGAME_KEY_LOC_SERVER, LGAME_KEY_LOC_WIDE };
+
+/* W326 LOC-WIDE: Bildformat (Index der Auswahl = Wert) */
+int lgame_wide_count(void)
+{
+    return LOC_WIDE_720P ? 3 : 2;
+}
+
+int lgame_wide_clamp(int v)
+{
+    return (v >= 0 && v < lgame_wide_count()) ? v : LGAME_WIDE_43;
+}
+
+int lgame_wide_experimental(int v)
+{
+    return lgame_wide_clamp(v) != LGAME_WIDE_43;
+}
+
+const char *lgame_wide_label_key(int v)
+{
+    switch (lgame_wide_clamp(v)) {
+    case LGAME_WIDE_169: return "gui.loc_wide_169";
+    case LGAME_WIDE_720P: return "gui.loc_wide_720p";
+    default: return "gui.loc_wide_43";
+    }
+}
 
 int lgame_cfg_load(const char *path, lgame_state_t *st)
 {
@@ -85,6 +111,9 @@ int lgame_cfg_load(const char *path, lgame_state_t *st)
         } else if ((val = key_line(line, LGAME_KEY_LOC_SERVER)) != NULL) {
             trim_val(val, v, sizeof v);
             strncpy_s(st->loc_server, sizeof st->loc_server, v, _TRUNCATE);
+        } else if ((val = key_line(line, LGAME_KEY_LOC_WIDE)) != NULL) {
+            trim_val(val, v, sizeof v);
+            st->loc_widescreen = lgame_wide_clamp(atoi(v)); /* wie hcfg (atoi), ungueltig -> 0 */
         }
     }
     fclose(f);
@@ -94,9 +123,9 @@ int lgame_cfg_load(const char *path, lgame_state_t *st)
 int lgame_cfg_save(const char *path, const lgame_state_t *st)
 {
     FILE *f = NULL;
-    char line[1200], vals[3][1100], *out;
+    char line[1200], vals[LGAME_NKEYS][1100], *out;
     size_t n = 0, cap = 1024 * 1024;
-    int done[3] = { 0, 0, 0 }, k;
+    int done[LGAME_NKEYS] = { 0, 0, 0, 0 }, k;
     out = (char *)malloc(cap);
     if (!out || !path) {
         free(out);
@@ -105,7 +134,8 @@ int lgame_cfg_save(const char *path, const lgame_state_t *st)
     strcpy_s(vals[0], sizeof vals[0], lgame_key(st->game));
     u8_to_acp(st->loc_image, vals[1], sizeof vals[1]); /* Kurzname, falls noetig */
     strncpy_s(vals[2], sizeof vals[2], st->loc_server, _TRUNCATE);
-    for (k = 0; k < 3; k++) { /* keine Zeilenumbrueche in Werten */
+    _snprintf_s(vals[3], sizeof vals[3], _TRUNCATE, "%d", lgame_wide_clamp(st->loc_widescreen));
+    for (k = 0; k < LGAME_NKEYS; k++) { /* keine Zeilenumbrueche in Werten */
         char *p;
         for (p = vals[k]; *p; p++) {
             if (*p == '\r' || *p == '\n') {
@@ -117,7 +147,7 @@ int lgame_cfg_save(const char *path, const lgame_state_t *st)
         while (fgets(line, sizeof line, f)) {
             size_t l;
             int skip = 0;
-            for (k = 0; k < 3; k++) {
+            for (k = 0; k < LGAME_NKEYS; k++) {
                 if (key_line(line, kKeys[k])) {
                     if (done[k]) {
                         skip = 1; /* doppelte Zeilen entfernen */
@@ -148,10 +178,14 @@ int lgame_cfg_save(const char *path, const lgame_state_t *st)
     if (!done[0] || !done[1] || !done[2]) {
         n += (size_t)_snprintf_s(out + n, cap - n, _TRUNCATE,
                                  "# launcher: chosen game (sb = Steel Battalion, loc = Line of Contact)\n");
-        for (k = 0; k < 3; k++) {
-            if (!done[k]) {
-                n += (size_t)_snprintf_s(out + n, cap - n, _TRUNCATE, "%s=%s\n", kKeys[k], vals[k]);
-            }
+    }
+    if (!done[3]) { /* W326: eigene Kommentarzeile (auch an aeltere user.cfg angehaengt) */
+        n += (size_t)_snprintf_s(out + n, cap - n, _TRUNCATE,
+                                 "# Line of Contact picture format (0 = 4:3 original, 1 = 16:9, 2 = 720p)\n");
+    }
+    for (k = 0; k < LGAME_NKEYS; k++) {
+        if (!done[k]) {
+            n += (size_t)_snprintf_s(out + n, cap - n, _TRUNCATE, "%s=%s\n", kKeys[k], vals[k]);
         }
     }
     if (u8_fopen_s(&f, path, "w") != 0 || !f) {
@@ -300,7 +334,7 @@ int lgame_img_msg(const lgame_img_t *r, const char *path_u8, char *msg, size_t c
     const char *p = path_u8 ? path_u8 : "";
     switch (r->kind) {
     case LGAME_IMG_NONE:
-        strcpy_s(msg, cap, LT("gui.loc_img_none"));
+        strncpy_s(msg, cap, LT("gui.loc_img_none"), _TRUNCATE);
         return 0;
     case LGAME_IMG_MISSING:
         _snprintf_s(msg, cap, _TRUNCATE, LT("gui.loc_img_missing"), p);
@@ -316,7 +350,7 @@ int lgame_img_msg(const lgame_img_t *r, const char *path_u8, char *msg, size_t c
         _snprintf_s(msg, cap, _TRUNCATE, LT("gui.loc_img_jp"), r->title_id);
         return 3;
     case LGAME_IMG_SB:
-        strcpy_s(msg, cap, LT("gui.loc_img_sb"));
+        strncpy_s(msg, cap, LT("gui.loc_img_sb"), _TRUNCATE);
         return 3;
     default:
         _snprintf_s(msg, cap, _TRUNCATE, LT("gui.loc_img_other"), r->title_id);
@@ -327,11 +361,11 @@ int lgame_img_msg(const lgame_img_t *r, const char *path_u8, char *msg, size_t c
 int lgame_loc_start_gate(const lgame_img_t *r, char *msg, size_t cap)
 {
     if (!lgame_loc_client_ready()) {
-        strcpy_s(msg, cap, LT("gui.loc_soon"));
+        strncpy_s(msg, cap, LT("gui.loc_soon"), _TRUNCATE);
         return 1;
     }
     if (!r || r->kind != LGAME_IMG_LOC) {
-        strcpy_s(msg, cap, LT("gui.loc_start_noimg"));
+        strncpy_s(msg, cap, LT("gui.loc_start_noimg"), _TRUNCATE);
         return 1;
     }
     msg[0] = '\0';

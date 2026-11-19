@@ -14,6 +14,10 @@
 #include "hcfg.h"
 #include "hlog.h"
 #include "kernel_hle.h"
+#include "guest_wx.h" /* W339 SEC-A3 */
+#include "loc_guard.h"
+#include "loc_rollback.h" /* W353: loc_rb_diag */
+#include "sb_pausenet.h" /* W357 */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -138,6 +142,15 @@ static u32 __stdcall ln_XNetXnAddrToInAddr(u32 pxna, u32 pkid, u32 pina)
         HLOG_W("LOCNET: XNetXnAddrToInAddr: Adresse %s nicht lokal -> WSAEINVAL", locnet_ip_str(ip, b));
         return WSAEINVAL;
     }
+    if (!locnet_addr_known(&g_ln, ip)) {
+        /* W334 (SECURITY.md §6.5): Adressen aus Spielrahmen (XNADDR-Liste 0x13, Spielertabellen) nur, wenn sie die
+         * eigene oder die eines verbundenen Mitspielers sind - sonst Fehler, nie eine fremde Adresse herausgeben. */
+        static volatile LONG warned;
+        char b[16];
+        if (InterlockedIncrement(&warned) <= 8)
+            HLOG_W("LOCNET: XNetXnAddrToInAddr: %s ist kein verbundener Mitspieler -> WSAEINVAL", locnet_ip_str(ip, b));
+        return WSAEINVAL;
+    }
     ln_copy(pina, &ip, 4);
     return 0;
 }
@@ -241,11 +254,60 @@ static u32 __stdcall ln_select(u32 nfds, u32 r, u32 w, u32 x, u32 tv)
     return (u32)select((int)nfds, (fd_set *)(uintptr_t)r, (fd_set *)(uintptr_t)w, (fd_set *)(uintptr_t)x,
                        (const struct timeval *)(uintptr_t)tv);
 }
+/* W339 TEST (loc_crash_test=N, Standard 0): N s nach Beginn der Netzsitzung im Spiel-Thread eine Ausnahme im
+ * Gastkontext ausloesen - prueft "Absturz = Ende" (Erwartung: LOCSEC-Zeile, Absturzbericht, Exitcode 39).
+ * Modus 0: Schreibzugriff auf Adresse 0 aus privatem, ausfuehrbarem Code (wie eingeschleuster Code).
+ * Modus 1: Sprung in eine beschreibbare Gast-Datenseite (W^X: Ausfuehrungsfehler; ohne W^X liefe das RET durch und
+ * die Zeile "W^X wirkt NICHT" erscheint - Gegenprobe). */
+static void ln_crash_test(void)
+{
+    static ULONGLONG t0;
+    static volatile LONG fired;
+    if (g_cfg.loc_crash_test <= 0 || !g_locnet_session || fired) return;
+    if (!t0) {
+        t0 = GetTickCount64();
+        return;
+    }
+    if (GetTickCount64() - t0 < (ULONGLONG)g_cfg.loc_crash_test * 1000u) return;
+    if (InterlockedExchange(&fired, 1)) return;
+    if (g_cfg.loc_crash_test_mode == 1) {
+        uint32_t a = guest_wx_data_probe_addr();
+        volatile uint8_t *p;
+        uint8_t save;
+        if (!a) {
+            HLOG_W("LOCTEST: keine verwaltete Gast-Datenseite (W^X aus) - Sprung in Daten waere ungeschuetzt, entfaellt");
+            return;
+        }
+        p = (volatile uint8_t *)(uintptr_t)(a + 0xFF0u);
+        HLOG_W("LOCTEST: Sprung in Gast-Datenseite 0x%08X (erwartet: Ausnahme, Sitzung beendet)", a + 0xFF0u);
+        hlog_flush();
+        save = *p;
+        *p = 0xC3; /* ret */
+        ((void(__cdecl *)(void))(uintptr_t)p)();
+        *p = save;
+        HLOG_E("LOCTEST: Gast-Datenseite war ausfuehrbar - W^X wirkt NICHT");
+        return;
+    }
+    {
+        static const uint8_t code[] = { 0xC7, 0x05, 0, 0, 0, 0, 0x39, 0x03, 0, 0, 0xC3 }; /* mov dword [0], 0x339; ret */
+        DWORD old;
+        uint8_t *p = (uint8_t *)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!p) return;
+        memcpy(p, code, sizeof code);
+        VirtualProtect(p, 4096, PAGE_EXECUTE_READ, &old);
+        HLOG_W("LOCTEST: Schreibfehler aus privatem Code (erwartet: Sitzung beendet)");
+        hlog_flush();
+        ((void(__cdecl *)(void))(uintptr_t)p)();
+        HLOG_E("LOCTEST: Ausnahme wurde fortgesetzt - Absturz = Ende wirkt NICHT");
+    }
+}
+
 static u32 __stdcall ln_recv(u32 s, u32 buf, u32 len, u32 flags)
 {
     int r;
     FIRST(23, "recv");
-    r = recv((SOCKET)s, (char *)(uintptr_t)buf, (int)len, (int)flags);
+    ln_crash_test(); /* W339 TEST, Standard aus */
+    r = locnet_recv(&g_ln, (SOCKET)s, (char *)(uintptr_t)buf, (int)len, (int)flags); /* W334: Gastfilter */
     if (r > 0) {
         int e = WSAGetLastError();
         InterlockedIncrement(&g_ln.st.rx);
@@ -257,6 +319,7 @@ static u32 __stdcall ln_recv(u32 s, u32 buf, u32 len, u32 flags)
 static u32 __stdcall ln_recvfrom(u32 s, u32 buf, u32 len, u32 flags, u32 from, u32 pfl)
 {
     FIRST(24, "recvfrom");
+    ln_crash_test(); /* W339 TEST, Standard aus (das Spiel liest auch TCP ueber recvfrom) */
     return (u32)locnet_recvfrom(&g_ln, (SOCKET)s, (char *)(uintptr_t)buf, (int)len, (int)flags,
                                 (struct sockaddr *)(uintptr_t)from, (int *)(uintptr_t)pfl);
 }
@@ -345,6 +408,9 @@ static const ln_hook k_hooks[] = {
 };
 
 /* W297: Netz-Zustand fuer LoC-Testfolgen (loc_steps): 0 = nicht bereit. */
+/* W338 LOC-ROLLBACK-R2: Netz-Kern fuer den eigenen Eingabekanal (NULL = Netz aus). */
+struct locnet *loc_net_core(void) { return g_ln.ready ? &g_ln : NULL; }
+
 int loc_net_test_state(long *accepts, long *connects, int out, unsigned typ)
 {
     if (!g_ln.ready) {
@@ -359,6 +425,124 @@ int loc_net_test_state(long *accepts, long *connects, int out, unsigned typ)
         LONG t = g_ln.st.last34_ms;
         return (t && (LONG)(GetTickCount() - (DWORD)t) < 1000) ? 3 : 1;
     }
+    return 1;
+}
+
+/* W339 SEC-A3 (BERICHT_M2 "W339: SEC-A3", LOC_RE1 §6.6): Typ 0x38 (UDP 1202, 8 B) -> FUN_00055F40 schreibt
+ * Rahmen+4 nach P[slot]+0x48 mit slot = FUN_00050DD0(Absender G+0x98): Suche ueber die belegten Plaetze
+ * (FUN_0004F5A0: XNADDR T[i] = G+0xA8+i*0x300 nicht null) nach P[i]+0x24 == Absender; ohne Treffer liefert sie 0xFF
+ * und FUN_00055F40 schreibt ungeprueft nach P+0xFF*0x300+0x48 und (&DAT_0038FA42)[0xFF*8] (FUN_00069D60). Darum:
+ * 0x38 nur von einem Absender, der in der Spielertabelle steht - genau die Suche des Spiels, vorher. */
+static int ln_udp_state(uint16_t gp, const uint8_t *d, int n, uint32_t from_ip)
+{
+    int ok = 0;
+    if (gp != 1202 || n < 2 || ((unsigned)d[0] | ((unsigned)d[1] << 8)) != 0x38) return 1;
+    __try {
+        uint32_t G = *(volatile const uint32_t *)(uintptr_t)0x361708u;
+        uint32_t P = *(volatile const uint32_t *)(uintptr_t)0x3116B0u;
+        int i, k;
+        if (G && P) {
+            for (i = 0; i < 10 && !ok; i++) {
+                const volatile uint32_t *t = (const volatile uint32_t *)(uintptr_t)(G + 0xA8u + (uint32_t)i * 0x300u);
+                uint32_t nz = 0;
+                for (k = 0; k < 9; k++) nz |= t[k];
+                if (nz && *(volatile const uint32_t *)(uintptr_t)(P + (uint32_t)i * 0x300u + 0x24u) == from_ip) ok = 1;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = 0;
+    }
+    return ok;
+}
+
+/* W339 SEC-A3: Blockpuffer 0x20/0x2E. FUN_000569D0 (0x20) und FUN_00056770 (0x2E) haengen Rahmen+4 = n Byte an einen
+ * laufenden Versatz in einem 0x5040-B-Puffer an (0x20: Puffer FUN_001095E0(1, G+0xDE29), Versatz G+0xDE54+idx*8+4,
+ * Puffer angelegt mit 0x5040 B ueber 0x109730; 0x2E: Puffer conn*0x5040 + DAT_00581BEC (FUN_000A2130), Versatz
+ * [*(0x37A4D8) + conn*0x14 + 0x10]) und pruefen die Summe nicht (0x20 erst NACH dem Kopieren). Der Gastfilter
+ * begrenzt n zustandslos auf die Nutzlast 0x1000; hier, an der Aufrufstelle im Spielverteiler FUN_000533F0, prueft
+ * ein Wrapper mit dem Spielzustand "Versatz + n <= 0x5040". Verstoss: Rahmen nicht verarbeiten, Spiel-TCP-Socket
+ * dieses Mitspielers trennen (wie ein Gastfilter-Verstoss). */
+typedef int(__cdecl *ln_frame_handler)(uint32_t frame, int conn, int arg3);
+#define LN_BLK_SIZE 0x5040u
+
+static int ln_blk_violation(int conn, int typ)
+{
+    static volatile LONG logged;
+    SOCKET sk = INVALID_SOCKET;
+    __try {
+        uint32_t tab = *(volatile const uint32_t *)(uintptr_t)0x3116ACu;
+        if (tab && conn >= 0 && conn < 10) sk = (SOCKET) * (volatile const uint32_t *)(uintptr_t)(tab + (uint32_t)conn * 0x10u + 4u);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        sk = INVALID_SOCKET;
+    }
+    if (InterlockedIncrement(&logged) <= 8) {
+        HLOG_W("LOCGUARD: Spiel-TCP Verstoss Blockpuffer (Typ 0x%02X, Platz %d) - Verbindung getrennt", typ, conn);
+    }
+    if (sk != INVALID_SOCKET && sk != 0) locnet_guard_kill(&g_ln, sk, LGUARD_V_CONTENT);
+    return 1; /* Rahmen gilt als verarbeitet (nichts kopiert) */
+}
+
+static int __cdecl ln_hk_blk20(uint32_t frame, int conn, int arg3)
+{
+    int bad = 0;
+    __try {
+        uint32_t G = *(volatile const uint32_t *)(uintptr_t)0x361708u;
+        if (*(volatile const char *)(uintptr_t)(G + 0x15u) == '?') { /* nur in diesem Zustand kopiert das Original */
+            int idx = *(volatile const signed char *)(uintptr_t)(G + 0xDE29u);
+            uint32_t n = *(volatile const uint32_t *)(uintptr_t)(frame + 4u), off;
+            if (idx < 0 || idx > 9) {
+                bad = 1; /* FUN_001095E0(1, idx): Tabelle 0x130 + (idx + 5) * 4 mit 15 Plaetzen */
+            } else {
+                off = *(volatile const uint32_t *)(uintptr_t)(G + 0xDE54u + (uint32_t)idx * 8u + 4u);
+                bad = n > 0x1000u || off > LN_BLK_SIZE || n > LN_BLK_SIZE - off;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        bad = 1;
+    }
+    if (bad) return ln_blk_violation(conn, 0x20);
+    return ((ln_frame_handler)(uintptr_t)0x569D0u)(frame, conn, arg3);
+}
+
+static int __cdecl ln_hk_blk2e(uint32_t frame, int conn, int arg3)
+{
+    int bad = 0;
+    __try {
+        uint32_t st = *(volatile const uint32_t *)(uintptr_t)0x37A4D8u;
+        uint32_t n = *(volatile const uint32_t *)(uintptr_t)(frame + 4u), off;
+        if (conn < 0 || conn > 9 || !st) {
+            bad = 1;
+        } else {
+            off = *(volatile const uint32_t *)(uintptr_t)(st + (uint32_t)conn * 0x14u + 0x10u);
+            bad = n > 0x1000u || off > LN_BLK_SIZE || n > LN_BLK_SIZE - off;
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        bad = 1;
+    }
+    if (bad) return ln_blk_violation(conn, 0x2E);
+    return ((ln_frame_handler)(uintptr_t)0x56770u)(frame, conn, arg3);
+}
+
+/* call rel32 an site von target auf fn umbiegen (nur wenn die Bytes passen). */
+static int ln_patch_call(uint32_t site, uint32_t target, void *fn, const char *name)
+{
+    uint8_t *p = (uint8_t *)(uintptr_t)site;
+    DWORD old;
+    int32_t rel;
+    if (p[0] != 0xE8) {
+        HLOG_E("LOCBYTES LOCNET %s @0x%X: kein call - Hook fehlt", name, site);
+        return 0;
+    }
+    memcpy(&rel, p + 1, 4);
+    if ((uint32_t)(site + 5u + (uint32_t)rel) != target) {
+        HLOG_E("LOCBYTES LOCNET %s @0x%X: Ziel passt nicht - Hook fehlt", name, site);
+        return 0;
+    }
+    rel = (int32_t)((uint32_t)(uintptr_t)fn - (site + 5u));
+    VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old);
+    memcpy(p + 1, &rel, 4);
+    VirtualProtect(p, 5, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), p, 5);
     return 1;
 }
 
@@ -389,6 +573,19 @@ int loc_net_install(void)
             return 0;
         }
     }
+    locnet_set_udp_state_check(ln_udp_state); /* W339 SEC-A3 */
+    {
+        /* W339 SEC-A3: Blockpuffer-Pruefung an den Aufrufstellen im Spielverteiler (fail closed: ohne Hook kein Netz) */
+        int ok20 = ln_patch_call(0x5374Au, 0x569D0u, (void *)ln_hk_blk20, "blk20");
+        int ok2e = ln_patch_call(0x5363Cu, 0x56770u, (void *)ln_hk_blk2e, "blk2e");
+        if (!ok20 || !ok2e) {
+            HLOG_E("LOCNET: Blockpuffer-Hooks fehlen - Netz aus (fail closed)");
+            locnet_shutdown(&g_ln);
+            return 0;
+        }
+        HLOG_I("LOCNET: Inhaltsregeln Stufe 2 aktiv (Gastfilter + 0x38-Absender + Blockpuffer 0x20/0x2E)");
+    }
+    g_ln.fin_pass = g_cfg.loc_net_leave_reset ? 0 : 1; /* W350: Abgang als Verbindungsreset */
     g_ln.nodelay = g_cfg.loc_net_nodelay ? 1 : 0; /* W322: TCP_NODELAY auf den Spiel-Verbindungen */
     if (g_cfg.loc_netsim[0]) { /* W322 LOC-NETLAT (DIAG/TEST, Standard aus) */
         locnetsim_cfg sc;
@@ -426,6 +623,8 @@ int loc_net_install(void)
         strncpy_s(tc.pilot, sizeof tc.pilot, g_cfg.loc_lobby_pilot, _TRUNCATE);
         strncpy_s(tc.role, sizeof tc.role, g_cfg.loc_lobby_role, _TRUNCATE);
         strncpy_s(tc.relays, sizeof tc.relays, g_cfg.loc_relays, _TRUNCATE);
+        strncpy_s(tc.code, sizeof tc.code, g_cfg.loc_lobby_code, _TRUNCATE); /* W334 */
+        strncpy_s(tc.spki, sizeof tc.spki, g_cfg.loc_lobby_spki, _TRUNCATE);
         _snprintf_s(tc.status_path, sizeof tc.status_path, _TRUNCATE, "%s%sloc_net_status.txt", od ? od : "",
                     od ? "/" : "");
         g_ln.tun = loctun_start(&tc, &g_ln, g_ln.sim, ln_log);
@@ -445,6 +644,41 @@ int loc_net_install(void)
     }
     HLOG_I("LOCNET: %u XNet-/Winsock-Einstiege umgelenkt (Bytevergleich ok)", n);
     return 1;
+}
+
+/* W350 LOC-REJOIN (DIAG, loc_net_diag=1): Verbindungstabelle C = *(0x3116AC), 10 Eintraege zu 16 Byte
+ * (Byte 0: Bit 0 belegt, Bit 1 verbunden; +4 Socket; +8 Stillezaehler, LOC_RE1 §6.3), Spielzustand G = *(0x361708):
+ * G+0xA4/G+0xA5 Spieler je Seite, G+0x5174/G+0x5175 Gesamtzaehler (FUN_000511E0 zaehlt sie beim Entfernen herunter).
+ * Zeile nur bei Aenderung, hoechstens 400. Keine Namen, keine Rahmeninhalte. */
+void loc_net_lobby_frame(unsigned f)
+{
+    static u32 prev[5];
+    static int n;
+    u32 cur[5] = {0, 0, 0, 0, 0};
+    if (!g_cfg.loc_net_diag || n >= 400) return;
+    __try {
+        const uint8_t *c = *(const uint8_t *const *)(uintptr_t)0x3116ACu;
+        const uint8_t *g = *(const uint8_t *const *)(uintptr_t)0x361708u;
+        int i;
+        if (c) {
+            for (i = 0; i < 10; i++) {
+                if (c[i * 16] & 1) cur[0] |= 1u << i;
+                if (c[i * 16] & 2) cur[1] |= 1u << i;
+            }
+        }
+        if (g) {
+            cur[2] = g[0xA4];
+            cur[3] = g[0xA5];
+            cur[4] = (u32)g[0x5174] | ((u32)g[0x5175] << 8);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    if (!memcmp(cur, prev, sizeof cur)) return;
+    memcpy(prev, cur, sizeof prev);
+    n++;
+    HLOG_I("LOCROSTER: Bild %u belegt=0x%03X verbunden=0x%03X Seite0=%u Seite1=%u Zaehler=%u/%u", f, cur[0], cur[1],
+           cur[2], cur[3], cur[4] & 0xFFu, cur[4] >> 8);
 }
 
 /* DIAG (loc_net_diag=1): Spiel-Threads abtasten - wo steht das Spiel im Menue? */
@@ -526,8 +760,34 @@ void loc_net_tick(int waited_s)
     }
     if (g_ln.ready && waited_s % 30 == 0) {
         HLOG_I("LOCNET: t=%ds Sockets=%ld gesendet=%ld empfangen=%ld Broadcasts=%ld verworfen=%ld connect=%ld "
-               "accept=%ld",
+               "accept=%ld Filter=%ld zurueck=%ld",
                waited_s, g_ln.st.sockets, g_ln.st.tx, g_ln.st.rx, g_ln.st.bc, g_ln.st.drop, g_ln.st.connects,
-               g_ln.st.accepts);
+               g_ln.st.accepts, g_ln.st.guard, g_ln.st.hold);
     }
+}
+
+/* W353 LOC-DURCHSTICH: Netzwerte fuer das F11-Paket (sb_feedback.c). Nur Zustaende/Zahlen. */
+/* W357 LOC-PAUSE-NET (sb_pausenet.h): nur Zaehler lesen, keine Inhalte. */
+int loc_net_peer_live(void)
+{
+    static sb_pn_live_t s;
+    int links = 0;
+    if (!g_cfg.loc_boot || !g_ln.ready) return sb_pn_live_step(&s, GetTickCount(), 0, 0, 0, 0, 0);
+    if (g_ln.tun) links = loctun_links_up(g_ln.tun);
+    return sb_pn_live_step(&s, GetTickCount(), g_ln.st.rx, links, g_ln.st.last34_ms,
+                           (long)g_ln.st.accepts + g_ln.st.connects - g_ln.st.leave, 1);
+}
+
+int loc_net_diag_line(char *buf, int cap)
+{
+    char tun[320] = "", rb[320] = "";
+    if (!buf || cap <= 0) return 0;
+    buf[0] = 0;
+    if (!g_cfg.loc_boot) return 0;
+    if (g_ln.tun) loctun_diag(g_ln.tun, tun, (int)sizeof tun);
+    loc_rb_diag(rb, (int)sizeof rb);
+    _snprintf_s(buf, (size_t)cap, _TRUNCATE, "transport=%s%s%s netsim=%s %s | rollback: %s",
+                g_cfg.loc_net ? (_stricmp(g_cfg.loc_transport, "udp") == 0 ? "udp" : "tcp-original") : "off",
+                tun[0] ? " " : "", tun, g_cfg.loc_netsim[0] ? "on" : "off", g_cfg.loc_sync ? "sync=on" : "sync=off", rb);
+    return 1;
 }

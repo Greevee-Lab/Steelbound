@@ -159,6 +159,8 @@ u32 __stdcall hook_DS_21E58C(u32 a1, u32 a2)
  * (sonst laufen die alten Stubs/Originale wie bisher). Alle Signaturen per
  * RET-N vermessen (s. BERICHT W4). Fremd-/NULL-this -> S_OK, nie Crash. */
 #define dsa_ret() ((u32)(uintptr_t)_ReturnAddress())
+static void dsapi_vals(const char *what, au32 obj, au32 ret, const au32 *d, unsigned n); /* W348 DIAG(DSVAL) */
+static void dsapi_rd(au32 p, au32 *d, unsigned n);
 
 /* Generische Accept-Hooks pro argc (Setter etc.): Stimme/DS-Objekt prüfen. */
 static u32 __stdcall hook_DSa_A4(u32 v)
@@ -229,6 +231,12 @@ static u32 __stdcall hook_DSa_BufSetAllParams(u32 v, u32 p, u32 apply)
         SFXD(v, "SetAllParams2", d[13], d[14], d[15]);
     }
     (void)apply;
+    if (g_cfg.audio_api_diag && p) { /* W348 DIAG(DSVAL): ohne Position (0..3) */
+        au32 q[19];
+        dsapi_rd(p, q, 19); /* Xbox-DS3DBUFFER: +0x40 Distanz-, +0x44 Rolloff-, +0x48 Dopplerfaktor */
+        q[3] = q[0]; /* Groesse statt Position z */
+        dsapi_vals("AllParameters(size,vel,cone,min,max,mode,distf,rollf,dopf)", v, dsa_ret(), q + 3, 16);
+    }
     if (g_cfg.audio_3d && v && p)
         audio_3d_voice_allparams(v, p);
     return hook_DSa_A4(v);
@@ -298,6 +306,11 @@ static u32 __stdcall hook_DSa_DSSetRolloff(u32 o, u32 f, u32 apply)
 static u32 __stdcall hook_DSa_BufSetEG(u32 v, u32 p)
 {
     SFXD(v, "SetEG", p, 0, 0);
+    if (g_cfg.audio_api_diag && p) { /* W348 DIAG(DSVAL) */
+        au32 q[10];
+        dsapi_rd(p, q, 10);
+        dsapi_vals("BufSetEG", v, dsa_ret(), q, 10);
+    }
     if (v)
         audio_note_eg(v, p); /* W102 DIAG */
     if (g_cfg.audio_sfx_diag > 0 && p) { /* W89 DIAG(SFXEG): Inhalt je Desc */
@@ -329,6 +342,11 @@ static u32 __stdcall hook_DSa_BufSetEG(u32 v, u32 p)
 static u32 __stdcall hook_DSa_BufSetFilter(u32 v, u32 p)
 {
     SFXD(v, "SetFilter", p, 0, 0);
+    if (g_cfg.audio_api_diag && p) { /* W348 DIAG(DSVAL) */
+        au32 q[6];
+        dsapi_rd(p, q, 6);
+        dsapi_vals("BufSetFilter", v, dsa_ret(), q, 6);
+    }
     if (v && p) /* W102: DSFILTERDESC speichern (Wirkung bei audio_filter=1) */
         audio_set_filter(v, p);
     return hook_DSa_A4(v);
@@ -337,12 +355,22 @@ static u32 __stdcall hook_DSa_BufSetFilter(u32 v, u32 p)
  * (Puffer 0x220A31 / Stream 0x220B3F: v, Params, apply) mit Speicherung. */
 static u32 __stdcall hook_DSa_StrSetFilter(u32 v, u32 p)
 {
+    if (g_cfg.audio_api_diag && p) { /* W348 DIAG(DSVAL) */
+        au32 q[6];
+        dsapi_rd(p, q, 6);
+        dsapi_vals("StrSetFilter", v, dsa_ret(), q, 6);
+    }
     if (v && p)
         audio_set_filter(v, p);
     return hook_DSa_A4(v);
 }
 static u32 __stdcall hook_DSa_StrSetEG(u32 v, u32 p)
 {
+    if (g_cfg.audio_api_diag && p) { /* W348 DIAG(DSVAL) */
+        au32 q[10];
+        dsapi_rd(p, q, 10);
+        dsapi_vals("StrSetEG", v, dsa_ret(), q, 10);
+    }
     if (v)
         audio_note_eg(v, p);
     return hook_DSa_A4(v);
@@ -350,6 +378,11 @@ static u32 __stdcall hook_DSa_StrSetEG(u32 v, u32 p)
 static u32 __stdcall hook_DSa_SetI3DL2Src(u32 v, u32 p, u32 apply)
 {
     (void)apply;
+    if (g_cfg.audio_api_diag && p) { /* W348 DIAG(DSVAL): DSI3DL2BUFFER */
+        au32 q[9];
+        dsapi_rd(p, q, 9);
+        dsapi_vals("I3DL2Source", v, dsa_ret(), q, 9);
+    }
     if (v && p)
         audio_set_i3dl2(v, p);
     return hook_DSa_A4(v);
@@ -421,6 +454,7 @@ static u32 __stdcall hook_DSa_DSRelease(u32 o)
 static u32 __stdcall hook_DSa_DSCommit(u32 o)
 {
     (void)o;
+    audio_commit_deferred(); /* W348: zurueckgestellte Listener-Werte (I3DL2) */
     return 0;
 }
 /* Play/Stop/Status/Position. */
@@ -551,6 +585,15 @@ static u32 __stdcall hook_DSa_SetLoop(u32 v, u32 start, u32 len)
 static u32 __stdcall hook_DSa_SetMixBins(u32 v, u32 pMixBins)
 {
     SFXD(v, "SetMixBins", pMixBins, 0, 0);
+    if (g_cfg.audio_api_diag && pMixBins) { /* W348 DIAG(DSVAL): {Anzahl, Paare{Bin, mB}} */
+        au32 h[2], q[17];
+        dsapi_rd(pMixBins, h, 2);
+        if (h[0] && h[0] <= 8) {
+            q[0] = h[0];
+            dsapi_rd(h[1], q + 1, h[0] * 2);
+            dsapi_vals("SetMixBins", v, dsa_ret(), q, 1 + h[0] * 2);
+        }
+    }
     if (v)
         audio_set_mixbins(v, pMixBins);
     return 0;
@@ -558,6 +601,15 @@ static u32 __stdcall hook_DSa_SetMixBins(u32 v, u32 pMixBins)
 static u32 __stdcall hook_DSa_SetMixBinVolumes(u32 v, u32 pMixBins)
 {
     SFXD(v, "SetMixBinVol", pMixBins, 0, 0);
+    if (g_cfg.audio_api_diag && pMixBins) { /* W348 DIAG(DSVAL) */
+        au32 h[2], q[17];
+        dsapi_rd(pMixBins, h, 2);
+        if (h[0] && h[0] <= 8) {
+            q[0] = h[0];
+            dsapi_rd(h[1], q + 1, h[0] * 2);
+            dsapi_vals("SetMixBinVolumes", v, dsa_ret(), q, 1 + h[0] * 2);
+        }
+    }
     if (v)
         audio_set_mixbin_volumes(v, pMixBins);
     return 0;
@@ -565,6 +617,10 @@ static u32 __stdcall hook_DSa_SetMixBinVolumes(u32 v, u32 pMixBins)
 static u32 __stdcall hook_DSa_SetHeadroom(u32 v, u32 hr)
 {
     SFXD(v, "SetHeadroom", hr, 0, 0);
+    if (g_cfg.audio_api_diag) { /* W348 DIAG(DSVAL) */
+        au32 q[1] = { hr };
+        dsapi_vals("SetHeadroom", v, dsa_ret(), q, 1);
+    }
     if (v)
         audio_set_headroom(v, hr);
     return 0;
@@ -770,77 +826,258 @@ void ds_ui_sfx_install(void)
     patch_jmp(0x106640u, hook_ui_sfx_play, "UI-SFX PlaySegment (W258)");
 }
 
+/* W348: Werte-Spur fuer die API-Inventur (audio_api_diag): je Art die ersten 48
+ * verschiedenen Inhalte (Hash), danach nur noch Zaehler. */
+static void dsapi_vals(const char *what, au32 obj, au32 ret, const au32 *d, unsigned n)
+{
+    static struct { const char *w; au32 h; } seen[256];
+    static unsigned ns;
+    static LONG lk;
+    au32 h = 2166136261u;
+    unsigned i, per = 0;
+    if (!g_cfg.audio_api_diag)
+        return;
+    for (i = 0; i < n; i++)
+        h = (h ^ d[i]) * 16777619u;
+    while (InterlockedCompareExchange(&lk, 1, 0))
+        YieldProcessor();
+    for (i = 0; i < ns; i++) {
+        if (seen[i].w == what) {
+            per++;
+            if (seen[i].h == h) {
+                InterlockedExchange(&lk, 0);
+                return;
+            }
+        }
+    }
+    if (per >= 48 || ns >= 256) {
+        InterlockedExchange(&lk, 0);
+        return;
+    }
+    seen[ns].w = what;
+    seen[ns].h = h;
+    ns++;
+    InterlockedExchange(&lk, 0);
+    {
+        char b[600];
+        size_t o = 0;
+        for (i = 0; i < n && o < sizeof b - 24; i++) {
+            float f;
+            au32 ex = (d[i] >> 23) & 0xFFu;
+            memcpy(&f, &d[i], 4);
+            /* Ganzzahl, bei plausiblem Gleitkomma-Exponenten (2^-20..2^20) als Float */
+            if (ex >= 107u && ex <= 147u)
+                o += (size_t)_snprintf_s(b + o, sizeof b - o, _TRUNCATE, " %.4gf", f);
+            else
+                o += (size_t)_snprintf_s(b + o, sizeof b - o, _TRUNCATE, " %d", (int)d[i]);
+        }
+        HLOG_I("DIAG(DSVAL) %s obj=0x%X ret=0x%X:%s", what, obj, ret, b);
+    }
+}
+
+static void dsapi_rd(au32 p, au32 *d, unsigned n)
+{
+    memset(d, 0, n * 4);
+    if (!p)
+        return;
+    __try {
+        memcpy(d, (const void *)(uintptr_t)p, n * 4);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        memset(d, 0, n * 4);
+    }
+}
+
+/* W348: DS3D-Geschwindigkeiten (Puffer/Strom: v, x, y, z, apply; Listener: o, x, y, z, apply). */
+static u32 __stdcall hook_DSa_BufSetVelocity(u32 v, u32 x, u32 y, u32 z, u32 apply)
+{
+    au32 d[3] = { x, y, z };
+    (void)apply;
+    if ((x | y | z) & 0x7FFFFFFFu)
+        dsapi_vals("VoiceVelocity", v, dsa_ret(), d, 3);
+    if (v)
+        audio_3d_voice_vel(v, x, y, z);
+    return hook_DSa_A4(v);
+}
+static u32 __stdcall hook_DSa_DSSetVelocity(u32 o, u32 x, u32 y, u32 z, u32 apply)
+{
+    au32 d[3] = { x, y, z };
+    (void)apply;
+    if ((x | y | z) & 0x7FFFFFFFu)
+        dsapi_vals("ListenerVelocity", o, dsa_ret(), d, 3);
+    audio_3d_listener_vel(x, y, z);
+    return hook_DSa_A4(o);
+}
+/* IDirectSound_SetI3DL2Listener (o, DSI3DL2LISTENER*, apply): Hallraum fuer audio_reverb. */
+static u32 __stdcall hook_DSa_DSSetI3DL2List(u32 o, u32 p, u32 apply)
+{
+    au32 d[12];
+
+    dsapi_rd(p, d, 12);
+    if (p) {
+        dsapi_vals("I3DL2Listener", o, dsa_ret(), d, 12);
+        audio_set_i3dl2_listener(d, apply == 1); /* DS3D_DEFERRED = 1 */
+    }
+    return hook_DSa_A4(o);
+}
+/* IDirectSound_SetDistanceFactor (o, float, apply): Beleg 0x220C6A schreibt DS3DLISTENER
+ * +0x68 (vor RolloffFactor +0x6C) - SB setzt 2,0 (Meter je Einheit, wirkt auf Doppler). */
+static u32 __stdcall hook_DSa_DSSetDistFactor(u32 o, u32 f, u32 apply)
+{
+    au32 d[2] = { f, apply };
+    dsapi_vals("DistanceFactor", o, dsa_ret(), d, 2);
+    audio_3d_distance_factor(f);
+    return hook_DSa_A4(o);
+}
+
+static u32 __stdcall hook_DSa_DSSetMixBinHead(u32 o, u32 bin, u32 hr)
+{
+    au32 d[2] = { bin, hr };
+    dsapi_vals("MixBinHeadroom", o, dsa_ret(), d, 2);
+    return hook_DSa_A4(o);
+}
+static u32 __stdcall hook_DSa_DSDownloadFX(u32 o, u32 img, u32 size, u32 loc, u32 ppdesc)
+{
+    au32 d[2] = { size, loc };
+    (void)img;
+    (void)ppdesc;
+    dsapi_vals("DownloadEffectsImage", o, dsa_ret(), d, 2);
+    return hook_DSa_A4(o);
+}
+
+/* W348 DIAG(DSAPI) (audio_api_diag=1): Aufrufzaehler je DirectSound-Einstieg fuer
+ * die API-Inventur. Jeder Hook bekommt einen Thunk "lock inc [n]; jmp hook" (x86,
+ * Stack/Register unberuehrt) - ohne Schalter wird direkt gepatcht (unveraendert). */
+#define DSAPI_MAX 96
+static struct {
+    const char *name;
+    volatile LONG n;
+} s_dsapi[DSAPI_MAX];
+static unsigned s_dsapi_n;
+static void *dsapi_thunk(void *handler, const char *name)
+{
+    static uint8_t *pool;
+    static unsigned used;
+    uint8_t *t;
+    intptr_t rel;
+    au32 cnt;
+    if (!g_cfg.audio_api_diag || s_dsapi_n >= DSAPI_MAX)
+        return handler;
+    if (!pool) {
+        pool = (uint8_t *)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+        if (!pool)
+            return handler;
+    }
+    if (used + 16 > 4096)
+        return handler;
+    t = pool + used;
+    used += 16;
+    s_dsapi[s_dsapi_n].name = name;
+    cnt = (au32)(uintptr_t)&s_dsapi[s_dsapi_n].n;
+    s_dsapi_n++;
+    t[0] = 0xF0; /* lock inc dword ptr [cnt] */
+    t[1] = 0xFF;
+    t[2] = 0x05;
+    memcpy(t + 3, &cnt, 4);
+    t[7] = 0xE9; /* jmp handler */
+    rel = (uint8_t *)handler - (t + 12);
+    memcpy(t + 8, &rel, 4);
+    FlushInstructionCache(GetCurrentProcess(), t, 12);
+    return t;
+}
+#define DSA_PATCH(va, fn, name) patch_jmp((va), dsapi_thunk((void *)(fn), (name)), (name))
+
+void ds_api_diag_log(void)
+{
+    char ln[1400];
+    size_t o = 0;
+    unsigned i;
+    if (!g_cfg.audio_api_diag || !s_dsapi_n)
+        return;
+    for (i = 0; i < s_dsapi_n; i++) {
+        int r = _snprintf_s(ln + o, sizeof ln - o, _TRUNCATE, " %s=%ld", s_dsapi[i].name, s_dsapi[i].n);
+        if (r < 0)
+            break;
+        o += (size_t)r;
+        if (o > sizeof ln - 80 || i + 1 == s_dsapi_n) {
+            HLOG_I("DIAG(DSAPI)%s", ln);
+            o = 0;
+            ln[0] = 0;
+        }
+    }
+}
+
 /* Installation aller A7-Hooks (nur bei audio=1). Adressen + RET-N vermessen:
  * Erzeugung/Methoden s. BERICHT W4 (Inventar-Tabelle). */
 void ds_audio_install(void)
 {
     /* Erzeugung */
-    patch_jmp(0x221658u, hook_DSa_CreateSoundStream, "DSa-CreateSoundStream");
-    patch_jmp(0x221733u, hook_DSa_CreateSoundBuffer, "DSa-CreateSoundBuffer");
-    patch_jmp(0x2218EDu, hook_DSa_DirectSoundCreate, "DSa-DirectSoundCreate");
-    patch_jmp(0x221934u, hook_DSa_DirectSoundCreateBuffer, "DSa-DSCBuffer");
-    patch_jmp(0x22198Bu, hook_DSa_DirectSoundCreateStream, "DSa-DSCStream");
+    DSA_PATCH(0x221658u, hook_DSa_CreateSoundStream, "DSa-CreateSoundStream");
+    DSA_PATCH(0x221733u, hook_DSa_CreateSoundBuffer, "DSa-CreateSoundBuffer");
+    DSA_PATCH(0x2218EDu, hook_DSa_DirectSoundCreate, "DSa-DirectSoundCreate");
+    DSA_PATCH(0x221934u, hook_DSa_DirectSoundCreateBuffer, "DSa-DSCBuffer");
+    DSA_PATCH(0x22198Bu, hook_DSa_DirectSoundCreateStream, "DSa-DSCStream");
     /* Puffer-Leben + Transport */
-    patch_jmp(0x21E123u, hook_DSa_BufferAddRef, "DSa-BufAddRef");
-    patch_jmp(0x21E139u, hook_DSa_BufferRelease, "DSa-BufRelease");
-    patch_jmp(0x21E11Eu, hook_DSa_Unlock, "DSa-Unlock");
-    patch_jmp(0x21F518u, hook_DSa_Play, "DSa-Play");
-    patch_jmp(0x21E7C5u, hook_DSa_Stop, "DSa-Stop");
+    DSA_PATCH(0x21E123u, hook_DSa_BufferAddRef, "DSa-BufAddRef");
+    DSA_PATCH(0x21E139u, hook_DSa_BufferRelease, "DSa-BufRelease");
+    DSA_PATCH(0x21E11Eu, hook_DSa_Unlock, "DSa-Unlock");
+    DSA_PATCH(0x21F518u, hook_DSa_Play, "DSa-Play");
+    DSA_PATCH(0x21E7C5u, hook_DSa_Stop, "DSa-Stop");
     if (g_cfg.audio_ithis_fix) { /* W89: I-Wrapper (richtiger this) */
-        patch_jmp(0x21F53Cu, hook_DSa_IStop, "DSa-IStop");
-        patch_jmp(0x21F598u, hook_DSa_IGetStatus, "DSa-IGetStatus");
+        DSA_PATCH(0x21F53Cu, hook_DSa_IStop, "DSa-IStop");
+        DSA_PATCH(0x21F598u, hook_DSa_IGetStatus, "DSa-IGetStatus");
     }
-    patch_jmp(0x21F554u, hook_DSa_StopEx, "DSa-StopEx");
-    patch_jmp(0x21E86Du, hook_DSa_GetStatus, "DSa-GetStatus");
-    patch_jmp(0x21F5B4u, hook_DSa_GetCurrentPosition, "DSa-GetCurPos");
-    patch_jmp(0x21F5D4u, hook_DSa_SetCurrentPosition, "DSa-SetCurPos");
-    patch_jmp(0x2213F9u, hook_DSa_SetBufferData, "DSa-SetBufferData");
-    patch_jmp(0x21F5F0u, hook_DSa_Lock, "DSa-Lock");
-    patch_jmp(0x21F620u, hook_DSa_SetNotify, "DSa-SetNotify");
-    patch_jmp(0x21F578u, hook_DSa_SetLoop, "DSa-SetLoop");
-    patch_jmp(0x220A51u, hook_DSa_SetPlayRegion, "DSa-SetPlayRegion");
-    patch_jmp(0x21F421u, hook_DSa_Duplicate, "DSa-Duplicate");
+    DSA_PATCH(0x21F554u, hook_DSa_StopEx, "DSa-StopEx");
+    DSA_PATCH(0x21E86Du, hook_DSa_GetStatus, "DSa-GetStatus");
+    DSA_PATCH(0x21F5B4u, hook_DSa_GetCurrentPosition, "DSa-GetCurPos");
+    DSA_PATCH(0x21F5D4u, hook_DSa_SetCurrentPosition, "DSa-SetCurPos");
+    DSA_PATCH(0x2213F9u, hook_DSa_SetBufferData, "DSa-SetBufferData");
+    DSA_PATCH(0x21F5F0u, hook_DSa_Lock, "DSa-Lock");
+    DSA_PATCH(0x21F620u, hook_DSa_SetNotify, "DSa-SetNotify");
+    DSA_PATCH(0x21F578u, hook_DSa_SetLoop, "DSa-SetLoop");
+    DSA_PATCH(0x220A51u, hook_DSa_SetPlayRegion, "DSa-SetPlayRegion");
+    DSA_PATCH(0x21F421u, hook_DSa_Duplicate, "DSa-Duplicate");
     /* Puffer-Setter (Wirkung: Volume/Format/Frequenz) */
-    patch_jmp(0x21F438u, hook_DSa_SetVolume, "DSa-BufSetVolume");
-    patch_jmp(0x220872u, hook_DSa_SetFormat, "DSa-BufSetFormat");
-    patch_jmp(0x22088Eu, hook_DSa_SetFrequency, "DSa-BufSetFreq");
-    patch_jmp(0x21F454u, hook_DSa_SetPitch, "DSa-BufSetPitch");
-    patch_jmp(0x21F48Cu, hook_DSa_BufSetEG, "DSa-BufSetEG");
-    patch_jmp(0x21F4A8u, hook_DSa_BufSetFilter, "DSa-BufSetFilter");
-    patch_jmp(0x21F4C4u, hook_DSa_SetHeadroom, "DSa-BufSetHeadroom");
-    patch_jmp(0x21F4E0u, hook_DSa_SetMixBins, "DSa-BufSetMixBins");
-    patch_jmp(0x21F4FCu, hook_DSa_SetMixBinVolumes, "DSa-BufSetMixBinVol");
-    patch_jmp(0x2208C6u, hook_DSa_BufSetAllParams, "DSa-BufSetAllParams");
-    patch_jmp(0x2209C7u, hook_DSa_BufSetPosition3D, "DSa-BufSetPosition");
-    patch_jmp(0x2209FCu, hook_DSa_A20, "DSa-BufSetVelocity");
-    patch_jmp(0x220A31u, hook_DSa_SetI3DL2Src, "DSa-BufSetI3DL2Src");
+    DSA_PATCH(0x21F438u, hook_DSa_SetVolume, "DSa-BufSetVolume");
+    DSA_PATCH(0x220872u, hook_DSa_SetFormat, "DSa-BufSetFormat");
+    DSA_PATCH(0x22088Eu, hook_DSa_SetFrequency, "DSa-BufSetFreq");
+    DSA_PATCH(0x21F454u, hook_DSa_SetPitch, "DSa-BufSetPitch");
+    DSA_PATCH(0x21F48Cu, hook_DSa_BufSetEG, "DSa-BufSetEG");
+    DSA_PATCH(0x21F4A8u, hook_DSa_BufSetFilter, "DSa-BufSetFilter");
+    DSA_PATCH(0x21F4C4u, hook_DSa_SetHeadroom, "DSa-BufSetHeadroom");
+    DSA_PATCH(0x21F4E0u, hook_DSa_SetMixBins, "DSa-BufSetMixBins");
+    DSA_PATCH(0x21F4FCu, hook_DSa_SetMixBinVolumes, "DSa-BufSetMixBinVol");
+    DSA_PATCH(0x2208C6u, hook_DSa_BufSetAllParams, "DSa-BufSetAllParams");
+    DSA_PATCH(0x2209C7u, hook_DSa_BufSetPosition3D, "DSa-BufSetPosition");
+    DSA_PATCH(0x2209FCu, hook_DSa_BufSetVelocity, "DSa-BufSetVelocity");
+    DSA_PATCH(0x220A31u, hook_DSa_SetI3DL2Src, "DSa-BufSetI3DL2Src");
     /* Stream-Setter direkt (Vtable: GetInfo/Status/Process in audio_out.c) */
-    patch_jmp(0x21F640u, hook_DSa_SetVolume, "DSa-StrSetVolume");
-    patch_jmp(0x220A71u, hook_DSa_SetFormat, "DSa-StrSetFormat");
-    patch_jmp(0x21F668u, hook_DSa_Pause, "DSa-StrPause");
-    patch_jmp(0x21F66Du, hook_DSa_FlushEx, "DSa-StrFlushEx");
-    patch_jmp(0x21F64Fu, hook_DSa_StrSetEG, "DSa-StrSetEG");
-    patch_jmp(0x21F654u, hook_DSa_StrSetFilter, "DSa-StrSetFilter");
-    patch_jmp(0x21F659u, hook_DSa_SetHeadroom, "DSa-StrSetHeadroom");
-    patch_jmp(0x21F65Eu, hook_DSa_SetMixBins, "DSa-StrSetMixBins");
-    patch_jmp(0x220AB8u, hook_DSa_StrSetMaxDist, "DSa-StrSetMaxDist");
-    patch_jmp(0x220AD0u, hook_DSa_StrSetMinDist, "DSa-StrSetMinDist");
-    patch_jmp(0x220AEDu, hook_DSa_BufSetPosition3D, "DSa-StrSetPosition");
-    patch_jmp(0x220B16u, hook_DSa_A20, "DSa-StrSetVelocity");
-    patch_jmp(0x220B3Fu, hook_DSa_SetI3DL2Src, "DSa-StrSetI3DL2Src");
+    DSA_PATCH(0x21F640u, hook_DSa_SetVolume, "DSa-StrSetVolume");
+    DSA_PATCH(0x220A71u, hook_DSa_SetFormat, "DSa-StrSetFormat");
+    DSA_PATCH(0x21F668u, hook_DSa_Pause, "DSa-StrPause");
+    DSA_PATCH(0x21F66Du, hook_DSa_FlushEx, "DSa-StrFlushEx");
+    DSA_PATCH(0x21F64Fu, hook_DSa_StrSetEG, "DSa-StrSetEG");
+    DSA_PATCH(0x21F654u, hook_DSa_StrSetFilter, "DSa-StrSetFilter");
+    DSA_PATCH(0x21F659u, hook_DSa_SetHeadroom, "DSa-StrSetHeadroom");
+    DSA_PATCH(0x21F65Eu, hook_DSa_SetMixBins, "DSa-StrSetMixBins");
+    DSA_PATCH(0x220AB8u, hook_DSa_StrSetMaxDist, "DSa-StrSetMaxDist");
+    DSA_PATCH(0x220AD0u, hook_DSa_StrSetMinDist, "DSa-StrSetMinDist");
+    DSA_PATCH(0x220AEDu, hook_DSa_BufSetPosition3D, "DSa-StrSetPosition");
+    DSA_PATCH(0x220B16u, hook_DSa_BufSetVelocity, "DSa-StrSetVelocity");
+    DSA_PATCH(0x220B3Fu, hook_DSa_SetI3DL2Src, "DSa-StrSetI3DL2Src");
     /* DirectSound-Objekt */
-    patch_jmp(0x21E108u, hook_DSa_DSRelease, "DSa-DSRelease");
-    patch_jmp(0x21F3BEu, hook_DSa_GetCaps, "DSa-DSGetCaps");
-    patch_jmp(0x22085Au, hook_DSa_DSCommit, "DSa-DSCommit");
-    patch_jmp(0x21F3DAu, hook_DSa_A20, "DSa-DSDownloadFX");
-    patch_jmp(0x21F401u, hook_DSa_A12, "DSa-DSSetMixBinHead");
-    patch_jmp(0x22083Eu, hook_DSa_A8, "DSa-DSHeadphones");
-    patch_jmp(0x2212DDu, hook_DSa_A12, "DSa-DSSetDistFactor");
-    patch_jmp(0x221301u, hook_DSa_DSSetOrientation, "DSa-DSSetOrient");
-    patch_jmp(0x22134Bu, hook_DSa_DSSetPosition, "DSa-DSSetPosition");
-    patch_jmp(0x221380u, hook_DSa_DSSetRolloff, "DSa-DSSetRolloff");
-    patch_jmp(0x2213A4u, hook_DSa_A20, "DSa-DSSetVelocity");
-    patch_jmp(0x2213D9u, hook_DSa_A12, "DSa-DSSetI3DL2List");
-    patch_jmp(0x21F685u, hook_DSa_DoWork, "DSa-DoWork");
+    DSA_PATCH(0x21E108u, hook_DSa_DSRelease, "DSa-DSRelease");
+    DSA_PATCH(0x21F3BEu, hook_DSa_GetCaps, "DSa-DSGetCaps");
+    DSA_PATCH(0x22085Au, hook_DSa_DSCommit, "DSa-DSCommit");
+    DSA_PATCH(0x21F3DAu, hook_DSa_DSDownloadFX, "DSa-DSDownloadFX");
+    DSA_PATCH(0x21F401u, hook_DSa_DSSetMixBinHead, "DSa-DSSetMixBinHead");
+    DSA_PATCH(0x22083Eu, hook_DSa_A8, "DSa-DSHeadphones");
+    DSA_PATCH(0x2212DDu, hook_DSa_DSSetDistFactor, "DSa-DSSetDistFactor");
+    DSA_PATCH(0x221301u, hook_DSa_DSSetOrientation, "DSa-DSSetOrient");
+    DSA_PATCH(0x22134Bu, hook_DSa_DSSetPosition, "DSa-DSSetPosition");
+    DSA_PATCH(0x221380u, hook_DSa_DSSetRolloff, "DSa-DSSetRolloff");
+    DSA_PATCH(0x2213A4u, hook_DSa_DSSetVelocity, "DSa-DSSetVelocity");
+    DSA_PATCH(0x2213D9u, hook_DSa_DSSetI3DL2List, "DSa-DSSetI3DL2List");
+
+    DSA_PATCH(0x21F685u, hook_DSa_DoWork, "DSa-DoWork");
     HLOG_I("AUDIO HLE-Hooks installiert (audio=1)");
 }

@@ -71,6 +71,12 @@ typedef struct {
     int pitch;    /* 1/4096 Oktave */
     int category; /* XSB-Kategorie (Eintrag +0xA) */
     int entry;    /* gewaehlter Cue-Eintrag */
+    /* W356 (belegt an der XACT-Bibliothek des Spiels, Stimmen-Pegel 0x1C4208): Eintrag +4 als 16 Bit:
+     * Bit 0-8 Lautstaerke (SetVolume -16 mB je Stufe), Bit 9-15 LFE-Mixbin (-50 mB je Stufe);
+     * +0xF Pegel des I3DL2-Mixbins (-256 mB je Stufe, nur Stimmen mit diesem Bin = 3D). */
+    int db100_xact; /* -16 x Bit 0-8, >= -10000 */
+    int lfe_mb;     /* -50 x Bit 9-15, >= -10000 */
+    int room_mb;    /* -256 x (+0xF), >= -10000 */
 } lxf_cue_t;
 
 int lxf_xsb_parse(const uint8_t *d, uint32_t n, lxf_xsb_t *x); /* 0 = ok */

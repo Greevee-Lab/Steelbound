@@ -356,9 +356,11 @@ u32 __stdcall hle_RtlInitializeCriticalSection(u32 cs)
     return X_STATUS_SUCCESS;
 }
 
+void (*volatile g_loc_cs_note)(u32 cs, u32 ret); /* W359 DIAG: Gast-Sperren anderer Threads waehrend Rollback (loc_rollback) */
 u32 __stdcall hle_RtlEnterCriticalSection(u32 cs)
 {
     cs_slot_t *s = cs_for(cs, 1);
+    if (g_loc_cs_note) g_loc_cs_note(cs, (u32)(uintptr_t)_ReturnAddress());
     if (s) {
         DWORD t0 = GetTickCount();
         if (g_cfg.fair_cs) {
@@ -369,6 +371,26 @@ u32 __stdcall hle_RtlEnterCriticalSection(u32 cs)
         cs_wait_log(cs, (u32)(uintptr_t)_ReturnAddress(), GetTickCount() - t0);
     }
     return X_STATUS_SUCCESS;
+}
+
+/* W359: Gast-Sperre ohne Warten betreten (Heap-Pruefung im Rollback-Modul, Spiel-Thread am Ruhepunkt).
+ * 1 = gehalten (danach hle_RtlLeaveCriticalSection), 0 = von einem anderen Thread belegt. */
+int krnl_cs_try_enter(u32 cs)
+{
+    cs_slot_t *s = cs_for(cs, 1);
+    if (!s) return 0;
+    if (g_cfg.fair_cs) {
+        DWORD me = GetCurrentThreadId();
+        if (s->f.owner == me) {
+            s->f.recursion++;
+            return 1;
+        }
+        if (InterlockedCompareExchange(&s->f.lock_count, 0, -1) != -1) return 0;
+        s->f.owner = me;
+        s->f.recursion = 1;
+        return 1;
+    }
+    return TryEnterCriticalSection(&s->cs) ? 1 : 0;
 }
 
 u32 __stdcall hle_RtlLeaveCriticalSection(u32 cs)

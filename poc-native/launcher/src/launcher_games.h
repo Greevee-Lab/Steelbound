@@ -118,6 +118,8 @@ int lgame_img_msg(const lgame_img_t *r, const char *path_u8, char *msg, size_t c
  * Start); hier - und nur hier - freischalten. SB_TEST_LOC_READY=1 erzwingt 1
  * (Selbsttest des spaeteren Wegs). */
 int lgame_loc_client_ready(void);
+/* W353: Freigabe der Ausgabe ohne Test-Haken (intern 1, community nur mit SB_LOC_PLAY). */
+int lgame_loc_build_ready(void);
 /* Startversuch LoC: 0 = darf starten, 1 = gesperrt (msg = "Coming soon"-Text
  * bzw. Grund aus der Abbild-Pruefung). */
 int lgame_loc_start_gate(const lgame_img_t *r, char *msg, size_t cap);

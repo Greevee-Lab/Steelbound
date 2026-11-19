@@ -89,3 +89,12 @@ uint32_t rbr_shadow_diff(uint32_t *addr, uint32_t cap);
 uint32_t rbr_shadow_copy(uint8_t *dst);
 /* Bereich i: Lage, Art, Verfahren, heisse Seiten. 0 = kein Bereich i */
 int rbr_region_info(int i, uint32_t *va, uint32_t *len, uint32_t *kind, int *method, uint32_t *hot);
+
+/* W362 LOC-RING-INIT-EXIT: Stack-Belegungen ALLER Threads des Prozesses (TEB: StackBase/StackLimit/DeallocationStack;
+ * unter WoW64 auch der 64-Bit-Stack, sofern unter 4 GB). Ein Schreibschutz auf einem Stack beendet den Prozess still
+ * (Ausnahmerahmen nicht zustellbar), solche Seiten darf der Ring nie schuetzen. Belegungen ueber 4 MB werden auf
+ * 1 MB um den Stack-Zeiger begrenzt. Rueckgabe: Anzahl Eintraege; nthr = Threads des Prozesses, noteb = ohne TEB. */
+typedef struct { uint32_t a, b, tid; int bits; } rbr_stack_t;
+int rbr_thread_stacks(rbr_stack_t *out, int cap, unsigned *nthr, unsigned *noteb);
+/* Ganze Belegung (AllocationBase bis Ende), in der x liegt; 0 = frei/ungueltig */
+int rbr_alloc_span(uint32_t x, uint32_t *pa, uint32_t *pb);

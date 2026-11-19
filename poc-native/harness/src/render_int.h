@@ -233,6 +233,13 @@ int p2z_scene_mission(void); /* DIAG(W313) */
 void p2z_note(const im_vertex_t *out, unsigned nout, int rhw, int em, unsigned prim, int zt, const float *mvp); /* DIAG(P2-ZTEST,W313) */
 void p2z_post(void);
 void p2z_present(void);
+void lined_note(const im_vertex_t *out, unsigned nout, int rhw, int em, unsigned prim, int zt,
+                const float *c2, const float *c3, int colslot, int shaded); /* DIAG(ISSUE-EMP,W352) */
+void lined_post(void);
+ID3D11GeometryShader *sb_line_gs_for_draw(unsigned topo, int shade); /* FIX(ISSUE-EMP,W352) line_scale */
+extern ID3D11GeometryShader *g_line_gs_rec; /* W352: GS des gerade aufgezeichneten Draws (FPS-INTERP) */
+extern unsigned g_ls_draws;
+void lined_present(void);
 /* DIAG(SHADE-BLOOM,W112, render_bloom.c): Bloom-Kette Draw fuer Draw */
 void bloom_diag_pre(const im_vertex_t *out, unsigned nout, unsigned nsrc, int rhw, unsigned prim, ID3D11ShaderResourceView *srv0);
 void bloom_diag_post(void);
@@ -335,9 +342,14 @@ void sb_interp_rec_draw_src(const im_vertex_t *src, unsigned prim, unsigned nsrc
 void sb_interp_rec_clear(ID3D11RenderTargetView *rtv, const float c[4],
                          ID3D11DepthStencilView *dsv, unsigned dsflags,
                          float z, unsigned stencil);
+/* W340 LOC-FRAMES: Kopie BB-Ausschnitt -> Textur (LoC "Backbuffer als Textur") als Op aufzeichnen */
+void sb_interp_rec_copy(ID3D11RenderTargetView *src, ID3D11ShaderResourceView *dst, const D3D11_BOX *box);
 int sb_interp_swap(void);
 unsigned sb_interp_pairs(void); /* W81 Test: Interp-Paare seit Start (Missionsbeleg) */
 void sb_interp_reset(const char *why); /* W81: alle Listen/Schatten/Staging frei (vor ResizeBuffers) */
+/* W361: Objekt, das Zwischenbild-Listen roh tragen koennen (RENDER-QA-Shader/Layouts), erst freigeben, wenn keine
+ * Liste es mehr enthaelt (sonst sofort). Auch ohne ctx_lock. */
+void sb_interp_release_later(IUnknown *u);
 /* ISSUE-PHOTO: ohne FPS-INTERP (interp_fps=0) fuer ein Foto zwei Ticks aufzeichnen (render_interp.c): A liefert den
  * Anfangsstand der Ziele, B ist das Foto. request: Wunsch; arm: sb_render_present nach sb_pause_point (naechster Tick
  * zeichnet auf); end: am Swap vor der Endbild-Nachbearbeitung (direkter BB) sichern -> Historie A, B (Foto-Wiedergabe

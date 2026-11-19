@@ -33,6 +33,11 @@ else()
   message(FATAL_ERROR "SB_EDITION muss private oder community sein (ist: ${SB_EDITION})")
 endif()
 message(STATUS "SB_EDITION=${SB_EDITION}")
+# W353 LOC-DURCHSTICH: privater Schalter -DSB_LOC_PLAY=ON gibt in der Community-Ausgabe den LoC-Start frei
+# (privates Testpaket, make_alpha.py --loc-preview). Standard aus: oeffentliche Releases bleiben grau.
+# Interne Ausgabe: LoC-Start immer frei (wird nie verteilt).
+option(SB_LOC_PLAY "W353: privates Testpaket mit LoC (nur community, nie fuer Releases)" OFF)
+message(STATUS "SB_LOC_PLAY=${SB_LOC_PLAY}")
 
 # W142 L10N-EN: eingebautes Englisch (sb_lang_en.inc aus en.lang).
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -126,9 +131,17 @@ add_custom_target(lang_check ALL
 if(SB_EDITION_COMMUNITY)
   target_compile_definitions(sb_launcher PRIVATE SB_EDITION_COMMUNITY=1)
   target_link_options(sb_launcher PRIVATE "/PDBALTPATH:%_PDB%")
+  if(SB_LOC_PLAY)
+    target_compile_definitions(sb_launcher PRIVATE SB_LOC_PLAY=1)
+  endif()
 else()
   target_compile_definitions(sb_launcher PRIVATE
     SB_HARNESS_DIR_DEFAULT="${CMAKE_CURRENT_SOURCE_DIR}/../harness/build/Release")
+  # W336 LOC-TESTPARTNER: nur interne Ausgabe (community.include nimmt die Datei heraus)
+  target_sources(sb_launcher PRIVATE src/launcher_loctp.c src/launcher_loctp.h)
+  target_compile_definitions(sb_launcher PRIVATE SB_HAVE_LOCTP=1)
+  # 18.11.: steelnet v2 ist live (W335 abgenommen, Pins gesetzt) - Testpartner darf den echten Dienst nutzen
+  target_compile_definitions(sb_launcher PRIVATE LOCTP_REAL_SERVICE_ON=1)
 endif()
 target_link_libraries(sb_launcher PRIVATE comdlg32 shell32 ole32 comctl32 setupapi winusb
   uxtheme dwmapi windowscodecs winhttp crypt32 bcrypt ws2_32)
@@ -142,6 +155,11 @@ endif()
 if(SB_VERSION)
   target_compile_definitions(sb_launcher PRIVATE "SB_VERSION_STR=\"${SB_VERSION}\"")
 endif()
+# W334 (SECURITY.md §9, L6): Test-Haken (z. B. --steelnet game-auth gibt den Spielschluessel aus) nur in
+# Entwickler-Builds; Release-Builds (make_alpha setzt SB_VERSION) haben sie nicht.
+if(NOT SB_VERSION)
+  target_compile_definitions(sb_launcher PRIVATE SB_TEST_HOOKS=1)
+endif()
 message(STATUS "SB_VERSION=${SB_VERSION}")
 target_compile_options(sb_launcher PRIVATE /W3)
 # W217 FIRST-RUN: Launcher mit statischer CRT (/MT) - startet auch ohne
@@ -150,3 +168,13 @@ target_compile_options(sb_launcher PRIVATE /W3)
 set_property(TARGET sb_launcher PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
 # Hybrid: nur vcruntime statisch, UCRT dynamisch (Teil von Windows 10/11).
 target_link_options(sb_launcher PRIVATE "/NODEFAULTLIB:libucrt.lib" "ucrt.lib")
+# W332 SEC-HARDEN: Binaer-Haertung (Nachweis: tools/sec/pe_harden_check.py, dumpbin).
+#  /sdl       zusaetzliche Sicherheitswarnungen als Fehler + strengere /GS-Heuristik
+#  /guard:cf  Control Flow Guard (indirekte Aufrufe nur auf gueltige Ziele)
+#  /DYNAMICBASE /NXCOMPAT  ASLR + DEP (MSVC-Standard, hier ausdruecklich)
+#  /DEPENDENTLOADFLAG:0x800  statische Importe (uxtheme, dwmapi, winhttp ...) nur aus
+#             System32 - keine untergeschobenen DLLs aus dem Programmordner (z. B. Downloads).
+#  /CETCOMPAT Schattenstapel-tauglich markiert (Windows erzwingt CET nur in 64-bit-Prozessen;
+#             vorbereitet). /HIGHENTROPYVA gibt es nur fuer 64-bit (hier 32-bit).
+target_compile_options(sb_launcher PRIVATE /sdl /guard:cf)
+target_link_options(sb_launcher PRIVATE "/guard:cf" "/DYNAMICBASE" "/NXCOMPAT" "/DEPENDENTLOADFLAG:0x800" "/CETCOMPAT")

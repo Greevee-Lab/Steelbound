@@ -35,6 +35,7 @@ void lcfg_defaults(launcher_settings_t *s)
     s->audio = 1;
     s->audio_live = 1;
     s->volume_master = s->volume_music = s->volume_sfx = s->volume_voice = 100; /* W303 AUDIO-VOLUME */
+    s->audio_hrtf = 0; /* W356: Lautsprecher (Kopfhoerer-HRTF nur auf Wunsch) */
     s->aspect_mode = 1; /* W47: Pillarbox + Hor+, nie strecken (S3.10) */
     s->input_profile[0] = '\0'; /* W78: leer = Legacy-Tastatur */
     s->sbc_usb = 0;             /* W78: USB-Controller aus */
@@ -388,8 +389,15 @@ void lcfg_fx_apply_level(launcher_settings_t *s, int level)
     }
 }
 
+static int is_path_key(const char *k);
+
 static void set_key(launcher_settings_t *s, const char *k, const char *v)
 {
+    /* W332 SEC: zu lange Pfadwerte (user.cfg/Profil bis 4 KB je Zeile, Felder 512) verwerfen statt strcpy_s-Abbruch
+     * (Absturz beim Start); ein gekuerzter Pfad waere ein anderer Pfad. */
+    if (is_path_key(k) && strcmp(k, "photo_dir") != 0 && strlen(v) >= sizeof s->xbe_path) {
+        return;
+    }
     if (strcmp(k, "xbe_path") == 0) {
         strcpy_s(s->xbe_path, sizeof s->xbe_path, v);
     } else if (strcmp(k, "media_root") == 0) {
@@ -412,6 +420,8 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         s->audio = atoi(v);
     } else if (strcmp(k, "audio_live") == 0) {
         s->audio_live = atoi(v);
+    } else if (strcmp(k, "audio_hrtf") == 0) { /* W356 */
+        s->audio_hrtf = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "volume_master") == 0 || strcmp(k, "volume_music") == 0 || /* W303 AUDIO-VOLUME */
                strcmp(k, "volume_sfx") == 0 || strcmp(k, "volume_voice") == 0) {
         int vol = atoi(v); /* 0..100 klemmen (wie hcfg) */
@@ -665,7 +675,8 @@ static const char *kManaged[][2] = {
     { "audio_live", "audio" },      { "aspect_mode", "render" },
     { "volume_master", "audio" },   { "volume_music", "audio" }, /* W303 AUDIO-VOLUME */
     { "volume_sfx", "audio" },      { "volume_voice", "audio" },
-    { "input_profile", "input" },   { "sbc_usb", "input" },
+    { "audio_hrtf", "audio" }, /* W356 */
+    { "input_profile", "input" },  { "sbc_usb", "input" },
     { "sbc_mouse_off", "input" }, /* W128 */
     { "aim_assist", "input" },     { "auto_gear", "input" }, /* W218, W236 */
     { "aim_turn", "input" }, /* W236: Altwert neutralisieren (immer 0) */
@@ -797,6 +808,8 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = s->audio;
         } else if (strcmp(k, "audio_live") == 0) {
             v = s->audio_live;
+        } else if (strcmp(k, "audio_hrtf") == 0) { /* W356 */
+            v = s->audio_hrtf ? 1 : 0;
         } else if (strcmp(k, "volume_master") == 0) { /* W303 AUDIO-VOLUME */
             v = s->volume_master < 0 ? 0 : (s->volume_master > 100 ? 100 : s->volume_master);
         } else if (strcmp(k, "volume_music") == 0) {
@@ -935,6 +948,16 @@ static int line_is_key(const char *line, const char *key)
     return *line == '=';
 }
 
+/* W332 SEC: Laenge nach _snprintf_s(..., _TRUNCATE) fortschreiben; gekuerzt (-1) = Puffer voll (cap - 1),
+ * nie rueckwaerts oder hinter das Ende. */
+static size_t save_add(size_t len, size_t cap, int r)
+{
+    if (r < 0 || len + (size_t)r >= cap) {
+        return cap ? cap - 1 : 0;
+    }
+    return len + (size_t)r;
+}
+
 int lcfg_save_user(const char *path, const launcher_settings_t *s)
 {
     /* Bis 1 MB alte Datei erhalten (user.cfg ist real < 4 KB). */
@@ -966,17 +989,22 @@ int lcfg_save_user(const char *path, const launcher_settings_t *s)
         return 0;
     }
     fseek(f, 0, SEEK_END);
-    out_cap = (size_t)ftell(f) + 4096;
-    if (out_cap > 1024 * 1024 + 4096) {
+    out_cap = (size_t)ftell(f);
+    if (out_cap > 1024 * 1024) {
         fclose(f);
         return -1;
     }
+    /* W332 SEC: echte Obergrenze statt fester 4 KB Reserve - jede verwaltete Zeile kann beim Ersetzen/Anhaengen
+     * auf "key=<Wert bis 511>" (+ Section-Kopf) wachsen, fgets teilt ueberlange Zeilen (+1 Zeilenende je Teil).
+     * Vorher lief out_len bei Kuerzung (_snprintf_s -> -1) rueckwaerts bzw. hinter den Puffer. */
+    out_cap += out_cap / (sizeof line - 1) + 4096 + KMANAGED_N * (sizeof kval + 128);
     fseek(f, 0, SEEK_SET);
     out_text = (char *)malloc(out_cap);
     if (!out_text) {
         fclose(f);
         return -1;
     }
+    out_text[0] = '\0'; /* W332 SEC: leere alte Datei -> strstr unten las sonst uninitialisiert hinter den Puffer */
     /* Alte Zeilen uebernehmen, verwaltete Keys ersetzen (erstes Treffen). */
     while (fgets(line, sizeof line, f)) {
         char *nl = line + strcspn(line, "\r\n");
@@ -985,18 +1013,18 @@ int lcfg_save_user(const char *path, const launcher_settings_t *s)
         for (i = 0; i < KMANAGED_N; i++) {
             if (!done[i] && line_is_key(line, kManaged[i][0])) {
                 key_value(s, kManaged[i][0], kval, sizeof kval);
-                out_len += (size_t)_snprintf_s(out_text + out_len,
+                out_len = save_add(out_len, out_cap, _snprintf_s(out_text + out_len,
                                                out_cap - out_len, _TRUNCATE,
-                                               "%s=%s\n", kManaged[i][0], kval);
+                                               "%s=%s\n", kManaged[i][0], kval));
                 done[i] = 1;
                 replaced = 1;
                 break;
             }
         }
         if (!replaced) {
-            out_len += (size_t)_snprintf_s(out_text + out_len,
+            out_len = save_add(out_len, out_cap, _snprintf_s(out_text + out_len,
                                            out_cap - out_len, _TRUNCATE, "%s\n",
-                                           line);
+                                           line));
         }
     }
     fclose(f);
@@ -1006,14 +1034,14 @@ int lcfg_save_user(const char *path, const launcher_settings_t *s)
             char hdr[64];
             _snprintf_s(hdr, sizeof hdr, _TRUNCATE, "[%s]", kManaged[i][1]);
             if (!strstr(out_text, hdr)) {
-                out_len += (size_t)_snprintf_s(out_text + out_len,
+                out_len = save_add(out_len, out_cap, _snprintf_s(out_text + out_len,
                                                out_cap - out_len, _TRUNCATE,
-                                               "%s\n", hdr);
+                                               "%s\n", hdr));
             }
             key_value(s, kManaged[i][0], kval, sizeof kval);
-            out_len += (size_t)_snprintf_s(out_text + out_len,
+            out_len = save_add(out_len, out_cap, _snprintf_s(out_text + out_len,
                                            out_cap - out_len, _TRUNCATE,
-                                           "%s=%s\n", kManaged[i][0], kval);
+                                           "%s=%s\n", kManaged[i][0], kval));
         }
     }
     if (u8_fopen_s(&f, path, "w") != 0 || !f) {
@@ -1486,6 +1514,9 @@ const char *lcfg_exit_msg_key(unsigned long code, int edition)
     }
     if (code == 8) {
         return "gui.exit8";
+    }
+    if (code == 39) { /* W339: LoC-Netzspiel nach Gastcode-Ausnahme beendet (Absturz = Ende, SECURITY.md §6.6) */
+        return "gui.exit39";
     }
     return NULL;
 }

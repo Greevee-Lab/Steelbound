@@ -32,6 +32,10 @@ int loc_render_vismap(unsigned surf, unsigned *host, unsigned *pitch);
 int loc_render_interp_mission(void);
 /* W323: Missionstakt in Hz (vblank_hz / Felder je Bild, Original 60/3 = 20). */
 int loc_render_tick_hz(void);
+/* DIAG(W358 LOC-LOOK) loc_lookstat: Zustandszaehler je Draw (aus render_im.c, nur LoC) */
+void loc_render_lookstat(int rhw, unsigned has_tex);
+/* DIAG(W349 LOC-FRAMES-2) loc_ui_diag: Farbe der UI-Rahmen (FUN_000ECF10) mit Aufrufkette */
+void loc_render_ui_color(unsigned reg, unsigned color, const unsigned *ret);
 
 #ifdef __cplusplus
 }

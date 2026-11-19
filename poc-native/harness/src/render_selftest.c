@@ -26,6 +26,11 @@
 #include "render_cpersp_math.h"
 #include "sb_edition.h"
 #include "sb_texhash.h" /* W288 PACK-ZERO-TEX */
+#include "render_interp_bb.h" /* W347 GHOST */
+#include "render_interp_camfit.h" /* W349 LOC-FRAMES-2 */
+#include "render_loclook.h" /* W358 LOC-LOOK */
+#include "render_line_src.h" /* W352 ISSUE-EMP line_scale */
+#include "render_interp_shref.h" /* W361 LOC-INTERP-CRASH */
 #if SB_EDITION_COMMUNITY
 #include "render_selftest_xbe.h"
 /* Gleiche Formen wie in render_selftest_data.h, aber mit Lade-Puffern
@@ -885,6 +890,396 @@ static void test_texzero(void)
     g_fail += fail;
 }
 
+/* ---- W347 GHOST: Billboard-Paarung per Kamera (render_interp_bb.h) ----
+ * Baeume als je Tick zur Kamera ausgerichtete Quads (Sichtraum-Vertices, Matrix = Projektion, wie im Spiel:
+ * Matrix gleich, Eingangsdaten neu). Kamera dreht 3 Grad je Tick (schneller Schwenk) und faehrt 0,3 m vor;
+ * Tick N in umgekehrter Reihenfolge. Soll: jeder Baum findet genau sich selbst, auch neben einem 2 m entfernten
+ * Nachbarn; ein bewegter Baum (5 m versetzt) findet keinen; stehende Kamera: Fehler ~0. */
+static void bb_mul(double r[16], const double a[16], const double b[16])
+{
+    int i, j, k;
+    for (i = 0; i < 4; i++) {
+        for (j = 0; j < 4; j++) {
+            double s = 0.0;
+            for (k = 0; k < 4; k++) { s += a[i * 4 + k] * b[k * 4 + j]; }
+            r[i * 4 + j] = s;
+        }
+    }
+}
+static int bb_inv(double out[16], const double m[16])
+{
+    double a[4][8];
+    int i, j, k;
+    for (i = 0; i < 4; i++) { for (j = 0; j < 4; j++) { a[i][j] = m[i * 4 + j]; a[i][j + 4] = (i == j); } }
+    for (i = 0; i < 4; i++) {
+        int pv = i;
+        double d;
+        for (k = i + 1; k < 4; k++) { if (fabs(a[k][i]) > fabs(a[pv][i])) { pv = k; } }
+        if (fabs(a[pv][i]) < 1e-12) { return 0; }
+        for (j = 0; j < 8; j++) { double t = a[i][j]; a[i][j] = a[pv][j]; a[pv][j] = t; }
+        d = a[i][i];
+        for (j = 0; j < 8; j++) { a[i][j] /= d; }
+        for (k = 0; k < 4; k++) { if (k != i) { double f = a[k][i]; for (j = 0; j < 8; j++) { a[k][j] -= f * a[i][j]; } } }
+    }
+    for (i = 0; i < 4; i++) { for (j = 0; j < 4; j++) { out[i * 4 + j] = a[i][j + 4]; } }
+    return 1;
+}
+/* Sicht-Matrix (Zeilenvektoren): Welt -> Sicht fuer Kamera an (cx,0,cz) mit Gierwinkel deg */
+static void bb_view(double v[16], double cx, double cz, double deg)
+{
+    double t = deg * 3.14159265358979 / 180.0, c = cos(t), s = sin(t);
+    double T[16] = { 1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1 }, R[16] = { 0 };
+    T[12] = -cx; T[14] = -cz;
+    /* Drehung um y um -t: x' = c*x - s*z, z' = s*x + c*z (Zeilenvektor p*R) */
+    R[0] = c; R[2] = s; R[5] = 1.0; R[8] = -s; R[10] = c; R[15] = 1.0;
+    bb_mul(v, T, R);
+}
+/* Baum-Quad im Sichtraum: 4 Bezugs-Vertices (Liste n=6: Index 0, 2, 4, 5) */
+static void bb_tree(float pr[4][4], const double V[16], double x, double z)
+{
+    static const double ex[4][2] = { { -3, -4 }, { 3, 4 }, { 3, 4 }, { 3, -4 } };
+    double w[4] = { x, 4.0, z, 1.0 }, c[4];
+    int q, j;
+    for (j = 0; j < 4; j++) { c[j] = w[0] * V[j] + w[1] * V[4 + j] + w[2] * V[8 + j] + w[3] * V[12 + j]; }
+    for (q = 0; q < 4; q++) {
+        pr[q][0] = (float)(c[0] + ex[q][0]); pr[q][1] = (float)(c[1] + ex[q][1]); pr[q][2] = (float)c[2]; pr[q][3] = 1.0f;
+    }
+}
+static int bb_pick(float pa[][4][4], int na, const float P[16], const float pb[4][4], const double D[16], double *ecb)
+{
+    int k, best = -1;
+    double eb = 1e30;
+    for (k = 0; k < na; k++) {
+        double ec, ev;
+        ipbb_err((const float (*)[4])pa[k], P, pb, P, D, &ec, &ev);
+        if (ipbb_ok(ec, ev) && ec < eb) { eb = ec; best = k; }
+    }
+    if (ecb) { *ecb = eb; }
+    return best;
+}
+static void test_bbcam(void)
+{
+    static const double trees[7][2] = { { -20, 60 }, { -18, 61 }, { 0, 80 }, { 15, 50 }, { 30, 120 }, { -40, 90 }, { 4, 15 } };
+    enum { NT = 7 };
+    float P[16] = { 0 }, pa[NT][4][4], pb[4][4];
+    double VA[16], VB[16], PA[16], PB[16], Pd[16] = { 0 }, IA[16], D[16], ec;
+    int n = 0, fail = 0, k, r;
+    double n0 = 1.0, f0 = 1000.0, ys = 1.0 / tan(30.0 * 3.14159265358979 / 180.0);
+    Pd[0] = ys; Pd[5] = ys; Pd[10] = f0 / (f0 - n0); Pd[11] = 1.0; Pd[14] = -n0 * f0 / (f0 - n0);
+    for (k = 0; k < 16; k++) { P[k] = (float)Pd[k]; }
+    /* (a) Schwenk 3 Grad + 0,3 m Fahrt, Tick N in umgekehrter Reihenfolge */
+    bb_view(VA, 0.0, 0.0, 0.0);
+    bb_view(VB, 0.0, 0.3, 3.0);
+    bb_mul(PA, VA, Pd); bb_mul(PB, VB, Pd);
+    if (!bb_inv(IA, PA)) { fail++; }
+    bb_mul(D, IA, PB); /* D = M_A^-1 * M_B der Welt-Geometrie (Kamera des Ziels) */
+    for (k = 0; k < NT; k++) { bb_tree(pa[k], VA, trees[k][0], trees[k][1]); }
+    for (k = NT - 1; k >= 0; k--) {
+        bb_tree(pb, VB, trees[k][0], trees[k][1]);
+        r = bb_pick(pa, NT, P, (const float (*)[4])pb, D, &ec);
+        n++; if (r != k) { fail++; printf("BBCAM Schwenk: Baum %d -> %d (ec=%.5f)\n", k, r, ec); }
+    }
+    /* (b) bewegter Baum (5 m versetzt): kein Partner */
+    bb_tree(pb, VB, trees[0][0] - 5.0, trees[0][1]);
+    r = bb_pick(pa, NT, P, (const float (*)[4])pb, D, &ec);
+    n++; if (r >= 0) { fail++; printf("BBCAM bewegt: Partner %d (ec=%.5f)\n", r, ec); }
+    /* (c) Reihenfolge-Partner (anderer Baum) wird abgelehnt: Baum 2 gegen Kandidat 3 allein */
+    bb_tree(pb, VB, trees[2][0], trees[2][1]);
+    r = bb_pick(&pa[3], 1, P, (const float (*)[4])pb, D, &ec);
+    n++; if (r >= 0) { fail++; printf("BBCAM fremd: angenommen (ec=%.5f)\n", ec); }
+    /* (d) stehende Kamera: D = I, Fehler ~0 */
+    for (k = 0; k < 16; k++) { D[k] = (k % 5) == 0 ? 1.0 : 0.0; }
+    for (k = 0; k < NT; k++) {
+        r = bb_pick(pa, NT, P, (const float (*)[4])pa[k], D, &ec);
+        n++; if (r != k || ec > 1e-6) { fail++; printf("BBCAM still: Baum %d -> %d (ec=%.6f)\n", k, r, ec); }
+    }
+    /* (e) sehr schneller Schwenk 8 Grad je Tick (240 Grad/s): naher Baum (15 m) bleibt eindeutig */
+    bb_view(VB, 0.0, 0.0, 8.0);
+    bb_mul(PB, VB, Pd);
+    bb_mul(D, IA, PB);
+    bb_tree(pb, VB, trees[6][0], trees[6][1]);
+    r = bb_pick(pa, NT, P, (const float (*)[4])pb, D, &ec);
+    n++; if (r != 6) { fail++; printf("BBCAM schnell: Baum 6 -> %d (ec=%.5f)\n", r, ec); }
+    printf("BBCAM (W347): %d Faelle (Schwenk/Reihenfolge, bewegt, fremd, still, schnell): %d Fehler\n", n, fail);
+    g_fail += fail;
+}
+
+/* W349 LOC-FRAMES-2: Kamera-Pruefung der Zwischenbild-Zuordnung (render_interp_camfit.h). Kamera dreht sich um
+ * die Hochachse (Gierwinkel), Projektion 90 Grad, Zeilenvektoren wie im Spiel (clip = p * M). */
+static void cf_mat(float m[16], double yaw, double tx)
+{
+    double c = cos(yaw), s = sin(yaw), f = 1.0, zn = 1.0, zf = 1000.0;
+    double V[16] = { c, 0, -s, 0,  0, 1, 0, 0,  s, 0, c, 0,  -tx * c, 0, tx * s, 1 };
+    double P[16] = { f, 0, 0, 0,  0, f, 0, 0,  0, 0, zf / (zf - zn), 1,  0, 0, -zn * zf / (zf - zn), 0 };
+    int r, k, j;
+    for (r = 0; r < 4; r++) {
+        for (k = 0; k < 4; k++) {
+            double a = 0.0;
+            for (j = 0; j < 4; j++) { a += V[r * 4 + j] * P[j * 4 + k]; }
+            m[r * 4 + k] = (float)a;
+        }
+    }
+}
+static int cf_inv(double out[16], const float m[16]) /* Gauss-Jordan wie zc_dmat */
+{
+    double a[4][8];
+    int i, j, k;
+    for (i = 0; i < 4; i++) { for (j = 0; j < 4; j++) { a[i][j] = m[i * 4 + j]; a[i][j + 4] = (i == j); } }
+    for (i = 0; i < 4; i++) {
+        int pv = i;
+        double d;
+        for (k = i + 1; k < 4; k++) { if (fabs(a[k][i]) > fabs(a[pv][i])) { pv = k; } }
+        if (fabs(a[pv][i]) < 1e-12) { return 0; }
+        for (j = 0; j < 8; j++) { double t = a[i][j]; a[i][j] = a[pv][j]; a[pv][j] = t; }
+        d = a[i][i];
+        for (j = 0; j < 8; j++) { a[i][j] /= d; }
+        for (k = 0; k < 4; k++) { if (k != i) { double f = a[k][i]; for (j = 0; j < 8; j++) { a[k][j] -= f * a[i][j]; } } }
+    }
+    for (i = 0; i < 4; i++) { for (j = 0; j < 4; j++) { out[i * 4 + j] = a[i][j + 4]; } }
+    return 1;
+}
+static void test_camfit(void)
+{
+    float MA[16], MB[16], pa[4][4], pb[4][4], pc[4][4];
+    double Ai[16], D[1][16];
+    int fail = 0, n = 0, q, r, k;
+    cf_mat(MA, 0.0, 0.0);
+    cf_mat(MB, 0.15, 0.3); /* 20-Hz-Tick bei schneller Drehung: ~8,6 Grad + Versatz */
+    cf_inv(Ai, MA);
+    for (r = 0; r < 4; r++) {
+        for (k = 0; k < 4; k++) {
+            double a = 0.0;
+            for (q = 0; q < 4; q++) { a += Ai[r * 4 + q] * MB[q * 4 + k]; }
+            D[0][r * 4 + k] = a;
+        }
+    }
+    /* (a) ruhender Gelaendestreifen: gleiche Vertices, Matrix A/B -> ~0 */
+    for (q = 0; q < 4; q++) { pa[q][0] = -20.0f + 13.0f * q; pa[q][1] = -3.0f; pa[q][2] = 40.0f + 5.0f * q; pa[q][3] = 1.0f; }
+    n++; if (!(ipcf_camfit(pa, MA, pa, MB, D, 1) < 1e-4)) { fail++; }
+    /* (b) Billboard (Wolken-Sprite, 6 Vertices -> 4 Bezugs-Vertices) neu zur Kamera gedreht: klein (< 0,25) */
+    for (q = 0; q < 4; q++) {
+        double ang = 0.15 * 0.5, cx = 30.0, cz = 300.0, ox = (q & 1) ? 12.0 : -12.0, oy = (q & 2) ? 8.0 : -8.0;
+        pa[q][0] = (float)(cx + ox); pa[q][1] = (float)(40.0 + oy); pa[q][2] = (float)cz; pa[q][3] = 1.0f;
+        pb[q][0] = (float)(cx + ox * cos(ang)); pb[q][1] = (float)(40.0 + oy); pb[q][2] = (float)(cz + ox * sin(ang)); pb[q][3] = 1.0f;
+    }
+    n++; if (!(ipcf_camfit(pa, MA, pb, MB, D, 1) < 0.25)) { fail++; }
+    /* (c) falscher Partner (anderer Sprite 60 Einheiten daneben): gross */
+    for (q = 0; q < 4; q++) { pc[q][0] = pa[q][0] + 60.0f; pc[q][1] = pa[q][1]; pc[q][2] = pa[q][2]; pc[q][3] = 1.0f; }
+    n++; if (!(ipcf_camfit(pc, MA, pb, MB, D, 1) > 0.25)) { fail++; }
+    /* (d) Streifen hinter der Kamera (w < 0), ruhend: klein; (e) w-Seitenwechsel: unbrauchbar */
+    for (q = 0; q < 4; q++) { pa[q][0] = -5.0f + 3.0f * q; pa[q][1] = -2.0f; pa[q][2] = -30.0f - 4.0f * q; pa[q][3] = 1.0f; }
+    n++; if (!(ipcf_camfit(pa, MA, pa, MB, D, 1) < 1e-4)) { fail++; }
+    pb[0][0] = 0.0f; pb[0][1] = 0.0f; pb[0][2] = 10.0f; pb[0][3] = 1.0f;
+    for (q = 1; q < 4; q++) { memcpy(pb[q], pa[q], sizeof pb[q]); }
+    n++; if (!(ipcf_camfit(pa, MA, pb, MB, D, 1) >= 1e9)) { fail++; }
+    /* (f) Matrix-Lerp-Test (Tick-N-Vertices mit M_A): ruhendes Gitter knapp ueber der Matrix-Schwelle (Rundung) */
+    {
+        float MB2[16];
+        memcpy(MB2, MB, sizeof MB2);
+        MB2[12] *= 1.003f; MB2[14] *= 1.003f;
+        for (q = 0; q < 4; q++) { pa[q][0] = -200.0f + 130.0f * q; pa[q][1] = -3.0f; pa[q][2] = 400.0f + 50.0f * q; pa[q][3] = 1.0f; }
+        n++; if (!(ipcf_camfit(pa, MA, pa, MB2, D, 1) < 0.05)) { fail++; }
+    }
+    printf("CAMFIT (W349): %d Faelle (ruhend, Billboard, Fehlpartner, hinter der Kamera, w-Wechsel, Rundung): %d Fehler\n", n, fail);
+    g_fail += fail;
+}
+
+/* ---------- W361 LOC-INTERP-CRASH: Liste haelt Schatten-Views ueber die Lebensdauer des Eintrags hinaus ----------
+ * Nachbau des Absturzpfads: Eintrag gibt Textur/Views frei, die Liste bindet die SRV danach per Deferred-Context
+ * (dort lag der Absturz: AllocateDependentCLS<CResource> mit Ressource NULL). */
+static void test_shref(void)
+{
+    int fail = 0, n = 0;
+    D3D11_TEXTURE2D_DESC td;
+    ID3D11Texture2D *tex = NULL;
+    ID3D11RenderTargetView *rtv = NULL;
+    ID3D11ShaderResourceView *srv = NULL;
+    ID3D11DeviceContext *dc = NULL;
+    ip_shref_t r;
+    memset(&td, 0, sizeof td);
+    td.Width = td.Height = 16;
+    td.MipLevels = td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT;
+    td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+    if (FAILED(ID3D11Device_CreateTexture2D(g_d, &td, NULL, &tex)) ||
+        FAILED(ID3D11Device_CreateRenderTargetView(g_d, (ID3D11Resource *)tex, NULL, &rtv)) ||
+        FAILED(ID3D11Device_CreateShaderResourceView(g_d, (ID3D11Resource *)tex, NULL, &srv)) ||
+        FAILED(ID3D11Device_CreateDeferredContext(g_d, 0, &dc))) {
+        printf("SHREF (W361): Anlegen fehlgeschlagen\n");
+        g_fail++;
+        return;
+    }
+    memset(&r, 0, sizeof r);
+    ip_shref_take(&r, (ID3D11View *)rtv, NULL, (ID3D11View *)srv, 5u);
+    n++; if (!ip_shref_same(&r, 5u) || ip_shref_same(&r, 6u) || ip_shref_same(&r, 0u)) { fail++; } /* Generation */
+    n++; if (r.v[0] != (ID3D11View *)rtv || r.v[1] || r.v[2] != (ID3D11View *)srv) { fail++; }
+    /* Eintrag wird verdraengt: seine Referenzen gehen weg, die der Liste bleiben */
+    ID3D11Texture2D_Release(tex);
+    ID3D11RenderTargetView_Release(rtv);
+    ID3D11ShaderResourceView_Release(srv);
+    n++; { ULONG c1 = ID3D11ShaderResourceView_AddRef(srv), c0 = ID3D11ShaderResourceView_Release(srv);
+           if (c1 != 2u || c0 != 1u) { fail++; } } /* nur noch die Liste */
+    n++; { ID3D11Resource *res = NULL; /* View haelt die Textur am Leben */
+           ID3D11View_GetResource(r.v[2], &res);
+           if (!res) { fail++; } else { ID3D11Resource_Release(res); } }
+    n++; { ID3D11ShaderResourceView *sv = srv; /* Absturzpfad: Deferred-Context bindet die SRV, Liste ausfuehren */
+           ID3D11CommandList *cl = NULL;
+           ID3D11DeviceContext_PSSetShaderResources(dc, 0, 1, &sv);
+           if (FAILED(ID3D11DeviceContext_FinishCommandList(dc, FALSE, &cl)) || !cl) { fail++; }
+           else { ID3D11DeviceContext_ExecuteCommandList(g_c, cl, FALSE); ID3D11CommandList_Release(cl); } }
+    ip_shref_drop(&r);
+    n++; if (r.v[0] || r.v[1] || r.v[2] || r.gen || ip_shref_same(&r, 5u)) { fail++; }
+    ip_shref_drop(&r); /* zweimal unschaedlich */
+    n++; if (r.v[0] || r.v[2]) { fail++; }
+    ID3D11DeviceContext_ClearState(g_c);
+    ID3D11DeviceContext_Release(dc);
+    printf("SHREF (W361): %d Faelle (Listen-Referenzen auf Schatten-Views, Generation, Deferred-Bindung nach Freigabe): %d Fehler\n",
+           n, fail);
+    g_fail += fail;
+}
+
+/* ---------- W358 LOC-LOOK: Vertex-Licht der P2-Programme, LOD-Bias-Kompensation, Mip-Filter ---------- */
+static void test_loclook(void)
+{
+    int fail = 0, n = 0;
+    /* oD0-Quelle: kind 0 immer, kind 2 nur LoC + Schalter, kind 1 nie, shade_mask Bit 1 Pflicht */
+    n++; if (!rq_loc_od0_from_prog(0, 0, 0, 31u)) { fail++; }
+    n++; if (rq_loc_od0_from_prog(2, 0, 1, 31u)) { fail++; }     /* SB: unveraendert (Eingangsfarbe) */
+    n++; if (rq_loc_od0_from_prog(2, 1, 0, 31u)) { fail++; }     /* LoC, Schalter aus */
+    n++; if (!rq_loc_od0_from_prog(2, 1, 1, 31u)) { fail++; }    /* LoC, Schalter an */
+    n++; if (rq_loc_od0_from_prog(1, 1, 1, 31u)) { fail++; }     /* P1 (2D) nie */
+    n++; if (rq_loc_od0_from_prog(0, 1, 1, 0u)) { fail++; }      /* shade_mask ohne Bit 1 */
+    /* Bias: Spiel -2,0 bei 480 Zeilen (s = 1) bleibt -2,0; bei 1440 Zeilen (s = 3) -2 + log2(3) = -0,415 */
+    n++; if (rq_loc_bias16(-2.0f, 1.0f, 1) != -32) { fail++; }
+    n++; if (rq_loc_bias16(-2.0f, 3.0f, 1) != -7) { fail++; }    /* -0,415 * 16 = -6,64 -> -7 */
+    n++; if (rq_loc_bias16(-2.0f, 3.0f, 2) != -32) { fail++; }   /* roh */
+    n++; if (rq_loc_bias16(-0.1f, 1.5f, 1) != 0) { fail++; }     /* nie unschaerfer als ohne Bias */
+    n++; if (rq_loc_bias16(0.5f, 2.0f, 1) != 24) { fail++; }     /* positiver Spiel-Bias + 1 */
+    { union { unsigned u; float f; } nan; nan.u = 0x7FC00000u;
+      n++; if (rq_loc_bias16(nan.f, 1.0f, 1) != 0) { fail++; } } /* ungueltig -> 0 */
+    n++; if (rq_loc_bias16(-1.0f, 0.5f, 1) != -16) { fail++; }   /* Skala < 1: keine Kompensation */
+    /* Mip-Filter: Stufe 1 immer linear, volle Emulation = Spielwert */
+    n++; if (rq_loc_mipfilter(1u, 1) != 2u || rq_loc_mipfilter(0u, 1) != 2u) { fail++; }
+    n++; if (rq_loc_mipfilter(0u, 3) != 0u || rq_loc_mipfilter(1u, 3) != 1u || rq_loc_mipfilter(7u, 3) != 2u) { fail++; }
+    printf("LOCLOOK (W358): %d Faelle (oD0-Quelle, LOD-Bias-Kompensation, Mip-Filter): %d Fehler\n", n, fail);
+    g_fail += fail;
+}
+
+/* ---------- W352 ISSUE-EMP: Linien-Band-GS (line_scale) ----------
+ * Spiel-Viewport 16x16 (logisch) auf 64x64 (Faktor 4): Linie mit und ohne
+ * GS rastern, gezaehlte Pixel gegen Laenge x Breite (1 Xbox-Pixel = 4 px). */
+static const char *kLsVsIm =
+    "struct VI { float4 pos : POSITION; float4 col : COLOR0; };\n"
+    "struct VO { float4 pos : SV_Position; float4 col : COLOR0; float2 uv : TEXCOORD0; };\n"
+    "VO main(VI i) { VO o; o.pos = i.pos; o.col = i.col; o.uv = float2(0, 0); return o; }\n";
+static const char *kLsPsIm =
+    "float4 main(float4 p : SV_Position, float4 c : COLOR0, float2 uv : TEXCOORD0) : SV_Target { return c; }\n";
+static const char *kLsVsSh =
+    "struct VI { float4 pos : POSITION; float4 col : COLOR0; };\n"
+    "struct VO { float4 pos : SV_Position; float4 col : COLOR0; float2 uv : TEXCOORD0;\n"
+    "  float4 spec : COLOR1; float4 t0 : TEXCOORD1; float4 t1 : TEXCOORD2;\n"
+    "  float4 t2 : TEXCOORD3; float4 t3 : TEXCOORD4; float fog : TEXCOORD5; };\n"
+    "VO main(VI i) { VO o = (VO)0; o.pos = i.pos; o.col = i.col; o.fog = 1.0; return o; }\n";
+static const char *kLsPsSh =
+    "struct PSIN { float4 pos : SV_Position; float4 col : COLOR0; float2 uv : TEXCOORD0;\n"
+    "  float4 spec : COLOR1; float4 t0 : TEXCOORD1; float4 t1 : TEXCOORD2;\n"
+    "  float4 t2 : TEXCOORD3; float4 t3 : TEXCOORD4; float fog : TEXCOORD5; };\n"
+    "float4 main(PSIN i) : SV_Target { return i.col * i.fog; }\n";
+
+/* Linie (logische Pixel x0,y0 -> x1,y1, Clip-w = w) zeichnen, leuchtende Pixel zaehlen */
+static int ls_count(ID3D11VertexShader *vs, ID3D11PixelShader *ps, ID3D11GeometryShader *gs, ID3D11InputLayout *lay,
+                    ID3D11RenderTargetView *rtv, ID3D11Texture2D *rt, ID3D11Texture2D *stg,
+                    float x0, float y0, float x1, float y1, float w)
+{
+    float v[2][8];
+    ID3D11Buffer *vb;
+    UINT st = 32, of = 0;
+    float clr[4] = { 0, 0, 0, 0 };
+    D3D11_VIEWPORT vp;
+    D3D11_MAPPED_SUBRESOURCE m;
+    int n = 0, i;
+    float px[2][2] = { { x0, y0 }, { x1, y1 } };
+    for (i = 0; i < 2; i++) {
+        v[i][0] = (px[i][0] / 16.0f * 2.0f - 1.0f) * w; v[i][1] = (1.0f - px[i][1] / 16.0f * 2.0f) * w;
+        v[i][2] = 0.5f * w; v[i][3] = w;
+        v[i][4] = 1; v[i][5] = 1; v[i][6] = 1; v[i][7] = 1;
+    }
+    vb = mkbuf(D3D11_BIND_VERTEX_BUFFER, v, sizeof v);
+    if (!vb) { return -1; }
+    vp.TopLeftX = 0; vp.TopLeftY = 0; vp.Width = 64; vp.Height = 64; vp.MinDepth = 0; vp.MaxDepth = 1;
+    ID3D11DeviceContext_ClearRenderTargetView(g_c, rtv, clr);
+    ID3D11DeviceContext_OMSetRenderTargets(g_c, 1, &rtv, NULL);
+    ID3D11DeviceContext_RSSetViewports(g_c, 1, &vp);
+    ID3D11DeviceContext_IASetInputLayout(g_c, lay);
+    ID3D11DeviceContext_IASetVertexBuffers(g_c, 0, 1, &vb, &st, &of);
+    ID3D11DeviceContext_IASetPrimitiveTopology(g_c, D3D11_PRIMITIVE_TOPOLOGY_LINELIST);
+    ID3D11DeviceContext_VSSetShader(g_c, vs, NULL, 0);
+    ID3D11DeviceContext_GSSetShader(g_c, gs, NULL, 0);
+    ID3D11DeviceContext_PSSetShader(g_c, ps, NULL, 0);
+    ID3D11DeviceContext_Draw(g_c, 2, 0);
+    ID3D11DeviceContext_GSSetShader(g_c, NULL, NULL, 0);
+    ID3D11DeviceContext_CopyResource(g_c, (ID3D11Resource *)stg, (ID3D11Resource *)rt);
+    if (SUCCEEDED(ID3D11DeviceContext_Map(g_c, (ID3D11Resource *)stg, 0, D3D11_MAP_READ, 0, &m))) {
+        int y, x;
+        for (y = 0; y < 64; y++) {
+            const unsigned *row = (const unsigned *)((const unsigned char *)m.pData + (size_t)y * m.RowPitch);
+            for (x = 0; x < 64; x++) { if (row[x] & 0xFFu) { n++; } }
+        }
+        ID3D11DeviceContext_Unmap(g_c, (ID3D11Resource *)stg, 0);
+    }
+    vb->lpVtbl->Release(vb);
+    return n;
+}
+
+static void test_linescale(void)
+{
+    D3D11_TEXTURE2D_DESC td;
+    D3D11_INPUT_ELEMENT_DESC ie[2] = {
+        { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 } };
+    ID3D11Texture2D *rt = NULL, *stg = NULL;
+    ID3D11RenderTargetView *rtv = NULL;
+    int sh;
+    printf("== 7. Linien-Band-GS (W352 line_scale, Faktor 4)\n");
+    memset(&td, 0, sizeof td);
+    td.Width = 64; td.Height = 64; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
+    if (FAILED(ID3D11Device_CreateTexture2D(g_d, &td, NULL, &rt)) ||
+        FAILED(ID3D11Device_CreateRenderTargetView(g_d, (ID3D11Resource *)rt, NULL, &rtv))) { printf("LS FAIL Ziel\n"); g_fail++; return; }
+    td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    if (FAILED(ID3D11Device_CreateTexture2D(g_d, &td, NULL, &stg))) { printf("LS FAIL Staging\n"); g_fail++; return; }
+    for (sh = 0; sh < 2; sh++) {
+        char src[2048];
+        ID3DBlob *bv = compile(sh ? kLsVsSh : kLsVsIm, "vs_4_0"), *bp = compile(sh ? kLsPsSh : kLsPsIm, "ps_4_0"), *bg;
+        ID3D11VertexShader *vs = NULL; ID3D11PixelShader *ps = NULL; ID3D11GeometryShader *gs = NULL; ID3D11InputLayout *lay = NULL;
+        int nl, nh, nh2, nd, nz, ok;
+        sb_line_gs_source(src, sizeof src, 16, 16, sh);
+        bg = compile(src, "gs_4_0");
+        if (!bv || !bp || !bg) { printf("LS FAIL %s: Uebersetzung\n", sh ? "Shading" : "IM"); g_fail++; continue; }
+        ID3D11Device_CreateVertexShader(g_d, bv->lpVtbl->GetBufferPointer(bv), bv->lpVtbl->GetBufferSize(bv), NULL, &vs);
+        ID3D11Device_CreatePixelShader(g_d, bp->lpVtbl->GetBufferPointer(bp), bp->lpVtbl->GetBufferSize(bp), NULL, &ps);
+        ID3D11Device_CreateGeometryShader(g_d, bg->lpVtbl->GetBufferPointer(bg), bg->lpVtbl->GetBufferSize(bg), NULL, &gs);
+        ID3D11Device_CreateInputLayout(g_d, ie, 2, bv->lpVtbl->GetBufferPointer(bv), bv->lpVtbl->GetBufferSize(bv), &lay);
+        if (!vs || !ps || !gs || !lay) { printf("LS FAIL %s: Objekte\n", sh ? "Shading" : "IM"); g_fail++; continue; }
+        nl = ls_count(vs, ps, NULL, lay, rtv, rt, stg, 2.0f, 8.5f, 14.0f, 8.5f, 1.0f);  /* alt: 1 px */
+        nh = ls_count(vs, ps, gs, lay, rtv, rt, stg, 2.0f, 8.5f, 14.0f, 8.5f, 1.0f);    /* 12 x 1 Xbox-Pixel */
+        nh2 = ls_count(vs, ps, gs, lay, rtv, rt, stg, 2.0f, 8.5f, 14.0f, 8.5f, 2.5f);   /* gleiche Linie, w = 2,5 */
+        nd = ls_count(vs, ps, gs, lay, rtv, rt, stg, 2.0f, 2.0f, 13.0f, 13.0f, 1.0f);   /* Diagonale 15,56 */
+        nz = ls_count(vs, ps, gs, lay, rtv, rt, stg, 5.0f, 5.0f, 5.0f, 5.0f, 1.0f);     /* Laenge 0 */
+        /* Soll: 12*4 x 4 = 192; Diagonale (8,8)-(52,52) x 4 px: 220 Pixelmitten (Flaeche 249); ohne GS ~48; Laenge 0 -> 0 */
+        ok = nl >= 44 && nl <= 50 && nh >= 184 && nh <= 200 && nh2 == nh && nd >= 210 && nd <= 230 && nz == 0;
+        printf("LS %s %s: ohne=%d band=%d band_w2.5=%d diag=%d null=%d (Soll ~48/192/=band/~220/0)\n",
+               sh ? "Shading" : "IM", ok ? "ok" : "FAIL", nl, nh, nh2, nd, nz);
+        if (!ok) { g_fail++; }
+        vs->lpVtbl->Release(vs); ps->lpVtbl->Release(ps); gs->lpVtbl->Release(gs); lay->lpVtbl->Release(lay);
+        bv->lpVtbl->Release(bv); bp->lpVtbl->Release(bp); bg->lpVtbl->Release(bg);
+    }
+    rtv->lpVtbl->Release(rtv); rt->lpVtbl->Release(rt); stg->lpVtbl->Release(stg);
+}
+
 int main(int argc, char **argv)
 {
     HMODULE dc;
@@ -925,6 +1320,11 @@ int main(int argc, char **argv)
     test_ps();
     test_cpersp();
     test_texzero();
+    test_bbcam();
+    test_camfit();
+    test_loclook();
+    test_linescale();
+    test_shref();
     printf("== ERGEBNIS: %d Fehler\n", g_fail);
     return g_fail ? 1 : 0;
 }

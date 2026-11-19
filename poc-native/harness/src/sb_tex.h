@@ -42,6 +42,8 @@ void sb_tex_note_reuse(unsigned va, unsigned len);
 void sb_tex_lockwatch_note(unsigned xptr);   /* W98: LockRect-Textur beobachten */
 void sb_tex_lockwatch_forget(unsigned xptr); /* W98: Release rc=0 */
 void sb_tex_diag_info(unsigned xptr, char *buf, size_t n); /* DIAG(AMMO-HUD,W243) */
+void sb_tex_hud_tick(void);                          /* FIX(HUDFREEZE,W345): Anzeige-Texturen beobachtet halten (je Bild) */
+void sb_tex_hud_format(char *o, size_t cap);         /* W345: Zustand der Anzeige-Texturen (F11) */
 /* W2B-FIX: Linear-Dims direkt aus Header (Norm-Fallback ohne Cache). */
 int sb_tex_hdr_dims(unsigned xptr, unsigned *w, unsigned *h);
 /* W261 FILM-ALTTAB: 1 = Texturkopf meldet ein lineares Format (ohne Cache). */

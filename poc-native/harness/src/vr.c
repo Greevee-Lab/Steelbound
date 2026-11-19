@@ -1107,8 +1107,10 @@ static int xr_load_runtime(char *name_out, size_t cap)
     json_path[0] = '\0';
     if (g_cfg.vr_runtime_json[0]) {
         strcpy_s(json_path, sizeof json_path, g_cfg.vr_runtime_json);
-    } else if (getenv("XR_RUNTIME_JSON") && getenv("XR_RUNTIME_JSON")[0]) {
-        strcpy_s(json_path, sizeof json_path, getenv("XR_RUNTIME_JSON"));
+    } else if ((sz = GetEnvironmentVariableA("XR_RUNTIME_JSON", json_path, sizeof json_path)) > 0 &&
+               sz < sizeof json_path && json_path[0]) {
+        /* W332 SEC (/sdl C4996): statt getenv; zu lang -> wie nicht gesetzt (Registry) */
+        sz = 0;
         src = "XR_RUNTIME_JSON";
     } else {
         /* 32-bit-Prozess: Registry-Umleitung liefert die 32-bit-Runtime (WOW6432Node) */
@@ -1151,7 +1153,10 @@ static int xr_load_runtime(char *name_out, size_t cap)
         xr_failf("Runtime-DLL ist kein 32-bit-Modul (Maschine 0x%X): %s - dieser Prozess ist 32-bit", mach, full);
         return 0;
     }
-    xr_dll = LoadLibraryExA(full, NULL, LOAD_WITH_ALTERED_SEARCH_PATH);
+    /* W332 SEC: Abhaengigkeiten der Runtime aus deren Ordner + System32 (Prozess-
+     * Standard ist seit W332 nur System32, s. ldr.c); gleichwertig zu
+     * LOAD_WITH_ALTERED_SEARCH_PATH, aber ohne Programm-/Arbeitsordner. */
+    xr_dll = LoadLibraryExA(full, NULL, LOAD_LIBRARY_SEARCH_DLL_LOAD_DIR | LOAD_LIBRARY_SEARCH_DEFAULT_DIRS);
     if (!xr_dll) { xr_failf("Runtime-DLL laedt nicht (Fehler %lu): %s", GetLastError(), full); return 0; }
     neg = (PFN_xrNegotiateLoaderRuntimeInterface)(void *)GetProcAddress(xr_dll, "xrNegotiateLoaderRuntimeInterface");
     if (!neg) { xr_failf("Runtime ohne xrNegotiateLoaderRuntimeInterface: %s", full); return 0; }

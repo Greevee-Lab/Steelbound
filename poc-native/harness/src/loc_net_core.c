@@ -5,6 +5,7 @@
 #include "loc_net_core.h"
 #include "loc_netsim.h"
 #include "loc_tun.h"
+#include "loc_guard.h"
 #include <ws2tcpip.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -15,6 +16,18 @@
 #define LN_CLAIM_OFF 200u /* Spielport 1200 nutzt LoC nicht */
 #define LN_IPPROTO_VDP 0xFE
 #define LN_SIO_UDP_CONNRESET 0x9800000Cu /* _WSAIOW(IOC_VENDOR, 12) */
+
+/* W339 SEC-A3 (SECURITY.md §6.6 Punkt 3): 1, sobald Bytes eines Mitspielers einen Puffer des Spiels erreicht haben
+ * (Gastfilter bestanden). Bleibt bis zum Prozessende gesetzt (Rahmeninhalte liegen danach im Gastspeicher). Der
+ * VEH "Absturz = Ende" (emu_main.c) beendet ab dann jede Ausnahme im Gastcode statt sie dem SEH des Spiels zu geben. */
+volatile LONG g_locnet_session;
+static void ln_logf(const locnet *n, const char *fmt, ...);
+static void ln_session_mark(const locnet *n)
+{
+    if (!g_locnet_session && InterlockedExchange(&g_locnet_session, 1) == 0) {
+        ln_logf(n, "LOCSEC: Netzsitzung - Absturz = Ende aktiv (Gastcode-Ausnahmen beenden die Sitzung)");
+    }
+}
 
 static void ln_logf(const locnet *n, const char *fmt, ...)
 {
@@ -363,6 +376,15 @@ typedef struct ln_walk {
 } ln_walk;
 static ln_walk s_walk[2][32];
 static volatile LONG s_walk_lock;
+/* W334: Gastfilter-Zustand je Spiel-TCP-Socket (SECURITY.md §6, letzte Linie in den HLE-Hooks) */
+typedef struct ln_gw {
+    SOCKET s;
+    lguard_walk w;
+    int dead; /* Verstoss: Verbindung getrennt, recv meldet WSAECONNRESET */
+    ULONGLONG undecided_since; /* seit wann ein Rahmenkopf unentschieden ansteht (0 = keiner) */
+} ln_gw;
+#define LN_GW_MAX 64 /* W335: 32 -> 64 (Ueberlauf jetzt fail closed, ln_gw_get) */
+static ln_gw s_gw[LN_GW_MAX];
 
 static void ln_walk_lock(void)
 {
@@ -382,6 +404,9 @@ static void ln_walk_reset(SOCKET s)
                 memset(&s_walk[d][i], 0, sizeof s_walk[d][i]);
             }
         }
+    }
+    for (i = 0; i < LN_GW_MAX; i++) {
+        if (s_gw[i].s == s) memset(&s_gw[i], 0, sizeof s_gw[i]);
     }
     InterlockedExchange(&s_walk_lock, 0);
 }
@@ -610,6 +635,14 @@ SOCKET locnet_accept(locnet *n, SOCKET s, struct sockaddr *a, int *len)
         WSASetLastError(WSAEWOULDBLOCK);
         return INVALID_SOCKET;
     }
+    if (n->tun && in.sin_addr.s_addr != n->self_ip && !loctun_is_peer(n->tun, in.sin_addr.s_addr)) {
+        /* W334 (SECURITY.md §6.5): mit Transport nur Verbindungen der Stellvertreter verbundener Mitspieler */
+        ln_logf(n, "LOCNET: Verbindung von %s verworfen (kein verbundener Mitspieler)", locnet_ip_str(in.sin_addr.s_addr, ipb));
+        closesocket(c);
+        InterlockedIncrement(&n->st.drop);
+        WSASetLastError(WSAEWOULDBLOCK);
+        return INVALID_SOCKET;
+    }
     in.sin_port = htons(locnet_port_in(n, in.sin_addr.s_addr, ntohs(in.sin_port)));
     ln_nodelay(n, c);
     ln_walk_reset(c); /* W324: neuer Strom */
@@ -705,9 +738,251 @@ int locnet_sendto(locnet *n, SOCKET s, const char *buf, int len, int flags, cons
     return r;
 }
 
+/* ---------- W334 LOC-SEC-CLIENT: Gastfilter in den HLE-Hooks (SECURITY.md §6) ----------
+ * Letzte Linie fuer jeden Weg zum Spiel (eigener Transport, Original-TCP/UDP, Loopback): das Spiel bekommt ueber
+ * recv/recvfrom nur Bytes, die der Gastfilter freigibt. Im Transport (loc_tun) prueft derselbe Filter vorher und
+ * trennt den Mitspieler; hier wird zusaetzlich alles abgefangen, was an ihm vorbei kaeme. */
+static void ln_guard_log(locnet *n, int tcp, int why)
+{
+    static volatile LONG logged;
+    if (InterlockedIncrement(&logged) <= 8) {
+        ln_logf(n, "LOCGUARD: Spiel-%s Verstoss %s - %s", tcp ? "TCP" : "UDP", lguard_reason(why),
+                tcp ? "Verbindung getrennt" : "verworfen");
+    }
+}
+
+/* W339 SEC-A3: Zustandspruefung fuer UDP-Rahmen, die vom Spielzustand abhaengt (sb_emu setzt sie, loc_net.c). */
+static locnet_udp_state_fn s_udp_state;
+void locnet_set_udp_state_check(locnet_udp_state_fn f)
+{
+    s_udp_state = f;
+}
+
+/* 1 = Datagramm darf zum Spiel. Spielport aus dem eigenen gebundenen Port. from_ip = Absender, wie ihn das Spiel
+ * sieht (Netzwerk-Byte-Reihenfolge, 0 = unbekannt). */
+static int ln_udp_guard(locnet *n, SOCKET s, char *buf, int r, uint32_t from_ip)
+{
+    struct sockaddr_in me;
+    int l = sizeof me, why = 0, e = WSAGetLastError();
+    uint16_t gp = 0;
+    if (getsockname(s, (struct sockaddr *)&me, &l) == 0 && me.sin_family == AF_INET) {
+        gp = locnet_port_in(n, n->self_ip, ntohs(me.sin_port));
+    }
+    WSASetLastError(e);
+    if (lguard_udp_check(gp, (const uint8_t *)buf, r, &why)) {
+        if (!s_udp_state || s_udp_state(gp, (const uint8_t *)buf, r, from_ip)) return 1;
+        why = LGUARD_V_CONTENT; /* W339: z. B. 0x38 von einem Absender ohne Platz in der Spielertabelle */
+    }
+    memset(buf, 0, (size_t)r);
+    InterlockedIncrement(&n->st.guard);
+    ln_guard_log(n, 0, why);
+    return 0;
+}
+
+/* W335: abgelehntes Datagramm verwerfen. Bei MSG_PEEK liegt es noch in der Warteschlange -> einmal ohne PEEK
+ * entnehmen. Puffer des Spiels danach leeren (keine ungeprueften Bytes im Gastspeicher). */
+static void ln_dg_discard(SOCKET s, char *buf, int len, int flags)
+{
+    int e = WSAGetLastError();
+    if (flags & MSG_PEEK) recv(s, buf, len, flags & ~MSG_PEEK);
+    if (len > 0) memset(buf, 0, (size_t)len);
+    WSASetLastError(e);
+}
+
+static ln_gw *ln_gw_get(SOCKET s)
+{
+    static ln_gw over;
+    int i, fr = -1;
+    for (i = 0; i < LN_GW_MAX; i++) {
+        if (s_gw[i].s == s) return &s_gw[i];
+        if (fr < 0 && s_gw[i].s == 0) fr = i;
+    }
+    if (fr < 0) {
+        /* W335 (NET-AUDIT N2): Tabelle voll. Frueher wurde der Zustand eines fremden, laufenden Sockets verdraengt
+         * (Rahmengrenze vergessen -> Filter und Spiel zerlegen den Strom verschieden). Fail closed: dieser Socket
+         * gilt als getrennt. */
+        memset(&over, 0, sizeof over);
+        over.s = s;
+        over.dead = 1;
+        return &over;
+    }
+    memset(&s_gw[fr], 0, sizeof s_gw[fr]);
+    s_gw[fr].s = s;
+    return &s_gw[fr];
+}
+
+static int ln_tcp_kill(locnet *n, SOCKET s, int why)
+{
+    shutdown(s, SD_BOTH);
+    ln_walk_lock();
+    ln_gw_get(s)->dead = 1;
+    InterlockedExchange(&s_walk_lock, 0);
+    InterlockedIncrement(&n->st.guard);
+    ln_guard_log(n, 1, why);
+    WSASetLastError(WSAECONNRESET);
+    return SOCKET_ERROR;
+}
+
+/* W350 LOC-REJOIN: Der Mitspieler hat seinen Strom beendet (recv 0 = FIN; das Spiel ruft nie shutdown, ein halb
+ * geschlossener Strom kommt im Original nicht vor). Das Spiel wertet recv 0 nicht als Fehler, setzt aber den
+ * Stillezaehler zurueck, weil select "lesbar" meldet (FUN_00053B20) - der Platz bliebe fuer immer belegt
+ * (Geistereintrag nach Verlassen/Wiederbeitritt). Auf der Konsole loest der Abgang (XNetUnregisterInAddr bzw. Ende der
+ * Sicherheitszuordnung) einen Verbindungsreset aus; WSAECONNRESET entfernt den Spieler (FUN_00051FE0 -> FUN_000511E0(5),
+ * LOC_RE1 §6.1). Daher hier genau das melden, auch bei jedem weiteren Aufruf (dead). Keine Inhalte im Log. */
+static int ln_tcp_leave(locnet *n, SOCKET s)
+{
+    struct sockaddr_in pa;
+    int pl = sizeof pa;
+    char ipb[16];
+    ln_walk_lock();
+    ln_gw_get(s)->dead = 1;
+    InterlockedExchange(&s_walk_lock, 0);
+    InterlockedIncrement(&n->st.leave);
+    memset(&pa, 0, sizeof pa);
+    if (getpeername(s, (struct sockaddr *)&pa, &pl) != 0) pa.sin_addr.s_addr = 0;
+    ln_logf(n, "LOCNET: Strom von %s beendet - dem Spiel als Verbindungsreset gemeldet (Abgang)",
+            locnet_ip_str(pa.sin_addr.s_addr, ipb));
+    WSASetLastError(WSAECONNRESET);
+    return SOCKET_ERROR;
+}
+
+void locnet_guard_kill(locnet *n, SOCKET s, int why)
+{
+    int e = WSAGetLastError();
+    ln_tcp_kill(n, s, why);
+    WSASetLastError(e);
+}
+
+int locnet_recv(locnet *n, SOCKET s, char *buf, int len, int flags)
+{
+    int st = 0, tl = sizeof st;
+    lguard_walk w;
+    ln_gw *g;
+    if (getsockopt(s, SOL_SOCKET, SO_TYPE, (char *)&st, &tl) == 0 && st == SOCK_DGRAM) {
+        /* W335 (NET-AUDIT N3): UDP ueber recv wie ueber recvfrom absichern - Absender nur Loopback/privat
+         * (unverbundener Socket), abgeschnittene Datagramme (WSAEMSGSIZE, Puffer enthaelt ungeprueften Anfang) nie
+         * zum Spiel, abgelehnte Datagramme auch bei MSG_PEEK verbrauchen (sonst blockiert eines die Warteschlange). */
+        int tries;
+        for (tries = 0; tries < 16; tries++) {
+            struct sockaddr_in in;
+            int l = sizeof in, r = recvfrom(s, buf, len, flags, (struct sockaddr *)&in, &l);
+            if (r == SOCKET_ERROR) {
+                if (WSAGetLastError() != WSAEMSGSIZE) return r;
+                ln_dg_discard(s, buf, len, flags);
+                InterlockedIncrement(&n->st.guard);
+                continue;
+            }
+            if (l >= (int)sizeof in && in.sin_family == AF_INET && !locnet_ip_allowed(in.sin_addr.s_addr)) {
+                ln_dg_discard(s, buf, len, flags);
+                InterlockedIncrement(&n->st.drop);
+                continue;
+            }
+            if (r > 0 && !ln_udp_guard(n, s, buf, r, l >= (int)sizeof in && in.sin_family == AF_INET ? in.sin_addr.s_addr : 0)) {
+                ln_dg_discard(s, buf, len, flags);
+                continue;
+            }
+            if (r > 0) ln_session_mark(n);
+            return r;
+        }
+        WSASetLastError(WSAEWOULDBLOCK);
+        return SOCKET_ERROR;
+    }
+    ln_walk_lock();
+    g = ln_gw_get(s);
+    w = g->w;
+    if (g->dead) {
+        InterlockedExchange(&s_walk_lock, 0);
+        WSASetLastError(WSAECONNRESET);
+        return SOCKET_ERROR;
+    }
+    InterlockedExchange(&s_walk_lock, 0);
+    for (;;) {
+        uint8_t *big = NULL; /* W339: groesserer Blick (bis LGUARD_HOLD_MAX + 16), nur wenn der Spielpuffer zu klein ist */
+        const uint8_t *view = (const uint8_t *)buf;
+        int r = recv(s, buf, len, MSG_PEEK), ok, why = 0, vr;
+        if (r <= 0) {
+            if (r == 0) {
+                if (n->fin_pass || len <= 0) return recv(s, buf, len, flags); /* W350 aus: Ende wie bisher melden */
+                return ln_tcp_leave(n, s); /* W350: Abgang wie auf der Konsole (Verbindungsreset) */
+            }
+            return r;
+        }
+        vr = r;
+        ok = lguard_walk_tcp(&w, view, vr, 0, &why);
+        if (ok == 0 && r >= len) {
+            /* Puffer des Spiels zu klein fuer die Entscheidung (fast voller Strompuffer, bzw. W339: Rahmen mit
+             * Inhaltsregel bis 0x100C B muss ganz sichtbar sein): separat ansehen. Kein Stapelpuffer (Gast-Stapel). */
+            big = (uint8_t *)malloc(LGUARD_HOLD_MAX + 16);
+            if (big) {
+                int hr = recv(s, (char *)big, LGUARD_HOLD_MAX + 16, MSG_PEEK);
+                if (hr > r) {
+                    view = big;
+                    vr = hr;
+                    ok = lguard_walk_tcp(&w, view, vr, 0, &why);
+                }
+            }
+        }
+        if (ok < 0) {
+            free(big);
+            memset(buf, 0, (size_t)r);
+            return ln_tcp_kill(n, s, why);
+        }
+        if (ok == 0) {
+            /* Rahmenkopf noch nicht entscheidbar (1 Byte bzw. 0x34 mit < 5 Byte; W339: Rahmen mit Inhaltsregel noch
+             * nicht ganz da): NICHT im Spiel-Thread warten
+             * (W334-Lauf CW: das Warten machte aus dem nicht blockierenden recv ein blockierendes -> Haenger bis 1 s).
+             * Wie "noch keine Daten" melden; das Spiel fragt wieder. Bleibt der Kopf > 2 s unentschieden, ist der
+             * Mitspieler defekt oder boeswillig -> trennen wie bei einem Verstoss. */
+            ULONGLONG now = GetTickCount64(), since;
+            free(big);
+            memset(buf, 0, (size_t)r);
+            ln_walk_lock();
+            g = ln_gw_get(s);
+            if (!g->undecided_since) g->undecided_since = now;
+            since = g->undecided_since;
+            InterlockedExchange(&s_walk_lock, 0);
+            if (now - since >= 2000) return ln_tcp_kill(n, s, LGUARD_V_STATE);
+            InterlockedIncrement(&n->st.hold);
+            WSASetLastError(WSAEWOULDBLOCK);
+            return SOCKET_ERROR;
+        }
+        if (ok > len) ok = len;
+        if (ok < r) memset(buf + ok, 0, (size_t)(r - ok));
+        if (ok > 0) ln_session_mark(n);
+        if (flags & MSG_PEEK) {
+            free(big);
+            return ok;
+        }
+        r = recv(s, buf, ok, flags & ~MSG_PEEK); /* genau die geprueften Bytes entnehmen (identisch zum Blick) */
+        if (r > 0) {
+            lguard_walk_advance(&w, view, vr, r);
+            ln_walk_lock();
+            g = ln_gw_get(s);
+            g->w = w;
+            g->undecided_since = 0;
+            InterlockedExchange(&s_walk_lock, 0);
+        }
+        free(big);
+        return r;
+    }
+}
+
 int locnet_recvfrom(locnet *n, SOCKET s, char *buf, int len, int flags, struct sockaddr *from, int *fromlen)
 {
-    int tries;
+    int tries, st = 0, tl = sizeof st;
+    /* W334: das Spiel liest seinen TCP-Strom (Spielport 1000) auch ueber recvfrom. Stream-Sockets gehen durch den
+     * TCP-Gastfilter (Rahmenzerleger) wie bei recv; from/fromlen bleiben unberuehrt (Winsock ignoriert sie bei
+     * verbindungsorientierten Sockets). Vorher lief der Strom durch den UDP-Filter und wurde ganz verworfen. */
+    if (getsockopt(s, SOL_SOCKET, SO_TYPE, (char *)&st, &tl) == 0 && st == SOCK_STREAM) {
+        int r = locnet_recv(n, s, buf, len, flags);
+        if (r > 0 && !(flags & MSG_PEEK)) { /* wie ln_recv: Zaehler und Typ-Merkliste (loc_steps rx:) */
+            int e = WSAGetLastError();
+            InterlockedIncrement(&n->st.rx);
+            ln_seen(n, s, 0, buf, r);
+            WSASetLastError(e);
+        }
+        return r;
+    }
     for (tries = 0; tries < 16; tries++) {
         struct sockaddr_in in;
         int l = sizeof in;
@@ -715,6 +990,11 @@ int locnet_recvfrom(locnet *n, SOCKET s, char *buf, int len, int flags, struct s
         if (r == SOCKET_ERROR) {
             if (WSAGetLastError() == WSAECONNRESET) {
                 continue; /* Rest-Meldung einer ICMP-Antwort (UDP), wie Xbox ignorieren */
+            }
+            if (WSAGetLastError() == WSAEMSGSIZE) { /* W334: abgeschnittenes Datagramm nie zum Spiel */
+                if (len > 0) memset(buf, 0, (size_t)len);
+                InterlockedIncrement(&n->st.guard);
+                continue;
             }
             return r;
         }
@@ -724,6 +1004,9 @@ int locnet_recvfrom(locnet *n, SOCKET s, char *buf, int len, int flags, struct s
                 continue; /* fremder Absender */
             }
             in.sin_port = htons(locnet_port_in(n, in.sin_addr.s_addr, ntohs(in.sin_port)));
+        }
+        if (r > 0 && !ln_udp_guard(n, s, buf, r, l >= (int)sizeof in && in.sin_family == AF_INET ? in.sin_addr.s_addr : 0)) {
+            continue; /* W334: Gastfilter UDP (Positivliste) - nie zum Spiel */
         }
         if (from && fromlen) {
             int c = *fromlen < l ? *fromlen : l;
@@ -735,6 +1018,7 @@ int locnet_recvfrom(locnet *n, SOCKET s, char *buf, int len, int flags, struct s
         if (r > 0) {
             InterlockedIncrement(&n->st.rx);
             ln_seen(n, s, 0, buf, r);
+            ln_session_mark(n);
         }
         return r;
     }
@@ -817,4 +1101,17 @@ void *locnet_qos_alloc(const locnet *n, unsigned cnt, unsigned probes)
 void locnet_qos_free(void *q)
 {
     free(q);
+}
+
+/* W334 (SECURITY.md §6.5): 1 = Adresse ist die eigene oder die eines verbundenen Mitspielers. */
+int locnet_addr_known(locnet *n, uint32_t ip_net)
+{
+    int i;
+    if (ip_net == 0) return 0;
+    if (ip_net == n->self_ip) return 1;
+    if (n->tun) return loctun_is_peer(n->tun, ip_net);
+    for (i = 0; i < n->npeers; i++) {
+        if (n->peers[i].ip == ip_net) return 1;
+    }
+    return 0;
 }

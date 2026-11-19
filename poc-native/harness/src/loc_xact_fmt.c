@@ -274,6 +274,13 @@ int lxf_xsb_cue(const lxf_xsb_t *x, int cue, uint32_t rnd, lxf_cue_t *c)
     c->pitch = rds16(x->d, x->n, eo + 6, &ok);
     c->category = rd8(x->d, x->n, eo + 0xA, &ok);
     fl = rd8(x->d, x->n, eo + 0xB, &ok);
+    { /* W356: Pegelfelder wie die XACT-Bibliothek (lxf_cue_t) */
+        int w = rd8(x->d, x->n, eo + 4, &ok) | (rd8(x->d, x->n, eo + 5, &ok) << 8);
+        int a = -16 * (w & 0x1FF), b = -50 * ((w >> 9) & 0x7F), r = -256 * rd8(x->d, x->n, eo + 0xF, &ok);
+        c->db100_xact = a < -10000 ? -10000 : a;
+        c->lfe_mb = b < -10000 ? -10000 : b;
+        c->room_mb = r < -10000 ? -10000 : r;
+    }
     if (!ok) {
         return -4;
     }

@@ -53,6 +53,11 @@ HWND sb_render_hwnd(void);                     /* d3d11_render.c */
 int imouse_subclassed(void);                   /* input_mouse.c */
 void imouse_release_keys(void);                /* input_mouse.c (UI-Thread) */
 int sb_render_pause_jpg(const char *path, unsigned *ow, unsigned *oh); /* d3d11_render.c (W188, unter ctx_lock) */
+#include "sb_pausenet.h" /* W357 LOC-PAUSE-NET */
+int loc_net_peer_live(void);                                     /* loc_net.c (W357, nur lesend) */
+int loc_mouse_mission(void);                                     /* loc_pad.c (W357: Missionsanker der Testfolge) */
+int sb_render_snap_async(const char *path, int utf8);            /* d3d11_render.c (W357): Bild ohne Pause */
+int sb_render_snap_poll(unsigned *w, unsigned *h, double *ms);   /* d3d11_render.c (W357): 1 ok, -1 Fehler */
 
 /* ------------------------------------------------------------------ */
 /* Zustand                                                             */
@@ -246,6 +251,13 @@ static int g_fb_len, g_fb_kind, g_fb_have, g_fb_pending;
 static volatile LONG g_fb_hot_request;
 static volatile LONG g_fb_vk[2][4] = {{ VK_F11, 0, 0, 0 }, { VK_F9, 0, 0, 0 }};
 static int g_fb_hot, g_fb_capture, g_fb_clip_prompt;
+/* W357 LOC-PAUSE-NET: Netzspiel (je Bild in ov_frame), Hinweis-Wunsch (1 Pause-Taste, 2 Fotomodus; auch vom
+ * UI-Thread), Bild ohne Pause (Besitzer 1 = Feedback, 2 = Schnell-Screenshot). */
+static volatile LONG g_pn_net, g_pn_hint;
+static int g_pn_snap_owner;
+static char g_pn_qs_name[160];
+static void ov_close(const char *why); /* W357 */
+static void ov_qs_net(unsigned n);     /* W357 */
 static sb_fb_pkg_t g_fb_pkg;
 /* Trefferflaechen (Backbuffer-Pixel, Render-Thread schreibt beim Zeichnen) */
 static int g_hit_x0, g_hit_y0, g_hit_w, g_hit_h, g_hit_rows_y, g_hit_rowh, g_hit_nrows, g_hit_valx;
@@ -326,6 +338,12 @@ static void ov_status_key(const char *key)
     wchar_t b[96];
     ov_wkey(b, 96, key);
     ov_status(b);
+}
+
+/* W357: gesperrte Aktion im Netzspiel melden (beliebiger Thread; angezeigt im naechsten ov_frame) */
+static void ov_pn_hint(int k)
+{
+    InterlockedExchange(&g_pn_hint, k);
 }
 
 static int ov_clamp(int v, int lo, int hi)
@@ -1659,6 +1677,11 @@ static void ov_screen(int sc, int sel)
 {
     static const char *const nm[] = { "Einstellungen", "Spielmenue", "Beenden?", "Pause", "Feedback-Art",
                                       "Feedback-Text", "Feedback-Paket", "Fotomodus", "Alpha-Hinweis" };
+    if (g_pn_net && (sc == SC_PAUSED || sc == SC_PHOTO)) { /* W357: im Netzspiel gesperrt (haelt den Takt an) */
+        ov_pn_hint(sc == SC_PHOTO ? 2 : 1);
+        if (g_ov_scr == SC_PAUSED || g_ov_scr == SC_PHOTO) { ov_close("Netzspiel"); }
+        return;
+    }
     if (g_ov_scr != sc) {
         HLOG_I("MENU: Bildschirm -> %s (f=%u)", nm[sc], g_present_no);
         if (g_ov_scr == SC_PHOTO) { sb_photo_leave(); ov_ph_persist(); InterlockedExchange(&g_ph_keys, 0); } /* W195, W290 */
@@ -1846,6 +1869,17 @@ static void ov_fb_shot(void)
 {
     char shot[700];
     _snprintf_s(shot, sizeof shot, _TRUNCATE, "%s\\screenshot.jpg", g_fb_pkg.dir);
+    if (!g_sb_paused && g_pn_net) { /* W357: Netzspiel - Bild ohne Pause (Datei folgt asynchron) */
+        g_fb_pkg.shot_ok = 0;
+        g_fb_pkg.shot_w = g_fb_pkg.shot_h = 0;
+        if (sb_render_snap_async(shot, 0)) {
+            g_pn_snap_owner = 1;
+            HLOG_I("FEEDBACK: Netzspiel - Bild ohne Pause angefordert (f=%u)", g_present_no);
+        } else {
+            HLOG_W("FEEDBACK: Netzspiel - Bild nicht moeglich (Aufnahme belegt)");
+        }
+        return;
+    }
     sb_ctx_enter();
     g_fb_pkg.shot_ok = sb_render_pause_jpg(shot, &g_fb_pkg.shot_w, &g_fb_pkg.shot_h);
     sb_ctx_leave();
@@ -1888,9 +1922,9 @@ static void ov_activate(int k)
         case MI_CONTINUE: ov_close("Weiter"); break;
         case MI_SETTINGS: ov_screen(SC_SET, 0); break;
         case MI_PHOTO: /* W195 PHOTO-MODE */
-            if (!g_cfg.photo_mode || g_cfg.vr_enable) {
+            if (!g_cfg.photo_mode || g_cfg.vr_enable || g_pn_net) { /* W357 */
                 HLOG_I("MENU: Fotomodus nicht verfuegbar (%s, f=%u)", g_cfg.vr_enable ? "VR" : "photo_mode=0", g_present_no);
-                ov_status_key(g_cfg.vr_enable ? "ovl.ph_st_vr" : "ovl.ph_st_off");
+                ov_status_key(g_pn_net ? "ovl.pn_photo" : g_cfg.vr_enable ? "ovl.ph_st_vr" : "ovl.ph_st_off");
             } else {
                 g_ph_from_menu = 1;
                 ov_screen(SC_PHOTO, 0);
@@ -1924,7 +1958,7 @@ static void ov_activate(int k)
         ov_screen(SC_FBTEXT, 0);
         break;
     case SC_FBTEXT:
-        if (g_sb_paused) { ov_fb_create(); }
+        if (g_sb_paused || g_pn_net) { ov_fb_create(); } /* W357: Netzspiel ohne Pause */
         else { g_fb_pending = 1; } /* Pause greift erst am Ende dieses Bildes */
         break;
     case SC_FBREVIEW:
@@ -2070,7 +2104,7 @@ static int ov_ph_enabled(int it, const sb_photo_ui_t *u)
 
 static int ov_photo_allowed(void)
 {
-    return g_cfg.photo_mode && !g_cfg.vr_enable;
+    return g_cfg.photo_mode && !g_cfg.vr_enable && !g_pn_net; /* W357: nicht im Netzspiel */
 }
 
 static void ov_ph_back(const char *why)
@@ -2508,7 +2542,7 @@ static void ov_key(int vk)
         return;
     }
     if (vk == OK_PHOTO && g_ov_scr != SC_PHOTO) { /* W195: Foto-Taste bei offenem Menue -> Fotomodus */
-        if (!ov_photo_allowed()) { ov_status_key(g_cfg.vr_enable ? "ovl.ph_st_vr" : "ovl.ph_st_off"); return; }
+        if (!ov_photo_allowed()) { ov_status_key(g_pn_net ? "ovl.pn_photo" : g_cfg.vr_enable ? "ovl.ph_st_vr" : "ovl.ph_st_off"); return; }
         if (g_ov_scr == SC_FBTEXT) { return; }
         g_ph_from_menu = g_cfg.game_menu != 0;
         ov_screen(SC_PHOTO, 0);
@@ -2627,7 +2661,7 @@ void sb_ovl_request_feedback(int clip)
     if (!clip) {
         InterlockedExchange(&g_ov_req, SC_FBKIND);
         InterlockedExchange(&g_ov_open, 1);
-        sb_pause_request(1, "Feedback hotkey");
+        if (!g_pn_net) { sb_pause_request(1, "Feedback hotkey"); } /* W357: im Netzspiel laeuft das Spiel weiter */
     }
 }
 
@@ -2635,6 +2669,7 @@ void sb_ovl_request_feedback(int clip)
 void sb_ovl_request_photo(const char *why)
 {
     if (!g_cfg.overlay || !g_cfg.photo_mode || g_cfg.vr_enable) { return; }
+    if (g_pn_net) { ov_pn_hint(2); return; } /* W357 */
     if (g_ov_open) { /* Ring gehoert dem UI-Thread: ueber dessen Nachricht */
         HWND h = sb_render_hwnd();
         if (h) { PostMessageA(h, OV_MSG_TEST, (WPARAM)OK_PHOTO, 0); }
@@ -2686,6 +2721,7 @@ static LONG ov_ph_keybit(int vk)
 void sb_ovl_request_pause(const char *why)
 {
     if (!g_cfg.overlay || g_ov_open) { return; }
+    if (g_pn_net) { ov_pn_hint(1); return; } /* W357 */
     HLOG_I("MENU: Pause angefordert (%s)", why ? why : "");
     InterlockedExchange(&g_ov_req, SC_PAUSED);
     InterlockedExchange(&g_ov_open, 1);
@@ -2703,6 +2739,10 @@ static int ov_is_pause_vk(int vk)
 /* UI-Thread: Overlay mit Bildschirm sc oeffnen */
 static void ov_open_ui(int sc)
 {
+    if (g_pn_net && (sc == SC_PAUSED || sc == SC_PHOTO)) { /* W357 LOC-PAUSE-NET */
+        ov_pn_hint(sc == SC_PHOTO ? 2 : 1);
+        return;
+    }
     InterlockedExchange(&g_ov_swallow_k, 0);
     InterlockedExchange(&g_ov_swallow_m, 0);
     InterlockedExchange(&g_ov_req, sc);
@@ -3054,7 +3094,7 @@ static void ov_test_tick(unsigned n)
     { /* W232: Mission = sb_in_mission (Szene 0x2C + mloop 1 ohne Titel-Demo;
        * rq_in_mission allein trifft auch die Demo, der Ladezaehler [0x2EEA34]
        * war nur in der ersten Mission der Testkette 4) */
-        int in = sb_in_mission();
+        int in = g_sba_loc ? loc_mouse_mission() : sb_in_mission(); /* W357: LoC-Anker (Lockstep + eigener VT, nur Testfolge) */
         if (in && !g_ov_in_mission && g_ov_nmission < 8) {
             g_ov_mission_f[g_ov_nmission++] = n;
             HLOG_I("OVERLAY test: Missionsbeginn #%d f=%u", g_ov_nmission, n);
@@ -3361,7 +3401,7 @@ static void ov_qs_toast(const sb_photo_qres_t *r)
         _snwprintf_s(t2, 200, _TRUNCATE, L"%s  \x00B7  %u\x00D7%u", nb, r->w, r->h);
         if (r->notes) {
             wchar_t nt[120];
-            sb_lang_w((r->notes & SB_QS_NOTE_NOFLAT) ? "ovl.qs_n_noflat" : (r->notes & SB_QS_NOTE_NOREC) ? "ovl.qs_n_norec"
+            sb_lang_w((r->notes & SB_QS_NOTE_NET) ? "ovl.qs_n_net" : (r->notes & SB_QS_NOTE_NOFLAT) ? "ovl.qs_n_noflat" : (r->notes & SB_QS_NOTE_NOREC) ? "ovl.qs_n_norec"
                                                                                                         : "ovl.qs_n_smaller", nt, 120);
             wcsncat_s(t2, 200, L"  \x00B7  ", _TRUNCATE);
             wcsncat_s(t2, 200, nt, _TRUNCATE);
@@ -3391,6 +3431,8 @@ static void ov_qs_tick(unsigned n)
             sb_lang_w("ovl.qs_vr", t1, 160);
             sb_ov_toast_msg(t1, L"", 2500u);
             HLOG_I("QUICKSHOT: im VR-Betrieb ohne Wirkung");
+        } else if (sb_pn_policy(SB_PN_QSHOT, g_pn_net, g_cfg.menu_pause) == SB_PN_ASYNC) { /* W357: Netzspiel */
+            ov_qs_net(n);
         } else {
             g_qs_notes = 0;
             g_qs_t0 = n;
@@ -3436,11 +3478,93 @@ static void ov_qs_tick(unsigned n)
     }
 }
 
+/* W357 LOC-PAUSE-NET (sb_pausenet.h): Netzspiel-Zustand, Hinweise, Bild ohne Pause abholen. Je Bild (Spiel-Thread). */
+static void ov_pn_tick(unsigned n)
+{
+    LONG net, k;
+    int live = 0, r;
+    unsigned w = 0, h = 0;
+    double ms = 0.0;
+    if (g_cfg.pause_net == 1 && g_cfg.loc_boot) { live = loc_net_peer_live(); }
+    net = sb_pn_net(g_cfg.pause_net, g_cfg.loc_boot, live);
+    if (net != g_pn_net) {
+        InterlockedExchange(&g_pn_net, net);
+        HLOG_I("PAUSENET: Netzspiel %s (pause_net=%d, f=%u) -> Overlays %s", net ? "an" : "aus", g_cfg.pause_net, n,
+               net ? "ohne Pause, Pause-Taste/Fotomodus gesperrt" : "wie bisher");
+    }
+    k = InterlockedExchange(&g_pn_hint, 0);
+    if (k) {
+        const char *key = k == 2 ? "ovl.pn_photo" : "ovl.pn_pause";
+        HLOG_I("PAUSENET: %s im Netzspiel gesperrt (f=%u)", k == 2 ? "Fotomodus" : "Pause", n);
+        if (g_ov_open) {
+            ov_status_key(key);
+        } else {
+            wchar_t t1[160], t2[200];
+            sb_lang_w(key, t1, 160);
+            sb_lang_w("ovl.pn_sub", t2, 200);
+            sb_ov_toast_msg(t1, t2, 2500u);
+        }
+    }
+    if (!g_pn_snap_owner) { return; }
+    r = sb_render_snap_poll(&w, &h, &ms);
+    if (!r) { return; }
+    if (g_pn_snap_owner == 1) {
+        g_fb_pkg.shot_ok = r > 0;
+        g_fb_pkg.shot_w = w;
+        g_fb_pkg.shot_h = h;
+        HLOG_I("FEEDBACK: Netzspiel-Bild %s (%ux%u, Spiel-Thread %.1f ms, f=%u)", r > 0 ? "fertig" : "FEHLER", w, h, ms, n);
+    } else {
+        sb_photo_qres_t q;
+        memset(&q, 0, sizeof q);
+        q.ok = r > 0;
+        q.notes = SB_QS_NOTE_NET;
+        q.w = w;
+        q.h = h;
+        q.ms = ms;
+        strcpy_s(q.name, sizeof q.name, g_pn_qs_name);
+        HLOG_I("QUICKSHOT: Netzspiel %s (%ux%u, ohne Pause, Spiel-Thread %.1f ms, f=%u)", r > 0 ? "fertig" : "FEHLER", w, h, ms, n);
+        ov_qs_toast(&q);
+    }
+    g_pn_snap_owner = 0;
+}
+
+/* W357: Schnell-Screenshot im Netzspiel - Fenstergroesse, ohne Pause, Datei asynchron (Fotoordner). */
+static void ov_qs_net(unsigned n)
+{
+    char dir[700], path[900];
+    WCHAR wdir[700], wpath[900];
+    SYSTEMTIME lt;
+    int k;
+    if (g_pn_snap_owner || !sb_photo_dir(dir, sizeof dir) || !MultiByteToWideChar(CP_UTF8, 0, dir, -1, wdir, 700)) {
+        HLOG_W("QUICKSHOT: Netzspiel - nicht moeglich (%s, f=%u)", g_pn_snap_owner ? "Aufnahme belegt" : "kein Fotoordner", n);
+        return;
+    }
+    CreateDirectoryW(wdir, NULL);
+    GetLocalTime(&lt);
+    for (k = 1; k < 100; k++) {
+        char sfx[8];
+        sfx[0] = 0;
+        if (k > 1) { _snprintf_s(sfx, sizeof sfx, _TRUNCATE, "_%d", k); }
+        _snprintf_s(g_pn_qs_name, sizeof g_pn_qs_name, _TRUNCATE, "Steelbound_%04u-%02u-%02u_%02u-%02u-%02u_LoC%s.jpg", lt.wYear,
+                    lt.wMonth, lt.wDay, lt.wHour, lt.wMinute, lt.wSecond, sfx);
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s\\%s", dir, g_pn_qs_name);
+        MultiByteToWideChar(CP_UTF8, 0, path, -1, wpath, 900);
+        if (GetFileAttributesW(wpath) == INVALID_FILE_ATTRIBUTES) { break; }
+    }
+    if (sb_render_snap_async(path, 1)) {
+        g_pn_snap_owner = 2;
+        HLOG_I("QUICKSHOT: Netzspiel - ohne Pause (Fenstergroesse, f=%u)", n);
+    } else {
+        HLOG_W("QUICKSHOT: Netzspiel - Aufnahme belegt (f=%u)", n);
+    }
+}
+
 /* Ein Overlay-Schritt (Render-Thread): Test-Hook, Oeffnen/Schliessen, Tasten, Pad, Maus, Pause-Wunsch. */
 static void ov_frame(unsigned n)
 {
     int open;
     ov_test_tick(n);
+    ov_pn_tick(n); /* W357 LOC-PAUSE-NET */
     {
         LONG request = InterlockedExchange(&g_fb_hot_request, 0);
         if (request) {
@@ -3522,7 +3646,12 @@ static void ov_frame(unsigned n)
         g_ov_dirty = 1;
         if (open) {
             LONG rq = InterlockedExchange(&g_ov_req, -1);
-            ov_screen(rq >= 0 ? (int)rq : (g_cfg.game_menu ? SC_MENU : SC_SET), 0);
+            if (g_pn_net && (rq == SC_PAUSED || rq == SC_PHOTO)) { /* W357: im Netzspiel gesperrt */
+                ov_pn_hint(rq == SC_PHOTO ? 2 : 1);
+                ov_close("Netzspiel");
+            } else {
+                ov_screen(rq >= 0 ? (int)rq : (g_cfg.game_menu ? SC_MENU : SC_SET), 0);
+            }
             g_pad_prev = 0xFFFF; /* gehaltene Pad-Tasten loesen nichts aus */
             g_ov_mgen_seen = g_ov_mgen;
             InterlockedExchange(&g_ov_blocked_q, 0);
@@ -3552,7 +3681,7 @@ static void ov_frame(unsigned n)
             g_ov_mgen_seen = mg;
             ov_mouse((int)g_ov_mx, (int)g_ov_my, 0);
         }
-        if (g_fb_capture && g_sb_paused) {
+        if (g_fb_capture && (g_sb_paused || g_pn_net)) { /* W357: Netzspiel ohne Pause */
             g_fb_capture = 0;
             ov_fb_shot();
             g_ov_dirty = 1;
@@ -3560,7 +3689,7 @@ static void ov_frame(unsigned n)
             HLOG_I("FEEDBACK hotkey: screenshot ready=%d paused=%d size=%ux%u",
                    g_fb_pkg.shot_ok, g_sb_paused, g_fb_pkg.shot_w, g_fb_pkg.shot_h);
         }
-        if (g_fb_pending && g_sb_paused) { ov_fb_create(); }
+        if (g_fb_pending && (g_sb_paused || g_pn_net)) { ov_fb_create(); }
         if (g_ov_scr == SC_PHOTO) { ov_ph_tick(); } /* W195 */
     }
     if (g_ov_status_until && GetTickCount64() > g_ov_status_until) {
@@ -3571,12 +3700,26 @@ static void ov_frame(unsigned n)
     { /* W188: Pause-Wunsch (Spiel steht am Ende des naechsten Presents) */
         int want = 0;
         const char *why = "Menue zu";
+        if (g_ov_open && g_pn_net && (g_ov_scr == SC_PAUSED || g_ov_scr == SC_PHOTO)) { /* W357: Netz kam dazu */
+            ov_pn_hint(g_ov_scr == SC_PHOTO ? 2 : 1);
+            if (g_ov_scr == SC_PHOTO) { ov_ph_back("Netzspiel"); }
+            else { ov_close("Netzspiel"); }
+        }
         if (g_ov_open) {
             if (g_ov_scr == SC_PAUSED) { want = 1; why = "Pause-Taste"; }
-            else if (OV_IS_FB(g_ov_scr)) { want = 1; why = "Feedback"; }
+            else if (OV_IS_FB(g_ov_scr)) {
+                want = sb_pn_policy(SB_PN_FEEDBACK, g_pn_net, g_cfg.menu_pause) == SB_PN_PAUSE; /* W357 */
+                why = want ? "Feedback" : "Netzspiel: Feedback ohne Pause";
+            }
             else if (g_ov_scr == SC_PHOTO) { want = !sb_photo_stepping(); why = want ? "Fotomodus" : "Fotomodus: Ansicht"; } /* W195, W290 */
-            else if (g_ov_scr == SC_WELCOME) { want = 1; why = "Alpha-Hinweis"; } /* W222 */
-            else if (g_cfg.menu_pause) { want = 1; why = "ESC-Menue"; }
+            else if (g_ov_scr == SC_WELCOME) { /* W222 */
+                want = sb_pn_policy(SB_PN_WELCOME, g_pn_net, g_cfg.menu_pause) == SB_PN_PAUSE; /* W357 */
+                why = want ? "Alpha-Hinweis" : "Netzspiel: Alpha-Hinweis ohne Pause";
+            }
+            else if (g_cfg.menu_pause) {
+                want = sb_pn_policy(SB_PN_ESC, g_pn_net, g_cfg.menu_pause) == SB_PN_PAUSE; /* W357 */
+                why = want ? "ESC-Menue" : "Netzspiel: ESC-Menue ohne Pause";
+            }
             else { why = "menu_pause=0"; }
         }
         if (!want && g_qs_state == QS_PAUSE) { want = 1; why = "Schnell-Screenshot"; } /* W290 */
@@ -4403,6 +4546,7 @@ static void ov_paint_menu(void)
     }
     case SC_MENU:
         if (sb_pause_requested()) { ov_wkey(tag, 48, "ovl.hdr_paused"); }
+        else if (g_pn_net) { ov_wkey(tag, 48, "ovl.hdr_netrun"); } /* W357: Netzspiel laeuft weiter */
         if (krnl_savelock_active()) { /* W190 SAVE-LOCK: sichtbarer Hinweis, solange der Schutz aktiv ist */
             ov_wkey(ln[0], 128, "ovl.sl_note");
             lc[0] = OV_C_HEAD;

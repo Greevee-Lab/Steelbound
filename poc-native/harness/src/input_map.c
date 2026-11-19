@@ -96,7 +96,7 @@ static void imap_mouse_update(imap_state_t *st, const imap_snap_t *snap,
                               int *lb, int *rb, int *mb, int *x1, int *x2)
 {
     *lb = *rb = *mb = *x1 = *x2 = 0;
-    if (snap->replay_active) {
+    if (snap->replay_active && !snap->mouse_live) { /* W341: mouse_live = LoC-Testmodus, echter Pfad */
         if (snap->mouse_aim && snap->frame != st->m_step_frame) {
             int sdx = 0, sdy = 0;
             st->m_step_frame = snap->frame;
@@ -419,7 +419,7 @@ static int imap_atom_active(const imap_atom_t *a, const imap_snap_t *snap)
         return snap->key(a->code, snap->ctx) != 0;
     case IMAP_A_MOUSEBTN:
         if (!snap->mouse_buttons) return 0;
-        if (snap->replay_active)
+        if (snap->replay_active && !snap->mouse_live) /* W341 */
             return snap->key(324 + a->code, snap->ctx) != 0;
         if (snap->real_blocked) return 0; /* W79: kein Fokus/freigegeben */
         if (a->code >= IMAP_WHEEL_CODE0) /* W260: Mausrad-Impuls */

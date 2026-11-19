@@ -10,6 +10,8 @@ static int physical, overlay, minimized;
 static HCURSOR cursor_value;
 static HWND foreground = (HWND)(INT_PTR)1;
 unsigned test_mode, test_scene, test_loop, test_demo;
+static int test_loc_mission; /* W341: Stub fuer loc_pad.c */
+int loc_mouse_mission(void) { return test_loc_mission; }
 unsigned imouse_test_state(unsigned addr)
 {
     return addr == 0x2EEA34u ? test_mode : addr == 0x6B96DCu ? test_scene :
@@ -215,6 +217,7 @@ int imouse_selftest(void)
     { extern int sb_state_w232_selftest(void); fail += sb_state_w232_selftest(); }
     { extern int imouse_w260_selftest(void); fail += imouse_w260_selftest(); }
     { extern int imouse_w299_selftest(void); fail += imouse_w299_selftest(); }
+    { extern int imouse_w341_selftest(void); fail += imouse_w341_selftest(); }
     VERIFY(!bad_registration, "foreground-only Raw Input registration");
     VERIFY(physical == 0, "test focus never invokes physical cursor APIs");
     printf("W208 simulated physical calls=%d\n", physical);
@@ -562,5 +565,52 @@ int imouse_w299_selftest(void)
     g_cfg.mouse_capture = saved_cap;
     printf("W299 Fokus-Klick (Fenster): Fehler=%d\n", fail);
 #undef W299
+    return fail;
+}
+
+/* ---- W341 LOC-MOUSE: Fangen im LoC-Profil ----
+ * Vorher las das Soll die SB-Zustandsadressen (im LoC-Profil Null-Seite) -> nie gefangen, Deltas 0.
+ * Jetzt: LoC-Mission (loc_mouse_mission, hier Stub) -> gefangen und Raw-Deltas wirken; SB-Merkmale
+ * zaehlen im LoC-Profil nicht; loc_mouse=0 = altes Verhalten; Menue/F10 wie in SB. */
+int imouse_w341_selftest(void)
+{
+    extern int g_sba_loc;
+    int fail = 0, dx, dy, blocked, save_loc = g_sba_loc;
+    menu(0); g_want = 1; g_force = 0;
+    g_cfg.loc_mouse = 1;
+    event(IMOUSE_MSG_TEST_FOCUS, 1);
+    g_sba_loc = 1;
+    w225_set(4, 0x2C, 1, 0); /* SB-Mission sichtbar - im LoC-Profil ohne Bedeutung */
+    test_loc_mission = 0;
+    event(WM_TIMER, IMOUSE_TIMER_ID);
+    fail += w225_reason("W341 LoC Karte/Lobby (SB-Merkmal Mission)", 0, "ausserhalb_mission");
+    test_loc_mission = 1;
+    event(WM_TIMER, IMOUSE_TIMER_ID);
+    fail += w225_reason("W341 LoC Mission", 1, "mission");
+    imouse_poll(&dx, &dy, &blocked);
+    event(IMOUSE_MSG_TEST_MOVE, 0); /* leer */
+    imouse_wndproc(g_mwnd, IMOUSE_MSG_TEST_MOVE, (WPARAM)(INT_PTR)12, (LPARAM)(INT_PTR)-5);
+    imouse_poll(&dx, &dy, &blocked);
+    if (dx != 12 || dy != -5 || blocked) {
+        printf("W341 FAIL Deltas in der LoC-Mission dx=%d dy=%d blocked=%d (soll 12,-5,0)\n", dx, dy, blocked);
+        fail++;
+    } else {
+        printf("W341 LoC Mission: Deltas kommen an (dx=%d dy=%d) OK\n", dx, dy);
+    }
+    menu(1); fail += w225_reason("W341 LoC Mission + eigenes Menue", 0, "menue");
+    menu(0); fail += w225_reason("W341 LoC Mission nach Menue", 1, "mission");
+    event(WM_KEYDOWN, VK_F10); fail += w225_reason("W341 LoC F10 frei", 0, "f10_frei");
+    event(WM_KEYDOWN, VK_F10); fail += w225_reason("W341 LoC F10 zurueck", 1, "mission");
+    g_cfg.loc_mouse = 0;
+    event(WM_TIMER, IMOUSE_TIMER_ID);
+    fail += w225_reason("W341 loc_mouse=0 (altes Verhalten)", 0, "ausserhalb_mission");
+    g_cfg.loc_mouse = 1;
+    test_loc_mission = 0;
+    event(WM_TIMER, IMOUSE_TIMER_ID);
+    fail += w225_reason("W341 LoC Missionsende", 0, "ausserhalb_mission");
+    g_sba_loc = save_loc;
+    event(WM_TIMER, IMOUSE_TIMER_ID);
+    fail += w225_reason("W341 SB-Profil unveraendert (Mission)", 1, "mission");
+    printf("W341 LOC-MOUSE: Fehler=%d\n", fail);
     return fail;
 }

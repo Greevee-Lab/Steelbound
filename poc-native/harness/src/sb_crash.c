@@ -507,7 +507,7 @@ static void write_info(const char *dir, const char *kind, const char *status, co
 {
     SYSTEMTIME lt;
     char st[400];
-    static char th[2048]; /* W315: Textur-Gesundheit (letzter Stand, keine DXGI-Abfrage im Absturz) */
+    static char th[4096]; /* W315: Textur-Gesundheit (letzter Stand, keine DXGI-Abfrage im Absturz); W360: 3072 -> 4096 */
     GetLocalTime(&lt);
     state_line(st, sizeof st);
     __try { sb_th_format(th, sizeof th, 0); } __except (EXCEPTION_EXECUTE_HANDLER) { strcpy_s(th, sizeof th, "[texture health] (unavailable)\r\n"); }

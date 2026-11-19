@@ -63,6 +63,7 @@ typedef struct {
     imap_key_fn key;
     void *ctx;
     int replay_active; /* 1 = Replay/Slots aktiv (echte Maus tot) */
+    int mouse_live;    /* W341 TEST: 1 = Maus trotz replay_active ueber den echten Pfad (LoC-Testmodus) */
     unsigned frame;    /* Present-Frame (Maus-Einmal-Guard) */
     /* cfg-Gatter (Mausschalter + Taster/Toggle, aus g_cfg): */
     int mouse_aim, mouse_sight, mouse_sens;

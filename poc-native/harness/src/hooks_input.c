@@ -214,6 +214,7 @@ u32 __stdcall hook_XGetDeviceChanges(u32 type, u32 pIns, u32 pRem)
 /* W128: 1 = Maus liefert in diesem Poll Achsen (0 = per sbc_mouse_off
  * abgeschaltet, weil der Original-Controller aktiv ist). */
 static int g_sbc_mouse_live = 1;
+static int g_w341_dx, g_w341_dy; /* W341: Raw-Delta des letzten Polls (Zaehler LOCMOUSE) */
 
 /* W299 REPLAY: laeuft gerade eine Spiel-Replay-Wiedergabe (REPLAY LOAD, kein Titel-Demo)?
  * FUN_00049AE0 (Wiedergabe-Zweig [0x3B8CC0]==1): Titel-Demo ([0x670E9C]==1) endet mit jeder
@@ -895,7 +896,13 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                            g_cfg.input_profile[0] ? g_cfg.input_profile
                                                   : "Legacy");
             }
-            if (!snap.replay_active) {
+            /* W341 TEST: LoC-Testmodus -> Maus ueber den echten Fenster-/Raw-Pfad trotz Testfolge
+             * (Tasten bleiben bei der Testfolge). Ohne loc_mouse_test bitgleich wie bisher. */
+            int w341_live = g_sba_loc && snap.replay_active && g_cfg.loc_mouse_test &&
+                            g_cfg.input_test_hook;
+            if (g_sba_loc) loc_mouse_test_drive();
+            snap.mouse_live = w341_live;
+            if (!snap.replay_active || w341_live) {
                 snap.mouse_raw = imouse_poll(&snap.raw_dx, &snap.raw_dy,
                                              &snap.real_blocked);
                 if (g_cfg.input_source == 1) snap.real_vk = imsg_real_vk;
@@ -915,6 +922,8 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                 (void)imouse_poll(&rdx, &rdy, &rbl);
                 (void)imouse_wheel_mask(g_frames, 1); /* W260: Rad verwerfen */
             }
+            g_w341_dx = snap.raw_dx; /* W341: nur fuer den Zaehler "bewegt" */
+            g_w341_dy = snap.raw_dy;
         }
         { /* W299 REPLAY: im Spiel-Replay beendet die Maus (Hauptwaffe) nichts */
             static int w299_last = -1;
@@ -931,6 +940,17 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
         if (!g_leg_init) {
             imap_state_init(&g_leg);
             g_leg_init = 1;
+        }
+        if (g_sba_loc) { /* W341 LOC-MOUSE: Maus-Hebel beim Wechsel Mission <-> Menue zentrieren */
+            static int lm_prev;
+            int lm = g_cfg.loc_mouse && loc_mouse_mission();
+            if (lm != lm_prev) {
+                g_leg.m_ax = g_leg.m_ay = 0x7F;
+                g_leg.m_fx = g_leg.m_fy = 0.0f;
+                g_prof_st.m_ax = g_prof_st.m_ay = 0x7F;
+                g_prof_st.m_fx = g_prof_st.m_fy = 0.0f;
+                lm_prev = lm;
+            }
         }
         if (g_cfg.input_profile[0]) {
             if (!g_prof_init) {
@@ -1171,6 +1191,7 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
         }
     }
     sbc_merge(s); /* W75: USB/Fixture als Zweitquelle (sbc_usb=1) */
+    if (g_sba_loc) loc_mouse_note(g_w341_dx, g_w341_dy, s->aiming_x, s->aiming_y, s->buttons[0]); /* W341: nur Zaehler */
     sb_rauto_apply(s); /* W254 REPLAY-LAUNCHER: Menue-Fuehrung (nur mit replay_autoplay) */
     sb_mauto_apply(s); /* W272 ALPHA-TEST: Menue-Fuehrung (nur mit mission_autostart) */
     sb_cchain_apply(s); /* W303 CAMPAIGN-CHAIN: Folgebildschirme (nur mit campaign_chain) */

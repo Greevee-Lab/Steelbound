@@ -275,17 +275,22 @@ au32 audio_output_latency_ms(void)
     return (au32)InterlockedCompareExchange(&g_output_latency_ms, 0, 0);
 }
 
+static int16_t *g_ringx; /* W356 Surround: C, LFE, BL, BR je Ring-Frame (gleiche Indizes) */
+static volatile LONG g_wa_ch, g_wa_mask; /* W356: Kanalzahl/-maske des WASAPI-Geraets (0 = keins) */
+
 static void ring_init(void)
 {
     if (!g_ring_init) {
         InitializeCriticalSection(&g_ring_cs);
         g_ring = (int16_t *)malloc((size_t)RING_FRAMES * 2 * sizeof(int16_t));
+        g_ringx = (int16_t *)calloc((size_t)RING_FRAMES * 4, sizeof(int16_t));
         g_ring_init = 1;
     }
 }
 
-/* Append one mixer block; the low-latency path uses shorter blocks. */
-static void ring_write(const int16_t *s, au32 n)
+/* Append one mixer block; the low-latency path uses shorter blocks.
+ * W356: s6 != NULL = 6 Kanaele je Frame (Surround), sonst s = Stereo (weitere Kanaele 0). */
+static void ring_write_any(const int16_t *s, const int16_t *s6, au32 n)
 {
     au32 i;
     ring_init();
@@ -298,8 +303,17 @@ static void ring_write(const int16_t *s, au32 n)
                 g_ring_rd = 0;
             g_ring_n--;
         }
-        g_ring[g_ring_wr * 2] = s[i * 2];
-        g_ring[g_ring_wr * 2 + 1] = s[i * 2 + 1];
+        if (s6) {
+            g_ring[g_ring_wr * 2] = s6[i * 6];
+            g_ring[g_ring_wr * 2 + 1] = s6[i * 6 + 1];
+            if (g_ringx)
+                memcpy(g_ringx + (size_t)g_ring_wr * 4, s6 + i * 6 + 2, 4 * sizeof(int16_t));
+        } else {
+            g_ring[g_ring_wr * 2] = s[i * 2];
+            g_ring[g_ring_wr * 2 + 1] = s[i * 2 + 1];
+            if (g_ringx)
+                memset(g_ringx + (size_t)g_ring_wr * 4, 0, 4 * sizeof(int16_t));
+        }
         if (++g_ring_wr >= RING_FRAMES)
             g_ring_wr = 0;
         g_ring_n++;
@@ -308,8 +322,24 @@ static void ring_write(const int16_t *s, au32 n)
     LeaveCriticalSection(&g_ring_cs);
 }
 
-/* Bis zu n Frames lesen, Rueckgabe Anzahl. */
+static void ring_write(const int16_t *s, au32 n)
+{
+    ring_write_any(s, NULL, n);
+}
+
+static void ring_write6(const int16_t *s6, au32 n)
+{
+    ring_write_any(NULL, s6, n);
+}
+
+/* Bis zu n Frames lesen, Rueckgabe Anzahl. W356: dstx != NULL = weitere 4 Kanaele je Frame. */
+static LONG ring_read_x(int16_t *dst, int16_t *dstx, LONG n);
 static LONG ring_read(int16_t *dst, LONG n)
+{
+    return ring_read_x(dst, NULL, n);
+}
+
+static LONG ring_read_x(int16_t *dst, int16_t *dstx, LONG n)
 {
     LONG got = 0;
     if (!g_ring_init || !g_ring)
@@ -318,6 +348,12 @@ static LONG ring_read(int16_t *dst, LONG n)
     while (got < n && g_ring_n > 0) {
         dst[got * 2] = g_ring[g_ring_rd * 2];
         dst[got * 2 + 1] = g_ring[g_ring_rd * 2 + 1];
+        if (dstx) {
+            if (g_ringx)
+                memcpy(dstx + got * 4, g_ringx + (size_t)g_ring_rd * 4, 4 * sizeof(int16_t));
+            else
+                memset(dstx + got * 4, 0, 4 * sizeof(int16_t));
+        }
         if (++g_ring_rd >= RING_FRAMES)
             g_ring_rd = 0;
         g_ring_n--;
@@ -393,6 +429,86 @@ static void wa_device_name(IMMDevice *dev, char *out, size_t cap)
         }
     }
     ps->lpVtbl->Release(ps);
+}
+
+/* W356 Surround: Matrix Geraetekanal <- FL FR C LFE BL BR aus der Kanalmaske (i-tes gesetztes Bit =
+ * Kanal i). Fehlende Mitte/Rueckkanaele werden nach ITU (-3 dB) auf vorn gefaltet, LFE ohne Lautsprecher
+ * entfaellt; 7.1: hinten auf Rueck- und Seitenpaar je -3 dB. */
+#define WA_MAXCH 8
+static float g_wa_map[WA_MAXCH][6];
+static void wa_build_map(DWORD mask, WORD ch)
+{
+    DWORD bits[WA_MAXCH];
+    int n = 0, c, back, side, fc;
+    DWORD b;
+    memset(g_wa_map, 0, sizeof g_wa_map);
+    if (!mask) /* kein EXTENSIBLE: Standardbelegung */
+        mask = ch >= 8 ? 0x63Fu : ch >= 6 ? 0x3Fu : ch >= 4 ? 0x33u : 0x3u;
+    for (b = 1; b && n < WA_MAXCH; b <<= 1)
+        if (mask & b)
+            bits[n++] = b;
+    back = (mask & 0x30u) == 0x30u;
+    side = (mask & 0x600u) == 0x600u;
+    fc = (mask & 0x4u) != 0;
+    for (c = 0; c < (int)ch && c < n; c++) {
+        float *m = g_wa_map[c];
+        switch (bits[c]) {
+        case 0x1u:
+        case 0x2u: {
+            int s = bits[c] == 0x2u;
+            m[s] = 1.0f;
+            if (!fc)
+                m[2] = 0.7071f;
+            if (!back && !side)
+                m[4 + s] = 0.7071f;
+            break;
+        }
+        case 0x4u:
+            m[2] = 1.0f;
+            break;
+        case 0x8u:
+            m[3] = 1.0f;
+            break;
+        case 0x10u:
+        case 0x20u:
+            m[bits[c] == 0x10u ? 4 : 5] = side ? 0.7071f : 1.0f;
+            break;
+        case 0x200u:
+        case 0x400u:
+            m[bits[c] == 0x200u ? 4 : 5] = back ? 0.7071f : 1.0f;
+            break;
+        default:
+            break;
+        }
+    }
+}
+
+static void wa_put_frame6(BYTE **pp, const float *f6, WORD ch, WORD bits, int isfloat)
+{
+    BYTE *p = *pp;
+    WORD c;
+    for (c = 0; c < ch; c++) {
+        float s = 0.0f;
+        int k;
+        if (c < WA_MAXCH)
+            for (k = 0; k < 6; k++)
+                s += g_wa_map[c][k] * f6[k];
+        if (s > 1.0f)
+            s = 1.0f;
+        if (s < -1.0f)
+            s = -1.0f;
+        if (isfloat) {
+            *(float *)p = s;
+            p += 4;
+        } else if (bits == 32) {
+            *(int32_t *)p = (int32_t)(s * 2147483647.0f);
+            p += 4;
+        } else {
+            *(int16_t *)p = (int16_t)(s * 32767.0f);
+            p += 2;
+        }
+    }
+    *pp = p;
 }
 
 /* Ein Ziel-Frame (Stereo float) ins Geraetepuffer-Format schreiben. */
@@ -482,6 +598,8 @@ static DWORD WINAPI au_wa_thread(LPVOID p)
         char name[128];
         double step = 1.0, frac = 0.0;
         int16_t cur[2] = { 0, 0 }, nxt[2] = { 0, 0 };
+        int16_t curx[4] = { 0, 0, 0, 0 }, nxtx[4] = { 0, 0, 0, 0 }; /* W356 Surround */
+        DWORD chmask = 0;
         int primed = 0;
 
         { /* A7B: Header-Fenster fuers Setup (COM validiert Image-Header) */
@@ -533,6 +651,7 @@ static DWORD WINAPI au_wa_thread(LPVOID p)
                 isfloat = 1;
             if (x->Samples.wValidBitsPerSample)
                 bits = x->Samples.wValidBitsPerSample;
+            chmask = x->dwChannelMask; /* W356 */
         }
         if (rate < 8000 || rate > 192000 || ch < 1 || ch > 8 ||
             !(bits == 16 || bits == 32) ||
@@ -586,6 +705,13 @@ static DWORD WINAPI au_wa_thread(LPVOID p)
         }
         HLOG_I("audio: WASAPI läuft (Gerät %s, %u Hz/%u Kanäle/%u Bit%s)",
                name, rate, ch, bits, isfloat ? " float" : "");
+        wa_build_map(chmask, ch); /* W356 Surround */
+        InterlockedExchange(&g_wa_mask, (LONG)chmask);
+        InterlockedExchange(&g_wa_ch, (LONG)ch);
+        if (ch >= 4)
+            HLOG_I("audio: Raumklang (W356): %u Kanäle, Maske 0x%lX, audio_surround=%d audio_hrtf=%d -> %s", ch,
+                   (unsigned long)chmask, g_cfg.audio_surround, g_cfg.audio_hrtf,
+                   g_cfg.audio_hrtf ? "Kopfhörer (Stereo)" : g_cfg.audio_surround ? "Surround" : "Stereo");
                 } __finally {
                     au_hdr_to_game(htok);
                 }
@@ -701,12 +827,18 @@ static DWORD WINAPI au_wa_thread(LPVOID p)
                 Sleep(10);
                 continue;
             }
+            {
+            /* W356: Surround-Geraet (>= 4 Kanaele, audio_surround, nicht Kopfhoerer) -> alle 6 Ring-Kanaele */
+            int surr = ch >= 4 && g_cfg.audio_surround && !g_cfg.audio_hrtf;
             if (!primed) { /* erste zwei Quell-Samples */
-                if (ring_read(cur, 1) < 1)
+                if (ring_read_x(cur, curx, 1) < 1) {
                     cur[0] = cur[1] = 0;
-                if (ring_read(nxt, 1) < 1) {
+                    memset(curx, 0, sizeof curx);
+                }
+                if (ring_read_x(nxt, nxtx, 1) < 1) {
                     nxt[0] = cur[0];
                     nxt[1] = cur[1];
+                    memcpy(nxtx, curx, sizeof nxtx);
                 }
                 primed = 1;
             }
@@ -716,20 +848,34 @@ static DWORD WINAPI au_wa_thread(LPVOID p)
                 /* Diagnostic 2 exercises the actual device queue silently;
                  * capture and all sample/cursor accounting stay unchanged. */
                 if (g_cfg.audio_sync_diag == 2) fl = fr = 0.0f;
+                if (surr) {
+                    float f6[6];
+                    int c;
+                    f6[0] = fl;
+                    f6[1] = fr;
+                    for (c = 0; c < 4; c++)
+                        f6[2 + c] = g_cfg.audio_sync_diag == 2 ? 0.0f
+                                                                : (curx[c] + (nxtx[c] - curx[c]) * (float)frac) / 32768.0f;
+                    wa_put_frame6(&dst, f6, ch, bits, isfloat);
+                } else
                 wa_put_frame(&dst, fl, fr, ch, bits, isfloat);
                 frac += step;
                 while (frac >= 1.0) {
-                    int16_t s[2];
+                    int16_t s[2], sx[4];
                     frac -= 1.0;
                     cur[0] = nxt[0];
                     cur[1] = nxt[1];
-                    if (ring_read(s, 1) < 1) {
+                    memcpy(curx, nxtx, sizeof curx);
+                    if (ring_read_x(s, sx, 1) < 1) {
                         g_stat_wa_under++;
                         s[0] = s[1] = 0;
+                        memset(sx, 0, sizeof sx);
                     }
                     nxt[0] = s[0];
                     nxt[1] = s[1];
+                    memcpy(nxtx, sx, sizeof nxtx);
                 }
+            }
             }
             hr = rc->lpVtbl->ReleaseBuffer(rc, avail, 0);
             if (SUCCEEDED(hr)) submitted += avail;
@@ -744,6 +890,7 @@ static DWORD WINAPI au_wa_thread(LPVOID p)
             Sleep(g_cfg.audio_low_latency ? 1 : 5);
         }
         InterlockedExchange(&g_wa_ready, 0);
+        InterlockedExchange(&g_wa_ch, 0); /* W356 */
         InterlockedExchange(&g_output_latency_ms, 0);
         cli->lpVtbl->Stop(cli);
         if (clock) clock->lpVtbl->Release(clock);
@@ -775,6 +922,94 @@ static void au_ensure_wasapi(void)
 
 /* ---------- Mixer ---------- */
 static float g_mixbuf[MIXCHUNK * 2];
+/* W356 AUDIO-2: Raumklang-Modus je Mischdurchgang (audio_hrtf / audio_surround) */
+enum { AUSP_MODE_STEREO = 0, AUSP_MODE_HRTF = 1, AUSP_MODE_SURR = 2 };
+static int g_spatial;
+static float g_hrbuf[MIXCHUNK]; /* Mono-Eingang je HRTF-Stimme */
+static float g_mixx_buf[MIXCHUNK * 4]; /* Surround: C, LFE, BL, BR (FL/FR in g_mixbuf) */
+static float *g_mixx; /* = g_mixx_buf bei Surround-Ausgabe, sonst NULL */
+static LONGLONG g_sp_q; /* QPC-Summe HRTF-Bloecke */
+static uint64_t g_sp_hrtf_frames, g_sp_surr_frames;
+static float g_rearbuf[MIXCHUNK * 2]; /* Surround: Nachhall hinten (BL/BR) */
+static int16_t g_out6[MIXCHUNK * 6]; /* Surround: Geraete-Frames FL FR C LFE BL BR */
+
+int audio_out_channels(void)
+{
+    return (int)InterlockedCompareExchange(&g_wa_ch, 0, 0);
+}
+
+const char *audio_spatial_mode(void)
+{
+    return g_spatial == AUSP_MODE_HRTF ? "kopfhoerer" : g_spatial == AUSP_MODE_SURR ? "surround" : "stereo";
+}
+
+void ausp_log_stats(void)
+{
+    LARGE_INTEGER f;
+    double blocks = (double)g_mixed_total / (MIXRATE / 100.0);
+    QueryPerformanceFrequency(&f);
+    HLOG_I("AUDIO raumklang (W356): modus=%s audio_hrtf=%d audio_surround=%d geraet_kanaele=%d hrtf_frames=%llu "
+           "hrtf_kosten=%.4f ms/10ms surround_frames=%llu",
+           audio_spatial_mode(), g_cfg.audio_hrtf, g_cfg.audio_surround, audio_out_channels(),
+           (unsigned long long)g_sp_hrtf_frames,
+           blocks > 0.0 ? (double)g_sp_q * 1000.0 / (double)f.QuadPart / blocks : 0.0,
+           (unsigned long long)g_sp_surr_frames);
+}
+
+/* W356: 5.1-Quellen ungefaltet speichern, wenn Surround-Ausgabe moeglich ist. */
+int au_keep51(void)
+{
+    return g_cfg.audio_surround == 2 || (g_cfg.audio_surround == 1 && g_cfg.audio_live == 1);
+}
+
+/* W356 TEST (audio_surround=2 + audio_capture): 6-Kanal-Mitschnitt <out>/audio51.wav (FL FR C LFE BL BR). */
+static FILE *g_wav6;
+static au32 g_wav6_bytes;
+static void au_wav6_header(void)
+{
+    uint8_t h[44];
+    au32 riff = 36 + g_wav6_bytes, r = MIXRATE, b = MIXRATE * 12;
+    memcpy(h, "RIFF", 4);
+    memcpy(h + 4, &riff, 4);
+    memcpy(h + 8, "WAVEfmt ", 8);
+    h[16] = 16; h[17] = h[18] = h[19] = 0;
+    h[20] = 1; h[21] = 0; /* PCM */
+    h[22] = 6; h[23] = 0; /* 6 Kanaele */
+    memcpy(h + 24, &r, 4);
+    memcpy(h + 28, &b, 4);
+    h[32] = 12; h[33] = 0; /* blockalign */
+    h[34] = 16; h[35] = 0;
+    memcpy(h + 36, "data", 4);
+    memcpy(h + 40, &g_wav6_bytes, 4);
+    fseek(g_wav6, 0, SEEK_SET);
+    fwrite(h, 1, 44, g_wav6);
+    fseek(g_wav6, 0, SEEK_END);
+    fflush(g_wav6);
+}
+
+static void au_wav6_write(const int16_t *s, au32 n)
+{
+    if (!g_wav6) {
+        static int failed;
+        char p[600];
+        if (failed)
+            return;
+        _snprintf_s(p, sizeof p, _TRUNCATE, "%s/audio51.wav", hcfg_out_dir());
+        if (fopen_s(&g_wav6, p, "wb") != 0 || !g_wav6) {
+            g_wav6 = NULL;
+            failed = 1;
+            return;
+        }
+        g_wav6_bytes = 0;
+        au_wav6_header();
+        HLOG_I("AUDIO capture51 (W356 TEST): %s (44100/16/6 Kanaele)", p);
+    }
+    fwrite(s, 1, n * 12u, g_wav6);
+    g_wav6_bytes += n * 12u;
+    au_wav6_header();
+}
+static uint64_t g_stat_lim, g_stat_hclip, g_stat_out; /* W348: Begrenzer-Frames, hart begrenzte Samples, Samples */
+static double g_stat_lim_db, g_stat_lim_max; /* W348: Summe/Maximum Pegelabsenkung (dB) des Begrenzers */
 static int16_t g_outbuf[MIXCHUNK * 2];
 
 /* W34: faellige In-Flight-Pakete vollziehen. Muss unter au_lock laufen;
@@ -806,6 +1041,13 @@ static void au_render_voice(audio_voice_t *v, au32 n, int bink_start_ready)
     int use_freq = g_cfg.audio_freq; /* A7B: Frequenz-Schritt */
     int lvl = g_cfg.audio_level_diag; /* W102 DIAG(LVL) */
     float rl = 0, rr = 0; /* W102: Pegel vor Filter (DIAG) */
+    int ru; /* ISSUE-10 */
+    float *rvs = NULL, rvg = 0.0f, rva = 1.0f, g3 = 1.0f; /* W348 Hall-Send */
+    float ea0 = 1.0f, ead = 0.0f; /* W348 EA-Rampe */
+    int eon = 0;
+    float dg = 1.0f, da = 1.0f, sg[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; /* W356 Direktpfad, Surround-Ecken */
+    int hrtf = 0, quad = 0;
+    au32 nr = 0; /* W356: gerenderte Frames (HRTF-Block) */
     /* W102 (audio_filter): DLS2-Tiefpass; Koeffizient fuer 2x MIXRATE */
     int flt = g_cfg.audio_filter && v->flt_mode == 1 && v->flt_n;
     float ff = 0.0f, fq = 1.0f;
@@ -820,7 +1062,35 @@ static void au_render_voice(audio_voice_t *v, au32 n, int bink_start_ready)
     if (v->paused)
         return;
     au3d_update(v); /* W89: DS3D-Daempfung/Pan (audio_3d; sonst 1/1/1) */
-    g *= v->g3d;
+    au3d_doppler(v); /* W348: v->dop (audio_doppler; sonst 1) */
+    aufx_chunk(v, n); /* W348: Huellkurven (audio_eg) -> eg_ea0..eg_lv[1], step_mul */
+    if (g_cfg.audio_reverb && (v->kind == 1 ? v->playing : v->active)) { /* W348 I3DL2-Send */
+        rvg = aufx_voice_send(v);
+        if (rvg > 0.0f)
+            rvs = aufx_reverb_send();
+        rva = v->rv_sendhf;
+    }
+    dg = aufx_voice_direct(v, &da); /* W356: Direktpfad lDirect + Obstruction/Occlusion (audio_occlusion; sonst 1/1) */
+    if (rvs)
+        g3 = v->g3d * dg; /* W348: Distanzdaempfung erst nach dem Send (Raumanteil ohne DS3D-Abfall) */
+    else if (dg != 1.0f)
+        g *= v->g3d * dg;
+    else
+        g *= v->g3d;
+    /* W356 (audio_hrtf): positionierte 3D-Stimmen binaural statt Stereo-Balance (Kopfhoerer) */
+    hrtf = g_cfg.audio_hrtf && g_cfg.audio_3d && v->is3d && v->mode3d != 2 && g_spatial == AUSP_MODE_HRTF;
+    quad = !hrtf && g_spatial == AUSP_MODE_SURR && g_mixx;
+    if (quad && g_cfg.audio_3d && v->is3d && v->mode3d != 2)
+        ausp_quad_gains(v->dir3, sg);
+    else if (quad)
+        quad = 2; /* 2D: Mixbins direkt auf die Kanaele */
+    if (g_cfg.audio_eg && (v->eg_ea0 != 1.0f || v->eg_lv[1] != 1.0f)) { /* W348 EA-Rampe */
+        ea0 = v->eg_ea0;
+        ead = (v->eg_lv[1] - v->eg_ea0) / (float)(n ? n : 1);
+        eon = 1;
+    }
+    if (g_cfg.audio_pitch_diag == 2 && v->pd_lmin == v->pd_lmax)
+        g = 0.0f; /* W343 DIAG(PITCH) Solo: nur Stimmen mit wechselndem Pitch (Motor) hoerbar, Ablauf unveraendert */
     { /* W303 AUDIO-VOLUME: Nutzerlautstaerke (Kategorie x Gesamt), laufend aus g_cfg (ESC wirkt
        * sofort). Alle Regler 100 = Original: keine Rechnung, keine Multiplikation (bitgleich). */
         int vm = g_cfg.volume_master, vmu = g_cfg.volume_music, vs = g_cfg.volume_sfx, vv = g_cfg.volume_voice;
@@ -840,21 +1110,40 @@ static void au_render_voice(audio_voice_t *v, au32 n, int bink_start_ready)
         return;
     if (v->kind == 2 && !v->active)
         return;
-    if (!bink_start_ready && v->create_ret == SBA(0x2435FCu) && !v->played)
+    if (!bink_start_ready && v->create_ret == SBA(0x2435FCu) && !v->played &&
+        au_ring_first_start(v, g_cfg.audio_ring_underrun))
         return;
+    /* ISSUE-10 (audio_ring.c): gefuetterte Bink-Ringstimme -> Unterlauf still, Einblenden danach */
+    ru = g_cfg.audio_ring_underrun && v->ring_fed && v->create_ret == SBA(0x2435FCu);
     for (i = 0; i < n; i++) {
         float l = 0, r = 0;
-        int have = 0;
+        float xs[4] = { 0.0f, 0.0f, 0.0f, 0.0f }; /* W356: C/LFE/BL/BR einer 5.1-Quelle */
+        int have = 0, hx = 0;
         if (v->fifo_n) {
             l = v->fifo[v->fifo_rd * 2] * g;
             r = v->fifo[v->fifo_rd * 2 + 1] * g;
+            if (v->fifox) {
+                const float *x = v->fifox + (size_t)v->fifo_rd * 4;
+                xs[0] = x[0] * g;
+                xs[1] = x[1] * g;
+                xs[2] = x[2] * g;
+                xs[3] = x[3] * g;
+                hx = 1;
+            }
             v->fifo_rd = (v->fifo_rd + 1) % v->fifo_cap;
             v->fifo_n--;
             v->pc_done++; /* W34: Vollzugs-Uhr (nur FIFO-Konsum) */
             have = 1;
+            if (ru && ((v->ring_hold | v->ring_ramp | (au32)v->ring_starved) || v->fifo_n < AU_RING_FADE)) {
+                float k = au_ring_gain(v); /* ISSUE-10: Ein-/Ausblenden nach Unterlauf/Reset */
+                l *= k;
+                r *= k;
+            }
         } else if (v->data && v->datalen) {
             /* A7B: fraktionaler Playhead, SetFrequency/SetPitch = Schritt */
             float step = use_freq ? v->freq_step : 1.0f;
+            if (v->step_mul != 1.0f && v->step_mul > 0.0f)
+                step *= v->step_mul; /* W348: Doppler x EF-Pitch */
             float fpos = (float)v->playhead + v->play_frac;
             au32 lo_end = v->loop_len ? v->loop_start + v->loop_len : v->datalen;
             if (g_cfg.audio_loop_fix && !v->looping)
@@ -887,6 +1176,12 @@ static void au_render_voice(audio_voice_t *v, au32 n, int bink_start_ready)
             if (smp0 < v->datalen) {
                 l = (v->data[smp0 * 2] + (v->data[smp1 * 2] - v->data[smp0 * 2]) * smpfr) * g;
                 r = (v->data[smp0 * 2 + 1] + (v->data[smp1 * 2 + 1] - v->data[smp0 * 2 + 1]) * smpfr) * g;
+                if (v->datax) { /* W356: 5.1-Quelle, weitere Kanaele */
+                    int c;
+                    for (c = 0; c < 4; c++)
+                        xs[c] = (v->datax[smp0 * 4 + c] + (v->datax[smp1 * 4 + c] - v->datax[smp0 * 4 + c]) * smpfr) * g;
+                    hx = 1;
+                }
                 fpos += step;
                 /* W95 (audio_oneshot_fix): Loop-Wrap nur bei Schleife. Das
                  * Spiel setzt die Loop-Region bei JEDEM Ton auf die volle
@@ -900,10 +1195,22 @@ static void au_render_voice(audio_voice_t *v, au32 n, int bink_start_ready)
                 v->playhead = (au32)fpos;
                 v->play_frac = fpos - (float)v->playhead;
                 have = 1;
+                if (ru) { /* ISSUE-10: Unterlauf - Stille statt alter Ring-Momentaufnahme, Uhr laeuft weiter */
+                    l = r = 0.0f;
+                    v->ring_starved = 1;
+                }
             }
         }
-        if (!have)
+        if (!have) {
+            if (ru)
+                v->ring_starved = 1; /* ISSUE-10 */
             break; /* Stream ohne Daten: Stille, bleibt PLAYING */
+        }
+        if (hx && quad != 2) { /* W356: 5.1-Quelle ohne Surround-Ausgabe: hier falten (audio_downmix) */
+            float m6[6] = { l, r, xs[0], xs[1], xs[2], xs[3] };
+            ausp_downmix51(m6, g_cfg.audio_downmix, &l, &r);
+            hx = 0;
+        }
         if (lvl) {
             rl = l;
             rr = r;
@@ -929,12 +1236,71 @@ static void au_render_voice(audio_voice_t *v, au32 n, int bink_start_ready)
             l = v->svf_lp[0];
             r = v->svf_lp[1];
         }
-        if (use_pan) { /* A7B: Stimme links/rechts aus MixBins */
+        if (eon) { /* W348: Amplituden-Huellkurve, linear ueber den Chunk */
+            float k = ea0 + ead * (float)i;
+            l *= k;
+            r *= k;
+            xs[0] *= k; /* W356: 5.1-Kanaele (nur bei Surround-Ausgabe noch getrennt) */
+            xs[1] *= k;
+            xs[2] *= k;
+            xs[3] *= k;
+        }
+        if (use_pan && quad != 2) { /* A7B: Stimme links/rechts aus MixBins (W356 Surround 2D: Bins einzeln, s. u.) */
             l *= v->pan_l;
             r *= v->pan_r;
             rl *= v->pan_l;
             rr *= v->pan_r;
         }
+        if (rvs) { /* W348: I3DL2-Send (lRoom, HF-Daempfung lRoomHF), dann Distanz */
+            v->rv_lp[0] += rva * (l * rvg - v->rv_lp[0]);
+            v->rv_lp[1] += rva * (r * rvg - v->rv_lp[1]);
+            rvs[i * 2] += v->rv_lp[0];
+            rvs[i * 2 + 1] += v->rv_lp[1];
+            l *= g3;
+            r *= g3;
+        }
+        if (da < 1.0f) { /* W356 (audio_occlusion): HF-Daempfung Direktpfad (Obstruction/Occlusion, lDirectHF) */
+            v->oc_lp[0] += da * (l - v->oc_lp[0]);
+            v->oc_lp[1] += da * (r - v->oc_lp[1]);
+            l = v->oc_lp[0];
+            r = v->oc_lp[1];
+        }
+        nr = i + 1;
+        if (hrtf) { /* W356: Mono-Eingang des Kugelkopf-Modells, Ausgabe nach der Schleife */
+            g_hrbuf[i] = 0.5f * (l + r);
+            if (lvl) {
+                v->lv_e += (double)l * l + (double)r * r;
+                v->lv_eraw += (double)rl * rl + (double)rr * rr;
+                v->lv_fr++;
+            }
+        } else if (quad == 1) { /* W356 Surround: 3D-Stimme auf vier Ecken (konstante Leistung) */
+            float m = 0.5f * (l + r);
+            g_mixbuf[i * 2] += m * sg[0];
+            g_mixbuf[i * 2 + 1] += m * sg[1];
+            g_mixx[i * 4 + 2] += m * sg[2];
+            g_mixx[i * 4 + 3] += m * sg[3];
+        } else if (quad == 2) { /* W356 Surround: 2D-Stimme, Mixbins direkt (Mono/Stereo; 5.1-Quellen je Kanal) */
+            const float *b = v->bin_gain;
+            if (!use_pan) {
+                g_mixbuf[i * 2] += l;
+                g_mixbuf[i * 2 + 1] += r;
+            } else if (hx) {
+                g_mixbuf[i * 2] += l * b[0];
+                g_mixbuf[i * 2 + 1] += r * b[1];
+                g_mixx[i * 4] += xs[0] * b[2];
+                g_mixx[i * 4 + 1] += xs[1] * b[3];
+                g_mixx[i * 4 + 2] += xs[2] * b[4];
+                g_mixx[i * 4 + 3] += xs[3] * b[5];
+            } else {
+                float m = 0.5f * (l + r);
+                g_mixbuf[i * 2] += l * b[0];
+                g_mixbuf[i * 2 + 1] += r * b[1];
+                g_mixx[i * 4] += m * b[2];
+                g_mixx[i * 4 + 1] += m * b[3];
+                g_mixx[i * 4 + 2] += l * b[4];
+                g_mixx[i * 4 + 3] += r * b[5];
+            }
+        } else {
         l *= v->pan3l; /* W89: DS3D-Balance (1 ohne audio_3d/3D) */
         r *= v->pan3r;
         if (lvl) { /* W102 DIAG(LVL) */
@@ -946,6 +1312,7 @@ static void au_render_voice(audio_voice_t *v, au32 n, int bink_start_ready)
         }
         g_mixbuf[i * 2] += l;
         g_mixbuf[i * 2 + 1] += r;
+        }
         if (g_cfg.audio_sfx_diag > 0) { /* W89 DIAG(SFX) */
             v->dbg_energy += (double)l * l + (double)r * r;
             v->dbg_eframes++;
@@ -953,6 +1320,18 @@ static void au_render_voice(audio_voice_t *v, au32 n, int bink_start_ready)
         v->played++;
         v->dbg_consumed++; /* W14: nie zurueckgesetzt (DIAG) */
     }
+    if (hrtf && nr) { /* W356: Kugelkopf-HRTF (Laufzeit + Kopfschatten je Ohr), additiv in den Mix */
+        LARGE_INTEGER q0, q1;
+        QueryPerformanceCounter(&q0);
+        ausp_hrtf_block(&v->hr, v->dir3, (float)MIXRATE, g_hrbuf, nr, g_mixbuf);
+        QueryPerformanceCounter(&q1);
+        g_sp_q += q1.QuadPart - q0.QuadPart;
+        g_sp_hrtf_frames += nr;
+    } else if (!hrtf) {
+        v->hr.init = 0; /* naechster HRTF-Block ohne Rampe von alten Werten */
+    }
+    if (v->played)
+        v->ring_once = 1; /* ISSUE-10: Stimme lief schon (Startgatter W205 nur fuer den ersten Start) */
     if (v->ninflight) /* W34: Async-Vollzug (Echtzeit) */
         au_complete_due(v, 0, XMP_SUCCESS);
 }
@@ -1179,6 +1558,20 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
         LARGE_INTEGER h0, h1;
         /* mischen */
         memset(g_mixbuf, 0, sizeof g_mixbuf);
+        { /* W356: Raumklang je Durchgang - Kopfhoerer-HRTF, Surround (Geraet >= 4 Kanaele) oder Stereo */
+            int dch = (int)InterlockedCompareExchange(&g_wa_ch, 0, 0);
+            g_mixx = NULL;
+            g_spatial = AUSP_MODE_STEREO;
+            if (g_cfg.audio_hrtf)
+                g_spatial = AUSP_MODE_HRTF;
+            else if (g_cfg.audio_surround == 2 || (g_cfg.audio_surround == 1 && g_cfg.audio_live == 1 && dch >= 4)) {
+                g_spatial = AUSP_MODE_SURR;
+                g_mixx = g_mixx_buf;
+                memset(g_mixx_buf, 0, sizeof g_mixx_buf);
+                memset(g_rearbuf, 0, sizeof g_rearbuf);
+            }
+        }
+        aufx_reverb_begin(mix_n); /* W348: Hall-Send leeren (audio_reverb) */
         au_lock();
         QueryPerformanceCounter(&h0);
         if (g_cfg.audio_bink_sync) {
@@ -1188,7 +1581,8 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
              * a pass crossing those calls cannot separate tracks by 20 ms.
              * Already running tracks and all non-Bink voices are untouched. */
             for (v = g_voices; v; v = v->next)
-                if (v->create_ret == SBA(0x2435FCu) && !v->played && !v->playing)
+                if (v->create_ret == SBA(0x2435FCu) && !v->played && !v->playing &&
+                    au_ring_first_start(v, g_cfg.audio_ring_underrun))
                     bink_start_ready = 0;
         }
         if (g_cfg.audio_sync_diag && !g_sb_paused) {
@@ -1246,6 +1640,23 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
         }
         if (g_cfg.audio_voice_diag && (g_mixed_total % MIXRATE) < mix_n)
             au_voice_diag(); /* W95: 1x pro Sekunde */
+        if (g_cfg.audio_test_stall_ms > 0 && (g_mixed_total % MIXRATE) < mix_n) {
+            /* ISSUE-10 TEST: FIFO-Stand (Verzug) und Pegel der Bink-Ringstimmen 1x pro Sekunde */
+            char ln[512];
+            int o = 0;
+            audio_voice_t *v;
+            for (v = g_voices; v && o < (int)sizeof ln - 64; v = v->next)
+                if (v->create_ret == SBA(0x2435FCu) && v->ring_fed) {
+                    /* W332: snprintf statt _snprintf (/sdl); kein -1 bei Kürzung, Schleife endet über o */
+                    int r = snprintf(ln + o, sizeof ln - o, " v%u=%u/%.2f%s", v->id, v->fifo_n, v->gain,
+                                     v->playing ? "" : "(stop)");
+                    if (r < 0)
+                        break;
+                    o += r;
+                }
+            if (o)
+                HLOG_I("AUDIO TEST fifo:%s", ln);
+        }
         if (g_cfg.audio_level_diag && (g_mixed_total % MIXRATE) < mix_n)
             au_level_diag(); /* W102: 1x pro Sekunde */
         QueryPerformanceCounter(&h1);
@@ -1253,6 +1664,15 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
         if (h1.QuadPart - h0.QuadPart > g_aul_hold_max_q) { g_aul_hold_max_q = h1.QuadPart - h0.QuadPart; }
         g_aul_hold_n++;
         au_unlock();
+        if (!au_was_paused && g_mixx) { /* W356 Surround: Nachhall vorn und hinten */
+            aufx_reverb_end2(g_mixbuf, g_rearbuf, mix_n);
+            for (i = 0; i < mix_n; i++) {
+                g_mixx[i * 4 + 2] += g_rearbuf[i * 2];
+                g_mixx[i * 4 + 3] += g_rearbuf[i * 2 + 1];
+            }
+        } else if (!au_was_paused)
+            aufx_reverb_end(g_mixbuf, mix_n); /* W348: I3DL2-Hall (audio_reverb), Pause bleibt still */
+
         if (g_cfg.audio_lock_diag && (g_aul_hold_n % lock_window) == 0u) { /* DIAG(PERF-TICK,W168): alle ~10 s */
             double k = 1000.0 / (double)qpf.QuadPart;
             HLOG_I("AUDIOLOCK 10s: mischer_haelt=%.2fms mittel (max %.2fms) n=%ld abgegeben=%ld | andere_warten=%.1fms (n=%ld, max %.2fms) | setbuf=%.1fms (n=%ld, max %.2fms)",
@@ -1263,11 +1683,77 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
             g_aul_wait_n = g_aul_yield_n = 0;
             g_aul_sb_q = g_aul_sb_max_q = 0; g_aul_sb_n = 0;
         }
+        if (g_cfg.audio_limiter && !au_was_paused) { /* W348: Pegelschutz statt harter Begrenzung */
+            /* Spitzenbegrenzer: Schwelle -1 dBFS, sofortiger Eingriff, Rueckkehr 150 ms. Unter der
+             * Schwelle Faktor 1 (unveraendert); verhindert die Hart-Clips gleichzeitiger SFX. */
+            static float lim_g = 1.0f;
+            static const float thr = 0.891f;
+            const float rel = 0.99985f; /* exp(-1 / (0,15 s * 44100)) */
+            for (i = 0; i < mix_n; i++) {
+                float a = fabsf(g_mixbuf[i * 2]), b = fabsf(g_mixbuf[i * 2 + 1]), want;
+                if (b > a)
+                    a = b;
+                if (g_mixx) { /* W356 Surround: Spitze ueber alle Kanaele */
+                    int c;
+                    for (c = 0; c < 4; c++)
+                        if (fabsf(g_mixx[i * 4 + c]) > a)
+                            a = fabsf(g_mixx[i * 4 + c]);
+                }
+                want = a > thr ? thr / a : 1.0f;
+                if (want < lim_g)
+                    lim_g = want;
+                else
+                    lim_g = want - (want - lim_g) * rel;
+                if (lim_g < 0.9999f) {
+                    g_mixbuf[i * 2] *= lim_g;
+                    g_mixbuf[i * 2 + 1] *= lim_g;
+                    if (g_mixx) {
+                        g_mixx[i * 4] *= lim_g;
+                        g_mixx[i * 4 + 1] *= lim_g;
+                        g_mixx[i * 4 + 2] *= lim_g;
+                        g_mixx[i * 4 + 3] *= lim_g;
+                    }
+                    g_stat_lim++;
+                    {
+                        double gr = -20.0 * log10((double)lim_g);
+                        g_stat_lim_db += gr;
+                        if (gr > g_stat_lim_max)
+                            g_stat_lim_max = gr;
+                    }
+                }
+            }
+        }
+        if (g_mixx) { /* W356 Surround: 6 Kanaele fuers Geraet (FL FR C LFE BL BR), Stereo-Faltung fuer Mitschnitt */
+            for (i = 0; i < mix_n; i++) {
+                float m6[6], l, r;
+                int c;
+                m6[0] = g_mixbuf[i * 2];
+                m6[1] = g_mixbuf[i * 2 + 1];
+                for (c = 0; c < 4; c++)
+                    m6[2 + c] = g_mixx[i * 4 + c];
+                for (c = 0; c < 6; c++) {
+                    float s = m6[c] > 1.0f ? 1.0f : m6[c] < -1.0f ? -1.0f : m6[c];
+                    g_out6[i * 6 + c] = (int16_t)(int)(s * 32767.0f);
+                }
+                /* Mitschnitt/Video-Export: Faltung wie die Mixbin-Faltung des Stereo-Pfads (gleiche Pegel wie
+                 * bei Stereo-Ausgabe; 5.1-Quellen wurden schon ungefaltet gemischt) */
+                l = m6[0] + 0.7071f * m6[2] + 0.5f * m6[3] + 0.5f * m6[4];
+                r = m6[1] + 0.7071f * m6[2] + 0.5f * m6[3] + 0.5f * m6[5];
+                g_mixbuf[i * 2] = l;
+                g_mixbuf[i * 2 + 1] = r;
+            }
+            g_sp_surr_frames += mix_n;
+            if (g_cfg.audio_surround == 2 && g_cfg.audio_capture) /* TEST: 6-Kanal-Mitschnitt */
+                au_wav6_write(g_out6, mix_n);
+        }
         /* Clamp + s16 + Peak */
         for (i = 0; i < mix_n * 2; i++) {
+
             float s = g_mixbuf[i];
             float a;
             int v;
+            if (s > 1.0f || s < -1.0f)
+                g_stat_hclip++; /* W348: Zaehler (unveraendertes Verhalten) */
             if (s > 1.0f)
                 s = 1.0f;
             if (s < -1.0f)
@@ -1279,7 +1765,10 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
             g_outbuf[i] = (int16_t)v;
         }
         if (g_cfg.audio_live == 1) { /* A7B: WASAPI (neu, Default) */
-            ring_write(g_outbuf, mix_n);
+            if (g_mixx)
+                ring_write6(g_out6, mix_n); /* W356 Surround */
+            else
+                ring_write(g_outbuf, mix_n);
             au_ensure_wasapi();
         } else if (g_cfg.audio_live == 2) { /* WinMM (alt) */
             au_wo_write(g_outbuf);
@@ -1294,8 +1783,18 @@ static DWORD WINAPI au_mix_thread(LPVOID p)
             }
         }
         g_mixed_total += mix_n;
-        if ((g_mixed_total % (MIXRATE * 60u)) < mix_n) /* alle ~60 s */
+        g_stat_out += mix_n * 2u;
+        if ((g_mixed_total % (MIXRATE * 60u)) < mix_n) { /* alle ~60 s */
             audio_log_stats();
+            HLOG_I("AUDIO pegel (W348): audio_limiter=%d begrenzt=%.3f%% absenkung_mittel=%.2f dB (je begrenztem Frame %.2f, max %.1f) hart_geclippt=%.4f%%", g_cfg.audio_limiter,
+                   g_stat_out ? 200.0 * (double)g_stat_lim / (double)g_stat_out : 0.0,
+                   g_stat_out ? 2.0 * g_stat_lim_db / (double)g_stat_out : 0.0, g_stat_lim ? g_stat_lim_db / (double)g_stat_lim : 0.0,
+                   g_stat_lim_max,
+                   g_stat_out ? 100.0 * (double)g_stat_hclip / (double)g_stat_out : 0.0);
+        }
+
+        if (g_cfg.audio_pitch_diag && (g_mixed_total % (MIXRATE * 10u)) < mix_n) /* W343 DIAG(PITCH), alle ~10 s */
+            audio_pitch_diag_log();
         if (sb_vexp_audio()) {
             /* W255 VIDEO-EXPORT: Block an den Encoder, Takt = virtuelle Spielzeit statt Echtzeit */
             sb_vexp_audio_push(g_outbuf, mix_n);

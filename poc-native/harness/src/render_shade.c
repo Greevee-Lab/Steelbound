@@ -26,6 +26,7 @@
 #include "render_psgen.h"
 #include "sb_state.h" /* W232: sb_in_mission */
 #include "sb_texhealth.h" /* W315 */
+#include "render_loclook.h" /* W358 LOC-LOOK */
 
 #define RQ_VS_MAX 96
 #define RQ_PS_MAX 96
@@ -299,6 +300,89 @@ static unsigned rq_u32(unsigned a)
     return v;
 }
 
+/* W358 LOC-LOOK (loc_texfilt, nur LoC-Profil): Sampler aus den Deferred-TextureStates der Stufe k statt
+ * immer trilinear ohne Bias. LoC setzt je Missionsbild MAG/MIN LINEAR, MIP POINT bzw. NONE (Welt-Draws
+ * ohne Mips) und MIPMAPLODBIAS -2,0 (LOOKSTAT, Lauf LS1); MAXMIPLEVEL (TSS 7) = feinste erlaubte Stufe,
+ * MAXANISOTROPY (TSS 8). Der Bias gilt auf der NV2A gegen das 480-Zeilen-Raster (Backbuffer) bzw. die
+ * Xbox-RT-Groesse; bei Render-Skalierung s ist die Mip-Wahl schon um log2(s) feiner -> Bias + log2(s)
+ * (gleiche Texeldichte je Spielpixel wie das Original, kein Ueberschaerfen).
+ *   loc_texfilt=1: Bias (kompensiert) + MAXMIPLEVEL + MIN/MAG des Spiels, Mip-Stufen immer linear
+ *                  ueberblendet ("Original (HD)": ohne harte Stufenkanten; Laeufe T1/T3 zeigten mit MIP
+ *                  POINT/NONE rechteckige Stufengrenzen im Himmel, LOD nach Max-Norm),
+ *   loc_texfilt=3: volle Emulation (MIP POINT/NONE wie das Spiel, Bias kompensiert; DIAG),
+ *   loc_texfilt=2: wie 3 mit Roh-Bias (DIAG). */
+#define RQ_LSMP_N 96
+static struct { unsigned key; int bias16; ID3D11SamplerState *s; } g_rq_lsmp[RQ_LSMP_N];
+static unsigned g_rq_lsmp_n;
+static ID3D11SamplerState *rq_sampler_loc(unsigned k)
+{
+    static const D3D11_TEXTURE_ADDRESS_MODE am[6] = {
+        D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE_ADDRESS_WRAP, D3D11_TEXTURE_ADDRESS_MIRROR,
+        D3D11_TEXTURE_ADDRESS_CLAMP, D3D11_TEXTURE_ADDRESS_BORDER, D3D11_TEXTURE_ADDRESS_CLAMP };
+    unsigned ts = SBA(0x21A8B0u) + k * 32u * 4u, au = rq_u32(ts), av = rq_u32(ts + 4u);
+    unsigned mag = rq_u32(ts + 12u), mnf = rq_u32(ts + 16u), mip = rq_u32(ts + 20u);
+    unsigned maxmip = rq_u32(ts + 28u), an = rq_u32(ts + 32u), key, i;
+    union { unsigned u; float f; } lb;
+    float s = 1.0f;
+    int b16;
+    if (au > 5u) { au = 0; }
+    if (av > 5u) { av = 0; }
+    lb.u = rq_u32(ts + 24u);
+    mip = rq_loc_mipfilter(mip, g_cfg.loc_texfilt); /* 1: Mip-Stufen linear (keine Stufenkanten) */
+    if (g_cfg.loc_texfilt == 1 || g_cfg.loc_texfilt == 3) {
+        if (rtt_active() && g_rtt_bound >= 0 && g_rtt_bound < RTT_MAX && g_rtt[g_rtt_bound].h) {
+            s = (float)g_rtt[g_rtt_bound].ph / (float)g_rtt[g_rtt_bound].h;
+        } else {
+            unsigned bx = 0, by = 0, bw = 0, bh = 0;
+            sb_aspect_box(&bx, &by, &bw, &bh);
+            if (bh) { s = (float)bh / 480.0f; }
+        }
+    }
+    b16 = rq_loc_bias16(lb.f, s, g_cfg.loc_texfilt);
+    if (mag > 3u) { mag = 2u; }
+    if (mnf > 3u) { mnf = 2u; }
+    if (mip > 2u) { mip = 2u; }
+    if (maxmip > 15u) { maxmip = 15u; }
+    if (an > 15u) { an = 15u; }
+    key = au | (av << 3) | (mag << 6) | (mnf << 8) | (mip << 10) | (maxmip << 12) | (an << 16);
+    for (i = 0; i < g_rq_lsmp_n; i++) {
+        if (g_rq_lsmp[i].key == key && g_rq_lsmp[i].bias16 == b16) { return g_rq_lsmp[i].s; }
+    }
+    if (g_rq_lsmp_n >= RQ_LSMP_N) { return rq_sampler(au, av); }
+    {
+        D3D11_SAMPLER_DESC sd;
+        ID3D11SamplerState *smp = NULL;
+        unsigned fmin = mnf == 1u ? 0u : 1u, fmag = mag == 1u ? 0u : 1u, fmip = mip == 2u ? 1u : 0u;
+        memset(&sd, 0, sizeof sd);
+        if ((mnf == 3u || mag == 3u) && an > 1u) {
+            sd.Filter = D3D11_FILTER_ANISOTROPIC;
+            sd.MaxAnisotropy = an;
+        } else {
+            sd.Filter = (D3D11_FILTER)((fmin << 4) | (fmag << 2) | fmip); /* D3D11_ENCODE_BASIC_FILTER */
+            sd.MaxAnisotropy = 1;
+        }
+        sd.AddressU = am[au]; sd.AddressV = am[av]; sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sd.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        sd.MipLODBias = (float)b16 / 16.0f;
+        sd.MinLOD = (float)maxmip;
+        sd.MaxLOD = mip == 0u ? (float)maxmip : D3D11_FLOAT32_MAX; /* MIP NONE: nur die Grundstufe */
+        if (FAILED(ID3D11Device_CreateSamplerState(g_dev, &sd, &smp)) || !smp) { return rq_sampler(au, av); }
+        g_rq_lsmp[g_rq_lsmp_n].key = key;
+        g_rq_lsmp[g_rq_lsmp_n].bias16 = b16;
+        g_rq_lsmp[g_rq_lsmp_n].s = smp;
+        g_rq_lsmp_n++;
+        {
+            static unsigned nlog;
+            if (nlog < 12u) {
+                nlog++;
+                HLOG_I("LOCLOOK: Sampler #%u Stufe %u addr=%u/%u filt=%u/%u/%u lod=%.2f (Spiel %.2f, Skala %.2f) maxmip=%u aniso=%u",
+                       g_rq_lsmp_n, k, au, av, mag, mnf, mip, (float)b16 / 16.0f, lb.f, s, maxmip, an);
+            }
+        }
+        return smp;
+    }
+}
+
 /* Slots wie vsh_classify (render_shader.c) aus dem Spiel-Speicher. */
 static int rq_read_slots(unsigned handle, unsigned *slots, unsigned *pn)
 {
@@ -472,10 +556,11 @@ static int rq_mklayout(const rq_vsent_t *e, int lerp, ID3DBlob *b, ID3D11InputLa
 
 static void rq_raw_release(rq_vsent_t *e)
 {
-    if (e->vsr) { ID3D11VertexShader_Release(e->vsr); }
-    if (e->vsrl) { ID3D11VertexShader_Release(e->vsrl); }
-    if (e->layr) { ID3D11InputLayout_Release(e->layr); }
-    if (e->layrl) { ID3D11InputLayout_Release(e->layrl); }
+    /* W361: Zwischenbild-Listen koennen die Roh-Variante noch tragen (g_rq_rec) -> verzoegert freigeben */
+    sb_interp_release_later((IUnknown *)e->vsr);
+    sb_interp_release_later((IUnknown *)e->vsrl);
+    sb_interp_release_later((IUnknown *)e->layr);
+    sb_interp_release_later((IUnknown *)e->layrl);
     e->vsr = e->vsrl = NULL;
     e->layr = e->layrl = NULL;
     e->rawok = 0;
@@ -693,10 +778,11 @@ static rq_vsent_t *rq_vs_get_slow0(unsigned handle)
         if (g_rqvs_n >= RQ_VS_MAX) { return NULL; }
         e = &g_rqvs[g_rqvs_n++];
     } else {
-        if (e->vs) { ID3D11VertexShader_Release(e->vs); }
-        if (e->vsl) { ID3D11VertexShader_Release(e->vsl); }
-        if (e->lay) { ID3D11InputLayout_Release(e->lay); }
-        if (e->layl) { ID3D11InputLayout_Release(e->layl); }
+        /* W361: Handle mit neuem Programm - alte Objekte koennen noch in Zwischenbild-Listen stehen */
+        sb_interp_release_later((IUnknown *)e->vs);
+        sb_interp_release_later((IUnknown *)e->vsl);
+        sb_interp_release_later((IUnknown *)e->lay);
+        sb_interp_release_later((IUnknown *)e->layl);
         rq_raw_release(e);
     }
     memset(e, 0, sizeof *e);
@@ -779,7 +865,7 @@ static rq_psent_t *rq_ps_get_slow0(unsigned handle)
         if (g_rqps_n >= RQ_PS_MAX) { return NULL; }
         e = &g_rqps[g_rqps_n++];
     } else if (e->ps) {
-        ID3D11PixelShader_Release(e->ps);
+        sb_interp_release_later((IUnknown *)e->ps); /* W361: kann noch in Zwischenbild-Listen stehen */
     }
     memset(e, 0, sizeof *e);
     e->handle = handle;
@@ -839,6 +925,16 @@ static int rq_ab_skip(void)
      * Stoerzeilen-Bildern - Bild p+1 alter Pfad, p+2 Shading, sonst Shading. */
     if (g_cfg.shade_ab == 3) { return mfx_ab_phase() == 1; }
     return g_cfg.shade_ab == 2 ? rq_ab_base() : !rq_ab_on();
+}
+
+/* DIAG(LOC-LOOK,W358): Bits des aktiven Shading-Draws fuer loc_lookstat (render_im.c):
+ * Bit 0..3 Programm-Art (kind), Bit 4 = VS schreibt oFog, Bit 5 = PS mischt Nebel (Final-Combiner). */
+unsigned rq_lookstat_bits(void)
+{
+    unsigned b = g_rq_kind & 0xFu;
+    if (g_rq_vse && (g_rq_vse->prog.outmask & 0x20u)) { b |= 0x10u; }
+    if (g_rq_pse && g_rq_pse->info.uses_fog) { b |= 0x20u; }
+    return b;
 }
 
 int rq_in_mission(void)
@@ -1400,7 +1496,9 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
             } else if (ftb == 1u) { fg[0] = 2.0f; fg[1] = 1.5f; fg[2] = de.f * -0.0901680738f; }
             else if (ftb == 2u) { fg[0] = 3.0f; fg[1] = 1.5f; fg[2] = de.f * -0.2123300284f; }
         }
-        fg[4] = (g_rq_kind == 0u && (mask & 2u)) ? 1.0f : 0.0f; /* oD0 aus dem Programm */
+        /* W358 LOC-LOOK: LoC-Modelle (SHORT3 + NORMSHORT3-Normale) rechnen das Vertex-Licht in P2-Programmen
+         * (DP4-oPos + 50..82 Befehle Licht); ohne oD0 aus dem Programm bleibt die Rohfarbe -> flach/vollhell. */
+        fg[4] = rq_loc_od0_from_prog((int)g_rq_kind, g_sba_loc, g_cfg.loc_vsod0, mask) ? 1.0f : 0.0f; /* oD0 aus dem Programm */
         fg[5] = 1.0f;                                             /* oT0 aus dem Programm */
         fg[6] = (mask & 2u) ? 1.0f : 0.0f;                        /* oD1 */
         fg[7] = 0.0f;
@@ -1481,10 +1579,13 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
                 s = NULL; w = h = 0;
             }
             s = sb_tex_get_stage(k, &w, &h, &lin);
-            /* W315 DIAG tex_missing_mark: Stufe 1..3 belegt ohne SRV (nicht Tiefenformat 13/leer 10) */
-            if (!s && g_cfg.tex_missing_mark && g_tex_stage_why != 10u && g_tex_stage_why != 13u) {
-                s = sb_th_mark(g_tex_stage_why);
-                { /* DIAG(ISSUE-TEX): markierte Stufe 1..3 einmal je xptr ins Log (Kopf, Grund, Shader) */
+            /* W315 DIAG tex_missing_mark: Stufe 1..3 belegt ohne SRV (nicht Tiefenformat 13/leer 10).
+             * W360: immer zaehlen (Textur-Gesundheit/F11), Markierung nur mit tex_missing_mark. */
+            if (!s && g_tex_stage_why != 10u && g_tex_stage_why != 13u) {
+                unsigned sxk[4], snk[4];
+                sb_tex_stages(sxk, snk);
+                s = sb_th_stage_missing(k, g_tex_stage_why, sxk[k], g_present_no); /* NULL ohne tex_missing_mark */
+                if (s) { /* DIAG(ISSUE-TEX): markierte Stufe 1..3 einmal je xptr ins Log (Kopf, Grund, Shader) */
                     static unsigned mx[64], mn;
                     unsigned sxp[4], snn[4], q, hh[5] = { 0, 0, 0, 0, 0 };
                     sb_tex_stages(sxp, snn);
@@ -1522,7 +1623,8 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
                 tsc[k * 4u + 1] = 1.0f / (float)h;
             }
         }
-        g_rq_rec.smp[k] = rq_sampler(rq_u32(SBA(0x21A8B0u) + (k * 32u + 0u) * 4u),
+        g_rq_rec.smp[k] = (g_sba_loc && g_cfg.loc_texfilt) ? rq_sampler_loc(k) /* W358 LOC-LOOK */
+                        : rq_sampler(rq_u32(SBA(0x21A8B0u) + (k * 32u + 0u) * 4u),
                                      rq_u32(SBA(0x21A8B0u) + (k * 32u + 1u) * 4u));
     }
     {   /* RENDER-QA3 (W100): pflags = Alpha-Test (x Funktion, y Ref), ALPHAKILL-

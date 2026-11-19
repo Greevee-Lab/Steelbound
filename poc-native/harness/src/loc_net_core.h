@@ -22,6 +22,9 @@ typedef struct locnet_peer {
 
 typedef struct locnet_stats {
     volatile LONG tx, rx, bc, drop, sockets, accepts, connects;
+    volatile LONG guard; /* W334: vom Gastfilter in den HLE-Hooks verworfen */
+    volatile LONG hold;  /* W334: recv mit unentschiedenem Rahmenkopf (WSAEWOULDBLOCK, nur Zaehler) */
+    volatile LONG leave; /* W350: Stromende eines Mitspielers dem Spiel als Verbindungsreset gemeldet (Abgaenge) */
     volatile LONG last34_ms; /* W297: GetTickCount des letzten gesendeten 0x34-Rahmens (Lockstep aktiv) */
     volatile LONG typ_seen[2][8]; /* W297: Rahmentyp < 256 gesehen (Bit), [0] empfangen, [1] gesendet - nur Typ, kein Inhalt */
 } locnet_stats;
@@ -42,12 +45,22 @@ typedef struct locnet {
     locnet_stats st;
     locnet_log_fn log;
     struct locnetsim *sim; /* W322 LOC-NETLAT: Verzoegerungsstufe (NULL = aus, Standard) */
+    int fin_pass;          /* W350: 0 = Stromende eines Mitspielers -> WSAECONNRESET (Standard), 1 = recv 0 durchreichen */
     int nodelay;           /* W322: 1 = TCP_NODELAY auf den Spiel-TCP-Verbindungen (kein Nagle-Stau) */
     struct loctun *tun;    /* W324 LOC-NETPLAY: eigener UDP-Transport (NULL = Original-TCP/UDP, Standard) */
     /* W329: Host-UDP-Ports, die das Spiel an der eigenen Adresse gebunden hat (Bit je Port). Der Transport stellt
      * Datagramme von Mitspielern nur an diese Ports zu - nie an fremde Dienste auf Loopback. */
     volatile LONG udp_bound[65536 / 32];
 } locnet;
+
+/* W339: 1 = Daten eines Mitspielers haben das Spiel erreicht (Netzsitzung, bis Prozessende). */
+extern volatile LONG g_locnet_session;
+/* W339: Zustandspruefung fuer UDP-Rahmen nach bestandenem Gastfilter (1 = zum Spiel, 0 = verwerfen). from_ip =
+ * Absender, wie ihn das Spiel sieht (Netzwerk-Byte-Reihenfolge). NULL = keine (Selbsttest). */
+typedef int (*locnet_udp_state_fn)(uint16_t game_port, const uint8_t *d, int n, uint32_t from_ip);
+void locnet_set_udp_state_check(locnet_udp_state_fn f);
+/* W339: Spiel-TCP-Socket wegen eines Verstosses trennen (wie der Gastfilter: shutdown, recv meldet WSAECONNRESET). */
+void locnet_guard_kill(locnet *n, SOCKET s, int why);
 
 /* 1 = Loopback (127/8), privat (10/8, 172.16/12, 192.168/16) oder link-local (169.254/16). */
 int locnet_ip_allowed(uint32_t ip_net);
@@ -79,6 +92,11 @@ SOCKET locnet_accept(locnet *n, SOCKET s, struct sockaddr *a, int *len);
 int locnet_sendto(locnet *n, SOCKET s, const char *buf, int len, int flags, const struct sockaddr *to, int tolen);
 int locnet_send(locnet *n, SOCKET s, const char *buf, int len, int flags); /* W322: TCP send (ueber sim, falls aktiv) */
 int locnet_recvfrom(locnet *n, SOCKET s, char *buf, int len, int flags, struct sockaddr *from, int *fromlen);
+/* W334: recv des Spiels durch den Gastfilter (TCP: nur Bytes mit entschiedenem gueltigem Rahmenkopf, Verstoss =
+ * Verbindung getrennt; UDP: Positivliste). */
+int locnet_recv(locnet *n, SOCKET s, char *buf, int len, int flags);
+/* W334: 1 = eigene Adresse oder verbundener Mitspieler (XNet-HLE gibt nur solche heraus). */
+int locnet_addr_known(locnet *n, uint32_t ip_net);
 
 /* XNADDR (36 B): ina, inaOnline, wPortOnline, abEnet[6], abOnline[20]. */
 void locnet_xnaddr(const locnet *n, uint32_t ip_net, uint8_t out[LOCNET_XNADDR_SIZE]);

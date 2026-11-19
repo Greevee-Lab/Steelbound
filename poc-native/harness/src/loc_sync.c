@@ -45,16 +45,22 @@ static volatile LONG s_frames;
 static unsigned long long s_hash = 1469598103934665603ull;
 static u32 s_last_tick;
 static u32 s_desync_logged;
+static int s_ext; /* W338: Hash/LOCSYNC aus der Eingabeschicht (loc_rb_input) */
 
-/* W297 TEST loc_replay_tick: "rahmen:vk,len;..." (len in Bildern), aufsteigend sortiert erwartet */
+/* W297 TEST loc_replay_tick: "rahmen:vk,len;..." (len in Bildern), aufsteigend sortiert erwartet.
+ * W336 LOCTP: "rahmen:vk,len@P" wiederholt den Eintrag alle P Lockstep-Rahmen ab "rahmen" (Testpartner:
+ * Bewegen/Feuern bis Missionsende ohne lange Liste); Eintraege ohne @ wie bisher genau einmal. */
 #define LS_RT_MAX 96
+#define LS_RP_MAX 16
 static struct { LONG at; int vk, len; } s_rt[LS_RT_MAX];
 static int s_rt_n, s_rt_cur;
+static struct { LONG next, period; int vk, len; } s_rp[LS_RP_MAX];
+static int s_rp_n;
 
 static void ls_rt_parse(const char *p)
 {
     while (*p && s_rt_n < LS_RT_MAX) {
-        long at;
+        long at, per = 0;
         int vk, len;
         while (*p == ' ' || *p == ';') p++;
         if (!*p) break;
@@ -66,7 +72,21 @@ static void ls_rt_parse(const char *p)
             p++;
             len = (int)strtol(p, (char **)&p, 10);
         }
+        if (*p == '@') { /* W336: Wiederholung */
+            p++;
+            per = strtol(p, (char **)&p, 10);
+        }
         while (*p && *p != ';') p++;
+        if (per > 0) {
+            if (s_rp_n < LS_RP_MAX) {
+                s_rp[s_rp_n].next = at;
+                s_rp[s_rp_n].period = per;
+                s_rp[s_rp_n].vk = vk;
+                s_rp[s_rp_n].len = len;
+                s_rp_n++;
+            }
+            continue;
+        }
         s_rt[s_rt_n].at = at;
         s_rt[s_rt_n].vk = vk;
         s_rt[s_rt_n].len = len;
@@ -78,13 +98,21 @@ static void ls_rt_parse(const char *p)
  * loc_replay-Folgen brechen, wenn ein Client langsamer laeuft). Schritte nacheinander:
  *   AUSLOESER[+N]>vk,len   mit AUSLOESER = acc>=K (angenommene TCP-Verbindungen),
  *   con>=K (eigene connects), rx:0xTT / tx:0xTT (Rahmentyp empfangen/gesendet gesehen),
- *   sync>=K (Lockstep-Rahmen), f (sofort). +N = N Bilder nach dem Ausloesen. vk 0 = Bild,
- *   vk 1 = Draw-Zensus (DIAG). */
+ *   sync>=K (Lockstep-Rahmen), f (sofort), W344: scn=S[.T] (Szene[.Schritt]), mnK=V (Menuewort K).
+ *   +N = N Bilder nach dem Ausloesen. vk 0 = Bild, vk 1 = Draw-Zensus (DIAG).
+ *   W344: AUSLOESER/N=J[+M]>... = kommt der Ausloeser nicht binnen N Bildern, weiter bei Schritt J (1-basiert,
+ *   ohne Taste); j=J = Sprung zu Schritt J (Wiederholung, z. B. erneut suchen). Hoechstens 1000 Spruenge
+ *   (je Sprung mindestens ein Bild; Suchschleife 2 Spruenge je ~12 s = ~1,5 h Warten auf das Match). */
 #define LS_ST_MAX 48
-enum { LST_F, LST_ACC, LST_CON, LST_RX, LST_TX, LST_SYNC };
-static struct { int kind; long arg; int delay, vk, len; } s_st[LS_ST_MAX];
-static int s_st_n, s_st_cur, s_st_hit;
-static unsigned s_st_hitf;
+/* W344 LOC-TP-UX: Menue-Zustand als Ausloeser (statt Bildzaehler): scn=S bzw. scn=S.T (Szene u16 [0x727988],
+ * Schritt u16 [0x72798A]), mnK=V (Wort K 0..5 des Menue-Unterzustands [[0x6DC678]], LOC_BOOT §15.4/§30). */
+enum { LST_F, LST_ACC, LST_CON, LST_RX, LST_TX, LST_SYNC, LST_SCN, LST_MN, LST_J };
+#define LS_SCENE 0x727988u   /* Szene (u16), Schritt (u16) bei +2 */
+#define LS_MENU 0x6DC678u    /* Zeiger auf den Menue-Unterzustand (Szene 5) */
+#define LS_SCENE6 0x6DD3F8u  /* Zeiger auf den Szene-6-Unterzustand */
+static struct { int kind; long arg, arg2; int delay, vk, len, to, to_j; } s_st[LS_ST_MAX];
+static int s_st_n, s_st_cur, s_st_hit, s_st_jumps;
+static unsigned s_st_hitf, s_st_since; /* W344: Bild, seit dem der aktuelle Schritt wartet */
 
 static void ls_st_parse(const char *p)
 {
@@ -93,7 +121,7 @@ static void ls_st_parse(const char *p)
         unsigned k = 0;
         const char *q;
         int kind = -1;
-        long arg = 0;
+        long arg = 0, arg2 = -1;
         while (*p == ' ' || *p == ';') p++;
         if (!*p) break;
         while (*p && *p != ';' && k < sizeof tok - 1) tok[k++] = *p++;
@@ -103,7 +131,24 @@ static void ls_st_parse(const char *p)
         else if (strncmp(tok, "rx:", 3) == 0) { kind = LST_RX; arg = strtol(tok + 3, NULL, 0); }
         else if (strncmp(tok, "tx:", 3) == 0) { kind = LST_TX; arg = strtol(tok + 3, NULL, 0); }
         else if (strncmp(tok, "sync>=", 6) == 0) { kind = LST_SYNC; arg = strtol(tok + 6, NULL, 0); }
+        else if (strncmp(tok, "scn=", 4) == 0) { /* W344: Szene[.Schritt] */
+            char *e = NULL;
+            kind = LST_SCN;
+            arg = strtol(tok + 4, &e, 0);
+            arg2 = (e && *e == '.') ? strtol(e + 1, NULL, 0) : -1;
+        } else if (tok[0] == 'm' && tok[1] == 'n' && tok[2] >= '0' && tok[2] <= '5' && tok[3] == '=') { /* W344 */
+            kind = LST_MN;
+            arg = tok[2] - '0';
+            arg2 = (long)strtoul(tok + 4, NULL, 0);
+        }
         else if (tok[0] == 'f') { kind = LST_F; }
+        else if (tok[0] == 'j' && tok[1] == '=') { /* W344: Sprung */
+            memset(&s_st[s_st_n], 0, sizeof s_st[s_st_n]);
+            s_st[s_st_n].kind = LST_J;
+            s_st[s_st_n].arg = atol(tok + 2);
+            s_st_n++;
+            continue;
+        }
         if (kind < 0 || !strrchr(tok, '>')) {
             HLOG_W("LOCSTEPS: unbekannter Schritt %s", tok);
             continue;
@@ -117,18 +162,79 @@ static void ls_st_parse(const char *p)
         s_st[s_st_n].len = q ? atoi(q + 1) : 8;
         s_st[s_st_n].kind = kind;
         s_st[s_st_n].arg = arg;
+        s_st[s_st_n].arg2 = arg2;
+        q = strchr(tok, '/'); /* W344: Zeitgrenze /N=J */
+        s_st[s_st_n].to = (q && q < strrchr(tok, '>')) ? atoi(q + 1) : 0;
+        q = q ? strchr(q, '=') : NULL;
+        s_st[s_st_n].to_j = (q && q < strrchr(tok, '>')) ? atoi(q + 1) : 0;
         s_st_n++;
     }
 }
 
 static void lp_swap(void); /* W320 LOC-PERF */
 
+/* W344: Menue-Zustand lesen (0 = nicht lesbar). mn[6] = Woerter des Menue-Unterzustands (0 ohne Zeiger). */
+static int ls_state(u32 *scene, u32 *step, u32 *mn, u32 *s6)
+{
+    int ok = 0;
+    __try {
+        const u32 *m = *(const u32 *const *)(uintptr_t)LS_MENU;
+        const u32 *q = *(const u32 *const *)(uintptr_t)LS_SCENE6;
+        int i;
+        *scene = *(const uint16_t *)(uintptr_t)LS_SCENE;
+        *step = *(const uint16_t *)(uintptr_t)(LS_SCENE + 2);
+        for (i = 0; i < 6; i++) mn[i] = m ? m[i] : 0;
+        for (i = 0; i < 4; i++) s6[i] = q ? q[i] : 0;
+        ok = 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    return ok;
+}
+
+/* W344: Zustandswechsel loggen, solange eine Testfolge laeuft (Szene/Schritt immer; mit loc_net_diag auch
+ * Menue-/Szene-6-Woerter, Zaehler +1 nicht). Nur Spielzustand, keine Eingaben. Hoechstens 600 Zeilen. */
+static void ls_state_log(unsigned f)
+{
+    static u32 prev[12];
+    static int n;
+    u32 sc = 0, stp = 0, mn[6], s6[4], cur[12];
+    int i, diff = 0;
+    if (n >= 600 || !ls_state(&sc, &stp, mn, s6)) return;
+    cur[0] = sc;
+    cur[1] = stp;
+    for (i = 0; i < 6; i++) cur[2 + i] = g_cfg.loc_net_diag ? mn[i] : 0;
+    for (i = 0; i < 4; i++) cur[8 + i] = g_cfg.loc_net_diag ? s6[i] : 0;
+    for (i = 0; i < 12; i++) diff |= cur[i] != prev[i] && cur[i] != prev[i] + 1; /* Zaehler (+1 je Bild) nicht */
+    memcpy(prev, cur, sizeof prev);
+    if (!diff && f > 1) return;
+    n++;
+    HLOG_I("LOCSTATE: Bild %u Szene=%u.%u Menue [%X %X %X %X %X %X] Szene6 [%X %X %X %X]", f, sc, stp, cur[2], cur[3],
+           cur[4], cur[5], cur[6], cur[7], cur[8], cur[9], cur[10], cur[11]);
+}
+
 void loc_sync_frame(unsigned f)
 {
     lp_swap(); /* W320: Swap-Zeitpunkt (nur loc_pace_diag) */
+    if (s_st_n) ls_state_log(f); /* W344 */
     while (s_st_cur < s_st_n) {
         int hit = 0;
         long acc = 0, con = 0;
+        if (!s_st_since) s_st_since = f;
+        if (!s_st_hit && (s_st[s_st_cur].kind == LST_J ||
+                          (s_st[s_st_cur].to > 0 && s_st[s_st_cur].to_j > 0 && f - s_st_since >= (unsigned)s_st[s_st_cur].to))) {
+            /* W344: Sprung bzw. Zeitgrenze (ohne Taste) */
+            int to = s_st[s_st_cur].kind == LST_J ? (int)s_st[s_st_cur].arg : s_st[s_st_cur].to_j;
+            if (to < 1 || to > s_st_n || ++s_st_jumps > 1000) {
+                HLOG_W("LOCSTEPS: Sprung von Schritt %d nach %d ungueltig bzw. zu oft - Testfolge endet", s_st_cur + 1, to);
+                s_st_cur = s_st_n;
+                return;
+            }
+            HLOG_I("LOCSTEPS: %s Schritt %d -> %d bei Bild %u", s_st[s_st_cur].kind == LST_J ? "Sprung" : "Zeitgrenze",
+                   s_st_cur + 1, to, f);
+            s_st_cur = to - 1;
+            s_st_hitf = f;
+            s_st_since = f;
+            return; /* naechster Schritt ab dem naechsten Bild */
+        }
         if (!s_st_hit) {
             switch (s_st[s_st_cur].kind) {
             case LST_F: hit = 1; break;
@@ -137,6 +243,17 @@ void loc_sync_frame(unsigned f)
             case LST_RX: hit = loc_net_test_state(NULL, NULL, 0, (unsigned)s_st[s_st_cur].arg) == 2; break;
             case LST_TX: hit = loc_net_test_state(NULL, NULL, 1, (unsigned)s_st[s_st_cur].arg) == 2; break;
             case LST_SYNC: hit = s_frames >= s_st[s_st_cur].arg; break;
+            case LST_SCN:
+            case LST_MN: { /* W344 */
+                u32 sc = 0, stp = 0, mn[6], s6[4];
+                if (ls_state(&sc, &stp, mn, s6)) {
+                    if (s_st[s_st_cur].kind == LST_SCN)
+                        hit = (long)sc == s_st[s_st_cur].arg && (s_st[s_st_cur].arg2 < 0 || (long)stp == s_st[s_st_cur].arg2);
+                    else
+                        hit = mn[s_st[s_st_cur].arg] == (u32)s_st[s_st_cur].arg2;
+                }
+                break;
+            }
             }
             if (!hit) return;
             s_st_hit = 1;
@@ -156,6 +273,7 @@ void loc_sync_frame(unsigned f)
         s_st_cur++;
         s_st_hit = 0;
         s_st_hitf = f; /* f+N relativ zum vorigen Schritt */
+        s_st_since = f; /* W344 */
     }
 }
 
@@ -259,17 +377,50 @@ static void __cdecl ls_record(void)
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
     n = InterlockedIncrement(&s_frames);
     nl_record(delay); /* W322 */
-    s_hash = fnv_u32(fnv_u32(s_hash, acc), tick);
+    if (!s_ext) s_hash = fnv_u32(fnv_u32(s_hash, acc), tick);
     s_last_tick = tick;
     while (s_rt_cur < s_rt_n && s_rt[s_rt_cur].at <= n) { /* Testtasten am Lockstep-Rahmen */
         replay_inject(s_rt[s_rt_cur].vk, s_rt[s_rt_cur].len);
         s_rt_cur++;
     }
+    {
+        int i;
+        for (i = 0; i < s_rp_n; i++) { /* W336: wiederholte Testtasten */
+            if (s_rp[i].next <= n) {
+                replay_inject(s_rp[i].vk, s_rp[i].len);
+                s_rp[i].next += s_rp[i].period * (1 + (n - s_rp[i].next) / s_rp[i].period);
+            }
+        }
+    }
     if (desync && !s_desync_logged) {
         s_desync_logged = 1;
         HLOG_W("LOCSYNC: DESYNC vom Spiel erkannt bei Rahmen %ld Tick %u", n, tick);
     }
+    if (!s_ext && g_cfg.loc_sync_every > 0 && n % g_cfg.loc_sync_every == 0) {
+        HLOG_I("LOCSYNC: Rahmen=%ld Tick=%u Hash=%016llX Stau=%u Stauframes=%u Stauepisoden=%u Verz=%u "
+               "Spieler=%u Maske=0x%X f=%u",
+               n, tick, s_hash, stall, stallf, stalle, delay, npl, act, hooks_frame_count());
+    }
+}
+
+void loc_sync_ext_on(int on) { s_ext = on; }
+
+/* W338: endgueltiger Akkumulator von Slot 'slot' (Slot-Reihenfolge, Spiel-Thread am Ruhepunkt). */
+void loc_sync_ext_frame(unsigned slot, unsigned acc, unsigned tick)
+{
+    u32 stall = 0, stallf = 0, stalle = 0, delay = 0, npl = 0, act = 0;
+    long n = (long)slot + 1;
+    if (!s_on || !s_ext) return;
+    s_hash = fnv_u32(fnv_u32(s_hash, acc), tick);
     if (g_cfg.loc_sync_every > 0 && n % g_cfg.loc_sync_every == 0) {
+        __try {
+            stall = *(const u32 *)(uintptr_t)LS_STALL;
+            stallf = *(const u32 *)(uintptr_t)LS_STALLF;
+            stalle = *(const u32 *)(uintptr_t)LS_STALLE;
+            delay = *(const u32 *)(uintptr_t)LS_DELAY;
+            npl = *(const u32 *)(uintptr_t)LS_NPL;
+            act = *(const u32 *)(uintptr_t)LS_ACTIVE;
+        } __except (EXCEPTION_EXECUTE_HANDLER) {}
         HLOG_I("LOCSYNC: Rahmen=%ld Tick=%u Hash=%016llX Stau=%u Stauframes=%u Stauepisoden=%u Verz=%u "
                "Spieler=%u Maske=0x%X f=%u",
                n, tick, s_hash, stall, stallf, stalle, delay, npl, act, hooks_frame_count());
@@ -316,6 +467,9 @@ int loc_sync_install(void)
     if (g_cfg.loc_replay_tick[0]) {
         ls_rt_parse(g_cfg.loc_replay_tick);
         HLOG_I("LOCSYNC: Test-Tastenfolge am Lockstep-Rahmen (loc_replay_tick, %d Slots)", s_rt_n);
+        if (s_rp_n) {
+            HLOG_I("LOCSYNC: davon %d wiederholte Testtasten (@P, W336)", s_rp_n);
+        }
     }
     HLOG_I("LOCSYNC: aktiv (Zustandsakkumulator je Lockstep-Rahmen, Log alle %d Rahmen, nur Hash)",
            g_cfg.loc_sync_every);

@@ -794,6 +794,7 @@ int lctrl_bind_set(lctrl_bind_t *b, int idx, const char *alts)
          one = strtok_s(NULL, ",", &ctx)) {
         trim(one);
         if (!one[0]) { continue; }
+        if (strlen(one) >= sizeof b->row[idx].alt[0]) { continue; } /* W332 SEC: zu lang (Feld 96) verwerfen */
         if (b->row[idx].n_alt >= LCTRL_ALT_N) { break; } /* max. 4 */
         strcpy_s(b->row[idx].alt[b->row[idx].n_alt],
                  sizeof b->row[idx].alt[0], one);
@@ -874,6 +875,9 @@ static int bind_parse_line(char *line, lctrl_bind_t *b)
          one = strtok_s(NULL, ",", &ctx)) {
         trim(one);
         if (!one[0]) { continue; }
+        /* W332 SEC: Profile werden geteilt; zu lange Alternative (Zeile bis 511, Feld 96) verwerfen statt
+         * strcpy_s-Abbruch (Absturz beim Laden des Profils / der Steuerungsseite). */
+        if (strlen(one) >= sizeof b->row[idx].alt[0]) { continue; }
         if (b->row[idx].n_alt >= LCTRL_ALT_N) { break; }
         strcpy_s(b->row[idx].alt[b->row[idx].n_alt],
                  sizeof b->row[idx].alt[0], one);

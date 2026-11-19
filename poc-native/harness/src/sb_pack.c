@@ -223,9 +223,21 @@ static jnode_t *jval(jrd_t *r)
         j = s ? jnew(4) : NULL;
         if (j) { j->s = s; } else { free(s); }
     } else if ((*r->p >= '0' && *r->p <= '9') || *r->p == '-') {
-        char *e;
-        j = jnew(3);
-        if (j) { j->num = strtod(r->p, &e); r->p = e < r->end ? e : r->end; }
+        /* W332 SEC: strtod nur auf einer NUL-terminierten Kopie der Zahl - Puffer aus
+         * ZIP (stored, sbpk_zread) bzw. Inflate enden ohne NUL, strtod las sonst ueber
+         * das Pufferende hinaus. Gueltige JSON-Zahlen ergeben denselben Wert. */
+        char nb[64], *cp = nb, *e;
+        size_t k = 0;
+        while (r->p + k < r->end && r->p[k] && strchr("0123456789+-.eE", r->p[k])) { k++; }
+        if (k >= sizeof nb) { cp = (char *)malloc(k + 1); }
+        j = cp ? jnew(3) : NULL;
+        if (j) {
+            memcpy(cp, r->p, k);
+            cp[k] = '\0';
+            j->num = strtod(cp, &e);
+            r->p += e - cp;
+        }
+        if (cp != nb) { free(cp); }
     } else if (r->end - r->p >= 4 && memcmp(r->p, "true", 4) == 0) {
         j = jnew(2);
         r->p += 4;
@@ -284,13 +296,19 @@ typedef struct {
     const unsigned char *p, *end;
     unsigned bitbuf;
     int bitn;
+    int pad; /* W332 SEC: Null-Bytes hinter dem Eingabeende (Vorschau) */
 } bits_t;
+
+/* W332 SEC: 1 = Bits hinter dem Eingabeende verbraucht (abgeschnittener Strom).
+ * Vorher lieferte ein leerer Rest endlos Null-Bits: 11 Byte Eingabe -> bis maxout
+ * (64 MB) Symbole ueber den langsamen Pfad, minutenlange Last beim Start. */
+#define BITS_OVER(b) ((b).pad * 8 > (b).bitn)
 
 static unsigned bneed(bits_t *b, int n)
 {
     while (b->bitn < n) {
         unsigned c = 0;
-        if (b->p < b->end) { c = *b->p++; }
+        if (b->p < b->end) { c = *b->p++; } else if (b->pad < 64) { b->pad++; }
         b->bitbuf |= c << b->bitn;
         b->bitn += 8;
     }
@@ -413,12 +431,16 @@ static size_t inflate_raw(const unsigned char *in, size_t nin,
     b.end = in + nin;
     b.bitbuf = 0;
     b.bitn = 0;
+    b.pad = 0;
     o = (unsigned char *)malloc(cap);
     if (!o) { return (size_t)-1; }
     while (!fin) {
         huff_t lh, dh;
         unsigned char llen[288], dlen[32];
         int nl, nd, s;
+        lh.extra = NULL; /* W332 SEC: Fehlerpfad nach gescheitertem hbuild gibt sonst Muell frei */
+        dh.extra = NULL;
+        if (BITS_OVER(b)) { free(o); return (size_t)-1; }
         fin = (int)btake(&b, 1);
         switch (btake(&b, 2)) {
         case 0: { /* stored */
@@ -466,7 +488,7 @@ static size_t inflate_raw(const unsigned char *in, size_t nin,
                 if (hbuild(&ch, clen, 19) != 0) { free(o); return (size_t)-1; }
                 while (i < nl + nd) {
                     int v = hsym(&b, &ch, clen, 19);
-                    if (v < 0) { free(ch.extra); free(o); return (size_t)-1; }
+                    if (v < 0 || BITS_OVER(b)) { free(ch.extra); free(o); return (size_t)-1; }
                     if (v < 16) {
                         if (i < nl) { llen[i] = (unsigned char)v; }
                         else { dlen[i - nl] = (unsigned char)v; }
@@ -505,7 +527,7 @@ static size_t inflate_raw(const unsigned char *in, size_t nin,
         }
         for (;;) {
             int v = hsym(&b, &lh, llen, nl);
-            if (v < 0) { free(lh.extra); free(dh.extra); free(o); return (size_t)-1; }
+            if (v < 0 || BITS_OVER(b)) { free(lh.extra); free(dh.extra); free(o); return (size_t)-1; }
             if (v < 256) {
                 if (n + 1 > cap) {
                     unsigned char *q;
@@ -574,6 +596,119 @@ typedef struct {
 static unsigned long long u64le(const unsigned char *p)
 {
     return (unsigned long long)u32le(p) | ((unsigned long long)u32le(p + 4) << 32);
+}
+
+/* ------------------------------------------------------------------ */
+/* W332 SEC: Schluessel -> Index (offene Adressierung, Streuung mit     */
+/* Zufallsschluessel je Prozess). Ersetzt lineare Suchen, die bei       */
+/* praeparierten Paketen (100 000+ Eintraege) quadratisch wurden        */
+/* (Start/Launcher minutenlang blockiert). Nur Mengen-Semantik:         */
+/* Ergebnisse wie vorher, unabhaengig vom Schluessel.                   */
+/* ------------------------------------------------------------------ */
+typedef struct { unsigned long long *k; int *v; unsigned cap, n; int bad; } u64map_t;
+static unsigned long long g_mapkey;
+
+static unsigned u64mix(unsigned long long x)
+{
+    if (!g_mapkey) {
+        LARGE_INTEGER t;
+        QueryPerformanceCounter(&t);
+        g_mapkey = ((unsigned long long)t.QuadPart ^ ((unsigned long long)GetCurrentProcessId() << 32) ^
+                    (unsigned long long)(size_t)&g_mapkey) | 1ull;
+    }
+    x ^= g_mapkey;
+    x ^= x >> 30;
+    x *= 0xBF58476D1CE4E5B9ull;
+    x ^= x >> 27;
+    x *= 0x94D049BB133111EBull;
+    x ^= x >> 31;
+    return (unsigned)x;
+}
+
+static void u64map_free(u64map_t *m)
+{
+    free(m->k);
+    free(m->v);
+    memset(m, 0, sizeof *m);
+}
+
+/* Index zu k oder -1. */
+static int u64map_get(const u64map_t *m, unsigned long long k)
+{
+    unsigned s;
+    if (!m->cap) { return -1; }
+    for (s = u64mix(k) & (m->cap - 1u);; s = (s + 1u) & (m->cap - 1u)) {
+        if (m->v[s] < 0) { return -1; }
+        if (m->k[s] == k) { return m->v[s]; }
+    }
+}
+
+/* k -> v eintragen, falls k fehlt (erstes gewinnt). 1 = neu, 0 = vorhanden, -1 = kein Speicher. */
+static int u64map_put(u64map_t *m, unsigned long long k, int v)
+{
+    unsigned s;
+    if (m->bad) { return -1; }
+    if ((m->n + 1u) * 2u > m->cap) {
+        unsigned nc = m->cap ? m->cap * 2u : 64u, i;
+        unsigned long long *nk;
+        int *nv;
+        if (nc < m->cap || nc > (1u << 26)) { m->bad = 1; return -1; }
+        nk = (unsigned long long *)malloc(sizeof *nk * nc);
+        nv = (int *)malloc(sizeof *nv * nc);
+        if (!nk || !nv) { free(nk); free(nv); m->bad = 1; return -1; }
+        for (i = 0; i < nc; i++) { nv[i] = -1; }
+        for (i = 0; i < m->cap; i++) {
+            if (m->v[i] >= 0) {
+                unsigned t = u64mix(m->k[i]) & (nc - 1u);
+                while (nv[t] >= 0) { t = (t + 1u) & (nc - 1u); }
+                nk[t] = m->k[i];
+                nv[t] = m->v[i];
+            }
+        }
+        free(m->k);
+        free(m->v);
+        m->k = nk;
+        m->v = nv;
+        m->cap = nc;
+    }
+    for (s = u64mix(k) & (m->cap - 1u);; s = (s + 1u) & (m->cap - 1u)) {
+        if (m->v[s] < 0) { break; }
+        if (m->k[s] == k) { return 0; }
+    }
+    m->k[s] = k;
+    m->v[s] = v;
+    m->n++;
+    return 1;
+}
+
+/* Name -> 64 Bit (FNV-1a mit Prozessschluessel als Start). */
+static unsigned long long u64name(const char *s)
+{
+    unsigned long long h = 0xCBF29CE484222325ull ^ g_mapkey;
+    for (; *s; s++) { h = (h ^ (unsigned char)*s) * 0x100000001B3ull; }
+    return h;
+}
+
+/* Erster Eintrag mit genau diesem Namen (wie die lineare Suche vorher). Die Tabelle
+ * entsteht beim ersten Aufruf; ohne Speicher bzw. bei Namens-Kollision linear. */
+static const zipent_t *zent_find(const zipent_t *z, int nz, u64map_t *m, const char *name)
+{
+    int i;
+    if (nz > 16 && !m->cap && !m->bad) {
+        (void)u64mix(0); /* Schluessel festlegen, bevor u64name ihn nutzt */
+        for (i = 0; i < nz; i++) {
+            if (u64map_put(m, u64name(z[i].name), i) < 0) { u64map_free(m); m->bad = 1; break; }
+        }
+    }
+    if (m->cap && !m->bad) {
+        i = u64map_get(m, u64name(name));
+        if (i < 0) { return NULL; }
+        if (strcmp(z[i].name, name) == 0) { return &z[i]; }
+    }
+    for (i = 0; i < nz; i++) {
+        if (strcmp(z[i].name, name) == 0) { return &z[i]; }
+    }
+    return NULL;
 }
 
 /* Zentrales Verzeichnis einlesen. Rueckgabe: Eintraege oder NULL. */
@@ -792,6 +927,7 @@ static int zip_get(HANDLE h, const zipent_t *e, unsigned char **out, size_t *nou
 /* ------------------------------------------------------------------ */
 #define PK_MAX 32
 #define IDX_HN 16384
+#define IDX_HS (2 * IDX_HN) /* W332 SEC: Platzzahl, Fuellgrad <= 50 % */
 
 typedef struct {
     u64 hash;
@@ -807,6 +943,7 @@ typedef struct {
     HANDLE h;       /* ZIP-Handle (offen) */
     zipent_t *zent;
     int nzent;
+    u64map_t zmap;  /* W332 SEC: Name -> zent-Index (zent_find) */
     pkent_t *ents;
     int nents;
     int ndrop;      /* verworfene Varianten (Datei fehlt, Pfad, Methode) */
@@ -818,6 +955,7 @@ typedef struct {
     int used;
     u64 hash;
     int pack;       /* gewaehltes Paket */
+    int ent;        /* W332 SEC: Index in g_pk[pack].ents */
     int cap;        /* min(category_level, overrides), ohne globale Stufe */
     int has2, has4;
     char *path2, *path4; /* Ordner: voller Pfad; ZIP: Anzeige "id!datei" */
@@ -894,13 +1032,9 @@ static int read_small(const char *path, unsigned char **out, size_t *nout,
     return 1;
 }
 
-static const zipent_t *zip_find(const pack_t *p, const char *name)
+static const zipent_t *zip_find(pack_t *p, const char *name)
 {
-    int i;
-    for (i = 0; i < p->nzent; i++) {
-        if (strcmp(p->zent[i].name, name) == 0) { return &p->zent[i]; }
-    }
-    return NULL;
+    return zent_find(p->zent, p->nzent, &p->zmap, name);
 }
 
 static int lvl_of(const char *s)
@@ -986,6 +1120,8 @@ static int pack_entries(pack_t *p)
     jnode_t *ef = NULL;
     int i, cap = 0;
     char mp[700];
+    u64map_t seen; /* W332 SEC: Hashes schon aufgenommener Eintraege */
+    memset(&seen, 0, sizeof seen);
     if (p->is_zip) {
         const zipent_t *e = zip_find(p, "manifest.json");
         if (!e || !zip_get(p->h, e, &mj, &mn)) { return 0; }
@@ -1044,8 +1180,9 @@ static int pack_entries(pack_t *p)
         if (!var || var->kind != 5) { continue; }
         /* Duplikat im Paket: erstes gewinnt (validate meldet rot). */
         {
-            int k, dup = 0;
-            for (k = 0; k < p->nents; k++) {
+            int k, dup = 0, r = u64map_put(&seen, hv, p->nents);
+            if (r == 0) { dup = 1; }
+            for (k = 0; r < 0 && k < p->nents; k++) { /* ohne Speicher: linear wie vorher */
                 if (p->ents[k].hash == hv) { dup = 1; break; }
             }
             if (dup) { continue; }
@@ -1088,6 +1225,7 @@ static int pack_entries(pack_t *p)
             }
         }
     }
+    u64map_free(&seen);
     jfree(m);
     jfree(ef);
     return 1;
@@ -1126,12 +1264,15 @@ static void pack_check_files(pack_t *p)
 
 static int idx_slot(u64 hv, int add)
 {
-    unsigned s = (unsigned)(hv ^ (hv >> 29)) & (IDX_HN - 1u);
+    /* W332 SEC: gestreut mit Prozessschluessel + doppelte Platzzahl (vorher: Hash direkt,
+     * Tabelle bis 100 % voll -> jede Fehlsuche lief alle 16384 Plaetze ab, praeparierte
+     * Hashes bildeten eine Kette). Gefunden wird wie vorher nur per Gleichheit. */
+    unsigned s = u64mix(hv) & (IDX_HS - 1u);
     unsigned steps = 0;
     while (g_idxh[s] >= 0) {
         if (g_idx[g_idxh[s]].hash == hv) { return g_idxh[s]; }
-        s = (s + 1u) & (IDX_HN - 1u);
-        if (++steps >= IDX_HN) { return -1; }
+        s = (s + 1u) & (IDX_HS - 1u);
+        if (++steps >= IDX_HS) { return -1; }
     }
     if (!add || g_nidx >= IDX_HN) { return -1; }
     memset(&g_idx[g_nidx], 0, sizeof g_idx[g_nidx]);
@@ -1211,6 +1352,7 @@ static void fx_close(pack_t *p)
     free(p->zent);
     p->zent = NULL;
     p->nzent = 0;
+    u64map_free(&p->zmap);
 }
 
 int sb_pack_fxparams(const char *packs_json, int *out, int *hit,
@@ -1359,9 +1501,9 @@ int sb_pack_init(const char *packs_json, const char *rdir)
     if (g_inited) { return 1; }
     g_inited = 1;
     g_idx = (idxent_t *)calloc(IDX_HN, sizeof *g_idx);
-    g_idxh = (int *)malloc(sizeof(int) * IDX_HN);
+    g_idxh = (int *)malloc(sizeof(int) * IDX_HS);
     if (!g_idx || !g_idxh) { free(g_idx); free(g_idxh); g_idx = NULL; g_idxh = NULL; return 0; }
-    for (i = 0; i < IDX_HN; i++) { g_idxh[i] = -1; }
+    for (i = 0; i < IDX_HS; i++) { g_idxh[i] = -1; }
     if (!packs_json || !packs_json[0]) {
         HLOG_I("PACK: pack_list leer -> keine Pakete (Original)");
         return 1;
@@ -1480,6 +1622,7 @@ int sb_pack_init(const char *packs_json, const char *rdir)
                     for (k = 0; k < p->nzent; k++) { free(p->zent[k].name); }
                     free(p->zent);
                     p->zent = NULL;
+                    u64map_free(&p->zmap);
                 }
                 continue;
             }
@@ -1504,6 +1647,7 @@ int sb_pack_init(const char *packs_json, const char *rdir)
                 s = idx_slot(d->hash, 1);
                 if (s >= 0) {
                     g_idx[s].pack = i;
+                    g_idx[s].ent = k;
                     g_idx[s].used = 1;
                 }
             }
@@ -1521,6 +1665,7 @@ int sb_pack_init(const char *packs_json, const char *rdir)
                 s = idx_slot(d->hash, 1);
                 if (s >= 0) {
                     g_idx[s].pack = i;
+                    g_idx[s].ent = k;
                     g_idx[s].used = 1;
                 }
             }
@@ -1531,10 +1676,9 @@ int sb_pack_init(const char *packs_json, const char *rdir)
         idxent_t *x = &g_idx[i];
         pack_t *p = &g_pk[x->pack];
         pkent_t *d = NULL;
-        int k, c1 = 4, c2 = 4;
-        for (k = 0; k < p->nents; k++) {
-            if (p->ents[k].hash == x->hash) { d = &p->ents[k]; break; }
-        }
+        int c1 = 4, c2 = 4;
+        /* W332 SEC: Eintrag direkt (vorher lineare Suche je Hash; Hashes im Paket eindeutig) */
+        if (x->ent >= 0 && x->ent < p->nents && p->ents[x->ent].hash == x->hash) { d = &p->ents[x->ent]; }
         if (!d) { x->used = 0; continue; }
         c1 = cat_cap(d->cat);
         c2 = over_cap(x->hash);
@@ -1710,6 +1854,7 @@ void sb_pack_shutdown(void)
         if (g_pk[i].h != INVALID_HANDLE_VALUE) { CloseHandle(g_pk[i].h); }
         for (k = 0; k < g_pk[i].nzent; k++) { free(g_pk[i].zent[k].name); }
         free(g_pk[i].zent);
+        u64map_free(&g_pk[i].zmap);
         for (k = 0; k < g_pk[i].nents; k++) {
             free(g_pk[i].ents[k].cat);
             free(g_pk[i].ents[k].f2);

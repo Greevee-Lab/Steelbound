@@ -10,6 +10,7 @@
  * audio_fmt.c, Mixer/Ausgabe/WAV in audio_mix.c (gemeinsam: audio_int.h). */
 #include "audio_int.h"
 #include "sb_profile.h" /* W229 SBA() */
+static float au_db100_to_gain(int db100); /* W348: Vorwaertsdeklaration */
 
 /* ---------- Globals ---------- */
 static hlock_t g_au_cs; /* W119 LOADLOCK: hlock (atomarer Owner, reentrant) */
@@ -25,6 +26,10 @@ char g_wav_path[600];
 uint64_t g_mixed_total;
 au32 g_stat_packets, g_stat_bytes, g_stat_drops, g_stat_voices;
 au32 g_stat_bufplay, g_stat_mixbin, g_stat_freq, g_stat_wa_under;
+static au32 g_stat_ring_place, g_stat_ring_reset; /* ISSUE-10: Ring-Neubeschreibungen / Cursor-Resets mit Verwurf */
+static uint64_t g_stat_ring_drop; /* ISSUE-10: verworfene FIFO-Frames */
+static LONG g_au_stall_diag; /* ISSUE-10 TEST: danach so viele Lock-Zeilen (DIAG) */
+static au32 g_au_diag_vid; /* ISSUE-10 TEST: DIAG nur fuer die erste zurueckgesetzte Bink-Stimme */
 static LONG g_stat_getpos; /* W22: GetCurrentPosition-Aufrufe (Main-Spin?) */
 static LONG g_stat_unlock_mm_buf, g_stat_unlock_mm_str; /* W22: Unlock<>Lock */
 static LONG g_stat_unlock_ptr_out; /* W22: Unlock-p1 ausserhalb lockbuf */
@@ -185,6 +190,15 @@ static au32 au_create_ex(au32 kind, au32 desc, au32 retaddr, au32 fixed_id)
     v->min3d = 1.0f; /* W89 DS3D-Defaults (DS3D_DEFAULTMIN/MAXDISTANCE) */
     v->max3d = 1e9f;
     v->g3d = v->pan3l = v->pan3r = 1.0f;
+    v->cflags = flags; /* W348 */
+    v->dop = v->step_mul = 1.0f;
+    v->distf = v->dopf = 1.0f; /* DS3D-Standard */
+    v->eg_lv[0] = v->eg_lv[1] = v->eg_ea0 = 1.0f;
+    /* W348 (audio_headroom_xdk): DirectSound-Grundheadroom wie CDirectSoundVoiceSettings (0x220FE0):
+     * 600 mB fuer 2D-Stimmen, 0 fuer 3D (DSBCAPS_CTRL3D 0x10) und Submix (0x82000). Interne
+     * HLE-Stimmen (fixed_id, Menuetoene) und die XACT-HLE (LoC, eigene Pegel) ausgenommen. */
+    if (g_cfg.audio_headroom_xdk && !fixed_id && !g_sba_loc && !(flags & 0x82010u))
+        v->hr_gain = au_db100_to_gain(g_cfg.audio_headroom_xdk >= 2 ? -1200 : -600);
     au_lock();
     v->id = fixed_id ? fixed_id : g_next_id++;
     v->next = g_voices;
@@ -312,7 +326,9 @@ void audio_release(au32 v)
     HLOG_I("AUDIO v%u freigegeben (played=%llu)", vp->id,
            (unsigned long long)vp->played);
     free(vp->data);
+    free(vp->datax); /* W356 */
     free(vp->fifo);
+    free(vp->fifox); /* W356 */
     free(vp->lockbuf);
     free(vp->dbg_shadow); /* W83 DIAG(BINKWRAP) */
     free(vp);
@@ -401,10 +417,12 @@ static void au_par_exec(au_par_t *t, int n)
  * Verdopplungs-Kopien, Rueckkopie) dieselben Werte bekommt. *got = Rueckgabewert wie bisher (ADPCM: Frames
  * vor dem Resampling), *used = verbrauchte Quell-Bytes. NULL = nichts dekodiert. */
 static float *au_decode_buf(const audio_voice_t *v, const uint8_t *src, au32 nbytes, au32 *n, au32 *got_out,
-                            au32 *used, int par)
+                            au32 *used, int par, float **xout)
 {
     au32 got = 0;
     *n = 0; *got_out = 0; *used = 0;
+    if (xout)
+        *xout = NULL; /* W356: nur PCM-5.1 mit au_keep51() liefert getrennte Kanaele */
     if (!v->have_fmt || !src || !nbytes)
         return NULL;
     if (v->fmt.tag == 105) {
@@ -501,9 +519,15 @@ static float *au_decode_buf(const audio_voice_t *v, const uint8_t *src, au32 nby
         tmp = (float *)malloc((size_t)want * 2 * sizeof(float));
         if (!tmp)
             return NULL;
-        got = au_pcm_convert(src, nsrc * sframe, v->fmt.ch, v->fmt.bits,
-                             v->src_rate ? v->src_rate : v->fmt.rate, tmp,
-                             want);
+        {
+            float *xt = NULL; /* W356: 5.1-Kanaele getrennt (Surround), sonst Faltung nach audio_downmix */
+            if (xout && v->fmt.ch > 2 && au_keep51())
+                xt = (float *)malloc((size_t)want * 4 * sizeof(float));
+            got = au_pcm_convert_x(src, nsrc * sframe, v->fmt.ch, v->fmt.bits,
+                                   v->src_rate ? v->src_rate : v->fmt.rate, tmp, xt, want, g_cfg.audio_downmix);
+            if (xout)
+                *xout = xt;
+        }
         *used = nsrc * sframe;
         *got_out = got;
         *n = got;
@@ -515,11 +539,13 @@ static float *au_decode_buf(const audio_voice_t *v, const uint8_t *src, au32 nby
 static au32 au_decode_append(audio_voice_t *v, const uint8_t *src, au32 nbytes)
 {
     au32 n = 0, got = 0, used = 0;
-    float *buf = au_decode_buf(v, src, nbytes, &n, &got, &used, 0);
+    float *x = NULL;
+    float *buf = au_decode_buf(v, src, nbytes, &n, &got, &used, 0, &x);
     if (!buf)
         return 0;
-    au_fifo_append(v, buf, n);
+    au_fifo_append_x(v, buf, x, n);
     free(buf);
+    free(x);
     v->src_consumed += used;
     return got;
 }
@@ -618,9 +644,12 @@ void audio_3d_voice_pos(au32 v, au32 x, au32 y, au32 z)
 void audio_3d_voice_allparams(au32 v, au32 pParams)
 {
     audio_voice_t *vp = au_lookup(v);
-    au32 d[16];
-    if (vp && au_probe_read(pParams, d, sizeof d))
+    au32 d[19];
+    if (vp && au_probe_read(pParams, d, 16 * 4)) {
+        if (d[0] >= 19u * 4u && !au_probe_read(pParams + 64, d + 16, 12))
+            d[0] = 16u * 4u; /* W348: Xbox-Zusatzfelder nur wenn lesbar */
         au3d_voice_allparams(vp, d);
+    }
 }
 void audio_3d_voice_dist(au32 v, int which, au32 f)
 {
@@ -682,6 +711,7 @@ static void audio_set_buffer_data_body(au32 v, au32 pdata, au32 bytes)
         audio_voice_t scratch;
         au32 i;
         float *flat = NULL; /* PERF(PERF-TICK,W168) audio_setbuf_fast: fertiger Puffer statt FIFO */
+        float *flatx = NULL; /* W356: 5.1-Kanaele (Surround) */
         au32 flat_n = 0;
         memset(&scratch, 0, sizeof scratch);
         scratch.fmt = vp->fmt;
@@ -689,7 +719,8 @@ static void audio_set_buffer_data_body(au32 v, au32 pdata, au32 bytes)
         scratch.src_rate = vp->src_rate ? vp->src_rate : vp->fmt.rate;
         if (g_cfg.audio_setbuf_fast) {
             au32 got = 0, used = 0;
-            flat = au_decode_buf(&scratch, tmp, bytes, &flat_n, &got, &used, g_cfg.audio_decode_par);
+            flat = au_decode_buf(&scratch, tmp, bytes, &flat_n, &got, &used, g_cfg.audio_decode_par,
+                                 g_cfg.audio_setbuf_fast == 2 ? NULL : &flatx);
             if (flat && flat_n) {
                 /* wie au_fifo_append in eine leere FIFO: Kapazitaet 16384 Frames, verdoppelt; ueber
                  * FIFO_HARD_CAP wird alles verworfen (ein Drop gezaehlt) */
@@ -698,6 +729,7 @@ static void audio_set_buffer_data_body(au32 v, au32 pdata, au32 bytes)
                 if ((uint64_t)ncap * 8 > FIFO_HARD_CAP) { g_stat_drops++; flat_n = 0; }
             }
             if (flat && !flat_n) { free(flat); flat = NULL; }
+            if (!flat) { free(flatx); flatx = NULL; } /* W356 */
             if (g_cfg.audio_setbuf_fast == 2) { /* DIAG(PERF-TICK,W168): Pruefmodus - alter Weg zaehlt, Vergleich bitgenau */
                 static au32 nchk, ndiff, nframes;
                 au32 k, bad = 0;
@@ -723,6 +755,8 @@ static void audio_set_buffer_data_body(au32 v, au32 pdata, au32 bytes)
             g_stat_cut++; /* W89: laufender Ton durch neue Daten ersetzt */
         free(vp->data);
         vp->data = NULL;
+        free(vp->datax); /* W356 */
+        vp->datax = NULL;
         vp->datalen = 0;
         vp->play_frac = 0.0f;
         vp->freq_step = 1.0f; /* neu dekodiert @src_rate */
@@ -744,17 +778,23 @@ static void audio_set_buffer_data_body(au32 v, au32 pdata, au32 bytes)
         vp->playhead = 0;
         if (flat) { /* PERF(PERF-TICK,W168): Puffer uebernehmen (gleiche Werte wie die FIFO-Kopie) */
             vp->data = flat;
+            vp->datax = flatx; /* W356: 5.1-Kanaele oder NULL */
             vp->datalen = flat_n;
             flat = NULL;
+            flatx = NULL;
         } else
         if (scratch.fifo_n) {
             vp->data =
                 (float *)malloc((size_t)scratch.fifo_n * 2 * sizeof(float));
+            if (vp->data && scratch.fifox) /* W356 */
+                vp->datax = (float *)malloc((size_t)scratch.fifo_n * 4 * sizeof(float));
             if (vp->data) {
                 for (i = 0; i < scratch.fifo_n; i++) {
                     au32 s = (scratch.fifo_rd + i) % scratch.fifo_cap;
                     vp->data[i * 2] = scratch.fifo[s * 2];
                     vp->data[i * 2 + 1] = scratch.fifo[s * 2 + 1];
+                    if (vp->datax)
+                        memcpy(vp->datax + (size_t)i * 4, scratch.fifox + (size_t)s * 4, 4 * sizeof(float));
                 }
                 vp->datalen = scratch.fifo_n;
             }
@@ -763,6 +803,7 @@ static void audio_set_buffer_data_body(au32 v, au32 pdata, au32 bytes)
         vp->dbg_setbuf_p = pdata; /* W83 DIAG(BINKWRAP) */
         au_unlock();
         free(scratch.fifo);
+        free(scratch.fifox); /* W356 */
     }
     if (hlog_throttle(&logged) || vp->datalen == 0)
         HLOG_I("AUDIO v%u SetBufferData: %u Bytes -> %u Frames (fmt %s)",
@@ -789,11 +830,15 @@ void audio_play(au32 v, au32 flags)
     if (!vp->playing) { /* W102: Filterzustand bei Neustart leeren */
         vp->svf_lp[0] = vp->svf_lp[1] = 0.0f;
         vp->svf_bp[0] = vp->svf_bp[1] = 0.0f;
+        vp->rv_lp[0] = vp->rv_lp[1] = 0.0f; /* W348 */
+        aufx_voice_play(vp); /* W348: Huellkurven starten (VOICE_ON) */
     }
     vp->playing = 1;
     vp->paused = 0;
     vp->active = 1;
     vp->play_mix = g_mixed_total; /* W95 DIAG(SFXN) */
+    if (g_au_stall_diag > 0 && vp->create_ret == SBA(0x2435FCu)) /* ISSUE-10 TEST */
+        HLOG_I("AUDIO TEST play: v%u played=%llu fifo=%u front=%llu", vp->id, vp->played, vp->fifo_n, vp->ring_front);
     vp->play_flags = flags;
     if (g_cfg.audio_sync_diag && vp->create_ret == SBA(0x2435FCu) && vp->dbg_lock_n <= 16)
         HLOG_I("AVSYNC play: v%u played=%llu fifo=%u front=%llu", vp->id,
@@ -813,6 +858,8 @@ void audio_stop(au32 v)
     au_lock();
     if (vp->kind == 1 && vp->playing)
         g_stat_stop++; /* W95 */
+    if (g_au_stall_diag > 0 && vp->create_ret == SBA(0x2435FCu)) /* ISSUE-10 TEST */
+        HLOG_I("AUDIO TEST stop: v%u played=%llu fifo=%u front=%llu", vp->id, vp->played, vp->fifo_n, vp->ring_front);
     vp->playing = 0;
     au_unlock();
 }
@@ -882,6 +929,22 @@ void audio_set_pos(au32 v, au32 byteOff)
     if (g_cfg.audio_sync_diag && vp->create_ret == SBA(0x2435FCu) && vp->dbg_lock_n <= 16)
         HLOG_I("AVSYNC setpos: v%u off=%u played=%llu fifo=%u front=%llu", vp->id,
                byteOff, vp->played, vp->fifo_n, vp->ring_front);
+    if (g_cfg.audio_ring_underrun && vp->kind == 1 && vp->ring_fed && vp->played && vp->fifo_n &&
+        vp->create_ret == SBA(0x2435FCu)) {
+        /* ISSUE-10 (audio_ring.c): Cursor-Reset nach Wiedergabe (Bink nach Haenger) - ungespielte
+         * FIFO-Frames gehoeren zur alten Ringrunde, der neue Inhalt ersetzt sie (Xbox: ein Ring) */
+        static au32 logged_rst;
+        au32 nq = vp->fifo_n, drop = au_ring_reset_flush(vp);
+        g_stat_ring_reset++;
+        if (g_cfg.audio_test_stall_ms > 0 && !g_au_diag_vid)
+            g_au_diag_vid = vp->id; /* ISSUE-10 TEST: Spur ab erstem Reset protokollieren */
+        g_stat_ring_drop += drop;
+        if (hlog_throttle(&logged_rst) || g_cfg.audio_test_stall_ms > 0)
+            HLOG_I("AUDIO v%u Cursor-Reset: %u/%u ungespielte Frames verworfen, %u ausgeblendet (ISSUE-10)",
+                   vp->id, drop, nq, vp->fifo_n);
+    } else if (g_cfg.audio_test_stall_ms > 0 && vp->create_ret == SBA(0x2435FCu))
+        HLOG_I("AUDIO TEST setpos: v%u off=%u played=%llu fifo=%u front=%llu", vp->id, byteOff,
+               vp->played, vp->fifo_n, vp->ring_front);
     /* Playhead aus Byte-Offset ableiten (statische Daten) */
     if (vp->have_fmt && vp->data && vp->datalen) {
         uint64_t f;
@@ -904,6 +967,23 @@ void audio_set_pos(au32 v, au32 byteOff)
     au_unlock();
 }
 
+/* ISSUE-10 TEST (audio_test_stall_ms, Standard 0): blockiert den Thread, der
+ * den Bink-Tonring fuettert, genau einmal fuer audio_test_stall_ms ms, sobald
+ * alle Bink-Stimmen zusammen audio_test_stall_at Locks gemacht haben - stellt
+ * den Haenger des Spiel-Threads im Film (W310 #10) nach. Ausserhalb au_lock. */
+static LONG g_au_stall_n, g_au_stall_done;
+static void au_test_stall(audio_voice_t *vp, au32 off, au32 bytes)
+{
+    LONG k = InterlockedIncrement(&g_au_stall_n);
+    if (k != g_cfg.audio_test_stall_at || InterlockedExchange(&g_au_stall_done, 1))
+        return;
+    HLOG_I("AUDIO TEST stall: v%u blockiert %d ms (Lock #%ld, off=%u bytes=%u fifo=%u)",
+           vp->id, g_cfg.audio_test_stall_ms, k, off, bytes, vp->fifo_n);
+    Sleep((DWORD)g_cfg.audio_test_stall_ms);
+    HLOG_I("AUDIO TEST stall: v%u weiter (fifo=%u played=%llu)", vp->id, vp->fifo_n, vp->played);
+    g_au_stall_diag = 400;
+}
+
 au32 audio_lock(au32 v, au32 off, au32 bytes, au32 pp1, au32 pb1, au32 pp2,
                 au32 pb2, au32 flags)
 {
@@ -912,7 +992,14 @@ au32 audio_lock(au32 v, au32 off, au32 bytes, au32 pp1, au32 pb1, au32 pp2,
     (void)flags;
     if (!vp)
         return E_FAIL;
+    if (g_cfg.audio_test_stall_ms > 0 && vp->create_ret == SBA(0x2435FCu))
+        au_test_stall(vp, off, bytes);
     au_lock();
+    if (g_au_stall_diag > 0 && g_au_diag_vid && vp->create_ret == SBA(0x2435FCu)) {
+        g_au_stall_diag--;
+        HLOG_I("AUDIO TEST lock: v%u off=%u bytes=%u play=%u played=%llu fifo=%u front=%llu",
+               vp->id, off, bytes, vp->dbg_last_play, vp->played, vp->fifo_n, vp->ring_front);
+    }
     if (!vp->lockbuf) {
         /* A7B: Allokation MATCHT buflen (vorher fix 64K bei beliebigem
          * buflen -> Lock log ueber das Ende -> Bink-Heap-Tod). */
@@ -1154,6 +1241,7 @@ au32 audio_unlock(au32 v, au32 p1, au32 b1, au32 p2, au32 b2)
             if (au_probe_read(p, tmp, b)) {
                 au32 skip = 0;
                 int tracked = 0; /* W83: Ring-Byte <-> FIFO-Frame bekannt */
+                uint64_t dbg_ao = 0; /* ISSUE-10 TEST */
                 au_lock();
                 if (g_cfg.audio_ring_clip && vp->kind == 1 && vp->buflen &&
                     b1 == vp->lock_n1 && b2 == vp->lock_n2 &&
@@ -1178,7 +1266,21 @@ au32 audio_unlock(au32 v, au32 p1, au32 b1, au32 p2, au32 b2)
                          * neither the reported cursor nor any clock changes. */
                         ao = roff;
                     }
+                    if (g_cfg.audio_ring_underrun && vp->ring_fed &&
+                        vp->create_ret == SBA(0x2435FCu)) {
+                        /* ISSUE-10 (audio_ring.c): Neubeschreiben nach Cursor-Reset = Ueberschreiben */
+                        uint64_t ao2 = au_ring_place(ao, b, vp->ring_front, au_src_pos(vp), vp->buflen);
+                        if (ao2 != ao) {
+                            static au32 logged_pl;
+                            g_stat_ring_place++;
+                            if (hlog_throttle(&logged_pl) || g_au_stall_diag > 0)
+                                HLOG_I("AUDIO v%u Ring neu beschrieben: off=%u %u Bytes ueberschreiben statt neuer Runde (ISSUE-10)",
+                                       vp->id, roff, b);
+                            ao = ao2;
+                        }
+                    }
                     tracked = 1;
+                    dbg_ao = ao;
                     if (ao > vp->ring_front)
                         vp->ring_contig = 0; /* W83: Luecke im Ring */
                     if (ao < vp->ring_front) {
@@ -1197,6 +1299,10 @@ au32 audio_unlock(au32 v, au32 p1, au32 b1, au32 p2, au32 b2)
                     vp->dbg_clip_bytes += skip;
                     g_stat_clip += skip;
                 }
+                if (g_au_stall_diag > 0 && g_au_diag_vid && vp->create_ret == SBA(0x2435FCu))
+                    HLOG_I("AUDIO TEST unlock: v%u part=%u off=%u bytes=%u skip=%u tracked=%d fifo=%u front=%llu ao=%llu cur=%llu contig=%llu playing=%d",
+                           vp->id, i, vp->lock_off, b, skip, tracked, vp->fifo_n, vp->ring_front, dbg_ao,
+                           au_src_pos(vp), vp->ring_contig, vp->playing);
                 if (g_cfg.audio_sync_diag && vp->create_ret == SBA(0x2435FCu) && vp->dbg_lock_n <= 16)
                     HLOG_I("AVSYNC unlock: v%u n=%llu part=%u off=%u bytes=%u skip=%u played=%llu fifo=%u front=%llu",
                            vp->id, vp->dbg_lock_n, i, vp->lock_off, b, skip,
@@ -1208,6 +1314,8 @@ au32 audio_unlock(au32 v, au32 p1, au32 b1, au32 p2, au32 b2)
                     vp->ring_contig = 0;
                 au_feed_diag(vp, tmp + skip, b - skip);
                 vp->active = 1;
+                if (vp->kind == 1 && b > skip)
+                    vp->ring_fed = 1; /* ISSUE-10 */
                 g_stat_bytes += b - skip;
                 au_unlock();
             }
@@ -1393,25 +1501,64 @@ void audio_set_format(au32 v, au32 pwfx)
            w.tag == 105 ? "ADPCM" : "PCM", w.ch, w.rate, w.bits);
 }
 
+/* W343 ISSUE-46: XDK-Grenzen (dsound.h): DSBFREQUENCY_MIN 188, _MAX 191983,
+ * DSBFREQUENCY_ORIGINAL 0 = Rate des Puffer-Formats; DSBPITCH_MIN -32768
+ * (= 48000/256 = 187,5 Hz), DSBPITCH_MAX 8191 (= 191983 Hz). */
+#define AU_XDK_FREQ_MIN 188u
+#define AU_XDK_FREQ_MAX 191983u
+#define AU_XDK_PITCH_MIN (-32768)
+#define AU_XDK_PITCH_MAX 8191
+static au32 g_stat_freq_drop, g_stat_freq_clamp, g_stat_step_clamp; /* W343 */
+
+/* W343: Frequenz uebernehmen (Sperre gehalten). Schritt relativ zur Dekodier-Rate. */
+static void au_apply_freq(audio_voice_t *vp, au32 hz)
+{
+    vp->src_rate = hz;
+    if (vp->dec_rate) { /* A7B: Schritt relativ zur Dekodier-Rate */
+        float st = (float)hz / (float)vp->dec_rate;
+        /* alt: 1/16..16. Mit XDK-Grenzen (188 Hz auf 11 025 Hz = 0,017) nur
+         * noch Schutz vor Unsinn (Raten 188..192000 -> 0,00098..1021). */
+        float lo = g_cfg.audio_freq_xdk ? (1.0f / 1024.0f) : 0.0625f;
+        float hi = g_cfg.audio_freq_xdk ? 1024.0f : 16.0f;
+        if (st < lo || st > hi) {
+            st = st < lo ? lo : hi;
+            vp->pd_clamp++;
+            g_stat_step_clamp++;
+        }
+        vp->freq_step = st;
+    }
+    g_stat_freq++;
+}
+
 void audio_set_frequency(au32 v, au32 hz)
 {
     audio_voice_t *vp = au_lookup(v);
     if (!vp)
         return;
-    if (hz >= 4000 && hz <= 192000) {
-        au_lock();
-        vp->src_rate = hz;
-        if (vp->dec_rate) { /* A7B: Schritt relativ zur Dekodier-Rate */
-            float st = (float)hz / (float)vp->dec_rate;
-            if (st < 0.0625f)
-                st = 0.0625f;
-            if (st > 16.0f)
-                st = 16.0f;
-            vp->freq_step = st;
+    au_lock();
+    vp->pd_nf++;
+    if (hz && (!vp->pd_fmin || hz < vp->pd_fmin))
+        vp->pd_fmin = hz;
+    if (hz > vp->pd_fmax)
+        vp->pd_fmax = hz;
+    if (g_cfg.audio_freq_xdk) {
+        /* W343 ISSUE-46: 0 = Original-Rate, sonst auf 188..191983 klemmen
+         * (alt: unter 4000 Hz verworfen -> alte Tonhoehe blieb stehen). */
+        if (hz == 0) {
+            hz = vp->have_fmt && vp->fmt.rate ? vp->fmt.rate : MIXRATE;
+            vp->pd_orig++;
+        } else if (hz < AU_XDK_FREQ_MIN || hz > AU_XDK_FREQ_MAX) {
+            hz = hz < AU_XDK_FREQ_MIN ? AU_XDK_FREQ_MIN : AU_XDK_FREQ_MAX;
+            g_stat_freq_clamp++;
         }
-        g_stat_freq++;
-        au_unlock();
+        au_apply_freq(vp, hz);
+    } else if (hz >= 4000 && hz <= 192000) {
+        au_apply_freq(vp, hz);
+    } else {
+        vp->pd_drop++;
+        g_stat_freq_drop++;
     }
+    au_unlock();
 }
 
 void audio_set_notify(au32 v, au32 count, au32 pNotifies)
@@ -1578,6 +1725,7 @@ static void au_mixbins_apply(audio_voice_t *vp, au32 pMixBins, int full)
     if (full) {
         for (i = 0; i < 8; i++)
             vp->bin_gain[i] = 0.0f;
+        vp->rv_bin_mb = -10000; /* W348: neue Bin-Liste ohne I3DL2-Bin = kein Hall-Send */
     }
     for (i = 0; i < n; i++) {
         au32 pair[2];
@@ -1587,6 +1735,9 @@ static void au_mixbins_apply(audio_voice_t *vp, au32 pMixBins, int full)
         bin = pair[0];
         if (bin < 8)
             vp->bin_gain[bin] = au_db100_to_gain((int)pair[1]);
+        else if (bin == 10) /* W348: DSMIXBIN_I3DL2 = Hall-Send-Pegel (audio_reverb) */
+            vp->rv_bin_mb = (int)pair[1];
+
     }
     vp->pan_l = vp->bin_gain[AUBIN_FL] + 0.7071f * vp->bin_gain[AUBIN_C] +
         0.5f * vp->bin_gain[AUBIN_LFE] + 0.5f * vp->bin_gain[AUBIN_BL];
@@ -1621,6 +1772,26 @@ void audio_set_pan(au32 v, float l, float r)
     au_lock();
     vp->pan_l = l;
     vp->pan_r = r;
+    memset(vp->bin_gain, 0, sizeof vp->bin_gain); /* W356 Surround: Pan = vorn links/rechts */
+    vp->bin_gain[AUBIN_FL] = l;
+    vp->bin_gain[AUBIN_FR] = r;
+    au_unlock();
+}
+
+/* W356: Mixbin-Pegel direkt (XACT-HLE). Faltung wie au_mixbins_apply. */
+void audio_set_bins(au32 v, const float *g6)
+{
+    audio_voice_t *vp = au_lookup(v);
+    int i;
+    if (!vp || !g6)
+        return;
+    au_lock();
+    for (i = 0; i < 6; i++)
+        vp->bin_gain[i] = g6[i] >= 0.0f && g6[i] <= 4.0f ? g6[i] : 0.0f;
+    vp->pan_l = vp->bin_gain[AUBIN_FL] + 0.7071f * vp->bin_gain[AUBIN_C] +
+        0.5f * vp->bin_gain[AUBIN_LFE] + 0.5f * vp->bin_gain[AUBIN_BL];
+    vp->pan_r = vp->bin_gain[AUBIN_FR] + 0.7071f * vp->bin_gain[AUBIN_C] +
+        0.5f * vp->bin_gain[AUBIN_LFE] + 0.5f * vp->bin_gain[AUBIN_BR];
     au_unlock();
 }
 
@@ -1666,7 +1837,27 @@ void audio_set_pitch(au32 v, int pitch)
     static au32 logged;
     if (!vp)
         return;
-    if (g_cfg.audio_pitch_range) {
+    au_lock(); /* W343 DIAG(PITCH) */
+    if (!vp->pd_np || pitch < vp->pd_pmin)
+        vp->pd_pmin = pitch;
+    if (!vp->pd_np || pitch > vp->pd_pmax)
+        vp->pd_pmax = pitch;
+    if (vp->pd_lmin == vp->pd_lmax && vp->pd_lmin == 0)
+        vp->pd_lmin = vp->pd_lmax = pitch; /* erster Wert (0 = Pitch 48 kHz, kommt im Spiel nicht vor) */
+    if (pitch < vp->pd_lmin)
+        vp->pd_lmin = pitch;
+    if (pitch > vp->pd_lmax)
+        vp->pd_lmax = pitch;
+    vp->pd_np++;
+    au_unlock();
+    if (g_cfg.audio_freq_xdk) {
+        /* W343 ISSUE-46: XDK-Pitchbereich -32768..8191 = 187,5..191983 Hz
+         * (W89-Klemme -98304..32767 lag ausserhalb, unten wurde verworfen). */
+        if (pitch < AU_XDK_PITCH_MIN)
+            pitch = AU_XDK_PITCH_MIN;
+        if (pitch > AU_XDK_PITCH_MAX)
+            pitch = AU_XDK_PITCH_MAX;
+    } else if (g_cfg.audio_pitch_range) {
         /* W89: Das Spiel nutzt fuer 11025-Hz-Toene ~-8576..-9216 (11,3/10,1
          * kHz); die alte Klemme -8192 (12 kHz) spielte sie bis 19 % zu hoch.
          * Weite Klemme, die Frequenz wird unten auf 4..192 kHz begrenzt. */
@@ -1683,8 +1874,58 @@ void audio_set_pitch(au32 v, int pitch)
     f = exp((pitch / 4096.0) * log(2.0)) * 48000.0;
     if (hlog_throttle(&logged))
         HLOG_I("AUDIO v%u Pitch: %d -> %.0f Hz", vp->id, pitch, f);
-    if (f >= 4000.0 && f <= 192000.0)
-        audio_set_frequency(v, (au32)f);
+    au_lock();
+    {
+        au32 req = f < 4.0e9 ? (au32)(f + 0.5) : 0xFFFFFFFFu; /* W343 DIAG(PITCH) */
+        if (!vp->pd_fmin || req < vp->pd_fmin)
+            vp->pd_fmin = req;
+        if (req > vp->pd_fmax)
+            vp->pd_fmax = req;
+    }
+    if (g_cfg.audio_freq_xdk) {
+        /* W343: direkt (gerundet, 187,5 -> 188), ohne Umweg ueber SetFrequency */
+        au32 hz = (au32)(f + 0.5);
+        if (hz < AU_XDK_FREQ_MIN)
+            hz = AU_XDK_FREQ_MIN;
+        if (hz > AU_XDK_FREQ_MAX)
+            hz = AU_XDK_FREQ_MAX;
+        au_apply_freq(vp, hz);
+    } else if (f >= 4000.0 && f <= 192000.0) {
+        au_apply_freq(vp, (au32)f); /* alt: wie audio_set_frequency(v, (au32)f) */
+    } else {
+        vp->pd_drop++;
+        g_stat_freq_drop++;
+    }
+    au_unlock();
+}
+
+/* W343 DIAG(PITCH): je Stimme mit Frequenz-Settern seit der letzten Zeile.
+ * Art: bink (0x2435FC), sfx (Pool 0x106C59), buf (andere Puffer), str (Stream). */
+void audio_pitch_diag_log(void)
+{
+    audio_voice_t *v;
+    if (!g_cfg.audio_pitch_diag)
+        return;
+    au_lock();
+    for (v = g_voices; v; v = v->next) {
+        const char *art;
+        if (!v->pd_nf && !v->pd_np)
+            continue;
+        art = v->kind == 2 ? "str" : v->create_ret == SBA(0x2435FCu) ? "bink"
+            : v->create_ret == SBA(0x106C59u) ? "sfx" : "buf";
+        HLOG_I("DIAG(PITCH) t=%.0f v%u art=%s fmt=%u src=%u dec=%u step=%.4f play=%d loop=%d "
+               "setfreq=%u setpitch=%u pitch=%d..%d hz=%u..%u verworfen=%u geklemmt=%u original=%u data=%u p=0x%X leben=%d..%d",
+               (double)g_mixed_total / MIXRATE, v->id, art, v->have_fmt ? v->fmt.rate : 0u, v->src_rate,
+               v->dec_rate, v->freq_step, v->playing, v->looping, v->pd_nf, v->pd_np, v->pd_pmin,
+               v->pd_pmax, v->pd_fmin, v->pd_fmax, v->pd_drop, v->pd_clamp, v->pd_orig, v->datalen,
+               v->dbg_setbuf_p, v->pd_lmin, v->pd_lmax);
+        v->pd_nf = v->pd_np = 0;
+        v->pd_fmin = v->pd_fmax = 0;
+        v->pd_drop = v->pd_clamp = v->pd_orig = 0;
+    }
+    HLOG_I("DIAG(PITCH) summe: freq=%u verworfen=%u hz_geklemmt=%u schritt_geklemmt=%u xdk=%d",
+           g_stat_freq, g_stat_freq_drop, g_stat_freq_clamp, g_stat_step_clamp, g_cfg.audio_freq_xdk);
+    au_unlock();
 }
 
 /* ---------- W102 AUDIO-TUT: Voice-Filter / I3DL2 / EG ----------
@@ -1739,17 +1980,60 @@ void audio_set_filter(au32 v, au32 pDesc)
 
 /* DSI3DL2BUFFER: lDirect, lDirectHF, lRoom, lRoomHF, flRoomRolloff,
  * Obstruction{lHFLevel, flLFRatio}, Occlusion{lHFLevel, flLFRatio}. */
-void audio_set_i3dl2(au32 v, au32 pParams)
+static float au_i3d_f(au32 bits, float lo, float hi)
 {
-    audio_voice_t *vp = au_lookup(v);
-    au32 d[4];
-    if (!vp || !au_probe_read(pParams, d, sizeof d))
-        return;
+    float f;
+    memcpy(&f, &bits, 4);
+    return f == f && f >= lo && f <= hi ? f : 0.0f;
+}
+
+static void au_i3dl2_apply(audio_voice_t *vp, const au32 *d, int n)
+{
+    au_lock();
     vp->i3d_direct = (int)d[0];
     vp->i3d_directhf = (int)d[1];
     vp->i3d_room = (int)d[2];
     vp->i3d_roomhf = (int)d[3];
+    if (n >= 9) { /* W356: Rolloff, Obstruction, Occlusion (audio_occlusion) */
+        vp->i3d_rolloff = au_i3d_f(d[4], 0.0f, 10.0f);
+        vp->i3d_obs = (int)d[5] < -10000 ? -10000 : (int)d[5] > 0 ? 0 : (int)d[5];
+        vp->i3d_obs_lfr = au_i3d_f(d[6], 0.0f, 1.0f);
+        vp->i3d_occ = (int)d[7] < -10000 ? -10000 : (int)d[7] > 0 ? 0 : (int)d[7];
+        vp->i3d_occ_lfr = au_i3d_f(d[8], 0.0f, 1.0f);
+    }
     vp->has_i3dl2 = 1;
+    au_unlock();
+}
+
+void audio_set_i3dl2(au32 v, au32 pParams)
+{
+    audio_voice_t *vp = au_lookup(v);
+    au32 d[9];
+    if (!vp)
+        return;
+    if (au_probe_read(pParams, d, sizeof d))
+        au_i3dl2_apply(vp, d, 9);
+    else if (au_probe_read(pParams, d, 4 * 4))
+        au_i3dl2_apply(vp, d, 4);
+}
+
+/* W356: DSI3DL2BUFFER als Werte (XACT-HLE, LoC: IXACTSoundSource_SetI3DL2Source je Quelle). */
+void audio_set_i3dl2_vals(au32 v, const au32 *d9)
+{
+    audio_voice_t *vp = au_lookup(v);
+    if (vp && d9)
+        au_i3dl2_apply(vp, d9, 9);
+}
+
+/* W356: Pegel des I3DL2-Mixbins (Hall-Send) direkt setzen (XACT-HLE: Send je Cue; -10000 = keiner). */
+void audio_set_room_send(au32 v, int mb)
+{
+    audio_voice_t *vp = au_lookup(v);
+    if (!vp)
+        return;
+    au_lock();
+    vp->rv_bin_mb = mb < -10000 ? -10000 : mb > 0 ? 0 : mb;
+    au_unlock();
 }
 
 void audio_note_eg(au32 v, au32 pDesc)
@@ -1759,10 +2043,43 @@ void audio_note_eg(au32 v, au32 pDesc)
         return;
     vp->eg_p = pDesc;
     vp->eg_n++;
+    if (pDesc) { /* W348: Huellkurve speichern (Wirkung bei audio_eg=1) */
+        au32 d[10];
+        if (au_probe_read(pDesc, d, sizeof d))
+            aufx_eg_set(vp, d);
+    }
+    if (g_cfg.audio_pitch_diag && pDesc) {
+        /* W343 DIAG(PITCH): DSENVELOPEDESC je Stimme bei Inhaltswechsel (W89-SFXEG sah nur die
+         * ersten 64 Desc beim Erzeugen) - Multi-EG (eg=1) traegt lPitchScale/lFilterCutOff */
+        au32 d[10];
+        if (au_probe_read(pDesc, d, sizeof d)) {
+            au32 h = 0, i, k = d[0] ? 1u : 0u;
+            for (i = 0; i < 10; i++)
+                h = h * 31u + d[i];
+            if (vp->pd_eg_h[k] != h) {
+                vp->pd_eg_h[k] = h;
+                HLOG_I("DIAG(PITCH) EG t=%.2f v%u eg=%u mode=%u delay=%u attack=%u hold=%u decay=%u "
+                       "release=%u sustain=%u pitchscale=%d filtercut=%d n=%u",
+                       (double)g_mixed_total / MIXRATE, vp->id, d[0], d[1], d[2], d[3], d[4], d[5], d[6],
+                       d[7], (int)d[8], (int)d[9], vp->eg_n);
+            }
+        }
+    }
+}
+
+void audio_3d_voice_vel(au32 v, au32 x, au32 y, au32 z)
+{
+    audio_voice_t *vp = au_lookup(v);
+    if (vp)
+        au3d_voice_vel(vp, x, y, z);
 }
 
 void audio_log_stats(void)
 {
+    aufx_log_stats(); /* W348 */
+    ausp_log_stats(); /* W356 */
+    ds_api_diag_log(); /* W348 DIAG(DSAPI) */
+
     HLOG_I("AUDIO stats: stimmen=%u pakete=%u bytes=%u drops=%u "
            "gemischt=%llu frames peak=%.2f getpos=%ld unlockmm=%ld/%ld ptrout=%ld clip=%llu",
            g_stat_voices, g_stat_packets, g_stat_bytes, g_stat_drops,
@@ -1774,6 +2091,9 @@ void audio_log_stats(void)
            g_stat_wa_under);
     HLOG_I("AUDIO stats3 (W89): sfx_abgeschnitten=%u sfx_zuende=%u ithis_fix=%d",
            g_stat_cut, g_stat_end, g_cfg.audio_ithis_fix);
+    if (g_stat_ring_place || g_stat_ring_reset) /* ISSUE-10, nur nach Unterlauf/Reset */
+        HLOG_I("AUDIO ISSUE-10: cursor_resets=%u verworfen=%llu ring_neu_beschrieben=%u",
+               g_stat_ring_reset, (unsigned long long)g_stat_ring_drop, g_stat_ring_place);
     au3d_log_stats();
     if (g_cfg.audio_sfx_diag > 0) { /* W89 DIAG(SFX): Energie-Rangliste */
         audio_voice_t *top[8];

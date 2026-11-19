@@ -39,6 +39,7 @@
 #include "sb_cchain.h" /* W303 CAMPAIGN-CHAIN */
 #include "render_vexp.h" /* W255 VIDEO-EXPORT */
 #include "sb_crash.h" /* W279 DIAG-CRASH */
+#include "guest_wx.h" /* W339 SEC-A3 */
 
 static int g_run_seconds;
 static volatile LONG g_wd_waited; /* W186: Sekunden seit Watchdog-Start (Rest-Laufzeit) */
@@ -920,6 +921,87 @@ static LONG WINAPI last_chance(EXCEPTION_POINTERS *ep)
     return EXCEPTION_EXECUTE_HANDLER; /* unreachable */
 }
 
+/* W339 SEC-A3 "Absturz = Ende" (SECURITY.md §6.6 Punkt 3): Im LoC-Netzspiel darf eine Ausnahme im Gastcode nie an
+ * das SEH des Spiels gehen - generisches Weiterlaufen nach einem Speicherfehler hilft Ausnutzungsversuchen eines
+ * boeswilligen Mitspielers. Sitzt als LETZTER VEH (AddVectoredExceptionHandler(0, ...)): alle eigenen Behandler
+ * (Rollback-/Ring-Schreibschutz, Sonden, VEH-OWN) laufen vorher und setzen ihre Faelle selbst fort; was hier
+ * ankommt, ist unbehandelt und ginge sonst an das SEH des Spiels. Bedingung: LoC-Profil und Netzsitzung
+ * (g_locnet_session, Daten eines Mitspielers haben das Spiel erreicht). Ausserhalb bleibt alles wie bisher.
+ * Folge: Log-Zeile, Absturzbericht (Text + Minidump, bereinigt), Prozessende mit Exitcode 39 (Launcher-Meldung
+ * gui.exit39). Kein Inhalt aus Netzrahmen im Log. */
+extern volatile LONG g_locnet_session; /* loc_net_core.c */
+#define LOC_NETCRASH_EXIT 39u
+
+static int loc_netcrash_guest_ctx(xb_u32 eip)
+{
+    extern int krnl_xb_thread_count(void);
+    extern int krnl_xb_thread_get(int, void **, unsigned *);
+    MEMORY_BASIC_INFORMATION mi;
+    DWORD me = GetCurrentThreadId();
+    int i, n;
+    if (eip >= 0x10000u && eip < 0x2810000u) return 1; /* Gastabbild */
+    if (VirtualQuery((LPCVOID)(uintptr_t)eip, &mi, sizeof mi) == sizeof mi && mi.Type != MEM_IMAGE) {
+        return 1; /* Code im Heap/Stapel/ungueltig: nie legitim */
+    }
+    n = krnl_xb_thread_count();
+    for (i = 0; i < n; i++) { /* Xbox-Thread in einer System-DLL (vom Gast oder vom HLE gerufen) */
+        void *h = NULL;
+        unsigned rt = 0;
+        if (krnl_xb_thread_get(i, &h, &rt) && h && GetThreadId((HANDLE)h) == me) break;
+    }
+    if (i >= n) return 0; /* Host-Thread (Render, Ton, Netz): bisheriges Verhalten */
+    /* Wer faengt? Innerster SEH-Rahmen (fs:[0] bleibt nativ, fs_emu.h): eigenes __try (sb_emu) oder ein Behandler der
+     * System-DLL selbst -> bisheriges Verhalten; ein Behandler des Spiels (Abbild/Heap) -> Sitzung beenden. */
+    __try {
+        EXCEPTION_REGISTRATION_RECORD *r = (EXCEPTION_REGISTRATION_RECORD *)((NT_TIB *)NtCurrentTeb())->ExceptionList;
+        xb_u32 hd;
+        if (!r || r == (EXCEPTION_REGISTRATION_RECORD *)(uintptr_t)0xFFFFFFFFu) return 1; /* niemand: unbehandelt */
+        hd = (xb_u32)(uintptr_t)r->Handler;
+        if (hd >= 0x30000000u && hd < 0x31000000u) return 0;
+        if (hd >= 0x10000u && hd < 0x2810000u) return 1;
+        if (VirtualQuery((LPCVOID)(uintptr_t)hd, &mi, sizeof mi) == sizeof mi && mi.Type == MEM_IMAGE) return 0;
+        return 1;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 1;
+    }
+}
+
+static LONG WINAPI loc_netcrash_veh(EXCEPTION_POINTERS *ep)
+{
+    static volatile LONG once;
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    xb_u32 eip = (xb_u32)ep->ContextRecord->Eip;
+    if (!g_sba_loc || !g_locnet_session) return EXCEPTION_CONTINUE_SEARCH;
+    switch (code) {
+    case EXCEPTION_ACCESS_VIOLATION:
+    case EXCEPTION_ILLEGAL_INSTRUCTION:
+    case EXCEPTION_PRIV_INSTRUCTION:
+    case EXCEPTION_INT_DIVIDE_BY_ZERO:
+    case EXCEPTION_INT_OVERFLOW:
+    case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:
+    case EXCEPTION_DATATYPE_MISALIGNMENT:
+    case EXCEPTION_IN_PAGE_ERROR:
+    case EXCEPTION_STACK_OVERFLOW:
+    case EXCEPTION_BREAKPOINT:
+    case 0xC00001A5u: /* ungueltige SEH-Kette */
+        break;
+    default:
+        return EXCEPTION_CONTINUE_SEARCH;
+    }
+    if (eip >= 0x30000000u && eip < 0x31000000u) return EXCEPTION_CONTINUE_SEARCH; /* eigene DLL: eigenes __try */
+    if (!loc_netcrash_guest_ctx(eip)) return EXCEPTION_CONTINUE_SEARCH;
+    if (InterlockedCompareExchange(&once, (LONG)GetCurrentThreadId(), 0) != 0) {
+        if ((DWORD)once == GetCurrentThreadId()) return EXCEPTION_CONTINUE_SEARCH; /* Folgefehler im Bericht selbst */
+        for (;;) Sleep(1000); /* zweiter Thread waehrend des Endes: anhalten, bis TerminateProcess greift */
+    }
+    HLOG_E("LOCSEC: Ausnahme 0x%lX im Gastcode (RIP 0x%X) waehrend der Netzsitzung - Sitzung beendet (Absturz = Ende)",
+           code, eip);
+    crash_report(ep, "LOCSEC: Gastcode-Ausnahme im Netzspiel - Sitzung beendet");
+    hlog_close();
+    TerminateProcess(GetCurrentProcess(), LOC_NETCRASH_EXIT);
+    return EXCEPTION_CONTINUE_SEARCH; /* unerreichbar */
+}
+
 /* THREADWATCH (31.10.): alle 30 s CPU-Zeit pro Xbox-Thread. Ein Thread,
  * der >= 60 s keine CPU bekommt, waehrend Frames weiterlaufen, wird mit
  * Warteposition (Modul/Symbol) und erster Spieladresse auf dem Stack
@@ -1739,6 +1821,7 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     if (g_cfg.hlog_async) { hlog_async_start(); } /* PERF(PERF-TICK,W168) */
 
     AddVectoredExceptionHandler(1, veh);
+    AddVectoredExceptionHandler(0, loc_netcrash_veh); /* W339: letzter VEH, wirkt nur im LoC-Netzspiel */
     SetUnhandledExceptionFilter(last_chance);
     /* W150 ISO-DIRECT: game_image hat Vorrang vor media_root/xbe_path/--xbe. */
     if (g_cfg.game_image[0]) {
@@ -1838,6 +1921,9 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
         hooks_install();
         fs_emu_patch_all();
     }
+    /* W339 SEC-A3: W^X fuer das Gastabbild nach dem Setzen der Hooks (SECURITY.md §6.6 Punkt 4). Standard: LoC an
+     * (Netzspiel mit fremden Rahmen), SB aus (kein Netz; Abschnitte/Laufzeit-Patches nicht vermessen). */
+    guest_wx_apply(&img, g_cfg.guest_wx < 0 ? (g_sba_loc ? 1 : 0) : g_cfg.guest_wx);
     /* BINKPATCH-AUS (Bink-Completion noetig: TEXMOVIE/effect.efp-Load
      * wartet auf Bink-Textur. Patch -> Deadlock. Original -> langsam). */
 #if 0

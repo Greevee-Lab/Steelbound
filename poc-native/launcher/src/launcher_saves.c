@@ -356,10 +356,10 @@ static unsigned crc(const unsigned char *p, unsigned n)
     }
     return ~c;
 }
-static int zipread(ls_plan *p, const wchar_t *path)
+/* W332: ZIP-Parser auf Speicher (aus zipread herausgezogen, isoliert fuzzbar: tests/fuzz/proj_launcher). */
+static int zipparse(ls_plan *p, const unsigned char *d, unsigned n)
 {
-    unsigned n = 0, off, count, i, end;
-    unsigned char *d = readbytes(path, &n);
+    unsigned off, count, i, end;
     int ok = 0;
     long e;
     if (!d || n < 22)
@@ -442,6 +442,13 @@ static int zipread(ls_plan *p, const wchar_t *path)
     }
     ok = off == end;
 done:
+    return ok;
+}
+static int zipread(ls_plan *p, const wchar_t *path)
+{
+    unsigned n = 0;
+    unsigned char *d = readbytes(path, &n);
+    int ok = zipparse(p, d, n);
     free(d);
     return ok;
 }

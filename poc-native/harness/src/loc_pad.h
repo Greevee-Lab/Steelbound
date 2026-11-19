@@ -11,3 +11,10 @@ int loc_pad_is_handle(uint32_t h);
 uint32_t loc_pad_get_state(uint32_t pState);
 /* W297: 1 = Pfeil hoch/runter gehoeren dem Menue-Pad (LoC-Netzmenue, kein Lockstep aktiv) */
 int loc_pad_menu_arrows(void);
+/* W341 LOC-MOUSE: 1 = Maus darf zielen (Lockstep aktiv und eigener VT abgesetzt, nicht auf der Karte). */
+int loc_mouse_mission(void);
+/* W341 TEST (loc_mouse_test=1, input_test_hook=1): Pseudo-Tasten 330-336 der Testfolge in Fenster-
+ * Nachrichten ans eigene Client-Fenster umsetzen (Bewegung, Klicks, Bild). Spiel-Thread, je Poll. */
+void loc_mouse_test_drive(void);
+/* W341: Zaehler je Poll (nur Anzahlen und Achsenbereiche, keine Eingaben). */
+void loc_mouse_note(int dx, int dy, uint8_t aim_x, uint8_t aim_y, uint16_t btn0);

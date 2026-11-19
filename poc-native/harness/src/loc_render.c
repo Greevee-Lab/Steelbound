@@ -7,6 +7,8 @@
 #include "sb_profile.h"
 #include "hlog.h"
 #include "loc_sync.h"
+#include "loc_net.h"
+#include "render_qa.h" /* W358: g_rq_active */
 
 unsigned g_loc_draws;
 static unsigned s_prev_draws;
@@ -52,6 +54,7 @@ void loc_render_frame(unsigned f)
     g_loc_draws = 0;
     if (g_sba_loc) {
         loc_sync_frame(f); /* W297: Testfolge loc_steps (nur mit loc_sync=1 geparst) */
+        loc_net_lobby_frame(f); /* W350: DIAG Lobby-Belegung (nur loc_net_diag=1) */
     }
 }
 
@@ -152,6 +155,7 @@ static ID3D11ShaderResourceView *bbc_copy(void)
         dd.Width = bw; dd.Height = bh; dd.MipLevels = 1; dd.ArraySize = 1;
         dd.Format = bd.Format; dd.SampleDesc.Count = 1;
         dd.Usage = D3D11_USAGE_DEFAULT; dd.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (g_cfg.loc_interp_copy) { dd.BindFlags |= D3D11_BIND_RENDER_TARGET; } /* W340: Interp-Schatten verlangt RT-Bindung */
         if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &dd, NULL, &s_bbc_tex)) ||
             FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)s_bbc_tex, NULL, &s_bbc_srv))) {
             bbc_release();
@@ -178,6 +182,8 @@ static ID3D11ShaderResourceView *bbc_copy(void)
         }
     } else {
         ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)s_bbc_tex, 0, 0, 0, 0, (ID3D11Resource *)bb, 0, &box);
+        /* W340 LOC-FRAMES: Kopie als Interp-Op, sonst zeigt das Kompositions-Quad in Zwischenbildern die Welt von Tick N */
+        if (g_ip_recording) { sb_interp_rec_copy(g_rtv, s_bbc_srv, &box); }
     }
     ID3D11Texture2D_Release(bb);
     sb_ctx_leave();
@@ -369,4 +375,103 @@ int loc_render_tick_hz(void)
     int fields = (g_cfg.loc_fields > 0 && g_cfg.loc_fields <= 6) ? g_cfg.loc_fields : 3;
     int hz = g_cfg.vblank_hz > 0 ? g_cfg.vblank_hz : 60;
     return hz / fields > 0 ? hz / fields : 1;
+}
+
+/* DIAG(W349 LOC-FRAMES-2) loc_ui_diag=1: Farbe der UI-Rahmen (Begin(3), FUN_000ECF10 -> SetVertexDataColor, Ruecksprung
+ * 0xECF2B) mit Aufrufkette aus dem Gast-Stack: ret[6] = Ruecksprung aus FUN_000ECF10 (3 gesicherte Register, 2 Args),
+ * ret[12] = eine Ebene hoeher (Huellen wie FUN_00060B70 mit 5 Args). Je Aufrufstelle alle 30 Bilder, hoechstens 120 Zeilen. */
+void loc_render_ui_color(unsigned reg, unsigned color, const unsigned *ret)
+{
+    static unsigned nln, site[32][2], last[32], nsite;
+    unsigned r0 = 0, r6 = 0, r12 = 0, k;
+    if (nln >= 120u || !ret) { return; }
+    __try { r0 = ret[0]; r6 = ret[6]; r12 = ret[12]; } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (r0 != 0xECF2Bu) { return; }
+    for (k = 0; k < nsite && (site[k][0] != r6 || site[k][1] != r12); k++) {}
+    if (k == nsite) {
+        if (nsite >= 32u) { return; }
+        site[k][0] = r6; site[k][1] = r12; last[k] = 0xFFFFFFFFu; nsite++;
+    }
+    if (last[k] != 0xFFFFFFFFu && g_present_no - last[k] < 30u) { return; }
+    last[k] = g_present_no;
+    nln++;
+    HLOG_I("LOCUI rahmen f=%u reg=%u farbe=0x%08X ruecksprung=0x%X/0x%X/0x%X", g_present_no, reg, color, r0, r6, r12);
+}
+
+/* ---------------------------------------------------------------------------
+ * DIAG(LOC-LOOK,W358) loc_lookstat=N: Zustandszaehler je Draw (Audit gegen das Original).
+ * Alle N Bilder (hoechstens 8 Bilder je Lauf) eine Zeile je Zustandskombination des Bildes:
+ * Ziel (0 = Backbuffer, k = RT-Slot+1), Pfad (1 = Shading), Programm-Art, RHW, Nebel (FOGENABLE /
+ * FOGTABLEMODE), VS schreibt oFog, PS mischt Nebel, Alpha-Test (an/Funktion/Ref), ALPHAKILL Stufe 0
+ * (TSS 11 Bit 2), Filter Stufe 0 (MAG/MIN/MIP, TSS 3..5), LOD-Bias (TSS 6, roh), MAXANISOTROPY (TSS 8),
+ * Blend an, Textur. Keine Eingaben, nur Render-Zustand.
+ * ------------------------------------------------------------------------- */
+#define LS_KEYS 64
+typedef struct { unsigned k[14]; unsigned n; } ls_ent_t;
+static ls_ent_t s_ls[LS_KEYS];
+static unsigned s_ls_n, s_ls_drop, s_ls_f = 0xFFFFFFFFu, s_ls_frames, s_ls_draws;
+unsigned rq_lookstat_bits(void);                                /* render_shade.c */
+unsigned fx_nv(unsigned m, unsigned def);                       /* render_fx.c */
+void sb_render_blend_state(unsigned *on, unsigned *src, unsigned *dst);
+
+static unsigned ls_u32(unsigned a)
+{
+    unsigned v = 0;
+    __try { v = *(volatile unsigned *)(uintptr_t)a; }
+    __except (EXCEPTION_EXECUTE_HANDLER) { v = 0; }
+    return v;
+}
+
+static void ls_flush(void)
+{
+    unsigned i;
+    if (!s_ls_draws) { return; }
+    HLOG_I("LOOKSTAT f=%u draws=%u kombis=%u verworfen=%u", s_ls_f, s_ls_draws, s_ls_n, s_ls_drop);
+    for (i = 0; i < s_ls_n; i++) {
+        const unsigned *k = s_ls[i].k;
+        HLOG_I("LOOKSTAT f=%u n=%u tgt=%u sh=%u kind=%u rhw=%u fog=%u/%u vsfog=%u psfog=%u at=%u/%u/%u ak=%u "
+               "filt=%u/%u/%u lod=0x%X an=%u bl=%u tex=%u",
+               s_ls_f, s_ls[i].n, k[0], k[1], k[2], k[3], k[4], k[5], k[6], k[7], k[8], k[9], k[10], k[11],
+               k[12] & 0xFFu, (k[12] >> 8) & 0xFFu, (k[12] >> 16) & 0xFFu, k[13], (k[12] >> 24) & 0xFu,
+               (k[12] >> 28) & 1u, (k[12] >> 29) & 1u);
+    }
+}
+
+void loc_render_lookstat(int rhw, unsigned has_tex)
+{
+    unsigned k[14], i, b, on = 0, bs = 0, bd = 0, ts = SBA(0x21A8B0u);
+    if (!g_sba_loc || g_cfg.loc_lookstat <= 0) { return; }
+    if (g_present_no != s_ls_f) {
+        if (s_ls_f != 0xFFFFFFFFu && s_ls_draws) { ls_flush(); s_ls_frames++; }
+        s_ls_n = 0; s_ls_drop = 0; s_ls_draws = 0;
+        s_ls_f = (s_ls_frames < 8u && (g_present_no % (unsigned)g_cfg.loc_lookstat) == 0u) ? g_present_no : 0xFFFFFFFEu;
+        if (s_ls_f == 0xFFFFFFFEu) { s_ls_f = g_present_no | 0x80000000u; }
+    }
+    if (s_ls_f & 0x80000000u) { return; } /* kein Messbild */
+    b = g_rq_active ? rq_lookstat_bits() : 0xFu;
+    sb_render_blend_state(&on, &bs, &bd);
+    memset(k, 0, sizeof k);
+    k[0] = rtt_active() ? (unsigned)(g_rtt_bound + 1) : 0u;
+    k[1] = g_rq_active ? 1u : 0u;
+    k[2] = b & 0xFu;
+    k[3] = rhw ? 1u : 0u;
+    k[4] = ls_u32(SBA(0x21AC20u));
+    k[5] = ls_u32(SBA(0x21AC24u));
+    k[6] = (b >> 4) & 1u;
+    k[7] = (b >> 5) & 1u;
+    k[8] = fx_nv(0x300u, 0u) ? 1u : 0u;
+    k[9] = k[8] ? (fx_nv(0x33Cu, 0x207u) & 0xFu) : 0u;
+    k[10] = k[8] ? (fx_nv(0x340u, 0u) & 0xFFu) : 0u;
+    k[11] = (ls_u32(ts + 11u * 4u) & 4u) ? 1u : 0u;
+    k[12] = (ls_u32(ts + 3u * 4u) & 0xFFu) | ((ls_u32(ts + 4u * 4u) & 0xFFu) << 8) | ((ls_u32(ts + 5u * 4u) & 0xFFu) << 16) |
+            ((ls_u32(ts + 8u * 4u) & 0xFu) << 24) | ((on ? 1u : 0u) << 28) | ((has_tex & 1u) << 29);
+    k[13] = ls_u32(ts + 6u * 4u);
+    s_ls_draws++;
+    for (i = 0; i < s_ls_n; i++) {
+        if (memcmp(s_ls[i].k, k, sizeof k) == 0) { s_ls[i].n++; return; }
+    }
+    if (s_ls_n >= LS_KEYS) { s_ls_drop++; return; }
+    memcpy(s_ls[s_ls_n].k, k, sizeof k);
+    s_ls[s_ls_n].n = 1;
+    s_ls_n++;
 }

@@ -100,7 +100,120 @@ static void random_writes(unsigned tick, HANDLE fh, int big)
     (void)tick;
 }
 
-int main(void)
+/* ================= W362 LOC-RING-INIT-EXIT =================
+ * (a) Mechanismus: Schreibschutz auf dem eigenen Stack + Schreibzugriff dort -> Prozess endet, ohne dass ein
+ *     vektorieller Handler (wie der des Rings) laeuft. Kindprozess (Modus 1). Gegenprobe Modus 2: gleiche Schutzart
+ *     auf einer Heap-Seite -> Handler hebt den Schutz auf, Prozess lebt (Exit 0).
+ * (b) rbr_thread_stacks findet die Stacks des eigenen und eines zweiten Threads. */
+static volatile LONG g_w362_veh;
+static LONG CALLBACK w362_veh(EXCEPTION_POINTERS *ep)
+{
+    DWORD old;
+    if (ep->ExceptionRecord->ExceptionCode == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2 &&
+        ep->ExceptionRecord->ExceptionInformation[0] == 1) {
+        InterlockedIncrement(&g_w362_veh);
+        if (VirtualProtect((void *)(ep->ExceptionRecord->ExceptionInformation[1] & ~(uintptr_t)(PG - 1)), PG, PAGE_READWRITE,
+                           &old))
+            return EXCEPTION_CONTINUE_EXECUTION;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static __declspec(noinline) int w362_deep(int n)
+{
+    volatile uint8_t buf[2048];
+    int i;
+    for (i = 0; i < (int)sizeof buf; i += 256) buf[i] = (uint8_t)(n + i);
+    return n > 0 ? w362_deep(n - 1) + buf[0] : buf[0];
+}
+static int w362_child(int mode)
+{
+    DWORD old;
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX | SEM_NOOPENFILEERRORBOX);
+    AddVectoredExceptionHandler(1, w362_veh);
+    if (mode == 1) {
+        volatile uint8_t here = 0;
+        uintptr_t sp = (uintptr_t)&here & ~(uintptr_t)(PG - 1);
+        (void)w362_deep(16); /* Stack-Seiten unterhalb zusagen */
+        if (!VirtualProtect((void *)(sp - 6 * PG), 5 * PG, PAGE_READONLY, &old)) return 4;
+        (void)w362_deep(16); /* schreibt in die geschuetzten Stack-Seiten */
+        return 0;            /* ueberlebt: Handler hat den Schutz aufgehoben */
+    } else {
+        volatile uint8_t *p = (volatile uint8_t *)VirtualAlloc(NULL, PG, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!p || !VirtualProtect((void *)p, PG, PAGE_READONLY, &old)) return 4;
+        p[5] = 1;
+        return g_w362_veh == 1 && p[5] == 1 ? 0 : 3;
+    }
+}
+static DWORD w362_spawn(int mode)
+{
+    char exe[MAX_PATH], cmd[MAX_PATH + 64];
+    STARTUPINFOA si;
+    PROCESS_INFORMATION pi;
+    DWORD code = 0xFFFFFFFFu;
+    GetModuleFileNameA(NULL, exe, sizeof exe);
+    _snprintf_s(cmd, sizeof cmd, _TRUNCATE, "\"%s\" --w362-child %d", exe, mode);
+    memset(&si, 0, sizeof si);
+    si.cb = sizeof si;
+    if (!CreateProcessA(exe, cmd, NULL, NULL, FALSE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) return code;
+    if (WaitForSingleObject(pi.hProcess, 20000) != WAIT_OBJECT_0) TerminateProcess(pi.hProcess, 0xDEAD);
+    GetExitCodeProcess(pi.hProcess, &code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+    return code;
+}
+static volatile uint32_t g_w362_tsp;
+static HANDLE g_w362_ev;
+static DWORD WINAPI w362_thread(LPVOID a)
+{
+    volatile uint8_t here = 0;
+    (void)a;
+    g_w362_tsp = (uint32_t)(uintptr_t)&here;
+    WaitForSingleObject(g_w362_ev, 10000);
+    return here;
+}
+static int w362_covered(const rbr_stack_t *s, int n, uint32_t x, int bits)
+{
+    int k;
+    for (k = 0; k < n; k++)
+        if (s[k].a <= x && x < s[k].b && (!bits || s[k].bits == bits)) return 1;
+    return 0;
+}
+static void w362_tests(void)
+{
+    rbr_stack_t s[256];
+    unsigned nthr = 0, noteb = 0;
+    int n, k, n64 = 0;
+    volatile uint8_t here = 0;
+    HANDLE th;
+    BOOL wow = FALSE;
+    DWORD c1, c2;
+    uint32_t a = 0, b = 0;
+    /* (b) */
+    g_w362_ev = CreateEventA(NULL, TRUE, FALSE, NULL);
+    th = CreateThread(NULL, 256 * 1024, w362_thread, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+    for (k = 0; k < 200 && !g_w362_tsp; k++) Sleep(5);
+    n = rbr_thread_stacks(s, 256, &nthr, &noteb);
+    for (k = 0; k < n; k++) n64 += s[k].bits == 64;
+    IsWow64Process(GetCurrentProcess(), &wow);
+    CHECK(nthr >= 2 && n >= 2, "W362: Thread-Stacks: %u Threads, %d Stacks", nthr, n);
+    CHECK(noteb == 0, "W362: %u Threads ohne TEB", noteb);
+    CHECK(w362_covered(s, n, (uint32_t)(uintptr_t)&here, 32), "W362: Stack des Haupt-Threads nicht gefunden");
+    CHECK(g_w362_tsp && w362_covered(s, n, g_w362_tsp, 32), "W362: Stack des zweiten Threads nicht gefunden");
+    CHECK(rbr_alloc_span((uint32_t)(uintptr_t)&here, &a, &b) && a <= (uint32_t)(uintptr_t)&here &&
+              (uint32_t)(uintptr_t)&here < b, "W362: rbr_alloc_span");
+    SetEvent(g_w362_ev);
+    if (th) { WaitForSingleObject(th, 5000); CloseHandle(th); }
+    /* (a) */
+    c1 = w362_spawn(1);
+    c2 = w362_spawn(2);
+    CHECK(c1 != 0 && c1 != 4 && c1 != 0xFFFFFFFFu && c1 != 0xDEAD,
+          "W362: Schreibschutz auf dem eigenen Stack beendet den Prozess nicht (Exit 0x%08lX)", c1);
+    CHECK(c2 == 0, "W362: Gegenprobe Heap-Seite: Handler griff nicht (Exit 0x%08lX)", c2);
+    printf("loc_rb_selftest: W362 Threads %u, Stacks %d (64 Bit %d, WoW64 %d); Stack-Schutz im Kind: Exit 0x%08lX "
+           "(ohne Handler/Bericht), Gegenprobe Heap: Exit %lu\n", nthr, n, n64, wow, c1, c2);
+}
+
+int main(int argc, char **argv)
 {
     HANDLE sec, th, fh = NULL;
     uint32_t alias, tot, hist_t[HIST], loads = 0, hot_max = 0, cooled = 0, k_hist[9] = {0}, saved_max = 0, us_max = 0, lus_max = 0;
@@ -110,6 +223,8 @@ int main(void)
     rbr_commit_t c;
     rbr_stat_t st;
 
+    if (argc >= 3 && strcmp(argv[1], "--w362-child") == 0) return w362_child(atoi(argv[2]));
+    w362_tests();
     A = (uint8_t *)VirtualAlloc(NULL, NA * PG, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE);
     B = (uint8_t *)VirtualAlloc(NULL, NB * PG, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
     sec = CreateFileMappingA(INVALID_HANDLE_VALUE, NULL, PAGE_READWRITE | SEC_COMMIT, 0, NC * PG, NULL);

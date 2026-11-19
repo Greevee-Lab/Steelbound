@@ -130,7 +130,7 @@ static const sb_text_map_t k_loc_map[123] = {
     { 0x00256A32u, 0x001E4C25u }, /* XInputSetState */
 };
 
-static const sb_check_t k_loc_check[157] = {
+static const sb_check_t k_loc_check[159] = {
     { 0x0012C5BAu, 0x1FB4F030u }, /* XapiSelectCachePartition */
     { 0x0012C805u, 0x543397D3u }, /* XMountUtilityDrive */
     { 0x001298A1u, 0x81FB2FADu }, /* ReadFile */
@@ -288,4 +288,6 @@ static const sb_check_t k_loc_check[157] = {
     { 0x0012A532u, 0x2FF92079u }, /* XSetProcessQuantumLength */
     { 0x00170B2Fu, 0x6BBD7EA7u }, /* XNetStartup */
     { 0x00170B46u, 0x32D959EDu }, /* WSAStartup */
+    { 0x00185BC0u, 0xC4194828u }, /* D3DDevice_SetVertexData2s */
+    { 0x00185C00u, 0xC4194828u }, /* D3DDevice_SetVertexData4s */
 };

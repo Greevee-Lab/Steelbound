@@ -149,6 +149,11 @@ void lacc_loop_close(long long sock);
 /* Neuer Unicode-Umgebungsblock = eigene Umgebung (ohne alte name=) + name=value,
  * sortiert. free() durch den Aufrufer. Die eigene Prozessumgebung bleibt unveraendert. */
 wchar_t *lacc_env_block(const char *name, const char *value);
+/* W344: Laenge eines Umgebungsblocks in Zeichen bis einschliesslich des doppelten Nullzeichens (NULL -> 0). */
+size_t lacc_env_len(const wchar_t *env);
+/* W344: ganzen Block (alle Eintraege, nicht nur den ersten) mit Nullen ueberschreiben bzw. zusaetzlich freigeben. */
+void lacc_env_wipe(wchar_t *env);
+void lacc_env_free(wchar_t *env);
 
 /* ---------------- CLI + Selbsttest ---------------- */
 /* sb_launcher --steelnet <aktion> [args]; argv ab der Aktion. Rueckgabe Exitcode. */

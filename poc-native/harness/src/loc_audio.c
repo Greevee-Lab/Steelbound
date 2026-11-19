@@ -91,6 +91,10 @@ typedef struct {
     int used, is3d, has_pan;
     float pan_l, pan_r;
     u32 pos[3]; /* Float-Bits */
+    float bin[6]; /* W356: Mixbin-Pegel FL FR C LFE BL BR (linear) aus SetMixBins */
+    int has_lfe;  /* W356: Bin-Liste enthaelt LFE (XACT ersetzt dessen Pegel je Cue) */
+    u32 i3d[9];   /* W356: DSI3DL2BUFFER aus IXACTSoundSource_SetI3DL2Source */
+    int has_i3d;
 } la_src_t;
 
 typedef struct {
@@ -480,7 +484,8 @@ static int la_cat(const la_cue_t *c)
 static void la_cue_apply(la_cue_t *c)
 {
     int t, k = la_cat(c);
-    int db = c->c.db100 + s_cat_db[k] + ((c->src && c->src->is3d) ? LA_3D_HEADROOM : 0);
+    int xs = g_cfg.audio_xact_sends; /* W356: Pegel/Sends je Cue wie die XACT-Bibliothek (0x1C4208) */
+    int db = (xs ? c->c.db100_xact : c->c.db100) + s_cat_db[k] + ((c->src && c->src->is3d) ? LA_3D_HEADROOM : 0);
     for (t = 0; t < LXF_MAX_TRACKS; t++) {
         la_pool_t *p;
         u32 a[16];
@@ -505,12 +510,30 @@ static void la_cue_apply(la_cue_t *c)
             a[3] = c->src->pos[2];
             a[15] = 0; /* NORMAL */
             audio_set_pan(p->v, 1.0f, 1.0f);
+            if (xs) { /* W356: 3D-Stimmen haben den I3DL2-Bin -> Send je Cue; Occlusion der Quelle */
+                static const u32 none[9];
+                audio_set_room_send(p->v, c->c.room_mb);
+                audio_set_i3dl2_vals(p->v, c->src->has_i3d ? c->src->i3d : none);
+            }
         } else {
             a[15] = 2; /* DISABLE: 2D */
             if (c->src && c->src->has_pan) {
-                audio_set_pan(p->v, c->src->pan_l, c->src->pan_r);
+                if (xs) { /* W356: LFE-Pegel je Cue (nur wenn die Bin-Liste der Quelle LFE enthaelt) */
+                    float g6[6];
+                    memcpy(g6, c->src->bin, sizeof g6);
+                    if (c->src->has_lfe)
+                        g6[3] = c->c.lfe_mb <= -10000 ? 0.0f : (float)pow(10.0, c->c.lfe_mb / 2000.0);
+                    audio_set_bins(p->v, g6);
+                } else {
+                    audio_set_pan(p->v, c->src->pan_l, c->src->pan_r);
+                }
             } else {
                 audio_set_pan(p->v, 1.0f, 1.0f);
+            }
+            if (xs) {
+                static const u32 none[9];
+                audio_set_room_send(p->v, -10000); /* W356: 2D-Bin-Listen ohne I3DL2-Bin = trocken */
+                audio_set_i3dl2_vals(p->v, none); /* Pool-Stimme: Occlusion eines frueheren 3D-Cues loeschen */
             }
         }
         audio_3d_voice_allparams(p->v, (u32)(uintptr_t)a);
@@ -958,6 +981,26 @@ static u32 __stdcall la_SetListenerOrientation(u32 e, u32 fx, u32 fy, u32 fz, u3
     return 0;
 }
 
+/* W348 AUDIO-DSP: IXACTEngine_SetI3dl2Listener(e, DSI3DL2LISTENER*, apply). Das Spiel waehlt per
+ * FUN_00088E40 eines von 25 XDK-Presets (Tabelle 0x273FB0) und uebergibt es hier; die echte
+ * XACT-Engine reicht es an IDirectSound_SetI3DL2Listener weiter. Wirkung im Mischer (audio_reverb);
+ * CommitDeferredSettings bleibt Stub, darum sofort. */
+static u32 __stdcall la_SetI3dl2Listener(u32 e, u32 p, u32 apply)
+{
+    u32 d[12];
+    (void)e;
+    (void)apply;
+    if (g_cfg.audio_reverb_test >= 0 && g_cfg.audio_reverb_test <= 24) /* TEST: Preset erzwingen (Hoerprobe) */
+        p = 0x273FB0u + (u32)g_cfg.audio_reverb_test * 48u;
+    if (p && la_rd(p, d, sizeof d)) {
+        if (g_cfg.audio_api_diag)
+            HLOG_I("DIAG(I3DL2) LoC XACT room=%d roomhf=%d decay=%.2f reverb=%d apply=%u", (int)d[0], (int)d[1],
+                   *(float *)&d[3], (int)d[7], apply);
+        audio_set_i3dl2_listener(d, 0);
+    }
+    return 0;
+}
+
 static u32 __stdcall la_SetListenerPosition(u32 e, u32 x, u32 y, u32 z, u32 apply)
 {
     (void)e;
@@ -1222,6 +1265,11 @@ static void la_src_mixbins(la_src_t *s, u32 pmb, int full)
     s->pan_l = g[0] + 0.7071f * g[2] + 0.5f * g[3] + 0.5f * g[4];
     s->pan_r = g[1] + 0.7071f * g[2] + 0.5f * g[3] + 0.5f * g[5];
     s->has_pan = 1;
+    memcpy(s->bin, g, sizeof s->bin); /* W356: Bins fuer LFE je Cue und Surround */
+    s->has_lfe = 0;
+    for (i = 0; i < hdr[0]; i++)
+        if (la_rd(hdr[1] + i * 8, pair, sizeof pair) && pair[0] == 3)
+            s->has_lfe = 1;
 }
 
 static u32 __stdcall la_SourceSetMixBins(u32 sp, u32 pmb)
@@ -1240,6 +1288,45 @@ static u32 __stdcall la_SourceSetMixBinVolumes(u32 sp, u32 pmb)
     (void)sp;
     (void)pmb;
     la_first(4, "IXACTSoundSource_SetMixBinVolumes (nicht ausgewertet)");
+    return 0;
+}
+
+/* W356 AUDIO-2: IXACTSoundSource_SetI3DL2Source(src, DSI3DL2BUFFER*, apply). Das Spiel (FUN_00088E80)
+ * setzt allen 64 3D-Quellen nur die Occlusion aus einer Material-Tabelle (0x274460, XDK-Presets
+ * Fenster/Tuer/Wand ...), alles andere 0. Wirkung je Stimme im Mischer (audio_occlusion). */
+static LONG st_i3d;
+static u32 __stdcall la_SourceSetI3DL2Source(u32 sp, u32 p, u32 apply)
+{
+    la_src_t *s = (la_src_t *)(uintptr_t)sp;
+    u32 d[9];
+    int i, t;
+    (void)apply;
+    if (!g_cfg.audio_xact_sends || !la_rd(p, d, sizeof d)) {
+        return 0;
+    }
+    lk();
+    if (IS_SRC(s) && s->used) {
+        memcpy(s->i3d, d, sizeof d);
+        s->has_i3d = 1;
+        if (InterlockedIncrement(&st_i3d) <= 2 && g_cfg.audio_api_diag) {
+            float lfr;
+            memcpy(&lfr, &d[8], 4);
+            HLOG_I("DIAG(I3DL2) LoC Quelle Occlusion=%d LFRatio=%.2f Direkt=%d Raum=%d", (int)d[7], lfr, (int)d[0],
+                   (int)d[2]);
+        }
+        if (s->is3d) {
+            for (i = 0; i < LA_MAX_CUE; i++) {
+                if (s_cue[i].state == 2 && s_cue[i].src == s) {
+                    for (t = 0; t < LXF_MAX_TRACKS; t++) {
+                        if (s_cue[i].pool[t]) {
+                            audio_set_i3dl2_vals(s_pool[s_cue[i].pool[t] - 1].v, d);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ulk();
     return 0;
 }
 
@@ -1309,6 +1396,8 @@ int loc_audio_install(void)
     LA_PATCH(IXACTEngine_SetMasterVolume, la_SetMasterVolume);
     LA_PATCH(IXACTEngine_SetListenerOrientation, la_SetListenerOrientation);
     LA_PATCH(IXACTEngine_SetListenerPosition, la_SetListenerPosition);
+    LA_PATCH(IXACTEngine_SetI3dl2Listener, la_SetI3dl2Listener); /* W348 */
+
     LA_PATCH(IXACTEngine_GlobalPause, la_GlobalPause);
     LA_PATCH(IXACTEngine_RegisterNotification, la_RegisterNotification);
     LA_PATCH(IXACTEngine_GetNotification, la_GetNotification);
@@ -1322,6 +1411,7 @@ int loc_audio_install(void)
     LA_PATCH(IXACTSoundSource_SetPosition, la_SourceSetPosition);
     LA_PATCH(IXACTSoundSource_SetMixBins, la_SourceSetMixBins);
     LA_PATCH(IXACTSoundSource_SetMixBinVolumes, la_SourceSetMixBinVolumes);
+    LA_PATCH(IXACTSoundSource_SetI3DL2Source, la_SourceSetI3DL2Source); /* W356 */
     LA_PATCH(IXACTSoundSource_StopSoundCues, la_SourceStopSoundCues);
     LA_PATCH(IXACTSoundSource_GetStatus, la_SourceGetStatus);
     s_active = 1;

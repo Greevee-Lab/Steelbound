@@ -5,6 +5,7 @@
  * Ke/Hal/Av/Xe/Xc/Dbg, Init + Thunk-Installation; Handles/Threads/Sync in
  * krnl_sync.c, Pfade/Dateien in krnl_file.c, Speicher in krnl_mem.c. */
 #include "krnl_int.h"
+#include "guest_wx.h" /* W339 SEC-A3 */
 #include "sb_profile.h" /* W326: g_sba_loc */
 
 /* Vorwaerts: XBE-Bild (Definition unten bei den Implementierungen) */
@@ -837,6 +838,7 @@ static u32 __stdcall hle_XeLoadSection(u32 pSec)
         }
         HLOG_I("XeLoadSection '%s' (0x%X, 0x%X Bytes) geladen", si->name, si->vaddr,
                si->rawsize);
+        guest_wx_section_loaded(si); /* W339: W^X-Schutz der Section wiederherstellen */
     }
     s->refcount++;
     return X_STATUS_SUCCESS;

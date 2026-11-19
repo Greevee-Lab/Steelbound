@@ -8,7 +8,9 @@
  *    nach gemeldetem Verlust), Wiederholung nach RTO, kumulative Bestaetigung.
  *  - UDP des Spiels (Suche 1201, Beitritt 1202, VDP 1203): als Datagramm, in N Paketen mitgeschickt,
  *    beim Empfaenger entdoppelt (keine Wiederholung darueber hinaus, wie UDP).
- *  - Wege: direkt (NAT-Durchstich SBP1 wie steelnet/PROTOKOLL.md) oder ueber ein steelnet-Relay
+ *  - W334: Protokoll v2 (net/SECURITY.md): Steuerkanal TLS mit SPKI-Pin, Spielverkehr Ende-zu-Ende (SBT2),
+ *    Gastfilter vor jeder Uebergabe ans Spiel (loc_guard).
+ *  - Wege: direkt (NAT-Durchstich als SBT2-PROBE) oder ueber ein steelnet-Relay
  *    (SBN1 RELAY mit link_id, Bindung per Ticket des Treffpunkts). Die Wahl trifft der Treffpunkt
  *    (route) anhand der gemessenen Pings (kleinste maximale paarweise Latenz).
  *  - Treffpunkt (loc_lobby=host:port): steelnet-Steuerkanal (JSON-Zeilen) im selben Thread.
@@ -41,11 +43,13 @@ typedef struct loctun_cfg {
     char relays[256];     /* zusaetzliche Relays "name=host:port,..." (der Treffpunkt nennt seine selbst) */
     char status_path[260];/* Statusdatei fuer den Launcher (leer = keine) */
     char auth[100];       /* W328: Konto "account:exp:G-hex64" (leer = aus Umgebung SB_LOC_AUTH lesen, dann Gast) */
+    char code[16];        /* W334: Raumcode zum Beitreten (leer = eigene Lobby mit Raumcode anlegen, SECURITY.md §3.5) */
+    char spki[65];        /* W334: Pin (SPKI-SHA-256, hex64) fuer einen anderen Treffpunkt als SB_STEELNET_HOST (§3.6) */
 } loctun_cfg;
 
 typedef struct loctun_stats {
     volatile LONG pkt_tx, pkt_rx, msg_new, msg_copy, msg_rto, msg_rx, msg_dup, msg_saved, dg_tx, dg_rx, dg_dup,
-        dg_drop, streams, bad;
+        dg_drop, streams, bad, guard /* W334: Gastfilter-Verstoesse */, e2e_bad /* W334: SBT2 verworfen */;
 } loctun_stats;
 
 struct loctun;
@@ -64,6 +68,12 @@ void loctun_stop(loctun *t);
 int loctun_dgram(loctun *t, uint32_t dst_vip, uint16_t src_gp, uint16_t dst_gp, const char *buf, int len);
 /* 1 = vip gehoert einem verbundenen Mitspieler. */
 int loctun_is_peer(loctun *t, uint32_t vip);
+/* W338 LOC-ROLLBACK-R2: Datagramme mit Quell- UND Zielspielport gp gehen an den Client (fn) statt an das Spiel -
+ * eigener Eingabekanal ueber SBT2 (Senden mit loctun_dgram(t, vip, gp, gp, ...)). Nie an den Gast; fn laeuft im
+ * Transport-Thread (kurz halten), vip = Mitspieler; Inhaltspruefung beim Empfaenger (net/SECURITY.md §18 Ae1).
+ * Ratenbremse je Mitspieler wie fuer Spiel-Datagramme. fn = NULL schaltet ab. */
+typedef void (*loctun_app_fn)(uint32_t vip, const uint8_t *d, int len);
+void loctun_set_app(loctun *t, uint16_t gp, loctun_app_fn fn);
 
 /* Zustand fuer Log/Launcher/Selbsttest. */
 int loctun_links_up(loctun *t);
@@ -77,3 +87,11 @@ void loctun_log_stats(loctun *t, int waited_s);
 int loctun_lobby_state(loctun *t);
 /* W328: Konto-Anmeldung am Treffpunkt: 0 keine (Gast), 1 laeuft, 2 angenommen, -1 abgelehnt. */
 int loctun_auth_state(loctun *t);
+/* W334: Raumcode der eigenen Lobby ("XXXX-XXXX", leer = noch keiner). 1 = vorhanden. */
+int loctun_lobby_code(loctun *t, char *buf, int cap);
+/* W334: 0 ok, 1 Krypto-Selbsttest fehlgeschlagen, 2 Server-Pruefung (Pin) fehlgeschlagen, 3 kein Pin
+ * (Dienst nicht eingerichtet), 4 Treffpunkt verlangt eine neuere Version. */
+int loctun_sec_state(loctun *t);
+/* W353 LOC-DURCHSTICH: eine Zeile fuer das F11-Paket (Treffpunkt, Weg, Ping, Verlust, sec, err) - nur Zustaende
+ * und Zahlen, keine Adressen, kein Raumcode, keine Eingaben. 0 = kein Transport. */
+int loctun_diag(loctun *t, char *buf, int cap);

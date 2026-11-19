@@ -74,6 +74,227 @@ static void ign_gate_tick(void)
     }
 }
 
+/* DIAG(ISSUE-GEO, Steelbound#38): Entity-Tabelle [0x351828] (Stride 0x5C,
+ * Anzahl [0x352288]) einmal N Bilder nach Missionsbeginn ausgeben: HP (+0),
+ * Typ (+2), Flags (+0x28), Byte +0x4A/+0x4B, Objekt-Index (+0x34), Max (+0x3A)
+ * und die Position (+0x0C/+0x14, x/z). */
+static void ent_dump_tick(void)
+{
+    static u32 f_live;
+    static int done;
+    u32 mloop = 0, n = 0, tab = 0, ob = 0, i;
+    __try {
+        mloop = *(volatile u32 *)(uintptr_t)SBA(0x356F58u);
+        n = *(volatile u32 *)(uintptr_t)SBA(0x352288u);
+        tab = *(volatile u32 *)(uintptr_t)SBA(0x351828u);
+        ob = *(volatile u32 *)(uintptr_t)SBA(0x4CA034u);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    if (mloop != 1u) {
+        f_live = 0;
+        done = 0;
+        return;
+    }
+    if (!f_live) {
+        f_live = g_frames;
+    }
+    if (done || g_frames - f_live < (u32)g_cfg.ent_dump || !tab || n > 65536u) {
+        return;
+    }
+    done = 1;
+    HLOG_I("ENTDUMP f=%u n=%u tab=0x%X obj=0x%X", g_frames, n, tab, ob);
+    for (i = 0; i < n; i++) {
+        __try {
+            u32 b = tab + i * 0x5Cu;
+            unsigned short hp = *(volatile unsigned short *)(uintptr_t)b;
+            unsigned short tp = *(volatile unsigned short *)(uintptr_t)(b + 2u);
+            u32 fl = *(volatile u32 *)(uintptr_t)(b + 0x28u);
+            unsigned char f4a = *(volatile unsigned char *)(uintptr_t)(b + 0x4Au);
+            unsigned char f4b = *(volatile unsigned char *)(uintptr_t)(b + 0x4Bu);
+            unsigned short oi = *(volatile unsigned short *)(uintptr_t)(b + 0x34u);
+            unsigned short mx = *(volatile unsigned short *)(uintptr_t)(b + 0x3Au);
+            float x = *(volatile float *)(uintptr_t)(b + 0x0Cu);
+            float z = *(volatile float *)(uintptr_t)(b + 0x14u);
+            HLOG_I("ENT %u hp=%u typ=0x%X fl=0x%X 4a=0x%X 4b=0x%X obj=%u max=%u pos=%.0f/%.0f",
+                   i, hp, tp, fl, f4a, f4b, oi, mx, x, z);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            HLOG_I("ENT %u: Lesefehler", i);
+        }
+    }
+}
+
+/* DIAG(ISSUE-GEO, Steelbound#40): Welt-Matrix je Draw am Hubschrauber.
+ * W = MVP * (V * P)^-1 mit der Hauptkamera des Spiels (View [0x357E60], Proj
+ * [0x3B6560]); Draws, deren Ursprung naeher als 25 Einheiten am Hubschrauber
+ * liegt (3D-Pfad: auch Rohpositionen in Weltkoordinaten), werden mit Ursprung,
+ * normierten Achsen, Skalen, Modellraum-Huelle, Textur und Pixelshader geloggt
+ * (HELIDRAW), 4-Vertex-Draws zusaetzlich mit Farbe/UV (HELIDRAW-V). Nur fuer
+ * Draws mit der Hauptkamera aussagekraeftig (andere Kameras: Mischmatrix). */
+static float g_heli_pos[3];
+static int g_heli_live;
+float g_heli_bb[6]; /* Modellraum-Huelle des aktuellen Draws (render_im.c) */
+unsigned g_heli_xp, g_heli_ps; /* Textur (Stufe 0) und Pixelshader des aktuellen Draws (render_im.c) */
+float g_heli_cu[4][6]; /* erste 4 Vertices: Farbe rgba + UV (render_im.c, P2-Pfad) */
+int g_heli_fast;
+static int inv4(const float *m, float *o)
+{
+    double inv[16], det;
+    int i;
+    inv[0] = m[5]*m[10]*m[15]-m[5]*m[11]*m[14]-m[9]*m[6]*m[15]+m[9]*m[7]*m[14]+m[13]*m[6]*m[11]-m[13]*m[7]*m[10];
+    inv[4] = -m[4]*m[10]*m[15]+m[4]*m[11]*m[14]+m[8]*m[6]*m[15]-m[8]*m[7]*m[14]-m[12]*m[6]*m[11]+m[12]*m[7]*m[10];
+    inv[8] = m[4]*m[9]*m[15]-m[4]*m[11]*m[13]-m[8]*m[5]*m[15]+m[8]*m[7]*m[13]+m[12]*m[5]*m[11]-m[12]*m[7]*m[9];
+    inv[12] = -m[4]*m[9]*m[14]+m[4]*m[10]*m[13]+m[8]*m[5]*m[14]-m[8]*m[6]*m[13]-m[12]*m[5]*m[10]+m[12]*m[6]*m[9];
+    inv[1] = -m[1]*m[10]*m[15]+m[1]*m[11]*m[14]+m[9]*m[2]*m[15]-m[9]*m[3]*m[14]-m[13]*m[2]*m[11]+m[13]*m[3]*m[10];
+    inv[5] = m[0]*m[10]*m[15]-m[0]*m[11]*m[14]-m[8]*m[2]*m[15]+m[8]*m[3]*m[14]+m[12]*m[2]*m[11]-m[12]*m[3]*m[10];
+    inv[9] = -m[0]*m[9]*m[15]+m[0]*m[11]*m[13]+m[8]*m[1]*m[15]-m[8]*m[3]*m[13]-m[12]*m[1]*m[11]+m[12]*m[3]*m[9];
+    inv[13] = m[0]*m[9]*m[14]-m[0]*m[10]*m[13]-m[8]*m[1]*m[14]+m[8]*m[2]*m[13]+m[12]*m[1]*m[10]-m[12]*m[2]*m[9];
+    inv[2] = m[1]*m[6]*m[15]-m[1]*m[7]*m[14]-m[5]*m[2]*m[15]+m[5]*m[3]*m[14]+m[13]*m[2]*m[7]-m[13]*m[3]*m[6];
+    inv[6] = -m[0]*m[6]*m[15]+m[0]*m[7]*m[14]+m[4]*m[2]*m[15]-m[4]*m[3]*m[14]-m[12]*m[2]*m[7]+m[12]*m[3]*m[6];
+    inv[10] = m[0]*m[5]*m[15]-m[0]*m[7]*m[13]-m[4]*m[1]*m[15]+m[4]*m[3]*m[13]+m[12]*m[1]*m[7]-m[12]*m[3]*m[5];
+    inv[14] = -m[0]*m[5]*m[14]+m[0]*m[6]*m[13]+m[4]*m[1]*m[14]-m[4]*m[2]*m[13]-m[12]*m[1]*m[6]+m[12]*m[2]*m[5];
+    inv[3] = -m[1]*m[6]*m[11]+m[1]*m[7]*m[10]+m[5]*m[2]*m[11]-m[5]*m[3]*m[10]-m[9]*m[2]*m[7]+m[9]*m[3]*m[6];
+    inv[7] = m[0]*m[6]*m[11]-m[0]*m[7]*m[10]-m[4]*m[2]*m[11]+m[4]*m[3]*m[10]+m[8]*m[2]*m[7]-m[8]*m[3]*m[6];
+    inv[11] = -m[0]*m[5]*m[11]+m[0]*m[7]*m[9]+m[4]*m[1]*m[11]-m[4]*m[3]*m[9]-m[8]*m[1]*m[7]+m[8]*m[3]*m[5];
+    inv[15] = m[0]*m[5]*m[10]-m[0]*m[6]*m[9]-m[4]*m[1]*m[10]+m[4]*m[2]*m[9]+m[8]*m[1]*m[6]-m[8]*m[2]*m[5];
+    det = m[0]*inv[0]+m[1]*inv[4]+m[2]*inv[8]+m[3]*inv[12];
+    if (det == 0.0) { return 0; }
+    for (i = 0; i < 16; i++) { o[i] = (float)(inv[i] / det); }
+    return 1;
+}
+void heli_draw_diag(const float *mvp, unsigned n, unsigned vs)
+{
+    static unsigned nlog;
+    float v[16], p[16], vp[16], ivp[16], w[16];
+    float ax[3][3], len[3];
+    int r, c, k;
+    if (!g_heli_live || nlog >= 30000u) { return; }
+    __try {
+        for (k = 0; k < 16; k++) {
+            v[k] = *(volatile float *)(uintptr_t)(SBA(0x357E60u) + (u32)k * 4u);
+            p[k] = *(volatile float *)(uintptr_t)(SBA(0x3B6560u) + (u32)k * 4u);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    for (r = 0; r < 4; r++) {
+        for (c = 0; c < 4; c++) {
+            vp[r * 4 + c] = v[r * 4 + 0] * p[0 * 4 + c] + v[r * 4 + 1] * p[1 * 4 + c] + v[r * 4 + 2] * p[2 * 4 + c] + v[r * 4 + 3] * p[3 * 4 + c];
+        }
+    }
+    if (!inv4(vp, ivp)) { return; }
+    for (r = 0; r < 4; r++) {
+        for (c = 0; c < 4; c++) {
+            w[r * 4 + c] = mvp[r * 4 + 0] * ivp[0 * 4 + c] + mvp[r * 4 + 1] * ivp[1 * 4 + c] + mvp[r * 4 + 2] * ivp[2 * 4 + c] + mvp[r * 4 + 3] * ivp[3 * 4 + c];
+        }
+    }
+    if (fabsf(w[15]) < 1e-12f) { return; }
+    for (k = 0; k < 16; k++) { w[k] /= w[15]; }
+    if (fabsf(w[12] - g_heli_pos[0]) > 25.0f || fabsf(w[13] - g_heli_pos[1]) > 25.0f || fabsf(w[14] - g_heli_pos[2]) > 25.0f) {
+        /* 3D-Pfad (vs Bit 31): Rohpositionen in Weltkoordinaten nahe am Hubschrauber? (Modell schon auf der CPU transformiert) */
+        float cx = 0.5f * (g_heli_bb[0] + g_heli_bb[3]), cy = 0.5f * (g_heli_bb[1] + g_heli_bb[4]), cz = 0.5f * (g_heli_bb[2] + g_heli_bb[5]);
+        if (!(vs & 0x80000000u) || fabsf(cx - g_heli_pos[0]) > 30.0f || fabsf(cy - g_heli_pos[1]) > 30.0f || fabsf(cz - g_heli_pos[2]) > 30.0f) { return; }
+    }
+    for (k = 0; k < 3; k++) {
+        len[k] = sqrtf(w[k * 4] * w[k * 4] + w[k * 4 + 1] * w[k * 4 + 1] + w[k * 4 + 2] * w[k * 4 + 2]);
+        for (c = 0; c < 3; c++) { ax[k][c] = len[k] > 1e-9f ? w[k * 4 + c] / len[k] : 0.0f; }
+    }
+    nlog++;
+    HLOG_I("HELIDRAW f=%u n=%u vs=0x%X t=%.2f/%.2f/%.2f x=%.3f/%.3f/%.3f y=%.3f/%.3f/%.3f z=%.3f/%.3f/%.3f s=%.3f/%.3f/%.3f bb=%.2f..%.2f/%.2f..%.2f/%.2f..%.2f xp=0x%X ps=0x%X",
+           g_frames, n, vs, w[12], w[13], w[14], ax[0][0], ax[0][1], ax[0][2], ax[1][0], ax[1][1], ax[1][2],
+           ax[2][0], ax[2][1], ax[2][2], len[0], len[1], len[2],
+           g_heli_bb[0], g_heli_bb[3], g_heli_bb[1], g_heli_bb[4], g_heli_bb[2], g_heli_bb[5], g_heli_xp, g_heli_ps);
+    memset(g_heli_bb, 0, sizeof g_heli_bb);
+    if (n == 4u && !(vs & 0x80000000u)) {
+        HLOG_I("HELIDRAW-V f=%u fast=%d c0=%.3f/%.3f/%.3f/%.3f uv=%.4f,%.4f %.4f,%.4f %.4f,%.4f %.4f,%.4f",
+               g_frames, g_heli_fast, g_heli_cu[0][0], g_heli_cu[0][1], g_heli_cu[0][2], g_heli_cu[0][3],
+               g_heli_cu[0][4], g_heli_cu[0][5], g_heli_cu[1][4], g_heli_cu[1][5], g_heli_cu[2][4], g_heli_cu[2][5],
+               g_heli_cu[3][4], g_heli_cu[3][5]);
+    }
+}
+
+/* DIAG(ISSUE-GEO, Steelbound#40): Nachschub-Hubschrauber ohne Monitor-Menue
+ * rufen. Das Menue (FUN_000A31F0 @0xA3714/0xA3790/0xA37B8) ruft
+ * FUN_00119930(*[0x355000]) = Zeiger auf die VT-Position; die Funktion
+ * prueft selbst [0x6CA6C4] (Einheit des Hubschraubers, 0 = keiner in der
+ * Mission), setzt Ziel = VT, Objekt-Flag 0x2000 und die Einheit aktiv.
+ * Spiel-Thread (Swap = Bildende). Standard 0: nichts gelesen/geschrieben. */
+static void heli_call_tick(void)
+{
+    static u32 f_live, lastlog;
+    static int done, shots_armed;
+    u32 mloop = 0, st = 0, vtp = 0, ub = 0, ob = 0;
+    unsigned short hu = 0, oi = 0;
+    float hx = 0.0f, hy = 0.0f, hz = 0.0f;
+    if (g_cfg.ent_dump > 0) {
+        ent_dump_tick();
+    }
+    if (g_cfg.heli_call <= 0) {
+        return;
+    }
+    __try {
+        mloop = *(volatile u32 *)(uintptr_t)SBA(0x356F58u);
+        st = *(volatile u32 *)(uintptr_t)SBA(0x356EE4u);
+        hu = *(volatile unsigned short *)(uintptr_t)SBA(0x6CA6C4u);
+        vtp = *(volatile u32 *)(uintptr_t)SBA(0x355000u);
+        ub = *(volatile u32 *)(uintptr_t)SBA(0x351828u);
+        ob = *(volatile u32 *)(uintptr_t)SBA(0x4CA034u);
+        if (hu && ub && ob) {
+            oi = *(volatile unsigned short *)(uintptr_t)(ub + (u32)hu * 0x5Cu + 0x34u);
+            hx = *(volatile float *)(uintptr_t)(ub + (u32)hu * 0x5Cu + 0x0Cu);
+            hy = *(volatile float *)(uintptr_t)(ub + (u32)hu * 0x5Cu + 0x10u);
+            hz = *(volatile float *)(uintptr_t)(ub + (u32)hu * 0x5Cu + 0x14u);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    if (mloop != 1u) {
+        f_live = 0;
+        done = 0;
+        g_heli_live = 0;
+        return;
+    }
+    if (!f_live) {
+        f_live = g_frames;
+    }
+    g_heli_live = (done && st >= 1u && st <= 4u && (hx != 0.0f || hz != 0.0f)) ? 1 : 0;
+    g_heli_pos[0] = hx; g_heli_pos[1] = hy; g_heli_pos[2] = hz;
+    if (g_frames - lastlog >= 150u) {
+        lastlog = g_frames;
+        HLOG_I("HELI f=%u unit=%u obj=%u st=%u pos=%.1f/%.1f/%.1f", g_frames, hu, oi, st, hx, hy, hz);
+    }
+    if (g_cfg.heli_shots > 0 && done && st == 2u && !shots_armed) {
+        /* Hubschrauber ueber dem VT angekommen: Bildfolge ab jetzt (Testtakt:
+         * Spiel-Bilder je Present, mit Zwischenbildern ip_<f>_<k>.bmp je Tick) */
+        extern unsigned g_present_no;
+        shots_armed = 1;
+        if (g_cfg.interp_fps > 0) {
+            g_cfg.interp_shot_ticks = g_cfg.heli_shots;
+            g_cfg.interp_shot_max = 1;
+            g_cfg.interp_shot_every = 0;
+            g_cfg.interp_shots = 1;
+        } else {
+            g_cfg.screenshot_every = 1;
+            g_cfg.screenshot_max = g_cfg.heli_shots;
+            g_cfg.screenshot_frame = (int)g_present_no + 1;
+        }
+        HLOG_I("HELI shots f=%u present=%u n=%d interp=%d", g_frames, g_present_no, g_cfg.heli_shots, g_cfg.interp_fps);
+    }
+    if (!done && g_frames - f_live >= (u32)g_cfg.heli_call) {
+        typedef unsigned char (__cdecl *fn119930_t)(u32);
+        unsigned char r = 0xFF;
+        u32 pos = 0;
+        done = 1;
+        __try {
+            pos = vtp ? *(volatile u32 *)(uintptr_t)vtp : 0u;
+            if (hu && pos) {
+                r = ((fn119930_t)(uintptr_t)SBA(0x119930u))(pos);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            r = 0xFE;
+        }
+        HLOG_I("HELI call f=%u unit=%u vtpos=0x%X -> %u", g_frames, hu, pos, r);
+    }
+}
+
 /* W268 COCKPIT-HIDE: Komfort-Option "Cockpit ausblenden" ([render]
  * cockpit_hide, Standard 0 = kein Schreiben, bitgleich). Wirkung wie der
  * Spiel-Kniff IGNITION+START (W263): Vollbild-Flag u16 [0x3516DC]=1, dann
@@ -329,6 +550,7 @@ u32 __stdcall hook_D3DDevice_Swap(u32 flags)
     sb_cchain_tick(); /* W303 CAMPAIGN-CHAIN: Kampagnen-Kette (nur mit campaign_chain) */
     sb_vexp_swap(); /* W255 VIDEO-EXPORT: Aufnahme/Ende (nur mit video_export) */
     ign_gate_tick(); /* W52 IGNFIX: Gate Bit 2 (nur bei ign_toggle_fix=1) */
+    heli_call_tick(); /* DIAG(ISSUE-GEO): Hubschrauber rufen (nur bei heli_call>0) */
     cockpit_hide_tick(); /* W268 COCKPIT-HIDE: Vollbild-Flag (nur bei cockpit_hide=1) */
     flat_capture_tick(); /* W290 QUICK-SHOT: Vollbild-Ansicht fuer eine Aufnahme (nur auf Anforderung) */
     /* DIAG(MEMSCAN): XBE-.data (0x279DC0-0x6ED17C, memory.tsv) alle N Frames
@@ -751,6 +973,7 @@ u32 __stdcall hook_D3DDevice_SetVertexDataColor(u32 reg, u32 color)
     if (hlog_throttle(&calls)) {
         HLOG_T("D3D SetVertexDataColor(%u, 0x%X)", reg, color);
     }
+    if (g_sba_loc && g_cfg.loc_ui_diag) { loc_render_ui_color(reg, color, (const unsigned *)_AddressOfReturnAddress()); } /* DIAG(W349) */
     sb_render_im_color(reg, color);
     return 0;
 }

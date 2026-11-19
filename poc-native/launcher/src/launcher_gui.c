@@ -52,6 +52,10 @@
 #include "launcher_diag.h" /* W279 DIAG-CRASH: Absturz-Karte + Diagnosepaket (launcher_diag.inc) */
 #include "launcher_games.h" /* W276 LOC-LAUNCH */
 #include "launcher_account.h" /* W328 STEELNET-ACCOUNT: Pilotenkonto */
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+#include "launcher_loctp.h" /* W336 LOC-TESTPARTNER (nur interne Ausgabe) */
+#endif
+#include "steelnet_pins.h" /* W334 LOC-SEC: SB_STEELNET_HOST/PORT/SPKI1/2 (Online-Karte LoC) */
 #include "launcher_orig.h" /* W278 ORIG-FLAG */
 #include "sb_origflag.h" /* W278: SB_OFG_* */
 #include "launcher_layout.h" /* W281 LAUNCHER-SIZE: Layout 0/a/b (Entwurf) */
@@ -98,6 +102,9 @@ static const wchar_t kPageIcon[P_N] = { 0xE768, 0xE7F4, 0xE790, 0xE7B8,
 /* W272 ALPHA-TEST: Seite "Test tools" (W301, vorher "Alpha Test"; launcher_alpha.inc, vor den Selbsttests) */
 static int g_alpha_tools = 1; /* launcher_ui.cfg test_tools (W301; Rueckfall alpha_tools), 0 = Seite aus */
 static int g_show_adv; /* W291 ESC-REWORK: launcher_ui.cfg show_advanced (Feinregler auf Anzeige/Grafik zeigen) */
+/* W351 LOC-TP-FIX: launcher_ui.cfg loctp_mode (Testpartner-Ablauf, 0 = du erstellst, 1 = Partner erstellt);
+ * -1 = nie gewaehlt (nicht geschrieben). Auch die Community-Ausgabe liest und schreibt den Wert unveraendert mit. */
+static int g_loctp_mode_cfg = -1;
 static void paint_alpha(void);
 static void alpha_build_controls(HWND w);
 static void alpha_page_shown(void);
@@ -276,7 +283,8 @@ int gui_page_from_name(const char *v)
 #define ID_VOL_MUSIC 1119
 #define ID_VOL_SFX 1120
 #define ID_VOL_VOICE 1121
-#define VOL_N 21           /* Listen 100 %, 95 %, ... 0 % (5er-Schritte, wie ESC) */
+#define ID_HRTF 1122       /* W356 AUDIO-2: Kopfhoerer (3D-Klang/HRTF wie die Konsole) */
+#define VOL_N 21          /* Listen 100 %, 95 %, ... 0 % (5er-Schritte, wie ESC) */
 #define EXY 18             /* W303: Karte "Fotos & Screenshots" 18 tiefer (Platz fuer die Lautstaerke) */
 static const int kVolId[4] = { ID_VOL_MASTER, ID_VOL_MUSIC, ID_VOL_SFX, ID_VOL_VOICE };
 static const char *const kVolKey[4] = { "gui.vol_master", "gui.vol_music", "gui.vol_sfx", "gui.vol_voice" };
@@ -452,6 +460,7 @@ static void xtip_text(int id, char *out, size_t cap);
 static void orig_relabel(void);
 static int loctab_command(int id, int code);
 static void acc_page_shown(void); /* W328 STEELNET-ACCOUNT */
+static int onl_status_refresh(void); /* W334 LOC-SEC: loc_net_status.txt (Block nach loctab_save) */
 static void acc_apply_state(const char *name); /* W328: Shot-Zustaende loc_acc_* */
 static void loctab_relabel(void);
 /* W281 LAUNCHER-SIZE (Block bei on_dpi) */
@@ -1128,7 +1137,7 @@ static int bg_load(void)
     if (!wic_init()) {
         return 0;
     }
-    r = FindResourceW(NULL, MAKEINTRESOURCEW(IDR_BG), RT_RCDATA);
+    r = FindResourceW(NULL, MAKEINTRESOURCEW(IDR_BG), MAKEINTRESOURCEW(10) /* RT_RCDATA */);
     if (!r) {
         return 0;
     }
@@ -1406,6 +1415,9 @@ static int ui_cfg_save_bg(const char *client_dir, int bg)
                "test_tools=%d\n" /* W272/W301: Seite Test tools (0 = aus; alte cfg: alpha_tools) */
                "show_advanced=%d\n", /* W291: Feinregler auf Anzeige/Grafik */
             bg ? 1 : 0, g_diag_open ? 1 : 0, g_alpha_tools ? 1 : 0, g_show_adv ? 1 : 0);
+    if (g_loctp_mode_cfg >= 0) { /* W351: Testpartner-Ablauf */
+        fprintf(f, "loctp_mode=%d\n", g_loctp_mode_cfg);
+    }
     if (g_lay_cfg_id >= 0) { /* W281: Layout-Vorschau 0|a|b + UI-Groesse */
         fprintf(f, "launcher_layout=%s\nui_size=%s\n", llay_name(g_lay_cfg_id),
                 llay_size_name(g_lay_cfg_size >= 0 ? g_lay_cfg_size : LLAY_SZ_NORMAL));
@@ -2599,7 +2611,7 @@ static void paint_audio(void)
     /* W290: Ton und Spieltempo nebeneinander, darunter die groessere Karte "Fotos & Screenshots" */
     /* W303 AUDIO-VOLUME: Karte "Ton & Lautstaerke" (158 hoch): Schalter + Ausgabe, darunter 2x2 Regler */
     card(CX0, CY0, COLW, 140 + EXY, LT("gui.audio_card"));
-    label(F_TINY, LT("gui.audio_dev_txt"), CX0 + 178, CY0 + 46, COLW - 196, 30, C_DIM);
+    /* W356: rechts neben "Ton an" der Schalter "Kopfhoerer" (statt des Hinweises zum Ausgabegeraet) */
     {
         int k;
         for (k = 0; k < 4; k++) { /* Gesamt | Musik / Effekte | Sprache/Funk */
@@ -4195,7 +4207,7 @@ static void keyshtml_parse(const char *memo)
     if (!memo) {
         return;
     }
-    strcpy_s(work, sizeof work, memo);
+    strncpy_s(work, sizeof work, memo, _TRUNCATE); /* W332 SEC: ueberlanges Memo kuerzen statt Abbruch */
     p = work;
     while (*p) {
         char *line = p, *tab;
@@ -4250,7 +4262,10 @@ static void keyshtml_parse(const char *memo)
             continue;
         }
         *tab = '\0';
-        if (kh_n < KH_MAXROWS) {
+        /* W332 SEC: Tasten-/Aktionstext laenger als das Feld (Sprachdatei) -> Zeile verwerfen statt
+         * strcpy_s-Abbruch (Fuzz-Fund keyshtml). */
+        if (kh_n < KH_MAXROWS && strlen(keyshtml_trim(line)) < sizeof kh_rows[0].key &&
+            strlen(keyshtml_trim(tab + 1)) < sizeof kh_rows[0].act) {
             int s = sec;
             if (blank) {
                 s = KH_MOUSEX; /* kopflose Zeile (F10) -> Maus */
@@ -6533,6 +6548,7 @@ static void ui_from_settings(const launcher_settings_t *s)
                           : s->fps_limit == 120 ? 3 : 0);
     ui_set_checked(ID_AUDIO, s->audio);
     ui_set_checked(ID_LIVE, s->audio_live);
+    ui_set_checked(ID_HRTF, s->audio_hrtf); /* W356 */
     { /* W303 AUDIO-VOLUME: auf 5 gerundet anzeigen, Rohwert merken (ui_to_settings behaelt ihn, wenn unveraendert) */
         const int vv[4] = { s->volume_master, s->volume_music, s->volume_sfx, s->volume_voice };
         int k;
@@ -6642,6 +6658,7 @@ static void ui_to_settings(launcher_settings_t *s)
     s->fps_limit = (sel >= 0 && sel < 4) ? fps_map[sel] : 0;
     s->audio = ui_checked(ID_AUDIO);
     s->audio_live = ui_checked(ID_LIVE);
+    s->audio_hrtf = ui_checked(ID_HRTF) ? 1 : 0; /* W356 */
     { /* W303 AUDIO-VOLUME */
         int *vp[4] = { &s->volume_master, &s->volume_music, &s->volume_sfx, &s->volume_voice };
         int k;
@@ -14281,6 +14298,9 @@ static void show_page(int p)
     }
     g_page = p;
     g_setup_force = 0; /* W172: Einrichtungskarte nur, wenn Regel R3 greift */
+    if (p == P_PLAY && g_game == LGAME_LOC) {
+        onl_status_refresh(); /* W334: Raumcode/Sicherheitsmeldung vor der Sichtbarkeit (Kopieren) */
+    }
     for (i = 0; i < g_ui_n; i++) {
         uictl_t *u = &g_ui[i];
         if (u->parent != g_hwnd) {
@@ -14504,6 +14524,7 @@ static void ui_apply_language(void)
     /* Ton */
     ui_settext(ctl(ID_AUDIO), LT("gui.ton_on"));
     ui_settext(ctl(ID_LIVE), LT("gui.ton_live"));
+    ui_settext(ctl(ID_HRTF), LT("gui.hrtf")); /* W356 */
     ui_settext(ctl(ID_SAVE_LOCK), LT("gui.save_lock")); /* W190 */
     ui_settext(ctl(ID_PH_BROWSE), LT("gui.btn_browse")); /* W195 */
     ui_settext(ctl(ID_PH_OPEN), LT("gui.extras_open"));
@@ -14654,8 +14675,11 @@ static void ui_apply_language(void)
 #define LOC_SUM_N 5
 #define ID_LOC_WIDE 2772    /* W326 LOC-WIDE: Auswahl Bildformat (LoC > Erweitert) */
 #define ID_LOC_WIDE_XI 2773 /* W326: Experimentell-Symbol an der Karte "Bildformat" */
+#define ID_LOC_ONL 2774       /* W334 LOC-SEC: Schalter "Online-Spiel" (Karte "Online (steelnet)", LoC-Spielen) */
+#define ID_LOC_CODE 2775      /* W334: Raumcode zum Beitreten (leer = eigene Lobby mit Raumcode) */
+#define ID_LOC_CODE_COPY 2776 /* W334: Raumcode der eigenen Lobby kopieren (nur sichtbar mit Code) */
 #define ID_LOC_FIRST ID_LOC_START
-#define ID_LOC_LAST ID_LOC_WIDE_XI /* = ID_LOC_GO0 + LOC_SUM_N - 1 + 2 (lueckenlos) */
+#define ID_LOC_LAST ID_LOC_CODE_COPY /* = ID_LOC_GO0 + LOC_SUM_N - 1 + 5 (lueckenlos) */
 /* W293 LOC-LAYOUT: Spielen = Kopf, Start, Bereitschaft (wie SB), Hinweisband
  * unten; Disc, Spielstaende & Daten und Online liegen links auf Erweitert
  * (rechts die gemeinsamen Teile Feinabstimmung + Launcher). */
@@ -14671,6 +14695,14 @@ static void ui_apply_language(void)
  * (dort, wo im SB-Bereich die Diagnose steht), unten buendig mit Online. */
 #define LOC_WIDE_Y (CY0 + 256)
 #define LOC_WIDE_H 240
+/* W334 LOC-SEC: Karte "Online (steelnet)" auf LoC-Spielen rechts neben dem
+ * Start (frueher "Gemeinsam mit Steel Battalion"; der Hinweis steht jetzt
+ * dezent im Kopf von "Startbereit"), Vertrauenshinweis knapp darunter. */
+#define LOC_NET_X UPD_X
+#define LOC_NET_Y UPD_Y
+#define LOC_NET_W UPD_W
+#define LOC_NET_H 116
+#define ONL_TIMER 26 /* W334: loc_net_status.txt nachlesen (2 s, nur LoC-Spielen) */
 static lgame_state_t g_loc;        /* LoC-Einstellungen (user.cfg launcher_*) */
 static lgame_img_t g_loc_res;      /* letzte Abbild-Pruefung */
 static char g_loc_res_path[512];   /* ... gilt nur fuer diesen Pfad */
@@ -14682,9 +14714,18 @@ static char g_loc_last_cmd[1600];  /* Selbsttest: Startweg (Trockenlauf) */
 #define LOC_SB_ISO "D:\\Games\\Steel Battalion (Europe).iso"
 
 static void loctab_wide_sync(void); /* W326 */
+static void onl_load(void);         /* W334 */
 static int acc_visible(int id, int page); /* W328 */
 static int acc_view_active(void);        /* W328 */
 static wchar_t *acc_launch_env(char *set, size_t cap); /* W328 */
+/* W336 LOC-TESTPARTNER: Knoepfe im LoC-Tab (nur interne Ausgabe; IDs auch in der Community-Ausgabe
+ * bekannt, damit der Selbsttest dort "kein Knopf" pruefen kann). Code: launcher_loctp_gui.inc. */
+#define ID_LOCTP_OPEN 2880
+#define ID_LOCTP_STOP 2881
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+static int loctp_visible_id(int id, int page);
+static int loctp_command(int id, int code);
+#endif
 
 static int loctab_may_write(void)
 {
@@ -14700,6 +14741,7 @@ static void loctab_load(void)
     g_loc_checked = 0;
     g_loc_res_path[0] = '\0';
     loctab_wide_sync(); /* W326 (vor build_controls: nur Wert pruefen) */
+    onl_load();         /* W334: Schalter "Online-Spiel" */
 }
 
 static int loctab_save(void) /* 0 = gespeichert, 1 = nicht geschrieben (Shot), -1 = Fehler */
@@ -14715,6 +14757,472 @@ static int loctab_save(void) /* 0 = gespeichert, 1 = nicht geschrieben (Shot), -
         return -1;
     }
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* W334 LOC-SEC-CLIENT: Online-Spiel ueber steelnet (Protokoll v2,      */
+/* SECURITY.md §3.5 Raumcode, §6.6 Punkt 6, §9, §13 F2). Karte "Online  */
+/* (steelnet)" auf LoC-Spielen: Schalter (user.cfg launcher_loc_online, */
+/* Standard aus), Raumcode (leer = eigene Lobby mit Raumcode). Start    */
+/* mit loc_transport=udp;loc_lobby=<Host>:<Port>;loc_lobby_code=<Code>. */
+/* Waehrend/nach dem Lauf liest die Karte loc_net_status.txt (sec=,     */
+/* lobby_code=). Dienst nicht eingerichtet (beide SPKI in               */
+/* steelnet_pins.h leer) = Schalter grau, kein Online-Start.            */
+/* ------------------------------------------------------------------ */
+#define ONL_KEY "launcher_loc_online"
+static int g_loc_online;             /* 1 = Online-Spiel an (gemerkt) */
+static int g_onl_fix_srv = -1;       /* Shots/Selbsttest: -1 = echte Pins, sonst 0/1 */
+static int g_onl_fixture;            /* Shots: Status vorgegeben, nie von der Platte */
+static char g_onl_sec[24];           /* letzter sec= ("" = unbekannt) */
+static char g_onl_code[16];          /* letzter lobby_code= (normalisiert, "" = keiner) */
+static char g_onl_status_test[1200]; /* Selbsttest: Statusdatei statt Lauf-Ordner */
+static ULONGLONG g_onl_since;        /* FILETIME: aeltere Statusdateien (frueherer Lauf) gelten nicht */
+
+/* sec= -> Meldung (ok/unbekannt: keine). */
+static const char *const kOnlSec[][2] = {
+    { "selftest_failed", "gui.loc_onl_sec_selftest" },
+    { "pin_failed", "gui.loc_onl_sec_pin" },
+    { "no_pin", "gui.loc_onl_nosrv" },
+    { "upgrade_required", "gui.loc_onl_sec_upgrade" },
+};
+#define ONL_SEC_N ((int)(sizeof kOnlSec / sizeof kOnlSec[0]))
+/* W353 LOC-DURCHSTICH: err= (Fehlergrund des Clients, loc_tun.c tl_write_status) -> Meldung de/en */
+static const char *const kOnlErr[][2] = {
+    { "dns", "gui.loc_onl_err_dns" },         /* kein Netz bzw. Treffpunkt-Name nicht aufloesbar */
+    { "connect", "gui.loc_onl_err_connect" }, /* Aufbau zum Treffpunkt gescheitert (Netz/Firewall/Dienst aus) */
+    { "lost", "gui.loc_onl_err_lost" },       /* Verbindung zum Treffpunkt verloren, neuer Versuch */
+    { "code", "gui.loc_onl_err_code" },       /* Raumcode nicht gefunden */
+    { "full", "gui.loc_onl_err_full" },       /* Lobby voll */
+    { "rate", "gui.loc_onl_err_rate" },       /* zu viele Versuche */
+    { "path", "gui.loc_onl_err_path" },       /* Mitspieler weder direkt noch ueber Relay erreichbar */
+};
+#define ONL_ERR_N ((int)(sizeof kOnlErr / sizeof kOnlErr[0]))
+static char g_onl_err[12]; /* W353: letzter err= ("" = keiner) */
+
+static int onl_srv_on(void)
+{
+    static const char kP1[] = SB_STEELNET_SPKI1, kP2[] = SB_STEELNET_SPKI2;
+    if (g_onl_fix_srv >= 0) {
+        return g_onl_fix_srv;
+    }
+    return kP1[0] != '\0' || kP2[0] != '\0';
+}
+
+static ULONGLONG onl_now_ft(void)
+{
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    return ((ULONGLONG)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+}
+
+/* Raumcode normalisieren: Gross/Klein, '-' und Leerzeichen egal, I/L -> 1 und
+ * O -> 0 (wie der Dienst, §3.5), sonst nur Crockford-Base32 (0-9, A-Z ohne
+ * I L O U); hoechstens 9 Zeichen ohne Leerzeichen, genau 8 Codezeichen.
+ * 0 = leer (eigene Lobby), 1 = gueltig (out = "XXXX-XXXX"), -1 = ungueltig. */
+static int onl_code_norm(const char *in, char *out, size_t cap)
+{
+    char c8[8];
+    int n = 0, sig = 0;
+    out[0] = '\0';
+    if (!in) {
+        return 0;
+    }
+    for (; *in; in++) {
+        char ch = *in;
+        if (ch == ' ' || ch == '\t') {
+            continue;
+        }
+        if (++sig > 9) {
+            return -1;
+        }
+        if (ch == '-') {
+            continue;
+        }
+        if (ch >= 'a' && ch <= 'z') {
+            ch = (char)(ch - 'a' + 'A');
+        }
+        if (ch == 'I' || ch == 'L') {
+            ch = '1';
+        } else if (ch == 'O') {
+            ch = '0';
+        }
+        if (!((ch >= '0' && ch <= '9') || (ch >= 'A' && ch <= 'Z')) || ch == 'U' || n >= 8) {
+            return -1;
+        }
+        c8[n++] = ch;
+    }
+    if (sig == 0) {
+        return 0;
+    }
+    if (n != 8) {
+        return -1;
+    }
+    _snprintf_s(out, cap, _TRUNCATE, "%.4s-%.4s", c8, c8 + 4);
+    return 1;
+}
+
+/* --set des LoC-Starts: mit Online (an + Dienst eingerichtet) Transport,
+ * Treffpunkt und Raumcode anhaengen (leerer Code = eigene Lobby anlegen).
+ * 0 = ok (ggf. unveraendert), -1 = Raumcode ungueltig (nicht starten). */
+static int onl_set_append(char *set, size_t cap, int on, int srv, const char *raw)
+{
+    char code[16];
+    size_t l = strlen(set);
+    if (!on || !srv) {
+        return 0;
+    }
+    if (onl_code_norm(raw, code, sizeof code) < 0) {
+        return -1;
+    }
+    /* W353: Rollback-Eingabeschicht ausdruecklich an (je Mission ausgehandelt, Rueckfall Lockstep), unabhaengig
+     * vom Client-Standard und von user.cfg - beide Seiten eines Online-Spiels wollen dasselbe */
+    _snprintf_s(set + l, cap - l, _TRUNCATE, "%sloc_transport=udp;loc_lobby=%s:%d;loc_lobby_code=%s;loc_rb_input=1",
+                l ? ";" : "", SB_STEELNET_HOST, (int)SB_STEELNET_PORT, code);
+    return 0;
+}
+
+/* loc_net_status.txt lesen (Schluessel=Wert je Zeile, letzte Zeile gewinnt).
+ * Nur bekannte sec-Werte und gueltige Raumcodes werden uebernommen.
+ * 1 = gelesen, 0 = fehlt. */
+static int onl_status_parse(const char *path, char *sec, size_t sc, char *code, size_t cc)
+{
+    FILE *f = NULL;
+    char line[256];
+    sec[0] = code[0] = '\0';
+    if (!path || u8_fopen_s(&f, path, "r") != 0 || !f) {
+        return 0;
+    }
+    while (fgets(line, sizeof line, f)) {
+        char *e = line + strlen(line);
+        while (e > line && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ')) {
+            *--e = '\0';
+        }
+        if (strncmp(line, "sec=", 4) == 0) {
+            int i;
+            sec[0] = '\0';
+            if (strcmp(line + 4, "ok") == 0) {
+                strncpy_s(sec, sc, "ok", _TRUNCATE);
+            }
+            for (i = 0; i < ONL_SEC_N; i++) {
+                if (strcmp(line + 4, kOnlSec[i][0]) == 0) {
+                    strncpy_s(sec, sc, kOnlSec[i][0], _TRUNCATE);
+                }
+            }
+        } else if (strncmp(line, "lobby_code=", 11) == 0) {
+            if (onl_code_norm(line + 11, code, cc) != 1) {
+                code[0] = '\0';
+            }
+        }
+    }
+    fclose(f);
+    return 1;
+}
+
+/* W353: err= aus loc_net_status.txt (letzte Zeile gewinnt); nur bekannte Werte, sonst leer. */
+static void onl_status_err(const char *path, char *err, size_t cap)
+{
+    FILE *f = NULL;
+    char line[128];
+    err[0] = '\0';
+    if (!path || u8_fopen_s(&f, path, "r") != 0 || !f) {
+        return;
+    }
+    while (fgets(line, sizeof line, f)) {
+        char *e = line + strlen(line);
+        int i;
+        while (e > line && (e[-1] == '\n' || e[-1] == '\r' || e[-1] == ' ')) {
+            *--e = '\0';
+        }
+        if (strncmp(line, "err=", 4) != 0) {
+            continue;
+        }
+        err[0] = '\0';
+        for (i = 0; i < ONL_ERR_N; i++) {
+            if (strcmp(line + 4, kOnlErr[i][0]) == 0) {
+                strncpy_s(err, cap, kOnlErr[i][0], _TRUNCATE);
+            }
+        }
+    }
+    fclose(f);
+}
+
+/* Lauf-Ordner des Clients: SB_OUT_DIR (erbt der Kindprozess; relativ = zum
+ * Client-Ordner, dem Arbeitsordner des Clients), sonst der Client-Ordner. */
+static void onl_status_path(char *out, size_t cap)
+{
+    char od[1024];
+    if (g_onl_status_test[0]) {
+        strcpy_s(out, cap, g_onl_status_test);
+        return;
+    }
+    if (u8_GetEnv("SB_OUT_DIR", od, sizeof od) > 0 && od[0]) {
+        int abs = od[0] == '\\' || od[0] == '/' || (od[0] && od[1] == ':');
+        if (abs) {
+            _snprintf_s(out, cap, _TRUNCATE, "%s\\loc_net_status.txt", od);
+        } else {
+            _snprintf_s(out, cap, _TRUNCATE, "%s\\%s\\loc_net_status.txt", g_client_dir, od);
+        }
+        return;
+    }
+    _snprintf_s(out, cap, _TRUNCATE, "%s\\loc_net_status.txt", g_client_dir);
+}
+
+/* Statusdatei nachlesen (nur Dateien seit g_onl_since). 1 = Anzeige geaendert. */
+static int onl_status_refresh(void)
+{
+    char p[1200], sec[24] = "", code[16] = "", err[12] = "";
+    wchar_t w[1200];
+    WIN32_FILE_ATTRIBUTE_DATA fa;
+    if (g_onl_fixture || (g_o.shot != 0 && !g_onl_status_test[0])) {
+        return 0; /* Shots: nie die echte Datei */
+    }
+    onl_status_path(p, sizeof p);
+    u8_to_w(p, w, 1200);
+    if (GetFileAttributesExW(w, GetFileExInfoStandard, &fa)) {
+        ULONGLONG t = ((ULONGLONG)fa.ftLastWriteTime.dwHighDateTime << 32) | fa.ftLastWriteTime.dwLowDateTime;
+        if (t >= g_onl_since) {
+            onl_status_parse(p, sec, sizeof sec, code, sizeof code);
+            onl_status_err(p, err, sizeof err); /* W353 */
+        }
+    }
+    if (strcmp(sec, g_onl_sec) == 0 && strcmp(code, g_onl_code) == 0 && strcmp(err, g_onl_err) == 0) {
+        return 0;
+    }
+    strcpy_s(g_onl_sec, sizeof g_onl_sec, sec);
+    strcpy_s(g_onl_code, sizeof g_onl_code, code);
+    strcpy_s(g_onl_err, sizeof g_onl_err, err);
+    return 1;
+}
+
+/* Infozeile der Karte (Text, Farbe). Rueckgabe 1 = Raumcode der eigenen
+ * Lobby wird gezeigt (Knopf "Kopieren" sichtbar). Reihenfolge: Dienst fehlt,
+ * Eingabe ungueltig, Sicherheitsmeldung des Clients, eigener Raumcode, Hinweis. */
+static int onl_info(char *out, size_t cap, COLORREF *col)
+{
+    char raw[64] = "", code[16];
+    int i;
+    if (!onl_srv_on()) {
+        strncpy_s(out, cap, LT("gui.loc_onl_nosrv"), _TRUNCATE);
+        *col = C_DIM;
+        return 0;
+    }
+    if (ctl(ID_LOC_CODE)) {
+        ui_gettext(ctl(ID_LOC_CODE), raw, sizeof raw);
+    }
+    if (g_loc_online && onl_code_norm(raw, code, sizeof code) < 0) {
+        strncpy_s(out, cap, LT("gui.loc_code_bad"), _TRUNCATE);
+        *col = C_WARN;
+        return 0;
+    }
+    for (i = 0; i < ONL_SEC_N; i++) {
+        if (strcmp(g_onl_sec, kOnlSec[i][0]) == 0) {
+            strncpy_s(out, cap, LT(kOnlSec[i][1]), _TRUNCATE);
+            *col = strcmp(g_onl_sec, "no_pin") == 0 ? C_WARN : C_ERR;
+            return 0;
+        }
+    }
+    for (i = 0; i < ONL_ERR_N; i++) { /* W353: Fehlergrund vor dem Raumcode (was jetzt zu tun ist) */
+        if (strcmp(g_onl_err, kOnlErr[i][0]) == 0) {
+            strncpy_s(out, cap, LT(kOnlErr[i][1]), _TRUNCATE);
+            *col = (strcmp(g_onl_err, "lost") == 0 || strcmp(g_onl_err, "rate") == 0) ? C_WARN : C_ERR;
+            return 0;
+        }
+    }
+    if (g_onl_code[0]) {
+        _snprintf_s(out, cap, _TRUNCATE, LT("gui.loc_onl_code"), g_onl_code);
+        *col = C_OK;
+        return 1;
+    }
+    strncpy_s(out, cap, LT("gui.loc_code_hint"), _TRUNCATE);
+    *col = C_DIM;
+    return 0;
+}
+
+static void onl_load(void)
+{
+    char up[1200], line[256];
+    FILE *f = NULL;
+    size_t kl = strlen(ONL_KEY);
+    g_loc_online = 0;
+    if (!g_onl_since) { /* laufendes Spiel (Launcher neu geoeffnet) zaehlt, alte Laeufe nicht */
+        g_onl_since = onl_now_ft() - 600ULL * 10000000ULL;
+    }
+    user_cfg_path(up, sizeof up);
+    if (u8_fopen_s(&f, up, "r") == 0 && f) {
+        while (fgets(line, sizeof line, f)) {
+            if (strncmp(line, ONL_KEY, kl) == 0 && line[kl] == '=') {
+                g_loc_online = atoi(line + kl + 1) ? 1 : 0; /* letzte Zeile gewinnt */
+            }
+        }
+        fclose(f);
+    }
+}
+
+/* launcher_loc_online in user.cfg setzen (erste Zeile ersetzen, Doppelte weg,
+ * sonst anhaengen; fremde Zeilen bleiben). 0 = gespeichert, 1 = nicht
+ * geschrieben (Shot), -1 = Fehler. */
+static int onl_save(void)
+{
+    char up[1200], line[1200], *out;
+    FILE *f = NULL;
+    size_t n = 0, cap = 1024 * 1024, kl = strlen(ONL_KEY);
+    int done = 0;
+    if (!loctab_may_write()) {
+        return 1;
+    }
+    user_cfg_path(up, sizeof up);
+    out = (char *)malloc(cap);
+    if (!out) {
+        return -1;
+    }
+    if (u8_fopen_s(&f, up, "r") == 0 && f) {
+        while (fgets(line, sizeof line, f)) {
+            size_t l;
+            if (strncmp(line, ONL_KEY, kl) == 0 && line[kl] == '=') {
+                if (done) {
+                    continue;
+                }
+                _snprintf_s(line, sizeof line, _TRUNCATE, "%s=%d\n", ONL_KEY, g_loc_online ? 1 : 0);
+                done = 1;
+            }
+            l = strlen(line);
+            if (n + l + 64 >= cap) {
+                fclose(f);
+                free(out);
+                return -1;
+            }
+            memcpy(out + n, line, l);
+            n += l;
+        }
+        fclose(f);
+    }
+    if (!done) {
+        if (n > 0 && out[n - 1] != '\n') {
+            out[n++] = '\n';
+        }
+        n += (size_t)_snprintf_s(out + n, cap - n, _TRUNCATE, "%s=%d\n", ONL_KEY, g_loc_online ? 1 : 0);
+    }
+    if (u8_fopen_s(&f, up, "w") != 0 || !f) {
+        free(out);
+        set_status_k(LT("gui.loc_save_err"), 2);
+        return -1;
+    }
+    fwrite(out, 1, n, f);
+    fclose(f);
+    free(out);
+    return 0;
+}
+
+/* Schalter/Feld zum Zustand: ohne Dienst grau (und aus), Feld nur mit Online an. */
+static void onl_sync_ui(void)
+{
+    int srv = onl_srv_on();
+    if (ctl(ID_LOC_ONL)) {
+        ui_set_checked(ID_LOC_ONL, srv && g_loc_online);
+        EnableWindow(ctl(ID_LOC_ONL), srv ? TRUE : FALSE);
+    }
+    if (ctl(ID_LOC_CODE)) {
+        EnableWindow(ctl(ID_LOC_CODE), srv && g_loc_online ? TRUE : FALSE);
+    }
+}
+
+static void onl_redraw(void)
+{
+    redraw_rect(LOC_NET_X, LOC_NET_Y, LOC_NET_W, LOC_NET_H + 22); /* + Vertrauenshinweis */
+}
+
+static int onl_copy_visible(void)
+{
+    char t[300];
+    COLORREF c;
+    return onl_info(t, sizeof t, &c);
+}
+
+static void onl_copy(void)
+{
+    wchar_t w[16];
+    HGLOBAL hg;
+    if (!g_onl_code[0]) {
+        return;
+    }
+    if (g_o.shot != 0) { /* Test: Zwischenablage des Nutzers nie anfassen */
+        printf("[clipboard] Raumcode (%u Zeichen)\n", (unsigned)strlen(g_onl_code));
+        set_status_k(LT("gui.loc_code_copied"), 1);
+        return;
+    }
+    u8_to_w(g_onl_code, w, 16);
+    if (OpenClipboard(g_hwnd)) {
+        EmptyClipboard();
+        hg = GlobalAlloc(GMEM_MOVEABLE, (wcslen(w) + 1) * sizeof(wchar_t));
+        if (hg) {
+            memcpy(GlobalLock(hg), w, (wcslen(w) + 1) * sizeof(wchar_t));
+            GlobalUnlock(hg);
+            if (!SetClipboardData(CF_UNICODETEXT, hg)) {
+                GlobalFree(hg);
+            }
+        }
+        CloseClipboard();
+        set_status_k(LT("gui.loc_code_copied"), 1);
+    }
+}
+
+static void onl_toggle(void)
+{
+    if (!onl_srv_on()) {
+        set_status_k(LT("gui.loc_onl_nosrv"), 0);
+        onl_sync_ui();
+        return;
+    }
+    g_loc_online = !g_loc_online;
+    onl_sync_ui();
+    if (onl_save() >= 0) {
+        set_status_k(LT(g_loc_online ? "gui.loc_onl_on" : "gui.loc_onl_off"), g_loc_online ? 1 : 0);
+    }
+    ui_refresh_visibility();
+    onl_redraw();
+}
+
+/* Timer (2 s) und Seitenwechsel: Status des laufenden/letzten Spiels. */
+static void onl_tick(void)
+{
+    if (g_game != LGAME_LOC || g_page != P_PLAY || !g_hwnd || IsIconic(g_hwnd)) {
+        return;
+    }
+    if (onl_status_refresh()) {
+        ui_refresh_visibility();
+        onl_redraw();
+    }
+}
+
+static void onl_paint(void)
+{
+    char t[400];
+    COLORREF col = C_DIM;
+    int x = LOC_NET_X, y = LOC_NET_Y, w = LOC_NET_W, cp = onl_info(t, sizeof t, &col);
+    card(x, y, w, LOC_NET_H, LT("gui.loc_onl_title"));
+    label1(F_SMALL, LT("gui.loc_code"), x + 170, y + 42, 64, 28, onl_srv_on() && g_loc_online ? C_DIM : C_FAINT);
+    label(F_TINY, t, x + 18, y + 76, w - 36 - (cp ? 92 : 0), 36, col);
+    /* Nutzerentscheid F2 (§6.6 Punkt 6): dezent unter der Karte */
+    label1(F_TINY, LT("gui.loc_onl_trust"), x + 18, y + LOC_NET_H + 2, w - 36, 16, C_DIM);
+}
+
+static void onl_build(HWND w)
+{
+    int x = LOC_NET_X, y = LOC_NET_Y, cw = LOC_NET_W;
+    mk(w, K_TOGGLE, ID_LOC_ONL, P_PLAY, x + 18, y + 42, 148, 28, LT("gui.loc_onl_toggle"), 0);
+    mk(w, K_EDIT, ID_LOC_CODE, P_PLAY, x + 236, y + 42, cw - 18 - 236, 28, "", ES_UPPERCASE);
+    mk(w, K_BTN, ID_LOC_CODE_COPY, P_PLAY, x + cw - 18 - 84, y + 80, 84, 26, LT("gui.loc_code_copy"), 0);
+    if (ctl(ID_LOC_CODE)) {
+        SendMessageW(ctl(ID_LOC_CODE), EM_LIMITTEXT, 12, 0);
+        SendMessageW(ctl(ID_LOC_CODE), EM_SETCUEBANNER, TRUE, (LPARAM)L"XXXX-XXXX");
+    }
+    onl_sync_ui();
+}
+
+static void onl_relabel(void)
+{
+    if (ctl(ID_LOC_ONL)) ui_settext(ctl(ID_LOC_ONL), LT("gui.loc_onl_toggle"));
+    if (ctl(ID_LOC_CODE_COPY)) ui_settext(ctl(ID_LOC_CODE_COPY), LT("gui.loc_code_copy"));
 }
 
 /* W326 LOC-WIDE: Auswahl "Bildformat" (LoC > Erweitert). Eintraege = die
@@ -14796,9 +15304,20 @@ static int loctab_visible(const uictl_t *u, int page)
             return av;
         }
     }
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+    { /* W336: Testpartner-Knoepfe auf LoC > Spielen */
+        int tv = loctp_visible_id(u->id, page);
+        if (tv >= 0) {
+            return tv;
+        }
+    }
+#endif
     if (u->id >= ID_LOC_FIRST && u->id <= ID_LOC_LAST) {
         if (page == P_ADV && acc_view_active()) {
             return 0; /* W328: Verwaltungsansicht deckt die Seite */
+        }
+        if (u->id == ID_LOC_CODE_COPY && !onl_copy_visible()) {
+            return 0; /* W334: nur mit Raumcode der eigenen Lobby */
         }
         return g_game == LGAME_LOC && page == u->page; /* W293: Start/Change auf Spielen, Disc/Ordner auf Erweitert */
     }
@@ -14948,13 +15467,42 @@ static void loctab_start(void)
         set_status_k(m, lgame_loc_client_ready() ? 2 : 0);
         return;
     }
-    { /* spaeterer Weg (heute nur mit SB_TEST_LOC_READY=1 erreichbar) */
-        char d[1200], acp[1200], set[1400];
+    { /* W353: intern immer, Community nur im privaten Testpaket (lgame_loc_client_ready) */
+        char d[1200], acp[1200], img[1200], set[4096], raw[64] = "";
+        int onl = g_loc_online && onl_srv_on();
+        size_t k;
         loctab_data_dir(d, sizeof d);
         strcat_s(d, sizeof d, "\\hdd");
         u8_to_acp(d, acp, sizeof acp);
+        u8_to_acp(g_loc.loc_image, img, sizeof img);
         wchar_t *env;
-        _snprintf_s(set, sizeof set, _TRUNCATE, "vr_enable=0;hdd_root=%s", acp);
+        /* W353 LOC-DURCHSTICH: Kette wie das Nutzer-Spiel des Testpartners (loctp_build_set, W336):
+         * loc_boot=1 (sonst bricht der Client beim LoC-Abbild ab) und game_image (Ordner/ISO/XBE, hat Vorrang
+         * vor --xbe); ';' im Pfad maskiert (hcfg_apply_set). */
+        strcpy_s(set, sizeof set, "loc_boot=1;game_image=");
+        for (k = 0; img[k] && strlen(set) + 3 < sizeof set; k++) {
+            size_t n = strlen(set);
+            if (img[k] == ';') set[n++] = '\\';
+            set[n++] = img[k];
+            set[n] = '\0';
+        }
+        k = strlen(set);
+        _snprintf_s(set + k, sizeof set - k, _TRUNCATE, ";vr_enable=0;hdd_root=%s", acp);
+        if (ctl(ID_LOC_CODE)) {
+            ui_gettext(ctl(ID_LOC_CODE), raw, sizeof raw);
+        }
+        /* W334: Online (steelnet) -> Transport, Treffpunkt, Raumcode; ungueltiger Code = kein Start */
+        if (onl_set_append(set, sizeof set, onl, onl, raw) != 0) {
+            set_status_k(LT("gui.loc_code_bad"), 2);
+            onl_redraw();
+            return;
+        }
+        if (onl && g_o.shot == 0) { /* Status ab diesem Lauf (aeltere Datei gilt nicht) */
+            g_onl_since = onl_now_ft() - 2ULL * 10000000ULL;
+            g_onl_sec[0] = g_onl_code[0] = g_onl_err[0] = '\0';
+            ui_refresh_visibility();
+            onl_redraw();
+        }
         env = acc_launch_env(set, sizeof set); /* W328: Pilotname + SB_LOC_AUTH nur im Kindprozess */
         app_client_cmdline(g_client_dir, g_loc.loc_image, set, g_loc_last_cmd,
                            sizeof g_loc_last_cmd);
@@ -14972,10 +15520,7 @@ static void loctab_start(void)
         } else {
             set_status_k(m, 2);
         }
-        if (env) {
-            SecureZeroMemory(env, wcslen(env) * sizeof(wchar_t)); /* erster Eintrag (Rest ohne Geheimnis) */
-            free(env);
-        }
+        lacc_env_free(env); /* W344: ganzer Block (sortiert, SB_LOC_AUTH steht nicht vorne) */
     }
 }
 
@@ -15666,6 +16211,11 @@ static int loctab_command(int id, int code)
     if (acc_command(id, code)) { /* W328 */
         return 1;
     }
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+    if (loctp_command(id, code)) { /* W336 */
+        return 1;
+    }
+#endif
     if (id >= ID_LOC_GO0 && id < ID_LOC_GO0 + LOC_SUM_N) {
         if (code == BN_CLICKED) {
             show_page(kLocSumPage[id - ID_LOC_GO0]);
@@ -15692,6 +16242,25 @@ static int loctab_command(int id, int code)
     case ID_LOC_WIDE: /* W326 LOC-WIDE */
         if (code == CBN_SELCHANGE && !g_updating) {
             loctab_wide_pick();
+        }
+        return 1;
+    case ID_LOC_ONL: /* W334 LOC-SEC: Online-Spiel an/aus */
+        if (code == BN_CLICKED) {
+            onl_toggle();
+        }
+        return 1;
+    case ID_LOC_CODE_COPY: /* W334: Raumcode der eigenen Lobby kopieren */
+        if (code == BN_CLICKED) {
+            onl_copy();
+        }
+        return 1;
+    case ID_LOC_CODE: /* W334: Raumcode (Eingabe tolerant, Pruefung in der Infozeile) */
+        if (code == EN_SETFOCUS || code == EN_KILLFOCUS) {
+            g_focus_id = code == EN_SETFOCUS ? id : 0;
+            redraw_all();
+        } else if (code == EN_CHANGE && !g_updating) {
+            ui_refresh_visibility();
+            onl_redraw();
         }
         return 1;
     case ID_LOC_IMAGE:
@@ -15841,16 +16410,17 @@ static void paint_loc_play(void)
         }
         label(F_TINY, LT("gui.loc_soon"), CX0 + 18, CY0 + 146, 312, 40, C_ACCENT_HI);
     }
-    /* rechts: was gemeinsam ist (W293: der Hinweis steht jetzt unten als Band wie bei SB) */
-    card(UPD_X, UPD_Y, UPD_W, 134, LT("gui.loc_shared_title"));
-    label(F_TINY, LT("gui.loc_shared_text"), UPD_X + 18, UPD_Y + 38, UPD_W - 36, 56, C_TEXT);
-    label(F_TINY, LT("gui.loc_shared_hint"), UPD_X + 18, UPD_Y + 96, UPD_W - 36, 32, C_DIM);
+    /* rechts: W334 Karte "Online (steelnet)" (frueher "Gemeinsam mit Steel Battalion";
+     * der Hinweis steht jetzt dezent im Kopf von "Startbereit") */
+    onl_paint();
     /* W293: Bereitschaft wie SB (Punkt, Bezeichnung, Wert, "Change") */
     {
         loc_sumrow_t r[LOC_SUM_N];
         int i, y;
         loctab_sum_rows(r);
         card(CX0, LOC_SUM_Y, CW, LOC_SUM_H, LT("gui.sum_title"));
+        L_text(F_TINY, LT("gui.loc_shared_rows"), CX0 + 200, LOC_SUM_Y + 12, CW - 218, 24, C_FAINT,
+               DT_RIGHT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS); /* W334 (frueher eigene Karte) */
         for (i = 0, y = LOC_SUM_Y + 40; i < LOC_SUM_N; i++, y += 36) {
             dot(CX0 + 20, y + 6, r[i].col);
             label1(F_SMALL, r[i].label, CX0 + 40, y, 100, 22, C_DIM);
@@ -15908,6 +16478,10 @@ static void paint_loc_adv(void)
     }
 }
 
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+#include "launcher_loctp_gui.inc" /* W336 LOC-TESTPARTNER: Knoepfe + Dialog (nur interne Ausgabe) */
+#endif
+
 static void loctab_build(HWND w)
 {
     int i;
@@ -15930,7 +16504,11 @@ static void loctab_build(HWND w)
     mk(w, K_COMBO, ID_LOC_WIDE, P_ADV, COL2 + 18, LOC_WIDE_Y + 44, COLW - 36, 30, "", 0);
     mk(w, K_ICON, ID_LOC_WIDE_XI, P_ADV, COL2 + COLW - 18 - XI_W, LOC_WIDE_Y + 12, XI_W, 24 /* XI_H */, "", 0);
     loctab_wide_fill();
+    onl_build(w); /* W334: Online (steelnet) auf LoC-Spielen */
     acc_build(w); /* W328 */
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+    loctp_tab_build(w); /* W336 */
+#endif
     loctab_nav_layout();
 }
 
@@ -15943,7 +16521,11 @@ static void loctab_relabel(void)
     ui_settext(ctl(ID_LOC_BROWSE), LT("gui.btn_browse"));
     ui_settext(ctl(ID_LOC_FOLDER), LT("gui.loc_open_folder"));
     loctab_wide_fill(); /* W326: Eintraege in der neuen Sprache, Wahl bleibt */
+    onl_relabel(); /* W334 */
     acc_relabel(); /* W328 */
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+    loctp_relabel(); /* W336 */
+#endif
     {
         int i;
         for (i = 0; i < LOC_SUM_N; i++) { /* W293 */
@@ -15956,6 +16538,7 @@ static void loctab_relabel(void)
 static void loctab_fill_done(void)
 {
     loctab_wide_sync(); /* W326 */
+    onl_sync_ui();      /* W334 */
     loctab_nav_layout();
     if (!g_loc_checked && g_loc.loc_image[0] &&
         u8_GetFileAttributes(g_loc.loc_image) != INVALID_FILE_ATTRIBUTES) {
@@ -15985,7 +16568,7 @@ static int loctab_apply_state(const char *name)
     /* W326: loc_wide = Erweitert mit "16:9 (Spielmodus)" (Warnzeile), sonst 4:3 */
     g_loc.loc_widescreen = strcmp(name, "loc_wide") == 0 ? LGAME_WIDE_169 : LGAME_WIDE_43;
     if (strcmp(name, "loc_ok") == 0 || strcmp(name, "loc_start") == 0 || strcmp(name, "loc_exp") == 0 ||
-        strcmp(name, "loc_wide") == 0) {
+        strcmp(name, "loc_wide") == 0 || strncmp(name, "loc_onl", 7) == 0) { /* W334: loc_onl* wie loc_ok */
         strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_ISO);
         g_locfix.kind = LGAME_IMG_LOC;
         g_locfix.title_id = LGAME_TID_LOC;
@@ -15996,6 +16579,13 @@ static int loctab_apply_state(const char *name)
     }
     strcpy_s(g_loc.loc_image, sizeof g_loc.loc_image, g_locfix_path);
     acc_apply_state(name); /* W328: loc_acc_* */
+    if (strncmp(name, "loc_onl", 7) == 0) { /* W334: Beispielzustand, kein Netz, keine Datei */
+        g_onl_fix_srv = 1;
+        g_onl_fixture = 1;
+        g_loc_online = 1;
+        strcpy_s(g_onl_sec, sizeof g_onl_sec, strcmp(name, "loc_onl_err") == 0 ? "pin_failed" : "ok");
+        strcpy_s(g_onl_code, sizeof g_onl_code, strcmp(name, "loc_onl_err") == 0 ? "" : "7K3M-Q9TX");
+    }
     return 1;
 }
 
@@ -16596,6 +17186,8 @@ static void build_controls(void)
     /* W303: Schalter schmal (rechts daneben die Ausgabe), darunter die Lautstaerke-Regler */
     mk(w, K_TOGGLE, ID_AUDIO, P_AUDIO, CX0 + 18, CY0 + 46, 150, 28, LT("gui.ton_on"),
        0);
+    /* W356 AUDIO-2: Kopfhoerer = 3D-Klang (HRTF) wie die Konsole; aus = Lautsprecher (Stereo bzw. 5.1/7.1) */
+    mk(w, K_TOGGLE, ID_HRTF, P_AUDIO, CX0 + 178, CY0 + 46, COLW - 196, 28, LT("gui.hrtf"), 0);
     { /* W303 AUDIO-VOLUME: 2x2 Listen 100..0 % (Gesamt | Musik / Effekte | Sprache/Funk), wirken bei SB und LoC */
         int k, j;
         for (k = 0; k < 4; k++) {
@@ -17047,6 +17639,10 @@ static void on_command_inner(int id, int code)
         break;
     case ID_LIVE:
         ui_set_checked(ID_LIVE, !ui_checked(ID_LIVE));
+        break;
+    case ID_HRTF: /* W356 AUDIO-2: Kopfhoerer (wirkt beim naechsten Start) */
+        ui_set_checked(ID_HRTF, !ui_checked(ID_HRTF));
+        set_status(LT(ui_checked(ID_HRTF) ? "gui.hrtf_on" : "gui.hrtf_off"));
         break;
     case ID_VOL_MASTER: /* W303 AUDIO-VOLUME */
     case ID_VOL_MUSIC:
@@ -17853,6 +18449,14 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == UPD_TIMER) {
             upd_timeout(); /* W250 */
         }
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+        if (wp == LOCTP_TIMER) {
+            loctp_tick(); /* W336: Testpartner-Zustand */
+        }
+#endif
+        if (wp == ONL_TIMER) {
+            onl_tick(); /* W334: loc_net_status.txt */
+        }
         return 0;
     case WM_APP_ACC: { /* W328: Ergebnis eines Konto-Auftrags */
         acc_job_t *j = (acc_job_t *)lp;
@@ -17913,6 +18517,10 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         KillTimer(h, 1);
         KillTimer(h, 7);
         KillTimer(h, UPD_TIMER);
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+        KillTimer(h, LOCTP_TIMER);
+        loctp_shutdown(); /* W336: Launcher zu = Testpartner weg (zusaetzlich Job-Objekt) */
+#endif
         if (g_upd_ask && g_o.shot == 0) {
             upd_set_cfg(0); /* W250: Schliessen ohne Antwort = Nein (nie wieder ungefragt) */
         }
@@ -18092,6 +18700,7 @@ static const struct {
     { "fpslist", "xbe_path=;media_root=;window_mode=0;interp_fps=120", 0 }, /* W309: Bildratenliste offen (120 gewaehlt) */
     { "fpslist_auto", "xbe_path=;media_root=;window_mode=0;interp_fps=-1", 0 }, /* W309: Bildratenliste offen (auto) */
     { "crash", "xbe_path=;media_root=", 0 }, /* W279: Karte "The last session crashed" (Fixture) */
+    { "loctp_err", "", 0 }, /* W344: Testpartner-Dialog im Fehlerfall (nur interne Ausgabe, Attrappe) */
     { "pack2", "", 0, 1 },  /* W172: zweites Pack gewaehlt (verdeckt durch ...) */
     { "pack3", "", 0, 2 },  /* W172: drittes Pack (Effekt-Pack mit Schloss) */
     /* W173: Remastered dezent, Effect Pack setzt color_sat/fx_embers (Effect-Pack-
@@ -18109,6 +18718,9 @@ static const struct {
     { "loc_acc_ok", "", 0 },     /* Pilot mit Discord + Login gesichert */
     { "loc_acc_view", "", 0 },   /* Verwaltungsansicht (Code angezeigt) */
     { "loc_acc_signin", "", 0 }, /* Ansicht "Auf diesem PC anmelden" (ohne Pilot) */
+    /* W334 LOC-SEC: Karte "Online (steelnet)" (Dienst als eingerichtet vorgegeben, nichts gespeichert) */
+    { "loc_onl", "", 0 },     /* Online an, Raumcode der eigenen Lobby (Kopieren) */
+    { "loc_onl_err", "", 0 }, /* Online an, sec=pin_failed (Server-Pruefung fehlgeschlagen) */
     { "effectpack", "shading=1;world_sharpen=60;aa_mode=3;ssao=25;color_sat=110;color_gain=103;"
                     "shade_shadow=1;fx_soft=60;fx_embers=160;fx_light=40;fx_light_cockpit=30;"
                     "fx_interp=1;remaster=1;hd_textures=1", 0 },
@@ -18535,6 +19147,10 @@ int gui_main(const char *client_override, const gui_opts_t *o)
     g_diag_open = ui_cfg_load_key(g_client_dir, "diag_open", 0); /* W171 */
     g_alpha_tools = ui_cfg_load_tools(g_client_dir); /* W272, W301: test_tools, Rueckfall alpha_tools */
     g_show_adv = ui_cfg_load_key(g_client_dir, "show_advanced", 0); /* W291 */
+    g_loctp_mode_cfg = ui_cfg_load_key(g_client_dir, "loctp_mode", -1); /* W351 */
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+    loctp_mode_from_cfg();
+#endif
     g_lay_work_w = g_o.lay_work_w; /* W281: --work WxH (Test des Einpassens) */
     g_lay_work_h = g_o.lay_work_h;
     if (!gui_create(g_o.shot != 0)) {
@@ -18544,6 +19160,9 @@ int gui_main(const char *client_override, const gui_opts_t *o)
     }
     gui_fill();
     show_page(P_PLAY);
+    if (g_o.shot == 0) {
+        SetTimer(g_hwnd, ONL_TIMER, 2000, NULL); /* W334: Raumcode/Status des LoC-Online-Laufs */
+    }
     if (g_o.shot == 4) {
         /* GUI-Startpfad ohne Clientstart (Abnahme: user.cfg-Vergleich). */
         if (g_o.alpha_on) { /* W272: Trockenlauf "Start test" (gleiche Kette wie die Seite) */
@@ -18694,6 +19313,11 @@ int gui_main(const char *client_override, const gui_opts_t *o)
                 if (p == P_ADV && strcmp(g_o.state, "replays") == 0) {
                     replay_dialog_modal(1); /* W254: Replay-Dialog mit Beispieldaten */
                 }
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+                if (p == P_PLAY && strcmp(g_o.state, "loctp_err") == 0) {
+                    rc |= loctp_err_shot(g_o.out_dir); /* W344: Testpartner-Dialog im Fehlerfall */
+                }
+#endif
             }
         }
         gui_teardown();
@@ -18909,8 +19533,8 @@ static void loctab_gui_selftest(int *pass, int *fail)
     loctab_vis(ID_START_VR, 0, "LoC-Spielen (SB-VR)", why, sizeof why);
     loctab_vis(ID_IMAGE, 0, "LoC-Spielen (SB-Abbild)", why, sizeof why);
     loctab_vis(ID_SUM_GO0, 0, "LoC-Spielen (SB-Bereitschaft)", why, sizeof why);
-    if (!why[0] && IsWindowEnabled(ctl(ID_LOC_START))) {
-        strcpy_s(why, sizeof why, "LoC-Start nicht gesperrt");
+    if (!why[0] && !IsWindowEnabled(ctl(ID_LOC_START)) != !lgame_loc_client_ready()) { /* W353: je Ausgabe */
+        strcpy_s(why, sizeof why, "LoC-Start-Freigabe passt nicht zur Ausgabe");
     }
     if (!why[0]) { /* W293: Disc/Ordner auf LoC > Erweitert */
         show_page(P_ADV);
@@ -18968,6 +19592,7 @@ static void loctab_gui_selftest(int *pass, int *fail)
     if (!why[0]) {
         static const int ids[] = { ID_LOC_START, ID_START, ID_START_MENU, ID_START_BIG, IDOK };
         int li;
+        gt_setenv("SB_TEST_LOC_READY", "0"); /* W353: Sperre erzwingen (intern/Testpaket sonst frei) */
         for (li = 0; li < 2 && !why[0]; li++) {
             sb_lang_set(li ? "de" : "en");
             ui_apply_language();
@@ -18994,13 +19619,15 @@ static void loctab_gui_selftest(int *pass, int *fail)
         }
         sb_lang_set("en");
         ui_apply_language();
+        SetEnvironmentVariableA("SB_TEST_LOC_READY", NULL);
     }
     /* spaeterer Weg: Client bereit -> Startweg mit LoC-Abbild + eigenem Datenordner */
     if (!why[0]) {
         gt_setenv("SB_TEST_LOC_READY", "1");
         on_command(ID_LOC_START, BN_CLICKED);
         SetEnvironmentVariableA("SB_TEST_LOC_READY", NULL);
-        if (!strstr(g_loc_last_cmd, LOC_ISO) || !strstr(g_loc_last_cmd, "\\loc\\hdd")) {
+        if (!strstr(g_loc_last_cmd, LOC_ISO) || !strstr(g_loc_last_cmd, "\\loc\\hdd") ||
+            !strstr(g_loc_last_cmd, "loc_boot=1;game_image=")) { /* W353: Kette wie Testpartner */
             _snprintf_s(why, sizeof why, _TRUNCATE, "bereit: Startweg '%.160s'", g_loc_last_cmd);
         }
         g_loc_last_cmd[0] = '\0';
@@ -20056,6 +20683,298 @@ static __declspec(noinline) void acc_gui_selftest(int *pass, int *fail)
     }
 }
 
+/* --- 77 (W334 LOC-SEC): Karte "Online (steelnet)": Raumcode-Normalisierung,
+ * --set-Zusammenbau mit/ohne Code, loc_net_status.txt (sec=, lobby_code=) aus
+ * einer Temp-Datei, Schalter grau ohne Dienst, gemerkt in einer Temp-user.cfg,
+ * Startweg (Trockenlauf) mit/ohne Online, ungueltiger Code = kein Start. --- */
+static void onl_gt_status(const char *path, const char *text)
+{
+    write_file(path, text);
+}
+
+static __declspec(noinline) void onl_gui_selftest(int *pass, int *fail)
+{
+    static const struct {
+        const char *in;
+        int rc;
+        const char *out;
+    } kN[] = {
+        { "", 0, "" },                     { "   ", 0, "" },
+        { "7K3M-Q9TX", 1, "7K3M-Q9TX" },   { "7k3m-q9tx", 1, "7K3M-Q9TX" },
+        { " 7k3m q9tx ", 1, "7K3M-Q9TX" }, { "7K3MQ9TX", 1, "7K3M-Q9TX" },
+        { "ilo0-abcd", 1, "1100-ABCD" },   { "7K3M-Q9TU", -1, "" },
+        { "7K3M-Q9T", -1, "" },            { "7K3MQ9TXA", -1, "" },
+        { "7K3M--Q9TX", -1, "" },          { "7K3M-Q9TX-", -1, "" },
+        { "7K3M_Q9TX", -1, "" },           { "7K3M-Q9T\xC3\x84", -1, "" },
+        { "-", -1, "" },
+    };
+    static const char *const kSecIn[] = { "selftest_failed", "pin_failed", "no_pin", "upgrade_required" };
+    static const char *const kSecKey[] = { "gui.loc_onl_sec_selftest", "gui.loc_onl_sec_pin", "gui.loc_onl_nosrv",
+                                           "gui.loc_onl_sec_upgrade" };
+    char why[300] = "", keep[16], tmp[1024], cfg[1200], stp[1200], set[600], want[600], t[400], sec[24], code[16];
+    char buf[4096];
+    int i, rc, g0 = g_game, p0 = g_page, on0 = g_loc_online;
+    lgame_state_t loc0 = g_loc;
+    lacc_store_t a0 = g_acc;
+    COLORREF col;
+    if (!ctl(ID_LOC_ONL) || !ctl(ID_LOC_CODE) || !ctl(ID_LOC_CODE_COPY)) {
+        GT_FAIL("77 W334 LOC-SEC online card", "%s", "Elemente fehlen");
+        return;
+    }
+    /* a: Raumcode normalisieren */
+    for (i = 0; i < (int)(sizeof kN / sizeof kN[0]) && !why[0]; i++) {
+        rc = onl_code_norm(kN[i].in, code, sizeof code);
+        if (rc != kN[i].rc || strcmp(code, kN[i].out) != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "norm '%s' -> %d '%s' (soll %d '%s')", kN[i].in, rc, code,
+                        kN[i].rc, kN[i].out);
+        }
+    }
+    /* b: --set mit/ohne Code, aus, ohne Dienst, ungueltig */
+    if (!why[0]) {
+        strcpy_s(set, sizeof set, "vr_enable=0");
+        rc = onl_set_append(set, sizeof set, 1, 1, " 7k3m q9tx");
+        _snprintf_s(want, sizeof want, _TRUNCATE, "vr_enable=0;loc_transport=udp;loc_lobby=%s:%d;loc_lobby_code=7K3M-Q9TX;loc_rb_input=1",
+                    SB_STEELNET_HOST, (int)SB_STEELNET_PORT);
+        if (rc != 0 || strcmp(set, want) != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "set mit Code '%s'", set);
+    }
+    if (!why[0]) {
+        strcpy_s(set, sizeof set, "vr_enable=0");
+        rc = onl_set_append(set, sizeof set, 1, 1, "");
+        _snprintf_s(want, sizeof want, _TRUNCATE, "vr_enable=0;loc_transport=udp;loc_lobby=%s:%d;loc_lobby_code=;loc_rb_input=1",
+                    SB_STEELNET_HOST, (int)SB_STEELNET_PORT);
+        if (rc != 0 || strcmp(set, want) != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "set ohne Code '%s'", set);
+    }
+    if (!why[0]) {
+        strcpy_s(set, sizeof set, "vr_enable=0");
+        if (onl_set_append(set, sizeof set, 0, 1, "7K3M-Q9TX") != 0 || strcmp(set, "vr_enable=0") != 0 ||
+            onl_set_append(set, sizeof set, 1, 0, "7K3M-Q9TX") != 0 || strcmp(set, "vr_enable=0") != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "set aus/ohne Dienst veraendert '%s'", set);
+        else if (onl_set_append(set, sizeof set, 1, 1, "7K3M-Q9TU") != -1 || strcmp(set, "vr_enable=0") != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "set ungueltig nicht abgewiesen '%s'", set);
+    }
+    /* c: Statusdatei lesen (Temp-Ordner) */
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(stp, sizeof stp, _TRUNCATE, "%sw334_loc_net_status_%lu.txt", tmp, GetCurrentProcessId());
+    _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw334_gui_user_%lu.cfg", tmp, GetCurrentProcessId());
+    u8_DeleteFile(stp);
+    if (!why[0] && onl_status_parse(stp, sec, sizeof sec, code, sizeof code) != 0)
+        strcpy_s(why, sizeof why, "fehlende Statusdatei gelesen");
+    if (!why[0]) {
+        onl_gt_status(stp, "transport=udp\nlobby=lobby\nroute=direkt\npeers=1\nping_ms=31\nsec=ok\nlobby_code=7k3m-q9tx\n");
+        if (onl_status_parse(stp, sec, sizeof sec, code, sizeof code) != 1 || strcmp(sec, "ok") != 0 ||
+            strcmp(code, "7K3M-Q9TX") != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Status ok: '%s' '%s'", sec, code);
+    }
+    for (i = 0; i < 4 && !why[0]; i++) {
+        char txt[200];
+        _snprintf_s(txt, sizeof txt, _TRUNCATE, "lobby=aus\nsec=%s\nlobby_code=\n", kSecIn[i]);
+        onl_gt_status(stp, txt);
+        if (onl_status_parse(stp, sec, sizeof sec, code, sizeof code) != 1 || strcmp(sec, kSecIn[i]) != 0 || code[0])
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Status %s: '%s' '%s'", kSecIn[i], sec, code);
+    }
+    if (!why[0]) {
+        onl_gt_status(stp, "sec=gehackt\nlobby_code=<b>X</b>\n");
+        if (onl_status_parse(stp, sec, sizeof sec, code, sizeof code) != 1 || sec[0] || code[0])
+            _snprintf_s(why, sizeof why, _TRUNCATE, "fremde Werte uebernommen: '%s' '%s'", sec, code);
+    }
+    /* W353: err= je Grund gelesen und als Meldung (de/en) vor dem Raumcode gezeigt; fremde Werte nie */
+    for (i = 0; i <= ONL_ERR_N && !why[0]; i++) {
+        char txt[200], er[12], info[400], ks[8];
+        COLORREF ic = 0;
+        _snprintf_s(txt, sizeof txt, _TRUNCATE, "lobby=verbinde\nsec=ok\nlobby_code=7K3M-Q9TX\nerr=%s\n",
+                    i < ONL_ERR_N ? kOnlErr[i][0] : "<script>");
+        onl_gt_status(stp, txt);
+        onl_status_err(stp, er, sizeof er);
+        if (strcmp(er, i < ONL_ERR_N ? kOnlErr[i][0] : "") != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "err %d gelesen als '%s'", i, er);
+            break;
+        }
+        strcpy_s(ks, sizeof ks, sb_lang_code());
+        sb_lang_set(i & 1 ? "de" : "en");
+        strcpy_s(g_onl_err, sizeof g_onl_err, er);
+        strcpy_s(g_onl_sec, sizeof g_onl_sec, "ok");
+        strcpy_s(g_onl_code, sizeof g_onl_code, "7K3M-Q9TX");
+        g_onl_fix_srv = 1;
+        g_loc_online = 0;
+        onl_info(info, sizeof info, &ic);
+        if (i < ONL_ERR_N && (strcmp(info, LT(kOnlErr[i][1])) != 0 || !LT(kOnlErr[i][1])[0] ||
+                              strncmp(LT(kOnlErr[i][1]), "gui.", 4) == 0))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "err %s: Anzeige '%.80s'", er, info);
+        if (i == ONL_ERR_N && !strstr(info, "7K3M-Q9TX"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "ohne err: Anzeige '%.80s'", info);
+        sb_lang_set(ks);
+        g_onl_err[0] = g_onl_sec[0] = g_onl_code[0] = '\0';
+        g_onl_fix_srv = -1;
+    }
+    /* d: Karte im Fenster (Temp-user.cfg, Testdatei, kein Netz, kein echtes Konto) */
+    write_file(cfg, "[display]\nwidth=1280\n# fremde Zeile\nlauncher_loc_online=0\nlauncher_loc_online=0\n");
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    sb_lang_set("en");
+    ui_apply_language();
+    acc_fixture(0, 0, 0, 0, 0); /* ohne Pilot: Startweg ohne loc_lobby_pilot */
+    g_game = LGAME_LOC;
+    loctab_nav_layout();
+    g_loc_online = 0;
+    g_onl_fix_srv = 0;
+    g_onl_fixture = 0;
+    g_onl_since = 1;
+    strcpy_s(g_onl_status_test, sizeof g_onl_status_test, stp);
+    u8_DeleteFile(stp);
+    onl_sync_ui();
+    ui_settext(ctl(ID_LOC_CODE), "");
+    show_page(P_PLAY);
+    pump();
+    /* ohne Dienst: grau, Text, Klick aendert nichts */
+    if (!why[0] && (!acc_gt_vis(ID_LOC_ONL) || !acc_gt_vis(ID_LOC_CODE) || acc_gt_vis(ID_LOC_CODE_COPY) ||
+                    IsWindowEnabled(ctl(ID_LOC_ONL)) || IsWindowEnabled(ctl(ID_LOC_CODE))))
+        strcpy_s(why, sizeof why, "ohne Dienst: Schalter/Feld nicht grau bzw. Sichtbarkeit");
+    if (!why[0] && (onl_info(t, sizeof t, &col) != 0 || strcmp(t, LT("gui.loc_onl_nosrv")) != 0))
+        _snprintf_s(why, sizeof why, _TRUNCATE, "ohne Dienst: Infozeile '%s'", t);
+    if (!why[0]) {
+        on_command(ID_LOC_ONL, BN_CLICKED);
+        if (g_loc_online || ui_checked(ID_LOC_ONL)) strcpy_s(why, sizeof why, "ohne Dienst: Schalter laesst sich setzen");
+    }
+    /* mit Dienst: Schalter an -> gemerkt (Doppelte weg, fremde Zeilen bleiben) */
+    if (!why[0]) {
+        g_onl_fix_srv = 1;
+        onl_sync_ui();
+        on_command(ID_LOC_ONL, BN_CLICKED);
+        gt_read(cfg, buf, sizeof buf);
+        if (!g_loc_online || !ui_checked(ID_LOC_ONL) || !IsWindowEnabled(ctl(ID_LOC_CODE)))
+            strcpy_s(why, sizeof why, "Schalter an");
+        else if (!strstr(buf, "launcher_loc_online=1\n") || strstr(strstr(buf, "launcher_loc_online=") + 1, "launcher_loc_online=") ||
+                 !strstr(buf, "# fremde Zeile\n") || !strstr(buf, "width=1280\n"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "user.cfg: %.120s", buf);
+        if (!why[0]) {
+            g_loc_online = 0;
+            onl_load();
+            if (!g_loc_online) strcpy_s(why, sizeof why, "launcher_loc_online nicht gelesen");
+        }
+    }
+    /* Hinweis, ungueltige Eingabe */
+    if (!why[0] && (onl_info(t, sizeof t, &col) != 0 || strcmp(t, LT("gui.loc_code_hint")) != 0))
+        _snprintf_s(why, sizeof why, _TRUNCATE, "Hinweis '%s'", t);
+    if (!why[0]) {
+        ui_settext(ctl(ID_LOC_CODE), "7K3M-Q9TU");
+        if (onl_info(t, sizeof t, &col) != 0 || strcmp(t, LT("gui.loc_code_bad")) != 0 || col != C_WARN)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "ungueltig '%s'", t);
+        ui_settext(ctl(ID_LOC_CODE), "");
+    }
+    /* Status: eigener Raumcode + Kopieren, dann Sicherheitsmeldungen */
+    if (!why[0]) {
+        onl_gt_status(stp, "lobby=lobby\nsec=ok\nlobby_code=7K3MQ9TX\n");
+        show_page(P_PLAY);
+        pump();
+        _snprintf_s(want, sizeof want, _TRUNCATE, LT("gui.loc_onl_code"), "7K3M-Q9TX");
+        if (onl_info(t, sizeof t, &col) != 1 || strcmp(t, want) != 0 || !acc_gt_vis(ID_LOC_CODE_COPY))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "eigener Raumcode '%s'", t);
+        else {
+            on_command(ID_LOC_CODE_COPY, BN_CLICKED); /* Testbetrieb: Zwischenablage bleibt unberuehrt */
+            if (strcmp(g_status, LT("gui.loc_code_copied")) != 0) strcpy_s(why, sizeof why, "Kopieren");
+        }
+    }
+    for (i = 0; i < 4 && !why[0]; i++) {
+        char txt[200];
+        _snprintf_s(txt, sizeof txt, _TRUNCATE, "lobby=getrennt\nsec=%s\nlobby_code=7K3M-Q9TX\n", kSecIn[i]);
+        onl_gt_status(stp, txt);
+        if (onl_status_refresh() != 1) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "%s: keine Aenderung erkannt", kSecIn[i]);
+            break;
+        }
+        ui_refresh_visibility();
+        if (onl_info(t, sizeof t, &col) != 0 || strcmp(t, LT(kSecKey[i])) != 0 || acc_gt_vis(ID_LOC_CODE_COPY))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "%s: '%s'", kSecIn[i], t);
+    }
+    /* alter Lauf (Datei vor g_onl_since) zaehlt nicht */
+    if (!why[0]) {
+        onl_gt_status(stp, "sec=ok\nlobby_code=7K3M-Q9TX\n");
+        g_onl_since = onl_now_ft() + 3600ULL * 10000000ULL;
+        onl_status_refresh();
+        if (g_onl_code[0] || g_onl_sec[0]) strcpy_s(why, sizeof why, "alte Statusdatei angezeigt");
+        g_onl_since = 1;
+    }
+    /* e: Startweg (Trockenlauf, Pruef-Fixture, Client "bereit") */
+    if (!why[0]) {
+        strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_ISO);
+        memset(&g_locfix, 0, sizeof g_locfix);
+        g_locfix.kind = LGAME_IMG_LOC;
+        g_locfix.title_id = LGAME_TID_LOC;
+        ui_settext(ctl(ID_LOC_IMAGE), LOC_ISO);
+        loctab_check();
+        gt_setenv("SB_TEST_LOC_READY", "1");
+        ui_settext(ctl(ID_LOC_CODE), "7k3m q9tx");
+        on_command(ID_LOC_START, BN_CLICKED);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "loc_transport=udp;loc_lobby=%s:%d;loc_lobby_code=7K3M-Q9TX",
+                    SB_STEELNET_HOST, (int)SB_STEELNET_PORT);
+        if (!strstr(g_loc_last_cmd, want) || !strstr(g_loc_last_cmd, LOC_ISO))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Start mit Code '%.200s'", g_loc_last_cmd);
+        if (!why[0]) {
+            const char *q;
+            ui_settext(ctl(ID_LOC_CODE), "");
+            on_command(ID_LOC_START, BN_CLICKED);
+            q = strstr(g_loc_last_cmd, "loc_lobby_code=");
+            if (!strstr(g_loc_last_cmd, "loc_transport=udp") || !q || (q[15] != ';' && q[15] != '"') ||
+                !strstr(g_loc_last_cmd, "loc_rb_input=1") || !strstr(g_loc_last_cmd, "loc_boot=1")) /* W353 */
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Start eigene Lobby '%.200s'", g_loc_last_cmd);
+        }
+        if (!why[0]) {
+            ui_settext(ctl(ID_LOC_CODE), "ABC");
+            set_status_k("x", 0);
+            on_command(ID_LOC_START, BN_CLICKED);
+            if (g_loc_last_cmd[0] || strcmp(g_status, LT("gui.loc_code_bad")) != 0)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "ungueltiger Code gestartet '%.120s'", g_loc_last_cmd);
+        }
+        if (!why[0]) {
+            g_loc_online = 0;
+            onl_sync_ui();
+            on_command(ID_LOC_START, BN_CLICKED); /* aus: Code im Feld egal, kein Online */
+            if (!g_loc_last_cmd[0] || strstr(g_loc_last_cmd, "loc_transport") || strstr(g_loc_last_cmd, "loc_lobby"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Start ohne Online '%.200s'", g_loc_last_cmd);
+        }
+        SetEnvironmentVariableA("SB_TEST_LOC_READY", NULL);
+        g_loc_last_cmd[0] = '\0';
+    }
+    /* f: Sprachwechsel (Relabel) */
+    if (!why[0]) {
+        sb_lang_set("de");
+        ui_apply_language();
+        ui_gettext(ctl(ID_LOC_ONL), t, sizeof t);
+        if (strcmp(t, LT("gui.loc_onl_toggle")) != 0 || strcmp(t, "Online-Spiel") != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "de Schalter '%s'", t);
+        ui_gettext(ctl(ID_LOC_CODE_COPY), t, sizeof t);
+        if (!why[0] && strcmp(t, LT("gui.loc_code_copy")) != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "de Kopieren '%s'", t);
+    }
+    /* Aufraeumen */
+    ui_settext(ctl(ID_LOC_CODE), "");
+    u8_DeleteFile(stp);
+    u8_DeleteFile(cfg);
+    g_ucfg_test[0] = '\0';
+    g_onl_status_test[0] = '\0';
+    g_onl_fix_srv = -1;
+    g_onl_sec[0] = g_onl_code[0] = g_onl_err[0] = '\0';
+    g_onl_since = 0;
+    g_loc_online = on0;
+    g_loc = loc0;
+    g_locfix_path[0] = '\0';
+    g_loc_checked = 0;
+    g_acc_fixture = 0;
+    g_acc_loaded = 0;
+    g_acc = a0;
+    g_game = g0;
+    onl_sync_ui();
+    loctab_nav_layout();
+    show_page(p0);
+    sb_lang_set(keep);
+    ui_apply_language();
+    if (!why[0]) {
+        GT_OK("77 W334 LOC-SEC online card (room code normalisation, --set with/without code, loc_net_status.txt sec=/lobby_code=, "
+              "greyed without service, saved in user.cfg, own code + copy, security messages, start path, relabel)");
+    } else {
+        GT_FAIL("77 W334 LOC-SEC online card", "%s", why);
+    }
+}
+
 static __declspec(noinline) void locwide_gui_selftest(int *pass, int *fail)
 {
     static char buf[16384];
@@ -20544,8 +21463,8 @@ static void locl_gui_selftest(int *pass, int *fail)
         loctab_vis(ID_SUM_GO0 + k, 0, "SB-Bereitschaft im LoC-Bereich", why, sizeof why);
     }
     loctab_vis(ID_LOC_START, 1, "LoC-Start", why, sizeof why);
-    if (!why[0] && IsWindowEnabled(ctl(ID_LOC_START))) {
-        strcpy_s(why, sizeof why, "LoC-Start nicht grau");
+    if (!why[0] && !IsWindowEnabled(ctl(ID_LOC_START)) != !lgame_loc_client_ready()) { /* W353: je Ausgabe */
+        strcpy_s(why, sizeof why, "LoC-Start grau/frei passt nicht zur Ausgabe");
     }
     /* 2: Hinweisband unten wie SB (nach der Liste), ohne Einmal-Start */
     if (!why[0] && (!g_orig_mask || !orig_banner_on())) {
@@ -22320,6 +23239,16 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                 }
             }
             loctab_gui_selftest(pass, fail); /* W276 LOC-LAUNCH (Fall 65) */
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+            loctp_gui_selftest(pass, fail); /* W336 LOC-TESTPARTNER (Fall 74) */
+            loctp_mode_selftest(pass, fail); /* W351 LOC-TP-FIX (Fall 74b) */
+#else
+            if (!ctl(ID_LOCTP_OPEN) && !ctl(ID_LOCTP_STOP)) { /* W336: Community-Ausgabe ohne Testpartner */
+                GT_OK("74 W336 loctp: Community-Ausgabe ohne Testpartner-Knoepfe");
+            } else {
+                GT_FAIL("74 W336 loctp", "%s", "Testpartner-Knopf in der Community-Ausgabe");
+            }
+#endif
             orig_gui_selftest(pass, fail); /* W278 ORIG-FLAG (Fall 66) */
             lay_gui_selftest(pass, fail); /* W281 LAUNCHER-SIZE (Fall 67) */
             xicon_gui_selftest(pass, fail); /* W287 EXP-ICON (Fall 68) */
@@ -22330,6 +23259,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
             locip_gui_selftest(pass, fail); /* W323 LOC-INTERP (Fall 73) */
             locwide_gui_selftest(pass, fail); /* W326 LOC-WIDE (Fall 74) */
             acc_gui_selftest(pass, fail); /* W328 STEELNET-ACCOUNT (Fall 75/76) */
+            onl_gui_selftest(pass, fail); /* W334 LOC-SEC: Online (steelnet) (Fall 77) */
             /* --- 64 (W259 SETTINGS-RESET): Launcher bleibt offen, im Spiel wird
              * per ESC "Als Standard speichern" gesichert, danach startet derselbe
              * Launcher erneut. Vorher schrieb er seine alten Werte zurueck
@@ -22777,6 +23707,19 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                 char t[300];
                 _snprintf_s(t, sizeof t, _TRUNCATE, "Standard: %s", why54);
                 strcpy_s(why54, sizeof why54, t);
+            }
+        }
+        if (ok54) { /* W332 SEC (Fuzz-Fund keyshtml): Memo-Zeile mit ueberlangem Tastenfeld (Sprachdatei)
+                     * -> Zeile verworfen, frueher strcpy_s-Abbruch des Launchers */
+            static char m332[1200];
+            char lk[200];
+            memset(lk, 'K', 150);
+            lk[150] = '\0';
+            _snprintf_s(m332, sizeof m332, _TRUNCATE, "COMBAT\n%s\tW332 zu lang\nF9\tW332 ok\n", lk);
+            keyshtml_build(m332, "", NULL, NULL, LT("gui.mouse_abs"), 4, "", "", "", html, sizeof html);
+            if (!strstr(html, "W332 ok") || strstr(html, "W332 zu lang")) {
+                ok54 = 0;
+                strcpy_s(why54, sizeof why54, "W332: ueberlange Memo-Zeile nicht verworfen");
             }
         }
 #ifdef SB_HARNESS_DIR_DEFAULT
@@ -24004,11 +24947,20 @@ static void w303_card(void)
         uictl_t *d = ui_find(ID_PH_DIR), *t = ui_find(ID_AUDIO);
         if (!d || d->y < CY0 + 152 + EXY || !t || t->y + t->h_ > CY0 + 82) { W303_WHY("Lage Ton-Schalter/Fotokarte"); return; }
     }
+    { /* W356 AUDIO-2: Schalter "Kopfhoerer" rechts neben "Ton an", in der Tonkarte, ueber den Reglern */
+        uictl_t *h = ui_find(ID_HRTF), *t = ui_find(ID_AUDIO);
+        if (!h || !t || !ui_visible_on(h, P_AUDIO) || ui_visible_on(h, P_GFX) || h->x < t->x + t->w ||
+            h->y + h->h_ > CY0 + 82 || h->x + h->w > CX0 + COLW - 18) {
+            W303_WHY("W356 Kopfhoerer-Schalter fehlt/Lage");
+            return;
+        }
+    }
     lcfg_defaults(&a);
     if (a.volume_master != 100 || a.volume_music != 100 || a.volume_sfx != 100 || a.volume_voice != 100) {
         W303_WHY("Standard nicht 100 (Original)");
         return;
     }
+    if (a.audio_hrtf != 0) { W303_WHY("W356 Kopfhoerer standardmaessig an"); return; }
     ui_from_settings(&a);
     for (k = 0; k < 4; k++) {
         if (ComboBox_GetCurSel(ctl(kVolId[k])) != 0) { W303_WHY("Standard-Auswahl %d nicht 100 %%", kVolId[k]); return; }
@@ -24017,9 +24969,11 @@ static void w303_card(void)
     a.volume_music = 45;
     a.volume_sfx = 0;
     a.volume_voice = 83; /* nicht auf 5: Anzeige 85, Wert bleibt */
+    a.audio_hrtf = 1; /* W356 */
     ui_from_settings(&a);
     lcfg_defaults(&b);
     ui_to_settings(&b);
+    if (b.audio_hrtf != 1 || !ui_checked(ID_HRTF)) { W303_WHY("W356 Rundweg Kopfhoerer (Oberflaeche)"); return; }
     if (b.volume_master != 80 || b.volume_music != 45 || b.volume_sfx != 0 || b.volume_voice != 83) {
         W303_WHY("Rundweg Oberflaeche (%d/%d/%d/%d)", b.volume_master, b.volume_music, b.volume_sfx, b.volume_voice);
         return;
@@ -24042,10 +24996,12 @@ static void w303_card(void)
             !strstr(buf, "volume_voice=90") || !strstr(buf, "[audio]")) {
             W303_WHY("user.cfg ohne volume_* unter [audio]");
         }
+        if (!strstr(buf, "audio_hrtf=1"))
+            W303_WHY("W356 user.cfg ohne audio_hrtf=1");
     }
     lcfg_defaults(&a);
     if (!g_w303_why[0] && (lcfg_load_file(f, &a) != 0 || a.volume_master != 80 || a.volume_music != 45 || a.volume_sfx != 0 ||
-                           a.volume_voice != 90))
+                           a.volume_voice != 90 || a.audio_hrtf != 1))
         W303_WHY("Rundweg user.cfg");
     if (!g_w303_why[0]) {
         write_file(f, "[audio]\nvolume_master=150\nvolume_music=-3\nvolume_sfx=abc\n");
@@ -24071,7 +25027,7 @@ void w303_gui_selftest(const char *client_override, int *pass, int *fail)
         ShowWindow(g_hwnd, SW_HIDE);
         gui_teardown();
     }
-    if (!g_w303_why[0]) W282_OK("W303 AUDIO-VOLUME gui (Karte Ton & Lautstaerke: 4 Regler auf Ton & Extras, Listen 100..0 %, Standard 100 = Original, Lage ueber Fotokarte, Rundweg Oberflaeche/user.cfg [audio], Rohwert 83 bleibt, Klemmen)");
+    if (!g_w303_why[0]) W282_OK("W303 AUDIO-VOLUME gui (Karte Ton & Lautstaerke: 4 Regler auf Ton & Extras, Listen 100..0 %, Standard 100 = Original, Lage ueber Fotokarte, Rundweg Oberflaeche/user.cfg [audio], Rohwert 83 bleibt, Klemmen; W356 Kopfhoerer-Schalter: Lage, Standard aus, Rundweg audio_hrtf)");
     else W282_FAIL("W303 AUDIO-VOLUME gui", g_w303_why);
 }
 #undef W303_WHY

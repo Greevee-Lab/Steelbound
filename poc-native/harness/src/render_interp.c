@@ -37,10 +37,13 @@
 #include <share.h> /* W174: _fsopen/_SH_DENYNO */
 #include <d3d11_1.h>
 #include "render_qa.h"
+#include "render_interp_camfit.h" /* W349 LOC-FRAMES-2 */
 #include "sb_perfhud.h" /* W122 PERF-HUD */
 #include "render_fx_rem.h" /* W133 REM-FX */
 #include "vr.h" /* W134 VR-PROTO */
 #include "render_reproj.h" /* W295 WORLD-REPROJ */
+#include "render_interp_bb.h" /* W347 GHOST: Billboard-Paarung per Kamera */
+#include "render_interp_shref.h" /* W361 LOC-INTERP-CRASH: Listen halten ihre Schatten-Views */
 #include "sb_profile.h" /* W323 LOC-INTERP: g_sba_loc */
 #include "loc_render.h" /* W323 LOC-INTERP: Missions-Weiche und 20-Hz-Takt */
 #include <math.h>
@@ -50,6 +53,7 @@
 #define IP_DRAW 1
 #define IP_CLR_RTV 2
 #define IP_CLR_DSV 3
+#define IP_COPY 4 /* W340 LOC-FRAMES: Kopie BB-Ausschnitt -> Textur (LoC-Glow-Kette), Wiedergabe Schatten -> Schatten */
 #define IP_VERTS_INIT (1024u * 1024u)      /* Tick-VB 40 MB (Mission ~0,7-1,2 Mio Vertices/Tick) */
 #define IP_VERTS_MAX (4u * 1024u * 1024u) /* Deckel je Tick (160 MB) -> sonst Tick ohne Interp */
 #define IP_OPS_MAX 65536u
@@ -110,6 +114,7 @@ typedef struct {
     ID3D11ShaderResourceView *rq_shsrv[4]; /* Schatten-SRVs der Stufen 1..3 */
     ID3D11SamplerState *ta_smp; /* FIX(TEXADDR,W84): s0 des alten Draws (NULL = Init-CLAMP; Cache, nicht besitzend) */
     int nolerp;             /* MONITOR-FX (W105): Korn-Wash/Stoerzeilen nie interpolieren (Zufall je Tick) */
+    ID3D11GeometryShader *lgs; /* FIX(ISSUE-EMP,W352) line_scale: Linien-Band wie im Tick-Bild (Cache, nicht besitzend) */
     unsigned fxk;           /* W133 REM-FX: 1 = Effekt-Draw des Spiels, 2 = eigener Zusatz-Draw (Glut/Licht) */
     float fxp[8];           /* W133 REM-FX: Parameter (b2) bei has_tex & FXR_MASK */
     /* W195 PHOTO-MODE: Spiel-Viewport (x,y,w,h) und logische RT-Groesse (w,h) bei RT-Draws (0 = BB/unbekannt)
@@ -117,7 +122,15 @@ typedef struct {
      * (freie Kamera: Clip -> Sicht -> Clip); kein Einfluss auf Aufzeichnung/Wiedergabe sonst. */
     unsigned short vpg[4], rtl[2];
     float prj[4];
+    /* W340 LOC-FRAMES (IP_COPY): Quelle (BB-RTV) und Ziel (Textur-SRV) mit AddRef, Ausschnitt, Schatten-Eintraege
+     * (am Swap gesetzt, -1 = keiner -> Op ohne Wirkung). rtv/dsv/srv bleiben NULL (keine Draw-/Clear-Op). */
+    ID3D11RenderTargetView *cps;
+    ID3D11ShaderResourceView *cpd;
+    D3D11_BOX cpbox;
+    int cp_es, cp_ed;
 } ip_op_t;
+static volatile LONG li_cp_rec, li_cp_ok, li_cp_rep; /* W340: Kopier-Ops aufgezeichnet / mit Schatten / wiedergegeben (LOCINTERP stat) */
+static volatile LONG li_cp_seen; /* W347: Kopien waehrend der Aufzeichnung (SB: INTERP selfcopy) */
 /* W317 INTERP-PAIR: Matrix N-1 eines gelerpten Draws (rzm: eigene Matrix, sonst die des Partners a) */
 #define IP_AMVP(o, a) ((o)->rzm ? (o)->mva : (a)->mvp)
 
@@ -144,9 +157,17 @@ typedef struct {
     int ready;        /* fertig + gesichert, Wiedergabe moeglich */
     int snap_ok;      /* alle Ressourcen gesichert */
     int refs[IP_REFS_MAX], nrefs; /* benutzte Schatten-Eintraege */
+    /* FIX(W361 LOC-INTERP-CRASH): Generation je benutztem Eintrag (beim Sichern) und eigene Referenzen auf
+     * dessen Views (rtv/dsv/srv, AddRef beim Sichern, Release in ip_list_reset). Die Ops tragen die Views als
+     * rohe Zeiger (sh_rtv/sh_dsv/sh_srv/rq_shsrv); so bleiben sie gueltige Objekte, solange die Liste lebt -
+     * auch wenn der Eintrag inzwischen verdraengt/ersetzt wurde (sonst Deferred-Context mit zerstoerter SRV,
+     * d3d11 AllocateDependentCLS liest NULL). */
+    ip_shref_t refo[IP_REFS_MAX]; /* render_interp_shref.h */
     int bbref;        /* Eintrag des Spiel-BB */
     LONGLONG tstate;  /* Zustandszeit (QPC) */
     LONGLONG tswap;   /* Swap-Zeit (QPC) */
+    LONGLONG tvb0;    /* W340 LOC-FRAMES: Feldgrenze beim ersten aufgezeichneten Op (Tick-Anfang), 0 = keiner */
+    unsigned ncopy;   /* W340: Anzahl IP_COPY-Ops */
     /* RENDER-QA (W77): Tick-Puffer fuer Stream 2 (Bytes) und Konstanten (float4) */
     ID3D11Buffer *rqx, *rqc;
     ID3D11ShaderResourceView *rqxsrv; /* SHADE-PERF (W80): rqx als Buffer<uint> */
@@ -182,6 +203,8 @@ typedef struct {
     ID3D11Texture2D *bak[IP_LISTS];
     unsigned bakser[IP_LISTS];
     unsigned used;
+    unsigned gen; /* W361: Generation (beim Anlegen, nie 0; 0 = frei) */
+    unsigned pin[3]; /* W361: nach fremder Ueberfreigabe selbst gehaltene Zusatz-Referenzen (rtv/dsv/srv) */
 } ip_sh_t;
 
 int g_ip_recording; /* 1 = Draws/Clears dieses Ticks werden aufgezeichnet */
@@ -461,15 +484,25 @@ static void ip_op_release(ip_op_t *o)
     if (o->ds) { ID3D11DepthStencilState_Release(o->ds); }
     if (o->rs) { ID3D11RasterizerState_Release(o->rs); }
     if (o->srv) { ID3D11ShaderResourceView_Release(o->srv); }
+    if (o->cps) { ID3D11RenderTargetView_Release(o->cps); } /* W340 */
+    if (o->cpd) { ID3D11ShaderResourceView_Release(o->cpd); } /* W340 */
     if (o->rq) {
         int k;
         for (k = 1; k < 4; k++) { if (o->rqr.srv[k]) { ID3D11ShaderResourceView_Release(o->rqr.srv[k]); } }
     }
 }
 
+/* W361: eigene Referenzen der Liste auf Schatten-Views abgeben (vor nrefs = 0). */
+static void ip_list_unref(ip_list_t *L)
+{
+    int j;
+    for (j = 0; j < L->nrefs && j < IP_REFS_MAX; j++) { ip_shref_drop(&L->refo[j]); }
+}
+
 static void ip_list_reset(ip_list_t *L)
 {
     unsigned i;
+    ip_list_unref(L); /* W361 */
     while (L->cp_original) {
         ip_cp_t *p = L->cp_original;
         L->cp_original = p->next;
@@ -496,6 +529,7 @@ static void ip_list_reset(ip_list_t *L)
     L->gpu_ok = 0; /* W174 */
     L->ipw_bad = 0; L->wb_ok = 0; /* W237 */
     L->ddsel = 0; /* W284 */
+    L->tvb0 = 0; L->ncopy = 0; /* W340 */
     if (L->smp0) { ID3D11SamplerState_Release(L->smp0); L->smp0 = NULL; } /* W126 */
 }
 
@@ -510,6 +544,12 @@ static ip_op_t *ip_new_op(ip_list_t *L)
         if (!no) { L->overflow = 1; return NULL; }
         L->ops = no;
         L->capops = nc;
+    }
+    if (!L->nops && g_sba_loc && g_cfg.loc_interp_anchor) {
+        /* W340 LOC-FRAMES: Tick-Anfang merken. Der Spiel-Render-Thread beginnt ~0,2 ms nach dem Feldwechsel, der den
+         * Tick freigibt; am Swap (Renderdauer bis ~18 ms bei 3440x1440) ist oft schon das naechste Feld da -> die
+         * Zustandszeit sprang um 16,7 ms (zustand_abw), die Zwischenbilder liefen ungleichmaessig. */
+        L->tvb0 = ip_vb_get();
     }
     o = &L->ops[L->nops++];
     memset(o, 0, sizeof *o);
@@ -1567,6 +1607,7 @@ static void ip_rec_draw_core(const float pref[4][4], unsigned outhash, unsigned 
     o->vstart = vstart;
     o->nv = n;
     o->ib1 = ib1; o->nsv = nsv; /* W264 DRAW-OPT2 */
+    o->lgs = g_line_gs_rec; /* FIX(ISSUE-EMP,W352) */
     {
         unsigned q;
         for (q = 0; q < 4u; q++) {
@@ -1642,6 +1683,35 @@ void sb_interp_rec_clear(ID3D11RenderTargetView *rtv, const float c[4],
     } else {
         L->nops--;
     }
+}
+
+/* W340 LOC-FRAMES: LoC zeichnet die Welt in den Backbuffer, kopiert den 4:3-Ausschnitt in eine Textur
+ * (loc_render.c bbc_copy, "Backbuffer als Textur") und zeichnet daraus Glow-Verkleinerung und das
+ * Kompositions-Quad zurueck in den Backbuffer. Die Kopie war keine Op: Zwischenbilder lerpten die Welt in den
+ * BB-Schatten, das Kompositions-Quad sampelte aber die Spiel-Kopie (Stand Tick N) und deckte die gelerpte Welt
+ * zu -> Welt nur 20 Bilder/s, Cockpit 120. Jetzt Op: Wiedergabe kopiert aus dem BB-Schatten in den Schatten der
+ * Textur, die sampelnden Draws bekommen dessen SRV (ip_list_snap). */
+void sb_interp_rec_copy(ID3D11RenderTargetView *src, ID3D11ShaderResourceView *dst, const D3D11_BOX *box)
+{
+    ip_list_t *L;
+    ip_op_t *o;
+    if (!src || !dst || ip_rec < 0) { return; }
+    InterlockedIncrement(&li_cp_seen); /* W347 DIAG: Kopien waehrend der Aufzeichnung (auch mit Schalter aus) */
+    /* FIX(W347 GHOST): SB-Selbstkopien (W106-Ring) ebenso, eigener Schalter */
+    if (!(g_sba_loc ? g_cfg.loc_interp_copy : g_cfg.interp_selfcopy)) { return; }
+    L = &g_ipl[ip_rec];
+    if (L->overflow) { return; }
+    o = ip_new_op(L);
+    if (!o) { return; }
+    o->kind = IP_COPY;
+    o->cps = src;
+    ID3D11RenderTargetView_AddRef(src);
+    o->cpd = dst;
+    ID3D11ShaderResourceView_AddRef(dst);
+    if (box) { o->cpbox = *box; } else { o->cpbox.back = 0; } /* back = 0: ganze Ressource (CopyResource) */
+    o->cp_es = o->cp_ed = -1;
+    L->ncopy++;
+    InterlockedIncrement(&li_cp_rec);
 }
 
 /* ---------- Zuordnung Tick N-1 -> N ---------- */
@@ -2201,6 +2271,17 @@ static int rz_offset_grid(const ip_op_t *a, const ip_op_t *o, float d[3])
     }
     return 1;
 }
+/* W349 LOC-FRAMES-2: Kamera-Pruefung der Bezugs-Vertices (render_interp_camfit.h, Selbsttest CAMFIT). */
+static double li_camfit_pm(const float pa[4][4], const float *ma, const ip_op_t *o, double D[8][16], int nD)
+{
+    return ipcf_camfit(pa, ma, (const float (*)[4])o->pref, o->mvp, (const double (*)[16])D, nD);
+}
+/* Vertex-Lerp-Pruefung: Bezugs-Vertices des Partners c mit dessen Matrix (Vortick) gegen o. Matrix-Lerp-Pruefung
+ * (Tick-N-Vertices mit M_A): li_camfit_pm(o->pref, a->mvp, o, ...). */
+static double li_camfit(const ip_op_t *c, const ip_op_t *o, double D[8][16], int nD)
+{
+    return li_camfit_pm((const float (*)[4])c->pref, c->mvp, o, D, nD);
+}
 /* FIX(W284) interp_rawzc=2: Hash-Kette der Vortick-Draws nach sig0 (Signatur ohne Vertexzahl), bei Bedarf je Tick */
 static int rz_s0head[1u << IP_HBITS], *rz_s0next;
 static unsigned rz_s0cap;
@@ -2223,6 +2304,128 @@ static int rz_s0_build(const ip_list_t *A)
         rz_s0head[h] = (int)j;
     }
     return 1;
+}
+/* FIX(W347 GHOST) interp_bbcam: Partner eines exakt gebliebenen rawchg-Draws (Billboard, z. B. Baum) per Kamera.
+ * Baeume sind Quads (n=6/12), die das Spiel je Tick neu zur Kamera ausgerichtet in den VB schreibt (Matrix
+ * gleich, Eingangsdaten neu, W347_ld5). Ein Billboard ruht in der Welt um seinen Mittelpunkt; fuer den richtigen
+ * Vortick-Partner c gilt dann Schwerpunkt(c)*M_c*D ~ Schwerpunkt(o)*M_o (D = Kamerabewegung des Ziels,
+ * Zeilenvektoren), die Ecken weichen nur um die Eigendrehung ab. Gewaehlt wird der kleinste Schwerpunkt-
+ * Fehler (Gleichstand: Reihenfolge, deterministisch). -1 = keiner. */
+static unsigned st_bb_ok, st_bb_no, st_bb_far, st_bb_build; /* W347: Zaehler (INTERP bbcam) */
+static double st_bb_ms; /* W347: Zeit in ip_bb_pick (inkl. Rasteraufbau) je Statistikfenster */
+/* Raster der Vortick-Kandidaten nach vorhergesagter NDC-Lage (Schwerpunkt * D[0]) je Signatur: ohne Raster
+ * prueft jeder Baum alle gleichen Baeume des Vorticks (W347_lf1: 43 ms je Tick). Neu je Vortick und Ziel. */
+enum { BBG_BITS = 12, BBG_N = 8 };
+#define BBG_CELL 0.05
+typedef struct {
+    int head[1u << BBG_BITS], *next;
+    float *px, *py; /* vorhergesagte NDC-Lage (Schwerpunkt * D0) je Vortick-Draw: billige Vorpruefung */
+    double (*pv)[5][4]; /* je Vortick-Draw: Clip der 4 Bezugs-Vertices + Schwerpunkt (ipbb_prep, einmal je Tick) */
+    unsigned cap, ser, used;
+    ID3D11RenderTargetView *rtv;
+    double D0[16];
+} bbg_t;
+static bbg_t bbg[BBG_N]; /* je Ziel ein Raster (Ziele wechseln innerhalb des Ticks; ein einzelnes Raster wurde je Draw neu gebaut) */
+static unsigned bbg_clock;
+static unsigned bbg_key(unsigned sig, int cx, int cy)
+{
+    unsigned h = (sig * 2654435761u) ^ ((unsigned)cx * 40503u) ^ ((unsigned)cy * 2246822519u);
+    return (h ^ (h >> 15) ^ (h >> 27)) & ((1u << BBG_BITS) - 1u);
+}
+static bbg_t *bbg_build(const ip_list_t *A, const ip_op_t *o, const double D0[16])
+{
+    unsigned j;
+    int k, v = 0;
+    bbg_t *g;
+    for (k = 0; k < BBG_N; k++) {
+        g = &bbg[k];
+        if (g->ser == A->serial && g->rtv == o->rtv && memcmp(g->D0, D0, sizeof g->D0) == 0) { g->used = ++bbg_clock; return g; }
+    }
+    for (k = 1; k < BBG_N; k++) { if (bbg[k].used < bbg[v].used) { v = k; } } /* aeltestes ersetzen */
+    g = &bbg[v];
+    if (g->cap < A->nops) {
+        int *nn = (int *)realloc(g->next, A->nops * sizeof *nn);
+        float *fx, *fy;
+        if (!nn) { g->ser = 0; return NULL; }
+        g->next = nn;
+        fx = (float *)realloc(g->px, A->nops * sizeof *fx);
+        if (!fx) { g->ser = 0; g->cap = 0; return NULL; }
+        g->px = fx;
+        fy = (float *)realloc(g->py, A->nops * sizeof *fy);
+        if (!fy) { g->ser = 0; g->cap = 0; return NULL; }
+        g->py = fy;
+        {
+            double (*pv)[5][4] = (double (*)[5][4])realloc(g->pv, A->nops * sizeof *pv);
+            if (!pv) { g->ser = 0; g->cap = 0; return NULL; }
+            g->pv = pv;
+        }
+        g->cap = A->nops;
+    }
+    memset(g->head, 0xFF, sizeof g->head);
+    for (j = A->nops; j-- > 0;) {
+        const ip_op_t *c = &A->ops[j];
+        double nx, ny, p[4];
+        unsigned h;
+        g->next[j] = -1;
+        if (c->kind != IP_DRAW || !c->cls || c->nv > 64u || c->rtv != o->rtv) { continue; }
+        ipbb_prep((const float (*)[4])c->pref, c->mvp, g->pv[j], g->pv[j][4]);
+        ipbb_row(g->pv[j][4], D0, p);
+        if (p[3] <= 1e-6) { continue; }
+        nx = p[0] / p[3]; ny = p[1] / p[3];
+        if (fabs(nx) > 1e6 || fabs(ny) > 1e6) { continue; }
+        g->px[j] = (float)nx; g->py[j] = (float)ny;
+        h = bbg_key(c->sig, (int)floor(nx / BBG_CELL), (int)floor(ny / BBG_CELL));
+        g->next[j] = g->head[h];
+        g->head[h] = (int)j;
+    }
+    g->ser = A->serial; g->rtv = o->rtv; g->used = ++bbg_clock;
+    st_bb_build++;
+    memcpy(g->D0, D0, sizeof g->D0);
+    return g;
+}
+static int ip_bb_pick_x(const ip_list_t *A, const ip_op_t *o, double D[8][16], int nd);
+static int ip_bb_pick(const ip_list_t *A, const ip_op_t *o, double D[8][16], int nd)
+{
+    LONGLONG q0 = ip_now();
+    int r = ip_bb_pick_x(A, o, D, nd);
+    st_bb_ms += ip_ms(q0, ip_now());
+    return r;
+}
+static int ip_bb_pick_x(const ip_list_t *A, const ip_op_t *o, double D[8][16], int nd)
+{
+    double best = 1e30, nx, ny, vb[4][4], cb[4];
+    int j, x, bj = -1, cx, cy, gx, gy, nfull = 0;
+    bbg_t *g;
+    if (nd <= 0 || o->nv > 64u) { st_bb_no++; return -1; } /* nur kleine Draws (Billboards, Sprites) */
+    ipbb_prep((const float (*)[4])o->pref, o->mvp, vb, cb);
+    if (cb[3] <= 1e-6) { st_bb_no++; return -1; }
+    nx = cb[0] / cb[3]; ny = cb[1] / cb[3];
+    if (fabs(nx) > 1e6 || fabs(ny) > 1e6) { st_bb_no++; return -1; }
+    g = bbg_build(A, o, D[0]);
+    if (!g) { st_bb_no++; return -1; }
+    cx = (int)floor((nx - 2.0 * IPBB_EC) / BBG_CELL); cy = (int)floor((ny - 2.0 * IPBB_EC) / BBG_CELL); /* nur Zellen im Vorpruef-Fenster */
+    for (gy = cy; gy <= (int)floor((ny + 2.0 * IPBB_EC) / BBG_CELL) && nfull <= 24; gy++) {
+        for (gx = cx; gx <= (int)floor((nx + 2.0 * IPBB_EC) / BBG_CELL) && nfull <= 24; gx++) {
+            for (j = g->head[bbg_key(o->sig, gx, gy)]; j >= 0; j = g->next[j]) {
+                const ip_op_t *c = &A->ops[j];
+                double ec = 1e30, ev = 1e30;
+                if (c->taken || c->sig != o->sig || c->nv != o->nv || c->dsv != o->dsv || c->topo != o->topo ||
+                    c->ib1 != o->ib1) { continue; } /* ib1: Vertex-Lerp nur gleich abgelegt (W264) */
+                /* Vorpruefung mit D[0] (Spielraum fuer die anderen Kamera-Kandidaten); dichte Partikelwolken: Deckel */
+                if (fabs(g->px[j] - nx) > 2.0 * IPBB_EC || fabs(g->py[j] - ny) > 2.0 * IPBB_EC) { continue; }
+                if (++nfull > 24) { break; }
+                for (x = 0; x < nd; x++) {
+                    double e2, e3;
+                    ipbb_err2((const double (*)[4])g->pv[j], g->pv[j][4], (const double (*)[4])vb, cb, D[x], &e2, &e3);
+                    if (e2 < ec) { ec = e2; ev = e3; }
+                }
+                if (!ipbb_ok(ec, ev)) { continue; } /* Schwerpunkt ruht nicht bzw. Ecken passen nicht -> anderes Objekt */
+                if (ec < best || (ec == best && j < bj)) { best = ec; bj = j; } /* Gleichstand: Reihenfolge (deterministisch) */
+            }
+        }
+    }
+    if (bj < 0) { st_bb_far++; }
+    return bj;
 }
 static unsigned st_rz_nm, st_rz_nmno, st_rz_nmcam, st_rz_n;
 static double st_rz_ms, st_rz_max; /* W284: Zeit des rawzc-Blocks je Tick */
@@ -2605,6 +2808,31 @@ done:
     }
 }
 
+/* DIAG(W340 LOC-FRAMES, interp_diag>=1, nur LoC): Gruende der unplausiblen Zuordnungen (reject) */
+static unsigned li_rj_w, li_rj_j[4], li_rj_big, li_rj_n, li_rj_cam;
+static unsigned li_rz_alt, li_rz_vl, li_rj_cam2; /* W349: rawchg mit anderem Kamera-passenden Partner gleicher Signatur (LOCINTERP stat rzalt) */
+static void li_rej_note(const ip_op_t *a, const ip_op_t *o)
+{
+    int q, wx = 0;
+    float mj = 0.0f;
+    for (q = 0; q < 4; q++) {
+        float c0[4], c1[4];
+        ip_clip(a->pref[q], a->mvp, c0);
+        ip_clip(o->pref[q], o->mvp, c1);
+        if (c0[3] > 1e-6f && c1[3] > 1e-6f) {
+            float dx = fabsf(c1[0] / c1[3] - c0[0] / c0[3]), dy = fabsf(c1[1] / c1[3] - c0[1] / c0[3]);
+            if (dx > mj) { mj = dx; }
+            if (dy > mj) { mj = dy; }
+        } else if (!(c0[3] < -1e-6f && c1[3] < -1e-6f)) {
+            wx = 1;
+        }
+    }
+    li_rj_n++;
+    if (o->nv >= 1000u) { li_rj_big++; }
+    if (wx) { li_rj_w++; }
+    else { li_rj_j[mj < 0.75f ? 0 : mj < 1.0f ? 1 : mj < 2.0f ? 2 : 3]++; }
+}
+
 static int ip_match(ip_list_t *A, ip_list_t *B, int log)
 {
     unsigned i, jp = 0, ndraw = 0, nclr = 0, nworld = 0, nmatch = 0, nlerp = 0,
@@ -2727,7 +2955,7 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
             }
             if (ip_still(a, o)) { nstatic++; o->why = IP_W_STATIC; }
             else if (ip_plausible(a, o, g_cfg.interp_maxjump)) { o->flag = 1; nlerp++; o->why = IP_W_LERP; }
-            else { nreject++; o->why = IP_W_REJECT; }
+            else { nreject++; o->why = IP_W_REJECT; if (g_sba_loc && g_cfg.interp_diag >= 1) { li_rej_note(a, o); } }
             if (iwbest >= 0 && o->why == IP_W_LERP) { ip_iwrong_log(A, B, i, found, iwbest); } /* DIAG(POPIN,W91) */
         }
     }
@@ -2821,8 +3049,24 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
                     for (x = 0; x < znr[t]; x++) { double e2 = zc_derr(Dx, zD[t][x]); if (e2 < ex) { ex = e2; } }
                     if (ex < eb) { eb = ex; cand = j; }
                 }
-                if (!nc) { st_rz_nmno++; continue; }
-                if (cand < 0 || eb > 1e-3) { st_rz_nmcam++; continue; }
+                if (!nc || cand < 0 || eb > 1e-3) {
+                    /* FIX(W347 GHOST) interp_bbcam: gleiche Billboard-Instanzen (Baeume, gleiche Daten, je Baum eine
+                     * zur Kamera gedrehte Matrix) sind beim Schwenk nach Bildsprung mehrdeutig (W91 amb -> nomatch)
+                     * und bestehen den Welt-Test nicht -> Partner per Kamera-Schwerpunkt, Matrix-/Vertex-Lerp. */
+                    int bj = (g_cfg.interp_bbcam && !g_sba_loc) ? ip_bb_pick(A, o, zD[t], znr[t]) : -1;
+                    if (bj < 0) {
+                        if (!nc) { st_rz_nmno++; } else { st_rz_nmcam++; }
+                        continue;
+                    }
+                    A->ops[bj].taken = 1;
+                    o->match = bj;
+                    o->flag = 1;
+                    o->why = IP_W_LERP;
+                    st_bb_ok++;
+                    nnomatch--;
+                    nlerp++;
+                    continue;
+                }
                 o->match = cand;
                 o->rzb = 1;
                 o->flag = 1;
@@ -2830,6 +3074,38 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
                 st_rz_nm++;
                 nnomatch--;
                 nlerp++;
+                continue;
+            }
+            if (o->why == IP_W_REJECT && g_sba_loc && g_cfg.loc_interp_rejcam && !g_cfg.vr_enable) {
+                /* W340 LOC-FRAMES: "reject" = gleiche Eingangsdaten, aber Bezugs-Vertices springen > interp_maxjump
+                 * (NDC). Bei 20 Hz und Drehung meist Vertices nahe der Augenebene (Sprung >= 2 NDC, LOCINTERP
+                 * reject). Passt M_A^-1*M_B zur Kamerabewegung des Ziels, ruht das Objekt in der Welt -> der
+                 * Matrix-Lerp ist genau die Zwischenkamera (linear im Clip-Raum). */
+                double er = 1.0;
+                if (o->match < 0 || (unsigned)o->match >= A->nops) { continue; }
+                a = &A->ops[o->match];
+                if (a->kind != IP_DRAW || !a->cls || a->rtv != o->rtv || a->dsv != o->dsv) { continue; }
+                for (k = 0; k < nz; k++) { if (zr[k] == o->rtv && zd[k] == rz_dkey(o)) { t = (int)k; break; } }
+                if (t < 0) {
+                    if (nz >= RZ_T) { continue; }
+                    t = (int)nz++;
+                    zr[t] = o->rtv; zd[t] = rz_dkey(o);
+                    znr[t] = rz_cam(A, B, o, zD[t]);
+                }
+                if (!znr[t] || !zc_dmat(Dx, a->mvp, o->mvp)) { continue; }
+                for (x = 0; x < znr[t]; x++) { double ex = zc_derr(Dx, zD[t][x]); if (ex < er) { er = ex; } }
+                if (er > 1e-3 && (g_cfg.loc_interp_dbg & 2) && (g_cfg.pf_ring <= 0 || sb_pf_active()) && st_rz_ln < 1400u) { /* DIAG(W349) */
+                    st_rz_ln++;
+                    HLOG_I("LOCINTERP rjerr f=%u i=%u n=%u m=%d er=%.5f nD=%d camfit=%.3f", B->frame, i, o->nv, o->match, er, znr[t],
+                           li_camfit(a, o, zD[t], znr[t]));
+                }
+                if (er > 1e-3 && !(g_cfg.loc_interp_rzalt && er <= 0.01 && li_camfit(a, o, zD[t], znr[t]) <= 0.05)) { continue; } /* W349: Geometrie bestaetigt */
+                if (er > 1e-3) { li_rj_cam2++; }
+                o->flag = 1;
+                o->why = IP_W_LERP;
+                nreject--;
+                nlerp++;
+                li_rj_cam++;
                 continue;
             }
             if (o->why != IP_W_RAWCHG) { continue; }
@@ -2851,6 +3127,31 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
              *     richtig ist der Vertex-Lerp i <-> i (p_A*M_A -> p_B*M_B). */
             if (zc_dmat(Dx, a->mvp, o->mvp)) {
                 for (x = 0; x < znr[t]; x++) { double ex = zc_derr(Dx, zD[t][x]); if (ex < e0) { e0 = ex; } }
+            }
+            if (e0 > 1e-3 && g_sba_loc && g_cfg.loc_interp_rzalt && !g_cfg.vr_enable) {
+                /* W349 LOC-FRAMES-2: Mehrpass-Draws gleicher Signatur (LoC-Himmel/Wolken: 3 Durchgaenge mit je 258
+                 * Vertices) waehlten alle denselben Vortick-Partner (ip_pick: erster freier ab jp, der rawchg-Partner
+                 * wird nicht belegt). Nur der erste passte zur Kamera, die weiteren blieben exakt -> weiche Flecken
+                 * im Himmel auf dem Tickstand. Der Matrix-Lerp der Tick-N-Vertices braucht vom Partner nur M_A ->
+                 * beste zur Kamera passende Matrix unter den Kandidaten gleicher Signatur ohne Vertexzahl (sig0). */
+                int j2, cand = -1, nc = 0;
+                double eb = e0;
+                if (!s0ok) { s0ok = rz_s0_build(A) ? 1 : -1; }
+                for (j2 = s0ok > 0 ? rz_s0head[IP_HB(o->sig0)] : -1; j2 >= 0 && nc < 16; j2 = rz_s0next[j2]) {
+                    const ip_op_t *c2 = &A->ops[j2];
+                    double ex = 1.0;
+                    if (j2 == o->match || c2->sig0 != o->sig0 || !c2->cls || c2->rtv != o->rtv || c2->dsv != o->dsv ||
+                        c2->topo != o->topo) { continue; }
+                    nc++;
+                    if (!zc_dmat(Dx, c2->mvp, o->mvp)) { continue; }
+                    for (x = 0; x < znr[t]; x++) { double e2 = zc_derr(Dx, zD[t][x]); if (e2 < ex) { ex = e2; } }
+                    if (ex < eb) { eb = ex; cand = j2; }
+                }
+                if (cand >= 0 && eb <= 1e-3) { o->match = cand; a = &A->ops[cand]; e0 = eb; li_rz_alt++; }
+                else if (e0 <= 0.01 && li_camfit_pm((const float (*)[4])o->pref, a->mvp, o, zD[t], znr[t]) <= 0.05) {
+                    e0 = 1e-3; /* knapp ueber der Matrix-Schwelle, Geometrie bestaetigt (Rundung grosser Weltkoordinaten) */
+                    li_rz_alt++;
+                }
             }
             /* Welt-Fall zuerst; der Versatz-Test (zweite Inversion) nur, wenn er scheitert (W284: Zeit je Tick halbiert) */
             ofs = (e0 > 1e-3 || g_cfg.vr_enable) && !a->taken && a->nv == o->nv && rz_offset(a, o, d); /* Vertex-Lerp braucht den Partner exklusiv */
@@ -2878,9 +3179,50 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
             } else if (e <= 1e-3 && ofs) {
                 st_rz_rel++;
             } else {
-                if (!ofs) { st_rz_noofs++; }
-                st_rz_cam++;
-                continue;
+                /* FIX(W347 GHOST) interp_bbcam: Billboards (Baeume: n=6/12, je Tick neu zur Kamera gedreht) bestehen
+                 * weder den Welt- noch den Versatz-Test und blieben exakt (Tick-N-Lage in allen Zwischenbildern) ->
+                 * beim Drehen stehen die Baeume, der Rest gleitet = Doppelkanten. Partner = Vortick-Draw, dessen
+                 * Drehpunkt (Ursprung der Matrix) mit der Kamera des Ziels auf den von o faellt; dann Vertex-Lerp. */
+                int bj = (g_cfg.interp_bbcam && !g_sba_loc && !g_cfg.vr_enable) ? ip_bb_pick(A, o, zD[t], znr[t]) : -1;
+                int vl = -1;
+                if (g_sba_loc && g_cfg.loc_interp_rzalt && !g_cfg.vr_enable) {
+                    /* W349 LOC-FRAMES-2: Vertex-Lerp i <-> i mit dem Kandidaten gleicher Signatur (gleiche Vertexzahl),
+                     * dessen Bezugs-Vertices der Kamera folgen (li_camfit <= 0,25 der Objektgroesse): neu gebaute
+                     * Billboards (Wolken/Glow-Sprites des Himmels, 6 Vertices, je Tick neu um die Kamera gedreht) und
+                     * mitwandernde Himmelsgitter. Ohne Kamera-Bezug des Ziels kein Lerp. */
+                    unsigned h2 = IP_HB(o->sig);
+                    int j3, nc3 = 0;
+                    double eb3 = 0.25;
+                    for (j3 = ip_hhead[h2]; j3 >= 0 && nc3 < 64; j3 = ip_hnext[j3]) {
+                        const ip_op_t *c3 = &A->ops[j3];
+                        double ex3;
+                        if (c3->sig != o->sig || c3->nv != o->nv || c3->kind != IP_DRAW || c3->rtv != o->rtv) { continue; }
+                        nc3++;
+                        ex3 = li_camfit(c3, o, zD[t], znr[t]);
+                        if (c3->taken) { ex3 += 0.05; } /* freie Partner bevorzugt */
+                        if (ex3 < eb3) { eb3 = ex3; vl = j3; }
+                    }
+                    if ((g_cfg.loc_interp_dbg & 2) && (g_cfg.pf_ring <= 0 || sb_pf_active()) && st_rz_ln < 1400u) { /* DIAG(W349) */
+                        st_rz_ln++;
+                        HLOG_I("LOCINTERP rzv f=%u i=%u n=%u m=%d e0=%.4f kand=%d best=%d fehler=%.3f", B->frame, i, o->nv,
+                               o->match, e0, nc3, vl, vl >= 0 ? eb3 : -1.0);
+                    }
+                }
+                if (bj < 0 && vl < 0) {
+                    if (!ofs) { st_rz_noofs++; }
+                    st_rz_cam++;
+                    continue;
+                }
+                if (bj >= 0) {
+                    a = &A->ops[bj];
+                    o->match = bj;
+                    st_bb_ok++;
+                } else {
+                    o->match = vl;
+                    a = &A->ops[vl];
+                    o->rzb = 0; /* Vertex-Lerp i <-> i */
+                    li_rz_vl++;
+                }
             }
             a->taken = 1;
             o->flag = 1;
@@ -3148,6 +3490,21 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
             }
         }
     }
+    if ((g_cfg.loc_interp_dbg & 2) && g_sba_loc && (g_cfg.pf_ring <= 0 || sb_pf_active())) { /* DIAG(W349): exakte Welt-Draws */
+        static unsigned nln;
+        for (i = 0; i < B->nops && nln < 1500u; i++) {
+            const ip_op_t *o = &B->ops[i];
+            const ip_op_t *a = (o->match >= 0 && (unsigned)o->match < A->nops) ? &A->ops[o->match] : NULL;
+            if (o->kind != IP_DRAW || !o->cls || o->flag || o->why == IP_W_STATIC) { continue; }
+            nln++;
+            HLOG_I("LOCINTERP ex f=%u i=%u why=%s bb=%d n=%u/%d topo=%u vs=%X xp=%X ps=%X raw=%08X m=%d "
+                   "ndc=%.2f,%.2f w=%.1f / %.2f,%.2f w=%.1f a=%.2f,%.2f w=%.1f / %.2f,%.2f w=%.1f",
+                   B->frame, i, pr_why(o->why), o->rtv == g_rtv, o->nv, a ? (int)a->nv : -1, o->topo, o->pvs, o->pxp,
+                   o->pps, o->rawhash, o->match, o->rn[0][0], o->rn[0][1], o->rn[0][2], o->rn[3][0], o->rn[3][1], o->rn[3][2],
+                   a ? a->rn[0][0] : 0.f, a ? a->rn[0][1] : 0.f, a ? a->rn[0][2] : 0.f, a ? a->rn[3][0] : 0.f,
+                   a ? a->rn[3][1] : 0.f, a ? a->rn[3][2] : 0.f);
+        }
+    }
     st_lerp += nlerp; st_static += nstatic; st_nomatch += nnomatch;
     st_rawchg += nrawchg; st_reject += nreject; st_2d += n2d; st_rawlerp += nrawlerp;
     st_rt2d += nrt2d;
@@ -3177,7 +3534,7 @@ static void ip_dump(ip_list_t *B)
         const ip_op_t *o = &B->ops[i];
         if (o->kind != IP_DRAW) {
             HLOG_I("INTERP op f=%u i=%u %s rtv=%p dsv=%p", B->frame, i,
-                   o->kind == IP_CLR_RTV ? "clr-rt" : "clr-ds", (void *)o->rtv, (void *)o->dsv);
+                   o->kind == IP_CLR_RTV ? "clr-rt" : o->kind == IP_COPY ? "copy" : "clr-ds", (void *)o->rtv, (void *)o->dsv);
             continue;
         }
         HLOG_I("INTERP op f=%u i=%u draw rtv=%p%s cls=%u n=%u topo=%u tex=%u sig=%08X raw=%08X out=%08X m=%d fl=%u mvp0=%.4f,%.4f,%.4f,%.4f",
@@ -3189,10 +3546,19 @@ static void ip_dump(ip_list_t *B)
 
 /* ---------- Schatten-Ziele + Sicherung je Liste ---------- */
 
+static unsigned ip_sh_gen; /* W361: Generationszaehler der Schatten-Eintraege */
+static volatile LONG st_sh_stale, st_sh_stale_tot; /* W361: Wiedergaben mit ersetztem Eintrag (je Fenster / gesamt) */
+
 static void ip_sh_free(ip_sh_t *e)
 {
     int i;
     if (e->res) { ID3D11Resource_Release(e->res); }
+    { /* W361: Zusatz-Referenzen der Zaehlerwache mit abgeben */
+        ID3D11View *vw[3];
+        int q;
+        vw[0] = (ID3D11View *)e->rtv; vw[1] = (ID3D11View *)e->dsv; vw[2] = (ID3D11View *)e->srv;
+        for (q = 0; q < 3; q++) { while (vw[q] && e->pin[q]) { ID3D11View_Release(vw[q]); e->pin[q]--; } }
+    }
     if (e->rtv) { ID3D11RenderTargetView_Release(e->rtv); }
     if (e->dsv) { ID3D11DepthStencilView_Release(e->dsv); }
     if (e->srv) { ID3D11ShaderResourceView_Release(e->srv); }
@@ -3277,6 +3643,8 @@ static int ip_sh_find(ID3D11Resource *res)
     }
     e->res = res;
     ID3D11Resource_AddRef(res);
+    if (++ip_sh_gen == 0u) { ip_sh_gen = 1u; } /* W361 */
+    e->gen = ip_sh_gen;
     if (g_cfg.interp_diag >= 1) {
         static unsigned nlog;
         if (nlog++ < 48u) {
@@ -3313,6 +3681,9 @@ static int ip_sh_ref(ip_list_t *L, int li, ID3D11View *v, int need_rt)
     for (j = 0; j < L->nrefs && L->refs[j] != e; j++) {}
     if (j == L->nrefs) {
         if (L->nrefs >= IP_REFS_MAX) { ID3D11Resource_Release(res); L->snap_ok = 0; return -1; }
+        /* W361: Views selbst halten, Generation merken (Abgabe in ip_list_unref) */
+        ip_shref_take(&L->refo[L->nrefs], (ID3D11View *)g_ish[e].rtv, (ID3D11View *)g_ish[e].dsv,
+                      (ID3D11View *)g_ish[e].srv, g_ish[e].gen);
         L->refs[L->nrefs++] = e;
         ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_ish[e].bak[li], res);
         g_ish[e].bakser[li] = L->serial;
@@ -3322,6 +3693,30 @@ static int ip_sh_ref(ip_list_t *L, int li, ID3D11View *v, int need_rt)
     return e;
 }
 
+/* DIAG(W340 LOC-FRAMES): Texturen ohne Schatten, die Draws sampeln (bis 24 verschiedene, je Ressource einmal) */
+static void li_srv_note(const ip_op_t *o, unsigned i)
+{
+    static void *seen[24];
+    static unsigned nseen;
+    ID3D11Resource *res = NULL;
+    D3D11_TEXTURE2D_DESC dd;
+    D3D11_RESOURCE_DIMENSION dim;
+    unsigned k;
+    if (nseen >= 24u || !o->srv) { return; }
+    ID3D11View_GetResource((ID3D11View *)o->srv, &res);
+    if (!res) { return; }
+    for (k = 0; k < nseen && seen[k] != (void *)res; k++) {}
+    if (k == nseen) {
+        ID3D11Resource_GetType(res, &dim);
+        memset(&dd, 0, sizeof dd);
+        if (dim == D3D11_RESOURCE_DIMENSION_TEXTURE2D) { ID3D11Texture2D_GetDesc((ID3D11Texture2D *)res, &dd); }
+        seen[nseen++] = (void *)res;
+        HLOG_I("LOCINTERP srv ohne Schatten #%u: op=%u %ux%u fmt=%u bind=0x%X ziel=%s cls=%u n=%u f=%u", nseen, i, dd.Width,
+               dd.Height, (unsigned)dd.Format, dd.BindFlags, o->rtv == g_rtv ? "BB" : "RT", o->cls, o->nv, g_present_no);
+    }
+    ID3D11Resource_Release(res);
+}
+
 /* Am Swap: alle Ressourcen der Liste sichern, Schatten-Views eintragen. */
 static void ip_list_snap(ip_list_t *L, int li)
 {
@@ -3329,12 +3724,19 @@ static void ip_list_snap(ip_list_t *L, int li)
     ID3D11View *lv[3] = { NULL, NULL, NULL };
     int le[3] = { -1, -1, -1 };
     L->snap_ok = 1;
+    ip_list_unref(L); /* W361 */
     L->nrefs = 0;
     L->bbref = ip_sh_ref(L, li, (ID3D11View *)g_rtv, 0);
     for (i = 0; i < L->nops; i++) {
         ip_op_t *o = &L->ops[i];
         ID3D11View *vv[3];
         int q;
+        if (o->kind == IP_COPY) { /* W340: Quelle = Schatten des BB, Ziel = Schatten der Textur (braucht RT-Bindung) */
+            o->cp_es = ip_sh_ref(L, li, (ID3D11View *)o->cps, 0);
+            o->cp_ed = ip_sh_ref(L, li, (ID3D11View *)o->cpd, 1);
+            if (o->cp_es >= 0 && o->cp_ed >= 0) { InterlockedIncrement(&li_cp_ok); }
+            continue;
+        }
         vv[0] = (ID3D11View *)o->rtv;
         vv[1] = (ID3D11View *)o->dsv;
         vv[2] = (ID3D11View *)o->srv;
@@ -3349,6 +3751,7 @@ static void ip_list_snap(ip_list_t *L, int li)
             if (q == 0) { o->sh_rtv = (e >= 0) ? g_ish[e].rtv : NULL; }
             else if (q == 1) { o->sh_dsv = (e >= 0) ? g_ish[e].dsv : NULL; }
             else if (e >= 0) { o->sh_srv = g_ish[e].srv; }
+            else if (g_sba_loc && g_cfg.interp_diag >= 1) { li_srv_note(o, i); } /* DIAG(W340) */
         }
         if (o->rq) { /* RENDER-QA: Stufen 1..3 (RT-Texturen bekommen Schatten) */
             int k2;
@@ -4123,6 +4526,7 @@ static int cc_prep(ip_list_t *B, int bi, int lerp_ok)
     int mode = g_cfg.interp_cockpit_cache;
     ip_sh_noskip = NULL;
     if (mode <= 0 || !lerp_ok || B->bbref < 0) { return 0; }
+    if (B->ncopy) { return 0; } /* W340: Kopier-Ops kennt die Ruhe-/Anfangs-Analyse nicht -> ohne Cache */
     if (cc_scan_ser != B->serial) {
         cc_scan(B, bi);
         cc_st_n++;
@@ -4144,7 +4548,7 @@ static int cc_begin(ip_list_t *B, int bi, ip_list_t *A, int lerp_ok, const ip_cx
     int m = 0, k;
     int mode = g_cfg.interp_cockpit_cache;
     ip_sh_noskip = NULL;
-    if (mode <= 0 || !lerp_ok || B->bbref < 0 || cc_scan_ser != B->serial) { return 0; }
+    if (mode <= 0 || !lerp_ok || B->bbref < 0 || cc_scan_ser != B->serial || B->ncopy) { return 0; }
     cc_st_rep++;
     if ((mode & 1) && cc_nskip) { /* a) ruhige Ziele: Tick-Endstand */
         for (k = 0; k < IP_SH_MAX; k++) {
@@ -4357,6 +4761,15 @@ static void ip_vr_cb_write(const ip_cx_t *x, const sb_vr_pass_t *p, int e, int k
  * (0, wenn die Stroeme per Versatz gebunden sind). */
 static void ip_draw_op(ID3D11DeviceContext *c, const ip_op_t *o, unsigned n, unsigned base)
 {
+    /* FIX(ISSUE-EMP,W352) line_scale: Linie als Band wie im Tick-Bild (GS je Draw an/aus; Linien-Draws
+     * haben nie den W265-Waechter, mit interp_guard traegt der Lerp-VS Zusatzausgaben -> dann alt). */
+    if (o->lgs && !g_cfg.interp_guard) {
+        ID3D11DeviceContext_GSSetShader(c, o->lgs, NULL, 0);
+        if (o->ib1) { sb_im_ib_bind(c); ID3D11DeviceContext_DrawIndexed(c, n, o->ib1 - 1u, (INT)base); }
+        else { ID3D11DeviceContext_Draw(c, n, base); }
+        ID3D11DeviceContext_GSSetShader(c, NULL, NULL, 0);
+        return;
+    }
     if (o->ib1) {
         sb_im_ib_bind(c);
         ID3D11DeviceContext_DrawIndexed(c, n, o->ib1 - 1u, (INT)base);
@@ -4428,7 +4841,7 @@ static void vt_scan(const ip_list_t *B, int bi)
     memset(vt_wr, 0, sizeof vt_wr);
     memset(vt_nosc, 0, sizeof vt_nosc);
     memset(lastw, 0, sizeof lastw);
-    if (B->nops > CC_MAXOPS) { vt_ok = 0; return; }
+    if (B->nops > CC_MAXOPS || B->ncopy) { vt_ok = 0; return; } /* W340: Kopier-Ops nicht in der VR-Analyse */
     for (i = 0; i < B->nops; i++) {
         const ip_op_t *o = &B->ops[i];
         int bb = (o->kind == IP_DRAW && o->rtv == g_rtv) || (o->kind == IP_CLR_RTV && o->rtv == g_rtv) ||
@@ -4697,6 +5110,126 @@ static int ip_rp_prep;      /* Vorbereitung am Swap: 1 = exakte Teil-Wiedergabe 
 static unsigned ip_rp_stop; /* ... nur Ops 0..ip_rp_stop (bis zur letzten Welt-Op vor der Komposition) */
 #define IP_RP_ISW(o, rw, rd) ((((o)->kind == IP_DRAW || (o)->kind == IP_CLR_RTV) && (o)->sh_rtv && (o)->sh_rtv == (rw)) ||     ((rd) && !(o)->sh_rtv && (o)->kind != IP_CLR_RTV && (o)->sh_dsv == (rd)))
 
+/* W361 LOC-INTERP-CRASH: Sind die Schatten-Eintraege der Liste noch die beim Sichern? (Generation je Eintrag.)
+ * Nach Entwurf nie verletzt (Verdraengung nur ohne lebende Sicherung, vorher ip_rt_quiesce); falls doch, bleiben
+ * die Views dank refv gueltig - hier nur zaehlen und melden (Bild unveraendert). */
+static int ip_list_refs_check(const ip_list_t *L, int li, const char *wo)
+{
+    int j;
+    for (j = 0; j < L->nrefs && j < IP_REFS_MAX; j++) {
+        int e = L->refs[j];
+        if (e < 0 || e >= IP_SH_MAX || !ip_shref_same(&L->refo[j], g_ish[e].gen)) {
+            LONG n = InterlockedIncrement(&st_sh_stale_tot);
+            InterlockedIncrement(&st_sh_stale);
+            if (n <= 8) {
+                HLOG_W("INTERP W361: Liste %d (%s, Tick f=%u ser=%u) nutzt ersetzten Schatten-Eintrag %d (Generation %u -> %u) "
+                       "- Views der Liste gehalten, kein Absturz", li, wo, L->frame, L->serial, e, L->refo[j].gen,
+                       (e >= 0 && e < IP_SH_MAX) ? g_ish[e].gen : 0u);
+            }
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* W361: oeffentlicher Referenzzaehler einer View (AddRef/Release-Rueckgabe). */
+static ULONG ip_view_refs(ID3D11View *v)
+{
+    ID3D11View_AddRef(v);
+    return ID3D11View_Release(v);
+}
+
+/* W361 LOC-INTERP-CRASH: Zaehlerwache der Schatten-Views. Soll = 1 (Eintrag) + je Liste, die den Eintrag mit
+ * eigener Referenz haelt (refo), 1. Weniger = fremde Ueberfreigabe (Minidumps P0/A5a: SRV mit Zaehler -4/-3
+ * zerstoert, RTV/DSV desselben Eintrags heil) -> melden und die Differenz selbst halten (Leck statt Absturz;
+ * Abgabe beim Freigeben des Eintrags). Am Swap unter ctx_lock (fix=1) und vor jedem Render-Thread-Auftrag (fix=0,
+ * nur Eintraege der Auftragslisten). */
+static volatile LONG st_rc_bad, st_rc_fix, st_rc_dead;
+#define IP_DEAD_MAX 8
+static ID3D11View *volatile ip_dead_v[IP_DEAD_MAX]; /* tot gefundene Views (Render-Thread), Quarantaene in ip_show */
+static volatile LONG ip_dead_n;
+static int ip_sh_rc_watch(int fix, const ip_list_t *A, const ip_list_t *B, const char *wo)
+{
+    int e, k, j, q, dead = 0;
+    for (e = 0; e < IP_SH_MAX; e++) {
+        ip_sh_t *s = &g_ish[e];
+        ID3D11View *vw[3];
+        if (!s->res) { continue; }
+        if ((A || B) && !fix) { /* nur Eintraege der Auftragslisten */
+            int use = 0;
+            for (j = 0; B && j < B->nrefs && !use; j++) { use = (B->refs[j] == e); }
+            for (j = 0; A && j < A->nrefs && !use; j++) { use = (A->refs[j] == e); }
+            if (!use) { continue; }
+        }
+        vw[0] = (ID3D11View *)s->rtv; vw[1] = (ID3D11View *)s->dsv; vw[2] = (ID3D11View *)s->srv;
+        for (q = 0; q < 3; q++) {
+            ULONG soll = 1u + s->pin[q], ist;
+            if (!vw[q]) { continue; }
+            for (k = 0; k < IP_LISTS; k++) {
+                const ip_list_t *L = &g_ipl[k];
+                if (!fix && L != A && L != B) { continue; } /* Render-Thread: nur gepinnte Listen (Untergrenze) */
+                for (j = 0; j < L->nrefs && j < IP_REFS_MAX; j++) {
+                    if (L->refs[j] == e && L->refo[j].v[q] == vw[q]) { soll++; }
+                }
+            }
+            ist = ip_view_refs(vw[q]);
+            if (fix ? (ist == soll) : (ist >= soll)) { continue; }
+            if (ist >= 0x80000000u) { /* d3d11-Zerstoerungsmarke (Zaehler + 0xC0000001): nicht mehr binden */
+                LONG n = InterlockedIncrement(&ip_dead_n);
+                if (n <= IP_DEAD_MAX) { ip_dead_v[n - 1] = vw[q]; }
+                InterlockedIncrement(&st_rc_dead);
+                dead = 1;
+            }
+            if (InterlockedIncrement(&st_rc_bad) <= 24) {
+                HLOG_W("INTERP W361 Zaehler (%s): Schatten %d %s %p soll %lu ist %lu (Tick f=%u)%s", wo, e,
+                       q == 0 ? "rtv" : (q == 1 ? "dsv" : "srv"), (void *)vw[q], soll, ist, g_present_no,
+                       ist >= 0x80000000u ? " -> zerstoert, Bild entfaellt, Quarantaene" :
+                       (ist < soll && ist >= 1u ? " -> Differenz gehalten" : ""));
+            }
+            if (ist < soll && ist >= 1u) { /* lebt noch: Differenz selbst halten (auch im Render-Thread, atomar) */
+                ULONG d = soll - ist;
+                InterlockedExchangeAdd((volatile LONG *)&s->pin[q], (LONG)d);
+                while (d--) { ID3D11View_AddRef(vw[q]); }
+                InterlockedIncrement(&st_rc_fix);
+            }
+        }
+    }
+    return dead;
+}
+
+static void ip_hist_clear(void);
+/* W361: tot gemeldete Views unter Quarantaene stellen (nie wieder binden oder freigeben - Release auf ein
+ * zerstoertes Objekt waere selbst ein Fehler), Historie verwerfen. Unter ctx_lock, Render-Thread ruhig. */
+static void ip_dead_purge(void)
+{
+    LONG n = ip_dead_n, i;
+    int e, k, j, q;
+    if (n > IP_DEAD_MAX) { n = IP_DEAD_MAX; }
+    ip_rt_quiesce();
+    for (i = 0; i < n; i++) {
+        ID3D11View *d = ip_dead_v[i];
+        if (!d) { continue; }
+        for (k = 0; k < IP_LISTS; k++) {
+            ip_list_t *L = &g_ipl[k];
+            for (j = 0; j < L->nrefs && j < IP_REFS_MAX; j++) {
+                for (q = 0; q < 3; q++) { if (L->refo[j].v[q] == d) { L->refo[j].v[q] = NULL; } }
+            }
+        }
+        for (e = 0; e < IP_SH_MAX; e++) {
+            ip_sh_t *s = &g_ish[e];
+            int hit = 0;
+            if ((ID3D11View *)s->rtv == d) { s->rtv = NULL; s->pin[0] = 0; hit = 1; }
+            if ((ID3D11View *)s->dsv == d) { s->dsv = NULL; s->pin[1] = 0; hit = 1; }
+            if ((ID3D11View *)s->srv == d) { s->srv = NULL; s->pin[2] = 0; hit = 1; }
+            if (hit && s->res) { ip_sh_free(s); } /* Rest frei, Eintrag wird beim naechsten Sichern neu angelegt */
+        }
+        ip_dead_v[i] = NULL;
+    }
+    ip_dead_n = 0;
+    ip_hist_clear(); /* Ops der Listen zeigen auf die tote View */
+    HLOG_W("INTERP W361: %ld zerstoerte Schatten-View(s) in Quarantaene, Historie verworfen (Zwischenbilder setzen kurz aus)", n);
+}
+
 static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, int dbg, const ip_cx_t *x)
 {
     int cps = -1; /* DIAG: 1 = Diagnose-PS gebunden */
@@ -4734,6 +5267,8 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
     ID3D11RenderTargetView *rpw = NULL; /* W295 WORLD-REPROJ: Welt-Schatten (Welt-Ops bis rplast durch den Warp ersetzen) */
     ID3D11DepthStencilView *rpd = NULL;
     unsigned rplast = 0xFFFFFFFFu;
+    (void)ip_list_refs_check(B, bi, "B"); /* W361 */
+    if (A) { (void)ip_list_refs_check(A, ai, "A"); }
     fxr_rep_begin(&fxs);
     memset(&rc, 0, sizeof rc);
     if (!dbg && !vrp) {
@@ -4832,6 +5367,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
         if (ip_pl_on && o->nolerp && (ip_pl_mfx & (o->nolerp == MFX_WASH ? 1u : 2u))) { ip_pl_nmfx++; continue; } /* W193: monitor_fx aus */
         if (ip_ph.on && ip_ph.hud_off && ip_ph_is_hud(o)) { ip_ph_nhud++; continue; } /* W290: HUD aus (nur Foto) */
         if (vtk && vt_skip[i]) { continue; } /* W183 VR-FIX3: RT-Op, Ziel hat den Tick-Endstand */
+        if ((g_cfg.loc_interp_dbg & 1) && g_sba_loc && lerp_ok && !dbg && o->kind == IP_DRAW && o->cls && !o->flag) { continue; } /* DIAG(W349) */
         if ((ccm & 3) && i < (unsigned)cc_pfx) { /* W146 GPU-COST: BB-Anfang aus dem Cockpit-Cache */
             if ((ccm & 3) == 2 && (o->rtv == g_rtv || (cc_bdsv && o->dsv == cc_bdsv))) { continue; }
         } else if ((ccm & 3) == 1 && i == (unsigned)cc_pfx) {
@@ -4847,6 +5383,18 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
         }
         if (ip_gs_n > 0 && o->sh_rtv && o->sh_rtv != ip_gs_rtv[ip_gs_n - 1]) { ip_gs_mark(o->sh_rtv); } /* DIAG(TICK-PERF,W125) */
         if (ip_gs_n > 0 && o->kind == IP_DRAW) { ip_gs_draws[ip_gs_n - 1]++; if (o->rq) { ip_gs_rq[ip_gs_n - 1]++; } }
+        if (o->kind == IP_COPY) { /* W340 LOC-FRAMES: BB-Schatten (Stand dieser Wiedergabe) -> Schatten der Textur */
+            if (o->cp_es >= 0 && o->cp_ed >= 0 && g_ish[o->cp_es].sh && g_ish[o->cp_ed].sh) {
+                ID3D11Resource *dr = (ID3D11Resource *)g_ish[o->cp_ed].sh, *sr = (ID3D11Resource *)g_ish[o->cp_es].sh;
+                if (vrp) { /* W134 VR: BB-Draws gingen ins Augenziel -> Textur bleibt Tick-Stand */ }
+                else {
+                    if (o->cpbox.back) { ID3D11DeviceContext_CopySubresourceRegion(x->c, dr, 0, 0, 0, 0, sr, 0, &o->cpbox); }
+                    else { ID3D11DeviceContext_CopyResource(x->c, dr, sr); }
+                    InterlockedIncrement(&li_cp_rep);
+                }
+            }
+            continue;
+        }
         if (o->kind == IP_CLR_RTV) {
             if (ip_ph.on && ip_ph.tgt >= 0 && o->sh_rtv && o->sh_rtv == g_ish[ip_ph.tgt].rtv) { /* W195: Foto-Kachel */
                 D3D11_RECT cr;
@@ -5458,6 +6006,63 @@ unsigned sb_interp_pairs(void)
     return ip_pairs_total;
 }
 
+/* ---------- W361 LOC-INTERP-CRASH: verzoegerte Freigabe ----------
+ * Die Ops der Zwischenbild-Listen tragen RENDER-QA-Shader/Layouts roh (rq_rec_t vs/vsl/lay/layl/ps). Ersetzt
+ * render_shade.c einen Cache-Eintrag (Handle mit neuem Programm, Roh-Variante mit anderem Vertex-Format), darf
+ * das alte Objekt erst weg, wenn keine Liste es mehr enthalten kann: eine Liste lebt hoechstens Aufnahme (1 Swap)
+ * + Historie (IP_HIST Swaps), danach IP_LISTS + 1 Swaps Abstand und vorher den Render-Thread abwarten. Ohne Listen
+ * (Zwischenbilder aus, keine Foto-Aufnahme) sofort. Aufruf auch ohne ctx_lock (render_shade gibt ihn beim
+ * Erstellen ab) - eigene Sperre. */
+typedef struct { IUnknown *u; unsigned due; } ip_rl_t;
+static ip_rl_t *ip_rl;
+static unsigned ip_rl_n, ip_rl_cap, ip_swapno;
+static SRWLOCK ip_rl_lock = SRWLOCK_INIT;
+static volatile LONG st_rl_tot;
+
+void sb_interp_release_later(IUnknown *u)
+{
+    if (!u) { return; }
+    if (!ip_init_done || (g_cfg.interp_fps <= 0 && ip_nhist == 0 && ip_rec < 0)) { IUnknown_Release(u); return; }
+    AcquireSRWLockExclusive(&ip_rl_lock);
+    if (ip_rl_n == ip_rl_cap) {
+        unsigned nc = ip_rl_cap ? ip_rl_cap * 2u : 64u;
+        ip_rl_t *p = (ip_rl_t *)realloc(ip_rl, nc * sizeof *p);
+        if (!p) { /* kein Speicher: lieber festhalten als zu frueh freigeben */
+            ReleaseSRWLockExclusive(&ip_rl_lock);
+            return;
+        }
+        ip_rl = p;
+        ip_rl_cap = nc;
+    }
+    ip_rl[ip_rl_n].u = u;
+    ip_rl[ip_rl_n].due = ip_swapno + IP_LISTS + 1u;
+    ip_rl_n++;
+    ReleaseSRWLockExclusive(&ip_rl_lock);
+    if (InterlockedIncrement(&st_rl_tot) <= 4) {
+        HLOG_I("INTERP W361: Objekt einer Zwischenbild-Liste ersetzt -> Freigabe nach %u Swaps (Render-Thread abgewartet)",
+               IP_LISTS + 1u);
+    }
+}
+
+/* Faellige (all: alle) Objekte freigeben. Unter ctx_lock. */
+static void ip_rl_drain(int all)
+{
+    unsigned i, k = 0;
+    int quiet = 0;
+    if (!ip_rl_n) { return; }
+    AcquireSRWLockExclusive(&ip_rl_lock);
+    for (i = 0; i < ip_rl_n; i++) {
+        if (all || (int)(ip_swapno - ip_rl[i].due) >= 0) {
+            if (!quiet) { ip_rt_quiesce(); quiet = 1; }
+            IUnknown_Release(ip_rl[i].u);
+        } else {
+            ip_rl[k++] = ip_rl[i];
+        }
+    }
+    ip_rl_n = k;
+    ReleaseSRWLockExclusive(&ip_rl_lock);
+}
+
 /* W81 WINMODE: vor ResizeBuffers alles freigeben, was Backbuffer-Ressourcen
  * (oder ihre Views) haelt: Aufzeichnungs-/Historienlisten (o->rtv/dsv/srv),
  * Schatten-Eintraege (AddRef auf Spiel-BB/RTs, Kopien in BB-Groesse) und
@@ -5469,6 +6074,7 @@ void sb_interp_reset(const char *why)
     if (!ip_init_done) { return; }
     ip_rt_quiesce(); /* W126 RENDER-THREAD: Render-Thread liest Listen/Schatten */
     for (i = 0; i < IP_LISTS; i++) { ip_list_reset(&g_ipl[i]); }
+    ip_rl_drain(1); /* W361: keine Liste mehr -> alles Verzoegerte frei */
     ip_nhist = 0;
     ip_nneed = 0;
     ip_live = 0;
@@ -5642,9 +6248,13 @@ static DWORD WINAPI ip_rt_main(LPVOID p)
             ip_rtjob_t *j = &ip_rtj;
             ID3D11CommandList *cl = NULL;
             j->q0 = ip_now();
+            if (ip_sh_rc_watch(0, j->ai >= 0 ? &g_ipl[j->ai] : NULL, &g_ipl[j->bi], "rt")) { /* W361: tote View -> nicht binden */
+                cl = NULL;
+            } else {
             ip_replay_ex(&g_ipl[j->bi], j->bi, j->ai >= 0 ? &g_ipl[j->ai] : NULL, j->ai, j->t, 0, &ip_rt_cx);
             j->rc = ip_rc_ctx[1]; /* DIAG(PERF-M2,W174) */
             if (FAILED(ID3D11DeviceContext_FinishCommandList(ip_rt_cx.c, FALSE, &cl))) { cl = NULL; }
+            }
             j->cl = cl;
             j->q1 = ip_now();
             InterlockedExchange(&j->st, IP_RT_DONE);
@@ -6041,6 +6651,28 @@ static void li_note(const ip_list_t *A, const ip_list_t *B, float t)
     li_last_t = tt;
 }
 
+/* DIAG(W349 LOC-FRAMES-2) loc_interp_dbg Bit 4: nach Zwischenbild-Wiedergaben in den Bildfolgen (pf_ring) die kleinen
+ * Render-Ziel-Schatten (<= 256 px, Glow-Kette) roh als PPM ablegen (12 Bilder): folgen sie t oder bleiben sie stehen? */
+static void li_sh_dump(const ip_list_t *B, float t)
+{
+    static unsigned n;
+    int j;
+    char nm[80];
+    int big = (g_cfg.loc_interp_dbg & 8) != 0; /* Bit 8: nur Ziele 257..512 px (Welt-RT), 24 Bilder */
+    if (n >= (big ? 24u : 12u)) { return; }
+    n++;
+    for (j = 0; j < B->nrefs; j++) {
+        int e = B->refs[j];
+        D3D11_TEXTURE2D_DESC dd;
+        if (!g_ish[e].sh) { continue; }
+        ID3D11Texture2D_GetDesc(g_ish[e].sh, &dd);
+        if ((big ? (dd.Width <= 256u || dd.Width > 512u) : dd.Width > 256u) || !(dd.BindFlags & D3D11_BIND_RENDER_TARGET) ||
+            dd.SampleDesc.Count != 1) { continue; }
+        _snprintf_s(nm, sizeof nm, _TRUNCATE, "lish_%06u_%03u_e%02d_%ux%u", B->frame, (unsigned)(t * 1000.0f + 0.5f), e, dd.Width, dd.Height);
+        ip_tex_ppm(nm, g_ish[e].sh);
+    }
+}
+
 static void ip_show(ip_list_t *A, ip_list_t *B, float t, const char *tag)
 {
     int bi = ip_list_index(B), ai = A ? ip_list_index(A) : -1;
@@ -6078,6 +6710,7 @@ static void ip_show(ip_list_t *A, ip_list_t *B, float t, const char *tag)
     } else {
         int gq, gd;
         ID3D11CommandList *cl = ip_rt_active() ? ip_rt_get(A, B, t) : NULL; /* W126 RENDER-THREAD */
+        if (!cl && ip_dead_n) { ip_dead_purge(); return; } /* W361: tote Schatten-View - dieses Bild entfaellt */
         if (!cl) { gpm = sb_gp_begin(0); } /* DIAG(GPU-COST,W146) */
         dy_begin(); /* W146 rt_scale_dyn */
         gq = ip_gpu_begin();
@@ -6106,6 +6739,7 @@ static void ip_show(ip_list_t *A, ip_list_t *B, float t, const char *tag)
         }
     }
     if (((ip_dd_ser && B->serial >= ip_dd_lo && B->serial <= ip_dd_ser) || B->ddsel) && ip_id_ps && A) { ip_id_dump(A, ai, B, bi, t); } /* DIAG(W251, W284) */
+    if ((g_cfg.loc_interp_dbg & 12) && g_sba_loc && A && t < 1.0f && sb_pf_active()) { li_sh_dump(B, t); } /* DIAG(W349) */
     sb_render_blit(img);
     if (gpm) { sb_gp_end(); } /* DIAG(GPU-COST,W146) */
     dy_end(); /* W146 rt_scale_dyn */
@@ -6320,12 +6954,29 @@ static void pd_stat_log(LONGLONG now)
     }
     if (pd_stat_q && g_sba_loc && (li_mid || li_exact)) { /* W323 LOC-INTERP */
         HLOG_I("LOCINTERP stat: %.1fs takt=%dHz interp_fps=%d ticks=%u bilder=%u zwischen=%u exakt=%u wiederholt=%u "
-               "gehalten=%u L=%.1fms r=%.1fms zustand_abw>2ms=%u (max %.1fms)",
+               "gehalten=%u L=%.1fms r=%.1fms zustand_abw>2ms=%u (max %.1fms) kopien=%ld/%ld/%ld rawchg_matrix=%u rawchg_vertex=%u reject_geo=%u",
                secs, ip_tick_hz(), g_cfg.interp_fps, li_ticks, li_mid + li_exact, li_mid, li_exact, li_same, li_kept,
                (double)ip_lat * 1000.0 / (double)ip_qpf.QuadPart, ip_rbar * 1000.0 / (double)ip_qpf.QuadPart,
-               li_dev2, li_dev_max);
+               li_dev2, li_dev_max, li_cp_rec, li_cp_ok, li_cp_rep, li_rz_alt, li_rz_vl, li_rj_cam2);
+        li_cp_rec = li_cp_ok = li_cp_rep = 0;
+        li_rz_alt = li_rz_vl = li_rj_cam2 = 0;
+        if (g_cfg.interp_diag >= 1 && li_rj_n) { /* DIAG(W340) */
+            HLOG_I("LOCINTERP reject: %u (w-Wechsel %u, Sprung <0.75 %u, <1 %u, <2 %u, >=2 %u NDC; >=1000 Vertices %u), davon Kamera-Lerp %u",
+                   li_rj_n, li_rj_w, li_rj_j[0], li_rj_j[1], li_rj_j[2], li_rj_j[3], li_rj_big, li_rj_cam);
+            li_rj_n = li_rj_w = li_rj_big = li_rj_cam = 0;
+            memset(li_rj_j, 0, sizeof li_rj_j);
+        }
         li_mid = li_exact = li_same = li_ticks = li_dev2 = li_kept = 0;
         li_dev_max = 0.0;
+    }
+    {   /* W361: sollte nie vorkommen (ip_list_refs_check, ip_sh_rc_watch) */
+        static LONG rc_last;
+        if (pd_stat_q && (st_sh_stale || st_rc_bad != rc_last)) {
+            HLOG_W("INTERP W361 stat: %.1fs %ld Wiedergaben mit ersetztem Schatten-Eintrag (gesamt %ld), Zaehler-Abweichungen "
+                   "gesamt %ld, davon gehalten %ld", secs, st_sh_stale, st_sh_stale_tot, st_rc_bad, st_rc_fix);
+            InterlockedExchange(&st_sh_stale, 0);
+            rc_last = st_rc_bad;
+        }
     }
     pd_stat_q = now;
     pd_n_ip = pd_n_hold = pd_n_late = pd_n_lockw = pd_n_iter = pd_n_gw = pd_n_gw_ok = 0;
@@ -6630,6 +7281,15 @@ static void ip_stat_log(void)
            st_r_n ? st_r_ms / st_r_n : 0.0, st_r_max, st_lat_n ? st_lat_ms / st_lat_n : 0.0,
            st_verify - st_verify_bad, st_verify);
     HLOG_I("INTERP stat2: geo=%u (Geometrie-Partner, in lerp enthalten)", st_geo);
+    if (!g_sba_loc) { /* W347 GHOST: RT-Selbstkopien (gesehen / als Op aufgezeichnet / mit Schatten / wiedergegeben) */
+        HLOG_I("INTERP selfcopy: gesehen=%ld ops=%ld schatten=%ld wiedergabe=%ld (interp_selfcopy=%d)",
+               li_cp_seen, li_cp_rec, li_cp_ok, li_cp_rep, g_cfg.interp_selfcopy);
+        li_cp_seen = li_cp_rec = li_cp_ok = li_cp_rep = 0;
+        HLOG_I("INTERP bbcam: gepaart=%u ohne_partner=%u ungeeignet=%u raster=%u zeit=%.2fms (interp_bbcam=%d, Billboards per Kamera-Schwerpunkt)",
+               st_bb_ok, st_bb_far, st_bb_no, st_bb_build, st_bb_ms, g_cfg.interp_bbcam);
+        st_bb_ok = st_bb_far = st_bb_no = st_bb_build = 0;
+        st_bb_ms = 0.0;
+    }
     if (g_cfg.interp_hlerp) { /* FIX(W237) */
         HLOG_I("INTERP hlerp: ticks=%u fehl=%u draws=%u ersatz=%u (homogener Zwischenbild-Lerp, w-Puffer je Tick)",
                st_hw_up, st_hw_fail, st_hw_draws, st_hw_one);
@@ -7582,6 +8242,7 @@ int sb_interp_swap(void)
     if (!ip_init()) { return 0; }
     t0 = ip_now();
     sb_ctx_enter();
+    ip_swapno++; /* W361: Takt der verzoegerten Freigabe */
     ip_gpu_poll();
     if (g_cfg.interp_guard_diag) { ip_gd_poll(); } /* DIAG(W265) */
     mission = ip_mission();
@@ -7655,6 +8316,7 @@ int sb_interp_swap(void)
          *    (regelmaessiger als die Swap-Zeit selbst); Testtakt: Swap-Zeit. */
         L->tstate = t0;
         LONGLONG vb = ip_vb_get(); /* W323: LoC schreibt der Haupt-Thread */
+        if (g_sba_loc && L->tvb0 && g_cfg.loc_interp_anchor) { vb = L->tvb0; } /* W340: Feld des Tick-Anfangs */
         if (g_cfg.vblank_hz > 0 && vb && t0 - vb < ip_qpf.QuadPart / 10) {
             double r = (double)(t0 - vb);
             double rms = r * 1000.0 / (double)ip_qpf.QuadPart;
@@ -7714,7 +8376,7 @@ int sb_interp_swap(void)
              * Zwischenbilder (Command-List des Render-Threads) pruefen. */
             ID3D11CommandList *vcl = ip_rt_active() ? ip_rt_get(A, L, 1.0f) : NULL;
             if (vcl) { ip_rt_exec(vcl); }
-            else { ip_replay(L, li, A, ip_list_index(A), 1.0f); }
+            else if (!ip_dead_n) { ip_replay(L, li, A, ip_list_index(A), 1.0f); } /* W361: tote View nie binden */
             ip_verify_check(L, li);
         }
         if (A && g_cfg.interp_mode == 1 && L->pair_ok && sb_rp_want()) { ip_rp_tick(A, ip_list_index(A), L, li); } /* W295 WORLD-REPROJ */
@@ -7770,6 +8432,8 @@ int sb_interp_swap(void)
         }
     }
     if (!took) { ip_live = 0; }
+    ip_rl_drain(0); /* W361: faellige ersetzte Shader/Layouts (vor dem neuen Auftrag) */
+    if (ip_sh_rc_watch(1, NULL, NULL, "swap") || ip_dead_n) { ip_dead_purge(); } /* W361: Zaehlerwache der Schatten-Views */
     if (ip_live) { ip_rt_prefetch(); } /* W126 RENDER-THREAD: Historie neu -> naechstes Bild vorbereiten */
     sb_ctx_leave();
     if (ip_live) { ip_poll(); }

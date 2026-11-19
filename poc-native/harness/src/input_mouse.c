@@ -16,6 +16,7 @@
 #include "sb_perfhud.h" /* W122 PERF-HUD */
 #include "vr.h" /* W134 VR-PROTO */
 #include "sb_state.h" /* W232: sb_in_mission (zentrale Missionserkennung) */
+#include "loc_pad.h" /* W341: loc_mouse_mission (LoC-Missionserkennung) */
 
 #define IMOUSE_MSG_INIT (WM_APP + 0x79)
 #define IMOUSE_MSG_SYNC (WM_APP + 0x7D) /* W225: Spiel-Thread -> UI-Abgleich */
@@ -63,6 +64,12 @@ static int imouse_in_mission(void)
      * Demos: Mission 1 = 4; Spieler, der im Titel sofort START drueckt:
      * Mission 1 = 2 (= Wert der Titel-Demo); Mission 2 = 5 usw. Die Demo
      * erkennt [0x3B8CDC] = 1 (alle CAMP-Logs: Demo 1, Kampagne 0). */
+    if (g_sba_loc) {
+        /* W341 LOC-MOUSE: Die SB-Zustandsadressen lesen im LoC-Profil die Null-Seite (immer 0) ->
+         * die Maus wurde nie gefangen, Raw-Deltas blieben 0 (nur Maustasten wirkten). LoC: Mission =
+         * Lockstep aktiv und eigener VT abgesetzt (loc_pad.c). loc_mouse=0 = altes Verhalten. */
+        return g_cfg.loc_mouse && loc_mouse_mission();
+    }
     return sb_in_mission(); /* W232: Logik nach sb_state.c verschoben (Selbsttest: gleiche Test-Lesefunktion) */
 }
 static int imouse_menu_now(void)
@@ -153,6 +160,20 @@ int imouse_test_pad(short *lx, short *ly, unsigned short *buttons)
     *ly = (short)((xy >> 16) & 0xFFFF);
     *buttons = (unsigned short)(b & 0xFFFF);
     return 1;
+}
+
+/* W341 TEST (input_test_hook=1): Nachricht an das EIGENE Client-Fenster einreihen (PostMessage,
+ * kein Fokus/Vordergrund). 0 = Fenster-Eingabe noch nicht installiert. */
+int imouse_test_post(unsigned msg, uintptr_t wp, intptr_t lp)
+{
+    if (!g_cfg.input_test_hook || g_installed != 1 || !g_mwnd) return 0;
+    return PostMessageA(g_mwnd, (UINT)msg, (WPARAM)wp, (LPARAM)lp) != 0;
+}
+
+/* W341: 1 = Maus gerade gefangen (Raw-Deltas wirken). */
+int imouse_captured(void)
+{
+    return g_captured != 0;
 }
 
 int imouse_has_focus(void)

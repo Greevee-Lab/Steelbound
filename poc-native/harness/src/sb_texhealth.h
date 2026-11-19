@@ -16,8 +16,11 @@ void sb_th_hi_entry(void);
 void sb_th_dauer(void);
 /* render_im.c/render_shade.c: Draw erwartet eine Textur (Stufe belegt), hat aber keine SRV.
  * Zaehlt (je Grund, je Bild) und liefert mit tex_missing_mark=1 die Markierungs-SRV, sonst NULL. */
-struct ID3D11ShaderResourceView *sb_th_missing(unsigned why, unsigned present);
-/* render_shade.c (Stufen 1..3, nur mit tex_missing_mark): Markierungs-SRV je Grund, ohne Zaehlung. */
+struct ID3D11ShaderResourceView *sb_th_missing(unsigned why, unsigned present, unsigned xptr);
+/* W360 render_shade.c: Stufe 1..3 belegt (Textur-Modus aktiv), aber keine SRV. Zaehlt immer, merkt die
+ * Textur fuer F11 und liefert mit tex_missing_mark=1 die Markierungs-SRV, sonst NULL (bitgleich). */
+struct ID3D11ShaderResourceView *sb_th_stage_missing(unsigned stage, unsigned why, unsigned xptr, unsigned present);
+/* Markierungs-SRV je Grund, ohne Zaehlung. */
 struct ID3D11ShaderResourceView *sb_th_mark(unsigned why);
 /* render_d3ddbg.c: Geraetefaehigkeiten nach dem Anlegen (einmal). */
 void sb_th_device(struct ID3D11Device *dev, int driver_cmdlists, int warp);

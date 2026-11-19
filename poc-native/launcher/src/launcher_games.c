@@ -218,20 +218,38 @@ int lgame_classify(int xbe_ok, uint32_t title_id)
     }
 }
 
+/* W353 LOC-DURCHSTICH: Freigabe des LoC-Starts je Ausgabe. Interne Ausgabe: frei (wird nie verteilt).
+ * Community: nur im privaten Testpaket (CMake -DSB_LOC_PLAY=ON, make_alpha.py --loc-preview); oeffentliche
+ * Releases bleiben grau (Nutzer 15.11.). Hinweis: Die Sperre ist Bedienung, keine Sicherheitsgrenze (der
+ * Client startet LoC mit loc_boot=1 in jeder Ausgabe). */
+#if defined(SB_EDITION_COMMUNITY) && SB_EDITION_COMMUNITY
+#if defined(SB_LOC_PLAY) && SB_LOC_PLAY
+#define LGAME_LOC_BUILD_READY 1
+#else
+#define LGAME_LOC_BUILD_READY 0
+#endif
+#else
+#define LGAME_LOC_BUILD_READY 1
+#endif
+
+int lgame_loc_build_ready(void)
+{
+    return LGAME_LOC_BUILD_READY;
+}
+
 int lgame_loc_client_ready(void)
 {
     char v[8];
-    /* W276: Client startet LoC noch nicht (W275). Freischalten = hier 1. */
-    if (u8_GetEnv("SB_TEST_LOC_READY", v, sizeof v) > 0 && v[0] == '1') {
-        return 1;
+    /* Test-Haken (W276): SB_TEST_LOC_READY=1 frei, W353: =0 gesperrt (Sperrtexte in jeder Ausgabe pruefbar) */
+    if (u8_GetEnv("SB_TEST_LOC_READY", v, sizeof v) > 0) {
+        if (v[0] == '1') {
+            return 1;
+        }
+        if (v[0] == '0') {
+            return 0;
+        }
     }
-#if defined(SB_EDITION_COMMUNITY) && SB_EDITION_COMMUNITY
-    /* Nutzer 15.11.: Community-Fassung zeigt LoC, Start bleibt grau -- auch
-     * wenn die private Fassung LoC spaeter freischaltet (nur hier freigeben). */
-    return 0;
-#else
-    return 0; /* W276: Client startet LoC noch nicht; Freischalten = hier 1 */
-#endif
+    return LGAME_LOC_BUILD_READY;
 }
 
 void lgame_check_xbe(const uint8_t *xbe, size_t n, lgame_img_t *out)
@@ -515,7 +533,8 @@ void lgame_selftest(int *pass, int *fail)
             _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\t.iso", dir);
             u8_to_acp(p, acp, sizeof acp);
             if (!why[0] && (iso_vfs_make_test_image(acp, xb, sizeof xb) != 0 ||
-                            lgame_loc_check(p, &r) != k[i].kind || r.startable)) {
+                            lgame_loc_check(p, &r) != k[i].kind ||
+                            r.startable != (k[i].kind == LGAME_IMG_LOC && lgame_loc_client_ready()))) { /* W353 */
                 _snprintf_s(why, sizeof why, _TRUNCATE, "ISO %08X -> %d", k[i].tid, r.kind);
             }
             u8_DeleteFile(p);
@@ -568,7 +587,7 @@ void lgame_selftest(int *pass, int *fail)
             ok.kind = LGAME_IMG_LOC;
             ok.title_id = LGAME_TID_LOC;
             sb_lang_set(li ? "de" : "en");
-            SetEnvironmentVariableA("SB_TEST_LOC_READY", NULL);
+            SetEnvironmentVariableA("SB_TEST_LOC_READY", "0"); /* W353: Sperre erzwingen (intern sonst frei) */
             if (lgame_loc_start_gate(&ok, m, sizeof m) != 1 || strcmp(m, LT("gui.loc_soon")) != 0 ||
                 !strstr(m, li ? "Demn" : "Coming soon")) {
                 _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Sperre '%s'", li ? "de" : "en", m);
@@ -619,30 +638,39 @@ void lgame_selftest(int *pass, int *fail)
         lgame_img_t ok;
 
         char p[1200];
+        /* W353: oeffentliche Community-Fassung gesperrt; privates Testpaket (SB_LOC_PLAY) und intern frei */
+#if defined(SB_EDITION_COMMUNITY) && SB_EDITION_COMMUNITY && !(defined(SB_LOC_PLAY) && SB_LOC_PLAY)
+        const int want = 0;
+#else
+        const int want = 1;
+#endif
         SetEnvironmentVariableA("SB_TEST_LOC_READY", NULL);
         memset(&ok, 0, sizeof ok);
         ok.kind = LGAME_IMG_LOC;
         ok.title_id = LGAME_TID_LOC;
-        if (lgame_loc_client_ready() != 0) {
-            strcpy_s(why, sizeof why, "lgame_loc_client_ready() != 0");
-        } else if (lgame_loc_start_gate(&ok, m, sizeof m) != 1 || strcmp(m, LT("gui.loc_soon")) != 0) {
-            _snprintf_s(why, sizeof why, _TRUNCATE, "Start nicht gesperrt '%s'", m);
+        if (lgame_loc_build_ready() != want || lgame_loc_client_ready() != want) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Freigabe der Ausgabe != %d", want);
+        } else if (lgame_loc_start_gate(&ok, m, sizeof m) != !want ||
+                   (!want && strcmp(m, LT("gui.loc_soon")) != 0)) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Startsperre falsch '%s'", m);
         }
-        if (!why[0]) { /* echtes (synthetisches) LoC-Abbild: erkannt, aber nicht startbar */
+        if (!why[0]) { /* echtes (synthetisches) LoC-Abbild: erkannt, startbar nur mit Freigabe */
             st_xbe(xb, sizeof xb, LGAME_TID_LOC);
             _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\default.xbe", dir);
             st_write(p, xb, sizeof xb);
-            if (lgame_loc_check(dir, &r) != LGAME_IMG_LOC || r.startable) {
+            if (lgame_loc_check(dir, &r) != LGAME_IMG_LOC || r.startable != want) {
                 _snprintf_s(why, sizeof why, _TRUNCATE, "LoC-Abbild Art %d startbar %d", r.kind, r.startable);
             }
             u8_DeleteFile(p);
         }
     }
     if (!why[0]) {
-#if defined(SB_EDITION_COMMUNITY) && SB_EDITION_COMMUNITY
+#if defined(SB_EDITION_COMMUNITY) && SB_EDITION_COMMUNITY && !(defined(SB_LOC_PLAY) && SB_LOC_PLAY)
         printf("PASS W292 loctab: Community-Fassung - LoC-Start grau (gesperrt, Meldung, LoC-Abbild erkannt aber nicht startbar)\n");
+#elif defined(SB_EDITION_COMMUNITY) && SB_EDITION_COMMUNITY
+        printf("PASS W353 loctab: privates Community-Testpaket (SB_LOC_PLAY) - LoC-Start frei, LoC-Abbild startbar\n");
 #else
-        printf("PASS W292 loctab: Private Fassung - LoC-Start heute ebenfalls gesperrt (Community-Sperre: eigener Zweig in lgame_loc_client_ready)\n");
+        printf("PASS W353 loctab: interne Ausgabe - LoC-Start frei, LoC-Abbild startbar\n");
 #endif
         (*pass)++;
     } else {

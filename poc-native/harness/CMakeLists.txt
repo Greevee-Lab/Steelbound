@@ -26,6 +26,13 @@ else()
   message(FATAL_ERROR "SB_EDITION muss private oder community sein (ist: ${SB_EDITION})")
 endif()
 message(STATUS "SB_EDITION=${SB_EDITION}")
+# W353 LOC-DURCHSTICH: privater Schalter fuer ein Testpaket mit LoC (nur community wirksam; Standard aus,
+# oeffentliche Releases bleiben grau). Client: Rollback-Eingabeschicht standardmaessig an wie intern.
+option(SB_LOC_PLAY "W353: privates Testpaket mit LoC (nur -DSB_EDITION=community, nie fuer Releases)" OFF)
+if(SB_LOC_PLAY AND NOT SB_EDITION_COMMUNITY)
+  set(SB_LOC_PLAY OFF)  # intern ohne Wirkung, Kommandozeile bleibt unveraendert
+endif()
+message(STATUS "SB_LOC_PLAY=${SB_LOC_PLAY}")
 
 
 # ---- Loader: winzig, kein CRT, fix auf 0x10000 (Vorbild: Cxbx cxbxr-ldr) ----
@@ -35,6 +42,12 @@ target_link_options(sb_ldr PRIVATE
   "/LARGEADDRESSAWARE" "/SUBSYSTEM:CONSOLE" "/ENTRY:rawMain")
 target_link_libraries(sb_ldr PRIVATE kernel32)
 target_compile_options(sb_ldr PRIVATE /W3 /GS-)
+# W332 SEC-HARDEN: DEP ausdruecklich (das XBE-Abbild bekommt seine Seiten per VirtualProtect als
+# PAGE_EXECUTE_READWRITE, xbe_loader.c/kernel_hle.c). Bewusst NICHT: /DYNAMICBASE (das XBE braucht
+# die feste Basis 0x10000), /GS und /guard:cf (kein CRT -> kein Sicherheits-Cookie und keine
+# Lade-Konfiguration; der Loader liest keine Fremddaten), /SAFESEH (SEH-Handler des Gastcodes liegen
+# im Abbild-Bereich des Loaders). DLL-Suchpfad: SetDefaultDllDirectories in ldr.c.
+target_link_options(sb_ldr PRIVATE "/NXCOMPAT")
 
 # ---- W142 L10N-EN: eingebautes Englisch (sb_lang_en.inc aus en.lang) ----
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -57,6 +70,7 @@ add_library(sb_emu SHARED
   src/hcfg.c
   src/sb_lang.c
   src/xbe_loader.c
+  src/guest_wx.c
   src/kernel_hle.c
   src/krnl_sync.c
   src/krnl_file.c
@@ -84,6 +98,7 @@ add_library(sb_emu SHARED
   src/render_rtt.c
   src/render_diag.c
   src/render_fx.c
+  src/render_line.c
   src/render_mfx.c
   src/render_shfx.c
   src/render_fx_rem.c
@@ -120,6 +135,8 @@ add_library(sb_emu SHARED
   src/loc_sync.c
   src/loc_rollback.c
   src/loc_rb_ring.c
+  src/loc_rbi.c
+  src/loc_rbn.c
   src/krnl_loc.c
   src/sb_userdata.c
   src/sb_savecheck.c
@@ -139,7 +156,10 @@ add_library(sb_emu SHARED
   src/audio_out.c
   src/audio_fmt.c
   src/audio_mix.c
+  src/audio_ring.c
   src/audio_3d.c
+  src/audio_fx.c
+  src/audio_spatial.c
   src/diag_states.c
   src/diag_campaign.c
   src/diag_input.c
@@ -164,13 +184,25 @@ target_link_libraries(sb_emu PRIVATE d3d11 dxgi dxguid dbghelp windowscodecs ole
 target_sources(sb_emu PRIVATE src/loc_net.c src/loc_net_core.c src/loc_netsim.c)
 # W324 LOC-NETPLAY: eigener UDP-Transport mit Internet-Treffpunkt (DNS, Relays) vorerst nur privat;
 # Community bekommt den Platzhalter (loc_transport=udp -> Hinweis im Log, Original-Transport).
-if(SB_EDITION_COMMUNITY)
+if(SB_EDITION_COMMUNITY AND SB_LOC_PLAY)
+  # W353 LOC-DURCHSTICH: privates LoC-Testpaket (make_alpha.py --loc-preview legt loc_tun.c in den Export)
+  if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/loc_tun.c)
+    message(FATAL_ERROR "SB_LOC_PLAY=ON braucht src/loc_tun.c (Export mit package_edition.py --loc-preview)")
+  endif()
+  set(SB_LOC_TUN_SRC src/loc_tun.c)
+elseif(SB_EDITION_COMMUNITY)
   set(SB_LOC_TUN_SRC src/loc_tun_stub.c)
 else()
   set(SB_LOC_TUN_SRC src/loc_tun.c)
 endif()
 target_sources(sb_emu PRIVATE ${SB_LOC_TUN_SRC})
 target_link_libraries(sb_emu PRIVATE ws2_32)
+# W334 LOC-SEC-CLIENT: Sicherheitsprotokoll v2 (SECURITY.md §12 B) - SChannel-TLS mit SPKI-Pin, SBT2 ueber CNG,
+# Gastfilter (auch in den HLE-Hooks beider Fassungen). Netznahe neue Dateien mit /sdl /W4 /WX (SECURITY.md §7).
+set(SB_LOC_SEC_SRC src/sb_tls.c src/sb_e2e.c src/loc_guard.c)
+set_source_files_properties(${SB_LOC_SEC_SRC} PROPERTIES COMPILE_OPTIONS "/sdl;/W4;/WX")
+target_sources(sb_emu PRIVATE ${SB_LOC_SEC_SRC})
+target_link_libraries(sb_emu PRIVATE bcrypt secur32 crypt32)
 target_compile_options(sb_emu PRIVATE /Zi)
 # W279 DIAG-CRASH: Release (community) mit vollstaendiger PDB - FASTLINK-PDBs
 # verweisen auf die .obj-Dateien und taugen spaeter nicht zum Aufloesen von
@@ -183,6 +215,13 @@ else()
   target_link_options(sb_emu PRIVATE /DEBUG:FASTLINK)
 endif()
 target_link_options(sb_emu PRIVATE "/BASE:0x30000000" "/DYNAMICBASE:NO" "/STACK:8388608" "/MAP")
+# W332 SEC-HARDEN: /sdl (Sicherheitswarnungen als Fehler, strengere /GS-Heuristik; /GS ist
+# MSVC-Standard), DEP ausdruecklich, statische Importe nur aus System32 (zusaetzlich zu
+# SetDefaultDllDirectories in ldr.c). Bewusst NICHT: /DYNAMICBASE (feste Basis 0x30000000:
+# VEH-OWN-Bereich, Speicher-Layout/Golden deterministisch) und /guard:cf (CFG wirkt nur, wenn die
+# Exe es hat; sb_ldr.exe kann es nicht, s. dort). Begruendung: BERICHT_M2 Abschnitt W332.
+target_compile_options(sb_emu PRIVATE /sdl)
+target_link_options(sb_emu PRIVATE "/NXCOMPAT" "/DEPENDENTLOADFLAG:0x800")
 target_compile_options(sb_emu PRIVATE /W3)
 
 # ---- sbc_probe: USB-Testprogramm zum Original-Controller (W49, CTRL-SBC) ----
@@ -258,10 +297,11 @@ add_executable(loc_net_selftest
   src/loc_net_core.c
   src/loc_netsim.c
   ${SB_LOC_TUN_SRC}
+  ${SB_LOC_SEC_SRC}
   src/sb_sha256.c
 )
 target_include_directories(loc_net_selftest PRIVATE src)
-target_link_libraries(loc_net_selftest PRIVATE ws2_32 winmm)
+target_link_libraries(loc_net_selftest PRIVATE ws2_32 winmm bcrypt secur32 crypt32)
 target_compile_options(loc_net_selftest PRIVATE /W3)
 
 # ---- loc_audio_selftest: XACT-1-Parser (XWB/XSB) + Wave-Bank-Dekodierung, synthetische Daten (W298) ----
@@ -273,6 +313,25 @@ add_executable(loc_audio_selftest
 target_include_directories(loc_audio_selftest PRIVATE src)
 target_compile_options(loc_audio_selftest PRIVATE /W3)
 
+# ---- audio_reverb_selftest: W348 I3DL2-Hall (Nachhallzeit, Pegel, Stabilitaet, Kosten) + Huellkurven ----
+add_executable(audio_reverb_selftest
+  tests/audio_reverb_selftest.c
+  src/audio_fx.c
+  src/audio_spatial.c
+)
+target_include_directories(audio_reverb_selftest PRIVATE src)
+target_compile_definitions(audio_reverb_selftest PRIVATE AUFX_SELFTEST)
+target_compile_options(audio_reverb_selftest PRIVATE /W3)
+
+# ---- audio_ring_selftest: Unterlauf/Cursor-Reset der Bink-Ringstimmen, synthetischer Ring (ISSUE-10) ----
+add_executable(audio_ring_selftest
+  tests/audio_ring_selftest.c
+  src/audio_ring.c
+  src/audio_fmt.c
+)
+target_include_directories(audio_ring_selftest PRIVATE src)
+target_compile_options(audio_ring_selftest PRIVATE /W3)
+
 # ---- loc_rb_selftest: Zustandsring fuer Rollback (Write-Watch + Schreibschutz-Verfolgung), synthetischer Speicher (W330) ----
 add_executable(loc_rb_selftest
   tests/loc_rb_selftest.c
@@ -280,6 +339,15 @@ add_executable(loc_rb_selftest
 )
 target_include_directories(loc_rb_selftest PRIVATE src)
 target_compile_options(loc_rb_selftest PRIVATE /W3)
+
+# ---- loc_rbi_selftest: Eingabeschicht fuer Rollback R2 (Slots, Vorhersage, Kanal, Hash), Spielzwilling synthetisch (W338) ----
+add_executable(loc_rbi_selftest
+  tests/loc_rbi_selftest.c
+  src/loc_rbi.c
+  src/loc_rbn.c
+)
+target_include_directories(loc_rbi_selftest PRIVATE src)
+target_compile_options(loc_rbi_selftest PRIVATE /W3)
 
 # ---- render_selftest: VSH-Interpreter/-Uebersetzung + Combiner (W77 RENDER-QA) ----
 # W152 COMM-SELFTEST: privat mit render_selftest_data.h (Spiel-Testvektoren),
@@ -310,6 +378,9 @@ if(SB_EDITION_COMMUNITY)
   foreach(t sb_ldr sb_emu sbc_probe input_selftest render_selftest iso_vfs_check)
     target_compile_definitions(${t} PRIVATE SB_EDITION_COMMUNITY=1)
     target_link_options(${t} PRIVATE "/PDBALTPATH:%_PDB%")
+    if(SB_LOC_PLAY)
+      target_compile_definitions(${t} PRIVATE SB_LOC_PLAY=1)
+    endif()
   endforeach()
 endif()
 

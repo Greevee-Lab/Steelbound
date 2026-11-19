@@ -37,6 +37,7 @@
 #include "loc_rollback.h" /* W325 */
 #include "sb_tex.h" /* W297: Texttextur nach Lock neu hochladen */
 #include "loc_render.h" /* W297: Textebene */
+#include "d3d11_render.h" /* W342: sb_render_im_vdata (SetVertexData2s/4s) */
 
 #include <stdio.h>
 #include <string.h>
@@ -315,6 +316,24 @@ LS1(42, D3DDevice_SetRenderState_MultiSampleRenderTargetMode, 0)
 LS1(43, D3DDevice_SetRenderState_MultiSampleAntiAlias, 0)
 
 LS1(44, XSetProcessQuantumLength, 0)
+
+/* W342 LOC-DISPLAY: SetVertexData2s/4s (XDK 5788, SB linkt sie nicht). LoC zeichnet damit alle
+ * UI-Grundformen (Linie Begin(2), Rahmen Begin(3), Feld/Verlauf Begin(6); FUN_000ECEC0..ED0C0).
+ * Ohne Hook schrieb die Original-Funktion nur in den Push-Buffer: Begin/End kamen ohne Vertex an,
+ * Menues ohne Rahmen, Kopfbalken, Zeilenfelder, Auswahlrahmen und Kartenraster. NV2A wandelt
+ * die 16-Bit-Werte vorzeichenbehaftet und unnormiert in float (2S: z = 0, w = 1). */
+static u32 __stdcall ls_D3DDevice_SetVertexData2s(u32 reg, u32 a, u32 b)
+{
+    loc_stub_first(47, "D3DDevice_SetVertexData2s (IM-Pfad)");
+    sb_render_im_vdata(reg, (float)(int16_t)a, (float)(int16_t)b, 0.0f, 1.0f);
+    return 0;
+}
+static u32 __stdcall ls_D3DDevice_SetVertexData4s(u32 reg, u32 a, u32 b, u32 c, u32 d)
+{
+    loc_stub_first(48, "D3DDevice_SetVertexData4s (IM-Pfad)");
+    sb_render_im_vdata(reg, (float)(int16_t)a, (float)(int16_t)b, (float)(int16_t)c, (float)(int16_t)d);
+    return 0;
+}
 
 #define LOC_WSASYSNOTREADY 10091u
 static u32 __stdcall ls_XNetStartup(u32 params)
@@ -725,6 +744,10 @@ void loc_boot_install(void)
     LOC_STUB(D3DDevice_SetRenderState_MultiSampleRenderTargetMode);
     LOC_STUB(D3DDevice_SetRenderState_MultiSampleAntiAlias);
     LOC_STUB(XSetProcessQuantumLength);
+    if (g_cfg.loc_vdata_s) { /* W342 LOC-DISPLAY: UI-Grundformen (Standard 1) */
+        LOC_STUB(D3DDevice_SetVertexData2s);
+        LOC_STUB(D3DDevice_SetVertexData4s);
+    }
     loc_audio_install(); /* W298: XACT-HLE ueberschreibt die stummen Audio-Stubs (loc_audio.c) */
     if (loc_net_install()) { /* W286: System-Link-Netz-HLE (loc_net.c) + Menue-Gamepad (loc_pad.c) */
         loc_pad_install();

@@ -47,7 +47,8 @@ static uint8_t *s_streak, *s_hotf, *s_cexp;
 static uint16_t *s_cold;
 static u32 *s_lastc, *s_coolat, s_ncommit; /* coolat: Sicherung, bei der die Seite zuletzt abgekuehlt ist */
 static u32 s_hot_n = 2, s_hot_cool = 64, s_nhot;
-static int s_active;
+static volatile int s_active;
+static volatile LONG s_veh_in; /* W338: laufende Schreibschutz-Handler (rbr_stop wartet, bevor es Puffer freigibt) */
 static PVOID s_veh;
 static u32 s_owner;
 static long long s_qpf = 1;
@@ -205,7 +206,18 @@ static void note_writer(u32 va, u32 eip)
     InterlockedExchange(&s_wlock, 0);
 }
 
+static LONG rbr_veh_body(EXCEPTION_POINTERS *ep);
 static LONG CALLBACK rbr_veh(EXCEPTION_POINTERS *ep)
+{
+    LONG r;
+    if (ep->ExceptionRecord->ExceptionCode != EXCEPTION_ACCESS_VIOLATION) return EXCEPTION_CONTINUE_SEARCH;
+    InterlockedIncrement(&s_veh_in); /* W338: vor der s_active-Pruefung zaehlen, rbr_stop wartet auf 0 */
+    r = rbr_veh_body(ep);
+    InterlockedDecrement(&s_veh_in);
+    return r;
+}
+
+static LONG rbr_veh_body(EXCEPTION_POINTERS *ep)
 {
     const EXCEPTION_RECORD *er = ep->ExceptionRecord;
     long long t0;
@@ -296,6 +308,14 @@ void rbr_stop(void)
             if (s_r[i].method == RBR_WP) prot_run(&s_r[i], s_r[i].pg0, s_r[i].npg, 0);
     }
     s_active = 0;
+    MemoryBarrier();
+    { /* W338: andere Threads koennen noch im Handler stecken (Seitentabelle, Merkfeld) - erst danach freigeben */
+        int spins = 0;
+        while (s_veh_in && spins++ < 200000) { /* bis ~0,2 s: verdraengte Threads beenden ihren Handler */
+            if (spins & 255) YieldProcessor();
+            else SwitchToThread();
+        }
+    }
     if (s_veh) RemoveVectoredExceptionHandler(s_veh);
     s_veh = NULL;
     if (s_S) VirtualFree(s_S, 0, MEM_RELEASE);
@@ -541,7 +561,15 @@ int rbr_load(unsigned k, uint32_t *pages, uint32_t *us)
     return 0;
 }
 
+static void rbr_prewrite_body(uintptr_t a, uint32_t n);
 void rbr_prewrite(uintptr_t a, uint32_t n)
+{
+    InterlockedIncrement(&s_veh_in); /* W338: wie der Handler - rbr_stop gibt erst frei, wenn niemand mehr drin ist */
+    if (s_active && n) rbr_prewrite_body(a, n);
+    InterlockedDecrement(&s_veh_in);
+}
+
+static void rbr_prewrite_body(uintptr_t a, uint32_t n)
 {
     uintptr_t e;
     if (!s_active || !n) return;
@@ -632,4 +660,104 @@ int rbr_region_info(int i, uint32_t *va, uint32_t *len, uint32_t *kind, int *met
         for (q = s_r[i].pg0; q < s_r[i].pg0 + s_r[i].npg; q++) n += s_hotf[q];
     *hot = n;
     return 1;
+}
+
+/* ================= W362 LOC-RING-INIT-EXIT: Thread-Stacks des Prozesses ================= */
+typedef LONG(NTAPI *rbr_nqit_t)(HANDLE, int, PVOID, ULONG, PULONG);
+typedef struct { LONG st; PVOID teb; PVOID cid[2]; ULONG_PTR aff; LONG pr, bpr; } rbr_tbi_t;
+typedef LONG(NTAPI *rbr_ngnt_t)(HANDLE, HANDLE, ACCESS_MASK, ULONG, ULONG, PHANDLE);
+
+static int rd_self(u32 a, void *p, size_t n)
+{
+    SIZE_T got = 0;
+    return a && ReadProcessMemory(GetCurrentProcess(), (LPCVOID)(uintptr_t)a, p, n, &got) && got == n;
+}
+
+int rbr_alloc_span(uint32_t x, uint32_t *pa, uint32_t *pb)
+{
+    MEMORY_BASIC_INFORMATION mi;
+    u32 ab, e;
+    if (!x || !VirtualQuery((void *)(uintptr_t)x, &mi, sizeof mi) || mi.State == MEM_FREE) return 0;
+    ab = (u32)(uintptr_t)mi.AllocationBase;
+    e = ab;
+    for (;;) {
+        MEMORY_BASIC_INFORMATION m2;
+        if (!VirtualQuery((void *)(uintptr_t)e, &m2, sizeof m2) || (u32)(uintptr_t)m2.AllocationBase != ab ||
+            m2.State == MEM_FREE)
+            break;
+        e = (u32)(uintptr_t)m2.BaseAddress + (u32)m2.RegionSize;
+        if (e - ab > 0x10000000u || e < ab) break;
+    }
+    *pa = ab;
+    *pb = e;
+    return e > ab;
+}
+
+static void stk_put(rbr_stack_t *out, int cap, int *n, u32 x, u32 tid, int bits)
+{
+    u32 a, b;
+    int k;
+    if (*n >= cap || !rbr_alloc_span(x, &a, &b)) return;
+    if (b - a > 0x400000u) { /* wie die ESP-Ausnahmen: in grosser Belegung nur 1 MB um den Stack-Zeiger */
+        u32 lo = (x & ~(PG - 1)) - 0x100000u, hi = (x & ~(PG - 1)) + 0x100000u;
+        if (lo > a && lo < x) a = lo;
+        if (hi < b && hi > x) b = hi;
+    }
+    for (k = 0; k < *n; k++)
+        if (out[k].a == a && out[k].b == b) return;
+    out[*n].a = a;
+    out[*n].b = b;
+    out[*n].tid = tid;
+    out[*n].bits = bits;
+    (*n)++;
+}
+
+int rbr_thread_stacks(rbr_stack_t *out, int cap, unsigned *nthr, unsigned *noteb)
+{
+    /* NtGetNextThread: nur die Threads dieses Prozesses (Toolhelp zaehlt alle Threads des Systems: ~130 ms) */
+    static rbr_nqit_t nqit;
+    static rbr_ngnt_t ngnt;
+    HANDLE cur = NULL, nx = NULL;
+    int n = 0;
+    unsigned thr = 0, bad = 0;
+    if (!nqit) {
+        HMODULE nt = GetModuleHandleA("ntdll.dll");
+        nqit = (rbr_nqit_t)(void *)GetProcAddress(nt, "NtQueryInformationThread");
+        ngnt = (rbr_ngnt_t)(void *)GetProcAddress(nt, "NtGetNextThread");
+    }
+    if (nthr) *nthr = 0;
+    if (noteb) *noteb = 0;
+    if (!nqit || !ngnt) return 0;
+    while (thr < 4096 && ngnt(GetCurrentProcess(), cur, THREAD_QUERY_INFORMATION, 0, 0, &nx) >= 0) {
+        rbr_tbi_t bi;
+        u32 t, t32 = 0, t64 = 0, self32 = 0, v = 0, tid;
+        unsigned long long self64 = 0, q = 0;
+        if (cur) CloseHandle(cur);
+        cur = nx;
+        thr++;
+        tid = GetThreadId(cur);
+        memset(&bi, 0, sizeof bi);
+        if (nqit(cur, 0 /* ThreadBasicInformation */, &bi, sizeof bi, NULL) < 0) bi.teb = NULL;
+        t = (u32)(uintptr_t)bi.teb;
+        /* TEB-Art am Selbstzeiger erkennen (nicht an fs: der Gast-Thread kann ein eigenes fs haben) */
+        if (rd_self(t + 0x18, &self32, 4) && self32 == t) t32 = t;          /* TEB32.NtTib.Self */
+        else if (rd_self(t + 0x30, &self64, 8) && self64 == t) t64 = t;     /* TEB64.NtTib.Self */
+        if (t32 && t32 > 0x2000 && rd_self(t32 - 0x2000 + 0x30, &self64, 8) && self64 == t32 - 0x2000) t64 = t32 - 0x2000;
+        if (t64 && !t32 && rd_self(t64 + 0x2000 + 0x18, &self32, 4) && self32 == t64 + 0x2000) t32 = t64 + 0x2000;
+        if (!t32 && !t64) { bad++; continue; }
+        if (t32) {
+            if (rd_self(t32 + 0x4, &v, 4) && v > 4) stk_put(out, cap, &n, v - 4, tid, 32);  /* StackBase */
+            if (rd_self(t32 + 0x8, &v, 4) && v) stk_put(out, cap, &n, v, tid, 32);          /* StackLimit */
+            if (rd_self(t32 + 0xE0C, &v, 4) && v) stk_put(out, cap, &n, v, tid, 32);        /* DeallocationStack */
+        }
+        if (t64) { /* WoW64: 64-Bit-Stack desselben Threads (Systemaufrufe, Ausnahmezustellung) */
+            if (rd_self(t64 + 0x8, &q, 8) && q > 8 && q <= 0xFFFFFFFFull) stk_put(out, cap, &n, (u32)q - 8, tid, 64);
+            if (rd_self(t64 + 0x10, &q, 8) && q && q <= 0xFFFFFFFFull) stk_put(out, cap, &n, (u32)q, tid, 64);
+            if (rd_self(t64 + 0x1478, &q, 8) && q && q <= 0xFFFFFFFFull) stk_put(out, cap, &n, (u32)q, tid, 64);
+        }
+    }
+    if (cur) CloseHandle(cur);
+    if (nthr) *nthr = thr;
+    if (noteb) *noteb = bad;
+    return n;
 }

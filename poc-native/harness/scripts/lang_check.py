@@ -41,6 +41,9 @@ SRC = [
     "harness/src/sb_origflag.h",  # W278 ORIG-FLAG (Gruppennamen, ovl.of_g_*)
     "harness/src/sb_origview.c",  # W278 (Einblendung, ovl.of_*)
     "launcher/src/launcher_orig.c",  # W278 (Hinweis, gui.of_*)
+    "launcher/src/launcher_loctp.c",  # W336 LOC-TESTPARTNER (gui.loctp_*, nur intern)
+    "launcher/src/launcher_loctp_gui.inc",  # W336: Dialog/Knoepfe (nur intern)
+    "harness/src/loc_rollback.c",  # W346 LOC-ROLLBACK-R4: Meldung bei Desync (loc.rb_*)
 ]
 
 # W180 EXPORT: Quellen, die im Community-Export (noch) fehlen duerfen (Pack
@@ -49,6 +52,9 @@ SRC = [
 OPTIONAL_SRC = {
     "creator/src/creator.c": "gui.crt_",
     "creator/src/creator_gui.c": "gui.crt_",
+    # W336: Testpartner nur in der internen Ausgabe (community.include nimmt beide heraus)
+    "launcher/src/launcher_loctp.c": "gui.loctp_",
+    "launcher/src/launcher_loctp_gui.inc": "gui.loctp_",
 }
 missing_prefixes = []
 

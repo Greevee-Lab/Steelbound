@@ -96,8 +96,14 @@ void u8_from_acp(const char *acp, char *out, size_t cap)
     if (!out || cap == 0) {
         return;
     }
+    /* W332 SEC: zu lang fuer out -> leer (verwerfen) statt strcpy_s-Abbruch; Werte kommen aus cfg-Dateien
+     * (bis 4 KB je Zeile), ein gekuerzter Pfad waere ein anderer Pfad. */
+    if (!acp || strlen(acp) >= cap) {
+        out[0] = '\0';
+        return;
+    }
     if (u8_is_ascii(acp)) {
-        strcpy_s(out, cap, acp ? acp : "");
+        strcpy_s(out, cap, acp);
         return;
     }
     if (MultiByteToWideChar(CP_ACP, 0, acp, -1, w, 2048) <= 0) {

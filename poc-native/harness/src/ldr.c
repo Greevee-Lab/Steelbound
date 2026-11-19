@@ -95,6 +95,14 @@ DWORD CALLBACK rawMain(void)
     if (ldr_emupath(path, sizeof path) != 0) {
         ldr_die("ldr: Pfad zu lang\n", 13);
     }
+    /* W332 SEC: DLL-Suchpfad fuer den ganzen Prozess auf System32 begrenzen,
+     * BEVOR sb_emu.dll geladen wird. Sonst sucht der Lader deren statische
+     * Importe (d3d11, dbghelp, winmm, winusb, VCRUNTIME140 ...) und alle
+     * spaeteren LoadLibrary("x.dll") zuerst im Programmordner/Arbeitsordner:
+     * eine dort abgelegte gleichnamige DLL liefe mit unseren Rechten
+     * (DLL-Planting). sb_emu.dll selbst kommt per vollem Pfad. */
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    SetDllDirectoryA("");
     emu = LoadLibraryA(path);
     if (!emu) {
         ldr_msg("ldr: sb_emu.dll nicht ladbar: ");

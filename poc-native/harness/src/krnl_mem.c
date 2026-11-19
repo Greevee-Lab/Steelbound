@@ -12,6 +12,7 @@ static int in_game_region(u32 va, u32 size)
 
 /* ----- Speicher ----- */
 static void memreg_add(u32 va, u32 size, u32 kind);
+static void exreg_mark_released(u32 va); /* W338 */
 /* LIFO_REUSE */
 #define LIFO_N 64
 static u32 lifo_va[LIFO_N];
@@ -99,6 +100,14 @@ u32 __stdcall hle_NtAllocateVirtualMemory(u32 pBase, u32 zeroBits, u32 pSize,
         type = (base == 0) ? (MEM_COMMIT | MEM_RESERVE) : MEM_COMMIT;
     }
     if (g_loc_rb_ww && (type & MEM_RESERVE)) { type |= MEM_WRITE_WATCH; } /* W330: nur LoC mit loc_rb=1 */
+    if (base == 0 && g_loc_rb_alloc) { /* W346 R3: beim Neurechnen denselben Block wie in der ersten Rechnung */
+        unsigned ra = 0;
+        if (g_loc_rb_alloc(0, size, type, prot, &ra) && ra) {
+            *(u32 *)(uintptr_t)pBase = ra;
+            *(u32 *)(uintptr_t)pSize = (size + 0xFFFu) & ~0xFFFu;
+            return X_STATUS_SUCCESS;
+        }
+    }
     if (base == 0) {
         u32 want = (size + 0xFFFu) & ~0xFFFu;
         u32 re = lifo_pop(want);
@@ -120,7 +129,28 @@ u32 __stdcall hle_NtAllocateVirtualMemory(u32 pBase, u32 zeroBits, u32 pSize,
         memset((void *)(uintptr_t)base, 0, size);
         r = (void *)(uintptr_t)base;
     } else {
+        /* W355: Commit in einen reservierten Bereich (das Spiel belegt im Kampf so neue Heap-Seiten). Beim Neurechnen
+         * (R2) dieselbe Belegung: Seiten wie frisch genullt, kein zweiter Registereintrag (sonst Neuaufbau mitten im
+         * Neurechnen und Inhalt der ersten Rechnung in "frischem" Speicher). */
+        unsigned fresh = 0;
+        if (g_loc_rb_alloc && (type & MEM_COMMIT)) {
+            unsigned io = base;
+            MEMORY_BASIC_INFORMATION mb;
+            if (g_loc_rb_alloc(2, size, type, prot, &io) && io) {
+                *(u32 *)(uintptr_t)pBase = io;
+                *(u32 *)(uintptr_t)pSize = ((base + size + 0xFFFu) & ~0xFFFu) - io;
+                return X_STATUS_SUCCESS;
+            }
+            if (VirtualQuery((LPCVOID)(uintptr_t)base, &mb, sizeof mb) && mb.State == MEM_RESERVE &&
+                (u32)((uintptr_t)mb.BaseAddress + mb.RegionSize) >= base + size) {
+                fresh = 1; /* ganzer Bereich war nur reserviert */
+            }
+        }
         r = VirtualAlloc((LPVOID)(uintptr_t)base, size, type, flProtect);
+        if (r && g_loc_rb_alloc && (type & MEM_COMMIT)) {
+            unsigned io = (unsigned)(uintptr_t)r | fresh; /* Bit 0 = frisch (r ist seitenausgerichtet) */
+            (void)g_loc_rb_alloc(3, size, type, prot, &io);
+        }
     }
     if (!r) {
         HLOG_W("NtAllocateVirtualMemory(base=0x%X size=0x%X) FEHLER %lu", base, size,
@@ -130,6 +160,7 @@ u32 __stdcall hle_NtAllocateVirtualMemory(u32 pBase, u32 zeroBits, u32 pSize,
     *(u32 *)(uintptr_t)pBase = (u32)(uintptr_t)r;
     *(u32 *)(uintptr_t)pSize = (size + 0xFFFu) & ~0xFFFu;
     memreg_add((u32)(uintptr_t)r, size, 2);
+    if (base == 0 && g_loc_rb_alloc) { unsigned ra = (unsigned)(uintptr_t)r; (void)g_loc_rb_alloc(1, size, type, prot, &ra); } /* W346 */
     HLOG_T("NtAllocateVirtualMemory -> 0x%X (0x%X)", (u32)(uintptr_t)r, size);
     return X_STATUS_SUCCESS;
 }
@@ -171,12 +202,14 @@ u32 __stdcall hle_NtFreeVirtualMemory(u32 pBase, u32 pSize, u32 type)
         static unsigned nfr;
         if (nfr < 64) { nfr++; HLOG_I("NtFreeVirt: base=0x%X size=0x%X type=0x%X", base, size, type); }
     }
+    if (g_loc_rb_alloc) { unsigned io = base; (void)g_loc_rb_alloc(5, size, type, 0, &io); } /* W359 DIAG memlog */
     ok = VirtualFree((LPVOID)(uintptr_t)base, size, type);
     if (!ok) {
         HLOG_W("NtFreeVirtualMemory(0x%X) FEHLER %lu", base, GetLastError());
     } else {
         *(u32 *)(uintptr_t)pSize = size;
         if (g_loc_rb_prewrite) { InterlockedIncrement(&g_loc_rb_memev); } /* W330: Bereich weg -> Rollback-Bereiche neu */
+        if (type & MEM_RELEASE) { exreg_mark_released(base); } /* W338 */
         if (type & MEM_RELEASE) { low_alloc_note_free(base); } /* W122: Suchwissen von low_alloc verwerfen (nur RELEASE macht Adressraum frei) */
     }
     return ok ? X_STATUS_SUCCESS : X_STATUS_INVALID_PARAMETER;
@@ -199,6 +232,32 @@ u32 __stdcall hle_NtQueryVirtualMemory(u32 base, u32 pInfo)
  * NtFreeVirtualMemory gibt diese Bloecke NIE frei (stale Reads!). Ring, 512. */
 #define EXREG_MAX 8192
 static struct { u32 vaddr, len; u32 kind; } g_exreg[EXREG_MAX];
+/* W338: Belegungsbasis beim Eintragen (nur mit Rollback-Ring, sonst 0 = unbekannt). Das Register loescht nie; ein
+ * freigegebener Block kann spaeter z. B. als Thread-Stack wiederverwendet werden - der Ring darf ihn dann nicht
+ * schuetzen (A10-A15: harter Abbruch nach dem Neuaufbau beim ersten Schuss). */
+static u32 g_exreg_ab[EXREG_MAX];
+/* W338: Freigabe (MEM_RELEASE bzw. Pool) -> Eintrag ungueltig markieren (Basis 1). Gleiche Basis kann spaeter z. B. ein
+ * Thread-Stack belegen (A18/A19: Absturz in WaitForSingleObjectEx, Stack schreibgeschuetzt). Nur mit Ring. */
+static void exreg_mark_released(u32 va)
+{
+    unsigned k, cnt;
+    if (!(g_loc_rb_ww || g_loc_rb_prewrite) || !va) return;
+    cnt = (g_exreg_n < EXREG_MAX) ? g_exreg_n : EXREG_MAX;
+    for (k = 0; k < cnt; k++) {
+        if (g_exreg[k].vaddr == va && (g_exreg[k].kind == 2 || g_exreg[k].kind == 5)) g_exreg_ab[k] = 1u;
+        /* W362: auch Teil-Zusagen derselben Belegung (NtAlloc mit Basis innerhalb der Reservierung, Eintrag beginnt
+         * nicht an va). Sie behielten sonst die alte Belegungsbasis, die ein neuer Thread-Stack an genau dieser
+         * Adresse wieder traegt -> Ring schuetzte den Stack (Render-Thread beim Missionsstart, stilles Ende). */
+        else if (g_exreg[k].kind == 2 && g_exreg_ab[k] == va) g_exreg_ab[k] = 1u;
+    }
+}
+static u32 exreg_ab_of(u32 va)
+{
+    MEMORY_BASIC_INFORMATION mi;
+    if (!(g_loc_rb_ww || g_loc_rb_prewrite) || !va) return 0;
+    if (!VirtualQuery((LPCVOID)(uintptr_t)va, &mi, sizeof mi) || mi.State == MEM_FREE) return 0;
+    return (u32)(uintptr_t)mi.AllocationBase;
+}
 /* kind: 1=Ex, 2=NtAlloc, 3=Ex(freed/leak), 4=NtAlloc(freed) */
 unsigned g_exreg_n;
 /* DIAG(FILM-WHITE,W177, contig_diag=1): Ring-Ueberlauf (Contig-Eintrag
@@ -236,6 +295,7 @@ static void exreg_add(u32 va, u32 size)
     g_exreg[g_exreg_n % EXREG_MAX].vaddr = va;
     g_exreg[g_exreg_n % EXREG_MAX].len = size;
     g_exreg[g_exreg_n % EXREG_MAX].kind = 1;
+    g_exreg_ab[g_exreg_n % EXREG_MAX] = exreg_ab_of(va); /* W338 */
     g_exreg_n++;
 }
 static void memreg_add(u32 va, u32 size, u32 kind)
@@ -244,6 +304,7 @@ static void memreg_add(u32 va, u32 size, u32 kind)
     g_exreg[g_exreg_n % EXREG_MAX].vaddr = va;
     g_exreg[g_exreg_n % EXREG_MAX].len = size;
     g_exreg[g_exreg_n % EXREG_MAX].kind = kind;
+    g_exreg_ab[g_exreg_n % EXREG_MAX] = exreg_ab_of(va); /* W338 */
     g_exreg_n++;
 }
 /* W325 LOC-ROLLBACK-SPIKE: Registereintrag i lesen (nur Diagnose, loc_rollback.c). */
@@ -252,6 +313,12 @@ int krnl_memreg_get(unsigned i, unsigned *va, unsigned *len, unsigned *kind)
     if (i >= EXREG_MAX || i >= g_exreg_n) { return 0; }
     *va = g_exreg[i].vaddr; *len = g_exreg[i].len; *kind = g_exreg[i].kind;
     return 1;
+}
+/* W338: Belegungsbasis von Eintrag i beim Eintragen (0 = unbekannt). */
+unsigned krnl_memreg_ab(unsigned i)
+{
+    if (i >= EXREG_MAX || i >= g_exreg_n) { return 0; }
+    return g_exreg_ab[i];
 }
 /* PERF(PERF-M2,W174) krnl_reg_cache=1: krnl_phys_to_virt/krnl_memreg_find durchsuchen das
  * Register (bis 8192 Eintraege) linear - je Textur-/RT-Zugriff (M2-Kampf: 12 % bzw. 3 % der
@@ -1145,10 +1212,22 @@ u32 __stdcall hle_MmAllocateSystemMemory(u32 size, u32 flags)
     return (u32)(uintptr_t)r;
 }
 
+/* W338: Pool-Freigabe ab 64 KB kann Heap-Seiten zurueckgeben -> Rollback-Bereiche neu (nur mit Ring; kleinere
+ * Faelle faengt der Ring selbst ab). Ohne loc_rb ist g_loc_rb_prewrite Null: SB unveraendert. */
+static void pool_free_note(u32 va)
+{
+    if (g_loc_rb_prewrite && g_pool_heap && va) {
+        SIZE_T sz = HeapSize(g_pool_heap, 0, (void *)(uintptr_t)va);
+        if (sz != (SIZE_T)-1 && sz >= 0x10000u) InterlockedIncrement(&g_loc_rb_memev);
+    }
+    exreg_mark_released(va); /* W338: Eintrag gilt nicht mehr */
+}
+
 u32 __stdcall hle_MmFreeSystemMemory(u32 va, u32 flags)
 {
     (void)flags;
     if (g_pool_heap && va) {
+        pool_free_note(va);
         HeapFree(g_pool_heap, 0, (void *)(uintptr_t)va);
     }
     return 0;
@@ -1175,6 +1254,7 @@ u32 __stdcall hle_ExAllocatePoolWithTag(u32 size, u32 tag)
 u32 __stdcall hle_ExFreePool(u32 va)
 {
     if (g_pool_heap && va) {
+        pool_free_note(va);
         HeapFree(g_pool_heap, 0, (void *)(uintptr_t)va);
     }
     return 0;

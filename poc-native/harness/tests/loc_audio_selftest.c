@@ -153,6 +153,7 @@ static uint8_t *make_xsb(uint32_t *size)
     /* Eintraege */
     w16(d + ent + 0, 1); w16(d + ent + 2, 0); d[ent + 4] = 60; w16(d + ent + 6, (uint16_t)(short)-682);
     d[ent + 0xA] = 4; d[ent + 0xB] = 0x09;
+    d[ent + 5] = 0xFE; d[ent + 0xF] = 3; /* W356: LFE-Stufe 127 (Bit 9-15), I3DL2-Send 3 */
     w16(d + ent + 0x14, 0); w16(d + ent + 0x16, 0); d[ent + 0x14 + 0xA] = 5; d[ent + 0x14 + 0xB] = 0x09;
     w32(d + ent + 0x28, tab_e2); d[ent + 0x28 + 0xA] = 1; d[ent + 0x28 + 0xB] = 0x11;
     w32(d + ent + 0x3C, list); d[ent + 0x3C + 4] = 25; d[ent + 0x3C + 0xA] = 5; d[ent + 0x3C + 0xB] = 0x01;
@@ -338,6 +339,10 @@ int main(int argc, char **argv)
         CHECK(lxf_xsb_cue(&xs, 0, 0, &c) == 0 && c.ntrack == 1 && c.track[0].wave == 1 && c.track[0].bank == 0 &&
                   c.db100 == -600 && c.pitch == -682 && c.category == 4,
               "Cue 0 einfach");
+        /* W356: Pegelfelder wie die XACT-Bibliothek (Volumen 9 Bit x -16 mB, LFE 7 Bit x -50, Send x -256) */
+        CHECK(c.db100_xact == -960 && c.lfe_mb == -6350 && c.room_mb == -768, "Cue 0 XACT-Pegel %d/%d/%d",
+              c.db100_xact, c.lfe_mb, c.room_mb);
+        printf("XACT-Pegel Cue 0: Lautstaerke %d mB, LFE %d mB, Hall-Send %d mB\n", c.db100_xact, c.lfe_mb, c.room_mb);
         for (k = 0; k < 16; k++) {
             CHECK(lxf_xsb_cue(&xs, 1, (uint32_t)k, &c) == 0 && c.ntrack == 1, "Cue 1 Zufall %d", k);
             if (c.entry == 1) {

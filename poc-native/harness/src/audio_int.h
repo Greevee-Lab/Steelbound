@@ -10,6 +10,7 @@
 #include "hcfg.h"
 #include "kernel_hle.h"
 #include "hlock.h" /* W119 LOADLOCK */
+#include "audio_spatial.h" /* W356: HRTF, Surround, Downmix */
 #include <windows.h>
 #include <mmsystem.h>
 #include <objbase.h> /* COM (WASAPI) */
@@ -27,6 +28,7 @@
 #define MIXCHUNK 882 /* 20 ms */
 #define FIFO_CAP_FRAMES (MIXRATE * 3) /* 3 s Backpressure-Grenze */
 #define FIFO_HARD_CAP (16 * 1024 * 1024) /* Bytes, danach Drop */
+#define AU_RING_FADE 220 /* ISSUE-10: Ein-/Ausblenden bei Unterlauf/Reset, 5 ms */
 
 /* DSBSTATUS-Bits (Xbox wie PC) */
 #define DSBSTATUS_PLAYING 0x00000001u
@@ -155,6 +157,44 @@ typedef struct audio_voice {
     au32 lv_secs; /* Sekunden mit Pegel > -60 dBFS */
     au32 mix_pass; /* PERF(PERF-TICK,W168) audio_mix_yield: in diesem Mischdurchgang schon gemischt */
     int ucat; /* W303 AUDIO-VOLUME: explizite Nutzerkategorie (AVOL_*, audio_vol.h; 0 = automatisch) */
+    /* ISSUE-10 (audio_ring.c, audio_ring_underrun): Unterlauf/Cursor-Reset der Ringstimmen */
+    int ring_fed; /* Unlock-Daten seit Erzeugung angehaengt */
+    int ring_starved; /* FIFO lief leer bzw. Reset: naechster FIFO-Ton wird eingeblendet */
+    au32 ring_ramp; /* verbleibende Einblend-Frames */
+    au32 ring_hold; /* nach Reset: ausgeblendeter Rest, ohne Faktor */
+    int ring_once; /* Stimme hat schon Frames gespielt (vor einem Cursor-Reset) */
+    /* W343 DIAG(PITCH) (audio_pitch_diag): Frequenz-Setter je Stimme seit letzter Zeile */
+    au32 pd_nf, pd_np; /* SetFrequency- / SetPitch-Aufrufe */
+    int pd_pmin, pd_pmax; /* Pitch-Rohwerte */
+    au32 pd_fmin, pd_fmax; /* angeforderte Frequenz (Hz) */
+    au32 pd_drop, pd_clamp, pd_orig; /* verworfen / Schritt geklemmt / DSBFREQUENCY_ORIGINAL */
+    int pd_lmin, pd_lmax; /* Pitch seit Erzeugung (audio_pitch_diag=2: Solo bei lmin != lmax) */
+    au32 pd_eg_h[2]; /* letzter Inhalts-Hash je EG (Amplitude/Multi) */
+    /* W348 AUDIO-DSP (audio_fx.c, audio_3d.c) */
+    au32 cflags; /* DSBUFFERDESC/DSSTREAMDESC dwFlags beim Erzeugen */
+    float vel3[3]; /* DS3D-Geschwindigkeit (audio_doppler) */
+    float dop; /* Doppler-Faktor der Tonhoehe (1 = aus), vom Mischer je Chunk */
+    float distf, dopf; /* Xbox-DS3DBUFFER DistanceFactor/DopplerFactor der Stimme (Standard 1) */
+    au32 eg[2][8]; /* SetEG je EG (0 = Multi/EF, 1 = Amplitude/EA): mode, delay, attack, hold, decay, release, sustain, gesetzt */
+    int eg_ps, eg_fc; /* EF Pitch-/Filter-Skala (signed 8 Bit) */
+    int eg_ph[2]; /* laufende Phase je EG (DSEG_MODE_*) */
+    double eg_t[2]; /* Zeit in der Phase (s) */
+    float eg_lv[2]; /* Pegel 0..1 je EG */
+    float eg_rel0[2]; /* Pegel beim Release-Beginn */
+    float eg_ea0; /* EA-Pegel am Chunk-Anfang (Rampe) */
+    float step_mul; /* Doppler x EF-Pitch (1 = neutral) */
+    float rv_send, rv_sendhf; /* Hall-Send linear (lRoom) und HF-Faktor (lRoomHF) */
+    float rv_lp[2]; /* Zustand HF-Daempfung des Sends */
+    int rv_bin_mb; /* Pegel des I3DL2-Mixbins (DSMIXBIN_I3DL2 = 10) in mB, Standard 0 */
+    /* W356 AUDIO-2 (audio_fx.c, audio_spatial.c) */
+    float i3d_rolloff; /* DSI3DL2BUFFER flRoomRolloffFactor der Quelle */
+    int i3d_obs, i3d_occ; /* Obstruction/Occlusion lHFLevel (mB) */
+    float i3d_obs_lfr, i3d_occ_lfr; /* flLFRatio (LF-Daempfung = lHFLevel x Ratio) */
+    float oc_lp[2]; /* Zustand HF-Daempfung Direktpfad (audio_occlusion) */
+    float dir3[3]; /* Richtung zur Quelle im Hoerer-Raum (x rechts, y oben, z vorn), normiert; vom Mischer */
+    ausp_hrtf_t hr; /* HRTF-Zustand (audio_hrtf) */
+    float *fifox; /* 5.1-Quellen: C/LFE/BL/BR je FIFO-Frame (gleiche Indizes wie fifo), sonst NULL */
+    float *datax; /* 5.1-Quellen: C/LFE/BL/BR je Daten-Frame (SetBufferData), sonst NULL */
     struct audio_voice *next;
 } audio_voice_t;
 
@@ -180,6 +220,9 @@ extern float g_peak;
 extern au32 g_stat_stop; /* W95: Stop auf spielender Puffer-Stimme */
 extern au32 g_stat_cut, g_stat_end; /* W89: SFX abgeschnitten (neue Daten waehrend Wiedergabe) / natuerlich zu Ende */
 
+/* W343 DIAG(PITCH): Zeile je Stimme mit Frequenz-Settern (alle 10 s, audio_pitch_diag) */
+void audio_pitch_diag_log(void);
+
 /* W89 DIAG(SFX): Ereignis-Spur einer Puffer-Stimme (audio_sfx_diag) */
 void au_sfx_trace(audio_voice_t *v, const char *what, au32 a, au32 b, au32 c, au32 ret);
 
@@ -195,6 +238,12 @@ int au_parse_desc(au32 kind, au32 desc, wfx_t *wfx, au32 *buflen, au32 *flags);
 au32 au_adpcm_decode(const uint8_t *src, au32 nbytes, int ch, float *dst, au32 dst_cap_frames);
 au32 au_pcm_convert(const uint8_t *src, au32 nbytes, int ch, int bits, au32 src_rate, float *dst, au32 dst_cap_frames);
 au32 au_fifo_append(audio_voice_t *v, const float *s, au32 n);
+/* W356 AUDIO-2: 5.1-Quellen getrennt (x = C/LFE/SL/SR je Frame), s. audio_fmt.c */
+au32 au_fifo_append_x(audio_voice_t *v, const float *s, const float *x, au32 n);
+au32 au_pcm_convert_x(const uint8_t *src, au32 nbytes, int ch, int bits, au32 src_rate, float *dst, float *xdst,
+                      au32 dst_cap_frames, int norm);
+int au_keep51(void); /* audio_mix.c: 5.1-Quellen ungefaltet speichern (Surround moeglich) */
+void ausp_log_stats(void); /* audio_mix.c: Raumklang-Modus, HRTF-Kosten */
 
 /* ---- audio_3d.c (W89) ---- */
 void au3d_listener_pos(au32 x, au32 y, au32 z);
@@ -207,8 +256,34 @@ void au3d_voice_allparams(audio_voice_t *v, const au32 *d);
 void au3d_update(audio_voice_t *v);
 void au3d_log_stats(void);
 
+void au3d_doppler(audio_voice_t *v); /* W348: v->dop (audio_doppler) */
+void au3d_voice_vel(audio_voice_t *v, au32 x, au32 y, au32 z);
+
+/* ---- audio_fx.c (W348 AUDIO-DSP) ---- */
+void aufx_voice_play(audio_voice_t *v); /* Huellkurven starten (Play) */
+int aufx_voice_stop(audio_voice_t *v); /* 1 = Amplituden-Release laeuft (Stimme spielt aus) */
+void aufx_eg_set(audio_voice_t *v, const au32 *d); /* DSENVELOPEDESC */
+void aufx_chunk(audio_voice_t *v, au32 n); /* je Chunk: EG weiter, step_mul, eg_ea0 -> eg_lv[1] */
+void aufx_reverb_begin(au32 n); /* Send-Puffer leeren */
+float *aufx_reverb_send(void); /* Stereo-Send-Puffer (n Frames) oder NULL */
+void aufx_reverb_end(float *mix, au32 n); /* Hall rechnen, in mix addieren */
+float aufx_voice_send(audio_voice_t *v); /* Send-Pegel (linear) je Chunk, setzt rv_sendhf */
+/* W356 (audio_occlusion): Direktpfad der I3DL2-Quelle (lDirect + Obstruction/Occlusion), Pegel linear,
+ * *a_hf = Ein-Pol-Tiefpass-Koeffizient fuer die HF-Daempfung (1 = keine). */
+float aufx_voice_direct(audio_voice_t *v, float *a_hf);
+/* W356 Surround: wie aufx_reverb_end, rear != NULL: Nachhall auf vorn/hinten verteilt (je -3 dB,
+ * hinten eigene FDN-Kombination), rear = Stereo-Paar BL/BR (n Frames, additiv) */
+void aufx_reverb_end2(float *mix, float *rear, au32 n);
+void aufx_log_stats(void);
+
 /* ---- audio_out.c (W102) ---- */
 void au_filter_coeffs(audio_voice_t *v);
+
+/* ---- audio_ring.c (ISSUE-10) ---- */
+au32 au_ring_reset_flush(audio_voice_t *v);
+float au_ring_gain(audio_voice_t *v);
+int au_ring_first_start(const audio_voice_t *v, int fix);
+uint64_t au_ring_place(uint64_t ao, au32 n, uint64_t front, uint64_t cur, au32 buflen);
 
 /* ---- audio_mix.c ---- */
 void au_complete_due(audio_voice_t *v, int all, au32 st);

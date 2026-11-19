@@ -488,3 +488,128 @@ void p2z_present(void)
                g_present_no, i, e->draws, e->verts, e->pixq, e->pixq ? e->pix / e->pixq : 0u, e->zmin, e->zmax);
     }
 }
+
+/* DIAG(ISSUE-EMP,W352, line_diag=N): Linien- und Punkt-Draws (Begin
+ * POINTLIST/LINELIST/LINELOOP/LINESTRIP, z. B. Funken-/Fallen-Linien
+ * FUN_0001D3E0) in der Kampagnen-Mission. Die ersten N Draws einzeln
+ * (`LINED d`: Ziel, physische RT-Groesse, VS/PS, Blend, Farbe v0, Pixel-
+ * Endpunkte, Laenge in Xbox-Pixeln), je Schluessel (VS, Primitiv, Ziel)
+ * Summen je 300 Bilder (`LINED sum`: Draws, Laenge, Pixel nach Tiefentest
+ * per Occlusion-Query fuer jeden 8. Draw). Nur Zahlen, kein Eingriff. */
+#define LD_KEYS 64u
+typedef struct {
+    unsigned vs, prim, tgt, rw, pw;
+    unsigned draws, last, qd, pix;
+    double len, qlen;
+} ld_ent_t;
+static ld_ent_t g_ld[LD_KEYS];
+static unsigned g_ld_n, g_ld_logged;
+static unsigned g_ld_strips, g_ld_shots, g_ld_shotf; /* Linien-Strips (Funken) im laufenden Bild, Belegbilder */
+static ID3D11Query *g_ld_q[32];
+static int g_ld_qk[32], g_ld_qbusy[32], g_ld_qcur = -1;
+
+static void ld_poll(void)
+{
+    int i;
+    for (i = 0; i < 32; i++) {
+        UINT64 v = 0;
+        if (!g_ld_qbusy[i] || !g_ld_q[i]) { continue; }
+        if (ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)g_ld_q[i], &v, sizeof v,
+                                        D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK) {
+            g_ld[g_ld_qk[i]].pix += (unsigned)v;
+            g_ld_qbusy[i] = 0;
+        }
+    }
+}
+
+void lined_note(const im_vertex_t *out, unsigned nout, int rhw, int em, unsigned prim, int zt,
+                const float *c2, const float *c3, int colslot, int shaded)
+{
+    unsigned i, tgt, rw = 0, rh = 0, pw = 0, bon = 0, bs = 0, bd = 0;
+    double len = 0.0;
+    ld_ent_t *e = NULL;
+    g_ld_qcur = -1;
+    if (prim < 1u || prim > 4u || !fx_in_mission()) { return; }
+    ld_poll();
+    tgt = rtt_active() ? (unsigned)g_rtt_bound : 0xFFu;
+    if (rtt_active()) { rtt_cur_dims(&rw, &rh); pw = g_rtt[g_rtt_bound].pw; }
+    if (rhw) { /* Bildschirm-Pixel (Xbox-Groesse): Laenge = max(|dx|,|dy|) je Segment */
+        unsigned step = (prim == 2u) ? 2u : 1u;
+        for (i = 0; i + 1u < nout; i += step) {
+            float dx = out[i + 1].pos[0] - out[i].pos[0], dy = out[i + 1].pos[1] - out[i].pos[1];
+            if (dx < 0) { dx = -dx; }
+            if (dy < 0) { dy = -dy; }
+            len += (dx > dy) ? dx : dy;
+        }
+    }
+    for (i = 0; i < g_ld_n; i++) {
+        if (g_ld[i].vs == g_im_shader && g_ld[i].prim == prim && g_ld[i].tgt == tgt) { e = &g_ld[i]; break; }
+    }
+    if (!e && g_ld_n < LD_KEYS) {
+        e = &g_ld[g_ld_n++];
+        memset(e, 0, sizeof *e);
+        e->vs = g_im_shader; e->prim = prim; e->tgt = tgt; e->rw = rw; e->pw = pw;
+    }
+    if (!e) { return; }
+    e->draws++; e->len += len;
+    if (prim == 4u && tgt != 0xFFu) { g_ld_strips++; }
+    if (g_ld_logged < (unsigned)g_cfg.line_diag) {
+        g_ld_logged++;
+        sb_render_blend_state(&bon, &bs, &bd);
+        HLOG_W("LINED d f=%u p=%u n=%u vs=0x%X ps=0x%X xp=0x%X tgt=%u %ux%u phys=%u rhw=%d em=%d zt=%d sh=%d bl=%u/%u/%u cm=0x%X cs=%d "
+               "v2=(%.2f,%.2f,%.2f,%.2f) v3=(%.2f,%.2f,%.2f,%.2f) col0=(%.2f,%.2f,%.2f,%.2f) p0=(%.1f,%.1f,%.4f,%.3f) p1=(%.1f,%.1f,%.4f,%.3f) len=%.1f",
+               g_present_no, prim, nout, g_im_shader, g_im_pshader, sb_tex_xptr(), tgt, rw, rh, pw, rhw, em, zt, shaded,
+               bon, bs, bd, rs_cmask, colslot, c2[0], c2[1], c2[2], c2[3], c3[0], c3[1], c3[2], c3[3],
+               out[0].col[0], out[0].col[1], out[0].col[2], out[0].col[3],
+               out[0].pos[0], out[0].pos[1], out[0].pos[2], out[0].pos[3],
+               nout > 1u ? out[1].pos[0] : 0.0f, nout > 1u ? out[1].pos[1] : 0.0f,
+               nout > 1u ? out[1].pos[2] : 0.0f, nout > 1u ? out[1].pos[3] : 0.0f, len);
+    }
+    if ((e->draws & 7u) == 1u) { /* jeder 8. Draw: Pixel nach Tiefentest */
+        int q;
+        for (q = 0; q < 32; q++) { if (!g_ld_qbusy[q]) { break; } }
+        if (q < 32) {
+            if (!g_ld_q[q]) {
+                D3D11_QUERY_DESC qd; qd.Query = D3D11_QUERY_OCCLUSION; qd.MiscFlags = 0;
+                if (FAILED(ID3D11Device_CreateQuery(g_dev, &qd, &g_ld_q[q]))) { g_ld_q[q] = NULL; }
+            }
+            if (g_ld_q[q]) {
+                ID3D11DeviceContext_Begin(g_ctx, (ID3D11Asynchronous *)g_ld_q[q]);
+                g_ld_qk[q] = (int)(e - g_ld); g_ld_qbusy[q] = 1; g_ld_qcur = q;
+                e->qd++; e->qlen += len;
+            }
+        }
+    }
+}
+
+void lined_post(void)
+{
+    if (g_ld_qcur >= 0) {
+        ID3D11DeviceContext_End(g_ctx, (ID3D11Asynchronous *)g_ld_q[g_ld_qcur]);
+        g_ld_qcur = -1;
+    }
+}
+
+void lined_present(void)
+{
+    static unsigned last;
+    unsigned i;
+    ld_poll();
+    /* Belegbild: Bild mit >= 3 Linien-Strips in Spiel-RTs (Funken), hoechstens 12, Abstand >= 15 Bilder */
+    if (g_ld_strips >= 3u && g_ld_shots < 12u && g_present_no - g_ld_shotf >= 15u) {
+        extern unsigned g_shot_census; /* render_diag.c: Bild beim naechsten Present */
+        g_shot_census = 1; g_ld_shots++; g_ld_shotf = g_present_no;
+        HLOG_W("LINED shot f=%u strips=%u", g_present_no, g_ld_strips);
+    }
+    g_ld_strips = 0;
+    if (g_present_no - last < 300u) { return; }
+    last = g_present_no;
+    for (i = 0; i < g_ld_n; i++) {
+        ld_ent_t *e = &g_ld[i];
+        if (e->draws == e->last) { continue; }
+        e->last = e->draws;
+        HLOG_W("LINED sum f=%u vs=0x%X p=%u tgt=%u %u->%u draws=%u len/draw=%.2f gemessen=%u len=%.0f pix=%u pix/len=%.3f",
+               g_present_no, e->vs, e->prim, e->tgt, e->rw, e->pw, e->draws, e->draws ? e->len / e->draws : 0.0,
+               e->qd, e->qlen, e->pix, e->qlen > 0.0 ? e->pix / e->qlen : 0.0);
+    }
+}

@@ -76,6 +76,7 @@ typedef struct {
 #define SB_QS_NOTE_NOREC 1  /* keine Tick-Aufzeichnung: nur Fenstergroesse / wie im Spiel */
 #define SB_QS_NOTE_NOFLAT 2 /* ohne Cockpit hier nicht moeglich -> wie im Spiel */
 #define SB_QS_NOTE_SMALLER 4 /* gewaehlte Groesse ueber den Grafik-Grenzen -> kleiner */
+#define SB_QS_NOTE_NET 8     /* W357: Netzspiel - Fenstergroesse, ohne Pause (sb_pausenet.h) */
 typedef struct {
     int ok;            /* 1 gespeichert, 0 Fehler */
     int notes;         /* SB_QS_NOTE_* */

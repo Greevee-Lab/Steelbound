@@ -27,6 +27,7 @@ int loctun_dgram(loctun *t, uint32_t dst_vip, uint16_t src_gp, uint16_t dst_gp, 
     return -1;
 }
 int loctun_is_peer(loctun *t, uint32_t vip) { (void)t; (void)vip; return 0; }
+void loctun_set_app(loctun *t, uint16_t gp, loctun_app_fn fn) { (void)t; (void)gp; (void)fn; } /* W338 */
 int loctun_links_up(loctun *t) { (void)t; return 0; }
 int loctun_link_info(loctun *t, int i, int *path, double *srtt_ms, int *red, uint32_t *vip, char *relay, int rlen)
 {
@@ -43,3 +44,16 @@ uint16_t loctun_port(loctun *t) { (void)t; return 0; }
 void loctun_log_stats(loctun *t, int waited_s) { (void)t; (void)waited_s; }
 int loctun_lobby_state(loctun *t) { (void)t; return 0; }
 int loctun_auth_state(loctun *t) { (void)t; return 0; }
+int loctun_lobby_code(loctun *t, char *buf, int cap)
+{
+    (void)t;
+    if (buf && cap > 0) buf[0] = 0;
+    return 0;
+}
+int loctun_sec_state(loctun *t) { (void)t; return 0; }
+int loctun_diag(loctun *t, char *buf, int cap) /* W353 */
+{
+    (void)t;
+    if (buf && cap > 0) buf[0] = 0;
+    return 0;
+}

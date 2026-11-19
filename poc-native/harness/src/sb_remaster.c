@@ -931,7 +931,8 @@ static ID3D11ShaderResourceView *dds_load_mem(unsigned char *d, size_t n, const 
     static unsigned nlog;
     *reject = 0;
     if (!d || !n) { free(d); return NULL; }
-    if (u32le(d) != 0x20534444u || u32le(d + 4) != 124u) { *reject = 1; goto bad; }
+    /* W332 SEC: Pack-Daten (sb_pack_read) haben keine Mindestgroesse -> Kopf (128 B) erst pruefen. */
+    if (n < 128u || u32le(d) != 0x20534444u || u32le(d + 4) != 124u) { *reject = 1; goto bad; }
     h = u32le(d + 12);
     w = u32le(d + 16);
     mips = (u32le(d + 8) & 0x20000u) ? u32le(d + 28) : 1u;

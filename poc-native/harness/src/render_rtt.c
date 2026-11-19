@@ -1702,6 +1702,7 @@ static ID3D11ShaderResourceView *rtt_selfcopy_srv(int i)
         HRESULT hr;
         ID3D11Texture2D_GetDesc(e->tex, &td);
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        if (g_sba_loc ? g_cfg.loc_interp_copy : g_cfg.interp_selfcopy) { td.BindFlags |= D3D11_BIND_RENDER_TARGET; } /* W340/W347: Interp-Schatten der Kopie */
         td.Usage = D3D11_USAGE_DEFAULT;
         td.CPUAccessFlags = 0;
         td.MiscFlags = 0;
@@ -1715,6 +1716,12 @@ static ID3D11ShaderResourceView *rtt_selfcopy_srv(int i)
     }
     sb_ctx_enter();
     ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)e->ctex[k], (ID3D11Resource *)e->tex);
+    /* W340 LOC-FRAMES: LoC-Glow-Kette (256er-RT sampelt sich selbst) -> Kopie als Interp-Op, sonst Glow in
+     * Zwischenbildern auf dem Stand von Tick N.
+     * FIX(W347 GHOST): SB ebenso (interp_selfcopy). Der Hauptmonitor-RT (Slot 12, 512^2) sampelt sich jeden Tick
+     * selbst; die Zwischenbilder lasen die Tick-N-Kopie und mischten sie ueber die gelerpte Welt -> doppelte
+     * Kanten beim Drehen (Steelbound#45). sb_interp_rec_copy prueft den Schalter je Profil. */
+    if (g_ip_recording && e->rtv) { sb_interp_rec_copy(e->rtv, e->csrv[k], NULL); }
     sb_ctx_leave();
     e->cring = k; e->cgen = e->wgen + 1u;
     if (nlog < 8u) {

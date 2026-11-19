@@ -80,6 +80,17 @@ void audio_3d_voice_dist(au32 v, int which, au32 f);
 void audio_3d_listener_pos(au32 x, au32 y, au32 z);
 void audio_3d_listener_orient(au32 fx, au32 fy, au32 fz, au32 tx, au32 ty, au32 tz);
 void audio_3d_rolloff(au32 r);
+/* W348 (audio_doppler): Geschwindigkeiten (Float-Bits) fuer Doppler. */
+void audio_3d_voice_vel(au32 v, au32 x, au32 y, au32 z);
+void audio_3d_listener_vel(au32 x, au32 y, au32 z);
+void audio_3d_distance_factor(au32 f); /* IDirectSound_SetDistanceFactor */
+/* W348 (audio_reverb): DSI3DL2LISTENER (12 DWORDs wie vom Spiel); deferred = DS3D_DEFERRED
+ * (wirkt erst mit audio_commit_deferred = IDirectSound_CommitDeferredSettings). */
+void audio_set_i3dl2_listener(const au32 *d, int deferred);
+void audio_commit_deferred(void);
+
+/* W348 DIAG(DSAPI): Aufrufzaehler der DirectSound-Einstiege (hooks_audio.c). */
+void ds_api_diag_log(void);
 
 /* W102 AUDIO-TUT: Voice-Filter (DSFILTERDESC: Mode, Q, 4 Koeffizienten; Mode 1
  * = DLS2-Tiefpass, wirkt bei audio_filter=1), I3DL2-Quelle (DSI3DL2BUFFER, nur
@@ -87,6 +98,15 @@ void audio_3d_rolloff(au32 r);
 void audio_set_filter(au32 v, au32 pDesc);
 void audio_set_i3dl2(au32 v, au32 pParams);
 void audio_note_eg(au32 v, au32 pDesc);
+/* W356 AUDIO-2 (XACT-HLE, LoC): DSI3DL2BUFFER als 9 Werte (Occlusion je Quelle), Pegel des
+ * I3DL2-Mixbins (Hall-Send je Cue, mB; -10000 = kein Send), Mixbin-Pegel FL FR C LFE BL BR (linear;
+ * Stereo-Faltung wie audio_set_mixbins, Surround nutzt die Bins direkt). */
+void audio_set_i3dl2_vals(au32 v, const au32 *d9);
+void audio_set_room_send(au32 v, int mb);
+void audio_set_bins(au32 v, const float *g6);
+/* W356: Kanalzahl/Maske des Ausgabegeraets (WASAPI, 0 = unbekannt) und ob Surround/HRTF wirken. */
+int audio_out_channels(void);
+const char *audio_spatial_mode(void);
 
 /* Statistik fuers Log (einmalig pro Lauf bei Bedarf). */
 void audio_log_stats(void);

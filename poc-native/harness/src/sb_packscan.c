@@ -359,6 +359,7 @@ typedef struct {
     HANDLE h;
     zipent_t *zent;
     int nzent;
+    u64map_t zmap; /* W332 SEC: Name -> zent-Index */
 } sbpk_pk_t;
 
 static int sbpk_open(const char *path, sbpk_pk_t *p)
@@ -399,19 +400,14 @@ static void sbpk_close(sbpk_pk_t *p)
         free(p->zent[i].name);
     }
     free(p->zent);
+    u64map_free(&p->zmap);
     memset(p, 0, sizeof *p);
     p->h = INVALID_HANDLE_VALUE;
 }
 
 static const zipent_t *sbpk_zfind(sbpk_pk_t *p, const char *name)
 {
-    int i;
-    for (i = 0; i < p->nzent; i++) {
-        if (strcmp(p->zent[i].name, name) == 0) {
-            return &p->zent[i];
-        }
-    }
-    return NULL;
+    return zent_find(p->zent, p->nzent, &p->zmap, name); /* W332 SEC: statt linear */
 }
 
 static int sbpk_has(sbpk_pk_t *p, const char *name)
@@ -802,6 +798,8 @@ static void sbpk_validate(sbpk_pk_t *p, const char *xbe, sbpk_finds_t *f)
     if (arr && arr->kind == 6) {
         char (*seen)[17] = NULL;
         int nseen = 0;
+        u64map_t seenm; /* W332 SEC: Hash -> gesehen (statt linearer Suche) */
+        memset(&seenm, 0, sizeof seenm);
         if (arr->n > 0) {
             seen = (char(*)[17])malloc(sizeof *seen * (size_t)arr->n);
         }
@@ -825,10 +823,17 @@ static void sbpk_validate(sbpk_pk_t *p, const char *xbe, sbpk_finds_t *f)
                 sbpk_add(f, 1, "V1", "bad_hash", b);
                 continue;
             }
-            for (k = 0; k < nseen; k++) {
-                if (strcmp(seen[k], hh) == 0) {
+            {
+                u64 hv = 0;
+                int r = hex16(hh, &hv) ? u64map_put(&seenm, hv, i) : -1;
+                if (r == 0) {
                     dup = 1;
-                    break;
+                }
+                for (k = 0; r < 0 && k < nseen; k++) { /* ohne Speicher: linear wie vorher */
+                    if (strcmp(seen[k], hh) == 0) {
+                        dup = 1;
+                        break;
+                    }
                 }
             }
             if (dup) {
@@ -1001,6 +1006,7 @@ static void sbpk_validate(sbpk_pk_t *p, const char *xbe, sbpk_finds_t *f)
             }
         }
         free(seen);
+        u64map_free(&seenm);
     }
     /* Effect-Parameter (PACK_FORMAT.md Abschnitt 9, Positivliste kSbFxParams). */
     {
@@ -1596,6 +1602,7 @@ static int sbpk_shadow_load(const char *full, sbpk_shadow_pk_t *o)
             free(p.zent[i].name);
         }
         free(p.zent);
+        u64map_free(&p.zmap);
         for (i = 0; i < p.nents; i++) {
             free(p.ents[i].cat);
             free(p.ents[i].f2);
@@ -1636,6 +1643,7 @@ static int sbpk_shadow_load(const char *full, sbpk_shadow_pk_t *o)
         free(p.zent[i].name);
     }
     free(p.zent);
+    u64map_free(&p.zmap);
     for (i = 0; i < p.nents; i++) {
         free(p.ents[i].cat);
         free(p.ents[i].f2);
@@ -1655,6 +1663,7 @@ typedef struct {
     int *choice;
     int nchoice;
     int n;
+    u64map_t cmap; /* W332 SEC: Hash -> Index in chosen/choice */
 } sbpk_res_t;
 
 static void sbpk_res_free(sbpk_res_t *r)
@@ -1663,6 +1672,7 @@ static void sbpk_res_free(sbpk_res_t *r)
     free(r->choice);
     sbpk_shadow_free(r->pkgs, r->n);
     free(r->loaded);
+    u64map_free(&r->cmap);
     memset(r, 0, sizeof *r);
 }
 
@@ -1750,10 +1760,16 @@ static int sbpk_resolve(const char *packs_json, sbpk_res_t *r)
                 if (!r->pkgs[i].file[k] || r->pkgs[i].pri[k] != pass) {
                     continue;
                 }
-                for (q = 0; q < r->nchoice; q++) {
-                    if (r->chosen[q] == r->pkgs[i].hash[k]) {
+                {
+                    int pr = u64map_put(&r->cmap, r->pkgs[i].hash[k], r->nchoice);
+                    if (pr == 0) {
                         have = 1;
-                        break;
+                    }
+                    for (q = 0; pr < 0 && q < r->nchoice; q++) { /* ohne Speicher: linear */
+                        if (r->chosen[q] == r->pkgs[i].hash[k]) {
+                            have = 1;
+                            break;
+                        }
                     }
                 }
                 if (!have) {
@@ -1771,6 +1787,10 @@ static int sbpk_resolve(const char *packs_json, sbpk_res_t *r)
 static int sbpk_winner(const sbpk_res_t *r, u64 h)
 {
     int q;
+    if (r->cmap.cap && !r->cmap.bad) { /* W332 SEC: Tabelle statt linear */
+        q = u64map_get(&r->cmap, h);
+        return q >= 0 ? r->choice[q] : -1;
+    }
     for (q = 0; q < r->nchoice; q++) {
         if (r->chosen[q] == h) {
             return r->choice[q];

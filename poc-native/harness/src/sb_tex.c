@@ -13,6 +13,7 @@
 #include "sb_profile.h" /* W297: g_sba_loc (V8U8 nur LoC) */
 #include "hlock.h" /* W308 SUSP-CTLOCK */
 #include "sb_texhealth.h" /* W315 TEX-WHITE-AMD: Zaehler */
+#include "sb_state.h" /* W345: sb_in_mission (Testhook tex_lw_drop_test) */
 int sb_ctx_release_all(void); /* W138 d3d11_render.c */
 void sb_ctx_reacquire(int r);
 #include <windows.h>
@@ -1169,6 +1170,7 @@ static void tex_dump_diag(unsigned xptr, unsigned data, unsigned w, unsigned h)
  * Voll-Hash ueber den ganzen Puffer (wortweise, ~50 us je 256 KB). */
 static unsigned g_lw_xptr[64];
 static int g_lw_n;
+static unsigned g_lw_forgot, g_lw_full, g_lw_hudadd; /* W345 HUDFREEZE: Zaehler fuer F11/Absturzbericht */
 extern unsigned g_present_no;
 void sb_tex_lockwatch_note(unsigned xptr)
 {
@@ -1178,13 +1180,15 @@ void sb_tex_lockwatch_note(unsigned xptr)
     if (g_lw_n < 64) {
         g_lw_xptr[g_lw_n++] = xptr;
         if (g_lw_n <= 32) { HLOG_I("TEX lockwatch #%d: xptr=0x%X", g_lw_n, xptr); }
+    } else {
+        g_lw_full++; /* W345: Liste voll - diese Textur wird nicht beobachtet */
     }
 }
 void sb_tex_lockwatch_forget(unsigned xptr)
 {
     int k;
     for (k = 0; k < g_lw_n; k++) {
-        if (g_lw_xptr[k] == xptr) { g_lw_xptr[k] = g_lw_xptr[--g_lw_n]; return; }
+        if (g_lw_xptr[k] == xptr) { g_lw_xptr[k] = g_lw_xptr[--g_lw_n]; g_lw_forgot++; return; }
     }
 }
 static int lw_has(unsigned xptr)
@@ -1222,6 +1226,69 @@ void sb_tex_diag_info(unsigned xptr, char *buf, size_t n)
     _snprintf_s(buf, n, _TRUNCATE, "x=0x%X lw=%d lwn=%d c=%d d=%d data=%s lwf=%u lwh=%08X cur=%08X%s", xptr, lw_has(xptr), g_lw_n, i,
                 (int)g_cache[i].dirty, data == g_cache[i].data ? "=" : "neu", g_cache[i].lw_frame, g_cache[i].lw_hash, cur,
                 (cur && g_cache[i].lw_hash && cur != g_cache[i].lw_hash) ? " ALT" : "");
+}
+
+/* FIX(HUDFREEZE,W345) [render] tex_hud_guard=1: Die Cockpit-Anzeigen (Gang, Tacho, Lebens-
+ * und Waffenanzeige) rastert das Spiel per CPU in dauerhaft gesperrte Texturen (Lock einmal je
+ * Load, FUN_00093210; Zeiger in [0x3B78FC]/[0x3B7D24]/[0x3B791C]/[0x3B7914]/[0x3B7900], BERICHT
+ * W243). Aktuell bleiben sie nur ueber tex_lockwatch (W98) - faellt eine dieser Texturen aus der
+ * Beobachtung (Release rc=0 einer frueheren Textur an derselben Kopfadresse, Liste voll, Lock vor
+ * dem Wiederbeleben der Kopfadresse), sieht nur noch der Stichproben-Hash jedes 16. Get die Aenderungen
+ * und trifft die Ziffern-/Balkenzeilen kaum: Anzeige steht. Je Bild werden die gerade gesetzten
+ * Anzeige-Texturen deshalb wieder in die Beobachtung genommen (nur SB, nicht LoC). Sind sie schon
+ * beobachtet (Normalfall), aendert sich nichts. tex_hud_guard=0 = alt. */
+static const unsigned g_hud_tex[5] = { 0x3B78FCu, 0x3B7D24u, 0x3B791Cu, 0x3B7914u, 0x3B7900u };
+static unsigned hud_ptr(unsigned eu_va)
+{
+    unsigned v = 0;
+    __try { v = *(volatile unsigned *)(uintptr_t)SBA(eu_va); } __except (EXCEPTION_EXECUTE_HANDLER) { v = 0; }
+    return (v >= 0x10000u && v < SB_HOST_LIM()) ? v : 0u;
+}
+void sb_tex_hud_tick(void)
+{
+    static unsigned last, ndrop;
+    unsigned i, x;
+    if (g_sba_loc || last == g_present_no) { return; }
+    last = g_present_no;
+    if (g_cfg.tex_lw_drop_test > 0 && (g_present_no % (unsigned)g_cfg.tex_lw_drop_test) == 0u && sb_in_mission()) {
+        /* TEST(HUDFREEZE,W345): Beobachtung der Anzeige-Texturen verlieren wie nach Release rc=0 (Standard 0). */
+        unsigned nd = 0;
+        for (i = 0; i < 5u; i++) {
+            if ((x = hud_ptr(g_hud_tex[i])) && lw_has(x)) { sb_tex_lockwatch_forget(x); nd++; }
+        }
+        if (nd && ndrop++ < 16u) { HLOG_I("TEX lw-drop-test #%u: %u Anzeige-Texturen aus der Beobachtung (f=%u)", ndrop, nd, g_present_no); }
+    }
+    if (!g_cfg.tex_hud_guard || !g_cfg.tex_lockwatch) { return; }
+    for (i = 0; i < 5u; i++) {
+        if (!(x = hud_ptr(g_hud_tex[i])) || lw_has(x)) { continue; }
+        if (g_lw_n >= 64) { g_lw_xptr[--g_lw_n] = 0; g_lw_full++; } /* Platz fuer die Anzeige (juengster Eintrag geht) */
+        g_lw_xptr[g_lw_n++] = x;
+        g_lw_hudadd++;
+        if (g_lw_hudadd <= 16u || (g_lw_hudadd & 255u) == 0u) {
+            HLOG_I("TEX hud-guard #%u: Anzeige-Textur [0x%X]=0x%X wieder beobachtet (lwn=%d f=%u)", g_lw_hudadd, g_hud_tex[i],
+                   x, g_lw_n, g_present_no);
+        }
+    }
+}
+/* W345: Zustand der Cockpit-Anzeige-Texturen fuer F11/Textur-Gesundheit (nur lesend). */
+void sb_tex_hud_format(char *o, size_t cap)
+{
+    static const char *nm[5] = { "78FC", "7D24", "791C", "7914", "7900" };
+    unsigned i, mode = 0;
+    size_t u;
+    if (!o || !cap) { return; }
+    __try { mode = *(volatile unsigned *)(uintptr_t)SBA(0x354F3Cu); } __except (EXCEPTION_EXECUTE_HANDLER) { mode = 0; }
+    _snprintf_s(o, cap, _TRUNCATE, "cockpit displays (W345): mode=%u lockwatch=%d/64 forgotten=%u full=%u guard_added=%u guard=%d",
+                g_sba_loc ? 0u : mode, g_lw_n, g_lw_forgot, g_lw_full, g_lw_hudadd, g_cfg.tex_hud_guard);
+    if (g_sba_loc) { return; }
+    for (i = 0; i < 5u; i++) {
+        char b[112];
+        unsigned x = hud_ptr(g_hud_tex[i]);
+        if (!x) { continue; }
+        sb_tex_diag_info(x, b, sizeof b);
+        u = strlen(o);
+        _snprintf_s(o + u, cap - u, _TRUNCATE, " %s[%s]", nm[i], b);
+    }
 }
 
 /* DIAG(PERF-HUD,W122): Zeit in sb_tex_get (Cache, Dirty-Hash, Upload, HD-Ersatz)

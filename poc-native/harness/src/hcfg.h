@@ -22,6 +22,7 @@ typedef struct {
     int loc_net_port;     /* W286: Portbasis (Standard 1000 = Original: TCP 1000, UDP 1201/1202, VDP 1203 -> Basis+0/+201/+202/+203) */
     char loc_net_peers[512]; /* W286: Mitspieler "ip[:basis],..." ("auto" = 127.0.0.2-127.0.0.9 ohne sich selbst); nur Loopback/privat */
     int loc_net_rtt;      /* W286: gemeldete QoS-Rundlaufzeit in ms (XNetQosLookup, Standard 10) */
+    int loc_net_leave_reset; /* W350: 1 = Stromende (recv 0) eines Mitspielers meldet das Netz-HLE dem Spiel als WSAECONNRESET (Abgang wie XNet, Platz frei; Standard), 0 = recv 0 durchreichen (Geisterplatz) */
     int loc_net_nodelay;  /* W322: 1 = TCP_NODELAY auf den LoC-Spielverbindungen (kein Nagle-Stau ueber Strecken mit Laufzeit; Standard), 0 = Host-Standard */
     char loc_netsim[256]; /* W322 DIAG/TEST: Verzoegerungsstufe im Netz-HLE, z. B. "dsl", "eu-jp,nagle:0", "rtt:300,jitter:20" (leer = aus, Standard) */
     char loc_transport[8]; /* W324 LOC-NETPLAY: "tcp" = Original (Standard), "udp" = eigener UDP-Transport mit Redundanz unter dem Spiel */
@@ -33,10 +34,15 @@ typedef struct {
     int loc_transport_hold;   /* W324: Jitter-Puffer, Mindest-Haltezeit in ms (Standard 0) */
     int loc_transport_qos;    /* W324: Reserve fuer die gemeldete QoS-RTT in ms (Standard 100) */
     int loc_transport_nodirect; /* W324 TEST: 1 = kein direkter Weg (Relay erzwingen) */
+    int guest_wx;       /* W339 SEC-A3: W^X fuer das Gastabbild: -1 automatisch (LoC 1, SB 0), 0 aus, 1 strikt, 2 Diagnose */
+    int loc_crash_test; /* W339 TEST: N > 0 = N s nach Beginn der Netzsitzung Ausnahme im Gastkontext (Absturz = Ende pruefen); Modus loc_crash_test_mode */
+    int loc_crash_test_mode; /* W339 TEST: 0 = Schreibfehler in privatem Code, 1 = Sprung in eine Gast-Datenseite (W^X) */
     char loc_lobby[128];      /* W324: Treffpunkt steelnet "host:port" (leer = System Link wie bisher, Standard) */
     char loc_lobby_room[33];  /* W324: Lobby-Name beim Treffpunkt (Standard "loc") */
     char loc_lobby_pilot[17]; /* W324: Pilotname beim Treffpunkt (Standard "Pilot") */
     char loc_lobby_role[8];   /* W324: "auto" (beitreten, sonst anlegen), "host", "join" */
+    char loc_lobby_code[16];  /* W334: Raumcode zum Beitreten (leer = eigene Lobby mit Raumcode anlegen) */
+    char loc_lobby_spki[65];  /* W334: SPKI-Pin (hex64) eines anderen Treffpunkts als relay.steelbound.dev */
     char loc_relays[256];     /* W324: zusaetzliche Relays "name=host:port,..." (der Treffpunkt nennt seine selbst) */
     int loc_net_diag;     /* W286 DIAG: 1 = alle 10 s Spiel-Threads abtasten (EIP + LoC-Ruecksprungadressen), Standard 0 */
     int loc_sync;         /* W297 DIAG: 1 = Lockstep-Zustandshash je 0x34-Rahmen loggen (LOCSYNC, nur LoC + Netz), Standard 0 */
@@ -47,11 +53,23 @@ typedef struct {
     int loc_direct_present; /* W320 LOC-PERF: 1 = LoC-Profil praesentiert direkt (interp_fps=0, keine Wiederhol-Presents), Standard 1 */
     int loc_widescreen;   /* W326 LOC-WIDE: Bildformat des Spiels: 0 = 4:3 (Original, Standard), 1 = 16:9 (Spiel meldet WIDESCREEN, 720x480 anamorph), 2 = 720p (1280x720 progressiv, HDTV-AV-Pack) - nur LoC, wirkt beim Start */
     int loc_interp;       /* W323 LOC-INTERP: 1 = Zwischenbilder in der LoC-Mission (20-Hz-Takt, interp_fps bleibt), 0 = wie W320 direkt */
+    int loc_interp_rzalt; /* W349 LOC-FRAMES-2: 1 = rawchg-Draws (neue Eingangsdaten) mit dem zur Kamera passenden Partner gleicher Signatur lerpen (Mehrpass-Himmel, Billboards) und reject/rawchg knapp ueber der Matrix-Schwelle per Geometrie-Pruefung (li_camfit) retten, 0 = Stand W340 */
+    int loc_ui_diag; /* DIAG(W349): 1 = Farbe/Aufrufkette der LoC-UI-Rahmen loggen (LOCUI rahmen) */
+    int loc_interp_dbg; /* DIAG(W349 LOC-FRAMES-2): Bit 1 = exakte Welt-Draws in Zwischenbildern weglassen (Bildfolge zeigt Loecher), Bit 2 = exakte Welt-Draws je Paar loggen */
+    int loc_interp_rejcam; /* W340 LOC-FRAMES: 1 = reject-Draws lerpen, wenn M_A^-1*M_B zur Kamera passt (Objekt ruht in der Welt), 0 = exakt */
+    int loc_interp_copy;   /* W340 LOC-FRAMES: 1 = BB-Kopie (Backbuffer als Textur) als Interp-Op -> Welt in Zwischenbildern bewegt, 0 = alt (Welt 20 Hz) */
+    int loc_interp_anchor; /* W340 LOC-FRAMES: 1 = Zustandszeit am Feld des Tick-Anfangs (erstes Op), 0 = Feld am Swap (W323) */
     int loc_rb_spike;     /* W325 DIAG: Rollback-Machbarkeit messen (1 = Zustand je Tick, 2 = Determinismus-Zyklen), Standard 0 */
     char loc_rb_opts[128]; /* W325 DIAG: Optionen zu loc_rb_spike, z. B. "k=1,2,4,8;render=0;warm=300;max=0;census=1" */
     int loc_rb;           /* W330 LOC-ROLLBACK-R1: 1 = Zustandsring je Tick (inkrementell, Ruhe aller Threads), nur LoC-Profil, Standard 0 */
+    int loc_rb_input;     /* W338 LOC-ROLLBACK-R2: 1 = eigene Eingabeschicht (Verzoegerung, Vorhersage, Rollback, Hash-Pruefung) statt
+                           * Spiel-Lockstep; braucht den Ring (schaltet loc_rb ein). W346: je Mission ausgehandelt - nur wenn alle
+                           * Clients es koennen und wollen, sonst Original-Lockstep. Standard: intern 1, Community 0 */
+    int loc_rb_delay;     /* W338: Eingabeverzoegerung in Ticks mit loc_rb_input (1..8); W346: 0 = adaptiv nach Umlaufzeit (Standard) */
     int loc_fields;       /* W320 TEST: Felder je Missionsbild statt 3 (aendert Spielgeschwindigkeit, nur Messung), 0 = Original */
     int loc_pad_keys;     /* W286: 1 = Tastatur auch auf das virtuelle Menue-Gamepad (Ziffernblock 8/2/4/6, SPACE/0, Backspace, Enter; Standard), 0 = Pad nur anwesend (neutral) */
+    int loc_mouse;        /* W341 LOC-MOUSE: 1 = Maus zielt in der LoC-Mission wie in SB (Fangen, sobald der eigene VT im Lockstep abgesetzt ist; Standard), 0 = altes Verhalten (Maus nie gefangen, nur Tasten) */
+    int loc_mouse_test;   /* W341 TEST: 1 = (mit input_test_hook=1) synthetische Maus ueber den echten Fenster-/Rohdatenpfad auch bei Testfolge; Pseudo-Tasten 330-333 = Bewegung +x/-x/+y/-y, 334/335 = links/rechts, 336 = Bild */
     int iso_selftest;     /* W150 DIAG: 1 = D:-Selbsttest (Lesen, Schreibschutz) vor dem Spielstart */
     int save_check;       /* W187 KIA-LOAD: Spielstaende (T:) beim Start pruefen: 1 = reparieren (mit Sicherung), 2 = nur melden, 0 = aus */
     int save_lock;        /* W190 SAVE-LOCK: 1 = Spielstaende schuetzen (T:/U: in eine Wegwerf-Arbeitskopie <hdd>\_savelock, beim naechsten Start verworfen), 0 = Original (Standard) */
@@ -147,6 +165,8 @@ typedef struct {
     int tex_hdr_check;     /* W63: 1 = Cache-Treffer prueft Texturkopf (Data/Format) auf Neubelegung, 0 = alt */
     int rt_init_clear;     /* FIX(HD-PACK-ART,W262): 1 = neu angelegte Spiel-RTs (rtt_ensure) einmal auf Null-Bytes setzen (Farbe 0, Tiefe 0, Stencil 0) statt undefiniertem VRAM-Inhalt, 0 = alt, 2 = DIAG: Farbe magenta (zeigt nie beschriebene RT-Bereiche) */
     int tex_throttle_retry; /* FIX(TEX-WHITE-UI,W307): 1 = an der Upload-Drossel gescheiterter Erst-Upload beim naechsten Get erneut (statt erst beim 16.), 0 = alt */
+    int tex_lw_drop_test;   /* TEST(HUDFREEZE,W345): >0 = in der Mission alle N Bilder die Anzeige-Texturen aus der Lockwatch-Beobachtung nehmen (Verlust nachstellen), 0 = aus */
+    int tex_hud_guard;      /* FIX(HUDFREEZE,W345): 1 = Cockpit-Anzeige-Texturen (CPU-gerastert, dauerhaft gesperrt) je Bild in der Lockwatch-Beobachtung halten, 0 = alt */
     int tex_up_budget;      /* DIAG(TEX-WHITE-UI,W307): Uploads je Bild (Drossel), Standard 12; kleiner = Last/langsame Maschine nachstellen */
     int tex_missing_mark;   /* DIAG(TEX-WHITE-AMD,W315): 1 = Draw erwartet Textur, hat aber keine SRV -> Farbe nach Grund statt weiss/Vertexfarbe: gelb = noch nicht hochgeladen/gedrosselt, cyan = Anlegen abgelehnt (D3D), magenta = sonst; 0 = aus (bitgleich) */
     int d3d_debug;         /* DIAG(AMD-ARTIFACTS,W302): 1 = D3D11-Debug-Layer, InfoQueue-Meldungen gruppiert ins Log (D3DDBG), 2 = zusaetzlich je Binden eines Render-Ziels abholen (Ziel im Log), 0 = aus */
@@ -276,6 +296,20 @@ typedef struct {
     int audio_ithis_fix;   /* W89: 1 = Puffer-Stop/GetStatus an den I-Wrappern 0x21F53C/0x21F598 hooken (diese rufen C-Ebene mit this-0x1C -> Stimme nie erkannt: Stop wirkungslos, Status immer STOPPED = Stimmenklau), 0 = alt */
     int audio_loop_fix;    /* W89: 1 = SetLoopRegion legt nur die Region fest (Schleife nur mit Play(LOOPING)), Region/Position in Daten-Frames (Resampling), Einmal-Ton bis Datenende; 0 = alt (jede Region loopt, Quell-Frames) */
     int audio_pitch_range; /* W89: 1 = SetPitch-Klemme weit (-98304..32767; Spiel nutzt -8576 = 11,3 kHz), 0 = alt (-8192..8192) */
+    int audio_freq_xdk;    /* W343 ISSUE-46: 1 = Frequenz-Setter nach XDK-Grenzen (SetFrequency 188..191983 Hz geklemmt statt verworfen, 0 = Original-Rate, SetPitch -32768..8191, Schritt ohne 1/16..16-Klemme), 0 = alt (unter 4000 Hz verworfen) */
+    int audio_pitch_diag;  /* W343 DIAG(PITCH): 1 = alle 10 s je Stimme Frequenz-Setter (Anzahl, Pitch/Hz min..max, verworfen, geklemmt), 0 = aus */
+    int audio_api_diag;    /* W348 DIAG(DSAPI): 1 = Aufrufzaehler je DirectSound-Einstieg (alle 60 s) + DIAG(I3DL2)/DIAG(EG)/DIAG(VEL)-Wertezeilen, 0 = aus */
+    int audio_eg;          /* W348: 1 = Hüllkurven der Stimmen (SetEG: Amplitude + Multi-EG mit Pitch-Skala) wie MCPX, 0 = alt (ignoriert) */
+    int audio_reverb;      /* W348: 1 = I3DL2-Hall im Mischer (Send je 3D-Stimme nach lRoom/lRoomHF), 0 = alt (trocken) */
+    int audio_doppler;     /* W348: 1 = Doppler aus DS3D-Geschwindigkeiten, 0 = aus */
+    int audio_headroom_xdk; /* W348: 1 = DirectSound-Grundheadroom 600 mB (-6 dB) fuer 2D-Stimmen wie die XDK-Bibliothek, 2 = zusaetzlich Submix-Headroom 1 (-6 dB, Hypothese), 0 = alt (0 dB) */
+    int audio_reverb_test; /* W348 TEST: LoC-Hallpreset erzwingen (0..24 = Index der Spieltabelle 0x273FB0, z. B. 9 = Hoehle der Untergrundkarten), -1 = aus */
+    int audio_limiter;     /* W348: 1 = Spitzenbegrenzer am Mischerausgang (-1 dBFS, Rueckkehr 150 ms) statt harter Begrenzung, 0 = alt */
+    int audio_occlusion;   /* W356: 1 = I3DL2-Quelle vollstaendig (lDirect/lDirectHF, Obstruction, Occlusion, Raum-Rolloff), 0 = alt (nur lRoom/lRoomHF) */
+    int audio_hrtf;        /* W356: 1 = Kopfhoerer-HRTF fuer positionierte 3D-Stimmen (Kugelkopf-Modell, Original: DirectSoundUseFullHRTF), 0 = Stereo-Balance */
+    int audio_surround;    /* W356: 1 = echte 5.1/7.1-Ausgabe bei Geraet >= 4 Kanaele (WASAPI), 0 = immer Stereo; 2 = TEST: Surround-Mix erzwingen + <out>/audio51.wav */
+    int audio_downmix;     /* W356: 1 = 5.1-Faltung ITU (C/Surround -3 dB, LFE -6 dB) normiert auf Vollaussteuerung samt 2D-Headroom, 0 = alt (ungenormt) */
+    int audio_xact_sends;  /* W356 LoC: 1 = XACT je Cue wie die Bibliothek (Hall-Send Eintrag +0xF x -2,56 dB nur 3D, LFE-Pegel, Lautstaerke 9 Bit x 0,16 dB, Occlusion je Quelle), 0 = W348 */
     int audio_adpcm_lerp;  /* W89: 1 = ADPCM-Resampling linear interpoliert, 0 = alt (naechster Nachbar) */
     int audio_3d;          /* W89: 1 = DS3D-Distanzdaempfung (min/max/rolloff) + Balance aus Listener-Raum fuer positionierte Stimmen, 0 = alt (3D-Setter ignoriert, alles voll + mittig) */
     int audio_oneshot_fix; /* W95: 1 = Loop-Region-Wrap im Mixer nur bei Schleife (Play LOOPING), Einmal-Ton endet am Datenende; 0 = alt (jede gesetzte Loop-Region wrappt -> Einmal-Toene enden nie) */
@@ -292,6 +326,9 @@ typedef struct {
     int audio_wrap_diag;   /* W83: DIAG(BINKWRAP) Ring-Wrap-Unlocks (Lock-Puffer vs. SetBufferData-Speicher), 0 = aus */
     int audio_sync_diag;   /* W205: 1=ring/frame/device trace, 2=also mute device only, 0=off */
     int audio_bink_sync;   /* W205: overwrite the initial Bink ring before Play */
+    int audio_ring_underrun; /* ISSUE-10: 1 = Bink-Ringstimmen bei Unterlauf still statt alter Ring-Momentaufnahme, Cursor-Reset verwirft ungespielte FIFO-Frames, 5 ms Ein-/Ausblenden; 0 = alt */
+    int audio_test_stall_ms; /* ISSUE-10 TEST: Bink-Tonfuetterung einmal so lange blockieren (ms), 0 = aus */
+    int audio_test_stall_at; /* ISSUE-10 TEST: nach so vielen Bink-Locks (alle Stimmen zusammen) */
     int audio_bink_delay;  /* W205: align the movie start with device output */
     int audio_low_latency; /* W205: WASAPI short queue, default 1 */
     int audio_process_async; /* W34: 1 = Process async (PENDING + Echtzeit-Vollzug, Xbox), 0 = alt (sync + Sleep(10)x50-Backpressure -> 5,1-s-Ladepause) */
@@ -313,6 +350,9 @@ typedef struct {
     int replay_fx_live;     /* W299 REPLAY-FX (experimentell): Replay-Bildfilter des Spiels (EFFECT #1..#8) auch in der Live-Mission, nur in der Vollbild-Ansicht (Cockpit aus); 0 = aus (Standard, bitgleich) */
     int monitor_view;       /* W319 MONITOR-VIEW: 1 = Monitoransicht (Hauptmonitor bildfuellend wie im Cockpit, ohne Cockpit; experimentell), 2 = + Radar/FRONT VIEW als kleine Felder; nicht in VR/Replay; hat Vorrang vor cockpit_hide; 0 = Original (Standard, bitgleich) */
     int monitor_view_diag;  /* DIAG(W319): 1 = MONVIEW-Zeilen (weggelassene Draws, Abbildung, Zaehler je 600 Bilder) */
+    int ent_dump;           /* DIAG(ISSUE-GEO): N > 0 = Entity-Tabelle einmal N Bilder nach Missionsbeginn ausgeben (ENT-Zeilen); 0 = aus (Standard) */
+    int heli_shots;         /* DIAG(ISSUE-GEO): mit heli_call: bei Ankunft (Zustand 2) N Bilder je Spiel-Bild (bzw. N Ticks Zwischenbild-Folge mit interp_fps) */
+    int heli_call;          /* DIAG(ISSUE-GEO): N > 0 = N Bilder nach Missionsbeginn (mloop 1) einmal den Nachschub-Hubschrauber rufen (Spiel-Funktion FUN_00119930 wie das Monitor-Menue), dazu HELI-Zeilen; 0 = aus (Standard) */
     int cockpit_hide;       /* W268 COCKPIT-HIDE: 1 = in der Live-Mission Cockpit aus wie der Spiel-Kniff IGNITION+START (Vollbild-Flag [0x3516DC]=1, ohne Freischaltung); nicht in VR, Replay, Titel-Demo; 0 = Original (Standard, bitgleich) */
     int cockpit_persp_pause; /* W209: 1 = live camera in pause, 0 = legacy fallback */
     int cockpit_persp_dist; /* W191: Kamera-Weg bei 100 % in mm (Spiel-Einheit ~ 1 m): > 0 = zurueck + engeres Sichtfeld (Tele, Standard 1500; Near-Ebene am alten Auge), < 0 = vor + weiteres Sichtfeld (Breitbildrand fuellen, Experiment) */
@@ -344,11 +384,15 @@ typedef struct {
     int loc_vpreset; /* W297 LOC-MISSION: 1 = SetRenderTarget setzt den Viewport auf die volle Zielgroesse (wie D3D; Standard), 0 = alt; nur LoC-Profil */
     int loc_vismap; /* W311 LOC-MISSION-RENDER: 1 = Sichtkarte (256x256-RT [0x300FF4], Dauer-Lock pBits [0x300D70]) im selben Bild per GPU-Rueckschrieb in den Xbox-Speicher (Gelaende-Zellen/Objektlisten lesen sie, Standard), 0 = alt (Karte leer -> nur Himmel); nur LoC-Profil */
     int loc_short3; /* W311 LOC-MISSION-RENDER: 1 = VB-Position SHORT3 (0x35, roh, w = 1) wie NV2A annehmen (LoC-Modelle: VTs, Cockpit, Objekte; Standard), 0 = alt (Draw verworfen, nodecl); nur LoC-Profil */
+    int loc_vdata_s; /* W342 LOC-DISPLAY: 1 = SetVertexData2s/4s in den IM-Pfad (UI-Rahmen, Felder, Kartenraster; Standard), 0 = alt (verworfen); nur LoC-Profil */
     int loc_nodummy; /* W297 LOC-MISSION: 1 = Draws in die Dummy-Farbflaeche (Schatten-Tiefenpass, Data=0) verwerfen statt in den Backbuffer (Standard), 0 = alt; nur LoC-Profil */
     int loc_bumpenv; /* W285 LOC-RENDER: 1 = PS-Texturmodus BUMPENVMAP wie PROJECT2D abtasten (Gelaende sichtbar, ohne Bump-Verschiebung; Standard), 0 = alt (Fallback, Vertexfarbe); nur LoC-Profil */
     int loc_psdump; /* W285 DIAG(LOC-RENDER): 1 = je LoC-Pixelshader Def-Woerter + erzeugtes HLSL nach <out>/locps_<handle>.txt (nur LoC-Profil) */
     int loc_shading; /* W285 LOC-RENDER: 1 = Shading-Pfad (Combiner-Emulation) im LoC-Profil ueberall wie shade_scope=1 (Standard; sonst nie, weil die Missions-Erkennung SB-Adressen liest), 0 = alt */
     int loc_rtuv; /* W285 LOC-RENDER: 1 = Shading-Pfad skaliert RT-Texturen nur bei Texel-UV (> 1.5) auf 1/Groesse, sonst normiert (Standard); 0 = immer 1/Groesse wie SB; nur LoC-Profil */
+    int loc_lookstat; /* DIAG(W358 LOC-LOOK): alle N Bilder Zustandszaehler je Draw (LOOKSTAT-Zeilen, max. 8 Bilder), 0 = aus; nur LoC */
+    int loc_texfilt; /* W358 LOC-LOOK: 1 = Shading-Pfad-Sampler mit LOD-Bias des Spiels (aufloesungskompensiert), MAXMIPLEVEL, MIN/MAG, Mips linear; 3 = volle Emulation inkl. MIP POINT/NONE (DIAG), 2 = wie 3 mit Roh-Bias (DIAG), 0 = alt (immer trilinear, kein Bias); nur LoC */
+    int loc_vsod0; /* W358 LOC-LOOK: 1 = Shading-Pfad nimmt bei P2-Vertexprogrammen (kind 2) oD0/oD1 aus dem Programm (Vertex-Licht der LoC-Modelle), 0 = alt (Eingangsfarbe); nur LoC-Profil */
     int loc_glow; /* W285 LOC-RENDER: 1 = Glow-Draws mit Backbuffer-Textur ueber den Shading-Pfad (Original-Komposition), 0 = alter Pfad (nur Szene); nur LoC-Profil */
     int loc_census_draws; /* W285 DIAG(LOC-RENDER): ... und nur, wenn das Vorbild mindestens so viele Draws hatte (Standard 300 = 3D-Szene) */
     int vsh_color; /* FIX(WASH,W50): 1 = IM-Diffuse ohne Color-Call aus oD0-Quellregister des VSH (statt stale Slot 3), 0 = alt */
@@ -446,6 +490,8 @@ typedef struct {
     int interp_rawzc; /* FIX(W284 INTERP-RAWCHG): exakte Welt-Draws zwischen gelerpten Nachbarn per Kamera-Pruefung lerpen: 1 = "rawchg" (gleiche Signatur, neue Eingangsdaten): passt M_A^-1*M_B zur Kamera (Objekt ruht, Gitter verschoben) -> Matrix-Lerp der Tick-N-Vertices, passt M_A^-1*(T(d)*M_B) (fester Versatz d) -> Vertex-Lerp; 2 = zusaetzlich "nomatch" mit Kandidat gleicher Signatur ohne Vertexzahl (Welt-Test); 0 = alt */
     int interp_streak; /* FIX(W294 LINE-STREAK): Bits 1 = Kamerabewegung fuer interp_rawzc/interp_zcons nur aus gelerpten Draws mit verschiedenen, nicht affinen Matrizen (P2-/gleiche Matrizen tragen keine Kamera, D = I); 2 = interp_rawzc auch fuer Welt-Draws ohne Tiefenpuffer (Kamera je Renderziel); 4 = "rawlerp" mit Gitter-Versatz (x/z einheitlich >= 0,5, Hoehe frei; Boden-/Meeresgitter neu gelegt) und Welt-Test -> Matrix-Lerp der Tick-N-Vertices wie der rawchg-Nachbar; Standard 7, 0 = alt */
     int interp_pair; /* W317 INTERP-PAIR: Bits 1 = robuste Zuordnung der Welt-Draws (Kamera-korrigierte Kosten, global eindeutig; bisher exakte ohne Partner mit der Kamera bewegen), 2 = Mehrpass-Gruppen folgen ihrem Leiter (gleiche Matrix N-1); Standard 0 (W317: nicht klar besser, Option) */
+    int interp_selfcopy; /* W347 GHOST: 1 = Selbstkopie eines Render-Ziels (W106-Ring, z. B. Hauptmonitor-RT 512^2) als Interp-Op -> Zwischenbilder sampeln den gelerpten Stand statt der Tick-Kopie (sonst Geisterbild beim Drehen), 0 = alt; nur SB (LoC: loc_interp_copy) */
+    int interp_bbcam; /* W347 GHOST: 1 = exakt gebliebene rawchg-Billboards (Baeume, je Tick zur Kamera gedreht) per Kamera-Drehpunkt paaren und vertex-lerpen (sonst stehen sie beim Drehen im Tick-Takt = Doppelkanten), 0 = alt; nur SB */
     int interp_pair_diag; /* W317 DIAG: Zensus der Fehlpaarungen (Zeile INTERP pairz je INTERP stat; 2 = auch Einzelzeilen INTERP pzd) */
     float interp_pair_thr; /* W317: Kostengrenze Welt-Partner (NDC, Kamera-korrigiert; Standard 0,004) */
     float interp_pair_mov; /* W317: Kostengrenze bewegter Partner (NDC, nur eindeutig; Standard 0,1) */
@@ -553,6 +599,8 @@ typedef struct {
     int vis_query_all; /* W117 vis_query: 0 = nur Sonnentests 0x3FFE/0x3FFF echt, 2 = Sonne + Licht-Flares 0x3EFE..0x3FFD (W304 FLARE-OCCL, Standard), 1 = alle Indizes (zusaetzlich Objekt-Occlusion-Culling FUN_00025580/00025840) */
     int vis_ztest;     /* W304 FLARE-OCCL: 1 = Punkt-Draws im Sichtbarkeitstest (Sonne, Flares; P2-Pixel ins Welt-RT) mit dem Tiefentest des Spiels wie NV2A (Standard), 0 = alt (RHW ohne Tiefentest -> verdeckt zaehlt als sichtbar) */
     int p2_ztest;      /* W313 P2-ZTEST: 1 = P2-Draws (VS-Programm Clip/Tail, Bildschirm-Pixel rhw=1) in Spiel-RTs mit Tiefenflaeche bekommen den Tiefenzustand des Spiels (ZENABLE-Spiegel, ZFUNC, Tiefenmaske) wie die NV2A; 0 = alt (RHW ohne Tiefentest) */
+    int line_scale;    /* FIX(ISSUE-EMP,W352): 1 = Linien-Primitive in Spiel-RTs mit Render-Skalierung (rt_scale/auto >= 1,5) per Geometry Shader 1 Xbox-Pixel breit wie die NV2A (Funken-/Fallen-/EMP-Linien, Monitor-Stoerzeilen); 0 = alt (1 physisches Pixel, bei Faktor N nur ~1/N Deckung) */
+    int line_diag;     /* DIAG(ISSUE-EMP,W352): N = Linien-/Punkt-Draws (Begin LINELIST/LOOP/STRIP/POINTLIST) in der Kampagnen-Mission: erste N einzeln (LINED d), Summen je 300 Bilder (LINED sum) mit Laenge und Pixeln nach Tiefentest */
     int p2z_diag;      /* DIAG(P2-ZTEST,W313): 1 = Zensus der Draws in Spiel-RTs je Zustand (P2Z-Zeilen: VS/PS/Textur/Ziel/zen/zf/dm/Blend, z-Bereich, Pixel nach Tiefentest) */
     int vis_diag;      /* DIAG(SHADE-M2,W117): 1 = VISQ-Zeilen (Ergebnis je Index, erste 64 + je 2000 Abfragen) */
     int bloom_diag; /* DIAG(SHADE-BLOOM,W112): 1 = Bloom-Kette in Diag-Bildern der Kampagnen-Mission (Modus 4) Draw fuer Draw protokollieren + RTs roh dumpen (BLOOM-Zeilen, shots/bl_*.bin), 2 = jede Mission (auch Titel-Demo) */
@@ -597,6 +645,7 @@ typedef struct {
     char overlay_save_path[512]; /* "Als Standard speichern": Ziel (leer = user.cfg neben sb_native.cfg bzw. SB_USER_CFG) */
     /* W188 GAME-MENU (sb_overlay.c, sb_pause.c, sb_feedback.c) */
     int game_menu;              /* 1 = ESC oeffnet zuerst das Spielmenue (Weiter/Einstellungen/Fotomodus/Feedback/Beenden), 0 = ESC direkt in die Einstellungen (W118) */
+    int pause_net;              /* W357 LOC-PAUSE-NET: 0 = aus (Pause wie bisher), 1 = im LoC-Netzspiel kein Anhalten (Standard), 2 = TEST: immer wie im Netzspiel */
     int menu_pause;             /* 1 = offenes ESC-Menue pausiert das Spiel (Spieler-Standard), 0 = Spiel laeuft dahinter weiter (Live-Vorschau) */
     int esc_debug;              /* W291 ESC-REWORK: 1 = ESC-Gruppe "Debug" (Drahtgitter, Vaporwave, Sonnentest, Vergleich B) zeigen; der Launcher setzt es je Start aus alpha_tools, Standard 0 */
     int pause_live;             /* W193 PAUSE-LIVE: 1 = Standbild der Pause aus der FPS-INTERP-Aufzeichnung mit den aktuellen Einstellungen neu zeichnen, 0 = W188 (Kopie) */

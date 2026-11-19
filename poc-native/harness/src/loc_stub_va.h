@@ -49,4 +49,6 @@
 #define LOC_VA_XSetProcessQuantumLength 0x0012A532u /* 1 Arg. */
 #define LOC_VA_XNetStartup 0x00170B2Fu /* 1 Arg. */
 #define LOC_VA_WSAStartup 0x00170B46u /* 2 Arg. */
-#define LOC_N_STUBS 47u
+#define LOC_VA_D3DDevice_SetVertexData2s 0x00185BC0u /* 3 Arg. */
+#define LOC_VA_D3DDevice_SetVertexData4s 0x00185C00u /* 5 Arg. */
+#define LOC_N_STUBS 49u

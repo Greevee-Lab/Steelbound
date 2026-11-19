@@ -19,6 +19,7 @@
 #define IM_SLOTS 16
 #define IM_MAX_VERTS 65536
 unsigned g_im_draws, g_im_vdata, g_im_prim_hist[16];
+ID3D11GeometryShader *g_line_gs_rec; /* FIX(ISSUE-EMP,W352) line_scale: GS des aufgezeichneten Draws */
 unsigned g_im_tris, g_im_rhw, g_im_3d;
 static int g_im_p2zt; /* W313 P2-ZTEST: aktueller Draw mit Tiefentest (Diag) */
 /* DIAG(CAMD,W269): Zaehler fuer diag_cam_tick (nur mit cam_diag > 0) */
@@ -889,6 +890,38 @@ static void imcb_bind(int slot)
 }
 
 static void sb_im_submit_body(void);
+/* DIAG(ISSUE-GEO, Steelbound#40): Draw-Daten fuer heli_draw_diag (hooks_d3d.c) sammeln:
+ * Modellraum-Huelle der Rohpositionen, Textur/PS, Farbe/UV der ersten 4 Vertices
+ * (fast: umgewandelt; sonst Slots v2/v3). Nur mit [log] heli_call > 0 gerufen. */
+extern void heli_draw_diag(const float *mvp, unsigned n, unsigned vs);
+extern float g_heli_bb[6], g_heli_cu[4][6];
+extern unsigned g_heli_xp, g_heli_ps;
+extern int g_heli_fast;
+static void heli_diag_submit(const float *mvp, const float *pb, size_t pst, unsigned n, int fast, unsigned vs)
+{
+    unsigned q;
+    int c;
+    g_heli_bb[0] = g_heli_bb[1] = g_heli_bb[2] = 1e30f;
+    g_heli_bb[3] = g_heli_bb[4] = g_heli_bb[5] = -1e30f;
+    for (q = 0; q < n; q++) {
+        const float *pq = pb + (size_t)q * pst;
+        for (c = 0; c < 3; c++) {
+            if (pq[c] < g_heli_bb[c]) { g_heli_bb[c] = pq[c]; }
+            if (pq[c] > g_heli_bb[3 + c]) { g_heli_bb[3 + c] = pq[c]; }
+        }
+    }
+    g_heli_xp = sb_tex_xptr();
+    g_heli_ps = g_im_pshader;
+    g_heli_fast = fast;
+    for (q = 0; q < 4u && q < n; q++) {
+        const float *col = fast ? g_imf[q].col : g_im_buf[q][2];
+        g_heli_cu[q][0] = col[0]; g_heli_cu[q][1] = col[1]; g_heli_cu[q][2] = col[2]; g_heli_cu[q][3] = col[3];
+        g_heli_cu[q][4] = fast ? g_imf[q].uv[0] : g_im_buf[q][3][0];
+        g_heli_cu[q][5] = fast ? g_imf[q].uv[1] : g_im_buf[q][3][1];
+    }
+    heli_draw_diag(mvp, n, vs);
+}
+
 
 /* DIAG(IM-PERF,W99, im_fast=2): Selbstpruefung des schnellen Wegs gegen den
  * alten im selben Lauf. a) Dekodierung + Umwandlung: g_imf[i] gegen die
@@ -1184,6 +1217,7 @@ static void sb_im_submit_body(void)
     long long imq = 0; /* DIAG(IM-PERF,W99) */
     int fxr_on = 0, fxr_cls = 0; /* W133 REM-FX */
     int xw_on = 0; ID3D11RasterizerState *xw_saved = NULL; /* W240 FX-EXPERIMENTAL: Drahtgitter */
+    ID3D11GeometryShader *lgs = NULL; /* FIX(ISSUE-EMP,W352) line_scale: Linien-Band in skalierten Spiel-RTs */
 #define IMPOS(i) (pb + (size_t)(i) * pst)
 #define IMP_MARK(k) do { if (RQP_FULL) { long long t_ = rq_qpc(); g_imp_q[k] += t_ - imq; imq = t_; } } while (0)
     if (!g_dev || n == 0) {
@@ -1350,6 +1384,12 @@ static void sb_im_submit_body(void)
         }
         rhw = 1;
     } else if (vsh_em == 2) {
+        if (g_cfg.heli_call > 0) { /* DIAG(ISSUE-GEO): Teile am Hubschrauber (P2-Matrix, transponiert wie m3d_vs_mvp_read) */
+            float hm[16];
+            int r_, c_;
+            for (r_ = 0; r_ < 4; r_++) { for (c_ = 0; c_ < 4; c_++) { hm[r_ * 4 + c_] = vsh_mat[c_][r_]; } }
+            heli_diag_submit(hm, pb, pst, n, fast, g_im_shader);
+        }
         if (rtt_active()) {
             /* RT: Xbox-exakte Screenspace-Pixel (Tail mit Spiel-Viewport). */
             float vpw = (float)(g_vp_game.w ? g_vp_game.w : 640);
@@ -1494,6 +1534,9 @@ static void sb_im_submit_body(void)
          * skaliert). Hor+: x-Spalte mit k (4:3-Basis, VS-Proj enthaelt
          * 4:3-Aspect 1.8107); ins RT 1:1 ohne Hor+ (W23-Regel). */
         if (g_cfg.m3d_vs_mvp && m3d_vs_mvp_read(tmp)) {
+            if (g_cfg.heli_call > 0) { /* DIAG(ISSUE-GEO): Teile am Hubschrauber (3D-Pfad: c98..c101, Rohpositionen) */
+                heli_diag_submit(tmp, pb, pst, n, fast, g_im_shader | 0x80000000u);
+            }
             if (!rtt_active()) {
                 float oa = (float)g_bb_w / (float)(g_bb_h ? g_bb_h : 1);
                 float vk = g_game_disp_aspect / (oa > 0.0f ? oa : 1.0f); /* W326: SB 4:3 */
@@ -1918,7 +1961,7 @@ static void sb_im_submit_body(void)
         /* W315 TEX-WHITE-AMD: Stufe 0 belegt, aber keine SRV -> zaehlen (Textur-Gesundheit);
          * tex_missing_mark=1 (DIAG) bindet stattdessen eine Markierungsfarbe je Grund. */
         if (!srv && sb_tex_xptr() && !ps_stage0_none()) {
-            srv = sb_th_missing(sb_tex_why(), g_present_no);
+            srv = sb_th_missing(sb_tex_why(), g_present_no, sb_tex_xptr());
             has_tex = srv ? 1u : 0u;
             if (srv) { /* DIAG(ISSUE-TEX, nur mit tex_missing_mark): markierte Stufe 0 einmal je xptr ins Log */
                 static unsigned mx0[64], mn0;
@@ -1993,6 +2036,7 @@ static void sb_im_submit_body(void)
             if (g_cfg.fx_alphakill < 2 && !(scn == 0x2Cu && mlp == 1u)) { ak = 0; }
             if (ak & 4u) { has_tex |= 0x1000000u; ip_tex = has_tex; }
         }
+        if (g_cfg.loc_lookstat > 0) { loc_render_lookstat(rhw, has_tex); } /* DIAG(W358 LOC-LOOK) */
         if (fxr_cls) { unsigned fb = fxr_draw_bits(); if (fb) { has_tex |= fb; ip_tex = has_tex; } } /* W133 REM-FX: weicher Partikel */
         memcpy(imcbd, mvp, sizeof mvp);
         imcbd[16] = has_tex;
@@ -2277,6 +2321,8 @@ static void sb_im_submit_body(void)
     if (self_clip) { sb_selfclip_begin(); }
     if (g_cfg.fx_wireframe) { xw_on = sb_xfx_wire_begin(rhw, &xw_saved); } /* W240: vor der FPS-INTERP-Aufzeichnung (ip_snap liest den RS) */
     IMP_MARK(IMP_ST); /* DIAG(IM-PERF,W99): Zustaende + Diagnosen */
+    lgs = sb_line_gs_for_draw(topo, g_rq_active); /* FIX(ISSUE-EMP,W352) */
+    g_line_gs_rec = lgs; /* W352: Zwischenbilder zeichnen die Linie gleich breit */
     if (g_ip_recording) { /* FPS-INTERP (W69): Draw samt Zustand aufzeichnen */
         long long q0 = RQP_ON ? rq_qpc() : 0;
         g_phud_in_cap = 1; /* W125: Zwischenbilder hier stecken in cap */
@@ -2301,20 +2347,24 @@ static void sb_im_submit_body(void)
     { long long q0 = RQP_ON ? rq_qpc() : 0;
     int fxq = g_cfg.fx_diag ? fx_draw_pre(out, nout, rhw, g_im_prim, mvp) : 0; /* DIAG(FX-ORIG,W90) */
     if (g_cfg.p2z_diag) { p2z_note(out, nout, rhw, vsh_em, g_im_prim, g_im_p2zt, mvp); } /* DIAG(P2-ZTEST,W313) */
+    if (g_cfg.line_diag) { static const float z4[4]; lined_note(out, nout, rhw, vsh_em, g_im_prim, g_im_p2zt, fast ? z4 : g_im_buf[0][2], fast ? z4 : g_im_buf[0][3], g_im_col_slot, g_rq_active); } /* DIAG(ISSUE-EMP,W352) */
     if (g_cfg.bloom_diag) { bloom_diag_pre(out, nout, n, rhw, g_im_prim, rq_srv0); } /* DIAG(SHADE-BLOOM,W112) */
     { extern int g_visq_on; if (g_visq_on) { extern void sb_visq_draw_note(void); sb_visq_draw_note(); } } /* FIX(SHADE-M2,W117) vis_query: Draws im Sichtbarkeitstest */
     if (g_cfg.vis_diag) { extern void sb_visq_draw_diag(const im_vertex_t *v, unsigned n, int rhw, unsigned prim, unsigned tex); sb_visq_draw_diag(ov, n, rhw, g_im_prim, ip_tex); } /* DIAG(FLARE-OCCL,W304) */
     if (fxr_cls) { fxr_bind(); } else if (fxr_on) { fxr_note_other(); } /* W133 REM-FX: Tiefen-Kopie, Effekt-PS */
+    if (lgs) { ID3D11DeviceContext_GSSetShader(g_ctx, lgs, NULL, 0); g_ls_draws++; } /* FIX(ISSUE-EMP,W352) */
     if (g_rq_active) { rq_draw(ip_vb ? ip_vb : g_im_vb, nout, vb_start, ibf); } /* RENDER-QA; W264 ibf */
     else if (ibf != 0xFFFFFFFFu) { /* W264 DRAW-OPT2: Strip/Fan/Quad ueber festen Indexpuffer */
         sb_im_ib_bind(g_ctx);
         WD_CALL("draw_im", g_ctx, ID3D11DeviceContext_DrawIndexed(g_ctx, nout, ibf, (INT)vb_start));
     }
     else { WD_CALL("draw_im", g_ctx, ID3D11DeviceContext_Draw(g_ctx, nout, vb_start)); }
+    if (lgs) { ID3D11DeviceContext_GSSetShader(g_ctx, NULL, NULL, 0); g_line_gs_rec = NULL; } /* FIX(ISSUE-EMP,W352): Spiel-Draws sonst ohne GS */
     if (fxr_cls) { fxr_after(fast ? ov : out, fast ? n : nout); } /* W133 REM-FX: Glut/Licht, Energie */
     if (g_cfg.bloom_diag) { bloom_diag_post(); } /* DIAG(SHADE-BLOOM,W112) */
     fx_draw_post(fxq); /* DIAG(FX-ORIG,W90) */
     if (g_cfg.p2z_diag) { p2z_post(); } /* DIAG(P2-ZTEST,W313) */
+    if (g_cfg.line_diag) { lined_post(); } /* DIAG(ISSUE-EMP,W352) */
     if (RQP_ON) { g_rqp_q[RQP_DRAW] += rq_qpc() - q0; } } /* DIAG(SHADE-PERF,W80): auch alter Pfad */
     if (g_cfg.sbar_probe[0] && m3d_on) { sbar_probe_after(rhw, nout); } /* DIAG(STARTSEQ-BARS,W98) */
     if (xw_on) { sb_xfx_wire_end(xw_saved); } /* W240 */

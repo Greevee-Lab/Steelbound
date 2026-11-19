@@ -14,6 +14,10 @@
 #ifndef SB_EDITION_COMMUNITY
 #define SB_EDITION_COMMUNITY 0
 #endif
+/* W353 LOC-DURCHSTICH: privates Testpaket mit LoC (CMake -DSB_LOC_PLAY=ON, nur community; Standard 0). */
+#ifndef SB_LOC_PLAY
+#define SB_LOC_PLAY 0
+#endif
 
 #if SB_EDITION_COMMUNITY
 #define SB_EDITION_NAME "community"

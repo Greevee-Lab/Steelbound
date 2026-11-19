@@ -868,6 +868,8 @@ static void pf_present_tick(unsigned n)
                 md = *(volatile unsigned *)(uintptr_t)SBA(0x2EEA34u); /* Ladezaehler (W225/W232) */
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
             if (sc != 0x2Cu || ml != 1u || md != (unsigned)g_cfg.pf_mode) { return; }
+        } else if (g_sba_loc) { /* W340 LOC-FRAMES: LoC-Missionsbild (Lockstep aktiv + Render-Auftrag, W323) */
+            if (!loc_render_interp_mission()) { return; }
         } else if (!sb_in_mission()) { return; } /* W232: Spielermission ohne Titel-Demo (statt Ladezaehler == 4) */
         pf_m0 = n;
         pf_next = n + (unsigned)(g_cfg.pf_from > 0 ? g_cfg.pf_from : 0);
@@ -949,6 +951,7 @@ dump:
     }
 }
 
+void sb_render_snap_tick(void); /* W357 */
 static void sb_render_present_body(unsigned flags);
 void sb_render_present(unsigned flags)
 {
@@ -980,6 +983,7 @@ static void sb_render_present_body(unsigned flags)
         if (pdl) { sb_ctx_enter(); }
         sb_ovl_present_begin(n_present);
         if (pdl) { sb_ctx_leave(); }
+        sb_render_snap_tick(); /* W357 LOC-PAUSE-NET: Bild ohne Pause (nur bei Wunsch, sonst sofort zurueck) */
     }
     if (g_cfg.vis_query_live && g_cfg.shading) { extern void xdk_visq_live(void); xdk_visq_live(); } /* FIX(SHADE-FX,W121): Shading per ESC-Menue */
     sb_shfx_shading_watch(); /* FIX(SHADE-FX,W121) shade_live_reset: Bloom-Akkumulatoren beim Pfadwechsel leeren */
@@ -992,6 +996,7 @@ static void sb_render_present_body(unsigned flags)
     if (g_cfg.im_fast == 2) { im_fast_check_present(n_present); } /* DIAG(IM-PERF,W99) */
     if (g_cfg.fx_diag) { sb_ctx_enter(); fx_present(); sb_ctx_leave(); } /* DIAG(FX-ORIG,W90) */
     if (g_cfg.p2z_diag) { sb_ctx_enter(); p2z_present(); sb_ctx_leave(); } /* DIAG(P2-ZTEST,W313) */
+    if (g_cfg.line_diag) { sb_ctx_enter(); lined_present(); sb_ctx_leave(); } /* DIAG(ISSUE-EMP,W352) */
     if (g_cfg.mfx_diag || g_cfg.mfx_shots) { mfx_present(); } /* DIAG(MONITOR-FX,W105) */
     if (g_cfg.shot_mission || g_cfg.shfx_diag || g_cfg.shfx_ab) { sb_shfx_present(n_present); } /* DIAG(SHADE-FX,W121) */
     if (g_cfg.fxr_diag) { fxr_present(n_present); } /* DIAG(REM-FX,W133) */
@@ -1116,6 +1121,7 @@ static void sb_render_present_body(unsigned flags)
     if (g_cfg.bloom_diag) { bloom_diag_present(n_present); } /* DIAG(SHADE-BLOOM,W112) */
     if (g_cfg.d3d_debug || g_cfg.interp_shots_mrel > 0 || g_cfg.interp_shots_scene[0]) { sb_d3ddbg_present(n_present); } /* DIAG(AMD-ARTIFACTS,W302; W315 Szene) */
     sb_th_present(n_present); /* W315 Textur-Gesundheit: VRAM alle 1800 Presents */
+    sb_tex_hud_tick(); /* FIX(HUDFREEZE,W345): Anzeige-Texturen beobachtet halten */
     sb_ctx_leave();
     /* M2c: alle 100 Presents (fps120_probe nutzt "IM draws="). */
     if ((n_present % 100) == 0) {
@@ -1775,6 +1781,7 @@ void sb_render_pause_end(void)
 }
 
 static int sb_write_jpg(const char *path, const unsigned char *bgr, unsigned w, unsigned h);
+static int sb_write_jpg_w(const WCHAR *wpath, const unsigned char *bgr, unsigned w, unsigned h); /* W357 */
 /* W188 GAME-MENU (Feedback): Spielbild der Pause (nie der Desktop) als JPG
  * nach path. Unter ctx_lock aufrufen. 1 = geschrieben. */
 int sb_render_pause_jpg(const char *path, unsigned *ow, unsigned *oh)
@@ -1825,6 +1832,193 @@ int sb_render_pause_jpg(const char *path, unsigned *ow, unsigned *oh)
     if (ow) { *ow = dd.Width; }
     if (oh) { *oh = dd.Height; }
     return ok;
+}
+
+/* W357 LOC-PAUSE-NET: Spielbild ohne Pause als JPG (Netzspiel: F11-Bild, Schnell-Screenshot).
+ * sb_render_snap_async (Spiel-Thread, Overlay) merkt den Wunsch; sb_render_snap_tick (Spiel-Thread, je Present
+ * vor dem Overlay-Zeichnen) kopiert das Spielbild (g_rtv, ohne Menue) auf der GPU in eine Staging-Textur, liest es
+ * in einem spaeteren Bild ohne Warten (DO_NOT_WAIT, hoechstens 8 Bilder, danach blockierend) und uebergibt die
+ * Pixel einem eigenen Thread (Wasserzeichen, JPEG via WIC). Kosten im Spiel-Thread: eine Kopie + memcpy der Zeilen.
+ * Nur das Client-Bild, nie der Desktop. */
+static ID3D11Texture2D *g_snap_stg;
+static int g_snap_st, g_snap_wait;       /* 0 frei, 1 gewuenscht, 2 Kopie unterwegs */
+static WCHAR g_snap_path[800];
+static volatile LONG g_snap_busy;        /* 1 = Wunsch bis Datei fertig */
+static volatile LONG g_snap_res;         /* 0 offen, 1 ok, -1 Fehler (einmal geliefert) */
+static unsigned g_snap_w, g_snap_h;
+static double g_snap_ms;                 /* Spiel-Thread-Kosten des Lesens (ms) */
+typedef struct {
+    unsigned char *px; /* RGBA/BGRA, dicht */
+    unsigned w, h;
+    int bgra;
+} sb_snap_job_t;
+
+static DWORD WINAPI sb_snap_thread(LPVOID arg)
+{
+    sb_snap_job_t *j = (sb_snap_job_t *)arg;
+    unsigned char *bgr = (unsigned char *)malloc((size_t)j->w * j->h * 3u);
+    int ok = 0;
+    if (bgr) {
+        size_t i, n = (size_t)j->w * j->h;
+        for (i = 0; i < n; i++) {
+            const unsigned char *s = j->px + i * 4u;
+            bgr[i * 3 + 0] = s[j->bgra ? 0 : 2];
+            bgr[i * 3 + 1] = s[1];
+            bgr[i * 3 + 2] = s[j->bgra ? 2 : 0];
+        }
+        (void)sb_wm_blend_bgr(bgr, j->w, j->h); /* W219 WATERMARK wie im Feedback-Bild */
+        ok = sb_write_jpg_w(g_snap_path, bgr, j->w, j->h);
+        free(bgr);
+    }
+    g_snap_w = j->w;
+    g_snap_h = j->h;
+    free(j->px);
+    free(j);
+    InterlockedExchange(&g_snap_res, ok ? 1 : -1);
+    InterlockedExchange(&g_snap_busy, 0);
+    return 0;
+}
+
+static void sb_snap_fail(const char *why)
+{
+    HLOG_W("SNAP: %s", why);
+    g_snap_st = 0;
+    InterlockedExchange(&g_snap_res, -1);
+    InterlockedExchange(&g_snap_busy, 0);
+}
+
+/* path: utf8 = 1 UTF-8 (Fotoordner), 0 = ANSI wie sb_render_pause_jpg (Feedback-Ordner). 0 = belegt/ungueltig. */
+int sb_render_snap_async(const char *path, int utf8)
+{
+    if (!path || !g_dev) { return 0; }
+    if (InterlockedCompareExchange(&g_snap_busy, 1, 0) != 0) { return 0; }
+    if (!MultiByteToWideChar(utf8 ? CP_UTF8 : CP_ACP, 0, path, -1, g_snap_path, 800)) {
+        InterlockedExchange(&g_snap_busy, 0);
+        return 0;
+    }
+    InterlockedExchange(&g_snap_res, 0);
+    g_snap_st = 1;
+    return 1;
+}
+
+/* 0 = offen/nichts, 1 = gespeichert, -1 = Fehler (einmal geliefert). */
+int sb_render_snap_poll(unsigned *w, unsigned *h, double *ms)
+{
+    LONG r;
+    if (g_snap_busy) { return 0; }
+    r = InterlockedExchange(&g_snap_res, 0);
+    if (r && w) { *w = g_snap_w; }
+    if (r && h) { *h = g_snap_h; }
+    if (r && ms) { *ms = g_snap_ms; }
+    return (int)r;
+}
+
+void sb_render_snap_tick(void)
+{
+    if (!g_snap_st || !g_dev || !g_ctx) { return; }
+    sb_ctx_enter();
+    if (g_snap_st == 1) {
+        ID3D11Resource *res = NULL;
+        D3D11_TEXTURE2D_DESC dd;
+        if (g_rtv) { ID3D11RenderTargetView_GetResource(g_rtv, &res); }
+        if (!res) {
+            sb_ctx_leave();
+            sb_snap_fail("kein Spielbild");
+            return;
+        }
+        ID3D11Texture2D_GetDesc((ID3D11Texture2D *)res, &dd);
+        if (dd.Format != DXGI_FORMAT_R8G8B8A8_UNORM && dd.Format != DXGI_FORMAT_B8G8R8A8_UNORM &&
+            dd.Format != DXGI_FORMAT_B8G8R8X8_UNORM) {
+            ID3D11Resource_Release(res);
+            sb_ctx_leave();
+            sb_snap_fail("Bildformat nicht unterstuetzt");
+            return;
+        }
+        if (g_snap_stg) {
+            D3D11_TEXTURE2D_DESC od;
+            ID3D11Texture2D_GetDesc(g_snap_stg, &od);
+            if (od.Width != dd.Width || od.Height != dd.Height || od.Format != dd.Format) {
+                ID3D11Texture2D_Release(g_snap_stg);
+                g_snap_stg = NULL;
+            }
+        }
+        if (!g_snap_stg) {
+            dd.MipLevels = 1;
+            dd.ArraySize = 1;
+            dd.SampleDesc.Count = 1;
+            dd.SampleDesc.Quality = 0;
+            dd.Usage = D3D11_USAGE_STAGING;
+            dd.BindFlags = 0;
+            dd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            dd.MiscFlags = 0;
+            if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &dd, NULL, &g_snap_stg))) { g_snap_stg = NULL; }
+        }
+        if (!g_snap_stg) {
+            ID3D11Resource_Release(res);
+            sb_ctx_leave();
+            sb_snap_fail("keine Staging-Textur");
+            return;
+        }
+        ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_snap_stg, res);
+        ID3D11Resource_Release(res);
+        g_snap_st = 2;
+        g_snap_wait = 0;
+        sb_ctx_leave();
+        return;
+    }
+    {
+        D3D11_MAPPED_SUBRESOURCE map;
+        D3D11_TEXTURE2D_DESC dd;
+        LARGE_INTEGER q0, q1, qf;
+        HRESULT hr;
+        sb_snap_job_t *j;
+        unsigned y;
+        QueryPerformanceCounter(&q0);
+        hr = ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_snap_stg, 0, D3D11_MAP_READ,
+                                     ++g_snap_wait <= 8 ? D3D11_MAP_FLAG_DO_NOT_WAIT : 0, &map);
+        if (hr == DXGI_ERROR_WAS_STILL_DRAWING) {
+            sb_ctx_leave();
+            return;
+        }
+        if (FAILED(hr)) {
+            sb_ctx_leave();
+            sb_snap_fail("Lesen fehlgeschlagen");
+            return;
+        }
+        ID3D11Texture2D_GetDesc(g_snap_stg, &dd);
+        j = (sb_snap_job_t *)calloc(1, sizeof *j);
+        if (j) { j->px = (unsigned char *)malloc((size_t)dd.Width * dd.Height * 4u); }
+        if (!j || !j->px) {
+            ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_snap_stg, 0);
+            sb_ctx_leave();
+            if (j) { free(j); }
+            sb_snap_fail("kein Speicher");
+            return;
+        }
+        for (y = 0; y < dd.Height; y++) {
+            memcpy(j->px + (size_t)y * dd.Width * 4u, (const unsigned char *)map.pData + (size_t)y * map.RowPitch,
+                   (size_t)dd.Width * 4u);
+        }
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_snap_stg, 0);
+        sb_ctx_leave();
+        j->w = dd.Width;
+        j->h = dd.Height;
+        j->bgra = dd.Format != DXGI_FORMAT_R8G8B8A8_UNORM;
+        g_snap_st = 0;
+        QueryPerformanceCounter(&q1);
+        QueryPerformanceFrequency(&qf);
+        g_snap_ms = (double)(q1.QuadPart - q0.QuadPart) * 1000.0 / (double)qf.QuadPart;
+        {
+            HANDLE th = CreateThread(NULL, 0, sb_snap_thread, j, 0, NULL);
+            if (th) {
+                CloseHandle(th);
+            } else {
+                free(j->px);
+                free(j);
+                sb_snap_fail("kein Thread");
+            }
+        }
+    }
 }
 
 /* M2c: Device-Health (GPU-Fault? S_OK=gesund). */
@@ -2004,8 +2198,16 @@ unsigned sb_render_backbuffer_h(void)
  * Pfad: shot_<frame>.bmp im Arbeitsverzeichnis. */
 /* JPG via WIC (in Windows enthalten, keine Fremd-Lib): ~0,4 MB statt
  * ~11 MB BMP bei 2560x1080. bgr = 24-bit BGR, top-down. */
+static int sb_write_jpg_w(const WCHAR *wpath, const unsigned char *bgr, unsigned w, unsigned h);
 static int sb_write_jpg(const char *path, const unsigned char *bgr,
                         unsigned w, unsigned h)
+{
+    WCHAR wpath[MAX_PATH];
+    MultiByteToWideChar(CP_ACP, 0, path, -1, wpath, MAX_PATH);
+    return sb_write_jpg_w(wpath, bgr, w, h);
+}
+/* W357: Pfad als UTF-16 (Fotoordner ist UTF-8); sonst wie bisher. Auch aus einem eigenen Thread (COM MTA). */
+static int sb_write_jpg_w(const WCHAR *wpath, const unsigned char *bgr, unsigned w, unsigned h)
 {
     IWICImagingFactory *fac = NULL;
     IWICStream *st = NULL;
@@ -2013,10 +2215,8 @@ static int sb_write_jpg(const char *path, const unsigned char *bgr,
     IWICBitmapFrameEncode *fr = NULL;
     IPropertyBag2 *props = NULL;
     WICPixelFormatGUID pf = GUID_WICPixelFormat24bppBGR;
-    WCHAR wpath[MAX_PATH];
     HRESULT hr;
     int ok = 0;
-    MultiByteToWideChar(CP_ACP, 0, path, -1, wpath, MAX_PATH);
     CoInitializeEx(NULL, COINIT_MULTITHREADED); /* S_FALSE/CHANGED_MODE ok */
     hr = CoCreateInstance(&CLSID_WICImagingFactory, NULL,
                           CLSCTX_INPROC_SERVER, &IID_IWICImagingFactory,

@@ -31,6 +31,7 @@
 #define COBJMACROS
 #include "render_int.h"
 #include "sb_texhealth.h"
+#include "sb_state.h" /* W360: sb_in_mission */
 #include <dxgi1_4.h>
 
 #define TH_NFAIL 8
@@ -132,8 +133,70 @@ ID3D11ShaderResourceView *sb_th_mark(unsigned why)
     return th_mark_srv(why == 2u || why == 12u ? 0 : (why == 7u || why == 9u) ? 1 : 2);
 }
 
-ID3D11ShaderResourceView *sb_th_missing(unsigned why, unsigned present)
+/* W360 ISSUE-47-48 (Mission 23: weisse, untexturierte Geometrie bzw. fast weisser Hauptmonitor,
+ * nicht nachgestellt): Ein F11-Paket soll die Ursache eindeutig zeigen, nur Zahlen.
+ *  - Stufen 1..3 ohne SRV wurden bisher nur mit tex_missing_mark sichtbar (im Shading-Pfad T = 1,
+ *    z. B. Licht-/Detailstufe -> Flaeche zu hell); jetzt immer gezaehlt wie Stufe 0.
+ *  - Die letzten 8 betroffenen Texturen (Stufe, Kopfadresse, Formatwort +0xC, Groessenwort +0x10,
+ *    Grund, Anzahl, erstes/letztes Bild) und das letzte betroffene Bild gegen "jetzt": zeigt, ob
+ *    beim Druck auf F11 gerade Draws ohne Textur liefen.
+ *  - Sonnenblendung des Spiels (W337, [0x356D58], hebt das Umgebungslicht des Hauptpasses um
+ *    [0x3514D4] * Blendung): jetzt/hoechster Wert, Bilder mit Blendung >= 0,5, vis_ztest. Ein
+ *    ganz weisser Hauptmonitor bei Blendung ~0 ist damit keine Blendung.
+ * Nur Zaehler/Lesen, Bild bitgleich. */
+#define TH_NREC 8
+typedef struct {
+    unsigned xptr, fmtw, sizew, why, stage, n, first, last;
+} th_rec_t;
+static th_rec_t g_th_rec[TH_NREC];
+static unsigned g_th_rec_next, g_th_miss_last_f;
+static unsigned g_th_smiss_total, g_th_smiss_frames, g_th_smiss_max, g_th_smiss_max_f, g_th_smiss_cur, g_th_smiss_curf;
+static unsigned g_th_now_f;
+static float g_th_gl_now, g_th_gl_max, g_th_gl_gain;
+static unsigned g_th_gl_max_f, g_th_gl_frames, g_th_gl_last_f;
+
+static void th_note(unsigned stage, unsigned xptr, unsigned why, unsigned present)
 {
+    unsigned i;
+    th_rec_t *r;
+    g_th_miss_last_f = present;
+    for (i = 0; i < TH_NREC; i++) {
+        r = &g_th_rec[i];
+        if (r->n && r->xptr == xptr && r->stage == stage) {
+            r->n++;
+            r->last = present;
+            r->why = why;
+            return;
+        }
+    }
+    r = &g_th_rec[g_th_rec_next++ % TH_NREC];
+    r->xptr = xptr; r->stage = stage; r->why = why; r->n = 1; r->first = present; r->last = present;
+    r->fmtw = 0; r->sizew = 0;
+    if (xptr >= 0x10000u) {
+        __try {
+            r->fmtw = *(volatile unsigned *)(uintptr_t)(xptr + 0xCu);
+            r->sizew = *(volatile unsigned *)(uintptr_t)(xptr + 0x10u);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { r->fmtw = 0; r->sizew = 0; }
+    }
+}
+
+ID3D11ShaderResourceView *sb_th_stage_missing(unsigned stage, unsigned why, unsigned xptr, unsigned present)
+{
+    g_th_smiss_total++;
+    if (present != g_th_smiss_curf) {
+        g_th_smiss_curf = present;
+        g_th_smiss_cur = 0;
+        g_th_smiss_frames++;
+    }
+    if (++g_th_smiss_cur > g_th_smiss_max) { g_th_smiss_max = g_th_smiss_cur; g_th_smiss_max_f = present; }
+    th_note(stage, xptr, why, present);
+    if (!g_cfg.tex_missing_mark) { return NULL; }
+    return sb_th_mark(why);
+}
+
+ID3D11ShaderResourceView *sb_th_missing(unsigned why, unsigned present, unsigned xptr)
+{
+    th_note(0u, xptr, why, present); /* W360 */
     g_th_miss_total++;
     g_th_miss_why[why < 16u ? why : 15u]++;
     if (present != g_th_miss_curf) {
@@ -191,6 +254,20 @@ void sb_th_device(ID3D11Device *dev, int driver_cmdlists, int warp)
 
 void sb_th_present(unsigned present)
 {
+    g_th_now_f = present;
+    if (!g_sba_loc && sb_in_mission()) { /* W360: Sonnenblendung des Spiels (nur SB, nur Mission) */
+        float gl = 0.0f, gn = 0.0f;
+        __try {
+            gl = *(volatile float *)(uintptr_t)SBA(0x356D58u);
+            gn = *(volatile float *)(uintptr_t)SBA(0x3514D4u);
+        } __except (EXCEPTION_EXECUTE_HANDLER) { gl = 0.0f; gn = 0.0f; }
+        if (!(gl >= 0.0f && gl <= 16.0f)) { gl = 0.0f; } /* NaN/Unsinn */
+        if (!(gn >= -16.0f && gn <= 16.0f)) { gn = 0.0f; }
+        g_th_gl_now = gl;
+        if (gl > g_th_gl_max) { g_th_gl_max = gl; g_th_gl_max_f = present; g_th_gl_gain = gn; }
+        if (gl >= 0.5f) { g_th_gl_frames++; }
+        if (gl > 0.0f) { g_th_gl_last_f = present; }
+    }
     if (present - g_th_vram_last < 1800u) { return; }
     g_th_vram_last = present;
     th_vram_query();
@@ -263,14 +340,43 @@ void sb_th_format(char *o, size_t cap, int live)
         if (th_why_name(w)) { _snprintf_s(o + u, cap - u, _TRUNCATE, " %s=%u", th_why_name(w), g_th_miss_why[w]); }
         else { _snprintf_s(o + u, cap - u, _TRUNCATE, " why%u=%u", w, g_th_miss_why[w]); }
     }
+    { /* W360 ISSUE-47-48: Stufen 1..3, letzte betroffene Texturen, Sonnenblendung (nur Zahlen) */
+        unsigned k, n = 0;
+        u = strlen(o);
+        _snprintf_s(o + u, cap - u, _TRUNCATE,
+                    "\r\nstage 1-3 draws without srv (W360): %u in %u frames, peak %u/frame (present %u)\r\n"
+                    "last draw without srv: present %u (now %u)\r\n"
+                    "textures without srv (W360, last 8):",
+                    g_th_smiss_total, g_th_smiss_frames, g_th_smiss_max, g_th_smiss_max_f, g_th_miss_last_f, g_th_now_f);
+        for (k = 0; k < TH_NREC; k++) { /* aelteste zuerst */
+            const th_rec_t *r = &g_th_rec[(g_th_rec_next + k) % TH_NREC];
+            if (!r->n) { continue; }
+            u = strlen(o);
+            _snprintf_s(o + u, cap - u, _TRUNCATE, "%s st%u x=0x%X fmt=0x%08X size=0x%08X why=%u n=%u f=%u-%u",
+                        n++ ? ";" : "", r->stage, r->xptr, r->fmtw, r->sizew, r->why, r->n, r->first, r->last);
+        }
+        u = strlen(o);
+        _snprintf_s(o + u, cap - u, _TRUNCATE,
+                    "%s\r\nsun glare (W360): vis_ztest=%d now=%.2f max=%.2f (present %u, ambient gain %.2f) "
+                    "frames>=0.5: %u last>0: present %u",
+                    n ? "" : " none", g_cfg.vis_ztest, g_th_gl_now, g_th_gl_max, g_th_gl_max_f, g_th_gl_gain,
+                    g_th_gl_frames, g_th_gl_last_f);
+    }
     u = strlen(o);
     _snprintf_s(o + u, cap - u, _TRUNCATE, "\r\nhd pack: %s\r\nmissing-texture marker: %s\r\n", hd[0] ? hd : "off",
                 g_cfg.tex_missing_mark ? "on (yellow = not uploaded yet, cyan = rejected, magenta = other)" : "off");
+    { /* W345 HUDFREEZE: Cockpit-Anzeige-Texturen (Beobachtung, Cache, Hash beim letzten Upload gegen Speicher) */
+        char hb[900];
+        hb[0] = '\0';
+        __try { sb_tex_hud_format(hb, sizeof hb); } __except (EXCEPTION_EXECUTE_HANDLER) { strcpy_s(hb, sizeof hb, "cockpit displays (W345): ?"); }
+        u = strlen(o);
+        _snprintf_s(o + u, cap - u, _TRUNCATE, "%s\r\n", hb);
+    }
 }
 
 void sb_th_log(const char *why)
 {
-    char b[2048], *p, *q;
+    char b[4096], *p, *q; /* W360: 3072 -> 4096 (neue Zeilen) */
     sb_th_format(b, sizeof b, 1);
     HLOG_I("TEXHEALTH Block (%s):", why ? why : "?");
     for (p = b; *p; p = q) {

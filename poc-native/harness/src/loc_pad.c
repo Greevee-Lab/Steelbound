@@ -18,6 +18,8 @@
 #include "hlog.h"
 #include "sb_profile.h"
 #include "loc_net.h"
+#include "input_mouse.h" /* W341: imouse_test_post, imouse_captured */
+#include "xdk_hooks.h" /* W341: hooks_frame_count */
 
 #include <string.h>
 #include <intrin.h>
@@ -193,4 +195,125 @@ int loc_pad_install(void)
     HLOG_I("LOCPAD: aktiv (Port %u; Ziffernblock 8/2/4/6=Steuerkreuz, SPACE/0=A, Backspace=B, Enter=START; Tasten %s)",
            LOC_PAD_PORT, g_cfg.loc_pad_keys ? "an" : "aus");
     return 1;
+}
+
+/* ---------------------------------------------------------------------------
+ * W341 LOC-MOUSE: Maus -> Zielhebel in der LoC-Mission.
+ * Befund: Das Fangen der Maus (input_mouse.c, Soll "mission") fragte sb_in_mission(); dessen SB-Adressen
+ * lesen im LoC-Profil die Null-Seite (0) -> nie gefangen -> Raw-Deltas 0, nur Maustasten wirkten.
+ * LoC-Mission fuer die Maus: Lockstep aktiv ([0x306830] != 0) und eigener VT abgesetzt: Spielerflags
+ * [0x5C5168 + spieler*0xAE8] ohne Bit 0x10000000 (spieler = [0x306A84]). Das Bit steht, solange der Spieler auf
+ * der Einsatzkarte auf das Absetzen wartet (FUN_0002E3D0, Zweig Startpunkt/Startzaehler); FUN_000BE470 (Absetzen)
+ * loescht die Flags (+0x98 = 0). Der Startpunkt [0x5C5A44] taugt nicht: er springt nach dem Absetzen auf -1
+ * (Lauf W341_A1). Auf der Karte, in Lobby/Briefing/Ergebnis bleibt die Maus frei (Menues unbeeinflusst). */
+#define LM_ACTIVE 0x306830u
+#define LM_PLAYER 0x306A84u
+#define LM_FLAGS0 0x5C5168u
+#define LM_PSTRIDE 0xAE8u
+#define LM_ON_MAP 0x10000000u
+
+static volatile LONG s_lm_mission = -1; /* letzter Wert (Log bei Wechsel) */
+
+int loc_mouse_mission(void)
+{
+    u32 act = 0, pl = 0xFFFFFFFFu, fl = LM_ON_MAP;
+    int m;
+    if (!g_sba_loc) {
+        return 0;
+    }
+    __try {
+        act = *(volatile const u32 *)(uintptr_t)LM_ACTIVE;
+        if (act) {
+            pl = *(volatile const u32 *)(uintptr_t)LM_PLAYER;
+            if (pl < 10u) {
+                fl = *(volatile const u32 *)(uintptr_t)(LM_FLAGS0 + pl * LM_PSTRIDE);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        act = 0;
+    }
+    m = act != 0u && pl < 10u && !(fl & LM_ON_MAP);
+    if ((LONG)m != s_lm_mission) {
+        InterlockedExchange(&s_lm_mission, (LONG)m);
+        HLOG_I("LOCMOUSE: Zielen per Maus %s (aktiv=0x%X spieler=%u flags=0x%08X f=%u)", m ? "an" : "aus", act, pl,
+               fl, hooks_frame_count());
+    }
+    return m;
+}
+
+/* Test-Hook: Pseudo-Tasten der Testfolge (loc_replay_tick/loc_steps) -> Nachrichten ans eigene Fenster.
+ * 330/331 = Maus +x/-x, 332/333 = +y/-y (je Poll LM_STEP Counts, wie ein Raw-Input-Paket),
+ * 334/335 = linke/rechte Taste gehalten (WM_xBUTTONDOWN/UP an den Flanken), 336 = Bild (naechstes Present).
+ * Kein SendInput, kein Fokus/Vordergrund; der logische Fokus kommt ueber IMOUSE_MSG_TEST_FOCUS. */
+#define LM_STEP 16
+void loc_mouse_test_drive(void)
+{
+    static int focus_sent, lb, rb, shot;
+    int dx = 0, dy = 0, k;
+    if (!g_sba_loc || !g_cfg.loc_mouse_test || !g_cfg.input_test_hook) {
+        return;
+    }
+    if (!focus_sent) {
+        if (imouse_test_post(IMOUSE_MSG_TEST_FOCUS, 1, 0)) {
+            focus_sent = 1;
+            HLOG_I("LOCMOUSE: Testmodus (synthetische Maus ueber Fenster-Nachrichten, logischer Fokus)");
+        }
+        return;
+    }
+    if (key_down(330)) dx += LM_STEP;
+    if (key_down(331)) dx -= LM_STEP;
+    if (key_down(332)) dy += LM_STEP;
+    if (key_down(333)) dy -= LM_STEP;
+    if (dx || dy) {
+        (void)imouse_test_post(IMOUSE_MSG_TEST_MOVE, (uintptr_t)(intptr_t)dx, (intptr_t)dy);
+    }
+    k = key_down(334) != 0;
+    if (k != lb) {
+        lb = k;
+        (void)imouse_test_post(k ? WM_LBUTTONDOWN : WM_LBUTTONUP, k ? MK_LBUTTON : 0, 0);
+    }
+    k = key_down(335) != 0;
+    if (k != rb) {
+        rb = k;
+        (void)imouse_test_post(k ? WM_RBUTTONDOWN : WM_RBUTTONUP, k ? MK_RBUTTON : 0, 0);
+    }
+    k = key_down(336) != 0;
+    if (k && !shot) {
+        extern unsigned g_shot_census; /* render_diag.c: Bild beim naechsten Present */
+        g_shot_census = 1;
+        HLOG_I("LOCMOUSE: Testbild angefordert (f=%u)", hooks_frame_count());
+    }
+    shot = k;
+}
+
+/* Zaehler (alle ~10 s eine Zeile, nur im LoC-Profil): Polls, davon gefangen, Polls mit Raw-Delta != 0,
+ * Spanne des Zielhebels (min..max X/Y), den das Spiel in diesem Fenster gelesen hat. Keine Eingaben. */
+void loc_mouse_note(int dx, int dy, uint8_t aim_x, uint8_t aim_y, uint16_t btn0)
+{
+    static unsigned n, ncap, nmove, nb0, nb1;
+    static int xmin = 256, xmax = -1, ymin = 256, ymax = -1;
+    static DWORD t0;
+    DWORD t;
+    if (!g_sba_loc) {
+        return;
+    }
+    n++;
+    if (imouse_captured()) ncap++;
+    if (dx || dy) nmove++;
+    if (btn0 & 1u) nb0++; /* bi0 Hauptwaffe */
+    if (btn0 & 2u) nb1++; /* bi1 Nebenwaffe */
+    if (aim_x < xmin) xmin = aim_x;
+    if (aim_x > xmax) xmax = aim_x;
+    if (aim_y < ymin) ymin = aim_y;
+    if (aim_y > ymax) ymax = aim_y;
+    t = GetTickCount();
+    if (!t0) t0 = t;
+    if (t - t0 >= 10000u) {
+        HLOG_I("LOCMOUSE: polls=%u gefangen=%u bewegt=%u zielhebel x=%d..%d y=%d..%d bi0=%u bi1=%u mission=%ld loc_mouse=%d",
+               n, ncap, nmove, xmin, xmax, ymin, ymax, nb0, nb1, (long)s_lm_mission, g_cfg.loc_mouse);
+        n = ncap = nmove = nb0 = nb1 = 0;
+        xmin = ymin = 256;
+        xmax = ymax = -1;
+        t0 = t;
+    }
 }

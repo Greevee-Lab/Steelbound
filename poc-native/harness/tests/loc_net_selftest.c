@@ -6,11 +6,16 @@
 #include "loc_net_core.h"
 #include "loc_netsim.h"
 #include "loc_tun.h"
+#include "sb_e2e.h"
+#include "loc_guard.h"
+#include "sb_tls.h"
 #include <ws2tcpip.h>
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "json_mini.h"
+#include "sb_pausenet.h" /* W357 LOC-PAUSE-NET */
 
 static int s_ok, s_n;
 #define CHECK(c, msg)                                                   \
@@ -24,8 +29,14 @@ static int s_ok, s_n;
     } while (0)
 
 static int s_verbose;
+static volatile LONG s_lg_selfvip; /* W332: Logzeilen "dieselbe virtuelle Adresse" (Log-Flut durch Mitspieler) */
+static volatile LONG s_lg_n; /* W332: alle Logzeilen (Log-Obergrenze) */
 static void lg(const char *m)
 {
+    InterlockedIncrement(&s_lg_n);
+    if (strstr(m, "dieselbe virtuelle Adresse")) {
+        InterlockedIncrement(&s_lg_selfvip);
+    }
     if (s_verbose) {
         printf("  [log] %s\n", m);
     }
@@ -68,6 +79,17 @@ static SOCKET game_udp(locnet *n, uint16_t port, int proto)
 }
 
 /* Polling wie im Spiel (select mit Timeout 0), hoechstens ~2 s */
+/* W339: Test-Zustandspruefung - lehnt 0x38 ab und merkt sich den Absender */
+static uint32_t s_w339_from;
+static int w339_reject_38(uint16_t gp, const uint8_t *d, int n, uint32_t from_ip)
+{
+    if (gp == 1202 && n >= 2 && d[0] == 0x38 && d[1] == 0) {
+        s_w339_from = from_ip;
+        return 0;
+    }
+    return 1;
+}
+
 static int poll_recvfrom(locnet *n, SOCKET s, char *buf, int len, struct sockaddr_in *from)
 {
     int t;
@@ -121,8 +143,9 @@ static double now_ms(void)
 static void frame(char *b, int seq)
 {
     memset(b, 0, 26);
-    b[0] = 0x34;
-    memcpy(b + 2, &seq, 4);
+    b[0] = 0x34; /* W334: gueltiger Lockstep-Rahmen (n = 1 -> 26 B), sonst verwirft der Gastfilter */
+    b[4] = 1;
+    memcpy(b + 6, &seq, 4);
 }
 
 /* n Rahmen a 26 B empfangen (Polling wie im Spiel), Ankunftszeit und Folgenummer je Rahmen */
@@ -147,7 +170,7 @@ static int recv_frames(SOCKET s, int n, double *arr, int *seq, int timeout_ms, i
             have += k;
             while (have >= 26 && fr < n) {
                 arr[fr] = t;
-                memcpy(&seq[fr], b + 2, 4);
+                memcpy(&seq[fr], b + 6, 4);
                 fr++;
                 memmove(b, b + 26, (size_t)(have - 26));
                 have -= 26;
@@ -353,34 +376,34 @@ static void netsim_tests(void)
         LONG lost;
         sim_on(&A, "rtt:160");
         t0 = now_ms();
-        locnet_sendto(&A, ua, "\x03\x00", 2, 0, (struct sockaddr *)&to, sizeof to);
+        locnet_sendto(&A, ua, "\x05\x00\x00\x00", 4, 0, (struct sockaddr *)&to, sizeof to);
         while (now_ms() - t0 < 1000 && !got) {
             int fl = sizeof fr;
-            if (locnet_recvfrom(&B, ub, b, sizeof b, 0, (struct sockaddr *)&fr, &fl) == 2) got = 1;
+            if (locnet_recvfrom(&B, ub, b, sizeof b, 0, (struct sockaddr *)&fr, &fl) == 4) got = 1;
             else Sleep(0);
         }
         CHECK(got && now_ms() - t0 >= 79.0, "Netzsim UDP: Datagramm nach >= 80 ms (halbe RTT)");
         sim_on(&A, "loss:50,rtt:0,seed:1");
         for (i = 0; i < 40; i++) {
-            locnet_sendto(&A, ua, "\x03\x00", 2, 0, (struct sockaddr *)&to, sizeof to);
+            locnet_sendto(&A, ua, "\x05\x00\x00\x00", 4, 0, (struct sockaddr *)&to, sizeof to);
         }
         Sleep(100);
         got = 0;
         for (i = 0; i < 100; i++) {
             int fl = sizeof fr;
-            if (locnet_recvfrom(&B, ub, b, sizeof b, 0, (struct sockaddr *)&fr, &fl) == 2) got++;
+            if (locnet_recvfrom(&B, ub, b, sizeof b, 0, (struct sockaddr *)&fr, &fl) == 4) got++;
         }
         lost = locnetsim_get_stats(A.sim)->udp_lost;
         CHECK(lost > 5 && got == 40 - lost, "Netzsim UDP-Verlust: verlorene Datagramme fehlen, Rest kommt an");
         sim_on(&A, "loss:50,uloss:0,rtt:0,seed:1");
         for (i = 0; i < 20; i++) {
-            locnet_sendto(&A, ua, " ", 2, 0, (struct sockaddr *)&to, sizeof to);
+            locnet_sendto(&A, ua, "\x05\x00\x00\x00", 4, 0, (struct sockaddr *)&to, sizeof to);
         }
         Sleep(100);
         got = 0;
         for (i = 0; i < 100; i++) {
             int fl = sizeof fr;
-            if (locnet_recvfrom(&B, ub, b, sizeof b, 0, (struct sockaddr *)&fr, &fl) == 2) got++;
+            if (locnet_recvfrom(&B, ub, b, sizeof b, 0, (struct sockaddr *)&fr, &fl) == 4) got++;
         }
         CHECK(got == 20 && locnetsim_get_stats(A.sim)->udp_lost == 0, "Netzsim uloss:0: UDP ohne Verlust trotz loss");
         closesocket(ua);
@@ -412,6 +435,7 @@ typedef struct tun_pair {
 } tun_pair;
 
 static char s_auth_a[100], s_auth_b[100]; /* W328: --auth-a/--auth-b "account:exp:G-hex" */
+static char s_spki[80];                     /* W334: --spki <hex64> = Pin des (Loopback-)Testtreffpunkts */
 
 /* Zwei Instanzen mit Transport (feste Mitspieler oder Treffpunkt). simspec: Stufe auf beiden (NULL = aus). */
 static int tun_pair_start(tun_pair *P, int base, const char *simspec, const char *lobby, int nodirect, int red)
@@ -447,6 +471,8 @@ static int tun_pair_start(tun_pair *P, int base, const char *simspec, const char
         strcpy_s(cb.pilot, sizeof cb.pilot, "TestB");
         strcpy_s(ca.auth, sizeof ca.auth, s_auth_a); /* W328: Konten (leer = Gast) */
         strcpy_s(cb.auth, sizeof cb.auth, s_auth_b);
+        strcpy_s(ca.spki, sizeof ca.spki, s_spki); /* W334: TLS-Pin des Testtreffpunkts */
+        strcpy_s(cb.spki, sizeof cb.spki, s_spki);
     } else {
         ca.port = (uint16_t)(base + 900);
         cb.port = (uint16_t)(base + 901);
@@ -454,7 +480,11 @@ static int tun_pair_start(tun_pair *P, int base, const char *simspec, const char
         _snprintf_s(cb.peers, sizeof cb.peers, _TRUNCATE, "127.0.0.1:%d", base + 900);
     }
     P->A.tun = loctun_start(&ca, &P->A, P->A.sim, lg);
-    if (lobby) Sleep(500); /* Host legt die Lobby an */
+    if (lobby && P->A.tun) {
+        /* W334: Host legt eine Lobby mit Raumcode an (Standard); B tritt mit dem Code bei */
+        for (i = 0; i < 1000 && !loctun_lobby_code(P->A.tun, cb.code, sizeof cb.code); i++) Sleep(10);
+        printf("Treffpunkt: Raumcode %s\n", cb.code[0] ? "erhalten" : "FEHLT");
+    }
     P->B.tun = loctun_start(&cb, &P->B, P->B.sim, lg);
     if (!P->A.tun || !P->B.tun) return 0;
     for (i = 0; i < (lobby ? 1500 : 500); i++) {
@@ -594,6 +624,9 @@ static void tun_tests(void)
           "Transport: A sieht B unter dessen Adresse, Weg direkt");
     CHECK(P.A.npeers == 1 && P.A.peers[0].ip == P.B.self_ip && P.A.peers[0].base == 39000,
           "Transport: Mitspielerliste = vip mit Stellvertreter-Basis");
+    CHECK(locnet_addr_known(&P.A, P.B.self_ip) && locnet_addr_known(&P.A, P.A.self_ip) &&
+              !locnet_addr_known(&P.A, ip4("127.0.0.99")) && !locnet_addr_known(&P.A, ip4("192.168.1.7")),
+          "W334: XNet-HLE gibt nur eigene/verbundene Adressen heraus (fremde -> Fehler)");
     a1201 = game_udp(&P.A, 1201, IPPROTO_UDP);
     b1201 = game_udp(&P.B, 1201, IPPROTO_UDP);
     {
@@ -623,6 +656,9 @@ static void tun_tests(void)
         closesocket(t);
     }
     for (i = 0; i < (int)sizeof big; i++) big[i] = (char)(i * 13 + 1);
+    big[0] = 0x22; /* W334: gueltiger Kopf (0x100C) */
+    big[1] = 0;
+    big[4] = 0; big[5] = 0x10; big[6] = 0; big[7] = 0; /* W339: Blocklaenge 0x1000 (Inhaltsregel Stufe 2) */
     k = send(acon, big, sizeof big, 0);
     k = recv_all(bacc, buf, (int)sizeof big);
     CHECK(k == (int)sizeof big && memcmp(buf, big, sizeof big) == 0, "Transport: 0x100C-Rahmen A->B vollstaendig");
@@ -665,6 +701,9 @@ static void tun_tests(void)
         CHECK(red >= 3, "Transport: Redundanz N steigt mit gemeldetem Verlust (adaptiv)");
         printf("Transport 10 %% Verlust: N=%d, RTT %.1f ms\n", red, srtt);
         for (i = 0; i < (int)sizeof big; i++) big[i] = (char)(i * 3 + 5);
+        big[0] = 0x22; /* W334 */
+        big[4] = 0; big[5] = 0x10; big[6] = 0; big[7] = 0; /* W339: Blocklaenge 0x1000 */
+        big[1] = 0;
         send(acon, big, sizeof big, 0);
         k = recv_all(bacc, buf, (int)sizeof big);
         CHECK(k == (int)sizeof big && memcmp(buf, big, sizeof big) == 0,
@@ -677,15 +716,16 @@ static void tun_tests(void)
             unsigned char seen[60];
             memset(seen, 0, sizeof seen);
             for (i = 0; i < 50; i++) {
-                memset(buf, 0, 64);
-                buf[0] = (char)i;
-                locnet_sendto(&P.A, a1201, buf, 64, 0, (struct sockaddr *)&to, sizeof to);
+                memset(buf, 0, 0x2C4);
+                buf[0] = 3; /* W334: gueltiger Rahmen (Beitritt, 0x2C4 B), Kennung in Byte 4 */
+                buf[4] = (char)i;
+                locnet_sendto(&P.A, a1201, buf, 0x2C4, 0, (struct sockaddr *)&to, sizeof to);
                 Sleep(5);
             }
             for (i = 0; i < 100; i++) {
                 k = poll_recvfrom(&P.B, b1201, buf, sizeof buf, &from);
                 if (k < 0) break;
-                if (seen[(unsigned char)buf[0] % 60]++) dup++;
+                if (seen[(unsigned char)buf[4] % 60]++) dup++;
                 got++;
             }
             printf("Transport 10 %% Verlust: Datagramme %d/50 angekommen, doppelt %d\n", got, dup);
@@ -713,7 +753,9 @@ static void tun_tests(void)
     tun_pair_stop(&P);
 }
 
-/* ---------- W329 STEELNET-SECREVIEW: boeswilliger Mitspieler (handgebaute Transportpakete) ---------- */
+/* ---------- W329/W334: boeswilliger Mitspieler (handgebaute Transportpakete, seit W334 als SBT2) ----------
+ * Der Test-Mitspieler kennt den Testschluessel des Wegs ohne Treffpunkt (SECURITY.md §4.7) und kann daher
+ * authentische Pakete mit beliebigem Inhalt bauen - genau die Lage eines eingeladenen, boeswilligen Mitspielers. */
 typedef struct fpeer {
     SOCKET s;                 /* eigener UDP-Socket des "Mitspielers" */
     struct sockaddr_in b;     /* Transport-Adresse von B (aus dem Durchstich) */
@@ -721,40 +763,45 @@ typedef struct fpeer {
     uint32_t vip;             /* gemeldete virtuelle Adresse */
     uint32_t seq, acked, pseq;
     uint32_t fin_mask;        /* S_FIN von B fuer Strom-ID < 32 */
+    sbe2e_link e2e;           /* Schluessel (Seite "hi": Port 44950 > 44900) */
+    uint8_t last[1200];       /* zuletzt gesendetes Paket (Wiederholungstest) */
+    int last_len;
+    int probes_seen;          /* empfangene, authentische PROBE von B */
 } fpeer;
 
 static void fp_put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
 static void fp_put32(uint8_t *p, uint32_t v) { fp_put16(p, (uint16_t)v); fp_put16(p + 2, (uint16_t)(v >> 16)); }
 static uint32_t fp_get32(const uint8_t *p) { return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24); }
 
-static void fp_hdr(uint8_t *p, int type)
+/* Klartext [Typ][Rumpf] versiegeln und an B senden. */
+static void fp_send(fpeer *f, const uint8_t *pt, int n)
 {
-    memcpy(p, "SBT1", 4); /* Kennung */
-    p[4] = (uint8_t)type;
-    p[5] = 0;
-    memcpy(p + 6, "SBT1", 4); /* Sitzung = erste 4 Byte der TEST-Nonce "SBT1TEST" */
+    int k = sbe2e_seal(&f->e2e, pt, n, f->last, sizeof f->last);
+    if (k <= 0 || !f->have_b) return;
+    f->last_len = k;
+    sendto(f->s, (const char *)f->last, k, 0, (struct sockaddr *)&f->b, sizeof f->b);
 }
 
 static void fp_hello(fpeer *f)
 {
-    uint8_t p[18];
-    fp_hdr(p, 1);
-    fp_put32(p + 10, f->vip);
-    p[14] = 1;
-    p[15] = 1;
-    fp_put16(p + 16, 0);
-    if (f->have_b) sendto(f->s, (const char *)p, sizeof p, 0, (struct sockaddr *)&f->b, sizeof f->b);
+    uint8_t p[9];
+    p[0] = 1; /* T_HELLO */
+    fp_put32(p + 1, f->vip);
+    p[5] = 1;
+    p[6] = 2;
+    fp_put16(p + 7, 0);
+    fp_send(f, p, sizeof p);
 }
 
 /* Ein T_DATA mit einem Eintrag (K_STREAM: sub/stream/data mit Folgenummer seq; K_DGRAM: src/dst/data). */
 static void fp_data(fpeer *f, int kind, uint32_t seq, int sub, uint16_t stream, uint16_t dst, const uint8_t *d, int n)
 {
-    uint8_t p[1200];
-    int off = 31;
-    memset(p, 0, 31);
-    fp_hdr(p, 3);
-    fp_put32(p + 10, ++f->pseq);
-    p[30] = 1;
+    uint8_t p[1168];
+    int off = 22;
+    memset(p, 0, 22);
+    p[0] = 3; /* T_DATA */
+    fp_put32(p + 1, ++f->pseq);
+    p[21] = 1;
     if (kind == 1) {
         p[off] = 1;
         fp_put32(p + off + 1, seq);
@@ -774,7 +821,7 @@ static void fp_data(fpeer *f, int kind, uint32_t seq, int sub, uint16_t stream, 
         memcpy(p + off + 10, d, (size_t)n);
         off += 10 + n;
     }
-    sendto(f->s, (const char *)p, off, 0, (struct sockaddr *)&f->b, sizeof f->b);
+    fp_send(f, p, off);
 }
 
 /* Pakete von B verarbeiten (Durchstich beantworten, Bestaetigung + FIN mitlesen), ms Millisekunden. */
@@ -782,33 +829,38 @@ static void fp_pump(fpeer *f, int ms)
 {
     double t0 = now_ms();
     do {
-        uint8_t b[2048];
+        uint8_t b[2048], pt[1200];
         struct sockaddr_in from;
-        int fl = sizeof from, k;
+        int fl = sizeof from, k, n;
         while ((k = recvfrom(f->s, (char *)b, sizeof b, 0, (struct sockaddr *)&from, &fl)) > 0) {
-            if (k == 13 && memcmp(b, "SBP1", 4) == 0 && b[4] == 1) { /* PROBE -> ACK */
-                b[4] = 2;
-                sendto(f->s, (const char *)b, 13, 0, (struct sockaddr *)&from, sizeof from);
+            fl = sizeof from;
+            n = sbe2e_open(&f->e2e, b, k, pt, sizeof pt);
+            if (n < 1) continue;
+            if (pt[0] == 7 && n == 9) { /* PROBE -> PROBE_ACK an die Absenderadresse */
+                uint8_t q[9];
                 f->b = from;
                 f->have_b = 1;
-            } else if (k >= 31 && memcmp(b, "SBT1", 4) == 0 && b[4] == 3) {
-                uint32_t ack = fp_get32(b + 14);
-                int n = b[30], off = 31, i;
+                f->probes_seen++;
+                q[0] = 8;
+                memcpy(q + 1, pt + 1, 8);
+                fp_send(f, q, 9);
+            } else if (pt[0] == 3 && n >= 22) {
+                uint32_t ack = fp_get32(pt + 5);
+                int cnt = pt[21], off = 22, i;
                 if ((int32_t)(ack - f->acked) > 0) f->acked = ack;
-                for (i = 0; i < n && off < k; i++) {
-                    if (b[off] == 1 && off + 11 <= k) {
-                        int ml = b[off + 9] | (b[off + 10] << 8);
-                        int st = b[off + 6] | (b[off + 7] << 8);
-                        if (b[off + 5] == 3 && st < 32) f->fin_mask |= 1u << st;
+                for (i = 0; i < cnt && off < n; i++) {
+                    if (pt[off] == 1 && off + 11 <= n) {
+                        int ml = pt[off + 9] | (pt[off + 10] << 8);
+                        int st = pt[off + 6] | (pt[off + 7] << 8);
+                        if (pt[off + 5] == 3 && st < 32) f->fin_mask |= 1u << st;
                         off += 11 + ml;
-                    } else if (b[off] == 2 && off + 10 <= k) {
-                        off += 10 + (b[off + 8] | (b[off + 9] << 8));
+                    } else if (pt[off] == 2 && off + 10 <= n) {
+                        off += 10 + (pt[off + 8] | (pt[off + 9] << 8));
                     } else {
                         break;
                     }
                 }
             }
-            fl = sizeof from;
         }
         if (ms > 0) Sleep(1);
     } while (now_ms() - t0 < ms);
@@ -840,38 +892,166 @@ static int fp_tcp_pending(SOCKET l, int ms)
     return select(0, &r, NULL, NULL, &tv) > 0;
 }
 
+/* Instanz B mit Transport und festem Test-Mitspieler f (Port 44950); vip = 0: keine Verbindung aufbauen. */
+static int gt_start(locnet *B, fpeer *f, uint32_t vip)
+{
+    loctun_cfg c;
+    struct sockaddr_in a;
+    u_long nb = 1;
+    int i;
+    memset(f, 0, sizeof *f);
+    if (!locnet_init(B, "127.0.0.45", 44000, "none", 10, lg)) return 0;
+    f->s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    a = sa(htonl(INADDR_LOOPBACK), 44950);
+    bind(f->s, (struct sockaddr *)&a, sizeof a);
+    ioctlsocket(f->s, (long)FIONBIO, &nb);
+    if (sbe2e_link_test(0, &f->e2e) != 0) return 0;
+    loctun_cfg_default(&c);
+    c.port = 44900;
+    c.proxy_base = 45000; /* Stellvertreter fuer die vip des "Mitspielers" */
+    strcpy_s(c.peers, sizeof c.peers, "127.0.0.1:44950");
+    B->tun = loctun_start(&c, B, NULL, lg);
+    if (!B->tun) return 0;
+    for (i = 0; i < 200 && !f->have_b; i++) fp_pump(f, 10);
+    if (!f->have_b) return 0;
+    if (!vip) return 1;
+    f->vip = vip;
+    for (i = 0; i < 100 && loctun_links_up(B->tun) == 0; i++) {
+        fp_hello(f);
+        fp_pump(f, 10);
+    }
+    return loctun_links_up(B->tun) == 1;
+}
+
+static void gt_stop(locnet *B, fpeer *f)
+{
+    if (f->s != INVALID_SOCKET && f->s) closesocket(f->s);
+    sbe2e_link_free(&f->e2e);
+    locnet_shutdown(B);
+}
+
+/* Spiel lauscht auf TCP 1000, Mitspieler oeffnet einen Strom dorthin. INVALID_SOCKET bei Fehler. */
+static SOCKET gt_open1000(locnet *B, fpeer *f, SOCKET *glis, uint16_t stream)
+{
+    struct sockaddr_in a = sa(INADDR_ANY, 1000);
+    uint8_t od[4];
+    SOCKET g = INVALID_SOCKET;
+    *glis = locnet_socket(B, AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    locnet_bind(B, *glis, (struct sockaddr *)&a, sizeof a);
+    listen(*glis, 4);
+    fp_put16(od, 1000);
+    fp_put16(od + 2, 0);
+    if (fp_stream(f, 1, stream, od, 4) && fp_tcp_pending(*glis, 1000)) g = accept(*glis, NULL, NULL);
+    return g;
+}
+
+/* W334: boeswillige Rahmen (SECURITY.md §12 B): kein Byte an den Gast, Partner getrennt. */
+static void gt_bad_frame(const char *name, const uint8_t *fr, int n, int udp)
+{
+    locnet B;
+    fpeer f;
+    SOCKET glis = INVALID_SOCKET, g = INVALID_SOCKET, gu = INVALID_SOCKET;
+    char msg[160], buf[64];
+    int got = 0, i;
+    LONG gd;
+    if (!gt_start(&B, &f, ip4("127.0.0.46"))) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "W334: %s - Verbindung zum Test-Mitspieler", name);
+        CHECK(0, msg);
+        gt_stop(&B, &f);
+        return;
+    }
+    gd = loctun_get_stats(B.tun)->guard;
+    if (udp) {
+        struct sockaddr_in from;
+        gu = game_udp(&B, 1202, IPPROTO_UDP);
+        fp_data(&f, 2, 0, 0, 0, 1202, fr, n);
+        fp_pump(&f, 300);
+        got = poll_recvfrom(&B, gu, buf, sizeof buf, &from) > 0;
+    } else {
+        g = gt_open1000(&B, &f, &glis, 2);
+        if (g != INVALID_SOCKET) {
+            fp_stream(&f, 2, 2, fr, n);
+            fp_pump(&f, 300);
+            if (fp_tcp_pending(g, 300)) got = recv(g, buf, sizeof buf, 0) > 0;
+        } else {
+            got = -1;
+        }
+    }
+    for (i = 0; i < 50 && loctun_links_up(B.tun) != 0; i++) Sleep(10);
+    _snprintf_s(msg, sizeof msg, _TRUNCATE, "W334: %s - kein Byte an den Gast, Mitspieler getrennt", name);
+    CHECK(got == 0 && loctun_links_up(B.tun) == 0 && loctun_get_stats(B.tun)->guard > gd, msg);
+    if (g != INVALID_SOCKET) closesocket(g);
+    if (glis != INVALID_SOCKET) closesocket(glis);
+    if (gu != INVALID_SOCKET) closesocket(gu);
+    gt_stop(&B, &f);
+}
+
 static void tun_guard_tests(void)
 {
     locnet B;
-    loctun_cfg c;
     fpeer f;
     struct sockaddr_in a;
     u_long nb = 1;
     char buf[2048];
     SOCKET vic_u, vic_t, g1202, glis, gacc = INVALID_SOCKET;
     int i, k, ok;
-    memset(&f, 0, sizeof f);
-    if (!locnet_init(&B, "127.0.0.45", 44000, "none", 10, lg)) {
-        CHECK(0, "W329: Instanz B startet");
+    if (!gt_start(&B, &f, 0)) {
+        CHECK(0, "W329: Durchstich zum Test-Mitspieler (SBT2-PROBE)");
+        gt_stop(&B, &f);
         return;
     }
-    f.s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    a = sa(htonl(INADDR_LOOPBACK), 44950);
-    bind(f.s, (struct sockaddr *)&a, sizeof a);
-    ioctlsocket(f.s, (long)FIONBIO, &nb);
-    loctun_cfg_default(&c);
-    c.port = 44900;
-    c.proxy_base = 45000; /* Stellvertreter fuer die vip des "Mitspielers" */
-    strcpy_s(c.peers, sizeof c.peers, "127.0.0.1:44950");
-    B.tun = loctun_start(&c, &B, NULL, lg);
-    if (!B.tun) {
-        CHECK(0, "W329: Transport B startet");
-        closesocket(f.s);
-        locnet_shutdown(&B);
-        return;
+    CHECK(f.have_b && f.probes_seen > 0, "W329: Durchstich zum Test-Mitspieler (SBT2-PROBE)");
+
+    /* W334: Altformate SBT1/SBP1 werden ohne Ausnahme verworfen (kein Klartext-Rueckfall) */
+    {
+        uint8_t old[18];
+        LONG eb = loctun_get_stats(B.tun)->e2e_bad;
+        memcpy(old, "SBT1", 4);
+        old[4] = 1;
+        old[5] = 0;
+        memcpy(old + 6, "SBT1", 4);
+        fp_put32(old + 10, ip4("127.0.0.46"));
+        old[14] = 1;
+        old[15] = 1;
+        fp_put16(old + 16, 0);
+        for (i = 0; i < 20; i++) {
+            sendto(f.s, (const char *)old, sizeof old, 0, (struct sockaddr *)&f.b, sizeof f.b);
+            fp_pump(&f, 10);
+        }
+        memcpy(old, "SBP1", 4); /* alter PROBE */
+        old[4] = 1;
+        memcpy(old + 5, "SBT1TEST", 8);
+        sendto(f.s, (const char *)old, 13, 0, (struct sockaddr *)&f.b, sizeof f.b);
+        fp_pump(&f, 50);
+        CHECK(loctun_links_up(B.tun) == 0 && loctun_get_stats(B.tun)->e2e_bad >= eb + 21,
+              "W334: SBT1-HELLO und SBP1-PROBE verworfen, keine Verbindung");
     }
-    for (i = 0; i < 200 && !f.have_b; i++) fp_pump(&f, 10);
-    CHECK(f.have_b, "W329: Durchstich zum Test-Mitspieler");
+    /* W334: fremde sid / fremder Schluessel / veraendertes Tag / Wiederholung -> verworfen */
+    {
+        sbe2e_link other;
+        uint8_t prk[32], pkt[64], p9[9];
+        LONG eb = loctun_get_stats(B.tun)->e2e_bad;
+        int n;
+        memset(prk, 0x5C, sizeof prk);
+        sbe2e_link_from_prk(prk, 0, &other);
+        p9[0] = 1;
+        fp_put32(p9 + 1, ip4("127.0.0.46"));
+        p9[5] = 1;
+        p9[6] = 2;
+        fp_put16(p9 + 7, 0);
+        n = sbe2e_seal(&other, p9, 9, pkt, sizeof pkt);
+        sendto(f.s, (const char *)pkt, n, 0, (struct sockaddr *)&f.b, sizeof f.b); /* fremde sid */
+        other.sid = f.e2e.sid;
+        n = sbe2e_seal(&other, p9, 9, pkt, sizeof pkt);
+        sendto(f.s, (const char *)pkt, n, 0, (struct sockaddr *)&f.b, sizeof f.b); /* richtige sid, falscher Schluessel */
+        n = sbe2e_seal(&f.e2e, p9, 9, pkt, sizeof pkt);
+        pkt[n - 1] ^= 0x01;
+        sendto(f.s, (const char *)pkt, n, 0, (struct sockaddr *)&f.b, sizeof f.b); /* Tag veraendert */
+        fp_pump(&f, 100);
+        CHECK(loctun_links_up(B.tun) == 0 && loctun_get_stats(B.tun)->e2e_bad >= eb + 3,
+              "W334: fremde sid, fremder Schluessel und veraendertes Tag verworfen");
+        sbe2e_link_free(&other);
+    }
 
     /* 1) virtuelle Adresse: 0.0.0.0 / 127.0.0.1 / eigene LAN-Adresse nie -> Stellvertreter nicht offen fuers Netz */
     f.vip = 0;
@@ -883,6 +1063,12 @@ static void tun_guard_tests(void)
     f.vip = ip4("192.168.77.5");
     for (i = 0; i < 20; i++) { fp_hello(&f); fp_pump(&f, 10); }
     CHECK(loctun_links_up(B.tun) == 0, "W329: HELLO mit nicht-Loopback-vip abgelehnt");
+    /* W332: vip = eigene Adresse wird abgelehnt - aber nur EINE Logzeile, nicht eine je HELLO (Log-Flut) */
+    f.vip = B.self_ip;
+    InterlockedExchange(&s_lg_selfvip, 0);
+    for (i = 0; i < 30; i++) { fp_hello(&f); fp_pump(&f, 5); }
+    CHECK(loctun_links_up(B.tun) == 0 && s_lg_selfvip == 1,
+          "W332: HELLO mit eigener vip abgelehnt, nur eine Logzeile (keine Log-Flut je Paket)");
     f.vip = ip4("127.0.0.46");
     for (i = 0; i < 100 && loctun_links_up(B.tun) == 0; i++) { fp_hello(&f); fp_pump(&f, 10); }
     CHECK(loctun_links_up(B.tun) == 1, "W329: HELLO mit Loopback-vip 127.0.0.46 -> Verbindung steht");
@@ -894,6 +1080,14 @@ static void tun_guard_tests(void)
         CHECK(vip == keep, "W329: vip nach dem Verbindungsaufbau nicht mehr aenderbar");
         f.vip = keep;
     }
+    /* W334: Wiederholung eines authentischen Pakets wird verworfen (Fenster) */
+    {
+        LONG eb = loctun_get_stats(B.tun)->e2e_bad;
+        fp_hello(&f);
+        sendto(f.s, (const char *)f.last, f.last_len, 0, (struct sockaddr *)&f.b, sizeof f.b);
+        fp_pump(&f, 50);
+        CHECK(loctun_get_stats(B.tun)->e2e_bad == eb + 1, "W334: Wiederholung eines gueltigen Pakets verworfen");
+    }
 
     /* 2) UDP: nur an Ports, die das Spiel gebunden hat - nie an fremde lokale Dienste */
     vic_u = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -901,17 +1095,18 @@ static void tun_guard_tests(void)
     bind(vic_u, (struct sockaddr *)&a, sizeof a);
     ioctlsocket(vic_u, (long)FIONBIO, &nb);
     g1202 = game_udp(&B, 1202, IPPROTO_UDP);
-    memset(buf, 0x5A, 64);
-    fp_data(&f, 2, 0, 0, 0, 44777, (const uint8_t *)buf, 64);
-    fp_data(&f, 2, 0, 0, 0, 1999, (const uint8_t *)buf, 64); /* Spielbereich, aber nicht gebunden */
-    fp_data(&f, 2, 0, 0, 0, 1202, (const uint8_t *)buf, 64);
+    memset(buf, 0, 0x2C4);
+    buf[0] = 3; /* gueltiger Rahmen (Beitritt) - nur der Zielport ist falsch */
+    fp_data(&f, 2, 0, 0, 0, 44777, (const uint8_t *)buf, 0x2C4);
+    fp_data(&f, 2, 0, 0, 0, 1999, (const uint8_t *)buf, 0x2C4); /* Spielbereich, aber nicht gebunden */
+    fp_data(&f, 2, 0, 0, 0, 1202, (const uint8_t *)buf, 0x2C4);
     fp_pump(&f, 200);
     k = recv(vic_u, buf, sizeof buf, 0);
     CHECK(k <= 0, "W329: Datagramm des Mitspielers an fremden lokalen UDP-Port verworfen");
     {
         struct sockaddr_in from;
         k = poll_recvfrom(&B, g1202, buf, sizeof buf, &from);
-        CHECK(k == 64, "W329: Datagramm an gebundenen Spielport 1202 kommt an (Gegenprobe)");
+        CHECK(k == 0x2C4, "W329: Datagramm an gebundenen Spielport 1202 kommt an (Gegenprobe)");
     }
 
     /* 3) TCP: OPEN nur an Spiel-TCP 1000 - nie Tunnel zu beliebigen lokalen Diensten */
@@ -928,25 +1123,75 @@ static void tun_guard_tests(void)
         CHECK(ok && !fp_tcp_pending(vic_t, 200), "W329: OPEN an fremden TCP-Port 44778 baut keine Verbindung auf");
         CHECK(f.fin_mask & (1u << 2), "W329: abgelehnter OPEN wird beim Mitspieler geschlossen (FIN)");
     }
-    glis = locnet_socket(&B, AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    a = sa(INADDR_ANY, 1000);
-    locnet_bind(&B, glis, (struct sockaddr *)&a, sizeof a);
-    listen(glis, 4);
+    /* W332: Log-Obergrenze - 650 Stroeme an Spiel-TCP 1000 (OPEN, Spiel nimmt an und schliesst, FIN) erzeugen je
+     * eine Zeile; hoechstens 200 je 10-s-Fenster duerfen ins Log (sonst fuellt der Mitspieler die Platte). Ein
+     * Zeitraum < 10 s beruehrt hoechstens zwei Fenster -> <= 400 Zeilen, ohne Grenze 650. */
     {
         uint8_t od[4];
+        LONG n0 = s_lg_n;
+        int sent = 0;
+        double t0, el;
+        SOCKET tl1000 = locnet_socket(&B, AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        a = sa(INADDR_ANY, 1000);
+        locnet_bind(&B, tl1000, (struct sockaddr *)&a, sizeof a);
+        listen(tl1000, 64);
+        ioctlsocket(tl1000, (long)FIONBIO, &nb);
         fp_put16(od, 1000);
         fp_put16(od + 2, 0);
-        ok = fp_stream(&f, 1, 4, od, 4);
-        if (fp_tcp_pending(glis, 1000)) gacc = accept(glis, NULL, NULL);
-        CHECK(ok && gacc != INVALID_SOCKET, "W329: OPEN an Spiel-TCP 1000 verbunden (Gegenprobe)");
+        n0 = s_lg_n;
+        t0 = now_ms();
+        for (i = 0; i < 650; i += 25) { /* je 25: OPEN, Spiel nimmt an und schliesst, FIN (Stroeme wieder frei) */
+            int j, got = 0;
+            double tw = now_ms();
+            for (j = i; j < i + 25 && j < 650; j++) sent += fp_stream(&f, 1, (uint16_t)(1000 + 2 * j), od, 4);
+            while (got < j - i && now_ms() - tw < 2000) {
+                SOCKET g = accept(tl1000, NULL, NULL);
+                if (g != INVALID_SOCKET) {
+                    closesocket(g);
+                    got++;
+                } else {
+                    fp_pump(&f, 1);
+                }
+            }
+            for (j = i; j < i + 25 && j < 650; j++) fp_stream(&f, 3, (uint16_t)(1000 + 2 * j), NULL, 0);
+        }
+        el = now_ms() - t0;
+        fp_pump(&f, 300);
+        closesocket(tl1000);
+        printf("W332: %d Stroeme in %.0f ms -> %ld Logzeilen\n", sent, el, s_lg_n - n0);
+        CHECK(sent == 650 && s_lg_n - n0 >= 150 && s_lg_n - n0 <= 200 * (2 + (int)(el / 10000.0)) + 1,
+              "W332: Log-Flut durch Mitspieler auf 200 Zeilen je 10-s-Fenster begrenzt");
+        /* < 15 s: ohne Grenze kaemen mehr als 400 Zeilen -> Unterdrueckung pruefbar; sonst (Rechner ausgelastet) Hinweis */
+        CHECK(el >= 15000.0 || s_lg_n - n0 < sent, "W332: Log-Flut - Zeilen ueber der Obergrenze unterdrueckt");
+        if (el >= 15000.0) printf("Hinweis: Strom-Flut dauerte %.0f ms - Unterdrueckung nicht pruefbar\n", el);
+    }
+    gacc = gt_open1000(&B, &f, &glis, 4);
+    CHECK(gacc != INVALID_SOCKET, "W329: OPEN an Spiel-TCP 1000 verbunden (Gegenprobe)");
+
+    /* W334: gueltiger Lockstep-Rahmen kommt durch den Filter (Gegenprobe zu den Verstoessen unten) */
+    if (gacc != INVALID_SOCKET) {
+        uint8_t fr[26];
+        memset(fr, 0, sizeof fr);
+        fr[0] = 0x34;
+        fr[4] = 1;
+        fp_stream(&f, 2, 4, fr, 13); /* geteilt: Kopf in zwei Nachrichten */
+        fp_stream(&f, 2, 4, fr + 13, 13);
+        k = fp_tcp_pending(gacc, 1000) ? recv(gacc, buf, sizeof buf, 0) : 0;
+        if (k > 0 && k < 26 && fp_tcp_pending(gacc, 500)) k += recv(gacc, buf + k, (int)sizeof buf - k, 0);
+        CHECK(k == 26 && (uint8_t)buf[0] == 0x34, "W334: gueltiger 0x34-Rahmen (n = 1, geteilt) erreicht das Spiel ganz");
     }
 
     /* 4) Puffer zum Spiel begrenzt: Spiel liest nicht, Mitspieler sendet weiter -> Strom zu, kein Speicherlauf */
     if (gacc != INVALID_SOCKET) {
         static uint8_t chunk[1000];
         int sent = 0;
-        memset(chunk, 0x33, sizeof chunk);
-        for (i = 0; i < 12000 && !(f.fin_mask & (1u << 4)); i++) { /* bis 12 MB */
+        uint32_t pos = 0;
+        for (i = 0; i < 12000 && !(f.fin_mask & (1u << 4)); i++) { /* bis 12 MB, gueltige 0x22-Rahmen (0x100C B) */
+            int j;
+            for (j = 0; j < (int)sizeof chunk; j++, pos++) {
+                uint32_t o = pos % 0x100C;
+                chunk[j] = (uint8_t)(o == 0 ? 0x22 : (o == 1 ? 0 : (o == 5 ? 0x10 : (o >= 4 && o <= 7 ? 0 : 0x33)))); /* W339: Laenge 0x1000 */
+            }
             if (!fp_stream(&f, 2, 4, chunk, sizeof chunk)) break;
             sent++;
         }
@@ -959,8 +1204,1007 @@ static void tun_guard_tests(void)
     closesocket(vic_t);
     closesocket(vic_u);
     closesocket(g1202);
-    closesocket(f.s);
-    locnet_shutdown(&B);
+    gt_stop(&B, &f);
+
+    /* W334: Gastfilter gegen boeswillige Rahmen (SECURITY.md §6, §12 B) - je Fall eine frische Verbindung */
+    {
+        uint8_t fr[32];
+        memset(fr, 0, sizeof fr);
+        fr[0] = 0x34;
+        fr[4] = 0xFF; /* n = -1: Spielzerleger rechnet negative Laenge (rep movsd mit riesigem Zaehler) */
+        gt_bad_frame("TCP 0x34 mit n = -1", fr, 26, 0);
+        fr[4] = 2;    /* n = 2: Handler ueberschreibt den 16-Byte-Schlitz (Stufe 2) */
+        gt_bad_frame("TCP 0x34 mit n = 2", fr, 26, 0);
+        memset(fr, 0, sizeof fr);
+        fr[0] = 0x09; /* Laenge 0 in der Spieltabelle (Zerleger tritt auf der Stelle) */
+        gt_bad_frame("TCP Typ 0x09", fr, 4, 0);
+        memset(fr, 0, sizeof fr);
+        fr[0] = 0x09; /* UDP 0x09: Stufe 1 gesperrt */
+        gt_bad_frame("UDP 0x09 an 1202", fr, 4, 1);
+        fr[0] = 0x06; /* UDP 0x06 mit falscher Laenge */
+        gt_bad_frame("UDP 0x06 mit 4 statt 0x308 Byte", fr, 4, 1);
+    }
+}
+
+/* ---------- W334 LOC-SEC-CLIENT: Krypto, Fenster, Gastfilter gegen net/tools/sbt2_vectors.json ---------- */
+static int hexeq(const char *v, const uint8_t *p, int n)
+{
+    uint8_t b[2048];
+    int k = jm_hex(v, b, sizeof b);
+    return k == n && memcmp(b, p, (size_t)n) == 0;
+}
+
+static void sec_unit_tests(void)
+{
+    char why[96];
+    int t, ok;
+    CHECK(sbe2e_selftest(why, sizeof why) == 0, "W334: Start-Selbsttest (X25519 RFC 7748, HKDF TC1, GCM TC16, SBT2-Paket)");
+    for (t = 1; t <= 4; t++) {
+        char msg[120];
+        ok = sbe2e_selftest_ex(why, sizeof why, t) != 0 && why[0];
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "W334: Selbsttest erkennt verfaelschten Wert %d (%s)", t, why);
+        CHECK(ok, msg);
+    }
+    { /* Schluesselpaar, beide Seiten leiten dieselben Schluessel ab, Paket hin und zurueck */
+        sbe2e_kp ka, kb;
+        sbe2e_side sa_, sb_;
+        sbe2e_link la, lb;
+        uint8_t th[32], pkt[80], pt[80], msg[] = {3, 9, 8, 7, 6};
+        int n;
+        memset(&sa_, 0, sizeof sa_);
+        memset(&sb_, 0, sizeof sb_);
+        ok = sbe2e_keypair(&ka, sa_.pub) == 0 && sbe2e_keypair(&kb, sb_.pub) == 0;
+        sa_.cid = 5;
+        sb_.cid = 6;
+        strcpy_s(sa_.pilot, sizeof sa_.pilot, "A");
+        strcpy_s(sb_.pilot, sizeof sb_.pilot, "Guest-B");
+        ok = ok && sbe2e_transcript(th, 1, (const uint8_t *)"0123456789abcdef", &sa_, &sb_) == 0;
+        ok = ok && sbe2e_derive(&ka, sb_.pub, th, 5, 6, &la) == 0 && sbe2e_derive(&kb, sa_.pub, th, 6, 5, &lb) == 0;
+        ok = ok && la.sid == lb.sid;
+        n = ok ? sbe2e_seal(&la, msg, sizeof msg, pkt, sizeof pkt) : -1;
+        ok = ok && sbe2e_open(&lb, pkt, n, pt, sizeof pt) == (int)sizeof msg && memcmp(pt, msg, sizeof msg) == 0;
+        n = ok ? sbe2e_seal(&lb, msg, sizeof msg, pkt, sizeof pkt) : -1;
+        ok = ok && sbe2e_open(&la, pkt, n, pt, sizeof pt) == (int)sizeof msg;
+        CHECK(ok, "W334: fluechtige X25519-Paare (CNG), gleiche Paarschluessel auf beiden Seiten, SBT2 hin und zurueck");
+        /* anderer Pilotname im Transkript -> andere Schluessel, keine Verbindung (§4.3) */
+        strcpy_s(sb_.pilot, sizeof sb_.pilot, "Guest-X");
+        sbe2e_link_free(&lb);
+        ok = sbe2e_transcript(th, 1, (const uint8_t *)"0123456789abcdef", &sa_, &sb_) == 0 &&
+             sbe2e_derive(&kb, sa_.pub, th, 6, 5, &lb) == 0;
+        n = sbe2e_seal(&la, msg, sizeof msg, pkt, sizeof pkt);
+        CHECK(ok && sbe2e_open(&lb, pkt, n, pt, sizeof pt) < 0, "W334: abweichende Identitaet im Transkript -> Paket nicht oeffenbar");
+        CHECK(sbe2e_derive(&ka, sb_.pub, th, 5, 5, &lb) != 0, "W334: gleiche client_id -> Ableitung abgelehnt");
+        sbe2e_link_free(&la);
+        sbe2e_link_free(&lb);
+        sbe2e_kp_free(&ka);
+        sbe2e_kp_free(&kb);
+    }
+    { /* Paketgrenze 2^32 (kein Schluesselwechsel im Betrieb) */
+        sbe2e_link l;
+        uint8_t pkt[64], m[] = {4, 1, 2, 3, 4};
+        sbe2e_link_test(1, &l);
+        l.tx_ctr = SBE2E_CTR_MAX - 1;
+        ok = sbe2e_seal(&l, m, sizeof m, pkt, sizeof pkt) > 0 && sbe2e_exhausted(&l) &&
+             sbe2e_seal(&l, m, sizeof m, pkt, sizeof pkt) < 0;
+        CHECK(ok, "W334: ctr 2^32 ist das letzte Paket, danach verweigert seal (Verbindung beenden)");
+        ok = sbe2e_seal(&l, (const uint8_t *)"\x02\x00", 2, pkt, sizeof pkt) < 0;
+        sbe2e_link_free(&l);
+        sbe2e_link_test(1, &l);
+        CHECK(ok && sbe2e_seal(&l, (const uint8_t *)"\x09\x00", 2, pkt, sizeof pkt) < 0,
+              "W334: unbekannter innerer Typ wird nicht versiegelt");
+        sbe2e_link_free(&l);
+    }
+    { /* Gastfilter ohne Puffer (HLE-Hooks) */
+        lguard_walk w;
+        uint8_t s[64];
+        int why2 = 0;
+        memset(&w, 0, sizeof w);
+        memset(s, 0, sizeof s);
+        s[0] = 0x34;
+        s[4] = 1; /* 26 B */
+        s[26] = 0x37; /* 4 B */
+        ok = lguard_walk_tcp(&w, s, 4, 1, &why2) == 0; /* 0x34-Kopf ohne n: zurueckhalten */
+        ok = ok && lguard_walk_tcp(&w, s, 30, 1, &why2) == 30 && w.rem == 0;
+        ok = ok && lguard_walk_tcp(&w, s, 1, 1, &why2) == 0; /* 1 Byte Typ: zurueckhalten */
+        s[0] = 0x34;
+        s[4] = 0x80;
+        ok = ok && lguard_walk_tcp(&w, s, 26, 1, &why2) < 0 && why2 == LGUARD_V_NEG;
+        s[4] = 3;
+        ok = ok && lguard_walk_tcp(&w, s, 26, 1, &why2) < 0 && why2 == LGUARD_V_CONTENT;
+        s[0] = 0x15;
+        ok = ok && lguard_walk_tcp(&w, s, 4, 1, &why2) < 0 && why2 == LGUARD_V_TYPE;
+        CHECK(ok, "W334: Gastfilter-Laeufer (HLE recv): Koepfe erst entschieden freigeben, 0x34 n>=0x80 / n>1, Typ 0x15 = Verstoss");
+    }
+}
+
+static SOCKET s_late_sock;
+static DWORD WINAPI late_rest(LPVOID p)
+{
+    static const char rest[23] = {0, 1};
+    (void)p;
+    Sleep(100);
+    send(s_late_sock, rest, 23, 0);
+    return 0;
+}
+
+/* HLE-recv des Spiels: jeder Weg (auch ohne Transport) geht durch den Filter. */
+static void hle_recv_tests(void)
+{
+    locnet A;
+    SOCKET l, c, s;
+    struct sockaddr_in a;
+    int al = sizeof a, k;
+    char b[64];
+    u_long nb = 1;
+    if (!locnet_init(&A, "127.0.0.25", 46000, "none", 10, lg)) {
+        CHECK(0, "W334: HLE-recv-Test startet");
+        return;
+    }
+    l = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    a = sa(ip4("127.0.0.25"), 46990);
+    bind(l, (struct sockaddr *)&a, sizeof a);
+    listen(l, 2);
+    c = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    connect(c, (struct sockaddr *)&a, sizeof a);
+    s = accept(l, (struct sockaddr *)&a, &al);
+    ioctlsocket(s, (long)FIONBIO, &nb);
+    send(c, "\x34\x00\x00", 3, 0); /* Kopf unvollstaendig: Typ 0x34, n fehlt noch */
+    Sleep(30);
+    {
+        HANDLE th;
+        s_late_sock = c;
+        th = CreateThread(NULL, 0, late_rest, NULL, 0, NULL); /* Rest nach 100 ms */
+        int k0, e0, polls = 0;
+        double t0 = now_ms();
+        k0 = locnet_recv(&A, s, b, sizeof b, 0); /* Kopf unentschieden: sofort "noch keine Daten", nie blockieren */
+        e0 = WSAGetLastError();
+        CHECK(k0 == SOCKET_ERROR && e0 == WSAEWOULDBLOCK && now_ms() - t0 < 50.0,
+              "W334: HLE recv blockiert nie bei unentschiedenem Kopf (WSAEWOULDBLOCK, Spiel-Thread frei)");
+        do { /* das Spiel fragt wieder (nicht blockierender Socket) */
+            Sleep(5);
+            k = locnet_recv(&A, s, b, sizeof b, 0);
+            polls++;
+        } while (k == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK && now_ms() - t0 < 1900.0);
+        WaitForSingleObject(th, 2000);
+        CloseHandle(th);
+        if (k != 26) printf("HLE recv Kopf: k=%d err=%d polls=%d nach %.0f ms\n", k, WSAGetLastError(), polls, now_ms() - t0);
+        CHECK(k == 26 && b[0] == 0x34 && b[4] == 1 && polls >= 1,
+              "W334: HLE recv haelt einen unentschiedenen Kopf zurueck und liefert dann den ganzen Rahmen");
+    }
+    send(c, "\x37\x00\x00\x00\x34\x00\x00\x00\xFF", 9, 0); /* 0x37 gueltig, dann 0x34 mit n = -1 */
+    Sleep(30);
+    k = locnet_recv(&A, s, b, sizeof b, 0); /* fail closed: auch der gueltige Rahmen davor geht nicht mehr hinaus */
+    CHECK(k == SOCKET_ERROR && WSAGetLastError() == WSAECONNRESET && A.st.guard > 0 && b[4] == 0,
+          "W334: HLE recv: 0x34 mit negativer Anzahl -> Verbindung getrennt, kein Byte zum Spiel");
+    k = locnet_recv(&A, s, b, sizeof b, 0);
+    CHECK(k == SOCKET_ERROR && WSAGetLastError() == WSAECONNRESET, "W334: HLE recv: getrennter Strom bleibt getrennt");
+    closesocket(c);
+    locnet_closesocket(&A, s); /* wie das Spiel ueber den Hook: Filterzustand des Handles vergessen */
+    /* Das Spiel liest seinen TCP-Strom auch ueber recvfrom (W334-Lauf L1): gleicher TCP-Filter, kein UDP-Filter */
+    c = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    a = sa(ip4("127.0.0.25"), 46990); /* accept hat a mit der Gegenadresse ueberschrieben */
+    connect(c, (struct sockaddr *)&a, sizeof a);
+    al = sizeof a;
+    s = accept(l, (struct sockaddr *)&a, &al);
+    ioctlsocket(s, (long)FIONBIO, &nb);
+    send(c, "\x37\x00\x00\x00", 4, 0); /* gueltiger Rahmen 0x37 (4 Byte) */
+    Sleep(30);
+    {
+        struct sockaddr_in fr;
+        int fl = sizeof fr;
+        memset(&fr, 0x5A, sizeof fr);
+        memset(b, 0, sizeof b);
+        k = locnet_recvfrom(&A, s, b, sizeof b, 0, (struct sockaddr *)&fr, &fl);
+        CHECK(k == 4 && b[0] == 0x37, "W334: HLE recvfrom auf dem TCP-Strom liefert gueltige Rahmen (TCP-Filter)");
+    }
+    {
+        static const char bad[26] = {0x34, 0, 0, 0, 2}; /* 0x34 mit n = 2 (Stufe 2) */
+        send(c, bad, sizeof bad, 0);
+    }
+    Sleep(30);
+    memset(b, 0, sizeof b);
+    k = locnet_recvfrom(&A, s, b, sizeof b, 0, NULL, NULL);
+    CHECK(k == SOCKET_ERROR && WSAGetLastError() == WSAECONNRESET && b[0] == 0,
+          "W334: HLE recvfrom auf dem TCP-Strom: 0x34 mit n = 2 -> Verbindung getrennt, kein Byte zum Spiel");
+    closesocket(c);
+    locnet_closesocket(&A, s); /* wie das Spiel ueber den Hook: Filterzustand des Handles vergessen */
+    /* Kopf bleibt > 2 s unentschieden (Mitspieler schickt den Rest nie) -> getrennt, ohne dass recv je wartet */
+    c = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    a = sa(ip4("127.0.0.25"), 46990);
+    connect(c, (struct sockaddr *)&a, sizeof a);
+    al = sizeof a;
+    s = accept(l, (struct sockaddr *)&a, &al);
+    ioctlsocket(s, (long)FIONBIO, &nb);
+    send(c, "\x34\x00\x00\x00", 4, 0); /* 0x34 ohne Anzahl-Byte */
+    {
+        double t0 = now_ms(), worst = 0;
+        int e = 0;
+        do {
+            double t1;
+            Sleep(20);
+            t1 = now_ms();
+            k = locnet_recv(&A, s, b, sizeof b, 0);
+            e = WSAGetLastError();
+            if (now_ms() - t1 > worst) worst = now_ms() - t1;
+        } while (k == SOCKET_ERROR && e == WSAEWOULDBLOCK && now_ms() - t0 < 3000.0);
+        printf("HLE recv unentschieden: getrennt nach %.0f ms, laengster recv-Aufruf %.1f ms\n", now_ms() - t0, worst);
+        CHECK(k == SOCKET_ERROR && e == WSAECONNRESET && now_ms() - t0 >= 1900.0 && worst < 200.0,
+              "W334: HLE recv: Kopf > 2 s unentschieden -> Verbindung getrennt (kein Warten im Spiel-Thread)");
+    }
+    closesocket(c);
+    locnet_closesocket(&A, s); /* wie das Spiel ueber den Hook: Filterzustand des Handles vergessen */
+    closesocket(l);
+    locnet_shutdown(&A);
+}
+
+/* W350 LOC-REJOIN: Abgang eines Mitspielers. Das Spiel wertet recv 0 nicht als Fehler und haelt den Platz (Geist);
+ * das Netz-HLE meldet das Stromende als WSAECONNRESET (wie XNet), dauerhaft fuer diesen Socket. Wiederbeitritt von
+ * derselben Adresse = neue Verbindung mit frischem Zustand, genau ein lebender Strom. */
+static SOCKET w350_accept(locnet *A, SOCKET l, int ms)
+{
+    int i;
+    for (i = 0; i < ms / 5; i++) {
+        struct sockaddr_in r;
+        int rl = sizeof r;
+        SOCKET s = locnet_accept(A, l, (struct sockaddr *)&r, &rl);
+        if (s != INVALID_SOCKET) return s;
+        Sleep(5);
+    }
+    return INVALID_SOCKET;
+}
+/* liest, bis ein Ergebnis != WSAEWOULDBLOCK kommt (hoechstens ms); *err = WSAGetLastError() */
+static int w350_recv(locnet *A, SOCKET s, char *b, int len, int ms, int *err)
+{
+    double t0 = now_ms();
+    int k;
+    do {
+        k = locnet_recv(A, s, b, len, 0);
+        *err = k == SOCKET_ERROR ? WSAGetLastError() : 0;
+        if (!(k == SOCKET_ERROR && *err == WSAEWOULDBLOCK)) return k;
+        Sleep(5);
+    } while (now_ms() - t0 < ms);
+    return k;
+}
+static SOCKET w350_join(locnet *A, locnet *C, SOCKET l, const struct sockaddr_in *to, SOCKET *c)
+{
+    u_long nb = 1;
+    SOCKET s;
+    *c = locnet_socket(C, AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    locnet_connect(C, *c, (const struct sockaddr *)to, sizeof *to);
+    s = w350_accept(A, l, 2000);
+    if (s != INVALID_SOCKET) ioctlsocket(s, (long)FIONBIO, &nb);
+    return s;
+}
+static void w350_tests(void)
+{
+    static const char ka[4] = {0x37, 0, 0, 0}; /* Keepalive 0x37 (4 Byte) */
+    locnet A, C;
+    SOCKET l, c, s, prev = INVALID_SOCKET;
+    struct sockaddr_in a, to;
+    int k, k2, e, e2, i, ok_leave = 1, ok_new = 1, ok_once = 1, joins = 0;
+    char b[64];
+    u_long nb = 1;
+    if (!locnet_init(&A, "127.0.0.26", 46100, "none", 10, lg) || !locnet_init(&C, "127.0.0.27", 46100, "none", 10, lg)) {
+        CHECK(0, "W350: Abgangs-Test startet");
+        return;
+    }
+    l = locnet_socket(&A, AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    a = sa(INADDR_ANY, 1000);
+    locnet_bind(&A, l, (struct sockaddr *)&a, sizeof a);
+    listen(l, 5);
+    ioctlsocket(l, (long)FIONBIO, &nb);
+    to = sa(A.self_ip, 1000);
+    /* 5x beitreten, Rahmen tauschen, geordnet verlassen (closesocket = FIN) */
+    for (i = 0; i < 5; i++) {
+        long leave0 = A.st.leave;
+        s = w350_join(&A, &C, l, &to, &c);
+        if (s == INVALID_SOCKET) {
+            ok_new = 0;
+            closesocket(c);
+            break;
+        }
+        joins++;
+        k = locnet_recv(&A, s, b, sizeof b, 0); /* frische Verbindung: nichts da, kein Reset (auch bei gleichem Handle) */
+        e = WSAGetLastError();
+        if (!(k == SOCKET_ERROR && e == WSAEWOULDBLOCK)) ok_new = 0;
+        send(c, ka, 4, 0);
+        k = w350_recv(&A, s, b, sizeof b, 1000, &e);
+        if (k != 4 || b[0] != 0x37) ok_new = 0;
+        locnet_closesocket(&C, c); /* Abgang (Spiel ueber den Hook) */
+        k = w350_recv(&A, s, b, sizeof b, 1000, &e);
+        if (!(k == SOCKET_ERROR && e == WSAECONNRESET)) ok_leave = 0;
+        k = locnet_recv(&A, s, b, sizeof b, 0);
+        e = WSAGetLastError();
+        if (!(k == SOCKET_ERROR && e == WSAECONNRESET)) ok_leave = 0; /* bleibt getrennt */
+        if (A.st.leave != leave0 + 1) ok_once = 0;                    /* ein Abgang je Verbindung */
+        if (prev != INVALID_SOCKET) locnet_closesocket(&A, prev);
+        prev = s; /* das Spiel schliesst den alten Platz erst spaeter: der neue Strom darf davon nichts erben */
+    }
+    if (prev != INVALID_SOCKET) locnet_closesocket(&A, prev);
+    CHECK(joins == 5 && ok_new, "W350: 5x Wiederbeitritt derselben Adresse - je ein frischer Strom, Rahmen kommen an");
+    CHECK(ok_leave, "W350: geordneter Abgang (FIN) -> Spiel sieht WSAECONNRESET, auch beim naechsten recv");
+    CHECK(ok_once && A.st.leave == 5, "W350: Abgangszaehler = 5 (einmal je Verbindung)");
+    /* harter Abbruch (RST, z. B. beendeter Prozess) */
+    s = w350_join(&A, &C, l, &to, &c);
+    if (s != INVALID_SOCKET) {
+        struct linger lg0 = {1, 0};
+        setsockopt(c, SOL_SOCKET, SO_LINGER, (const char *)&lg0, sizeof lg0);
+        closesocket(c);
+        k = w350_recv(&A, s, b, sizeof b, 1000, &e);
+        CHECK(k == SOCKET_ERROR && e == WSAECONNRESET, "W350: harter Abbruch (RST) -> WSAECONNRESET");
+        locnet_closesocket(&A, s);
+    } else {
+        CHECK(0, "W350: harter Abbruch (Verbindung)");
+        closesocket(c);
+    }
+    /* letzter Rahmen, dann Abgang: erst der Rahmen, dann WSAECONNRESET (nichts geht verloren) */
+    s = w350_join(&A, &C, l, &to, &c);
+    if (s != INVALID_SOCKET) {
+        send(c, ka, 4, 0);
+        locnet_closesocket(&C, c);
+        Sleep(30);
+        k = w350_recv(&A, s, b, sizeof b, 1000, &e);
+        k2 = w350_recv(&A, s, b + 8, sizeof b - 8, 1000, &e2);
+        CHECK(k == 4 && b[0] == 0x37 && k2 == SOCKET_ERROR && e2 == WSAECONNRESET,
+              "W350: letzter Rahmen vor dem Abgang kommt noch an, danach WSAECONNRESET");
+        locnet_closesocket(&A, s);
+    } else {
+        CHECK(0, "W350: Rahmen vor Abgang (Verbindung)");
+        closesocket(c);
+    }
+    /* unvollstaendiger Rahmen, dann Abgang: der Kopf (Typ 0x37) ist entschieden, die Teilbytes darf der Filter
+     * weitergeben (Strom, das Spiel puffert); danach muss der Abgang kommen, nie recv 0 */
+    s = w350_join(&A, &C, l, &to, &c);
+    if (s != INVALID_SOCKET) {
+        send(c, ka, 2, 0);
+        locnet_closesocket(&C, c);
+        Sleep(30);
+        k = w350_recv(&A, s, b, sizeof b, 3000, &e);
+        if (k > 0) k = w350_recv(&A, s, b, sizeof b, 3000, &e);
+        CHECK(k == SOCKET_ERROR && e == WSAECONNRESET, "W350: halber Rahmen + Abgang -> danach WSAECONNRESET");
+        locnet_closesocket(&A, s);
+    } else {
+        CHECK(0, "W350: halber Rahmen (Verbindung)");
+        closesocket(c);
+    }
+    /* Schalter loc_net_leave_reset=0 (fin_pass): altes Verhalten recv 0 */
+    A.fin_pass = 1;
+    s = w350_join(&A, &C, l, &to, &c);
+    if (s != INVALID_SOCKET) {
+        locnet_closesocket(&C, c);
+        k = w350_recv(&A, s, b, sizeof b, 1000, &e);
+        CHECK(k == 0, "W350: loc_net_leave_reset=0 reicht recv 0 durch (Vergleichsweg)");
+        locnet_closesocket(&A, s);
+    } else {
+        CHECK(0, "W350: Vergleichsweg (Verbindung)");
+        closesocket(c);
+    }
+    A.fin_pass = 0;
+    closesocket(l);
+    locnet_shutdown(&C);
+    locnet_shutdown(&A);
+}
+
+static void vector_tests(const char *path, int required)
+{
+    char *js = jm_load(path), name[96];
+    const char *st, *sb, *in, *v, *arr;
+    static uint8_t c[8192], d[8192], out[8192];
+    uint8_t a[64], b[64], tag[16], th[32], prk[32];
+    int i, n, k, ok;
+    if (!js) {
+        printf("Hinweis: Testvektoren %s nicht lesbar - Vektor-Pruefungen uebersprungen\n", path);
+        /* Standardlauf: die Vektoren liegen unter net/tools (privat, nicht im Community-Export); der Start-KAT
+         * (sbe2e_selftest) laeuft trotzdem. Mit --vectors PFAD ist die Datei Pflicht. */
+        if (required) CHECK(0, "W334: sbt2_vectors.json lesbar");
+        return;
+    }
+    st = jm_get(js, "standard");
+    /* X25519 RFC 7748 §5.2 und §6.1 */
+    v = jm_get(st, "x25519_rfc7748_5_2");
+    jm_hex(jm_get(v, "scalar"), a, 32);
+    jm_hex(jm_get(v, "u"), b, 32);
+    k = sbe2e_x25519(a, b, out);
+    printf("X25519 RFC 7748 §5.2: %s\n", k == 0 ? (hexeq(jm_get(v, "out"), out, 32) ? "gleich" : "ABWEICHUNG") : "von CNG abgelehnt");
+    /* W334 (B): der u-Wert von §5.2 liegt nicht in der Untergruppe primer Ordnung (l*P != O, nachgerechnet);
+     * CNG prueft das beim Import und lehnt ab. Echte oeffentliche Schluessel (Skalar * Basispunkt) liegen immer
+     * darin - die Abweichung ist nur strenger (fail closed, SECURITY.md §11 Aenderung W334). */
+    CHECK((k == 0 && hexeq(jm_get(v, "out"), out, 32)) || k < 0,
+          "Vektor: X25519 RFC 7748 §5.2 (gleich oder als Punkt ausserhalb der Untergruppe abgelehnt)");
+    v = jm_get(st, "x25519_rfc7748_6_1");
+    {
+        sbe2e_kp kp;
+        uint8_t pub[32];
+        jm_hex(jm_get(v, "alice_priv"), a, 32);
+        jm_hex(jm_get(v, "bob_pub"), b, 32);
+        ok = sbe2e_x25519(a, b, out) == 0 && hexeq(jm_get(v, "shared"), out, 32);
+        ok = ok && sbe2e_kp_import(&kp, a, pub) == 0 && hexeq(jm_get(v, "alice_pub"), pub, 32);
+        sbe2e_kp_free(&kp);
+        jm_hex(jm_get(v, "bob_priv"), a, 32);
+        jm_hex(jm_get(v, "alice_pub"), b, 32);
+        ok = ok && sbe2e_x25519(a, b, out) == 0 && hexeq(jm_get(v, "shared"), out, 32);
+        ok = ok && sbe2e_kp_import(&kp, a, pub) == 0 && hexeq(jm_get(v, "bob_pub"), pub, 32);
+        sbe2e_kp_free(&kp);
+        CHECK(ok, "Vektor: X25519 RFC 7748 §6.1 (beide Seiten, oeffentliche Schluessel)");
+    }
+    /* HKDF RFC 5869 TC1 */
+    v = jm_get(st, "hkdf_rfc5869_tc1");
+    {
+        int il = jm_hex(jm_get(v, "ikm"), a, 64), sl = jm_hex(jm_get(v, "salt"), b, 64), nl = jm_hex(jm_get(v, "info"), c, 64);
+        int len = (int)jm_num(jm_get(v, "len"));
+        sbe2e_hkdf_extract(b, sl, a, il, prk);
+        ok = hexeq(jm_get(v, "prk"), prk, 32) && sbe2e_hkdf_expand(prk, c, nl, out, len) == 0 && hexeq(jm_get(v, "okm"), out, len);
+        CHECK(ok, "Vektor: HKDF-SHA256 RFC 5869 TC1");
+    }
+    /* AES-256-GCM TC13/14/16 */
+    {
+        static const char *tcs[3] = {"aes256gcm_tc13", "aes256gcm_tc14", "aes256gcm_tc16"};
+        for (i = 0; i < 3; i++) {
+            uint8_t key[32], iv[12], aad[64];
+            int pl, al;
+            v = jm_get(st, tcs[i]);
+            jm_hex(jm_get(v, "key"), key, 32);
+            jm_hex(jm_get(v, "iv"), iv, 12);
+            pl = jm_hex(jm_get(v, "pt"), c, sizeof c);
+            al = jm_hex(jm_get(v, "aad"), aad, sizeof aad);
+            ok = sbe2e_gcm(1, key, iv, aad, al, c, pl, out, tag) == 0 && hexeq(jm_get(v, "ct"), out, pl) &&
+                 hexeq(jm_get(v, "tag"), tag, 16);
+            ok = ok && sbe2e_gcm(0, key, iv, aad, al, out, pl, d, tag) == 0 && memcmp(d, c, (size_t)pl) == 0;
+            tag[0] ^= 1;
+            ok = ok && sbe2e_gcm(0, key, iv, aad, al, out, pl, d, tag) != 0;
+            _snprintf_s(name, sizeof name, _TRUNCATE, "Vektor: AES-256-GCM %s (versiegeln, oeffnen, falscher Tag)", tcs[i] + 10);
+            CHECK(ok, name);
+        }
+    }
+    /* SBT2: Ableitung */
+    sb = jm_get(js, "sbt2");
+    in = jm_get(sb, "inputs");
+    {
+        sbe2e_side sa_, sb_;
+        uint8_t apriv[32], bpriv[32], pn[16], pub[32], shared[32];
+        sbe2e_kp ka, kb;
+        sbe2e_link la, lb;
+        const char *A_ = jm_get(in, "a"), *B_ = jm_get(in, "b");
+        memset(&sa_, 0, sizeof sa_);
+        memset(&sb_, 0, sizeof sb_);
+        sa_.cid = (uint32_t)jm_num(jm_get(A_, "cid"));
+        sa_.account = (uint32_t)jm_num(jm_get(A_, "account"));
+        jm_str(jm_get(A_, "pilot"), sa_.pilot, sizeof sa_.pilot);
+        jm_hex(jm_get(A_, "pub"), sa_.pub, 32);
+        jm_hex(jm_get(A_, "priv"), apriv, 32);
+        sb_.cid = (uint32_t)jm_num(jm_get(B_, "cid"));
+        sb_.account = (uint32_t)jm_num(jm_get(B_, "account"));
+        jm_str(jm_get(B_, "pilot"), sb_.pilot, sizeof sb_.pilot);
+        jm_hex(jm_get(B_, "pub"), sb_.pub, 32);
+        jm_hex(jm_get(B_, "priv"), bpriv, 32);
+        jm_hex(jm_get(in, "pair_nonce"), pn, 16);
+        ok = sbe2e_transcript(th, (uint32_t)jm_num(jm_get(in, "lobby_id")), pn, &sa_, &sb_) == 0 &&
+             hexeq(jm_get(sb, "transcript_hash"), th, 32);
+        CHECK(ok, "Vektor: SBT2 Transkript-Hash");
+        ok = sbe2e_x25519(apriv, sb_.pub, shared) == 0 && hexeq(jm_get(sb, "shared"), shared, 32) &&
+             sbe2e_x25519(bpriv, sa_.pub, out) == 0 && memcmp(out, shared, 32) == 0;
+        sbe2e_hkdf_extract(th, 32, shared, 32, prk);
+        ok = ok && hexeq(jm_get(sb, "prk"), prk, 32);
+        sbe2e_hkdf_expand(prk, "sbt2 k lo>hi", 12, out, 32);
+        ok = ok && hexeq(jm_get(sb, "k_lohi"), out, 32);
+        sbe2e_hkdf_expand(prk, "sbt2 k hi>lo", 12, out, 32);
+        ok = ok && hexeq(jm_get(sb, "k_hilo"), out, 32);
+        CHECK(ok, "Vektor: SBT2 Z, PRK, k_lohi, k_hilo");
+        ok = sbe2e_kp_import(&ka, apriv, pub) == 0 && memcmp(pub, sa_.pub, 32) == 0 && sbe2e_kp_import(&kb, bpriv, pub) == 0 &&
+             sbe2e_derive(&ka, sb_.pub, th, sa_.cid, sb_.cid, &la) == 0 &&
+             sbe2e_derive(&kb, sa_.pub, th, sb_.cid, sa_.cid, &lb) == 0 &&
+             la.sid == (uint32_t)jm_num(jm_get(sb, "sid")) && lb.sid == la.sid;
+        CHECK(ok, "Vektor: SBT2 sid und Ableitung beider Seiten (sbe2e_derive)");
+        /* Punkte kleiner Ordnung -> Abbruch */
+        arr = jm_get(sb, "low_order_points");
+        k = 0;
+        for (i = 0; i < jm_len(arr); i++) {
+            sbe2e_link lx;
+            jm_hex(jm_idx(arr, i), b, 32);
+            if (sbe2e_derive(&ka, b, th, sa_.cid, sb_.cid, &lx) != 0 && !lx.valid) k++;
+            sbe2e_link_free(&lx);
+        }
+        CHECK(k == jm_len(arr) && k == 3, "Vektor: 3 Punkte kleiner Ordnung -> Ableitung abgelehnt");
+        /* Pakete: gueltige bitgenau versiegeln + oeffnen, ungueltige verwerfen */
+        arr = jm_get(sb, "packets");
+        for (i = 0; i < jm_len(arr); i++) {
+            const char *p = jm_idx(arr, i);
+            char kn[16];
+            int valid = jm_true(jm_get(p, "valid")), pl;
+            int lohi;
+            sbe2e_link rx, tx;
+            jm_str(jm_get(p, "name"), name, sizeof name);
+            jm_str(jm_get(p, "key"), kn, sizeof kn);
+            lohi = strcmp(kn, "k_lohi") == 0;
+            /* Empfaenger: k_lohi -> Seite hi (a, cid 9); Sender: lo (b) */
+            sbe2e_link_from_prk(prk, lohi ? 0 : 1, &rx);
+            sbe2e_link_from_prk(prk, lohi ? 1 : 0, &tx);
+            pl = jm_hex(jm_get(p, "packet"), c, sizeof c);
+            n = sbe2e_open(&rx, c, pl, d, sizeof d);
+            if (valid) {
+                uint64_t ctr = (uint64_t)jm_num(jm_get(p, "ctr"));
+                int tl = jm_hex(jm_get(p, "pt"), a, sizeof a);
+                ok = n == tl && memcmp(d, a, (size_t)tl) == 0;
+                tx.tx_ctr = ctr - 1;
+                k = sbe2e_seal(&tx, a, tl, out, sizeof out);
+                ok = ok && k == pl && memcmp(out, c, (size_t)pl) == 0;
+            } else {
+                ok = n < 0;
+            }
+            sbe2e_link_free(&rx);
+            sbe2e_link_free(&tx);
+            {
+                char msg[160];
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Vektor: SBT2-Paket \"%s\" %s", name,
+                            valid ? "bitgenau versiegelt und geoeffnet" : "verworfen");
+                CHECK(ok, msg);
+            }
+        }
+        sbe2e_link_free(&la);
+        sbe2e_link_free(&lb);
+        sbe2e_kp_free(&ka);
+        sbe2e_kp_free(&kb);
+    }
+    /* Wiederholungsfenster */
+    {
+        sbe2e_link w;
+        memset(&w, 0, sizeof w);
+        arr = jm_get(js, "replay");
+        ok = jm_len(arr) > 10;
+        for (i = 0; i < jm_len(arr); i++) {
+            const char *e = jm_idx(arr, i);
+            uint64_t ctr = (uint64_t)jm_num(jm_get(e, "ctr"));
+            int acc = sbe2e_win_check(&w, ctr) && jm_true(jm_get(e, "tag_ok"));
+            if (acc) sbe2e_win_commit(&w, ctr);
+            if (acc != jm_true(jm_get(e, "accept"))) {
+                ok = 0;
+                printf("  Fenster: Schritt %d ctr %llu falsch\n", i, (unsigned long long)ctr);
+            }
+        }
+        CHECK(ok, "Vektor: Wiederholungsfenster (Duplikat, verspaetet, zu alt, falscher Tag aendert nichts, ctr 0, 2^32+1)");
+    }
+    /* Gastfilter: Spieltabelle, TCP, UDP */
+    {
+        const char *f = jm_get(js, "filter"), *gl = jm_get(f, "game_len");
+        int typ, bad = 0;
+        for (typ = 0; typ < 0x40; typ++) {
+            char key[8];
+            uint8_t fr[8] = {0};
+            const char *e;
+            if (typ == 0x34) continue;
+            _snprintf_s(key, sizeof key, _TRUNCATE, "0x%02X", typ);
+            e = jm_get(gl, key);
+            fr[0] = (uint8_t)typ;
+            if (lguard_frame_len(fr, 8) != (e ? (int)jm_num(e) : 0)) bad++;
+        }
+        CHECK(bad == 0, "Vektor: Laengentabelle des Spiels (FUN_0004EFE0) identisch");
+        arr = jm_get(f, "tcp");
+        for (i = 0; i < jm_len(arr); i++) {
+            const char *e = jm_idx(arr, i), *ch = jm_get(e, "chunks"), *ou = jm_get(e, "out");
+            int okexp = jm_true(jm_get(e, "ok")), j, fail = 0, viol = 0;
+            lguard_tcp *g = (lguard_tcp *)malloc(sizeof *g);
+            lguard_tcp_init(g);
+            jm_str(jm_get(e, "name"), name, sizeof name);
+            for (j = 0; j < jm_len(ch); j++) {
+                int cl = jm_hex(jm_idx(ch, j), c, sizeof c), ol = jm_hex(jm_idx(ou, j), d, sizeof d);
+                k = lguard_tcp_feed(g, c, cl, out, sizeof out);
+                if (k < 0) {
+                    viol = 1;
+                    break;
+                }
+                if (k != ol || memcmp(out, d, (size_t)k) != 0) fail = 1;
+            }
+            free(g);
+            {
+                char msg[160];
+                _snprintf_s(msg, sizeof msg, _TRUNCATE, "Vektor: TCP-Filter \"%s\" %s", name, okexp ? "freigegeben" : "Verstoss");
+                CHECK(okexp ? (!viol && !fail) : viol, msg);
+            }
+            {
+                /* W339: derselbe Strom ueber den HLE-Hook-Pfad (lguard_walk_tcp ohne Puffer, wie recv mit MSG_PEEK),
+                 * einmal mit grossem Spielpuffer, einmal mit 7-Byte-Puffer (Rahmen werden mittendrin entnommen) */
+                static uint8_t all[16384];
+                int tot = 0, pass;
+                for (j = 0; j < jm_len(ch); j++) tot += jm_hex(jm_idx(ch, j), all + tot, (int)sizeof all - tot);
+                for (pass = 0; pass < 2; pass++) {
+                    lguard_walk w = {0};
+                    int pos = 0, wv = 0, why = 0;
+                    char msg[160];
+                    for (;;) {
+                        int kk = lguard_walk_tcp(&w, all + pos, tot - pos, 0, &why), take;
+                        if (kk < 0) {
+                            wv = 1;
+                            break;
+                        }
+                        if (kk == 0) break;
+                        take = pass ? (kk < 7 ? kk : 7) : kk;
+                        lguard_walk_advance(&w, all + pos, tot - pos, take);
+                        pos += take;
+                    }
+                    _snprintf_s(msg, sizeof msg, _TRUNCATE, "Vektor: Hook-Pfad%s \"%s\" %s", pass ? " (7-B-Puffer)" : "", name,
+                                okexp ? "freigegeben" : "Verstoss");
+                    CHECK(okexp ? (!wv && pos == tot) : wv, msg);
+                }
+            }
+        }
+        arr = jm_get(f, "udp");
+        for (i = 0; i < jm_len(arr); i++) {
+            const char *e = jm_idx(arr, i);
+            int dl = jm_hex(jm_get(e, "dgram"), c, sizeof c);
+            char msg[160];
+            jm_str(jm_get(e, "name"), name, sizeof name);
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "Vektor: UDP-Filter \"%s\"", name);
+            CHECK(lguard_udp_ok((uint16_t)jm_num(jm_get(e, "port")), c, dl) == jm_true(jm_get(e, "ok")), msg);
+        }
+    }
+    free(js);
+}
+
+
+/* W334: TLS-Pruefung gegen einen laufenden (Loopback-)Treffpunkt: Handshake mit Pin(s), bei Erfolg eine Zeile senden.
+ * --expect fail: Handshake MUSS scheitern und es darf kein Anwendungsbyte gesendet werden (Mitschnitt am Server). */
+static int tls_check(int argc, char **argv, const char *hp)
+{
+    char host[64], pins[200] = "", expect[8] = "ok", *ctx = NULL, *tok;
+    uint8_t pin[2][32];
+    int np = 0, i, r = SBTLS_WANT_IO, wrote = 0;
+    uint16_t port;
+    struct sockaddr_in a;
+    SOCKET s;
+    sbtls *t = NULL;
+    u_long nb = 1;
+    double t0;
+    locnet ln; /* startet Winsock ueber den Netz-Kern */
+    if (!locnet_init(&ln, "127.0.0.26", 47200, "none", 10, lg)) return 2;
+    memset(pin, 0, sizeof pin);
+    for (i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--spki") == 0 && i + 1 < argc) strncpy_s(pins, sizeof pins, argv[i + 1], _TRUNCATE);
+        if (strcmp(argv[i], "--expect") == 0 && i + 1 < argc) strncpy_s(expect, sizeof expect, argv[i + 1], _TRUNCATE);
+    }
+    for (tok = strtok_s(pins, ",", &ctx); tok && np < 2; tok = strtok_s(NULL, ",", &ctx)) {
+        if (strcmp(tok, "-") == 0) { np++; continue; } /* leerer Pin */
+        if (sbtls_parse_pin(tok, pin[np])) np++;
+    }
+    {
+        const char *cl = strrchr(hp, ':');
+        if (!cl || (size_t)(cl - hp) >= sizeof host) return 2;
+        memcpy(host, hp, (size_t)(cl - hp));
+        host[cl - hp] = 0;
+        port = (uint16_t)atoi(cl + 1);
+    }
+    a = sa(ip4(host), port);
+    s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (connect(s, (struct sockaddr *)&a, sizeof a) != 0) {
+        printf("tls_check: connect fehlgeschlagen\n");
+        return 2;
+    }
+    ioctlsocket(s, (long)FIONBIO, &nb);
+    if (sbtls_client_new(&t, s, "relay.steelbound.dev", (const uint8_t(*)[32])pin, np > 0 ? np : 1) == SBTLS_OK) {
+        t0 = now_ms();
+        while ((r = sbtls_handshake(t)) == SBTLS_WANT_IO && now_ms() - t0 < 10000) Sleep(5);
+    } else {
+        r = SBTLS_FAIL;
+    }
+    if (r == SBTLS_OK) {
+        char line[] = "{\"t\":\"ping\"}\n", rb[256];
+        int k = 0;
+        wrote = sbtls_write(t, line, (int)strlen(line)) == SBTLS_OK;
+        t0 = now_ms();
+        while (now_ms() - t0 < 3000 && (k = sbtls_read(t, rb, sizeof rb - 1)) == SBTLS_WANT_IO) Sleep(5);
+        printf("tls_check: verbunden (%s), Antwort %d Byte\n", sbtls_version(t), k > 0 ? k : 0);
+    } else {
+        /* Versuch, trotzdem zu schreiben: muss abgelehnt werden (kein Anwendungsbyte vor bestandener Pruefung) */
+        wrote = t && sbtls_write(t, "x", 1) == SBTLS_OK;
+        printf("tls_check: abgelehnt (%s)%s\n", sbtls_error(t), t && sbtls_pin_failed(t) ? " [Pin]" : "");
+    }
+    sbtls_free(t);
+    closesocket(s);
+    locnet_shutdown(&ln);
+    if (strcmp(expect, "fail") == 0) return (r != SBTLS_OK && !wrote) ? 0 : 1;
+    return (r == SBTLS_OK && wrote) ? 0 : 1;
+}
+
+/* ---------- W335 NET-AUDIT: Regressionstests der Client-Befunde N1-N3 ---------- */
+/* W350: Abgang ueber den eigenen Transport: Strom-FIN (S_FIN) bzw. Ende des Mitspielers (BYE) -> der Stellvertreter
+ * schliesst den Strom zum Spiel; das Spiel sieht WSAECONNRESET. Wiederbeitritt dazwischen erbt nichts. */
+static void w350_tun_tests(void)
+{
+    static const char ka[4] = {0x37, 0, 0, 0};
+    tun_pair P;
+    SOCKET acon, bacc, blis;
+    char b[64];
+    int k, e, i;
+    u_long nb = 1;
+    if (!tun_pair_start(&P, 42000, NULL, NULL, 0, 0)) {
+        CHECK(0, "W350 Transport: Verbindung A<->B steht");
+        tun_pair_stop(&P);
+        return;
+    }
+    if (!tun_tcp(&P, &acon, &bacc, &blis)) {
+        CHECK(0, "W350 Transport: TCP ueber den Transport");
+        tun_pair_stop(&P);
+        return;
+    }
+    ioctlsocket(bacc, (long)FIONBIO, &nb);
+    locnet_send(&P.A, acon, ka, 4, 0);
+    k = w350_recv(&P.B, bacc, b, sizeof b, 2000, &e);
+    CHECK(k == 4 && b[0] == 0x37, "W350 Transport: Rahmen ueber den Strom");
+    locnet_closesocket(&P.A, acon); /* Abgang: S_FIN durch den Transport */
+    k = w350_recv(&P.B, bacc, b, sizeof b, 3000, &e);
+    CHECK(k == SOCKET_ERROR && e == WSAECONNRESET, "W350 Transport: Strom-FIN des Mitspielers -> WSAECONNRESET beim Host");
+    locnet_closesocket(&P.B, bacc);
+    /* Wiederbeitritt, dann Ende des Mitspielers (BYE, Verbindung weg) */
+    {
+        struct sockaddr_in to = sa(P.B.self_ip, 1000);
+        acon = locnet_socket(&P.A, AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        locnet_connect(&P.A, acon, (struct sockaddr *)&to, sizeof to);
+    }
+    bacc = INVALID_SOCKET;
+    for (i = 0; i < 300 && bacc == INVALID_SOCKET; i++) {
+        struct sockaddr_in r;
+        int rl = sizeof r;
+        bacc = locnet_accept(&P.B, blis, (struct sockaddr *)&r, &rl);
+        if (bacc == INVALID_SOCKET) Sleep(10);
+    }
+    CHECK(bacc != INVALID_SOCKET, "W350 Transport: Wiederbeitritt (neuer Strom angenommen)");
+    if (bacc != INVALID_SOCKET) {
+        ioctlsocket(bacc, (long)FIONBIO, &nb);
+        locnet_send(&P.A, acon, ka, 4, 0);
+        k = w350_recv(&P.B, bacc, b, sizeof b, 2000, &e);
+        CHECK(k == 4 && b[0] == 0x37, "W350 Transport: neuer Strom erbt keinen Abgang (Rahmen kommt an)");
+        locnet_shutdown(&P.A); /* Mitspieler hart weg (Prozessende: kein BYE, kein FIN) */
+        k = w350_recv(&P.B, bacc, b, sizeof b, 1000, &e);
+        CHECK(k == SOCKET_ERROR && (e == WSAEWOULDBLOCK || e == WSAECONNRESET),
+              "W350 Transport: Mitspieler hart weg -> Strom still oder Reset, nie recv 0 (Original: 300 stille Polls entfernen)");
+        locnet_closesocket(&P.B, bacc);
+    } else {
+        locnet_shutdown(&P.A);
+    }
+    closesocket(blis);
+    locnet_shutdown(&P.B);
+}
+
+static void w335_tests(void)
+{
+    locnet B;
+    fpeer f;
+    loctun_cfg c;
+    struct sockaddr_in a;
+    u_long nb = 1;
+    int i;
+    /* N1: Testweg (loc_transport_peers, Schluessel oeffentlich bekannt) nie zusammen mit einem Treffpunkt.
+     * Vorher: B stach zum Test-Mitspieler durch und nahm dessen HELLO an. */
+    memset(&f, 0, sizeof f);
+    if (!locnet_init(&B, "127.0.0.45", 44000, "none", 10, lg)) {
+        CHECK(0, "W335 N1: Instanz");
+        return;
+    }
+    f.s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    a = sa(htonl(INADDR_LOOPBACK), 44950);
+    bind(f.s, (struct sockaddr *)&a, sizeof a);
+    ioctlsocket(f.s, (long)FIONBIO, &nb);
+    sbe2e_link_test(0, &f.e2e);
+    loctun_cfg_default(&c);
+    c.port = 44900;
+    c.proxy_base = 45000;
+    c.allow_public = 1; /* wie loc_net.c mit loc_lobby */
+    strcpy_s(c.peers, sizeof c.peers, "127.0.0.1:44950");
+    strcpy_s(c.lobby, sizeof c.lobby, "127.0.0.1:44999"); /* kein Treffpunkt erreichbar - genuegt */
+    B.tun = loctun_start(&c, &B, NULL, lg);
+    CHECK(B.tun != NULL, "W335 N1: Transport startet mit Treffpunkt + loc_transport_peers");
+    if (B.tun) {
+        fp_pump(&f, 600);
+        f.b = sa(htonl(INADDR_LOOPBACK), 44900);
+        f.have_b = 1;
+        f.vip = ip4("127.0.0.46");
+        for (i = 0; i < 20; i++) {
+            fp_hello(&f);
+            fp_pump(&f, 10);
+        }
+        CHECK(f.probes_seen == 0 && loctun_links_up(B.tun) == 0,
+              "W335 N1: Testweg mit Treffpunkt nicht aktiv (kein Durchstich, HELLO mit Testschluessel verworfen)");
+    }
+    gt_stop(&B, &f);
+
+    /* N3: UDP ueber recv wie recvfrom - abgeschnittene Datagramme nie zum Spiel, abgelehnte auch bei MSG_PEEK
+     * verbraucht. Vorher: WSAEMSGSIZE mit ungeprueftem Anfang im Puffer; ein abgelehntes gepeektes Datagramm
+     * blieb vorn in der Warteschlange. */
+    if (locnet_init(&B, "127.0.0.47", 46000, "none", 10, lg)) {
+        SOCKET g = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP), tx = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        struct sockaddr_in ga = sa(ip4("127.0.0.47"), 46201); /* Spielport 1201 */
+        uint8_t big[200], ok1[0x14], bad[0x14], buf[256];
+        int r, e, zero = 1;
+        bind(g, (struct sockaddr *)&ga, sizeof ga);
+        ioctlsocket(g, (long)FIONBIO, &nb);
+        memset(big, 0x41, sizeof big);
+        big[0] = 1;
+        big[1] = 0;
+        memset(ok1, 0, sizeof ok1);
+        ok1[0] = 1;
+        memset(bad, 0, sizeof bad);
+        bad[0] = 9; /* Typ 0x09: nicht in der Positivliste */
+        sendto(tx, (const char *)big, sizeof big, 0, (struct sockaddr *)&ga, sizeof ga);
+        Sleep(20);
+        memset(buf, 0, sizeof buf);
+        r = locnet_recv(&B, g, (char *)buf, 0x14, 0);
+        e = WSAGetLastError();
+        for (i = 0; i < 0x14; i++) zero &= buf[i] == 0;
+        CHECK(r == SOCKET_ERROR && e == WSAEWOULDBLOCK && zero, "W335 N3: abgeschnittenes UDP-Datagramm (recv) nie zum Spiel");
+        sendto(tx, (const char *)bad, sizeof bad, 0, (struct sockaddr *)&ga, sizeof ga);
+        sendto(tx, (const char *)ok1, sizeof ok1, 0, (struct sockaddr *)&ga, sizeof ga);
+        Sleep(20);
+        r = locnet_recv(&B, g, (char *)buf, sizeof buf, MSG_PEEK);
+        CHECK(r == 0x14 && buf[0] == 1, "W335 N3: abgelehntes Datagramm bei MSG_PEEK verbraucht, gueltiges folgt");
+        r = locnet_recv(&B, g, (char *)buf, sizeof buf, 0);
+        CHECK(r == 0x14, "W335 N3: gueltiges Datagramm (recv) unveraendert");
+        closesocket(g);
+        closesocket(tx);
+
+        /* N2: Zustandstabelle des HLE-TCP-Filters voll -> fail closed (vorher: Zustand eines fremden Sockets
+         * verdraengt, Rahmengrenze vergessen). */
+        {
+            SOCKET ss[100];
+            int n = 0, reset_at = -1;
+            for (i = 0; i < 100; i++) {
+                ss[i] = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+                n = i + 1;
+                r = locnet_recv(&B, ss[i], (char *)buf, 16, 0);
+                if (r == SOCKET_ERROR && WSAGetLastError() == WSAECONNRESET) {
+                    reset_at = i;
+                    break;
+                }
+            }
+            CHECK(reset_at >= 0 && reset_at <= 64, "W335 N2: volle Filtertabelle trennt den neuen Socket (fail closed)");
+            for (i = 0; i < n; i++) locnet_closesocket(&B, ss[i]);
+        }
+        locnet_shutdown(&B);
+    } else {
+        CHECK(0, "W335 N3: Instanz");
+    }
+}
+
+/* ---------- W332 SEC-HARDEN: Treffpunkt-Attrappe (TCP-Zeilen auf Loopback), Funde aus dem Fuzzing ---------- */
+static SOCKET fl_accept(SOCKET lis, int ms)
+{
+    return fp_tcp_pending(lis, ms) ? accept(lis, NULL, NULL) : INVALID_SOCKET;
+}
+
+/* Eine Zeile (ohne '\n') lesen; -1 = keine vollstaendige Zeile in ms, -2 = Verbindung zu. */
+static int fl_line(SOCKET c, char *buf, int cap, int ms)
+{
+    double t0 = now_ms();
+    int o = 0;
+    for (;;) {
+        double left = ms - (now_ms() - t0);
+        char ch;
+        int k;
+        if (left <= 0 || !fp_tcp_pending(c, (int)left + 1)) return -1;
+        k = recv(c, &ch, 1, 0);
+        if (k <= 0) return -2;
+        if (ch == '\n') {
+            buf[o] = 0;
+            return o;
+        }
+        if (o < cap - 1) buf[o++] = ch;
+    }
+}
+
+/* Datagramme am Beobachter (UDP-Port des Treffpunkts) zaehlen, die mit "SBN1" beginnen. */
+static int fl_udp_count(SOCKET u, int ms)
+{
+    double t0 = now_ms();
+    int n = 0;
+    do {
+        char b[256];
+        int k;
+        while ((k = recv(u, b, sizeof b, 0)) > 0) {
+            if (k >= 5 && memcmp(b, "SBN1", 4) == 0) n++;
+        }
+        if (ms > 0) Sleep(5);
+    } while (now_ms() - t0 < ms);
+    return n;
+}
+
+static void fl_send(SOCKET c, const char *s)
+{
+    send(c, s, (int)strlen(s), 0);
+}
+
+/* W332 (nach W334 auf Protokoll v2 umgestellt): Treffpunkt-Attrappe im Klartext. Der Client spricht den
+ * Steuerkanal nur noch per TLS mit SPKI-Pin (W334). Gepruefte Sicherheitsgrenze:
+ *  a) ohne Pin: gar keine Verbindung zum Treffpunkt (kein ungepruefter Kanal);
+ *  b) mit Pin gegen einen Klartext-Dienst: nur ein TLS-ClientHello, nie ein Klartext-hello; ein Klartext-
+ *     welcome der Attrappe wird nicht uebernommen (Client trennt, kein UDP-BIND, kein lobby_list).
+ * Die alte Klartext-Pruefung "Sitzung erst nach gueltigem welcome" deckt jetzt der welcome-Handler von W334 ab
+ * (alle Felder geprueft, bevor client_id/udp_key uebernommen werden). */
+static int fl_raw(SOCKET c, char *buf, int cap, int ms)
+{
+    double t0 = now_ms();
+    int o = 0;
+    while (o < cap && now_ms() - t0 < ms) {
+        int k;
+        if (!fp_tcp_pending(c, 50)) {
+            if (o > 0) break;
+            continue;
+        }
+        k = recv(c, buf + o, cap - o, 0);
+        if (k <= 0) return o > 0 ? o : -2;
+        o += k;
+    }
+    return o;
+}
+
+static int fl_has(const char *b, int n, const char *needle)
+{
+    int i, l = (int)strlen(needle);
+    for (i = 0; i + l <= n; i++)
+        if (memcmp(b + i, needle, (size_t)l) == 0) return 1;
+    return 0;
+}
+
+static void tun_lobby_guard_tests(void)
+{
+    locnet B;
+    loctun_cfg c;
+    struct sockaddr_in a;
+    u_long nb = 1;
+    char buf[4096];
+    SOCKET lis, uobs, con;
+    int k, pass, n0 = s_n, ok0 = s_ok;
+    SetEnvironmentVariableA("SB_STEELNET_SPKI", NULL); /* nur die Konfiguration dieses Tests zaehlt */
+    lis = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    a = sa(htonl(INADDR_LOOPBACK), 46970);
+    bind(lis, (struct sockaddr *)&a, sizeof a);
+    listen(lis, 4);
+    uobs = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    a = sa(htonl(INADDR_LOOPBACK), 46971);
+    bind(uobs, (struct sockaddr *)&a, sizeof a);
+    ioctlsocket(uobs, (long)FIONBIO, &nb);
+    for (pass = 0; pass < 2; pass++) {
+        if (!locnet_init(&B, pass ? "127.0.0.49" : "127.0.0.48", (uint16_t)(46000 + 100 * pass), "none", 10, lg)) {
+            CHECK(0, "W332: Instanz B startet");
+            break;
+        }
+        loctun_cfg_default(&c);
+        c.port = (uint16_t)(46900 + 10 * pass);
+        c.proxy_base = (uint16_t)(46500 + 100 * pass);
+        strcpy_s(c.lobby, sizeof c.lobby, "127.0.0.1:46970");
+        if (pass) /* irgendein Pin: die Attrappe kann ihn nie erfuellen */
+            strcpy_s(c.spki, sizeof c.spki, "00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff");
+        B.tun = loctun_start(&c, &B, NULL, lg);
+        if (!B.tun) {
+            CHECK(0, "W332: Transport B mit Treffpunkt-Attrappe startet");
+            locnet_shutdown(&B);
+            break;
+        }
+        fl_udp_count(uobs, 0);
+        con = fl_accept(lis, pass ? 4000 : 2500);
+        if (!pass) {
+            CHECK(con == INVALID_SOCKET, "W332: ohne Server-Pin keine Verbindung zum Treffpunkt");
+            if (con != INVALID_SOCKET) closesocket(con);
+        } else {
+            CHECK(con != INVALID_SOCKET, "W332: mit Pin baut der Client die Verbindung auf");
+            if (con != INVALID_SOCKET) {
+                k = fl_raw(con, buf, sizeof buf, 3000);
+                CHECK(k > 5 && (unsigned char)buf[0] == 0x16 && (unsigned char)buf[1] == 0x03,
+                      "W332: erstes Paket ist ein TLS-ClientHello");
+                CHECK(k > 0 && !fl_has(buf, k, "\"t\":\"hello\"") && !fl_has(buf, k, "\"pilot\""),
+                      "W332: kein Klartext-hello an einen Dienst ohne TLS");
+                fl_send(con, "{\"t\":\"welcome\",\"v\":2,\"client_id\":42,\"udp_key\":"
+                             "\"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\","
+                             "\"udp_port\":46971,\"pilot\":\"Guest-X\"}\n");
+                k = fl_raw(con, buf, sizeof buf, 3000);
+                CHECK(k == -2 || (k >= 0 && !fl_has(buf, k, "lobby_list")),
+                      "W332: Klartext-welcome nicht uebernommen (kein lobby_list, Client trennt)");
+                CHECK(fl_udp_count(uobs, 1000) == 0, "W332: Klartext-welcome -> kein UDP-BIND");
+                closesocket(con);
+            }
+        }
+        locnet_shutdown(&B);
+    }
+    closesocket(lis);
+    closesocket(uobs);
+    printf("W332: Treffpunkt-Attrappe (TLS-Pflicht): %d/%d OK\n", s_ok - ok0, s_n - n0);
 }
 
 /* --lobby host:port [--nodirect] [--sim SPEC]: zwei Instanzen ueber einen laufenden steelnet-Treffpunkt. */
@@ -995,6 +2239,47 @@ static int tun_lobby_test(const char *lobby, int nodirect, const char *simspec)
     return s_ok == s_n ? 0 : 1;
 }
 
+/* W357 LOC-PAUSE-NET (sb_pausenet.h): Netzspiel-Erkennung und Regel "Overlays halten den Takt nicht an". */
+static void pause_net_tests(void)
+{
+    sb_pn_live_t s;
+    int w, n0 = s_n, k0 = s_ok;
+    memset(&s, 0, sizeof s);
+    /* Netz aus / erster Zaehlerstand ist nur Bezug */
+    CHECK(sb_pn_live_step(&s, 1000, 50, 0, 0, 1, 0) == 0, "W357: Netz aus -> kein Mitspieler");
+    CHECK(sb_pn_live_step(&s, 1000, 50, 0, 0, 1, 1) == 0, "W357: erster rx-Stand ist kein Lebenszeichen");
+    CHECK(sb_pn_live_step(&s, 1500, 50, 0, 0, 1, 1) == 0, "W357: rx unveraendert -> allein");
+    CHECK(sb_pn_live_step(&s, 1800, 52, 0, 0, 0, 1) == 0, "W357: Empfang ohne Spiel-Strom (allein) -> kein Mitspieler");
+    CHECK(sb_pn_live_step(&s, 2000, 51, 0, 0, 1, 1) == 1, "W357: Empfang -> verbunden");
+    CHECK(sb_pn_live_step(&s, 2000 + SB_PN_HOLD_MS - 1, 51, 0, 0, 1, 1) == 1, "W357: innerhalb der Haltezeit verbunden");
+    CHECK(sb_pn_live_step(&s, 2000 + SB_PN_HOLD_MS + 1, 51, 0, 0, 1, 1) == 0, "W357: nach der Haltezeit allein");
+    CHECK(sb_pn_live_step(&s, 9000, 51, 1, 0, 1, 1) == 1, "W357: Transport-Verbindung -> verbunden");
+    CHECK(sb_pn_live_step(&s, 9000, 51, 0, 8500 | 1, 1, 1) == 1, "W357: eigener Lockstep-Rahmen -> verbunden");
+    CHECK(sb_pn_live_step(&s, 0xFFFFFF00u, 51, 0, (long)0xFFFFFE00u, 1, 1) == 1, "W357: GetTickCount-Ueberlauf");
+    CHECK(sb_pn_live_step(&s, 100, 51, 0, (long)0xFFFFFF00u, 1, 1) == 1, "W357: Lockstep ueber den Ueberlauf");
+    CHECK(sb_pn_live_step(&s, 20000, 51, 0, 20001, 1, 1) == 1, "W357: Lockstep-Stempel |1 (1 ms voraus)");
+    CHECK(sb_pn_live_step(&s, 100, 51, 0, 0, 1, 0) == 0 && !s.seen, "W357: Netz aus setzt zurueck");
+    /* Schalter */
+    CHECK(sb_pn_net(0, 1, 1) == 0, "W357: pause_net=0 -> immer wie bisher");
+    CHECK(sb_pn_net(1, 1, 1) == 1, "W357: pause_net=1, LoC + Mitspieler -> Netzspiel");
+    CHECK(sb_pn_net(1, 0, 1) == 0, "W357: pause_net=1, SB -> kein Netzspiel");
+    CHECK(sb_pn_net(1, 1, 0) == 0, "W357: pause_net=1, LoC allein -> kein Netzspiel");
+    CHECK(sb_pn_net(2, 0, 0) == 1, "W357: pause_net=2 (TEST) -> Netzspiel");
+    /* Regel ohne Netz: unveraendert (Pause wie bisher, ESC nach menu_pause) */
+    CHECK(sb_pn_policy(SB_PN_ESC, 0, 1) == SB_PN_PAUSE, "W357: allein ESC pausiert");
+    CHECK(sb_pn_policy(SB_PN_ESC, 0, 0) == SB_PN_RUN, "W357: allein ESC mit menu_pause=0 laeuft");
+    for (w = SB_PN_PAUSEKEY; w < SB_PN_N; w++) CHECK(sb_pn_policy(w, 0, 1) == SB_PN_PAUSE, "W357: allein pausiert alles");
+    /* Regel im Netzspiel */
+    CHECK(sb_pn_policy(SB_PN_ESC, 1, 1) == SB_PN_RUN, "W357: Netz ESC laeuft weiter");
+    CHECK(sb_pn_policy(SB_PN_FEEDBACK, 1, 1) == SB_PN_RUN, "W357: Netz F11 laeuft weiter");
+    CHECK(sb_pn_policy(SB_PN_WELCOME, 1, 1) == SB_PN_RUN, "W357: Netz Alpha-Hinweis laeuft weiter");
+    CHECK(sb_pn_policy(SB_PN_PAUSEKEY, 1, 1) == SB_PN_BLOCK, "W357: Netz Pause-Taste gesperrt");
+    CHECK(sb_pn_policy(SB_PN_PHOTO, 1, 1) == SB_PN_BLOCK, "W357: Netz Fotomodus gesperrt");
+    CHECK(sb_pn_policy(SB_PN_QSHOT, 1, 1) == SB_PN_ASYNC, "W357: Netz Schnell-Screenshot asynchron");
+    for (w = 0; w < SB_PN_N; w++) CHECK(sb_pn_policy(w, 1, 0) != SB_PN_PAUSE, "W357: Netz pausiert nie");
+    printf("W357 pause_net: %d/%d OK\n", s_ok - k0, s_n - n0);
+}
+
 int main(int argc, char **argv)
 {
     locnet A, B, C, X1, X2;
@@ -1008,6 +2293,17 @@ int main(int argc, char **argv)
     for (i = 1; i < argc; i++) { /* W324: --lobby host:port [--nodirect] [--sim SPEC] */
         if (strcmp(argv[i], "-v") == 0) s_verbose = 1;
     }
+    for (i = 1; i < argc; i++) { /* W334: --vectors <pfad>: Krypto/Filter gegen sbt2_vectors.json */
+        if (strcmp(argv[i], "--vectors") == 0 && i + 1 < argc) {
+            sec_unit_tests();
+            vector_tests(argv[i + 1], 1);
+            printf("loc_net_selftest --vectors: %d/%d OK\n", s_ok, s_n);
+            return s_ok == s_n ? 0 : 1;
+        }
+    }
+    for (i = 1; i < argc; i++) { /* W334: --tls-check host:port --spki HEX[,HEX2] --expect ok|fail */
+        if (strcmp(argv[i], "--tls-check") == 0 && i + 1 < argc) return tls_check(argc, argv, argv[i + 1]);
+    }
     for (i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--lobby") == 0 && i + 1 < argc) {
             int nd = 0, j;
@@ -1017,6 +2313,7 @@ int main(int argc, char **argv)
                 if (strcmp(argv[j], "--sim") == 0 && j + 1 < argc) sp = argv[j + 1];
                 if (strcmp(argv[j], "--auth-a") == 0 && j + 1 < argc) strncpy_s(s_auth_a, sizeof s_auth_a, argv[j + 1], _TRUNCATE);
                 if (strcmp(argv[j], "--auth-b") == 0 && j + 1 < argc) strncpy_s(s_auth_b, sizeof s_auth_b, argv[j + 1], _TRUNCATE);
+                if (strcmp(argv[j], "--spki") == 0 && j + 1 < argc) strncpy_s(s_spki, sizeof s_spki, argv[j + 1], _TRUNCATE);
             }
             return tun_lobby_test(argv[i + 1], nd, sp);
         }
@@ -1095,15 +2392,45 @@ int main(int argc, char **argv)
         memset(buf, 0x5A, 0x2C4);
         buf[0] = 3;
         buf[1] = 0;
+        /* W339: Inhaltsregeln Stufe 2 - Gamertag mit NUL, Portrait im Bereich, Pilotname mit NUL */
+        buf[0x1F] = 0;
+        buf[0x20 + 5] = 0;
+        buf[0x20 + 0x26] = 0;
+        buf[0x20 + 0x27] = 0;
+        buf[0x20 + 0x28 + 22] = 0;
         k = locnet_sendto(&A, a1202, buf, 0x2C4, 0, (struct sockaddr *)&to, sizeof to);
         CHECK(k == 0x2C4, "Beitrittsanfrage gesendet");
     }
     k = poll_recvfrom(&B, b1202, buf, sizeof buf, &from);
     CHECK(k == 0x2C4 && buf[0] == 3, "Host empfaengt die Beitrittsanfrage");
     CHECK(from.sin_addr.s_addr == A.self_ip && ntohs(from.sin_port) == 1202, "Antwortadresse 127.0.0.21:1202");
-    k = locnet_sendto(&B, b1202, "\x06\x00", 2, 0, (struct sockaddr *)&from, sizeof from);
+    memset(buf, 0, 0x308);
+    buf[0] = 6; /* W334: Typ 6 (angenommen) hat 0x308 B - kuerzer verwirft der Gastfilter */
+    k = locnet_sendto(&B, b1202, buf, 0x308, 0, (struct sockaddr *)&from, sizeof from);
     k = poll_recvfrom(&A, a1202, buf, sizeof buf, &from);
-    CHECK(k == 2 && buf[0] == 6, "Antwort des Hosts kommt an");
+    CHECK(k == 0x308 && buf[0] == 6, "Antwort des Hosts kommt an");
+    {
+        LONG g0 = A.st.guard;
+        struct sockaddr_in toA = sa(A.self_ip, 1202);
+        k = locnet_sendto(&B, b1202, "\x06\x00", 2, 0, (struct sockaddr *)&toA, sizeof toA);
+        k = poll_recvfrom(&A, a1202, buf, sizeof buf, &from);
+        CHECK(k < 0 && A.st.guard > g0, "W334: Gastfilter in recvfrom - Typ 6 mit falscher Laenge erreicht das Spiel nie");
+    }
+    {
+        /* W339: Zustandspruefung fuer UDP (0x38 nur von einem Absender mit Platz in der Spielertabelle, loc_net.c) */
+        LONG g0 = A.st.guard;
+        struct sockaddr_in toA = sa(A.self_ip, 1202);
+        char f38[8] = {0x38, 0, 0, 0, 1, 0, 0, 0};
+        locnet_set_udp_state_check(w339_reject_38);
+        k = locnet_sendto(&B, b1202, f38, 8, 0, (struct sockaddr *)&toA, sizeof toA);
+        k = poll_recvfrom(&A, a1202, buf, sizeof buf, &from);
+        CHECK(k < 0 && A.st.guard > g0 && s_w339_from == B.self_ip,
+              "W339: 0x38 von unbekanntem Absender verworfen (Zustandspruefung sieht die Absenderadresse)");
+        locnet_set_udp_state_check(NULL);
+        k = locnet_sendto(&B, b1202, f38, 8, 0, (struct sockaddr *)&toA, sizeof toA);
+        k = poll_recvfrom(&A, a1202, buf, sizeof buf, &from);
+        CHECK(k == 8 && buf[0] == 0x38, "W339: 0x38 ohne Zustandspruefung zugestellt (Gegenprobe)");
+    }
 
     /* --- VDP 1203 (Protokoll 0xFE) --- */
     bvdp = game_udp(&B, 1203, 0xFE);
@@ -1136,6 +2463,7 @@ int main(int argc, char **argv)
     CHECK(bacc != INVALID_SOCKET, "Host nimmt die Verbindung an");
     memset(buf, 0, 26);
     buf[0] = 0x34; /* 0x34: 26 B je Tick und Peer */
+    buf[4] = 1;
     k = locnet_sendto(&A, acon, buf, 26, 0, NULL, 0);
     CHECK(k == 26, "0x34-Rahmen ueber sendto(NULL) auf TCP");
     k = recv_all(bacc, buf, 26);
@@ -1143,6 +2471,9 @@ int main(int argc, char **argv)
     for (i = 0; i < (int)sizeof big; i++) {
         big[i] = (char)(i * 7);
     }
+    big[0] = 0x22; /* W334: Typ 0x22 = 0x100C B */
+    big[4] = 0; big[5] = 0x10; big[6] = 0; big[7] = 0; /* W339: Blocklaenge 0x1000 */
+    big[1] = 0;
     k = send(bacc, big, sizeof big, 0);
     CHECK(k == (int)sizeof big, "0x100C-Rahmen gesendet");
     k = recv_all(acon, buf, (int)sizeof big);
@@ -1202,13 +2533,29 @@ int main(int argc, char **argv)
     locnet_shutdown(&X2);
 
     netsim_tests(); /* W322 */
+    sec_unit_tests(); /* W334 */
+    hle_recv_tests(); /* W334 */
+    w350_tests();     /* W350 LOC-REJOIN */
+    {
+        /* W334: Vektoren am Standardort (Exe in harness/build/Release) */
+        char vp[MAX_PATH], *sl;
+        GetModuleFileNameA(NULL, vp, sizeof vp);
+        sl = strrchr(vp, '\\');
+        if (sl) *sl = 0;
+        strcat_s(vp, sizeof vp, "\\..\\..\\..\\net\\tools\\sbt2_vectors.json");
+        vector_tests(vp, 0);
+    }
     if (loctun_available()) {
         tun_tests(); /* W324 */
         tun_guard_tests(); /* W329 */
+        w335_tests();      /* W335 NET-AUDIT */
+        w350_tun_tests();  /* W350 LOC-REJOIN */
+        tun_lobby_guard_tests(); /* W332 */
     } else {
         printf("Hinweis: eigener Transport nur in der privaten Fassung - Transport-Pruefungen uebersprungen\n");
     }
 
+    pause_net_tests(); /* W357 */
     printf("loc_net_selftest: %d/%d OK\n", s_ok, s_n);
     return s_ok == s_n ? 0 : 1;
 }

@@ -1,4 +1,5 @@
 #pragma once
+#include <stdint.h> /* W341: uintptr_t/intptr_t */
 /* input_mouse.h - W79 INPUT-REAL: echte Maus/Tastatur im Spielerbetrieb.
  *
  * input_source=1: echte Tasten + Maustasten aus Fenster-Nachrichten
@@ -61,6 +62,12 @@ unsigned imouse_wheel_mask(unsigned frame, int blocked);
 /* 1 = Client-Fenster hat den Fokus (Fenster-Eingabe installiert: logischer
  * Fokus aus Nachrichten/Test-Hook; sonst Vordergrundfenster). */
 int imouse_has_focus(void);
+
+/* W341 TEST (nur input_test_hook=1): Nachricht ans eigene Client-Fenster (PostMessage, kein Fokus).
+ * 0 = Fenster-Eingabe noch nicht installiert. */
+int imouse_test_post(unsigned msg, uintptr_t wp, intptr_t lp);
+/* W341: 1 = Maus gefangen (Raw-Deltas wirken aufs Zielen). */
+int imouse_captured(void);
 
 /* input_source=1: Nachrichten-Zustand der Taste vk (0..255) im Spiel-Frame
  * frame (gedrueckt oder kurzer Tipp juenger als 2 Frames). */

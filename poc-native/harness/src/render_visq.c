@@ -140,7 +140,7 @@ void sb_visq_draw_diag(const im_vertex_t *v, unsigned n, int rhw, unsigned prim,
     if (g_ctx) { ID3D11DeviceContext_RSGetViewports(g_ctx, &nvp, &vp); }
     g_vq_onscr = v[0].pos[0] >= vp.TopLeftX && v[0].pos[0] < vp.TopLeftX + vp.Width &&
                  v[0].pos[1] >= vp.TopLeftY && v[0].pos[1] < vp.TopLeftY + vp.Height && v[0].pos[2] >= 0.0f && v[0].pos[2] <= 1.0f;
-    _snprintf(g_vq_dd, sizeof g_vq_dd - 1u, "prim=%u n=%u rhw=%d zt=%d pos=(%.3f %.3f %.6f %.4f) col=(%.2f %.2f %.2f %.2f) tex=0x%X rt=%d %ux%u vp=(%.0f %.0f %.0f %.0f z %.2f..%.2f) zf=0x%X zen=0x%X dmask=%u cmask=0x%X at=%u/0x%X/%u",
+    _snprintf_s(g_vq_dd, sizeof g_vq_dd, _TRUNCATE, "prim=%u n=%u rhw=%d zt=%d pos=(%.3f %.3f %.6f %.4f) col=(%.2f %.2f %.2f %.2f) tex=0x%X rt=%d %ux%u vp=(%.0f %.0f %.0f %.0f z %.2f..%.2f) zf=0x%X zen=0x%X dmask=%u cmask=0x%X at=%u/0x%X/%u",
            prim, n, rhw, sb_visq_ztest(), v[0].pos[0], v[0].pos[1], v[0].pos[2], v[0].pos[3],
            v[0].col[0], v[0].col[1], v[0].col[2], v[0].col[3], tex,
            rtt_active() ? g_rtt_bound : -1, rtt_active() ? g_rtt[g_rtt_bound].w : 0u, rtt_active() ? g_rtt[g_rtt_bound].h : 0u,
@@ -149,7 +149,7 @@ void sb_visq_draw_diag(const im_vertex_t *v, unsigned n, int rhw, unsigned prim,
            fx_nv(0x300u, 0u), fx_nv(0x33Cu, 0x207u), fx_nv(0x340u, 0u));
     {
         size_t l = strlen(g_vq_dd);
-        _snprintf(g_vq_dd + l, sizeof g_vq_dd - 1u - l, " vs=0x%X em=%d rowe=%d raw=(%.2f %.2f %.2f %.2f) m0=(%.3f %.3f %.3f %.3f) m3=(%.3f %.3f %.3f %.3f)",
+        _snprintf_s(g_vq_dd + l, sizeof g_vq_dd - l, _TRUNCATE, " vs=0x%X em=%d rowe=%d raw=(%.2f %.2f %.2f %.2f) m0=(%.3f %.3f %.3f %.3f) m3=(%.3f %.3f %.3f %.3f)",
                   g_vqd_vs, g_vqd_em, g_vqd_rowe, g_vqd_raw[0], g_vqd_raw[1], g_vqd_raw[2], g_vqd_raw[3],
                   g_vqd_mat[0][0], g_vqd_mat[0][1], g_vqd_mat[0][2], g_vqd_mat[0][3],
                   g_vqd_mat[3][0], g_vqd_mat[3][1], g_vqd_mat[3][2], g_vqd_mat[3][3]);
@@ -260,7 +260,7 @@ void sb_visq_end(unsigned index)
     if (g_cfg.vis_diag && visq_flare_idx(index)) { /* DIAG(FLARE-OCCL,W304) */
         static unsigned nfe, nfin;
         if (g_vq_onscr) { nfin++; }
-        if (nfe < 200u || (g_vq_onscr && nfin < 600u) || (g_present_no % 600u) == 0u) {
+        if (nfe < 200u || (g_vq_onscr && (nfin < 600u || (g_present_no % 100u) == 0u)) || (g_present_no % 600u) == 0u) {
             nfe++;
             HLOG_W("VISQ fend f=%u idx=0x%X draws=%u im_bild=%d (%u) %s", g_present_no, index, g_vq_ndraw, g_vq_onscr, nfin, g_vq_dd);
         }
@@ -377,13 +377,14 @@ done:
         static unsigned nsun[2], lastf[2];
         unsigned s = index & 1u;
         if (nsun[s] < 120u || g_present_no - lastf[s] >= 300u) {
-            float fl[6] = { 0, 0, 0, 0, 0, 0 };
-            static const unsigned ad[6] = { 0x356D58u, 0x351684u, 0x357DCCu, 0x357DD0u, 0x311590u, 0x31158Cu };
+            float fl[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+            /* W337: + Sonnen-Elevation/-Azimut (FUN_0001D8F0) */
+            static const unsigned ad[8] = { 0x356D58u, 0x351684u, 0x357DCCu, 0x357DD0u, 0x311590u, 0x31158Cu, 0x352110u, 0x352168u };
             unsigned q;
-            for (q = 0; q < 6u; q++) { __try { fl[q] = *(volatile float *)(uintptr_t)SBA(ad[q]); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+            for (q = 0; q < 8u; q++) { __try { fl[q] = *(volatile float *)(uintptr_t)SBA(ad[q]); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
             nsun[s]++; lastf[s] = g_present_no;
-            HLOG_W("VISQ sun f=%u idx=0x%X n=%u blend356D58=%.4f blend351684=%.4f pos357DCC=(%.4f,%.4f) a311590=%.4f b31158C=%.4f",
-                   g_present_no, index, *out, fl[0], fl[1], fl[2], fl[3], fl[4], fl[5]);
+            HLOG_W("VISQ sun f=%u idx=0x%X n=%u blend356D58=%.4f blend351684=%.4f pos357DCC=(%.4f,%.4f) a311590=%.4f b31158C=%.4f elev=%.4f azim=%.4f",
+                   g_present_no, index, *out, fl[0], fl[1], fl[2], fl[3], fl[4], fl[5], fl[6], fl[7]);
         }
     }
     if (g_cfg.vis_diag && (g_vq_nlog < 64u || (g_vq_ncalls % 2000u) == 0u)) {

@@ -79,7 +79,7 @@ static HRESULT clip_sample(IMFSinkWriter *wr, DWORD stream, const BYTE *rgb, uns
 {
     IMFMediaBuffer *buf = NULL;
     IMFSample *s = NULL;
-    BYTE *dst;
+    BYTE *dst = NULL; /* W332 SEC (/sdl C4703): nur nach erfolgreichem Lock benutzt */
     unsigned x, y, size = c.w * c.h * 3 / 2;
     HRESULT hr = mf_buffer(size, &buf);
     if (SUCCEEDED(hr)) { hr = IMFMediaBuffer_Lock(buf, &dst, NULL, NULL); }

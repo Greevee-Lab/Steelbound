@@ -22,7 +22,8 @@ typedef struct {
     int audio_live;       /* 0 = nur Capture, 1 = Live-Ton */
     /* W303 AUDIO-VOLUME: [audio] volume_master/_music/_sfx/_voice, 0..100 % (Standard 100 = Original), SB und LoC */
     int volume_master, volume_music, volume_sfx, volume_voice;
-    int aspect_mode;      /* W47: 1 = Pillarbox + Hor+ (nie strecken, S3.10) */
+    int audio_hrtf;       /* W356 AUDIO-2: [audio] audio_hrtf 1 = Kopfhoerer (3D-Klang/HRTF wie die Konsole), 0 = Lautsprecher */
+    int aspect_mode;     /* W47: 1 = Pillarbox + Hor+ (nie strecken, S3.10) */
     char input_profile[64]; /* W78: Eingabe-Profil (profiles/<name>.ini), leer = Legacy-Tastatur */
     int sbc_usb;            /* W78: 1 = Original-Controller per WinUSB lesen */
     int sbc_mouse_off;      /* W128: 1 = Maus-Achsen aus, solange der Controller aktiv ist */

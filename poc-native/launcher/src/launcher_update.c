@@ -463,6 +463,14 @@ void lupd_fetch(const char *cur, lupd_res_t *r)
         return;
     }
     WinHttpSetTimeouts(ses, 3000, 3000, 3000, 4000);
+    /* W332 SEC: nur TLS 1.2/1.3 (Zertifikatspruefung bleibt Standard: kein
+     * SECURITY_FLAG_IGNORE_*). Ohne TLS-1.3-Unterstuetzung (aeltere Windows)
+     * nur 1.2. */
+    opt = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+    if (!WinHttpSetOption(ses, WINHTTP_OPTION_SECURE_PROTOCOLS, &opt, sizeof opt)) {
+        opt = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2;
+        WinHttpSetOption(ses, WINHTTP_OPTION_SECURE_PROTOCOLS, &opt, sizeof opt);
+    }
     con = WinHttpConnect(ses, L"" LUPD_API_HOST, INTERNET_DEFAULT_HTTPS_PORT, 0);
     if (con) {
         req = WinHttpOpenRequest(con, L"GET", L"" LUPD_API_PATH, NULL, WINHTTP_NO_REFERER,
@@ -473,7 +481,8 @@ void lupd_fetch(const char *cur, lupd_res_t *r)
         WinHttpSetOption(req, WINHTTP_OPTION_DISABLE_FEATURE, &opt, sizeof opt);
         opt = WINHTTP_AUTOLOGON_SECURITY_LEVEL_HIGH; /* nie Windows-Anmeldedaten senden */
         WinHttpSetOption(req, WINHTTP_OPTION_AUTOLOGON_POLICY, &opt, sizeof opt);
-        opt = WINHTTP_OPTION_REDIRECT_POLICY_DISALLOW_HTTPS_TO_HTTP;
+        /* W332 SEC: fester Host - keine Weiterleitung (auch nicht https->https). */
+        opt = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
         WinHttpSetOption(req, WINHTTP_OPTION_REDIRECT_POLICY, &opt, sizeof opt);
     }
     if (req && WinHttpSendRequest(req, L"Accept: application/vnd.github+json\r\n", (DWORD)-1L,

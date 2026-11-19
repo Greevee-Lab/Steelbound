@@ -31,6 +31,9 @@
 #include "launcher_orig.h" /* W278 ORIG-FLAG */
 #include "launcher_layout.h" /* W281 LAUNCHER-SIZE */
 #include "launcher_account.h" /* W328 STEELNET-ACCOUNT */
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+#include "launcher_loctp.h" /* W336 LOC-TESTPARTNER (nur interne Ausgabe) */
+#endif
 
 static void dpi_init(void)
 {
@@ -410,17 +413,11 @@ int app_client_runtime_missing(const char *client_dir, const char *probe_name,
         probe_name = kVcrt;
     }
     u8_to_w(probe_name, wn, 64);
-    /* Gleiche Suche wie beim Laden von sb_emu.dll (Exe-Ordner des Clients
-     * zuerst, dann System32 bzw. SysWOW64). Echtes Laden statt Datendatei:
-     * eine 64-Bit-Kopie im PATH zaehlt nicht. */
-    SetDllDirectoryW(NULL);
-    {
-        wchar_t cd[1100];
-        u8_to_w(client_dir, cd, 1100);
-        SetDllDirectoryW(cd);
-    }
-    h = LoadLibraryExW(wn, NULL, 0);
-    SetDllDirectoryW(NULL);
+    /* Gleiche Suche wie beim Laden von sb_emu.dll: seit W332 SEC begrenzt
+     * sb_ldr.exe den DLL-Suchpfad auf System32 (bzw. SysWOW64), der
+     * Client-Ordner zaehlt nicht mehr (Schutz vor untergeschobenen DLLs).
+     * Echtes Laden statt Datendatei: eine 64-Bit-Kopie zaehlt nicht. */
+    h = LoadLibraryExW(wn, NULL, LOAD_LIBRARY_SEARCH_SYSTEM32);
     if (h) {
         FreeLibrary(h);
         return 0;
@@ -827,6 +824,21 @@ static __declspec(noinline) void st_w312_joycalib(int *pass_, int *fail_)
     }
 #undef W312_OK
 #undef W312_FAIL
+}
+
+/* W332 Selbsttest: enthaelt die Datei (bis 64 KB) den Text? */
+static int st_file_has(const char *path, const char *needle)
+{
+    static char buf[65536];
+    FILE *f = NULL;
+    size_t n = 0;
+    if (u8_fopen_s(&f, path, "rb") != 0 || !f) {
+        return 0;
+    }
+    n = fread(buf, 1, sizeof buf - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return strstr(buf, needle) != NULL;
 }
 
 static int cli_selftest(const char *client_override)
@@ -3763,6 +3775,7 @@ static int cli_selftest(const char *client_override)
         if (strcmp(lcfg_exit_msg_key(5, LCFG_ED_EU) ? lcfg_exit_msg_key(5, LCFG_ED_EU) : "", "gui.exit5") ||
             strcmp(lcfg_exit_msg_key(5, LCFG_ED_US) ? lcfg_exit_msg_key(5, LCFG_ED_US) : "", "gui.exit5_us") ||
             strcmp(lcfg_exit_msg_key(8, LCFG_ED_US) ? lcfg_exit_msg_key(8, LCFG_ED_US) : "", "gui.exit8") ||
+            strcmp(lcfg_exit_msg_key(39, LCFG_ED_EU) ? lcfg_exit_msg_key(39, LCFG_ED_EU) : "", "gui.exit39") || /* W339 */
             lcfg_exit_msg_key(0, LCFG_ED_US) || lcfg_exit_msg_key(1, LCFG_ED_EU) ||
             lcfg_exit_msg_key(4, LCFG_ED_US))
             strcpy_s(why, sizeof why, "exit-Schluessel");
@@ -3804,7 +3817,7 @@ static int cli_selftest(const char *client_override)
             }
         }
         if (!why[0]) {
-            T_OK("W231 US-LAUNCHER: Einordnung EU/US/US-fremd/Japan, Saveordner us, allow_ntsc_u nur solange experimental, Exit 5/8, Texte EN/DE");
+            T_OK("W231 US-LAUNCHER: Einordnung EU/US/US-fremd/Japan, Saveordner us, allow_ntsc_u nur solange experimental, Exit 5/8/39, Texte EN/DE");
         } else {
             T_FAIL("W231 US-LAUNCHER", "%s", why);
         }
@@ -3820,6 +3833,9 @@ static int cli_selftest(const char *client_override)
     lupd_selftest(&pass, &fail); /* W250 UPDATE-CHECK (ohne Netz) */
     lgame_selftest(&pass, &fail); /* W276 LOC-LAUNCH (Spielauswahl, LoC-Abbild, Startsperre) */
     lacc_selftest(&pass, &fail); /* W328 STEELNET-ACCOUNT (Krypto, Pin, DPAPI, Discord-Rueckleitung, Kind-Umgebung) */
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+    loctp_selftest(&pass, &fail); /* W336 LOC-TESTPARTNER (Profile, Ketten, Auswertung, Start/Stopp mit Attrappe) */
+#endif
     lorig_selftest(&pass, &fail); /* W278 ORIG-FLAG (Einordnung, Hinweis, Back to original, 4:3, Einmal-Start) */
     g_llay_pass = g_llay_fail = 0; /* W281 LAUNCHER-SIZE: Layout 0/a/b (rein) */
     llay_selftest(llay_rep);
@@ -3864,6 +3880,82 @@ static int cli_selftest(const char *client_override)
     else { T_FAIL("W254 replay list", "%s", "failed"); }
     if (!ls_selftest()) { T_OK("W199 save-import layouts, conflicts, backup, ZIP roundtrip, rejection"); }
     else { T_FAIL("W199 save-import", "%s", "failed"); }
+    { /* W332 SEC: Funde aus dem Fuzzing der Launcher-Parser (tests/fuzz/proj_launcher) - frueher Absturz
+       * (strcpy_s-Abbruch) bzw. Lesen/Schreiben hinter den Puffer */
+        /* static: cli_selftest hat schon einen grossen Rahmen; mehr Stack laesst die GUI-Pruefung (Fenster-
+         * Callbacks) ueberlaufen (0xC000041D) */
+        static char longv[3000], ln[3200], d[1100], uc[1200];
+        static launcher_settings_t s1;
+        static lgame_state_t g1;
+        static lctrl_bind_t b1;
+        char why[160] = "", u8o[64];
+        size_t k;
+        memset(longv, 'A', sizeof longv - 1);
+        longv[sizeof longv - 1] = '\0';
+        u8_GetTempPath(d, sizeof d);
+        strcat_s(d, sizeof d, "w332_fuzz");
+        lcfg_mkdir_p(d);
+        _snprintf_s(uc, sizeof uc, _TRUNCATE, "%s/user.cfg", d);
+        /* a) user.cfg / Profil: Pfadwert 600 Zeichen (Feld 512) wird verworfen, Rest gilt */
+        if ((f = NULL, u8_fopen_s(&f, uc, "w")) == 0 && f) {
+            fprintf(f, "xbe_path=%.600s\nwidth=1280\nlauncher_loc_image=%.1000s\n", longv, longv);
+            fclose(f);
+        }
+        lcfg_defaults(&s1);
+        if (lcfg_load_file(uc, &s1) != 0 || s1.width != 1280 || strlen(s1.xbe_path) >= 512)
+            strcpy_s(why, sizeof why, "user.cfg langer Pfad");
+        if (!why[0] && (lgame_cfg_load(uc, &g1) != 0 || g1.loc_image[0]))
+            strcpy_s(why, sizeof why, "LoC-Abbild langer Pfad");
+        u8_from_acp(longv, u8o, sizeof u8o);
+        if (!why[0] && u8o[0])
+            strcpy_s(why, sizeof why, "u8_from_acp zu lang");
+        /* b) lcfg_save_user: leere alte Datei, und alte Datei, deren verwaltete Zeilen beim Ersetzen stark wachsen */
+        if (!why[0]) {
+            if ((f = NULL, u8_fopen_s(&f, uc, "w")) == 0 && f) {
+                fclose(f);
+            }
+            lcfg_defaults(&s1);
+            if (lcfg_save_user(uc, &s1) != 0 || !st_file_has(uc, "width="))
+                strcpy_s(why, sizeof why, "save_user leere Datei");
+        }
+        if (!why[0]) {
+            lcfg_defaults(&s1);
+            memset(s1.xbe_path, 'x', 500);
+            s1.xbe_path[500] = '\0';
+            strcpy_s(s1.media_root, sizeof s1.media_root, s1.xbe_path);
+            strcpy_s(s1.hdd_root, sizeof s1.hdd_root, s1.xbe_path);
+            strcpy_s(s1.game_image, sizeof s1.game_image, s1.xbe_path);
+            memset(s1.photo_dir, 'p', 390);
+            s1.photo_dir[390] = '\0';
+            if ((f = NULL, u8_fopen_s(&f, uc, "w")) == 0 && f) {
+                fputs("xbe_path=\nmedia_root=\nhdd_root=\ngame_image=\n", f);
+                fclose(f);
+            }
+            /* vorher: Reserve fest 4 KB -> letzte Schluessel ([ui] lang) abgeschnitten/verstuemmelt */
+            if (lcfg_save_user(uc, &s1) != 0 || !st_file_has(uc, "\nlang=") ||
+                !st_file_has(uc, "game_image=xxxxxxxxxx"))
+                strcpy_s(why, sizeof why, "save_user Wachstum");
+        }
+        u8_DeleteFile(uc);
+        /* c) Eingabe-Profil: Alternative > 95 Zeichen wird verworfen, kurze bleibt */
+        if (!why[0]) {
+            _snprintf_s(ln, sizeof ln, _TRUNCATE, "photo = KEY:%.200s, KEY:F11\n", longv);
+            lctrl_bind_load_text(ln, &b1);
+            k = (size_t)lctrl_bind_elem_index("photo");
+            if (k >= LCTRL_ELEM_N || b1.row[k].n_alt != 1 || strcmp(b1.row[k].alt[0], "KEY:F11") != 0)
+                strcpy_s(why, sizeof why, "Profil lange Alternative");
+        }
+        {
+            wchar_t w1[1200];
+            u8_to_w(d, w1, 1200);
+            RemoveDirectoryW(w1);
+        }
+        if (!why[0]) {
+            T_OK("W332 fuzz findings: overlong cfg path values/profile alternatives ignored (no strcpy_s abort), lcfg_save_user empty file + growth, u8_from_acp bound");
+        } else {
+            T_FAIL("W332 fuzz findings", "%s", why);
+        }
+    }
     st_valid_cleanup(); /* COMM-SELFTEST2 */
     printf("selftest: %d PASS, %d FAIL\n", pass, fail);
     return fail ? 1 : 0;
@@ -4427,6 +4519,12 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
     (void)p;
     (void)cmd;
     (void)show;
+    /* W332 SEC: DLLs nur aus System32 (keine untergeschobenen DLLs aus dem
+     * Programm-/Arbeitsordner, z. B. Downloads). Statische Importe deckt der
+     * Linker-Schalter /DEPENDENTLOADFLAG:0x800 ab (CMakeLists.txt). */
+    SetDefaultDllDirectories(LOAD_LIBRARY_SEARCH_SYSTEM32);
+    SetDllDirectoryW(L"");
+    SetSearchPathMode(BASE_SEARCH_PATH_ENABLE_SAFE_SEARCHMODE | BASE_SEARCH_PATH_PERMANENT);
     dpi_init();
     /* W82: Kommandozeile als UTF-16 holen (Pfade mit Umlauten). */
     w_to_u8(GetCommandLineW(), u8cmd, (int)sizeof u8cmd);
@@ -4504,6 +4602,20 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
         cli_console();
         cli_usage();
         rc = 0;
+    } else if (cli_flag(argc, argv, "--loctp-dummy")) { /* W336: Attrappe eines Clients (Selbsttest Testpartner) */
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+        rc = loctp_dummy_main();
+#else
+        rc = 2;
+#endif
+    } else if (cli_flag(argc, argv, "--loctp-run")) { /* W336: Testpartner-Durchlauf ohne Fenster (Abnahme) */
+        cli_console();
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+        rc = loctp_cli(client_override, argc, argv);
+#else
+        printf("loctp: in dieser Ausgabe nicht enthalten\n");
+        rc = 2;
+#endif
     } else if (cli_flag(argc, argv, "--selftest")) {
         cli_console();
         rc = cli_selftest(client_override);

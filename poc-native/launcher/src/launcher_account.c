@@ -311,8 +311,8 @@ int lacc_server(lacc_srv_t *s)
     strcpy_s(s->host, sizeof s->host, SB_STEELNET_HOST);
     s->port = SB_STEELNET_API_PORT;
     s->lobby_port = SB_STEELNET_PORT;
-    norm_pin(SB_STEELNET_PIN1, s->pin1);
-    norm_pin(SB_STEELNET_PIN2, s->pin2);
+    norm_pin(SB_STEELNET_SPKI1, s->pin1); /* W334: SPKI-Pins (steelnet_pins.h) */
+    norm_pin(SB_STEELNET_SPKI2, s->pin2);
     if (u8_GetEnv("SB_STEELNET_API", api, sizeof api) > 0) {
         char *c = strrchr(api, ':');
         if (c) {
@@ -323,7 +323,7 @@ int lacc_server(lacc_srv_t *s)
                 s->port = port;
                 s->test = 1;
                 s->pin1[0] = s->pin2[0] = '\0';
-                if (u8_GetEnv("SB_STEELNET_PIN", pin, sizeof pin) > 0) {
+                if (u8_GetEnv("SB_STEELNET_SPKI", pin, sizeof pin) > 0 || u8_GetEnv("SB_STEELNET_PIN", pin, sizeof pin) > 0) {
                     norm_pin(pin, s->pin1);
                 }
                 if (u8_GetEnv("SB_STEELNET_LOBBY_PORT", pin, sizeof pin) > 0 && atoi(pin) > 0) {
@@ -627,15 +627,28 @@ int lacc_http(const lacc_srv_t *s, const char *method, const char *path, const c
                             WINHTTP_NO_REQUEST_DATA, 0, len, 0)) {
         goto done;
     }
-    /* 2) Pinning: SHA-256 ueber das DER-Zertifikat, sonst Abbruch vor dem Rumpf */
+    /* 2) Pinning (W334, SECURITY.md §9): SHA-256 ueber das DER-kodierte SubjectPublicKeyInfo, sonst Abbruch
+     *    vor dem Rumpf. Ein neues Zertifikat mit demselben Schluessel bricht nichts; Schluesselwechsel ueber SPKI2. */
     n = sizeof cert;
     if (!WinHttpQueryOption(req, WINHTTP_OPTION_SERVER_CERT_CONTEXT, &cert, &n) || !cert) {
         r->pin_fail = 1;
         strcpy_s(r->error, sizeof r->error, "pin");
         goto done;
     }
-    sb_sha256(cert->pbCertEncoded, cert->cbCertEncoded, sha);
-    CertFreeCertificateContext(cert);
+    {
+        BYTE *der = NULL;
+        DWORD dl = 0;
+        int enc = CryptEncodeObjectEx(X509_ASN_ENCODING, X509_PUBLIC_KEY_INFO, &cert->pCertInfo->SubjectPublicKeyInfo,
+                                      CRYPT_ENCODE_ALLOC_FLAG, NULL, &der, &dl) && der;
+        CertFreeCertificateContext(cert);
+        if (!enc) {
+            r->pin_fail = 1;
+            strcpy_s(r->error, sizeof r->error, "pin");
+            goto done;
+        }
+        sb_sha256(der, dl, sha);
+        LocalFree(der);
+    }
     if (!lacc_pin_match(s, sha)) {
         r->pin_fail = 1;
         strcpy_s(r->error, sizeof r->error, "pin");
@@ -1110,6 +1123,40 @@ static void loop_reply(SOCKET c, int ok)
     if (n > 0) send(c, resp, n, 0);
 }
 
+/* W332: Auswertung einer empfangenen Anfrage (ohne Socket; isoliert fuzzbar, tests/fuzz/proj_launcher).
+ * req = NUL-terminiert (got Bytes). path = Arbeitspuffer (>= 2048). Ergebnis:
+ * LOOP_P_404 = nicht "GET /discord[?...]" (z. B. favicon), LOOP_P_FOREIGN = falscher/fehlender state (fremde
+ * Anfrage, weiter warten), LOOP_P_DENIED = error=... mit richtigem state, LOOP_P_CODE = richtiger state, code
+ * gesetzt (leer = ungueltig). */
+enum { LOOP_P_404 = 0, LOOP_P_FOREIGN, LOOP_P_DENIED, LOOP_P_CODE };
+static int loop_parse(const char *req, int got, const char *state, char *path, size_t pcap, char *code, size_t ccap)
+{
+    char v[600];
+    const char *q;
+    code[0] = '\0';
+    path[0] = '\0';
+    if (got < 5 || pcap < 2048 || strncmp(req, "GET ", 4) != 0 ||
+        sscanf_s(req + 4, "%2047s", path, (unsigned)pcap) != 1 || strncmp(path, "/discord", 8) != 0 ||
+        (path[8] != '?' && path[8] != '\0')) {
+        return LOOP_P_404;
+    }
+    q = path[8] == '?' ? path + 9 : "";
+    /* W329: erst state pruefen. Falscher/fehlender state = fremde Anfrage (z. B. eine Webseite, die
+     * http://127.0.0.1:47090/discord?... aufruft): ablehnen und WEITER warten - sie darf die echte
+     * Anmeldung weder ersetzen noch abbrechen. Auch "error" zaehlt nur mit richtigem state. */
+    q_get(q, "state", v, sizeof v);
+    if (!state || !state[0] || strlen(v) != strlen(state) || strcmp(v, state) != 0) {
+        wipe(v, sizeof v);
+        return LOOP_P_FOREIGN;
+    }
+    q_get(q, "error", v, sizeof v);
+    if (v[0]) {
+        return LOOP_P_DENIED;
+    }
+    q_get(q, "code", code, ccap);
+    return LOOP_P_CODE;
+}
+
 int lacc_loop_wait(long long sock, const char *state, int timeout_ms, volatile long *cancel,
                    char *code, size_t ccap, char *err, size_t ecap)
 {
@@ -1119,7 +1166,7 @@ int lacc_loop_wait(long long sock, const char *state, int timeout_ms, volatile l
         fd_set rs;
         struct timeval tv = { 0, 250000 };
         SOCKET c;
-        char req[4096], path[2048], v[600];
+        char req[4096], path[2048];
         int got = 0, n;
         DWORD to = 3000;
         if (cancel && *cancel) return fail(err, ecap, "cancel");
@@ -1141,33 +1188,24 @@ int lacc_loop_wait(long long sock, const char *state, int timeout_ms, volatile l
             }
         }
         req[got] = '\0';
-        if (got < 5 || strncmp(req, "GET ", 4) != 0 || sscanf_s(req + 4, "%2047s", path, (unsigned)sizeof path) != 1 ||
-            strncmp(path, "/discord", 8) != 0 || (path[8] != '?' && path[8] != '\0')) {
+        n = loop_parse(req, got, state, path, sizeof path, code, ccap);
+        if (n == LOOP_P_404) {
             static const char k404[] = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
             send(c, k404, (int)sizeof k404 - 1, 0);
             closesocket(c);
             continue; /* z. B. favicon: weiter warten */
         }
-        {
-            const char *q = path[8] == '?' ? path + 9 : "";
-            /* W329: erst state pruefen. Falscher/fehlender state = fremde Anfrage (z. B. eine Webseite, die
-             * http://127.0.0.1:47090/discord?... aufruft): ablehnen und WEITER warten - sie darf die echte
-             * Anmeldung weder ersetzen noch abbrechen. Auch "error" zaehlt nur mit richtigem state. */
-            q_get(q, "state", v, sizeof v);
-            if (!state || !state[0] || strlen(v) != strlen(state) || strcmp(v, state) != 0) {
-                loop_reply(c, 0);
-                closesocket(c);
-                wipe(req, sizeof req);
-                wipe(path, sizeof path);
-                continue;
-            }
-            q_get(q, "error", v, sizeof v);
-            if (v[0]) {
-                loop_reply(c, 0);
-                closesocket(c);
-                return fail(err, ecap, "denied");
-            }
-            q_get(q, "code", code, ccap);
+        if (n == LOOP_P_FOREIGN) {
+            loop_reply(c, 0);
+            closesocket(c);
+            wipe(req, sizeof req);
+            wipe(path, sizeof path);
+            continue;
+        }
+        if (n == LOOP_P_DENIED) {
+            loop_reply(c, 0);
+            closesocket(c);
+            return fail(err, ecap, "denied");
         }
         wipe(req, sizeof req);
         wipe(path, sizeof path);
@@ -1241,11 +1279,43 @@ wchar_t *lacc_env_block(const char *name, const char *value)
     return out;
 }
 
+size_t lacc_env_len(const wchar_t *env)
+{
+    const wchar_t *p = env;
+    if (!env) return 0;
+    while (*p) p += wcslen(p) + 1; /* Eintraege bis zum leeren Eintrag */
+    return (size_t)(p - env) + 1;  /* + abschliessende Null (bei leerem Block die einzige) */
+}
+
+void lacc_env_wipe(wchar_t *env)
+{
+    if (env) SecureZeroMemory(env, lacc_env_len(env) * sizeof(wchar_t));
+}
+
+void lacc_env_free(wchar_t *env)
+{
+    lacc_env_wipe(env);
+    free(env);
+}
+
 /* ====================================================================== CLI */
 static int cli_out_store(const char *tag, const lacc_store_t *st)
 {
     printf("ok %saccount=%lu name=%s gen=%d\n", tag, (unsigned long)st->account, st->name, st->gen);
     return 0;
+}
+
+/* W334 (L6): Passwort aus stdin (eine Zeile, ohne Zeilenende). 1 = gelesen und nicht leer. */
+static int cli_read_password(char *pw, size_t cap)
+{
+    size_t l;
+    if (!fgets(pw, (int)cap, stdin)) {
+        pw[0] = '\0';
+        return 0;
+    }
+    l = strlen(pw);
+    while (l > 0 && (pw[l - 1] == '\n' || pw[l - 1] == '\r')) pw[--l] = '\0';
+    return l > 0;
 }
 
 int lacc_cli(const char *client_dir, int argc, char **argv)
@@ -1284,6 +1354,8 @@ int lacc_cli(const char *client_dir, int argc, char **argv)
         wipe(c, sizeof c);
         return 0;
     }
+#ifdef SB_TEST_HOOKS
+    /* W334 (SECURITY.md §9, L6): gibt den Spielschluessel G aus - nur in Testbauten, nie im Release */
     if (strcmp(act, "game-auth") == 0) {
         char a[160];
         if (ld != 1) {
@@ -1295,6 +1367,7 @@ int lacc_cli(const char *client_dir, int argc, char **argv)
         wipe(a, sizeof a);
         return 0;
     }
+#endif
     if (!s.pin1[0] && !s.pin2[0]) {
         printf("error off\n");
         return 1;
@@ -1335,12 +1408,23 @@ int lacc_cli(const char *client_dir, int argc, char **argv)
             if (lm) cli_out_store("", &st);
             else printf("ok discord=1\n");
         }
-    } else if (strcmp(act, "login-set") == 0) {
-        rc = ld == 1 ? lacc_op_login_set(&s, &st, a1, a2, err, sizeof err) : fail(err, sizeof err, "no_account");
-        if (rc == 0) printf("ok login=1 login_name=%s\n", a1);
-    } else if (strcmp(act, "login") == 0) {
-        rc = lacc_op_login(&s, dir, a1, a2, &st, err, sizeof err);
-        if (rc == 0) cli_out_store("", &st);
+    } else if (strcmp(act, "login-set") == 0 || strcmp(act, "login") == 0) {
+        /* W334 (L6): Passwort nie aus der Kommandozeile (Prozessliste) - nur ueber stdin, eine Zeile */
+        char pw[200];
+        if (a2 && a2[0]) {
+            printf("error password_on_cmdline (Passwort ueber stdin uebergeben)\n");
+            return 2;
+        }
+        if (!cli_read_password(pw, sizeof pw)) {
+            rc = fail(err, sizeof err, "no_password");
+        } else if (strcmp(act, "login-set") == 0) {
+            rc = ld == 1 ? lacc_op_login_set(&s, &st, a1, pw, err, sizeof err) : fail(err, sizeof err, "no_account");
+            if (rc == 0) printf("ok login=1 login_name=%s\n", a1);
+        } else {
+            rc = lacc_op_login(&s, dir, a1, pw, &st, err, sizeof err);
+            if (rc == 0) cli_out_store("", &st);
+        }
+        wipe(pw, sizeof pw);
     } else if (strcmp(act, "transfer") == 0) {
         rc = lacc_op_transfer(&s, dir, a1, &st, err, sizeof err);
         if (rc == 0) cli_out_store("", &st);
@@ -1355,8 +1439,8 @@ int lacc_cli(const char *client_dir, int argc, char **argv)
         if (rc == 0) printf("ok deleted=1\n");
     } else {
         printf("error usage (create NAME | check NAME | status | local | info | discord-link | discord-login | "
-               "login-set LOGIN PASS | login LOGIN PASS | transfer CODE | recovery-show | recovery CODE | "
-               "logout-all | delete | game-auth | forget)\n");
+               "login-set LOGIN | login LOGIN (Passwort ueber stdin) | transfer CODE | recovery-show | "
+               "recovery CODE | logout-all | delete | forget)\n");
         return 2;
     }
     if (rc != 0) printf("error %s\n", err[0] ? err : "bad");
@@ -1537,7 +1621,7 @@ void lacc_selftest(int *pass, int *fail_n)
             strcpy_s(why, sizeof why, "Loopback-Ueberschreibung");
         SetEnvironmentVariableA("SB_STEELNET_API", had_api ? keep_api : NULL);
         SetEnvironmentVariableA("SB_STEELNET_PIN", had_pin ? keep_pin : NULL);
-        if (!why[0] && !had_api && lacc_server(&s) != (SB_STEELNET_PIN1[0] || SB_STEELNET_PIN2[0]))
+        if (!why[0] && !had_api && lacc_server(&s) != (SB_STEELNET_SPKI1[0] || SB_STEELNET_SPKI2[0]))
             strcpy_s(why, sizeof why, "Standard-Konfiguration (leerer Pin = aus)");
         {
             lacc_resp_t r;
@@ -1705,6 +1789,22 @@ void lacc_selftest(int *pass, int *fail_n)
     }
     ST_RESULT("W328 account: child env block has exactly one SB_LOC_AUTH (account:exp:G), never K, launcher env unchanged");
 
+    /* 6b: W344 Loeschen des ganzen Blocks (vorher nur der erste Eintrag bis zum ersten Nullzeichen) */
+    {
+        static const wchar_t kBlk[] = L"A=1\0SB_LOC_AUTH=42:1:ab\0Z=9\0"; /* + implizite Null = doppelte Null */
+        wchar_t b[64];
+        size_t i, n = sizeof kBlk / sizeof kBlk[0], nz = 0;
+        memcpy(b, kBlk, sizeof kBlk);
+        b[n] = L'x'; /* Waechter hinter dem Block bleibt */
+        if (lacc_env_len(b) != n || lacc_env_len(NULL) != 0 || lacc_env_len(L"") != 1)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Laenge %u statt %u", (unsigned)lacc_env_len(b), (unsigned)n);
+        lacc_env_wipe(b);
+        for (i = 0; i < n; i++) nz += b[i] != 0;
+        if (!why[0] && (nz || b[n] != L'x')) _snprintf_s(why, sizeof why, _TRUNCATE, "%u Zeichen uebrig", (unsigned)nz);
+        lacc_env_free(NULL);
+    }
+    ST_RESULT("W344 account: child env block wiped up to the double NUL (all entries, incl. SB_LOC_AUTH)");
+
     /* 7: W329 Haertung: JSON-Leser am Pufferende, Pilotname mit Steuerzeichen in der Kontodatei abgelehnt */
     {
         char o[16], tmp[1024], dir[1100];
@@ -1731,6 +1831,36 @@ void lacc_selftest(int *pass, int *fail_n)
         }
     }
     ST_RESULT("W329 account hardening: JSON reader stops at buffer end, \\u0000 not truncating, pilot name with ';'/control chars rejected from key file");
+
+    /* 8: W332 Discord-Empfaenger ohne Socket (loop_parse, gefuzzt in tests/fuzz/proj_launcher discord_loop) */
+    {
+        static const char S[] = "0123456789abcdef0123456789abcdef";
+        static char big[4096];
+        char path[2048], code[512], rq[256];
+        const char *r1 = "GET /favicon.ico HTTP/1.1\r\n\r\n", *r2 = "GET /discordX?state=x HTTP/1.1\r\n\r\n";
+        if (loop_parse(r1, (int)strlen(r1), S, path, sizeof path, code, sizeof code) != LOOP_P_404 ||
+            loop_parse(r2, (int)strlen(r2), S, path, sizeof path, code, sizeof code) != LOOP_P_404 ||
+            loop_parse("GET ", 4, S, path, sizeof path, code, sizeof code) != LOOP_P_404)
+            strcpy_s(why, sizeof why, "fremder Pfad nicht 404");
+        _snprintf_s(rq, sizeof rq, _TRUNCATE, "GET /discord?code=abc&state=%.31s0 HTTP/1.1\r\n\r\n", S);
+        if (!why[0] && (loop_parse(rq, (int)strlen(rq), S, path, sizeof path, code, sizeof code) != LOOP_P_FOREIGN ||
+                        code[0] || loop_parse(rq, (int)strlen(rq), NULL, path, sizeof path, code, sizeof code) !=
+                                       LOOP_P_FOREIGN))
+            strcpy_s(why, sizeof why, "falscher/fehlender state angenommen");
+        _snprintf_s(rq, sizeof rq, _TRUNCATE, "GET /discord?error=access_denied&state=%s HTTP/1.1\r\n\r\n", S);
+        if (!why[0] && loop_parse(rq, (int)strlen(rq), S, path, sizeof path, code, sizeof code) != LOOP_P_DENIED)
+            strcpy_s(why, sizeof why, "error= nicht erkannt");
+        _snprintf_s(rq, sizeof rq, _TRUNCATE, "GET /discord?state=%s&code=a%%2Bb+c%%zz HTTP/1.1\r\n\r\n", S);
+        if (!why[0] && (loop_parse(rq, (int)strlen(rq), S, path, sizeof path, code, sizeof code) != LOOP_P_CODE ||
+                        strcmp(code, "a+b c%zz") != 0))
+            strcpy_s(why, sizeof why, "code-Dekodierung");
+        memset(big, 'A', sizeof big - 1); /* volle 4095 Byte (recv-Grenze), Pfad laenger als path */
+        memcpy(big, "GET /discord?state=", 19);
+        big[sizeof big - 1] = '\0';
+        if (!why[0] && loop_parse(big, (int)sizeof big - 1, S, path, sizeof path, code, sizeof code) != LOOP_P_FOREIGN)
+            strcpy_s(why, sizeof why, "uebergrosse Anfrage");
+    }
+    ST_RESULT("W332 account: Discord loopback parser without socket (foreign paths 404, wrong/missing state, error=, %-decoding, 4 KB request)");
 #undef ST_RESULT
     wipe(K, sizeof K);
     wipe(G, sizeof G);

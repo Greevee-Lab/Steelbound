@@ -192,6 +192,15 @@ au32 au_adpcm_decode(const uint8_t *src, au32 nbytes, int ch, float *dst,
 au32 au_pcm_convert(const uint8_t *src, au32 nbytes, int ch, int bits,
                            au32 src_rate, float *dst, au32 dst_cap_frames)
 {
+    return au_pcm_convert_x(src, nbytes, ch, bits, src_rate, dst, NULL, dst_cap_frames, 0);
+}
+
+/* W356: wie au_pcm_convert; 5.1-Quellen (ch > 2): xdst != NULL -> dst = FL/FR ungefaltet, xdst = C, LFE,
+ * SL, SR je Frame (Surround-Ausgabe, Faltung sonst im Mischer); xdst == NULL -> Faltung hier, norm = 1
+ * ITU normiert wie ausp_downmix51 (audio_downmix), 0 = alt. */
+au32 au_pcm_convert_x(const uint8_t *src, au32 nbytes, int ch, int bits, au32 src_rate, float *dst, float *xdst,
+                      au32 dst_cap_frames, int norm)
+{
     au32 bps = (au32)(bits / 8);
     au32 sframe = bps * (au32)ch;
     au32 nsrc = sframe ? nbytes / sframe : 0;
@@ -243,8 +252,21 @@ au32 au_pcm_convert(const uint8_t *src, au32 nbytes, int ch, int bits,
                 float lfe = ch > 3 ? m[3] : 0;
                 float sl = ch > 4 ? m[4] : 0;
                 float sr = ch > 5 ? m[5] : 0;
-                l = fl + 0.707f * ce + 0.5f * lfe + 0.707f * sl;
-                r = fr + 0.707f * ce + 0.5f * lfe + 0.707f * sr;
+                if (xdst) { /* W356: Kanaele getrennt (Surround) */
+                    l = fl;
+                    r = fr;
+                    xdst[out * 4] = ce;
+                    xdst[out * 4 + 1] = lfe;
+                    xdst[out * 4 + 2] = sl;
+                    xdst[out * 4 + 3] = sr;
+                } else if (norm) { /* W356 audio_downmix: ITU, normiert (= ausp_downmix51) */
+                    const float k = 2.0f / (1.0f + 0.7071f + 0.5f + 0.7071f);
+                    l = (fl + 0.7071f * ce + 0.5f * lfe + 0.7071f * sl) * k;
+                    r = (fr + 0.7071f * ce + 0.5f * lfe + 0.7071f * sr) * k;
+                } else {
+                    l = fl + 0.707f * ce + 0.5f * lfe + 0.707f * sl;
+                    r = fr + 0.707f * ce + 0.5f * lfe + 0.707f * sr;
+                }
             }
         }
         dst[out * 2] = l;
@@ -256,14 +278,20 @@ au32 au_pcm_convert(const uint8_t *src, au32 nbytes, int ch, int bits,
 }
 
 /* ---------- FIFO ---------- */
-static void au_fifo_reserve(audio_voice_t *v, au32 add)
+static void au_fifo_reserve(audio_voice_t *v, au32 add, int wantx)
 {
+    if (wantx && !v->fifox && v->fifo_cap && v->fifo_n + add <= v->fifo_cap) {
+        /* W356: 5.1-Kanaele nachtraeglich, gleiche Kapazitaet/Indizes (bisherige Frames: 0) */
+        v->fifox = (float *)calloc((size_t)v->fifo_cap * 4, sizeof(float));
+        return;
+    }
     if (v->fifo_n + add <= v->fifo_cap)
         return;
     {
         au32 want = v->fifo_n + add;
         au32 ncap = v->fifo_cap ? v->fifo_cap : 16384;
-        float *nf;
+        float *nf, *nx = NULL;
+        int withx = wantx || v->fifox;
         while (ncap < want)
             ncap *= 2;
         if ((uint64_t)ncap * 8 > FIFO_HARD_CAP)
@@ -271,16 +299,27 @@ static void au_fifo_reserve(audio_voice_t *v, au32 add)
         nf = (float *)malloc((size_t)ncap * 2 * sizeof(float));
         if (!nf)
             return;
+        if (withx) {
+            nx = (float *)calloc((size_t)ncap * 4, sizeof(float));
+            if (!nx) {
+                free(nf);
+                return;
+            }
+        }
         if (v->fifo && v->fifo_n) {
             au32 i;
             for (i = 0; i < v->fifo_n; i++) {
                 au32 s = (v->fifo_rd + i) % v->fifo_cap;
                 nf[i * 2] = v->fifo[s * 2];
                 nf[i * 2 + 1] = v->fifo[s * 2 + 1];
+                if (nx && v->fifox)
+                    memcpy(nx + (size_t)i * 4, v->fifox + (size_t)s * 4, 4 * sizeof(float));
             }
-            free(v->fifo);
         }
+        free(v->fifo);
+        free(v->fifox);
         v->fifo = nf;
+        v->fifox = nx;
         v->fifo_cap = ncap;
         v->fifo_rd = 0;
         v->fifo_wr = v->fifo_n;
@@ -289,8 +328,14 @@ static void au_fifo_reserve(audio_voice_t *v, au32 add)
 
 au32 au_fifo_append(audio_voice_t *v, const float *s, au32 n)
 {
+    return au_fifo_append_x(v, s, NULL, n);
+}
+
+/* W356: x = C/LFE/BL/BR je Frame (5.1-Quelle) oder NULL. */
+au32 au_fifo_append_x(audio_voice_t *v, const float *s, const float *x, au32 n)
+{
     au32 i;
-    au_fifo_reserve(v, n);
+    au_fifo_reserve(v, n, x != NULL);
     for (i = 0; i < n; i++) {
         if (v->fifo_n >= v->fifo_cap) {
             g_stat_drops++;
@@ -298,6 +343,12 @@ au32 au_fifo_append(audio_voice_t *v, const float *s, au32 n)
         }
         v->fifo[v->fifo_wr * 2] = s[i * 2];
         v->fifo[v->fifo_wr * 2 + 1] = s[i * 2 + 1];
+        if (v->fifox) {
+            if (x)
+                memcpy(v->fifox + (size_t)v->fifo_wr * 4, x + (size_t)i * 4, 4 * sizeof(float));
+            else
+                memset(v->fifox + (size_t)v->fifo_wr * 4, 0, 4 * sizeof(float));
+        }
         v->fifo_wr = (v->fifo_wr + 1) % v->fifo_cap;
         v->fifo_n++;
     }

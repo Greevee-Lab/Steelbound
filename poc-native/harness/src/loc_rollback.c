@@ -29,6 +29,7 @@
  *
  * Logs: nur Zaehler, Zeiten, Adressen und Hashes. Keine Eingabe- oder Paketinhalte (die Aufzeichnung
  * liegt nur im Speicher und wird je Zyklus verworfen). */
+#include <winsock2.h> /* W338: vor windows.h (Eingabekanal) */
 #include <windows.h>
 
 #include "loc_rollback.h"
@@ -40,6 +41,16 @@
 #include "loc_rb_ring.h" /* W330 LOC-ROLLBACK-R1 */
 #include "loc_mem.h"
 #include "d3d11_render.h" /* W330: sb_interp_rb_pause */
+#include "loc_rbi.h"       /* W338 LOC-ROLLBACK-R2 */
+#include "loc_net.h"
+#include "loc_net_core.h"
+#include "loc_netsim.h"
+#include "loc_tun.h"
+#include "loc_sync.h"
+#include "loc_rbn.h"       /* W346 LOC-ROLLBACK-R4: Aushandlung */
+#include "loc_guard.h"
+#include "sb_lang.h"
+#include "sb_origview.h"   /* W346: Einblendung bei Desync */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -73,6 +84,7 @@ typedef uint32_t u32;
 
 /* ---- W330 LOC-ROLLBACK-R1: Zustandsring (loc_rb=1) ---- */
 void (*volatile g_loc_rb_prewrite)(uintptr_t a, unsigned n);
+int (*volatile g_loc_rb_alloc)(int op, unsigned size, unsigned type, unsigned prot, unsigned *io); /* W346 R3 */
 int g_loc_rb_ww;
 volatile long g_loc_rb_memev;
 int fs_emu_tls_range(unsigned *va, unsigned *len);           /* fs_emu.c (W330) */
@@ -101,6 +113,9 @@ static int rb_suspend_safe(HANDLE h)
 int loc_kstack_get(unsigned i, unsigned *va, unsigned *len); /* krnl_loc.c (W330) */
 static int s_ring;            /* loc_rb=1: Ring je Tick */
 static int s_ww = 1, s_depth = 16, s_pool = 8192, s_verify, s_pdpause = 1, s_shadowchk, s_hot = 2, s_cool = 64;
+/* W338: MmCreateKernelStack-Speicher mitsichern (W330: ja). Laeuft ein Thread darauf, macht der Schreibschutz die
+ * Ausnahmezustellung unmoeglich (harter Abbruch ohne Bericht, A12-A14 nach dem ersten Schuss) - mit R2 aus. */
+static int s_kstack = 1;
 static long s_memev_seen;
 static void rb_prewrite_cb(uintptr_t a, unsigned n) { rbr_prewrite(a, n); }
 
@@ -171,6 +186,8 @@ static void rb_logser(rb_ser_t *s, const char *unit)
 
 /* ================= Gast-Speicher: Bereiche ================= */
 int krnl_memreg_get(unsigned i, unsigned *va, unsigned *len, unsigned *kind); /* krnl_mem.c (W325) */
+unsigned krnl_memreg_ab(unsigned i); /* krnl_mem.c (W338) */
+static unsigned s_stale; /* W338: veraltete Registereintraege beim Bereichsaufbau uebersprungen */
 extern unsigned g_exreg_n;
 extern xbe_image_t *g_img; /* kernel_hle.c */
 static xbe_image_t *rb_img(void) { return g_img; }
@@ -201,6 +218,7 @@ static int rb_ivcmp(const void *x, const void *y)
 
 /* Bereiche: Abbild (beschreibbare Seiten) + alle registrierten Gast-Allokationen (krnl_mem-Register),
  * seitenweise gerundet, verschmolzen, nur zugesagte beschreibbare Seiten. */
+static int rb_ab_foreign(u32 a, u32 e, u32 kind, u32 ab); /* W362 (unten) */
 static void rb_add_committed(u32 a, u32 b, u32 kind)
 {
     while (a < b && s_nreg < RB_RMAX) {
@@ -209,7 +227,8 @@ static void rb_add_committed(u32 a, u32 b, u32 kind)
         if (!VirtualQuery((void *)(uintptr_t)a, &mi, sizeof mi)) break;
         e = (u32)(uintptr_t)mi.BaseAddress + (u32)mi.RegionSize;
         if (e > b || e < a) e = b;
-        if (mi.State == MEM_COMMIT && rb_writable(mi.Protect)) {
+        if (mi.State == MEM_COMMIT && rb_writable(mi.Protect) &&
+            !rb_ab_foreign(a, e, kind, (u32)(uintptr_t)mi.AllocationBase)) {
             if (s_nreg && s_reg[s_nreg - 1].va + s_reg[s_nreg - 1].len == a && s_reg[s_nreg - 1].kind == kind &&
                 s_reg[s_nreg - 1].prot == mi.Protect && s_reg[s_nreg - 1].ab == (u32)(uintptr_t)mi.AllocationBase) {
                 /* W330: gleicher Schutz und gleiche Belegung (VirtualProtect scheitert ueber Belegungsgrenzen) */
@@ -230,9 +249,10 @@ static void rb_add_committed(u32 a, u32 b, u32 kind)
 /* Thread-Stacks aus der Sicherung nehmen: Laden darf weder die aktiven Rahmen des Spiel-Threads (der
  * Thunk selbst laeuft dort) noch Stacks laufender Gast-Threads ueberschreiben. Stack = die Belegung,
  * in der ESP liegt (bei Windows-Threads die ganze Stack-Reservierung), hoechstens 4 MB um ESP. */
-#define RB_EXMAX 64
+#define RB_EXMAX 320
 static struct { u32 a, b; } s_ex[RB_EXMAX];
 static int s_nex;
+static int s_nex_fix = -1; /* W362: Eintraege aus rb_collect_stacks (ESP-basiert, einmal); Host-Stacks kommen je Aufbau dazu */
 static void rb_ex_add(u32 esp, const char *who, int idx)
 {
     MEMORY_BASIC_INFORMATION mi;
@@ -272,6 +292,72 @@ static void rb_collect_stacks(void)
         if (GetThreadContext((HANDLE)h, &c)) rb_ex_add(c.Esp, "Gast-Thread", i);
         ResumeThread((HANDLE)h);
     }
+    s_nex_fix = s_nex;
+}
+
+/* ================= W362 LOC-RING-INIT-EXIT: nie fremden Speicher schuetzen =================
+ * Befund (W358/W361, 5 Laeufe; W362 N1-N4): Partner endet still direkt beim ersten Ring-Aufbau (Exit 0xC0000005,
+ * ohne Dump/WER). Das Spiel gibt beim Missionsstart Belegungen frei, Windows legt die Stacks des neuen Gast-Render-
+ * Threads (32 Bit + WoW64-64-Bit) an dieselben Basen; Teil-Zusagen blieben im Register "lebend" (Wurzel: krnl_mem.c
+ * exreg_mark_released) und der Ring schuetzte den 64-Bit-Stack. Schreibt ein Thread auf eine geschuetzte Seite seines
+ * eigenen Stacks, kann Windows den Ausnahmerahmen nicht zustellen und beendet den Prozess ohne Handler (kein VEH,
+ * kein Filter, kein WER; loc_rb_selftest W362). Die ESP-Ausnahmen oben decken nur Gast-Threads ab, die sich anhalten
+ * lassen (2 von 15), nur deren 32-Bit-Stack und keine Host-Threads.
+ * Fix 1 (stkx): je Aufbau ALLE Threads des Prozesses aufzaehlen (rbr_thread_stacks), Stack-Reservierung aus dem TEB (32 Bit
+ *   und unter WoW64 auch 64 Bit, wenn unter 4 GB) komplett ausnehmen.
+ * Fix 2 (abchk): nur Seiten schuetzen/sichern, deren Belegung (AllocationBase) zu einem lebenden Registereintrag
+ *   gehoert. Ein Eintrag, dessen Adressraum teils freigegeben und neu (fremd) belegt wurde, deckte sonst fremde
+ *   Belegungen mit ab (W338-Pruefung sah nur die Startadresse).
+ * stkx=0 / abchk=0 (loc_rb_opts, DIAG): nur melden, nicht ausnehmen (Nachstellung). */
+static int s_stkx = 1, s_abchk = 1;
+#define RB_HSMAX 256
+static rbr_stack_t s_hs[RB_HSMAX];
+static int s_nhs;
+static unsigned s_hs_thr, s_hs_noteb;
+static u32 s_hs_in, s_ab_skip, s_ab_skip_kb, s_w362_logged;
+static u32 *s_abs;
+static unsigned s_nabs, s_abs_cap;
+static void rb_host_stacks(void) { s_nhs = rbr_thread_stacks(s_hs, RB_HSMAX, &s_hs_thr, &s_hs_noteb); }
+static int rb_u32cmp(const void *x, const void *y)
+{
+    u32 a = *(const u32 *)x, b = *(const u32 *)y;
+    return a < b ? -1 : a > b;
+}
+static void rb_abs_add(u32 ab)
+{
+    if (s_nabs >= s_abs_cap) {
+        unsigned nc = s_abs_cap ? s_abs_cap * 2u : 1024u;
+        u32 *p = (u32 *)realloc(s_abs, nc * sizeof(u32));
+        if (!p) return;
+        s_abs = p;
+        s_abs_cap = nc;
+    }
+    s_abs[s_nabs++] = ab;
+}
+static int rb_abs_has(u32 ab)
+{
+    return s_nabs && bsearch(&ab, s_abs, s_nabs, sizeof(u32), rb_u32cmp) != NULL;
+}
+/* 1 = Abschnitt [a,e) gehoert zu keiner lebenden Gast-Belegung (nur Register-Arten Contig/NtAlloc/Pool) -> nicht
+ * schuetzen/sichern; abchk=0: nur melden */
+static int rb_ab_foreign(u32 a, u32 e, u32 kind, u32 ab)
+{
+    int k;
+    if (kind != 1 && kind != 2 && kind != 5) return 0;
+    if (rb_abs_has(ab)) return 0;
+    s_ab_skip++;
+    s_ab_skip_kb += (e - a) / 1024u;
+    if (s_w362_logged < 48) {
+        const char *who = "";
+        u32 tid = 0;
+        for (k = 0; k < s_nhs; k++)
+            if (s_hs[k].a < e && a < s_hs[k].b) { who = s_hs[k].bits == 64 ? " = 64-Bit-Stack" : " = Thread-Stack"; tid = s_hs[k].tid; break; }
+        s_w362_logged++;
+        HLOG_W("LOCRB: W362 fremde Belegung im Gast-Bereich 0x%X-0x%X (%u KB, Belegung 0x%X, Art %u)%s (TID %lu)%s", a, e,
+               (e - a) / 1024u, ab, kind, who, (unsigned long)tid,
+               s_abchk ? " - ausgelassen" : " - NUR GEMELDET (abchk=0)");
+    }
+    return s_abchk;
 }
 static void rb_add_range(u32 a, u32 b, u32 kind)
 {
@@ -354,6 +440,7 @@ static void rb_ring_setup(void)
         else if (m == RBR_WP) nwp++;
         else HLOG_W("LOCRB: Bereich 0x%X (%u KB) nicht angemeldet", s_reg[i].va, s_reg[i].len / 1024u);
     }
+    if (!s_r_gen) hlog_flush(); /* W362: erster Aufbau - Log vor dem Schutz leeren (stilles Ende eingrenzen) */
     if (rbr_start() != 0) {
         HLOG_E("LOCRB: Ring-Start fehlgeschlagen - Ring aus");
         s_ring = 0;
@@ -377,6 +464,29 @@ static void rb_ring_setup(void)
            s_depth, s_pool, rb_us(rb_now() - t));
 }
 
+/* W338 DIAG (loc_rb_opts avlog=1): Zugriffsverletzungen aller Threads nach einem Ring-Neuaufbau sperrfrei in eine Datei
+ * (Thread, EIP, Adresse, Art) - fuer Abbrueche ohne Bericht. Keine Inhalte. */
+static int s_avlog;
+static HANDLE s_avlog_h = INVALID_HANDLE_VALUE;
+static volatile LONG s_avlog_n;
+static volatile LONG s_avlog_arm;
+static LONG CALLBACK rb_avlog_veh(EXCEPTION_POINTERS *ep)
+{
+    char b[200];
+    DWORD w;
+    int n;
+    const EXCEPTION_RECORD *er = ep->ExceptionRecord;
+    if (!s_avlog_arm || s_avlog_h == INVALID_HANDLE_VALUE) return EXCEPTION_CONTINUE_SEARCH;
+    if (InterlockedIncrement(&s_avlog_n) > 400) return EXCEPTION_CONTINUE_SEARCH;
+    n = wsprintfA(b, "t=%lu tid=%lu code=0x%08lX eip=0x%08lX art=%lu addr=0x%08lX esp=0x%08lX\r\n", GetTickCount(),
+                  GetCurrentThreadId(), er->ExceptionCode, (DWORD)ep->ContextRecord->Eip,
+                  er->NumberParameters > 0 ? (DWORD)er->ExceptionInformation[0] : 0xFFFFFFFFu,
+                  er->NumberParameters > 1 ? (DWORD)er->ExceptionInformation[1] : 0u, (DWORD)ep->ContextRecord->Esp);
+    WriteFile(s_avlog_h, b, (DWORD)n, &w, NULL);
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+static u32 s_r_commit_av;       /* W338: Zugriffsfehler beim Sichern (Bereich weg) */
+static int s_r_force_rebuild;   /* W338: Ring beim naechsten Pruefen neu aufbauen */
 /* Tick-Ende: inkrementell sichern (Spiel-Thread am Ruhepunkt, Render-Thread frei) */
 static void rb_ring_commit(int replay)
 {
@@ -387,7 +497,14 @@ static void rb_ring_commit(int replay)
     if (!rbr_active()) return;
     if (!s_tsc_q0) { s_tsc_q0 = rb_now(); s_tsc0 = __rdtsc(); }
     QueryThreadCycleTime(GetCurrentThread(), &cy0);
-    rbr_commit(&c);
+    __try { /* W338: Seite eines angemeldeten Bereichs nicht mehr lesbar (z. B. Heap gab sie zurueck) -> neu aufbauen */
+        rbr_commit(&c);
+    } __except (GetExceptionCode() == EXCEPTION_ACCESS_VIOLATION ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH) {
+        s_r_commit_av++;
+        s_r_force_rebuild = 1;
+        if (s_r_commit_av <= 4) HLOG_W("LOCRB: RING Sichern: Bereich nicht lesbar (Tick %u) - Neuaufbau", rd32(RB_TICK));
+        return;
+    }
     QueryThreadCycleTime(GetCurrentThread(), &cy1);
     if (!replay) rb_put(s_r_cpu, (u32)((cy1 - cy0) / 100u)); /* in 100 Zyklen */
     rbr_stats(&st);
@@ -443,6 +560,8 @@ static void rb_build_regions(void)
     }
     s_nreg = 0;
     s_reg_gen = g_exreg_n;
+    s_nabs = 0; /* W362: lebende Belegungen */
+    s_ab_skip = s_ab_skip_kb = 0;
     if (img) {
         iv[n].a = img->base & ~(RB_PG - 1);
         iv[n].b = img->image_end;
@@ -453,6 +572,18 @@ static void rb_build_regions(void)
         unsigned va = 0, len = 0, kind = 0;
         if (!krnl_memreg_get(i, &va, &len, &kind) || !va || !len) continue;
         if (kind == 3 || kind == 4) continue; /* freigegeben */
+        { /* W338: Eintrag gehoert nicht mehr zur selben Belegung (freigegeben, Adressraum wiederverwendet) -> weglassen */
+            unsigned ab = krnl_memreg_ab(i);
+            MEMORY_BASIC_INFORMATION mi;
+            if (ab && (!VirtualQuery((void *)(uintptr_t)va, &mi, sizeof mi) || mi.State == MEM_FREE ||
+                       (u32)(uintptr_t)mi.AllocationBase != ab)) {
+                s_stale++;
+                continue;
+            }
+            if (ab > 1u) rb_abs_add(ab); /* W362 */
+            else if (VirtualQuery((void *)(uintptr_t)va, &mi, sizeof mi) && mi.State != MEM_FREE)
+                rb_abs_add((u32)(uintptr_t)mi.AllocationBase); /* Basis unbekannt: wie bisher die an der Startadresse */
+        }
         iv[n].a = va & ~(RB_PG - 1);
         iv[n].b = (va + len + RB_PG - 1) & ~(RB_PG - 1);
         iv[n].kind = kind;
@@ -467,7 +598,7 @@ static void rb_build_regions(void)
             n++;
             HLOG_I("LOCRB: TLS des Spiel-Threads 0x%X-0x%X aufgenommen", va, va + len);
         }
-        for (k = 0; k < 16; k++) {
+        for (k = 0; k < 16 && s_kstack; k++) { /* W338: mit R2 Standard aus (kstack=0) */
             if (!loc_kstack_get(k, &va, &len)) continue;
             iv[n].a = va & ~(RB_PG - 1);
             iv[n].b = (va + len + RB_PG - 1) & ~(RB_PG - 1);
@@ -489,7 +620,40 @@ static void rb_build_regions(void)
         }
         n = j;
     }
+    if (s_nabs > 1) qsort(s_abs, s_nabs, sizeof(u32), rb_u32cmp); /* W362 */
+    { /* W362: Stacks aller Threads, die in Gast-Bereichen liegen, ausnehmen (stkx=0: nur melden) */
+        static u32 nbuild;
+        int k;
+        long long t0 = rb_now();
+        if (s_nex_fix >= 0) s_nex = s_nex_fix;
+        rb_host_stacks();
+        s_hs_in = 0;
+        for (k = 0; k < s_nhs; k++) {
+            unsigned m;
+            for (m = 0; m < n; m++) {
+                if (iv[m].a < s_hs[k].b && s_hs[k].a < iv[m].b) break;
+            }
+            if (m == n) continue;
+            s_hs_in++;
+            if (s_w362_logged < 48) {
+                s_w362_logged++;
+                HLOG_W("LOCRB: W362 %d-Bit-Stack von TID %lu 0x%X-0x%X (%u KB) liegt im Gast-Bereich 0x%X-0x%X Art %u%s",
+                       s_hs[k].bits, (unsigned long)s_hs[k].tid, s_hs[k].a, s_hs[k].b, (s_hs[k].b - s_hs[k].a) / 1024u,
+                       iv[m].a, iv[m].b, iv[m].kind, s_stkx ? " - ausgenommen" : " - NUR GEMELDET (stkx=0)");
+            }
+            if (s_stkx && s_nex < RB_EXMAX) {
+                s_ex[s_nex].a = s_hs[k].a;
+                s_ex[s_nex].b = s_hs[k].b;
+                s_nex++;
+            }
+        }
+        if (nbuild++ < 3 || s_hs_in)
+            HLOG_I("LOCRB: W362 Stack-Pruefung: Threads=%u ohne TEB=%u Stacks=%u davon im Gast-Bereich=%u, %u us", s_hs_thr,
+                   s_hs_noteb, (unsigned)s_nhs, s_hs_in, rb_us(rb_now() - t0));
+    }
     for (i = 0; i < n; i++) rb_add_range(iv[i].a, iv[i].b, iv[i].kind);
+    if (s_ab_skip) HLOG_W("LOCRB: W362 fremde Belegungen: %u Abschnitte, %u KB%s", s_ab_skip, s_ab_skip_kb,
+                          s_abchk ? " ausgelassen" : " NUR GEMELDET (abchk=0)");
     s_total = 0;
     for (i = 0; i < (unsigned)s_nreg; i++) {
         s_reg[i].off = s_total;
@@ -497,8 +661,8 @@ static void rb_build_regions(void)
         kb[s_reg[i].kind < 8 ? s_reg[i].kind : 5] += s_reg[i].len / 1024u;
     }
     HLOG_I("LOCRB: Bereiche=%d gesamt=%u KB (Abbild %u KB, Contig/Ex %u KB, NtAlloc %u KB, Pool %u KB, TLS %u KB, "
-           "Kernel-Stack %u KB) Register=%u",
-           s_nreg, (unsigned)(s_total / 1024u), kb[0], kb[1], kb[2], kb[5], kb[6], kb[7], g_exreg_n);
+           "Kernel-Stack %u KB) Register=%u veraltet=%u",
+           s_nreg, (unsigned)(s_total / 1024u), kb[0], kb[1], kb[2], kb[5], kb[6], kb[7], g_exreg_n, s_stale);
     {
         static int nlog;
         for (i = 0; i < (unsigned)s_nreg && nlog < 64; i++, nlog++)
@@ -629,11 +793,12 @@ static void rb_ah_add(u32 addr) { rb_ah_put((rb_ah_t *)s_ah, &s_nah, addr); }
 
 /* ================= Aufzeichnung / Wiedergabe der Spiel-Aufrufe ================= */
 enum { EV_SELECT = 1, EV_RECV, EV_RECVFROM, EV_SEND, EV_SENDTO, EV_IOCTL, EV_WSAERR, EV_XIN, EV_ACC,
-       EV_XGN, EV_XPLAY, EV_XPREP, EV_XSTOP, EV_XSTAT, EV_XSTOPSRC, EV_XWORK, EV_N };
+       EV_XGN, EV_XPLAY, EV_XPREP, EV_XSTOP, EV_XSTAT, EV_XSTOPSRC, EV_XWORK, EV_NTALLOC, EV_NTCOMMIT, EV_N };
 static const char *const k_evname[] = {"-", "select", "recv", "recvfrom", "send", "sendto", "ioctlsocket",
                                        "WSAGetLastError", "XInputGetState", "Akkumulator",
                                        "XACT GetNotification", "XACT PlayEx", "XACT PrepareEx", "XACT Stop",
-                                       "XACT SoundSource_GetStatus", "XACT StopSoundCues", "XACTEngineDoWork"};
+                                       "XACT SoundSource_GetStatus", "XACT StopSoundCues", "XACTEngineDoWork",
+                                       "NtAllocateVirtualMemory", "NtAllocateVirtualMemory(Commit)"};
 typedef struct { uint8_t fn, pad; uint16_t n; u32 ret, ih; } rb_ev_t; /* ih = Hash der Eingangsargumente */
 #define RB_REC_CAP (4u << 20)
 static uint8_t *s_rec;
@@ -677,11 +842,33 @@ static void rb_rec_put(int fn, u32 ret, u32 ih, const void *data, u32 n)
     s_cnt_ev[fn][0]++;
 }
 
+static u32 rb_rep_limit(void); /* W338: Ende der Wiedergabe (R2: Ende des aktuellen Neurechen-Ticks) */
 /* Naechstes Ereignis der Wiedergabe; NULL bei Abweichung (Art oder Eingangsargumente). */
+static int s_rbi_ep;      /* W338 (vorgezogen) */
+static u32 s_rep_kc[EV_N]; /* W346 R3: Wiedergabe-Zeiger je Ereignisart im laufenden Neurechen-Tick */
+static u32 s_rep_end;      /* W338 (vorgezogen) */
+static u32 s_rbi_send_live; /* W346 R3: beim Neurechnen live gesendet (nur die korrigierte Zeitlinie sendet) */
 static const rb_ev_t *rb_rep_get(int fn, u32 ih, const uint8_t **data)
 {
     const rb_ev_t *e;
-    if (s_rec_cur + sizeof(rb_ev_t) > s_rec_len) {
+    if (s_rbi_ep) { /* W346 R3: je Ereignisart in Reihenfolge (eine andere Verschraenkung der Arten ist kein Fehler) */
+        u32 c = s_rep_kc[fn];
+        while (c + sizeof(rb_ev_t) <= s_rep_end) {
+            e = (const rb_ev_t *)(s_rec + c);
+            if (e->fn == (uint8_t)fn) {
+                if (e->ih != ih) break;
+                s_rep_kc[fn] = c + (u32)sizeof *e + e->n;
+                s_cnt_ev[fn][1]++;
+                if (data) *data = (const uint8_t *)(e + 1);
+                return e;
+            }
+            c += (u32)sizeof *e + e->n;
+        }
+        if (!s_rep_div) { s_rep_div_fn = (u32)fn; s_rep_div_at = c; }
+        s_rep_div++;
+        return NULL;
+    }
+    if (s_rec_cur + sizeof(rb_ev_t) > rb_rep_limit()) {
         if (!s_rep_div) { s_rep_div_fn = (u32)fn; s_rep_div_at = s_rec_events; }
         s_rep_div++;
         return NULL;
@@ -815,17 +1002,77 @@ static u32 __stdcall rb_recvfrom(u32 s, u32 buf, u32 len, u32 flags, u32 from, u
     }
 }
 
+/* W355: Beim Neurechnen (R2) ein Senden gleicher Laenge auf demselben Socket im selben Tick suchen. Der TCP-Strom
+ * hat die Nachricht der ersten Rechnung schon - eine zweite Kopie (nur der Inhalt, z. B. das Sync-Byte des
+ * 0x34-Herzschlags, ist anders) waere eine doppelte Nachricht beim Mitspieler. W346 schickte bei jedem
+ * ueberlappenden Rollback jede solche Nachricht erneut live (Nutzerlauf: 612 Kopien in 5 s). */
+static u32 s_rbi_toff[RBI_GH]; /* W355: vorgezogen (Definition unten, R2) */
+static void rb_pcom_clear(void); /* W355 */
+static void rb_pcom_rollback(void);
+static rbi_t *s_rbc;
+static u32 s_rbi_send_same; /* W355: beim Neurechnen als schon gesendet gewertet (gleiche Laenge, anderer Inhalt) */
+static u32 s_rbi_sendto_rep, s_rbi_sendto_same; /* W355: Datagramme beim Neurechnen */
+static u32 s_rbi_send_rep, s_rbi_send_exact, s_rbi_send_nosock, s_rbi_send_otherlen, s_rbi_send_logged; /* W355 DIAG */
+static const rb_ev_t *rb_rep_get_sl(int fn, u32 s, u32 len, u32 toh)
+{
+    u32 c = s_rep_kc[fn], nk = fn == EV_SENDTO ? 12u : 8u;
+    while (c + sizeof(rb_ev_t) <= s_rep_end) {
+        const rb_ev_t *e = (const rb_ev_t *)(s_rec + c);
+        u32 nx = c + (u32)sizeof *e + e->n;
+        if (e->fn == (uint8_t)fn && e->n == nk) {
+            const u32 *d = (const u32 *)(e + 1);
+            if (d[0] == s && d[1] == len && (nk == 8u || d[2] == toh)) {
+                s_rep_kc[fn] = nx;
+                s_cnt_ev[fn][1]++;
+                return e;
+            }
+        }
+        c = nx;
+    }
+    return NULL;
+}
+
 static u32 __stdcall rb_send(u32 s, u32 buf, u32 len, u32 flags)
 {
     u32 ih;
     if (!rb_mine()) return o_send(s, buf, len, flags);
     ih = fnv(s * 31u + len, (const void *)(uintptr_t)buf, len > 0x2000 ? 0x2000 : len); /* Inhalt nur als Hash */
     if (s_phase == PH_RECORD) {
-        u32 ret = o_send(s, buf, len, flags);
-        rb_rec_put(EV_SEND, ret, ih, NULL, 0);
+        u32 ret = o_send(s, buf, len, flags), sl[2];
+        sl[0] = s; /* W355: Socket und Laenge (kein Inhalt) fuer die Zuordnung beim Neurechnen */
+        sl[1] = len;
+        rb_rec_put(EV_SEND, ret, ih, sl, 8u);
         return ret;
     } else {
         const rb_ev_t *e = rb_rep_get(EV_SEND, ih, NULL); /* unterdrueckt: nicht senden */
+        if (s_rbi_ep) s_rbi_send_rep++;
+        if (e && s_rbi_ep) s_rbi_send_exact++;
+        if (!e && s_rbi_ep) {
+            e = rb_rep_get_sl(EV_SEND, s, len, 0);
+            if (e) { s_rbi_send_same++; return e->ret; }
+            { /* W355 DIAG: was lag in diesem Tick an Sendungen vor (nur Socket/Laengen, kein Inhalt) */
+                u32 c = s_rbi_toff[rbi_gtick(s_rbc) & (RBI_GH - 1u)], nsock = 0, nother = 0, l0 = 0, n = 0;
+                while (c + sizeof(rb_ev_t) <= s_rep_end) {
+                    const rb_ev_t *x = (const rb_ev_t *)(s_rec + c);
+                    if (x->fn == EV_SEND && x->n == 8u) {
+                        const u32 *dd = (const u32 *)(x + 1);
+                        n++;
+                        if (dd[0] == s) { nsock++; if (dd[1] != len) { nother++; if (!l0) l0 = dd[1]; } }
+                    }
+                    c += (u32)sizeof *x + x->n;
+                }
+                if (!nsock) s_rbi_send_nosock++;
+                else s_rbi_send_otherlen++;
+                if (s_rbi_send_logged < 12) {
+                    s_rbi_send_logged++;
+                    HLOG_I("LOCRBI: DIAG Neurechnen Senden live: Tick %u Laenge %u | Aufzeichnung des Ticks: %u Sendungen, %u auf "
+                           "dem Socket, %u mit anderer Laenge (erste %u), Fenster %u..%u", rbi_gtick(s_rbc), len, n, nsock, nother,
+                           l0, s_rbi_toff[rbi_gtick(s_rbc) & (RBI_GH - 1u)], s_rep_end);
+                }
+            }
+            s_rbi_send_live++;
+            return o_send(s, buf, len, flags); /* W346: nur die korrigierte Zeitlinie sendet */
+        }
         return e ? e->ret : len;
     }
 }
@@ -836,11 +1083,21 @@ static u32 __stdcall rb_sendto(u32 s, u32 buf, u32 len, u32 flags, u32 to, u32 t
     if (!rb_mine()) return o_sendto(s, buf, len, flags, to, tolen);
     ih = fnv(s * 31u + len, (const void *)(uintptr_t)buf, len > 0x2000 ? 0x2000 : len);
     if (s_phase == PH_RECORD) {
-        u32 ret = o_sendto(s, buf, len, flags, to, tolen);
-        rb_rec_put(EV_SENDTO, ret, ih, NULL, 0);
+        u32 ret = o_sendto(s, buf, len, flags, to, tolen), sl[3];
+        sl[0] = s; /* W355: Socket, Laenge, Ziel (Hash, kein Inhalt) fuer die Zuordnung beim Neurechnen */
+        sl[1] = len;
+        sl[2] = fnv(2166136261u, (const void *)(uintptr_t)to, to && tolen <= 32u ? tolen : 0u);
+        rb_rec_put(EV_SENDTO, ret, ih, sl, 12u);
         return ret;
     } else {
         const rb_ev_t *e = rb_rep_get(EV_SENDTO, ih, NULL);
+        if (s_rbi_ep) s_rbi_sendto_rep++;
+        if (!e && s_rbi_ep) { /* W355: gleiches Datagramm (Socket/Laenge/Ziel) der ersten Rechnung = schon gesendet */
+            e = rb_rep_get_sl(EV_SENDTO, s, len, fnv(2166136261u, (const void *)(uintptr_t)to, to && tolen <= 32u ? tolen : 0u));
+            if (e) { s_rbi_sendto_same++; return e->ret; }
+            s_rbi_send_live++;
+            return o_sendto(s, buf, len, flags, to, tolen); /* W346: nur die korrigierte Zeitlinie sendet */
+        }
         return e ? e->ret : len;
     }
 }
@@ -914,6 +1171,7 @@ static u32 __stdcall rb_xin(u32 h, u32 pState)
 #define RB_XSTOPSRC_VA 0x1C0EE4u
 #define RB_XWORK_VA 0x1C08C9u
 static int s_xact;
+static u32 s_xc_dup, s_xc_new, s_xc_orphan; /* W346 R3: Ton beim Neurechnen doppelt / nachgeholt / verwaist (Zaehler) */
 static fn3_t o_xgn, o_xplay, o_xprep;
 static fn4_t o_xstop;
 static fn2_t o_xstat;
@@ -941,9 +1199,93 @@ static u32 __stdcall rb_xgn(u32 e, u32 pdesc, u32 pout)
         return ev->ret;
     }
 }
+/* W346 R3: Cue-Starts beim Neurechnen. Erste Rechnung (Aufzeichnung) und bereits beim Neurechnen live gestartete Cues
+ * (Nebentabelle) gelten im ganzen Neurechen-Fenster: gleicher Cue (Parameter-Hash) = wiederverwenden (kein zweiter
+ * Start, gleicher Handle). Nur was die korrigierte Zeitlinie zusaetzlich startet, startet live (nachgeholt). */
+#define RB_XSIDE 256
+typedef struct { u32 g, ih, ret, h; uint8_t fn, used, live; } rb_xside_t;
+static rb_xside_t s_xside[RB_XSIDE];
+static u32 s_xside_n;
+static u32 s_xwin0, s_xwin1, s_xwin_g0, s_xwin_g1; /* Fenster der laufenden Neurechnung (Aufzeichnung, Spielticks) */
+static u32 rb_rbi_gtick(void);
+static const rb_ev_t *rb_rep_xcue(int fn, u32 ih, const uint8_t **d, u32 *side_h, int *side_hit)
+{
+    u32 c, pass, cur0 = s_rec_cur;
+    *side_hit = 0;
+    for (pass = 0; pass < 2; pass++) { /* zuerst ab dem laufenden Tick, dann vom Fensterbeginn */
+        u32 a = pass ? s_xwin0 : cur0, b = pass ? cur0 : s_xwin1;
+        for (c = a; c + sizeof(rb_ev_t) <= b;) {
+            rb_ev_t *e = (rb_ev_t *)(s_rec + c);
+            if (e->fn == (uint8_t)fn && e->ih == ih && !(e->pad & 1)) {
+                e->pad |= 1;
+                s_cnt_ev[fn][1]++;
+                *d = (const uint8_t *)(e + 1);
+                return e;
+            }
+            c += (u32)sizeof *e + e->n;
+        }
+    }
+    for (c = 0; c < s_xside_n; c++) {
+        rb_xside_t *x = &s_xside[c];
+        if (x->fn == (uint8_t)fn && x->ih == ih && !x->used && x->g >= s_xwin_g0 && x->g < s_xwin_g1) {
+            x->used = 1;
+            *side_h = x->h;
+            *side_hit = 1;
+            return NULL;
+        }
+    }
+    return NULL;
+}
+static int rb_xcue_seen(int fn, u32 ih) /* gleicher Cue im Fenster schon verwendet (Zaehler doppelt) */
+{
+    u32 c;
+    for (c = s_xwin0; c + sizeof(rb_ev_t) <= s_xwin1;) {
+        const rb_ev_t *e = (const rb_ev_t *)(s_rec + c);
+        if (e->fn == (uint8_t)fn && e->ih == ih) return 1;
+        c += (u32)sizeof *e + e->n;
+    }
+    return 0;
+}
+static void rb_xside_add(int fn, u32 ih, u32 ret, u32 h)
+{
+    u32 g = rb_rbi_gtick(), i, w = 0;
+    for (i = 0; i < s_xside_n; i++) /* alte Eintraege verwerfen */
+        if (s_xside[i].g + RBI_GH / 2u > g) s_xside[w++] = s_xside[i];
+    s_xside_n = w;
+    if (s_xside_n >= RB_XSIDE) return;
+    s_xside[s_xside_n].g = g;
+    s_xside[s_xside_n].ih = ih;
+    s_xside[s_xside_n].ret = ret;
+    s_xside[s_xside_n].h = h;
+    s_xside[s_xside_n].fn = (uint8_t)fn;
+    s_xside[s_xside_n].used = 1;
+    s_xside[s_xside_n].live = 1;
+    s_xside_n++;
+}
 static u32 rb_xcue_call(int fn, fn3_t o, u32 sb, u32 params, u32 pp)
 {
     u32 ih = fnv(2166136261u, (const void *)(uintptr_t)params, params ? 12u : 0u) * 31u + (pp != 0);
+    if (s_rbi_ep && s_phase == PH_REPLAY) {
+        const uint8_t *d = NULL;
+        u32 sh = 0, ret, h;
+        int side = 0;
+        const rb_ev_t *ev = rb_rep_xcue(fn, ih, &d, &sh, &side);
+        if (ev) {
+            if (ev->n && pp) { LOC_RB_PREWRITE(pp, 4); memcpy((void *)(uintptr_t)pp, d, 4); }
+            return ev->ret;
+        }
+        if (side) {
+            if (pp) { LOC_RB_PREWRITE(pp, 4); *(u32 *)(uintptr_t)pp = sh; }
+            return 0;
+        }
+        if (rb_xcue_seen(fn, ih)) s_xc_dup++; /* korrigierte Zeitlinie startet denselben Cue oefter als die erste */
+        s_xc_new++;
+        if (pp) LOC_RB_PREWRITE(pp, 4);
+        ret = o(sb, params, pp); /* nachgeholt: nur die korrigierte Zeitlinie startet ihn */
+        h = rb_rd_u32(pp);
+        rb_xside_add(fn, ih, ret, h);
+        return ret;
+    }
     if (s_phase == PH_RECORD) {
         u32 ret = o(sb, params, pp), h = rb_rd_u32(pp);
         rb_rec_put(fn, ret, ih, &h, pp ? 4u : 0u);
@@ -975,6 +1317,7 @@ static u32 __stdcall rb_xstop(u32 sb, u32 cue, u32 flags, u32 pcue)
         return ret;
     } else {
         const rb_ev_t *ev = rb_rep_get(EV_XSTOP, cue * 31u + flags, NULL);
+        if (!ev && s_rbi_ep) return o_xstop(sb, cue, flags, pcue); /* W346: nur die korrigierte Zeitlinie stoppt */
         return ev ? ev->ret : 0;
     }
 }
@@ -1002,6 +1345,7 @@ static u32 __stdcall rb_xstopsrc(u32 sp)
         return ret;
     } else {
         const rb_ev_t *ev = rb_rep_get(EV_XSTOPSRC, 0, NULL);
+        if (!ev && s_rbi_ep) return o_xstopsrc(sp); /* W346 */
         return ev ? ev->ret : 0;
     }
 }
@@ -1016,6 +1360,8 @@ static u32 __stdcall rb_xwork(void)
 /* Akkumulator (Zustandssumme je Lockstep-Rahmen) vor dem Lesen+Loeschen abgreifen. Im Neurechnen
  * direkt zur Spielfunktion (loc_sync zaehlt dann nicht mit: seine Rahmen/Hashes bleiben die der
  * Zeitlinie, die der Mitspieler sieht). */
+static int rb_r2_acc(void); /* W338 */
+static int s_rbi_acc_chained;  /* W338: Akkumulator-Kette schon bei der Installation */
 static u32 s_acc_next = RB_ACC_FN; /* bisheriges Ziel (loc_sync-Thunk oder Spielfunktion) */
 static u32 s_acc_game = RB_ACC_FN;
 static u32 s_acc_tgt;
@@ -1026,6 +1372,10 @@ static void __cdecl rb_acc_note(void)
 {
     u32 v = rd32(RB_ACC) ^ (rd32(RB_TICK) * 0x9E3779B1u);
     s_acc_tgt = s_acc_next;
+    if (rb_r2_acc()) { /* W338: vor der Thread-Pruefung (Spiel-Thread ist vor dem Ringstart noch unbekannt) */ /* W338: Akkumulator je Slot in die Eingabeschicht; im Neurechnen loc_sync auslassen */
+        if (s_phase == PH_REPLAY) s_acc_tgt = s_acc_game;
+        return;
+    }
     if (GetCurrentThreadId() != s_game_tid) return;
     if (s_phase == PH_RECORD) {
         if (s_nacc_rec < RB_ACC_MAX) s_acc_rec[s_nacc_rec] = v;
@@ -1635,12 +1985,1431 @@ static void rb_dirty_step(void)
     memcpy(s_kinds_last, kinds, sizeof kinds);
 }
 
+/* ================= W338 LOC-ROLLBACK-R2: Eingabeschicht (loc_rb_input=1) =================
+ * Hooks: FUN_0004E920 (Entnahme eines Rahmens) -> rbi_take, FUN_0004EC80 (eigener 0x34-Rahmen: TCP an die
+ * Mitspieler + eigener Ring) -> rbi_own + eigener UDP-Kanal. Die Regelung in FUN_0001D010 (0x1D0BF..0x1D381:
+ * Verzoegerung, Zusatzrahmen, Schritte je Bild) entfaellt ([0x306944] = 1). Am Ruhepunkt: Commit nur in Ticks mit
+ * Entnahme, Empfang, Rollback (rbr_load + getreue Neurechnung ohne Feld-Warten, Aufrufe des Spiel-Threads aus der
+ * laufenden Aufzeichnung), Senden, endgueltige Hashes (loc_sync), Zeitabgleich. Das Spiel-Netz (TCP 1000) traegt
+ * weiter Lobby, Start und Ende. Keine Eingaben im Log. */
+#define RBI_E920 0x4E920u
+#define RBI_EC80 0x4EC80u
+#define RBI_REG 0x1D0BFu
+#define RBI_STEPS 0x306944u
+#define RBI_DELAYV 0x306F04u
+#define RBI_PREFILL 0x2C9B2Cu
+#define RBI_SELF 0x3071B0u
+#define RBI_NPL 0x3071A0u
+#define RBI_TAKENW 0x309474u
+#define RBI_SENTW 0x309368u
+#define RBI_CHAN_GP 1260u /* Spielport-Abbild des Kanals (Basis + 260); Spiel nutzt 1000 und 1201-1203, 1200 = Doppelstart-Schutz */
+#define RBI_GM (RBI_GH - 1u)
+#ifndef SIO_UDP_CONNRESET
+#define SIO_UDP_CONNRESET _WSAIOW(IOC_VENDOR, 12)
+#endif
+
+static int s_rbi, s_rbi_last_pre, s_rbi_delay = 2, s_rbi_maxpred = 10, s_rbi_tsync = 1;
+static int s_rbi_rec = 1; /* DIAG rec=0: Spiel-Aufrufe nicht aufzeichnen (dann kein Rollback moeglich) */
+/* TEST chanloss=N (Prozent, unabhaengig) bzw. chanloss=ge (Gilbert-Elliott wie Profil mobile-bad: 1/60 -> schlecht,
+ * 1/4 -> gut, im schlechten Zustand 80 % Verlust): nur ausgehende Kanalpakete, fuer Messungen mit uloss:0 in der
+ * Verzoegerungsstufe (Lobby-Suche bleibt deterministisch). */
+static int s_rbi_chanloss, s_rbi_chanloss_ge, s_rbi_ge_bad;
+static u32 s_rbi_chanloss_rng = 0x9E3779B9u, s_rbi_chanloss_n;
+static int rbi_chan_drop(void)
+{
+    u32 r;
+    if (!s_rbi_chanloss && !s_rbi_chanloss_ge) return 0;
+    s_rbi_chanloss_rng ^= s_rbi_chanloss_rng << 13;
+    s_rbi_chanloss_rng ^= s_rbi_chanloss_rng >> 17;
+    s_rbi_chanloss_rng ^= s_rbi_chanloss_rng << 5;
+    r = s_rbi_chanloss_rng % 100000u;
+    if (s_rbi_chanloss_ge) {
+        if (!s_rbi_ge_bad && r < 1667u) s_rbi_ge_bad = 1;
+        else if (s_rbi_ge_bad && r < 25000u) s_rbi_ge_bad = 0;
+        s_rbi_chanloss_rng = s_rbi_chanloss_rng * 1103515245u + 12345u;
+        r = s_rbi_chanloss_rng % 100000u;
+        if (s_rbi_ge_bad && r < 80000u) { s_rbi_chanloss_n++; return 1; }
+        return 0;
+    }
+    if (r < (u32)s_rbi_chanloss * 1000u) { s_rbi_chanloss_n++; return 1; }
+    return 0;
+}
+static rbi_t *s_rbc;
+static u32 s_rbi_epoch;
+static uint8_t s_rbi_out[RBI_MAXP][RBI_FR];
+static uint8_t *s_rbi_tramp;
+typedef u32(__cdecl *rbi_fn2_t)(u32, u32);
+static rbi_fn2_t o_e920, o_ec80;
+static u32 s_rbi_reg_d = 2; /* Anzeige der Verzoegerung in [0x306F04] (LOCSYNC Verz=) */
+static SOCKET s_rbi_sock = INVALID_SOCKET;
+static int s_rbi_chan;            /* 1 = eigener UDP-Socket (Original-Transport), 2 = ueber loc_tun (SBT2) */
+/* Kanal ueber loc_tun: Empfang im Transport-Thread -> Warteschlange -> Spiel-Thread (rbi_poll) */
+#define RBI_TQ 64
+static CRITICAL_SECTION s_rbi_tq_cs;
+static struct { uint64_t src; int len; uint8_t b[RBI_PKT_MAX]; } s_rbi_tq[RBI_TQ];
+static int s_rbi_tq_r, s_rbi_tq_w;
+static volatile LONG s_rbi_tq_drop;
+static u32 s_rbi_toff[RBI_GH];
+static long long s_rbi_t_rep0;
+static rb_ser_t *s_rbi_s_ticks, *s_rbi_s_slots, *s_rbi_s_load, *s_rbi_s_rep;
+static u32 s_rbi_rb_n, s_rbi_rb_last, s_rbi_lost_logged, s_rbi_qfail, s_rbi_ts_waits, s_rbi_ts_ms, s_rbi_bar,
+    s_rbi_peer_bad, s_rbi_tx_err, s_rbi_compact, s_rbi_hash_logged, s_rbi_load_fail, s_rbi_missions;
+static u32 s_rbi_win_sum, s_rbi_win_n; /* Rollbacks/s im Fenster */
+static int s_rbi_defer_on = 1;       /* W346 R3 defer=0: Neuaufbau sofort (W338-Verhalten) */
+static u32 s_rbi_defer_ticks, s_rbi_defer_n, s_rbi_defer_clean;
+static u32 s_rbi_dflags[2], s_rbi_dtick_own, s_rbi_dmulti; /* DIAG */
+static u32 s_rbi_ts_run, s_rbi_ts_cool; /* Zeitabgleich */
+static int s_rbi_ts_stall, s_rbi_ts_in;  /* Stau-Tick angefordert / laeuft */
+static u32 s_rbi_tick_takes;            /* Entnahmen im laufenden Tick */
+static u32 s_rbi_dstream[2], s_rbi_dn[2], s_rbi_dchk[2][10], s_rbi_dcnt[10];
+/* W346 R4: Aushandlung je Mission (loc_rbn), Kanal-Thread (Empfang Kanal 1 + Hallo 5 Hz), Rueckfall, Desync-Ende */
+static rbn_t *s_rbn;
+static CRITICAL_SECTION s_rbn_cs;
+static HANDLE s_rbi_thr;
+static volatile LONG s_rbi_thr_stop;
+static volatile int s_rbi_mst;          /* RBN_ST_* der laufenden Mission (IDLE = keine) */
+static volatile LONG s_rbi_self_hello = 0xFF; /* Spielerindex fuer das Hallo (0xFF = unbekannt) */
+static u32 s_rbi_ls_missions, s_rbi_r2_missions, s_rbi_fb_n, s_rbi_end_desync, s_rbi_end_disagree, s_rbi_last_why;
+static int s_rbi_hcmp_logged; /* W355 */
+static unsigned s_rbi_reg_tick; /* W355: Registerstand beim letzten Ruhepunkt */
+/* W359 rprep=1 (Standard): Beim Neurechnen laeuft die Render-Vorbereitung des Spiel-Threads jeden Tick wie live
+ * (0x2F256: Freigabe-Warteschlange 0x84AA0 leeren, Doppelpuffer 0xBBB00/0x32880/0xBBBB0 kopieren, Index 0x306A6C
+ * tauschen, Bildzaehler 0x306A74); nur das Zeichnen im Render-Thread entfaellt. rprep=0: altes Verhalten (Auftrag = 1,
+ * Vorbereitung uebersprungen - Heap- und Puffer-Verlauf weicht vom Original ab). */
+static int s_rbi_prep = 1;
+/* W359 heapchk (Absicherung, Beschreibung bei rbi_heapchk) */
+static int s_rbi_heapchk = 1;
+static int s_rbi_heap_bad;      /* 1 = beschaedigt erkannt (Ende im naechsten Live-Tick) */
+static u32 s_rbi_hc_tick, s_rbi_end_heap;
+static u32 s_rbi_hc_n, s_rbi_hc_nodes_max, s_rbi_hc_us_max, s_rbi_hc_bad, s_rbi_hc_part, s_rbi_hc_vq, s_rbi_hc_busy;
+static int s_rbi_rbtest_n, s_rbi_rbtest_k; /* W355 TEST rbtest=N,K: alle N Live-Ticks Rollback um K Ticks erzwingen */
+static u32 s_rbi_rbtest_cnt, s_rbi_rbtest_ok, s_rbi_rbtest_next;
+static int s_rbi_force_desync = -1;     /* TEST desync=N: eigener Hash von Slot N verfaelscht (Gegenprobe Desync-Ende) */
+static int s_rbi_dmin = 2, s_rbi_dmax = 3; /* W346: Grenzen der adaptiven Verzoegerung (D=1 nur fest) */
+static long long s_rbi_lt_last;         /* DIAG langer Tick: Zeit des letzten Ruhepunkts */
+static u32 s_rbi_lt_n, s_rbi_lt_max, s_rbi_lt_logged;
+static const char *const k_rbn_why[RBN_WHY_N] = {"-", "eigener Schalter aus", "Mitspieler ohne Rollback",
+                                                 "kein Rollback-Host", "Mitspieler meldet Lockstep", "Frist abgelaufen",
+                                                 "Host entschied Lockstep"};
+
+static void rbi_pct(rb_ser_t *s, u32 *p50, u32 *p95, u32 *mx)
+{
+    static u32 tmp[RB_SER_N];
+    u32 n = s ? s->n : 0;
+    *p50 = *p95 = *mx = 0;
+    if (!n) return;
+    memcpy(tmp, s->v, n * sizeof(u32));
+    qsort(tmp, n, sizeof(u32), rb_cmp);
+    *p50 = tmp[n / 2];
+    *p95 = tmp[(n * 95u) / 100u];
+    *mx = tmp[n - 1];
+}
+
+static int rbi_peer_ok(const locnet *n, u32 ip, uint16_t port)
+{
+    int i;
+    if (ip == n->self_ip || !locnet_ip_allowed(ip)) return 0;
+    for (i = 0; i < n->npeers; i++)
+        if (n->peers[i].ip == ip && locnet_port_out(n, ip, RBI_CHAN_GP) == port) return 1;
+    return 0;
+}
+
+static void rbi_poll(void)
+{
+    locnet *n = loc_net_core();
+    uint8_t b[RBI_PKT_MAX + 16];
+    int k;
+    if (!s_rbi_chan || !n || !s_rbc) return;
+    if (s_rbi_chan == 1) { /* W346: in der Mission liest der Spiel-Thread den Socket selbst (wie W338): der Kanal-Thread
+                            * teilt sich den Kern des Prozesses und kaeme erst nach einer Zeitscheibe dran (M_fern2:
+                            * 0,17 Rollbacks/s statt 0,01, 10 s Zeitabgleich-Stau). Hallo -> Aushandlung. */
+        for (k = 0; k < 64; k++) {
+            struct sockaddr_in f;
+            int fl = (int)sizeof f, r;
+            int len = recvfrom(s_rbi_sock, (char *)b, (int)sizeof b, 0, (struct sockaddr *)&f, &fl);
+            uint64_t src;
+            if (len < 0) {
+                if (WSAGetLastError() == WSAECONNRESET) continue;
+                break;
+            }
+            if (fl < (int)sizeof f || f.sin_family != AF_INET || !rbi_peer_ok(n, f.sin_addr.s_addr, ntohs(f.sin_port))) {
+                s_rbi_peer_bad++;
+                continue;
+            }
+            src = ((uint64_t)f.sin_addr.s_addr << 16) | ntohs(f.sin_port);
+            if (rbn_is_hello(b, len)) {
+                EnterCriticalSection(&s_rbn_cs);
+                (void)rbn_rx(s_rbn, GetTickCount(), b, len, src);
+                LeaveCriticalSection(&s_rbn_cs);
+                continue;
+            }
+            r = rbi_rx(s_rbc, b, len, src);
+            if (r == 1 && s_rbi_mst == RBN_ST_TENT) {
+                EnterCriticalSection(&s_rbn_cs);
+                rbn_confirm_peer(s_rbn, src);
+                LeaveCriticalSection(&s_rbn_cs);
+            }
+        }
+    }
+    /* Warteschlange: Kanal 2 (Transport-Thread) bzw. Reste, die der Kanal-Thread vor dem Missionsbeginn empfing */
+    for (k = 0; k < RBI_TQ; k++) {
+        uint64_t src;
+        int len, r;
+        EnterCriticalSection(&s_rbi_tq_cs);
+        if (s_rbi_tq_r == s_rbi_tq_w) {
+            LeaveCriticalSection(&s_rbi_tq_cs);
+            break;
+        }
+        src = s_rbi_tq[s_rbi_tq_r].src;
+        len = s_rbi_tq[s_rbi_tq_r].len;
+        memcpy(b, s_rbi_tq[s_rbi_tq_r].b, (size_t)len);
+        s_rbi_tq_r = (s_rbi_tq_r + 1) % RBI_TQ;
+        LeaveCriticalSection(&s_rbi_tq_cs);
+        r = rbi_rx(s_rbc, b, len, src);
+        if (r == 1 && s_rbi_mst == RBN_ST_TENT) { /* Host: SBR2 mit dieser Epoche = Mitspieler hat R2 angenommen */
+            EnterCriticalSection(&s_rbn_cs);
+            rbn_confirm_peer(s_rbn, src);
+            LeaveCriticalSection(&s_rbn_cs);
+        }
+    }
+}
+
+/* W346: Empfangsweg beider Kanaele (Thread des Kanals bzw. des Transports): Hallo -> Aushandlung (vollstaendig
+ * geprueft in rbn_rx), sonst Warteschlange fuer den Spiel-Thread (Pruefung in rbi_rx). */
+static void rbi_dispatch(uint64_t src, const uint8_t *d, int len)
+{
+    if (len <= 0 || len > RBI_PKT_MAX) {
+        InterlockedIncrement(&s_rbi_tq_drop);
+        return;
+    }
+    if (rbn_is_hello(d, len)) {
+        EnterCriticalSection(&s_rbn_cs);
+        (void)rbn_rx(s_rbn, GetTickCount(), d, len, src);
+        LeaveCriticalSection(&s_rbn_cs);
+        return;
+    }
+    EnterCriticalSection(&s_rbi_tq_cs);
+    if ((s_rbi_tq_w + 1) % RBI_TQ == s_rbi_tq_r) {
+        InterlockedIncrement(&s_rbi_tq_drop);
+    } else {
+        s_rbi_tq[s_rbi_tq_w].src = src;
+        s_rbi_tq[s_rbi_tq_w].len = len;
+        memcpy(s_rbi_tq[s_rbi_tq_w].b, d, (size_t)len);
+        s_rbi_tq_w = (s_rbi_tq_w + 1) % RBI_TQ;
+    }
+    LeaveCriticalSection(&s_rbi_tq_cs);
+}
+
+/* An alle Mitspieler senden (Kanal 1: eigener Socket ueber die Verzoegerungsstufe, Kanal 2: SBT2). Thread-sicher. */
+static void rbi_send_all(const uint8_t *b, int len)
+{
+    locnet *n = loc_net_core();
+    int i;
+    if (!n || len <= 0) return;
+    if (s_rbi_chan == 2) {
+        if (loctun_dgram(n->tun, INADDR_BROADCAST, RBI_CHAN_GP, RBI_CHAN_GP, (const char *)b, len) < 0) s_rbi_tx_err++;
+        return;
+    }
+    for (i = 0; i < n->npeers; i++) {
+        struct sockaddr_in to;
+        int r;
+        if (n->peers[i].ip == n->self_ip) continue;
+        memset(&to, 0, sizeof to);
+        to.sin_family = AF_INET;
+        to.sin_addr.s_addr = n->peers[i].ip;
+        to.sin_port = htons(locnet_port_out(n, n->peers[i].ip, RBI_CHAN_GP));
+        if (n->sim) r = locnetsim_send(n->sim, s_rbi_sock, 0, (const char *)b, len, 0, &to); /* W322-Pruefstand */
+        else r = sendto(s_rbi_sock, (const char *)b, len, 0, (const struct sockaddr *)&to, (int)sizeof to);
+        if (r < 0) s_rbi_tx_err++;
+    }
+}
+
+/* W346: Kanal-Thread: Empfang Kanal 1 (select 20 ms) und Hallo alle 200 ms (beide Kanaele, auch in der Lobby). */
+static DWORD WINAPI rbi_chan_thread(LPVOID unused)
+{
+    DWORD next = GetTickCount();
+    (void)unused;
+    while (!s_rbi_thr_stop) {
+        if (s_rbi_chan == 1 && (s_rbi_mst == RBN_ST_IDLE || s_rbi_mst == RBN_ST_LS)) { /* in der Mission: Spiel-Thread */
+            fd_set rs;
+            struct timeval tv = {0, 20000};
+            FD_ZERO(&rs);
+            FD_SET(s_rbi_sock, &rs);
+            if (select(0, &rs, NULL, NULL, &tv) > 0) {
+                locnet *n = loc_net_core();
+                int k;
+                for (k = 0; k < 64 && n; k++) {
+                    uint8_t b[RBI_PKT_MAX + 16];
+                    struct sockaddr_in f;
+                    int fl = (int)sizeof f;
+                    int len = recvfrom(s_rbi_sock, (char *)b, (int)sizeof b, 0, (struct sockaddr *)&f, &fl);
+                    if (len < 0) {
+                        if (WSAGetLastError() == WSAECONNRESET) continue;
+                        break;
+                    }
+                    if (fl < (int)sizeof f || f.sin_family != AF_INET ||
+                        !rbi_peer_ok(n, f.sin_addr.s_addr, ntohs(f.sin_port))) {
+                        s_rbi_peer_bad++;
+                        continue;
+                    }
+                    rbi_dispatch(((uint64_t)f.sin_addr.s_addr << 16) | ntohs(f.sin_port), b, len);
+                }
+            }
+        } else {
+            Sleep(20);
+        }
+        {
+            DWORD now = GetTickCount();
+            if ((LONG)(now - next) >= 0) {
+                uint8_t hb[RBN_PKT_MAX];
+                int hl;
+                next = now + 200;
+                EnterCriticalSection(&s_rbn_cs);
+                hl = rbn_tx(s_rbn, now, (int)s_rbi_self_hello, hb, (int)sizeof hb);
+                LeaveCriticalSection(&s_rbn_cs);
+                if (hl > 0) rbi_send_all(hb, hl);
+            }
+        }
+    }
+    return 0;
+}
+
+static void rbi_send(void)
+{
+    locnet *n = loc_net_core();
+    uint8_t b[RBI_PKT_MAX];
+    int len, i;
+    if (!s_rbi_chan || !n) return;
+    len = rbi_tx(s_rbc, b, (int)sizeof b);
+    if (len <= 0) return;
+    if (rbi_chan_drop()) return; /* TEST chanloss */
+    (void)i;
+    rbi_send_all(b, len);
+}
+
+static void rbi_tun_rx(uint32_t vip, const uint8_t *d, int len) /* Transport-Thread */
+{
+    rbi_dispatch((uint64_t)vip << 16, d, len);
+}
+
+static int rbi_sock_open(void)
+{
+    locnet *n = loc_net_core();
+    struct sockaddr_in a;
+    u_long nb = 1;
+    BOOL off = FALSE, excl = TRUE;
+    DWORD ret = 0;
+    SOCKET s;
+    if (!n) {
+        HLOG_W("LOCRBI: Netz aus - Eingabeschicht aus (Original-Lockstep)");
+        return 0;
+    }
+    if (n->tun) { /* eigener Transport (W324): Kanal als SBT2-Datagramm an Spielport 1260, nie an den Gast */
+        if (!loctun_available()) {
+            HLOG_W("LOCRBI: Transport nicht verfuegbar - Eingabeschicht aus (Original-Lockstep)");
+            return 0;
+        }
+        loctun_set_app(n->tun, (uint16_t)RBI_CHAN_GP, rbi_tun_rx);
+        s_rbi_chan = 2;
+        HLOG_I("LOCRBI: Eingabekanal ueber den eigenen Transport (SBT2-Datagramm, Spielport %u, nicht an das Spiel)",
+               RBI_CHAN_GP);
+        return 1;
+    }
+    s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return 0;
+    setsockopt(s, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, (const char *)&excl, (int)sizeof excl);
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = n->self_ip;
+    a.sin_port = htons(locnet_port_out(n, n->self_ip, RBI_CHAN_GP));
+    if (bind(s, (const struct sockaddr *)&a, (int)sizeof a) != 0) {
+        HLOG_W("LOCRBI: Kanal-Port %u nicht frei (WSA %d) - Eingabeschicht aus", ntohs(a.sin_port), WSAGetLastError());
+        closesocket(s);
+        return 0;
+    }
+    ioctlsocket(s, FIONBIO, &nb);
+    WSAIoctl(s, SIO_UDP_CONNRESET, &off, (DWORD)sizeof off, NULL, 0, &ret, NULL, NULL);
+    s_rbi_sock = s;
+    s_rbi_chan = 1;
+    HLOG_I("LOCRBI: Eingabekanal UDP Port %u (Basis+260), nur bekannte Mitspieler (%d)", ntohs(a.sin_port), n->npeers);
+    return 1;
+}
+
+/* W346: R2 fuer diese Mission ausgehandelt (Epoche/Verzoegerung stehen fest, noch keine Entnahme). */
+static void rbi_go_r2(u32 epoch, int delay)
+{
+    int rtt;
+    if (!rbi_configure(s_rbc, epoch, delay)) { /* darf nicht vorkommen (Entnahme vor der Entscheidung) */
+        HLOG_W("LOCRBI: Aushandlung zu spaet (Entnahme schon erfolgt) - Mission im Original-Lockstep");
+        rbi_end(s_rbc);
+        s_rbi_mst = RBN_ST_LS;
+        s_rbi_fb_n++;
+        return;
+    }
+    EnterCriticalSection(&s_rbn_cs);
+    rtt = rbn_rtt_max(s_rbn, GetTickCount());
+    LeaveCriticalSection(&s_rbn_cs);
+    s_rbi_epoch = epoch;
+    s_rbi_r2_missions++;
+    s_rbi_reg_d = (u32)delay;
+    memset(s_rbi_toff, 0, sizeof s_rbi_toff);
+    s_rec_len = s_rec_cur = 0; /* Aufzeichnung je Mission neu (Tick 0 ab Offset 0) */
+    if (s_ready && s_rec && s_rbi_rec) s_phase = PH_RECORD;
+    s_rbi_mst = RBN_ST_R2;
+    s_rbi_ep = 1;
+    loc_sync_ext_on(1);
+    HLOG_I("LOCRBI: Mission %u mit eigener Eingabeschicht (ausgehandelt): Spieler %u von %u, Epoche %08X, Verzoegerung %d "
+           "Ticks (%s, Umlaufzeit %d ms), Fenster %d Slots, Zeitabgleich %d", s_rbi_missions, rd32(RBI_SELF), rd32(RBI_NPL),
+           epoch, delay, s_rbi_delay > 0 ? "fest" : "adaptiv", rtt, s_rbi_maxpred, s_rbi_tsync);
+}
+
+static void rbi_fallback_ls(int why)
+{
+    s_rbi_mst = RBN_ST_LS;
+    s_rbi_ls_missions++;
+    s_rbi_last_why = (u32)why;
+    if (why != RBN_WHY_SELF_OFF) s_rbi_fb_n++;
+    HLOG_I("LOCRBI: Mission %u im Original-Lockstep (%s)", s_rbi_missions,
+           why > 0 && why < RBN_WHY_N ? k_rbn_why[why] : "?");
+}
+
+/* W346: Missionsbeginn (Vorlauf FUN_0001D3D0): Aushandlung starten. Vor der Entscheidung entnimmt keine Seite. */
+static void rbi_mission_open(void)
+{
+    int st, self, npl, d, why;
+    u32 ep;
+    if (!s_rbi || !s_rbi_chan || !s_rbc || !s_rbn) return;
+    self = (int)rd32(RBI_SELF);
+    npl = (int)rd32(RBI_NPL);
+    InterlockedExchange(&s_rbi_self_hello, (self >= 0 && self < 10) ? self : 0xFF);
+    EnterCriticalSection(&s_rbn_cs);
+    st = rbn_mission_start(s_rbn, GetTickCount(), self, npl - 1);
+    ep = rbn_epoch(s_rbn);
+    d = rbn_delay(s_rbn);
+    why = rbn_why(s_rbn);
+    LeaveCriticalSection(&s_rbn_cs);
+    s_rbi_missions++;
+    if (st == RBN_ST_LS) {
+        rbi_fallback_ls(why);
+        return;
+    }
+    rbi_begin(s_rbc, ep, self, d > 0 ? d : 2, s_rbi_maxpred); /* eigene Rahmen ab dem Vorlauf mitschreiben */
+    s_rbi_hcmp_logged = 0;
+    s_rbi_rbtest_next = 0;
+    rb_pcom_clear();
+    s_rbi_heap_bad = 0; /* W359 */
+    s_rbi_hc_tick = 0;
+    s_rbi_reg_tick = g_exreg_n;
+    s_rbi_mst = st;
+    HLOG_I("LOCRBI: Mission %u: Aushandlung (%s), Spieler %d von %d", s_rbi_missions,
+           st == RBN_ST_TENT ? "Host bietet Rollback an, wartet auf Bestaetigung" : "Client wartet auf die Entscheidung des Hosts",
+           self, npl);
+}
+
+/* W346: Aushandlung am Ruhepunkt weiterfuehren (TENT/PEND). */
+static void rbi_mission_poll(void)
+{
+    int st, d, why;
+    u32 ep;
+    rbi_poll();
+    EnterCriticalSection(&s_rbn_cs);
+    st = rbn_poll(s_rbn, GetTickCount());
+    ep = rbn_epoch(s_rbn);
+    d = rbn_delay(s_rbn);
+    why = rbn_why(s_rbn);
+    LeaveCriticalSection(&s_rbn_cs);
+    if (st == RBN_ST_R2) {
+        rbi_go_r2(ep, d);
+    } else if (st == RBN_ST_LS) {
+        rbi_end(s_rbc);
+        rbi_fallback_ls(why);
+    }
+}
+
+/* W346 R3: Allokation des Spiel-Threads waehrend R2 (krnl_mem). Aufzeichnen: Ergebnis je Aufruf. Neurechnen: derselbe
+ * Block wie in der ersten Rechnung (genullt wie frischer Speicher) statt eines neuen (kein Leck, gleiche Adresse). */
+static u32 s_rbi_alloc_rec, s_rbi_alloc_rep, s_rbi_alloc_new;
+static u32 s_rbi_alloc_other, s_rbi_alloc_miss, s_rbi_alloc_nocommit; /* W355 DIAG */
+static u32 s_rbi_com_rec, s_rbi_com_rep, s_rbi_com_miss, s_rbi_com_new; /* W355: Commit in reservierten Bereich */
+static u32 s_rbi_com_logged;
+/* W355: Commits (base != 0) seit dem letzten Ring-Neuaufbau, egal in welcher Phase (die erste Belegung kann aus der
+ * korrigierten Zeitlinie kommen, also im Neurechnen). Diese Seiten liegen nicht im Ring; jeder Rollback im Aufschub
+ * zielt hoechstens auf den fruehesten dieser Ticks (rbi_rebuild_note) - nach dem Laden sind sie in der neuen Zeitlinie
+ * also noch nicht belegt ("verworfen", live = 0), behalten aber den Inhalt der alten. Der erste Commit eines verworfenen
+ * Bereichs (live oder beim Neurechnen) wird wie frisch bedient: genullt, kein Registereintrag. Ein erneuter Commit in
+ * derselben Zeitlinie (live = 1) aendert nichts (wie im Original: Commit belegter Seiten laesst den Inhalt). */
+#define RB_PCOM_MAX 64
+static struct { u32 a, end, live; } s_pcom[RB_PCOM_MAX];
+static u32 s_pcom_n, s_pcom_full, s_rbi_com_same, s_rbi_com_drop;
+static void rb_pcom_clear(void) { s_pcom_n = 0; }
+static void rb_pcom_rollback(void) /* nach rbr_load: alle Eintraege gehoeren zur verworfenen Zeitlinie */
+{
+    u32 k;
+    for (k = 0; k < s_pcom_n; k++) {
+        if (s_pcom[k].live) s_rbi_com_drop++;
+        s_pcom[k].live = 0;
+    }
+}
+static int s_memlog;   /* W359 DIAG memlog=1: Commit/Freigabe/Rollback in R2 protokollieren (nur Adressen/Ticks) */
+static u32 s_memlog_n, s_memlog_lt;
+static int rb_alloc_cb(int op, unsigned size, unsigned type, unsigned prot, unsigned *io)
+{
+    u32 ih = size * 31u + type * 7u + prot;
+    if (s_rbi_ep && op == 0 && s_phase != PH_IDLE && GetCurrentThreadId() != s_game_tid) s_rbi_alloc_other++;
+    if (s_rbi_ep && op == 3 && s_rbi_com_logged < 8) { /* W355 DIAG: Commit in reservierten Bereich (Adresse/Groesse) */
+        s_rbi_com_logged++;
+        HLOG_I("LOCRBI: DIAG Commit 0x%X Groesse 0x%X frisch=%u Phase %d Spiel-Thread %d Spieltick %u", *io & ~0xFFFu, size,
+               *io & 1u, s_phase, GetCurrentThreadId() == s_game_tid, rd32(RB_TICK));
+    }
+    if (s_memlog && s_rbi_ep && op >= 2 && s_memlog_n < 600) { /* W359 DIAG memlog */
+        s_memlog_n++;
+        s_memlog_lt = rd32(RB_TICK);
+        HLOG_I("LOCRBI: DIAG memlog %s 0x%X Groesse 0x%X Typ 0x%X Phase %d Spiel-Thread %d Spieltick %u Slot %d", op == 2 ? "Commit?" :
+               (op == 3 ? "Commit" : (op == 5 ? "Freigabe" : "?")), *io & ~0xFFFu, size, type, s_phase,
+               GetCurrentThreadId() == s_game_tid, rd32(RB_TICK), s_rbc ? rbi_cons(s_rbc, rbi_self(s_rbc)) : -1);
+    }
+    if (op == 5) return 0;
+    if (!s_rbi_ep || !rb_mine()) return 0;
+    if (op == 3) { /* W355: Commit aufzeichnen (Adresse, frisch) */
+        u32 a3 = *io & ~0xFFFu, e3 = (a3 + size + 0xFFFu) & ~0xFFFu, k;
+        for (k = 0; k < s_pcom_n; k++) /* schon in der Liste (erneuter Commit derselben Seiten)? */
+            if (a3 >= s_pcom[k].a && e3 <= s_pcom[k].end) break;
+        if (k == s_pcom_n) {
+            if (s_pcom_n < RB_PCOM_MAX) {
+                s_pcom[s_pcom_n].a = a3;
+                s_pcom[s_pcom_n].end = e3;
+                s_pcom[s_pcom_n].live = 1;
+                s_pcom_n++;
+            } else {
+                s_pcom_full++;
+            }
+        }
+        if (s_phase == PH_RECORD) {
+            u32 v = *io;
+            rb_rec_put(EV_NTCOMMIT, 0, ih ^ ((v & ~0xFFFu) * 13u), &v, 4); /* gleiche Basis = gleicher Aufruf */
+            s_rbi_com_rec++;
+        } else if (s_phase == PH_REPLAY) {
+            s_rbi_com_new++; /* nur die korrigierte Zeitlinie committet */
+        }
+        return 0;
+    }
+    if (op == 2) { /* W355: Neurechnen - derselbe Commit wie in der ersten Rechnung */
+        u32 a, end, k;
+        (void)ih;
+        a = *io & ~0xFFFu;
+        end = (*io + size + 0xFFFu) & ~0xFFFu;
+        for (k = 0; k < s_pcom_n; k++)
+            if (a >= s_pcom[k].a && end <= s_pcom[k].end) break;
+        if (k == s_pcom_n || end <= a) { /* nicht seit dem letzten Neuaufbau belegt: Original */
+            if (s_phase == PH_REPLAY) s_rbi_com_miss++;
+            return 0;
+        }
+        if (s_pcom[k].live) { /* in dieser Zeitlinie schon belegt: Commit aendert nichts (kein Registereintrag) */
+            s_rbi_com_same++;
+            *io = a;
+            return 1;
+        }
+        __try {
+            MEMORY_BASIC_INFORMATION mb;
+            if (!VirtualQuery((LPCVOID)(uintptr_t)a, &mb, sizeof mb) || mb.State != MEM_COMMIT ||
+                (u32)((uintptr_t)mb.BaseAddress + mb.RegionSize) < end) { s_rbi_com_miss++; return 0; }
+            /* verworfene Zeitlinie hatte den Bereich belegt: Inhalt wie frisch committet. Nur dieser Teilbereich gilt
+             * danach als belegt; reicht der Eintrag weiter, wird er geteilt (Rest bleibt verworfen). */
+            LOC_RB_PREWRITE(a, end - a);
+            memset((void *)(uintptr_t)a, 0, end - a);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            s_rbi_com_miss++;
+            return 0;
+        }
+        if (s_pcom[k].a == a && s_pcom[k].end == end) {
+            s_pcom[k].live = 1;
+        } else if (s_pcom_n + 2u <= RB_PCOM_MAX) { /* teilen: [a0,a) verworfen, [a,end) belegt, [end,e0) verworfen */
+            u32 a0 = s_pcom[k].a, e0 = s_pcom[k].end;
+            s_pcom[k].a = a;
+            s_pcom[k].end = end;
+            s_pcom[k].live = 1;
+            if (a0 < a) { s_pcom[s_pcom_n].a = a0; s_pcom[s_pcom_n].end = a; s_pcom[s_pcom_n].live = 0; s_pcom_n++; }
+            if (end < e0) { s_pcom[s_pcom_n].a = end; s_pcom[s_pcom_n].end = e0; s_pcom[s_pcom_n].live = 0; s_pcom_n++; }
+        } else {
+            s_pcom_full++; /* kein Platz zum Teilen: ganzer Eintrag gilt als belegt (Rest: erneuter Commit nullt nicht) */
+            s_pcom[k].live = 1;
+        }
+        *io = a;
+        s_rbi_com_rep++;
+        return 1;
+    }
+    if (op == 1) {
+        if (s_phase == PH_RECORD) {
+            u32 v = *io;
+            rb_rec_put(EV_NTALLOC, 0, ih, &v, 4);
+            s_rbi_alloc_rec++;
+        } else if (s_phase == PH_REPLAY) {
+            s_rbi_alloc_new++; /* nur die korrigierte Zeitlinie belegt */
+        }
+        return 0;
+    }
+    if (s_phase == PH_REPLAY) {
+        const uint8_t *d;
+        const rb_ev_t *e = rb_rep_get(EV_NTALLOC, ih, &d);
+        u32 a;
+        if (!e || e->n != 4) { s_rbi_alloc_miss++; return 0; }
+        memcpy(&a, d, 4);
+        __try {
+            MEMORY_BASIC_INFORMATION mb;
+            if (!VirtualQuery((LPCVOID)(uintptr_t)a, &mb, sizeof mb) || mb.State != MEM_COMMIT) { s_rbi_alloc_nocommit++; return 0; }
+            LOC_RB_PREWRITE(a, (size + 0xFFFu) & ~0xFFFu);
+            memset((void *)(uintptr_t)a, 0, size);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            return 0;
+        }
+        *io = a;
+        s_rbi_alloc_rep++;
+        return 1;
+    }
+    return 0;
+}
+
+/* ---- W359 DIAG rbver=N: Neurechnen mit gleichen Eingaben gegen den Live-Stand pruefen ----
+ * Jeder N-te erzwungene Rollback (rbtest): vor dem Laden alle Ring-Bereiche kopieren (Live-Stand Tick T), nach dem
+ * Neurechnen bis Tick T Wort fuer Wort vergleichen. Gleiche Eingaben -> jede Abweichung ist Zustand, den Laden +
+ * Neurechnen nicht originaltreu herstellt. Logs: nur Adressen, Zaehler und Werte des Spielspeichers (keine Eingaben). */
+static int s_rbv_n, s_rbv_arm, s_rbv_on, s_rbv_div;
+static uint8_t *s_rbv_buf;
+static size_t s_rbv_cap;
+static unsigned s_rbv_gen;
+static u32 s_rbv_reb, s_rbv_tick, s_rbv_cnt, s_rbv_bad, s_rbv_skip, s_rbv_logged, s_rbv_pages_sum;
+#define RBV_H 384
+typedef struct { u32 page, n, words, first; } rbv_h_t;
+static rbv_h_t s_rbv_h[RBV_H];
+static unsigned s_rbv_nh, s_rbv_hfull;
+static void rbv_take(void)
+{
+    if (!s_rbv_arm) return;
+    s_rbv_arm = 0;
+    if (s_total > s_rbv_cap) {
+        if (s_rbv_buf) VirtualFree(s_rbv_buf, 0, MEM_RELEASE);
+        s_rbv_cap = s_total + 0x400000u;
+        s_rbv_buf = (uint8_t *)VirtualAlloc(NULL, s_rbv_cap, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        if (!s_rbv_buf) { s_rbv_cap = 0; s_rbv_skip++; return; }
+    }
+    __try {
+        rb_copy_out(s_rbv_buf);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        s_rbv_skip++;
+        return;
+    }
+    s_rbv_gen = s_reg_gen;
+    s_rbv_reb = s_r_rebuild;
+    s_rbv_tick = rd32(RB_TICK);
+    s_rbv_on = 1;
+}
+static void rbv_hadd(u32 page, u32 words, u32 first)
+{
+    unsigned i;
+    for (i = 0; i < s_rbv_nh; i++) {
+        if (s_rbv_h[i].page == page) {
+            s_rbv_h[i].n++;
+            s_rbv_h[i].words += words;
+            return;
+        }
+    }
+    if (s_rbv_nh >= RBV_H) { s_rbv_hfull++; return; }
+    s_rbv_h[s_rbv_nh].page = page;
+    s_rbv_h[s_rbv_nh].n = 1;
+    s_rbv_h[s_rbv_nh].words = words;
+    s_rbv_h[s_rbv_nh].first = first;
+    s_rbv_nh++;
+}
+static void rbv_check(void)
+{
+    int i;
+    u32 np = 0, nw = 0, ex[8][3], nex = 0;
+    if (!s_rbv_on) return;
+    s_rbv_on = 0;
+    if (s_rbv_gen != s_reg_gen || s_rbv_reb != s_r_rebuild || rd32(RB_TICK) != s_rbv_tick) {
+        s_rbv_skip++;
+        return;
+    }
+    __try {
+        for (i = 0; i < s_nreg; i++) {
+            const u32 *live = (const u32 *)(uintptr_t)s_reg[i].va;
+            const u32 *ref = (const u32 *)(s_rbv_buf + s_reg[i].off);
+            u32 o, w;
+            for (o = 0; o < s_reg[i].len / 4u; o += RB_PG / 4u) {
+                u32 pw = 0, first = 0;
+                if (memcmp(live + o, ref + o, RB_PG) == 0) continue;
+                for (w = 0; w < RB_PG / 4u; w++) {
+                    if (live[o + w] == ref[o + w]) continue;
+                    if (!pw++) first = s_reg[i].va + (o + w) * 4u;
+                    if (nex < 8) {
+                        ex[nex][0] = s_reg[i].va + (o + w) * 4u;
+                        ex[nex][1] = ref[o + w];
+                        ex[nex][2] = live[o + w];
+                        nex++;
+                    }
+                }
+                np++;
+                nw += pw;
+                rbv_hadd(s_reg[i].va + o * 4u, pw, first);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        s_rbv_skip++;
+        return;
+    }
+    s_rbv_cnt++;
+    s_rbv_pages_sum += np;
+    if (!np) return;
+    s_rbv_bad++;
+    if (s_rbv_logged < 40) {
+        char b[512];
+        int n = 0;
+        u32 k;
+        s_rbv_logged++;
+        for (k = 0; k < nex && n < (int)sizeof b - 40; k++)
+            n += snprintf(b + n, sizeof b - (size_t)n, " 0x%X:%08X->%08X", ex[k][0], ex[k][1], ex[k][2]);
+        b[sizeof b - 1] = 0;
+        HLOG_W("LOCRBV: Neurechnen != Live bei Tick %u: %u Seiten, %u Woerter |%s", s_rbv_tick, np, nw, b);
+    }
+}
+static int rbv_cmp(const void *a, const void *b)
+{
+    const rbv_h_t *p = (const rbv_h_t *)a, *q = (const rbv_h_t *)b;
+    return p->n < q->n ? 1 : (p->n > q->n ? -1 : (p->page > q->page) - (p->page < q->page));
+}
+/* W359 DIAG csn=1: Gast-Sperren (RtlEnterCriticalSection), die andere Threads als der Spiel-Thread in R2 betreten
+ * (Sperre, Ruecksprung, Thread-Start) - zeigt, welche Gast-Threads gemeinsame Strukturen (Heap) mitbenutzen. */
+extern void (*volatile g_loc_cs_note)(u32 cs, u32 ret);
+static int s_csn;
+#define CSN_N 48
+static struct { u32 cs, ret, tid, n; } s_csn_t[CSN_N];
+static volatile LONG s_csn_lock;
+static u32 s_csn_full;
+static void rb_cs_note(u32 cs, u32 ret)
+{
+    u32 tid = GetCurrentThreadId(), i;
+    if (!s_rbi_ep || tid == s_game_tid) return;
+    while (InterlockedExchange(&s_csn_lock, 1)) SwitchToThread();
+    for (i = 0; i < CSN_N && s_csn_t[i].n; i++)
+        if (s_csn_t[i].cs == cs && s_csn_t[i].ret == ret && s_csn_t[i].tid == tid) break;
+    if (i < CSN_N) {
+        if (!s_csn_t[i].n) { s_csn_t[i].cs = cs; s_csn_t[i].ret = ret; s_csn_t[i].tid = tid; }
+        s_csn_t[i].n++;
+    } else {
+        s_csn_full++;
+    }
+    InterlockedExchange(&s_csn_lock, 0);
+}
+static u32 rb_thread_start_of(u32 tid)
+{
+    int i, n = krnl_xb_thread_count();
+    for (i = 0; i < n; i++) {
+        void *h = NULL;
+        unsigned r = 0;
+        if (krnl_xb_thread_get(i, &h, &r) && GetThreadId((HANDLE)h) == tid) return r;
+    }
+    return 0;
+}
+static void rb_csn_log(int waited_s)
+{
+    char b[1400];
+    int n = 0;
+    u32 i;
+    if (!s_csn) return;
+    for (i = 0; i < CSN_N && s_csn_t[i].n && n < (int)sizeof b - 64; i++)
+        n += snprintf(b + n, sizeof b - (size_t)n, " cs=0x%X ret=0x%X start=0x%X n=%u", s_csn_t[i].cs, s_csn_t[i].ret,
+                      rb_thread_start_of(s_csn_t[i].tid), s_csn_t[i].n);
+    b[n < (int)sizeof b ? n : (int)sizeof b - 1] = 0;
+    HLOG_I("LOCRBV: t=%ds Gast-Sperren anderer Threads (Spiel-Thread ausgenommen)%s:%s", waited_s,
+           s_csn_full ? " (Tabelle voll)" : "", n ? b : " keine");
+}
+static void rbv_log(int waited_s)
+{
+    char b[1400];
+    int n = 0;
+    unsigned i;
+    rb_csn_log(waited_s);
+    if (!s_rbv_n) return;
+    qsort(s_rbv_h, s_rbv_nh, sizeof s_rbv_h[0], rbv_cmp);
+    for (i = 0; i < s_rbv_nh && i < 40 && n < (int)sizeof b - 48; i++)
+        n += snprintf(b + n, sizeof b - (size_t)n, " %X:%u/%u@%X", s_rbv_h[i].page, s_rbv_h[i].n, s_rbv_h[i].words,
+                       s_rbv_h[i].first);
+    b[n < (int)sizeof b ? n : (int)sizeof b - 1] = 0;
+    HLOG_I("LOCRBV: t=%ds geprueft=%u abweichend=%u uebersprungen=%u Seiten-Summe=%u verschiedene Seiten=%u%s | Seite:Pruefungen/"
+           "Woerter@erstes:%s",
+           waited_s, s_rbv_cnt, s_rbv_bad, s_rbv_skip, s_rbv_pages_sum, s_rbv_nh, s_rbv_hfull ? " (Tabelle voll)" : "", b);
+}
+
+/* ---- W359 Absicherung: Freilisten des Spiel-Heaps pruefen (heapchk=1, Standard). Nach jeder Neurechnung und je
+ * Sekunde live. Beschaedigt -> sauberes Ende (Meldung) statt Absturz/Haenger in der Liste. Heap-Zeiger: 0x306F84
+ * (Spiel), 0x73EAB4 (XAPI-Prozess-Heap). Gelesen wird nur innerhalb der gesicherten Bereiche. ---- */
+static int rb_heap_rd(void *ctx, u32 va, u32 *out)
+{
+    int lo = 0, hi = s_nreg - 1, ok = 0;
+    u32 k;
+    (void)ctx;
+    while (lo <= hi && !ok) { /* s_reg aufsteigend (schneller Weg) */
+        int m = (lo + hi) / 2;
+        if (va < s_reg[m].va) hi = m - 1;
+        else if (va - s_reg[m].va + 4u > s_reg[m].len) lo = m + 1;
+        else ok = 1;
+    }
+    for (k = 0; !ok && k < s_pcom_n; k++) /* seit dem letzten Neuaufbau belegt (noch nicht im Ring, z. B. Heap-Wachstum) */
+        if (va >= s_pcom[k].a && va + 4u <= s_pcom[k].end) ok = 1;
+    if (!ok) { /* sonst: belegter, lesbarer Speicher (Verkettung/Groesse pruefen weiter streng) */
+        MEMORY_BASIC_INFORMATION mb;
+        if (va < 0x10000u || !VirtualQuery((LPCVOID)(uintptr_t)va, &mb, sizeof mb) || mb.State != MEM_COMMIT ||
+            (mb.Protect & (PAGE_GUARD | PAGE_NOACCESS)) || !(mb.Protect & 0xEEu))
+            return 0;
+        s_rbi_hc_vq++;
+    }
+    __try {
+        *out = *(volatile const u32 *)(uintptr_t)va;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return 0;
+    }
+    return 1;
+}
+int krnl_cs_try_enter(u32 cs);                     /* krnl_sync.c (W359) */
+u32 __stdcall hle_RtlLeaveCriticalSection(u32 cs); /* krnl_sync.c */
+static void rbi_heapchk(int after_replay)
+{
+    static const u32 k_hp[2] = {0x306F84u, 0x73EAB4u};
+    u32 h[2], i;
+    long long t0;
+    if (!s_rbi_heapchk || s_rbi_heap_bad || !s_ring || !s_nreg || rbi_free_running(s_rbc)) return;
+    t0 = rb_now();
+    h[0] = rd32(k_hp[0]);
+    h[1] = rd32(k_hp[1]);
+    for (i = 0; i < 2; i++) {
+        u32 bad = 0, nodes = 0, us;
+        int rc;
+        u32 lk;
+        if (!h[i] || (i && h[1] == h[0])) continue;
+        /* Sperre des Heaps (RtlFreeHeap 0x12970C, nur ohne HEAP_NO_SERIALIZE in Heap+0x18): andere Threads nie mitten im
+         * Umketten lesen */
+        lk = (rd32(h[i] + 0x18u) & 1u) ? 0u : rd32(h[i] + 0x580u);
+        if (lk && !krnl_cs_try_enter(lk)) {
+            s_rbi_hc_busy++;
+            continue;
+        }
+        rc = rbi_heap_check(rb_heap_rd, NULL, h[i], 20000u, &bad, &nodes);
+        if (lk) (void)hle_RtlLeaveCriticalSection(lk);
+        s_rbi_hc_n++;
+        if (nodes > s_rbi_hc_nodes_max) s_rbi_hc_nodes_max = nodes;
+        if (nodes >= 20000u) s_rbi_hc_part++;
+        if (rc != RBI_HEAP_OK) {
+            s_rbi_hc_bad++;
+            s_rbi_heap_bad = 1;
+            HLOG_W("LOCRBI: Heap-Pruefung: Spiel-Heap 0x%X beschaedigt (%s, Adresse 0x%X) bei Slot %d, Spieltick %u%s - "
+                   "Sitzung wird sauber beendet", h[i], rbi_heap_err(rc), bad, rbi_cons(s_rbc, rbi_self(s_rbc)),
+                   rd32(RB_TICK), after_replay ? " (nach Neurechnung)" : "");
+        }
+        us = rb_us(rb_now() - t0);
+        if (us > s_rbi_hc_us_max) s_rbi_hc_us_max = us;
+    }
+}
+
+static void rbi_replay_finish(void)
+{
+    { /* W346 R3: Cues der ersten Rechnung, die die korrigierte Zeitlinie nicht mehr startet (Zaehler) */
+        u32 c;
+        for (c = s_xwin0; c + sizeof(rb_ev_t) <= s_xwin1 && s_xwin1 <= s_rec_len;) {
+            rb_ev_t *e = (rb_ev_t *)(s_rec + c);
+            if ((e->fn == EV_XPLAY || e->fn == EV_XPREP) && !(e->pad & 1)) s_xc_orphan++;
+            e->pad &= (uint8_t)~1u;
+            c += (u32)sizeof *e + e->n;
+        }
+        s_xwin0 = s_xwin1 = 0;
+    }
+    if (!s_render || s_rbi_prep) /* kein halber Auftrag fuer den Render-Thread */
+        *(volatile u32 *)(uintptr_t)RB_RJOB = rbi_rjob_replay(s_rbi_prep, RBI_RJOB_DONE, rd32(RB_RJOB));
+    rbi_heapchk(1); /* W359: Heap nach dem Neurechnen pruefen (Render-Thread steht noch) */
+    if (s_freeze) rb_thaw_others();
+    if (s_rthread) ResumeThread(s_rthread);
+    if (s_pdpause) sb_interp_rb_pause(0);
+    InterlockedExchange(&s_skipwait, 0);
+    s_phase = PH_RECORD;
+    rb_put(s_rbi_s_rep, rb_us(rb_now() - s_rbi_t_rep0));
+}
+
+static void rbi_mission_end(void)
+{
+    const rbi_stats_t *st = rbi_stats(s_rbc);
+    if (s_rbi_ep) {
+        if (rbi_replaying(s_rbc)) rbi_replay_finish();
+        HLOG_I("LOCRBI: Mission %u Ende: Slot %d, Rollbacks %u, verloren %u, Hash verglichen %u abweichend %u",
+               s_rbi_missions, rbi_cons(s_rbc, rbi_self(s_rbc)), st->rb_plans, st->rb_lost, st->hash_cmp, st->hash_bad);
+        rbv_log(-1); /* W359 DIAG */
+        s_rbi_ep = 0;
+        loc_sync_ext_on(0);
+        s_phase = PH_IDLE;
+    }
+    rbi_end(s_rbc);
+    s_rbi_mst = RBN_ST_IDLE;
+    EnterCriticalSection(&s_rbn_cs);
+    rbn_mission_end(s_rbn);
+    LeaveCriticalSection(&s_rbn_cs);
+}
+
+/* W346: Synchronisation verloren (Hash-Abweichung) bzw. Uneinigkeit: kein Rollback mehr, nie haengen (Freilauf),
+ * Verbindung zum Mitspieler wie beim Gastfilter trennen (definierter Weg des Spiels) und den Nutzer informieren. */
+static void rbi_session_end(int desync)
+{
+    locnet *n = loc_net_core();
+    wchar_t t1[160], t2[240];
+    int k, killed = 0;
+    if (rbi_free_running(s_rbc)) return;
+    rbi_free_run(s_rbc);
+    if (desync == 2) s_rbi_end_heap++; /* W359: Heap-Pruefung */
+    else if (desync) s_rbi_end_desync++;
+    else s_rbi_end_disagree++;
+    HLOG_W("LOCRBI: %s bei Slot %d - Rollback aus, Verbindung zum Mitspieler wird getrennt (Meldung an den Nutzer)",
+           desync == 2 ? "Spielzustand beschaedigt (Heap-Pruefung)"
+                       : (desync ? "Synchronisation verloren (Hash-Abweichung)" : "Netzmodus uneinig"),
+           rbi_cons(s_rbc, rbi_self(s_rbc)));
+    __try { /* Spiel-TCP-Verbindungen (Tabelle wie LOCGUARD) */
+        u32 tab = *(volatile const u32 *)(uintptr_t)0x3116ACu;
+        for (k = 0; tab && k < 10; k++) {
+            SOCKET sk = (SOCKET) * (volatile const u32 *)(uintptr_t)(tab + (u32)k * 0x10u + 4u);
+            if (sk != INVALID_SOCKET && sk != 0 && n) {
+                locnet_guard_kill(n, sk, LGUARD_V_CONTENT);
+                killed++;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    HLOG_I("LOCRBI: %d Spiel-Verbindungen getrennt", killed);
+    if (desync == 2) { /* W359 */
+        sb_lang_w("loc.rb_heap_t", t1, 160);
+        sb_lang_w("loc.rb_heap_d", t2, 240);
+    } else if (desync) {
+        sb_lang_w("loc.rb_desync_t", t1, 160);
+        sb_lang_w("loc.rb_desync_d", t2, 240);
+    } else {
+        sb_lang_w("loc.rb_disagree_t", t1, 160);
+        sb_lang_w("loc.rb_disagree_d", t2, 240);
+    }
+    sb_ov_toast_msg(t1, t2, 9000u);
+}
+
+static u32 rbi_cmin(void)
+{
+    u32 c = rbi_commits(s_rbc), d;
+    if (!s_ring || !s_ready || s_failed || !rbr_active() || !s_rbi_rec) return c; /* kein Ring/keine Aufzeichnung: keine Vorhersage */
+    d = rbr_depth();
+    return c > d ? c - d : 0;
+}
+
+/* FUN_0004E920(i, &kopf): eax = Eingabesatz (14 B), *kopf = Rahmenkopf (8 B); 0 = Stau. cdecl, Spiel-Thread. */
+static u32 __cdecl rbi_e920(u32 i, u32 pout)
+{
+    if (s_rbi_mst == RBN_ST_TENT || s_rbi_mst == RBN_ST_PEND) { /* W346: vor der Entscheidung keine Entnahme (Stau) */
+        *(volatile u32 *)(uintptr_t)pout = 0;
+        return 0;
+    }
+    if (!s_rbi_ep || i >= RBI_MAXP) return o_e920(i, pout);
+    if (s_phase != PH_REPLAY) {
+        if (s_rbi_ts_in || (s_rbi_ts_stall && !s_rbi_tick_takes)) { /* Zeitabgleich: ganzer Tick als Stau */
+            if (!s_rbi_ts_in) s_rbi_ts_waits++;
+            s_rbi_ts_in = 1;
+            s_rbi_ts_stall = 0;
+            *(volatile u32 *)(uintptr_t)pout = 0;
+            return 0;
+        }
+        rbi_poll();
+    }
+    if (!rbi_take(s_rbc, (int)i, rbi_cmin(), s_rbi_out[i])) {
+        *(volatile u32 *)(uintptr_t)pout = 0;
+        return 0;
+    }
+    *(volatile uint16_t *)(uintptr_t)(RBI_TAKENW + i * 2u) += 1; /* wie das Original (Zaehler der Entnahmen) */
+    s_rbi_tick_takes++;
+    s_rbi_dflags[i == (u32)rbi_self(s_rbc) ? 0 : 1] |= *(const u32 *)(s_rbi_out[i] + 4); /* DIAG: Flags (keine Eingaben) */
+    if (i < 2 && s_phase != PH_REPLAY) { /* DIAG: Pruefsumme des Eingabestroms je Spieler (ohne Sync-Byte), keine Eingaben */
+        uint8_t t[RBI_FR];
+        memcpy(t, s_rbi_out[i], RBI_FR);
+        t[1] = 0;
+        s_rbi_dstream[i] = fnv(s_rbi_dstream[i] * 31u + s_rbi_dn[i]++, t, RBI_FR);
+        if (s_rbi_dn[i] % 25u == 0 && s_rbi_dn[i] <= 250u) {
+            s_rbi_dchk[i][s_rbi_dn[i] / 25u - 1u] = s_rbi_dstream[i];
+            if (i == 1) s_rbi_dcnt[s_rbi_dn[i] / 25u - 1u] = rd32(0x5C5A40u) | (rd32(RB_TICK) << 16);
+        }
+    }
+    *(volatile u32 *)(uintptr_t)pout = (u32)(uintptr_t)s_rbi_out[i];
+    return (u32)(uintptr_t)(s_rbi_out[i] + RBI_HDR);
+}
+
+/* FUN_0004EC80(daten, kopf): eigener Rahmen; im Original TCP an alle + eigener Ring. Rueckgabe 1. */
+static u32 __cdecl rbi_ec80(u32 data, u32 hdr)
+{
+    int pre = rd32(RBI_PREFILL) == 1u;
+    if (pre && !s_rbi_last_pre) { /* Vorlauf von FUN_0001D3D0 = neue Mission */
+        if (s_rbi_mst != RBN_ST_IDLE) rbi_mission_end();
+        rbi_mission_open(); /* W346: Aushandlung */
+    }
+    s_rbi_last_pre = pre;
+    if (s_rbi_mst == RBN_ST_TENT || s_rbi_mst == RBN_ST_PEND) { /* W346: eigene Rahmen schon mitschreiben */
+        rbi_own(s_rbc, (const uint8_t *)(uintptr_t)hdr, (const uint8_t *)(uintptr_t)data);
+        return o_ec80(data, hdr);
+    }
+    if (!s_rbi_ep) return o_ec80(data, hdr);
+    if (s_rbi_dtick_own++ && s_phase != PH_REPLAY) s_rbi_dmulti++; /* DIAG: mehr als ein eigener Rahmen je Tick */
+    rbi_own(s_rbc, (const uint8_t *)(uintptr_t)hdr, (const uint8_t *)(uintptr_t)data);
+    /* Der 0x34-Rahmen geht weiter wie im Original ueber TCP (und in den eigenen Ring): Das Spiel fuehrt je Mitspieler
+     * einen Stille-Zaehler ([0x366498+i*16+8], Reset bei jedem TCP-Empfang in FUN_00053B20, > 200 Ticks = Mitspieler
+     * weg in FUN_00050EF0) und tauscht in den Kopfbytes 2/3 Werte je Ziel aus. Der Inhalt wird nicht mehr entnommen
+     * (FUN_0004E920 bedient die Eingabeschicht), niemand wartet darauf. Im Neurechnen unterdrueckt rb_send das Senden. */
+    return o_ec80(data, hdr);
+}
+
+/* 0x1D0BF in FUN_0001D010: mit R2 Regelung ueberspringen (weiter bei 0x1D381, Kopf mit Maske/Flags steht in
+ * [esp+0x10]), sonst Originalbefehl "mov ebx,[0x3071A0]" und weiter bei 0x1D0C5. eax bleibt erhalten. */
+static __declspec(naked) void rbi_reg_thunk(void)
+{
+    __asm {
+        cmp dword ptr [s_rbi_ep], 0
+        je rbi_orig
+        mov dword ptr ds:[306944h], 1
+        push ecx
+        mov ecx, dword ptr [s_rbi_reg_d]
+        mov dword ptr ds:[306F04h], ecx
+        pop ecx
+        push 1D381h
+        ret
+    rbi_orig:
+        mov ebx, dword ptr ds:[3071A0h]
+        push 1D0C5h
+        ret
+    }
+}
+
+static void rbi_rec_compact(void)
+{
+    u32 g = rbi_gtick(s_rbc), keep, base, j, span = RBI_GH / 2u - 1u;
+    if (s_rec_len < RB_REC_CAP / 2u) return;
+    if (s_rec_len > (RB_REC_CAP / 4u) * 3u) span = 256u;
+    keep = g > span ? g - span : 0;
+    base = s_rbi_toff[keep & RBI_GM];
+    if (base == 0 || base > s_rec_len) return;
+    memmove(s_rec, s_rec + base, s_rec_len - base);
+    s_rec_len -= base;
+    for (j = keep; j <= g; j++) s_rbi_toff[j & RBI_GM] -= base;
+    s_rbi_compact++;
+}
+
+static void rbi_set_rep_cursor(void)
+{
+    u32 g = rbi_gtick(s_rbc), k;
+    s_rec_cur = s_rbi_toff[g & RBI_GM];
+    s_rep_end = s_rbi_toff[(g + 1u) & RBI_GM];
+    if (s_rep_end < s_rec_cur) s_rep_end = s_rec_cur;
+    for (k = 0; k < EV_N; k++) s_rep_kc[k] = s_rec_cur; /* W346 R3 */
+}
+static u32 rb_rbi_gtick(void) { return s_rbc ? rbi_gtick(s_rbc) : 0; }
+
+static void rbi_try_rollback(void)
+{
+    u32 ticks = 0, sb = 0, pages = 0, us = 0;
+    int k;
+    if (!rbi_rb_pending(s_rbc)) return;
+    if (!s_ring || !s_ready || s_failed || !rbr_active()) {
+        k = rbi_plan(s_rbc, 0, &ticks, &sb); /* nicht moeglich -> gezaehlt */
+        return;
+    }
+    if (!rb_quiesce(1)) { /* Render-Thread beschaeftigt: naechster Tick */
+        s_rbi_qfail++;
+        return;
+    }
+    if (s_pdpause && !sb_interp_rb_pause(1)) s_r_pd_fail++;
+    if (s_freeze) rb_freeze_others();
+    rbv_take(); /* W359 DIAG rbver: Live-Stand vor dem Laden */
+    k = rbi_plan(s_rbc, rbr_depth(), &ticks, &sb);
+    if (k > 0 && rbr_load((unsigned)k, &pages, &us) != 0) { /* darf nicht vorkommen (k <= rbr_depth) */
+        s_rbi_load_fail++;
+        k = -2;
+    }
+    if (k <= 0) {
+        s_rbv_on = 0;
+        if (s_freeze) rb_thaw_others();
+        if (s_rthread) ResumeThread(s_rthread);
+        if (s_pdpause) sb_interp_rb_pause(0);
+        if (k < 0 && s_rbi_lost_logged < 8) {
+            s_rbi_lost_logged++;
+            HLOG_W("LOCRBI: Rollback nicht moeglich (%s) bei Slot %d, Ring %u Ticks - Desync moeglich",
+                   k == -2 ? "Laden fehlgeschlagen" : "zu weit zurueck/Barriere", rbi_cons(s_rbc, rbi_self(s_rbc)),
+                   rbr_depth());
+        }
+        return;
+    }
+    rb_pcom_rollback(); /* W355: Commits seit dem Neuaufbau gehoeren jetzt zur verworfenen Zeitlinie */
+    if (s_memlog && s_memlog_n < 600 && s_memlog_lt && rd32(RB_TICK) + 40u >= s_memlog_lt && rd32(RB_TICK) <= s_memlog_lt + 40u) {
+        s_memlog_n++;
+        HLOG_I("LOCRBI: DIAG memlog Rollback %d Ticks (%u Slots) -> Spieltick %u, Neurechnen bis %u", k, ticks, rd32(RB_TICK),
+               rbi_replay_until(s_rbc));
+    }
+    rb_put(s_rbi_s_load, us);
+    rb_put(s_rbi_s_ticks, ticks);
+    rb_put(s_rbi_s_slots, sb);
+    s_rbi_rb_n++;
+    if (s_rbi_prep || !s_render) /* W359: Vorbereitung beim Neurechnen wie live (rprep=0: ueberspringen) */
+        *(volatile u32 *)(uintptr_t)RB_RJOB = rbi_rjob_replay(s_rbi_prep, RBI_RJOB_LOAD, rd32(RB_RJOB));
+    s_phase = PH_REPLAY;
+    InterlockedExchange(&s_skipwait, 1);
+    { /* W346 R3: Fenster der Neurechnung fuer die Cue-Zuordnung */
+        u32 c, i;
+        s_xwin_g0 = rbi_gtick(s_rbc);
+        s_xwin_g1 = rbi_replay_until(s_rbc);
+        s_xwin0 = s_rbi_toff[s_xwin_g0 & RBI_GM];
+        s_xwin1 = s_rec_len; /* der laufende Tick ist noch nicht abgeschlossen: bis zum Ende der Aufzeichnung */
+        if (s_xwin0 > s_xwin1) s_xwin0 = s_xwin1;
+        for (c = s_xwin0; c + sizeof(rb_ev_t) <= s_xwin1;) {
+            rb_ev_t *e = (rb_ev_t *)(s_rec + c);
+            e->pad &= (uint8_t)~1u;
+            c += (u32)sizeof *e + e->n;
+        }
+        for (i = 0; i < s_xside_n; i++) s_xside[i].used = 0;
+    }
+    rbi_set_rep_cursor();
+    s_rbi_t_rep0 = rb_now();
+}
+
+static void rbi_finals(void)
+{
+    u32 sl, acc, gt;
+    const rbi_stats_t *st;
+    while (rbi_final_next(s_rbc, &sl, &acc, &gt)) loc_sync_ext_frame(sl, acc, gt);
+    st = rbi_stats(s_rbc);
+    if (!s_rbi_hcmp_logged) { /* W355: frueh und eindeutig belegen, dass die Hash-Pruefung von Anfang an laeuft */
+        int eq = 0;
+        int32_t f = rbi_hash_first_cmp(s_rbc, &eq);
+        if (f >= 0) {
+            s_rbi_hcmp_logged = 1;
+            HLOG_I("LOCRBI: Hash-Pruefung aktiv: erster Vergleich mit dem Mitspieler bei Slot %d %s (danach jeder endgueltige "
+                   "Slot; Abweichung -> Zeile DESYNC)", f, eq ? "gleich" : "VERSCHIEDEN");
+        }
+    }
+    if (st->hash_bad && !s_rbi_hash_logged) {
+        s_rbi_hash_logged = 1;
+        HLOG_W("LOCRBI: DESYNC erkannt: Zustandshash von Slot %d weicht vom Mitspieler ab (Hash-Pruefung R2): "
+               "eigen %08X/Tick %u, Mitspieler %08X/Tick %u",
+               st->hash_bad_first, st->hb_acc[0], st->hb_gt[0], st->hb_acc[1], st->hb_gt[1]);
+    }
+    if (!rbi_free_running(s_rbc)) { /* W346 R4: Desync bzw. Uneinigkeit -> sauberes Ende mit Meldung */
+        int dis;
+        EnterCriticalSection(&s_rbn_cs);
+        (void)rbn_poll(s_rbn, GetTickCount());
+        dis = rbn_peer_disagrees(s_rbn);
+        LeaveCriticalSection(&s_rbn_cs);
+        if (st->hash_bad) rbi_session_end(1);
+        else if (dis) rbi_session_end(0);
+    }
+}
+
+/* Ticks ohne Ring (vor dem Aufbau bzw. nach Fehlschlag): Buchfuehrung, Kanal, keine Vorhersage. */
+static void rbi_after_noring(void)
+{
+    (void)rbi_tick_end(s_rbc, NULL);
+    s_rbi_dtick_own = 0;
+    s_rbi_tick_takes = 0;
+    s_rbi_ts_in = 0;
+    s_rbi_toff[rbi_gtick(s_rbc) & RBI_GM] = s_rec_len;
+    rbi_poll();
+    rbi_send();
+    rbi_finals();
+}
+
+static int rb_ring_check_regions(void);
+static void rbi_after(void)
+{
+    int done = 0, com;
+    if (s_phase == PH_REPLAY && (s_rbi_prep || !s_render)) /* W359: Render-Vorbereitung dieses Neurechen-Ticks lief wie
+                                                            * live; Auftrag gilt als erledigt (gezeichnet wird nicht) */
+        *(volatile u32 *)(uintptr_t)RB_RJOB = rbi_rjob_replay(s_rbi_prep, RBI_RJOB_TICK, rd32(RB_RJOB));
+    com = rbi_tick_end(s_rbc, &done);
+    s_rbi_dtick_own = 0;
+    s_rbi_tick_takes = 0;
+    s_rbi_ts_in = 0;
+    { /* W346 R3: neue Allokationen (nur Register gewachsen, keine Freigabe/kein Schutzwechsel) aendern bestehende
+       * Bereiche nicht: Neuaufbau aufschieben, bis keine Vorhersage mehr offen ist (bestaetigter Tick, Barriere ohne
+       * Verlust); bis dahin keine neue Vorhersage. Freigaben/Fehler bauen wie bisher sofort neu. */
+        int need = g_exreg_n != s_reg_gen || g_loc_rb_memev != s_memev_seen || s_r_force_rebuild;
+        int only_alloc = need && g_loc_rb_memev == s_memev_seen && !s_r_force_rebuild;
+        u32 waited = rbi_rebuild_wait(s_rbc);
+        int gate;
+        if (g_exreg_n != s_rbi_reg_tick) { /* W355: Belegung in diesem Tick (auch im Neurechnen) -> Untergrenze */
+            s_rbi_reg_tick = g_exreg_n;
+            rbi_rebuild_note(s_rbc);
+        }
+        gate = rbi_rebuild_gate(s_rbc, need, only_alloc, s_rbi_defer_on, 200u);
+        /* W355: Entscheidung im Modul (Selbsttest); nie mitten in einer Neurechnung, Rollback ab Allokations-Tick */
+        if (gate == RBI_REBUILD_DEFER) {
+            if (!s_rbi_defer_ticks++) {
+                s_rbi_defer_n++;
+                HLOG_I("LOCRBI: Neuaufbau (neue Allokation) aufgeschoben bei Slot %d - offene Vorhersagen erst bestaetigen%s",
+                       rbi_cons(s_rbc, rbi_self(s_rbc)), rbi_replaying(s_rbc) ? " (Neurechnung laeuft)" : "");
+            }
+            need = 0;
+        } else if (gate == RBI_REBUILD_NOW && s_rbi_defer_ticks) {
+            if (!rbi_open_preds(s_rbc)) {
+                s_rbi_defer_clean++;
+                HLOG_I("LOCRBI: Neuaufbau nach %u Ticks (%u live) an bestaetigtem Stand (kein Rollback verloren)",
+                       s_rbi_defer_ticks, waited);
+            } else {
+                HLOG_W("LOCRBI: Neuaufbau nach %u Ticks trotz offener Vorhersage (Aufschub-Grenze)", s_rbi_defer_ticks);
+            }
+            s_rbi_defer_ticks = 0;
+        } else if (gate == RBI_REBUILD_NONE) {
+            s_rbi_defer_ticks = 0;
+        }
+        if (!need) goto rbi_no_rebuild;
+    }
+    if (rb_ring_check_regions()) { /* Ring neu: kein Rollback vor diesen Stand */
+        rbi_barrier(s_rbc);
+        s_rbi_bar++;
+        rb_pcom_clear(); /* W355: die Seiten liegen jetzt im Ring */
+    } else
+    rbi_no_rebuild:
+    if (com) {
+        u32 ovf0 = s_r_ovf;
+        if (s_phase != PH_REPLAY) (void)rb_quiesce(0);
+        rb_ring_commit(s_phase == PH_REPLAY);
+        if (s_r_force_rebuild) (void)rb_ring_check_regions(); /* Sichern scheiterte: sofort neu, kein Laden */
+        if (s_r_ovf != ovf0 || !rbr_active() || rbr_depth() == 0) {
+            rbi_barrier(s_rbc);
+            s_rbi_bar++;
+        }
+    }
+    if (rbi_replaying(s_rbc)) { /* naechster Neurechen-Tick */
+        rbi_set_rep_cursor();
+        return;
+    }
+    if (done) {
+        rbv_check(); /* W359 DIAG: vor dem Fortsetzen der Threads */
+        rbi_replay_finish();
+    } else if (++s_rbi_hc_tick >= 20u) { /* W359: je Sekunde live (nach dem Sichern, Render-Thread fertig) */
+        s_rbi_hc_tick = 0;
+        rbi_heapchk(0);
+    }
+    if (s_rbi_heap_bad && !rbi_free_running(s_rbc)) rbi_session_end(2); /* W359: sauberes Ende statt Absturz */
+    s_rbi_toff[rbi_gtick(s_rbc) & RBI_GM] = s_rec_len;
+    rbi_rec_compact();
+    rbi_poll();
+    rbi_send();
+    rbi_finals();
+    if (s_rbi_rbtest_n && s_ring && s_ready && !s_failed && rbr_active() &&
+        rbi_gtick(s_rbc) >= s_rbi_rbtest_next) { /* W355 TEST: Neurechnen mit gleichen Eingaben muss bitgleich sein */
+        s_rbi_rbtest_next = rbi_gtick(s_rbc) + (u32)s_rbi_rbtest_n; /* einmal je N Live-Ticks (nach dem Neurechnen
+                                                                     * steht der Tick wieder gleich) */
+        s_rbi_rbtest_cnt++;
+        {
+            int f = rbi_force_rb(s_rbc, (u32)s_rbi_rbtest_k, rbr_depth());
+            s_rbi_rbtest_ok += (u32)f;
+            if (f && s_rbv_n && s_rbi_rbtest_ok % (u32)s_rbv_n == 0) s_rbv_arm = 1; /* W359 DIAG */
+        }
+    }
+    rbi_try_rollback();
+    if (s_rbi_tsync && !rbi_replaying(s_rbc)) {
+        /* Zeitabgleich: Die Missionsschleife ist an den Bildtakt gebunden (Feld-Warten holt Pausen nach). Wer anhaltend
+         * vorne liegt (geglaettet > 0,75 Slots ueber 10 Ticks), laesst einen ganzen Tick ohne Entnahme laufen (Stau wie
+         * im Original, die Simulation steht), danach 10 Ticks Abklingzeit. */
+        double a = rbi_advantage(s_rbc);
+        /* W355: bei grossem Vorsprung staerker abbremsen (W338: hoechstens 1 Stau je 11 Ticks = 9 %; im Nutzerlauf lief
+         * eine Seite so 8-10 Slots vor, jede Vorhersage war 10 Slots tief). > 1,5 Slots: 1 je 5 Ticks, > 3: 1 je 3. */
+        int need = a > 3.0 ? 2 : (a > 1.5 ? 4 : 10), cool = a > 3.0 ? 1 : (a > 1.5 ? 1 : 10);
+        if (s_rbi_ts_cool) s_rbi_ts_cool--;
+        if (a > 0.75) s_rbi_ts_run++;
+        else s_rbi_ts_run = 0;
+        if (s_rbi_ts_run >= (u32)need && !s_rbi_ts_cool) {
+            s_rbi_ts_stall = 1;
+            s_rbi_ts_ms += 50;
+            s_rbi_ts_run = 0;
+            s_rbi_ts_cool = (u32)cool;
+        }
+    }
+}
+
+static void rbi_patch_jmp(u32 va, const void *dst, unsigned len)
+{
+    uint8_t *p = (uint8_t *)(uintptr_t)va;
+    intptr_t rel = (const uint8_t *)dst - (p + 5);
+    DWORD old;
+    VirtualProtect(p, len, PAGE_EXECUTE_READWRITE, &old);
+    p[0] = 0xE9;
+    memcpy(p + 1, &rel, 4);
+    if (len > 5) memset(p + 5, 0x90, len - 5);
+    VirtualProtect(p, len, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), p, len);
+}
+
+static void *rbi_tramp(uint8_t *mem, u32 va, unsigned n)
+{
+    intptr_t rel;
+    memcpy(mem, (const void *)(uintptr_t)va, n);
+    mem[n] = 0xE9;
+    rel = (intptr_t)(va + n) - (intptr_t)(mem + n + 5);
+    memcpy(mem + n + 1, &rel, 4);
+    return mem;
+}
+
+static void rbi_install(void)
+{
+    static const uint8_t e920[6] = {0x8B, 0x44, 0x24, 0x04, 0x8B, 0xC8};       /* mov eax,[esp+4]; mov ecx,eax */
+    static const uint8_t ec80[8] = {0x83, 0xEC, 0x20, 0xA1, 0x74, 0x96, 0x28, 0x00}; /* sub esp,20h; mov eax,[289674h] */
+    static const uint8_t reg[6] = {0x8B, 0x1D, 0xA0, 0x71, 0x30, 0x00};        /* mov ebx,[3071A0h] */
+    if (memcmp((const void *)(uintptr_t)RBI_E920, e920, 6) || memcmp((const void *)(uintptr_t)RBI_EC80, ec80, 8) ||
+        memcmp((const void *)(uintptr_t)RBI_REG, reg, 6)) {
+        HLOG_E("LOCBYTES LOCRBI @0x%X/0x%X/0x%X: Byte-Mismatch - ABBRUCH (exit 7)", RBI_E920, RBI_EC80, RBI_REG);
+        hlog_close();
+        ExitProcess(7);
+    }
+    s_rbc = rbi_new();
+    s_rbi_tramp = (uint8_t *)VirtualAlloc(NULL, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_EXECUTE_READWRITE);
+    InitializeCriticalSection(&s_rbi_tq_cs);
+    InitializeCriticalSection(&s_rbn_cs);
+    {
+        LARGE_INTEGER q;
+        QueryPerformanceCounter(&q);
+        s_rbn = rbn_new(1, (u32)(q.QuadPart ^ (q.QuadPart >> 32) ^ (GetCurrentProcessId() << 16)) | 1u, s_rbi_dmin,
+                        s_rbi_dmax, s_rbi_delay);
+    }
+    if (!s_rbc || !s_rbn || !s_rbi_tramp || !rbi_sock_open()) {
+        HLOG_W("LOCRBI: Eingabeschicht nicht verfuegbar - Missionen laufen im Original-Lockstep");
+        return;
+    }
+    o_e920 = (rbi_fn2_t)rbi_tramp(s_rbi_tramp, RBI_E920, 6);
+    o_ec80 = (rbi_fn2_t)rbi_tramp(s_rbi_tramp + 32, RBI_EC80, 8);
+    rbi_patch_jmp(RBI_E920, (const void *)rbi_e920, 6);
+    rbi_patch_jmp(RBI_EC80, (const void *)rbi_ec80, 8);
+    rbi_patch_jmp(RBI_REG, (const void *)rbi_reg_thunk, 6);
+    /* Akkumulator ab Missionsbeginn (nicht erst beim Ringstart): jeder Slot bekommt seinen Hash, die Ketten beider
+     * Seiten beginnen bei Slot 0 */
+    if (rb_chain_call(RB_ACC_CALL, (void *)rb_acc_thunk, &s_acc_next, "Akkumulator")) s_rbi_acc_chained = 1;
+    s_rbi_s_ticks = rb_ser_new("R2 Rollback-Tiefe (Spielticks)");
+    s_rbi_s_slots = rb_ser_new("R2 Rollback-Tiefe (Slots)");
+    s_rbi_s_load = rb_ser_new("R2 Ring laden (us)");
+    s_rbi_s_rep = rb_ser_new("R2 Neurechnen gesamt (us)");
+    s_rbi = 1;
+    g_loc_rb_alloc = rb_alloc_cb; /* W346 R3 */
+    s_rbi_thr = CreateThread(NULL, 0, rbi_chan_thread, NULL, 0, NULL); /* W346: Empfang + Hallo */
+    HLOG_I("LOCRBI: aktiv (loc_rb_input=1, je Mission ausgehandelt): Entnahme @0x%X, Senden @0x%X, Regelung @0x%X, "
+           "Verzoegerung %s%d (Grenzen %d..%d), Fenster %d, Zeitabgleich %d, Kanal-Thread %s", RBI_E920, RBI_EC80, RBI_REG,
+           s_rbi_delay > 0 ? "fest " : "adaptiv, Start ", s_rbi_delay > 0 ? s_rbi_delay : 2, s_rbi_dmin, s_rbi_dmax,
+           s_rbi_maxpred, s_rbi_tsync, s_rbi_thr ? "laeuft" : "FEHLT");
+}
+
+static void rbi_log(int waited_s)
+{
+    const rbi_stats_t *st;
+    u32 d50, d95, dmx, s50, s95, smx, r50, r95, rmx, l50, l95, lmx, rbw;
+    if (!s_rbi || !s_rbc) return;
+    { /* W346 R4: Telemetrie als Zaehlerzeile (nur Zahlen, keine Eingaben) - auch in der Lobby (Aushandlung) */
+        rbn_stats_t ns;
+        int rtt, fb = 0, k;
+        static u32 last_rb;
+        u32 a50, a95, amx, t50, t95, tmx, rbw10 = s_rbi_rb_n - last_rb;
+        last_rb = s_rbi_rb_n;
+        EnterCriticalSection(&s_rbn_cs);
+        ns = *rbn_stats(s_rbn);
+        rtt = rbn_rtt_max(s_rbn, GetTickCount());
+        LeaveCriticalSection(&s_rbn_cs);
+        for (k = 1; k < RBN_WHY_N; k++)
+            if (k != RBN_WHY_SELF_OFF) fb += (int)ns.fallback[k];
+        rbi_pct(s_rbi_s_ticks, &t50, &t95, &tmx);
+        rbi_pct(s_rbi_s_rep, &a50, &a95, &amx);
+        HLOG_I("LOCRBI-TEL: t=%ds Modus=%s Verz=%d RTT=%d ms | Rollbacks/s=%.2f gesamt=%u Tiefe p50/p95/max=%u/%u/%u Ticks "
+               "Neurechnen p95=%u us max=%u | Missionen R2=%u Lockstep=%u Rueckfaelle=%d (letzter Grund %u) Ende Desync=%u "
+               "uneinig=%u | Ton doppelt=%u nachgeholt=%u verwaist=%u | Neuaufbau aufgeschoben=%u sauber=%u Barrieren=%u | "
+               "Neurechnen Allokation=%u neu=%u Senden live=%u | lange Ticks=%u max=%u ms | Hallo tx=%u rx=%u schlecht=%u voll=%u",
+               waited_s,
+               s_rbi_mst == RBN_ST_R2 ? (rbi_free_running(s_rbc) ? "R2-Ende" : "R2")
+                                      : (s_rbi_mst == RBN_ST_LS ? "Lockstep"
+                                                                : (s_rbi_mst == RBN_ST_TENT ? "Angebot"
+                                                                                            : (s_rbi_mst == RBN_ST_PEND ? "Warten" : "Lobby"))),
+               s_rbi_ep ? (int)s_rbi_reg_d : 0, rtt, rbw10 / 10.0, s_rbi_rb_n, t50, t95, tmx, a95, amx, s_rbi_r2_missions,
+               s_rbi_ls_missions, fb, s_rbi_last_why, s_rbi_end_desync, s_rbi_end_disagree, s_xc_dup, s_xc_new, s_xc_orphan,
+               s_rbi_defer_n, s_rbi_defer_clean, s_rbi_bar, s_rbi_alloc_rep, s_rbi_alloc_new, s_rbi_send_live, s_rbi_lt_n,
+               s_rbi_lt_max, ns.tx, ns.rx_ok, ns.rx_bad, ns.rx_full);
+        if (s_rbc) { /* W355: Zusatzzeile (nur Zahlen) */
+            const rbi_stats_t *w = rbi_stats(s_rbc);
+            HLOG_I("LOCRBI-TEL2: t=%ds Senden gleich=%u live=%u | Neuaufbau aufgeschoben=%u davon Neurechnung=%u erzwungen=%u "
+                   "Rollback ab Allokation=%u | verloren=%u hingenommen=%u | Hash verglichen=%u abweichend=%u erster=%d "
+                   "Neurechnung-anders=%u | Allokation aufgez.=%u bedient=%u fehlt=%u ungueltig=%u fremd=%u neu=%u | rbtest %u/%u | "
+                   "Senden Neurechnen %u exakt=%u ohne-Socket=%u andere-Laenge=%u | Datagramme Neurechnen %u gleich=%u | "
+                   "Commit aufgez.=%u bedient=%u fehlt=%u neu=%u offen=%u voll=%u gleich=%u verworfen=%u | "
+                   "Heap-Pruefung %u Knoten max=%u unvollst.=%u Zeit max=%u us Fehler=%u Ende=%u ausserhalb=%u belegt=%u",
+                   waited_s, s_rbi_send_same, s_rbi_send_live, w->rebuild_deferred, w->rebuild_defer_replay,
+                   w->rebuild_forced, w->rb_floored, w->rb_lost, w->rb_accepted, w->hash_cmp, w->hash_bad, w->hash_bad_first,
+                   w->hash_recalc_diff, s_rbi_alloc_rec, s_rbi_alloc_rep, s_rbi_alloc_miss, s_rbi_alloc_nocommit,
+                   s_rbi_alloc_other, s_rbi_alloc_new, s_rbi_rbtest_ok, s_rbi_rbtest_cnt, s_rbi_send_rep, s_rbi_send_exact,
+                   s_rbi_send_nosock, s_rbi_send_otherlen, s_rbi_sendto_rep, s_rbi_sendto_same, s_rbi_com_rec, s_rbi_com_rep, s_rbi_com_miss, s_rbi_com_new,
+                   s_pcom_n, s_pcom_full, s_rbi_com_same, s_rbi_com_drop, s_rbi_hc_n, s_rbi_hc_nodes_max, s_rbi_hc_part,
+                   s_rbi_hc_us_max, s_rbi_hc_bad, s_rbi_end_heap, s_rbi_hc_vq, s_rbi_hc_busy);
+            rbv_log(waited_s); /* W359 DIAG */
+        }
+        s_rbi_lt_max = 0;
+    }
+    if (!s_rbi_r2_missions) return;
+    st = rbi_stats(s_rbc);
+    rbi_pct(s_rbi_s_ticks, &d50, &d95, &dmx);
+    rbi_pct(s_rbi_s_slots, &s50, &s95, &smx);
+    rbi_pct(s_rbi_s_rep, &r50, &r95, &rmx);
+    rbi_pct(s_rbi_s_load, &l50, &l95, &lmx);
+    rbw = s_rbi_rb_n - s_rbi_rb_last;
+    s_rbi_rb_last = s_rbi_rb_n;
+    HLOG_I("LOCRBI: t=%ds Mission=%u aktiv=%d Slot=%d Verz=%d P0=%d | Entnahmen=%u bestaetigt=%u Vorhersagen=%u richtig=%u "
+           "falsch=%u | Rollbacks=%u +%u/10s Tiefe p50/p95/max=%u/%u/%u Ticks %u/%u/%u Slots Neurechnen p50/p95/max=%u/%u/%u us "
+           "Laden=%u/%u/%u us verloren=%u hingenommen=%u Ladefehler=%u Ruhe-Fehler=%u Barrieren=%u | Stau Erst=%u Fenster=%u Tiefe=%u | "
+           "Hash endgueltig=%u verglichen=%u abweichend=%u erster=%d Neurechnung-anders=%u | Kanal tx=%u/%u rx=%u/%u "
+           "doppelt=%u schlecht=%u fremd=%u Bindung=%u Epoche=%u Konflikt=%u Sendefehler=%u Warteschlange-voll=%ld | Zeitabgleich=%.2f "
+           "Wartezeiten=%u/%u ms | Aufzeichnung=%u KB Kompakt=%u Aufruf-Abw=%u Kanalverlust-Test=%u",
+           waited_s, s_rbi_epoch, s_rbi_ep, rbi_cons(s_rbc, rbi_self(s_rbc)), rbi_delay_eff(s_rbc), rbi_p0(s_rbc), st->taken,
+           st->taken_conf, st->predicted, st->pred_ok, st->pred_bad, s_rbi_rb_n, rbw, d50, d95, dmx, s50, s95, smx, r50, r95,
+           rmx, l50, l95, lmx, st->rb_lost, st->rb_accepted, s_rbi_load_fail, s_rbi_qfail, s_rbi_bar, st->stall_first, st->stall_window,
+           st->stall_depth, st->hash_final, st->hash_cmp, st->hash_bad, st->hash_bad_first, st->hash_recalc_diff,
+           st->tx_pkts, st->tx_frames, st->rx_ok, st->rx_frames, st->rx_dup, st->rx_bad, s_rbi_peer_bad, st->rx_bind,
+           st->rx_epoch, st->rx_conflict, s_rbi_tx_err, s_rbi_tq_drop, rbi_advantage(s_rbc), s_rbi_ts_waits, s_rbi_ts_ms, s_rec_len / 1024u,
+           s_rbi_compact, s_rep_div, s_rbi_chanloss_n);
+    HLOG_I("LOCRBI: DIAG Startpunkt %d/%d (Wahl %d/%d) Zaehler %u Aktiv 0x%X Spieltick %u Stau %u | eigene Rahmen %u (doppelt %u, "
+           "mehrere je Tick %u) Flags eigen 0x%X fremd 0x%X Entnahmezaehler %u/%u", (int)rd32(0x5C5A44u),
+           (int)rd32(0x5C5A44u + 0xAE8u), (int)rd32(0x5C5A48u), (int)rd32(0x5C5A48u + 0xAE8u), rd32(0x5C5A40u),
+           rd32(RB_ACTIVE), rd32(RB_TICK), rd32(RB_STALL), st->own_frames, st->own_dup, s_rbi_dmulti, s_rbi_dflags[0],
+           s_rbi_dflags[1], rd32(RBI_TAKENW) & 0xFFFFu, rd32(RBI_TAKENW) >> 16);
+    HLOG_I("LOCRBI: DIAG Eingabestrom je Spieler (kein Zustandshash; Rechner vergleichen: gleiche Werte = gleiche "
+           "Eingaben) p0 %u/%08X p1 %u/%08X | Spieler0 522=%u 98=0x%X 8c=%u 92=%u | Spieler1 522=%u 98=0x%X 8c=%u 92=%u | "
+           "lokal %u netz %u", s_rbi_dn[0], s_rbi_dstream[0], s_rbi_dn[1], s_rbi_dstream[1],
+           rd32(0x5C50D0u + 0x522u) & 0xFFu, rd32(0x5C50D0u + 0x98u), rd32(0x5C50D0u + 0x8Cu) & 0xFFFFu,
+           rd32(0x5C50D0u + 0x92u) & 0xFFFFu, rd32(0x5C50D0u + 0xAE8u + 0x522u) & 0xFFu, rd32(0x5C50D0u + 0xAE8u + 0x98u),
+           rd32(0x5C50D0u + 0xAE8u + 0x8Cu) & 0xFFFFu, rd32(0x5C50D0u + 0xAE8u + 0x92u) & 0xFFFFu, rd32(0x306A84u), rd32(RBI_SELF));
+    {
+        int k;
+        for (k = 0; k < 10; k++)
+            if (s_rbi_dchk[0][k] || s_rbi_dchk[1][k])
+                HLOG_I("LOCRBI: DIAG Eingabestrom bis Slot %d Spieler0=%08X Spieler1=%08X Zaehler %u Spieltick %u", (k + 1) * 25, s_rbi_dchk[0][k],
+                       s_rbi_dchk[1][k], s_rbi_dcnt[k] & 0xFFFFu, s_rbi_dcnt[k] >> 16);
+    }
+    (void)s_rbi_win_sum;
+    (void)s_rbi_win_n;
+}
+
+static u32 rb_rep_limit(void) { return s_rbi_ep ? s_rep_end : s_rec_len; }
+static int rb_r2_acc(void)
+{
+    u32 acc;
+    if (!s_rbi_ep) return 0;
+    acc = rd32(RB_ACC);
+    if (s_rbi_force_desync >= 0 && rbi_cons(s_rbc, rbi_self(s_rbc)) == s_rbi_force_desync + 1)
+        acc ^= 0x5A5A5A5Au; /* TEST desync=N: nur der gemeldete Hash dieses Slots, Spielzustand unveraendert */
+    rbi_acc(s_rbc, acc, rd32(RB_TICK));
+    return 1;
+}
+
 /* Aufruf nach jedem Feld-Warten (bzw. statt dessen im Neurechnen), Spiel-Thread, Register gesichert. */
 /* W330: Bereiche geaendert (Allokation/Freigabe/Schutzwechsel)? Laufenden Zyklus verwerfen, Ring neu. */
 static int rb_ring_check_regions(void)
 {
-    if (g_exreg_n == s_reg_gen && g_loc_rb_memev == s_memev_seen) return 0;
-    if (s_phase != PH_IDLE) { /* Zyklus abbrechen: Zeitlinie B wiederherstellen (alte Bereiche) */
+    if (g_exreg_n == s_reg_gen && g_loc_rb_memev == s_memev_seen && !s_r_force_rebuild) return 0;
+    s_r_force_rebuild = 0;
+    if (s_phase != PH_IDLE && !s_rbi_ep) { /* W338: R2 behaelt Neurechnung/Phase, Barriere setzt der Aufrufer */ /* Zyklus abbrechen: Zeitlinie B wiederherstellen (alte Bereiche) */
         if (s_phase == PH_REPLAY) {
             __try { (void)rb_diff(s_snapB, 1, NULL, 0); } __except (EXCEPTION_EXECUTE_HANDLER) {}
             if (s_freeze) rb_thaw_others();
@@ -1655,16 +3424,63 @@ static int rb_ring_check_regions(void)
     HLOG_I("LOCRB: RING Bereiche geaendert (Register %u -> %u, Freigaben/Schutz %ld -> %ld) bei Tick %u - Neuaufbau",
            s_reg_gen, g_exreg_n, s_memev_seen, g_loc_rb_memev, rd32(RB_TICK));
     s_r_rebuild++;
+    /* W338: Andere Threads (Render-Thread, Lade-Threads 0x28DE0 ueber ReadFile -> rbr_prewrite) duerfen waehrend
+     * Stop/Aufbau weiterlaufen: rbr_stop wartet, bis kein Handler/Prewrite mehr in den alten Puffern arbeitet (A10-A12:
+     * Haenger bzw. harter Abbruch nach dem Neuaufbau beim ersten Schuss). Kein Anhalten - ein mitten im Handler
+     * angehaltener Thread wuerde das Warten blockieren. */
     rb_build_regions();
+    if (s_avlog) { /* DIAG: ab jetzt protokollieren (vorgeschaltet, auch vor dem Ring-Handler) */
+        static PVOID hv;
+        if (hv) RemoveVectoredExceptionHandler(hv);
+        hv = AddVectoredExceptionHandler(0, rb_avlog_veh); /* zuletzt: nur, was kein anderer Handler erledigt */
+        InterlockedExchange(&s_avlog_n, 0);
+        InterlockedExchange(&s_avlog_arm, 1);
+    }
     if (s_mode == 2 && !rb_alloc_snaps(1)) s_failed = 1;
     return 1;
 }
 
 static void __cdecl rb_after(void)
 {
-    if (s_failed) return;
-    if (!rd32(RB_ACTIVE)) { s_lst_frames = 0; return; }
-    if (++s_lst_frames < (unsigned)s_warm && s_phase == PH_IDLE) return;
+    if (s_rbi_mst == RBN_ST_TENT || s_rbi_mst == RBN_ST_PEND) rbi_mission_poll(); /* W346: Aushandlung je Tick */
+    if (s_rbi_ep) { /* W346 DIAG: langer Tick (Abstand zweier Ruhepunkte) */
+        long long t = rb_now();
+        if (s_rbi_lt_last) {
+            u32 ms = rb_us(t - s_rbi_lt_last) / 1000u;
+            if (ms > s_rbi_lt_max) s_rbi_lt_max = ms;
+            if (ms >= 300u) {
+                s_rbi_lt_n++;
+                if (s_rbi_lt_logged++ < 20)
+                    HLOG_W("LOCRBI: langer Tick %u ms bei Slot %d (Neurechnen=%d, Rollbacks bisher %u, Stau %u)", ms,
+                           rbi_cons(s_rbc, rbi_self(s_rbc)), rbi_replaying(s_rbc), s_rbi_rb_n, rd32(RB_STALL));
+            }
+        }
+        s_rbi_lt_last = t;
+    } else {
+        s_rbi_lt_last = 0;
+    }
+    if (!rd32(RB_ACTIVE) && !s_rbi_ep) { /* W338: mit R2 laeuft der Lockstep auch bei Aktiv-Maske 0 weiter (VT
+                                           * absetzen nach dem Startzaehler); eine neue Mission erkennt rbi_ec80 */
+        s_lst_frames = 0;
+        return;
+    }
+    if (s_rbi && !s_rbi_ep) { /* W346: Lockstep-Mission (ausgehandelt) bzw. Aushandlung: kein Ring, keine Aufzeichnung */
+        s_lst_frames = 0;
+        return;
+    }
+    if (s_failed) {
+        if (s_rbi_ep) rbi_after_noring(); /* W338: ohne Ring keine Vorhersage, Kanal laeuft weiter */
+        return;
+    }
+    if (++s_lst_frames < (unsigned)s_warm && s_phase == PH_IDLE) {
+        if (s_rbi_ep) rbi_after_noring();
+        return;
+    }
+    if (s_ready && s_rbi_ep) { /* W338 R2: eigener Ablauf am Ruhepunkt */
+        if (s_phase == PH_IDLE && s_rbi_rec) s_phase = PH_RECORD;
+        rbi_after();
+        return;
+    }
     if (!s_ready) {
         s_game_tid = GetCurrentThreadId();
         rb_threads_log();
@@ -1681,8 +3497,8 @@ static void __cdecl rb_after(void)
             ok &= rb_chain_jmp(RB_IOCTL, (void *)rb_ioctl, (void **)&o_ioctl, "ioctlsocket");
             ok &= rb_chain_jmp(RB_WSAERR, (void *)rb_wsaerr, (void **)&o_wsaerr, "WSAGetLastError");
             ok &= rb_chain_jmp(RB_XIN_VA, (void *)rb_xin, (void **)&o_xin, "XInputGetState");
-            ok &= rb_chain_call(RB_ACC_CALL, (void *)rb_acc_thunk, &s_acc_next, "Akkumulator");
-            if (s_xact && s_mode == 2) { /* W330 xact=1 */
+            if (!s_rbi_acc_chained) ok &= rb_chain_call(RB_ACC_CALL, (void *)rb_acc_thunk, &s_acc_next, "Akkumulator");
+            if (s_xact && (s_mode == 2 || s_rbi)) { /* W330 xact=1; W338: auch fuer R2 (Standard dort 1) */
                 int xo = 1;
                 xo &= rb_chain_jmp(RB_XGN_VA, (void *)rb_xgn, (void **)&o_xgn, "XACT GetNotification");
                 xo &= rb_chain_jmp(RB_XPLAY_VA, (void *)rb_xplay, (void **)&o_xplay, "XACT PlayEx");
@@ -1718,6 +3534,11 @@ static void __cdecl rb_after(void)
         s_ready = 1;
         HLOG_I("LOCRB: bereit bei Tick %u (Lockstep-Rahmen %u), Modus %d, k=%d..%d, render=%d, Spiel-Thread %lu",
                rd32(RB_TICK), s_lst_frames, s_mode, s_k[0], s_k[s_nk - 1], s_render, s_game_tid);
+        if (s_rbi_ep) { /* W338: ab hier Aufzeichnung + Ring; dieser Tick ohne Commit (Ring frisch) */
+            s_rec_len = s_rec_cur = 0;
+            if (s_rbi_rec) s_phase = PH_RECORD;
+            rbi_after_noring();
+        }
         return;
     }
     if (s_ring) { /* W330: Tick-Ende sichern (vor dem Zyklus-Schritt, der laden kann) */
@@ -1793,6 +3614,37 @@ static void rb_parse_opts(const char *p)
         else if (strncmp(p, "hot=", 4) == 0) { s_hot = atoi(p + 4); }
         else if (strncmp(p, "xact=", 5) == 0) { s_xact = atoi(p + 5); }
         else if (strncmp(p, "cool=", 5) == 0) { s_cool = atoi(p + 5); }
+        else if (strncmp(p, "maxpred=", 8) == 0) { s_rbi_maxpred = atoi(p + 8); } /* W338 */
+        else if (strncmp(p, "kstack=", 7) == 0) { s_kstack = atoi(p + 7); }
+        else if (strncmp(p, "avlog=", 6) == 0) { s_avlog = atoi(p + 6); }
+        else if (strncmp(p, "stkx=", 5) == 0) { s_stkx = atoi(p + 5); }   /* W362 DIAG */
+        else if (strncmp(p, "abchk=", 6) == 0) { s_abchk = atoi(p + 6); } /* W362 DIAG */
+        else if (strncmp(p, "rec=", 4) == 0) { s_rbi_rec = atoi(p + 4); }
+        else if (strncmp(p, "chanloss=", 9) == 0) {
+            if (strncmp(p + 9, "ge", 2) == 0) s_rbi_chanloss_ge = 1;
+            else s_rbi_chanloss = atoi(p + 9);
+        }
+        else if (strncmp(p, "tsync=", 6) == 0) { s_rbi_tsync = atoi(p + 6); }
+        else if (strncmp(p, "desync=", 7) == 0) { s_rbi_force_desync = atoi(p + 7); } /* W346 TEST */
+        else if (strncmp(p, "rbtest=", 7) == 0) { /* W355 TEST */
+            const char *c = strchr(p + 7, ',');
+            s_rbi_rbtest_n = atoi(p + 7);
+            s_rbi_rbtest_k = c ? atoi(c + 1) : 4;
+            if (s_rbi_rbtest_n < 0) s_rbi_rbtest_n = 0;
+            if (s_rbi_rbtest_k < 1) s_rbi_rbtest_k = 1;
+            if (s_rbi_rbtest_k > 30) s_rbi_rbtest_k = 30;
+        }
+        else if (strncmp(p, "defer=", 6) == 0) { s_rbi_defer_on = atoi(p + 6); }
+        else if (strncmp(p, "rbver=", 6) == 0) { s_rbv_n = atoi(p + 6); } /* W359 DIAG */
+        else if (strncmp(p, "memlog=", 7) == 0) { s_memlog = atoi(p + 7); } /* W359 DIAG */
+        else if (strncmp(p, "rprep=", 6) == 0) { s_rbi_prep = atoi(p + 6); } /* W359 */
+        else if (strncmp(p, "heapchk=", 8) == 0) { s_rbi_heapchk = atoi(p + 8); } /* W359 */
+        else if (strncmp(p, "csn=", 4) == 0) { /* W359 DIAG */
+            s_csn = atoi(p + 4);
+            g_loc_cs_note = s_csn ? rb_cs_note : NULL;
+        }
+        else if (strncmp(p, "dmin=", 5) == 0) { s_rbi_dmin = atoi(p + 5); }           /* W346 */
+        else if (strncmp(p, "dmax=", 5) == 0) { s_rbi_dmax = atoi(p + 5); }
         while (*p && *p != ';') p++;
     }
 }
@@ -1804,7 +3656,7 @@ int loc_rb_install(void)
     intptr_t rel;
     DWORD old;
     LARGE_INTEGER f;
-    if (g_cfg.loc_rb_spike <= 0 && g_cfg.loc_rb <= 0) return 0;
+    if (g_cfg.loc_rb_spike <= 0 && g_cfg.loc_rb <= 0 && g_cfg.loc_rb_input <= 0) return 0;
     if (g_cfg.loc_pace_diag || g_cfg.loc_fields > 0) {
         HLOG_W("LOCRB: loc_pace_diag/loc_fields belegen @0x%X - Spike aus", RB_CALL_VA);
         return 0;
@@ -1817,7 +3669,17 @@ int loc_rb_install(void)
     QueryPerformanceFrequency(&f);
     s_qpf = f.QuadPart ? f.QuadPart : 1;
     s_mode = g_cfg.loc_rb_spike >= 2 ? 2 : (g_cfg.loc_rb_spike == 1 ? 1 : 0);
-    s_ring = g_cfg.loc_rb > 0;
+    s_ring = g_cfg.loc_rb > 0 || g_cfg.loc_rb_input > 0; /* W338: R2 braucht den Ring */
+    if (g_cfg.loc_rb_input > 0) { /* W338: Standardwerte fuer R2 (loc_rb_opts kann sie aendern) */
+        if (s_mode) HLOG_W("LOCRB: loc_rb_spike und loc_rb_input schliessen sich aus - nur R2");
+        s_mode = 0;
+        /* Ring erst 300 Lockstep-Ticks nach Missionsbeginn (wie W330): mit fruehem Start (warm=1) endete der Prozess
+         * hart beim Missionsuebergang bzw. Neuaufbau (C1-C5, auch ohne R2). Bis dahin laeuft R2 ohne Vorhersage. */
+        s_warm = 300;
+        s_xact = 1;
+        s_kstack = 0;
+        s_rbi_delay = g_cfg.loc_rb_delay;
+    }
     if (s_ring && s_mode == 1) {
         HLOG_W("LOCRB: loc_rb_spike=1 (Vergleich je Tick) und loc_rb=1 schliessen sich aus - nur Ring");
         s_mode = 0;
@@ -1865,6 +3727,22 @@ int loc_rb_install(void)
     HLOG_I("LOCRB: Spike aktiv, Modus %d (%s), Ruhepunkt @0x%X, Optionen \"%s\"", s_mode,
            s_mode == 1 ? "Zustand je Tick erfassen" : (s_mode == 2 ? "Determinismus-Zyklen" : "nur Ring"), RB_CALL_VA,
            g_cfg.loc_rb_opts);
+    if (s_avlog) {
+        char fn[600];
+        const char *od = hcfg_out_dir();
+        _snprintf_s(fn, sizeof fn, _TRUNCATE, "%s\\rb_avlog.txt", od && od[0] ? od : ".");
+        s_avlog_h = CreateFileA(fn, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    }
+    if (g_cfg.loc_rb_input > 0) {
+        if (s_rbi_delay < 0) s_rbi_delay = 0; /* W346: 0 = adaptiv nach Umlaufzeit (dmin..dmax) */
+        if (s_rbi_delay > 8) s_rbi_delay = 8;
+        if (s_rbi_dmin < 1) s_rbi_dmin = 1;
+        if (s_rbi_dmax > 8) s_rbi_dmax = 8;
+        if (s_rbi_dmax < s_rbi_dmin) s_rbi_dmax = s_rbi_dmin;
+        if (s_rbi_maxpred < 1) s_rbi_maxpred = 1;
+        if (s_rbi_maxpred > s_depth - 4) s_rbi_maxpred = s_depth - 4;
+        rbi_install(); /* W338 */
+    }
     if (s_ring)
         HLOG_I("LOCRB: RING eingeschaltet (loc_rb=1): Write-Watch fuer NtAlloc=%d, Tiefe %d, Puffer %d Seiten, verify=%d, "
                "Present-Ruhe=%d", g_loc_rb_ww, s_depth, s_pool, s_verify, s_pdpause);
@@ -1964,6 +3842,7 @@ void loc_rb_tick(int waited_s)
 {
     u32 a, b, c;
     if ((!s_mode && !s_ring) || waited_s % 10 != 0) return;
+    if (s_rbi) rbi_log(waited_s); /* W338 */
     if (!s_ready) return;
     if (s_ring) rb_ring_log(waited_s);
     if (s_mode == 0) {
@@ -2004,7 +3883,7 @@ void loc_rb_tick(int waited_s)
         rb_logser(s_dirty_blk_k1, "Bloecke");
         rb_logser(s_dirty_pg, "Seiten");
         rb_logser(s_rec_bytes, "Bytes");
-        if (s_mode == 2) {
+        if (s_mode == 2 || s_rbi) { /* W338: auch R2 (Aufzeichnung/Wiedergabe beim Neurechnen) */
             for (i = 1; i < EV_N; i++) {
                 if (i == EV_ACC) continue;
                 if (s_cnt_ev[i][0] || s_cnt_ev[i][1])
@@ -2024,7 +3903,28 @@ void loc_rb_tick(int waited_s)
                     HLOG_I("LOCRB: Abweichende Seite 0x%X (erstes Wort 0x%X) in %u Zyklen", s_ah[i].page, s_ah[i].first,
                            s_ah[i].n);
             }
-            rb_census_log();
+            if (s_mode == 2) rb_census_log();
         }
     }
+}
+
+/* W353 LOC-DURCHSTICH: Rollback-Zustand fuer das F11-Paket (sb_feedback.c), nur Zahlen/Zustaende, keine Eingaben. */
+int loc_rb_diag(char *buf, int cap)
+{
+    if (!buf || cap <= 0) return 0;
+    buf[0] = 0;
+    if (!g_cfg.loc_rb_input) {
+        _snprintf_s(buf, (size_t)cap, _TRUNCATE, "input_layer=off (original lockstep)");
+        return 0;
+    }
+    _snprintf_s(buf, (size_t)cap, _TRUNCATE,
+                "input_layer=on mode=%s delay=%d rollbacks=%u missions_r2=%u missions_lockstep=%u last_fallback=%u "
+                "end_desync=%u end_disagree=%u",
+                s_rbi_mst == RBN_ST_R2 ? (s_rbc && rbi_free_running(s_rbc) ? "r2-end" : "r2")
+                                       : (s_rbi_mst == RBN_ST_LS ? "lockstep"
+                                                                 : (s_rbi_mst == RBN_ST_TENT ? "offer"
+                                                                                             : (s_rbi_mst == RBN_ST_PEND ? "wait" : "lobby"))),
+                s_rbi_ep ? (int)s_rbi_reg_d : 0, s_rbi_rb_n, s_rbi_r2_missions, s_rbi_ls_missions, s_rbi_last_why,
+                s_rbi_end_desync, s_rbi_end_disagree);
+    return 1;
 }

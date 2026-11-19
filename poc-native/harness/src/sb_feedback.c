@@ -17,6 +17,7 @@
 #include <time.h>
 #include "sb_state.h" /* W232: sb_in_mission */
 #include "sb_texhealth.h" /* W315 */
+#include "loc_net.h" /* W353: Netzwerte (LoC) */
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -310,6 +311,12 @@ int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
         char sb[400];
         sbc_wire_summary(sb, sizeof sb);
         _snprintf_s(info + used, sizeof info - used, _TRUNCATE, "controller: %s\r\n", sb);
+    }
+    if (g_cfg.loc_boot) { /* W353 LOC-DURCHSTICH: Netzwerte (nur Zustaende/Zahlen, keine Adressen/Eingaben) */
+        size_t used = strlen(info);
+        char nd[900];
+        if (loc_net_diag_line(nd, (int)sizeof nd))
+            _snprintf_s(info + used, sizeof info - used, _TRUNCATE, "network: %s\r\n", nd);
     }
     { /* W315 TEX-WHITE-AMD: Block "texture health" (nur Technikdaten) */
         size_t used = strlen(info);

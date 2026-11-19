@@ -17,6 +17,17 @@ body:
         The client removes user name, computer name and paths from these files, but please
         have a quick look before you attach them.
         **Never attach game files (ISO, XBE, extracted game data, saves).**
+  - type: dropdown
+    id: which
+    attributes:
+      label: Which game?
+      description: Pre-selected by the game. Sets the label automatically.
+      options:
+        - Steel Battalion
+        - Line of Contact
+        - Both / launcher in general
+    validations:
+      required: true
   - type: textarea
     id: what
     attributes:

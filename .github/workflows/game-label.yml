@@ -1,0 +1,35 @@
+# Adds a game label to new or edited issues from the "Which game?" field of the issue forms.
+# Steel Battalion -> "game: SB", Line of Contact -> "game: LoC", both -> both labels.
+name: Game label
+on:
+  issues:
+    types: [opened, edited]
+permissions:
+  issues: write
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/github-script@v7
+        with:
+          script: |
+            const body = context.payload.issue.body || "";
+            const m = body.match(/###\s*Which game\?\s*\r?\n\s*\r?\n?([^\r\n]+)/);
+            if (!m) return;
+            const v = m[1].trim();
+            const want = [];
+            if (v === "Steel Battalion") want.push("game: SB");
+            else if (v === "Line of Contact") want.push("game: LoC");
+            else if (v.startsWith("Both")) want.push("game: SB", "game: LoC");
+            if (!want.length) return;
+            const all = ["game: SB", "game: LoC"];
+            const have = (context.payload.issue.labels || []).map(l => l.name);
+            for (const l of all) {
+              if (have.includes(l) && !want.includes(l)) {
+                await github.rest.issues.removeLabel({ ...context.repo, issue_number: context.issue.number, name: l });
+              }
+            }
+            const add = want.filter(l => !have.includes(l));
+            if (add.length) {
+              await github.rest.issues.addLabels({ ...context.repo, issue_number: context.issue.number, labels: add });
+            }

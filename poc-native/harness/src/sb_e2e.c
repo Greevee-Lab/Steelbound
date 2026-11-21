@@ -1,48 +1,51 @@
-/* sb_e2e.c - W334 LOC-SEC-CLIENT: SBT2 (siehe sb_e2e.h, SECURITY.md §4). Nur CNG + sb_sha256. */
+/* sb_e2e.c - W334 LOC-SEC-CLIENT: SBT2 (siehe sb_e2e.h, SECURITY.md §4).
+ * W407 CRYPTO-PORTABLE: X25519 und AES-256-GCM aus BearSSL 0.6 (third_party/bearssl, unveraendert, MIT) statt
+ * Windows-CNG, damit jede Plattform dieselben Bausteine nutzt (CNG fehlte u. a. Curve25519 in manchen
+ * Umgebungen -> Selbsttest rot -> Online aus). Varianten bewusst zeitkonstant: aes_ct (bitsliced), ghash_ctmul,
+ * c25519_m31 (Montgomery-Leiter mit cswap). HMAC/HKDF ueber sb_sha256, Zufall weiter aus dem System-CSPRNG
+ * (BCryptGenRandom). Protokoll und Bytes unveraendert; Selbsttest (RFC-Vektoren) und sbt2_vectors.json pruefen das. */
 #include <winsock2.h>
 #include <windows.h>
 #include <bcrypt.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include "sb_e2e.h"
 #include "sb_sha256.h"
+#include "bearssl_block.h"
+#include "bearssl_hash.h"
+#include "bearssl_aead.h"
+#include "bearssl_ec.h"
 
 #pragma comment(lib, "bcrypt.lib")
 
-#ifndef STATUS_AUTH_TAG_MISMATCH
-#define STATUS_AUTH_TAG_MISMATCH ((NTSTATUS)0xC000A002L)
-#endif
+/* Schluesselobjekte (frueher BCRYPT_KEY_HANDLE): nur lesend benutzt, daher von mehreren Threads gleichzeitig
+ * verwendbar; der GCM-Zustand liegt je Aufruf auf dem Stack. Freigabe immer mit Loeschen. */
+typedef struct e2e_gcmkey {
+    br_aes_ct_ctr_keys ctr; /* AES-256-Schluesselplan (CTR, zeitkonstant) */
+} e2e_gcmkey;
 
-/* ====================================================================== Algorithmen (einmal oeffnen) */
-static BCRYPT_ALG_HANDLE s_ecdh, s_aes;
-static int s_alg_ok;
-static INIT_ONCE s_once = INIT_ONCE_STATIC_INIT;
+typedef struct e2e_xkey {
+    uint8_t priv[32]; /* X25519-Privatschluessel, RFC-7748-Form, geklemmt */
+} e2e_xkey;
 
-static BOOL CALLBACK alg_init(PINIT_ONCE o, PVOID p, PVOID *c)
+static void *secure_alloc(size_t n)
 {
-    (void)o; (void)p; (void)c;
-    if (BCryptOpenAlgorithmProvider(&s_ecdh, BCRYPT_ECDH_ALGORITHM, NULL, 0) != 0) return TRUE;
-    if (BCryptSetProperty(s_ecdh, BCRYPT_ECC_CURVE_NAME, (PUCHAR)BCRYPT_ECC_CURVE_25519,
-                          (ULONG)sizeof(BCRYPT_ECC_CURVE_25519), 0) != 0) {
-        BCryptCloseAlgorithmProvider(s_ecdh, 0);
-        s_ecdh = NULL;
-        return TRUE;
+    void *p = calloc(1, n);
+    return p;
+}
+
+static void secure_free(void *p, size_t n)
+{
+    if (p) {
+        SecureZeroMemory(p, n);
+        free(p);
     }
-    if (BCryptOpenAlgorithmProvider(&s_aes, BCRYPT_AES_ALGORITHM, NULL, 0) != 0) return TRUE;
-    if (BCryptSetProperty(s_aes, BCRYPT_CHAINING_MODE, (PUCHAR)BCRYPT_CHAIN_MODE_GCM,
-                          (ULONG)sizeof(BCRYPT_CHAIN_MODE_GCM), 0) != 0) {
-        BCryptCloseAlgorithmProvider(s_aes, 0);
-        s_aes = NULL;
-        return TRUE;
-    }
-    s_alg_ok = 1;
-    return TRUE;
 }
 
 static int alg_ready(void)
 {
-    InitOnceExecuteOnce(&s_once, alg_init, NULL, NULL);
-    return s_alg_ok;
+    return 1; /* keine Laufzeit-Abhaengigkeit mehr; Korrektheit prueft sbe2e_selftest */
 }
 
 /* ====================================================================== Hilfen */
@@ -125,41 +128,47 @@ int sbe2e_hkdf_expand(const uint8_t prk[32], const void *info, int ilen, uint8_t
     return 0;
 }
 
-/* ====================================================================== AES-256-GCM (CNG) */
+/* ====================================================================== AES-256-GCM (BearSSL aes_ct + ghash_ctmul) */
 static void *gcm_key(const uint8_t key[32])
 {
-    BCRYPT_KEY_HANDLE k = NULL;
-    if (!alg_ready()) return NULL;
-    if (BCryptGenerateSymmetricKey(s_aes, &k, NULL, 0, (PUCHAR)key, 32, 0) != 0) return NULL;
+    e2e_gcmkey *k = (e2e_gcmkey *)secure_alloc(sizeof *k);
+    if (!k) return NULL;
+    br_aes_ct_ctr_init(&k->ctr, key, 32);
     return k;
 }
 
+static void gcm_key_free(void *key)
+{
+    secure_free(key, sizeof(e2e_gcmkey));
+}
+
+/* Ein Aufruf = ein Paket. in/out duerfen nicht ueberlappen (ausser in == out). Beim Oeffnen wird der Tag
+ * zeitkonstant geprueft (br_gcm_check_tag); bei Fehler wird der Klartext geloescht (nie unauthentisch zurueck). */
 static int gcm_run(void *key, int enc, const uint8_t iv[12], const uint8_t *aad, int alen, const uint8_t *in, int n,
                    uint8_t *out, uint8_t tag[16])
 {
-    BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO ai;
-    ULONG got = 0;
-    NTSTATUS s;
-    uint8_t dummy[1];
-    BCRYPT_INIT_AUTH_MODE_INFO(ai);
-    ai.pbNonce = (PUCHAR)iv;
-    ai.cbNonce = 12;
-    ai.pbAuthData = (PUCHAR)aad;
-    ai.cbAuthData = (ULONG)alen;
-    ai.pbTag = tag;
-    ai.cbTag = 16;
+    /* nicht const: br_gcm_init erwartet einen veraenderlichen Zeiger, die CTR-Funktionen lesen den Plan aber nur
+     * (br_aes_ct_ctr_run nimmt const) - gleichzeitige Nutzung desselben Schluessels ist daher sicher. */
+    e2e_gcmkey *k = (e2e_gcmkey *)key;
+    br_gcm_context g;
+    int ok = 1;
+    if (!k || n < 0 || alen < 0 || (n > 0 && (!in || !out))) return -1;
+    br_gcm_init(&g, &k->ctr.vtable, &br_ghash_ctmul);
+    br_gcm_reset(&g, iv, 12);
+    if (alen > 0) br_gcm_aad_inject(&g, aad, (size_t)alen);
+    br_gcm_flip(&g);
+    if (n > 0) {
+        if (out != in) memmove(out, in, (size_t)n);
+        br_gcm_run(&g, enc ? 1 : 0, out, (size_t)n);
+    }
     if (enc) {
-        s = BCryptEncrypt((BCRYPT_KEY_HANDLE)key, (PUCHAR)(n ? in : dummy), (ULONG)n, &ai, NULL, 0,
-                          n ? out : dummy, (ULONG)n, &got, 0);
+        br_gcm_get_tag(&g, tag);
     } else {
-        s = BCryptDecrypt((BCRYPT_KEY_HANDLE)key, (PUCHAR)(n ? in : dummy), (ULONG)n, &ai, NULL, 0,
-                          n ? out : dummy, (ULONG)n, &got, 0);
+        ok = br_gcm_check_tag(&g, tag) == 1;
+        if (!ok && n > 0) SecureZeroMemory(out, (size_t)n); /* nie unauthentischen Klartext zurueckgeben */
     }
-    if (s != 0 || (int)got != n) {
-        if (!enc && n > 0) SecureZeroMemory(out, (size_t)n); /* nie unauthentischen Klartext zurueckgeben */
-        return -1;
-    }
-    return 0;
+    SecureZeroMemory(&g, sizeof g);
+    return ok ? 0 : -1;
 }
 
 int sbe2e_gcm(int enc, const uint8_t key[32], const uint8_t iv[12], const uint8_t *aad, int alen, const uint8_t *in,
@@ -169,91 +178,68 @@ int sbe2e_gcm(int enc, const uint8_t key[32], const uint8_t iv[12], const uint8_
     int r;
     if (!k) return -1;
     r = gcm_run(k, enc, iv, aad, alen, in, n, out, tag);
-    BCryptDestroyKey((BCRYPT_KEY_HANDLE)k);
+    gcm_key_free(k);
     return r;
 }
 
-/* ====================================================================== X25519 (CNG)
- * Befund W334 (B, Selbsttest RFC 7748 §6.1/§5.2): CNG erwartet den Privatschluessel in RFC-7748-Bytereihenfolge,
- * aber bereits geklemmt (ungeklemmt: STATUS_INVALID_PARAMETER); der oeffentliche Schluessel (X des
- * BCRYPT_ECCKEY_BLOB, Y = 0) ist RFC-Form; das Rohgeheimnis (BCRYPT_KDF_RAW_SECRET) kommt umgekehrt. Alle
- * Anpassungen nur hier. Oeffentliche Werte mit gesetztem Bit 255 werden laut RFC 7748 §5 maskiert. */
-static void rev32(uint8_t *p)
+/* ====================================================================== X25519 (BearSSL c25519_m31)
+ * RFC 7748: Privatschluessel und Punkte in Little-Endian-Form; BearSSL klemmt den Skalar selbst (k[0] &= 248,
+ * k[31] &= 127, |= 64) und maskiert Bit 255 des Punkts. Wir klemmen zusaetzlich beim Speichern (wie bisher). */
+static void x_clamp(uint8_t k[32])
 {
-    int i;
-    for (i = 0; i < 16; i++) {
-        uint8_t t = p[i];
-        p[i] = p[31 - i];
-        p[31 - i] = t;
+    k[0] &= 248;
+    k[31] &= 127;
+    k[31] |= 64;
+}
+
+static int x_mul(const uint8_t priv[32], const uint8_t point[32], uint8_t out[32])
+{
+    uint8_t G[32];
+    uint32_t ok;
+    memcpy(G, point, 32);
+    ok = br_ec_c25519_m31.mul(G, 32, priv, 32, BR_EC_curve25519);
+    if (!ok) {
+        SecureZeroMemory(G, sizeof G);
+        return -1;
     }
-}
-
-static BCRYPT_KEY_HANDLE x_import_pub(const uint8_t pub[32])
-{
-    uint8_t b[sizeof(BCRYPT_ECCKEY_BLOB) + 64];
-    BCRYPT_ECCKEY_BLOB *h = (BCRYPT_ECCKEY_BLOB *)b;
-    BCRYPT_KEY_HANDLE k = NULL;
-    memset(b, 0, sizeof b);
-    h->dwMagic = BCRYPT_ECDH_PUBLIC_GENERIC_MAGIC;
-    h->cbKey = 32;
-    memcpy(b + sizeof *h, pub, 32);
-    b[sizeof *h + 31] &= 0x7F;
-    if (BCryptImportKeyPair(s_ecdh, NULL, BCRYPT_ECCPUBLIC_BLOB, &k, b, sizeof b, 0) != 0) return NULL;
-    return k;
-}
-
-static int x_export_pub(BCRYPT_KEY_HANDLE k, uint8_t pub[32])
-{
-    uint8_t b[sizeof(BCRYPT_ECCKEY_BLOB) + 64];
-    ULONG got = 0;
-    BCRYPT_ECCKEY_BLOB *h = (BCRYPT_ECCKEY_BLOB *)b;
-    if (BCryptExportKey(k, NULL, BCRYPT_ECCPUBLIC_BLOB, b, sizeof b, &got, 0) != 0) return -1;
-    if (got < sizeof *h + 32 || h->cbKey != 32) return -1;
-    memcpy(pub, b + sizeof *h, 32);
+    memcpy(out, G, 32);
+    SecureZeroMemory(G, sizeof G);
     return 0;
 }
 
-static int x_agree(BCRYPT_KEY_HANDLE mine, const uint8_t peer_pub[32], uint8_t z[32])
+static int x_agree(const e2e_xkey *mine, const uint8_t peer_pub[32], uint8_t z[32])
 {
-    BCRYPT_KEY_HANDLE kp = x_import_pub(peer_pub);
-    BCRYPT_SECRET_HANDLE se = NULL;
-    ULONG got = 0;
-    int r = -1;
     uint8_t acc = 0;
-    int i;
-    if (!kp) return -1; /* CNG lehnt u. a. Punkte kleiner Ordnung beim Import ab -> Abbruch */
-    if (BCryptSecretAgreement(mine, kp, &se, 0) == 0 &&
-        BCryptDeriveKey(se, BCRYPT_KDF_RAW_SECRET, NULL, z, 32, &got, 0) == 0 && got == 32) {
-        rev32(z);
+    int i, r;
+    if (!mine) return -1;
+    r = x_mul(mine->priv, peer_pub, z);
+    if (r == 0) {
         for (i = 0; i < 32; i++) acc |= z[i];
         r = acc ? 0 : -1; /* Z == 0^32 -> Punkt kleiner Ordnung (SECURITY.md §4.3) */
     }
     if (r != 0) SecureZeroMemory(z, 32);
-    if (se) BCryptDestroySecret(se);
-    BCryptDestroyKey(kp);
     return r;
+}
+
+static int x_pub(const e2e_xkey *k, uint8_t pub[32])
+{
+    size_t glen = 0;
+    const unsigned char *g = br_ec_c25519_m31.generator(BR_EC_curve25519, &glen);
+    if (!g || glen != 32) return -1;
+    return x_mul(k->priv, g, pub);
 }
 
 int sbe2e_kp_import(sbe2e_kp *kp, const uint8_t priv[32], uint8_t pub[32])
 {
-    uint8_t b[sizeof(BCRYPT_ECCKEY_BLOB) + 96];
-    BCRYPT_ECCKEY_BLOB *h = (BCRYPT_ECCKEY_BLOB *)b;
-    BCRYPT_KEY_HANDLE k = NULL;
-    NTSTATUS s;
+    e2e_xkey *k;
     kp->key = NULL;
     if (!alg_ready()) return -1;
-    memset(b, 0, sizeof b);
-    h->dwMagic = BCRYPT_ECDH_PRIVATE_GENERIC_MAGIC;
-    h->cbKey = 32;
-    memcpy(b + sizeof *h + 64, priv, 32);
-    b[sizeof *h + 64] &= 248; /* Klemmen RFC 7748 §5 */
-    b[sizeof *h + 64 + 31] &= 127;
-    b[sizeof *h + 64 + 31] |= 64;
-    s = BCryptImportKeyPair(s_ecdh, NULL, BCRYPT_ECCPRIVATE_BLOB, &k, b, sizeof b, 0);
-    SecureZeroMemory(b, sizeof b);
-    if (s != 0) return -1;
-    if (pub && x_export_pub(k, pub) != 0) {
-        BCryptDestroyKey(k);
+    k = (e2e_xkey *)secure_alloc(sizeof *k);
+    if (!k) return -1;
+    memcpy(k->priv, priv, 32);
+    x_clamp(k->priv);
+    if (pub && x_pub(k, pub) != 0) {
+        secure_free(k, sizeof *k);
         return -1;
     }
     kp->key = k;
@@ -262,22 +248,19 @@ int sbe2e_kp_import(sbe2e_kp *kp, const uint8_t priv[32], uint8_t pub[32])
 
 int sbe2e_keypair(sbe2e_kp *kp, uint8_t pub[32])
 {
-    BCRYPT_KEY_HANDLE k = NULL;
+    uint8_t priv[32];
+    int r;
     kp->key = NULL;
-    if (!alg_ready()) return -1;
-    if (BCryptGenerateKeyPair(s_ecdh, &k, 255, 0) != 0) return -1;
-    if (BCryptFinalizeKeyPair(k, 0) != 0 || x_export_pub(k, pub) != 0) {
-        BCryptDestroyKey(k);
-        return -1;
-    }
-    kp->key = k;
-    return 0;
+    if (sbe2e_random(priv, 32) != 0) return -1;
+    r = sbe2e_kp_import(kp, priv, pub);
+    SecureZeroMemory(priv, sizeof priv);
+    return r;
 }
 
 void sbe2e_kp_free(sbe2e_kp *kp)
 {
     if (kp && kp->key) {
-        BCryptDestroyKey((BCRYPT_KEY_HANDLE)kp->key);
+        secure_free(kp->key, sizeof(e2e_xkey));
         kp->key = NULL;
     }
 }
@@ -287,7 +270,7 @@ int sbe2e_x25519(const uint8_t priv[32], const uint8_t pub[32], uint8_t out[32])
     sbe2e_kp kp;
     int r;
     if (sbe2e_kp_import(&kp, priv, NULL) != 0) return -1;
-    r = x_agree((BCRYPT_KEY_HANDLE)kp.key, pub, out);
+    r = x_agree((const e2e_xkey *)kp.key, pub, out);
     sbe2e_kp_free(&kp);
     return r;
 }
@@ -370,7 +353,7 @@ int sbe2e_derive(const sbe2e_kp *kp, const uint8_t peer_pub[32], const uint8_t t
     int r;
     memset(L, 0, sizeof *L);
     if (!kp || !kp->key || my_cid == peer_cid || !alg_ready()) return -1;
-    if (x_agree((BCRYPT_KEY_HANDLE)kp->key, peer_pub, z) != 0) return -1;
+    if (x_agree((const e2e_xkey *)kp->key, peer_pub, z) != 0) return -1;
     sbe2e_hkdf_extract(th, 32, z, 32, prk);
     r = sbe2e_link_from_prk(prk, my_cid < peer_cid, L);
     SecureZeroMemory(z, sizeof z);
@@ -392,8 +375,8 @@ int sbe2e_link_test(int i_am_lo, sbe2e_link *L)
 void sbe2e_link_free(sbe2e_link *L)
 {
     if (!L) return;
-    if (L->ktx) BCryptDestroyKey((BCRYPT_KEY_HANDLE)L->ktx);
-    if (L->krx) BCryptDestroyKey((BCRYPT_KEY_HANDLE)L->krx);
+    gcm_key_free(L->ktx);
+    gcm_key_free(L->krx);
     SecureZeroMemory(L, sizeof *L);
 }
 
@@ -543,7 +526,7 @@ int sbe2e_selftest_ex(char *why, int cap, int tamper)
     /* Zaehlfolgen der SBT2-Vektoren (Privatschluessel a = 10..2f, pair_nonce = 00..0f) zur Laufzeit */
     for (n = 0; n < 32; n++) KAT_S_APRIV[n] = (uint8_t)(0x10 + n);
     for (n = 0; n < 16; n++) KAT_S_PN[n] = (uint8_t)n;
-    if (!alg_ready()) return st_fail(why, cap, "CNG nicht verfuegbar (X25519/AES-GCM)");
+    if (!alg_ready()) return st_fail(why, cap, "Krypto-Bausteine nicht verfuegbar");
     /* X25519 RFC 7748 §6.1: oeffentlicher Schluessel und gemeinsames Geheimnis */
     memcpy(shared_exp, KAT_X_SHARED, 32);
     if (tamper == 1) shared_exp[5] ^= 1;

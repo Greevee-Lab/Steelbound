@@ -1191,6 +1191,7 @@ static void sb_render_present_body(unsigned flags)
     }
     n_present++;
     g_present_no = n_present;
+    { extern void loc_lampdiag_frame(unsigned); loc_lampdiag_frame(n_present); } /* DIAG(W405) loc_lampdiag */
     if (g_cfg.test_render_slow_ms > 0 && g_sba_loc && krnl_main_thread() &&
         GetCurrentThreadId() != GetThreadId((HANDLE)krnl_main_thread())) {
         /* TEST(W391) test_render_slow_ms: kuenstlich langsamer Renderer - Render-Thread des Spiels (LoC-Mission) rechnet je

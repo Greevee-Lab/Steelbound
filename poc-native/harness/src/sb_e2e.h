@@ -1,9 +1,9 @@
 /* sb_e2e.h - W334 LOC-SEC-CLIENT: Ende-zu-Ende-Schutz des Spielverkehrs (SBT2), Spezifikation
  * poc-native/net/SECURITY.md §4.
  *
- * Bausteine ausschliesslich aus Windows CNG (bcrypt): X25519 (BCRYPT_ECDH + Curve25519), AES-256-GCM,
- * Zufall aus BCryptGenRandom. HMAC/HKDF-SHA256 ueber das vorhandene sb_sha256 (RFC 2104/5869).
- * Keine eigenen Primitive. Schluesselmaterial wird nach Gebrauch geloescht (SecureZeroMemory, BCryptDestroyKey),
+ * Bausteine: X25519 und AES-256-GCM aus BearSSL 0.6 (third_party/bearssl, zeitkonstante Varianten; seit W407, vorher
+ * Windows CNG), Zufall aus BCryptGenRandom, HMAC/HKDF-SHA256 ueber das vorhandene sb_sha256 (RFC 2104/5869).
+ * Keine eigenen Primitive. Schluesselmaterial wird nach Gebrauch geloescht (SecureZeroMemory),
  * nie geloggt. Fehlerwege sind "fail closed" (Paket verwerfen / Verbindung ablehnen).
  *
  * Paket SBT2 (SECURITY.md §4.4):  "SBT2" | sid u32 BE | ctr u64 BE | Chiffretext n | Tag 16, n = 1..1168
@@ -41,7 +41,7 @@ extern "C" {
 #define SBE2E_E_STATE (-5)  /* Verbindung ohne Schluessel */
 
 typedef struct sbe2e_kp {
-    void *key; /* BCRYPT_KEY_HANDLE des fluechtigen X25519-Schluesselpaars */
+    void *key; /* fluechtiger X25519-Privatschluessel (intern, wird beim Freigeben geloescht) */
 } sbe2e_kp;
 
 typedef struct sbe2e_side {
@@ -54,7 +54,7 @@ typedef struct sbe2e_link {
     int valid;
     uint32_t sid;
     uint8_t tx_dir, rx_dir;
-    void *ktx, *krx;        /* BCRYPT_KEY_HANDLE AES-256-GCM je Richtung */
+    void *ktx, *krx;        /* AES-256-GCM-Schluesselplan je Richtung (intern, nur lesend genutzt) */
     uint64_t tx_ctr;        /* zuletzt gesendeter ctr (0 = noch keiner) */
     uint64_t rx_hi;         /* hoechster angenommener ctr */
     uint32_t rx_bits[SBE2E_WIN / 32]; /* Bit i = ctr (rx_hi - i) gesehen */
@@ -80,7 +80,7 @@ void sbe2e_kp_free(sbe2e_kp *kp);
 int sbe2e_transcript(uint8_t th[32], uint32_t lobby, const uint8_t pn[16], const sbe2e_side *a,
                      const sbe2e_side *b);
 /* Schluessel je Paar: Z = X25519(e, E_partner), PRK = HMAC(TH, Z), k_lohi/k_hilo/sid. -1 bei Z == 0,
- * gleicher cid oder CNG-Fehler (L bleibt ungueltig). */
+ * gleicher cid oder Baustein-Fehler (L bleibt ungueltig). */
 int sbe2e_derive(const sbe2e_kp *kp, const uint8_t peer_pub[32], const uint8_t th[32], uint32_t my_cid,
                  uint32_t peer_cid, sbe2e_link *L);
 /* Schluessel aus einem PRK (Testweg §4.7 und Vektoren); i_am_lo = 1, wenn diese Seite "lo" ist. */

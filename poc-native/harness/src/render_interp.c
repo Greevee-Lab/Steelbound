@@ -262,6 +262,7 @@ static unsigned ip_cwcap[IP_LISTS];
 static unsigned st_eyex_draws, st_eyex_verts, st_eyex_ln;
 /* W237: Vertex-Sprung-Statistik in zwischengerechneten Draws */
 static unsigned st_p2x_draws, st_p2x_verts, st_p2x_hit, st_jmp_verts, st_jmp_fp, st_p2x_ln;
+static unsigned st_p2rej; /* W406 interp_p2rej: P2-Draws statt reject gelerpt */
 static unsigned st_jf[IP_W_N], st_jb[IP_W_N], st_jfd[IP_W_N]; /* W237: Sprung vor (beide w>0) / hinter der Kamera je why; Draws mit Sprung vorn */
 static unsigned st_wwhy[IP_W_N];
 static void ip_cw_rec(int li, unsigned vbcap, unsigned vstart, unsigned n, const float mvp[16],
@@ -1829,6 +1830,31 @@ static int ip_plausible(const ip_op_t *a, const ip_op_t *o, float maxjump)
     return front > 0 || behind == 4;
 }
 
+/* OPTION(W406 M3-ROAD-JITTER) interp_p2rej: vorab transformierte Welt-Draws (P2 im Renderziel, Strom schon
+ * durch w geteilt, affine Bildraum-Matrix) mit GLEICHEN Eingangsdaten scheitern an ip_plausible, sobald EIN
+ * Bezugs-Vertex nahe der Augenebene liegt: dessen Pixellage ist riesig (|ndc| >> 1) und springt bei kleinster
+ * Kamerabewegung weit. Der ganze Draw (z. B. ein Gelaendestueck unter dem VT) steht dann im Zwischenbild in
+ * Tick-N-Lage, die gelerpten Nachbarn um (1-t)*Sprung daneben -> Versatz/Wackeln und Spalt (SEAMRJ, W406).
+ * Hier zaehlen nur Bezugs-Vertices, die in beiden Ticks im erweiterten Bild (|ndc| <= 2) liegen; mindestens
+ * einer muss es sein, und alle diese springen hoechstens maxjump. 1 = lerpen. */
+static int ip_mvp_affine(const float m[16]);
+static int ip_p2rej_ok(const ip_op_t *a, const ip_op_t *o, float maxjump)
+{
+    int q, nin = 0;
+    if (!ip_mvp_affine(o->mvp) || !ip_mvp_affine(a->mvp) || a->rawhash != o->rawhash || a->nv != o->nv) { return 0; }
+    for (q = 0; q < 4; q++) {
+        float c0[4], c1[4], x0, y0, x1, y1;
+        ip_clip(a->pref[q], a->mvp, c0);
+        ip_clip(o->pref[q], o->mvp, c1);
+        if (c0[3] <= 1e-6f || c1[3] <= 1e-6f) { return 0; }
+        x0 = c0[0] / c0[3]; y0 = c0[1] / c0[3]; x1 = c1[0] / c1[3]; y1 = c1[1] / c1[3];
+        if (fabsf(x0) > 2.0f || fabsf(y0) > 2.0f || fabsf(x1) > 2.0f || fabsf(y1) > 2.0f) { continue; }
+        if (fabsf(x1 - x0) > maxjump || fabsf(y1 - y0) > maxjump) { return 0; }
+        nin++;
+    }
+    return nin > 0;
+}
+
 /* Partnersuche ueber den ganzen Vortick (W73): Draws von A je Signatur-Eimer
  * in aufsteigender Reihenfolge verkettet. Frueher Fenster von 256 Draws ab dem
  * letzten Treffer - ein im Vortick fehlender/geaenderter Block > 256 Draws
@@ -3033,6 +3059,7 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
             }
             if (ip_still(a, o)) { nstatic++; o->why = IP_W_STATIC; }
             else if (ip_plausible(a, o, g_cfg.interp_maxjump)) { o->flag = 1; nlerp++; o->why = IP_W_LERP; }
+            else if (g_cfg.interp_p2rej && ip_p2rej_ok(a, o, g_cfg.interp_maxjump)) { o->flag = 1; nlerp++; o->why = IP_W_LERP; st_p2rej++; } /* W406 */
             else { nreject++; o->why = IP_W_REJECT; if (g_sba_loc && g_cfg.interp_diag >= 1) { li_rej_note(a, o); } }
             if (iwbest >= 0 && o->why == IP_W_LERP) { ip_iwrong_log(A, B, i, found, iwbest); } /* DIAG(POPIN,W91) */
         }
@@ -6357,6 +6384,224 @@ static void ip_diag_tick(ip_list_t *A, int ai, ip_list_t *B, int bi)
     }
 }
 
+/* ---------- DIAG(W406 M3-ROAD-JITTER): Fugen zwischen Nachbar-Draws im Zwischenbild ----------
+ * seam_diag=N (braucht interp_diag>=3, CPU-Kopie der Tick-Vertices): je Tick-Paar alle Welt-Vertices
+ * (cls=1) gruppieren, die im Tick-Bild N in DERSELBEN Pixelposition liegen (1/32 px, je Renderziel) und
+ * aus VERSCHIEDENEN Draws stammen - gemeinsame Ecken benachbarter Kacheln. Fuer jede Gruppe wird die
+ * Lage im Zwischenbild t=0,25 so gerechnet, wie die Wiedergabe sie zeichnet (flag 0: Tick N; flag 1:
+ * lerp(c0, c1, t) mit c0 = Vortick-Vertex bzw. Tick-N-Vertex mit Matrix N-1 bei rzb, W224-Regel bei
+ * w-Wechsel). Streuung > 0 = Spalt/Versatz zwischen Nachbarn (Linie, Wackeln). Zusaetzlich die Streuung
+ * der Vortick-Lagen bei rein gelerpten Gruppen (sprA: Partner-Vertices zeigen auf verschiedene Weltpunkte).
+ * Zeilen SEAM (erste N Ticks mit Fund, mit pf_ring nur in den Bildfolgen), SEAMW (schlimmste Gruppen),
+ * SEAMSUM (alle 200 Ticks, je Paar-Klasse). Nur Diagnose, Bild unveraendert. */
+typedef struct { unsigned long long key; unsigned op; float tx, ty, ax, ay, nx, ny; unsigned char why, flag, rzb, rt; } sd_ent_t;
+static sd_ent_t *sd_e;
+static unsigned sd_cap;
+static unsigned sd_cls_n[IP_W_N * IP_W_N + 1], sd_cls_bad[IP_W_N * IP_W_N + 1];
+static float sd_cls_max[IP_W_N * IP_W_N + 1];
+static unsigned sd_ticks, sd_lines, sd_groups, sd_bad05, sd_bad2, sd_badA;
+static unsigned sd_rj_draws[2], sd_rj_verts[2], sd_rj_bad[2], sd_rjl; /* [0] 3D-Matrix, [1] P2 (vorab transformiert) */
+static float sd_rj_max[2], sd_rj_dy[2];
+static double sd_rj_sum[2];
+static double sd_maxs;
+static int sd_cmp(const void *x, const void *y)
+{
+    const sd_ent_t *a = (const sd_ent_t *)x, *b = (const sd_ent_t *)y;
+    if (a->key != b->key) { return a->key < b->key ? -1 : 1; }
+    return a->op < b->op ? -1 : (a->op > b->op ? 1 : 0);
+}
+static void ip_seam_diag(ip_list_t *A, int ai, ip_list_t *B, int bi)
+{
+    const float T = 0.25f;
+    float (*PA)[4] = ip_cpos[ai], (*PB)[4] = ip_cpos[bi];
+    ID3D11RenderTargetView *rts[16];
+    unsigned nrt = 0, ne = 0, i, k, g0, gtick = 0, gbad05 = 0, gbad2 = 0, gbadA = 0;
+    double tmax = 0.0;
+    struct { float s, dy; unsigned i0, i1, w0, w1; float x, y; } worst[3];
+    memset(worst, 0, sizeof worst);
+    if (!PA || !PB || !A || !B || !sb_in_mission() || (g_cfg.pf_ring > 0 && !sb_pf_active())) { return; } /* mit pf_ring nur in den Bildfolgen */
+    for (i = 0; i < B->nops; i++) {
+        const ip_op_t *o = &B->ops[i];
+        const ip_op_t *a = (o->match >= 0 && (unsigned)o->match < A->nops) ? &A->ops[o->match] : NULL;
+        unsigned r;
+        if (o->kind != IP_DRAW || !o->cls || o->why == IP_W_BB2D || o->why == IP_W_STATIC || !o->nv) { continue; } /* unbewegt (Cockpit) bewegt sich nicht gegen Nachbarn */
+        for (r = 0; r < nrt && rts[r] != o->rtv; r++) {}
+        if (r == nrt) { if (nrt >= 16u) { continue; } rts[nrt++] = o->rtv; }
+        if (ne + o->nv > sd_cap) {
+            unsigned nc = (ne + o->nv) * 2u;
+            sd_ent_t *ne2 = (sd_ent_t *)realloc(sd_e, (size_t)nc * sizeof *sd_e);
+            if (!ne2) { return; }
+            sd_e = ne2; sd_cap = nc;
+        }
+        for (k = 0; k < o->nv; k++) {
+            float c1[4], c[4], c0[4], px, py;
+            int q, lerp = 0;
+            long long qx, qy;
+            ip_clip(PB[o->vstart + k], o->mvp, c1);
+            if (c1[3] <= 1e-6f) { continue; }
+            px = o->vp.TopLeftX + (c1[0] / c1[3] * 0.5f + 0.5f) * o->vp.Width;
+            py = o->vp.TopLeftY + (0.5f - c1[1] / c1[3] * 0.5f) * o->vp.Height;
+            if (px < o->vp.TopLeftX || px > o->vp.TopLeftX + o->vp.Width || py < o->vp.TopLeftY || py > o->vp.TopLeftY + o->vp.Height) { continue; } /* nur sichtbare Ecken */
+            memcpy(c, c1, sizeof c);
+            c0[0] = c0[1] = c0[2] = 0.0f; c0[3] = -1.0f;
+            if (o->flag && a && (o->rzb || k < a->nv)) {
+                ip_clip(o->rzb ? PB[o->vstart + k] : PA[a->vstart + k], IP_AMVP(o, a), c0);
+                if (!(g_cfg.interp_eyefix && c0[3] * c1[3] <= 0.0f)) {
+                    for (q = 0; q < 4; q++) { c[q] = (1.0f - T) * c0[q] + T * c1[q]; }
+                    lerp = 1;
+                }
+            }
+            if (c[3] <= 1e-6f) { continue; }
+            qx = (long long)floor((double)px * 32.0);
+            qy = (long long)floor((double)py * 32.0);
+            sd_e[ne].key = ((unsigned long long)r << 48) | ((unsigned long long)(qx & 0xFFFFFF) << 24) | (unsigned long long)(qy & 0xFFFFFF);
+            sd_e[ne].op = i;
+            sd_e[ne].nx = px; sd_e[ne].ny = py;
+            sd_e[ne].tx = o->vp.TopLeftX + (c[0] / c[3] * 0.5f + 0.5f) * o->vp.Width;
+            sd_e[ne].ty = o->vp.TopLeftY + (0.5f - c[1] / c[3] * 0.5f) * o->vp.Height;
+            if (lerp && !o->rzb && c0[3] > 1e-6f) {
+                sd_e[ne].ax = o->vp.TopLeftX + (c0[0] / c0[3] * 0.5f + 0.5f) * o->vp.Width;
+                sd_e[ne].ay = o->vp.TopLeftY + (0.5f - c0[1] / c0[3] * 0.5f) * o->vp.Height;
+            } else {
+                sd_e[ne].ax = sd_e[ne].ay = 1e30f;
+            }
+            sd_e[ne].why = (unsigned char)(o->why < IP_W_N ? o->why : 0);
+            sd_e[ne].flag = (unsigned char)(lerp ? 1 : 0);
+            sd_e[ne].rzb = (unsigned char)(o->rzb != 0);
+            sd_e[ne].rt = (unsigned char)r;
+            ne++;
+        }
+    }
+    /* Versatz exakt gezeichneter Draws gegenueber einer konsistenten Zwischenlage: "reject" = gleiche
+     * Eingangsdaten (Vertex i <-> i ist derselbe Weltpunkt), nur ein Bezugs-Vertex sprang zu weit -> der
+     * ganze Draw steht im Zwischenbild in Tick-N-Lage, gelerpte Nachbarn um (1-t)*(pN - pA) daneben. */
+    for (i = 0; i < B->nops; i++) {
+        const ip_op_t *o = &B->ops[i];
+        const ip_op_t *a = (o->match >= 0 && (unsigned)o->match < A->nops) ? &A->ops[o->match] : NULL;
+        float dmax = 0.0f, dymax = 0.0f;
+        unsigned non = 0, p2;
+        if (o->kind != IP_DRAW || !o->cls || o->flag || o->why != IP_W_REJECT || !a || a->nv != o->nv) { continue; }
+        p2 = ip_mvp_affine(o->mvp) ? 1u : 0u;
+        for (k = 0; k < o->nv; k++) {
+            float c0[4], c1[4], x0, y0, x1, y1, dx, dy, d;
+            ip_clip(PA[a->vstart + k], a->mvp, c0);
+            ip_clip(PB[o->vstart + k], o->mvp, c1);
+            if (c0[3] <= 1e-6f || c1[3] <= 1e-6f) { continue; }
+            x0 = (c0[0] / c0[3] * 0.5f + 0.5f) * o->vp.Width; y0 = (0.5f - c0[1] / c0[3] * 0.5f) * o->vp.Height;
+            x1 = (c1[0] / c1[3] * 0.5f + 0.5f) * o->vp.Width; y1 = (0.5f - c1[1] / c1[3] * 0.5f) * o->vp.Height;
+            if (x1 < 0.0f || x1 > o->vp.Width || y1 < 0.0f || y1 > o->vp.Height) { continue; } /* nur sichtbare Ecken */
+            dx = (1.0f - T) * (x1 - x0); dy = (1.0f - T) * (y1 - y0);
+            d = sqrtf(dx * dx + dy * dy);
+            if (d > dmax) { dmax = d; }
+            if (fabsf(dy) > dymax) { dymax = fabsf(dy); }
+            non++;
+        }
+        if (!non) { continue; }
+        sd_rj_draws[p2]++; sd_rj_verts[p2] += non;
+        if (dmax > 0.5f) { sd_rj_bad[p2]++; }
+        if (dmax > sd_rj_max[p2]) { sd_rj_max[p2] = dmax; }
+        if (dymax > sd_rj_dy[p2]) { sd_rj_dy[p2] = dymax; }
+        sd_rj_sum[p2] += dmax;
+        if (sd_rjl < (unsigned)g_cfg.seam_diag && dmax > 0.5f && (g_cfg.pf_ring <= 0 || sb_pf_active())) {
+            sd_rjl++;
+            HLOG_I("SEAMRJ f=%u i=%u n=%u p2=%u sichtbar=%u versatz_max=%.2fpx dy_max=%.2fpx (t=%.2f, exakt statt gelerpt)",
+                   B->frame, i, o->nv, p2, non, (double)dmax, (double)dymax, (double)T);
+        }
+    }
+    if (!ne) { return; }
+    qsort(sd_e, ne, sizeof *sd_e, sd_cmp);
+    for (g0 = 0; g0 < ne;) {
+        unsigned g1 = g0 + 1, x, y, multi = 0, allA = 1;
+        float best = 0.0f, bdy = 0.0f, bestA = 0.0f;
+        unsigned bx = g0, by = g0;
+        while (g1 < ne && sd_e[g1].key == sd_e[g0].key) { if (sd_e[g1].op != sd_e[g0].op) { multi = 1; } g1++; }
+        if (!multi) { g0 = g1; continue; }
+        for (x = g0; x < g1; x++) {
+            if (sd_e[x].ax > 1e29f) { allA = 0; }
+            for (y = x + 1; y < g1; y++) {
+                float dx, dy, s;
+                if (sd_e[y].op == sd_e[x].op) { continue; }
+                dx = sd_e[y].tx - sd_e[x].tx; dy = sd_e[y].ty - sd_e[x].ty;
+                s = sqrtf(dx * dx + dy * dy);
+                if (s > best) { best = s; bdy = dy < 0 ? -dy : dy; bx = x; by = y; }
+                if (sd_e[x].ax < 1e29f && sd_e[y].ax < 1e29f) {
+                    float ex = sd_e[y].ax - sd_e[x].ax, ey = sd_e[y].ay - sd_e[x].ay, sa = sqrtf(ex * ex + ey * ey);
+                    if (sa > bestA) { bestA = sa; }
+                }
+            }
+        }
+        gtick++;
+        if (allA && bestA > 0.5f) { gbadA++; }
+        {
+            unsigned w0 = sd_e[bx].why, w1 = sd_e[by].why, cl;
+            if (w0 > w1) { unsigned tt = w0; w0 = w1; w1 = tt; }
+            cl = w0 * IP_W_N + w1;
+            if (sd_e[bx].flag != sd_e[by].flag) { cl = IP_W_N * IP_W_N; } /* gemischt exakt/gelerpt */
+            sd_cls_n[cl]++;
+            if (best > 0.5f) {
+                sd_cls_bad[cl]++;
+                gbad05++;
+                if (best > 2.0f) { gbad2++; }
+                if (best > sd_cls_max[cl]) { sd_cls_max[cl] = best; }
+                for (x = 0; x < 3; x++) {
+                    if (best > worst[x].s) {
+                        memmove(&worst[x + 1], &worst[x], (2u - x) * sizeof worst[0]);
+                        worst[x].s = best; worst[x].dy = bdy;
+                        worst[x].i0 = sd_e[bx].op; worst[x].i1 = sd_e[by].op;
+                        worst[x].w0 = sd_e[bx].why | ((unsigned)sd_e[bx].flag << 8) | ((unsigned)sd_e[bx].rzb << 9);
+                        worst[x].w1 = sd_e[by].why | ((unsigned)sd_e[by].flag << 8) | ((unsigned)sd_e[by].rzb << 9);
+                        worst[x].x = sd_e[bx].nx; worst[x].y = sd_e[bx].ny;
+                        break;
+                    }
+                }
+            }
+        }
+        if (best > tmax) { tmax = best; }
+        g0 = g1;
+    }
+    sd_ticks++; sd_groups += gtick; sd_bad05 += gbad05; sd_bad2 += gbad2; sd_badA += gbadA;
+    if (tmax > sd_maxs) { sd_maxs = tmax; }
+    if (sd_lines < (unsigned)g_cfg.seam_diag && (gbad05 || gbadA) && (g_cfg.pf_ring <= 0 || sb_pf_active())) {
+        sd_lines++;
+        HLOG_I("SEAM f=%u t=%.2f gruppen=%u spalt>0.5px=%u spalt>2px=%u max=%.2fpx vortick_streu>0.5px=%u",
+               B->frame, (double)T, gtick, gbad05, gbad2, tmax, gbadA);
+        for (k = 0; k < 3 && worst[k].s > 0.0f; k++) {
+            const ip_op_t *o0 = &B->ops[worst[k].i0], *o1 = &B->ops[worst[k].i1];
+            HLOG_I("SEAMW f=%u #%u s=%.2fpx dy=%.2f bei=%.1f,%.1f A: i=%u n=%u %s flag=%u rzb=%u m=%d | B: i=%u n=%u %s flag=%u rzb=%u m=%d",
+                   B->frame, k, (double)worst[k].s, (double)worst[k].dy, (double)worst[k].x, (double)worst[k].y,
+                   worst[k].i0, o0->nv, kIP_WHY[worst[k].w0 & 0xFF], (worst[k].w0 >> 8) & 1u, (worst[k].w0 >> 9) & 1u, o0->match,
+                   worst[k].i1, o1->nv, kIP_WHY[worst[k].w1 & 0xFF], (worst[k].w1 >> 8) & 1u, (worst[k].w1 >> 9) & 1u, o1->match);
+        }
+    }
+    if (sd_ticks >= 200u) {
+        char buf[900];
+        int p = 0;
+        unsigned c2;
+        buf[0] = 0;
+        for (c2 = 0; c2 <= IP_W_N * IP_W_N && p < (int)sizeof buf - 64; c2++) {
+            if (!sd_cls_n[c2]) { continue; }
+            if (c2 == IP_W_N * IP_W_N) {
+                p += _snprintf_s(buf + p, sizeof buf - (size_t)p, _TRUNCATE, " exakt/gelerpt=%u/%u(max %.1f)", sd_cls_bad[c2], sd_cls_n[c2], (double)sd_cls_max[c2]);
+            } else {
+                p += _snprintf_s(buf + p, sizeof buf - (size_t)p, _TRUNCATE, " %s/%s=%u/%u(max %.1f)", kIP_WHY[c2 / IP_W_N], kIP_WHY[c2 % IP_W_N],
+                                 sd_cls_bad[c2], sd_cls_n[c2], (double)sd_cls_max[c2]);
+            }
+        }
+        HLOG_I("SEAMSUM ticks=%u gruppen=%u spalt>0.5px=%u spalt>2px=%u max=%.1fpx vortick_streu>0.5px=%u klassen(spalt/gruppen):%s",
+               sd_ticks, sd_groups, sd_bad05, sd_bad2, sd_maxs, sd_badA, buf);
+        HLOG_I("SEAMRJSUM ticks=%u p2: draws=%u ecken=%u versatz>0.5px=%u max=%.1fpx mittel=%.2fpx dy_max=%.1fpx | 3d: draws=%u ecken=%u versatz>0.5px=%u max=%.1fpx mittel=%.2fpx dy_max=%.1fpx",
+               sd_ticks, sd_rj_draws[1], sd_rj_verts[1], sd_rj_bad[1], (double)sd_rj_max[1],
+               sd_rj_draws[1] ? sd_rj_sum[1] / sd_rj_draws[1] : 0.0, (double)sd_rj_dy[1],
+               sd_rj_draws[0], sd_rj_verts[0], sd_rj_bad[0], (double)sd_rj_max[0],
+               sd_rj_draws[0] ? sd_rj_sum[0] / sd_rj_draws[0] : 0.0, (double)sd_rj_dy[0]);
+        memset(sd_rj_draws, 0, sizeof sd_rj_draws); memset(sd_rj_verts, 0, sizeof sd_rj_verts); memset(sd_rj_bad, 0, sizeof sd_rj_bad);
+        memset(sd_rj_max, 0, sizeof sd_rj_max); memset(sd_rj_dy, 0, sizeof sd_rj_dy); memset(sd_rj_sum, 0, sizeof sd_rj_sum);
+        sd_ticks = sd_groups = sd_bad05 = sd_bad2 = sd_badA = 0;
+        sd_maxs = 0.0;
+        memset(sd_cls_n, 0, sizeof sd_cls_n); memset(sd_cls_bad, 0, sizeof sd_cls_bad); memset(sd_cls_max, 0, sizeof sd_cls_max);
+    }
+}
+
 /* ---------- Verifikation (interp_verify) ---------- */
 
 static ID3D11Texture2D *ip_vstg[2];
@@ -7898,6 +8143,10 @@ static void ip_stat_log(void)
         HLOG_I("INTERP streak: modus=%d rawlerp_versatz=%u davon_welt=%u kamera_abw=%u rawchg_ohne_tiefe=%u",
                g_cfg.interp_streak, st_sk_rlofs, st_sk_rl, st_sk_rlcam, st_sk_nod);
         st_sk_rlofs = st_sk_rl = st_sk_rlcam = st_sk_nod = 0;
+    }
+    if (g_cfg.interp_p2rej) { /* OPTION(W406) */
+        HLOG_I("INTERP p2rej: gelerpt=%u (P2-Draws mit gleichen Eingangsdaten, sonst reject)", st_p2rej);
+        st_p2rej = 0;
     }
     if (g_cfg.interp_eyediag > 0) { /* DIAG(W224) */
         HLOG_I("INTERP eyesum: draws=%u verts=%u (w-Wechsel in zwischengerechneten Draws, eyefix=%d)",
@@ -9617,6 +9866,7 @@ int sb_interp_swap(void)
         }
         ip_hist[ip_nhist++] = li;
         ip_shots_tick(L);
+        if (A && g_cfg.interp_diag >= 3 && g_cfg.seam_diag > 0) { ip_seam_diag(A, ip_list_index(A), L, li); } /* DIAG(W406) */
         if (A && g_cfg.interp_diag >= 3 && g_cfg.interp_ddrel > 0) { /* DIAG(W251 INTERP-GROUND) */
             unsigned m0 = sb_pf_m0(), r = (unsigned)g_cfg.interp_ddrel;
             if (m0 && L->frame >= m0 + r && L->frame < m0 + r + 3u) {

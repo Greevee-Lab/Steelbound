@@ -47,17 +47,32 @@ u32 __stdcall hook_Direct3D_CreateDevice(u32 adapter, u32 devType, u32 hwnd,
  * IGN-Halt + START-Puls, W52_t1c) kann ohne das Bit nie feuern. Bit-2-Leser:
  * nur Toggle + Veteran-Meldung (harmlos). Setzen, sobald die Mission laeuft
  * (mloop==1); das Spiel gatet den Rest selbst. Schalter ign_toggle_fix. */
+/* W404 CHEAT-GATE (Issue #18): Bit 2 ist die Freischaltung des Spiel-Kniffs
+ * IGNITION+START (Cockpit aus). Das Spiel setzt es selbst: FUN_000df810
+ * @0xDF96E, wenn der Spielzeit-Zaehler [0x351550] (aus dem System-Spielstand,
+ * FUN_000c6620 @0xC667A) / 108000 >= 50 ist, bzw. per Restore aus dem
+ * Piloten-Stand (FUN_000cdab0 @0xCDD4D aus [0x3B8D64]). W52 hielt den Toggle
+ * irrtuemlich fuer die Zuendung; damit war der Kniff fuer alle frei. Seit W404
+ * ist ign_toggle_fix Standard 0 (Original). Einmal je Missionsbeginn wird der
+ * Stand geloggt (nur Lesen, nicht in LoC). */
 static void ign_gate_tick(void)
 {
-    static int logged;
+    static int logged, prev_mloop;
     u32 mloop = 0, gate = 0;
-    if (!g_cfg.ign_toggle_fix) {
-        return;
-    }
     __try {
         mloop = *(volatile u32 *)(uintptr_t)SBA(0x356F58u);
         gate = *(volatile u32 *)(uintptr_t)SBA(0x6A37E0u);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return;
+    }
+    if (mloop == 1u && prev_mloop != 1 && !g_sba_loc) {
+        u32 play = 0;
+        __try { play = *(volatile u32 *)(uintptr_t)SBA(0x351550u); } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        HLOG_I("CHEAT-GATE: Missionsbeginn gate=0x%X bit2=%u zaehler=%u (/108000=%u, Freischaltung ab 50) ign_toggle_fix=%d (Frame %u)",
+               gate, (gate >> 2) & 1u, play, play / 108000u, g_cfg.ign_toggle_fix, g_frames);
+    }
+    prev_mloop = (mloop == 1u);
+    if (!g_cfg.ign_toggle_fix) {
         return;
     }
     if (mloop != 1u || (gate & 4u) != 0u) {

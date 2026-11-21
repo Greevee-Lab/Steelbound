@@ -143,6 +143,7 @@ add_library(sb_emu SHARED
   src/loc_sync.c
   src/loc_state.c
   src/loc_rollback.c
+  src/loc_lampdiag.c
   src/loc_rb_ring.c
   src/loc_rbi.c
   src/loc_rbn.c
@@ -212,8 +213,26 @@ target_link_libraries(sb_emu PRIVATE ws2_32)
 # Gastfilter (auch in den HLE-Hooks beider Fassungen). Netznahe neue Dateien mit /sdl /W4 /WX (SECURITY.md §7).
 set(SB_LOC_SEC_SRC src/sb_tls.c src/sb_e2e.c src/loc_guard.c)
 set_source_files_properties(${SB_LOC_SEC_SRC} PROPERTIES COMPILE_OPTIONS "/sdl;/W4;/WX")
+# W407 CRYPTO-PORTABLE: X25519 und AES-256-GCM aus einer unveraenderten Teilkopie von BearSSL 0.6 (MIT,
+# third_party/bearssl/LICENSE.txt) statt Windows-CNG - gleiche Bausteine auf jeder Plattform, zeitkonstant
+# (aes_ct, ghash_ctmul, c25519_m31). Protokoll unveraendert (SECURITY.md §4), Selbsttest + Vektoren pruefen es.
+add_library(sb_bearssl STATIC
+  third_party/bearssl/src/symcipher/aes_ct.c
+  third_party/bearssl/src/symcipher/aes_ct_enc.c
+  third_party/bearssl/src/symcipher/aes_ct_ctr.c
+  third_party/bearssl/src/hash/ghash_ctmul.c
+  third_party/bearssl/src/aead/gcm.c
+  third_party/bearssl/src/ec/ec_c25519_m31.c
+  third_party/bearssl/src/codec/ccopy.c
+  third_party/bearssl/src/codec/dec32be.c
+  third_party/bearssl/src/codec/enc32be.c
+  third_party/bearssl/src/codec/dec32le.c
+  third_party/bearssl/src/codec/enc32le.c
+)
+target_include_directories(sb_bearssl PUBLIC third_party/bearssl/inc PRIVATE third_party/bearssl/src)
+target_compile_options(sb_bearssl PRIVATE /W3 /sdl /wd4267) # C4267 nur aus dem (ungenutzten) bearssl_ssl.h
 target_sources(sb_emu PRIVATE ${SB_LOC_SEC_SRC})
-target_link_libraries(sb_emu PRIVATE bcrypt secur32 crypt32)
+target_link_libraries(sb_emu PRIVATE sb_bearssl bcrypt secur32 crypt32)
 target_compile_options(sb_emu PRIVATE /Zi)
 # W279 DIAG-CRASH: Release (community) mit vollstaendiger PDB - FASTLINK-PDBs
 # verweisen auf die .obj-Dateien und taugen spaeter nicht zum Aufloesen von
@@ -313,7 +332,7 @@ add_executable(loc_net_selftest
   src/sb_sha256.c
 )
 target_include_directories(loc_net_selftest PRIVATE src)
-target_link_libraries(loc_net_selftest PRIVATE ws2_32 winmm bcrypt secur32 crypt32)
+target_link_libraries(loc_net_selftest PRIVATE sb_bearssl ws2_32 winmm bcrypt secur32 crypt32)
 target_compile_options(loc_net_selftest PRIVATE /W3)
 
 # ---- loc_audio_selftest: XACT-1-Parser (XWB/XSB) + Wave-Bank-Dekodierung, synthetische Daten (W298) ----

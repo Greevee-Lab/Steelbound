@@ -151,7 +151,7 @@ void hcfg_defaults(void)
     g_cfg.audio_freq = 1;
     g_cfg.audio_buflen = 1;
     g_cfg.sbc_momentary = 1; /* Master: Luke/Zuendung als Taster (Fix Missionsende nach Mech-Start) */
-    g_cfg.ign_toggle_fix = 1; /* W52: Gate Bit 2 in Mission (HLE-Ersatz, natuerliche Zuendung per Toggle) */
+    g_cfg.ign_toggle_fix = 0; /* W404: 0 = Original (Kniff IGNITION+START erst nach Freischaltung); 1 = W52 Gate Bit 2 in jeder Mission */
     g_cfg.audio_caps_clamp = 1; /* W24: Fix Missionsende-Nullcall (Standard an) */
     g_cfg.audio_ithis_fix = 1; /* W89: Puffer-Stop/GetStatus am I-Wrapper (Standard an) */
     g_cfg.audio_loop_fix = 1; /* W89: Loop nur mit Play(LOOPING) (Standard an) */
@@ -920,11 +920,28 @@ static int set_key_imlock(const char *k, const char *v)
     return 1;
 }
 
+/* W405 LOC-LAMPS: eigene Schluessel (C1026) */
+static int set_key_w405(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_lampdiag") == 0) { g_cfg.loc_lampdiag = atoi(v); } /* DIAG */
+    else { return 0; }
+    return 1;
+}
+
+/* W406 M3-ROAD-JITTER: eigene Schluessel (C1026) */
+static int set_key_w406(const char *k, const char *v)
+{
+    if (strcmp(k, "seam_diag") == 0) { g_cfg.seam_diag = atoi(v); } /* DIAG */
+    else if (strcmp(k, "interp_p2rej") == 0) { g_cfg.interp_p2rej = atoi(v); } /* OPTION */
+    else { return 0; }
+    return 1;
+}
+
 static void set_key_b(const char *k, const char *v);
 static void set_key(const char *k, const char *v)
 {
     if (set_key_remaster(k, v) || set_key_overlay(k, v) || set_key_vr(k, v) || set_key_w371(k, v) || set_key_w376(k, v) ||
-        set_key_w395(k, v) || set_key_lsarb(k, v) || set_key_imlock(k, v)) {
+        set_key_w395(k, v) || set_key_lsarb(k, v) || set_key_imlock(k, v) || set_key_w405(k, v) || set_key_w406(k, v)) {
         return;
     }
     if (strcmp(k, "xbe_path") == 0) {

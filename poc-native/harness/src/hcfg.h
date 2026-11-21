@@ -85,6 +85,9 @@ typedef struct {
                            * Present-Takt wartet seltener; 0 = alt (alles unter der Sperre). Bild unveraendert */
     int imlock_diag;      /* LOC-IM-LOCK DIAG: 1 = Zeile IMLOCK je 10 s (Wartezeit des Present-Takts auf ctx_lock, Halter je
                            * Aufrufstelle mit CPU-Anteil, Teilzeiten langer sb_render_im_end) */
+    int interp_p2rej;     /* OPTION(W406 M3-ROAD-JITTER): 1 = vorab transformierte Welt-Draws (P2) mit gleichen Eingangsdaten, die nur wegen eines Bezugs-Vertex nahe der Augenebene an ip_plausible scheitern, im Zwischenbild lerpen (Bezugs-Vertices mit |ndc| <= 2); 0 = alt (exakt aus Tick N) */
+    int seam_diag;        /* DIAG(W406 M3-ROAD-JITTER): N = Fugen-Messung zwischen Nachbar-Draws im Zwischenbild (SEAM/SEAMW, erste N Ticks mit Fund; SEAMSUM je 200 Ticks, nur sichtbare Ecken), braucht interp_diag>=3; 0 = aus */
+    int loc_lampdiag;     /* DIAG(W405 LOC-LAMPS): 1 = Cockpit-Lampen im LoC-Atlas beobachten (LAMPD), 2 = + Knoten/VT (loc_lampdiag.c), 0 = aus */
     char loc_ls_opts[128]; /* LOC-LOCKSTEP-ARBITER DIAG: Reglerwerte "lmin=2,drop_rmin=2,..." (loc_lsarb.h), leer = Standard */
     int loc_rb_delay;     /* W338: Eingabeverzoegerung in Ticks mit loc_rb_input (1..8); W346: 0 = adaptiv nach Umlaufzeit (Standard) */
     int loc_fields;       /* W320 TEST: Felder je Missionsbild statt 3 (aendert Spielgeschwindigkeit, nur Messung), 0 = Original */
@@ -316,7 +319,7 @@ typedef struct {
     int audio_freq;     /* 1 = SetFrequency/SetPitch wirken auf Puffer, 0 = alt */
     int audio_buflen;   /* 1 = Lock-Groesse aus dwBufferBytes (Fix Heap-Tod), 0 = alt */
     int sbc_momentary; /* Master: 1 = Luke/Zuendung als Taster (echter Controller), 0 = alt (dauerhaftes Toggle-Bit) */
-    int ign_toggle_fix; /* W52: 1 = Gate Bit 2 in Mission setzen (HLE-Ersatz, Toggle 0x376BE lebt), 0 = Original (Toggle tot) */
+    int ign_toggle_fix; /* W52/W404: 1 = Gate Bit 2 in Mission setzen (Kniff IGNITION+START immer frei), 0 = Original (Standard seit W404, Freischaltung durch das Spiel) */
     int audio_caps_clamp; /* W24: 1 = GetCaps-dwSize auf 12 (Xbox-DSOUNDCAPS) klemmen (Fix Missionsende-Nullcall), 0 = alt */
     int audio_setbuf_len; /* W22: 1 = SetBufferData setzt buflen (Bink-Ring statt Lazy-64K) */
     int hlog_async;        /* PERF(PERF-TICK,W168): 1 = Log-Zeilen ueber Schreib-Thread (kein WriteFile im Spiel-Thread) */

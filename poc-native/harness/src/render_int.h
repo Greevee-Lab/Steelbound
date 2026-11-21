@@ -233,6 +233,9 @@ int p2z_scene_mission(void); /* DIAG(W313) */
 void p2z_note(const im_vertex_t *out, unsigned nout, int rhw, int em, unsigned prim, int zt, const float *mvp); /* DIAG(P2-ZTEST,W313) */
 void p2z_post(void);
 void p2z_present(void);
+extern int g_projd_hit; /* DIAG(ISSUE49): aktueller Draw gehoert zu einem Lenkflugkoerper-Modell (proj_diag>=3) */
+void projd_note(const im_vertex_t *out, unsigned nout, int rhw, int em, unsigned prim, const float *mvp, int rq);
+void projd_post(void);
 void lined_note(const im_vertex_t *out, unsigned nout, int rhw, int em, unsigned prim, int zt,
                 const float *c2, const float *c3, int colslot, int shaded); /* DIAG(ISSUE-EMP,W352) */
 void lined_post(void);
@@ -314,6 +317,7 @@ void m3d_present_tick(unsigned f);
 void dd_sum(unsigned f);
 /* FPS-INTERP (W69, render_interp.c) */
 int sb_im_compile(const char *src, const char *target, ID3DBlob **out);
+int sb_im_compile_flags(const char *src, const char *target, unsigned flags, ID3DBlob **out); /* W371 */
 extern int g_ip_recording;
 extern unsigned g_ip_sigparts[3]; /* DIAG(FPS-INTERP-2): VS/Textur/PS des naechsten rec_draw */
 /* DIAG(W237 LINE-FLICKER2): echte Clip-w der Quell-Vertices des naechsten rec_draw (P2 im RT: Strom hat w=1);
@@ -440,6 +444,11 @@ void sb_winmode_on_close(void);
 void sb_winmode_tick(unsigned n);
 int sb_winmode_current(void);
 void sb_render_present_raw(void);
+/* W393 LOC-PACING pace_vsync: auf den naechsten VBlank des Monitors der Swapchain warten (eigener Thread, ohne
+ * ctx_lock). 1 = gewartet, 0 = kein Ausgang (Fenster/Swapchain fehlt). */
+int sb_render_vblank_wait(void);
+/* W393: 1 = exklusives Vollbild (zuletzt im VBlank-Thread festgestellt) */
+int sb_render_exclusive(void);
 void sb_pf_note(float t, unsigned src_frame); /* DIAG(POPIN,W91): Art des naechsten present_raw */
 int sb_pf_active(void); /* DIAG(POPIN,W91): 1 = Bildfolge (pf_ring) laeuft */
 unsigned sb_pf_m0(void); /* DIAG(W251): Present-Nr des Missionsbeginns (pf_ring, 0 = noch nicht) */

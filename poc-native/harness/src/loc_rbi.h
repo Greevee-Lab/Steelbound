@@ -30,6 +30,8 @@
 #define RBI_PKT_FRAMES 24     /* hoechstens so viele eigene Rahmen je Paket (unbestaetigte, aelteste zuerst) */
 #define RBI_PKT_HASHES 4
 #define RBI_PKT_HEAD 28
+#define RBI_SLH 160           /* W372: Puffer-Histogramm (Ankunft vor Entnahme), 2-ms-Stufen ab RBI_SLH_MIN ms */
+#define RBI_SLH_MIN (-120)
 #define RBI_PKT_MAX (RBI_PKT_HEAD + RBI_MAXP * 8 + RBI_PKT_FRAMES * RBI_FR + RBI_PKT_HASHES * 12)
 #define RBI_FL_TRANSIENT 0xD0000000u /* einmalige Flags (Vorzeichen, Zusatzrahmen 0x40000000/0x10000000) */
 
@@ -51,7 +53,52 @@ typedef struct {
     uint32_t rebuild_defer_replay; /* W355: davon Ticks, die nur wegen einer laufenden Neurechnung warteten */
     uint32_t rebuild_forced;       /* W355: Aufschub-Grenze erreicht, Neuaufbau trotz offener Vorhersage */
     uint32_t rb_floored;           /* W355: Rollback bis zum Allokations-Tick verlaengert (Aufschub aktiv) */
+    /* W372: Puffer je Fremd-Slot (nur live, nur mit rbi_clock): Entnahmezeit minus Ankunftszeit des bestaetigten Rahmens
+     * in ms (negativ = kam nach der Entnahme, also vorhergesagt). slack_late = davon negativ. */
+    uint32_t slack_h[RBI_SLH], slack_n, slack_late;
+    uint32_t ts_actions, ts_fields; /* W372: Feld-Verlaengerungen des Zeitabgleichs (Anzahl, Felder gesamt) */
+    uint32_t tt_tx, tt_rx, tt_bad;  /* W372: SBRT-Pakete */
+    /* W385 LOC-SMOOTH: Fehlvorhersagen nach abweichendem Feld (je falschem Slot alle zutreffenden Bits, RBI_MIS_*),
+     * Achsenfehler der falschen Slots mit der gewaehlten Vorhersage und mit Wiederholung (nur Zaehler, keine Eingaben). */
+    uint32_t mis_cat[8];
+    uint32_t mis_ax_err;           /* Summe |vorhergesagt - echt| der Achsen-Bytes je falschem Slot */
+    uint32_t mis_ax_err_rep;       /* dasselbe, wenn wiederholt worden waere (Vergleich Trend <-> Wiederholung) */
+    uint32_t pred_trend;           /* Vorhersagen, bei denen der Trend Achsen veraendert hat */
+    uint32_t pred_gain, pred_loss; /* bestaetigte Slots: nur der Trend lag richtig / nur die Wiederholung laege richtig */
+    /* W386 LOC-LATENCY: Verzoegerungswechsel waehrend der Mission und Schaetzer fuer D-1 (nur Zaehler). */
+    uint32_t dchg_down, dchg_up;   /* angewandte Wechsel D-1 (ein eigener Rahmen verworfen) bzw. D+1 (ein Rahmen gedoppelt) */
+    uint32_t dchg_late;            /* Wechsel erst nach dem angekuendigten Slot angewandt (Ankuendigung kam spaet) */
+    uint32_t est_n;                /* live entnommene bestaetigte Fremd-Slots mit Ankunftszeit (Grundmenge des Schaetzers) */
+    uint32_t est_late;             /* davon Puffer < 1 Tick: bei D-1 waeren sie vorhergesagt worden */
+    uint32_t est_wrong;            /* davon haette die Vorhersage (Trend aus Slot n-1/n-2) nicht gestimmt -> Korrektur */
+    uint32_t est_dep[4];           /* geschaetzte Tiefe bei D-1 der Faelle est_late: 1, 2, 3, >= 4 Ticks */
 } rbi_stats_t;
+
+/* W385: Kategorien einer Fehlvorhersage (Index in mis_cat, Bit in rbi_rb_cause); Byte-Index im 14-Byte-Eingabesatz. */
+enum {
+    RBI_MIS_AXIS = 0,  /* Dreh-, Ziel-, Sichthebel (Byte 9..13) */
+    RBI_MIS_DODGE = 1, /* linkes Pedal (Byte 5, Ausweichen W380) */
+    RBI_MIS_PEDAL = 2, /* uebrige Pedale (Byte 6/7) */
+    RBI_MIS_GEAR = 3,  /* Gang/Tuner (Byte 8) */
+    RBI_MIS_FIRE = 4,  /* Tasten Byte 0 Bit 0/1 (Lage der Waffentasten im Satz nicht belegt; W385-Laeufe: Feuer zaehlt unter RBI_MIS_BTN) */
+    RBI_MIS_BTN = 5,   /* uebrige Tasten (Byte 0 Bit 2..7, Byte 1..4), u. a. Feuer und Bremse/Gas-Tasten der Testfolge */
+    RBI_MIS_HDR = 6,   /* Kopf/Flags */
+    RBI_MIS_N = 7
+};
+/* W385: Felder, in denen zwei Rahmen (22 Byte, ohne Sync-Byte) abweichen: Bitmaske 1 << RBI_MIS_*. */
+uint32_t rbi_frame_cat(const uint8_t a[RBI_FR], const uint8_t b[RBI_FR]);
+/* W385 LOC-SMOOTH: Vorhersage fremder Eingaben. mode 0 = letzten bestaetigten Rahmen wiederholen (W338); mode 1 = fuer
+ * die analogen Achsen (Byte 9..13, int8) den Trend der letzten zwei bestaetigten Rahmen gedaempft fortsetzen:
+ * v = v_l + d * sum_{k=1..m} (q/8)^k (d = v_l - v_{l-1}, m = Slots ueber l hinaus, q = 1..8, 8 = linear), ganzzahlig,
+ * geklemmt; |d| > 48 (Tastenflanke auf einer Achse, z. B. A/D -> Drehhebel +-127) haelt den Wert; Tasten, Pedale, Gang und Kopf wie mode 0 (Haltezustand, einmalige Flags geloescht, nie eine Flanke).
+ * Rein ganzzahlig -> auf jedem Rechner gleich. Bleibt ueber rbi_begin erhalten. */
+void rbi_set_pred(rbi_t *r, int mode, int q);
+int rbi_pred_mode(const rbi_t *r);
+/* W385: Vorhersage aus den bestaetigten Rahmen (rein, auch fuer den Selbsttest): last = Slot l, prev = Slot l-1 (NULL =
+ * nicht bestaetigt), m = n - l >= 1. */
+void rbi_predict(const uint8_t last[RBI_FR], const uint8_t *prev, uint32_t m, int mode, int q, uint8_t out[RBI_FR]);
+/* W385: Kategorien (1 << RBI_MIS_*) der Fehlvorhersagen seit dem letzten Aufruf mit clear = 1 (ODER). */
+uint32_t rbi_rb_cause(rbi_t *r, int clear);
 
 rbi_t *rbi_new(void);
 void rbi_free(rbi_t *r);
@@ -68,10 +115,30 @@ int rbi_p0(const rbi_t *r);          /* Vorlauf P0, -1 vor der ersten Entnahme *
 void rbi_end(rbi_t *r);              /* Mission vorbei (inaktiv) */
 /* W346: Epoche und Verzoegerung nach der Aushandlung setzen; nur vor der ersten Entnahme (1 = gesetzt). */
 int rbi_configure(rbi_t *r, uint32_t epoch, int delay);
+/* W386 LOC-LATENCY: Verzoegerung waehrend der Mission wechseln (nur die Zuordnung der EIGENEN Rahmen zu Slots; die Slots
+ * selbst sind die Wahrheit, jeder Mitspieler bekommt genau die gesendeten Rahmen -> immer deterministisch).
+ * Angewandt beim ersten eigenen Live-Rahmen, dessen Slot >= from_slot waere (rbi_own, nicht im Neurechnen):
+ *  - D-1: dieser Rahmen wird verworfen; seine Tasten (Byte 0..4 des Eingabesatzes) und einmaligen Flags gehen per ODER
+ *    in den naechsten eigenen Rahmen, der den Slot uebernimmt (kurze Tastendruecke gehen nicht verloren).
+ *  - D+1: dieser Rahmen belegt seinen Slot und (ohne einmalige Flags) zusaetzlich den naechsten.
+ * Je Schritt hoechstens 1 Tick; neues D 1..8. Rueckgabe 1 = vorgemerkt, 0 = ungueltig/gleich (eine schon vorgemerkte
+ * Aenderung wird ersetzt). */
+int rbi_set_delay(rbi_t *r, int d, uint32_t from_slot);
+int rbi_delay_pending(const rbi_t *r, int *d, uint32_t *from_slot); /* 1 = Wechsel vorgemerkt */
+uint32_t rbi_own_next_slot(const rbi_t *r); /* Slot des naechsten eigenen Rahmens (0 vor der ersten Entnahme) */
+uint64_t rbi_peer_src(const rbi_t *r, int i); /* W386: gebundene Absenderkennung von Spieler i (0 = keine) */
+/* W386: Schaetzer "Korrekturen bei D-1" (rein, auch fuer den Selbsttest): Puffer slack_us des bestaetigten Rahmens
+ * (Ankunft vor Entnahme) -> geschaetzte Tiefe bei einem Tick weniger Verzoegerung (0 = waere rechtzeitig gewesen). */
+int rbi_est_depth(int32_t slack_us);
 /* W346: Freilauf nach Desync bzw. Uneinigkeit: keine Rollbacks mehr, kein Stau wegen Fenster/Ringtiefe; fehlt von
  * einem Mitspieler jeder Rahmen, wird ein neutraler Rahmen (keine Eingabe) bedient. Das Spiel haengt nie. */
 void rbi_free_run(rbi_t *r);
 int rbi_free_running(const rbi_t *r);
+/* W366 LOC-NET-EDGES: Mitspieler i hat die Mission verlassen (vom Spiel entfernt): seine offenen Vorhersagen halten
+ * weder Ringtiefe noch Neuaufbau mehr auf (sonst Stau fuer immer). Zaehler angenommener Pakete je Spieler. */
+void rbi_peer_gone(rbi_t *r, int i);
+uint32_t rbi_gone_mask(const rbi_t *r);
+uint32_t rbi_rx_count(const rbi_t *r, int i);
 /* W346 R3: Neuaufbau des Rings steht an: keine neuen Vorhersagen (Stau statt Vorhersage), bis alle offenen bestaetigt
  * sind; dann baut die Anbindung an einem bestaetigten Tick neu auf (Barriere ohne Verlust). */
 void rbi_hold(rbi_t *r, int on);
@@ -130,12 +197,42 @@ int rbi_tx(rbi_t *r, uint8_t *buf, int cap);
  * 1 = angenommen, 0 = andere Epoche/inaktiv (ignoriert), -1 = ungueltig (verworfen, gezaehlt). */
 int rbi_rx(rbi_t *r, const uint8_t *buf, int len, uint64_t src);
 
+/* W372: Uhr des Aufrufers in us (monoton, Ueberlauf erlaubt; 0 = keine Messung). Gilt fuer die folgenden rbi_rx
+ * (= Ankunftszeit der Pakete) bzw. rbi_take (= Entnahmezeit). */
+void rbi_clock(rbi_t *r, uint32_t now_us);
+/* W372: Perzentil pct (0..100) eines Puffer-Histogramms mit n Eintraegen in ms (0 bei n = 0). */
+int rbi_slack_pct(const uint32_t *h, uint32_t n, int pct);
+
+/* ---- W372: Zeitabgleich ueber die Feldzahl (statt Stau-Tick) ----
+ * Jede Seite misst ihren Puffer je Mitspieler (Ankunft des bestaetigten Rahmens vor seiner Entnahme, Median der letzten
+ * RBI_SLW Live-Slots) und meldet ihn ihm im Zusatzpaket "SBRT" (Kanal wie SBR2; aeltere Clients verwerfen es als
+ * ungueltig, ohne Folgen). Vorsprung gegen Mitspieler j in ms = (sein Puffer fuer meine Rahmen - mein Puffer fuer seine)
+ * / 2: Gleich viel Puffer auf beiden Seiten = Vorsprung 0 (gleicht auch ungleiche Wege aus). Ohne SBRT gilt der
+ * Slot-Schaetzer (rbi_advantage * 50 ms). Wer vorne liegt, verlaengert sein naechstes Feld-Warten um 1..3 Felder
+ * (16,7 ms je Feld; die Simulation rechnet weiter, nur der Takt verschiebt sich), danach Abklingzeit. */
+#define RBI_SLW 9             /* Puffer-Fenster je Mitspieler (Live-Slots) */
+#define RBI_TT_LEN (16 + RBI_MAXP * 4)
+int rbi_is_tt(const uint8_t *buf, int len);
+int rbi_tt_tx(rbi_t *r, uint8_t *buf, int cap);             /* Laenge, 0 = nichts zu melden */
+int rbi_tt_rx(rbi_t *r, const uint8_t *buf, int len, uint64_t src); /* 1 angenommen, 0 ignoriert, -1 ungueltig */
+/* Einmal je Live-Tick am Ruhepunkt: zusaetzliche Felder (0..3) fuer das naechste Feld-Warten. */
+int rbi_tsync(rbi_t *r);
+double rbi_tsync_ms(const rbi_t *r);  /* zuletzt berechneter Vorsprung in ms (> 0 = vorne) */
+int rbi_tsync_src(const rbi_t *r);    /* 2 = aus SBRT (Puffer beider Seiten), 1 = Slot-Schaetzer, 0 = keiner */
+int rbi_slack_med(const rbi_t *r, int i, int *ms01); /* eigener Puffer-Median fuer Mitspieler i in 0,1 ms (1 = gueltig) */
+
 /* Zeitabgleich: empfohlene Wartezeit in Ticks (geglaettet, >= 0): eigener Vorsprung minus fremder, halbiert. */
 double rbi_advantage(const rbi_t *r);
 
 const rbi_stats_t *rbi_stats(const rbi_t *r);
 /* Entnahme-Stand: naechster Slot von Spieler i (-1 = ungueltig) und Bestaetigt-bis (hoechster lueckenloser Slot). */
 int rbi_cons(const rbi_t *r, int i);
+/* W376 LOC-LOCAL-AIM: eigene erzeugte, noch nicht entnommene Eingabesaetze ab Slot cons (lueckenlos, <= max). */
+int rbi_own_pending(const rbi_t *r, uint8_t out[][RBI_IN], int max);
+/* W390 LOC-OWN-PREDICT: Rahmen der k-ten naechsten Entnahme von Spieler i (Slot cons + k) fuer den spekulativen
+ * Vorlauf, nur lesend. own_new = im Vorlauf neu erzeugter eigener Rahmen (Kopf + Satz, RBI_FR) oder NULL.
+ * 1 = bekannt, 2 = vorhergesagt/gehalten, 0 = nicht aktiv. */
+int rbi_spec_frame(const rbi_t *r, int i, uint32_t k, const uint8_t *own_new, uint8_t out[RBI_FR]);
 int rbi_contig(const rbi_t *r, int i);
 
 /* ---- W359 LOC-RB-FIDELITY ---- */

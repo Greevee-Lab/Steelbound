@@ -31,6 +31,7 @@ SRC = [
     "launcher/src/launcher_games.c",  # W276 LOC-LAUNCH (gui.loc_*)
     "launcher/src/launcher_diag.inc",  # W279 DIAG-CRASH (gui.dg_*)
     "harness/src/sb_overlay.c",
+    "harness/src/sb_nethud.c",  # W374 LOC-NET-OVERLAY (ovl.nh_*)
     "harness/src/render_fx_rem.c",
     "harness/src/vr.c",
     "creator/src/creator.c",  # W155 PACK-CREATOR

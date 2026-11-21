@@ -2,6 +2,7 @@
  * Xbox-Threads, Sync-Objekte/Waits, SUSPSAFE-Suspend, Zeit, KEVENT-Tabelle.
  * W68 SPLIT: 1:1 aus kernel_hle.c verschoben. */
 #include "krnl_int.h"
+#include "sb_profile.h" /* W391: g_sba_loc (loc_xb_prio) */
 
 static ht_entry_t g_ht[XB_HANDLE_MAX];
 static hlock_t g_ht_cs; /* W119 LOADLOCK: hlock (atomarer Owner) */
@@ -260,8 +261,10 @@ void *krnl_CreateThread(void *fn, void *param, unsigned long flags,
 static struct {
     HANDLE h;
     u32 routine;
+    int own; /* W375: h ist unser Duplikat (beim Wiederverwenden schliessen) */
 } g_xb_threads[XB_TR_MAX];
 static int g_xb_nthreads;
+static int g_xb_created; /* W375: angelegte Xbox-Threads gesamt (Tabelle verwendet Plaetze beendeter Threads neu) */
 HANDLE g_main_thread_h; /* W22: Duplikat des Main-Handles (CPU-DIAG) */
 
 void *krnl_main_thread(void)
@@ -272,6 +275,11 @@ void *krnl_main_thread(void)
 int krnl_xb_thread_count(void)
 {
     return g_xb_nthreads;
+}
+
+int krnl_xb_thread_created(void)
+{
+    return g_xb_created;
 }
 
 int krnl_xb_thread_get(int i, void **h, u32 *routine)
@@ -934,16 +942,51 @@ u32 __stdcall hle_PsCreateSystemThreadEx(u32 phThread, u32 extSize, u32 kernStac
         }
         SetThreadAffinityMask(h, mask);
     }
+    if (g_sba_loc && g_cfg.loc_xb_prio > 0) {
+        /* PERF(W391) loc_xb_prio (nur LoC): Xbox-Threads eine Stufe ueber normal. Sie sind fest an einen Kern gebunden und
+         * geben den Kern in ihren Warteschleifen per SwitchToThread ab; fremde rechenlastige Threads gleicher Prioritaet
+         * (andere Programme) bekamen dabei volle Zeitscheiben auf diesem Kern -> Spiel-Ticks 70-200 ms (W391 D2-D4).
+         * Mit hoeherer Prioritaet weicht normale Fremdlast auf andere Kerne aus. 2 = HIGHEST (nur Messung), 3 = TEST ohne
+         * Kern-Schutz. Nur mit >= 4 nutzbaren Kernen. */
+        static int nlp, ncores = -1;
+        int wp = g_cfg.loc_xb_prio >= 2 ? THREAD_PRIORITY_HIGHEST : THREAD_PRIORITY_ABOVE_NORMAL;
+        if (ncores < 0) { /* Schutz: auf Rechnern mit < 4 nutzbaren Kernen verdraengen die (aktiv wartenden) Xbox-Threads
+                           * sonst normal priorisierte Hilfs-Threads wie Treiber-Threads (W391 W1: 2 Kerne deutlich schlechter) */
+            DWORD_PTR pm = 0, sm = 0;
+            ncores = 0;
+            if (GetProcessAffinityMask(GetCurrentProcess(), &pm, &sm)) { while (pm) { ncores += (int)(pm & 1u); pm >>= 1; } }
+        }
+        if (ncores >= 4 || g_cfg.loc_xb_prio >= 3) {
+            if (g_cfg.loc_xb_prio >= 3) { wp = THREAD_PRIORITY_ABOVE_NORMAL; } /* 3 = TEST: auch mit wenigen Kernen */
+            SetThreadPriority(h, wp);
+            if (!nlp) { nlp = 1; HLOG_I("LOCPRIO: Xbox-Threads mit Host-Prioritaet %d (loc_xb_prio=%d, %d Kerne)", wp, g_cfg.loc_xb_prio, ncores); }
+        } else if (!nlp) {
+            nlp = 1;
+            HLOG_I("LOCPRIO: nur %d nutzbare Kerne - Xbox-Threads bleiben normal priorisiert (loc_xb_prio=%d)", ncores, g_cfg.loc_xb_prio);
+        }
+    }
     xh = ht_alloc(HT_THREAD, h);
-    if (g_xb_nthreads < XB_TR_MAX) {
-        /* Eigenes Duplikat fuer Sampler (Spiel schliesst Original via
-         * NtClose, z.B. Entry nach CreateThread)! */
-        HANDLE dup = NULL;
-        DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &dup,
-                        0, FALSE, DUPLICATE_SAME_ACCESS);
-        g_xb_threads[g_xb_nthreads].h = dup ? dup : h;
-        g_xb_threads[g_xb_nthreads].routine = start;
-        g_xb_nthreads++;
+    {
+        /* W375: Tabelle voll -> Platz eines beendeten Threads wiederverwenden. LoC startet je Mission u. a. den
+         * Render-Thread neu; ab Mission 3 (50 Threads) fehlte er in der Tabelle, die Rollback-Schicht fand ihn
+         * nicht (Stau bei Tick 90, Lauf R14). */
+        int slot = g_xb_nthreads < XB_TR_MAX ? g_xb_nthreads : -1, t;
+        for (t = 0; slot < 0 && t < g_xb_nthreads; t++) {
+            if (g_xb_threads[t].h && WaitForSingleObject(g_xb_threads[t].h, 0) == WAIT_OBJECT_0) slot = t;
+        }
+        if (slot >= 0) {
+            /* Eigenes Duplikat fuer Sampler (Spiel schliesst Original via
+             * NtClose, z.B. Entry nach CreateThread)! */
+            HANDLE dup = NULL;
+            DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &dup,
+                            0, FALSE, DUPLICATE_SAME_ACCESS);
+            if (slot < g_xb_nthreads && g_xb_threads[slot].own) CloseHandle(g_xb_threads[slot].h);
+            g_xb_threads[slot].h = dup ? dup : h;
+            g_xb_threads[slot].own = dup != NULL;
+            g_xb_threads[slot].routine = start;
+            if (slot == g_xb_nthreads) g_xb_nthreads++;
+        }
+        g_xb_created++;
     }
     *(u32 *)(uintptr_t)phThread = xh;
     watch_dr_on_thread(h, tid); /* W41 WATCHDR: DR auf neuem Xbox-Thread (nur bei watch=...) */
@@ -999,6 +1042,53 @@ u32 __stdcall hle_KeSetBasePriorityThread(u32 a0, u32 prio)
     return 0;
 }
 
+/* DIAG(W391) loc_delay_diag=1: Schlafen der Xbox-Threads (KeDelayExecutionThread) - gewollt gegen tatsaechlich, je
+ * Aufrufer (erste XBE-Ruecksprungadresse ueber dem XAPI-Sleep), Zeile LOCDELAY alle 10 s. Nur Zeiten und Adressen. */
+#define KD_TOP 8
+static struct { u32 ra; unsigned n; double want, got; } kd_top[KD_TOP];
+static unsigned kd_n, kd_n1, kd_rest;
+static double kd_want, kd_got, kd_got1;
+static DWORD kd_t0;
+static volatile LONG kd_lock;
+static void kd_diag(DWORD ms, u32 alertable, u32 ra0, const u32 *argp)
+{
+    LARGE_INTEGER f, a, b;
+    double got;
+    u32 ra = 0;
+    int k;
+    QueryPerformanceFrequency(&f);
+    QueryPerformanceCounter(&a);
+    SleepEx(ms, alertable ? TRUE : FALSE);
+    QueryPerformanceCounter(&b);
+    got = (double)(b.QuadPart - a.QuadPart) * 1000.0 / (double)f.QuadPart;
+    __try { /* Stack ueber den Argumenten: erste XBE-Adresse, die nicht der XAPI-Sleep selbst ist */
+        for (k = 3; k < 48 && !ra; k++) {
+            u32 v = argp[k];
+            if (v >= 0x12000u && v < 0x300000u && (v < ra0 - 0x40u || v > ra0 + 0x40u)) { ra = v; }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    while (InterlockedExchange(&kd_lock, 1)) { SwitchToThread(); }
+    kd_n++; kd_want += ms; kd_got += got;
+    if (ms <= 1u) { kd_n1++; kd_got1 += got; }
+    for (k = 0; k < KD_TOP && kd_top[k].n && kd_top[k].ra != ra; k++) {}
+    if (k < KD_TOP) { kd_top[k].ra = ra; kd_top[k].n++; kd_top[k].want += ms; kd_top[k].got += got; } else { kd_rest++; }
+    if (!kd_t0) { kd_t0 = GetTickCount(); }
+    if (GetTickCount() - kd_t0 >= 10000u) {
+        char buf[600];
+        size_t len = 0;
+        for (k = 0; k < KD_TOP && kd_top[k].n; k++) {
+            len += (size_t)_snprintf_s(buf + len, sizeof buf - len, _TRUNCATE, " 0x%X n=%u gewollt=%.0f ist=%.0fms",
+                                       kd_top[k].ra, kd_top[k].n, kd_top[k].want, kd_top[k].got);
+        }
+        HLOG_I("LOCDELAY: 10s Aufrufe=%u gewollt=%.0fms ist=%.0fms | <=1ms: n=%u mittel=%.2fms | Aufrufer:%s%s", kd_n, kd_want,
+               kd_got, kd_n1, kd_n1 ? kd_got1 / kd_n1 : 0.0, len ? buf : " -", kd_rest ? " (weitere)" : "");
+        kd_n = kd_n1 = kd_rest = 0; kd_want = kd_got = kd_got1 = 0.0;
+        memset(kd_top, 0, sizeof kd_top);
+        kd_t0 = GetTickCount();
+    }
+    InterlockedExchange(&kd_lock, 0);
+}
+
 u32 __stdcall hle_KeDelayExecutionThread(u32 mode, u32 alertable, u32 pInterval)
 {
     DWORD ms;
@@ -1007,6 +1097,7 @@ u32 __stdcall hle_KeDelayExecutionThread(u32 mode, u32 alertable, u32 pInterval)
     /* A5: 30-s-Deckel entfernt (W3_kdA/B gleich; INFINITE in 20/20 Laeufen
      * bis Missionsstart nie beobachtet). Xbox-Semantik: echt warten. */
     /* BIKDELAYFIX-AUS: verzoerrt Timing (Load-Loop). */
+    if (g_cfg.loc_delay_diag) { kd_diag(ms, alertable, (u32)(uintptr_t)_ReturnAddress(), (const u32 *)&mode); return X_STATUS_SUCCESS; }
     SleepEx(ms, alertable ? TRUE : FALSE);
     return X_STATUS_SUCCESS;
 }

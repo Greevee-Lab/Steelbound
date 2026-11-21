@@ -660,7 +660,7 @@ int ld_issue_url(const char *crash_dir, const char *name, const char *zipname, c
     char *in = crash_info(crash_dir, name);
     char ver[300] = "?", game[300] = "?", gpu[300] = "?", st[300] = "?", ex[300] = "", rs[300] = "", status[40] = "";
     char title[200], what[1400];
-    char e1[700], e2[700], e3[700], e4[700], e5[700], e6[3200];
+    char e1[700], e2[700], e3[700], e4[700], e5[700], e6[3200], e7[64];
     if (!sb_diag_crash_name_ok(name)) {
         free(in);
         return 0;
@@ -690,10 +690,12 @@ int ld_issue_url(const char *crash_dir, const char *name, const char *zipname, c
     urlenc(e4, sizeof e4, gpu);
     urlenc(e5, sizeof e5, st);
     urlenc(e6, sizeof e6, what);
+    /* 19.11.: Dropdown "Which game?" (Feld-ID which) -> GitHub-Workflow setzt Label game: SB/LoC */
+    urlenc(e7, sizeof e7, (game && strstr(game, "Line of Contact")) ? "Line of Contact" : "Steel Battalion");
     _snprintf_s(url, cap, _TRUNCATE,
                 "https://github.com/" SB_FEEDBACK_REPO_DEFAULT
-                "/issues/new?template=bug_report.yml&title=%s&what=%s&version=%s&game=%s&gpu=%s&state=%s",
-                e1, e6, e2, e3, e4, e5);
+                "/issues/new?template=bug_report.yml&title=%s&which=%s&what=%s&version=%s&game=%s&gpu=%s&state=%s",
+                e1, e7, e6, e2, e3, e4, e5);
     return ld_url_ok(url);
 }
 

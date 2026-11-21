@@ -11,7 +11,8 @@
  *
  * Abhilfe: Ein Geometry Shader zieht jede Linie im Bildraum zu einem Band
  * von 1 Xbox-Pixel Breite (= N physische Pixel) auf. Breite im NDC des
- * Spiel-Viewports: halbe Breite = 1 / Viewport-Groesse (logisch). Nur fuer
+ * D3D11-Viewports (= ganzes RT, SB-HUD-SMEAR): halbe Breite = 1 / logische
+ * RT-Groesse. Nur fuer
  * Linien in Spiel-RTs mit Faktor >= 1,5; mit rt_scale=1 (Xbox-Groesse,
  * Testlaeufe) und im Backbuffer bleibt alles bitgleich. Zwei Varianten fuer
  * die beiden VS-Ausgaben (IM-Pfad bzw. Shading-Pfad), je Viewport-Groesse
@@ -25,6 +26,7 @@ typedef struct { unsigned w, h; int shade; ID3D11GeometryShader *gs; } ls_ent_t;
 static ls_ent_t g_ls[LS_MAX];
 static unsigned g_ls_n;
 unsigned g_ls_draws; /* Zaehler (verbreiterte Tick-Draws) */
+unsigned g_ls_bb_draws; /* W381 (#59): davon LoC-Backbuffer-Linien (loc_line_bb) */
 
 static ID3D11GeometryShader *ls_get(unsigned w, unsigned h, int shade)
 {
@@ -55,9 +57,26 @@ ID3D11GeometryShader *sb_line_gs_for_draw(unsigned topo, int shade)
     const rtt_entry_t *r;
     if (!g_cfg.line_scale) { return NULL; }
     if (topo != D3D11_PRIMITIVE_TOPOLOGY_LINELIST && topo != D3D11_PRIMITIVE_TOPOLOGY_LINESTRIP) { return NULL; }
-    if (!rtt_active() || g_rtt_bound < 0) { return NULL; }
+    if (!rtt_active() || g_rtt_bound < 0) { /* Backbuffer */
+        D3D11_VIEWPORT vp;
+        UINT nvp = 1;
+        unsigned lw = 0, lh = 0;
+        if (!g_sba_loc || !g_cfg.loc_line_bb || !g_ctx) { return NULL; } /* W381 (#59): nur LoC (SB bitgleich) */
+        ID3D11DeviceContext_RSGetViewports(g_ctx, &nvp, &vp);
+        if (!nvp || !sb_line_bb_dims(vp.Width, vp.Height, g_bb_w, g_bb_h, g_game_fb_h, g_game_disp_aspect, &lw, &lh)) {
+            return NULL;
+        }
+        g_ls_bb_draws++;
+        if (g_ls_bb_draws <= 2u || (g_ls_bb_draws & (g_ls_bb_draws - 1u)) == 0u && g_ls_bb_draws <= 65536u) {
+            HLOG_I("LINE-SCALE: LoC-Backbuffer-Linie #%u (Viewport %.0fx%.0f -> logisch %ux%u, Bild %u) f=%u", g_ls_bb_draws,
+                   vp.Width, vp.Height, lw, lh, g_game_fb_h, g_present_no);
+        }
+        return ls_get(lw, lh, shade ? 1 : 0);
+    }
     r = &g_rtt[g_rtt_bound];
-    if (!r->w || !r->h || r->pw * 2u < r->w * 3u || r->ph * 2u < r->h * 3u) { return NULL; }
-    if (!g_vp_game.w || !g_vp_game.h) { return NULL; }
-    return ls_get(g_vp_game.w, g_vp_game.h, shade ? 1 : 0);
+    { /* FIX(SB-HUD-SMEAR): Bezug = ganzes RT (D3D11-Viewport), nicht der Spiel-Viewport (render_line_src.h) */
+        unsigned lw = 0, lh = 0;
+        if (!sb_line_rt_dims(r->w, r->h, r->pw, r->ph, &lw, &lh)) { return NULL; }
+        return ls_get(lw, lh, shade ? 1 : 0);
+    }
 }

@@ -960,6 +960,18 @@ static size_t save_add(size_t len, size_t cap, int r)
 
 int lcfg_save_user(const char *path, const launcher_settings_t *s)
 {
+    return lcfg_save_user_ex(path, s, 0);
+}
+
+/* W402 PERGAME: SB-Spielpfade (xbe_path, media_root, hdd_root, game_image) gehoeren nicht in user_loc.cfg */
+static int key_is_sb_path(const char *k)
+{
+    return strcmp(k, "xbe_path") == 0 || strcmp(k, "media_root") == 0 || strcmp(k, "hdd_root") == 0 ||
+           strcmp(k, "game_image") == 0;
+}
+
+int lcfg_save_user_ex(const char *path, const launcher_settings_t *s, int flags)
+{
     /* Bis 1 MB alte Datei erhalten (user.cfg ist real < 4 KB). */
     static char *out_text;
     size_t i, out_len = 0, out_cap;
@@ -978,6 +990,9 @@ int lcfg_save_user(const char *path, const launcher_settings_t *s)
         fputs("# user.cfg - vom Launcher geschrieben, ueberschreibt sb_native.cfg\n",
               f);
         for (i = 0; i < KMANAGED_N; i++) {
+            if ((flags & LCFG_SAVE_NO_PATHS) && key_is_sb_path(kManaged[i][0])) {
+                continue;
+            }
             if (!sec || strcmp(sec, kManaged[i][1]) != 0) {
                 sec = kManaged[i][1];
                 fprintf(f, "[%s]\n", sec);
@@ -1011,6 +1026,10 @@ int lcfg_save_user(const char *path, const launcher_settings_t *s)
         int replaced = 0;
         *nl = '\0';
         for (i = 0; i < KMANAGED_N; i++) {
+            if ((flags & LCFG_SAVE_NO_PATHS) && key_is_sb_path(kManaged[i][0]) && line_is_key(line, kManaged[i][0])) {
+                replaced = 1; /* W402: Zeile entfaellt */
+                break;
+            }
             if (!done[i] && line_is_key(line, kManaged[i][0])) {
                 key_value(s, kManaged[i][0], kval, sizeof kval);
                 out_len = save_add(out_len, out_cap, _snprintf_s(out_text + out_len,
@@ -1030,7 +1049,7 @@ int lcfg_save_user(const char *path, const launcher_settings_t *s)
     fclose(f);
     /* Fehlende Keys ans Ende (eigene Section falls noetig). */
     for (i = 0; i < KMANAGED_N; i++) {
-        if (!done[i]) {
+        if (!done[i] && !((flags & LCFG_SAVE_NO_PATHS) && key_is_sb_path(kManaged[i][0]))) {
             char hdr[64];
             _snprintf_s(hdr, sizeof hdr, _TRUNCATE, "[%s]", kManaged[i][1]);
             if (!strstr(out_text, hdr)) {
@@ -1293,6 +1312,97 @@ int lcfg_gamever_msg(const void *gamever, char *msg, size_t cap)
     return 0;
 }
 
+/* W369 LAUNCHER-XBE-PICK: entpackter Spielordner statt Abbild (siehe
+ * launcher_cfg.h). */
+static int is_sep(char c)
+{
+    return c == '\\' || c == '/';
+}
+
+int lcfg_image_as_folder(const char *p, char *dir, size_t dcap, char *xbe, size_t xcap)
+{
+    DWORD a;
+    size_t n;
+    char d[1024];
+    if (!p || !p[0] || (a = u8_GetFileAttributes(p)) == INVALID_FILE_ATTRIBUTES) {
+        return 0;
+    }
+    strcpy_s(d, sizeof d, p);
+    n = strlen(d);
+    if (a & FILE_ATTRIBUTE_DIRECTORY) { /* Ordner: nur mit default.xbe darin */
+        char x[1100];
+        while (n > 3 && is_sep(d[n - 1])) {
+            d[--n] = '\0';
+        }
+        _snprintf_s(x, sizeof x, _TRUNCATE, "%s%sdefault.xbe", d, is_sep(d[n - 1]) ? "" :
+                    (strchr(d, '/') && !strchr(d, '\\')) ? "/" : "\\"); /* Trennerstil des Pfads */
+        a = u8_GetFileAttributes(x);
+        if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY)) {
+            return 0;
+        }
+        strcpy_s(dir, dcap, d);
+        strcpy_s(xbe, xcap, x);
+        return 1;
+    }
+    if (n <= 4 || _stricmp(d + n - 4, ".xbe") != 0) {
+        return 0;
+    }
+    strcpy_s(xbe, xcap, d);
+    while (n > 0 && !is_sep(d[n - 1])) { /* Dateiname weg */
+        n--;
+    }
+    while (n > 1 && is_sep(d[n - 1]) && !(n == 3 && d[1] == ':')) { /* Trenner weg, "C:\" bleibt */
+        n--;
+    }
+    d[n] = '\0';
+    if (!d[0]) {
+        strcpy_s(d, sizeof d, ".");
+    }
+    strcpy_s(dir, dcap, d);
+    return 1;
+}
+
+int lcfg_image_folder_mode(launcher_settings_t *s)
+{
+    char d[1024], x[1100];
+    if (!s->game_image[0] || !lcfg_image_as_folder(s->game_image, d, sizeof d, x, sizeof x)) {
+        return 0;
+    }
+    strcpy_s(s->media_root, sizeof s->media_root, d);
+    strcpy_s(s->xbe_path, sizeof s->xbe_path, x);
+    s->game_image[0] = '\0';
+    return 1;
+}
+
+/* W369: Line of Contact (World-Disc oder Pilot Test) gehoert in den LoC-Tab. */
+static int tid_is_loc(const sb_gamever_t *gv)
+{
+    return gv->xbe_ok && (gv->title_id == 0x43430009u || gv->title_id == 0x4343000Du);
+}
+
+/* W369: Programmdatei lesen (max. 64 MiB). NULL = nicht lesbar. */
+static uint8_t *read_xbe_file(const char *path_u8, size_t *n)
+{
+    FILE *f = NULL;
+    long l = 0;
+    uint8_t *b = NULL;
+    *n = 0;
+    if (u8_fopen_s(&f, path_u8, "rb") != 0 || !f) {
+        return NULL;
+    }
+    if (fseek(f, 0, SEEK_END) == 0 && (l = ftell(f)) > 0 && l < 64L * 1024 * 1024 &&
+        fseek(f, 0, SEEK_SET) == 0 && (b = (uint8_t *)malloc((size_t)l)) != NULL &&
+        fread(b, 1, (size_t)l, f) != (size_t)l) {
+        free(b);
+        b = NULL;
+    }
+    fclose(f);
+    if (b) {
+        *n = (size_t)l;
+    }
+    return b;
+}
+
 /* W150 ISO-DIRECT: Abbild pruefen (gleicher Leser wie der Client). */
 int lcfg_image_check(const char *image_u8, char *msg, size_t cap)
 {
@@ -1302,6 +1412,27 @@ int lcfg_image_check(const char *image_u8, char *msg, size_t cap)
     uint32_t xn = 0;
     sb_gamever_t gv;
     DWORD a = u8_GetFileAttributes(image_u8);
+    {
+        char d[1024], x[1100];
+        if (lcfg_image_as_folder(image_u8, d, sizeof d, x, sizeof x)) { /* W369: Ordner/.xbe */
+            size_t fn = 0;
+            xb = read_xbe_file(x, &fn);
+            memset(&gv, 0, sizeof gv);
+            if (xb) {
+                sb_gamever_check(xb, fn, &gv);
+                free(xb);
+            }
+            if (!gv.xbe_ok) {
+                _snprintf_s(msg, cap, _TRUNCATE, LT("cfg.image_xbebad"), x);
+                return 2;
+            }
+            if (tid_is_loc(&gv)) {
+                strncpy_s(msg, cap, LT("cfg.image_is_loc"), _TRUNCATE);
+                return 5;
+            }
+            return lcfg_gamever_msg(&gv, msg, cap) ? 0 : 4;
+        }
+    }
     if (image_u8 && image_u8[0] && a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY)) {
         /* W217 FIRST-RUN: Ordner statt Abbild gewaehlt -> klarer Hinweis */
         _snprintf_s(msg, cap, _TRUNCATE, LT("cfg.image_isdir"), image_u8);
@@ -1325,6 +1456,10 @@ int lcfg_image_check(const char *image_u8, char *msg, size_t cap)
     iso_vfs_close(v);
     sb_gamever_check(xb, xn, &gv);
     free(xb);
+    if (tid_is_loc(&gv)) { /* W369: LoC-Abbild im SB-Tab */
+        strncpy_s(msg, cap, LT("cfg.image_is_loc"), _TRUNCATE);
+        return 5;
+    }
     return lcfg_gamever_msg(&gv, msg, cap) ? 0 : 4;
 }
 
@@ -1534,9 +1669,15 @@ void lcfg_user_cfg_path(const char *client_dir, char *out, size_t cap)
 
 int lcfg_validate(const launcher_settings_t *s, char *err, size_t errcap)
 {
+    return lcfg_validate_ex(s, err, errcap, 0);
+}
+
+int lcfg_validate_ex(const launcher_settings_t *s, char *err, size_t errcap, int flags)
+{
     DWORD a;
     char probe[1024];
     char xbe[1024]; /* W172: Programmdatei (im Ordner-Modus abgeleitet) */
+    int nogame = (flags & LCFG_V_NO_GAME) != 0; /* W375: LoC-Tab speichert ohne SB-Spieldaten (#50) */
 
 #define FAIL(fmt, ...)                                     \
     do {                                                   \
@@ -1544,6 +1685,16 @@ int lcfg_validate(const launcher_settings_t *s, char *err, size_t errcap)
         return 1;                                          \
     } while (0)
 
+    xbe[0] = 0;
+    if (nogame) {
+        goto paths_ok; /* W375: SB-Spieldaten (Abbild/Ordner/xbe) nicht pruefen, uebrige Werte schon */
+    }
+    if (s->game_image[0]) { /* W369: .xbe/Ordner im Abbild-Feld = Ordner-Modus */
+        launcher_settings_t t = *s;
+        if (lcfg_image_folder_mode(&t)) {
+            return lcfg_validate_ex(&t, err, errcap, flags);
+        }
+    }
     if (s->game_image[0]) { /* W150 ISO-DIRECT: Abbild statt Ordner */
         char acp[1024];
         if (u8_to_acp(s->game_image, acp, sizeof acp) == 2) {
@@ -1605,6 +1756,12 @@ int lcfg_validate(const launcher_settings_t *s, char *err, size_t errcap)
             if (xb && fread(xb, 1, (size_t)xn, xf) == (size_t)xn) {
                 sb_gamever_t gv;
                 sb_gamever_check(xb, (size_t)xn, &gv);
+                if (tid_is_loc(&gv)) { /* W369: LoC-xbe im SB-Tab (Erweitert) */
+                    strncpy_s(err, errcap, LT("cfg.image_is_loc"), _TRUNCATE);
+                    fclose(xf);
+                    free(xb);
+                    return 1;
+                }
                 if (!lcfg_gamever_msg(&gv, err, errcap)) { /* W231: US experimental startbar */
                     fclose(xf);
                     free(xb);
@@ -1629,8 +1786,8 @@ paths_ok:
         pv[1] = s->media_root;
         pv[2] = s->hdd_root;
         for (pi2 = 0; pi2 < 3; pi2++) {
-            if (s->game_image[0] && pi2 < 2) {
-                continue; /* W150: Abbild-Modus nutzt xbe_path/media_root nicht */
+            if ((s->game_image[0] || nogame) && pi2 < 2) {
+                continue; /* W150: Abbild-Modus nutzt xbe_path/media_root nicht (W375: ohne Spieldaten-Pruefung) */
             }
             if (u8_to_acp(pv[pi2], acp, sizeof acp) == 2) {
                 FAIL(LT("cfg.ansi"),

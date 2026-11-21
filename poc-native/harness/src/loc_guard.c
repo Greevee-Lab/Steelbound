@@ -122,6 +122,18 @@ static int has_content_rule(unsigned typ)
 }
 
 /* port 1000 = TCP-Spielstrom, sonst UDP-Spielport. f = ganzer Rahmen mit Laenge n (bereits nach Tabelle geprueft). */
+/* W373 LOC-PUBLIC-LOBBY (LOC_BOOT §49.2, B): Host-Info Typ 2 (UDP 1201, 100 B). Der Empfaenger kopiert Rahmen+0xC..0x63
+ * in die Hostliste; spaetere Leser: Pilotname +0x50 per swprintf("%S") ohne Grenze in wchar[16] (FUN_000F2020) ->
+ * NUL in 16 B; Sitze je Seite +0x4A/+0x4B (int8, movsx) -> Summe als Index in eine 11er-Tabelle (0x2518D4) und als
+ * Laenge -> 0..10, Summe <= 10; Mission +0x4D -> Index in 0x27CCB8 (27 Eintraege, 0x18/0x1A = -1) -> < 0x1B ohne 0x18/0x1A.
+ * Lager/Modus/Optionen/Zaehler sind nur Werte (begrenzter switch bzw. Anzeige). */
+static int hostinfo_ok(const uint8_t *f)
+{
+    int a = (int8_t)f[0x4A], b = (int8_t)f[0x4B];
+    unsigned ms = f[0x4D];
+    return nul_within(f + 0x50, 16) && a >= 0 && b >= 0 && a + b <= 10 && ms < 0x1Bu && ms != 0x18u && ms != 0x1Au;
+}
+
 static int content_ok(uint16_t port, const uint8_t *f, int n)
 {
     unsigned typ = rd16(f);
@@ -137,6 +149,7 @@ static int content_ok(uint16_t port, const uint8_t *f, int n)
         default: return 1;
         }
     }
+    if (port == 1201 && typ == 0x02 && n == 100) return hostinfo_ok(f); /* W373 */
     if (port == 1202) {
         if ((typ == 0x03 || typ == 0x04) && n == 0x2C4) return nul_within(f + 0x10, 16) && rec_ok(f + 0x20);
         if (typ == 0x06 && n == 0x308) return entry_ok(f + 8);
@@ -264,7 +277,8 @@ int lguard_udp_check(uint16_t game_port, const uint8_t *d, int n, int *why)
     } else if (game_port == 1202) {
         switch (typ) {
         case 0x03: case 0x04: need = 0x2C4; break;
-        case 0x05: case 0x07: case 0x08: need = 4; break;
+        case 0x05: case 0x08: need = 4; break;
+        case 0x07: need = 6; break; /* W373 (B): Sender FUN_00054210 schickt 6 B, Byte 4 = Grund (vorher 4 -> Trennung) */
         case 0x06: need = 0x308; break;
         case 0x38: need = 8; break;
         default: break;

@@ -10,3 +10,9 @@ int loc_pace_install(void); /* W320 LOC-PERF: Missionstakt messen (loc_pace_diag
  * (LOCSYNC Rahmen = Slot + 1, gleich auf allen Clients). */
 void loc_sync_ext_on(int on);
 void loc_sync_ext_frame(unsigned slot, unsigned acc, unsigned tick);
+/* W382 LOC-ISSUES-B: "game=loc phase=… frame=… tick=… sim_hz=… scene=… interp_fps=… render_thread=…" fuer Feedback. */
+#include <stddef.h>
+int loc_sync_state_line(char *out, size_t cap);
+/* W386 LOC-LATENCY: Haenger (Abstand der Lockstep-Rahmen > 100 ms) seit Prozessstart (wie LOCLAT >100ms). */
+unsigned loc_sync_hangs(void);
+unsigned loc_sync_frames(void); /* W390 DIAG: Lockstep-Rahmen der Testfolge (Zaehler, keine Eingaben) */

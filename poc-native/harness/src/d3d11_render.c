@@ -9,6 +9,7 @@
 #include "render_int.h"
 #include "sb_texhealth.h" /* W315 */
 #include "sb_profile.h" /* W229 SBA() */
+#include "kernel_hle.h" /* W391: krnl_main_thread (test_render_slow_ms) */
 #include "render_fx_rem.h" /* W133 REM-FX */
 #include "sb_remaster.h" /* W103 REM-FRAME */
 #include "render_qa.h"
@@ -53,7 +54,9 @@ static float g_last_game_aspect, g_last_out_aspect;
 #include "sb_watermark.h" /* W219 WATERMARK */
 #include "sb_origview.h" /* W278 ORIG-FLAG: Einblendung */
 #include "sb_state.h" /* W232: sb_in_mission */
+#include <dxgi1_6.h> /* W370: Adapterwahl (EnumAdapterByGpuPreference) */
 #include "sbc_wire.h" /* W305 */
+#include "loc_net.h" /* W366: loc_net_bye */
 int g_vr_blit; /* W134 VR-PROTO: sb_render_blit zeigt ein Augenbild (ohne Nachbearbeitung des Monobilds) */
 
 static LRESULT CALLBACK sb_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
@@ -77,6 +80,7 @@ static LRESULT CALLBACK sb_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CLOSE:
         sb_winmode_on_close(); /* W81: Exklusiv-Vollbild verlassen */
         HLOG_I("render: Fenster geschlossen -> Exit(0)");
+        loc_net_bye(); /* W366: Mitspieler sehen den Abgang sofort */
         sbc_wire_log_summary("Ende"); /* W305: nur sbc_usb=1 */
         hlog_close();
         ExitProcess(0);
@@ -231,6 +235,131 @@ extern unsigned g_present_no; /* weiter unten definiert */
 static LONGLONG g_ctxd_q0;
 static void *g_ctxd_ret;
 
+/* DIAG(LOC-IM-LOCK) imlock_diag=1: aeussere ctx_lock-Regionen anderer Threads als des Present-Takts
+ * (Halter) je Aufrufstelle (Ruecksprungadresse von sb_ctx_enter, sb_emu.dll fest ab 0x30000000) mit
+ * Wanduhr- und Thread-CPU-Zeit (QueryThreadCycleTime) und die Wartezeit des Present-Takts (pd_lock) je
+ * Halterstelle -> Zeile IMLOCK (sb_iml_log). Nur Zaehler und Zeiten. */
+#define IML_SITES 64
+typedef struct { void *site; unsigned n, n1, n3; double sum1, max, cpu1; unsigned w1, w3; double wmax; } iml_site_t;
+static iml_site_t g_iml_s[IML_SITES];
+static unsigned g_iml_nsite_over;
+static volatile void *g_iml_hsite;      /* Stelle der laufenden aeusseren Halter-Region (0 = keine) */
+static LONGLONG g_iml_hq0;
+static ULONG64 g_iml_hc0;
+static unsigned g_iml_hold_n, g_iml_hold_b[5]; /* > 0,5/1/2/3/5 ms */
+static double g_iml_hold_max;
+static unsigned g_iml_w_n, g_iml_w_b[5];      /* Present-Takt: Wartezeiten > 0,5/1/2/3/5 ms */
+static double g_iml_w_max, g_iml_w_sum;
+static LONGLONG g_iml_qf;
+static double g_iml_cyc_per_ms;               /* Thread-Zyklen je ms (aus rdtsc/QPC geeicht) */
+static LONGLONG g_iml_cal_q; static ULONG64 g_iml_cal_t;
+static iml_site_t *iml_site(void *site)
+{
+    int i;
+    for (i = 0; i < IML_SITES; i++) {
+        if (g_iml_s[i].site == site) { return &g_iml_s[i]; }
+        if (!g_iml_s[i].site) { g_iml_s[i].site = site; return &g_iml_s[i]; }
+    }
+    g_iml_nsite_over++;
+    return NULL;
+}
+static void iml_bucket(unsigned b[5], double ms)
+{
+    if (ms > 0.5) { b[0]++; }
+    if (ms > 1.0) { b[1]++; }
+    if (ms > 2.0) { b[2]++; }
+    if (ms > 3.0) { b[3]++; }
+    if (ms > 5.0) { b[4]++; }
+}
+static void iml_hold_begin(void *site)
+{
+    LARGE_INTEGER q;
+    if (!g_iml_qf) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); g_iml_qf = f.QuadPart; }
+    QueryPerformanceCounter(&q);
+    QueryThreadCycleTime(GetCurrentThread(), &g_iml_hc0);
+    g_iml_hq0 = q.QuadPart;
+    g_iml_hsite = site;
+}
+static void iml_hold_end(void)
+{
+    LARGE_INTEGER q;
+    ULONG64 c;
+    double ms, cpu;
+    iml_site_t *e;
+    if (!g_iml_hsite || !g_iml_qf) { return; }
+    QueryPerformanceCounter(&q);
+    QueryThreadCycleTime(GetCurrentThread(), &c);
+    ms = (double)(q.QuadPart - g_iml_hq0) * 1000.0 / (double)g_iml_qf;
+    if (!g_iml_cal_q) { g_iml_cal_q = q.QuadPart; g_iml_cal_t = __rdtsc(); }
+    cpu = g_iml_cyc_per_ms > 0.0 ? (double)(c - g_iml_hc0) / g_iml_cyc_per_ms : ms;
+    g_iml_hold_n++;
+    iml_bucket(g_iml_hold_b, ms);
+    if (ms > g_iml_hold_max) { g_iml_hold_max = ms; }
+    e = iml_site((void *)g_iml_hsite);
+    if (e) {
+        e->n++;
+        if (ms > 1.0) { e->n1++; e->sum1 += ms; e->cpu1 += cpu; }
+        if (ms > 3.0) { e->n3++; }
+        if (ms > e->max) { e->max = ms; }
+    }
+    g_iml_hsite = NULL;
+}
+void *sb_iml_holder_site(void) { return (void *)g_iml_hsite; }
+/* Present-Takt: Wartezeit dq (QPC) in pd_lock, Halterstelle vor dem Warten. */
+void sb_iml_pd_wait(LONGLONG dq, void *site)
+{
+    double ms;
+    iml_site_t *e;
+    if (!g_iml_qf) { return; }
+    ms = (double)dq * 1000.0 / (double)g_iml_qf;
+    g_iml_w_n++;
+    g_iml_w_sum += ms;
+    iml_bucket(g_iml_w_b, ms);
+    if (ms > g_iml_w_max) { g_iml_w_max = ms; }
+    if (ms > 1.0 && site && (e = iml_site(site)) != NULL) {
+        e->w1++;
+        if (ms > 3.0) { e->w3++; }
+        if (ms > e->wmax) { e->wmax = ms; }
+    }
+}
+/* Zeile IMLOCK (Present-Takt-Thread, alle 10 s; Momentaufnahme unter ctx_lock). */
+void sb_iml_im_log(double secs); /* render_im.c: Teilzeiten langer sb_render_im_end */
+void sb_iml_log(double secs)
+{
+    char sb[1400];
+    size_t o = 0;
+    int i;
+    LARGE_INTEGER q;
+    if (!g_iml_qf || secs <= 0.0) { return; }
+    sb_ctx_enter();
+    QueryPerformanceCounter(&q);
+    if (g_iml_cal_q && q.QuadPart > g_iml_cal_q) { /* Eichung Zyklen/ms ueber die ganze Laufzeit */
+        g_iml_cyc_per_ms = (double)(__rdtsc() - g_iml_cal_t) / ((double)(q.QuadPart - g_iml_cal_q) * 1000.0 / (double)g_iml_qf);
+    }
+    sb[0] = 0;
+    for (i = 0; i < IML_SITES && g_iml_s[i].site; i++) {
+        iml_site_t *e = &g_iml_s[i];
+        if (!e->n1 && !e->w1) { continue; }
+        o += (size_t)_snprintf_s(sb + o, sizeof sb - o, _TRUNCATE, " [%p n=%u >1ms=%u >3ms=%u max=%.2f cpu=%.0f%% takt_wartet>1ms=%u >3ms=%u max=%.2f]",
+                                 e->site, e->n, e->n1, e->n3, e->max, e->sum1 > 0.0 ? 100.0 * e->cpu1 / e->sum1 : 0.0, e->w1, e->w3, e->wmax);
+        if (o >= sizeof sb - 1) { break; }
+    }
+    HLOG_I("IMLOCK: %.1fs split=%d takt_wartet n=%u >0.5/1/2/3/5ms=%u/%u/%u/%u/%u (%.1f/min >1ms) max=%.2fms mittel=%.3fms "
+           "halter n=%u >0.5/1/2/3/5ms=%u/%u/%u/%u/%u max=%.2fms stellen_voll=%u%s",
+           secs, g_cfg.im_lock_split, g_iml_w_n, g_iml_w_b[0], g_iml_w_b[1], g_iml_w_b[2], g_iml_w_b[3], g_iml_w_b[4],
+           g_iml_w_b[1] * 60.0 / secs, g_iml_w_max, g_iml_w_n ? g_iml_w_sum / g_iml_w_n : 0.0,
+           g_iml_hold_n, g_iml_hold_b[0], g_iml_hold_b[1], g_iml_hold_b[2], g_iml_hold_b[3], g_iml_hold_b[4], g_iml_hold_max,
+           g_iml_nsite_over, sb);
+    sb_iml_im_log(secs);
+    memset(g_iml_s, 0, sizeof g_iml_s);
+    g_iml_nsite_over = 0;
+    g_iml_hold_n = g_iml_w_n = 0;
+    memset(g_iml_hold_b, 0, sizeof g_iml_hold_b);
+    memset(g_iml_w_b, 0, sizeof g_iml_w_b);
+    g_iml_hold_max = g_iml_w_max = g_iml_w_sum = 0.0;
+    sb_ctx_leave();
+}
+
 /* DIAG(PERF-TICK,W168) ctx_wait_diag=1: Wartezeit des Spiel-Threads auf ctx_lock (Vortritt +
  * Erwerb, QPC-Ticks) - Zeile CTXWAIT im Present-Takt-Thread alle 10 s. */
 volatile LONGLONG g_ctxw_q, g_ctxw_tick_q, g_ctxw_tick_max;
@@ -263,6 +392,7 @@ __declspec(noinline) void sb_ctx_enter(void)
             g_ctxw_tick_q += wq1.QuadPart - wq0.QuadPart;
             g_ctxw_n++;
         }
+        if (outer && g_cfg.imlock_diag && tid != g_pd_tid) { iml_hold_begin(_ReturnAddress()); } /* DIAG(LOC-IM-LOCK) */
         if (outer && g_cfg.pd_diag && tid != g_pd_tid) { /* DIAG(PERF-FIX,W138) */
             LARGE_INTEGER q;
             QueryPerformanceCounter(&q);
@@ -310,9 +440,14 @@ void sb_ctx_yield(void)
     if (!g_pd_want || !g_ctx_cs_init || !g_cfg.ctx_lock) { return; }
     tid = GetCurrentThreadId();
     if (hlock_owner(&g_ctx_cs) != tid || tid == g_pd_tid || g_ctx_cs.recursion != 1) { return; }
-    hlock_leave(&g_ctx_cs);
-    sb_ctx_pd_yield_wait();
-    hlock_enter(&g_ctx_cs);
+    {
+        void *site = g_cfg.imlock_diag ? (void *)g_iml_hsite : NULL; /* DIAG(LOC-IM-LOCK): Halter-Region endet mit der Abgabe */
+        if (site) { iml_hold_end(); }
+        hlock_leave(&g_ctx_cs);
+        sb_ctx_pd_yield_wait();
+        hlock_enter(&g_ctx_cs);
+        if (site) { iml_hold_begin(site); }
+    }
 }
 
 /* SUSPSAFE (W10): Owner-Tid von g_ctx_cs (0 = frei/uninit). Regionen sind
@@ -335,6 +470,8 @@ const hlock_t *sb_ctx_hlock(void)
 __declspec(noinline) void sb_ctx_leave(void)
 {
     if (g_ctx_cs_init && g_cfg.ctx_lock) {
+        if (g_cfg.imlock_diag && g_iml_hsite && g_ctx_cs.recursion == 1 &&
+            hlock_owner(&g_ctx_cs) == GetCurrentThreadId()) { iml_hold_end(); } /* DIAG(LOC-IM-LOCK) */
         if (g_cfg.pd_diag && g_ctxd_q0 && g_ctx_cs.recursion == 1 &&
             hlock_owner(&g_ctx_cs) == GetCurrentThreadId()) { /* DIAG(PERF-FIX,W138): aeussere Region endet */
             static LARGE_INTEGER f;
@@ -412,9 +549,81 @@ static DWORD WINAPI sb_ui_thread(LPVOID unused)
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
     }
+    loc_net_bye(); /* W366 */
     hlog_close();
     ExitProcess(0);
     return 0;
+}
+
+/* W370 LOC-RB-FALLBACK-US: Grafikadapter im Log (Hybrid-Laptops: der Standardadapter kann der integrierte sein). Beim
+ * ersten Menschentest kamen die 4-6 Bilder/s des Mitspielers vom Lockstep, nicht von der Grafik (Test 2: Adapter 0 =
+ * GTX 1660 Ti, 20 Spielbilder/s mit Rollback). gpu_pref=1 waehlt per DXGI 1.6 den leistungsstaerksten Adapter; Standard 0 = wie
+ * bisher (Standardadapter). Keine Exporte NvOptimusEnablement im Loader: dessen Abbild ueberschreibt das XBE. */
+static unsigned g_ad_n, g_ad_best_mb, g_ad_best_vendor;
+static char g_ad_best[128];
+
+static IDXGIAdapter *sb_adapter_pick(int hw)
+{
+    IDXGIFactory1 *f1 = NULL;
+    IDXGIFactory6 *f6 = NULL;
+    IDXGIAdapter1 *a = NULL;
+    IDXGIAdapter *pick = NULL;
+    UINT i;
+    if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&f1)) || !f1) { return NULL; }
+    for (i = 0; i < 8 && SUCCEEDED(IDXGIFactory1_EnumAdapters1(f1, i, &a)); i++) {
+        DXGI_ADAPTER_DESC1 d;
+        if (SUCCEEDED(IDXGIAdapter1_GetDesc1(a, &d)) && !(d.Flags & DXGI_ADAPTER_FLAG_SOFTWARE)) {
+            char nm[128];
+            unsigned mb = (unsigned)(d.DedicatedVideoMemory >> 20);
+            WideCharToMultiByte(CP_UTF8, 0, d.Description, -1, nm, (int)sizeof nm, NULL, NULL);
+            HLOG_I("render: Adapter %u '%s' (Hersteller 0x%04X, eigener Speicher %u MB, geteilt %u MB)", i, nm,
+                   (unsigned)d.VendorId, mb, (unsigned)(d.SharedSystemMemory >> 20));
+            g_ad_n++;
+            if (mb > g_ad_best_mb) {
+                g_ad_best_mb = mb;
+                g_ad_best_vendor = d.VendorId;
+                memcpy(g_ad_best, nm, sizeof g_ad_best);
+            }
+        }
+        IDXGIAdapter1_Release(a);
+        a = NULL;
+    }
+    if (hw && g_cfg.gpu_pref == 1 && SUCCEEDED(IDXGIFactory1_QueryInterface(f1, &IID_IDXGIFactory6, (void **)&f6)) && f6) {
+        if (FAILED(IDXGIFactory6_EnumAdapterByGpuPreference(f6, 0, DXGI_GPU_PREFERENCE_HIGH_PERFORMANCE, &IID_IDXGIAdapter,
+                                                            (void **)&pick))) {
+            pick = NULL;
+        }
+        IDXGIFactory6_Release(f6);
+        HLOG_I("render: gpu_pref=1 -> leistungsstaerkster Adapter %s", pick ? "gewaehlt" : "nicht verfuegbar (Standardadapter)");
+    }
+    IDXGIFactory1_Release(f1);
+    return pick;
+}
+
+/* Benutzter Adapter; Warnung, wenn es mehrere Grafikchips gibt und der benutzte deutlich weniger eigenen Speicher hat. */
+static void sb_adapter_used(void)
+{
+    IDXGIDevice *dx = NULL;
+    IDXGIAdapter *ad = NULL;
+    DXGI_ADAPTER_DESC d;
+    char nm[128];
+    unsigned mb;
+    if (!g_dev || FAILED(ID3D11Device_QueryInterface(g_dev, &IID_IDXGIDevice, (void **)&dx)) || !dx) { return; }
+    if (SUCCEEDED(IDXGIDevice_GetAdapter(dx, &ad)) && ad) {
+        if (SUCCEEDED(IDXGIAdapter_GetDesc(ad, &d))) {
+            WideCharToMultiByte(CP_UTF8, 0, d.Description, -1, nm, (int)sizeof nm, NULL, NULL);
+            mb = (unsigned)(d.DedicatedVideoMemory >> 20);
+            HLOG_I("render: Grafik laeuft auf '%s' (Hersteller 0x%04X, eigener Speicher %u MB, %u Adapter, gpu_pref=%d)", nm,
+                   (unsigned)d.VendorId, mb, g_ad_n, g_cfg.gpu_pref);
+            if (g_ad_n > 1 && g_ad_best_mb >= 2u * (mb + 256u)) {
+                HLOG_W("render: Spiel laeuft nicht auf dem staerksten Grafikchip ('%s', %u MB, Hersteller 0x%04X) - "
+                       "Windows-Grafikeinstellungen: sb_ldr.exe auf 'Hohe Leistung' oder gpu_pref=1", g_ad_best, g_ad_best_mb,
+                       g_ad_best_vendor);
+            }
+        }
+        IDXGIAdapter_Release(ad);
+    }
+    IDXGIDevice_Release(dx);
 }
 
 void sb_render_init(void)
@@ -526,6 +735,13 @@ void sb_render_init(void)
     sd.Flags = g_swap_flags;
     {   /* W302 AMD-ARTIFACTS: d3d_debug/d3d_warp (Standard 0 = Hardware ohne Flags wie bisher) */
         HRESULT hdbg = S_OK;
+        IDXGIAdapter *pick = sb_adapter_pick(sb_d3ddbg_driver() == D3D_DRIVER_TYPE_HARDWARE); /* W370 */
+        hr = pick ? D3D11CreateDeviceAndSwapChain(pick, D3D_DRIVER_TYPE_UNKNOWN, NULL, sb_d3ddbg_create_flags(), levels, 3,
+                                                  D3D11_SDK_VERSION, &sd, &g_swap, &g_dev, &got, &g_ctx)
+                  : E_FAIL;
+        if (pick && FAILED(hr)) { HLOG_W("render: gewaehlter Adapter scheitert (hr=0x%lX) - Standardadapter", (long)hr); }
+        if (pick) { IDXGIAdapter_Release(pick); }
+        if (FAILED(hr))
         hr = D3D11CreateDeviceAndSwapChain(NULL, sb_d3ddbg_driver(), NULL, sb_d3ddbg_create_flags(),
                                            levels, 3, D3D11_SDK_VERSION, &sd,
                                            &g_swap, &g_dev, &got, &g_ctx);
@@ -541,6 +757,7 @@ void sb_render_init(void)
         HLOG_E("render: D3D11CreateDeviceAndSwapChain (hr=0x%lX)", (long)hr);
         ExitProcess(7);
     }
+    sb_adapter_used(); /* W370 */
     sb_create_views();
     sb_winmode_init(g_hwnd, g_swap); /* W81 WINMODE (Wechsel erst am ersten Present) */
     if (g_cfg.vr_enable) { sb_vr_init(); } /* W134 VR-PROTO (Standard aus) */
@@ -974,6 +1191,15 @@ static void sb_render_present_body(unsigned flags)
     }
     n_present++;
     g_present_no = n_present;
+    if (g_cfg.test_render_slow_ms > 0 && g_sba_loc && krnl_main_thread() &&
+        GetCurrentThreadId() != GetThreadId((HANDLE)krnl_main_thread())) {
+        /* TEST(W391) test_render_slow_ms: kuenstlich langsamer Renderer - Render-Thread des Spiels (LoC-Mission) rechnet je
+         * Spielbild N ms (Messung Tick-Jitter/Senden bei langsamem Rendern). Standard 0. */
+        LARGE_INTEGER f, a, b;
+        QueryPerformanceFrequency(&f);
+        QueryPerformanceCounter(&a);
+        do { YieldProcessor(); QueryPerformanceCounter(&b); } while ((b.QuadPart - a.QuadPart) * 1000 < (LONGLONG)g_cfg.test_render_slow_ms * f.QuadPart);
+    }
     sb_phud_tick_begin(g_im_frame_draws); /* W122 PERF-HUD: Taste/Tick (aus: nur Tests) */
     sb_rt_dyn_apply(); /* W146 rt_scale_dyn: gewuenschten RT-Faktor am Swap-Anfang umsetzen */
     if (g_cfg.present_decouple > 0 && g_swap_res) { sb_pd_start(); } /* W138 PERF-FIX: Present-Takt-Thread (startet einmal, prueft selbst Echtzeit) */
@@ -1118,9 +1344,23 @@ static void sb_render_present_body(unsigned flags)
         }
     }
     if (g_shot_census) { g_shot_census = 0; sb_render_screenshot(n_present); }
+    if (g_cfg.loc_shot_tick_every > 0 && g_sba_loc && *(volatile unsigned *)(uintptr_t)0x306830u != 0u) {
+        /* TEST(W391) loc_shot_tick_every=N: Bild der LoC-Mission je N Spielticks ([0x3070F4], Lockstep aktiv) ->
+         * shots/loct_<Tick>.jpg (Vergleich vorher/nachher bei gleichem Spielstand). */
+        static unsigned last_t = 0xFFFFFFFFu, nsh;
+        unsigned t = *(volatile unsigned *)(uintptr_t)0x3070F4u;
+        if (t != last_t && t > 0u && t % (unsigned)g_cfg.loc_shot_tick_every == 0u && nsh < 64u) {
+            char nm[40];
+            _snprintf_s(nm, sizeof nm, _TRUNCATE, "loct_%06u", t);
+            sb_render_shot_name(nm, NULL);
+            nsh++;
+        }
+        last_t = t;
+    }
     if (g_cfg.bloom_diag) { bloom_diag_present(n_present); } /* DIAG(SHADE-BLOOM,W112) */
     if (g_cfg.d3d_debug || g_cfg.interp_shots_mrel > 0 || g_cfg.interp_shots_scene[0]) { sb_d3ddbg_present(n_present); } /* DIAG(AMD-ARTIFACTS,W302; W315 Szene) */
     sb_th_present(n_present); /* W315 Textur-Gesundheit: VRAM alle 1800 Presents */
+    { extern void sb_lm_diag(unsigned); sb_lm_diag(n_present); } /* DIAG(W377) loc_menu_diag: Zeile LOCMENU */
     sb_tex_hud_tick(); /* FIX(HUDFREEZE,W345): Anzeige-Texturen beobachtet halten */
     sb_ctx_leave();
     /* M2c: alle 100 Presents (fps120_probe nutzt "IM draws="). */
@@ -1141,6 +1381,7 @@ static void sb_render_present_body(unsigned flags)
     /* A6 ui_thread: nur der alte Pfad pumpt hier (sonst der UI-Thread). */
     while (!g_cfg.ui_thread && PeekMessageW(&msg, NULL, 0, 0, PM_REMOVE)) {
         if (msg.message == WM_QUIT) {
+            loc_net_bye(); /* W366 */
             hlog_close();
             ExitProcess(0);
         }
@@ -1220,9 +1461,11 @@ static void sb_render_present_body(unsigned flags)
     if (pf_on) { sb_ctx_enter(); pf_capture('g'); sb_ctx_leave(); } /* DIAG(POPIN,W91) */
     { long long q0 = (g_cfg.rq_perf || g_phud_meas) ? rq_qpc() : 0;
     if (g_phud_meas) { sb_ctx_enter(); sb_phud_present_pre(); sb_ctx_leave(); } /* W122 PERF-HUD: GPU-Zeit */
+    if (g_cfg.gpu_burn > 0 && g_cfg.gpu_burn_menu > 0) { extern void sb_gpu_burn(void); sb_ctx_enter(); sb_gpu_burn(); sb_ctx_leave(); } /* DIAG(W377): langsame GPU auch in Menues */
     hr = IDXGISwapChain_Present(g_swap, (unsigned)interval, 0);
     g_pd_last_q = rq_qpc(); /* W138 */
     sb_warm_note_game_present(g_pd_last_q); /* W139 warm_gpu: Ladephase erkennen */
+    { extern void sb_lm_note_game_present(LONGLONG q, int locked); sb_lm_note_game_present(g_pd_last_q, g_cfg.vr_enable || pdl); } /* W377 LOC-MENU-FPS */
     if (g_cfg.vr_enable || pdl) { sb_ctx_leave(); }
     if (g_phud_meas) { sb_ctx_enter(); sb_phud_present_post(q0, 1); sb_ctx_leave(); } /* W122 PERF-HUD */
     if (g_cfg.rq_perf) { g_rqp_q[RQP_PRESENT] += rq_qpc() - q0; } } } /* DIAG(SHADE-PERF,W80); W138: Ende pdl-Block */
@@ -1512,6 +1755,35 @@ void sb_render_blit(ID3D11Resource *src)
 /* FPS-INTERP (W69): nacktes Present eines Zwischen-/Tick-Bildes (ohne
  * Zaehler/Pump/Screenshot). Intervall 0: der Interp-Takt praesentiert auch
  * mitten im Spiel-Tick, ein VSync-Block wuerde das Spiel bremsen. */
+/* W393 LOC-PACING pace_vsync: VBlank-Thread (render_interp.c). Ausgang je ~4 s neu holen (Fenster kann den Monitor
+ * wechseln); GetContainingOutput unter ctx_lock, WaitForVBlank ohne (DXGI-Ausgaenge sind frei-threaded). */
+static volatile LONG s_vb_excl;
+int sb_render_exclusive(void) { return (int)s_vb_excl; }
+int sb_render_vblank_wait(void)
+{
+    static IDXGIOutput *out;
+    static DWORD t_out;
+    HRESULT hr;
+    DWORD now = GetTickCount();
+    if (!out || now - t_out > 4000u) {
+        IDXGIOutput *o = NULL;
+        sb_ctx_enter();
+        if (g_swap) {
+            BOOL fs = FALSE;
+            hr = IDXGISwapChain_GetContainingOutput(g_swap, &o);
+            if (FAILED(hr)) { o = NULL; }
+            if (SUCCEEDED(IDXGISwapChain_GetFullscreenState(g_swap, &fs, NULL))) { InterlockedExchange(&s_vb_excl, fs ? 1 : 0); }
+        }
+        sb_ctx_leave();
+        if (out) { IDXGIOutput_Release(out); }
+        out = o;
+        t_out = now;
+    }
+    if (!out) { return 0; }
+    hr = IDXGIOutput_WaitForVBlank(out);
+    return SUCCEEDED(hr) ? 1 : 0;
+}
+
 void sb_render_present_raw(void)
 {
     HRESULT hr;

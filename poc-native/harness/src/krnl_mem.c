@@ -175,6 +175,10 @@ u32 __stdcall hle_NtFreeVirtualMemory(u32 pBase, u32 pSize, u32 type)
     u32 base = *(u32 *)(uintptr_t)pBase;
     u32 size = *(u32 *)(uintptr_t)pSize;
     int ok;
+    if (loc_rb_spec()) { /* W390: spekulativer Vorlauf gibt nichts frei (die echte Zeitlinie nutzt den Speicher noch) */
+        loc_rb_spec_note(5);
+        return X_STATUS_SUCCESS;
+    }
     if (in_game_region(base, 1)) {
         /* Loader-Region: nur nullen, nie freigeben */
         if (size && size < 0x1000000u) {
@@ -1189,6 +1193,7 @@ u32 __stdcall hle_MmAllocateContiguousMemoryEx(u32 size, u32 low, u32 high,
 
 u32 __stdcall hle_MmFreeContiguousMemory(u32 va)
 {
+    if (loc_rb_spec()) { loc_rb_spec_note(5); return 0; } /* W390: Vorlauf gibt nichts frei */
     /* M2c: pures Leak (Xbox: freier Contig-Speicher behaelt Inhalt; das
      * Spiel sampelt stale Structs!). Session-begrenzt, kein LRU (PoC). */
     static unsigned nfree;
@@ -1225,6 +1230,7 @@ static void pool_free_note(u32 va)
 
 u32 __stdcall hle_MmFreeSystemMemory(u32 va, u32 flags)
 {
+    if (loc_rb_spec()) { loc_rb_spec_note(5); return 0; } /* W390 */
     (void)flags;
     if (g_pool_heap && va) {
         pool_free_note(va);
@@ -1253,6 +1259,7 @@ u32 __stdcall hle_ExAllocatePoolWithTag(u32 size, u32 tag)
 
 u32 __stdcall hle_ExFreePool(u32 va)
 {
+    if (loc_rb_spec()) { loc_rb_spec_note(5); return 0; } /* W390 */
     if (g_pool_heap && va) {
         pool_free_note(va);
         HeapFree(g_pool_heap, 0, (void *)(uintptr_t)va);

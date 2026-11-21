@@ -702,6 +702,28 @@ done:
 }
 
 /* ====================================================================== Aktionen */
+int lacc_probe(lacc_probe_t *o)
+{
+    lacc_srv_t s;
+    lacc_resp_t r;
+    ULONGLONG t0;
+    memset(o, 0, sizeof *o);
+    if (!lacc_server(&s)) {
+        strcpy_s(o->error, sizeof o->error, "off");
+        return 1;
+    }
+    t0 = GetTickCount64();
+    if (lacc_http(&s, "GET", "/v1/info", NULL, &r) == 0 && r.ok) {
+        o->ok = 1;
+        lacc_js_str(r.body, "version", o->version, sizeof o->version);
+    } else {
+        strcpy_s(o->error, sizeof o->error, r.error[0] ? r.error : "net");
+    }
+    o->ms = (int)(GetTickCount64() - t0);
+    SecureZeroMemory(&r, sizeof r);
+    return o->ok ? 0 : 1;
+}
+
 static int fail(char *err, size_t ecap, const char *code)
 {
     strcpy_s(err, ecap, code && *code ? code : "bad");
@@ -1371,6 +1393,16 @@ int lacc_cli(const char *client_dir, int argc, char **argv)
     if (!s.pin1[0] && !s.pin2[0]) {
         printf("error off\n");
         return 1;
+    }
+    if (strcmp(act, "probe") == 0) { /* W403: dieselbe Pruefung wie der Kopf-Chip (eine Anfrage, keine Adresse) */
+        lacc_probe_t pr;
+        rc = lacc_probe(&pr);
+        if (rc == 0) {
+            printf("ok ms=%d version=%s\n", pr.ms, pr.version[0] ? pr.version : "-");
+        } else {
+            printf("error %s ms=%d\n", pr.error, pr.ms);
+        }
+        return rc;
     }
     if (strcmp(act, "info") == 0) {
         lacc_resp_t r;

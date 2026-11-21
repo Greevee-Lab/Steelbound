@@ -35,6 +35,7 @@
 #include "loc_audio.h"
 #include "loc_sync.h"
 #include "loc_rollback.h" /* W325 */
+#include "loc_lsarb_game.h" /* LOC-LOCKSTEP-ARBITER */
 #include "sb_tex.h" /* W297: Texttextur nach Lock neu hochladen */
 #include "loc_render.h" /* W297: Textebene */
 #include "d3d11_render.h" /* W342: sb_render_im_vdata (SetVertexData2s/4s) */
@@ -192,8 +193,12 @@ static void loc_out(u32 pp, u32 v)
 }
 
 static volatile LONG s_stub_seen[LOC_N_STUBS];
+static volatile LONG s_stub_n[LOC_N_STUBS]; /* W363 DIAG(audio_api_diag): Aufrufe je Einstieg (Stub oder HLE) */
+void loc_api_count(int id) { if (id >= 0 && id < (int)LOC_N_STUBS) { InterlockedIncrement(&s_stub_n[id]); } }
+long loc_api_calls(int id) { return (id >= 0 && id < (int)LOC_N_STUBS) ? s_stub_n[id] : 0; }
 static void loc_stub_first(int id, const char *name)
 {
+    loc_api_count(id);
     if (id >= 0 && id < (int)LOC_N_STUBS && InterlockedExchange(&s_stub_seen[id], 1) == 0) {
         HLOG_I("LOCSTUB: %s erster Aufruf", name);
     }
@@ -754,6 +759,7 @@ void loc_boot_install(void)
         loc_sync_install(); /* W297: Lockstep-Zustandshash (loc_sync=1) */
         loc_pace_install(); /* W320: Missionstakt (loc_pace_diag/loc_fields, Standard aus) */
         loc_rb_install(); /* W325: Rollback-Spike (loc_rb_spike, Standard aus) */
+        loc_lsarb_install(); /* LOC-LOCKSTEP-ARBITER: Pufferregler im Lockstep (nach loc_rb_install) */
     } else { /* sonst "Netz nicht bereit" wie W275 */
         LOC_STUB(XNetStartup);
         LOC_STUB(WSAStartup);

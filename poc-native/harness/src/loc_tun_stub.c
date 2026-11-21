@@ -21,6 +21,7 @@ loctun *loctun_start(const loctun_cfg *c, struct locnet *n, struct locnetsim *si
 }
 
 void loctun_stop(loctun *t) { (void)t; }
+void loctun_bye_all(loctun *t) { (void)t; }
 int loctun_dgram(loctun *t, uint32_t dst_vip, uint16_t src_gp, uint16_t dst_gp, const char *buf, int len)
 {
     (void)t; (void)dst_vip; (void)src_gp; (void)dst_gp; (void)buf; (void)len;
@@ -51,6 +52,19 @@ int loctun_lobby_code(loctun *t, char *buf, int cap)
     return 0;
 }
 int loctun_sec_state(loctun *t) { (void)t; return 0; }
+int loctun_test_line(loctun *t, uint32_t my_cid, const char *line, char *out, int cap) /* W373 */
+{
+    (void)t; (void)my_cid; (void)line;
+    if (out && cap > 0) out[0] = 0;
+    return -1;
+}
+int loctun_pub_games(loctun *t) { (void)t; return 0; } /* W373 */
+int loctun_peer_hud_get(loctun *t, int i, loctun_peer_hud *o) /* W374 */
+{
+    (void)t; (void)i; (void)o;
+    return 0;
+}
+
 int loctun_diag(loctun *t, char *buf, int cap) /* W353 */
 {
     (void)t;

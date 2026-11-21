@@ -312,3 +312,76 @@ int lxf_xsb_cue(const lxf_xsb_t *x, int cue, uint32_t rnd, lxf_cue_t *c)
     }
     return c->ntrack > 0 ? 0 : -5;
 }
+
+/* W363 LOC-ORIGINAL: Laufzeit-Parameter (RPC, IXACTEngine_SetParameterControl) wie die XACT-Bibliothek des
+ * Spiels (belegt am Code: Suche 0x1C4015/0x1C404F, Cue 0x1C5C46, Kurve 0x1C5392, Ziele 0x1C4208/0x1C437E/
+ * 0x1C43C2). XSB-Kopf +0x14 = Tabelle, +0x20 = Anzahl; Eintrag 24 B {u16 Sound(=Cue-Eintrag), u8, u8 Kurven,
+ * u32 Kurven-Versatz, char Name[16]}; Kurve 24 B {u16 Spur, u16 Ziel (0 Lautstaerke mB, 1 Tonhoehe 1/4096 Oktave,
+ * 2 Filter-Eckfrequenz Hz), 4 x (u16 x, s16 y)}. x = (int)(Wert * 65536); x <= x0 -> y0, x >= x3 -> y3, sonst
+ * ganzzahlig linear zwischen den Stuetzpunkten (idiv rundet zur Null). Mehrere Kurven je Ziel und Spur addieren. */
+int lxf_rpc_eval(const uint8_t *cv, int xi)
+{
+    int k, x0, x1, y0, y1;
+    if (xi <= (int)(cv[4] | cv[5] << 8)) {
+        return (int)(int16_t)(cv[6] | cv[7] << 8);
+    }
+    if (xi >= (int)(cv[16] | cv[17] << 8)) {
+        return (int)(int16_t)(cv[18] | cv[19] << 8);
+    }
+    for (k = 1; k < 4; k++) {
+        x1 = cv[4 + 4 * k] | cv[5 + 4 * k] << 8;
+        if (xi < x1) {
+            x0 = cv[4 * k] | cv[1 + 4 * k] << 8;
+            y0 = (int16_t)(cv[2 + 4 * k] | cv[3 + 4 * k] << 8);
+            y1 = (int16_t)(cv[6 + 4 * k] | cv[7 + 4 * k] << 8);
+            return x1 > x0 ? y0 + (y1 - y0) * (xi - x0) / (x1 - x0) : y0;
+        }
+    }
+    return 0;
+}
+
+int lxf_xsb_rpc(const lxf_xsb_t *x, int entry, const char *name, float value, lxf_rpc_t out[LXF_MAX_TRACKS])
+{
+    int ok = 1, i, k, n, hits = 0, xi;
+    uint32_t tab;
+    double v = (double)value * 65536.0;
+    memset(out, 0, sizeof(lxf_rpc_t) * LXF_MAX_TRACKS);
+    if (!x || !x->d || !name || entry < 0 || !(value == value)) {
+        return 0;
+    }
+    xi = v > 2147483647.0 ? 2147483647 : v < -2147483647.0 ? -2147483647 : (int)v; /* _ftol: zur Null */
+    tab = rd32(x->d, x->n, 0x14, &ok);
+    n = rds16(x->d, x->n, 0x20, &ok) & 0xFFFF;
+    if (!ok || (uint64_t)tab + (uint64_t)n * 24u > x->n) {
+        return 0;
+    }
+    for (i = 0; i < n; i++) {
+        const uint8_t *e = x->d + tab + (uint32_t)i * 24u;
+        uint32_t co;
+        int nc;
+        if ((e[0] | e[1] << 8) != entry || strncmp((const char *)e + 8, name, 16) != 0) {
+            continue;
+        }
+        nc = e[3];
+        co = (uint32_t)(e[4] | e[5] << 8 | e[6] << 16) | (uint32_t)e[7] << 24;
+        for (k = 0; k < nc; k++) {
+            const uint8_t *cv;
+            int trk, tgt, y;
+            if ((uint64_t)co + (uint64_t)(k + 1) * 24u > x->n) {
+                break;
+            }
+            cv = x->d + co + (uint32_t)k * 24u;
+            trk = cv[0] | cv[1] << 8;
+            tgt = cv[2] | cv[3] << 8;
+            if (trk >= LXF_MAX_TRACKS || tgt > 2) {
+                continue;
+            }
+            y = lxf_rpc_eval(cv, xi);
+            if (tgt == 0) { out[trk].vol_mb += y; out[trk].has |= 1; }
+            else if (tgt == 1) { out[trk].pitch += y; out[trk].has |= 2; }
+            else { out[trk].filt_hz += y; out[trk].has |= 4; }
+            hits++;
+        }
+    }
+    return hits;
+}

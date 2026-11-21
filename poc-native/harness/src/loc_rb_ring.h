@@ -66,7 +66,11 @@ int rbr_commit(rbr_commit_t *st); /* Tick-Ende: inkrementell sichern; 0 = ok */
 /* k Ticks zurueck (k <= rbr_depth()). Danach ist der Ring um k Ticks kuerzer und S = Stand T-k.
  * pages = zurueckgeschriebene Seiten, us = Zeit. 0 = ok, -1 = zu wenig Ticks. */
 int rbr_load(unsigned k, uint32_t *pages, uint32_t *us);
+/* W390: seit dem letzten rbr_commit beschriebene Seiten auf den gesicherten Stand zuruecksetzen; Ring unveraendert.
+ * pages = zurueckgeschrieben, checked = verglichen, us = Zeit. 0 = ok, -1 = nicht aktiv. */
+int rbr_revert(uint32_t *pages, uint32_t *checked, uint32_t *us);
 unsigned rbr_depth(void);     /* Ticks im Ring (ladbar) */
+void rbr_stop_times(uint32_t out[4]); /* W372 DIAG: letzter rbr_stop: Schutz zurueck, Warten auf Handler, Freigeben (us), Warteschleifen */
 void rbr_reset_ring(void);    /* Ring leeren (Schatten bleibt) */
 
 /* Vor Kernel-Schreibzugriffen in Gast-Puffer (ReadFile/recv): Schutz aufheben + Seite merken.
@@ -87,6 +91,9 @@ uint32_t rbr_full_diff(const uint8_t *src, uint32_t *addr, uint32_t cap);
 uint32_t rbr_shadow_diff(uint32_t *addr, uint32_t cap);
 /* Schatten (= Stand des letzten Sicherns) nach dst kopieren (rbr_pages()*4096 Bytes) */
 uint32_t rbr_shadow_copy(uint8_t *dst);
+/* LOC-DESYNC-REPAIR: Stand k Ticks zurueck (k <= rbr_depth()) nach dst (rbr_pages()*4096 Bytes), Live/Schatten/Ring
+ * unveraendert. Rueckgabe Seiten, 0 = nicht aktiv bzw. k zu gross. */
+uint32_t rbr_snapshot_at(unsigned k, uint8_t *dst);
 /* Bereich i: Lage, Art, Verfahren, heisse Seiten. 0 = kein Bereich i */
 int rbr_region_info(int i, uint32_t *va, uint32_t *len, uint32_t *kind, int *method, uint32_t *hot);
 

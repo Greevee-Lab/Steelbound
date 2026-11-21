@@ -19,7 +19,8 @@ typedef struct {
     uint32_t region;      /* Zertifikat: 1 = NA, 2 = Japan, 4 = Rest der Welt (PAL) */
     uint32_t version;
     int ntsc_u;           /* W229: 1 = bekannte NTSC-U-Fassung (USA); W230: supported=1 (experimentell, US-Profil) */
-    int loc;              /* W275 LOC-BOOT: 1 = Line of Contact (World-Disc, Title-ID 43430009) erkannt.
+    int loc;              /* W275 LOC-BOOT: 1 = Line of Contact (World-Disc, Title-ID 43430009) erkannt
+                           * (W378: 2 = dieselbe XBE unveraendert, ohne Media-Patch; gleiches Profil).
                            * supported bleibt 0 (SB-Profil gilt nicht); der Client startet LoC nur mit
                            * [expert] loc_boot=1 ueber das eigene LoC-Profil. */
     char sha256[65];
@@ -36,6 +37,14 @@ int sb_gamever_check(const uint8_t *xbe, size_t n, sb_gamever_t *out);
 /* W275 LOC-BOOT: SHA-256 der bekannten LoC-default.xbe (World-Disc). */
 #define SB_GAMEVER_LOC_SHA "696db4056941039934f22e9b8bcbc1407575b64749c14c6032e2a049b34d8957"
 #define SB_GAMEVER_LOC_TITLE 0x43430009u
+/* W378 LOC-IMAGE-VARIANT: dieselbe 1.0-XBE unveraendert (ohne Media-Patch). Sie
+ * weicht von SB_GAMEVER_LOC_SHA nur in einem Sprungbyte der XAPI-Medienpruefung ab
+ * (0x12E71E jge statt jmp); bei diesem Zertifikat kehrt die Pruefung ohne
+ * Laufwerkszugriff mit Erfolg zurueck -> gleicher Ablauf, gleiches LoC-Profil. */
+#define SB_GAMEVER_LOC_SHA_STOCK "b75faaf36947f967c33435ec64fa792f9f99b9bc40254cf91484fa13347e4117"
+/* W378: 1 = SB_GAMEVER_LOC_SHA (Media-Patch), 2 = SB_GAMEVER_LOC_SHA_STOCK, 0 = unbekannt
+ * (64 Hex, Gross/Klein egal). */
+int sb_gamever_loc_variant(const char *sha256_hex);
 
 /* W256 PACK-ANYVER: Paket-Familie "steel-battalion" = alle bekannten,
  * unterstuetzten Fassungen (Texturen sind per Inhalts-Hash gleich).

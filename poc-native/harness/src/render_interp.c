@@ -46,6 +46,19 @@
 #include "render_interp_shref.h" /* W361 LOC-INTERP-CRASH: Listen halten ihre Schatten-Views */
 #include "sb_profile.h" /* W323 LOC-INTERP: g_sba_loc */
 #include "loc_render.h" /* W323 LOC-INTERP: Missions-Weiche und 20-Hz-Takt */
+#include "loc_aim.h" /* W376 LOC-LOCAL-AIM */
+#include "loc_vpf.h" /* W394 LOC-VIEW-PERFRAME */
+#include "loc_hud_math.h" /* W394 */
+#include "loc_aim_law.h" /* W376: Kamera-Korrektur la_cam_corr */
+#include "loc_smooth.h" /* W385 LOC-SMOOTH */
+#include "loc_smooth_math.h"
+#include "render_pace.h" /* W393 LOC-PACING */
+/* W394: Matrizen je Wiedergabe: 0 Kamera (W376), 1 Fadenkreuz (W376), 2 + j Marken des VT j, Kompass, Radar */
+#define LA_NM (2 + LS_MAXV + 2)
+#define LA_LAW_CMP (3 + LS_MAXV)
+#define LA_LAW_RAD (4 + LS_MAXV)
+#define LA_ON(on, law) ((law) && (((unsigned)(on) >> ((law) - 1)) & 1u))
+#include "xdk_hooks.h" /* W376: hooks_frame_count (DIAG) */
 #include <math.h>
 
 #define IP_LISTS 4
@@ -128,6 +141,8 @@ typedef struct {
     ID3D11ShaderResourceView *cpd;
     D3D11_BOX cpbox;
     int cp_es, cp_ed;
+    unsigned char law; /* W376 LOC-LOCAL-AIM: 1 = Welt-Draw (Kamera-Korrektur), 2 = Fadenkreuz-Draw (Verschiebung);
+                        * W394: 3 + j = HUD-Marke des VT j (Verschiebung), LA_LAW_CMP Kompassband, LA_LAW_RAD Radar */
 } ip_op_t;
 static volatile LONG li_cp_rec, li_cp_ok, li_cp_rep; /* W340: Kopier-Ops aufgezeichnet / mit Schatten / wiedergegeben (LOCINTERP stat) */
 static volatile LONG li_cp_seen; /* W347: Kopien waehrend der Aufzeichnung (SB: INTERP selfcopy) */
@@ -192,6 +207,26 @@ typedef struct {
     int wb_ok;        /* wb traegt die w dieses Ticks */
     unsigned rh[6];   /* DIAG(W273) interp_rhash Bit 2: GPU-Inhalt am Swap (vb, vbg, rqx, rqxg, rqc, wb) */
     int ddsel;        /* DIAG(W284) interp_ddfile: Tick gewaehlt -> Draw-ID-Bilder je Wiedergabe */
+    int la_ok;        /* W376 LOC-LOCAL-AIM: Vorhersage-Delta + Weltkamera gueltig */
+    float la_d[4];    /* W376: Sicht Gier/Nick, Arm x/y (vorhergesagt minus simuliert, rad) */
+    double la_vp[16]; /* W376: Weltkamera (haeufigste mvp der Welt-Draws vor der ersten BB-Kopie) */
+    unsigned la_seq;  /* W376: Nummer des Ruhepunkts der Vorhersage */
+    float la_rc[2];   /* W376: Fadenkreuz-Mitte im Weltziel (NDC) laut Simulation */
+    float la_rd[2];   /* W376: vorhergesagte Verschiebung des Fadenkreuzes (NDC) */
+    int la_ret;       /* W376: Fadenkreuz-Draws markiert (o->law == 2) */
+    float la_s[2];    /* W394: simulierte Sicht Gier/Nick dieser Liste (rad) */
+    /* W394 LOC-HUD-VIEW: je VT simulierte Bildlage a (NDC) und angezeigte Lage als Clip-Vektor c = [q, 1] * VP (q = Lage
+     * nach W387-Versatz und W390-Kamera), Marken-Draws je VT; Kompass/Radar: Gier-Abweichung der eigenen Kamera (rad) */
+    int hm_ok;
+    unsigned hm_vt;   /* Bit j = VT j hat markierte Draws */
+    float hm_a[LS_MAXV][2];
+    double hm_c[LS_MAXV][4];
+    float hm_dyaw;    /* eigene Gier angezeigt - simuliert (W390), rad */
+    float hm_gier;    /* eigene simulierte Gier dieser Liste (Kompass-Eichung) */
+    int hm_gok;
+    unsigned hm_n;    /* markierte Draws (Zaehler) */
+    unsigned hm_ncmp; /* Kompass-Draws */
+    unsigned hm_nrad; /* Radar-Draws */
 } ip_list_t;
 
 typedef struct {
@@ -401,11 +436,53 @@ static int ip_in_poll;        /* Rekursionsschutz */
 static LONGLONG ip_tnext;     /* naechstes Present (QPC) */
 static LONGLONG ip_dt;        /* 1/interp_fps (QPC) */
 static LONGLONG ip_lat;       /* Latenz L (QPC) */
+/* W393 LOC-PACING interp_pace_clock: Anzeige-Latenz, die ip_lat (Ziel) nur weich folgt (stetige Bilduhr), und die
+ * Faelligkeit, fuer die sie gilt. Schreiben nur ip_poll (Bild gezeigt), lesen ip_pair_at - beide unter ctx_lock. */
+static LONGLONG ip_lat_d, ip_lat_due;
+static LONGLONG ip_ts_laste; /* W393: vorige Abweichung der Tick-Zeitbasis (pace_ts_step) */
+static int ip_pace_on(void)
+{
+    return g_cfg.interp_pace_clock >= 2 || (g_cfg.interp_pace_clock == 1 && g_sba_loc);
+}
+/* Latenz fuer die Faelligkeit due ohne Uebernahme (Vorbestellung und Bild sehen denselben Wert). */
+static LONGLONG ip_lat_at(LONGLONG due)
+{
+    if (!ip_pace_on() || ip_lat_d <= 0) { return ip_lat; }
+    if (due <= ip_lat_due) { return ip_lat_d; }
+    /* L steigt: Uhr bis 20 % langsamer; L faellt: bis 2 % schneller; > 100 ms (Haenger) sofort */
+    return (LONGLONG)pace_lat_step(ip_lat_d, ip_lat, due - ip_lat_due, g_cfg.interp_pace_up > 0 ? g_cfg.interp_pace_up : 200,
+                                   g_cfg.interp_pace_dn > 0 ? g_cfg.interp_pace_dn : 20, ip_qpf.QuadPart / 10);
+}
+/* W393: Halten (naechster Tick fehlt, juengster Stand B steht exakt). Die Bilduhr dehnt sich mit: Latenz so, dass die
+ * gezeigte Zeit genau bei B bleibt. Kommt der Tick, laeuft das Bild nahtlos von B weiter (vorher: Sprung um die
+ * Haltezeit nach vorn) und holt die Latenz mit hoechstens interp_pace_dn wieder ab. Ueber Ziel + 100 ms (Haenger)
+ * nicht weiter dehnen - dann springt die Uhr wie bisher (Snap). */
+static unsigned pc_elastic; /* DIAG */
+static void ip_lat_hold(LONGLONG due, const ip_list_t *B)
+{
+    LONGLONG need;
+    if (!g_cfg.interp_pace_hold || !ip_pace_on() || ip_lat_d <= 0 || !B) { return; }
+    need = due - B->tstate;
+    if (pace_lat_hold(ip_lat_at(due), need, ip_lat, ip_qpf.QuadPart / 10) == need) {
+        ip_lat_d = need;
+        ip_lat_due = due;
+        pc_elastic++;
+    }
+}
+/* Nach dem gezeigten Bild: Latenz fuer due uebernehmen. */
+static void ip_lat_commit(LONGLONG due)
+{
+    if (!ip_pace_on()) { ip_lat_d = 0; return; }
+    ip_lat_d = ip_lat_d > 0 ? ip_lat_at(due) : ip_lat;
+    ip_lat_due = due;
+}
 static LONGLONG ip_need[32];  /* Swap_N - Zustandszeit_N-1 */
 static unsigned ip_nneed;
 static LONGLONG ip_vb_qpc;    /* letzter Feldwechsel im Feld-Poll (QPC) */
 static double ip_rbar;        /* mittlere Rechenzeit r (QPC-Einheiten) */
 static LONGLONG ip_tlast_present;
+static LONGLONG ip_tlast_present_pre; /* DIAG(W393): QPC direkt vor dem letzten Present */
+static volatile LONG pv_presents; /* W393: Zwischenbilder seit dem letzten VBlank (pace_vsync/pace_diag) */
 static HANDLE pd_wake; /* W138 PERF-FIX: Takt-Thread wecken (Interp-Takt startet) */
 
 static unsigned ip_shot_seq, ip_shot_left, ip_shot_next, ip_pairs_total;
@@ -530,6 +607,7 @@ static void ip_list_reset(ip_list_t *L)
     L->ipw_bad = 0; L->wb_ok = 0; /* W237 */
     L->ddsel = 0; /* W284 */
     L->tvb0 = 0; L->ncopy = 0; /* W340 */
+    L->la_ok = 0; L->la_seq = 0; /* W376 */
     if (L->smp0) { ID3D11SamplerState_Release(L->smp0); L->smp0 = NULL; } /* W126 */
 }
 
@@ -3546,6 +3624,7 @@ static void ip_dump(ip_list_t *B)
 
 /* ---------- Schatten-Ziele + Sicherung je Liste ---------- */
 
+static long long isw_cp_q, isw_un_q, isw_gr_q; static unsigned isw_cp_n, isw_gr_n; /* DIAG(LOC-IM-LOCK): CopyResource / unref / ip_sh_ref je Swap */
 static unsigned ip_sh_gen; /* W361: Generationszaehler der Schatten-Eintraege */
 static volatile LONG st_sh_stale, st_sh_stale_tot; /* W361: Wiedergaben mit ersetztem Eintrag (je Fenster / gesamt) */
 
@@ -3685,6 +3764,11 @@ static int ip_sh_ref(ip_list_t *L, int li, ID3D11View *v, int need_rt)
         ip_shref_take(&L->refo[L->nrefs], (ID3D11View *)g_ish[e].rtv, (ID3D11View *)g_ish[e].dsv,
                       (ID3D11View *)g_ish[e].srv, g_ish[e].gen);
         L->refs[L->nrefs++] = e;
+        if (g_cfg.imlock_diag) { /* DIAG(LOC-IM-LOCK) */
+            LONGLONG cq0 = ip_now();
+            ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_ish[e].bak[li], res);
+            isw_cp_q += ip_now() - cq0; isw_cp_n++;
+        } else
         ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_ish[e].bak[li], res);
         g_ish[e].bakser[li] = L->serial;
         g_ish[e].used = L->serial;
@@ -3718,19 +3802,84 @@ static void li_srv_note(const ip_op_t *o, unsigned i)
 }
 
 /* Am Swap: alle Ressourcen der Liste sichern, Schatten-Views eintragen. */
+/* LOC-IM-LOCK im_lock_split=1: Vorab-Einordnung der Textur-Quellen fuer ip_list_snap OHNE ctx_lock (Spiel-Thread am
+ * Anfang von sb_interp_swap). Messung (imlock_diag, Zeile IMLOCK swap): ip_list_snap hielt die Sperre je Swap 1-2 ms
+ * (bis 10 ms), fast nur fuer GetResource/GetType/GetDesc/Release je Draw-Textur, um festzustellen, dass eine
+ * gewoehnliche Textur keinen Schatten braucht (ip_sh_ref need_rt=1 -> -1 ohne Seiteneffekt). Diese Abfragen betreffen
+ * nur Device-Objekte (frei-threaded), keinen Context; die Aufnahmeliste L gehoert dem Spiel-Thread (nicht in der
+ * Historie, der Present-Takt liest sie nicht), sb_interp_reset laeuft nur auf diesem Thread. Ergebnis je Op: Bit 0 =
+ * srv ohne Schatten, Bit k = rq-Stufe k ohne Schatten; ip_list_snap ueberspringt dann genau diese ip_sh_ref-Aufrufe
+ * (gleiches Ergebnis, gleiche Liste). */
+static unsigned char ip_snap_cls[IP_OPS_MAX];
+static const ip_list_t *ip_snap_cls_L;
+static unsigned ip_snap_cls_n;
+static int ip_view_no_shadow(ID3D11View *v) /* 1 = ip_sh_ref(..., need_rt=1) liefert sicher -1 ohne Seiteneffekt */
+{
+    ID3D11Resource *res = NULL;
+    D3D11_RESOURCE_DIMENSION dim;
+    D3D11_TEXTURE2D_DESC dd;
+    int r;
+    ID3D11View_GetResource(v, &res);
+    if (!res) { return 0; } /* ip_sh_ref entscheidet (snap_ok = 0) */
+    ID3D11Resource_GetType(res, &dim);
+    if (dim != D3D11_RESOURCE_DIMENSION_TEXTURE2D) { r = 1; }
+    else {
+        ID3D11Texture2D_GetDesc((ID3D11Texture2D *)res, &dd);
+        r = !(dd.BindFlags & D3D11_BIND_RENDER_TARGET) && !(g_cfg.shade_shadow && (dd.BindFlags & D3D11_BIND_DEPTH_STENCIL));
+    }
+    ID3D11Resource_Release(res);
+    return r;
+}
+static void ip_snap_classify(const ip_list_t *L)
+{
+    unsigned i, n = L->nops;
+    ID3D11View *lv = NULL;
+    int lr = 0;
+    ip_snap_cls_L = NULL;
+    if (n > IP_OPS_MAX) { return; }
+    for (i = 0; i < n; i++) {
+        const ip_op_t *o = &L->ops[i];
+        unsigned char c = 0;
+        if (o->kind != IP_COPY) {
+            if (o->srv) {
+                if ((ID3D11View *)o->srv != lv) { lv = (ID3D11View *)o->srv; lr = ip_view_no_shadow(lv); }
+                if (lr) { c |= 1u; }
+            }
+            if (o->rq) {
+                int k2;
+                for (k2 = 1; k2 < 4; k2++) {
+                    if (o->rqr.srv[k2] && ip_view_no_shadow((ID3D11View *)o->rqr.srv[k2])) { c |= (unsigned char)(1u << k2); }
+                }
+            }
+        }
+        ip_snap_cls[i] = c;
+    }
+    ip_snap_cls_n = n;
+    ip_snap_cls_L = L;
+}
+
 static void ip_list_snap(ip_list_t *L, int li)
 {
     unsigned i;
     ID3D11View *lv[3] = { NULL, NULL, NULL };
     int le[3] = { -1, -1, -1 };
+    const int cls = (ip_snap_cls_L == L && ip_snap_cls_n == L->nops); /* LOC-IM-LOCK: Vorab-Einordnung gilt */
+    LONGLONG uq0 = g_cfg.imlock_diag ? ip_now() : 0;
+    ip_snap_cls_L = NULL;
     L->snap_ok = 1;
     ip_list_unref(L); /* W361 */
+    if (uq0) { isw_un_q += ip_now() - uq0; }
     L->nrefs = 0;
     L->bbref = ip_sh_ref(L, li, (ID3D11View *)g_rtv, 0);
     for (i = 0; i < L->nops; i++) {
         ip_op_t *o = &L->ops[i];
         ID3D11View *vv[3];
         int q;
+        /* LOC-IM-LOCK im_lock_split=1: alle 64 Ops dem Present-Takt die Sperre ueberlassen, wenn er wartet (sb_ctx_yield:
+         * nur aeusserste Ebene). Sicher wie die Zuordnung ohne Sperre (swap_match_unlock): L ist noch nicht in der Historie,
+         * Schreibzugriffe gehen nur auf Eintraege/Sicherungen von L (bak[li]); der Takt-Thread stellt den Pipeline-Zustand
+         * nach seiner Wiedergabe wieder her. Messung: Snap 1-2 ms (bis 10 ms) je Swap am Stueck. */
+        if (g_cfg.im_lock_split > 0 && (i & 63u) == 63u) { sb_ctx_yield(); }
         if (o->kind == IP_COPY) { /* W340: Quelle = Schatten des BB, Ziel = Schatten der Textur (braucht RT-Bindung) */
             o->cp_es = ip_sh_ref(L, li, (ID3D11View *)o->cps, 0);
             o->cp_ed = ip_sh_ref(L, li, (ID3D11View *)o->cpd, 1);
@@ -3747,6 +3896,8 @@ static void ip_list_snap(ip_list_t *L, int li)
             int e;
             if (!vv[q]) { continue; }
             if (vv[q] == lv[q]) { e = le[q]; } /* gleiche View wie zuvor (lebt in der Liste) */
+            else if (q == 2 && cls && (ip_snap_cls[i] & 1u)) { e = -1; lv[q] = vv[q]; le[q] = e; } /* LOC-IM-LOCK: kein RT */
+            else if (g_cfg.imlock_diag) { LONGLONG gq0 = ip_now(); e = ip_sh_ref(L, li, vv[q], q == 2); isw_gr_q += ip_now() - gq0; isw_gr_n++; lv[q] = vv[q]; le[q] = e; } /* DIAG */
             else { e = ip_sh_ref(L, li, vv[q], q == 2); lv[q] = vv[q]; le[q] = e; }
             if (q == 0) { o->sh_rtv = (e >= 0) ? g_ish[e].rtv : NULL; }
             else if (q == 1) { o->sh_dsv = (e >= 0) ? g_ish[e].dsv : NULL; }
@@ -3759,6 +3910,7 @@ static void ip_list_snap(ip_list_t *L, int li)
                 int e2;
                 o->rq_shsrv[k2] = o->rqr.srv[k2];
                 if (!o->rqr.srv[k2]) { continue; }
+                if (cls && (ip_snap_cls[i] & (1u << k2))) { continue; } /* LOC-IM-LOCK: kein RT */
                 e2 = ip_sh_ref(L, li, (ID3D11View *)o->rqr.srv[k2], 1);
                 if (e2 >= 0) { o->rq_shsrv[k2] = g_ish[e2].srv; }
             }
@@ -3952,7 +4104,9 @@ typedef struct {
 } ip_rc_t;
 static ip_rc_t ip_rc_ctx[2];
 
-static int ip_ring_fill(const ip_cx_t *x, const ip_list_t *B, const ip_list_t *A, int lerp_ok, float t, ip_rc_t *rc)
+static void ip_la_mul(float out[16], const float m[16], const float *C); /* W376 */
+static int ip_ring_fill(const ip_cx_t *x, const ip_list_t *B, const ip_list_t *A, int lerp_ok, float t, ip_rc_t *rc,
+                        int laOn, float laM[LA_NM][16])
 {
     ip_ring_t *R = &ip_ring[x->deferred ? 1 : 0];
     unsigned i, need = 0, n = 0, last0 = 0xFFFFFFFFu, last1 = 0xFFFFFFFFu;
@@ -3996,7 +4150,8 @@ static int ip_ring_fill(const ip_cx_t *x, const ip_list_t *B, const ip_list_t *A
         const ip_op_t *o = &B->ops[i];
         R->ofs[2u * i] = R->ofs[2u * i + 1u] = 0xFFFFFFFFu;
         if (o->kind != IP_DRAW) { continue; }
-        memcpy(r, o->mvp, 64);
+        if (LA_ON(laOn, o->law)) { float lm[16]; ip_la_mul(lm, o->mvp, laM[o->law - 1]); memcpy(r, lm, 64); } /* W376, W394 */
+        else { memcpy(r, o->mvp, 64); }
         memcpy(r + 64, &o->has_tex, 4);
         memset(r + 68, 0, 12); /* Padding (frueher W166-Parameter, entfernt in W181) */
         if (last0 == 0xFFFFFFFFu || memcmp(r, p0, 80) != 0) {
@@ -4006,7 +4161,8 @@ static int ip_ring_fill(const ip_cx_t *x, const ip_list_t *B, const ip_list_t *A
         }
         R->ofs[2u * i] = last0;
         if (lerp_ok && o->flag && o->match >= 0 && (unsigned)o->match < A->nops) {
-            memcpy(r, IP_AMVP(o, &A->ops[o->match]), 64); /* W317 rzm */
+            if (LA_ON(laOn, o->law)) { float lm[16]; ip_la_mul(lm, IP_AMVP(o, &A->ops[o->match]), laM[o->law - 1]); memcpy(r, lm, 64); } /* W376, W394 */
+            else { memcpy(r, IP_AMVP(o, &A->ops[o->match]), 64); } /* W317 rzm */
             memcpy(r + 64, &t, 4);
             if (last1 == 0xFFFFFFFFu || memcmp(r, p1, 80) != 0) {
                 memcpy(d + (size_t)n * IP_RING_SLOT, r, 80);
@@ -5230,6 +5386,225 @@ static void ip_dead_purge(void)
     HLOG_W("INTERP W361: %ld zerstoerte Schatten-View(s) in Quarantaene, Historie verworfen (Zwischenbilder setzen kurz aus)", n);
 }
 
+/* ---------- W376 LOC-LOCAL-AIM: eigene Sicht sofort im Bild ----------
+ * Je Wiedergabe (Tick- und Zwischenbild) das Vorhersage-Delta der Sicht lerp(A, B, t) als Kameradrehung C auf die
+ * Welt-Draws (o->law, gesetzt am Swap) anwenden: mvp' = mvp * C, ebenso die Matrix N-1. Spielzustand unberuehrt.
+ * Vorzeichen (Messlauf W376_A2): Sicht-Gier des Spiels faellt beim Blick nach rechts, Nick steigt beim Blick nach oben. */
+static const double LA_TURN_K = -1.0, LA_NICK_K = 1.0, LA_MAXANG = 0.6;
+static volatile LONG li_la_rep, li_la_on; /* Wiedergaben mit Liste gueltig / mit Korrektur (LOCAIM-Zeile) */
+static volatile LONG li_la_lists, li_la_draws, li_la_rets; /* Listen mit Vorhersage, Welt-/Fadenkreuz-Draws darin */
+static void ip_la_mul(float out[16], const float m[16], const float *C)
+{
+    int i, j;
+    for (i = 0; i < 4; i++)
+        for (j = 0; j < 4; j++)
+            out[i * 4 + j] = m[i * 4] * C[j] + m[i * 4 + 1] * C[4 + j] + m[i * 4 + 2] * C[8 + j] + m[i * 4 + 3] * C[12 + j];
+}
+/* DIAG(W376) loc_aim_diag Bit 32: je Wiedergabe Zeit, Tick, t, Drehung (angewandt bzw. mit Schalter aus: berechnet) */
+static CRITICAL_SECTION li_la_cs;
+static volatile LONG li_la_cs_init;
+static void li_la_note(const ip_list_t *B, float t, double dy, double dp, int on, double rx, double ry)
+{
+    static FILE *f;
+    struct { LONGLONG q; unsigned ser, seq; float t, dy, dp; int on; float rx, ry; } r;
+    LARGE_INTEGER q;
+    if (InterlockedCompareExchange(&li_la_cs_init, 1, 0) == 0) { InitializeCriticalSection(&li_la_cs); InterlockedExchange(&li_la_cs_init, 2); }
+    while (li_la_cs_init != 2) { Sleep(0); }
+    QueryPerformanceCounter(&q);
+    r.q = q.QuadPart; r.ser = B->serial; r.seq = B->la_seq; r.t = t; r.dy = (float)dy; r.dp = (float)dp; r.on = on;
+    r.rx = (float)rx; r.ry = (float)ry;
+    EnterCriticalSection(&li_la_cs);
+    if (!f) { f = (FILE *)loc_aim_diag_file("locaim_rep.bin"); }
+    if (f) { fwrite(&r, sizeof r, 1, f); fflush(f); }
+    LeaveCriticalSection(&li_la_cs);
+}
+/* W394 LOC-VIEW-PERFRAME: angezeigte Sicht/Arm (absolut, rad) fuer diese Wiedergabe. Basis = juengste Vorhersage (D eigene
+ * Saetze), dazu ein Zusatz-Schritt mit dem Satz, den der naechste Poll jetzt liefern wuerde (Maus-Akku nur gelesen),
+ * gewichtet mit der Phase bis zu diesem Poll (w 0 -> 1). Zwischen Poll und naechster Vorhersage (der Satz ist schon
+ * abgeholt, aber noch nicht in der Vorhersage) gilt der letzte volle Zusatz-Schritt. Rueckgabe 0 = nichts (alter Weg),
+ * 1 = Basis ohne Zusatz-Schritt, 2 = mit Zusatz-Schritt, 3 = gehalten. */
+static SRWLOCK li_vpf_lk = SRWLOCK_INIT;
+static la_state_t li_vpf_full;
+static uint32_t li_vpf_full_seq;
+static volatile LONG li_vpf_n[4]; /* LOCVPF-Zeile: Wiedergaben je Rueckgabe */
+static int li_vpf_view(double v[4])
+{
+    loc_aim_pub_t P;
+    uint8_t F[14];
+    uint32_t q = 0;
+    la_state_t s1;
+    LARGE_INTEGER now;
+    int r, mode;
+    double w;
+    if (!loc_aim_get(&P) || !P.have_pst) { InterlockedIncrement(&li_vpf_n[0]); return 0; }
+    r = loc_vpf_preview(P.last_in, F, &q);
+    QueryPerformanceCounter(&now);
+    AcquireSRWLockExclusive(&li_vpf_lk);
+    if (r && q == P.poll) {
+        s1 = P.pst;
+        if (!la_step(&s1, F)) { s1 = P.pst; }
+        w = lh_weight((double)(now.QuadPart - P.tq) * 1000.0 / (double)ip_qpf.QuadPart, P.wspan_ms);
+        lh_blend(&P.pst, &s1, w, v);
+        li_vpf_full = s1;
+        li_vpf_full_seq = P.seq;
+        mode = 2;
+    } else if (r && q == P.poll + 1u && li_vpf_full_seq == P.seq) {
+        v[0] = li_vpf_full.ys; v[1] = li_vpf_full.ps; v[2] = li_vpf_full.ax; v[3] = li_vpf_full.ay;
+        mode = 3;
+    } else {
+        v[0] = P.pst.ys; v[1] = P.pst.ps; v[2] = P.pst.ax; v[3] = P.pst.ay;
+        mode = 1;
+    }
+    ReleaseSRWLockExclusive(&li_vpf_lk);
+    InterlockedIncrement(&li_vpf_n[mode]);
+    return mode;
+}
+/* DIAG(W394) loc_hud_diag Bit 4: je Wiedergabe angezeigte Sicht-Gier und Fadenkreuz-Mitte (nur Testfolge) */
+static void li_vpf_note(const ip_list_t *B, float t, int mode, double yaw, double rcx, double rcy, double syaw, double sx)
+{
+    static FILE *f;
+    static SRWLOCK lk = SRWLOCK_INIT;
+    struct { LONGLONG q; unsigned ser; float t; int mode; float yaw, rcx, rcy, syaw, sx; } r;
+    LARGE_INTEGER q;
+    QueryPerformanceCounter(&q);
+    r.q = q.QuadPart; r.ser = B->serial; r.t = t; r.mode = mode; r.yaw = (float)yaw; r.rcx = (float)rcx; r.rcy = (float)rcy;
+    r.syaw = (float)syaw; r.sx = (float)sx;
+    AcquireSRWLockExclusive(&lk);
+    if (!f) { f = (FILE *)loc_aim_diag_file("locvpf_rep.bin"); }
+    if (f) { fwrite(&r, sizeof r, 1, f); }
+    ReleaseSRWLockExclusive(&lk);
+}
+
+/* W394 LOC-HUD-VIEW: Marken je VT (o->law 3 + j) um die Abweichung der angezeigten von der simulierten Bildlage
+ * verschieben: b = c * C (C = Sicht-Korrektur dieser Wiedergabe, sonst Einheit), Verschiebung b/w - a (Clip-Translation).
+ * Rueckgabe: Bits 2 + j. */
+static volatile LONG li_hm_rep, li_hm_on; /* LOCHUD-Zeile */
+static volatile LONG li_hm_lists, li_hm_draws, li_hm_cmp, li_hm_near; /* LOCHUD-Zeile (near: Gegner < 100 m im Bild) */
+static double li_hm_res_max, li_hm_res_sum; static unsigned li_hm_res_n;
+static volatile LONG li_hm_rad; /* Listen mit Radar-Draws */
+static volatile LONG li_hm_cand, li_hm_rej_mv, li_hm_rej_st; /* Kandidaten nahe a_j, verworfen (Bewegung, ruhend) */
+static double li_rad_k; static int li_rad_n; /* Radar: Drehung der Karte je rad eigener Gier (+-1 nach 6 gleichen Messungen) */ /* Rest: Verschiebung aus B gegen lerp(A, B, t) */
+static double li_cmp_k = 0.477; /* NDC je rad Gier (Eichung C3; laufend nachgefuehrt) */
+
+static double li_hm_px_max, li_hm_px_sum; static unsigned li_hm_px_n;
+static int ip_hm_prep(const ip_list_t *B, const ip_list_t *A, float t, const float *C, float M[LA_NM][16])
+{
+    int j, on = 0;
+    InterlockedIncrement(&li_hm_rep);
+    for (j = 0; j < LS_MAXV; j++) {
+        double dx, dy, ax, ay, r;
+        if (!(B->hm_vt & (1u << j))) { continue; }
+        if (!lh_mark_shift(B->hm_c[j], C, B->hm_a[j][0], B->hm_a[j][1], &dx, &dy)) { continue; }
+        if (A && A->hm_ok && A->hm_c[j][3] > 0.0 && lh_mark_shift(A->hm_c[j], C, A->hm_a[j][0], A->hm_a[j][1], &ax, &ay)) {
+            /* Statistik: angewandt (aus B) gegen lerp(A, B, t) */
+            r = (1.0 - t) * sqrt((ax - dx) * (ax - dx) * 102400.0 + (ay - dy) * (ay - dy) * 57600.0);
+            if (r > li_hm_res_max) { li_hm_res_max = r; } li_hm_res_sum += r; li_hm_res_n++;
+        }
+        if (fabs(dx) + fabs(dy) < 1e-5) { continue; }
+        memset(M[2 + j], 0, 64);
+        M[2 + j][0] = M[2 + j][5] = M[2 + j][10] = M[2 + j][15] = 1.0f;
+        M[2 + j][12] = (float)dx;
+        M[2 + j][13] = (float)dy;
+        on |= 1 << (2 + j);
+        { double px = sqrt(dx * 320.0 * dx * 320.0 + dy * 240.0 * dy * 240.0); /* Statistik (ungeschuetzt, nur Anzeige) */
+          if (px > li_hm_px_max) { li_hm_px_max = px; } li_hm_px_sum += px; li_hm_px_n++; }
+    }
+    if (on) { InterlockedIncrement(&li_hm_on); }
+    return on;
+}
+
+static int ip_la_prep0(const ip_list_t *B, const ip_list_t *A, int lerp_ok, float t, int dbg, int vr, float M[LA_NM][16]);
+/* Rueckgabe Bitmaske: 1 = Kamera-Korrektur M[0] (o->law 1), 2 = Fadenkreuz-Verschiebung M[1] (o->law 2),
+ * 4 << j = Marken des VT j (W394). */
+static int ip_la_prep(const ip_list_t *B, const ip_list_t *A, int lerp_ok, float t, int dbg, int vr, float M[LA_NM][16])
+{
+    int on = ip_la_prep0(B, A, lerp_ok, t, dbg, vr, M);
+    if (g_sba_loc && g_cfg.loc_hud_predict && !dbg && !vr && !ip_ph.on && !ip_pl_on && g_cfg.interp_mode != 1) {
+        if (B->hm_ok && B->hm_vt) { on |= ip_hm_prep(B, lerp_ok ? A : NULL, t, (on & 1) ? M[0] : NULL, M); }
+        if (B->hm_ncmp && fabs(B->hm_dyaw) > 1e-6) { /* Kompassband: eigene Gier angezeigt - simuliert (W390) */
+            float *m = M[LA_LAW_CMP - 1];
+            memset(m, 0, 64);
+            m[0] = m[5] = m[10] = m[15] = 1.0f;
+            m[12] = (float)la_clamp(li_cmp_k * B->hm_dyaw, -0.5, 0.5);
+            on |= 1 << (LA_LAW_CMP - 1);
+        }
+        if (B->hm_nrad && li_rad_n >= 6 && fabs(B->hm_dyaw) > 1e-6) { /* Radar: Karte um die Bildmitte drehen */
+            float *m = M[LA_LAW_RAD - 1];
+            double ph = la_clamp(li_rad_k * B->hm_dyaw, -0.5, 0.5), cs = cos(ph), sn = sin(ph);
+            memset(m, 0, 64);
+            m[0] = (float)cs; m[1] = (float)sn; m[4] = (float)-sn; m[5] = (float)cs; m[10] = m[15] = 1.0f;
+            on |= 1 << (LA_LAW_RAD - 1);
+        }
+    }
+    return on;
+}
+static int ip_la_prep0(const ip_list_t *B, const ip_list_t *A, int lerp_ok, float t, int dbg, int vr, float M[LA_NM][16])
+{
+    static const double up[3] = {0.0, 1.0, 0.0};
+    double dy, dp, Cd[16], rx, ry;
+    int i, apply, on = 0;
+    if (!g_sba_loc || dbg || vr || ip_ph.on || ip_pl_on || g_cfg.interp_mode == 1 || !B->la_ok) {
+        return 0;
+    }
+    apply = g_cfg.loc_local_aim != 0;
+    dy = B->la_d[0]; dp = B->la_d[1];
+    if (lerp_ok && A && A->la_ok) {
+        dy = A->la_d[0] + (B->la_d[0] - A->la_d[0]) * (double)t;
+        dp = A->la_d[1] + (B->la_d[1] - A->la_d[1]) * (double)t;
+    }
+    dy = la_clamp(dy * LA_TURN_K, -LA_MAXANG, LA_MAXANG);
+    dp = la_clamp(dp * LA_NICK_K, -LA_MAXANG, LA_MAXANG);
+    rx = ry = 0.0;
+    if (B->la_ret) {
+        rx = B->la_rd[0]; ry = B->la_rd[1];
+        if (lerp_ok && A && A->la_ok) {
+            rx = A->la_rd[0] + (B->la_rd[0] - A->la_rd[0]) * (double)t;
+            ry = A->la_rd[1] + (B->la_rd[1] - A->la_rd[1]) * (double)t;
+        }
+    }
+    if (apply && (g_cfg.loc_view_perframe || (g_cfg.loc_hud_diag & 4))) { /* W394 LOC-VIEW-PERFRAME */
+        double v[4], sy = B->la_s[0], sp = B->la_s[1], bx = B->la_rc[0], by = B->la_rc[1];
+        double c1 = sqrt(B->la_vp[1] * B->la_vp[1] + B->la_vp[5] * B->la_vp[5] + B->la_vp[9] * B->la_vp[9]);
+        double c3 = sqrt(B->la_vp[3] * B->la_vp[3] + B->la_vp[7] * B->la_vp[7] + B->la_vp[11] * B->la_vp[11]);
+        double py = c3 > 0.0 ? c1 / c3 : 0.0;
+        int mode = 0;
+        if (lerp_ok && A && A->la_ok) { /* so zeichnet die Zwischenbild-Wiedergabe den simulierten Stand */
+            sy = la_wrap(A->la_s[0] + la_wrap(B->la_s[0] - A->la_s[0]) * (double)t);
+            sp = la_wrap(A->la_s[1] + la_wrap(B->la_s[1] - A->la_s[1]) * (double)t);
+            bx = A->la_rc[0] + (B->la_rc[0] - A->la_rc[0]) * (double)t;
+            by = A->la_rc[1] + (B->la_rc[1] - A->la_rc[1]) * (double)t;
+        }
+        if (g_cfg.loc_view_perframe && !loc_vpf_test_off() && (mode = li_vpf_view(v)) != 0) {
+            dy = la_clamp(la_wrap(v[0] - sy) * LA_TURN_K, -LA_MAXANG, LA_MAXANG);
+            dp = la_clamp(la_wrap(v[1] - sp) * LA_NICK_K, -LA_MAXANG, LA_MAXANG);
+            if (B->la_ret) {
+                rx = -py * tan(la_clamp(v[2] - v[0], -1.4, 1.4)) - bx;
+                ry = -py * tan(la_clamp(v[3] + v[1], -1.4, 1.4)) - by;
+            }
+        }
+        if ((g_cfg.loc_hud_diag & 4) && (g_cfg.loc_replay_tick[0] || g_cfg.loc_steps[0])) {
+            li_vpf_note(B, t, mode, sy + dy / LA_TURN_K, bx + rx, by + ry, sy, bx);
+        }
+    }
+    if (g_cfg.loc_aim_diag & 32) { li_la_note(B, t, dy, dp, apply, rx, ry); }
+    if (!apply) { return 0; }
+    InterlockedIncrement(&li_la_rep);
+    if (fabs(dy) + fabs(dp) >= 1e-6 && la_cam_corr(Cd, B->la_vp, up, dy, dp)) {
+        for (i = 0; i < 16; i++) { M[0][i] = (float)Cd[i]; }
+        on |= 1;
+    }
+    if (B->la_ret) { /* Fadenkreuz: Clip-Verschiebung x += dx * w, y += dy * w (Zeilenvektor: Zeile 3) */
+        if (fabs(rx) + fabs(ry) >= 1e-5) {
+            memset(M[1], 0, 64);
+            M[1][0] = M[1][5] = M[1][10] = M[1][15] = 1.0f;
+            M[1][12] = (float)la_clamp(rx, -1.0, 1.0); M[1][13] = (float)la_clamp(ry, -1.0, 1.0);
+            on |= 2;
+        }
+    }
+    if (on) { InterlockedIncrement(&li_la_on); }
+    return on;
+}
+
 static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, int dbg, const ip_cx_t *x)
 {
     int cps = -1; /* DIAG: 1 = Diagnose-PS gebunden */
@@ -5267,6 +5642,9 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
     ID3D11RenderTargetView *rpw = NULL; /* W295 WORLD-REPROJ: Welt-Schatten (Welt-Ops bis rplast durch den Warp ersetzen) */
     ID3D11DepthStencilView *rpd = NULL;
     unsigned rplast = 0xFFFFFFFFu;
+    float la_M[LA_NM][16], la_tmp[16]; /* W376 LOC-LOCAL-AIM, W394 */
+    int la_on = ip_la_prep(B, A, lerp_ok, t, dbg, vrp != NULL, la_M);
+#define IP_LAM(o, m) (LA_ON(la_on, (o)->law) ? (ip_la_mul(la_tmp, (m), la_M[(o)->law - 1]), (const float *)la_tmp) : (const float *)(m))
     (void)ip_list_refs_check(B, bi, "B"); /* W361 */
     if (A) { (void)ip_list_refs_check(A, ai, "A"); }
     fxr_rep_begin(&fxs);
@@ -5337,7 +5715,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
     if (!x->deferred && !vrp && !dbg && !ip_rp_prep) { ccm = cc_begin(B, bi, A, lerp_ok, x); } /* W146 GPU-COST */
     if (ip_gs_n >= 0) { ip_gs_mark((ID3D11RenderTargetView *)2); } /* DIAG(TICK-PERF,W125): Kopien fertig */
     if (ring) { /* PERF(PERF-M2,W174) ip_cb_ring: alle Draw-Konstanten in einem Map */
-        ring = ip_ring_fill(x, B, A, lerp_ok, t, &rc);
+        ring = ip_ring_fill(x, B, A, lerp_ok, t, &rc, la_on, la_M);
         rofs = ip_ring[x->deferred ? 1 : 0].ofs;
     }
     rc.ring = (unsigned)ring;
@@ -5565,7 +5943,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             ip_cb_write(x, x->cb0, ip_pl_mvp[i], o->has_tex, 0.0f, 0);
             rc.nmap++;
         }
-        else if (var != 4u) { ip_cb_write(x, x->cb0, o->mvp, o->has_tex, 0.0f, 0); rc.nmap++; }
+        else if (var != 4u) { ip_cb_write(x, x->cb0, IP_LAM(o, o->mvp), o->has_tex, 0.0f, 0); rc.nmap++; } /* W376 */
         if (dbg == 2 && ip_id_ps && ip_dbg_cb) {
             /* DIAG(W251 INTERP-GROUND): Draw-ID-Bild - R/G = Op-Index+1, B = 255 gelerpt / 64 exakt;
              * Mischen aus (ausser reinen Tiefen-/Stencil-Draws ohne Farbschreiben) */
@@ -5688,7 +6066,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
                 ID3D11Buffer *cbs2[2];
                 UINT o1 = (o->rzb ? o->vstart : a->vstart) * stride; /* W284 rzb: Strom N-1 = Tick-N-Vertices */
                 if (ring) { ip_ring_bind(x, rofs[2u * i + 1u], 1, rcur, &rc); }
-                else if (var != 4u) { ip_cb_write(x, x->cb1, IP_AMVP(o, a), 0, t, 1); rc.nmap++; }
+                else if (var != 4u) { ip_cb_write(x, x->cb1, IP_LAM(o, IP_AMVP(o, a)), 0, t, 1); rc.nmap++; } /* W376 */
                 ID3D11DeviceContext_IASetInputLayout(x->c, r->layl);
                 ID3D11DeviceContext_VSSetShader(x->c, r->vsl, NULL, 0);
                 cbs2[0] = x->cb0; cbs2[1] = x->cb1;
@@ -5754,7 +6132,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
             ID3D11Buffer *vbs[2];
             UINT strides[2], offs[2];
             if (ring) { ip_ring_bind(x, rofs[2u * i + 1u], 1, rcur, &rc); } /* PERF(PERF-M2,W174) */
-            else if (var != 4u) { ip_cb_write(x, x->cb1, IP_AMVP(o, a), 0, t, 1); rc.nmap++; }
+            else if (var != 4u) { ip_cb_write(x, x->cb1, IP_LAM(o, IP_AMVP(o, a)), 0, t, 1); rc.nmap++; } /* W376 */
             if (mode != 1) {
                 ID3D11Buffer *cbs2[2];
                 ID3D11DeviceContext_IASetInputLayout(x->c, ip_lay2);
@@ -6746,6 +7124,8 @@ static void ip_show(ip_list_t *A, ip_list_t *B, float t, const char *tag)
     sb_pf_note((t >= 1.0f || !A) ? 1.0f : t, B->frame); /* DIAG(POPIN,W91): pf_ring */
     if (g_sba_loc) { li_note(A, B, t); } /* W323 */
     t0 = ip_now();
+    ip_tlast_present_pre = t0; /* DIAG(W393) pace_diag */
+    InterlockedIncrement(&pv_presents); /* W393: Bilder je VBlank-Intervall */
     if (GetCurrentThreadId() == g_pd_tid) { g_phud_src = 1; } /* W138 perf_trace */
     sb_render_present_raw();
     g_phud_src = 0;
@@ -6818,7 +7198,7 @@ static int ip_gpu_behind(void)
  * aelteste zuerst); hold = juengster Tick exakt halten (naechster fehlt). */
 static void ip_pair_at(LONGLONG due, ip_list_t **pA, ip_list_t **pB, float *pt, int *phold)
 {
-    LONGLONG v = due - ip_lat;
+    LONGLONG v = due - ip_lat_at(due); /* W393: stetige Bilduhr (aus: ip_lat) */
     ip_list_t *A = NULL, *B;
     float t = 1.0f;
     int i;
@@ -6845,6 +7225,96 @@ static void ip_pair_at(LONGLONG due, ip_list_t **pA, ip_list_t **pB, float *pt, 
 
 /* Echtzeit-Takt: faelliges Bild zeigen (Zustand zur Zeit tau - L). */
 static int pd_owns_clock(void); /* W138 PERF-FIX */
+/* ---------- W393 LOC-PACING pace_vsync: Zwischenbild-Takt an den VBlank koppeln ----------
+ * Mit present_interval=1 (VSync an) liefen die Zwischenbilder bisher mit dem Timer (Present-Intervall 0): Bei
+ * interp_fps = Monitorfrequenz wandert die Phase Timer<->VBlank langsam, liegt sie am VBlank, fallen zwei Bilder in
+ * ein Komponier-Intervall (eins nie gezeigt, eins doppelt). Ein eigener Thread wartet auf den VBlank (DXGI) und
+ * schaetzt Periode und Phase; die Faelligkeiten liegen dann auf dem Raster VBlank + Periode/2 (Mitte zwischen zwei
+ * VBlanks, weit weg vom Komponier-Zeitpunkt), alle k VBlanks (k = Monitor/interp_fps, nur ganzzahlig +-3 %).
+ * Present selbst bleibt Intervall 0 (blockiert nie unter ctx_lock). Ohne Kopplung zaehlt der Thread nur (pace_diag). */
+static HANDLE pv_th;
+static volatile LONGLONG pv_last, pv_per; /* letzter VBlank, Periode (QPC, geglaettet) */
+static volatile LONG pv_n0, pv_n1, pv_n2, pv_snap_n;
+static LONGLONG pv_st_d, pv_of_d; /* DIAG: Raster fuer die PACE-Zeile */
+static int pv_lock_want(void)
+{
+    if (g_cfg.pace_vsync == 3) { return g_sba_loc && !sb_render_exclusive(); } /* auch VSync aus, nur im Fenster (DWM) */
+    return g_cfg.present_interval == 1 && (g_cfg.pace_vsync == 2 || (g_cfg.pace_vsync == 1 && g_sba_loc));
+}
+/* Raster der Kopplung (pace_vb_grid), 0 = keine (Periode unbekannt, Thread steht oder nicht ganzzahlig) */
+static int pv_lock_grid(LONGLONG *step, LONGLONG *off)
+{
+    LONGLONG per = InterlockedCompareExchange64(&pv_per, 0, 0);
+    if (!pv_lock_want() || per <= 0 || g_cfg.interp_fps <= 0) { return 0; }
+    if (ip_now() - InterlockedCompareExchange64(&pv_last, 0, 0) > ip_qpf.QuadPart / 4) { return 0; } /* Thread steht */
+    return pace_vb_grid((double)g_cfg.interp_fps, per, ip_qpf.QuadPart, step, off);
+}
+/* Faelligkeit t auf den naechstgelegenen Rasterpunkt legen. */
+static LONGLONG pv_snap(LONGLONG t, LONGLONG step, LONGLONG off)
+{
+    LONGLONG vb = InterlockedCompareExchange64(&pv_last, 0, 0);
+    InterlockedIncrement(&pv_snap_n);
+    return (LONGLONG)pace_vb_next(t - step / 2, vb, step, off);
+}
+static DWORD WINAPI pv_main(LPVOID p)
+{
+    LONGLONG last = 0;
+    (void)p;
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_ABOVE_NORMAL);
+    for (;;) {
+        LONGLONG q;
+        if (!(pv_lock_want() || g_cfg.pace_diag) || !sb_pd_on() || !ip_live) { last = 0; Sleep(50); continue; }
+        if (!sb_render_vblank_wait()) { last = 0; Sleep(50); continue; }
+        q = ip_now();
+        if (last) {
+            LONGLONG d = q - last, per = pv_per;
+            /* 30..400 Hz; Ausreisser (verpasster VBlank) nicht in die Periode */
+            if (d > ip_qpf.QuadPart / 400 && d < ip_qpf.QuadPart / 30) {
+                if (per <= 0 || d < per * 3 / 2) {
+                    per = per > 0 ? per + (d - per) / 16 : d;
+                    InterlockedExchange64(&pv_per, per);
+                }
+            }
+            { LONG c = InterlockedExchange(&pv_presents, 0);
+              if (c <= 0) { InterlockedIncrement(&pv_n0); } else if (c == 1) { InterlockedIncrement(&pv_n1); } else { InterlockedIncrement(&pv_n2); } }
+        } else {
+            InterlockedExchange(&pv_presents, 0);
+        }
+        InterlockedExchange64(&pv_last, q);
+        last = q;
+    }
+}
+
+/* ---------- DIAG(W393 LOC-PACING) pace_diag: Bildtakt je 10 s (Zeile PACE) ----------
+ * Je gezeigtem Zwischenbild: Abstand der Presents (QPC vor Present), gezeigte Spielzeit g = Listen-Nummer von A +
+ * t (in Ticks), Phase der Faelligkeit im Tick, Latenz-Wechsel. Nur Zaehler/Zeiten, keine Eingaben. */
+#define PC_N 4096
+static float pc_ft[PC_N], pc_dg[PC_N];
+static int pc_nft, pc_ndg;
+static LONGLONG pc_last_q, pc_last_lat;
+static double pc_last_g = -1.0;
+static unsigned pc_kept, pc_latchg, pc_ph[12], pc_skip0, pc_lockw1, pc_ts_s, pc_ts_snap, pc_ts_big;
+static double pc_latchg_max, pc_lockw_max;
+static void pc_note(const ip_list_t *A, const ip_list_t *B, float t, LONGLONG due)
+{
+    double g = (A && t < 1.0f) ? (double)A->serial + (double)t * (double)(B->serial - A->serial) : (double)B->serial;
+    LONGLONG q = ip_tlast_present_pre, lat = ip_lat_at(due);
+    if (pc_last_q && pc_nft < PC_N) { pc_ft[pc_nft++] = (float)ip_ms(pc_last_q, q); }
+    if (pc_last_g >= 0.0 && pc_ndg < PC_N && g >= pc_last_g - 8.0) { pc_dg[pc_ndg++] = (float)(g - pc_last_g); }
+    if (pc_last_lat && lat != pc_last_lat) {
+        double d = fabs(ip_ms(pc_last_lat, lat));
+        if (d > 0.5) { pc_latchg++; }
+        if (d > pc_latchg_max) { pc_latchg_max = d; }
+    }
+    if (B && ip_tick_hz() > 0) { /* Phase der Faelligkeit gegen die Zustandszeit des juengsten Ticks */
+        const ip_list_t *N = &g_ipl[ip_hist[ip_nhist - 1]];
+        pc_ph[pace_phase_bin(due, N->tstate, ip_qpf.QuadPart / ip_tick_hz(), 12)]++;
+    }
+    pc_last_q = q;
+    pc_last_g = g;
+    pc_last_lat = lat;
+}
+
 static void ip_poll(void)
 {
     LONGLONG now;
@@ -6858,11 +7328,12 @@ static void ip_poll(void)
     if (now < ip_tnext) { return; }
     ip_in_poll = 1;
     ip_pair_at(ip_tnext, &A, &B, &t, &hold);
-    if (hold) { st_hold++; }
+    if (hold) { st_hold++; ip_lat_hold(ip_tnext, B); } /* W393: elastische Bilduhr */
     if (g_sba_loc && (hold || !A || t >= 1.0f) && B->serial == li_last_ser && li_last_t >= 1.0f) {
         /* W323 LOC-INTERP: naechster Tick noch nicht da und das juengste Bild steht schon exakt -> nicht erneut
          * praesentieren (keine Wiederhol-Presents im LoC-Profil, W320); das Fenster zeigt es ohnehin weiter. */
         li_kept++;
+        pc_kept++; /* DIAG(W393) */
         ip_tnext += ip_dt;
         now = ip_now();
         while (ip_tnext <= now) { ip_tnext += ip_dt; st_skip++; g_ip_skip_tot++; }
@@ -6881,11 +7352,17 @@ static void ip_poll(void)
         ip_in_poll = 0;
         return;
     }
+    { unsigned np0 = st_presents;
     ip_show(A, B, t, tag);
+    if (st_presents != np0) {
+        ip_lat_commit(ip_tnext); /* W393 */
+        if (g_cfg.pace_diag) { pc_note(A, B, t, ip_tnext); } /* DIAG(W393) */
+    } }
     sb_ctx_leave();
     ip_tnext += ip_dt;
     now = ip_now();
     while (ip_tnext <= now) { ip_tnext += ip_dt; st_skip++; g_ip_skip_tot++; }
+    { LONGLONG st, of; if (pv_lock_grid(&st, &of)) { ip_tnext = pv_snap(ip_tnext, st, of); } } /* W393 pace_vsync */
     ip_rt_prefetch(); /* W126 RENDER-THREAD: naechstes Bild vorbereiten */
     ip_in_poll = 0;
 }
@@ -6912,6 +7389,7 @@ static DWORD pd_tid_l;
 static volatile LONG pd_started; /* 0 = nie, 1 = laeuft, 2 = Start fehlgeschlagen */
 static LONGLONG pd_deadline;
 static unsigned pd_n_ip, pd_n_hold, pd_n_late, pd_n_lockw, pd_n_iter, pd_n_gw, pd_n_gw_ok;
+static unsigned pd_n_rbwait, pd_n_rbskip; /* W390: Ruhe (Vorlauf/Neurechnen) abgewartet bzw. Bild ausgelassen */
 static double pd_lockw_ms, pd_lockw_max, pd_late_max, pd_wake_err_max, pd_gw_ms;
 static LONGLONG pd_stat_q;
 
@@ -6928,6 +7406,10 @@ static int pd_owns_clock(void)
     return pd_started == 1 && GetCurrentThreadId() != g_pd_tid && sb_pd_on();
 }
 
+void *sb_iml_holder_site(void);                 /* DIAG(LOC-IM-LOCK), d3d11_render.c */
+void sb_iml_pd_wait(LONGLONG dq, void *site);
+void sb_iml_log(double secs);
+static void isw_log(double secs);
 static double pd_hold_ms, pd_hold_max; /* DIAG(PERF-TICK,W168) ctx_wait_diag */
 static unsigned pd_hold_n05;
 static void pd_stat_log(LONGLONG now)
@@ -6941,6 +7423,33 @@ static void pd_stat_log(LONGLONG now)
                secs, pd_n_ip, pd_n_hold, pd_n_late, pd_late_max, pd_n_lockw,
                pd_n_lockw ? pd_lockw_ms / pd_n_lockw : 0.0, pd_lockw_max, pd_wake_err_max, pd_n_iter, ip_live,
                pd_n_gw, pd_n_gw_ok, pd_n_gw ? pd_gw_ms / pd_n_gw : 0.0);
+    }
+    if (pd_stat_q && g_cfg.pace_diag) { /* DIAG(W393 LOC-PACING): eigene Zeile, nur Zaehler und Zeiten */
+        double soll = 1000.0 / (double)(g_cfg.interp_fps > 0 ? g_cfg.interp_fps : 120);
+        pace_ft_t f = pace_ft_sum(pc_ft, pc_nft, soll);
+        pace_g_t gg = pace_g_sum(pc_dg, pc_ndg);
+        unsigned k, phm = 0, pht = 0, sk = g_ip_skip_tot - pc_skip0;
+        for (k = 0; k < 12u; k++) { pht += pc_ph[k]; if (pc_ph[k] > phm) { phm = pc_ph[k]; } }
+        HLOG_I("PACE: %.1fs fps=%d bilder=%d abstand p50=%.2f p99=%.2f max=%.2fms ausserhalb1ms=%d (%.2f%%) "
+               "ausgelassen=%u (%.1f/min) ruhe_ausgelassen=%u ruhe_gewartet=%u doppelt=%d gehalten=%u g_med=%.4f g_abw99=%.1f%% "
+               "spruenge=%d L=%.1fms L_ziel=%.1fms L_wechsel=%u (max %.1fms) sperre>1ms=%u (max %.2fms) phase_max=%.0f%% uhr=%d vorlauf_frei=%d "
+               "vblank=%.2fHz gekoppelt=%d vb_bilder0/1/2+=%ld/%ld/%ld tick_glatt=%u (abw>1/8 %u) tick_neu=%u gedehnt=%u",
+               secs, g_cfg.interp_fps, f.n + (f.n ? 1 : 0), f.p50, f.p99, f.mx, f.out1, f.n ? 100.0 * f.out1 / f.n : 0.0,
+               sk, sk * 60.0 / secs, pd_n_rbskip, pd_n_rbwait, gg.same, pc_kept, gg.med, gg.dev99 * 100.0, gg.jump,
+               (double)ip_lat_at(ip_tnext) * 1000.0 / (double)ip_qpf.QuadPart, (double)ip_lat * 1000.0 / (double)ip_qpf.QuadPart,
+               pc_latchg, pc_latchg_max, pc_lockw1, pc_lockw_max, pht ? 100.0 * phm / pht : 0.0, ip_pace_on(), g_cfg.loc_pd_spec,
+               pv_per > 0 ? (double)ip_qpf.QuadPart / (double)pv_per : 0.0, pv_lock_grid(&pv_st_d, &pv_of_d), pv_n0, pv_n1, pv_n2, pc_ts_s, pc_ts_big, pc_ts_snap, pc_elastic);
+        pc_ts_s = pc_ts_big = pc_ts_snap = pc_elastic = 0;
+        InterlockedExchange(&pv_n0, 0); InterlockedExchange(&pv_n1, 0); InterlockedExchange(&pv_n2, 0);
+        pc_nft = pc_ndg = 0;
+        pc_kept = pc_latchg = pc_lockw1 = 0;
+        pc_latchg_max = pc_lockw_max = 0.0;
+        memset(pc_ph, 0, sizeof pc_ph);
+        pc_skip0 = g_ip_skip_tot;
+    }
+    if (pd_stat_q && g_cfg.imlock_diag) { sb_iml_log(secs); sb_ctx_enter(); isw_log(secs); sb_ctx_leave(); } /* DIAG(LOC-IM-LOCK) */
+    if (pd_stat_q && g_sba_loc && (pd_n_rbwait || pd_n_rbskip)) { /* W390: eigene Zeile (PRESENT-TAKT wird geparst) */
+        HLOG_I("PRESENT-RUHE: %.1fs Ruhe abgewartet=%u Bild ausgelassen=%u", secs, pd_n_rbwait, pd_n_rbskip);
     }
     if (pd_stat_q && g_cfg.ctx_wait_diag) { /* DIAG(PERF-TICK,W168) */
         extern volatile LONGLONG g_ctxw_q, g_ctxw_tick_max;
@@ -6968,6 +7477,30 @@ static void pd_stat_log(LONGLONG now)
         }
         li_mid = li_exact = li_same = li_ticks = li_dev2 = li_kept = 0;
         li_dev_max = 0.0;
+        if (g_cfg.loc_local_aim) { /* W376 LOC-LOCAL-AIM: eigene Zeile (LOCINTERP stat bleibt unveraendert) */
+            HLOG_I("LOCAIM render: %.1fs Listen mit Vorhersage=%ld (Welt-Draws je Liste %ld, Fadenkreuz-Draws gesamt %ld) "
+                   "Wiedergaben gueltig=%ld korrigiert=%ld",
+                   secs, li_la_lists, li_la_lists ? li_la_draws / li_la_lists : 0L, li_la_rets, li_la_rep, li_la_on);
+            InterlockedExchange(&li_la_lists, 0); InterlockedExchange(&li_la_draws, 0); InterlockedExchange(&li_la_rets, 0);
+            InterlockedExchange(&li_la_rep, 0); InterlockedExchange(&li_la_on, 0);
+        }
+        if (g_cfg.loc_hud_predict || g_cfg.loc_view_perframe) { /* W394 LOC-HUD-VIEW: eigene Zeile, nur Zaehler */
+            HLOG_I("LOCHUD: %.1fs Listen Gegner<100m=%ld mit Marken=%ld (Draws %ld, Kandidaten %ld, verworfen Bewegung %ld "
+                   "ruhend %ld) Kompass=%ld | Wiedergaben=%ld verschoben=%ld "
+                   "Abweichung Marke vorher mittel %.1f max %.1f, Rest mittel %.2f max %.2f px@640 | Kompass %.3f NDC/rad | "
+                   "Radar Listen=%ld Richtung %+.0f (n=%d) | Sicht je Bild ohne/Basis/Zusatz/gehalten=%ld/%ld/%ld/%ld",
+                   secs, li_hm_near, li_hm_lists, li_hm_draws, li_hm_cand, li_hm_rej_mv, li_hm_rej_st, li_hm_cmp, li_hm_rep, li_hm_on,
+                   li_hm_px_n ? li_hm_px_sum / li_hm_px_n : 0.0, li_hm_px_max,
+                   li_hm_res_n ? li_hm_res_sum / li_hm_res_n : 0.0, li_hm_res_max, li_cmp_k, li_hm_rad, li_rad_k, li_rad_n,
+                   li_vpf_n[0], li_vpf_n[1], li_vpf_n[2], li_vpf_n[3]);
+            InterlockedExchange(&li_hm_near, 0); InterlockedExchange(&li_hm_rad, 0);
+            InterlockedExchange(&li_hm_cand, 0); InterlockedExchange(&li_hm_rej_mv, 0); InterlockedExchange(&li_hm_rej_st, 0); li_hm_res_n = 0; li_hm_res_sum = 0.0; li_hm_res_max = 0.0;
+            InterlockedExchange(&li_hm_lists, 0); InterlockedExchange(&li_hm_draws, 0); InterlockedExchange(&li_hm_cmp, 0);
+            InterlockedExchange(&li_hm_rep, 0); InterlockedExchange(&li_hm_on, 0);
+            li_hm_px_n = 0; li_hm_px_sum = 0.0; li_hm_px_max = 0.0;
+            InterlockedExchange(&li_vpf_n[0], 0); InterlockedExchange(&li_vpf_n[1], 0);
+            InterlockedExchange(&li_vpf_n[2], 0); InterlockedExchange(&li_vpf_n[3], 0);
+        }
     }
     {   /* W361: sollte nie vorkommen (ip_list_refs_check, ip_sh_rc_watch) */
         static LONG rc_last;
@@ -6980,6 +7513,7 @@ static void pd_stat_log(LONGLONG now)
     }
     pd_stat_q = now;
     pd_n_ip = pd_n_hold = pd_n_late = pd_n_lockw = pd_n_iter = pd_n_gw = pd_n_gw_ok = 0;
+    pd_n_rbwait = pd_n_rbskip = 0;
     pd_lockw_ms = pd_lockw_max = pd_late_max = pd_wake_err_max = pd_gw_ms = 0.0;
 }
 
@@ -6999,9 +7533,12 @@ static int pd_gpu_would_skip(void)
 extern const hlock_t *sb_ctx_hlock(void);
 static void pd_lock(void)
 {
+    LONGLONG q0 = g_cfg.imlock_diag ? ip_now() : 0;
+    void *site = q0 ? sb_iml_holder_site() : NULL;
     InterlockedExchange(&g_pd_want, 1);
     sb_ctx_enter();
     InterlockedExchange(&g_pd_want, 0);
+    if (q0) { sb_iml_pd_wait(ip_now() - q0, site ? site : sb_iml_holder_site()); }
 }
 
 /* Ein Schritt unter ctx_lock; setzt pd_deadline. */
@@ -7057,6 +7594,8 @@ static void pd_step(void)
     }
     if (g_sba_loc) { /* W323 LOC-INTERP: keine Wiederhol-Presents im LoC-Profil (W320: Ruckeln); Menue/Lobby und
                       * die ersten Missionsbilder praesentiert das Spiel selbst */
+        extern int sb_lm_step(LONGLONG now, LONGLONG *deadline); /* W377 LOC-MENU-FPS: Menues mit der Bildrate */
+        if (sb_lm_step(now, &pd_deadline)) { return; }
         pd_deadline = now + dt;
         return;
     }
@@ -7131,15 +7670,34 @@ static DWORD WINAPI pd_main(LPVOID p)
         }
         q0 = ip_now();
         if (g_sba_loc) { /* W330 LOC-ROLLBACK-R1: Ruhe beim Laden/Neurechnen (sb_interp_rb_pause) */
+            extern int sb_lm_prelock(LONGLONG now, LONGLONG *deadline); /* W377 LOC-MENU-FPS */
             InterlockedExchange(&pd_rb_busy, 1);
             if (pd_rb_pause) {
+                LONGLONG w0 = ip_now();
                 InterlockedExchange(&pd_rb_busy, 0);
+                /* W390 LOC-OWN-PREDICT: kurze Ruhe (Vorlauf je Tick ~1 ms, kurzes Neurechnen) abwarten statt das Bild
+                 * auszulassen (sonst bei jedem Vorlauf, der in einen Bildtermin faellt, ein fehlendes Bild). Hoechstens
+                 * 4 ms, dann wie bisher auslassen. Gegenseitiger Ausschluss wie oben (busy setzen, Ruhe erneut pruefen). */
+                while (pd_rb_pause && ip_now() - w0 < ip_qpf.QuadPart / 250) { SwitchToThread(); }
+                if (!pd_rb_pause) {
+                    InterlockedExchange(&pd_rb_busy, 1);
+                    if (!pd_rb_pause) { pd_n_rbwait++; goto pd_rb_go; }
+                    InterlockedExchange(&pd_rb_busy, 0);
+                }
+                pd_n_rbskip++;
                 pd_deadline = now + (ip_dt > 0 ? ip_dt : ip_qpf.QuadPart / 120);
+                continue;
+            }
+        pd_rb_go:
+            if (sb_lm_prelock(now, &pd_deadline)) { /* W377: Menue, Spiel arbeitet gerade -> ctx_lock nicht anfassen */
+                InterlockedExchange(&pd_rb_busy, 0);
                 continue;
             }
         }
         pd_lock();
         w = ip_ms(q0, ip_now());
+        if (w > 1.0) { pc_lockw1++; } /* DIAG(W393) */
+        if (w > pc_lockw_max) { pc_lockw_max = w; }
         if (w > 0.05) {
             pd_n_lockw++;
             pd_lockw_ms += w;
@@ -7188,6 +7746,10 @@ void sb_pd_start(void)
     g_pd_tid = pd_tid_l;
     if (g_cfg.present_core >= 0 && g_cfg.present_core < 32) {
         SetThreadAffinityMask(pd_th, (DWORD_PTR)1 << g_cfg.present_core);
+    }
+    if ((g_cfg.pace_vsync > 0 && g_sba_loc) || g_cfg.pace_vsync == 2 || g_cfg.pace_diag) { /* W393: VBlank-Thread (ruht ohne Kopplung/Messung; SB nur mit pace_vsync=2) */
+        pv_th = CreateThread(NULL, 0, pv_main, NULL, 0, NULL);
+        if (pv_th && g_cfg.present_core >= 0 && g_cfg.present_core < 32) { SetThreadAffinityMask(pv_th, (DWORD_PTR)1 << g_cfg.present_core); }
     }
     HLOG_I("PRESENT-TAKT: Thread T%04lx gestartet (Kern %d, Takt %d Hz, Echtzeit=%d, Offscreen=%d)", pd_tid_l,
            g_cfg.present_core, g_cfg.interp_fps, g_cfg.vblank_hz > 0, sb_render_offscreen());
@@ -8232,6 +8794,676 @@ static void ip_rp_tick(ip_list_t *A, int ai, ip_list_t *B, int bi)
 }
 
 /* Swap N (sb_render_present, vor dem Present). 1 = Present uebernommen. */
+
+/* ---------- DIAG(W376 LOC-LOCAL-AIM) loc_aim_diag ----------
+ * Bit 2: je aufgezeichnetem Tick-Bild die Kamera-Matrix der Welt im Backbuffer (haeufigste mvp der Draws vor der
+ * ersten BB-Kopie) nach locaim_cam.bin. Bit 8: Draw-Zensus (jedes 200. Bild, hoechstens 8) nach locaim_census.txt
+ * mit M = mvp * Kamera^-1 (affin = Welt-Objekt; Verschiebung relativ zum Auge). Nur Spielbild, keine Eingaben. */
+/* Weltziel der Liste (Messlaeufe W376_A1/A4): vor dem Absetzen zeichnet LoC die Aussenwelt in den Backbuffer, danach in
+ * ein eigenes Render-Ziel (Hauptsicht), das das Cockpit im Backbuffer als Fenster-Textur zeigt; der Lock-On-Monitor
+ * folgt als weiteres Ziel. Je Ziel folgt auf die Welt eine Kopie dieses Ziels (W340 IP_COPY: Glow-Kette), danach
+ * HUD/2D. Weltziel = erstes Ziel (Reihenfolge der Ops) mit >= 32 3D-Draws vor seiner ersten Kopie; split = diese Kopie.
+ * Kein solches Ziel: NULL (keine Welt, keine Korrektur). */
+static ID3D11RenderTargetView *la_world_rtv(const ip_list_t *L, unsigned *split)
+{
+    enum { NT = 8 };
+    ID3D11RenderTargetView *tg[NT];
+    unsigned cnt[NT], nt = 0, i, k;
+    for (i = 0; i < L->nops; i++) {
+        const ip_op_t *o = &L->ops[i];
+        if (o->kind == IP_DRAW && o->cls && o->nv >= 3u && o->rtv) {
+            for (k = 0; k < nt && tg[k] != o->rtv; k++) {}
+            if (k == nt) { if (nt == NT) { continue; } tg[nt] = o->rtv; cnt[nt] = 0; nt++; }
+            cnt[k]++;
+        } else if (o->kind == IP_COPY && o->cps) {
+            for (k = 0; k < nt && tg[k] != o->cps; k++) {}
+            if (k < nt && cnt[k] >= 32u) { *split = i; return tg[k]; }
+            if (k < nt) { cnt[k] = 0; } /* kleine Gruppe (z. B. Kartenfenster): weiter suchen */
+        }
+    }
+    *split = 0;
+    return NULL;
+}
+static int la_cam_of(const ip_list_t *L, float cam[16], unsigned *cnt, unsigned *split)
+{
+    enum { NC = 64 };
+    unsigned cidx[NC], cn[NC], nc = 0, i, k, best = 0, sp = L->nops;
+    ID3D11RenderTargetView *wt = la_world_rtv(L, &sp);
+    if (!wt) { return 0; }
+    for (i = 0; i < sp; i++) {
+        const ip_op_t *o = &L->ops[i];
+        if (o->kind != IP_DRAW || o->rtv != wt || o->nv < 3u || !o->cls) { continue; }
+        for (k = 0; k < nc; k++) { if (memcmp(L->ops[cidx[k]].mvp, o->mvp, 64) == 0) { cn[k]++; break; } }
+        if (k == nc && nc < NC) { cidx[nc] = i; cn[nc] = 1; nc++; }
+    }
+    if (!nc) { return 0; }
+    for (k = 1; k < nc; k++) { if (cn[k] > cn[best]) { best = k; } }
+    memcpy(cam, L->ops[cidx[best]].mvp, 64);
+    *cnt = cn[best];
+    *split = sp;
+    return 1;
+}
+
+static void li_aim_diag(const ip_list_t *L)
+{
+    static FILE *fc, *fz;
+    static unsigned nl, ncz;
+    float cam[16], ci[16], M[16];
+    unsigned cnt = 0, sp = 0, i;
+    nl++;
+    if (!la_cam_of(L, cam, &cnt, &sp)) {
+        static unsigned nfail;
+        nfail++;
+        if ((g_cfg.loc_aim_diag & 8) && (nfail == 1u || nfail == 100u || nfail == 1000u || nfail == 3000u)) { /* Zensus ohne Kamera */
+            if (!fz) { fz = (FILE *)loc_aim_diag_file("locaim_census.txt"); }
+            if (fz) {
+                fprintf(fz, "NOCAM frame=%u serial=%u nops=%u g_rtv=%p\n", L->frame, L->serial, L->nops, (void *)g_rtv);
+                for (i = 0; i < L->nops; i++) {
+                    const ip_op_t *o = &L->ops[i];
+                    fprintf(fz, "%u k=%u rtv=%p cps=%p cls=%u nv=%u\n", i, o->kind, (void *)o->rtv, (void *)o->cps, o->cls, o->nv);
+                }
+                fflush(fz);
+            }
+        }
+        return;
+    }
+    if (g_cfg.loc_aim_diag & 2) {
+        unsigned hdr[12];
+        float pv[4];
+        loc_aim_pub_t pb;
+        if (!fc) { fc = (FILE *)loc_aim_diag_file("locaim_cam.bin"); }
+        if (fc) {
+            loc_aim_peek(&pb);
+            hdr[0] = 0x3241434Cu; hdr[1] = L->frame; hdr[2] = L->serial; hdr[3] = (unsigned)L->tswap;
+            hdr[4] = cnt; hdr[5] = L->nops; hdr[6] = sp; hdr[7] = (unsigned)(L->tswap >> 32);
+            hdr[8] = pb.seq; hdr[9] = pb.gframe; hdr[10] = hooks_frame_count(); hdr[11] = (unsigned)pb.n;
+            pv[0] = pb.ys; pv[1] = pb.ps; pv[2] = pb.ax; pv[3] = pb.ay;
+            fwrite(hdr, sizeof hdr, 1, fc);
+            fwrite(cam, 64, 1, fc);
+            fwrite(pv, sizeof pv, 1, fc);
+            fflush(fc);
+        }
+    }
+    if ((g_cfg.loc_aim_diag & 8) && ip_m4inv(ci, cam) &&
+        (g_cfg.loc_aim_diag_n > 0 ? (L->serial >= (unsigned)g_cfg.loc_aim_diag_from &&
+                                     L->serial < (unsigned)(g_cfg.loc_aim_diag_from + g_cfg.loc_aim_diag_n) && (L->serial & 3u) == 0u)
+                                  : ((nl % 200u) == 0u && ncz < 8u))) { /* Fenster (Serial, jede 4. Liste) bzw. jede 200. */
+        if (!fz) { fz = (FILE *)loc_aim_diag_file("locaim_census.txt"); }
+        if (!fz) { return; }
+        ncz++;
+        fprintf(fz, "LIST frame=%u serial=%u nops=%u split=%u camcnt=%u cam=", L->frame, L->serial, L->nops, sp, cnt);
+        for (i = 0; i < 16; i++) { fprintf(fz, "%.6g%s", cam[i], i < 15 ? "," : "\n"); }
+        for (i = 0; i < L->nops; i++) {
+            const ip_op_t *o = &L->ops[i];
+            float aff;
+            if (o->kind != IP_DRAW) { fprintf(fz, "%u k=%u\n", i, o->kind); continue; }
+            ip_m4mul(M, o->mvp, ci);
+            aff = fabsf(M[3]) + fabsf(M[7]) + fabsf(M[11]) + fabsf(M[15] - 1.0f);
+            fprintf(fz, "%u bb=%d rt=%p cls=%u why=%u fl=%u nv=%u tex=%u eq=%d aff=%.3g T=%.3f,%.3f,%.3f s=%.3f rn0=%.3f,%.3f,%.3f\n",
+                    i, o->rtv == g_rtv, (void *)o->sh_rtv, o->cls, o->why, o->flag, o->nv, o->has_tex,
+                    memcmp(o->mvp, cam, 64) == 0, aff, M[12], M[13], M[14],
+                    sqrtf(M[0] * M[0] + M[1] * M[1] + M[2] * M[2]), o->rn[0][0], o->rn[0][1], o->rn[0][2]);
+        }
+        fflush(fz);
+    }
+}
+
+/* W394 LOC-HUD-VIEW: je anderem VT simulierte Bildlage a = proj_VP(p) und angezeigte Lage c = [q, 1] * VP mit
+ * q = K * X_j * p (W387-Versatz X_j, W390-Kamera K; jeweils nur wenn aktiv). VP = simulierte Kamera der Liste. */
+static void li_hud_data(ip_list_t *L, const double VP[16], const loc_smooth_pub_t *pb, const double *K, double X[][16],
+                        unsigned objon)
+{
+    int j, k;
+    L->hm_ok = 0;
+    L->hm_gok = pb->own >= 0 && pb->own < LS_MAXV && pb->v[pb->own].ok;
+    L->hm_gier = L->hm_gok ? pb->v[pb->own].yaw : 0.0f;
+    L->hm_dyaw = (K && L->hm_gok && pb->v[pb->own].on) ? pb->v[pb->own].off[3] : 0.0f;
+    for (j = 0; j < LS_MAXV; j++) {
+        double p[3], q[3], a[4];
+        if (j == pb->own || !pb->v[j].ok) { L->hm_c[j][3] = 0.0; continue; }
+        for (k = 0; k < 3; k++) { p[k] = pb->v[j].p[k]; }
+        for (k = 0; k < 4; k++) { a[k] = p[0] * VP[k] + p[1] * VP[4 + k] + p[2] * VP[8 + k] + VP[12 + k]; }
+        if (a[3] < 1e-3) { L->hm_c[j][3] = 0.0; continue; }
+        L->hm_a[j][0] = (float)(a[0] / a[3]);
+        L->hm_a[j][1] = (float)(a[1] / a[3]);
+        memcpy(q, p, sizeof q);
+        if (objon & (1u << j)) { ls_xform_pt(q, q, X[j]); }
+        if (K) { ls_xform_pt(q, q, K); }
+        for (k = 0; k < 4; k++) { L->hm_c[j][k] = q[0] * VP[k] + q[1] * VP[4 + k] + q[2] * VP[8 + k] + VP[12 + k]; }
+        L->hm_ok = 1;
+    }
+}
+
+/* W394: ohne Versatz (li_smooth_apply ohne Wirkung): Daten aus dem juengsten Stand, simulierte Kamera der Liste. */
+static void li_hud_plain(ip_list_t *L)
+{
+    loc_smooth_pub_t pb;
+    float cam[16];
+    double VP[16];
+    unsigned cnt = 0, sp = 0, i;
+    if (!loc_smooth_peek(&pb) || !la_cam_of(L, cam, &cnt, &sp) || cnt < 8u) { return; }
+    for (i = 0; i < 16; i++) { VP[i] = cam[i]; }
+    li_hud_data(L, VP, &pb, NULL, NULL, 0u);
+}
+
+/* W385 LOC-SMOOTH: Rollback-Korrektur weich zeigen. Am Swap (vor der Zuordnung) die Welt-Draws dieser Liste mit dem
+ * abklingenden Versatz des Spiel-Threads verschieben: Draws, deren Weltursprung (mvp * Kamera^-1, affin) einem anderen
+ * VT am naechsten liegt (Radius), um dessen Versatz (W' = W * X); mit eigenem Versatz die ganze Welt ausser den Draws am
+ * eigenen VT so, dass die Kamera vom vorhergesagten Stand aus sieht (W' = W * K). Danach Bezugs-NDC neu. Ohne Versatz
+ * bleibt die Liste unberuehrt (bitgleich). Die Zwischenbilder interpolieren zwischen den so verschobenen Listen. */
+static void li_smooth_apply(ip_list_t *L)
+{
+    loc_smooth_pub_t pb;
+    float cam[16];
+    double VP[16], VPi[16], K[16], X[LS_MAXV][16], eye[3], r2;
+    unsigned cnt = 0, sp = 0, i, nobj = 0, ncam = 0, nown = 0, nvt = 0, nwd = 0;
+    unsigned hist[LS_MAXV][6], scnt[LS_MAXV];
+    double sraw[LS_MAXV][3], sdisp[LS_MAXV][3], sbd[LS_MAXV]; /* Anker-Draw je VT (naechster Weltursprung) */
+    int j, camon = 0, objon = 0, diag = (g_cfg.loc_rb_smooth_diag & 2) != 0, apply, haveye = 0;
+    int meas = (g_cfg.loc_rb_smooth_diag & 8) != 0; /* DIAG(W385): sichtbare Lageaenderung je Liste messen */
+    static unsigned s_dn, s_dl, s_pser;
+    static double s_pdisp[LS_MAXV][3], s_peye[3], s_pstep[LS_MAXV][3], s_pestep[3];
+    static double s_praw[LS_MAXV][3], s_prstep[LS_MAXV][3], s_peyer[3], s_perstep[3]; /* rohe Folge (ohne Versatz) */
+    static int s_pok[LS_MAXV], s_peok, s_psok[LS_MAXV], s_pesok;
+    ID3D11RenderTargetView *wt;
+    LARGE_INTEGER lsq0, lsq1, lsqf; /* W387: Kosten je Liste mit Versatz (F2-Regel) */
+    QueryPerformanceCounter(&lsq0);
+    apply = loc_smooth_get(&pb);
+    if (!apply) {
+        if (!(diag || meas) || !loc_smooth_peek(&pb)) { return; }
+        if (!meas && ((++s_dl % 200u) != 0u || s_dn >= 12u)) { return; } /* DIAG-Zensus: jede 200. Liste, hoechstens 12 */
+        if (meas && diag && ((++s_dl % 200u) != 0u || s_dn >= 12u)) { diag = 0; }
+    }
+    memset(scnt, 0, sizeof scnt);
+    memset(sraw, 0, sizeof sraw);
+    memset(sdisp, 0, sizeof sdisp);
+    if (!la_cam_of(L, cam, &cnt, &sp) || cnt < 8u) { return; }
+    wt = la_world_rtv(L, &sp);
+    if (!wt) { return; }
+    for (i = 0; i < 16; i++) { VP[i] = cam[i]; }
+    if (!la_m4inv_d(VPi, VP)) { return; }
+    haveye = ls_eye_of(eye, VPi);
+    if (apply && pb.own >= 0 && pb.own < LS_MAXV && pb.v[pb.own].ok && pb.v[pb.own].on && haveye) {
+        double off[4], oc[4], c3[3];
+        for (j = 0; j < 4; j++) { off[j] = pb.v[pb.own].off[j]; }
+        for (j = 0; j < 3; j++) { c3[j] = pb.v[pb.own].p[j]; }
+        ls_cam_off_pivot(off, eye, c3, oc); /* W390: das Auge dreht mit dem VT um dessen Mittelpunkt */
+        ls_cam_xform(K, eye, oc);
+        camon = 1;
+    }
+    for (j = 0; j < LS_MAXV; j++) {
+        double p[3], off[4];
+        int k;
+        if (!apply || j == pb.own || !pb.v[j].ok || !pb.v[j].on) { continue; }
+        for (k = 0; k < 3; k++) { p[k] = pb.v[j].p[k]; }
+        for (k = 0; k < 4; k++) { off[k] = pb.v[j].off[k]; }
+        ls_obj_xform(X[j], p, off);
+        objon |= 1 << j;
+        nvt++;
+    }
+    if (g_cfg.loc_hud_predict && apply) { li_hud_data(L, VP, &pb, camon ? K : NULL, X, (unsigned)objon); } /* W394 */
+    if (camon || objon) { /* W390: Abweichung einer Zielmarkierung (simulierter Stand, Bildpixel bei 640x480) vom gezeichneten VT */
+        double wmax = 0.0, wown = 0.0;
+        for (j = 0; j < LS_MAXV; j++) {
+            double p4[3], q[3], a[4], b[4], c4[4];
+            int k;
+            if (j == pb.own || !pb.v[j].ok) { continue; }
+            for (k = 0; k < 3; k++) { p4[k] = pb.v[j].p[k]; }
+            for (k = 0; k < 4; k++) { a[k] = p4[0] * VP[k] + p4[1] * VP[4 + k] + p4[2] * VP[8 + k] + VP[12 + k]; }
+            if (a[3] < 1e-3 || fabs(a[0] / a[3]) > 1.2 || fabs(a[1] / a[3]) > 1.2) { continue; }
+            if (camon) { /* nur eigene Kamera */
+                ls_xform_pt(q, p4, K);
+                for (k = 0; k < 4; k++) { c4[k] = q[0] * VP[k] + q[1] * VP[4 + k] + q[2] * VP[8 + k] + VP[12 + k]; }
+                if (c4[3] > 1e-3) {
+                    double dx = (c4[0] / c4[3] - a[0] / a[3]) * 320.0, dy = (c4[1] / c4[3] - a[1] / a[3]) * 240.0;
+                    if (sqrt(dx * dx + dy * dy) > wown) { wown = sqrt(dx * dx + dy * dy); }
+                }
+            }
+            if (objon & (1 << j)) { ls_xform_pt(q, p4, X[j]); } else { memcpy(q, p4, sizeof q); }
+            if (camon) { ls_xform_pt(q, q, K); }
+            for (k = 0; k < 4; k++) { b[k] = q[0] * VP[k] + q[1] * VP[4 + k] + q[2] * VP[8 + k] + VP[12 + k]; }
+            if (b[3] > 1e-3) {
+                double dx = (b[0] / b[3] - a[0] / a[3]) * 320.0, dy = (b[1] / b[3] - a[1] / a[3]) * 240.0;
+                if (sqrt(dx * dx + dy * dy) > wmax) { wmax = sqrt(dx * dx + dy * dy); }
+            }
+        }
+        if (camon) { /* gedachte Ziele geradeaus in 30 m und 100 m (unabhaengig davon, ob ein VT im Bild ist) */
+            double q4[4], fw[3], fl, t30 = 0.0, t100 = 0.0;
+            int k, rr;
+            for (k = 0; k < 4; k++) { q4[k] = 0.5 * VPi[8 + k] + VPi[12 + k]; } /* NDC (0, 0, 0.5) zurueck in die Welt */
+            if (fabs(q4[3]) > 1e-9) {
+                for (k = 0; k < 3; k++) { fw[k] = q4[k] / q4[3] - eye[k]; }
+                fl = sqrt(fw[0] * fw[0] + fw[1] * fw[1] + fw[2] * fw[2]);
+                for (rr = 0; rr < 2 && fl > 1e-6; rr++) {
+                    double R = rr ? 100000.0 : 30000.0, p4[3], q[3], a[4], b[4], dx, dy;
+                    for (k = 0; k < 3; k++) { p4[k] = eye[k] + fw[k] / fl * R; }
+                    ls_xform_pt(q, p4, K);
+                    for (k = 0; k < 4; k++) {
+                        a[k] = p4[0] * VP[k] + p4[1] * VP[4 + k] + p4[2] * VP[8 + k] + VP[12 + k];
+                        b[k] = q[0] * VP[k] + q[1] * VP[4 + k] + q[2] * VP[8 + k] + VP[12 + k];
+                    }
+                    if (a[3] < 1e-3 || b[3] < 1e-3) { continue; }
+                    dx = (b[0] / b[3] - a[0] / a[3]) * 320.0;
+                    dy = (b[1] / b[3] - a[1] / a[3]) * 240.0;
+                    if (rr) { t100 = sqrt(dx * dx + dy * dy); } else { t30 = sqrt(dx * dx + dy * dy); }
+                }
+            }
+            loc_smooth_render_mark_virt(t30, t100);
+        }
+        loc_smooth_render_mark(wmax, wown);
+    }
+    if (!camon && !objon && !diag && !meas) { return; }
+    memset(hist, 0, sizeof hist);
+    r2 = (double)pb.radius * (double)pb.radius;
+    for (i = 0; i < L->nops && i < sp; i++) {
+        ip_op_t *o = &L->ops[i];
+        double W[16], M[16], bd = -1.0;
+        int r, c, best = -1, q;
+        if (o->kind != IP_DRAW || o->rtv != wt || !o->cls) { continue; }
+        for (r = 0; r < 4; r++)
+            for (c = 0; c < 4; c++)
+                W[r * 4 + c] = (double)o->mvp[r * 4] * VPi[c] + (double)o->mvp[r * 4 + 1] * VPi[4 + c] +
+                               (double)o->mvp[r * 4 + 2] * VPi[8 + c] + (double)o->mvp[r * 4 + 3] * VPi[12 + c];
+        if (fabs(W[3]) + fabs(W[7]) + fabs(W[11]) + fabs(W[15] - 1.0) >= 0.02) { continue; } /* kein Weltobjekt */
+        nwd++;
+        for (j = 0; j < LS_MAXV; j++) {
+            double dx, dy, dz, d2;
+            if (!pb.v[j].ok) { continue; }
+            dx = W[12] - pb.v[j].p[0]; dy = W[13] - pb.v[j].p[1]; dz = W[14] - pb.v[j].p[2];
+            d2 = dx * dx + dy * dy + dz * dz;
+            if (diag) {
+                double d = sqrt(d2);
+                hist[j][d < 2000.0 ? 0 : (d < 4000.0 ? 1 : (d < 7000.0 ? 2 : (d < 10000.0 ? 3 : (d < 20000.0 ? 4 : 5))))]++;
+            }
+            if (d2 <= r2 && (best < 0 || d2 < bd)) { best = j; bd = d2; }
+        }
+        if (best >= 0 && best == pb.own) { nown++; continue; } /* bewegt sich mit der Kamera */
+        memcpy(M, W, sizeof M);
+        if (best >= 0 && (objon & (1 << best))) { ls_m4_mul(M, M, X[best]); nobj++; }
+        if (camon) { ls_m4_mul(M, M, K); ncam++; }
+        if (meas && best >= 0 && (!scnt[best] || bd < sbd[best])) { /* Anker: roh W, angezeigt W * X * K (wie gesehen) */
+            for (q = 0; q < 3; q++) { sraw[best][q] = W[12 + q]; sdisp[best][q] = M[12 + q]; }
+            sbd[best] = bd;
+            scnt[best] = 1;
+        }
+        if (!(best >= 0 && (objon & (1 << best))) && !camon) { continue; }
+        ls_m4_mul(M, M, VP);
+        for (q = 0; q < 16; q++) { o->mvp[q] = (float)M[q]; }
+        for (q = 0; q < 4; q++) { /* Bezugs-NDC wie bei der Aufzeichnung (Zuordnung/Plausibilitaet) */
+            float cc[4];
+            ip_clip(o->pref[q], o->mvp, cc);
+            o->rn[q][2] = cc[3];
+            o->rn[q][0] = cc[3] > 1e-6f ? cc[0] / cc[3] : 0.0f;
+            o->rn[q][1] = cc[3] > 1e-6f ? cc[1] / cc[3] : 0.0f;
+        }
+    }
+    if (apply) {
+        loc_smooth_render_note(nobj, ncam, nown, nvt);
+        QueryPerformanceCounter(&lsq1); /* W387 */
+        QueryPerformanceFrequency(&lsqf);
+        loc_smooth_render_cost((double)(lsq1.QuadPart - lsq0.QuadPart) * 1e6 / (double)lsqf.QuadPart);
+    }
+    if (meas) { /* DIAG(W385): Schritt gegen die zuletzt gezeigte Liste (Mittel der Draws je VT bzw. Auge) */
+        int cont = s_pser && L->serial == s_pser + 1u;
+        for (j = 0; j < LS_MAXV; j++) { /* Ruck (zweite Differenz) des Anker-Draws: roh gegen die zuletzt gezeigte Lage */
+            double sr[3], sd[3], a = 0.0, b = 0.0;
+            int q;
+            if (j == pb.own || !scnt[j]) { s_pok[j] = 0; s_psok[j] = 0; continue; }
+            if (cont && s_pok[j]) {
+                for (q = 0; q < 3; q++) { sr[q] = sraw[j][q] - s_praw[j][q]; sd[q] = sdisp[j][q] - s_pdisp[j][q]; }
+                if (s_psok[j]) {
+                    for (q = 0; q < 3; q++) {
+                        a += (sr[q] - s_prstep[j][q]) * (sr[q] - s_prstep[j][q]);
+                        b += (sd[q] - s_pstep[j][q]) * (sd[q] - s_pstep[j][q]);
+                    }
+                    loc_smooth_render_step(0, sqrt(a), sqrt(b), pb.v[j].on);
+                }
+                memcpy(s_pstep[j], sd, sizeof sd);
+                memcpy(s_prstep[j], sr, sizeof sr);
+                s_psok[j] = 1;
+            } else {
+                s_psok[j] = 0;
+            }
+            memcpy(s_pdisp[j], sdisp[j], sizeof s_pdisp[j]);
+            memcpy(s_praw[j], sraw[j], sizeof s_praw[j]);
+            s_pok[j] = 1;
+        }
+        if (haveye && pb.own >= 0 && pb.own < LS_MAXV) {
+            double ed[3], a = 0.0, b = 0.0;
+            int q;
+            for (q = 0; q < 3; q++) ed[q] = eye[q] + (camon ? pb.v[pb.own].off[q] : 0.0); /* Kamera sieht von e + E */
+            if (cont && s_peok) {
+                double sr[3], sd[3];
+                for (q = 0; q < 3; q++) { sr[q] = eye[q] - s_peyer[q]; sd[q] = ed[q] - s_peye[q]; }
+                if (s_pesok) {
+                    for (q = 0; q < 3; q++) {
+                        a += (sr[q] - s_perstep[q]) * (sr[q] - s_perstep[q]);
+                        b += (sd[q] - s_pestep[q]) * (sd[q] - s_pestep[q]);
+                    }
+                    loc_smooth_render_step(1, sqrt(a), sqrt(b), camon);
+                }
+                memcpy(s_pestep, sd, sizeof sd);
+                memcpy(s_perstep, sr, sizeof sr);
+                s_pesok = 1;
+            } else {
+                s_pesok = 0;
+            }
+            memcpy(s_peye, ed, sizeof ed);
+            memcpy(s_peyer, eye, sizeof s_peyer);
+            s_peok = 1;
+        }
+        s_pser = L->serial;
+    }
+    if (diag && s_dn < 12u) { /* DIAG(W385): Abstand Weltursprung der Draws -> VT (Eichung Radius), keine Eingaben */
+        static FILE *fz;
+        if (!fz) { fz = (FILE *)loc_aim_diag_file("locsmooth_census.txt"); }
+        if (fz) {
+            s_dn++;
+            fprintf(fz, "LIST serial=%u gtick=%u own=%d radius=%.0f welt=%u apply=%d obj=%u cam=%u eigen=%u\n", L->serial,
+                    pb.gtick, pb.own, pb.radius, nwd, apply, nobj, ncam, nown);
+            for (j = 0; j < LS_MAXV; j++) {
+                if (!pb.v[j].ok) { continue; }
+                fprintf(fz, "  VT%d p=%.1f,%.1f,%.1f gier=%.3f off=%.2f,%.2f,%.2f,%.4f  Draws <2000/4000/7000/10000/20000/sonst=%u/%u/%u/%u/%u/%u\n",
+                        j, pb.v[j].p[0], pb.v[j].p[1], pb.v[j].p[2], pb.v[j].yaw, pb.v[j].off[0], pb.v[j].off[1],
+                        pb.v[j].off[2], pb.v[j].off[3], hist[j][0], hist[j][1], hist[j][2], hist[j][3], hist[j][4], hist[j][5]);
+            }
+            fflush(fz);
+        }
+    }
+}
+
+/* W376 LOC-LOCAL-AIM: am Swap Vorhersage-Delta und Weltkamera an die Liste haengen, Welt-Draws markieren (Backbuffer,
+ * 3D, vor der ersten BB-Kopie, mvp * Kamera^-1 affin = Objekt in der Welt; Cockpit/HUD liegen hinter der Kopie bzw.
+ * haben eine eigene Projektion). */
+static void li_aim_attach(ip_list_t *L)
+{
+    loc_aim_pub_t pb;
+    float cam[16];
+    double VPi[16];
+    unsigned cnt = 0, sp = 0, i, nw = 0;
+    ID3D11RenderTargetView *wt;
+    L->la_ok = 0;
+    if (g_cfg.loc_local_aim) { if (!loc_aim_get(&pb)) { return; } }
+    else if (!loc_aim_peek(&pb) || !pb.ok) { return; } /* DIAG(W376) Bit 32: Vergleichslauf mit Schalter aus */
+    if (!la_cam_of(L, cam, &cnt, &sp) || cnt < 8u) { return; }
+    wt = la_world_rtv(L, &sp);
+    for (i = 0; i < 16; i++) { L->la_vp[i] = cam[i]; }
+    if (!la_m4inv_d(VPi, L->la_vp)) { return; }
+    for (i = 0; i < L->nops && i < sp; i++) {
+        ip_op_t *o = &L->ops[i];
+        double c3[4];
+        int k, j;
+        o->law = 0;
+        if (o->kind != IP_DRAW || o->rtv != wt || !o->cls) { continue; }
+        for (k = 0; k < 4; k++) {
+            c3[k] = 0.0;
+            for (j = 0; j < 4; j++) { c3[k] += (double)o->mvp[k * 4 + j] * VPi[j * 4 + 3]; }
+        }
+        if (fabs(c3[0]) + fabs(c3[1]) + fabs(c3[2]) + fabs(c3[3] - 1.0) < 0.02) { o->law = 1; nw++; }
+    }
+    L->la_d[0] = pb.dys; L->la_d[1] = pb.dps; L->la_d[2] = pb.dax; L->la_d[3] = pb.day;
+    L->la_s[0] = pb.ys; L->la_s[1] = pb.ps; /* W394 */
+    { /* Fadenkreuz (Messlauf W376_A9): Mitte im Weltziel x = -py tan(Arm_x - Sicht_x), y = -py tan(Arm_y + Sicht_y),
+       * py = Projektion der Weltkamera (|Spalte 1| / |Spalte 3|) */
+        double c1 = sqrt(L->la_vp[1] * L->la_vp[1] + L->la_vp[5] * L->la_vp[5] + L->la_vp[9] * L->la_vp[9]);
+        double c3 = sqrt(L->la_vp[3] * L->la_vp[3] + L->la_vp[7] * L->la_vp[7] + L->la_vp[11] * L->la_vp[11]);
+        double py = c3 > 0.0 ? c1 / c3 : 0.0, rx = (double)pb.ax - pb.ys, ry = (double)pb.ay + pb.ps;
+        double rx2 = rx + (double)pb.dax - pb.dys, ry2 = ry + (double)pb.day + pb.dps;
+        L->la_rc[0] = (float)(-py * tan(la_clamp(rx, -1.4, 1.4)));
+        L->la_rc[1] = (float)(-py * tan(la_clamp(ry, -1.4, 1.4)));
+        L->la_rd[0] = (float)(-py * tan(la_clamp(rx2, -1.4, 1.4))) - L->la_rc[0];
+        L->la_rd[1] = (float)(-py * tan(la_clamp(ry2, -1.4, 1.4))) - L->la_rc[1];
+    }
+    L->la_seq = pb.seq;
+    L->la_ok = nw > 0u;
+    InterlockedIncrement(&li_la_lists);
+    InterlockedExchangeAdd(&li_la_draws, (LONG)nw);
+}
+
+/* W376: Fadenkreuz-Draws markieren (o->law = 2): kleine untexturierte 2D-Draws (<= 64 Vertices) im Weltziel nach dessen
+ * Kopie, erster Vertex in der Box +-0,16 / +-0,12 NDC um die erwartete Mitte (A9: 7 Draws, Rahmen + Marken, alle
+ * anderen HUD-Elemente >= 0,3 entfernt). Hat sich die Mitte gegen den Vortick bewegt, muss sich ein zugeordneter
+ * Draw ebenso bewegen (+-0,01), sonst ist er ein ruhendes Element, das zufaellig in der Box liegt. */
+static void li_aim_reticle(ip_list_t *L, const ip_list_t *A)
+{
+    unsigned sp = 0, i, n = 0;
+    ID3D11RenderTargetView *wt = la_world_rtv(L, &sp);
+    int moved = A && A->la_ok && (fabs(L->la_rc[0] - A->la_rc[0]) + fabs(L->la_rc[1] - A->la_rc[1]) > 0.01);
+    L->la_ret = 0;
+    if (!wt || !sp) { return; }
+    for (i = sp + 1u; i < L->nops; i++) {
+        ip_op_t *o = &L->ops[i];
+        if (o->kind != IP_DRAW || o->cls || o->has_tex || o->nv > 64u || o->rtv != wt) { continue; }
+        if (fabs(o->rn[0][0] - L->la_rc[0]) > 0.16f || fabs(o->rn[0][1] - L->la_rc[1]) > 0.12f) {
+            /* W394 (nur mit loc_view_perframe): Partner eines Fadenkreuz-Draws der Vorliste bleibt Fadenkreuz (weitere Box),
+             * sonst faellt das Fadenkreuz fuer einen Tick auf den simulierten Stand zurueck (Sprung, Lauf C4) */
+            if (!g_cfg.loc_view_perframe || !A || !A->la_ret || o->match < 0 || (unsigned)o->match >= A->nops ||
+                A->ops[o->match].law != 2 || fabs(o->rn[0][0] - L->la_rc[0]) > 0.35f || fabs(o->rn[0][1] - L->la_rc[1]) > 0.3f) {
+                continue;
+            }
+        }
+        if (moved && o->match >= 0 && (unsigned)o->match < A->nops) {
+            const ip_op_t *a = &A->ops[o->match];
+            float ex = (o->rn[0][0] - a->rn[0][0]) - (L->la_rc[0] - A->la_rc[0]);
+            float ey = (o->rn[0][1] - a->rn[0][1]) - (L->la_rc[1] - A->la_rc[1]);
+            if (fabs(ex) > 0.01f || fabs(ey) > 0.01f) { continue; }
+        }
+        o->law = 2;
+        n++;
+    }
+    L->la_ret = n > 0u;
+    InterlockedExchangeAdd(&li_la_rets, (LONG)n);
+}
+
+/* DIAG(LOC-IM-LOCK) imlock_diag=1: Teilzeiten des Swaps unter ctx_lock bis zur Zuordnung (lange > 1 ms summiert).
+ * 0 gpu_poll, 1 snap, 2 gpu_copy, 3 w_upload, 4 aim, 5 smooth, 6 bis Freigabe */
+#define ISW_N 7
+static long long isw_q[ISW_N], isw_last;
+static unsigned isw_nc, isw_ns;
+static double isw_sum[ISW_N], isw_mx, isw_mxp[ISW_N];
+#define ISW(k) do { if (isw_last) { long long t_ = ip_now(); isw_q[k] += t_ - isw_last; isw_last = t_; } } while (0)
+static void isw_end(void)
+{
+    double t = 0.0, v[ISW_N];
+    int k;
+    if (!isw_last) { return; }
+    for (k = 0; k < ISW_N; k++) { v[k] = (double)isw_q[k] * 1000.0 / (double)ip_qpf.QuadPart; t += v[k]; }
+    isw_nc++;
+    if (t > 1.0) { isw_ns++; for (k = 0; k < ISW_N; k++) { isw_sum[k] += v[k]; } }
+    if (t > isw_mx) { isw_mx = t; memcpy(isw_mxp, v, sizeof v); }
+    isw_last = 0;
+}
+static void isw_log(double secs)
+{
+    HLOG_I("IMLOCK swap: %.1fs swaps=%u >1ms=%u teile_lang gpu_poll=%.1f snap=%.1f gpu_copy=%.1f w_upload=%.1f aim=%.1f smooth=%.1f rest=%.1f "
+           "| laengster %.2fms gpu_poll=%.2f snap=%.2f gpu_copy=%.2f w_upload=%.2f aim=%.2f smooth=%.2f rest=%.2f",
+           secs, isw_nc, isw_ns, isw_sum[0], isw_sum[1], isw_sum[2], isw_sum[3], isw_sum[4], isw_sum[5], isw_sum[6],
+           isw_mx, isw_mxp[0], isw_mxp[1], isw_mxp[2], isw_mxp[3], isw_mxp[4], isw_mxp[5], isw_mxp[6]);
+    HLOG_I("IMLOCK snap: %.1fs sh_ref=%u (%.1fms, davon CopyResource %u in %.1fms) unref=%.1fms",
+           secs, isw_gr_n, (double)isw_gr_q * 1000.0 / (double)ip_qpf.QuadPart, isw_cp_n, (double)isw_cp_q * 1000.0 / (double)ip_qpf.QuadPart,
+           (double)isw_un_q * 1000.0 / (double)ip_qpf.QuadPart);
+    isw_cp_q = isw_un_q = isw_gr_q = 0; isw_cp_n = isw_gr_n = 0;
+    isw_nc = isw_ns = 0; isw_mx = 0.0; memset(isw_sum, 0, sizeof isw_sum); memset(isw_mxp, 0, sizeof isw_mxp);
+}
+
+/* DIAG(W394) loc_hud_diag Bit 1: HUD-Zensus, solange ein anderer VT im Bild ist (vor li_smooth_apply: simulierte Kamera).
+ * Je Liste die VT-Lagen in NDC und alle Draws nach der ersten Kopie des Weltziels bzw. in anderen Zielen (2D/HUD) mit
+ * ihren 4 Bezugs-Vertices; jede 4. Ausgabe mit Bild beim naechsten Present. Nur Spielzustand, keine Eingaben. */
+static void li_hud_census(const ip_list_t *L)
+{
+    static FILE *fz;
+    static unsigned nseen, nout;
+    loc_smooth_pub_t pb;
+    float cam[16];
+    double VP[16];
+    unsigned cnt = 0, sp = 0, i;
+    int j, vis = 0;
+    ID3D11RenderTargetView *wt, *rts[16];
+    unsigned nrt = 0;
+    extern int loc_mouse_mission(void); /* loc_pad.c: eigener VT abgesetzt */
+    if (nout >= 80u || !loc_mouse_mission() || !loc_smooth_peek(&pb) || !la_cam_of(L, cam, &cnt, &sp) || cnt < 8u) { return; }
+    wt = la_world_rtv(L, &sp);
+    for (i = 0; i < 16; i++) { VP[i] = cam[i]; }
+    for (j = 0; j < LS_MAXV; j++) {
+        double a[4];
+        int k;
+        if (j == pb.own || !pb.v[j].ok) { continue; }
+        for (k = 0; k < 4; k++) { a[k] = pb.v[j].p[0] * VP[k] + pb.v[j].p[1] * VP[4 + k] + pb.v[j].p[2] * VP[8 + k] + VP[12 + k]; }
+        if (a[3] > 1e-3 && a[3] < 250000.0 && fabs(a[0] / a[3]) < 1.0 && fabs(a[1] / a[3]) < 1.0) { vis = 1; } /* nah (< ~250 m) */
+    }
+    if (!vis || (nseen++ % 8u) != 0u) { return; }
+    if (!fz) { fz = (FILE *)loc_aim_diag_file("lochud_census.txt"); }
+    if (!fz) { return; }
+    nout++;
+    if ((nout % 4u) == 1u) { extern unsigned g_shot_census; g_shot_census = 1; }
+    fprintf(fz, "LIST frame=%u serial=%u nops=%u split=%u shot=%d own=%d gtick=%u cam=", L->frame, L->serial, L->nops, sp,
+            (nout % 4u) == 1u, pb.own, pb.gtick);
+    for (i = 0; i < 16; i++) { fprintf(fz, "%.6g%s", cam[i], i < 15 ? "," : "\n"); }
+    for (j = 0; j < LS_MAXV; j++) {
+        double a[4];
+        int k;
+        if (!pb.v[j].ok) { continue; }
+        for (k = 0; k < 4; k++) { a[k] = pb.v[j].p[0] * VP[k] + pb.v[j].p[1] * VP[4 + k] + pb.v[j].p[2] * VP[8 + k] + VP[12 + k]; }
+        fprintf(fz, "  VT%d p=%.0f,%.0f,%.0f gier=%.4f ndc=%.4f,%.4f w=%.1f off=%.1f,%.1f,%.1f,%.4f on=%d\n", j, pb.v[j].p[0],
+                pb.v[j].p[1], pb.v[j].p[2], pb.v[j].yaw, a[3] > 1e-6 ? a[0] / a[3] : 9.0, a[3] > 1e-6 ? a[1] / a[3] : 9.0, a[3],
+                pb.v[j].off[0], pb.v[j].off[1], pb.v[j].off[2], pb.v[j].off[3], pb.v[j].on);
+    }
+    for (i = 0; i < L->nops; i++) {
+        const ip_op_t *o = &L->ops[i];
+        unsigned r;
+        if (o->kind == IP_COPY) { fprintf(fz, "%u COPY\n", i); continue; }
+        if (o->kind != IP_DRAW) { continue; }
+        if (o->rtv == wt && i < sp && o->cls) { continue; } /* Welt (3D vor der Kopie) */
+        for (r = 0; r < nrt && rts[r] != o->rtv; r++) {}
+        if (r == nrt && nrt < 16u) { rts[nrt++] = o->rtv; }
+        fprintf(fz, "%u rt=%u%s cls=%u nv=%u tex=%u srv=%p topo=%u vp=%.0f,%.0f,%.0f,%.0f sig=%08X rn=%.4f,%.4f;%.4f,%.4f;%.4f,%.4f;%.4f,%.4f w=%.3g\n",
+                i, r, o->rtv == wt ? "W" : "", o->cls, o->nv, o->has_tex, (void *)o->srv, o->topo, o->vp.TopLeftX, o->vp.TopLeftY,
+                o->vp.Width, o->vp.Height, o->sig, o->rn[0][0], o->rn[0][1], o->rn[1][0], o->rn[1][1], o->rn[2][0], o->rn[2][1],
+                o->rn[3][0], o->rn[3][1], o->rn[0][2]);
+    }
+    fflush(fz);
+}
+
+/* W394 LOC-HUD-VIEW: HUD-Draws mit Weltbezug markieren (Zensus W394 C3, LoC-Hauptsicht 512x512 nach der Weltkopie):
+ *  - Zielmarke/Lock-On-Rahmen je VT j: kleine untexturierte Linien-Draws (<= 32 Vertices, ausser dem festen 22er-Kreuz)
+ *    mit Mitte in +-0,16 um die simulierte Bildlage a_j (Marke sitzt ~0,04 hoeher), dazu Beschriftungen (texturiert,
+ *    6 Vertices) rechts oben daneben. Bewegt sich der Partner-Draw gegen die Vorliste anders als a_j (> 0,012), ist es
+ *    ein ruhendes HUD-Element bzw. das Fadenkreuz -> nicht markiert; ohne Bewegung nur Linien mit 4/8/24 Vertices.
+ *  - Kompassband: untexturierter Linien-Draw mit >= 100 Vertices, alle Bezugspunkte bei y -0,65..-0,48, Breite > 1.
+ * Fadenkreuz-Draws (law 2) bleiben beim Fadenkreuz. */
+static void li_hud_mark(ip_list_t *L, const ip_list_t *A)
+{
+    unsigned sp = 0, i, n = 0, ncmp = 0;
+    int j;
+    ID3D11RenderTargetView *wt;
+    if (!L->hm_ok && !L->hm_gok) { return; }
+    wt = la_world_rtv(L, &sp);
+    if (!wt || !sp) { return; }
+    for (j = 0; j < LS_MAXV; j++) {
+        if (L->hm_c[j][3] > 0.0 && L->hm_c[j][3] < 100000.0 && fabs(L->hm_a[j][0]) < 0.9 && fabs(L->hm_a[j][1]) < 0.9) {
+            InterlockedIncrement(&li_hm_near);
+            break;
+        }
+    }
+    if (L->hm_gok) { /* Radar (Kopf oben, Zensus C3): eigenes quadratisches Ziel <= 512 mit Karte (texturiert, >= 300 Vertices)
+                       * und >= 8 kleinen untexturierten Linienzuegen (Ring, Marken) - die Lock-On-Kamera hat keine solchen */
+        ID3D11RenderTargetView *rt = NULL, *cand[4];
+        unsigned nc = 0, nr = 0, k2, nls;
+        for (i = 0; i < L->nops; i++) {
+            const ip_op_t *o = &L->ops[i];
+            if (o->kind == IP_DRAW && o->cls && o->has_tex && o->nv >= 300u && o->rtv && o->rtv != wt && o->rtv != g_rtv &&
+                o->vp.Width == o->vp.Height && o->vp.Width <= 512.0f) {
+                for (k2 = 0; k2 < nc && cand[k2] != o->rtv; k2++) {}
+                if (k2 == nc && nc < 4u) { cand[nc++] = o->rtv; }
+            }
+        }
+        for (k2 = 0; k2 < nc && !rt; k2++) {
+            for (i = 0, nls = 0; i < L->nops; i++) {
+                const ip_op_t *o = &L->ops[i];
+                if (o->kind == IP_DRAW && o->rtv == cand[k2] && !o->has_tex && o->topo == 3u && o->nv <= 16u) { nls++; }
+            }
+            if (nls >= 8u) { rt = cand[k2]; }
+        }
+        for (i = 0; rt && i < L->nops; i++) {
+            ip_op_t *o = &L->ops[i];
+            if (o->kind != IP_DRAW || !o->cls || o->rtv != rt || o->law) { continue; }
+            if (A && A->hm_gok && o->has_tex && o->nv >= 300u && o->match >= 0 && (unsigned)o->match < A->nops) {
+                /* Eichung: Drehung der Weltachse x im Clip (Karte) gegen die eigene Gier */
+                const ip_op_t *a = &A->ops[o->match];
+                double dg = la_wrap((double)L->hm_gier - A->hm_gier);
+                double th = la_wrap(atan2(o->mvp[1], o->mvp[0]) - atan2(a->mvp[1], a->mvp[0]));
+                if (fabs(dg) > 0.003 && fabs(dg) < 0.2 && fabs(fabs(th / dg) - 1.0) < 0.2) {
+                    double sg = th / dg > 0.0 ? 1.0 : -1.0;
+                    if (li_rad_n > 0 && sg != li_rad_k) { li_rad_n = 0; }
+                    li_rad_k = sg;
+                    if (li_rad_n < 1000) { li_rad_n++; }
+                }
+            }
+            o->law = LA_LAW_RAD;
+            nr++;
+        }
+        L->hm_nrad = nr;
+        if (nr) { InterlockedIncrement(&li_hm_rad); }
+    }
+    for (i = sp + 1u; i < L->nops; i++) {
+        ip_op_t *o = &L->ops[i];
+        double cx, cy, ymin = 9.0, ymax = -9.0, xmin = 9.0, xmax = -9.0;
+        int q, best = -1;
+        if (o->kind != IP_DRAW || o->cls || o->rtv != wt || o->law) { continue; }
+        for (q = 0; q < 4; q++) {
+            if (o->rn[q][0] < xmin) { xmin = o->rn[q][0]; } if (o->rn[q][0] > xmax) { xmax = o->rn[q][0]; }
+            if (o->rn[q][1] < ymin) { ymin = o->rn[q][1]; } if (o->rn[q][1] > ymax) { ymax = o->rn[q][1]; }
+        }
+        if (!o->has_tex && o->nv >= 100u && ymin > -0.65 && ymax < -0.48 && xmax - xmin > 1.0) { /* Kompassband */
+            o->law = LA_LAW_CMP;
+            ncmp++;
+            if (A && A->hm_gok && L->hm_gok && o->match >= 0 && (unsigned)o->match < A->nops) { /* Eichung NDC je rad */
+                double dg = la_wrap((double)L->hm_gier - A->hm_gier), dx = o->rn[0][0] - A->ops[o->match].rn[0][0];
+                if (fabs(dg) > 0.003 && fabs(dg) < 0.2 && fabs(dx / dg - li_cmp_k) < 0.25) { li_cmp_k += 0.05 * (dx / dg - li_cmp_k); }
+            }
+            continue;
+        }
+        if (!L->hm_ok || o->nv > 32u || o->nv == 22u) { continue; }
+        cx = (o->rn[0][0] + o->rn[1][0] + o->rn[2][0] + o->rn[3][0]) * 0.25;
+        cy = (o->rn[0][1] + o->rn[1][1] + o->rn[2][1] + o->rn[3][1]) * 0.25;
+        for (j = 0; j < LS_MAXV && best < 0; j++) {
+            double ax = L->hm_a[j][0], ay = L->hm_a[j][1];
+            if (L->hm_c[j][3] <= 0.0 || fabs(ax) > 1.3 || fabs(ay) > 1.3) { continue; }
+            if (!o->has_tex) {
+                if (fabs(cx - ax) < 0.16 && fabs(cy - ay - 0.04) < 0.16) { best = j; }
+            } else if (o->nv == 6u && cx - ax > 0.05 && cx - ax < 0.5 && cy - ay > -0.05 && cy - ay < 0.25) {
+                best = j;
+            }
+        }
+        if (best < 0) { continue; }
+        InterlockedIncrement(&li_hm_cand);
+        {
+            int moved_ok = -1; /* -1 unbekannt, 0 passt nicht, 1 passt */
+            double ex = 0.0, ey = 0.0;
+            if (A && A->hm_ok && A->hm_c[best][3] > 0.0 && o->match >= 0 && (unsigned)o->match < A->nops) {
+                const ip_op_t *a = &A->ops[o->match];
+                double ax0 = (a->rn[0][0] + a->rn[1][0] + a->rn[2][0] + a->rn[3][0]) * 0.25;
+                double ay0 = (a->rn[0][1] + a->rn[1][1] + a->rn[2][1] + a->rn[3][1]) * 0.25;
+                ex = L->hm_a[best][0] - A->hm_a[best][0];
+                ey = L->hm_a[best][1] - A->hm_a[best][1];
+                moved_ok = fabs((cx - ax0) - ex) < 0.012 && fabs((cy - ay0) - ey) < 0.012;
+            }
+            if (moved_ok == 0) { InterlockedIncrement(&li_hm_rej_mv); continue; }
+            if (fabs(ex) + fabs(ey) < 0.004 && (o->has_tex || (o->nv != 4u && o->nv != 8u && o->nv != 24u))) {
+                InterlockedIncrement(&li_hm_rej_st);
+                continue;
+            }
+        }
+        o->law = (unsigned char)(3 + best);
+        L->hm_vt |= 1u << best;
+        n++;
+    }
+    L->hm_n = n;
+    L->hm_ncmp = ncmp;
+    if (ncmp) { InterlockedIncrement(&li_hm_cmp); }
+    if (n) { InterlockedIncrement(&li_hm_lists); InterlockedExchangeAdd(&li_hm_draws, (LONG)n); }
+}
+
 int sb_interp_swap(void)
 {
     int mission, took = 0, k, li;
@@ -8241,9 +9473,12 @@ int sb_interp_swap(void)
     if (g_cfg.interp_fps <= 0) { return 0; }
     if (!ip_init()) { return 0; }
     t0 = ip_now();
+    if (g_cfg.im_lock_split > 0 && ip_rec >= 0 && ip_rec < IP_LISTS) { ip_snap_classify(&g_ipl[ip_rec]); } /* LOC-IM-LOCK: ohne ctx_lock */
     sb_ctx_enter();
+    if (g_cfg.imlock_diag) { memset(isw_q, 0, sizeof isw_q); isw_last = ip_now(); } /* DIAG(LOC-IM-LOCK) */
     ip_swapno++; /* W361: Takt der verzoegerten Freigabe */
     ip_gpu_poll();
+    ISW(0);
     if (g_cfg.interp_guard_diag) { ip_gd_poll(); } /* DIAG(W265) */
     mission = ip_mission();
     ip_K = g_cfg.interp_fps / ip_tick_hz(); /* W323: LoC-Mission 20 Hz (120 -> K=6), SB 30 */
@@ -8266,6 +9501,7 @@ int sb_interp_swap(void)
             L = NULL;
         } else {
             ip_list_snap(L, li);
+            ISW(1);
             if (!L->snap_ok) {
                 ip_list_reset(L);
                 ip_hist_clear();
@@ -8277,8 +9513,18 @@ int sb_interp_swap(void)
         L->ready = 1;
         if (g_sba_loc) { li_ticks++; } /* W323 */
         if (g_cfg.ip_vb_gpu > 0) { ip_gpu_copy(L); } /* PERF(PERF-M2,W174) */
+        ISW(2);
         ip_w_upload(L); /* FIX(W237) interp_hlerp */
+        ISW(3);
         if (g_cfg.interp_rhash & 2) { ip_rh_take(L, L->rh); } /* DIAG(W273) */
+        if (g_sba_loc && (g_cfg.loc_aim_diag & 10)) { li_aim_diag(L); } /* DIAG(W376) */
+        if (g_sba_loc && (g_cfg.loc_local_aim || (g_cfg.loc_aim_diag & 32))) { li_aim_attach(L); } /* W376 LOC-LOCAL-AIM */
+        ISW(4);
+        if (g_sba_loc && (g_cfg.loc_hud_diag & 1)) { li_hud_census(L); } /* DIAG(W394) */
+        L->hm_ok = 0; L->hm_vt = 0; L->hm_n = 0; L->hm_ncmp = 0; L->hm_nrad = 0; L->hm_gok = 0; L->hm_dyaw = 0.0f; /* W394 */
+        if (g_sba_loc && (g_cfg.loc_rb_smooth || g_cfg.loc_own_predict || (g_cfg.loc_rb_smooth_diag & 10))) { li_smooth_apply(L); } /* W385 LOC-SMOOTH, W390 */
+        if (g_sba_loc && g_cfg.loc_hud_predict && !L->hm_ok) { li_hud_plain(L); } /* W394 LOC-HUD-VIEW */
+        ISW(5);
         A = ip_nhist ? &g_ipl[ip_hist[ip_nhist - 1]] : NULL;
         /* 2. Zuordnung gegen den Vortick. */
         if (A) {
@@ -8290,7 +9536,9 @@ int sb_interp_swap(void)
                  * auf L (noch nicht in der Historie) und A->ops[].taken (liest die Wiedergabe nicht) -> ctx_lock
                  * waehrenddessen abgeben, damit der Present-Takt nicht 1-3 ms auf den Swap wartet. Ohne Takt-Thread
                  * (Testtakt) wirkungslos. */
-                int cr = sb_ctx_release_all();
+                int cr;
+                ISW(6); isw_end(); /* DIAG(LOC-IM-LOCK): Halte-Abschnitt endet mit der Freigabe */
+                cr = sb_ctx_release_all();
                 L->pair_ok = ip_match(A, L, log);
                 sb_ctx_reacquire(cr);
             } else
@@ -8312,6 +9560,8 @@ int sb_interp_swap(void)
         } else {
             st_nopair++;
         }
+        if (g_sba_loc && L->la_ok) { li_aim_reticle(L, A); } /* W376 LOC-LOCAL-AIM: braucht die Zuordnung */
+        if (g_sba_loc && g_cfg.loc_hud_predict) { li_hud_mark(L, A); } /* W394 LOC-HUD-VIEW: nach dem Fadenkreuz */
         /* 3. Zustandszeit: Fensteranfang (Feldwechsel) + mittlere Rechenzeit r
          *    (regelmaessiger als die Swap-Zeit selbst); Testtakt: Swap-Zeit. */
         L->tstate = t0;
@@ -8332,6 +9582,18 @@ int sb_interp_swap(void)
             double dv = fabs(ip_ms(A->tstate, L->tstate) - 1000.0 / (double)ip_tick_hz());
             if (dv > li_dev_max) { li_dev_max = dv; }
             if (dv > 2.0) { li_dev2++; }
+        }
+        if (A && ip_pace_on() && ip_tick_hz() > 0) {
+            /* W393 LOC-PACING: geglaettete Tick-Zeitbasis. Die Zustandszeit liegt auf dem Feldraster (Feld des Tick-
+             * Anfangs + mittlere Rechenzeit); beginnt ein Tick ein Feld (16,7 ms) zu spaet und holt der naechste auf,
+             * lief die Anzeige einen Tick 25 % langsamer und dann 50 % schneller (Mikroruckeln). Jetzt: Erwartung
+             * = vorige Zustandszeit + 1/Takt, die Abweichung fliesst nur zu 1/8 ein (hoechstens 4 % des Takts je Tick);
+             * mehr als 1/2 Takt bzw. zweimal in Folge mehr als 1/8 Takt daneben (Zeit verloren) setzt neu an. */
+            LONGLONG P = ip_qpf.QuadPart / ip_tick_hz(), e = L->tstate - (A->tstate + P);
+            int sn;
+            L->tstate = (LONGLONG)pace_ts_step(A->tstate, L->tstate, P, &sn, &ip_ts_laste);
+            if (sn) { pc_ts_snap++; } else { pc_ts_s++; }
+            if (!sn && (e > P / 8 || e < -P / 8)) { pc_ts_big++; } /* DIAG: so viel haette die Anzeige geruckt */
         }
         /* 4. Latenz L = max(Swap_N - Zustand_N-1) der letzten 32 Ticks + 1 ms. */
         if (A) {
@@ -8435,6 +9697,7 @@ int sb_interp_swap(void)
     ip_rl_drain(0); /* W361: faellige ersetzte Shader/Layouts (vor dem neuen Auftrag) */
     if (ip_sh_rc_watch(1, NULL, NULL, "swap") || ip_dead_n) { ip_dead_purge(); } /* W361: Zaehlerwache der Schatten-Views */
     if (ip_live) { ip_rt_prefetch(); } /* W126 RENDER-THREAD: Historie neu -> naechstes Bild vorbereiten */
+    ISW(6); isw_end(); /* DIAG(LOC-IM-LOCK) */
     sb_ctx_leave();
     if (ip_live) { ip_poll(); }
     if (g_cfg.interp_diag >= 1 && st_ticks >= 300u) { sb_ctx_enter(); ip_stat_log(); sb_ctx_leave(); } /* W138: Zaehler auch vom Takt-Thread */

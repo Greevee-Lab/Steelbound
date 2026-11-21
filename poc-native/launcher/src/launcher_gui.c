@@ -66,13 +66,37 @@
 /* Layout (logische 96-dpi-Einheiten)                                  */
 /* ------------------------------------------------------------------ */
 #define WIN_W 960
-#define WIN_H 640
-#define TITLE_H 48
+#define WIN_H 656                  /* W401 LAUNCHER-HEADER-POLISH: 640 -> 656 (Kopf +16, Inhalt gleich hoch) */
+#define TITLE_H 72                 /* W397: 48 -> 56; W401: 56 -> 72 (Untertitel, Wortmarken, Balken mit Luft) */
 #define NAV_W 208
+#define NAVSUB_H 30                /* W399: Unterpunkt der Seitenleiste (Multiplayer > Match & network / Account) */
 #define BOT_H 64
+/* W397 LAUNCHER-STRUCT: Kopf von links: Marke (zweizeilig) | Edition | Spielumschalter | Status | Zahnrad | _ x
+ * W398 LAUNCHER-GAMESWITCH: links Projektzeile (klein) ueber den Spielnamen als Wortmarken-Tabs (aktiv = hell +
+ * oranger Balken); rechts Plaketten | Status | Zahnrad | _ x. Das Logo links entfaellt.
+ * W401 LAUNCHER-HEADER-POLISH: Edition/Beta als Zusatz in der Projektzeile; rechts eine Gruppe
+ * [Update-Chip] [Status-Chip] [Zahnrad], vertikal mittig zur Wortmarkenzeile; _ x klein in der Ecke. */
+#define HDR_GAME_X 22                                  /* Wortmarke SB (Text bei x = 26 = Symbolspalte der Navigation) */
+#define HDR_GAME_Y 30
+#define HDR_GAME_W 214
+#define HDR_GAME_H 36                                  /* Text 26 + Luft 5 + Balken 3 + Rand 2 */
+#define HDR_GAME_GAP 20
+#define HDR_GAME_PAD 4                                 /* Text-/Balkeneinzug im Tab */
+#define HDR_GAME_END (HDR_GAME_X + 2 * HDR_GAME_W + HDR_GAME_GAP) /* 470: rechts davon die Gruppe */
+#define HDR_SUB_Y 11                                   /* Projektzeile (+ Edition/Beta) */
+#define HDR_SUB_H 16
+#define HDR_WB_W 40                                    /* Fenster-Knoepfe _ x (Ecke oben rechts) */
+#define HDR_WB_H 30                                    /* W403: 32 -> 30 (Zahnrad darunter, keine Ueberlappung) */
+#define HDR_WB_X (WIN_W - 2 * HDR_WB_W)                /* 880 */
+#define HDR_CHIP_Y 31                                  /* Gruppe: mittig zur Wortmarkenzeile (Text 30..56) */
+#define HDR_CHIP_H 28
+#define HDR_GEAR_W 36
+/* W403 LAUNCHER-R1-POLISH: Gruppe rechtsbuendig mit der rechten Inhaltskante (Karten, x = 932), unter _ x */
+#define HDR_GEAR_X (WIN_W - 28 - HDR_GEAR_W)           /* 896 */
+#define HDR_CHIP_R (HDR_GEAR_X - 10)                    /* rechte Kante des Status-Chips */
 #define CX0 (NAV_W + 28)           /* Inhalt links */
 #define CW (WIN_W - CX0 - 28)      /* Inhalt Breite (696) */
-#define CY0 (TITLE_H + 24)         /* Inhalt oben */
+#define CY0 (TITLE_H + 16)         /* Inhalt oben (W397: bleibt 72, Abstand zum Kopf 24 -> 16) */
 #define COLW ((CW - 16) / 2)       /* Spalte (340) */
 #define COL2 (CX0 + COLW + 16)
 /* W172 LAUNCHER-P5: Seite Packs = Liste links (breit), Detail rechts */
@@ -84,6 +108,10 @@
 /* W171 LAUNCHER-P2P3: sieben Seiten (UX-Konzept 3.2). Remaster, Profile
  * und Pfade sind in Grafik, Packs und Erweitert aufgegangen. */
 enum { P_PLAY, P_DISPLAY, P_GFX, P_PACKS, P_CTRL, P_AUDIO, P_ADV, P_ALPHA, P_N }; /* W272: + Alpha Test */
+#define P_LNET P_PACKS /* W392 LAUNCHER-NETTAB: bei LoC steht auf dem Packs-Platz die Seite Netzwerk (W397: Multiplayer) */
+/* W397 LAUNCHER-STRUCT: Launcher-Einstellungen (Zahnrad im Kopf) = Sonderseite ausserhalb der Navigation
+ * (nicht in P_N, damit alle Seitenschleifen/Navigation unveraendert bleiben). */
+#define P_LSET P_N
 #define PG_ALL (-1)
 #define PG_NOTPLAY (-2)
 #define PG_DIALOG (-3)
@@ -137,6 +165,9 @@ int gui_page_count(void)
 
 const char *gui_page_key(int p)
 {
+    if (p == P_LSET) {
+        return "settings"; /* W397: Launcher-Einstellungen (--ui-shot settings) */
+    }
     return (p >= 0 && p < P_N) ? kPageKey[p] : "";
 }
 
@@ -151,6 +182,9 @@ int gui_page_from_name(const char *v)
             return i;
         }
     }
+    if (strcmp(v, "settings") == 0 || strcmp(v, "launcher") == 0) {
+        return P_LSET; /* W397 */
+    }
     for (i = 0; i < (int)(sizeof kPageAlias / sizeof kPageAlias[0]); i++) {
         if (strcmp(v, kPageAlias[i].name) == 0) {
             return kPageAlias[i].page;
@@ -164,6 +198,8 @@ int gui_page_from_name(const char *v)
 
 /* --- IDs ---------------------------------------------------------- */
 #define ID_NAV0 1000
+#define ID_NAVSUB_MATCH 2870 /* W399: Multiplayer > Match & network (Unterpunkt der Leiste, nur LoC auf Multiplayer) */
+#define ID_NAVSUB_ACC 2871   /* W399: Multiplayer > Account */
 #define ID_MIN 1010
 #define ID_CLOSE 1011
 #define ID_START_BIG 1020
@@ -295,6 +331,18 @@ static int g_vol_raw[4] = { 100, 100, 100, 100 }; /* W303: geladener Wert (nicht
 #define ID_UPD_OPEN 1152
 #define ID_UPD_AUTO 1153
 #define ID_UPD_NOW 1154
+/* W397 LAUNCHER-STRUCT: Zahnrad im Kopf, Seite Launcher-Einstellungen (P_LSET), Erstabfrage "Online & Updates" */
+#define ID_LSET_OPEN 2900  /* Zahnrad (Kopf, rechts): Launcher-Einstellungen */
+#define ID_NETM0 2901      /* ... 2903: Auswahl steelnet / Nur Version / Offline (Seite P_LSET) */
+#define ID_NETQ0 2904      /* ... 2906: Erstabfrage, gleiche drei Antworten (Karte auf Spielen, SB und LoC) */
+#define ID_LSET_TOOLS 2907 /* Seite P_LSET: Test tools oeffnen (frueher eigener Navigationspunkt) */
+#define ID_MP_GOSET 2908   /* LoC > Multiplayer: Hinweis "nicht verbunden" -> Launcher-Einstellungen */
+#define ID_LOC_MP_GO 2909  /* LoC > Spielen: Karte Multiplayer -> Seite Multiplayer */
+#define ID_LSET_RELPAGE 2910 /* Seite P_LSET: Release-Seite oeffnen (nur bei neuerer Version) */
+#define ID_LSET_DATA 2911  /* Seite P_LSET: Datenordner oeffnen (wie Erweitert) */
+#define LSET_LANG_Y CY0    /* Seite P_LSET: Karte Sprache & Fenster (rechts oben) */
+#define LSET_R_X COL2
+enum { NETM_STEEL, NETM_VER, NETM_OFF, NETM_N };
 #define WM_APP_UPD (WM_APP + 21) /* Ergebnis aus dem Abruf-Thread (l = upd_job_t*) */
 #define UPD_TIMER 25             /* Gesamtfrist des Abrufs (LUPD_TIMEOUT_MS) */
 static const char *g_upd_ver = ""; /* eigene Release-Version ("" = ausgeblendet; Shots: Fixture) */
@@ -347,7 +395,7 @@ typedef struct {
     int hover;
 } uictl_t;
 
-#define UI_MAX 240 /* W287: + Symbole */
+#define UI_MAX 288 /* W287: + Symbole; W373: 240 war voll (letzter Knopf des Belegungsdialogs fehlte) */
 static uictl_t g_ui[UI_MAX];
 static int g_ui_n;
 
@@ -427,10 +475,19 @@ static int ui_refresh_visibility(void);
  * die rechte ("Strength 100 %") bekommt den Rest. */
 #define EDGE_W1 88
 static void show_page(int p);
+static int acc_sub_active(void);    /* W399: 1 = Unterpunkt Account von Multiplayer aktiv */
+static void acc_nav_sub(int acc);   /* W399: Unterpunkt waehlen (0 = Match & network, 1 = Account) */
+static void nav_sub_layout(void);   /* W399: Leiste mit/ohne Unterpunkte */
 static int ui_confirm(const char *text, const char *title);
 static void set_status_k(const char *msg, int kind); /* W187 */
 /* W276 LOC-LAUNCH: Spielauswahl (Block "W276 LOCTAB" vor build_controls) */
 static int g_game;                 /* LGAME_SB | LGAME_LOC */
+static void pergame_mark(void);    /* W402: launcher_pergame=1 in user.cfg */
+/* W392 LAUNCHER-NETTAB: bei LoC heisst der Packs-Platz "Netzwerk" (eigenes Symbol: Globus). */
+static const char *page_name_key(int p)
+{
+    return g_game == LGAME_LOC && p == P_PACKS ? "gui.page_mp" : kPageName[p]; /* W397: Multiplayer (W392: Network) */
+}
 static int loctab_visible(const uictl_t *u, int page); /* -1 = keine Vorgabe */
 static void paint_loc_play(void);
 static int loctab_wide_val(void); /* W326: LoC-Bildformat (LGAME_WIDE_*) fuer den Experimental-Hinweis */
@@ -456,12 +513,37 @@ static int orig_visible(int id, int page); /* -1 = keine Vorgabe */
 static void orig_paint_play(int loc);
 static int orig_banner_on(void); /* W293 */
 static void xicon_texts(void); /* W287 */
+static void onl_sync_ui(void);  /* W392 */
+static void paint_lnet(void);   /* W392 */
 static void xtip_text(int id, char *out, size_t cap);
+static int loc_tip_id(int id); /* W387: LoC-Bedienelemente mit eigenem Tooltip */
 static void orig_relabel(void);
 static int loctab_command(int id, int code);
 static void acc_page_shown(void); /* W328 STEELNET-ACCOUNT */
 static int onl_status_refresh(void); /* W334 LOC-SEC: loc_net_status.txt (Block nach loctab_save) */
 static void acc_apply_state(const char *name); /* W328: Shot-Zustaende loc_acc_* */
+static void acc_fixture(int srv, int have, int discord, int login, int view); /* W397 */
+/* W397 LAUNCHER-STRUCT (Block vor on_command) */
+static int lset_visible(int id, int page);
+static void paint_lset(void);
+static void hdr_paint_status(void);
+static void hdr_paint_sub(void);        /* W401 */
+#define HDR_TIP_ID0 0x7F40              /* W403: Tooltip-Werkzeuge der Kopf-Chips (+ HDR_CHIP_ST/UPD) */
+static void hdr_tip_text(int kind, char *out, size_t cap); /* W403 */
+static void snp_netm_changed(void);     /* W403 */
+static void lset_open(void);
+static int gametab_id(int id);         /* W398 */
+static void netm_sync_ui(void);
+static int netm_get(void);
+static void lset_open(void);  /* W400: Sprung aus LoC > Spielen */
+static void loc_gate_sync(void); /* W400 */
+static int loc_launch_ok(void);  /* Launch in der Fussleiste: gleiche Sperre wie Play Line of Contact */
+static void loc_gate_msg(char *m, size_t cap);
+static int netq_should_ask(const char *ver, int upd_cfg, int online);
+static void netq_paint(int x, int y, int w);
+static void lset_build(HWND w);
+static void lset_relabel(void);
+static int lset_command(int id, int code);
 static void loctab_relabel(void);
 /* W281 LAUNCHER-SIZE (Block bei on_dpi) */
 static void lay_switch(int id, int size);
@@ -583,7 +665,7 @@ static launcher_settings_t g_cur; /* W172: Oberflaechen-Stand der letzten Regela
 
 /* Schriften */
 enum { F_BODY, F_SMALL, F_SEMI, F_CARD, F_BRAND, F_HERO, F_BIG, F_ICON,
-       F_MONO, F_TINY, F_ICONSM, F_N };
+       F_MONO, F_TINY, F_ICONSM, F_GAME, F_N }; /* W398: F_GAME = Wortmarken-Tabs im Kopf */
 static HFONT g_f[F_N];
 static int g_has_icons;
 static int g_icon_fluent; /* W287: Segoe Fluent Icons (Kolben U+F196 nur dort) */
@@ -1073,6 +1155,7 @@ static void fonts_make(void)
     g_f[F_BRAND] = mkfont(disp, 105, FW_SEMIBOLD, NULL, 0);
     g_f[F_HERO] = mkfont(bold, 300, FW_BOLD, NULL, 0);
     g_f[F_BIG] = mkfont(disp, 140, FW_SEMIBOLD, NULL, 0);
+    g_f[F_GAME] = mkfont(disp, 150, FW_SEMIBOLD, NULL, 0); /* W398 */
     g_f[F_MONO] = mkfont(mono, 90, FW_NORMAL, NULL, 0);
     used[0] = 0;
     g_f[F_ICON] = mkfont(icon, 110, FW_NORMAL, used, 64);
@@ -1493,6 +1576,13 @@ static LRESULT CALLBACK hover_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp,
             InvalidateRect(h, NULL, FALSE);
         }
         break;
+    case WM_SETCURSOR: /* W398: Handcursor auf dem inaktiven Spielnamen (Wortmarken-Tab) */
+        u = ui_by_hwnd(h);
+        if (u && gametab_id(u->id) && !u->checked && LOWORD(lp) == HTCLIENT) {
+            SetCursor(LoadCursor(NULL, IDC_HAND));
+            return TRUE;
+        }
+        break;
     case WM_ERASEBKGND:
         return 1;
     case WM_NCDESTROY:
@@ -1513,6 +1603,10 @@ static HWND mk(HWND parent, int kind, int id, int page, int x, int y, int w,
     HWND hw;
     wchar_t *wt;
     if (g_ui_n >= UI_MAX) {
+        static int warned;
+        if (!warned++) {
+            fprintf(stderr, "launcher: UI_MAX (%d) erreicht - Steuerelement %d fehlt\n", UI_MAX, id); /* W373 */
+        }
         return NULL;
     }
     switch (kind) {
@@ -1771,6 +1865,12 @@ static int ui_visible_on(const uictl_t *u, int page)
     if (!u) { /* W201: edition-specific controls need not exist. */
         return 0;
     }
+    { /* W397 LAUNCHER-STRUCT: Zahnrad, Launcher-Einstellungen, Erstabfrage, Multiplayer-Spruenge */
+        int sv = lset_visible(u->id, page);
+        if (sv >= 0) {
+            return sv;
+        }
+    }
     { /* W278 ORIG-FLAG: Knoepfe am Hinweis (beide Bereiche) */
         int ov = orig_visible(u->id, page);
         if (ov >= 0) {
@@ -1926,35 +2026,10 @@ static void base_build(void)
             RGB(4, 5, 7), 120, 0);
     cv_fill(&g_base, NW, H - SX(BOT_H), W - NW, 1,
             RGB(255, 255, 255), 14, 0);
-    /* Marke in der Titelleiste */
-    cv_fill(&g_base, SX(20), SX(17), SX(4), SX(14), C_ACCENT, 255, SX(1));
-    SetTextCharacterExtra(g_base.dc, SX(2));
-    cv_text(&g_base, g_f[F_BRAND], g_game == LGAME_LOC ? "LINE OF CONTACT" : "STEEL BATTALION", SX(32), 0, SX(260),
-            SX(TITLE_H), C_TEXT, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    SetTextCharacterExtra(g_base.dc, 0);
-    cv_text(&g_base, g_f[F_SMALL], "Game Preservation Project",
-            SX(214), 0, SX(300), SX(TITLE_H), C_DIM,
-            DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    /* W116 EDITIONS: Edition sichtbar (Badge rechts neben dem Untertitel) */
-    SetTextCharacterExtra(g_base.dc, SX(1));
-    if (!g_upd_ver[0]) {
-        cv_fill(&g_base, SX(398), SX(14), SX(160), SX(20), C_ACCENT, 34, SX(3));
-        cv_fill(&g_base, SX(398), SX(14), SX(2), SX(20), C_ACCENT, 255, 0);
-        cv_text(&g_base, g_f[F_TINY], SB_EDITION_BADGE, SX(398), SX(14), SX(160),
-                SX(20), C_ACCENT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    } else { /* W301 BETA-VERSION: Release-Build -> "COMMUNITY | BETA 0.2.0" (endet vor den Spiel-Tabs bei x=584) */
-        char vb[64];
-        const char *st = sb_release_stage(g_upd_ver);
-        _snprintf_s(vb, sizeof vb, _TRUNCATE, "%s%s%s", st, st[0] ? " " : "", g_upd_ver);
-        cv_fill(&g_base, SX(366), SX(14), SX(212), SX(20), C_ACCENT, 34, SX(3));
-        cv_fill(&g_base, SX(366), SX(14), SX(2), SX(20), C_ACCENT, 255, 0);
-        cv_text(&g_base, g_f[F_TINY], SB_EDITION_COMMUNITY ? "COMMUNITY" : "PRIVATE", SX(368), SX(14), SX(98),
-                SX(20), C_ACCENT, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-        cv_fill(&g_base, SX(468), SX(14), SX(110), SX(20), C_ACCENT_HI, 60, SX(3));
-        cv_text(&g_base, g_f[F_TINY], vb, SX(468), SX(14), SX(110), SX(20), C_ACCENT_HI,
-                DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    }
-    SetTextCharacterExtra(g_base.dc, 0);
+    /* W398 LAUNCHER-GAMESWITCH: Das Logo links entfaellt, die Spielnamen selbst sind der Umschalter (Tabs
+     * ID_GAME_*). Darueber klein und gedimmt die Projektzeile. Plaketten (Edition/Beta) stehen rechts neben der
+     * Statusanzeige und werden mit ihr in hdr_paint_status gezeichnet. */
+    hdr_paint_sub(); /* W401: Projektzeile + Edition/Beta */
     /* Fuss der Navigation (W281: in a/b steht dort die Layout-Vorschau) */
     if (g_lay.id == LLAY_0) {
         cv_text(&g_base, g_f[F_TINY], LT("gui.foot_hint"),
@@ -1992,18 +2067,24 @@ static void dot(int x, int y, COLORREF c)
 }
 
 /* Spiel-Box: 4:3, maximal in w x h (Pillar-/Letterbox). */
+static int pergame_box_169(void); /* W402: LoC mit Bildformat 16:9 -> Box 16:9 statt 4:3 */
 static void aspect_box_for(unsigned w, unsigned h, unsigned *bw, unsigned *bh)
 {
+    unsigned ax = 4, ay = 3;
     if (w == 0 || h == 0) {
         *bw = 0;
         *bh = 0;
         return;
     }
-    *bw = h * 4 / 3;
+    if (pergame_box_169()) {
+        ax = 16;
+        ay = 9;
+    }
+    *bw = h * ax / ay;
     *bh = h;
     if (*bw > w) {
         *bw = w;
-        *bh = w * 3 / 4;
+        *bh = w * ay / ax;
     }
 }
 
@@ -2069,7 +2150,8 @@ static void paint_preview(int x, int y, int w, int h)
             int ix = ox + (ow - (int)bw) / 2, iy = oy + (oh - (int)bh) / 2;
             int sh = (int)bh < 70 || (int)bw < SX(200); /* W171: kurz, wenn der Text nicht passt */
             cv_fill(&g_bb, ix, iy, (int)bw, (int)bh, RGB(44, 92, 128), 255, 0);
-            cv_text(&g_bb, g_f[sh ? F_TINY : F_SEMI], sh ? "4:3" : LT("gui.preview_43"), ix, /* W148 */
+            cv_text(&g_bb, g_f[sh ? F_TINY : F_SEMI], pergame_box_169() ? (sh ? "16:9" : LT("gui.preview_169")) /* W402 */
+                                                         : sh ? "4:3" : LT("gui.preview_43"), ix, /* W148 */
                     iy, (int)bw, (int)bh, C_TEXT,
                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
         }
@@ -2235,9 +2317,8 @@ static void upd_paint_play(void)
     if (dg_paint_play()) { /* W279: "The last session crashed" hat Vorrang */
         return;
     }
-    if (g_upd_ask) {
-        card(UPD_X, UPD_Y, UPD_W, 134, LT("gui.upd_title"));
-        label(F_TINY, LT("gui.upd_ask"), UPD_X + 18, UPD_Y + 36, UPD_W - 36, 60, C_TEXT);
+    if (g_upd_ask) { /* W397: Erstabfrage "Online & Updates" (drei Stufen) statt Update-Frage */
+        netq_paint(UPD_X, UPD_Y, UPD_W);
     } else if (g_upd_res.result == LUPD_R_NEWER) {
         card(UPD_X, UPD_Y, UPD_W, 96, LT("gui.upd_new_title"));
         upd_tag_disp(g_upd_res.rel.tag, v, sizeof v);
@@ -2465,7 +2546,8 @@ static void paint_display(void)
     card(COL2, CY0, COLW, 488, LT("gui.disp_wide"));
     /* W278/W287: Breitbild/Cockpit-Ansicht experimentell = Symbol ID_XEXP_DISP */
     /* R13: festes Bildformat (S3.10) als Info, kein Schalter */
-    label(F_SMALL, g_rr[13].text, COL2 + 18, CY0 + 42, COLW - 36, 52, C_DIM);
+    label(F_SMALL, g_game == LGAME_LOC ? LT(pergame_box_169() ? "gui.loc_disp_wide_169" : "gui.loc_disp_wide_43")
+                                       : g_rr[13].text, COL2 + 18, CY0 + 42, COLW - 36, 52, C_DIM); /* W402 */
     label1(F_SMALL, LT("gui.gfx_edge"), COL2 + 18, CY0 + 100, 100, 30, C_DIM);
     if (adv || edge_fade_shown()) { /* W296 PRESET-ORIG: Verlaufszeile gehoert zu "Fade out" */
         label1(F_SMALL, LT("gui.gfx_edgefade"), COL2 + 18, CY0 + 136, 100, 30, C_DIM);
@@ -2621,7 +2703,8 @@ static void paint_audio(void)
     }
     /* W234 PAL50: Karte "Spieltempo" (Schalter + kurze Erklaerung) */
     card(COL2, CY0, COLW, 140 + EXY, LT("gui.pal50_card"));
-    label(F_TINY, LT("gui.pal50_txt"), COL2 + 18, CY0 + 86, COLW - 36, 48, C_DIM);
+    label(F_TINY, LT(g_game == LGAME_LOC ? "gui.loc_lock_tick" : "gui.pal50_txt"), COL2 + 18, CY0 + 86, COLW - 36, 48, /* W402 */
+          g_game == LGAME_LOC ? C_WARN : C_DIM);
     /* W195 PHOTO-MODE / W290 QUICK-SHOT: Karte "Fotos & Screenshots" (eine Konfiguration fuer Fotomodus und
      * Schnell-Screenshot: Ordner, Ansicht, Groesse, Format, Bildformat der Aussenwelt; Replays & Video-Export) */
     card(CX0, CY0 + 152 + EXY, CW, 344 - EXY, LT("gui.extras_card"));
@@ -2680,7 +2763,7 @@ static void diag_row(const char *lbl, const char *val, COLORREF c, int y)
 }
 
 /* W178 COMM-BG: beide Editionen haben die Launcher-Karte (Hintergrundbild). */
-#define ADV_DIAG_Y (CY0 + 256) /* W250: +32 (Launcher-Karte mit Update-Schalter) */
+#define ADV_DIAG_Y (CY0 + 136) /* W250: +32 (Launcher-Karte mit Update-Schalter); W397: Karte weg, -120 */
 #define ADV_DIAG_DY 34 /* W190: Diagnose-Zeilen unter dem Schalter "Spielstaende schuetzen" */
 
 /* W172/P7: Datenort im Klartext (gleiche Quelle wie --userdata:
@@ -2942,10 +3025,7 @@ static void paint_adv_shared(void)
     card(COL2, CY0, COLW, 124, LT("gui.adv_finetune"));
     label1(F_SMALL, LT("gui.adv_vsync"), COL2 + 18, CY0 + 44, 150, 30, C_DIM);
     label1(F_SMALL, LT("gui.adv_fpslimit"), COL2 + 18, CY0 + 82, 150, 30, C_DIM);
-    card(COL2, CY0 + 136, COLW, 108, LT("gui.adv_launcher"));
-    if (!g_upd_ver[0]) { /* W250: Build ohne Release-Version -> nur Hinweis */
-        label(F_TINY, LT("gui.upd_dev"), COL2 + 18, CY0 + 208, COLW - 36, 30, C_FAINT);
-    }
+    /* W397: Karte "Launcher" (Hintergrund, Versionspruefung) liegt jetzt auf den Launcher-Einstellungen */
 }
 
 static void paint_loc_adv(void); /* W293: Bereich LoC (Block "W276 LOCTAB") */
@@ -3037,12 +3117,14 @@ static void compose(void)
     case P_PLAY: if (g_game == LGAME_LOC) { paint_loc_play(); } else { paint_play(); } break; /* W276 */
     case P_DISPLAY: paint_display(); break;
     case P_GFX: paint_gfx(); break;
-    case P_PACKS: paint_packs(); break;
+    case P_PACKS: if (g_game == LGAME_LOC) { paint_lnet(); } else { paint_packs(); } break; /* W392: LoC Netzwerk */
     case P_CTRL: paint_ctrl(); break;
     case P_AUDIO: paint_audio(); break;
     case P_ADV: paint_adv(); break;
     case P_ALPHA: paint_alpha(); break; /* W272 */
+    case P_LSET: paint_lset(); break; /* W397 */
     }
+    hdr_paint_status(); /* W397: Kopf rechts (steelnet / neue Version) */
     /* Eingabefelder: Rahmen (Fokus = Akzent) */
     for (i = 0; i < g_ui_n; i++) {
         uictl_t *u = &g_ui[i];
@@ -3075,6 +3157,12 @@ static void compose(void)
         if (blk) {
             static const int kBlk[] = { 4, 3 };
             paint_reason(first_rule(kBlk, 2), NAV_W + 28, WIN_H - 22, lw, 16);
+        } else if (g_page != P_PLAY && g_game == LGAME_LOC && !loc_launch_ok()) {
+            char m[700]; /* LoC-Sperre (Disc/steelnet): Grund wie auf der Spielen-Seite */
+            loc_gate_msg(m, sizeof m);
+            L_text(F_TINY, m, NAV_W + 28, WIN_H - 22, lw, 16, C_WARN,
+                   DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+            blk = 1;
         }
     if (g_status[0]) {
         wchar_t *wt = u8_wdup(g_status);
@@ -3252,6 +3340,8 @@ static int xexp_title_len(int id, const wchar_t *txt, int n1)
     return n1;
 }
 
+/* W398 LAUNCHER-GAMESWITCH (Block vor hdr_paint_status) */
+static void gametab_paint(canvas_t *c, const uictl_t *u, int w, int h, const wchar_t *txt, int n, int focus);
 static void draw_item(const DRAWITEMSTRUCT *d)
 {
     uictl_t *u = ui_by_hwnd(d->hwndItem);
@@ -3292,6 +3382,20 @@ static void draw_item(const DRAWITEMSTRUCT *d)
     switch (u->kind) {
     case K_NAV: {
         int sel = u->id - ID_NAV0 == g_page;
+        if (u->id == ID_NAVSUB_MATCH || u->id == ID_NAVSUB_ACC) { /* W399: Unterpunkt von Multiplayer */
+            int ssel = (u->id == ID_NAVSUB_ACC) == (acc_sub_active() != 0);
+            int gx = SX(g_has_icons ? 25 : 12); /* Fuehrungslinie unter dem Symbol des Elternpunkts */
+            cv_fill(&c, gx, 0, SX(1), h, RGB(255, 255, 255), 40, 0);
+            if (ssel) {
+                cv_fill(&c, gx + SX(14), 0, w - gx - SX(14), h, RGB(255, 255, 255), 14, SX(5));
+                cv_fill(&c, gx - SX(1), SX(7), SX(3), h - SX(14), C_ACCENT, 255, SX(1));
+            } else if (u->hover) {
+                cv_fill(&c, gx + SX(14), 0, w - gx - SX(14), h, RGB(255, 255, 255), 10, SX(5));
+            }
+            cv_textw(&c, g_f[F_SMALL], txt, n, gx + SX(24), 0, w - gx - SX(30), h,
+                     ssel ? C_TEXT : C_DIM, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+            break;
+        }
         if (sel) {
             cv_fill(&c, 0, 0, w, h, RGB(255, 255, 255), 22, SX(6));
             cv_fill(&c, 0, SX(9), SX(3), h - SX(18), C_ACCENT, 255, SX(1));
@@ -3299,7 +3403,7 @@ static void draw_item(const DRAWITEMSTRUCT *d)
             cv_fill(&c, 0, 0, w, h, RGB(255, 255, 255), 12, SX(6));
         }
         if (g_has_icons) {
-            wchar_t ic = kPageIcon[u->id - ID_NAV0];
+            wchar_t ic = g_game == LGAME_LOC && u->id - ID_NAV0 == P_PACKS ? 0xE774 : kPageIcon[u->id - ID_NAV0]; /* W392 */
             cv_textw(&c, g_f[F_ICON], &ic, 1, SX(14), 0, SX(24), h,
                      sel ? C_ACCENT_HI : C_DIM,
                      DT_LEFT | DT_VCENTER | DT_SINGLELINE);
@@ -3311,10 +3415,10 @@ static void draw_item(const DRAWITEMSTRUCT *d)
                 n = (int)(nl - txt);
             }
             cv_textw(&c, sel ? g_f[F_SEMI] : g_f[F_BODY], txt, n,
-                     SX(g_has_icons ? 46 : 18), 0, w - SX(g_has_icons ? 46 : 18) - (warn ? SX(34) : 0), h,
+                     SX(g_has_icons ? 46 : 18), 0, w - SX(g_has_icons ? 46 : 18) - (warn ? SX(40) : 0), h, /* W403 */
                      sel ? C_TEXT : C_DIM, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
             if (warn) {
-                xicon_paint(&c, w - SX(32), 0, SX(24), h, 1, 0);
+                xicon_paint(&c, w - SX(14) - SX(24), 0, SX(24), h, 1, 0); /* W403: Rand rechts 14 = Symbol links */
             }
         }
         break;
@@ -3406,11 +3510,17 @@ static void draw_item(const DRAWITEMSTRUCT *d)
         break;
     }
     default: { /* K_BTN, K_ACCENT, K_BIG, K_SEG (W172: gewaehlt = Akzent) */
-        int acc = u->kind == K_ACCENT || u->kind == K_BIG ||
-                  (u->kind == K_SEG && u->checked);
-        COLORREF bg = acc ? C_ACCENT : C_BTN;
-        COLORREF fg = acc ? C_ON_ACCENT : C_TEXT;
-        int rad = SX(u->kind == K_BIG ? 10 : 6);
+        int acc;
+        COLORREF bg, fg;
+        int rad;
+        if (gametab_id(u->id)) { /* W398: Wortmarken-Tab statt Knopf (kein Hintergrund) */
+            gametab_paint(&c, u, w, h, txt, n, focus);
+            break;
+        }
+        acc = u->kind == K_ACCENT || u->kind == K_BIG || (u->kind == K_SEG && u->checked);
+        bg = acc ? C_ACCENT : C_BTN;
+        fg = acc ? C_ON_ACCENT : C_TEXT;
+        rad = SX(u->kind == K_BIG ? 10 : 6);
         if (!dis && u->hover) {
             bg = acc ? C_ACCENT_HI : C_BTN_HI;
         }
@@ -3431,6 +3541,12 @@ static void draw_item(const DRAWITEMSTRUCT *d)
         }
         if (u->kind == K_BIG) {
             SetTextCharacterExtra(c.dc, SX(2));
+        }
+        if (u->id == ID_LSET_OPEN) { /* W397: Zahnrad (Fenstertext = zugaenglicher Name) */
+            wchar_t ic = g_has_icons ? 0xE713 : L'*';
+            cv_textw(&c, g_has_icons ? g_f[F_ICON] : g_f[F_SEMI], &ic, 1, 0, 0, w, h, fg,
+                     DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            break;
         }
         if (u->id == ID_START_MENU) { /* W171: Pfeil "v" (Launch-Menue) */
             wchar_t ic = g_has_icons ? 0xE70D : L'v';
@@ -3824,13 +3940,15 @@ static void update_aspect_info(void)
     if (bw == 0) {
         strncpy_s(g_aspect_info, sizeof g_aspect_info, LT("gui.aspect_bad"), _TRUNCATE);
     } else if (bw == w && bh == h) {
-        _snprintf_s(g_aspect_info, sizeof g_aspect_info, _TRUNCATE, LT("gui.aspect_43"),
+        _snprintf_s(g_aspect_info, sizeof g_aspect_info, _TRUNCATE, LT(pergame_box_169() ? "gui.aspect_169" : "gui.aspect_43"),
                     w, h);
     } else if (bh == h) {
-        _snprintf_s(g_aspect_info, sizeof g_aspect_info, _TRUNCATE, LT("gui.aspect_wide"),
+        _snprintf_s(g_aspect_info, sizeof g_aspect_info, _TRUNCATE,
+                    LT(pergame_box_169() ? "gui.aspect_wide_169" : "gui.aspect_wide"), /* W402: LoC 16:9 */
                     w, h, bw, bh, (w - bw) / 2);
     } else {
-        _snprintf_s(g_aspect_info, sizeof g_aspect_info, _TRUNCATE, LT("gui.aspect_tall"),
+        _snprintf_s(g_aspect_info, sizeof g_aspect_info, _TRUNCATE,
+                    LT(pergame_box_169() ? "gui.aspect_tall_169" : "gui.aspect_tall"),
                     w, h, bw, bh, (h - bh) / 2);
     }
     { /* W107 EDGE-MODE: Vorschau + Hinweis */
@@ -3840,7 +3958,7 @@ static void update_aspect_info(void)
         g_prev_edge = t.edge_mode;
         g_prev_ew = t.edge_fade_width;
         g_prev_es = t.edge_fade_strength;
-        if (bw && (bw != w || bh != h) && t.edge_mode) {
+        if (bw && (bw != w || bh != h) && t.edge_mode && !pergame_box_169()) {
             _snprintf_s(g_aspect_info + n, sizeof g_aspect_info - n, _TRUNCATE, " %s",
                         t.edge_mode == 1 ? LT("gui.aspect_cut")
                                          : LT("gui.aspect_fade"));
@@ -4398,6 +4516,7 @@ static const char ks_legacy_text[] =
     "bi0 = KEY:SPACE, MOUSE:LEFT\n"
     "bi1 = KEY:F, MOUSE:RIGHT\n"
     "bi2 = KEY:L, MOUSE:MIDDLE\n"
+    "bi3 = KEY:SHIFT+KEY:DELETE\n" /* W403: Eject (Standard, Akkord gegen Versehen) */
     "bi4 = KEY:H\n"
     "bi5 = KEY:I\n"
     "bi6 = KEY:ENTER\n"
@@ -4442,7 +4561,8 @@ static const char ks_legacy_text[] =
     "photo = KEY:SHIFT+KEY:F12\n"
     "quick_shot = KEY:F12\n"
     "orig_view = KEY:SHIFT+KEY:F8\n"
-    "replay_exit = KEY:BACKSPACE\n"; /* W283; W290 photo/quick_shot; W299 replay_exit */
+    "replay_exit = KEY:BACKSPACE\n"
+    "net_hud = KEY:F3\n"; /* W283; W290 photo/quick_shot; W299 replay_exit; W374 net_hud */
 
 /* Formen der Zeichnung. KS_LEDR/G/B = Taste mit roter/gruener/blauer
  * Leuchtleiste (3x3-Raster im Mittelblock). */
@@ -4767,10 +4887,19 @@ static void ks_atom(const char *a, char *out, size_t cap, int *src)
     }
     if (_stricmp(ty, "KEY") == 0) {
         const char *t = nm;
+        char kd[48];
         for (i = 0; i < (int)(sizeof keys / sizeof keys[0]); i++) {
             if (_stricmp(nm, keys[i].n) == 0) {
                 t = keys[i].t;
                 break;
+            }
+        }
+        if (t == nm && nm[0] >= '0' && nm[0] <= '9' && nm[1]) {
+            /* W365 BIND-KEYNAMES: numerisch gespeicherte Taste ("20") mit Namen ("Caps Lock"). */
+            int vk = lctrl_key_vk(nm);
+            if (vk >= 0) {
+                lctrl_key_disp(vk, kd, sizeof kd);
+                t = kd;
             }
         }
         _snprintf_s(out, cap, _TRUNCATE, "%s%s",
@@ -5596,8 +5725,8 @@ static int ks_selfcheck(const char *html, int prof, char *why, size_t cap)
             return 0;
         }
         ks_co(html, "bi3", co, sizeof co);
-        if (!strstr(co, KS_EMDASH)) {
-            strcpy_s(why, cap, "Eject belegt (Standard)");
+        if (strstr(co, KS_EMDASH) || !strstr(co, "Shift")) { /* W403: Eject = Umschalt+Entf (frueher unbelegt) */
+            _snprintf_s(why, cap, _TRUNCATE, "Eject nicht Umschalt+Entf (Standard): %.80s", co);
             return 0;
         }
         ks_co(html, "pedal_r", co, sizeof co);
@@ -5757,7 +5886,8 @@ static void keyshtml_build(const char *memo, const char *profile,
                                  !strcmp(kh_rows[i].act, LT("bind.orig_view")) ? "orig_view" : /* W283 */
                                  !strcmp(kh_rows[i].act, LT("bind.photo")) ? "photo" :
                                  !strcmp(kh_rows[i].act, LT("bind.quick_shot")) ? "quick_shot" : /* W290 */
-                                 !strcmp(kh_rows[i].act, LT("bind.replay_exit")) ? "replay_exit" : NULL; /* W299 */
+                                 !strcmp(kh_rows[i].act, LT("bind.replay_exit")) ? "replay_exit" : /* W299 */
+                                 !strcmp(kh_rows[i].act, LT("bind.net_hud")) ? "net_hud" : NULL; /* W374 */
             if (action) {
                 lctrl_bind_row_text(&bindings, lctrl_bind_elem_index(action), kh_rows[i].key, sizeof kh_rows[i].key);
             }
@@ -6651,6 +6781,7 @@ static void ui_to_settings(launcher_settings_t *s)
     ui_gettext(ctl(ID_MEDIA), s->media_root, sizeof s->media_root);
     ui_gettext(ctl(ID_HDD), s->hdd_root, sizeof s->hdd_root);
     ui_gettext(ctl(ID_IMAGE), s->game_image, sizeof s->game_image); /* W150 */
+    lcfg_image_folder_mode(s); /* W369: .xbe/Spielordner im Abbild-Feld = Ordner-Modus */
     s->width = get_num(ID_W);
     s->height = get_num(ID_H);
     s->present_interval = ComboBox_GetCurSel(ctl(ID_VSYNC)) == 1 ? 1 : 0;
@@ -6698,7 +6829,7 @@ static void ui_to_settings(launcher_settings_t *s)
     s->stick_aim = ComboBox_GetCurSel(ctl(ID_STICK_AIM)) == 1 ? 1 : 0; /* W271 */
     sel = ComboBox_GetCurSel(ctl(ID_STICK_SENS));
     s->stick_aim_sens = (sel >= 0 && sel < 16) ? sel + 1 : 4;
-    s->game_tick = ui_checked(ID_PAL50) ? 25 : 30; /* W234 */
+    s->game_tick = ui_checked(ID_PAL50) && g_game != LGAME_LOC ? 25 : 30; /* W234; W402: LoC immer 30 (20-Hz-Spiel) */
     sel = ComboBox_GetCurSel(ctl(ID_IPFPS));
     s->interp_fps = ip_val(sel, 0); /* W223, W309 */
     sel = ComboBox_GetCurSel(ctl(ID_WINMODE));
@@ -7080,6 +7211,34 @@ static int ui_refresh_visibility(void)
 /* Hauptfenster schon (TTF_SUBCLASS).                                   */
 /* ------------------------------------------------------------------ */
 /* Text der sperrenden Regel eines Elements ("" = keine Sperre/sichtbar frei). */
+/* W402 LAUNCHER-PERGAME: Optionen, die es in Line of Contact nicht gibt (sichtbar, gesperrt, Grund im
+ * Tooltip). Grundlage: Client-Code (LoC-Profil g_sba_loc: SB-Hooks nicht installiert, SB-Adressen lesen die
+ * Null-Seite), Tabelle in BERICHT_M2 "W402". Einzige Stelle der Liste. */
+static const int kLocLock[] = { ID_PAL50, ID_CPERSP, ID_CPANINI, ID_CWIDTH, ID_CHIDE, ID_MONFX,
+                                ID_CTRL_AIMASSIST, ID_CTRL_AUTOGEAR, ID_RP_LABEL, ID_RP_LOGO, ID_WM_MEDIA,
+                                ID_GFX_TEX, ID_REM_SCALE, ID_GFX_PACKS, ID_VR, ID_VRPRESET, ID_VRRES,
+                                ID_EDGE, ID_EDGE_S, ID_EDGE_W, ID_SAVE_LOCK };
+#define KLOCLOCK_N (sizeof kLocLock / sizeof kLocLock[0])
+static const char *loc_lock_key(int id) /* NULL = nicht gesperrt */
+{
+    if (g_game != LGAME_LOC) {
+        return NULL;
+    }
+    switch (id) {
+    case ID_PAL50: return "gui.loc_lock_tick";
+    case ID_CPERSP: case ID_CPANINI: case ID_CWIDTH: case ID_CHIDE: return "gui.loc_lock_cockpit";
+    case ID_MONFX: return "gui.loc_lock_monfx";
+    case ID_CTRL_AIMASSIST: case ID_CTRL_AUTOGEAR: return "gui.loc_lock_assist";
+    case ID_RP_LABEL: case ID_RP_LOGO: case ID_WM_MEDIA: return "gui.loc_lock_replay";
+    case ID_GFX_TEX: case ID_REM_SCALE: case ID_GFX_PACKS: return "gui.loc_lock_packs";
+    case ID_VR: case ID_VRPRESET: case ID_VRRES: return "gui.loc_lock_vr";
+    case ID_SAVE_LOCK: return "gui.loc_lock_savelock";
+    case ID_EDGE: case ID_EDGE_S: case ID_EDGE_W:
+        return pergame_box_169() ? "gui.loc_lock_edge" : NULL; /* 4:3: Hor+-Raender wirken auch in LoC */
+    default: return NULL;
+    }
+}
+
 static void tip_text(int id, char *out, size_t cap)
 {
     int i, k;
@@ -7095,6 +7254,10 @@ static void tip_text(int id, char *out, size_t cap)
     out[0] = '\0';
     if (!h || !(GetWindowLongW(h, GWL_STYLE) & WS_VISIBLE) ||
         IsWindowEnabled(h)) {
+        return;
+    }
+    if (loc_lock_key(id)) { /* W402 */
+        strncpy_s(out, cap, LT(loc_lock_key(id)), _TRUNCATE);
         return;
     }
     for (i = 0; i < KRULECTL_N; i++) {
@@ -7128,6 +7291,19 @@ static void tips_place(void)
             ui_px_rect(u, &ti.rect); /* W281 */
             SendMessageW(g_tip, TTM_NEWTOOLRECTW, 0, (LPARAM)&ti);
         }
+    }
+    for (i = 0; i < (int)KLOCLOCK_N; i++) { /* W402: gesperrte LoC-Optionen */
+        uictl_t *u = ui_find(kLocLock[i]);
+        TTTOOLINFOW ti;
+        if (!u) {
+            continue;
+        }
+        memset(&ti, 0, sizeof ti);
+        ti.cbSize = sizeof ti;
+        ti.hwnd = g_hwnd;
+        ti.uId = (UINT_PTR)u->id;
+        ui_px_rect(u, &ti.rect);
+        SendMessageW(g_tip, TTM_NEWTOOLRECTW, 0, (LPARAM)&ti);
     }
     { /* W179: Rechteck des Browser-Knopfes nachfuehren */
         uictl_t *u = ui_find(ID_CTRL_BROWSER);
@@ -7175,6 +7351,16 @@ static void tips_build(void)
             }
         }
     }
+    for (i = 0; i < (int)KLOCLOCK_N; i++) { /* W402: Grund der LoC-Sperre */
+        TTTOOLINFOW ti;
+        memset(&ti, 0, sizeof ti);
+        ti.cbSize = sizeof ti;
+        ti.uFlags = TTF_SUBCLASS;
+        ti.hwnd = g_hwnd;
+        ti.uId = (UINT_PTR)kLocLock[i];
+        ti.lpszText = LPSTR_TEXTCALLBACKW;
+        SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti); /* doppelt = egal */
+    }
     { /* W287 EXP-ICON: Symbole, Preset-Optionsfelder und Navigation tragen
        * ihren Tooltip selbst (aktiv, Maus am Element; leer = kein Tooltip) */
         int j;
@@ -7184,6 +7370,7 @@ static void tips_build(void)
             if (u->parent != g_hwnd ||
                 !(u->kind == K_ICON || (u->id >= ID_GP0 && u->id < ID_GP0 + LGP_CUSTOM) ||
                   u->id == ID_CHIDE || u->id == ID_REM_LABEL || /* W291: Erklaerung als Tooltip statt Textzeile */
+                  loc_tip_id(u->id) || /* W387: Gegner glaetten erklaert */
                   u->id == ID_NAV0 + P_DISPLAY || u->id == ID_NAV0 + P_GFX || u->id == ID_NAV0 + P_PACKS)) {
                 continue;
             }
@@ -7192,6 +7379,19 @@ static void tips_build(void)
             ti.uFlags = TTF_IDISHWND | TTF_SUBCLASS;
             ti.hwnd = g_hwnd;
             ti.uId = (UINT_PTR)u->h;
+            ti.lpszText = LPSTR_TEXTCALLBACKW;
+            SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
+        }
+    }
+    { /* W403: Kopf-Chips (gezeichnet, keine Kinder): Rechteck setzt hdr_paint_status */
+        int c;
+        for (c = 0; c < 2; c++) {
+            TTTOOLINFOW ti;
+            memset(&ti, 0, sizeof ti);
+            ti.cbSize = sizeof ti;
+            ti.uFlags = TTF_SUBCLASS;
+            ti.hwnd = g_hwnd;
+            ti.uId = (UINT_PTR)(HDR_TIP_ID0 + c);
             ti.lpszText = LPSTR_TEXTCALLBACKW;
             SendMessageW(g_tip, TTM_ADDTOOLW, 0, (LPARAM)&ti);
         }
@@ -7207,6 +7407,8 @@ static void tips_dispinfo(NMTTDISPINFOW *di)
     if (di->uFlags & TTF_IDISHWND) { /* W287: Werkzeug am Element */
         uictl_t *u = ui_by_hwnd((HWND)di->hdr.idFrom);
         xtip_text(u ? u->id : 0, t, sizeof t);
+    } else if (di->hdr.idFrom >= HDR_TIP_ID0 && di->hdr.idFrom < HDR_TIP_ID0 + 2) { /* W403: Kopf-Chips */
+        hdr_tip_text((int)(di->hdr.idFrom - HDR_TIP_ID0), t, sizeof t);
     } else {
         tip_text((int)di->hdr.idFrom, t, sizeof t);
     }
@@ -7269,11 +7471,32 @@ static void ui_apply_rules(void)
                 }
             }
             if (g_game == LGAME_LOC && (id == ID_START || id == ID_START_MENU)) {
-                en = 1; /* W276: im Bereich LoC meldet Launch "Coming soon" (keine SB-Sperre) */
+                /* W276: keine SB-Sperre im Bereich LoC ("Coming soon" ohne startbaren Client);
+                 * sonst grau wie Play Line of Contact (ohne Disc bzw. ohne steelnet) */
+                en = loc_launch_ok();
+            }
+            if (loc_lock_key(id)) {
+                en = 0; /* W402: gibt es in LoC nicht */
             }
             if (ctl(id) && (IsWindowEnabled(ctl(id)) != FALSE) != en) {
                 EnableWindow(ctl(id), en ? TRUE : FALSE);
             }
+        }
+    }
+    for (i = 0; i < (int)KLOCLOCK_N; i++) { /* W402: Sperr-IDs ohne Regel (mit Regel: oben erledigt) */
+        int id = kLocLock[i], j, m, ruled = 0, en;
+        for (j = 0; j < KRULECTL_N && !ruled; j++) {
+            for (m = 0; m < KRC_MAX && kRuleCtl[j].ids[m]; m++) {
+                if (kRuleCtl[j].ids[m] == id) {
+                    ruled = 1;
+                    break;
+                }
+            }
+        }
+        en = loc_lock_key(id) == NULL;
+        if (!ruled && ctl(id) && (IsWindowEnabled(ctl(id)) != FALSE) != en) {
+            EnableWindow(ctl(id), en ? TRUE : FALSE);
+            InvalidateRect(ctl(id), NULL, FALSE);
         }
     }
     /* W220 PLAY-LAYOUT: Sichtbarkeit geaendert (z. B. Einrichtungskarte ->
@@ -7309,6 +7532,14 @@ static void user_cfg_path(char *out, size_t cap)
     lcfg_user_cfg_path(g_client_dir, out, cap); /* W150 USER-DATA */
 }
 
+/* W402 PERGAME: Einstellungsdatei eines Spiels (SB = user.cfg, LoC = user_loc.cfg daneben). */
+static void game_cfg_path(int game, char *out, size_t cap)
+{
+    char base[1200];
+    user_cfg_path(base, sizeof base);
+    lgame_cfg_path(base, game, out, cap);
+}
+
 /* W259 SETTINGS-RESET: Stand der user.cfg beim letzten Lesen/Schreiben durch
  * den Launcher (Oberflaechenwerte, ueberlagert mit der Datei). Der Launcher
  * bleibt waehrend des Spiels offen; ohne Abgleich schrieb der naechste Start
@@ -7320,7 +7551,7 @@ static int g_disk_base_ok;
 static void disk_base_sync(const launcher_settings_t *s)
 {
     char upath[1200];
-    user_cfg_path(upath, sizeof upath);
+    game_cfg_path(g_game, upath, sizeof upath); /* W402: Datei des aktiven Spiels */
     g_disk_base = *s;
     lcfg_load_file(upath, &g_disk_base);
     g_disk_base_ok = 1;
@@ -7336,7 +7567,7 @@ static int disk_merge(launcher_settings_t *s)
     if (!g_disk_base_ok) {
         return 0;
     }
-    user_cfg_path(upath, sizeof upath);
+    game_cfg_path(g_game, upath, sizeof upath); /* W402 */
     disk = g_disk_base;
     if (lcfg_load_file(upath, &disk) != 0) {
         return 0; /* keine Datei: nichts zu uebernehmen */
@@ -7349,8 +7580,15 @@ static int disk_merge(launcher_settings_t *s)
 static int save_user_merged(const char *upath)
 {
     int n = disk_merge(&g_s);
-    if (lcfg_save_user(upath, &g_s) != 0) {
+    /* W402: LoC-Datei ohne SB-Spielpfade (der LoC-Start setzt Abbild/Datenordner selbst) */
+    if (lcfg_save_user_ex(upath, &g_s, g_game == LGAME_LOC ? LCFG_SAVE_NO_PATHS : 0) != 0) {
         return -1;
+    }
+    pergame_mark();
+    if (g_game == LGAME_LOC) { /* W402: Sprache ist global (Launcher liest sie aus user.cfg) */
+        char sp[1200];
+        user_cfg_path(sp, sizeof sp);
+        (void)la_cfg_set(sp, "lang", g_s.lang);
     }
     disk_base_sync(&g_s);
     if (n > 0) {
@@ -7381,7 +7619,10 @@ static int do_save(int complain)
 {
     char err[1024], upath[1200];
     ui_to_settings(&g_s);
-    if (lcfg_validate(&g_s, err, sizeof err) != 0) {
+    /* W375 (#50): Auf dem LoC-Tab gelten nur die gemeinsamen Werte (Grafik/Anzeige/Steuerung); die SB-Spieldaten
+     * pruefen wir dort nicht (vorher: "No game data set" ohne SB-Abbild, nichts gespeichert). Das LoC-Abbild
+     * speichert loctab_save getrennt, der LoC-Start prueft es selbst (lgame_loc_start_gate). */
+    if (lcfg_validate_ex(&g_s, err, sizeof err, g_game == LGAME_LOC ? LCFG_V_NO_GAME : 0) != 0) {
         set_status_k(err, 2);
         if (complain) {
             ui_msgbox(g_hwnd, err, LT("gui.msg_checkdata"),
@@ -7389,7 +7630,7 @@ static int do_save(int complain)
         }
         return 1;
     }
-    user_cfg_path(upath, sizeof upath);
+    game_cfg_path(g_game, upath, sizeof upath); /* W402: nur die Datei des aktiven Spiels */
     if (save_user_merged(upath) < 0) { /* W259: im Spiel gespeicherte Werte bleiben */
         _snprintf_s(err, sizeof err, _TRUNCATE, LT("gui.msg_nowrite"), upath);
         set_status_k(err, 2);
@@ -7662,11 +7903,11 @@ static void browse_image(void)
     n1 = wcslen(f1) + 1;
     n2 = wcslen(f2) + 1;
     memset(filter, 0, sizeof filter);
-    if (n1 + 13 + n2 + 5 < 200) { /* "<f1>|*.iso;*.xiso|<f2>|*.*||" */
+    if (n1 + 19 + n2 + 5 < 200) { /* "<f1>|*.iso;*.xiso;*.xbe|<f2>|*.*||" (W369: + .xbe) */
         wcscpy_s(filter, 200, f1);
-        wcscpy_s(filter + n1, 200 - n1, L"*.iso;*.xiso");
-        wcscpy_s(filter + n1 + 13, 200 - n1 - 13, f2);
-        wcscpy_s(filter + n1 + 13 + n2, 200 - n1 - 13 - n2, L"*.*");
+        wcscpy_s(filter + n1, 200 - n1, L"*.iso;*.xiso;*.xbe");
+        wcscpy_s(filter + n1 + 19, 200 - n1 - 19, f2);
+        wcscpy_s(filter + n1 + 19 + n2, 200 - n1 - 19 - n2, L"*.*");
     }
     memset(&ofn, 0, sizeof ofn);
     ofn.lStructSize = sizeof ofn;
@@ -7847,6 +8088,11 @@ static int g_bind_sel = -1;
 static int g_cap_mode; /* 0 = idle, 1 = ersetzen, 2 = hinzu */
 static int g_cap_mod;  /* W283: gedrueckte Zusatztaste (Zeile orig_view), 0 = keine */
 static lctrl_pad_t g_cap_prev;
+/* W365 BIND-COMBO: wartende erste Taste je Quelle (Pad, Original-Controller, Joystick). */
+static lctrl_combo_t g_cap_pcombo, g_cap_scombo;
+static volatile LONG g_cap_sbc_held[3]; /* Tastenstand aus dem SBC-Thread (buttons[0..2]) */
+static int g_cap_jp_dev = -1;           /* Joystick-Geraet der wartenden Taste, -1 = keine */
+static char g_cap_jp_part[16];          /* "B3" */
 static int g_cap_have_pad;
 static lctrl_pad_learner_t g_cap_plrn; /* W312: Pad-Achsen ab Ruhestellung */
 static void joy_cal_load(void);        /* W312: Kalibrierung aus user.cfg */
@@ -7894,6 +8140,9 @@ static DWORD WINAPI bind_sbc_thread(LPVOID arg)
             }
         }
         base = st;
+        for (i = 0; i < 3; i++) { /* W365: Stand fuer Kombi-Lernen (vor der Meldung) */
+            InterlockedExchange(&g_cap_sbc_held[i], (LONG)st.buttons[i]);
+        }
         if (bi >= 0) {
             PostMessageW(hd, WM_APP_BIND_SBC, (WPARAM)bi, 0);
         }
@@ -8150,7 +8399,13 @@ static const char *bind_wheel_src(UINT msg, WPARAM wp)
 static void bind_src_disp(const char *alt, char *out, size_t cap)
 {
     int i, n = 0;
+    char pr[160];
     strncpy_s(out, cap, alt, _TRUNCATE);
+    if (lctrl_src_pretty(alt, pr, sizeof pr)) { /* W365: Tastennamen / Kombination lesbar */
+        strncat_s(out, cap, "  (", _TRUNCATE);
+        strncat_s(out, cap, pr, _TRUNCATE);
+        n = 1;
+    }
     for (i = 0; i < 4; i++) {
         const char *hit = strstr(alt, kWheelSrc[i].src);
         size_t L = strlen(kWheelSrc[i].src);
@@ -8525,6 +8780,18 @@ static void bind_end_capture(HWND hd, const char *prompt)
     bind_refresh_cur(hd);
 }
 
+/* W365 BIND-COMBO: Lern-Hinweis je Zeile (Tastatur-Kombi bzw. nur Pad-/Controller-Kombi). */
+static const char *bind_combo_hint(int idx)
+{
+    if (lctrl_bind_key_combo_row(idx)) {
+        return LT("gui.bind_combo_hint");
+    }
+    if (lctrl_bind_combo_row(idx)) {
+        return LT("gui.bind_combo_hint_pad");
+    }
+    return NULL;
+}
+
 static void bind_start_capture(HWND hd, int mode)
 {
     char t[256], sbc_st[256];
@@ -8534,13 +8801,17 @@ static void bind_start_capture(HWND hd, int mode)
     }
     g_cap_mode = mode;
     g_cap_mod = 0;
+    lctrl_combo_reset(&g_cap_pcombo); /* W365 */
+    lctrl_combo_reset(&g_cap_scombo);
+    g_cap_jp_dev = -1;
+    g_cap_sbc_held[0] = g_cap_sbc_held[1] = g_cap_sbc_held[2] = 0;
     if (g_o.shot) { /* W228: nur Anzeige im Bild, keine Geraete/Timer */
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.bind_press"),
                     kCtrlElems[g_bind_sel].key, LT(kCtrlElems[g_bind_sel].lkey));
         ui_settext(bctl(hd, IDB_PROMPT), t);
         {
             const char *hint = lctrl_joy_dir_hint(g_bind_sel);
-            if (!hint && lctrl_bind_combo_row(g_bind_sel)) { hint = LT("gui.bind_combo_hint"); } /* W283 */
+            if (!hint) { hint = bind_combo_hint(g_bind_sel); } /* W283, W365 */
             bind_set_result(hd, hint ? hint : "");
         }
         ui_settext(bctl(hd, IDB_CLOSE), LT("gui.btn_cancel"));
@@ -8580,7 +8851,7 @@ static void bind_start_capture(HWND hd, int mode)
     ui_settext(bctl(hd, IDB_PROMPT), t);
     { /* W226: Richtungs-Hinweis fuer Joystick-Achsen */
         const char *hint = lctrl_joy_dir_hint(g_bind_sel);
-        if (!hint && lctrl_bind_combo_row(g_bind_sel)) { hint = LT("gui.bind_combo_hint"); } /* W283 */
+        if (!hint) { hint = bind_combo_hint(g_bind_sel); } /* W283, W365 */
         bind_set_result(hd, hint ? hint : "");
     }
     ui_settext(bctl(hd, IDB_CLOSE), LT("gui.btn_cancel"));
@@ -8619,10 +8890,24 @@ static int bind_apply(HWND hd, const char *src)
     rc = g_cap_mode == 2 ? lctrl_bind_add(&g_bind, g_bind_sel, src)
                          : lctrl_bind_set(&g_bind, g_bind_sel, src);
     if (rc == 0) {
-        char t[320], d[256];
+        char t[640], d[256];
+        char atom[64], pa[96];
+        int row = -1;
         bind_src_disp(src, d, sizeof d); /* W260: Mausrad mit Klartext */
         _snprintf_s(t, sizeof t, _TRUNCATE, "%s = %s.",
                     kCtrlElems[g_bind_sel].key, d);
+        if (lctrl_bind_combo_single_use(&g_bind, src, atom, sizeof atom, &row) && row >= 0) {
+            /* W365: Teil der Kombination ist auch einzeln belegt -> nur Hinweis, erlaubt. */
+            size_t L = strlen(t);
+            if (!lctrl_src_pretty(atom, pa, sizeof pa)) {
+                strcpy_s(pa, sizeof pa, atom);
+            }
+            if (L + 1 < sizeof t) {
+                t[L++] = ' ';
+                _snprintf_s(t + L, sizeof t - L, _TRUNCATE, LT("gui.bind_combo_single"), pa,
+                            kCtrlElems[row].key);
+            }
+        }
         bind_set_result(hd, t);
     }
     return rc;
@@ -8681,9 +8966,9 @@ static void bind_cap_key(HWND hd, int vk, LPARAM lp)
          * (PAD:..., Timer 7) lernt dieselbe Eingabe richtig. */
         return;
     }
-    if (lctrl_bind_combo_row(g_bind_sel)) {
-        /* W283 ORIG-KEY-BIND: Vergleichstaste lernt Zusatztaste + Taste
-         * (Shift+F8). Zusatztaste allein: erst beim Loslassen (bind_cap_keyup). */
+    if (lctrl_bind_key_combo_row(g_bind_sel)) {
+        /* W283 ORIG-KEY-BIND, W365: Zusatztaste + Taste (Shift+F8, Strg+S, Umschalt+1).
+         * Zusatztaste allein: erst beim Loslassen (bind_cap_keyup). */
         if (lctrl_vk_is_modifier(vk)) {
             g_cap_mod = vk;
             return;
@@ -8707,7 +8992,7 @@ static int bind_cap_keyup(HWND hd, int vk)
         bind_cap_key(hd, VK_SNAPSHOT, 0);
         return 1;
     }
-    if (!g_cap_mode || !g_cap_mod || !lctrl_bind_combo_row(g_bind_sel) ||
+    if (!g_cap_mode || !g_cap_mod || !lctrl_bind_key_combo_row(g_bind_sel) ||
         !lctrl_vk_is_modifier(vk)) {
         return 0;
     }
@@ -8723,6 +9008,18 @@ static void bind_cap_mouse(HWND hd, UINT msg, WPARAM wp)
                      : msg == WM_RBUTTONDOWN ? "MOUSE:RIGHT"
                      : msg == WM_MBUTTONDOWN ? "MOUSE:MIDDLE"
                      : HIWORD(wp) == XBUTTON2 ? "MOUSE:X2" : "MOUSE:X1";
+    if (g_cap_mod && lctrl_bind_mouse_combo_row(g_bind_sel)) {
+        /* W365: Zusatztaste gehalten + Maustaste -> "KEY:SHIFT+MOUSE:LEFT". */
+        char src[64], m[48];
+        lctrl_key_combo(0, g_cap_mod, m, sizeof m);
+        if (strcmp(m, "KEY:LCTRL") == 0 || strcmp(m, "KEY:RCTRL") == 0) {
+            strcpy_s(m, sizeof m, "KEY:CTRL");
+        }
+        _snprintf_s(src, sizeof src, _TRUNCATE, "%s+%s", m, nm);
+        g_cap_mod = 0;
+        bind_cap_done(hd, bind_apply(hd, src));
+        return;
+    }
     bind_cap_done(hd, bind_apply(hd, nm));
 }
 
@@ -8735,6 +9032,25 @@ static void bind_cap_wheel(HWND hd, UINT msg, WPARAM wp)
     }
 }
 
+/* W365: Original-Controller-Taste ("SBC:CHAFF") laut Capture-Thread gehalten -> 1. */
+static int bind_sbc_held(const char *atom)
+{
+    int bi;
+    if (!atom || !atom[0]) {
+        return 0;
+    }
+    if (_strnicmp(atom, "SBC:", 4) == 0) {
+        atom += 4;
+    }
+    for (bi = 0; bi < 39; bi++) {
+        const char *nm = lctrl_sbc_btn_name(bi);
+        if (nm && _stricmp(nm, atom) == 0) {
+            return (int)((g_cap_sbc_held[bi / 16] >> (bi % 16)) & 1);
+        }
+    }
+    return 0;
+}
+
 /* W159: Original-Controller-Taste aus dem Capture-Thread (WM_APP_BIND_SBC). */
 static void bind_cap_sbc(HWND hd, int bi)
 {
@@ -8744,14 +9060,58 @@ static void bind_cap_sbc(HWND hd, int bi)
         return;
     }
     _snprintf_s(src, sizeof src, _TRUNCATE, "SBC:%s", nm);
+    if (lctrl_bind_combo_row(g_bind_sel)) {
+        /* W365 BIND-COMBO: erste Taste halten + zweite = "SBC:A+SBC:B"; Kippschalter (bi34..38)
+         * bleiben gesetzt und warten daher nicht als erste Taste. */
+        char out[96];
+        int toggle = bi >= 34 && bi <= 38;
+        if (!g_cap_scombo.pend[0] && toggle) {
+            bind_cap_done(hd, bind_apply(hd, src));
+            return;
+        }
+        if (lctrl_combo_feed(&g_cap_scombo, src, bind_sbc_held(g_cap_scombo.pend), out, sizeof out)) {
+            bind_cap_done(hd, bind_apply(hd, out));
+        }
+        return;
+    }
     bind_cap_done(hd, bind_apply(hd, src));
 }
+
+/* W365: wartende Original-Controller-Taste losgelassen -> allein belegen (Timer 7). */
+static void bind_cap_sbc_tick(HWND hd)
+{
+    char out[96];
+    if (g_cap_mode && g_cap_scombo.pend[0] &&
+        lctrl_combo_feed(&g_cap_scombo, NULL, bind_sbc_held(g_cap_scombo.pend), out, sizeof out)) {
+        bind_cap_done(hd, bind_apply(hd, out));
+    }
+}
+
+static void bind_cap_pad_state(HWND hd, const lctrl_pad_t *curp);
 
 static void bind_cap_pad(HWND hd)
 {
     lctrl_pad_t cur;
-    char nm[16];
     if (!g_cap_have_pad || lctrl_pad_first(&cur) < 0) {
+        return;
+    }
+    bind_cap_pad_state(hd, &cur);
+}
+
+/* Ein Pad-Takt (Selbsttest ruft das mit erfundenen Zustaenden). */
+static void bind_cap_pad_state(HWND hd, const lctrl_pad_t *curp)
+{
+    lctrl_pad_t cur = *curp;
+    char nm[16];
+    if (lctrl_bind_combo_row(g_bind_sel)) {
+        /* W365 BIND-COMBO: erste Taste wartet; zweite bei gehaltener erster -> "PAD:LB+PAD:X",
+         * erste allein losgelassen -> "PAD:LB". */
+        char out[64];
+        int r = lctrl_pad_combo_step(&g_cap_pcombo, &g_cap_prev, &cur, out, sizeof out);
+        g_cap_prev = cur;
+        if (r) {
+            bind_cap_done(hd, bind_apply(hd, out));
+        }
         return;
     }
     if (lctrl_pad_new_press(&g_cap_prev, &cur, nm, sizeof nm)) {
@@ -8785,9 +9145,37 @@ static void bind_cap_pad(HWND hd)
 /* W221 HOTAS: Joystick-Eingabe im Lernmodus (Timer 7, 50 ms). Taste ->
  * JOYn:Bk, POV -> JOYn:POVkU.., Achse -> analog bzw. Z+/Z-/Zone. Slot aus
  * passender joyN-Zeile, sonst neue Zeile (bei Fehlschlag zurueck). */
+/* W365 BIND-COMBO: Joystick-Taste(n) belegen; db < 0 = nur eine Taste. Slots erst jetzt (bei
+ * Fehlschlag zurueck). */
+static void bind_joy_btn_apply(HWND hd, int da, const char *pa, int db, const char *pb)
+{
+    char keep[IMAP_JOY_MAX][96], src[96];
+    int sa, sb = 0, rc;
+    memcpy(keep, g_bind.joy, sizeof keep);
+    sa = lctrl_joy_slot_for(&g_bind, g_cap_jl, g_cap_jn, da);
+    if (db >= 0) {
+        sb = lctrl_joy_slot_for(&g_bind, g_cap_jl, g_cap_jn, db);
+    }
+    if (sa < 0 || sb < 0) {
+        memcpy(g_bind.joy, keep, sizeof keep);
+        ui_settext(bctl(hd, IDB_PROMPT), LT("gui.joy_noslot"));
+        return;
+    }
+    if (db >= 0) {
+        _snprintf_s(src, sizeof src, _TRUNCATE, "JOY%d:%s+JOY%d:%s", sa, pa, sb, pb);
+    } else {
+        _snprintf_s(src, sizeof src, _TRUNCATE, "JOY%d:%s", sa, pa);
+    }
+    rc = bind_apply(hd, src);
+    if (rc != 0) {
+        memcpy(g_bind.joy, keep, sizeof keep);
+    }
+    bind_cap_done(hd, rc);
+}
+
 static void bind_cap_joy(HWND hd)
 {
-    int i;
+    int i, jp_held = 0;
     for (i = 0; i < g_cap_jn && g_cap_mode; i++) {
         imap_joy_state_t cur;
         char part[48], src[64];
@@ -8795,8 +9183,41 @@ static void bind_cap_joy(HWND hd)
         r = lctrl_joy_learner_step(&g_cap_jlrn[i], ok, &cur,
                                    g_cap_jl[i].axmask, g_cap_jl[i].npov,
                                    g_bind_sel, part, sizeof part);
+        if (i == g_cap_jp_dev) { /* W365: wartende Taste noch gehalten? */
+            int k = atoi(g_cap_jp_part + 1) - 1; /* "B3" = Bit 2 */
+            jp_held = ok && k >= 0 && k < IJOY_BTNS && ((cur.btn[k / 32] >> (k % 32)) & 1u);
+        }
         if (r == 4) { /* W226: Zone enthielte die Ruhestellung */
             bind_set_result(hd, LT("gui.joy_restzone"));
+            continue;
+        }
+        if (r == 1 && lctrl_bind_combo_row(g_bind_sel) && (part[0] == 'B' || part[0] == 'b')) {
+            /* W365 BIND-COMBO: erste Taste wartet, zweite bei gehaltener erster -> Kombination
+             * (auch ueber zwei Geraete, z. B. Schubhebel + Knueppel). Achsen/POV bleiben einzeln. */
+            if (g_cap_jp_dev < 0) {
+                g_cap_jp_dev = i;
+                strncpy_s(g_cap_jp_part, sizeof g_cap_jp_part, part, _TRUNCATE);
+                jp_held = 1; /* gerade gedrueckt: nicht schon am Takt-Ende einzeln belegen */
+                continue;
+            }
+            if (!(g_cap_jp_dev == i && _stricmp(g_cap_jp_part, part) == 0)) {
+                int da = g_cap_jp_dev;
+                char pa[16];
+                int k = atoi(g_cap_jp_part + 1) - 1; /* "B3" = Bit 2 */
+                imap_joy_state_t ps;
+                int held = (da == i) ? (k >= 0 && k < IJOY_BTNS && ((cur.btn[k / 32] >> (k % 32)) & 1u))
+                                     : (da < i ? jp_held
+                                               : (ijoy_read(da, &ps) && k >= 0 && k < IJOY_BTNS &&
+                                                  ((ps.btn[k / 32] >> (k % 32)) & 1u)));
+                strcpy_s(pa, sizeof pa, g_cap_jp_part);
+                g_cap_jp_dev = -1;
+                if (held) {
+                    bind_joy_btn_apply(hd, da, pa, i, part);
+                } else {
+                    bind_joy_btn_apply(hd, da, pa, -1, NULL);
+                }
+                return;
+            }
             continue;
         }
         if (r) {
@@ -8842,6 +9263,14 @@ static void bind_cap_joy(HWND hd)
             }
             return;
         }
+    }
+    if (g_cap_mode && g_cap_jp_dev >= 0 && !jp_held) {
+        /* W365: wartende Joystick-Taste allein losgelassen -> allein belegen. */
+        char pa[16];
+        int da = g_cap_jp_dev;
+        strcpy_s(pa, sizeof pa, g_cap_jp_part);
+        g_cap_jp_dev = -1;
+        bind_joy_btn_apply(hd, da, pa, -1, NULL);
     }
 }
 
@@ -9095,6 +9524,9 @@ static LRESULT CALLBACK bind_proc(HWND hd, UINT msg, WPARAM wp, LPARAM lp)
             if (g_cap_mode) {
                 bind_cap_joy(hd); /* W221 */
             }
+            if (g_cap_mode) {
+                bind_cap_sbc_tick(hd); /* W365 */
+            }
         } else if (wp == 10 && !g_cap_mode) { /* W226: Live-Zeile */
             bind_joy_live(hd);
         } else if (wp == 11 && g_o.shot == 3) { /* W260: Mausrad-Beispiel */
@@ -9293,6 +9725,13 @@ static void bind_dialog_modal(const char *base_name, const char *base_path)
         strcpy_s(g_bind.joy[0], sizeof g_bind.joy[0], "Example HOTAS Throttle");
         lctrl_bind_set(&g_bind, g_o.bind_sel, "KEY:W, JOY0:Z:dz=0.05:inv=1");
         bind_set_result(hd, lctrl_joy_dir_hint(g_o.bind_sel));
+    }
+    if (g_o.shot == 3 && g_o.bind_combodemo && g_o.bind_sel >= 0) { /* W365: --bind-shot=combo */
+        char d[256], t[400];
+        lctrl_bind_set(&g_bind, g_o.bind_sel, "KEY:CTRL+KEY:S, KEY:20, PAD:LB+PAD:X");
+        bind_src_disp("KEY:CTRL+KEY:S", d, sizeof d);
+        _snprintf_s(t, sizeof t, _TRUNCATE, "%s = %s.", kCtrlElems[g_o.bind_sel].key, d);
+        bind_set_result(hd, t);
     }
     if (g_o.shot == 3 && g_o.bind_stickdemo && g_o.bind_sel >= 0) { /* W271: --bind-shot=stick */
         lctrl_bind_set(&g_bind, g_o.bind_sel,
@@ -14287,19 +14726,21 @@ static void paint_packs(void)
 static void show_page(int p)
 {
     int i;
-    if (p < 0 || p >= P_N) {
+    if (p < 0 || p > P_LSET) { /* W397: P_LSET = Launcher-Einstellungen (Zahnrad) */
         p = P_PLAY;
     }
     if (p == P_ALPHA && !g_alpha_tools) { /* W272: Seite ausgeblendet */
         p = P_ADV;
     }
-    if (g_game == LGAME_LOC && p == P_PACKS) {
-        p = P_PLAY; /* W276: nur Steel Battalion (W293: Erweitert gibt es auch fuer LoC) */
-    }
+    /* W276: Packs nur Steel Battalion; W392: bei LoC steht auf diesem Platz die Seite Netzwerk (P_LNET) */
     g_page = p;
+    nav_sub_layout(); /* W399: Unterpunkte von Multiplayer auf-/zuklappen (vor der Sichtbarkeit) */
     g_setup_force = 0; /* W172: Einrichtungskarte nur, wenn Regel R3 greift */
-    if (p == P_PLAY && g_game == LGAME_LOC) {
+    if ((p == P_PLAY || p == P_LNET) && g_game == LGAME_LOC) { /* W397: Kopieren jetzt auf Multiplayer */
         onl_status_refresh(); /* W334: Raumcode/Sicherheitsmeldung vor der Sichtbarkeit (Kopieren) */
+    }
+    if (g_game == LGAME_LOC) {
+        loc_gate_sync(); /* W403: Disc geprueft/geaendert -> Startknopf passend (nie aus dem Zeichnen) */
     }
     for (i = 0; i < g_ui_n; i++) {
         uictl_t *u = &g_ui[i];
@@ -14324,8 +14765,11 @@ static void show_page(int p)
         update_summary();
         update_vr_button(); /* W159 */
     }
-    if (p == P_PACKS) { /* W148 */
+    if (p == P_PACKS && g_game != LGAME_LOC) { /* W148 (W392: bei LoC Netzwerk) */
         packs_refresh(1);
+    }
+    if (p == P_LNET && g_game == LGAME_LOC) {
+        onl_sync_ui(); /* W392: Schalter/Grau zum gemerkten Stand */
     }
     if (p == P_ADV) {
         refresh_profiles();
@@ -14333,8 +14777,8 @@ static void show_page(int p)
     if (p == P_ALPHA) {
         alpha_page_shown(); /* W272: VT-Liste, A/B-Werte */
     }
-    if (p == P_ADV && g_game == LGAME_LOC) {
-        acc_page_shown(); /* W328: Pilotenkonto laden, Status holen */
+    if (p == P_LNET && g_game == LGAME_LOC) {
+        acc_page_shown(); /* W328: Konto laden, Status holen (W397: Multiplayer statt Erweitert) */
     }
     { /* W227: auf Spielen fehlt Launch in der Fussleiste -> Speichern und
        * Rueckgaengig an die rechte Kante statt mittig im Leeren */
@@ -14353,18 +14797,34 @@ static void show_page(int p)
             }
         }
     }
+    netm_sync_ui(); /* W397: Zahnrad gewaehlt auf P_LSET, Stufen zum Zustand */
     ui_apply_rules(); /* W171 */
     redraw_all();
 }
 
-/* W171: Strg+Tab / Strg+Umschalt+Tab = naechste/vorige Seite (zyklisch). */
+/* W397 LAUNCHER-STRUCT: Seitenleiste je Spiel gleich aufgebaut. SB: Play, Display, Graphics, Packs, Controls,
+ * Audio & extras, Advanced. LoC: Play, Display, Graphics, Controls, Audio & extras, Multiplayer (Packs-Platz),
+ * Advanced. Test tools liegen unter dem Zahnrad (nicht mehr in der Leiste). */
+#define NAV_ORDER_N 7
+static const int kNavSb[NAV_ORDER_N] = { P_PLAY, P_DISPLAY, P_GFX, P_PACKS, P_CTRL, P_AUDIO, P_ADV };
+static const int kNavLoc[NAV_ORDER_N] = { P_PLAY, P_DISPLAY, P_GFX, P_CTRL, P_AUDIO, P_LNET, P_ADV };
+static const int *nav_order(void)
+{
+    return g_game == LGAME_LOC ? kNavLoc : kNavSb;
+}
+
+/* W171: Strg+Tab / Strg+Umschalt+Tab = naechste/vorige Seite (zyklisch, W397: in der Reihenfolge der Leiste;
+ * von Test tools/Launcher-Einstellungen aus zur ersten bzw. letzten Seite). */
 static int nav_next(int page, int dir)
 {
-    int p = (page + (dir < 0 ? P_N - 1 : 1)) % P_N;
-    if (p == P_ALPHA && !g_alpha_tools) { /* W272: ausgeblendete Seite ueberspringen */
-        p = (p + (dir < 0 ? P_N - 1 : 1)) % P_N;
+    const int *o = nav_order();
+    int i;
+    for (i = 0; i < NAV_ORDER_N; i++) {
+        if (o[i] == page) {
+            return o[(i + (dir < 0 ? NAV_ORDER_N - 1 : 1)) % NAV_ORDER_N];
+        }
     }
-    return p;
+    return dir < 0 ? o[NAV_ORDER_N - 1] : o[0];
 }
 
 /* W142: Fenster-Texte in der aktiven Sprache neu setzen (ohne Neustart).
@@ -14427,18 +14887,18 @@ static void ui_apply_language(void)
     int i, sel;
     /* Navigation + Titelleiste + Start */
     for (i = 0; i < P_N; i++) {
-        ui_settext(ctl(ID_NAV0 + i), LT(kPageName[i]));
+        ui_settext(ctl(ID_NAV0 + i), LT(page_name_key(i))); /* W392 */
     }
+    ui_settext(ctl(ID_NAVSUB_MATCH), LT("gui.mp_sub_match")); /* W399 */
+    ui_settext(ctl(ID_NAVSUB_ACC), LT("gui.mp_sub_acc"));
     ui_settext(ctl(ID_MIN), LT("gui.win_min"));
     ui_settext(ctl(ID_CLOSE), LT("gui.btn_close"));
     ui_settext(ctl(ID_START_BIG), LT("gui.btn_bigstart"));
     ui_settext(ctl(ID_START_VR), LT("gui.btn_vrstart")); /* W159 */
     ui_settext(ctl(ID_BG), LT("gui.bg"));
     ui_settext(ctl(ID_UPD_NOW), LT("gui.upd_now")); /* W250 */
-    ui_settext(ctl(ID_UPD_AUTO), LT("gui.upd_auto"));
-    ui_settext(ctl(ID_UPD_YES), LT("gui.upd_yes"));
-    ui_settext(ctl(ID_UPD_NO), LT("gui.upd_no"));
     ui_settext(ctl(ID_UPD_OPEN), LT("gui.upd_open"));
+    lset_relabel(); /* W397 */
     /* Grafik-Kombis (Reihenfolge wie build_controls) */
     c = ctl(ID_PRESET);
     if (c) {
@@ -14666,6 +15126,10 @@ static void ui_apply_language(void)
 /* ------------------------------------------------------------------ */
 #define ID_GAME_SB 2760
 #define ID_GAME_LOC 2761
+static int gametab_id(int id) /* W398: Wortmarken-Tabs im Kopf */
+{
+    return id == ID_GAME_SB || id == ID_GAME_LOC;
+}
 #define ID_LOC_START 2762
 #define ID_LOC_IMAGE 2763
 #define ID_LOC_CHECK 2764
@@ -14678,8 +15142,19 @@ static void ui_apply_language(void)
 #define ID_LOC_ONL 2774       /* W334 LOC-SEC: Schalter "Online-Spiel" (Karte "Online (steelnet)", LoC-Spielen) */
 #define ID_LOC_CODE 2775      /* W334: Raumcode zum Beitreten (leer = eigene Lobby mit Raumcode) */
 #define ID_LOC_CODE_COPY 2776 /* W334: Raumcode der eigenen Lobby kopieren (nur sichtbar mit Code) */
+#define ID_LOC_VIS 2777       /* W373 LOC-PUBLIC-LOBBY: Auswahl Oeffentlich (Standard) / Privat (mit Raumcode) */
+#define ID_LOC_SMOOTH 2778    /* W387 LOC-SMOOTH-OPP: Auswahl Gegner glaetten Aus / Auto (Standard) / Fest 1 Tick */
 #define ID_LOC_FIRST ID_LOC_START
-#define ID_LOC_LAST ID_LOC_CODE_COPY /* = ID_LOC_GO0 + LOC_SUM_N - 1 + 5 (lueckenlos) */
+#define ID_LOC_LAST ID_LOC_SMOOTH /* = ID_LOC_GO0 + LOC_SUM_N - 1 + 7 (lueckenlos) */
+/* W392 LAUNCHER-NETTAB: Seite "Netzwerk" im LoC-Bereich (Navigationsplatz von Packs, den es bei LoC nicht gibt).
+ * Dort liegen Rollback, eigene Bewegung sofort, Gegner glaetten (ID_LOC_SMOOTH, frueher unter dem Start) und
+ * niedrigere Eingabeverzoegerung sowie "Standard wiederherstellen". */
+#define ID_LNET_RB 2793    /* Schalter Rollback-Netcode (loc_rb_input) */
+#define ID_LNET_OWN 2794   /* Schalter eigene Bewegung sofort (loc_own_predict) */
+#define ID_LNET_LOWD 2795  /* Schalter adaptive niedrigere Eingabeverzoegerung (loc_rb_opts lowd=0 = aus) */
+#define ID_LNET_RESET 2796 /* Knopf Standard wiederherstellen (alles an, Gegner glaetten Auto) */
+#define ID_LNET_FIRST ID_LNET_RB
+#define ID_LNET_LAST ID_LNET_RESET
 /* W293 LOC-LAYOUT: Spielen = Kopf, Start, Bereitschaft (wie SB), Hinweisband
  * unten; Disc, Spielstaende & Daten und Online liegen links auf Erweitert
  * (rechts die gemeinsamen Teile Feinabstimmung + Launcher). */
@@ -14689,11 +15164,14 @@ static void ui_apply_language(void)
 #define LOC_DISC_H 220
 #define LOC_DATA_Y (CY0 + 232)
 #define LOC_DATA_H 118
-#define LOC_ONL_Y (CY0 + 362)
-#define LOC_ONL_H 134 /* bis CY0 + 496 wie die SB-Karten */
+#define LOC_ONL_Y CY0 /* W397: Karte Account auf LoC > Multiplayer rechts oben (frueher Erweitert unten links) */
+#define LOC_ONL_H 150
+#define ACC_X COL2    /* W397: x der Karte Account */
+#define MP_MATCH_Y CY0 /* W397: Karte Match (links oben) */
+#define MP_MATCH_H 150
 /* W326 LOC-WIDE: Karte "Bildformat" rechts unter Feinabstimmung/Launcher
  * (dort, wo im SB-Bereich die Diagnose steht), unten buendig mit Online. */
-#define LOC_WIDE_Y (CY0 + 256)
+#define LOC_WIDE_Y (CY0 + 136) /* W397: Launcher-Karte weg */
 #define LOC_WIDE_H 240
 /* W334 LOC-SEC: Karte "Online (steelnet)" auf LoC-Spielen rechts neben dem
  * Start (frueher "Gemeinsam mit Steel Battalion"; der Hinweis steht jetzt
@@ -14701,7 +15179,7 @@ static void ui_apply_language(void)
 #define LOC_NET_X UPD_X
 #define LOC_NET_Y UPD_Y
 #define LOC_NET_W UPD_W
-#define LOC_NET_H 116
+#define LOC_NET_H 138 /* W373: drei Zeilen (Schalter + Sichtbarkeit, Raumcode, Hinweis), Vertrauenshinweis in der Karte */
 #define ONL_TIMER 26 /* W334: loc_net_status.txt nachlesen (2 s, nur LoC-Spielen) */
 static lgame_state_t g_loc;        /* LoC-Einstellungen (user.cfg launcher_*) */
 static lgame_img_t g_loc_res;      /* letzte Abbild-Pruefung */
@@ -14710,6 +15188,7 @@ static int g_loc_checked;
 static char g_locfix_path[512];    /* Shots/Selbsttest: Pruef-Fixture fuer genau einen Pfad */
 static lgame_img_t g_locfix;
 static char g_loc_last_cmd[1600];  /* Selbsttest: Startweg (Trockenlauf) */
+static char g_loc_last_cfg[1200];  /* W402: Einstellungsdatei des letzten LoC-Starts (SB_USER_CFG) */
 #define LOC_ISO "D:\\Games\\Line of Contact.iso"
 #define LOC_SB_ISO "D:\\Games\\Steel Battalion (Europe).iso"
 
@@ -14717,6 +15196,7 @@ static void loctab_wide_sync(void); /* W326 */
 static void onl_load(void);         /* W334 */
 static int acc_visible(int id, int page); /* W328 */
 static int acc_view_active(void);        /* W328 */
+static void acc_layout(void);            /* W399 */
 static wchar_t *acc_launch_env(char *set, size_t cap); /* W328 */
 /* W336 LOC-TESTPARTNER: Knoepfe im LoC-Tab (nur interne Ausgabe; IDs auch in der Community-Ausgabe
  * bekannt, damit der Selbsttest dort "kein Knopf" pruefen kann). Code: launcher_loctp_gui.inc. */
@@ -14732,11 +15212,21 @@ static int loctab_may_write(void)
     return g_o.shot == 0 || g_ucfg_test[0]; /* Shots speichern nie (Selbsttest: Temp-Datei) */
 }
 
+static int g_pg_migrated; /* W402: Ergebnis der Uebernahme beim Start (1 = gerade uebernommen) */
+
 static void loctab_load(void)
 {
-    char up[1200];
+    char up[1200], lp[1200];
+    lgame_state_t lt;
     user_cfg_path(up, sizeof up);
+    game_cfg_path(LGAME_LOC, lp, sizeof lp);
+    if (loctab_may_write()) { /* W402: einmalige Uebernahme der gemeinsamen Werte (Shots schreiben nie) */
+        g_pg_migrated = lgame_pergame_migrate(up, lp);
+    }
     lgame_cfg_load(up, &g_loc);
+    if (lgame_cfg_load(lp, &lt) == 0) { /* W402: Bildformat steht in user_loc.cfg (vor der Uebernahme: user.cfg) */
+        g_loc.loc_widescreen = lt.loc_widescreen;
+    }
     g_game = g_loc.game;
     g_loc_checked = 0;
     g_loc_res_path[0] = '\0';
@@ -14752,11 +15242,127 @@ static int loctab_save(void) /* 0 = gespeichert, 1 = nicht geschrieben (Shot), -
     }
     user_cfg_path(up, sizeof up);
     g_loc.game = g_game;
-    if (lgame_cfg_save(up, &g_loc) != 0) {
+    /* W402: Spielwahl/LoC-Abbild in user.cfg, Bildformat nur in user_loc.cfg */
+    if (lgame_cfg_save_ex(up, &g_loc, LGAME_K_LAUNCHER, LGAME_K_WIDE) != 0) {
+        set_status_k(LT("gui.loc_save_err"), 2);
+        return -1;
+    }
+    game_cfg_path(LGAME_LOC, up, sizeof up);
+    if ((u8_GetFileAttributes(up) != INVALID_FILE_ATTRIBUTES || g_loc.loc_widescreen != LGAME_WIDE_43) &&
+        lgame_cfg_save_ex(up, &g_loc, LGAME_K_WIDE, LGAME_K_LAUNCHER) != 0) { /* fehlt + 4:3 = Standard, nichts anlegen */
         set_status_k(LT("gui.loc_save_err"), 2);
         return -1;
     }
     return 0;
+}
+
+/* ------------------------------------------------------------------ */
+/* W402 LAUNCHER-PERGAME: eigene Werte je Spiel. g_s gehoert immer dem  */
+/* aktiven Spiel; das andere ruht in g_pg_s (inkl. ungespeicherter      */
+/* Aenderungen) samt Abgleich-Basis. Global bleiben nur die SB-Pfade    */
+/* (Spieldaten) und die Sprache (Zahnrad).                              */
+/* ------------------------------------------------------------------ */
+static launcher_settings_t g_pg_s[LGAME_N], g_pg_base[LGAME_N];
+static int g_pg_ok[LGAME_N], g_pg_base_ok[LGAME_N];
+
+static void pergame_mark(void)
+{
+    char up[1200];
+    if (!loctab_may_write()) {
+        return;
+    }
+    user_cfg_path(up, sizeof up);
+    if (!lgame_pergame_marked(up)) {
+        (void)lgame_cfg_save_ex(up, &g_loc, LGAME_K_PERGAME, 0);
+    }
+}
+
+static void pergame_globals(launcher_settings_t *dst, const launcher_settings_t *src)
+{
+    strcpy_s(dst->xbe_path, sizeof dst->xbe_path, src->xbe_path);
+    strcpy_s(dst->media_root, sizeof dst->media_root, src->media_root);
+    strcpy_s(dst->hdd_root, sizeof dst->hdd_root, src->hdd_root);
+    strcpy_s(dst->game_image, sizeof dst->game_image, src->game_image);
+    strcpy_s(dst->lang, sizeof dst->lang, src->lang);
+}
+
+/* Werte eines Spiels frisch laden: Standard -> sb_native.cfg -> Datei des Spiels (wie app_load_effective, das
+ * Standard-Profil gilt nur fuer Steel Battalion). */
+static void pergame_load(int game, launcher_settings_t *s)
+{
+    char p[1200];
+    launcher_settings_t d;
+    if (game != LGAME_LOC) {
+        app_load_effective(g_client_dir, s, NULL, 0, NULL, NULL);
+        return;
+    }
+    lcfg_defaults(s);
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s/sb_native.cfg", g_client_dir);
+    lcfg_load_file(p, s);
+    lcfg_defaults(&d); /* W87/W170: Spieler-Standard statt Testwerte aus sb_native.cfg */
+    s->mouse_mode = d.mouse_mode;
+    s->rt_scale = d.rt_scale;
+    s->rt_scale_dyn = d.rt_scale_dyn;
+    s->gfx_preset_rev = 0;
+    game_cfg_path(LGAME_LOC, p, sizeof p);
+    s->game_tick = 30; /* nach dem Laden erneut: PAL gibt es in LoC nicht */
+    if (lcfg_load_file(p, s) != 0) { /* noch keine LoC-Datei: Fenster wie beim Erststart pruefen */
+        RECT wa;
+        int ww = 0, wh = 0, dpi = g_dpi >= 96 ? g_dpi : 96;
+        if (SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0)) {
+            ww = (wa.right - wa.left) * 96 / dpi;
+            wh = (wa.bottom - wa.top) * 96 / dpi;
+        }
+        (void)app_firstrun_defaults(s, 0, ww, wh);
+    }
+    s->game_tick = 30; /* W402: PAL (Spieltakt 25) gibt es in LoC nicht, auch nicht aus der Uebernahme */
+    lcfg_gfx_migrate_fps(s);
+}
+
+/* Beim Start (gui_fill nach loctab_load): ist LoC gewaehlt, gilt dessen Datei. */
+static void pergame_init(void)
+{
+    if (g_game != LGAME_LOC) {
+        return;
+    }
+    g_pg_s[LGAME_SB] = g_s;
+    g_pg_ok[LGAME_SB] = 1;
+    g_pg_base_ok[LGAME_SB] = 0;
+    pergame_load(LGAME_LOC, &g_s);
+    pergame_globals(&g_s, &g_pg_s[LGAME_SB]);
+}
+
+/* Umschalten (g_game ist schon "to"): Oberflaechenwerte des alten Spiels ruhen lassen, die des neuen zeigen. */
+static void pergame_switch(int from, int to)
+{
+    launcher_settings_t cur = g_s;
+    int now = g_game;
+    g_game = from; /* Oberflaeche gehoert noch dem alten Spiel (z. B. PAL nur in SB) */
+    ui_to_settings(&cur);
+    g_game = now;
+    g_pg_s[from] = cur;
+    g_pg_ok[from] = 1;
+    g_pg_base[from] = g_disk_base;
+    g_pg_base_ok[from] = g_disk_base_ok;
+    if (g_pg_ok[to]) {
+        g_s = g_pg_s[to];
+        pergame_globals(&g_s, &cur);
+        g_disk_base = g_pg_base[to];
+        g_disk_base_ok = g_pg_base_ok[to];
+        if (g_disk_base_ok) {
+            (void)disk_merge(&g_s); /* waehrenddessen im Spiel (ESC-Menue) gespeicherte Werte */
+        }
+    } else {
+        pergame_load(to, &g_s);
+        pergame_globals(&g_s, &cur);
+        g_disk_base_ok = 0;
+    }
+    if (!g_disk_base_ok) {
+        disk_base_sync(&g_s);
+    }
+    ui_from_settings(&g_s);
+    update_aspect_info();
+    gfx_sync_ui();
 }
 
 /* ------------------------------------------------------------------ */
@@ -14770,7 +15376,31 @@ static int loctab_save(void) /* 0 = gespeichert, 1 = nicht geschrieben (Shot), -
 /* steelnet_pins.h leer) = Schalter grau, kein Online-Start.            */
 /* ------------------------------------------------------------------ */
 #define ONL_KEY "launcher_loc_online"
+#define ONL_PUB_KEY "launcher_loc_public" /* W373 */
 static int g_loc_online;             /* 1 = Online-Spiel an (gemerkt) */
+static int g_loc_public = 1;         /* W373: 1 = oeffentliche Lobby (Standard), 0 = privat mit Raumcode (gemerkt) */
+/* W387 LOC-SMOOTH-OPP: Client-Schluessel loc_smooth_opp (nur Anzeige fremder Objekte etwas spaeter, damit
+ * Netzkorrekturen/Rollback unsichtbar bleiben): 0 = aus, 1 = auto (Standard), 2 = fest 1 Tick. Gemerkt in
+ * user.cfg launcher_loc_smooth_opp (fehlt/ungueltig = 1), an jeden LoC-Start (lokal, Testpartner, online) im
+ * --set angehaengt, nie an Steel Battalion. */
+#define ONL_SMOOTH_KEY "launcher_loc_smooth_opp"
+#define LOC_SMOOTH_N 3
+static int g_loc_smooth_opp = 1;     /* W387 */
+/* W392 LAUNCHER-NETTAB: Netzwerk-Schalter fuer jeden LoC-Start (nie Steel Battalion), gemerkt in user.cfg
+ * (fehlt/ungueltig = 1 = an). Rollback aus -> loc_rb_input=0 (je Mission ausgehandelt: eine Seite aus = alle
+ * Lockstep); eigene Bewegung -> loc_own_predict; niedrigere Verzoegerung aus -> lowd=0 in loc_rb_opts. */
+#define LNET_RB_KEY "launcher_loc_rollback"
+#define LNET_OWN_KEY "launcher_loc_own_predict"
+#define LNET_LOWD_KEY "launcher_loc_low_delay"
+#define LNET_RBOPTS_MAX 127 /* hcfg.h loc_rb_opts[128] */
+static int g_loc_rb_on = 1;   /* W392 */
+static int g_loc_own_pred = 1; /* W392 */
+static int g_loc_lowd = 1;    /* W392 */
+
+static int loc_tip_id(int id) /* W387: Tooltip am Element (tips_build, Text in xtip_text) */
+{
+    return id == ID_LOC_SMOOTH;
+}
 static int g_onl_fix_srv = -1;       /* Shots/Selbsttest: -1 = echte Pins, sonst 0/1 */
 static int g_onl_fixture;            /* Shots: Status vorgegeben, nie von der Platte */
 static char g_onl_sec[24];           /* letzter sec= ("" = unbekannt) */
@@ -14795,6 +15425,7 @@ static const char *const kOnlErr[][2] = {
     { "full", "gui.loc_onl_err_full" },       /* Lobby voll */
     { "rate", "gui.loc_onl_err_rate" },       /* zu viele Versuche */
     { "path", "gui.loc_onl_err_path" },       /* Mitspieler weder direkt noch ueber Relay erreichbar */
+    { "closed", "gui.loc_onl_err_closed" },   /* W366: Host hat die Lobby geschlossen (Spiel beendet) */
 };
 #define ONL_ERR_N ((int)(sizeof kOnlErr / sizeof kOnlErr[0]))
 static char g_onl_err[12]; /* W353: letzter err= ("" = keiner) */
@@ -14863,8 +15494,10 @@ static int onl_code_norm(const char *in, char *out, size_t cap)
 
 /* --set des LoC-Starts: mit Online (an + Dienst eingerichtet) Transport,
  * Treffpunkt und Raumcode anhaengen (leerer Code = eigene Lobby anlegen).
- * 0 = ok (ggf. unveraendert), -1 = Raumcode ungueltig (nicht starten). */
-static int onl_set_append(char *set, size_t cap, int on, int srv, const char *raw)
+ * W373: pub = 1 und kein Code -> loc_lobby_vis=public (oeffentliche Lobbys:
+ * Search Match zeigt alle offenen Spiele); ein Code tritt immer der privaten
+ * Lobby bei. 0 = ok (ggf. unveraendert), -1 = Raumcode ungueltig. */
+static int onl_set_append(char *set, size_t cap, int on, int srv, const char *raw, int pub)
 {
     char code[16];
     size_t l = strlen(set);
@@ -14874,11 +15507,176 @@ static int onl_set_append(char *set, size_t cap, int on, int srv, const char *ra
     if (onl_code_norm(raw, code, sizeof code) < 0) {
         return -1;
     }
-    /* W353: Rollback-Eingabeschicht ausdruecklich an (je Mission ausgehandelt, Rueckfall Lockstep), unabhaengig
-     * vom Client-Standard und von user.cfg - beide Seiten eines Online-Spiels wollen dasselbe */
-    _snprintf_s(set + l, cap - l, _TRUNCATE, "%sloc_transport=udp;loc_lobby=%s:%d;loc_lobby_code=%s;loc_rb_input=1",
-                l ? ";" : "", SB_STEELNET_HOST, (int)SB_STEELNET_PORT, code);
+    /* W353: hier stand loc_rb_input=1 fest. W392: loc_rb_input kommt jetzt fuer jeden LoC-Start aus dem
+     * Schalter "Rollback-Netcode" (loc_net_set_append, Standard an, je Mission ausgehandelt). */
+    _snprintf_s(set + l, cap - l, _TRUNCATE, "%sloc_transport=udp;loc_lobby=%s:%d;loc_lobby_code=%s%s",
+                l ? ";" : "", SB_STEELNET_HOST, (int)SB_STEELNET_PORT, code,
+                pub && !code[0] ? ";loc_lobby_vis=public" : "");
     return 0;
+}
+
+/* W387: Wert aus user.cfg (Text nach "=") -> 0..2, alles andere (fehlt, Buchstaben, ausserhalb) = 1 (auto). */
+static int loc_smooth_parse(const char *v)
+{
+    char *end = NULL;
+    long n = strtol(v, &end, 10);
+    if (end == v) {
+        return 1;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        end++;
+    }
+    return (*end == '\0' && n >= 0 && n < LOC_SMOOTH_N) ? (int)n : 1;
+}
+
+/* W387: loc_smooth_opp=N an den --set eines LoC-Starts haengen (jeder LoC-Start, nie SB). */
+static void loc_smooth_set_append(char *set, size_t cap, int v)
+{
+    size_t l = strlen(set);
+    if (v < 0 || v >= LOC_SMOOTH_N) {
+        v = 1;
+    }
+    _snprintf_s(set + l, cap - l, _TRUNCATE, "%sloc_smooth_opp=%d", l ? ";" : "", v);
+}
+
+/* W392: Schalter 0/1 aus user.cfg (Text nach "="); fehlt/ungueltig = 1 (an). */
+static int lnet_bool_parse(const char *v)
+{
+    char *end = NULL;
+    long n = strtol(v, &end, 10);
+    if (end == v) {
+        return 1;
+    }
+    while (*end == ' ' || *end == '\t' || *end == '\r' || *end == '\n') {
+        end++;
+    }
+    return (*end == '\0' && (n == 0 || n == 1)) ? (int)n : 1;
+}
+
+/* W392: letzter Wert von key in einer --set-Kette ("\;" = maskiertes Semikolon wie hcfg_apply_set),
+ * unmaskiert nach out. 1 = gefunden. */
+static int lnet_set_last(const char *set, const char *key, char *out, size_t cap)
+{
+    size_t kl = strlen(key), n;
+    const char *p = set;
+    int found = 0;
+    while (p && *p) {
+        const char *s = p;
+        while (*p && !(*p == ';' && (p == set || p[-1] != '\\'))) {
+            p++;
+        }
+        if ((size_t)(p - s) > kl && strncmp(s, key, kl) == 0 && s[kl] == '=') {
+            const char *v = s + kl + 1;
+            n = 0;
+            while (v < p && n + 1 < cap) {
+                if (v[0] == '\\' && v + 1 < p && v[1] == ';') {
+                    v++;
+                }
+                out[n++] = *v++;
+            }
+            out[n] = '\0';
+            found = 1;
+        }
+        if (*p) {
+            p++;
+        }
+    }
+    return found;
+}
+
+/* W392: loc_rb_opts zusammenfuehren. base = bisheriger Wert (Optionen mit ";" getrennt). Mit lowd_on = 1
+ * bleibt alles unveraendert (0 = nichts anhaengen, der Client behaelt seinen Wert). Mit lowd_on = 0: alle
+ * vorhandenen Optionen bleiben in ihrer Reihenfolge, nur "lowd=..." faellt weg, am Ende kommt "lowd=0"
+ * (spaetere Option gewinnt im Client ohnehin). Ergebnis maskiert ("\;") fuer die --set-Kette; unmaskiert
+ * hoechstens LNET_RBOPTS_MAX Zeichen (Client-Puffer), zu lange Restoptionen fallen von hinten weg, lowd=0 bleibt.
+ * 1 = out anhaengen. */
+static int lnet_rbopts_merge(const char *base, int lowd_on, char *out, size_t cap)
+{
+    char tok[16][LNET_RBOPTS_MAX + 1];
+    int nt = 0, i;
+    size_t raw = 0;
+    const char *p = base ? base : "";
+    out[0] = '\0';
+    if (lowd_on) {
+        return 0;
+    }
+    while (*p && nt < 16) {
+        const char *s;
+        size_t n;
+        while (*p == ';' || *p == ' ') {
+            p++;
+        }
+        s = p;
+        while (*p && *p != ';') {
+            p++;
+        }
+        n = (size_t)(p - s);
+        while (n && (s[n - 1] == ' ' || s[n - 1] == '\t' || s[n - 1] == '\r' || s[n - 1] == '\n')) {
+            n--;
+        }
+        if (!n || n > LNET_RBOPTS_MAX || strncmp(s, "lowd=", 5) == 0) {
+            continue;
+        }
+        memcpy(tok[nt], s, n);
+        tok[nt][n] = '\0';
+        nt++;
+    }
+    /* Platz: Optionen + je ";" + "lowd=0" (6 Zeichen) */
+    for (i = 0; i < nt; i++) {
+        if (raw + strlen(tok[i]) + 1 + 6 > LNET_RBOPTS_MAX) {
+            nt = i;
+            break;
+        }
+        raw += strlen(tok[i]) + 1;
+    }
+    for (i = 0; i < nt; i++) {
+        strcat_s(out, cap, tok[i]);
+        strcat_s(out, cap, "\\;");
+    }
+    strcat_s(out, cap, "lowd=0");
+    return 1;
+}
+
+/* W392: bisheriger loc_rb_opts-Wert wie im Client: sb_native.cfg des Client-Ordners, dann user.cfg (gewinnt);
+ * steht er schon in der Kette (z. B. Testpartner), gilt der dortige Wert. "" = keiner. */
+static void lnet_base_rbopts(const char *set, char *out, size_t cap)
+{
+    char p[1300], u[1024];
+    out[0] = '\0';
+    if (set && lnet_set_last(set, "loc_rb_opts", out, cap)) {
+        return;
+    }
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s/sb_native.cfg", g_client_dir);
+    cfg_read_key(p, "loc_rb_opts", out, cap);
+    game_cfg_path(LGAME_LOC, p, sizeof p); /* W402: LoC-Client-Schluessel stehen in user_loc.cfg */
+    if (cfg_read_key(p, "loc_rb_opts", u, sizeof u)) {
+        strcpy_s(out, cap, u);
+    }
+}
+
+/* W392 LAUNCHER-NETTAB: Netzwerk-Schalter an den --set eines LoC-Starts haengen (jeder LoC-Start: lokal,
+ * online, Nutzer-Spiel des Testpartners; nie Steel Battalion): loc_rb_input, loc_own_predict, loc_smooth_opp
+ * (W387) und - nur mit "niedrigere Verzoegerung" aus - loc_rb_opts mit lowd=0 (vorhandene Optionen bleiben). */
+static void loc_net_set_append(char *set, size_t cap)
+{
+    char base[LNET_RBOPTS_MAX * 2 + 8], m[LNET_RBOPTS_MAX * 2 + 8];
+    size_t l = strlen(set);
+    _snprintf_s(set + l, cap - l, _TRUNCATE, "%sloc_rb_input=%d;loc_own_predict=%d", l ? ";" : "",
+                g_loc_rb_on ? 1 : 0, g_loc_own_pred ? 1 : 0);
+    loc_smooth_set_append(set, cap, g_loc_smooth_opp);
+    if (!g_loc_lowd) {
+        lnet_base_rbopts(set, base, sizeof base);
+        if (lnet_rbopts_merge(base, 0, m, sizeof m)) {
+            l = strlen(set);
+            _snprintf_s(set + l, cap - l, _TRUNCATE, ";loc_rb_opts=%s", m);
+        }
+    }
+}
+
+/* W392: Stimmen alle Netzwerk-Schalter mit dem Standard ueberein? (Hinweis auf LoC-Spielen) */
+static int lnet_is_default(void)
+{
+    return g_loc_rb_on && g_loc_own_pred && g_loc_lowd && g_loc_smooth_opp == 1;
 }
 
 /* loc_net_status.txt lesen (Schluessel=Wert je Zeile, letzte Zeile gewinnt).
@@ -15033,7 +15831,12 @@ static int onl_info(char *out, size_t cap, COLORREF *col)
         *col = C_OK;
         return 1;
     }
-    strncpy_s(out, cap, LT("gui.loc_code_hint"), _TRUNCATE);
+    if (g_loc_public && !raw[0]) { /* W373: oeffentlich (Standard) - Vertrauenshinweis */
+        strncpy_s(out, cap, LT("gui.loc_onl_trust"), _TRUNCATE);
+        *col = C_WARN;
+        return 0;
+    }
+    strncpy_s(out, cap, LT(g_loc_public ? "gui.loc_code_hint_pub" : "gui.loc_code_hint"), _TRUNCATE);
     *col = C_DIM;
     return 0;
 }
@@ -15044,6 +15847,9 @@ static void onl_load(void)
     FILE *f = NULL;
     size_t kl = strlen(ONL_KEY);
     g_loc_online = 0;
+    g_loc_public = 1; /* W373: Standard oeffentlich */
+    g_loc_smooth_opp = 1; /* W387: Standard auto */
+    g_loc_rb_on = g_loc_own_pred = g_loc_lowd = 1; /* W392: Standard an */
     if (!g_onl_since) { /* laufendes Spiel (Launcher neu geoeffnet) zaehlt, alte Laeufe nicht */
         g_onl_since = onl_now_ft() - 600ULL * 10000000ULL;
     }
@@ -15053,19 +15859,35 @@ static void onl_load(void)
             if (strncmp(line, ONL_KEY, kl) == 0 && line[kl] == '=') {
                 g_loc_online = atoi(line + kl + 1) ? 1 : 0; /* letzte Zeile gewinnt */
             }
+            if (strncmp(line, ONL_PUB_KEY "=", sizeof ONL_PUB_KEY) == 0) { /* W373: fehlt = oeffentlich */
+                g_loc_public = atoi(line + sizeof ONL_PUB_KEY) ? 1 : 0;
+            }
+            if (strncmp(line, ONL_SMOOTH_KEY "=", sizeof ONL_SMOOTH_KEY) == 0) { /* W387: fehlt/ungueltig = 1 */
+                g_loc_smooth_opp = loc_smooth_parse(line + sizeof ONL_SMOOTH_KEY);
+            }
+            if (strncmp(line, LNET_RB_KEY "=", sizeof LNET_RB_KEY) == 0) { /* W392: fehlt/ungueltig = 1 */
+                g_loc_rb_on = lnet_bool_parse(line + sizeof LNET_RB_KEY);
+            }
+            if (strncmp(line, LNET_OWN_KEY "=", sizeof LNET_OWN_KEY) == 0) {
+                g_loc_own_pred = lnet_bool_parse(line + sizeof LNET_OWN_KEY);
+            }
+            if (strncmp(line, LNET_LOWD_KEY "=", sizeof LNET_LOWD_KEY) == 0) {
+                g_loc_lowd = lnet_bool_parse(line + sizeof LNET_LOWD_KEY);
+            }
         }
         fclose(f);
     }
 }
 
-/* launcher_loc_online in user.cfg setzen (erste Zeile ersetzen, Doppelte weg,
- * sonst anhaengen; fremde Zeilen bleiben). 0 = gespeichert, 1 = nicht
- * geschrieben (Shot), -1 = Fehler. */
-static int onl_save(void)
+/* launcher_loc_online (W373: bzw. launcher_loc_public) in user.cfg setzen
+ * (erste Zeile ersetzen, Doppelte weg, sonst anhaengen; fremde Zeilen
+ * bleiben). 0 = gespeichert, 1 = nicht geschrieben (Shot), -1 = Fehler.
+ * W387: Wert wird unveraendert geschrieben (launcher_loc_smooth_opp 0..2; Schalter uebergeben 0/1). */
+static int onl_save_key(const char *key, int val)
 {
     char up[1200], line[1200], *out;
     FILE *f = NULL;
-    size_t n = 0, cap = 1024 * 1024, kl = strlen(ONL_KEY);
+    size_t n = 0, cap = 1024 * 1024, kl = strlen(key);
     int done = 0;
     if (!loctab_may_write()) {
         return 1;
@@ -15078,11 +15900,11 @@ static int onl_save(void)
     if (u8_fopen_s(&f, up, "r") == 0 && f) {
         while (fgets(line, sizeof line, f)) {
             size_t l;
-            if (strncmp(line, ONL_KEY, kl) == 0 && line[kl] == '=') {
+            if (strncmp(line, key, kl) == 0 && line[kl] == '=') {
                 if (done) {
                     continue;
                 }
-                _snprintf_s(line, sizeof line, _TRUNCATE, "%s=%d\n", ONL_KEY, g_loc_online ? 1 : 0);
+                _snprintf_s(line, sizeof line, _TRUNCATE, "%s=%d\n", key, val);
                 done = 1;
             }
             l = strlen(line);
@@ -15100,7 +15922,7 @@ static int onl_save(void)
         if (n > 0 && out[n - 1] != '\n') {
             out[n++] = '\n';
         }
-        n += (size_t)_snprintf_s(out + n, cap - n, _TRUNCATE, "%s=%d\n", ONL_KEY, g_loc_online ? 1 : 0);
+        n += (size_t)_snprintf_s(out + n, cap - n, _TRUNCATE, "%s=%d\n", key, val);
     }
     if (u8_fopen_s(&f, up, "w") != 0 || !f) {
         free(out);
@@ -15111,6 +15933,11 @@ static int onl_save(void)
     fclose(f);
     free(out);
     return 0;
+}
+
+static int onl_save(void)
+{
+    return onl_save_key(ONL_KEY, g_loc_online);
 }
 
 /* Schalter/Feld zum Zustand: ohne Dienst grau (und aus), Feld nur mit Online an. */
@@ -15124,11 +15951,46 @@ static void onl_sync_ui(void)
     if (ctl(ID_LOC_CODE)) {
         EnableWindow(ctl(ID_LOC_CODE), srv && g_loc_online ? TRUE : FALSE);
     }
+    if (ctl(ID_LOC_VIS)) { /* W373 */
+        g_updating++;
+        if (ComboBox_GetCurSel(ctl(ID_LOC_VIS)) != (g_loc_public ? 0 : 1)) {
+            ComboBox_SetCurSel(ctl(ID_LOC_VIS), g_loc_public ? 0 : 1);
+        }
+        g_updating--;
+        EnableWindow(ctl(ID_LOC_VIS), srv && g_loc_online ? TRUE : FALSE);
+    }
+    if (ctl(ID_LOC_SMOOTH)) { /* W387: gilt fuer jeden LoC-Start (W392: grau ohne Rollback) */
+        g_updating++;
+        if (ComboBox_GetCurSel(ctl(ID_LOC_SMOOTH)) != g_loc_smooth_opp) {
+            ComboBox_SetCurSel(ctl(ID_LOC_SMOOTH), g_loc_smooth_opp);
+        }
+        g_updating--;
+        EnableWindow(ctl(ID_LOC_SMOOTH), g_loc_rb_on ? TRUE : FALSE);
+    }
+    /* W392: Netzwerk-Schalter; ohne Rollback wirken die drei anderen nicht -> grau (Wert bleibt gemerkt) */
+    if (ctl(ID_LNET_RB)) {
+        ui_set_checked(ID_LNET_RB, g_loc_rb_on);
+    }
+    if (ctl(ID_LNET_OWN)) {
+        ui_set_checked(ID_LNET_OWN, g_loc_own_pred);
+        EnableWindow(ctl(ID_LNET_OWN), g_loc_rb_on ? TRUE : FALSE);
+    }
+    if (ctl(ID_LNET_LOWD)) {
+        ui_set_checked(ID_LNET_LOWD, g_loc_lowd);
+        EnableWindow(ctl(ID_LNET_LOWD), g_loc_rb_on ? TRUE : FALSE);
+    }
+    if (ctl(ID_LNET_RESET)) {
+        EnableWindow(ctl(ID_LNET_RESET), lnet_is_default() ? FALSE : TRUE);
+    }
 }
 
 static void onl_redraw(void)
 {
-    redraw_rect(LOC_NET_X, LOC_NET_Y, LOC_NET_W, LOC_NET_H + 22); /* + Vertrauenshinweis */
+    if (g_page == P_LNET) { /* W397: Match auf Multiplayer */
+        redraw_rect(CX0, MP_MATCH_Y, COLW, MP_MATCH_H + 4);
+        return;
+    }
+    redraw_rect(LOC_NET_X, LOC_NET_Y, LOC_NET_W, LOC_NET_H + 4);
 }
 
 static int onl_copy_visible(void)
@@ -15166,27 +16028,183 @@ static void onl_copy(void)
     }
 }
 
-static void onl_toggle(void)
+/* W373 LOC-PUBLIC-LOBBY: Auswahl Oeffentlich (0) / Privat mit Raumcode (1), gemerkt in user.cfg. */
+static void onl_vis_pick(void)
 {
-    if (!onl_srv_on()) {
-        set_status_k(LT("gui.loc_onl_nosrv"), 0);
+    int pub = ComboBox_GetCurSel(ctl(ID_LOC_VIS)) != 1;
+    if (pub == g_loc_public) {
+        return;
+    }
+    g_loc_public = pub;
+    onl_save_key(ONL_PUB_KEY, g_loc_public);
+    set_status_k(LT(g_loc_public ? "gui.loc_vis_pub_on" : "gui.loc_vis_priv_on"), 1);
+    ui_refresh_visibility();
+    onl_redraw();
+}
+
+/* W387 LOC-SMOOTH-OPP: Eintraege in Reihenfolge der Werte loc_smooth_opp (0 aus, 1 auto, 2 fest 1 Tick). */
+static const char *const kLocSmooth[LOC_SMOOTH_N] = { "gui.loc_smooth_off", "gui.loc_smooth_auto",
+                                                      "gui.loc_smooth_fix" };
+
+/* W387: Auswahl Gegner glaetten, gemerkt in user.cfg (wirkt beim naechsten Start). */
+static void loc_smooth_pick(void)
+{
+    char t[300];
+    int v = ComboBox_GetCurSel(ctl(ID_LOC_SMOOTH));
+    if (v < 0 || v >= LOC_SMOOTH_N || v == g_loc_smooth_opp) {
+        return;
+    }
+    g_loc_smooth_opp = v;
+    if (onl_save_key(ONL_SMOOTH_KEY, g_loc_smooth_opp) >= 0) {
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.loc_smooth_set"), LT(kLocSmooth[v]));
+        set_status_k(t, 1);
+    }
+}
+
+/* W387: Eintraege (Sprache), Auswahl nach g_loc_smooth_opp. */
+static void loc_smooth_fill(void)
+{
+    HWND c = ctl(ID_LOC_SMOOTH);
+    int i;
+    if (!c) {
+        return;
+    }
+    g_updating++;
+    ComboBox_ResetContent(c);
+    for (i = 0; i < LOC_SMOOTH_N; i++) {
+        combo_add(c, LT(kLocSmooth[i]));
+    }
+    ComboBox_SetCurSel(c, g_loc_smooth_opp);
+    g_updating--;
+    EnableWindow(c, g_loc_rb_on ? TRUE : FALSE); /* W392 */
+}
+
+/* ------------------------------------------------------------------ */
+/* W392 LAUNCHER-NETTAB: Seite "Netzwerk" (nur LoC, Navigationsplatz    */
+/* von Packs). Eine Karte: Rollback-Netcode, darunter eingerueckt die   */
+/* drei Teile, die nur mit Rollback wirken (ohne Rollback grau, Wert    */
+/* bleibt gemerkt), je ein kurzer Hinweis, "Standard wiederherstellen". */
+/* ------------------------------------------------------------------ */
+#define LNET_Y (CY0 + 162) /* W397: unter Match/Account, volle Breite */
+#define LNET_H 342
+#define LNET_IND 28                             /* Einrueckung der von Rollback abhaengigen Zeilen */
+#define LNET_CTL_W 300                          /* Schalter/Auswahl-Breite (W397: Hinweis rechts daneben) */
+#define LNET_ROW(i) (LNET_Y + 80 + (i) * 64)    /* Zeile i: Element, Hinweis rechts (W397) */
+#define LNET_HINT_X (CX0 + 18 + LNET_IND + LNET_CTL_W + 16)
+static const char *const kLnetHint[4] = { "gui.lnet_rb_hint", "gui.lnet_own_hint", "gui.lnet_smooth_hint",
+                                          "gui.lnet_lowd_hint" };
+
+static void lnet_redraw(void)
+{
+    redraw_rect(CX0, LNET_Y, CW, LNET_H + 4);
+}
+
+static int *lnet_var(int id, const char **key, const char **name)
+{
+    if (id == ID_LNET_RB) {
+        *key = LNET_RB_KEY;
+        *name = "gui.lnet_rb";
+        return &g_loc_rb_on;
+    }
+    if (id == ID_LNET_OWN) {
+        *key = LNET_OWN_KEY;
+        *name = "gui.lnet_own";
+        return &g_loc_own_pred;
+    }
+    *key = LNET_LOWD_KEY;
+    *name = "gui.lnet_lowd";
+    return &g_loc_lowd;
+}
+
+/* Schalter umlegen, sofort in user.cfg merken (wirkt beim naechsten Start). Ohne Rollback sind die
+ * abhaengigen Schalter grau; ein Klick (z. B. per Test) aendert dann nichts. */
+static void lnet_toggle(int id)
+{
+    const char *key, *name;
+    int *v = lnet_var(id, &key, &name);
+    char t[300];
+    if (id != ID_LNET_RB && !g_loc_rb_on) {
         onl_sync_ui();
         return;
     }
-    g_loc_online = !g_loc_online;
+    *v = !*v;
     onl_sync_ui();
-    if (onl_save() >= 0) {
-        set_status_k(LT(g_loc_online ? "gui.loc_onl_on" : "gui.loc_onl_off"), g_loc_online ? 1 : 0);
+    if (onl_save_key(key, *v) >= 0) {
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT(*v ? "gui.lnet_set_on" : "gui.lnet_set_off"), LT(name));
+        set_status_k(t, 1);
     }
-    ui_refresh_visibility();
-    onl_redraw();
+    lnet_redraw();
+}
+
+/* Alles auf Standard (an, Gegner glaetten Auto) und merken. */
+static void lnet_reset(void)
+{
+    int bad = 0;
+    g_loc_rb_on = g_loc_own_pred = g_loc_lowd = 1;
+    g_loc_smooth_opp = 1;
+    onl_sync_ui();
+    bad |= onl_save_key(LNET_RB_KEY, 1) < 0;
+    bad |= onl_save_key(LNET_OWN_KEY, 1) < 0;
+    bad |= onl_save_key(LNET_LOWD_KEY, 1) < 0;
+    bad |= onl_save_key(ONL_SMOOTH_KEY, 1) < 0;
+    if (!bad) {
+        set_status_k(LT("gui.lnet_reset_done"), 1);
+    }
+    lnet_redraw();
+}
+
+static void mp_paint_match(void); /* W397 */
+static int acc_paint_card(void);
+static void acc_paint_view(void);
+
+static void paint_lnet(void)
+{
+    int x = CX0, y = LNET_Y, w = CW, i;
+    if (acc_view_active()) { /* W397: Account verwalten = Unterseite von Multiplayer */
+        acc_paint_view();
+        return;
+    }
+    mp_paint_match();
+    if (!acc_paint_card()) { /* steelnet in dieser Ausgabe nicht eingerichtet */
+        card(ACC_X, LOC_ONL_Y, COLW, LOC_ONL_H, LT("gui.acc_title"));
+        label(F_TINY, LT("gui.loc_onl_nosrv"), ACC_X + 18, LOC_ONL_Y + 40, COLW - 36, 50, C_DIM);
+    }
+    card(x, y, w, LNET_H, LT("gui.lnet_title"));
+    label(F_TINY, LT("gui.lnet_intro"), x + 18, y + 38, w - 36 - 0, 34, C_DIM);
+    for (i = 0; i < 4; i++) {
+        int ind = i ? LNET_IND : 0;
+        int grey = i && !g_loc_rb_on;
+        COLORREF c = i == 0 ? (g_loc_rb_on ? C_DIM : C_WARN) : (g_loc_rb_on ? C_DIM : C_FAINT);
+        (void)ind;
+        label(F_TINY, LT(grey ? "gui.lnet_needs_rb" : kLnetHint[i]), LNET_HINT_X, LNET_ROW(i) - 2,
+              x + w - 18 - LNET_HINT_X, 48, c);
+    }
+}
+
+static void lnet_build(HWND w)
+{
+    int x = CX0 + 18;
+    mk(w, K_TOGGLE, ID_LNET_RB, P_LNET, x, LNET_ROW(0), LNET_CTL_W, 28, LT("gui.lnet_rb"), 0);
+    mk(w, K_TOGGLE, ID_LNET_OWN, P_LNET, x + LNET_IND, LNET_ROW(1), LNET_CTL_W, 28, LT("gui.lnet_own"), 0);
+    /* W387 Gegner glaetten: frueher unter dem Startknopf auf LoC-Spielen (gleicher Schluessel, Wert bleibt) */
+    mk(w, K_COMBO, ID_LOC_SMOOTH, P_LNET, x + LNET_IND, LNET_ROW(2), LNET_CTL_W, 28, "", 0);
+    mk(w, K_TOGGLE, ID_LNET_LOWD, P_LNET, x + LNET_IND, LNET_ROW(3), LNET_CTL_W, 28, LT("gui.lnet_lowd"), 0);
+    mk(w, K_BTN, ID_LNET_RESET, P_LNET, CX0 + CW - 18 - 200, LNET_Y + 9, 200, 28, LT("gui.lnet_reset"), 0); /* W397 */
+}
+
+static void lnet_relabel(void)
+{
+    if (ctl(ID_LNET_RB)) ui_settext(ctl(ID_LNET_RB), LT("gui.lnet_rb"));
+    if (ctl(ID_LNET_OWN)) ui_settext(ctl(ID_LNET_OWN), LT("gui.lnet_own"));
+    if (ctl(ID_LNET_LOWD)) ui_settext(ctl(ID_LNET_LOWD), LT("gui.lnet_lowd"));
+    if (ctl(ID_LNET_RESET)) ui_settext(ctl(ID_LNET_RESET), LT("gui.lnet_reset"));
 }
 
 /* Timer (2 s) und Seitenwechsel: Status des laufenden/letzten Spiels. */
 static void onl_tick(void)
 {
-    if (g_game != LGAME_LOC || g_page != P_PLAY || !g_hwnd || IsIconic(g_hwnd)) {
-        return;
+    if (g_game != LGAME_LOC || (g_page != P_PLAY && g_page != P_LNET) || !g_hwnd || IsIconic(g_hwnd)) {
+        return; /* W397: auch auf Multiplayer (Raumcode kopieren) */
     }
     if (onl_status_refresh()) {
         ui_refresh_visibility();
@@ -15194,24 +16212,77 @@ static void onl_tick(void)
     }
 }
 
+/* W397: LoC > Spielen rechts: Erstabfrage oder kurze Karte "Multiplayer" (Stufe, Lobby, Raumcode/Meldung). */
+static void mp_card_acc_line(char *t, size_t cap); /* W403 */
 static void onl_paint(void)
 {
     char t[400];
     COLORREF col = C_DIM;
-    int x = LOC_NET_X, y = LOC_NET_Y, w = LOC_NET_W, cp = onl_info(t, sizeof t, &col);
-    card(x, y, w, LOC_NET_H, LT("gui.loc_onl_title"));
-    label1(F_SMALL, LT("gui.loc_code"), x + 170, y + 42, 64, 28, onl_srv_on() && g_loc_online ? C_DIM : C_FAINT);
-    label(F_TINY, t, x + 18, y + 76, w - 36 - (cp ? 92 : 0), 36, col);
-    /* Nutzerentscheid F2 (§6.6 Punkt 6): dezent unter der Karte */
-    label1(F_TINY, LT("gui.loc_onl_trust"), x + 18, y + LOC_NET_H + 2, w - 36, 16, C_DIM);
+    int x = LOC_NET_X, y = LOC_NET_Y, w = LOC_NET_W;
+    if (g_upd_ask) {
+        netq_paint(x, y, w);
+        return;
+    }
+    card(x, y, w, LOC_NET_H, LT("gui.page_mp"));
+    if (netm_get() == NETM_STEEL) {
+        label1(F_SMALL, LT(g_loc_public ? "gui.mp_sum_pub" : "gui.mp_sum_priv"), x + 18, y + 38, w - 36, 22, C_TEXT);
+        onl_info(t, sizeof t, &col);
+        if (col != C_DIM) { /* Raumcode der eigenen Lobby, Fehler, Vertrauenshinweis (Eingabehinweise: Multiplayer) */
+            label(F_TINY, t, x + 18, y + 62, w - 36, 32, col);
+        }
+    } else { /* W403: ohne steelnet nur der Konto-Stand (Grund + Sprung stehen unter dem Startknopf) */
+        mp_card_acc_line(t, sizeof t);
+        label1(F_SMALL, t, x + 18, y + 38, w - 36, 22, C_DIM);
+        label(F_TINY, LT("gui.mp_card_off"), x + 18, y + 62, w - 36, 32, C_FAINT);
+    }
+}
+
+/* W397: LoC > Multiplayer, Karte Match (Sichtbarkeit, Raumcode, Meldung; ohne steelnet Hinweis + Sprung). */
+static void mp_paint_match(void)
+{
+    char t[400];
+    COLORREF col = C_DIM;
+    int x = CX0, y = MP_MATCH_Y, w = COLW, on = onl_srv_on() && g_loc_online;
+    card(x, y, w, MP_MATCH_H, LT("gui.mp_match"));
+    label1(F_SMALL, LT("gui.mp_lobby"), x + 18, y + 40, 76, 28, on ? C_DIM : C_FAINT);
+    label1(F_SMALL, LT("gui.loc_code"), x + 18, y + 74, 76, 28, on ? C_DIM : C_FAINT);
+    if (!on) {
+        label(F_TINY, LT(onl_srv_on() ? "gui.mp_off" : "gui.loc_onl_nosrv"), x + 18, y + 106, w - 36, 36, C_WARN);
+        return;
+    }
+    onl_info(t, sizeof t, &col);
+    label(F_TINY, t, x + 18, y + 106, w - 36, 36, col);
+}
+
+/* W373: Eintraege der Sichtbarkeits-Auswahl (Sprache), Auswahl nach g_loc_public. */
+static void onl_vis_fill(void)
+{
+    HWND c = ctl(ID_LOC_VIS);
+    if (!c) {
+        return;
+    }
+    g_updating++;
+    ComboBox_ResetContent(c);
+    combo_add(c, LT("gui.loc_vis_pub"));
+    combo_add(c, LT("gui.loc_vis_priv"));
+    ComboBox_SetCurSel(c, g_loc_public ? 0 : 1);
+    g_updating--;
 }
 
 static void onl_build(HWND w)
 {
-    int x = LOC_NET_X, y = LOC_NET_Y, cw = LOC_NET_W;
-    mk(w, K_TOGGLE, ID_LOC_ONL, P_PLAY, x + 18, y + 42, 148, 28, LT("gui.loc_onl_toggle"), 0);
-    mk(w, K_EDIT, ID_LOC_CODE, P_PLAY, x + 236, y + 42, cw - 18 - 236, 28, "", ES_UPPERCASE);
-    mk(w, K_BTN, ID_LOC_CODE_COPY, P_PLAY, x + cw - 18 - 84, y + 80, 84, 26, LT("gui.loc_code_copy"), 0);
+    int x = CX0, y = MP_MATCH_Y, cw = COLW;
+    /* W397: Schalter "Online-Spiel" entfaellt (Stufe steelnet unter dem Zahnrad); Match auf Multiplayer */
+    mk(w, K_COMBO, ID_LOC_VIS, P_LNET, x + 94, y + 40, cw - 18 - 94, 28, "", 0); /* W373 */
+    mk(w, K_EDIT, ID_LOC_CODE, P_LNET, x + 94, y + 74, cw - 18 - 84 - 8 - 94, 28, "", ES_UPPERCASE);
+    mk(w, K_BTN, ID_LOC_CODE_COPY, P_LNET, x + cw - 18 - 84, y + 75, 84, 26, LT("gui.loc_code_copy"), 0);
+    mk(w, K_BTN, ID_MP_GOSET, P_LNET, x + cw - 18 - 150, y + 9, 150, 26, LT("gui.mp_goset"), 0);
+    mk(w, K_BTN, ID_LOC_MP_GO, P_PLAY, LOC_NET_X + LOC_NET_W - 18 - 150, LOC_NET_Y + LOC_NET_H - 40, 150, 28,
+       LT("gui.mp_go"), 0);
+    /* W387: Gegner glaetten lag unter dem Startknopf; W392: jetzt auf der Seite Netzwerk */
+    lnet_build(w);
+    onl_vis_fill();
+    loc_smooth_fill(); /* W387 */
     if (ctl(ID_LOC_CODE)) {
         SendMessageW(ctl(ID_LOC_CODE), EM_LIMITTEXT, 12, 0);
         SendMessageW(ctl(ID_LOC_CODE), EM_SETCUEBANNER, TRUE, (LPARAM)L"XXXX-XXXX");
@@ -15221,7 +16292,9 @@ static void onl_build(HWND w)
 
 static void onl_relabel(void)
 {
-    if (ctl(ID_LOC_ONL)) ui_settext(ctl(ID_LOC_ONL), LT("gui.loc_onl_toggle"));
+    onl_vis_fill(); /* W373 */
+    loc_smooth_fill(); /* W387 */
+    lnet_relabel();    /* W392 */
     if (ctl(ID_LOC_CODE_COPY)) ui_settext(ctl(ID_LOC_CODE_COPY), LT("gui.loc_code_copy"));
 }
 
@@ -15262,6 +16335,11 @@ static int loctab_wide_val(void)
     return lgame_wide_clamp(g_loc.loc_widescreen);
 }
 
+static int pergame_box_169(void) /* W402: Bildformat des aktiven Spiels ist 16:9 (nur LoC) */
+{
+    return g_game == LGAME_LOC && loctab_wide_val() != LGAME_WIDE_43;
+}
+
 static void loctab_wide_pick(void)
 {
     int v = lgame_wide_clamp(ComboBox_GetCurSel(ctl(ID_LOC_WIDE)));
@@ -15272,6 +16350,7 @@ static void loctab_wide_pick(void)
     if (loctab_save() == 0) {
         set_status_k(LT("gui.loc_wide_saved"), 1);
     }
+    update_aspect_info(); /* W402: Vorschau 16:9/4:3 auf Anzeige */
     ui_apply_rules(); /* W326: Experimental-Hinweis (Breitbild) im LoC-Tab */
     redraw_rect(COL2, LOC_WIDE_Y, COLW, LOC_WIDE_H);
 }
@@ -15293,11 +16372,110 @@ static void loctab_data_dir(char *out, size_t cap)
  * Gespeicherte Setups, Diagnose mit Spielstand-Schutz) bleiben bei LoC weg. */
 static int loctab_adv_shared(int id)
 {
-    return id == ID_VSYNC || id == ID_FPS || id == ID_BG || id == ID_UPD_NOW || id == ID_UPD_AUTO;
+    return id == ID_VSYNC || id == ID_FPS; /* W397: Hintergrund/Versionspruefung jetzt unter dem Zahnrad */
+}
+
+/* ------------------------------------------------------------------ */
+/* W400 LAUNCHER-LOC-ONLINE-GATE: LoC ist ein reines Mehrspieler-Spiel.  */
+/* Ohne Stufe "Mit steelnet verbinden" (Zahnrad > Online & Updates, auch */
+/* aus der Erstabfrage) ist der LoC-Start gesperrt: Knopf grau (wie ohne */
+/* startbaren Client), Grund + Sprung zum Zahnrad unter dem Knopf, Zeile */
+/* Online warnt, jeder Startweg (Knopf, Launch-Leiste, Enter) prueft in  */
+/* loctab_start. Testpartner (Loopback, eigener Startweg) und SB frei.   */
+/* ------------------------------------------------------------------ */
+#define ID_LOC_GATE_GO 2920 /* LoC > Spielen: "steelnet waehlen" -> Launcher-Einstellungen */
+static int g_locgate_skip; /* nur Selbsttest: aeltere Startweg-Faelle pruefen die Kette ohne steelnet */
+static int g_in_gui_selftest; /* W403: Selbsttest laeuft (nie das echte Konto lesen) */
+
+static int loc_net_ok(void)
+{
+    return g_locgate_skip || netm_get() == NETM_STEEL;
+}
+
+/* Sperrgrund steelnet sichtbar? (nur mit startbarem Client, sonst gilt "Demnaechst") */
+static int loc_gate_shown(void)
+{
+    return lgame_loc_client_ready() && !loc_net_ok();
+}
+
+/* W403 LAUNCHER-R1-POLISH: ohne (gepruefte) LoC-Disc ist der Start gesperrt wie ohne steelnet: Knopf grau,
+ * Grund unter dem Knopf, Sprung "Disc-Image waehlen" (LoC > Erweitert). Gleiche Bedingung wie loctab_start
+ * (lgame_loc_start_gate mit dem Pruefergebnis des gemerkten Abbilds). m: Grund (ohne Pfad "kein Abbild",
+ * sonst die Meldung der Startsperre). Nur mit startbarem Client (sonst gilt "Demnaechst"). */
+#define ID_LOC_IMG_GO 2921 /* LoC > Spielen: "Disc-Image waehlen" -> LoC > Erweitert */
+static int loc_img_gate(char *m, size_t cap)
+{
+    char t[600];
+    const lgame_img_t *r = (g_loc_checked && strcmp(g_loc_res_path, g_loc.loc_image) == 0) ? &g_loc_res : NULL;
+    if (m && cap) {
+        m[0] = '\0';
+    }
+    if (!lgame_loc_client_ready() || lgame_loc_start_gate(r, t, sizeof t) == 0) {
+        return 0;
+    }
+    if (m && cap) {
+        strcpy_s(m, cap, g_loc.loc_image[0] ? t : LT("gui.loc_sum_none"));
+    }
+    return 1;
+}
+
+/* Launch (Fussleiste der Unterseiten) im Bereich LoC: frei ohne startbaren Client ("Coming soon"),
+ * sonst nur mit gepruefter Disc und steelnet - dieselbe Bedingung wie Play Line of Contact. */
+static int loc_launch_ok(void)
+{
+    return !lgame_loc_client_ready() || (loc_net_ok() && !loc_img_gate(NULL, 0));
+}
+
+/* Sperrgrund LoC (Spielen-Seite und Fussleiste): Disc zuerst, dann steelnet kurz. */
+static void loc_gate_msg(char *m, size_t cap)
+{
+    if (loc_img_gate(m, cap) && loc_gate_shown()) {
+        size_t k = strlen(m);
+        _snprintf_s(m + k, cap - k, _TRUNCATE, "%s %s", k && m[k - 1] != '.' ? "." : "",
+                    LT("gui.loc_gate_short"));
+    } else if (!m[0]) {
+        strcpy_s(m, cap, LT("gui.loc_gate_short"));
+    }
+}
+
+static void loc_gate_sync(void)
+{
+    static int busy; /* W403: EnableWindow kann Fokus-/Zeichenwege ausloesen -> kein Wiedereintritt */
+    if (ctl(ID_LOC_START) && !busy) {
+        static const int kFoot[] = { ID_START, ID_START_MENU };
+        int i;
+        busy = 1;
+        BOOL en = lgame_loc_client_ready() && loc_net_ok() && !loc_img_gate(NULL, 0) ? TRUE : FALSE;
+        if ((IsWindowEnabled(ctl(ID_LOC_START)) != FALSE) != (en != FALSE)) {
+            EnableWindow(ctl(ID_LOC_START), en);
+        }
+        for (i = 0; g_game == LGAME_LOC && i < 2; i++) { /* Fussleiste: grau wie Play Line of Contact */
+            BOOL fe = loc_launch_ok() ? TRUE : FALSE;
+            if (ctl(kFoot[i]) && (IsWindowEnabled(ctl(kFoot[i])) != FALSE) != (fe != FALSE)) {
+                EnableWindow(ctl(kFoot[i]), fe);
+                InvalidateRect(ctl(kFoot[i]), NULL, FALSE);
+            }
+        }
+        busy = 0;
+    }
 }
 
 static int loctab_visible(const uictl_t *u, int page)
 {
+    if (u->id == ID_NAVSUB_MATCH || u->id == ID_NAVSUB_ACC) { /* W399: nur LoC, nur auf Multiplayer */
+        return g_game == LGAME_LOC && page == P_LNET;
+    }
+    if (u->id == ID_LOC_IMG_GO) { /* W403: Disc zuerst */
+        return g_game == LGAME_LOC && page == P_PLAY && loc_img_gate(NULL, 0);
+    }
+    if (u->id == ID_LOC_GATE_GO) { /* W400; W403: erst, wenn die Disc passt (ein Sprung, Disc zuerst) */
+        return g_game == LGAME_LOC && page == P_PLAY && loc_gate_shown() && !loc_img_gate(NULL, 0);
+    }
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+    if (u->id == ID_LOCTP_STOP && (loc_gate_shown() || loc_img_gate(NULL, 0)) && !loctp_active()) {
+        return 0; /* W400: Platz fuer den Sprung zum Zahnrad (Stop erst mit laufendem Testpartner) */
+    }
+#endif
     { /* W328: Pilotenkonto (Karte bzw. Verwaltungsansicht auf LoC > Erweitert) */
         int av = acc_visible(u->id, page);
         if (av >= 0) {
@@ -15313,13 +16491,18 @@ static int loctab_visible(const uictl_t *u, int page)
     }
 #endif
     if (u->id >= ID_LOC_FIRST && u->id <= ID_LOC_LAST) {
-        if (page == P_ADV && acc_view_active()) {
-            return 0; /* W328: Verwaltungsansicht deckt die Seite */
+        if (page == P_LNET && acc_view_active()) {
+            return 0; /* W328: Verwaltungsansicht deckt die Seite (W397: Multiplayer) */
         }
         if (u->id == ID_LOC_CODE_COPY && !onl_copy_visible()) {
             return 0; /* W334: nur mit Raumcode der eigenen Lobby */
         }
+        /* W387: ohne startbaren Client war Gegner glaetten (unter dem Start) ausgeblendet; W392: auf der Seite
+         * Netzwerk immer sichtbar (Einstellung, kein Start) */
         return g_game == LGAME_LOC && page == u->page; /* W293: Start/Change auf Spielen, Disc/Ordner auf Erweitert */
+    }
+    if (u->id >= ID_LNET_FIRST && u->id <= ID_LNET_LAST) { /* W392: Seite Netzwerk, nur LoC (nie bei SB-Packs) */
+        return g_game == LGAME_LOC && page == P_LNET && !acc_view_active(); /* W397: Account verwalten deckt */
     }
     if (u->id == ID_GAME_SB || u->id == ID_GAME_LOC) {
         return -1;
@@ -15327,45 +16510,71 @@ static int loctab_visible(const uictl_t *u, int page)
     if (g_game != LGAME_LOC) {
         return -1;
     }
-    if (u->id == ID_NAV0 + P_PACKS) {
-        return 0;
+    if (u->page == P_PACKS) {
+        return 0; /* W392: Pack-Elemente nie auf der LoC-Seite Netzwerk (gleicher Seitenplatz) */
     }
     if (u->page == P_PLAY) {
         return 0; /* SB-Spielen (Start, VR, Abbild, Bereitschaft, Update-Karte) */
     }
-    if (u->page == P_ADV) { /* W293: nur die gemeinsamen Teile (Feinabstimmung, Launcher) */
-        if (acc_view_active()) {
-            return 0; /* W328: Verwaltungsansicht */
-        }
+    if (u->page == P_ADV) { /* W293: nur die gemeinsamen Teile (Feinabstimmung) */
         return loctab_adv_shared(u->id) ? -1 : 0;
     }
     return -1;
 }
 
-/* Navigation ohne Luecke (LoC: Packs ausgeblendet, W293: Erweitert bleibt). */
+/* Navigation ohne Luecke in der Reihenfolge je Spiel (W397: nav_order; Test tools unter dem Zahnrad). */
+/* W399: Ist bei LoC Multiplayer offen, stehen darunter eingerueckt die Unterpunkte Match & network und Account;
+ * die folgenden Punkte ruecken nach unten. Sonst bleibt die Leiste zugeklappt (Unterpunkte unsichtbar). */
+static int nav_sub_open(void)
+{
+    return g_game == LGAME_LOC && g_page == P_LNET;
+}
+
+static void nav_sub_layout(void)
+{
+    const int *o = nav_order();
+    int k, y = TITLE_H + 16, open = nav_sub_open();
+    for (k = 0; k < NAV_ORDER_N; k++) {
+        uictl_t *u = ui_find(ID_NAV0 + o[k]);
+        if (u && u->y != y) {
+            u->y = y;
+            ui_place(u);
+        }
+        y += 44;
+        if (o[k] == P_LNET && g_game == LGAME_LOC) {
+            uictl_t *s0 = ui_find(ID_NAVSUB_MATCH), *s1 = ui_find(ID_NAVSUB_ACC);
+            int ys = y - 4;
+            if (s0 && s0->y != ys) {
+                s0->y = ys;
+                ui_place(s0);
+            }
+            if (s1 && s1->y != ys + NAVSUB_H + 2) {
+                s1->y = ys + NAVSUB_H + 2;
+                ui_place(s1);
+            }
+            if (open) {
+                y = ys + 2 * (NAVSUB_H + 2) + 6;
+            }
+        }
+    }
+    if (ctl(ID_NAVSUB_MATCH)) {
+        InvalidateRect(ctl(ID_NAVSUB_MATCH), NULL, FALSE);
+    }
+    if (ctl(ID_NAVSUB_ACC)) {
+        InvalidateRect(ctl(ID_NAVSUB_ACC), NULL, FALSE);
+    }
+}
+
 static void loctab_nav_layout(void)
 {
-    int i, k = 0;
-    for (i = 0; i < P_N; i++) {
-        uictl_t *u = ui_find(ID_NAV0 + i);
-        int hide = g_game == LGAME_LOC && i == P_PACKS;
-        if (!u) {
-            continue;
-        }
-        if (!hide) {
-            int y = TITLE_H + 16 + k * 44;
-            if (u->y != y) {
-                u->y = y;
-                ui_place(u);
-            }
-            k++;
-        }
-    }
+    nav_sub_layout();
     ui_set_checked(ID_GAME_SB, g_game == LGAME_SB);
     ui_set_checked(ID_GAME_LOC, g_game == LGAME_LOC);
-    if (ctl(ID_LOC_START)) {
-        EnableWindow(ctl(ID_LOC_START), lgame_loc_client_ready() ? TRUE : FALSE);
+    xicon_texts(); /* W392: Navigation Packs <-> Netzwerk (Text inkl. Hinweiszeile, Symbol beim Zeichnen) */
+    if (ctl(ID_NAV0 + P_PACKS)) {
+        InvalidateRect(ctl(ID_NAV0 + P_PACKS), NULL, FALSE);
     }
+    loc_gate_sync(); /* W400: grau ohne startbaren Client oder ohne steelnet */
 }
 
 static void loctab_set_game(int game)
@@ -15375,7 +16584,11 @@ static void loctab_set_game(int game)
         loctab_nav_layout();
         return;
     }
-    g_game = game;
+    {
+        int from = g_game;
+        g_game = game;
+        pergame_switch(from, game); /* W402: eigene Werte je Spiel */
+    }
     loctab_save();
     loctab_nav_layout();
     ui_apply_rules(); /* W326: Experimental-Hinweis haengt am Bereich (LoC-Bildformat) */
@@ -15398,6 +16611,8 @@ static void loctab_check(void)
     g_loc_checked = 1;
     strcpy_s(g_loc.loc_image, sizeof g_loc.loc_image, p);
     loctab_save();
+    loc_gate_sync();         /* W403: Disc passt bzw. fehlt -> Startknopf + Sprung passend */
+    ui_refresh_visibility();
     redraw_rect(CX0, LOC_DISC_Y, COLW, LOC_DISC_H);
 }
 
@@ -15464,35 +16679,37 @@ static void loctab_start(void)
                                ? &g_loc_res : NULL;
     g_loc_last_cmd[0] = '\0';
     if (lgame_loc_start_gate(r, m, sizeof m) != 0) {
+        if (loc_gate_shown()) { /* W400: beide Gruende, der Disc-Grund zuerst */
+            size_t k = strlen(m);
+            _snprintf_s(m + k, sizeof m - k, _TRUNCATE, " %s", LT("gui.loc_gate_why"));
+        }
         set_status_k(m, lgame_loc_client_ready() ? 2 : 0);
         return;
     }
+    if (!loc_net_ok()) { /* W400: ohne steelnet kein LoC-Start (gleiche Sperre fuer alle Startwege) */
+        set_status_k(LT("gui.loc_gate_why"), 2);
+        return;
+    }
     { /* W353: intern immer, Community nur im privaten Testpaket (lgame_loc_client_ready) */
-        char d[1200], acp[1200], img[1200], set[4096], raw[64] = "";
+        char d[1200], acp[1200], set[4096], raw[64] = "", xbe_u8[1200];
         int onl = g_loc_online && onl_srv_on();
         size_t k;
         loctab_data_dir(d, sizeof d);
         strcat_s(d, sizeof d, "\\hdd");
         u8_to_acp(d, acp, sizeof acp);
-        u8_to_acp(g_loc.loc_image, img, sizeof img);
         wchar_t *env;
         /* W353 LOC-DURCHSTICH: Kette wie das Nutzer-Spiel des Testpartners (loctp_build_set, W336):
-         * loc_boot=1 (sonst bricht der Client beim LoC-Abbild ab) und game_image (Ordner/ISO/XBE, hat Vorrang
-         * vor --xbe); ';' im Pfad maskiert (hcfg_apply_set). */
-        strcpy_s(set, sizeof set, "loc_boot=1;game_image=");
-        for (k = 0; img[k] && strlen(set) + 3 < sizeof set; k++) {
-            size_t n = strlen(set);
-            if (img[k] == ';') set[n++] = '\\';
-            set[n++] = img[k];
-            set[n] = '\0';
-        }
+         * loc_boot=1 (sonst bricht der Client beim LoC-Abbild ab) und das Abbild. W384 (GH #52): ISO als
+         * game_image, .xbe/entpackter Ordner im Ordner-Modus (xbe_path + media_root, game_image leer). */
+        lgame_loc_image_set(g_loc.loc_image, set, sizeof set, xbe_u8, sizeof xbe_u8);
         k = strlen(set);
-        _snprintf_s(set + k, sizeof set - k, _TRUNCATE, ";vr_enable=0;hdd_root=%s", acp);
+        _snprintf_s(set + k, sizeof set - k, _TRUNCATE, ";vr_enable=0;game_tick=30;hdd_root=%s", acp); /* W402: nie PAL */
+        loc_net_set_append(set, sizeof set); /* W387/W392: Netzwerk-Schalter, jeder LoC-Start (lokal und online) */
         if (ctl(ID_LOC_CODE)) {
             ui_gettext(ctl(ID_LOC_CODE), raw, sizeof raw);
         }
         /* W334: Online (steelnet) -> Transport, Treffpunkt, Raumcode; ungueltiger Code = kein Start */
-        if (onl_set_append(set, sizeof set, onl, onl, raw) != 0) {
+        if (onl_set_append(set, sizeof set, onl, onl, raw, g_loc_public) != 0) {
             set_status_k(LT("gui.loc_code_bad"), 2);
             onl_redraw();
             return;
@@ -15503,11 +16720,32 @@ static void loctab_start(void)
             ui_refresh_visibility();
             onl_redraw();
         }
+        { /* W402 PERGAME: LoC-Werte sichern + Spielerbetrieb-Block in user_loc.cfg; der Client liest nur diese Datei */
+            char lp[1200];
+            wchar_t wlp[1200];
+            game_cfg_path(LGAME_LOC, lp, sizeof lp);
+            strcpy_s(g_loc_last_cfg, sizeof g_loc_last_cfg, lp);
+            if (loctab_may_write()) {
+                if (do_save(1) != 0) {
+                    return;
+                }
+                if (lcfg_write_player_block(lp) != 0) {
+                    char e[1400];
+                    _snprintf_s(e, sizeof e, _TRUNCATE, LT("gui.msg_nowrite"), lp);
+                    set_status_k(e, 2);
+                    return;
+                }
+            }
+            u8_to_w(lp, wlp, 1200);
+            SetEnvironmentVariableW(L"SB_USER_CFG", wlp); /* nur fuer diesen Start (acc_launch_env kopiert den Block) */
+        }
         env = acc_launch_env(set, sizeof set); /* W328: Pilotname + SB_LOC_AUTH nur im Kindprozess */
-        app_client_cmdline(g_client_dir, g_loc.loc_image, set, g_loc_last_cmd,
+        app_client_cmdline(g_client_dir, xbe_u8, set, g_loc_last_cmd,
                            sizeof g_loc_last_cmd);
         if (g_o.shot != 0) {
+            SetEnvironmentVariableW(L"SB_USER_CFG", NULL);
             printf("[loc-start] %s\n", g_loc_last_cmd);
+            printf("[loc-cfg] %s\n", LGAME_LOC_CFG_NAME); /* W402 */
             if (env) {
                 printf("[loc-env] SB_LOC_AUTH (nur Kindprozess)\n");
             }
@@ -15515,11 +16753,12 @@ static void loctab_start(void)
             return;
         }
         lcfg_mkdir_p(d);
-        if (app_launch_client_env(g_client_dir, g_loc.loc_image, set, env, m, sizeof m) == 0) {
+        if (app_launch_client_env(g_client_dir, xbe_u8, set, env, m, sizeof m) == 0) {
             set_status_k(m, 1);
         } else {
             set_status_k(m, 2);
         }
+        SetEnvironmentVariableW(L"SB_USER_CFG", NULL); /* W402: Steel Battalion liest weiter user.cfg */
         lacc_env_free(env); /* W344: ganzer Block (sortiert, SB_LOC_AUTH steht nicht vorne) */
     }
 }
@@ -15541,7 +16780,7 @@ static void loctab_start(void)
 #define ID_ACC_SIGNIN 2853     /* Karte: Auf diesem PC anmelden (-> Ansicht) */
 #define ID_ACC_DISCORD 2854    /* Karte: Mit Discord verbinden */
 #define ID_ACC_MANAGE 2855     /* Karte: Konto verwalten (-> Ansicht) */
-#define ID_ACC_BACK 2856       /* Ansicht: Zurueck */
+/* 2856 frei (W399: Zurueck entfaellt, Navigation ueber die Seitenleiste) */
 #define ID_ACC_V_DISCORD 2857  /* Ansicht: Discord verbinden / anmelden */
 #define ID_ACC_V_LOGIN 2858    /* Ansicht: Login-Name */
 #define ID_ACC_V_PASS 2859     /* Ansicht: Passwort (maskiert) */
@@ -15557,12 +16796,19 @@ static void loctab_start(void)
 #define ID_ACC_FIRST ID_ACC_NAME
 #define ID_ACC_LAST ID_ACC_V_FORGET
 /* Ansicht: Kartenraster (links/rechts wie Erweitert) */
-#define ACC_A_Y CY0
-#define ACC_A_H 150
-#define ACC_B_Y (CY0 + 162)
-#define ACC_B_H 206
-#define ACC_C_Y (CY0 + 380)
-#define ACC_C_H 116
+/* W399 LAUNCHER-ACCOUNT-PAGE: Unterseite Multiplayer > Account, von oben nach unten gruppiert:
+ * 1. Status (volle Breite), 2. Sichern (mit Account) bzw. Anmelden (ohne), 3. Auf einen anderen PC, 4. Gefahrenzone. */
+#define ACC_S_Y CY0          /* 1. Status bzw. Anlegen */
+#define ACC_S_H 88
+#define ACC_M_Y (CY0 + 100)  /* 2. Sichern / Anmelden (zweigeteilt) */
+#define ACC_M_H 228
+#define ACC_D_Y (CY0 + 340)  /* 3. Anderer PC (links) + 4. Gefahrenzone (rechts) */
+#define ACC_D_H 156
+#define ACC_LX (CX0 + 18)    /* linke Haelfte der geteilten Karte */
+#define ACC_LW (COLW - 30)
+#define ACC_RX (COL2 + 8)    /* rechte Haelfte */
+#define ACC_RW (CX0 + CW - 18 - ACC_RX)
+#define ACC_BTN_W 210        /* Discord-Knopf (gleiche Groesse an beiden Plaetzen) */
 
 enum { ACC_OP_STATUS = 1, ACC_OP_CHECK, ACC_OP_CREATE, ACC_OP_DISCORD_LINK, ACC_OP_DISCORD_LOGIN,
        ACC_OP_LOGIN_SET, ACC_OP_LOGIN, ACC_OP_TRANSFER, ACC_OP_RECOVERY, ACC_OP_DELETE };
@@ -15595,6 +16841,7 @@ static char g_acc_rec[48];        /* angezeigter Wiederherstellungscode ("" = ve
 static char g_acc_dir_test[1200]; /* Selbsttest: eigener Profilordner */
 static volatile long g_acc_cancel;
 static int g_acc_last_op, g_acc_last_rc; /* Selbsttest: letztes Ergebnis */
+static int g_acc_try_op;          /* W399 Selbsttest: zuletzt angestossener Auftrag im Testmodus (ohne Netz) */
 static char g_acc_last_err[64];
 
 static void acc_dir(char *out, size_t cap)
@@ -15625,6 +16872,19 @@ static void acc_load(void)
     acc_dir(d, sizeof d);
     if (lacc_store_load(d, &g_acc) != 1) {
         memset(&g_acc, 0, sizeof g_acc);
+    }
+}
+
+/* W403: Multiplayer-Karte (LoC-Spielen) ohne steelnet: nur der Konto-Stand dieses PCs (kein Netz). */
+static void mp_card_acc_line(char *t, size_t cap)
+{
+    if (g_o.shot == 0 && !g_in_gui_selftest) { /* Shots/Selbsttest: nie das echte Konto (nur Fixture/leer) */
+        acc_load();
+    }
+    if (g_acc.have && g_acc.name[0]) {
+        _snprintf_s(t, cap, _TRUNCATE, LT("gui.mp_card_pilot"), g_acc.name);
+    } else {
+        strcpy_s(t, cap, LT(acc_srv_on() ? "gui.mp_card_nopilot" : "gui.loc_onl_nosrv"));
     }
 }
 
@@ -15668,7 +16928,9 @@ static void acc_refresh(void)
     if (!g_hwnd) {
         return;
     }
+    acc_layout(); /* W399: Anlegen/Discord an den Platz der Ansicht */
     ui_refresh_visibility();
+    nav_sub_layout(); /* W399: Markierung des Unterpunkts */
     {
         static const int kBtn[] = { ID_ACC_CREATE, ID_ACC_CHECK, ID_ACC_SIGNIN, ID_ACC_DISCORD, ID_ACC_MANAGE,
                                     ID_ACC_V_DISCORD, ID_ACC_V_LOGINBTN, ID_ACC_V_CODEBTN, ID_ACC_V_RECBTN,
@@ -15737,6 +16999,7 @@ static int acc_start(int op, const char *a, const char *b)
         return 1;
     }
     if (g_acc_fixture || (g_o.shot != 0 && !g_acc_dir_test[0])) { /* Shots: nie Netz */
+        g_acc_try_op = op; /* W399: Selbsttest prueft die Verdrahtung der Knoepfe */
         printf("[acc] Auftrag %d (Testmodus, kein Netz)\n", op);
         return 1;
     }
@@ -15847,7 +17110,8 @@ static void acc_done(acc_job_t *j)
 static void acc_page_shown(void)
 {
     acc_load();
-    if (g_acc.have && !g_acc_st_ok && !g_acc_busy && acc_srv_on() && g_o.shot == 0) {
+    /* W397: automatische Statusabfrage nur mit Stufe "Mit steelnet verbinden" (Knoepfe bleiben Nutzeraktionen) */
+    if (g_acc.have && !g_acc_st_ok && !g_acc_busy && acc_srv_on() && netm_get() == NETM_STEEL && g_o.shot == 0) {
         acc_start(ACC_OP_STATUS, NULL, NULL);
     }
 }
@@ -15859,18 +17123,22 @@ static int acc_visible(int id, int page)
     if (id < ID_ACC_FIRST || id > ID_ACC_LAST) {
         return -1;
     }
-    if (g_game != LGAME_LOC || page != P_ADV) {
+    if (g_game != LGAME_LOC || page != P_LNET) { /* W397: Multiplayer statt Erweitert */
         return 0;
     }
     on = acc_srv_on();
     have = g_acc.have;
     view = g_acc_view && on;
     switch (id) {
-    case ID_ACC_NAME: case ID_ACC_CREATE: case ID_ACC_CHECK: case ID_ACC_SIGNIN:
+    case ID_ACC_NAME: case ID_ACC_CREATE: case ID_ACC_CHECK: /* W399: Karte bzw. Status der Account-Seite */
+        return on && !have;
+    case ID_ACC_SIGNIN:
         return on && !view && !have;
     case ID_ACC_DISCORD: case ID_ACC_MANAGE:
         return on && !view && have;
-    case ID_ACC_BACK: case ID_ACC_V_DISCORD: case ID_ACC_V_LOGIN: case ID_ACC_V_PASS: case ID_ACC_V_LOGINBTN:
+    case ID_ACC_V_DISCORD: /* W399: verbunden -> nur Zustandszeile, kein Knopf */
+        return view && (!have || !(g_acc_st_ok && g_acc_st.discord));
+    case ID_ACC_V_LOGIN: case ID_ACC_V_PASS: case ID_ACC_V_LOGINBTN:
     case ID_ACC_V_CODE: case ID_ACC_V_CODEBTN:
         return view;
     case ID_ACC_V_REC: case ID_ACC_V_RECBTN:
@@ -15881,15 +17149,43 @@ static int acc_visible(int id, int page)
     return 0;
 }
 
-/* In der Verwaltungsansicht: alle uebrigen Elemente der Seite aus. */
+/* In der Verwaltungsansicht: alle uebrigen Elemente der Seite aus. W399: Unterpunkt Account der Leiste, auch ohne
+ * eingerichteten Dienst (dann nur der Hinweis). */
 static int acc_view_active(void)
 {
-    return g_game == LGAME_LOC && g_acc_view && acc_srv_on();
+    return g_game == LGAME_LOC && g_acc_view;
+}
+
+static int acc_sub_active(void)
+{
+    return acc_view_active();
+}
+
+/* W399: Elemente, die je nach Ansicht an zwei Plaetzen stehen (Anlegen: Karte auf Match & network bzw. Status der
+ * Account-Seite; Discord: Status bei Handlungsbedarf, sonst Zeile "Discord" unter Sichern bzw. Anmelden). */
+static void acc_layout(void)
+{
+    int y = LOC_ONL_Y;
+    if (g_acc_view) {
+        ui_move_xy(ID_ACC_NAME, CX0 + 120, ACC_S_Y + 54);
+        ui_move_xy(ID_ACC_CHECK, CX0 + 254, ACC_S_Y + 55);
+        ui_move_xy(ID_ACC_CREATE, CX0 + 372, ACC_S_Y + 54);
+    } else {
+        ui_move_xy(ID_ACC_NAME, ACC_X + 104, y + 40);
+        ui_move_xy(ID_ACC_CREATE, ACC_X + 238, y + 40);
+        ui_move_xy(ID_ACC_CHECK, ACC_X + 18, y + 76);
+    }
+    if (g_acc.have && !acc_secured()) {
+        ui_move_xy(ID_ACC_V_DISCORD, CX0 + CW - 18 - ACC_BTN_W, ACC_S_Y + 44);
+    } else {
+        ui_move_xy(ID_ACC_V_DISCORD, ACC_LX, ACC_M_Y + 96);
+    }
 }
 
 static void acc_open_view(int on)
 {
     g_acc_view = on;
+    acc_layout(); /* W399 */
     g_acc_rec[0] = '\0';
     if (!on) {
         g_acc_cancel = 1; /* laufendes Discord-Warten abbrechen */
@@ -15898,6 +17194,15 @@ static void acc_open_view(int on)
         ui_settext(ctl(ID_ACC_V_LOGIN), g_acc_st.login_name);
     }
     acc_refresh();
+}
+
+/* W399: Unterpunkt von Multiplayer waehlen (Leiste, "Account verwalten", "Auf diesem PC anmelden"). */
+static void acc_nav_sub(int acc)
+{
+    if ((g_acc_view != 0) != (acc != 0)) {
+        acc_open_view(acc);
+    }
+    show_page(P_LNET);
 }
 
 static void acc_copy_code(void)
@@ -15962,10 +17267,7 @@ static int acc_command(int id, int code)
         return 1;
     case ID_ACC_SIGNIN:
     case ID_ACC_MANAGE:
-        acc_open_view(1);
-        return 1;
-    case ID_ACC_BACK:
-        acc_open_view(0);
+        acc_nav_sub(1); /* W399: Unterpunkt Account */
         return 1;
     case ID_ACC_DISCORD:
     case ID_ACC_V_DISCORD:
@@ -16004,7 +17306,7 @@ static int acc_command(int id, int code)
             lacc_recovery_code(g_acc.account, g_acc.key, g_acc_rec, sizeof g_acc_rec);
         }
         ui_settext(ctl(ID_ACC_V_RECSHOW), LT(g_acc_rec[0] ? "gui.acc_rec_hide" : "gui.acc_rec_show"));
-        redraw_rect(COL2, ACC_A_Y, COLW, ACC_A_H);
+        redraw_rect(CX0, ACC_M_Y, COLW, ACC_M_H);
         return 1;
     case ID_ACC_V_RECCOPY:
         acc_copy_code();
@@ -16033,28 +17335,28 @@ static int acc_command(int id, int code)
 
 static void acc_build(HWND w)
 {
-    int x = CX0 + 18, y = LOC_ONL_Y;
-    /* Karte "Pilot" (LoC > Erweitert, Platz der Online-Karte) */
-    mk(w, K_EDIT, ID_ACC_NAME, P_ADV, CX0 + 104, y + 40, 128, 28, "", 0);
-    mk(w, K_ACCENT, ID_ACC_CREATE, P_ADV, CX0 + 238, y + 40, 84, 28, LT("gui.acc_create"), 0);
-    mk(w, K_BTN, ID_ACC_CHECK, P_ADV, x, y + 76, 112, 26, LT("gui.acc_check"), 0);
-    mk(w, K_BTN, ID_ACC_SIGNIN, P_ADV, x + 118, y + 76, COLW - 36 - 118, 26, LT("gui.acc_signin"), 0);
-    mk(w, K_ACCENT, ID_ACC_DISCORD, P_ADV, x, y + 94, 168, 28, LT("gui.acc_discord_link"), 0);
-    mk(w, K_BTN, ID_ACC_MANAGE, P_ADV, x + 174, y + 94, COLW - 36 - 174, 28, LT("gui.acc_manage"), 0);
-    /* Verwaltungsansicht */
-    mk(w, K_BTN, ID_ACC_BACK, P_ADV, CX0 + COLW - 18 - 96, ACC_A_Y + 10, 96, 26, LT("gui.acc_back"), 0);
-    mk(w, K_ACCENT, ID_ACC_V_DISCORD, P_ADV, x, ACC_A_Y + 108, 200, 28, LT("gui.acc_discord_link"), 0);
-    mk(w, K_EDIT, ID_ACC_V_LOGIN, P_ADV, x, ACC_B_Y + 56, COLW - 36, 28, "", 0);
-    mk(w, K_EDIT, ID_ACC_V_PASS, P_ADV, x, ACC_B_Y + 108, COLW - 36, 28, "", ES_PASSWORD);
-    mk(w, K_ACCENT, ID_ACC_V_LOGINBTN, P_ADV, x, ACC_B_Y + 142, 170, 28, LT("gui.acc_login_save"), 0);
-    mk(w, K_BTN, ID_ACC_V_DELETE, P_ADV, x, ACC_C_Y + 78, 146, 28, LT("gui.acc_delete"), 0);
-    mk(w, K_BTN, ID_ACC_V_FORGET, P_ADV, x + 152, ACC_C_Y + 78, COLW - 36 - 152, 28, LT("gui.acc_forget"), 0);
-    mk(w, K_BTN, ID_ACC_V_RECSHOW, P_ADV, COL2 + 18, ACC_A_Y + 108, 120, 28, LT("gui.acc_rec_show"), 0);
-    mk(w, K_BTN, ID_ACC_V_RECCOPY, P_ADV, COL2 + 18 + 126, ACC_A_Y + 108, 120, 28, LT("gui.acc_rec_copy"), 0);
-    mk(w, K_EDIT, ID_ACC_V_REC, P_ADV, COL2 + 18, ACC_A_Y + 104, 196, 28, "", 0);
-    mk(w, K_ACCENT, ID_ACC_V_RECBTN, P_ADV, COL2 + 220, ACC_A_Y + 104, COLW - 238, 28, LT("gui.acc_redeem"), 0);
-    mk(w, K_EDIT, ID_ACC_V_CODE, P_ADV, COL2 + 18, ACC_B_Y + 104, 196, 28, "", 0);
-    mk(w, K_ACCENT, ID_ACC_V_CODEBTN, P_ADV, COL2 + 220, ACC_B_Y + 104, COLW - 238, 28, LT("gui.acc_redeem"), 0);
+    int x = ACC_X + 18, y = LOC_ONL_Y; /* W397: rechts oben auf Multiplayer */
+    /* Karte "Account" (W397: LoC > Multiplayer rechts oben; frueher "Pilot" auf Erweitert) */
+    mk(w, K_EDIT, ID_ACC_NAME, P_LNET, ACC_X + 104, y + 40, 128, 28, "", 0);
+    mk(w, K_ACCENT, ID_ACC_CREATE, P_LNET, ACC_X + 238, y + 40, 84, 28, LT("gui.acc_create"), 0);
+    mk(w, K_BTN, ID_ACC_CHECK, P_LNET, x, y + 76, 112, 26, LT("gui.acc_check"), 0);
+    mk(w, K_BTN, ID_ACC_SIGNIN, P_LNET, x + 118, y + 76, COLW - 36 - 118, 26, LT("gui.acc_signin"), 0);
+    mk(w, K_ACCENT, ID_ACC_DISCORD, P_LNET, x, y + 94, 168, 28, LT("gui.acc_discord_link"), 0);
+    mk(w, K_BTN, ID_ACC_MANAGE, P_LNET, x + 174, y + 94, COLW - 36 - 174, 28, LT("gui.acc_manage"), 0);
+    /* W399: Unterseite Multiplayer > Account (Reihenfolge = Tab-Reihenfolge: Sichern/Anmelden, anderer PC,
+     * Gefahrenzone). Ein Akzentknopf je Bereich (Anlegen bzw. Discord), sonst sekundaere Knoepfe. */
+    mk(w, K_ACCENT, ID_ACC_V_DISCORD, P_LNET, ACC_LX, ACC_M_Y + 96, ACC_BTN_W, 28, LT("gui.acc_discord_link"), 0);
+    mk(w, K_BTN, ID_ACC_V_RECSHOW, P_LNET, ACC_LX + ACC_LW - 170, ACC_M_Y + 136, 82, 26, LT("gui.acc_rec_show"), 0);
+    mk(w, K_BTN, ID_ACC_V_RECCOPY, P_LNET, ACC_LX + ACC_LW - 82, ACC_M_Y + 136, 82, 26, LT("gui.acc_rec_copy"), 0);
+    mk(w, K_EDIT, ID_ACC_V_REC, P_LNET, ACC_LX, ACC_M_Y + 194, 196, 28, "", 0);
+    mk(w, K_BTN, ID_ACC_V_RECBTN, P_LNET, ACC_LX + 202, ACC_M_Y + 194, ACC_LW - 202, 28, LT("gui.acc_redeem"), 0);
+    mk(w, K_EDIT, ID_ACC_V_LOGIN, P_LNET, ACC_RX + 96, ACC_M_Y + 84, ACC_RW - 96, 28, "", 0);
+    mk(w, K_EDIT, ID_ACC_V_PASS, P_LNET, ACC_RX + 96, ACC_M_Y + 118, ACC_RW - 96, 28, "", ES_PASSWORD);
+    mk(w, K_BTN, ID_ACC_V_LOGINBTN, P_LNET, ACC_RX + 96, ACC_M_Y + 154, 170, 28, LT("gui.acc_login_save"), 0);
+    mk(w, K_EDIT, ID_ACC_V_CODE, P_LNET, CX0 + 18, ACC_D_Y + 86, 196, 28, "", 0);
+    mk(w, K_BTN, ID_ACC_V_CODEBTN, P_LNET, CX0 + 220, ACC_D_Y + 86, COLW - 238, 28, LT("gui.acc_redeem"), 0);
+    mk(w, K_BTN, ID_ACC_V_FORGET, P_LNET, COL2 + 18, ACC_D_Y + 110, 156, 28, LT("gui.acc_forget"), 0);
+    mk(w, K_BTN, ID_ACC_V_DELETE, P_LNET, COL2 + 180, ACC_D_Y + 110, COLW - 198, 28, LT("gui.acc_delete"), 0);
     if (ctl(ID_ACC_NAME)) SendMessageW(ctl(ID_ACC_NAME), EM_LIMITTEXT, 16, 0);
     if (ctl(ID_ACC_V_LOGIN)) SendMessageW(ctl(ID_ACC_V_LOGIN), EM_LIMITTEXT, 32, 0);
     if (ctl(ID_ACC_V_PASS)) SendMessageW(ctl(ID_ACC_V_PASS), EM_LIMITTEXT, 256, 0);
@@ -16069,7 +17371,7 @@ static void acc_relabel(void)
         const char *key;
     } kL[] = {
         { ID_ACC_CREATE, "gui.acc_create" }, { ID_ACC_CHECK, "gui.acc_check" }, { ID_ACC_SIGNIN, "gui.acc_signin" },
-        { ID_ACC_MANAGE, "gui.acc_manage" }, { ID_ACC_BACK, "gui.acc_back" }, { ID_ACC_V_DELETE, "gui.acc_delete" },
+        { ID_ACC_MANAGE, "gui.acc_manage" }, { ID_ACC_V_DELETE, "gui.acc_delete" },
         { ID_ACC_V_FORGET, "gui.acc_forget" }, { ID_ACC_V_RECCOPY, "gui.acc_rec_copy" },
         { ID_ACC_V_RECBTN, "gui.acc_redeem" }, { ID_ACC_V_CODEBTN, "gui.acc_redeem" },
     };
@@ -16125,86 +17427,133 @@ static int acc_paint_card(void)
         return 0;
     }
     acc_load();
-    card(CX0, y, COLW, LOC_ONL_H, LT("gui.acc_title"));
+    card(ACC_X, y, COLW, LOC_ONL_H, LT("gui.acc_title"));
     if (!g_acc.have) {
-        label1(F_SMALL, LT("gui.acc_name"), CX0 + 18, y + 40, 84, 28, C_DIM);
+        label1(F_SMALL, LT("gui.acc_name"), ACC_X + 18, y + 40, 84, 28, C_DIM);
         if (g_acc_avail >= 0) {
             _snprintf_s(t, sizeof t, _TRUNCATE, LT(g_acc_avail ? "gui.acc_name_free" : "gui.acc_name_taken"),
                         g_acc_avail_name);
-            label1(F_TINY, t, CX0 + 18, y + 106, COLW - 36, 22, g_acc_avail ? C_OK : C_ERR);
+            label1(F_TINY, t, ACC_X + 18, y + 106, COLW - 36, 22, g_acc_avail ? C_OK : C_ERR);
         } else {
-            label1(F_TINY, LT("gui.acc_first_hint"), CX0 + 18, y + 106, COLW - 36, 22, C_DIM);
+            label(F_TINY, LT("gui.acc_first_hint"), ACC_X + 18, y + 106, COLW - 36, 36, C_DIM); /* W397 */
         }
         return 1;
     }
     _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.acc_signed_as"), g_acc.name);
-    label1(F_SMALL, t, CX0 + 18, y + 40, COLW - 36, 22, C_TEXT);
+    label1(F_SMALL, t, ACC_X + 18, y + 40, COLW - 36, 22, C_TEXT);
     if (!g_acc_st_ok) {
-        label1(F_TINY, LT(g_acc_busy == ACC_OP_STATUS ? "gui.acc_st_loading" : "gui.acc_st_unknown"), CX0 + 18,
+        label1(F_TINY, LT(g_acc_busy == ACC_OP_STATUS ? "gui.acc_st_loading" : "gui.acc_st_unknown"), ACC_X + 18,
                y + 64, COLW - 36, 22, C_DIM);
     } else if (acc_secured()) {
         _snprintf_s(t, sizeof t, _TRUNCATE, "%s%s%s", LT("gui.acc_secured"),
                     g_acc_st.discord ? LT("gui.acc_sec_discord") : "", g_acc_st.login ? LT("gui.acc_sec_login") : "");
-        label1(F_TINY, t, CX0 + 18, y + 64, COLW - 36, 22, C_OK);
+        label1(F_TINY, t, ACC_X + 18, y + 64, COLW - 36, 22, C_OK);
     } else {
-        label1(F_TINY, LT("gui.acc_unsecured"), CX0 + 18, y + 64, COLW - 36, 22, C_WARN);
+        label1(F_TINY, LT("gui.acc_unsecured"), ACC_X + 18, y + 64, COLW - 36, 22, C_WARN);
     }
     return 1;
 }
 
-/* Verwaltungsansicht (ganze Seite). */
+/* W399 LAUNCHER-ACCOUNT-PAGE: Unterseite Multiplayer > Account, von oben nach unten:
+ * 1. Status (Angemeldet als + Zustandszeile, bei Handlungsbedarf ein Akzentknopf) bzw. Anlegen,
+ * 2. Sichern (Discord empfohlen | Wiederherstellungscode | Login und Passwort) bzw. Anmelden auf diesem PC,
+ * 3. Auf einen anderen PC (Uebertragungscode, Datenschutz-Fussnote), 4. Gefahrenzone (Abmelden, Loeschen). */
+#define C_DANGER RGB(206, 112, 102) /* gedaempftes Rot (nur Rand/Titel der Gefahrenzone) */
 static void acc_paint_view(void)
 {
     char t[300];
-    int have = g_acc.have;
-    /* links oben: Pilot bzw. Anmelden */
-    card(CX0, ACC_A_Y, COLW, ACC_A_H, LT(have ? "gui.acc_title" : "gui.acc_signin_title"));
+    int have = g_acc.have, sec = acc_secured();
+    int sy = ACC_S_Y, my = ACC_M_Y, dy = ACC_D_Y;
+    if (!acc_srv_on()) { /* steelnet in dieser Ausgabe nicht eingerichtet */
+        card(CX0, sy, CW, ACC_S_H, LT("gui.acc_title"));
+        label(F_TINY, LT("gui.loc_onl_nosrv"), CX0 + 18, sy + 40, CW - 36, 44, C_DIM);
+        return;
+    }
+    /* 1. Status bzw. Anlegen */
+    card(CX0, sy, CW, ACC_S_H, LT("gui.acc_title"));
     if (have) {
+        COLORREF sc;
+        const char *k;
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.acc_signed_as"), g_acc.name);
-        label1(F_SMALL, t, CX0 + 18, ACC_A_Y + 40, COLW - 36, 22, C_TEXT);
-        _snprintf_s(t, sizeof t, _TRUNCATE, "%s %s", LT("gui.acc_row_discord"),
-                    !g_acc_st_ok ? "-" : LT(g_acc_st.discord ? "gui.acc_yes" : "gui.acc_no"));
-        label1(F_TINY, t, CX0 + 18, ACC_A_Y + 62, COLW - 36, 20, g_acc_st_ok && g_acc_st.discord ? C_OK : C_DIM);
-        if (g_acc_st_ok && g_acc_st.login) {
-            _snprintf_s(t, sizeof t, _TRUNCATE, "%s %s (%s)", LT("gui.acc_row_login"), LT("gui.acc_yes"),
-                        g_acc_st.login_name);
+        label1(F_SMALL, t, CX0 + 18, sy + 36, CW - 36 - ACC_BTN_W - 12, 22, C_TEXT);
+        if (!g_acc_st_ok) {
+            k = g_acc_busy == ACC_OP_STATUS ? "gui.acc_st_loading" : "gui.acc_st_unknown";
+            sc = C_DIM;
+        } else if (sec) {
+            k = g_acc_st.discord && g_acc_st.login ? "gui.acc_st_both"
+                : g_acc_st.discord ? "gui.acc_st_discord" : "gui.acc_st_login";
+            sc = C_OK;
         } else {
-            _snprintf_s(t, sizeof t, _TRUNCATE, "%s %s", LT("gui.acc_row_login"),
-                        !g_acc_st_ok ? "-" : LT("gui.acc_no"));
+            k = "gui.acc_unsecured";
+            sc = C_WARN;
         }
-        label1(F_TINY, t, CX0 + 18, ACC_A_Y + 82, COLW - 36, 20, g_acc_st_ok && g_acc_st.login ? C_OK : C_DIM);
+        dot(CX0 + 18, sy + 65, sc);
+        label1(F_SMALL, LT(k), CX0 + 36, sy + 58, CW - 54 - (sec ? 0 : ACC_BTN_W + 12), 24, sc);
     } else {
-        label(F_TINY, LT("gui.acc_signin_text"), CX0 + 18, ACC_A_Y + 40, COLW - 36, 60, C_DIM);
+        if (g_acc_avail >= 0) {
+            _snprintf_s(t, sizeof t, _TRUNCATE, LT(g_acc_avail ? "gui.acc_name_free" : "gui.acc_name_taken"),
+                        g_acc_avail_name);
+            label1(F_TINY, t, CX0 + 18, sy + 34, CW - 36, 20, g_acc_avail ? C_OK : C_ERR);
+        } else {
+            label1(F_TINY, LT("gui.acc_none_text"), CX0 + 18, sy + 34, CW - 36, 20, C_DIM);
+        }
+        label1(F_TINY, LT("gui.acc_name"), CX0 + 18, sy + 54, 100, 28, C_DIM);
     }
-    /* links Mitte: Login und Passwort */
-    card(CX0, ACC_B_Y, COLW, ACC_B_H, LT("gui.acc_login_title"));
-    label1(F_TINY, LT("gui.acc_login_name"), CX0 + 18, ACC_B_Y + 36, COLW - 36, 20, C_DIM);
-    label1(F_TINY, LT(have ? "gui.acc_pw_rule" : "gui.acc_pw"), CX0 + 18, ACC_B_Y + 88, COLW - 36, 20, C_DIM);
-    label(F_TINY, LT(have ? "gui.acc_pw_forget" : "gui.acc_pw_forget2"), CX0 + 18, ACC_B_Y + 174, COLW - 36, 30,
-          C_DIM);
-    /* links unten: Konto loeschen / abmelden (nur mit Konto) */
+    /* 2. Sichern (mit Account) bzw. Anmelden auf diesem PC (ohne) */
+    card(CX0, my, CW, ACC_M_H, LT(have ? "gui.acc_sec_title" : "gui.acc_signin_title"));
+    L_fill(COL2 - 8, my + 44, 1, ACC_M_H - 60, RGB(255, 255, 255), 22, 0);
+    /* links oben: Discord */
+    label1(F_SMALL, LT(have ? "gui.acc_sec_dc_title" : "gui.acc_l_discord"), ACC_LX, my + 38, ACC_LW, 22, C_TEXT);
     if (have) {
-        card(CX0, ACC_C_Y, COLW, ACC_C_H, LT("gui.acc_danger_title"));
-        label(F_TINY, LT("gui.acc_danger_text"), CX0 + 18, ACC_C_Y + 38, COLW - 36, 36, C_DIM);
+        int on = g_acc_st_ok && g_acc_st.discord;
+        label(F_TINY, LT(on ? "gui.acc_sec_dc_on" : !sec ? "gui.acc_sec_dc_up" : "gui.acc_sec_dc_off"),
+              ACC_LX, my + 58, ACC_LW, 34, on ? C_OK : C_DIM);
+    } else {
+        label(F_TINY, LT("gui.acc_signin_text"), ACC_LX, my + 58, ACC_LW, 34, C_DIM);
     }
-    /* rechts oben: Wiederherstellungscode */
-    card(COL2, ACC_A_Y, COLW, ACC_A_H, LT(have ? "gui.acc_rec_title" : "gui.acc_rec_in_title"));
-    label(F_TINY, LT(have ? "gui.acc_rec_text" : "gui.acc_rec_in_text"), COL2 + 18, ACC_A_Y + 38, COLW - 36, 36,
-          C_DIM);
+    /* links unten: Wiederherstellungscode (mit Account verdeckt + Anzeigen/Kopieren; ohne: eingeben) */
+    L_fill(ACC_LX, my + 132, ACC_LW, 1, RGB(255, 255, 255), 16, 0);
+    label1(F_SMALL, LT("gui.acc_rec_title"), ACC_LX, my + 138, ACC_LW - (have ? 176 : 0), 22, C_TEXT);
+    label(F_TINY, LT(have ? "gui.acc_rec_text" : "gui.acc_rec_in_text"), ACC_LX, my + 162, ACC_LW, 30, C_DIM);
     if (have) {
         L_text(F_MONO, g_acc_rec[0] ? g_acc_rec : "\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2-\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2-\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2-\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2",
-               COL2 + 18, ACC_A_Y + 76, COLW - 36, 26, g_acc_rec[0] ? C_TEXT : C_FAINT,
+               ACC_LX, my + 194, ACC_LW, 26, g_acc_rec[0] ? C_TEXT : C_FAINT,
                DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
     }
-    /* rechts Mitte: Uebertragungscode */
-    card(COL2, ACC_B_Y, COLW, ACC_B_H, LT("gui.acc_transfer_title"));
-    label(F_TINY, LT("gui.acc_transfer_text"), COL2 + 18, ACC_B_Y + 38, COLW - 36, 60, C_DIM);
-    label(F_TINY, LT("gui.acc_privacy"), COL2 + 18, ACC_B_Y + 142, COLW - 36, 56, C_FAINT);
+    /* rechts: Login und Passwort */
+    label1(F_SMALL, LT("gui.acc_login_title"), ACC_RX, my + 38, ACC_RW, 22, C_TEXT);
+    if (!have) {
+        label1(F_TINY, LT("gui.acc_signin_login"), ACC_RX, my + 60, ACC_RW, 20, C_DIM);
+    } else if (g_acc_st_ok && g_acc_st.login) {
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.acc_sec_lg_on"), g_acc_st.login_name);
+        label1(F_TINY, t, ACC_RX, my + 60, ACC_RW, 20, C_OK);
+    } else {
+        label1(F_TINY, LT(g_acc_st_ok ? "gui.acc_sec_lg_off" : "gui.acc_st_unknown"), ACC_RX, my + 60, ACC_RW, 20,
+               C_DIM);
+    }
+    label1(F_TINY, LT("gui.acc_l_login"), ACC_RX, my + 84, 92, 28, C_DIM);
+    label1(F_TINY, LT("gui.acc_l_pw"), ACC_RX, my + 118, 92, 28, C_DIM);
+    label(F_TINY, LT(have ? "gui.acc_login_rules" : "gui.acc_pw_forget2"), ACC_RX, my + 188, ACC_RW, 44, C_FAINT);
+    /* 3. Auf einen anderen PC (ohne Account: Uebertragungscode einloesen, volle Breite) */
+    {
+        int mw = have ? COLW : CW;
+        card(CX0, dy, mw, ACC_D_H, LT(have ? "gui.acc_move_title" : "gui.acc_transfer_title"));
+        label(F_TINY, LT(have ? "gui.acc_move_text" : "gui.acc_transfer_text"), CX0 + 18, dy + 38, mw - 36, 44, C_DIM);
+        label(F_TINY, LT("gui.acc_privacy"), CX0 + 18, dy + 120, mw - 36, 34, C_FAINT);
+    }
+    /* 4. Gefahrenzone (nur mit Account): abgesetzt, gedaempftes Rot nur an Rand und Titel */
+    if (have) {
+        card(COL2, dy, COLW, ACC_D_H, NULL);
+        L_ring(COL2, dy, COLW, ACC_D_H, C_DANGER, 70, 10);
+        L_text(F_CARD, LT("gui.acc_danger_title"), COL2 + 18, dy + 12, COLW - 36, 24, C_DANGER,
+               DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+        label(F_TINY, LT("gui.acc_danger_text"), COL2 + 18, dy + 40, COLW - 36, 44, C_DIM);
+    }
 }
 
 /* W293: Bereitschaft LoC: Spiel, Grafik, Anzeige, Steuerung, Online (spaeter).
  * "Change" fuehrt zur Seite der Ursache (Spiel/Online = LoC > Erweitert). */
-static const int kLocSumPage[LOC_SUM_N] = { P_ADV, P_GFX, P_DISPLAY, P_CTRL, P_ADV };
+static const int kLocSumPage[LOC_SUM_N] = { P_ADV, P_GFX, P_DISPLAY, P_CTRL, P_LNET }; /* W397: Online -> Multiplayer */
 
 static int loctab_command(int id, int code)
 {
@@ -16218,7 +17567,26 @@ static int loctab_command(int id, int code)
 #endif
     if (id >= ID_LOC_GO0 && id < ID_LOC_GO0 + LOC_SUM_N) {
         if (code == BN_CLICKED) {
-            show_page(kLocSumPage[id - ID_LOC_GO0]);
+            if (id - ID_LOC_GO0 == LOC_SUM_N - 1 && !loc_net_ok()) {
+                lset_open(); /* W400: Online ohne steelnet -> Zahnrad > Online & Updates */
+            } else {
+                show_page(kLocSumPage[id - ID_LOC_GO0]);
+            }
+        }
+        return 1;
+    }
+    if (id == ID_LOC_GATE_GO) { /* W400 */
+        if (code == BN_CLICKED) {
+            lset_open();
+        }
+        return 1;
+    }
+    if (id == ID_LOC_IMG_GO) { /* W403: zur Disc-Auswahl (LoC > Erweitert, Feld fokussiert) */
+        if (code == BN_CLICKED) {
+            show_page(P_ADV);
+            if (g_o.shot == 0 && ctl(ID_LOC_IMAGE)) {
+                SetFocus(ctl(ID_LOC_IMAGE));
+            }
         }
         return 1;
     }
@@ -16244,9 +17612,27 @@ static int loctab_command(int id, int code)
             loctab_wide_pick();
         }
         return 1;
-    case ID_LOC_ONL: /* W334 LOC-SEC: Online-Spiel an/aus */
+    case ID_LOC_VIS: /* W373: Oeffentlich / Privat */
+        if (code == CBN_SELCHANGE && !g_updating) {
+            onl_vis_pick();
+        }
+        return 1;
+    case ID_LOC_SMOOTH: /* W387: Gegner glaetten Aus / Auto / Fest */
+        if (code == CBN_SELCHANGE && !g_updating) {
+            loc_smooth_pick();
+            onl_sync_ui(); /* W392: "Standard wiederherstellen" an/aus */
+        }
+        return 1;
+    case ID_LNET_RB: /* W392 LAUNCHER-NETTAB */
+    case ID_LNET_OWN:
+    case ID_LNET_LOWD:
         if (code == BN_CLICKED) {
-            onl_toggle();
+            lnet_toggle(id);
+        }
+        return 1;
+    case ID_LNET_RESET:
+        if (code == BN_CLICKED) {
+            lnet_reset();
         }
         return 1;
     case ID_LOC_CODE_COPY: /* W334: Raumcode der eigenen Lobby kopieren */
@@ -16367,6 +17753,25 @@ static void loctab_sum_game(char *out, size_t cap, COLORREF *col)
     }
 }
 
+/* W363 LOC-ORIGINAL: Zeile "Anzeige" im LoC-Bereich. LoC nutzt dieselben Bild-Optionen wie SB (user.cfg:
+ * Fenster/Vollbild, Aufloesung, Bildrate mit Zwischenbildern, VSync), aber Original-Takt = Spieltakt von LoC
+ * (Mission 20 Hz, Menues 30 Hz) statt 30 FPS; dazu VSync und das LoC-Bildformat (4:3 mit Balken = Original). */
+static void loctab_display_value(const launcher_settings_t *s, char *out, size_t cap)
+{
+    char fpsb[96], scr[160];
+    if (s->interp_fps == 0) { strncpy_s(fpsb, sizeof fpsb, LT("gui.loc_sum_fps_orig"), _TRUNCATE); }
+    else if (s->interp_fps == SB_FPS_AUTO) { strncpy_s(fpsb, sizeof fpsb, LT("gui.sum_auto"), _TRUNCATE); }
+    else { _snprintf_s(fpsb, sizeof fpsb, _TRUNCATE, LT("gui.loc_sum_fps_ip"), s->interp_fps); }
+    if (s->window_mode == 1 || s->window_mode == 2) {
+        strncpy_s(scr, sizeof scr, s->window_mode == 1 ? LT("gui.wm_borderless") : LT("gui.wm_excl"), _TRUNCATE);
+    } else {
+        _snprintf_s(scr, sizeof scr, _TRUNCATE, LT("gui.loc_sum_win"), s->width, s->height);
+    }
+    _snprintf_s(out, cap, _TRUNCATE, "%s \xC2\xB7 %s \xC2\xB7 %s \xC2\xB7 %s", scr, fpsb,
+                LT(s->present_interval ? "gui.loc_sum_vsync_on" : "gui.loc_sum_vsync_off"),
+                LT(lgame_wide_label_key(loctab_wide_val())));
+}
+
 static void loctab_sum_rows(loc_sumrow_t *r)
 {
     static const int kShared[3] = { 1, 2, 4 }; /* g_sum: Grafik, Anzeige, Steuerung */
@@ -16380,10 +17785,17 @@ static void loctab_sum_rows(loc_sumrow_t *r)
         strcpy_s(r[1 + i].value, sizeof r[1 + i].value, g->value);
         r[1 + i].col = g->col;
     }
+    loctab_display_value(&g_s, r[2].value, sizeof r[2].value); /* W363: LoC-Takt, VSync, Bildformat */
     r[4].label = LT("gui.loc_sum_online");
-    if (!acc_sum_row(r[4].value, sizeof r[4].value, &r[4].col)) { /* W328: Pilot, sobald der Dienst eingerichtet ist */
+    if (!loc_net_ok()) { /* W400: ohne steelnet kein LoC-Spiel -> Warnpunkt, "Change" fuehrt zum Zahnrad */
+        strncpy_s(r[4].value, sizeof r[4].value, LT("gui.loc_sum_net_off"), _TRUNCATE);
+        r[4].col = C_WARN;
+    } else if (!acc_sum_row(r[4].value, sizeof r[4].value, &r[4].col)) { /* W328: Pilot, sobald der Dienst eingerichtet ist */
         strncpy_s(r[4].value, sizeof r[4].value, LT("gui.loc_server_cue"), _TRUNCATE);
         r[4].col = C_FAINT; /* grauer Punkt: kommt spaeter */
+    } else if (netm_get() != NETM_STEEL) { /* W397: nicht mit steelnet verbunden -> lokales Spiel, keine Konto-Warnung */
+        strncpy_s(r[4].value, sizeof r[4].value, LT("gui.mp_sum_off"), _TRUNCATE);
+        r[4].col = C_FAINT;
     }
 }
 
@@ -16396,9 +17808,11 @@ static void paint_loc_play(void)
     /* "In development" als Plakette vor der Unterzeile */
     L_fill(CX0, CY0 + 52, 132, 20, C_ACCENT, 46, 3);
     L_fill(CX0, CY0 + 52, 2, 20, C_ACCENT, 255, 0);
-    L_text(F_TINY, LT("gui.loc_badge"), CX0, CY0 + 52, 132, 20, C_ACCENT_HI,
-           DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    label1(F_BODY, LT("gui.loc_sub"), CX0 + 144, CY0 + 50, CW - 144, 22, C_DIM);
+    /* W389 RELEASE-030: mit freiem LoC-Start "Experimental" statt "In development" */
+    L_text(F_TINY, LT(lgame_loc_client_ready() ? "gui.loc_badge_ready" : "gui.loc_badge"), CX0, CY0 + 52, 132, 20,
+           C_ACCENT_HI, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    label1(F_BODY, LT(lgame_loc_client_ready() ? "gui.loc_sub_ready" : "gui.loc_sub"), CX0 + 144, CY0 + 50,
+           CW - 144, 22, C_DIM);
     /* Sperre unter dem Startknopf (Muster D: Schloss) */
     if (!lgame_loc_client_ready()) {
         if (g_has_icons) {
@@ -16409,6 +17823,15 @@ static void paint_loc_play(void)
                      C_ACCENT_HI, DT_LEFT | DT_TOP | DT_SINGLELINE);
         }
         label(F_TINY, LT("gui.loc_soon"), CX0 + 18, CY0 + 146, 312, 40, C_ACCENT_HI);
+    } else if (loc_img_gate(NULL, 0) || loc_gate_shown()) {
+        /* W400: Grund unter dem grauen Knopf, darunter Sprung zum Zahnrad (ID_LOC_GATE_GO). W403: Disc zuerst
+         * (Sprung ID_LOC_IMG_GO), steelnet nur noch kurz (ein Satz; Zeile "Online" bleibt Status) */
+        char m[700];
+        loc_gate_msg(m, sizeof m);
+        label(F_TINY, m, CX0, CY0 + 146, 308, 34, C_WARN);
+    } else if (!lnet_is_default()) { /* W392: unter dem Start (frueher Gegner glaetten): Netzwerk-Testeinstellungen */
+        label(F_TINY, LT(g_loc_rb_on ? "gui.lnet_play_custom" : "gui.lnet_play_lockstep"), CX0, CY0 + 148, 308, 34,
+              C_WARN);
     }
     /* rechts: W334 Karte "Online (steelnet)" (frueher "Gemeinsam mit Steel Battalion";
      * der Hinweis steht jetzt dezent im Kopf von "Startbereit") */
@@ -16440,10 +17863,6 @@ static void paint_loc_adv(void)
 {
     char t[1200];
     COLORREF col;
-    if (acc_view_active()) { /* W328: Verwaltungsansicht Pilotenkonto */
-        acc_paint_view();
-        return;
-    }
     /* Disc: Pfad, Check/Browse, Ergebnis, Hinweis */
     card(CX0, LOC_DISC_Y, COLW, LOC_DISC_H, LT("gui.loc_disc_title"));
     loctab_result(t, sizeof t, &col);
@@ -16455,17 +17874,7 @@ static void paint_loc_adv(void)
     loctab_data_dir(t, sizeof t);
     L_text(F_SMALL, t, CX0 + 18, LOC_DATA_Y + 56, COLW - 36, 22, C_TEXT,
            DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_PATH_ELLIPSIS);
-    /* W328: Karte "Pilot", sonst Online-Platzhalter (Dienst noch nicht eingerichtet) */
-    if (!acc_paint_card()) {
-        card(CX0, LOC_ONL_Y, COLW, LOC_ONL_H, LT("gui.loc_online_title"));
-        label1(F_SMALL, LT("gui.loc_server"), CX0 + 18, LOC_ONL_Y + 40, 70, 28, C_DIM);
-        /* Platzhalter-Feld (gesperrt, noch keine Eingabe): Adresse bzw. "kommt spaeter" */
-        L_fill(CX0 + 90, LOC_ONL_Y + 40, COLW - 108, 28, C_INPUT, 120, 6);
-        L_ring(CX0 + 90, LOC_ONL_Y + 40, COLW - 108, 28, C_INPUT_BRD, 120, 6);
-        label1(F_SMALL, g_loc.loc_server[0] ? g_loc.loc_server : LT("gui.loc_server_cue"),
-               CX0 + 100, LOC_ONL_Y + 40, COLW - 128, 28, C_FAINT);
-        label(F_TINY, LT("gui.loc_online_text"), CX0 + 18, LOC_ONL_Y + 76, COLW - 36, 50, C_DIM);
-    }
+    /* W397: Karte Account liegt jetzt auf LoC > Multiplayer */
     paint_adv_shared();
     /* W326 LOC-WIDE: Bildformat (Auswahl ID_LOC_WIDE, Kolben ID_LOC_WIDE_XI im Kopf) */
     {
@@ -16486,15 +17895,25 @@ static void loctab_build(HWND w)
 {
     int i;
     /* Titelleiste: Umschalter (zwischen Edition und Fensterknoepfen) */
-    mk(w, K_SEG, ID_GAME_SB, PG_ALL, WIN_W - 92 - 8 - 2 * 136 - 4, 10, 136, 28,
-       LT("gui.loc_game_sb"), 0);
-    mk(w, K_SEG, ID_GAME_LOC, PG_ALL, WIN_W - 92 - 8 - 136, 10, 136, 28, LT("gui.loc_game_loc"), 0);
+    /* W398: Spielnamen als Wortmarken-Tabs (Fenstertext = zugaenglicher Name, gezeichnet in Grossbuchstaben) */
+    mk(w, K_SEG, ID_GAME_SB, PG_ALL, HDR_GAME_X, HDR_GAME_Y, HDR_GAME_W, HDR_GAME_H, LT("gui.loc_game_sb"), 0);
+    mk(w, K_SEG, ID_GAME_LOC, PG_ALL, HDR_GAME_X + HDR_GAME_W + HDR_GAME_GAP, HDR_GAME_Y, HDR_GAME_W, HDR_GAME_H,
+       LT("gui.loc_game_loc"), 0);
     /* Seite Spielen (LoC): Start, "Change" je Bereitschaftszeile (wie SB) */
     mk(w, K_BIG, ID_LOC_START, P_PLAY, CX0, CY0 + 84, 308, 56, LT("gui.loc_btn_start"), 0);
     for (i = 0; i < LOC_SUM_N; i++) {
         mk(w, K_BTN, ID_LOC_GO0 + i, P_PLAY, CX0 + CW - 18 - 104, LOC_SUM_Y + 36 + i * 36, 104, 28,
            LT("gui.play_change"), 0);
     }
+    /* W400: Sprung zum Zahnrad in der Zeile ueber "Bereit zum Spielen" (intern neben "LoC test partner",
+     * dort statt des dann ungenutzten "Stop") */
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+    mk(w, K_BTN, ID_LOC_GATE_GO, P_PLAY, CX0 + 158, LOC_SUM_Y - 32, 150, 28, LT("gui.loc_gate_go"), 0);
+    mk(w, K_BTN, ID_LOC_IMG_GO, P_PLAY, CX0 + 158, LOC_SUM_Y - 32, 150, 28, LT("gui.loc_img_go"), 0); /* W403 */
+#else
+    mk(w, K_BTN, ID_LOC_GATE_GO, P_PLAY, CX0, LOC_SUM_Y - 32, 150, 28, LT("gui.loc_gate_go"), 0);
+    mk(w, K_BTN, ID_LOC_IMG_GO, P_PLAY, CX0, LOC_SUM_Y - 32, 150, 28, LT("gui.loc_img_go"), 0); /* W403 */
+#endif
     /* W293: Seite Erweitert (LoC): Disc und Datenordner */
     mk(w, K_EDIT, ID_LOC_IMAGE, P_ADV, CX0 + 18, LOC_DISC_Y + 42, COLW - 36, 32, g_loc.loc_image, 0);
     mk(w, K_BTN, ID_LOC_CHECK, P_ADV, CX0 + 18, LOC_DISC_Y + 80, 122, 30, LT("gui.btn_check"), 0);
@@ -16517,6 +17936,8 @@ static void loctab_relabel(void)
     ui_settext(ctl(ID_GAME_SB), LT("gui.loc_game_sb"));
     ui_settext(ctl(ID_GAME_LOC), LT("gui.loc_game_loc"));
     ui_settext(ctl(ID_LOC_START), LT("gui.loc_btn_start"));
+    ui_settext(ctl(ID_LOC_GATE_GO), LT("gui.loc_gate_go")); /* W400 */
+    ui_settext(ctl(ID_LOC_IMG_GO), LT("gui.loc_img_go"));   /* W403 */
     ui_settext(ctl(ID_LOC_CHECK), LT("gui.btn_check"));
     ui_settext(ctl(ID_LOC_BROWSE), LT("gui.btn_browse"));
     ui_settext(ctl(ID_LOC_FOLDER), LT("gui.loc_open_folder"));
@@ -16563,12 +17984,28 @@ static int loctab_apply_state(const char *name)
     }
     g_game = LGAME_LOC;
     g_loc.game = LGAME_LOC;
+    g_loc_smooth_opp = 1; /* W387: Shots immer mit Standard (Auto), nie die Wahl aus user.cfg */
+    g_loc_rb_on = g_loc_own_pred = g_loc_lowd = 1; /* W392: ebenso Netzwerk-Schalter (loc_net_off: Rollback aus) */
+    g_loc_online = 0;   /* W397: Shots ohne loc_onl* immer Stufe "nicht steelnet" (nie die Wahl aus user.cfg) */
+    g_upd_ask = 0;
+    if (strcmp(name, "loc_netq") == 0) { /* W397: Erstabfrage (wie update_ask) */
+        g_upd_ver = "0.3.0";
+        g_upd_cfg = -1;
+        g_upd_ask = 1;
+    }
+    if (strcmp(name, "loc_net_off") == 0) {
+        g_loc_rb_on = 0;
+    }
     memset(&g_locfix, 0, sizeof g_locfix);
     g_locfix_path[0] = '\0';
     /* W326: loc_wide = Erweitert mit "16:9 (Spielmodus)" (Warnzeile), sonst 4:3 */
-    g_loc.loc_widescreen = strcmp(name, "loc_wide") == 0 ? LGAME_WIDE_169 : LGAME_WIDE_43;
+    g_loc.loc_widescreen = strcmp(name, "loc_wide") == 0 || strcmp(name, "loc_pg") == 0 ? LGAME_WIDE_169 : LGAME_WIDE_43;
     if (strcmp(name, "loc_ok") == 0 || strcmp(name, "loc_start") == 0 || strcmp(name, "loc_exp") == 0 ||
-        strcmp(name, "loc_wide") == 0 || strncmp(name, "loc_onl", 7) == 0) { /* W334: loc_onl* wie loc_ok */
+        strcmp(name, "loc_pg") == 0 || /* W402 */
+        strcmp(name, "loc_wide") == 0 || strncmp(name, "loc_onl", 7) == 0 || /* W334: loc_onl* wie loc_ok */
+        strcmp(name, "loc_netq") == 0 || /* W397 */
+        strcmp(name, "loc_hover") == 0 || /* W398 */
+        strncmp(name, "loc_net", 7) == 0) { /* W392: loc_net* wie loc_ok */
         strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_ISO);
         g_locfix.kind = LGAME_IMG_LOC;
         g_locfix.title_id = LGAME_TID_LOC;
@@ -16585,7 +18022,13 @@ static int loctab_apply_state(const char *name)
         g_loc_online = 1;
         strcpy_s(g_onl_sec, sizeof g_onl_sec, strcmp(name, "loc_onl_err") == 0 ? "pin_failed" : "ok");
         strcpy_s(g_onl_code, sizeof g_onl_code, strcmp(name, "loc_onl_err") == 0 ? "" : "7K3M-Q9TX");
+        if (strcmp(name, "loc_onl_pub") == 0 || strcmp(name, "loc_onl_priv") == 0) { /* W373: ohne eigenen Code */
+            g_onl_code[0] = '\0';
+            g_loc_public = strcmp(name, "loc_onl_pub") == 0;
+            onl_sync_ui();
+        }
     }
+    loc_gate_sync(); /* W400: loc_onl* = steelnet (Start frei), sonst gesperrt */
     return 1;
 }
 
@@ -16625,12 +18068,19 @@ static void acc_apply_state(const char *name)
         acc_fixture(1, 1, 1, 0, 1);
         lacc_recovery_code(g_acc.account, g_acc.key, g_acc_rec, sizeof g_acc_rec);
     } else if (strcmp(name, "loc_acc_signin") == 0) acc_fixture(1, 0, 0, 0, 1);
+    else if (strcmp(name, "loc_acc_view_unsec") == 0) acc_fixture(1, 1, 0, 0, 1); /* W399 */
+    else if (strcmp(name, "loc_acc_view_login") == 0) acc_fixture(1, 1, 0, 1, 1);
+    else if (strcmp(name, "loc_acc_view_ok") == 0) acc_fixture(1, 1, 1, 1, 1);
 }
 
 /* Nach dem Aufbau (Shot): Pruefung bzw. Startversuch wie der Nutzer. */
 static void loctab_state_after(const char *name)
 {
-    if (strncmp(name, "loc_", 4) != 0 || (g_page != P_PLAY && g_page != P_ADV)) { /* W293: Disc auf Erweitert */
+    if (strncmp(name, "loc_", 4) != 0 ||
+        (g_page != P_PLAY && g_page != P_ADV && g_page != P_LNET)) { /* W293: Disc auf Erweitert; W399: Konto auf MP */
+        return;
+    }
+    if (g_page == P_LNET && strncmp(name, "loc_acc", 7) != 0) { /* W399: auf Multiplayer nur die Konto-Zustaende */
         return;
     }
     if (g_locfix_path[0]) {
@@ -16701,6 +18151,8 @@ static void xtip_text(int id, char *out, size_t cap)
         }
     } else if (id == ID_XEXP_PHOTO) { /* W290: breit (Aussenwelt), REPLAY/Logo aus */
         _snprintf_s(out, cap, _TRUNCATE, "%s\n%s", LT("gui.exp_tip"), LT("gui.exp_tip_photo"));
+    } else if (id == ID_LOC_SMOOTH) { /* W387 LOC-SMOOTH-OPP */
+        strncpy_s(out, cap, LT("gui.loc_smooth_tip"), _TRUNCATE);
     } else if (id == ID_LOC_WIDE_XI) { /* W326 LOC-WIDE: Bildformat 16:9/720p (LoC) */
         _snprintf_s(out, cap, _TRUNCATE, "%s\n%s", LT("gui.exp_tip"), LT("gui.exp_tip_locwide"));
     } else if (id == ID_XWARN_SB || id == ID_XWARN_LOC) {
@@ -16753,9 +18205,9 @@ static void xicon_texts(void)
         }
         xtip_text(ID_NAV0 + kNav[i], t, sizeof t);
         if (t[0]) {
-            _snprintf_s(n, sizeof n, _TRUNCATE, "%s\n%s", LT(kPageName[kNav[i]]), t);
+            _snprintf_s(n, sizeof n, _TRUNCATE, "%s\n%s", LT(page_name_key(kNav[i])), t);
         } else {
-            strncpy_s(n, sizeof n, LT(kPageName[kNav[i]]), _TRUNCATE);
+            strncpy_s(n, sizeof n, LT(page_name_key(kNav[i])), _TRUNCATE);
         }
         ui_settext_if(h, n);
     }
@@ -16887,24 +18339,30 @@ static void build_controls(void)
      * oben nach unten, dann rechte Spalte); Freigaben setzt ausschliesslich
      * ui_apply_rules (Regelwerk), hier kein EnableWindow. */
     /* Titelleiste */
-    mk(w, K_TBMIN, ID_MIN, PG_ALL, WIN_W - 92, 0, 46, 40, LT("gui.win_min"),
-       0);
-    mk(w, K_TBCLOSE, ID_CLOSE, PG_ALL, WIN_W - 46, 0, 46, 40, LT("gui.btn_close"), 0);
+    mk(w, K_TBMIN, ID_MIN, PG_ALL, HDR_WB_X, 0, HDR_WB_W, HDR_WB_H, LT("gui.win_min"), 0); /* W401: kleiner */
+    mk(w, K_TBCLOSE, ID_CLOSE, PG_ALL, HDR_WB_X + HDR_WB_W, 0, HDR_WB_W, HDR_WB_H, LT("gui.btn_close"), 0);
+    /* W397 LAUNCHER-STRUCT: Zahnrad = Launcher-Einstellungen (gewaehlt, solange die Seite offen ist) */
+    mk(w, K_SEG, ID_LSET_OPEN, PG_ALL, HDR_GEAR_X, HDR_CHIP_Y, HDR_GEAR_W, HDR_CHIP_H, LT("gui.lset_title"), 0);
     /* Navigation (7 Seiten) */
     for (i = 0; i < P_N; i++) {
         mk(w, K_NAV, ID_NAV0 + i, PG_ALL, 12, TITLE_H + 16 + i * 44,
-           NAV_W - 24, 38, LT(kPageName[i]), 0);
+           NAV_W - 24, 38, LT(page_name_key(i)), 0); /* W392 */
     }
-    /* W142: Sprachwahl (Sidebar unten, alle Seiten, wirkt sofort) */
-    mk(w, K_STATIC, ID_LANG_LBL, PG_ALL, 12, 506, NAV_W - 24, 24,
-       LT("gui.lang_label"), 0);
-    c = mk(w, K_COMBO, ID_LANG, PG_ALL, 12, 532, NAV_W - 24, 30, "", 0);
+    /* W399: Unterpunkte von Multiplayer (nur LoC, nur solange Multiplayer offen ist; Lage setzt nav_sub_layout) */
+    mk(w, K_NAV, ID_NAVSUB_MATCH, PG_ALL, 12, TITLE_H + 16, NAV_W - 24, NAVSUB_H, LT("gui.mp_sub_match"), 0);
+    mk(w, K_NAV, ID_NAVSUB_ACC, PG_ALL, 12, TITLE_H + 16, NAV_W - 24, NAVSUB_H, LT("gui.mp_sub_acc"), 0);
+    /* W142: Sprachwahl (wirkt sofort); W397: von der Seitenleiste auf die Launcher-Einstellungen */
+    mk(w, K_STATIC, ID_LANG_LBL, P_LSET, LSET_R_X + 18, LSET_LANG_Y + 46, 120, 24, LT("gui.lang_label"),
+       SS_CENTERIMAGE);
+    c = mk(w, K_COMBO, ID_LANG, P_LSET, LSET_R_X + 140, LSET_LANG_Y + 42, COLW - 158, 30, "", 0);
     combo_add(c, LT("gui.lang_en"));
     combo_add(c, LT("gui.lang_de"));
     ComboBox_SetCurSel(c, 0);
     /* W281 LAUNCHER-SIZE: Layout-Vorschau (nur in a/b sichtbar, wirkt sofort) */
-    mk(w, K_STATIC, ID_LAYOUT_LBL, PG_ALL, 12, WIN_H - 52, 54, 30, LT("gui.lay_size"), SS_CENTERIMAGE); /* W287 */
-    c = mk(w, K_COMBO, ID_LAYOUT, PG_ALL, 70, WIN_H - 52, NAV_W - 82, 30, "", 0);
+    /* W397: Fenstergroesse ebenfalls auf den Launcher-Einstellungen */
+    mk(w, K_STATIC, ID_LAYOUT_LBL, P_LSET, LSET_R_X + 18, LSET_LANG_Y + 84, 120, 30, LT("gui.lay_size"),
+       SS_CENTERIMAGE); /* W287 */
+    c = mk(w, K_COMBO, ID_LAYOUT, P_LSET, LSET_R_X + 140, LSET_LANG_Y + 84, COLW - 158, 30, "", 0);
     lay_combo_fill(c);
 
     /* --- Spielen: Startknoepfe (W159: Bildschirm + VR), Disc-Abbild --- */
@@ -17267,17 +18725,17 @@ static void build_controls(void)
     combo_add(c, "30");
     combo_add(c, "60");
     combo_add(c, "120");
-    mk(w, K_TOGGLE, ID_BG, P_ADV, COL2 + 18, CY0 + 176, COLW - 36, 28, LT("gui.bg"), 0);
+    mk(w, K_TOGGLE, ID_BG, P_LSET, COL2 + 18, LSET_LANG_Y + 130 + 12 + 40, COLW - 36, 28, LT("gui.bg"), 0); /* W397 */
     mk(w, K_BTN, ID_DIAG, P_ADV, COL2 + COLW - 18 - 130, ADV_DIAG_Y + 9, 130, 28,
        LT(g_diag_open ? "gui.adv_diag_hide" : "gui.adv_diag_show"), 0);
     mk(w, K_TOGGLE, ID_LIVE, P_ADV, COL2 + 18, ADV_DIAG_Y + ADV_DIAG_DY + 164, COLW - 36, 28, LT("gui.ton_live"), 0);
     /* W250 UPDATE-CHECK: Schalter + "Jetzt pruefen" (Launcher-Karte), Erstabfrage
      * und Hinweis rechts neben den Startknoepfen (Spielen) */
-    mk(w, K_BTN, ID_UPD_NOW, P_ADV, COL2 + COLW - 18 - 130, CY0 + 136 + 9, 130, 28, LT("gui.upd_now"), 0);
-    mk(w, K_TOGGLE, ID_UPD_AUTO, P_ADV, COL2 + 18, CY0 + 208, COLW - 36, 28, LT("gui.upd_auto"), 0);
-    mk(w, K_BTN, ID_UPD_NO, P_PLAY, UPD_X + UPD_W - 18 - 96, UPD_Y + 96, 96, 28, LT("gui.upd_no"), 0);
-    mk(w, K_BTN, ID_UPD_YES, P_PLAY, UPD_X + UPD_W - 18 - 96 - 8 - 120, UPD_Y + 96, 120, 28, LT("gui.upd_yes"), 0);
+    /* W397 LAUNCHER-STRUCT: Schalter/Erstabfrage ersetzt durch die drei Stufen (lset_build); "Jetzt pruefen"
+     * auf den Launcher-Einstellungen, Hinweis "neue Version" bleibt auf SB-Spielen */
+    mk(w, K_BTN, ID_UPD_NOW, P_LSET, CX0 + COLW - 18 - 130, CY0 + 332 - 42, 130, 28, LT("gui.upd_now"), 0);
     mk(w, K_BTN, ID_UPD_OPEN, P_PLAY, UPD_X + UPD_W - 18 - 160, UPD_Y + 58, 160, 28, LT("gui.upd_open"), 0);
+    lset_build(w);
     /* W190 SAVE-LOCK: immer sichtbar (auch bei eingeklappter Diagnose) */
     mk(w, K_TOGGLE, ID_SAVE_LOCK, P_ADV, COL2 + 18, ADV_DIAG_Y + 40, COLW - 36, 28, LT("gui.save_lock"), 0);
     alpha_build_controls(w); /* W272 ALPHA-TEST */
@@ -17474,9 +18932,746 @@ static void upd_open_page(void)
 
 static void on_command_inner(int id, int code);
 
+/* ------------------------------------------------------------------ */
+/* W397 LAUNCHER-STRUCT: Launcher-Einstellungen (Zahnrad im Kopf, Seite  */
+/* P_LSET ausserhalb der Navigation) und Erstabfrage "Online & Updates". */
+/* Drei Stufen ohne neuen user.cfg-Schluessel, abgeleitet aus den alten: */
+/*   launcher_loc_online=1            -> Mit steelnet verbinden          */
+/*   sonst update_check=1             -> Nur Version pruefen             */
+/*   sonst                            -> Offline                         */
+/* Waehlen schreibt beide alten Schluessel (steelnet: online=1/update=1, */
+/* Version: 0/1, Offline: 0/0). Wer die alte Update-Frage beantwortet    */
+/* hat, landet damit ohne neue Frage auf der passenden Stufe; Online an  */
+/* + Update nein bleibt steelnet (Update-Schluessel unveraendert, bis    */
+/* neu gewaehlt wird). Update-Pruefung bleibt Hinweis + Release-Seite.   */
+/* ------------------------------------------------------------------ */
+#define LSET_NET_H 332
+#define LSET_ABOUT_Y (CY0 + LSET_NET_H + 12)
+#define LSET_LANG_H 130
+#define LSET_BG_Y (LSET_LANG_Y + LSET_LANG_H + 12)
+#define LSET_BG_H 76
+#define LSET_TOOLS_Y (LSET_BG_Y + LSET_BG_H + 12)
+#define LSET_TOOLS_H 116
+#define LSET_DATA_Y (LSET_TOOLS_Y + LSET_TOOLS_H + 12)
+#define LSET_RADIO_Y(i) (CY0 + 62 + (i) * 66)
+static const char *const kNetmTitle[NETM_N] = { "gui.netm_steel", "gui.netm_ver", "gui.netm_off" };
+static const char *const kNetmHelp[NETM_N] = { "gui.netm_steel_hint", "gui.netm_ver_hint", "gui.netm_off_hint" };
+static const char *const kNetqBtn[NETM_N] = { "gui.netq_steel", "gui.netq_ver", "gui.netq_off" };
+static const char *const kNetmDone[NETM_N] = { "gui.netm_done_steel", "gui.netm_done_ver", "gui.netm_done_off" };
+
+/* Erstabfrage noetig? Wie W250 (Release-Version, update_check nie beantwortet), ausser das Online-Spiel ist
+ * schon an (= Stufe steelnet gewaehlt). */
+static int netq_should_ask(const char *ver, int upd_cfg, int online)
+{
+    return lupd_should_ask(ver, upd_cfg) && !online;
+}
+
+static int netm_get(void)
+{
+    if (g_loc_online && onl_srv_on()) {
+        return NETM_STEEL;
+    }
+    return g_upd_cfg == 1 ? NETM_VER : NETM_OFF;
+}
+
+static void netm_radio_text(int i, char *out, size_t cap)
+{
+    _snprintf_s(out, cap, _TRUNCATE, "%s\n%s", LT(kNetmTitle[i]), LT(kNetmHelp[i]));
+}
+
+/* Auswahl/Grau zum Zustand (ohne steelnet-Pins: Stufe steelnet grau). */
+static void netm_sync_ui(void)
+{
+    int m = netm_get(), i, srv = onl_srv_on();
+    for (i = 0; i < NETM_N; i++) {
+        ui_set_checked(ID_NETM0 + i, i == m);
+    }
+    if (ctl(ID_NETM0 + NETM_STEEL)) {
+        EnableWindow(ctl(ID_NETM0 + NETM_STEEL), srv ? TRUE : FALSE);
+    }
+    if (ctl(ID_NETQ0 + NETM_STEEL)) {
+        EnableWindow(ctl(ID_NETQ0 + NETM_STEEL), srv ? TRUE : FALSE);
+    }
+    ui_set_checked(ID_LSET_OPEN, g_page == P_LSET);
+}
+
+/* Stufe waehlen (Erstabfrage oder Seite): beide alten Schluessel schreiben. */
+static void netm_set(int m)
+{
+    int was_upd = g_upd_cfg == 1;
+    if (m < 0 || m >= NETM_N) {
+        return;
+    }
+    if (m == NETM_STEEL && !onl_srv_on()) {
+        set_status_k(LT("gui.loc_onl_nosrv"), 0);
+        netm_sync_ui();
+        return;
+    }
+    g_loc_online = m == NETM_STEEL;
+    onl_save();                 /* launcher_loc_online (Shots: nie geschrieben) */
+    upd_set_cfg(m != NETM_OFF); /* update_check, beendet die Erstabfrage */
+    onl_sync_ui();
+    netm_sync_ui();
+    loc_gate_sync(); /* W400: LoC-Start sofort frei bzw. gesperrt */
+    snp_netm_changed(); /* W403: Kopf-Chip (steelnet -> gleich pruefen, sonst Ergebnis vergessen) */
+    set_status_k(LT(kNetmDone[m]), 1);
+    if (m != NETM_OFF && !was_upd) {
+        upd_start(0); /* wie frueher "Ja, pruefen": gleich einmal (Test-/Shot-Betrieb: nie Netz) */
+    }
+    ui_refresh_visibility();
+    redraw_all();
+}
+
+/* ------------------------------------------------------------------ */
+/* W403 LAUNCHER-R1-POLISH: steelnet-Statuspruefung fuer den Kopf-Chip.  */
+/* Nur mit Stufe "Mit steelnet verbinden" und eingerichtetem Dienst:     */
+/* beim Start und dann alle 5 Minuten die bestehende Abfrage             */
+/* GET /v1/info (lacc_probe: TLS + SPKI-Pin, nur relay.steelbound.dev    */
+/* bzw. Loopback-Test). Thread, Ergebnis per WM_APP_SNP; Fehler leise,   */
+/* keine Adresse in Log/UI. Netz nur im echten Fensterbetrieb            */
+/* (g_snp_live, gesetzt vor der Nachrichtenschleife); Shots/Selbsttest   */
+/* nie (Selbsttest: g_snp_dry zaehlt nur, snp_apply = Attrappe).         */
+/* ------------------------------------------------------------------ */
+#define WM_APP_SNP (WM_APP + 31)
+#define SNP_TIMER 403
+#define SNP_PERIOD_MS (5 * 60 * 1000)
+typedef struct {
+    HWND h;
+    int gen;
+    lacc_probe_t r;
+} snp_job_t;
+static int g_snp_state = -1;   /* -1 = noch keine Pruefung (grau "steelnet ..."), 0 = offline, 1 = online */
+static int g_snp_ms;           /* Antwortzeit der letzten Pruefung */
+static char g_snp_ver[32];     /* Serverversion (falls geliefert) */
+static SYSTEMTIME g_snp_when;  /* Zeitpunkt der letzten Pruefung (lokal) */
+static int g_snp_busy, g_snp_gen, g_snp_live, g_snp_dry, g_snp_dry_n;
+
+static DWORD WINAPI snp_thread(LPVOID p)
+{
+    snp_job_t *j = (snp_job_t *)p;
+    lacc_probe(&j->r);
+    if (!PostMessageW(j->h, WM_APP_SNP, (WPARAM)j->gen, (LPARAM)j)) {
+        free(j);
+    }
+    return 0;
+}
+
+/* Pruefung anstossen (still). 1 = gestartet bzw. (Selbsttest) waere gestartet. */
+static int snp_kick(void)
+{
+    snp_job_t *j;
+    HANDLE th;
+    if (netm_get() != NETM_STEEL || !onl_srv_on() || g_snp_busy || !g_hwnd) {
+        return 0;
+    }
+    if (g_snp_dry) { /* Selbsttest: nur zaehlen, nie Netz */
+        g_snp_dry_n++;
+        return 1;
+    }
+    if (!g_snp_live || g_o.shot != 0) {
+        return 0;
+    }
+    j = (snp_job_t *)calloc(1, sizeof *j);
+    if (!j) {
+        return 0;
+    }
+    j->h = g_hwnd;
+    j->gen = ++g_snp_gen;
+    th = CreateThread(NULL, 0, snp_thread, j, 0, NULL);
+    if (!th) {
+        free(j);
+        return 0;
+    }
+    CloseHandle(th);
+    g_snp_busy = 1;
+    return 1;
+}
+
+/* Ergebnis uebernehmen (UI-Thread; Selbsttest ruft direkt mit Attrappe). */
+static void snp_apply(const lacc_probe_t *r)
+{
+    g_snp_state = r->ok ? 1 : 0;
+    g_snp_ms = r->ms;
+    strcpy_s(g_snp_ver, sizeof g_snp_ver, r->ok ? r->version : "");
+    GetLocalTime(&g_snp_when);
+    if (g_hwnd) {
+        redraw_all(); /* Kopf liegt im Grundbild */
+    }
+}
+
+/* Stufe gewechselt: nicht steelnet -> Ergebnis vergessen (naechstes Mal wieder grau bis zur ersten Pruefung). */
+static void snp_netm_changed(void)
+{
+    if (netm_get() != NETM_STEEL) {
+        g_snp_state = -1;
+        g_snp_ms = 0;
+        g_snp_ver[0] = '\0';
+        g_snp_gen++; /* laufendes Ergebnis verwerfen */
+        g_snp_busy = 0;
+    } else if (g_snp_state < 0) {
+        snp_kick();
+    }
+}
+
+/* Kopf: steelnet-Zustand. W403: zuerst die eigene Pruefung (snp_*), sonst wie W401 nur aus vorhandenen
+ * Ergebnissen: Statusdatei des letzten LoC-Laufs (sec=/err=) und letzte Konto-Abfrage.
+ * 1 = online, 0 = offline, -1 = unbekannt. */
+static int hdr_steel_state(void)
+{
+    if (g_snp_state >= 0) {
+        return g_snp_state;
+    }
+    if (!strcmp(g_onl_err, "dns") || !strcmp(g_onl_err, "connect") || !strcmp(g_onl_err, "lost")) {
+        return 0;
+    }
+    if (!strcmp(g_onl_sec, "ok") || g_acc_st_ok) {
+        return 1;
+    }
+    if (g_acc_last_rc && (!strcmp(g_acc_last_err, "net") || !strcmp(g_acc_last_err, "timeout"))) {
+        return 0;
+    }
+    return -1;
+}
+
+/* Kopf rechts neben dem Spielumschalter: steelnet (nur Stufe steelnet) und neuere Version (nur mit
+ * Versionspruefung). Leer, wenn beides nicht zutrifft. */
+/* W398 LAUNCHER-GAMESWITCH: Plaketten rechts im Kopf (Edition bzw. Edition + Stufe/Version, kompakt). */
+static int hdr_text_w(int font, const char *u8, int extra) /* logische Breite (96 dpi) */
+{
+    wchar_t *wt;
+    SIZE sz = { 0, 0 };
+    HDC own = NULL, dc = g_bb.dc ? g_bb.dc : g_base.dc;
+    if (!dc) {
+        dc = own = GetDC(NULL); /* Selbsttest ohne fertiges Bild */
+    }
+    if (!dc || !u8 || !*u8 || (wt = u8_wdup(u8)) == NULL) {
+        if (own) {
+            ReleaseDC(NULL, own);
+        }
+        return 0;
+    }
+    SelectObject(dc, g_f[font]);
+    SetTextCharacterExtra(dc, SX(extra));
+    GetTextExtentPoint32W(dc, wt, (int)wcslen(wt), &sz);
+    SetTextCharacterExtra(dc, 0);
+    free(wt);
+    if (own) {
+        ReleaseDC(NULL, own);
+    }
+    return g_dpi > 0 ? MulDiv(sz.cx, 96, g_dpi) + 1 : sz.cx;
+}
+
+static void hdr_badge_parts(const char **a, char *b, size_t bcap)
+{
+    b[0] = '\0';
+    if (!g_upd_ver[0]) {
+        *a = SB_EDITION_BADGE; /* Entwicklungsstand: "PRIVATE EDITION" / "COMMUNITY EDITION" */
+    } else { /* W301 BETA-VERSION: Release-Build -> "COMMUNITY | BETA 0.3.0" */
+        const char *st = sb_release_stage(g_upd_ver);
+        *a = SB_EDITION_COMMUNITY ? "COMMUNITY" : "PRIVATE";
+        _snprintf_s(b, bcap, _TRUNCATE, "%s%s%s", st, st[0] ? " " : "", g_upd_ver);
+    }
+}
+
+/* W401 LAUNCHER-HEADER-POLISH: Projektzeile = "STEELBOUND | GAME PRESERVATION PROJECT" (gedimmt), dahinter
+ * " | PRIVATE EDITION" (Akzent) bzw. " | COMMUNITY | BETA 0.3.0" (Version heller). Teile in Reihenfolge,
+ * Breiten logisch (Sperrung 1); Rueckgabe = Gesamtbreite. Selbsttest 65c. */
+#define HDR_SUB_SEP " \xC2\xB7 "
+static int hdr_sub_parts(const char *txt[3], COLORREF col[3], int w[3])
+{
+    static char ed[64], ver[80];
+    const char *a;
+    char b[64];
+    int i, sum = 0;
+    hdr_badge_parts(&a, b, sizeof b);
+    _snprintf_s(ed, sizeof ed, _TRUNCATE, HDR_SUB_SEP "%s", a);
+    ver[0] = '\0';
+    if (b[0]) {
+        _snprintf_s(ver, sizeof ver, _TRUNCATE, HDR_SUB_SEP "%s", b);
+    }
+    txt[0] = LT("gui.hdr_project");
+    txt[1] = ed;
+    txt[2] = ver;
+    col[0] = C_DIM;
+    col[1] = C_ACCENT;
+    col[2] = C_ACCENT_HI;
+    for (i = 0; i < 3; i++) {
+        w[i] = txt[i][0] ? hdr_text_w(F_TINY, txt[i], 1) : 0;
+        sum += w[i];
+    }
+    return sum;
+}
+
+/* Projektzeile auf dem Grundbild (links verankert wie W398, auch in Layout b). */
+static void hdr_paint_sub(void)
+{
+    const char *txt[3];
+    COLORREF col[3];
+    /* Pixel statt logischer Breiten: Schrift- und Geometrieskala koennen abweichen (UI-Groesse Kompakt) */
+    int w[3], i, x = SX(HDR_GAME_X + HDR_GAME_PAD), xr = SX(HDR_WB_X - 16); /* nie unter _ x */
+    hdr_sub_parts(txt, col, w);
+    for (i = 0; i < 3 && x < xr; i++) {
+        wchar_t *wt;
+        SIZE sz = { 0, 0 };
+        int ww;
+        if (!txt[i][0] || (wt = u8_wdup(txt[i])) == NULL) {
+            continue;
+        }
+        SelectObject(g_base.dc, g_f[F_TINY]);
+        SetTextCharacterExtra(g_base.dc, SX(1));
+        GetTextExtentPoint32W(g_base.dc, wt, (int)wcslen(wt), &sz);
+        free(wt);
+        ww = sz.cx + 2 > xr - x ? xr - x : sz.cx + 2;
+        cv_text(&g_base, g_f[F_TINY], txt[i], x, SX(HDR_SUB_Y), ww, SX(HDR_SUB_H), col[i],
+                DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        x += sz.cx;
+    }
+    SetTextCharacterExtra(g_base.dc, 0);
+}
+
+/* W401: Gruppe rechts: [Update-Chip] [Status-Chip] [Zahnrad]. Status-Chip immer (Punkt + Text), Update-Chip
+ * nur mit Versionspruefung und neuerer Version. Reine Lage (logisch), Selbsttest 65c. */
+#define HDR_CHIP_PAD 10
+#define HDR_CHIP_GAP 8
+#define HDR_CHIP_DOT 6
+enum { HDR_CHIP_ST, HDR_CHIP_UPD };
+typedef struct {
+    int n;
+    int kind[2], x[2], w[2], shortened;
+    char txt[2][96];
+    COLORREF col[2], dot[2];
+} hdr_lay_t;
+
+static void hdr_chip_text(int kind, int brief, char *out, size_t cap, COLORREF *col, COLORREF *dot)
+{
+    if (kind == HDR_CHIP_UPD) {
+        char v[64];
+        upd_tag_disp(g_upd_res.rel.tag, v, sizeof v);
+        _snprintf_s(out, cap, _TRUNCATE, brief ? "%s" : LT("gui.hdr_upd"), v);
+        *col = C_ACCENT_HI;
+        *dot = C_ACCENT;
+        return;
+    }
+    if (netm_get() == NETM_STEEL) {
+        int st = hdr_steel_state();
+        /* W403: grau "steelnet ..." nur bis zur ersten Pruefung, dann gruen online bzw. warnfarben offline */
+        strcpy_s(out, cap, LT(brief ? "gui.hdr_steel" : st < 0 ? "gui.hdr_steel_wait" : st > 0 ? "gui.hdr_steel_on"
+                                                                                                 : "gui.hdr_steel_off"));
+        *col = st == 0 ? C_WARN : st > 0 ? C_OK : C_DIM;
+        *dot = st > 0 ? C_OK : st == 0 ? C_WARN : C_FAINT;
+    } else {
+        strcpy_s(out, cap, LT(netm_get() == NETM_VER ? "gui.hdr_steel_none" : "gui.hdr_offline"));
+        *col = C_DIM;
+        *dot = C_FAINT;
+    }
+}
+
+static void hdr_layout(hdr_lay_t *L)
+{
+    int brief, i, x = HDR_CHIP_R;
+    memset(L, 0, sizeof *L);
+    L->kind[L->n++] = HDR_CHIP_ST;
+    if (g_upd_cfg == 1 && g_upd_res.result == LUPD_R_NEWER) {
+        L->kind[L->n++] = HDR_CHIP_UPD;
+    }
+    for (brief = 0; brief < 2; brief++) { /* zu eng: Kurzform (nur "steelnet" bzw. Versionsnummer) */
+        x = HDR_CHIP_R;
+        for (i = 0; i < L->n; i++) {
+            hdr_chip_text(L->kind[i], brief, L->txt[i], sizeof L->txt[i], &L->col[i], &L->dot[i]);
+            L->w[i] = HDR_CHIP_PAD + HDR_CHIP_DOT + 6 + hdr_text_w(F_TINY, L->txt[i], 0) + 2 + HDR_CHIP_PAD;
+            x -= L->w[i] + (i ? HDR_CHIP_GAP : 0);
+            L->x[i] = x;
+        }
+        L->shortened = brief;
+        if (x >= HDR_GAME_END + 12) {
+            break;
+        }
+    }
+    if (x < HDR_GAME_END + 12) { /* immer noch zu eng: linken Chip kappen (Text mit ...) */
+        int over = HDR_GAME_END + 12 - x;
+        i = L->n - 1;
+        L->w[i] -= over;
+        L->x[i] += over;
+    }
+}
+
+/* Klickflaechen der Chips (Pixel, Client des Hauptfensters), in hdr_paint_status gesetzt. */
+static RECT g_hdr_hit[2];
+static int g_hdr_hit_kind[2], g_hdr_hit_n;
+
+static void hdr_px(int x, int y, int w, int h, RECT *q)
+{
+    if (lay_b()) {
+        lay_paint_px(x, y, w, h, q);
+        return;
+    }
+    q->left = SX(x);
+    q->top = SX(y);
+    q->right = SX(x + w);
+    q->bottom = SX(y + h);
+}
+
+/* -1 = kein Chip, sonst HDR_CHIP_* unter dem Punkt (Client-Pixel) */
+static int hdr_hit(POINT p)
+{
+    int i;
+    for (i = 0; i < g_hdr_hit_n; i++) {
+        if (PtInRect(&g_hdr_hit[i], p)) {
+            return g_hdr_hit_kind[i];
+        }
+    }
+    return -1;
+}
+
+/* W403: Tooltip der Chips (Zeilen mit CRLF). Status: erreichbar, Antwortzeit, Serverversion, letzte Pruefung,
+ * "Klick: Online-Einstellungen" (Lobbys/Spieler liefert /v1/info nicht). Update: installiert/neu, Klick. */
+static void hdr_tip_text(int kind, char *out, size_t cap)
+{
+    size_t k;
+    out[0] = '\0';
+    if (kind == HDR_CHIP_UPD) {
+        char v[64];
+        upd_tag_disp(g_upd_res.rel.tag, v, sizeof v);
+        _snprintf_s(out, cap, _TRUNCATE, LT("gui.hdr_tip_inst"), g_upd_ver[0] ? g_upd_ver : "-");
+        k = strlen(out);
+        _snprintf_s(out + k, cap - k, _TRUNCATE, "\r\n");
+        k = strlen(out);
+        _snprintf_s(out + k, cap - k, _TRUNCATE, LT("gui.hdr_tip_new"), v);
+        k = strlen(out);
+        _snprintf_s(out + k, cap - k, _TRUNCATE, "\r\n%s", LT("gui.hdr_tip_rel"));
+        return;
+    }
+    if (kind != HDR_CHIP_ST) {
+        return;
+    }
+    if (netm_get() != NETM_STEEL) {
+        strcpy_s(out, cap, LT(netm_get() == NETM_VER ? "gui.hdr_tip_none" : "gui.hdr_tip_offline"));
+    } else {
+        int st = hdr_steel_state();
+        if (st < 0) {
+            strcpy_s(out, cap, LT("gui.hdr_tip_wait"));
+        } else {
+            _snprintf_s(out, cap, _TRUNCATE, LT("gui.hdr_tip_reach"), LT(st > 0 ? "gui.hdr_tip_yes" : "gui.hdr_tip_no"));
+            if (g_snp_state >= 0) { /* eigene Pruefung: Antwortzeit, Version, Zeitpunkt */
+                k = strlen(out);
+                _snprintf_s(out + k, cap - k, _TRUNCATE, "\r\n");
+                k = strlen(out);
+                _snprintf_s(out + k, cap - k, _TRUNCATE, LT("gui.hdr_tip_ms"), g_snp_ms);
+                if (g_snp_ver[0]) {
+                    k = strlen(out);
+                    _snprintf_s(out + k, cap - k, _TRUNCATE, "\r\n");
+                    k = strlen(out);
+                    _snprintf_s(out + k, cap - k, _TRUNCATE, LT("gui.hdr_tip_ver"), g_snp_ver);
+                }
+                k = strlen(out);
+                _snprintf_s(out + k, cap - k, _TRUNCATE, "\r\n");
+                k = strlen(out);
+                _snprintf_s(out + k, cap - k, _TRUNCATE, LT("gui.hdr_tip_when"), g_snp_when.wHour, g_snp_when.wMinute);
+            }
+        }
+    }
+    k = strlen(out);
+    _snprintf_s(out + k, cap - k, _TRUNCATE, "\r\n%s", LT("gui.hdr_tip_click"));
+}
+
+static void hdr_click(int kind)
+{
+    if (kind == HDR_CHIP_UPD) {
+        upd_open_page(); /* wie "Release-Seite oeffnen" */
+    } else if (kind == HDR_CHIP_ST) {
+        lset_open(); /* Online & Updates (Zahnrad) */
+    }
+}
+
+/* W398: Wortmarken-Tab (ID_GAME_SB/LOC). Aktiv: hell + oranger Balken unter dem Namen; inaktiv: gedimmt,
+ * Hover heller (Handcursor in hover_proc). Schrift stufenweise kleiner, falls der Name nicht passt. */
+static int gametab_font(HDC dc, const wchar_t *t, int n, int avail, int *tw)
+{
+    static const int fs[] = { F_GAME, F_BIG, F_CARD, F_BRAND, F_SEMI };
+    int i;
+    SIZE sz = { 0, 0 };
+    for (i = 0; i < (int)(sizeof fs / sizeof fs[0]); i++) {
+        SelectObject(dc, g_f[fs[i]]);
+        SetTextCharacterExtra(dc, SX(2));
+        GetTextExtentPoint32W(dc, t, n, &sz);
+        SetTextCharacterExtra(dc, 0);
+        if (sz.cx <= avail) {
+            break;
+        }
+    }
+    if (i == (int)(sizeof fs / sizeof fs[0])) {
+        i--;
+    }
+    *tw = sz.cx < avail ? sz.cx : avail;
+    return fs[i];
+}
+
+static int gametab_tw(HWND hw, int *font) /* Breite des Namens in Pixeln im Tab (Selbsttest) */
+{
+    wchar_t txt[64];
+    RECT r;
+    int n, tw = 0, f;
+    HDC dc;
+    if (!hw || (dc = GetDC(hw)) == NULL) {
+        return -1;
+    }
+    GetClientRect(hw, &r);
+    n = GetWindowTextW(hw, txt, 64);
+    CharUpperBuffW(txt, n);
+    f = gametab_font(dc, txt, n, r.right - SX(2 * HDR_GAME_PAD), &tw);
+    ReleaseDC(hw, dc);
+    if (font) {
+        *font = f;
+    }
+    return tw;
+}
+
+static void gametab_paint(canvas_t *c, const uictl_t *u, int w, int h, const wchar_t *txt, int n, int focus)
+{
+    wchar_t up[64];
+    int tw = 0, f, pad = SX(HDR_GAME_PAD), bh = SX(3) < 3 ? 3 : SX(3);
+    COLORREF fg = u->checked ? C_TEXT : u->hover ? RGB(214, 219, 227) : C_DIM;
+    if (n > 63) {
+        n = 63;
+    }
+    memcpy(up, txt, (size_t)n * sizeof up[0]);
+    up[n] = 0;
+    CharUpperBuffW(up, n);
+    f = gametab_font(c->dc, up, n, w - 2 * pad, &tw);
+    SetTextCharacterExtra(c->dc, SX(2));
+    cv_textw(c, g_f[f], up, n, pad, 0, w - 2 * pad, h - SX(10), fg, /* W401: Text 26 */
+             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SetTextCharacterExtra(c->dc, 0);
+    if (u->checked) {
+        cv_fill(c, pad, h - SX(5), tw, bh, C_ACCENT, 255, SX(1));
+    } else if (u->hover) {
+        cv_fill(c, pad, h - SX(5), tw, bh, RGB(255, 255, 255), 40, SX(1));
+    }
+    if (focus) {
+        cv_ring(c, 0, 0, tw + 2 * pad < w ? tw + 2 * pad : w, h, C_ACCENT_HI, 230, SX(4), SX(2) < 2 ? 2 : SX(2));
+    }
+}
+
+static void hdr_paint_status(void)
+{
+    hdr_lay_t L;
+    int i;
+    hdr_layout(&L);
+    g_hdr_hit_n = 0;
+    for (i = 0; i < L.n; i++) {
+        int x = L.x[i], w = L.w[i], up = L.kind[i] == HDR_CHIP_UPD;
+        L_fill(x, HDR_CHIP_Y, w, HDR_CHIP_H, up ? C_ACCENT : RGB(255, 255, 255), up ? 30 : 10, 6);
+        L_ring(x, HDR_CHIP_Y, w, HDR_CHIP_H, up ? C_ACCENT : RGB(255, 255, 255), up ? 120 : 26, 6);
+        L_fill(x + HDR_CHIP_PAD, HDR_CHIP_Y + (HDR_CHIP_H - HDR_CHIP_DOT) / 2, HDR_CHIP_DOT, HDR_CHIP_DOT,
+               L.dot[i], 255, 3);
+        L_text(F_TINY, L.txt[i], x + HDR_CHIP_PAD + HDR_CHIP_DOT + 6, HDR_CHIP_Y,
+               w - 2 * HDR_CHIP_PAD - HDR_CHIP_DOT - 6 + 2, HDR_CHIP_H, L.col[i],
+               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
+        hdr_px(x, HDR_CHIP_Y, w, HDR_CHIP_H, &g_hdr_hit[g_hdr_hit_n]);
+        g_hdr_hit_kind[g_hdr_hit_n++] = L.kind[i];
+    }
+    if (g_tip) { /* W403: Tooltip-Rechtecke = Klickflaechen (fehlender Chip: leer) */
+        int c;
+        for (c = 0; c < 2; c++) {
+            TTTOOLINFOW ti;
+            memset(&ti, 0, sizeof ti);
+            ti.cbSize = sizeof ti;
+            ti.hwnd = g_hwnd;
+            ti.uId = (UINT_PTR)(HDR_TIP_ID0 + c);
+            for (i = 0; i < g_hdr_hit_n; i++) {
+                if (g_hdr_hit_kind[i] == c) {
+                    ti.rect = g_hdr_hit[i];
+                }
+            }
+            SendMessageW(g_tip, TTM_NEWTOOLRECTW, 0, (LPARAM)&ti);
+        }
+    }
+}
+
+/* Erstabfrage (Spielen, SB und LoC; Platz der frueheren Update-Karte). */
+#define NETQ_H 134
+static void netq_paint(int x, int y, int w)
+{
+    card(x, y, w, NETQ_H, LT("gui.netq_title"));
+    label(F_TINY, LT("gui.netq_text"), x + 18, y + 36, w - 36, 58, C_TEXT);
+}
+
+static void lset_open(void)
+{
+    show_page(P_LSET);
+}
+
+/* Seite Launcher-Einstellungen */
+static void paint_lset(void)
+{
+    char t[600];
+    const char *mode;
+    /* links: Online & Updates, Ueber */
+    card(CX0, CY0, COLW, LSET_NET_H, LT("gui.netm_title"));
+    label1(F_TINY, LT("gui.netm_intro"), CX0 + 18, CY0 + 36, COLW - 36, 20, C_DIM);
+    if (!g_upd_ver[0]) {
+        label(F_TINY, LT("gui.upd_dev"), CX0 + 18, CY0 + LSET_NET_H - 70, COLW - 36, 34, C_FAINT);
+    } else {
+        char v[64];
+        if (g_upd_res.result == LUPD_R_NEWER) {
+            upd_tag_disp(g_upd_res.rel.tag, v, sizeof v);
+            _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.upd_new"), v);
+        } else {
+            _snprintf_s(t, sizeof t, _TRUNCATE,
+                        LT(g_upd_res.result == LUPD_R_CURRENT ? "gui.upd_latest" : "gui.upd_cur"), g_upd_ver);
+        }
+        L_text(F_TINY, t, CX0 + 18, CY0 + LSET_NET_H - 70, COLW - 36, 22,
+               g_upd_res.result == LUPD_R_NEWER ? C_ACCENT_HI : C_DIM,
+               DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    }
+    card(CX0, LSET_ABOUT_Y, COLW, CY0 + 504 - LSET_ABOUT_Y, LT("gui.lset_about"));
+    _snprintf_s(t, sizeof t, _TRUNCATE, "%s  \xC2\xB7  %s", SB_EDITION_BADGE,
+                g_upd_ver[0] ? g_upd_ver : LT("gui.lset_devbuild"));
+    label1(F_SMALL, t, CX0 + 18, LSET_ABOUT_Y + 40, COLW - 36, 22, C_TEXT);
+    label1(F_TINY, "Game Preservation Project", CX0 + 18, LSET_ABOUT_Y + 64, COLW - 36, 18, C_DIM);
+    label(F_TINY, LT("gui.lset_about_txt"), CX0 + 18, LSET_ABOUT_Y + 88, COLW - 36, 64, C_DIM);
+    /* rechts: Sprache & Fenster, Launcher, Test tools, Datenordner */
+    card(COL2, LSET_LANG_Y, COLW, LSET_LANG_H, LT("gui.lset_lang"));
+    if (g_lay.id == LLAY_0) {
+        label(F_TINY, LT("gui.foot_hint"), COL2 + 18, LSET_LANG_Y + 84, COLW - 36, 34, C_FAINT);
+    }
+    card(COL2, LSET_BG_Y, COLW, LSET_BG_H, LT("gui.adv_launcher"));
+    card(COL2, LSET_TOOLS_Y, COLW, LSET_TOOLS_H, LT("gui.alpha_page"));
+    label(F_TINY, LT(g_alpha_tools ? "gui.lset_tools_txt" : "gui.lset_tools_off"), COL2 + 18, LSET_TOOLS_Y + 36,
+          COLW - 36, 34, C_DIM);
+    card(COL2, LSET_DATA_Y, COLW, CY0 + 504 - LSET_DATA_Y, LT("gui.lset_data"));
+    {
+        char path[1024];
+        adv_data_loc(path, sizeof path, &mode);
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.adv_data_fmt"), LT(mode));
+        label(F_TINY, t, COL2 + 18, LSET_DATA_Y + 38, COLW - 36 - 124, 34, C_DIM);
+    }
+}
+
+static void lset_build(HWND w)
+{
+    int i;
+    char t[600];
+    for (i = 0; i < NETM_N; i++) {
+        netm_radio_text(i, t, sizeof t);
+        mk(w, K_RADIO, ID_NETM0 + i, P_LSET, CX0 + 18, LSET_RADIO_Y(i), COLW - 36, 60, t, 0);
+        mk(w, K_BTN, ID_NETQ0 + i, P_PLAY, UPD_X + 18 + i * ((UPD_W - 36 + 8) / 3), UPD_Y + 96,
+           (UPD_W - 36 + 8) / 3 - 8, 28, LT(kNetqBtn[i]), 0);
+    }
+    mk(w, K_BTN, ID_LSET_TOOLS, P_LSET, COL2 + 18, LSET_TOOLS_Y + 74, 190, 28, LT("gui.lset_tools_open"), 0);
+    mk(w, K_BTN, ID_LSET_DATA, P_LSET, COL2 + COLW - 18 - 112, LSET_DATA_Y + 40, 112, 26, LT("gui.adv_open_folder"),
+       0);
+    mk(w, K_BTN, ID_LSET_RELPAGE, P_LSET, CX0 + 18, CY0 + LSET_NET_H - 42, 150, 28,
+       LT("gui.upd_open"), 0);
+    netm_sync_ui();
+}
+
+static void lset_relabel(void)
+{
+    int i;
+    char t[600];
+    for (i = 0; i < NETM_N; i++) {
+        netm_radio_text(i, t, sizeof t);
+        if (ctl(ID_NETM0 + i)) ui_settext(ctl(ID_NETM0 + i), t);
+        if (ctl(ID_NETQ0 + i)) ui_settext(ctl(ID_NETQ0 + i), LT(kNetqBtn[i]));
+    }
+    if (ctl(ID_LSET_OPEN)) ui_settext(ctl(ID_LSET_OPEN), LT("gui.lset_title"));
+    if (ctl(ID_LSET_TOOLS)) ui_settext(ctl(ID_LSET_TOOLS), LT("gui.lset_tools_open"));
+    if (ctl(ID_LSET_DATA)) ui_settext(ctl(ID_LSET_DATA), LT("gui.adv_open_folder"));
+    if (ctl(ID_LSET_RELPAGE)) ui_settext(ctl(ID_LSET_RELPAGE), LT("gui.upd_open"));
+    if (ctl(ID_MP_GOSET)) ui_settext(ctl(ID_MP_GOSET), LT("gui.mp_goset"));
+    if (ctl(ID_LOC_MP_GO)) ui_settext(ctl(ID_LOC_MP_GO), LT("gui.mp_go"));
+}
+
+/* Sichtbarkeit (-1 = nicht zustaendig). Vor dem LoC-Bereich geprueft. */
+static int lset_visible(int id, int page)
+{
+    if (id >= ID_NETQ0 && id < ID_NETQ0 + NETM_N) { /* SB: Absturz-Karte hat Vorrang (wie die alte Update-Karte) */
+        return g_upd_ask && page == P_PLAY && (g_game == LGAME_LOC || dg_ctl_visible(ID_UPD_YES));
+    }
+    if (id == ID_LSET_OPEN) {
+        return 1;
+    }
+    if ((id >= ID_NETM0 && id < ID_NETM0 + NETM_N) || id == ID_LSET_DATA || id == ID_BG || id == ID_LANG ||
+        id == ID_LANG_LBL) {
+        return page == P_LSET;
+    }
+    if (id == ID_LSET_TOOLS) {
+        return page == P_LSET && g_alpha_tools;
+    }
+    if (id == ID_LSET_RELPAGE) {
+        return page == P_LSET && g_upd_res.result == LUPD_R_NEWER && g_upd_ver[0];
+    }
+    if (id == ID_UPD_NOW) {
+        return page == P_LSET && g_upd_ver[0];
+    }
+    if (id == ID_LAYOUT || id == ID_LAYOUT_LBL) {
+        return page == P_LSET && g_lay.id != LLAY_0;
+    }
+    if (id == ID_NAV0 + P_ALPHA) {
+        return 0; /* Test tools: jetzt unter dem Zahnrad */
+    }
+    if (id == ID_MP_GOSET) {
+        return g_game == LGAME_LOC && page == P_LNET && netm_get() != NETM_STEEL && !acc_view_active();
+    }
+    if (id == ID_LOC_MP_GO) {
+        return g_game == LGAME_LOC && page == P_PLAY && !g_upd_ask;
+    }
+    return -1;
+}
+
+/* Befehle (1 = erledigt). */
+static int lset_command(int id, int code)
+{
+    (void)code;
+    if (id == ID_LSET_OPEN) {
+        lset_open();
+        return 1;
+    }
+    if (id >= ID_NETM0 && id < ID_NETM0 + NETM_N) {
+        netm_set(id - ID_NETM0);
+        return 1;
+    }
+    if (id >= ID_NETQ0 && id < ID_NETQ0 + NETM_N) {
+        netm_set(id - ID_NETQ0);
+        return 1;
+    }
+    if (id == ID_LSET_TOOLS) {
+        show_page(P_ALPHA);
+        return 1;
+    }
+    if (id == ID_LSET_DATA) {
+        on_command_inner(ID_DATA_OPEN, BN_CLICKED);
+        return 1;
+    }
+    if (id == ID_LSET_RELPAGE) {
+        upd_open_page();
+        return 1;
+    }
+    if (id == ID_MP_GOSET) {
+        lset_open();
+        return 1;
+    }
+    if (id == ID_LOC_MP_GO) {
+        acc_nav_sub(0); /* W399: Match & network */
+        return 1;
+    }
+    return 0;
+}
+
 static void on_command(int id, int code)
 {
+    if (id == ID_NAVSUB_MATCH || id == ID_NAVSUB_ACC) { /* W399: Unterpunkte von Multiplayer */
+        if (code == BN_CLICKED) {
+            acc_nav_sub(id == ID_NAVSUB_ACC);
+        }
+        return;
+    }
     if (id >= ID_NAV0 && id < ID_NAV0 + P_N) {
+        if (id == ID_NAV0 + P_LNET && g_game == LGAME_LOC) {
+            acc_nav_sub(0); /* W399: Elternpunkt = erster Unterpunkt (Match & network) */
+            return;
+        }
         show_page(id - ID_NAV0);
         return;
     }
@@ -17495,6 +19690,9 @@ static void on_command(int id, int code)
 
 static void on_command_inner(int id, int code)
 {
+    if (lset_command(id, code)) { /* W397: Zahnrad, Online & Updates, Spruenge */
+        return;
+    }
     if (loctab_command(id, code)) { /* W276: Spielauswahl, LoC-Seite, LoC-Startsperre */
         return;
     }
@@ -18382,10 +20580,33 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
             if (t) { return HTTOP; }
             if (b) { return HTBOTTOM; }
         }
+        if (hdr_hit(p) >= 0) {
+            return HTCLIENT; /* W401: Status-/Update-Chip anklickbar */
+        }
         if (p.y >= 0 && p.y < SX(TITLE_H)) {
             return HTCAPTION; /* Ziehen, Aero-Snap */
         }
         return HTCLIENT;
+    }
+    case WM_SETCURSOR: /* W401: Handcursor auf den Chips im Kopf */
+        if ((HWND)wp == h && LOWORD(lp) == HTCLIENT) {
+            POINT p;
+            GetCursorPos(&p);
+            ScreenToClient(h, &p);
+            if (hdr_hit(p) >= 0) {
+                SetCursor(LoadCursor(NULL, IDC_HAND));
+                return TRUE;
+            }
+        }
+        break;
+    case WM_LBUTTONUP: { /* W401: Klick auf einen Chip (Update -> Release-Seite, Status -> Zahnrad) */
+        POINT p = { GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+        int k = hdr_hit(p);
+        if (k >= 0) {
+            hdr_click(k);
+            return 0;
+        }
+        break;
     }
     case WM_ERASEBKGND:
         return 1;
@@ -18457,7 +20678,19 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == ONL_TIMER) {
             onl_tick(); /* W334: loc_net_status.txt */
         }
+        if (wp == SNP_TIMER) {
+            snp_kick(); /* W403: steelnet-Chip alle 5 Minuten (nur Stufe steelnet) */
+        }
         return 0;
+    case WM_APP_SNP: { /* W403: Ergebnis der steelnet-Pruefung */
+        snp_job_t *j = (snp_job_t *)lp;
+        if (j && (int)wp == g_snp_gen && g_snp_busy) {
+            g_snp_busy = 0;
+            snp_apply(&j->r);
+        }
+        free(j);
+        return 0;
+    }
     case WM_APP_ACC: { /* W328: Ergebnis eines Konto-Auftrags */
         acc_job_t *j = (acc_job_t *)lp;
         if (j && (int)wp == g_acc_gen && g_acc_busy) {
@@ -18683,8 +20916,11 @@ static const struct {
     { "img_folder", "game_image=;xbe_path=;media_root=", 0 },
     { "img_browse", "game_image=;xbe_path=;media_root=", 0 },
     { "img_browse_bad", "game_image=;xbe_path=;media_root=", 0 },
+    { "img_loc", "game_image=;xbe_path=;media_root=", 0 }, /* W369: LoC-xbe in der SB-Karte */
     /* W227 LAUNCHER-POLISH: startbereit mit Beispiel-Abbild (Fixture, bereinigt) */
     { "ready", "xbe_path=;media_root=", 0 },
+    { "ready_hover", "xbe_path=;media_root=", 0 }, /* W398: wie ready, Maus auf dem inaktiven Spielnamen */
+    { "ready_pg", "xbe_path=;media_root=", 0 }, /* W402: SB mit eigenen Werten (2560x1440, 120 FPS, PAL, Zielhilfe) */
     { "ready_us", "xbe_path=;media_root=", 0 },  /* W231: US-Beispielabbild */
     { "exit8_us", "xbe_path=;media_root=", 0 },  /* W231: + Meldung Exitcode 8 */
     { "ready_controller", "xbe_path=;media_root=;sbc_usb=1;sbc_mouse_off=1;input_profile=", 0 },
@@ -18693,6 +20929,12 @@ static const struct {
     { "update_ask", "xbe_path=;media_root=", 0 },
     { "update_new", "xbe_path=;media_root=", 0 },
     { "update_dev", "", 0 },
+    { "update_steel", "xbe_path=;media_root=", 0 }, /* W397: Stufe steelnet + neue Version (Kopf zweizeilig) */
+    { "update_unk", "xbe_path=;media_root=", 0 },   /* W401: Stufe steelnet, Zustand unbekannt, kein Update */
+    { "update_lost", "xbe_path=;media_root=", 0 },  /* W401: Stufe steelnet, Verbindung verloren */
+    { "update_snp_on", "xbe_path=;media_root=", 0 },  /* W403: Stufe steelnet, Pruefung ok (gruen) + neue Version */
+    { "update_snp_off", "xbe_path=;media_root=", 0 }, /* W403: Stufe steelnet, Pruefung nicht erreichbar */
+    { "update_offl", "xbe_path=;media_root=", 0 },  /* W401: Stufe offline (Release-Version) */
     { "replays", "", 0 },   /* W254: Seite Erweitert + Replay-Dialog (Beispieldaten) */
     { "alpha_demo", "", 0 }, /* W272: Alpha Test mit Beispielwahl + Schalter interp_guard (Layout) */
     { "advanced", "", 0 }, /* W291: Anzeige/Grafik mit "Erweiterte Einstellungen zeigen" */
@@ -18708,6 +20950,8 @@ static const struct {
     /* W276 LOC-LAUNCH: Bereich Line of Contact (Pruef-Fixture, bereinigte Pfade) */
     { "loc_empty", "", 0 },
     { "loc_ok", "", 0 },
+    { "loc_hover", "", 0 }, /* W398: wie loc_ok, Maus auf dem inaktiven Spielnamen */
+    { "loc_pg", "", 0 }, /* W402: LoC mit eigenen Werten (16:9, 1920x1080, 60 FPS) */
     { "loc_sb", "", 0 },
     { "loc_start", "", 0 },
     { "loc_exp", "edge_mode=2;cockpit_hide=1", 0 }, /* W293: wie loc_ok, mit Hinweisband (Breitbild, Cockpit aus) */
@@ -18718,9 +20962,18 @@ static const struct {
     { "loc_acc_ok", "", 0 },     /* Pilot mit Discord + Login gesichert */
     { "loc_acc_view", "", 0 },   /* Verwaltungsansicht (Code angezeigt) */
     { "loc_acc_signin", "", 0 }, /* Ansicht "Auf diesem PC anmelden" (ohne Pilot) */
+    { "loc_acc_view_unsec", "", 0 }, /* W399: Unterseite Account, ungesichert (Discord-Knopf im Status) */
+    { "loc_acc_view_login", "", 0 }, /* W399: Unterseite Account, nur mit Login gesichert */
+    { "loc_acc_view_ok", "", 0 },    /* W399: Unterseite Account, Discord + Login, Code verdeckt */
     /* W334 LOC-SEC: Karte "Online (steelnet)" (Dienst als eingerichtet vorgegeben, nichts gespeichert) */
     { "loc_onl", "", 0 },     /* Online an, Raumcode der eigenen Lobby (Kopieren) */
     { "loc_onl_err", "", 0 }, /* Online an, sec=pin_failed (Server-Pruefung fehlgeschlagen) */
+    { "loc_onl_pub", "", 0 },  /* W373: Online an, oeffentlich (Standard), Vertrauenshinweis */
+    { "loc_onl_priv", "", 0 }, /* W373: Online an, privat mit Raumcode (noch keine Lobby) */
+    /* W392 LAUNCHER-NETTAB: Seite Netzwerk (--ui-shot packs = Platz der Seite bei LoC) */
+    { "loc_net", "", 0 },     /* Standard: alles an, Gegner glaetten Auto */
+    { "loc_net_off", "", 0 }, /* Rollback aus: abhaengige Schalter grau, Hinweis auf Spielen */
+    { "loc_netq", "", 0 },    /* W397: Erstabfrage "Online & Updates" auf LoC-Spielen (Release-Version) */
     { "effectpack", "shading=1;world_sharpen=60;aa_mode=3;ssao=25;color_sat=110;color_gain=103;"
                     "shade_shadow=1;fx_soft=60;fx_embers=160;fx_light=40;fx_light_cockpit=30;"
                     "fx_interp=1;remaster=1;hd_textures=1", 0 },
@@ -18744,7 +20997,14 @@ static void w220_fixture(const char *path, int rc);
 static void gui_apply_state(const char *name)
 {
     int i;
-    loctab_apply_state(name); /* W276: loc_* */
+    acc_fixture(1, 0, 0, 0, 0); /* W397: Shots zeigen nie das echte Konto (Name!), loc_acc_* setzt eigene Fixtures */
+    if (!loctab_apply_state(name)) { /* W276: loc_* */
+        /* W398: SB-Shots immer mit SB aktiv und ohne Stufe steelnet (nie Spielwahl/Online aus der echten cfg);
+         * update_steel setzt die Stufe unten selbst */
+        g_game = LGAME_SB;
+        g_loc.game = LGAME_SB;
+        g_loc_online = 0;
+    }
     if (strcmp(name, "ready_us") == 0 || strcmp(name, "exit8_us") == 0) {
         /* W231: startbereit mit US-Beispielabbild (Fixture, bereinigt) */
         w220_fixture(W220_ISO_US, 0);
@@ -18754,13 +21014,60 @@ static void gui_apply_state(const char *name)
         w220_fixture(W220_ISO, 0);
         strcpy_s(g_s.game_image, sizeof g_s.game_image, W220_ISO);
     }
+    if (strcmp(name, "ready_pg") == 0 || strcmp(name, "loc_pg") == 0) { /* W402: je Spiel eigene Werte (nur Speicher) */
+        int loc = name[0] == 'l';
+        g_s.window_mode = 0;
+        g_s.width = loc ? 1920 : 2560;
+        g_s.height = loc ? 1080 : 1440;
+        g_s.interp_fps = loc ? 60 : 120;
+        g_s.volume_music = loc ? 70 : 40;
+        g_s.game_tick = loc ? 30 : 25;
+        g_s.aim_assist = loc ? 0 : 1;
+        g_s.auto_gear = loc ? 0 : 1;
+        g_s.mouse_sens = loc ? 6 : 10;
+    }
     if (strncmp(name, "update_", 7) == 0) { /* W250: Fixtures, nichts gespeichert */
         int dev = strcmp(name, "update_dev") == 0;
         g_upd_ver = dev ? "" : "0.2.0"; /* W301: erste Beta */
         g_upd_cfg = dev ? -1 : strcmp(name, "update_ask") == 0 ? -1 : 1;
         g_upd_ask = strcmp(name, "update_ask") == 0;
         memset(&g_upd_res, 0, sizeof g_upd_res);
-        if (strcmp(name, "update_new") == 0) {
+        if (strcmp(name, "update_steel") == 0) { /* W397: Beispielzustand, kein Netz, keine Datei */
+            g_onl_fix_srv = 1;
+            g_onl_fixture = 1;
+            g_loc_online = 1;
+            strcpy_s(g_onl_sec, sizeof g_onl_sec, "ok");
+        }
+        if (strcmp(name, "update_unk") == 0 || strcmp(name, "update_lost") == 0) { /* W401: Kopf-Chip */
+            g_onl_fix_srv = 1;
+            g_onl_fixture = 1;
+            g_loc_online = 1;
+            g_onl_sec[0] = 0;
+            strcpy_s(g_onl_err, sizeof g_onl_err, strcmp(name, "update_lost") == 0 ? "lost" : "");
+        }
+        if (strcmp(name, "update_offl") == 0) { /* W401: Stufe offline */
+            g_upd_cfg = 0;
+            g_loc_online = 0;
+        }
+        if (strcmp(name, "update_snp_on") == 0 || strcmp(name, "update_snp_off") == 0) { /* W403: Pruefergebnis */
+            lacc_probe_t pr;
+            memset(&pr, 0, sizeof pr);
+            g_onl_fix_srv = 1;
+            g_onl_fixture = 1;
+            g_loc_online = 1;
+            g_onl_sec[0] = 0;
+            g_onl_err[0] = 0;
+            pr.ok = strcmp(name, "update_snp_on") == 0;
+            pr.ms = pr.ok ? 38 : 5000;
+            strcpy_s(pr.version, sizeof pr.version, pr.ok ? "2.4" : "");
+            snp_apply(&pr);
+            g_snp_when.wHour = 12; /* Beleg: fester Zeitpunkt */
+            g_snp_when.wMinute = 5;
+        } else {
+            g_snp_state = -1; /* Shots: nie ein altes Ergebnis */
+        }
+        if (strcmp(name, "update_new") == 0 || strcmp(name, "update_steel") == 0 ||
+            strcmp(name, "update_snp_on") == 0) {
             g_upd_res.result = LUPD_R_NEWER;
             strcpy_s(g_upd_res.rel.tag, sizeof g_upd_res.rel.tag, "v0.2.1");
             strcpy_s(g_upd_res.rel.url, sizeof g_upd_res.rel.url,
@@ -18785,6 +21092,7 @@ static void gui_apply_state(const char *name)
 /* W220 PLAY-LAYOUT: Zustaende der Einrichtungskarte (Shots + Selbsttest 62).
  * Pfade sind bereinigte Beispiele; die Pruefung liefert die Fixture. */
 #define W220_ISO_JP "D:\\Games\\Steel Battalion (Japan).iso" /* W231: nicht unterstuetzt */
+#define W220_LOC_XBE "D:/Games/Steel Battalion - Line of Contact/default.xbe" /* W369 */
 #define W220_DIR "D:\\Games\\Steel Battalion"
 static void w220_fixture(const char *path, int rc)
 {
@@ -18802,6 +21110,8 @@ static void w220_fixture(const char *path, int rc)
         _snprintf_s(m, sizeof m, _TRUNCATE, LT("cfg.image_version"), "43430002",
                     sb_gamever_region_name(2), 0u);
         g_imgfix_ed = LCFG_ED_OTHER;
+    } else if (rc == 5) { /* W369: Line of Contact im SB-Tab */
+        strncpy_s(m, sizeof m, LT("cfg.image_is_loc"), _TRUNCATE);
     } else {
         _snprintf_s(m, sizeof m, _TRUNCATE, LT("cfg.image_isdir"), path);
     }
@@ -18837,6 +21147,9 @@ static int w220_state(const char *name)
     } else if (strcmp(name, "img_folder") == 0) {
         path = W220_DIR;
         rc = 1;
+    } else if (strcmp(name, "img_loc") == 0) { /* W369 */
+        path = W220_LOC_XBE;
+        rc = 5;
     } else {
         return 0;
     }
@@ -18891,6 +21204,8 @@ static void gui_fill(void)
     upd_init(); /* W250: vor --state (Shots ueberschreiben im Speicher) */
     dg_init(); /* W279: neuer Absturzbericht seit dem letzten Hinweis? */
     loctab_load(); /* W276: gewaehltes Spiel + LoC-Abbild (user.cfg) */
+    pergame_init(); /* W402: LoC gewaehlt -> Werte aus user_loc.cfg */
+    g_upd_ask = netq_should_ask(g_upd_ver, g_upd_cfg, g_loc_online); /* W397: Online an = steelnet, keine Frage */
     if (g_o.state[0]) { /* W171: --state (nur Shots, nie gespeichert) */
         gui_apply_state(g_o.state);
         if (strcmp(g_o.state, "advanced") == 0) { /* W291: Bild mit Feinreglern (nicht gespeichert) */
@@ -18899,6 +21214,14 @@ static void gui_fill(void)
     }
     build_controls();
     tips_build(); /* W172: Begruendungen als Tooltip */
+    if (g_o.shot != 0 && strncmp(g_o.state, "update_", 7) == 0) { /* W403: Tooltip-Texte der Kopf-Chips als Beleg */
+        char tt[1000];
+        int c;
+        for (c = 0; c < 2; c++) {
+            hdr_tip_text(c, tt, sizeof tt);
+            printf("[tip %s] %s\n", c == HDR_CHIP_ST ? "status" : "update", tt);
+        }
+    }
     packs_load(); /* W171: Packs-Zustand fuer das Regelwerk (R17-R22/R29/R30) */
     update_sbc_status();
     update_vr_button(); /* W159: VR-Knopf je Runtime */
@@ -19260,15 +21583,13 @@ int gui_main(const char *client_override, const gui_opts_t *o)
                 ui_set_checked(ID_BG, g_bg_on);
                 base_build();
             }
-            for (p = 0; p < P_N; p++) {
+            for (p = 0; p <= P_LSET; p++) { /* W397: + Launcher-Einstellungen */
                 char path[1200];
                 int r;
                 if ((g_o.page >= 0 && g_o.page != p) || (p == P_ALPHA && !g_alpha_tools)) {
                     continue;
                 }
-                if (g_game == LGAME_LOC && p == P_PACKS) {
-                    continue; /* W276: im Bereich LoC ausgeblendet (W293: Erweitert bleibt) */
-                }
+                /* W276: Packs im Bereich LoC ausgeblendet; W392: dort jetzt die Seite Netzwerk (mit Shot) */
                 show_page(p);
                 loctab_state_after(g_o.state); /* W276 */
                 if (p == P_PLAY && strncmp(g_o.state, "img_", 4) == 0) {
@@ -19276,6 +21597,12 @@ int gui_main(const char *client_override, const gui_opts_t *o)
                 }
                 if (strcmp(g_o.state, "exit8_us") == 0) {
                     client_exit_report(8, LCFG_ED_US, 0); /* W231: Meldung wie nach Clientende */
+                }
+                if (strcmp(g_o.state, "ready_hover") == 0 || strcmp(g_o.state, "loc_hover") == 0) {
+                    uictl_t *hu = ui_find(g_game == LGAME_LOC ? ID_GAME_SB : ID_GAME_LOC); /* W398: Hover-Bild */
+                    if (hu) {
+                        hu->hover = 1;
+                    }
                 }
                 pump();
                 RedrawWindow(g_hwnd, NULL, NULL,
@@ -19288,16 +21615,16 @@ int gui_main(const char *client_override, const gui_opts_t *o)
                 } else if (g_o.state[0]) { /* W171: Regelzustand im Namen */
                     _snprintf_s(path, sizeof path, _TRUNCATE,
                                 "%s/w82_%s%s_%s_%s_%d.png", g_o.out_dir,
-                                kPageKey[p], lay_shot_tag(), g_o.state, g_bg_on ? "bg" : "ohne",
+                                gui_page_key(p), lay_shot_tag(), g_o.state, g_bg_on ? "bg" : "ohne",
                                 g_dpi_mon * 100 / 96);
                 } else {
                     _snprintf_s(path, sizeof path, _TRUNCATE,
                                 "%s/w82_%s%s_%s_%d.png", g_o.out_dir,
-                                kPageKey[p], lay_shot_tag(), g_bg_on ? "bg" : "ohne",
+                                gui_page_key(p), lay_shot_tag(), g_bg_on ? "bg" : "ohne",
                                 g_dpi_mon * 100 / 96);
                 }
                 r = shot_window(g_hwnd, path, g_o.shot == 2);
-                printf("shot: Seite %d (%s) -> %s%s\n", p, kPageKey[p],
+                printf("shot: Seite %d (%s) -> %s%s\n", p, gui_page_key(p),
                        r ? "FEHLER " : "", path);
                 rc |= r;
                 if (p == P_DISPLAY && g_o.shot == 2 && strncmp(g_o.state, "fpslist", 7) == 0) { /* W309 */
@@ -19330,6 +21657,9 @@ int gui_main(const char *client_override, const gui_opts_t *o)
     if (lupd_auto_check(g_upd_ver, g_upd_cfg)) {
         upd_start(0); /* W250: nur nach Zustimmung, still bei Fehlern */
     }
+    g_snp_live = 1; /* W403: ab hier echter Fensterbetrieb (Shots/Selbsttest kommen nie hierher) */
+    snp_kick();
+    SetTimer(g_hwnd, SNP_TIMER, SNP_PERIOD_MS, NULL);
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
         if (msg.message == WM_KEYDOWN && msg.wParam == VK_TAB &&
             GetKeyState(VK_CONTROL) < 0) {
@@ -19500,16 +21830,21 @@ static void loctab_gui_selftest(int *pass, int *fail)
     if (!why[0] && g_page != P_DISPLAY) {
         strcpy_s(why, sizeof why, "Umschalten verlaesst die gemeinsame Seite Anzeige");
     }
-    loctab_vis(ID_NAV0 + P_PACKS, 0, "LoC", why, sizeof why);
-    for (k = 0; k < P_N; k++) { /* gemeinsame Seiten bleiben, W293: Erweitert auch */
-        if (k != P_PACKS) {
-            loctab_vis(ID_NAV0 + k, 1, "LoC", why, sizeof why);
-        }
+    for (k = 0; k < P_N; k++) { /* gemeinsame Seiten bleiben, W293: Erweitert auch; W392: Packs-Platz = Netzwerk */
+        loctab_vis(ID_NAV0 + k, k != P_ALPHA, "LoC", why, sizeof why); /* W397: Test tools unter dem Zahnrad */
     }
-    if (!why[0]) { /* Navigation ohne Luecke: Steuerung rutscht nach oben */
-        uictl_t *c = ui_find(ID_NAV0 + P_CTRL), *a = ui_find(ID_NAV0 + P_AUDIO);
-        if (!c || !a || c->y != TITLE_H + 16 + 3 * 44 || a->y != TITLE_H + 16 + 4 * 44) {
-            strcpy_s(why, sizeof why, "Navigation LoC: Luecke");
+    if (!why[0]) { /* W397: LoC-Leiste Play, Display, Graphics, Controls, Audio & extras, Multiplayer, Advanced */
+        uictl_t *c = ui_find(ID_NAV0 + P_CTRL), *a = ui_find(ID_NAV0 + P_AUDIO), *mp = ui_find(ID_NAV0 + P_LNET);
+        uictl_t *ad = ui_find(ID_NAV0 + P_ADV);
+        char nt[300];
+        ui_gettext(ctl(ID_NAV0 + P_PACKS), nt, sizeof nt);
+        if (!c || !a || !mp || !ad || c->y != TITLE_H + 16 + 3 * 44 || a->y != TITLE_H + 16 + 4 * 44 ||
+            mp->y != TITLE_H + 16 + 5 * 44 || ad->y != TITLE_H + 16 + 6 * 44) {
+            strcpy_s(why, sizeof why, "Navigation LoC: Reihenfolge/Luecke");
+        } else if (strncmp(nt, LT("gui.page_mp"), strlen(LT("gui.page_mp"))) != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Navigation LoC: Packs-Platz heisst '%s'", nt);
+        } else if (nav_next(P_AUDIO, 1) != P_LNET || nav_next(P_LNET, 1) != P_ADV || nav_next(P_GFX, 1) != P_CTRL) {
+            strcpy_s(why, sizeof why, "Navigation LoC: Strg+Tab-Reihenfolge");
         }
     }
     loctab_vis(ID_WINMODE, 1, "LoC Anzeige (gemeinsam)", why, sizeof why);
@@ -19517,13 +21852,20 @@ static void loctab_gui_selftest(int *pass, int *fail)
     if (!why[0] && (!strstr(buf, "launcher_game=loc\n") || !strstr(buf, "# fremde Zeile\n"))) {
         _snprintf_s(why, sizeof why, _TRUNCATE, "Wahl nicht gemerkt: %.120s", buf);
     }
-    /* Packs im Bereich LoC -> Spielen (LoC-Seite); W293: Erweitert erreichbar */
+    /* W392: Packs-Platz im Bereich LoC = Seite Netzwerk (keine Pack-Elemente); W293: Erweitert erreichbar */
     if (!why[0]) {
         show_page(P_PACKS);
         pump();
-        if (g_page != P_PLAY) {
-            strcpy_s(why, sizeof why, "LoC: Packs erreichbar");
+        if (g_page != P_LNET) {
+            strcpy_s(why, sizeof why, "LoC: Seite Netzwerk nicht erreichbar");
         }
+    }
+    loctab_vis(ID_LNET_RB, 1, "LoC-Netzwerk", why, sizeof why);
+    loctab_vis(ID_PK_LIST, 0, "LoC-Netzwerk (Pack-Liste)", why, sizeof why);
+    loctab_vis(ID_PK_ADD, 0, "LoC-Netzwerk (Pack hinzufuegen)", why, sizeof why);
+    if (!why[0]) {
+        show_page(P_PLAY);
+        pump();
     }
     loctab_vis(ID_LOC_START, 1, "LoC-Spielen", why, sizeof why);
     loctab_vis(ID_LOC_GO0, 1, "LoC-Spielen (Bereitschaft)", why, sizeof why);
@@ -19533,7 +21875,8 @@ static void loctab_gui_selftest(int *pass, int *fail)
     loctab_vis(ID_START_VR, 0, "LoC-Spielen (SB-VR)", why, sizeof why);
     loctab_vis(ID_IMAGE, 0, "LoC-Spielen (SB-Abbild)", why, sizeof why);
     loctab_vis(ID_SUM_GO0, 0, "LoC-Spielen (SB-Bereitschaft)", why, sizeof why);
-    if (!why[0] && !IsWindowEnabled(ctl(ID_LOC_START)) != !lgame_loc_client_ready()) { /* W353: je Ausgabe */
+    if (!why[0] && !IsWindowEnabled(ctl(ID_LOC_START)) != !(lgame_loc_client_ready() && !loc_img_gate(NULL, 0))) {
+        /* W353: je Ausgabe; W403: ohne gepruefte Disc grau */
         strcpy_s(why, sizeof why, "LoC-Start-Freigabe passt nicht zur Ausgabe");
     }
     if (!why[0]) { /* W293: Disc/Ordner auf LoC > Erweitert */
@@ -19646,7 +21989,7 @@ static void loctab_gui_selftest(int *pass, int *fail)
         }
     }
     for (k = 0; k < P_N; k++) {
-        loctab_vis(ID_NAV0 + k, 1, "SB", why, sizeof why);
+        loctab_vis(ID_NAV0 + k, k != P_ALPHA, "SB", why, sizeof why); /* W397: Test tools unter dem Zahnrad */
     }
     if (!why[0]) {
         uictl_t *c = ui_find(ID_NAV0 + P_CTRL);
@@ -19695,6 +22038,893 @@ static void loctab_gui_selftest(int *pass, int *fail)
     }
 }
 
+/* --- 65c (W398 LAUNCHER-GAMESWITCH): Spielnamen als Wortmarken-Tabs im Kopf. Klick auf den inaktiven Namen
+ * wechselt (wie bisher), der aktive bleibt; Handcursor nur auf dem inaktiven; Tabstopp + zugaenglicher Name;
+ * Tabs im Kopf ohne Ueberlappung, Name passt (keine Kuerzung), Plaketten rechts frei von Wortmarken/Zahnrad. */
+static void gameswitch_gui_selftest(int *pass, int *fail)
+{
+    char why[300] = "", t[128];
+    const char *keep_ver = g_upd_ver;
+    HWND hs = ctl(ID_GAME_SB), hl = ctl(ID_GAME_LOC);
+    HCURSOR hand = LoadCursor(NULL, IDC_HAND);
+    RECT rs, rl;
+    int k;
+    g_game = LGAME_SB;
+    loctab_nav_layout();
+    show_page(P_DISPLAY);
+    pump();
+    if (!hs || !hl) {
+        strcpy_s(why, sizeof why, "Tabs fehlen");
+    }
+    if (!why[0] && (!(GetWindowLongW(hs, GWL_STYLE) & WS_TABSTOP) || !(GetWindowLongW(hl, GWL_STYLE) & WS_TABSTOP))) {
+        strcpy_s(why, sizeof why, "kein Tabstopp");
+    }
+    if (!why[0]) {
+        ui_gettext(hs, t, sizeof t);
+        if (strcmp(t, "Steel Battalion") != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "zugaenglicher Name SB '%s'", t);
+        }
+    }
+    if (!why[0] && (!ui_checked(ID_GAME_SB) || ui_checked(ID_GAME_LOC))) {
+        strcpy_s(why, sizeof why, "Start: SB nicht aktiv");
+    }
+    /* Handcursor: nur auf dem inaktiven Namen */
+    if (!why[0]) {
+        SetCursor(LoadCursor(NULL, IDC_ARROW));
+        if (!SendMessageW(hl, WM_SETCURSOR, (WPARAM)hl, MAKELPARAM(HTCLIENT, WM_MOUSEMOVE)) || GetCursor() != hand) {
+            strcpy_s(why, sizeof why, "kein Handcursor auf dem inaktiven Namen");
+        }
+        SetCursor(LoadCursor(NULL, IDC_ARROW));
+        SendMessageW(hs, WM_SETCURSOR, (WPARAM)hs, MAKELPARAM(HTCLIENT, WM_MOUSEMOVE));
+        if (!why[0] && GetCursor() == hand) {
+            strcpy_s(why, sizeof why, "Handcursor auf dem aktiven Namen");
+        }
+    }
+    /* Klick (BM_CLICK = echter Knopfweg) auf den inaktiven Namen wechselt, Seite bleibt */
+    if (!why[0]) {
+        SendMessageW(hl, BM_CLICK, 0, 0);
+        pump();
+        if (g_game != LGAME_LOC || !ui_checked(ID_GAME_LOC) || ui_checked(ID_GAME_SB)) {
+            strcpy_s(why, sizeof why, "Klick LoC: Zustand");
+        } else if (g_page != P_DISPLAY) {
+            strcpy_s(why, sizeof why, "Klick LoC: Seite gewechselt");
+        }
+    }
+    if (!why[0]) { /* Klick auf den aktiven Namen: bleibt */
+        SendMessageW(hl, BM_CLICK, 0, 0);
+        pump();
+        if (g_game != LGAME_LOC || !ui_checked(ID_GAME_LOC)) {
+            strcpy_s(why, sizeof why, "Klick auf aktiven Namen wechselt");
+        }
+    }
+    if (!why[0]) {
+        SendMessageW(hs, BM_CLICK, 0, 0);
+        pump();
+        if (g_game != LGAME_SB || !ui_checked(ID_GAME_SB) || ui_checked(ID_GAME_LOC)) {
+            strcpy_s(why, sizeof why, "Klick SB: Zustand");
+        }
+    }
+    /* Geometrie: im Kopf, nebeneinander, Name passt ungekuerzt */
+    if (!why[0]) {
+        GetWindowRect(hs, &rs);
+        GetWindowRect(hl, &rl);
+        MapWindowPoints(NULL, g_hwnd, (POINT *)&rs, 2);
+        MapWindowPoints(NULL, g_hwnd, (POINT *)&rl, 2);
+        if (rs.right > rl.left || rs.bottom > SX(TITLE_H) || rl.bottom > SX(TITLE_H) ||
+            abs((rs.bottom - rs.top) - (rl.bottom - rl.top)) > 1 || /* gleiche Groesse (Rundung +-1) */
+            abs((rs.right - rs.left) - (rl.right - rl.left)) > 1) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Lage SB %ld..%ld LoC %ld..%ld (Kopf %d)", rs.left, rs.right,
+                        rl.left, rl.right, SX(TITLE_H));
+        }
+    }
+    for (k = 0; k < 2 && !why[0]; k++) {
+        HWND hw = k ? hl : hs;
+        RECT r;
+        int f = -1, tw = gametab_tw(hw, &f);
+        GetClientRect(hw, &r);
+        if (tw <= 0 || tw > r.right - SX(2 * HDR_GAME_PAD) || f != F_GAME) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Name %d: Breite %d von %ld, Schrift %d", k, tw,
+                        r.right - SX(2 * HDR_GAME_PAD), f);
+        }
+    }
+    /* W401: Edition/Beta stehen jetzt in der Projektzeile (65d), rechts nur Status-Chip + Zahnrad */
+    (void)keep_ver;
+    show_page(P_PLAY);
+    if (!why[0]) {
+        GT_OK("65c W398 GAMESWITCH (Wortmarken-Tabs: Klick inaktiv wechselt, aktiv bleibt, Handcursor nur inaktiv, Tabstopp, Name passt)");
+    } else {
+        GT_FAIL("65c W398 GAMESWITCH", "%s", why);
+    }
+}
+
+/* --- 65d (W401 LAUNCHER-HEADER-POLISH): Projektzeile mit Edition/Beta passt ungekuerzt vor _ x; rechts
+ * [Update-Chip] [Status-Chip] [Zahnrad] ohne Ueberlappung, rechts der Wortmarken, gleiche Hoehe, mittig zur
+ * Wortmarkenzeile; _ x in der Ecke getrennt; Chips anklickbar (Trefferflaeche = Client statt Ziehen, Status
+ * oeffnet das Zahnrad), Projektzeile bleibt Ziehflaeche. Kein Netz, Browser wird nie geoeffnet. --- */
+static void header_polish_selftest(int *pass, int *fail)
+{
+    char why[300] = "";
+    const char *keep_ver = g_upd_ver;
+    int keep_cfg = g_upd_cfg, k, i;
+    lupd_res_t keep_res = g_upd_res;
+    RECT rg, rm, rs, rl;
+    show_page(P_PLAY);
+    pump();
+    for (k = 0; k < 4 && !why[0]; k++) { /* k&1: Release-Version, k&2: Update-Chip */
+        const char *txt[3];
+        COLORREF col[3];
+        int w[3], sum;
+        hdr_lay_t L;
+        g_upd_ver = k & 1 ? "0.3.0" : "";
+        g_upd_cfg = k & 2 ? 1 : keep_cfg;
+        memset(&g_upd_res, 0, sizeof g_upd_res);
+        if (k & 2) {
+            g_upd_res.result = LUPD_R_NEWER;
+            strcpy_s(g_upd_res.rel.tag, sizeof g_upd_res.rel.tag, "v0.3.1");
+        }
+        sum = hdr_sub_parts(txt, col, w);
+        if (!w[1] || (k & 1 && !w[2]) || HDR_GAME_X + HDR_GAME_PAD + sum > HDR_WB_X - 16) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Projektzeile %d: Breite %d (bis %d)", k, sum,
+                        HDR_WB_X - 16 - HDR_GAME_X - HDR_GAME_PAD);
+            break;
+        }
+        hdr_layout(&L);
+        if (L.n != (k & 2 ? 2 : 1) || L.shortened) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Chips %d: n %d kurz %d", k, L.n, L.shortened);
+            break;
+        }
+        for (i = 0; i < L.n && !why[0]; i++) {
+            if (L.x[i] < HDR_GAME_END + 12 || L.x[i] + L.w[i] > HDR_GEAR_X - 8 ||
+                (i && L.x[i] + L.w[i] > L.x[i - 1] - 6)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Chip %d/%d: x %d w %d (Wortmarken bis %d, Zahnrad %d)", k, i,
+                            L.x[i], L.w[i], HDR_GAME_END, HDR_GEAR_X);
+            }
+        }
+        if (!why[0] && k == 2) { /* Trefferflaechen nach dem Zeichnen */
+            POINT pu, ps, pt;
+            LRESULT hu, hst, hsub;
+            hdr_paint_status();
+            pu.x = (g_hdr_hit[1].left + g_hdr_hit[1].right) / 2;
+            pu.y = (g_hdr_hit[1].top + g_hdr_hit[1].bottom) / 2;
+            ps.x = (g_hdr_hit[0].left + g_hdr_hit[0].right) / 2;
+            ps.y = (g_hdr_hit[0].top + g_hdr_hit[0].bottom) / 2;
+            pt.x = SX(HDR_GAME_X + 40);
+            pt.y = SX(HDR_SUB_Y + HDR_SUB_H / 2);
+            if (g_hdr_hit_n != 2 || hdr_hit(pu) != HDR_CHIP_UPD || hdr_hit(ps) != HDR_CHIP_ST || hdr_hit(pt) != -1) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Treffer: n %d upd %d st %d sub %d", g_hdr_hit_n, hdr_hit(pu),
+                            hdr_hit(ps), hdr_hit(pt));
+            } else {
+                ClientToScreen(g_hwnd, &pu);
+                ClientToScreen(g_hwnd, &ps);
+                ClientToScreen(g_hwnd, &pt);
+                hu = SendMessageW(g_hwnd, WM_NCHITTEST, 0, MAKELPARAM(pu.x, pu.y));
+                hst = SendMessageW(g_hwnd, WM_NCHITTEST, 0, MAKELPARAM(ps.x, ps.y));
+                hsub = SendMessageW(g_hwnd, WM_NCHITTEST, 0, MAKELPARAM(pt.x, pt.y));
+                if (hu != HTCLIENT || hst != HTCLIENT || hsub != HTCAPTION) {
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "NCHITTEST upd %ld st %ld sub %ld", (long)hu, (long)hst,
+                                (long)hsub);
+                }
+            }
+            if (!why[0]) {
+                hdr_click(HDR_CHIP_ST);
+                pump();
+                if (g_page != P_LSET) {
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "Status-Chip oeffnet Seite %d statt Zahnrad", g_page);
+                }
+                show_page(P_PLAY);
+            }
+        }
+    }
+    g_upd_ver = keep_ver;
+    g_upd_cfg = keep_cfg;
+    g_upd_res = keep_res;
+    /* Zahnrad gleich hoch wie der Chip, _ x klein in der Ecke, getrennt von der Gruppe */
+    if (!why[0]) {
+        GetWindowRect(ctl(ID_LSET_OPEN), &rg);
+        GetWindowRect(ctl(ID_MIN), &rm);
+        GetWindowRect(ctl(ID_GAME_SB), &rs);
+        GetWindowRect(ctl(ID_GAME_LOC), &rl);
+        MapWindowPoints(NULL, g_hwnd, (POINT *)&rg, 2);
+        MapWindowPoints(NULL, g_hwnd, (POINT *)&rm, 2);
+        MapWindowPoints(NULL, g_hwnd, (POINT *)&rs, 2);
+        MapWindowPoints(NULL, g_hwnd, (POINT *)&rl, 2);
+        if (abs((rg.bottom - rg.top) - SX(HDR_CHIP_H)) > 1 || abs(rg.top - SX(HDR_CHIP_Y)) > 1 ||
+            /* W403: Zahnrad unter _ x, rechtsbuendig mit der Inhaltskante (frueher links von _ x) */
+            rg.top < rm.bottom || abs(rg.right - SX(CX0 + CW)) > 1 || rm.bottom > SX(HDR_CHIP_Y) + 2 || rs.top < SX(HDR_SUB_Y + HDR_SUB_H) ||
+            rs.bottom > SX(TITLE_H) - 2 || rl.left - rs.right < SX(HDR_GAME_GAP) - 1) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Lage Zahnrad %ld..%ld/%ld..%ld, _ %ld..%ld/%ld, Tabs %ld..%ld/%ld..%ld",
+                        rg.left, rg.right, rg.top, rg.bottom, rm.left, rm.right, rm.bottom, rs.top, rs.bottom,
+                        rs.right, rl.left);
+        }
+    }
+    show_page(P_PLAY);
+    if (!why[0]) {
+        GT_OK("65d W401 HEADER (Projektzeile + Edition/Beta ungekuerzt, Chips rechts frei und gleich hoch wie das Zahnrad, _ x getrennt, Chips anklickbar, Status -> Zahnrad)");
+    } else {
+        GT_FAIL("65d W401 HEADER", "%s", why);
+    }
+}
+
+/* --- 65b (W375, GitHub #50): LoC-Tab -> Grafik aendern -> Speichern ohne SB-Abbild. Vorher meldete do_save
+ * "No game data set" und schrieb nichts (nach dem Neustart alte Werte). Jetzt: gespeichert, nach erneutem Lesen
+ * da; Gegenprobe SB-Tab ohne Spieldaten lehnt weiter ab. user.cfg = Temp-Datei (g_ucfg_test). --- */
+/* --- 65d (W400 LAUNCHER-LOC-ONLINE-GATE): LoC-Start nur mit Stufe "Mit steelnet verbinden". Offline bzw. Nur
+ * Version: Knopf grau, Grund + Sprung sichtbar, Zeile Online warnt ("Change" -> Zahnrad), kein Start ueber
+ * Knopf/Launch-Leiste/Enter (Status = Grund); ohne Disc beide Gruende, Disc zuerst. Auf steelnet gestellt
+ * (Zahnrad) sofort frei. Testpartner bleibt sichtbar/nutzbar, SB-Start unabhaengig von der Stufe. */
+static void loc_gate_gui_selftest(int *pass, int *fail)
+{
+    static const int kIds[] = { ID_LOC_START, ID_START, ID_START_MENU, ID_START_BIG, IDOK };
+    char why[300] = "", tmp[1024], cfg[1200], keep[16];
+    int on0 = g_loc_online, fs0 = g_onl_fix_srv, uc0 = g_upd_cfg, ask0 = g_upd_ask, m, k, li;
+    loc_sumrow_t r[LOC_SUM_N];
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw400_gui_user_%lu.cfg", tmp, GetCurrentProcessId());
+    write_file(cfg, "[display]\nwidth=1280\n");
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    g_locgate_skip = 0;
+    g_onl_fix_srv = 1; /* Dienst eingerichtet (steelnet waehlbar) */
+    g_upd_cfg = 1;     /* kein Update-Abruf beim Waehlen */
+    g_upd_ask = 0;
+    gt_setenv("SB_TEST_LOC_READY", "1");
+    strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_ISO);
+    memset(&g_locfix, 0, sizeof g_locfix);
+    g_locfix.kind = LGAME_IMG_LOC;
+    g_locfix.title_id = LGAME_TID_LOC;
+    g_game = LGAME_LOC;
+    loctab_nav_layout();
+    show_page(P_PLAY);
+    ui_settext(ctl(ID_LOC_IMAGE), LOC_ISO);
+    loctab_check();
+    ui_settext(ctl(ID_LOC_CODE), "");
+    for (m = NETM_VER; m <= NETM_OFF && !why[0]; m++) { /* 1: Nur Version / Offline -> gesperrt */
+        for (li = 0; li < 2 && !why[0]; li++) {
+            sb_lang_set(li ? "de" : "en");
+            ui_apply_language();
+            on_command(ID_NETM0 + m, BN_CLICKED); /* Zahnrad > Online & Updates */
+            show_page(P_PLAY);
+            pump();
+            if (netm_get() != m) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Stufe %d nicht gewaehlt (%d)", m, netm_get());
+            } else if (IsWindowEnabled(ctl(ID_LOC_START))) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Stufe %d: LoC-Start nicht grau", m);
+            } else if (!IsWindowVisible(ctl(ID_LOC_GATE_GO))) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Stufe %d: Sprung zum Zahnrad fehlt", m);
+            } else if (!strstr(LT("gui.loc_gate_why"), "steelnet")) {
+                strcpy_s(why, sizeof why, "Grund ohne steelnet");
+            }
+            loctab_sum_rows(r);
+            if (!why[0] && (strcmp(r[4].value, LT("gui.loc_sum_net_off")) != 0 || r[4].col != C_WARN))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s Zeile Online '%s'", li ? "de" : "en", r[4].value);
+            for (k = 0; k < 5 && !why[0]; k++) { /* jeder Startweg: gleiche Sperre, keine Hintertuer */
+                set_status_k("x", 0);
+                g_loc_last_cmd[0] = '\0';
+                if (kIds[k] == IDOK) {
+                    SetFocus(NULL);
+                }
+                on_command(kIds[k], BN_CLICKED);
+                if (g_loc_last_cmd[0] || strcmp(g_status, LT("gui.loc_gate_why")) != 0)
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "Stufe %d Start %d: '%.120s' '%.80s'", m, kIds[k],
+                                g_status, g_loc_last_cmd);
+            }
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+            if (!why[0] && (!IsWindowVisible(ctl(ID_LOCTP_OPEN)) || !IsWindowEnabled(ctl(ID_LOCTP_OPEN))))
+                strcpy_s(why, sizeof why, "Testpartner gesperrt");
+#endif
+        }
+    }
+    if (!why[0]) { /* 2: ohne Disc beide Gruende, Disc zuerst */
+        ui_settext(ctl(ID_LOC_IMAGE), "");
+        loctab_check();
+        set_status_k("x", 0);
+        on_command(ID_LOC_START, BN_CLICKED);
+        {
+            const char *a = strstr(g_status, LT("gui.loc_start_noimg")), *b = strstr(g_status, LT("gui.loc_gate_why"));
+            if (!a || !b || a > b || g_loc_last_cmd[0])
+                _snprintf_s(why, sizeof why, _TRUNCATE, "ohne Disc: '%.200s'", g_status);
+        }
+        loctab_sum_rows(r);
+        if (!why[0] && (r[0].col == C_OK || r[4].col != C_WARN))
+            strcpy_s(why, sizeof why, "ohne Disc: Zeilen Spiel/Online");
+        ui_settext(ctl(ID_LOC_IMAGE), LOC_ISO);
+        loctab_check();
+    }
+    if (!why[0]) { /* 3: "Change" bei Online und der Sprung fuehren zum Zahnrad */
+        show_page(P_PLAY);
+        on_command(ID_LOC_GO0 + LOC_SUM_N - 1, BN_CLICKED);
+        if (g_page != P_LSET)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Change Online -> Seite %d", g_page);
+        show_page(P_PLAY);
+        on_command(ID_LOC_GATE_GO, BN_CLICKED);
+        if (!why[0] && g_page != P_LSET)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Sprung -> Seite %d", g_page);
+    }
+    if (!why[0]) { /* 4: SB-Start unabhaengig von der Stufe (Startweg nicht durch die LoC-Sperre) */
+        int en[2], vis[2], j;
+        g_game = LGAME_SB;
+        loctab_nav_layout();
+        for (j = 0; j < 2; j++) { /* Offline, dann steelnet: SB-Start gleich (grau/frei je Ausgabe/Client) */
+            g_upd_cfg = 1;
+            on_command(ID_NETM0 + (j ? NETM_STEEL : NETM_OFF), BN_CLICKED);
+            show_page(P_PLAY);
+            pump();
+            en[j] = IsWindowEnabled(ctl(ID_START_BIG)) ? 1 : 0;
+            vis[j] = IsWindowVisible(ctl(ID_START_BIG)) && !IsWindowVisible(ctl(ID_LOC_GATE_GO));
+        }
+        if (en[0] != en[1] || !vis[0] || !vis[1])
+            _snprintf_s(why, sizeof why, _TRUNCATE, "SB-Start von der LoC-Sperre betroffen (%d/%d %d/%d)", en[0], en[1],
+                        vis[0], vis[1]);
+        on_command(ID_NETM0 + NETM_OFF, BN_CLICKED);
+        g_game = LGAME_LOC;
+        loctab_nav_layout();
+    }
+    if (!why[0]) { /* 5: auf steelnet gestellt -> sofort frei, Startweg online */
+        show_page(P_LSET);
+        g_upd_cfg = 1; /* kein Update-Abruf beim Waehlen */
+        on_command(ID_NETM0 + NETM_STEEL, BN_CLICKED);
+        show_page(P_PLAY);
+        pump();
+        g_loc_last_cmd[0] = '\0';
+        on_command(ID_LOC_START, BN_CLICKED);
+        loctab_sum_rows(r);
+        if (netm_get() != NETM_STEEL || !IsWindowEnabled(ctl(ID_LOC_START)) || IsWindowVisible(ctl(ID_LOC_GATE_GO)))
+            strcpy_s(why, sizeof why, "steelnet: Start nicht frei");
+        else if (!strstr(g_loc_last_cmd, "loc_transport=udp") || !strstr(g_loc_last_cmd, LOC_ISO))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "steelnet: Startweg '%.200s'", g_loc_last_cmd);
+        else if (strcmp(r[4].value, LT("gui.loc_sum_net_off")) == 0)
+            strcpy_s(why, sizeof why, "steelnet: Zeile Online warnt weiter");
+    }
+    if (!why[0]) { /* 6: zurueck auf Offline -> sofort wieder gesperrt */
+        on_command(ID_NETM0 + NETM_OFF, BN_CLICKED);
+        show_page(P_PLAY);
+        if (IsWindowEnabled(ctl(ID_LOC_START)))
+            strcpy_s(why, sizeof why, "Offline danach: Start nicht grau");
+    }
+    /* aufraeumen */
+    SetEnvironmentVariableA("SB_TEST_LOC_READY", NULL);
+    g_locgate_skip = 1;
+    g_loc_online = on0;
+    g_onl_fix_srv = fs0;
+    g_upd_cfg = uc0;
+    g_upd_ask = ask0;
+    g_loc_last_cmd[0] = '\0';
+    g_locfix_path[0] = '\0';
+    g_loc_checked = 0;
+    ui_settext(ctl(ID_LOC_IMAGE), "");
+    u8_DeleteFile(cfg);
+    g_ucfg_test[0] = '\0';
+    sb_lang_set(keep);
+    ui_apply_language();
+    g_game = LGAME_SB;
+    loctab_nav_layout();
+    onl_sync_ui();
+    netm_sync_ui();
+    show_page(P_PLAY);
+    if (!why[0]) {
+        GT_OK("65d W400 LOC-ONLINE-GATE (LoC nur mit steelnet: Version/Offline grau + Grund + Sprung, alle Startwege gesperrt, ohne Disc Disc-Grund zuerst, steelnet sofort frei, Testpartner und SB frei)");
+    } else {
+        GT_FAIL("65d W400 LOC-ONLINE-GATE", "%s", why);
+    }
+}
+
+/* --- 65e (W403 LAUNCHER-R1-POLISH): (1) LoC ohne Disc: Knopf grau, Sprung "Disc-Abbild waehlen" (statt steelnet),
+ * Grund = Disc zuerst, Start verweigert, Sprung fuehrt nach Erweitert; mit Disc + steelnet frei. SB ohne Abbild: alle
+ * Startwege gesperrt, Grund = R3. (2) Kopf-Chip: grau "steelnet ..." bis zur ersten Pruefung, gruen online, warnfarben
+ * offline, "steelnet aus" (Nur Version), "offline". (3) Tooltips (Status, Update). (4) Pruefung nie im Test-/Shot-
+ * Betrieb (g_snp_dry zaehlt nur; ohne steelnet kein Anstoss). (5) Eject-Standard Umschalt+Entf, ohne Konflikt.
+ * (6) Kopf rechtsbuendig zur Inhaltskante. (7) Multiplayer-Karte ohne steelnet-Satz. */
+static void r1_polish_gui_selftest(int *pass, int *fail)
+{
+    char why[300] = "", tmp[1024], cfg[1200], keep[16], t[1000], m[700];
+    int on0 = g_loc_online, fs0 = g_onl_fix_srv, uc0 = g_upd_cfg, ask0 = g_upd_ask, li;
+    lacc_probe_t pr;
+    hdr_lay_t L;
+    COLORREF col, dot;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw403_gui_user_%lu.cfg", tmp, GetCurrentProcessId());
+    write_file(cfg, "[display]\nwidth=1280\n");
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    g_locgate_skip = 0;
+    g_onl_fix_srv = 1;
+    g_upd_cfg = 1;
+    g_upd_ask = 0;
+    g_snp_dry = 1; /* nie Netz: Anstoss nur zaehlen */
+    g_snp_dry_n = 0;
+    gt_setenv("SB_TEST_LOC_READY", "1");
+    strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_ISO);
+    memset(&g_locfix, 0, sizeof g_locfix);
+    g_locfix.kind = LGAME_IMG_LOC;
+    g_locfix.title_id = LGAME_TID_LOC;
+    g_game = LGAME_LOC;
+    loctab_nav_layout();
+    on_command(ID_NETM0 + NETM_STEEL, BN_CLICKED);
+    show_page(P_PLAY);
+    ui_settext(ctl(ID_LOC_IMAGE), "");
+    loctab_check();
+    show_page(P_PLAY);
+    pump();
+    /* 1a: LoC ohne Disc (steelnet an): grau, Disc-Sprung statt steelnet-Sprung, Start verweigert */
+    if (IsWindowEnabled(ctl(ID_LOC_START)) || !IsWindowVisible(ctl(ID_LOC_IMG_GO)) ||
+        IsWindowVisible(ctl(ID_LOC_GATE_GO)) || IsWindowEnabled(ctl(ID_START)) || IsWindowEnabled(ctl(ID_START_MENU))) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "ohne Disc: en %d img %d gate %d fuss %d/%d", IsWindowEnabled(ctl(ID_LOC_START)),
+                    IsWindowVisible(ctl(ID_LOC_IMG_GO)), IsWindowVisible(ctl(ID_LOC_GATE_GO)),
+                    IsWindowEnabled(ctl(ID_START)), IsWindowEnabled(ctl(ID_START_MENU)));
+    } else if (!loc_img_gate(m, sizeof m) || strcmp(m, LT("gui.loc_sum_none")) != 0) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "ohne Disc: Grund '%.200s'", m);
+    }
+    if (!why[0]) {
+        static const int kIds[] = { ID_LOC_START, ID_START, ID_START_MENU, ID_START_BIG };
+        int k;
+        for (k = 0; k < 4 && !why[0]; k++) {
+            g_loc_last_cmd[0] = '\0';
+            set_status_k("x", 0);
+            on_command(kIds[k], BN_CLICKED);
+            if (g_loc_last_cmd[0] || !strstr(g_status, LT("gui.loc_start_noimg")))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "ohne Disc Start %d: '%.150s'", kIds[k], g_status);
+        }
+    }
+    if (!why[0]) { /* 1b: Sprung -> Erweitert (Disc-Karte) */
+        on_command(ID_LOC_IMG_GO, BN_CLICKED);
+        if (g_page != P_ADV || !IsWindowVisible(ctl(ID_LOC_IMAGE)))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Disc-Sprung -> Seite %d", g_page);
+    }
+    if (!why[0]) { /* 1c: ohne Disc und ohne steelnet: beide Gruende, Disc zuerst, ein Sprung (Disc) */
+        on_command(ID_NETM0 + NETM_OFF, BN_CLICKED);
+        show_page(P_PLAY);
+        pump();
+        if (!IsWindowVisible(ctl(ID_LOC_IMG_GO)) || IsWindowVisible(ctl(ID_LOC_GATE_GO)))
+            strcpy_s(why, sizeof why, "ohne Disc + offline: falscher Sprung");
+    }
+    if (!why[0]) { /* 1d: Disc da, offline -> steelnet-Sprung; Disc + steelnet -> frei, kein Sprung */
+        ui_settext(ctl(ID_LOC_IMAGE), LOC_ISO);
+        loctab_check();
+        show_page(P_PLAY);
+        pump();
+        if (IsWindowEnabled(ctl(ID_LOC_START)) || IsWindowVisible(ctl(ID_LOC_IMG_GO)) ||
+            !IsWindowVisible(ctl(ID_LOC_GATE_GO)) || IsWindowEnabled(ctl(ID_START)) || IsWindowEnabled(ctl(ID_START_MENU))) {
+            strcpy_s(why, sizeof why, "Disc + offline: Knopf/Sprung/Fussleiste");
+        } else {
+            on_command(ID_NETM0 + NETM_STEEL, BN_CLICKED);
+            show_page(P_PLAY);
+            pump();
+            if (!IsWindowEnabled(ctl(ID_LOC_START)) || IsWindowVisible(ctl(ID_LOC_IMG_GO)) ||
+                IsWindowVisible(ctl(ID_LOC_GATE_GO)) || !IsWindowEnabled(ctl(ID_START)) || !IsWindowEnabled(ctl(ID_START_MENU)))
+                strcpy_s(why, sizeof why, "Disc + steelnet: nicht frei (Knopf/Fussleiste)");
+        }
+    }
+    if (!why[0]) { /* 7: Multiplayer-Karte ohne steelnet: Konto-Zeile statt steelnet-Satz */
+        mp_card_acc_line(t, sizeof t);
+        if (strstr(t, "steelnet") || strstr(LT("gui.mp_card_off"), "steelnet") || strstr(LT("gui.loc_gate_short"), "Zahnrad") ||
+            strlen(LT("gui.loc_gate_short")) > 60)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Karte/Grund: '%.100s'", t);
+    }
+    if (!why[0]) { /* 1e: SB ohne Abbild: R3 sperrt alle Startwege, Grund = R3 */
+        launcher_settings_t ks = g_s;
+        g_game = LGAME_SB;
+        loctab_nav_layout();
+        g_s.game_image[0] = g_s.xbe_path[0] = g_s.media_root[0] = '\0';
+        ui_from_settings(&g_s);
+        ui_apply_rules();
+        show_page(P_PLAY);
+        pump();
+        if (!g_rr[3].active || IsWindowEnabled(ctl(ID_START_BIG)) || IsWindowEnabled(ctl(ID_START)) ||
+            IsWindowEnabled(ctl(ID_START_MENU)) || strcmp(g_rr[3].text, LT("gui.rule_r3")) != 0 ||
+            !strstr(LT("gui.rule_r3"), LT("gui.btn_browse"))) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "SB ohne Abbild: r3 %d en %d '%.100s'", g_rr[3].active,
+                        IsWindowEnabled(ctl(ID_START_BIG)), g_rr[3].text);
+        } else {
+            set_status_k("x", 0);
+            g_loc_last_cmd[0] = '\0';
+            on_command(ID_START_BIG, BN_CLICKED);
+            if (strcmp(g_status, LT("gui.rule_r3")) != 0)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "SB Start ohne Abbild: '%.150s'", g_status);
+        }
+        g_s = ks;
+        ui_from_settings(&g_s);
+        ui_apply_rules();
+    }
+    /* 2 + 3 + 4: Chip-Zustaende, Tooltips, kein Netz */
+    for (li = 0; li < 2 && !why[0]; li++) {
+        sb_lang_set(li ? "de" : "en");
+        ui_apply_language();
+        g_snp_dry_n = 0;
+        on_command(ID_NETM0 + NETM_VER, BN_CLICKED);
+        hdr_chip_text(HDR_CHIP_ST, 0, t, sizeof t, &col, &dot);
+        if (strcmp(t, LT("gui.hdr_steel_none")) != 0 || col != C_DIM || g_snp_state != -1)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "%s Nur Version: '%s'", li ? "de" : "en", t);
+        hdr_tip_text(HDR_CHIP_ST, t, sizeof t);
+        if (!why[0] && strcmp(t, LT("gui.hdr_tip_none")) != 0 && !strstr(t, LT("gui.hdr_tip_none")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Tooltip Nur Version '%.100s'", t);
+        if (!why[0] && g_snp_dry_n != 0)
+            strcpy_s(why, sizeof why, "Nur Version: Pruefung angestossen");
+        on_command(ID_NETM0 + NETM_OFF, BN_CLICKED);
+        hdr_chip_text(HDR_CHIP_ST, 0, t, sizeof t, &col, &dot);
+        if (!why[0] && strcmp(t, LT("gui.hdr_offline")) != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Offline: '%s'", t);
+        on_command(ID_NETM0 + NETM_STEEL, BN_CLICKED); /* -> genau ein Anstoss (Attrappe), grau bis Ergebnis */
+        hdr_chip_text(HDR_CHIP_ST, 0, t, sizeof t, &col, &dot);
+        if (!why[0] && (g_snp_dry_n != 1 || strcmp(t, LT("gui.hdr_steel_wait")) != 0 || col != C_DIM))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "steelnet vor Pruefung: n %d '%s'", g_snp_dry_n, t);
+        hdr_tip_text(HDR_CHIP_ST, t, sizeof t);
+        if (!why[0] && (!strstr(t, LT("gui.hdr_tip_wait")) || !strstr(t, LT("gui.hdr_tip_click"))))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Tooltip wartend '%.100s'", t);
+        memset(&pr, 0, sizeof pr);
+        pr.ok = 1;
+        pr.ms = 38;
+        strcpy_s(pr.version, sizeof pr.version, "2.4");
+        snp_apply(&pr);
+        hdr_chip_text(HDR_CHIP_ST, 0, t, sizeof t, &col, &dot);
+        if (!why[0] && (strcmp(t, LT("gui.hdr_steel_on")) != 0 || col != C_OK || dot != C_OK))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "online: '%s'", t);
+        hdr_tip_text(HDR_CHIP_ST, t, sizeof t);
+        if (!why[0]) {
+            char a[80], b[80], c[80];
+            _snprintf_s(a, sizeof a, _TRUNCATE, LT("gui.hdr_tip_reach"), LT("gui.hdr_tip_yes"));
+            _snprintf_s(b, sizeof b, _TRUNCATE, LT("gui.hdr_tip_ms"), 38);
+            _snprintf_s(c, sizeof c, _TRUNCATE, LT("gui.hdr_tip_ver"), "2.4");
+            if (!strstr(t, a) || !strstr(t, b) || !strstr(t, c) || !strstr(t, LT("gui.hdr_tip_click")) ||
+                strstr(t, "relay") || strstr(t, SB_STEELNET_HOST))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Tooltip online '%.200s'", t);
+        }
+        pr.ok = 0;
+        pr.ms = 5000;
+        pr.version[0] = '\0';
+        snp_apply(&pr);
+        hdr_chip_text(HDR_CHIP_ST, 0, t, sizeof t, &col, &dot);
+        if (!why[0] && (strcmp(t, LT("gui.hdr_steel_off")) != 0 || col != C_WARN))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "offline-Ergebnis: '%s'", t);
+        hdr_tip_text(HDR_CHIP_ST, t, sizeof t);
+        if (!why[0]) {
+            char a[80];
+            _snprintf_s(a, sizeof a, _TRUNCATE, LT("gui.hdr_tip_reach"), LT("gui.hdr_tip_no"));
+            if (!strstr(t, a))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Tooltip offline '%.200s'", t);
+        }
+        if (!why[0]) { /* Update-Chip: installiert/neu/Klick */
+            const char *v0 = g_upd_ver;
+            lupd_res_t r0 = g_upd_res;
+            g_upd_ver = "0.3.0";
+            memset(&g_upd_res, 0, sizeof g_upd_res);
+            g_upd_res.result = LUPD_R_NEWER;
+            strcpy_s(g_upd_res.rel.tag, sizeof g_upd_res.rel.tag, "v0.3.1");
+            hdr_tip_text(HDR_CHIP_UPD, t, sizeof t);
+            if (!strstr(t, "0.3.0") || !strstr(t, "0.3.1") || !strstr(t, LT("gui.hdr_tip_rel")))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Tooltip Update '%.200s'", t);
+            g_upd_ver = v0;
+            g_upd_res = r0;
+        }
+        if (!why[0]) { /* 4: Fensterbetrieb aus (g_snp_live 0) und ohne Attrappe -> nie ein Thread */
+            int busy0 = g_snp_busy, live0 = g_snp_live;
+            g_snp_dry = 0;
+            g_snp_live = 0;
+            if (snp_kick() != 0 || g_snp_busy != busy0)
+                strcpy_s(why, sizeof why, "Pruefung ausserhalb des Fensterbetriebs");
+            g_snp_live = live0;
+            g_snp_dry = 1;
+        }
+        on_command(ID_NETM0 + NETM_OFF, BN_CLICKED); /* Ergebnis vergessen */
+        if (!why[0] && g_snp_state != -1)
+            strcpy_s(why, sizeof why, "Offline: Ergebnis nicht vergessen");
+    }
+    if (!why[0]) { /* 6: Kopf rechtsbuendig: Zahnrad endet an der Inhaltskante, Chips links daneben, unter _ x */
+        hdr_layout(&L);
+        if (HDR_GEAR_X + HDR_GEAR_W != CX0 + CW || HDR_CHIP_Y < HDR_WB_H || L.x[0] + L.w[0] != HDR_CHIP_R)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Kopf: Zahnrad %d..%d Inhalt %d Chip %d", HDR_GEAR_X,
+                        HDR_GEAR_X + HDR_GEAR_W, CX0 + CW, L.x[0] + L.w[0]);
+    }
+    if (!why[0]) { /* 5: Eject-Standard (Launcher-Kopie der Standardbelegung) */
+        static lctrl_bind_t b; /* gross (~31 KB): nicht auf den Stapel des Selbsttests */
+        char cf[4][160];
+        int ix = lctrl_bind_elem_index("bi3"), n, k;
+        lctrl_bind_init(&b);
+        lctrl_bind_load_text(ks_legacy_text, &b);
+        if (ix < 0 || b.row[ix].n_alt != 1 || strcmp(b.row[ix].alt[0], "KEY:SHIFT+KEY:DELETE") != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Eject-Standard '%s'", ix >= 0 ? b.row[ix].alt[0] : "?");
+        } else {
+            n = lctrl_bind_conflicts(&b, cf, 4);
+            for (k = 0; k < n && !why[0]; k++) {
+                if (strstr(cf[k], "DELETE"))
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "Eject-Konflikt '%s'", cf[k]);
+            }
+        }
+    }
+    /* aufraeumen */
+    SetEnvironmentVariableA("SB_TEST_LOC_READY", NULL);
+    g_snp_dry = 0;
+    g_snp_state = -1;
+    g_locgate_skip = 1;
+    g_loc_online = on0;
+    g_onl_fix_srv = fs0;
+    g_upd_cfg = uc0;
+    g_upd_ask = ask0;
+    g_loc_last_cmd[0] = '\0';
+    g_locfix_path[0] = '\0';
+    g_loc_checked = 0;
+    ui_settext(ctl(ID_LOC_IMAGE), "");
+    u8_DeleteFile(cfg);
+    g_ucfg_test[0] = '\0';
+    sb_lang_set(keep);
+    ui_apply_language();
+    g_game = LGAME_SB;
+    loctab_nav_layout();
+    onl_sync_ui();
+    netm_sync_ui();
+    show_page(P_PLAY);
+    if (!why[0]) {
+        GT_OK("65e W403 R1-POLISH (Disc-Sperre LoC/SB + Sprung, Chip grau/gruen/offline/aus/offline, Tooltips, keine Pruefung im Test, Eject Umschalt+Entf, Kopf buendig)");
+    } else {
+        GT_FAIL("65e W403 R1-POLISH", "%s", why);
+    }
+}
+
+/* W402 LAUNCHER-PERGAME (Fall 65e): jedes Spiel hat eigene Werte (user.cfg | user_loc.cfg), LoC-Start nur mit
+ * der LoC-Datei, PAL und SB-Optionen in LoC gesperrt, 16:9 in den Zusammenfassungen. */
+static int pg_has(const char *path, const char *needle)
+{
+    static char b[16384];
+    gt_read(path, b, sizeof b);
+    return strstr(b, needle) != NULL;
+}
+
+static void pergame_gui_selftest(int *pass, int *fail)
+{
+    char why[300] = "", tmp[1024], cfg[1200], lcf[1200], t[800];
+    launcher_settings_t a, keep_s = g_s, keep_base = g_disk_base;
+    int keep_ok = g_disk_base_ok, keep_game = g_game, keep_page = g_page, keep_skip = g_locgate_skip;
+    lgame_state_t keep_loc = g_loc;
+    loc_sumrow_t r[LOC_SUM_N];
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw402_pg_user_%lu.cfg", tmp, GetCurrentProcessId());
+    lgame_cfg_path(cfg, LGAME_LOC, lcf, sizeof lcf);
+    u8_DeleteFile(lcf);
+    write_file(cfg, "[display]\nwidth=1280\n# fremde Zeile\nlauncher_pergame=1\n");
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    memset(g_pg_ok, 0, sizeof g_pg_ok);
+    g_loc.loc_widescreen = LGAME_WIDE_43;
+    /* a: Steel Battalion setzen + speichern */
+    g_game = LGAME_SB;
+    show_page(P_DISPLAY);
+    lcfg_defaults(&a);
+    strcpy_s(a.xbe_path, sizeof a.xbe_path, "C:\\w402\\default.xbe");
+    a.width = 1600;
+    a.height = 900;
+    a.volume_music = 40;
+    a.aim_assist = 1;
+    a.game_tick = 25;
+    g_s = a;
+    disk_base_sync(&g_s);
+    ui_from_settings(&g_s);
+    ui_to_settings(&g_s);
+    if (save_user_merged(cfg) < 0 || !pg_has(cfg, "width=1600\n") || !pg_has(cfg, "volume_music=40\n") ||
+        !pg_has(cfg, "game_tick=25\n"))
+        strcpy_s(why, sizeof why, "a: SB nicht gespeichert");
+    /* b: nach LoC: eigene (Standard-)Werte, keine SB-Werte */
+    if (!why[0]) {
+        loctab_set_game(LGAME_LOC);
+        if (g_game != LGAME_LOC || g_s.width == 1600 || g_s.volume_music == 40 || g_s.game_tick != 30)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "b: LoC zeigt SB-Werte (%ux%u, Musik %d, Takt %d)", g_s.width,
+                        g_s.height, g_s.volume_music, g_s.game_tick);
+        else if (strcmp(g_s.xbe_path, a.xbe_path) != 0)
+            strcpy_s(why, sizeof why, "b: SB-Pfade (global) fehlen im LoC-Stand");
+    }
+    /* c: LoC setzen + speichern -> nur user_loc.cfg, SB-Datei unveraendert */
+    if (!why[0]) {
+        a = g_s;
+        a.width = 1920;
+        a.height = 1080;
+        a.volume_music = 70;
+        a.game_tick = 25; /* PAL kommt nie in die LoC-Datei */
+        ui_from_settings(&a);
+        ui_set_checked(ID_PAL50, 1);
+        ui_to_settings(&g_s);
+        if (g_s.game_tick != 30)
+            strcpy_s(why, sizeof why, "c: PAL in LoC aus der Oberflaeche uebernommen");
+        else if (do_save(0) != 0 || !pg_has(lcf, "width=1920\n") || !pg_has(lcf, "volume_music=70\n") ||
+                 !pg_has(lcf, "game_tick=30\n") || pg_has(lcf, "xbe_path") || pg_has(lcf, "launcher_"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "c: user_loc.cfg falsch (%.100s)", g_status);
+        else if (!pg_has(cfg, "width=1600\n") || pg_has(cfg, "1920") || !pg_has(cfg, "volume_music=40\n") ||
+                 !pg_has(cfg, "# fremde Zeile\n"))
+            strcpy_s(why, sizeof why, "c: user.cfg (SB) mitgeaendert");
+        else {
+            char lw[32];
+            _snprintf_s(lw, sizeof lw, _TRUNCATE, "lang=%s\n", g_s.lang);
+            if (!pg_has(cfg, lw))
+                strcpy_s(why, sizeof why, "c: Sprache (global) nicht in user.cfg");
+        }
+    }
+    /* d: hin und her: jedes Spiel zeigt seine Werte (auch ungespeicherte bleiben je Spiel) */
+    if (!why[0]) {
+        loctab_set_game(LGAME_SB);
+        if (g_s.width != 1600 || g_s.volume_music != 40 || g_s.game_tick != 25 || get_num(ID_W) != 1600)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "d: SB nach Rueckwechsel %ux%u Musik %d Takt %d Feld %u", g_s.width, g_s.height,
+                        g_s.volume_music, g_s.game_tick, get_num(ID_W));
+    }
+    if (!why[0]) {
+        ui_set_checked(ID_PAL50, 1);
+        set_num(ID_W, 1700); /* ungespeichert */
+        loctab_set_game(LGAME_LOC);
+        if (g_s.width != 1920 || g_s.volume_music != 70 || get_num(ID_W) != 1920)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "d: LoC nach Wechsel %u Musik %d", g_s.width, g_s.volume_music);
+        loctab_set_game(LGAME_SB);
+        if (!why[0] && get_num(ID_W) != 1700)
+            strcpy_s(why, sizeof why, "d: ungespeicherte SB-Aenderung verloren");
+        set_num(ID_W, 1600);
+        loctab_set_game(LGAME_LOC);
+    }
+    /* e: PAL und SB-Optionen in LoC gesperrt (mit Grund), in SB frei */
+    if (!why[0]) {
+        show_page(P_AUDIO);
+        ui_apply_rules();
+        pump();
+        tip_text(ID_PAL50, t, sizeof t);
+        if (IsWindowEnabled(ctl(ID_PAL50)) || strcmp(t, LT("gui.loc_lock_tick")) != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "e: PAL in LoC nicht gesperrt ('%.80s')", t);
+        else if (ctl(ID_RP_LABEL) && IsWindowEnabled(ctl(ID_RP_LABEL)))
+            strcpy_s(why, sizeof why, "e: Replay-Beschriftung in LoC frei");
+    }
+    if (!why[0]) {
+        show_page(P_CTRL);
+        ui_apply_rules();
+        if (IsWindowEnabled(ctl(ID_CTRL_AIMASSIST)) || IsWindowEnabled(ctl(ID_CTRL_AUTOGEAR)))
+            strcpy_s(why, sizeof why, "e: Zielhilfe/Automatik in LoC frei");
+        loctab_set_game(LGAME_SB);
+        show_page(P_AUDIO);
+        ui_apply_rules();
+        if (!why[0] && (!IsWindowEnabled(ctl(ID_PAL50)) || !ui_checked(ID_PAL50)))
+            strcpy_s(why, sizeof why, "e: PAL in SB gesperrt oder Wert verloren");
+        loctab_set_game(LGAME_LOC);
+    }
+    /* f: Startweg: LoC startet mit user_loc.cfg (SB_USER_CFG), nie PAL; die SB-Kette kennt keine LoC-Werte */
+    if (!why[0]) {
+        g_locgate_skip = 1;
+        strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_ISO);
+        memset(&g_locfix, 0, sizeof g_locfix);
+        g_locfix.kind = LGAME_IMG_LOC;
+        g_locfix.title_id = LGAME_TID_LOC;
+        ui_settext(ctl(ID_LOC_IMAGE), LOC_ISO);
+        loctab_check();
+        g_loc_online = 0;
+        g_loc_last_cmd[0] = g_loc_last_cfg[0] = '\0';
+        on_command(ID_LOC_START, BN_CLICKED);
+        if (!strstr(g_loc_last_cmd, "loc_boot=1") || !strstr(g_loc_last_cmd, "game_tick=30") ||
+            strstr(g_loc_last_cmd, "game_tick=25") || strstr(g_loc_last_cmd, "user.cfg"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "f: LoC-Kette '%.160s'", g_loc_last_cmd);
+        else if (_stricmp(g_loc_last_cfg, lcf) != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "f: LoC-Datei '%.120s'", g_loc_last_cfg);
+        else if (!pg_has(lcf, "input_test_hook=0\n") || pg_has(cfg, "input_test_hook"))
+            strcpy_s(why, sizeof why, "f: Spielerbetrieb-Block nicht (nur) in user_loc.cfg");
+        else if (GetEnvironmentVariableA("SB_USER_CFG", t, sizeof t) > 0)
+            strcpy_s(why, sizeof why, "f: SB_USER_CFG bleibt im Launcher gesetzt");
+        g_locfix_path[0] = '\0';
+    }
+    /* g: 16:9 ueberall statt 4:3 (Startbereit, Anzeige-Vorschau/Text, Warnband), Texte ohne "geteilt" */
+    if (!why[0]) {
+        g_loc.loc_widescreen = LGAME_WIDE_169;
+        update_aspect_info();
+        ui_apply_rules();
+        loctab_sum_rows(r);
+        if (!strstr(r[2].value, LT("gui.loc_wide_169")) || strstr(r[2].value, LT("gui.loc_wide_43")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "g: Startbereit '%.120s'", r[2].value);
+        else if (!strstr(g_aspect_info, "16:9") || strstr(g_aspect_info, "4:3"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "g: Anzeige '%.120s'", g_aspect_info);
+        else if (!(g_orig_mask & (1u << SB_OFG_WIDE)))
+            strcpy_s(why, sizeof why, "g: Warnband ohne Breitbild");
+        else if (!loc_lock_key(ID_EDGE))
+            strcpy_s(why, sizeof why, "g: Raender bei 16:9 nicht gesperrt");
+        g_loc.loc_widescreen = LGAME_WIDE_43;
+        update_aspect_info();
+        if (!why[0] && (strstr(g_aspect_info, "16:9") || loc_lock_key(ID_EDGE)))
+            strcpy_s(why, sizeof why, "g: 4:3 zeigt 16:9 bzw. sperrt die Raender");
+    }
+    if (!why[0]) {
+        static const char *const kKeys[] = { "gui.loc_shared_rows", "gui.loc_switched", "gui.of_banner_loc", "gui.vol_status" };
+        int li, k;
+        for (li = 0; li < 2 && !why[0]; li++) {
+            sb_lang_set(li ? "de" : "en");
+            for (k = 0; k < 4 && !why[0]; k++) {
+                const char *v = LT(kKeys[k]);
+                if (strstr(v, "shared") || strstr(v, "also apply") || strstr(v, "teilt es") || strstr(v, "auch f\xC3\xBCr Steel"))
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "g: Text %s '%.80s'", kKeys[k], v);
+            }
+        }
+        sb_lang_set("en");
+    }
+    u8_DeleteFile(cfg);
+    u8_DeleteFile(lcf);
+    g_ucfg_test[0] = '\0';
+    g_locgate_skip = keep_skip;
+    g_loc = keep_loc;
+    memset(g_pg_ok, 0, sizeof g_pg_ok);
+    g_game = keep_game;
+    g_s = keep_s;
+    g_disk_base = keep_base;
+    g_disk_base_ok = keep_ok;
+    ui_from_settings(&g_s);
+    loctab_nav_layout();
+    show_page(keep_page);
+    ui_apply_rules();
+    if (!why[0]) {
+        GT_OK("65e W402 LAUNCHER-PERGAME (SB/LoC getrennt gespeichert und angezeigt, hin und her inkl. ungespeicherter Werte, "
+              "LoC-Start mit user_loc.cfg + Spielerblock, nie PAL, PAL/Zielhilfe/Automatik/Replay in LoC gesperrt mit Grund, "
+              "SB frei, 16:9 in Startbereit/Anzeige/Warnband, Texte DE/EN ohne 'geteilt')");
+    } else {
+        GT_FAIL("65e W402 LAUNCHER-PERGAME", "%s", why);
+    }
+}
+
+static void loc_save_gui_selftest(int *pass, int *fail)
+{
+    char why[300] = "", tmp[1024], cfg[1200], lcf[1200], buf[8192];
+    launcher_settings_t s0, s1, keep_s = g_s, keep_base = g_disk_base;
+    int keep_ok = g_disk_base_ok, keep_game = g_game, r;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw375_locsave_user.cfg", tmp);
+    {
+        FILE *f = NULL;
+        if (u8_fopen_s(&f, cfg, "w") == 0 && f) {
+            fputs("[display]\nwidth=1280\nheight=720\n# fremde Zeile\n", f);
+            fclose(f);
+        }
+    }
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    lgame_cfg_path(cfg, LGAME_LOC, lcf, sizeof lcf); /* W402: LoC speichert in user_loc.cfg */
+    u8_DeleteFile(lcf);
+    lcfg_defaults(&s0);
+    s0.game_image[0] = s0.xbe_path[0] = s0.media_root[0] = '\0'; /* kein SB-Abbild, kein Ordner */
+    s0.width = 1280;
+    s0.height = 720;
+    g_game = LGAME_LOC;
+    disk_base_sync(&s0);
+    s0.width = 1920; /* Grafik geaendert */
+    s0.height = 1080;
+    ui_from_settings(&s0);
+    r = do_save(0);
+    gt_read(lcf, buf, sizeof buf);
+    if (r != 0) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "LoC-Tab: Speichern abgelehnt (%.120s)", g_status);
+    } else if (!strstr(buf, "width=1920\n") || !strstr(buf, "height=1080\n") || strstr(buf, "xbe_path=")) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "LoC-Tab: nicht geschrieben: %.120s", buf);
+    }
+    if (!why[0]) { /* W402: SB-Datei unveraendert */
+        gt_read(cfg, buf, sizeof buf);
+        if (!strstr(buf, "width=1280\n") || strstr(buf, "width=1920") || !strstr(buf, "# fremde Zeile\n"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "SB-Datei mitgeaendert: %.120s", buf);
+    }
+    if (!why[0]) { /* Launcher-Neustart: Werte aus der Datei */
+        lcfg_defaults(&s1);
+        if (lcfg_load_file(lcf, &s1) != 0 || s1.width != 1920 || s1.height != 1080) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "nach Neustart %dx%d", s1.width, s1.height);
+        }
+    }
+    if (!why[0]) { /* Gegenprobe: SB-Tab ohne Spieldaten lehnt weiter ab, Datei bleibt */
+        g_game = LGAME_SB;
+        s0.width = 1600;
+        s0.height = 900;
+        ui_from_settings(&s0);
+        if (do_save(0) == 0) {
+            strcpy_s(why, sizeof why, "SB-Tab ohne Spieldaten gespeichert");
+        } else {
+            gt_read(lcf, buf, sizeof buf);
+            if (!strstr(buf, "width=1920\n")) strcpy_s(why, sizeof why, "SB-Tab: Datei trotz Ablehnung geaendert");
+        }
+    }
+    u8_DeleteFile(cfg);
+    u8_DeleteFile(lcf);
+    g_ucfg_test[0] = '\0';
+    g_game = keep_game;
+    g_s = keep_s;
+    g_disk_base = keep_base;
+    g_disk_base_ok = keep_ok;
+    ui_from_settings(&g_s);
+    if (!why[0]) {
+        GT_OK("65b W375 LOC-SAVE #50 (LoC-Tab: Grafik ohne SB-Abbild gespeichert, W402: in user_loc.cfg ohne SB-Pfade, user.cfg unveraendert, nach Neustart da; SB-Tab lehnt weiter ab)");
+    } else {
+        GT_FAIL("65b W375 LOC-SAVE #50", "%s", why);
+    }
+}
+
 /* --- 66 (W278 ORIG-FLAG): Hinweis an/aus auf Spielen (SB + LoC), "Back to
  * original" setzt nur Grafik zurueck und speichert, Einmal-Start (Trockenlauf)
  * schreibt die Original-Werte nur in die --set-Kette, nie in user.cfg.
@@ -19723,7 +22953,7 @@ static void orig_gui_selftest(int *pass, int *fail)
     char why[300] = "", tmp[1024], cfg[1200], keep[16];
     launcher_settings_t s, r;
     const lr_env_t *fix = g_env_fix;
-    int setup;
+    int setup, rc; /* W392: rc = Einmal-Start (Trockenlauf) */
     u8_GetTempPath(tmp, sizeof tmp);
     _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw278_gui_user.cfg", tmp);
     {
@@ -19760,11 +22990,19 @@ static void orig_gui_selftest(int *pass, int *fail)
     /* 2: Einmal-Start (Trockenlauf): Kette mit Original-Werten, user.cfg behaelt Breitbild */
     if (!why[0] && !launch_blocked()) {
         g_start_args[0] = '\0';
-        if (orig_once_start(1) != 0) {
+        g_loc_rb_on = g_loc_own_pred = g_loc_lowd = 0; /* W392: Nicht-Standard darf nie in den SB-Start */
+        g_loc_smooth_opp = 2;
+        rc = orig_once_start(1);
+        g_loc_rb_on = g_loc_own_pred = g_loc_lowd = 1;
+        g_loc_smooth_opp = 1;
+        if (rc != 0) {
             strcpy_s(why, sizeof why, "Einmal-Start (Trockenlauf) gescheitert");
         } else if (!strstr(g_start_args, "edge_mode=1;") || !strstr(g_start_args, "cockpit_hide=0;") ||
                    !strstr(g_start_args, "world_sharpen=0;") || !strstr(g_start_args, "pack_list=;") ||
-                   !strstr(g_start_args, "orig_once=1") || strstr(g_start_args, "interp_fps")) {
+                   !strstr(g_start_args, "orig_once=1") || strstr(g_start_args, "interp_fps") ||
+                   strstr(g_start_args, "loc_smooth_opp") || /* W387: nie im SB-Start */
+                   strstr(g_start_args, "loc_rb_input") || strstr(g_start_args, "loc_own_predict") ||
+                   strstr(g_start_args, "loc_rb_opts")) { /* W392 */
             _snprintf_s(why, sizeof why, _TRUNCATE, "Kette falsch: %.180s", g_start_args);
         } else if (!orig_file_has(cfg, "edge_mode=2") || orig_file_has(cfg, "edge_mode=1") ||
                    !orig_file_has(cfg, "cockpit_hide=1") || orig_file_has(cfg, "orig_once=1") ||
@@ -19836,13 +23074,11 @@ static int lay_gt_page_check(char *why, size_t cap, const char *tag)
     RECT cr, r[UI_MAX];
     int id[UI_MAX], n = 0, i, j, p;
     GetClientRect(g_hwnd, &cr);
-    for (p = 0; p < P_N; p++) {
+    for (p = 0; p <= P_LSET; p++) { /* W397: + Launcher-Einstellungen */
         if (p == P_ALPHA && !g_alpha_tools) {
             continue;
         }
-        if (g_game == LGAME_LOC && p == P_PACKS) { /* W293: Erweitert gibt es auch fuer LoC */
-            continue;
-        }
+        /* W293/W392: bei LoC zaehlt auch die Seite Netzwerk (Packs-Platz) */
         show_page(p);
         pump();
         n = 0;
@@ -19859,7 +23095,7 @@ static int lay_gt_page_check(char *why, size_t cap, const char *tag)
             }
             if (q.left < 0 || q.top < 0 || q.right > cr.right || q.bottom > cr.bottom) {
                 _snprintf_s(why, cap, _TRUNCATE, "%s Seite %s: Element %d ausserhalb (%ld,%ld-%ld,%ld)",
-                            tag, kPageKey[p], u->id, q.left, q.top, q.right, q.bottom);
+                            tag, gui_page_key(p), u->id, q.left, q.top, q.right, q.bottom);
                 return 0;
             }
             r[n] = q;
@@ -19867,7 +23103,7 @@ static int lay_gt_page_check(char *why, size_t cap, const char *tag)
         }
         if (n < 4) { /* Pruefung greift nur mit sichtbaren Elementen */
             _snprintf_s(why, cap, _TRUNCATE, "%s Seite %s: nur %d sichtbare Elemente", tag,
-                        kPageKey[p], n);
+                        gui_page_key(p), n);
             return 0;
         }
         for (i = 0; i < n; i++) {
@@ -19875,7 +23111,7 @@ static int lay_gt_page_check(char *why, size_t cap, const char *tag)
                 RECT x;
                 if (IntersectRect(&x, &r[i], &r[j])) {
                     _snprintf_s(why, cap, _TRUNCATE, "%s Seite %s: Elemente %d/%d ueberlappen",
-                                tag, kPageKey[p], id[i], id[j]);
+                                tag, gui_page_key(p), id[i], id[j]);
                     return 0;
                 }
             }
@@ -20099,8 +23335,11 @@ static void xicon_gui_selftest(int *pass, int *fail)
         if (!why[0]) {
             lay_switch(LLAY_A, LLAY_SZ_NORMAL);
             ui_gettext(ctl(ID_LAYOUT_LBL), tmp, sizeof tmp);
+            show_page(P_LSET); /* W397: Groesse liegt auf den Launcher-Einstellungen */
+            pump();
             xicon_gt_vis(ID_LAYOUT, 1, "Groessen-Kombi in A", why, sizeof why);
             xicon_gt_vis(ID_LAYOUT_LBL, 1, "Beschriftung Groesse in A", why, sizeof why);
+            show_page(P_PLAY);
             if (!why[0] && (strcmp(tmp, LT("gui.lay_size")) != 0 || ComboBox_GetCurSel(c) != LLAY_SZ_NORMAL)) {
                 _snprintf_s(why, sizeof why, _TRUNCATE, "Groessen-Kombi: Beschriftung '%s' / Wahl %d", tmp,
                             ComboBox_GetCurSel(c));
@@ -20180,9 +23419,9 @@ static void lay_gui_selftest(int *pass, int *fail)
             _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Layout nicht gewechselt", tag);
             break;
         }
-        if (IsWindowVisible(ctl(ID_LAYOUT)) != (kSet[k][0] != LLAY_0)) {
+        if (ui_visible_on(ui_find(ID_LAYOUT), P_LSET) != (kSet[k][0] != LLAY_0)) { /* W397: unter dem Zahnrad */
             _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Layout-Kombi sichtbar=%d", tag,
-                        IsWindowVisible(ctl(ID_LAYOUT)));
+                        ui_visible_on(ui_find(ID_LAYOUT), P_LSET));
             break;
         }
         lay_gt_page_check(why, sizeof why, tag);
@@ -20331,7 +23570,7 @@ static void adv_gui_selftest(int *pass, int *fail)
                             IsWindowVisible(u->h) != 0, want);
             }
             if (!why[0] && !IsWindowVisible(ctl(ID_SHOWADV))) {
-                _snprintf_s(why, sizeof why, _TRUNCATE, "Schalter fehlt auf Seite %s", kPageKey[u->page]);
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Schalter fehlt auf Seite %s", gui_page_key(u->page));
             }
         }
         for (k = 0; k < (int)(sizeof kMain / sizeof kMain[0]) && !why[0]; k++) {
@@ -20494,9 +23733,9 @@ static __declspec(noinline) void acc_gui_selftest(int *pass, int *fail)
     loctab_nav_layout();
     /* a: Dienst nicht eingerichtet -> alte Karte, keine Konto-Elemente */
     acc_fixture(0, 0, 0, 0, 0);
-    show_page(P_ADV);
+    show_page(P_LNET);
     pump();
-    if (acc_gt_vis(ID_ACC_NAME) || acc_gt_vis(ID_ACC_MANAGE) || acc_gt_vis(ID_ACC_V_LOGIN) || !acc_gt_vis(ID_LOC_IMAGE))
+    if (acc_gt_vis(ID_ACC_NAME) || acc_gt_vis(ID_ACC_MANAGE) || acc_gt_vis(ID_ACC_V_LOGIN) || !acc_gt_vis(ID_LNET_RB))
         strcpy_s(why, sizeof why, "ohne Dienst: Konto-Elemente sichtbar");
     {
         COLORREF c = 0;
@@ -20508,7 +23747,7 @@ static __declspec(noinline) void acc_gui_selftest(int *pass, int *fail)
     pump();
     if (!why[0] && (!acc_gt_vis(ID_ACC_NAME) || !acc_gt_vis(ID_ACC_CREATE) || !acc_gt_vis(ID_ACC_CHECK) ||
                     !acc_gt_vis(ID_ACC_SIGNIN) || acc_gt_vis(ID_ACC_DISCORD) || acc_gt_vis(ID_ACC_V_LOGIN) ||
-                    !acc_gt_vis(ID_LOC_IMAGE)))
+                    !acc_gt_vis(ID_LNET_RB)))
         strcpy_s(why, sizeof why, "kein Pilot: Karte falsch");
     {
         COLORREF c = 0;
@@ -20537,10 +23776,11 @@ static __declspec(noinline) void acc_gui_selftest(int *pass, int *fail)
     /* d: Verwaltungsansicht deckt die Seite, Code anzeigen/verbergen, Passwort maskiert */
     on_command(ID_ACC_MANAGE, BN_CLICKED);
     pump();
-    if (!why[0] && (!g_acc_view || acc_gt_vis(ID_LOC_IMAGE) || acc_gt_vis(ID_LOC_WIDE) || acc_gt_vis(ID_VSYNC) ||
+    if (!why[0] && (!g_acc_view || acc_gt_vis(ID_LNET_RB) || acc_gt_vis(ID_LOC_VIS) || acc_gt_vis(ID_VSYNC) ||
                     acc_gt_vis(ID_ACC_DISCORD) || !acc_gt_vis(ID_ACC_V_LOGIN) || !acc_gt_vis(ID_ACC_V_PASS) ||
                     !acc_gt_vis(ID_ACC_V_DELETE) || !acc_gt_vis(ID_ACC_V_RECSHOW) || acc_gt_vis(ID_ACC_V_REC) ||
-                    !acc_gt_vis(ID_ACC_BACK) || !acc_gt_vis(ID_ACC_V_CODE)))
+                    !acc_gt_vis(ID_NAVSUB_ACC) || !acc_sub_active() || !acc_gt_vis(ID_ACC_V_CODE) ||
+                    !acc_gt_vis(ID_ACC_V_DISCORD)))
         strcpy_s(why, sizeof why, "Ansicht: Sichtbarkeit");
     if (!why[0] && !(GetWindowLongW(ctl(ID_ACC_V_PASS), GWL_STYLE) & ES_PASSWORD))
         strcpy_s(why, sizeof why, "Passwortfeld nicht maskiert");
@@ -20560,17 +23800,18 @@ static __declspec(noinline) void acc_gui_selftest(int *pass, int *fail)
     if (!why[0] && (g_acc_busy || strcmp(g_status, LT("gui.acc_err_pw")) != 0))
         strcpy_s(why, sizeof why, "kurzes Passwort nicht abgewiesen");
     ui_settext(ctl(ID_ACC_V_PASS), "");
-    /* e: zurueck */
-    on_command(ID_ACC_BACK, BN_CLICKED);
+    /* e: zurueck (W399: Unterpunkt Match & network der Leiste statt Zurueck-Knopf) */
+    on_command(ID_NAVSUB_MATCH, BN_CLICKED);
     pump();
-    if (!why[0] && (g_acc_view || !acc_gt_vis(ID_LOC_IMAGE) || !acc_gt_vis(ID_ACC_MANAGE)))
+    if (!why[0] && (g_acc_view || !acc_gt_vis(ID_LNET_RB) || !acc_gt_vis(ID_ACC_MANAGE)))
         strcpy_s(why, sizeof why, "Zurueck");
     /* f: Anmelden-Ansicht ohne Pilot (Wiederherstellungscode eingeben statt anzeigen) */
     acc_fixture(1, 0, 0, 0, 1);
     acc_refresh();
     pump();
     if (!why[0] && (!acc_gt_vis(ID_ACC_V_REC) || !acc_gt_vis(ID_ACC_V_RECBTN) || acc_gt_vis(ID_ACC_V_RECSHOW) ||
-                    acc_gt_vis(ID_ACC_V_DELETE) || !acc_gt_vis(ID_ACC_V_DISCORD)))
+                    acc_gt_vis(ID_ACC_V_DELETE) || !acc_gt_vis(ID_ACC_V_DISCORD) ||
+                    !acc_gt_vis(ID_ACC_NAME) || !acc_gt_vis(ID_ACC_CREATE) || acc_gt_vis(ID_ACC_SIGNIN)))
         strcpy_s(why, sizeof why, "Anmelden-Ansicht");
     {
         char lbl[64];
@@ -20635,7 +23876,7 @@ static __declspec(noinline) void acc_gui_selftest(int *pass, int *fail)
         g_acc_st_ok = 0;
         g_game = LGAME_LOC;
         loctab_nav_layout();
-        show_page(P_ADV);
+        show_page(P_LNET);
         _snprintf_s(nm, sizeof nm, _TRUNCATE, "Gui%lu", GetCurrentProcessId() % 100000);
         ui_settext(ctl(ID_ACC_NAME), nm);
         on_command(ID_ACC_CREATE, BN_CLICKED);
@@ -20683,6 +23924,188 @@ static __declspec(noinline) void acc_gui_selftest(int *pass, int *fail)
     }
 }
 
+/* --- 75b (W399 LAUNCHER-ACCOUNT-PAGE): Unterpunkte Match & network / Account nur bei LoC auf Multiplayer
+ * (eingerueckt unter dem Elternpunkt, folgende Punkte ruecken nach), "Account verwalten" springt auf Account,
+ * Elternpunkt auf Match & network, Knoepfe der Account-Seite weiter verdrahtet (Fixture, Testmodus ohne Netz:
+ * nur der angestossene Auftrag wird geprueft), Anlegen/Discord am Platz der Ansicht, DE-Texte. --- */
+static int accpage_gt_y(int id)
+{
+    uictl_t *u = ui_find(id);
+    return u ? u->y : -1;
+}
+
+static __declspec(noinline) void accpage_gui_selftest(int *pass, int *fail)
+{
+    char why[300] = "", keep[16], t[120];
+    int g0 = g_game, p0 = g_page, c0 = g_confirm_auto, ya0, ymp;
+    lacc_store_t a0 = g_acc;
+    if (!ctl(ID_NAVSUB_MATCH) || !ctl(ID_NAVSUB_ACC) || !ctl(ID_ACC_V_DISCORD)) {
+        GT_FAIL("75b W399 LAUNCHER-ACCOUNT-PAGE", "%s", "Elemente fehlen");
+        return;
+    }
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    sb_lang_set("en");
+    ui_apply_language();
+    g_confirm_auto = 1;
+    g_game = LGAME_LOC;
+    loctab_nav_layout();
+    acc_fixture(1, 1, 0, 0, 0);
+    /* a: zugeklappt ausserhalb von Multiplayer */
+    show_page(P_GFX);
+    pump();
+    ya0 = accpage_gt_y(ID_NAV0 + P_ADV);
+    if (acc_gt_vis(ID_NAVSUB_MATCH) || acc_gt_vis(ID_NAVSUB_ACC))
+        strcpy_s(why, sizeof why, "Unterpunkte ausserhalb von Multiplayer sichtbar");
+    /* b: auf Multiplayer aufgeklappt, eingerueckt zwischen Multiplayer und Advanced, Match aktiv */
+    on_command(ID_NAV0 + P_LNET, BN_CLICKED);
+    pump();
+    ymp = accpage_gt_y(ID_NAV0 + P_LNET);
+    if (!why[0] && (!acc_gt_vis(ID_NAVSUB_MATCH) || !acc_gt_vis(ID_NAVSUB_ACC) || acc_sub_active() ||
+                    g_page != P_LNET))
+        strcpy_s(why, sizeof why, "Multiplayer: Unterpunkte/Match");
+    if (!why[0] && !(accpage_gt_y(ID_NAVSUB_MATCH) >= ymp + 38 &&
+                     accpage_gt_y(ID_NAVSUB_ACC) >= accpage_gt_y(ID_NAVSUB_MATCH) + NAVSUB_H &&
+                     accpage_gt_y(ID_NAV0 + P_ADV) >= accpage_gt_y(ID_NAVSUB_ACC) + NAVSUB_H &&
+                     accpage_gt_y(ID_NAV0 + P_ADV) > ya0))
+        _snprintf_s(why, sizeof why, _TRUNCATE, "Lage Leiste (MP %d, Sub %d/%d, Adv %d vorher %d)", ymp,
+                    accpage_gt_y(ID_NAVSUB_MATCH), accpage_gt_y(ID_NAVSUB_ACC), accpage_gt_y(ID_NAV0 + P_ADV), ya0);
+    {
+        uictl_t *s0 = ui_find(ID_NAVSUB_MATCH), *mp = ui_find(ID_NAV0 + P_LNET);
+        if (!why[0] && (!s0 || !mp || s0->x != mp->x || s0->h_ >= mp->h_))
+            strcpy_s(why, sizeof why, "Unterpunkt nicht kleiner/buendig");
+    }
+    /* c: "Account verwalten" -> Unterpunkt Account; Elternpunkt -> Match & network */
+    on_command(ID_ACC_MANAGE, BN_CLICKED);
+    pump();
+    if (!why[0] && (!acc_sub_active() || g_page != P_LNET || acc_gt_vis(ID_LNET_RB) || !acc_gt_vis(ID_ACC_V_RECSHOW) ||
+                    !acc_gt_vis(ID_NAVSUB_ACC)))
+        strcpy_s(why, sizeof why, "Account verwalten springt nicht auf Account");
+    on_command(ID_NAV0 + P_LNET, BN_CLICKED);
+    pump();
+    if (!why[0] && (acc_sub_active() || !acc_gt_vis(ID_LNET_RB) || !acc_gt_vis(ID_ACC_MANAGE)))
+        strcpy_s(why, sizeof why, "Elternpunkt nicht Match & network");
+    on_command(ID_NAVSUB_ACC, BN_CLICKED);
+    pump();
+    if (!why[0] && (!acc_sub_active() || acc_gt_vis(ID_LNET_RB)))
+        strcpy_s(why, sizeof why, "Unterpunkt Account");
+    /* d: andere Seite -> zugeklappt, Advanced wieder an alter Stelle; SB nie */
+    show_page(P_CTRL);
+    pump();
+    if (!why[0] && (acc_gt_vis(ID_NAVSUB_MATCH) || acc_gt_vis(ID_NAVSUB_ACC) || accpage_gt_y(ID_NAV0 + P_ADV) != ya0))
+        strcpy_s(why, sizeof why, "Controls: Leiste nicht zugeklappt");
+    g_game = LGAME_SB;
+    loctab_nav_layout();
+    show_page(P_PACKS);
+    pump();
+    if (!why[0] && (acc_gt_vis(ID_NAVSUB_MATCH) || acc_gt_vis(ID_NAVSUB_ACC)))
+        strcpy_s(why, sizeof why, "SB: Unterpunkte sichtbar");
+    g_game = LGAME_LOC;
+    loctab_nav_layout();
+    /* e: ungesichert -> Discord als einziger Hauptknopf im Status; Knoepfe angestossen wie bisher */
+    acc_fixture(1, 1, 0, 0, 1);
+    show_page(P_LNET);
+    acc_refresh();
+    pump();
+    if (!why[0] && (!acc_gt_vis(ID_ACC_V_DISCORD) || accpage_gt_y(ID_ACC_V_DISCORD) != ACC_S_Y + 44))
+        strcpy_s(why, sizeof why, "ungesichert: Discord nicht im Status");
+    g_acc_try_op = 0;
+    on_command(ID_ACC_V_DISCORD, BN_CLICKED);
+    if (!why[0] && g_acc_try_op != ACC_OP_DISCORD_LINK) strcpy_s(why, sizeof why, "Discord verbinden");
+    g_acc_try_op = 0;
+    ui_settext(ctl(ID_ACC_V_CODE), "ABCD-EFGH");
+    on_command(ID_ACC_V_CODEBTN, BN_CLICKED);
+    ui_settext(ctl(ID_ACC_V_CODE), "");
+    if (!why[0] && g_acc_try_op != ACC_OP_TRANSFER) strcpy_s(why, sizeof why, "Uebertragungscode einloesen");
+    g_acc_try_op = 0;
+    ui_settext(ctl(ID_ACC_V_LOGIN), "ace-login");
+    ui_settext(ctl(ID_ACC_V_PASS), "0123456789ab");
+    on_command(ID_ACC_V_LOGINBTN, BN_CLICKED);
+    ui_settext(ctl(ID_ACC_V_PASS), "");
+    if (!why[0] && g_acc_try_op != ACC_OP_LOGIN_SET) strcpy_s(why, sizeof why, "Login sichern");
+    if (!why[0] && (!acc_gt_vis(ID_ACC_V_RECCOPY) || !IsWindowEnabled(ctl(ID_ACC_V_RECCOPY)) || g_acc_rec[0]))
+        strcpy_s(why, sizeof why, "Code kopieren / verdeckt");
+    g_acc_try_op = 0;
+    on_command(ID_ACC_V_DELETE, BN_CLICKED);
+    if (!why[0] && g_acc_try_op != ACC_OP_DELETE) strcpy_s(why, sizeof why, "Loeschen (mit Rueckfrage)");
+    on_command(ID_ACC_V_FORGET, BN_CLICKED); /* Fixture: nichts gespeichert, nur der Speicherzustand */
+    if (!why[0] && g_acc.have) strcpy_s(why, sizeof why, "Abmelden (mit Rueckfrage)");
+    /* f: nur Login gesichert -> Discord in der Zeile Discord; mit Discord verbunden -> kein Knopf */
+    acc_fixture(1, 1, 0, 1, 1);
+    acc_refresh();
+    pump();
+    if (!why[0] && (!acc_gt_vis(ID_ACC_V_DISCORD) || accpage_gt_y(ID_ACC_V_DISCORD) != ACC_M_Y + 96))
+        strcpy_s(why, sizeof why, "Login: Discord nicht unter Sichern");
+    acc_fixture(1, 1, 1, 1, 1);
+    acc_refresh();
+    pump();
+    if (!why[0] && acc_gt_vis(ID_ACC_V_DISCORD)) strcpy_s(why, sizeof why, "verbunden: Discord-Knopf sichtbar");
+    /* g: ohne Account -> Anlegen im Status, Anmelden darunter; Anlegen zurueck auf die Karte */
+    acc_fixture(1, 0, 0, 0, 1);
+    acc_refresh();
+    pump();
+    if (!why[0] && (accpage_gt_y(ID_ACC_NAME) != ACC_S_Y + 54 || !acc_gt_vis(ID_ACC_NAME) || acc_gt_vis(ID_ACC_SIGNIN)))
+        strcpy_s(why, sizeof why, "ohne Account: Anlegen nicht im Status");
+    g_acc_try_op = 0;
+    on_command(ID_ACC_V_DISCORD, BN_CLICKED);
+    if (!why[0] && g_acc_try_op != ACC_OP_DISCORD_LOGIN) strcpy_s(why, sizeof why, "Mit Discord anmelden");
+    g_acc_try_op = 0;
+    ui_settext(ctl(ID_ACC_V_LOGIN), "ace-login");
+    ui_settext(ctl(ID_ACC_V_PASS), "0123456789ab");
+    on_command(ID_ACC_V_LOGINBTN, BN_CLICKED);
+    ui_settext(ctl(ID_ACC_V_PASS), "");
+    ui_settext(ctl(ID_ACC_V_LOGIN), "");
+    if (!why[0] && g_acc_try_op != ACC_OP_LOGIN) strcpy_s(why, sizeof why, "Mit Login anmelden");
+    g_acc_try_op = 0;
+    ui_settext(ctl(ID_ACC_V_REC), "AAAA-BBBB");
+    on_command(ID_ACC_V_RECBTN, BN_CLICKED);
+    ui_settext(ctl(ID_ACC_V_REC), "");
+    if (!why[0] && g_acc_try_op != ACC_OP_RECOVERY) strcpy_s(why, sizeof why, "Wiederherstellungscode einloesen");
+    g_acc_try_op = 0;
+    ui_settext(ctl(ID_ACC_NAME), "Ace Pilot");
+    on_command(ID_ACC_CREATE, BN_CLICKED);
+    ui_settext(ctl(ID_ACC_NAME), "");
+    if (!why[0] && g_acc_try_op != ACC_OP_CREATE) strcpy_s(why, sizeof why, "Anlegen");
+    on_command(ID_NAVSUB_MATCH, BN_CLICKED);
+    pump();
+    if (!why[0] && (accpage_gt_y(ID_ACC_NAME) != LOC_ONL_Y + 40 || !acc_gt_vis(ID_ACC_SIGNIN)))
+        strcpy_s(why, sizeof why, "Match: Anlegen nicht auf der Karte");
+    on_command(ID_ACC_SIGNIN, BN_CLICKED); /* "Auf diesem PC anmelden" -> Account */
+    pump();
+    if (!why[0] && (!acc_sub_active() || !acc_gt_vis(ID_ACC_V_REC)))
+        strcpy_s(why, sizeof why, "Anmelden springt nicht auf Account");
+    /* h: Dienst nicht eingerichtet -> Account-Seite nur mit Hinweis */
+    acc_fixture(0, 0, 0, 0, 1);
+    acc_refresh();
+    pump();
+    if (!why[0] && (acc_gt_vis(ID_ACC_NAME) || acc_gt_vis(ID_ACC_V_DISCORD) || acc_gt_vis(ID_ACC_V_LOGIN) ||
+                    acc_gt_vis(ID_LNET_RB) || !acc_gt_vis(ID_NAVSUB_ACC)))
+        strcpy_s(why, sizeof why, "ohne Dienst: Account-Seite");
+    /* i: DE-Texte */
+    sb_lang_set("de");
+    ui_apply_language();
+    ui_gettext(ctl(ID_NAVSUB_MATCH), t, sizeof t);
+    if (!why[0] && strcmp(t, "Match & Netzwerk") != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "de Unterpunkt '%s'", t);
+    ui_gettext(ctl(ID_NAVSUB_ACC), t, sizeof t);
+    if (!why[0] && strcmp(t, "Account") != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "de Unterpunkt '%s'", t);
+    /* Aufraeumen */
+    g_confirm_auto = c0;
+    g_acc_fixture = 0;
+    g_acc_loaded = 0;
+    g_acc_view = 0;
+    g_acc = a0;
+    g_game = g0;
+    loctab_nav_layout();
+    acc_layout();
+    show_page(p0);
+    sb_lang_set(keep);
+    ui_apply_language();
+    if (!why[0]) {
+        GT_OK("75b W399 LAUNCHER-ACCOUNT-PAGE sidebar sub-items only on LoC Multiplayer (indented, rest moves down, collapsed elsewhere/SB), Manage account/Sign in -> Account, parent -> Match & network, account buttons still wired (Discord link/login, login set/sign-in, transfer, recovery, create, delete/sign out with confirm), Discord button placement, no-service page, DE texts");
+    } else {
+        GT_FAIL("75b W399 LAUNCHER-ACCOUNT-PAGE", "%s", why);
+    }
+}
+
 /* --- 77 (W334 LOC-SEC): Karte "Online (steelnet)": Raumcode-Normalisierung,
  * --set-Zusammenbau mit/ohne Code, loc_net_status.txt (sec=, lobby_code=) aus
  * einer Temp-Datei, Schalter grau ohne Dienst, gemerkt in einer Temp-user.cfg,
@@ -20713,11 +24136,12 @@ static __declspec(noinline) void onl_gui_selftest(int *pass, int *fail)
                                            "gui.loc_onl_sec_upgrade" };
     char why[300] = "", keep[16], tmp[1024], cfg[1200], stp[1200], set[600], want[600], t[400], sec[24], code[16];
     char buf[4096];
-    int i, rc, g0 = g_game, p0 = g_page, on0 = g_loc_online;
+    int i, rc, g0 = g_game, p0 = g_page, on0 = g_loc_online, uc0 = g_upd_cfg;
     lgame_state_t loc0 = g_loc;
     lacc_store_t a0 = g_acc;
     COLORREF col;
-    if (!ctl(ID_LOC_ONL) || !ctl(ID_LOC_CODE) || !ctl(ID_LOC_CODE_COPY)) {
+    /* W397: kein Schalter "Online-Spiel" mehr im LoC-Bereich (Stufe steelnet unter dem Zahnrad) */
+    if (ctl(ID_LOC_ONL) || !ctl(ID_NETM0 + NETM_STEEL) || !ctl(ID_LOC_CODE) || !ctl(ID_LOC_CODE_COPY)) {
         GT_FAIL("77 W334 LOC-SEC online card", "%s", "Elemente fehlen");
         return;
     }
@@ -20732,24 +24156,33 @@ static __declspec(noinline) void onl_gui_selftest(int *pass, int *fail)
     /* b: --set mit/ohne Code, aus, ohne Dienst, ungueltig */
     if (!why[0]) {
         strcpy_s(set, sizeof set, "vr_enable=0");
-        rc = onl_set_append(set, sizeof set, 1, 1, " 7k3m q9tx");
-        _snprintf_s(want, sizeof want, _TRUNCATE, "vr_enable=0;loc_transport=udp;loc_lobby=%s:%d;loc_lobby_code=7K3M-Q9TX;loc_rb_input=1",
+        rc = onl_set_append(set, sizeof set, 1, 1, " 7k3m q9tx", 1); /* W373: Code tritt immer privat bei */
+        _snprintf_s(want, sizeof want, _TRUNCATE, "vr_enable=0;loc_transport=udp;loc_lobby=%s:%d;loc_lobby_code=7K3M-Q9TX",
                     SB_STEELNET_HOST, (int)SB_STEELNET_PORT);
         if (rc != 0 || strcmp(set, want) != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "set mit Code '%s'", set);
     }
     if (!why[0]) {
         strcpy_s(set, sizeof set, "vr_enable=0");
-        rc = onl_set_append(set, sizeof set, 1, 1, "");
-        _snprintf_s(want, sizeof want, _TRUNCATE, "vr_enable=0;loc_transport=udp;loc_lobby=%s:%d;loc_lobby_code=;loc_rb_input=1",
+        rc = onl_set_append(set, sizeof set, 1, 1, "", 0);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "vr_enable=0;loc_transport=udp;loc_lobby=%s:%d;loc_lobby_code=",
                     SB_STEELNET_HOST, (int)SB_STEELNET_PORT);
         if (rc != 0 || strcmp(set, want) != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "set ohne Code '%s'", set);
     }
+    if (!why[0]) { /* W373: oeffentlich ohne Code -> loc_lobby_vis=public */
+        strcpy_s(set, sizeof set, "vr_enable=0");
+        rc = onl_set_append(set, sizeof set, 1, 1, "  ", 1);
+        _snprintf_s(want, sizeof want, _TRUNCATE,
+                    "vr_enable=0;loc_transport=udp;loc_lobby=%s:%d;loc_lobby_code=;loc_lobby_vis=public",
+                    SB_STEELNET_HOST, (int)SB_STEELNET_PORT);
+        if (rc != 0 || strcmp(set, want) != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "W373 set oeffentlich '%s'", set);
+    }
     if (!why[0]) {
         strcpy_s(set, sizeof set, "vr_enable=0");
-        if (onl_set_append(set, sizeof set, 0, 1, "7K3M-Q9TX") != 0 || strcmp(set, "vr_enable=0") != 0 ||
-            onl_set_append(set, sizeof set, 1, 0, "7K3M-Q9TX") != 0 || strcmp(set, "vr_enable=0") != 0)
+        if (onl_set_append(set, sizeof set, 0, 1, "7K3M-Q9TX", 1) != 0 || strcmp(set, "vr_enable=0") != 0 ||
+            onl_set_append(set, sizeof set, 1, 0, "7K3M-Q9TX", 1) != 0 || strcmp(set, "vr_enable=0") != 0 ||
+            onl_set_append(set, sizeof set, 0, 1, "", 1) != 0 || strcmp(set, "vr_enable=0") != 0)
             _snprintf_s(why, sizeof why, _TRUNCATE, "set aus/ohne Dienst veraendert '%s'", set);
-        else if (onl_set_append(set, sizeof set, 1, 1, "7K3M-Q9TU") != -1 || strcmp(set, "vr_enable=0") != 0)
+        else if (onl_set_append(set, sizeof set, 1, 1, "7K3M-Q9TU", 1) != -1 || strcmp(set, "vr_enable=0") != 0)
             _snprintf_s(why, sizeof why, _TRUNCATE, "set ungueltig nicht abgewiesen '%s'", set);
     }
     /* c: Statusdatei lesen (Temp-Ordner) */
@@ -20823,26 +24256,28 @@ static __declspec(noinline) void onl_gui_selftest(int *pass, int *fail)
     u8_DeleteFile(stp);
     onl_sync_ui();
     ui_settext(ctl(ID_LOC_CODE), "");
-    show_page(P_PLAY);
+    show_page(P_LNET); /* W397: Match auf LoC > Multiplayer */
     pump();
     /* ohne Dienst: grau, Text, Klick aendert nichts */
-    if (!why[0] && (!acc_gt_vis(ID_LOC_ONL) || !acc_gt_vis(ID_LOC_CODE) || acc_gt_vis(ID_LOC_CODE_COPY) ||
-                    IsWindowEnabled(ctl(ID_LOC_ONL)) || IsWindowEnabled(ctl(ID_LOC_CODE))))
+    if (!why[0] && (!acc_gt_vis(ID_LOC_VIS) || !acc_gt_vis(ID_LOC_CODE) || acc_gt_vis(ID_LOC_CODE_COPY) ||
+                    IsWindowEnabled(ctl(ID_NETM0 + NETM_STEEL)) || IsWindowEnabled(ctl(ID_LOC_CODE))))
         strcpy_s(why, sizeof why, "ohne Dienst: Schalter/Feld nicht grau bzw. Sichtbarkeit");
     if (!why[0] && (onl_info(t, sizeof t, &col) != 0 || strcmp(t, LT("gui.loc_onl_nosrv")) != 0))
         _snprintf_s(why, sizeof why, _TRUNCATE, "ohne Dienst: Infozeile '%s'", t);
     if (!why[0]) {
-        on_command(ID_LOC_ONL, BN_CLICKED);
-        if (g_loc_online || ui_checked(ID_LOC_ONL)) strcpy_s(why, sizeof why, "ohne Dienst: Schalter laesst sich setzen");
+        on_command(ID_NETM0 + NETM_STEEL, BN_CLICKED);
+        if (g_loc_online || ui_checked(ID_NETM0 + NETM_STEEL)) strcpy_s(why, sizeof why, "ohne Dienst: steelnet laesst sich waehlen");
     }
     /* mit Dienst: Schalter an -> gemerkt (Doppelte weg, fremde Zeilen bleiben) */
     if (!why[0]) {
         g_onl_fix_srv = 1;
         onl_sync_ui();
-        on_command(ID_LOC_ONL, BN_CLICKED);
+        netm_sync_ui();
+        on_command(ID_NETM0 + NETM_STEEL, BN_CLICKED); /* W397: Stufe "Mit steelnet verbinden" */
         gt_read(cfg, buf, sizeof buf);
-        if (!g_loc_online || !ui_checked(ID_LOC_ONL) || !IsWindowEnabled(ctl(ID_LOC_CODE)))
-            strcpy_s(why, sizeof why, "Schalter an");
+        if (!g_loc_online || !ui_checked(ID_NETM0 + NETM_STEEL) || !IsWindowEnabled(ctl(ID_LOC_CODE)) ||
+            acc_gt_vis(ID_MP_GOSET))
+            strcpy_s(why, sizeof why, "steelnet an");
         else if (!strstr(buf, "launcher_loc_online=1\n") || strstr(strstr(buf, "launcher_loc_online=") + 1, "launcher_loc_online=") ||
                  !strstr(buf, "# fremde Zeile\n") || !strstr(buf, "width=1280\n"))
             _snprintf_s(why, sizeof why, _TRUNCATE, "user.cfg: %.120s", buf);
@@ -20850,6 +24285,35 @@ static __declspec(noinline) void onl_gui_selftest(int *pass, int *fail)
             g_loc_online = 0;
             onl_load();
             if (!g_loc_online) strcpy_s(why, sizeof why, "launcher_loc_online nicht gelesen");
+        }
+    }
+    /* W373 LOC-PUBLIC-LOBBY: Standard oeffentlich (Vertrauenshinweis), Wahl privat gemerkt und gelesen */
+    if (!why[0]) {
+        if (!g_loc_public || !ctl(ID_LOC_VIS) || ComboBox_GetCurSel(ctl(ID_LOC_VIS)) != 0 ||
+            !IsWindowEnabled(ctl(ID_LOC_VIS)) || !acc_gt_vis(ID_LOC_VIS) || ComboBox_GetCount(ctl(ID_LOC_VIS)) != 2)
+            strcpy_s(why, sizeof why, "W373: Standard nicht oeffentlich bzw. Auswahl fehlt/grau");
+        else if (onl_info(t, sizeof t, &col) != 0 || strcmp(t, LT("gui.loc_onl_trust")) != 0 || col != C_WARN ||
+                 !strstr(t, "don't know"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "W373: Vertrauenshinweis oeffentlich '%s'", t);
+        else {
+            ui_settext(ctl(ID_LOC_CODE), "7K3M-Q9TX"); /* Code eingegeben: tritt privat bei, Hinweis dazu */
+            if (onl_info(t, sizeof t, &col) != 0 || strcmp(t, LT("gui.loc_code_hint_pub")) != 0)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W373: Hinweis mit Code '%s'", t);
+            ui_settext(ctl(ID_LOC_CODE), "");
+        }
+    }
+    if (!why[0]) {
+        ComboBox_SetCurSel(ctl(ID_LOC_VIS), 1);
+        on_command(ID_LOC_VIS, CBN_SELCHANGE);
+        gt_read(cfg, buf, sizeof buf);
+        if (g_loc_public || !strstr(buf, "launcher_loc_public=0\n") || !strstr(buf, "launcher_loc_online=1\n"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "W373: privat nicht gemerkt: %.120s", buf);
+        else {
+            g_loc_public = 1;
+            onl_load();
+            if (g_loc_public || !g_loc_online) strcpy_s(why, sizeof why, "W373: launcher_loc_public=0 nicht gelesen");
+            onl_sync_ui();
+            if (!why[0] && ComboBox_GetCurSel(ctl(ID_LOC_VIS)) != 1) strcpy_s(why, sizeof why, "W373: Auswahl nach Laden");
         }
     }
     /* Hinweis, ungueltige Eingabe */
@@ -20864,7 +24328,7 @@ static __declspec(noinline) void onl_gui_selftest(int *pass, int *fail)
     /* Status: eigener Raumcode + Kopieren, dann Sicherheitsmeldungen */
     if (!why[0]) {
         onl_gt_status(stp, "lobby=lobby\nsec=ok\nlobby_code=7K3MQ9TX\n");
-        show_page(P_PLAY);
+        show_page(P_LNET); /* W397: Kopieren auf Multiplayer */
         pump();
         _snprintf_s(want, sizeof want, _TRUNCATE, LT("gui.loc_onl_code"), "7K3M-Q9TX");
         if (onl_info(t, sizeof t, &col) != 1 || strcmp(t, want) != 0 || !acc_gt_vis(ID_LOC_CODE_COPY))
@@ -20939,9 +24403,9 @@ static __declspec(noinline) void onl_gui_selftest(int *pass, int *fail)
     if (!why[0]) {
         sb_lang_set("de");
         ui_apply_language();
-        ui_gettext(ctl(ID_LOC_ONL), t, sizeof t);
-        if (strcmp(t, LT("gui.loc_onl_toggle")) != 0 || strcmp(t, "Online-Spiel") != 0)
-            _snprintf_s(why, sizeof why, _TRUNCATE, "de Schalter '%s'", t);
+        ui_gettext(ctl(ID_NETM0 + NETM_STEEL), t, sizeof t); /* W397: Stufe statt Schalter */
+        if (strncmp(t, "Mit steelnet verbinden", 22) != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "de Stufe '%s'", t);
         ui_gettext(ctl(ID_LOC_CODE_COPY), t, sizeof t);
         if (!why[0] && strcmp(t, LT("gui.loc_code_copy")) != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "de Kopieren '%s'", t);
     }
@@ -20955,6 +24419,8 @@ static __declspec(noinline) void onl_gui_selftest(int *pass, int *fail)
     g_onl_sec[0] = g_onl_code[0] = g_onl_err[0] = '\0';
     g_onl_since = 0;
     g_loc_online = on0;
+    g_upd_cfg = uc0; /* W397: Stufe steelnet setzt auch update_check (nur im Speicher, Testbetrieb) */
+    g_loc_public = 1; /* W373: Fixture-Zustand nicht stehen lassen (echte Wahl liest onl_load) */
     g_loc = loc0;
     g_locfix_path[0] = '\0';
     g_loc_checked = 0;
@@ -20975,10 +24441,527 @@ static __declspec(noinline) void onl_gui_selftest(int *pass, int *fail)
     }
 }
 
+/* --- 77b (W387 LOC-SMOOTH-OPP): Auswahl "Gegner glaetten" auf LoC-Spielen: Standard Auto (Index 1, Schluessel
+ * fehlt/ungueltig = 1), Wahl 0/2 gemerkt in einer Temp-user.cfg und gelesen, loc_smooth_opp=N in jedem LoC-Start
+ * (Trockenlauf ohne/mit Online, intern auch Testpartner-Nutzer-Spiel), Tooltip, Relabel DE. SB-Start ohne den
+ * Schluessel prueft Fall 66 (Einmal-Start-Kette). --- */
+static __declspec(noinline) void smooth_gui_selftest(int *pass, int *fail)
+{
+    static const struct {
+        const char *in;
+        int out;
+    } kP[] = { { "0", 0 }, { "1", 1 }, { "2", 2 }, { "2\n", 2 }, { "0\r\n", 0 }, { "3", 1 },
+               { "-1", 1 }, { "abc", 1 }, { "", 1 }, { "1x", 1 }, { "99", 1 } };
+    char why[300] = "", tmp[1024], cfg[1200], buf[4096], t[400], keep[16], want[300];
+    int i, g0 = g_game, p0 = g_page, on0 = g_loc_online;
+    lgame_state_t loc0 = g_loc;
+    lacc_store_t a0 = g_acc;
+    HWND c = ctl(ID_LOC_SMOOTH);
+    if (!c) {
+        GT_FAIL("77b W387 LOC-SMOOTH-OPP", "%s", "ID_LOC_SMOOTH fehlt");
+        return;
+    }
+    /* a: Wert aus user.cfg */
+    for (i = 0; i < (int)(sizeof kP / sizeof kP[0]) && !why[0]; i++) {
+        if (loc_smooth_parse(kP[i].in) != kP[i].out)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "parse '%s' -> %d (soll %d)", kP[i].in, loc_smooth_parse(kP[i].in),
+                        kP[i].out);
+    }
+    /* b: --set-Baustein */
+    if (!why[0]) {
+        char s[64] = "";
+        loc_smooth_set_append(s, sizeof s, 1);
+        if (strcmp(s, "loc_smooth_opp=1") != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "set leer '%s'", s);
+        strcpy_s(s, sizeof s, "vr_enable=0");
+        loc_smooth_set_append(s, sizeof s, 2);
+        if (!why[0] && strcmp(s, "vr_enable=0;loc_smooth_opp=2") != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "set 2 '%s'", s);
+        strcpy_s(s, sizeof s, "a=1");
+        loc_smooth_set_append(s, sizeof s, 7);
+        if (!why[0] && strcmp(s, "a=1;loc_smooth_opp=1") != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "set ungueltig '%s'", s);
+    }
+    /* c: Fenster (Temp-user.cfg ohne Schluessel -> Auto) */
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw387_gui_user_%lu.cfg", tmp, GetCurrentProcessId());
+    write_file(cfg, "[display]\nwidth=1280\n# fremde Zeile\nlauncher_loc_online=0\n");
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    sb_lang_set("en");
+    ui_apply_language();
+    acc_fixture(0, 0, 0, 0, 0);
+    gt_setenv("SB_TEST_LOC_READY", "1");
+    g_game = LGAME_LOC;
+    loctab_nav_layout();
+    g_onl_fix_srv = 0;
+    g_onl_fixture = 0;
+    g_loc_smooth_opp = 0; /* onl_load muss auf 1 setzen */
+    onl_load();
+    onl_sync_ui();
+    show_page(P_LNET); /* W392: Gegner glaetten liegt jetzt auf der Seite Netzwerk */
+    pump();
+    if (!why[0] && (g_loc_smooth_opp != 1 || ComboBox_GetCount(c) != LOC_SMOOTH_N || ComboBox_GetCurSel(c) != 1 ||
+                    !IsWindowEnabled(c)))
+        _snprintf_s(why, sizeof why, _TRUNCATE, "Standard: Wert %d, %d Eintraege, Auswahl %d", g_loc_smooth_opp,
+                    ComboBox_GetCount(c), ComboBox_GetCurSel(c));
+    loctab_vis(ID_LOC_SMOOTH, 1, "Gegner glaetten (LoC Netzwerk)", why, sizeof why);
+    if (!why[0]) {
+        wchar_t wt[120] = L"";
+        SendMessageW(c, CB_GETLBTEXT, 1, (LPARAM)wt);
+        WideCharToMultiByte(CP_UTF8, 0, wt, -1, t, (int)sizeof t, NULL, NULL);
+        if (strcmp(t, LT("gui.loc_smooth_auto")) != 0 || strcmp(t, "Smooth opponents: Auto (recommended)") != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Eintrag Auto '%s'", t);
+    }
+    if (!why[0]) {
+        xtip_text(ID_LOC_SMOOTH, t, sizeof t);
+        if (strcmp(t, LT("gui.loc_smooth_tip")) != 0 || !strstr(t, "network corrections"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Tooltip '%s'", t);
+    }
+    if (!why[0]) { /* ungueltiger Wert = Auto */
+        write_file(cfg, "launcher_loc_smooth_opp=7\n");
+        g_loc_smooth_opp = 0;
+        onl_load();
+        if (g_loc_smooth_opp != 1) _snprintf_s(why, sizeof why, _TRUNCATE, "ungueltig gelesen als %d", g_loc_smooth_opp);
+        write_file(cfg, "[display]\nwidth=1280\n# fremde Zeile\nlauncher_loc_smooth_opp=1\nlauncher_loc_smooth_opp=1\n");
+    }
+    /* d: Wahl 0 und 2 gemerkt (Doppelte weg, fremde Zeilen bleiben) und gelesen */
+    for (i = 0; i < 2 && !why[0]; i++) {
+        int v = i ? 2 : 0;
+        const char *p;
+        ComboBox_SetCurSel(c, v);
+        on_command(ID_LOC_SMOOTH, CBN_SELCHANGE);
+        gt_read(cfg, buf, sizeof buf);
+        _snprintf_s(want, sizeof want, _TRUNCATE, "launcher_loc_smooth_opp=%d\n", v);
+        p = strstr(buf, want);
+        if (g_loc_smooth_opp != v || !p || strstr(p + 1, "launcher_loc_smooth_opp=") || !strstr(buf, "# fremde Zeile\n") ||
+            !strstr(buf, "width=1280\n"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Wahl %d nicht gemerkt: %.120s", v, buf);
+        if (!why[0]) {
+            _snprintf_s(want, sizeof want, _TRUNCATE, LT("gui.loc_smooth_set"), LT(kLocSmooth[v]));
+            if (strcmp(g_status, want) != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "Status '%.120s'", g_status);
+        }
+        if (!why[0]) {
+            g_loc_smooth_opp = 1;
+            onl_load();
+            onl_sync_ui();
+            if (g_loc_smooth_opp != v || ComboBox_GetCurSel(c) != v)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Wahl %d nach Laden: %d / Auswahl %d", v, g_loc_smooth_opp,
+                            ComboBox_GetCurSel(c));
+        }
+    }
+    /* e: Startweg (Trockenlauf): jeder LoC-Start traegt loc_smooth_opp=N (Standard 1, Wahl 2, auch online) */
+    if (!why[0]) {
+        strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_ISO);
+        memset(&g_locfix, 0, sizeof g_locfix);
+        g_locfix.kind = LGAME_IMG_LOC;
+        g_locfix.title_id = LGAME_TID_LOC;
+        ui_settext(ctl(ID_LOC_IMAGE), LOC_ISO);
+        loctab_check();
+        g_loc_online = 0;
+        g_loc_smooth_opp = 1;
+        onl_sync_ui();
+        ui_settext(ctl(ID_LOC_CODE), "");
+        on_command(ID_LOC_START, BN_CLICKED);
+        if (!strstr(g_loc_last_cmd, "loc_smooth_opp=1") || !strstr(g_loc_last_cmd, "loc_boot=1") ||
+            strstr(g_loc_last_cmd, "loc_transport"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Start Standard '%.200s'", g_loc_last_cmd);
+        if (!why[0]) {
+            ComboBox_SetCurSel(c, 2);
+            on_command(ID_LOC_SMOOTH, CBN_SELCHANGE);
+            on_command(ID_LOC_START, BN_CLICKED);
+            if (!strstr(g_loc_last_cmd, "loc_smooth_opp=2") || strstr(g_loc_last_cmd, "loc_smooth_opp=1"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Start Wahl 2 '%.200s'", g_loc_last_cmd);
+        }
+        if (!why[0]) { /* online (Dienst als eingerichtet vorgegeben, eigene Lobby) */
+            g_onl_fix_srv = 1;
+            g_loc_online = 1;
+            onl_sync_ui();
+            on_command(ID_LOC_START, BN_CLICKED);
+            if (!strstr(g_loc_last_cmd, "loc_smooth_opp=2") || !strstr(g_loc_last_cmd, "loc_transport=udp"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Start online '%.200s'", g_loc_last_cmd);
+            g_loc_online = 0;
+            g_onl_fix_srv = 0;
+        }
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+        if (!why[0]) { /* Testpartner: Nutzer-Spiel mit der Wahl, Partner ohne */
+            static loctp_cfg_t tc;
+            static char ts[4096];
+            loctp_link_t lk;
+            char err[300] = "";
+            memset(&lk, 0, sizeof lk);
+            lk.port_partner = 47100;
+            lk.port_user = 47101;
+            if (loctp_cfg_from_ui(&tc, err, sizeof err) != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Testpartner-Konfiguration: %s", err);
+            } else if (loctp_build_set(&tc, 1, 0, &lk, "", ts, sizeof ts) != 0 || !strstr(ts, ";loc_smooth_opp=2")) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Testpartner Nutzer-Spiel '%.200s'", ts);
+            } else if (loctp_build_set(&tc, 0, 0, &lk, "", ts, sizeof ts) != 0 || strstr(ts, "loc_smooth_opp")) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Testpartner Partner '%.200s'", ts);
+            }
+        }
+#endif
+        g_loc_last_cmd[0] = '\0';
+    }
+    /* f: Relabel DE (Auswahl bleibt) */
+    if (!why[0]) {
+        wchar_t wt[120] = L"";
+        sb_lang_set("de");
+        ui_apply_language();
+        SendMessageW(c, CB_GETLBTEXT, 1, (LPARAM)wt);
+        WideCharToMultiByte(CP_UTF8, 0, wt, -1, t, (int)sizeof t, NULL, NULL);
+        if (strcmp(t, "Gegner gl\xC3\xA4tten: Auto (empfohlen)") != 0 || ComboBox_GetCurSel(c) != 2)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "de Eintrag '%s' / Auswahl %d", t, ComboBox_GetCurSel(c));
+    }
+    /* g: W392: auf der Seite Netzwerk auch ohne startbaren Client sichtbar (Einstellung, frueher unter dem
+     * gesperrten Start ausgeblendet) */
+    if (!why[0]) {
+        gt_setenv("SB_TEST_LOC_READY", "0");
+        ui_refresh_visibility();
+        loctab_vis(ID_LOC_SMOOTH, 1, "Gegner glaetten ohne startbaren Client (Netzwerk)", why, sizeof why);
+    }
+    /* Aufraeumen */
+    SetEnvironmentVariableA("SB_TEST_LOC_READY", NULL);
+    u8_DeleteFile(cfg);
+    g_ucfg_test[0] = '\0';
+    g_onl_fix_srv = -1;
+    g_loc_online = on0;
+    g_loc_smooth_opp = 1; /* echte Wahl liest onl_load */
+    g_loc = loc0;
+    g_locfix_path[0] = '\0';
+    g_loc_checked = 0;
+    g_acc_fixture = 0;
+    g_acc_loaded = 0;
+    g_acc = a0;
+    g_game = g0;
+    onl_sync_ui();
+    loctab_nav_layout();
+    show_page(p0);
+    sb_lang_set(keep);
+    ui_apply_language();
+    if (!why[0]) {
+        GT_OK("77b W387 LOC-SMOOTH-OPP smooth opponents (default Auto, key missing/invalid = 1, 0/2 saved + read, "
+              "loc_smooth_opp=N in every LoC start incl. online (internal: test partner user game), tooltip, relabel, "
+              "W392: on the Network page, also without a startable client)");
+    } else {
+        GT_FAIL("77b W387 LOC-SMOOTH-OPP", "%s", why);
+    }
+}
+
+/* --- 77c (W392 LAUNCHER-NETTAB): Seite Netzwerk im LoC-Bereich. a Lesen (fehlt/ungueltig = an), b loc_rb_opts-
+ * Zusammenfuehrung (vorhandene Optionen bleiben, lowd ersetzt, 127-Zeichen-Grenze), c Standard im Fenster, d Schalter
+ * speichern/laden (Temp-user.cfg), e Ausgrauen ohne Rollback, f Uebergabe an jeden LoC-Start (lokal, online, Nutzer-Spiel
+ * des Testpartners; Partner nie), g nie an Steel Battalion (Trockenlauf), h Standard wiederherstellen, i Sprache,
+ * j SB-Bereich zeigt auf dem Platz weiter Packs. */
+static __declspec(noinline) void lnet_gui_selftest(int *pass, int *fail)
+{
+    static const struct {
+        const char *in;
+        int out;
+    } kP[] = { { "0", 0 }, { "1", 1 }, { "0\r\n", 0 }, { "1\n", 1 }, { "2", 1 }, { "-1", 1 }, { "abc", 1 }, { "", 1 },
+               { "0x", 1 } };
+    static const struct {
+        const char *base;
+        int lowd, ret;
+        const char *out;
+    } kM[] = {
+        { "", 1, 0, "" },
+        { "lowd=0;hot=1", 1, 0, "" }, /* an: nichts anhaengen, der Client behaelt seinen Wert */
+        { "", 0, 1, "lowd=0" },
+        { "k=1,2;render=0", 0, 1, "k=1,2\\;render=0\\;lowd=0" },
+        { "lowd=1;hot=1", 0, 1, "hot=1\\;lowd=0" },
+        { " ;hot=1; ;lowd=1;cool=2;", 0, 1, "hot=1\\;cool=2\\;lowd=0" },
+    };
+    char why[300] = "", tmp[1024], cfg[1200], buf[4096], out[300], s[1024], keep[16];
+    int i, g0 = g_game, p0 = g_page, on0 = g_loc_online;
+    lgame_state_t loc0 = g_loc;
+    lacc_store_t a0 = g_acc;
+    if (!ctl(ID_LNET_RB) || !ctl(ID_LNET_OWN) || !ctl(ID_LNET_LOWD) || !ctl(ID_LNET_RESET) || !ctl(ID_LOC_SMOOTH)) {
+        GT_FAIL("77c W392 LAUNCHER-NETTAB", "%s", "Elemente fehlen");
+        return;
+    }
+    /* a */
+    for (i = 0; i < (int)(sizeof kP / sizeof kP[0]) && !why[0]; i++) {
+        if (lnet_bool_parse(kP[i].in) != kP[i].out)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "parse '%s' -> %d", kP[i].in, lnet_bool_parse(kP[i].in));
+    }
+    /* b */
+    for (i = 0; i < (int)(sizeof kM / sizeof kM[0]) && !why[0]; i++) {
+        int r = lnet_rbopts_merge(kM[i].base, kM[i].lowd, out, sizeof out);
+        if (r != kM[i].ret || strcmp(out, kM[i].out) != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "merge '%s' lowd=%d -> %d '%s'", kM[i].base, kM[i].lowd, r, out);
+    }
+    if (!why[0]) { /* zu lang: Restoptionen fallen von hinten weg, unmaskiert <= 127, lowd=0 am Ende */
+        char big[400] = "", one[16], *q;
+        size_t raw = 0;
+        for (i = 0; i < 30; i++) {
+            _snprintf_s(one, sizeof one, _TRUNCATE, "%sopt%02d=1", i ? ";" : "", i);
+            strcat_s(big, sizeof big, one);
+        }
+        lnet_rbopts_merge(big, 0, out, sizeof out);
+        for (q = out; *q; q++) {
+            raw += !(q[0] == '\\' && q[1] == ';');
+        }
+        q = strstr(out, "lowd=0");
+        if (raw > LNET_RBOPTS_MAX || raw < LNET_RBOPTS_MAX - 12 || !q || q[6] || strncmp(out, "opt00=1\\;", 9) != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "merge lang: %u Zeichen '%.80s'", (unsigned)raw, out);
+    }
+    if (!why[0] && (!lnet_set_last("a=1;loc_rb_opts=x=1\\;y=2;b=3;loc_rb_opts=z=4\\;w=5;c=1", "loc_rb_opts", out,
+                                   sizeof out) || strcmp(out, "z=4;w=5") != 0 ||
+                    lnet_set_last("a=1;xloc_rb_opts=1", "loc_rb_opts", out, sizeof out)))
+        _snprintf_s(why, sizeof why, _TRUNCATE, "set_last '%s'", out);
+    /* c: Fenster mit Temp-user.cfg ohne Schluessel */
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw392_gui_user_%lu.cfg", tmp, GetCurrentProcessId());
+    write_file(cfg, "[display]\nwidth=1280\n# fremde Zeile\nlauncher_loc_online=0\n");
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    sb_lang_set("en");
+    ui_apply_language();
+    acc_fixture(0, 0, 0, 0, 0);
+    gt_setenv("SB_TEST_LOC_READY", "1");
+    g_game = LGAME_LOC;
+    loctab_nav_layout();
+    g_onl_fix_srv = 0;
+    g_onl_fixture = 0;
+    g_loc_online = 0;
+    g_loc_rb_on = g_loc_own_pred = g_loc_lowd = 0; /* onl_load muss auf 1 setzen */
+    g_loc_smooth_opp = 0;
+    onl_load();
+    show_page(P_LNET);
+    pump();
+    if (!why[0] && (g_page != P_LNET || !g_loc_rb_on || !g_loc_own_pred || !g_loc_lowd || g_loc_smooth_opp != 1 ||
+                    !ui_checked(ID_LNET_RB) || !ui_checked(ID_LNET_OWN) || !ui_checked(ID_LNET_LOWD) ||
+                    !IsWindowEnabled(ctl(ID_LNET_OWN)) || !IsWindowEnabled(ctl(ID_LNET_LOWD)) ||
+                    !IsWindowEnabled(ctl(ID_LOC_SMOOTH)) || IsWindowEnabled(ctl(ID_LNET_RESET))))
+        _snprintf_s(why, sizeof why, _TRUNCATE, "Standard: Seite %d rb %d own %d lowd %d smooth %d", g_page, g_loc_rb_on,
+                    g_loc_own_pred, g_loc_lowd, g_loc_smooth_opp);
+    loctab_vis(ID_LNET_RB, 1, "Netzwerk Rollback", why, sizeof why);
+    loctab_vis(ID_LNET_OWN, 1, "Netzwerk eigene Bewegung", why, sizeof why);
+    loctab_vis(ID_LNET_LOWD, 1, "Netzwerk niedrige Verzoegerung", why, sizeof why);
+    loctab_vis(ID_LNET_RESET, 1, "Netzwerk Standard", why, sizeof why);
+    loctab_vis(ID_LOC_SMOOTH, 1, "Netzwerk Gegner glaetten", why, sizeof why);
+    loctab_vis(ID_PK_LIST, 0, "Netzwerk ohne Pack-Liste", why, sizeof why);
+    if (!why[0]) { /* Standard-Kette (lowd an: kein loc_rb_opts) */
+        strcpy_s(s, sizeof s, "vr_enable=0");
+        loc_net_set_append(s, sizeof s);
+        if (strcmp(s, "vr_enable=0;loc_rb_input=1;loc_own_predict=1;loc_smooth_opp=1") != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Kette Standard '%s'", s);
+    }
+    /* d/e: Rollback aus -> gemerkt, Rest grau, Klick auf grauen Schalter aendert nichts */
+    if (!why[0]) {
+        on_command(ID_LNET_RB, BN_CLICKED);
+        pump();
+        gt_read(cfg, buf, sizeof buf);
+        if (g_loc_rb_on || ui_checked(ID_LNET_RB) || !strstr(buf, "launcher_loc_rollback=0\n") ||
+            !strstr(buf, "# fremde Zeile\n"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Rollback aus nicht gemerkt: %.120s", buf);
+        else if (IsWindowEnabled(ctl(ID_LNET_OWN)) || IsWindowEnabled(ctl(ID_LNET_LOWD)) ||
+                 IsWindowEnabled(ctl(ID_LOC_SMOOTH)) || !IsWindowEnabled(ctl(ID_LNET_RESET)) ||
+                 !IsWindowEnabled(ctl(ID_LNET_RB)))
+            strcpy_s(why, sizeof why, "Rollback aus: Ausgrauen falsch");
+        if (!why[0]) {
+            on_command(ID_LNET_OWN, BN_CLICKED);
+            if (!g_loc_own_pred || !ui_checked(ID_LNET_OWN))
+                strcpy_s(why, sizeof why, "grauer Schalter liess sich umlegen");
+        }
+        if (!why[0]) {
+            g_loc_rb_on = 1;
+            onl_load();
+            onl_sync_ui();
+            if (g_loc_rb_on || ui_checked(ID_LNET_RB) || IsWindowEnabled(ctl(ID_LNET_OWN)))
+                strcpy_s(why, sizeof why, "Rollback aus nach Laden");
+        }
+        if (!why[0]) {
+            s[0] = '\0';
+            loc_net_set_append(s, sizeof s);
+            if (strcmp(s, "loc_rb_input=0;loc_own_predict=1;loc_smooth_opp=1") != 0)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Kette Rollback aus '%s'", s);
+        }
+        if (!why[0]) { /* wieder an, dann eigene Bewegung + niedrige Verzoegerung aus */
+            on_command(ID_LNET_RB, BN_CLICKED);
+            on_command(ID_LNET_OWN, BN_CLICKED);
+            on_command(ID_LNET_LOWD, BN_CLICKED);
+            gt_read(cfg, buf, sizeof buf);
+            if (!g_loc_rb_on || g_loc_own_pred || g_loc_lowd || !strstr(buf, "launcher_loc_rollback=1\n") ||
+                !strstr(buf, "launcher_loc_own_predict=0\n") || !strstr(buf, "launcher_loc_low_delay=0\n") ||
+                strstr(strstr(buf, "launcher_loc_rollback=") + 1, "launcher_loc_rollback="))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Schalter gemerkt: %.160s", buf);
+        }
+        if (!why[0]) {
+            g_loc_own_pred = g_loc_lowd = 1;
+            onl_load();
+            onl_sync_ui();
+            if (g_loc_own_pred || g_loc_lowd || ui_checked(ID_LNET_OWN) || ui_checked(ID_LNET_LOWD))
+                strcpy_s(why, sizeof why, "eigene Bewegung/niedrige Verzoegerung nach Laden");
+        }
+        if (!why[0]) { /* ungueltig = an */
+            write_file(cfg, "launcher_loc_rollback=5\nlauncher_loc_own_predict=x\nlauncher_loc_low_delay=\n");
+            onl_load();
+            if (!g_loc_rb_on || !g_loc_own_pred || !g_loc_lowd)
+                strcpy_s(why, sizeof why, "ungueltige Werte nicht als an gelesen");
+        }
+    }
+    /* b2: lowd aus mit vorhandenem loc_rb_opts (W402: user_loc.cfg bzw. Kette) */
+    if (!why[0]) {
+        char lcf2[1200];
+        lgame_cfg_path(cfg, LGAME_LOC, lcf2, sizeof lcf2);
+        write_file(cfg, "loc_rb_opts=k=9\nlauncher_loc_low_delay=0\n"); /* SB-Datei zaehlt fuer LoC nicht */
+        write_file(lcf2, "loc_rb_opts=k=1,2;hot=1\n");
+        onl_load();
+        strcpy_s(s, sizeof s, "vr_enable=0");
+        loc_net_set_append(s, sizeof s);
+        u8_DeleteFile(lcf2);
+        if (strcmp(s, "vr_enable=0;loc_rb_input=1;loc_own_predict=1;loc_smooth_opp=1;loc_rb_opts=k=1,2\\;hot=1\\;lowd=0") != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Kette lowd aus (user_loc.cfg) '%s'", s);
+        strcpy_s(s, sizeof s, "loc_rb_opts=cool=3\\;lowd=1");
+        loc_net_set_append(s, sizeof s);
+        if (!why[0] && !strstr(s, ";loc_rb_opts=cool=3\\;lowd=0"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Kette lowd aus (Kette) '%s'", s);
+    }
+    /* f: Startweg (Trockenlauf) mit Rollback aus, eigene Bewegung aus, lowd aus, Gegner glaetten Fest */
+    if (!why[0]) {
+        write_file(cfg, "# fremde Zeile\n");
+        onl_load();
+        on_command(ID_LNET_OWN, BN_CLICKED);
+        on_command(ID_LNET_LOWD, BN_CLICKED);
+        ComboBox_SetCurSel(ctl(ID_LOC_SMOOTH), 2);
+        on_command(ID_LOC_SMOOTH, CBN_SELCHANGE);
+        on_command(ID_LNET_RB, BN_CLICKED);
+        strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_ISO);
+        memset(&g_locfix, 0, sizeof g_locfix);
+        g_locfix.kind = LGAME_IMG_LOC;
+        g_locfix.title_id = LGAME_TID_LOC;
+        ui_settext(ctl(ID_LOC_IMAGE), LOC_ISO);
+        loctab_check();
+        ui_settext(ctl(ID_LOC_CODE), "");
+        on_command(ID_LOC_START, BN_CLICKED);
+        if (!strstr(g_loc_last_cmd, "loc_rb_input=0;loc_own_predict=0;loc_smooth_opp=2;loc_rb_opts=lowd=0") ||
+            strstr(g_loc_last_cmd, "loc_rb_input=1") || !strstr(g_loc_last_cmd, "loc_boot=1"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Start lokal '%.240s'", g_loc_last_cmd);
+        if (!why[0]) { /* online: kein festes loc_rb_input=1 mehr */
+            g_onl_fix_srv = 1;
+            g_loc_online = 1;
+            onl_sync_ui();
+            on_command(ID_LOC_START, BN_CLICKED);
+            if (!strstr(g_loc_last_cmd, "loc_rb_input=0") || strstr(g_loc_last_cmd, "loc_rb_input=1") ||
+                !strstr(g_loc_last_cmd, "loc_transport=udp") || !strstr(g_loc_last_cmd, "loc_own_predict=0"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Start online '%.240s'", g_loc_last_cmd);
+            g_loc_online = 0;
+            g_onl_fix_srv = 0;
+        }
+#if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
+        if (!why[0]) { /* Testpartner: Nutzer-Spiel mit den Schaltern, Partner ohne */
+            static loctp_cfg_t tc;
+            static char ts[4096];
+            loctp_link_t lk;
+            char err[300] = "";
+            memset(&lk, 0, sizeof lk);
+            lk.port_partner = 47100;
+            lk.port_user = 47101;
+            if (loctp_cfg_from_ui(&tc, err, sizeof err) != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Testpartner-Konfiguration: %s", err);
+            } else if (loctp_build_set(&tc, 1, 0, &lk, "", ts, sizeof ts) != 0 ||
+                       !strstr(ts, ";loc_rb_input=0;loc_own_predict=0;loc_smooth_opp=2;loc_rb_opts=lowd=0")) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Testpartner Nutzer-Spiel '%.240s'", ts);
+            } else if (loctp_build_set(&tc, 0, 0, &lk, "", ts, sizeof ts) != 0 || strstr(ts, "loc_rb_input=0") ||
+                       strstr(ts, "loc_own_predict") || strstr(ts, "loc_rb_opts")) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Testpartner Partner '%.240s'", ts);
+            }
+        }
+#endif
+        g_loc_last_cmd[0] = '\0';
+    }
+    /* g: Steel Battalion (Trockenlauf) traegt keinen LoC-Netzschluessel, auch mit Nicht-Standard */
+    if (!why[0]) {
+        g_game = LGAME_SB;
+        loctab_nav_layout();
+        g_start_args[0] = '\0';
+        if (do_start_ex(1, 0, "") == 0 &&
+            (strstr(g_start_args, "loc_rb_input") || strstr(g_start_args, "loc_own_predict") ||
+             strstr(g_start_args, "loc_smooth_opp") || strstr(g_start_args, "loc_rb_opts")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "SB-Start mit LoC-Netz: %.200s", g_start_args);
+        /* j: SB-Bereich: Packs-Platz zeigt Packs, keine Netzwerk-Elemente */
+        if (!why[0]) {
+            char nt[300];
+            show_page(P_PACKS);
+            pump();
+            ui_gettext(ctl(ID_NAV0 + P_PACKS), nt, sizeof nt);
+            if (g_page != P_PACKS || strncmp(nt, LT("gui.page_packs"), strlen(LT("gui.page_packs"))) != 0)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "SB Packs-Platz '%s' Seite %d", nt, g_page);
+        }
+        loctab_vis(ID_LNET_RB, 0, "SB Packs ohne Netzwerk-Schalter", why, sizeof why);
+        loctab_vis(ID_LNET_RESET, 0, "SB Packs ohne Netzwerk-Knopf", why, sizeof why);
+        loctab_vis(ID_LOC_SMOOTH, 0, "SB Packs ohne Gegner glaetten", why, sizeof why);
+        loctab_vis(ID_PK_ADD, 1, "SB Pack hinzufuegen", why, sizeof why);
+        g_game = LGAME_LOC;
+        loctab_nav_layout();
+        show_page(P_LNET);
+        pump();
+    }
+    /* h: Standard wiederherstellen */
+    if (!why[0]) {
+        on_command(ID_LNET_RESET, BN_CLICKED);
+        gt_read(cfg, buf, sizeof buf);
+        if (!lnet_is_default() || !ui_checked(ID_LNET_RB) || !ui_checked(ID_LNET_OWN) || !ui_checked(ID_LNET_LOWD) ||
+            ComboBox_GetCurSel(ctl(ID_LOC_SMOOTH)) != 1 || IsWindowEnabled(ctl(ID_LNET_RESET)) ||
+            !IsWindowEnabled(ctl(ID_LNET_OWN)) || !strstr(buf, "launcher_loc_rollback=1\n") ||
+            !strstr(buf, "launcher_loc_own_predict=1\n") || !strstr(buf, "launcher_loc_low_delay=1\n") ||
+            !strstr(buf, "launcher_loc_smooth_opp=1\n") || !strstr(buf, "# fremde Zeile\n"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Standard wiederherstellen: %.160s", buf);
+    }
+    /* i: Sprache DE (Navigation + Schalter) */
+    if (!why[0]) {
+        char nt[300], tt[300];
+        sb_lang_set("de");
+        ui_apply_language();
+        ui_gettext(ctl(ID_NAV0 + P_PACKS), nt, sizeof nt);
+        ui_gettext(ctl(ID_LNET_RB), tt, sizeof tt);
+        if (strncmp(nt, "Multiplayer", 11) != 0 || strcmp(tt, "Rollback-Netcode") != 0) /* W397 */
+            _snprintf_s(why, sizeof why, _TRUNCATE, "de '%s' / '%s'", nt, tt);
+        /* W397: im Launcher "Account" statt "Pilot" (Piloten sind Spielobjekte), DE und EN */
+        if (!why[0] && (strcmp(LT("gui.acc_title"), "Account") != 0 ||
+                        strcmp(LT("gui.acc_manage"), "Account verwalten \xE2\x80\xA6") != 0 ||
+                        strstr(LT("gui.acc_sum_none"), "Pilot") || strstr(LT("gui.acc_unsecured"), "Pilot")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "de Account-Texte '%s' / '%s'", LT("gui.acc_title"), LT("gui.acc_manage"));
+        if (!why[0]) {
+            sb_lang_set("en");
+            if (strcmp(LT("gui.acc_title"), "Account") != 0 || strcmp(LT("gui.page_mp"), "Multiplayer") != 0 ||
+                strstr(LT("gui.acc_name"), "ilot") || strstr(LT("gui.acc_sum_none"), "ilot"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "en Account-Texte '%s' / '%s'", LT("gui.acc_title"), LT("gui.acc_name"));
+            sb_lang_set("de");
+        }
+    }
+    /* Aufraeumen */
+    SetEnvironmentVariableA("SB_TEST_LOC_READY", NULL);
+    u8_DeleteFile(cfg);
+    g_ucfg_test[0] = '\0';
+    g_onl_fix_srv = -1;
+    g_loc_online = on0;
+    g_loc_smooth_opp = 1; /* echte Werte liest onl_load */
+    g_loc_rb_on = g_loc_own_pred = g_loc_lowd = 1;
+    g_loc = loc0;
+    g_locfix_path[0] = '\0';
+    g_loc_checked = 0;
+    g_acc_fixture = 0;
+    g_acc_loaded = 0;
+    g_acc = a0;
+    g_game = g0;
+    onl_sync_ui();
+    loctab_nav_layout();
+    show_page(p0);
+    sb_lang_set(keep);
+    ui_apply_language();
+    if (!why[0]) {
+        GT_OK("77c W392 LAUNCHER-NETTAB Network page (defaults on, missing/invalid = on, saved + read, greyed without "
+              "rollback, loc_rb_input/loc_own_predict/loc_smooth_opp/loc_rb_opts lowd=0 merge in every LoC start incl. "
+              "online (internal: test partner user game only), never in SB start, restore defaults, relabel, SB keeps Packs)");
+    } else {
+        GT_FAIL("77c W392 LAUNCHER-NETTAB", "%s", why);
+    }
+}
+
 static __declspec(noinline) void locwide_gui_selftest(int *pass, int *fail)
 {
     static char buf[16384];
-    char why[300] = "", tmp[1024], cfg[1200], t[400], keep[16];
+    char why[300] = "", tmp[1024], cfg[1200], lcf[1200], t[400], keep[16];
     int g0 = g_game, i, n, li;
     lgame_state_t loc0 = g_loc, rd;
     HWND c = ctl(ID_LOC_WIDE);
@@ -20990,6 +24973,8 @@ static __declspec(noinline) void locwide_gui_selftest(int *pass, int *fail)
     _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw326_gui_user_%lu.cfg", tmp, GetCurrentProcessId());
     write_file(cfg, "[display]\nwidth=1280\n# fremde Zeile\n");
     strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    lgame_cfg_path(cfg, LGAME_LOC, lcf, sizeof lcf); /* W402: Bildformat steht in der LoC-Datei */
+    u8_DeleteFile(lcf);
     strcpy_s(keep, sizeof keep, sb_lang_code());
     sb_lang_set("en");
     ui_apply_language();
@@ -21042,13 +25027,15 @@ static __declspec(noinline) void locwide_gui_selftest(int *pass, int *fail)
         }
         ComboBox_SetCurSel(c, v);
         on_command(ID_LOC_WIDE, CBN_SELCHANGE);
-        gt_read(cfg, buf, sizeof buf);
+        gt_read(lcf, buf, sizeof buf);
         _snprintf_s(line, sizeof line, _TRUNCATE, "loc_widescreen=%d\n", v);
         if (locwide_cfg_count(buf, line) != 1 || locwide_cfg_count(buf, "loc_widescreen=") != 1) {
-            _snprintf_s(why, sizeof why, _TRUNCATE, "Wahl %d: user.cfg '%.120s'", v, buf);
-        } else if (!strstr(buf, "width=1280\n") || !strstr(buf, "# fremde Zeile\n")) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Wahl %d: user_loc.cfg '%.120s'", v, buf);
+        } else if (gt_read(cfg, buf, sizeof buf), !strstr(buf, "width=1280\n") || !strstr(buf, "# fremde Zeile\n")) {
             strcpy_s(why, sizeof why, "fremde Zeilen verloren");
-        } else if (lgame_cfg_load(cfg, &rd) != 0 || rd.loc_widescreen != v || g_loc.loc_widescreen != v) {
+        } else if (strstr(buf, "loc_widescreen=")) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Wahl %d: Bildformat in user.cfg (SB)", v);
+        } else if (lgame_cfg_load(lcf, &rd) != 0 || rd.loc_widescreen != v || g_loc.loc_widescreen != v) {
             _snprintf_s(why, sizeof why, _TRUNCATE, "Wahl %d: geladen %d", v, rd.loc_widescreen);
         } else if (v && (g_status_kind != 1 || strcmp(g_status, LT("gui.loc_wide_saved")) != 0)) {
             _snprintf_s(why, sizeof why, _TRUNCATE, "Wahl %d: Statuszeile '%s'", v, g_status);
@@ -21070,7 +25057,7 @@ static __declspec(noinline) void locwide_gui_selftest(int *pass, int *fail)
             char body[200];
             _snprintf_s(body, sizeof body, _TRUNCATE, "[display]\nwidth=1280\nloc_widescreen=1\nloc_widescreen = %s\n",
                         kBad[i]);
-            write_file(cfg, body);
+            write_file(lcf, body); /* W402 */
             loctab_load();
             g_game = LGAME_LOC;
             if (g_loc.loc_widescreen != 0 || ComboBox_GetCurSel(c) != 0) {
@@ -21134,6 +25121,7 @@ static __declspec(noinline) void locwide_gui_selftest(int *pass, int *fail)
     }
     /* aufraeumen (nur die Temp-Datei wurde geschrieben) */
     u8_DeleteFile(cfg);
+    u8_DeleteFile(lcf);
     g_ucfg_test[0] = '\0';
     g_loc = loc0;
     g_game = g0;
@@ -21145,7 +25133,7 @@ static __declspec(noinline) void locwide_gui_selftest(int *pass, int *fail)
     show_page(P_PLAY);
     if (!why[0]) {
         _snprintf_s(t, sizeof t, _TRUNCATE,
-                    "74 W326 LOC-WIDE (Bildformat %d Eintraege EN/DE, Rundweg ueber user.cfg, fehlt/ungueltig = 4:3, "
+                    "74 W326 LOC-WIDE (Bildformat %d Eintraege EN/DE, Rundweg ueber user_loc.cfg (W402), fehlt/ungueltig = 4:3, "
                     "Kolben + Tooltip, Experimental-Hinweis nur LoC, nur LoC > Erweitert, keine Ueberlappung)", n);
         GT_OK(t);
     } else {
@@ -21405,11 +25393,11 @@ static void locl_gt_row(const loc_sumrow_t *r, int i, const char *label, const c
 
 static void locl_gui_selftest(int *pass, int *fail)
 {
-    static const int kAdvLoc[] = { ID_LOC_IMAGE, ID_LOC_CHECK, ID_LOC_BROWSE, ID_LOC_FOLDER, ID_VSYNC, ID_FPS, ID_BG };
+    static const int kAdvLoc[] = { ID_LOC_IMAGE, ID_LOC_CHECK, ID_LOC_BROWSE, ID_LOC_FOLDER, ID_VSYNC, ID_FPS }; /* W397: ID_BG unter dem Zahnrad */
     static const int kAdvSb[] = { ID_MEDIA, ID_MEDIA_B, ID_XBE, ID_HDD, ID_HDD_OPEN, ID_DATA_OPEN, ID_SAVES_RESET,
                                   ID_SAVES_IMPORT, ID_SAVES_EXPORT, ID_SAVES_REPLAYS, ID_PROF_COMBO, ID_PROF_LOAD,
                                   ID_PROF_SAVE, ID_PROF_DEL, ID_PROF_DFLT, ID_DIAG, ID_SAVE_LOCK, ID_LIVE };
-    static const int kGo[LOC_SUM_N] = { P_ADV, P_GFX, P_DISPLAY, P_CTRL, P_ADV };
+    static const int kGo[LOC_SUM_N] = { P_ADV, P_GFX, P_DISPLAY, P_CTRL, P_LNET }; /* W397: Online -> Multiplayer */
     char why[300] = "", tmp[1024], cfg[1200], keep[16], dir[1100], cd0[sizeof g_client_dir];
     launcher_settings_t s;
     loc_sumrow_t r[LOC_SUM_N];
@@ -21452,7 +25440,22 @@ static void locl_gui_selftest(int *pass, int *fail)
     loctab_sum_rows(r);
     locl_gt_row(r, 0, LT("gui.sum_game"), LT("gui.loc_sum_none"), C_WARN, "en", why, sizeof why);
     locl_gt_row(r, 1, g_sum[1].label, g_sum[1].value, g_sum[1].col, "en", why, sizeof why);
-    locl_gt_row(r, 2, g_sum[2].label, g_sum[2].value, g_sum[2].col, "en", why, sizeof why);
+    { /* W363: Anzeige-Zeile mit LoC-Takt, VSync und Bildformat */
+        char dv[sizeof r[2].value];
+        launcher_settings_t t = g_s;
+        loctab_display_value(&g_s, dv, sizeof dv);
+        locl_gt_row(r, 2, g_sum[2].label, dv, g_sum[2].col, "en", why, sizeof why);
+        t.interp_fps = 0; t.present_interval = 1; t.window_mode = 0; t.width = 960; t.height = 720;
+        loctab_display_value(&t, dv, sizeof dv);
+        if (!why[0] && (!strstr(dv, "960 \xC3\x97 720") || !strstr(dv, "20 Hz") || !strstr(dv, "VSync on") || !strstr(dv, "4:3"))) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "W363 Anzeige LoC: %s", dv);
+        }
+        t.interp_fps = 120; t.present_interval = 0;
+        loctab_display_value(&t, dv, sizeof dv);
+        if (!why[0] && (!strstr(dv, "120") || !strstr(dv, "VSync off"))) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "W363 Anzeige LoC 120: %s", dv);
+        }
+    }
     locl_gt_row(r, 3, g_sum[4].label, g_sum[4].value, g_sum[4].col, "en", why, sizeof why);
     locl_gt_row(r, 4, LT("gui.loc_sum_online"), LT("gui.loc_server_cue"), C_FAINT, "en", why, sizeof why);
     if (!why[0] && (strcmp(r[1].label, LT("gui.page_graphics")) != 0 || strcmp(r[3].label, LT("gui.page_controls")) != 0)) {
@@ -21463,7 +25466,8 @@ static void locl_gui_selftest(int *pass, int *fail)
         loctab_vis(ID_SUM_GO0 + k, 0, "SB-Bereitschaft im LoC-Bereich", why, sizeof why);
     }
     loctab_vis(ID_LOC_START, 1, "LoC-Start", why, sizeof why);
-    if (!why[0] && !IsWindowEnabled(ctl(ID_LOC_START)) != !lgame_loc_client_ready()) { /* W353: je Ausgabe */
+    if (!why[0] && !IsWindowEnabled(ctl(ID_LOC_START)) != !(lgame_loc_client_ready() && !loc_img_gate(NULL, 0))) {
+        /* W353: je Ausgabe; W403: ohne gepruefte Disc grau */
         strcpy_s(why, sizeof why, "LoC-Start grau/frei passt nicht zur Ausgabe");
     }
     /* 2: Hinweisband unten wie SB (nach der Liste), ohne Einmal-Start */
@@ -21507,7 +25511,7 @@ static void locl_gui_selftest(int *pass, int *fail)
         }
     }
     loctab_vis(ID_NAV0 + P_ADV, 1, "LoC", why, sizeof why);
-    loctab_vis(ID_NAV0 + P_PACKS, 0, "LoC", why, sizeof why);
+    loctab_vis(ID_NAV0 + P_PACKS, 1, "LoC (Netzwerk)", why, sizeof why); /* W392 */
     for (k = 0; k < (int)(sizeof kAdvLoc / sizeof kAdvLoc[0]); k++) {
         loctab_vis(kAdvLoc[k], 1, "LoC-Erweitert", why, sizeof why);
     }
@@ -21621,6 +25625,8 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
     /* Ordnername mit Umlauten und sz: "w82_uemlaeut_ss" */
     const char *uml = "w82_" U8_UE "ml" U8_AE "ut_" U8_SZ;
     u8_GetTempPath(tmp, sizeof tmp);
+    g_locgate_skip = 1; /* W400: aeltere LoC-Startweg-Faelle pruefen die Kette ohne steelnet (Fall 65d prueft die Sperre) */
+    g_in_gui_selftest = 1; /* W403 */
 
     /* 20: UTF-8-Pfade (Datei, Suche, Profile in Umlaut-Ordner) */
     {
@@ -22153,14 +26159,15 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                         _snprintf_s(why44, sizeof why44, _TRUNCATE, "Alias '%s'", al[i].n);
                     }
                 }
-                for (n = 0; n < P_N; n++) {
+                for (n = 0; n < NAV_ORDER_N; n++) {
                     seen[cur] = 1;
                     cur = nav_next(cur, 1);
                 }
-                for (n = 0; n < P_N; n++) {
-                    ok44 = ok44 && seen[n];
+                for (n = 0; n < P_N; n++) { /* W397: Test tools nicht mehr im Zyklus (unter dem Zahnrad) */
+                    ok44 = ok44 && seen[n] == (n != P_ALPHA);
                 }
-                ok44 = ok44 && cur == P_PLAY && nav_next(P_PLAY, -1) == P_ALPHA; /* W272 */
+                ok44 = ok44 && cur == P_PLAY && nav_next(P_PLAY, -1) == P_ADV && nav_next(P_ALPHA, 1) == P_PLAY &&
+                       gui_page_from_name("settings") == P_LSET && strcmp(gui_page_key(P_LSET), "settings") == 0;
                 for (p = 0; p < P_N && ok44; p++) {
                     int vis = 0;
                     for (i = 0; i < g_ui_n; i++) {
@@ -23183,49 +27190,122 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                 g_upd_cfg = -1;
                 g_upd_ask = 1;
                 memset(&g_upd_res, 0, sizeof g_upd_res);
-                show_page(P_PLAY);
-                pump();
-                if (!IsWindowVisible(ctl(ID_UPD_YES)) || !IsWindowVisible(ctl(ID_UPD_NO)) ||
-                    IsWindowVisible(ctl(ID_UPD_OPEN)))
-                    strcpy_s(why63, sizeof why63, "unbeantwortet: Frage nicht sichtbar");
-                on_command(ID_UPD_NO, BN_CLICKED);
-                pump();
-                if (!why63[0] && (g_upd_ask || g_upd_cfg != 0 || IsWindowVisible(ctl(ID_UPD_NO)) ||
-                                  ui_checked(ID_UPD_AUTO)))
-                    strcpy_s(why63, sizeof why63, "nein: Frage bleibt / Zustand falsch");
-                g_upd_cfg = -1;
-                g_upd_ask = 1;
-                ui_refresh_visibility();
-                on_command(ID_UPD_YES, BN_CLICKED);
-                pump();
-                if (!why63[0] && (g_upd_ask || g_upd_cfg != 1 || !ui_checked(ID_UPD_AUTO) || g_upd_busy ||
-                                  IsWindowVisible(ctl(ID_UPD_YES))))
-                    strcpy_s(why63, sizeof why63, "ja: Zustand falsch oder Abruf im Testbetrieb");
-                on_command(ID_UPD_AUTO, BN_CLICKED);
-                if (!why63[0] && (g_upd_cfg != 0 || ui_checked(ID_UPD_AUTO)))
-                    strcpy_s(why63, sizeof why63, "Schalter aus");
+                /* W397 LAUNCHER-STRUCT: Erstabfrage "Online & Updates" mit drei Stufen (SB- und LoC-Spielen),
+                 * Stufe = abgeleitet aus launcher_loc_online/update_check, Uebernahme alter Antworten. */
+                {
+                    static const struct { const char *cfg; int mode, ask; } kMig[] = {
+                        { "update_check=1\nlauncher_loc_online=1\n", NETM_STEEL, 0 }, /* ja + Online -> steelnet */
+                        { "update_check=1\nlauncher_loc_online=0\n", NETM_VER, 0 },   /* nur Update -> Version */
+                        { "update_check=0\n", NETM_OFF, 0 },                          /* nein -> offline */
+                        { "update_check=0\nlauncher_loc_online=1\n", NETM_STEEL, 0 }, /* Online an bleibt */
+                        { "# nie gefragt\n", NETM_OFF, 1 },                           /* neu: fragen */
+                        { "launcher_loc_online=1\n", NETM_STEEL, 0 },                 /* Online an: nicht fragen */
+                    };
+                    char tmp63[1024], cfg63[1200], keep63[1200];
+                    int fs0 = g_onl_fix_srv, on0 = g_loc_online, m;
+                    u8_GetTempPath(tmp63, sizeof tmp63);
+                    _snprintf_s(cfg63, sizeof cfg63, _TRUNCATE, "%sw397_netq_user.cfg", tmp63);
+                    strcpy_s(keep63, sizeof keep63, g_ucfg_test);
+                    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg63);
+                    g_onl_fix_srv = 1;
+                    for (m = 0; m < (int)(sizeof kMig / sizeof kMig[0]) && !why63[0]; m++) {
+                        FILE *f = NULL;
+                        if (u8_fopen_s(&f, cfg63, "w") == 0 && f) {
+                            fputs(kMig[m].cfg, f);
+                            fclose(f);
+                        }
+                        onl_load();
+                        g_upd_cfg = lupd_cfg_get(cfg63);
+                        if (netm_get() != kMig[m].mode || netq_should_ask("0.3.0", g_upd_cfg, g_loc_online) != kMig[m].ask)
+                            _snprintf_s(why63, sizeof why63, _TRUNCATE, "Uebernahme %d: Stufe %d (soll %d), Frage %d",
+                                        m, netm_get(), kMig[m].mode, netq_should_ask("0.3.0", g_upd_cfg, g_loc_online));
+                    }
+                    if (!why63[0] && netq_should_ask("", -1, 0)) /* ohne Release-Version nie fragen (wie W250) */
+                        strcpy_s(why63, sizeof why63, "ohne Version gefragt");
+                    /* Waehlen schreibt beide alten Schluessel (Temp-Datei) */
+                    for (m = NETM_N - 1; m >= 0 && !why63[0]; m--) {
+                        static const int kOn[NETM_N] = { 1, 0, 0 }, kUp[NETM_N] = { 1, 1, 0 };
+                        on_command(ID_NETM0 + m, BN_CLICKED);
+                        pump();
+                        g_loc_online = -1;
+                        onl_load();
+                        if (g_loc_online != kOn[m] || g_upd_cfg != kUp[m] || netm_get() != m ||
+                            !ui_checked(ID_NETM0 + m) || ui_checked(ID_NETM0 + (m + 1) % NETM_N))
+                            _snprintf_s(why63, sizeof why63, _TRUNCATE, "Stufe %d: online=%d update=%d", m,
+                                        g_loc_online, g_upd_cfg);
+                    }
+                    /* ohne steelnet-Pins: Stufe steelnet grau, Klick aendert nichts */
+                    g_onl_fix_srv = 0;
+                    g_loc_online = 0;
+                    netm_sync_ui();
+                    on_command(ID_NETM0 + NETM_STEEL, BN_CLICKED);
+                    if (!why63[0] && (g_loc_online || IsWindowEnabled(ctl(ID_NETM0 + NETM_STEEL))))
+                        strcpy_s(why63, sizeof why63, "ohne Dienst: steelnet waehlbar");
+                    g_onl_fix_srv = 1;
+                    u8_DeleteFile(cfg63);
+                    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, keep63);
+                    /* Erstabfrage sichtbar auf SB- und LoC-Spielen, Antwort beendet sie */
+                    for (m = 0; m < 2 && !why63[0]; m++) {
+                        int i3;
+                        g_game = m ? LGAME_LOC : LGAME_SB;
+                        g_upd_cfg = -1;
+                        g_loc_online = 0;
+                        g_upd_ask = 1;
+                        loctab_nav_layout();
+                        show_page(P_PLAY);
+                        pump();
+                        for (i3 = 0; i3 < NETM_N; i3++) {
+                            if (!IsWindowVisible(ctl(ID_NETQ0 + i3)))
+                                _snprintf_s(why63, sizeof why63, _TRUNCATE, "%s: Erstabfrage Knopf %d fehlt",
+                                            m ? "LoC" : "SB", i3);
+                        }
+                        if (!why63[0] && (IsWindowVisible(ctl(ID_UPD_OPEN)) || ui_find(ID_UPD_YES) || ui_find(ID_UPD_AUTO)))
+                            strcpy_s(why63, sizeof why63, "alte Update-Frage/Schalter noch da");
+                        on_command(ID_NETQ0 + (m ? NETM_STEEL : NETM_VER), BN_CLICKED);
+                        pump();
+                        if (!why63[0] && (g_upd_ask || g_upd_cfg != 1 || g_upd_busy || IsWindowVisible(ctl(ID_NETQ0)) ||
+                                          netm_get() != (m ? NETM_STEEL : NETM_VER)))
+                            _snprintf_s(why63, sizeof why63, _TRUNCATE, "%s: Antwort nicht uebernommen", m ? "LoC" : "SB");
+                        if (!why63[0] && m && !IsWindowVisible(ctl(ID_LOC_MP_GO)))
+                            strcpy_s(why63, sizeof why63, "LoC: Karte Multiplayer fehlt nach der Antwort");
+                    }
+                    g_game = LGAME_SB;
+                    loctab_nav_layout();
+                    on_command(ID_NETQ0 + NETM_OFF, BN_CLICKED);
+                    if (!why63[0] && (g_upd_cfg != 0 || g_loc_online || netm_get() != NETM_OFF))
+                        strcpy_s(why63, sizeof why63, "offline: Zustand falsch");
+                    g_onl_fix_srv = fs0;
+                    g_loc_online = on0;
+                }
                 /* Hinweis mit fremder Adresse: Knopf sichtbar, Oeffnen verweigert */
+                g_upd_cfg = 1;
                 g_upd_res.result = LUPD_R_NEWER;
                 strcpy_s(g_upd_res.rel.tag, sizeof g_upd_res.rel.tag, "v0.2.1");
                 strcpy_s(g_upd_res.rel.url, sizeof g_upd_res.rel.url,
                          "https://github.com/someone/Steelbound/releases/tag/v0.2.1");
-                ui_refresh_visibility();
+                show_page(P_PLAY);
                 pump();
                 if (!why63[0] && !IsWindowVisible(ctl(ID_UPD_OPEN)))
                     strcpy_s(why63, sizeof why63, "Hinweis: Knopf fehlt");
                 on_command(ID_UPD_OPEN, BN_CLICKED);
                 if (!why63[0] && strcmp(g_status, LT("gui.upd_badurl")) != 0)
                     strcpy_s(why63, sizeof why63, "fremde URL nicht abgewiesen");
-                /* Erweitert: Schalter + Knopf nur mit Release-Version */
-                show_page(P_ADV);
+                /* Launcher-Einstellungen (Zahnrad): Stufen, "Jetzt pruefen" und Release-Seite nur mit Release-Version */
+                on_command(ID_LSET_OPEN, BN_CLICKED);
                 pump();
-                if (!why63[0] && (!IsWindowVisible(ctl(ID_UPD_AUTO)) || !IsWindowVisible(ctl(ID_UPD_NOW))))
-                    strcpy_s(why63, sizeof why63, "Erweitert: Schalter fehlt");
+                if (!why63[0] && (g_page != P_LSET || !ui_checked(ID_LSET_OPEN) || !IsWindowVisible(ctl(ID_NETM0)) ||
+                                  !IsWindowVisible(ctl(ID_UPD_NOW)) || !IsWindowVisible(ctl(ID_LSET_RELPAGE)) ||
+                                  !IsWindowVisible(ctl(ID_BG)) || !IsWindowVisible(ctl(ID_LANG))))
+                    strcpy_s(why63, sizeof why63, "Zahnrad: Seite/Elemente fehlen");
                 g_upd_ver = "";
                 ui_refresh_visibility();
                 pump();
-                if (!why63[0] && (IsWindowVisible(ctl(ID_UPD_AUTO)) || IsWindowVisible(ctl(ID_UPD_NOW))))
-                    strcpy_s(why63, sizeof why63, "ohne Version: Schalter sichtbar");
+                if (!why63[0] && (IsWindowVisible(ctl(ID_UPD_NOW)) || IsWindowVisible(ctl(ID_LSET_RELPAGE))))
+                    strcpy_s(why63, sizeof why63, "ohne Version: Pruefen sichtbar");
+                show_page(P_ADV);
+                pump();
+                if (!why63[0] && (IsWindowVisible(ctl(ID_BG)) || IsWindowVisible(ctl(ID_LANG)) || ui_checked(ID_LSET_OPEN)))
+                    strcpy_s(why63, sizeof why63, "Erweitert zeigt noch Launcher-Teile");
                 g_upd_ver = v0;
                 g_upd_ask = 0;
                 g_upd_cfg = -1;
@@ -23239,6 +27319,12 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                 }
             }
             loctab_gui_selftest(pass, fail); /* W276 LOC-LAUNCH (Fall 65) */
+            gameswitch_gui_selftest(pass, fail); /* W398 LAUNCHER-GAMESWITCH (Fall 65c) */
+            loc_gate_gui_selftest(pass, fail); /* W400 LAUNCHER-LOC-ONLINE-GATE (Fall 65d) */
+            r1_polish_gui_selftest(pass, fail); /* W403 LAUNCHER-R1-POLISH (Fall 65e) */
+            header_polish_selftest(pass, fail); /* W401 LAUNCHER-HEADER-POLISH (Fall 65d) */
+            loc_save_gui_selftest(pass, fail); /* W375 LOC-SAVE #50 (Fall 65b) */
+            pergame_gui_selftest(pass, fail); /* W402 LAUNCHER-PERGAME (Fall 65e) */
 #if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
             loctp_gui_selftest(pass, fail); /* W336 LOC-TESTPARTNER (Fall 74) */
             loctp_mode_selftest(pass, fail); /* W351 LOC-TP-FIX (Fall 74b) */
@@ -23259,7 +27345,10 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
             locip_gui_selftest(pass, fail); /* W323 LOC-INTERP (Fall 73) */
             locwide_gui_selftest(pass, fail); /* W326 LOC-WIDE (Fall 74) */
             acc_gui_selftest(pass, fail); /* W328 STEELNET-ACCOUNT (Fall 75/76) */
+            accpage_gui_selftest(pass, fail); /* W399 LAUNCHER-ACCOUNT-PAGE (Fall 75b) */
             onl_gui_selftest(pass, fail); /* W334 LOC-SEC: Online (steelnet) (Fall 77) */
+            smooth_gui_selftest(pass, fail); /* W387 LOC-SMOOTH-OPP: Gegner glaetten (Fall 77b) */
+            lnet_gui_selftest(pass, fail);   /* W392 LAUNCHER-NETTAB: Seite Netzwerk (Fall 77c) */
             /* --- 64 (W259 SETTINGS-RESET): Launcher bleibt offen, im Spiel wird
              * per ESC "Als Standard speichern" gesichert, danach startet derselbe
              * Launcher erneut. Vorher schrieb er seine alten Werte zurueck
@@ -24247,7 +28336,7 @@ static void w282_bind_dialog(const char *client_override, int *pass, int *fail)
         strcpy_s(g_client_dir, sizeof g_client_dir, dir); /* nie das echte Profil */
         g_o.shot = 3; /* Dialog offscreen, ohne Aktivierung, ohne Rueckfragen */
         g_o.bind_sel = -1;
-        g_o.bind_learn = g_o.bind_joydemo = g_o.bind_stickdemo = g_o.bind_wheeldemo = 0;
+        g_o.bind_learn = g_o.bind_joydemo = g_o.bind_stickdemo = g_o.bind_wheeldemo = g_o.bind_combodemo = 0;
         g_bind_testfn = w282_bind_probe;
         g_w282_stage = 1;
         bind_dialog_modal("user_w282Test2", g_w282_prof);
@@ -24525,7 +28614,7 @@ static void w283_bind_dialog(const char *client_override, int *pass, int *fail)
         strcpy_s(g_client_dir, sizeof g_client_dir, dir); /* nie das echte Profil */
         g_o.shot = 3;
         g_o.bind_sel = -1;
-        g_o.bind_learn = g_o.bind_joydemo = g_o.bind_stickdemo = g_o.bind_wheeldemo = 0;
+        g_o.bind_learn = g_o.bind_joydemo = g_o.bind_stickdemo = g_o.bind_wheeldemo = g_o.bind_combodemo = 0;
         g_bind_testfn = w283_bind_probe;
         bind_dialog_modal("user_w283Test", g_w283_prof);
         g_bind_testfn = NULL;
@@ -24570,8 +28659,8 @@ static void w283_pure(int *pass, int *fail)
         strcpy_s(why, sizeof why, "orig_view: Element/Gruppe/Text");
     if (!why[0]) {
         for (i = 0; i < LCTRL_ELEM_N; i++)
-            if (lctrl_bind_combo_row(i) != (i == ov || i == lctrl_bind_elem_index("photo") || i == lctrl_bind_elem_index("quick_shot"))) {
-                strcpy_s(why, sizeof why, "lctrl_bind_combo_row nicht nur orig_view/photo/quick_shot (W290)");
+            if (lctrl_bind_combo_row(i) != (kCtrlElems[i].kind != LCTRL_AXIS)) { /* W365: alle digitalen Zeilen */
+                strcpy_s(why, sizeof why, "lctrl_bind_combo_row nicht alle digitalen Zeilen (W365)");
                 break;
             }
     }
@@ -24615,6 +28704,333 @@ void w283_gui_selftest(const char *client_override, int *pass, int *fail)
     w283_bind_dialog(client_override, pass, fail);
 }
 #undef W283_WHY
+
+/* --- W365 BIND-COMBO / BIND-KEYNAMES ---------------------------------------------------------------
+ * Rein: Anzeigenamen (Caps Lock, Num-Block, F13-F24, Medien/Browser, OEM, unbekannt de/en), Profil bleibt
+ * kanonisch (KEY:20), Rueckrichtung, lesbare Quelle, Kombi-Lerner (Pad gehalten/allein/gleichzeitig,
+ * Trigger), Konflikt-Hinweis (auch LCTRL ~ CTRL), welche Zeilen was lernen.
+ * Dialog (offscreen, Temp-Client-Ordner, nie echte Profile): Strg+S, Umschalt+1, Umschalt allein,
+ * Caps Lock (Anzeige "Caps Lock"), Pad LB+X und A allein, Gang 1 per BACK+DU, Umschalt+Maus links,
+ * Konflikt-Hinweis bei Strg+Leertaste (bi0 = Leertaste), pause lernt keine Tastatur-Kombi, Speichern kanonisch. */
+static char g_w365_why[240];
+static char g_w365_prof[1200];
+
+#define W365_WHY(...) do { if (!g_w365_why[0]) _snprintf_s(g_w365_why, sizeof g_w365_why, _TRUNCATE, __VA_ARGS__); } while (0)
+
+static void w365_pure(int *pass, int *fail)
+{
+    static const struct { int vk; const char *want; } kn[] = {
+        { VK_CAPITAL, "Caps Lock" }, { VK_NUMLOCK, "Num Lock" }, { VK_SCROLL, "Scroll Lock" },
+        { VK_NUMPAD5, "Num 5" }, { VK_NUMPAD0, "Num 0" }, { VK_ADD, "Num +" }, { VK_DIVIDE, "Num /" },
+        { VK_F13, "F13" }, { VK_F24, "F24" }, { VK_F1, "F1" }, { VK_VOLUME_MUTE, "Volume Mute" },
+        { VK_MEDIA_PLAY_PAUSE, "Play/Pause" }, { VK_BROWSER_BACK, "Browser Back" },
+        { VK_LWIN, "Left Win" }, { VK_APPS, "Menu" }, { VK_SNAPSHOT, "Print Screen" },
+        { VK_PRIOR, "Page Up" }, { VK_LCONTROL, "Left Ctrl" }, { 'Q', "Q" }, { '7', "7" },
+    };
+    char why[240] = "", t[160], keep[8];
+    int i, row = -1;
+    lctrl_combo_t cb;
+    lctrl_pad_t p0, p1, p2;
+    lctrl_bind_t b;
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    sb_lang_set("en");
+    for (i = 0; i < (int)(sizeof kn / sizeof kn[0]) && !why[0]; i++) {
+        lctrl_key_disp(kn[i].vk, t, sizeof t);
+        if (strcmp(t, kn[i].want) != 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "lctrl_key_disp(%d)='%s' statt '%s'", kn[i].vk, t, kn[i].want);
+        }
+    }
+    if (!why[0]) { /* OEM nach Layout: nicht leer, keine Nummer */
+        lctrl_key_disp(VK_OEM_PERIOD, t, sizeof t);
+        if (!t[0] || strstr(t, "Key ")) _snprintf_s(why, sizeof why, _TRUNCATE, "OEM-Punkt '%s'", t);
+    }
+    if (!why[0]) {
+        lctrl_key_disp(0xFF, t, sizeof t);
+        if (strcmp(t, "Key 255") != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "EN unbekannt '%s'", t);
+        sb_lang_set("de");
+        lctrl_key_disp(0xFF, t, sizeof t);
+        if (!why[0] && strcmp(t, "Taste 255") != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "DE unbekannt '%s'", t);
+    }
+    if (!why[0]) { /* Profil kanonisch, Rueckrichtung */
+        lctrl_key_name(VK_CAPITAL, t, sizeof t);
+        if (strcmp(t, "20") != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "lctrl_key_name(Caps)='%s' statt 20", t);
+        else if (lctrl_key_vk("20") != VK_CAPITAL || lctrl_key_vk("0x14") != VK_CAPITAL ||
+                 lctrl_key_vk("F5") != VK_F5 || lctrl_key_vk("space") != VK_SPACE || lctrl_key_vk("s") != 'S' ||
+                 lctrl_key_vk("LCTRL") != VK_LCONTROL || lctrl_key_vk("XYZ") != -1)
+            strcpy_s(why, sizeof why, "lctrl_key_vk Rueckrichtung");
+    }
+    if (!why[0]) { /* lesbare Quelle (Sprache de) */
+        static const struct { const char *src, *want; int diff; } sp[] = {
+            { "KEY:20", "Caps Lock", 1 }, { "KEY:CTRL+KEY:S", "Ctrl + S", 1 }, { "KEY:T", "T", 0 },
+            { "KEY:SHIFT+KEY:1", "Shift + 1", 1 }, { "PAD:LB+PAD:X", "LB + X", 1 }, { "PAD:A", "A", 0 },
+            { "PAD:DU", "Steuerkreuz oben", 1 }, { "KEY:SHIFT+MOUSE:LEFT", "Shift + MOUSE:LEFT", 1 },
+        };
+        for (i = 0; i < (int)(sizeof sp / sizeof sp[0]) && !why[0]; i++) {
+            int d = lctrl_src_pretty(sp[i].src, t, sizeof t);
+            if (d != sp[i].diff || strcmp(t, sp[i].want) != 0)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "lctrl_src_pretty(%s)='%s'/%d", sp[i].src, t, d);
+        }
+        if (!why[0] && (lctrl_src_pretty("PAD:L3", t, sizeof t) != 1 || strncmp(t, "Linker Stick", 12) != 0))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "lctrl_src_pretty(PAD:L3)='%s'", t);
+    }
+    if (!why[0]) {
+        bind_src_disp("KEY:20", t, sizeof t);
+        if (strcmp(t, "KEY:20  (Caps Lock)") != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "Liste KEY:20 '%s'", t);
+    }
+    if (!why[0]) {
+        int src;
+        ks_atom("KEY:20", t, sizeof t, &src);
+        if (strcmp(t, "Caps Lock") != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "Uebersicht KEY:20 '%s'", t);
+        ks_atom("KEY:SPACE", t, sizeof t, &src);
+        if (!why[0] && strcmp(t, "SPACE") != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "Uebersicht SPACE veraendert '%s'", t);
+    }
+    if (!why[0]) { /* Pad-Kombi-Lerner */
+        memset(&p0, 0, sizeof p0);
+        p1 = p0;
+        p1.buttons = LCTRL_PB_LB;
+        p2 = p1;
+        p2.buttons |= LCTRL_PB_X;
+        lctrl_combo_reset(&cb);
+        if (lctrl_pad_combo_step(&cb, &p0, &p1, t, sizeof t) != 0) strcpy_s(why, sizeof why, "Pad: LB allein sofort belegt");
+        else if (lctrl_pad_combo_step(&cb, &p1, &p1, t, sizeof t) != 0) strcpy_s(why, sizeof why, "Pad: LB gehalten belegt");
+        else if (lctrl_pad_combo_step(&cb, &p1, &p2, t, sizeof t) != 1 || strcmp(t, "PAD:LB+PAD:X") != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Pad: LB+X '%s'", t);
+    }
+    if (!why[0]) {
+        p1 = p0;
+        p1.buttons = LCTRL_PB_A;
+        lctrl_combo_reset(&cb);
+        if (lctrl_pad_combo_step(&cb, &p0, &p1, t, sizeof t) != 0 ||
+            lctrl_pad_combo_step(&cb, &p1, &p0, t, sizeof t) != 1 || strcmp(t, "PAD:A") != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Pad: A allein '%s'", t);
+    }
+    if (!why[0]) { /* gleichzeitig in einem Takt; Trigger als erste Taste */
+        p2 = p0;
+        p2.buttons = LCTRL_PB_LB | LCTRL_PB_Y;
+        lctrl_combo_reset(&cb);
+        if (lctrl_pad_combo_step(&cb, &p0, &p2, t, sizeof t) != 1 || !strstr(t, "PAD:LB") || !strstr(t, "PAD:Y") ||
+            !strchr(t, '+'))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Pad: LB+Y gleichzeitig '%s'", t);
+        p1 = p0;
+        p1.lt = 255;
+        p2 = p1;
+        p2.buttons = LCTRL_PB_A;
+        lctrl_combo_reset(&cb);
+        if (!why[0] && (lctrl_pad_combo_step(&cb, &p0, &p1, t, sizeof t) != 0 ||
+                        lctrl_pad_combo_step(&cb, &p1, &p2, t, sizeof t) != 1 || strcmp(t, "PAD:LT+PAD:A") != 0))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Pad: LT+A '%s'", t);
+    }
+    if (!why[0]) { /* allgemeiner Lerner (Original-Controller, Joystick) */
+        lctrl_combo_reset(&cb);
+        if (lctrl_combo_feed(&cb, "SBC:CHAFF", 1, t, sizeof t) != 0 ||
+            lctrl_combo_feed(&cb, "SBC:EJECT", 1, t, sizeof t) != 1 || strcmp(t, "SBC:CHAFF+SBC:EJECT") != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "feed: Kombi '%s'", t);
+        lctrl_combo_reset(&cb);
+        if (!why[0] && (lctrl_combo_feed(&cb, "SBC:CHAFF", 1, t, sizeof t) != 0 ||
+                        lctrl_combo_feed(&cb, NULL, 1, t, sizeof t) != 0 ||
+                        lctrl_combo_feed(&cb, NULL, 0, t, sizeof t) != 1 || strcmp(t, "SBC:CHAFF") != 0))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "feed: allein '%s'", t);
+    }
+    if (!why[0]) { /* Konflikt-Hinweis */
+        lctrl_bind_load_text("[buttons]\nbi0 = KEY:S\npedal_l = KEY:LCTRL\n", &b);
+        if (!lctrl_bind_combo_single_use(&b, "KEY:CTRL+KEY:S", t, sizeof t, &row) || row < 0)
+            strcpy_s(why, sizeof why, "Konflikt Strg+S nicht erkannt");
+        else if (lctrl_bind_combo_single_use(&b, "KEY:ALT+KEY:Q", t, sizeof t, &row))
+            strcpy_s(why, sizeof why, "Konflikt Alt+Q gemeldet");
+        else if (lctrl_bind_combo_single_use(&b, "KEY:S", t, sizeof t, &row))
+            strcpy_s(why, sizeof why, "Einzeltaste als Kombi gemeldet");
+        lctrl_bind_load_text("[buttons]\npedal_l = KEY:LCTRL\n", &b);
+        if (!why[0] && (!lctrl_bind_combo_single_use(&b, "KEY:CTRL+KEY:S", t, sizeof t, &row) ||
+                        row != lctrl_bind_elem_index("pedal_l")))
+            strcpy_s(why, sizeof why, "Konflikt CTRL ~ LCTRL (pedal_l) nicht erkannt");
+    }
+    if (!why[0]) { /* Zeilen */
+        int pz = lctrl_bind_elem_index("pause"), ph = lctrl_bind_elem_index("photo"),
+            ac = lctrl_bind_elem_index("aim_center"), ax = lctrl_bind_elem_index("aim_x"),
+            g1 = lctrl_bind_elem_index("gear.1"), fs = lctrl_bind_elem_index("feedback_shot");
+        if (!lctrl_bind_combo_row(0) || !lctrl_bind_key_combo_row(0) || !lctrl_bind_mouse_combo_row(0) ||
+            lctrl_bind_combo_row(ax) || !lctrl_bind_combo_row(pz) || lctrl_bind_key_combo_row(pz) ||
+            lctrl_bind_key_combo_row(fs) || !lctrl_bind_key_combo_row(ph) || lctrl_bind_mouse_combo_row(ph) ||
+            !lctrl_bind_mouse_combo_row(ac) || !lctrl_bind_key_combo_row(g1))
+            strcpy_s(why, sizeof why, "Zeilen-Regeln (combo/key/mouse)");
+    }
+    sb_lang_set(keep);
+    if (!why[0]) W282_OK("W365 BIND names+combo pure (Caps Lock/Num/F13-24/Medien/OEM, Profil KEY:20, Pad LB+X/A/LT+A, SBC-Lerner, Konflikt CTRL~LCTRL, Zeilen)");
+    else W282_FAIL("W365 BIND names+combo pure", why);
+}
+
+static int w365_row_is(int idx, const char *want)
+{
+    char t[256];
+    lctrl_bind_row_text(&g_bind, idx, t, sizeof t);
+    if (strcmp(t, want) != 0) {
+        W365_WHY("Zeile %s: '%s' statt '%s' (cap=%d)", kCtrlElems[idx].key, t, want, g_cap_mode);
+        return 0;
+    }
+    return 1;
+}
+
+static void w365_select(HWND hd, int idx)
+{
+    HWND lb = bctl(hd, IDB_LIST);
+    int n = ListBox_GetCount(lb), at;
+    for (at = 0; at < n; at++) {
+        if ((int)ListBox_GetItemData(lb, at) == idx) {
+            ListBox_SetCurSel(lb, at);
+            g_bind_lb_prev = at;
+            break;
+        }
+    }
+    g_bind_sel = idx;
+}
+
+static void w365_keys(HWND hd, int idx, const int *vk, int n, int up_vk)
+{
+    int i;
+    w365_select(hd, idx);
+    bind_start_capture(hd, 1);
+    for (i = 0; i < n && g_cap_mode; i++) {
+        bind_cap_key(hd, vk[i], 0);
+    }
+    if (up_vk && g_cap_mode) {
+        bind_cap_keyup(hd, up_vk);
+    }
+}
+
+static void w365_result(HWND hd, char *out, size_t cap)
+{
+    wchar_t w[1024];
+    w[0] = 0;
+    GetWindowTextW(bctl(hd, IDB_RESULT), w, 1024);
+    WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)cap, NULL, NULL);
+}
+
+static void w365_pad(HWND hd, int idx, unsigned short first, unsigned short second)
+{
+    lctrl_pad_t p0, p1, p2;
+    memset(&p0, 0, sizeof p0);
+    p1 = p0;
+    p1.buttons = first;
+    p2 = p1;
+    p2.buttons = (unsigned short)(first | second);
+    w365_select(hd, idx);
+    bind_start_capture(hd, 1);
+    g_cap_prev = p0;
+    bind_cap_pad_state(hd, &p1);
+    if (!g_cap_mode) {
+        W365_WHY("Pad: erste Taste allein beendete das Lernen");
+        return;
+    }
+    bind_cap_pad_state(hd, second ? &p2 : &p0);
+}
+
+static void w365_bind_probe(HWND hd)
+{
+    static const int k_ctrl_s[] = { VK_CONTROL, 'S' }, k_shift_1[] = { VK_SHIFT, '1' }, k_shift[] = { VK_SHIFT },
+                     k_caps[] = { VK_CAPITAL }, k_ctrl_sp[] = { VK_CONTROL, VK_SPACE };
+    int b1 = lctrl_bind_elem_index("bi1"), b2 = lctrl_bind_elem_index("bi2"), b3 = lctrl_bind_elem_index("bi3"),
+        b4 = lctrl_bind_elem_index("bi4"), b5 = lctrl_bind_elem_index("bi5"), b6 = lctrl_bind_elem_index("bi6"),
+        b7 = lctrl_bind_elem_index("bi7"), g1 = lctrl_bind_elem_index("gear.1"), pz = lctrl_bind_elem_index("pause");
+    char res[1024], buf[4096];
+    FILE *f;
+    w365_keys(hd, b1, k_ctrl_s, 2, 0);
+    if (g_cap_mode || !w365_row_is(b1, "KEY:CTRL+KEY:S")) return;
+    w365_keys(hd, b2, k_shift_1, 2, 0);
+    if (g_cap_mode || !w365_row_is(b2, "KEY:SHIFT+KEY:1")) return;
+    w365_keys(hd, b3, k_shift, 1, VK_SHIFT);
+    if (g_cap_mode || !w365_row_is(b3, "KEY:SHIFT")) return;
+    w365_keys(hd, b3, k_caps, 1, 0);
+    if (g_cap_mode || !w365_row_is(b3, "KEY:20")) return;
+    w365_result(hd, res, sizeof res);
+    if (!strstr(res, "Caps Lock")) { W365_WHY("Ergebnis ohne 'Caps Lock': '%s'", res); return; }
+    /* Pad: LB halten + X -> Kombi; A allein beim Loslassen; Gang 1 per BACK+DU */
+    w365_pad(hd, b4, LCTRL_PB_LB, LCTRL_PB_X);
+    if (g_cap_mode || !w365_row_is(b4, "PAD:LB+PAD:X")) return;
+    w365_pad(hd, b5, LCTRL_PB_A, 0);
+    if (g_cap_mode || !w365_row_is(b5, "PAD:A")) return;
+    w365_pad(hd, g1, LCTRL_PB_BACK, LCTRL_PB_DU);
+    if (g_cap_mode || !w365_row_is(g1, "PAD:BACK+PAD:DU")) return;
+    /* Konflikt: bi0 = KEY:SPACE einzeln, Strg+Leertaste -> Hinweis, trotzdem eingetragen */
+    w365_keys(hd, b6, k_ctrl_sp, 2, 0);
+    if (g_cap_mode || !w365_row_is(b6, "KEY:CTRL+KEY:SPACE")) return;
+    w365_result(hd, res, sizeof res);
+    if (!strstr(res, "bi0") || !strstr(res, "Space")) { W365_WHY("kein Konflikt-Hinweis: '%s'", res); return; }
+    /* Umschalt + Maus links */
+    w365_select(hd, b7);
+    bind_start_capture(hd, 1);
+    bind_cap_key(hd, VK_SHIFT, 0);
+    bind_cap_mouse(hd, WM_LBUTTONDOWN, 0);
+    if (g_cap_mode || !w365_row_is(b7, "KEY:SHIFT+MOUSE:LEFT")) return;
+    /* pause: Tastatur-Kombi nicht (Fenster kennt nur einfache Tasten) -> Strg sofort */
+    w365_keys(hd, pz, k_ctrl_s, 2, 0);
+    if (g_cap_mode || !w365_row_is(pz, "KEY:LCTRL")) return;
+    lctrl_bind_set(&g_bind, pz, "KEY:PAUSE");
+    if (bind_save(hd) != 0) { W365_WHY("Speichern scheiterte"); return; }
+    buf[0] = 0;
+    if (u8_fopen_s(&f, g_w365_prof, "rb") == 0 && f) {
+        size_t got = fread(buf, 1, sizeof buf - 1, f);
+        buf[got] = 0;
+        fclose(f);
+    }
+    if (!strstr(buf, "KEY:CTRL+KEY:S") || !strstr(buf, "KEY:SHIFT+KEY:1") || !strstr(buf, "KEY:20") ||
+        !strstr(buf, "PAD:LB+PAD:X") || !strstr(buf, "PAD:BACK+PAD:DU") || !strstr(buf, "KEY:SHIFT+MOUSE:LEFT") ||
+        strstr(buf, "Caps Lock")) {
+        W365_WHY("Datei nicht kanonisch / Kombis fehlen");
+        return;
+    }
+}
+
+static void w365_bind_dialog(const char *client_override, int *pass, int *fail)
+{
+    char tmp[1024], dir[1100], pd[1200], keepdir[sizeof g_client_dir], keepl[8];
+    gui_opts_t keepo = g_o;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw365_bind", tmp);
+    _snprintf_s(pd, sizeof pd, _TRUNCATE, "%s/profiles", dir);
+    lcfg_mkdir_p(pd);
+    _snprintf_s(g_w365_prof, sizeof g_w365_prof, _TRUNCATE, "%s/user_w365Test.ini", pd);
+    write_file(g_w365_prof, "[buttons]\nbi0 = KEY:SPACE\n[client]\npause = KEY:PAUSE\n");
+    g_w365_why[0] = 0;
+    strcpy_s(keepl, sizeof keepl, sb_lang_code());
+    sb_lang_set("en");
+    if (!(gui_init(client_override) && gui_create(1))) {
+        strcpy_s(g_w365_why, sizeof g_w365_why, "Fenster nicht erzeugt");
+    } else {
+        build_controls();
+        tips_build();
+        ShowWindow(g_hwnd, SW_SHOWNOACTIVATE); /* ausserhalb des Bildschirms */
+        strcpy_s(keepdir, sizeof keepdir, g_client_dir);
+        strcpy_s(g_client_dir, sizeof g_client_dir, dir); /* nie das echte Profil */
+        g_o.shot = 3;
+        g_o.bind_sel = -1;
+        g_o.bind_learn = g_o.bind_joydemo = g_o.bind_stickdemo = g_o.bind_wheeldemo = g_o.bind_combodemo = 0;
+        g_bind_testfn = w365_bind_probe;
+        bind_dialog_modal("user_w365Test", g_w365_prof);
+        g_bind_testfn = NULL;
+        g_o = keepo;
+        strcpy_s(g_client_dir, sizeof g_client_dir, keepdir);
+        ShowWindow(g_hwnd, SW_HIDE);
+        gui_teardown();
+    }
+    sb_lang_set(keepl);
+    u8_DeleteFile(g_w365_prof);
+    {
+        wchar_t w[1200];
+        u8_to_w(pd, w, 1200);
+        RemoveDirectoryW(w);
+        u8_to_w(dir, w, 1200);
+        RemoveDirectoryW(w);
+    }
+    if (!g_w365_why[0]) W282_OK("W365 BIND combo bind-dialog (Strg+S, Umschalt+1, Umschalt allein, Caps Lock angezeigt, Pad LB+X / A allein / Gang 1 BACK+DU, Konflikt-Hinweis Strg+Leertaste, Umschalt+Maus, pause ohne Tastatur-Kombi, Datei kanonisch)");
+    else W282_FAIL("W365 BIND combo bind-dialog", g_w365_why);
+}
+
+void w365_gui_selftest(const char *client_override, int *pass, int *fail)
+{
+    w365_pure(pass, fail);
+    w365_bind_dialog(client_override, pass, fail);
+}
+#undef W365_WHY
 
 /* --- W290 QUICK-SHOT: Schnell-Screenshot + Fotomodus im Belegungsdialog, Karte "Fotos & Screenshots" ---------
  * Rein: Uebergang alter Profile (photo=F12 -> Shift+F12 + quick_shot=F12), eigene Belegung bleibt, leere Zeile =
@@ -24819,7 +29235,7 @@ void w299_bind_selftest(int *pass, int *fail)
     char why[220] = "", tmp[1024], path[1200], *html, *txt;
     int re = lctrl_bind_elem_index("replay_exit");
     lctrl_bind_t b, rb;
-    if (re < 0 || kCtrlElems[re].kind != LCTRL_ACT || lctrl_elem_group(re) != 5 || lctrl_bind_combo_row(re) ||
+    if (re < 0 || kCtrlElems[re].kind != LCTRL_ACT || lctrl_elem_group(re) != 5 || !lctrl_bind_combo_row(re) || /* W365: Kombis */
         !lctrl_bind_empty_line_row(re) || strcmp(LT("bind.replay_exit"), "bind.replay_exit") == 0)
         strcpy_s(why, sizeof why, "replay_exit: Element/Gruppe/Text");
     if (!why[0]) {
@@ -24902,7 +29318,7 @@ void w290_gui_selftest(const char *client_override, int *pass, int *fail)
         strcpy_s(g_client_dir, sizeof g_client_dir, dir); /* nie das echte Profil */
         g_o.shot = 3;
         g_o.bind_sel = -1;
-        g_o.bind_learn = g_o.bind_joydemo = g_o.bind_stickdemo = g_o.bind_wheeldemo = 0;
+        g_o.bind_learn = g_o.bind_joydemo = g_o.bind_stickdemo = g_o.bind_wheeldemo = g_o.bind_combodemo = 0;
         if (!g_w290_why[0]) {
             g_bind_testfn = w290_bind_probe;
             bind_dialog_modal("user_w290Test", g_w290_prof);

@@ -88,6 +88,9 @@ static uint16_t ln_base_of(const locnet *n, uint32_t ip_net)
             return n->peers[i].base;
         }
     }
+    if (n->tun && n->tun_base && ip_net != n->self_ip) {
+        return n->tun_base; /* W373: Geister oeffentlicher Lobbys (vip:Stellvertreter) wie Mitspieler */
+    }
     return n->base;
 }
 

@@ -192,6 +192,9 @@ int lcfg_load_file_count(const char *path, launcher_settings_t *s, int *keys);
 /* user.cfg schreiben; vorhandene fremde Zeilen/Kommentare bleiben erhalten.
  * 0 = ok, -1 = Schreibfehler. */
 int lcfg_save_user(const char *path, const launcher_settings_t *s);
+/* W402 PERGAME: flags LCFG_SAVE_NO_PATHS = SB-Spielpfade weder schreiben noch behalten (user_loc.cfg) */
+#define LCFG_SAVE_NO_PATHS 1
+int lcfg_save_user_ex(const char *path, const launcher_settings_t *s, int flags);
 /* W259 SETTINGS-RESET: 3-Wege-Abgleich vor dem Schreiben. base = Dateistand
  * beim letzten Lesen/Schreiben durch den Launcher, disk = Dateistand jetzt
  * (beide als Einstellungen, fehlende Keys = base). Jeder verwaltete Key, den
@@ -219,6 +222,10 @@ int lcfg_apply_set(launcher_settings_t *s, const char *set);
 /* Verstaendliche Vorabpruefung: 0 = ok, 1 = Fehler (Text in err, aktive
  * Sprache via sb_lang; Fehlermeldungen sind Spielertexte). */
 int lcfg_validate(const launcher_settings_t *s, char *err, size_t errcap);
+/* W375 (#50): wie lcfg_validate; LCFG_V_NO_GAME = SB-Spieldaten (Abbild, Ordner, Programmdatei) nicht pruefen
+ * (Speichern auf dem LoC-Tab: gemeinsame Grafik-/Anzeige-/Steuerungswerte ohne SB-Abbild). */
+#define LCFG_V_NO_GAME 1
+int lcfg_validate_ex(const launcher_settings_t *s, char *err, size_t errcap, int flags);
 /* W172 LAUNCHER-P6: wirksame Programmdatei (Ordner-Modus mit leerem
  * xbe_path: <media_root>/default.xbe; sonst xbe_path). lcfg_save_user
  * schreibt diesen Pfad, Start/Kommandozeile nutzen ihn. */
@@ -227,6 +234,16 @@ void lcfg_xbe_effective(const launcher_settings_t *s, char *out, size_t cap);
  * Spielversion). 0 = ok (msg = "Image OK: <Fassung>"), sonst Fehlertext
  * (Sprachschluessel cfg.image_*) in msg. Pfad UTF-8. */
 int lcfg_image_check(const char *image_u8, char *msg, size_t cap);
+/* W369 LAUNCHER-XBE-PICK: Steht im Abbild-Feld ein entpackter Spielordner
+ * (Ordner mit default.xbe) oder eine .xbe-Datei, gilt das als Ordner-Modus
+ * (W172/W217). lcfg_image_check prueft dann die Programmdatei (0/4 wie beim
+ * Abbild, 2 = keine gueltige XBE, 5 = Line of Contact -> Tab-Hinweis; 5 auch
+ * bei einem LoC-Abbild). lcfg_image_as_folder: 1 = Ordner-Fall, dir =
+ * Spielordner, xbe = Programmdatei. lcfg_image_folder_mode: verschiebt so
+ * einen Pfad aus game_image nach media_root/xbe_path (1 = umgestellt).
+ * lcfg_validate behandelt den Fall ebenso. */
+int lcfg_image_as_folder(const char *p, char *dir, size_t dcap, char *xbe, size_t xcap);
+int lcfg_image_folder_mode(launcher_settings_t *s);
 /* W150: SHA-256 (hex) der default.xbe im Abbild. 1 = ok. */
 int lcfg_image_xbe_sha256(const char *image_u8, char hex[65]);
 /* W256 PACK-ANYVER: Klartext "Fits your game" zur Passung fit

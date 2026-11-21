@@ -194,6 +194,17 @@ ID3D11ShaderResourceView *sb_th_stage_missing(unsigned stage, unsigned why, unsi
     return sb_th_mark(why);
 }
 
+/* ISSUE44: Stufe 1..3 sampelt eine leere Stufe (keine Textur gesetzt). */
+static unsigned g_th_empty_total, g_th_empty_frames, g_th_empty_curf, g_th_empty_last_f, g_th_empty_ps, g_th_empty_st;
+void sb_th_stage_empty(unsigned stage, unsigned ps, unsigned present)
+{
+    g_th_empty_total++;
+    if (present != g_th_empty_curf) { g_th_empty_curf = present; g_th_empty_frames++; }
+    g_th_empty_last_f = present;
+    g_th_empty_ps = ps;
+    g_th_empty_st = stage;
+}
+
 ID3D11ShaderResourceView *sb_th_missing(unsigned why, unsigned present, unsigned xptr)
 {
     th_note(0u, xptr, why, present); /* W360 */
@@ -361,6 +372,10 @@ void sb_th_format(char *o, size_t cap, int live)
                     "frames>=0.5: %u last>0: present %u",
                     n ? "" : " none", g_cfg.vis_ztest, g_th_gl_now, g_th_gl_max, g_th_gl_max_f, g_th_gl_gain,
                     g_th_gl_frames, g_th_gl_last_f);
+        u = strlen(o);
+        _snprintf_s(o + u, cap - u, _TRUNCATE,
+                    "\r\nstage 1-3 sampled without texture set (ISSUE44): %u in %u frames, last present %u st%u ps=0x%X",
+                    g_th_empty_total, g_th_empty_frames, g_th_empty_last_f, g_th_empty_st, g_th_empty_ps);
     }
     u = strlen(o);
     _snprintf_s(o + u, cap - u, _TRUNCATE, "\r\nhd pack: %s\r\nmissing-texture marker: %s\r\n", hd[0] ? hd : "off",

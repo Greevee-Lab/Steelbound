@@ -33,10 +33,10 @@ else()
   message(FATAL_ERROR "SB_EDITION muss private oder community sein (ist: ${SB_EDITION})")
 endif()
 message(STATUS "SB_EDITION=${SB_EDITION}")
-# W353 LOC-DURCHSTICH: privater Schalter -DSB_LOC_PLAY=ON gibt in der Community-Ausgabe den LoC-Start frei
-# (privates Testpaket, make_alpha.py --loc-preview). Standard aus: oeffentliche Releases bleiben grau.
-# Interne Ausgabe: LoC-Start immer frei (wird nie verteilt).
-option(SB_LOC_PLAY "W353: privates Testpaket mit LoC (nur community, nie fuer Releases)" OFF)
+# W353 LOC-DURCHSTICH / W389 RELEASE-030: SB_LOC_PLAY gibt in der Community-Ausgabe den LoC-Start frei.
+# Seit 0.3.0 Standard an (LoC fuer alle); -DSB_LOC_PLAY=OFF = Notschalter (LoC-Start grau).
+# Interne Ausgabe: LoC-Start immer frei.
+option(SB_LOC_PLAY "W389: LoC-Start in der Community-Ausgabe (Standard an; OFF = grau, Notschalter)" ON)
 message(STATUS "SB_LOC_PLAY=${SB_LOC_PLAY}")
 
 # W142 L10N-EN: eingebautes Englisch (sb_lang_en.inc aus en.lang).
@@ -161,6 +161,11 @@ if(NOT SB_VERSION)
   target_compile_definitions(sb_launcher PRIVATE SB_TEST_HOOKS=1)
 endif()
 message(STATUS "SB_VERSION=${SB_VERSION}")
+# REL-DEFENDER-FP: Dateieigenschaften (VERSIONINFO) wie beim Client, Version aus SB_VERSION bzw.
+# poc-native/VERSION. Manifest (asInvoker, Win10/11, Per-Monitor-DPI v2, Common Controls v6) s.
+# src/sb_launcher.manifest + Linker-UAC-Eintrag.
+include(${CMAKE_CURRENT_SOURCE_DIR}/../harness/src/sb_verinfo.cmake)
+sb_add_verinfo(sb_launcher "Steelbound Launcher")
 target_compile_options(sb_launcher PRIVATE /W3)
 # W217 FIRST-RUN: Launcher mit statischer CRT (/MT) - startet auch ohne
 # VC++-Redistributable und meldet dann vor dem Spielstart klar, dass der

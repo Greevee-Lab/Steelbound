@@ -27,8 +27,17 @@ typedef struct {
     int32_t ack_of_me;             /* vom Mitspieler gemeldet: lueckenlos bestaetigt von meinen Rahmen */
     u32 rcons;                     /* vom Mitspieler gemeldet: sein naechster Slot */
     uint64_t src;
+    u32 rx_n;                      /* W366: angenommene Pakete dieses Mitspielers (Abgangserkennung) */
     int bound;
     u32 accept_below;              /* Fehlvorhersagen unter diesem Slot werden hingenommen (Rollback war nicht moeglich) */
+    u32 arr[RBI_WIN], arrt[RBI_WIN]; /* W372: Ankunftszeit (us) des bestaetigten Rahmens, slot + 1 */
+    u32 tk[RBI_WIN], tkt[RBI_WIN];   /* W372: Zeit der Live-Entnahme (us), slot + 1 */
+    uint8_t tkp[RBI_WIN];            /* W372: Live-Entnahme war Vorhersage */
+    uint8_t srep[RBI_WIN][5];        /* W385: Achsen, die die Wiederholung vorhergesagt haette (Vergleich) */
+    int32_t slw[RBI_SLW];            /* W372: letzte Puffer (us) dieses Mitspielers */
+    u32 slw_n;
+    int32_t tt_for_me;               /* W372: sein gemeldeter Puffer fuer meine Rahmen (0,1 ms) */
+    u32 tt_g;                        /* W372: eigener Live-Tick-Zaehler + 1 beim Empfang (0 = nie) */
 } rbi_pl;
 
 typedef struct {
@@ -62,12 +71,23 @@ struct rbi {
     double adv;
     int freerun;                   /* W346: nach Desync/Ende: keine Rollbacks, kein Stau (Vorhersage ohne Grenze) */
     int hold;                      /* W346: Neuaufbau steht an - keine neue Vorhersage */
+    u32 gone;                      /* W366: Mitspieler hat die Mission verlassen (Bit je Spieler) - nie mehr warten */
     int32_t hcmp_first;            /* W355: erster verglichener Slot der Mission (-1) */
     int hcmp_first_eq;
     int rbd_pend;                  /* W355: Neuaufbau aufgeschoben (reine Allokation) */
     u32 rbd_floor;                 /* W355: Spieltick der Allokation: Rollback-Ziel hoechstens hier */
     u32 rbd_ticks;                 /* W355: Live-Ticks des Aufschubs */
     rbi_stats_t st;
+    u32 now;                       /* W372: Uhr des Aufrufers (us), 0 = keine Messung */
+    int ts_cool, ts_src;           /* W372: Abklingzeit (Live-Ticks), Quelle des letzten Vorsprungs */
+    u32 ts_n;                      /* W372: Live-Ticks (rbi_tsync-Aufrufe), monoton auch ueber Rollbacks */
+    double ts_ms;                  /* W372: letzter Vorsprung (ms) */
+    int predm, predq;              /* W385: Vorhersagemodus (0 Wiederholung, 1 Trend), Daempfung q/8 */
+    u32 rb_cause;                  /* W385: Kategorien der Fehlvorhersagen seit dem letzten Abholen */
+    int dpend;                     /* W386: vorgemerkte neue Verzoegerung (0 = keine) */
+    u32 dslot;                     /* W386: ab diesem Slot (eigene Rahmen) */
+    int carry_on;                  /* W386: Tasten/Flags des verworfenen Rahmens in den naechsten uebernehmen */
+    uint8_t carry[RBI_FR];
 };
 
 static void wr32(uint8_t *p, u32 v)
@@ -105,8 +125,11 @@ void rbi_begin(rbi_t *r, u32 epoch, int self, int delay, int maxpred)
 {
     int i;
     rbi_stats_t keep = r->st;
+    int pm = r->predm, pq = r->predq;
     memset(r, 0, sizeof *r);
     r->st = keep; /* Zaehler laufen ueber Missionen weiter */
+    r->predm = pm; /* W385: Einstellung, kein Missionszustand */
+    r->predq = pq;
     if (self < 0 || self >= RBI_MAXP) self = 0;
     if (delay < 1) delay = 1;
     if (delay > 8) delay = 8;
@@ -126,6 +149,53 @@ void rbi_begin(rbi_t *r, u32 epoch, int self, int delay, int maxpred)
     tick_start(r);
 }
 
+void rbi_clock(rbi_t *r, u32 now_us) { r->now = now_us ? now_us : 1u; }
+
+static void slack_add(rbi_t *r, rbi_pl *P, int32_t us)
+{
+    int32_t ms = us >= 0 ? us / 1000 : -((-us + 999) / 1000), b = (ms - RBI_SLH_MIN) / 2;
+    if (ms < RBI_SLH_MIN) b = 0;
+    if (b >= (int32_t)RBI_SLH) b = RBI_SLH - 1;
+    r->st.slack_h[b]++;
+    r->st.slack_n++;
+    if (us < 0) r->st.slack_late++;
+    P->slw[P->slw_n % RBI_SLW] = us;
+    P->slw_n++;
+}
+
+int rbi_slack_med(const rbi_t *r, int i, int *ms01)
+{
+    const rbi_pl *P;
+    int32_t v[RBI_SLW], t;
+    int a, b;
+    if (i < 0 || i >= RBI_MAXP) return 0;
+    P = &r->p[i];
+    if (P->slw_n < RBI_SLW) return 0;
+    memcpy(v, P->slw, sizeof v);
+    for (a = 1; a < (int)RBI_SLW; a++) /* Einfuegesortieren (wenige Werte) */
+        for (b = a; b > 0 && v[b - 1] > v[b]; b--) {
+            t = v[b];
+            v[b] = v[b - 1];
+            v[b - 1] = t;
+        }
+    *ms01 = (int)(v[RBI_SLW / 2] / 100);
+    return 1;
+}
+
+int rbi_slack_pct(const u32 *h, u32 n, int pct)
+{
+    u32 want, acc = 0;
+    int b;
+    if (!n) return 0;
+    want = (u32)(((uint64_t)n * (u32)(pct < 0 ? 0 : (pct > 100 ? 100 : pct)) + 99u) / 100u);
+    if (want < 1) want = 1;
+    for (b = 0; b < (int)RBI_SLH; b++) {
+        acc += h[b];
+        if (acc >= want) return RBI_SLH_MIN + 2 * b;
+    }
+    return RBI_SLH_MIN + 2 * (RBI_SLH - 1);
+}
+
 int rbi_active(const rbi_t *r) { return r && r->active; }
 u32 rbi_epoch(const rbi_t *r) { return r->epoch; }
 int rbi_self(const rbi_t *r) { return r->self; }
@@ -141,12 +211,64 @@ int rbi_configure(rbi_t *r, u32 epoch, int delay)
     r->delay = delay;
     return 1;
 }
+/* W386 LOC-LATENCY: Verzoegerungswechsel (Beschreibung in loc_rbi.h). */
+int rbi_set_delay(rbi_t *r, int d, u32 from_slot)
+{
+    if (!r->active || r->p0 < 0 || r->deff < 1 || d < 1 || d > 8) return 0;
+    if (d == r->deff) {
+        r->dpend = 0;
+        return 0;
+    }
+    r->dpend = d < r->deff ? r->deff - 1 : r->deff + 1; /* hoechstens 1 Tick je Schritt */
+    r->dslot = from_slot;
+    return 1;
+}
+int rbi_delay_pending(const rbi_t *r, int *d, u32 *from_slot)
+{
+    if (d) *d = r->dpend;
+    if (from_slot) *from_slot = r->dslot;
+    return r->dpend != 0;
+}
+u32 rbi_own_next_slot(const rbi_t *r)
+{
+    int32_t n;
+    if (!r->active || r->p0 < 0) return 0;
+    n = (int32_t)r->own_prod - r->p0 + r->deff;
+    return n > 0 ? (u32)n : 0u;
+}
+uint64_t rbi_peer_src(const rbi_t *r, int i)
+{
+    return (i >= 0 && i < RBI_MAXP && r->p[i].bound) ? r->p[i].src : 0u;
+}
+int rbi_est_depth(int32_t slack_us)
+{
+    int64_t s = (int64_t)slack_us - 50000; /* bei D-1 waere die Entnahme einen Tick (50 ms) frueher */
+    if (s >= 0) return 0;
+    s = (-s + 49999) / 50000;
+    return s > 255 ? 255 : (int)s;
+}
+static void est_note(rbi_t *r, int32_t slack_us, int wrong)
+{
+    int d = rbi_est_depth(slack_us);
+    r->st.est_n++;
+    if (!d) return;
+    r->st.est_late++;
+    r->st.est_dep[d >= 4 ? 3 : d - 1]++;
+    if (wrong) r->st.est_wrong++;
+}
+
 void rbi_free_run(rbi_t *r)
 {
     r->freerun = 1;
     r->rb_req = 0;
 }
 int rbi_free_running(const rbi_t *r) { return r->freerun; }
+void rbi_peer_gone(rbi_t *r, int i)
+{
+    if (i >= 0 && i < RBI_MAXP && i != r->self) r->gone |= 1u << i;
+}
+u32 rbi_gone_mask(const rbi_t *r) { return r->gone; }
+u32 rbi_rx_count(const rbi_t *r, int i) { return (i >= 0 && i < RBI_MAXP) ? r->p[i].rx_n : 0u; }
 void rbi_hold(rbi_t *r, int on) { r->hold = on ? 1 : 0; }
 u32 rbi_replay_until(const rbi_t *r) { return r->replay_until; }
 int rbi_open_preds(const rbi_t *r)
@@ -159,7 +281,7 @@ int rbi_open_preds(const rbi_t *r)
     for (j = 0; j < RBI_MAXP; j++) {
         const rbi_pl *J = &r->p[j];
         u32 u = (u32)(J->verified + 1);
-        if (j == r->self || u >= J->cons) continue;
+        if (j == r->self || ((r->gone >> j) & 1u) || u >= J->cons) continue;
         if (J->stag[u & WM] == u + 1u && J->sfl[u & WM] == 1) return 1;
         if (J->stag[u & WM] == u + 1u && J->sfl[u & WM] != 2) return 1;
     }
@@ -235,6 +357,60 @@ double rbi_advantage(const rbi_t *r) { return r->adv; }
 int rbi_cons(const rbi_t *r, int i) { return (i >= 0 && i < RBI_MAXP) ? (int)r->p[i].cons : -1; }
 int rbi_contig(const rbi_t *r, int i) { return (i >= 0 && i < RBI_MAXP) ? r->p[i].contig : -1; }
 
+/* W376 LOC-LOCAL-AIM: eigene, schon erzeugte, aber noch nicht entnommene Eingabesaetze (Slots cons, cons+1, ...,
+ * lueckenlos, hoechstens max). Nur lesend. Rueckgabe: Anzahl. */
+int rbi_own_pending(const rbi_t *r, uint8_t out[][RBI_IN], int max)
+{
+    const rbi_pl *P;
+    int n = 0;
+    if (!r->active || r->self < 0 || r->self >= RBI_MAXP || max <= 0) return 0;
+    P = &r->p[r->self];
+    while (n < max && n < (int)RBI_WIN) {
+        u32 s = P->cons + (u32)n;
+        if (P->ctag[s & WM] != s + 1u) break;
+        memcpy(out[n], P->conf[s & WM] + RBI_HDR, RBI_IN);
+        n++;
+    }
+    return n;
+}
+
+static int find_last_conf(const rbi_pl *P, u32 n, u32 *out);
+/* W390 LOC-OWN-PREDICT: Rahmen fuer die k-te naechste Entnahme von Spieler i (Slot cons + k) im spekulativen Vorlauf,
+ * ohne jede Zustandsaenderung. Bestaetigt -> dieser Rahmen. Eigener Spieler ohne Rahmen -> own_new (im Vorlauf neu
+ * erzeugter eigener Rahmen, Kopf + Eingabesatz) bzw. Halten des letzten eigenen. Andere -> Vorhersage wie rbi_take
+ * (W385 Trend, einmalige Flags geloescht), ohne bekannten Rahmen neutral. Byte 1 = eigenes Sync-Byte des Slots.
+ * Rueckgabe 1 = bekannt (bestaetigt bzw. eigen), 2 = vorhergesagt/gehalten, 0 = nicht aktiv. */
+int rbi_spec_frame(const rbi_t *r, int i, u32 k, const uint8_t *own_new, uint8_t out[RBI_FR])
+{
+    const rbi_pl *P, *S;
+    u32 n, l = 0;
+    int ret = 1;
+    if (!r->active || r->p0 < 0 || i < 0 || i >= RBI_MAXP || r->self < 0 || r->self >= RBI_MAXP) return 0; /* p0: vor der ersten Entnahme */
+    P = &r->p[i];
+    S = &r->p[r->self];
+    n = P->cons + k;
+    if (P->ctag[n & WM] == n + 1u) {
+        memcpy(out, P->conf[n & WM], RBI_FR);
+    } else if (i == r->self && own_new) {
+        memcpy(out, own_new, RBI_FR);
+        if (k > 0u && P->ctag[(n - 1u) & WM] != n) { /* nicht der erste fehlende Slot: halten (ohne einmalige Flags) */
+            wr32(out + 4, rd32(out + 4) & ~RBI_FL_TRANSIENT);
+            ret = 2;
+        }
+    } else if (find_last_conf(P, n, &l)) {
+        const uint8_t *pv = (i != r->self && l > 0u && P->ctag[(l - 1u) & WM] == l) ? P->conf[(l - 1u) & WM] : NULL;
+        rbi_predict(P->conf[l & WM], pv, n - l, i == r->self ? 0 : r->predm, r->predq, out);
+        ret = 2;
+    } else {
+        memset(out, 0, RBI_FR);
+        out[0] = 1;
+        ret = 2;
+    }
+    if (S->ctag[n & WM] == n + 1u) out[1] = S->conf[n & WM][1];
+    else out[1] = own_new ? own_new[1] : 0;
+    return ret;
+}
+
 static void put_conf(rbi_pl *P, u32 s, const uint8_t *f)
 {
     memcpy(P->conf[s & WM], f, RBI_FR);
@@ -271,7 +447,35 @@ int rbi_own(rbi_t *r, const uint8_t hdr[RBI_HDR], const uint8_t in[RBI_IN])
     r->st.own_frames++;
     if (r->p0 >= 0) {
         int32_t n = (int32_t)q - r->p0 + r->deff;
-        if (n >= 0) put_conf(&r->p[r->self], (u32)n, r->oq[q & WM]);
+        uint8_t *f = r->oq[q & WM];
+        if (r->carry_on) { /* W386: Tasten und einmalige Flags des verworfenen Rahmens uebernehmen */
+            int k;
+            for (k = 0; k < 5; k++) f[RBI_HDR + k] |= r->carry[RBI_HDR + k];
+            wr32(f + 4, rd32(f + 4) | (rd32(r->carry + 4) & RBI_FL_TRANSIENT));
+            r->carry_on = 0;
+        }
+        if (r->dpend && !r->replay && n >= 0 && (u32)n >= r->dslot) { /* W386: Verzoegerungswechsel */
+            if ((u32)n > r->dslot) r->st.dchg_late++;
+            if (r->dpend < r->deff) { /* D-1: Slot n bekommt den naechsten Rahmen */
+                memcpy(r->carry, f, RBI_FR);
+                r->carry_on = 1;
+                r->deff--;
+                r->dpend = 0;
+                r->st.dchg_down++;
+                return 1;
+            } else { /* D+1: Rahmen in Slot n und (ohne einmalige Flags) in Slot n+1 */
+                uint8_t dup[RBI_FR];
+                put_conf(&r->p[r->self], (u32)n, f);
+                memcpy(dup, f, RBI_FR);
+                wr32(dup + 4, rd32(dup + 4) & ~RBI_FL_TRANSIENT);
+                put_conf(&r->p[r->self], (u32)n + 1u, dup);
+                r->deff++;
+                r->dpend = 0;
+                r->st.dchg_up++;
+                return 1;
+            }
+        }
+        if (n >= 0) put_conf(&r->p[r->self], (u32)n, f);
     }
     return 1;
 }
@@ -311,6 +515,75 @@ static int find_last_conf(const rbi_pl *P, u32 n, u32 *out)
     return 0;
 }
 
+/* ---- W385 LOC-SMOOTH: Vorhersage mit Trend, Kategorien der Fehlvorhersagen ---- */
+#define RBI_AX0 (RBI_HDR + 9) /* Drehhebel; bis Sichthebel y = RBI_HDR + 13 */
+#define RBI_AXN 5
+#define RBI_TREND_MAXD 48 /* groessere Schritte = Taste/Sprung (A/D auf dem Drehhebel: 0 <-> +-127) -> halten */
+
+void rbi_set_pred(rbi_t *r, int mode, int q)
+{
+    r->predm = mode == 1 ? 1 : 0;
+    r->predq = q < 1 ? 1 : (q > 8 ? 8 : q);
+}
+int rbi_pred_mode(const rbi_t *r) { return r->predm; }
+u32 rbi_rb_cause(rbi_t *r, int clear)
+{
+    u32 c = r->rb_cause;
+    if (clear) r->rb_cause = 0;
+    return c;
+}
+
+void rbi_predict(const uint8_t last[RBI_FR], const uint8_t *prev, u32 m, int mode, int q, uint8_t out[RBI_FR])
+{
+    int k;
+    int32_t w = 65536, acc = 0; /* Summe der Gewichte (q/8)^k in 1/65536 */
+    u32 j;
+    memcpy(out, last, RBI_FR);
+    wr32(out + 4, rd32(out + 4) & ~RBI_FL_TRANSIENT);
+    if (mode != 1 || !prev || m < 1u) return;
+    if (q < 1) q = 1;
+    if (q > 8) q = 8;
+    if (m > 16u) m = 16u;
+    for (j = 0; j < m; j++) {
+        w = (w * q) / 8;
+        acc += w;
+    }
+    for (k = 0; k < RBI_AXN; k++) {
+        int32_t vl = (int8_t)last[RBI_AX0 + k], d = vl - (int8_t)prev[RBI_AX0 + k], v, t;
+        if (!d || d > RBI_TREND_MAXD || d < -RBI_TREND_MAXD) continue;
+        t = d * acc; /* |d| <= 255, acc <= 16 * 65536 -> passt in 32 Bit */
+        v = vl + (t >= 0 ? (t + 32768) / 65536 : -((-t + 32768) / 65536));
+        if (v > 127) v = 127;
+        if (v < -128) v = -128;
+        out[RBI_AX0 + k] = (uint8_t)(int8_t)v;
+    }
+}
+
+u32 rbi_frame_cat(const uint8_t a[RBI_FR], const uint8_t b[RBI_FR])
+{
+    const uint8_t *x = a + RBI_HDR, *y = b + RBI_HDR;
+    u32 c = 0;
+    int k;
+    if (a[0] != b[0] || memcmp(a + 2, b + 2, RBI_HDR - 2) != 0) c |= 1u << RBI_MIS_HDR;
+    for (k = 9; k <= 13; k++) if (x[k] != y[k]) c |= 1u << RBI_MIS_AXIS;
+    if (x[5] != y[5]) c |= 1u << RBI_MIS_DODGE;
+    if (x[6] != y[6] || x[7] != y[7]) c |= 1u << RBI_MIS_PEDAL;
+    if (x[8] != y[8]) c |= 1u << RBI_MIS_GEAR;
+    if ((x[0] ^ y[0]) & 3u) c |= 1u << RBI_MIS_FIRE;
+    if (((x[0] ^ y[0]) & ~3u) || x[1] != y[1] || x[2] != y[2] || x[3] != y[3] || x[4] != y[4]) c |= 1u << RBI_MIS_BTN;
+    return c;
+}
+
+static int ax_err(const uint8_t *a, const uint8_t *b)
+{
+    int k, e = 0;
+    for (k = 0; k < RBI_AXN; k++) {
+        int d = (int)(int8_t)a[RBI_AX0 + k] - (int)(int8_t)b[RBI_AX0 + k];
+        e += d < 0 ? -d : d;
+    }
+    return e;
+}
+
 int rbi_take(rbi_t *r, int i, u32 cmin, uint8_t out[RBI_FR])
 {
     rbi_pl *P, *S;
@@ -339,7 +612,7 @@ int rbi_take(rbi_t *r, int i, u32 cmin, uint8_t out[RBI_FR])
         for (j = 0; j < RBI_MAXP; j++) {
             rbi_pl *J = &r->p[j];
             u32 uj = (u32)(J->verified + 1);
-            if (j == r->self || uj >= J->cons || J->stag[uj & WM] != uj + 1u) continue;
+            if (j == r->self || ((r->gone >> j) & 1u) || uj >= J->cons || J->stag[uj & WM] != uj + 1u) continue;
             if (J->sc[uj & WM] < cmin + 2u || J->sc[uj & WM] < r->cbar) {
                 r->st.stall_depth++;
                 return 0;
@@ -377,8 +650,12 @@ int rbi_take(rbi_t *r, int i, u32 cmin, uint8_t out[RBI_FR])
                 return 0;
             }
         }
-        memcpy(pred_fr, P->conf[l & WM], RBI_FR);
-        wr32(pred_fr + 4, rd32(pred_fr + 4) & ~RBI_FL_TRANSIENT);
+        { /* W385: Wiederholung (W338) bzw. Trend der Achsen aus den letzten zwei bestaetigten Rahmen */
+            const uint8_t *pv = (l > 0u && P->ctag[(l - 1u) & WM] == l) ? P->conf[(l - 1u) & WM] : NULL;
+            rbi_predict(P->conf[l & WM], pv, n - l, r->predm, r->predq, pred_fr);
+            memcpy(P->srep[ix], P->conf[l & WM] + RBI_AX0, RBI_AXN); /* Vergleich: Wiederholung */
+            if (r->predm && pv && memcmp(pred_fr + RBI_AX0, P->conf[l & WM] + RBI_AX0, RBI_AXN) != 0) r->st.pred_trend++;
+        }
     serve_pred:
         src = pred_fr;
         pred = 1;
@@ -391,6 +668,28 @@ int rbi_take(rbi_t *r, int i, u32 cmin, uint8_t out[RBI_FR])
     P->sc[ix] = r->c;
     memcpy(out, P->srv[ix], RBI_FR);
     out[1] = S->ctag[ix] == n + 1u ? S->conf[ix][1] : 0; /* eigenes Sync-Byte: die Spiel-Pruefung sieht immer Gleichheit */
+    if (!r->replay && i != r->self && r->now) { /* W372: Puffer messen */
+        P->tk[ix] = r->now;
+        P->tkt[ix] = n + 1u;
+        P->tkp[ix] = (uint8_t)pred;
+        if (!pred && P->arrt[ix] == n + 1u) {
+            int32_t sl = (int32_t)(r->now - P->arr[ix]);
+            int wrong = 0;
+            slack_add(r, P, sl);
+            if (rbi_est_depth(sl) > 0) { /* W386: bei D-1 vorhergesagt - haette die Vorhersage gestimmt? */
+                u32 p1 = n - 1u, p2 = n - 2u;
+                if (n >= 1u && P->ctag[p1 & WM] == p1 + 1u) {
+                    uint8_t e[RBI_FR];
+                    const uint8_t *pv = (n >= 2u && P->ctag[p2 & WM] == p2 + 1u) ? P->conf[p2 & WM] : NULL;
+                    rbi_predict(P->conf[p1 & WM], pv, 1u, r->predm, r->predq, e);
+                    wrong = !eq_nosync(e, src);
+                } else {
+                    wrong = 1;
+                }
+            }
+            est_note(r, sl, wrong);
+        }
+    }
     P->cons = n + 1u;
     r->gt[r->g & GM].mask |= (uint16_t)(1u << i);
     r->st.taken++;
@@ -693,6 +992,7 @@ int rbi_rx(rbi_t *r, const uint8_t *b, int len, uint64_t src)
     }
     P->bound = 1;
     P->src = src;
+    P->rx_n++;
     r->st.rx_ok++;
     P->rcons = rcons;
     for (k = 0; k < nack; k++) {
@@ -713,10 +1013,21 @@ int rbi_rx(rbi_t *r, const uint8_t *b, int len, uint64_t src)
         }
         put_conf(P, s, f);
         r->st.rx_frames++;
+        if (r->now) { /* W372: Ankunft; schon live vorhergesagt -> negativer Puffer */
+            P->arr[ix] = r->now;
+            P->arrt[ix] = s + 1u;
+            if (P->tkt[ix] == s + 1u && P->tkp[ix]) {
+                P->tkp[ix] = 0;
+                slack_add(r, P, (int32_t)(P->tk[ix] - r->now));
+                /* W386: schon bei D vorhergesagt -> bei D-1 tiefer; Korrektur, wenn die Vorhersage nicht stimmte */
+                est_note(r, (int32_t)(P->tk[ix] - r->now), P->stag[ix] == s + 1u && !eq_nosync(P->srv[ix], f));
+            }
+        }
         if (s < P->cons && P->stag[ix] == s + 1u && P->sfl[ix] == 1) {
             if (eq_nosync(P->srv[ix], f)) {
                 P->sfl[ix] = 2;
                 r->st.pred_ok++;
+                if (memcmp(P->srep[ix], f + RBI_AX0, RBI_AXN) != 0) r->st.pred_gain++; /* W385: nur der Trend traf */
             } else if (s < P->accept_below) { /* Rollback dorthin war nicht mehr moeglich: weiter (Desync moeglich) */
                 P->sfl[ix] = 2;
                 r->st.pred_bad++;
@@ -726,6 +1037,19 @@ int rbi_rx(rbi_t *r, const uint8_t *b, int len, uint64_t src)
                 r->st.pred_bad++;
             } else {
                 r->st.pred_bad++;
+                { /* W385: welche Felder wichen ab (nur Zaehler) */
+                    u32 c = rbi_frame_cat(P->srv[ix], f), k;
+                    uint8_t rp[RBI_FR];
+                    r->rb_cause |= c;
+                    for (k = 0; k < RBI_MIS_N; k++) if (c & (1u << k)) r->st.mis_cat[k]++;
+                    memcpy(rp, P->srv[ix], RBI_FR);
+                    memcpy(rp + RBI_AX0, P->srep[ix], RBI_AXN); /* was die Wiederholung geliefert haette */
+                    if (c & (1u << RBI_MIS_AXIS)) {
+                        r->st.mis_ax_err += (u32)ax_err(P->srv[ix], f);
+                        r->st.mis_ax_err_rep += (u32)ax_err(rp, f);
+                    }
+                    if (eq_nosync(rp, f)) r->st.pred_loss++;
+                }
                 if (!r->rb_req || P->sg[ix] < r->rb_g) {
                     r->rb_g = P->sg[ix];
                     r->rb_slot = s;
@@ -771,6 +1095,107 @@ void rbi_debug_dump(const rbi_t *r, u32 cmin)
 #endif
 
 /* ---- W359 LOC-RB-FIDELITY ---- */
+/* ---- W372: Zeitabgleich ----
+ * SBRT (little endian, Laenge exakt 16 + n * 4): "SBRT", ver = 1, Absender-Index, n (1..RBI_MAXP), 0, Epoche,
+ * eigener Spieltick (nur Info), dann n x {Spieler, 0, Puffer fuer dessen Rahmen in 0,1 ms (int16, +-3000)}. */
+int rbi_is_tt(const uint8_t *b, int len) { return b && len >= 4 && memcmp(b, "SBRT", 4) == 0; }
+
+int rbi_tt_tx(rbi_t *r, uint8_t *buf, int cap)
+{
+    int j, n = 0, off = 16;
+    if (!r->active || r->replay || cap < RBI_TT_LEN) return 0;
+    for (j = 0; j < RBI_MAXP; j++) {
+        int v;
+        if (j == r->self || !r->p[j].bound || !rbi_slack_med(r, j, &v)) continue;
+        if (v > 3000) v = 3000;
+        if (v < -3000) v = -3000;
+        buf[off] = (uint8_t)j;
+        buf[off + 1] = 0;
+        buf[off + 2] = (uint8_t)((unsigned)v & 0xFFu);
+        buf[off + 3] = (uint8_t)(((unsigned)v >> 8) & 0xFFu);
+        off += 4;
+        n++;
+    }
+    if (!n) return 0;
+    memcpy(buf, "SBRT", 4);
+    buf[4] = 1;
+    buf[5] = (uint8_t)r->self;
+    buf[6] = (uint8_t)n;
+    buf[7] = 0;
+    wr32(buf + 8, r->epoch);
+    wr32(buf + 12, r->g);
+    r->st.tt_tx++;
+    return off;
+}
+
+int rbi_tt_rx(rbi_t *r, const uint8_t *b, int len, uint64_t src)
+{
+    int i, n, k;
+    rbi_pl *P;
+    if (!r->active) return 0;
+    if (!b || len < 16 || memcmp(b, "SBRT", 4) != 0 || b[4] != 1 || b[7]) goto bad;
+    i = b[5];
+    n = b[6];
+    if (i >= RBI_MAXP || i == r->self || n < 1 || n > RBI_MAXP || len != 16 + n * 4) goto bad;
+    for (k = 0; k < n; k++) {
+        const uint8_t *e = b + 16 + k * 4;
+        int v = (int16_t)(uint16_t)(e[2] | (e[3] << 8));
+        if (e[0] >= RBI_MAXP || e[1] || v > 3000 || v < -3000) goto bad;
+    }
+    if (rd32(b + 8) != r->epoch) return 0;
+    P = &r->p[i];
+    if (!P->bound || P->src != src) goto bad; /* nur von einem gebundenen Mitspieler (erst SBR2, dann SBRT) */
+    for (k = 0; k < n; k++) {
+        const uint8_t *e = b + 16 + k * 4;
+        if (e[0] != r->self) continue;
+        P->tt_for_me = (int16_t)(uint16_t)(e[2] | (e[3] << 8));
+        P->tt_g = r->ts_n + 1u;
+    }
+    r->st.tt_rx++;
+    return 1;
+bad:
+    r->st.tt_bad++;
+    return -1;
+}
+
+int rbi_tsync(rbi_t *r)
+{
+    int j, src = 0, extra = 0;
+    double a = -1e9;
+    if (!r->active || r->replay || r->freerun) return 0;
+    r->ts_n++;
+    for (j = 0; j < RBI_MAXP; j++) {
+        rbi_pl *P = &r->p[j];
+        int me;
+        if (j == r->self || !P->bound || ((r->gone >> j) & 1u)) continue;
+        if (P->tt_g && r->ts_n + 1u - P->tt_g < 40u && rbi_slack_med(r, j, &me)) { /* SBRT frisch (2 s) */
+            double v = (P->tt_for_me - me) / 20.0; /* (seiner - meiner) / 2; 0,1 ms -> ms */
+            if (v > a) a = v;
+            src = 2;
+        }
+    }
+    if (src == 0) {
+        a = r->adv * 50.0;
+        src = 1;
+    }
+    r->ts_ms = a;
+    r->ts_src = src;
+    if (r->ts_cool > 0) {
+        r->ts_cool--;
+        return 0;
+    }
+    if (a > 10.0) { /* Totband ~ 0,6 Feld */
+        extra = a >= 58.0 ? 3 : (a >= 33.0 ? 2 : 1);
+        r->ts_cool = a > 100.0 ? 4 : 10; /* Wirkung erst nach Fenster + Umlauf sichtbar */
+        r->st.ts_actions++;
+        r->st.ts_fields += (u32)extra;
+    }
+    return extra;
+}
+
+double rbi_tsync_ms(const rbi_t *r) { return r->ts_ms; }
+int rbi_tsync_src(const rbi_t *r) { return r->ts_src; }
+
 uint32_t rbi_rjob_replay(int prep, int at, uint32_t cur)
 {
     if (prep) return 0u; /* Vorbereitung wie live; Zeichnen entfaellt, Auftrag sofort erledigt */

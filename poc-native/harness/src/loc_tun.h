@@ -45,6 +45,12 @@ typedef struct loctun_cfg {
     char auth[100];       /* W328: Konto "account:exp:G-hex64" (leer = aus Umgebung SB_LOC_AUTH lesen, dann Gast) */
     char code[16];        /* W334: Raumcode zum Beitreten (leer = eigene Lobby mit Raumcode anlegen, SECURITY.md §3.5) */
     char spki[65];        /* W334: Pin (SPKI-SHA-256, hex64) fuer einen anderen Treffpunkt als SB_STEELNET_HOST (§3.6) */
+    char netcut_file[260];/* W366 TEST: solange diese Datei existiert, gehen alle UDP-Pakete verloren (Netz kurz weg) */
+    char vis[8];          /* W373: "public" = oeffentliche Lobbys (ohne Raumcode; Code geht immer privat), sonst Raumcode-Lobby */
+    int route_auto;       /* W395: 1 = Weg je Mitspieler selbst waehlen und wechseln (direkt/alle Relays), 0 = wie bisher
+                           * dem Treffpunkt folgen (Standard 1) */
+    char route_sim[256];  /* W395 TEST: je Weg eigene Verzoegerung/Ausfall, "name:SPEC/name:SPEC" mit name = direct oder
+                           * Relayname, SPEC wie loc_netsim plus cut:A-B (Sekunden ab Transportstart, B leer = bis Ende) */
 } loctun_cfg;
 
 typedef struct loctun_stats {
@@ -62,6 +68,10 @@ int loctun_available(void);
  * Verzoegerungsstufe fuer die AUSGEHENDEN Transportpakete (W322-Pruefstand). NULL bei Fehler. */
 loctun *loctun_start(const loctun_cfg *c, struct locnet *n, struct locnetsim *sim, loctun_log_fn log);
 void loctun_stop(loctun *t);
+/* W366 LOC-NET-EDGES: beim Beenden des Clients (Fenster zu, --run-seconds) allen verbundenen Mitspielern ein BYE
+ * senden (authentisch, zweimal), damit sie den Abgang sofort sehen statt nach der Stillegrenze. Wartet hoechstens
+ * 200 ms auf den Transport, baut nichts ab (der Prozess endet danach). */
+void loctun_bye_all(loctun *t);
 
 /* Spiel-UDP (aus dem Spiel-Thread): dst_vip = virtuelle Adresse des Mitspielers oder INADDR_BROADCAST
  * (an alle verbundenen), Ports als Spielports. Rueckgabe len (wie UDP: angenommen) oder -1 (kein Weg). */
@@ -95,3 +105,26 @@ int loctun_sec_state(loctun *t);
 /* W353 LOC-DURCHSTICH: eine Zeile fuer das F11-Paket (Treffpunkt, Weg, Ping, Verlust, sec, err) - nur Zustaende
  * und Zahlen, keine Adressen, kein Raumcode, keine Eingaben. 0 = kein Transport. */
 int loctun_diag(loctun *t, char *buf, int cap);
+/* W373 LOC-PUBLIC-LOBBY TEST (loc_net_selftest): eine Steuerzeile des Treffpunkts ohne Netz einspeisen (line = NULL:
+ * nur Zeitschritt), my_cid > 0 = angemeldet; danach rechnet die oeffentliche Logik einen Schritt. out = seither vom
+ * Client gesendete Steuerzeilen ('\n'-getrennt). Rueckgabe 1 = oeffentlicher Modus, 0 = nicht, -1 = Fehler. */
+int loctun_test_line(loctun *t, uint32_t my_cid, const char *line, char *out, int cap);
+/* W373: Zahl der lokal vertretenen offenen oeffentlichen Spiele (Geister). */
+int loctun_pub_games(loctun *t);
+/* W374 LOC-NET-OVERLAY (F3): Werte des i-ten Mitspielers fuer das Netz-Overlay (nur Zahlen und der Pilotname
+ * aus dem Treffpunkt, keine Adressen). 0 = kein solcher Eintrag. */
+#define LOCTUN_HUD_ALT 4 /* W395: Wege je Mitspieler im Overlay */
+typedef struct loctun_peer_hud {
+    int up, path;                  /* path 0 keiner, 1 direkt, 2 Relay */
+    double srtt, rtt_min, rttvar;  /* ms */
+    int loss_in, loss_peer;        /* Promille: Verlust beim Empfang bzw. vom Mitspieler gemeldet (unsere Pakete) */
+    char pilot[24];                /* Pilotname (leer ohne Treffpunkt) */
+    /* W395 LOC-ROUTE: aktiver Weg und die gemessenen Alternativen (nur Namen und Zahlen) */
+    char route[24];                /* "direct" oder Relayname, leer = keiner */
+    int nalt;
+    struct { char name[24]; double rtt; int state, active; } alt[LOCTUN_HUD_ALT]; /* rtt < 0: keine Antwort;
+                                                                                * state 0 aus, 1 verdaechtig, 2 gut */
+    int nswitch, nfail;            /* Wechsel insgesamt / davon wegen Ausfall */
+    int rt_on, decided;            /* eigene Wegwahl aktiv / erste Wahl nach dem Messfenster getroffen */
+} loctun_peer_hud;
+int loctun_peer_hud_get(loctun *t, int i, loctun_peer_hud *o);

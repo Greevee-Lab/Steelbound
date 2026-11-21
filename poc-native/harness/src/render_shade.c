@@ -27,6 +27,7 @@
 #include "sb_state.h" /* W232: sb_in_mission */
 #include "sb_texhealth.h" /* W315 */
 #include "render_loclook.h" /* W358 LOC-LOOK */
+#include "render_rq_exp.h" /* W383 LOC-GH-DATA (#62) */
 
 #define RQ_VS_MAX 96
 #define RQ_PS_MAX 96
@@ -383,6 +384,21 @@ static ID3D11SamplerState *rq_sampler_loc(unsigned k)
     }
 }
 
+/* DIAG(LOC-ORIGINAL,W363) loc_texfilt_gate: loc_texfilt nur fuer eine Teilmenge der Draws (Kanten-Suche). */
+static int rq_loc_tf_gate(unsigned k)
+{
+    unsigned g = (unsigned)g_cfg.loc_texfilt_gate, xp[4], nn[4], mips, mip;
+    int rt = rtt_active();
+    if (!g) { return 1; }
+    if (((g & 1u) && !rt) || ((g & 2u) && rt) || ((g & 4u) && k) || ((g & 8u) && !k)) { return 0; }
+    sb_tex_stages(xp, nn);
+    mips = xp[k] ? (rq_u32(xp[k] + 12u) >> 16) & 0xFu : 0u;
+    mip = rq_u32(SBA(0x21A8B0u) + k * 128u + 20u);
+    if (((g & 16u) && mips <= 1u) || ((g & 32u) && mips > 1u)) { return 0; }
+    if (((g & 64u) && mip != 0u) || ((g & 128u) && mip == 0u)) { return 0; }
+    return 1;
+}
+
 /* Slots wie vsh_classify (render_shader.c) aus dem Spiel-Speicher. */
 static int rq_read_slots(unsigned handle, unsigned *slots, unsigned *pn)
 {
@@ -454,6 +470,113 @@ static int rq_compile(const char *src, const char *target, ID3DBlob **out)
     g_shz_comp += rq_qpc() - q;
     return r;
 }
+/* W371 LOC-PERF: Cache-Datei atomar schreiben (Temp-Datei + Umbenennen, parallele Instanzen sicher). 1 = neu */
+static int rq_cache_write(const char *path, ID3DBlob *b)
+{
+    char tmp[MAX_PATH + 80];
+    HANDLE w;
+    _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.%lu.%lu.tmp", path, (unsigned long)GetCurrentProcessId(),
+                (unsigned long)GetCurrentThreadId());
+    w = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
+    if (w != INVALID_HANDLE_VALUE) {
+        DWORD wr = 0, sz = (DWORD)b->lpVtbl->GetBufferSize(b);
+        BOOL okw = WriteFile(w, b->lpVtbl->GetBufferPointer(b), sz, &wr, NULL) && wr == sz;
+        CloseHandle(w);
+        if (!okw || !MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING)) { DeleteFileA(tmp); }
+        else { return 1; }
+    }
+    return 0;
+}
+
+/* W371 LOC-PERF shade_fast_first: Bei kaltem Cache stockte jedes neue Shading-Programm den Render-Thread des
+ * Spiels um eine volle D3DCompile-Uebersetzung (OPTIMIZATION_LEVEL3; Laptop-CPU ~130 ms, RTX-4090-Rechner ~55 ms
+ * je Programm, 20-50 neue je Missionsstart -> Ruckler in den ersten 20 s). Jetzt: sofort mit niedriger
+ * Optimierung uebersetzen (shade_fast_level) und benutzen; die volle Uebersetzung macht ein Hilfs-Thread mit
+ * niedriger Prioritaet und legt sie in den Cache (wirksam ab dem naechsten Start). Die schnelle Fassung landet
+ * nie im Cache. Gleiche HLSL-Quelle, nur andere FXC-Optimierung (Ergebnis kann in den letzten Bits abweichen) ->
+ * Standard nur im LoC-Profil (1); 2 = auch SB, 0 = aus (alter Weg). */
+typedef struct rq_bg_job { struct rq_bg_job *next; char *src; char target[8]; char path[MAX_PATH + 64]; } rq_bg_job_t;
+static SRWLOCK rq_bg_lk = SRWLOCK_INIT;
+static rq_bg_job_t *rq_bg_head, *rq_bg_tail;
+static HANDLE rq_bg_ev, rq_bg_th;
+static volatile LONG rq_bg_started, rq_bg_queued, rq_bg_done, rq_bg_fail;
+static volatile LONGLONG rq_bg_q;
+static long long rq_fast_q;
+static unsigned rq_fast_n, rq_fast_fallback;
+static DWORD WINAPI rq_bg_main(LPVOID p)
+{
+    (void)p;
+    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_LOWEST);
+    for (;;) {
+        rq_bg_job_t *j;
+        AcquireSRWLockExclusive(&rq_bg_lk);
+        j = rq_bg_head;
+        if (j) {
+            rq_bg_head = j->next;
+            if (!rq_bg_head) { rq_bg_tail = NULL; }
+        }
+        ReleaseSRWLockExclusive(&rq_bg_lk);
+        if (!j) {
+            WaitForSingleObject(rq_bg_ev, INFINITE);
+            continue;
+        }
+        if (GetFileAttributesA(j->path) == INVALID_FILE_ATTRIBUTES) {
+            ID3DBlob *b = NULL;
+            LARGE_INTEGER q0, q1;
+            QueryPerformanceCounter(&q0);
+            if (sb_im_compile(j->src, j->target, &b) && b) {
+                (void)rq_cache_write(j->path, b);
+                b->lpVtbl->Release(b);
+                InterlockedIncrement(&rq_bg_done);
+            } else {
+                InterlockedIncrement(&rq_bg_fail);
+            }
+            QueryPerformanceCounter(&q1);
+            InterlockedExchangeAdd64(&rq_bg_q, q1.QuadPart - q0.QuadPart);
+        }
+        free(j->src);
+        free(j);
+    }
+}
+static int rq_fast_first_on(void)
+{
+    return g_cfg.shade_fast_first >= 2 || (g_cfg.shade_fast_first == 1 && g_sba_loc);
+}
+static void rq_bg_enqueue(const char *src, const char *target, const char *path)
+{
+    rq_bg_job_t *j;
+    if (InterlockedCompareExchange(&rq_bg_started, 1, 0) == 0) {
+        rq_bg_ev = CreateEventA(NULL, FALSE, FALSE, NULL);
+        rq_bg_th = rq_bg_ev ? CreateThread(NULL, 1u << 20, rq_bg_main, NULL, 0, NULL) : NULL;
+        if (!rq_bg_th) { InterlockedExchange(&rq_bg_started, 2); }
+    }
+    if (rq_bg_started != 1) { return; }
+    j = (rq_bg_job_t *)calloc(1, sizeof *j);
+    if (!j) { return; }
+    j->src = _strdup(src);
+    if (!j->src) {
+        free(j);
+        return;
+    }
+    strcpy_s(j->target, sizeof j->target, target);
+    strcpy_s(j->path, sizeof j->path, path);
+    AcquireSRWLockExclusive(&rq_bg_lk);
+    if (rq_bg_tail) { rq_bg_tail->next = j; } else { rq_bg_head = j; }
+    rq_bg_tail = j;
+    ReleaseSRWLockExclusive(&rq_bg_lk);
+    InterlockedIncrement(&rq_bg_queued);
+    SetEvent(rq_bg_ev);
+}
+static unsigned rq_fast_flags(void)
+{
+    switch (g_cfg.shade_fast_level) {
+    case 0: return D3DCOMPILE_SKIP_OPTIMIZATION;
+    case 1: return D3DCOMPILE_OPTIMIZATION_LEVEL0;
+    case 2: return D3DCOMPILE_OPTIMIZATION_LEVEL1;
+    default: return D3DCOMPILE_OPTIMIZATION_LEVEL3;
+    }
+}
+
 static int rq_compile_x(const char *src, const char *target, ID3DBlob **out)
 {
     char path[MAX_PATH + 64];
@@ -493,20 +616,27 @@ static int rq_compile_x(const char *src, const char *target, ID3DBlob **out)
             }
             if (b) { b->lpVtbl->Release(b); }
         }
-        if (!sb_im_compile(src, target, out)) { return 0; }
-        {
-            char tmp[MAX_PATH + 80];
-            HANDLE w;
-            _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.%lu.tmp", path, (unsigned long)GetCurrentProcessId());
-            w = CreateFileA(tmp, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, 0, NULL);
-            if (w != INVALID_HANDLE_VALUE) {
-                DWORD wr = 0, sz = (DWORD)(*out)->lpVtbl->GetBufferSize(*out);
-                BOOL okw = WriteFile(w, (*out)->lpVtbl->GetBufferPointer(*out), sz, &wr, NULL) && wr == sz;
-                CloseHandle(w);
-                if (!okw || !MoveFileExA(tmp, path, MOVEFILE_REPLACE_EXISTING)) { DeleteFileA(tmp); }
-                else { ncache_new++; }
+        if (rq_fast_first_on()) { /* W371: schnelle Fassung jetzt, volle im Hilfs-Thread in den Cache */
+            long long qf = rq_qpc();
+            if (sb_im_compile_flags(src, target, rq_fast_flags(), out)) {
+                rq_fast_q += rq_qpc() - qf;
+                rq_fast_n++;
+                rq_bg_enqueue(src, target, path);
+                if ((rq_fast_n % 16u) == 1u) {
+                    LARGE_INTEGER f; QueryPerformanceFrequency(&f);
+                    HLOG_I("SHADE-FAST: %u schnell uebersetzt (Stufe %d, %.1f ms gesamt, %.1f ms je Programm), Hilfs-Thread "
+                           "%ld/%ld fertig (%.1f ms), %ld Fehler, Rueckfall %u, Cache %d geladen",
+                           rq_fast_n, g_cfg.shade_fast_level, (double)rq_fast_q * 1000.0 / (double)f.QuadPart,
+                           (double)rq_fast_q * 1000.0 / (double)f.QuadPart / (double)rq_fast_n, (long)rq_bg_done,
+                           (long)rq_bg_queued, (double)rq_bg_q * 1000.0 / (double)f.QuadPart, (long)rq_bg_fail,
+                           rq_fast_fallback, ncache_hit);
+                }
+                return 1;
             }
+            rq_fast_fallback++; /* schnelle Fassung gescheitert -> wie bisher voll */
         }
+        if (!sb_im_compile(src, target, out)) { return 0; }
+        if (rq_cache_write(path, *out)) { ncache_new++; }
         if (((ncache_new + ncache_hit) % 16) == 1) {
             HLOG_I("SHADE-PERF: Shader-Cache %d geladen, %d neu (%s)", ncache_hit, ncache_new, path);
             { LARGE_INTEGER f; QueryPerformanceFrequency(&f); /* DIAG(PERF-BENCH,W137) */
@@ -1134,7 +1264,7 @@ static int rq_raw_upload(unsigned prim, unsigned n)
 
 int rq_expand_upload(unsigned prim, unsigned n, unsigned nout, int idx)
 {
-    unsigned nv, stride, e = 0, i, bytes;
+    unsigned nv, stride, e = 0, bytes;
     const float *P = g_rq_pack;
     float *X;
     ID3D11Buffer *xb = NULL;
@@ -1157,34 +1287,13 @@ int rq_expand_upload(unsigned prim, unsigned n, unsigned nout, int idx)
         X = (float *)rq_xmap(stride ? nout * stride : 16u, &xb, &xo, &xs);
         if (!X) { g_rq_active = 0; return 0; }
     }
-#define RQ_CP(src) do { if (nv) { memcpy(X + (size_t)e * nv * 4u, P + (size_t)(src) * nv * 4u, stride); } e++; } while (0)
-    switch (prim) {
-    case 3: /* LINELOOP */
-        for (i = 0; i < n; i++) { RQ_CP(i); }
-        if (n > 0 && n + 1 <= IM_VB_MAX) { RQ_CP(0); }
-        break;
-    case 6: case 7: case 10:
-        for (i = 2; i < n && e + 3 <= IM_VB_MAX * 3u; i++) {
-            if (prim == 6) { RQ_CP(i - 2); RQ_CP(i - 1); RQ_CP(i); }
-            else { RQ_CP(0); RQ_CP(i - 1); RQ_CP(i); }
-        }
-        break;
-    case 8:
-        for (i = 0; i + 3 < n && e + 6 <= IM_VB_MAX * 3u; i += 4) {
-            RQ_CP(i); RQ_CP(i + 1); RQ_CP(i + 2); RQ_CP(i); RQ_CP(i + 2); RQ_CP(i + 3);
-        }
-        break;
-    case 9:
-        for (i = 0; i + 3 < n && e + 6 <= IM_VB_MAX * 3u; i += 2) {
-            RQ_CP(i); RQ_CP(i + 1); RQ_CP(i + 2); RQ_CP(i); RQ_CP(i + 2); RQ_CP(i + 3);
-        }
-        break;
-    default: /* 1, 2, 4, 5, unbekannt: direkt */
-        for (i = 0; i < n; i++) { RQ_CP(i); }
-        break;
+    /* W383 (#62): hoechstens nout Eintraege (= reservierter Platz), nur ganze Primitive wie im_fast_expand.
+     * Vorher liefen Streifen bis IM_VB_MAX*3 Eintraege bei Platz fuer IM_VB_MAX -> Ueberlauf im Mapping. */
+    e = rq_exp_fill((unsigned char *)X, (const unsigned char *)P, stride, prim, n, nout, IM_VB_MAX);
+    if (nout >= IM_VB_MAX) { /* DIAG(LOC-GH-DATA,W383): gekappter (bzw. randvoller) Draw */
+        static unsigned ncap;
+        if (ncap < 4u) { ncap++; HLOG_I("SHADE W383: Strom-2-Expansion gekappt prim=%u n=%u nout=%u geschrieben=%u (#%u)", prim, n, nout, e, ncap); }
     }
-#undef RQ_CP
-    if (e > IM_VB_MAX) { e = IM_VB_MAX; }
     g_rq_rec.xstride = stride ? stride : 16u;
     bytes = nout * stride;
     if (!stride) { /* Programm liest keine v-Register: Dummy-Stream */
@@ -1599,6 +1708,20 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
                                g_im_pshader, sxp[0], sxp[1], sxp[2], sxp[3]);
                     }
                 }
+            } else if (!s && g_tex_stage_why == 10u) {
+                /* ISSUE44: PS sampelt Stufe 1..3, aber das Spiel hat keine Textur gesetzt (Stufe leer ->
+                 * T = 1, wie bisher). Zaehlt immer fuer die Textur-Gesundheit (F11, nur Zahlen); mit
+                 * tex_missing_mark einmal je PS-Handle/Stufe ins Log. Bild unveraendert. */
+                static unsigned nx[32], nn44;
+                unsigned key = g_im_pshader ^ (k << 28), q, sxp[4], snn[4];
+                sb_th_stage_empty(k, g_im_pshader, g_present_no);
+                for (q = 0; q < nn44 && nx[q] != key; q++) {}
+                if (g_cfg.tex_missing_mark && q == nn44 && nn44 < 32u) {
+                    nx[nn44++] = key;
+                    sb_tex_stages(sxp, snn);
+                    HLOG_W("TEXNULL stufe=%u tm=%u f=%u vs=0x%X ps=0x%X st=0x%X/0x%X/0x%X/0x%X",
+                           k, tm, g_present_no, g_im_shader, g_im_pshader, sxp[0], sxp[1], sxp[2], sxp[3]);
+                }
             }
         }
         if (!s) { continue; }
@@ -1618,12 +1741,39 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
                 if (g_rq_tmax[k] < 0.0f) { g_rq_tmax[k] = rq_raw_tmax(k); }
                 rtscale = g_rq_tmax[k] > 1.5f;
             }
-            if (rtscale || (!mfx_norm && g_rq_tmax[k] > 1.5f && (lin || rhw))) {
+            /* W363 LOC-ORIGINAL (loc_swznorm, nur LoC): Die NV2A adressiert nur lineare Formate (LIN_*) mit
+             * Texel-Koordinaten, swizzled Texturen immer normiert - auch bei vortransformierten Draws. LoC legt
+             * in den Kompositionen (RT-Nachbearbeitung, Hauptbild, Monitore) auf Stufe 3 eine Korn-Textur
+             * 128x128 (DXT1, POINT, MIRROR/WRAP) mit UV weit ueber 1; die Texel-Skala 1/128 machte daraus
+             * ~11 riesige Texel: mit linearem Filter ein weicher Schleier, mit dem POINT-Filter des Spiels
+             * Rechteckbloecke (W358 loc_texfilt). Wie FIX(SHADE-FX,W121) fuer den SB-Monitor-Wash. */
+            int swznorm = g_sba_loc && g_cfg.loc_swznorm && !lin && !isrt;
+            if (swznorm && !mfx_norm && g_rq_tmax[k] > 1.5f && rhw) {
+                static unsigned nlog;
+                if (nlog < 8u) {
+                    nlog++;
+                    HLOG_I("LOCLOOK: swizzled Stufe %u %ux%u normiert (UV bis %.1f, vortransformiert) statt Texel-Skala", k, w, h, g_rq_tmax[k]);
+                }
+            }
+            int lps = rq_loc_lin_progscale(g_sba_loc, g_cfg.loc_lintexel, isrt, lin, rhw, (int)g_rq_kind,
+                                           g_rq_vse && g_rq_vse->tsrc[k] < 0); /* W368 LOC-COCKPIT */
+            if (lps) {
+                static unsigned lxp[16], nl;
+                unsigned sx[4], sn[4], q;
+                sb_tex_stages(sx, sn);
+                for (q = 0; q < nl && lxp[q] != (sx[k] ^ g_im_shader); q++) {}
+                if (q == nl && nl < 16u) {
+                    lxp[nl++] = sx[k] ^ g_im_shader;
+                    HLOG_I("LOCLOOK: Linear-Textur mit Programm-UV texeladressiert (W368) st=%u xp=0x%X %ux%u vs=0x%X kind=%u",
+                           k, sx[k], w, h, g_im_shader, g_rq_kind);
+                }
+            }
+            if (rq_loc_texel_scale(g_sba_loc, g_cfg.loc_swznorm, isrt, lin, rhw, rtscale, mfx_norm, g_rq_tmax[k]) || lps) {
                 tsc[k * 4u + 0] = 1.0f / (float)w;
                 tsc[k * 4u + 1] = 1.0f / (float)h;
             }
         }
-        g_rq_rec.smp[k] = (g_sba_loc && g_cfg.loc_texfilt) ? rq_sampler_loc(k) /* W358 LOC-LOOK */
+        g_rq_rec.smp[k] = (g_sba_loc && g_cfg.loc_texfilt && rq_loc_tf_gate(k)) ? rq_sampler_loc(k) /* W358 LOC-LOOK */
                         : rq_sampler(rq_u32(SBA(0x21A8B0u) + (k * 32u + 0u) * 4u),
                                      rq_u32(SBA(0x21A8B0u) + (k * 32u + 1u) * 4u));
     }
@@ -1662,6 +1812,10 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
         }
         if (g_cfg.shade_dbg && g_rq_kind != 1u && rtt_active()) { /* DIAG(W100): nur 3D-Draws in Render-Targets (Welt-RTs) */
             pf[3] = g_cfg.shade_dbg == 99 ? (g_present_no / 1500u) % 10u : (unsigned)g_cfg.shade_dbg;
+        }
+        if (g_sba_loc && g_cfg.loc_dbg_xp && sb_tex_xptr() == g_cfg.loc_dbg_xp) { /* DIAG(W368): Draws einer Textur */
+            static const unsigned km[4] = { 1u, 3u, 5u, 6u }; /* T0, V0, C0, R0 je 100 Bilder */
+            pf[3] = km[(g_present_no / 100u) % 4u];
         }
     }
     {   /* SHADE-FX (W121): Optionen Aussenwelt (sfx0/sfx1, alles 0 = Original) */

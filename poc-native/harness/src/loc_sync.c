@@ -21,6 +21,10 @@
 #include "hlog.h"
 #include "hooks_int.h"
 #include "loc_net.h"
+#include "loc_dodge.h"
+#include "loc_state.h"
+#include "loc_rollback.h"
+#include "loc_lsarb_game.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -42,6 +46,7 @@ typedef uint32_t u32;
 static int s_on;
 static u32 s_jmp_target = LS_ACC_FN;
 static volatile LONG s_frames;
+unsigned loc_sync_frames(void) { return (unsigned)s_frames; } /* W390 DIAG */
 static unsigned long long s_hash = 1469598103934665603ull;
 static u32 s_last_tick;
 static u32 s_desync_logged;
@@ -54,7 +59,8 @@ static int s_ext; /* W338: Hash/LOCSYNC aus der Eingabeschicht (loc_rb_input) */
 #define LS_RP_MAX 16
 static struct { LONG at; int vk, len; } s_rt[LS_RT_MAX];
 static int s_rt_n, s_rt_cur;
-static struct { LONG next, period; int vk, len; } s_rp[LS_RP_MAX];
+static struct { LONG next, period, at; int vk, len; } s_rp[LS_RP_MAX]; /* W375: at = Start (neue Mission) */
+static u32 s_ls_missions; /* W375: Missionswechsel im selben Prozess (Zaehler/Hash/Testtasten neu) */
 static int s_rp_n;
 
 static void ls_rt_parse(const char *p)
@@ -80,6 +86,7 @@ static void ls_rt_parse(const char *p)
         if (per > 0) {
             if (s_rp_n < LS_RP_MAX) {
                 s_rp[s_rp_n].next = at;
+                s_rp[s_rp_n].at = at;
                 s_rp[s_rp_n].period = per;
                 s_rp[s_rp_n].vk = vk;
                 s_rp[s_rp_n].len = len;
@@ -103,10 +110,16 @@ static void ls_rt_parse(const char *p)
  *   W344: AUSLOESER/N=J[+M]>... = kommt der Ausloeser nicht binnen N Bildern, weiter bei Schritt J (1-basiert,
  *   ohne Taste); j=J = Sprung zu Schritt J (Wiederholung, z. B. erneut suchen). Hoechstens 1000 Spruenge
  *   (je Sprung mindestens ein Bild; Suchschleife 2 Spruenge je ~12 s = ~1,5 h Warten auf das Match). */
-#define LS_ST_MAX 48
+#define LS_ST_MAX 192 /* W375: 96 -> 192 (drei Runden); W366: 48 -> 96 (zweite Runde ohne Neustart: Nachbesprechung, SIGN OUT, neues Match) */
 /* W344 LOC-TP-UX: Menue-Zustand als Ausloeser (statt Bildzaehler): scn=S bzw. scn=S.T (Szene u16 [0x727988],
  * Schritt u16 [0x72798A]), mnK=V (Wort K 0..5 des Menue-Unterzustands [[0x6DC678]], LOC_BOOT §15.4/§30). */
-enum { LST_F, LST_ACC, LST_CON, LST_RX, LST_TX, LST_SYNC, LST_SCN, LST_MN, LST_J };
+enum { LST_F, LST_ACC, LST_CON, LST_RX, LST_TX, LST_SYNC, LST_SCN, LST_MN, LST_J, LST_MSK, LST_STL };
+/* W375: msk=1 / msk=0 = Lockstep-Aktiv-Maske [0x306830] gesetzt / leer (Missionsbeginn/-ende fuer Folgen ueber
+ * mehrere Runden im selben Prozess). */
+/* W375: stl=N = seit N Bildern kein neuer Lockstep-Rahmen (nach mindestens 100 Rahmen dieser Mission): Ende der
+ * Mission (TIME UP, Ergebnis) unabhaengig von der Spielzeit. */
+static long s_stl_frames = -1;
+static unsigned s_stl_since;
 #define LS_SCENE 0x727988u   /* Szene (u16), Schritt (u16) bei +2 */
 #define LS_MENU 0x6DC678u    /* Zeiger auf den Menue-Unterzustand (Szene 5) */
 #define LS_SCENE6 0x6DD3F8u  /* Zeiger auf den Szene-6-Unterzustand */
@@ -131,6 +144,8 @@ static void ls_st_parse(const char *p)
         else if (strncmp(tok, "rx:", 3) == 0) { kind = LST_RX; arg = strtol(tok + 3, NULL, 0); }
         else if (strncmp(tok, "tx:", 3) == 0) { kind = LST_TX; arg = strtol(tok + 3, NULL, 0); }
         else if (strncmp(tok, "sync>=", 6) == 0) { kind = LST_SYNC; arg = strtol(tok + 6, NULL, 0); }
+        else if (strncmp(tok, "msk=", 4) == 0) { kind = LST_MSK; arg = strtol(tok + 4, NULL, 0); } /* W375 */
+        else if (strncmp(tok, "stl=", 4) == 0) { kind = LST_STL; arg = strtol(tok + 4, NULL, 0); } /* W375 */
         else if (strncmp(tok, "scn=", 4) == 0) { /* W344: Szene[.Schritt] */
             char *e = NULL;
             kind = LST_SCN;
@@ -215,6 +230,21 @@ void loc_sync_frame(unsigned f)
 {
     lp_swap(); /* W320: Swap-Zeitpunkt (nur loc_pace_diag) */
     if (s_st_n) ls_state_log(f); /* W344 */
+    if (s_frames != s_stl_frames) { /* W375: Bild des letzten neuen Lockstep-Rahmens (stl=N) */
+        s_stl_frames = s_frames;
+        s_stl_since = f;
+    }
+    if (s_st_n) { /* W375 TEST: Aktiv-Maske (Missionsgrenze) bei Aenderung, hoechstens 200 Zeilen */
+        static u32 pm = 0xFFFFFFFFu;
+        static int nm;
+        u32 m = 0;
+        __try { m = *(volatile const u32 *)(uintptr_t)LS_ACTIVE; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+        if (m != pm && nm < 200) {
+            nm++;
+            HLOG_I("LOCMASK: Bild %u Maske 0x%X (Lockstep-Rahmen %ld)", f, m, s_frames);
+        }
+        pm = m;
+    }
     while (s_st_cur < s_st_n) {
         int hit = 0;
         long acc = 0, con = 0;
@@ -243,6 +273,13 @@ void loc_sync_frame(unsigned f)
             case LST_RX: hit = loc_net_test_state(NULL, NULL, 0, (unsigned)s_st[s_st_cur].arg) == 2; break;
             case LST_TX: hit = loc_net_test_state(NULL, NULL, 1, (unsigned)s_st[s_st_cur].arg) == 2; break;
             case LST_SYNC: hit = s_frames >= s_st[s_st_cur].arg; break;
+            case LST_STL: hit = s_frames >= 100 && f - s_stl_since >= (unsigned)s_st[s_st_cur].arg; break; /* W375 */
+            case LST_MSK: { /* W375 */
+                u32 m = 0;
+                __try { m = *(volatile const u32 *)(uintptr_t)LS_ACTIVE; } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                hit = (m != 0u) == (s_st[s_st_cur].arg != 0);
+                break;
+            }
             case LST_SCN:
             case LST_MN: { /* W344 */
                 u32 sc = 0, stp = 0, mn[6], s6[4];
@@ -258,6 +295,20 @@ void loc_sync_frame(unsigned f)
             if (!hit) return;
             s_st_hit = 1;
             s_st_hitf = f;
+            if (s_st[s_st_cur].kind == LST_STL) { /* W375: Mission vorbei - sync>=K der naechsten Runde zaehlt neu */
+                int i;
+                HLOG_I("LOCSYNC: Missionsende erkannt (seit %u Bildern kein Rahmen, %ld Rahmen) - Rahmenzaehler, Hash und "
+                       "Testtasten neu", f - s_stl_since, s_frames);
+                s_ls_missions++;
+                InterlockedExchange(&s_frames, 0);
+                s_stl_frames = 0;
+                s_hash = 1469598103934665603ull;
+                s_rt_cur = 0;
+                for (i = 0; i < s_rp_n; i++) s_rp[i].next = s_rp[i].at;
+                s_desync_logged = 0;
+                loc_net_test_rearm(); /* rx:/tx:/acc>= der naechsten Runde */
+                replay_release_all(); /* gehaltene Testtasten (Kippschalter) los */
+            }
         }
         if (f < s_st_hitf + (unsigned)s_st[s_st_cur].delay) return;
         if (s_st[s_st_cur].vk == 0) { /* vk 0 = Bild anfordern (naechstes Present) */
@@ -328,6 +379,14 @@ static int nl_pct(const LONG *h, long long tot, int pct)
     return NL_H - 1;
 }
 
+unsigned loc_sync_hangs(void)
+{
+    unsigned n = 0;
+    int i;
+    for (i = 101; i < NL_H; i++) n += (unsigned)s_nl_hist[i];
+    return n;
+}
+
 static void nl_log(int waited_s)
 {
     static LONG win[NL_H];
@@ -360,6 +419,20 @@ static void nl_log(int waited_s)
 
 /* cdecl, aus dem Thunk (alle Register gesichert). Nur Ganzzahlarithmetik: der x87-Stapel des
  * Spiels bleibt unberuehrt. */
+/* W382 LOC-ISSUES-B: Spieltakt (Stuetzpunkte je Sekunde aus ls_record) fuer die LoC-Zustandszeile im Feedback. */
+static loc_tickrate_t s_tr;
+static SRWLOCK s_tr_lk = SRWLOCK_INIT;
+
+/* W396: wirksame Eingabeverzoegerung fuer LOCSYNC "Wirk=" (Testpartner-Ergebnis): im Rollback die Verzoegerung
+ * der F3-Zeile, im Lockstep der Vorlauf L (eigener Empfangsring, LOC_BOOT §69), sonst [0x306F04] wie bisher. */
+static u32 ls_eff_delay(u32 reg)
+{
+    int l = 0, d = loc_rb_eff_delay();
+    if (d > 0) return (u32)d;
+    if (loc_lsarb_hud(NULL, &l, NULL) && l > 0) return (u32)l;
+    return reg;
+}
+
 static void __cdecl ls_record(void)
 {
     u32 acc = 0, tick = 0, stall = 0, stallf = 0, stalle = 0, delay = 0, desync = 0, npl = 0, act = 0;
@@ -375,8 +448,27 @@ static void __cdecl ls_record(void)
         npl = *(const u32 *)(uintptr_t)LS_NPL;
         act = *(const u32 *)(uintptr_t)LS_ACTIVE;
     } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    if (s_frames > 0 && tick + 100u < s_last_tick) { /* W375: neue Mission im selben Prozess (Tick wieder klein) */
+        int i;
+        s_ls_missions++;
+        HLOG_I("LOCSYNC: neue Mission %u (Tick %u nach %u, %ld Rahmen) - Rahmenzaehler, Hash und Testtasten neu",
+               s_ls_missions + 1, tick, s_last_tick, s_frames);
+        InterlockedExchange(&s_frames, 0);
+        s_hash = 1469598103934665603ull;
+        s_rt_cur = 0;
+        for (i = 0; i < s_rp_n; i++) s_rp[i].next = s_rp[i].at;
+        s_desync_logged = 0;
+    }
     n = InterlockedIncrement(&s_frames);
     nl_record(delay); /* W322 */
+    if (!loc_rb_resim()) { /* W382: Spieltakt fuer das Feedback-Paket (nur Ganzzahlen, kein x87 im Thunk) */
+        LARGE_INTEGER q, f;
+        QueryPerformanceCounter(&q);
+        QueryPerformanceFrequency(&f);
+        AcquireSRWLockExclusive(&s_tr_lk);
+        loc_tickrate_push(&s_tr, q.QuadPart, tick, f.QuadPart);
+        ReleaseSRWLockExclusive(&s_tr_lk);
+    }
     if (!s_ext) s_hash = fnv_u32(fnv_u32(s_hash, acc), tick);
     s_last_tick = tick;
     while (s_rt_cur < s_rt_n && s_rt[s_rt_cur].at <= n) { /* Testtasten am Lockstep-Rahmen */
@@ -392,14 +484,15 @@ static void __cdecl ls_record(void)
             }
         }
     }
+    loc_dodge_frame(); /* W380 DIAG (ohne loc_dodge_diag ohne Wirkung) */
     if (desync && !s_desync_logged) {
         s_desync_logged = 1;
         HLOG_W("LOCSYNC: DESYNC vom Spiel erkannt bei Rahmen %ld Tick %u", n, tick);
     }
     if (!s_ext && g_cfg.loc_sync_every > 0 && n % g_cfg.loc_sync_every == 0) {
         HLOG_I("LOCSYNC: Rahmen=%ld Tick=%u Hash=%016llX Stau=%u Stauframes=%u Stauepisoden=%u Verz=%u "
-               "Spieler=%u Maske=0x%X f=%u",
-               n, tick, s_hash, stall, stallf, stalle, delay, npl, act, hooks_frame_count());
+               "Spieler=%u Maske=0x%X f=%u Wirk=%u",
+               n, tick, s_hash, stall, stallf, stalle, delay, npl, act, hooks_frame_count(), ls_eff_delay(delay));
     }
 }
 
@@ -422,8 +515,8 @@ void loc_sync_ext_frame(unsigned slot, unsigned acc, unsigned tick)
             act = *(const u32 *)(uintptr_t)LS_ACTIVE;
         } __except (EXCEPTION_EXECUTE_HANDLER) {}
         HLOG_I("LOCSYNC: Rahmen=%ld Tick=%u Hash=%016llX Stau=%u Stauframes=%u Stauepisoden=%u Verz=%u "
-               "Spieler=%u Maske=0x%X f=%u",
-               n, tick, s_hash, stall, stallf, stalle, delay, npl, act, hooks_frame_count());
+               "Spieler=%u Maske=0x%X f=%u Wirk=%u",
+               n, tick, s_hash, stall, stallf, stalle, delay, npl, act, hooks_frame_count(), ls_eff_delay(delay));
     }
 }
 
@@ -486,6 +579,11 @@ void loc_sync_tick(int waited_s)
     }
     if (s_on && waited_s % 30 == 0) {
         HLOG_I("LOCSYNC: t=%ds Rahmen=%ld Tick=%u Hash=%016llX", waited_s, s_frames, s_last_tick, s_hash);
+    }
+    if (waited_s > 0 && waited_s % 60 == 0) { /* W382: Zustandszeile wie im Feedback-Paket (Spieltakt, Bild-Weg) */
+        char st[240];
+        loc_sync_state_line(st, sizeof st);
+        HLOG_I("LOCGAME: t=%ds %s", waited_s, st);
     }
 }
 
@@ -716,4 +814,25 @@ static void lp_log(void)
     w->n = 0;
     w->ns = 0;
     w->nr = 0;
+}
+
+/* W382 LOC-ISSUES-B: Zustandszeile fuer Feedback-/Issue-Pakete (beliebiger Thread). */
+int loc_sync_state_line(char *out, size_t cap)
+{
+    loc_state_t st;
+    memset(&st, 0, sizeof st);
+    __try {
+        st.lockstep = *(const u32 *)(uintptr_t)LS_ACTIVE != 0u;
+        st.tick = *(const u32 *)(uintptr_t)LS_TICK;
+        st.scene = *(const uint16_t *)(uintptr_t)LS_SCENE;
+        st.step = *(const uint16_t *)(uintptr_t)(LS_SCENE + 2);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+    st.frame = s_frames;
+    AcquireSRWLockShared(&s_tr_lk);
+    st.hz = loc_tickrate_hz(&s_tr, 60.0, &st.span_s);
+    ReleaseSRWLockShared(&s_tr_lk);
+    st.interp_fps = g_cfg.interp_fps;
+    st.render_thread = g_cfg.render_thread;
+    st.vblank_hz = g_cfg.vblank_hz;
+    return loc_state_line(out, cap, &st);
 }

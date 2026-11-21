@@ -20,6 +20,10 @@ extern "C" {
 int loc_audio_install(void);
 /* Watchdog-Takt (Sekunden): Statistik alle 30 s. */
 void loc_audio_tick(int waited_s);
+/* W375 (#51): laufende Nummer des zuletzt von diesem Thread angelegten Cues (0 = keine) bzw. Rollback-Waise
+ * stoppen, falls sie noch als Schleife spielt (1 = gestoppt). Ohne aktives LoC-Audio 0. */
+unsigned loc_audio_last_serial(void);
+int loc_audio_stop_orphan(unsigned serial);
 
 #ifdef __cplusplus
 }

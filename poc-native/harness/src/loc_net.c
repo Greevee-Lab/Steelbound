@@ -27,6 +27,10 @@
 typedef uint32_t u32;
 
 static locnet g_ln;
+void loc_net_bye(void)
+{
+    if (g_ln.tun) loctun_bye_all(g_ln.tun); /* W366 */
+}
 static volatile LONG s_first[40];
 
 static void ln_log(const char *m)
@@ -411,13 +415,24 @@ static const ln_hook k_hooks[] = {
 /* W338 LOC-ROLLBACK-R2: Netz-Kern fuer den eigenen Eingabekanal (NULL = Netz aus). */
 struct locnet *loc_net_core(void) { return g_ln.ready ? &g_ln : NULL; }
 
+/* W375 TEST: Testfolgen ueber mehrere Runden - Typ-Merkliste und Zaehler fuer acc>=/con>= neu (Missionsende). */
+static long s_tst_acc0, s_tst_con0;
+void loc_net_test_rearm(void)
+{
+    int i, k;
+    for (i = 0; i < 2; i++)
+        for (k = 0; k < 8; k++) InterlockedExchange(&g_ln.st.typ_seen[i][k], 0);
+    s_tst_acc0 = g_ln.st.accepts;
+    s_tst_con0 = g_ln.st.connects;
+}
+
 int loc_net_test_state(long *accepts, long *connects, int out, unsigned typ)
 {
     if (!g_ln.ready) {
         return 0;
     }
-    if (accepts) *accepts = g_ln.st.accepts;
-    if (connects) *connects = g_ln.st.connects;
+    if (accepts) *accepts = g_ln.st.accepts - s_tst_acc0; /* W375: ab der letzten Neuvorlage (Runde) */
+    if (connects) *connects = g_ln.st.connects - s_tst_con0;
     if (typ < 256) {
         return (g_ln.st.typ_seen[out ? 1 : 0][typ >> 5] >> (typ & 31)) & 1 ? 2 : 1;
     }
@@ -616,6 +631,9 @@ int loc_net_install(void)
         tc.hold_ms = g_cfg.loc_transport_hold;
         tc.qos_reserve_ms = g_cfg.loc_transport_qos;
         tc.nodirect = g_cfg.loc_transport_nodirect;
+        strcpy_s(tc.netcut_file, sizeof tc.netcut_file, g_cfg.loc_test_netcut); /* W366 TEST */
+        tc.route_auto = g_cfg.loc_route;                                      /* W395 */
+        strcpy_s(tc.route_sim, sizeof tc.route_sim, g_cfg.loc_route_sim);   /* W395 TEST */
         tc.allow_public = g_cfg.loc_lobby[0] ? 1 : 0;
         strncpy_s(tc.peers, sizeof tc.peers, g_cfg.loc_transport_peers, _TRUNCATE);
         strncpy_s(tc.lobby, sizeof tc.lobby, g_cfg.loc_lobby, _TRUNCATE);
@@ -624,6 +642,7 @@ int loc_net_install(void)
         strncpy_s(tc.role, sizeof tc.role, g_cfg.loc_lobby_role, _TRUNCATE);
         strncpy_s(tc.relays, sizeof tc.relays, g_cfg.loc_relays, _TRUNCATE);
         strncpy_s(tc.code, sizeof tc.code, g_cfg.loc_lobby_code, _TRUNCATE); /* W334 */
+        strncpy_s(tc.vis, sizeof tc.vis, g_cfg.loc_lobby_vis, _TRUNCATE);   /* W373 */
         strncpy_s(tc.spki, sizeof tc.spki, g_cfg.loc_lobby_spki, _TRUNCATE);
         _snprintf_s(tc.status_path, sizeof tc.status_path, _TRUNCATE, "%s%sloc_net_status.txt", od ? od : "",
                     od ? "/" : "");
@@ -655,6 +674,27 @@ void loc_net_lobby_frame(unsigned f)
     static u32 prev[5];
     static int n;
     u32 cur[5] = {0, 0, 0, 0, 0};
+    /* W373 LOC-PUBLIC-LOBBY (LOC_BOOT §49.2, B): Host-Zustand fuer oeffentliche Lobbys alle 8 Bilder - Lobby-Zustand
+     * G+0x15 (0x22/0x23 = Match angeboten, wartet auf Beitritte), S = G+0x5624 (Lager A/B, Sitze A/B, Modus, Mission,
+     * Bestaetigung, Option), Spieler je Seite G+0xA4/A5. Nur Werte; der Transport prueft sie vor dem Veroeffentlichen. */
+    if (g_ln.tun && (f & 7u) == 0) {
+        LONG w0 = 0, w1 = 0, w2 = 0;
+        __try {
+            const uint8_t *g = *(const uint8_t *const *)(uintptr_t)0x361708u;
+            if (g) {
+                const uint8_t *s = g + 0x5624;
+                w0 = (LONG)((u32)s[0] | ((u32)s[1] << 8) | ((u32)s[2] << 16) | ((u32)s[3] << 24));
+                w1 = (LONG)((u32)s[4] | ((u32)s[5] << 8) | ((u32)s[6] << 16) | ((u32)s[7] << 24));
+                w2 = (LONG)((u32)g[0x15] | ((u32)g[0xA4] << 8) | ((u32)g[0xA5] << 16) | 0x1000000u);
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            w2 = 0;
+        }
+        InterlockedExchange(&g_ln.pub_w[2], 0); /* ungueltig, waehrend die Felder wechseln */
+        InterlockedExchange(&g_ln.pub_w[0], w0);
+        InterlockedExchange(&g_ln.pub_w[1], w1);
+        InterlockedExchange(&g_ln.pub_w[2], w2);
+    }
     if (!g_cfg.loc_net_diag || n >= 400) return;
     __try {
         const uint8_t *c = *(const uint8_t *const *)(uintptr_t)0x3116ACu;
@@ -776,6 +816,50 @@ int loc_net_peer_live(void)
     if (g_ln.tun) links = loctun_links_up(g_ln.tun);
     return sb_pn_live_step(&s, GetTickCount(), g_ln.st.rx, links, g_ln.st.last34_ms,
                            (long)g_ln.st.accepts + g_ln.st.connects - g_ln.st.leave, 1);
+}
+
+int loc_net_hud_read(loc_net_hud *o) /* W374 F3-Overlay */
+{
+    int i;
+    loctun_peer_hud ph;
+    if (!o) return 0;
+    memset(o, 0, sizeof *o);
+    if (!g_cfg.loc_boot || !g_cfg.loc_net) return 0;
+    o->tun = g_ln.tun ? 1 : 0;
+    if (!g_ln.tun) return 1;
+    for (i = 0; i < 32; i++) {
+        memset(&ph, 0, sizeof ph);
+        if (!loctun_peer_hud_get(g_ln.tun, i, &ph)) break;
+        o->known++;
+        if (o->npeer < LOC_NET_HUD_PEERS) {
+            strncpy_s(o->peer[o->npeer].name, sizeof o->peer[o->npeer].name, ph.pilot, _TRUNCATE);
+            o->peer[o->npeer].ping = ph.srtt;
+            o->peer[o->npeer].up = ph.up;
+            o->npeer++;
+        }
+        if (!ph.up) continue;
+        o->up++;
+        o->route = (o->route == 0 || o->route == ph.path) ? ph.path : 3;
+        if (ph.srtt >= o->ping) {
+            int k;
+            o->ping = ph.srtt;
+            o->ping_min = ph.rtt_min;
+            /* W395: Wege dieses (langsamsten) Mitspielers */
+            strncpy_s(o->route_name, sizeof o->route_name, ph.route, _TRUNCATE);
+            o->nswitch = ph.nswitch;
+            o->nalt = ph.nalt < 4 ? ph.nalt : 4;
+            for (k = 0; k < o->nalt; k++) {
+                strncpy_s(o->alt[k].name, sizeof o->alt[k].name, ph.alt[k].name, _TRUNCATE);
+                o->alt[k].rtt = ph.alt[k].rtt < 0 ? -1 : (int)(ph.alt[k].rtt + 0.5);
+                o->alt[k].state = ph.alt[k].state;
+                o->alt[k].active = ph.alt[k].active;
+            }
+        }
+        if (ph.rttvar > o->jitter) o->jitter = ph.rttvar;
+        if (ph.loss_in > o->loss_in) o->loss_in = ph.loss_in;
+        if (ph.loss_peer > o->loss_out) o->loss_out = ph.loss_peer;
+    }
+    return 1;
 }
 
 int loc_net_diag_line(char *buf, int cap)

@@ -58,7 +58,7 @@ the steps and your settings. Details:
 Open the launcher again: it shows **"The last session crashed"** once,
 with **Report on GitHub** (packs the report into a ZIP and opens a
 pre-filled bug report – you drag the ZIP in yourself) and **Open report
-folder**. For anything else, **Test tools › Create diagnostic package**
+folder**. For anything else, **Test tools › Create diagnostic package** (gear › *Test tools*)
 makes one cleaned ZIP with system info, versions, changed settings, packs,
 the last logs and crash reports – no saves, no inputs, no user names or
 paths. Nothing is uploaded automatically. Details:
@@ -84,7 +84,8 @@ view. Not available in VR yet.
 ## Where are my saves?
 
 In your user profile: `%LOCALAPPDATA%\Steelbound\` (folder **Save
-games**). Settings (`user.cfg`), packs, caches and logs live there too.
+games**). Settings (`user.cfg` for Steel Battalion, `user_loc.cfg` for Line of Contact), packs,
+caches and logs live there too.
 In portable mode (`portable.txt` next to the exe), everything stays in
 the program folder instead.
 
@@ -143,12 +144,28 @@ created yourself – and never textures taken from the game. Sharing packs is
 your responsibility; see the legal note in
 [Graphics and packs](GRAPHICS_AND_PACKS.md).
 
+## Can I play Line of Contact online?
+
+Yes (experimental). Click **LINE OF CONTACT** at the top of the launcher, choose your own LoC
+disc image, choose **Connect to steelnet** in the launcher settings (gear at the top right)
+and start. **Public** lobbies show up for
+everyone under *Search Match*; **Private (room code)** gives you a code to
+share with friends. **F3** in the game shows ping and connection details.
+Line of Contact has its own display, graphics, control and audio settings.
+Step by step: [Playing Line of Contact](LINE_OF_CONTACT.md).
+
 ## Does Steelbound connect to the internet?
 
-Only if you allow it. On first start the launcher asks whether it should
-check for new versions; the answer is **No** unless you choose **Yes**, and
-you can change it later under **Advanced** (with **Check now** for a single
-check). The check sends one request to the GitHub release list (GitHub sees
+Steel Battalion never goes online. **Line of Contact** connects only when you
+choose **Connect to steelnet** under *Online & updates* in the launcher settings (gear at the
+top right): then it talks to our meeting
+point `relay.steelbound.dev` and to your fellow pilots (game traffic is
+encrypted end to end). See [Playing Line of Contact](LINE_OF_CONTACT.md).
+
+Otherwise only if you allow it. On first start the launcher asks once how it may go
+online: **steelnet** (online play, server status, version hint), **Version only** or
+**Offline**. You can change it later in the launcher settings (gear at the top right, with
+**Check now** for a single check). The version check sends one request to the GitHub release list (GitHub sees
 your IP address), shows a note when a newer version exists and **downloads
 nothing** – updating stays your decision.
 
@@ -158,3 +175,5 @@ Everyday settings are on the launcher pages (**Play**, **Display**,
 **Graphics**, **Packs**, **Controls**, **Audio**, **Advanced**). In-game
 fine-tuning is on the ESC menu (**Save as default** keeps it). Complete
 sets of settings can be stored as **Saved setups** under **Advanced**.
+Settings for the launcher itself (online & updates, language, window size, background,
+test tools) are behind the **gear** at the top right.

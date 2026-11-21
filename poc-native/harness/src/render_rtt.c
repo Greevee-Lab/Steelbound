@@ -1893,9 +1893,11 @@ have_match:
         /* W139 PERF-WARM: nur noch mit rtt_dump=1 (CopyResource + blockierendes Map READ + JPG
          * unter ctx_lock, ~1-12 ms je Ziel, 10 Ziele beim Missionsstart und erneut nach 5000 Bildern
          * beim Retry -> GPU leergelaufen, Present-Takt gesperrt). */
-        if (g_cfg.rtt_dump && ndump < 48 && g_rtt[i].pw && g_rtt[i].ph && /* W38: Cap 12->48 (Serve-Dumps auch post-START) */
+        /* DIAG(LOC-ORIGINAL,W363): rtt_dump=N>1 -> alle N Bilder je Ziel ab Bild loc_census_from (Kappe 240) */
+        if (g_cfg.rtt_dump && ndump < (g_cfg.rtt_dump > 1 ? 240u : 48u) && g_rtt[i].pw && g_rtt[i].ph && /* W38: Cap 12->48 (Serve-Dumps auch post-START) */
             (g_rtt[i].draws || g_rtt[i].clears) &&
-            (!did[i] || g_present_no - g_rtt[i].dumpf > 5000) &&
+            (g_cfg.rtt_dump <= 1 || g_present_no >= (unsigned)g_cfg.loc_census_from) &&
+            (!did[i] || g_present_no - g_rtt[i].dumpf > (g_cfg.rtt_dump > 1 ? (unsigned)g_cfg.rtt_dump : 5000u)) &&
             g_rtt[i].pw <= 2048 && g_rtt[i].ph <= 2048) {
             ID3D11Resource *res = NULL;
             ID3D11Texture2D *stage = NULL;

@@ -25,12 +25,14 @@
 #include "render_qa.h"
 #include "sb_overlay.h"
 #include "sb_perfhud.h"
+#include "sb_nethud.h" /* W374: F3-Netz-Overlay (gleiche Zeichenstellen) */
 #include "sb_pause.h"
 #include "sb_lang.h"    /* W190: Hinweis Spielstaende geschuetzt */
 #include "kernel_hle.h" /* W190: krnl_savelock_active */
 #include "vr.h"         /* W197: sb_vr_hud_text */
 #include <stdlib.h>
 #include <stdarg.h>
+#include <intrin.h> /* W391: __rdtsc (DIAG loc_thr_diag) */
 #include <wchar.h>
 #include <tlhelp32.h>
 
@@ -114,6 +116,7 @@ static const char *const gp_nm[GP_N] = { "start", "welt", "welt_sh", "rt", "rt_s
 static HANDLE ph_prof_th;
 static volatile LONG ph_prof_run;
 static void ph_prof_start(void);
+static void ph_prof_follow(void); /* DIAG(W391) */
 
 /* Panel */
 static HDC ph_dc;
@@ -241,7 +244,7 @@ static void ph_key_name(wchar_t *o, size_t cap)
 /* ------------------------------------------------------------------ */
 int sb_phud_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 {
-    (void)w;
+    if (sb_nhud_wndproc(w, msg, wp, lp)) { return 1; } /* W374: F3 */
     if (ph_vk < 0) { InterlockedExchange(&ph_vk, ph_parse_key(g_cfg.perf_hud_key)); }
     if (ph_vk <= 0 || (WPARAM)ph_vk != wp) { return 0; }
     if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN) {
@@ -674,7 +677,7 @@ void sb_phud_cycle_pos(void)
 
 int sb_phud_visible(void)
 {
-    return ph_vis;
+    return ph_vis || sb_nhud_visible(); /* W374: auch das F3-Panel zeichnet an diesen Stellen */
 }
 
 /* DIAG(TICK-PERF,W125): Blockier-Zeitmesser (sb_perfhud.h TB_*) */
@@ -687,6 +690,7 @@ static long long ph_swap_q0;
 void sb_phud_tick_begin(unsigned draws)
 {
     if (!ph_init) { ph_init_once(); ph_set_meas(ph_vis || g_cfg.perf_log > 0 || g_cfg.perf_trace); }
+    sb_nhud_tick(); /* W374: F3 an/aus, Ecke */
     if (ph_req_toggle) {
         InterlockedExchange(&ph_req_toggle, 0);
         ph_vis = !ph_vis;
@@ -709,10 +713,114 @@ void sb_phud_tick_begin(unsigned draws)
     ph_tick_draws = draws;
     ph_in_tick = 1;
     if (g_cfg.perf_prof && !ph_prof_th) { ph_prof_start(); } /* DIAG(PERF-HUD,W122) */
+    if (g_cfg.perf_prof && g_cfg.perf_prof_follow && ph_prof_th) { ph_prof_follow(); } /* DIAG(W391) */
     ph_prof_run = g_cfg.perf_prof && rq_in_mission();
     ph_tick_since_pres = 1;
 }
 
+
+/* DIAG(W391) loc_thr_diag=1: CPU-Zeit (QueryThreadCycleTime) aller Xbox-Threads und des Haupt-Threads je Tick; bei
+ * Tick-Periode > 70 ms Zeile LOCTHR-LANG (hoechstens 64 je Lauf), alle 10 s LOCTHR mit der Summe je Thread. Zeigt, ob
+ * in langen Ticks eigene Xbox-Threads den Kern belegten (Summe ~ Periode) oder der Kern fremd belegt war bzw. alle
+ * warteten. Nur Zeiten. */
+#define LT_N 34
+static int ph_thr_count(void);
+static HANDLE ph_thr_get(int i);
+static DWORD ph_thr_tid(int i);
+static void lt_tick(double period_ms)
+{
+    static ULONG64 c0[LT_N];
+    static DWORD tid0[LT_N];
+    static double acc[LT_N], acc_per;
+    static unsigned nlong, nt, nlong_win;
+    static long long q0, t0;
+    static double hz;
+    HANDLE h[LT_N];
+    DWORD tid[LT_N];
+    ULONG64 c[LT_N];
+    double d[LT_N], sum = 0.0;
+    int n = 0, i, j, nx = krnl_xb_thread_count();
+    if (!hz) {
+        LARGE_INTEGER q;
+        long long t = (long long)__rdtsc();
+        QueryPerformanceCounter(&q);
+        if (!q0) { q0 = q.QuadPart; t0 = t; return; }
+        if (q.QuadPart - q0 < ph_qpf.QuadPart) { return; }
+        hz = (double)(t - t0) * (double)ph_qpf.QuadPart / (double)(q.QuadPart - q0);
+    }
+    if (krnl_main_thread()) { h[n++] = (HANDLE)krnl_main_thread(); }
+    for (i = 0; i < nx && n < LT_N; i++) {
+        void *hh = NULL;
+        unsigned rt = 0;
+        if (krnl_xb_thread_get(i, &hh, &rt) && hh && WaitForSingleObject((HANDLE)hh, 0) == WAIT_TIMEOUT) { h[n++] = (HANDLE)hh; }
+    }
+    for (i = 0; i < n; i++) {
+        c[i] = 0;
+        QueryThreadCycleTime(h[i], &c[i]);
+        tid[i] = GetThreadId(h[i]);
+        d[i] = 0.0;
+        for (j = 0; j < LT_N; j++) {
+            if (tid0[j] == tid[i] && tid[i]) { d[i] = (double)(c[i] - c0[j]) * 1000.0 / hz; break; }
+        }
+        sum += d[i];
+    }
+    for (j = 0; j < LT_N; j++) { tid0[j] = j < n ? tid[j] : 0; c0[j] = j < n ? c[j] : 0; }
+    {   /* uebrige Threads des Prozesses (PERFTHR-Liste): CPU je Tick, Top 4 in langen Ticks */
+        static ULONG64 oc0[128];
+        static DWORD otid0[128];
+        int no = ph_thr_count(), q;
+        ULONG64 oc[128];
+        DWORD otid[128];
+        double od[128];
+        for (q = 0; q < no && q < 128; q++) {
+            HANDLE hh = ph_thr_get(q);
+            oc[q] = 0; od[q] = 0.0;
+            otid[q] = ph_thr_tid(q);
+            if (hh) { QueryThreadCycleTime(hh, &oc[q]); }
+            for (j = 0; j < 128; j++) { if (otid0[j] == otid[q] && otid[q]) { od[q] = (double)(oc[q] - oc0[j]) * 1000.0 / hz; break; } }
+            for (j = 0; j < n; j++) { if (tid[j] == otid[q]) { od[q] = 0.0; } } /* Xbox-Threads schon oben */
+        }
+        for (q = 0; q < 128; q++) { otid0[q] = q < no ? otid[q] : 0; oc0[q] = q < no ? oc[q] : 0; }
+        if (period_ms > 70.0 && nlong < 64u) {
+            char ob[300];
+            size_t ol = 0;
+            int r, best;
+            double osum = 0.0;
+            for (q = 0; q < no && q < 128; q++) { osum += od[q]; }
+            for (r = 0; r < 4; r++) {
+                best = -1;
+                for (q = 0; q < no && q < 128; q++) { if (od[q] > 0.3 && (best < 0 || od[q] > od[best])) { best = q; } }
+                if (best < 0) { break; }
+                ol += (size_t)_snprintf_s(ob + ol, sizeof ob - ol, _TRUNCATE, " T%04lx=%.1f", (unsigned long)otid[best], od[best]);
+                od[best] = 0.0;
+            }
+            HLOG_I("LOCTHR-LANG2 f=%u uebrige Threads summe=%.1fms top:%s", g_present_no, osum, ol ? ob : " -");
+        }
+    }
+    if (period_ms > 70.0 && nlong < 64u) {
+        char buf[400];
+        size_t len = 0;
+        nlong++;
+        for (i = 0; i < n; i++) {
+            if (d[i] >= 0.5) { len += (size_t)_snprintf_s(buf + len, sizeof buf - len, _TRUNCATE, " T%04lx=%.1f", (unsigned long)tid[i], d[i]); }
+        }
+        HLOG_I("LOCTHR-LANG f=%u periode=%.1fms Xbox-CPU summe=%.1fms (%.0f%% der Periode):%s", g_present_no, period_ms, sum,
+               period_ms > 0 ? 100.0 * sum / period_ms : 0.0, buf);
+    }
+    if (period_ms > 70.0) { nlong_win++; }
+    for (i = 0; i < n && i < LT_N; i++) { acc[i] += d[i]; }
+    acc_per += period_ms;
+    if (++nt >= 200u) {
+        double tot = 0.0;
+        for (i = 0; i < n; i++) { tot += acc[i]; }
+        HLOG_I("LOCTHR 200 Ticks: periode=%.0fms Xbox-CPU=%.0fms (%.0f%% eines Kerns) Haupt=%.0fms lange(>70ms)=%u", acc_per, tot,
+               acc_per > 0 ? 100.0 * tot / acc_per : 0.0, acc[0], nlong_win);
+        memset(acc, 0, sizeof acc);
+        acc_per = 0.0;
+        nt = 0;
+        nlong_win = 0;
+    }
+}
 static void ph_log(void);
 
 void sb_phud_tick_end(void)
@@ -764,6 +872,7 @@ void sb_phud_tick_end(void)
     ph_texn_last = g_phud_texn;
     ph_upn_last = g_phud_upn;
     ph_tn++;
+    if (g_cfg.loc_thr_diag) { lt_tick((double)t->period); } /* DIAG(W391) */
     if (g_cfg.perf_trace) { /* DIAG(PERF-BENCH,W137) */
         double vq = -1.0;
         if (g_tb_on) {
@@ -933,6 +1042,10 @@ static void ph_thr_handles(void)
     CloseHandle(sn);
 }
 
+static int ph_thr_count(void) { return ph_thr_hn; } /* DIAG(W391) lt_tick */
+static HANDLE ph_thr_get(int i) { return (i >= 0 && i < ph_thr_hn) ? ph_thr_h[i] : NULL; }
+static DWORD ph_thr_tid(int i) { return (i >= 0 && i < ph_thr_hn) ? ph_thr_hid[i] : 0; }
+
 static void ph_log_threads(double win_s)
 {
     THREADENTRY32 te;
@@ -946,6 +1059,27 @@ static void ph_log_threads(double win_s)
     double sum = 0.0;
     int x;
     if (!ph_thr_hn || (!rq_in_mission() && !g_cfg.perf_trace)) { ph_thr_handles(); } /* W137: mit perf_trace kein ~150-ms-Snapshot alle perf_log s */
+    if (g_cfg.loc_thr_diag) { /* DIAG(W391) loc_thr_diag=1: neue Xbox-Threads (LoC: Render-Thread je Mission) -> Liste neu, Zuordnung loggen */
+        static int last_created = -1;
+        int cr = krnl_xb_thread_created();
+        if (cr != last_created) {
+            char xb[400];
+            size_t xl = 0;
+            int q, nq = krnl_xb_thread_count();
+            last_created = cr;
+            ph_thr_handles();
+            xb[0] = 0;
+            for (q = 0; q < nq; q++) {
+                void *hh = NULL;
+                unsigned rt = 0;
+                if (krnl_xb_thread_get(q, &hh, &rt) && hh && WaitForSingleObject((HANDLE)hh, 0) == WAIT_TIMEOUT) {
+                    xl += (size_t)_snprintf_s(xb + xl, sizeof xb - xl, _TRUNCATE, " T%04lx=0x%X", (unsigned long)GetThreadId((HANDLE)hh), rt);
+                }
+            }
+            HLOG_I("PERFTHR-XB: Xbox-Threads (lebend, Startroutine):%s | Haupt T%04lx", xb,
+                   (unsigned long)(krnl_main_thread() ? GetThreadId((HANDLE)krnl_main_thread()) : 0));
+        }
+    }
     for (x = 0; x < ph_thr_hn; x++) {
         {
             {
@@ -1001,9 +1135,25 @@ static DWORD ph_prof_eip[PH_PROF_N];
 static DWORD ph_prof_remu[PH_PROF_N], ph_prof_rxbe[PH_PROF_N]; /* erste sb_emu-/XBE-Ruecksprungadresse auf dem Stack */
 static unsigned ph_prof_tn[PH_PROF_N]; /* DIAG(PERF-TICK,W168): Tick-Index der Probe (perf_prof>=2) */
 static unsigned char ph_prof_zone[PH_PROF_N]; /* DIAG(PERF-TICK,W168): g_ph_zone der Probe */
+#define PH_STK 20
+static DWORD ph_prof_stk[PH_PROF_N][PH_STK]; /* DIAG(W391) perf_prof_stack=1: rohe Stack-Woerter ab ESP */
 static DWORD ph_emu_lo, ph_emu_hi;
 static volatile LONG ph_prof_n;
 static DWORD ph_prof_tid;
+static HANDLE volatile ph_prof_tgt; /* DIAG(W391) perf_prof_follow: Ziel wechselt zum zeichnenden Thread (LoC: Render-Thread je Mission) */
+/* DIAG(W391) perf_prof_follow=1: Profiler auf den Thread umhaengen, der jetzt praesentiert (LoC: Menue = Spiel-Thread,
+ * Mission = Render-Thread des Spiels, je Mission neu). Alter Handle bleibt offen (wenige Wechsel je Lauf). */
+static void ph_prof_follow(void)
+{
+    HANDLE h;
+    if (ph_prof_tid == GetCurrentThreadId()) { return; }
+    h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, FALSE, GetCurrentThreadId());
+    if (!h) { return; }
+    ph_prof_tid = GetCurrentThreadId();
+    InterlockedExchange(&ph_prof_n, 0);
+    ph_prof_tgt = h;
+    HLOG_I("PERFPROF: Ziel -> T%04lx (perf_prof_follow)", (unsigned long)ph_prof_tid);
+}
 typedef BOOL(WINAPI *ph_syminit_t)(HANDLE, PCSTR, BOOL);
 typedef DWORD(WINAPI *ph_symopt_t)(DWORD);
 typedef struct { ULONG SizeOfStruct, TypeIndex; ULONG64 Reserved[2]; ULONG Index, Size; ULONG64 ModBase;
@@ -1021,6 +1171,7 @@ static DWORD WINAPI ph_prof_main(void *arg)
         CONTEXT c;
         Sleep(1);
         if (!ph_prof_run) { continue; }
+        if (ph_prof_tgt && ph_prof_tgt != t) { t = ph_prof_tgt; } /* DIAG(W391) perf_prof_follow */
         n = ph_prof_n;
         if (n >= PH_PROF_N) { continue; }
         if (SuspendThread(t) == (DWORD)-1) { continue; }
@@ -1040,6 +1191,9 @@ static DWORD WINAPI ph_prof_main(void *arg)
                     if (!rx && v >= 0x12000u && v < 0x300000u) { rx = v; }
                 }
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            if (g_cfg.perf_prof_stack) { /* DIAG(W391) */
+                __try { memcpy(ph_prof_stk[n], sp, sizeof ph_prof_stk[n]); } __except (EXCEPTION_EXECUTE_HANDLER) { memset(ph_prof_stk[n], 0, sizeof ph_prof_stk[n]); }
+            }
             ph_prof_eip[n] = c.Eip;
             ph_prof_remu[n] = re;
             ph_prof_rxbe[n] = rx;
@@ -1090,6 +1244,9 @@ typedef struct { char name[64]; unsigned n; } ph_bucket_t;
  * schweren Ticks (Tick-Last > perf_prof_heavy ms, 0 = 28). Zeile PERFPROF3 je Fenster:
  * alle Proben + schwere Ticks mit den haeufigsten Funktionen (XBE in 4-KB-Bloecken,
  * Systemmodule mit dem sb_emu-Aufrufer). */
+typedef struct { char name[320]; unsigned n; } ph_stkb_t; /* DIAG(W391) */
+static ph_stkb_t ph_stk_b[40];
+static int ph_nstk;
 static void ph_prof3(LONG n)
 {
     static ph_bucket_t b[200];
@@ -1175,6 +1332,36 @@ static void ph_prof3(LONG n)
             }
             if (i == n - 1 && pf) { fflush(pf); }
         }
+        if (g_cfg.perf_prof_stack && cls == 3 && hv == 1) { /* DIAG(W391): Aufrufkette der Systemmodul-Proben in schweren Ticks */
+            char sg[64 * 5];
+            size_t sl = 0;
+            int q, nf = 0;
+            sl += (size_t)_snprintf_s(sg + sl, sizeof sg - sl, _TRUNCATE, "%.30s", nm);
+            for (q = 0; q < PH_STK && nf < 5; q++) {
+                DWORD v = ph_prof_stk[i][q];
+                HMODULE vm = NULL;
+                char path2[MAX_PATH], fn2[48];
+                const char *bs;
+                if (v >= 0x12000u && v < 0x300000u) { sl += (size_t)_snprintf_s(sg + sl, sizeof sg - sl, _TRUNCATE, "<XBE:0x%lX", (unsigned long)v); nf++; continue; }
+                if (v < 0x400000u || !GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, (LPCSTR)(uintptr_t)v, &vm) || !vm) { continue; }
+                fn2[0] = 0;
+                if (ph_symfrom) {
+                    ULONG64 d2 = 0;
+                    memset(&sym, 0, sizeof sym);
+                    sym.s.SizeOfStruct = 88;
+                    sym.s.MaxNameLen = 120;
+                    if (ph_symfrom(GetCurrentProcess(), v, &d2, &sym.s)) { _snprintf_s(fn2, sizeof fn2, _TRUNCATE, "%s", sym.s.Name); }
+                }
+                GetModuleFileNameA(vm, path2, sizeof path2);
+                bs = strrchr(path2, '\\');
+                bs = bs ? bs + 1 : path2;
+                sl += (size_t)_snprintf_s(sg + sl, sizeof sg - sl, _TRUNCATE, "<%.8s!%.28s", bs, fn2[0] ? fn2 : "?");
+                nf++;
+            }
+            for (q = 0; q < ph_nstk && strcmp(ph_stk_b[q].name, sg) != 0; q++) {}
+            if (q == ph_nstk && ph_nstk < 40) { strcpy_s(ph_stk_b[q].name, sizeof ph_stk_b[q].name, sg); ph_stk_b[q].n = 0; ph_nstk++; }
+            if (q < ph_nstk) { ph_stk_b[q].n++; }
+        }
         cnt[0][cls]++; tot[0]++;
         if (hv == 1) { cnt[1][cls]++; tot[1]++; }
         for (j = 0; j < nb && strcmp(b[j].name, nm) != 0; j++) {}
@@ -1212,6 +1399,17 @@ static void ph_prof3(LONG n)
         }
     }
     HLOG_I("PERFPROF3 f=%u %s", g_present_no, line);
+    if (g_cfg.perf_prof_stack && ph_nstk) { /* DIAG(W391) */
+        int r;
+        for (r = 0; r < 4; r++) {
+            int best = -1, q;
+            for (q = 0; q < ph_nstk; q++) { if (ph_stk_b[q].n && (best < 0 || ph_stk_b[q].n > ph_stk_b[best].n)) { best = q; } }
+            if (best < 0) { break; }
+            HLOG_I("PERFPROF-STK f=%u #%d n=%u: %s", g_present_no, r + 1, ph_stk_b[best].n, ph_stk_b[best].name);
+            ph_stk_b[best].n = 0;
+        }
+        ph_nstk = 0;
+    }
 }
 static void ph_prof_log(void)
 {
@@ -1616,7 +1814,17 @@ static int ph_tex_upload(void)
     return 1;
 }
 
+static void sb_phud_draw_perf(ID3D11RenderTargetView *rtv, int save, unsigned *rect);
+
+/* W374: F2-Panel, danach das F3-Panel (weicht dem F2-Panel aus) */
 void sb_phud_draw(ID3D11RenderTargetView *rtv, int save)
+{
+    unsigned rect[4] = { 0, 0, 0, 0 };
+    if (ph_vis) { sb_phud_draw_perf(rtv, save, rect); }
+    if (sb_nhud_visible()) { sb_nhud_draw(rtv, save, rect[2] ? rect : NULL); }
+}
+
+static void sb_phud_draw_perf(ID3D11RenderTargetView *rtv, int save, unsigned *rect)
 {
     unsigned pw, ph, x0, y0, m;
     LONGLONG now;
@@ -1641,10 +1849,12 @@ void sb_phud_draw(ID3D11RenderTargetView *rtv, int save)
     }
     if (save) { sb_ovl_save_take(&ph_save, rtv, x0, y0, pw, ph); }
     sb_ovl_quad(rtv, ph_srv, x0, y0, pw, ph);
+    rect[0] = x0; rect[1] = y0; rect[2] = pw; rect[3] = ph;
 }
 
 void sb_phud_restore(void)
 {
+    sb_nhud_restore(); /* W374: umgekehrte Reihenfolge */
     sb_ovl_save_put(&ph_save);
 }
 

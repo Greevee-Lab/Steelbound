@@ -8,15 +8,34 @@
  * W275-Stubs "Netz nicht bereit". */
 int loc_net_install(void);
 void loc_net_tick(int waited_s);
+void loc_net_bye(void); /* W366: Client endet - Mitspielern BYE senden (eigener Transport) */
 /* W297: Netz-Zustand fuer Testfolgen: 0 = Netz aus, 1 = Typ nicht gesehen, 2 = Typ gesehen (typ >= 256: nur Zaehler);
  * typ 512: 3 = Lockstep aktiv (eigener 0x34-Rahmen < 1 s alt). */
 int loc_net_test_state(long *accepts, long *connects, int out, unsigned typ);
+void loc_net_test_rearm(void); /* W375 TEST: Merkliste/Zaehler der Testfolgen neu (naechste Runde) */
 /* W338 LOC-ROLLBACK-R2: Netz-Kern (Adresse, Portbasis, Mitspieler, Verzoegerungsstufe) fuer den eigenen
  * Eingabekanal; NULL = Netz aus. */
 struct locnet *loc_net_core(void);
 /* W353 LOC-DURCHSTICH: Netzwerte fuer das F11-Paket (Transport, Treffpunkt, Weg, Ping, Rollback) als eine Zeile;
  * nur Zustaende und Zahlen (keine Adressen, kein Raumcode, keine Eingaben). 0 = kein LoC-Netz. */
 int loc_net_diag_line(char *buf, int cap);
+/* W374 LOC-NET-OVERLAY (F3): Transportwerte fuer das Netz-Overlay (Abtast-Thread, hoechstens 2x/s; nur Zahlen und
+ * gekuerzte Pilotnamen, keine Adressen, kein Raumcode). 0 = kein LoC-Netz (SB-Profil oder loc_net=0). */
+#define LOC_NET_HUD_PEERS 8
+typedef struct loc_net_hud {
+    int tun;             /* 1 = eigener Transport (udp), 0 = Original-TCP */
+    int known, up;       /* Mitspieler bekannt / verbunden (eigener Transport) */
+    int route;           /* 0 keiner, 1 direkt, 2 Relay, 3 gemischt */
+    double ping, ping_min, jitter; /* schlechtester verbundener Mitspieler (ms) */
+    int loss_in, loss_out;         /* Promille, Maximum ueber die Mitspieler */
+    int npeer;                     /* Zeilen in peer[] */
+    struct { char name[24]; double ping; int up; } peer[LOC_NET_HUD_PEERS];
+    /* W395 LOC-ROUTE: Wege des schlechtesten verbundenen Mitspielers (aktiv + gemessene Alternativen) */
+    char route_name[24];           /* "direct" bzw. Relayname, leer = unbekannt */
+    int nalt, nswitch;
+    struct { char name[24]; int rtt, state, active; } alt[4]; /* rtt < 0 = keine Antwort; state 0 aus, 1 ?, 2 gut */
+} loc_net_hud;
+int loc_net_hud_read(loc_net_hud *o);
 /* W357 LOC-PAUSE-NET: 1 = Mitspieler verbunden (eigener Transport mit Verbindung, eigener Lockstep-Rahmen oder
  * Empfang auf den Spiel-Sockets in den letzten SB_PN_HOLD_MS); nur lesend, je Bild vom Spiel-Thread (Overlay). */
 int loc_net_peer_live(void);

@@ -3039,6 +3039,7 @@ static void run_wheel_cases(const imap_profile_t *kb, const imap_profile_t *xbox
     for (i = 0; i < 16; i++) {
         wheel_snap(&sn, f + i, imap_wheel_step(&w, f + i, 0));
         sn.real_vk = wheel_real_vk;
+        sn.wheel_step = imap_wheel_steps(&w); /* W384: Zaehl-Spur */
         imap_profile_apply(&b, &st, &p, &sn);
     }
     CHECK(b.tuner == 3, "wheel: 3 Rasten hoch -> Tuner 3 (ist %u)", b.tuner);
@@ -3047,6 +3048,7 @@ static void run_wheel_cases(const imap_profile_t *kb, const imap_profile_t *xbox
     for (i = 0; i < 6; i++) {
         wheel_snap(&sn, f + i, imap_wheel_step(&w, f + i, 0));
         sn.real_vk = wheel_real_vk;
+        sn.wheel_step = imap_wheel_steps(&w);
         imap_profile_apply(&b, &st, &p, &sn);
     }
     CHECK(b.tuner == 2, "wheel: 1 Raste runter -> Tuner 2 (ist %u)", b.tuner);
@@ -3055,6 +3057,7 @@ static void run_wheel_cases(const imap_profile_t *kb, const imap_profile_t *xbox
     for (i = 0; i < 6; i++) {
         wheel_snap(&sn, f + i, imap_wheel_step(&w, f + i, 0));
         sn.real_vk = wheel_real_vk;
+        sn.wheel_step = imap_wheel_steps(&w);
         imap_profile_apply(&b, &st, &p, &sn);
     }
     CHECK(b.gear == 9 && b.tuner == 2, "wheel: Kipprad rechts -> Gang N->1 (gear=%u)", b.gear);
@@ -3062,11 +3065,13 @@ static void run_wheel_cases(const imap_profile_t *kb, const imap_profile_t *xbox
     imap_state_init(&st);
     wheel_snap(&sn, f + 40, 1u << IMAP_WHEEL_UP);
     sn.real_blocked = 1;
+    sn.wheel_step = 1u << IMAP_WHEEL_UP; /* W384 */
     imap_profile_apply(&b, &st, &p, &sn);
     CHECK(b.tuner == 0, "wheel: real_blocked -> kein Tuner (ist %u)", b.tuner);
     imap_state_init(&st);
     wheel_snap(&sn, f + 41, 1u << IMAP_WHEEL_UP);
     sn.mouse_buttons = 0;
+    sn.wheel_step = 1u << IMAP_WHEEL_UP; /* W384 */
     imap_profile_apply(&b, &st, &p, &sn);
     CHECK(b.tuner == 0, "wheel: mouse_buttons=0 -> kein Tuner (ist %u)", b.tuner);
     /* Replay: synthetische VKs 329..332 (wie 324..328 fuer die Tasten). */
@@ -3094,9 +3099,67 @@ static void run_wheel_cases(const imap_profile_t *kb, const imap_profile_t *xbox
         imap_profile_apply(&b0, &s0, dp, &sn);
         wheel_snap(&sn, f + 60, 0xFu);
         sn.real_vk = wheel_real_vk;
+        sn.wheel_step = 0xFu; /* W384 */
         imap_profile_apply(&b1, &s1, dp, &sn);
         ok = memcmp(&b0, &b1, sizeof b0) == 0;
         CHECK(ok, "wheel: %s ohne Rad-Belegung (Block gleich)", i ? "xbox_pad_default" : "keyboard_default");
+    }
+
+    /* W384 (GH #63): Raste -> Tuner-Schritt im selben Frame wie die Raste ankommt
+     * (kein Warten auf 2+2-Impulse); schnelles Drehen: 1 Schritt je Frame, ohne
+     * Stufen zu ueberspringen; zweiter Poll im selben Frame zaehlt nicht doppelt. */
+    {
+        unsigned seqt[8];
+        int bad = 0;
+        imap_state_init(&st);
+        memset(&w, 0, sizeof w);
+        f += 100;
+        imap_wheel_add(&w, 0, 120);
+        wheel_snap(&sn, f, imap_wheel_step(&w, f, 0));
+        sn.real_vk = wheel_real_vk;
+        sn.wheel_step = imap_wheel_steps(&w);
+        imap_profile_apply(&b, &st, &p, &sn);
+        CHECK(b.tuner == 1, "W384 wheel: 1 Raste -> Tuner 1 im naechsten Poll (ist %u)", b.tuner);
+        wheel_snap(&sn, f, imap_wheel_step(&w, f, 0)); /* zweiter Poll, gleicher Frame */
+        sn.real_vk = wheel_real_vk;
+        sn.wheel_step = imap_wheel_steps(&w);
+        imap_profile_apply(&b, &st, &p, &sn);
+        CHECK(b.tuner == 1 && sn.wheel_step == 0, "W384 wheel: 2. Poll im selben Frame zaehlt nicht (Tuner %u)", b.tuner);
+        imap_state_init(&st);
+        memset(&w, 0, sizeof w);
+        f += 10;
+        imap_wheel_add(&w, 0, 120 * 5); /* schnelles Drehen: 5 Rasten auf einmal */
+        for (i = 0; i < 8; i++) {
+            wheel_snap(&sn, f + i, imap_wheel_step(&w, f + i, 0));
+            sn.real_vk = wheel_real_vk;
+            sn.wheel_step = imap_wheel_steps(&w);
+            imap_profile_apply(&b, &st, &p, &sn);
+            seqt[i] = b.tuner;
+        }
+        for (i = 0; i < 8; i++) bad |= seqt[i] != (unsigned)(i < 5 ? i + 1 : 5);
+        CHECK(!bad, "W384 wheel: 5 Rasten -> Tuner 1,2,3,4,5 in 5 Frames (ist %u,%u,%u,%u,%u,%u)",
+              seqt[0], seqt[1], seqt[2], seqt[3], seqt[4], seqt[5]);
+        imap_wheel_add(&w, 0, -120 * 2);
+        for (i = 0; i < 3; i++) {
+            wheel_snap(&sn, f + 20 + i, imap_wheel_step(&w, f + 20 + i, 0));
+            sn.real_vk = wheel_real_vk;
+            sn.wheel_step = imap_wheel_steps(&w);
+            imap_profile_apply(&b, &st, &p, &sn);
+            seqt[i] = b.tuner;
+        }
+        CHECK(seqt[0] == 4 && seqt[1] == 3 && seqt[2] == 3, "W384 wheel: 2 Rasten runter -> 4,3 (ist %u,%u,%u)",
+              seqt[0], seqt[1], seqt[2]);
+        imap_wheel_add(&w, 1, 120); /* Kipprad -> Gang im selben Frame */
+        wheel_snap(&sn, f + 30, imap_wheel_step(&w, f + 30, 0));
+        sn.real_vk = wheel_real_vk;
+        sn.wheel_step = imap_wheel_steps(&w);
+        imap_profile_apply(&b, &st, &p, &sn);
+        CHECK(b.gear == 9, "W384 wheel: Kipprad -> Gang N->1 sofort (gear=%u)", b.gear);
+        imap_wheel_add(&w, 0, 120 * 3); /* gesperrt verwirft auch die Zaehl-Spur */
+        (void)imap_wheel_step(&w, f + 31, 1);
+        CHECK(imap_wheel_steps(&w) == 0 && w.cnt[IMAP_WHEEL_UP] == 0 &&
+              (imap_wheel_step(&w, f + 32, 0), imap_wheel_steps(&w)) == 0,
+              "W384 wheel: gesperrt verwirft Zaehl-Spur");
     }
 }
 
@@ -3487,6 +3550,126 @@ static void run_joyhotplug_cases(void)
     ijoy_test_end();
 }
 
+/* ---- Teil 27: W380 LOC-DODGE - Ausweich-Hilfe (slide_assist): kurzer Druck/Flanke ---- */
+static void sa_poll(int path, const imap_profile_t *prof, imap_block_t *b, imap_state_t *st, unsigned *fr,
+                    const cfgvar_t *c, const int *keys, int n, int assist)
+{
+    imap_snap_t sn;
+    make_snap(&sn, (*fr)++, c);
+    sn.slide_assist = assist;
+    set_keys(keys, n);
+    if (path) imap_profile_apply(b, st, prof, &sn);
+    else imap_legacy_apply(b, st, &sn);
+}
+
+static void run_slide_assist_cases(const imap_profile_t *kb)
+{
+    imap_block_t b;
+    imap_state_t st;
+    cfgvar_t c = { 1, 1, 0, 1, 4, 0, 0 };
+    unsigned fr = 120000;
+    int kla[] = { VK_LCONTROL, 'A' }, kl[] = { VK_LCONTROL }, ka[] = { 'A' }, kd[] = { 'D' }, kx1[] = { 327 };
+    int path, i, ok;
+    printf("Teil 27: W380 Ausweich-Hilfe (slide_assist)\n");
+    for (path = 0; path < 2; path++) {
+        const char *pn = path ? "Profil" : "Legacy";
+        /* Tipp 1 Poll Strg+A -> Pedal + links 8 Polls, danach los. */
+        imap_state_init(&st);
+        sa_poll(path, kb, &b, &st, &fr, &c, kla, 2, 8);
+        ok = b.pedal_l == 0xFF && b.rot_lever == -127;
+        for (i = 1; i < 8; i++) {
+            sa_poll(path, kb, &b, &st, &fr, &c, NULL, 0, 8);
+            ok = ok && b.pedal_l == 0xFF && b.rot_lever == -127;
+        }
+        CHECK(ok, "%s: Tipp Strg+A haelt Pedal+links 8 Polls", pn);
+        sa_poll(path, kb, &b, &st, &fr, &c, NULL, 0, 8);
+        CHECK(b.pedal_l == 0 && b.rot_lever == 0, "%s: nach 8 Polls los (ped=%02X rot=%d)", pn, b.pedal_l,
+              (int)b.rot_lever);
+        /* Richtung einen Poll spaeter (A nach Strg) -> links ab dem A-Poll. */
+        imap_state_init(&st);
+        sa_poll(path, kb, &b, &st, &fr, &c, kl, 1, 8);
+        CHECK(b.pedal_l == 0xFF && b.rot_lever == 0, "%s: Strg allein -> Pedal, Hebel 0", pn);
+        sa_poll(path, kb, &b, &st, &fr, &c, ka, 1, 8);
+        sa_poll(path, kb, &b, &st, &fr, &c, NULL, 0, 8);
+        CHECK(b.pedal_l == 0xFF && b.rot_lever == -127, "%s: A nach Strg -> links gehalten (rot=%d)", pn,
+              (int)b.rot_lever);
+        /* A vor dem Druck (Rueckblick 2 Polls) -> links; 4 Polls vorher -> geradeaus. */
+        imap_state_init(&st);
+        sa_poll(path, kb, &b, &st, &fr, &c, ka, 1, 8);
+        sa_poll(path, kb, &b, &st, &fr, &c, kl, 1, 8);
+        sa_poll(path, kb, &b, &st, &fr, &c, NULL, 0, 8);
+        CHECK(b.pedal_l == 0xFF && b.rot_lever == -127, "%s: A kurz vor Strg -> links (rot=%d)", pn,
+              (int)b.rot_lever);
+        imap_state_init(&st);
+        sa_poll(path, kb, &b, &st, &fr, &c, ka, 1, 8);
+        for (i = 0; i < 4; i++) sa_poll(path, kb, &b, &st, &fr, &c, NULL, 0, 8);
+        sa_poll(path, kb, &b, &st, &fr, &c, kl, 1, 8);
+        sa_poll(path, kb, &b, &st, &fr, &c, NULL, 0, 8);
+        CHECK(b.pedal_l == 0xFF && b.rot_lever == 0, "%s: A 5 Polls vorher -> geradeaus (rot=%d)", pn,
+              (int)b.rot_lever);
+        /* Gegenrichtung im Fenster gewinnt. */
+        imap_state_init(&st);
+        sa_poll(path, kb, &b, &st, &fr, &c, kla, 2, 8);
+        sa_poll(path, kb, &b, &st, &fr, &c, kd, 1, 8);
+        sa_poll(path, kb, &b, &st, &fr, &c, NULL, 0, 8);
+        CHECK(b.pedal_l == 0xFF && b.rot_lever == 127, "%s: D im Fenster -> rechts (rot=%d)", pn,
+              (int)b.rot_lever);
+        /* Laenger gehalten = Original: Pedal solange gedrueckt, Hebel wieder echt nach dem Fenster. */
+        imap_state_init(&st);
+        sa_poll(path, kb, &b, &st, &fr, &c, kla, 2, 4);
+        for (i = 0; i < 9; i++) sa_poll(path, kb, &b, &st, &fr, &c, kl, 1, 4);
+        CHECK(b.pedal_l == 0xFF && b.rot_lever == 0, "%s: gehalten ueber das Fenster -> Pedal, Hebel echt", pn);
+        sa_poll(path, kb, &b, &st, &fr, &c, NULL, 0, 4);
+        CHECK(b.pedal_l == 0, "%s: losgelassen nach dem Fenster -> sofort los", pn);
+        /* Schalter aus = bisheriges Verhalten (Tipp nur 1 Poll). */
+        imap_state_init(&st);
+        sa_poll(path, kb, &b, &st, &fr, &c, kla, 2, 0);
+        sa_poll(path, kb, &b, &st, &fr, &c, NULL, 0, 0);
+        CHECK(b.pedal_l == 0 && b.rot_lever == 0, "%s: slide_assist=0 -> Tipp 1 Poll (Original)", pn);
+        /* Ohne Druck keine Wirkung (Hebel/Pedal unveraendert). */
+        imap_state_init(&st);
+        sa_poll(path, kb, &b, &st, &fr, &c, ka, 1, 8);
+        CHECK(b.pedal_l == 0 && b.rot_lever == -127, "%s: A ohne Strg -> kein Pedal", pn);
+        sa_poll(path, kb, &b, &st, &fr, &c, NULL, 0, 8);
+        CHECK(b.pedal_l == 0 && b.rot_lever == 0, "%s: ohne Druck kein Halten", pn);
+        /* Maus X1 (Synth 327) als Tipp. */
+        imap_state_init(&st);
+        sa_poll(path, kb, &b, &st, &fr, &c, kx1, 1, 8);
+        sa_poll(path, kb, &b, &st, &fr, &c, NULL, 0, 8);
+        CHECK(b.pedal_l == 0xFF, "%s: X1-Tipp haelt Pedal", pn);
+    }
+}
+
+/* ---- Teil 26: W374 LOC-NET-OVERLAY - Aktion net_hud (Netz-Overlay, Standard F3, nur Tasten) ---- */
+static void run_nethud_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
+{
+    imap_profile_t p, q;
+    int vks[4], mods[4], n;
+    printf("Teil 26: W374 Aktion net_hud\n");
+    CHECK(kb->net_hud_set == 1 && kb->net_hud.n == 1 && !kb->net_hud.alt[0].chord &&
+          kb->net_hud.alt[0].a.kind == IMAP_A_KEY && kb->net_hud.alt[0].a.code == VK_F3,
+          "net_hud: kb Standard KEY:F3");
+    CHECK(xbox->net_hud_set == 1 && xbox->net_hud.n == 1 && xbox->net_hud.alt[0].a.code == VK_F3,
+          "net_hud: xbox Standard KEY:F3");
+    n = imap_bind_key_combos(&kb->net_hud, vks, mods, 4);
+    CHECK(n == 1 && vks[0] == VK_F3 && mods[0] == 0, "net_hud: Fenster-Taste F3 ohne Zusatz");
+    CHECK(imap_profile_parse("pause = KEY:PAUSE\n", "alt", &p) == 0 && p.net_hud_set == 0 && p.net_hud.n == 1 &&
+          p.net_hud.alt[0].a.code == VK_F3, "net_hud: altes Profil ohne Zeile -> Standard F3");
+    CHECK(imap_profile_parse("net_hud =\n", "t", &p) == 0 && p.net_hud_set == 1 && p.net_hud.n == 0,
+          "net_hud: leere Zeile = aus");
+    CHECK(imap_profile_parse("net_hud = KEY:F6\nnet_hud = KEY:N\n", "t", &p) == 0 && p.net_hud.n == 1 &&
+          p.net_hud.alt[0].a.code == 'N', "net_hud: letzte Zeile gewinnt");
+    CHECK(imap_profile_parse("net_hud = KEY:CTRL+KEY:F3\n", "t", &p) == 0 &&
+          (n = imap_bind_key_combos(&p.net_hud, vks, mods, 4)) == 1 && vks[0] == VK_F3 && mods[0] == 2,
+          "net_hud: Strg+F3 -> Fenster-Taste mit Zusatz");
+    CHECK(imap_profile_parse("net_hud = KEY:F3\n", "t", &p) == 0 &&
+          imap_profile_parse("net_hud = KEY:F4\n", "t", &q) == 0 && imap_profile_equal(&p, &q) != 0,
+          "net_hud: Belegung geht in den Profilvergleich ein");
+    CHECK(imap_profile_parse("net_hud = KEY:F3\n", "t", &p) == 0 &&
+          imap_profile_parse("pause = KEY:PAUSE\n", "t", &q) == 0 && imap_profile_equal(&p, &q) != 0,
+          "net_hud: Zeile gesetzt vs. Standard unterscheidbar (net_hud_set)");
+}
+
 /* ---- Teil 24: W312 JOY-CALIB - simulierte DirectInput-Objektlisten ----
  * Wingman Force 3D (Tester: Schub geht, Stick X/Y nicht), Hori PS4-Modus,
  * Standard-HOTAS. Format-Entscheidung (Standard vs. eigenes Format je
@@ -3795,6 +3978,243 @@ static void run_joycalib_cases(void)
     (void)i;
 }
 
+/* Teil 25: W365 BIND-COMBO - Kombis aus dem Launcher (alle Zeilen): Akkord gewinnt, die Einzeltaste
+ * feuert nicht zusaetzlich (auch Gang-Direktwahl, Client-Aktionen, Zusatztasten-Familie LCTRL ~ CTRL). */
+static void w365_apply(const imap_profile_t *p, imap_block_t *b, imap_state_t *st, const int *vk, int n,
+                       unsigned short padb, unsigned fr)
+{
+    cfgvar_t c = { 1, 1, 0, 1, 4, 0, 0 };
+    imap_snap_t s;
+    make_snap(&s, fr, &c);
+    set_keys(vk, n);
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = padb;
+    s.pad_present = padb != 0;
+    imap_profile_apply(b, st, p, &s);
+}
+
+static void run_w365_combo_cases(void)
+{
+    static const int k_ctrl_s[] = { VK_CONTROL, VK_LCONTROL, 'S' }, k_s[] = { 'S' },
+                     k_ctrl[] = { VK_CONTROL, VK_LCONTROL }, k_shift_s[] = { VK_SHIFT, VK_LSHIFT, 'S' },
+                     k_ctrl_a[] = { VK_CONTROL, VK_RCONTROL, 'A' }, k_a[] = { 'A' },
+                     k_shift_f8[] = { VK_SHIFT, VK_LSHIFT, VK_F8 }, k_f8[] = { VK_F8 };
+    imap_profile_t p;
+    imap_state_t st;
+    imap_block_t b;
+    imap_snap_t s;
+    cfgvar_t c = { 1, 1, 0, 1, 4, 0, 0 };
+    unsigned fr = 1;
+    printf("Teil 25: W365 BIND-COMBO\n");
+    /* Tastatur Strg+S auf bi1, S allein auf bi0 */
+    CHECK(imap_profile_parse("bi0 = KEY:S\nbi1 = KEY:CTRL+KEY:S\n", "w365", &p) == 0, "w365: parse Strg+S");
+    imap_state_init(&st);
+    w365_apply(&p, &b, &st, k_ctrl_s, 3, 0, fr++);
+    CHECK((b.buttons[0] & 2u) && !(b.buttons[0] & 1u), "w365: Strg+S -> nur bi1 (btn=%04X)", b.buttons[0]);
+    w365_apply(&p, &b, &st, k_s, 1, 0, fr++);
+    CHECK((b.buttons[0] & 1u) && !(b.buttons[0] & 2u), "w365: S allein -> nur bi0 (btn=%04X)", b.buttons[0]);
+    /* Familie: Akkord mit CTRL unterdrueckt Einzelbelegung LCTRL (Pedal) */
+    CHECK(imap_profile_parse("pedal_l = KEY:LCTRL\nbi1 = KEY:CTRL+KEY:S\n", "w365", &p) == 0, "w365: parse LCTRL");
+    imap_state_init(&st);
+    w365_apply(&p, &b, &st, k_ctrl_s, 3, 0, fr++);
+    CHECK((b.buttons[0] & 2u) && b.pedal_l == 0, "w365: Strg+S -> bi1, Pedal LCTRL schweigt (%u)", b.pedal_l);
+    w365_apply(&p, &b, &st, k_ctrl, 2, 0, fr++);
+    CHECK(!(b.buttons[0] & 2u) && b.pedal_l == 0xFF, "w365: LCTRL allein -> Pedal (%u)", b.pedal_l);
+    /* Pad LB+X auf bi1, X allein auf bi0 */
+    CHECK(imap_profile_parse("bi0 = PAD:X\nbi1 = PAD:LB+PAD:X\n", "w365", &p) == 0, "w365: parse LB+X");
+    imap_state_init(&st);
+    w365_apply(&p, &b, &st, NULL, 0, (unsigned short)(IMAP_PAD_LB | IMAP_PAD_X), fr++);
+    CHECK((b.buttons[0] & 2u) && !(b.buttons[0] & 1u), "w365: LB+X -> nur bi1 (btn=%04X)", b.buttons[0]);
+    w365_apply(&p, &b, &st, NULL, 0, (unsigned short)IMAP_PAD_X, fr++);
+    CHECK((b.buttons[0] & 1u) && !(b.buttons[0] & 2u), "w365: X allein -> nur bi0 (btn=%04X)", b.buttons[0]);
+    /* Gang-Direktwahl mit Akkord unterdrueckt die Einzeltaste (vorher nicht gesammelt) */
+    CHECK(imap_profile_parse("bi0 = KEY:S\ngear.1 = KEY:SHIFT+KEY:S\n", "w365", &p) == 0, "w365: parse gear.1");
+    imap_state_init(&st);
+    w365_apply(&p, &b, &st, k_shift_s, 3, 0, fr++);
+    CHECK(b.gear == 9 && !(b.buttons[0] & 1u), "w365: Umschalt+S -> Gang 1, bi0 schweigt (gear=%u btn=%04X)",
+          b.gear, b.buttons[0]);
+    /* Client-Aktion mit Akkord unterdrueckt Spiel-Taste */
+    CHECK(imap_profile_parse("bi0 = KEY:A\naim_center = KEY:CTRL+KEY:A\n", "w365", &p) == 0, "w365: parse aim_center");
+    imap_state_init(&st);
+    w365_apply(&p, &b, &st, k_ctrl_a, 3, 0, fr++);
+    CHECK(!(b.buttons[0] & 1u), "w365: Strg+A (aim_center) -> bi0 schweigt (btn=%04X)", b.buttons[0]);
+    w365_apply(&p, &b, &st, k_a, 1, 0, fr++);
+    CHECK((b.buttons[0] & 1u) != 0, "w365: A allein -> bi0");
+    /* vr_recenter F8 vs. orig_view Umschalt+F8 (Standardprofile): Umschalt+F8 zentriert nicht mehr */
+    CHECK(imap_profile_parse("vr_recenter = KEY:F8\norig_view = KEY:SHIFT+KEY:F8\n", "w365", &p) == 0,
+          "w365: parse vr/orig");
+    imap_state_init(&st);
+    make_snap(&s, fr++, &c);
+    set_keys(k_shift_f8, 3);
+    CHECK(imap_action_vr_recenter(&p, &st, &s) == 0, "w365: Umschalt+F8 -> kein vr_recenter");
+    make_snap(&s, fr++, &c);
+    set_keys(NULL, 0);
+    (void)imap_action_vr_recenter(&p, &st, &s);
+    make_snap(&s, fr++, &c);
+    set_keys(k_f8, 1);
+    CHECK(imap_action_vr_recenter(&p, &st, &s) == 1, "w365: F8 allein -> vr_recenter");
+    /* Vom Launcher erzeugte Formen parsen (numerische Taste, Maus, Joystick, Original-Controller) */
+    CHECK(imap_profile_parse("bi0 = KEY:CTRL+KEY:20\nbi1 = KEY:SHIFT+MOUSE:LEFT\nbi2 = JOY0:B1+JOY0:B2\n"
+                             "bi3 = SBC:CHAFF+SBC:EJECT\nbi4 = PAD:LT+PAD:A\n", "w365", &p) == 0 &&
+          p.btn[0].alt[0].chord && p.btn[0].alt[0].b.code == 20 && p.btn[1].alt[0].chord &&
+          p.btn[2].alt[0].chord && p.btn[3].alt[0].chord && p.btn[4].alt[0].chord,
+          "w365: Launcher-Kombis (KEY:20, Maus, JOY, SBC, LT) parsen als Akkord");
+}
+
+/* Teil 28 (W394 LOC-VIEW-PERFRAME): Vorschau des Maus-Akkus ohne Doppelzaehlung. Zwischen zwei Polls liest die Anzeige
+ * mehrmals den Akku-Stand plus die noch nicht abgeholten Deltas (imap_mouse_preview). Pruefung: (a) Vorschau = Ergebnis
+ * eines Polls mit genau diesen Deltas (auf einer Kopie), (b) der Zustand der Simulation bleibt durch Vorschauen
+ * unveraendert, (c) nach dem echten Poll ist der Zustand bitgleich mit einem Bezugslauf ganz ohne Vorschau. */
+static int w394_realvk(int vk) { (void)vk; return 0; }
+static void run_w394_preview_cases(void)
+{
+    static const int sens_v[] = {1, 4, 9, 16};
+    int abs_m, si, sight, inv, poll, part, nprev = 0, nbad = 0;
+    uint32_t rnd = 12345u;
+    printf("Teil 28: W394 Maus-Akku-Vorschau ohne Doppelzaehlung ...\n");
+    for (abs_m = 0; abs_m < 2; abs_m++)
+        for (si = 0; si < 4; si++)
+            for (sight = 0; sight < 2; sight++)
+                for (inv = 0; inv < 2; inv++) {
+                    imap_state_t sim, ref, before, prev, chk;
+                    imap_snap_t sn;
+                    imap_block_t b1, b2;
+                    imap_state_init(&sim);
+                    imap_state_init(&ref);
+                    memset(&sn, 0, sizeof sn);
+                    memset(g_keys, 0, sizeof g_keys);
+                    sn.key = stub_key;
+                    sn.real_vk = w394_realvk;
+                    sn.mouse_aim = 1;
+                    sn.mouse_raw = 1;
+                    sn.mouse_live = 1;
+                    sn.mouse_abs = abs_m;
+                    sn.mouse_sight = sight;
+                    sn.mouse_sens = sens_v[si];
+                    sn.mouse_invert_x = inv;
+                    sn.mouse_invert_y = !inv;
+                    for (poll = 0; poll < 400; poll++) {
+                        int pdx = 0, pdy = 0;
+                        sn.frame = (unsigned)poll;
+                        for (part = 0; part < 4; part++) { /* Deltas kommen in Teilen zwischen zwei Polls an */
+                            rnd = rnd * 1664525u + 1013904223u;
+                            pdx += (int)((rnd >> 8) % 41u) - 20;
+                            rnd = rnd * 1664525u + 1013904223u;
+                            pdy += (int)((rnd >> 8) % 41u) - 20;
+                            before = sim;
+                            imap_mouse_preview(&sim, &sn, pdx, pdy, &prev);
+                            nprev++;
+                            if (memcmp(&before, &sim, sizeof sim) != 0) nbad++; /* (b) */
+                            chk = sim;
+                            sn.raw_dx = pdx; sn.raw_dy = pdy;
+                            imap_legacy_apply(&b1, &chk, &sn);
+                            if (chk.m_ax != prev.m_ax || chk.m_ay != prev.m_ay || chk.m_sx != prev.m_sx ||
+                                chk.m_sy != prev.m_sy || chk.m_fx != prev.m_fx || chk.m_fy != prev.m_fy) nbad++; /* (a) */
+                        }
+                        sn.raw_dx = pdx; sn.raw_dy = pdy; /* echter Poll holt alles genau einmal ab */
+                        imap_legacy_apply(&b1, &sim, &sn);
+                        imap_legacy_apply(&b2, &ref, &sn);
+                        if (memcmp(&sim, &ref, sizeof sim) != 0 || memcmp(&b1, &b2, sizeof b1) != 0) nbad++; /* (c) */
+                    }
+                }
+    { /* Gatter wie der Poll: Maus nicht wirksam -> Vorschau = Stand */
+        imap_state_t st, pv;
+        imap_snap_t sn;
+        imap_state_init(&st);
+        memset(&sn, 0, sizeof sn);
+        sn.key = stub_key;
+        sn.mouse_aim = 1; sn.mouse_raw = 1; sn.mouse_live = 1; sn.mouse_sens = 4; sn.real_blocked = 1;
+        imap_mouse_preview(&st, &sn, 50, 50, &pv);
+        CHECK(memcmp(&st, &pv, sizeof st) == 0, "W394: gesperrte Maus veraendert die Vorschau");
+        sn.real_blocked = 0; sn.replay_active = 1; sn.mouse_live = 0;
+        imap_mouse_preview(&st, &sn, 50, 50, &pv);
+        CHECK(memcmp(&st, &pv, sizeof st) == 0, "W394: Replay ohne Live-Maus veraendert die Vorschau");
+        sn.replay_active = 0; sn.mouse_live = 1;
+        imap_mouse_preview(&st, &sn, 50, 0, &pv);
+        CHECK(pv.m_ax == 0x7F + 50, "W394: Vorschau relativ sens 4: %d", pv.m_ax);
+        imap_mouse_preview(&st, &sn, 500, 0, &pv);
+        CHECK(pv.m_ax == 0x7F + 64, "W394: Vorschau begrenzt auf 64 Counts: %d", pv.m_ax);
+    }
+    CHECK(nbad == 0, "W394: %d Abweichungen in %d Vorschauen", nbad, nprev);
+    printf("Teil 28: %d Vorschauen, %d Abweichungen\n", nprev, nbad);
+}
+
+/* Teil 30 (W403 LAUNCHER-R1-POLISH): Eject (bi3) hat in beiden Standardprofilen Umschalt+Entf (Akkord gegen
+ * Versehen; Strg waere das Pedal). Nur der Akkord loest Eject aus, Entf bzw. Umschalt allein nichts, das Pedal
+ * schweigt; Gamepad BACK+Y bleibt. */
+static void run_w403_eject_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
+{
+    static const int k_sd[] = { VK_SHIFT, VK_LSHIFT, VK_DELETE }, k_d[] = { VK_DELETE },
+                     k_s[] = { VK_SHIFT, VK_LSHIFT };
+    const imap_profile_t *pr[2];
+    imap_state_t st;
+    imap_block_t b;
+    unsigned fr = 1;
+    int i;
+    pr[0] = kb;
+    pr[1] = xbox;
+    printf("Teil 30: W403 Eject-Standard\n");
+    for (i = 0; i < 2; i++) {
+        const imap_bind_t *e = &pr[i]->btn[3];
+        int k, chord = 0, pad = 0;
+        for (k = 0; k < e->n; k++) {
+            const imap_chord_t *c = &e->alt[k];
+            if (c->chord && c->a.kind == IMAP_A_KEY && c->a.code == VK_SHIFT && c->b.kind == IMAP_A_KEY &&
+                c->b.code == VK_DELETE) chord = 1;
+            if (c->chord && c->a.kind != IMAP_A_KEY && c->b.kind != IMAP_A_KEY) pad = 1;
+        }
+        CHECK(chord, "w403: %s bi3 = KEY:SHIFT+KEY:DELETE (n=%d)", i ? "xbox" : "kb", e->n);
+        CHECK(i == 0 ? e->n == 1 : (e->n == 2 && pad), "w403: %s bi3 Quellen (n=%d, pad=%d)", i ? "xbox" : "kb",
+              e->n, pad);
+        imap_state_init(&st);
+        w365_apply(pr[i], &b, &st, k_sd, 3, 0, fr++);
+        CHECK(b.buttons[0] == (1u << 3) && b.buttons[1] == 0 && b.buttons[2] == 0 && b.pedal_l == 0,
+              "w403: %s Umschalt+Entf -> nur Eject (btn=%04X %04X %04X pedal=%u)", i ? "xbox" : "kb", b.buttons[0],
+              b.buttons[1], b.buttons[2], b.pedal_l);
+        w365_apply(pr[i], &b, &st, k_d, 1, 0, fr++);
+        CHECK(!(b.buttons[0] & (1u << 3)), "w403: %s Entf allein -> kein Eject (btn=%04X)", i ? "xbox" : "kb",
+              b.buttons[0]);
+        w365_apply(pr[i], &b, &st, k_s, 2, 0, fr++);
+        CHECK(b.buttons[0] == 0 && b.buttons[1] == 0 && b.buttons[2] == 0,
+              "w403: %s Umschalt allein -> keine Taste (btn=%04X)", i ? "xbox" : "kb", b.buttons[0]);
+        if (i == 1) {
+            w365_apply(pr[i], &b, &st, NULL, 0, (unsigned short)(IMAP_PAD_BACK | IMAP_PAD_Y), fr++);
+            CHECK((b.buttons[0] & (1u << 3)) != 0, "w403: xbox BACK+Y -> Eject (btn=%04X)", b.buttons[0]);
+        }
+    }
+}
+
+/* Teil 29 (W396 LOC-POLISH): Maus-Akkus beim Missionswechsel zur Mitte, auch die Sicht (mouse_sight=1). */
+static void run_w396_center_cases(void)
+{
+    imap_state_t st;
+    imap_snap_t sn;
+    imap_block_t b;
+    printf("Teil 29: W396 Maus-Akkus zur Mitte (Ziel + Sicht) ...\n");
+    imap_state_init(&st);
+    memset(&sn, 0, sizeof sn);
+    memset(g_keys, 0, sizeof g_keys);
+    sn.key = stub_key;
+    sn.real_vk = w394_realvk;
+    sn.mouse_aim = 1;
+    sn.mouse_raw = 1;
+    sn.mouse_live = 1;
+    sn.mouse_sight = 1;
+    sn.mouse_sens = 16;
+    sn.raw_dx = 40;
+    sn.raw_dy = -30;
+    imap_legacy_apply(&b, &st, &sn);
+    CHECK(b.sight_x > 25 && b.sight_y < -25, "W396: Maus -> Sicht vor dem Zentrieren: %d,%d", b.sight_x, b.sight_y);
+    st.m_ax = 0x20;
+    st.m_fx = 0.5f;
+    imap_mouse_center(&st);
+    CHECK(st.m_sx == 0 && st.m_sy == 0 && st.m_ax == 0x7F && st.m_ay == 0x7F && st.m_fx == 0.0f && st.m_fy == 0.0f,
+          "W396: Mitte: s %d,%d a %d,%d", st.m_sx, st.m_sy, st.m_ax, st.m_ay);
+    sn.raw_dx = sn.raw_dy = 0;
+    imap_legacy_apply(&b, &st, &sn);
+    CHECK(b.sight_x == 0 && b.sight_y == 0, "W396: Sicht nach dem Zentrieren in Ruhe: %d,%d", b.sight_x, b.sight_y);
+}
+
 int main(int argc, char **argv)
 {
     imap_profile_t kb_file, kb_in, xbox_file, xbox_in;
@@ -3899,6 +4319,12 @@ int main(int argc, char **argv)
     run_joyhotplug_cases(); /* Teil 22: W305 */
     run_replayexit_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 23: W299 */
     run_joycalib_cases(); /* Teil 24: W312 */
+    run_w365_combo_cases(); /* Teil 25: W365 */
+    run_nethud_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 26: W374 */
+    run_slide_assist_cases(rc_kb == 0 ? &kb_file : &kb_in); /* Teil 27: W380 */
+    run_w394_preview_cases(); /* Teil 28: W394 */
+    run_w396_center_cases(); /* Teil 29: W396 */
+    run_w403_eject_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 30: W403 */
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;

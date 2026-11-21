@@ -22,6 +22,7 @@ typedef struct {
     int loc_net_port;     /* W286: Portbasis (Standard 1000 = Original: TCP 1000, UDP 1201/1202, VDP 1203 -> Basis+0/+201/+202/+203) */
     char loc_net_peers[512]; /* W286: Mitspieler "ip[:basis],..." ("auto" = 127.0.0.2-127.0.0.9 ohne sich selbst); nur Loopback/privat */
     int loc_net_rtt;      /* W286: gemeldete QoS-Rundlaufzeit in ms (XNetQosLookup, Standard 10) */
+    int gpu_pref; /* W370: 0 = Standardadapter (wie bisher), 1 = leistungsstaerkster Grafikchip (DXGI 1.6, Laptops mit zwei GPUs) */
     int loc_net_leave_reset; /* W350: 1 = Stromende (recv 0) eines Mitspielers meldet das Netz-HLE dem Spiel als WSAECONNRESET (Abgang wie XNet, Platz frei; Standard), 0 = recv 0 durchreichen (Geisterplatz) */
     int loc_net_nodelay;  /* W322: 1 = TCP_NODELAY auf den LoC-Spielverbindungen (kein Nagle-Stau ueber Strecken mit Laufzeit; Standard), 0 = Host-Standard */
     char loc_netsim[256]; /* W322 DIAG/TEST: Verzoegerungsstufe im Netz-HLE, z. B. "dsl", "eu-jp,nagle:0", "rtt:300,jitter:20" (leer = aus, Standard) */
@@ -30,10 +31,13 @@ typedef struct {
     char loc_transport_peers[256]; /* W324 TEST: feste Mitspieler "ip:port,..." ohne Treffpunkt (nur Loopback/privat) */
     int loc_transport_proxy;  /* W324: Portbasis der lokalen Stellvertreter der Mitspieler (Standard 21000) */
     int loc_transport_red;    /* W324: Redundanz N (0 = adaptiv 2..8, Standard) */
+    char loc_test_netcut[260]; /* W366 TEST: Marker-Datei - solange sie existiert, verwirft der Transport alle UDP-Pakete */
     int loc_transport_gap;    /* W324: Abstand der Kopien in ms (Standard 15) */
     int loc_transport_hold;   /* W324: Jitter-Puffer, Mindest-Haltezeit in ms (Standard 0) */
     int loc_transport_qos;    /* W324: Reserve fuer die gemeldete QoS-RTT in ms (Standard 100) */
     int loc_transport_nodirect; /* W324 TEST: 1 = kein direkter Weg (Relay erzwingen) */
+    int loc_route;              /* W395: 1 = Weg je Mitspieler selbst waehlen/wechseln (direkt, alle Relays), 0 = Treffpunkt folgen */
+    char loc_route_sim[256];    /* W395 TEST: je Weg Verzoegerung/Ausfall (loctun_cfg.route_sim), leer = aus */
     int guest_wx;       /* W339 SEC-A3: W^X fuer das Gastabbild: -1 automatisch (LoC 1, SB 0), 0 aus, 1 strikt, 2 Diagnose */
     int loc_crash_test; /* W339 TEST: N > 0 = N s nach Beginn der Netzsitzung Ausnahme im Gastkontext (Absturz = Ende pruefen); Modus loc_crash_test_mode */
     int loc_crash_test_mode; /* W339 TEST: 0 = Schreibfehler in privatem Code, 1 = Sprung in eine Gast-Datenseite (W^X) */
@@ -42,12 +46,13 @@ typedef struct {
     char loc_lobby_pilot[17]; /* W324: Pilotname beim Treffpunkt (Standard "Pilot") */
     char loc_lobby_role[8];   /* W324: "auto" (beitreten, sonst anlegen), "host", "join" */
     char loc_lobby_code[16];  /* W334: Raumcode zum Beitreten (leer = eigene Lobby mit Raumcode anlegen) */
+    char loc_lobby_vis[8];    /* W373: "public" = oeffentliche Lobbys (Search Match zeigt alle offenen Spiele); Code geht vor */
     char loc_lobby_spki[65];  /* W334: SPKI-Pin (hex64) eines anderen Treffpunkts als relay.steelbound.dev */
     char loc_relays[256];     /* W324: zusaetzliche Relays "name=host:port,..." (der Treffpunkt nennt seine selbst) */
     int loc_net_diag;     /* W286 DIAG: 1 = alle 10 s Spiel-Threads abtasten (EIP + LoC-Ruecksprungadressen), Standard 0 */
     int loc_sync;         /* W297 DIAG: 1 = Lockstep-Zustandshash je 0x34-Rahmen loggen (LOCSYNC, nur LoC + Netz), Standard 0 */
     char loc_replay_tick[1024]; /* W297 TEST: Tastenfolge "rahmen:vk,len;..." an Lockstep-Rahmen gekoppelt (braucht loc_sync=1), leer = aus */
-    char loc_steps[1024]; /* W297 TEST: zustandsgesteuerte Testtasten "acc>=1+400>98,8;rx:0xF+150>100,10;sync>=60>32,8;f+50>..." (braucht loc_sync=1) */
+    char loc_steps[4096]; /* W375: 2048 -> 4096 (drei Runden); W366: 1024 -> 2048 (zweite Runde); W297 TEST: zustandsgesteuerte Testtasten "acc>=1+400>98,8;rx:0xF+150>100,10;sync>=60>32,8;f+50>..." (braucht loc_sync=1) */
     int loc_sync_every;   /* W297: LOCSYNC-Logzeile alle n Rahmen (Standard 150) */
     int loc_pace_diag;    /* W320 DIAG: 1 = Missionstakt FUN_00033050 messen (LOCPACE alle 10 s), Standard 0 */
     int loc_direct_present; /* W320 LOC-PERF: 1 = LoC-Profil praesentiert direkt (interp_fps=0, keine Wiederhol-Presents), Standard 1 */
@@ -62,14 +67,59 @@ typedef struct {
     int loc_rb_spike;     /* W325 DIAG: Rollback-Machbarkeit messen (1 = Zustand je Tick, 2 = Determinismus-Zyklen), Standard 0 */
     char loc_rb_opts[128]; /* W325 DIAG: Optionen zu loc_rb_spike, z. B. "k=1,2,4,8;render=0;warm=300;max=0;census=1" */
     int loc_rb;           /* W330 LOC-ROLLBACK-R1: 1 = Zustandsring je Tick (inkrementell, Ruhe aller Threads), nur LoC-Profil, Standard 0 */
+    int loc_menu_hz; /* W377 LOC-MENU-FPS: LoC-Menues (Lockstep aus, keine Zwischenbilder) mit der Bildrate (interp_fps, gedeckelt durch fps_limit) zeigen: Takt-Thread wiederholt das letzte Spielbild, phasenrichtig zum Spiel-Present, nur bei freier GPU; 1 = an (Standard), 0 = alt (nur Spiel-Presents) */
+    int loc_menu_diag; /* DIAG(W377): 1 = Zeile LOCMENU alle 300 Spiel-Presents in LoC-Menues (Anteile in sb_tex_get, Wiederholbilder, ausgelassene) */
+    int gpu_burn_menu; /* DIAG(W377): 1 = gpu_burn auch vor dem Present des Spiels (Menues/Ladebilder; langsame GPU nachbilden) */
+    int loc_vq_cache; /* PERF(W377): Texturauffrischung (Adressabbildung, Inhalts-Hash): VirtualQuery-Ergebnisse festgeschriebener Regionen je Thread innerhalb desselben Spielbilds wiederverwenden (Adresse in bekannter Region = gleiches Ergebnis); 1 = an (Standard, nur LoC), 0 = alt, 2 = DIAG zusaetzlich direkt abfragen und Abweichungen zaehlen */
+    int loc_text_cache; /* PERF(W377): LoC-Textebene (XFONT, CPU-geschrieben): Neu-Upload nur bei geaendertem Inhalt (voller Hash) und in die vorhandene Textur (UpdateSubresource) statt neuer Textur; 1 = an (Standard), 0 = alt */
+    int loc_rb_fastq; /* W371 LOC-PERF: Ring-Neuaufbau: Belegungsbasis aus dem Regionen-Zwischenspeicher (1, Standard), 0 = VirtualQuery je Eintrag wie bisher, 2 = DIAG beide vergleichen */
     int loc_rb_input;     /* W338 LOC-ROLLBACK-R2: 1 = eigene Eingabeschicht (Verzoegerung, Vorhersage, Rollback, Hash-Pruefung) statt
                            * Spiel-Lockstep; braucht den Ring (schaltet loc_rb ein). W346: je Mission ausgehandelt - nur wenn alle
                            * Clients es koennen und wollen, sonst Original-Lockstep. Standard: intern 1, Community 0 */
+    int loc_ls_arbiter;   /* LOC-LOCKSTEP-ARBITER: Pufferregler im Original-Lockstep (Rueckfall ohne Rollback): 1 = neu (Vorlauf
+                           * nach RTT+Jitter und Stau, Hysterese, kein Rauswurf nach Warteschlange > 45; Standard), 0 = Original.
+                           * Es zaehlt der Schalter des Taktgebers (niedrigster aktiver Platz, meist der Host) */
+    int im_lock_split;    /* LOC-IM-LOCK: 1 = reine CPU-/Device-Arbeit ohne ctx_lock (Standard): Textur-Quellen der Tick-Liste vor dem
+                           * Swap einordnen, im Snap alle 64 Ops dem wartenden Present-Takt die Sperre geben (sb_ctx_yield) und Inhalts-Hashes der
+                           * Texturpruefung (Refresh, Lockwatch, Textebene) bei abgegebener Sperre wie der Upload (W138) -> der
+                           * Present-Takt wartet seltener; 0 = alt (alles unter der Sperre). Bild unveraendert */
+    int imlock_diag;      /* LOC-IM-LOCK DIAG: 1 = Zeile IMLOCK je 10 s (Wartezeit des Present-Takts auf ctx_lock, Halter je
+                           * Aufrufstelle mit CPU-Anteil, Teilzeiten langer sb_render_im_end) */
+    char loc_ls_opts[128]; /* LOC-LOCKSTEP-ARBITER DIAG: Reglerwerte "lmin=2,drop_rmin=2,..." (loc_lsarb.h), leer = Standard */
     int loc_rb_delay;     /* W338: Eingabeverzoegerung in Ticks mit loc_rb_input (1..8); W346: 0 = adaptiv nach Umlaufzeit (Standard) */
     int loc_fields;       /* W320 TEST: Felder je Missionsbild statt 3 (aendert Spielgeschwindigkeit, nur Messung), 0 = Original */
     int loc_pad_keys;     /* W286: 1 = Tastatur auch auf das virtuelle Menue-Gamepad (Ziffernblock 8/2/4/6, SPACE/0, Backspace, Enter; Standard), 0 = Pad nur anwesend (neutral) */
     int loc_mouse;        /* W341 LOC-MOUSE: 1 = Maus zielt in der LoC-Mission wie in SB (Fangen, sobald der eigene VT im Lockstep abgesetzt ist; Standard), 0 = altes Verhalten (Maus nie gefangen, nur Tasten) */
     int loc_mouse_test;   /* W341 TEST: 1 = (mit input_test_hook=1) synthetische Maus ueber den echten Fenster-/Rohdatenpfad auch bei Testfolge; Pseudo-Tasten 330-333 = Bewegung +x/-x/+y/-y, 334/335 = links/rechts, 336 = Bild */
+    int loc_local_aim;    /* W376 LOC-LOCAL-AIM: 1 = eigene, noch nicht simulierte Eingabe (Verzoegerung D) sofort auf Kamera/HUD beim Zeichnen anwenden (nur Netzspiel mit Rollback-Eingabeschicht, Spielzustand unberuehrt), 0 = aus (Standard) */
+    int loc_aim_diag;     /* W376 DIAG: Bit 1 Spielerblock je Tick, Bit 2 Kamera-Matrix je aufgezeichnetem Bild, Bit 4 .data-Dump (Slots loc_aim_diag_from..+n), Bit 8 Draw-Zensus, Bit 16 Logzeilen der Vorhersage */
+    int loc_rb_smooth;    /* W385 LOC-SMOOTH (Standard 1): 1 = Rollback-Korrekturen anderer VTs (und der eigenen Kamera, wenn sie selbst springt) im Zwischenbild-Pfad abklingend ueberblenden (nur Anzeige, Simulation/Hash unberuehrt), 0 = sofort springen */
+    int loc_rb_smooth_ms; /* W385: Dauer des Abklingens in ms (Standard 150, 50..500; je 50 ms eine Liste) */
+    int loc_rb_smooth_r;  /* W385: Radius Draw -> VT in Spieleinheiten (Standard siehe hcfg.c) */
+    int loc_rb_smooth_max; /* W385: groessere Spruenge (Spieleinheiten) springen sofort (Neustart, Teleport) */
+    int loc_rb_smooth_diag; /* W385 DIAG: Bit 1 Zeile je Rollback (Lagen-Spruenge, nur mit Testfolge), Bit 2 Render-Zensus der verschobenen Draws */
+    int loc_smooth_opp;     /* W387 LOC-SMOOTH-OPP (Standard 1): andere VTs leicht in der Vergangenheit zeigen (nur Anzeige): 0 aus, 1 auto (0..loc_smooth_opp_max Ticks nach sichtbaren Korrekturen), 2 fest 1 Tick */
+    int loc_smooth_opp_max; /* W387: Obergrenze auto in Ticks (Standard 2, 1..2) */
+    int loc_smooth_opp_vis; /* W387: Sprung ab dem eine Korrektur sichtbar zaehlt (Spieleinheiten ~ mm bei 10 m Abstand, weiter weg proportional; Standard 20) */
+    int loc_own_predict;    /* W390 LOC-OWN-PREDICT: eigene VT-Lage per spekulativem Vorlauf D+1 Ticks voraus zeigen (nur Anzeige, Simulation unveraendert): 0 aus, 1 an (Standard) */
+    int loc_own_predict_ticks;  /* W390 TEST: Vorlauf-Ticks fest (0 = D + 1) */
+    int loc_own_predict_max_ms; /* W390: Kostengrenze je Vorlauf (p95, ms; Standard 5) - darueber 30 s Pause, nach 3 Mal aus fuer die Mission */
+    int loc_own_predict_prep;   /* W390 TEST: Render-Vorbereitung im Vorlauf ausfuehren (Standard 0: ausgelassen, ohne Belang fuer die Lage) */
+    int loc_own_predict_diag;   /* W390 DIAG: Bit 1 Schatten-Pruefung nach jedem 50. Zuruecksetzen, Bit 2 Lagen-Datei je Tick (nur mit Testfolge), Bit 4 Zeile je Korrektur */
+    int loc_pd_spec;        /* W393 LOC-PACING: 1 = Present-Takt laeuft waehrend des spekulativen Vorlaufs weiter (nie warten, Standard), 0 = alt (W390: Ruhe bis 4 ms abwarten, sonst Bild auslassen) */
+    int interp_pace_clock;  /* W393: stetige Bilduhr - Latenz L nur weich nachgefuehrt statt Spruengen (1 = LoC, Standard; 2 = auch SB; 0 = alt) */
+    int pace_vsync;         /* W393: mit present_interval=1 Zwischenbild-Takt an den VBlank des Monitors koppeln (1 = LoC, Standard; 2 = auch SB; 3 = LoC auch mit VSync aus im Fenster; 0 = nur Timer) */
+    int pace_diag;          /* W393 DIAG frame_pace_diag (Schluessel; nicht verwechseln mit loc_pace_diag): 1 = Zeile PACE je 10 s (Bildabstand p50/p99, ausserhalb +-1 ms, Auslassungen, doppelte Phase, Bilduhr) */
+    int interp_pace_up;     /* W393 TEST: Bilduhr - hoechste Verlangsamung in Promille, wenn L steigt (Standard 200) */
+    int interp_pace_hold;   /* W393 TEST: 1 = elastisches Halten (Bilduhr dehnt sich beim Halten; Messung: mehr gehaltene Bilder, Standard 0) */
+    int interp_pace_dn;     /* W393 TEST: hoechste Beschleunigung in Promille, wenn L faellt (Standard 20) */
+    int loc_hud_predict;    /* W394 LOC-HUD-VIEW: HUD-Marken mit Weltbezug (Zielmarken, Lock-On-Rahmen, Kompass, Radar) zur vorgezeichneten eigenen Kamera zeichnen (nur Anzeige): 0 aus, 1 an (Standard) */
+    int loc_view_perframe;  /* W394: Sicht/Fadenkreuz je Bild aus Maus bzw. Hebel vorzeichnen (nur Anzeige, Simulation tastet weiter je Tick ab): 0 aus, 1 an */
+    int loc_hud_diag;       /* W394 DIAG: Bit 1 HUD-Zensus mit Gegner im Bild (nur mit Testfolge), Bit 2 Zeilen LOCHUD/LOCVPF, Bit 4 Bild-Datei je Wiedergabe (nur mit Testfolge) */
+    int loc_vpf_test;       /* W394 TEST: Pseudo-Taste 337 -> Mausschritte (Counts je 5 ms) ab zufaelliger Tickphase (nur input_test_hook + loc_mouse_test + Testfolge) */
+    int loc_vpf_test_alt;   /* W394 TEST: 1 = loc_view_perframe je Gruppe von 4 Testschritten abwechselnd aus/an (Vergleich im selben Lauf) */
+    int loc_dodge_diag;   /* W380 DIAG: Seitenschritt-Zaehler LOCDODGE (Bit 1 Zaehler, Bit 2 je Versuch), nur mit Testfolge */
+    int loc_aim_diag_from, loc_aim_diag_n; /* W376 DIAG: Slot-Fenster fuer Bit 4/8 */
     int iso_selftest;     /* W150 DIAG: 1 = D:-Selbsttest (Lesen, Schreibschutz) vor dem Spielstart */
     int save_check;       /* W187 KIA-LOAD: Spielstaende (T:) beim Start pruefen: 1 = reparieren (mit Sicherung), 2 = nur melden, 0 = aus */
     int save_lock;        /* W190 SAVE-LOCK: 1 = Spielstaende schuetzen (T:/U: in eine Wegwerf-Arbeitskopie <hdd>\_savelock, beim naechsten Start verworfen), 0 = Original (Standard) */
@@ -164,6 +214,7 @@ typedef struct {
     int tex_cache_lru;     /* W63: 1 = Cache voll -> laengst unbenutzten Eintrag freigeben, 0 = alt (NULL) */
     int tex_hdr_check;     /* W63: 1 = Cache-Treffer prueft Texturkopf (Data/Format) auf Neubelegung, 0 = alt */
     int rt_init_clear;     /* FIX(HD-PACK-ART,W262): 1 = neu angelegte Spiel-RTs (rtt_ensure) einmal auf Null-Bytes setzen (Farbe 0, Tiefe 0, Stencil 0) statt undefiniertem VRAM-Inhalt, 0 = alt, 2 = DIAG: Farbe magenta (zeigt nie beschriebene RT-Bereiche) */
+    int tex_fmt_first; /* FIX(LOC-GH-DATA,W383): 1 = Upload, der ohnehin am Format scheitert, belegt keinen Platz in der Drossel (12/Bild), 0 = alt */
     int tex_throttle_retry; /* FIX(TEX-WHITE-UI,W307): 1 = an der Upload-Drossel gescheiterter Erst-Upload beim naechsten Get erneut (statt erst beim 16.), 0 = alt */
     int tex_lw_drop_test;   /* TEST(HUDFREEZE,W345): >0 = in der Mission alle N Bilder die Anzeige-Texturen aus der Lockwatch-Beobachtung nehmen (Verlust nachstellen), 0 = aus */
     int tex_hud_guard;      /* FIX(HUDFREEZE,W345): 1 = Cockpit-Anzeige-Texturen (CPU-gerastert, dauerhaft gesperrt) je Bild in der Lockwatch-Beobachtung halten, 0 = alt */
@@ -233,6 +284,7 @@ typedef struct {
     int key_toggles;      /* W79: 1 = Tasten 1-5 rasten die 5 Kippschalter (bi34-38) ein/aus (nur ohne Replay), 0 = alt */
     int mouse_mode;       /* W87: 1 = absolut (Fadenkreuz folgt der Maus ohne Spielglaettung, Vorsteuerung auf [0x356D08]/[0x3521BC]), 0 = relativ (alt) */
     int startseq_shots;   /* W87 DIAG(STARTSEQ): 1 = Client-Bild bei jedem Startsequenz-Wechsel + alle 300 Frames bis VT online (braucht input_diag=1), 0 = aus */
+    int slide_assist;     /* W380 LOC-DODGE: Ausweich-Hilfe - digitale Slide-Step-Belegung haelt Pedal links + Drehrichtung des Drucks so viele Polls (0 = aus) */
     int toggle_assist;    /* W87: 1 = Druck 1-5 in der Schalterphase auf einen schon eingerasteten, vom Spiel nicht erkannten Kippschalter erzeugt die Flanke neu (bleibt AN), nur mit key_toggles=1; 0 = reine Rast (W79) */
     int key_tap_queue;    /* W92: 1 = schnelle Tipper je Taste anstauen (mind. 1 Poll an + 1 Poll Luecke, Deckel 8; nur Nachrichtenpfad input_source=1), 0 = alt (Tipper zwischen Polls verschmelzen) */
     int aim_diag;         /* W87 DIAG(AIMSTEP): 1 = Zielkette pro Frame loggen (nach Hebel-/Mausaenderung, Mission), 0 = aus */
@@ -316,6 +368,9 @@ typedef struct {
     int audio_filter;      /* W102: 1 = Voice-Filter DLS2 (SetFilter Mode 1: resonanter 2-Pol-Tiefpass, Chamberlin-SVF wie MCPX) im Mixer, 0 = aus (alt: SetFilter ignoriert) */
     int audio_level_diag;  /* W102: 1 = DIAG(LVL) Pegel je Stimme und Sekunde -> <out>/voice_levels.csv + DIAG(LVLT)-Rangliste (Laufzeit x Pegel) alle 30 s, 0 = aus */
     int loc_audio;         /* W298 LOC-AUDIO: 1 = XACT-HLE fuer Line of Contact (nur LoC-Profil, mit audio=1; Standard), 2 = plus Cue-Protokoll LOCAUDIO cue, 0 = stumm wie W275 */
+    int loc_wma;           /* W367 LOC-WMA: 1 = WMA-Soundtrack (IXACTWmaPlayList) ueber Windows Media Foundation im eigenen Thread (Standard; nur mit loc_audio), 0 = Playlist-Stub stumm wie W298 */
+    int loc_wma_demo;      /* W367 LOC-WMA Test/Experimental: 1 = leeren Einsatz-Soundtrack mit den beiden Spiel-Liedern vorbelegen (wie im Optionsmenue eingestellt, nur Spielspeicher dieses Rechners), 0 = aus (Standard, Original) */
+    int loc_wma_fail_test; /* W367 DIAG: 1 = Lieddateien gelten als nicht lesbar (Fehlerfall-Beleg: stumm, Logzeile, Cue endet), 0 = aus */
     int volume_master;     /* W303 AUDIO-VOLUME: Gesamtlautstaerke 0..100 % (100 = Original, bitgleich; linear) */
     int volume_music;      /* W303: Musik (Streams mehrkanalig, LoC Soundtrack/BGM) 0..100 */
     int volume_sfx;        /* W303: Effekte (Puffer, Menuetoene, LoC Ambience/Motoren/Rest) 0..100 */
@@ -390,8 +445,16 @@ typedef struct {
     int loc_psdump; /* W285 DIAG(LOC-RENDER): 1 = je LoC-Pixelshader Def-Woerter + erzeugtes HLSL nach <out>/locps_<handle>.txt (nur LoC-Profil) */
     int loc_shading; /* W285 LOC-RENDER: 1 = Shading-Pfad (Combiner-Emulation) im LoC-Profil ueberall wie shade_scope=1 (Standard; sonst nie, weil die Missions-Erkennung SB-Adressen liest), 0 = alt */
     int loc_rtuv; /* W285 LOC-RENDER: 1 = Shading-Pfad skaliert RT-Texturen nur bei Texel-UV (> 1.5) auf 1/Groesse, sonst normiert (Standard); 0 = immer 1/Groesse wie SB; nur LoC-Profil */
+    unsigned loc_texdump_xp; /* DIAG(W368 LOC-COCKPIT): Lineartextur mit diesem Kopf (xptr) ab Bild loc_texdump_from beim naechsten Upload als RGB+Alpha-JPG nach <out>/shots (bis 4x), 0 = aus */
+    int loc_texdump_from; /* DIAG(W368): erstes Bild fuer loc_texdump_xp */
+    int loc_dbg_skip; /* DIAG(W368): 1 = Draws mit Stufe-0-Textur loc_dbg_xp auslassen */
+    unsigned loc_dbg_xp; /* DIAG(W368): Shading-Pfad-Ausgabe T0/V0/C0/R0 (je 100 Bilder wechselnd) fuer Draws mit dieser Stufe-0-Textur, 0 = aus; nur LoC */
     int loc_lookstat; /* DIAG(W358 LOC-LOOK): alle N Bilder Zustandszaehler je Draw (LOOKSTAT-Zeilen, max. 8 Bilder), 0 = aus; nur LoC */
-    int loc_texfilt; /* W358 LOC-LOOK: 1 = Shading-Pfad-Sampler mit LOD-Bias des Spiels (aufloesungskompensiert), MAXMIPLEVEL, MIN/MAG, Mips linear; 3 = volle Emulation inkl. MIP POINT/NONE (DIAG), 2 = wie 3 mit Roh-Bias (DIAG), 0 = alt (immer trilinear, kein Bias); nur LoC */
+    int loc_texfilt; /* W358 LOC-LOOK: 1 = Shading-Pfad-Sampler mit LOD-Bias des Spiels (aufloesungskompensiert), MAXMIPLEVEL, MIN/MAG, Mips linear; 3 = volle Emulation inkl. MIP POINT/NONE (Standard seit W363), 2 = wie 3 mit Roh-Bias (DIAG), 0 = alt (immer trilinear, kein Bias); nur LoC */
+    int loc_xact_rpc; /* W363 LOC-ORIGINAL: 1 = Laufzeit-Parameter (IXACTEngine_SetParameterControl, z. B. Motordrehzahl RPM_VT01) mit den Kurven aus Bank.xsb wie die XACT-Bibliothek (Tonhoehe, Lautstaerke, Tiefpass); 0 = ignoriert (alt) */
+    int loc_lintexel; /* W368 LOC-COCKPIT: 1 = lineare Texturen auch bei vom Vertexprogramm gerechneter UV (tsrc < 0) mit Texel-Koordinaten (NV2A), Cockpit-Anzeigen; 0 = alt; nur LoC */
+    int loc_swznorm; /* W363 LOC-ORIGINAL: 1 = swizzled Texturen im Shading-Pfad immer normiert (NV2A: Texel-Koordinaten nur LIN_*), auch bei vortransformierten Draws; 0 = alt (Texel-Skala bei UV > 1,5); nur LoC */
+    int loc_texfilt_gate; /* DIAG(LOC-ORIGINAL,W363): loc_texfilt nur fuer Teilmengen (Bit0 nur RT-Ziel, Bit1 nur Backbuffer, Bit2 nur Stufe 0, Bit3 nur Stufe 1-3, Bit4 nur Texturen mit Mips, Bit5 nur ohne Mips, Bit6 nur MIP NONE, Bit7 nur MIP POINT/LINEAR); 0 = alle */
     int loc_vsod0; /* W358 LOC-LOOK: 1 = Shading-Pfad nimmt bei P2-Vertexprogrammen (kind 2) oD0/oD1 aus dem Programm (Vertex-Licht der LoC-Modelle), 0 = alt (Eingangsfarbe); nur LoC-Profil */
     int loc_glow; /* W285 LOC-RENDER: 1 = Glow-Draws mit Backbuffer-Textur ueber den Shading-Pfad (Original-Komposition), 0 = alter Pfad (nur Szene); nur LoC-Profil */
     int loc_census_draws; /* W285 DIAG(LOC-RENDER): ... und nur, wenn das Vorbild mindestens so viele Draws hatte (Standard 300 = 3D-Szene) */
@@ -471,6 +534,8 @@ typedef struct {
     int rt_scale_dyn_keep; /* PERF(GPU-COST2,W165): 1 = rt_scale_dyn wechselt ohne RT-Neuanlage (Saetze je Faktor, Hilfs-Thread, Hochschalten nur mit Prognose) */
     int warm_gpu_soft;  /* PERF(GPU-COST2,W165): Bits: 1 = Last erst nach warm_gpu_delay ms Ladephase, 2 = erste Last 1/8-Einheit, 4 = Last nach dem Wiederholbild (Standard 1) */
     int warm_gpu_delay; /* PERF(GPU-COST2,W165): Entprellung der Ladephase in ms (nur mit warm_gpu_soft) */
+    int shade_fast_first; /* PERF(LOC-PERF,W371): kalter Shader-Cache -> erst schnelle Uebersetzung (shade_fast_level), volle im Hilfs-Thread in den Cache; 1 = nur LoC (Standard), 2 = immer, 0 = aus */
+    int shade_fast_level; /* PERF(LOC-PERF,W371): 0 = SKIP_OPTIMIZATION (Standard), 1 = OPTIMIZATION_LEVEL0, 2 = LEVEL1 */
     int shade_par_compile; /* PERF(PERF-SPIKE,W318): zweite VS-Variante parallel uebersetzen (kalter Shader-Cache), 0 = nacheinander */
     int interp_bsets_imm; /* PERF(PERF-SPIKE,W318): Reserve-Saetze ohne Render-Thread (render_thread=0), 0 = wie interp_bsets */
     int interp_gpu_tight_imm; /* PERF(PERF-SPIKE,W318): interp_gpu_tight ohne Render-Thread, wenn interp_gpu_tight=0; 0 = aus */
@@ -600,6 +665,9 @@ typedef struct {
     int vis_ztest;     /* W304 FLARE-OCCL: 1 = Punkt-Draws im Sichtbarkeitstest (Sonne, Flares; P2-Pixel ins Welt-RT) mit dem Tiefentest des Spiels wie NV2A (Standard), 0 = alt (RHW ohne Tiefentest -> verdeckt zaehlt als sichtbar) */
     int p2_ztest;      /* W313 P2-ZTEST: 1 = P2-Draws (VS-Programm Clip/Tail, Bildschirm-Pixel rhw=1) in Spiel-RTs mit Tiefenflaeche bekommen den Tiefenzustand des Spiels (ZENABLE-Spiegel, ZFUNC, Tiefenmaske) wie die NV2A; 0 = alt (RHW ohne Tiefentest) */
     int line_scale;    /* FIX(ISSUE-EMP,W352): 1 = Linien-Primitive in Spiel-RTs mit Render-Skalierung (rt_scale/auto >= 1,5) per Geometry Shader 1 Xbox-Pixel breit wie die NV2A (Funken-/Fallen-/EMP-Linien, Monitor-Stoerzeilen); 0 = alt (1 physisches Pixel, bei Faktor N nur ~1/N Deckung) */
+    int loc_line_bb;   /* FIX(W381,#59): 1 = LoC-Linien im Backbuffer (Welt-Effekte: Funken/Explosionen) bei Bildhoehe >= 1,5 x Framebuffer per Band-GS 1 Xbox-Pixel breit wie die NV2A; 0 = alt (1 physisches Pixel). Nur LoC-Profil */
+    int specmat_diag;  /* DIAG(ISSUE36): 1 = C0-Wiederherstellung nach Sonder-Material-Draws (Aufrufer 0x241C7) je Bild zaehlen (SPECMAT-Zeilen), Belegbild beim ersten Treffer */
+    int proj_diag;     /* DIAG(ISSUE49): 1 = Geschoss-Listen des Spiels ([0x6E4480]/[0x6E4484], 0xE0 je Eintrag) je Bild: Geburt/Ende einzeln (PROJ new/end), aktive Eintraege alle 30 Bilder (PROJ act) */
     int line_diag;     /* DIAG(ISSUE-EMP,W352): N = Linien-/Punkt-Draws (Begin LINELIST/LOOP/STRIP/POINTLIST) in der Kampagnen-Mission: erste N einzeln (LINED d), Summen je 300 Bilder (LINED sum) mit Laenge und Pixeln nach Tiefentest */
     int p2z_diag;      /* DIAG(P2-ZTEST,W313): 1 = Zensus der Draws in Spiel-RTs je Zustand (P2Z-Zeilen: VS/PS/Textur/Ziel/zen/zf/dm/Blend, z-Bereich, Pixel nach Tiefentest) */
     int vis_diag;      /* DIAG(SHADE-M2,W117): 1 = VISQ-Zeilen (Ergebnis je Index, erste 64 + je 2000 Abfragen) */
@@ -678,11 +746,23 @@ typedef struct {
     int perf_hud;               /* 1 = Leistungs-Overlay sichtbar (Taste schaltet und speichert in user.cfg), 0 = aus (Standard) */
     int perf_hud_pos;           /* Ecke: 0 = oben rechts, 1 = oben links, 2 = unten links, 3 = unten rechts */
     char perf_hud_key[16];      /* Taste: F1..F12 (ohne F10), VK<hex>; 0/aus = keine Taste. Standard F2 */
+    /* W374 LOC-NET-OVERLAY (sb_nethud.c); Taste = Profil-Aktion net_hud (Standard F3) */
+    int net_hud;                /* 1 = Netz-Overlay sichtbar (Taste schaltet und speichert in user.cfg), 0 = aus (Standard) */
+    int net_hud_pos;            /* Ecke wie perf_hud_pos; Standard 1 = oben links. Gleiche Ecke wie F2: darunter/darueber */
     int watermark;              /* W219 WATERMARK: 1 = Alpha-Wasserzeichen (Version) unten rechts, 0 = aus (Code-/Test-Standard) */
     int perf_log;               /* DIAG(PERF-HUD,W122): alle N s Zeile PERFHUD + PERFSPIKE-Zeilen (0 = aus) */
     int perf_spike_ms;          /* DIAG(PERF-HUD,W122): PERFSPIKE ab dieser Bildzeit (0 = 2x Zielbildzeit) */
     int perf_prof;              /* DIAG(PERF-HUD,W122): 1 = Stichproben-Profiler des Spiel-Threads (Zeile PERFPROF, mit perf_log) */
     int perf_prof_heavy;
+    int perf_prof_follow;       /* DIAG(W391): 1 = Profiler folgt dem praesentierenden Thread (LoC-Mission: Render-Thread) */
+    int loc_thr_diag;           /* DIAG(W391): 1 = PERFTHR-Liste bei neuen Xbox-Threads neu (PERFTHR-XB), CPU je Tick (LOCTHR, LOCTHR-LANG) */
+    int loc_xb_prio;            /* PERF(W391): LoC-Xbox-Threads ueber normal (1 = ABOVE_NORMAL ab 4 Kernen, 2 = HIGHEST, 3 = TEST ohne Kern-Schutz, 0 = normal) */
+    int loc_yield_sleep;        /* PERF(W391): Xbox-Warteschleifen (NtYieldExecution) nach 1 ms in 0,25-ms-Schritten schlafen (nur LoC) */
+    int test_render_slow_ms;
+    int loc_shot_tick_every;    /* TEST(W391): LoC-Mission je N Spielticks ein Bild shots/loct_<Tick>.jpg (0 = aus) */    /* TEST(W391): Render-Thread des Spiels rechnet je Spielbild N ms zusaetzlich (nur LoC, 0 = aus) */
+    int perf_prof_stack;        /* DIAG(W391): 1 = PERFPROF-STK (Aufrufketten der Systemmodul-Proben in schweren Ticks, perf_prof=2) */
+    int loc_delay_diag;         /* DIAG(W391): 1 = Zeile LOCDELAY (KeDelayExecutionThread gewollt/ist je Aufrufer) */
+    unsigned test_cpu_mask;     /* TEST(W391): Prozess-Affinitaet (Bitmaske, 0 = aus) - "schwacher PC" mit wenigen Kernen */
     int swap_match_unlock;      /* PERF(PERF-TICK,W168): 1 = Interp-Zuordnung am Swap ohne ctx_lock (Present-Takt wartet nicht) */
     int krnl_reg_cache;         /* PERF(PERF-M2,W174): 1 = Ergebnis-Cache (je Thread) fuer krnl_phys_to_virt/krnl_memreg_find (linearer Register-Scan je Textur-/RT-Zugriff); gleiche Antworten */
     int ip_match_compact;       /* PERF(PERF-M2,W174): 1 = Interp-Zuordnung (ip_inst_best) liest Signatur/Hash/Bezugspunkte aus einem dicht gepackten Feld; gleiche Zuordnung */

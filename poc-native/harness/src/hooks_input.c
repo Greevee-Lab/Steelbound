@@ -6,11 +6,13 @@
 #include "input_map.h" /* W76 CTRL-MAP: Legacy-Abbildung + Profile */
 #include "input_mouse.h" /* W79 INPUT-REAL: Maus fangen + Fokus-Gatter */
 #include "sb_overlay.h" /* W118 REM-OVERLAY: Eingabesperre */
+#include "sb_nethud.h" /* W374 LOC-NET-OVERLAY: Belegung net_hud */
 #include "sb_origview.h" /* W283 ORIG-KEY-BIND: Vergleichstaste aus dem Profil */
 #include "vr.h" /* W159: sb_vr_recenter("Belegung") per Aktions-Bindung */
 #include "sb_rauto.h" /* W254 REPLAY-LAUNCHER */
 #include "sb_mauto.h" /* W272 ALPHA-TEST */
 #include "loc_pad.h" /* W297: Pfeile in LoC-Menues ans Pad */
+#include "loc_vpf.h" /* W394 LOC-VIEW-PERFRAME */
 #include "sb_profile.h" /* W297: g_sba_loc */
 #include "sb_cchain.h" /* W303 CAMPAIGN-CHAIN */
 
@@ -840,6 +842,7 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
         snap.replay_active = input_replay_active();
         snap.frame = g_frames;
         snap.mouse_aim = g_cfg.mouse_aim;
+        snap.slide_assist = g_cfg.slide_assist; /* W380 LOC-DODGE */
         snap.mouse_sight = g_cfg.mouse_sight;
         snap.mouse_sens = g_cfg.mouse_sens;
         snap.mouse_invert_x = g_cfg.mouse_invert_x;
@@ -901,6 +904,8 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
             int w341_live = g_sba_loc && snap.replay_active && g_cfg.loc_mouse_test &&
                             g_cfg.input_test_hook;
             if (g_sba_loc) loc_mouse_test_drive();
+            if (g_sba_loc) loc_vpf_test_drive(); /* W394 TEST */
+            if (g_sba_loc) loc_vpf_begin(); /* W394: Poll beginnt (Anzeige liest den Akku nur, wenn kein Poll laeuft) */
             snap.mouse_live = w341_live;
             if (!snap.replay_active || w341_live) {
                 snap.mouse_raw = imouse_poll(&snap.raw_dx, &snap.raw_dy,
@@ -915,6 +920,7 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                  * Maustasten (Fokus, F10/Maus frei, Overlay, mouse_buttons). */
                 snap.wheel_mask = imouse_wheel_mask(
                     g_frames, snap.real_blocked || !snap.mouse_buttons);
+                snap.wheel_step = imouse_wheel_steps(); /* W384 (GH #63) */
             } else if (g_cfg.input_source == 1) {
                 /* Fenster-Eingabe auch bei Replay installieren (Nachrichten
                  * kommen an, Abbildung ignoriert sie - Gegenprobe/Hinweis). */
@@ -945,10 +951,8 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
             static int lm_prev;
             int lm = g_cfg.loc_mouse && loc_mouse_mission();
             if (lm != lm_prev) {
-                g_leg.m_ax = g_leg.m_ay = 0x7F;
-                g_leg.m_fx = g_leg.m_fy = 0.0f;
-                g_prof_st.m_ax = g_prof_st.m_ay = 0x7F;
-                g_prof_st.m_fx = g_prof_st.m_fy = 0.0f;
+                imap_mouse_center(&g_leg); /* W396: inkl. Sicht-Akku (mouse_sight=1) */
+                imap_mouse_center(&g_prof_st);
                 lm_prev = lm;
             }
         }
@@ -989,6 +993,12 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                     sb_ovl_set_feedback_binding(0, pvk, pn);
                     pn = imap_bind_keys(&g_prof.feedback_clip, pvk, 4, &pm);
                     sb_ovl_set_feedback_binding(1, pvk, pn);
+                }
+                if (g_prof_load_rc >= 0) {
+                    /* W374 LOC-NET-OVERLAY: Tasten der Aktion "net_hud" (Standard F3; leere Zeile = aus) */
+                    int nvk[4], nmod[4], nn;
+                    nn = imap_bind_key_combos(&g_prof.net_hud, nvk, nmod, 4);
+                    sb_nhud_set_binding(nvk, nmod, nn);
                 }
                 if (g_prof_load_rc >= 0) {
                     /* W283 ORIG-KEY-BIND: Aktion "orig_view" (Standard
@@ -1134,6 +1144,8 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                 if (g_cfg.overlay && imap_action_photo(&g_prof, &g_prof_st, &snap)) {
                     sb_ovl_request_photo("Belegung");
                 }
+                /* W374 LOC-NET-OVERLAY: net_hud aus Pad/Controller (Flanke) */
+                if (imap_action_net_hud(&g_prof, &g_prof_st, &snap)) { sb_nhud_toggle(); }
                 /* W290 QUICK-SHOT: quick_shot aus Pad/Controller (Flanke) */
                 if (g_cfg.overlay && imap_action_quick_shot(&g_prof, &g_prof_st, &snap)) {
                     sb_ovl_request_qshot("Belegung");
@@ -1188,9 +1200,11 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                                 g_prof_load_rc >= 0) ? &g_prof_st : &g_leg;
             unsigned ffm = w271_ff_mask(as);
             if (ffm) w87_aim_abs(s, as, ffm);
+            if (g_sba_loc) loc_vpf_mapped(as, &snap, s, !(g_cfg.input_profile[0] && g_prof_load_rc >= 0)); /* W394 */
         }
     }
     sbc_merge(s); /* W75: USB/Fixture als Zweitquelle (sbc_usb=1) */
+    if (g_sba_loc) loc_vpf_end(s); /* W394: Poll fertig (Akku-Stand fuer die Anzeige veroeffentlicht) */
     if (g_sba_loc) loc_mouse_note(g_w341_dx, g_w341_dy, s->aiming_x, s->aiming_y, s->buttons[0]); /* W341: nur Zaehler */
     sb_rauto_apply(s); /* W254 REPLAY-LAUNCHER: Menue-Fuehrung (nur mit replay_autoplay) */
     sb_mauto_apply(s); /* W272 ALPHA-TEST: Menue-Fuehrung (nur mit mission_autostart) */

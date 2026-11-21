@@ -218,9 +218,60 @@ static u32 __stdcall loc_NtSetSystemTime(u32 nt, u32 old)
     return LOC_ST_SUCCESS;
 }
 
+/* PERF(W391) loc_yield_sleep=1: Die Xbox-Threads warten in Schleifen mit NtYieldExecution (Feld-Warten des Spiel-Threads,
+ * Leerlauf des Render-Threads). SwitchToThread kehrt sofort zurueck, wenn auf dem Kern niemand gleich oder hoeher
+ * priorisiert bereit ist -> der Xbox-Kern lief dauernd zu 100 %, und mit loc_xb_prio kaemen normal priorisierte Threads
+ * (Treiber, andere Programme) auf diesem Kern nie dran. Hier: Wer laenger als 1 ms nur abgibt (ohne Arbeit dazwischen),
+ * wartet in Schritten von 0,25 ms auf einem hochaufloesenden Zeitgeber (unabhaengig von timeBeginPeriod, das Windows 11
+ * fuer verborgene Fenster ignoriert). Das Spiel sieht dasselbe (Rueckkehr aus dem Abgeben), nur spaeter um <= 0,25 ms.
+ * Nur Laufzeitverhalten, kein Spielzustand. Zeile LOCYIELD alle 60 s (Zaehler). */
+static __declspec(thread) LONGLONG s_y_last, s_y_start;
+static __declspec(thread) HANDLE s_y_timer;
+static __declspec(thread) int s_y_tried;
+static volatile LONG s_y_sleeps, s_y_yields;
+static LONGLONG s_y_qpf;
 static u32 __stdcall loc_NtYieldExecution(void)
 {
+    LARGE_INTEGER q;
+    if (g_cfg.loc_yield_sleep <= 0) {
+        SwitchToThread();
+        return LOC_ST_SUCCESS;
+    }
+    if (!s_y_qpf) { LARGE_INTEGER f; QueryPerformanceFrequency(&f); s_y_qpf = f.QuadPart; }
+    QueryPerformanceCounter(&q);
+    if (!s_y_last || q.QuadPart - s_y_last > s_y_qpf / 5000) { s_y_start = q.QuadPart; } /* > 0,2 ms Arbeit seit dem letzten Abgeben */
+    if (q.QuadPart - s_y_start > s_y_qpf / 1000) { /* > 1 ms nur abgegeben */
+        if (!s_y_timer && !s_y_tried) {
+            s_y_tried = 1;
+            s_y_timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002u /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+        }
+        if (s_y_timer) {
+            LARGE_INTEGER due;
+            due.QuadPart = -2500; /* 0,25 ms */
+            if (SetWaitableTimer(s_y_timer, &due, 0, NULL, NULL, FALSE)) {
+                WaitForSingleObject(s_y_timer, 5);
+                InterlockedIncrement(&s_y_sleeps);
+                QueryPerformanceCounter(&q);
+                s_y_last = q.QuadPart;
+                return LOC_ST_SUCCESS;
+            }
+        }
+    }
     SwitchToThread();
+    InterlockedIncrement(&s_y_yields);
+    QueryPerformanceCounter(&q);
+    s_y_last = q.QuadPart;
+    {
+        static volatile LONG next_log;
+        DWORD now = GetTickCount();
+        if ((LONG)(now - (DWORD)next_log) >= 0) {
+            if (next_log) {
+                HLOG_I("LOCYIELD: 60s Abgeben=%ld Schlafen(0,25ms)=%ld (loc_yield_sleep)", InterlockedExchange(&s_y_yields, 0),
+                       InterlockedExchange(&s_y_sleeps, 0));
+            }
+            InterlockedExchange(&next_log, (LONG)(now + 60000u));
+        }
+    }
     return LOC_ST_SUCCESS;
 }
 

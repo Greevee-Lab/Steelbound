@@ -99,6 +99,7 @@ void replay_steps_tick(void);
 int input_replay_active(void);
 int key_down(int vk);
 void replay_inject(int vk, int len); /* W297: Test-Slot ab jetzt (LoC loc_replay_tick) */
+void replay_release_all(void);       /* W375: alle gerade gehaltenen Test-Slots loslassen (naechste Runde) */
 void aimat_apply(sbc_in_t *s);
 void drive_apply(sbc_in_t *s);
 

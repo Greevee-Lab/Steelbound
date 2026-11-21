@@ -35,3 +35,24 @@ static __inline unsigned rq_loc_mipfilter(unsigned game_mip, int mode)
     if (mode == 1) { return 2u; }
     return game_mip > 2u ? 2u : game_mip;
 }
+
+/* W363 LOC-ORIGINAL (loc_swznorm): Texel-Koordinaten (Skala 1/w, 1/h) adressiert die NV2A nur bei linearen
+ * Formaten (LIN_*); swizzled Texturen sind immer normiert, auch bei vortransformierten Draws. Alte Regel
+ * (SB, loc_swznorm=0): Texel-Skala auch fuer swizzled, wenn vortransformiert und UV > 1,5.
+ * Rueckgabe 1 = Texel-Skala anwenden. rtscale = RT-Regel (loc_rtuv), mfx_norm = SB-Monitor-Wash (W121). */
+static __inline int rq_loc_texel_scale(int loc, int swznorm, int isrt, int lin, int rhw, int rtscale, int mfx_norm, float tmax)
+{
+    int swz = loc && swznorm && !lin && !isrt;
+    return rtscale || (!mfx_norm && !swz && tmax > 1.5f && (lin || rhw));
+}
+
+/* W368 LOC-COCKPIT (loc_lintexel): Rechnet das Vertexprogramm oTk selbst (kein reines "mov oTk, vN",
+ * tsrc < 0), ist der UV-Bereich auf der CPU unbekannt (tmax = 0) und die Regel oben greift nie. Die NV2A
+ * adressiert lineare Formate aber immer mit Texel-Koordinaten. LoC zeichnet die Cockpit-Anzeigen
+ * (Waffen, Munition, Schalterlampen, Instrumentenfelder) aus dem CPU-gerasterten Linear-Atlas 512x256 mit
+ * einem solchen Programm (oT0 = Texel-UV); normiert gesampelt klemmte CLAMP alles auf das Eckentexel ->
+ * flache lila Flaechen. Rueckgabe 1 = Texel-Skala zusaetzlich anwenden. kind 1 (P1) normiert die CPU schon. */
+static __inline int rq_loc_lin_progscale(int loc, int lintexel, int isrt, int lin, int rhw, int kind, int prog_uv)
+{
+    return loc && lintexel && lin && !isrt && !rhw && kind != 1 && prog_uv;
+}

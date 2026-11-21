@@ -15,12 +15,16 @@ struct xbe_image; /* fwd */
 void *krnl_CreateThread(void *fn, void *param, unsigned long flags,
                         unsigned long *tid);
 int krnl_xb_thread_count(void);
+int krnl_xb_thread_created(void); /* W375: angelegte Xbox-Threads gesamt (monoton) */
 int krnl_xb_thread_get(int i, void **h, unsigned *routine);
 void *krnl_main_thread(void); /* W22: Main-Thread-Handle (fuer CPU-DIAG) */
 int krnl_seek_skip(unsigned xh, unsigned long long off); /* W22: Seek-Cache */
 void krnl_seek_note(unsigned xh, unsigned long long off);
 void krnl_seek_add(unsigned xh, unsigned long long n);
 void krnl_seek_invalidate(unsigned xh);
+/* W390 LOC-OWN-PREDICT: Dateiposition vor dem ersten Zugriff im spekulativen Vorlauf merken / danach alle zuruecksetzen. */
+void krnl_file_spec_touch(unsigned xh);
+int krnl_file_spec_restore(void);
 void krnl_seek_stats(long *n, long *skip); /* W32: Fenster-Zaehler */
 int krnl_seek_tids(unsigned long *tids, long *skips, int cap); /* W32 */
 void *krnl_file_host(unsigned xh);

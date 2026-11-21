@@ -40,6 +40,7 @@
 #include "render_vexp.h" /* W255 VIDEO-EXPORT */
 #include "sb_crash.h" /* W279 DIAG-CRASH */
 #include "guest_wx.h" /* W339 SEC-A3 */
+#include "loc_net.h" /* W366: loc_net_bye */
 
 static int g_run_seconds;
 static volatile LONG g_wd_waited; /* W186: Sekunden seit Watchdog-Start (Rest-Laufzeit) */
@@ -1492,6 +1493,7 @@ static DWORD WINAPI watchdog(LPVOID unused)
         }
         if (g_run_seconds > 0 && waited >= g_run_seconds) {
             HLOG_I("watchdog: --run-seconds erreicht, Exit(0)");
+            loc_net_bye(); /* W366: Mitspieler sehen den Abgang sofort */
             sbc_wire_log_summary("Ende"); /* W305: nur sbc_usb=1 */
             sb_th_log("Ende"); /* W315: Textur-Gesundheit ins Log */
             sb_rem_shutdown(); /* W103: index.json/VRAM-Zeile */
@@ -1653,6 +1655,37 @@ static void parse_cmdline(const char **cfg_path, const char **xbe_path)
     }
 }
 
+/* W384 (GH #52): game_image zeigt auf eine .xbe-Datei oder einen Ordner mit
+ * default.xbe (entpackte Disc) statt auf ein ISO -> 1, dir = Spielordner,
+ * xbe = Programmdatei. Sonst 0 (ISO/xiso/fehlt: alter Weg mit Meldung). */
+static int emu_image_as_folder(const char *p, char *dir, size_t dcap, char *xbe, size_t xcap)
+{
+    DWORD a;
+    size_t n;
+    char d[512];
+    if (!p || !p[0] || (a = GetFileAttributesA(p)) == INVALID_FILE_ATTRIBUTES) return 0;
+    strcpy_s(d, sizeof d, p);
+    n = strlen(d);
+    if (a & FILE_ATTRIBUTE_DIRECTORY) {
+        char x[600];
+        while (n > 3 && (d[n - 1] == '\\' || d[n - 1] == '/')) d[--n] = '\0';
+        _snprintf_s(x, sizeof x, _TRUNCATE, "%s\\default.xbe", d);
+        a = GetFileAttributesA(x);
+        if (a == INVALID_FILE_ATTRIBUTES || (a & FILE_ATTRIBUTE_DIRECTORY) || strlen(x) >= xcap) return 0;
+        strcpy_s(dir, dcap, d);
+        strcpy_s(xbe, xcap, x);
+        return 1;
+    }
+    if (n <= 4 || _stricmp(d + n - 4, ".xbe") != 0) return 0;
+    strcpy_s(xbe, xcap, d);
+    while (n > 0 && d[n - 1] != '\\' && d[n - 1] != '/') n--; /* Dateiname weg */
+    while (n > 1 && (d[n - 1] == '\\' || d[n - 1] == '/') && !(n == 3 && d[1] == ':')) n--;
+    d[n] = '\0';
+    if (!d[0]) strcpy_s(d, sizeof d, ".");
+    strcpy_s(dir, dcap, d);
+    return 1;
+}
+
 /* W150: Startfehler fuer den Spieler (Abbild/Version). Testlaeufe
  * (--run-seconds) und unsichtbare Fenster zeigen nichts an (Fokus-Regel),
  * die Log-Zeile steht immer im Log. */
@@ -1783,6 +1816,10 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
      * bleiben unveraendert (Einzelstart-Override). */
     hcfg_apply_set(g_cmdline_set, "cmdline");
     sb_relaunch_after_cfg(); /* W186: nur im Neustart-Kind (Zeile RELAUNCH + Ersatz-Set) */
+    if (g_cfg.test_cpu_mask) { /* TEST(W391) test_cpu_mask: "schwacher PC" - ganzer Prozess auf wenige Kerne (Xbox-Kern SB_CORE darin) */
+        BOOL ok = SetProcessAffinityMask(GetCurrentProcess(), (DWORD_PTR)g_cfg.test_cpu_mask);
+        HLOG_I("TESTCPU: Prozess-Affinitaet 0x%X %s", g_cfg.test_cpu_mask, ok ? "gesetzt" : "FEHLER");
+    }
     sb_rauto_init(); /* W254 REPLAY-LAUNCHER: nur mit replay_autoplay */
     sb_mauto_init(); /* W272 ALPHA-TEST: nur mit mission_autostart */
     sb_cchain_init(); /* W303 CAMPAIGN-CHAIN: nur mit campaign_chain (Testwerkzeug) */
@@ -1823,6 +1860,16 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     AddVectoredExceptionHandler(1, veh);
     AddVectoredExceptionHandler(0, loc_netcrash_veh); /* W339: letzter VEH, wirkt nur im LoC-Netzspiel */
     SetUnhandledExceptionFilter(last_chance);
+    if (g_cfg.game_image[0]) { /* W384 (GH #52): .xbe-Datei/entpackter Ordner als game_image */
+        char d[512], x[512];
+        if (emu_image_as_folder(g_cfg.game_image, d, sizeof d, x, sizeof x)) {
+            HLOG_I("ISO: game_image '%s' ist ein entpackter Spielordner -> Ordner-Modus (media_root='%s', xbe_path='%s')",
+                   g_cfg.game_image, d, x);
+            strcpy_s(g_cfg.media_root, sizeof g_cfg.media_root, d);
+            strcpy_s(g_cfg.xbe_path, sizeof g_cfg.xbe_path, x);
+            g_cfg.game_image[0] = '\0';
+        }
+    }
     /* W150 ISO-DIRECT: game_image hat Vorrang vor media_root/xbe_path/--xbe. */
     if (g_cfg.game_image[0]) {
         char err[320];
@@ -1868,9 +1915,14 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
             char detail[320], tid[16];
             sb_feedback_note_gamever(&gv);
             _snprintf_s(tid, sizeof tid, _TRUNCATE, "%08X", gv.title_id);
-            _snprintf_s(detail, sizeof detail, _TRUNCATE,
-                        sb_lang("cfg.image_version"), tid,
-                        sb_gamever_region_name(gv.region), gv.version);
+            if (gv.xbe_ok && gv.title_id == SB_GAMEVER_LOC_TITLE && !gv.loc) { /* W384 (GH #52): LoC, unbekannte Fassung (z. B. TU) */
+                _snprintf_s(detail, sizeof detail, _TRUNCATE,
+                            sb_lang("cfg.image_version_loc"), tid, gv.version);
+            } else {
+                _snprintf_s(detail, sizeof detail, _TRUNCATE,
+                            sb_lang("cfg.image_version"), tid,
+                            sb_gamever_region_name(gv.region), gv.version);
+            }
             HLOG_E("%s - Start abgebrochen (nur bekanntes PAL-Profil)", gv.text);
             HLOG_E("%s", detail);
             HLOG_E("GAMEVER: unsupported version; exit=5 (before XBE parse/map/hooks)");

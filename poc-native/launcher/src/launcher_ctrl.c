@@ -145,16 +145,37 @@ int lctrl_vk_is_modifier(int vk)
 
 int lctrl_bind_combo_row(int idx)
 {
-    return idx >= 0 && idx < LCTRL_ELEM_N &&
-           (strcmp(kCtrlElems[idx].key, "orig_view") == 0 || strcmp(kCtrlElems[idx].key, "photo") == 0 ||
-            strcmp(kCtrlElems[idx].key, "quick_shot") == 0); /* W290: photo, quick_shot */
+    /* W365 BIND-COMBO: jede digitale Zeile (Tasten, Achsen-Endlagen, Gang/Tuner, Client-Aktionen);
+     * analoge Achsen bleiben Einzelatome. */
+    return idx >= 0 && idx < LCTRL_ELEM_N && kCtrlElems[idx].kind != LCTRL_AXIS;
+}
+
+int lctrl_bind_key_combo_row(int idx)
+{
+    /* W365: pause/feedback_* wertet das Fenster nur als einfache Taste aus (imap_bind_keys),
+     * Pad-/Controller-Kombis gehen dort ueber die Engine. */
+    return lctrl_bind_combo_row(idx) && strcmp(kCtrlElems[idx].key, "pause") != 0 &&
+           strcmp(kCtrlElems[idx].key, "feedback_shot") != 0 && strcmp(kCtrlElems[idx].key, "feedback_clip") != 0;
+}
+
+int lctrl_bind_mouse_combo_row(int idx)
+{
+    /* W365: Zusatztaste + Maustaste nur, wo die Engine mit echten Tasten auswertet (Spiel-Elemente,
+     * vr_recenter, aim_center); photo/quick_shot/orig_view kennen im Fenster nur Zusatz+Taste,
+     * replay_exit ignoriert die Maus. */
+    if (!lctrl_bind_combo_row(idx)) {
+        return 0;
+    }
+    return kCtrlElems[idx].kind != LCTRL_ACT || strcmp(kCtrlElems[idx].key, "vr_recenter") == 0 ||
+           strcmp(kCtrlElems[idx].key, "aim_center") == 0;
 }
 
 int lctrl_bind_empty_line_row(int idx)
 {
     return idx >= 0 && idx < LCTRL_ELEM_N &&
            (strcmp(kCtrlElems[idx].key, "orig_view") == 0 || strcmp(kCtrlElems[idx].key, "quick_shot") == 0 ||
-            strcmp(kCtrlElems[idx].key, "replay_exit") == 0); /* W299: leer = aus (sonst Standard) */
+            strcmp(kCtrlElems[idx].key, "replay_exit") == 0 || /* W299: leer = aus (sonst Standard) */
+            strcmp(kCtrlElems[idx].key, "net_hud") == 0);      /* W374 */
 }
 
 void lctrl_key_combo(int mod_vk, int vk, char *out, size_t cap)
@@ -232,20 +253,6 @@ static lctrl_xgs_fn g_xgs;
 static int g_xgs_tried;
 
 /* XINPUT_GAMEPAD_*-Bits (lokal, ohne xinput.h, wie input_map.c). */
-#define LCTRL_PB_DU 0x0001
-#define LCTRL_PB_DD 0x0002
-#define LCTRL_PB_DL 0x0004
-#define LCTRL_PB_DR 0x0008
-#define LCTRL_PB_START 0x0010
-#define LCTRL_PB_BACK 0x0020
-#define LCTRL_PB_L3 0x0040
-#define LCTRL_PB_R3 0x0080
-#define LCTRL_PB_LB 0x0100
-#define LCTRL_PB_RB 0x0200
-#define LCTRL_PB_A 0x1000
-#define LCTRL_PB_B 0x2000
-#define LCTRL_PB_X 0x4000
-#define LCTRL_PB_Y 0x8000
 
 static void xgs_ensure(void)
 {
@@ -600,6 +607,376 @@ void lctrl_key_name(int vk, char *out, size_t cap)
     _snprintf_s(out, cap, _TRUNCATE, "%d", vk); /* numerisch (Parser kann das) */
 }
 
+/* --- W365 BIND-KEYNAMES: Anzeigenamen (nur Anzeige, Profil bleibt kanonisch) --- */
+
+int lctrl_key_vk(const char *name)
+{
+    static const struct { const char *n; int vk; } tab[] = {
+        { "SPACE", VK_SPACE }, { "ENTER", VK_RETURN }, { "RETURN", VK_RETURN }, { "TAB", VK_TAB },
+        { "SHIFT", VK_SHIFT }, { "CTRL", VK_CONTROL }, { "CONTROL", VK_CONTROL }, { "LCTRL", VK_LCONTROL },
+        { "RCTRL", VK_RCONTROL }, { "ALT", VK_MENU }, { "ESC", VK_ESCAPE }, { "ESCAPE", VK_ESCAPE },
+        { "LEFT", VK_LEFT }, { "RIGHT", VK_RIGHT }, { "UP", VK_UP }, { "DOWN", VK_DOWN },
+        { "BACKSPACE", VK_BACK }, { "INSERT", VK_INSERT }, { "DELETE", VK_DELETE }, { "HOME", VK_HOME },
+        { "END", VK_END }, { "PAGEUP", VK_PRIOR }, { "PAGEDOWN", VK_NEXT }, { "PAUSE", VK_PAUSE },
+        { "SNAPSHOT", VK_SNAPSHOT }, { NULL, 0 }
+    };
+    char *end = NULL;
+    long v;
+    int i;
+    if (!name || !name[0]) {
+        return -1;
+    }
+    if (!name[1]) {
+        char c = name[0];
+        if (c >= 'a' && c <= 'z') { c = (char)(c - 32); }
+        return ((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) ? c : -1;
+    }
+    if ((name[0] == 'F' || name[0] == 'f') && name[1] >= '1' && name[1] <= '9') {
+        v = strtol(name + 1, &end, 10);
+        if (end && !*end && v >= 1 && v <= 12) {
+            return VK_F1 + (int)v - 1;
+        }
+    }
+    for (i = 0; tab[i].n; i++) {
+        if (_stricmp(name, tab[i].n) == 0) {
+            return tab[i].vk;
+        }
+    }
+    if (name[0] >= '0' && name[0] <= '9') {
+        v = strtol(name, &end, 0);
+        if (end && !*end && v >= 0 && v < 512) {
+            return (int)v;
+        }
+    }
+    return -1;
+}
+
+void lctrl_key_disp(int vk, char *out, size_t cap)
+{
+    static const struct { int vk; const char *n; } tab[] = {
+        { VK_SPACE, "Space" }, { VK_RETURN, "Enter" }, { VK_TAB, "Tab" }, { VK_ESCAPE, "Esc" },
+        { VK_BACK, "Backspace" }, { VK_CAPITAL, "Caps Lock" }, { VK_NUMLOCK, "Num Lock" },
+        { VK_SCROLL, "Scroll Lock" }, { VK_PAUSE, "Pause" }, { VK_SNAPSHOT, "Print Screen" },
+        { VK_INSERT, "Insert" }, { VK_DELETE, "Delete" }, { VK_HOME, "Home" }, { VK_END, "End" },
+        { VK_PRIOR, "Page Up" }, { VK_NEXT, "Page Down" }, { VK_CLEAR, "Clear" },
+        { VK_LEFT, "Left" }, { VK_RIGHT, "Right" }, { VK_UP, "Up" }, { VK_DOWN, "Down" },
+        { VK_SHIFT, "Shift" }, { VK_LSHIFT, "Left Shift" }, { VK_RSHIFT, "Right Shift" },
+        { VK_CONTROL, "Ctrl" }, { VK_LCONTROL, "Left Ctrl" }, { VK_RCONTROL, "Right Ctrl" },
+        { VK_MENU, "Alt" }, { VK_LMENU, "Left Alt" }, { VK_RMENU, "Right Alt" },
+        { VK_LWIN, "Left Win" }, { VK_RWIN, "Right Win" }, { VK_APPS, "Menu" },
+        { VK_MULTIPLY, "Num *" }, { VK_ADD, "Num +" }, { VK_SUBTRACT, "Num -" }, { VK_DIVIDE, "Num /" },
+        { VK_DECIMAL, "Num Del" }, { VK_SEPARATOR, "Num Sep" },
+        { VK_VOLUME_MUTE, "Volume Mute" }, { VK_VOLUME_DOWN, "Volume Down" }, { VK_VOLUME_UP, "Volume Up" },
+        { VK_MEDIA_NEXT_TRACK, "Next Track" }, { VK_MEDIA_PREV_TRACK, "Previous Track" },
+        { VK_MEDIA_STOP, "Media Stop" }, { VK_MEDIA_PLAY_PAUSE, "Play/Pause" },
+        { VK_LAUNCH_MAIL, "Mail" }, { VK_LAUNCH_MEDIA_SELECT, "Media Select" },
+        { VK_LAUNCH_APP1, "App 1" }, { VK_LAUNCH_APP2, "App 2" },
+        { VK_BROWSER_BACK, "Browser Back" }, { VK_BROWSER_FORWARD, "Browser Forward" },
+        { VK_BROWSER_REFRESH, "Browser Refresh" }, { VK_BROWSER_STOP, "Browser Stop" },
+        { VK_BROWSER_SEARCH, "Browser Search" }, { VK_BROWSER_FAVORITES, "Browser Favorites" },
+        { VK_BROWSER_HOME, "Browser Home" }, { VK_SLEEP, "Sleep" },
+        { 0, NULL }
+    };
+    /* OEM-Tasten: Zeichen nach Tastaturlayout (GetKeyNameText), sonst diese Rueckfallnamen. */
+    static const struct { int vk; const char *n; } oem[] = {
+        { VK_OEM_1, "OEM ;" }, { VK_OEM_PLUS, "OEM +" }, { VK_OEM_COMMA, "OEM ," }, { VK_OEM_MINUS, "OEM -" },
+        { VK_OEM_PERIOD, "OEM ." }, { VK_OEM_2, "OEM /" }, { VK_OEM_3, "OEM `" }, { VK_OEM_4, "OEM [" },
+        { VK_OEM_5, "OEM \\" }, { VK_OEM_6, "OEM ]" }, { VK_OEM_7, "OEM '" }, { VK_OEM_8, "OEM 8" },
+        { VK_OEM_102, "OEM <>" }, { 0, NULL }
+    };
+    int i;
+    if (!out || cap == 0) {
+        return;
+    }
+    if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
+        _snprintf_s(out, cap, _TRUNCATE, "%c", (char)vk);
+        return;
+    }
+    if (vk >= VK_F1 && vk <= VK_F24) {
+        _snprintf_s(out, cap, _TRUNCATE, "F%d", vk - VK_F1 + 1);
+        return;
+    }
+    if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) {
+        _snprintf_s(out, cap, _TRUNCATE, "Num %d", vk - VK_NUMPAD0);
+        return;
+    }
+    for (i = 0; tab[i].n; i++) {
+        if (tab[i].vk == vk) {
+            strcpy_s(out, cap, tab[i].n);
+            return;
+        }
+    }
+    for (i = 0; oem[i].n; i++) {
+        if (oem[i].vk == vk) {
+            wchar_t w[32];
+            UINT sc = MapVirtualKeyW((UINT)vk, MAPVK_VK_TO_VSC);
+            int n = sc ? GetKeyNameTextW((LONG)(sc << 16), w, 32) : 0;
+            if (n > 0 && WideCharToMultiByte(CP_UTF8, 0, w, -1, out, (int)cap, NULL, NULL) > 0) {
+                return;
+            }
+            strcpy_s(out, cap, oem[i].n);
+            return;
+        }
+    }
+    _snprintf_s(out, cap, _TRUNCATE, LT("gui.key_unknown"), vk);
+}
+
+/* Pad-Anzeige: A/B/X/Y, LB/RB, LT/RT bleiben, der Rest mit Klarnamen. */
+static const char *pad_disp_key(const char *nm)
+{
+    static const struct { const char *n, *k; } tab[] = {
+        { "BACK", "gui.pad_back" }, { "START", "gui.pad_start" }, { "L3", "gui.pad_l3" },
+        { "R3", "gui.pad_r3" }, { "DU", "gui.pad_du" }, { "DUP", "gui.pad_du" }, { "DD", "gui.pad_dd" },
+        { "DDOWN", "gui.pad_dd" }, { "DL", "gui.pad_dl" }, { "DLEFT", "gui.pad_dl" },
+        { "DR", "gui.pad_dr" }, { "DRIGHT", "gui.pad_dr" }, { NULL, NULL }
+    };
+    int i;
+    for (i = 0; tab[i].n; i++) {
+        if (_stricmp(nm, tab[i].n) == 0) {
+            return tab[i].k;
+        }
+    }
+    return NULL;
+}
+
+/* Ein Atom ("KEY:20", "PAD:L3", "JOY0:B3") -> Anzeige. 1 = Anzeige weicht vom Rohnamen ab. */
+static int atom_pretty(const char *atom, char *out, size_t cap)
+{
+    char ty[16], nm[48];
+    const char *c1, *c2;
+    size_t n;
+    while (*atom == ' ' || *atom == '\t') { atom++; }
+    c1 = strchr(atom, ':');
+    strncpy_s(out, cap, atom, _TRUNCATE);
+    if (!c1 || (size_t)(c1 - atom) >= sizeof ty) {
+        return 0;
+    }
+    memcpy(ty, atom, (size_t)(c1 - atom));
+    ty[c1 - atom] = '\0';
+    c2 = strchr(c1 + 1, ':');
+    n = c2 ? (size_t)(c2 - c1 - 1) : strlen(c1 + 1);
+    if (n >= sizeof nm) { n = sizeof nm - 1; }
+    memcpy(nm, c1 + 1, n);
+    nm[n] = '\0';
+    while (n > 0 && (nm[n - 1] == ' ' || nm[n - 1] == '\t')) { nm[--n] = '\0'; }
+    if (_stricmp(ty, "KEY") == 0) {
+        int vk = lctrl_key_vk(nm);
+        if (vk < 0) {
+            return 0;
+        }
+        lctrl_key_disp(vk, out, cap);
+        return _stricmp(out, nm) != 0;
+    }
+    if (_stricmp(ty, "PAD") == 0) {
+        const char *k = pad_disp_key(nm);
+        strncpy_s(out, cap, k ? LT(k) : nm, _TRUNCATE);
+        return k != NULL;
+    }
+    if (_strnicmp(ty, "JOY", 3) == 0 && lctrl_joy_atom_text(atom, out, cap)) {
+        return 1;
+    }
+    strncpy_s(out, cap, nm, _TRUNCATE);
+    if (_stricmp(ty, "SBC") == 0 || _stricmp(ty, "MOUSE") == 0) {
+        _snprintf_s(out, cap, _TRUNCATE, "%s:%s", ty, nm);
+    }
+    return 0;
+}
+
+int lctrl_src_pretty(const char *alt, char *out, size_t cap)
+{
+    char work[128], t[96];
+    char *p, *plus;
+    int diff = 0, first = 1;
+    if (!out || cap == 0) {
+        return 0;
+    }
+    out[0] = '\0';
+    if (!alt) {
+        return 0;
+    }
+    strncpy_s(work, sizeof work, alt, _TRUNCATE);
+    p = work;
+    for (;;) {
+        plus = (char *)lctrl_chord_plus(p);
+        if (plus) {
+            *plus = '\0';
+            diff = 1; /* Kombination: immer lesbar mit " + " zeigen */
+        }
+        if (atom_pretty(p, t, sizeof t)) {
+            diff = 1;
+        }
+        if (!first) {
+            strncat_s(out, cap, " + ", _TRUNCATE);
+        }
+        strncat_s(out, cap, t, _TRUNCATE);
+        first = 0;
+        if (!plus) {
+            break;
+        }
+        p = plus + 1;
+    }
+    return diff;
+}
+
+/* --- W365 BIND-COMBO: Kombi-Lernen (rein, testbar) ---------------------- */
+
+void lctrl_combo_reset(lctrl_combo_t *c)
+{
+    if (c) {
+        c->pend[0] = '\0';
+    }
+}
+
+int lctrl_combo_feed(lctrl_combo_t *c, const char *press, int pend_held, char *out, size_t cap)
+{
+    if (!c || !out || cap == 0) {
+        return 0;
+    }
+    if (press && press[0]) {
+        if (c->pend[0] && pend_held && _stricmp(c->pend, press) != 0) {
+            _snprintf_s(out, cap, _TRUNCATE, "%s+%s", c->pend, press);
+            c->pend[0] = '\0';
+            return 1;
+        }
+        if (!c->pend[0]) {
+            strncpy_s(c->pend, sizeof c->pend, press, _TRUNCATE);
+            return 0;
+        }
+    }
+    if (c->pend[0] && !pend_held) {
+        strncpy_s(out, cap, c->pend, _TRUNCATE);
+        c->pend[0] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
+int lctrl_pad_held(const lctrl_pad_t *p, const char *name)
+{
+    static const unsigned bits[] = {
+        LCTRL_PB_A, LCTRL_PB_B, LCTRL_PB_X, LCTRL_PB_Y, LCTRL_PB_LB, LCTRL_PB_RB, LCTRL_PB_START,
+        LCTRL_PB_BACK, LCTRL_PB_L3, LCTRL_PB_R3, LCTRL_PB_DU, LCTRL_PB_DD, LCTRL_PB_DL, LCTRL_PB_DR
+    };
+    size_t i;
+    if (!p || !name) {
+        return 0;
+    }
+    if (_strnicmp(name, "PAD:", 4) == 0) {
+        name += 4;
+    }
+    if (_stricmp(name, "LT") == 0) { return p->lt > 128; }
+    if (_stricmp(name, "RT") == 0) { return p->rt > 128; }
+    for (i = 0; i < sizeof bits / sizeof bits[0]; i++) {
+        const char *nm = lctrl_pad_button_name(bits[i]);
+        if (nm && _stricmp(nm, name) == 0) {
+            return (p->buttons & bits[i]) != 0;
+        }
+    }
+    return 0;
+}
+
+int lctrl_pad_combo_step(lctrl_combo_t *c, const lctrl_pad_t *prev, const lctrl_pad_t *cur, char *out, size_t cap)
+{
+    lctrl_pad_t pv;
+    char nm[16], at[24];
+    int guard;
+    if (!c || !prev || !cur) {
+        return 0;
+    }
+    pv = *prev;
+    /* Alle frischen Tasten dieses Takts (zwei gleichzeitig = Kombi in Reihenfolge der Bits). */
+    for (guard = 0; guard < 16 && lctrl_pad_new_press(&pv, cur, nm, sizeof nm); guard++) {
+        if (strcmp(nm, "LT") == 0) { pv.lt = cur->lt; }
+        else if (strcmp(nm, "RT") == 0) { pv.rt = cur->rt; }
+        else {
+            size_t i;
+            for (i = 0; i < 16; i++) {
+                const char *bn = lctrl_pad_button_name(1u << i);
+                if (bn && strcmp(bn, nm) == 0) { pv.buttons |= (unsigned short)(1u << i); }
+            }
+        }
+        _snprintf_s(at, sizeof at, _TRUNCATE, "PAD:%s", nm);
+        if (lctrl_combo_feed(c, at, c->pend[0] ? lctrl_pad_held(cur, c->pend) : 1, out, cap)) {
+            return 1;
+        }
+    }
+    return lctrl_combo_feed(c, NULL, c->pend[0] ? lctrl_pad_held(cur, c->pend) : 0, out, cap);
+}
+
+/* Modifier-Familie fuer den Konfliktvergleich (CTRL ~ LCTRL/RCTRL, SHIFT ~ L/R). */
+static int key_family(const char *atom)
+{
+    int vk;
+    if (_strnicmp(atom, "KEY:", 4) != 0) {
+        return -1;
+    }
+    vk = lctrl_key_vk(atom + 4);
+    if (vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT) { return VK_SHIFT; }
+    if (vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL) { return VK_CONTROL; }
+    if (vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU) { return VK_MENU; }
+    return vk < 0 ? -1 : 0x1000 + vk;
+}
+
+/* Atom ohne Parameter ("KEY:LEFT:cond=!SHIFT" -> "KEY:LEFT"), getrimmt. */
+static void atom_core(const char *a, char *out, size_t cap)
+{
+    const char *c1, *c2;
+    size_t n;
+    while (*a == ' ' || *a == '\t') { a++; }
+    c1 = strchr(a, ':');
+    c2 = c1 ? strchr(c1 + 1, ':') : NULL;
+    n = c2 ? (size_t)(c2 - a) : strlen(a);
+    if (n >= cap) { n = cap - 1; }
+    memcpy(out, a, n);
+    out[n] = '\0';
+    while (n > 0 && (out[n - 1] == ' ' || out[n - 1] == '\t')) { out[--n] = '\0'; }
+}
+
+int lctrl_bind_combo_single_use(const lctrl_bind_t *b, const char *combo, char *atom_out, size_t acap,
+                                int *row_out)
+{
+    char work[128], core[64], other[64];
+    char *p, *plus;
+    int r, a;
+    if (!b || !combo || !lctrl_chord_plus(combo)) {
+        return 0;
+    }
+    strncpy_s(work, sizeof work, combo, _TRUNCATE);
+    p = work;
+    for (;;) {
+        int fam;
+        plus = (char *)lctrl_chord_plus(p);
+        if (plus) {
+            *plus = '\0';
+        }
+        atom_core(p, core, sizeof core);
+        fam = key_family(core);
+        for (r = 0; r < LCTRL_ELEM_N; r++) {
+            for (a = 0; a < b->row[r].n_alt; a++) {
+                const char *alt = b->row[r].alt[a];
+                if (lctrl_chord_plus(alt)) {
+                    continue;
+                }
+                atom_core(alt, other, sizeof other);
+                if (_stricmp(other, core) == 0 || (fam >= 0 && fam < 0x1000 && key_family(other) == fam)) {
+                    if (atom_out && acap) {
+                        strncpy_s(atom_out, acap, core, _TRUNCATE);
+                    }
+                    if (row_out) {
+                        *row_out = r;
+                    }
+                    return 1;
+                }
+            }
+        }
+        if (!plus) {
+            break;
+        }
+        p = plus + 1;
+    }
+    return 0;
+}
+
 /* --- Belegungs-Modell -------------------------------------------------- */
 /* Reihenfolge wie keyboard_default.ini (Tasten, Achsen, Gang/Tuner),
  * Labels aus CONTROLLER.md Abschnitt 8. */
@@ -693,6 +1070,8 @@ const lctrl_elem_t kCtrlElems[LCTRL_ELEM_N] = {
     /* W299 REPLAY: laufendes Spiel-Replay beenden (Abschnitt [client], Standard Ruecktaste; die Maus
      * beendet Replays nicht, Pad/Original-Controller/Joystick wie im Original). */
     { "replay_exit", "-", "bind.replay_exit", LCTRL_ACT },
+    /* W374 LOC-NET-OVERLAY: Netz-Overlay an/aus (Abschnitt [client], Standard F3; Umschalt + Taste = Ecke). */
+    { "net_hud", "-", "bind.net_hud", LCTRL_ACT },
 };
 
 /* W159: kanonische SBC-Quellnamen bi0..38 (parserstabil, s. kBiAlias). */
@@ -928,6 +1307,15 @@ static void bind_replay_exit_default(lctrl_bind_t *b, int seen)
     }
 }
 
+/* W374: Profil ohne net_hud-Zeile -> Standard F3 wie im Client. */
+static void bind_net_hud_default(lctrl_bind_t *b, int seen)
+{
+    int nh = lctrl_bind_elem_index("net_hud");
+    if (!seen && nh >= 0) {
+        lctrl_bind_set(b, nh, LCTRL_NET_HUD_DEFAULT);
+    }
+}
+
 int lctrl_bind_load_file(const char *path, lctrl_bind_t *b)
 {
     FILE *f;
@@ -935,6 +1323,7 @@ int lctrl_bind_load_file(const char *path, lctrl_bind_t *b)
     int ov = lctrl_bind_elem_index("orig_view"), seen = 0;
     int qs = lctrl_bind_elem_index("quick_shot"), qseen = 0; /* W290 */
     int re = lctrl_bind_elem_index("replay_exit"), rseen = 0; /* W299 */
+    int nh = lctrl_bind_elem_index("net_hud"), nseen = 0;     /* W374 */
     lctrl_bind_init(b);
     if (u8_fopen_s(&f, path, "r") != 0 || !f) { return 1; }
     while (fgets(line, sizeof line, f)) {
@@ -942,11 +1331,13 @@ int lctrl_bind_load_file(const char *path, lctrl_bind_t *b)
         if (r == ov) { seen = 1; }
         if (r == qs) { qseen = 1; }
         if (r == re) { rseen = 1; }
+        if (r == nh) { nseen = 1; }
     }
     fclose(f);
     bind_orig_default(b, seen);
     bind_quick_default(b, qseen);
     bind_replay_exit_default(b, rseen);
+    bind_net_hud_default(b, nseen);
     return 0;
 }
 
@@ -959,6 +1350,7 @@ int lctrl_bind_load_text(const char *text, lctrl_bind_t *b)
     int ov = lctrl_bind_elem_index("orig_view"), seen = 0;
     int qs = lctrl_bind_elem_index("quick_shot"), qseen = 0; /* W290 */
     int re = lctrl_bind_elem_index("replay_exit"), rseen = 0; /* W299 */
+    int nh = lctrl_bind_elem_index("net_hud"), nseen = 0;     /* W374 */
     lctrl_bind_init(b);
     if (!text) { return 1; }
     while (*p) {
@@ -971,12 +1363,14 @@ int lctrl_bind_load_text(const char *text, lctrl_bind_t *b)
         if (r == ov) { seen = 1; }
         if (r == qs) { qseen = 1; }
         if (r == re) { rseen = 1; }
+        if (r == nh) { nseen = 1; }
         p += n;
         while (*p == '\r' || *p == '\n') { p++; }
     }
     bind_orig_default(b, seen);
     bind_quick_default(b, qseen);
     bind_replay_exit_default(b, rseen);
+    bind_net_hud_default(b, nseen);
     return 0;
 }
 

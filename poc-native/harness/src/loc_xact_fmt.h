@@ -79,6 +79,13 @@ typedef struct {
     int room_mb;    /* -256 x (+0xF), >= -10000 */
 } lxf_cue_t;
 
+/* W363: Laufzeit-Parameter (RPC) je Spur: Summe der Kurven eines Parameters fuer einen Cue-Eintrag. */
+typedef struct {
+    int vol_mb;  /* Ziel 0: Lautstaerke in mB (zur Eintrags-Lautstaerke, Summe <= 0 geklemmt) */
+    int pitch;   /* Ziel 1: Tonhoehe in 1/4096 Oktave (zur Eintrags-Tonhoehe, Summe -32767..8191) */
+    int filt_hz; /* Ziel 2: Tiefpass-Eckfrequenz in Hz (0..8192, DLS2) */
+    int has;     /* Bit 0/1/2 = Ziel 0/1/2 belegt */
+} lxf_rpc_t;
 int lxf_xsb_parse(const uint8_t *d, uint32_t n, lxf_xsb_t *x); /* 0 = ok */
 const char *lxf_xsb_cue_name(const lxf_xsb_t *x, int cue);      /* NULL = keiner */
 int lxf_xsb_find(const lxf_xsb_t *x, const char *name);         /* -1 = fehlt */
@@ -86,6 +93,10 @@ int lxf_xsb_find(const lxf_xsb_t *x, const char *name);         /* -1 = fehlt */
 void lxf_xsb_bank_name(const lxf_xsb_t *x, int i, char buf[17]);
 /* Cue aufloesen; rnd waehlt Varianten (Zufallstabellen). 0 = ok. */
 int lxf_xsb_cue(const lxf_xsb_t *x, int cue, uint32_t rnd, lxf_cue_t *c);
+/* W363: Kurve (24 B) an x auswerten wie die XACT-Bibliothek (0x1C5392). */
+int lxf_rpc_eval(const uint8_t *cv, int xi);
+/* W363: RPC "name" mit Wert value fuer Cue-Eintrag entry; Rueckgabe = Zahl ausgewerteter Kurven. */
+int lxf_xsb_rpc(const lxf_xsb_t *x, int entry, const char *name, float value, lxf_rpc_t out[LXF_MAX_TRACKS]);
 
 #ifdef __cplusplus
 }

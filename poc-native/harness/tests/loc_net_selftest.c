@@ -6,6 +6,7 @@
 #include "loc_net_core.h"
 #include "loc_netsim.h"
 #include "loc_tun.h"
+#include "loc_route.h" /* W395 */
 #include "sb_e2e.h"
 #include "loc_guard.h"
 #include "sb_tls.h"
@@ -436,6 +437,7 @@ typedef struct tun_pair {
 
 static char s_auth_a[100], s_auth_b[100]; /* W328: --auth-a/--auth-b "account:exp:G-hex" */
 static char s_spki[80];                     /* W334: --spki <hex64> = Pin des (Loopback-)Testtreffpunkts */
+static char s_rsim_a[256], s_rsim_b[256];   /* W395: --rsim/--rsim-a/--rsim-b (loc_route_sim je Seite) */
 
 /* Zwei Instanzen mit Transport (feste Mitspieler oder Treffpunkt). simspec: Stufe auf beiden (NULL = aus). */
 static int tun_pair_start(tun_pair *P, int base, const char *simspec, const char *lobby, int nodirect, int red)
@@ -473,6 +475,8 @@ static int tun_pair_start(tun_pair *P, int base, const char *simspec, const char
         strcpy_s(cb.auth, sizeof cb.auth, s_auth_b);
         strcpy_s(ca.spki, sizeof ca.spki, s_spki); /* W334: TLS-Pin des Testtreffpunkts */
         strcpy_s(cb.spki, sizeof cb.spki, s_spki);
+        strcpy_s(ca.route_sim, sizeof ca.route_sim, s_rsim_a); /* W395 TEST: Wege mit eigener Verzoegerung */
+        strcpy_s(cb.route_sim, sizeof cb.route_sim, s_rsim_b);
     } else {
         ca.port = (uint16_t)(base + 900);
         cb.port = (uint16_t)(base + 901);
@@ -767,6 +771,8 @@ typedef struct fpeer {
     uint8_t last[1200];       /* zuletzt gesendetes Paket (Wiederholungstest) */
     int last_len;
     int probes_seen;          /* empfangene, authentische PROBE von B */
+    int rt_pong, rt_pong_bad, small_pong; /* W395: Echos auf Wegproben (8 B, gleich), abweichend, 4-B-PONG */
+    uint8_t rt_last[8];       /* W395: zuletzt gesendete Wegprobe */
 } fpeer;
 
 static void fp_put16(uint8_t *p, uint16_t v) { p[0] = (uint8_t)v; p[1] = (uint8_t)(v >> 8); }
@@ -844,6 +850,10 @@ static void fp_pump(fpeer *f, int ms)
                 q[0] = 8;
                 memcpy(q + 1, pt + 1, 8);
                 fp_send(f, q, 9);
+            } else if (pt[0] == 5) { /* W395: T_PONG */
+                if (n == 9 && memcmp(pt + 1, f->rt_last, 8) == 0) f->rt_pong++;
+                else if (n == 9) f->rt_pong_bad++;
+                else if (n == 5) f->small_pong++;
             } else if (pt[0] == 3 && n >= 22) {
                 uint32_t ack = fp_get32(pt + 5);
                 int cnt = pt[21], off = 22, i;
@@ -1199,6 +1209,53 @@ static void tun_guard_tests(void)
         printf("W329: Puffergrenze nach %d KB ohne Lesen des Spiels\n", sent);
         CHECK(f.fin_mask & (1u << 4), "W329: Puffer zum Spiel voll -> Strom geschlossen (FIN), kein unbegrenzter Speicher");
         closesocket(gacc);
+    }
+    /* W395 LOC-ROUTE: Wegproben eines boeswilligen Mitspielers (T_PING mit Kennung "RT", SECURITY.md §26) */
+    {
+        uint8_t q[16];
+        loctun_peer_hud h;
+        memset(q, 0, sizeof q);
+        q[0] = 4; /* T_PING */
+        q[1] = 'R'; q[2] = 'T'; q[3] = 0; q[4] = 0; q[5] = 0x34; q[6] = 0x12;
+        memcpy(f.rt_last, q + 1, 8);
+        f.rt_pong = f.rt_pong_bad = f.small_pong = 0;
+        fp_send(&f, q, 9);
+        fp_pump(&f, 150);
+        CHECK(f.rt_pong == 1 && f.rt_pong_bad == 0, "W395: Wegprobe auf dem Ankunftsweg gleich gross beantwortet (Echo)");
+        f.rt_pong = 0;
+        fp_send(&f, q, 8);   /* 7 Byte Rumpf: alte PING-Regel (4-Byte-PONG, kleiner als die Anfrage) */
+        fp_send(&f, q, 10);  /* 9 Byte Rumpf: ebenso */
+        q[2] = 'X';
+        fp_send(&f, q, 9);   /* falsche Kennung: alte PING-Regel */
+        fp_pump(&f, 150);
+        CHECK(f.rt_pong == 0 && f.rt_pong_bad == 0 && f.small_pong == 3,
+              "W395: Wegprobe mit falscher Laenge/Kennung -> nur die alte 4-Byte-Antwort, kein Echo");
+        q[2] = 'T';
+        f.rt_pong = f.small_pong = 0;
+        for (i = 0; i < 400; i++) {
+            q[5] = (uint8_t)i;
+            memcpy(f.rt_last, q + 1, 8);
+            fp_send(&f, q, 9);
+            if (i % 50 == 0) fp_pump(&f, 0);
+        }
+        fp_pump(&f, 200);
+        printf("W395: 400 Wegproben in Folge -> %d Echos\n", f.rt_pong + f.rt_pong_bad);
+        CHECK(f.rt_pong + f.rt_pong_bad <= 130, "W395: Echos auf Wegproben gebremst (100/s je Verbindung)");
+        for (i = 0; i < 200; i++) { /* gefaelschte Echos (Slot/Folge beliebig) und Unsinn */
+            q[0] = 5;
+            q[3] = (uint8_t)(i * 37);
+            q[4] = (uint8_t)i;
+            q[5] = (uint8_t)(i * 11);
+            fp_send(&f, q, 9 + (i % 3) - 1);
+        }
+        q[0] = 1; /* HELLO mit allen Flag-Bits */
+        fp_put32(q + 1, f.vip);
+        q[5] = 1; q[6] = 2; q[7] = 0xFF; q[8] = 0xFF;
+        fp_send(&f, q, 9);
+        fp_pump(&f, 200);
+        memset(&h, 0, sizeof h);
+        CHECK(loctun_links_up(B.tun) == 1 && loctun_peer_hud_get(B.tun, 0, &h) && h.up && !h.rt_on && h.nswitch == 0,
+              "W395: gefaelschte Echos/Flags ohne Wirkung (ohne Treffpunkt keine eigene Wegwahl), Verbindung steht");
     }
     closesocket(glis);
     closesocket(vic_t);
@@ -2207,7 +2264,372 @@ static void tun_lobby_guard_tests(void)
     printf("W332: Treffpunkt-Attrappe (TLS-Pflicht): %d/%d OK\n", s_ok - ok0, s_n - n0);
 }
 
+/* ---------- W373 LOC-PUBLIC-LOBBY: oeffentliche Lobbys ohne Netz (Steuerzeilen eingespeist, LOC_BOOT §48) ---------- */
+static uint32_t pub_rand(uint32_t *s)
+{
+    *s = *s * 1103515245u + 12345u;
+    return *s >> 8;
+}
+
+/* Liste offener Lobbys an die Instanz: eine Zeile, Eintraege als JSON-Text. fields = Spielfelder (NULL = gueltig). */
+#define PUB_F(ma, mb, ms, ca, cb) "\"fa\":0,\"fb\":1,\"ma\":" ma ",\"mb\":" mb ",\"tm\":0,\"ms\":" ms ",\"cf\":0,\"op\":0,\"ca\":" ca ",\"cb\":" cb
+static void pub_entry(char *b, size_t cap, int id, const char *pilot, uint32_t vip_host, const char *fields, const char *extra)
+{
+    size_t l = strlen(b);
+    _snprintf_s(b + l, cap - l, _TRUNCATE,
+                "%s{\"id\":%d,\"name\":\"%s\",\"game\":\"loc\",\"mode\":\"syslink\",\"map\":\"m02\",\"players\":1,"
+                "\"max_players\":10,\"host_pilot\":\"%s\",\"rules\":{\"vip\":%u,%s%s},\"state\":\"open\"}",
+                b[l - 1] == '[' ? "" : ",", id, pilot, pilot, vip_host, fields ? fields : PUB_F("5", "5", "2", "1", "0"),
+                extra ? extra : "");
+}
+
+static int pub_recv_all(locnet *n, SOCKET s, uint8_t nonce[8], uint32_t *vips, int maxv, int *bad)
+{
+    char buf[256];
+    struct sockaddr_in from;
+    int k, got = 0;
+    *bad = 0;
+    while ((k = poll_recvfrom(n, s, buf, sizeof buf, &from)) > 0) {
+        if (k != 100 || buf[0] != 2 || memcmp(buf + 4, nonce, 8) != 0 || !lguard_udp_ok(1201, (uint8_t *)buf, k) ||
+            locnet_xnaddr_ip((uint8_t *)buf + 0x24) != from.sin_addr.s_addr || ntohs(from.sin_port) != 1201 ||
+            memchr(buf + 0x50, 0, 16) == NULL)
+            (*bad)++;
+        if (got < maxv) vips[got] = from.sin_addr.s_addr;
+        got++;
+        if (got > 60) break;
+    }
+    return got;
+}
+
+static void pub_search(locnet *n, SOCKET g1201, uint8_t nonce[8], uint32_t *seed)
+{
+    struct sockaddr_in bc = sa(INADDR_BROADCAST, 1201);
+    char buf[0x14];
+    int i;
+    memset(buf, 0, sizeof buf);
+    buf[0] = 1;
+    for (i = 0; i < 8; i++) nonce[i] = (uint8_t)pub_rand(seed);
+    memcpy(buf + 4, nonce, 8);
+    memcpy(buf + 0xC, "Ver 1.0", 8);
+    locnet_sendto(n, g1201, buf, 0x14, 0, (struct sockaddr *)&bc, sizeof bc);
+}
+
+static void pub_tests(void)
+{
+    locnet G, H;
+    loctun_cfg c;
+    char out[8192], line[12000], buf[0x2C4 + 16];
+    SOCKET g1201, g1202;
+    struct sockaddr_in from;
+    uint8_t nonce[8];
+    uint32_t seed = 373, vips[64];
+    uint32_t vA = ip4("127.88.1.2"), vB = ip4("127.88.3.4"), vG = ip4("127.88.5.6");
+    int k, i, bad, n0 = s_n, ok0 = s_ok;
+    SetEnvironmentVariableA("SB_STEELNET_SPKI", NULL); /* kein Pin -> der Transport verbindet nie (nur Einspeisung) */
+    /* Raumcode geht immer privat, auch mit vis=public */
+    if (locnet_init(&H, "127.0.0.58", 47300, "none", 10, lg)) {
+        loctun_cfg_default(&c);
+        c.port = 47390;
+        c.proxy_base = 47700;
+        c.allow_public = 1;
+        strcpy_s(c.lobby, sizeof c.lobby, "127.0.0.1:44998");
+        strcpy_s(c.vis, sizeof c.vis, "public");
+        strcpy_s(c.code, sizeof c.code, "7K3M-Q9TX");
+        H.tun = loctun_start(&c, &H, NULL, lg);
+        CHECK(H.tun && loctun_test_line(H.tun, 9, NULL, out, sizeof out) == 0, "W373: mit Raumcode kein oeffentlicher Modus");
+        locnet_shutdown(&H);
+    }
+    if (!locnet_init(&G, "127.0.0.57", 47100, "none", 10, lg)) {
+        CHECK(0, "W373: Instanz startet");
+        return;
+    }
+    loctun_cfg_default(&c);
+    c.port = 47190;
+    c.proxy_base = 47500;
+    c.allow_public = 1;
+    strcpy_s(c.lobby, sizeof c.lobby, "127.0.0.1:44998");
+    strcpy_s(c.vis, sizeof c.vis, "public");
+    strcpy_s(c.pilot, sizeof c.pilot, "Seeker");
+    G.tun = loctun_start(&c, &G, NULL, lg);
+    CHECK(G.tun && loctun_test_line(G.tun, 7, NULL, out, sizeof out) == 1, "W373: oeffentlicher Modus (vis=public, kein Code)");
+    if (!G.tun) {
+        locnet_shutdown(&G);
+        return;
+    }
+    CHECK(!strstr(out, "lobby_create") && !strstr(out, "lobby_list"), "W373: ohne Match und ohne Suche keine Lobby, keine Liste");
+    g1201 = game_udp(&G, 1201, IPPROTO_UDP);
+    g1202 = game_udp(&G, 1202, IPPROTO_UDP);
+    /* Liste: zwei gueltige Hosts, ein Name mit Steuerzeichen/zu lang (bereinigt), dazu ungueltige/volle Eintraege */
+    strcpy_s(line, sizeof line, "{\"t\":\"lobby_list\",\"lobbies\":[");
+    pub_entry(line, sizeof line, 11, "Alpha", ntohl(vA), NULL, NULL);
+    pub_entry(line, sizeof line, 12, "Guest-Bravo", ntohl(vB), NULL, ",\"rt_main\":40");
+    pub_entry(line, sizeof line, 13, "Zz\\nLongEvilNameXYZ", ntohl(vG), NULL, NULL);       /* Steuerzeichen, zu lang */
+    pub_entry(line, sizeof line, 14, "NotLoop", ntohl(ip4("10.1.2.3")), NULL, NULL);       /* vip nicht 127/8 */
+    pub_entry(line, sizeof line, 15, "SameVip", ntohl(vA), NULL, NULL);                    /* vip wie Alpha */
+    pub_entry(line, sizeof line, 16, "Self", ntohl(G.self_ip), NULL, NULL);                /* eigene Adresse */
+    pub_entry(line, sizeof line, 17, "Full", ntohl(ip4("127.88.7.8")), PUB_F("5", "5", "2", "5", "5"), NULL); /* voll */
+    pub_entry(line, sizeof line, 18, "Mis18", ntohl(ip4("127.88.9.1")), PUB_F("5", "5", "24", "1", "0"), NULL); /* 0x18 */
+    pub_entry(line, sizeof line, 19, "Seats", ntohl(ip4("127.88.9.2")), PUB_F("6", "5", "2", "1", "0"), NULL);  /* 6+5 */
+    pub_entry(line, sizeof line, 20, "Frac", ntohl(ip4("127.88.9.3")), PUB_F("5", "5", "2.5", "1", "0"), NULL); /* 2,5 */
+    pub_entry(line, sizeof line, 22, "Neg", ntohl(ip4("127.88.9.4")), PUB_F("5", "-1", "2", "1", "0"), NULL);   /* < 0 */
+    strcat_s(line, sizeof line, ",{\"id\":21,\"host_pilot\":\"Started\",\"state\":\"started\",\"rules\":{}}]}");
+    loctun_test_line(G.tun, 0, line, out, sizeof out);
+    CHECK(loctun_pub_games(G.tun) == 3, "W373: Liste -> 3 offene Spiele (ungueltige, volle, gestartete, Adresskonflikte nicht)");
+    CHECK(locnet_addr_known(&G, vA) && locnet_addr_known(&G, vB) && !locnet_addr_known(&G, ip4("127.88.7.8")),
+          "W373: XNetXnAddrToInAddr kennt nur gelistete Geister");
+    /* Suche des Spiels -> Host-Info je Spiel (Nonce-Echo, XNADDR = Absender, Gastfilter), Liste wird frisch geholt */
+    pub_search(&G, g1201, nonce, &seed);
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    CHECK(strstr(out, "\"t\":\"lobby_list\"") && strstr(out, "\"open\":true"), "W373: Suche holt die Liste (open:true)");
+    k = pub_recv_all(&G, g1201, nonce, vips, 64, &bad);
+    CHECK(k == 3 && bad == 0, "W373: Suche -> 3 Host-Infos (Typ 2, 100 B, Nonce-Echo, XNADDR = Absender, Gastfilter ok)");
+    {
+        int fA = 0, fB = 0, fG = 0;
+        for (i = 0; i < k && i < 64; i++) {
+            fA |= vips[i] == vA;
+            fB |= vips[i] == vB;
+            fG |= vips[i] == vG;
+        }
+        CHECK(fA && fB && fG, "W373: Host-Infos von Alpha, Bravo und dem bereinigten Namen");
+    }
+    /* Feldinhalt einer Host-Info (erneute Suche, nur Alpha pruefen) */
+    pub_search(&G, g1201, nonce, &seed);
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    {
+        int seen = 0, ok = 1, okb = 0;
+        while ((k = poll_recvfrom(&G, g1201, buf, sizeof buf, &from)) > 0) {
+            if (from.sin_addr.s_addr == vB) okb = strcmp(buf + 0x50, "~Bravo") == 0; /* Gast: "~Name" */
+            if (from.sin_addr.s_addr == vA) {
+                seen = 1;
+                ok &= buf[0x48] == 0 && buf[0x49] == 1 && buf[0x4A] == 5 && buf[0x4B] == 5 && buf[0x4D] == 2 &&
+                     buf[0x60] == 1 && buf[0x61] == 0 && strcmp(buf + 0x50, "Alpha") == 0 && (buf[0x0C] & 0xF0) == 0;
+            }
+            if (from.sin_addr.s_addr == vG) {
+                ok &= strlen(buf + 0x50) <= 15;
+                for (i = 0x50; i < 0x60 && buf[i]; i++) ok &= buf[i] >= 0x20 && buf[i] <= 0x7E;
+            }
+        }
+        CHECK(seen && ok && okb, "W373: Host-Info-Felder aus rules (Lager, Sitze, Mission, Zaehler, Name druckbar <= 15, Gast ~Name)");
+    }
+    /* Beitritt: Typ 3 an den Geist -> lobby_join mit lobby_id; Treffpunkt meldet voll -> Typ 7 (6 B) vom Geist */
+    {
+        struct sockaddr_in to = sa(vA, 1202);
+        memset(buf, 0, sizeof buf);
+        buf[0] = 3;
+        k = locnet_sendto(&G, g1202, buf, 0x2C4, 0, (struct sockaddr *)&to, sizeof to);
+        loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+        CHECK(k == 0x2C4 && strstr(out, "{\"t\":\"lobby_join\",\"lobby_id\":11}"), "W373: Beitritt am Geist -> lobby_join lobby_id 11");
+        CHECK(poll_recvfrom(&G, g1202, buf, sizeof buf, &from) < 0, "W373: waehrend des Beitritts keine Antwort an das Spiel (Client wartet)");
+        loctun_test_line(G.tun, 0, "{\"t\":\"error\",\"code\":\"lobby_full\",\"msg\":\"lobby full\"}", out, sizeof out);
+        k = poll_recvfrom(&G, g1202, buf, sizeof buf, &from);
+        CHECK(k == 6 && buf[0] == 7 && buf[4] == 0 && from.sin_addr.s_addr == vA, "W373: voll -> Ablehnung Typ 7 (6 B) vom Host-Geist");
+        CHECK(loctun_pub_games(G.tun) == 2, "W373: abgelehnte Lobby verschwindet aus der Liste");
+    }
+    /* Neue Liste ohne Bravo (gestartet) -> verschwindet */
+    strcpy_s(line, sizeof line, "{\"t\":\"lobby_list\",\"lobbies\":[");
+    pub_entry(line, sizeof line, 13, "Zz", ntohl(vG), NULL, NULL);
+    strcat_s(line, sizeof line, "]}");
+    loctun_test_line(G.tun, 0, line, out, sizeof out);
+    CHECK(loctun_pub_games(G.tun) == 1 && !locnet_addr_known(&G, vB), "W373: gestartete/volle Lobby verschwindet (nicht mehr gelistet)");
+    /* Host-Seite: Match angeboten (Spielzustand 0x22) -> oeffentliche Lobby mit rules, Aenderung -> lobby_update,
+     * Lockstep -> lobby_start */
+    InterlockedExchange(&G.pub_w[0], (LONG)(0u | (1u << 8) | (5u << 16) | (5u << 24)));
+    InterlockedExchange(&G.pub_w[1], (LONG)(0u | (2u << 8)));
+    InterlockedExchange(&G.pub_w[2], (LONG)(0x22u | (1u << 8) | 0x1000000u));
+    for (i = 0; i < 30 && !strstr(out, "lobby_create"); i++) {
+        loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+        if (!strstr(out, "lobby_create")) Sleep(100);
+    }
+    {
+        char want[64];
+        _snprintf_s(want, sizeof want, _TRUNCATE, "\"vip\":%u,", ntohl(G.self_ip));
+        CHECK(strstr(out, "\"t\":\"lobby_create\"") && strstr(out, "\"visibility\":\"public\"") && strstr(out, want) &&
+              strstr(out, "\"ms\":2") && strstr(out, "\"ma\":5") && strstr(out, "\"ca\":1") && strstr(out, "\"max_players\":10"),
+              "W373: Match angeboten -> oeffentliche Lobby (rules: vip, Sitze, Mission, Zaehler)");
+        CHECK(!strstr(out, "127.") && !strstr(out, "\"code\""), "W373: Lobby-Anlage ohne Adresse im Klartext, ohne Raumcode");
+    }
+    loctun_test_line(G.tun, 0, "{\"t\":\"lobby_state\",\"lobby\":{\"id\":99,\"members\":[{\"client_id\":7,\"pilot\":\"Seeker\","
+                               "\"controller\":\"pad\",\"host\":true}],\"visibility\":\"public\"}}", out, sizeof out);
+    InterlockedExchange(&G.pub_w[2], (LONG)(0x22u | (2u << 8) | 0x1000000u));
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    Sleep(1700);
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    CHECK(strstr(out, "\"t\":\"lobby_update\"") && strstr(out, "\"ca\":2"), "W373: Spielerzahl geaendert -> lobby_update");
+    InterlockedExchange(&G.st.last34_ms, (LONG)GetTickCount());
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    CHECK(strstr(out, "\"t\":\"lobby_start\"") != NULL, "W373: Missionsbeginn (0x34) -> lobby_start (nicht mehr gelistet)");
+    InterlockedExchange(&G.st.last34_ms, 0);
+    InterlockedExchange(&G.pub_w[2], 0);
+    /* Fuzz: veraenderte Listen-, Zustands- und Fehlerzeilen - danach nur gueltige Host-Infos, hoechstens 24 Spiele */
+    loctun_test_line(G.tun, 0, "{\"t\":\"lobby_closed\",\"lobby_id\":99}", out, sizeof out);
+    {
+        static const char *const tmpl[] = {
+            "{\"t\":\"lobby_list\",\"lobbies\":[{\"id\":31,\"host_pilot\":\"Fz\",\"state\":\"open\",\"rules\":{\"vip\":2136474114,"
+            "\"fa\":0,\"fb\":1,\"ma\":5,\"mb\":5,\"tm\":0,\"ms\":2,\"cf\":0,\"op\":0,\"ca\":1,\"cb\":0,\"rt_main\":30}}],\"more\":true}",
+            "{\"t\":\"lobby_state\",\"lobby\":{\"id\":5,\"members\":[{\"client_id\":3,\"host\":true},{\"client_id\":7}]}}",
+            "{\"t\":\"error\",\"code\":\"lobby_started\"}",
+            "{\"t\":\"lobby_list\",\"lobbies\":[]}",
+        };
+        int it, mx = 0;
+        for (it = 0; it < 3000; it++) {
+            const char *tp = tmpl[pub_rand(&seed) % 4];
+            int l = (int)strlen(tp), m, nm = 1 + (int)(pub_rand(&seed) % 4);
+            strcpy_s(line, sizeof line, tp);
+            for (m = 0; m < nm; m++) {
+                int pos = (int)(pub_rand(&seed) % (unsigned)l);
+                switch (pub_rand(&seed) % 4) {
+                case 0: line[pos] = (char)(pub_rand(&seed) & 0xFF); if (!line[pos]) line[pos] = '9'; break;
+                case 1: line[pos] = "0123456789-.e\"{}[],:"[pub_rand(&seed) % 21]; break;
+                case 2: line[pos] = 0; l = pos > 0 ? pos : 1; break;
+                default: line[pos] = '9'; break;
+                }
+            }
+            loctun_test_line(G.tun, 0, line, out, sizeof out);
+            k = loctun_pub_games(G.tun);
+            if (k > mx) mx = k;
+        }
+        /* viele gueltige Eintraege: Obergrenze */
+        strcpy_s(line, sizeof line, "{\"t\":\"lobby_list\",\"lobbies\":[");
+        for (i = 0; i < 40; i++) {
+            char nmx[16];
+            _snprintf_s(nmx, sizeof nmx, _TRUNCATE, "H%d", i);
+            pub_entry(line, sizeof line, 100 + i, nmx, ntohl(ip4("127.90.0.10")) + (uint32_t)(i << 8), NULL, NULL);
+        }
+        strcat_s(line, sizeof line, "]}");
+        loctun_test_line(G.tun, 0, line, out, sizeof out);
+        k = loctun_pub_games(G.tun);
+        if (k > mx) mx = k;
+        pub_search(&G, g1201, nonce, &seed);
+        loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+        k = pub_recv_all(&G, g1201, nonce, vips, 64, &bad);
+        CHECK(mx <= 24 && k == loctun_pub_games(G.tun) && k == 24 && bad == 0,
+              "W373: Fuzz (3000 Zeilen) ohne Absturz, hoechstens 24 Spiele, alle Host-Infos gueltig");
+    }
+    closesocket(g1201);
+    closesocket(g1202);
+    locnet_shutdown(&G);
+    printf("W373: oeffentliche Lobbys (eingespeist): %d/%d OK\n", s_ok - ok0, s_n - n0);
+}
+
 /* --lobby host:port [--nodirect] [--sim SPEC]: zwei Instanzen ueber einen laufenden steelnet-Treffpunkt. */
+/* ---------- W395 LOC-ROUTE: Wegwahl mit mehreren Relays und Wegen eigener Verzoegerung (loc_route_sim) ----------
+ * --route host:port --spki X [--rsim SPEC] [--rsim-a SPEC] [--rsim-b SPEC] [--secs N] [--expect-first NAME]
+ *         [--expect-final NAME] [--max-switch N]
+ * Zwei Clients ueber den (lokalen) Treffpunkt; A schickt N Sekunden lang Lockstep-Rahmen (26 B, alle 33 ms) an B.
+ * Ausgabe: Zeitleiste des Weges von A und B, erste Wahl, Endweg, Wechsel/Ausfaelle, groesster Rahmenabstand. */
+#define RT_MAXF 4000
+typedef struct rt_rx {
+    SOCKET r;
+    int n, got, to_ms;
+    double *arr;
+    int *seq;
+} rt_rx;
+
+static DWORD WINAPI rt_rx_thread(LPVOID p)
+{
+    rt_rx *x = (rt_rx *)p;
+    x->got = recv_frames(x->r, x->n, x->arr, x->seq, x->to_ms, NULL);
+    return 0;
+}
+
+static void rt_hud(loctun *t, char *route, int cap, int *nsw, int *nfail, int *decided, int *rt_on, char *alts, int acap)
+{
+    loctun_peer_hud h;
+    int i, o = 0;
+    memset(&h, 0, sizeof h);
+    route[0] = 0;
+    if (alts) alts[0] = 0;
+    if (!t || !loctun_peer_hud_get(t, 0, &h)) return;
+    strncpy_s(route, (size_t)cap, h.route, _TRUNCATE);
+    *nsw = h.nswitch;
+    *nfail = h.nfail;
+    *decided = h.decided;
+    *rt_on = h.rt_on;
+    for (i = 0; alts && i < h.nalt && o < acap - 40; i++) {
+        o += _snprintf_s(alts + o, (size_t)(acap - o), _TRUNCATE, "%s%s=%.0f%s%s", i ? " " : "", h.alt[i].name,
+                         h.alt[i].rtt, h.alt[i].state == 0 ? "(aus)" : h.alt[i].state == 1 ? "(?)" : "",
+                         h.alt[i].active ? "*" : "");
+    }
+}
+
+static int tun_route_test(const char *lobby, int secs, const char *exp_first, const char *exp_final, int max_switch)
+{
+    tun_pair P;
+    SOCKET acon, bacc, blis;
+    static rt_rx x;
+    static double arr[RT_MAXF];
+    static int seq[RT_MAXF];
+    char first[24] = "", ra[24] = "", rb[24] = "", la[24] = "", lb2[24] = "", alts[200];
+    int nswa = 0, nfa = 0, deca = 0, ona = 0, nswb = 0, nfb = 0, decb = 0, onb = 0, i, n, over = 0, inorder = 1;
+    double t0, maxgap = 0, gap_at = 0, decided_at = -1;
+    HANDLE th;
+    char b[26];
+    CHECK(tun_pair_start(&P, 41000, NULL, lobby, 0, 0), "W395: beide in der Lobby, Verbindung steht");
+    if (!P.ok) {
+        tun_pair_stop(&P);
+        printf("loc_net_selftest --route: %d/%d OK\n", s_ok, s_n);
+        return 1;
+    }
+    CHECK(tun_tcp(&P, &acon, &bacc, &blis), "W395: TCP 1000 verbunden");
+    n = secs * 30;
+    if (n > RT_MAXF) n = RT_MAXF;
+    memset(&x, 0, sizeof x);
+    x.r = bacc;
+    x.n = n;
+    x.arr = arr;
+    x.seq = seq;
+    x.to_ms = secs * 1000 + 15000;
+    th = CreateThread(NULL, 0, rt_rx_thread, &x, 0, NULL);
+    t0 = now_ms();
+    for (i = 0; i < n; i++) {
+        frame(b, i);
+        send(acon, b, 26, 0);
+        if (i % 3 == 0) { /* Zeitleiste alle 100 ms */
+            rt_hud(P.A.tun, ra, sizeof ra, &nswa, &nfa, &deca, &ona, alts, sizeof alts);
+            rt_hud(P.B.tun, rb, sizeof rb, &nswb, &nfb, &decb, &onb, NULL, 0);
+            if (deca && decided_at < 0) {
+                decided_at = (now_ms() - t0) / 1000.0;
+                strcpy_s(first, sizeof first, ra);
+            }
+            if (strcmp(ra, la) != 0 || strcmp(rb, lb2) != 0) {
+                printf("W395 t=%5.1f s: A %s, B %s (Wahl %s, A misst: %s)\n", (now_ms() - t0) / 1000.0, ra[0] ? ra : "-",
+                       rb[0] ? rb : "-", ona ? (deca ? "fertig" : "misst") : "Treffpunkt", alts);
+                strcpy_s(la, sizeof la, ra);
+                strcpy_s(lb2, sizeof lb2, rb);
+            }
+            if (i % 300 == 0) printf("W395 t=%5.1f s: A misst %s\n", (now_ms() - t0) / 1000.0, alts);
+        }
+        while (now_ms() - t0 < (double)(i + 1) * 33.0) Sleep(0);
+    }
+    WaitForSingleObject(th, 20000);
+    CloseHandle(th);
+    for (i = 0; i < x.got; i++) {
+        double g = i > 0 ? x.arr[i] - x.arr[i - 1] : 0;
+        if (x.seq[i] != i) inorder = 0;
+        if (g > maxgap) {
+            maxgap = g;
+            gap_at = (x.arr[i] - t0) / 1000.0;
+        }
+        if (g > 2.0 * 33 + 30.0) over++;
+    }
+    rt_hud(P.A.tun, ra, sizeof ra, &nswa, &nfa, &deca, &ona, alts, sizeof alts);
+    rt_hud(P.B.tun, rb, sizeof rb, &nswb, &nfb, &decb, &onb, NULL, 0);
+    printf("W395ROUTE: erst=%s (t=%.1f s) final=%s/%s wechsel=%d/%d ausfall=%d/%d rahmen=%d/%d geordnet=%d "
+           "maxgap=%.0f ms (t=%.1f s) haenger=%d wege: %s\n",
+           first[0] ? first : "-", decided_at, ra[0] ? ra : "-", rb[0] ? rb : "-", nswa, nswb, nfa, nfb, x.got, n,
+           inorder, maxgap, gap_at, over, alts);
+    CHECK(ona && onb, "W395: beide waehlen den Weg selbst (HELLO-Flag)");
+    CHECK(x.got == n && inorder, "W395: alle Rahmen geordnet und vollstaendig (kein Desync im Strom)");
+    if (exp_first) CHECK(strcmp(first, exp_first) == 0, "W395: erste Wahl wie erwartet");
+    if (exp_final) CHECK(strcmp(ra, exp_final) == 0 && strcmp(rb, exp_final) == 0, "W395: Endweg wie erwartet (A und B)");
+    if (max_switch >= 0) CHECK(nswa <= max_switch && nswb <= max_switch, "W395: hoechstens erwartete Zahl an Wechseln");
+    loctun_log_stats(P.A.tun, secs);
+    closesocket(acon); closesocket(bacc); closesocket(blis);
+    tun_pair_stop(&P);
+    printf("loc_net_selftest --route: %d/%d OK\n", s_ok, s_n);
+    return s_ok == s_n ? 0 : 1;
+}
+
 static int tun_lobby_test(const char *lobby, int nodirect, const char *simspec)
 {
     tun_pair P;
@@ -2237,6 +2659,238 @@ static int tun_lobby_test(const char *lobby, int nodirect, const char *simspec)
     tun_pair_stop(&P);
     printf("loc_net_selftest --lobby: %d/%d OK\n", s_ok, s_n);
     return s_ok == s_n ? 0 : 1;
+}
+
+/* ---------- W395 LOC-ROUTE: neue Felder der route-Zeile (link_id/ticket bei "direct", relays) gegen Unsinn ---------- */
+static void route_feed_tests(void)
+{
+    locnet G;
+    loctun_cfg c;
+    static char out[16384], line[4096];
+    static const char *base =
+        "{\"t\":\"route\",\"mode\":\"direct\",\"max_ms\":10,\"relays\":[\"eu\",\"us\"],\"links\":[{\"peer\":77,\"via\":\"direct\","
+        "\"ms\":10,\"link_id\":12345,\"ticket\":\"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\"},"
+        "{\"peer\":77,\"via\":\"relay\",\"relay\":\"us\",\"host\":\"127.0.0.1\",\"port\":46982,\"ms\":20,\"link_id\":12345,"
+        "\"ticket\":\"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\"}]}";
+    static const char *bad[] = {
+        "{\"t\":\"route\",\"links\":[{\"peer\":77,\"via\":\"direct\",\"link_id\":-1,\"ticket\":\"00\"}]}",
+        "{\"t\":\"route\",\"links\":[{\"peer\":77,\"via\":\"direct\",\"link_id\":1e300,\"ticket\":\"0011\"}]}",
+        "{\"t\":\"route\",\"links\":[{\"peer\":77,\"via\":\"direct\",\"link_id\":\"x\",\"ticket\":12}]}",
+        "{\"t\":\"route\",\"links\":[{\"peer\":77,\"via\":\"direct\",\"link_id\":5,\"ticket\":\"0011223344556677889900112233445566778899001122334455667788990\"}]}",
+        "{\"t\":\"route\",\"links\":[{\"peer\":77,\"via\":\"direct\",\"link_id\":5,\"ticket\":\"zz112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\"}]}",
+        "{\"t\":\"route\",\"links\":[{\"peer\":77,\"via\":\"direct\",\"link_id\":5,\"ticket\":\"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff00\"}]}",
+        "{\"t\":\"route\",\"relays\":5,\"links\":{}}",
+        "{\"t\":\"route\",\"relays\":[1,2,{},[],null,true],\"links\":[]}",
+        "{\"t\":\"route\",\"relays\":[\"eu\",\"eu\",\"eu\",\"eu\",\"eu\",\"eu\",\"eu\",\"eu\",\"eu\",\"eu\",\"eu\",\"eu\",\"eu\",\"eu\",\"eu\",\"eu\",\"eu\"]}",
+        "{\"t\":\"route\",\"relays\":[\"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\"]}",
+        "{\"t\":\"route\",\"relays\":[\"\\\"\\\\\"],\"links\":[{\"peer\":4294967296,\"via\":\"direct\"}]}",
+        "{\"t\":\"route\",\"relays\":[]}",
+        "{\"t\":\"route\",\"relays\":[\"eu\"",
+    };
+    uint32_t rng = 395;
+    int i, k, n0 = s_n, ok0 = s_ok, len;
+    SetEnvironmentVariableA("SB_STEELNET_SPKI", NULL); /* kein Pin -> der Transport verbindet nie (nur Einspeisung) */
+    if (!locnet_init(&G, "127.0.0.59", 47800, "none", 10, lg)) {
+        CHECK(0, "W395: Instanz startet");
+        return;
+    }
+    loctun_cfg_default(&c);
+    c.port = 47890;
+    c.proxy_base = 47950;
+    c.allow_public = 1;
+    strcpy_s(c.lobby, sizeof c.lobby, "127.0.0.1:44997");
+    G.tun = loctun_start(&c, &G, NULL, lg);
+    if (!G.tun) {
+        CHECK(0, "W395: Transport mit Einspeisung startet");
+        locnet_shutdown(&G);
+        return;
+    }
+    loctun_test_line(G.tun, 5,
+                     "{\"t\":\"welcome\",\"v\":2,\"client_id\":5,\"udp_key\":\"00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff\","
+                     "\"udp_port\":44996,\"pilot\":\"Fz\",\"relays\":[{\"name\":\"eu\",\"host\":\"127.0.0.1\",\"port\":46981},"
+                     "{\"name\":\"us\",\"host\":\"127.0.0.1\",\"port\":46982}]}", out, sizeof out);
+    loctun_test_line(G.tun, 5,
+                     "{\"t\":\"peer_info\",\"peer\":77,\"pair_nonce\":\"00112233445566778899aabbccddeeff\",\"e2e\":{\"suite\":1,"
+                     "\"pub\":\"9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0\"},\"account\":0,\"lobby_id\":3,"
+                     "\"pilot\":\"Bad\",\"local_eps\":[]}", out, sizeof out);
+    CHECK(loctun_test_line(G.tun, 5, base, out, sizeof out) >= 0, "W395: gueltige route-Zeile mit link_id/ticket bei direct");
+    for (i = 0; i < (int)(sizeof bad / sizeof bad[0]); i++) loctun_test_line(G.tun, 5, bad[i], out, sizeof out);
+    len = (int)strlen(base);
+    for (k = 1; k < len; k++) { /* jede Kuerzung */
+        memcpy(line, base, (size_t)k);
+        line[k] = 0;
+        loctun_test_line(G.tun, 5, line, out, sizeof out);
+    }
+    for (i = 0; i < 3000; i++) { /* zufaellige Byte-Aenderungen (fest gesaet) */
+        int j, m;
+        strcpy_s(line, sizeof line, base);
+        for (m = 0; m < 1 + i % 4; m++) {
+            rng = rng * 1103515245u + 12345u;
+            j = (int)((rng >> 8) % (uint32_t)len);
+            rng = rng * 1103515245u + 12345u;
+            line[j] = (char)("\"{}[],:0123456789-e.x\\ "[(rng >> 8) % 23]);
+        }
+        loctun_test_line(G.tun, 5, line, out, sizeof out);
+    }
+    CHECK(loctun_test_line(G.tun, 5, base, out, sizeof out) >= 0, "W395: 3000 veraenderte und alle gekuerzten route-Zeilen ohne Absturz");
+    locnet_shutdown(&G);
+    printf("W395 route-Zeilen: %d/%d OK\n", s_ok - ok0, s_n - n0);
+}
+
+/* ---------- W395 LOC-ROUTE: Wahl-Logik (loc_route.c) ohne Netz, simulierte Wege ---------- */
+static struct { int used, slot; unsigned short seq; double due; } s_rp[4096];
+static unsigned s_rp_n;
+typedef struct ru_env {
+    double rtt[LOCROUTE_MAXP];
+    int dead[LOCROUTE_MAXP];
+    int loss_every[LOCROUTE_MAXP]; /* jede k-te Probe verloren (0 = keine) */
+    int sent[LOCROUTE_MAXP];
+} ru_env;
+
+static void ru_reset(void)
+{
+    memset(s_rp, 0, sizeof s_rp);
+    s_rp_n = 0;
+}
+
+/* Zeit in 10-ms-Schritten bis until; zaehlt Wechsel (besser/Ausfall) und merkt die Zeit des ersten Ausfallwechsels. */
+static void ru_run(locroute *r, ru_env *e, double *now, double until, int ready, int *sw, double *fail_at, int *dual_seen)
+{
+    int s, why, k;
+    while (*now < until) {
+        for (s = 0; s < LOCROUTE_MAXP; s++) {
+            unsigned short q;
+            if (!locroute_probe_due(r, s, *now, &q)) continue;
+            e->sent[s]++;
+            if (e->dead[s] || (e->loss_every[s] && e->sent[s] % e->loss_every[s] == 0)) continue;
+            k = (int)(s_rp_n++ % 4096);
+            s_rp[k].used = 1;
+            s_rp[k].slot = s;
+            s_rp[k].seq = q;
+            s_rp[k].due = *now + e->rtt[s];
+        }
+        for (k = 0; k < 4096; k++) {
+            if (s_rp[k].used && s_rp[k].due <= *now) {
+                s_rp[k].used = 0;
+                if (!e->dead[s_rp[k].slot]) locroute_probe_ack(r, s_rp[k].slot, s_rp[k].seq, *now);
+            }
+        }
+        locroute_step(r, *now, ready, &why);
+        if (sw && (why == 2 || why == 3)) (*sw)++;
+        if (fail_at && why == 3 && *fail_at < 0) *fail_at = *now;
+        if (dual_seen && locroute_dual(r, *now) >= 0) *dual_seen = 1;
+        *now += 10.0;
+    }
+}
+
+static void route_unit_tests(void)
+{
+    locroute r;
+    ru_env e;
+    double now, t_cut, fail_at;
+    int sw, dual, n0 = s_n, k0 = s_ok;
+    unsigned short q;
+    /* 1) Messfenster: vorlaeufig direkt, danach das schnellere Relay (60 statt 100 ms) */
+    ru_reset();
+    memset(&e, 0, sizeof e);
+    e.rtt[0] = 100; e.rtt[1] = 60; e.rtt[2] = 150;
+    locroute_init(&r);
+    now = 1000;
+    locroute_set_avail(&r, 0, 1, now);
+    locroute_set_avail(&r, 1, 1, now);
+    locroute_set_avail(&r, 2, 1, now);
+    ru_run(&r, &e, &now, 3400, 1, NULL, NULL, NULL);
+    CHECK(!r.decided && r.active == 0, "W395: im Messfenster vorlaeufig direkt");
+    ru_run(&r, &e, &now, 4000, 1, NULL, NULL, NULL);
+    CHECK(r.decided && r.active == 1 && r.nswitch == 0, "W395: nach dem Messfenster das schnellste Relay (erste Wahl kein Wechsel)");
+    CHECK(fabs(r.p[0].srtt - 100) < 15 && fabs(r.p[1].srtt - 60) < 15 && r.p[1].n >= LOCROUTE_MIN_SAMPLES,
+          "W395: RTT je Weg gemessen");
+    /* 2) Gleichstand: direkt bleibt (97 vs 100 ms) */
+    ru_reset();
+    memset(&e, 0, sizeof e);
+    e.rtt[0] = 100; e.rtt[1] = 97;
+    locroute_init(&r);
+    now = 1000;
+    locroute_set_avail(&r, 0, 1, now);
+    locroute_set_avail(&r, 1, 1, now);
+    ru_run(&r, &e, &now, 5000, 1, NULL, NULL, NULL);
+    CHECK(r.decided && r.active == 0, "W395: Gleichstand -> direkt bevorzugt");
+    /* 3) Treffpunkt noch ohne Wege (ready=0): erst nach LOCROUTE_MEASURE_MAX */
+    ru_reset();
+    locroute_init(&r);
+    now = 1000;
+    locroute_set_avail(&r, 0, 1, now);
+    locroute_set_avail(&r, 1, 1, now);
+    ru_run(&r, &e, &now, 1000 + LOCROUTE_MEASURE_MAX - 100, 0, NULL, NULL, NULL);
+    CHECK(!r.decided, "W395: ohne Wegliste des Treffpunkts noch keine Wahl");
+    ru_run(&r, &e, &now, 1000 + LOCROUTE_MEASURE_MAX + 200, 0, NULL, NULL, NULL);
+    CHECK(r.decided, "W395: spaetestens nach dem Messfenster-Maximum gewaehlt");
+    /* 4) Hysterese: 20 ms besser -> bleibt; 40 ms besser -> Wechsel nach >= 3 s */
+    ru_reset();
+    memset(&e, 0, sizeof e);
+    e.rtt[0] = 100; e.rtt[1] = 100;
+    locroute_init(&r);
+    now = 1000;
+    locroute_set_avail(&r, 0, 1, now);
+    locroute_set_avail(&r, 1, 1, now);
+    sw = 0;
+    ru_run(&r, &e, &now, 5000, 1, &sw, NULL, NULL);
+    CHECK(r.active == 0, "W395: gleich schnell -> direkt");
+    e.rtt[1] = 80;
+    ru_run(&r, &e, &now, 25000, 1, &sw, NULL, NULL);
+    CHECK(r.active == 0 && sw == 0, "W395: 20 ms Vorsprung reicht nicht (Hysterese 25 ms)");
+    e.rtt[1] = 60;
+    t_cut = now;
+    ru_run(&r, &e, &now, t_cut + 2900, 1, &sw, NULL, NULL);
+    CHECK(r.active == 0, "W395: kein Wechsel vor 3 s Vorsprung");
+    ru_run(&r, &e, &now, t_cut + 6000, 1, &sw, NULL, NULL);
+    CHECK(r.active == 1 && sw == 1 && r.nfail == 0, "W395: dauerhaft 40 ms besser -> genau ein Wechsel");
+    CHECK(locroute_dual(&r, r.last_switch + 500) == 0 && locroute_dual(&r, r.last_switch + LOCROUTE_DUAL_MS + 10) < 0,
+          "W395: nach dem Wechsel 1 s doppelt ueber den alten Weg");
+    /* 5) Ausfall des aktiven Weges: Verdacht (doppelt senden), dann Wechsel < 1 s */
+    sw = 0;
+    fail_at = -1;
+    dual = 0;
+    ru_run(&r, &e, &now, now + 12000, 1, &sw, NULL, NULL); /* Doppelsenden vorbei, Mindestabstand vorbei */
+    r.kick = 0;
+    e.dead[1] = 1;
+    t_cut = now;
+    ru_run(&r, &e, &now, t_cut + 400, 1, &sw, &fail_at, &dual);
+    CHECK(dual && r.active == 1 && r.kick, "W395: Verdacht -> doppelt ueber den naechsten Weg, Offenes neu senden");
+    ru_run(&r, &e, &now, t_cut + 2000, 1, &sw, &fail_at, NULL);
+    CHECK(r.active == 0 && r.nfail == 1 && fail_at > 0 && fail_at - t_cut < 1000.0,
+          "W395: Ausfall -> sofort auf den naechsten Weg (< 1 s)");
+    printf("W395: Ausfall erkannt nach %.0f ms (Verdacht vorher)\n", fail_at - t_cut);
+    /* 6) Wiederkehr: Weg antwortet wieder -> nach Hysterese und Mindestabstand zurueck */
+    e.dead[1] = 0;
+    ru_run(&r, &e, &now, now + 20000, 1, &sw, NULL, NULL);
+    CHECK(r.active == 1 && r.nswitch >= 3, "W395: wiederkehrender schnellerer Weg wird wieder gewaehlt");
+    /* 7) Verlust-Strafe: direkt 80 ms mit 10 % Verlust gegen Relay 100 ms ohne Verlust */
+    ru_reset();
+    memset(&e, 0, sizeof e);
+    e.rtt[0] = 80; e.rtt[1] = 100; e.loss_every[0] = 10;
+    locroute_init(&r);
+    now = 1000;
+    locroute_set_avail(&r, 0, 1, now);
+    locroute_set_avail(&r, 1, 1, now);
+    ru_run(&r, &e, &now, 6000, 1, NULL, NULL, NULL);
+    CHECK(r.active == 1 && locroute_loss(&r.p[0], now) > 0.05, "W395: 10 % Verlust wiegt 20 ms Vorsprung auf");
+    /* 8) Antworten pruefen: unbekannt, doppelt, nach Neustart des Weges */
+    locroute_init(&r);
+    locroute_set_avail(&r, 0, 1, 1000);
+    CHECK(locroute_probe_due(&r, 0, 1000, &q) && q == 0, "W395: erste Probe faellig");
+    CHECK(!locroute_probe_ack(&r, 0, 7, 1050), "W395: Antwort auf nie gesendete Probe ignoriert");
+    CHECK(locroute_probe_ack(&r, 0, 0, 1050) && !locroute_probe_ack(&r, 0, 0, 1060), "W395: doppelte Antwort ignoriert");
+    CHECK(!locroute_probe_ack(&r, 3, 0, 1050) && !locroute_probe_ack(&r, -1, 0, 1050) &&
+              !locroute_probe_ack(&r, LOCROUTE_MAXP, 0, 1050), "W395: fremder/ungueltiger Slot ignoriert");
+    CHECK(locroute_probe_due(&r, 0, 1100, &q) && q == 1, "W395: zweite Probe");
+    locroute_set_avail(&r, 0, 0, 1110);
+    locroute_set_avail(&r, 0, 1, 1120);
+    CHECK(!locroute_probe_ack(&r, 0, 1, 1150), "W395: Antwort aus der Zeit vor dem Neustart des Weges ignoriert");
+    CHECK(locroute_score(&r.p[0], 1150) < 0, "W395: unter 8 Antworten keine Bewertung");
+    CHECK(!locroute_probe_due(&r, 5, 1150, &q) && !locroute_probe_due(&r, LOCROUTE_MAXP, 1150, &q),
+          "W395: nicht nutzbarer/ungueltiger Weg ohne Probe");
+    printf("W395 loc_route: %d/%d OK\n", s_ok - k0, s_n - n0);
 }
 
 /* W357 LOC-PAUSE-NET (sb_pausenet.h): Netzspiel-Erkennung und Regel "Overlays halten den Takt nicht an". */
@@ -2314,8 +2968,33 @@ int main(int argc, char **argv)
                 if (strcmp(argv[j], "--auth-a") == 0 && j + 1 < argc) strncpy_s(s_auth_a, sizeof s_auth_a, argv[j + 1], _TRUNCATE);
                 if (strcmp(argv[j], "--auth-b") == 0 && j + 1 < argc) strncpy_s(s_auth_b, sizeof s_auth_b, argv[j + 1], _TRUNCATE);
                 if (strcmp(argv[j], "--spki") == 0 && j + 1 < argc) strncpy_s(s_spki, sizeof s_spki, argv[j + 1], _TRUNCATE);
+                if (strcmp(argv[j], "--rsim") == 0 && j + 1 < argc) { /* W395 */
+                    strncpy_s(s_rsim_a, sizeof s_rsim_a, argv[j + 1], _TRUNCATE);
+                    strncpy_s(s_rsim_b, sizeof s_rsim_b, argv[j + 1], _TRUNCATE);
+                }
+                if (strcmp(argv[j], "--rsim-a") == 0 && j + 1 < argc) strncpy_s(s_rsim_a, sizeof s_rsim_a, argv[j + 1], _TRUNCATE);
+                if (strcmp(argv[j], "--rsim-b") == 0 && j + 1 < argc) strncpy_s(s_rsim_b, sizeof s_rsim_b, argv[j + 1], _TRUNCATE);
             }
             return tun_lobby_test(argv[i + 1], nd, sp);
+        }
+        if (strcmp(argv[i], "--route") == 0 && i + 1 < argc) { /* W395 LOC-ROUTE */
+            int j, secs = 30, maxsw = -1;
+            const char *ef = NULL, *el = NULL;
+            for (j = 1; j < argc - 1; j++) {
+                if (strcmp(argv[j], "--spki") == 0) strncpy_s(s_spki, sizeof s_spki, argv[j + 1], _TRUNCATE);
+                if (strcmp(argv[j], "--rsim") == 0) {
+                    strncpy_s(s_rsim_a, sizeof s_rsim_a, argv[j + 1], _TRUNCATE);
+                    strncpy_s(s_rsim_b, sizeof s_rsim_b, argv[j + 1], _TRUNCATE);
+                }
+                if (strcmp(argv[j], "--rsim-a") == 0) strncpy_s(s_rsim_a, sizeof s_rsim_a, argv[j + 1], _TRUNCATE);
+                if (strcmp(argv[j], "--rsim-b") == 0) strncpy_s(s_rsim_b, sizeof s_rsim_b, argv[j + 1], _TRUNCATE);
+                if (strcmp(argv[j], "--secs") == 0) secs = atoi(argv[j + 1]);
+                if (strcmp(argv[j], "--expect-first") == 0) ef = argv[j + 1];
+                if (strcmp(argv[j], "--expect-final") == 0) el = argv[j + 1];
+                if (strcmp(argv[j], "--max-switch") == 0) maxsw = atoi(argv[j + 1]);
+            }
+            if (secs < 5) secs = 5;
+            return tun_route_test(argv[i + 1], secs, ef, el, maxsw);
         }
     }
 
@@ -2551,10 +3230,13 @@ int main(int argc, char **argv)
         w335_tests();      /* W335 NET-AUDIT */
         w350_tun_tests();  /* W350 LOC-REJOIN */
         tun_lobby_guard_tests(); /* W332 */
+        pub_tests();             /* W373 LOC-PUBLIC-LOBBY */
+        route_feed_tests();      /* W395 LOC-ROUTE */
     } else {
         printf("Hinweis: eigener Transport nur in der privaten Fassung - Transport-Pruefungen uebersprungen\n");
     }
 
+    route_unit_tests(); /* W395 */
     pause_net_tests(); /* W357 */
     printf("loc_net_selftest: %d/%d OK\n", s_ok, s_n);
     return s_ok == s_n ? 0 : 1;

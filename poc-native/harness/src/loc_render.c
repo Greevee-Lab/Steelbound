@@ -422,10 +422,159 @@ static unsigned ls_u32(unsigned a)
     return v;
 }
 
+/* ---------------------------------------------------------------------------
+ * DIAG(LOC-ORIGINAL,W363) Teil von loc_lookstat: Inventur der Pixel-Pipeline-Merkmale, die LoC nutzt
+ * (kumuliert ueber die Messbilder, Zeilen LOOKPS bei jedem Messbild-Ende):
+ *  - why: Pfad je Draw (100 = Shading-Pfad, sonst Grund fuer den alten Pfad, g_rq_why),
+ *  - tm: Texturmodus je Stufe (PSTextureModes, 0 NONE .. 18), nst: Combiner-Stufen,
+ *  - Merkmale (Draws je Merkmal, Namen s_lp_fn), fmt: Texturformat (Formatwort Bit 8-15) und Mip-Anzahl je Stufe.
+ * Nur Render-Zustand, keine Eingaben. Reine Zaehlung, kein Einfluss aufs Bild. */
+enum { LPF_NOPS, LPF_DOT, LPF_MUXL, LPF_MUXM, LPF_B2A, LPF_OMAP, LPF_ISGN, LPF_UNIQ, LPF_FIN, LPF_FSUM, LPF_FPROD,
+       LPF_FCLMP, LPF_FCMPL, LPF_FOG, LPF_V1, LPF_CMPM, LPF_DOTMAP, LPF_INTEX, LPF_CONST, LPF_R1, LPF_T23, LPF_ABLUE,
+       LPF_TEXGEN, LPF_TTF, LPF_CKEY, LPF_CSIGN, LPF_AKILL, LPF_BUMP, LPF_WRT, LPF_WRV, LPF_FD, LPF_CUBE, LPF_N };
+static const char *const s_lp_fn[LPF_N] = {
+    "ohnePS", "dot", "muxLSB", "muxMSB", "blau2alpha", "ausgabeabb", "eingabeabb_vz", "konst_je_stufe", "final",
+    "final_v1r0sum", "final_efprod", "final_klemm", "final_kompl", "nebelreg", "v1", "vergleich_clipplane",
+    "dotmapping", "inputtexture", "konst_c0c1", "r1", "t2t3", "alpha_blau", "texgen", "textrafo", "colorkey",
+    "colorsign", "alphakill", "bumpenv", "schreibt_T", "schreibt_V", "final_d", "cubemap" };
+static unsigned s_lp_why[16], s_lp_tm[4][20], s_lp_nst[10], s_lp_f[LPF_N], s_lp_draws;
+#define LP_FMT_N 48
+static struct { unsigned fmt, mips, n; } s_lp_fmt[LP_FMT_N];
+static unsigned s_lp_fmt_n;
+extern unsigned g_rq_why; /* render_shade.c */
+
+static void lp_in(unsigned code, int alpha_part, unsigned *f)
+{
+    unsigned reg = code & 0xFu, map = code & 0xE0u;
+    if (map >= 0x40u) { f[0] |= 1u << LPF_ISGN; }
+    if (reg == 3u) { f[0] |= 1u << LPF_FOG; }
+    if (reg == 5u) { f[0] |= 1u << LPF_V1; }
+    if (reg == 1u || reg == 2u) { f[0] |= 1u << LPF_CONST; }
+    if (reg == 13u) { f[0] |= 1u << LPF_R1; }
+    if (reg == 10u || reg == 11u) { f[0] |= 1u << LPF_T23; }
+    if (alpha_part && reg && !(code & 0x10u)) { f[0] |= 1u << LPF_ABLUE; }
+}
+
+static void lp_count(void)
+{
+    unsigned f = 0, d[60], pdef = 0, i, ts = SBA(0x21A8B0u), why = g_rq_why, xp[4], nn[4];
+    int ok = 0;
+    s_lp_draws++;
+    s_lp_why[why == 100u ? 15u : (why < 15u ? why : 14u)]++;
+    for (i = 0; i < 4u; i++) {
+        unsigned tci = ls_u32(ts + i * 128u + 28u * 4u);
+        if (tci & 0xFFFF0000u) { f |= 1u << LPF_TEXGEN; }
+        if (ls_u32(ts + i * 128u + 21u * 4u)) { f |= 1u << LPF_TTF; }
+        if (ls_u32(ts + i * 128u + 9u * 4u)) { f |= 1u << LPF_CKEY; }
+        if (ls_u32(ts + i * 128u + 10u * 4u)) { f |= 1u << LPF_CSIGN; }
+        if (ls_u32(ts + i * 128u + 11u * 4u) & 4u) { f |= 1u << LPF_AKILL; }
+    }
+    sb_tex_stages(xp, nn);
+    for (i = 0; i < 4u; i++) {
+        unsigned fw, fm, mp, k;
+        if (!xp[i]) { continue; }
+        fw = ls_u32(xp[i] + 12u);
+        fm = (fw >> 8) & 0xFFu; mp = (fw >> 16) & 0xFu;
+        if (fw & 4u) { f |= 1u << LPF_CUBE; }
+        for (k = 0; k < s_lp_fmt_n; k++) {
+            if (s_lp_fmt[k].fmt == (fm | (i << 8)) && s_lp_fmt[k].mips == mp) { s_lp_fmt[k].n++; break; }
+        }
+        if (k == s_lp_fmt_n && s_lp_fmt_n < LP_FMT_N) {
+            s_lp_fmt[k].fmt = fm | (i << 8); s_lp_fmt[k].mips = mp; s_lp_fmt[k].n = 1; s_lp_fmt_n++;
+        }
+    }
+    if (!g_im_pshader) {
+        f |= 1u << LPF_NOPS;
+    } else {
+        __try {
+            pdef = *(volatile unsigned *)(uintptr_t)((g_im_pshader & ~1u) + 8u);
+            if (pdef >= 0x10000u) { memcpy(d, (const void *)(uintptr_t)pdef, sizeof d); ok = 1; }
+        } __except (EXCEPTION_EXECUTE_HANDLER) { ok = 0; }
+    }
+    if (ok) {
+        unsigned cnt = d[53], nst = cnt & 0xFFu;
+        if (nst > 9u) { nst = 9u; }
+        s_lp_nst[nst]++;
+        if (cnt & 0x1100u) { f |= 1u << LPF_UNIQ; }
+        for (i = 0; i < 4u; i++) {
+            unsigned tm = (d[54] >> (i * 5u)) & 0x1Fu;
+            s_lp_tm[i][tm < 19u ? tm : 19u]++;
+            if (tm == 6u || tm == 7u) { f |= 1u << LPF_BUMP; }
+        }
+        if (d[42]) { f |= 1u << LPF_CMPM; }
+        if (d[55]) { f |= 1u << LPF_DOTMAP; }
+        if (d[56]) { f |= 1u << LPF_INTEX; }
+        for (i = 0; i < nst && i < 8u; i++) {
+            unsigned rin = d[34 + i], ain = d[i], rout = d[45 + i], aout = d[26 + i], q, r[6];
+            if (rout & 0x3000u) { f |= 1u << LPF_DOT; }
+            if ((rout | aout) & 0x4000u) { f |= 1u << ((cnt & 0x10000u) ? LPF_MUXM : LPF_MUXL); }
+            if (rout & 0xC0000u) { f |= 1u << LPF_B2A; }
+            if (((rout >> 15) & 7u) || ((aout >> 15) & 7u)) { f |= 1u << LPF_OMAP; }
+            for (q = 0; q < 4u; q++) { lp_in((rin >> (q * 8u)) & 0xFFu, 0, &f); lp_in((ain >> (q * 8u)) & 0xFFu, 1, &f); }
+            r[0] = rout & 0xFu; r[1] = (rout >> 4) & 0xFu; r[2] = (rout >> 8) & 0xFu;
+            r[3] = aout & 0xFu; r[4] = (aout >> 4) & 0xFu; r[5] = (aout >> 8) & 0xFu;
+            for (q = 0; q < 6u; q++) {
+                if (r[q] >= 8u && r[q] <= 11u) { f |= 1u << LPF_WRT; }
+                if (r[q] == 4u || r[q] == 5u) { f |= 1u << LPF_WRV; }
+            }
+        }
+        if (d[8] || d[9]) {
+            unsigned q;
+            f |= 1u << LPF_FIN;
+            for (q = 0; q < 4u; q++) {
+                unsigned c = (d[8] >> (q * 8u)) & 0xFu;
+                if (c == 14u) { f |= 1u << LPF_FSUM; }
+                if (c == 15u) { f |= 1u << LPF_FPROD; }
+                lp_in((d[8] >> (q * 8u)) & 0x3Fu, 0, &f);
+            }
+            for (q = 1; q < 4u; q++) { lp_in((d[9] >> (q * 8u)) & 0x3Fu, q == 1u, &f); }
+            if ((d[8] & 0xFFu) != 0u) { f |= 1u << LPF_FD; }
+            if (d[9] & 0x80u) { f |= 1u << LPF_FCLMP; }
+            if (d[9] & 0x60u) { f |= 1u << LPF_FCMPL; }
+        }
+    }
+    for (i = 0; i < LPF_N; i++) {
+        if (f & (1u << i)) { s_lp_f[i]++; }
+    }
+}
+
+static void lp_flush(void)
+{
+    char b[1400];
+    unsigned i, k, o;
+    if (!s_lp_draws) { return; }
+    o = (unsigned)_snprintf_s(b, sizeof b, _TRUNCATE, "LOOKPS f=%u draws=%u why", s_ls_f, s_lp_draws);
+    for (i = 0; i < 16u; i++) {
+        if (s_lp_why[i] && o < sizeof b - 32u) { o += (unsigned)_snprintf_s(b + o, sizeof b - o, _TRUNCATE, " %u:%u", i == 15u ? 100u : i, s_lp_why[i]); }
+    }
+    o += (unsigned)_snprintf_s(b + o, sizeof b - o, _TRUNCATE, " | nst");
+    for (i = 0; i < 10u; i++) {
+        if (s_lp_nst[i] && o < sizeof b - 32u) { o += (unsigned)_snprintf_s(b + o, sizeof b - o, _TRUNCATE, " %u:%u", i, s_lp_nst[i]); }
+    }
+    o += (unsigned)_snprintf_s(b + o, sizeof b - o, _TRUNCATE, " | tm");
+    for (k = 0; k < 4u; k++) {
+        for (i = 1; i < 20u; i++) {
+            if (s_lp_tm[k][i] && o < sizeof b - 32u) { o += (unsigned)_snprintf_s(b + o, sizeof b - o, _TRUNCATE, " st%u/%u:%u", k, i, s_lp_tm[k][i]); }
+        }
+    }
+    HLOG_I("%s", b);
+    o = (unsigned)_snprintf_s(b, sizeof b, _TRUNCATE, "LOOKPS f=%u merkmale", s_ls_f);
+    for (i = 0; i < LPF_N; i++) {
+        if (s_lp_f[i] && o < sizeof b - 48u) { o += (unsigned)_snprintf_s(b + o, sizeof b - o, _TRUNCATE, " %s:%u", s_lp_fn[i], s_lp_f[i]); }
+    }
+    HLOG_I("%s", b);
+    o = (unsigned)_snprintf_s(b, sizeof b, _TRUNCATE, "LOOKPS f=%u fmt(stufe/format/mips:n)", s_ls_f);
+    for (i = 0; i < s_lp_fmt_n; i++) {
+        if (o < sizeof b - 32u) { o += (unsigned)_snprintf_s(b + o, sizeof b - o, _TRUNCATE, " %u/0x%02X/%u:%u", s_lp_fmt[i].fmt >> 8, s_lp_fmt[i].fmt & 0xFFu, s_lp_fmt[i].mips, s_lp_fmt[i].n); }
+    }
+    HLOG_I("%s", b);
+}
+
 static void ls_flush(void)
 {
     unsigned i;
     if (!s_ls_draws) { return; }
+    lp_flush(); /* W363 */
     HLOG_I("LOOKSTAT f=%u draws=%u kombis=%u verworfen=%u", s_ls_f, s_ls_draws, s_ls_n, s_ls_drop);
     for (i = 0; i < s_ls_n; i++) {
         const unsigned *k = s_ls[i].k;
@@ -448,6 +597,7 @@ void loc_render_lookstat(int rhw, unsigned has_tex)
         if (s_ls_f == 0xFFFFFFFEu) { s_ls_f = g_present_no | 0x80000000u; }
     }
     if (s_ls_f & 0x80000000u) { return; } /* kein Messbild */
+    lp_count(); /* W363 */
     b = g_rq_active ? rq_lookstat_bits() : 0xFu;
     sb_render_blend_state(&on, &bs, &bd);
     memset(k, 0, sizeof k);

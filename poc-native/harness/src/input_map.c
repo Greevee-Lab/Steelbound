@@ -18,6 +18,13 @@ void imap_state_init(imap_state_t *st)
     st->m_step_frame = 0xFFFFFFFFu;
 }
 
+void imap_mouse_center(imap_state_t *st)
+{
+    st->m_ax = st->m_ay = 0x7F;
+    st->m_fx = st->m_fy = 0.0f;
+    st->m_sx = st->m_sy = 0; /* W396: Sicht-Akku (mouse_sight=1) mit */
+}
+
 static void imap_btn(imap_block_t *s, int idx)
 {
     s->buttons[idx / 16] |= (uint16_t)(1u << (idx % 16));
@@ -80,6 +87,29 @@ static void imap_mouse_accu_add_f(imap_state_t *st, const imap_snap_t *snap,
     st->m_ay = (int)(vy + 0.5f);
     st->m_fx = vx - (float)st->m_ax;
     st->m_fy = vy - (float)st->m_ay;
+}
+
+/* W394 LOC-VIEW-PERFRAME: Vorschau des Maus-Akkus ohne Nebenwirkung. Kopie von *st, darauf derselbe Raw-Pfad wie
+ * imap_mouse_update (Begrenzung +-64 Counts je Poll, mouse_sens, absolut/relativ) mit den noch nicht abgeholten
+ * Deltas dx/dy. *st bleibt unberuehrt; die Simulation liest den Akku weiter genau einmal je Poll. */
+void imap_mouse_preview(const imap_state_t *st, const imap_snap_t *snap, int dx, int dy, imap_state_t *out)
+{
+    int sens = snap->mouse_sens;
+    *out = *st;
+    if (!snap->mouse_aim || !snap->mouse_raw || snap->real_blocked ||
+        (snap->replay_active && !snap->mouse_live))
+        return;
+    if (sens < 0) sens = 0;
+    if (sens > 16) sens = 16;
+    if (dx > 64) dx = 64;
+    if (dx < -64) dx = -64;
+    if (dy > 64) dy = 64;
+    if (dy < -64) dy = -64;
+    if ((dx || dy) && snap->mouse_abs)
+        imap_mouse_accu_add_f(out, snap, (float)(dx * sens) / IMAP_ABS_DIV,
+                              (float)(dy * sens) / IMAP_ABS_DIV);
+    else if (dx || dy)
+        imap_mouse_accu_add_raw(out, snap, dx * sens / 4, dy * sens / 4);
 }
 
 /* Echte Maustaste: W79 input_source=1 -> snap->real_vk (Fenster-
@@ -312,6 +342,43 @@ void imap_legacy_apply(imap_block_t *blk, imap_state_t *st,
     st->prev_tdn = tdn;
     blk->gear = st->gear;
     blk->tuner = st->tuner;
+    imap_slide_assist(st, blk, key_down(VK_LCONTROL, kctx) || x1 || x2, snap->slide_assist);
+}
+
+/* ---- W380 LOC-DODGE: Ausweich-Hilfe ----
+ * Original (LoC und SB, gleiche VT-Logik; LOC_BOOT "W380"): die Pedal-Flanke startet den Seitenschritt, die
+ * Richtung liest das Spiel erst einen Tick spaeter aus dem Drehhebel, und das Loslassen des Pedals beendet den
+ * Schritt sofort. Ein Tastentipp (1-2 Ticks) gibt daher nur Anlauf und Ton ohne Strecke, ein Tipp mit A/D im
+ * selben Tick einen Schritt geradeaus. Am Original-Controller tritt man das Pedal und haelt den Drehhebel.
+ * Die Hilfe macht aus dem digitalen Tipp einen kurzen Pedaltritt: Pedal links und die Richtung des Drucks
+ * bleiben hold Polls stehen. Kein Eingriff ins Spiel; die Werte laufen ueber den Eingabesatz (Netzspiel
+ * synchron). */
+void imap_slide_assist(imap_state_t *st, imap_block_t *blk, int dig, int hold)
+{
+    int r = blk->rot_lever > 25 ? 1 : (blk->rot_lever < -25 ? -1 : 0); /* Totzone des Spiels (|x| < 25,6) */
+    if (hold <= 0) {
+        st->sa_prev = (uint8_t)(dig != 0);
+        st->sa_hold = 0;
+        return;
+    }
+    if (hold > 255) hold = 255;
+    if (r) {
+        st->sa_last = (int8_t)r;
+        st->sa_age = 0;
+    } else if (st->sa_age < 255) {
+        st->sa_age++;
+    }
+    if (dig && !st->sa_prev) { /* Druck: Fenster starten, Richtung aus diesem oder den 2 Vor-Polls */
+        st->sa_hold = (uint8_t)hold;
+        st->sa_dir = st->sa_age <= 2 ? st->sa_last : 0;
+    }
+    st->sa_prev = (uint8_t)(dig != 0);
+    if (st->sa_hold) {
+        st->sa_hold--;
+        if (r) st->sa_dir = (int8_t)r; /* neueste Richtung im Fenster gewinnt */
+        blk->pedal_l = 0xFF;
+        if (!r && st->sa_dir) blk->rot_lever = (int8_t)(st->sa_dir * 127);
+    }
 }
 
 /* ---- Profil-Auswertung ---- */
@@ -368,6 +435,8 @@ void imap_wheel_add(imap_wheel_t *w, int horiz, int delta)
         acc += acc > 0 ? -IMAP_WHEEL_DELTA : IMAP_WHEEL_DELTA;
         if (InterlockedIncrement(&w->pend[d]) > IMAP_WHEEL_MAXQ)
             InterlockedDecrement(&w->pend[d]);
+        if (InterlockedIncrement(&w->cnt[d]) > IMAP_WHEEL_MAXQ) /* W384 */
+            InterlockedDecrement(&w->cnt[d]);
     }
     InterlockedExchange(&w->acc[horiz], acc);
 }
@@ -378,19 +447,35 @@ void imap_wheel_clear(imap_wheel_t *w)
     if (!w) return;
     InterlockedExchange(&w->acc[0], 0);
     InterlockedExchange(&w->acc[1], 0);
-    for (i = 0; i < IMAP_WHEEL_N; i++) InterlockedExchange(&w->pend[i], 0);
+    for (i = 0; i < IMAP_WHEEL_N; i++) {
+        InterlockedExchange(&w->pend[i], 0);
+        InterlockedExchange(&w->cnt[i], 0); /* W384 */
+    }
 }
 
 unsigned imap_wheel_step(imap_wheel_t *w, unsigned frame, int blocked)
 {
     unsigned m = 0;
-    int i;
+    int i, newf;
     if (!w) return 0;
+    newf = !w->stepv || frame != w->stepf; /* W384: Zaehler nur im ersten Poll je Frame */
+    w->stepv = 1;
+    w->stepf = frame;
+    w->steps = 0;
     for (i = 0; i < IMAP_WHEEL_N; i++) {
         if (blocked) { /* gesperrt: nichts anstauen, laufenden Impuls beenden */
             InterlockedExchange(&w->pend[i], 0);
+            InterlockedExchange(&w->cnt[i], 0); /* W384 */
             w->on[i] = 0;
             continue;
+        }
+        while (newf) { /* W384 (GH #63): eine Raste je Frame fuer Tuner/Gang */
+            long c = w->cnt[i];
+            if (c <= 0) break;
+            if (InterlockedCompareExchange(&w->cnt[i], c - 1, c) == c) {
+                w->steps |= 1u << i;
+                break;
+            }
         }
         if (w->on[i]) {
             unsigned d = frame - w->f0[i];
@@ -410,6 +495,11 @@ unsigned imap_wheel_step(imap_wheel_t *w, unsigned frame, int blocked)
         }
     }
     return m;
+}
+
+unsigned imap_wheel_steps(const imap_wheel_t *w)
+{
+    return w ? w->steps : 0u;
 }
 
 static int imap_atom_active(const imap_atom_t *a, const imap_snap_t *snap)
@@ -951,76 +1041,79 @@ static int imap_axis_pedal(const imap_axis_map_t *m, const imap_snap_t *snap)
     return imap_clampi(best, 0, 0xFF);
 }
 
+/* W365 BIND-COMBO: Atom in die Unterdrueckungsliste (ohne Doppel). Eine generische Zusatztaste
+ * (SHIFT/CTRL/ALT) im Akkord unterdrueckt auch ihre Links/Rechts-Variante (LCTRL als Einzelbelegung). */
+static void imap_supp_add1(imap_snap_t *snap, int kind, int code)
+{
+    int d;
+    for (d = 0; d < snap->nsupp; d++) {
+        if (snap->supp[d].kind == kind && snap->supp[d].code == code) return;
+    }
+    if (snap->nsupp < 16) {
+        snap->supp[snap->nsupp].kind = kind;
+        snap->supp[snap->nsupp].code = code;
+        snap->nsupp++;
+    }
+}
+
+static void imap_supp_add(imap_snap_t *snap, const imap_atom_t *a)
+{
+    imap_supp_add1(snap, (int)a->kind, a->code);
+    if (a->kind != IMAP_A_KEY) return;
+    if (a->code == VK_SHIFT) {
+        imap_supp_add1(snap, (int)a->kind, VK_LSHIFT);
+        imap_supp_add1(snap, (int)a->kind, VK_RSHIFT);
+    } else if (a->code == VK_CONTROL) {
+        imap_supp_add1(snap, (int)a->kind, VK_LCONTROL);
+        imap_supp_add1(snap, (int)a->kind, VK_RCONTROL);
+    } else if (a->code == VK_MENU) {
+        imap_supp_add1(snap, (int)a->kind, VK_LMENU);
+        imap_supp_add1(snap, (int)a->kind, VK_RMENU);
+    }
+}
+
+static void imap_supp_bind(const imap_bind_t *b, imap_snap_t *snap)
+{
+    int i;
+    for (i = 0; i < b->n; i++) {
+        const imap_chord_t *c = &b->alt[i];
+        if (!c->chord || !imap_chord_active(c, snap, 0, 0)) continue;
+        imap_supp_add(snap, &c->a);
+        imap_supp_add(snap, &c->b);
+    }
+}
+
 /* Aktive Akkorde des Profils sammeln -> deren Atome unterdruecken
  * reine Basis-Bindungen (s. imap_chord_active). Akkorde selbst werden
- * nie unterdrueckt (keine Rekursion). */
+ * nie unterdrueckt (keine Rekursion). W365: alle digitalen Bindungen
+ * (auch Gang-Direktwahl und Client-Aktionen), da der Launcher Kombis
+ * jetzt ueberall lernt. Die Liste wird erst nach dem Sammeln gelesen
+ * (imap_chord_active prueft supp nur fuer Nicht-Akkorde). */
 static void imap_collect_suppression(const imap_profile_t *prof,
                                      imap_snap_t *snap)
 {
-    int bi, ax, i, k;
+    int bi, ax, k;
     snap->nsupp = 0;
-    for (bi = 0; bi < 39; bi++) {
-        for (i = 0; i < prof->btn[bi].n; i++) {
-            const imap_chord_t *c = &prof->btn[bi].alt[i];
-            const imap_atom_t *at[2];
-            if (!c->chord) continue;
-            if (!imap_chord_active(c, snap, 0, 0)) continue;
-            at[0] = &c->a;
-            at[1] = &c->b;
-            for (k = 0; k < 2; k++) {
-                int d, dup = 0;
-                for (d = 0; d < snap->nsupp; d++) {
-                    if (snap->supp[d].kind == (int)at[k]->kind &&
-                        snap->supp[d].code == at[k]->code) {
-                        dup = 1;
-                        break;
-                    }
-                }
-                if (!dup && snap->nsupp < 16) {
-                    snap->supp[snap->nsupp].kind = (int)at[k]->kind;
-                    snap->supp[snap->nsupp].code = at[k]->code;
-                    snap->nsupp++;
-                }
-            }
-        }
-    }
-    /* Akkorde auf Achsen-Endlagen und Gang/Tuner ebenso. */
+    for (bi = 0; bi < 39; bi++) imap_supp_bind(&prof->btn[bi], snap);
     for (ax = 0; ax < IMAP_AX_COUNT; ax++) {
-        const imap_bind_t *bb[2] = { &prof->axis[ax].neg,
-                                     &prof->axis[ax].pos };
-        for (k = 0; k < 2; k++) {
-            for (i = 0; i < bb[k]->n; i++) {
-                const imap_chord_t *c = &bb[k]->alt[i];
-                if (c->chord && imap_chord_active(c, snap, 0, 0) &&
-                    snap->nsupp + 2 <= 16) {
-                    snap->supp[snap->nsupp].kind = (int)c->a.kind;
-                    snap->supp[snap->nsupp].code = c->a.code;
-                    snap->nsupp++;
-                    snap->supp[snap->nsupp].kind = (int)c->b.kind;
-                    snap->supp[snap->nsupp].code = c->b.code;
-                    snap->nsupp++;
-                }
-            }
-        }
+        imap_supp_bind(&prof->axis[ax].neg, snap);
+        imap_supp_bind(&prof->axis[ax].pos, snap);
     }
-    {
-        const imap_bind_t *bb[4] = { &prof->gear_up, &prof->gear_down,
-                                     &prof->tuner_up, &prof->tuner_down };
-        for (k = 0; k < 4; k++) {
-            for (i = 0; i < bb[k]->n; i++) {
-                const imap_chord_t *c = &bb[k]->alt[i];
-                if (c->chord && imap_chord_active(c, snap, 0, 0) &&
-                    snap->nsupp + 2 <= 16) {
-                    snap->supp[snap->nsupp].kind = (int)c->a.kind;
-                    snap->supp[snap->nsupp].code = c->a.code;
-                    snap->nsupp++;
-                    snap->supp[snap->nsupp].kind = (int)c->b.kind;
-                    snap->supp[snap->nsupp].code = c->b.code;
-                    snap->nsupp++;
-                }
-            }
-        }
-    }
+    imap_supp_bind(&prof->gear_up, snap);
+    imap_supp_bind(&prof->gear_down, snap);
+    imap_supp_bind(&prof->tuner_up, snap);
+    imap_supp_bind(&prof->tuner_down, snap);
+    for (k = 0; k < 7; k++) imap_supp_bind(&prof->gear_direct[k], snap);
+    imap_supp_bind(&prof->vr_recenter, snap);
+    imap_supp_bind(&prof->pause, snap);
+    imap_supp_bind(&prof->photo, snap);
+    imap_supp_bind(&prof->feedback_shot, snap);
+    imap_supp_bind(&prof->feedback_clip, snap);
+    imap_supp_bind(&prof->aim_center, snap);
+    imap_supp_bind(&prof->orig_view, snap);
+    imap_supp_bind(&prof->quick_shot, snap);
+    imap_supp_bind(&prof->replay_exit, snap);
+    imap_supp_bind(&prof->net_hud, snap); /* W374 */
 }
 
 void imap_profile_apply(imap_block_t *blk, imap_state_t *st,
@@ -1131,20 +1224,45 @@ void imap_profile_apply(imap_block_t *blk, imap_state_t *st,
         (uint8_t)imap_axis_pedal(&prof->axis[IMAP_AX_PEDAL_M], snap);
     blk->pedal_r =
         (uint8_t)imap_axis_pedal(&prof->axis[IMAP_AX_PEDAL_R], snap);
+    imap_slide_assist(st, blk, imap_bind_active(&prof->axis[IMAP_AX_PEDAL_L].neg, snap) ||
+                      imap_bind_active(&prof->axis[IMAP_AX_PEDAL_L].pos, snap), snap->slide_assist);
 
     /* Gang/Tuner (Flanken auf ODER-Signal, Direktwahl gewinnt). */
     {
-        int up = imap_bind_active(&prof->gear_up, snap);
-        int dn = imap_bind_active(&prof->gear_down, snap);
-        int tu = imap_bind_active(&prof->tuner_up, snap);
-        int td = imap_bind_active(&prof->tuner_down, snap);
-        if (up && !st->prev_qup && st->gear < 13) st->gear++;
+        int up, dn, tu, td, wup = 0, wdn = 0, wtu = 0, wtd = 0;
+        if (loc.wheel_mask || loc.wheel_step) {
+            /* W384 (GH #63): Rad-Quellen zaehlen direkt je Raste (wheel_step), nicht ueber
+             * die 2+2-Frame-Impulse (schnelles Drehen lief sonst bis ~1 s hinterher).
+             * Pegel/Flanken der uebrigen Quellen ohne Rad-Impulse. */
+            unsigned wm = loc.wheel_mask;
+            loc.wheel_mask = loc.wheel_step;
+            wup = imap_bind_active(&prof->gear_up, snap);
+            wdn = imap_bind_active(&prof->gear_down, snap);
+            wtu = imap_bind_active(&prof->tuner_up, snap);
+            wtd = imap_bind_active(&prof->tuner_down, snap);
+            loc.wheel_mask = 0;
+            up = imap_bind_active(&prof->gear_up, snap);
+            dn = imap_bind_active(&prof->gear_down, snap);
+            tu = imap_bind_active(&prof->tuner_up, snap);
+            td = imap_bind_active(&prof->tuner_down, snap);
+            loc.wheel_mask = wm;
+            wup = wup && !up; /* nur der Rad-Anteil (gehaltene Taste zaehlt per Flanke) */
+            wdn = wdn && !dn;
+            wtu = wtu && !tu;
+            wtd = wtd && !td;
+        } else {
+            up = imap_bind_active(&prof->gear_up, snap);
+            dn = imap_bind_active(&prof->gear_down, snap);
+            tu = imap_bind_active(&prof->tuner_up, snap);
+            td = imap_bind_active(&prof->tuner_down, snap);
+        }
+        if (((up && !st->prev_qup) || wup) && st->gear < 13) st->gear++;
         st->prev_qup = up;
-        if (dn && !st->prev_qdn && st->gear > 7) st->gear--;
+        if (((dn && !st->prev_qdn) || wdn) && st->gear > 7) st->gear--;
         st->prev_qdn = dn;
-        if (tu && !st->prev_tup && st->tuner < 12) st->tuner++;
+        if (((tu && !st->prev_tup) || wtu) && st->tuner < 12) st->tuner++;
         st->prev_tup = tu;
-        if (td && !st->prev_tdn && st->tuner > 0) st->tuner--;
+        if (((td && !st->prev_tdn) || wtd) && st->tuner > 0) st->tuner--;
         st->prev_tdn = td;
         st->gear_direct_hit = 0;
         for (i = 0; i < 7; i++) {
@@ -1296,6 +1414,24 @@ int imap_action_quick_shot(const imap_profile_t *prof, imap_state_t *st,
     lvl = imap_bind_active(&prof->quick_shot, &loc) ? 1 : 0;
     hit = (lvl && !st->prev_quick_shot) ? 1 : 0;
     st->prev_quick_shot = lvl;
+    return hit;
+}
+
+/* W374 LOC-NET-OVERLAY: Aktion "net_hud" (Pad/Controller/Joystick, Flanke; Tasten wertet das Fenster aus). */
+int imap_action_net_hud(const imap_profile_t *prof, imap_state_t *st, const imap_snap_t *snap)
+{
+    imap_snap_t loc;
+    int lvl, hit;
+    if (prof->net_hud.n == 0) {
+        st->prev_net_hud = 0;
+        return 0;
+    }
+    loc = *snap;
+    loc.key = imap_key_off;
+    imap_collect_suppression(prof, &loc);
+    lvl = imap_bind_active(&prof->net_hud, &loc) ? 1 : 0;
+    hit = (lvl && !st->prev_net_hud) ? 1 : 0;
+    st->prev_net_hud = lvl;
     return hit;
 }
 
@@ -1526,7 +1662,8 @@ enum {
     IMAP_ACT_AIM_CENTER = 5, /* W271: Waffenarm zur Mitte */
     IMAP_ACT_ORIG_VIEW = 6,  /* W283: Original-Optik <-> eigene Einstellungen */
     IMAP_ACT_QUICK_SHOT = 7, /* W290: Schnell-Screenshot */
-    IMAP_ACT_REPLAY_EXIT = 8 /* W299: Spiel-Replay beenden */
+    IMAP_ACT_REPLAY_EXIT = 8, /* W299: Spiel-Replay beenden */
+    IMAP_ACT_NET_HUD = 9 /* W374: Netz-Overlay */
 };
 
 /* Elementname -> Ziel. btn_i >= 0: Taste; axis >= 0 (+negpos 0/1/2 =
@@ -1570,6 +1707,10 @@ static int imap_elem_parse(const char *name, imap_elem_t *e)
     }
     if (imap_strieq(name, "replay_exit")) { /* W299: Replay beenden */
         e->action = IMAP_ACT_REPLAY_EXIT;
+        return 0;
+    }
+    if (imap_strieq(name, "net_hud")) { /* W374: Netz-Overlay */
+        e->action = IMAP_ACT_NET_HUD;
         return 0;
     }
     if (imap_strieq(name, "photo")) { /* W195: Fotomodus */
@@ -2116,6 +2257,7 @@ static unsigned imap_profile_joy_used(const imap_profile_t *p)
     m |= imap_bind_joy_used(&p->orig_view);  /* W283 */
     m |= imap_bind_joy_used(&p->quick_shot); /* W290 */
     m |= imap_bind_joy_used(&p->replay_exit); /* W299 */
+    m |= imap_bind_joy_used(&p->net_hud);     /* W374 */
     return m;
 }
 
@@ -2178,6 +2320,10 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
             out->replay_exit.n = 0;
             out->replay_exit_set = 1;
         }
+        if (e.action == IMAP_ACT_NET_HUD) { /* W374: letzte Zeile gewinnt, leer = aus */
+            out->net_hud.n = 0;
+            out->net_hud_set = 1;
+        }
         for (alt = strtok_s(val, ",", &ctx); alt;
              alt = strtok_s(NULL, ",", &ctx)) {
             int rc;
@@ -2204,6 +2350,8 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
                 rc = imap_bind_add(&out->quick_shot, alt, &out->has_pad, &out->has_sbc);
             } else if (e.action == IMAP_ACT_REPLAY_EXIT) { /* W299 */
                 rc = imap_bind_add(&out->replay_exit, alt, &out->has_pad, &out->has_sbc);
+            } else if (e.action == IMAP_ACT_NET_HUD) { /* W374 */
+                rc = imap_bind_add(&out->net_hud, alt, &out->has_pad, &out->has_sbc);
             } else if (e.btn_i >= 0) {
                 rc = imap_bind_add(&out->btn[e.btn_i], alt, &out->has_pad,
                                    &out->has_sbc);
@@ -2247,6 +2395,11 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
         out->replay_exit.n = 0;
         (void)imap_bind_add(&out->replay_exit, IMAP_REPLAY_EXIT_DEFAULT, &dp, &ds);
     }
+    if (!out->net_hud_set) { /* W374: Profil ohne Zeile -> Standard F3 */
+        int dp = 0, ds = 0;
+        out->net_hud.n = 0;
+        (void)imap_bind_add(&out->net_hud, IMAP_NET_HUD_DEFAULT, &dp, &ds);
+    }
     out->joy_used = imap_profile_joy_used(out);
     return 0;
 }
@@ -2280,6 +2433,7 @@ static const char kBuiltinKeyboard[] =
     "bi0 = KEY:SPACE, MOUSE:LEFT\n"
     "bi1 = KEY:F, MOUSE:RIGHT\n"
     "bi2 = KEY:L, MOUSE:MIDDLE\n"
+    "bi3 = KEY:SHIFT+KEY:DELETE\n" /* W403: Eject, Akkord gegen Versehen (Strg = Pedal) */
     "bi4 = KEY:H\n"
     "bi5 = KEY:I\n"
     "bi6 = KEY:ENTER\n"
@@ -2322,7 +2476,8 @@ static const char kBuiltinKeyboard[] =
     "photo = KEY:SHIFT+KEY:F12\n"
     "quick_shot = KEY:F12\n"
     "orig_view = KEY:SHIFT+KEY:F8\n"
-    "replay_exit = KEY:BACKSPACE\n"; /* W283; W290 photo/quick_shot; W299 replay_exit */
+    "replay_exit = KEY:BACKSPACE\n"
+    "net_hud = KEY:F3\n"; /* W283; W290 photo/quick_shot; W299 replay_exit; W374 net_hud */
 
 static const char kBuiltinXbox[] =
     "# xbox_pad_default - Xbox-Gamepad + Tastatur parallel (OR / Max-Abs).\n"
@@ -2330,7 +2485,7 @@ static const char kBuiltinXbox[] =
     "bi0 = KEY:SPACE, MOUSE:LEFT, PAD:RB\n"
     "bi1 = KEY:F, MOUSE:RIGHT, PAD:B\n"
     "bi2 = KEY:L, MOUSE:MIDDLE, PAD:LB\n"
-    "bi3 = PAD:BACK+PAD:Y\n"
+    "bi3 = KEY:SHIFT+KEY:DELETE, PAD:BACK+PAD:Y\n"
     "bi4 = KEY:H, PAD:BACK+PAD:X\n"
     "bi5 = KEY:I, PAD:BACK+PAD:A\n"
     "bi6 = KEY:ENTER, PAD:START\n"
@@ -2385,7 +2540,8 @@ static const char kBuiltinXbox[] =
     "photo = KEY:SHIFT+KEY:F12\n"
     "quick_shot = KEY:F12\n"
     "orig_view = KEY:SHIFT+KEY:F8\n"
-    "replay_exit = KEY:BACKSPACE\n"; /* W283; W290 photo/quick_shot; W299 replay_exit */
+    "replay_exit = KEY:BACKSPACE\n"
+    "net_hud = KEY:F3\n"; /* W283; W290 photo/quick_shot; W299 replay_exit; W374 net_hud */
 
 int imap_profile_builtin(const char *name, imap_profile_t *out)
 {
@@ -2546,6 +2702,8 @@ int imap_profile_equal(const imap_profile_t *a, const imap_profile_t *b)
     if (a->quick_shot_set != b->quick_shot_set) return 1;
     if (imap_bind_equal(&a->replay_exit, &b->replay_exit)) return 1; /* W299 */
     if (a->replay_exit_set != b->replay_exit_set) return 1;
+    if (imap_bind_equal(&a->net_hud, &b->net_hud)) return 1; /* W374 */
+    if (a->net_hud_set != b->net_hud_set) return 1;
     if (a->orig_view_set != b->orig_view_set) return 1;
     if (a->has_pad != b->has_pad) return 1;
     if (a->has_sbc != b->has_sbc) return 1; /* W159 */

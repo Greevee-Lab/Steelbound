@@ -28,9 +28,16 @@
 #include "sb_texhash.h" /* W288 PACK-ZERO-TEX */
 #include "render_interp_bb.h" /* W347 GHOST */
 #include "render_interp_camfit.h" /* W349 LOC-FRAMES-2 */
+#include "loc_aim_law.h" /* W376 LOC-LOCAL-AIM */
+#include "loc_smooth_math.h" /* W385 LOC-SMOOTH */
+#include "render_pace.h" /* W393 LOC-PACING */
+#include "loc_hud_math.h" /* W394 LOC-HUD-VIEW */
 #include "render_loclook.h" /* W358 LOC-LOOK */
 #include "render_line_src.h" /* W352 ISSUE-EMP line_scale */
 #include "render_interp_shref.h" /* W361 LOC-INTERP-CRASH */
+#include "render_locmenu.h" /* W377 LOC-MENU-FPS */
+#include "render_rq_exp.h" /* W383 LOC-GH-DATA (#62) */
+#include "sb_tex_budget.h" /* W383 LOC-GH-DATA (#60) */
 #if SB_EDITION_COMMUNITY
 #include "render_selftest_xbe.h"
 /* Gleiche Formen wie in render_selftest_data.h, aber mit Lade-Puffern
@@ -1084,6 +1091,671 @@ static void test_camfit(void)
     g_fail += fail;
 }
 
+/* ---------- W376 LOC-LOCAL-AIM: Gesetz Eingabe -> Sicht/Arm und Kamera-Korrektur (loc_aim_law.h) ----------
+ * (a) Sicht Tick fuer Tick gegen den Messlauf W376_A0 (Spielerblock, Sichthebel voll rechts = +127): Soll/Glaettung,
+ * Anschlag -pi/2, Totzone. (b) Arm: Hoechstschritt, Annaeherung, Ruhe bei Hebel 0. (c) Kamera-Korrektur: VP * C ==
+ * Kamera mit gedrehter Sicht (Gier, Nick, beides; Punkte im Bild), Null-Drehung = Einheit. */
+static void la_camera(double VP[16], const double e[3], double yaw, double pitch)
+{
+    double f[3], r[3], u[3], V[16], P[16], fov = 0.8, zn = 0.5, zf = 4000.0, py, a, b;
+    int i;
+    f[0] = sin(yaw) * cos(pitch); f[1] = sin(pitch); f[2] = cos(yaw) * cos(pitch);
+    r[0] = cos(yaw); r[1] = 0.0; r[2] = -sin(yaw);
+    u[0] = f[1] * r[2] - f[2] * r[1]; u[1] = f[2] * r[0] - f[0] * r[2]; u[2] = f[0] * r[1] - f[1] * r[0];
+    memset(V, 0, sizeof V);
+    for (i = 0; i < 3; i++) { V[i * 4 + 0] = r[i]; V[i * 4 + 1] = u[i]; V[i * 4 + 2] = f[i]; }
+    V[12] = -(e[0] * r[0] + e[1] * r[1] + e[2] * r[2]);
+    V[13] = -(e[0] * u[0] + e[1] * u[1] + e[2] * u[2]);
+    V[14] = -(e[0] * f[0] + e[1] * f[1] + e[2] * f[2]);
+    V[15] = 1.0;
+    py = 1.0 / tan(fov * 0.5); a = zf / (zf - zn); b = -zn * a;
+    memset(P, 0, sizeof P);
+    P[0] = py * 0.75; P[5] = py; P[10] = a; P[11] = 1.0; P[14] = b;
+    la_m4mul_d(VP, V, P);
+}
+static double la_img_err(const double VPa[16], const double C[16], const double VPb[16])
+{
+    static const double pts[5][3] = {{10, 2, 300}, {-80, -5, 200}, {40, 30, 900}, {0, -2, 25}, {300, 0, 200}};
+    double M[16], err = 0.0;
+    int k, c;
+    la_m4mul_d(M, VPa, C);
+    for (k = 0; k < 5; k++) {
+        double ca[4] = {0, 0, 0, 0}, cb[4] = {0, 0, 0, 0}, p[4] = {pts[k][0], pts[k][1], pts[k][2], 1.0};
+        for (c = 0; c < 4; c++) {
+            int q;
+            for (q = 0; q < 4; q++) { ca[c] += p[q] * M[q * 4 + c]; cb[c] += p[q] * VPb[q * 4 + c]; }
+        }
+        if (cb[3] <= 1e-6) { continue; }
+        for (c = 0; c < 3; c++) { double d = fabs(ca[c] / ca[3] - cb[c] / cb[3]); if (d > err) { err = d; } }
+    }
+    return err;
+}
+static void test_locaim(void)
+{
+    int fail = 0, n = 0, k;
+    la_state_t s;
+    uint8_t in[14];
+    double VPa[16], VPb[16], C[16], e[3] = {120.0, 14.0, -350.0}, up[3] = {0.0, 1.0, 0.0};
+    /* (a) Sicht gegen W376_A0: Slot 1849 -> 1850 -> 1851 (Sichthebel +127), 1870 -> 1871 (Anschlag), 1878 -> 1879 */
+    memset(&s, 0, sizeof s);
+    memset(in, 0, sizeof in);
+    s.fa0 = 0x4400u; s.f98 = 0x80u; s.arate = 0.0523598790;
+    s.yt = -0.0692727268; s.ys = -0.0277090911;
+    in[12] = 127;
+    n++; if (!la_can(&s) || !la_step(&s, in) || fabs(s.yt - -0.138545454) > 2e-6 || fabs(s.ys - -0.072043635) > 2e-6) { fail++; }
+    n++; if (!la_step(&s, in) || fabs(s.yt - -0.20781818) > 2e-6 || fabs(s.ys - -0.126353458) > 2e-6) { fail++; }
+    s.yt = -1.52400041; s.ys = -1.42009258;
+    n++; if (!la_step(&s, in) || fabs(s.yt - -1.57079637) > 2e-6 || fabs(s.ys - -1.4803741) > 2e-6) { fail++; }
+    s.ys = -1.5682652;
+    n++; if (!la_step(&s, in) || fabs(s.ys - -1.56927764) > 2e-6) { fail++; }
+    n++; if (!la_step(&s, in) || fabs(s.ys - -1.56927764) > 2e-6) { fail++; } /* Totzone: bleibt stehen */
+    /* Totzone 25,6 (FUN_0001B0A0): Ruhewert -1 und 25 bewegen nicht, 26 schon */
+    {
+        la_state_t t0 = s;
+        memset(in, 0, sizeof in);
+        t0.pt = 0.5411475; t0.ps = 0.5393885; /* W376_A6: Rest-Delta 0,0009 rad ohne Totzone */
+        in[13] = 0xFF;
+        la_step(&t0, in); la_step(&t0, in);
+        n++; if (fabs(t0.ps - 0.5393885) > 1e-9 || fabs(t0.pt - 0.5411475) > 1e-9) { fail++; }
+        in[13] = 25; la_step(&t0, in);
+        n++; if (fabs(t0.pt - 0.5411475) > 1e-9) { fail++; }
+        in[13] = 26; la_step(&t0, in);
+        n++; if (!(t0.pt < 0.5411475 - 1e-3)) { fail++; }
+        memset(in, 0, sizeof in);
+        in[12] = 127;
+    }
+    in[2] = 1; /* Stick-Klick: keine Vorhersage */
+    n++; if (la_step(&s, in) != 0) { fail++; }
+    in[2] = 0;
+    s.f94 = 0x20u;
+    n++; if (la_can(&s)) { fail++; }
+    s.f94 = 0u;
+    /* (b) Arm: Hebel -128 (voll) -> Soll +2,094; je Tick hoechstens arate; Hebel 0 -> zurueck; Nick-Hoechstschritt */
+    memset(in, 0, sizeof in);
+    in[10] = 0x80;
+    s.ax = 0.0;
+    for (k = 0; k < 3; k++) { la_step(&s, in); }
+    n++; if (fabs(s.ax - 3.0 * 0.0523598790) > 1e-6) { fail++; }
+    for (k = 0; k < 60; k++) { la_step(&s, in); }
+    /* Glaettung k = |d| * 0,2387: nahe am Soll quadratisch langsamer (nie darueber) */
+    n++; if (!(s.ax > 2.0944 - 0.1 && s.ax <= 2.0944)) { fail++; }
+    {
+        double ax0 = s.ax;
+        in[10] = 0; in[11] = 100;
+        la_step(&s, in);
+        n++; if (fabs(s.ay - 0.05235987901687622) > 1e-6 || !(s.ax < ax0 && s.ax >= ax0 - 0.0523598790 - 1e-9)) { fail++; }
+    }
+    /* (c) Kamera-Korrektur */
+    la_camera(VPa, e, 0.4, 0.0); la_camera(VPb, e, 0.4 + 0.12, 0.0);
+    n++; if (!la_cam_corr(C, VPa, up, 0.12, 0.0) || la_img_err(VPa, C, VPb) > 1e-6) { fail++; }
+    la_camera(VPa, e, -1.1, 0.2); la_camera(VPb, e, -1.1, 0.2 - 0.07);
+    n++; if (!la_cam_corr(C, VPa, up, 0.0, -0.07) || la_img_err(VPa, C, VPb) > 1e-6) { fail++; }
+    la_camera(VPa, e, 2.5, 0.0); la_camera(VPb, e, 2.5 - 0.2, 0.05);
+    n++; if (!la_cam_corr(C, VPa, up, -0.2, 0.05) || la_img_err(VPa, C, VPb) > 1e-6) { fail++; }
+    la_camera(VPa, e, 0.7, 0.1);
+    n++; if (!la_cam_corr(C, VPa, up, 0.0, 0.0) || la_img_err(VPa, C, VPa) > 1e-9) { fail++; }
+    /* rechtshaendige Welt wie LoC (x gespiegelt): "rechts"/"hoch" bleiben Bild-rechts/-oben */
+    {
+        double S[16], A2[16], B2[16];
+        memset(S, 0, sizeof S); S[0] = -1.0; S[5] = 1.0; S[10] = 1.0; S[15] = 1.0;
+        la_camera(VPa, e, 0.3, 0.0); la_camera(VPb, e, 0.3 + 0.15, 0.0);
+        la_m4mul_d(A2, S, VPa); la_m4mul_d(B2, S, VPb);
+        n++; if (!la_cam_corr(C, A2, up, 0.15, 0.0) || la_img_err(A2, C, B2) > 1e-6) { fail++; }
+        la_camera(VPa, e, 0.3, 0.1); la_camera(VPb, e, 0.3, 0.1 + 0.06);
+        la_m4mul_d(A2, S, VPa); la_m4mul_d(B2, S, VPb);
+        n++; if (!la_cam_corr(C, A2, up, 0.0, 0.06) || la_img_err(A2, C, B2) > 1e-6) { fail++; }
+    }
+    printf("LOCAIM (W376): %d Faelle (Sicht gegen Messlauf, Anschlag, Totzone, Sonderfaelle, Arm, Kamera Gier/Nick/beides/null/rechtshaendig): %d Fehler\n", n, fail);
+    g_fail += fail;
+}
+
+/* ---------- W385 LOC-SMOOTH: weiche Rollback-Korrektur (loc_smooth_math.h) ----------
+ * (a) Abklingen: Gewichte 1, 2/3, 1/3, 0 (150 ms = 3 Listen), danach zurueckgesetzt; zweite Korrektur waehrend des
+ * Abklingens = Rest + neue (Anzeige stetig); Gier-Wrap. (b) Objekt: korrigierte Lage -> vorhergesagte, Vorwaertsrichtung
+ * dreht um dGier, Null-Versatz = Einheit. (c) Kamera: K * VP(korrigiert) zeigt jeden Punkt wie VP(vorhergesagt), Auge
+ * aus VP^-1. (d) beides zusammen (anderer VT gesehen von der vorhergesagten eigenen Kamera). */
+static void ls_img(double out[3], const double p[3], const double M[16])
+{
+    double c[4];
+    int k;
+    for (k = 0; k < 4; k++) c[k] = p[0] * M[k] + p[1] * M[4 + k] + p[2] * M[8 + k] + M[12 + k];
+    out[0] = c[0] / c[3];
+    out[1] = c[1] / c[3];
+    out[2] = c[3];
+}
+static double ls_d3(const double a[3], const double b[3])
+{
+    return fabs(a[0] - b[0]) + fabs(a[1] - b[1]) + fabs(a[2] - b[2]);
+}
+static void test_locsmooth(void)
+{
+    int n = 0, fail = 0, k, i;
+    ls_track_t t;
+    double o[4], e1[4] = {30.0, 2.0, -12.0, 0.05}, e2[4] = {-6.0, 0.0, 4.0, -0.02};
+    static const double w3[4] = {1.0, 2.0 / 3.0, 1.0 / 3.0, 0.0};
+    /* (a) */
+    memset(&t, 0, sizeof t);
+    n++; if (ls_track_step(&t, o) != 0 || o[0] != 0.0) { fail++; }
+    ls_track_add(&t, e1, 3);
+    for (k = 0; k < 4; k++) {
+        int nz = ls_track_step(&t, o);
+        n++; if (nz != (k < 3) || fabs(o[0] - e1[0] * w3[k]) > 1e-12 || fabs(o[3] - e1[3] * w3[k]) > 1e-12) { fail++; }
+    }
+    n++; if (t.n != 0 || t.k != 0 || t.off0[0] != 0.0) { fail++; } /* zurueckgesetzt */
+    ls_track_add(&t, e1, 3);
+    (void)ls_track_step(&t, o);                 /* Liste 1: e1 */
+    (void)ls_track_step(&t, o);                 /* Liste 2: 2/3 e1 */
+    ls_track_add(&t, e2, 3);                    /* neue Korrektur vor Liste 3 */
+    (void)ls_track_step(&t, o);
+    for (i = 0; i < 4; i++) { n++; if (fabs(o[i] - (e1[i] * 2.0 / 3.0 + e2[i])) > 1e-12) { fail++; } }
+    (void)ls_track_step(&t, o);
+    n++; if (fabs(o[2] - (e1[2] * 2.0 / 3.0 + e2[2]) * 2.0 / 3.0) > 1e-12) { fail++; }
+    ls_track_add(&t, e1, 3); /* mitten im Abklingen: Rest der zuletzt gezeigten Liste + e1 */
+    (void)ls_track_step(&t, o);
+    n++; if (fabs(o[0] - ((e1[0] * 2.0 / 3.0 + e2[0]) * 2.0 / 3.0 + e1[0])) > 1e-12) { fail++; }
+    ls_track_reset(&t);
+    {
+        double ey[4] = {0.0, 0.0, 0.0, 3.0};
+        ls_track_add(&t, ey, 2);
+        (void)ls_track_step(&t, o); /* Rest 3.0 */
+        ls_track_add(&t, ey, 2);    /* 6.0 -> gewickelt */
+        n++; if (!(t.off0[3] > -LS_PI && t.off0[3] <= LS_PI) || fabs(t.off0[3] - (6.0 - 2.0 * LS_PI)) > 1e-12) { fail++; }
+    }
+    n++; if (ls_weight(0, 2) != 1.0 || ls_weight(1, 2) != 0.5 || ls_weight(2, 2) != 0.0 || ls_weight(0, 0) != 0.0) { fail++; }
+    /* (b) Objekt */
+    {
+        double p[3] = {1200.0, 40.0, -800.0}, X[16], q[3], r[3], f[3], a = 0.7, L = 50.0;
+        double off[4] = {35.0, -3.0, 18.0, 0.12}, z[4] = {0, 0, 0, 0};
+        ls_obj_xform(X, p, off);
+        ls_xform_pt(q, p, X);
+        r[0] = p[0] + off[0]; r[1] = p[1] + off[1]; r[2] = p[2] + off[2];
+        n++; if (ls_d3(q, r) > 1e-9) { fail++; }
+        f[0] = p[0] + sin(a) * L; f[1] = p[1]; f[2] = p[2] + cos(a) * L; /* Vorwaerts bei Gier a */
+        ls_xform_pt(q, f, X);
+        r[0] = p[0] + off[0] + sin(a + off[3]) * L; r[1] = p[1] + off[1]; r[2] = p[2] + off[2] + cos(a + off[3]) * L;
+        n++; if (ls_d3(q, r) > 1e-9) { fail++; }
+        ls_obj_xform(X, p, z);
+        for (k = 0; k < 16; k++) { n++; if (fabs(X[k] - ((k % 5) == 0 ? 1.0 : 0.0)) > 1e-12) { fail++; } }
+    }
+    /* (c) Kamera, (d) zusammen */
+    {
+        double e[3] = {500.0, 120.0, 300.0}, offc[4] = {-22.0, 1.5, 14.0, -0.09}, ep[3], VPc[16], VPp[16], VPi[16], K[16],
+               M[16], eye[3], ia[3], ib[3], z[4] = {0, 0, 0, 0}, X[16], MX[16];
+        static const double pts[6][3] = {{520, 120, 900}, {300, 60, 700}, {900, 300, 1500}, {480, 100, 340},
+                                         {1500, 0, 600}, {-200, 50, 1200}};
+        double po[3] = {700.0, 110.0, 820.0}, offo[4] = {40.0, 0.0, -25.0, 0.2};
+        double a = 0.25;
+        ep[0] = e[0] + offc[0]; ep[1] = e[1] + offc[1]; ep[2] = e[2] + offc[2];
+        la_camera(VPc, e, a, 0.05);
+        la_camera(VPp, ep, a + offc[3], 0.05);
+        n++; if (!la_m4inv_d(VPi, VPc) || !ls_eye_of(eye, VPi) || ls_d3(eye, e) > 1e-6) { fail++; }
+        ls_cam_xform(K, eye, offc);
+        ls_m4_mul(M, K, VPc);
+        for (k = 0; k < 6; k++) {
+            ls_img(ia, pts[k], M);
+            ls_img(ib, pts[k], VPp);
+            n++; if (ls_d3(ia, ib) > 1e-6 * (1.0 + fabs(ib[2]))) { fail++; }
+        }
+        ls_obj_xform(X, po, offo); /* anderer VT: seine Draws (Weltursprung po) erst X, dann K */
+        ls_m4_mul(MX, X, K);
+        ls_m4_mul(MX, MX, VPc);
+        for (k = 0; k < 6; k++) {
+            double q[3];
+            ls_xform_pt(q, pts[k], X);
+            ls_img(ia, pts[k], MX);
+            ls_img(ib, q, VPp);
+            n++; if (ls_d3(ia, ib) > 1e-6 * (1.0 + fabs(ib[2]))) { fail++; }
+        }
+        ls_cam_xform(K, eye, z);
+        for (k = 0; k < 16; k++) { n++; if (fabs(K[k] - ((k % 5) == 0 ? 1.0 : 0.0)) > 1e-9) { fail++; } }
+    }
+    printf("LOCSMOOTH (W385): %d Faelle (Abklingen 1/2/3-Listen, Rest + neue Korrektur, Gier-Wrap, Objekt Lage/Drehung/null, "
+           "Kamera Auge/Bild/null, Objekt von vorhergesagter Kamera): %d Fehler\n", n, fail);
+    g_fail += fail;
+}
+
+/* ---------- W387 LOC-SMOOTH-OPP: andere VTs verzoegert zeigen (loc_smooth_math.h) ----------
+ * (a) Historie: T - d mit Bruchteil linear, Gier-Wrap, fehlender/fremder Tick -> verkuerzt bzw. 0. (b) Versatz
+ * Lage(T - d) - Lage(T), Objekt-Matrix bringt den Mittelpunkt dorthin. (c) Bedarf einer Korrektur (0..3) aus Ringen
+ * vorher/nachher, Gier zaehlt mit Hebel. (d) Auto-Regelung: aus = 0, fest = 1 (Rampe), auto ohne Korrekturen 0, nach
+ * 2 sichtbaren 1, nach 3 mit Bedarf 2 -> 2 (bzw. Obergrenze 1), Absenken erst nach Fenster + Ruhezeit, nie schneller als
+ * 1/20 Tick je Tick, Zufallsfolge beschraenkt. */
+static void lso_put(ls_hist_t *h, unsigned t, unsigned obj, double x, double yaw)
+{
+    double p[4];
+    p[0] = x; p[1] = 5.0; p[2] = -2.0 * x; p[3] = yaw;
+    ls_hist_put(h, t, obj, p);
+}
+/* W390 LOC-OWN-PREDICT: Korrektur zwischen zwei Vorlaeufen, Anzeige-Versatz, stetige Anzeige bei Korrektur. */
+static void test_locownpred(void)
+{
+    int n = 0, fail = 0, k, i, ok[4] = {1, 1, 1, 1};
+    unsigned gt[4] = {102, 103, 104, 105};
+    float p[4][4], pp[4] = {1000.f, 5.f, 2000.f, 3.10f}, pred[4];
+    double c[4], sim[4], res[4] = {0, 0, 0, 0}, o[4];
+    for (k = 0; k < 4; k++) {
+        p[k][0] = 900.f + (float)k * 30.f; p[k][1] = 5.f; p[k][2] = 2000.f; p[k][3] = -3.10f;
+    }
+    /* (a) Korrektur am gemeinsamen Tick, Gier ueber +-pi */
+    n++; if (!ls_own_corr(105, pp, 4, gt, (const float(*)[4])p, ok, c) || fabs(c[0] - (1000.0 - 990.0)) > 1e-4 ||
+             fabs(c[3] - ls_wrap(3.10 - (-3.10))) > 1e-5 || fabs(c[3]) > 0.1) { fail++; }
+    n++; if (ls_own_corr(106, pp, 4, gt, (const float(*)[4])p, ok, c)) { fail++; } /* nicht enthalten */
+    ok[3] = 0;
+    n++; if (ls_own_corr(105, pp, 4, gt, (const float(*)[4])p, ok, c)) { fail++; } /* Lage ungueltig */
+    ok[3] = 1;
+    /* (b) Versatz und Grenzen */
+    pred[0] = 1500.f; pred[1] = 0.f; pred[2] = -200.f; pred[3] = 0.3f;
+    sim[0] = 1000.0; sim[1] = 0.0; sim[2] = 0.0; sim[3] = 0.1;
+    n++; if (!ls_own_offset(pred, sim, res, 20000.0, o) || fabs(o[0] - 500.0) > 1e-4 || fabs(o[2] + 200.0) > 1e-4 || fabs(o[3] - 0.2) > 1e-6) { fail++; }
+    res[0] = -100.0; res[3] = 0.05;
+    n++; if (!ls_own_offset(pred, sim, res, 20000.0, o) || fabs(o[0] - 400.0) > 1e-4 || fabs(o[3] - 0.25) > 1e-6) { fail++; }
+    res[0] = 0.0; res[3] = 0.0;
+    pred[0] = 30000.f;
+    n++; if (ls_own_offset(pred, sim, res, 20000.0, o) || o[0] != 0.0 || o[3] != 0.0) { fail++; } /* Teleport */
+    pred[0] = 1500.f; pred[3] = 2.0f;
+    n++; if (ls_own_offset(pred, sim, res, 20000.0, o)) { fail++; } /* Gier-Sprung */
+    /* (c) gleichfoermige Fahrt (v je Tick), Vorlauf 2 Ticks; bei Tick 10 korrigiert ein neuer Vorlauf die Vorhersage um
+     * delta. Angezeigt = Vorhersage + abklingende Korrektur: Schritt je Tick weicht hoechstens delta/3 von v ab. */
+    {
+        ls_track_t t;
+        double v = 120.0, delta = -90.0, prevd = 0.0, worst = 0.0, shift = 0.0, last_final = 0.0;
+        unsigned lastgt = 0;
+        memset(&t, 0, sizeof t);
+        for (k = 0; k < 30; k++) {
+            unsigned g[3];
+            float q[3][4];
+            int qo[3] = {1, 1, 1};
+            double r4[4], s4[4], d;
+            if (k == 10) shift = delta; /* ab hier sagt jeder Vorlauf delta weniger voraus */
+            for (i = 0; i < 3; i++) {
+                g[i] = (unsigned)(k + i + 1);
+                q[i][0] = (float)(v * (double)(k + i + 1) + shift); q[i][1] = 0.f; q[i][2] = 0.f; q[i][3] = 0.f;
+            }
+            if (lastgt) {
+                float lp[4];
+                lp[0] = (float)last_final; lp[1] = lp[2] = lp[3] = 0.f;
+                if (ls_own_corr(lastgt, lp, 3, g, (const float(*)[4])q, qo, c) && (fabs(c[0]) > 1e-6)) ls_track_add(&t, c, 3);
+            }
+            (void)ls_track_step(&t, r4);
+            s4[0] = v * (double)(k + 1); s4[1] = s4[2] = s4[3] = 0.0; /* simuliert (Tick k + 1) */
+            if (!ls_own_offset(q[2], s4, r4, 20000.0, o)) { fail++; break; }
+            d = s4[0] + o[0];
+            if (k > 0 && fabs((d - prevd) - v) > worst) worst = fabs((d - prevd) - v);
+            prevd = d;
+            lastgt = g[2];
+            last_final = q[2][0];
+        }
+        n++; if (worst > fabs(delta) / 3.0 + 1e-3 || worst < fabs(delta) / 3.0 - 1e-3) { fail++; }
+    }
+    { /* (d) Drehung um den VT-Mittelpunkt: das vorhergesagte Auge erscheint nach K am echten Auge, Blickrichtung um dG */
+        double e[3] = {100.0, 2500.0, 1800.0}, cc[3] = {100.0, 0.0, 0.0}, off4[4] = {300.0, 0.0, 900.0, 0.2}, oc[4], K[16];
+        double ep[3], m[16], r[16], d[3], t[3], u[3];
+        ls_cam_off_pivot(off4, e, cc, oc);
+        ls_m4_yaw(r, off4[3]);
+        for (i = 0; i < 3; i++) d[i] = e[i] - cc[i];
+        ls_xform_pt(u, d, r);
+        for (i = 0; i < 3; i++) ep[i] = cc[i] + off4[i] + u[i]; /* vorhergesagtes Auge */
+        ls_cam_xform(K, e, oc);
+        ls_xform_pt(t, ep, K);
+        n++; if (fabs(t[0] - e[0]) + fabs(t[1] - e[1]) + fabs(t[2] - e[2]) > 1e-6) { fail++; }
+        oc[3] = 0.0; off4[3] = 0.0;
+        ls_cam_off_pivot(off4, e, cc, oc);
+        n++; if (fabs(oc[0] - 300.0) + fabs(oc[2] - 900.0) > 1e-9) { fail++; } /* ohne Drehung = reiner Versatz */
+        (void)m;
+    }
+    { /* (e) Vorsprung 3 -> 2 Ticks bei gleichfoermiger Fahrt: mit Ausgleich laeuft die Anzeige ohne Stillstand weiter */
+        float a[4] = {1000.f, 0.f, 500.f, 0.3f}, b[4] = {880.f, 0.f, 500.f, 0.28f};
+        double c[4];
+        ls_own_leadchg(a, b, -1, c);
+        n++; if (fabs(c[0] - 120.0) > 1e-4 || fabs(c[2]) > 1e-9 || fabs(c[3] - 0.02) > 1e-6) { fail++; }
+        ls_own_leadchg(a, b, 1, c);
+        n++; if (fabs(c[0] + 120.0) > 1e-4) { fail++; }
+    }
+    printf("LOCOWNPRED (W390): %d Faelle (Korrektur am gemeinsamen Tick, Gier-Wrap, Versatz, Teleport/Gier-Grenze, stetige Anzeige): %d Fehler\n", n, fail);
+    g_fail += fail;
+}
+
+/* ---------- W393 LOC-PACING: Bildtakt (render_pace.h) ---------- */
+typedef struct { LONG a, b[2000], c; } pace_tst_t; /* alle Felder = Folgenummer: zerrissen, wenn nicht gleich */
+static volatile LONG pace_tst_seq, pace_tst_stop;
+static pace_tst_t pace_tst_slots[PACE_PUB_SLOTS];
+static DWORD WINAPI pace_tst_writer(LPVOID p)
+{
+    LONG i, k;
+    static pace_tst_t v;
+    (void)p;
+    for (i = 1; !pace_tst_stop; i++) {
+        v.a = v.c = i;
+        for (k = 0; k < 2000; k++) { v.b[k] = i; }
+        pace_pub_write(&pace_tst_seq, pace_tst_slots, sizeof v, &v);
+        if ((i & 1) == 0) { /* Paare dicht hintereinander (Live-Tick + Vorlauf), dann kurz Ruhe */
+            for (k = 0; k < 2000; k++) { YieldProcessor(); }
+        }
+    }
+    return 0;
+}
+
+static void test_pacing(void)
+{
+    int n = 0, fail = 0, i;
+    LONGLONG f = 10000000; /* 10 MHz wie QPC */
+    { /* (a) Bilduhr: L springt +30 ms und nach 1,6 s -30 ms. Alt (L direkt): gezeigte Zeit laeuft zurueck bzw. springt.
+       *     Neu (pace_lat_step 200/20 Promille): gezeigte Zeit steigt immer, Schritt je Bild 80..102 % des Bildabstands. */
+        LONGLONG dt = f / 120, due = 0, lat = 0, want, v, vlast = 0;
+        int back_old = 0, bad_new = 0, conv = 0;
+        LONGLONG lold = 0;
+        for (i = 0; i < 1200; i++) {
+            want = (i >= 100 && i < 292) ? f * 82 / 1000 : f * 52 / 1000;
+            due += dt;
+            if (i > 0 && (due - want) < (due - dt - lold)) { back_old++; } /* alt: v = due - want */
+            lold = want;
+            lat = pace_lat_step(lat, want, i ? dt : 0, 200, 20, f / 10);
+            v = due - lat;
+            if (i > 0) {
+                LONGLONG st = v - vlast;
+                if (st <= 0 || st < dt * 79 / 100 || st > dt * 103 / 100) { bad_new++; }
+            }
+            vlast = v;
+            if (i == 1199 && lat == f * 52 / 1000) { conv = 1; }
+        }
+        n++; if (back_old < 1) { fail++; printf("  PACING (a) alt ohne Ruecklauf?\n"); }
+        n++; if (bad_new) { fail++; printf("  PACING (a) neu %d unstetige Schritte\n", bad_new); }
+        n++; if (!conv) { fail++; printf("  PACING (a) L nicht eingeschwungen\n"); }
+    }
+    { /* (b) Snap, Start, Grenzen */
+        n++; if (pace_lat_step(0, 500, 10, 200, 20, 0) != 500) { fail++; }
+        n++; if (pace_lat_step(1000, 3000, 1000, 200, 20, 1500) != 3000) { fail++; } /* > snap: sofort */
+        n++; if (pace_lat_step(1000, 2000, 1000, 200, 20, 1500) != 1200) { fail++; } /* +20 % */
+        n++; if (pace_lat_step(1000, 500, 1000, 200, 20, 0) != 980) { fail++; }       /* -2 % */
+        n++; if (pace_lat_step(1000, 1010, 1000, 200, 20, 0) != 1010) { fail++; }     /* innerhalb: Ziel */
+    }
+    { /* (c) Kennzahlen Bildabstand */
+        float v[100];
+        pace_ft_t r;
+        for (i = 0; i < 100; i++) { v[i] = 8.33f; }
+        v[10] = 9.5f; v[20] = 16.7f; v[30] = 7.0f;
+        r = pace_ft_sum(v, 100, 8.333);
+        n++; if (r.out1 != 3 || fabs(r.p50 - 8.33) > 1e-3 || fabs(r.mx - 16.7) > 1e-3 || fabs(r.p99 - 9.5) > 1e-3) { fail++; printf("  PACING (c) out1=%d p50=%.3f p99=%.3f max=%.3f\n", r.out1, r.p50, r.p99, r.mx); }
+    }
+    { /* (d) gezeigte Spielzeit: doppelt (0), Sprung, Median */
+        float g[60];
+        pace_g_t r;
+        for (i = 0; i < 60; i++) { g[i] = 1.0f / 6.0f; }
+        g[5] = 0.0f; g[6] = 2.0f / 6.0f; g[40] = 0.5f;
+        r = pace_g_sum(g, 60);
+        n++; if (r.same != 1 || r.jump != 2 || fabs(r.med - 1.0 / 6.0) > 1e-6 || r.dev99 < 0.99) { fail++; printf("  PACING (d) same=%d jump=%d med=%.4f dev99=%.3f\n", r.same, r.jump, r.med, r.dev99); }
+    }
+    { /* (e) VBlank-Raster: Mitte zwischen zwei VBlanks (k VBlanks je Bild) bzw. gleichmaessig (m Bilder je VBlank) */
+        LONGLONG st = 0, of = 0;
+        n++; if (pace_vb_next(1020, 1000, 100, 50) != 1050 || pace_vb_next(1050, 1000, 100, 50) != 1150) { fail++; }
+        n++; if (pace_vb_next(700, 1000, 100, 50) != 750 || pace_vb_next(650, 1000, 100, 50) != 750) { fail++; } /* vor vb */
+        n++; if (!pace_vb_grid(60.0, f / 60, f, &st, &of) || st != f / 60 || of != f / 120) { fail++; }       /* 60 auf 60 Hz */
+        n++; if (!pace_vb_grid(60.0, f / 120, f, &st, &of) || st != f / 60 || of != f / 240) { fail++; }      /* k = 2 */
+        n++; if (!pace_vb_grid(120.0, f / 60, f, &st, &of) || st != f / 120 || of != f / 240) { fail++; }     /* m = 2 */
+        n++; if (pace_vb_grid(144.0, f / 120, f, &st, &of) || pace_vb_grid(100.0, f / 60, f, &st, &of)) { fail++; } /* krumm */
+        { /* Rasterpunkte nie naeher als ein Viertel Periode am VBlank, auch bei 119,9 Hz und 120 Bildern */
+            LONGLONG per = f * 1000 / 119900, vb = 12345, t = 20000, last = 0;
+            int bad = 0;
+            if (!pace_vb_grid(120.0, per, f, &st, &of)) { bad++; }
+            for (i = 0; i < 500 && !bad; i++) {
+                LONGLONG s2 = pace_vb_next(t + f / 120 - st / 2, vb, st, of), ph = (s2 - vb) % per;
+                if (last && s2 - last != st) { bad++; }
+                if (ph < per / 4 || ph > per * 3 / 4) { bad++; }
+                last = t = s2;
+            }
+            n++; if (bad) { fail++; printf("  PACING (e) %d Fehler im Raster\n", bad); }
+        }
+    }
+    { /* (i) Tick-Zeitbasis: ein Tick ein Feld (16,7 ms) spaet, der naechste holt auf -> Abstaende 50 ms +-4 %, kein
+       *     Neuansatz. Spiel verliert dauerhaft 70 ms bzw. ein Feld (Phase verschoben) -> Neuansatz sofort bzw. beim
+       *     zweiten Tick, danach wieder Erwartung. Takt 1 % langsamer -> folgt ohne Neuansatz (Abstand beschraenkt). */
+        LONGLONG P = f / 20, fld = f / 60, prev = 0, raw, r, worst = 0, le = 0, sh;
+        int sn, snaps = 0, k2, at = -1;
+        for (k2 = 1; k2 <= 40; k2++) {
+            raw = (LONGLONG)k2 * P + (k2 == 10 ? fld : 0);
+            r = pace_ts_step(prev, raw, P, &sn, &le);
+            snaps += sn;
+            if (k2 > 1) { LONGLONG d = r - prev - P; if (d < 0) { d = -d; } if (d > worst) { worst = d; } }
+            prev = r;
+        }
+        n++; if (snaps || worst > P / 25) { fail++; printf("  PACING (i) Feld spaet: snaps=%d worst=%lld\n", snaps, worst); }
+        for (sh = 0; sh < 2; sh++) { /* 0: 70 ms verloren, 1: ein Feld verloren (ab Tick 10 dauerhaft) */
+            LONGLONG lost = sh ? fld : f * 70 / 1000;
+            prev = 0; le = 0; snaps = 0; at = -1;
+            for (k2 = 1; k2 <= 40; k2++) {
+                raw = (LONGLONG)k2 * P + (k2 >= 10 ? lost : 0);
+                prev = pace_ts_step(prev, raw, P, &sn, &le);
+                if (sn) { snaps++; if (at < 0) { at = k2; } }
+            }
+            n++; if (snaps != 1 || at != (sh ? 11 : 10) || prev != 40 * P + lost) { fail++; printf("  PACING (i) verloren %lld: snaps=%d bei %d\n", lost, snaps, at); }
+        }
+        r = pace_ts_step(prev, prev + P + f / 5, P, &sn, &le);
+        n++; if (!sn || r != prev + P + f / 5) { fail++; }
+        prev = 0; worst = 0; le = 0; snaps = 0;
+        for (k2 = 1; k2 <= 400; k2++) { /* Takt 1 % langsamer */
+            raw = (LONGLONG)k2 * (P + P / 100);
+            prev = pace_ts_step(prev, raw, P, &sn, &le);
+            snaps += sn;
+            if (k2 > 100) { LONGLONG d = prev - raw; if (d < 0) { d = -d; } if (d > worst) { worst = d; } }
+        }
+        n++; if (snaps || worst > P / 10) { fail++; printf("  PACING (i) Drift: snaps=%d Abstand %lld\n", snaps, worst); }
+    }
+    { /* (j) Elastisches Halten: Ticks alle 50 ms (Ankunft = Zustandszeit + 40 ms), Tick 20 kommt 30 ms spaet. Bild
+       *     120 Hz, Latenz-Ziel 45 ms. Alt (L fest): nach dem Halten springt die gezeigte Zeit um ~30 ms nach vorn.
+       *     Neu: gezeigte Zeit bleibt beim Halten stehen und laeuft danach mit <= 102 % weiter (kein Sprung). */
+        LONGLONG P = f / 20, dt = f / 120, tgt = f * 45 / 1000, due, v, vlo = -1, vln = -1, Ln = 0, Lnd = 0;
+        double jo = 0.0, jn = 0.0;
+        int frames;
+        for (frames = 1; frames < 600; frames++) {
+            LONGLONG newest, arr;
+            int k3;
+            due = (LONGLONG)frames * dt + f;
+            newest = -1;
+            for (k3 = 0; k3 < 100; k3++) { /* juengster angekommener Tick zur Zeit due */
+                arr = (LONGLONG)k3 * P + f * 40 / 1000 + (k3 == 20 ? f * 30 / 1000 : 0);
+                if (arr <= due) { newest = (LONGLONG)k3 * P; }
+            }
+            if (newest < 0) { continue; }
+            v = due - tgt; if (v > newest) { v = newest; }                       /* alt: Halten, danach Sprung */
+            if (vlo >= 0) { double st = (double)(v - vlo) / (double)dt; if (st > jo) { jo = st; } }
+            vlo = v;
+            Ln = Ln > 0 ? pace_lat_step(Ln, tgt, Lnd ? due - Lnd : 0, 50, 20, f / 10) : tgt; /* neu */
+            if (due - Ln > newest) { Ln = pace_lat_hold(Ln, due - newest, tgt, f / 10); }
+            Lnd = due;
+            v = due - Ln;
+            if (vln >= 0) { double st = (double)(v - vln) / (double)dt; if (st > jn) { jn = st; } }
+            vln = v;
+        }
+        n++; if (jo < 2.0) { fail++; printf("  PACING (j) alt ohne Sprung? %.2f\n", jo); }
+        n++; if (jn > 1.021) { fail++; printf("  PACING (j) neu Schritt %.3f Bildabstaende\n", jn); }
+    }
+    { /* (f) Phase im Tick */
+        n++; if (pace_phase_bin(125, 100, 50, 10) != 5 || pace_phase_bin(95, 100, 50, 10) != 9) { fail++; }
+    }
+    { /* (g) Doppelpuffer: Schreiber veroeffentlicht ohne Pause (auch zwei Freigaben dicht hintereinander), Leser liest
+       *     200 000 Mal - nie ein zerrissener Stand, Folgenummer nie rueckwaerts, nie gesperrt. */
+        HANDLE th;
+        int torn = 0, back = 0, okn = 0;
+        /* 8 KB je Stand: Lesen dauert lange genug, dass zwei Freigaben hineinfallen (mit 2 Plaetzen zerrissen) */
+        LONG last = 0;
+        static pace_tst_t o;
+        pace_tst_seq = 0; pace_tst_stop = 0;
+        memset(pace_tst_slots, 0, sizeof pace_tst_slots);
+        th = CreateThread(NULL, 0, pace_tst_writer, NULL, 0, NULL);
+        { DWORD w0 = GetTickCount(); while (!pace_tst_seq && GetTickCount() - w0 < 2000u) { Sleep(0); } } /* Schreiber laeuft */
+        for (i = 0; i < 100000; i++) {
+            int k, bad = 0;
+            if (!pace_pub_read(&pace_tst_seq, pace_tst_slots, sizeof o, &o)) { continue; }
+            okn++;
+            for (k = 0; k < 2000; k++) { if (o.b[k] != o.a) { bad = 1; } }
+            if (o.c != o.a) { bad = 1; }
+            if (bad) { torn++; }
+            if (o.a < last) { back++; }
+            last = o.a;
+        }
+        InterlockedExchange(&pace_tst_stop, 1);
+        if (th) { WaitForSingleObject(th, 5000); CloseHandle(th); }
+        n++; if (torn || back || okn < 1000) { fail++; printf("  PACING (g) zerrissen=%d rueckwaerts=%d gelesen=%d\n", torn, back, okn); }
+    }
+    { /* (h) Ablauf fest nachgestellt: Leser hat q gesehen, der Schreiber gibt q+1 frei und schreibt gerade q+2 (halb).
+       *     Der Leser kopiert jetzt und prueft: Freigabe q+1 erlaubt, sein Platz q darf nicht der halb geschriebene sein
+       *     (mit zwei Plaetzen waere er es: zerrissener Stand). */
+        static pace_tst_t sl[PACE_PUB_SLOTS], w, o2;
+        volatile LONG sq = 0;
+        LONG q, k2;
+        int bad = 0;
+        memset(sl, 0, sizeof sl);
+        for (k2 = 1; k2 <= 5; k2++) { w.a = w.c = k2; for (i = 0; i < 2000; i++) { w.b[i] = k2; } pace_pub_write(&sq, sl, sizeof w, &w); }
+        q = sq;                                                              /* Leser: Folgenummer gelesen */
+        w.a = w.c = q + 1; for (i = 0; i < 2000; i++) { w.b[i] = q + 1; }
+        pace_pub_write(&sq, sl, sizeof w, &w);                               /* Schreiber: q+1 frei */
+        { pace_tst_t *half = &sl[(q + 2) % PACE_PUB_SLOTS];                  /* Schreiber: q+2 halb geschrieben */
+          half->a = q + 2; for (i = 0; i < 1000; i++) { half->b[i] = q + 2; } }
+        memcpy(&o2, &sl[q % PACE_PUB_SLOTS], sizeof o2);                     /* Leser kopiert seinen Platz */
+        if ((LONG)(sq - q) <= 1) {                                           /* Pruefung wuerde bestehen */
+            for (i = 0; i < 2000; i++) { if (o2.b[i] != o2.a) { bad = 1; } }
+            if (o2.c != o2.a || o2.a != q) { bad = 1; }
+        }
+        n++; if (bad) { fail++; printf("  PACING (h) zerrissener Stand trotz bestandener Pruefung\n"); }
+    }
+    printf("PACING (W393): %d Faelle (stetige Bilduhr, Kennzahlen, VBlank-Raster, Phase, Doppelpuffer 3 Plaetze): %d Fehler\n", n, fail);
+    g_fail += fail;
+}
+
+static void test_locsmoothopp(void)
+{
+    int n = 0, fail = 0, i, r;
+    unsigned t;
+    ls_hist_t h, pre, post;
+    ls_auto_t a;
+    double o[4], off[4], X[16], c[3], q[3];
+    /* (a) */
+    ls_hist_reset(&h);
+    for (t = 100; t <= 105; t++) lso_put(&h, t, 7u, 10.0 * t, 0.1 * (t - 100));
+    r = ls_hist_at(&h, 105, 7u, 0.0, o); n++; if (r != 2 || o[0] != 1050.0) { fail++; }
+    r = ls_hist_at(&h, 105, 7u, 1.0, o); n++; if (r != 2 || o[0] != 1040.0 || fabs(o[2] + 2080.0) > 1e-9) { fail++; }
+    r = ls_hist_at(&h, 105, 7u, 0.5, o); n++; if (r != 2 || fabs(o[0] - 1045.0) > 1e-9 || fabs(o[3] - 0.45) > 1e-9) { fail++; }
+    r = ls_hist_at(&h, 105, 7u, 1.25, o); n++; if (r != 2 || fabs(o[0] - 1037.5) > 1e-9) { fail++; }
+    r = ls_hist_at(&h, 105, 8u, 0.0, o); n++; if (r != 0) { fail++; } /* anderes Objekt (Neustart) */
+    r = ls_hist_at(&h, 106, 7u, 0.0, o); n++; if (r != 0) { fail++; } /* Tick fehlt */
+    lso_put(&h, 104, 7u, 1040.0, 3.1);
+    lso_put(&h, 105, 7u, 1050.0, -3.1);
+    r = ls_hist_at(&h, 105, 7u, 0.5, o); n++; if (r != 2 || fabs(fabs(o[3]) - LS_PI) > 1e-9) { fail++; } /* Wrap */
+    ls_hist_reset(&h);
+    lso_put(&h, 105, 7u, 1050.0, 0.0);
+    lso_put(&h, 104, 7u, 1040.0, 0.0);
+    lso_put(&h, 102, 7u, 1020.0, 0.0); /* 103 fehlt */
+    r = ls_hist_at(&h, 105, 7u, 1.5, o); n++; if (r != 1 || o[0] != 1040.0) { fail++; }
+    r = ls_hist_at(&h, 105, 7u, 2.5, o); n++; if (r != 1 || o[0] != 1040.0) { fail++; }
+    lso_put(&h, 97, 7u, 970.0, 0.0); /* ueberschreibt Platz 105 & 7 = 1 -> Tick 105 fehlt */
+    r = ls_hist_at(&h, 105, 7u, 0.0, o); n++; if (r != 0) { fail++; }
+    /* (b) */
+    ls_hist_reset(&h);
+    for (t = 200; t <= 204; t++) lso_put(&h, t, 3u, 100.0 * t, 0.01 * t);
+    r = ls_delay_off(&h, 204, 3u, 0.0, off); n++; if (r != 2 || off[0] != 0.0 || off[3] != 0.0) { fail++; }
+    r = ls_delay_off(&h, 204, 3u, 0.6, off);
+    n++; if (r != 2 || fabs(off[0] + 60.0) > 1e-9 || fabs(off[2] - 120.0) > 1e-9 || fabs(off[3] + 0.006) > 1e-9) { fail++; }
+    {
+        double p[3] = {20400.0, 5.0, -40800.0}, want[3] = {20340.0, 5.0, -40680.0};
+        ls_obj_xform(X, p, off);
+        ls_xform_pt(q, p, X);
+        n++; if (ls_d3(q, want) > 1e-6) { fail++; }
+        c[0] = p[0] + 1000.0; c[1] = p[1]; c[2] = p[2]; /* Punkt 1 m daneben dreht um dGier mit */
+        ls_xform_pt(q, c, X);
+        n++; if (fabs(sqrt((q[0] - want[0]) * (q[0] - want[0]) + (q[2] - want[2]) * (q[2] - want[2])) - 1000.0) > 1e-6) { fail++; }
+    }
+    r = ls_delay_off(&h, 204, 9u, 1.0, off); n++; if (r != 0 || off[0] != 0.0) { fail++; }
+    /* (c) */
+    ls_hist_reset(&pre);
+    for (t = 300; t <= 305; t++) lso_put(&pre, t, 1u, 10.0 * t, 0.0);
+    post = pre;
+    n++; if (ls_need(&pre, &post, 305, 1u, 20.0, 2) != 0) { fail++; }
+    lso_put(&post, 305, 1u, 3050.0 + 50.0, 0.0);
+    n++; if (ls_need(&pre, &post, 305, 1u, 20.0, 2) != 1) { fail++; }
+    n++; if (ls_need(&pre, &post, 305, 1u, 200.0, 2) != 0) { fail++; } /* weiter weg: Schwelle hoeher */
+    lso_put(&post, 304, 1u, 3040.0 + 30.0, 0.0);
+    n++; if (ls_need(&pre, &post, 305, 1u, 20.0, 2) != 2) { fail++; }
+    lso_put(&post, 303, 1u, 3030.0, 0.02); /* Gier 0,02 rad * 2000 = 40 */
+    n++; if (ls_need(&pre, &post, 305, 1u, 20.0, 2) != 3) { fail++; }
+    lso_put(&post, 303, 1u, 3030.0 + 5.0, 0.0);
+    n++; if (ls_need(&pre, &post, 305, 1u, 20.0, 2) != 2) { fail++; }
+    /* (d) aus / fest */
+    ls_auto_reset(&a);
+    ls_auto_event(&a, 2); ls_auto_event(&a, 2); ls_auto_event(&a, 2);
+    for (i = 0; i < 50; i++) { n++; if (ls_auto_step(&a, 0, 2) != 0.0) { fail++; break; } }
+    ls_auto_reset(&a);
+    for (i = 1; i <= 40; i++) {
+        double d = ls_auto_step(&a, 2, 2);
+        if (i == 10) { n++; if (fabs(d - 0.5) > 1e-9) { fail++; } }
+        if (i >= 20) { n++; if (fabs(d - 1.0) > 1e-9) { fail++; break; } }
+    }
+    /* auto: ohne Korrekturen 0; eine sichtbare reicht nicht; zwei -> 1 */
+    ls_auto_reset(&a);
+    for (i = 0; i < 1000; i++) ls_auto_step(&a, 1, 2);
+    n++; if (a.d != 0.0 || a.target != 0) { fail++; }
+    ls_auto_event(&a, 0); ls_auto_event(&a, 1);
+    for (i = 0; i < 100; i++) ls_auto_step(&a, 1, 2);
+    n++; if (a.d != 0.0 || a.target != 0) { fail++; }
+    ls_auto_event(&a, 1);
+    ls_auto_step(&a, 1, 2);
+    n++; if (a.target != 1 || fabs(a.d - LS_AUP) > 1e-12) { fail++; }
+    for (i = 0; i < 19; i++) ls_auto_step(&a, 1, 2);
+    n++; if (fabs(a.d - 1.0) > 1e-9) { fail++; }
+    /* Absenken: Ziel 1 bis Fenster + Ruhezeit nach der letzten Korrektur, dann Rampe ab */
+    {
+        unsigned last = a.ev_t[(a.ev_n - 1u) % LS_AEV];
+        int ok480 = 0, ok520 = 0, ok570 = 0;
+        double prev = a.d, dmax = 0.0;
+        while (a.now < last + 600u) {
+            double d = ls_auto_step(&a, 1, 2);
+            if (fabs(d - prev) > dmax) dmax = fabs(d - prev);
+            prev = d;
+            if (a.now == last + 480u) ok480 = a.target == 1 && fabs(a.d - 1.0) < 1e-9;
+            if (a.now == last + 520u) ok520 = a.target == 0 && a.d < 1.0;
+            if (a.now == last + 570u) ok570 = a.d == 0.0;
+        }
+        n++; if (!ok480) { fail++; }
+        n++; if (!ok520) { fail++; }
+        n++; if (!ok570) { fail++; }
+        n++; if (dmax > LS_ADN + 1e-12) { fail++; }
+    }
+    /* starker Jitter: 3 x Bedarf 2 -> 2 (Obergrenze 1 -> 1) */
+    ls_auto_reset(&a);
+    ls_auto_event(&a, 2); ls_auto_event(&a, 3); ls_auto_event(&a, 2);
+    for (i = 0; i < 60; i++) ls_auto_step(&a, 1, 2);
+    n++; if (a.target != 2 || fabs(a.d - 2.0) > 1e-9) { fail++; }
+    ls_auto_reset(&a);
+    ls_auto_event(&a, 2); ls_auto_event(&a, 3); ls_auto_event(&a, 2);
+    for (i = 0; i < 60; i++) ls_auto_step(&a, 1, 1);
+    n++; if (a.target != 1 || fabs(a.d - 1.0) > 1e-9) { fail++; }
+    /* 2 -> 1 nach Fenster + Ruhe, 1 -> 0 nach weiterer Ruhe */
+    ls_auto_reset(&a);
+    ls_auto_event(&a, 2); ls_auto_event(&a, 2); ls_auto_event(&a, 2);
+    for (i = 0; i < 520; i++) ls_auto_step(&a, 1, 2);
+    n++; if (a.target != 1) { fail++; }
+    for (i = 0; i < 260; i++) ls_auto_step(&a, 1, 2);
+    n++; if (a.target != 0 || a.d != 0.0) { fail++; }
+    /* Zufallsfolge: beschraenkt, nie sprunghaft */
+    {
+        unsigned s = 12345u;
+        double prev = 0.0, worst = 0.0, lo = 0.0, hi = 0.0;
+        ls_auto_reset(&a);
+        for (i = 0; i < 20000; i++) {
+            double d;
+            s = s * 1103515245u + 12345u;
+            if (((s >> 16) & 63u) == 0u) ls_auto_event(&a, (int)((s >> 8) & 3u));
+            d = ls_auto_step(&a, 1, 2);
+            if (fabs(d - prev) > worst) worst = fabs(d - prev);
+            if (d < lo) lo = d;
+            if (d > hi) hi = d;
+            prev = d;
+        }
+        n++; if (worst > LS_AUP + 1e-12 || lo < 0.0 || hi > 2.0 || hi <= 0.0) { fail++; }
+    }
+    printf("LOCSMOOTHOPP (W387): %d Faelle (Historie T-d, Wrap, Luecken, Versatz/Objekt, Bedarf, Auto aus/fest/auto, Hysterese, Jitter, Zufallsfolge): %d Fehler\n", n, fail);
+    g_fail += fail;
+}
+
 /* ---------- W361 LOC-INTERP-CRASH: Liste haelt Schatten-Views ueber die Lebensdauer des Eintrags hinaus ----------
  * Nachbau des Absturzpfads: Eintrag gibt Textur/Views frei, die Liste bindet die SRV danach per Deferred-Context
  * (dort lag der Absturz: AllocateDependentCLS<CResource> mit Ressource NULL). */
@@ -1140,6 +1812,275 @@ static void test_shref(void)
     g_fail += fail;
 }
 
+/* ---------- W383 LOC-GH-DATA (#62): Strom-2-Expansion bleibt im reservierten Platz ----------
+ * Nachbau des Absturzes: Dreiecksstreifen mit 30000 Vertices, Platz fuer 65536 Eintraege (IM_VB_MAX) zu je 64 Bytes.
+ * Die alte Schleife (Grenze IM_VB_MAX*3) haette 89994 Eintraege geschrieben (Tester: Eintrag 70828 lag hinter dem
+ * Mapping). Prueft Kappung, Waechterbereich, Reihenfolge je Primitiv und die unveraenderte Expansion ohne Kappung. */
+#define W383_VBMAX 65536u
+#define W383_ST 64u
+static unsigned w383_src(const unsigned char *X, unsigned k) { unsigned v; memcpy(&v, X + (size_t)k * W383_ST, 4); return v; }
+static int w383_guard(const unsigned char *X, unsigned cap)
+{
+    unsigned i;
+    for (i = 0; i < 4096u; i++) { if (X[(size_t)cap * W383_ST + i] != 0xCDu) { return 0; } }
+    return 1;
+}
+static void test_rqexp(void)
+{
+    int fail = 0, n = 0;
+    unsigned i, e, t, cap = W383_VBMAX;
+    size_t xb = (size_t)cap * W383_ST + 4096u;
+    unsigned char *X = (unsigned char *)malloc(xb), *P = (unsigned char *)malloc((size_t)80000u * W383_ST);
+    if (!X || !P) { printf("RQEXP (W383): kein Speicher\n"); g_fail++; free(X); free(P); return; }
+    for (i = 0; i < 80000u; i++) { memset(P + (size_t)i * W383_ST, 0x11, W383_ST); memcpy(P + (size_t)i * W383_ST, &i, 4); }
+    /* 1. Streifen 30000 (Absturzfall) */
+    memset(X, 0xCD, xb);
+    e = rq_exp_fill(X, P, W383_ST, 6u, 30000u, cap, W383_VBMAX);
+    n++; if (e != 65535u || !w383_guard(X, cap)) { fail++; printf("  RQEXP Streifen: e=%u Waechter=%d\n", e, w383_guard(X, cap)); }
+    n++; for (t = 0; t < e / 3u; t += 997u) { if (w383_src(X, 3u * t) != t || w383_src(X, 3u * t + 1u) != t + 1u || w383_src(X, 3u * t + 2u) != t + 2u) { fail++; break; } }
+    /* 2. Facher 30000 */
+    memset(X, 0xCD, xb);
+    e = rq_exp_fill(X, P, W383_ST, 7u, 30000u, cap, W383_VBMAX);
+    n++; if (e != 65535u || !w383_guard(X, cap) || w383_src(X, 3u * 20000u) != 0u || w383_src(X, 3u * 20000u + 2u) != 20002u) { fail++; }
+    /* 3. Viereckliste 60000 und 4. Viereckstreifen 30000 (je 90000 ungekappt) */
+    memset(X, 0xCD, xb);
+    e = rq_exp_fill(X, P, W383_ST, 8u, 60000u, cap, W383_VBMAX);
+    n++; if (e != 65532u || !w383_guard(X, cap) || w383_src(X, 6u * 10921u + 5u) != 4u * 10921u + 3u) { fail++; }
+    memset(X, 0xCD, xb);
+    e = rq_exp_fill(X, P, W383_ST, 9u, 30000u, cap, W383_VBMAX);
+    n++; if (e != 65532u || !w383_guard(X, cap) || w383_src(X, 6u * 10921u + 5u) != 2u * 10921u + 3u) { fail++; }
+    /* 5. Liste 70000 > Platz */
+    memset(X, 0xCD, xb);
+    e = rq_exp_fill(X, P, W383_ST, 5u, 70000u, cap, W383_VBMAX);
+    n++; if (e != cap || !w383_guard(X, cap) || w383_src(X, cap - 1u) != cap - 1u) { fail++; }
+    /* 6. Linienschleife: voll ohne Schluss, klein mit Schluss */
+    memset(X, 0xCD, xb);
+    e = rq_exp_fill(X, P, W383_ST, 3u, W383_VBMAX, cap, W383_VBMAX);
+    n++; if (e != cap || !w383_guard(X, cap)) { fail++; }
+    e = rq_exp_fill(X, P, W383_ST, 3u, 10u, cap, W383_VBMAX);
+    n++; if (e != 11u || w383_src(X, 10u) != 0u || w383_src(X, 9u) != 9u) { fail++; }
+    /* 7. ohne Kappung wie bisher (Platz = exakte Zahl): Streifen 10 -> 24, Waechter direkt dahinter */
+    memset(X, 0xCD, xb);
+    e = rq_exp_fill(X, P, W383_ST, 6u, 10u, 24u, W383_VBMAX);
+    n++; if (e != 24u || !w383_guard(X, 24u) || w383_src(X, 23u) != 9u || w383_src(X, 21u) != 7u) { fail++; }
+    /* 8. stride 0 (Programm ohne v-Register): nichts geschrieben */
+    memset(X, 0xCD, xb);
+    e = rq_exp_fill(X, P, 0u, 6u, 30000u, cap, W383_VBMAX);
+    n++; if (e != 65535u || X[0] != 0xCDu) { fail++; }
+    printf("RQEXP (W383): %d Faelle (Strom-2-Expansion gekappt auf reservierten Platz, Waechter, Reihenfolge): %d Fehler\n", n, fail);
+    g_fail += fail;
+    free(X);
+    free(P);
+}
+
+/* ---------- W383 LOC-GH-DATA (#60): nie ladbare Texturen fressen nicht das Upload-Budget ----------
+ * Modell von sb_tex_get/tex_upload mit der echten Zulassung (tex_budget_admit): 17 Bump-Eintraege (Format nicht
+ * ladbar, je 180 Draws im Bild, Gelaende vor dem Cockpit; Tester: n=180 je Eintrag und Bild) und 15 Cockpit-
+ * Eintraege, deren Inhalt zu Beginn von Runde 2 neu ist (Refresh je 16 Gets, je 4 Draws im Bild). Start mit
+ * gedrosseltem Missionsbeginn (alle Bump-Eintraege "an der Drossel gescheitert", W307 thr). */
+typedef struct { int fmt_ok, thr, fresh; unsigned gets; } w383_te_t;
+static void w383_tex_get(w383_te_t *e, int fmt_first, unsigned *count, unsigned *attempts)
+{
+    unsigned pf = 0;
+    int attempt;
+    if (!e->fmt_ok) { attempt = e->thr || ((++e->gets & 15u) == 0u); } /* ohne SRV: W307-Retry bzw. 16. Get */
+    else { attempt = !e->fresh && ((++e->gets & 15u) == 0u); }       /* Refresh-Takt (Hash neu) */
+    if (!attempt) { return; }
+    (*attempts)++;
+    if (tex_budget_admit(e->fmt_ok, fmt_first, count, 12u, 0, &pf)) { e->fresh = 1; }
+    if (!e->fmt_ok || !e->fresh) { e->thr = (pf == 2u); }
+}
+static unsigned w383_sim(int fmt_first, unsigned frames, unsigned *bump_slots)
+{
+    w383_te_t t[32];
+    unsigned f, k, d, count, att, done_at = 0, used = 0;
+    for (k = 0; k < 32u; k++) { t[k].fmt_ok = k >= 17u; t[k].thr = k < 17u; t[k].fresh = 0; t[k].gets = k * 5u; }
+    for (f = 1; f <= frames; f++) {
+        unsigned c0;
+        count = 0; att = 0;
+        for (d = 0; d < 180u; d++) { for (k = 0; k < 17u; k++) { w383_tex_get(&t[k], fmt_first, &count, &att); } }
+        c0 = count; used += c0;
+        for (d = 0; d < 4u; d++) { for (k = 17u; k < 32u; k++) { w383_tex_get(&t[k], fmt_first, &count, &att); } }
+        if (!done_at) {
+            unsigned ok = 0;
+            for (k = 17u; k < 32u; k++) { ok += (unsigned)t[k].fresh; }
+            if (ok == 15u) { done_at = f; }
+        }
+    }
+    *bump_slots = used;
+    return done_at;
+}
+static void test_texbudget(void)
+{
+    int fail = 0, n = 0;
+    unsigned pf = 0, c = 0, slots_new = 0, slots_old = 0, fnew, fold;
+    /* Zulassung einzeln */
+    n++; if (tex_budget_admit(0, 1, &c, 12u, 0, &pf) || pf != 4u || c != 0u) { fail++; }   /* neu: kein Platz */
+    n++; if (tex_budget_admit(0, 0, &c, 12u, 0, &pf) || pf != 4u || c != 1u) { fail++; }   /* alt: Platz belegt */
+    c = 12u;
+    n++; if (tex_budget_admit(1, 1, &c, 12u, 0, &pf) || pf != 2u || c != 12u) { fail++; }  /* voll: Drossel */
+    n++; if (!tex_budget_admit(1, 1, &c, 12u, 1, &pf) || pf != 0u || c != 13u) { fail++; } /* Pause: frei */
+    c = 0;
+    n++; if (!tex_budget_admit(1, 0, &c, 12u, 0, &pf) || pf != 0u || c != 1u) { fail++; }  /* ladbar: wie alt */
+    /* Modell Runde 2 */
+    fnew = w383_sim(1, 600u, &slots_new);
+    fold = w383_sim(0, 600u, &slots_old);
+    n++; if (!fnew || fnew > 10u) { fail++; }        /* neu: Cockpit nach wenigen Bildern frisch */
+    n++; if (slots_new != 0u) { fail++; }            /* neu: Bump-Eintraege belegen keinen Platz */
+    n++; if (fold != 0u || slots_old < 600u * 12u) { fail++; } /* Gegenprobe alt: Budget jedes Bild weg, Cockpit nie */
+    printf("TEXBUDGET (W383): %d Faelle (Drossel-Zulassung, Modell Runde 2: Cockpit frisch nach %u Bildern, alt %s, "
+           "Bump-Plaetze neu %u / alt %u in 600 Bildern): %d Fehler\n", n, fnew, fold ? "frisch" : "nie", slots_new,
+           slots_old, fail);
+    g_fail += fail;
+}
+
+/* ---------- W377 LOC-MENU-FPS: Wiederholbild-Takt der LoC-Menues, Textebenen-Ring ---------- */
+/* Simuliert 2 s Menue mit 30-Hz-Spiel-Presents (Zeit in us) und dem Takt-Thread; zaehlt Presents je Spielbild,
+ * den kleinsten Abstand eines Wiederholbilds vor dem naechsten Spiel-Present und den groessten Abstand. */
+static void lm_sim(int rate, int fps_limit, long long game_per, long long late_every, long long late_us, int gpu_busy_us,
+                   int *rep, double *min_gap_before_game, double *max_gap)
+{
+    long long dt = 1000000 / lm_rate(rate, fps_limit), t, next_game = 0, last = 0, dl = 0, prev_pres = 0;
+    long long ev[2] = { 0, 0 }; /* Fertigzeit der letzten beiden Presents (Ring wie render_locmenu.c) */
+    int evk = 0, ng = 0;
+    lm_clock_t c;
+    memset(&c, 0, sizeof c);
+    *rep = 0; *min_gap_before_game = 1e9; *max_gap = 0;
+    for (t = 1000; t < 2001000; t += 50) { /* 50-us-Raster */
+        if (t >= next_game) { /* Spiel-Present (nie verzoegert) */
+            if (ng >= 3 && prev_pres && (double)(t - prev_pres) > *max_gap) { *max_gap = (double)(t - prev_pres); } /* ab Spielbild 3 (Periode bekannt) */
+            if (ng >= 3 && last && last != c.game && (double)(t - last) < *min_gap_before_game) { *min_gap_before_game = (double)(t - last); }
+            lm_clock_game(&c, t, dt, 10000, 125000);
+            last = prev_pres = t; ev[evk] = t + gpu_busy_us; evk ^= 1; ng++;
+            next_game = t + game_per + ((late_every && ng % late_every == 0) ? late_us : 0);
+            dl = 0;
+            continue;
+        }
+        if (t >= dl) {
+            int a = lm_clock_decide(&c, t, dt, t >= ev[evk], &dl); /* vorletztes Present fertig? */
+            if (a == LM_REPEAT) {
+                if (ng >= 3 && prev_pres && (double)(t - prev_pres) > *max_gap) { *max_gap = (double)(t - prev_pres); }
+                last = prev_pres = t; ev[evk] = t + gpu_busy_us; evk ^= 1; (*rep)++;
+                lm_clock_done(&c, t);
+            }
+        }
+    }
+}
+
+static void test_locmenu(void)
+{
+    int fail = 0, n = 0, rep;
+    double mg, mx;
+    /* Bildrate / Menue-Limit */
+    n++; if (lm_rate(120, 120) != 120 || lm_rate(144, 120) != 120 || lm_rate(144, 0) != 144 || lm_rate(0, 0) != 60 ||
+             lm_rate(120, 60) != 60) { fail++; }
+    /* 30-Hz-Menue bei 120: 3 Wiederholbilder je Spielbild (~90/s), keins in der halben Periode vor dem Spiel-Present */
+    lm_sim(120, 0, 33333, 0, 0, 500, &rep, &mg, &mx);
+    n++; if (rep < 170 || rep + 60 > 242 || mg < 4100 || mx > 9000) { fail++; printf("LOCMENU 120: rep=%d gap_vor_spiel=%.0f max=%.0f\n", rep, mg, mx); }
+    /* 144 Hz: im Mittel 3,8 je Spielbild, zusammen hoechstens 144/s */
+    lm_sim(144, 0, 33333, 0, 0, 500, &rep, &mg, &mx);
+    n++; if (rep < 215 || rep + 60 > 290 || mg < 3400 || mx > 9000) { fail++; printf("LOCMENU 144: rep=%d gap_vor_spiel=%.0f max=%.0f\n", rep, mg, mx); }
+    /* Menue-Limit 60: 1 je Spielbild */
+    lm_sim(144, 60, 33333, 0, 0, 500, &rep, &mg, &mx);
+    n++; if (rep < 55 || rep + 60 > 122 || mx > 17500) { fail++; printf("LOCMENU Limit 60: rep=%d max=%.0f\n", rep, mx); }
+    /* Bildrate <= Spieltakt: keine Wiederholbilder */
+    lm_sim(30, 0, 33333, 0, 0, 500, &rep, &mg, &mx);
+    n++; if (rep != 0) { fail++; printf("LOCMENU 30: rep=%d\n", rep); }
+    /* jedes 5. Spielbild 40 ms zu spaet: Wiederholbilder laufen weiter (kein Loch > 2 Bildperioden) */
+    lm_sim(120, 0, 33333, 5, 40000, 500, &rep, &mg, &mx);
+    n++; if (mx > 16700 || rep < 180) { fail++; printf("LOCMENU spaet: rep=%d max=%.0f\n", rep, mx); }
+    /* GPU langsam (je Present 20 ms): hoechstens ein Present in Arbeit -> deutlich weniger Wiederholbilder */
+    lm_sim(120, 0, 33333, 0, 0, 20000, &rep, &mg, &mx);
+    n++; if (rep > 130) { fail++; printf("LOCMENU GPU langsam: rep=%d\n", rep); }
+    /* Hash: ganzer Inhalt, jedes Bit an jeder Stelle zaehlt, Vertauschen zaehlt, nie 0 */
+    {
+        static unsigned long long buf[640 * 480 / 2];
+        unsigned long long h0, h1, h2, h3;
+        unsigned pos, bad = 0;
+        memset(buf, 0, sizeof buf);
+        h0 = lm_hash64(buf, 640 * 480 / 4);
+        for (pos = 0; pos < 640u * 480u / 2u; pos += 997u) {
+            unsigned bit = (pos * 7u) & 63u;
+            buf[pos] ^= 1ull << bit;
+            if (lm_hash64(buf, 640 * 480 / 4) == h0) { bad++; }
+            buf[pos] ^= 1ull << bit;
+        }
+        buf[10] = 0x1111111111111111ull; buf[11] = 0x2222222222222222ull;
+        h1 = lm_hash64(buf, 640 * 480 / 4);
+        buf[10] = 0x2222222222222222ull; buf[11] = 0x1111111111111111ull;
+        h2 = lm_hash64(buf, 640 * 480 / 4);
+        h3 = lm_hash64(buf, 640 * 480 / 4);
+        /* verschobener Text: dasselbe Muster an anderer Stelle (Vielfache von 16/64 Byte, eine Bildzeile = 2560 Byte)
+         * und zwei vertauschte Muster muessen andere Hashes ergeben (W377: Summe ohne Positionsschluessel war
+         * vertauschungsinvariant -> falscher Textebenen-Zustand in der Lobby) */
+        {
+            static const unsigned offs[] = { 0u, 16u, 64u, 256u, 2560u, 2576u, 25600u, 640u * 4u * 100u, 1228800u - 128u };
+            unsigned long long hs[9];
+            unsigned a, c, w;
+            unsigned char *bb = (unsigned char *)buf;
+            for (a = 0; a < 9; a++) {
+                memset(buf, 0, sizeof buf);
+                for (w = 0; w < 64u; w++) { bb[offs[a] + w] = (unsigned char)(w * 37u + 11u); }
+                hs[a] = lm_hash64(buf, 640 * 480 / 4);
+                for (c = 0; c < a; c++) { if (hs[c] == hs[a]) { bad++; } }
+            }
+            memset(buf, 0, sizeof buf);
+            for (w = 0; w < 64u; w++) { bb[2560u + w] = (unsigned char)(w + 1u); bb[25600u + w] = (unsigned char)(200u - w); }
+            h0 = lm_hash64(buf, 640 * 480 / 4);
+            memset(buf, 0, sizeof buf);
+            for (w = 0; w < 64u; w++) { bb[25600u + w] = (unsigned char)(w + 1u); bb[2560u + w] = (unsigned char)(200u - w); }
+            if (lm_hash64(buf, 640 * 480 / 4) == h0) { bad++; }
+            memset(buf, 0, sizeof buf);
+            h0 = lm_hash64(buf, 640 * 480 / 4);
+        }
+        n++; if (!h0 || !h1 || h1 == h2 || h2 != h3 || bad) { fail++; printf("LOCMENU Hash: bad=%u\n", bad); }
+    }
+    /* Ring: Treffer nach Kopf + Groesse + Hash + Device, Referenzen, Verdraengen */
+    {
+        lm_txr_t r[2];
+        unsigned tick = 0;
+        D3D11_TEXTURE2D_DESC td;
+        ID3D11Texture2D *tx[3] = { NULL, NULL, NULL };
+        ID3D11ShaderResourceView *sv[3] = { NULL, NULL, NULL };
+        int k, ok = 1;
+        memset(r, 0, sizeof r);
+        memset(&td, 0, sizeof td);
+        td.Width = td.Height = 4; td.MipLevels = td.ArraySize = 1; td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1; td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        for (k = 0; k < 3 && ok; k++) {
+            ok = SUCCEEDED(ID3D11Device_CreateTexture2D(g_d, &td, NULL, &tx[k])) &&
+                 SUCCEEDED(ID3D11Device_CreateShaderResourceView(g_d, (ID3D11Resource *)tx[k], NULL, &sv[k]));
+        }
+        if (!ok) { printf("LOCMENU: Anlegen fehlgeschlagen\n"); g_fail++; return; }
+        lm_txr_put(r, 2, &tick, 0x7264E4u, 640, 480, 11ull, 0u, g_d, sv[0]);
+        lm_txr_put(r, 2, &tick, 0x7264E4u, 640, 480, 22ull, 0u, g_d, sv[1]);
+        lm_txr_put(r, 2, &tick, 0x7264E4u, 640, 480, 22ull, 0u, g_d, sv[1]); /* doppelt: keine zweite Referenz */
+        n++; if (lm_txr_find(r, 2, &tick, 0x7264E4u, 640, 480, 11ull, g_d) < 0 ||
+                 lm_txr_find(r, 2, &tick, 0x7264E4u, 640, 480, 33ull, g_d) >= 0 ||
+                 lm_txr_find(r, 2, &tick, 0x667D00Cu, 640, 480, 11ull, g_d) >= 0 ||
+                 lm_txr_find(r, 2, &tick, 0x7264E4u, 512, 480, 11ull, g_d) >= 0 ||
+                 lm_txr_find(r, 2, &tick, 0x7264E4u, 640, 480, 11ull, NULL) >= 0) { fail++; }
+        /* 11 zuletzt benutzt -> 22 wird verdraengt */
+        lm_txr_put(r, 2, &tick, 0x7264E4u, 640, 480, 33ull, 0u, g_d, sv[2]);
+        n++; if (lm_txr_find(r, 2, &tick, 0x7264E4u, 640, 480, 22ull, g_d) >= 0 ||
+                 lm_txr_find(r, 2, &tick, 0x7264E4u, 640, 480, 11ull, g_d) < 0 ||
+                 lm_txr_find(r, 2, &tick, 0x7264E4u, 640, 480, 33ull, g_d) < 0) { fail++; }
+        /* Referenzen: sv[1] nur noch eigene (1), sv[0]/sv[2] eigene + Ring (2) */
+        {
+            ULONG c0, c1, c2;
+            ID3D11ShaderResourceView_AddRef(sv[0]); c0 = ID3D11ShaderResourceView_Release(sv[0]);
+            ID3D11ShaderResourceView_AddRef(sv[1]); c1 = ID3D11ShaderResourceView_Release(sv[1]);
+            ID3D11ShaderResourceView_AddRef(sv[2]); c2 = ID3D11ShaderResourceView_Release(sv[2]);
+            n++; if (c0 != 2u || c1 != 1u || c2 != 2u) { fail++; printf("LOCMENU Ring-Referenzen %lu/%lu/%lu\n", c0, c1, c2); }
+        }
+        for (k = 0; k < 2; k++) { if (r[k].srv) { ID3D11ShaderResourceView_Release(r[k].srv); } }
+        for (k = 0; k < 3; k++) { ID3D11ShaderResourceView_Release(sv[k]); ID3D11Texture2D_Release(tx[k]); }
+    }
+    printf("LOCMENU (W377): %d Faelle (Bildrate/Menue-Limit, Wiederholbild-Takt 120/144/60/30 Hz, spaete Spielbilder, "
+           "langsame GPU, Inhalts-Hash, Textebenen-Ring): %d Fehler\n", n, fail);
+    g_fail += fail;
+}
+
 /* ---------- W358 LOC-LOOK: Vertex-Licht der P2-Programme, LOD-Bias-Kompensation, Mip-Filter ---------- */
 static void test_loclook(void)
 {
@@ -1163,7 +2104,27 @@ static void test_loclook(void)
     /* Mip-Filter: Stufe 1 immer linear, volle Emulation = Spielwert */
     n++; if (rq_loc_mipfilter(1u, 1) != 2u || rq_loc_mipfilter(0u, 1) != 2u) { fail++; }
     n++; if (rq_loc_mipfilter(0u, 3) != 0u || rq_loc_mipfilter(1u, 3) != 1u || rq_loc_mipfilter(7u, 3) != 2u) { fail++; }
-    printf("LOCLOOK (W358): %d Faelle (oD0-Quelle, LOD-Bias-Kompensation, Mip-Filter): %d Fehler\n", n, fail);
+    /* W363 loc_swznorm: swizzled normiert (LoC), linear/RT unveraendert, SB unveraendert */
+    n++; if (rq_loc_texel_scale(1, 1, 0, 0, 1, 0, 0, 11.25f)) { fail++; }   /* LoC: Korn-Textur 128^2, UV 11 -> normiert */
+    n++; if (!rq_loc_texel_scale(0, 1, 0, 0, 1, 0, 0, 11.25f)) { fail++; }  /* SB: alte Regel (Golden) */
+    n++; if (!rq_loc_texel_scale(1, 0, 0, 0, 1, 0, 0, 11.25f)) { fail++; }  /* LoC, Schalter aus: alt */
+    n++; if (!rq_loc_texel_scale(1, 1, 0, 1, 0, 0, 0, 640.0f)) { fail++; }  /* LoC linear (LIN_*): Texel */
+    n++; if (!rq_loc_texel_scale(1, 1, 1, 0, 1, 1, 0, 512.0f)) { fail++; }  /* RT mit Texel-UV (loc_rtuv) */
+    n++; if (rq_loc_texel_scale(1, 1, 1, 0, 1, 0, 0, 1.0f)) { fail++; }     /* RT normiert */
+    n++; if (rq_loc_texel_scale(0, 0, 0, 0, 0, 0, 0, 11.25f)) { fail++; }   /* 3D-Draw swizzled: nie */
+    n++; if (rq_loc_texel_scale(0, 0, 0, 0, 1, 0, 1, 11.25f)) { fail++; }   /* SB-Monitor-Wash (W121) */
+    /* W368 LOC-COCKPIT: Linear-Atlas der Cockpit-Anzeigen, oT0 vom Programm gerechnet -> Texel (NV2A) */
+    n++; if (!rq_loc_lin_progscale(1, 1, 0, 1, 0, 0, 1)) { fail++; }  /* LoC, linear, VS-Programm rechnet oT0 */
+    n++; if (rq_loc_lin_progscale(0, 1, 0, 1, 0, 0, 1)) { fail++; }   /* SB: nie (Golden) */
+    n++; if (rq_loc_lin_progscale(1, 0, 0, 1, 0, 0, 1)) { fail++; }   /* Schalter aus: alt */
+    n++; if (rq_loc_lin_progscale(1, 1, 0, 0, 0, 0, 1)) { fail++; }   /* swizzled: immer normiert */
+    n++; if (rq_loc_lin_progscale(1, 1, 1, 1, 0, 0, 1)) { fail++; }   /* RT: eigene Regel (loc_rtuv) */
+    n++; if (rq_loc_lin_progscale(1, 1, 0, 1, 1, 0, 1)) { fail++; }   /* vortransformiert: tmax-Regel */
+    n++; if (rq_loc_lin_progscale(1, 1, 0, 1, 0, 1, 1)) { fail++; }   /* kind 1 (P1): CPU normiert schon */
+    n++; if (rq_loc_lin_progscale(1, 1, 0, 1, 0, 0, 0)) { fail++; }   /* mov oT0, vN: tmax-Regel */
+    /* Kette wie render_shade.c: Atlas 512x256, tmax 0 (Programm-UV) -> alte Regel nein, neue ja */
+    n++; if (rq_loc_texel_scale(1, 1, 0, 1, 0, 0, 0, 0.0f) || !rq_loc_lin_progscale(1, 1, 0, 1, 0, 0, 1)) { fail++; }
+    printf("LOCLOOK (W358/W363/W368): %d Faelle (oD0-Quelle, LOD-Bias-Kompensation, Mip-Filter, swizzled normiert, Linear mit Programm-UV): %d Fehler\n", n, fail);
     g_fail += fail;
 }
 
@@ -1277,7 +2238,179 @@ static void test_linescale(void)
         vs->lpVtbl->Release(vs); ps->lpVtbl->Release(ps); gs->lpVtbl->Release(gs); lay->lpVtbl->Release(lay);
         bv->lpVtbl->Release(bv); bp->lpVtbl->Release(bp); bg->lpVtbl->Release(bg);
     }
+    { /* FIX(SB-HUD-SMEAR): Bezug ganzes RT statt Spiel-Viewport. Rechnung + Band einer senkrechten HUD-Strich-Linie
+       * in einem Teil-Viewport (Kompassstreifen): RT 16x16 logisch / 64x64 D3D11, Spiel-Viewport 4x2. */
+        static const struct { unsigned rw, rh, pw, ph; int on; const char *n; } k[] = {
+            {512, 512, 1024, 1024, 1, "Hauptmonitor rt_scale 2"},
+            {256, 256, 1024, 1024, 1, "Sub-Monitor rt_scale 4"},
+            {512, 512, 512, 512, 0, "rt_scale 1 bitgleich"},
+            {256, 256, 320, 320, 0, "Faktor 1,25"},
+            {512, 512, 1024, 512, 0, "nur eine Achse skaliert"},
+            {0, 512, 1024, 1024, 0, "RT 0"},
+        };
+        unsigned i, w, h;
+        int on, nf = 0, nv = -1, nvold = -1;
+        for (i = 0; i < sizeof k / sizeof k[0]; i++) {
+            w = h = 0;
+            on = sb_line_rt_dims(k[i].rw, k[i].rh, k[i].pw, k[i].ph, &w, &h);
+            if (on != k[i].on || (on && (w != k[i].rw || h != k[i].rh))) {
+                printf("LSRT FAIL %s: an=%d %ux%u\n", k[i].n, on, w, h);
+                nf++;
+            }
+        }
+        w = h = 0;
+        if (sb_line_rt_dims(16, 16, 64, 64, &w, &h)) {
+            char src[2048];
+            ID3DBlob *bv = compile(kLsVsIm, "vs_4_0"), *bp = compile(kLsPsIm, "ps_4_0"), *bg, *bo;
+            ID3D11VertexShader *vs = NULL; ID3D11PixelShader *ps = NULL; ID3D11GeometryShader *gs = NULL, *go = NULL;
+            ID3D11InputLayout *lay = NULL;
+            sb_line_gs_source(src, sizeof src, w, h, 0);
+            bg = compile(src, "gs_4_0");
+            sb_line_gs_source(src, sizeof src, 4, 2, 0); /* alt (W352): Spiel-Viewport 4x2 */
+            bo = compile(src, "gs_4_0");
+            if (bv && bp && bg && bo) {
+                ID3D11Device_CreateVertexShader(g_d, bv->lpVtbl->GetBufferPointer(bv), bv->lpVtbl->GetBufferSize(bv), NULL, &vs);
+                ID3D11Device_CreatePixelShader(g_d, bp->lpVtbl->GetBufferPointer(bp), bp->lpVtbl->GetBufferSize(bp), NULL, &ps);
+                ID3D11Device_CreateGeometryShader(g_d, bg->lpVtbl->GetBufferPointer(bg), bg->lpVtbl->GetBufferSize(bg), NULL, &gs);
+                ID3D11Device_CreateGeometryShader(g_d, bo->lpVtbl->GetBufferPointer(bo), bo->lpVtbl->GetBufferSize(bo), NULL, &go);
+                {
+                    D3D11_INPUT_ELEMENT_DESC ie2[2] = {
+                        { "POSITION", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+                        { "COLOR", 0, DXGI_FORMAT_R32G32B32A32_FLOAT, 0, 16, D3D11_INPUT_PER_VERTEX_DATA, 0 } };
+                    ID3D11Device_CreateInputLayout(g_d, ie2, 2, bv->lpVtbl->GetBufferPointer(bv), bv->lpVtbl->GetBufferSize(bv), &lay);
+                }
+                if (vs && ps && gs && go && lay) {
+                    nv = ls_count(vs, ps, gs, lay, rtv, rt, stg, 8.5f, 2.0f, 8.5f, 14.0f, 1.0f);    /* 1 x 12 Xbox-Pixel */
+                    nvold = ls_count(vs, ps, go, lay, rtv, rt, stg, 8.5f, 2.0f, 8.5f, 14.0f, 1.0f); /* alt: 16/4 = 4 Xbox-Pixel breit */
+                }
+            }
+            if (vs) { vs->lpVtbl->Release(vs); } if (ps) { ps->lpVtbl->Release(ps); }
+            if (gs) { gs->lpVtbl->Release(gs); } if (go) { go->lpVtbl->Release(go); } if (lay) { lay->lpVtbl->Release(lay); }
+            if (bv) { bv->lpVtbl->Release(bv); } if (bp) { bp->lpVtbl->Release(bp); }
+            if (bg) { bg->lpVtbl->Release(bg); } if (bo) { bo->lpVtbl->Release(bo); }
+        }
+        /* Soll: 4 x 48 = 192 (1 Xbox-Pixel breit); alter Bezug 4x2 -> 16 px breit (~ 768) */
+        if (!(nv >= 184 && nv <= 200 && nvold > 400)) { nf++; }
+        printf("LSRT %s: %u Faelle, senkrechte Linie im Teil-Viewport band=%d (Soll ~192) alt=%d (~768, zu breit)\n",
+               nf ? "FAIL" : "ok", (unsigned)(sizeof k / sizeof k[0]), nv, nvold);
+        g_fail += nf;
+    }
     rtv->lpVtbl->Release(rtv); rt->lpVtbl->Release(rt); stg->lpVtbl->Release(stg);
+    { /* W381 (#59) loc_line_bb: logische Groesse fuer Backbuffer-Linien (reine Rechnung; GS wie oben) */
+        static const struct { float vw, vh; unsigned bw, bh, fh; float asp; int on; unsigned w, h; const char *n; } k[] = {
+            {3440, 1440, 3440, 1440, 480, 4.0f / 3.0f, 1, 1147, 480, "3440x1440 Hor+"},
+            {1920, 1440, 3440, 1440, 480, 4.0f / 3.0f, 1, 640, 480, "4:3-Box in 3440x1440"},
+            {3840, 2160, 3840, 2160, 480, 4.0f / 3.0f, 1, 853, 480, "3840x2160 Hor+"},
+            {640, 480, 640, 480, 480, 4.0f / 3.0f, 0, 0, 0, "640x480 (Testlaeufe) bitgleich"},
+            {800, 600, 800, 600, 480, 4.0f / 3.0f, 0, 0, 0, "800x600 Faktor 1,25"},
+            {960, 720, 960, 720, 480, 4.0f / 3.0f, 1, 640, 480, "960x720 Faktor 1,5"},
+            {1000, 1500, 1000, 1500, 480, 4.0f / 3.0f, 1, 640, 960, "hohes Fenster (Breite begrenzt)"},
+            {64, 64, 64, 64, 16, 1.0f, 1, 16, 16, "64x64/16 = GS-Pruefung oben"},
+            {640, 480, 640, 480, 0, 4.0f / 3.0f, 0, 0, 0, "Framebuffer 0"},
+        };
+        unsigned i, w, h;
+        int on, nf = 0;
+        printf("== 7b. LoC-Backbuffer-Linien (W381 loc_line_bb)\n");
+        for (i = 0; i < sizeof k / sizeof k[0]; i++) {
+            w = h = 0;
+            on = sb_line_bb_dims(k[i].vw, k[i].vh, k[i].bw, k[i].bh, k[i].fh, k[i].asp, &w, &h);
+            if (on != k[i].on || (on && (w != k[i].w || h != k[i].h))) {
+                printf("LSBB FAIL %s: an=%d %ux%u (Soll %d %ux%u)\n", k[i].n, on, w, h, k[i].on, k[i].w, k[i].h);
+                nf++;
+            }
+        }
+        printf("LSBB %s: %u Faelle\n", nf ? "FAIL" : "ok", (unsigned)(sizeof k / sizeof k[0]));
+        g_fail += nf;
+    }
+}
+
+/* ---------- W394 LOC-HUD-VIEW / LOC-VIEW-PERFRAME (loc_hud_math.h) ---------- */
+static void test_lochud(void)
+{
+    int n = 0, fail = 0, v, k, a, b;
+    /* (a) Umrechnung Zielhebel Block -> Satz (belegt C2/C3): Totzone 0x7F/0x80, sonst Stufen */
+    n++; if (lh_conv_aim(0x7F) != 0 || lh_conv_aim(0x80) != 0) { fail++; }
+    n++; if (lh_conv_aim(0xFF) != 127 || lh_conv_aim(0x00) != -127 || lh_conv_aim(0x81) != 1 || lh_conv_aim(0x7E) != -1) { fail++; }
+    { uint8_t f4[4]; lh_axes_to_frame(123, 123, 0, 0, f4); n++; if ((int8_t)f4[0] != -4 || (int8_t)f4[1] != 4 || (int8_t)f4[3] != -1) { fail++; } }
+    /* (b) Vorschau-Satz = Satz, den der Poll mit den neuen Achsen liefern wuerde (alle Achsen, Grenzen eingeschlossen) */
+    for (a = 0; a < 256; a += 3)
+        for (b = 0; b < 256; b += 5) {
+            uint8_t base[14], out[14], exp4[4], fin[4];
+            int have[4] = {1, 1, 1, 1};
+            int sx0 = (a % 255) - 127, sx1 = (b % 255) - 127;
+            memset(base, 0x5A, sizeof base);
+            fin[0] = (uint8_t)a; fin[1] = (uint8_t)b; fin[2] = (uint8_t)(int8_t)sx0; fin[3] = (uint8_t)(int8_t)sx1;
+            lh_axes_to_frame(a, b, sx0, sx1, base + 10);
+            lh_frame(base, fin, b, a, sx1, sx0, have, out);
+            lh_axes_to_frame(b, a, sx1, sx0, exp4);
+            n++; if (memcmp(out + 10, exp4, 4) != 0 || memcmp(out, base, 10) != 0) { fail++; }
+        }
+    { /* ohne have: Satz unveraendert */
+        uint8_t base[14], out[14], fin[4] = {0x90, 0x70, 5, 250};
+        int have[4] = {0, 0, 0, 0};
+        for (k = 0; k < 14; k++) base[k] = (uint8_t)(k * 17);
+        lh_frame(base, fin, 0xFF, 0x00, 127, -127, have, out);
+        n++; if (memcmp(base, out, 14) != 0) { fail++; }
+    }
+    /* (c) Gewicht und Mischung: w 0 -> Basis, 1 -> voller Schritt, Umbruch bei +-pi */
+    n++; if (lh_weight(0.0, 49.0) != 0.0 || lh_weight(49.0, 49.0) != 1.0 || lh_weight(80.0, 49.0) != 1.0 || fabs(lh_weight(24.5, 49.0) - 0.5) > 1e-12) { fail++; }
+    n++; if (fabs(lh_weight(25.0, 0.0) - 0.5) > 1e-12) { fail++; } /* ohne Schaetzung 50 ms */
+    {
+        la_state_t p, s1;
+        double o[4];
+        memset(&p, 0, sizeof p); memset(&s1, 0, sizeof s1);
+        p.ys = 3.10; s1.ys = -3.10; p.ax = 0.2; s1.ax = 0.3; p.ps = -0.1; s1.ps = 0.1; p.ay = 0.0; s1.ay = -0.04;
+        lh_blend(&p, &s1, 0.0, o); n++; if (fabs(o[0] - 3.10) > 1e-12 || fabs(o[2] - 0.2) > 1e-12) { fail++; }
+        lh_blend(&p, &s1, 1.0, o); n++; if (fabs(o[0] + 3.10) > 1e-9 || fabs(o[2] - 0.3) > 1e-12 || fabs(o[3] + 0.04) > 1e-12) { fail++; }
+        lh_blend(&p, &s1, 0.5, o); n++; if (fabs(fabs(o[0]) - LA_PI) > 1e-9 || fabs(o[1]) > 1e-12) { fail++; } /* ueber +-pi, nicht durch 0 */
+    }
+    /* (d) Stetigkeit am Uebergang: naechste Vorhersage = voller Schritt (gleicher Satz) -> Anzeige springt nicht */
+    {
+        uint32_t r = 7u;
+        for (v = 0; v < 2000; v++) {
+            la_state_t p, s1, p2;
+            uint8_t in[14];
+            double o1[4], o2[4];
+            memset(&p, 0, sizeof p);
+            r = r * 1664525u + 1013904223u;
+            p.fa0 = 0x4000u; p.zoom = (double)(r % 56u); p.arate = 0.05;
+            p.ys = ((int)(r >> 8) % 1000) * 0.001; p.yt = p.ys + 0.1; p.ax = 0.1; p.ay = -0.05;
+            memset(in, 0, sizeof in);
+            r = r * 1664525u + 1013904223u;
+            in[10] = (uint8_t)(r >> 8); in[11] = (uint8_t)(r >> 16); in[12] = (uint8_t)(r >> 20); in[13] = (uint8_t)(r >> 24);
+            s1 = p;
+            if (!la_step(&s1, in)) { continue; }
+            p2 = s1; /* Simulation hat den Satz uebernommen */
+            lh_blend(&p, &s1, 1.0, o1);   /* gehalten bis zur Vorhersage */
+            lh_blend(&p2, &p2, 0.0, o2);  /* neue Basis, w = 0 */
+            n++; if (fabs(la_wrap(o1[0] - o2[0])) + fabs(la_wrap(o1[1] - o2[1])) + fabs(o1[2] - o2[2]) + fabs(o1[3] - o2[3]) > 1e-12) { fail++; }
+        }
+    }
+    /* (e) Marken-Verschiebung: ohne Korrektur c/w - a, hinter der Kamera keine, Grenze +-0,5 */
+    {
+        double c[4] = {0.3, -0.2, 0.5, 2.0}, dx, dy;
+        float C[16];
+        n++; if (!lh_mark_shift(c, NULL, 0.1, -0.05, &dx, &dy) || fabs(dx - 0.05) > 1e-12 || fabs(dy + 0.05) > 1e-12) { fail++; }
+        c[3] = -1.0; n++; if (lh_mark_shift(c, NULL, 0.0, 0.0, &dx, &dy)) { fail++; }
+        c[3] = 0.5; c[0] = 2.0; n++; if (!lh_mark_shift(c, NULL, 0.0, 0.0, &dx, &dy) || dx != 0.5) { fail++; }
+        /* mit Kamera-Korrektur (W376 la_cam_corr): Marke folgt einem Weltpunkt unter der korrigierten Kamera */
+        {
+            static const double up[3] = {0.0, 1.0, 0.0};
+            double VP[16], Cd[16], q[3] = {200.0, 50.0, 3000.0}, cq[4], bq[4];
+            memset(VP, 0, sizeof VP);
+            VP[0] = 1.3; VP[5] = 1.73; VP[10] = 1.0; VP[11] = 1.0; VP[14] = -10.0; /* Blick +z, w = z */
+            if (la_cam_corr(Cd, VP, up, 0.05, -0.02)) {
+                for (k = 0; k < 16; k++) { C[k] = (float)Cd[k]; }
+                for (k = 0; k < 4; k++) { cq[k] = q[0] * VP[k] + q[1] * VP[4 + k] + q[2] * VP[8 + k] + VP[12 + k]; }
+                for (k = 0; k < 4; k++) { bq[k] = cq[0] * Cd[k] + cq[1] * Cd[4 + k] + cq[2] * Cd[8 + k] + cq[3] * Cd[12 + k]; }
+                n++; if (!lh_mark_shift(cq, C, cq[0] / cq[3], cq[1] / cq[3], &dx, &dy) ||
+                         fabs(dx - (bq[0] / bq[3] - cq[0] / cq[3])) > 1e-5 || fabs(dy - (bq[1] / bq[3] - cq[1] / cq[3])) > 1e-5 ||
+                         fabs(dx) < 1e-3) { fail++; }
+            } else { n++; fail++; }
+        }
+    }
+    printf("LOCHUD (W394): %d Faelle (Umrechnung Block/Satz, Vorschau-Satz, Gewicht/Mischung, Stetigkeit am Uebergang, Marken-Verschiebung): %d Fehler\n", n, fail);
+    g_fail += fail;
 }
 
 int main(int argc, char **argv)
@@ -1322,9 +2455,18 @@ int main(int argc, char **argv)
     test_texzero();
     test_bbcam();
     test_camfit();
+    test_locaim();
+    test_locsmooth(); /* W385 */
+    test_locsmoothopp(); /* W387 */
+    test_locownpred(); /* W390 */
+    test_pacing(); /* W393 */
+    test_lochud(); /* W394 */
     test_loclook();
     test_linescale();
     test_shref();
+    test_rqexp();
+    test_texbudget();
+    test_locmenu();
     printf("== ERGEBNIS: %d Fehler\n", g_fail);
     return g_fail ? 1 : 0;
 }

@@ -165,7 +165,7 @@ where.
     that folder and a pre-filled *Bug report* page in your browser. Drag the
     ZIP into the *Attachments* field, add what you were doing, submit.
   - **Dismiss** – hide the card. The report stays in the folder.
-- **Diagnostic package:** launcher › **Test tools** › *Problem reports* ›
+- **Diagnostic package:** launcher › gear › **Test tools** › *Problem reports* ›
   **Create diagnostic package**. It first lists what goes in, then writes
   `diagnostics/steelbound-diag-<date-time>.zip` and opens the folder:
   Windows version, CPU, RAM, graphics card and driver, monitors with
@@ -249,7 +249,8 @@ save check on the next start.
 
 ## Test tools page (test start)
 
-The launcher page **Test tools** (called *Alpha Test* in earlier versions) collects tools that only exist to make
+The launcher page **Test tools** (called *Alpha Test* in earlier versions; since 0.3.0 opened with the gear at the
+top right › *Test tools*) collects tools that only exist to make
 testing easier. They are not part of the original game.
 
 - **Test start (mission + VT):** pick a mission (Training or Mission

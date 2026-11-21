@@ -80,6 +80,27 @@ int lgame_cfg_load(const char *usercfg_path, lgame_state_t *st);
  * -1 = Schreibfehler. Leere Werte werden als "key=" geschrieben. */
 int lgame_cfg_save(const char *usercfg_path, const lgame_state_t *st);
 
+/* W402 LAUNCHER-PERGAME: jedes Spiel hat eigene Einstellungen (Nutzer 21.11.). Steel Battalion: user.cfg
+ * (wie bisher, dazu die launcher_*-Schluessel). Line of Contact: user_loc.cfg im selben Ordner; der Launcher
+ * startet LoC mit SB_USER_CFG=<user_loc.cfg> (hcfg.c), der Client liest und speichert (ESC-Menue) dann nur dort.
+ * Masken fuer lgame_cfg_save_ex (Bit = Index in kKeys). */
+#define LGAME_KEY_PERGAME "launcher_pergame" /* 1 = Uebernahme der gemeinsamen Werte erledigt */
+#define LGAME_LOC_CFG_NAME "user_loc.cfg"
+enum {
+    LGAME_K_GAME = 1, LGAME_K_IMAGE = 2, LGAME_K_SERVER = 4, LGAME_K_WIDE = 8, LGAME_K_PERGAME = 16,
+    LGAME_K_LAUNCHER = 1 | 2 | 4 | 16 /* gehoeren in user.cfg */
+};
+/* Schluessel aus mask schreiben (ersetzen/anhaengen), Schluessel aus drop entfernen, alles andere bleibt. */
+int lgame_cfg_save_ex(const char *usercfg_path, const lgame_state_t *st, unsigned mask, unsigned drop);
+/* Einstellungsdatei des Spiels: SB = usercfg, LoC = user_loc.cfg im Ordner von usercfg. */
+void lgame_cfg_path(const char *usercfg, int game, char *out, size_t cap);
+/* 1 = user.cfg traegt launcher_pergame=1 */
+int lgame_pergame_marked(const char *usercfg);
+/* Einmalige Uebernahme: user.cfg vorhanden und nicht markiert -> (falls user_loc.cfg fehlt) Kopie ohne
+ * launcher_*-, Pfad- und Update-Zeilen nach user_loc.cfg, dann Markierung in user.cfg (loc_widescreen dort
+ * entfernt). 1 = uebernommen, 0 = nichts zu tun (neu oder schon markiert), -1 = Schreibfehler. Idempotent. */
+int lgame_pergame_migrate(const char *usercfg, const char *loccfg);
+
 /* LoC-Datenordner: base = Datenordner (Profil/portabel) bzw. Client-Ordner
  * (legacy). out = base\loc (Endtrenner von base egal). Rein, testbar. */
 void lgame_loc_dir(const char *base, char *out, size_t cap);
@@ -101,6 +122,7 @@ typedef struct {
     uint32_t version;
     char sha256[65];        /* SHA-256 der default.xbe ("" = nicht gelesen) */
     int startable;          /* 1 = Client startet LoC (lgame_loc_client_ready) */
+    int ver_unknown;        /* W384 (GH #52): LoC, aber unbekannte Fassung (z. B. Titel-Update) */
 } lgame_img_t;
 
 /* Einordnung nach Title-ID (rein, testbar; xbe_ok = Zertifikat gelesen). */
@@ -118,11 +140,16 @@ int lgame_img_msg(const lgame_img_t *r, const char *path_u8, char *msg, size_t c
  * Start); hier - und nur hier - freischalten. SB_TEST_LOC_READY=1 erzwingt 1
  * (Selbsttest des spaeteren Wegs). */
 int lgame_loc_client_ready(void);
-/* W353: Freigabe der Ausgabe ohne Test-Haken (intern 1, community nur mit SB_LOC_PLAY). */
+/* W353/W389: Freigabe der Ausgabe ohne Test-Haken (intern 1, community mit SB_LOC_PLAY, Standard seit 0.3.0). */
 int lgame_loc_build_ready(void);
 /* Startversuch LoC: 0 = darf starten, 1 = gesperrt (msg = "Coming soon"-Text
  * bzw. Grund aus der Abbild-Pruefung). */
 int lgame_loc_start_gate(const lgame_img_t *r, char *msg, size_t cap);
+/* W384 (GH #52): --set-Anfang fuer den LoC-Start (ACP, ';' maskiert). ISO/xiso ->
+ * "loc_boot=1;game_image=<Abbild>"; .xbe oder entpackter Ordner -> Ordner-Modus
+ * "loc_boot=1;game_image=;xbe_path=<xbe>;media_root=<Ordner>" (Client liest game_image
+ * nur als ISO). xbe_u8 = Pfad fuer --xbe (u8). */
+void lgame_loc_image_set(const char *img_u8, char *set, size_t cap, char *xbe_u8, size_t xcap);
 
 /* Selbsttest der reinen Logik (Temp-Ordner, synthetische XBE ohne
  * Spielbytes). Meldet PASS/FAIL per printf (cli_printf). */

@@ -10,6 +10,7 @@
 #include "hlog.h"
 #include "hcfg.h"
 #include "sb_tex.h" /* W243 DIAG(AMMO-HUD) */
+#include "sb_state.h" /* ISSUE49: sb_in_mission */
 #include <stdint.h>
 #include <string.h>
 #include <stdio.h>
@@ -938,5 +939,112 @@ void diag_cam_tick(unsigned frame)
         HLOG_I("CAMV: f=%u nset=%u%s", frame, g_camd_nset, vb);
         g_camd_best_n = 0;
         g_camd_nv = g_camd_nset = 0;
+    }
+}
+
+/* DIAG(ISSUE49, proj_diag=1): Geschoss-Listen des Spiels. Tick FUN_00176910
+ * laeuft ueber zwei Felder mit 0xE0 Byte je Eintrag: A = [0x6E4480] (Anzahl
+ * [0x6E4478], Flag +4 Bit2) und B = [0x6E4484] (Anzahl [0x6E447C], Flag +4
+ * Bit1); +4 Bit0 aktiv, +0xE Waffen-ID (WEPDAT-Satz), +0x10 Art (Handler
+ * 0x2FC430/0x2FC464), +0x14 Objektzeiger, +0x20 Ziel, +0x2000000 = lenkt auf
+ * ein Ziel (Radar/CHAFF, FUN_00181BB0). Geburt/Ende je Eintrag einzeln, alle
+ * 30 Bilder die aktiven Eintraege (Floats +0x40..+0x6C). Nur lesend. */
+u32 g_proj_vbs[32]; /* DIAG(ISSUE49): VB-Objekte der Modellteile aktiver Lenkflugkoerper (hook_D3D_DrawIdx) */
+unsigned g_proj_nvb;
+
+void diag_proj_tick(unsigned frame)
+{
+    static u32 prev_on[2][256], prev_wid[2][256];
+    static unsigned nlog;
+    int li;
+    if (!g_cfg.proj_diag) {
+        return;
+    }
+    g_proj_nvb = 0;
+    for (li = 0; li < 2; li++) {
+        u32 arr = st_read(SBA(li ? 0x6E4484u : 0x6E4480u));
+        u32 n = st_read(SBA(li ? 0x6E447Cu : 0x6E4478u)), i;
+        if (arr < 0x10000u || arr >= 0xFFFF0000u || n == 0 || n > 256u) {
+            continue;
+        }
+        for (i = 0; i < n; i++) {
+            u32 b = arr + i * 0xE0u, fl = st_read(b + 4u);
+            u32 on = (fl != 0xFFFFFFFEu) && (fl & 1u);
+            u32 wid = st_read16(b + 0x0Eu) & 0xFFFFu, kind = st_read16(b + 0x10u) & 0xFFFFu;
+            if (on && kind == 3u && g_cfg.proj_diag >= 3 && sb_in_mission()) {
+                u32 ob2 = st_read(b + 0x14u), mi = st_read(ob2 + 0x54u), np = st_read(ob2 + 0x36u) & 0xFFu, pi;
+                for (pi = 0; pi < np && pi < 16u && mi >= 0x10000u && mi < 0xFFFF0000u && g_proj_nvb < 32u; pi++) {
+                    u32 vb = st_read(mi + pi * 0x1A0u + 0x18Cu);
+                    if (vb && vb < 0xFFFF0000u) { g_proj_vbs[g_proj_nvb++] = vb; }
+                }
+            }
+            if (on && (!prev_on[li][i] || prev_wid[li][i] != wid)) {
+                if (nlog < 3000u) {
+                    char hx[0xE0 / 4 * 9 + 8];
+                    size_t k = 0; u32 o;
+                    for (o = 0; o < 0xE0u; o += 4u) {
+                        int w2 = snprintf(hx + k, sizeof hx - k, "%08X ", st_read(b + o));
+                        if (w2 > 0) { k += (size_t)w2; }
+                    }
+                    HLOG_I("PROJ new: f=%u l=%c i=%u fl=0x%08X wid=%u kind=%u obj=0x%08X raw=%s",
+                           frame, li ? 'B' : 'A', i, fl, wid, kind, st_read(b + 0x14u), hx);
+                    nlog++;
+                }
+            } else if (!on && prev_on[li][i]) {
+                if (nlog < 3000u) {
+                    HLOG_I("PROJ end: f=%u l=%c i=%u wid=%u", frame, li ? 'B' : 'A', i, prev_wid[li][i]);
+                    nlog++;
+                }
+            } else if (on && (g_cfg.proj_diag >= 2 || (frame % 30u) == 0u) && nlog < 20000u &&
+                       (g_cfg.proj_diag < 3 || kind == 3u)) {
+                /* proj_diag=2: jedes Bild; 3: nur Lenkflugkoerper (Art 3). Objekt +0x14 =
+                 * Eintrag der Entity-Tabelle [0x351828] (Stride 0x5C), Lage +0xC/+0x10/+0x14;
+                 * eigene Lage 0x3579B4.. (Radar FUN_00033820). */
+                float fv[12], ep[3], me[3]; u32 o, ob = st_read(b + 0x14u), tb = st_read(SBA(0x351828u));
+                for (o = 0; o < 12u; o++) { u32 r = st_read(b + 0x40u + o * 4u); memcpy(&fv[o], &r, 4); }
+                for (o = 0; o < 3u; o++) {
+                    u32 r = st_read(ob + 0x0Cu + o * 4u), q = st_read(SBA(0x3579B4u) + o * 4u);
+                    memcpy(&ep[o], &r, 4); memcpy(&me[o], &q, 4);
+                }
+                /* Zeichenliste der Entities (FUN_00025580): Anzahl i16 [0x3517C0],
+                 * Eintraege u32 0x356FE0 (Index im unteren Wort) -> dl = Platz oder -1. */
+                int ei = (tb && ob >= tb) ? (int)((ob - tb) / 0x5Cu) : -1, dl = -1, dn;
+                dn = (int)(int16_t)(st_read16(SBA(0x3517C0u)) & 0xFFFFu);
+                for (o = 0; ei >= 0 && dn > 0 && o < (u32)dn && o < 4096u; o++) {
+                    if ((int)(st_read16(SBA(0x356FE0u) + o * 4u) & 0xFFFFu) == ei) { dl = (int)o; break; }
+                }
+                if (g_cfg.proj_diag >= 3 && dl >= 0 && kind == 3u) {
+                    /* Belegbild: Lenkflugkoerper in der Zeichenliste und < 60 Einheiten vor uns
+                     * (jedes 3. Bild, hoechstens 60 Bilder; render_diag.c g_shot_census). */
+                    static unsigned nshot, lastf;
+                    float dx = ep[0] - me[0], dy = ep[1] - me[1], dz = ep[2] - me[2];
+                    if (dx * dx + dy * dy + dz * dz < 3600.0f && nshot < 60u && frame - lastf >= 3u) {
+                        extern unsigned g_shot_census;
+                        g_shot_census = 1; nshot++; lastf = frame;
+                        HLOG_I("PROJ shot: f=%u ent=%d d2=%.0f", frame, ei, dx * dx + dy * dy + dz * dz);
+                    }
+                }
+                if (g_cfg.proj_diag >= 3 && dl >= 0) {
+                    /* Modell des Entity-Renderers FUN_00023B70: +0x54 Instanz, +0x36 Teile,
+                     * je Teil 0x1A0: +0x18C VB, +0x190 IB, +0x188 Draw-Satz (+0x1C Prim, +0x20 n, +0x24 Stride). */
+                    u32 mi = st_read(ob + 0x54u), np = st_read(ob + 0x36u) & 0xFFu, pi;
+                    for (pi = 0; pi < np && pi < 4u && mi >= 0x10000u && mi < 0xFFFF0000u; pi++) {
+                        u32 pb = mi + pi * 0x1A0u, ds = st_read(pb + 0x188u);
+                        HLOG_I("PROJ mdl: f=%u ent=%d teil=%u/%u inst=0x%08X vb=0x%08X ib=0x%08X ds=0x%08X prim=%u n=%u stride=%u",
+                               frame, ei, pi, np, mi, st_read(pb + 0x18Cu), st_read(pb + 0x190u), ds,
+                               st_read(ds + 0x1Cu), st_read16(ds + 0x20u) & 0xFFFFu, st_read(ds + 0x24u) & 0xFFu);
+                        nlog++;
+                    }
+                }
+                HLOG_I("PROJ act: f=%u l=%c i=%u fl=0x%08X wid=%u kind=%u age=%u ent=%d typ=%u e28=0x%08X dl=%d/%d epos=%.1f,%.1f,%.1f me=%.1f,%.1f,%.1f f40=%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f,%.1f",
+                       frame, li ? 'B' : 'A', i, fl, wid, kind, st_read(b + 0x18u),
+                       ei, st_read16(ob + 8u) & 0xFFFFu, st_read(ob + 0x28u), dl, dn,
+                       ep[0], ep[1], ep[2], me[0], me[1], me[2],
+                       fv[0], fv[1], fv[2], fv[3], fv[4], fv[5], fv[6], fv[7], fv[8], fv[9], fv[10], fv[11]);
+                nlog++;
+            }
+            prev_on[li][i] = on;
+            prev_wid[li][i] = wid;
+        }
     }
 }

@@ -4,6 +4,7 @@
  * und Flag-neutral; Aritaet-transparent (JMP statt CALL).
  */
 #include "sctrace.h"
+#include "loc_rollback.h" /* W390 DIAG */
 #include "hlog.h"
 #include "hcfg.h"
 #include "kernel_hle.h" /* krnl_name */
@@ -21,6 +22,10 @@ static void __cdecl sctrace_log(uint32_t ordinal, uint32_t retaddr)
 {
     /* Spiel-ESP = Logger-ESP + ret(4) + args(8) + EFLAGS(4) + PUSHAD(32). */
     void *ra = _AddressOfReturnAddress();
+    if (g_cfg.syscall_trace == 2) { /* W390 DIAG: nur zaehlen (Vorlauf/Live-Ticks des Spiel-Threads), keine Zeile */
+        loc_rb_sc_count(ordinal);
+        return;
+    }
     HLOG_T("SC %3u %-28s <- 0x%08X esp=0x%08X", ordinal,
            krnl_name(ordinal), retaddr,
            (uint32_t)(uintptr_t)ra + 0x30u);

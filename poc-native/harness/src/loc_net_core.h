@@ -51,6 +51,11 @@ typedef struct locnet {
     /* W329: Host-UDP-Ports, die das Spiel an der eigenen Adresse gebunden hat (Bit je Port). Der Transport stellt
      * Datagramme von Mitspielern nur an diese Ports zu - nie an fremde Dienste auf Loopback. */
     volatile LONG udp_bound[65536 / 32];
+    /* W373 LOC-PUBLIC-LOBBY: Host-Zustand des Spiels fuer oeffentliche Lobbys (Spiel-Thread schreibt, Transport liest;
+     * nur Werte): [0] S[0..3], [1] S[4..7] (G+0x5624: Lager A/B, Sitze A/B, Modus, Mission, Bestaetigung, Option),
+     * [2] Bit 0-7 Lobby-Zustand G+0x15, 8-15 / 16-23 Spieler je Seite (G+0xA4/A5), Bit 24 gueltig. */
+    volatile LONG pub_w[3];
+    uint16_t tun_base; /* W373: Portbasis fuer Absender ohne Eintrag im Transportbetrieb (= Stellvertreter-Basis) */
 } locnet;
 
 /* W339: 1 = Daten eines Mitspielers haben das Spiel erreicht (Netzsitzung, bis Prozessende). */

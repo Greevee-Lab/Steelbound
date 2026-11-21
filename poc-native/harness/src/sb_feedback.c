@@ -18,6 +18,7 @@
 #include "sb_state.h" /* W232: sb_in_mission */
 #include "sb_texhealth.h" /* W315 */
 #include "loc_net.h" /* W353: Netzwerte (LoC) */
+#include "loc_sync.h" /* W382: LoC-Zustandszeile */
 
 #pragma comment(lib, "shell32.lib")
 #pragma comment(lib, "ole32.lib")
@@ -251,8 +252,8 @@ static const char *fb_repo(void)
 
 int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
 {
-    char gpu[200], build[40], txt8[1024], title[160], info[8192], game[200], state[160], ver[120];
-    char e1[400], e2[400], e3[400], e4[400], e5[400];
+    char gpu[200], build[40], txt8[1024], title[160], info[8192], game[200], state[240], ver[120];
+    char e1[400], e2[400], e3[400], e4[400], e5[400], e6[64];
     char *logb;
     size_t logcap = 196608 * 2 + 4096;
     unsigned loads = fb_rd(SBA(0x2EEA34u)), scene = fb_rd(SBA(0x6B96DCu)), tmr = fb_rd(SBA(0x3563F0u)); /* W232: Ladezaehler */
@@ -275,8 +276,14 @@ int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
     } else {
         strcpy_s(game, sizeof game, "?");
     }
-    _snprintf_s(state, sizeof state, _TRUNCATE, "loadcount=%u scene=0x%X in_mission=%d countdown=%u", loads, scene, inm,
-                tmr);
+    if (g_cfg.loc_boot) {
+        /* W382 LOC-ISSUES-B: in LoC sind die SB-Adressen fremd (Issues #53/#55-#58: "loadcount=0 scene=0x0 ...");
+         * stattdessen Phase, Lockstep-Rahmen, gemessener Spieltakt, Menue-Szene und Zwischenbild-Weg. */
+        loc_sync_state_line(state, sizeof state);
+    } else {
+        _snprintf_s(state, sizeof state, _TRUNCATE, "loadcount=%u scene=0x%X in_mission=%d countdown=%u", loads, scene,
+                    inm, tmr);
+    }
     /* W301 BETA-VERSION: Release-Version vorn (Issue-Feld "Client version"), dann Edition + Build */
     _snprintf_s(ver, sizeof ver, _TRUNCATE, "%s, %s edition, build %s",
                 sb_version_str()[0] ? sb_version_str() : "dev", SB_EDITION_NAME, build);
@@ -360,9 +367,11 @@ int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
         fb_urlenc(e3, sizeof e3, g_fb_gv_set && g_fb_gv.label[0] ? g_fb_gv.label : "?");
         fb_urlenc(e4, sizeof e4, gpu);
         fb_urlenc(e5, sizeof e5, state);
+        /* 19.11.: Dropdown "Which game?" (Feld-ID which) vorbelegen -> GitHub-Workflow setzt Label game: SB/LoC */
+        fb_urlenc(e6, sizeof e6, g_cfg.loc_boot ? "Line of Contact" : "Steel Battalion");
         _snprintf_s(p->url, sizeof p->url, _TRUNCATE,
-                    "https://github.com/%s/issues/new?template=%s&title=%s&version=%s&game=%s&gpu=%s&state=%s",
-                    fb_repo(), p->kind ? "idea.yml" : "bug_report.yml", e1, e2, e3, e4, e5);
+                    "https://github.com/%s/issues/new?template=%s&title=%s&which=%s&version=%s&game=%s&gpu=%s&state=%s",
+                    fb_repo(), p->kind ? "idea.yml" : "bug_report.yml", e1, e6, e2, e3, e4, e5);
         /* Nachpruefung ohne den Repo-Namen (oeffentlicher GitHub-Owner kann den Nutzernamen enthalten) */
         p->clean_hits += fb_clean_hits(strstr(p->url, "/issues/new") ? strstr(p->url, "/issues/new") : p->url);
     }

@@ -109,6 +109,17 @@ typedef struct {
 int lacc_http(const lacc_srv_t *s, const char *method, const char *path, const char *body,
               lacc_resp_t *r);
 
+/* W403 LAUNCHER-R1-POLISH: leichte Erreichbarkeitspruefung fuer den Kopf-Chip = bestehende Abfrage
+ * GET /v1/info (kein neues Protokoll), nur zum eingerichteten Dienst (lacc_server: steelnet_pins.h bzw.
+ * Loopback-Test), TLS + SPKI-Pin wie lacc_http. Blockiert (Thread). Keine Adresse im Ergebnis. */
+typedef struct {
+    int ok;              /* 1 = Antwort ok:true */
+    int ms;              /* Antwortzeit (ms), auch bei Fehler */
+    char version[32];    /* "version" der Antwort (Serverversion), sonst "" */
+    char error[48];      /* Fehlercode (net/pin/off/...), sonst "" */
+} lacc_probe_t;
+int lacc_probe(lacc_probe_t *o); /* 0 = erreichbar */
+
 /* ---------------- Aktionen (blockierend) ----------------
  * Rueckgabe 0 = ok, sonst Fehler mit Code in err (API-Code oder net/pin/off/
  * bad/timeout/state/denied/no_account). Gespeichertes Konto wird bei Erfolg

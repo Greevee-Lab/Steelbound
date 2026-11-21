@@ -1,0 +1,34 @@
+// sb_verinfo.rc - erzeugt aus sb_verinfo.rc.in (REL-DEFENDER-FP), nicht von Hand pflegen.
+// VERSIONINFO fuer die ausgelieferten Binaerdateien (sb_launcher.exe, sb_ldr.exe, sb_emu.dll):
+// Version aus poc-native/VERSION (bzw. -DSB_VERSION), Texte aus sb_verinfo.cmake. Nur ASCII.
+#include <winver.h>
+
+VS_VERSION_INFO VERSIONINFO
+ FILEVERSION @SB_VI_NUM@
+ PRODUCTVERSION @SB_VI_NUM@
+ FILEFLAGSMASK VS_FFI_FILEFLAGSMASK
+ FILEFLAGS 0x0L
+ FILEOS VOS_NT_WINDOWS32
+ FILETYPE @SB_VI_FILETYPE@
+ FILESUBTYPE VFT2_UNKNOWN
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "040904B0"
+        BEGIN
+            VALUE "CompanyName", "Greevee-Lab"
+            VALUE "FileDescription", "@SB_VI_DESC@"
+            VALUE "FileVersion", "@SB_VI_STR@"
+            VALUE "InternalName", "@SB_VI_INTERNAL@"
+            VALUE "LegalCopyright", "Copyright (C) 2026 Steelbound (https://steelbound.dev). PolyForm Noncommercial License 1.0.0, see LICENSE."
+            VALUE "OriginalFilename", "@SB_VI_ORIG@"
+            VALUE "ProductName", "Steelbound"
+            VALUE "ProductVersion", "@SB_VI_STR@"
+            VALUE "Comments", "Game preservation client. https://steelbound.dev"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x409, 1200
+    END
+END

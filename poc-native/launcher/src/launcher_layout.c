@@ -225,7 +225,7 @@ void llay_map_paint(const llay_t *L, int x, int y, int w, int h, int out[4])
 /* --- b: Spielen-Seite (Entwurfsraster) ------------------------------- */
 #define B_CX0 (LLAY_NAV + 28)
 #define B_CW (LLAY_DW - B_CX0 - 28)
-#define B_CY0 (LLAY_TITLE + 24)
+#define B_CY0 (LLAY_TITLE + 16) /* W397 */
 #define B_GRID_Y (B_CY0 + 230)
 #define B_GAP 12
 #define B_CARD_W ((B_CW - 2 * B_GAP) / 3)
@@ -297,10 +297,10 @@ void llay_selftest(llay_rep_fn rep)
         llay_init(&L, LLAY_0, LLAY_SZ_LARGE);
         llay_map_rect(&L, 300, 200, 120, 30, 1, 1, r);
         llay_window_px(&L, 96, &w, &h);
-        ok = L.geo_pct == 100 && L.font_pct == 100 && w == 960 && h == 640 && r[0] == 300 &&
+        ok = L.geo_pct == 100 && L.font_pct == 100 && w == LLAY_DW && h == LLAY_DH && r[0] == 300 &&
              r[1] == 200 && r[2] == 120 && r[3] == 30 && llay_fit(&L, 144, 1366, 728) == 0 &&
              L.geo_pct == 100;
-        rep("W281 layout: 0 bleibt 960x640 ohne Abbildung/Einpassen", ok, "");
+        rep("W281 layout: 0 bleibt 960x656 ohne Abbildung/Einpassen", ok, "");
     }
     /* Einpassen: kleine Arbeitsflaechen je Variante und Groesse */
     {

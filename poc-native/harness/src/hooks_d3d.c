@@ -542,6 +542,7 @@ u32 __stdcall hook_D3DDevice_Swap(u32 flags)
     diag_combat_tick(g_frames); /* DIAG(COMBAT): Entity-HP/Schaden (W35, nur bei combat_diag=1) */
     diag_cam_tick(g_frames); /* DIAG(CAMD): Kamera gegen Gelaende (W269, nur bei cam_diag>0) */
     diag_campaign_tick(g_frames); /* DIAG(CAMPAIGN): Missionsziel/Phase (W63, nur bei campaign_diag=1) */
+    diag_proj_tick(g_frames); /* DIAG(ISSUE49): Geschoss-Listen (nur bei proj_diag=1) */
     diag_gear_tick(g_frames); /* DIAG(GEAR): Gang-Kette+Position (W141, nur bei gear_diag=1) */
     watch_dr_tick(g_frames); /* WATCHDR (W41): ent:-Reload bei Tabellenwechsel (nur bei watch=...) */
     replay_steps_tick(); /* A4: zustandsgesteuerte Eingaben */
@@ -1521,6 +1522,19 @@ u32 __stdcall hook_D3D_PSConst(u32 reg, u32 pData,
         extern unsigned g_psc_ra;
         g_psc_ra = (unsigned)(uintptr_t)_ReturnAddress();
     }
+    if (g_cfg.specmat_diag && (unsigned)(uintptr_t)_ReturnAddress() == 0x241C7u) {
+        /* DIAG(ISSUE36, specmat_diag=1): C0-Wiederherstellung nach einem Sonder-Material-Draw
+         * (FUN_00023D70 @0x241C2) - die Stelle, an der ohne psconst_store das Umgebungslicht des
+         * restlichen Hauptpasses auf 0 fiel. Je Bild zaehlen, erstes Bild mit Treffer als Beleg. */
+        extern unsigned g_present_no, g_shot_census;
+        static unsigned last_f, n_f, n_all, nshot, nlog;
+        if (g_present_no != last_f) {
+            if (n_f && nlog < 400u) { HLOG_I("SPECMAT f=%u n=%u gesamt=%u", last_f, n_f, n_all); nlog++; }
+            last_f = g_present_no; n_f = 0;
+        }
+        n_f++; n_all++;
+        if (nshot < 6u && (n_all == 1u || (n_all % 2000u) == 0u)) { g_shot_census = 1; nshot++; }
+    }
     /* FIX(ISSUE-LIGHT, psconst_store=1): Das XDK-Original klemmt jede Komponente auf [0,1], rundet auf 8 Bit
      * (x*255+0,5) und legt den Wert als ARGB (A = w) im Geraet ab: [[0x21A8A0] + 0x4AC + 4*reg] (0x2103B5).
      * D3DDevice_GetPixelShaderConstant (0x20FCD0, ungehookt) liest genau dort. Das Sonder-Material
@@ -1806,6 +1820,13 @@ u32 __stdcall hook_D3D_DrawIdx(u32 prim, u32 vcount, u32 pIndex)
         HLOG_T("D3D DrawIdx(prim=%u n=%u pIdx=0x%X)", prim, vcount,
                pIndex);
     }
+    if (g_cfg.proj_diag >= 3) { /* DIAG(ISSUE49): VB eines Lenkflugkoerper-Modells? (diag_proj_tick) */
+        extern u32 g_proj_vbs[32]; extern unsigned g_proj_nvb;
+        extern int g_projd_hit;
+        unsigned k;
+        g_projd_hit = 0;
+        for (k = 0; k < g_proj_nvb; k++) { if (g_proj_vbs[k] == g_last_stream_ptr) { g_projd_hit = 1; break; } }
+    }
     {
         u32 vd = vb_stream_data(g_last_stream_ptr);
         u32 id = vb_stream_data(g_last_index_a);
@@ -1822,6 +1843,7 @@ u32 __stdcall hook_D3D_DrawIdx(u32 prim, u32 vcount, u32 pIndex)
             sb_render_drawdrop(4, 0, vcount, 0); /* DIAG(COCKPIT,W60) */
         }
     }
+    if (g_cfg.proj_diag >= 3) { extern int g_projd_hit; g_projd_hit = 0; } /* DIAG(ISSUE49) */
     return 0;
 }
 

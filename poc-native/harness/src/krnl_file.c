@@ -766,6 +766,49 @@ u32 __stdcall hle_NtOpenFile(u32 ph, u32 access, u32 attr, u32 iosb, u32 share,
     return st;
 }
 
+/* W390 LOC-OWN-PREDICT: Dateipositionen, die der spekulative Vorlauf des Spiel-Threads bewegt, danach zuruecksetzen
+ * (Spiel-Thread; nur waehrend loc_rb_spec()). */
+#define KF_SPEC_MAX 16
+static struct { u32 xh; int vfs; uint64_t vpos; LONGLONG hpos; } s_kf_spec[KF_SPEC_MAX];
+static int s_kf_spec_n;
+static unsigned s_kf_spec_full;
+void krnl_file_spec_touch(u32 xh)
+{
+    ht_entry_t *e = ht_get(xh);
+    int k;
+    LARGE_INTEGER z, cur;
+    if (!e || e->kind != HT_FILE) return;
+    for (k = 0; k < s_kf_spec_n; k++)
+        if (s_kf_spec[k].xh == xh) return;
+    if (s_kf_spec_n >= KF_SPEC_MAX) { s_kf_spec_full++; return; }
+    z.QuadPart = 0;
+    cur.QuadPart = -1;
+    if (!e->vfs) SetFilePointerEx(e->host, z, &cur, FILE_CURRENT);
+    s_kf_spec[s_kf_spec_n].xh = xh;
+    s_kf_spec[s_kf_spec_n].vfs = e->vfs != 0;
+    s_kf_spec[s_kf_spec_n].vpos = e->vfs_pos;
+    s_kf_spec[s_kf_spec_n].hpos = cur.QuadPart;
+    s_kf_spec_n++;
+}
+int krnl_file_spec_restore(void)
+{
+    int k, n = s_kf_spec_n;
+    for (k = 0; k < s_kf_spec_n; k++) {
+        ht_entry_t *e = ht_get(s_kf_spec[k].xh);
+        if (!e || e->kind != HT_FILE) continue;
+        if (s_kf_spec[k].vfs) {
+            e->vfs_pos = s_kf_spec[k].vpos;
+        } else if (s_kf_spec[k].hpos >= 0) {
+            LARGE_INTEGER li;
+            li.QuadPart = s_kf_spec[k].hpos;
+            SetFilePointerEx(e->host, li, NULL, FILE_BEGIN);
+        }
+        krnl_seek_invalidate(s_kf_spec[k].xh);
+    }
+    s_kf_spec_n = 0;
+    return n;
+}
+
 u32 __stdcall hle_NtReadFile(u32 xh, u32 ev, u32 apc, u32 apcCtx, u32 iosb,
                                     u32 buf, u32 len, u32 pOff)
 {
@@ -776,6 +819,10 @@ u32 __stdcall hle_NtReadFile(u32 xh, u32 ev, u32 apc, u32 apcCtx, u32 iosb,
         return X_STATUS_INVALID_HANDLE;
     }
     LOC_RB_PREWRITE(buf, len); /* W330: Kernel schreibt in den Gast-Puffer (Rollback-Schreibschutz) */
+    if (loc_rb_spec()) { /* W390: Vorlauf liest; die Dateiposition stellt krnl_file_spec_restore danach zurueck */
+        krnl_file_spec_touch(xh);
+        loc_rb_spec_note(1);
+    }
     if (ev || apc) {
         static u32 warned;
         if (!warned) {
@@ -856,6 +903,14 @@ u32 __stdcall hle_NtWriteFile(u32 xh, u32 ev, u32 apc, u32 apcCtx, u32 iosb,
     if (!e || e->kind != HT_FILE) {
         return X_STATUS_INVALID_HANDLE;
     }
+    if (loc_rb_spec()) { /* W390: spekulativer Vorlauf schreibt nichts (keine Spielstaende/Aufzeichnung aus dem Vorlauf) */
+        if (iosb) {
+            ((xb_io_status_block *)(uintptr_t)iosb)->status = X_STATUS_SUCCESS;
+            ((xb_io_status_block *)(uintptr_t)iosb)->information = len;
+        }
+        loc_rb_spec_note(2);
+        return X_STATUS_SUCCESS;
+    }
     if (e->vfs) { /* W150: Abbild ist nur lesbar (DVD) */
         HLOG_W("ISO: NtWriteFile auf D: verweigert '%s' (%u B)", e->path, len);
         if (iosb) {
@@ -921,6 +976,10 @@ u32 __stdcall hle_NtWriteFile(u32 xh, u32 ev, u32 apc, u32 apcCtx, u32 iosb,
 u32 __stdcall hle_NtClose(u32 xh)
 {
     ht_entry_t *e = ht_get(xh);
+    if (e && loc_rb_spec()) { /* W390: die echte Zeitlinie haelt den Handle noch */
+        loc_rb_spec_note(3);
+        return X_STATUS_SUCCESS;
+    }
     if (!e) {
         HLOG_T("NtClose(0x%X) -> INVALID_HANDLE", xh);
         return X_STATUS_INVALID_HANDLE;
@@ -1201,6 +1260,18 @@ static u32 __stdcall hle_NtSetInformationFile(u32 xh, u32 iosb, u32 info, u32 le
     ht_entry_t *e = ht_get(xh);
     if (!e || e->kind != HT_FILE) {
         return X_STATUS_INVALID_HANDLE;
+    }
+    if (loc_rb_spec()) { /* W390: Vorlauf darf nur die Position setzen (danach zurueck), nichts aendern */
+        loc_rb_spec_note(4);
+        if (cls == X_FilePositionInformation) {
+            krnl_file_spec_touch(xh);
+        } else {
+            if (iosb) {
+                ((xb_io_status_block *)(uintptr_t)iosb)->status = X_STATUS_SUCCESS;
+                ((xb_io_status_block *)(uintptr_t)iosb)->information = 0;
+            }
+            return X_STATUS_SUCCESS;
+        }
     }
     if (e->vfs) { /* W150 ISO-DIRECT: Zeiger setzen ja, Aendern nein */
         u32 st = X_STATUS_SUCCESS;

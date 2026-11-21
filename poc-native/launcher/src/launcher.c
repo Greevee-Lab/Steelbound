@@ -169,7 +169,9 @@ static void cli_usage(void)
            "                          mit Feinreglern, W291, fade = Breitbild\n"
            "                          Fade out mit Verlaufszeile, W296, fpslist/\n"
            "                          fpslist_auto = Bildratenliste offen, W309,\n"
-           "                          loc_acc_none|unsec|ok|view|signin = Pilotenkonto, W328),\n"
+           "                          loc_acc_none|unsec|ok|view|signin = Pilotenkonto, W328,\n"
+           "                          loc_acc_view_unsec|view_login|view_ok = Account-Seite, W399,\n"
+           "                          ready_hover/loc_hover = Maus auf dem inaktiven Spielnamen, W398),\n"
            "                          nur Anzeige (Packs-Ordner: Umgebung SB_PACKS_DIR)\n"
            "  --dpi N                 mit --ui-shot/--bind-shot: DPI erzwingen\n"
            "  --sim-monitors LISTE    W309: simulierte Monitore fuer --ui-shot/Tests,\n"
@@ -3876,6 +3878,7 @@ static int cli_selftest(const char *client_override)
     w290_gui_selftest(client_override, &pass, &fail); /* W290 QUICK-SHOT */
     w303_gui_selftest(client_override, &pass, &fail); /* W303 AUDIO-VOLUME */
     w299_bind_selftest(&pass, &fail); /* W299 REPLAY */
+    w365_gui_selftest(client_override, &pass, &fail); /* W365 BIND-COMBO */
     if (!ls_replay_selftest()) { T_OK("W254 replay list (folders, SaveMeta name, mission, signature state, order, set args)"); }
     else { T_FAIL("W254 replay list", "%s", "failed"); }
     if (!ls_selftest()) { T_OK("W199 save-import layouts, conflicts, backup, ZIP roundtrip, rejection"); }
@@ -4748,6 +4751,9 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
         } else if (bv && strcmp(bv, "wheel") == 0) { /* W260: Mausrad-Beispiel */
             o.bind_sel = lctrl_bind_elem_index("tuner.up");
             o.bind_wheeldemo = 1;
+        } else if (bv && strcmp(bv, "combo") == 0) { /* W365: Kombination + Tastenname */
+            o.bind_sel = lctrl_bind_elem_index("bi1");
+            o.bind_combodemo = 1;
         } else if (bv) {
             o.bind_sel = lctrl_bind_elem_index(bv);
         }

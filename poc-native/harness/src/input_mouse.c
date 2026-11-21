@@ -749,6 +749,12 @@ unsigned imouse_wheel_mask(unsigned frame, int blocked)
     return imap_wheel_step(&g_wheel, frame, blocked);
 }
 
+unsigned imouse_wheel_steps(void) /* W384 (GH #63): Zaehl-Maske des letzten imouse_wheel_mask */
+{
+    if (g_installed != 1) return 0;
+    return imap_wheel_steps(&g_wheel);
+}
+
 int imouse_poll(int *dx, int *dy, int *blocked)
 {
     int raw = 0;
@@ -784,4 +790,22 @@ int imouse_poll(int *dx, int *dy, int *blocked)
     }
     if (g_cfg.input_focus_only && !imouse_has_focus()) *blocked = 1;
     return raw;
+}
+
+/* W394 LOC-VIEW-PERFRAME: noch nicht abgeholte Raw-Deltas nur lesen (kein Leeren; die Simulation holt sie weiter genau
+ * einmal je Poll per imouse_poll ab). 0 = Raw-Pfad nicht aktiv bzw. Maus nicht wirksam (wie imouse_poll: dann 0/0). */
+int imouse_raw_peek(int *dx, int *dy)
+{
+    *dx = *dy = 0;
+    if (!g_cfg.mouse_capture || g_installed != 1 || !g_captured || g_suppress_btn) return 0;
+    *dx = (int)g_raw_dx;
+    *dy = (int)g_raw_dy;
+    return 1;
+}
+
+/* W394: Nachrichten-Taste vk jetzt gedrueckt (nur lesen, keine Tipp-Verwaltung). */
+int imsg_key_peek(int vk)
+{
+    if (vk <= 0 || vk > 255) return 0;
+    return g_kdown[vk] != 0;
 }

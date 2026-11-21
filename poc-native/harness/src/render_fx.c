@@ -489,6 +489,79 @@ void p2z_present(void)
     }
 }
 
+/* DIAG(ISSUE49, proj_diag>=3): Draws eines Lenkflugkoerper-Modells (VB aus
+ * diag_proj_tick, Treffer in hook_D3D_DrawIdx -> g_projd_hit). Je Draw: Shader,
+ * Textur, Ziel-RT, Blend/Alpha-Test/Z, NDC-Huelle (mvp), erste Vertex-Farbe und
+ * Pixel nach Tiefentest (Occlusion-Query, Ergebnis eine Zeile spaeter). */
+int g_projd_hit;
+static ID3D11Query *g_projd_q[8];
+static unsigned g_projd_qid[8], g_projd_busy[8], g_projd_seq, g_projd_nlog;
+static int g_projd_cur = -1;
+
+static void projd_poll(void)
+{
+    int i;
+    for (i = 0; i < 8; i++) {
+        UINT64 v = 0;
+        if (!g_projd_busy[i]) { continue; }
+        if (ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)g_projd_q[i], &v, sizeof v,
+                                        D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK) {
+            HLOG_I("PROJD pix: id=%u pix=%u", g_projd_qid[i], (unsigned)v);
+            g_projd_busy[i] = 0;
+        }
+    }
+}
+
+void projd_note(const im_vertex_t *out, unsigned nout, int rhw, int em, unsigned prim, const float *mvp, int rq)
+{
+    unsigned bon = 0, bs = 0, bd = 0, i, rw = 0, rh = 0;
+    float mn[3] = { 1e30f, 1e30f, 1e30f }, mx[3] = { -1e30f, -1e30f, -1e30f }, wmn = 1e30f, wmx = -1e30f;
+    int q;
+    g_projd_cur = -1;
+    projd_poll();
+    if (g_projd_nlog >= 20000u || !fx_in_mission() || rs_cmask == 0u || nout < 100u) { return; } /* nur Farb-Draws des Rumpfs */
+    sb_render_blend_state(&bon, &bs, &bd);
+    rtt_cur_dims(&rw, &rh);
+    for (i = 0; i < nout; i++) {
+        const float *p = out[i].pos;
+        float c[4]; int k;
+        for (k = 0; k < 4; k++) { c[k] = p[0] * mvp[k] + p[1] * mvp[4 + k] + p[2] * mvp[8 + k] + p[3] * mvp[12 + k]; }
+        if (c[3] < wmn) { wmn = c[3]; }
+        if (c[3] > wmx) { wmx = c[3]; }
+        if (c[3] > 1e-6f) {
+            for (k = 0; k < 3; k++) { float v = c[k] / c[3]; if (v < mn[k]) { mn[k] = v; } if (v > mx[k]) { mx[k] = v; } }
+        }
+    }
+    g_projd_seq++;
+    HLOG_I("PROJD draw: id=%u f=%u n=%u prim=%u rhw=%d em=%d rq=%d vs=0x%X ps=0x%X xp=0x%X rt=%d %ux%u bl=%u/%u/%u at=%u/0x%X/%u zen=%u zf=0x%X dm=%u cm=0x%X "
+           "ndc=[%.3f,%.3f]x[%.3f,%.3f] z=[%.4f,%.4f] w=[%.2f,%.2f] col0=%.2f,%.2f,%.2f,%.2f pos0=%.2f,%.2f,%.2f,%.2f",
+           g_projd_seq, g_present_no, nout, prim, rhw, em, rq, g_im_shader, g_im_pshader, sb_tex_xptr(), g_rtt_bound, rw, rh,
+           bon, bs, bd, fx_nv(0x300u, 0), fx_nv(0x33Cu, 0), fx_nv(0x340u, 0), m3d_zenable, fx_nv(0x354u, 0x203u), rs_dmask, rs_cmask,
+           mn[0], mx[0], mn[1], mx[1], mn[2], mx[2], wmn, wmx,
+           nout ? out[0].col[0] : 0.f, nout ? out[0].col[1] : 0.f, nout ? out[0].col[2] : 0.f, nout ? out[0].col[3] : 0.f,
+           nout ? out[0].pos[0] : 0.f, nout ? out[0].pos[1] : 0.f, nout ? out[0].pos[2] : 0.f, nout ? out[0].pos[3] : 0.f);
+    g_projd_nlog++;
+    for (q = 0; q < 8; q++) { if (!g_projd_busy[q]) { break; } }
+    if (q < 8) {
+        if (!g_projd_q[q]) {
+            D3D11_QUERY_DESC qd; qd.Query = D3D11_QUERY_OCCLUSION; qd.MiscFlags = 0;
+            if (FAILED(ID3D11Device_CreateQuery(g_dev, &qd, &g_projd_q[q]))) { g_projd_q[q] = NULL; }
+        }
+        if (g_projd_q[q]) {
+            ID3D11DeviceContext_Begin(g_ctx, (ID3D11Asynchronous *)g_projd_q[q]);
+            g_projd_qid[q] = g_projd_seq; g_projd_busy[q] = 1; g_projd_cur = q;
+        }
+    }
+}
+
+void projd_post(void)
+{
+    if (g_projd_cur >= 0) {
+        ID3D11DeviceContext_End(g_ctx, (ID3D11Asynchronous *)g_projd_q[g_projd_cur]);
+        g_projd_cur = -1;
+    }
+}
+
 /* DIAG(ISSUE-EMP,W352, line_diag=N): Linien- und Punkt-Draws (Begin
  * POINTLIST/LINELIST/LINELOOP/LINESTRIP, z. B. Funken-/Fallen-Linien
  * FUN_0001D3E0) in der Kampagnen-Mission. Die ersten N Draws einzeln

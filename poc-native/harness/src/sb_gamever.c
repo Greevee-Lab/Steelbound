@@ -27,6 +27,30 @@ static const struct { const char *sha256, *name; } k_family[] = {
 
 int sb_gamever_family_count(void) { return K_NFAM; }
 
+int sb_gamever_loc_variant(const char *sha256_hex)
+{
+    static const char *const k_loc[2] = { SB_GAMEVER_LOC_SHA, SB_GAMEVER_LOC_SHA_STOCK };
+    int i, k;
+    if (!sha256_hex) {
+        return 0;
+    }
+    for (i = 0; i < 2; i++) {
+        for (k = 0; k < 64; k++) {
+            char c = sha256_hex[k];
+            if (c >= 'A' && c <= 'F') {
+                c = (char)(c - 'A' + 'a');
+            }
+            if (c != k_loc[i][k]) {
+                break;
+            }
+        }
+        if (k == 64 && sha256_hex[64] == '\0') {
+            return i + 1;
+        }
+    }
+    return 0;
+}
+
 int sb_gamever_family_idx(const char *sha256_hex)
 {
     int i, k;
@@ -102,10 +126,12 @@ int sb_gamever_check(const uint8_t *xbe, size_t n, sb_gamever_t *out)
         strcpy_s(out->label, sizeof out->label, "Steel Battalion (USA, NTSC-U)" /* Launcher haengt "experimental" selbst an (W231) */);
     }
     if (!out->supported && out->xbe_ok && out->title_id == SB_GAMEVER_LOC_TITLE &&
-        strcmp(out->sha256, SB_GAMEVER_LOC_SHA) == 0) {
-        /* W275 LOC-BOOT: Line of Contact erkannt; eigenes Profil, nicht SB. */
-        out->loc = 1;
-        strcpy_s(out->label, sizeof out->label, "Line of Contact (World)");
+        sb_gamever_loc_variant(out->sha256) != 0) {
+        /* W275 LOC-BOOT: Line of Contact erkannt; eigenes Profil, nicht SB.
+         * W378: Media-Patch (bisheriges Abbild) oder unveraenderte XBE, beide 1.0. */
+        out->loc = sb_gamever_loc_variant(out->sha256);
+        strcpy_s(out->label, sizeof out->label,
+                 out->loc == 2 ? "Line of Contact (World, unveraendert)" : "Line of Contact (World)");
         _snprintf_s(out->text, sizeof out->text, _TRUNCATE,
                     "GAMEVER: %s erkannt (Title-ID %08X, Region %s, Version %u, sha256 %.16s...) -> LoC-Profil (experimentell, [expert] loc_boot=1)",
                     out->label, out->title_id, sb_gamever_region_name(out->region), out->version, out->sha256);

@@ -556,15 +556,46 @@ void replay_steps_tick(void)
  * den LoC-Lockstep-Rahmen statt an Bildzaehler gekoppelt sind (loc_sync.c, loc_replay_tick). */
 void replay_inject(int vk, int len)
 {
+    int i;
     replay_parse();
     if (g_replay_n < 0)
         g_replay_n = 0;
+    /* W375: abgelaufene Slots wiederverwenden (nur dieser Weg: LoC-Testfolgen loc_steps/loc_replay_tick). Vorher
+     * fuellten Lobby, Missions-Wiederholtasten (Feuer alle 120 Rahmen) und Nachbesprechung die 192 Slots schon in
+     * Runde 1; ab Runde 2 wurden Testtasten still verworfen (Laeufe R8-R10). */
+    for (i = 0; i < g_replay_n; i++) {
+        if (g_replay[i].start + g_replay[i].len < (int)g_frames) {
+            g_replay[i].start = (int)g_frames;
+            g_replay[i].vk = vk;
+            g_replay[i].len = len;
+            g_replay[i].logged = 0;
+            return;
+        }
+    }
     if (g_replay_n < REPLAY_MAX) {
         g_replay[g_replay_n].start = (int)g_frames;
         g_replay[g_replay_n].vk = vk;
         g_replay[g_replay_n].len = len;
         g_replay[g_replay_n].logged = 0;
         g_replay_n++;
+    } else {
+        static int warned;
+        if (!warned) {
+            warned = 1;
+            HLOG_W("XIN replay: alle %d Slots belegt - Testtaste %d verworfen", REPLAY_MAX, vk);
+        }
+    }
+}
+
+/* W375: alle gerade gehaltenen Slots beenden (LoC-Testfolgen beim Missionsende: Kippschalter der Missionsfolge
+ * werden 99999 Bilder gehalten - in Runde 2 lagen sie dann schon vor dem Pruefbildschirm an -> ERROR, Pilot erstickt). */
+void replay_release_all(void)
+{
+    int i;
+    replay_parse();
+    for (i = 0; i < g_replay_n; i++) {
+        if (g_replay[i].start <= (int)g_frames && (int)g_frames < g_replay[i].start + g_replay[i].len)
+            g_replay[i].len = (int)g_frames - g_replay[i].start;
     }
 }
 

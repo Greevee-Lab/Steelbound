@@ -1168,10 +1168,57 @@ void sbar_probe_after(int rhw, unsigned nout)
     }
     ID3D11Resource_Release(res);
 }
+/* DIAG(LOC-IM-LOCK) imlock_diag=1: Teilzeiten je Uebergabe (Phasen wie IM-PERF + Texturabruf), getrennt
+ * nach IM (Begin/End) und VB; lange Uebergaben (> 1 ms) summiert, die laengste mit Zerlegung. Unter ctx_lock. */
+static int g_iml_on;
+static long long g_iml_ph[IMP_N + 1];
+static unsigned g_iml_nc[2], g_iml_ns[2], g_iml_mx_n[2];
+static double g_iml_st[2], g_iml_sph[2][IMP_N + 1], g_iml_mx[2], g_iml_mxph[2][IMP_N + 1];
+static double iml_ms(long long d)
+{
+    static LARGE_INTEGER f;
+    if (!f.QuadPart) { QueryPerformanceFrequency(&f); }
+    return (double)d * 1000.0 / (double)f.QuadPart;
+}
+static void iml_submit_end(long long q0, unsigned nv)
+{
+    int p = g_submit_vb ? 1 : 0, k;
+    double t = iml_ms(rq_qpc() - q0);
+    g_iml_nc[p]++;
+    if (t > 1.0) {
+        g_iml_ns[p]++;
+        g_iml_st[p] += t;
+        for (k = 0; k <= IMP_N; k++) { g_iml_sph[p][k] += iml_ms(g_iml_ph[k]); }
+    }
+    if (t > g_iml_mx[p]) {
+        g_iml_mx[p] = t;
+        g_iml_mx_n[p] = nv;
+        for (k = 0; k <= IMP_N; k++) { g_iml_mxph[p][k] = iml_ms(g_iml_ph[k]); }
+    }
+}
+void sb_tex_iml_log(double secs); /* sb_tex.c */
+void sb_iml_im_log(double secs)
+{
+    int p;
+    sb_tex_iml_log(secs);
+    for (p = 0; p < 2; p++) {
+        const double *a = g_iml_sph[p], *m = g_iml_mxph[p];
+        HLOG_I("IMLOCK %s: %.1fs uebergaben=%u >1ms=%u (summe %.1fms) teile_lang p0=%.1f p1=%.1f p2=%.1f pre=%.1f up=%.1f cb=%.1f (tex %.1f) st=%.1f "
+               "| laengste %.2fms n=%u p0=%.2f p1=%.2f p2=%.2f pre=%.2f up=%.2f cb=%.2f (tex %.2f) st=%.2f",
+               p ? "vb" : "im", secs, g_iml_nc[p], g_iml_ns[p], g_iml_st[p], a[IMP_P0], a[IMP_P1], a[IMP_P2], a[IMP_PRE], a[IMP_UP],
+               a[IMP_CB], a[IMP_N], a[IMP_ST], g_iml_mx[p], g_iml_mx_n[p], m[IMP_P0], m[IMP_P1], m[IMP_P2], m[IMP_PRE], m[IMP_UP],
+               m[IMP_CB], m[IMP_N], m[IMP_ST]);
+    }
+    memset(g_iml_nc, 0, sizeof g_iml_nc); memset(g_iml_ns, 0, sizeof g_iml_ns); memset(g_iml_mx_n, 0, sizeof g_iml_mx_n);
+    memset(g_iml_st, 0, sizeof g_iml_st); memset(g_iml_sph, 0, sizeof g_iml_sph);
+    memset(g_iml_mx, 0, sizeof g_iml_mx); memset(g_iml_mxph, 0, sizeof g_iml_mxph);
+}
+
 /* DIAG(SHADE-PERF,W80): rq_perf=1 misst die ganze Uebergabe je Draw. */
 void sb_im_submit(void)
 {
-    long long q0;
+    long long q0, iq0 = 0;
+    unsigned inv = g_im_nverts;
     int z0 = g_ph_zone; /* DIAG(PERF-TICK,W168) */
     g_ph_zone = 1;
     if (g_sba_loc) { g_loc_draws++; } /* W285 DIAG(LOC-RENDER): Draws je Bild (nur LoC) */
@@ -1179,11 +1226,14 @@ void sb_im_submit(void)
      * Dummy-Farbflaeche (Data=0) und schreibt Farbe (Maske 0x01010101). Auf der Xbox unsichtbar, bei uns
      * landete er im Backbuffer und deckte die untere Box graublau ab (Zensus A9). Nur LoC-Profil. */
     if (g_sba_loc && g_cfg.loc_nodummy && g_rtt_dummy) { g_ph_zone = z0; return; }
-    if (!RQP_ON) { sb_im_submit_body(); mfx_end(); g_ph_zone = z0; return; }
+    if (g_sba_loc && g_cfg.loc_dbg_skip && g_cfg.loc_dbg_xp && sb_tex_xptr() == g_cfg.loc_dbg_xp) { g_ph_zone = z0; return; } /* DIAG(W368) */
+    if (g_cfg.imlock_diag) { g_iml_on = 1; memset(g_iml_ph, 0, sizeof g_iml_ph); iq0 = rq_qpc(); } /* DIAG(LOC-IM-LOCK) */
+    if (!RQP_ON) { sb_im_submit_body(); mfx_end(); if (iq0) { iml_submit_end(iq0, inv); g_iml_on = 0; } g_ph_zone = z0; return; }
     q0 = rq_qpc();
     sb_im_submit_body();
     mfx_end();
     g_rqp_q[RQP_SUBMIT] += rq_qpc() - q0;
+    if (iq0) { iml_submit_end(iq0, inv); g_iml_on = 0; }
     g_ph_zone = z0;
 }
 static void sb_im_submit_body(void)
@@ -1219,11 +1269,11 @@ static void sb_im_submit_body(void)
     int xw_on = 0; ID3D11RasterizerState *xw_saved = NULL; /* W240 FX-EXPERIMENTAL: Drahtgitter */
     ID3D11GeometryShader *lgs = NULL; /* FIX(ISSUE-EMP,W352) line_scale: Linien-Band in skalierten Spiel-RTs */
 #define IMPOS(i) (pb + (size_t)(i) * pst)
-#define IMP_MARK(k) do { if (RQP_FULL) { long long t_ = rq_qpc(); g_imp_q[k] += t_ - imq; imq = t_; } } while (0)
+#define IMP_MARK(k) do { if (RQP_FULL || g_iml_on) { long long t_ = rq_qpc(); if (RQP_FULL) { g_imp_q[k] += t_ - imq; } g_iml_ph[k] += t_ - imq; imq = t_; } } while (0)
     if (!g_dev || n == 0) {
         return;
     }
-    if (RQP_FULL) { imq = rq_qpc(); if (!g_submit_vb) { g_imp_imv += n; } }
+    if (RQP_FULL || g_iml_on) { imq = rq_qpc(); if (RQP_FULL && !g_submit_vb) { g_imp_imv += n; } }
     if (fast && g_cfg.im_fast == 2) { im_fast_check_decode(n); } /* DIAG(IM-PERF,W99) */
     if (g_cfg.sbar_diag || g_cfg.sbar_skip_xp) { /* DIAG(STARTSEQ-BARS,W98) */
         unsigned scn = 0, mlp = 0, sx = sb_tex_xptr();
@@ -1815,7 +1865,7 @@ static void sb_im_submit_body(void)
                     exp[e++] = out[i];
                 }
             }
-            memcpy(out, exp, e * sizeof out[0]);
+            memcpy(out, exp, (e > IM_VB_MAX ? IM_VB_MAX : e) * sizeof out[0]); /* W383: out fasst IM_VB_MAX */
             break;
         case 8: /* QUADLIST -> LIST */
             if (fast) { e = (n / 4u) * 6u; break; } /* PERF(IM-PERF,W99) */
@@ -1829,7 +1879,7 @@ static void sb_im_submit_body(void)
                 exp[e++] = out[i + 2];
                 exp[e++] = out[i + 3];
             }
-            memcpy(out, exp, e * sizeof out[0]);
+            memcpy(out, exp, (e > IM_VB_MAX ? IM_VB_MAX : e) * sizeof out[0]); /* W383: out fasst IM_VB_MAX */
             break;
         case 9: /* QUADSTRIP -> LIST */
             if (fast) { e = (n >= 4u) ? ((n - 4u) / 2u + 1u) * 6u : 0u; break; } /* PERF(IM-PERF,W99) */
@@ -1843,7 +1893,7 @@ static void sb_im_submit_body(void)
                 exp[e++] = out[i + 2];
                 exp[e++] = out[i + 3];
             }
-            memcpy(out, exp, e * sizeof out[0]);
+            memcpy(out, exp, (e > IM_VB_MAX ? IM_VB_MAX : e) * sizeof out[0]); /* W383: out fasst IM_VB_MAX */
             break;
         default: /* 5 TRIANGLELIST + unbekannt: direkt */
             e = n;
@@ -1945,8 +1995,10 @@ static void sb_im_submit_body(void)
         }
     }
     {
+        long long tq0 = g_iml_on ? rq_qpc() : 0; /* DIAG(LOC-IM-LOCK): Texturabruf eigens */
         struct ID3D11ShaderResourceView *srv = sb_tex_get();
         unsigned has_tex = (srv != NULL) ? 1u : 0u;
+        if (tq0) { g_iml_ph[IMP_N] += rq_qpc() - tq0; }
         /* FIX(WORLDVIEW,W65): Pixel-Shader ohne Textur-Stufe 0
          * (PSTextureModes Stufe 0 = NONE) sampelt auf der Xbox nichts –
          * die noch gebundene Stage-0-Textur ist ein Rest des vorigen Draws.
@@ -2210,6 +2262,18 @@ static void sb_im_submit_body(void)
                g_present_no, m3d_ndraw, fx_nv(0x354u, 0u), fx_nv(0x30Cu, 0u),
                fx_nv(0x338u, 0u), fx_nv(0x334u, 0u), fx_nv(0x330u, 0u),
                fx_nv(0x384u, 0u), fx_nv(0x388u, 0u));
+        if (g_sba_loc) { /* DIAG(LOC-ORIGINAL,W363): Sampler-Zustand + Texturkopf je Stufe (Kanten-Zensus loc_texfilt) */
+            unsigned ls_xp[4], ls_n[4], lk;
+            sb_tex_stages(ls_xp, ls_n);
+            for (lk = 0; lk < 4u; lk++) {
+                unsigned ts = SBA(0x21A8B0u) + lk * 128u, v[9] = {0}, fw = 0, sz = 0, q;
+                if (!ls_xp[lk]) { continue; }
+                for (q = 0; q < 9u; q++) { v[q] = sb_ta_u32(ts + q * 4u); }
+                fw = sb_ta_u32(ls_xp[lk] + 12u); sz = sb_ta_u32(ls_xp[lk] + 16u);
+                HLOG_W("M3D lsmp f=%u i=%u st=%u xp=0x%X adr=%u/%u filt=%u/%u/%u lod=0x%X maxmip=%u an=%u fmtw=0x%X size=0x%X",
+                       g_present_no, m3d_ndraw, lk, ls_xp[lk], v[0], v[1], v[3], v[4], v[5], v[6], v[7], v[8], fw, sz);
+            }
+        }
         /* VSH-Dump (vsh_dump): Stage0-Datenzeiger je Draw (Alias-Flips
          * des Comp-Xptr sichtbar machen): nur Frames #1+#2. */
         if (g_cfg.vsh_dump && m3d_nframes <= 2u) {
@@ -2347,6 +2411,7 @@ static void sb_im_submit_body(void)
     { long long q0 = RQP_ON ? rq_qpc() : 0;
     int fxq = g_cfg.fx_diag ? fx_draw_pre(out, nout, rhw, g_im_prim, mvp) : 0; /* DIAG(FX-ORIG,W90) */
     if (g_cfg.p2z_diag) { p2z_note(out, nout, rhw, vsh_em, g_im_prim, g_im_p2zt, mvp); } /* DIAG(P2-ZTEST,W313) */
+    if (g_projd_hit) { projd_note(fast ? ov : out, fast ? n : nout, rhw, vsh_em, g_im_prim, mvp, g_rq_active); } /* DIAG(ISSUE49) */
     if (g_cfg.line_diag) { static const float z4[4]; lined_note(out, nout, rhw, vsh_em, g_im_prim, g_im_p2zt, fast ? z4 : g_im_buf[0][2], fast ? z4 : g_im_buf[0][3], g_im_col_slot, g_rq_active); } /* DIAG(ISSUE-EMP,W352) */
     if (g_cfg.bloom_diag) { bloom_diag_pre(out, nout, n, rhw, g_im_prim, rq_srv0); } /* DIAG(SHADE-BLOOM,W112) */
     { extern int g_visq_on; if (g_visq_on) { extern void sb_visq_draw_note(void); sb_visq_draw_note(); } } /* FIX(SHADE-M2,W117) vis_query: Draws im Sichtbarkeitstest */
@@ -2364,6 +2429,7 @@ static void sb_im_submit_body(void)
     if (g_cfg.bloom_diag) { bloom_diag_post(); } /* DIAG(SHADE-BLOOM,W112) */
     fx_draw_post(fxq); /* DIAG(FX-ORIG,W90) */
     if (g_cfg.p2z_diag) { p2z_post(); } /* DIAG(P2-ZTEST,W313) */
+    if (g_projd_hit) { projd_post(); } /* DIAG(ISSUE49) */
     if (g_cfg.line_diag) { lined_post(); } /* DIAG(ISSUE-EMP,W352) */
     if (RQP_ON) { g_rqp_q[RQP_DRAW] += rq_qpc() - q0; } } /* DIAG(SHADE-PERF,W80): auch alter Pfad */
     if (g_cfg.sbar_probe[0] && m3d_on) { sbar_probe_after(rhw, nout); } /* DIAG(STARTSEQ-BARS,W98) */

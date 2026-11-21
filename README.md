@@ -41,6 +41,11 @@ Thank you! ☕
    `.xiso` (Europe/PAL; USA/NTSC-U is experimental), then press **Check**.
 3. **Play:** press **LAUNCH GAME**.
 
+**Line of Contact** (the online sequel, experimental): switch to the **Line of
+Contact** tab at the top, choose your own LoC disc image, turn on **Online
+play** and press **Play Line of Contact** – see
+[Playing Line of Contact](poc-native/docs/community/LINE_OF_CONTACT.md).
+
 The default preset **Original** (at your monitor's refresh rate) is the
 recommended start; on an older or weaker PC pick **Performance** on the
 **Graphics** page. More: [Getting started](poc-native/docs/community/GETTING_STARTED.md),
@@ -140,11 +145,6 @@ feels off? Fill in the 2-minute
 [Discussions](../../discussions). To chat with other pilots and get notified
 when a new version is out, join the [Discord](https://discord.gg/ExEH3gBbyw).
 
-## Known issues" in editions/community/README.md (wird im Export zu README.md).
-Der englische Block unten ersetzt den bisherigen Abschnitt vollständig (von "## Known issues"
-bis vor "## What Steelbound is"). Darunter: Änderungsliste und Diff zur Prüfung.
--->
-
 ## Known issues
 
 Current state of the beta – no need to report these again, but new details
@@ -161,9 +161,10 @@ are welcome in the existing issue:
   launcher's Play page. Setting the frame rate to **30 (original)** also
   helps to narrow it down. An **F11** report taken right when it is visible
   helps me a lot.
-- **Line of Contact is not startable yet.** The launcher tab prepares it (disc
-  check, save folder); System Link works in my local tests, playing a mission
-  is the next step. Online play comes later.
+- **Line of Contact is experimental.** Online matches, public lobbies and
+  rollback work in our tests, but the support is new. Please report anything
+  odd with **F11** (the issue form asks *Which game?*). Details:
+  [Playing Line of Contact](poc-native/docs/community/LINE_OF_CONTACT.md).
 - **The USA (NTSC-U) release is experimental**; Europe (PAL) is the fully
   supported version.
 - **Camera on rising terrain** (Mission 9): the VT height changes in small
@@ -229,13 +230,16 @@ are welcome in the existing issue:
 - Texture/effect packs (`.sbpack`) with per-pack order, on/off switch,
   quality level and conflict display.
 - English and German UI (English default).
+- **Line of Contact** (experimental): online matches through our own meeting
+  point – public lobbies or private room codes, automatic rollback, network
+  info on **F3**.
 - Self-tests for input, rendering and pack validation.
 
 ## Documentation
 
 Player guides (English) are in `poc-native/docs/community/` (in a release
 archive: `docs/`): Getting started, Controls, Graphics and packs, VR, FAQ,
-and Beta testing (what to test, where logs and crash reports are).
+Playing Line of Contact and Beta testing (what to test, where logs and crash reports are).
 
 ## Packs
 

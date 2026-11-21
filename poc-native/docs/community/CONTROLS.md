@@ -27,6 +27,7 @@ while the game window has focus.
 | Slide-step (dodge, steer with A/D) | Left Ctrl or mouse X1/X2 |
 | Gear down / up (from N: E = 1st gear) | Q / E |
 | Tuner up / down | T / G |
+| Eject (only when the game tells you, otherwise your save is lost) | Shift + Delete |
 | Aim | Mouse (or arrows; Shift + arrows = sight only) |
 | Free / capture mouse | F10 |
 | Game menu (Continue, Settings, Feedback, Quit; pauses the game) | ESC |
@@ -37,13 +38,25 @@ while the game window has focus.
 | Original look ↔ your settings (compare live) | Shift + F8 (assignable: Controls page, "orig_view") |
 | Exit a running replay (the mouse no longer ends replays; gamepad, original controller and joystick work as in the original) | Backspace (assignable: Controls page, "replay_exit") |
 | Performance overlay | F2 (Shift + F2 moves it) |
+| Network overlay in Line of Contact online play (route, ping, loss, rollback, smoothing; see LINE_OF_CONTACT.md) | F3 (Shift + F3 moves it; assignable: Controls page, "Network overlay") |
 | Window / fullscreen | Alt + Enter |
 | VR: recenter view | F8 |
 
 Mouse aiming is **Absolute** by default (the crosshair follows the
 mouse); **Sensitivity** (1–16) is on the **Controls** page next to the
-mode. EJECT has no key in the Standard layout. Own layouts can be edited
+mode. EJECT is Shift + Delete in the Standard layout: a combination, so
+you do not press it by accident (Ctrl is already the slide-step pedal).
+Own layouts can be edited
 with **Assign …** on the **Controls** page.
+
+**Looking around with the mouse (Line of Contact):** with `mouse_sight=1`
+in `user.cfg` the mouse moves the sight lever instead of the crosshair.
+The game treats this lever like the stick on the original controller: how
+far you push it sets how fast the view turns. Move the mouse away from the
+centre to look around and back to the centre to stop; small movements near
+the centre do nothing. The view stops at about 90° to either side and 45°
+up or down and stays where you left it. When you drop into a mission, the
+lever starts at the centre.
 
 The comparison key (**Original look ↔ your settings**) is listed with the
 client keys in **Assign …**. To learn a combination, hold Shift, Ctrl or
@@ -77,8 +90,14 @@ before this change keep working: without their own entry, Shift + F8 (or
 | BACK + START | Washer |
 | BACK + LT | Slide-step |
 
-Warning: BACK + Y is Eject. Only use it when the game tells you to;
-otherwise your save is lost.
+Warning: BACK + Y (keyboard: Shift + Delete) is Eject. Only use it when
+the game tells you to; otherwise your save is lost.
+
+In Line of Contact, Eject works the same way (Shift + Delete, gamepad
+BACK + Y, the EJECT button of the original controller, or your own key via
+**Assign …**). It acts at once, without a confirmation: you leave your
+VT, your team loses one VT from its VT count, and you choose a new
+sortie on the map. In online play it is sent like any other input.
 
 ## Original controller (USB)
 

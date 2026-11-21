@@ -32,6 +32,7 @@ void hcfg_defaults(void)
     g_cfg.loc_net_rtt = 10;
     g_cfg.loc_net_nodelay = 1;   /* W322: TCP_NODELAY (nur LoC-Netz-HLE) */
     g_cfg.loc_net_leave_reset = 1; /* W350: Stromende eines Mitspielers = Verbindungsreset (Abgang wie XNet) */
+    g_cfg.loc_route = 1;        /* W395 LOC-ROUTE: kuerzester Weg je Mitspieler, Wechsel im Spiel */
     g_cfg.guest_wx = -1;         /* W339: W^X automatisch (LoC an, SB aus) */
     strcpy_s(g_cfg.loc_transport, sizeof g_cfg.loc_transport, "tcp"); /* W324: Original, bis abgenommen */
     g_cfg.loc_transport_proxy = 21000;
@@ -41,8 +42,15 @@ void hcfg_defaults(void)
     strcpy_s(g_cfg.loc_lobby_pilot, sizeof g_cfg.loc_lobby_pilot, "Pilot");
     strcpy_s(g_cfg.loc_lobby_role, sizeof g_cfg.loc_lobby_role, "auto");
     g_cfg.loc_sync_every = 150;  /* W297: LOCSYNC alle 150 Rahmen (nur mit loc_sync=1) */
+    g_cfg.loc_ls_arbiter = 1;    /* LOC-LOCKSTEP-ARBITER: neuer Pufferregler im Lockstep-Rueckfall */
+    g_cfg.im_lock_split = 1;     /* LOC-IM-LOCK: Snap-Einordnung und Textur-Hashes ohne ctx_lock */
     g_cfg.loc_rb_delay = 0;      /* W346: Eingabeverzoegerung mit loc_rb_input: 0 = adaptiv nach Umlaufzeit (2..3) */
-    g_cfg.loc_rb_input = !SB_EDITION_COMMUNITY || SB_LOC_PLAY; /* W346: Rollback intern standardmaessig an (je Mission ausgehandelt), Community aus; W353: privates LoC-Testpaket an */
+    g_cfg.loc_menu_hz = 1; /* W377 LOC-MENU-FPS: LoC-Menues mit der Bildrate (Wiederholbild, phasenrichtig, nur bei freier GPU) */
+    g_cfg.loc_vq_cache = 1; /* W377: VirtualQuery-Zwischenspeicher je Spielbild (Texturauffrischung, nur LoC) */
+    g_cfg.loc_xb_prio = 1;  /* W391: Xbox-Threads ueber normal (nur LoC; fremde Last weicht vom Xbox-Kern aus) */
+    g_cfg.loc_text_cache = 1; /* W377: LoC-Textebene nur bei geaendertem Inhalt neu hochladen, in die vorhandene Textur */
+    g_cfg.loc_rb_fastq = 1; /* W371 LOC-PERF: Ring-Neuaufbau: Regionen-Zwischenspeicher statt VirtualQuery je Eintrag (0 = alt, 2 = DIAG beide) */
+    g_cfg.loc_rb_input = !SB_EDITION_COMMUNITY || SB_LOC_PLAY; /* W346: Rollback intern standardmaessig an (je Mission ausgehandelt), Community mit SB_LOC_PLAY (W389: seit 0.3.0 Standard an, LoC fuer alle) */
     g_cfg.loc_pad_keys = 1;      /* W286: Ziffernblock/SPACE/Backspace/Enter auch an das Menue-Gamepad */
     g_cfg.loc_mouse = 1;         /* W341: Maus zielt in der LoC-Mission */
     g_cfg.save_check = 1;        /* W187 KIA-LOAD: Spielstaende pruefen/reparieren */
@@ -123,6 +131,7 @@ void hcfg_defaults(void)
     g_cfg.tex_hdr_check = 1;    /* W63 TEXCACHE */
     g_cfg.tex_reuse_inval = 1;  /* W244 WASH-TEX (Fix, 0 = alt) */
     g_cfg.tex_throttle_retry = 1; /* W307 TEX-WHITE-UI (Fix, 0 = alt) */
+    g_cfg.tex_fmt_first = 1; /* W383 LOC-GH-DATA (#60, Fix, 0 = alt) */
     g_cfg.tex_hud_guard = 1;      /* W345 HUDFREEZE (Fix, 0 = alt) */
     g_cfg.tex_up_budget = 12;     /* W307 DIAG: Upload-Drossel je Bild */
     g_cfg.tex_missing_mark = 0; g_cfg.interp_shots_sdelay = 45; /* W315 DIAG */
@@ -162,6 +171,7 @@ void hcfg_defaults(void)
     g_cfg.audio_adpcm_lerp = 1; /* W89: ADPCM linear resamplen (Standard an) */
     g_cfg.audio_3d = 1; /* W89: DS3D-Distanzdaempfung (Standard an) */
     g_cfg.loc_audio = 1; /* W298 LOC-AUDIO: XACT-HLE (wirkt nur im LoC-Profil) */
+    g_cfg.loc_wma = 1; /* W367 LOC-WMA: WMA-Soundtrack-Playlist ueber Media Foundation */
     g_cfg.volume_master = g_cfg.volume_music = g_cfg.volume_sfx = g_cfg.volume_voice = 100; /* W303 AUDIO-VOLUME */
     g_cfg.audio_menu_sfx = 1; /* W258: Menuetoene (snk_*.wav) per HLE statt stummem DirectMusic */
     g_cfg.audio_oneshot_fix = 1; /* W95: Einmal-Toene enden am Datenende (Standard an) */
@@ -219,6 +229,36 @@ void hcfg_defaults(void)
     g_cfg.loc_interp_anchor = 1; /* W340 LOC-FRAMES: Zustandszeit = Feld des Tick-Anfangs (nur LoC) */
     g_cfg.loc_interp_copy = 1; /* W340 LOC-FRAMES: BB-Kopie der Glow-Kette als Interp-Op (nur LoC) */
     g_cfg.loc_interp_dbg = 0; /* DIAG(W349) */
+    g_cfg.loc_local_aim = !SB_EDITION_COMMUNITY || SB_LOC_PLAY; /* W376 LOC-LOCAL-AIM; 20.11.: intern an (Empfehlung W376); Community mit SB_LOC_PLAY (W389: seit 0.3.0 Standard) */
+    g_cfg.loc_aim_diag = 0; /* DIAG(W376) */
+    g_cfg.loc_dodge_diag = 0; /* DIAG(W380) */
+    g_cfg.loc_rb_smooth = 1; /* W385 LOC-SMOOTH: Standard 1 nach Nachweis (Messreihe W385 K3-K6, Ruck der Korrektur ~E/3, synchron) */
+    g_cfg.loc_rb_smooth_ms = 150;
+    g_cfg.loc_rb_smooth_r = 7000; /* W385: Spieleinheiten ~ mm (Startabstand ~447 000, Ausweichen ~3000) */
+    g_cfg.loc_rb_smooth_max = 20000;
+    g_cfg.loc_rb_smooth_diag = 0; /* DIAG(W385) */
+    g_cfg.loc_smooth_opp = 1; /* W387 LOC-SMOOTH-OPP: auto (Nutzerwunsch 20.11. "Standard an") */
+    g_cfg.loc_smooth_opp_max = 2;
+    g_cfg.loc_smooth_opp_vis = 20;
+    g_cfg.loc_own_predict = 1; /* W390 LOC-OWN-PREDICT: eigene Lage D+1 Ticks voraus (Nachweis W390, Standard an) */
+    g_cfg.loc_own_predict_ticks = 0;
+    g_cfg.loc_own_predict_max_ms = 5;
+    g_cfg.loc_own_predict_diag = 0;
+    g_cfg.loc_own_predict_prep = 0;
+    g_cfg.loc_pd_spec = 1; /* W393 LOC-PACING: Present-Takt wartet nie auf den Vorlauf (0 = alt: Ruhe abwarten/auslassen) */
+    g_cfg.interp_pace_clock = 1; /* W393: stetige Bilduhr (Latenz weich nachgefuehrt), 1 = LoC, 2 = auch SB, 0 = alt */
+    g_cfg.pace_vsync = 1; /* W393: mit present_interval=1 Bildtakt an den VBlank koppeln (LoC) */
+    g_cfg.pace_diag = 0;
+    g_cfg.interp_pace_up = 200; /* W393 TEST: Bilduhr hoechstens 20 % langsamer, wenn L steigt */
+    g_cfg.interp_pace_hold = 0; /* W393 TEST: elastisches Halten (gemessen schlechter: 2,5-4x mehr gehaltene Bilder) */
+    g_cfg.interp_pace_dn = 20;  /* W393 TEST: hoechstens 2 % schneller, wenn L faellt */
+    g_cfg.loc_hud_predict = 1; /* W394 LOC-HUD-VIEW */
+    g_cfg.loc_view_perframe = 1; /* W394 LOC-VIEW-PERFRAME (Nachweis W394 C3/C4, Standard an) */
+    g_cfg.loc_hud_diag = 0; /* DIAG(W394) */
+    g_cfg.loc_vpf_test = 0; /* TEST(W394) */
+    g_cfg.loc_vpf_test_alt = 0; /* TEST(W394) */
+    g_cfg.loc_aim_diag_from = 0;
+    g_cfg.loc_aim_diag_n = 0;
     g_cfg.loc_ui_diag = 0; /* DIAG(W349) */
     g_cfg.loc_interp_rzalt = 1; /* W349 LOC-FRAMES-2: rawchg-Partner per Kamera-Pruefung (nur LoC) */
     g_cfg.loc_interp_rejcam = 1; /* W340 LOC-FRAMES: unplausible Spruenge mit Kamera-Pruefung lerpen (nur LoC) */
@@ -228,7 +268,10 @@ void hcfg_defaults(void)
     g_cfg.loc_shading = 1; /* W285 LOC-RENDER: Shading-Pfad im LoC-Profil (nur LoC) */
     g_cfg.loc_rtuv = 1; /* W285 LOC-RENDER: RT-UV normiert/texel nach Bereich (nur LoC) */
     g_cfg.loc_lookstat = 0; /* DIAG(W358 LOC-LOOK) */
-    g_cfg.loc_texfilt = 0; /* W358 LOC-LOOK: Texturfilter/LOD-Bias des Spiels (nur LoC) */
+    g_cfg.loc_texfilt = 3; /* W358 LOC-LOOK, W363: Texturfilter/LOD-Bias des Spiels wie die NV2A (nur LoC) */
+    g_cfg.loc_xact_rpc = 1; /* W363 LOC-ORIGINAL: RPC aus Bank.xsb */
+    g_cfg.loc_swznorm = 1; /* W363 LOC-ORIGINAL: swizzled Texturen normiert (NV2A) */
+    g_cfg.loc_lintexel = 1; /* W368 LOC-COCKPIT: Linear-Texturen mit Programm-UV texeladressiert (NV2A) */
     g_cfg.loc_vsod0 = 1; /* W358 LOC-LOOK: Vertex-Licht der P2-Programme (nur LoC; Nachweis L1) */
     g_cfg.loc_glow = 0; /* W285 LOC-RENDER: Glow-Komposition (Test, nur LoC) */
     g_cfg.loc_census_draws = 300; /* W285 LOC-RENDER: Zensus nur in 3D-Bildern (DIAG, nur LoC) */
@@ -285,6 +328,8 @@ void hcfg_defaults(void)
     g_cfg.gpu_burn = 0; /* DIAG(PERF-SPIKE,W318) */
     g_cfg.interp_gpu_tight_imm = 30; /* W318 PERF-SPIKE: render_thread=0 (AMD-Weg) Grenze 1 ab 30-ms-Tick (0 = aus) */
     g_cfg.interp_bsets_imm = 4; /* W318 PERF-SPIKE: render_thread=0 (AMD-Weg) mit 4 Reserve-Saetzen (0 = wie interp_bsets) */
+    g_cfg.shade_fast_first = 1; /* W371 LOC-PERF: kalter Shader-Cache -> schnell uebersetzen, voll im Hilfs-Thread (1 = nur LoC, 2 = immer, 0 = aus) */
+    g_cfg.shade_fast_level = 0; /* W371: Stufe der schnellen Fassung (0 SKIP_OPTIMIZATION = Standard, 2,7x schneller als LEVEL3; 1 LEVEL0, 2 LEVEL1 - kaum schneller) */
     g_cfg.shade_par_compile = 1; /* W318 PERF-SPIKE: VS-Variantenpaar parallel uebersetzen (0 = alt) */
     g_cfg.warm_shaders = 1;  /* W139: Shader-Cache vorab laden/anlegen */
     g_cfg.warm_vbpre = 1;    /* W139: Tick-Puffer beim Start anlegen */
@@ -302,7 +347,10 @@ void hcfg_defaults(void)
     g_cfg.p2_ztest = 1; /* W313 P2-ZTEST: FIX, P2-Draws in Spiel-RTs mit Tiefentest des Spiels wie NV2A (Feuer/Lichter nicht mehr durch Waende) */
     g_cfg.p2z_diag = 0; /* W313: DIAG(P2-ZTEST) */
     g_cfg.line_diag = 0; /* W352: DIAG(ISSUE-EMP) */
+    g_cfg.proj_diag = 0; /* DIAG(ISSUE49) */
+    g_cfg.specmat_diag = 0; /* DIAG(ISSUE36) */
     g_cfg.line_scale = 1; /* W352: FIX(ISSUE-EMP) Linien in skalierten Spiel-RTs 1 Xbox-Pixel breit */
+    g_cfg.loc_line_bb = 1; /* W381: FIX(#59) LoC-Linien im Backbuffer 1 Xbox-Pixel breit */
     g_cfg.bloom_diag = 0; g_cfg.bloom_frame = 0; g_cfg.bloom_max = 4; g_cfg.bloom_every = 0; /* W112: DIAG(SHADE-BLOOM) */
     g_cfg.shade_shadow = 0; /* W100 RENDER-QA3: Schattenpuffer (nur shading=1); 0 bis die 120-FPS-Paarung mit dem Tiefenpass geklaert ist (W100_oni2: pairs=0) */
     g_cfg.shadow_diag = 0; g_cfg.shadow_ab = 0; /* W127: DIAG(SHADOWBUF) */
@@ -411,6 +459,8 @@ void hcfg_defaults(void)
     g_cfg.perf_hud = 0;                 /* W122: Leistungs-Overlay aus (Taste aktiv) */
     g_cfg.perf_hud_pos = 0;             /* W122: oben rechts */
     strcpy_s(g_cfg.perf_hud_key, sizeof g_cfg.perf_hud_key, "F2"); /* W122 */
+    g_cfg.net_hud = 0;                  /* W374: Netz-Overlay aus (Taste aktiv) */
+    g_cfg.net_hud_pos = 1;              /* W374: oben links */
     g_cfg.perf_log = 0;                 /* W122: DIAG aus */
     g_cfg.watermark = 0;                /* W219: aus (Spieler-cfg sb_player.cfg setzt 1) */
     g_cfg.perf_spike_ms = 0;            /* W122: 0 = 2x Zielbildzeit */
@@ -549,6 +599,7 @@ void hcfg_defaults(void)
     g_cfg.key_toggles = 0;      /* W79 */
     g_cfg.mouse_mode = 0;       /* W87: 0 = relativ (alt); Launcher schreibt absolute */
     g_cfg.aim_diag = 0;         /* W87: DIAG(AIMSTEP) aus */
+    g_cfg.slide_assist = 8;     /* W380 LOC-DODGE: Ausweich-Hilfe, Polls (0 = aus, Original-Tastenverhalten) */
     g_cfg.toggle_assist = 1;    /* W87: wirkt nur mit key_toggles=1 (Spielerbetrieb) */
     g_cfg.startseq_shots = 0;   /* W87: DIAG(STARTSEQ)-Bilder aus */
     g_cfg.input_source = 0;     /* W79: 0 = GetAsyncKeyState (alt) */
@@ -708,11 +759,22 @@ static int set_key_overlay(const char *k, const char *v)
     if (strcmp(k, "overlay") == 0) { g_cfg.overlay = atoi(v); }
     else if (strcmp(k, "perf_hud") == 0) { g_cfg.perf_hud = atoi(v); }
     else if (strcmp(k, "perf_hud_pos") == 0) { g_cfg.perf_hud_pos = atoi(v); }
+    else if (strcmp(k, "net_hud") == 0) { g_cfg.net_hud = atoi(v); }         /* W374 */
+    else if (strcmp(k, "net_hud_pos") == 0) { g_cfg.net_hud_pos = atoi(v); } /* W374 */
     else if (strcmp(k, "perf_hud_key") == 0) { strncpy_s(g_cfg.perf_hud_key, sizeof g_cfg.perf_hud_key, v, _TRUNCATE); }
     else if (strcmp(k, "perf_log") == 0) { g_cfg.perf_log = atoi(v); }
     else if (strcmp(k, "watermark") == 0) { g_cfg.watermark = atoi(v); } /* W219 */
     else if (strcmp(k, "perf_spike_ms") == 0) { g_cfg.perf_spike_ms = atoi(v); }
     else if (strcmp(k, "perf_prof") == 0) { g_cfg.perf_prof = atoi(v); }
+    else if (strcmp(k, "test_cpu_mask") == 0) { g_cfg.test_cpu_mask = (unsigned)strtoul(v, NULL, 0); } /* TEST(W391) */
+    else if (strcmp(k, "loc_delay_diag") == 0) { g_cfg.loc_delay_diag = atoi(v); } /* DIAG(W391) */
+    else if (strcmp(k, "perf_prof_stack") == 0) { g_cfg.perf_prof_stack = atoi(v); } /* DIAG(W391) */
+    else if (strcmp(k, "test_render_slow_ms") == 0) { g_cfg.test_render_slow_ms = atoi(v); } /* TEST(W391) */
+    else if (strcmp(k, "loc_yield_sleep") == 0) { g_cfg.loc_yield_sleep = atoi(v); } /* PERF(W391) */
+    else if (strcmp(k, "loc_shot_tick_every") == 0) { g_cfg.loc_shot_tick_every = atoi(v); } /* TEST(W391) */
+    else if (strcmp(k, "loc_xb_prio") == 0) { g_cfg.loc_xb_prio = atoi(v); } /* PERF(W391) */
+    else if (strcmp(k, "loc_thr_diag") == 0) { g_cfg.loc_thr_diag = atoi(v); } /* DIAG(W391) */
+    else if (strcmp(k, "perf_prof_follow") == 0) { g_cfg.perf_prof_follow = atoi(v); } /* DIAG(W391) */
     else if (strcmp(k, "perf_prof_heavy") == 0) { g_cfg.perf_prof_heavy = atoi(v); } /* DIAG(PERF-TICK,W168) */
     else if (strcmp(k, "ctx_wait_diag") == 0) { g_cfg.ctx_wait_diag = atoi(v); } /* DIAG(PERF-TICK,W168) */
     else if (strcmp(k, "pd_gw_nopri") == 0) { g_cfg.pd_gw_nopri = atoi(v); } /* PERF(PERF-TICK,W168) */
@@ -778,10 +840,91 @@ static int set_key_overlay(const char *k, const char *v)
     return 1;
 }
 
+/* W371 LOC-PERF: eigene Schluessel (die else-if-Kette in set_key ist am Parser-Limit von MSVC, C1026) */
+static int set_key_w371(const char *k, const char *v)
+{
+    if (strcmp(k, "shade_fast_first") == 0) { g_cfg.shade_fast_first = atoi(v); }
+    else if (strcmp(k, "shade_fast_level") == 0) { g_cfg.shade_fast_level = atoi(v); }
+    else if (strcmp(k, "loc_rb_fastq") == 0) { g_cfg.loc_rb_fastq = atoi(v); }
+    else if (strcmp(k, "loc_menu_hz") == 0) { g_cfg.loc_menu_hz = atoi(v); }
+    else if (strcmp(k, "loc_menu_diag") == 0) { g_cfg.loc_menu_diag = atoi(v); }
+    else if (strcmp(k, "gpu_burn_menu") == 0) { g_cfg.gpu_burn_menu = atoi(v); }
+    else if (strcmp(k, "loc_text_cache") == 0) { g_cfg.loc_text_cache = atoi(v); }
+    else if (strcmp(k, "loc_vq_cache") == 0) { g_cfg.loc_vq_cache = atoi(v); }
+    else { return 0; }
+    return 1;
+}
+
+/* W376 LOC-LOCAL-AIM: eigene Schluessel (C1026 wie W371) */
+static int set_key_w376(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_local_aim") == 0) { g_cfg.loc_local_aim = atoi(v); }
+    else if (strcmp(k, "loc_aim_diag") == 0) { g_cfg.loc_aim_diag = atoi(v); } /* DIAG(W376) */
+    else if (strcmp(k, "loc_dodge_diag") == 0) { g_cfg.loc_dodge_diag = atoi(v); } /* DIAG(W380) */
+    else if (strcmp(k, "loc_rb_smooth") == 0) { g_cfg.loc_rb_smooth = atoi(v); } /* W385 */
+    else if (strcmp(k, "loc_rb_smooth_ms") == 0) { g_cfg.loc_rb_smooth_ms = atoi(v); }
+    else if (strcmp(k, "loc_rb_smooth_r") == 0) { g_cfg.loc_rb_smooth_r = atoi(v); }
+    else if (strcmp(k, "loc_rb_smooth_max") == 0) { g_cfg.loc_rb_smooth_max = atoi(v); }
+    else if (strcmp(k, "loc_rb_smooth_diag") == 0) { g_cfg.loc_rb_smooth_diag = atoi(v); } /* DIAG(W385) */
+    else if (strcmp(k, "loc_smooth_opp") == 0) { g_cfg.loc_smooth_opp = atoi(v); } /* W387 */
+    else if (strcmp(k, "loc_smooth_opp_max") == 0) { g_cfg.loc_smooth_opp_max = atoi(v); }
+    else if (strcmp(k, "loc_smooth_opp_vis") == 0) { g_cfg.loc_smooth_opp_vis = atoi(v); }
+    else if (strcmp(k, "loc_own_predict") == 0) { g_cfg.loc_own_predict = atoi(v); } /* W390 */
+    else if (strcmp(k, "loc_own_predict_ticks") == 0) { g_cfg.loc_own_predict_ticks = atoi(v); }
+    else if (strcmp(k, "loc_own_predict_max_ms") == 0) { g_cfg.loc_own_predict_max_ms = atoi(v); }
+    else if (strcmp(k, "loc_own_predict_diag") == 0) { g_cfg.loc_own_predict_diag = atoi(v); }
+    else if (strcmp(k, "loc_own_predict_prep") == 0) { g_cfg.loc_own_predict_prep = atoi(v); }
+    else if (strcmp(k, "loc_pd_spec") == 0) { g_cfg.loc_pd_spec = atoi(v); } /* W393 */
+    else if (strcmp(k, "interp_pace_clock") == 0) { g_cfg.interp_pace_clock = atoi(v); } /* W393 */
+    else if (strcmp(k, "pace_vsync") == 0) { g_cfg.pace_vsync = atoi(v); } /* W393 */
+    else if (strcmp(k, "frame_pace_diag") == 0) { g_cfg.pace_diag = atoi(v); } /* W393 DIAG (nicht loc_pace_diag!) */
+    else if (strcmp(k, "interp_pace_up") == 0) { g_cfg.interp_pace_up = atoi(v); } /* W393 TEST */
+    else if (strcmp(k, "interp_pace_dn") == 0) { g_cfg.interp_pace_dn = atoi(v); } /* W393 TEST */
+    else if (strcmp(k, "interp_pace_hold") == 0) { g_cfg.interp_pace_hold = atoi(v); } /* W393 TEST */
+    else if (strcmp(k, "loc_hud_predict") == 0) { g_cfg.loc_hud_predict = atoi(v); } /* W394 */
+    else if (strcmp(k, "loc_view_perframe") == 0) { g_cfg.loc_view_perframe = atoi(v); } /* W394 */
+    else if (strcmp(k, "loc_hud_diag") == 0) { g_cfg.loc_hud_diag = atoi(v); } /* DIAG(W394) */
+    else if (strcmp(k, "loc_vpf_test") == 0) { g_cfg.loc_vpf_test = atoi(v); } /* TEST(W394) */
+    else if (strcmp(k, "loc_vpf_test_alt") == 0) { g_cfg.loc_vpf_test_alt = atoi(v); } /* TEST(W394) */
+    else if (strcmp(k, "loc_aim_diag_from") == 0) { g_cfg.loc_aim_diag_from = atoi(v); }
+    else if (strcmp(k, "loc_aim_diag_n") == 0) { g_cfg.loc_aim_diag_n = atoi(v); }
+    else if (strcmp(k, "tex_fmt_first") == 0) { g_cfg.tex_fmt_first = atoi(v); } /* FIX(LOC-GH-DATA,W383) */
+    else { return 0; }
+    return 1;
+}
+
+/* W395 LOC-ROUTE: eigene Schluessel (C1026 wie W371) */
+static int set_key_w395(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_route") == 0) { g_cfg.loc_route = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "loc_route_sim") == 0) { strcpy_s(g_cfg.loc_route_sim, sizeof g_cfg.loc_route_sim, v); } /* TEST */
+    else { return 0; }
+    return 1;
+}
+
+/* LOC-LOCKSTEP-ARBITER: eigene Schluessel (C1026 wie W371) */
+static int set_key_lsarb(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_ls_arbiter") == 0) { g_cfg.loc_ls_arbiter = atoi(v); }
+    else if (strcmp(k, "loc_ls_opts") == 0) { strcpy_s(g_cfg.loc_ls_opts, sizeof g_cfg.loc_ls_opts, v); } /* DIAG */
+    else { return 0; }
+    return 1;
+}
+
+/* LOC-IM-LOCK: eigene Schluessel (C1026) */
+static int set_key_imlock(const char *k, const char *v)
+{
+    if (strcmp(k, "im_lock_split") == 0) { g_cfg.im_lock_split = atoi(v); }
+    else if (strcmp(k, "imlock_diag") == 0) { g_cfg.imlock_diag = atoi(v); } /* DIAG */
+    else { return 0; }
+    return 1;
+}
+
 static void set_key_b(const char *k, const char *v);
 static void set_key(const char *k, const char *v)
 {
-    if (set_key_remaster(k, v) || set_key_overlay(k, v) || set_key_vr(k, v)) {
+    if (set_key_remaster(k, v) || set_key_overlay(k, v) || set_key_vr(k, v) || set_key_w371(k, v) || set_key_w376(k, v) ||
+        set_key_w395(k, v) || set_key_lsarb(k, v) || set_key_imlock(k, v)) {
         return;
     }
     if (strcmp(k, "xbe_path") == 0) {
@@ -818,6 +961,8 @@ static void set_key(const char *k, const char *v)
         g_cfg.loc_net_rtt = atoi(v);
     } else if (strcmp(k, "loc_net_nodelay") == 0) { /* W322 LOC-NETLAT */
         g_cfg.loc_net_nodelay = atoi(v);
+    } else if (strcmp(k, "gpu_pref") == 0) { /* W370 LOC-RB-FALLBACK-US */
+        g_cfg.gpu_pref = atoi(v);
     } else if (strcmp(k, "loc_net_leave_reset") == 0) { /* W350 LOC-REJOIN */
         g_cfg.loc_net_leave_reset = atoi(v);
     } else if (strcmp(k, "loc_netsim") == 0) { /* W322 LOC-NETLAT */
@@ -830,6 +975,8 @@ static void set_key(const char *k, const char *v)
         strncpy_s(g_cfg.loc_transport_peers, sizeof g_cfg.loc_transport_peers, v, _TRUNCATE);
     } else if (strcmp(k, "loc_transport_proxy") == 0) { /* W324 */
         g_cfg.loc_transport_proxy = atoi(v);
+    } else if (strcmp(k, "loc_test_netcut") == 0) { /* W366 TEST */
+        strcpy_s(g_cfg.loc_test_netcut, sizeof g_cfg.loc_test_netcut, v);
     } else if (strcmp(k, "loc_transport_red") == 0) { /* W324 */
         g_cfg.loc_transport_red = atoi(v);
     } else if (strcmp(k, "loc_transport_gap") == 0) { /* W324 */
@@ -1678,10 +1825,34 @@ static void set_key(const char *k, const char *v)
  * bei zu langer else-if-Kette) */
 static void set_key_b(const char *k, const char *v)
 {
-    if (strcmp(k, "loc_lookstat") == 0) { /* DIAG(W358 LOC-LOOK) */
+    if (strcmp(k, "loc_lobby_vis") == 0) { /* W373: public | code (Standard code) */
+        strncpy_s(g_cfg.loc_lobby_vis, sizeof g_cfg.loc_lobby_vis, v, _TRUNCATE);
+    } else if (strcmp(k, "loc_texdump_xp") == 0) { /* DIAG(W368 LOC-COCKPIT) */
+        g_cfg.loc_texdump_xp = (unsigned)strtoul(v, NULL, 0);
+    } else if (strcmp(k, "loc_dbg_skip") == 0) { /* DIAG(W368 LOC-COCKPIT) */
+        g_cfg.loc_dbg_skip = atoi(v);
+    } else if (strcmp(k, "loc_dbg_xp") == 0) { /* DIAG(W368 LOC-COCKPIT) */
+        g_cfg.loc_dbg_xp = (unsigned)strtoul(v, NULL, 0);
+    } else if (strcmp(k, "loc_texdump_from") == 0) { /* DIAG(W368 LOC-COCKPIT) */
+        g_cfg.loc_texdump_from = atoi(v);
+    } else if (strcmp(k, "loc_wma") == 0) { /* W367 LOC-WMA */
+        g_cfg.loc_wma = atoi(v);
+    } else if (strcmp(k, "loc_wma_demo") == 0) { /* W367 LOC-WMA (Test/Experimental) */
+        g_cfg.loc_wma_demo = atoi(v);
+    } else if (strcmp(k, "loc_wma_fail_test") == 0) { /* W367 DIAG */
+        g_cfg.loc_wma_fail_test = atoi(v);
+    } else if (strcmp(k, "loc_lookstat") == 0) { /* DIAG(W358 LOC-LOOK) */
         g_cfg.loc_lookstat = atoi(v);
     } else if (strcmp(k, "loc_texfilt") == 0) { /* W358 LOC-LOOK */
         g_cfg.loc_texfilt = atoi(v);
+    } else if (strcmp(k, "loc_xact_rpc") == 0) { /* W363 LOC-ORIGINAL */
+        g_cfg.loc_xact_rpc = atoi(v);
+    } else if (strcmp(k, "loc_lintexel") == 0) { /* W368 LOC-COCKPIT */
+        g_cfg.loc_lintexel = atoi(v);
+    } else if (strcmp(k, "loc_swznorm") == 0) { /* W363 LOC-ORIGINAL */
+        g_cfg.loc_swznorm = atoi(v);
+    } else if (strcmp(k, "loc_texfilt_gate") == 0) { /* DIAG(LOC-ORIGINAL,W363) */
+        g_cfg.loc_texfilt_gate = atoi(v);
     } else if (strcmp(k, "loc_vsod0") == 0) { /* W358 LOC-LOOK */
         g_cfg.loc_vsod0 = atoi(v);
     } else if (strcmp(k, "audio_api_diag") == 0) { /* W348 AUDIO-DSP */
@@ -1805,6 +1976,12 @@ static void set_key_b(const char *k, const char *v)
         g_cfg.p2z_diag = atoi(v);
     } else if (strcmp(k, "line_scale") == 0) { /* FIX(ISSUE-EMP,W352) */
         g_cfg.line_scale = atoi(v);
+    } else if (strcmp(k, "loc_line_bb") == 0) { /* FIX(W381,#59) */
+        g_cfg.loc_line_bb = atoi(v);
+    } else if (strcmp(k, "specmat_diag") == 0) { /* DIAG(ISSUE36) */
+        g_cfg.specmat_diag = atoi(v);
+    } else if (strcmp(k, "proj_diag") == 0) { /* DIAG(ISSUE49) */
+        g_cfg.proj_diag = atoi(v);
     } else if (strcmp(k, "line_diag") == 0) { /* DIAG(ISSUE-EMP,W352) */
         g_cfg.line_diag = atoi(v);
     } else if (strcmp(k, "vis_diag") == 0) { /* DIAG(SHADE-M2,W117) */
@@ -1958,6 +2135,10 @@ static void set_key_b(const char *k, const char *v)
         /* W87: absolute|relative (auch 1/0) */
         g_cfg.mouse_mode = (_stricmp(v, "absolute") == 0 ||
                             _stricmp(v, "absolut") == 0 || atoi(v) == 1) ? 1 : 0;
+    } else if (strcmp(k, "slide_assist") == 0) { /* W380 */
+        g_cfg.slide_assist = atoi(v);
+        if (g_cfg.slide_assist < 0) g_cfg.slide_assist = 0;
+        if (g_cfg.slide_assist > 60) g_cfg.slide_assist = 60;
     } else if (strcmp(k, "toggle_assist") == 0) {
         g_cfg.toggle_assist = atoi(v);
     } else if (strcmp(k, "aim_diag") == 0) {

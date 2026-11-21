@@ -66,6 +66,12 @@ typedef HRESULT(WINAPI *fn_d3dcompile)(LPCVOID, SIZE_T, LPCSTR,
 
 int sb_im_compile(const char *src, const char *target, ID3DBlob **out)
 {
+    return sb_im_compile_flags(src, target, D3DCOMPILE_OPTIMIZATION_LEVEL3, out);
+}
+
+/* W371 LOC-PERF: wie sb_im_compile, aber mit waehlbaren D3DCompile-Flags (schneller Erstweg render_shade.c). */
+int sb_im_compile_flags(const char *src, const char *target, unsigned flags, ID3DBlob **out)
+{
     HMODULE dc;
     fn_d3dcompile comp;
     ID3DBlob *code = NULL, *err = NULL;
@@ -84,7 +90,7 @@ int sb_im_compile(const char *src, const char *target, ID3DBlob **out)
         return 0;
     }
     hr = comp(src, strlen(src), NULL, NULL, NULL, "main", target,
-              D3DCOMPILE_OPTIMIZATION_LEVEL3, 0, &code, &err);
+              flags, 0, &code, &err);
     if (FAILED(hr)) {
         HLOG_E("render: Shader-Fehler %s: %s", target,
                err ? (const char *)BLOB_PTR(err) : "?");

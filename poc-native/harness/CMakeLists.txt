@@ -26,9 +26,10 @@ else()
   message(FATAL_ERROR "SB_EDITION muss private oder community sein (ist: ${SB_EDITION})")
 endif()
 message(STATUS "SB_EDITION=${SB_EDITION}")
-# W353 LOC-DURCHSTICH: privater Schalter fuer ein Testpaket mit LoC (nur community wirksam; Standard aus,
-# oeffentliche Releases bleiben grau). Client: Rollback-Eingabeschicht standardmaessig an wie intern.
-option(SB_LOC_PLAY "W353: privates Testpaket mit LoC (nur -DSB_EDITION=community, nie fuer Releases)" OFF)
+# W353 LOC-DURCHSTICH / W389 RELEASE-030: LoC in der Community-Ausgabe (nur community wirksam). Seit 0.3.0
+# Standard an (LoC fuer alle, Nutzerentscheid 20.11.); -DSB_LOC_PLAY=OFF = Notschalter (LoC-Start grau,
+# Platzhalter-Transport). Client: Rollback-Eingabeschicht und LoC-Standards wie intern.
+option(SB_LOC_PLAY "W389: LoC in der Community-Ausgabe (Standard an; OFF = LoC grau, Notschalter)" ON)
 if(SB_LOC_PLAY AND NOT SB_EDITION_COMMUNITY)
   set(SB_LOC_PLAY OFF)  # intern ohne Wirkung, Kommandozeile bleibt unveraendert
 endif()
@@ -108,6 +109,7 @@ add_library(sb_emu SHARED
   src/render_visq.c
   src/render_interp.c
   src/render_warm.c
+  src/render_locmenu.c
   src/render_edge.c
   src/render_cpersp.c
   src/render_monview.c
@@ -130,13 +132,22 @@ add_library(sb_emu SHARED
   src/loc_mem.c
   src/loc_render.c
   src/loc_pad.c
+  src/loc_aim.c
+  src/loc_vpf.c
+  src/loc_dodge.c
+  src/loc_smooth.c
   src/loc_audio.c
+  src/loc_audio_scope.c
+  src/loc_wma.c
   src/loc_xact_fmt.c
   src/loc_sync.c
+  src/loc_state.c
   src/loc_rollback.c
   src/loc_rb_ring.c
   src/loc_rbi.c
   src/loc_rbn.c
+  src/loc_lsarb.c
+  src/loc_lsarb_game.c
   src/krnl_loc.c
   src/sb_userdata.c
   src/sb_savecheck.c
@@ -151,6 +162,7 @@ add_library(sb_emu SHARED
   src/sb_diagcore.c
   src/sb_crash.c
   src/sb_perfhud.c
+  src/sb_nethud.c
   src/sb_watermark.c
   src/sb_origview.c
   src/audio_out.c
@@ -176,18 +188,17 @@ add_library(sb_emu SHARED
   src/vr.c
 )
 target_include_directories(sb_emu PRIVATE src ${CMAKE_CURRENT_BINARY_DIR})
-target_link_libraries(sb_emu PRIVATE d3d11 dxgi dxguid dbghelp windowscodecs ole32 oleaut32 uuid winmm setupapi winusb synchronization)
+target_link_libraries(sb_emu PRIVATE d3d11 dxgi dxguid dbghelp windowscodecs ole32 oleaut32 uuid winmm setupapi winusb synchronization mfuuid) # W367: mfuuid = nur GUIDs (statisch); mfplat/mfreadwrite dynamisch
 # W286 LOC-SYSLINK / W292 LOC-COMM: Netz-HLE (Winsock, nur Loopback/private LAN-Adressen, kein Bind auf
 # alle Schnittstellen, kein DNS, nur mit loc_boot=1) in beiden Fassungen (Nutzer 15.11.: "keine Geheimnisse").
 # Community: clean_check-Freigaben in editions/clean_allow.tsv (Kategorie netz); der LoC-Start im Launcher
 # bleibt dort gesperrt (lgame_loc_client_ready).
-target_sources(sb_emu PRIVATE src/loc_net.c src/loc_net_core.c src/loc_netsim.c)
-# W324 LOC-NETPLAY: eigener UDP-Transport mit Internet-Treffpunkt (DNS, Relays) vorerst nur privat;
-# Community bekommt den Platzhalter (loc_transport=udp -> Hinweis im Log, Original-Transport).
+target_sources(sb_emu PRIVATE src/loc_net.c src/loc_net_core.c src/loc_netsim.c src/loc_route.c) # W395: loc_route (Wegwahl)
+# W324 LOC-NETPLAY: eigener UDP-Transport mit Internet-Treffpunkt (DNS, Relays). W389: seit 0.3.0 auch im
+# Community-Export; nur mit -DSB_LOC_PLAY=OFF bekommt Community den Platzhalter (Original-Transport).
 if(SB_EDITION_COMMUNITY AND SB_LOC_PLAY)
-  # W353 LOC-DURCHSTICH: privates LoC-Testpaket (make_alpha.py --loc-preview legt loc_tun.c in den Export)
   if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/loc_tun.c)
-    message(FATAL_ERROR "SB_LOC_PLAY=ON braucht src/loc_tun.c (Export mit package_edition.py --loc-preview)")
+    message(FATAL_ERROR "SB_LOC_PLAY=ON braucht src/loc_tun.c (Community-Export ab W389 bzw. 0.3.0)")
   endif()
   set(SB_LOC_TUN_SRC src/loc_tun.c)
 elseif(SB_EDITION_COMMUNITY)
@@ -296,6 +307,7 @@ add_executable(loc_net_selftest
   tests/loc_net_selftest.c
   src/loc_net_core.c
   src/loc_netsim.c
+  src/loc_route.c
   ${SB_LOC_TUN_SRC}
   ${SB_LOC_SEC_SRC}
   src/sb_sha256.c
@@ -308,9 +320,13 @@ target_compile_options(loc_net_selftest PRIVATE /W3)
 add_executable(loc_audio_selftest
   tests/loc_audio_selftest.c
   src/loc_xact_fmt.c
+  src/loc_audio_scope.c
   src/audio_fmt.c
+  src/loc_wma.c
 )
 target_include_directories(loc_audio_selftest PRIVATE src)
+target_compile_definitions(loc_audio_selftest PRIVATE LW_SELFTEST=1) # W367: Playlist + Media-Foundation-Dekoder ohne Mischer
+target_link_libraries(loc_audio_selftest PRIVATE mfuuid ole32)
 target_compile_options(loc_audio_selftest PRIVATE /W3)
 
 # ---- audio_reverb_selftest: W348 I3DL2-Hall (Nachhallzeit, Pegel, Stabilitaet, Kosten) + Huellkurven ----
@@ -343,8 +359,11 @@ target_compile_options(loc_rb_selftest PRIVATE /W3)
 # ---- loc_rbi_selftest: Eingabeschicht fuer Rollback R2 (Slots, Vorhersage, Kanal, Hash), Spielzwilling synthetisch (W338) ----
 add_executable(loc_rbi_selftest
   tests/loc_rbi_selftest.c
+  tests/loc_lsarb_cases.c
   src/loc_rbi.c
   src/loc_rbn.c
+  src/loc_lsarb.c
+  src/loc_state.c
 )
 target_include_directories(loc_rbi_selftest PRIVATE src)
 target_compile_options(loc_rbi_selftest PRIVATE /W3)
@@ -372,6 +391,11 @@ if(SB_VERSION)
   target_compile_definitions(sb_emu PRIVATE "SB_VERSION_STR=\"${SB_VERSION}\"")
 endif()
 message(STATUS "SB_VERSION=${SB_VERSION}")
+# REL-DEFENDER-FP: Dateieigenschaften (VERSIONINFO) der ausgelieferten Client-Dateien, Version aus
+# SB_VERSION bzw. poc-native/VERSION. Nur Ressource (passt in die bestehende .rsrc-Seite).
+include(${CMAKE_CURRENT_SOURCE_DIR}/src/sb_verinfo.cmake)
+sb_add_verinfo(sb_ldr "Steelbound client loader")
+sb_add_verinfo(sb_emu "Steelbound client core")
 
 # W116: Edition an alle C-Ziele (nur community setzt etwas)
 if(SB_EDITION_COMMUNITY)

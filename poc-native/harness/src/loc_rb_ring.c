@@ -300,22 +300,31 @@ int rbr_start(void)
     return 0;
 }
 
+static u32 s_stop_us[4]; /* W372 DIAG: Schutz zurueck, Warten auf Handler, Freigeben (us), Warteschleifen */
+void rbr_stop_times(uint32_t out[4]) { memcpy(out, s_stop_us, sizeof s_stop_us); }
+
 void rbr_stop(void)
 {
     int i;
+    long long t0 = now_qpc(), t1, t2;
     if (s_active) {
         for (i = 0; i < s_nr; i++)
             if (s_r[i].method == RBR_WP) prot_run(&s_r[i], s_r[i].pg0, s_r[i].npg, 0);
     }
     s_active = 0;
     MemoryBarrier();
+    t1 = now_qpc();
     { /* W338: andere Threads koennen noch im Handler stecken (Seitentabelle, Merkfeld) - erst danach freigeben */
         int spins = 0;
         while (s_veh_in && spins++ < 200000) { /* bis ~0,2 s: verdraengte Threads beenden ihren Handler */
             if (spins & 255) YieldProcessor();
             else SwitchToThread();
         }
+        s_stop_us[3] = (u32)spins;
     }
+    t2 = now_qpc();
+    s_stop_us[0] = us_of(t1 - t0);
+    s_stop_us[1] = us_of(t2 - t1);
     if (s_veh) RemoveVectoredExceptionHandler(s_veh);
     s_veh = NULL;
     if (s_S) VirtualFree(s_S, 0, MEM_RELEASE);
@@ -341,6 +350,7 @@ void rbr_stop(void)
     s_nlk = 0;
     s_npg = 0;
     rbr_reset_ring();
+    s_stop_us[2] = us_of(now_qpc() - t2);
 }
 
 int rbr_active(void) { return s_active; }
@@ -517,6 +527,49 @@ int rbr_commit(rbr_commit_t *st)
     return 0;
 }
 
+/* W390 LOC-OWN-PREDICT: alle seit dem letzten Sichern beschriebenen Seiten auf den Schatten S (= Stand des letzten
+ * rbr_commit) zuruecksetzen, ohne den Ring zu veraendern (spekulativer Vorlauf: danach wieder genau der gesicherte
+ * Stand). Gemeldete Seiten bleiben offen (pst = 1) und werden beim naechsten Sichern nur verglichen (gleich -> nichts
+ * in den Ring). pages = zurueckgeschriebene Seiten, checked = verglichene. 0 = ok, -1 = nicht aktiv. */
+int rbr_revert(uint32_t *pages, uint32_t *checked, uint32_t *us)
+{
+    long long t0 = now_qpc();
+    u32 n = 0, nc = 0;
+    int i;
+    if (!s_active) return -1;
+    for (i = 0; i < s_nr; i++) { /* Write-Watch ohne Zuruecksetzen: das naechste rbr_commit sieht sie noch */
+        reg_t *r = &s_r[i];
+        ULONG_PTR cnt = s_ww_cap, j;
+        ULONG gran = 0;
+        if (r->method != RBR_WW) continue;
+        if (GetWriteWatch(0, (void *)(uintptr_t)r->va, r->len, s_ww_addr, &cnt, &gran) != 0) continue;
+        for (j = 0; j < cnt; j++) s_pst[r->pg0 + ((u32)(uintptr_t)s_ww_addr[j] - r->va) / PG] = 1;
+    }
+    for (i = 0; i < s_nr; i++) {
+        reg_t *r = &s_r[i];
+        u32 q, end = r->pg0 + r->npg;
+        const volatile uint8_t *ps = s_pst;
+        for (q = r->pg0; q < end; q++) {
+            uint8_t *lv, *sv;
+            if ((q & 7u) == 0 && q + 8 <= end && *(const volatile uint64_t *)(ps + q) == 0) {
+                q += 7;
+                continue;
+            }
+            if (!ps[q]) continue;
+            nc++;
+            lv = live_of(r, q);
+            sv = s_S + (size_t)q * PG;
+            if (memcmp(lv, sv, PG) == 0) continue;
+            memcpy(lv, sv, PG);
+            n++;
+        }
+    }
+    if (pages) *pages = n;
+    if (checked) *checked = nc;
+    if (us) *us = us_of(now_qpc() - t0);
+    return 0;
+}
+
 int rbr_load(unsigned k, uint32_t *pages, uint32_t *us)
 {
     long long t0 = now_qpc();
@@ -645,6 +698,30 @@ uint32_t rbr_shadow_copy(uint8_t *dst)
 {
     if (!s_S) return 0;
     memcpy(dst, s_S, (size_t)s_npg * PG);
+    return s_npg;
+}
+
+/* LOC-DESYNC-REPAIR (21.11.): Stand k Ticks zurueck nach dst, ohne Live, Schatten oder Ring zu aendern.
+ * Wie rbr_load: je Seite gewinnt der aelteste alte Inhalt der k neuesten Ticks. */
+uint32_t rbr_snapshot_at(unsigned k, uint8_t *dst)
+{
+    u32 t;
+    if (!s_S || !dst || k > s_nt) return 0;
+    memcpy(dst, s_S, (size_t)s_npg * PG);
+    if (!k) return s_npg;
+    if (++s_gen == 0) {
+        memset(s_stamp, 0, (size_t)s_npg * sizeof(u32));
+        s_gen = 1;
+    }
+    for (t = s_nt - k; t < s_nt; t++) {
+        u32 ti = (s_t0 + t) % RBR_TMAX, e;
+        for (e = 0; e < s_t[ti].ne; e++) {
+            u32 slot = (s_t[ti].e0 + e) % s_cap, q = s_ent[slot].pg;
+            if (q >= s_npg || s_stamp[q] == s_gen) continue;
+            s_stamp[q] = s_gen;
+            memcpy(dst + (size_t)q * PG, s_pool + (size_t)slot * PG, PG);
+        }
+    }
     return s_npg;
 }
 

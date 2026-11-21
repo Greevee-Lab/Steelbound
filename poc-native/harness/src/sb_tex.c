@@ -18,9 +18,11 @@ int sb_ctx_release_all(void); /* W138 d3d11_render.c */
 void sb_ctx_reacquire(int r);
 #include <windows.h>
 #include <d3d11.h>
+#include "render_locmenu.h" /* W377 LOC-MENU-FPS: Textebenen-Ring (nach d3d11.h) */
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include "sb_tex_budget.h" /* W383 LOC-GH-DATA (#60) */
 
 static ID3D11Device *g_tdev;
 static unsigned g_stage0_xptr;
@@ -47,6 +49,7 @@ typedef struct {
     int reuse;  /* FIX(WASH-TEX,W244) tex_reuse_inval: Block wiederverwendet -> neu laden, bleibt bis zum Erfolg */
     int thr;    /* FIX(TEX-WHITE-UI,W307) tex_throttle_retry: noch nie hochgeladen, letzter Versuch an der Drossel gescheitert */
     unsigned nnull; /* DIAG(TEX-WHITE-UI,W307): Gets ohne SRV in Folge (Log ab 90) */
+    unsigned long long txh; /* PERF(W377) loc_text_cache: 64-Bit-Hash des zuletzt hochgeladenen Inhalts (0 = unbekannt) */
 } tex_entry_t;
 unsigned krnl_phys_to_virt(unsigned phys);
 void krnl_phys_diag(unsigned xptr, unsigned phys, unsigned need); /* DIAG(FILM-WHITE,W177) */
@@ -74,6 +77,53 @@ static unsigned sb_tex_hostaddr(unsigned data)
  * unmittelbar folgenden tex_data_hash desselben Threads (spart dort die Seiten-Walks). */
 static __declspec(thread) MEMORY_BASIC_INFORMATION g_vqm;
 static __declspec(thread) unsigned g_vqm_addr;
+/* PERF(W377 LOC-MENU-FPS) loc_vq_cache (nur LoC-Profil): Die Auffrischung jedes 16. Gets fragt je Textur 1-3-mal
+ * VirtualQuery (Adressabbildung, Hash-Bereich). VirtualQuery laeuft die Seitentabelle der ganzen gleichartigen Region
+ * ab (W371: Ring-Register 103-166 ms fuer 600 Abfragen) - in LoC-Menues ~56 us je Auffrischung, bis 1,6 ms je Bild,
+ * auf langsameren Rechnern ein Vielfaches. Hier: je Thread die letzten 8 Ergebnisse festgeschriebener Regionen,
+ * gueltig nur innerhalb desselben Spielbilds (g_present_no). Eine Adresse in [Seite der Abfrage, Regionsende) hat
+ * per Definition dasselbe Ergebnis (Zustand, Schutz, Belegungsbasis, Typ); Basis = ihre Seite, Groesse = bis zum
+ * Ende. Der Upload-Schutz (tex_range_ok, TEXLIFE) fragt weiter direkt. 2 = DIAG: zusaetzlich direkt, Abweichungen
+ * zaehlen. */
+extern unsigned g_present_no;
+unsigned g_lm_vq_hit, g_lm_vq_miss, g_lm_vq_bad; /* DIAG(W377) Zeile LOCMENU */
+#define TVQ_N 8
+static __declspec(thread) struct { uintptr_t base, end; MEMORY_BASIC_INFORMATION m; } g_tvq[TVQ_N];
+static __declspec(thread) unsigned g_tvq_n, g_tvq_k, g_tvq_frame;
+static SIZE_T tex_vq(LPCVOID a, MEMORY_BASIC_INFORMATION *m)
+{
+    uintptr_t ad = (uintptr_t)a, pg = ad & ~(uintptr_t)0xFFFu;
+    unsigned k;
+    SIZE_T r;
+    if (!g_sba_loc || g_cfg.loc_vq_cache <= 0) { return VirtualQuery(a, m, sizeof *m); }
+    if (g_tvq_frame != g_present_no) { g_tvq_frame = g_present_no; g_tvq_n = 0; g_tvq_k = 0; }
+    for (k = 0; k < g_tvq_n; k++) {
+        if (ad >= g_tvq[k].base && ad < g_tvq[k].end) {
+            *m = g_tvq[k].m;
+            m->BaseAddress = (PVOID)pg;
+            m->RegionSize = g_tvq[k].end - pg;
+            g_lm_vq_hit++;
+            if (g_cfg.loc_vq_cache >= 2) { /* DIAG: Gegenprobe */
+                MEMORY_BASIC_INFORMATION d;
+                if (!VirtualQuery(a, &d, sizeof d) || d.BaseAddress != m->BaseAddress || d.RegionSize != m->RegionSize ||
+                    d.State != m->State || d.Protect != m->Protect || d.AllocationBase != m->AllocationBase || d.Type != m->Type) {
+                    g_lm_vq_bad++;
+                    *m = d;
+                }
+            }
+            return sizeof *m;
+        }
+    }
+    r = VirtualQuery(a, m, sizeof *m);
+    g_lm_vq_miss++;
+    if (r && m->State == MEM_COMMIT && m->RegionSize) {
+        k = g_tvq_n < TVQ_N ? g_tvq_n++ : (g_tvq_k++ % TVQ_N);
+        g_tvq[k].base = (uintptr_t)m->BaseAddress;
+        g_tvq[k].end = (uintptr_t)m->BaseAddress + m->RegionSize;
+        g_tvq[k].m = *m;
+    }
+    return r;
+}
 static unsigned sb_tex_hostaddr_x(unsigned xptr, unsigned data)
 {
     unsigned xl, cand, res = 0, old;
@@ -86,13 +136,13 @@ static unsigned sb_tex_hostaddr_x(unsigned xptr, unsigned data)
         MEMORY_BASIC_INFORMATION ma, mb;
         /* PERF(PERF-TICK,W168) tex_hash_fast: liegt der Kopf in derselben VirtualQuery-Region wie die
          * Daten (einheitlicher Zustand, eine Allokation), ist die zweite Abfrage gleichwertig entbehrlich. */
-        if (g_cfg.tex_hash_fast && VirtualQuery((LPCVOID)(uintptr_t)cand, &mb, sizeof mb) && mb.State == MEM_COMMIT &&
+        if (g_cfg.tex_hash_fast && tex_vq((LPCVOID)(uintptr_t)cand, &mb) && mb.State == MEM_COMMIT &&
             (uintptr_t)xptr >= (uintptr_t)mb.BaseAddress && (uintptr_t)xptr - (uintptr_t)mb.BaseAddress < mb.RegionSize) {
             res = cand;
             g_vqm = mb; g_vqm_addr = cand;
         } else
-        if (VirtualQuery((LPCVOID)(uintptr_t)xptr, &ma, sizeof ma) &&
-            VirtualQuery((LPCVOID)(uintptr_t)cand, &mb, sizeof mb) &&
+        if (tex_vq((LPCVOID)(uintptr_t)xptr, &ma) &&
+            tex_vq((LPCVOID)(uintptr_t)cand, &mb) &&
             ma.State == MEM_COMMIT && mb.State == MEM_COMMIT &&
             ma.AllocationBase == mb.AllocationBase) {
             res = cand;
@@ -626,7 +676,33 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
         last_ok = xptr;
     }
     if (g_present_no != up_frame) { up_frame = g_present_no; up_count = 0; }
-    if (up_count >= (g_cfg.tex_up_budget > 0 ? (unsigned)g_cfg.tex_up_budget : 12u) && !g_tex_pause_up) { /* W307: tex_up_budget (DIAG, Standard 12) */
+    /* FIX(LOC-GH-DATA,W383) tex_fmt_first: Versuche, die ohnehin am Format scheitern, belegen keinen
+     * Drossel-Platz (sb_tex_budget.h; sonst frassen nie ladbare LoC-Bump-Karten das Budget, #60). */
+    unsigned up_pf = 0, up_hfmt = 0;
+    int up_fmt_ok = 1;
+    if (g_cfg.tex_fmt_first) {
+        unsigned hdata = 0, hb = 0, hw = 0, hh = 0;
+        DXGI_FORMAT hd;
+        int rd = 1;
+        __try {
+            hdata = *(unsigned *)(uintptr_t)(xptr + 4);
+            up_hfmt = *(unsigned *)(uintptr_t)(xptr + 0xC);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            rd = 0; /* Lesefehler meldet der normale Weg (g_up_fail 3) */
+        }
+        if (rd) { up_fmt_ok = hdata ? (tex_decode_fmt(up_hfmt, &hd, &hb, &hw, &hh) != 0) : 0; }
+    }
+    if (!tex_budget_admit(up_fmt_ok, g_cfg.tex_fmt_first, &up_count,
+                          g_cfg.tex_up_budget > 0 ? (unsigned)g_cfg.tex_up_budget : 12u, /* W307: tex_up_budget (DIAG, Standard 12) */
+                          g_tex_pause_up != 0, &up_pf)) {
+        if (up_pf == 4u) {
+            if (g_skiplog < 8) {
+                g_skiplog++;
+                HLOG_W("TEX skip: xptr=0x%X fmt=0x%08X (vor der Drossel, W383)", xptr, up_hfmt);
+            }
+            g_up_fail = 4; g_up_fmt = up_hfmt; /* wie unten (Kind 0), aber ohne Platz in der Drossel */
+            return NULL;
+        }
         up_skip++;
         if (g_present_no - up_logf >= 600u) {
             up_logf = g_present_no;
@@ -636,7 +712,6 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
         sb_th_throttle(g_present_no); /* W315: Textur-Gesundheit */
         return NULL;
     }
-    up_count++;
     { extern unsigned g_phud_upn; g_phud_upn++; } /* DIAG(PERF-HUD,W122): Uploads zaehlen */
     unsigned data = 0, fmt = 0;
     DXGI_FORMAT dfmt;
@@ -1032,7 +1107,7 @@ static unsigned tex_data_hash(unsigned data, unsigned size)
     if (g_cfg.tex_hash_fast) { /* PERF(PERF-TICK,W168): Region aus sb_tex_hostaddr_x bzw. eine eigene Abfrage */
         if (g_vqm_addr && data == g_vqm_addr) { vm = &g_vqm; }
         else if (data >= 0x10000u && data < SB_HOST_LIM() && g_cfg.tex_upload_guard && /* W315 */
-                 VirtualQuery((LPCVOID)(uintptr_t)data, &vm2, sizeof vm2)) { vm = &vm2; }
+                 tex_vq((LPCVOID)(uintptr_t)data, &vm2)) { vm = &vm2; }
         g_vqm_addr = 0;
     }
     if (!data || !size) {
@@ -1157,6 +1232,48 @@ static void tex_dump_diag(unsigned xptr, unsigned data, unsigned w, unsigned h)
                xptr, w, h, pitch, first, distinct, distinct >= 64 ? "+" : "",
                n ? sumr / n : 0, path);
     }
+}
+
+/* DIAG(W368 LOC-COCKPIT) loc_texdump_xp: eine Lineartextur (32 Bit) ab Bild loc_texdump_from beim
+ * Upload als Farbe und Alpha (je JPG) ablegen, hoechstens 4x je Lauf. Nur Speicherinhalt der Textur. */
+static void tex_dump_xp(unsigned xptr, unsigned data, unsigned w, unsigned h)
+{
+    static unsigned nd;
+    extern unsigned g_present_no;
+    extern int sb_render_write_jpg(const char *, const unsigned char *, unsigned, unsigned);
+    extern const char *hcfg_out_dir(void);
+    unsigned size = 0, pitch, x, y, k, nz = 0;
+    unsigned char *bgr;
+    char path[600];
+    if (!g_cfg.loc_texdump_xp || xptr != g_cfg.loc_texdump_xp || nd >= 4u ||
+        (int)g_present_no < g_cfg.loc_texdump_from || !w || !h || w > 2048u || h > 2048u) {
+        return;
+    }
+    data = sb_tex_hostaddr_x(xptr, data);
+    __try { size = *(unsigned *)(uintptr_t)(xptr + 16); } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    if (!size) { return; }
+    pitch = (((size >> 24) & 0xFFu) + 1u) * 64u;
+    bgr = (unsigned char *)malloc((size_t)w * h * 3u * 2u);
+    if (!bgr) { return; }
+    nd++;
+    __try {
+        for (y = 0; y < h; y++) {
+            const unsigned char *s = (const unsigned char *)(uintptr_t)(data + y * pitch);
+            for (x = 0; x < w; x++) {
+                unsigned char *o = bgr + ((size_t)y * w + x) * 3u, *oa = o + (size_t)w * h * 3u;
+                o[0] = s[x * 4u]; o[1] = s[x * 4u + 1u]; o[2] = s[x * 4u + 2u];
+                oa[0] = oa[1] = oa[2] = s[x * 4u + 3u];
+                nz += s[x * 4u + 3u] != 0;
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { free(bgr); return; }
+    for (k = 0; k < 2u; k++) {
+        _snprintf_s(path, sizeof path, _TRUNCATE, "%s/shots/texdump_%08X_f%u_%s.jpg", hcfg_out_dir(), xptr,
+                    g_present_no, k ? "a" : "rgb");
+        sb_render_write_jpg(path, bgr + (size_t)k * w * h * 3u, w, h);
+    }
+    free(bgr);
+    HLOG_W("TEXDUMP W368: xptr=0x%X %ux%u pitch=%u f=%u alpha!=0: %u", xptr, w, h, pitch, g_present_no, nz);
 }
 
 /* FIX(STARTSEQ-BARS,W98) tex_lockwatch: Texturen, die das Spiel per
@@ -1355,6 +1472,54 @@ static void tex_reuse_drain(void)
     if (nm) { ndrain++; }
 }
 
+/* DIAG(W377 LOC-MENU-FPS) loc_menu_diag: Anteile in sb_tex_get (QPC-Ticks), Zeile LOCMENU (d3d11_render.c) */
+long long g_lm_rttq, g_lm_upq, g_lm_hashq, g_lm_txq;
+unsigned g_lm_rttn, g_lm_upn, g_lm_txskip, g_lm_txupd, g_lm_hashn;
+extern long long rq_qpc(void);
+/* PERF(W377 LOC-MENU-FPS) loc_text_cache (nur LoC-Profil): Die Textebene der Menues (XFONT, 640x480
+ * LIN_A8R8G8B8, z. B. 0x7264E4) schreibt das Spiel per CPU (Clear + TextOut, LockRect -> dirty), mehrmals je Bild
+ * mit wechselndem Inhalt (Lobby: 6 Zustaende je Bild, die sich jedes Bild wiederholen). Bisher legte jeder Get
+ * danach eine neue Textur an (CreateTexture2D mit Anfangsdaten + SRV + Logzeile), bis 180-mal je Sekunde.
+ * Jetzt: voller 64-Bit-Hash des Inhalts beim Get. Gleich dem zuletzt gezeigten -> vorhandene SRV; schon einmal
+ * hochgeladen (Ring der letzten TXR_N Inhalte, nach Kopf + Hash) -> dessen SRV; sonst alter Weg (Upload), danach in
+ * den Ring. Gezeigt wird immer genau der Inhalt zum Zeitpunkt des Gets (wie bisher). Nur lineare Eintraege mit SRV,
+ * ohne HD-Ersatz/Dump. 1 = genommen (e->srv gilt). */
+#define TXR_N 16
+static lm_txr_t g_txr[TXR_N];
+static unsigned g_txr_tick;
+static unsigned long long tex_hash64(unsigned data, unsigned size)
+{
+    unsigned long long h = 0;
+    if (!data || size < 16u || size > (16u << 20) || !tex_range_ok(data, size)) { return 0; }
+    __try {
+        h = (size & 15u) ? 0ull : lm_hash64((const void *)(uintptr_t)data, size / 16u);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return h;
+}
+static int tex_txc_on(const tex_entry_t *e)
+{
+    return g_sba_loc && g_cfg.loc_text_cache > 0 && e->linear == 1 && !sb_rem_active() && !sb_rpf_wanted() && !g_cfg.tex_dump;
+}
+static int tex_txc_fast(tex_entry_t *e, unsigned data)
+{
+    unsigned long long h;
+    int k;
+    if (!tex_txc_on(e) || !e->srv || !e->size || data != e->data) { return 0; }
+    h = tex_hash64(sb_tex_hostaddr_x(e->xptr, data), e->size);
+    if (!h) { return 0; }
+    if (h == e->txh) { g_lm_txskip++; return 1; }
+    k = lm_txr_find(g_txr, TXR_N, &g_txr_tick, e->xptr, e->w, e->h, h, g_tdev);
+    if (k < 0) { return 0; } /* neuer Inhalt: alter Weg (Upload), danach lm_txr_put */
+    if (e->srv != g_txr[k].srv) {
+        ID3D11ShaderResourceView_AddRef(g_txr[k].srv);
+        ID3D11ShaderResourceView_Release(e->srv);
+        e->srv = g_txr[k].srv;
+    }
+    e->txh = h;
+    e->hash = g_txr[k].h32; /* Refresh-Hash zu diesem Inhalt (beim Upload berechnet) */
+    g_lm_txupd++;
+    return 1;
+}
 static ID3D11ShaderResourceView *sb_tex_get_body(void);
 static int g_get_ent = -1; /* DIAG(TEX-WHITE-UI,W307): Cache-Eintrag des letzten Gets (-1 = keiner/RT) */
 /* DIAG(TEX-WHITE-UI,W307): Eintrag bleibt dauerhaft ohne SRV (Draw ohne Textur:
@@ -1389,15 +1554,78 @@ unsigned sb_tex_thr_pending(unsigned *entries)
     if (entries) { *entries = z; }
     return n;
 }
+long long g_lt_wall, g_lt_cyc, g_lt_drain, g_lt_find; /* DIAG(W391) Zeile LOCTEX (render_locmenu.c) */
+/* DIAG(LOC-IM-LOCK) imlock_diag=1: Teilzeiten je sb_tex_get (QPC), lange Abrufe (> 1 ms) summiert.
+ * 0 drain, 1 rtt, 2 find, 3 txc (Textebene), 4 lockwatch, 5 refresh-hash, 6 upload (ohne Sperre), 7 hash nach Upload */
+enum { TXM_DRAIN, TXM_RTT, TXM_FIND, TXM_TXC, TXM_LW, TXM_HASH, TXM_UP, TXM_POST, TXM_N };
+static long long g_txm[TXM_N];
+static int g_txm_on;
+static unsigned g_txm_ns, g_txm_nc, g_txm_why[4]; /* why: 0 Treffer/stabil, 1 refresh ohne Upload, 2 Upload, 3 neu */
+static double g_txm_sum[TXM_N + 1], g_txm_mx, g_txm_mxp[TXM_N + 1];
+static unsigned g_txm_mx_sz, g_txm_mx_kind;
+static unsigned g_txm_kind, g_txm_sz;
+#define TXM(k, stmt) do { if (g_txm_on) { long long q_ = rq_qpc(); stmt; g_txm[k] += rq_qpc() - q_; } else { stmt; } } while (0)
+/* LOC-IM-LOCK im_lock_split=1: Inhalts-Pruefungen (Hashes ueber Gast-Speicher, VirtualQuery) sind reine CPU-Arbeit auf
+ * Daten des Spiel-Threads (Cache-Eintrag, Gast-Speicher) ohne Context-Aufruf -> ctx_lock waehrenddessen abgeben, wie
+ * beim Upload (W138, gleiche Aufrufstellen). Messung: Refresh-/Lockwatch-Hash 1-8 ms unter der Sperre (LoC Lockstep),
+ * der Present-Takt wartete bis 600-750 Mal je Minute > 1 ms. Ohne Present-Takt (Testtakt, Golden) wirkungslos. */
+#define TEX_UNL(stmt) do { int cr_ = g_cfg.im_lock_split > 0 ? sb_ctx_release_all() : 0; stmt; sb_ctx_reacquire(cr_); } while (0)
+static double txm_ms(long long d) { static LARGE_INTEGER f; if (!f.QuadPart) { QueryPerformanceFrequency(&f); } return (double)d * 1000.0 / (double)f.QuadPart; }
+void sb_tex_iml_log(double secs)
+{
+    const double *a = g_txm_sum, *m = g_txm_mxp;
+    HLOG_I("IMLOCK tex: %.1fs abrufe=%u >1ms=%u (stabil %u, refresh %u, upload %u, neu %u) teile_lang drain=%.1f rtt=%.1f find=%.1f txc=%.1f lw=%.1f "
+           "hash=%.1f upload=%.1f nach_upload=%.1f rest=%.1f | laengster %.2fms art=%u groesse=%u drain=%.2f rtt=%.2f find=%.2f txc=%.2f lw=%.2f hash=%.2f upload=%.2f nach=%.2f rest=%.2f",
+           secs, g_txm_nc, g_txm_ns, g_txm_why[0], g_txm_why[1], g_txm_why[2], g_txm_why[3], a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7], a[8],
+           g_txm_mx, g_txm_mx_kind, g_txm_mx_sz, m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8]);
+    g_txm_ns = g_txm_nc = 0; memset(g_txm_why, 0, sizeof g_txm_why); memset(g_txm_sum, 0, sizeof g_txm_sum);
+    g_txm_mx = 0.0; memset(g_txm_mxp, 0, sizeof g_txm_mxp); g_txm_mx_sz = g_txm_mx_kind = 0;
+}
+unsigned g_lt_n;
 ID3D11ShaderResourceView *sb_tex_get(void)
 {
     extern volatile int g_phud_meas;
     LARGE_INTEGER a, b;
     ID3D11ShaderResourceView *r;
+    if (g_cfg.imlock_diag && !g_phud_meas) { /* DIAG(LOC-IM-LOCK) */
+        long long q0 = rq_qpc();
+        double t, k = 0.0;
+        int j;
+        memset(g_txm, 0, sizeof g_txm); g_txm_on = 1; g_txm_kind = 0; g_txm_sz = 0;
+        r = sb_tex_get_body();
+        g_txm_on = 0;
+        t = txm_ms(rq_qpc() - q0);
+        g_txm_nc++;
+        if (t > 1.0) {
+            g_txm_ns++;
+            g_txm_why[g_txm_kind & 3u]++;
+            for (j = 0; j < TXM_N; j++) { double v = txm_ms(g_txm[j]); g_txm_sum[j] += v; k += v; }
+            g_txm_sum[TXM_N] += t - k;
+        }
+        if (t > g_txm_mx) {
+            g_txm_mx = t; g_txm_mx_kind = g_txm_kind; g_txm_mx_sz = g_txm_sz; k = 0.0;
+            for (j = 0; j < TXM_N; j++) { g_txm_mxp[j] = txm_ms(g_txm[j]); k += g_txm_mxp[j]; }
+            g_txm_mxp[TXM_N] = t - k;
+        }
+        tex_null_watch(r);
+        return r;
+    }
     if (!g_phud_meas) { r = sb_tex_get_body(); tex_null_watch(r); return r; }
+    if (g_cfg.loc_menu_diag) { /* DIAG(W391): Wanduhr gegen CPU-Zeit des Threads (Zeile LOCTEX) */
+        ULONG64 c0 = 0, c1 = 0;
+        QueryThreadCycleTime(GetCurrentThread(), &c0);
+        QueryPerformanceCounter(&a);
+        r = sb_tex_get_body();
+        QueryPerformanceCounter(&b);
+        QueryThreadCycleTime(GetCurrentThread(), &c1);
+        g_lt_wall += b.QuadPart - a.QuadPart;
+        g_lt_cyc += (long long)(c1 - c0);
+        g_lt_n++;
+    } else {
     QueryPerformanceCounter(&a);
     r = sb_tex_get_body();
     QueryPerformanceCounter(&b);
+    }
     g_phud_texq += b.QuadPart - a.QuadPart;
     g_phud_texn++;
     tex_null_watch(r);
@@ -1414,20 +1642,28 @@ static ID3D11ShaderResourceView *sb_tex_get_body(void)
         g_get_why = 10;
         return NULL;
     }
-    tex_reuse_drain(); /* FIX(WASH-TEX,W244) */
+    if (g_cfg.loc_menu_diag) { long long q0 = rq_qpc(); tex_reuse_drain(); g_lt_drain += rq_qpc() - q0; } /* DIAG(W391) */
+    else
+    TXM(TXM_DRAIN, tex_reuse_drain()); /* FIX(WASH-TEX,W244) */
     /* RTT (W23): Offscreen-gefuellte Textur direkt sampeln (rtt=1);
      * Match-DIAG laeuft auch bei rtt=0. */
     {
         ID3D11ShaderResourceView *rsrv = NULL;
         unsigned rw = 0, rh = 0;
-        if (sb_rtt_lookup(g_stage0_xptr, &rsrv, &rw, &rh) && rsrv) {
+        int hit;
+        long long lq0 = g_cfg.loc_menu_diag ? rq_qpc() : 0; /* DIAG(W377) */
+        TXM(TXM_RTT, hit = sb_rtt_lookup(g_stage0_xptr, &rsrv, &rw, &rh) && rsrv);
+        if (lq0) { g_lm_rttq += rq_qpc() - lq0; g_lm_rttn++; }
+        if (hit) {
             g_get_why = 0;
             return rsrv;
         }
     }
     nget++;
     g_tex_tick++;
-    i = tex_find(g_stage0_xptr);
+    if (g_cfg.loc_menu_diag) { long long q0 = rq_qpc(); i = tex_find(g_stage0_xptr); g_lt_find += rq_qpc() - q0; } /* DIAG(W391) */
+    else
+    TXM(TXM_FIND, i = tex_find(g_stage0_xptr));
     g_get_ent = i; /* DIAG(W307) */
     if (i >= 0) {
         {
@@ -1448,6 +1684,9 @@ static ID3D11ShaderResourceView *sb_tex_get_body(void)
              * Movie blieb weiss). */
             if (e->dirty && data) {
                 e->dirty = 0;
+                { long long tq0 = g_cfg.loc_menu_diag ? rq_qpc() : 0; int hit; TXM(TXM_TXC, TEX_UNL(hit = tex_txc_fast(e, data))); /* PERF(W377) loc_text_cache */
+                  if (tq0) { g_lm_txq += rq_qpc() - tq0; }
+                  if (hit) { g_get_why = 0; return e->srv; } }
                 goto reupload;
             }
             if (e->relive && data) { /* W118: HD live umgeschaltet (nur nach sb_tex_relive_all) */
@@ -1475,7 +1714,8 @@ static ID3D11ShaderResourceView *sb_tex_get_body(void)
             }
             if (g_cfg.tex_lockwatch && data && e->srv && e->size && e->lw_frame != g_present_no &&
                 data == e->data && lw_has(e->xptr)) {
-                unsigned h = tex_full_hash(sb_tex_hostaddr_x(e->xptr, data), e->size);
+                unsigned h;
+                TXM(TXM_LW, TEX_UNL(h = tex_full_hash(sb_tex_hostaddr_x(e->xptr, data), e->size)));
                 e->lw_frame = g_present_no;
                 if (h && e->lw_hash && h != e->lw_hash) {
                     static unsigned nlw;
@@ -1516,7 +1756,11 @@ static ID3D11ShaderResourceView *sb_tex_get_body(void)
              * ueber die VIRT-Adresse wie tex_upload (vorher roh -> falscher
              * Speicher -> Hash konstant -> nie Refresh). */
             if (e->srv && data == e->data && e->size) {
-                unsigned h = tex_data_hash(sb_tex_hostaddr_x(e->xptr, data), e->size);
+                long long hq0 = g_cfg.loc_menu_diag ? rq_qpc() : 0; /* DIAG(W377) */
+                unsigned h;
+                TXM(TXM_HASH, TEX_UNL(h = tex_data_hash(sb_tex_hostaddr_x(e->xptr, data), e->size)));
+                if (hq0) { g_lm_hashq += rq_qpc() - hq0; g_lm_hashn++; }
+                g_txm_kind = 1u; g_txm_sz = e->size;
                 if (!h || h == e->hash) {
                     g_get_why = 0;
                     return e->srv; /* stabil */
@@ -1526,7 +1770,9 @@ reupload:
             {
                 unsigned tw = 0, th = 0, ts = 0;
                 static unsigned nref;
-                { int cr = sb_ctx_release_all(); srv = tex_upload(g_stage0_xptr, &tw, &th, &ts); sb_ctx_reacquire(cr); } /* W138: Upload ohne ctx_lock (Device) */
+                long long pq0;
+                g_txm_kind = 2u;
+                { long long uq0 = g_cfg.loc_menu_diag ? rq_qpc() : 0; int cr = sb_ctx_release_all(); TXM(TXM_UP, srv = tex_upload(g_stage0_xptr, &tw, &th, &ts)); sb_ctx_reacquire(cr); if (uq0) { g_lm_upq += rq_qpc() - uq0; g_lm_upn++; } } /* W138: Upload ohne ctx_lock (Device) */
                 if (srv) {
                     if (e->srv) {
                         ID3D11ShaderResourceView_Release(e->srv);
@@ -1541,6 +1787,7 @@ reupload:
                         e->hfmt = *(unsigned *)(uintptr_t)(g_stage0_xptr + 0xC);
                     } __except (EXCEPTION_EXECUTE_HANDLER) {
                     }
+                    pq0 = g_txm_on ? rq_qpc() : 0; g_txm_sz = ts;
                     {
                         e->hash = tex_data_hash(sb_tex_hostaddr_x(e->xptr, data), ts);
                     }
@@ -1551,12 +1798,19 @@ reupload:
                     e->lw_frame = g_present_no;
                     e->relive = 0; /* W118 */
                     e->reuse = 0;  /* W244 */
+                    e->txh = 0ull;
+                    if (tex_txc_on(e)) { /* PERF(W377) loc_text_cache: Stand dieses Uploads, in den Ring */
+                        e->txh = tex_hash64(sb_tex_hostaddr_x(e->xptr, data), ts);
+                        lm_txr_put(g_txr, TXR_N, &g_txr_tick, e->xptr, e->w, e->h, e->txh, e->hash, g_tdev, e->srv);
+                    }
+                    if (pq0) { g_txm[TXM_POST] += rq_qpc() - pq0; }
                     if (nref < 32) {
                         nref++;
                         HLOG_I("TEX refresh #%u: xptr=0x%X %ux%u",
                                nref, e->xptr, tw, th);
                     }
                     tex_dump_diag(e->xptr, data, tw, th);
+                    tex_dump_xp(e->xptr, data, tw, th); /* DIAG(W368) */
                 } else if (e->relive && g_up_fail != 2u) {
                     e->relive = 0; /* W118: nur die Drossel wiederholt, echte Fehler nicht */
                 }
@@ -1579,7 +1833,8 @@ reupload:
     }
     {
         unsigned tw = 0, th = 0, ts = 0, data = 0;
-        { int cr = sb_ctx_release_all(); srv = tex_upload(g_stage0_xptr, &tw, &th, &ts); sb_ctx_reacquire(cr); } /* W138: Upload ohne ctx_lock (Device) */
+        g_txm_kind = 3u;
+        { long long uq0 = g_cfg.loc_menu_diag ? rq_qpc() : 0; int cr = sb_ctx_release_all(); TXM(TXM_UP, srv = tex_upload(g_stage0_xptr, &tw, &th, &ts)); sb_ctx_reacquire(cr); if (uq0) { g_lm_upq += rq_qpc() - uq0; g_lm_upn++; } } /* W138: Upload ohne ctx_lock (Device) */
         __try {
             data = *(unsigned *)(uintptr_t)(g_stage0_xptr + 4);
         } __except (EXCEPTION_EXECUTE_HANDLER) {
@@ -1598,6 +1853,7 @@ reupload:
         g_cache[g_ncache].relive = 0; /* W118 */
         g_cache[g_ncache].thr = (!srv && g_up_fail == 2u) ? 1 : 0; /* W307 tex_throttle_retry */
         g_cache[g_ncache].nnull = 0; /* DIAG(W307) */
+        g_cache[g_ncache].txh = 0; /* PERF(W377) */
         g_get_ent = g_ncache;
         g_cache[g_ncache].fmt = g_up_fmt;
         g_cache[g_ncache].linear = g_up_lin;
@@ -1755,6 +2011,7 @@ int sb_tex_pause_relive(int max, unsigned *nup, unsigned *nfail)
         e->lw_hash = 0;
         e->lw_frame = g_present_no;
         e->relive = 0;
+        e->txh = 0ull; /* W377: Stand unbekannt */
         g_prl_up++;
     }
     if (nup) { *nup = g_prl_up; }

@@ -671,6 +671,10 @@ void lupd_selftest(int *pass, int *fail)
         { "v0.2.0", "0.2.0", 0 },
         { "0.2.0-rc.1", "0.2.0", -1 },
         { "0.2.10", "0.2.9", 1 },
+        /* W389 RELEASE-030: 0.2.2 (letzte Beta ohne LoC) meldet 0.3.0 als neuer, 0.3.0 nicht mehr */
+        { "0.2.2", "0.3.0", -1 },
+        { "0.3.0", "0.2.2", 1 },
+        { "v0.3.0", "0.3.0", 0 },
     };
     static const char *const kBadVer[] = {
         "", "dev", "0.1", "0.1.0.1", "0.1.0-", "0.1.0-alpha..1", "0.1.0 alpha",

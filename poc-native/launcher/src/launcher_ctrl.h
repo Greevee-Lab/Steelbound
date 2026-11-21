@@ -36,6 +36,11 @@ int lctrl_vk_is_modifier(int vk);
  * Vergleichstaste orig_view und (W290) Fotomodus photo / Schnell-Screenshot quick_shot
  * (Fenster wertet Zusatztasten aus). */
 int lctrl_bind_combo_row(int idx);
+/* W365 BIND-COMBO: 1 = Zeile lernt Zusatztaste + Taste (nicht pause/feedback_*, die das Fenster nur
+ * als einfache Taste kennt); combo_row selbst gilt seit W365 fuer alle digitalen Zeilen (Pad-Kombis). */
+int lctrl_bind_key_combo_row(int idx);
+/* W365: 1 = Zusatztaste + Maustaste (Spiel-Elemente, vr_recenter, aim_center). */
+int lctrl_bind_mouse_combo_row(int idx);
 /* W290: 1 = eine leere Zeile wird als "<name> =" gespeichert (aus, kein Rueckfall/Uebergang im Client):
  * orig_view, quick_shot. */
 int lctrl_bind_empty_line_row(int idx);
@@ -52,6 +57,8 @@ void lctrl_key_combo(int mod_vk, int vk, char *out, size_t cap);
 /* W299 REPLAY: Standard "Replay beenden" (Client: IMAP_REPLAY_EXIT_DEFAULT). Fehlt die Zeile, gilt er; eine
  * leere Zeile "replay_exit =" heisst aus. */
 #define LCTRL_REPLAY_EXIT_DEFAULT "KEY:BACKSPACE"
+/* W374 LOC-NET-OVERLAY: Standard "Netz-Overlay" (Client: IMAP_NET_HUD_DEFAULT); leere Zeile heisst aus. */
+#define LCTRL_NET_HUD_DEFAULT "KEY:F3"
 #define LCTRL_PHOTO_DEFAULT "KEY:SHIFT+KEY:F12"
 
 /* --- SBC-USB-Status ---------------------------------------------------- */
@@ -65,6 +72,21 @@ typedef struct {
     unsigned char lt, rt;   /* Trigger 0..255 */
     short lx, ly, rx, ry;   /* Sticks -32768..32767 */
 } lctrl_pad_t;
+/* XInput-Tastenbits (W365: auch fuer Selbsttests im Dialog). */
+#define LCTRL_PB_DU 0x0001
+#define LCTRL_PB_DD 0x0002
+#define LCTRL_PB_DL 0x0004
+#define LCTRL_PB_DR 0x0008
+#define LCTRL_PB_START 0x0010
+#define LCTRL_PB_BACK 0x0020
+#define LCTRL_PB_L3 0x0040
+#define LCTRL_PB_R3 0x0080
+#define LCTRL_PB_LB 0x0100
+#define LCTRL_PB_RB 0x0200
+#define LCTRL_PB_A 0x1000
+#define LCTRL_PB_B 0x2000
+#define LCTRL_PB_X 0x4000
+#define LCTRL_PB_Y 0x8000
 
 /* Port 0..3 abfragen. 1 = verbunden (out gueltig), 0 = nein. */
 int lctrl_pad_poll(int port, lctrl_pad_t *out);
@@ -78,6 +100,18 @@ void lctrl_pad_format(const lctrl_pad_t *p, char *out, size_t cap);
  * 1 = gefunden (Name in name, z. B. "A", "DU", "LT"), 0 = nichts. */
 int lctrl_pad_new_press(const lctrl_pad_t *prev, const lctrl_pad_t *cur,
                         char *name, size_t cap);
+/* W365 BIND-COMBO: Kombi-Lernen. Erste Taste wartet (pend); zweite Taste bei gehaltener erster ->
+ * "ERSTE+ZWEITE"; erste allein losgelassen -> allein. press = neu gedrueckte Quelle (NULL = keine),
+ * pend_held = erste noch gehalten. 1 = Ergebnis in out. */
+typedef struct {
+    char pend[48];
+} lctrl_combo_t;
+void lctrl_combo_reset(lctrl_combo_t *c);
+int lctrl_combo_feed(lctrl_combo_t *c, const char *press, int pend_held, char *out, size_t cap);
+/* Pad-Taste ("A", "PAD:LB", "LT") in p gehalten -> 1. */
+int lctrl_pad_held(const lctrl_pad_t *p, const char *name);
+/* Ein Pad-Takt prev -> cur durch den Kombi-Lerner ("PAD:LB+PAD:X" bzw. "PAD:A"). */
+int lctrl_pad_combo_step(lctrl_combo_t *c, const lctrl_pad_t *prev, const lctrl_pad_t *cur, char *out, size_t cap);
 /* Ausgelenkte Analogachse (ein Stick > 0.7, Rest ruhig): Name in name
  * ("LX", "LY", "RX", "RY", "LT", "RT"). 1 = gefunden, 0 = nichts. */
 int lctrl_pad_deflected(const lctrl_pad_t *p, char *name, size_t cap);
@@ -109,6 +143,14 @@ int lctrl_bind_axis_used_by(const struct lctrl_bind_s *b, int idx, const char *s
 /* --- Tasten-Namen (wie input_map.c imap_key_code, Rueckrichtung) ------- */
 /* VK -> "A", "SPACE", "F5", sonst dezimal ("165"). */
 void lctrl_key_name(int vk, char *out, size_t cap);
+/* W365 BIND-KEYNAMES: Rueckrichtung zu lctrl_key_name ("SPACE", "F5", "20", "0x14"), -1 = unbekannt. */
+int lctrl_key_vk(const char *name);
+/* W365: Anzeigename fuer den Dialog ("Caps Lock", "Num 5", "F13", OEM nach Tastaturlayout). Nur Anzeige,
+ * das Profil behaelt lctrl_key_name. */
+void lctrl_key_disp(int vk, char *out, size_t cap);
+/* W365: Quelle -> lesbare Anzeige ("KEY:CTRL+KEY:S" -> "Ctrl + S", "KEY:20" -> "Caps Lock",
+ * "PAD:L3" -> Klarname). 1 = weicht vom Rohtext ab (Kombination oder Klarname). */
+int lctrl_src_pretty(const char *alt, char *out, size_t cap);
 
 /* --- Belegungs-Modell (ein Profil im Dialog) --------------------------- */
 typedef enum {
@@ -126,7 +168,7 @@ typedef struct {
     lctrl_kind_t kind;
 } lctrl_elem_t;
 
-#define LCTRL_ELEM_N 77 /* W188: + Client-Aktion pause, W195: + photo, W271: + aim_center, W283: + orig_view, W290: + quick_shot, W299: + replay_exit */
+#define LCTRL_ELEM_N 78 /* W188: + Client-Aktion pause, W195: + photo, W271: + aim_center, W283: + orig_view, W290: + quick_shot, W299: + replay_exit, W374: + net_hud */
 extern const lctrl_elem_t kCtrlElems[LCTRL_ELEM_N];
 /* W159: Original-Controller-Tasten als Belegungs-Quellen (SBC:<name>).
  * Kanonische Namen bi0..38, parserstabil wie input_map.c (kBiAlias).
@@ -171,6 +213,10 @@ int lctrl_bind_conflicts(const lctrl_bind_t *b, char out[][160], int max);
  * (auch im Akkord "+SBC:..."), sonst 0. Jede SBC-Taste hat eine
  * Spielfunktion (CONTROLLER.md S8): Belegung nur mit Warnung. */
 int lctrl_bind_alt_is_sbc(const char *alt);
+/* W365: Teil der Kombination combo ist anderswo einzeln belegt (Zusatztasten-Familie: CTRL ~ LCTRL).
+ * 1 = gefunden (Atom, Zeile); nur Hinweis, die Kombination bleibt erlaubt. */
+int lctrl_bind_combo_single_use(const lctrl_bind_t *b, const char *combo, char *atom_out, size_t acap,
+                                int *row_out);
 /* --- W228 BIND-DIALOG: Darstellungs-Helfer (rein, testbar) ------------- */
 /* Gruppe einer Aktion fuer die gegliederte Liste (Reihenfolge = Anzeige):
  * 0 Tasten (bi0-38), 1 Achsen, 2 Tasten fuer Achsen (.neg/.pos), 3 Gaenge,

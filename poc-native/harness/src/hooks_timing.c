@@ -2,6 +2,7 @@
  * Blank, DisplayFieldStatus, GPU-Ready-Waits, TSC-Frequenz).
  * W68 SPLIT: 1:1 aus xdk_hooks.c verschoben. */
 #include "hooks_int.h"
+#include "sb_profile.h" /* W377: g_sba_loc */
 #include "hlock.h"
 #include "audio_out.h"
 #include "sb_perfhud.h" /* W122 PERF-HUD */
@@ -219,6 +220,7 @@ u32 __stdcall hook_GetDisplayFieldStatus(u32 out)
     }
     g_fs_counter = counter; /* TEST(POPIN,W91): Stand fuer rt_from_mission */
     if (g_phud_meas) { sb_phud_wait_enter(); } /* W122 PERF-HUD: Poll = Warten */
+    if (g_sba_loc) { extern void sb_lm_field_poll(void); sb_lm_field_poll(); } /* W377 LOC-MENU-FPS: Spiel wartet auf das Feld */
     *(u32 *)(uintptr_t)(out + 4) = counter;
     *(u32 *)(uintptr_t)out = 3;
     *(u32 *)(g_fake_d3d + 0x2580) = counter;

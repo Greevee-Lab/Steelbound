@@ -18,8 +18,8 @@ extern "C" {
 
 /* Entwurfsraster (logische 96-dpi-Einheiten, wie launcher_gui.c) */
 #define LLAY_DW 960
-#define LLAY_DH 640
-#define LLAY_TITLE 48
+#define LLAY_DH 656 /* W401: Kopf +16 (Inhalt gleich hoch) */
+#define LLAY_TITLE 72 /* W397: Kopf 48 -> 56; W401: 56 -> 72 (Inhalt ab 88) */
 #define LLAY_NAV 208
 #define LLAY_BOT 64
 

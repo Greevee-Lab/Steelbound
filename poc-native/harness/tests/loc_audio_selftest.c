@@ -9,6 +9,8 @@
  * Exit 0 = alles gruen. */
 #include "../src/loc_xact_fmt.h"
 #include "../src/audio_int.h"
+#include "../src/loc_wma.h" /* W367 */
+#include "../src/loc_audio_scope.h" /* W375 */
 
 #include <math.h>
 #include <stdio.h>
@@ -250,12 +252,280 @@ static int real_banks(const char *dir)
     return miss ? 1 : 0;
 }
 
+
+/* ---- W367 LOC-WMA: Playlist-Modell, Media-Foundation-Dekoder, Fehlerfaelle (keine Spieldaten) ---- */
+/* W375 (GitHub #51): Missions-Cues beim Missionsende still; Rollback-Waisen (Schleife) gestoppt. Spielmodell:
+ * Mission 1 beginnt (Maske 0 -> 3), Eject-Alarm (Schleife), Motor (Schleife, vom Spiel gestoppt), Einschlag (einmal),
+ * Musik (WMA-Playlist, Spiel stoppt selbst), Menue-Schleife von vorher; Ende (3 -> 0): nur der Alarm wird gestoppt,
+ * danach 0 aktive Schleifen der Mission. Mission 2: Menue-Cue nach dem Ende bleibt unberuehrt. */
+static void scope_tests(void)
+{
+    las_cue_t c[8];
+    int idx[8], n, i, act;
+    uint32_t mask = 0, gen = 0;
+    memset(c, 0, sizeof c);
+    CHECK(las_mission_edge(0, 0) == LAS_EDGE_NONE && las_mission_edge(0, 3) == LAS_EDGE_BEGIN &&
+          las_mission_edge(3, 1) == LAS_EDGE_NONE && las_mission_edge(1, 0) == LAS_EDGE_END, "Missionsgrenzen");
+    c[0].state = 2; c[0].loops = 1; c[0].serial = 1; c[0].mgen = 0; /* Menue-Schleife vor der Mission */
+    if (las_mission_edge(mask, 3) == LAS_EDGE_BEGIN) gen++;
+    mask = 3;
+    c[1].state = 2; c[1].loops = 1; c[1].serial = 2; c[1].mgen = gen; /* Eject-Alarm */
+    c[2].state = 2; c[2].loops = 1; c[2].serial = 3; c[2].mgen = gen; /* Motor ... */
+    c[3].state = 2; c[3].loops = 0; c[3].serial = 4; c[3].mgen = gen; /* Einschlag (einmal) */
+    c[4].state = 2; c[4].loops = 1; c[4].wma = 1; c[4].serial = 5; c[4].mgen = gen; /* Musik */
+    c[5].state = 1; c[5].loops = 1; c[5].serial = 6; c[5].mgen = gen; /* vorbereitet, nie gestartet */
+    c[2].state = 0; /* ... vom Spiel gestoppt */
+    c[4].state = 0; /* Musik: FUN_0008D8D0 Stop(ST_CUE) */
+    CHECK(las_mission_edge(mask, 0) == LAS_EDGE_END, "Ende erkannt");
+    mask = 0;
+    n = las_mission_end_pick(c, 8, gen, idx, 8);
+    CHECK(n == 1 && idx[0] == 1, "Missionsende: nur Eject-Alarm (n=%d, idx0=%d)", n, n ? idx[0] : -1);
+    for (i = 0; i < n; i++) c[idx[i]].state = 0;
+    for (act = 0, i = 0; i < 8; i++) act += c[i].state == 2 && c[i].loops && c[i].mgen == gen;
+    CHECK(act == 0, "nach dem Missionsende %d aktive Schleifen der Mission", act);
+    CHECK(c[0].state == 2 && c[3].state == 2, "Menue-Schleife/Einmal-Cue unberuehrt");
+    CHECK(las_mission_end_pick(c, 8, 0, idx, 8) == 0, "keine Mission -> nichts");
+    c[6].state = 2; c[6].loops = 1; c[6].serial = 7; c[6].mgen = 0; /* Menue nach dem Ende */
+    if (las_mission_edge(mask, 1) == LAS_EDGE_BEGIN) gen++;
+    CHECK(gen == 2 && las_mission_end_pick(c, 8, gen, idx, 8) == 0, "Mission 2: alte Cues nicht ihre");
+    /* Rollback-Waise: Nummer passt + spielt + Schleife -> stoppen; Einmal-Cue, Musik, unbekannte Nummer -> nicht */
+    c[1].state = 2; c[1].mgen = gen;
+    CHECK(las_orphan_pick(c, 8, 2) == 1, "Waise Schleife");
+    CHECK(las_orphan_pick(c, 8, 4) == -1, "Waise einmal: laeuft aus");
+    c[4].state = 2;
+    CHECK(las_orphan_pick(c, 8, 5) == -1, "Waise Musik");
+    CHECK(las_orphan_pick(c, 8, 99) == -1 && las_orphan_pick(c, 8, 0) == -1, "unbekannte Nummer");
+    c[1].state = 0; c[1].serial = 8; /* Slot wiederverwendet: alte Nummer trifft ihn nicht */
+    c[1].state = 2;
+    CHECK(las_orphan_pick(c, 8, 2) == -1, "wiederverwendeter Slot");
+    printf("Missionsende/Waisen (W375): Grenzen, Auswahl, Musik/Menue/Einmal unberuehrt, Slot-Nummer geprueft\n");
+    { /* W390 LOC-OWN-PREDICT: im spekulativen Vorlauf kein Ton, kein Stopp, keine Freigabe, kein Setter */
+        static const int play[] = {4, 23, 24, 25, 38, 32, 10}; /* DoWork, PrepareEx, PlayEx, Stop, StopSoundCues, SourceRelease, UnRegister */
+        static const int set[] = {11, 12, 13, 14, 15, 16, 17, 20, 21, 33, 34, 35, 36, 37, 27, 28, 29, 31};
+        static const int ro[] = {22, 30, 39, 5, 6, 7, 8, 9, 26};
+        int i2, bad = 0, nskip = 0;
+        for (i2 = 0; i2 < (int)(sizeof play / sizeof play[0]); i2++) bad += las_spec_action(play[i2]) != LAS_SPEC_SKIP;
+        for (i2 = 0; i2 < (int)(sizeof set / sizeof set[0]); i2++) bad += las_spec_action(set[i2]) != LAS_SPEC_SKIP;
+        for (i2 = 0; i2 < (int)(sizeof ro / sizeof ro[0]); i2++) bad += las_spec_action(ro[i2]) != LAS_SPEC_ALLOW;
+        CHECK(bad == 0, "W390: Vorlauf-Tabelle XACT (%d falsch)", bad);
+        CHECK(las_spec_action(18) == LAS_SPEC_FAIL, "W390: GetNotification im Vorlauf = keine Meldung");
+        for (i2 = 0; i2 < 64; i2++) nskip += las_spec_action(i2) == LAS_SPEC_SKIP;
+        CHECK(nskip >= 64 - 10, "W390: unbekannte Einstiege muessen ohne Wirkung bleiben (%d von 64)", nskip);
+        printf("Vorlauf (W390): Start/Vorbereiten/Stopp/Freigabe/Setter/DoWork ohne Wirkung, Lesen erlaubt\n");
+    }
+}
+
+/* W379 (GitHub #54): Titelmusik nach der Titel-Demo. Spielmodell (Lauf W379_T4): Titel startet B01 (Streaming-Bank
+ * bgm, Welle 5, Handle h1); Demo; Tastendruck in der Demo -> zurueck zum Titel, das Spiel startet B01 erneut (h2) ohne
+ * h1 zu stoppen; naechster Tastendruck -> Stop(h2) -> Menue. Erwartet: danach keine Streaming-Musik mehr aktiv.
+ * Gegenprobe ohne Regel: h1 laeuft in den Menues weiter. Dazu: andere Welle, andere Bank, vorbereitete Cues, eigener
+ * Cue und mit memset genullte Eintraege werden nie gewaehlt. */
+static void steal_model(las_cue_t *c, int with_rule)
+{
+    int idx[8], n, i;
+    memset(c, 0, sizeof(las_cue_t) * 8);
+    c[0].state = 2; c[0].loops = 1; c[0].swb[0] = 3; c[0].swave[0] = 5; /* h1: B01 (Bank 2 -> swb 3) */
+    c[1].state = 2; /* Menue-Ton aus Speicher-Bank (keine Streaming-Welle) */
+    c[2].state = 2; c[2].swb[0] = 3; c[2].swave[0] = 6; /* andere Streaming-Welle derselben Bank */
+    c[3].state = 2; c[3].swb[1] = 4; c[3].swave[1] = 5; /* gleiche Welle, andere Bank */
+    c[4].state = 1; c[4].swb[0] = 3; c[4].swave[0] = 5; /* nur vorbereitet */
+    n = with_rule ? las_stream_steal_pick(c, 8, 5, 2, 5, idx, 8) : 0; /* h2 startet B01 in Slot 5 */
+    for (i = 0; i < n; i++) c[idx[i]].state = 0;
+    c[5].state = 2; c[5].loops = 1; c[5].swb[0] = 3; c[5].swave[0] = 5; /* h2 */
+    c[5].state = 0; /* Tastendruck: Stop(Cue -1, h2) */
+}
+
+static void steal_tests(void)
+{
+    las_cue_t c[8];
+    int idx[8], n, i, act;
+    memset(c, 0, sizeof c);
+    for (i = 0; i < 8; i++) c[i].state = 2;
+    CHECK(las_stream_steal_pick(c, 8, -1, 0, 0, idx, 8) == 0, "genullte Eintraege nie gewaehlt");
+    CHECK(las_stream_steal_pick(NULL, 8, -1, 2, 5, idx, 8) == 0 && las_stream_steal_pick(c, 8, -1, -1, 5, idx, 8) == 0,
+          "ungueltige Argumente");
+    steal_model(c, 1);
+    for (act = 0, i = 0; i < 8; i++) act += c[i].state == 2 && c[i].swb[0] == 3 && c[i].swave[0] == 5;
+    CHECK(act == 0, "#54: nach dem Tastendruck %d Instanz(en) der Titelmusik aktiv", act);
+    CHECK(c[1].state == 2 && c[2].state == 2 && c[3].state == 2 && c[4].state == 1,
+          "andere Welle/Bank, Menue-Ton, vorbereiteter Cue unberuehrt");
+    steal_model(c, 0);
+    for (act = 0, i = 0; i < 8; i++) act += c[i].state == 2 && c[i].swb[0] == 3 && c[i].swave[0] == 5;
+    CHECK(act == 1, "Gegenprobe ohne Regel: alte Titelmusik laeuft weiter (%d)", act);
+    memset(c, 0, sizeof c);
+    c[0].state = 2; c[0].swb[2] = 1; c[0].swave[2] = 0; /* Bank 0, Welle 0 auf Spur 2 */
+    c[1].state = 2; c[1].swb[0] = 1; c[1].swave[0] = 0;
+    n = las_stream_steal_pick(c, 8, 1, 0, 0, idx, 8);
+    CHECK(n == 1 && idx[0] == 0, "Bank 0/Welle 0, beliebige Spur, eigener Cue ausgenommen (n=%d)", n);
+    CHECK(las_stream_steal_pick(c, 8, -1, 0, 0, idx, 1) == 1, "Obergrenze cap");
+    printf("Streaming-Welle einfach (W379, #54): Titel->Demo->Titel->Menue still, Gegenprobe, Randfaelle geprueft\n");
+}
+
+static void wma_tests(void)
+{
+    static lw_pl_t pl;
+    uint32_t id = 0, id2 = 0;
+    int i, k, prev, same = 0, seen[4] = { 0, 0, 0, 0 }, seq[16], seq2[16];
+    char err[256];
+    lw_pl_init(&pl, 0x1234, 7, 2u);
+    CHECK(pl.kind == LW_K_PL && pl.n == 0 && pl.cur == -1 && !lw_pl_shuffle(&pl), "WMA Liste leer");
+    CHECK(lw_pl_next(&pl) == -1 && pl.cur == -1, "WMA Next auf leerer Liste");
+    CHECK(lw_pl_after(&pl, 0) == -1, "WMA after leer");
+    CHECK(lw_pl_add(&pl, LW_ENTRY_FILE, "z:\\A.wma", 0, 0, &id) == 0 && id == LW_SONG_ID_BASE, "WMA Add 1 id=%X", id);
+    CHECK(lw_pl_add(&pl, LW_ENTRY_SOUNDTRACK, NULL, 3, 9, &id2) == 0 && id2 == LW_SONG_ID_BASE + 1, "WMA Add HDD");
+    CHECK(lw_pl_add(&pl, LW_ENTRY_FILE, "z:\\B.wma", 0, 0, NULL) == 0 && pl.n == 3, "WMA Add 3");
+    CHECK(lw_pl_playable(&pl, 0) && !lw_pl_playable(&pl, 1) && lw_pl_playable(&pl, 2) && !lw_pl_playable(&pl, 3) &&
+              !lw_pl_playable(&pl, -1),
+          "WMA abspielbar: Datei ja, Festplatten-Soundtrack nein");
+    CHECK(strcmp(pl.e[2].path, "z:\\B.wma") == 0 && pl.e[1].st_id == 3 && pl.e[1].song_id == 9, "WMA Eintraege");
+    CHECK(lw_pl_next(&pl) == 0 && lw_pl_next(&pl) == 1 && lw_pl_next(&pl) == 2 && lw_pl_next(&pl) == 0, "WMA Next reihum");
+    CHECK(lw_pl_after(&pl, 0) == 1 && lw_pl_after(&pl, 2) == 0, "WMA after mit Wiederholen (Flag 2)");
+    pl.flags = 0;
+    CHECK(lw_pl_after(&pl, 2) == -1 && lw_pl_after(&pl, 1) == 2, "WMA after ohne Wiederholen endet");
+    /* Zufall: nie dasselbe Lied hintereinander, alle Lieder kommen vor, gleiche Folge bei gleichem Startwert */
+    lw_pl_init(&pl, 1, 1, 3u);
+    for (i = 0; i < 4; i++) {
+        lw_pl_add(&pl, LW_ENTRY_FILE, "z:\\X.wma", 0, 0, NULL);
+    }
+    CHECK(lw_pl_shuffle(&pl), "WMA Zufall aus Flag 1");
+    for (prev = 0, k = 0; k < 400; k++) {
+        int nx = lw_pl_after(&pl, prev);
+        same += nx == prev;
+        if (nx >= 0 && nx < 4) {
+            seen[nx]++;
+        }
+        if (k < 16) {
+            seq[k] = nx;
+        }
+        prev = nx;
+    }
+    CHECK(same == 0 && seen[0] && seen[1] && seen[2] && seen[3], "WMA Zufall (gleich %d, %d/%d/%d/%d)", same, seen[0],
+          seen[1], seen[2], seen[3]);
+    lw_pl_init(&pl, 1, 1, 3u);
+    for (i = 0; i < 4; i++) {
+        lw_pl_add(&pl, LW_ENTRY_FILE, "z:\\X.wma", 0, 0, NULL);
+    }
+    for (prev = 0, k = 0; k < 16; k++) {
+        seq2[k] = prev = lw_pl_after(&pl, prev);
+    }
+    CHECK(memcmp(seq, seq2, sizeof seq) == 0, "WMA Zufall deterministisch");
+    pl.behavior = 2u;
+    CHECK(!lw_pl_shuffle(&pl) && lw_pl_after(&pl, 1) == 2, "WMA SetPlaybackBehavior 2 = der Reihe nach");
+    /* Volle Liste */
+    lw_pl_init(&pl, 1, 1, 2u);
+    for (i = 0; i < LW_MAX_SONGS; i++) {
+        lw_pl_add(&pl, LW_ENTRY_FILE, "z:\\X.wma", 0, 0, NULL);
+    }
+    CHECK(lw_pl_add(&pl, LW_ENTRY_FILE, "z:\\X.wma", 0, 0, &id) != 0 && pl.n == LW_MAX_SONGS, "WMA Liste voll");
+    { /* langer Pfad wird gekuerzt, nie ueber den Puffer */
+        char lp[300];
+        memset(lp, 'a', sizeof lp - 1);
+        lp[sizeof lp - 1] = 0;
+        lw_pl_init(&pl, 1, 1, 2u);
+        CHECK(lw_pl_add(&pl, LW_ENTRY_FILE, lp, 0, 0, NULL) == 0 && strlen(pl.e[0].path) == LW_PATH - 1, "WMA Pfad gekuerzt");
+    }
+    /* Fehlerfaelle Dekoder: kein Absturz, Fehlertext, NULL */
+    {
+        static const uint8_t asf[16] = { 0x30, 0x26, 0xB2, 0x75, 0x8E, 0x66, 0xCF, 0x11,
+                                         0xA6, 0xD9, 0x00, 0xAA, 0x00, 0x62, 0xCE, 0x6C };
+        uint8_t junk[4096];
+        int mf = lw_mf_thread_init(err, sizeof err);
+        printf("WMA: Media Foundation %s%s\n", mf == 0 ? "verfuegbar" : "FEHLT: ", mf == 0 ? "" : err);
+        err[0] = 0;
+        CHECK(lw_dec_open(NULL, 0, err, sizeof err) == NULL && err[0], "WMA Dekoder: leere Daten");
+        for (i = 0; i < (int)sizeof junk; i++) {
+            junk[i] = (uint8_t)(i * 37 + 11);
+        }
+        err[0] = 0;
+        CHECK(lw_dec_open(junk, sizeof junk, err, sizeof err) == NULL && err[0], "WMA Dekoder: kein ASF");
+        CHECK(!lw_is_asf(junk, sizeof junk) && !lw_is_asf(asf, 16), "WMA ASF-Kennung");
+        memcpy(junk, asf, 16);
+        CHECK(lw_is_asf(junk, sizeof junk), "WMA ASF-Kennung erkannt");
+        if (mf == 0) {
+            lw_dec_t *d;
+            err[0] = 0;
+            d = lw_dec_open(junk, sizeof junk, err, sizeof err);
+            CHECK(d == NULL && err[0], "WMA Dekoder: kaputter ASF-Kopf abgelehnt (%s)", err);
+            if (d) {
+                lw_dec_close(d);
+            }
+            printf("WMA: kaputte Datei -> \"%s\"\n", err);
+        }
+    }
+    lw_dec_close(NULL);
+    printf("WMA (W367): Playlist-Modell, Zufall, Fehlerfaelle geprueft\n");
+}
+
+/* W367: echte WMA-Datei (nur lesen) vollstaendig dekodieren und nur Kennzahlen ausgeben. */
+static int wma_file(const char *path)
+{
+    uint32_t n = 0;
+    uint8_t *d = NULL;
+    char err[256];
+    FILE *f = fopen(path, "rb");
+    if (f) { /* ganz lesen (slurp liest nur 1 MB Kopf) */
+        long sz;
+        fseek(f, 0, SEEK_END);
+        sz = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        if (sz > 0 && sz < (64L << 20) && (d = (uint8_t *)malloc((size_t)sz)) != NULL) {
+            n = (uint32_t)fread(d, 1, (size_t)sz, f);
+        }
+        fclose(f);
+    }
+    lw_dec_t *dec;
+    uint8_t *buf;
+    uint64_t frames = 0;
+    double sum = 0, pk = 0;
+    int rate = 0, ch = 0, r;
+    if (!d) {
+        printf("WMA: %s nicht lesbar\n", path);
+        return 1;
+    }
+    err[0] = 0;
+    dec = lw_dec_open(d, n, err, sizeof err);
+    if (!dec) {
+        printf("WMA: Dekoder-Fehler: %s\n", err);
+        free(d);
+        return 1;
+    }
+    lw_dec_format(dec, &rate, &ch);
+    buf = (uint8_t *)malloc(65536);
+    for (;;) {
+        uint32_t got = 0, i;
+        r = lw_dec_read(dec, buf, 65536, &got);
+        for (i = 0; i + 1 < got; i += 2) {
+            short v;
+            memcpy(&v, buf + i, 2);
+            sum += (double)v * v;
+            pk = fabs((double)v) > pk ? fabs((double)v) : pk;
+        }
+        frames += got / (uint32_t)(2 * ch);
+        if (r != 0) {
+            break;
+        }
+    }
+    printf("WMA: %u Bytes, %d Hz, %d Kan., Dauer laut Kopf %.2f s, dekodiert %.2f s (%llu Frames), RMS %.1f dBFS, "
+           "Spitze %.1f dBFS, Ende %s\n",
+           n, rate, ch, lw_dec_secs(dec), rate ? (double)frames / rate : 0, (unsigned long long)frames,
+           frames ? 20 * log10(sqrt(sum / ((double)frames * ch)) / 32768.0) : -999.0, pk > 0 ? 20 * log10(pk / 32768.0) : -999.0,
+           r == 1 ? "sauber" : "FEHLER");
+    lw_dec_close(dec);
+    free(buf);
+    free(d);
+    return r == 1 && frames > 0 ? 0 : 1;
+}
+
 int main(int argc, char **argv)
 {
     uint32_t nx, ns, i;
     short *ad_src = NULL;
     uint8_t *x;
     if (argc > 1) {
+        size_t al = strlen(argv[1]);
+        if (al > 4 && _stricmp(argv[1] + al - 4, ".wma") == 0) {
+            return wma_file(argv[1]); /* W367 */
+        }
         return real_banks(argv[1]);
     }
     x = make_xwb(&nx, &ad_src);
@@ -394,6 +664,66 @@ int main(int argc, char **argv)
     free(x);
     free(s);
     free(ad_src);
+    { /* W363 LOC-ORIGINAL: RPC-Kurven wie die XACT-Bibliothek (0x1C5392), synthetische Tabelle */
+        uint8_t b[0x200];
+        lxf_xsb_t xs;
+        lxf_rpc_t r[LXF_MAX_TRACKS];
+        int h, nrpc_ok = 0;
+        static const struct { int x, y; } pt[4] = { { 0, -2000 }, { 16384, 0 }, { 32768, 1000 }, { 65535, 4000 } };
+        memset(b, 0, sizeof b);
+        memcpy(b, "SDBK", 4);
+        w32(b + 0x14, 0x40);
+        w16(b + 0x20, 3);
+        /* Eintraege: Sound 7 "RPM_A" (2 Kurven), Sound 7 "OTHER" (1 Kurve), Sound 9 "RPM_A" (1 Kurve) */
+        w16(b + 0x40, 7); b[0x43] = 2; w32(b + 0x44, 0x100); memcpy(b + 0x48, "RPM_A", 5);
+        w16(b + 0x58, 7); b[0x5B] = 1; w32(b + 0x5C, 0x130); memcpy(b + 0x60, "OTHER", 5);
+        w16(b + 0x70, 9); b[0x73] = 1; w32(b + 0x74, 0x130); memcpy(b + 0x78, "RPM_A", 5);
+        { /* Kurve 0: Spur 0 Tonhoehe; Kurve 1: Spur 0 Filter; Kurve 2 (0x130): Spur 1 Lautstaerke */
+            int k, j;
+            for (k = 0; k < 3; k++) {
+                uint8_t *cv = b + 0x100 + k * 24;
+                w16(cv, k == 2 ? 1 : 0);
+                w16(cv + 2, k == 0 ? 1 : k == 1 ? 2 : 0);
+                for (j = 0; j < 4; j++) {
+                    w16(cv + 4 + 4 * j, (uint16_t)pt[j].x);
+                    w16(cv + 6 + 4 * j, (uint16_t)(int16_t)(k == 1 ? 1000 * (j + 1) : pt[j].y));
+                }
+            }
+        }
+        memset(&xs, 0, sizeof xs);
+        xs.d = b;
+        xs.n = sizeof b;
+        /* Stuetzpunkte, Klemmen, Interpolation (ganzzahlig, zur Null) */
+        CHECK(lxf_rpc_eval(b + 0x100, -5) == -2000, "RPC x<x0");
+        CHECK(lxf_rpc_eval(b + 0x100, 0) == -2000, "RPC x=x0");
+        CHECK(lxf_rpc_eval(b + 0x100, 8192) == -1000, "RPC Mitte Segment 1: %d", lxf_rpc_eval(b + 0x100, 8192));
+        CHECK(lxf_rpc_eval(b + 0x100, 16384) == 0, "RPC Stuetzpunkt 1");
+        CHECK(lxf_rpc_eval(b + 0x100, 16385) == 0, "RPC zur Null gerundet: %d", lxf_rpc_eval(b + 0x100, 16385));
+        CHECK(lxf_rpc_eval(b + 0x100, 49151) == 2499, "RPC Segment 3: %d", lxf_rpc_eval(b + 0x100, 49151));
+        CHECK(lxf_rpc_eval(b + 0x100, 70000) == 4000, "RPC x>x3");
+        /* Suche: Sound + Name, Ziele, Wert * 65536 */
+        h = lxf_xsb_rpc(&xs, 7, "RPM_A", 0.125f, r); /* x = 8192 */
+        CHECK(h == 2 && r[0].pitch == -1000 && r[0].filt_hz == 1500 && r[0].has == 6 && r[1].has == 0,
+              "RPC Sound 7: h=%d p=%d f=%d has=%d", h, r[0].pitch, r[0].filt_hz, r[0].has);
+        h = lxf_xsb_rpc(&xs, 7, "OTHER", 1.0f, r);
+        CHECK(h == 1 && r[1].vol_mb == 4000 && r[1].has == 1 && r[0].has == 0, "RPC OTHER Spur 1: h=%d v=%d", h, r[1].vol_mb);
+        CHECK(lxf_xsb_rpc(&xs, 8, "RPM_A", 0.5f, r) == 0, "RPC fremder Sound");
+        CHECK(lxf_xsb_rpc(&xs, 7, "RPM_B", 0.5f, r) == 0, "RPC fremder Name");
+        CHECK(lxf_xsb_rpc(&xs, 9, "RPM_A", 0.0f, r) == 1 && r[1].vol_mb == -2000, "RPC Sound 9");
+        { /* Kuerzung: Tabelle/Kurven ausserhalb -> nie lesen */
+            uint32_t n;
+            for (n = 0; n <= sizeof b; n += 8) {
+                xs.n = n;
+                nrpc_ok += lxf_xsb_rpc(&xs, 7, "RPM_A", 0.5f, r) >= 0;
+            }
+            xs.n = sizeof b;
+        }
+        CHECK(nrpc_ok == (int)(sizeof b / 8) + 1, "RPC Kuerzung");
+        printf("RPC (W363): Kurven, Klemmen, Suche, Kuerzung geprueft\n");
+    }
+    wma_tests(); /* W367 */
+    scope_tests(); /* W375 */
+    steal_tests(); /* W379 */
     if (g_fail) {
         printf("loc_audio_selftest: %d FEHLER\n", g_fail);
     } else {

@@ -385,6 +385,12 @@ int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_
             "    else if (dm == 5u) dv = pc0[0]; else if (dm == 6u) dv = R0c; else if (dm == 7u) dv = FOG.aaaa;\n"
             "    else if (dm == 8u) dv = float4(frac((i.t0.w != 0.0 ? i.t0.xy / i.t0.w : i.t0.xy) * tsc[0].xy), 0.0, 1.0);\n"
             "    else if (dm == 9u) dv = R1c;\n"
+            /* DIAG(LOC-ORIGINAL,W363) 10: LOD der Stufe 0 aus den Ableitungen (ohne Bias), Grau = (LOD + 4) / 16;
+             * 11: Vorzeichen/Betrag von t0.w (rot = negativ) fuer die Kanten-Suche. */
+            "    else if (dm == 10u) { float2 u0 = (i.t0.w != 0.0 ? i.t0.xy / i.t0.w : i.t0.xy) * tsc[0].xy; uint tw0, th0; tx0.GetDimensions(tw0, th0);\n"
+            "      float2 dx0 = ddx(u0 * float2(tw0, th0)), dy0 = ddy(u0 * float2(tw0, th0));\n"
+            "      float l0 = 0.5 * log2(max(max(dot(dx0, dx0), dot(dy0, dy0)), 1e-12)); dv = float4(saturate((l0 + 4.0) / 16.0).xxx, 1.0); }\n"
+            "    else if (dm == 11u) dv = float4(saturate(-i.t0.w * 1e-3), saturate(abs(i.t0.w) * 1e-5), 0.0, 1.0);\n"
             "    res = float4(saturate(dv.rgb), 1.0); } }\n"
             "  return res;\n}\n");
     return s.ovf ? 0 : 1;

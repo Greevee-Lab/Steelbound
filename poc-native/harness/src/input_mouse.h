@@ -58,6 +58,7 @@ int imouse_poll(int *dx, int *dy, int *blocked);
 /* W260 MOUSE-WHEEL: Maske der aktiven Mausrad-Impulse (Bit = IMAP_WHEEL_*)
  * fuer diesen Spiel-Frame; blocked = 1 verwirft angestaute Rasten. */
 unsigned imouse_wheel_mask(unsigned frame, int blocked);
+unsigned imouse_wheel_steps(void); /* W384: neue Rasten dieses Frames (Tuner/Gang) */
 
 /* 1 = Client-Fenster hat den Fokus (Fenster-Eingabe installiert: logischer
  * Fokus aus Nachrichten/Test-Hook; sonst Vordergrundfenster). */
@@ -84,3 +85,9 @@ int imouse_assist_allowed(void);
 
 /* W196: UI thread, idempotent aggregate state for all own menus/panels. */
 void imouse_menu_capture(int open);
+
+/* W394 LOC-VIEW-PERFRAME (Render-Thread, nur lesen): noch nicht abgeholte Raw-Deltas seit dem letzten Poll, ohne sie zu
+ * leeren (gemeinsamer Akkumulator: die Simulation holt ab, die Anzeige liest nur). 0 = Maus nicht wirksam (dann 0/0). */
+int imouse_raw_peek(int *dx, int *dy);
+/* W394: Nachrichten-Taste vk (input_source=1) jetzt gedrueckt, ohne Tipp-Verwaltung (nur lesen). */
+int imsg_key_peek(int vk);

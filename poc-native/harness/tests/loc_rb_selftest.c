@@ -23,6 +23,9 @@
 #define HIST 64u
 
 static int g_checks, g_fail;
+static unsigned g_w390_rev, g_w390_pages; /* W390: Vorlaeufe mit rbr_revert, zurueckgeschriebene Seiten */
+static unsigned g_snaps;         /* LOC-DESYNC-REPAIR: rbr_snapshot_at gegen Referenz */
+static uint8_t *g_snap;
 #define CHECK(c, ...) do { g_checks++; if (!(c)) { g_fail++; printf("FEHLER: " __VA_ARGS__); printf("\n"); } } while (0)
 
 static uint8_t *A, *B, *C1, *C2, *D;
@@ -304,6 +307,41 @@ int main(int argc, char **argv)
         rbr_full_copy(ref[nh]);
         hist_t[nh] = tick;
         nh++;
+        /* W390 LOC-OWN-PREDICT: spekulativer Vorlauf = 1-4 Ticks schreiben ohne Sichern, dann rbr_revert. Danach muss
+         * der Stand bitgleich der gesicherte sein, der Ring unveraendert (Tiefe, spaeteres Laden siehe unten). */
+        if (!big && tick % 3 == 1) {
+            unsigned d0 = rbr_depth(), sk = 1u + rnd() % 4u, j;
+            uint32_t pages = 0, chk = 0, us = 0, nd, addr[4] = {0};
+            for (j = 0; j < sk; j++) {
+                random_writes(tick, fh, 0);
+                B[1 * PG + 17] += 3; /* auch heisse Seiten */
+                if (j == 0 && tick % 2) foreign_write(5 * PG + 8, tick * 3u);
+            }
+            CHECK(rbr_revert(&pages, &chk, &us) == 0, "W390: rbr_revert");
+            nd = rbr_full_diff(ref[nh - 1], addr, 4);
+            CHECK(nd == 0, "W390: Tick %u: Vorlauf %u Ticks, nach rbr_revert %u Seiten falsch (erste 0x%X)", tick, sk, nd,
+                  addr[0]);
+            CHECK(rbr_depth() == d0, "W390: Tiefe nach rbr_revert %u (erwartet %u)", rbr_depth(), d0);
+            CHECK(rbr_shadow_diff(NULL, 0) == 0, "W390: Schatten != Live nach rbr_revert");
+            CHECK(pages <= chk, "W390: zurueckgeschrieben %u > verglichen %u", pages, chk);
+            g_w390_rev++;
+            g_w390_pages += pages;
+        }
+        /* LOC-DESYNC-REPAIR: Stand k Ticks zurueck als Kopie, ohne Live/Schatten/Ring zu aendern */
+        if (tick % 5 == 2 && rbr_depth() > 0 && nh > 1) {
+            unsigned k = 1 + rnd() % rbr_depth(), d0 = rbr_depth();
+            if (k >= nh) k = nh - 1;
+            if (!g_snap) g_snap = (uint8_t *)malloc((size_t)tot * PG);
+            if (!g_snap) return 2;
+            CHECK(rbr_snapshot_at(k, g_snap) == tot, "rbr_snapshot_at(%u)", k);
+            CHECK(memcmp(g_snap, ref[nh - 1 - k], (size_t)tot * PG) == 0, "Tick %u: rbr_snapshot_at k=%u != Stand von Tick %u",
+                  tick, k, hist_t[nh - 1 - k]);
+            CHECK(rbr_depth() == d0, "rbr_snapshot_at aendert die Tiefe");
+            CHECK(rbr_full_diff(ref[nh - 1], NULL, 0) == 0 && rbr_shadow_diff(NULL, 0) == 0,
+                  "rbr_snapshot_at aendert Live oder Schatten");
+            CHECK(rbr_snapshot_at(d0 + 1, g_snap) == 0, "rbr_snapshot_at ueber die Tiefe muss scheitern");
+            g_snaps++;
+        }
         /* gelegentlich laden */
         if (tick % 7 == 0 && rbr_depth() > 0) {
             unsigned maxk = rbr_depth() < 8 ? rbr_depth() : 8, k = 1 + rnd() % maxk, d0 = rbr_depth();
@@ -363,6 +401,11 @@ int main(int argc, char **argv)
            "prewrite %u), max %u Seiten je Tick, heiss max %u, abgekuehlt %u, Sichern max %u us, Laden max %u us\n",
            loads, k_hist[1], k_hist[2], k_hist[3], k_hist[4], k_hist[5], k_hist[6], k_hist[7], k_hist[8], st.faults,
            st.faults_alias, st.faults_foreign, st.prewrites, saved_max, hot_max, cooled, us_max, lus_max);
+    CHECK(g_w390_rev > 100u && g_w390_pages > 0u, "W390: zu wenige Vorlaeufe (%u, Seiten %u)", g_w390_rev, g_w390_pages);
+    printf("loc_rb_selftest: W390 Vorlaeufe %u, zurueckgeschriebene Seiten %u (Stand danach jeweils bitgleich)\n", g_w390_rev,
+           g_w390_pages);
+    CHECK(g_snaps > 50u, "rbr_snapshot_at zu selten geprueft (%u)", g_snaps);
+    printf("loc_rb_selftest: rbr_snapshot_at %u Kopien bitgleich dem Stand k Ticks zurueck\n", g_snaps);
     printf("loc_rb_selftest: %d Pruefungen, %d Fehler -> %s\n", g_checks, g_fail, g_fail ? "FEHLER" : "OK");
     return g_fail ? 1 : 0;
 }

@@ -20,6 +20,9 @@ struct ID3D11ShaderResourceView *sb_th_missing(unsigned why, unsigned present, u
 /* W360 render_shade.c: Stufe 1..3 belegt (Textur-Modus aktiv), aber keine SRV. Zaehlt immer, merkt die
  * Textur fuer F11 und liefert mit tex_missing_mark=1 die Markierungs-SRV, sonst NULL (bitgleich). */
 struct ID3D11ShaderResourceView *sb_th_stage_missing(unsigned stage, unsigned why, unsigned xptr, unsigned present);
+/* ISSUE44 render_shade.c: PS sampelt Stufe 1..3 (Textur-Modus aktiv), das Spiel hat dort aber keine Textur
+ * gesetzt (leer, T = 1). Zaehlt immer (F11), aendert nichts am Bild. */
+void sb_th_stage_empty(unsigned stage, unsigned ps, unsigned present);
 /* Markierungs-SRV je Grund, ohne Zaehlung. */
 struct ID3D11ShaderResourceView *sb_th_mark(unsigned why);
 /* render_d3ddbg.c: Geraetefaehigkeiten nach dem Anlegen (einmal). */

@@ -117,6 +117,11 @@ typedef struct {
      * IMAP_WHEEL_UP/DOWN/LEFT/RIGHT; Hook: imouse_wheel_mask, Test:
      * gesetzt). 0 = Mausrad traegt nichts bei (bisheriges Verhalten). */
     unsigned wheel_mask;
+    /* W384 (GH #63): in diesem Frame neu begonnene Rasten (Bit wie wheel_mask,
+     * nur im ersten Poll des Frames; Hook: imouse_wheel_steps). Tuner und Gang
+     * zaehlen ihre Rad-Quellen daraus direkt (1 Schritt je Raste, hoechstens
+     * einer je Frame und Richtung) statt ueber die 2+2-Frame-Impulse. */
+    unsigned wheel_step;
     /* W271 STICK-RELATIVE: globaler Modus der Pad-/Joystick-Quellen auf dem
      * Zielhebel (aim_x/aim_y gemeinsam): 0 = Position (Standard, bitgleich
      * wie bisher), 1 = relativ ("wie eine Maus": Auslenkung = Geschwindigkeit,
@@ -131,6 +136,11 @@ typedef struct {
      * Spiel-Replay-Wiedergabe mit replay_mouse_exit=0). Andere Maus-Bindungen, Tastatur, Pad, Original-
      * Controller und Joystick bleiben. 0 = bisheriges Verhalten bitgenau. */
     int bi0_nomouse;
+    /* W380 LOC-DODGE: Ausweich-Hilfe (slide_assist). > 0 = eine digitale Slide-Step-Belegung (Taste,
+     * Maustaste, Pad-Taste) haelt das linke Pedal ab dem Druck mindestens so viele Polls und die beim Druck
+     * gewaehlte Drehrichtung ebenso lange (Original: Richtung erst einen Tick nach dem Druck, Loslassen bricht
+     * den Schritt ab). 0 = bisheriges Verhalten bitgenau. Analoge Pedale bleiben unberuehrt. */
+    int slide_assist;
 } imap_snap_t;
 
 /* W260 MOUSE-WHEEL: Mausrad-Rasten als Tastenimpulse (Quellen
@@ -151,6 +161,10 @@ typedef struct {
     volatile long pend[IMAP_WHEEL_N]; /* ausstehende Rasten */
     unsigned f0[IMAP_WHEEL_N];        /* Spiel-Thread: Start des Impulses */
     int on[IMAP_WHEEL_N];             /* 1 = Impuls (inkl. Pause) laeuft */
+    volatile long cnt[IMAP_WHEEL_N];  /* W384: ausstehende Rasten fuer Zaehler (Tuner/Gang) */
+    unsigned stepf;                   /* W384: Frame der letzten Zaehl-Ausgabe */
+    int stepv;                        /* W384: stepf gueltig */
+    unsigned steps;                   /* W384: Zaehl-Maske dieses Polls */
 } imap_wheel_t;
 /* horiz = 0: WM_MOUSEWHEEL (+ = hoch), 1: WM_MOUSEHWHEEL (+ = rechts). */
 void imap_wheel_add(imap_wheel_t *w, int horiz, int delta);
@@ -158,6 +172,10 @@ void imap_wheel_clear(imap_wheel_t *w); /* Puffer + Rest verwerfen */
 /* Maske der aktiven Impulse fuer diesen Frame; blocked = 1 verwirft
  * ausstehende Rasten (kein spaeteres Nachfeuern) und liefert 0. */
 unsigned imap_wheel_step(imap_wheel_t *w, unsigned frame, int blocked);
+/* W384 (GH #63): Zaehl-Maske des letzten imap_wheel_step: je Richtung eine
+ * neue Raste, nur beim ersten Poll eines neuen Frames (weitere Polls im
+ * selben Frame: 0, damit Zaehler nicht doppelt zaehlen). */
+unsigned imap_wheel_steps(const imap_wheel_t *w);
 
 /* W132 PAD-ARB: einachsiger Arbitrierungs-Zustand (gleiche Logik wie
  * imap_arb_t/W128, ein Geraet gegen die Maus). memset(0) = uninitialisiert. */
@@ -205,9 +223,23 @@ typedef struct {
     uint8_t aim_centered; /* 1 = aim_center hat in diesem Poll zentriert */
     int prev_orig_view;   /* W283: Pegel der Aktion orig_view (ohne Tasten) im Vor-Poll */
     int prev_quick_shot;  /* W290: Pegel der Aktion quick_shot (ohne Tasten) im Vor-Poll */
+    int prev_net_hud;     /* W374: Pegel der Aktion net_hud (ohne Tasten) im Vor-Poll */
+    /* W380 LOC-DODGE: Ausweich-Hilfe (imap_slide_assist) */
+    uint8_t sa_prev;      /* digitale Slide-Belegung im Vor-Poll gedrueckt */
+    uint8_t sa_hold;      /* restliche Polls mit gehaltenem Pedal */
+    uint8_t sa_age;       /* Polls seit der letzten Drehrichtung != 0 (gesaettigt) */
+    int8_t sa_dir;        /* gehaltene Drehrichtung -1/0/+1 */
+    int8_t sa_last;       /* letzte Drehrichtung != 0 */
 } imap_state_t;
 
 void imap_state_init(imap_state_t *st); /* gear=8(N), tuner=0, Akkus Mitte */
+/* W341/W396: Maus-Akkus zur Mitte (Zielhebel 0x7F, Sicht 0), beim Wechsel Mission <-> Menue in LoC. LoC dreht den
+ * Kopf mit der Rate des Sichthebels; ein Sicht-Rest aus der letzten Mission drehte ihn sonst bis zum Anschlag. */
+void imap_mouse_center(imap_state_t *st);
+/* W380 LOC-DODGE: Ausweich-Hilfe nach der Abbildung (dig = digitale Slide-Belegung gedrueckt, hold = Polls,
+ * 0 = aus). Haelt Pedal links und die Drehrichtung des Drucks (Rueckblick 2 Polls, neueste Richtung im Fenster
+ * gewinnt) fuer hold Polls; laenger gedrueckt = Original. Reine Funktion (Selbsttest). */
+void imap_slide_assist(imap_state_t *st, imap_block_t *blk, int dig, int hold);
 /* W79 INPUT-REAL (key_toggles=1, nur ohne Replay): die 5 Kippschalter
  * bi34..bi38 (FILT CONTROL, OXYGEN SUPPLY, FUEL FLOW, BUFFER MATERIAL,
  * VT-LOCATION) als Rastschalter wie am Original-Controller: Flanke auf
@@ -348,6 +380,11 @@ typedef struct {
      * Zeile steht im Profil (auch leer = aus); fehlt sie, gilt der Standard (imap_profile_parse). */
     imap_bind_t replay_exit;
     int replay_exit_set;
+    /* W374 LOC-NET-OVERLAY: Client-Aktion "net_hud" (Netz-Overlay an/aus, Abschnitt [client], Standard KEY:F3;
+     * Umschalt + dieselbe Taste wechselt die Ecke). Nur Tasten, die wertet das Fenster aus (sb_nethud.c).
+     * net_hud_set = 1: Zeile steht im Profil (auch leer = aus); fehlt sie, gilt der Standard. */
+    imap_bind_t net_hud;
+    int net_hud_set;
     int has_pad; /* 1 = Profil referenziert Pad-Quellen */
     int has_sbc; /* 1 = Profil referenziert SBC-Quellen */
     /* W221 HOTAS (experimentell): Geraete-Zuordnung je Slot ("joy0 = <Name
@@ -378,6 +415,10 @@ int imap_profile_equal(const imap_profile_t *a, const imap_profile_t *b);
  * Maus vor Pad). */
 void imap_profile_apply(imap_block_t *blk, imap_state_t *st,
                         const imap_profile_t *prof, const imap_snap_t *snap);
+/* W394 LOC-VIEW-PERFRAME: *out = *st plus noch nicht abgeholte Raw-Deltas
+ * dx/dy auf dem Maus-Akku (gleicher Pfad wie der Poll, ohne Nebenwirkung). */
+void imap_mouse_preview(const imap_state_t *st, const imap_snap_t *snap,
+                        int dx, int dy, imap_state_t *out);
 /* W159: Client-Aktion "vr_recenter" (VR: Blick zentrieren). 1 = steigende
  * Flanke in diesem Poll (Hook ruft sb_vr_recenter("Belegung")), sonst 0.
  * Unbelegt -> 0. Ohne VR wirkt der Aufruf nicht (vr.c prueft vr_mode). */
@@ -404,9 +445,12 @@ int imap_action_orig_view(const imap_profile_t *prof, imap_state_t *st,
 /* W290 QUICK-SHOT: Aktion "quick_shot", Pad/Controller/Joystick-Flanke (Tasten: Fenster). Unbelegt -> 0. */
 int imap_action_quick_shot(const imap_profile_t *prof, imap_state_t *st,
                            const imap_snap_t *snap);
+/* W374 LOC-NET-OVERLAY: Aktion "net_hud", Pad/Controller/Joystick-Flanke (Tasten: Fenster). Unbelegt -> 0. */
+int imap_action_net_hud(const imap_profile_t *prof, imap_state_t *st, const imap_snap_t *snap);
 /* W299 REPLAY: Pegel der Aktion "replay_exit" (alle Quellen inkl. Tastatur). Unbelegt -> 0. */
 int imap_action_replay_exit(const imap_profile_t *prof, const imap_snap_t *snap);
 #define IMAP_REPLAY_EXIT_DEFAULT "KEY:BACKSPACE"
+#define IMAP_NET_HUD_DEFAULT "KEY:F3" /* W374 */
 /* W290: Uebergang fuer Profile ohne quick_shot-Zeile (von imap_profile_parse gerufen):
  *   photo genau KEY:F12 (alter Standard) -> photo = KEY:SHIFT+KEY:F12, quick_shot = KEY:F12;
  *   sonst bleibt photo, quick_shot = KEY:F12, wenn F12 (ohne Zusatztaste) frei ist, sonst leer.

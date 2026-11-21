@@ -26,6 +26,7 @@
 #include "sb_watermark.h" /* PO: sb_version_str fuer W222 */
 #include "sb_overlay.h"
 #include "sb_perfhud.h" /* W122: Test-Aktion PHUDPOS */
+#include "sb_nethud.h" /* W374: Test-Aktionen NHUD/NHUDPOS */
 #include "sb_remaster.h"
 #include "input_mouse.h"
 #include "sbc_wire.h" /* W128: Statuszeile Original-Controller */
@@ -279,7 +280,8 @@ enum { OA_KEY, OA_SHOT, OA_FOCUS1, OA_FOCUS0, OA_LOG, OA_PHUDPOS,
        OA_QSHOT, /* W290: Schnell-Screenshot (Taste der Belegung bzw. mit Ansicht/Groesse direkt) */
        OA_MHOV, /* W197: Maus nur ueber Zeile N bewegen (VR-Zeiger) */
        OA_WMSG, /* W261: Fenster-Nachrichtenfolge Alt-Tab/Minimieren (vk = Art) */
-       OA_CHECK }; /* W291: Struktur-Selbsttest der ESC-Gruppen (Log "OVERLAY check:") */
+       OA_CHECK, /* W291: Struktur-Selbsttest der ESC-Gruppen (Log "OVERLAY check:") */
+       OA_NHUD, OA_NHUDPOS }; /* W374: Netz-Overlay an/aus bzw. Ecke (wie F3 / Shift+F3) */
 static ov_step_t g_ov_steps[160]; /* W193: 96 -> 160 (Pause-Live-Belege) */
 static int g_ov_nsteps, g_ov_step, g_ov_test_parsed;
 static unsigned g_ov_mission_f[8];      /* Startbild der k-ten Mission (fuer mN / mK.N) */
@@ -3004,6 +3006,10 @@ static void ov_test_parse(void)
         else if (_stricmp(act, "FOCUS0") == 0) { s->act = OA_FOCUS0; }
         else if (_stricmp(act, "LOG") == 0) { s->act = OA_LOG; }
         else if (_stricmp(act, "PHUDPOS") == 0) { s->act = OA_PHUDPOS; } /* W122: Leistungs-Overlay Ecke (wie Shift+F2) */
+        else if (_stricmp(act, "NHUD") == 0) { s->act = OA_NHUD; }       /* W374: Netz-Overlay an/aus (wie F3) */
+        else if (_stricmp(act, "NHUDPOS") == 0) { s->act = OA_NHUDPOS; } /* W374: Netz-Overlay Ecke (wie Shift+F3) */
+        else if (_stricmp(act, "F2") == 0) { s->vk = VK_F2; }            /* W374: echte Taste ans Fenster */
+        else if (_stricmp(act, "F3") == 0) { s->vk = VK_F3; }            /* W374 */
         else if (_stricmp(act, "ESC") == 0) { s->vk = VK_ESCAPE; }
         else if (_stricmp(act, "UP") == 0) { s->vk = VK_UP; }
         else if (_stricmp(act, "DOWN") == 0) { s->vk = VK_DOWN; }
@@ -3130,8 +3136,10 @@ static void ov_test_tick(unsigned n)
         case OA_SHOT: g_ov_shot_due = 1; break;
         case OA_FOCUS1: PostMessageA(h, IMOUSE_MSG_TEST_FOCUS, 1, 0); break;
         case OA_FOCUS0: PostMessageA(h, IMOUSE_MSG_TEST_FOCUS, 0, 0); break;
-        case OA_LOG: sb_phud_test_log(); PostMessageA(h, IMOUSE_MSG_TEST_STATE, 0, 0); ov_log_values("test"); ov_log_shader("test"); ov_log_shader2("test"); ov_log_fx("test"); break;
+        case OA_LOG: sb_phud_test_log(); sb_nhud_test_log(); PostMessageA(h, IMOUSE_MSG_TEST_STATE, 0, 0); ov_log_values("test"); ov_log_shader("test"); ov_log_shader2("test"); ov_log_fx("test"); break;
         case OA_PHUDPOS: sb_phud_cycle_pos(); break;
+        case OA_NHUD: sb_nhud_toggle(); break;       /* W374 */
+        case OA_NHUDPOS: sb_nhud_cycle_pos(); break; /* W374 */
         case OA_TKEY: PostMessageA(h, OV_MSG_TEST, (WPARAM)s->vk, 0); break; /* W188 */
         case OA_CHAR: PostMessageW(h, WM_CHAR, (WPARAM)s->vk, 1); break;
         case OA_TXT: { /* W192: Testtext ist UTF-8, WM_CHAR liefert UTF-16 */

@@ -21,7 +21,14 @@
 #include "loc_rollback.h" /* W330: LOC_RB_PREWRITE */
 #include "loc_audio.h"
 #include "loc_xact_fmt.h"
+#include "loc_wma.h" /* W367 LOC-WMA */
 #include "loc_stub_va.h"
+#include "loc_audio_scope.h" /* W375 (#51) */
+void loc_api_count(int id); /* W363 loc_boot.c: Aufrufzaehler je Einstieg (audio_api_diag) */
+long loc_api_calls(int id);
+static long s_vel_nz; /* W363 DIAG: SetVelocity mit v != 0 */
+static long st_rpc, st_rpc_none; /* W363: RPC angewendet / ohne Kurve */
+static float s_vel_max2;
 #include "audio_out.h"
 #include "audio_vol.h" /* W303 AUDIO-VOLUME: XSB-Kategorie -> Nutzerkategorie */
 #include "hcfg.h"
@@ -39,6 +46,10 @@
 typedef uint32_t u32;
 
 #define LA_E_FAIL 0x80004005u
+/* W390 LOC-OWN-PREDICT: im spekulativen Vorlauf des Spiel-Threads (nur Anzeige, wird verworfen) kein Ton, kein Stopp,
+ * keine Freigabe, kein Setter (Tabelle las_spec_action, Selbsttest loc_audio_selftest). */
+static volatile LONG st_spec_skip;
+#define LA_SPEC_GUARD(id) do { if (loc_rb_spec()) { int a_ = las_spec_action(id); if (a_ != LAS_SPEC_ALLOW) {     InterlockedIncrement(&st_spec_skip); return a_ == LAS_SPEC_FAIL ? LA_E_FAIL : 0u; } } } while (0)
 #define LA_DSBPLAY_LOOPING 1u
 #define LA_DSBSTATUS_PLAYING 1u
 #define LA_MAX_WB 40
@@ -50,10 +61,12 @@ typedef uint32_t u32;
 #define LA_MAX_CAT 8
 #define LA_NOTE_CUES 4096
 #define LA_MAX_WAVE_BYTES (40u * 1024u * 1024u)
+#define LA_RPC_SLOTS 4 /* W363: Parameter-Namen je Cue */
 #define LA_MIN3D 8.0f /* W: XSB-3D-Parameter unbekannt; Spiel rechnet in ~Metern (x0,01x0,5) */
 #define LA_MAX3D 1000.0f
 #define LA_DOWNMIX_DB (-770) /* 5.1-Wellen (Stream.xwb): Mischer-Downmix summiert bis x2,9 -> ITU-Norm 1/2,414 */
 #define LA_3D_HEADROOM (-600) /* W: 3D-Cues -6 dB (sonst im Gefecht 0,1-2,8 % Uebersteuerung, W298_A2) */
+#define LA_WMA_HEADROOM (-600) /* W367 (W): Soundtrack-WMA -6 dB - Quellen bis 0 dBFS, RMS -11 dBFS; damit Pegel wie Titelmusik (-17..-22 dBFS) */
 #define LA_STREAM_SECS 20.0 /* laenger: Stream statt Puffer (Mischer-Puffer max. 16 MB = 47 s) */
 #define LA_STREAM_PKTS 3
 #define LA_STREAM_CHUNK 65536u
@@ -91,6 +104,7 @@ typedef struct {
     int used, is3d, has_pan;
     float pan_l, pan_r;
     u32 pos[3]; /* Float-Bits */
+    u32 vel[3]; /* W363: Geschwindigkeit (Float-Bits) aus IXACTSoundSource_SetVelocity -> Doppler (audio_doppler) */
     float bin[6]; /* W356: Mixbin-Pegel FL FR C LFE BL BR (linear) aus SetMixBins */
     int has_lfe;  /* W356: Bin-Liste enthaelt LFE (XACT ersetzt dessen Pegel je Cue) */
     u32 i3d[9];   /* W356: DSI3DL2BUFFER aus IXACTSoundSource_SetI3DL2Source */
@@ -106,6 +120,15 @@ typedef struct {
     lxf_cue_t c;
     int pool[LXF_MAX_TRACKS]; /* Pool-Indizes (+1) */
     int paused;
+    /* W363: Laufzeit-Parameter (RPC) je Name (z. B. RPM_VT01) und Spur, aus IXACTEngine_SetParameterControl */
+    int nrpc;
+    char rpc_name[LA_RPC_SLOTS][16];
+    lxf_rpc_t rpc[LA_RPC_SLOTS][LXF_MAX_TRACKS];
+    int wma;       /* W367: Spur ist die WMA-Playlist (Player-Thread) */
+    long wma_seen; /* W367: bereits gemeldete Liedstarts (je Start Meldung wType 0) */
+    u32 serial;    /* W375: laufende Nummer (Rollback-Waise eindeutig, auch wenn der Slot wiederverwendet wird) */
+    u32 mgen;      /* W375: in Mission mgen gestartet (0 = ausserhalb) */
+    int loops;     /* W375: mindestens eine Spur mit Schleife */
 } la_cue_t;
 
 typedef struct {
@@ -113,6 +136,7 @@ typedef struct {
     int wb;     /* la_wb-Index */
     int wave;
     int busy;
+    int rpc_flt; /* W363: Filter aus einem RPC gesetzt (beim naechsten Cue ohne RPC-Filter abschalten) */
     lxf_wave_t w;
     /* Lange Wellen (> LA_STREAM_SECS): Stream-Stimme, paketweise nachgespeist */
     int is_stream, s_eof, s_done;
@@ -130,6 +154,12 @@ static la_sb_t s_sb[LA_MAX_SB];
 static la_src_t s_src[LA_MAX_SRC];
 static la_cue_t s_cue[LA_MAX_CUE];
 static int s_cue_next;
+/* W375 (#51): Missionsgrenze (Lockstep-Aktiv-Maske [0x306830], wie LOCINTERP) und laufende Cue-Nummern */
+#define LA_MIS_MASK 0x306830u
+static u32 s_serial, s_last_serial, s_last_tid, s_mis_gen, s_mis_mask;
+static int s_mis_on;
+static lw_pl_t *s_mis_pl; /* W375: Missions-Playlist (Einsatzbeginn FUN_0008C3D0), ihr Release = Missionsende */
+static volatile LONG st_mis_stop, st_orphan_stop;
 static la_pool_t s_pool[LA_MAX_POOL];
 static int s_npool;
 static int s_cat_db[LA_MAX_CAT];
@@ -144,6 +174,19 @@ static int s_active;
 /* Statistik */
 static volatile LONG st_play, st_prep, st_stop, st_end, st_notes, st_drop_notes, st_wma, st_fail, st_voices, st_reuse,
     st_evict, st_tracks, st_loops, st_cuelog, st_streams, st_spkts, st_sread_fail;
+
+/* W367 LOC-WMA: Playlists (Handle = Zeiger), Besitzer-Cue des Players, Zaehler */
+static lw_pl_t s_pl[LW_MAX_PL];
+static la_cue_t *s_wma_cue;
+static lw_pl_t *s_wma_pl;
+static int s_rs_add;
+static volatile LONG st_wma_start, st_wma_notes, st_wma_rs, st_wma_create, st_wma_add, st_wma_next, st_wma_demo;
+static int la_is_pl(const void *p)
+{
+    uintptr_t a = (uintptr_t)p, b0 = (uintptr_t)s_pl;
+    return p && a >= b0 && a < b0 + sizeof s_pl && (a - b0) % sizeof s_pl[0] == 0 && ((const lw_pl_t *)p)->kind == LW_K_PL;
+}
+#define IS_PL(p) la_is_pl(p)
 
 static void lk(void) { hlock_enter(&s_lk); }
 static void ulk(void) { hlock_leave(&s_lk); }
@@ -187,6 +230,13 @@ static void la_first(int id, const char *what)
         HLOG_I("LOCAUDIO: %s erster Aufruf (Aufrufer 0x%X)", what, (u32)(uintptr_t)_ReturnAddress());
     }
 }
+
+/* W379 DIAG (#54, nur loc_audio>=2): Stopp-/Pause-Aufrufe mit Aufrufer, hoechstens 300 Zeilen. */
+static volatile LONG st_stoplog;
+#define LA_STOPLOG(...)                                                                                              \
+    do {                                                                                                             \
+        if (g_cfg.loc_audio >= 2 && InterlockedIncrement(&st_stoplog) <= 300) HLOG_I(__VA_ARGS__);                   \
+    } while (0)
 
 static u32 la_rand(void)
 {
@@ -481,11 +531,57 @@ static int la_cat(const la_cue_t *c)
     return (k >= 0 && k < LA_MAX_CAT) ? k : 0;
 }
 
+/* W363: Summe der RPC-Anteile einer Spur (alle Parameter-Namen des Cues). */
+static lxf_rpc_t la_rpc_sum(const la_cue_t *c, int t)
+{
+    lxf_rpc_t r;
+    int i;
+    memset(&r, 0, sizeof r);
+    for (i = 0; i < c->nrpc && i < LA_RPC_SLOTS; i++) {
+        r.vol_mb += c->rpc[i][t].vol_mb;
+        r.pitch += c->rpc[i][t].pitch;
+        r.filt_hz += c->rpc[i][t].filt_hz;
+        r.has |= c->rpc[i][t].has;
+    }
+    return r;
+}
+
+/* W363: Frequenz einer Spur = Wellenrate x 2^(Tonhoehe/4096), Tonhoehe = Eintrag + RPC, geklemmt wie 0x1C437E. */
+static u32 la_track_freq(const la_cue_t *c, int t, int rate)
+{
+    int p = c->c.pitch + la_rpc_sum(c, t).pitch;
+    if (p > 0x1FFF) { p = 0x1FFF; }
+    if (p < -0x7FFF) { p = -0x7FFF; }
+    return p ? (u32)(rate * pow(2.0, p / 4096.0) + 0.5) : (u32)rate;
+}
+
+/* W363: Tiefpass aus dem RPC (Ziel 2) wie 0x1C43C2/0x1C9638: Modus 1 (DLS2), c0 = 4096*log2(2*sin(pi*fc/48000))
+ * (fc <= 30 -> 0x8000, fc >= 8000 -> 0), Resonanz 0 dB -> c1 = 32768. Ohne RPC-Filter: abschalten, falls eine
+ * Pool-Stimme ihn noch vom vorigen Cue traegt. */
+static void la_track_filter(la_pool_t *p, const lxf_rpc_t *r)
+{
+    u32 d[6] = { 0, 0, 0, 0, 0, 0 };
+    if (r->has & 4) {
+        int fc = r->filt_hz < 0 ? 0 : r->filt_hz > 0x2000 ? 0x2000 : r->filt_hz;
+        d[0] = 1;
+        d[2] = fc <= 30 ? 0x8000u : fc >= 8000 ? 0u : (u32)((int)(4096.0 * log(2.0 * sin(3.14159265358979 * fc / 48000.0)) / log(2.0)) & 0xFFFF);
+        d[3] = 32768u;
+        audio_set_filter(p->v, (u32)(uintptr_t)d);
+        p->rpc_flt = 1;
+    } else if (p->rpc_flt) {
+        audio_set_filter(p->v, (u32)(uintptr_t)d);
+        p->rpc_flt = 0;
+    }
+}
+
 static void la_cue_apply(la_cue_t *c)
 {
     int t, k = la_cat(c);
     int xs = g_cfg.audio_xact_sends; /* W356: Pegel/Sends je Cue wie die XACT-Bibliothek (0x1C4208) */
     int db = (xs ? c->c.db100_xact : c->c.db100) + s_cat_db[k] + ((c->src && c->src->is3d) ? LA_3D_HEADROOM : 0);
+    if (c->wma && c == s_wma_cue) { /* W367: WMA-Stimme gehoert dem Player-Thread (2D, trocken) */
+        lw_player_volume(db + LA_WMA_HEADROOM < -10000 ? -10000 : db + LA_WMA_HEADROOM);
+    }
     for (t = 0; t < LXF_MAX_TRACKS; t++) {
         la_pool_t *p;
         u32 a[16];
@@ -494,7 +590,13 @@ static void la_cue_apply(la_cue_t *c)
         }
         p = &s_pool[c->pool[t] - 1];
         {
+            lxf_rpc_t rr = la_rpc_sum(c, t);
             int dbt = db + (p->w.ch > 2 ? LA_DOWNMIX_DB : 0);
+            if (rr.has & 1) { /* W363: RPC-Lautstaerke zur Eintrags-Lautstaerke, Summe <= 0 (0x1C4208) */
+                int base = xs ? c->c.db100_xact : c->c.db100, part = base + rr.vol_mb;
+                dbt += (part > 0 ? 0 : part) - base;
+            }
+            la_track_filter(p, &rr);
             audio_set_volume(p->v, dbt < -10000 ? -10000 : dbt);
         }
         audio_set_ucat(p->v, avol_loc_cat(k)); /* W303: Pool-Stimmen wechseln den Cue -> je Anwendung */
@@ -508,6 +610,9 @@ static void la_cue_apply(la_cue_t *c)
             a[1] = c->src->pos[0];
             a[2] = c->src->pos[1];
             a[3] = c->src->pos[2];
+            a[4] = c->src->vel[0]; /* W363: Doppler */
+            a[5] = c->src->vel[1];
+            a[6] = c->src->vel[2];
             a[15] = 0; /* NORMAL */
             audio_set_pan(p->v, 1.0f, 1.0f);
             if (xs) { /* W356: 3D-Stimmen haben den I3DL2-Bin -> Send je Cue; Occlusion der Quelle */
@@ -543,6 +648,14 @@ static void la_cue_apply(la_cue_t *c)
 static void la_cue_release_voices(la_cue_t *c, int stop)
 {
     int t;
+    if (c->wma) { /* W367 */
+        if (c == s_wma_cue) {
+            lw_player_stop();
+            s_wma_cue = NULL;
+            s_wma_pl = NULL;
+        }
+        c->wma = 0;
+    }
     for (t = 0; t < LXF_MAX_TRACKS; t++) {
         if (c->pool[t]) {
             la_pool_t *p = &s_pool[c->pool[t] - 1];
@@ -565,6 +678,11 @@ static void la_cue_end(la_cue_t *c, int stopped)
     if (c->state == 0) {
         return;
     }
+    if (c->state == 2 && c->loops && c->sb) { /* W379 DIAG (#54) */
+        const char *nm = lxf_xsb_cue_name(&c->sb->x, c->cue);
+        LA_STOPLOG("LOCAUDIO ende: Schleifen-Cue %d '%s' Kat=%d %s", c->cue, nm ? nm : "?", la_cat(c),
+                   stopped ? "gestoppt" : "ausgelaufen");
+    }
     la_cue_release_voices(c, stopped);
     if (c->state == 2) {
         la_note_push(1, c);
@@ -583,6 +701,11 @@ static la_cue_t *la_cue_alloc(void)
             s_cue_next = (int)(c - s_cue + 1) % LA_MAX_CUE;
             memset(c, 0, sizeof *c);
             c->o.kind = LA_K_CUE;
+            if (++s_serial == 0) s_serial = 1; /* W375 */
+            c->serial = s_serial;
+            c->mgen = s_mis_on ? s_mis_gen : 0u;
+            s_last_serial = s_serial;
+            s_last_tid = GetCurrentThreadId();
             return c;
         }
     }
@@ -616,6 +739,7 @@ static int la_cue_prepare(la_cue_t *c, la_sb_t *sb, int cue, la_src_t *src)
     c->sb = sb;
     c->cue = cue;
     c->src = src;
+    c->nrpc = 0; /* W363 */
     if (lxf_xsb_cue(&sb->x, cue, la_rand(), &c->c) != 0) {
         InterlockedIncrement(&st_fail);
         c->c.ntrack = 0;
@@ -624,10 +748,69 @@ static int la_cue_prepare(la_cue_t *c, la_sb_t *sb, int cue, la_src_t *src)
     return 0;
 }
 
+/* W367: WMA-Spur eines Cues -> Playlist dieses Cues (zuletzt angelegt) im Player-Thread starten. Unter s_lk. */
+static int la_wma_cue_start(la_cue_t *c, int k)
+{
+    int i, xs = g_cfg.audio_xact_sends, db;
+    lw_pl_t *p = NULL;
+    for (i = 0; i < LW_MAX_PL; i++) {
+        if (s_pl[i].kind == LW_K_PL && s_pl[i].sb == (u32)(uintptr_t)c->sb && s_pl[i].cue == c->cue) {
+            p = &s_pl[i];
+        }
+    }
+    if (!p || p->n <= 0) {
+        return 0;
+    }
+    if (s_wma_cue && s_wma_cue != c) { /* ein Player: der vorige Playlist-Cue endet */
+        s_wma_cue->wma = 0;
+    }
+    db = (xs ? c->c.db100_xact : c->c.db100) + s_cat_db[k] + LA_WMA_HEADROOM;
+    c->wma_seen = lw_player_starts();
+    if (!lw_player_start(p, db < -10000 ? -10000 : db, avol_loc_cat(k), s_cat_pause[k], 0)) {
+        return 0;
+    }
+    c->wma = 1;
+    s_wma_cue = c;
+    s_wma_pl = p;
+    InterlockedIncrement(&st_wma_start);
+    return 1;
+}
+
+static void la_cues_snapshot(las_cue_t *v);
+static void la_cue_end(la_cue_t *c, int stopped);
+static volatile LONG st_stream_steal; /* W379 (#54) */
+
+/* W379 (GitHub #54): Eine lange Welle einer Streaming-Wave-Bank (Musik/Ambience, > LA_STREAM_SECS, eigene
+ * Stream-Stimme) spielt hoechstens in einem Cue gleichzeitig - startet c sie erneut, enden die alten Instanzen
+ * (Stopp-Meldung wie beim Stop). Kurze Wellen (z. B. Effekte aus 'Memory', mehrfach gleichzeitig auf 3D-Quellen)
+ * bleiben unberuehrt. Unter s_lk. */
+static void la_stream_steal(la_cue_t *c, int wbi, int wave)
+{
+    las_cue_t v[LA_MAX_CUE];
+    int idx[8], n, k;
+    if (wbi < 0 || wbi >= LA_MAX_WB || !s_wb[wbi].streamed) return;
+    la_cues_snapshot(v);
+    n = las_stream_steal_pick(v, LA_MAX_CUE, (int)(c - s_cue), wbi, wave, idx, 8);
+    for (k = 0; k < n; k++) {
+        la_cue_t *o = &s_cue[idx[k]];
+        if (InterlockedIncrement(&st_stream_steal) <= 40) {
+            const char *nm = o->sb ? lxf_xsb_cue_name(&o->sb->x, o->cue) : NULL;
+            HLOG_I("LOCAUDIO: Streaming-Welle %d ('%s') neu gestartet - alte Instanz (Cue %d '%s') beendet", wave,
+                   s_wb[wbi].b.name, o->cue, nm ? nm : "?");
+        }
+        la_cue_end(o, 1);
+    }
+}
+
 static void la_cue_start(la_cue_t *c)
 {
     int t, k = la_cat(c), nv = 0;
-    for (t = 0; t < c->c.ntrack; t++) {
+    /* W367: Cue mit gebundener WMA-Playlist (CreateWmaPlayList(Bank, Cue)) spielt die Playlist statt seiner Wellen
+     * (ST_CUE zeigt in Bank.xsb auf eine kurze Platzhalter-Welle, belegt im Lauf W367_A1). */
+    if (g_cfg.loc_wma && la_wma_cue_start(c, k)) {
+        nv = 1;
+    }
+    for (t = 0; t < c->c.ntrack && !c->wma; t++) {
         lxf_wave_t w;
         int wbi = la_sb_bank(c->sb, c->c.track[t].bank), pi;
         la_pool_t *p;
@@ -639,6 +822,7 @@ static void la_cue_start(la_cue_t *c)
             InterlockedIncrement(&st_wma);
             continue;
         }
+        if (la_wave_secs(&w) > LA_STREAM_SECS) la_stream_steal(c, wbi, c->c.track[t].wave); /* W379 (#54) */
         pi = la_wave_secs(&w) > LA_STREAM_SECS ? la_stream_acquire(wbi, c->c.track[t].wave, &w)
                                                 : la_pool_acquire(wbi, c->c.track[t].wave, &w);
         if (pi < 0) {
@@ -648,11 +832,12 @@ static void la_cue_start(la_cue_t *c)
         p = &s_pool[pi];
         c->pool[t] = pi + 1;
         nv++;
-        audio_set_frequency(p->v, c->c.pitch ? (u32)(w.rate * pow(2.0, c->c.pitch / 4096.0) + 0.5) : (u32)w.rate);
+        audio_set_frequency(p->v, la_track_freq(c, t, w.rate)); /* W363: + RPC */
         if (p->is_stream) {
             InterlockedIncrement(&st_tracks);
             if (w.loop) {
                 InterlockedIncrement(&st_loops);
+                c->loops = 1; /* W375 */
             }
             continue;
         }
@@ -660,6 +845,7 @@ static void la_cue_start(la_cue_t *c)
         if (w.loop) {
             audio_set_loop(p->v, w.loop_len ? w.loop_off : 0, w.loop_len ? w.loop_len : w.len);
             InterlockedIncrement(&st_loops);
+            c->loops = 1; /* W375 */
         }
         InterlockedIncrement(&st_tracks);
     }
@@ -688,15 +874,124 @@ static void la_cue_start(la_cue_t *c)
     }
 }
 
+static void la_cues_snapshot(las_cue_t *v)
+{
+    int i, t;
+    for (i = 0; i < LA_MAX_CUE; i++) {
+        v[i].state = s_cue[i].state;
+        v[i].loops = s_cue[i].loops;
+        v[i].wma = s_cue[i].wma;
+        v[i].serial = s_cue[i].serial;
+        v[i].mgen = s_cue[i].mgen;
+        for (t = 0; t < LAS_TRACKS && t < LXF_MAX_TRACKS; t++) { /* W379 (#54) */
+            const la_pool_t *p = s_cue[i].pool[t] ? &s_pool[s_cue[i].pool[t] - 1] : NULL;
+            int sw = p && p->is_stream && p->wb >= 0 && p->wb < LA_MAX_WB && s_wb[p->wb].streamed;
+            v[i].swb[t] = sw ? p->wb + 1 : 0;
+            v[i].swave[t] = sw ? p->wave : 0;
+        }
+    }
+}
+
+/* W375 (#51): Missionsende: alle noch spielenden Schleifen-Cues dieser Mission beenden (Spiel stoppt z. B. den
+ * Eject-Alarm nicht, wenn die Mission mitten in der Warnung endet bzw. sein Handle nach einem Rollback nur in der
+ * verworfenen Zeitlinie stand). why = Ausloeser fuer das Log. Unter s_lk. */
+static void la_mission_end(const char *why)
+{
+    las_cue_t v[LA_MAX_CUE];
+    int idx[LA_MAX_CUE], n, k, act = 0;
+    char names[200] = "";
+    size_t o = 0;
+    if (!s_mis_on) return;
+    la_cues_snapshot(v);
+    n = las_mission_end_pick(v, LA_MAX_CUE, s_mis_gen, idx, LA_MAX_CUE);
+    for (k = 0; k < n; k++) {
+        la_cue_t *c = &s_cue[idx[k]];
+        const char *nm = c->sb ? lxf_xsb_cue_name(&c->sb->x, c->cue) : NULL;
+        if (o + 24 < sizeof names) o += (size_t)_snprintf_s(names + o, sizeof names - o, _TRUNCATE, "%s%d '%s'",
+                                                             k ? ", " : "", c->cue, nm ? nm : "?");
+        la_cue_end(c, 1);
+        InterlockedIncrement(&st_mis_stop);
+    }
+    for (k = 0; k < LA_MAX_CUE; k++) act += s_cue[k].state == 2;
+    s_mis_on = 0;
+    s_mis_pl = NULL;
+    HLOG_I("LOCAUDIO: Missionsende (Mission %u, %s): %d Schleifen-Cue(s) der Mission gestoppt%s%s%s, danach aktiv %d",
+           s_mis_gen, why, n, n ? " [" : "", names, n ? "]" : "", act);
+}
+
+/* W375: Missionsbeginn. Unter s_lk. */
+static void la_mission_begin(void)
+{
+    s_mis_gen++;
+    s_mis_on = 1;
+    s_mis_pl = NULL;
+}
+
+/* W375 (#51): Missionsgrenze an der Lockstep-Aktiv-Maske [0x306830] (0 -> gesetzt = Beginn, gesetzt -> 0 = Ende).
+ * Die Maske bleibt nach TIME UP bis in die Nachbesprechung gesetzt; frueher meldet das Spiel das Ende ueber die
+ * Missions-Playlist (FUN_0008D8D0: Stop(ST_CUE), Release - la_WmaRelease). Unter s_lk. */
+static void la_mission_poll(void)
+{
+    u32 m = 0;
+    int e;
+    __try { m = *(volatile const u32 *)(uintptr_t)LA_MIS_MASK; } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    e = las_mission_edge(s_mis_mask, m);
+    s_mis_mask = m;
+    if (e == LAS_EDGE_BEGIN) {
+        la_mission_begin();
+    } else if (e == LAS_EDGE_END) {
+        la_mission_end("Lockstep-Maske leer");
+    }
+}
+
+/* W375: laufende Nummer des zuletzt von diesem Thread angelegten Cues (direkt nach PlayEx/PrepareEx), 0 = keine. */
+u32 loc_audio_last_serial(void)
+{
+    u32 s = 0;
+    if (!s_active) return 0;
+    lk();
+    if (s_last_tid == GetCurrentThreadId()) s = s_last_serial;
+    ulk();
+    return s;
+}
+
+/* W375: Rollback-Waise (nur die verworfene Zeitlinie hat den Cue gestartet): spielt er noch als Schleife, beenden.
+ * 1 = gestoppt. Einmal-Cues laufen aus (wie bisher). */
+int loc_audio_stop_orphan(u32 serial)
+{
+    las_cue_t v[LA_MAX_CUE];
+    int i;
+    if (!s_active || !serial) return 0;
+    lk();
+    la_cues_snapshot(v);
+    i = las_orphan_pick(v, LA_MAX_CUE, serial);
+    if (i >= 0) {
+        la_cue_end(&s_cue[i], 1);
+        InterlockedIncrement(&st_orphan_stop);
+    }
+    ulk();
+    return i >= 0;
+}
+
 /* Ausgelaufene Cues erkennen (aus DoWork/GetNotification). Unter s_lk. */
 static void la_pump(void)
 {
     int i, t;
+    la_mission_poll(); /* W375 */
     for (i = 0; i < LA_MAX_CUE; i++) {
         la_cue_t *c = &s_cue[i];
         int playing = 0;
         if (c->state != 2 || c->paused) {
             continue;
+        }
+        if (c->wma && c == s_wma_cue && lw_player_active()) { /* W367: Playlist laeuft; je Liedstart Meldung wType 0 */
+            long st = lw_player_starts();
+            playing = 1;
+            while (c->wma_seen < st) {
+                la_note_push(0, c);
+                c->wma_seen++;
+                InterlockedIncrement(&st_wma_notes);
+            }
         }
         for (t = 0; t < LXF_MAX_TRACKS; t++) {
             la_pool_t *p;
@@ -720,6 +1015,7 @@ static void la_pump(void)
 /* ---------------- XACT-Einstiege (stdcall, Argumentzahl = loc_stub_va.h) ---------------- */
 static u32 __stdcall la_XACTEngineDoWork(void)
 {
+    loc_api_count(4); /* W363 */ LA_SPEC_GUARD(4);
     lk();
     la_pump();
     ulk();
@@ -728,6 +1024,7 @@ static u32 __stdcall la_XACTEngineDoWork(void)
 
 static u32 __stdcall la_XACTEngineCreate(u32 params, u32 pp)
 {
+    loc_api_count(5); /* W363 */ LA_SPEC_GUARD(5);
     (void)params;
     la_first(0, "XACTEngineCreate");
     s_eng.kind = LA_K_ENG;
@@ -737,6 +1034,7 @@ static u32 __stdcall la_XACTEngineCreate(u32 params, u32 pp)
 
 static u32 __stdcall la_CreateSoundSource(u32 e, u32 flags, u32 pp)
 {
+    loc_api_count(6); /* W363 */ LA_SPEC_GUARD(6);
     int i;
     (void)e;
     lk();
@@ -761,6 +1059,7 @@ static u32 __stdcall la_CreateSoundSource(u32 e, u32 flags, u32 pp)
 
 static u32 __stdcall la_CreateSoundBank(u32 e, u32 data, u32 size, u32 pp)
 {
+    loc_api_count(7); /* W363 */ LA_SPEC_GUARD(7);
     int i, rc;
     (void)e;
     if (!data || size < 0x38 || size > 16u * 1024u * 1024u) {
@@ -816,6 +1115,7 @@ static void la_wb_log(const la_wb_t *wb)
 
 static u32 __stdcall la_RegisterWaveBank(u32 e, u32 data, u32 size, u32 pp)
 {
+    loc_api_count(8); /* W363 */ LA_SPEC_GUARD(8);
     int i, rc;
     (void)e;
     lk();
@@ -843,6 +1143,7 @@ static u32 __stdcall la_RegisterWaveBank(u32 e, u32 data, u32 size, u32 pp)
 /* params: {hFile, dwOffset, Paketgroesse, Paketzahl} (FUN_00088240/FUN_0008bea0) */
 static u32 __stdcall la_RegisterStreamedWaveBank(u32 e, u32 params, u32 pp)
 {
+    loc_api_count(9); /* W363 */ LA_SPEC_GUARD(9);
     u32 p[2];
     uint8_t head[0x50];
     uint32_t hs;
@@ -885,6 +1186,7 @@ static u32 __stdcall la_RegisterStreamedWaveBank(u32 e, u32 params, u32 pp)
 
 static u32 __stdcall la_UnRegisterWaveBank(u32 e, u32 wbp)
 {
+    loc_api_count(10); /* W363 */ LA_SPEC_GUARD(10);
     la_wb_t *wb = (la_wb_t *)(uintptr_t)wbp;
     int wbi, i, t;
     (void)e;
@@ -894,6 +1196,7 @@ static u32 __stdcall la_UnRegisterWaveBank(u32 e, u32 wbp)
         return 0;
     }
     wbi = (int)(wb - s_wb);
+    LA_STOPLOG("LOCAUDIO stop: UnRegisterWaveBank('%s') Aufrufer 0x%X", wb->b.name, (u32)(uintptr_t)_ReturnAddress());
     for (i = 0; i < LA_MAX_CUE; i++) { /* Cues auf dieser Bank beenden */
         la_cue_t *c = &s_cue[i];
         if (c->state == 0) {
@@ -932,6 +1235,7 @@ static void la_cat_update(int k)
 
 static u32 __stdcall la_SetMasterVolume(u32 e, u32 cat, u32 vol)
 {
+    loc_api_count(11); /* W363 */ LA_SPEC_GUARD(11);
     static volatile LONG n;
     (void)e;
     if (cat >= LA_MAX_CAT) {
@@ -949,9 +1253,11 @@ static u32 __stdcall la_SetMasterVolume(u32 e, u32 cat, u32 vol)
 
 static u32 __stdcall la_GlobalPause(u32 e, u32 cat, u32 pause)
 {
+    loc_api_count(16); /* W363 */ LA_SPEC_GUARD(16);
     int i, t;
     (void)e;
     la_first(1, "IXACTEngine_GlobalPause");
+    LA_STOPLOG("LOCAUDIO stop: GlobalPause(Kategorie %u, %u) Aufrufer 0x%X", cat, pause, (u32)(uintptr_t)_ReturnAddress());
     if (cat >= LA_MAX_CAT) {
         return 0;
     }
@@ -967,6 +1273,9 @@ static u32 __stdcall la_GlobalPause(u32 e, u32 cat, u32 pause)
                 audio_pause(s_pool[c->pool[t] - 1].v, pause ? 1 : 0);
             }
         }
+        if (c->wma && c == s_wma_cue) { /* W367 */
+            lw_player_pause(pause ? 1 : 0);
+        }
         c->paused = pause ? 1 : 0;
     }
     ulk();
@@ -975,6 +1284,7 @@ static u32 __stdcall la_GlobalPause(u32 e, u32 cat, u32 pause)
 
 static u32 __stdcall la_SetListenerOrientation(u32 e, u32 fx, u32 fy, u32 fz, u32 tx, u32 ty, u32 tz, u32 apply)
 {
+    loc_api_count(13); /* W363 */ LA_SPEC_GUARD(13);
     (void)e;
     (void)apply;
     audio_3d_listener_orient(fx, fy, fz, tx, ty, tz);
@@ -987,6 +1297,7 @@ static u32 __stdcall la_SetListenerOrientation(u32 e, u32 fx, u32 fy, u32 fz, u3
  * CommitDeferredSettings bleibt Stub, darum sofort. */
 static u32 __stdcall la_SetI3dl2Listener(u32 e, u32 p, u32 apply)
 {
+    loc_api_count(12); /* W363 */ LA_SPEC_GUARD(12);
     u32 d[12];
     (void)e;
     (void)apply;
@@ -1003,6 +1314,7 @@ static u32 __stdcall la_SetI3dl2Listener(u32 e, u32 p, u32 apply)
 
 static u32 __stdcall la_SetListenerPosition(u32 e, u32 x, u32 y, u32 z, u32 apply)
 {
+    loc_api_count(14); /* W363 */ LA_SPEC_GUARD(14);
     (void)e;
     (void)apply;
     audio_3d_listener_pos(x, y, z);
@@ -1012,6 +1324,7 @@ static u32 __stdcall la_SetListenerPosition(u32 e, u32 x, u32 y, u32 z, u32 appl
 /* desc: {wType|wFlags<<16, Bank, Cue, Cue-Handle, Kontext, Event} */
 static u32 __stdcall la_RegisterNotification(u32 e, u32 pdesc)
 {
+    loc_api_count(17); /* W363 */ LA_SPEC_GUARD(17);
     u32 d[5];
     int type;
     (void)e;
@@ -1035,6 +1348,7 @@ static u32 __stdcall la_RegisterNotification(u32 e, u32 pdesc)
 
 static u32 __stdcall la_GetNotification(u32 e, u32 pdesc, u32 pout)
 {
+    loc_api_count(18); /* W363 */ LA_SPEC_GUARD(18);
     u32 q[6];
     (void)e;
     (void)pdesc;
@@ -1062,6 +1376,7 @@ static u32 __stdcall la_GetNotification(u32 e, u32 pdesc, u32 pout)
 
 static u32 __stdcall la_EnableHeadphones(u32 e, u32 on)
 {
+    loc_api_count(20); /* W363 */ LA_SPEC_GUARD(20);
     (void)e;
     (void)on;
     la_first(2, "IXACTEngine_EnableHeadphones");
@@ -1070,14 +1385,76 @@ static u32 __stdcall la_EnableHeadphones(u32 e, u32 on)
 
 static u32 __stdcall la_SetParameterControl(u32 e, u32 p)
 {
+    loc_api_count(21); /* W363 */ LA_SPEC_GUARD(21);
     (void)e;
-    (void)p;
-    la_first(3, "IXACTEngine_SetParameterControl (RPM, nicht ausgewertet)");
+    if (g_cfg.audio_api_diag) { /* W363 DIAG: Aufbau des Parameters (erste 12 Aufrufe, dann jeder 500.) */
+        static LONG n;
+        LONG k = InterlockedIncrement(&n);
+        if (k <= 12 || k % 500 == 0) {
+            u32 d[8];
+            memset(d, 0, sizeof d);
+            if (!la_rd(p, d, sizeof d)) { d[0] = 0xDEADu; }
+            HLOG_I("LOCAPI rpc #%ld e=0x%X p=0x%X: %08X %08X %08X %08X %08X %08X %08X %08X (f1=%.3f f2=%.3f)", (long)k, e, p,
+                   d[0], d[1], d[2], d[3], d[4], d[5], d[6], d[7], *(float *)&d[1], *(float *)&d[2]);
+        }
+    }
+    la_first(3, "IXACTEngine_SetParameterControl (RPC: Kurven aus Bank.xsb, W363)");
+    if (g_cfg.loc_xact_rpc) { /* W363 LOC-ORIGINAL: Desc {Anzahl, Elemente[24 B]}; Element {u16 Art (1 = an Cue),
+                               * u16, u16, u16 Schritte, f32 Steigung, f32 Wert, Cue, Name} (0x1C0574/0x1C042F;
+                               * LoC: Steigung/Schritte 0 -> Wert gilt sofort) */
+        u32 hd[2], el[6];
+        u32 i;
+        if (!la_rd(p, hd, sizeof hd) || hd[0] > 64u) {
+            return 0;
+        }
+        for (i = 0; i < hd[0]; i++) {
+            char nm[17];
+            la_cue_t *c;
+            float val;
+            if (!la_rd(hd[1] + i * 24u, el, sizeof el) || !(el[0] & 1u) || el[5] < 0x10000u) {
+                continue; /* nur an Cues gebundene Parameter mit Namen (LoC ruft nur diese) */
+            }
+            memset(nm, 0, sizeof nm);
+            if (!la_rd(el[5], nm, 16)) {
+                continue;
+            }
+            memcpy(&val, &el[3], 4);
+            c = (la_cue_t *)(uintptr_t)el[4];
+            lk();
+            if (IS_CUE(c) && c->state >= 1 && c->sb) {
+                int slot, t, hits;
+                lxf_rpc_t r[LXF_MAX_TRACKS];
+                for (slot = 0; slot < c->nrpc && strncmp(c->rpc_name[slot], nm, 16) != 0; slot++) {}
+                hits = lxf_xsb_rpc(&c->sb->x, c->c.entry, nm, val, r);
+                if (hits && slot < LA_RPC_SLOTS) {
+                    if (slot == c->nrpc) {
+                        memcpy(c->rpc_name[slot], nm, 16);
+                        c->nrpc++;
+                    }
+                    memcpy(c->rpc[slot], r, sizeof r);
+                    st_rpc++;
+                    if (c->state == 2) {
+                        la_cue_apply(c); /* Pegel + Filter */
+                        for (t = 0; t < LXF_MAX_TRACKS; t++) {
+                            if (c->pool[t]) {
+                                la_pool_t *pp = &s_pool[c->pool[t] - 1];
+                                audio_set_frequency(pp->v, la_track_freq(c, t, pp->w.rate));
+                            }
+                        }
+                    }
+                } else if (!hits) {
+                    st_rpc_none++;
+                }
+            }
+            ulk();
+        }
+    }
     return 0;
 }
 
 static u32 __stdcall la_GetSoundCueIndexFromFriendlyName(u32 sbp, u32 name, u32 pidx)
 {
+    loc_api_count(22); /* W363 */ LA_SPEC_GUARD(22);
     la_sb_t *sb = (la_sb_t *)(uintptr_t)sbp;
     char nm[64];
     int k = -1;
@@ -1111,6 +1488,7 @@ static u32 __stdcall la_GetSoundCueIndexFromFriendlyName(u32 sbp, u32 name, u32 
 /* params: {Flags, Cue, Quelle, 0} */
 static u32 __stdcall la_PrepareEx(u32 sbp, u32 params, u32 pp)
 {
+    loc_api_count(23); /* W363 */ LA_SPEC_GUARD(23);
     la_sb_t *sb = (la_sb_t *)(uintptr_t)sbp;
     u32 p[3];
     la_cue_t *c;
@@ -1132,6 +1510,7 @@ static u32 __stdcall la_PrepareEx(u32 sbp, u32 params, u32 pp)
 
 static u32 __stdcall la_PlayEx(u32 sbp, u32 params, u32 pp)
 {
+    loc_api_count(24); /* W363 */ LA_SPEC_GUARD(24);
     la_sb_t *sb = (la_sb_t *)(uintptr_t)sbp;
     u32 p[3];
     la_cue_t *c = NULL;
@@ -1173,9 +1552,11 @@ static u32 __stdcall la_PlayEx(u32 sbp, u32 params, u32 pp)
 
 static u32 __stdcall la_Stop(u32 sbp, u32 cue, u32 flags, u32 pcue)
 {
+    loc_api_count(25); /* W363 */ LA_SPEC_GUARD(25);
     int i;
     (void)sbp;
-    (void)flags;
+    LA_STOPLOG("LOCAUDIO stop: Stop(Cue %d, Flags 0x%X, Handle %s) Aufrufer 0x%X", (int)cue, flags,
+               IS_CUE((void *)(uintptr_t)pcue) ? "gueltig" : (pcue ? "unbekannt" : "-"), (u32)(uintptr_t)_ReturnAddress());
     lk();
     if ((int)cue >= 0) {
         for (i = 0; i < LA_MAX_CUE; i++) {
@@ -1192,8 +1573,11 @@ static u32 __stdcall la_Stop(u32 sbp, u32 cue, u32 flags, u32 pcue)
 
 static u32 __stdcall la_SourceRelease(u32 sp)
 {
+    loc_api_count(32); /* W363 */ LA_SPEC_GUARD(32);
     la_src_t *s = (la_src_t *)(uintptr_t)sp;
     int i;
+    LA_STOPLOG("LOCAUDIO stop: SourceRelease(Quelle %d) Aufrufer 0x%X", IS_SRC(s) ? (int)(s - s_src) : -1,
+               (u32)(uintptr_t)_ReturnAddress());
     lk();
     if (IS_SRC(s) && s->used) {
         for (i = 0; i < LA_MAX_CUE; i++) {
@@ -1209,6 +1593,7 @@ static u32 __stdcall la_SourceRelease(u32 sp)
 
 static u32 __stdcall la_SourceSetPosition(u32 sp, u32 x, u32 y, u32 z, u32 apply)
 {
+    loc_api_count(33); /* W363 */ LA_SPEC_GUARD(33);
     la_src_t *s = (la_src_t *)(uintptr_t)sp;
     int i, t;
     (void)apply;
@@ -1272,8 +1657,53 @@ static void la_src_mixbins(la_src_t *s, u32 pmb, int full)
             s->has_lfe = 1;
 }
 
+/* W363 LOC-ORIGINAL: Doppler wie die XACT-Bibliothek (DS3D je 3D-Stimme). Bisher Stub (loc_boot), 178 Aufrufe je
+ * Missionsminute (immer zusammen mit SetPosition). Geschwindigkeit je Quelle merken und auf laufende Stimmen geben;
+ * die Formel (Radialanteil, Klemme) rechnet audio_3d.c wie fuer SB (audio_doppler, W348). */
+static u32 __stdcall la_SourceSetVelocity(u32 sp, u32 x, u32 y, u32 z, u32 apply)
+{
+    la_src_t *s = (la_src_t *)(uintptr_t)sp;
+    int i, t;
+    loc_api_count(35); LA_SPEC_GUARD(35);
+    (void)apply;
+    if ((x | y | z) & 0x7FFFFFFFu) { /* W363 DIAG: Anteil echter Geschwindigkeiten, groesster Betrag */
+        float fx = *(float *)&x, fy = *(float *)&y, fz = *(float *)&z, m = fx * fx + fy * fy + fz * fz;
+        s_vel_nz++;
+        if (m == m && m > s_vel_max2) { s_vel_max2 = m; }
+    }
+    lk();
+    if (IS_SRC(s) && s->used) {
+        s->vel[0] = x;
+        s->vel[1] = y;
+        s->vel[2] = z;
+        if (s->is3d) {
+            for (i = 0; i < LA_MAX_CUE; i++) {
+                if (s_cue[i].state == 2 && s_cue[i].src == s) {
+                    for (t = 0; t < LXF_MAX_TRACKS; t++) {
+                        if (s_cue[i].pool[t]) {
+                            audio_3d_voice_vel(s_pool[s_cue[i].pool[t] - 1].v, x, y, z);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    ulk();
+    return 0;
+}
+
+static u32 __stdcall la_SetListenerVelocity(u32 e, u32 x, u32 y, u32 z, u32 apply)
+{
+    loc_api_count(15); LA_SPEC_GUARD(15);
+    (void)e;
+    (void)apply;
+    audio_3d_listener_vel(x, y, z);
+    return 0;
+}
+
 static u32 __stdcall la_SourceSetMixBins(u32 sp, u32 pmb)
 {
+    loc_api_count(36); /* W363 */ LA_SPEC_GUARD(36);
     la_src_t *s = (la_src_t *)(uintptr_t)sp;
     lk();
     if (IS_SRC(s) && s->used) {
@@ -1285,9 +1715,38 @@ static u32 __stdcall la_SourceSetMixBins(u32 sp, u32 pmb)
 
 static u32 __stdcall la_SourceSetMixBinVolumes(u32 sp, u32 pmb)
 {
-    (void)sp;
-    (void)pmb;
-    la_first(4, "IXACTSoundSource_SetMixBinVolumes (nicht ausgewertet)");
+    la_src_t *s = (la_src_t *)(uintptr_t)sp;
+    u32 hdr[2], pair[2], i;
+    loc_api_count(37); /* W363 */ LA_SPEC_GUARD(37);
+    la_first(4, "IXACTSoundSource_SetMixBinVolumes (W363: Pegel der genannten Bins)");
+    if (!la_rd(pmb, hdr, sizeof hdr) || hdr[0] > 16) {
+        return 0;
+    }
+    lk();
+    if (IS_SRC(s) && s->used && s->has_pan) { /* W363: DSound-Regel - nur die genannten Bins aendern, Rest bleibt */
+        float g[6];
+        int k;
+        memcpy(g, s->bin, sizeof g);
+        for (i = 0; i < hdr[0]; i++) {
+            if (la_rd(hdr[1] + i * 8, pair, sizeof pair) && pair[0] < 6) {
+                int db = (int)pair[1];
+                g[pair[0]] = db <= -10000 ? 0.0f : (float)pow(10.0, (db > 0 ? 0 : db) / 2000.0);
+                if (g_cfg.audio_api_diag) {
+                    static LONG nl;
+                    if (InterlockedIncrement(&nl) <= 16) { HLOG_I("LOCAPI mixbinvol src=0x%X bin=%u mB=%d", sp, pair[0], db); }
+                }
+            }
+        }
+        memcpy(s->bin, g, sizeof g);
+        s->pan_l = g[0] + 0.7071f * g[2] + 0.5f * g[3] + 0.5f * g[4];
+        s->pan_r = g[1] + 0.7071f * g[2] + 0.5f * g[3] + 0.5f * g[5];
+        for (k = 0; k < LA_MAX_CUE; k++) {
+            if (s_cue[k].state == 2 && s_cue[k].src == s) {
+                la_cue_apply(&s_cue[k]);
+            }
+        }
+    }
+    ulk();
     return 0;
 }
 
@@ -1297,6 +1756,7 @@ static u32 __stdcall la_SourceSetMixBinVolumes(u32 sp, u32 pmb)
 static LONG st_i3d;
 static u32 __stdcall la_SourceSetI3DL2Source(u32 sp, u32 p, u32 apply)
 {
+    loc_api_count(34); /* W363 */ LA_SPEC_GUARD(34);
     la_src_t *s = (la_src_t *)(uintptr_t)sp;
     u32 d[9];
     int i, t;
@@ -1332,8 +1792,11 @@ static u32 __stdcall la_SourceSetI3DL2Source(u32 sp, u32 p, u32 apply)
 
 static u32 __stdcall la_SourceStopSoundCues(u32 sp)
 {
+    loc_api_count(38); /* W363 */ LA_SPEC_GUARD(38);
     la_src_t *s = (la_src_t *)(uintptr_t)sp;
     int i;
+    LA_STOPLOG("LOCAUDIO stop: SourceStopSoundCues(Quelle %d) Aufrufer 0x%X", IS_SRC(s) ? (int)(s - s_src) : -1,
+               (u32)(uintptr_t)_ReturnAddress());
     lk();
     for (i = 0; i < LA_MAX_CUE; i++) {
         if (s_cue[i].state != 0 && s_cue[i].src == s) {
@@ -1346,6 +1809,7 @@ static u32 __stdcall la_SourceStopSoundCues(u32 sp)
 
 static u32 __stdcall la_SourceGetStatus(u32 sp, u32 pst)
 {
+    loc_api_count(39); /* W363 */ LA_SPEC_GUARD(39);
     la_src_t *s = (la_src_t *)(uintptr_t)sp;
     int i;
     u32 st = 0;
@@ -1359,6 +1823,213 @@ static u32 __stdcall la_SourceGetStatus(u32 sp, u32 pst)
     }
     ulk();
     la_out(pst, st);
+    return 0;
+}
+
+/* ---------------- W367 LOC-WMA: IXACTWmaPlayList ---------------- */
+/* Soundtrack-Einstellung im Spielspeicher (LoC-XBE, Ghidra gelesen): 0x57B529 an/aus, 0x57B52A Modus (0 Reihe, 1 Zufall),
+ * 0x57B524 Anzahl, 0x57B538 Eintraege je 12 Bytes {Soundtrack-ID, Lied-ID, ?, Lautstaerke, Spiel-Lied (0xFFFF = HDD)},
+ * 0x57B9DC Menue-Puffer (!= 0 nur im Soundtrack-Menue). */
+#define LW_VA_ON 0x57B529u
+#define LW_VA_MODE 0x57B52Au
+#define LW_VA_COUNT 0x57B524u
+#define LW_VA_ENTRIES 0x57B538u
+#define LW_VA_MENU 0x57B9DCu
+
+/* loc_wma_demo=1 (Test/Experimental): leeren Einsatz-Soundtrack mit den beiden Spiel-Liedern vorbelegen, als haette der
+ * Spieler sie im Optionsmenue gewaehlt (der Reihe nach, volle Lautstaerke). Nur beim Einsatzbeginn (kein Menue-Puffer). */
+static void la_wma_demo_fill(void)
+{
+    u32 cnt = 0, menu = 1;
+    if (!la_rd(LW_VA_COUNT, &cnt, 4) || !la_rd(LW_VA_MENU, &menu, 4) || cnt != 0 || menu != 0) {
+        return;
+    }
+    __try {
+        static const uint8_t ent[24] = { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xFF, 1, 0 };
+        LOC_RB_PREWRITE(LW_VA_ENTRIES, sizeof ent);
+        memcpy((void *)(uintptr_t)LW_VA_ENTRIES, ent, sizeof ent);
+        LOC_RB_PREWRITE(LW_VA_COUNT, 4);
+        *(volatile u32 *)(uintptr_t)LW_VA_COUNT = 2;
+        LOC_RB_PREWRITE(LW_VA_ON, 2);
+        *(volatile uint8_t *)(uintptr_t)LW_VA_MODE = 0;
+        *(volatile uint8_t *)(uintptr_t)LW_VA_ON = 1;
+        InterlockedIncrement(&st_wma_demo);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+static void la_wma_log(const char *what, const lw_pl_t *p, u32 a, u32 b)
+{
+    static volatile LONG n;
+    if (InterlockedIncrement(&n) <= 64) {
+        HLOG_I("LOCWMA: %s Liste %d (Cue %d, Flags %u, Lieder %d, aktuell %d) %u %u%s", what,
+               p ? (int)(p - s_pl) : -1, p ? p->cue : -1, p ? p->flags : 0, p ? p->n : 0, p ? p->cur : -1, a, b,
+               loc_rb_resim() ? " [Neurechnen: ohne Wirkung]" : "");
+    }
+}
+
+static u32 __stdcall la_CreateWmaPlayList(u32 sb, u32 cue, u32 flags, u32 pp)
+{
+    int i;
+    lw_pl_t *p = NULL;
+    loc_api_count(26); LA_SPEC_GUARD(26);
+    lk();
+    if (loc_rb_resim()) { /* Neurechnen: dieselbe (zuletzt live angelegte) Liste, nichts neu anlegen */
+        for (i = 0; i < LW_MAX_PL; i++) {
+            if (s_pl[i].kind == LW_K_PL && s_pl[i].sb == sb && s_pl[i].cue == (int)cue) {
+                p = &s_pl[i];
+            }
+        }
+        s_rs_add = 0;
+        InterlockedIncrement(&st_wma_rs);
+    } else {
+        for (i = 0; i < LW_MAX_PL && !p; i++) {
+            if (s_pl[i].kind != LW_K_PL) {
+                p = &s_pl[i];
+            }
+        }
+        if (p) {
+            lw_pl_init(p, sb, (int)cue, flags);
+            InterlockedIncrement(&st_wma_create);
+            if (s_mis_mask) { /* W375: Einsatzbeginn (Maske steht) - Missions-Playlist merken */
+                if (!s_mis_on) la_mission_begin(); /* Maske blieb seit der letzten Mission gesetzt */
+                s_mis_pl = p;
+            }
+        }
+    }
+    if (g_cfg.loc_wma_demo) {
+        la_wma_demo_fill();
+    }
+    la_wma_log("Create", p, cue, flags);
+    ulk();
+    if (!p) {
+        return LA_E_FAIL;
+    }
+    la_out(pp, (u32)(uintptr_t)p);
+    return 0;
+}
+
+static u32 __stdcall la_WmaRelease(u32 pl)
+{
+    lw_pl_t *p = (lw_pl_t *)(uintptr_t)pl;
+    loc_api_count(27); LA_SPEC_GUARD(27);
+    lk();
+    if (IS_PL(p) && !loc_rb_resim()) {
+        if (s_wma_pl == p) {
+            lw_player_stop();
+            if (s_wma_cue) {
+                s_wma_cue->wma = 0; /* Cue endet beim naechsten DoWork (Stopp-Meldung wie bisher) */
+            }
+            s_wma_cue = NULL;
+            s_wma_pl = NULL;
+        }
+        la_wma_log("Release", p, 0, 0);
+        if (s_mis_on && p == s_mis_pl) {
+            la_mission_end("Missions-Playlist freigegeben"); /* W375: FUN_0008D8D0 */
+        }
+        p->kind = 0;
+    } else if (IS_PL(p)) {
+        InterlockedIncrement(&st_wma_rs);
+    }
+    ulk();
+    return 0;
+}
+
+/* Eintrag (am Spiel belegt): {dwType, Pfad (char*), Soundtrack-ID, Lied-ID, Index}; Ausgabe: Lied-ID */
+static u32 __stdcall la_WmaAdd(u32 pl, u32 pent, u32 pid)
+{
+    lw_pl_t *p = (lw_pl_t *)(uintptr_t)pl;
+    u32 e[5], id = 0;
+    char path[LW_PATH];
+    int rc = 0;
+    loc_api_count(28); LA_SPEC_GUARD(28);
+    memset(e, 0, sizeof e);
+    path[0] = '\0';
+    if (!la_rd(pent, e, sizeof e)) {
+        return LA_E_FAIL;
+    }
+    if (e[0] == LW_ENTRY_FILE && e[1]) {
+        __try {
+            strncpy_s(path, sizeof path, (const char *)(uintptr_t)e[1], _TRUNCATE);
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            path[0] = '\0';
+        }
+    }
+    lk();
+    if (!IS_PL(p)) {
+        rc = -1;
+    } else if (loc_rb_resim()) {
+        id = LW_SONG_ID_BASE + (u32)s_rs_add++;
+        InterlockedIncrement(&st_wma_rs);
+    } else {
+        rc = lw_pl_add(p, e[0], path, e[2], e[3], &id);
+        InterlockedIncrement(&st_wma_add);
+        la_wma_log(path[0] ? path : "Add (Soundtrack der Festplatte)", p, e[0], id);
+    }
+    ulk();
+    if (rc != 0) {
+        return LA_E_FAIL;
+    }
+    la_out(pid, id);
+    return 0;
+}
+
+static u32 __stdcall la_WmaNext(u32 pl)
+{
+    lw_pl_t *p = (lw_pl_t *)(uintptr_t)pl;
+    loc_api_count(29); LA_SPEC_GUARD(29);
+    lk();
+    if (IS_PL(p) && !loc_rb_resim()) {
+        lw_pl_next(p);
+        InterlockedIncrement(&st_wma_next);
+        if (s_wma_pl == p && s_wma_cue && lw_player_active()) {
+            lw_player_jump(p); /* Taste "naechstes Lied" waehrend der Wiedergabe */
+        }
+        la_wma_log("Next", p, 0, 0);
+    } else if (IS_PL(p)) {
+        InterlockedIncrement(&st_wma_rs);
+    }
+    ulk();
+    return 0;
+}
+
+/* GetCurrentSongInfo(Liste, 0, Name (WCHAR), Zeichen, &Lied-ID) - am Aufrufer FUN_0008D200 belegt */
+static u32 __stdcall la_WmaGetCurrentSongInfo(u32 pl, u32 a2, u32 pname, u32 cch, u32 pid)
+{
+    lw_pl_t *p = (lw_pl_t *)(uintptr_t)pl;
+    int song = -1;
+    u32 id = 0;
+    loc_api_count(30); LA_SPEC_GUARD(30);
+    (void)a2;
+    lk();
+    if (IS_PL(p)) {
+        song = (s_wma_pl == p && lw_player_song() >= 0) ? lw_player_song() : p->cur;
+        if (song >= 0 && song < p->n) {
+            id = p->e[song].id;
+        } else {
+            song = -1;
+        }
+    }
+    ulk();
+    if (song < 0) {
+        return LA_E_FAIL;
+    }
+    if (pname && cch) {
+        la_out(pname, 0); /* leerer Titel (Null-Zeichen) */
+    }
+    la_out(pid, id);
+    return 0;
+}
+
+static u32 __stdcall la_WmaSetPlaybackBehavior(u32 pl, u32 b)
+{
+    lw_pl_t *p = (lw_pl_t *)(uintptr_t)pl;
+    loc_api_count(31); LA_SPEC_GUARD(31);
+    lk();
+    if (IS_PL(p) && !loc_rb_resim()) {
+        p->behavior = b;
+    }
+    ulk();
     return 0;
 }
 
@@ -1409,15 +2080,84 @@ int loc_audio_install(void)
     LA_PATCH(IXACTSoundBank_Stop, la_Stop);
     LA_PATCH(IXACTSoundSource_Release, la_SourceRelease);
     LA_PATCH(IXACTSoundSource_SetPosition, la_SourceSetPosition);
+    LA_PATCH(IXACTSoundSource_SetVelocity, la_SourceSetVelocity); /* W363 Doppler */
+    LA_PATCH(IXACTEngine_SetListenerVelocity, la_SetListenerVelocity); /* W363 Doppler */
     LA_PATCH(IXACTSoundSource_SetMixBins, la_SourceSetMixBins);
     LA_PATCH(IXACTSoundSource_SetMixBinVolumes, la_SourceSetMixBinVolumes);
     LA_PATCH(IXACTSoundSource_SetI3DL2Source, la_SourceSetI3DL2Source); /* W356 */
     LA_PATCH(IXACTSoundSource_StopSoundCues, la_SourceStopSoundCues);
     LA_PATCH(IXACTSoundSource_GetStatus, la_SourceGetStatus);
+    if (g_cfg.loc_wma) { /* W367 LOC-WMA: Playlist ueber Media Foundation (0 = Stub aus loc_boot.c, stumm) */
+        LA_PATCH(IXACTSoundBank_CreateWmaPlayList, la_CreateWmaPlayList);
+        LA_PATCH(IXACTWmaPlayList_Release, la_WmaRelease);
+        LA_PATCH(IXACTWmaPlayList_Add, la_WmaAdd);
+        LA_PATCH(IXACTWmaPlayList_Next, la_WmaNext);
+        LA_PATCH(IXACTWmaPlayList_GetCurrentSongInfo, la_WmaGetCurrentSongInfo);
+        LA_PATCH(IXACTWmaPlayList_SetPlaybackBehavior, la_WmaSetPlaybackBehavior);
+        HLOG_I("LOCWMA: WMA-Playlist aktiv (loc_wma=1, Media Foundation im eigenen Thread%s)",
+               g_cfg.loc_wma_demo ? ", loc_wma_demo=1: leerer Einsatz-Soundtrack wird vorbelegt" : "");
+    }
     s_active = 1;
-    HLOG_I("LOCAUDIO: XACT-HLE aktiv, %u Einstiege (WMA-Playlist, I3DL2, Velocity, CommitDeferred bleiben Stub)",
-           s_npatch);
+    HLOG_I("LOCAUDIO: XACT-HLE aktiv, %u Einstiege (WMA-Playlist %s, CommitDeferred bleibt Stub; Einstellungen gelten sofort)",
+           s_npatch, g_cfg.loc_wma ? "ueber Media Foundation (W367)" : "Stub");
     return 1;
+}
+
+
+/* W363 DIAG(LOC-ORIGINAL, audio_api_diag): Inventur der XACT-/DirectSound-Einstiege (Aufrufe je Einstieg,
+ * H = eigene HLE-Umsetzung in loc_audio.c, S = Stub aus loc_boot.c). Ids = Stub-Nummern (loc_boot.c). */
+static const char *const s_api_name[40] = {
+    "DirectSoundCreate",
+    "XAudioDownloadEffectsImage",
+    "DirectSoundUseFullHRTF",
+    "DirectSoundDoWork",
+    "XACTEngineDoWork",
+    "XACTEngineCreate",
+    "E_CreateSoundSource",
+    "E_CreateSoundBank",
+    "E_RegisterWaveBank",
+    "E_RegisterStreamedWaveBank",
+    "E_UnRegisterWaveBank",
+    "E_SetMasterVolume",
+    "E_SetI3dl2Listener",
+    "E_SetListenerOrientation",
+    "E_SetListenerPosition",
+    "E_SetListenerVelocity",
+    "E_GlobalPause",
+    "E_RegisterNotification",
+    "E_GetNotification",
+    "E_CommitDeferredSettings",
+    "E_EnableHeadphones",
+    "E_SetParameterControl",
+    "SB_GetSoundCueIndexFromFriendlyName",
+    "SB_PrepareEx",
+    "SB_PlayEx",
+    "SB_Stop",
+    "SB_CreateWmaPlayList",
+    "WMA_Release",
+    "WMA_Add",
+    "WMA_Next",
+    "WMA_GetCurrentSongInfo",
+    "WMA_SetPlaybackBehavior",
+    "SS_Release",
+    "SS_SetPosition",
+    "SS_SetI3DL2Source",
+    "SS_SetVelocity",
+    "SS_SetMixBins",
+    "SS_SetMixBinVolumes",
+    "SS_StopSoundCues",
+    "SS_GetStatus" };
+static void la_api_report(int waited_s)
+{
+    char b[2048];
+    int i, o;
+    o = _snprintf_s(b, sizeof b, _TRUNCATE, "LOCAPI t=%ds", waited_s);
+    for (i = 0; i < 40 && o > 0 && o < (int)sizeof b - 48; i++) {
+        long n = loc_api_calls(i);
+        if (n) { o += _snprintf_s(b + o, sizeof b - o, _TRUNCATE, " %s:%ld%c", s_api_name[i], n, (0xFF03F7FFF0ULL >> i) & 1u ? 'H' : 'S'); }
+    }
+    HLOG_I("%s", b);
+    HLOG_I("LOCAPI t=%ds Geschwindigkeit != 0: %ld, max |v| = %.2f; RPC angewendet %ld, ohne Kurve %ld", waited_s, s_vel_nz, sqrt((double)s_vel_max2), st_rpc, st_rpc_none);
 }
 
 void loc_audio_tick(int waited_s)
@@ -1426,6 +2166,7 @@ void loc_audio_tick(int waited_s)
     if (!s_active || waited_s % 30 != 0) {
         return;
     }
+    if (g_cfg.audio_api_diag) { la_api_report(waited_s); } /* W363 */
     lk();
     for (i = 0; i < LA_MAX_CUE; i++) {
         act += s_cue[i].state == 2;
@@ -1439,4 +2180,16 @@ void loc_audio_tick(int waited_s)
            "verdraengt %ld) Streams=%ld (Pakete %ld, Lesefehler %ld) WMA-stumm=%ld Fehler=%ld",
            waited_s, st_play, st_prep, act, st_stop, st_end, st_notes, st_drop_notes, st_tracks, st_loops, st_voices,
            s_npool, busy, st_reuse, st_evict, st_streams, st_spkts, st_sread_fail, st_wma, st_fail);
+    if (st_stream_steal) /* W379 (#54) */
+        HLOG_I("LOCAUDIO: t=%ds Streaming-Welle neu gestartet, alte Instanz beendet=%ld", waited_s, st_stream_steal);
+    if (st_mis_stop || st_orphan_stop) /* W375 (#51) */
+        HLOG_I("LOCAUDIO: t=%ds Missionsende-Stopps=%ld Rollback-Waisen-Stopps=%ld (Schleifen-Cues)", waited_s, st_mis_stop,
+               st_orphan_stop);
+    if (g_cfg.loc_wma) { /* W367 */
+        char b[256];
+        lw_player_stats(b, sizeof b);
+        HLOG_I("LOCWMA: t=%ds Listen=%ld Eintraege=%ld Next=%ld Musikstarts=%ld Meldungen=%ld Neurechnen-ohne-Wirkung=%ld "
+               "Vorbelegt=%ld | %s", waited_s, st_wma_create, st_wma_add, st_wma_next, st_wma_start, st_wma_notes,
+               st_wma_rs, st_wma_demo, b);
+    }
 }

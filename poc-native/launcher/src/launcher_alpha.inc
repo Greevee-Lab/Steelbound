@@ -220,6 +220,10 @@ static void alpha_ab_toggle(int id, const char *key)
         set_status_k(LT("gui.alpha_ab_nowrite"), 2);
         return;
     }
+    game_cfg_path(LGAME_LOC, uc, sizeof uc); /* W402: Test-Tools sind global -> auch Line of Contact (falls Datei da) */
+    if (u8_GetFileAttributes(uc) != INVALID_FILE_ATTRIBUTES) {
+        (void)la_cfg_set(uc, key, on ? "1" : "0");
+    }
     ui_set_checked(id, on);
     set_status_k(LT("gui.alpha_ab_saved"), 1);
 }
@@ -428,19 +432,20 @@ void alpha_gui_selftest(const char *client_override, int *pass, int *fail)
         if (nav) {
             ui_gettext(nav->h, t, sizeof t);
         }
-        if (!nav || !ui_visible_on(nav, P_PLAY) || !ui_visible_on(nav, P_ALPHA) ||
-            strcmp(t, LT("gui.alpha_page")) != 0) {
+        /* W397 LAUNCHER-STRUCT: kein Navigationseintrag mehr; Zugang ueber Zahnrad > Test tools */
+        if (!nav || ui_visible_on(nav, P_PLAY) || strcmp(t, LT("gui.alpha_page")) != 0 ||
+            !ui_visible_on(ui_find(ID_LSET_TOOLS), P_LSET)) {
             ok = 0;
-            strcpy_s(why, sizeof why, "Navigationseintrag");
+            strcpy_s(why, sizeof why, "Zugang (Zahnrad > Test tools)");
         }
-        show_page(P_ALPHA);
+        on_command(ID_LSET_TOOLS, BN_CLICKED);
         if (ok && (g_page != P_ALPHA || !ui_visible_on(ui_find(ID_AL_START), P_ALPHA) ||
                    ui_visible_on(ui_find(ID_AL_START), P_ADV) || !ui_visible_on(ui_find(ID_AL_MIS), P_ALPHA))) {
             ok = 0;
             strcpy_s(why, sizeof why, "Seite/Elemente");
         }
-        if (ok && (nav_next(P_ADV, 1) != P_ALPHA || nav_next(P_ALPHA, 1) != P_PLAY ||
-                   nav_next(P_PLAY, -1) != P_ALPHA || gui_page_from_name("alpha") != P_ALPHA ||
+        if (ok && (nav_next(P_ADV, 1) != P_PLAY || nav_next(P_ALPHA, 1) != P_PLAY || /* W397: nicht im Zyklus */
+                   nav_next(P_PLAY, -1) != P_ADV || gui_page_from_name("alpha") != P_ALPHA ||
                    gui_page_from_name("tools") != P_ALPHA || /* W301: neuer Name + alter Alias */
                    strcmp(gui_page_key(P_ALPHA), "tools") != 0)) {
             ok = 0;
@@ -519,14 +524,14 @@ void alpha_gui_selftest(const char *client_override, int *pass, int *fail)
             g_alpha_tools = 0;
             alpha_tools_apply();
             show_page(P_ALPHA);
-            if (ui_visible_on(nav, P_PLAY) || g_page == P_ALPHA || nav_next(P_ADV, 1) != P_PLAY ||
+            if (ui_visible_on(nav, P_PLAY) || g_page == P_ALPHA || ui_visible_on(ui_find(ID_LSET_TOOLS), P_LSET) || nav_next(P_ADV, 1) != P_PLAY ||
                 nav_next(P_PLAY, -1) != P_ADV) {
                 ok = 0;
                 strcpy_s(why, sizeof why, "alpha_tools=0");
             }
             g_alpha_tools = 1;
             alpha_tools_apply();
-            if (ok && (!ui_visible_on(nav, P_PLAY) || nav_next(P_ADV, 1) != P_ALPHA)) {
+            if (ok && (!ui_visible_on(ui_find(ID_LSET_TOOLS), P_LSET) || ui_visible_on(nav, P_PLAY))) { /* W397 */
                 ok = 0;
                 strcpy_s(why, sizeof why, "alpha_tools=1 zurueck");
             }

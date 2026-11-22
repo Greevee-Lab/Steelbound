@@ -7,6 +7,9 @@ against other pilots through our own meeting point. Line of Contact support is n
 
 No game data is included – you need your own copy of *Steel Battalion: Line of Contact*.
 
+All VTs, missions (maps) and items are always unlocked for every player, as with the original unlock code back
+then, so everyone in a match has the same choice; pilots you already have get the missing VTs the next time they load.
+
 ## What you need
 
 - Windows 10 or 11 (64-bit), mouse and keyboard, a gamepad or the original controller.
@@ -24,10 +27,13 @@ No game data is included – you need your own copy of *Steel Battalion: Line of
    A green line (*"Line of Contact found … Ready to play"*) means it is fine.
 3. If you want to play over the internet: open the **launcher settings** with the gear at the top right
    and choose **Connect to steelnet** under *Online & updates* (on first start the launcher asks you
-   this once). Optional: create an account under **Multiplayer › Account** (sub-item in the sidebar
-   while Multiplayer is open). The page shows at the top whether your account is secured; *Connect
-   with Discord* (recommended), a login and password (you choose it yourself) or your recovery code
-   bring it back on a new PC. Sign out and delete sit at the bottom.
+   this once). Optional: create a **steelnet account** under **Multiplayer › Account** (sub-item in
+   the sidebar while Multiplayer is open) – no password, no email. New here? Pick an account name
+   (shown to other players) and press *Create account*. Already have one? *Sign in with Discord*, or
+   use your login and password, or a code from another PC or from the admin. Afterwards the page shows
+   one step: secure your account with *Secure with Discord* (recommended), a login and password
+   (private, only for signing in) or by writing down your recovery code. Redeeming a code, signing out
+   and deleting the account sit under *Manage*.
 4. Press **Play Line of Contact**.
 
 Each game has its own settings: display, graphics, controls, audio and extras you change while
@@ -103,7 +109,7 @@ On the Line of Contact pages of the launcher:
 
 | Option | What it does |
 |---|---|
-| **Picture format** – **4:3 (Original)** / 16:9 / 720p | 16:9 and 720p are the console's own widescreen modes and are **experimental** (not the original picture). Takes effect on the next start. |
+| **Picture format** – 4:3 (Original) / **16:9 (game mode)** | **16:9 is the default**: the console's own widescreen mode, never stretched, not marked as experimental. The widescreen sides default to *Fade out* (visible on screens wider than 16:9). Saved settings switch to 16:9 once; you can still choose 4:3 under Advanced. Takes effect on the next start. |
 | Frame rate | *Original rate* shows the mission exactly as the console (20 pictures per second, least graphics power); higher rates add in-between frames. |
 
 Your own looking around and crosshair react immediately, and corrections of your fellow pilots are

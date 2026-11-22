@@ -132,6 +132,10 @@ int assist_cfg_owns(const char *key);
 int joycal_cfg_owns(const char *key);
 int joycal_cfg_apply(const char *user_cfg, const char lines[][96], int n);
 int joycal_cfg_read(const char *user_cfg, char lines[][96], int cap);
+/* W419 CTRL-EXPORT: wie oben mit frei gewaehltem Besitzer (owns je Key).
+ * rewrite ersetzt ALLE Zeilen, die owns erfuellen, durch lines. */
+int assist_cfg_rewrite_fn(const char *user_cfg, const char lines[][96], int n, int (*owns)(const char *key));
+int assist_cfg_read_fn(const char *user_cfg, char lines[][96], int cap, int (*owns)(const char *key));
 
 #ifdef __cplusplus
 }

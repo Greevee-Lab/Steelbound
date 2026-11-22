@@ -33,6 +33,7 @@ void hcfg_defaults(void)
     g_cfg.loc_net_nodelay = 1;   /* W322: TCP_NODELAY (nur LoC-Netz-HLE) */
     g_cfg.loc_net_leave_reset = 1; /* W350: Stromende eines Mitspielers = Verbindungsreset (Abgang wie XNet) */
     g_cfg.loc_route = 1;        /* W395 LOC-ROUTE: kuerzester Weg je Mitspieler, Wechsel im Spiel */
+    g_cfg.loc_transport_open_hold = 3000; /* W409 LOC-MESH-KICK: OPEN halten, bis das eigene Spiel TCP 1000 annimmt */
     g_cfg.guest_wx = -1;         /* W339: W^X automatisch (LoC an, SB aus) */
     strcpy_s(g_cfg.loc_transport, sizeof g_cfg.loc_transport, "tcp"); /* W324: Original, bis abgenommen */
     g_cfg.loc_transport_proxy = 21000;
@@ -261,6 +262,12 @@ void hcfg_defaults(void)
     g_cfg.loc_aim_diag_n = 0;
     g_cfg.loc_ui_diag = 0; /* DIAG(W349) */
     g_cfg.loc_interp_rzalt = 1; /* W349 LOC-FRAMES-2: rawchg-Partner per Kamera-Pruefung (nur LoC) */
+    g_cfg.loc_wlag_fix = 1; /* W412 LOC-WORLD-LAG: Himmel mit derselben vorhergesagten Kamera wie die Welt (Nachweis W412) */
+    g_cfg.loc_stat_fix = 1; /* W415 LOC-STATIC-LAG: Gelaende in Zwischenbildern mit der Kamera der Welt bewegen (Nachweis W415) */
+    g_cfg.loc_sndloop_fix = 1; /* W413 LOC-SOUND-LOOP (#65): Ton nach dem Neurechnen mit der korrigierten Zeitlinie abgleichen */
+    g_cfg.loc_sndloop_grace = 30; /* W413: Sicherheitsnetz, Ticks ohne Besitzer bis zum Stopp */
+    g_cfg.loc_audio_loopcount = 1; /* W413: Schleifenzahl der XSB (direkte Eintraege einmal, Sound-Spuren 0/n/endlos) */
+    g_cfg.loc_interp_rawrzb = 1; /* W410 LOC-GFX-JITTER: rawlerp ruhender Welt-Draws per Matrix-Lerp (1 = LoC, 2 = auch SB, 0 = aus) */
     g_cfg.loc_interp_rejcam = 1; /* W340 LOC-FRAMES: unplausible Spruenge mit Kamera-Pruefung lerpen (nur LoC) */
     g_cfg.loc_widescreen = 0; /* W326 LOC-WIDE: 4:3 wie bisher (nur LoC) */
     g_cfg.loc_vdata_s = 1; /* W342 LOC-DISPLAY: UI-Grundformen per SetVertexData2s/4s (nur LoC) */
@@ -291,6 +298,9 @@ void hcfg_defaults(void)
     g_cfg.ip_gdiag = 0; /* W174 DIAG */
     g_cfg.ip_match_compact = 1; /* W174 PERF-M2: Standard 1 (Selbstpruefung W174_m2: 25,4 Mio. Vergleiche abweichend=0; Zuordnung am Swap im dichten M2 schneller) */
     g_cfg.krnl_reg_cache = 1; /* W174 PERF-M2: Standard 1 (W174_c0b/c1 Testtakt M2 dicht: Tick-Last 27,4 -> 24,7 ms, Kern 16) */
+    g_cfg.memreg_keep = 1; /* W417 SB-BRIEF-BLACK (#66): verdraengte Register-Eintraege behalten (wirkt erst nach Ring-Ueberlauf) */
+    g_cfg.loc_rule_clipdump_block = 1; /* W420 LOC-CLIPDUMP: Nutzerentscheid 22.11., Standard an (Host-Regel) */
+    g_cfg.loc_clip_diag = 0; /* W420 DIAG */
     g_cfg.ip_ablate = 0; /* W174 DIAG */
     g_cfg.hlog_async = 1; /* W168 PERF-TICK */
     g_cfg.audio_decode_par = 4; /* W168 PERF-TICK */
@@ -898,6 +908,8 @@ static int set_key_w395(const char *k, const char *v)
 {
     if (strcmp(k, "loc_route") == 0) { g_cfg.loc_route = atoi(v) ? 1 : 0; }
     else if (strcmp(k, "loc_route_sim") == 0) { strcpy_s(g_cfg.loc_route_sim, sizeof g_cfg.loc_route_sim, v); } /* TEST */
+    else if (strcmp(k, "loc_transport_open_hold") == 0) { g_cfg.loc_transport_open_hold = atoi(v); } /* W409 */
+    else if (strcmp(k, "loc_test_open_refuse") == 0) { g_cfg.loc_test_open_refuse = atoi(v); }        /* W409 TEST */
     else { return 0; }
     return 1;
 }
@@ -937,11 +949,66 @@ static int set_key_w406(const char *k, const char *v)
     return 1;
 }
 
+static int set_key_w410(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_interp_rawrzb") == 0) { g_cfg.loc_interp_rawrzb = atoi(v); } /* W410 LOC-GFX-JITTER */
+    else { return 0; }
+    return 1;
+}
+
+/* W412 LOC-WORLD-LAG: eigene Schluessel (C1026) */
+static int set_key_w412(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_wlag_diag") == 0) { g_cfg.loc_wlag_diag = atoi(v); } /* DIAG */
+    else if (strcmp(k, "loc_wlag_fix") == 0) { g_cfg.loc_wlag_fix = atoi(v); } /* FIX */
+    else { return 0; }
+    return 1;
+}
+
+/* W413 LOC-SOUND-LOOP: eigene Schluessel (C1026) */
+static int set_key_w413(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_sndloop_fix") == 0) { g_cfg.loc_sndloop_fix = atoi(v); } /* FIX */
+    else if (strcmp(k, "loc_sndloop_grace") == 0) { g_cfg.loc_sndloop_grace = atoi(v); } /* FIX */
+    else if (strcmp(k, "loc_sndloop_diag") == 0) { g_cfg.loc_sndloop_diag = atoi(v); } /* DIAG */
+    else if (strcmp(k, "loc_audio_loopcount") == 0) { g_cfg.loc_audio_loopcount = atoi(v); } /* FIX */
+    else { return 0; }
+    return 1;
+}
+
+/* W415 LOC-STATIC-LAG: eigene Schluessel (C1026) */
+static int set_key_w415(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_stat_diag") == 0) { g_cfg.loc_stat_diag = atoi(v); } /* DIAG */
+    else if (strcmp(k, "loc_stat_fix") == 0) { g_cfg.loc_stat_fix = atoi(v); } /* FIX */
+    else { return 0; }
+    return 1;
+}
+/* W417 SB-BRIEF-BLACK: eigene Schluessel (C1026) */
+static int set_key_w417(const char *k, const char *v)
+{
+    if (strcmp(k, "memreg_diag") == 0) { g_cfg.memreg_diag = atoi(v); } /* DIAG */
+    else if (strcmp(k, "memreg_keep") == 0) { g_cfg.memreg_keep = atoi(v); } /* FIX */
+    else { return 0; }
+    return 1;
+}
+
+/* W420 LOC-CLIPDUMP: eigene Schluessel (C1026) */
+static int set_key_w420(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_rule_clipdump_block") == 0) { g_cfg.loc_rule_clipdump_block = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "loc_clip_diag") == 0) { g_cfg.loc_clip_diag = atoi(v); } /* DIAG */
+    else { return 0; }
+    return 1;
+}
+
 static void set_key_b(const char *k, const char *v);
 static void set_key(const char *k, const char *v)
 {
     if (set_key_remaster(k, v) || set_key_overlay(k, v) || set_key_vr(k, v) || set_key_w371(k, v) || set_key_w376(k, v) ||
-        set_key_w395(k, v) || set_key_lsarb(k, v) || set_key_imlock(k, v) || set_key_w405(k, v) || set_key_w406(k, v)) {
+        set_key_w395(k, v) || set_key_lsarb(k, v) || set_key_imlock(k, v) || set_key_w405(k, v) || set_key_w406(k, v) ||
+        set_key_w410(k, v) || set_key_w412(k, v) || set_key_w413(k, v) || set_key_w415(k, v) || set_key_w417(k, v) ||
+        set_key_w420(k, v)) {
         return;
     }
     if (strcmp(k, "xbe_path") == 0) {

@@ -143,8 +143,12 @@ typedef struct {
     int cp_es, cp_ed;
     unsigned char law; /* W376 LOC-LOCAL-AIM: 1 = Welt-Draw (Kamera-Korrektur), 2 = Fadenkreuz-Draw (Verschiebung);
                         * W394: 3 + j = HUD-Marke des VT j (Verschiebung), LA_LAW_CMP Kompassband, LA_LAW_RAD Radar */
+    unsigned char wlc; /* W412 LOC-WORLD-LAG: Klasse im Weltziel (li_smooth_apply): 1 Welt mit Kamera K, 2 eigener VT,
+                        * 3 nicht affin zur Kamera, 4 anderer VT (Versatz X), 5 Welt ohne K (keine Vorhersage),
+                        * 6 Himmel (Weltkoordinaten, eigene Tiefe) mit K (loc_wlag_fix) */
 } ip_op_t;
 static volatile LONG li_cp_rec, li_cp_ok, li_cp_rep; /* W340: Kopier-Ops aufgezeichnet / mit Schatten / wiedergegeben (LOCINTERP stat) */
+static volatile LONG wl_fix_lists, wl_fix_draws; /* W412 LOC-WORLD-LAG: Listen/Draws mit Himmel-Kamera (Zeile LOCINTERP wlag) */
 static volatile LONG li_cp_seen; /* W347: Kopien waehrend der Aufzeichnung (SB: INTERP selfcopy) */
 /* W317 INTERP-PAIR: Matrix N-1 eines gelerpten Draws (rzm: eigene Matrix, sonst die des Partners a) */
 #define IP_AMVP(o, a) ((o)->rzm ? (o)->mva : (a)->mvp)
@@ -2233,6 +2237,7 @@ static int zc_cam_src(const ip_op_t *a, const ip_op_t *r)
  * (Meeres-Kacheln) den Welt-Test bekommen. */
 static ID3D11DepthStencilView *rz_dkey(const ip_op_t *o) { return (g_cfg.interp_streak & 2) ? NULL : o->dsv; }
 static unsigned st_sk_rl, st_sk_rlcam, st_sk_rlofs, st_sk_nod, st_sk_ln; /* W294: Zaehler */
+static unsigned st_w410_rzb, st_w410_big, st_w410_cam, st_w410_mov, st_w410_rzm; /* W410 loc_interp_rawrzb: Matrix-Lerp statt Vertex-Lerp (davon >= 1000 Vertices), Matrix passt nicht zur Kamera, Bezugs-Vertices bewegt */
 
 /* W294 Bit 1: Kamera-Kandidaten nach Mehrheit statt Groesse. Ruhende Welt-Geometrie mit Matrix = VP
  * (Kacheln, Gelaendestreifen) teilt sich bitgenau dasselbe Matrix-Paar (M_A, M_B); in M2 faehrt die Kamera
@@ -2643,6 +2648,112 @@ static void pr_mul_di(float out[16], const float m[16], const double Di[16])
                                      m[r * 4 + 2] * Di[2 * 4 + c] + m[r * 4 + 3] * Di[3 * 4 + c]);
         }
     }
+}
+/* W410: D^-1 = M_B^-1 * M_A des haeufigsten gelerpten Matrix-Paars im Ziel von o (nach rz_cam_pre). 1 = ok. */
+static int w410_cam_inv(const ip_list_t *A, const ip_list_t *B, const ip_op_t *o, double Di[16])
+{
+    int x;
+    for (x = 0; x < rz_pn; x++) {
+        if (rz_prt[x] == o->rtv && rz_pds[x] == rz_dkey(o) && rz_prr[x][0] >= 0) {
+            const ip_op_t *r = &B->ops[rz_prr[x][0]];
+            return zc_dmat(Di, r->mvp, A->ops[r->match].mvp);
+        }
+    }
+    return 0;
+}
+/* FIX(W415 LOC-STATIC-LAG) loc_stat_fix: Kamera der Welt fuer "mit der Kamera bewegen" (rzm) in LoC.
+ * Befund W415_R2d (Mission 02 Stadt, Drehen, 120 FPS): die W410-Kamera (haeufigstes gleiche Matrix-Paar unter den
+ * GELERPTEN Draws, rz_cam_pre) ist dort ein fast ruhendes Paar (Tickweg der Bildmitte 0,0-0,4 px), denn die Geometrie in
+ * Weltkoordinaten (Gelaende-Kacheln, grosses Bodennetz) wird je Tick neu gebaut (rawlerp/nomatch) und zaehlt nicht mit;
+ * Gebaeude haben je eigene Weltmatrix. Die gelerpten Gebaeude und die Kamera der Weltkoordinaten-Draws (haeufigste
+ * gleiche Matrix der Liste, wie la_cam_of) zeigen dagegen 7-12 px Tickweg. Folge: Gelaende-Kacheln (rzm) und das
+ * grosse Bodennetz (nomatch, Vertexzahl wechselt je Tick -> exakt) standen in den Zwischenbildern still, die Gebaeude
+ * glitten -> Gebaeude/Masten schwimmen gegen den Boden. Kamera hier: D^-1 = C_B^-1 * C_A der haeufigsten gleichen Matrix
+ * im Weltziel beider Listen, bestaetigt durch >= 3 gelerpte bewegte Matrix-Draws mit demselben Tickweg (9 Probepunkte,
+ * < 2e-4 NDC). Je Tick-Paar einmal berechnet. */
+static ID3D11RenderTargetView *la_world_rtv(const ip_list_t *L, unsigned *split);
+static struct {
+    unsigned serA, serB;
+    int ok, ia;
+    ID3D11RenderTargetView *rtv;
+    double Di[16];
+    float camB[16];
+} w415_wc;
+static unsigned st_w415_rzm, st_w415_nm, st_w415_nocam, st_w415_cam, st_w415_rej; /* Zaehler (LOCINTERP stat415) */
+static int w415_cam_find(const ip_list_t *L, ID3D11RenderTargetView **wt, int *idx, unsigned *cnt)
+{
+    enum { NC = 64 };
+    unsigned cidx[NC], cn[NC], nc = 0, i, k, best = 0, sp = L->nops;
+    *wt = la_world_rtv(L, &sp);
+    if (!*wt) { return 0; }
+    for (i = 0; i < sp; i++) {
+        const ip_op_t *o = &L->ops[i];
+        if (o->kind != IP_DRAW || o->rtv != *wt || o->nv < 3u || !o->cls || ip_mvp_affine(o->mvp)) { continue; }
+        for (k = 0; k < nc; k++) { if (memcmp(L->ops[cidx[k]].mvp, o->mvp, 64) == 0) { cn[k]++; break; } }
+        if (k == nc && nc < NC) { cidx[nc] = i; cn[nc] = 1; nc++; }
+    }
+    if (!nc) { return 0; }
+    for (k = 1; k < nc; k++) { if (cn[k] > cn[best]) { best = k; } }
+    *idx = (int)cidx[best];
+    *cnt = cn[best];
+    return 1;
+}
+/* groesste Abweichung (NDC) zweier Tick-Bewegungen D an 9 Probepunkten im Bild (Tiefe 0,99) */
+static double w415_dev(const double X[16], const double Y[16])
+{
+    int px, py, j;
+    double mx = 0.0;
+    for (px = -1; px <= 1; px++) {
+        for (py = -1; py <= 1; py++) {
+            double c[4] = { 0.6 * px, 0.6 * py, 0.99, 1.0 }, a[4], b[4];
+            for (j = 0; j < 4; j++) {
+                a[j] = c[0] * X[0 * 4 + j] + c[1] * X[1 * 4 + j] + c[2] * X[2 * 4 + j] + c[3] * X[3 * 4 + j];
+                b[j] = c[0] * Y[0 * 4 + j] + c[1] * Y[1 * 4 + j] + c[2] * Y[2 * 4 + j] + c[3] * Y[3 * 4 + j];
+            }
+            if (a[3] <= 1e-9 || b[3] <= 1e-9) { return 1e9; }
+            mx = fmax(mx, fmax(fabs(a[0] / a[3] - b[0] / b[3]), fabs(a[1] / a[3] - b[1] / b[3])));
+        }
+    }
+    return mx;
+}
+static int w415_world_cam(const ip_list_t *A, const ip_list_t *B, const ip_op_t *o, double Di[16], int *ia)
+{
+    if (!g_sba_loc || g_cfg.vr_enable || !(g_cfg.loc_stat_fix || (g_cfg.loc_stat_diag & 1))) { return 0; } /* Diagnose misst auch ohne Fix */
+    if (w415_wc.serA != A->serial || w415_wc.serB != B->serial) {
+        ID3D11RenderTargetView *wa = NULL, *wb = NULL;
+        int xa = -1, xb = -1;
+        unsigned ca = 0, cb = 0, i, nok = 0;
+        w415_wc.serA = A->serial; w415_wc.serB = B->serial; w415_wc.ok = 0;
+        if (w415_cam_find(A, &wa, &xa, &ca) && w415_cam_find(B, &wb, &xb, &cb) && wa == wb && ca >= 4u && cb >= 4u &&
+            zc_dmat(w415_wc.Di, B->ops[xb].mvp, A->ops[xa].mvp)) {
+            for (i = 0; i < B->nops && nok < 3u; i++) { /* Bestaetigung: gelerpte, bewegte Matrix-Draws mit demselben Tickweg */
+                const ip_op_t *r = &B->ops[i];
+                const ip_op_t *q = (r->match >= 0 && (unsigned)r->match < A->nops) ? &A->ops[r->match] : NULL;
+                double Dx[16];
+                if (r->kind != IP_DRAW || !r->cls || r->rtv != wb || !r->flag || !q || r->why != IP_W_LERP || r->rzb || r->rzm ||
+                    ip_mvp_affine(r->mvp) || memcmp(q->mvp, r->mvp, sizeof r->mvp) == 0) { continue; }
+                if (zc_dmat(Dx, r->mvp, q->mvp) && w415_dev(Dx, w415_wc.Di) < 2e-4) { nok++; }
+            }
+            if (nok >= 3u) {
+                w415_wc.ok = 1; w415_wc.rtv = wb; w415_wc.ia = xa;
+                memcpy(w415_wc.camB, B->ops[xb].mvp, sizeof w415_wc.camB);
+                st_w415_cam++;
+            } else { st_w415_rej++; }
+        } else { st_w415_nocam++; }
+    }
+    if (!w415_wc.ok || o->rtv != w415_wc.rtv) { return 0; }
+    memcpy(Di, w415_wc.Di, sizeof w415_wc.Di);
+    if (ia) { *ia = w415_wc.ia; }
+    return 1;
+}
+/* W415: Bezugs-Draw (Tick N) der W410-Kamera im Ziel von o (nach rz_cam_pre), NULL = keiner */
+static const ip_op_t *w415_cam_ref(const ip_list_t *B, const ip_op_t *o)
+{
+    int x;
+    for (x = 0; x < rz_pn; x++) {
+        if (rz_prt[x] == o->rtv && rz_pds[x] == rz_dkey(o) && rz_prr[x][0] >= 0) { return &B->ops[rz_prr[x][0]]; }
+    }
+    return NULL;
 }
 static const char *pr_why(unsigned w)
 {
@@ -3092,6 +3203,84 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
             int t = -1, x, c, ofs;
             if (o->kind != IP_DRAW || !o->cls) { continue; }
             if (!o->dsv && !(g_cfg.interp_streak & 2)) { continue; }
+            if (g_sba_loc && g_cfg.loc_stat_fix && !g_cfg.vr_enable && o->dsv && !o->rzb && !ip_mvp_affine(o->mvp) &&
+                (o->why == IP_W_NOMATCH || o->why == IP_W_RAWCHG || o->why == IP_W_REJECT ||
+                 (o->why == IP_W_RAWLERP && o->flag && o->nv >= 1000u))) {
+                /* FIX(W415 LOC-STATIC-LAG): Draw in Weltkoordinaten (Matrix bitgleich der Kamera der Welt) ohne brauchbaren
+                 * Partner: das grosse Bodennetz der Stadt (~45 700 Vertices; Vertexzahl wechselt je Tick -> nomatch, sonst
+                 * rawlerp mit falschen Vertex-Partnern bzw. rawchg), Fern-Streifen (nomatch), weite Spruenge (reject). Blieb exakt
+                 * (Tick-N-Lage, 20 Hz) bzw. wurde Vertex i <-> i gemischt, waehrend die Gebaeude glitten. Tick-N-Vertices mit der
+                 * Welt-Kamera bewegen (rzm, wie W410 Regel 2): exakt fuer ruhende Welt, ohne Drehung D = I = wie bisher; fuer in
+                 * der Welt Bewegtes (Partikel in Weltkoordinaten) nie schlechter als exakt. Partner ohne Zuordnung = Platzhalter
+                 * (rzb liest nur Tick-N-Vertices). */
+                double Dw[16];
+                int ia = -1;
+                if (w415_world_cam(A, B, o, Dw, &ia) && memcmp(o->mvp, w415_wc.camB, sizeof o->mvp) == 0 &&
+                    ((o->match >= 0 && (unsigned)o->match < A->nops) || ia >= 0)) {
+                    if (!(o->match >= 0 && (unsigned)o->match < A->nops)) { o->match = ia; }
+                    if (o->why == IP_W_NOMATCH) { nnomatch--; nlerp++; }
+                    else if (o->why == IP_W_RAWCHG) { nrawchg--; nlerp++; }
+                    /* reject: Zaehler bleiben (Schnitt-Erkennung "viele unplausible Spruenge" unveraendert) */
+                    pr_mul_di(o->mva, o->mvp, Dw);
+                    o->rzm = 1; o->rzb = 1; o->flag = 1;
+                    o->why = IP_W_LERP;
+                    st_w415_nm++;
+                    continue;
+                }
+            }
+            if (o->flag && o->why == IP_W_RAWLERP && !o->rzb && !g_cfg.vr_enable &&
+                (g_cfg.loc_interp_rawrzb >= 2 || (g_cfg.loc_interp_rawrzb == 1 && g_sba_loc)) &&
+                o->match >= 0 && (unsigned)o->match < A->nops && !ip_mvp_affine(o->mvp)) {
+                /* FIX(W410 LOC-GFX-JITTER) loc_interp_rawrzb: "rawlerp" = gleiche Signatur (also gleiche Vertexzahl), neue
+                 * Eingangsdaten, Vertex i <-> i, weil die 4 Bezugs-Vertices kaum sprangen. LoC baut das Gelaende-Netz
+                 * vor dem VT (~8400-9200 Vertices, ein Draw) je Tick neu; bei gleicher Vertexzahl gehoert Vertex i im
+                 * Vortick oft zu einem ANDEREN Weltpunkt (W410 KEIL: 450-720 Vertices > 8 px, bis 914 px daneben) ->
+                 * Dreiecke klappen im Zwischenbild um, durch die Loecher scheint der Himmel (weisse Keile, nur > 20 FPS).
+                 * (1) Ruht der Draw in der Welt (M_A^-1*M_B passt zur Kamerabewegung des Ziels und die Bezugs-Vertices des
+                 * Partners folgen ihr), ist der Matrix-Lerp der Tick-N-Vertices (rzb) genau die Zwischenkamera -
+                 * unabhaengig davon, wie das Netz neu gebaut wurde. (2) Grosse Gelaende-Netze (>= 1000 Vertices, mit
+                 * Tiefenpuffer), deren Gitter bzw. Ursprung neu gelegt wurde (Matrix-Test scheitert, Bezugs-Vertices folgen
+                 * der Kamera nur grob, camfit <= 0,25): Tick-N-Vertices mit der Kamera bewegen (rzm). Bewegte bzw. mit
+                 * der Kamera wandernde kleine Netze (Himmel, Billboards, Partikel) bleiben beim Vertex-Lerp. */
+                double ew = 1.0, cf = 1e9, Di[16];
+                const int big = o->nv >= 1000u && o->dsv != NULL;
+                a = &A->ops[o->match];
+                if (a->kind == IP_DRAW && a->cls && a->rtv == o->rtv) {
+                    for (k = 0; k < nz; k++) { if (zr[k] == o->rtv && zd[k] == rz_dkey(o)) { t = (int)k; break; } }
+                    if (t < 0 && nz < RZ_T) {
+                        t = (int)nz++;
+                        zr[t] = o->rtv; zd[t] = rz_dkey(o);
+                        znr[t] = rz_cam(A, B, o, zD[t]);
+                    }
+                }
+                if (t >= 0 && znr[t]) {
+                    if (a->dsv == o->dsv && a->topo == o->topo && zc_dmat(Dx, a->mvp, o->mvp)) {
+                        for (x = 0; x < znr[t]; x++) { double ex = zc_derr(Dx, zD[t][x]); if (ex < ew) { ew = ex; } }
+                    }
+                    /* Bezugs-Vertices des Partners: folgen sie wie ruhende Weltpunkte der Kamera (camfit)? In der Welt
+                     * bewegte Netze (Partikel, Geschosse: Vertices in Weltkoordinaten, Matrix = Kamera) bestehen den
+                     * Matrix-Test auch, ihre Bezugs-Vertices wandern aber -> dort bleibt der Vertex-Lerp. */
+                    if (ew <= 1e-3 || big) { cf = li_camfit(a, o, zD[t], znr[t]); }
+                    if ((g_cfg.loc_interp_dbg & 2) && (big || (ew <= 1e-3 && cf > 0.01)) && (g_cfg.pf_ring <= 0 || sb_pf_active()) && st_rz_ln < 1400u) { /* DIAG(W410) */
+                        st_rz_ln++;
+                        HLOG_I("LOCINTERP rawrzb f=%u i=%u n=%u m=%d welt=%.6f camfit=%.5f topo=%u tex=%u", B->frame, i, o->nv, o->match, ew, cf, o->topo, o->has_tex);
+                    }
+                    if (ew <= 1e-3 && cf <= 0.01) { /* Matrix-Lerp der Tick-N-Vertices; richtig zugeordnete Vertices unveraendert */
+                        o->rzb = 1; st_w410_rzb++; if (o->nv >= 1000u) { st_w410_big++; } continue;
+                    }
+                    if (big && cf <= 0.25 && ((g_cfg.loc_stat_fix && w415_world_cam(A, B, o, Di, NULL)) || w410_cam_inv(A, B, o, Di))) { /* W415: Welt-Kamera */
+                        if (g_cfg.loc_stat_fix && w415_wc.ok && w415_wc.rtv == o->rtv) { st_w415_rzm++; }
+                        /* Gelaende-Netz mit neu gelegtem Gitter bzw. verschobenem Ursprung (Matrix-Test scheitert, Bezugs-
+                         * Vertices sind andere Weltpunkte, folgen aber grob der Kamera): Tick-N-Vertices mit der Kamera
+                         * bewegen, Matrix N-1 = M_B * D^-1 (wie W317 rzm). Exakt fuer ruhende Welt, ohne Vertex-Partner. */
+                        pr_mul_di(o->mva, o->mvp, Di);
+                        o->rzm = 1; o->rzb = 1; st_w410_rzm++;
+                        continue;
+                    }
+                    if (ew <= 1e-3) { st_w410_mov++; } else { st_w410_cam++; }
+                }
+                t = -1;
+            }
             if (o->flag) {
                 /* FIX(W294 LINE-STREAK) interp_streak Bit 4: "rawlerp" mit reinem Eingangs-Versatz d != 0
                  * (M2-Meer: Kacheln n=6, Gitter in 5er-Schritten neu um die Kamera gelegt, Partner nach
@@ -6393,7 +6582,7 @@ static void ip_diag_tick(ip_list_t *A, int ai, ip_list_t *B, int bi)
  * w-Wechsel). Streuung > 0 = Spalt/Versatz zwischen Nachbarn (Linie, Wackeln). Zusaetzlich die Streuung
  * der Vortick-Lagen bei rein gelerpten Gruppen (sprA: Partner-Vertices zeigen auf verschiedene Weltpunkte).
  * Zeilen SEAM (erste N Ticks mit Fund, mit pf_ring nur in den Bildfolgen), SEAMW (schlimmste Gruppen),
- * SEAMSUM (alle 200 Ticks, je Paar-Klasse). Nur Diagnose, Bild unveraendert. */
+ * SEAMSUM (alle 200 Ticks, je Paar-Klasse). Nur Diagnose, Bild unveraendert. W410: KEIL/KEILSUM (alle 100 Ticks). */
 typedef struct { unsigned long long key; unsigned op; float tx, ty, ax, ay, nx, ny; unsigned char why, flag, rzb, rt; } sd_ent_t;
 static sd_ent_t *sd_e;
 static unsigned sd_cap;
@@ -6404,6 +6593,93 @@ static unsigned sd_rj_draws[2], sd_rj_verts[2], sd_rj_bad[2], sd_rjl; /* [0] 3D-
 static float sd_rj_max[2], sd_rj_dy[2];
 static double sd_rj_sum[2];
 static double sd_maxs;
+/* DIAG(W410 LOC-GFX-JITTER): falsche Vertex-Partner ("Keile"). Fuer jeden gelerpten Welt-Draw (flag) wird je
+ * Vertex k die Vortick-Lage c0_k (wie in der Wiedergabe: Vortick-Vertex bzw. Tick-N-Vertex bei rzb, Matrix N-1)
+ * mit der Kamerabewegung D = M_A^-1 * M_B des Ziels (rz_cam, beste von bis zu 8) nach Tick N gebracht und mit
+ * c1_k verglichen (Pixel). Ruhende Welt mit richtigem Partner: Fehler ~0. Ein falscher Partner (anderer Weltpunkt
+ * je Vertex) zieht im Zwischenbild Dreiecke von der alten zur neuen Lage = Keil. Gezaehlt: Draws mit einem Vertex
+ * > 8 px UND > 4x Median des Draws (starr bewegte Objekte wie VTs haben gleichmaessigen Fehler). Nur Diagnose. */
+static unsigned kd_ticks, kd_draws[IP_W_N], kd_bad[IP_W_N], kd_badrzb, kd_lines;
+static float kd_max[IP_W_N];
+static float *kd_e;
+static unsigned kd_ecap;
+static int kd_fcmp(const void *x, const void *y)
+{
+    float a = *(const float *)x, b = *(const float *)y;
+    return a < b ? -1 : (a > b ? 1 : 0);
+}
+static void ip_wedge_diag(ip_list_t *A, float (*PA)[4], ip_list_t *B, float (*PB)[4])
+{
+    double D[8][16];
+    unsigned i, k;
+    rz_cam_pre(A, B);
+    for (i = 0; i < B->nops; i++) {
+        const ip_op_t *o = &B->ops[i];
+        const ip_op_t *a = (o->match >= 0 && (unsigned)o->match < A->nops) ? &A->ops[o->match] : NULL;
+        int nD, x, bestx = -1;
+        float best = 1e30f, bmed = 0.0f;
+        unsigned bkmax = 0, bnbad = 0, bnv = 0, w = o->why < IP_W_N ? o->why : 0;
+        if (o->kind != IP_DRAW || !o->cls || !o->flag || !a || (!o->rzb && a->nv != o->nv) || !o->nv) { continue; }
+        nD = rz_cam(A, B, o, D);
+        if (!nD) { continue; }
+        if (kd_ecap < o->nv * 2u) {
+            float *ne = (float *)realloc(kd_e, (size_t)o->nv * 2u * sizeof *kd_e);
+            if (!ne) { return; }
+            kd_e = ne; kd_ecap = o->nv * 2u;
+        }
+        for (x = 0; x < nD; x++) {
+            unsigned nv = 0, kmax = 0, nbad = 0;
+            float emax = 0.0f, med;
+            for (k = 0; k < o->nv; k++) {
+                float c0[4], c1[4], p[4], px1, py1, px0, py0, dx, dy, e;
+                int j;
+                ip_clip(o->rzb ? PB[o->vstart + k] : PA[a->vstart + k], IP_AMVP(o, a), c0);
+                ip_clip(PB[o->vstart + k], o->mvp, c1);
+                if (c0[3] <= 1e-6f || c1[3] <= 1e-6f) { continue; }
+                px1 = (c1[0] / c1[3] * 0.5f + 0.5f) * o->vp.Width; py1 = (0.5f - c1[1] / c1[3] * 0.5f) * o->vp.Height;
+                if (px1 < -0.5f * o->vp.Width || px1 > 1.5f * o->vp.Width || py1 < -0.5f * o->vp.Height || py1 > 1.5f * o->vp.Height) { continue; }
+                for (j = 0; j < 4; j++) {
+                    p[j] = (float)(c0[0] * D[x][0 * 4 + j] + c0[1] * D[x][1 * 4 + j] + c0[2] * D[x][2 * 4 + j] + c0[3] * D[x][3 * 4 + j]);
+                }
+                if (p[3] <= 1e-6f) { e = 1e6f; }
+                else {
+                    px0 = (p[0] / p[3] * 0.5f + 0.5f) * o->vp.Width; py0 = (0.5f - p[1] / p[3] * 0.5f) * o->vp.Height;
+                    dx = px1 - px0; dy = py1 - py0;
+                    e = sqrtf(dx * dx + dy * dy);
+                }
+                kd_e[nv++] = e;
+                if (e > emax) { emax = e; kmax = k; }
+            }
+            if (!nv) { break; }
+            memcpy(kd_e + nv, kd_e, nv * sizeof *kd_e);
+            qsort(kd_e + nv, nv, sizeof *kd_e, kd_fcmp);
+            med = kd_e[nv + nv / 2u];
+            for (k = 0; k < nv; k++) { if (kd_e[k] > 8.0f && kd_e[k] > 4.0f * med) { nbad++; } }
+            if (emax < best) { best = emax; bestx = x; bmed = med; bkmax = kmax; bnbad = nbad; bnv = nv; }
+        }
+        if (bestx < 0) { continue; }
+        kd_draws[w]++;
+        if (bnbad) {
+            kd_bad[w]++;
+            if (o->rzb) { kd_badrzb++; }
+            if (best > kd_max[w]) { kd_max[w] = best; }
+            if (kd_lines < (unsigned)g_cfg.seam_diag) {
+                kd_lines++;
+                HLOG_I("KEIL f=%u i=%u n=%u/%u %s rzb=%u m=%d raw=%s max=%.1fpx (Vertex %u) median=%.2fpx keil_vertices=%u/%u",
+                       B->frame, i, o->nv, a->nv, kIP_WHY[w], o->rzb, o->match, a->rawhash == o->rawhash ? "gleich" : "neu",
+                       (double)best, bkmax, (double)bmed, bnbad, bnv);
+            }
+        }
+    }
+    if (++kd_ticks >= 100u) {
+        HLOG_I("KEILSUM ticks=%u lerp=%u/%u(max %.1f) rawlerp=%u/%u(max %.1f) rt2dlerp=%u/%u davon_rzb=%u (keil/gepruefte Draws)",
+               kd_ticks, kd_bad[IP_W_LERP], kd_draws[IP_W_LERP], (double)kd_max[IP_W_LERP], kd_bad[IP_W_RAWLERP],
+               kd_draws[IP_W_RAWLERP], (double)kd_max[IP_W_RAWLERP], kd_bad[IP_W_RT2DLERP], kd_draws[IP_W_RT2DLERP], kd_badrzb);
+        kd_ticks = 0; kd_badrzb = 0;
+        memset(kd_draws, 0, sizeof kd_draws); memset(kd_bad, 0, sizeof kd_bad); memset(kd_max, 0, sizeof kd_max);
+    }
+}
+
 static int sd_cmp(const void *x, const void *y)
 {
     const sd_ent_t *a = (const sd_ent_t *)x, *b = (const sd_ent_t *)y;
@@ -6419,7 +6695,9 @@ static void ip_seam_diag(ip_list_t *A, int ai, ip_list_t *B, int bi)
     double tmax = 0.0;
     struct { float s, dy; unsigned i0, i1, w0, w1; float x, y; } worst[3];
     memset(worst, 0, sizeof worst);
-    if (!PA || !PB || !A || !B || !sb_in_mission() || (g_cfg.pf_ring > 0 && !sb_pf_active())) { return; } /* mit pf_ring nur in den Bildfolgen */
+    if (!PA || !PB || !A || !B || !(g_sba_loc ? loc_render_interp_mission() : sb_in_mission()) ||
+        (g_cfg.pf_ring > 0 && !sb_pf_active())) { return; } /* mit pf_ring nur in den Bildfolgen; W410: auch LoC-Mission */
+    ip_wedge_diag(A, PA, B, PB);
     for (i = 0; i < B->nops; i++) {
         const ip_op_t *o = &B->ops[i];
         const ip_op_t *a = (o->match >= 0 && (unsigned)o->match < A->nops) ? &A->ops[o->match] : NULL;
@@ -7714,6 +7992,20 @@ static void pd_stat_log(LONGLONG now)
                li_dev2, li_dev_max, li_cp_rec, li_cp_ok, li_cp_rep, li_rz_alt, li_rz_vl, li_rj_cam2);
         li_cp_rec = li_cp_ok = li_cp_rep = 0;
         li_rz_alt = li_rz_vl = li_rj_cam2 = 0;
+        if (g_cfg.loc_wlag_fix) { /* W412 LOC-WORLD-LAG: eigene Zeile (LOCINTERP stat bleibt unveraendert) */
+            HLOG_I("LOCINTERP wlag: %.1fs Himmel mit vorhergesagter Kamera: Listen=%ld Draws=%ld", secs,
+                   (long)InterlockedExchange(&wl_fix_lists, 0), (long)InterlockedExchange(&wl_fix_draws, 0));
+        }
+        if (g_cfg.loc_stat_fix) { /* W415 LOC-STATIC-LAG: eigene Zeile (LOCINTERP stat bleibt unveraendert) */
+            HLOG_I("LOCINTERP stat415: %.1fs Welt-Kamera ok=%u verworfen=%u keine=%u | Gelaende mit Welt-Kamera=%u Weltkoordinaten ohne Partner mit Welt-Kamera=%u",
+                   secs, st_w415_cam, st_w415_rej, st_w415_nocam, st_w415_rzm, st_w415_nm);
+            st_w415_cam = st_w415_rej = st_w415_nocam = st_w415_rzm = st_w415_nm = 0;
+        }
+        if (g_cfg.loc_interp_rawrzb) { /* W410 LOC-GFX-JITTER: eigene Zeile (LOCINTERP stat bleibt unveraendert) */
+            HLOG_I("LOCINTERP rawrzb: %.1fs rawlerp->Matrix-Lerp=%u (>=1000 Vertices %u) Gelaende mit Kamera=%u Kamera passt nicht=%u bewegt=%u",
+                   secs, st_w410_rzb, st_w410_big, st_w410_rzm, st_w410_cam, st_w410_mov);
+            st_w410_rzb = st_w410_big = st_w410_cam = st_w410_mov = st_w410_rzm = 0;
+        }
         if (g_cfg.interp_diag >= 1 && li_rj_n) { /* DIAG(W340) */
             HLOG_I("LOCINTERP reject: %u (w-Wechsel %u, Sprung <0.75 %u, <1 %u, <2 %u, >=2 %u NDC; >=1000 Vertices %u), davon Kamera-Lerp %u",
                    li_rj_n, li_rj_w, li_rj_j[0], li_rj_j[1], li_rj_j[2], li_rj_j[3], li_rj_big, li_rj_cam);
@@ -9195,6 +9487,444 @@ static void li_hud_plain(ip_list_t *L)
     li_hud_data(L, VP, &pb, NULL, NULL, 0u);
 }
 
+/* ---------- DIAG(W412 LOC-WORLD-LAG) loc_wlag_diag Bit 1 ----------
+ * Je Liste (am Swap): Blickrichtung (Gier) der simulierten Kamera VP und der gezeigten Kamera (VP mit K, W390) aus dem
+ * Augpunkt und der Bildmitte; Vergleich der gezeigten Gier eines Ticks mit der simulierten Gier s Ticks spaeter
+ * (s = -3..+4): kleinster Fehler bei s = Vorsprung. Nach der Zuordnung: Draws des Weltziels je Klasse (o->wlc) und ob sie
+ * in den Zwischenbildern gelerpt (mit der Kamera) oder exakt aus Tick N stehen. Zeile LOCWLAG alle 10 s (nur Zaehler,
+ * Winkel, keine Eingaben). */
+#define WL_SH 8 /* Verschiebungen s = -3..+4 */
+#define WL_RING 16u
+static struct {
+    unsigned ok[WL_RING], gt[WL_RING];
+    double ysim[WL_RING], ydisp[WL_RING];
+} wl_r;
+static unsigned wl_lists, wl_cam, wl_turn, wl_agree, wl_oppo, wl_errn[WL_SH];
+static double wl_lead_sum, wl_lead_abs, wl_rate_sum, wl_err[WL_SH], wl_lead_max;
+static unsigned wl_cls_n[7], wl_cls_v[7], wl_cls_ex[7], wl_cls_exv[7], wl_cls_cm[7]; /* Draws, Vertices, davon exakt, Kamera-Lerp */
+static unsigned wl_cls_lists;
+static unsigned wl_why[3][IP_W_N + 2]; /* Welt mit K: Gruppe 0 Netz >= 1000 Vertices, 1 untexturiert <= 32 (Linien/Pfosten), 2 sonst;
+                                         * Spalte IP_W_N = davon rzb (Tick-N-Vertices per Matrix), IP_W_N + 1 = rzm (mit der Kamera) */
+static double wl_cls_lagdeg[7]; /* Summe Versatz der Klasse gegen die gezeigte Kamera (Grad) */
+static LONGLONG wl_tlog;
+static double wl_yaw_of(const double e[3], const double f[3])
+{
+    return atan2(f[0] - e[0], f[2] - e[2]);
+}
+static double wl_wrap(double a)
+{
+    while (a > 3.14159265358979) { a -= 6.28318530717959; }
+    while (a < -3.14159265358979) { a += 6.28318530717959; }
+    return a;
+}
+static double wl_last_lead; /* Gier gezeigt - simuliert der juengsten Liste (rad) */
+static void wl_cam_note(const double VPi[16], const double *K, uint32_t gtick)
+{
+    double e[3], f[3], q4[4], e2[3], f2[3], Ki[16], ys, yd, rate = 0.0;
+    unsigned k, s, slot;
+    int have_prev;
+    wl_lists++;
+    if (!ls_eye_of(e, VPi)) { return; }
+    for (k = 0; k < 4; k++) { q4[k] = 0.5 * VPi[8 + k] + VPi[12 + k]; }
+    if (fabs(q4[3]) < 1e-12) { return; }
+    for (k = 0; k < 3; k++) { f[k] = q4[k] / q4[3]; }
+    ys = wl_yaw_of(e, f);
+    yd = ys;
+    if (K && la_m4inv_d(Ki, K)) { /* gezeigt: Weltpunkt q erscheint, wo die simulierte Kamera q * K sieht -> Auge e * K^-1 */
+        ls_xform_pt(e2, e, Ki);
+        ls_xform_pt(f2, f, Ki);
+        yd = wl_yaw_of(e2, f2);
+        wl_cam++;
+    }
+    wl_last_lead = wl_wrap(yd - ys);
+    slot = gtick % WL_RING;
+    have_prev = wl_r.ok[(gtick - 1u) % WL_RING] && wl_r.gt[(gtick - 1u) % WL_RING] == gtick - 1u;
+    if (have_prev) { rate = wl_wrap(ys - wl_r.ysim[(gtick - 1u) % WL_RING]); }
+    wl_r.ok[slot] = 1; wl_r.gt[slot] = gtick; wl_r.ysim[slot] = ys; wl_r.ydisp[slot] = yd;
+    if (!have_prev || fabs(rate) < 0.1 * 3.14159265358979 / 180.0) { return; } /* nur gleichmaessiges Drehen (>= 0,1 Grad/Tick) */
+    wl_turn++;
+    wl_rate_sum += fabs(rate);
+    wl_lead_sum += wl_last_lead * (rate > 0.0 ? 1.0 : -1.0); /* positiv = in Drehrichtung voraus */
+    wl_lead_abs += fabs(wl_last_lead);
+    if (fabs(wl_last_lead) > wl_lead_max) { wl_lead_max = fabs(wl_last_lead); }
+    if (fabs(wl_last_lead) > 0.02 * 3.14159265358979 / 180.0) {
+        if ((wl_last_lead > 0.0) == (rate > 0.0)) { wl_agree++; } else { wl_oppo++; }
+    }
+    for (s = 0; s < WL_SH; s++) { /* gezeigt bei Tick g gegen simuliert bei g + (s - 3) */
+        int sh = (int)s - 3;
+        uint32_t gd = sh >= 0 ? gtick - (uint32_t)sh : gtick, gs = sh >= 0 ? gtick : gtick + (uint32_t)(-sh);
+        unsigned id = gd % WL_RING, is = gs % WL_RING;
+        if (sh < 0) { /* simuliert spaeter als jetzt: gezeigt von frueher (g + sh) gegen simuliert jetzt */
+            gd = gtick - (uint32_t)(-sh); gs = gtick; id = gd % WL_RING; is = gs % WL_RING;
+            if (!(wl_r.ok[id] && wl_r.gt[id] == gd)) { continue; }
+            wl_err[s] += fabs(wl_wrap(wl_r.ysim[id] - wl_r.ydisp[is])); /* simuliert frueher gegen gezeigt jetzt */
+            wl_errn[s]++;
+            continue;
+        }
+        if (!(wl_r.ok[id] && wl_r.gt[id] == gd && wl_r.ok[is] && wl_r.gt[is] == gs)) { continue; }
+        wl_err[s] += fabs(wl_wrap(wl_r.ydisp[id] - wl_r.ysim[is]));
+        wl_errn[s]++;
+    }
+}
+
+/* Nach der Zuordnung: Klassen im Weltziel, gelerpt oder exakt (nur Listen mit Drehung bzw. Vorhersage) */
+static void li_wlag_after(const ip_list_t *L)
+{
+    unsigned i;
+    int any = 0;
+    LONGLONG now = ip_now();
+    for (i = 0; i < L->nops; i++) {
+        const ip_op_t *o = &L->ops[i];
+        unsigned c = o->wlc;
+        if (o->kind != IP_DRAW || !c || c > 6u) { continue; }
+        any = 1;
+        wl_cls_n[c]++;
+        wl_cls_v[c] += o->nv;
+        if (!o->flag) { wl_cls_ex[c]++; wl_cls_exv[c] += o->nv; }
+        else if (o->rzm) { wl_cls_cm[c]++; }
+        if (c == 2u || c == 3u || c == 5u) { wl_cls_lagdeg[c] += fabs(wl_last_lead) * 180.0 / 3.14159265358979; }
+        if (c == 1u || c == 5u) {
+            unsigned g = o->nv >= 1000u ? 0u : ((!o->has_tex && o->nv <= 32u) ? 1u : 2u);
+            wl_why[g][o->why < IP_W_N ? o->why : 0]++;
+            if (o->flag && o->rzb) { wl_why[g][IP_W_N]++; }
+            if (o->flag && o->rzm) { wl_why[g][IP_W_N + 1]++; }
+        }
+    }
+    if (any) { wl_cls_lists++; }
+    if (!wl_tlog) { wl_tlog = now; }
+    if (ip_ms(wl_tlog, now) >= 10000.0) {
+        double dg = 180.0 / 3.14159265358979, tn = wl_turn ? (double)wl_turn : 1.0, cl = wl_cls_lists ? (double)wl_cls_lists : 1.0;
+        unsigned s, best = 0;
+        char eb[256];
+        int n = 0;
+        for (s = 0; s < WL_SH; s++) {
+            double m = wl_errn[s] ? wl_err[s] / wl_errn[s] * dg : -1.0;
+            n += _snprintf_s(eb + n, sizeof eb - (size_t)n, _TRUNCATE, "%s%+d:%.3f", s ? " " : "", (int)s - 3, m);
+            if (wl_errn[s] && (!wl_errn[best] || wl_err[s] / wl_errn[s] < wl_err[best] / wl_errn[best])) { best = s; }
+        }
+        HLOG_I("LOCWLAG: %.1fs Listen=%u mit Kamera K=%u Drehung=%u (Rate %.3f Grad/Tick) | gezeigt-simuliert Mittel %+.3f "
+               "(|.| %.3f, max %.3f) Grad, Richtung mit/gegen Drehung=%u/%u | Fehler gezeigt(g) gegen simuliert(g+s) Grad %s -> "
+               "bester s=%+d",
+               ip_ms(wl_tlog, now) / 1000.0, wl_lists, wl_cam, wl_turn, wl_rate_sum / tn * dg, wl_lead_sum / tn * dg,
+               wl_lead_abs / tn * dg, wl_lead_max * dg, wl_agree, wl_oppo, eb, (int)best - 3);
+        HLOG_I("LOCWLAG klassen: Listen=%u je Liste Draws/Vertices/exakt/Kamera-Lerp | WeltK %.1f/%.0f/%.1f/%.1f | eigen %.1f/%.0f/%.1f/%.1f "
+               "(Versatz %.3f Grad) | nicht-affin %.1f/%.0f/%.1f/%.1f (Versatz %.3f Grad) | VT %.1f/%.0f/%.1f/%.1f | Welt-ohne-K %.1f/%.0f/%.1f/%.1f "
+               "| Himmel-mit-K %.1f/%.0f/%.1f/%.1f",
+               wl_cls_lists, wl_cls_n[1] / cl, wl_cls_v[1] / cl, wl_cls_ex[1] / cl, wl_cls_cm[1] / cl, wl_cls_n[2] / cl,
+               wl_cls_v[2] / cl, wl_cls_ex[2] / cl, wl_cls_cm[2] / cl, wl_cls_n[2] ? wl_cls_lagdeg[2] / wl_cls_n[2] : 0.0,
+               wl_cls_n[3] / cl, wl_cls_v[3] / cl, wl_cls_ex[3] / cl, wl_cls_cm[3] / cl,
+               wl_cls_n[3] ? wl_cls_lagdeg[3] / wl_cls_n[3] : 0.0, wl_cls_n[4] / cl, wl_cls_v[4] / cl, wl_cls_ex[4] / cl,
+               wl_cls_cm[4] / cl, wl_cls_n[5] / cl, wl_cls_v[5] / cl, wl_cls_ex[5] / cl, wl_cls_cm[5] / cl,
+               wl_cls_n[6] / cl, wl_cls_v[6] / cl, wl_cls_ex[6] / cl, wl_cls_cm[6] / cl);
+        for (s = 0; s < 3u; s++) {
+            const unsigned *w = wl_why[s];
+            HLOG_I("LOCWLAG why: Welt %s je Liste static=%.1f lerp=%.1f (rzb %.1f, rzm %.1f) rawlerp=%.1f nomatch=%.1f rawchg=%.1f reject=%.1f",
+                   s == 0u ? "Netz>=1000" : (s == 1u ? "Linien/Pfosten" : "Objekte"), w[IP_W_STATIC] / cl, w[IP_W_LERP] / cl,
+                   w[IP_W_N] / cl, w[IP_W_N + 1] / cl, w[IP_W_RAWLERP] / cl, w[IP_W_NOMATCH] / cl, w[IP_W_RAWCHG] / cl,
+                   w[IP_W_REJECT] / cl);
+        }
+        memset(wl_why, 0, sizeof wl_why);
+        wl_lists = wl_cam = wl_turn = wl_agree = wl_oppo = 0;
+        wl_lead_sum = wl_lead_abs = wl_rate_sum = wl_lead_max = 0.0;
+        memset(wl_err, 0, sizeof wl_err); memset(wl_errn, 0, sizeof wl_errn);
+        memset(wl_cls_n, 0, sizeof wl_cls_n); memset(wl_cls_v, 0, sizeof wl_cls_v); memset(wl_cls_ex, 0, sizeof wl_cls_ex);
+        memset(wl_cls_exv, 0, sizeof wl_cls_exv); memset(wl_cls_cm, 0, sizeof wl_cls_cm); memset(wl_cls_lagdeg, 0, sizeof wl_cls_lagdeg);
+        wl_cls_lists = 0;
+        wl_tlog = now;
+    }
+}
+
+/* ---------- DIAG(W415 LOC-STATIC-LAG) loc_stat_diag Bit 1 ----------
+ * Nach der Zuordnung (je Tick-Paar A -> B): Bezug = das Gelaende (groesster Welt-Draw mit Tiefe im Hauptziel). Seine
+ * Bildlage im Zwischenbild t ist c_B * T(t) mit T(t) = lerp(M_B^-1 * M_A', I, t) (clip-linear, wie der Interp-VS; M_A' =
+ * Matrix N-1 bzw. rzm). Fuer jeden anderen Welt-Draw im selben Ziel (perspektivisch, mit Tiefe) und jeden seiner 4
+ * Bezugs-Vertices: gezeigte Lage (gelerpt lerp(c_A, c_B, t) bzw. exakt c_B) gegen die Lage, an der das Gelaende
+ * denselben Weltpunkt zeigt (c_B * T(t)), t = 1/6 .. 5/6 (120 FPS bei 20 Hz). Ruhende Objekte (Masten, Pfosten,
+ * Gebaeude) muessen 0 px zeigen; bewegte (VTs, Geschosse) zeigen ihre eigene Bewegung. Zeile LOCSTAT alle 10 s je
+ * Gruppe (Netz >= 1000, Linien/Pfosten untexturiert <= 32, Objekte) und Art (exakt, Matrix-Lerp, rzb, rzm, Vertex-Lerp):
+ * Draws, max/p95 Versatz in Pixeln (Bildgroesse g_bb_w x g_bb_h). Bit 2: groesste Einzel-Draws (LOCSTAT top). Nur Zahlen. */
+#define LS15_G 3
+#define LS15_S 5
+#define LS15_CAP 16384u
+static float ls15_v[LS15_G][LS15_S][LS15_CAP];
+static unsigned ls15_n[LS15_G][LS15_S], ls15_nd[LS15_G][LS15_S], ls15_big[LS15_G][LS15_S];
+static double ls15_mx[LS15_G][LS15_S];
+static unsigned ls15_lists, ls15_turn, ls15_noterr, ls15_terr_raw, ls15_law, ls15_ncons, ls15_nocons, ls15_ln, ls15_pln;
+static double ls15_dev_sum[2], ls15_dev_max[2]; /* 0 = groesstes Netz, 1 = W410-Kamera (rzm) gegen die Mehrheits-Kamera, px */
+static unsigned ls15_dev_n[2], ls15_dev_big[2];
+static double ls15_cam_sum, ls15_cam_max;
+static LONGLONG ls15_tlog;
+typedef struct { float px; unsigned f, i, nv, tex, why, st, wlc, g; float x, y; } ls15_top_t;
+static ls15_top_t ls15_top[8];
+static int ls15_fcmp(const void *x, const void *y)
+{
+    float a = *(const float *)x, b = *(const float *)y;
+    return a < b ? -1 : (a > b);
+}
+static int ls15_ndc(const float c[4], double *x, double *y)
+{
+    if (c[3] <= 1e-3f) { return 0; }
+    *x = (double)c[0] / (double)c[3];
+    *y = (double)c[1] / (double)c[3];
+    return 1;
+}
+static void ls15_vmul(float out[4], const float c[4], const double D[16])
+{
+    int j;
+    for (j = 0; j < 4; j++) {
+        out[j] = (float)(c[0] * D[0 * 4 + j] + c[1] * D[1 * 4 + j] + c[2] * D[2 * 4 + j] + c[3] * D[3 * 4 + j]);
+    }
+}
+/* Tickweg (waagrecht, px) der Bildmitte in Tiefe 0,99 unter D (Clip, Tick N -> N-1) */
+static float ls15_cmove(const double D[16], double hw)
+{
+    float c[4] = { 0.0f, 0.0f, 0.99f, 1.0f }, d[4];
+    ls15_vmul(d, c, D);
+    if (d[3] <= 1e-6f) { return -999.0f; }
+    return (float)((double)d[0] / (double)d[3] * hw);
+}
+static void li_stat_after(const ip_list_t *A, const ip_list_t *B)
+{
+    static const float ts[5] = { 1.0f / 6.0f, 2.0f / 6.0f, 3.0f / 6.0f, 4.0f / 6.0f, 5.0f / 6.0f };
+    const double hw = 0.5 * (double)(g_bb_w ? g_bb_w : 640u), hh = 0.5 * (double)(g_bb_h ? g_bb_h : 480u);
+    const ip_op_t *tr = NULL;
+    double Di[16], cam = 0.0;
+    unsigned i, q, k, g, s;
+    int ti = -1;
+    LONGLONG now = ip_now();
+    if (A && B && B->pair_ok) {
+        for (i = 0; i < B->nops; i++) { /* Gelaende = groesster perspektivische Welt-Draw mit Tiefe */
+            const ip_op_t *o = &B->ops[i];
+            if (o->kind != IP_DRAW || !o->cls || !o->dsv || ip_mvp_affine(o->mvp) || o->nv < 1000u) { continue; }
+            if (!tr || o->nv > tr->nv) { tr = o; ti = (int)i; }
+        }
+        if (!tr) { ls15_noterr++; }
+        else {
+            /* Kamera = Mehrheit der Welt-Draws: fuer jeden ruhenden Welt-Draw (Matrix W*C*P) ist M_B^-1*M_A = P^-1*C_B^-1*C_A*P
+             * unabhaengig von seiner Weltmatrix W -> haeufigstes D unter den gelerpten, bewegten Matrix-Draws des Ziels
+             * (gezaehlt je eigener Matrix; Teile mit gleicher Matrix zaehlen einmal). */
+            enum { NC = 16 };
+            static double cD[NC][16];
+            unsigned cn[NC], ncl = 0, bestc = 0;
+            const float *clast[NC];
+            const ip_op_t *ta = (tr->match >= 0 && (unsigned)tr->match < A->nops) ? &A->ops[tr->match] : NULL;
+            double Dt[16], Dw[16], Dwc[16];
+            int dtok = 0, dwok = 0, wcok = 0;
+            static float mv[512];
+            unsigned nmv = 0;
+            for (i = 0; i < B->nops; i++) {
+                const ip_op_t *o = &B->ops[i];
+                const ip_op_t *a = (o->match >= 0 && (unsigned)o->match < A->nops) ? &A->ops[o->match] : NULL;
+                double Dx[16];
+                unsigned c;
+                if (o->kind != IP_DRAW || !o->cls || !o->dsv || o->rtv != tr->rtv || !o->flag || !a || o->why != IP_W_LERP ||
+                    o->rzb || o->rzm || ip_mvp_affine(o->mvp) || memcmp(a->mvp, o->mvp, sizeof o->mvp) == 0) { continue; }
+                if (!zc_dmat(Dx, o->mvp, a->mvp)) { continue; }
+                if (nmv < 512u) { mv[nmv++] = ls15_cmove(Dx, hw); }
+                for (c = 0; c < ncl; c++) { if (zc_derr(Dx, cD[c]) <= 1e-3) { break; } }
+                if (c == ncl) {
+                    if (ncl >= NC) { continue; }
+                    memcpy(cD[c], Dx, sizeof Dx); cn[c] = 0; clast[c] = NULL; ncl++;
+                }
+                if (!clast[c] || memcmp(clast[c], o->mvp, sizeof o->mvp) != 0) { cn[c]++; clast[c] = o->mvp; }
+            }
+            for (k = 1; k < ncl; k++) { if (cn[k] > cn[bestc]) { bestc = k; } }
+            if (tr->flag && ta) {
+                dtok = zc_dmat(Dt, tr->mvp, IP_AMVP(tr, ta)); /* M_B^-1 * M_A' des groessten Netzes */
+                if (tr->why == IP_W_RAWLERP && !tr->rzb) { ls15_terr_raw++; } /* Vertex-Lerp: Matrizen allein beschreiben es nicht */
+            } else if (!tr->flag) {
+                for (k = 0; k < 16; k++) { Dt[k] = (k % 5) == 0 ? 1.0 : 0.0; }
+                dtok = 1;
+            }
+            rz_cam_pre(A, B); /* W410-Kamera (haeufigstes Matrix-Paar, rzm) zum Vergleich */
+            dwok = w410_cam_inv(A, B, tr, Dw);
+            wcok = w415_world_cam(A, B, tr, Dwc, NULL); /* W415 Welt-Kamera (Bezug, auch ohne Fix) */
+            if ((g_cfg.loc_stat_diag & 16) && ls15_pln < 400u && (g_cfg.pf_ring <= 0 || sb_pf_active())) {
+                /* DIAG(W415): Tickweg der Bildmitte (waagrecht, px, Tick N-1 -> N gesehen von N) je Kamera-Kandidat */
+                float ca[16], cb2[16];
+                unsigned cnt = 0, sp = 0;
+                double Dl[16];
+                int lok = la_cam_of(A, ca, &cnt, &sp) && la_cam_of(B, cb2, &cnt, &sp) && zc_dmat(Dl, cb2, ca);
+                if (nmv) { qsort(mv, nmv, sizeof(float), ls15_fcmp); }
+                ls15_pln++;
+                HLOG_I("LOCSTAT paar: f=%u Welt=%.2f W410=%.2f Mehrheit=%.2f (%u) groesstes=%.2f (n=%u why=%s rzm=%d) la_cam=%.2f | gelerpte Matrix-Draws %u: "
+                       "p10 %.2f p50 %.2f p90 %.2f", B->frame, wcok ? ls15_cmove(Dwc, hw) : -999.0, dwok ? ls15_cmove(Dw, hw) : -999.0, ncl ? ls15_cmove(cD[bestc], hw) : -999.0,
+                       ncl ? cn[bestc] : 0u, dtok ? ls15_cmove(Dt, hw) : -999.0, tr->nv, pr_why(tr->why), tr->rzm,
+                       lok ? ls15_cmove(Dl, hw) : -999.0, nmv, nmv ? mv[nmv / 10u] : 0.0f, nmv ? mv[nmv / 2u] : 0.0f,
+                       nmv ? mv[(nmv * 9u) / 10u] : 0.0f);
+            }
+            /* Bezug: Kamera der Welt-Draws in Weltkoordinaten (haeufigstes gleiches Matrix-Paar, W410/W294; damit bewegt rzm
+             * das Gelaende). Bit 4: stattdessen die Mehrheit gleicher D (Messlauf W415_R2b: das sind die Teile des eigenen VT). */
+            if ((g_cfg.loc_stat_diag & 4) && ncl && cn[bestc] >= 3u) { memcpy(Di, cD[bestc], sizeof Di); ls15_ncons += cn[bestc]; }
+            else if (wcok) { memcpy(Di, Dwc, sizeof Di); ls15_ncons++; }
+            else if (dwok) { memcpy(Di, Dw, sizeof Di); ls15_nocons++; }
+            else if (dtok) { memcpy(Di, Dt, sizeof Di); ls15_nocons++; }
+            else { ls15_noterr++; tr = NULL; }
+            if (tr) { /* Abweichung groesstes Netz bzw. Mehrheits-D gegen den Bezug, Probepunkte im Bild (Tiefe 0,99) bei t = 1/6 */
+                int px, py, w;
+                for (w = 0; w < 2; w++) {
+                    const double *Dq = w ? cD[bestc] : Dt;
+                    double mx = 0.0;
+                    if (!(w ? (ncl > 0u) : dtok)) { continue; }
+                    for (px = -1; px <= 1; px++) {
+                        for (py = -1; py <= 1; py++) {
+                            float cb[4] = { 0.6f * (float)px, 0.6f * (float)py, 0.99f, 1.0f }, c1[4], c2[4], e1[4], e2[4];
+                            double x1, y1, x2, y2, d;
+                            ls15_vmul(c1, cb, Di); ls15_vmul(c2, cb, Dq);
+                            for (k = 0; k < 4; k++) { e1[k] = c1[k] + (cb[k] - c1[k]) * ts[0]; e2[k] = c2[k] + (cb[k] - c2[k]) * ts[0]; }
+                            if (!ls15_ndc(e1, &x1, &y1) || !ls15_ndc(e2, &x2, &y2)) { continue; }
+                            d = sqrt((x1 - x2) * (x1 - x2) * hw * hw + (y1 - y2) * (y1 - y2) * hh * hh);
+                            if (d > mx) { mx = d; }
+                        }
+                    }
+                    ls15_dev_sum[w] += mx; ls15_dev_n[w]++;
+                    if (mx > ls15_dev_max[w]) { ls15_dev_max[w] = mx; }
+                    if (mx > 0.5) { ls15_dev_big[w]++; }
+                }
+            }
+        }
+        if (tr) {
+            ls15_lists++;
+            { /* Kamerabewegung: Probepunkte bei t = 1/6 gegen Tick N (px) */
+                int px, py;
+                for (px = -1; px <= 1; px++) {
+                    for (py = -1; py <= 1; py++) {
+                        float cb[4] = { 0.6f * (float)px, 0.6f * (float)py, 0.99f, 1.0f }, cd[4], cc[4];
+                        double x0, y0, x1, y1, d;
+                        ls15_vmul(cd, cb, Di);
+                        for (k = 0; k < 4; k++) { cc[k] = cd[k] + (cb[k] - cd[k]) * ts[0]; }
+                        if (!ls15_ndc(cb, &x0, &y0) || !ls15_ndc(cc, &x1, &y1)) { continue; }
+                        d = sqrt((x1 - x0) * (x1 - x0) * hw * hw + (y1 - y0) * (y1 - y0) * hh * hh);
+                        if (d > cam) { cam = d; }
+                    }
+                }
+            }
+            ls15_cam_sum += cam;
+            if (cam > ls15_cam_max) { ls15_cam_max = cam; }
+            if (cam >= 0.5) { ls15_turn++; }
+            for (i = 0; i < B->nops; i++) {
+                const ip_op_t *o = &B->ops[i];
+                const ip_op_t *a = (o->match >= 0 && (unsigned)o->match < A->nops) ? &A->ops[o->match] : NULL;
+                double best = 0.0, bx = 0.0, by = 0.0;
+                int lerp, any = 0;
+                if (o->kind != IP_DRAW || !o->cls || !o->dsv || o->rtv != tr->rtv || ip_mvp_affine(o->mvp)) { continue; }
+                if (o->wlc == 2u || o->wlc == 4u) { continue; } /* eigener VT bzw. geglaetteter Gegner-VT (bewegt) */
+                lerp = o->flag && a != NULL;
+                g = o->nv >= 1000u ? 0u : ((!o->has_tex && o->nv <= 32u) ? 1u : 2u);
+                s = !lerp ? 0u : (o->rzm ? 3u : (o->rzb ? 2u : (o->why == IP_W_RAWLERP ? 4u : 1u)));
+                if (o->law != tr->law) { ls15_law++; }
+                for (q = 0; q < 4; q++) {
+                    float cb[4], ca[4], cd[4];
+                    ip_clip(o->pref[q], o->mvp, cb);
+                    if (cb[3] <= 1e-3f) { continue; }
+                    if (lerp) { ip_clip(o->rzb ? o->pref[q] : a->pref[q], IP_AMVP(o, a), ca); if (ca[3] <= 1e-3f) { continue; } }
+                    ls15_vmul(cd, cb, Di);
+                    if (cd[3] <= 1e-3f) { continue; }
+                    for (k = 0; k < 5; k++) {
+                        float cs[4], cg[4];
+                        double xs, ys, xg, yg, d;
+                        unsigned j;
+                        for (j = 0; j < 4; j++) {
+                            cs[j] = lerp ? ca[j] + (cb[j] - ca[j]) * ts[k] : cb[j];  /* gezeigt */
+                            cg[j] = cd[j] + (cb[j] - cd[j]) * ts[k];                 /* Gelaende an derselben Weltstelle */
+                        }
+                        if (!ls15_ndc(cs, &xs, &ys) || !ls15_ndc(cg, &xg, &yg)) { continue; }
+                        if (fabs(xg) > 1.2 || fabs(yg) > 1.2) { continue; } /* ausserhalb des Bildes */
+                        d = sqrt((xs - xg) * (xs - xg) * hw * hw + (ys - yg) * (ys - yg) * hh * hh);
+                        any = 1;
+                        if (d > best) { best = d; bx = xg; by = yg; }
+                    }
+                }
+                if (!any) { continue; }
+                if ((g_cfg.loc_stat_diag & 8) && s == 0u && best > 0.5 && ls15_ln < 600u && (g_cfg.pf_ring <= 0 || sb_pf_active())) {
+                    /* DIAG(W415): exakter Draw mit Versatz - Matrix gegen die Kamera (X = C_B^-1 * M_B: reine Verschiebung = Weltkoordinaten
+                     * mit eigenem Ursprung), Partner-Lage */
+                    const ip_op_t *cr = w415_cam_ref(B, o);
+                    double X[16], rot = -1.0;
+                    int xok = cr && zc_dmat(X, cr->mvp, o->mvp);
+                    if (xok) { rot = 0.0; for (k = 0; k < 12; k++) { if ((k & 3) != 3) { double d = fabs(X[k] - ((k % 5) == 0 ? 1.0 : 0.0)); if (d > rot) { rot = d; } } } }
+                    ls15_ln++;
+                    HLOG_I("LOCSTAT ex: f=%u i=%u n=%u tex=%u why=%s m=%d px=%.2f ndc=%.2f,%.2f w=%.0f gleich_kamera=%d rot=%.5f T=%.1f,%.1f,%.1f vs=%X ps=%X",
+                           B->frame, i, o->nv, o->has_tex, pr_why(o->why), o->match, best, bx, by, (double)o->rn[0][2],
+                           cr ? memcmp(cr->mvp, o->mvp, sizeof o->mvp) == 0 : -1, rot, xok ? X[12] : 0.0, xok ? X[13] : 0.0, xok ? X[14] : 0.0,
+                           o->pvs, o->pps);
+                }
+                ls15_nd[g][s]++;
+                if (ls15_n[g][s] < LS15_CAP) { ls15_v[g][s][ls15_n[g][s]++] = (float)best; }
+                if (best > ls15_mx[g][s]) { ls15_mx[g][s] = best; }
+                if (best > 0.5) { ls15_big[g][s]++; }
+                if ((g_cfg.loc_stat_diag & 2) && best > ls15_top[7].px) {
+                    ls15_top_t e;
+                    int p = 7;
+                    e.px = (float)best; e.f = B->frame; e.i = i; e.nv = o->nv; e.tex = o->has_tex; e.why = o->why; e.st = s;
+                    e.wlc = o->wlc; e.g = g; e.x = (float)bx; e.y = (float)by;
+                    while (p > 0 && ls15_top[p - 1].px < e.px) { ls15_top[p] = ls15_top[p - 1]; p--; }
+                    ls15_top[p] = e;
+                }
+            }
+        }
+    }
+    if (!ls15_tlog) { ls15_tlog = now; }
+    if (ip_ms(ls15_tlog, now) >= 10000.0) {
+        static const char *gn[LS15_G] = { "Netz>=1000", "Linien/Pfosten", "Objekte" };
+        static const char *sn[LS15_S] = { "exakt", "lerp", "rzb", "rzm", "vlerp" };
+        char b[900];
+        int n;
+        HLOG_I("LOCSTAT: %.1fs Paare=%u davon Kamera bewegt (>=0,5 px je Zwischenbild)=%u Kamera mittel %.2f max %.2f px "
+               "| ohne Gelaende-Bezug=%u Gelaende Vertex-Lerp=%u law-abweichend=%u | Bild %ux%u",
+               ip_ms(ls15_tlog, now) / 1000.0, ls15_lists, ls15_turn, ls15_lists ? ls15_cam_sum / ls15_lists : 0.0,
+               ls15_cam_max, ls15_noterr, ls15_terr_raw, ls15_law, g_bb_w, g_bb_h);
+        HLOG_I("LOCSTAT kamera: Bezug-Kamera %u Paare (Wert %.1f), ohne Bezug (groesstes Netz) %u | Abweichung bei t=1/6 "
+               "gegen den Bezug: groesstes Netz mittel %.2f max %.2f px (>0,5px %u/%u) | Mehrheits-D mittel %.2f max %.2f px (>0,5px %u/%u)",
+               ls15_lists - ls15_nocons, (ls15_lists > ls15_nocons) ? (double)ls15_ncons / (double)(ls15_lists - ls15_nocons) : 0.0,
+               ls15_nocons, ls15_dev_n[0] ? ls15_dev_sum[0] / ls15_dev_n[0] : 0.0, ls15_dev_max[0], ls15_dev_big[0], ls15_dev_n[0],
+               ls15_dev_n[1] ? ls15_dev_sum[1] / ls15_dev_n[1] : 0.0, ls15_dev_max[1], ls15_dev_big[1], ls15_dev_n[1]);
+        for (g = 0; g < LS15_G; g++) {
+            n = _snprintf_s(b, sizeof b, _TRUNCATE, "LOCSTAT %s:", gn[g]);
+            for (s = 0; s < LS15_S; s++) {
+                double p95 = 0.0;
+                if (ls15_n[g][s]) {
+                    qsort(ls15_v[g][s], ls15_n[g][s], sizeof(float), ls15_fcmp);
+                    p95 = ls15_v[g][s][(unsigned)((ls15_n[g][s] - 1u) * 0.95)];
+                }
+                n += _snprintf_s(b + n, sizeof b - (size_t)n, _TRUNCATE, " %s n=%u >0,5px=%u p95=%.2f max=%.2f |", sn[s],
+                                 ls15_nd[g][s], ls15_big[g][s], p95, ls15_mx[g][s]);
+            }
+            HLOG_I("%s", b);
+        }
+        if (g_cfg.loc_stat_diag & 2) {
+            for (k = 0; k < 8 && ls15_top[k].px > 0.0f; k++) {
+                const ls15_top_t *e = &ls15_top[k];
+                HLOG_I("LOCSTAT top %u: px=%.2f f=%u i=%u n=%u tex=%u gruppe=%s art=%s why=%s wlc=%u ndc=%.2f,%.2f", k, e->px, e->f, e->i,
+                       e->nv, e->tex, gn[e->g], sn[e->st], pr_why(e->why), e->wlc, e->x, e->y);
+            }
+        }
+        memset(ls15_n, 0, sizeof ls15_n); memset(ls15_nd, 0, sizeof ls15_nd); memset(ls15_big, 0, sizeof ls15_big);
+        memset(ls15_mx, 0, sizeof ls15_mx); memset(ls15_top, 0, sizeof ls15_top);
+        ls15_lists = ls15_turn = ls15_noterr = ls15_terr_raw = ls15_law = ls15_ncons = ls15_nocons = 0;
+        memset(ls15_dev_sum, 0, sizeof ls15_dev_sum); memset(ls15_dev_max, 0, sizeof ls15_dev_max);
+        memset(ls15_dev_n, 0, sizeof ls15_dev_n); memset(ls15_dev_big, 0, sizeof ls15_dev_big);
+        ls15_cam_sum = ls15_cam_max = 0.0;
+        ls15_tlog = now;
+    }
+}
+
+/* W412 LOC-WORLD-LAG: Draw in Weltkoordinaten mit eigener Tiefe (Himmel): Spalten x, y, w der mvp gleich der Kamera VP,
+ * nur die Tiefenspalte z weicht ab (Messlauf W412_P6: Himmels-Quad n=6, Tiefe auf die Ferne gelegt). mvp * VP^-1 ist
+ * dann nicht affin, die Bildlage aber dieselbe wie bei einem Welt-Draw -> Kamera K davor (K * mvp) ist exakt. */
+static int wl_same_view(const float mvp[16], const double VP[16])
+{
+    static const int cols[3] = {0, 1, 3};
+    int r, k;
+    for (k = 0; k < 3; k++) {
+        for (r = 0; r < 4; r++) {
+            double a = (double)mvp[r * 4 + cols[k]], b = VP[r * 4 + cols[k]];
+            if (fabs(a - b) > 1e-4 * (1.0 + fabs(b))) { return 0; }
+        }
+    }
+    return 1;
+}
+
 /* W385 LOC-SMOOTH: Rollback-Korrektur weich zeigen. Am Swap (vor der Zuordnung) die Welt-Draws dieser Liste mit dem
  * abklingenden Versatz des Spiel-Threads verschieben: Draws, deren Weltursprung (mvp * Kamera^-1, affin) einem anderen
  * VT am naechsten liegt (Radius), um dessen Versatz (W' = W * X); mit eigenem Versatz die ganze Welt ausser den Draws am
@@ -9205,11 +9935,12 @@ static void li_smooth_apply(ip_list_t *L)
     loc_smooth_pub_t pb;
     float cam[16];
     double VP[16], VPi[16], K[16], X[LS_MAXV][16], eye[3], r2;
-    unsigned cnt = 0, sp = 0, i, nobj = 0, ncam = 0, nown = 0, nvt = 0, nwd = 0;
+    unsigned cnt = 0, sp = 0, i, nobj = 0, ncam = 0, nown = 0, nvt = 0, nwd = 0, nsky = 0;
     unsigned hist[LS_MAXV][6], scnt[LS_MAXV];
     double sraw[LS_MAXV][3], sdisp[LS_MAXV][3], sbd[LS_MAXV]; /* Anker-Draw je VT (naechster Weltursprung) */
     int j, camon = 0, objon = 0, diag = (g_cfg.loc_rb_smooth_diag & 2) != 0, apply, haveye = 0;
     int meas = (g_cfg.loc_rb_smooth_diag & 8) != 0; /* DIAG(W385): sichtbare Lageaenderung je Liste messen */
+    int wlag = (g_cfg.loc_wlag_diag & 1) != 0; /* DIAG(W412) */
     static unsigned s_dn, s_dl, s_pser;
     static double s_pdisp[LS_MAXV][3], s_peye[3], s_pstep[LS_MAXV][3], s_pestep[3];
     static double s_praw[LS_MAXV][3], s_prstep[LS_MAXV][3], s_peyer[3], s_perstep[3]; /* rohe Folge (ohne Versatz) */
@@ -9218,7 +9949,9 @@ static void li_smooth_apply(ip_list_t *L)
     LARGE_INTEGER lsq0, lsq1, lsqf; /* W387: Kosten je Liste mit Versatz (F2-Regel) */
     QueryPerformanceCounter(&lsq0);
     apply = loc_smooth_get(&pb);
-    if (!apply) {
+    if (!apply && wlag) { /* DIAG(W412): auch ohne Versatz Klassen und Kamera messen (Gegenprobe) */
+        if (!loc_smooth_peek(&pb)) { memset(&pb, 0, sizeof pb); pb.own = -1; }
+    } else if (!apply) {
         if (!(diag || meas) || !loc_smooth_peek(&pb)) { return; }
         if (!meas && ((++s_dl % 200u) != 0u || s_dn >= 12u)) { return; } /* DIAG-Zensus: jede 200. Liste, hoechstens 12 */
         if (meas && diag && ((++s_dl % 200u) != 0u || s_dn >= 12u)) { diag = 0; }
@@ -9251,6 +9984,7 @@ static void li_smooth_apply(ip_list_t *L)
         nvt++;
     }
     if (g_cfg.loc_hud_predict && apply) { li_hud_data(L, VP, &pb, camon ? K : NULL, X, (unsigned)objon); } /* W394 */
+    if (wlag) { wl_cam_note(VPi, camon ? K : NULL, pb.gtick ? pb.gtick : L->serial); } /* DIAG(W412) */
     if (camon || objon) { /* W390: Abweichung einer Zielmarkierung (simulierter Stand, Bildpixel bei 640x480) vom gezeichneten VT */
         double wmax = 0.0, wown = 0.0;
         for (j = 0; j < LS_MAXV; j++) {
@@ -9301,7 +10035,7 @@ static void li_smooth_apply(ip_list_t *L)
         }
         loc_smooth_render_mark(wmax, wown);
     }
-    if (!camon && !objon && !diag && !meas) { return; }
+    if (!camon && !objon && !diag && !meas && !wlag) { return; }
     memset(hist, 0, sizeof hist);
     r2 = (double)pb.radius * (double)pb.radius;
     for (i = 0; i < L->nops && i < sp; i++) {
@@ -9313,7 +10047,35 @@ static void li_smooth_apply(ip_list_t *L)
             for (c = 0; c < 4; c++)
                 W[r * 4 + c] = (double)o->mvp[r * 4] * VPi[c] + (double)o->mvp[r * 4 + 1] * VPi[4 + c] +
                                (double)o->mvp[r * 4 + 2] * VPi[8 + c] + (double)o->mvp[r * 4 + 3] * VPi[12 + c];
-        if (fabs(W[3]) + fabs(W[7]) + fabs(W[11]) + fabs(W[15] - 1.0) >= 0.02) { continue; } /* kein Weltobjekt */
+        if (fabs(W[3]) + fabs(W[7]) + fabs(W[11]) + fabs(W[15] - 1.0) >= 0.02) { /* kein Weltobjekt */
+            static unsigned s_wn;
+            o->wlc = 3;
+            if ((g_cfg.loc_wlag_diag & 2) && s_wn < 24u && (L->serial % 97u) == 0u) { /* DIAG(W412): Matrix nicht-affiner Draws */
+                s_wn++;
+                HLOG_I("LOCWLAG naff: ser=%u i=%u n=%u tex=%u yawoff=%.5f mvp=%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g "
+                       "VP=%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g",
+                       L->serial, i, o->nv, o->has_tex, camon ? pb.v[pb.own].off[3] : 0.0f, o->mvp[0], o->mvp[1], o->mvp[2], o->mvp[3],
+                       o->mvp[4], o->mvp[5], o->mvp[6], o->mvp[7], o->mvp[8], o->mvp[9], o->mvp[10], o->mvp[11], o->mvp[12],
+                       o->mvp[13], o->mvp[14], o->mvp[15], VP[0], VP[1], VP[2], VP[3], VP[4], VP[5], VP[6], VP[7], VP[8], VP[9],
+                       VP[10], VP[11], VP[12], VP[13], VP[14], VP[15]);
+            }
+            if (camon && g_cfg.loc_wlag_fix && wl_same_view(o->mvp, VP)) { /* W412: Himmel mit derselben Kamera wie die Welt */
+                double Md[16];
+                for (q = 0; q < 16; q++) { Md[q] = (double)o->mvp[q]; }
+                ls_m4_mul(Md, K, Md);
+                for (q = 0; q < 16; q++) { o->mvp[q] = (float)Md[q]; }
+                for (q = 0; q < 4; q++) { /* Bezugs-NDC wie bei der Aufzeichnung (Zuordnung/Plausibilitaet) */
+                    float cc[4];
+                    ip_clip(o->pref[q], o->mvp, cc);
+                    o->rn[q][2] = cc[3];
+                    o->rn[q][0] = cc[3] > 1e-6f ? cc[0] / cc[3] : 0.0f;
+                    o->rn[q][1] = cc[3] > 1e-6f ? cc[1] / cc[3] : 0.0f;
+                }
+                o->wlc = 6;
+                nsky++;
+            }
+            continue;
+        }
         nwd++;
         for (j = 0; j < LS_MAXV; j++) {
             double dx, dy, dz, d2;
@@ -9326,7 +10088,18 @@ static void li_smooth_apply(ip_list_t *L)
             }
             if (d2 <= r2 && (best < 0 || d2 < bd)) { best = j; bd = d2; }
         }
-        if (best >= 0 && best == pb.own) { nown++; continue; } /* bewegt sich mit der Kamera */
+        if (best >= 0 && best == pb.own) { /* bewegt sich mit der Kamera */
+            o->wlc = 2; /* W412 */
+            static unsigned s_own_ln;
+            if ((g_cfg.loc_rb_smooth_diag & 16) && camon && s_own_ln < 600u && (g_cfg.pf_ring <= 0 || sb_pf_active())) { /* DIAG(W410) */
+                s_own_ln++;
+                HLOG_I("LOCSMOOTH own: ser=%u i=%u n=%u tex=%u topo=%u d=%.0f W=%.0f,%.0f,%.0f ndc0=%.2f,%.2f w=%.1f ndc3=%.2f,%.2f w=%.1f",
+                       L->serial, i, o->nv, o->has_tex, o->topo, sqrt(bd), W[12], W[13], W[14], o->rn[0][0], o->rn[0][1],
+                       o->rn[0][2], o->rn[3][0], o->rn[3][1], o->rn[3][2]);
+            }
+            nown++;
+            continue;
+        }
         memcpy(M, W, sizeof M);
         if (best >= 0 && (objon & (1 << best))) { ls_m4_mul(M, M, X[best]); nobj++; }
         if (camon) { ls_m4_mul(M, M, K); ncam++; }
@@ -9335,6 +10108,7 @@ static void li_smooth_apply(ip_list_t *L)
             sbd[best] = bd;
             scnt[best] = 1;
         }
+        o->wlc = camon ? 1 : ((best >= 0 && (objon & (1 << best))) ? 4 : 5); /* W412 */
         if (!(best >= 0 && (objon & (1 << best))) && !camon) { continue; }
         ls_m4_mul(M, M, VP);
         for (q = 0; q < 16; q++) { o->mvp[q] = (float)M[q]; }
@@ -9346,6 +10120,7 @@ static void li_smooth_apply(ip_list_t *L)
             o->rn[q][1] = cc[3] > 1e-6f ? cc[1] / cc[3] : 0.0f;
         }
     }
+    if (nsky) { InterlockedIncrement(&wl_fix_lists); InterlockedExchangeAdd(&wl_fix_draws, (LONG)nsky); } /* W412 */
     if (apply) {
         loc_smooth_render_note(nobj, ncam, nown, nvt);
         QueryPerformanceCounter(&lsq1); /* W387 */
@@ -9811,6 +10586,8 @@ int sb_interp_swap(void)
         }
         if (g_sba_loc && L->la_ok) { li_aim_reticle(L, A); } /* W376 LOC-LOCAL-AIM: braucht die Zuordnung */
         if (g_sba_loc && g_cfg.loc_hud_predict) { li_hud_mark(L, A); } /* W394 LOC-HUD-VIEW: nach dem Fadenkreuz */
+        if (g_sba_loc && (g_cfg.loc_wlag_diag & 1)) { li_wlag_after(L); } /* DIAG(W412 LOC-WORLD-LAG) */
+        if (g_sba_loc && (g_cfg.loc_stat_diag & 1)) { li_stat_after(A, L); } /* DIAG(W415 LOC-STATIC-LAG) */
         /* 3. Zustandszeit: Fensteranfang (Feldwechsel) + mittlere Rechenzeit r
          *    (regelmaessiger als die Swap-Zeit selbst); Testtakt: Swap-Zeit. */
         L->tstate = t0;

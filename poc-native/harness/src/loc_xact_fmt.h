@@ -66,6 +66,8 @@ typedef struct {
     int ntrack;
     struct {
         int wave, bank; /* Wave-Index, Index in die XSB-Bankliste */
+        int loopc;      /* W413: Schleifenzahl aus der XSB (lxf_track_loop_mode): -1 = keine Angabe (Wellen-Flag),
+                         * 0 = einmal (direkter Eintrag, Sound-Spur 0), 0xFFFF = endlos, sonst n Wiederholungen */
     } track[LXF_MAX_TRACKS];
     int db100;    /* Lautstaerke (<= 0) */
     int pitch;    /* 1/4096 Oktave */
@@ -78,6 +80,13 @@ typedef struct {
     int lfe_mb;     /* -50 x Bit 9-15, >= -10000 */
     int room_mb;    /* -256 x (+0xF), >= -10000 */
 } lxf_cue_t;
+
+/* W413 LOC-SOUND-LOOP (GitHub #65): Schleife einer Spur aus Wellen-Flag und XSB-Schleifenzahl. Belegt an Bank.xsb:
+ * Sound-Spuren tragen bei +6 eine 16-Bit-Zahl (230 x 0xFFFF, alle mit Schleifen-Welle; 26 x 0, davon 12 mit
+ * Schleifen-Welle; 2 x 5); direkte Eintraege (Flag 0x08) haben keine - die 90 mit Schleifen-Welle sind die "_2"-Varianten
+ * endloser Sounds (z. B. VT01_003_2 = Ausklang des MG-Feuers, vom Spiel ohne Handle gestartet). */
+enum { LXF_LOOP_ONCE = 0, LXF_LOOP_INF = 1, LXF_LOOP_N = 2 };
+int lxf_track_loop_mode(int wave_loop, int loopc);
 
 /* W363: Laufzeit-Parameter (RPC) je Spur: Summe der Kurven eines Parameters fuer einen Cue-Eintrag. */
 typedef struct {

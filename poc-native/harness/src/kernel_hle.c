@@ -94,6 +94,7 @@ void krnl_dump_stats(void)
     HLOG_I("KRNL MmContig: %u Allocs (Reg %u Slots)", g_exreg_n,
            8192);
     { extern void krnl_contig_stats(void); krnl_contig_stats(); } /* W177 contig_noalias */
+    { extern void krnl_memreg_keep_stats(void); krnl_memreg_keep_stats(); } /* W417 memreg_keep */
     HLOG_I("KRNL SUSPSAFE: %lu suspends, %lu retries, %lu giveups (safe_suspend=%d)",
            susp_n_suspend, susp_n_retry, susp_n_giveup, g_cfg.safe_suspend);
     HLOG_I("KRNL LOADLOCK: Modell %d, inject=%d, injiziert=%ld, sync=%d, rueckzuege=%ld",

@@ -147,6 +147,8 @@ add_library(sb_emu SHARED
   src/loc_rb_ring.c
   src/loc_rbi.c
   src/loc_rbn.c
+  src/loc_rule.c
+  src/loc_rulenet.c
   src/loc_lsarb.c
   src/loc_lsarb_game.c
   src/krnl_loc.c
@@ -325,6 +327,7 @@ endif()
 add_executable(loc_net_selftest
   tests/loc_net_selftest.c
   src/loc_net_core.c
+  src/loc_rule.c
   src/loc_netsim.c
   src/loc_route.c
   ${SB_LOC_TUN_SRC}
@@ -410,6 +413,16 @@ if(SB_VERSION)
   target_compile_definitions(sb_emu PRIVATE "SB_VERSION_STR=\"${SB_VERSION}\"")
 endif()
 message(STATUS "SB_VERSION=${SB_VERSION}")
+# W420 LOC-CLIPDUMP (Nutzerentscheid 22.11.): steelnet nur mit gleicher Client-Version - Version aus poc-native/VERSION
+# zur Build-Zeit (auch Entwickler-Builds), Austausch im Tunnel-HELLO und bei der Anmeldung am Treffpunkt (loc_tun.c).
+file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/../VERSION SB_NET_VERSION LIMIT_COUNT 1)
+string(STRIP "${SB_NET_VERSION}" SB_NET_VERSION)
+if(NOT SB_NET_VERSION MATCHES "^[A-Za-z0-9.+-]+$")
+  message(FATAL_ERROR "poc-native/VERSION ungueltig (${SB_NET_VERSION})")
+endif()
+foreach(t sb_emu loc_net_selftest)
+  target_compile_definitions(${t} PRIVATE "SB_NET_VERSION=\"${SB_NET_VERSION}\"")
+endforeach()
 # REL-DEFENDER-FP: Dateieigenschaften (VERSIONINFO) der ausgelieferten Client-Dateien, Version aus
 # SB_VERSION bzw. poc-native/VERSION. Nur Ressource (passt in die bestehende .rsrc-Seite).
 include(${CMAKE_CURRENT_SOURCE_DIR}/src/sb_verinfo.cmake)

@@ -29,6 +29,14 @@ int loctun_dgram(loctun *t, uint32_t dst_vip, uint16_t src_gp, uint16_t dst_gp, 
 }
 int loctun_is_peer(loctun *t, uint32_t vip) { (void)t; (void)vip; return 0; }
 void loctun_set_app(loctun *t, uint16_t gp, loctun_app_fn fn) { (void)t; (void)gp; (void)fn; } /* W338 */
+int loctun_version_state(loctun *t, char *need, int ncap, char *peer, int pcap) /* W420 */
+{
+    (void)t;
+    if (need && ncap > 0) need[0] = 0;
+    if (peer && pcap > 0) peer[0] = 0;
+    return 0;
+}
+void loctun_set_app2(loctun *t, uint16_t gp, loctun_app_fn fn) { (void)t; (void)gp; (void)fn; } /* W420 */
 int loctun_links_up(loctun *t) { (void)t; return 0; }
 int loctun_link_info(loctun *t, int i, int *path, double *srtt_ms, int *red, uint32_t *vip, char *relay, int rlen)
 {

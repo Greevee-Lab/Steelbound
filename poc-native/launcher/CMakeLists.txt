@@ -70,11 +70,15 @@ if(SB_BG_HEAD MATCHES "git-lfs.github.com/spec/v1")
   if(NOT SB_BG_GEN_RC EQUAL 0)
     message(FATAL_ERROR "convert_bg.py scheiterte (Pillow mit WebP noetig)")
   endif()
-  file(TO_NATIVE_PATH "${CMAKE_CURRENT_BINARY_DIR}/bg_nutzer.png" SB_BG_PNG_NATIVE)
+  # W414: Pfad mit Vorwaerts-Schraegstrichen schreiben. Mit TO_NATIVE_PATH standen einfache
+  # Backslashes im rc-String, rc.exe las Ordner wie \abc, \new, \x.. als Escape (\a, \n, \x)
+  # und brach ab. rc.exe nimmt '/' als Trenner an (wie launcher.rc "../res/...").
+  file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/bg_nutzer.png" SB_BG_PNG_RC)
+  string(REPLACE "\\" "/" SB_BG_PNG_RC "${SB_BG_PNG_RC}")
   file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/launcher_bg.rc
     "// erzeugt (W162): Hintergrundbild aus WebP (LFS-Zeiger im Quellbaum)\n"
     "#define IDR_BG 101\n"
-    "IDR_BG RCDATA \"${SB_BG_PNG_NATIVE}\"\n")
+    "IDR_BG RCDATA \"${SB_BG_PNG_RC}\"\n")
   set(SB_LAUNCHER_RC ${CMAKE_CURRENT_BINARY_DIR}/launcher_bg.rc)
 endif()
 
@@ -161,6 +165,14 @@ if(NOT SB_VERSION)
   target_compile_definitions(sb_launcher PRIVATE SB_TEST_HOOKS=1)
 endif()
 message(STATUS "SB_VERSION=${SB_VERSION}")
+# W421 LOC-VERSION-GATE: eigene steelnet-Version wie beim Client (W420, harness/CMakeLists.txt) aus poc-native/VERSION,
+# auch in Entwickler-Builds; Vergleich mit min_client_version aus GET /v1/info (LoC-Start gesperrt, wenn aelter).
+file(STRINGS ${CMAKE_CURRENT_SOURCE_DIR}/../VERSION SB_NET_VERSION LIMIT_COUNT 1)
+string(STRIP "${SB_NET_VERSION}" SB_NET_VERSION)
+if(NOT SB_NET_VERSION MATCHES "^[A-Za-z0-9.+-]+$")
+  message(FATAL_ERROR "poc-native/VERSION ungueltig (${SB_NET_VERSION})")
+endif()
+target_compile_definitions(sb_launcher PRIVATE "SB_NET_VERSION=\"${SB_NET_VERSION}\"")
 # REL-DEFENDER-FP: Dateieigenschaften (VERSIONINFO) wie beim Client, Version aus SB_VERSION bzw.
 # poc-native/VERSION. Manifest (asInvoker, Win10/11, Per-Monitor-DPI v2, Common Controls v6) s.
 # src/sb_launcher.manifest + Linker-UAC-Eintrag.

@@ -15,7 +15,7 @@
  *                               Client-Schluessel (kein launcher_*), den der
  *                               Client nur im LoC-Profil auswertet, beim Start
  *                               (0 = 4:3 Original, 1 = 16:9 Spielmodus,
- *                               2 = 720p; fehlt/ungueltig = 0)
+ *                               2 = 720p; ungueltig = 0; W414: fehlt = 1)
  * Datenordner LoC: <Datenordner>\loc (Profil/portabel) bzw. <Client>\loc
  * (legacy) - getrennt von den SB-Spielstaenden (<...>\hdd).
  *
@@ -37,8 +37,8 @@ enum { LGAME_SB = 0, LGAME_LOC = 1, LGAME_N = 2 };
 #define LGAME_KEY_LOC_SERVER "launcher_loc_server"
 #define LGAME_KEY_LOC_WIDE "loc_widescreen" /* W326: liest der Client (hcfg) */
 
-/* W326 LOC-WIDE: Bildformat im LoC-Profil. 16:9 und 720p sind experimentell
- * (nicht das Originalbild). LOC_WIDE_720P = 0 nimmt den Eintrag "720p (16:9)"
+/* W326 LOC-WIDE: Bildformat im LoC-Profil. W414: 16:9 ist Standard und nicht mehr experimentell, 720p
+ * bliebe experimentell (nicht angeboten). LOC_WIDE_720P = 0 nimmt den Eintrag "720p (16:9)"
  * aus der Auswahl (gespeichertes 2 gilt dann als 4:3) - die einzige Stelle.
  * W326-Befund: 720p nicht angeboten - das Spiel gibt Menue-/HUD-Schrift in
  * 640x480-Pixelkoordinaten aus (ohne Supersampling-Skalierung unskaliert oben
@@ -100,6 +100,24 @@ int lgame_pergame_marked(const char *usercfg);
  * launcher_*-, Pfad- und Update-Zeilen nach user_loc.cfg, dann Markierung in user.cfg (loc_widescreen dort
  * entfernt). 1 = uebernommen, 0 = nichts zu tun (neu oder schon markiert), -1 = Schreibfehler. Idempotent. */
 int lgame_pergame_migrate(const char *usercfg, const char *loccfg);
+
+/* W414 LOC-DEFAULT-169/-FADE (Nutzer 21.11.): in Line of Contact ist "16:9 (Spielmodus)" der Standard
+ * (lgame_defaults), dazu Breitbild-Raender "Fade out" 8 %/100 %. Steel Battalion bleibt 4:3 (Original).
+ * Einmalige Umstellung je user_loc.cfg: Markierung launcher_loc169=1 (launcher_* liest der Client nicht).
+ * Danach bleibt jede manuelle Wahl erhalten (auch 4:3). user.cfg wird nie veraendert. */
+#define LGAME_KEY_LOC169 "launcher_loc169"
+#define LGAME_LOC169_EDGE_MODE 2 /* Fade out (Abdunklung) */
+#define LGAME_LOC169_EDGE_W 8    /* Verlaufsbreite % */
+#define LGAME_LOC169_EDGE_S 100  /* Staerke % */
+/* 1 = user_loc.cfg traegt launcher_loc169=1 */
+int lgame_loc169_marked(const char *loccfg);
+/* Einmal-Umstellung: Datei vorhanden und nicht markiert -> loc_widescreen=1, edge_mode=2, edge_fade_width=8,
+ * edge_fade_strength=100, launcher_loc169=1 (ersetzen/anhaengen, fremde Zeilen bleiben). 1 = umgestellt,
+ * 0 = nichts zu tun (Datei fehlt = Standard gilt, oder schon markiert), -1 = Schreibfehler. Idempotent. */
+int lgame_loc169_migrate(const char *loccfg);
+/* Beim Schreiben der LoC-Datei durch den Launcher: loc_widescreen=<wide> + Markierung (legt die Datei an);
+ * with_edges = 1 schreibt zusaetzlich die Rand-Standardwerte (neue Datei). 0 = ok, -1 = Fehler. */
+int lgame_loc169_mark(const char *loccfg, int wide, int with_edges);
 
 /* LoC-Datenordner: base = Datenordner (Profil/portabel) bzw. Client-Ordner
  * (legacy). out = base\loc (Endtrenner von base egal). Rein, testbar. */

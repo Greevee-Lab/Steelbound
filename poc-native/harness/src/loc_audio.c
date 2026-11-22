@@ -129,6 +129,8 @@ typedef struct {
     u32 serial;    /* W375: laufende Nummer (Rollback-Waise eindeutig, auch wenn der Slot wiederverwendet wird) */
     u32 mgen;      /* W375: in Mission mgen gestartet (0 = ausserhalb) */
     int loops;     /* W375: mindestens eine Spur mit Schleife */
+    DWORD t0;      /* W413 DIAG: Anlegezeit (GetTickCount) */
+    DWORD t_end;   /* W413: Ende einer endlichen XSB-Schleife (GetTickCount, 0 = keins) */
 } la_cue_t;
 
 typedef struct {
@@ -160,6 +162,7 @@ static u32 s_serial, s_last_serial, s_last_tid, s_mis_gen, s_mis_mask;
 static int s_mis_on;
 static lw_pl_t *s_mis_pl; /* W375: Missions-Playlist (Einsatzbeginn FUN_0008C3D0), ihr Release = Missionsende */
 static volatile LONG st_mis_stop, st_orphan_stop;
+static volatile LONG st_loop_once, st_loop_n, st_loop_n_end; /* W413: XSB-Schleifenzahl: einmal / endlich / endlich beendet */
 static la_pool_t s_pool[LA_MAX_POOL];
 static int s_npool;
 static int s_cat_db[LA_MAX_CAT];
@@ -237,6 +240,10 @@ static volatile LONG st_stoplog;
     do {                                                                                                             \
         if (g_cfg.loc_audio >= 2 && InterlockedIncrement(&st_stoplog) <= 300) HLOG_I(__VA_ARGS__);                   \
     } while (0)
+
+/* W413 DIAG (loc_sndloop_diag Bit 2): Start von Schleifen-Cues und Stopp-Aufrufe mit Aufrufer/Thread, hoechstens 400 Zeilen. */
+static volatile LONG st_sllog;
+#define LA_SLLOG(...)                                                                                                    do {                                                                                                                     if ((g_cfg.loc_sndloop_diag & 2) && InterlockedIncrement(&st_sllog) <= 400) HLOG_I(__VA_ARGS__);                  } while (0)
 
 static u32 la_rand(void)
 {
@@ -704,6 +711,7 @@ static la_cue_t *la_cue_alloc(void)
             if (++s_serial == 0) s_serial = 1; /* W375 */
             c->serial = s_serial;
             c->mgen = s_mis_on ? s_mis_gen : 0u;
+            c->t0 = GetTickCount(); /* W413 */
             s_last_serial = s_serial;
             s_last_tid = GetCurrentThreadId();
             return c;
@@ -822,6 +830,17 @@ static void la_cue_start(la_cue_t *c)
             InterlockedIncrement(&st_wma);
             continue;
         }
+        if (w.loop && g_cfg.loc_audio_loopcount) { /* W413 (#65): Schleifenzahl der XSB statt nur Wellen-Flag */
+            int lm = lxf_track_loop_mode(w.loop, c->c.track[t].loopc);
+            if (lm == LXF_LOOP_ONCE) {
+                w.loop = 0;
+                InterlockedIncrement(&st_loop_once);
+            } else if (lm == LXF_LOOP_N) { /* n Wiederholungen = n + 1 Durchlaeufe (Annahme), Tonhoehe nicht beruecksichtigt */
+                DWORD e = GetTickCount() + (DWORD)(la_wave_secs(&w) * 1000.0 * (c->c.track[t].loopc + 1)) + 1u;
+                if (!c->t_end || (int)(e - c->t_end) > 0) c->t_end = e ? e : 1u;
+                InterlockedIncrement(&st_loop_n);
+            }
+        }
         if (la_wave_secs(&w) > LA_STREAM_SECS) la_stream_steal(c, wbi, c->c.track[t].wave); /* W379 (#54) */
         pi = la_wave_secs(&w) > LA_STREAM_SECS ? la_stream_acquire(wbi, c->c.track[t].wave, &w)
                                                 : la_pool_acquire(wbi, c->c.track[t].wave, &w);
@@ -832,6 +851,7 @@ static void la_cue_start(la_cue_t *c)
         p = &s_pool[pi];
         c->pool[t] = pi + 1;
         nv++;
+        if (!p->is_stream) p->w.loop = w.loop; /* W413: wiederverwendete Stimme derselben Welle traegt das alte Flag */
         audio_set_frequency(p->v, la_track_freq(c, t, w.rate)); /* W363: + RPC */
         if (p->is_stream) {
             InterlockedIncrement(&st_tracks);
@@ -973,6 +993,82 @@ int loc_audio_stop_orphan(u32 serial)
     return i >= 0;
 }
 
+/* W413 LOC-SOUND-LOOP (#65): Cue-Slot zur laufenden Nummer (nur belegte Slots), sonst NULL. Unter s_lk. */
+static la_cue_t *la_by_serial(u32 serial)
+{
+    int i;
+    if (!serial) return NULL;
+    for (i = 0; i < LA_MAX_CUE; i++)
+        if (s_cue[i].state != 0 && s_cue[i].serial == serial) return &s_cue[i];
+    return NULL;
+}
+
+/* W413: Auskunft zur laufenden Nummer. Rueckgabe Zustand (0 = frei/unbekannt, 1 = vorbereitet, 2 = spielt). */
+int loc_audio_cue_info(unsigned serial, int *cue, int *loops, unsigned *src, char *name, int cap)
+{
+    la_cue_t *c;
+    int st = 0;
+    if (cue) *cue = -1;
+    if (loops) *loops = 0;
+    if (src) *src = 0;
+    if (name && cap > 0) name[0] = 0;
+    if (!s_active || !serial) return 0;
+    lk();
+    c = la_by_serial(serial);
+    if (c) {
+        st = c->state;
+        if (cue) *cue = c->cue;
+        if (loops) *loops = c->loops;
+        if (src) *src = (unsigned)(uintptr_t)c->src;
+        if (name && cap > 0) {
+            const char *nm = c->sb ? lxf_xsb_cue_name(&c->sb->x, c->cue) : NULL;
+            strncpy_s(name, (size_t)cap, nm ? nm : "?", _TRUNCATE);
+        }
+    }
+    ulk();
+    return st;
+}
+
+/* W413: Cue zur laufenden Nummer beenden (wie Stop per Handle). only_loops: nur spielende Schleifen-Cues (ohne WMA).
+ * 1 = gestoppt. */
+int loc_audio_stop_serial(unsigned serial, int only_loops)
+{
+    la_cue_t *c;
+    int ok = 0;
+    if (!s_active || !serial) return 0;
+    lk();
+    c = la_by_serial(serial);
+    if (c && (!only_loops || (c->state == 2 && c->loops && !c->wma))) {
+        la_cue_end(c, 1);
+        ok = 1;
+    }
+    ulk();
+    return ok;
+}
+
+/* W413 DIAG: Zahl der noch spielenden Schleifen-Cues (ohne WMA); Namen mit Alter (s) nach buf. */
+int loc_audio_loops_active(char *buf, int cap)
+{
+    int i, n = 0;
+    size_t o = 0;
+    DWORD now = GetTickCount();
+    if (buf && cap > 0) buf[0] = 0;
+    if (!s_active) return 0;
+    lk();
+    for (i = 0; i < LA_MAX_CUE; i++) {
+        const la_cue_t *c = &s_cue[i];
+        if (c->state != 2 || !c->loops || c->wma) continue;
+        n++;
+        if (buf && cap > 0 && o + 40 < (size_t)cap) {
+            const char *nm = c->sb ? lxf_xsb_cue_name(&c->sb->x, c->cue) : NULL;
+            o += (size_t)_snprintf_s(buf + o, (size_t)cap - o, _TRUNCATE, "%s%d '%s' %lus", n > 1 ? ", " : "", c->cue,
+                                     nm ? nm : "?", (unsigned long)((now - c->t0) / 1000u));
+        }
+    }
+    ulk();
+    return n;
+}
+
 /* Ausgelaufene Cues erkennen (aus DoWork/GetNotification). Unter s_lk. */
 static void la_pump(void)
 {
@@ -982,6 +1078,11 @@ static void la_pump(void)
         la_cue_t *c = &s_cue[i];
         int playing = 0;
         if (c->state != 2 || c->paused) {
+            continue;
+        }
+        if (c->t_end && (int)(GetTickCount() - c->t_end) >= 0) { /* W413: endliche XSB-Schleife durchgelaufen */
+            InterlockedIncrement(&st_loop_n_end);
+            la_cue_end(c, 0);
             continue;
         }
         if (c->wma && c == s_wma_cue && lw_player_active()) { /* W367: Playlist laeuft; je Liedstart Meldung wType 0 */
@@ -1543,6 +1644,9 @@ static u32 __stdcall la_PlayEx(u32 sbp, u32 params, u32 pp)
     }
     la_cue_prepare(c, sb, (int)p[1], src);
     la_cue_start(c);
+    if (c->loops) LA_SLLOG("LOCSNDLOOP play: Cue %d '%s' Nr %u Flags 0x%X Quelle %d pp 0x%X Aufrufer 0x%X Thread %lu", c->cue,
+                           lxf_xsb_cue_name(&c->sb->x, c->cue) ? lxf_xsb_cue_name(&c->sb->x, c->cue) : "?", c->serial, p[0],
+                           src ? (int)(src - s_src) : -1, pp, (u32)(uintptr_t)_ReturnAddress(), GetCurrentThreadId());
     ulk();
     if (pp && !(p[0] & 1u)) {
         la_out(pp, (u32)(uintptr_t)c);
@@ -1558,6 +1662,12 @@ static u32 __stdcall la_Stop(u32 sbp, u32 cue, u32 flags, u32 pcue)
     LA_STOPLOG("LOCAUDIO stop: Stop(Cue %d, Flags 0x%X, Handle %s) Aufrufer 0x%X", (int)cue, flags,
                IS_CUE((void *)(uintptr_t)pcue) ? "gueltig" : (pcue ? "unbekannt" : "-"), (u32)(uintptr_t)_ReturnAddress());
     lk();
+    if (g_cfg.loc_sndloop_diag & 2) {
+        const la_cue_t *t = IS_CUE((void *)(uintptr_t)pcue) ? (const la_cue_t *)(uintptr_t)pcue : NULL;
+        LA_SLLOG("LOCSNDLOOP stop: Stop(Cue %d, Flags 0x%X, Handle %s Nr %u Ziel %d Zustand %d Schleife %d) Aufrufer 0x%X Thread %lu",
+                 (int)cue, flags, t ? "gueltig" : (pcue ? "unbekannt" : "-"), t ? t->serial : 0u, t ? t->cue : -1,
+                 t ? t->state : -1, t ? t->loops : 0, (u32)(uintptr_t)_ReturnAddress(), GetCurrentThreadId());
+    }
     if ((int)cue >= 0) {
         for (i = 0; i < LA_MAX_CUE; i++) {
             if (s_cue[i].state != 0 && s_cue[i].cue == (int)cue) {
@@ -2182,6 +2292,14 @@ void loc_audio_tick(int waited_s)
            s_npool, busy, st_reuse, st_evict, st_streams, st_spkts, st_sread_fail, st_wma, st_fail);
     if (st_stream_steal) /* W379 (#54) */
         HLOG_I("LOCAUDIO: t=%ds Streaming-Welle neu gestartet, alte Instanz beendet=%ld", waited_s, st_stream_steal);
+    if (st_loop_once || st_loop_n) /* W413 (#65): eigene Zeile (geparste Zeilen unveraendert) */
+        HLOG_I("LOCAUDIO: t=%ds XSB-Schleifenzahl: Schleifen-Welle einmal gespielt=%ld endlich=%ld (beendet %ld)", waited_s,
+               st_loop_once, st_loop_n, st_loop_n_end);
+    if (g_cfg.loc_sndloop_diag) { /* W413 DIAG: spielende Schleifen (auch ohne Rollback) */
+        char b[700];
+        int na = loc_audio_loops_active(b, (int)sizeof b);
+        HLOG_I("LOCSNDLOOP audio: t=%ds aktive Schleifen=%d [%s]", waited_s, na, b);
+    }
     if (st_mis_stop || st_orphan_stop) /* W375 (#51) */
         HLOG_I("LOCAUDIO: t=%ds Missionsende-Stopps=%ld Rollback-Waisen-Stopps=%ld (Schleifen-Cues)", waited_s, st_mis_stop,
                st_orphan_stop);

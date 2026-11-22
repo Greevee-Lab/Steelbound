@@ -31,6 +31,7 @@ SRC = [
     "launcher/src/launcher_games.c",  # W276 LOC-LAUNCH (gui.loc_*)
     "launcher/src/launcher_diag.inc",  # W279 DIAG-CRASH (gui.dg_*)
     "harness/src/sb_overlay.c",
+    "harness/src/sb_ovl_loclock.h",  # W416 LOC-ESC-MENU (ovl.ll_*)
     "harness/src/sb_nethud.c",  # W374 LOC-NET-OVERLAY (ovl.nh_*)
     "harness/src/render_fx_rem.c",
     "harness/src/vr.c",
@@ -45,6 +46,7 @@ SRC = [
     "launcher/src/launcher_loctp.c",  # W336 LOC-TESTPARTNER (gui.loctp_*, nur intern)
     "launcher/src/launcher_loctp_gui.inc",  # W336: Dialog/Knoepfe (nur intern)
     "harness/src/loc_rollback.c",  # W346 LOC-ROLLBACK-R4: Meldung bei Desync (loc.rb_*)
+    "harness/src/loc_rulenet.c",  # W420 LOC-CLIPDUMP: Match-Regel/Version (loc.rule_*, loc.ver_*)
 ]
 
 # W180 EXPORT: Quellen, die im Community-Export (noch) fehlen duerfen (Pack

@@ -29,7 +29,7 @@
 extern void wd_sym_init(void); /* emu_main.c (SymInitialize einmal je Prozess) */
 
 /* ---- cfg ---- */
-static int g_dump_on = 1, g_hang_on = 1, g_hang_secs = 20, g_crash_test, g_hang_test;
+static int g_dump_on = 1, g_hang_on = 1, g_hang_secs = 20, g_crash_test, g_hang_test, g_hang_loc = 1;
 
 int sb_crash_cfg_key(const char *k, const char *v)
 {
@@ -38,6 +38,7 @@ int sb_crash_cfg_key(const char *k, const char *v)
     else if (strcmp(k, "hang_secs") == 0) { g_hang_secs = atoi(v) < 10 ? 10 : atoi(v); }
     else if (strcmp(k, "crash_test") == 0) { g_crash_test = atoi(v); } /* TEST(W279) */
     else if (strcmp(k, "hang_test") == 0) { g_hang_test = atoi(v); }   /* TEST(W279) */
+    else if (strcmp(k, "hang_report_loc") == 0) { g_hang_loc = atoi(v); } /* W411 */
     else { return 0; }
     return 1;
 }
@@ -676,6 +677,13 @@ static void hang_report(int still_s)
     }
     _snprintf_s(why, sizeof why, _TRUNCATE, "no new game frame for %d s (not paused)", still_s);
     _snprintf_s(g_buf, sizeof g_buf, _TRUNCATE, "SB-HANG: %s\r\n", why);
+    if (g_sba_loc) { /* W411: Rollback-Zustand (Render-Thread von uns angehalten?) */
+        extern int loc_rb_susp_diag(char *buf, int cap);
+        char lb[600];
+        size_t u = strlen(g_buf);
+        if (loc_rb_susp_diag(lb, (int)sizeof lb))
+            _snprintf_s(g_buf + u, sizeof g_buf - u, _TRUNCATE, "LoC rollback: %s\r\n", lb);
+    }
     hang_stacks(g_buf, sizeof g_buf);
     san(g_buf, sizeof g_buf);
     wfile(g_hang_dir, "hang.txt", g_buf);
@@ -725,8 +733,9 @@ void sb_crash_tick(int waited)
         InterlockedExchange(&g_fc_pending, 0);
         mark_recovered(g_crash_dir_cur, "The game kept running after this first-chance exception.\r\n");
     }
-    /* Haenger: keine neuen Bilder, nicht pausiert (LoC-Profil ausgenommen) */
-    if (f == last_f && waited > 10 && !g_sb_paused && !g_sba_loc) {
+    /* Haenger: keine neuen Bilder, nicht pausiert. W411: auch im LoC-Profil (vorher ausgenommen -> 3er-Match-Haenger
+     * 21.11. ohne Bericht); hang_report_loc=0 schaltet es dort ab. */
+    if (f == last_f && waited > 10 && !g_sb_paused && (!g_sba_loc || g_hang_loc)) {
         still_s += 5;
         if (g_hang_on && still_s >= g_hang_secs && !g_hang_open && g_hang_n < 2) {
             g_hang_open = 1;

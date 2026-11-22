@@ -17,6 +17,7 @@
 #include <string.h>
 #include "json_mini.h"
 #include "sb_pausenet.h" /* W357 LOC-PAUSE-NET */
+#include "loc_rule.h"     /* W420 LOC-CLIPDUMP */
 
 static int s_ok, s_n;
 #define CHECK(c, msg)                                                   \
@@ -438,6 +439,10 @@ typedef struct tun_pair {
 static char s_auth_a[100], s_auth_b[100]; /* W328: --auth-a/--auth-b "account:exp:G-hex" */
 static char s_spki[80];                     /* W334: --spki <hex64> = Pin des (Loopback-)Testtreffpunkts */
 static char s_rsim_a[256], s_rsim_b[256];   /* W395: --rsim/--rsim-a/--rsim-b (loc_route_sim je Seite) */
+static int s_open_hold = -1;                /* W409: >= 0 = open_hold_ms beider Seiten in tun_pair_start */
+static int s_refuse_b;                      /* W409 TEST: test_refuse_ms nur bei B (connect wie unter Linux sofort abgelehnt) */
+static int s_ver_check;                     /* W420 TEST: Versionspruefung im HELLO ohne Treffpunkt */
+static char s_ver_a[16], s_ver_b[16];       /* W420 TEST: Versionen je Seite ("-" = ohne Feld) */
 
 /* Zwei Instanzen mit Transport (feste Mitspieler oder Treffpunkt). simspec: Stufe auf beiden (NULL = aus). */
 static int tun_pair_start(tun_pair *P, int base, const char *simspec, const char *lobby, int nodirect, int red)
@@ -459,6 +464,11 @@ static int tun_pair_start(tun_pair *P, int base, const char *simspec, const char
     ca.proxy_base = cb.proxy_base = (uint16_t)(base + 3000);
     ca.red_fixed = cb.red_fixed = red;
     ca.nodirect = cb.nodirect = nodirect;
+    if (s_open_hold >= 0) ca.open_hold_ms = cb.open_hold_ms = s_open_hold; /* W409 */
+    cb.test_refuse_ms = s_refuse_b;
+    ca.ver_check = cb.ver_check = s_ver_check; /* W420 */
+    strcpy_s(ca.ver_test, sizeof ca.ver_test, s_ver_a);
+    strcpy_s(cb.ver_test, sizeof cb.ver_test, s_ver_b);
     if (lobby) {
         char room[33];
         _snprintf_s(room, sizeof room, _TRUNCATE, "selftest-%lu", GetCurrentProcessId() % 100000u);
@@ -2021,6 +2031,99 @@ static void w350_tun_tests(void)
     locnet_shutdown(&P.B);
 }
 
+/* W409 LOC-MESH-KICK: Strom-OPEN zu einem Spiel, das TCP 1000 (noch) nicht lauscht. Das Original wiederholt einen
+ * abgelehnten connect; beim Mitspieler steht die Verbindung zum Stellvertreter schon - ein sofortiges S_FIN wurde ihm
+ * als Verbindungsreset gemeldet (W350) und sein Spiel entfernte uns (Rauswurf beim Beitritt zu 3+ Spielern). Jetzt
+ * haelt der Empfaenger das OPEN bis open_hold_ms und verbindet neu. Fall 1: B lauscht erst nach ~800 ms (gehalten,
+ * Rahmen kommen in beiden Richtungen an, kein Reset bei A). Fall 2: wie unter Linux sofort abgelehnt (TEST
+ * test_refuse_ms, Windows wiederholt das SYN auf Loopback sonst ~2 s), mit Halten. Fall 3: open_hold=0 (altes
+ * Verhalten) -> sofort Reset. Fall 4: abgelehnt ueber das Halten hinaus -> Reset nach etwa open_hold_ms (begrenzt). */
+/* expect: 1 = gehalten und angenommen, 0 = sofort Reset, 2 = Reset nach dem Halten */
+static void w409_case(int base, int hold, int refuse_ms, int listen_after_ms, int expect, const char *what)
+{
+    static const char ka[4] = {0x37, 0, 0, 0};
+    tun_pair P;
+    SOCKET acon, bacc = INVALID_SOCKET, blis = INVALID_SOCKET;
+    struct sockaddr_in to, l = sa(INADDR_ANY, 1000);
+    char b[64], msg[200];
+    int k, e = 0;
+    u_long nb = 1;
+    double t0, t_reset = -1.0;
+    s_open_hold = hold;
+    s_refuse_b = refuse_ms;
+    if (!tun_pair_start(&P, base, NULL, NULL, 0, 0)) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "W409 %s: Verbindung A<->B steht", what);
+        CHECK(0, msg);
+        tun_pair_stop(&P);
+        s_open_hold = -1;
+        s_refuse_b = 0;
+        return;
+    }
+    if (listen_after_ms == 0) { /* B lauscht schon (nur der TEST-Schalter lehnt ab) */
+        blis = locnet_socket(&P.B, AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (locnet_bind(&P.B, blis, (struct sockaddr *)&l, sizeof l) == 0 && listen(blis, 5) == 0)
+            ioctlsocket(blis, (long)0x8004667E, &nb);
+    }
+    to = sa(P.B.self_ip, 1000);
+    acon = locnet_socket(&P.A, AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    k = locnet_connect(&P.A, acon, (struct sockaddr *)&to, sizeof to);
+    ioctlsocket(acon, (long)FIONBIO, &nb);
+    t0 = now_ms();
+    locnet_send(&P.A, acon, ka, 4, 0); /* Spiel sendet sofort nach dem connect (Rahmen wartet beim Empfaenger) */
+    while (now_ms() - t0 < (listen_after_ms > 0 ? listen_after_ms : listen_after_ms == 0 ? refuse_ms + 300 : hold + 1500)) {
+        k = locnet_recv(&P.A, acon, b, sizeof b, 0);
+        e = k == SOCKET_ERROR ? WSAGetLastError() : 0;
+        if (!(k == SOCKET_ERROR && e == WSAEWOULDBLOCK)) {
+            t_reset = now_ms() - t0;
+            break;
+        }
+        Sleep(5);
+    }
+    if (listen_after_ms > 0 && t_reset < 0) {
+        blis = locnet_socket(&P.B, AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        if (locnet_bind(&P.B, blis, (struct sockaddr *)&l, sizeof l) == 0 && listen(blis, 5) == 0)
+            ioctlsocket(blis, (long)0x8004667E, &nb);
+    }
+    if (listen_after_ms >= 0 && t_reset < 0 && blis != INVALID_SOCKET) bacc = w350_accept(&P.B, blis, 2500);
+    if (expect == 1) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "W409 %s: kein Reset bei A, solange B noch nicht lauscht (OPEN gehalten)", what);
+        CHECK(t_reset < 0, msg);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "W409 %s: B nimmt den gehaltenen Strom an, sobald es lauscht", what);
+        CHECK(bacc != INVALID_SOCKET, msg);
+        if (bacc != INVALID_SOCKET) {
+            ioctlsocket(bacc, (long)FIONBIO, &nb);
+            k = w350_recv(&P.B, bacc, b, sizeof b, 2000, &e);
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "W409 %s: Rahmen von vor dem Annehmen kommt bei B an", what);
+            CHECK(k == 4 && b[0] == 0x37, msg);
+            locnet_send(&P.B, bacc, ka, 4, 0);
+            k = w350_recv(&P.A, acon, b, sizeof b, 2000, &e);
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "W409 %s: Antwort B -> A ueber denselben Strom", what);
+            CHECK(k == 4 && b[0] == 0x37, msg);
+            closesocket(bacc);
+        }
+    } else if (expect == 0) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "W409 %s: ohne Halten sofort Reset bei A (altes Verhalten)", what);
+        CHECK(t_reset >= 0 && t_reset < 600 && e == WSAECONNRESET, msg);
+    } else {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "W409 %s: Reset bei A erst nach dem Halten (%.0f ms, Grenze %d ms)", what,
+                    t_reset, hold);
+        CHECK(t_reset >= hold - 300 && t_reset < hold + 1500 && e == WSAECONNRESET, msg);
+    }
+    if (blis != INVALID_SOCKET) closesocket(blis);
+    locnet_closesocket(&P.A, acon);
+    tun_pair_stop(&P);
+    s_open_hold = -1;
+    s_refuse_b = 0;
+}
+
+static void w409_tun_tests(void)
+{
+    w409_case(43000, 3000, 0, 800, 1, "spaet lauschen");
+    w409_case(43300, 3000, 1000, 0, 1, "sofort abgelehnt, gehalten");
+    w409_case(43600, 0, 1000, 0, 0, "open_hold=0");
+    w409_case(43900, 600, 5000, 0, 2, "abgelehnt ueber das Halten hinaus");
+}
+
 static void w335_tests(void)
 {
     locnet B;
@@ -2934,6 +3037,203 @@ static void pause_net_tests(void)
     printf("W357 pause_net: %d/%d OK\n", s_ok - k0, s_n - n0);
 }
 
+
+/* ---------- W420 LOC-CLIPDUMP: Match-Regel (SBRU, loc_rule.c) und Client-Version im Tunnel-HELLO ---------- */
+/* Modell der Spielstelle (LoC-XBE, Dekompilat): Schuss FUN_000CD7B0 (Einzelschuss: Pause = WEPDAT+0x2A), Tick
+ * FUN_000CA680 (Pause - 1), Nachladen FUN_000CF3C0 (Magazin voll, Magazine - 1, dann FUN_000CF390 = Pause 0; mit Regel
+ * entfaellt nur dieser Aufruf). Liefert die Schuesse in n Ticks bei gehaltenem Abzug; Nachladen alle spam Ticks, 0 = erst bei
+ * leerem Magazin (normales Spiel), -1 = nie. */
+typedef struct { int cd, ammo, mags; } w420_vt;
+static int w420_model(int rule, int ticks, int interval, int magsize, int mags, int spam, unsigned *hash)
+{
+    w420_vt v = {0, magsize, mags};
+    int t, shots = 0;
+    unsigned h = 2166136261u;
+    for (t = 0; t < ticks; t++) {
+        if (v.mags > 0 && ((spam > 0 && t % spam == spam - 1) || (spam == 0 && v.ammo == 0))) { /* FUN_000CF3C0 */
+            v.ammo = magsize;
+            v.mags--;
+            if (!(rule & LRU_BIT_CLIPDUMP)) v.cd = 0; /* FUN_000CF390 (Original) */
+        }
+        if (v.cd <= 0) { /* FUN_000CD7B0 */
+            if (v.ammo < 1) v.cd = interval; /* leer: Klick, Pause */
+            else {
+                v.ammo--;
+                v.cd = interval;
+                shots++;
+            }
+        }
+        if (v.cd > -1) v.cd--; /* FUN_000CA680 */
+        h = (h ^ (unsigned)(v.cd * 131 + v.ammo * 7 + v.mags)) * 16777619u;
+    }
+    if (hash) *hash = h;
+    return shots;
+}
+
+static void w420_rule_tests(void)
+{
+    uint8_t b[LRU_PKT_LEN], c[LRU_PKT_LEN];
+    lru_pkt k;
+    lru_t r;
+    const lru_peer *P;
+    int src, i, bad;
+    unsigned h0, h1, h2;
+    const uint32_t HOST = 0x0A00007Fu, J2 = 0x0B00007Fu, J3 = 0x0C00007Fu;
+    /* Paket: bauen, streng pruefen */
+    CHECK(lru_build(b, sizeof b, 0x1234u, -1, LRU_BIT_CLIPDUMP, 0, LRU_BIT_CLIPDUMP) == LRU_PKT_LEN, "W420: SBRU bauen");
+    CHECK(lru_parse(b, LRU_PKT_LEN, &k) && k.pref == 1 && k.applied == 0 && k.in_mission == 0 && k.pidx == -1 &&
+              k.ruleset == LRU_RULESET && k.nonce == 0x1234u,
+          "W420: SBRU gueltig, angewandte Regel nur in der Mission");
+    CHECK(lru_build(b, sizeof b, 0, 0, 1, 0, 0) == 0, "W420: Kennung 0 wird nicht gebaut");
+    lru_build(b, sizeof b, 0x1234u, 3, 1, 1, 1);
+    CHECK(lru_parse(b, LRU_PKT_LEN, &k) && k.pidx == 3 && k.applied == 1, "W420: SBRU in der Mission");
+    for (i = 0, bad = 0; i < 11; i++) { /* je eine Verfaelschung -> verworfen */
+        int len = LRU_PKT_LEN;
+        memcpy(c, b, sizeof c);
+        switch (i) {
+        case 0: len = LRU_PKT_LEN - 1; break;
+        case 1: len = LRU_PKT_LEN + 1; break;
+        case 2: c[0] = 'X'; break;
+        case 3: c[4] = 2; break;               /* Paketversion */
+        case 4: c[5] = 0; break;               /* Regelsatz 0 */
+        case 5: c[6] = 10; break;              /* Spielerindex */
+        case 6: c[7] = 2; break;               /* unbekanntes Flag */
+        case 7: memset(c + 8, 0, 4); break;    /* Kennung 0 */
+        case 8: c[12] = 2; break;              /* unbekannte Regel im eigenen Regelsatz */
+        case 9: c[15] = 1; break;              /* Reserve */
+        case 10: c[7] = 0; break;              /* angewandte Regel ausserhalb der Mission */
+        }
+        bad += !lru_parse(c, len, NULL);
+    }
+    CHECK(bad == 11, "W420: SBRU-Verfaelschungen (Laenge, Kennung, Version, Index, Flags, Bits, Reserve) verworfen");
+    memcpy(c, b, sizeof c);
+    c[5] = LRU_RULESET + 1;
+    c[12] = 3;
+    CHECK(lru_parse(c, LRU_PKT_LEN, &k) && k.pref == 3, "W420: neuerer Regelsatz mit unbekannter Regel lesbar (Ablehnung)");
+    /* Empfang, Bindung, Entscheidung */
+    lru_init(&r, 0x1111u);
+    lru_build(b, sizeof b, 0x1111u, -1, 1, 0, 0);
+    CHECK(lru_rx(&r, 1000, HOST, b, LRU_PKT_LEN) == 0 && r.rx_self == 1, "W420: eigenes SBRU ignoriert");
+    CHECK(lru_decide(&r, LRU_ROLE_OFFLINE, 0, 1, &src) == 1 && src == LRU_SRC_LOCAL, "W420: offline = eigene Einstellung");
+    CHECK(lru_decide(&r, LRU_ROLE_HOST, 0, 0, &src) == 0 && src == LRU_SRC_HOST_SELF, "W420: Host = eigene Einstellung");
+    CHECK(lru_decide(&r, LRU_ROLE_JOIN, HOST, 1, &src) == 0 && src == LRU_SRC_HOST_OLD,
+          "W420: Host ohne Regel-Feld (aelter) -> Original, auch bei eigener Einstellung an");
+    lru_build(b, sizeof b, 0x2222u, -1, LRU_BIT_CLIPDUMP, 0, 0); /* Host: Regel an */
+    CHECK(lru_rx(&r, 1000, HOST, b, LRU_PKT_LEN) == 1, "W420: SBRU des Hosts uebernommen");
+    CHECK(lru_decide(&r, LRU_ROLE_JOIN, HOST, 0, &src) == 1 && src == LRU_SRC_HOST,
+          "W420: Beitretender uebernimmt die Regel des Hosts (eigene Einstellung aus)");
+    lru_build(b, sizeof b, 0x2223u, -1, 0, 0, 0);
+    CHECK(lru_rx(&r, 1100, HOST, b, LRU_PKT_LEN) == 1 && lru_decide(&r, LRU_ROLE_JOIN, HOST, 1, &src) == 0 &&
+              lru_find(&r, HOST)->first_ms == 1100,
+          "W420: Neustart des Hosts (neue Kennung) mit Regel aus -> Original");
+    lru_build(b, sizeof b, 0x2223u, -1, 0, 0, 0);
+    CHECK(lru_rx(&r, 1200, J2, b, LRU_PKT_LEN) == -1, "W420: fremde Adresse mit frischer Kennung des Hosts verworfen");
+    memcpy(c, b, sizeof c);
+    c[5] = LRU_RULESET + 1;
+    c[12] = 3;
+    c[8] = 0x77;
+    CHECK(lru_rx(&r, 1300, HOST, c, LRU_PKT_LEN) == 1 && lru_decide(&r, LRU_ROLE_JOIN, HOST, 1, &src) == 0 &&
+              src == LRU_SRC_HOST_NEWER,
+          "W420: Host mit neuerem Regelsatz und unbekannter Regel -> ablehnen (bitte aktualisieren)");
+    /* Zulassen beim Host */
+    CHECK(lru_admit(&r, J3, 0, 50000, 1000) == 1, "W420: Regel aus (Original) -> aelterer Client zugelassen");
+    CHECK(lru_admit(&r, J3, 1, 1000 + LRU_ADMIT_MS - 1, 1000) == 1, "W420: Regel an -> Frist fuer das erste SBRU");
+    CHECK(lru_admit(&r, J3, 1, 1000 + LRU_ADMIT_MS, 1000) == 0, "W420: Regel an, kein SBRU nach der Frist -> getrennt");
+    lru_build(b, sizeof b, 0x3333u, -1, 0, 0, 0);
+    lru_rx(&r, 2000, J3, b, LRU_PKT_LEN);
+    CHECK(lru_admit(&r, J3, 1, 60000, 1000) == 1, "W420: Regel an, Mitspieler kennt das Regel-Feld -> zugelassen");
+    /* Gegenprobe in der Mission */
+    lru_build(b, sizeof b, 0x3333u, 1, 0, 1, 0);
+    lru_rx(&r, 3000, J3, b, LRU_PKT_LEN);
+    P = lru_find(&r, J3);
+    CHECK(lru_mismatch(P, 1, 3100) == 1 && lru_mismatch(P, 0, 3100) == 0, "W420: abweichende angewandte Regel erkannt");
+    CHECK(lru_mismatch(P, 1, 3000 + LRU_FRESH_MS + 1) == 0, "W420: veraltetes SBRU zaehlt nicht");
+    lru_build(b, sizeof b, 0x3333u, -1, 0, 0, 0);
+    lru_rx(&r, 3200, J3, b, LRU_PKT_LEN);
+    CHECK(lru_mismatch(lru_find(&r, J3), 1, 3300) == 0, "W420: ausserhalb der Mission keine Gegenprobe");
+    for (i = 0, bad = 0; i < 3000; i++) { /* Zufallspakete: nie uebernommen, Tabelle bleibt heil */
+        int j, len = 1 + (int)(((unsigned)i * 2654435761u) % 24u);
+        uint8_t z[24];
+        for (j = 0; j < 24; j++) z[j] = (uint8_t)(((unsigned)i * 31u + (unsigned)j * 17u) * 2654435761u >> 24);
+        if (i % 3 == 0 && len >= 4) memcpy(z, "SBRU", 4);
+        bad += lru_rx(&r, 4000, J2, z, len) == 1;
+    }
+    CHECK(bad == 0, "W420: 3000 Zufallspakete verworfen");
+    { /* Missionsklammer: Luecken der Hinweise aendern nichts, neue Runde gibt frei (W375-Ablauf) */
+        lru_phase ph = {0, 0, 0};
+        int ok = 1, k2;
+        ok &= !lru_phase_lobby(&ph, 100, 0) && !ph.frozen;           /* Lobby, Host bietet an */
+        ok &= lru_phase_mission(&ph, 1, 100, 0) && ph.frozen;         /* Mission 1 beginnt */
+        for (k2 = 0; k2 < 20; k2++) {                                  /* Luecken (Rollback, Nachbesprechung) */
+            ok &= !lru_phase_lobby(&ph, 100, 0);
+            ok &= !lru_phase_mission(&ph, k2 & 1, 100, 0) && ph.frozen;
+        }
+        ok &= lru_phase_lobby(&ph, 900, 0) && !ph.frozen;              /* Runde 2: Host bietet neu an */
+        ok &= lru_phase_mission(&ph, 1, 900, 0) && ph.frozen;
+        ok &= !lru_phase_lobby(&ph, 900, 0) && ph.frozen;
+        CHECK(ok, "W420: Missionsklammer Host - fest ueber Luecken, frei erst mit neuem Match-Angebot");
+        memset(&ph, 0, sizeof ph);
+        ok = lru_phase_mission(&ph, 1, 0, 5000) && !lru_phase_lobby(&ph, 0, 5000) && ph.frozen; /* Beitretender */
+        ok &= !lru_phase_mission(&ph, 0, 0, 5000) && ph.frozen;        /* Missionsende ohne Lobby-Handlung */
+        ok &= lru_phase_lobby(&ph, 0, 9000) && !ph.frozen;             /* neue Beitrittsanfrage */
+        ok &= !lru_phase_mission(&ph, 0, 0, 9000) && !ph.frozen;
+        CHECK(ok, "W420: Missionsklammer Beitretender - frei erst mit neuer Beitrittsanfrage");
+    }
+    /* Spielstelle als Modell: Regel aus = Original (Pause 0 nach Nachladen), Regel an = nie schneller als Dauerfeuer */
+    {
+        int s_off_n = w420_model(0, 100, 60, 3, 3, 0, NULL), s_off = w420_model(0, 100, 60, 3, 3, 4, &h1);
+        int s_norm = w420_model(1, 100, 60, 3, 3, 0, NULL), s_on = w420_model(1, 100, 60, 3, 3, 4, &h2);
+        int s_on2 = w420_model(1, 100, 60, 3, 3, 4, &h0);
+        unsigned h3, h4;
+        CHECK(s_off > s_off_n && s_off > s_on, "W420: Modell Regel aus - Clip dumping schneller als Dauerfeuer (Original)");
+        CHECK(s_on <= s_norm && s_on == s_on2 && h0 == h2,
+              "W420: Modell Regel an - Spam nicht schneller als Dauerfeuer, deterministisch");
+        CHECK(w420_model(1, 600, 60, 3, 3, -1, &h3) == w420_model(0, 600, 60, 3, 3, -1, &h4) && h3 == h4,
+              "W420: Modell ohne Nachladen - Regel an bitgleich zum Original");
+        printf("W420 Modell (100 Ticks, Intervall 60, Magazin 3, 3 Reserve): Dauerfeuer aus %d / an %d, Spam aus %d / an %d\n",
+               s_off_n, s_norm, s_off, s_on);
+        (void)h1;
+        (void)h2;
+    }
+}
+
+/* Client-Version im Tunnel-HELLO (TEST ver_check: wie mit Treffpunkt, ohne Netz nach aussen) */
+static void w420_ver_case(int base, const char *va, const char *vb, int expect_up, const char *what)
+{
+    tun_pair P;
+    char need[16], peer[16], msg[200];
+    int up, i, sa_, sb_;
+    s_ver_check = 1;
+    strcpy_s(s_ver_a, sizeof s_ver_a, va);
+    strcpy_s(s_ver_b, sizeof s_ver_b, vb);
+    up = tun_pair_start(&P, base, NULL, NULL, 0, 0);
+    if (!up) for (i = 0; i < 100; i++) Sleep(10); /* HELLO-Runden abwarten */
+    sa_ = P.A.tun ? loctun_version_state(P.A.tun, need, sizeof need, peer, sizeof peer) : -1;
+    _snprintf_s(msg, sizeof msg, _TRUNCATE, "W420 %s: Verbindung %s", what, expect_up ? "steht" : "abgelehnt");
+    CHECK(up == expect_up, msg);
+    if (!expect_up) {
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "W420 %s: A meldet Mitspieler-Version '%s' (neuere %s)", what, peer, need);
+        CHECK(sa_ == 2 && strcmp(peer, strcmp(vb, "-") == 0 ? "" : vb) == 0, msg);
+        if (strcmp(vb, "-") != 0) {
+            sb_ = loctun_version_state(P.B.tun, need, sizeof need, peer, sizeof peer);
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "W420 %s: B lehnt ebenfalls ab (Mitspieler '%s')", what, peer);
+            CHECK(sb_ == 2 && strcmp(peer, va) == 0, msg);
+        }
+    } else {
+        CHECK(sa_ == 0, "W420: gleiche Version - keine Ablehnung");
+    }
+    tun_pair_stop(&P);
+    s_ver_check = 0;
+    s_ver_a[0] = s_ver_b[0] = 0;
+}
+static void w420_ver_tests(void)
+{
+    w420_ver_case(43000, "0.3.2", "0.3.2", 1, "gleiche Version");
+    w420_ver_case(43100, "0.3.2", "0.3.1", 0, "aeltere Version");
+    w420_ver_case(43200, "0.3.2", "0.3.10", 0, "neuere Version");
+    w420_ver_case(43300, "0.3.2", "-", 0, "aelterer Client ohne Versionsfeld");
+}
+
 int main(int argc, char **argv)
 {
     locnet A, B, C, X1, X2;
@@ -3229,14 +3529,17 @@ int main(int argc, char **argv)
         tun_guard_tests(); /* W329 */
         w335_tests();      /* W335 NET-AUDIT */
         w350_tun_tests();  /* W350 LOC-REJOIN */
+        w409_tun_tests();  /* W409 LOC-MESH-KICK */
         tun_lobby_guard_tests(); /* W332 */
         pub_tests();             /* W373 LOC-PUBLIC-LOBBY */
         route_feed_tests();      /* W395 LOC-ROUTE */
+        w420_ver_tests();        /* W420 LOC-CLIPDUMP: Client-Version im HELLO */
     } else {
         printf("Hinweis: eigener Transport nur in der privaten Fassung - Transport-Pruefungen uebersprungen\n");
     }
 
     route_unit_tests(); /* W395 */
+    w420_rule_tests(); /* W420 LOC-CLIPDUMP: Match-Regel */
     pause_net_tests(); /* W357 */
     printf("loc_net_selftest: %d/%d OK\n", s_ok, s_n);
     return s_ok == s_n ? 0 : 1;

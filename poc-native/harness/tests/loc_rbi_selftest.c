@@ -594,6 +594,266 @@ static void w381_xkey_cases(void)
     CHECK(lost_old > 0, "W381 Gegenprobe Zufall: alter Schluessel verlor keinen Stopp (Fall prueft nichts)");
 }
 
+/* W413 (GitHub #65 "sounds repeat endlessly online"): Schleifen-Cues nach mehreren, sich ueberlappenden Neurechnungen.
+ * Modell von loc_rollback.c (rb_xcue_call/rb_rep_xcue/Nebentabelle, rb_xstop mit rb_rep_get je Art in Reihenfolge,
+ * rbi_replay_finish, W375-Waisen) mit einem Spielzwilling: Feuer gedrueckt -> MG-Schleife starten (Handle in die Ablage
+ * des Spiels), losgelassen -> Stopp per Handle, alle 37 Ticks Stopp nach Index (Ablage leer). Eingabe des Mitspielers in
+ * kurzen Stoessen, Bestaetigung mit 1..6 Ticks Verzoegerung, Vorhersage = letzte bestaetigte Eingabe. Am Ende ist alles
+ * bestaetigt: es darf genau die Schleife spielen, deren Handle die endgueltige Zeitlinie haelt. Gegenprobe ohne Fix:
+ * endlose Schleifen (nachgeholte Waisen, erledigte Index-Stopps). Ohne Fehlvorhersage greift der Fix nie. */
+#include "loc_rb_sndloop.h"
+#define W4_T 700
+#define W4_EV 16384
+#define W4_MG 7
+enum { W4_PLAY = 0, W4_STOPH, W4_STOPIDX };
+typedef struct { int type; u32 key, h, serial; uint8_t pad; } w4_ev_t;
+typedef struct { u32 serial; int cue, playing; } w4_inst_t;
+typedef struct { u32 g, key, h, serial; int used; } w4_side_t;
+typedef struct { u32 serial, h; int touched; uint16_t miss; } w4_net_t;
+static struct {
+    w4_ev_t ev[W4_EV];
+    int nev, toff[W4_T + 2];
+    w4_inst_t in[8192];
+    int nin;
+    w4_side_t side[512];
+    int nside;
+    w4_net_t net[64];
+    int nnet;
+    int fix, grace, replay, cur_t, kc[3], rep_end, win0, win1;
+    u32 g0, g1, slot_hist[W4_T + 2];
+    int n_live_start, n_live_stop, n_fix_stops;
+} W4;
+static w4_inst_t *w4_inst(u32 serial)
+{
+    int i;
+    for (i = 0; i < W4.nin; i++) if (W4.in[i].serial == serial) return &W4.in[i];
+    return NULL;
+}
+static u32 w4_start(int cue)
+{
+    w4_inst_t *x = &W4.in[W4.nin++];
+    x->serial = (u32)W4.nin;
+    x->cue = cue;
+    x->playing = 1;
+    return x->serial;
+}
+static int w4_stop_serial(u32 serial) /* 1 = gestoppt (spielte) */
+{
+    w4_inst_t *x = w4_inst(serial);
+    if (!x || !x->playing) return 0;
+    x->playing = 0;
+    return 1;
+}
+static void w4_rec(int type, u32 key, u32 h, u32 serial)
+{
+    w4_ev_t *e = &W4.ev[W4.nev++];
+    e->type = type; e->key = key; e->h = h; e->serial = serial; e->pad = 0;
+}
+static int w4_rep_get(int type, u32 key) /* rb_rep_get (R3): je Art in Reihenfolge, Abweichung = Zeiger bleibt */
+{
+    int c;
+    for (c = W4.kc[type]; c < W4.rep_end; c++) {
+        if (W4.ev[c].type != type) continue;
+        if (W4.ev[c].key != key) break;
+        W4.kc[type] = c + 1;
+        return 1;
+    }
+    return 0;
+}
+static void w4_net_add(u32 serial, u32 h, int touched)
+{
+    if (W4.nnet < 64) { W4.net[W4.nnet].serial = serial; W4.net[W4.nnet].h = h; W4.net[W4.nnet].touched = touched; W4.net[W4.nnet].miss = 0; W4.nnet++; }
+}
+static u32 w4_play(int cue)
+{
+    int c, pass, i;
+    u32 ser;
+    if (!W4.replay) {
+        ser = w4_start(cue);
+        w4_rec(W4_PLAY, (u32)cue, ser, ser);
+        if (W4.fix) w4_net_add(ser, ser, 0);
+        return ser;
+    }
+    for (pass = 0; pass < 2; pass++) { /* rb_rep_xcue: ab dem laufenden Tick, dann vom Fensterbeginn */
+        int a = pass ? W4.win0 : W4.toff[W4.cur_t], b = pass ? W4.toff[W4.cur_t] : W4.win1;
+        for (c = a; c < b; c++) {
+            w4_ev_t *e = &W4.ev[c];
+            if (e->type == W4_PLAY && e->key == (u32)cue && !(e->pad & (LRS_PAD_USED | LRS_PAD_DEAD))) {
+                e->pad |= LRS_PAD_USED;
+                return e->h;
+            }
+        }
+    }
+    for (i = 0; i < W4.nside; i++) {
+        w4_side_t *x = &W4.side[i];
+        if (x->key == (u32)cue && !x->used && x->g >= W4.g0 && x->g < W4.g1) { x->used = 1; return x->h; }
+    }
+    ser = w4_start(cue); /* nachgeholt */
+    W4.n_live_start++;
+    if (W4.nside >= 512) return ser;
+    W4.side[W4.nside].g = (u32)W4.cur_t; W4.side[W4.nside].key = (u32)cue; W4.side[W4.nside].h = ser;
+    W4.side[W4.nside].serial = ser; W4.side[W4.nside].used = 1; W4.nside++;
+    if (W4.fix) w4_net_add(ser, ser, 1);
+    return ser;
+}
+static void w4_stop_h(u32 h)
+{
+    if (!W4.replay) { w4_stop_serial(h); w4_rec(W4_STOPH, h, 0, 0); return; }
+    if (!w4_rep_get(W4_STOPH, h)) { W4.n_live_stop++; w4_stop_serial(h); }
+}
+static void w4_stop_idx(int cue)
+{
+    int i, c;
+    if (!W4.replay || !w4_rep_get(W4_STOPIDX, 0x80000000u | (u32)cue)) {
+        if (W4.replay) W4.n_live_stop++;
+        for (i = 0; i < W4.nin; i++) if (W4.in[i].cue == cue) W4.in[i].playing = 0;
+        if (!W4.replay) w4_rec(W4_STOPIDX, 0x80000000u | (u32)cue, 0, 0);
+        return;
+    }
+    if (!W4.fix) return; /* erledigt (alt): nichts live */
+    for (i = 0; i < W4.nside; i++) { /* rbs_stop_cover */
+        w4_side_t *x = &W4.side[i];
+        w4_inst_t *n = w4_inst(x->serial);
+        if (lrs_side_in_timeline(x->g, x->used, W4.g0, (u32)W4.cur_t) && n && lrs_stop_covers(cue, 0, n->cue, 0))
+            W4.n_fix_stops += w4_stop_serial(x->serial);
+    }
+    for (c = W4.win0; c < W4.win1; c++) {
+        w4_ev_t *e = &W4.ev[c];
+        w4_inst_t *n = w4_inst(e->serial);
+        if (e->type == W4_PLAY && (e->pad & LRS_PAD_USED) && n && lrs_stop_covers(cue, 0, n->cue, 0))
+            W4.n_fix_stops += w4_stop_serial(e->serial);
+    }
+}
+static u32 w4_game_tick(int t, int fire, u32 s) /* Spielzwilling: Ablage s = Handle der MG-Schleife */
+{
+    if (t % 37 == 36 && s) { w4_stop_idx(W4_MG); return 0; }
+    if (fire && !s) return w4_play(W4_MG);
+    if (!fire && s) { w4_stop_h(s); return 0; }
+    return s;
+}
+static void w4_replay(int m, int t, const int *inp, int conf, int *used_in)
+{
+    int k, c, i, w = 0;
+    u32 s = m ? W4.slot_hist[m - 1] : 0;
+    W4.replay = 1;
+    W4.g0 = (u32)m; W4.g1 = (u32)t;
+    W4.toff[t] = W4.nev;
+    W4.win0 = W4.toff[m]; W4.win1 = W4.nev;
+    for (c = W4.win0; c < W4.win1; c++) {
+        W4.ev[c].pad &= (uint8_t)~LRS_PAD_USED;
+        if (W4.ev[c].type == W4_PLAY)
+            for (i = 0; i < W4.nnet; i++) if (W4.net[i].serial == W4.ev[c].serial) W4.net[i].touched = 1;
+    }
+    for (i = 0; i < W4.nside; i++) W4.side[i].used = 0;
+    for (k = m; k < t; k++) {
+        int in = k <= conf ? inp[k] : inp[conf];
+        W4.cur_t = k;
+        W4.kc[0] = W4.kc[1] = W4.kc[2] = W4.toff[k];
+        W4.rep_end = W4.toff[k + 1];
+        used_in[k] = in;
+        s = w4_game_tick(k, in, s);
+        W4.slot_hist[k] = s;
+    }
+    for (c = W4.win0; c < W4.win1; c++) { /* rbi_replay_finish: W375-Waisen, W413 tot markieren */
+        w4_ev_t *e = &W4.ev[c];
+        if (e->type == W4_PLAY && !(e->pad & (LRS_PAD_USED | LRS_PAD_DEAD)) && w4_stop_serial(e->serial) && W4.fix)
+            e->pad |= LRS_PAD_DEAD;
+        e->pad &= (uint8_t)~LRS_PAD_USED;
+    }
+    for (i = 0; i < W4.nside; i++) { /* W413: nachgeholte Waisen */
+        w4_side_t *x = &W4.side[i];
+        if (W4.fix && lrs_side_orphan(x->g, x->used, W4.g0, W4.g1) && w4_stop_serial(x->serial)) { W4.n_fix_stops++; continue; }
+        W4.side[w++] = *x;
+    }
+    W4.nside = w;
+    W4.replay = 0;
+}
+/* Ein Lauf: Rueckgabe Zahl der endlosen Schleifen am Ende (*missing = Handle der Zeitlinie spielt nicht) */
+static int w4_run(u32 seed, int fix, int grace, int perfect, int *missing, int *rbs)
+{
+    static int inp[W4_T], used_in[W4_T];
+    int t, conf = -1, k, endless = 0, i;
+    u32 fin;
+    memset(&W4, 0, sizeof W4);
+    W4.fix = fix; W4.grace = grace;
+    s_rng = seed;
+    inp[0] = 0;
+    for (t = 1; t < W4_T; t++) inp[t] = (rnd() % 100u) < 30u ? !inp[t - 1] : inp[t - 1];
+    *rbs = 0;
+    for (t = 0; t < W4_T; t++) {
+        int nc = perfect ? t - 1 : t - 1 - (int)(rnd() % 6u), m = -1, in;
+        if (nc > conf) {
+            for (k = conf + 1; k <= nc && m < 0; k++) if (used_in[k] != inp[k]) m = k;
+            if (m >= 0) { w4_replay(m, t, inp, nc, used_in); (*rbs)++; }
+            conf = nc;
+        }
+        in = perfect || t <= conf ? inp[t] : (conf >= 0 ? inp[conf] : 0);
+        W4.toff[t] = W4.nev;
+        used_in[t] = in;
+        W4.slot_hist[t] = w4_game_tick(t, in, t ? W4.slot_hist[t - 1] : 0);
+        W4.toff[t + 1] = W4.nev;
+        if (W4.fix) { /* Sicherheitsnetz je Live-Tick */
+            int w = 0;
+            for (i = 0; i < W4.nnet; i++) {
+                w4_net_t *x = &W4.net[i];
+                w4_inst_t *n = w4_inst(x->serial);
+                if (!n || !n->playing) continue;
+                if (x->touched && lrs_net_step(W4.slot_hist[t], x->h, &x->miss, (u32)W4.grace)) { W4.n_fix_stops += w4_stop_serial(x->serial); continue; }
+                W4.net[w++] = *x;
+            }
+            W4.nnet = w;
+        }
+    }
+    for (k = conf + 1, t = -1; k < W4_T && t < 0; k++) if (used_in[k] != inp[k]) t = k; /* alles bestaetigt */
+    if (t >= 0) { w4_replay(t, W4_T, inp, W4_T - 1, used_in); (*rbs)++; }
+    fin = W4.slot_hist[W4_T - 1];
+    for (i = 0; i < W4.nin; i++) if (W4.in[i].playing && W4.in[i].serial != fin) endless++;
+    *missing = fin && !(w4_inst(fin) && w4_inst(fin)->playing);
+    return endless;
+}
+static void w413_sndloop_cases(void)
+{
+    int r, miss, rbs, e_old = 0, e_new = 0, e_nonet = 0, m_old = 0, m_new = 0, runs_old = 0, rb_tot = 0;
+    for (r = 0; r < 200; r++) {
+        int e = w4_run(4130u + (u32)r, 0, 0, 0, &miss, &rbs);
+        e_old += e; m_old += miss; runs_old += e > 0; rb_tot += rbs;
+        e_new += w4_run(4130u + (u32)r, 1, 30, 0, &miss, &rbs); m_new += miss;
+        e_nonet += w4_run(4130u + (u32)r, 1, 0, 0, &miss, &rbs);
+    }
+    printf("%-28s W413 200 Laeufe (%d Neurechnungen): endlose Schleifen alt %d (in %d Laeufen), neu %d, neu ohne Netz %d; "
+           "Ton fehlt alt %d neu %d\n", "Ton beim Neurechnen", rb_tot, e_old, runs_old, e_new, e_nonet, m_old, m_new);
+    CHECK(e_old > 0, "W413 Gegenprobe: ohne Fix keine endlose Schleife (Strecke prueft nichts)");
+    CHECK(e_new == 0, "W413: %d endlose Schleifen mit Fix", e_new);
+    CHECK(e_nonet == 0, "W413: %d endlose Schleifen mit Fix ohne Sicherheitsnetz", e_nonet);
+    CHECK(m_new <= m_old, "W413: mit Fix fehlt der Ton oefter (%d > %d)", m_new, m_old);
+    { /* Ohne Fehlvorhersage: kein Neurechnen, Fix ohne jede Wirkung (gleiche Starts/Stopps) */
+        int ea, eb, ma, mb, ra, rb2, nin_a, fs;
+        ea = w4_run(4999u, 0, 0, 1, &ma, &ra); nin_a = W4.nin;
+        eb = w4_run(4999u, 1, 30, 1, &mb, &rb2); fs = W4.n_fix_stops;
+        CHECK(ra == 0 && rb2 == 0 && ea == 0 && eb == 0 && fs == 0 && nin_a == W4.nin && W4.n_live_start == 0,
+              "W413: ohne Fehlvorhersage wirkt der Fix (Neurechnungen %d/%d, Stopps %d, Starts %d/%d)", ra, rb2, fs, nin_a, W4.nin);
+    }
+    { /* Einzelfall nachgeholte Waise: R1 startet die Schleife nachgeholt, R2 nicht mehr */
+        static int inp1[W4_T], used1[W4_T];
+        int fx;
+        for (fx = 0; fx < 2; fx++) {
+            int i, playing = 0;
+            memset(&W4, 0, sizeof W4);
+            memset(inp1, 0, sizeof inp1);
+            memset(used1, 0, sizeof used1);
+            W4.fix = fx;
+            for (i = 0; i < 10; i++) { W4.toff[i] = W4.nev; W4.slot_hist[i] = w4_game_tick(i, 0, i ? W4.slot_hist[i - 1] : 0); W4.toff[i + 1] = W4.nev; }
+            inp1[5] = 1; /* R1 (Neurechnen ab Tick 5, bestaetigt bis 5): Feuer an Tick 5, vorhergesagt gehalten */
+            w4_replay(5, 10, inp1, 5, used1);
+            inp1[5] = 0; /* R2 (Neurechnen ab Tick 4): Korrektur - nie gefeuert */
+            w4_replay(4, 10, inp1, 9, used1);
+            for (i = 0; i < W4.nin; i++) playing += W4.in[i].playing;
+            if (fx) CHECK(playing == 0, "W413 Fall nachgeholte Waise: %d Schleife(n) spielen mit Fix", playing);
+            else CHECK(playing == 1, "W413 Gegenprobe nachgeholte Waise: ohne Fix spielen %d (erwartet 1)", playing);
+        }
+    }
+}
+
 static void w380_cases(void)
 {
     static const struct { int dab, dba, jit, loss, D, tap; const char *n; } k[] = {
@@ -2436,6 +2696,7 @@ int main(void)
     w385_cases(); /* W385 */
     w386_cases(); /* W386 */
     w381_xkey_cases(); /* W381 (#61) */
+    w413_sndloop_cases(); /* W413 (#65) */
     w382_cases(); /* W382 */
     mission_switch_tests(); /* W375 */
     CHECK(g_sp_n > 20000u && g_sp_bad == 0u && g_sp_pred > 1000u, "W390: Vorlauf-Rahmen != echte Entnahme (%u von %u, davon vorhergesagt %u)",

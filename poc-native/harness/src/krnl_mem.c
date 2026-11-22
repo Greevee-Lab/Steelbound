@@ -293,8 +293,153 @@ static void exreg_diag_alias(u32 va, u32 size)
         }
     }
 }
+/* DIAG(SB-BRIEF-BLACK,W417, memreg_diag=1): Fuellstand des Registers je Art, Ring-Ueberlauf und Verlauf der
+ * verdraengten Eintraege (der Ring ueberschreibt nach EXREG_MAX Eintraegen den aeltesten, auch wenn dessen
+ * Speicher noch belegt ist). Reiner Zaehler/Verlauf, aendert keine Antwort. */
+#define MRD_EV_N 16384u
+static struct { u32 va, len, kind, nev; } g_mrd_ev[MRD_EV_N];
+static unsigned g_mrd_evn, g_mrd_kind[8], g_mrd_evbig;
+static void memreg_diag_note(u32 va, u32 size, u32 kind)
+{
+    unsigned slot = g_exreg_n % EXREG_MAX;
+    g_mrd_kind[kind & 7u]++;
+    if (g_exreg_n >= EXREG_MAX) {
+        unsigned h = g_mrd_evn % MRD_EV_N;
+        g_mrd_ev[h].va = g_exreg[slot].vaddr; g_mrd_ev[h].len = g_exreg[slot].len;
+        g_mrd_ev[h].kind = g_exreg[slot].kind; g_mrd_ev[h].nev = g_exreg_n;
+        g_mrd_evn++;
+        if (g_exreg[slot].len >= 0x10000u && g_mrd_evbig < 32u) {
+            MEMORY_BASIC_INFORMATION mi;
+            unsigned st = 0;
+            g_mrd_evbig++;
+            if (VirtualQuery((LPCVOID)(uintptr_t)g_exreg[slot].vaddr, &mi, sizeof mi)) { st = (unsigned)mi.State; }
+            HLOG_I("MEMREG verdraengt #%u: va=0x%X len=0x%X kind=%u (registriert als #%u, jetzt #%u, Speicher state=0x%X) neu va=0x%X len=0x%X kind=%u",
+                   g_mrd_evbig, g_exreg[slot].vaddr, g_exreg[slot].len, g_exreg[slot].kind, g_exreg_n - EXREG_MAX,
+                   g_exreg_n, st, va, size, kind);
+        }
+    }
+    if (g_exreg_n == EXREG_MAX) {
+        HLOG_I("MEMREG Ring voll: %u Eintraege, ab jetzt ueberschreibt jeder neue den aeltesten", (unsigned)EXREG_MAX);
+    }
+    if ((g_exreg_n & 1023u) == 0u) {
+        HLOG_I("MEMREG n=%u: Ex/Contig=%u NtAlloc=%u Pool=%u verdraengt=%u", g_exreg_n, g_mrd_kind[1], g_mrd_kind[2],
+               g_mrd_kind[5], g_mrd_evn);
+    }
+}
+/* DIAG(W417): Adresse va wurde abgelehnt (kein Registereintrag) - Lage, Register-Nachbarn, verdraengter Eintrag. */
+void krnl_memreg_diag_miss(unsigned va, const char *who)
+{
+    static unsigned nm;
+    MEMORY_BASIC_INFORMATION mi;
+    unsigned k, cnt = (g_exreg_n < EXREG_MAX) ? g_exreg_n : EXREG_MAX, lo = 0, hi = 0xFFFFFFFFu, klo = 0, khi = 0, j;
+    if (!g_cfg.memreg_diag || nm >= 16u) { return; }
+    nm++;
+    memset(&mi, 0, sizeof mi);
+    (void)VirtualQuery((LPCVOID)(uintptr_t)va, &mi, sizeof mi);
+    for (k = 0; k < cnt; k++) {
+        unsigned b = g_exreg[k].vaddr;
+        if (!b) { continue; }
+        if (b <= va && b >= lo) { lo = b; klo = k; }
+        if (b > va && b < hi) { hi = b; khi = k; }
+    }
+    HLOG_W("MEMREG fehlt #%u (%s): va=0x%X reg_n=%u (Ring %u, verdraengt %u) VQ state=0x%X alloc=0x%X region=0x%X+0x%X prot=0x%X type=0x%X",
+           nm, who, va, g_exreg_n, (unsigned)EXREG_MAX, g_mrd_evn, (unsigned)mi.State, (u32)(uintptr_t)mi.AllocationBase,
+           (u32)(uintptr_t)mi.BaseAddress, (u32)mi.RegionSize, (unsigned)mi.Protect, (unsigned)mi.Type);
+    if (lo) { HLOG_W("MEMREG fehlt #%u   Nachbar unten: reg[%u] va=0x%X len=0x%X kind=%u", nm, klo, lo, g_exreg[klo].len, g_exreg[klo].kind); }
+    if (hi != 0xFFFFFFFFu) { HLOG_W("MEMREG fehlt #%u   Nachbar oben: reg[%u] va=0x%X len=0x%X kind=%u", nm, khi, hi, g_exreg[khi].len, g_exreg[khi].kind); }
+    for (j = 0; j < g_mrd_evn && j < MRD_EV_N; j++) {
+        unsigned h = (g_mrd_evn - 1u - j) % MRD_EV_N;
+        if (g_mrd_ev[h].va && va >= g_mrd_ev[h].va && va - g_mrd_ev[h].va < g_mrd_ev[h].len) {
+            HLOG_W("MEMREG fehlt #%u   lag in verdraengtem Eintrag va=0x%X len=0x%X kind=%u (registriert als #%u, verdraengt bei #%u)",
+                   nm, g_mrd_ev[h].va, g_mrd_ev[h].len, g_mrd_ev[h].kind, g_mrd_ev[h].nev - EXREG_MAX, g_mrd_ev[h].nev);
+            break;
+        }
+    }
+}
+/* FIX(SB-BRIEF-BLACK,W417, #66) memreg_keep=1: Der Register-Ring ueberschreibt nach EXREG_MAX Eintraegen den
+ * aeltesten - auch wenn dessen Speicher noch belegt ist (Heap-Bereiche vom Spielstart). Nach einigen Missionen
+ * im selben Lauf fand krnl_memreg_find die Texturkoepfe darin nicht mehr; tex_upload hielt sie fuer "stale"
+ * (Grund 1, STALLFIX boot500), der Briefing-Film blieb schwarz. Verdraengte Eintraege landen hier als sortierte,
+ * disjunkte Bereiche [lo,hi) (Nachbarn bis MK_GAP verschmolzen, Heap-Bloecke liegen dicht). Abgefragt nur, wenn
+ * der Ring nichts findet; ein Treffer zaehlt nur, wenn die Seite zugesagt und lesbar ist (VirtualQuery, kein
+ * Probe-Fault). Vor dem ersten Ueberlauf leer -> Antworten wie vorher. Der Ring selbst bleibt unveraendert
+ * (LoC-Rollback liest ihn per Index). */
+#define MK_MAX 16384u
+#define MK_GAP 0x40u
+#define MK_KIND 6u /* Rueckgabe von krnl_memreg_find fuer einen behaltenen Bereich */
+static u32 g_mk_lo[MK_MAX], g_mk_hi[MK_MAX];
+static unsigned g_mk_n, g_mk_full, g_mk_ins, g_mk_hit, g_mk_nocommit;
+static SRWLOCK g_mk_lock = SRWLOCK_INIT;
+static unsigned mk_first_end_after(u32 a) /* erstes i mit g_mk_hi[i] > a (Sperre gehalten) */
+{
+    unsigned l = 0, r = g_mk_n;
+    while (l < r) { unsigned m = (l + r) >> 1; if (g_mk_hi[m] > a) { r = m; } else { l = m + 1u; } }
+    return l;
+}
+static void mk_insert(u32 va, u32 len)
+{
+    u32 lo = va, hi = va + len;
+    unsigned i, j;
+    if (!va || !len || hi < lo) { return; }
+    AcquireSRWLockExclusive(&g_mk_lock);
+    i = mk_first_end_after(lo >= MK_GAP ? lo - MK_GAP : 0u);
+    for (j = i; j < g_mk_n && g_mk_lo[j] <= hi + MK_GAP; j++) {
+        if (g_mk_lo[j] < lo) { lo = g_mk_lo[j]; }
+        if (g_mk_hi[j] > hi) { hi = g_mk_hi[j]; }
+    }
+    if (j == i) { /* neuer Bereich an Stelle i */
+        if (g_mk_n >= MK_MAX) {
+            if (!g_mk_full) { HLOG_W("MEMREG behalten: Tabelle voll (%u Bereiche), weitere verdraengte Eintraege gehen verloren", (unsigned)MK_MAX); }
+            g_mk_full++;
+            ReleaseSRWLockExclusive(&g_mk_lock);
+            return;
+        }
+        memmove(&g_mk_lo[i + 1u], &g_mk_lo[i], (g_mk_n - i) * sizeof g_mk_lo[0]);
+        memmove(&g_mk_hi[i + 1u], &g_mk_hi[i], (g_mk_n - i) * sizeof g_mk_hi[0]);
+        g_mk_n++;
+    } else if (j > i + 1u) { /* i..j-1 verschmelzen */
+        memmove(&g_mk_lo[i + 1u], &g_mk_lo[j], (g_mk_n - j) * sizeof g_mk_lo[0]);
+        memmove(&g_mk_hi[i + 1u], &g_mk_hi[j], (g_mk_n - j) * sizeof g_mk_hi[0]);
+        g_mk_n -= j - i - 1u;
+    }
+    g_mk_lo[i] = lo; g_mk_hi[i] = hi;
+    g_mk_ins++;
+    ReleaseSRWLockExclusive(&g_mk_lock);
+}
+static unsigned mk_find(u32 va, unsigned *pbase, unsigned *plen)
+{
+    unsigned i, b = 0, l = 0, hit = 0;
+    MEMORY_BASIC_INFORMATION mi;
+    AcquireSRWLockShared(&g_mk_lock);
+    i = mk_first_end_after(va);
+    if (i < g_mk_n && g_mk_lo[i] <= va) { hit = 1; b = g_mk_lo[i]; l = g_mk_hi[i] - g_mk_lo[i]; }
+    ReleaseSRWLockShared(&g_mk_lock);
+    if (!hit) { return 0; }
+    if (!VirtualQuery((LPCVOID)(uintptr_t)va, &mi, sizeof mi) || mi.State != MEM_COMMIT ||
+        (mi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) || !mi.Protect) {
+        g_mk_nocommit++;
+        return 0; /* Bereich inzwischen freigegeben: wie vorher abgelehnt */
+    }
+    g_mk_hit++;
+    if (pbase) { *pbase = b; }
+    if (plen) { *plen = l; }
+    return MK_KIND;
+}
+/* Eintrag im Slot des naechsten Schreibens wird verdraengt (nur nach Ueberlauf). */
+static void mk_note_evict(void)
+{
+    unsigned slot = g_exreg_n % EXREG_MAX;
+    if (g_exreg_n >= EXREG_MAX && g_cfg.memreg_keep) { mk_insert(g_exreg[slot].vaddr, g_exreg[slot].len); }
+}
+void krnl_memreg_keep_stats(void)
+{
+    HLOG_I("MEMREG Register: %u Eintraege (Ring %u), behalten %u Bereiche aus %u Verdraengungen, Treffer %u, nicht mehr zugesagt %u, Tabelle voll %u (memreg_keep=%d)",
+           g_exreg_n, (unsigned)EXREG_MAX, g_mk_n, g_mk_ins, g_mk_hit, g_mk_nocommit, g_mk_full, g_cfg.memreg_keep);
+}
 static void exreg_add(u32 va, u32 size)
 {
+    if (g_cfg.memreg_diag) { memreg_diag_note(va, size, 1); } /* DIAG(W417) */
+    mk_note_evict(); /* W417 */
     if (g_cfg.contig_diag) { exreg_diag_slot(g_exreg_n % EXREG_MAX); exreg_diag_alias(va, size); } /* DIAG(FILM-WHITE,W177) */
     g_exreg[g_exreg_n % EXREG_MAX].vaddr = va;
     g_exreg[g_exreg_n % EXREG_MAX].len = size;
@@ -304,6 +449,8 @@ static void exreg_add(u32 va, u32 size)
 }
 static void memreg_add(u32 va, u32 size, u32 kind)
 {
+    if (g_cfg.memreg_diag) { memreg_diag_note(va, size, kind); } /* DIAG(W417) */
+    mk_note_evict(); /* W417 */
     if (g_cfg.contig_diag) { exreg_diag_slot(g_exreg_n % EXREG_MAX); } /* DIAG(FILM-WHITE,W177) */
     g_exreg[g_exreg_n % EXREG_MAX].vaddr = va;
     g_exreg[g_exreg_n % EXREG_MAX].len = size;
@@ -363,6 +510,7 @@ static unsigned krnl_memreg_find_scan(unsigned va, unsigned *pbase, unsigned *pl
             return g_exreg[k].kind;
         }
     }
+    if (g_mk_n && g_cfg.memreg_keep) { return mk_find(va, pbase, plen); } /* W417: vom Ring verdraengt */
     return 0;
 }
 /* M2c: PHYS (lower28) -> VIRT (ExBloecke). 0 = kein Treffer. */

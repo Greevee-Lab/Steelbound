@@ -117,6 +117,15 @@ typedef struct {
     int ms;              /* Antwortzeit (ms), auch bei Fehler */
     char version[32];    /* "version" der Antwort (Serverversion), sonst "" */
     char error[48];      /* Fehlercode (net/pin/off/...), sonst "" */
+    /* Live-Zahlen: Objekt "online" der Antwort (players/lobbies/games). Aeltere Server ohne das Objekt
+     * -> has_counts 0, Zahlen 0 (Anzeige wie vorher). */
+    int has_counts;
+    int players;         /* verbundene Piloten */
+    int lobbies;         /* offene Lobbys (warten auf Spieler) */
+    int games;           /* laufende Spiele */
+    /* W421 LOC-VERSION-GATE: "min_client_version" der Antwort, nur strikt X.Y.Z (sb_netver_strict), sonst ""
+     * (aelterer Server, leer, kaputt, zu lang -> keine Sperre). */
+    char min_ver[16];
 } lacc_probe_t;
 int lacc_probe(lacc_probe_t *o); /* 0 = erreichbar */
 

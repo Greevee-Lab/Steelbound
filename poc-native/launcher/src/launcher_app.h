@@ -140,6 +140,7 @@ void w283_gui_selftest(const char *client_override, int *pass, int *fail);
 void w290_gui_selftest(const char *client_override, int *pass, int *fail); /* W290 QUICK-SHOT */
 void w303_gui_selftest(const char *client_override, int *pass, int *fail); /* W303 AUDIO-VOLUME */
 void w365_gui_selftest(const char *client_override, int *pass, int *fail); /* W365 BIND-COMBO */
+void w419_gui_selftest(const char *client_override, int *pass, int *fail); /* W419 CTRL-EXPORT */
 void w299_bind_selftest(int *pass, int *fail); /* W299 REPLAY: Zeile "Replay beenden" */
 
 #ifdef __cplusplus

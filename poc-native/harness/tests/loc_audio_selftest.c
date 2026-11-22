@@ -626,6 +626,30 @@ int main(int argc, char **argv)
                   c.track[1].wave == 1 && c.track[1].bank == 0 && c.db100 == -250,
               "Cue 2 Sound-Liste (Spuren %d)", c.ntrack);
         CHECK(lxf_xsb_cue(&xs, 3, 0, &c) != 0 && lxf_xsb_cue(&xs, -1, 0, &c) != 0, "Cue ausserhalb");
+        /* W413 (#65): Schleifenzahl je Spur - direkter Eintrag einmal, Sound-Spur aus +6, Tabelle ohne Angabe */
+        CHECK(lxf_xsb_cue(&xs, 0, 0, &c) == 0 && c.track[0].loopc == 0, "W413 direkter Eintrag loopc=%d", c.track[0].loopc);
+        CHECK(lxf_xsb_cue(&xs, 2, 0, &c) == 0 && c.track[0].loopc == 0 && c.track[1].loopc == -1,
+              "W413 Sound-Liste loopc=%d/%d", c.track[0].loopc, c.track[1].loopc);
+        {
+            uint8_t *s2 = (uint8_t *)malloc(ns);
+            uint32_t snd = 0x38 + 3 * 0x14 + 4 * 0x14 + 3 * 16 + 32 + 20 + 20 + 8; /* wie make_xsb */
+            int k2, mode_ok;
+            memcpy(s2, s, ns);
+            s2[snd + 26] = 0xFF; s2[snd + 27] = 0xFF; /* direkte Sound-Spur: endlos */
+            CHECK(lxf_xsb_parse(s2, ns, &xs) == 0 && lxf_xsb_cue(&xs, 2, 0, &c) == 0 && c.track[0].loopc == 0xFFFF,
+                  "W413 Sound-Spur endlos loopc=%d", c.track[0].loopc);
+            s2[snd + 26] = 5; s2[snd + 27] = 0;
+            CHECK(lxf_xsb_parse(s2, ns, &xs) == 0 && lxf_xsb_cue(&xs, 2, 0, &c) == 0 && c.track[0].loopc == 5,
+                  "W413 Sound-Spur 5 loopc=%d", c.track[0].loopc);
+            free(s2);
+            (void)lxf_xsb_parse(s, ns, &xs);
+            mode_ok = lxf_track_loop_mode(0, 0xFFFF) == LXF_LOOP_ONCE && lxf_track_loop_mode(1, 0) == LXF_LOOP_ONCE &&
+                      lxf_track_loop_mode(1, 0xFFFF) == LXF_LOOP_INF && lxf_track_loop_mode(1, -1) == LXF_LOOP_INF &&
+                      lxf_track_loop_mode(1, 5) == LXF_LOOP_N;
+            for (k2 = 1; k2 < 0xFFFF; k2 += 97) mode_ok &= lxf_track_loop_mode(1, k2) == LXF_LOOP_N;
+            CHECK(mode_ok, "W413 lxf_track_loop_mode");
+            printf("W413 XSB-Schleifenzahl: direkt einmal, Spur 0/5/0xFFFF, Tabelle ohne Angabe = Wellen-Flag: OK\n");
+        }
     }
 
     /* --- Kuerzungen: jede Laenge, kein Absturz, nur Fehler oder gueltige Werte --- */

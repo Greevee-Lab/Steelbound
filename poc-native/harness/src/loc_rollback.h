@@ -7,6 +7,9 @@ int loc_rb_install(void);   /* nach loc_sync_install/loc_pace_install (loc_boot.
 void loc_rb_tick(int waited_s); /* Watchdog-Takt (Sekunden), Logzeilen LOCRB alle 10 s */
 /* W353 LOC-DURCHSTICH: Rollback-Zustand fuer das F11-Paket (nur Zahlen/Zustaende). 0 = Eingabeschicht aus. */
 int loc_rb_diag(char *buf, int cap);
+/* W411 LOC-FREEZE-SUSP: Buchfuehrung Render-Thread-Anhalten (Zahlen) fuer Haenger-Bericht; 0 = Ring aus. */
+int loc_rb_susp_diag(char *buf, int cap);
+void loc_rb_stall_diag(void); /* Watchdog-STALL: eine Zeile LOCRB: STALL-Diag */
 
 /* W330 LOC-ROLLBACK-R1 (loc_rb=1, nur LoC-Profil). Ohne loc_rb bleiben die Zeiger 0/Null: SB-Pfad unveraendert. */
 extern void (*volatile g_loc_rb_prewrite)(uintptr_t a, unsigned n); /* vor Kernel-Schreibzugriffen in Gast-Puffer */
@@ -52,3 +55,6 @@ typedef struct loc_rb_hud {
 int loc_rb_hud_read(loc_rb_hud *o);
 /* W396: wirksame Eingabeverzoegerung im Rollback (Ticks, = F3-Zeile), 0 = nicht im Rollback-Modus */
 int loc_rb_eff_delay(void);
+/* W420 LOC-CLIPDUMP: GetTickCount|1 des letzten eigenen Rahmens (FUN_0004EC80, auch im Rollback, wo kein TCP-0x34
+ * gesendet wird), 0 = nie. Nur mit loc_rb_input=1 (sonst zeigt locnet.last34_ms die Mission). */
+extern volatile long g_loc_rb_own_ms;

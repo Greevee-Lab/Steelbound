@@ -7,6 +7,7 @@
 #include "sb_overlay.h"
 #include "sb_perfhud.h"
 #include "sb_nethud.h"
+#include "loc_rulenet.h" /* W420 */
 #include "sb_lang.h"
 #include "loc_net.h"
 #include "loc_rollback.h"
@@ -257,6 +258,15 @@ static void nh_sample(void)
             nh_lw(rb.why_key, r, 64);
             nh_lw("ovl.nh_why", f, 96);
             nh_add(&x, 0, f, r);
+        }
+        { /* W420 LOC-CLIPDUMP: Match-Regel des Hosts */
+            int ron = 0, rsrc = 0, rmis = 0;
+            if (loc_rule_hud(&ron, &rsrc, &rmis)) {
+                nh_lw(ron ? "ovl.nh_rule_on" : "ovl.nh_rule_off", a, 48);
+                nh_lw(rsrc == 0 ? "ovl.nh_rule_local" : "ovl.nh_rule_host", b, 48);
+                nh_lw("ovl.nh_rule", f, 96);
+                nh_add(&x, 0, f, a, b);
+            }
         }
         if (have_rb && rb.delay > 0) {
             nh_lw("ovl.nh_delay", f, 96);

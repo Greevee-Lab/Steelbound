@@ -38,6 +38,7 @@
 #include "render_locmenu.h" /* W377 LOC-MENU-FPS */
 #include "render_rq_exp.h" /* W383 LOC-GH-DATA (#62) */
 #include "sb_tex_budget.h" /* W383 LOC-GH-DATA (#60) */
+#include "sb_ovl_loclock.h" /* W416 LOC-ESC-MENU */
 #if SB_EDITION_COMMUNITY
 #include "render_selftest_xbe.h"
 /* Gleiche Formen wie in render_selftest_data.h, aber mit Lade-Puffern
@@ -2081,6 +2082,50 @@ static void test_locmenu(void)
     g_fail += fail;
 }
 
+/* ---------- W416 LOC-ESC-MENU: ESC-Zeilen ohne Wirkung in LoC (sb_ovl_loclock.h) ----------
+ * LoC-Profil -> gesperrt mit Grund (gleiche Gruende wie Launcher kLocLock), SB-Profil -> nichts gesperrt. */
+static void test_ovlloclock(void)
+{
+    static const char *const lock[][2] = {
+        { "monitor_fx", "ovl.ll_monfx" }, { "monitor_grain", "ovl.ll_monfx" }, { "cockpit_hide", "ovl.ll_cockpit" },
+        { "monitor_view", "ovl.ll_cockpit" }, { "cockpit_persp", "ovl.ll_cockpit" }, { "hud_label_avoid", "ovl.ll_cockpit" },
+        { "aim_assist", "ovl.ll_assist" }, { "auto_gear", "ovl.ll_assist" }, { "replay_label", "ovl.ll_replay" },
+        { "watermark_media", "ovl.ll_replay" }, { "replay_fx_live", "ovl.ll_replay" }, { "remaster", "ovl.ll_packs" },
+        { "hd_textures", "ovl.ll_packs" }, { "vr_enable", "ovl.ll_vr" }, { "vr_preset", "ovl.ll_vr" },
+        { "save_lock", "ovl.ll_savelock" }, { "cockpit_glow", "ovl.ll_post" }, { "cockpit_light", "ovl.ll_post" },
+        { "color_sat", "ovl.ll_post" }, { "color_gain", "ovl.ll_post" }, { "ssao", "ovl.ll_post" },
+    };
+    static const char *const freek[] = { "interp_fps", "window_mode", "rt_scale", "shading", "world_fog", "light_world",
+                                         "light_cockpit", "bloom_strength", "shade_shadow", "aa_mode", "world_sharpen",
+                                         "fx_soft", "fx_light_cockpit", "mouse_mode", "mouse_sens", "stick_aim",
+                                         "sbc_mouse_off", "menu_pause", "volume_master", "volume_voice", "", NULL };
+    static const char *const edge[] = { "edge_mode", "edge_fade_width", "edge_fade_strength" };
+    int fail = 0, n = 0, k, w;
+    const char *r;
+    for (k = 0; k < (int)(sizeof lock / sizeof lock[0]); k++) {
+        for (w = 0; w < 2; w++) {
+            r = sb_ovl_loc_lock(lock[k][0], 1, w);
+            n++; if (!r || strcmp(r, lock[k][1]) != 0) { printf("OVLLOCK FAIL LoC %s (16:9=%d): %s\n", lock[k][0], w, r ? r : "frei"); fail++; }
+            n++; if (sb_ovl_loc_lock(lock[k][0], 0, w)) { printf("OVLLOCK FAIL SB %s gesperrt\n", lock[k][0]); fail++; }
+        }
+        n++; if (strcmp(sb_ovl_loc_lock_tag(sb_ovl_loc_lock(lock[k][0], 1, 0)), "ovl.ll_tag") != 0) { fail++; }
+    }
+    for (k = 0; k < (int)(sizeof freek / sizeof freek[0]); k++) {
+        for (w = 0; w < 2; w++) {
+            n++; if (sb_ovl_loc_lock(freek[k], 1, w) || sb_ovl_loc_lock(freek[k], 0, w)) { printf("OVLLOCK FAIL frei %s\n", freek[k] ? freek[k] : "(null)"); fail++; }
+        }
+    }
+    for (k = 0; k < 3; k++) { /* Raender: nur LoC mit 16:9 fest (Launcher pergame_box_169) */
+        n++; if (sb_ovl_loc_lock(edge[k], 1, 0) || sb_ovl_loc_lock(edge[k], 0, 1)) { fail++; }
+        r = sb_ovl_loc_lock(edge[k], 1, 1);
+        n++; if (!r || strcmp(r, "ovl.ll_edge") != 0 || strcmp(sb_ovl_loc_lock_tag(r), "ovl.ll_tag169") != 0) { fail++; }
+    }
+    n++; if (sb_ovl_loc_lock_tag(NULL) != NULL) { fail++; }
+    printf("OVLLOCK (W416): %d Faelle (LoC gesperrt mit Grund, SB frei, wirksame Zeilen frei, Raender nur bei 16:9): %d Fehler\n",
+           n, fail);
+    g_fail += fail;
+}
+
 /* ---------- W358 LOC-LOOK: Vertex-Licht der P2-Programme, LOD-Bias-Kompensation, Mip-Filter ---------- */
 static void test_loclook(void)
 {
@@ -2467,6 +2512,7 @@ int main(int argc, char **argv)
     test_rqexp();
     test_texbudget();
     test_locmenu();
+    test_ovlloclock(); /* W416 */
     printf("== ERGEBNIS: %d Fehler\n", g_fail);
     return g_fail ? 1 : 0;
 }

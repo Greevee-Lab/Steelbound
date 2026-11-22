@@ -38,6 +38,8 @@ typedef struct {
     int loc_transport_nodirect; /* W324 TEST: 1 = kein direkter Weg (Relay erzwingen) */
     int loc_route;              /* W395: 1 = Weg je Mitspieler selbst waehlen/wechseln (direkt, alle Relays), 0 = Treffpunkt folgen */
     char loc_route_sim[256];    /* W395 TEST: je Weg Verzoegerung/Ausfall (loctun_cfg.route_sim), leer = aus */
+    int loc_transport_open_hold; /* W409: ms, OPEN eines Mitspielers halten, solange das eigene Spiel TCP 1000 nicht annimmt (0 = sofort S_FIN) */
+    int loc_test_open_refuse;   /* W409 TEST: ms, eigenes Spiel gilt nach jedem OPEN so lange als "lauscht nicht" (0 = aus) */
     int guest_wx;       /* W339 SEC-A3: W^X fuer das Gastabbild: -1 automatisch (LoC 1, SB 0), 0 aus, 1 strikt, 2 Diagnose */
     int loc_crash_test; /* W339 TEST: N > 0 = N s nach Beginn der Netzsitzung Ausnahme im Gastkontext (Absturz = Ende pruefen); Modus loc_crash_test_mode */
     int loc_crash_test_mode; /* W339 TEST: 0 = Schreibfehler in privatem Code, 1 = Sprung in eine Gast-Datenseite (W^X) */
@@ -86,7 +88,23 @@ typedef struct {
     int imlock_diag;      /* LOC-IM-LOCK DIAG: 1 = Zeile IMLOCK je 10 s (Wartezeit des Present-Takts auf ctx_lock, Halter je
                            * Aufrufstelle mit CPU-Anteil, Teilzeiten langer sb_render_im_end) */
     int interp_p2rej;     /* OPTION(W406 M3-ROAD-JITTER): 1 = vorab transformierte Welt-Draws (P2) mit gleichen Eingangsdaten, die nur wegen eines Bezugs-Vertex nahe der Augenebene an ip_plausible scheitern, im Zwischenbild lerpen (Bezugs-Vertices mit |ndc| <= 2); 0 = alt (exakt aus Tick N) */
+    int loc_interp_rawrzb; /* W410 LOC-GFX-JITTER: "rawlerp" (gleiche Signatur, neue Eingangsdaten, Vertex i <-> i) eines in der Welt
+                            * ruhenden Draws (M_A^-1*M_B passt zur Kamera des Ziels) als Matrix-Lerp der Tick-N-Vertices zeichnen
+                            * (rzb): neu gebaute Gelaende-Netze (~9000 Vertices) ordnen Vertex i je Tick anderen Weltpunkten zu ->
+                            * Keile/Loecher. 1 = nur LoC (Standard), 2 = auch SB, 0 = aus */
     int seam_diag;        /* DIAG(W406 M3-ROAD-JITTER): N = Fugen-Messung zwischen Nachbar-Draws im Zwischenbild (SEAM/SEAMW, erste N Ticks mit Fund; SEAMSUM je 200 Ticks, nur sichtbare Ecken), braucht interp_diag>=3; 0 = aus */
+    int loc_wlag_fix;     /* W412 LOC-WORLD-LAG: 1 = Himmel (Welt-Draw mit eigener Tiefe) mit derselben vorhergesagten Kamera wie die Welt (nur LoC, nur mit Kamera-Versatz W385/W390), 0 = aus (alt) */
+    int loc_wlag_diag;    /* DIAG(W412 LOC-WORLD-LAG): Bit 1 = Zeile LOCWLAG alle 10 s (Kamera je Draw-Klasse, Versatz in Grad), 0 = aus */
+    int loc_stat_fix;     /* W415 LOC-STATIC-LAG: 1 = in Zwischenbildern die Kamera der Welt (haeufigste gleiche Matrix im Weltziel, bestaetigt durch gelerpte Draws) fuer mit der Kamera bewegte Gelaende-Netze (W410 rzm) und fuer partnerlose Draws in Weltkoordinaten (grosses Bodennetz, nomatch) nehmen (nur LoC); 0 = alt (W410-Kamera bzw. exakt) */
+    int memreg_keep;      /* W417 SB-BRIEF-BLACK (#66): 1 = Eintraege, die der volle Register-Ring (8192) verdraengt, als Bereiche behalten; Adressabfragen (Texturkopf-Pruefung) finden sie weiter, solange der Speicher zugesagt ist (vorher nach langen Laeufen Film im Briefing schwarz, Grund 1); 0 = alt */
+    int loc_rule_clipdump_block; /* W420 LOC-CLIPDUMP: Host-Regel "Clip dumping unterbinden" (1 = Magazinwechsel setzt die Feuerpause der Hauptwaffe nicht zurueck; Standard 1, gilt im Match nach der Einstellung des Hosts, loc_rule.c) */
+    int loc_clip_diag;    /* W420 DIAG: Zeile LOCCLIP je Sekunde (Schuesse, Waffe, Magazine, Feuerpause des eigenen VT) */
+    int memreg_diag;      /* DIAG(W417 SB-BRIEF-BLACK): 1 = Speicherregister messen (MEMREG-Zeilen: Fuellstand je Art alle 1024 Eintraege, Ring voll, verdraengte grosse Eintraege) und bei Textur-Ablehnung Grund 1 Lage der Adresse (VirtualQuery, Register-Nachbarn, verdraengter Eintrag); 0 = aus */
+    int loc_stat_diag;    /* DIAG(W415 LOC-STATIC-LAG): Bit 1 = Zeile LOCSTAT alle 10 s (Versatz jedes Welt-Draws im Zwischenbild gegen die Kamera der Welt an derselben Stelle, Pixel je Klasse), Bit 2 = groesste Einzel-Draws (LOCSTAT top), Bit 4 = Bezug Mehrheits-D, Bit 8 = exakte Draws mit Versatz (LOCSTAT ex), Bit 16 = Tickweg je Kamera-Kandidat (LOCSTAT paar); 0 = aus */
+    int loc_sndloop_fix;  /* W413 LOC-SOUND-LOOP (#65): 1 = nach jedem Neurechnen Toene stoppen, die die korrigierte Zeitlinie nicht mehr gestartet bzw. schon gestoppt hat (nachgeholte Waisen, Index-/Quellen-Stopps, Sicherheitsnetz), nur LoC-Rollback; 0 = alt (nur W375-Waisen) */
+    int loc_sndloop_grace; /* W413: Sicherheitsnetz - Schleifen-Cue aus einer Neurechnung endet nach N Live-Ticks ohne Besitzer (Handle-Ablage des Spiels); 0 = Netz aus. Standard 30 */
+    int loc_audio_loopcount; /* W413 LOC-SOUND-LOOP (#65): 1 = Schleife einer Spur nach der XSB-Schleifenzahl (direkte Eintraege und Spuren mit 0 einmal, 0xFFFF endlos, n endlich), 0 = alt (Schleifen-Flag der Welle; MG-Ausklang lief endlos) */
+    int loc_sndloop_diag; /* DIAG(W413): 1 = Zeilen LOCSNDLOOP (je verwaistem Cue, je Index-/Quellen-Stopp-Luecke, Netz, alle 10 s aktive Schleifen), 0 = aus */
     int loc_lampdiag;     /* DIAG(W405 LOC-LAMPS): 1 = Cockpit-Lampen im LoC-Atlas beobachten (LAMPD), 2 = + Knoten/VT (loc_lampdiag.c), 0 = aus */
     char loc_ls_opts[128]; /* LOC-LOCKSTEP-ARBITER DIAG: Reglerwerte "lmin=2,drop_rmin=2,..." (loc_lsarb.h), leer = Standard */
     int loc_rb_delay;     /* W338: Eingabeverzoegerung in Ticks mit loc_rb_input (1..8); W346: 0 = adaptiv nach Umlaufzeit (Standard) */

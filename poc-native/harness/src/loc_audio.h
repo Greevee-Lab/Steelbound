@@ -24,6 +24,12 @@ void loc_audio_tick(int waited_s);
  * stoppen, falls sie noch als Schleife spielt (1 = gestoppt). Ohne aktives LoC-Audio 0. */
 unsigned loc_audio_last_serial(void);
 int loc_audio_stop_orphan(unsigned serial);
+/* W413 LOC-SOUND-LOOP (#65): Auskunft zur laufenden Nummer (Rueckgabe Zustand 0 frei/unbekannt, 1 vorbereitet,
+ * 2 spielt; Cue-Index, Schleife, Quelle, Name), Cue zur Nummer beenden (only_loops: nur spielende Schleifen, 1 =
+ * gestoppt), DIAG: Zahl der spielenden Schleifen-Cues mit Namen/Alter. */
+int loc_audio_cue_info(unsigned serial, int *cue, int *loops, unsigned *src, char *name, int cap);
+int loc_audio_stop_serial(unsigned serial, int only_loops);
+int loc_audio_loops_active(char *buf, int cap);
 
 #ifdef __cplusplus
 }

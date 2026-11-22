@@ -672,7 +672,13 @@ static ID3D11ShaderResourceView *tex_upload(unsigned xptr,
             if (xptr < 0x10000000u) { ok = 1; } /* Xbox-Mask (Heap!) */
             else if (krnl_memreg_find(xptr, NULL, NULL)) { ok = 1; }
         }
-        if (!ok) { g_up_fail = 1; return NULL; }
+        if (!ok) {
+            if (g_cfg.memreg_diag && xptr >= 0x10000000u && xptr < SB_HOST_LIM()) { /* DIAG(W417) */
+                extern void krnl_memreg_diag_miss(unsigned, const char *);
+                krnl_memreg_diag_miss(xptr, "tex_upload");
+            }
+            g_up_fail = 1; return NULL;
+        }
         last_ok = xptr;
     }
     if (g_present_no != up_frame) { up_frame = g_present_no; up_count = 0; }

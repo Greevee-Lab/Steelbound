@@ -27,6 +27,7 @@
 #include "sb_tls.h"
 #include "loc_guard.h"
 #include "steelnet_pins.h"
+#include "sb_version.h" /* W421: sb_netver_cmp (gemeinsam mit dem Launcher) */
 #include <ws2tcpip.h>
 #include <mmsystem.h>
 #include <math.h>
@@ -61,6 +62,12 @@
  * 4 Byte und werden ignoriert, ihre k-Pruefung (k < 5) verwirft unsere Probe). */
 #define RP_LEN 8
 #define HELLO_F_ROUTE 1 /* W395: HELLO-Flag "waehlt den Weg selbst, beantwortet Wegproben" */
+#define HELLO_F_VER 2   /* W420: HELLO traegt die Client-Version (16 Byte nach den Flags, NUL-gefuellt) */
+#define HELLO_VLEN 16
+#define HELLO_LEN (HDR + 8 + HELLO_VLEN)
+#ifndef SB_NET_VERSION
+#define SB_NET_VERSION "dev"
+#endif
 #define TUN_ROUTE_SIMS 4 /* W395 TEST loc_route_sim: Wege mit eigener Verzoegerung/Ausfall */
 #define K_STREAM 1
 #define K_DGRAM 2
@@ -123,6 +130,7 @@ typedef struct trelay {
 
 typedef struct tlink {
     int used, up, got_hello, peer_got, down_logged;
+    int ver_bad;    /* W420: Mitspieler mit anderer bzw. ohne Client-Version (steelnet) - abgelehnt */
     int bad_logged; /* W329: Bit 1 Port, 2 vip, 4 Puffer, 8 eigene vip (W332) - je Grund nur einmal protokollieren */
     uint32_t cid, vip;
     char pilot[24];
@@ -136,6 +144,7 @@ typedef struct tlink {
     uint64_t probe_id;    /* offene Durchstich-Kennung (CSPRNG) */
     lguard_bucket b_dec, b_ack, b_dg[2];
     lguard_bucket b_app; /* W338: R2-Eingabekanal */
+    lguard_bucket b_app2; /* W420: Regelkanal (eigene Bremse, stoert den R2-Kanal nicht) */
     lguard_bucket b_rp;  /* W395: Antworten auf Wegproben */
     struct sockaddr_in cand[TUN_MAX_CAND];
     int ncand;
@@ -192,6 +201,11 @@ typedef struct tghost {
 
 typedef struct tstream {
     int used, link, connecting, rd_closed, fin_rx, fin_sent, wr_shut;
+    /* W409 LOC-MESH-KICK: peer = Strom vom Mitspieler geoeffnet (wir verbinden zum eigenen Spiel); held = eigenes Spiel
+     * nahm TCP 1000 (noch) nicht an, Strom gehalten bis retry_at; tries = Versuche; rx_any/tx_any = schon Bytes vom
+     * Mitspieler bzw. vom eigenen Spiel; t_open = Zeitpunkt des OPEN (Diagnose "sofort geschlossen") */
+    int peer, held, tries, rx_any, tx_any;
+    double t_open, retry_at;
     uint16_t id;
     SOCKET s;
     uint8_t *ob;
@@ -202,7 +216,7 @@ typedef struct tstream {
 
 enum { LB_OFF, LB_CONNECTING, LB_HELLO, LB_LOBBY, LB_TLS };
 /* W334: Sicherheitszustand fuer Log/Launcher (loctun_sec_state) */
-enum { SEC_OK = 0, SEC_SELFTEST = 1, SEC_PIN = 2, SEC_NOPIN = 3, SEC_UPGRADE = 4 };
+enum { SEC_OK = 0, SEC_SELFTEST = 1, SEC_PIN = 2, SEC_NOPIN = 3, SEC_UPGRADE = 4, SEC_VERSION = 5 /* W420 */ };
 
 struct loctun {
     loctun_cfg c;
@@ -226,6 +240,8 @@ struct loctun {
     loctun_stats st;
     volatile uint16_t app_gp;      /* W338: Kanal-Spielport (0 = aus) */
     loctun_app_fn volatile app_fn; /* W338: Empfaenger im Client */
+    volatile uint16_t app2_gp;      /* W420: zweiter Kanal (Match-Regel, loc_rule.c), 0 = aus */
+    loctun_app_fn volatile app2_fn;
     /* Treffpunkt */
     int lb_state, lb_lobby_id, lb_joined, lb_listed;
     SOCKET lb_s;
@@ -247,6 +263,9 @@ struct loctun {
     uint64_t bctr;
     char my_pilot[17];  /* wirksamer Name aus welcome (Transkript) */
     char lobby_code[16];/* Raumcode der eigenen Lobby (Anzeige im Launcher) */
+    char need_ver[16];  /* W420: vom Treffpunkt verlangte bzw. neuere Version eines Mitspielers (nur [0-9A-Za-z.+-]) */
+    char peer_ver[16];  /* W420: Version des abgelehnten Mitspielers ("" = Feld fehlt, aelterer Client) */
+    volatile LONG ver_state; /* W420: 0 nichts, 1 Treffpunkt lehnt ab, 2 Mitspieler mit anderer Version abgelehnt */
     char lb_err[12];    /* W353: letzter Fehlergrund fuer den Launcher (err=, leer = keiner) */
     int lb_host_left;   /* W366: Host hat die Lobby geschlossen -> err=closed statt code beim erneuten Beitritt */
     volatile LONG netcut; /* W366 TEST (netcut_file): Netz unterbrochen - UDP ein/aus verwerfen */
@@ -768,6 +787,22 @@ static void tl_stream_flush(loctun *t, tstream *st)
             continue;
         }
         if (WSAGetLastError() == WSAEWOULDBLOCK) return;
+        {
+            /* W409: Verbindung zum Spiel weg - einmal je Mitspieler sichtbar machen und dem Mitspieler das Ende melden
+             * (vorher blieb sein Strom halb offen: kein S_FIN, Eintrag nie frei) */
+            tlink *L = &t->links[st->link];
+            int e = WSAGetLastError();
+            if (!(L->bad_logged & 256)) {
+                L->bad_logged |= 256;
+                tl_logf(t, "LOCTUN: Strom %u (c%u): Senden an das eigene Spiel gescheitert (Fehler %d) - Strom beendet",
+                        st->id, L->cid, e);
+            }
+            if (!st->fin_sent) {
+                tl_queue_msg(t, L, S_FIN, st->id, NULL, 0);
+                st->fin_sent = 1;
+            }
+            st->wr_shut = 1;
+        }
         st->olen = 0; /* Verbindung zum Spiel weg */
         st->rd_closed = 1;
         break;
@@ -855,15 +890,124 @@ static void tl_guard_kill(loctun *t, tlink *L, int why)
     tl_link_drop(t, L, "Gastfilter");
 }
 
-/* OPEN vom Mitspieler: Verbindung zum eigenen Spiel aufbauen, Absender = vip des Mitspielers. */
-static void tl_stream_open_remote(loctun *t, int li, uint16_t id, uint16_t dst_gp)
+/* W409 LOC-MESH-KICK: Strom vom Mitspieler aufgeben - S_FIN an ihn, Eintrag frei. */
+static void tl_stream_give_up(loctun *t, tstream *st)
 {
-    tlink *L = &t->links[li];
+    tlink *L = &t->links[st->link];
+    if (!st->fin_sent) {
+        tl_queue_msg(t, L, S_FIN, st->id, NULL, 0);
+        st->fin_sent = 1;
+    }
+    tl_stream_free(t, st);
+}
+
+/* W409: Verbindung zum eigenen Spiel (neu) aufbauen, Absender = vip des Mitspielers. 1 = laeuft bzw. steht,
+ * 0 = abgelehnt (*err, z. B. WSAECONNREFUSED: Spiel lauscht nicht), -1 = kein Socket (*err). */
+static int tl_stream_connect(loctun *t, tstream *st, int *err)
+{
+    tlink *L = &t->links[st->link];
     struct sockaddr_in a;
     char ipb[16];
     u_long nb = 1;
     SOCKET s;
+    *err = 0;
+    if (t->c.test_refuse_ms > 0 && tl_now(t) - st->t_open < (double)t->c.test_refuse_ms) {
+        *err = WSAECONNREFUSED; /* W409 TEST: wie ein Spiel, das TCP 1000 (noch) nicht lauscht */
+        return 0;
+    }
+    s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (s == INVALID_SOCKET) {
+        *err = WSAGetLastError();
+        return -1;
+    }
+    tl_nodelay(s);
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = L->vip;
+    if (bind(s, (struct sockaddr *)&a, sizeof a) != 0 && !(L->bad_logged & 8192)) {
+        L->bad_logged |= 8192; /* W409: einmal je Mitspieler (Text unveraendert) */
+        tl_logf(t, "LOCTUN: Strom %u: bind %s fehlgeschlagen (%d)", st->id, locnet_ip_str(L->vip, ipb), WSAGetLastError());
+    }
+    ioctlsocket(s, FIONBIO, &nb);
+    tl_sock_events(t, s, FD_READ | FD_WRITE | FD_CONNECT | FD_CLOSE);
+    a.sin_addr.s_addr = t->n->self_ip;
+    a.sin_port = htons(locnet_port_out(t->n, t->n->self_ip, 1000));
+    st->s = s;
+    st->connecting = 1;
+    if (connect(s, (struct sockaddr *)&a, sizeof a) == 0) {
+        st->connecting = 0;
+    } else if (WSAGetLastError() != WSAEWOULDBLOCK) {
+        *err = WSAGetLastError();
+        if (!(L->bad_logged & 32)) {
+            L->bad_logged |= 32; /* W409: einmal je Mitspieler (Text unveraendert) */
+            tl_logf(t, "LOCTUN: Strom %u: connect an das eigene Spiel fehlgeschlagen (%d)", st->id, *err);
+        }
+        WSAEventSelect(s, NULL, 0);
+        closesocket(s);
+        st->s = INVALID_SOCKET;
+        st->connecting = 0;
+        return 0;
+    }
+    return 1;
+}
+
+/* W409: Zustand des eigenen Spiels fuer die Diagnosezeilen (keine Adressen): lauscht es auf TCP 1000, Lobby-Zustand
+ * G+0x15 (vom Spiel-Thread alle 8 Bilder gemeldet, W373; "?" = unbekannt). */
+static const char *tl_game_info(loctun *t, char *b, size_t cap)
+{
+    LONG w = t->n->pub_w[2];
+    if (w & 0x1000000)
+        _snprintf_s(b, cap, _TRUNCATE, "Spiel lauscht %s, Lobby-Zustand 0x%02X", t->n->tcp_listen ? "ja" : "nein",
+                    (unsigned)(w & 0xFF));
+    else
+        _snprintf_s(b, cap, _TRUNCATE, "Spiel lauscht %s, Lobby-Zustand ?", t->n->tcp_listen ? "ja" : "nein");
+    return b;
+}
+
+/* W409: Das eigene Spiel nahm den Strom des Mitspielers nicht an (connect abgelehnt: lauscht nicht auf TCP 1000).
+ * Das Original wiederholt einen abgelehnten connect (FUN_0004FD80: select meldet Ausnahme -> Socket zu,
+ * FUN_000562C0 verbindet neu); beim Mitspieler steht die Verbindung zum Stellvertreter aber schon, ein S_FIN wuerde
+ * ihm als Verbindungsreset gemeldet (W350) und sein Spiel entfernt uns. Daher den Strom kurz halten und neu
+ * verbinden (alle 200 ms, hoechstens open_hold_ms ab OPEN), danach S_FIN wie bisher. Puffer bleibt begrenzt
+ * (TUN_OB_MAX, Gastfilter je Rahmen), Strom-Tabelle ebenso (TUN_MAX_STREAMS). */
+static void tl_stream_refused(loctun *t, tstream *st, int err)
+{
+    tlink *L = &t->links[st->link];
+    double now = tl_now(t), age = now - st->t_open;
+    char gi[64];
+    if (st->s != INVALID_SOCKET) {
+        WSAEventSelect(st->s, NULL, 0);
+        closesocket(st->s);
+        st->s = INVALID_SOCKET;
+    }
+    st->connecting = 0;
+    if (st->peer && !st->tx_any && !st->fin_rx && !L->blocked && L->up && age + 200.0 <= (double)t->c.open_hold_ms) {
+        st->held = 1;
+        st->tries++;
+        st->retry_at = now + 200.0;
+        if (!(L->bad_logged & 64)) {
+            L->bad_logged |= 64;
+            tl_logf(t, "LOCTUN: Strom %u von c%u: eigenes Spiel nimmt TCP 1000 nicht an (Fehler %d, %s) - Strom gehalten, "
+                       "neuer Versuch bis %d ms",
+                    st->id, L->cid, err, tl_game_info(t, gi, sizeof gi), t->c.open_hold_ms);
+        }
+        return;
+    }
+    if (!(L->bad_logged & 4096)) {
+        L->bad_logged |= 4096;
+        tl_logf(t, "LOCTUN: Strom %u von c%u: eigenes Spiel nahm TCP 1000 nicht an (Fehler %d, %d Versuche, %.0f ms, %s) - "
+                   "Strom geschlossen (S_FIN)",
+                st->id, L->cid, err, st->tries + 1, age, tl_game_info(t, gi, sizeof gi));
+    }
+    tl_stream_give_up(t, st);
+}
+
+/* OPEN vom Mitspieler: Verbindung zum eigenen Spiel aufbauen, Absender = vip des Mitspielers. */
+static void tl_stream_open_remote(loctun *t, int li, uint16_t id, uint16_t dst_gp)
+{
+    tlink *L = &t->links[li];
     tstream *st;
+    int r, err;
     if (tl_stream_find(t, li, id)) return;
     if (dst_gp != 1000) {
         /* W329: Der Mitspieler bestimmt den Zielport. Das Spiel nutzt nur TCP 1000 (tl_accept); jeder andere Port
@@ -877,34 +1021,30 @@ static void tl_stream_open_remote(loctun *t, int li, uint16_t id, uint16_t dst_g
         tl_queue_msg(t, L, S_FIN, id, NULL, 0);
         return;
     }
-    s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    if (s == INVALID_SOCKET) return;
-    tl_nodelay(s);
-    memset(&a, 0, sizeof a);
-    a.sin_family = AF_INET;
-    a.sin_addr.s_addr = L->vip;
-    if (bind(s, (struct sockaddr *)&a, sizeof a) != 0) {
-        tl_logf(t, "LOCTUN: Strom %u: bind %s fehlgeschlagen (%d)", id, locnet_ip_str(L->vip, ipb), WSAGetLastError());
-    }
-    ioctlsocket(s, FIONBIO, &nb);
-    st = tl_stream_new(t, li, id, s);
+    st = tl_stream_new(t, li, id, INVALID_SOCKET);
     if (!st) {
-        closesocket(s);
+        /* W409: vorher still verworfen (der Strom des Mitspielers blieb offen) - jetzt S_FIN und einmal sichtbar */
+        InterlockedIncrement(&t->st.bad);
+        if (!(L->bad_logged & 16)) {
+            L->bad_logged |= 16;
+            tl_logf(t, "LOCTUN: Strom %u von c%u abgelehnt (Strom-Tabelle voll, %d) - S_FIN", id, L->cid, TUN_MAX_STREAMS);
+        }
+        tl_queue_msg(t, L, S_FIN, id, NULL, 0);
         return;
     }
-    tl_sock_events(t, s, FD_READ | FD_WRITE | FD_CONNECT | FD_CLOSE);
-    a.sin_addr.s_addr = t->n->self_ip;
-    a.sin_port = htons(locnet_port_out(t->n, t->n->self_ip, dst_gp));
-    st->connecting = 1;
-    if (connect(s, (struct sockaddr *)&a, sizeof a) == 0) {
-        st->connecting = 0;
-    } else if (WSAGetLastError() != WSAEWOULDBLOCK) {
-        tl_logf(t, "LOCTUN: Strom %u: connect an das eigene Spiel fehlgeschlagen (%d)", id, WSAGetLastError());
-        st->connecting = 0;
-        st->rd_closed = 1;
-        st->wr_shut = 1;
-    }
+    st->peer = 1;
+    st->t_open = tl_now(t);
     tl_logf(t, "LOCTUN: Strom %u von c%u geoeffnet (Spielport %u)", id, L->cid, dst_gp);
+    r = tl_stream_connect(t, st, &err);
+    if (r < 0) {
+        if (!(L->bad_logged & 16)) {
+            L->bad_logged |= 16;
+            tl_logf(t, "LOCTUN: Strom %u von c%u abgelehnt (kein Socket, Fehler %d) - S_FIN", id, L->cid, err);
+        }
+        tl_stream_give_up(t, st);
+    } else if (r == 0) {
+        tl_stream_refused(t, st, err);
+    }
 }
 
 static void tl_deliver_msg(loctun *t, int li, tmsg *m)
@@ -916,8 +1056,18 @@ static void tl_deliver_msg(loctun *t, int li, tmsg *m)
         return;
     }
     st = tl_stream_find(t, li, m->stream);
-    if (!st) return;
+    if (!st) {
+        /* W409: Nachricht fuer einen Strom, den es hier nicht (mehr) gibt - einmal je Mitspieler sichtbar */
+        tlink *L = &t->links[li];
+        if (!(L->bad_logged & 1024)) {
+            L->bad_logged |= 1024;
+            tl_logf(t, "LOCTUN: Strom %u (c%u): %s fuer unbekannten Strom verworfen", m->stream, L->cid,
+                    m->sub == S_FIN ? "Ende" : "Daten");
+        }
+        return;
+    }
     if (m->sub == S_DATA) {
+        st->rx_any = 1;
         /* W334: Gastfilter TCP (SECURITY.md §6.2) - nur ganze, gueltige Spielrahmen; Verstoss = Mitspieler trennen */
         static uint8_t gout[LGUARD_TCP_MAX + TUN_MSG];
         int gn = st->g ? lguard_tcp_feed(st->g, m->data, m->len, gout, (int)sizeof gout) : -1;
@@ -939,6 +1089,16 @@ static void tl_deliver_msg(loctun *t, int li, tmsg *m)
         }
     } else if (m->sub == S_FIN) {
         st->fin_rx = 1;
+        if (!st->peer && !st->rx_any) {
+            /* W409: eigener Strom (Spiel verband sich zum Mitspieler), Gegenseite schloss ihn vor jedem Byte - das
+             * Spiel sieht gleich einen Verbindungsreset (W350). Grund steht im Log der Gegenseite (LOCTUN: Strom ...). */
+            tlink *L = &t->links[li];
+            if (!(L->bad_logged & 2048)) {
+                L->bad_logged |= 2048;
+                tl_logf(t, "LOCTUN: Strom %u zu c%u: Gegenseite schloss ihn sofort (nach %.0f ms, vor Daten)", st->id,
+                        L->cid, tl_now(t) - st->t_open);
+            }
+        }
     }
     tl_stream_flush(t, st);
 }
@@ -998,6 +1158,15 @@ static void tl_deliver_dg(loctun *t, tlink *L, uint16_t src, uint16_t dst, const
     if (t->app_fn && t->app_gp && dst == t->app_gp && src == t->app_gp) { /* W338: R2-Kanal, nie an den Gast */
         loctun_app_fn fn = t->app_fn;
         if (!lguard_bucket_take(&L->b_app, tl_now(t), TUN_DG_RATE, 2.0 * TUN_DG_RATE)) {
+            InterlockedIncrement(&t->st.dg_drop);
+            return;
+        }
+        if (fn) fn(L->vip, d, len);
+        return;
+    }
+    if (t->app2_fn && t->app2_gp && dst == t->app2_gp && src == t->app2_gp) { /* W420: Regelkanal, nie an den Gast */
+        loctun_app_fn fn = t->app2_fn;
+        if (!lguard_bucket_take(&L->b_app2, tl_now(t), 20.0, 40.0)) { /* 5/s erwartet */
             InterlockedIncrement(&t->st.dg_drop);
             return;
         }
@@ -1107,18 +1276,56 @@ static int tl_build_send(loctun *t, tlink *L, double now, int force)
     return nitems > 0 ? 2 : 1;
 }
 
+/* W420: Version nur aus [0-9A-Za-z.+-] (hoechstens 15 Zeichen), sonst leer */
+static void tl_ver_clean(const char *in, int n, char *out, int cap)
+{
+    int i, o = 0;
+    out[0] = 0;
+    for (i = 0; i < n && in[i]; i++) {
+        char c = in[i];
+        if (!(isalnum((unsigned char)c) || c == '.' || c == '+' || c == '-') || o + 1 >= cap || o >= 15) {
+            out[0] = 0;
+            return;
+        }
+        out[o++] = c;
+    }
+    out[o] = 0;
+}
+/* W420: numerischer Vergleich "0.3.10" > "0.3.2" (Nicht-Ziffern beenden den Teil); > 0 = a neuer.
+ * W421: gemeinsame Hilfsfunktion mit dem Launcher (sb_version.h, LoC-Startsperre aus /v1/info) */
+static int tl_ver_cmp(const char *a, const char *b)
+{
+    return sb_netver_cmp(a, b);
+}
+/* W420: eigene Version (TEST: ver_test) und ob die Pruefung gilt (steelnet bzw. TEST ver_check) */
+static const char *tl_myver(const loctun *t) { return t->c.ver_test[0] ? t->c.ver_test : SB_NET_VERSION; }
+static int tl_ver_required(const loctun *t) { return t->c.lobby[0] || t->c.ver_check; }
+static const char *tl_sec_name(const loctun *t)
+{
+    return t->sec == SEC_OK ? "ok" : (t->sec == SEC_PIN ? "pin_failed" : (t->sec == SEC_NOPIN ? "no_pin" :
+           (t->sec == SEC_UPGRADE ? "upgrade_required" : (t->sec == SEC_VERSION ? "version_required" :
+           "selftest_failed"))));
+}
+
 static void tl_hello_fill(loctun *t, tlink *L, uint8_t *p)
 {
     tl_hdr(p, T_HELLO);
     put32(p + HDR, t->n->self_ip);
     p[HDR + 4] = (uint8_t)L->got_hello;
     p[HDR + 5] = 2; /* Version (W334: SBT2) */
-    put16(p + HDR + 6, (uint16_t)(t->c.route_auto ? HELLO_F_ROUTE : 0)); /* W395: Flags */
+    memset(p + HDR + 8, 0, HELLO_VLEN);
+    if (strcmp(tl_myver(t), "-") == 0) { /* TEST: wie ein aelterer Client (Feld fehlt, Flag aus) */
+        put16(p + HDR + 6, (uint16_t)(t->c.route_auto ? HELLO_F_ROUTE : 0));
+    } else {
+        size_t vl = strlen(tl_myver(t));
+        put16(p + HDR + 6, (uint16_t)((t->c.route_auto ? HELLO_F_ROUTE : 0) | HELLO_F_VER)); /* W395: Flags, W420 */
+        memcpy(p + HDR + 8, tl_myver(t), vl < HELLO_VLEN ? vl : HELLO_VLEN - 1);
+    }
 }
 
 static void tl_hello(loctun *t, tlink *L, double now)
 {
-    uint8_t p[HDR + 8];
+    uint8_t p[HELLO_LEN];
     tl_hello_fill(t, L, p);
     tl_send_link(t, L, L->path, p, sizeof p);
     L->hello_last = now;
@@ -1127,7 +1334,7 @@ static void tl_hello(loctun *t, tlink *L, double now)
 /* HELLO auf einem bestimmten Weg: slot >= 1 = Relay slot-1 (W395), sonst direkt an "to". */
 static void tl_hello_on(loctun *t, tlink *L, int slot, const struct sockaddr_in *to, double now)
 {
-    uint8_t p[HDR + 8];
+    uint8_t p[HELLO_LEN];
     tl_hello_fill(t, L, p);
     if (slot >= 1) {
         tl_send_slot(t, L, slot, p, sizeof p);
@@ -1143,7 +1350,7 @@ static void tl_link_up(loctun *t, tlink *L)
     struct sockaddr_in a;
     char ipb[16], ipc[16];
     u_long nb = 1;
-    if (L->up) return;
+    if (L->up || L->ver_bad) return; /* W420 */
     if (L->vip == t->n->self_ip) {
         if (!(L->bad_logged & 8)) { /* W332: je HELLO eine Zeile = Mitspieler fuellt das Log unbegrenzt */
             L->bad_logged |= 8;
@@ -1379,6 +1586,25 @@ static void tl_rx_sbt(loctun *t, const uint8_t *pkt, int plen, const struct sock
                             locnet_ip_str(vip, ipb));
                 }
                 break;
+            }
+            if (tl_ver_required(t)) { /* W420: steelnet nur mit gleicher Client-Version (fehlt = aelterer Client) */
+                char pv[16] = "";
+                int has = len >= HELLO_LEN && (get16(p + HDR + 6) & HELLO_F_VER);
+                if (has) tl_ver_clean((const char *)p + HDR + 8, HELLO_VLEN, pv, (int)sizeof pv);
+                if (!has || strcmp(pv, tl_myver(t)) != 0) {
+                    if (!L->ver_bad) {
+                        L->ver_bad = 1;
+                        strcpy_s(t->peer_ver, sizeof t->peer_ver, pv);
+                        strcpy_s(t->need_ver, sizeof t->need_ver,
+                                 (pv[0] && tl_ver_cmp(pv, tl_myver(t)) > 0) ? pv : tl_myver(t));
+                        InterlockedExchange(&t->ver_state, 2);
+                        tl_logf(t, "LOCVER: c%u nutzt Client-Version %s, eigene %s - Verbindung abgelehnt (steelnet nur mit "
+                                "gleicher Version)", L->cid, pv[0] ? pv : "(fehlt, aelterer Client)", tl_myver(t));
+                        if (slot >= 0) tl_hello_on(t, L, slot, from, now); /* damit ein neuer Client es auch sieht */
+                        tl_link_drop(t, L, "andere Client-Version");
+                    }
+                    break;
+                }
             }
             L->vip = vip;
             if (p[HDR + 4]) L->peer_got = 1;
@@ -1770,8 +1996,8 @@ static void lb_hello(loctun *t)
     tohex(t->my_pub, 32, pub);
     _snprintf_s(b, sizeof b, _TRUNCATE,
                 "{\"t\":\"hello\",\"v\":2,\"client\":\"steelbound-loc\",\"pilot\":\"%s\",\"controller\":\"kbm\","
-                "\"local_eps\":[[\"%s\",%u]],\"e2e\":{\"suite\":1,\"pub\":\"%s\"}}",
-                pe, locnet_ip_str(me.sin_addr.s_addr, ip), t->uport, pub);
+                "\"local_eps\":[[\"%s\",%u]],\"e2e\":{\"suite\":1,\"pub\":\"%s\"},\"cver\":\"%s\"}",
+                pe, locnet_ip_str(me.sin_addr.s_addr, ip), t->uport, pub, tl_myver(t)); /* W420: cver */
     if (t->acct) { /* W328: Konto -> auth_challenge statt welcome */
         size_t bl = strlen(b);
         _snprintf_s(b + bl - 1, sizeof b - bl + 1, _TRUNCATE, ",\"account\":%u,\"exp\":%lld}", t->acct, t->acct_exp);
@@ -2838,6 +3064,32 @@ static void lb_on_line(loctun *t, const char *m, const char *e, double now)
             SecureZeroMemory(t->gkey, sizeof t->gkey);
             InterlockedExchange(&t->auth_state, -1);
         }
+        if (strcmp(code, "version_required") == 0) { /* W420: Treffpunkt verlangt eine neuere Client-Version */
+            char msg[96] = "", nv[16] = "";
+            const char *q;
+            v = js_get(m, e, "msg", &ve);
+            js_str(v, ve, msg, sizeof msg);
+            q = strstr(msg, "client version ");
+            if (q) {
+                char tmp[24];
+                int i;
+                q += 15;
+                for (i = 0; i < 23 && q[i] && q[i] != ' '; i++) tmp[i] = q[i];
+                tmp[i] = 0;
+                tl_ver_clean(tmp, i, nv, (int)sizeof nv);
+            }
+            EnterCriticalSection(&t->cs);
+            strcpy_s(t->need_ver, sizeof t->need_ver, nv);
+            t->peer_ver[0] = 0;
+            LeaveCriticalSection(&t->cs);
+            InterlockedExchange(&t->ver_state, 1);
+            InterlockedExchange(&t->sec, SEC_VERSION);
+            tl_logf(t, "LOCVER: Treffpunkt verlangt Client-Version %s (eigene %s) - Online-Spiel aus", nv[0] ? nv : "?",
+                    SB_NET_VERSION);
+            lb_close(t, code, now);
+            t->lb_next_try = now + 600000.0;
+            return;
+        }
         if (strcmp(code, "upgrade_required") == 0 || strcmp(code, "e2e_required") == 0) {
             InterlockedExchange(&t->sec, SEC_UPGRADE);
             tl_logf(t, "LOCSEC: Treffpunkt lehnt die Protokollversion ab - Online-Spiel aus");
@@ -3135,6 +3387,7 @@ static void tl_accept(loctun *t, int li)
             closesocket(c);
             continue;
         }
+        st->t_open = tl_now(t); /* W409: Diagnose "Gegenseite schloss sofort" */
         tl_sock_events(t, c, FD_READ | FD_WRITE | FD_CLOSE);
         put16(od, 1000);
         put16(od + 2, 0);
@@ -3282,6 +3535,24 @@ static void tl_stream_read(loctun *t, tstream *st)
 {
     tlink *L = &t->links[st->link];
     uint8_t b[TUN_MSG];
+    if (st->held) { /* W409: OPEN gehalten - Mitspieler schloss inzwischen bzw. Zeit fuer den naechsten Versuch */
+        int r, err;
+        if (st->fin_rx) {
+            tl_stream_give_up(t, st);
+            return;
+        }
+        if (tl_now(t) < st->retry_at) return;
+        st->held = 0;
+        r = tl_stream_connect(t, st, &err);
+        if (r < 0) {
+            tl_stream_give_up(t, st);
+            return;
+        }
+        if (r == 0) {
+            tl_stream_refused(t, st, err);
+            return;
+        }
+    }
     if (st->connecting) {
         fd_set w, x;
         struct timeval tv = {0, 0};
@@ -3291,14 +3562,19 @@ static void tl_stream_read(loctun *t, tstream *st)
         FD_SET(st->s, &x);
         if (select(0, NULL, &w, &x, &tv) > 0) {
             if (FD_ISSET(st->s, &x)) {
-                st->connecting = 0;
-                st->rd_closed = 1;
-                st->wr_shut = 1;
-                tl_queue_msg(t, L, S_FIN, st->id, NULL, 0);
-                tl_stream_free(t, st);
+                /* W409: connect ans eigene Spiel abgelehnt (vorher still S_FIN) - halten/neu versuchen bzw. sichtbar
+                 * aufgeben (tl_stream_refused) */
+                int err = 0, el = sizeof err;
+                if (getsockopt(st->s, SOL_SOCKET, SO_ERROR, (char *)&err, &el) != 0 || err == 0) err = WSAECONNREFUSED;
+                tl_stream_refused(t, st, err);
                 return;
             }
             st->connecting = 0;
+            if (st->tries && !(L->bad_logged & 16384)) {
+                L->bad_logged |= 16384;
+                tl_logf(t, "LOCTUN: Strom %u von c%u: eigenes Spiel nahm TCP 1000 nach %d Versuchen an (%.0f ms)", st->id,
+                        L->cid, st->tries + 1, tl_now(t) - st->t_open);
+            }
         } else {
             return;
         }
@@ -3308,11 +3584,21 @@ static void tl_stream_read(loctun *t, tstream *st)
         if (L->snd_next - L->snd_una >= TUN_SQ - 4 || L->sq_bytes >= TUN_FLOW_BYTES) break; /* Flusskontrolle */
         r = recv(st->s, (char *)b, sizeof b, 0);
         if (r > 0) {
+            st->tx_any = 1;
             if (t->fz_on) tl_fuzz_stream(t, st, b, r); /* W335 TEST */
             tl_queue_msg(t, L, S_DATA, st->id, b, r);
             continue;
         }
         if (r < 0 && WSAGetLastError() == WSAEWOULDBLOCK) break;
+        if (st->peer && !st->tx_any && !(L->bad_logged & 128)) {
+            /* W409: das eigene Spiel nahm den Strom an und schloss ihn vor jedem Byte (z. B. Netz-HLE verwarf die
+             * Verbindung: "kein verbundener Mitspieler", bzw. das Spiel schloss seinen Lauschsocket) */
+            char gi[64];
+            int e = r == 0 ? 0 : WSAGetLastError();
+            L->bad_logged |= 128;
+            tl_logf(t, "LOCTUN: Strom %u von c%u: eigenes Spiel schloss die Verbindung sofort (nach %.0f ms, %s %d, %s)",
+                    st->id, L->cid, tl_now(t) - st->t_open, r == 0 ? "Ende" : "Fehler", e, tl_game_info(t, gi, sizeof gi));
+        }
         st->rd_closed = 1;
         if (!st->fin_sent) {
             tl_queue_msg(t, L, S_FIN, st->id, NULL, 0);
@@ -3654,9 +3940,10 @@ static void tl_write_status(loctun *t, double now)
             t->route_mode[0] ? t->route_mode : "-", up, relay, worst);
     /* W334: Sicherheitszustand und Raumcode fuer den Launcher */
     fprintf(f, "sec=%s\nlobby_code=%s\n",
-            t->sec == SEC_OK ? "ok" : (t->sec == SEC_PIN ? "pin_failed" : (t->sec == SEC_NOPIN ? "no_pin" :
-            (t->sec == SEC_UPGRADE ? "upgrade_required" : "selftest_failed"))),
-            t->lobby_code);
+            tl_sec_name(t), t->lobby_code);
+    if (t->ver_state) /* W420: Versionsablehnung (Launcher-Meldung mit Link zur Release-Seite) */
+        fprintf(f, "ver=%s\nneed_ver=%s\npeer_ver=%s\nown_ver=%s\n", t->ver_state == 1 ? "server" : "peer", t->need_ver,
+                t->peer_ver[0] ? t->peer_ver : "-", SB_NET_VERSION);
     /* W353: Fehlergrund (dns, connect, lost, code, full, rate, path; leer = keiner) - nur Zustaende, keine Adressen */
     fprintf(f, "err=%s\n", t->lb_err[0] ? t->lb_err : (t->lb_joined && stuck ? "path" : ""));
     if (t->pub) /* W373: nur Zustand und Zahlen */
@@ -3742,6 +4029,7 @@ void loctun_cfg_default(loctun_cfg *c)
     strcpy_s(c->pilot, sizeof c->pilot, "Pilot");
     strcpy_s(c->role, sizeof c->role, "auto");
     c->route_auto = 1; /* W395 */
+    c->open_hold_ms = 3000; /* W409 */
 }
 
 int loctun_available(void) { return 1; }
@@ -4099,6 +4387,26 @@ void loctun_set_app(loctun *t, uint16_t gp, loctun_app_fn fn)
     t->app_fn = fn;
 }
 
+int loctun_version_state(loctun *t, char *need, int ncap, char *peer, int pcap)
+{
+    int st;
+    if (!t) return 0;
+    EnterCriticalSection(&t->cs);
+    st = (int)t->ver_state;
+    if (need && ncap > 0) strncpy_s(need, (size_t)ncap, t->need_ver, _TRUNCATE);
+    if (peer && pcap > 0) strncpy_s(peer, (size_t)pcap, t->peer_ver, _TRUNCATE);
+    LeaveCriticalSection(&t->cs);
+    return st;
+}
+
+void loctun_set_app2(loctun *t, uint16_t gp, loctun_app_fn fn)
+{
+    if (!t) return;
+    t->app2_fn = NULL;
+    t->app2_gp = gp;
+    t->app2_fn = fn;
+}
+
 int loctun_is_peer(loctun *t, uint32_t vip)
 {
     int r;
@@ -4311,9 +4619,7 @@ int loctun_diag(loctun *t, char *buf, int cap)
                 t->lb_joined ? "joined" : (t->lb_state == LB_OFF ? "off" : "connecting"),
                 up == 0 ? "none" : (relay == 0 ? "direct" : (relay == up ? "relay" : "mixed")), relay ? ":" : "",
                 relay ? rn : "", up, known, worst, lin / 10, lin % 10,
-                t->sec == SEC_OK ? "ok" : (t->sec == SEC_PIN ? "pin_failed" : (t->sec == SEC_NOPIN ? "no_pin" :
-                (t->sec == SEC_UPGRADE ? "upgrade_required" : "selftest_failed"))),
-                t->lb_err[0] ? t->lb_err : "-");
+                tl_sec_name(t), t->lb_err[0] ? t->lb_err : "-");
     LeaveCriticalSection(&t->cs);
     return 1;
 }

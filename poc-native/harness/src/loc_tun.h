@@ -49,6 +49,11 @@ typedef struct loctun_cfg {
     char vis[8];          /* W373: "public" = oeffentliche Lobbys (ohne Raumcode; Code geht immer privat), sonst Raumcode-Lobby */
     int route_auto;       /* W395: 1 = Weg je Mitspieler selbst waehlen und wechseln (direkt/alle Relays), 0 = wie bisher
                            * dem Treffpunkt folgen (Standard 1) */
+    int open_hold_ms;     /* W409: OPEN eines Mitspielers halten, solange das eigene Spiel TCP 1000 nicht annimmt (wie das
+                           * Original, das einen abgelehnten connect wiederholt), 0 = sofort S_FIN (Standard 3000) */
+    int test_refuse_ms;   /* W409 TEST: eigenes Spiel gilt die ersten N ms nach jedem OPEN als "lauscht nicht" */
+    int ver_check;        /* W420 TEST: Versionspruefung im HELLO auch ohne Treffpunkt (Standard 0: nur steelnet) */
+    char ver_test[16];    /* W420 TEST: eigene Version statt SB_NET_VERSION ("-" = HELLO ohne Versionsfeld wie aeltere Clients) */
     char route_sim[256];  /* W395 TEST: je Weg eigene Verzoegerung/Ausfall, "name:SPEC/name:SPEC" mit name = direct oder
                            * Relayname, SPEC wie loc_netsim plus cut:A-B (Sekunden ab Transportstart, B leer = bis Ende) */
 } loctun_cfg;
@@ -84,6 +89,13 @@ int loctun_is_peer(loctun *t, uint32_t vip);
  * Ratenbremse je Mitspieler wie fuer Spiel-Datagramme. fn = NULL schaltet ab. */
 typedef void (*loctun_app_fn)(uint32_t vip, const uint8_t *d, int len);
 void loctun_set_app(loctun *t, uint16_t gp, loctun_app_fn fn);
+/* W420 LOC-CLIPDUMP: zweiter Kanal gleicher Art (Match-Regel "SBRU", loc_rule.c) auf eigenem Spielport, eigene
+ * Ratenbremse (20/s). Aeltere Clients kennen den Port nicht und verwerfen das Datagramm (nicht gebunden). */
+void loctun_set_app2(loctun *t, uint16_t gp, loctun_app_fn fn);
+/* W420 (Nutzerentscheid 22.11.): steelnet nur mit gleicher Client-Version (poc-native/VERSION). Rueckgabe 0 = keine
+ * Ablehnung, 1 = Treffpunkt verlangt need (Fehler version_required), 2 = Mitspieler mit Version peer ("" = Feld fehlt,
+ * aelterer Client) abgelehnt; need = die neuere der beiden Versionen. */
+int loctun_version_state(loctun *t, char *need, int ncap, char *peer, int pcap);
 
 /* Zustand fuer Log/Launcher/Selbsttest. */
 int loctun_links_up(loctun *t);

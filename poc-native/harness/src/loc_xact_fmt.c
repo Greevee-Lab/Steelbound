@@ -217,11 +217,12 @@ void lxf_xsb_bank_name(const lxf_xsb_t *x, int i, char buf[17])
     }
 }
 
-static void add_track(const lxf_xsb_t *x, lxf_cue_t *c, int wave, int bank)
+static void add_track(const lxf_xsb_t *x, lxf_cue_t *c, int wave, int bank, int loopc)
 {
     if (c->ntrack < LXF_MAX_TRACKS && wave >= 0 && wave < 0x10000 && bank >= 0 && bank < x->n_wb) {
         c->track[c->ntrack].wave = wave;
         c->track[c->ntrack].bank = bank;
+        c->track[c->ntrack].loopc = loopc; /* W413 */
         c->ntrack++;
     }
 }
@@ -240,7 +241,7 @@ static void add_from_table(const lxf_xsb_t *x, lxf_cue_t *c, uint32_t j, uint32_
         int wave = rds16(x->d, x->n, j + 4 + 8 * k, &ok);
         int bank = rds16(x->d, x->n, j + 6 + 8 * k, &ok);
         if (ok) {
-            add_track(x, c, wave, bank);
+            add_track(x, c, wave, bank, -1); /* W413: keine Schleifenzahl bekannt (Bank.xsb ohne Tabellen) */
         }
     }
 }
@@ -287,7 +288,7 @@ int lxf_xsb_cue(const lxf_xsb_t *x, int cue, uint32_t rnd, lxf_cue_t *c)
     if (fl & 0x10) {
         add_from_table(x, c, rd32(x->d, x->n, eo, &ok), rnd);
     } else if (fl & 0x08) {
-        add_track(x, c, rds16(x->d, x->n, eo, &ok), rds16(x->d, x->n, eo + 2, &ok));
+        add_track(x, c, rds16(x->d, x->n, eo, &ok), rds16(x->d, x->n, eo + 2, &ok), 0); /* W413: direkt = einmal */
     } else { /* Sound-Liste: Anzahl (Byte) + 24-Bit-Offset; je Sound 8 B Kopf + Groesse */
         uint32_t j = rd32(x->d, x->n, eo, &ok);
         int cnt = rd8(x->d, x->n, j, &ok);
@@ -304,7 +305,8 @@ int lxf_xsb_cue(const lxf_xsb_t *x, int cue, uint32_t rnd, lxf_cue_t *c)
                 if (sf == 0x04 || sf == 0x44) {
                     add_from_table(x, c, rd32(x->d, x->n, so + 8, &ok), rnd);
                 } else if (sf == 0x00 || sf == 0x40) {
-                    add_track(x, c, rds16(x->d, x->n, so + 8, &ok), rds16(x->d, x->n, so + 10, &ok));
+                    add_track(x, c, rds16(x->d, x->n, so + 8, &ok), rds16(x->d, x->n, so + 10, &ok),
+                              (int)((unsigned)rd8(x->d, x->n, so + 6, &ok) | ((unsigned)rd8(x->d, x->n, so + 7, &ok) << 8))); /* W413 */
                 }
             }
             so += 8u + (uint32_t)sz;
@@ -384,4 +386,12 @@ int lxf_xsb_rpc(const lxf_xsb_t *x, int entry, const char *name, float value, lx
         }
     }
     return hits;
+}
+
+/* W413 LOC-SOUND-LOOP (GitHub #65): Schleife einer Spur aus Wellen-Flag und XSB-Schleifenzahl (loc_xact_fmt.h). */
+int lxf_track_loop_mode(int wave_loop, int loopc)
+{
+    if (!wave_loop || loopc == 0) return LXF_LOOP_ONCE; /* ohne Schleifen-Welle nie; Schleifenzahl 0 = einmal */
+    if (loopc < 0 || loopc == 0xFFFF) return LXF_LOOP_INF; /* keine Angabe (wie bisher) bzw. endlos */
+    return LXF_LOOP_N;
 }

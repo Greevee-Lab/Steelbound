@@ -3,6 +3,7 @@
  * Eingabe-Profile auflisten, SBC-USB-/Gamepad-Status, Belegungs-Modell
  * fuer den Belegungs-Dialog (Namen wie docs/EINGABE.md). ASCII only. */
 #include "input_joy.h" /* W221: ijoy_info_t, imap_joy_state_t, IMAP_JOY_MAX */
+#include "launcher_cfg.h" /* W419: launcher_settings_t (Export/Import) */
 
 #ifdef __cplusplus
 extern "C" {
@@ -334,6 +335,72 @@ int lctrl_joy_param_set(char *alt, size_t cap, const char *key,
 /* Lesbar: "JOY1:B3" -> "Joystick 2 Taste 3" (Sprache via LT). 1 = JOY-
  * Quelle, 0 = keine (out unveraendert). */
 int lctrl_joy_atom_text(const char *atom, char *out, size_t cap);
+
+/* --- W419 CTRL-EXPORT: Steuerung exportieren / importieren -------------- */
+/* Textdatei <profil>.sbcontrols (Format docs/EINGABE.md S8a):
+ *   [steelbound_controls]  format, launcher, game (sb|loc), profile
+ *   [settings]             steuerungsnahe Werte (feste Liste, lcx_set_check)
+ *   [profile]              joyN = Geraet, element = quelle, quelle (wie profiles/*.ini)
+ *   [end]                  Pflicht (fehlt = abgeschnitten)
+ * Keine Pfade, Konten oder sonstigen Einstellungen. Import: Datei ist
+ * unvertrauenswuerdig (Groesse, Text, Abschnitte, Schluessel, Wertebereiche,
+ * Quellen-Zeichensatz streng geprueft; Unbekanntes gezaehlt und ignoriert). */
+#define LCX_FORMAT 1
+#define LCX_MAX_BYTES (64 * 1024)
+#define LCX_SET_MAX 64
+enum {
+    LCX_OK = 0,
+    LCX_E_IO,       /* nicht lesbar */
+    LCX_E_TOOBIG,   /* > LCX_MAX_BYTES */
+    LCX_E_BINARY,   /* kein Text (NUL/Steuerzeichen) */
+    LCX_E_NOTCX,    /* kein [steelbound_controls]-Kopf / kein format */
+    LCX_E_NEWER,    /* format > LCX_FORMAT */
+    LCX_E_TRUNC,    /* [end] fehlt (abgeschnitten) */
+    LCX_E_NAME,     /* Profilname fehlt oder enthaelt einen Pfad */
+    LCX_E_VALUE,    /* Wert ausserhalb des Bereichs / ungueltige Quelle */
+    LCX_E_LINE      /* Zeile zu lang */
+};
+typedef struct {
+    int format;
+    char launcher[32];
+    char game[8];     /* "sb" | "loc" */
+    char profile[64]; /* Name aus der Datei (geprueft: kein Pfad) */
+    int n_set;
+    char set[LCX_SET_MAX][96]; /* "key=value", normalisiert und geprueft */
+    lctrl_bind_t bind;
+    int unknown;      /* ignorierte Abschnitte, Schluessel und Quellen */
+} lcx_data_t;         /* gross (~38 KB): nur static/Heap */
+/* Schluessel der Liste [settings]: 1 = bekannt + Wert gueltig, 0 = bekannt,
+ * Wert ungueltig, -1 = unbekannt. */
+int lcx_set_check(const char *key, const char *val);
+/* 1 = Wert steht in der Launcher-Oberflaeche (launcher_settings_t), 0 = nur
+ * user.cfg [input] (Kalibrierung, Totzonen, Invertierung ...). */
+int lcx_set_is_ui(const char *key);
+/* Oberflaechenwerte s bzw. user.cfg-Zeilen in d->set uebernehmen (Export). */
+void lcx_put_settings(lcx_data_t *d, const launcher_settings_t *s);
+int lcx_put_cfg(lcx_data_t *d, const char *user_cfg); /* Anzahl */
+/* Oberflaechenwerte aus d nach s (Import). Rueckgabe = Anzahl. */
+int lcx_get_settings(const lcx_data_t *d, launcher_settings_t *s);
+/* user.cfg-Werte aus d schreiben: Keys ersetzen, joy_calN je Geraet+Achse
+ * zusammenfuehren (fremde Geraete bleiben, nichts wird umgehaengt).
+ * Rueckgabe 0 = ok (auch: nichts zu tun), 1 = Schreibfehler. */
+int lcx_apply_cfg(const lcx_data_t *d, const char *user_cfg);
+/* Datei-Text bauen bzw. schreiben (UTF-8, LF). 0 = ok. */
+int lcx_build(const lcx_data_t *d, char *out, size_t cap);
+int lcx_write_file(const char *path, const lcx_data_t *d);
+/* Pruefen + lesen. Rueckgabe LCX_*; err = Spielertext (aktive Sprache).
+ * Bei Fehler bleibt d leer (nichts davon darf angewendet werden). */
+int lcx_parse(const char *buf, size_t len, lcx_data_t *d, char *err, size_t cap);
+int lcx_read_file(const char *path, lcx_data_t *d, char *err, size_t cap);
+/* Name fuer das neue Profil: "user_<rest>" (rest aus raw ohne "user_",
+ * fremde Zeichen -> '_', max. 40), bei Kollision im Client-Ordner -2, -3 ...
+ * 0 = ok, 1 = kein freier Name. */
+int lcx_import_name(const char *client_dir, const char *raw, char *out, size_t cap);
+/* Fehlende Geraete (nur Namen): joyN-Zeilen genutzter Slots ohne Treffer in
+ * list (bzw. Slot ohne Zeile und ohne n-tes Geraet), Original-Controller
+ * (SBC-Quellen oder sbc_usb=1) ohne sbc_present. Rueckgabe = Anzahl. */
+int lcx_missing(const lcx_data_t *d, const ijoy_info_t *list, int n, int sbc_present,
+                char out[][96], int max);
 
 /* --- input_selftest --dump pruefen ------------------------------------- */
 /* Profil per Client-Tool parsen lassen. 0 = Exit 0 (geparst), Text in out. */

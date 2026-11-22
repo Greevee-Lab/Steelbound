@@ -149,6 +149,8 @@ static void cli_usage(void)
            "  --shot N|alle           Test: Seite N (0..6) als BMP sichern\n"
            "  --shot-out DIR          Ziel f" U8_UE "r --shot (Default: %%TEMP%%)\n"
            "  --write-user-profile R    Benutzerprofil user_R.ini schreiben\n"
+           "  --controls-export OUT     W419: Steuerung (aktives Profil + Werte) als .sbcontrols\n"
+           "  --controls-check DATEI    W419: .sbcontrols nur pruefen (nichts aendern)\n"
            "                            (Basis --from B, --set-bind \"e=a;...\", --force)\n"
            "  --bind-shot[=AKTION]    Test: Belegungs-Dialog sichern (BMP+PNG)\n"
            "  --bind-learn            mit --bind-shot: Lernmodus im Bild (W228)\n"
@@ -165,12 +167,15 @@ static void cli_usage(void)
            "                          loc_empty, loc_ok, loc_sb, loc_start = Bereich\n"
            "                          Line of Contact, W276, loc_exp = loc_ok mit\n"
            "                          Hinweisband, W293, loc_wide = loc_ok mit\n"
-           "                          Bildformat 16:9, W326, advanced = Anzeige/Grafik\n"
+           "                          Bildformat 16:9, W326, loc_169 = LoC-Standard\n"
+           "                          16:9 + Fade out, W414, advanced = Anzeige/Grafik\n"
            "                          mit Feinreglern, W291, fade = Breitbild\n"
            "                          Fade out mit Verlaufszeile, W296, fpslist/\n"
            "                          fpslist_auto = Bildratenliste offen, W309,\n"
            "                          loc_acc_none|unsec|ok|view|signin = Pilotenkonto, W328,\n"
            "                          loc_acc_view_unsec|view_login|view_ok = Account-Seite, W399,\n"
+           "                          loc_acc_view_manage|view_net|signin_code|view_unsec_login =\n"
+           "                          Kontoseite mit Aufklappern bzw. Server nicht erreichbar, W418,\n"
            "                          ready_hover/loc_hover = Maus auf dem inaktiven Spielnamen, W398),\n"
            "                          nur Anzeige (Packs-Ordner: Umgebung SB_PACKS_DIR)\n"
            "  --dpi N                 mit --ui-shot/--bind-shot: DPI erzwingen\n"
@@ -1523,7 +1528,7 @@ static int cli_selftest(const char *client_override)
     /* 16 (W78): Bind-Modell parsen/setzen/speichern */
     {
         char bp[1024];
-        lctrl_bind_t bd;
+        static lctrl_bind_t bd; /* W414: static (Stapelrahmen cli_selftest) */
         char row[420];
         u8_GetTempPath(bp, sizeof bp);
         strcat_s(bp, sizeof bp, "w78_bind_test.ini");
@@ -1551,7 +1556,7 @@ static int cli_selftest(const char *client_override)
                 lctrl_bind_add(&bd, 2, "PAD:LB") == 0 &&
                 lctrl_bind_add(&bd, 2, "PAD:LB") == 1) {
                 char sp[1024], err2[256];
-                lctrl_bind_t bd2;
+                static lctrl_bind_t bd2; /* W414: static */
                 u8_GetTempPath(sp, sizeof sp);
                 strcat_s(sp, sizeof sp, "w78_bind_out.ini");
                 u8_DeleteFile(sp);
@@ -1590,7 +1595,7 @@ static int cli_selftest(const char *client_override)
         }
         {
             char nm[32], c[4][160];
-            lctrl_bind_t bc;
+            static lctrl_bind_t bc; /* W414: static */
             int nc;
             lctrl_key_name(VK_SPACE, nm, sizeof nm);
             if (strcmp(nm, "SPACE") != 0) {
@@ -2620,7 +2625,7 @@ static int cli_selftest(const char *client_override)
 
     /* 41 (W159): Bind-Aktion vr_recenter speichern + laden. */
     {
-        lctrl_bind_t b1, b2;
+        static lctrl_bind_t b1, b2; /* W414: static, je ~31 KB (Stapelrahmen cli_selftest) */
         char row[256], conf[4][160], err2[256];
         int ok = 1, n, vr, bi0;
         vr = lctrl_bind_elem_index("vr_recenter");
@@ -2695,7 +2700,7 @@ static int cli_selftest(const char *client_override)
     /* 57 (W188 GAME-MENU): Client-Aktion pause - Element, Abschnitt [client],
      * Tastenname PAUSE, Konflikt mit einem Spiel-Element wird gemeldet. */
     {
-        lctrl_bind_t b1, b2;
+        static lctrl_bind_t b1, b2; /* W414: static, je ~31 KB (Stapelrahmen cli_selftest) */
         char row[256], conf[4][160], err2[256], nm[32];
         int ok = 1, n, pa, bi0;
         const char *why = "";
@@ -2750,7 +2755,7 @@ static int cli_selftest(const char *client_override)
     /* 60 (W195 PHOTO-MODE): Client-Aktion photo - Element, Abschnitt [client],
      * Tastenname F12, Rundweg, Konflikt mit einem Spiel-Element wird gemeldet. */
     {
-        lctrl_bind_t b1, b2;
+        static lctrl_bind_t b1, b2; /* W414: static, je ~31 KB (Stapelrahmen cli_selftest) */
         char row[256], conf[4][160], err2[256], nm[32];
         int ok = 1, n, ph, bi0;
         const char *why = "";
@@ -2803,7 +2808,7 @@ static int cli_selftest(const char *client_override)
     }
 
     {
-        lctrl_bind_t b1, b2;
+        static lctrl_bind_t b1, b2; /* W414: static, je ~31 KB (Stapelrahmen cli_selftest) */
         char row[256], conf[4][160], err2[256], nm[32];
         int ok = 1, n, ph, bi0;
         const char *why = "";
@@ -2856,7 +2861,7 @@ static int cli_selftest(const char *client_override)
     }
 
     {
-        lctrl_bind_t b1, b2;
+        static lctrl_bind_t b1, b2; /* W414: static, je ~31 KB (Stapelrahmen cli_selftest) */
         char row[256], conf[4][160], err2[256], nm[32];
         int ok = 1, n, ph, bi0;
         const char *why = "";
@@ -3879,6 +3884,7 @@ static int cli_selftest(const char *client_override)
     w303_gui_selftest(client_override, &pass, &fail); /* W303 AUDIO-VOLUME */
     w299_bind_selftest(&pass, &fail); /* W299 REPLAY */
     w365_gui_selftest(client_override, &pass, &fail); /* W365 BIND-COMBO */
+    w419_gui_selftest(client_override, &pass, &fail); /* W419 CTRL-EXPORT */
     if (!ls_replay_selftest()) { T_OK("W254 replay list (folders, SaveMeta name, mission, signature state, order, set args)"); }
     else { T_FAIL("W254 replay list", "%s", "failed"); }
     if (!ls_selftest()) { T_OK("W199 save-import layouts, conflicts, backup, ZIP roundtrip, rejection"); }
@@ -3960,6 +3966,23 @@ static int cli_selftest(const char *client_override)
         }
     }
     st_valid_cleanup(); /* COMM-SELFTEST2 */
+    /* W414: Stapel-Reserve des Hauptthreads. Vorher lag die Spitze bei ~1008 von 1024 KB (cli_selftest
+     * hatte 13 lctrl_bind_t a ~31 KB auf dem Stapel, Rahmen 640 KB), kleine Zusaetze liefen in C00000FD.
+     * Spitze = festgeschriebener Stapel (TIB StackBase - StackLimit); Grenze 75 % der PE-Reserve,
+     * damit Zuwachs als FAIL auffaellt statt als Absturz. Stapelgroesse bleibt Standard (kein /STACK). */
+    {
+        NT_TIB *tib = (NT_TIB *)NtCurrentTeb();
+        const IMAGE_DOS_HEADER *dh = (const IMAGE_DOS_HEADER *)GetModuleHandleW(NULL);
+        const IMAGE_NT_HEADERS *nh = (const IMAGE_NT_HEADERS *)((const char *)dh + dh->e_lfanew);
+        unsigned long peak = (unsigned long)(((char *)tib->StackBase - (char *)tib->StackLimit) / 1024);
+        unsigned long resv = (unsigned long)(nh->OptionalHeader.SizeOfStackReserve / 1024);
+        printf("     (W414: Stapel-Spitze %lu KB von %lu KB Reserve)\n", peak, resv);
+        if (resv && peak * 4 <= resv * 3) {
+            T_OK("W414 stack headroom (main thread peak <= 75 % of the default reserve, big test buffers static)");
+        } else {
+            T_FAIL("W414 stack headroom", "Spitze %lu KB von %lu KB", peak, resv);
+        }
+    }
     printf("selftest: %d PASS, %d FAIL\n", pass, fail);
     return fail ? 1 : 0;
 #undef T_OK
@@ -4142,6 +4165,59 @@ static int cli_list_profiles(const char *client_override)
 }
 
 /* Schreibt user.cfg aus (Profil|user.cfg-Basis) + --set. 0 = ok. */
+/* W419 CTRL-EXPORT: --controls-export OUT (wie der Knopf "Export...": aktives Profil + Steuerungswerte) bzw.
+ * --controls-check DATEI (nur pruefen, nichts aendern). 0 = ok. */
+static int cli_controls(const char *client_override, const char *exp, const char *chk)
+{
+    static lcx_data_t d;
+    static launcher_settings_t s;
+    char client[1024], upath[1200], pp[1200], err[400];
+    int has_ldr, i, ui = 0;
+    if (chk) {
+        int rc = lcx_read_file(chk, &d, err, sizeof err);
+        if (rc != LCX_OK) {
+            printf("FEHLER (%d): %s\n", rc, err);
+            return 1;
+        }
+        for (i = 0; i < d.n_set; i++) {
+            char k[48];
+            const char *eq = strchr(d.set[i], '=');
+            if (eq && (size_t)(eq - d.set[i]) < sizeof k) {
+                memcpy(k, d.set[i], (size_t)(eq - d.set[i]));
+                k[eq - d.set[i]] = '\0';
+                ui += lcx_set_is_ui(k);
+            }
+        }
+        printf("OK: format %d, game %s, profile %s, %d settings (%d page, %d user.cfg), %d unknown ignored\n",
+               d.format, d.game[0] ? d.game : "-", d.profile, d.n_set, ui, d.n_set - ui, d.unknown);
+        return 0;
+    }
+    lcfg_find_client_dir(client_override, client, sizeof client, &has_ldr);
+    if (!has_ldr) {
+        printf("FEHLER: kein sb_ldr.exe in '%s' (Client-Ordner?).\n", client);
+        return 1;
+    }
+    load_effective(client, &s, NULL, 0, NULL, NULL);
+    memset(&d, 0, sizeof d);
+    strcpy_s(d.profile, sizeof d.profile, s.input_profile[0] ? s.input_profile : "keyboard_default");
+    if (lctrl_input_profile_path(client, d.profile, pp, sizeof pp) != 0 || lctrl_bind_load_file(pp, &d.bind) != 0) {
+        printf("FEHLER: Profil '%s' nicht gefunden.\n", d.profile);
+        return 1;
+    }
+    d.format = LCX_FORMAT;
+    strcpy_s(d.launcher, sizeof d.launcher, lupd_version()[0] ? lupd_version() : "dev");
+    strcpy_s(d.game, sizeof d.game, "sb");
+    lcx_put_settings(&d, &s);
+    lcfg_user_cfg_path(client, upath, sizeof upath);
+    lcx_put_cfg(&d, upath);
+    if (lcx_write_file(exp, &d) != 0) {
+        printf("FEHLER: Datei nicht schreibbar.\n");
+        return 1;
+    }
+    printf("OK: profile %s, %d settings exportiert.\n", d.profile, d.n_set);
+    return 0;
+}
+
 static int cli_write_user_cfg(const char *client_override,
                               const char *profile, const char *set)
 {
@@ -4647,6 +4723,14 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
         cli_console();
         rc = lcfg_image_check(cli_value(argc, argv, "--check-image"), m, sizeof m);
         printf("%s\n", m);
+#if defined(SB_TEST_HOOKS) && SB_TEST_HOOKS
+    } else if (cli_value(argc, argv, "--loc169-migrate")) { /* W414: Test-Haken (Entwickler-Build) - Einmal-Umstellung */
+        int r414;
+        cli_console();
+        r414 = lgame_loc169_migrate(cli_value(argc, argv, "--loc169-migrate"));
+        printf("loc169-migrate: %d (1 = umgestellt, 0 = nichts zu tun, -1 = Fehler)\n", r414);
+        rc = r414 < 0 ? 1 : 0;
+#endif
     } else if (cli_flag(argc, argv, "--diag-package")) { /* W279 DIAG-CRASH: Diagnosepaket ohne Fenster */
         cli_console();
         rc = gui_diag_package_cli(client_override);
@@ -4731,6 +4815,10 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
             client_override, cli_value(argc, argv, "--write-user-profile"),
             cli_value(argc, argv, "--from"), cli_value(argc, argv, "--set-bind"),
             cli_flag(argc, argv, "--force"));
+    } else if (cli_value(argc, argv, "--controls-export") || cli_value(argc, argv, "--controls-check")) {
+        cli_console(); /* W419 CTRL-EXPORT */
+        rc = cli_controls(client_override, cli_value(argc, argv, "--controls-export"),
+                          cli_value(argc, argv, "--controls-check"));
     } else if (cli_flag(argc, argv, "--write-user-cfg")) {
         cli_console();
         rc = cli_write_user_cfg(client_override, profile,

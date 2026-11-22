@@ -304,8 +304,10 @@ void sb_edge_apply(ID3D11RenderTargetView *rtv)
         eg_mv = 0;
         return;
     }
-    if (g_loc_wide) { /* W326 LOC-WIDE: nativer 16:9-Modus - ausserhalb der 16:9-Box hart schwarz (kein Hor+) */
-        eg_apply(rtv, 1, 0);
+    if (g_loc_wide) { /* W326 LOC-WIDE: nativer 16:9-Modus - ausserhalb der 16:9-Box hart schwarz (kein volles Hor+) */
+        /* W414 LOC-DEFAULT-FADE (Nutzer 21.11.): edge_mode=2 ("Fade out", LoC-Standard) laeuft ab der 16:9-Boxkante
+         * ins Schwarze (edge_fade_width/-strength wie W107); 0/1 bleiben hart schwarz wie W326. Nur LoC-Profil. */
+        eg_apply(rtv, g_cfg.edge_mode == 2 ? 2 : 1, 0);
         return;
     }
     eg_apply(rtv, g_cfg.edge_mode, 0);

@@ -36,6 +36,7 @@
 #include "loc_sync.h"
 #include "loc_rollback.h" /* W325 */
 #include "loc_lsarb_game.h" /* LOC-LOCKSTEP-ARBITER */
+#include "loc_rulenet.h" /* W420 LOC-CLIPDUMP */
 #include "sb_tex.h" /* W297: Texttextur nach Lock neu hochladen */
 #include "loc_render.h" /* W297: Textebene */
 #include "d3d11_render.h" /* W342: sb_render_im_vdata (SetVertexData2s/4s) */
@@ -570,6 +571,176 @@ static __declspec(naked) void loc_ground_check(void)
     }
 }
 
+/* ---------------------------------------------------------------- W408 LOC-UNLOCK-ALL
+ * Alle VTs, Missionen und Items immer frei (Nutzer 21.11., kein Schalter; LOC_RE1 §4, LOC_BOOT §74).
+ * CONFIG.DAT liegt im Speicher bei 0x7279B4 (0x24 B): +0x18 VT-Maske, +0x1C Missions-Maske, +0x20 Item-Maske.
+ * Der originale Freischaltcode (FUN_000C8B60 -> FUN_00126B50, Ton 0x1C8) setzt
+ *     Missionen |= alle Stufentabellen 0x286374..0x286398 (10 x u32, ergibt 0x02FFFFFF);  VT = 0xFFFFFFEF;
+ *     FUN_000A5900 (CONFIG.DAT speichern)
+ * und laesst die Items unberuehrt; die Item-Maske waechst sonst nur ueber den Kampagnen-Fortschritt (FUN_00126CB0:
+ * Bit i, sobald der Pilot Item i besitzt). "Alle Items" = ODER der Item-Stufentabelle 0x286354 (8 x u32, ergibt
+ * 0x3FFFFFFF), dieselbe Vereinigung, die FUN_000E7A40 bei voller Stufe bildet.
+ * Hier gleich nach jedem Laden (FUN_000EB760, Ende 0xEB7B5) und nach jeder Vorgabe (FUN_000EBC40, Ende 0xEBCE9):
+ * dieselben Zuweisungen wie FUN_00126B50 plus Items, ohne eigenes Speichern - das Spiel schreibt CONFIG.DAT wie
+ * ueblich selbst (fehlende Datei: FUN_000EFD90 -> Vorgabe + FUN_000A5900; nach Missionen FUN_00126CB0).
+ * Die VT-Auswahl der Match-Lobby folgt der VT-Maske (Lauf: alter Pilot mit 4 Garagen-VTs waehlt aus allen 31).
+ * Bestehende Free-/Link-Piloten (LIVEUSER/LINKUSER): die Garage entsteht nur bei der Neuanlage aus der VT-Maske
+ * (FUN_00126E30: je VT ein Platz [0]=1/[1]=Id); der Hangar zeigt nur VTs der Garage (FUN_000611F0 ueber
+ * FUN_00127AB0). Nach dem Lesen des Pilotblocks (FUN_000A5E40, Aufrufe 0xF00B1 im Speicherschritt der Szene 6 und
+ * 0x10FEDF in FUN_0010FEA0) werden fehlende VTs in freie Garagenplaetze ergaenzt; so hat der Pilot dieselben VTs wie
+ * ein neu angelegter. Item-Bestaende (+0x21C) bleiben unberuehrt: auch ein neu angelegter Pilot hat dort nach dem
+ * Speichern 0 (Lauf), die Items folgen der Item-Maske. Kampagnen-Piloten (Modus 0) bleiben unberuehrt. */
+#define LOCU_VTS 0x7279CCu       /* CONFIG +0x18 */
+#define LOCU_MIS 0x7279D0u       /* CONFIG +0x1C */
+#define LOCU_ITEMS 0x7279D4u     /* CONFIG +0x20 */
+#define LOCU_TAB_ITEM 0x286354u  /* Item-Stufentabelle, 8 x u32 */
+#define LOCU_TAB_MIS 0x286374u   /* Missions-Stufentabelle, 10 x u32 (FUN_00126B50) */
+#define LOCU_VT_ALL 0xFFFFFFEFu  /* wie FUN_00126B50 (Id 4 zaehlt nie) */
+#define LOCU_MODE 0x72799Cu      /* u8: 0 Kampagne, 1 Live Free Mission, 2 System Link */
+#define LOCU_BLOCK 0x727AE0u     /* Pilotblock, Byte 0 = Pilot tot/ungueltig */
+#define LOCU_PILOT_PTR 0x72702Cu /* Zeiger auf den aktiven Piloten (0x718 B) */
+#define LOCU_GARAGE 0x3Cu        /* 60 x 8 B */
+#define LOCU_GARAGE_N 60
+
+static volatile LONG s_unlock_logs;
+static void __cdecl loc_unlock_cfg(u32 after_load)
+{
+    volatile u32 *vt = (volatile u32 *)(uintptr_t)LOCU_VTS;
+    volatile u32 *mi = (volatile u32 *)(uintptr_t)LOCU_MIS;
+    volatile u32 *it = (volatile u32 *)(uintptr_t)LOCU_ITEMS;
+    const u32 *tm = (const u32 *)(uintptr_t)LOCU_TAB_MIS, *ti = (const u32 *)(uintptr_t)LOCU_TAB_ITEM;
+    u32 o_vt = *vt, o_mi = *mi, o_it = *it, mis = 0, itm = 0;
+    int i;
+    for (i = 0; i < 10; i++) mis |= tm[i];
+    for (i = 0; i < 8; i++) itm |= ti[i];
+    *vt = LOCU_VT_ALL;
+    *mi = o_mi | mis;
+    *it = o_it | itm;
+    if (InterlockedIncrement(&s_unlock_logs) <= 16) {
+        HLOG_I("LOCUNLOCK: CONFIG nach %s: VT %08X->%08X Missionen %08X->%08X Items %08X->%08X",
+               after_load ? "Laden" : "Vorgabe", o_vt, *vt, o_mi, *mi, o_it, *it);
+    }
+}
+/* ersetzt 0xEB7B5 "mov [0x7279D0],ecx; ret" (Ende FUN_000EB760; AL = Ladeergebnis bleibt erhalten) */
+static __declspec(naked) void loc_unlock_after_load(void)
+{
+    __asm {
+        mov dword ptr ds:[0x7279D0], ecx
+        push eax
+        push ecx
+        push edx
+        push 1
+        call loc_unlock_cfg
+        add esp, 4
+        pop edx
+        pop ecx
+        pop eax
+        ret
+    }
+}
+/* ersetzt 0xEBCE9 "jmp 0xEB7C0" (Ende FUN_000EBC40) */
+static __declspec(naked) void loc_unlock_after_defaults(void)
+{
+    __asm {
+        push eax
+        push ecx
+        push edx
+        push 0
+        call loc_unlock_cfg
+        add esp, 4
+        pop edx
+        pop ecx
+        pop eax
+        push 0xEB7C0
+        ret
+    }
+}
+
+static int locu_owned(const uint8_t *p, unsigned vt)
+{
+    int s;
+    for (s = 0; s < LOCU_GARAGE_N; s++) {
+        const uint8_t *g = p + LOCU_GARAGE + s * 8;
+        if (g[0] == 1 && g[1] == vt) return 1;
+    }
+    return 0;
+}
+static int locu_free_slot(const uint8_t *p)
+{
+    int s, k;
+    for (s = 0; s < LOCU_GARAGE_N; s++) {
+        const uint8_t *g = p + LOCU_GARAGE + s * 8;
+        for (k = 0; k < 8 && g[k] == 0; k++) {}
+        if (k == 8) return s;
+    }
+    return -1;
+}
+/* Fehlende freigeschaltete VTs in freie Garagenplaetze (wie FUN_00126E30: [0]=1, [1]=Id). */
+static void loc_unlock_pilot(void)
+{
+    unsigned mode = *(const uint8_t *)(uintptr_t)LOCU_MODE;
+    uint8_t *p = (uint8_t *)(uintptr_t)*(const u32 *)(uintptr_t)LOCU_PILOT_PTR;
+    u32 vtm = *(const u32 *)(uintptr_t)LOCU_VTS;
+    int added = 0, full = 0, used = 0, k;
+    unsigned vt;
+    if (mode != 1 && mode != 2) return;
+    if (!p || *(const uint8_t *)(uintptr_t)LOCU_BLOCK != 0) return; /* kein bzw. ungueltiger Pilot */
+    for (k = 0; k < 16 && p[0x28 + k] == 0; k++) {}
+    if (k == 16) return; /* Name leer = kein Pilot */
+    for (vt = 0; vt < 32; vt++) {
+        int s;
+        if (!(vtm & (1u << vt)) || vt == 4 || locu_owned(p, vt)) continue;
+        s = locu_free_slot(p);
+        if (s < 0) { full++; continue; }
+        p[LOCU_GARAGE + s * 8] = 1;
+        p[LOCU_GARAGE + s * 8 + 1] = (uint8_t)vt;
+        added++;
+    }
+    if (added == 0 && full == 0) return; /* Pilot schon vollstaendig */
+    for (k = 0; k < LOCU_GARAGE_N; k++) used += p[LOCU_GARAGE + k * 8] == 1;
+    HLOG_I("LOCUNLOCK: Pilot (Modus %u) ergaenzt: %d VTs, Garage %d/%d belegt%s", mode, added, used, LOCU_GARAGE_N,
+           full ? ", Garage voll" : "");
+}
+typedef u32(__cdecl *locu_pilot_read_t)(void);
+/* ersetzt den Aufruf FUN_000A5E40 (Pilotblock lesen) bei 0x10FEDF; Rueckgabe AL = 0 gelesen */
+static u32 __cdecl loc_unlock_pilot_read(void)
+{
+    u32 r = ((locu_pilot_read_t)(uintptr_t)0xA5E40u)();
+    HLOG_I("LOCUNLOCK: Pilot gelesen (Modus %u, Ergebnis %u)", (unsigned)*(const uint8_t *)(uintptr_t)LOCU_MODE,
+           r & 0xFFu);
+    if ((r & 0xFFu) == 0) loc_unlock_pilot();
+    return r;
+}
+
+static void locu_patch(u32 va, const uint8_t *expect, u32 len, uint8_t op, void *handler, const char *name)
+{
+    uint8_t *p = (uint8_t *)(uintptr_t)va;
+    intptr_t rel = (uint8_t *)handler - (p + 5);
+    DWORD old;
+    if (memcmp(p, expect, len) != 0) {
+        HLOG_E("LOCBYTES %s @0x%X: Byte-Mismatch - ABBRUCH (exit 7)", name, va);
+        hlog_close();
+        ExitProcess(7);
+    }
+    VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old);
+    p[0] = op;
+    memcpy(p + 1, &rel, 4);
+    VirtualProtect(p, 5, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), p, 5);
+    HLOG_I("LOCUNLOCK: Eingriff %s @0x%X", name, va);
+}
+static void loc_unlock_install(void)
+{
+    static const uint8_t k_load[7] = { 0x89, 0x0D, 0xD0, 0x79, 0x72, 0x00, 0xC3 };  /* mov [0x7279D0],ecx; ret */
+    static const uint8_t k_defaults[5] = { 0xE9, 0xD2, 0xFA, 0xFF, 0xFF };            /* jmp 0xEB7C0 */
+    static const uint8_t k_pilot[5] = { 0xE8, 0x5C, 0x5F, 0xF9, 0xFF };               /* call 0xA5E40 */
+    static const uint8_t k_pilot6[5] = { 0xE8, 0x8A, 0x5D, 0xFB, 0xFF };              /* call 0xA5E40 */
+    locu_patch(0xEB7B5u, k_load, 7, 0xE9, (void *)loc_unlock_after_load, "CONFIG geladen (FUN_000EB760)");
+    locu_patch(0xEBCE9u, k_defaults, 5, 0xE9, (void *)loc_unlock_after_defaults, "CONFIG-Vorgabe (FUN_000EBC40)");
+    locu_patch(0x10FEDFu, k_pilot, 5, 0xE8, (void *)loc_unlock_pilot_read, "Pilot gelesen (FUN_000A5E40, Kampagne)");
+    locu_patch(0xF00B1u, k_pilot6, 5, 0xE8, (void *)loc_unlock_pilot_read, "Pilot gelesen (FUN_000A5E40, Szene 6)");
+}
+
 /* XDK-5788-Interna (Musterkatalog fuer spaeteren Scan, docs/loc/LOC_BOOT.md). */
 static void loc_xdk_internals(void)
 {
@@ -765,6 +936,8 @@ void loc_boot_install(void)
         LOC_STUB(WSAStartup);
     }
     loc_xdk_internals();
+    loc_unlock_install(); /* W408: alle VTs/Missionen/Items frei (immer, nur LoC) */
+    loc_rule_install(); /* W420: Clip dumping unterbinden (Host-Regel, Standard an, Abgleich im Match) */
     HLOG_I("LOCBOOT: %u XDK-Hooks, %u uebergangen, %u Stubs (von %u), %u Byte-Patches installiert",
            s_nhook, s_nskip, s_nstub, (unsigned)LOC_N_STUBS, s_nbytes);
     HLOG_I("LOCBOOT: %u W277-Eingriffe mit Bytevergleich (IDirectSound_Release, D3DSurface_LockRect, "

@@ -1357,6 +1357,7 @@ static DWORD WINAPI watchdog(LPVOID unused)
                     HLOG_W("watchdog: STALL devreason=0x%lX",
                            sb_render_device_reason());
                     krnl_lock_diag(); /* DIAG(SUSPSAFE): Sperren-Owner beim STALL */
+                    if (g_sba_loc) { extern void loc_rb_stall_diag(void); loc_rb_stall_diag(); } /* W411 */
                     wd_holder_stacks(); /* W145 DIAG(LOADLOCK): Stack fremder Halter (VR/Takt) */
                 }
                 if (!loadpause && stall_n <= 6) {

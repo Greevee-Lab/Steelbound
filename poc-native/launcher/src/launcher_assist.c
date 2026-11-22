@@ -438,6 +438,28 @@ int joycal_cfg_read(const char *user_cfg, char lines[][96], int cap)
     return cfg_read_own(user_cfg, lines, cap, joycal_cfg_owns);
 }
 
+/* W419 CTRL-EXPORT: dieselbe Mechanik mit frei gewaehltem Besitzer (Import/Export der
+ * Steuerungswerte). owns entscheidet je Key; die Zeilen muessen owns erfuellen. */
+int assist_cfg_rewrite_fn(const char *user_cfg, const char lines[][96], int n, int (*owns)(const char *key))
+{
+    int i;
+    if (n < 0 || !owns) {
+        return 1;
+    }
+    for (i = 0; i < n; i++) {
+        char k[96];
+        if (!line_key(lines[i], k, sizeof k) || !owns(k)) {
+            return 1;
+        }
+    }
+    return cfg_rewrite(user_cfg, lines, n, owns);
+}
+
+int assist_cfg_read_fn(const char *user_cfg, char lines[][96], int cap, int (*owns)(const char *key))
+{
+    return owns ? cfg_read_own(user_cfg, lines, cap, owns) : 0;
+}
+
 /* ======================================================================
  * Engine
  * ====================================================================== */

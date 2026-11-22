@@ -41,6 +41,7 @@
 #include "sb_rauto.h" /* W290: Test-Anker pN */
 #include "sb_origview.h" /* W278 ORIG-FLAG: Umschalttaste, EXP-Markierung */
 #include "sb_origflag.h"
+#include "sb_ovl_loclock.h" /* W416 LOC-ESC-MENU: in LoC wirkungslose Zeilen */
 #include <stdlib.h>
 #include <ctype.h> /* W195: toupper (Test-Hook KDN=/KUP=) */
 #include <wchar.h>
@@ -353,11 +354,75 @@ static int ov_clamp(int v, int lo, int hi)
     return v < lo ? lo : (v > hi ? hi : v);
 }
 
+/* ---- W416 LOC-ESC-MENU: Zeilen ohne Wirkung in Line of Contact ----
+ * Grund je cfg-Schluessel in sb_ovl_loclock.h (gleiche Gruende wie der Launcher, W402). Gesperrte Zeilen sind
+ * grau und nicht bedienbar (ov_enabled), zeigen "nur Steel Battalion" statt des Werts und den Grund in der
+ * Hinweiszeile; Gruppen, in denen jede Zeile gesperrt ist, sind ausgeblendet. Werte bleiben unveraendert:
+ * "Auf Original" und "Als Standard speichern" lassen gesperrte Schluessel aus. Steel Battalion: loc = 0, nichts. */
+static const char *ov_oi_home(int i);
+
+/* cfg-Schluessel der Zeile fuer die Sperre: erster Heimat-Schluessel; Sammel-, Aktions- und Info-Zeilen eigens */
+static void ov_loc_key(int i, char *o, size_t cap)
+{
+    const char *h;
+    size_t n;
+    switch (i) {
+    case OI_SLIGHT: h = "light_world"; break;
+    case OI_SBLOOM: h = "bloom_strength"; break;
+    case OI_SGLOW: h = "cockpit_glow"; break;
+    case OI_SLOOK: h = "color_sat"; break;
+    case OI_SLCOMMIT: h = "save_lock"; break;
+    case OI_HD: case OI_HDSCALE: case OI_TEXINFO: h = "hd_textures"; break;
+    case OI_VRREC: h = "vr_enable"; break;
+    default: h = ov_oi_home(i); break;
+    }
+    n = strcspn(h, ",");
+    if (n >= cap) { n = cap - 1; }
+    memcpy(o, h, n);
+    o[n] = 0;
+}
+
+static const char *ov_loc_lock_ex(int i, int loc, int wide)
+{
+    char k[40];
+    if (!loc) { return NULL; }
+    ov_loc_key(i, k, sizeof k);
+    return sb_ovl_loc_lock(k, loc, wide);
+}
+
+static int ov_loc_wide(void)
+{
+    return g_cfg.loc_widescreen != 0; /* wie Launcher pergame_box_169: Bildformat 16:9 bzw. 720p */
+}
+
+/* Grund (Sprachschluessel) oder NULL = bedienbar */
+static const char *ov_loc_lock(int i)
+{
+    return g_sba_loc ? ov_loc_lock_ex(i, 1, ov_loc_wide()) : NULL;
+}
+
+/* Gruppe in LoC ohne jede wirksame Zeile? (Zeilen ohne Schluessel, z. B. Presets, zaehlen nicht) */
+static int ov_grp_loc_hidden_ex(int g, int loc, int wide)
+{
+    const ov_grp_t *gp = &kOvGrp[g];
+    int k, nl = 0;
+    if (!loc || g == OG_QUICK || g == OG_DEBUG) { return 0; }
+    for (k = 0; k < gp->nmain + gp->nadv; k++) {
+        int i = k < gp->nmain ? gp->main[k] : gp->adv[k - gp->nmain];
+        char key[40];
+        if (ov_loc_lock_ex(i, loc, wide)) { nl++; continue; }
+        ov_loc_key(i, key, sizeof key);
+        if (key[0]) { return 0; }
+    }
+    return nl > 0;
+}
+
 /* W291 ESC-REWORK: Gruppe sichtbar? VR nur bei VR (oder ausstehendem VR-Start),
  * Debug nur mit Alpha-Tools (Launcher -> esc_debug) oder solange ein
  * Spass-Effekt an ist (sonst waere er unsichtbar eingeschaltet). */
 static int ov_grp_vis(int g)
 {
+    if (g_sba_loc && g >= 0 && g < OG_N && ov_grp_loc_hidden_ex(g, 1, ov_loc_wide())) { return 0; } /* W416 */
     if (g == OG_VR) { return g_cfg.vr_enable || g_ov_vr == 1; }
     if (g == OG_DEBUG) { return g_cfg.esc_debug || g_cfg.fx_wireframe || g_cfg.fx_vaporwave; }
     return g >= 0 && g < OG_N;
@@ -457,6 +522,7 @@ static int ov_hd_scale(void)
  * sich aber nicht) */
 static int ov_enabled(int i)
 {
+    if (ov_loc_lock(i)) { return 0; } /* W416: in LoC ohne Wirkung */
     switch (i) {
     case OI_GRAIN: case OI_GLITCH: return g_cfg.monitor_fx != 0;
     case OI_EDGEW: case OI_EDGES: return g_cfg.edge_mode == 2;
@@ -477,6 +543,7 @@ static int ov_enabled(int i)
 /* W121: Zeile wirkt gerade (Welt-Optionen nur mit Shading) - sonst gedimmt */
 static int ov_effective(int i)
 {
+    if (ov_loc_lock(i)) { return 0; } /* W416 */
     switch (i) {
     case OI_FOG: case OI_WCON: case OI_WGAM: case OI_WSHARP: case OI_BLOOM:
     case OI_EXPO: case OI_TONE: case OI_BTHR: case OI_LWORLD: case OI_LCKP: case OI_FOCUS: return g_cfg.shading != 0;
@@ -552,6 +619,7 @@ static void ov_sl_commit(void)
 {
     ULONGLONG now = GetTickCount64();
     int rc;
+    if (ov_loc_lock(OI_SLCOMMIT)) { return; } /* W416: Spielstandschutz gilt nur fuer SB (Grund in der Hinweiszeile) */
     if (!krnl_savelock_active()) {
         ov_status_key("ovl.st_sl_none");
         return;
@@ -730,7 +798,8 @@ static void ov_reset(int og)
         g_ov_usnap_hd = g_cfg.hd_textures;
         g_ov_usnap_rpfx = g_cfg.replay_fx_live;
     }
-    if ((og == OG_QUICK || og == OG_FX) && g_cfg.replay_fx_live) { /* W299: Replay-Filter live ist nicht original */
+    if ((og == OG_QUICK || og == OG_FX) && g_cfg.replay_fx_live &&
+        !sb_ovl_loc_lock("replay_fx_live", g_sba_loc, ov_loc_wide())) { /* W299: Replay-Filter live ist nicht original; W416: LoC laesst ihn */
         g_cfg.replay_fx_live = 0;
         HLOG_I("OVERLAY: replay_fx_live -> 0 (f=%u)", g_present_no);
         n++;
@@ -739,6 +808,7 @@ static void ov_reset(int og)
         const char *k = kSbOrigFlag[i].key;
         int *p;
         if (og != OG_QUICK && ov_key_grp(k) != og) { continue; }
+        if (sb_ovl_loc_lock(k, g_sba_loc, ov_loc_wide())) { continue; } /* W416: in LoC gesperrt -> Wert bleibt */
         if (strcmp(k, "hd_textures") == 0) { hd = 1; continue; }
         p = sb_ov_field(k);
         if (p && *p != kSbOrigFlag[i].orig) {
@@ -812,7 +882,7 @@ void sb_ovl_monitor_hz(int hz)
 static void ov_change(int i, int dir)
 {
     int k;
-    if (!ov_enabled(i)) { return; }
+    if (!ov_enabled(i)) { return; } /* W416: Grund einer LoC-Sperre steht in der Hinweiszeile (gewaehlte Zeile) */
     switch (i) {
     case OI_FPS: { /* W223 FPS-RATES: Monitor (auto), 30, 60 ... 240; W309: nur bis zur Monitorrate */
         SbFpsItem fl[SB_FPS_LIST_MAX];
@@ -1591,13 +1661,16 @@ static int ov_save(void)
     const char *keys[OV_NKEYS], *secs[OV_NKEYS], *vals[OV_NKEYS];
     char vbuf[OV_NKEYS][64];
     size_t i;
+    int n = 0;
     for (i = 0; i < OV_NKEYS; i++) {
-        keys[i] = kOvKeys[i].key;
-        secs[i] = kOvKeys[i].sec;
-        ov_key_value(kOvKeys[i].key, vbuf[i], sizeof vbuf[i]);
-        vals[i] = vbuf[i];
+        if (sb_ovl_loc_lock(kOvKeys[i].key, g_sba_loc, ov_loc_wide())) { continue; } /* W416: LoC-gesperrt -> Zeile der Datei bleibt */
+        keys[n] = kOvKeys[i].key;
+        secs[n] = kOvKeys[i].sec;
+        ov_key_value(kOvKeys[i].key, vbuf[n], sizeof vbuf[n]);
+        vals[n] = vbuf[n];
+        n++;
     }
-    return sb_ovl_cfg_write(g_ov_save_path, (int)OV_NKEYS, keys, secs, vals);
+    return sb_ovl_cfg_write(g_ov_save_path, n, keys, secs, vals);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2450,6 +2523,60 @@ static void ov_struct_check(void)
     if (!d1 || (d0 && !g_cfg.fx_wireframe && !g_cfg.fx_vaporwave)) { nfail++; }
     HLOG_I("OVERLAY check: Debug sichtbar=%d (esc_debug=%d; mit 0: %d, mit 1: %d), VR sichtbar=%d", dv, esc0, d0, d1,
            ov_grp_vis(OG_VR));
+    { /* W416 LOC-ESC-MENU: SB nichts gesperrt; LoC: erwartete Sperren/Ausblendungen; im LoC-Lauf Wertprobe */
+        static const short kMustLock[] = { OI_SMON, OI_GRAIN, OI_CHIDE, OI_MONVIEW, OI_CPERSP, OI_ASSIST, OI_AUTOGEAR,
+                                           OI_SAVELOCK, OI_SLCOMMIT, OI_STEX, OI_VRON, OI_RPLABEL, OI_RPFX, OI_SGLOW,
+                                           OI_CLIGHT, OI_SLOOK, OI_CSAT, OI_SSAO, OI_LABEL };
+        static const short kMustFree[] = { OI_FPS, OI_WINMODE, OI_RTS, OI_MMODE, OI_MSENS, OI_STICKAIM, OI_MPAUSE,
+                                           OI_SHADING, OI_PRESET, OI_SSHADOW, OI_FOG, OI_LCKP, OI_AA, OI_WSHARP,
+                                           OI_FXPRESET, OI_FXSOFT, OI_VOLM, OI_VOLVOX, OI_SBCMOUSE };
+        int nsb = 0, nloc43 = 0, nloc169 = 0, lf = 0, w, hid = 0, hidsb = 0, probe = -1;
+        for (k = 0; k < OI_N; k++) {
+            nsb += ov_loc_lock_ex(k, 0, 1) != NULL;
+            nloc43 += ov_loc_lock_ex(k, 1, 0) != NULL;
+            nloc169 += ov_loc_lock_ex(k, 1, 1) != NULL;
+        }
+        for (k = 0; k < (int)(sizeof kMustLock / sizeof kMustLock[0]); k++) {
+            for (w = 0; w < 2; w++) { if (!ov_loc_lock_ex(kMustLock[k], 1, w)) { HLOG_W("OVERLAY check: LoC-Zeile %d nicht gesperrt", kMustLock[k]); lf++; } }
+        }
+        for (k = 0; k < (int)(sizeof kMustFree / sizeof kMustFree[0]); k++) {
+            for (w = 0; w < 2; w++) { if (ov_loc_lock_ex(kMustFree[k], 1, w)) { HLOG_W("OVERLAY check: LoC-Zeile %d gesperrt", kMustFree[k]); lf++; } }
+        }
+        if (ov_loc_lock_ex(OI_EDGE, 1, 0) || !ov_loc_lock_ex(OI_EDGE, 1, 1) || !ov_loc_lock_ex(OI_EDGEW, 1, 1)) { lf++; } /* Raender nur bei 16:9 */
+        for (g = 0; g < OG_N; g++) {
+            int want = g == OG_CKP || g == OG_COLOR || g == OG_TEX || g == OG_VR;
+            if (ov_grp_loc_hidden_ex(g, 1, 0) != want || ov_grp_loc_hidden_ex(g, 1, 1) != want) {
+                HLOG_W("OVERLAY check: LoC-Gruppe %s ausgeblendet %d/%d (erwartet %d)", kOvGrp[g].log,
+                       ov_grp_loc_hidden_ex(g, 1, 0), ov_grp_loc_hidden_ex(g, 1, 1), want);
+                lf++;
+            }
+            hid += ov_grp_loc_hidden_ex(g, g_sba_loc, ov_loc_wide()); /* tatsaechlich ausgeblendet (SB: 0) */
+            hidsb += ov_grp_loc_hidden_ex(g, 0, 1);
+        }
+        if (nsb || hidsb) { lf++; }
+        if (g_sba_loc) { /* echter LoC-Lauf: Bedienen gesperrter Zeilen aendert keinen Wert (kOvKeys + Laufzeitwahl) */
+            char before[OV_NKEYS][64], after[64];
+            int r, dirty = 0, page1 = g_ov_page, sel1 = g_ov_sel;
+            for (j = 0; j < (int)OV_NKEYS; j++) { ov_key_value(kOvKeys[j].key, before[j], sizeof before[j]); }
+            for (k = 0; k < OI_N; k++) {
+                if (!ov_loc_lock(k)) { continue; }
+                if (ov_enabled(k) || ov_effective(k)) { lf++; }
+                for (r = 0; r < 3; r++) { ov_change(k, r == 1 ? -1 : +1); }
+            }
+            for (j = 0; j < (int)OV_NKEYS; j++) {
+                ov_key_value(kOvKeys[j].key, after, sizeof after);
+                if (strcmp(after, before[j]) != 0) { HLOG_W("OVERLAY check: LoC-Wert %s geaendert (%s -> %s)", kOvKeys[j].key, before[j], after); dirty++; }
+            }
+            g_ov_page = page1;
+            g_ov_sel = sel1;
+            lf += dirty;
+            probe = dirty;
+        }
+        nfail += lf;
+        HLOG_I("OVERLAY check: LoC-Sperren %s (SB %d gesperrt, LoC %d bei 4:3 / %d bei 16:9, LoC-Profil=%d, ausgeblendet %d, "
+               "Wertprobe %s, %d Fehler)", lf ? "FAIL" : "OK", nsb, nloc43, nloc169, g_sba_loc, hid,
+               probe < 0 ? "-" : probe ? "FAIL" : "OK", lf);
+    }
     HLOG_I("OVERLAY check: %s (%d Gruppen, %d Zeilen, %d Schluessel, %d Fehler)", nfail ? "FAIL" : "OK", OG_N, nrows, nkey,
            nfail);
     g_ov_dirty = 1;
@@ -3940,6 +4067,7 @@ static int ov_rs_mark(int x, int y, COLORREF c)
 /* W291: 0 = wirkt sofort, 1 = wirkt nach Neustart, 2 = gewaehlter Wert wartet auf den Neustart */
 static int ov_rs_state(int i)
 {
+    if (ov_loc_lock(i)) { return 0; } /* W416: gesperrt -> keine Marke */
     switch (i) {
     case OI_WINMODE: return g_ov_winmode != ov_clamp(g_cfg.window_mode, 0, 2) ? 2 : 1;
     case OI_RES: return 1;
@@ -3975,6 +4103,7 @@ static int ov_exp_state(int i)
         { OI_XVAPOR, "fx_vaporwave" },
     };
     int k;
+    if (ov_loc_lock(i)) { return 0; } /* W416: in LoC ohne Wirkung -> kein Kolben */
     if (i == OI_PRESET) { /* Preset: Licht, Nachbearbeitung, Effekte, Monitor, HD, Effect Packs */
         return sb_ov_group_state((1u << SB_OFG_LIGHT) | (1u << SB_OFG_POST) | (1u << SB_OFG_FX) |
                                  (1u << SB_OFG_MONITOR) | (1u << SB_OFG_HD) | (1u << SB_OFG_PACKS));
@@ -4915,7 +5044,14 @@ static void ov_paint(void)
                 if (rs) { ov_rs_mark(mx, yt, rs == 2 ? OV_C_TXT : OV_C_DIM); }
             }
             if (!act && i != OI_ADV && i != OI_TEXINFO) { /* Aktionen und Info ohne Wert */
-                ov_value(i, vb, 64);
+                if (ov_loc_lock(i)) { /* W416: "nur Steel Battalion"; bei langem Namen kurz "nur SB" */
+                    SIZE l1, v1;
+                    ov_wkey(vb, 64, sb_ovl_loc_lock_tag(ov_loc_lock(i)));
+                    GetTextExtentPoint32W(ov_dc, lb, (int)wcslen(lb), &l1);
+                    GetTextExtentPoint32W(ov_dc, vb, (int)wcslen(vb), &v1);
+                    if (rx + S(4.0f) + l1.cx + S(6.0f) > W - pad - S(2.0f) - v1.cx) { ov_wkey(vb, 64, "ovl.ll_tag_short"); }
+                }
+                else { ov_value(i, vb, 64); }
                 if (sel && ov_enabled(i) && !ov_row_info(i)) {
                     wchar_t t[80];
                     _snwprintf_s(t, 80, _TRUNCATE, L"\u25C4 %s \u25BA", vb);
@@ -4938,7 +5074,11 @@ static void ov_paint(void)
         y += S(11.0f);
         if (g_ov_status[0]) { ov_text(pad + S(2.0f), y, g_ov_status, OV_C_TXT, 0); }
         y += S(11.0f);
-        if (g_ov_page == OG_DEBUG) { /* W240: Hinweis "experimental, just for fun" */
+        if (g_ov_sel >= 0 && g_ov_sel < ov_nrows() && ov_loc_lock(ov_row(g_ov_sel))) { /* W416: Grund der LoC-Sperre */
+            wchar_t ll[96];
+            ov_wkey(ll, 96, ov_loc_lock(ov_row(g_ov_sel)));
+            ov_text(pad + S(2.0f), y, ll, OV_C_TXT, 0);
+        } else if (g_ov_page == OG_DEBUG) { /* W240: Hinweis "experimental, just for fun" */
             ov_wkey(leg, 64, g_cfg.vr_enable ? "ovl.xp_note_vr" : "ovl.xp_note");
             ov_text(pad + S(2.0f), y, leg, OV_C_DIM, 0);
         } else if (g_sb_paused && g_cfg.pause_live && ov_peek_vk() > 0) { /* W193: in der Pause Hinweis aufs Ausblenden */

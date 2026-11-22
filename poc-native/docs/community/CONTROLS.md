@@ -137,6 +137,29 @@ while the controller is used** disables mouse aiming only.
 - **Lamps**: lamp test (all 37 lamps in order).
 - **Gamepad**: XInput status and stick/trigger deadzones.
 
+## Export and import your controls
+
+On the **Controls** page, the **Control layout** card has **Export …** and
+**Import …**. Use them to back up your controls, take them to another PC
+or share them.
+
+- **Export …** saves one text file, `<layout>.sbcontrols`. It contains the
+  selected layout (keys, mouse, gamepad, joystick and original-controller
+  buttons) and the control settings: mouse mode and sensitivity, stick
+  aiming, aim assist, automatic gears, original controller on/off,
+  invert, dead zones and calibration. No paths, account data or other
+  settings (graphics, audio, network) are included.
+- **Import …** checks the file first. A broken or unknown file is refused
+  with a short message, and nothing changes. Otherwise the launcher asks
+  whether to import it as a new layout (`user_<name>`; if the name exists,
+  `-2`, `-3` … is added). Existing layouts are never overwritten. The new
+  layout is selected; click **Save** (or **Launch**) to keep the selection
+  and the page settings. Dead zones and calibration are saved right away.
+- Joysticks or the original controller that are not connected stay in
+  the layout and work as soon as they are plugged in; the question lists
+  them by name. Joystick calibration belongs to its device model and is
+  never moved to another device.
+
 ## Starting the mech
 
 Wait briefly between steps.

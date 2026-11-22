@@ -245,8 +245,11 @@ static u32 __stdcall ln_connect(u32 s, u32 a, u32 len)
 }
 static u32 __stdcall ln_listen(u32 s, u32 backlog)
 {
+    int r;
     FIRST(21, "listen");
-    return (u32)listen((SOCKET)s, (int)backlog);
+    r = listen((SOCKET)s, (int)backlog);
+    if (r == 0) InterlockedExchange(&g_ln.tcp_listen, (LONG)s); /* W409: Spiel lauscht (TCP 1000) */
+    return (u32)r;
 }
 static u32 __stdcall ln_accept(u32 s, u32 a, u32 plen)
 {
@@ -633,6 +636,9 @@ int loc_net_install(void)
         tc.nodirect = g_cfg.loc_transport_nodirect;
         strcpy_s(tc.netcut_file, sizeof tc.netcut_file, g_cfg.loc_test_netcut); /* W366 TEST */
         tc.route_auto = g_cfg.loc_route;                                      /* W395 */
+        tc.open_hold_ms = g_cfg.loc_transport_open_hold < 0 ? 0 : g_cfg.loc_transport_open_hold > 10000 ? 10000
+                                                                : g_cfg.loc_transport_open_hold; /* W409 */
+        tc.test_refuse_ms = g_cfg.loc_test_open_refuse;                       /* W409 TEST */
         strcpy_s(tc.route_sim, sizeof tc.route_sim, g_cfg.loc_route_sim);   /* W395 TEST */
         tc.allow_public = g_cfg.loc_lobby[0] ? 1 : 0;
         strncpy_s(tc.peers, sizeof tc.peers, g_cfg.loc_transport_peers, _TRUNCATE);
@@ -696,6 +702,26 @@ void loc_net_lobby_frame(unsigned f)
         InterlockedExchange(&g_ln.pub_w[2], w2);
     }
     if (!g_cfg.loc_net_diag || n >= 400) return;
+    { /* W409 DIAG: Lobby-Zustand G+0x15 und Lauschsocket TCP 1000 (G+0x5160 != -1) bei jeder Aenderung */
+        static int st_prev = -1, ls_prev = -1, st_n;
+        int stv = -1, lsv = -1;
+        __try {
+            const uint8_t *g = *(const uint8_t *const *)(uintptr_t)0x361708u;
+            if (g) {
+                stv = g[0x15];
+                lsv = *(const int32_t *)(g + 0x5160) != -1;
+            }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+            stv = -1;
+        }
+        if (stv >= 0 && (stv != st_prev || lsv != ls_prev) && st_n < 400) {
+            st_n++;
+            HLOG_I("LOCLSTATE: Bild %u Zustand 0x%02X (vorher 0x%02X) TCP-1000-Lauschsocket %s", f, (unsigned)stv,
+                   (unsigned)(st_prev & 0xFF), lsv ? "offen" : "zu");
+            st_prev = stv;
+            ls_prev = lsv;
+        }
+    }
     __try {
         const uint8_t *c = *(const uint8_t *const *)(uintptr_t)0x3116ACu;
         const uint8_t *g = *(const uint8_t *const *)(uintptr_t)0x361708u;

@@ -4,6 +4,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <stdio.h>
+#include <stdarg.h>
 #include <string.h>
 #include <stdlib.h>
 #include <stdint.h>
@@ -13,6 +14,7 @@
 #include "launcher_u8.h"
 #include "sb_lang.h"
 #include "input_sbc_usb.h"
+#include "launcher_assist.h" /* W419: user.cfg-Zeilen lesen/schreiben */
 
 /* --- Eingabe-Profile -------------------------------------------------- */
 
@@ -2371,4 +2373,699 @@ int lctrl_run_dump(const char *client_dir, const char *profile, char *out,
     }
     _snprintf_s(out, cap, _TRUNCATE, LT("gui.bind_dumperr"), code, lines);
     return 1;
+}
+
+/* ======================================================================
+ * W419 CTRL-EXPORT: Steuerung exportieren / importieren (.sbcontrols)
+ * ====================================================================== */
+
+enum { CXK_INT = 0, CXK_MOUSE, CXK_STICK };
+typedef struct {
+    const char *key;
+    int ui;   /* 1 = Launcher-Oberflaeche, 0 = nur user.cfg [input] */
+    int kind; /* CXK_* */
+    int lo, hi;
+} cx_key_t;
+
+/* Inventur der steuerungsnahen Werte (Doku: EINGABE.md S8a). Bereiche wie
+ * der Client (hcfg.c); sbc_cal_/sbc_dead_ und joy_calN kommen dazu. */
+static const cx_key_t kCxKeys[] = {
+    { "mouse_mode", 1, CXK_MOUSE, 0, 1 },
+    { "mouse_sens", 1, CXK_INT, 1, 16 },
+    { "stick_aim", 1, CXK_STICK, 0, 1 },
+    { "stick_aim_sens", 1, CXK_INT, 1, 16 },
+    { "aim_assist", 1, CXK_INT, 0, 2 },
+    { "auto_gear", 1, CXK_INT, 0, 1 },
+    { "sbc_usb", 1, CXK_INT, 0, 1 },
+    { "sbc_mouse_off", 1, CXK_INT, 0, 1 },
+    { "mouse_invert_x", 0, CXK_INT, 0, 1 },
+    { "mouse_invert_y", 0, CXK_INT, 0, 1 },
+    { "stick_aim_accel", 0, CXK_INT, 0, 4 },
+    { "aim_assist_edge", 0, CXK_INT, 30, 100 },
+    { "pad_dz_stick", 0, CXK_INT, 0, 90 },
+    { "pad_dz_trig", 0, CXK_INT, 0, 90 },
+};
+#define CX_NKEYS ((int)(sizeof kCxKeys / sizeof kCxKeys[0]))
+
+/* Strenge Ganzzahl: optional '-', 1..6 Ziffern, sonst nichts. 1 = ok. */
+static int cx_int(const char *v, int *out)
+{
+    const char *p = v;
+    int n = 0;
+    if (!v) { return 0; }
+    if (*p == '-') { p++; }
+    while (*p >= '0' && *p <= '9') { p++; n++; }
+    if (*p || n < 1 || n > 6) { return 0; }
+    *out = atoi(v);
+    return 1;
+}
+
+/* 0 = unbekannt, 1 = Oberflaeche, 2 = nur user.cfg. */
+static int cx_key_kind(const char *key)
+{
+    int i;
+    if (!key || !*key) { return 0; }
+    for (i = 0; i < CX_NKEYS; i++) {
+        if (strcmp(key, kCxKeys[i].key) == 0) { return kCxKeys[i].ui ? 1 : 2; }
+    }
+    if ((strncmp(key, "sbc_cal_", 8) == 0 || strncmp(key, "sbc_dead_", 9) == 0) && assist_cfg_owns(key)) {
+        return 2; /* Kalibrierung Original-Controller (Assistent) */
+    }
+    if (joycal_cfg_owns(key)) { return 2; } /* W312 Joystick-Kalibrierung je VID:PID + Achse */
+    return 0;
+}
+
+int lcx_set_check(const char *key, const char *val)
+{
+    int i, kind = cx_key_kind(key), v;
+    const char *p;
+    if (!kind) { return -1; }
+    if (!val || !*val || strlen(val) > 80) { return 0; }
+    for (p = val; *p; p++) { /* Werte sind Zahlen/Namen/Listen: nichts anderes zulassen */
+        char c = *p;
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == ',' ||
+              c == ':' || c == '-' || c == '.')) {
+            return 0;
+        }
+    }
+    for (i = 0; i < CX_NKEYS; i++) {
+        if (strcmp(key, kCxKeys[i].key) != 0) { continue; }
+        if (kCxKeys[i].kind == CXK_MOUSE) {
+            return strcmp(val, "absolute") == 0 || strcmp(val, "relative") == 0;
+        }
+        if (kCxKeys[i].kind == CXK_STICK) {
+            return strcmp(val, "position") == 0 || strcmp(val, "relative") == 0;
+        }
+        return cx_int(val, &v) && v >= kCxKeys[i].lo && v <= kCxKeys[i].hi;
+    }
+    if (joycal_cfg_owns(key)) {
+        unsigned short vid, pid;
+        int ax;
+        ijoy_cal_t c;
+        return ijoy_cal_parse(val, &vid, &pid, &ax, &c) ? 1 : 0;
+    }
+    {
+        static sbc_cal_t cal; /* nur Pruefung (Struktur nicht klein) */
+        int r;
+        memset(&cal, 0, sizeof cal);
+        r = sbc_usb_cal_set(&cal, key, val);
+        return (r == 1 || r == SBC_CAL_NOTE) ? 1 : 0;
+    }
+}
+
+int lcx_set_is_ui(const char *key)
+{
+    return cx_key_kind(key) == 1;
+}
+
+static void cx_set_put(lcx_data_t *d, const char *key, const char *val)
+{
+    int i;
+    size_t kl = strlen(key);
+    for (i = 0; i < d->n_set; i++) {
+        if (strncmp(d->set[i], key, kl) == 0 && d->set[i][kl] == '=') {
+            _snprintf_s(d->set[i], sizeof d->set[i], _TRUNCATE, "%s=%s", key, val);
+            return;
+        }
+    }
+    if (d->n_set < LCX_SET_MAX) {
+        _snprintf_s(d->set[d->n_set], sizeof d->set[0], _TRUNCATE, "%s=%s", key, val);
+        d->n_set++;
+    }
+}
+
+static void cx_put_int(lcx_data_t *d, const char *key, int v)
+{
+    char t[16];
+    _snprintf_s(t, sizeof t, _TRUNCATE, "%d", v);
+    if (lcx_set_check(key, t) == 1) { cx_set_put(d, key, t); }
+}
+
+void lcx_put_settings(lcx_data_t *d, const launcher_settings_t *s)
+{
+    if (!d || !s) { return; }
+    cx_set_put(d, "mouse_mode", s->mouse_mode ? "absolute" : "relative");
+    cx_put_int(d, "mouse_sens", s->mouse_sens);
+    cx_set_put(d, "stick_aim", s->stick_aim ? "relative" : "position");
+    cx_put_int(d, "stick_aim_sens", s->stick_aim_sens);
+    cx_put_int(d, "aim_assist", s->aim_assist);
+    cx_put_int(d, "auto_gear", s->auto_gear);
+    cx_put_int(d, "sbc_usb", s->sbc_usb ? 1 : 0);
+    cx_put_int(d, "sbc_mouse_off", s->sbc_mouse_off ? 1 : 0);
+}
+
+static int cx_owns_raw(const char *key)
+{
+    return cx_key_kind(key) == 2;
+}
+
+int lcx_put_cfg(lcx_data_t *d, const char *user_cfg)
+{
+    static char lines[LCX_SET_MAX][96];
+    int n, i, got = 0;
+    if (!d || !user_cfg) { return 0; }
+    n = assist_cfg_read_fn(user_cfg, lines, LCX_SET_MAX, cx_owns_raw);
+    for (i = 0; i < n; i++) {
+        char *eq = strchr(lines[i], '=');
+        if (!eq) { continue; }
+        *eq = '\0';
+        if (lcx_set_check(lines[i], eq + 1) == 1) { /* ungueltige Zeilen nicht weitergeben */
+            cx_set_put(d, lines[i], eq + 1);
+            got++;
+        }
+    }
+    return got;
+}
+
+int lcx_get_settings(const lcx_data_t *d, launcher_settings_t *s)
+{
+    int i, n = 0;
+    if (!d || !s) { return 0; }
+    for (i = 0; i < d->n_set; i++) {
+        char k[48];
+        const char *eq = strchr(d->set[i], '=');
+        int v = 0;
+        size_t kl;
+        if (!eq) { continue; }
+        kl = (size_t)(eq - d->set[i]);
+        if (kl >= sizeof k) { continue; }
+        memcpy(k, d->set[i], kl);
+        k[kl] = '\0';
+        if (!lcx_set_is_ui(k) || lcx_set_check(k, eq + 1) != 1) { continue; }
+        (void)cx_int(eq + 1, &v);
+        if (strcmp(k, "mouse_mode") == 0) { s->mouse_mode = strcmp(eq + 1, "absolute") == 0; }
+        else if (strcmp(k, "stick_aim") == 0) { s->stick_aim = strcmp(eq + 1, "relative") == 0; }
+        else if (strcmp(k, "mouse_sens") == 0) { s->mouse_sens = v; }
+        else if (strcmp(k, "stick_aim_sens") == 0) { s->stick_aim_sens = v; }
+        else if (strcmp(k, "aim_assist") == 0) { s->aim_assist = v; }
+        else if (strcmp(k, "auto_gear") == 0) { s->auto_gear = v; }
+        else if (strcmp(k, "sbc_usb") == 0) { s->sbc_usb = v; }
+        else if (strcmp(k, "sbc_mouse_off") == 0) { s->sbc_mouse_off = v; }
+        else { continue; }
+        n++;
+    }
+    return n;
+}
+
+/* Import-Besitzer: genau die user.cfg-Keys (ohne joy_calN) aus der Datei. */
+static const lcx_data_t *g_cx_own;
+static int cx_owns_import(const char *key)
+{
+    int i;
+    size_t kl;
+    if (!g_cx_own || !key || cx_key_kind(key) != 2 || joycal_cfg_owns(key)) { return 0; }
+    kl = strlen(key);
+    for (i = 0; i < g_cx_own->n_set; i++) {
+        if (strncmp(g_cx_own->set[i], key, kl) == 0 && g_cx_own->set[i][kl] == '=') { return 1; }
+    }
+    return 0;
+}
+
+int lcx_apply_cfg(const lcx_data_t *d, const char *user_cfg)
+{
+    static char lines[LCX_SET_MAX][96], ex[IJOY_CAL_MAX][96];
+    typedef struct { unsigned short v, p; int ax; ijoy_cal_t c; } jc_t;
+    static jc_t tab[IJOY_CAL_MAX];
+    int i, n = 0, nj = 0, nimp = 0, rc = 0;
+    if (!d || !user_cfg || !*user_cfg) { return 1; }
+    for (i = 0; i < d->n_set; i++) {
+        char k[48];
+        const char *eq = strchr(d->set[i], '=');
+        size_t kl;
+        if (!eq) { continue; }
+        kl = (size_t)(eq - d->set[i]);
+        if (kl >= sizeof k) { continue; }
+        memcpy(k, d->set[i], kl);
+        k[kl] = '\0';
+        if (cx_key_kind(k) != 2 || lcx_set_check(k, eq + 1) != 1) { continue; }
+        if (joycal_cfg_owns(k)) { nimp++; continue; }
+        strcpy_s(lines[n++], sizeof lines[0], d->set[i]);
+    }
+    if (n > 0) {
+        g_cx_own = d;
+        rc = assist_cfg_rewrite_fn(user_cfg, (const char (*)[96])lines, n, cx_owns_import);
+        g_cx_own = NULL;
+        if (rc != 0) { return 1; }
+    }
+    if (nimp == 0) { return 0; }
+    /* joy_calN: vorhandene Eintraege behalten, gleiche VID:PID+Achse ersetzen, neue anhaengen
+     * (Kalibrierung gehoert zum Geraet: nichts wird auf andere Geraete uebertragen). */
+    {
+        int m = joycal_cfg_read(user_cfg, ex, IJOY_CAL_MAX);
+        for (i = 0; i < m && nj < IJOY_CAL_MAX; i++) {
+            const char *eq = strchr(ex[i], '=');
+            if (eq && ijoy_cal_parse(eq + 1, &tab[nj].v, &tab[nj].p, &tab[nj].ax, &tab[nj].c)) { nj++; }
+        }
+    }
+    for (i = 0; i < d->n_set; i++) {
+        char k[48];
+        const char *eq = strchr(d->set[i], '=');
+        jc_t e;
+        int j;
+        size_t kl;
+        if (!eq) { continue; }
+        kl = (size_t)(eq - d->set[i]);
+        if (kl >= sizeof k) { continue; }
+        memcpy(k, d->set[i], kl);
+        k[kl] = '\0';
+        if (!joycal_cfg_owns(k) || !ijoy_cal_parse(eq + 1, &e.v, &e.p, &e.ax, &e.c)) { continue; }
+        for (j = 0; j < nj; j++) {
+            if (tab[j].v == e.v && tab[j].p == e.p && tab[j].ax == e.ax) { break; }
+        }
+        if (j < nj) { tab[j] = e; }
+        else if (nj < IJOY_CAL_MAX) { tab[nj++] = e; }
+    }
+    n = 0;
+    for (i = 0; i < nj; i++) {
+        char val[80];
+        if (ijoy_cal_format(tab[i].v, tab[i].p, tab[i].ax, &tab[i].c, val, (int)sizeof val)) {
+            _snprintf_s(lines[n], sizeof lines[0], _TRUNCATE, "joy_cal%d=%s", n, val);
+            n++;
+        }
+    }
+    return joycal_cfg_apply(user_cfg, (const char (*)[96])lines, n) == 0 ? 0 : 1;
+}
+
+/* Einfacher Anhaenger fuer lcx_build. */
+typedef struct { char *p; size_t cap, len; int full; } cx_buf_t;
+static void cx_add(cx_buf_t *b, const char *fmt, ...)
+{
+    va_list ap;
+    int r;
+    if (b->full || b->len >= b->cap) { b->full = 1; return; }
+    va_start(ap, fmt);
+    r = _vsnprintf_s(b->p + b->len, b->cap - b->len, _TRUNCATE, fmt, ap);
+    va_end(ap);
+    if (r < 0) { b->full = 1; return; }
+    b->len += (size_t)r;
+}
+
+int lcx_build(const lcx_data_t *d, char *out, size_t cap)
+{
+    cx_buf_t b;
+    int i;
+    if (!d || !out || cap < 64) { return 1; }
+    b.p = out;
+    b.cap = cap;
+    b.len = 0;
+    b.full = 0;
+    out[0] = '\0';
+    cx_add(&b, "# Steelbound controls: key bindings and control settings.\n");
+    cx_add(&b, "# Import in the launcher: Controls > Import. No paths, accounts or other settings.\n");
+    cx_add(&b, "[steelbound_controls]\nformat = %d\nlauncher = %s\ngame = %s\nprofile = %s\n", LCX_FORMAT,
+           d->launcher[0] ? d->launcher : "dev", d->game[0] ? d->game : "sb", d->profile);
+    cx_add(&b, "\n[settings]\n");
+    for (i = 0; i < d->n_set; i++) {
+        const char *eq = strchr(d->set[i], '=');
+        if (eq) { cx_add(&b, "%.*s = %s\n", (int)(eq - d->set[i]), d->set[i], eq + 1); }
+    }
+    cx_add(&b, "\n[profile]\n");
+    for (i = 0; i < IMAP_JOY_MAX; i++) {
+        if (d->bind.joy[i][0]) { cx_add(&b, "joy%d = %s\n", i, d->bind.joy[i]); }
+    }
+    for (i = 0; i < LCTRL_ELEM_N; i++) { /* wie lctrl_bind_save (leere Aus-Zeilen bleiben) */
+        int a;
+        if (d->bind.row[i].n_alt == 0 && !lctrl_bind_empty_line_row(i)) { continue; }
+        cx_add(&b, "%s =", kCtrlElems[i].key);
+        for (a = 0; a < d->bind.row[i].n_alt; a++) {
+            cx_add(&b, "%s%s", a ? ", " : " ", d->bind.row[i].alt[a]);
+        }
+        cx_add(&b, "\n");
+    }
+    cx_add(&b, "\n[end]\n");
+    return b.full ? 1 : 0;
+}
+
+int lcx_write_file(const char *path, const lcx_data_t *d)
+{
+    static char buf[LCX_MAX_BYTES];
+    FILE *f = NULL;
+    size_t n;
+    if (!path || !*path || lcx_build(d, buf, sizeof buf) != 0) { return 1; }
+    if (u8_fopen_s(&f, path, "wb") != 0 || !f) { return 1; }
+    n = strlen(buf);
+    if (fwrite(buf, 1, n, f) != n) { fclose(f); return 1; }
+    return fclose(f) == 0 ? 0 : 1;
+}
+
+/* Zahl (strtod, ganz verbraucht) in [lo, hi]. */
+static int cx_num_in(const char *v, double lo, double hi)
+{
+    char *e = NULL;
+    double x;
+    if (!v || !*v || strlen(v) > 12) { return 0; }
+    x = strtod(v, &e);
+    return e && !*e && x >= lo && x <= hi;
+}
+
+/* Eine Quelle pruefen: 1 = ok, 0 = ungueltig (Zeichen, Form, Bereich), -1 = unbekannte Quellenart. */
+static int cx_alt_check(const char *alt)
+{
+    const char *p, *q;
+    int unknown = 0;
+    size_t L = alt ? strlen(alt) : 0;
+    if (L < 1 || L > 95) { return 0; }
+    for (p = alt; *p; p++) {
+        char c = *p;
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == ':' ||
+              c == '+' || c == '=' || c == '.' || c == '_' || c == '!' || c == '-')) {
+            return 0;
+        }
+    }
+    for (p = alt; *p; p = q ? q + 1 : p + strlen(p)) {
+        char atom[96], *seg, *ctx = NULL;
+        size_t n;
+        int si = 0;
+        q = lctrl_chord_plus(p);
+        n = q ? (size_t)(q - p) : strlen(p);
+        if (n == 0 || n >= sizeof atom) { return 0; }
+        memcpy(atom, p, n);
+        atom[n] = '\0';
+        if (!strchr(atom, ':')) { return 0; }
+        for (seg = strtok_s(atom, ":", &ctx); seg; seg = strtok_s(NULL, ":", &ctx), si++) {
+            if (si == 0) {
+                if (_stricmp(seg, "KEY") && _stricmp(seg, "MOUSE") && _stricmp(seg, "PAD") &&
+                    _stricmp(seg, "SBC") && _stricmp(seg, "JOY") && !(_strnicmp(seg, "JOY", 3) == 0 &&
+                    seg[3] >= '0' && seg[3] < '0' + IMAP_JOY_MAX && seg[4] == '\0')) {
+                    unknown = 1;
+                }
+                continue;
+            }
+            if (si == 1) {
+                if (!seg[0]) { return 0; }
+                continue;
+            }
+            { /* Parameter p=v */
+                char *eq = strchr(seg, '=');
+                const char *v;
+                if (!eq) { continue; }
+                *eq = '\0';
+                v = eq + 1;
+                if (_stricmp(seg, "dz") == 0 && !cx_num_in(v, 0.0, 0.9)) { return 0; }
+                if (_stricmp(seg, "curve") == 0 && !cx_num_in(v, 0.5, 3.0)) { return 0; }
+                if (_stricmp(seg, "sens") == 0 && !cx_num_in(v, 0.1, 4.0)) { return 0; }
+                if ((_stricmp(seg, "inv") == 0 || _stricmp(seg, "half") == 0) && strcmp(v, "0") && strcmp(v, "1")) {
+                    return 0;
+                }
+                if (_stricmp(seg, "zone") == 0) {
+                    int lo = -1, hi = -1;
+                    char tail = 0;
+                    if (sscanf_s(v, "%d-%d%c", &lo, &hi, &tail, 1) != 2 || lo < 0 || hi > 100 || lo > hi) {
+                        return 0;
+                    }
+                }
+            }
+        }
+        if (!q) { break; }
+    }
+    return unknown ? -1 : 1;
+}
+
+/* Profilname aus der Datei: kein Pfad, keine Steuerzeichen, 1..63 Zeichen. */
+static int cx_name_ok(const char *v)
+{
+    const unsigned char *p;
+    size_t L = v ? strlen(v) : 0;
+    if (L < 1 || L > 63 || strstr(v, "..")) { return 0; }
+    for (p = (const unsigned char *)v; *p; p++) {
+        if (*p < 0x20 || *p == 0x7F || *p == '/' || *p == '\\' || *p == ':' || *p == '*' || *p == '?' ||
+            *p == '"' || *p == '<' || *p == '>' || *p == '|') {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void cx_err(char *err, size_t cap, const char *key, const char *a, int line)
+{
+    if (!err || !cap) { return; }
+    if (a) { _snprintf_s(err, cap, _TRUNCATE, LT(key), a, line); }
+    else if (line > 0) { _snprintf_s(err, cap, _TRUNCATE, LT(key), line); }
+    else { strncpy_s(err, cap, LT(key), _TRUNCATE); }
+}
+
+int lcx_parse(const char *buf, size_t len, lcx_data_t *d, char *err, size_t cap)
+{
+    enum { S_NONE, S_HEAD, S_SET, S_PROF, S_END, S_OTHER };
+    static char text[LCX_MAX_BYTES + 1024]; /* gepruefte Profilzeilen fuer lctrl_bind_load_text */
+    size_t i, p, tl = 0;
+    int sec = S_NONE, lineno = 0, have_head = 0, have_end = 0, first = 1, rc = LCX_OK;
+    if (err && cap) { err[0] = '\0'; }
+    if (!d) { return LCX_E_IO; }
+    memset(d, 0, sizeof *d);
+    if (!buf) { cx_err(err, cap, "gui.cx_err_io", NULL, 0); return LCX_E_IO; }
+    if (len > LCX_MAX_BYTES) { cx_err(err, cap, "gui.cx_err_big", NULL, 0); return LCX_E_TOOBIG; }
+    if (len >= 3 && (unsigned char)buf[0] == 0xEF && (unsigned char)buf[1] == 0xBB &&
+        (unsigned char)buf[2] == 0xBF) {
+        buf += 3; /* UTF-8-BOM */
+        len -= 3;
+    }
+    for (i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)buf[i];
+        if ((c < 0x20 && c != '\t' && c != '\r' && c != '\n') || c == 0x7F) {
+            cx_err(err, cap, "gui.cx_err_bin", NULL, 0);
+            return LCX_E_BINARY;
+        }
+    }
+    /* Vorlauf: Kopf zuerst, Endmarke vorhanden (abgeschnittene Dateien vor jeder Zeilenpruefung erkennen). */
+    for (p = 0; p < len;) {
+        char ln[520];
+        size_t q = p, n;
+        while (q < len && buf[q] != '\n') { q++; }
+        n = q - p;
+        if (n < sizeof ln) {
+            char *t;
+            memcpy(ln, buf + p, n);
+            ln[n] = '\0';
+            trim(ln);
+            t = ln;
+            if (t[0] && t[0] != '#' && t[0] != ';') {
+                if (first) {
+                    first = 0;
+                    if (_stricmp(t, "[steelbound_controls]") != 0) {
+                        cx_err(err, cap, "gui.cx_err_notcx", NULL, 0);
+                        return LCX_E_NOTCX;
+                    }
+                }
+                if (_stricmp(t, "[end]") == 0) { have_end = 1; }
+            }
+        }
+        p = q + 1;
+    }
+    if (first) { cx_err(err, cap, "gui.cx_err_notcx", NULL, 0); return LCX_E_NOTCX; }
+    if (!have_end) { cx_err(err, cap, "gui.cx_err_trunc", NULL, 0); return LCX_E_TRUNC; }
+    text[0] = '\0';
+    for (p = 0; p < len && rc == LCX_OK;) {
+        char ln[520], *t, *eq, *key, *val, *h;
+        size_t q = p, n;
+        while (q < len && buf[q] != '\n') { q++; }
+        n = q - p;
+        lineno++;
+        if (n >= 512) { cx_err(err, cap, "gui.cx_err_line", NULL, lineno); rc = LCX_E_LINE; break; }
+        memcpy(ln, buf + p, n);
+        ln[n] = '\0';
+        p = q + 1;
+        h = strchr(ln, '#');
+        if (h) { *h = '\0'; } /* Kommentar ab '#' (wie Profile) */
+        trim(ln);
+        t = ln;
+        if (!t[0] || t[0] == ';') { continue; }
+        if (sec == S_END) { d->unknown++; continue; } /* nach [end] zaehlt nichts */
+        if (t[0] == '[') {
+            if (_stricmp(t, "[steelbound_controls]") == 0) { sec = S_HEAD; have_head = 1; }
+            else if (_stricmp(t, "[settings]") == 0) { sec = S_SET; }
+            else if (_stricmp(t, "[profile]") == 0) { sec = S_PROF; }
+            else if (_stricmp(t, "[end]") == 0) { sec = S_END; }
+            else { sec = S_OTHER; d->unknown++; }
+            continue;
+        }
+        eq = strchr(t, '=');
+        if (!eq || sec == S_OTHER) { d->unknown++; continue; }
+        *eq = '\0';
+        key = t;
+        val = eq + 1;
+        trim(key);
+        trim(val);
+        if (sec == S_HEAD) {
+            if (_stricmp(key, "format") == 0) {
+                int v = 0;
+                if (!cx_int(val, &v) || v < 1) { cx_err(err, cap, "gui.cx_err_notcx", NULL, 0); rc = LCX_E_NOTCX; }
+                else if (v > LCX_FORMAT) { cx_err(err, cap, "gui.cx_err_newer", NULL, 0); rc = LCX_E_NEWER; }
+                else { d->format = v; }
+            } else if (_stricmp(key, "profile") == 0) {
+                if (!cx_name_ok(val)) { cx_err(err, cap, "gui.cx_err_name", NULL, 0); rc = LCX_E_NAME; }
+                else { strcpy_s(d->profile, sizeof d->profile, val); }
+            } else if (_stricmp(key, "game") == 0) {
+                if (_stricmp(val, "sb") == 0 || _stricmp(val, "loc") == 0) {
+                    strcpy_s(d->game, sizeof d->game, _stricmp(val, "sb") == 0 ? "sb" : "loc");
+                } else {
+                    d->unknown++;
+                }
+            } else if (_stricmp(key, "launcher") == 0) {
+                const char *c;
+                int ok = strlen(val) < sizeof d->launcher;
+                for (c = val; ok && *c; c++) {
+                    ok = (*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') ||
+                         *c == '.' || *c == '-' || *c == '+';
+                }
+                if (ok) { strcpy_s(d->launcher, sizeof d->launcher, val); }
+            } else {
+                d->unknown++;
+            }
+        } else if (sec == S_SET) {
+            int r = strlen(key) < 48 ? lcx_set_check(key, val) : -1;
+            if (r == 1) { cx_set_put(d, key, val); }
+            else if (r == 0) { cx_err(err, cap, "gui.cx_err_value", key, lineno); rc = LCX_E_VALUE; }
+            else { d->unknown++; }
+        } else if (sec == S_PROF) {
+            char row[520];
+            if ((key[0] == 'j' || key[0] == 'J') && (key[1] == 'o' || key[1] == 'O') &&
+                (key[2] == 'y' || key[2] == 'Y') && key[3] >= '0' && key[3] < '0' + IMAP_JOY_MAX && !key[4]) {
+                const unsigned char *c;
+                int ok = strlen(val) < sizeof d->bind.joy[0];
+                for (c = (const unsigned char *)val; ok && *c; c++) {
+                    ok = *c >= 0x20 && *c != 0x7F && *c != ',';
+                }
+                if (!ok) { cx_err(err, cap, "gui.cx_err_value", key, lineno); rc = LCX_E_VALUE; break; }
+                _snprintf_s(row, sizeof row, _TRUNCATE, "joy%c = %s\n", key[3], val);
+            } else if (strlen(key) < 32 && lctrl_bind_elem_index(key) >= 0) {
+                char *one, *ctx = NULL;
+                size_t rl;
+                int na = 0;
+                rl = (size_t)_snprintf_s(row, sizeof row, _TRUNCATE, "%s =", key);
+                for (one = strtok_s(val, ",", &ctx); one && rc == LCX_OK; one = strtok_s(NULL, ",", &ctx)) {
+                    int r;
+                    trim(one);
+                    if (!one[0]) { continue; }
+                    r = cx_alt_check(one);
+                    if (r < 0) { d->unknown++; continue; } /* unbekannte Quellenart: weglassen */
+                    if (r == 0 || ++na > LCTRL_ALT_N) {
+                        cx_err(err, cap, "gui.cx_err_value", key, lineno);
+                        rc = LCX_E_VALUE;
+                        break;
+                    }
+                    rl += (size_t)_snprintf_s(row + rl, sizeof row - rl, _TRUNCATE, "%s%s", na > 1 ? ", " : " ", one);
+                }
+                if (rc != LCX_OK) { break; }
+                strcat_s(row, sizeof row, "\n");
+            } else {
+                d->unknown++;
+                continue;
+            }
+            if (tl + strlen(row) + 1 >= sizeof text) { cx_err(err, cap, "gui.cx_err_big", NULL, 0); rc = LCX_E_TOOBIG; break; }
+            memcpy(text + tl, row, strlen(row) + 1);
+            tl += strlen(row);
+        } else {
+            d->unknown++; /* Wert vor dem ersten Abschnitt */
+        }
+    }
+    if (rc == LCX_OK && (!have_head || d->format < 1)) { cx_err(err, cap, "gui.cx_err_notcx", NULL, 0); rc = LCX_E_NOTCX; }
+    if (rc == LCX_OK && !d->profile[0]) { cx_err(err, cap, "gui.cx_err_name", NULL, 0); rc = LCX_E_NAME; }
+    if (rc != LCX_OK) {
+        memset(d, 0, sizeof *d); /* nichts davon darf angewendet werden */
+        return rc;
+    }
+    lctrl_bind_load_text(text, &d->bind);
+    return LCX_OK;
+}
+
+int lcx_read_file(const char *path, lcx_data_t *d, char *err, size_t cap)
+{
+    static char buf[LCX_MAX_BYTES + 1];
+    FILE *f = NULL;
+    long sz;
+    size_t n;
+    if (d) { memset(d, 0, sizeof *d); }
+    if (!path || !*path || u8_fopen_s(&f, path, "rb") != 0 || !f) {
+        cx_err(err, cap, "gui.cx_err_io", NULL, 0);
+        return LCX_E_IO;
+    }
+    if (fseek(f, 0, SEEK_END) != 0 || (sz = ftell(f)) < 0) {
+        fclose(f);
+        cx_err(err, cap, "gui.cx_err_io", NULL, 0);
+        return LCX_E_IO;
+    }
+    if (sz > LCX_MAX_BYTES) { /* vor dem Lesen ablehnen */
+        fclose(f);
+        cx_err(err, cap, "gui.cx_err_big", NULL, 0);
+        return LCX_E_TOOBIG;
+    }
+    fseek(f, 0, SEEK_SET);
+    n = fread(buf, 1, (size_t)sz, f);
+    fclose(f);
+    buf[n] = '\0';
+    return lcx_parse(buf, n, d, err, cap);
+}
+
+int lcx_import_name(const char *client_dir, const char *raw, char *out, size_t cap)
+{
+    char rest[48], cand[72], path[1200];
+    size_t i, n = 0;
+    int k;
+    if (!out || cap < 8) { return 1; }
+    out[0] = '\0';
+    if (!raw) { raw = ""; }
+    if (_strnicmp(raw, "user_", 5) == 0) { raw += 5; }
+    for (i = 0; raw[i] && n < 40; i++) {
+        char c = raw[i];
+        int ok = (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '_' ||
+                 c == '-' || c == '.';
+        if ((unsigned char)c >= 0x80 && (unsigned char)c < 0xC0) { continue; } /* UTF-8-Folgebyte: nur ein '_' */
+        rest[n++] = ok ? c : '_';
+    }
+    rest[n] = '\0';
+    while (n > 0 && rest[n - 1] == '.') { rest[--n] = '\0'; } /* keine Punkte am Ende */
+    if (!n || strspn(rest, "._") == n) { strcpy_s(rest, sizeof rest, "imported"); }
+    for (k = 1; k < 100; k++) {
+        char sfx[8] = "";
+        size_t keep;
+        if (k > 1) { _snprintf_s(sfx, sizeof sfx, _TRUNCATE, "-%d", k); }
+        keep = strlen(rest);
+        if (keep + strlen(sfx) > 40) { keep = 40 - strlen(sfx); }
+        _snprintf_s(cand, sizeof cand, _TRUNCATE, "user_%.*s%s", (int)keep, rest, sfx);
+        if (lctrl_input_profile_path(client_dir, cand, path, sizeof path) != 0) { return 1; }
+        if (u8_GetFileAttributes(path) == INVALID_FILE_ATTRIBUTES) {
+            strcpy_s(out, cap, cand);
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void cx_miss_add(char out[][96], int max, int *n, const char *name)
+{
+    int i;
+    for (i = 0; i < *n; i++) {
+        if (_stricmp(out[i], name) == 0) { return; }
+    }
+    if (*n < max) {
+        strcpy_s(out[*n], 96, name);
+        (*n)++;
+    }
+}
+
+int lcx_missing(const lcx_data_t *d, const ijoy_info_t *list, int n, int sbc_present, char out[][96], int max)
+{
+    int s, i, a, cnt = 0, sbc = 0;
+    if (!d || !out || max <= 0) { return 0; }
+    for (s = 0; s < IMAP_JOY_MAX; s++) {
+        if (!lctrl_bind_uses_joy_slot(&d->bind, s)) { continue; }
+        if (d->bind.joy[s][0]) {
+            if (ijoy_match_list(list, n, d->bind.joy[s], s) < 0) { cx_miss_add(out, max, &cnt, d->bind.joy[s]); }
+        } else if (ijoy_match_list(list, n, "", s) < 0) {
+            char t[96];
+            _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.cx_joy_slot"), s + 1);
+            cx_miss_add(out, max, &cnt, t);
+        }
+    }
+    for (i = 0; i < LCTRL_ELEM_N && !sbc; i++) {
+        for (a = 0; a < d->bind.row[i].n_alt; a++) {
+            if (lctrl_bind_alt_is_sbc(d->bind.row[i].alt[a])) { sbc = 1; }
+        }
+    }
+    for (i = 0; i < d->n_set; i++) {
+        if (strcmp(d->set[i], "sbc_usb=1") == 0) { sbc = 1; }
+    }
+    if (sbc && !sbc_present) { cx_miss_add(out, max, &cnt, LT("gui.cx_sbc_name")); }
+    return cnt;
 }

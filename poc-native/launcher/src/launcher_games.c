@@ -21,6 +21,7 @@ void lgame_defaults(lgame_state_t *st)
 {
     memset(st, 0, sizeof *st);
     st->game = LGAME_SB;
+    st->loc_widescreen = LGAME_WIDE_169; /* W414: LoC-Standard 16:9 (Spielmodus); fehlender Schluessel = 16:9 */
 }
 
 const char *lgame_key(int game)
@@ -82,7 +83,9 @@ int lgame_wide_clamp(int v)
 
 int lgame_wide_experimental(int v)
 {
-    return lgame_wide_clamp(v) != LGAME_WIDE_43;
+    /* W414 (Nutzer 21.11.): 16:9 laeuft im Basisspiel sehr gut - keine Experimental-Kennzeichnung mehr.
+     * Nur 720p (falls angeboten, LOC_WIDE_720P) bleibt experimentell (Schrift unskaliert, §23.4). */
+    return lgame_wide_clamp(v) == LGAME_WIDE_720P;
 }
 
 const char *lgame_wide_label_key(int v)
@@ -327,6 +330,163 @@ int lgame_pergame_migrate(const char *usercfg, const char *loccfg)
     }
     /* Markierung in user.cfg; loc_widescreen gehoert ab jetzt nur in die LoC-Datei */
     return lgame_cfg_save_ex(usercfg, &st, LGAME_K_PERGAME, LGAME_K_WIDE) == 0 ? 1 : -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* W414 LOC-DEFAULT-169/-FADE: 16:9 (Spielmodus) + Breitbild-Raender    */
+/* "Fade out" 8 %/100 % als LoC-Standard, einmalige Umstellung je       */
+/* user_loc.cfg (Markierung launcher_loc169=1; launcher_* liest der     */
+/* Client nicht). user.cfg (SB) wird hier nie geschrieben.              */
+/* ------------------------------------------------------------------ */
+int lgame_loc169_marked(const char *loccfg)
+{
+    FILE *f = NULL;
+    char line[1200], v[64];
+    int on = 0;
+    if (!loccfg || u8_fopen_s(&f, loccfg, "r") != 0 || !f) {
+        return 0;
+    }
+    while (fgets(line, sizeof line, f)) {
+        const char *val = key_line(line, LGAME_KEY_LOC169);
+        if (val) {
+            trim_val(val, v, sizeof v);
+            on = atoi(v) != 0;
+        }
+    }
+    fclose(f);
+    return on;
+}
+
+/* Schluessel ersetzen (erste Zeile, Doppelte entfernt) bzw. anhaengen; fehlende render-Schluessel mit
+ * "[render]"-Kopf. Datei fehlt: nur mit create anlegen. 0 = ok, 1 = fehlt (nicht angelegt), -1 = Fehler. */
+static int loc169_set_keys(const char *path, const char *const *keys, const char *const *vals, int n, int create)
+{
+    FILE *f = NULL;
+    char line[1200];
+    char *out;
+    size_t o = 0, cap = 1024 * 1024;
+    int done[8] = { 0 }, k, need_render = 0, ok;
+    if (!path || n > 8) {
+        return -1;
+    }
+    out = (char *)malloc(cap);
+    if (!out) {
+        return -1;
+    }
+    if (u8_fopen_s(&f, path, "r") == 0 && f) {
+        while (fgets(line, sizeof line, f)) {
+            size_t l;
+            int skip = 0;
+            for (k = 0; k < n; k++) {
+                if (key_line(line, keys[k])) {
+                    if (done[k]) {
+                        skip = 1;
+                    } else {
+                        _snprintf_s(line, sizeof line, _TRUNCATE, "%s=%s\n", keys[k], vals[k]);
+                        done[k] = 1;
+                    }
+                    break;
+                }
+            }
+            if (skip) {
+                continue;
+            }
+            l = strlen(line);
+            if (o + l + 4096 >= cap) {
+                fclose(f);
+                free(out);
+                return -1;
+            }
+            memcpy(out + o, line, l);
+            o += l;
+        }
+        fclose(f);
+        if (o && out[o - 1] != '\n') {
+            out[o++] = '\n';
+        }
+    } else if (!create) {
+        free(out);
+        return 1;
+    } else {
+        o += (size_t)_snprintf_s(out + o, cap - o, _TRUNCATE, "# " LGAME_LOC_CFG_NAME
+                                 " - Line of Contact settings (launcher). Steel Battalion uses user.cfg.\n");
+    }
+    for (k = 0; k < n; k++) {
+        if (!done[k] && strncmp(keys[k], "edge_", 5) == 0) {
+            need_render = 1;
+        }
+    }
+    if (need_render) {
+        o += (size_t)_snprintf_s(out + o, cap - o, _TRUNCATE, "[render]\n");
+    }
+    for (k = 0; k < n; k++) { /* zuerst die render-Schluessel unter dem Kopf */
+        if (!done[k] && strncmp(keys[k], "edge_", 5) == 0) {
+            o += (size_t)_snprintf_s(out + o, cap - o, _TRUNCATE, "%s=%s\n", keys[k], vals[k]);
+            done[k] = 1;
+        }
+    }
+    for (k = 0; k < n; k++) {
+        if (!done[k]) {
+            if (strcmp(keys[k], LGAME_KEY_LOC169) == 0) {
+                o += (size_t)_snprintf_s(out + o, cap - o, _TRUNCATE,
+                                         "# launcher: 16:9 + Fade out as Line of Contact default applied once\n");
+            } else if (strcmp(keys[k], LGAME_KEY_LOC_WIDE) == 0) {
+                o += (size_t)_snprintf_s(out + o, cap - o, _TRUNCATE,
+                                         "# Line of Contact picture format (0 = 4:3 original, 1 = 16:9, 2 = 720p)\n");
+            }
+            o += (size_t)_snprintf_s(out + o, cap - o, _TRUNCATE, "%s=%s\n", keys[k], vals[k]);
+        }
+    }
+    if (u8_fopen_s(&f, path, "w") != 0 || !f) {
+        free(out);
+        return -1;
+    }
+    ok = fwrite(out, 1, o, f) == o;
+    ok &= fclose(f) == 0;
+    free(out);
+    return ok ? 0 : -1;
+}
+
+int lgame_loc169_migrate(const char *loccfg)
+{
+    static const char *const kK[5] = { LGAME_KEY_LOC_WIDE, "edge_mode", "edge_fade_width", "edge_fade_strength",
+                                       LGAME_KEY_LOC169 };
+    char v[5][16];
+    const char *pv[5];
+    int k;
+    if (!loccfg || !file_exists_u8(loccfg) || lgame_loc169_marked(loccfg)) {
+        return 0; /* keine LoC-Datei (Standard gilt) oder schon umgestellt */
+    }
+    _snprintf_s(v[0], sizeof v[0], _TRUNCATE, "%d", LGAME_WIDE_169);
+    _snprintf_s(v[1], sizeof v[1], _TRUNCATE, "%d", LGAME_LOC169_EDGE_MODE);
+    _snprintf_s(v[2], sizeof v[2], _TRUNCATE, "%d", LGAME_LOC169_EDGE_W);
+    _snprintf_s(v[3], sizeof v[3], _TRUNCATE, "%d", LGAME_LOC169_EDGE_S);
+    strcpy_s(v[4], sizeof v[4], "1");
+    for (k = 0; k < 5; k++) {
+        pv[k] = v[k];
+    }
+    return loc169_set_keys(loccfg, kK, pv, 5, 0) == 0 ? 1 : -1;
+}
+
+int lgame_loc169_mark(const char *loccfg, int wide, int with_edges)
+{
+    static const char *const kK[5] = { LGAME_KEY_LOC_WIDE, LGAME_KEY_LOC169, "edge_mode", "edge_fade_width",
+                                       "edge_fade_strength" };
+    char v[5][16];
+    const char *pv[5];
+    int k;
+    if (!loccfg) {
+        return -1;
+    }
+    _snprintf_s(v[0], sizeof v[0], _TRUNCATE, "%d", lgame_wide_clamp(wide));
+    strcpy_s(v[1], sizeof v[1], "1");
+    _snprintf_s(v[2], sizeof v[2], _TRUNCATE, "%d", LGAME_LOC169_EDGE_MODE);
+    _snprintf_s(v[3], sizeof v[3], _TRUNCATE, "%d", LGAME_LOC169_EDGE_W);
+    _snprintf_s(v[4], sizeof v[4], _TRUNCATE, "%d", LGAME_LOC169_EDGE_S);
+    for (k = 0; k < 5; k++) {
+        pv[k] = v[k];
+    }
+    return loc169_set_keys(loccfg, kK, pv, with_edges ? 5 : 2, 1) == 0 ? 0 : -1;
 }
 
 void lgame_loc_dir(const char *base, char *out, size_t cap)

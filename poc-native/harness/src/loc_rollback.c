@@ -51,6 +51,7 @@
 #include "loc_rbn.h"       /* W346 LOC-ROLLBACK-R4: Aushandlung */
 #include "loc_audio.h"     /* W375: Rollback-Waisen (Schleifen-Cues) stoppen */
 #include "loc_rb_xkey.h"    /* W381 (#61): Stopp-/Status-Schluessel mit Handle bzw. Quelle */
+#include "loc_rb_sndloop.h" /* W413 (#65): Ton nach dem Neurechnen mit der korrigierten Zeitlinie abgleichen */
 #include "loc_guard.h"
 #include "sb_lang.h"
 #include "sb_origview.h"   /* W346: Einblendung bei Desync */
@@ -1324,11 +1325,122 @@ static u32 __stdcall rb_xgn(u32 e, u32 pdesc, u32 pout)
  * (Nebentabelle) gelten im ganzen Neurechen-Fenster: gleicher Cue (Parameter-Hash) = wiederverwenden (kein zweiter
  * Start, gleicher Handle). Nur was die korrigierte Zeitlinie zusaetzlich startet, startet live (nachgeholt). */
 #define RB_XSIDE 256
-typedef struct { u32 g, ih, ret, h; uint8_t fn, used, live; } rb_xside_t;
+typedef struct { u32 g, ih, ret, h, serial; uint8_t fn, used, live; } rb_xside_t; /* W413: serial = laufende Cue-Nummer */
 static rb_xside_t s_xside[RB_XSIDE];
 static u32 s_xside_n;
 static u32 s_xwin0, s_xwin1, s_xwin_g0, s_xwin_g1; /* Fenster der laufenden Neurechnung (Aufzeichnung, Spielticks) */
 static u32 rb_rbi_gtick(void);
+
+/* ---- W413 LOC-SOUND-LOOP (#65): Ton nach dem Neurechnen mit der korrigierten Zeitlinie abgleichen (loc_rb_sndloop.h).
+ * loc_sndloop_fix (Standard 1) stoppt, loc_sndloop_diag zaehlt/loggt auch ohne Fix (Gegenprobe: was liefe weiter). ---- */
+#define RBS_NET 64
+typedef struct { u32 serial, h, pp; uint16_t miss; uint8_t touched, origin; } rbs_net_t; /* origin 0 Aufzeichnung, 1 nachgeholt */
+static rbs_net_t s_rbs_net[RBS_NET];
+static u32 s_rbs_net_n, s_rbs_net_drop, s_rbs_net_stop, s_rbs_net_would, s_rbs_net_umiss;
+static u32 s_rbs_rec_loop, s_rbs_rec_dead;          /* verwaist aus der Aufzeichnung: davon Schleife / als tot markiert */
+static u32 s_rbs_side_orphan, s_rbs_side_loop, s_rbs_side_stop; /* nachgeholte Waisen (Nebentabelle) */
+static u32 s_rbs_gap, s_rbs_gap_loop, s_rbs_gap_stop;  /* erledigter Index-/Quellen-Stopp: Instanz spielte noch */
+static volatile LONG s_rbs_log_n;
+static int rbs_act(void) { return g_cfg.loc_sndloop_fix != 0; }
+static int rbs_on(void) { return g_cfg.loc_sndloop_fix || g_cfg.loc_sndloop_diag; }
+#define RBS_LOG(...)                                                                                                 \
+    do {                                                                                                             \
+        if (g_cfg.loc_sndloop_diag && InterlockedIncrement(&s_rbs_log_n) <= 400) HLOG_I(__VA_ARGS__);                \
+    } while (0)
+static void rbs_net_add(u32 serial, u32 h, u32 pp, int touched, int origin)
+{
+    u32 i;
+    if (!rbs_on() || g_cfg.loc_sndloop_grace <= 0 || !serial || !h || !pp) return;
+    for (i = 0; i < s_rbs_net_n; i++)
+        if (s_rbs_net[i].serial == serial) {
+            s_rbs_net[i].touched |= (uint8_t)(touched != 0);
+            return;
+        }
+    if (s_rbs_net_n >= RBS_NET) {
+        s_rbs_net_drop++;
+        return;
+    }
+    s_rbs_net[s_rbs_net_n].serial = serial;
+    s_rbs_net[s_rbs_net_n].h = h;
+    s_rbs_net[s_rbs_net_n].pp = pp;
+    s_rbs_net[s_rbs_net_n].miss = 0;
+    s_rbs_net[s_rbs_net_n].touched = (uint8_t)(touched != 0);
+    s_rbs_net[s_rbs_net_n].origin = (uint8_t)origin;
+    s_rbs_net_n++;
+}
+static void rbs_net_touch(u32 serial)
+{
+    u32 i;
+    for (i = 0; i < s_rbs_net_n; i++)
+        if (s_rbs_net[i].serial == serial) s_rbs_net[i].touched = 1;
+}
+static u32 rb_rd_u32(u32 p);
+/* Sicherheitsnetz je Live-Tick (nach dem Neurechnen, Spiel-Thread): Schleife, die eine Neurechnung beruehrt hat und deren
+ * Handle-Ablage im Spiel sie grace Ticks lang nicht mehr enthaelt, endet. Unberuehrte Schleifen werden nur gezaehlt. */
+static void rbs_net_tick(void)
+{
+    u32 i, w = 0;
+    for (i = 0; i < s_rbs_net_n; i++) {
+        rbs_net_t *x = &s_rbs_net[i];
+        int cue, loops, st;
+        char nm[40];
+        st = loc_audio_cue_info(x->serial, &cue, &loops, NULL, nm, (int)sizeof nm);
+        if (st == 0) continue; /* beendet: Eintrag weg */
+        if (st == 2 && loops) {
+            u32 owner = rb_rd_u32(x->pp);
+            if (!x->touched) {
+                if (owner != x->h) s_rbs_net_umiss++; /* Gegenprobe: Ablage leer ohne Neurechnung (Netz greift dort nie) */
+            } else if (lrs_net_step(owner, x->h, &x->miss, (u32)g_cfg.loc_sndloop_grace)) {
+                if (rbs_act() && loc_audio_stop_serial(x->serial, 1)) {
+                    s_rbs_net_stop++;
+                    RBS_LOG("LOCSNDLOOP Netz: Cue %d '%s' (%s) ohne Besitzer seit %u Ticks -> gestoppt", cue, nm,
+                            x->origin ? "nachgeholt" : "Aufzeichnung", (u32)x->miss);
+                    continue;
+                }
+                if (!rbs_act() && x->miss == (uint16_t)g_cfg.loc_sndloop_grace) {
+                    s_rbs_net_would++;
+                    RBS_LOG("LOCSNDLOOP Netz: Cue %d '%s' (%s) ohne Besitzer seit %u Ticks -> spielt weiter (Fix aus)", cue,
+                            nm, x->origin ? "nachgeholt" : "Aufzeichnung", (u32)x->miss);
+                }
+            }
+        }
+        s_rbs_net[w++] = *x;
+    }
+    s_rbs_net_n = w;
+}
+/* Erledigter Stopp nach Index (cue >= 0) bzw. StopSoundCues (cue < 0, Quelle src) am Neurechen-Tick: Instanzen, die die
+ * korrigierte Zeitlinie zu diesem Zeitpunkt kennt (Nebentabelle, in dieser Neurechnung verwendete Aufzeichnung) und die
+ * noch spielen, hat der damalige Live-Stopp nicht getroffen -> live stoppen. */
+static void rbs_inst_cover(u32 serial, int32_t cue, u32 src, const char *from)
+{
+    int icue, loops, st;
+    u32 isrc;
+    char nm[40];
+    if (!serial) return;
+    st = loc_audio_cue_info(serial, &icue, &loops, &isrc, nm, (int)sizeof nm);
+    if (st == 0 || !lrs_stop_covers(cue, src, icue, isrc)) return;
+    s_rbs_gap++;
+    if (loops) s_rbs_gap_loop++;
+    if (rbs_act() && loc_audio_stop_serial(serial, 0)) s_rbs_gap_stop++;
+    RBS_LOG("LOCSNDLOOP Stopp-Luecke: %s %d erledigt (erste Rechnung), Instanz Cue %d '%s' Schleife=%s (%s) spielte noch -> %s",
+            cue >= 0 ? "Index" : "Quelle", cue >= 0 ? (int)cue : (int)(src & 0xFFFFu), icue, nm, loops ? "ja" : "nein",
+            from, rbs_act() ? "gestoppt" : "spielt weiter (Fix aus)");
+}
+static void rbs_stop_cover(int32_t cue, u32 src)
+{
+    u32 c, i, t = rb_rbi_gtick();
+    if (!rbs_on() || !s_rbi_ep) return;
+    for (i = 0; i < s_xside_n; i++) {
+        const rb_xside_t *x = &s_xside[i];
+        if (lrs_side_in_timeline(x->g, x->used, s_xwin_g0, t)) rbs_inst_cover(x->serial, cue, src, "nachgeholt");
+    }
+    for (c = s_xwin0; c + sizeof(rb_ev_t) <= s_xwin1 && s_xwin1 <= s_rec_len;) {
+        const rb_ev_t *e = (const rb_ev_t *)(s_rec + c);
+        if ((e->fn == EV_XPLAY || e->fn == EV_XPREP) && (e->pad & LRS_PAD_USED) && e->n >= 8u)
+            rbs_inst_cover(((const u32 *)(e + 1))[1], cue, src, "erste Rechnung, spaeter im Fenster");
+        c += (u32)sizeof *e + e->n;
+    }
+}
 static const rb_ev_t *rb_rep_xcue(int fn, u32 ih, const uint8_t **d, u32 *side_h, int *side_hit)
 {
     u32 c, pass, cur0 = s_rec_cur;
@@ -1337,7 +1449,7 @@ static const rb_ev_t *rb_rep_xcue(int fn, u32 ih, const uint8_t **d, u32 *side_h
         u32 a = pass ? s_xwin0 : cur0, b = pass ? cur0 : s_xwin1;
         for (c = a; c + sizeof(rb_ev_t) <= b;) {
             rb_ev_t *e = (rb_ev_t *)(s_rec + c);
-            if (e->fn == (uint8_t)fn && e->ih == ih && !(e->pad & 1)) {
+            if (e->fn == (uint8_t)fn && e->ih == ih && !(e->pad & (LRS_PAD_USED | LRS_PAD_DEAD))) { /* W413: tote nie */
                 e->pad |= 1;
                 s_cnt_ev[fn][1]++;
                 *d = (const uint8_t *)(e + 1);
@@ -1367,7 +1479,7 @@ static int rb_xcue_seen(int fn, u32 ih) /* gleicher Cue im Fenster schon verwend
     }
     return 0;
 }
-static void rb_xside_add(int fn, u32 ih, u32 ret, u32 h)
+static void rb_xside_add(int fn, u32 ih, u32 ret, u32 h, u32 serial)
 {
     u32 g = rb_rbi_gtick(), i, w = 0;
     for (i = 0; i < s_xside_n; i++) /* alte Eintraege verwerfen */
@@ -1378,6 +1490,7 @@ static void rb_xside_add(int fn, u32 ih, u32 ret, u32 h)
     s_xside[s_xside_n].ih = ih;
     s_xside[s_xside_n].ret = ret;
     s_xside[s_xside_n].h = h;
+    s_xside[s_xside_n].serial = serial;
     s_xside[s_xside_n].fn = (uint8_t)fn;
     s_xside[s_xside_n].used = 1;
     s_xside[s_xside_n].live = 1;
@@ -1404,9 +1517,18 @@ static u32 rb_xcue_call(int fn, fn3_t o, u32 sb, u32 params, u32 pp)
         if (rb_xcue_seen(fn, ih)) s_xc_dup++; /* korrigierte Zeitlinie startet denselben Cue oefter als die erste */
         s_xc_new++;
         if (pp) LOC_RB_PREWRITE(pp, 4);
-        ret = o(sb, params, pp); /* nachgeholt: nur die korrigierte Zeitlinie startet ihn */
-        h = rb_rd_u32(pp);
-        rb_xside_add(fn, ih, ret, h);
+        {
+            u32 s0 = loc_audio_last_serial(), ser;
+            ret = o(sb, params, pp); /* nachgeholt: nur die korrigierte Zeitlinie startet ihn */
+            h = rb_rd_u32(pp);
+            ser = loc_audio_last_serial(); /* W413: laufende Nummer (Waise der naechsten Neurechnung, Netz) */
+            if (ser == s0) ser = 0;
+            rb_xside_add(fn, ih, ret, h, ser);
+            if (ser && rbs_on()) {
+                int lp = 0, st = loc_audio_cue_info(ser, NULL, &lp, NULL, NULL, 0);
+                if (fn == EV_XPREP || (st == 2 && lp)) rbs_net_add(ser, h, pp, 1, 1);
+            }
+        }
         return ret;
     }
     if (s_phase == PH_RECORD) {
@@ -1417,6 +1539,10 @@ static u32 rb_xcue_call(int fn, fn3_t o, u32 sb, u32 params, u32 pp)
         hs[1] = loc_audio_last_serial();
         if (hs[1] == s0) hs[1] = 0;
         rb_rec_put(fn, ret, ih, hs, 8u);
+        if (s_rbi_ep && hs[1] && rbs_on()) { /* W413: Schleifen fuer das Sicherheitsnetz merken (beruehrt erst im Fenster) */
+            int lp = 0, st = loc_audio_cue_info(hs[1], NULL, &lp, NULL, NULL, 0);
+            if (fn == EV_XPREP || (st == 2 && lp)) rbs_net_add(hs[1], hs[0], pp, 0, 0);
+        }
         return ret;
     } else {
         const uint8_t *d;
@@ -1448,6 +1574,7 @@ static u32 __stdcall rb_xstop(u32 sb, u32 cue, u32 flags, u32 pcue)
     } else {
         const rb_ev_t *ev = rb_rep_get(EV_XSTOP, key, NULL);
         if (!ev && s_rbi_ep) { s_xc_stop_live++; return o_xstop(sb, cue, flags, pcue); } /* W346: nur die korrigierte Zeitlinie stoppt */
+        if (ev && s_rbi_ep && (int)cue >= 0) rbs_stop_cover((int32_t)cue, 0); /* W413: Index-Stopp erledigt - Luecken */
         return ev ? ev->ret : 0;
     }
 }
@@ -1478,6 +1605,7 @@ static u32 __stdcall rb_xstopsrc(u32 sp)
     } else {
         const rb_ev_t *ev = rb_rep_get(EV_XSTOPSRC, loc_rb_xkey_src(sp, s_xkey_legacy), NULL);
         if (!ev && s_rbi_ep) { s_xc_stop_live++; return o_xstopsrc(sp); } /* W346 */
+        if (ev && s_rbi_ep && sp) rbs_stop_cover(-1, sp); /* W413: StopSoundCues erledigt - Luecken */
         return ev ? ev->ret : 0;
     }
 }
@@ -1832,6 +1960,71 @@ static void rb_rthread_check(void)
     else if (rb_rthread_dead()) rb_rthread_refresh("alter beendet");
 }
 
+/* ================= W411 LOC-FREEZE-SUSP: Anhalten des Render-Threads mit Buchfuehrung =================
+ * Befund (Nutzer-Log 21.11., 3 Spieler, R2): Spiel-Thread kreist in FUN_0002F100 @0x2F355 ("warte bis Render-Auftrag
+ * [0x306EEC] == 0, dann Auftrag 2 = Ende") - die Missionsschleife ist verlassen (Ende-Zaehler [0x3068E0] hat die Grenze
+ * [0x306C10] erreicht). Der Render-Thread (0x2C580) steht mit SuspendCount 1: angehalten vom Vorlauf (W390,
+ * rb_spec_try_start, Auftrag 1) bzw. Neurechnen (rb_quiesce). Fortgesetzt wird nur im naechsten rb_after - den gibt es
+ * nach dem Verlassen der Schleife nicht mehr -> ewiges Kreisen. Gleiches Bild in W409 T1 (Rauswurf: Ende mit Grenze 0).
+ * Ab hier: genau ein gebuchtes Anhalten (kein doppeltes, Fortsetzen nur, wenn wir halten), Ende-Pruefung vor dem
+ * Verlassen der Schleife (rb_loop_exits), Haken am Schleifenende (rb_loop_exit) und ein Waechter-Thread. */
+static volatile LONG s_rs_held;   /* 1 = wir halten genau ein Anhalten des Render-Threads */
+static HANDLE s_rs_h;             /* angehaltener Thread (gesetzt vor s_rs_held) */
+static volatile LONG s_rs_t0;     /* GetTickCount beim Anhalten */
+static volatile LONG s_rs_why;    /* 1 Ruhepunkt (Neurechnen/Zyklus), 2 Vorlauf */
+static volatile LONG s_after_seq; /* je rb_after + 1 (Waechter: Spiel-Thread erreicht den Ruhepunkt) */
+static u32 s_rs_n, s_rs_double, s_rs_swap, s_rs_spur, s_rs_prev0, s_rs_max_ms, s_rs_rescue, s_lx_n, s_lx_spec,
+    s_lx_rep, s_lx_held, s_spec_endstop, s_rep_endstop, s_spec_abandon_n;
+static int s_endguard = 1;        /* loc_rb_opts endguard=0: alte Wirkung (TEST, Nachweis vorher) */
+static int s_exithook = 1;        /* loc_rb_opts exithook=0: kein Haken am Schleifenende */
+static int s_sguard_ms = 2000;    /* loc_rb_opts sguard=N: Waechter (ms), 0 = aus */
+static int s_test_end = -1, s_test_end_spec, s_test_end_done; /* TEST tend=N, tendspec=1 */
+static int s_rep_ended;           /* Missionsende im Neurechnen schon behandelt (rbi_mission_end nicht erneut) */
+static const char *rb_rs_why_name(LONG w) { return w == 2 ? "Vorlauf" : (w == 1 ? "Ruhepunkt/Neurechnen" : "-"); }
+static void rb_rs_resume(void)
+{
+    DWORD prev, ms;
+    if (!InterlockedExchange(&s_rs_held, 0)) { /* nichts gebucht (Waechter oder Haken war schneller): nie blind fortsetzen */
+        s_rs_spur++;
+        return;
+    }
+    ms = GetTickCount() - (DWORD)s_rs_t0;
+    if (ms > s_rs_max_ms) s_rs_max_ms = ms;
+    prev = ResumeThread(s_rs_h);
+    if (prev == 0) s_rs_prev0++; /* war nicht angehalten (fremdes Fortsetzen) */
+}
+/* 1 = angehalten (genau einmal gebucht). Haelt schon ein Anhalten fuer denselben Thread: nicht doppelt anhalten. */
+static int rb_rs_suspend(HANDLE h, int why)
+{
+    if (s_rs_held) {
+        s_rs_double++;
+        if (s_rs_h == h) return 1;
+        s_rs_swap++;
+        rb_rs_resume(); /* Render-Thread gewechselt: alten zuerst freigeben */
+    }
+    if (!rb_suspend_safe(h)) return 0;
+    s_rs_h = h;
+    InterlockedExchange(&s_rs_why, why);
+    InterlockedExchange(&s_rs_t0, (LONG)GetTickCount());
+    InterlockedExchange(&s_rs_held, 1);
+    s_rs_n++;
+    return 1;
+}
+/* Ende-Pruefung von FUN_0002F100 direkt nach dem Feld-Warten (0x2F2FE..0x2F34C), exakt nachgebildet: Zaehler != 0 ->
+ * Zaehler + 1, < 0 -> 0, > Grenze -> Grenze; gleich Grenze -> Schleife wird verlassen. rb_after laeuft im Thunk am CALL
+ * @0x2F2F9, danach folgt ohne weiteren Spielcode genau diese Pruefung. */
+#define RB_END_CNT 0x3068E0u
+#define RB_END_LIM 0x306C10u
+static int rb_loop_exits(void)
+{
+    int c = (int)rd32(RB_END_CNT), l = (int)rd32(RB_END_LIM);
+    if (!c) return 0;
+    c++;
+    if (c < 0) c = 0;
+    else if (c > l) c = l;
+    return c == l;
+}
+
 static rb_ser_t *s_q_wait, *s_q_susp, *s_t_saveA, *s_t_saveB, *s_t_loadA, *s_t_loadB, *s_t_tick, *s_t_rep,
     *s_dirty_k1, *s_dirty_blk_k1, *s_dirty_pg, *s_t_cmp, *s_t_full, *s_rec_bytes, *s_t_tickfwd;
 static u32 s_q_busy;           /* Render-Thread am Ruhepunkt noch beschaeftigt */
@@ -1882,13 +2075,13 @@ static int rb_quiesce(int suspend)
     if (suspend) rb_rthread_check(); /* W375: neue Mission, neuer Render-Thread */
     if (suspend && s_rthread) {
         long long t1 = rb_now();
-        if (!rb_suspend_safe(s_rthread)) { /* W330: haelt dauernd eine Sperre -> Zyklus verwerfen */
+        if (!rb_rs_suspend(s_rthread, 1)) { /* W330: haelt dauernd eine Sperre -> Zyklus verwerfen (W411: gebucht) */
             s_q_timeout++;
             return 0;
         }
         rb_put(s_q_susp, rb_us(rb_now() - t1));
         if (rd32(RB_RJOB) == 1u) { /* doch noch einen Auftrag gesehen */
-            ResumeThread(s_rthread);
+            rb_rs_resume(); /* W411 */
             s_q_timeout++;
             return 0;
         }
@@ -1985,7 +2178,7 @@ static void rb_cycle_end(void)
         rbr_reset_ring();
     }
     if (s_freeze) rb_thaw_others();
-    if (s_rthread) ResumeThread(s_rthread);
+    rb_rs_resume(); /* W411: nur, wenn gebucht */
     if (s_pdpause) sb_interp_rb_pause(0); /* W330 */
     InterlockedExchange(&s_skipwait, 0);
     s_phase = PH_IDLE;
@@ -2095,7 +2288,7 @@ static void rb_cycle_step(void)
             if (rbr_load((unsigned)s_kcur, &pages, &us) != 0) { /* zu wenig Ticks im Ring (Neuaufbau) -> verwerfen */
                 if (s_pdpause) sb_interp_rb_pause(0);
                 if (s_freeze) rb_thaw_others();
-                if (s_rthread) ResumeThread(s_rthread);
+                rb_rs_resume(); /* W411: nur, wenn gebucht */
                 s_phase = PH_IDLE;
                 s_cyc_skip++;
                 return;
@@ -3442,14 +3635,50 @@ static void rbi_replay_finish(void)
         u32 c;
         for (c = s_xwin0; c + sizeof(rb_ev_t) <= s_xwin1 && s_xwin1 <= s_rec_len;) {
             rb_ev_t *e = (rb_ev_t *)(s_rec + c);
-            if ((e->fn == EV_XPLAY || e->fn == EV_XPREP) && !(e->pad & 1)) {
+            if ((e->fn == EV_XPLAY || e->fn == EV_XPREP) && !(e->pad & (LRS_PAD_USED | LRS_PAD_DEAD))) {
+                u32 ser = e->n >= 8u ? ((const u32 *)(e + 1))[1] : 0u;
+                int icue = -1, lp = 0, st = 0, stopped;
+                char nm[40] = "";
                 s_xc_orphan++;
+                if (rbs_on() && ser) st = loc_audio_cue_info(ser, &icue, &lp, NULL, nm, (int)sizeof nm);
+                if (st == 2 && lp) s_rbs_rec_loop++;
                 /* W375 (#51): Schleife ohne Besitzer (Handle nur im verworfenen Stand) - sonst laeuft sie ewig, auch in
                  * den Menues (Eject-Alarm). Einmal-Cues laufen aus wie bisher. */
-                if (e->n >= 8u && loc_audio_stop_orphan(((const u32 *)(e + 1))[1])) s_xc_orphan_stop++;
+                stopped = ser && loc_audio_stop_orphan(ser);
+                if (stopped) s_xc_orphan_stop++;
+                if (stopped && rbs_act()) { /* W413: tot - eine spaetere Neurechnung startet ihn live statt Handle */
+                    e->pad |= LRS_PAD_DEAD;
+                    s_rbs_rec_dead++;
+                }
+                RBS_LOG("LOCSNDLOOP verwaist: Cue %d '%s' Schleife=%s Start=erste Rechnung (vorhergesagt) Fenster=%u..%u -> %s",
+                        icue, nm, lp ? "ja" : "nein", s_xwin_g0, s_xwin_g1,
+                        stopped ? "gestoppt (W375)" : (st == 0 ? "schon aus" : (lp ? "spielt weiter" : "laeuft aus")));
             }
-            e->pad &= (uint8_t)~1u;
+            e->pad &= (uint8_t)~LRS_PAD_USED;
             c += (u32)sizeof *e + e->n;
+        }
+        if (rbs_on()) { /* W413: nachgeholte Waisen (Nebentabelle): von einer frueheren Neurechnung live gestartet, von dieser nicht */
+            u32 i, w = 0;
+            for (i = 0; i < s_xside_n; i++) {
+                rb_xside_t *x = &s_xside[i];
+                if (lrs_side_orphan(x->g, x->used, s_xwin_g0, s_xwin_g1)) {
+                    int icue = -1, lp = 0, st = 0, stopped = 0;
+                    char nm[40] = "";
+                    s_rbs_side_orphan++;
+                    if (x->serial) st = loc_audio_cue_info(x->serial, &icue, &lp, NULL, nm, (int)sizeof nm);
+                    if (st == 2 && lp) {
+                        s_rbs_side_loop++;
+                        if (rbs_act()) stopped = loc_audio_stop_serial(x->serial, 1);
+                        if (stopped) s_rbs_side_stop++;
+                    }
+                    RBS_LOG("LOCSNDLOOP verwaist: Cue %d '%s' Schleife=%s Start=Neurechnen (nachgeholt, Tick %u) Fenster=%u..%u -> %s",
+                            icue, nm, lp ? "ja" : "nein", x->g, s_xwin_g0, s_xwin_g1,
+                            stopped ? "gestoppt" : (st == 0 ? "schon aus" : (lp ? "spielt weiter (Fix aus)" : "laeuft aus")));
+                    if (stopped) continue; /* Eintrag weg: keine Zeitlinie besitzt ihn mehr */
+                }
+                s_xside[w++] = *x;
+            }
+            s_xside_n = w;
         }
         s_xwin0 = s_xwin1 = 0;
     }
@@ -3457,7 +3686,7 @@ static void rbi_replay_finish(void)
         *(volatile u32 *)(uintptr_t)RB_RJOB = rbi_rjob_replay(s_rbi_prep, RBI_RJOB_DONE, rd32(RB_RJOB));
     rbi_heapchk(1); /* W359: Heap nach dem Neurechnen pruefen (Render-Thread steht noch) */
     if (s_freeze) rb_thaw_others();
-    if (s_rthread) ResumeThread(s_rthread);
+    rb_rs_resume(); /* W411: nur, wenn gebucht */
     if (s_pdpause) sb_interp_rb_pause(0);
     { /* W372: Feldbezug wieder live (sonst wartet der naechste Tick nicht) */
         u32 f = rd32(RBI_FIELD_LAST);
@@ -3478,7 +3707,7 @@ static void rbi_mission_end(void)
     const rbi_stats_t *st = rbi_stats(s_rbc);
     rbl_mission_end(); /* W386 */
     if (s_rbi_ep) {
-        if (rbi_replaying(s_rbc)) rbi_replay_finish();
+        if (rbi_replaying(s_rbc) && !s_rep_ended) rbi_replay_finish(); /* W411: schon beim Missionsende im Neurechnen */
         HLOG_I("LOCRBI: Mission %u Ende: Slot %d, Rollbacks %u, verloren %u, Hash verglichen %u abweichend %u",
                s_rbi_missions, rbi_cons(s_rbc, rbi_self(s_rbc)), st->rb_plans, st->rb_lost, st->hash_cmp, st->hash_bad);
         rbv_log(-1); /* W359 DIAG */
@@ -3487,6 +3716,8 @@ static void rbi_mission_end(void)
         s_phase = PH_IDLE;
     }
     rbi_end(s_rbc);
+    s_rep_ended = 0; /* W411 */
+    s_rbs_net_n = 0; /* W413: Missionsende stoppt die Schleifen der Mission (W375) */
     loc_smooth_reset(); /* W385 */
     s_rbi_mst = RBN_ST_IDLE;
     EnterCriticalSection(&s_rbn_cs);
@@ -3655,10 +3886,12 @@ static u32 __cdecl rbi_e920(u32 i, u32 pout)
     return (u32)(uintptr_t)(s_rbi_out[i] + RBI_HDR);
 }
 
+volatile long g_loc_rb_own_ms; /* W420 LOC-CLIPDUMP (loc_rollback.h) */
 /* FUN_0004EC80(daten, kopf): eigener Rahmen; im Original TCP an alle + eigener Ring. Rueckgabe 1. */
 static u32 __cdecl rbi_ec80(u32 data, u32 hdr)
 {
     int pre;
+    InterlockedExchange(&g_loc_rb_own_ms, (LONG)(GetTickCount() | 1u)); /* W420: eigener Rahmen = Mission laeuft */
     if (s_spec) { /* W390: Vorlauf - erster neu erzeugter eigener Rahmen = der des naechsten Live-Ticks (gleiche Abfrage) */
         s_spec_ev.ec80++;
         if (!s_spec_own_have) {
@@ -3785,7 +4018,7 @@ static void rbi_try_rollback(void)
         loc_smooth_rb_pre(0xFFFFFFFFu); /* W385: kein Rollback -> Messung verwerfen (Tick passt nie) */
         s_rbv_on = 0;
         if (s_freeze) rb_thaw_others();
-        if (s_rthread) ResumeThread(s_rthread);
+        rb_rs_resume(); /* W411: nur, wenn gebucht */
         if (s_pdpause) sb_interp_rb_pause(0);
         if (k < 0 && s_rbi_lost_logged < 8) {
             s_rbi_lost_logged++;
@@ -3826,6 +4059,8 @@ static void rbi_try_rollback(void)
         for (c = s_xwin0; c + sizeof(rb_ev_t) <= s_xwin1;) {
             rb_ev_t *e = (rb_ev_t *)(s_rec + c);
             e->pad &= (uint8_t)~1u;
+            if (s_rbs_net_n && (e->fn == EV_XPLAY || e->fn == EV_XPREP) && e->n >= 8u)
+                rbs_net_touch(((const u32 *)(e + 1))[1]); /* W413: Start im Fenster - vom Neurechnen beruehrt */
             c += (u32)sizeof *e + e->n;
         }
         for (i = 0; i < s_xside_n; i++) s_xside[i].used = 0;
@@ -4002,6 +4237,9 @@ static int rb_spec_try_start(int snap_ok)
         s_spec_xcn = 0;
     }
     if (s_spec_off_mission) return rb_spec_skip(4);
+    /* W411: Missionsende laeuft (Zaehler != 0) bzw. die Schleife endet nach diesem Tick: kein Vorlauf - er wuerde die
+     * Schleife in der verworfenen Zeitlinie verlassen (Render-Thread angehalten, Auftrag 1 -> ewiges Kreisen @0x2F355). */
+    if (s_endguard && rd32(RB_END_CNT) != 0) return rb_spec_skip(7);
     if (!snap_ok) return rb_spec_skip(0);
     if (!s_ring || !s_ready || s_failed || !rbr_active() || !rbi_active(s_rbc) || rbi_replaying(s_rbc) ||
         rbi_free_running(s_rbc) || s_phase != PH_RECORD || s_rbi_mst != RBN_ST_R2)
@@ -4018,9 +4256,9 @@ static int rb_spec_try_start(int snap_ok)
     if (rd32(RB_RJOB) == 1u) return rb_spec_skip(2); /* Render-Thread zeichnet noch: nicht warten */
     rb_rthread_check();
     if (s_rthread) {
-        if (!rb_suspend_safe(s_rthread)) return rb_spec_skip(2);
+        if (!rb_rs_suspend(s_rthread, 2)) return rb_spec_skip(2); /* W411: gebucht */
         if (rd32(RB_RJOB) == 1u) {
-            ResumeThread(s_rthread);
+            rb_rs_resume(); /* W411 */
             return rb_spec_skip(2);
         }
     }
@@ -4030,7 +4268,7 @@ static int rb_spec_try_start(int snap_ok)
     s_spec_pd = s_pdpause && !g_cfg.loc_pd_spec;
     if (s_spec_pd && !sb_interp_rb_pause(1)) {
         sb_interp_rb_pause(0);
-        if (s_rthread) ResumeThread(s_rthread);
+        rb_rs_resume(); /* W411: nur, wenn gebucht */
         return rb_spec_skip(3);
     }
     if (s_freeze) rb_freeze_others();
@@ -4099,7 +4337,7 @@ static void rb_spec_finish(void)
         }
     }
     if (s_freeze) rb_thaw_others();
-    if (s_rthread) ResumeThread(s_rthread);
+    rb_rs_resume(); /* W411: nur, wenn gebucht */
     if (s_spec_pd) sb_interp_rb_pause(0); /* W393 */
     s_spec = 0;
     s_phase = s_spec_phase0;
@@ -4142,6 +4380,25 @@ static void rb_spec_finish(void)
     loc_smooth_own_pred(s_spec_gt0 + 1u, s_spec_n, s_spec_gt, (const float(*)[4])s_spec_pose, s_spec_pose_ok);
 }
 
+/* W411: Vorlauf ohne Zuruecksetzen beenden (nur Spiel-Thread). Fuer Lagen, in denen Zuruecksetzen falsch waere: die
+ * Missionsschleife ist schon verlassen bzw. eine neue Mission laeuft (Spieltick kleiner als beim Start). Mit endguard=1
+ * tritt das nicht ein (Zaehler bleiben 0); ohne ihn bleibt der Stand der verworfenen Zeitlinie stehen (Mission ist zu Ende). */
+static void rb_spec_abandon(const char *why)
+{
+    s_spec_abandon_n++;
+    HLOG_W("LOCOWNPRED: Vorlauf ohne Zuruecksetzen beendet (%s, Spieltick %u, Start %u, %d Ticks)", why, rd32(RB_TICK),
+           s_spec_gt0, s_spec_n);
+    s_spec_cm_n = 0;
+    if (s_freeze) rb_thaw_others();
+    rb_rs_resume();
+    if (s_spec_pd) sb_interp_rb_pause(0);
+    s_spec = 0;
+    s_phase = s_spec_phase0;
+    s_spec_off_mission = 1;
+    memset(s_spec_pose_ok, 0, sizeof s_spec_pose_ok);
+    InterlockedExchange(&s_skipwait, 0);
+}
+
 /* rb_after waehrend des Vorlaufs: ein Vorlauf-Tick ist fertig gerechnet. */
 static void rb_spec_tick(void)
 {
@@ -4152,6 +4409,14 @@ static void rb_spec_tick(void)
     }
     s_spec_n++;
     if (s_spec_n >= s_spec_want) {
+        rb_spec_finish();
+    } else if (s_endguard && rb_loop_exits()) {
+        /* W411: die verworfene Zeitlinie wuerde die Missionsschleife jetzt verlassen (Ende-Zaehler an der Grenze, z. B.
+         * Rauswurf/Abbruch mit Grenze 0): sofort zuruecksetzen - die Ende-Pruefung danach sieht den Live-Stand. */
+        s_spec_endstop++;
+        if (s_spec_endstop <= 4)
+            HLOG_I("LOCOWNPRED: Vorlauf erreicht Missionsende (Tick %u, Zaehler %u/%u) - vorzeitig zurueckgesetzt",
+                   rd32(RB_TICK), rd32(RB_END_CNT), rd32(RB_END_LIM));
         rb_spec_finish();
     } else if (rb_us(rb_now() - s_spec_t0) > (u32)(g_cfg.loc_own_predict_max_ms > 0 ? g_cfg.loc_own_predict_max_ms : 5) * 3000u) {
         s_spec_early++; /* einzelner Ausreisser: mit weniger Vorlauf beenden */
@@ -4224,6 +4489,16 @@ static void rbi_after(void)
     }
     if (s_phase == PH_REPLAY) loc_smooth_replay_tick(rd32(RB_TICK)); /* W387: Lagen-Historie auf den korrigierten Stand */
     if (rbi_replaying(s_rbc)) { /* naechster Neurechen-Tick */
+        if (s_endguard && rb_loop_exits() && !s_rep_ended) {
+            /* W411: Die korrigierte Zeitlinie beendet die Mission in diesem Neurechen-Tick: die Schleife wird verlassen,
+             * ein weiteres rb_after kommt nicht. Threads jetzt fortsetzen (sonst kreist der Spiel-Thread @0x2F355). */
+            s_rep_endstop++;
+            s_rep_ended = 1;
+            HLOG_W("LOCRBI: Missionsende im Neurechnen (Spieltick %u, Zaehler %u/%u) - Neurechnung beendet, Threads fortgesetzt",
+                   rd32(RB_TICK), rd32(RB_END_CNT), rd32(RB_END_LIM));
+            rbi_replay_finish();
+            return;
+        }
         rbi_set_rep_cursor();
         return;
     }
@@ -4238,6 +4513,7 @@ static void rbi_after(void)
     if (s_rbi_heap_bad && !rbi_free_running(s_rbc)) rbi_session_end(2); /* W359: sauberes Ende statt Absturz */
     s_rbi_toff[rbi_gtick(s_rbc) & RBI_GM] = s_rec_len;
     rbi_rec_compact();
+    if (s_rbs_net_n && s_rbi_ep) rbs_net_tick(); /* W413: Sicherheitsnetz (Live-Tick, nach dem Neurechnen) */
     rbi_poll();
     if (!s_rbi_sent_early) rbi_send(); /* W372: in diesem Tick schon gesendet (frueh) */
     s_rbi_sent_early = 0;
@@ -4432,6 +4708,22 @@ static void rbi_log(int waited_s)
         }
         if (s_xc_orphan_stop) /* W375 (#51): eigene Zeile (geparste Zeilen unveraendert) */
             HLOG_I("LOCRBI-TEL3: t=%ds Ton verwaist=%u davon Schleife gestoppt=%u", waited_s, s_xc_orphan, s_xc_orphan_stop);
+        if (s_rbs_side_stop || s_rbs_gap_stop || s_rbs_net_stop || s_rbs_rec_dead) /* W413 (#65): eigene Zeile */
+            HLOG_I("LOCRBI-TEL5: t=%ds Ton-Abgleich nach dem Neurechnen: nachgeholte Waisen gestoppt=%u Stopp-Luecken gestoppt=%u "
+                   "Sicherheitsnetz=%u Waisen tot markiert=%u", waited_s, s_rbs_side_stop, s_rbs_gap_stop, s_rbs_net_stop,
+                   s_rbs_rec_dead);
+        if (g_cfg.loc_sndloop_diag) { /* W413 DIAG: noch spielende Schleifen und Zaehler je Luecke (auch ohne Fix) */
+            char b[600];
+            int na = loc_audio_loops_active(b, (int)sizeof b);
+            u32 tch = 0, i;
+            for (i = 0; i < s_rbs_net_n; i++) tch += s_rbs_net[i].touched;
+            HLOG_I("LOCSNDLOOP: t=%ds Fix=%d aktive Schleifen=%d [%s] | verwaist Aufzeichnung=%u (Schleife %u, gestoppt %u, tot %u) "
+                   "nachgeholt=%u (Schleife %u, gestoppt %u) | Stopp-Luecken=%u (Schleife %u, gestoppt %u) | Netz verfolgt=%u "
+                   "beruehrt=%u gestoppt=%u wuerde=%u voll=%u Ablage-leer-unberuehrt=%u | Vorlauf-Starts unterdrueckt=%u",
+                   waited_s, g_cfg.loc_sndloop_fix, na, b, s_xc_orphan, s_rbs_rec_loop, s_xc_orphan_stop, s_rbs_rec_dead,
+                   s_rbs_side_orphan, s_rbs_side_loop, s_rbs_side_stop, s_rbs_gap, s_rbs_gap_loop, s_rbs_gap_stop, s_rbs_net_n,
+                   tch, s_rbs_net_stop, s_rbs_net_would, s_rbs_net_drop, s_rbs_net_umiss, s_spec_ev.xcue);
+        }
         if (s_xc_stop_live) /* W381 (#61): eigene Zeile */
             HLOG_I("LOCRBI-TEL4: t=%ds Ton-Stopps beim Neurechnen live=%u (Schluessel %s)", waited_s, s_xc_stop_live,
                    s_xkey_legacy ? "alt" : "mit Handle/Quelle");
@@ -4559,7 +4851,7 @@ static int rb_ring_check_regions(void)
         if (s_phase == PH_REPLAY) {
             __try { (void)rb_diff(s_snapB, 1, NULL, 0); } __except (EXCEPTION_EXECUTE_HANDLER) {}
             if (s_freeze) rb_thaw_others();
-            if (s_rthread) ResumeThread(s_rthread);
+            rb_rs_resume(); /* W411: nur, wenn gebucht */
             if (s_pdpause) sb_interp_rb_pause(0);
             InterlockedExchange(&s_skipwait, 0);
         }
@@ -4586,6 +4878,20 @@ static int rb_ring_check_regions(void)
     return 1;
 }
 
+/* W411 TEST tend=N (loc_rb_opts, Standard aus): ab Spieltick N einmal das Missionsende des Spiels ausloesen wie bei
+ * Rauswurf/Abbruch: FUN_00029C60(9, 0) = Zaehler 1, Grenze 0 -> die Ende-Pruefung nach diesem rb_after verlaesst die
+ * Schleife. tendspec=1: im ersten Vorlauf-Tick ab N (verworfene Zeitlinie), sonst im Live-Tick. */
+static void rb_test_end(const char *where)
+{
+    typedef u32(__cdecl * end_fn)(u32, u32);
+    u32 r;
+    s_test_end_done++;
+    r = ((end_fn)(uintptr_t)0x29C60u)(9u, 0u);
+    HLOG_W("LOCRB: TEST tend=%d: Missionsende ausgeloest (%s, Spieltick %u, Ergebnis %u, Zaehler %u/%u, Vorlauf %d, "
+           "Render-Thread angehalten %ld)", s_test_end, where, rd32(RB_TICK), r, rd32(RB_END_CNT), rd32(RB_END_LIM), s_spec,
+           s_rs_held);
+}
+
 static void __cdecl rb_after(void)
 {
     { /* W390: Aufrufer des Feld-Wartens und Stapeltiefe (Thunk: pushad + pushfd + Ruecksprung = 40 Bytes) */
@@ -4593,6 +4899,12 @@ static void __cdecl rb_after(void)
         s_rb_esp0 = (u32)(uintptr_t)(ra + 10);
         s_rb_caller = ra[10];
     }
+    InterlockedIncrement(&s_after_seq); /* W411: Waechter (Spiel-Thread erreicht den Ruhepunkt) */
+    if (s_spec && rd32(RB_TICK) < s_spec_gt0) /* W411: Vorlauf aus einer verlassenen Missionsschleife, neue Mission */
+        rb_spec_abandon("neue Mission");
+    if (s_spec && s_test_end >= 0 && s_test_end_spec && !s_test_end_done && rd32(RB_TICK) >= (u32)s_test_end &&
+        s_spec_n + 1 < s_spec_want) /* nicht im letzten Vorlauf-Tick (dort setzt der Vorlauf ohnehin zurueck) */
+        rb_test_end("Vorlauf");
     if (s_spec) { /* W390: Tick des spekulativen Vorlaufs fertig */
         if (s_rb_esp0 != s_spec_esp0 || s_rb_caller != s_spec_caller) { /* andere Schleife/Stapeltiefe als beim Start */
             if (!s_spec_ctx_bad++)
@@ -4665,6 +4977,9 @@ static void __cdecl rb_after(void)
         return;
     }
     if (s_ready && s_rbi_ep) { /* W338 R2: eigener Ablauf am Ruhepunkt */
+        if (s_test_end >= 0 && !s_test_end_spec && s_test_end_done < 5 && s_phase != PH_REPLAY &&
+            rd32(RB_TICK) >= (u32)s_test_end && rd32(RB_END_CNT) == 0)
+            rb_test_end("Live-Tick"); /* W411 TEST (erneut, falls ein Rollback den Stand davor geladen hat) */
         if (s_phase == PH_IDLE && s_rbi_rec) s_phase = PH_RECORD;
         rbi_after();
         return;
@@ -4707,7 +5022,7 @@ static void __cdecl rb_after(void)
             if (s_census && s_mode == 2) { /* Render-Thread waehrend des Umlenkens anhalten */
                 int q = rb_quiesce(1);
                 rb_census_install();
-                if (q && s_rthread) ResumeThread(s_rthread);
+                if (q) rb_rs_resume(); /* W411 */
             }
         }
         /* W330: Bereiche/Ring erst nach allen Code-Patches (Ketten, Zensus): VirtualProtect dort hebt sonst den
@@ -4774,6 +5089,135 @@ static __declspec(naked) void rb_thunk(void)
     }
 }
 
+/* ================= W411: Haken am Ende der Missionsschleife =================
+ * FUN_0002F100 @0x2F352: pop esi; pop ebp; pop ebx; dann "warte bis [0x306EEC] == 0" (@0x2F355) und Auftrag 2 (Ende)
+ * @0x2F35E. Der Haken laeuft auf dem Spiel-Thread, bevor er auf den Render-Thread wartet: Vorlauf/Neurechnen, die die
+ * Schleife verlassen haben, werden hier beendet und ein noch gebuchtes Anhalten des Render-Threads freigegeben. */
+#define RB_LX_VA 0x2F352u
+static const u32 s_lx_rjob = RB_RJOB;
+static const u32 s_lx_ret = 0x2F35Eu;
+static void __cdecl rb_loop_exit(void)
+{
+    LONG held = s_rs_held, why = s_rs_why;
+    int spec = s_spec, rep = s_rbi_ep && s_rbc && rbi_replaying(s_rbc) && !s_rep_ended;
+    s_lx_n++;
+    if (spec) {
+        s_lx_spec++;
+        rb_spec_abandon("Missionsschleife im Vorlauf verlassen");
+    }
+    if (rep) {
+        s_lx_rep++;
+        s_rep_ended = 1;
+        HLOG_W("LOCRBI: Missionsschleife im Neurechnen verlassen (Spieltick %u) - Neurechnung beendet, Threads fortgesetzt",
+               rd32(RB_TICK));
+        rbi_replay_finish();
+    }
+    if (s_rs_held) {
+        s_lx_held++;
+        HLOG_W("LOCRB: Render-Thread beim Verlassen der Missionsschleife noch angehalten (%s) - fortgesetzt",
+               rb_rs_why_name(s_rs_why));
+        rb_rs_resume();
+    }
+    if (s_lx_n <= 8 || spec || rep || held)
+        HLOG_I("LOCRB: Missionsschleife verlassen (Spieltick %u, Ende-Zaehler %u/%u, Render-Auftrag %u) | vorher: Vorlauf=%d "
+               "Neurechnen=%d Render-Thread angehalten=%ld (%s)",
+               rd32(RB_TICK), rd32(RB_END_CNT), rd32(RB_END_LIM), rd32(RB_RJOB), spec, rep, held, rb_rs_why_name(why));
+}
+static __declspec(naked) void rb_exit_thunk(void)
+{
+    __asm {
+        pushad
+        pushfd
+        call rb_loop_exit
+        popfd
+        popad
+        pop esi /* ersetzte Originalbefehle @0x2F352 */
+        pop ebp
+        pop ebx
+    lx_spin: /* Original @0x2F355: warten, bis der Render-Thread den Auftrag erledigt hat */
+        mov eax, dword ptr [s_lx_rjob]
+        mov eax, dword ptr [eax]
+        test eax, eax
+        jne lx_spin
+        jmp dword ptr [s_lx_ret]
+    }
+}
+static int rb_exit_install(void)
+{
+    static const uint8_t expect[23] = {0x5E, 0x5D, 0x5B, 0xA1, 0xEC, 0x6E, 0x30, 0x00, 0x85, 0xC0, 0x75, 0xF7,
+                                       0xC7, 0x05, 0xEC, 0x6E, 0x30, 0x00, 0x02, 0x00, 0x00, 0x00, 0xC3};
+    uint8_t *p = (uint8_t *)(uintptr_t)RB_LX_VA;
+    intptr_t rel;
+    DWORD old;
+    if (memcmp(p, expect, sizeof expect) != 0) {
+        HLOG_W("LOCRB: Schleifenende @0x%X: Bytes passen nicht - Haken aus", RB_LX_VA);
+        return 0;
+    }
+    rel = (uint8_t *)(void *)rb_exit_thunk - (p + 5);
+    VirtualProtect(p, 5, PAGE_EXECUTE_READWRITE, &old);
+    p[0] = 0xE9;
+    memcpy(p + 1, &rel, 4);
+    VirtualProtect(p, 5, old, &old);
+    FlushInstructionCache(GetCurrentProcess(), p, 5);
+    return 1;
+}
+
+/* W411 Waechter: Haelt der Rollback den Render-Thread laenger als sguard ms angehalten und erreicht der Spiel-Thread so
+ * lange keinen Ruhepunkt mehr (rb_after), dann Logzeile und fortsetzen. Ein lebender Vorlauf/Neurechnen ruft rb_after
+ * je Tick (ms); 2 s ohne Ruhepunkt bei angehaltenem Render-Thread ist immer ein Haenger. */
+static DWORD WINAPI rb_guard_thread(LPVOID unused)
+{
+    LONG seq_last = -1;
+    DWORD seq_t = GetTickCount();
+    (void)unused;
+    for (;;) {
+        DWORD now, age;
+        LONG seq;
+        Sleep(200);
+        now = GetTickCount();
+        seq = s_after_seq;
+        if (seq != seq_last) {
+            seq_last = seq;
+            seq_t = now;
+        }
+        if (!s_rs_held) continue;
+        age = now - (DWORD)s_rs_t0;
+        if (age < (DWORD)s_sguard_ms || now - seq_t < (DWORD)s_sguard_ms) continue;
+        if (!InterlockedExchange(&s_rs_held, 0)) continue; /* Spiel-Thread war schneller */
+        {
+            DWORD prev = ResumeThread(s_rs_h);
+            s_rs_rescue++;
+            HLOG_W("LOCRB: WAECHTER Render-Thread seit %lu ms von uns angehalten (%s), Spiel-Thread seit %lu ms ohne "
+                   "Ruhepunkt (Spieltick %u, Phase %d, Vorlauf %d, Ende-Zaehler %u/%u) - fortgesetzt (vorher %lu)",
+                   age, rb_rs_why_name(s_rs_why), now - seq_t, rd32(RB_TICK), s_phase, s_spec, rd32(RB_END_CNT),
+                   rd32(RB_END_LIM), prev);
+        }
+    }
+}
+
+/* W411: Zustand fuer STALL-Zeilen und Haenger-Bericht (nur Zahlen). */
+int loc_rb_susp_diag(char *buf, int cap)
+{
+    if (!buf || cap <= 0) return 0;
+    _snprintf_s(buf, (size_t)cap, _TRUNCATE,
+                "render_held=%ld held_ms=%lu why=%s phase=%d spec=%d replaying=%d end=%u/%u rjob=%u | suspends=%u "
+                "double=%u swap=%u spurious=%u prev0=%u max_ms=%u guard_rescues=%u loop_exits=%u (spec %u replay %u held %u) "
+                "spec_endstop=%u replay_endstop=%u abandon=%u",
+                s_rs_held, s_rs_held ? GetTickCount() - (DWORD)s_rs_t0 : 0ul, rb_rs_why_name(s_rs_why), s_phase, s_spec,
+                (s_rbi_ep && s_rbc) ? rbi_replaying(s_rbc) : 0, s_ready ? rd32(RB_END_CNT) : 0u,
+                s_ready ? rd32(RB_END_LIM) : 0u, s_ready ? rd32(RB_RJOB) : 0u, s_rs_n, s_rs_double, s_rs_swap, s_rs_spur,
+                s_rs_prev0, s_rs_max_ms, s_rs_rescue, s_lx_n, s_lx_spec, s_lx_rep, s_lx_held, s_spec_endstop,
+                s_rep_endstop, s_spec_abandon_n);
+    return s_ring;
+}
+void loc_rb_stall_diag(void)
+{
+    char b[600];
+    if (!s_ring) return;
+    loc_rb_susp_diag(b, (int)sizeof b);
+    HLOG_W("LOCRB: STALL-Diag %s", b);
+}
+
 /* Diagnose: Zustand des Spikes bei einer Zugriffsverletzung im Spiel-Thread (einmal), dann weiter wie bisher. */
 static volatile LONG s_veh_once;
 static LONG CALLBACK rb_veh_diag(EXCEPTION_POINTERS *ep)
@@ -4811,6 +5255,11 @@ static void rb_parse_opts(const char *p)
         else if (strncmp(p, "perturb=", 8) == 0) { s_perturb = atoi(p + 8); }
         else if (strncmp(p, "twice=", 6) == 0) { s_twice = atoi(p + 6); }
         else if (strncmp(p, "freeze=", 7) == 0) { s_freeze = atoi(p + 7); }
+        else if (strncmp(p, "endguard=", 9) == 0) { s_endguard = atoi(p + 9); } /* W411: 0 = alte Wirkung (TEST) */
+        else if (strncmp(p, "exithook=", 9) == 0) { s_exithook = atoi(p + 9); } /* W411 */
+        else if (strncmp(p, "sguard=", 7) == 0) { s_sguard_ms = atoi(p + 7); }  /* W411: Waechter ms, 0 = aus */
+        else if (strncmp(p, "tendspec=", 9) == 0) { s_test_end_spec = atoi(p + 9); } /* W411 TEST */
+        else if (strncmp(p, "tend=", 5) == 0) { s_test_end = atoi(p + 5); }     /* W411 TEST */
         else if (strncmp(p, "ww=", 3) == 0) { s_ww = atoi(p + 3); }             /* W330 */
         else if (strncmp(p, "depth=", 6) == 0) { s_depth = atoi(p + 6); }
         else if (strncmp(p, "pool=", 5) == 0) { s_pool = atoi(p + 5); }
@@ -4980,6 +5429,16 @@ int loc_rb_install(void)
         if (s_rbi_maxpred > s_depth - 4) s_rbi_maxpred = s_depth - 4;
         rbi_install(); /* W338 */
     }
+    if (s_ring) { /* W411 LOC-FREEZE-SUSP: Schleifenende-Haken + Waechter */
+        int lx = s_exithook ? rb_exit_install() : 0;
+        if (s_sguard_ms > 0) {
+            HANDLE th = CreateThread(NULL, 64 * 1024, rb_guard_thread, NULL, STACK_SIZE_PARAM_IS_A_RESERVATION, NULL);
+            if (th) CloseHandle(th);
+            else s_sguard_ms = 0;
+        }
+        HLOG_I("LOCRB: W411 Render-Thread-Schutz: Ende-Pruefung=%d Schleifenende-Haken=%d Waechter=%d ms%s", s_endguard, lx,
+               s_sguard_ms, s_test_end >= 0 ? " | TEST tend aktiv" : "");
+    }
     if (s_ring)
         HLOG_I("LOCRB: RING eingeschaltet (loc_rb=1): Write-Watch fuer NtAlloc=%d, Tiefe %d, Puffer %d Seiten, verify=%d, "
                "Present-Ruhe=%d", g_loc_rb_ww, s_depth, s_pool, s_verify, s_pdpause);
@@ -5082,6 +5541,17 @@ void loc_rb_tick(int waited_s)
     if (s_rbi) rbi_log(waited_s); /* W338 */
     if (!s_ready) return;
     if (s_ring) rb_ring_log(waited_s);
+    if (s_ring) { /* W411: Buchfuehrung Render-Thread (alle 60 s bzw. bei neuen Auffaelligkeiten) */
+        static u32 last;
+        u32 now = s_rs_double + s_rs_swap + s_rs_prev0 + s_rs_rescue + s_lx_spec + s_lx_rep + s_lx_held + s_spec_endstop +
+                  s_rep_endstop + s_spec_abandon_n + s_lx_n;
+        if (waited_s % 60 == 0 || now != last) {
+            char b[600];
+            last = now;
+            loc_rb_susp_diag(b, (int)sizeof b);
+            HLOG_I("LOCRB-SUSP: t=%ds %s | Vorlauf ausgelassen Missionsende=%u", waited_s, b, s_spec_skip[7]);
+        }
+    }
     if (s_mode == 0) {
     } else if (s_mode == 1) {
         rb_pct(s_dirty_k1, &a, &b, &c);

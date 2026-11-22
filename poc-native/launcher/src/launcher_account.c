@@ -21,6 +21,7 @@
 #include "launcher_u8.h"
 #include "sb_sha256.h"
 #include "sb_userdata.h"
+#include "sb_version.h" /* W421: sb_netver_strict (min_client_version aus /v1/info) */
 
 #define printf cli_printf
 
@@ -701,6 +702,55 @@ done:
     return rc;
 }
 
+/* Live-Zahlen aus GET /v1/info: "online":{"players":n,"lobbies":n,"games":n,...}. Gesucht wird nur innerhalb
+ * dieses Objekts (gleichnamige Schluessel anderswo zaehlen nicht); alle drei Werte muessen da und plausibel
+ * (0..1000000) sein, sonst has_counts 0 (aelterer Server oder kaputte Antwort -> Anzeige wie vorher). */
+static void probe_counts(const char *body, lacc_probe_t *o)
+{
+    char obj[512];
+    const char *p = js_find(body, "online"), *q;
+    long long v[3];
+    static const char *const kKeys[3] = { "players", "lobbies", "games" };
+    int i, depth = 0, instr = 0;
+    o->has_counts = 0;
+    o->players = o->lobbies = o->games = 0;
+    if (!p || *p != '{') return;
+    for (q = p; *q; q++) { /* passende } (Zeichenketten uebersprungen) */
+        if (instr) {
+            if (*q == '\\' && q[1]) q++;
+            else if (*q == '"') instr = 0;
+        } else if (*q == '"') {
+            instr = 1;
+        } else if (*q == '{') {
+            depth++;
+        } else if (*q == '}' && --depth == 0) {
+            break;
+        }
+    }
+    if (*q != '}' || (size_t)(q - p) + 2 > sizeof obj) return;
+    memcpy(obj, p, (size_t)(q - p) + 1);
+    obj[q - p + 1] = '\0';
+    for (i = 0; i < 3; i++) {
+        if (!lacc_js_int(obj, kKeys[i], &v[i]) || v[i] < 0 || v[i] > 1000000) return;
+    }
+    o->players = (int)v[0];
+    o->lobbies = (int)v[1];
+    o->games = (int)v[2];
+    o->has_counts = 1;
+}
+
+/* W421 LOC-VERSION-GATE: "min_client_version" aus GET /v1/info, nur strikt X.Y.Z (je 1-4 Ziffern, <= 14 Zeichen).
+ * lacc_js_str kuerzt still auf den Puffer - 64 Byte reichen, damit eine zu lange Angabe an der Laengengrenze
+ * scheitert statt gekuerzt gueltig zu werden. Fehlt/leer/kaputt -> "" (keine Sperre). */
+static void probe_minver(const char *body, lacc_probe_t *o)
+{
+    char v[64];
+    o->min_ver[0] = '\0';
+    if (lacc_js_str(body, "min_client_version", v, sizeof v) && sb_netver_strict(v)) {
+        strcpy_s(o->min_ver, sizeof o->min_ver, v);
+    }
+}
+
 /* ====================================================================== Aktionen */
 int lacc_probe(lacc_probe_t *o)
 {
@@ -716,6 +766,8 @@ int lacc_probe(lacc_probe_t *o)
     if (lacc_http(&s, "GET", "/v1/info", NULL, &r) == 0 && r.ok) {
         o->ok = 1;
         lacc_js_str(r.body, "version", o->version, sizeof o->version);
+        probe_counts(r.body, o);
+        probe_minver(r.body, o); /* W421 */
     } else {
         strcpy_s(o->error, sizeof o->error, r.error[0] ? r.error : "net");
     }
@@ -1398,7 +1450,14 @@ int lacc_cli(const char *client_dir, int argc, char **argv)
         lacc_probe_t pr;
         rc = lacc_probe(&pr);
         if (rc == 0) {
-            printf("ok ms=%d version=%s\n", pr.ms, pr.version[0] ? pr.version : "-");
+            printf("ok ms=%d version=%s", pr.ms, pr.version[0] ? pr.version : "-");
+            if (pr.has_counts) { /* Live-Zahlen (nur neuere Server) */
+                printf(" players=%d lobbies=%d games=%d", pr.players, pr.lobbies, pr.games);
+            }
+            if (pr.min_ver[0]) { /* W421: Mindestversion (nur neuere Server mit gesetzter Mindestversion) */
+                printf(" min_client_version=%s", pr.min_ver);
+            }
+            printf("\n");
         } else {
             printf("error %s ms=%d\n", pr.error, pr.ms);
         }
@@ -1863,6 +1922,90 @@ void lacc_selftest(int *pass, int *fail_n)
         }
     }
     ST_RESULT("W329 account hardening: JSON reader stops at buffer end, \\u0000 not truncating, pilot name with ';'/control chars rejected from key file");
+
+    /* 7b: Live-Zahlen aus /v1/info ("online"-Objekt), alte Server ohne Objekt, Schluessel ausserhalb, Unsinn */
+    {
+        static const struct {
+            const char *body;
+            int has, pl, lb, gm;
+        } kCase[] = {
+            { "{\"ok\":true,\"version\":\"0.2.0\"}", 0, 0, 0, 0 }, /* alter Server */
+            { "{\"ok\":true,\"online\":{\"players\":5,\"lobbies\":2,\"games\":1,\"games_today\":14,\"peak_7d\":9}}", 1, 5, 2, 1 },
+            { "{\"ok\":true,\"online\": { \"games\" : 0 , \"players\":0,\"lobbies\":0 } ,\"version\":\"x\"}", 1, 0, 0, 0 },
+            { "{\"ok\":true,\"players\":7,\"online\":{\"lobbies\":1,\"games\":1}}", 0, 0, 0, 0 }, /* players ausserhalb */
+            { "{\"ok\":true,\"online\":{\"players\":-1,\"lobbies\":0,\"games\":0}}", 0, 0, 0, 0 },
+            { "{\"ok\":true,\"online\":{\"players\":\"5\",\"lobbies\":0,\"games\":0}}", 0, 0, 0, 0 },
+            { "{\"ok\":true,\"online\":true}", 0, 0, 0, 0 },
+            { "{\"ok\":true,\"online\":{\"players\":3,\"lobbies\":1,\"games\":0", 0, 0, 0, 0 }, /* abgeschnitten */
+            { "{\"ok\":true,\"online\":{\"m\":\"}\",\"players\":4,\"lobbies\":1,\"games\":2}}", 1, 4, 1, 2 }, /* } im Text */
+        };
+        int k;
+        for (k = 0; k < (int)(sizeof kCase / sizeof kCase[0]) && !why[0]; k++) {
+            lacc_probe_t pr;
+            memset(&pr, 0x5A, sizeof pr);
+            probe_counts(kCase[k].body, &pr);
+            if (pr.has_counts != kCase[k].has || pr.players != kCase[k].pl || pr.lobbies != kCase[k].lb ||
+                pr.games != kCase[k].gm)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Fall %d: has %d %d/%d/%d", k, pr.has_counts, pr.players,
+                            pr.lobbies, pr.games);
+        }
+    }
+    ST_RESULT("SNP-COUNTS account: live counts from /v1/info (online object only, old server without it, bad values ignored)");
+
+    /* 7c: W421 LOC-VERSION-GATE: min_client_version aus /v1/info strikt (X.Y.Z), sonst leer; Vergleich sb_netver_* */
+    {
+        static char longv[200];
+        static const struct {
+            const char *body, *want;
+        } kMv[] = {
+            { "{\"ok\":true,\"version\":\"0.2.0\"}", "" }, /* alter Server ohne Feld */
+            { "{\"ok\":true,\"min_client_version\":\"0.3.2\"}", "0.3.2" },
+            { "{\"ok\":true,\"min_client_version\" : \"10.20.3000\" ,\"x\":1}", "10.20.3000" },
+            { "{\"ok\":true,\"min_client_version\":\"\"}", "" },       /* leer = keine Mindestversion */
+            { "{\"ok\":true,\"min_client_version\":\"1.2\"}", "" },
+            { "{\"ok\":true,\"min_client_version\":\"abc\"}", "" },
+            { "{\"ok\":true,\"min_client_version\":\"1.2.3.4\"}", "" },
+            { "{\"ok\":true,\"min_client_version\":\"0.3.2-beta\"}", "" },
+            { "{\"ok\":true,\"min_client_version\":\" 0.3.2\"}", "" },
+            { "{\"ok\":true,\"min_client_version\":\"12345.0.0\"}", "" },
+            { "{\"ok\":true,\"min_client_version\":\"1..2\"}", "" },
+            { "{\"ok\":true,\"min_client_version\":\".1.2\"}", "" },
+            { "{\"ok\":true,\"min_client_version\":0.3}", "" },          /* Zahl statt Text */
+            { "{\"ok\":true,\"min_client_version\":\"0.3.2", "" },        /* abgeschnitten */
+            { "{\"ok\":true,\"min_client_version\":\"0.3.\\u0032\"}", "0.3.2" }, /* Escape wie jeder JSON-Text */
+        };
+        static const struct {
+            const char *own, *min;
+            int out;
+        } kCmp[] = {
+            { "0.3.1", "0.3.2", 1 }, { "0.3.2", "0.3.2", 0 }, { "0.3.10", "0.3.2", 0 }, { "0.3.2", "0.3.10", 1 },
+            { "0.4.0", "0.3.9", 0 }, { "0.9.9", "1.0.0", 1 }, { "0.3.2", "", 0 }, { "0.3.2", "1.2", 0 },
+            { "0.3.2", "abc", 0 }, { "", "9.9.9", 0 }, { "dev", "9.9.9", 0 },
+        };
+        int k;
+        for (k = 0; k < (int)(sizeof kMv / sizeof kMv[0]) && !why[0]; k++) {
+            lacc_probe_t pr;
+            memset(&pr, 0x5A, sizeof pr);
+            probe_minver(kMv[k].body, &pr);
+            if (strcmp(pr.min_ver, kMv[k].want) != 0)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W421 Feld %d: '%.15s'", k, pr.min_ver);
+        }
+        if (!why[0]) { /* sehr lang: 1.1.1.1... bzw. 0000...1.2.3 - Laengengrenze, nie gekuerzt gueltig */
+            lacc_probe_t pr;
+            char body[300];
+            memset(longv, '1', sizeof longv - 1);
+            longv[1] = longv[3] = '.';
+            longv[sizeof longv - 1] = '\0';
+            _snprintf_s(body, sizeof body, _TRUNCATE, "{\"ok\":true,\"min_client_version\":\"%s\"}", longv);
+            probe_minver(body, &pr);
+            if (pr.min_ver[0]) _snprintf_s(why, sizeof why, _TRUNCATE, "W421 lang: '%.15s'", pr.min_ver);
+        }
+        for (k = 0; k < (int)(sizeof kCmp / sizeof kCmp[0]) && !why[0]; k++) {
+            if (sb_netver_outdated(kCmp[k].own, kCmp[k].min) != kCmp[k].out)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W421 Vergleich %s < %s", kCmp[k].own, kCmp[k].min);
+        }
+    }
+    ST_RESULT("W421 account: min_client_version from /v1/info strict X.Y.Z (missing/empty/1.2/abc/long ignored), compare");
 
     /* 8: W332 Discord-Empfaenger ohne Socket (loop_parse, gefuzzt in tests/fuzz/proj_launcher discord_loop) */
     {

@@ -537,6 +537,7 @@ void locnet_note_stream(locnet *n, SOCKET s, int out, const char *buf, int len)
 
 int locnet_closesocket(locnet *n, SOCKET s)
 {
+    InterlockedCompareExchange(&n->tcp_listen, 0, (LONG)s); /* W409 */
     ln_walk_reset(s); /* W324 */
     ln_udp_mark(n, s, 0); /* W329 */
     if (n->sim && locnetsim_close(n->sim, s)) {
@@ -698,6 +699,12 @@ int locnet_sendto(locnet *n, SOCKET s, const char *buf, int len, int flags, cons
     memcpy(&in, to, sizeof in);
     gp = ntohs(in.sin_port);
     ln_bind_self(n, s);
+    if (gp == 1202 && len >= 2 && (((unsigned)(uint8_t)buf[0]) | ((unsigned)(uint8_t)buf[1] << 8)) == 3 &&
+        in.sin_addr.s_addr != INADDR_BROADCAST && in.sin_addr.s_addr != n->self_ip) {
+        /* W420: Beitrittsanfrage an den Host (nur Adresse und Zeit merken) */
+        InterlockedExchange(&n->join_ip, (LONG)in.sin_addr.s_addr);
+        InterlockedExchange(&n->join_ms, (LONG)(GetTickCount() | 1u));
+    }
     if (n->tun && in.sin_addr.s_addr != n->self_ip) {
         /* W324: Spiel-UDP ueber den eigenen Transport (Broadcast = an alle verbundenen Mitspieler) */
         struct sockaddr_in me;
@@ -773,8 +780,16 @@ static int ln_udp_guard(locnet *n, SOCKET s, char *buf, int r, uint32_t from_ip)
     }
     WSASetLastError(e);
     if (lguard_udp_check(gp, (const uint8_t *)buf, r, &why)) {
+        static volatile LONG st_logged;
         if (!s_udp_state || s_udp_state(gp, (const uint8_t *)buf, r, from_ip)) return 1;
-        why = LGUARD_V_CONTENT; /* W339: z. B. 0x38 von einem Absender ohne Platz in der Spielertabelle */
+        /* W339: 0x38 von einem Absender ohne Platz in der Spielertabelle (Rahmen selbst gueltig). W409: eigene Zeile -
+         * das ist der Normalfall kurz nach einem Abgang/Rauswurf (der Entfernte sendet noch einige 0x38), kein
+         * defekter Rahmen; verworfen bleibt er (das Spiel schriebe sonst nach Platz 0xFF). */
+        memset(buf, 0, (size_t)r);
+        InterlockedIncrement(&n->st.guard);
+        if (InterlockedIncrement(&st_logged) <= 4)
+            ln_logf(n, "LOCGUARD: Spiel-UDP 0x38 von Absender ohne Platz in der Spielertabelle - verworfen (z. B. nach Abgang)");
+        return 0;
     }
     memset(buf, 0, (size_t)r);
     InterlockedIncrement(&n->st.guard);

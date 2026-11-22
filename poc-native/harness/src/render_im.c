@@ -1503,7 +1503,7 @@ static void sb_im_submit_body(void)
             static float ip_twb[IM_VB_MAX]; /* W237: echte Clip-w (interp_hlerp / interp_eyediag) */
             /* W237: echte Clip-w fuer den homogenen Zwischenbild-Lerp (interp_hlerp) bzw. die Diagnose;
              * eye_clip-Draws tragen w schon im Strom (dort bleibt g_ip_tw leer = w 1). */
-            const int twr = g_ip_recording && (g_cfg.interp_hlerp || g_cfg.interp_eyediag > 0) && !eye_clip && n <= IM_VB_MAX;
+            const int twr = g_ip_recording && (sb_ip_hlerp() || g_cfg.interp_eyediag > 0) && !eye_clip && n <= IM_VB_MAX;
             for (i = 0; i < n; i++) {
                 float *pp = IMPOS(i);
                 float x = pp[0], y = pp[1];

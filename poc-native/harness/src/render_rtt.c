@@ -122,6 +122,7 @@ static unsigned rtt_scale_for(unsigned w, unsigned h, unsigned fmt, unsigned sur
     unsigned n, xf = (fmt >> 8) & 0xFFu, mn = (unsigned)(g_cfg.rt_scale_min > 0 ? g_cfg.rt_scale_min : 1);
     if (g_cfg.rt_scale == 1) { return 1u; }
     if (loc_render_vismap(surf, NULL, NULL)) { return 1u; } /* W311: LoC-Sichtkarte liest die CPU (1:1) */
+    if (loc_render_insignia_rt(surf)) { return 1u; } /* W422: Stift-RT des Insignien-Editors (CPU liest/loescht, 1:1) */
     if (w < mn || h < mn || w > 512u || h > 512u) { return 1u; }
     if (g_cfg.rtt_readback && (xf == 0x1Eu || (g_cfg.rtt_readback >= 2 && g_cfg.rtt_readback != 9 && xf == 0x12u))) {
         unsigned lim = (g_cfg.rtt_readback == 3) ? 512u : 128u;
@@ -741,6 +742,7 @@ static void rtt_readback(int c)
     if (!rtt_hdr(e->surf, &data, &fmt, &size)) { return; }
     xf = (fmt >> 8) & 0xFFu;
     lvm = loc_render_vismap(e->surf, &lhost, &lpitch); /* W311: LoC-Sichtkarte (256x256 A8R8G8B8) */
+    if (!lvm && loc_render_insignia_rt(e->surf)) { lvm = 1; lhost = 0; } /* W422: Stift-RT, synchron bis BlockOnFence */
     if (xf != 0x12u && xf != 0x1Eu) { return; } /* nur LIN_A8R8G8B8 / LIN_X8R8G8B8 */
     if (!lvm && (g_cfg.rtt_readback == 1 || g_cfg.rtt_readback == 9) && xf != 0x1Eu) { return; } /* 1: nur X8R8G8B8 (Zellenkarte); 9 = DIAG wie 1 ohne Schrieb */
     if (!lvm && g_cfg.rtt_readback <= 2 && (e->w > 128u || e->h > 128u)) { return; }
@@ -1288,6 +1290,53 @@ int sb_rtt_rescale(unsigned n)
 }
 
 /* Session-Ende (Rueckschaltung): Statistik loggen (deckelt), Session zu. */
+/* FIX(LOC-INSIGNIA-PEN,W422): Xbox-Speicher eines RTs, das die CPU direkt beschreibt, vor der Session ins
+ * D3D11-RT laden (Xbox: GPU und CPU teilen den Speicher). Der Insignien-Editor loescht sein Stift-RT je Bild
+ * per CPU (FUN_000A1970: 0x4000 B Nullen) und zeichnet dann nur den aktuellen Stift-Abdruck hinein; ohne
+ * Upload blieben alle frueheren Abdruecke im RT (Phantom-Spur). Nur unskalierte LIN_A8R8G8B8/X8R8G8B8-RTs bis
+ * 512x512 (Kopie ueber einen Puffer, damit ein ungueltiger Xbox-Zeiger nie im Treiber faellt). Eine noch
+ * offene Rueckschrift desselben Ziels wird zuerst abgeholt, damit der Speicher den letzten GPU-Stand hat. */
+static void rtt_upload_mem(int idx)
+{
+    static unsigned char *buf;
+    static unsigned nlog, nfail;
+    rtt_entry_t *e;
+    unsigned data = 0, fmt = 0, size = 0, xf, host, pitch, y;
+    int ok = 1;
+    if (idx < 0 || idx >= g_rtt_n || !g_ctx) { return; }
+    e = &g_rtt[idx];
+    if (!e->tex || e->isdepth || e->pw != e->w || e->ph != e->h || e->w > 512u || e->h > 512u) { return; }
+    if (!rtt_hdr(e->surf, &data, &fmt, &size)) { return; }
+    xf = (fmt >> 8) & 0xFFu;
+    if (xf != 0x12u && xf != 0x1Eu) { return; }
+    if (g_rb_sync_c == idx) { sb_rtt_rb_sync_resolve(2); }
+    host = krnl_phys_to_virt_rb(data);
+    if (!host) { host = data; }
+    pitch = size ? ((((size >> 24) & 0xFFu) + 1u) * 64u) : e->w * 4u;
+    if (pitch < e->w * 4u) { pitch = e->w * 4u; }
+    if (!buf) { buf = (unsigned char *)malloc(512u * 512u * 4u); }
+    if (!buf) { return; }
+    __try {
+        for (y = 0; y < e->h; y++) {
+            memcpy(buf + (size_t)y * e->w * 4u, (const void *)(uintptr_t)(host + y * pitch), (size_t)e->w * 4u);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ok = 0;
+    }
+    if (!ok) {
+        if (nfail < 4) { nfail++; HLOG_W("RTT upload: Xbox-Speicher 0x%X nicht lesbar (surf=0x%X)", host, e->surf); }
+        return;
+    }
+    sb_ctx_enter();
+    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)e->tex, 0, NULL, buf, e->w * 4u, 0);
+    sb_ctx_leave();
+    if (nlog < 4) {
+        nlog++;
+        HLOG_I("RTT upload #%u: surf=0x%X data=0x%X host=0x%X %ux%u fmt=0x%02X pitch=%u f=%u (W422, CPU-Speicher -> RT)",
+               nlog, e->surf, data, host, e->w, e->h, xf, pitch, g_present_no);
+    }
+}
+
 static void rtt_session_end(unsigned surf, const char *why)
 {
     static unsigned nend;
@@ -1569,6 +1618,7 @@ have_entry:
         sb_ctx_leave();
         g_rtt_bound = idx;
     }
+    if (loc_render_insignia_rt(surf)) { rtt_upload_mem(idx); } /* W422 LOC-INSIGNIA-PEN */
 }
 
 void rtt_present_restore(void)

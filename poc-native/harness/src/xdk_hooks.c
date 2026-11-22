@@ -384,6 +384,10 @@ void hooks_install(void)
     if (g_cfg.hud_label_avoid || g_cfg.label_diag) { /* W153 HUD-LABEL-OPT: Etikett-Hook (nur dann gepatcht, sonst bitgleich) */
         label_avoid_install();
     }
+    { /* W424 SB-ALLIED-SQUADS: Thunk an der Aufrufstelle 0x5CED9 (nur mit Option, sonst kein Patch) */
+        extern void sb_ally_install(void);
+        sb_ally_install();
+    }
     if (g_cfg.dlg_text_upload) { /* FIX(DLGTEXT,W77): CPU-Text (TextOut) in RT-Texturen hochladen */
         extern unsigned __stdcall hook_txt_lockrect(unsigned, unsigned, unsigned, unsigned);
         extern unsigned __stdcall hook_txt_render(unsigned, unsigned, unsigned, unsigned, unsigned,

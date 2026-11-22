@@ -325,6 +325,15 @@ int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
         if (loc_net_diag_line(nd, (int)sizeof nd))
             _snprintf_s(info + used, sizeof info - used, _TRUNCATE, "network: %s\r\n", nd);
     }
+    if (g_cfg.loc_boot) { /* W423 LOC-XSB-LOOP (#71): Datei-Cache Z: und Start-Kopie (nur Zustaende/Zahlen) */
+        extern int krnl_loc_boot_diag_line(char *o, int cap);
+        extern const char *sb_ovl_open_why(void);
+        size_t used = strlen(info);
+        char bd[300];
+        if (krnl_loc_boot_diag_line(bd, (int)sizeof bd))
+            _snprintf_s(info + used, sizeof info - used, _TRUNCATE, "loc boot: %s; menu opened by: %s\r\n", bd,
+                        sb_ovl_open_why());
+    }
     { /* W315 TEX-WHITE-AMD: Block "texture health" (nur Technikdaten) */
         size_t used = strlen(info);
         if (used + 3 < sizeof info) {

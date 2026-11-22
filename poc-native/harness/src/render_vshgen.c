@@ -286,7 +286,7 @@ int rqv_hlsl_ex(const rqv_prog_t *p, int lerp, const rqv_raw_t *raw, char *buf, 
         rqs(&s, "  o.pos = c0 + ip_t * (c1 - c0);\n");
         if ((lerp & 3) == 2) { /* FIX(W224 LINE-FLICKER): w-Wechsel N-1/N -> Tick N */
             rqs(&s, "  if (ew0 * ew1 <= 0.0) { o.pos = c1; }\n");
-            if (lerp & 4) { /* FIX(W237): unplausibler Bildsprung vor der Kamera (Nahebene, Fehlpaarung) -> Tick N */
+            if ((lerp & 4) && !(lerp & 32)) { /* FIX(W237): unplausibler Bildsprung vor der Kamera (Nahebene, Fehlpaarung) -> Tick N; W429 Modus 3 ohne */
                 rqs(&s, "  else if (ew0 > 0.0 && ew1 > 0.0) {\n"
                         "    float2 n0 = c0.xy / c0.w, n1 = c1.xy / c1.w;\n"
                         "    if (any(abs(n1 - n0) > 0.5 * (1.0 + max(abs(n0), abs(n1))))) { o.pos = c1; } }\n");

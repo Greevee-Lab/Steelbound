@@ -28,6 +28,9 @@ void loc_render_text_lock(unsigned surf, unsigned bits, unsigned pitch);
 void loc_render_on_clear(unsigned surf, unsigned flags, unsigned color);
 /* W311: 1 = surf ist die LoC-Sichtkarte (loc_vismap); host/pitch = Lesezeiger des Spiels (Dauer-Lock, 0 = keiner). */
 int loc_render_vismap(unsigned surf, unsigned *host, unsigned *pitch);
+/* W422 LOC-INSIGNIA-PEN: 1 = surf ist ein Stift-RT des Insignien-Editors (Speicher mit der CPU geteilt:
+ * vor der Session hochladen, danach synchron zurueckschreiben; loc_insignia_rt, nur LoC-Profil). */
+int loc_render_insignia_rt(unsigned surf);
 /* W323 LOC-INTERP: 1 = dieser Swap ist ein Missionsbild (Zwischenbilder, nur LoC-Profil + loc_interp). */
 int loc_render_interp_mission(void);
 /* W323: Missionstakt in Hz (vblank_hz / Felder je Bild, Original 60/3 = 20). */

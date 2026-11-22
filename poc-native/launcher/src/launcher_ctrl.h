@@ -116,7 +116,14 @@ int lctrl_pad_combo_step(lctrl_combo_t *c, const lctrl_pad_t *prev, const lctrl_
 /* Ausgelenkte Analogachse (ein Stick > 0.7, Rest ruhig): Name in name
  * ("LX", "LY", "RX", "RY", "LT", "RT"). 1 = gefunden, 0 = nichts. */
 int lctrl_pad_deflected(const lctrl_pad_t *p, char *name, size_t cap);
-/* W312 JOY-CALIB: Pad-Lerner MIT Ruhestellung (wie der Joystick-Lerner).
+/* W432 HOTAS-AXES: Lernen ab Ruhe mit 20 % des Bereichs je Kanal (Stick
+ * 0.4 des Halbwegs, Trigger 51/255); jeder andere Kanal darf hoechstens
+ * die Haelfte davon ausgelenkt sein (Diagonale bleibt uneindeutig). Vorher
+ * 0.7/0.3 bzw. Trigger 160/40: kurze Drehachsen von Flugsticks im Xbox-
+ * Modus und Stickbewegung mit leichtem Nebenweg (> 0.3) lernten nichts.
+ * Ruhe bei Schwankung <= 2048 (Stick) bzw. 8 (Trigger) je Abtastung.
+ *
+ * W312 JOY-CALIB: Pad-Lerner MIT Ruhestellung (wie der Joystick-Lerner).
  * lctrl_pad_deflected wertet absolute Stellungen aus: ein Stick-/Trigger-
  * Kanal, der am Anschlag ruht (Schubhebel/Ruder eines Flugsticks im Xbox-
  * Modus), galt sofort als "ausgelenkt" und wurde fuer JEDES Achsen-Element
@@ -266,8 +273,9 @@ int lctrl_bind_save(const char *path, const lctrl_bind_t *b, const char *base,
 /* --- W221 HOTAS (experimentell): Joystick-Quellen ---------------------- */
 /* Lernmodus (rein, testbar): base = Stand beim Start des Lernens, prev =
  * letzter Poll, cur = aktueller Poll. Erkennt neue Taste ("B3"), neue
- * POV-Richtung ("POV1U") oder Achsen-Auslenkung >= 40 % des Wegs relativ
- * zu base (Schubhebel/Pedale ruhen nicht in der Mitte). Auf Achsen-
+ * POV-Richtung ("POV1U") oder Achsen-Auslenkung >= 20 % des Bereichs
+ * (W432, vorher 40 %) relativ zu base (Schubhebel/Pedale ruhen nicht in
+ * der Mitte, zentrierte Achsen erreichen oft nicht das Ende). Auf Achsen-
  * Elementen (idx LCTRL_AXIS) nur Achsen -> analoge Quelle "Z:dz=0.05"
  * (Pedal invertiert, wenn der Weg zum Minimum fuehrt); sonst "Z+"/"Z-"
  * bzw. "Z:zone=lo-hi" (W226-Regeln s. u.). out = Teil hinter "JOYn:".
@@ -295,14 +303,23 @@ const char *lctrl_chord_plus(const char *s);
  * die erste Aenderung je Achse die Basis; steht eine Achse exakt auf
  * einem Endwert und springt in einer Abtastung um > 25 %, gilt der Sprung
  * ebenfalls als erster Bericht (neue Basis). Achse wird erst uebernommen,
- * wenn sie >= 40 % ausgelenkt und 2 Abtastungen ruhig ist (bzw. mit der
- * Spitzenstellung, wenn sie zurueckfedert). */
+ * wenn sie >= 20 % (W432, vorher 40 %) ausgelenkt und 2 Abtastungen ruhig
+ * ist (bzw. mit der Spitzenstellung, wenn sie zurueckfedert). */
+/* W432 HOTAS-AXES: Schwelle 20 % des Bereichs ab Ruhestellung (vorher 40 %
+ * = 80 % des Halbwegs: zentrierte Achsen mit kuerzerem Weg - WingMan X/Y/RZ,
+ * Arduino-Potis - wurden nie gelernt). Ruhe gilt bei Schwankung <= 3 % je
+ * Abtastung (vorher 1 %: verrauschte Achsen fanden nie eine Basis, dann
+ * lernte das Geraet gar nichts, auch keine Tasten); das gemessene Rauschen
+ * zaehlt bei Schwelle und Stillstand dazu. */
+#define LCTRL_JOY_LEARN_MIN 13107 /* 20 % von 65535 */
+#define LCTRL_JOY_STILL 2048      /* ~3 % je Abtastung */
 typedef struct {
     imap_joy_state_t base, prev;
     int16_t peak[IJOY_AXES];
     int peakd[IJOY_AXES];
     unsigned unconf, unext;
     int settle, have_base, stable, cand;
+    int jit[IJOY_AXES]; /* W432: Rauschen je Achse waehrend der Ruhe */
 } lctrl_joy_learner_t;
 void lctrl_joy_learner_reset(lctrl_joy_learner_t *L);
 /* ok = Lesen erfolgreich. Rueckgabe wie lctrl_joy_learn (0 = weiter). */

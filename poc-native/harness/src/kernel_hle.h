@@ -55,6 +55,7 @@ int krnl_savelock_commit(void);
 /* W190: Selbsttest durch die echten Nt*File-Wege (savelock_selftest=1). 0 = ok. */
 int krnl_savelock_selftest(void);
 int krnl_directory_selftest(void); /* W213 */
+int krnl_savedelete_selftest(void); /* W433 REPLAY-DELETE */
 void *krnl_event_host(unsigned xh);
 unsigned long __stdcall krnl_GetExitCodeThread(unsigned long xh,
                                                unsigned long *code);

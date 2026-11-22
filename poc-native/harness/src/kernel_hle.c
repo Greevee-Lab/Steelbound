@@ -1079,6 +1079,10 @@ void krnl_init(xbe_image_t *img)
          * Datenordner (Community-Erststart) -> sonst FEHLER 3 auf ZCACHE */
         _snprintf_s(d, sizeof d, _TRUNCATE, "%s/ZCACHE", g_cfg.hdd_root);
         xb_mkdir_p(d);
+        if (g_sba_loc) { /* W423 LOC-XSB-LOOP (#71): Z: beschreibbar? sonst Ersatzordner */
+            extern void krnl_loc_zcache_check(void);
+            krnl_loc_zcache_check();
+        }
         HLOG_I("KRNL: hdd_root='%s' fair_cs=%d", g_cfg.hdd_root, g_cfg.fair_cs);
         if (g_cfg.save_check) {
             krnl_save_check();

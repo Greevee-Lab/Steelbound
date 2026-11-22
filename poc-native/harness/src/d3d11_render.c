@@ -1213,6 +1213,7 @@ static void sb_render_present_body(unsigned flags)
         sb_render_snap_tick(); /* W357 LOC-PAUSE-NET: Bild ohne Pause (nur bei Wunsch, sonst sofort zurueck) */
     }
     if (g_cfg.vis_query_live && g_cfg.shading) { extern void xdk_visq_live(void); xdk_visq_live(); } /* FIX(SHADE-FX,W121): Shading per ESC-Menue */
+    if (g_cfg.sb_allied_squads && !g_sba_loc) { extern void sb_ally_live(void); sb_ally_live(); } /* W424: im ESC-Menue eingeschaltet */
     sb_shfx_shading_watch(); /* FIX(SHADE-FX,W121) shade_live_reset: Bloom-Akkumulatoren beim Pfadwechsel leeren */
     if (g_cfg.pf_ring > 0) { pf_present_tick(n_present); } /* DIAG(POPIN,W91) */
     if (g_cfg.tex_dump || g_cfg.remaster) { sb_rem_present(n_present); } /* W103 REM-FRAME */

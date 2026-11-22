@@ -594,7 +594,25 @@ static int ph_size_idx_of(int v)
 
 static int ph_pview(void)
 {
-    return g_cfg.photo_view >= SB_PV_GAME && g_cfg.photo_view <= SB_PV_WORLD ? g_cfg.photo_view : SB_PV_GAME;
+    int v = g_cfg.photo_view >= SB_PV_GAME && g_cfg.photo_view < SB_PV_N ? g_cfg.photo_view : SB_PV_GAME;
+    if (v == SB_PV_CINE && g_sba_loc) { v = SB_PV_WORLD; } /* W428: Cinematic nur SB (LoC: wie nur Aussenwelt) */
+    return v;
+}
+
+/* W428 PHOTO-CINEMATIC: Aussenwelt-Pfad (Welt-RT direkt): "nur Aussenwelt" sowie Cinematic, wenn die
+ * Vollbild-Ansicht des Spiels hier nicht moeglich ist (Rueckfall; dort gibt es weder HUD noch Monitor-Effekt).
+ * Sonst nimmt Cinematic den Cockpit-Pfad auf der Vollbild-Ansicht (4:3-Rahmen), damit die Shader-Optionen der
+ * Monitor-Komposition (Kontrast, Gamma, Schaerfe, FXAA Welt, Bloom, Fokus) wie im Spiel wirken. */
+static int ph_world(void)
+{
+    int v = ph_pview();
+    return v == SB_PV_WORLD || (v == SB_PV_CINE && !sb_flat_now());
+}
+
+/* W428: Cinematic aktiv (gewaehlt und im SB) */
+static int ph_cine(void)
+{
+    return ph_pview() == SB_PV_CINE;
 }
 
 static int ph_asp_cfg(void)
@@ -747,7 +765,7 @@ static unsigned ph_aa_factor(unsigned w, unsigned h, int cockpit, float k)
  * weiter (Pause aufgehoben, sb_photo_stepping), bis es die Ansicht gezeichnet und aufgezeichnet hat. */
 static void ph_view_sync(void)
 {
-    int want = ph_on && ph_pview() == SB_PV_FLAT;
+    int want = ph_on && (ph_pview() == SB_PV_FLAT || ph_pview() == SB_PV_CINE); /* W428: Cinematic auf der Vollbild-Ansicht */
     if (want && !ph_fl_held) {
         if (sb_flat_now()) { return; } /* schon flach (Option Cockpit aus / Spieler-Kniff) */
         sb_flat_request(1);
@@ -800,7 +818,7 @@ static int ph_rec_settled(ULONGLONG t0)
 /* Schnell-Screenshot (sb_overlay.c): 1 = Aufzeichnung angefordert (vor der Pause abwarten: sb_photo_quick_rec_wait). */
 int sb_photo_quick_rec_begin(void)
 {
-    int need = sb_photo_size_eff() != 1 || ph_pview() == SB_PV_WORLD || !g_cfg.photo_hud;
+    int need = sb_photo_size_eff() != 1 || ph_world() || ph_cine() || !g_cfg.photo_hud;
     if (!need || !ph_rec_od()) { return 0; }
     sb_interp_rec1_request();
     ph_qr_t0 = GetTickCount64();
@@ -841,7 +859,7 @@ void sb_photo_step_tick(void)
                 HLOG_I("PHOTO: ohne Cockpit hier nicht moeglich (%s) - wie im Spiel", st < 0 ? "Bedingung" : "Zeit");
                 sb_flat_request(0);
                 ph_fl_held = 0;
-                g_cfg.photo_view = SB_PV_GAME;
+                if (!ph_cine()) { g_cfg.photo_view = SB_PV_GAME; } /* W428: Cinematic bleibt (Rueckfall Aussenwelt-Pfad) */
             }
             ph_step = 0;
             ph_dirty = 1;
@@ -919,9 +937,11 @@ void sb_photo_set_effect(int shader, int on)
 
 void sb_photo_set_view(int v)
 {
-    static const char *const nm[3] = { "wie im Spiel", "ohne Cockpit (Vollbild-Ansicht)", "nur Aussenwelt" };
-    v = (v % 3 + 3) % 3;
-    if (v == SB_PV_WORLD && !ph_rec_ok()) { v = SB_PV_GAME; }
+    static const char *const nm[SB_PV_N] = { "wie im Spiel", "ohne Cockpit (Vollbild-Ansicht)", "nur Aussenwelt",
+                                             "Cinematic (Aussenwelt ohne HUD, Monitor-Effekt und eigene VT-Teile)" };
+    v = (v % SB_PV_N + SB_PV_N) % SB_PV_N;
+    if (v == SB_PV_CINE && g_sba_loc) { v = SB_PV_WORLD; } /* W428: nur SB */
+    if (v >= SB_PV_WORLD && !ph_rec_ok()) { v = SB_PV_GAME; }
     if (v != ph_pview()) {
         g_cfg.photo_view = v;
         ph_dirty = 1;
@@ -974,7 +994,9 @@ void sb_photo_get(sb_photo_ui_t *u)
     u->rec = ph_rec_ok();
     u->vr = g_cfg.vr_enable != 0;
     u->view = ph_pview();
-    u->cockpit = cockpit = !(u->view == SB_PV_WORLD && u->rec);
+    u->world = ph_world(); /* W428: wirksamer Aussenwelt-Pfad */
+    u->cine_ok = !g_sba_loc;
+    u->cockpit = cockpit = !(u->world && u->rec);
     u->flat = sb_flat_now();
     u->stepping = ph_step;
     crop = cockpit && ph_crop_now();
@@ -1239,7 +1261,8 @@ static void ph_rep_base(sb_ph_rep_t *r)
     r->tgt = r->tgtd = -1;
     r->wld = ph_cen.wld;
     r->mon = ph_cen_ok ? ph_cen.mon : -1; /* W290: HUD aus (Monitor-RT des Hauptmonitors) */
-    r->hud_off = !g_cfg.photo_hud;
+    r->cine = ph_cine() && ph_cen_ok; /* W428: HUD, Monitor-Effekt, Einblendungen und eigene VT-Teile auslassen */
+    r->hud_off = !g_cfg.photo_hud || r->cine;
     r->cam = ph_free && (ph_yaw != 0.0f || ph_pitch != 0.0f || ph_t[0] != 0.0f || ph_t[1] != 0.0f || ph_t[2] != 0.0f);
     r->wcx = 1.0f;
     ph_cam_delta(r->cam_d);
@@ -1363,8 +1386,8 @@ static int ph_capture(ID3D11Resource *still)
     unsigned ntiles = 0, ncam_tot = 0, mno;
     sb_ph_rep_t sc_r;
     ph_init_t sc_pi;
-    cockpit = !(ph_pview() == SB_PV_WORLD && ph_rec_ok());
-    if (ph_pview() == SB_PV_WORLD && cockpit) { ph_cap_notes |= SB_QS_NOTE_NOREC; }
+    cockpit = !(ph_world() && ph_rec_ok());
+    if (ph_world() && cockpit) { ph_cap_notes |= SB_QS_NOTE_NOREC; }
     crop = cockpit && ph_crop_now();
     size = sb_photo_size_eff();
     while (!ph_size_ok(size, cockpit, crop)) {
@@ -1383,7 +1406,8 @@ static int ph_capture(ID3D11Resource *still)
     W = g.W;
     H = g.H;
     K = g.K;
-    direct = cockpit && size == 1 && !(ph_free && ph_rec_ok()) && (g_cfg.photo_hud || !ph_rec_ok()); /* Standbild direkt (Ausschnitt) */
+    direct = cockpit && size == 1 && !(ph_free && ph_rec_ok()) && ((g_cfg.photo_hud && !ph_cine()) || !ph_rec_ok()); /* Standbild direkt (Ausschnitt); W428: Cinematic nie direkt */
+    if (cockpit && ph_cine() && !ph_rec_ok()) { ph_cap_notes |= SB_QS_NOTE_NOREC; } /* W428: Cinematic braucht die Aufzeichnung */
     if (cockpit && !g_cfg.photo_hud && !ph_rec_ok()) { ph_cap_notes |= SB_QS_NOTE_NOREC; } /* W290: HUD aus braucht die Aufzeichnung */
     if (!direct) { sf = ph_aa_factor(W, H, cockpit, K); }
     KS = K * (float)sf;
@@ -1614,8 +1638,8 @@ ID3D11Resource *sb_photo_pause_image(ID3D11Resource *still, int *raw)
             g_cfg.photo_aa = aa;
         }
     }
-    cockpit = !(ph_pview() == SB_PV_WORLD && ph_rec_ok());
-    if (!ph_rec_ok() || (cockpit && !ph_free && g_cfg.photo_hud)) { /* W290: HUD aus -> Vorschau neu gezeichnet */
+    cockpit = !(ph_world() && ph_rec_ok());
+    if (!ph_rec_ok() || (cockpit && !ph_free && g_cfg.photo_hud && !ph_cine())) { /* W290: HUD aus -> Vorschau neu gezeichnet (W428: Cinematic ebenso) */
         ph_view_valid = 0;
         return still;
     }

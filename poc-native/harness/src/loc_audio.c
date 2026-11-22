@@ -1164,6 +1164,10 @@ static u32 __stdcall la_CreateSoundBank(u32 e, u32 data, u32 size, u32 pp)
     int i, rc;
     (void)e;
     if (!data || size < 0x38 || size > 16u * 1024u * 1024u) {
+        static LONG said; /* W423: abgelehnte Sound-Bank einmal klar melden (Spiel bricht die Ton-Init dann ab) */
+        if (!InterlockedExchange(&said, 1)) {
+            HLOG_W("LOCAUDIO: CreateSoundBank abgelehnt (Daten 0x%X, %u B) -> E_FAIL", data, size);
+        }
         return LA_E_FAIL;
     }
     lk();

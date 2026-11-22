@@ -130,7 +130,8 @@ int lctrl_user_filename(const char *rest, char *out, size_t cap)
 int lctrl_name_shipped(const char *name)
 {
     return name && (strcmp(name, "keyboard_default") == 0 ||
-                    strcmp(name, "xbox_pad_default") == 0);
+                    strcmp(name, "xbox_pad_default") == 0 ||
+                    strcmp(name, "default_full") == 0); /* W431 */
 }
 
 int lctrl_vk_is_gamepad(int vk)
@@ -450,17 +451,17 @@ void lctrl_pad_learner_reset(lctrl_pad_learner_t *L)
 int lctrl_pad_learner_axis(lctrl_pad_learner_t *L, const lctrl_pad_t *cur,
                            char *name, size_t cap)
 {
-    double v[4];
-    int hot = -1, i, n_hot = 0, half = 0;
+    double v[6];
+    int hot = -1, i;
     if (!L || !cur || !name) {
         return 0;
     }
     if (!L->have_base) {
         int still = L->settle > 0 &&
-                    abs(cur->lx - L->prev.lx) <= 655 && abs(cur->ly - L->prev.ly) <= 655 &&
-                    abs(cur->rx - L->prev.rx) <= 655 && abs(cur->ry - L->prev.ry) <= 655 &&
-                    abs((int)cur->lt - (int)L->prev.lt) <= 5 &&
-                    abs((int)cur->rt - (int)L->prev.rt) <= 5;
+                    abs(cur->lx - L->prev.lx) <= 2048 && abs(cur->ly - L->prev.ly) <= 2048 &&
+                    abs(cur->rx - L->prev.rx) <= 2048 && abs(cur->ry - L->prev.ry) <= 2048 &&
+                    abs((int)cur->lt - (int)L->prev.lt) <= 8 &&
+                    abs((int)cur->rt - (int)L->prev.rt) <= 8;
         L->settle = still ? L->settle + 1 : 1;
         L->prev = *cur;
         if (L->settle >= 3) {
@@ -470,33 +471,33 @@ int lctrl_pad_learner_axis(lctrl_pad_learner_t *L, const lctrl_pad_t *cur,
         return 0;
     }
     L->prev = *cur;
-    v[0] = (cur->lx - L->base.lx) / 32768.0;
-    v[1] = (cur->ly - L->base.ly) / 32768.0;
-    v[2] = (cur->rx - L->base.rx) / 32768.0;
-    v[3] = (cur->ry - L->base.ry) / 32768.0;
-    for (i = 0; i < 4; i++) {
-        if (dabs(v[i]) > 0.7) {
+    /* W432: Auslenkung je Kanal als Anteil des vollen Bereichs (Stick
+     * 65535, Trigger 255), staerkster Kanal muss >= 20 % sein und jeden
+     * anderen um mindestens das Doppelte uebertreffen. */
+    v[0] = (cur->lx - L->base.lx) / 65535.0;
+    v[1] = (cur->ly - L->base.ly) / 65535.0;
+    v[2] = (cur->rx - L->base.rx) / 65535.0;
+    v[3] = (cur->ry - L->base.ry) / 65535.0;
+    v[4] = ((int)cur->lt - (int)L->base.lt) / 255.0;
+    v[5] = ((int)cur->rt - (int)L->base.rt) / 255.0;
+    for (i = 0; i < 6; i++) {
+        if (hot < 0 || dabs(v[i]) > dabs(v[hot])) {
             hot = i;
-            n_hot++;
-        } else if (dabs(v[i]) > 0.3) {
-            half = 1;
         }
     }
-    if (n_hot == 1 && !half) {
-        static const char *nm[4] = { "LX", "LY", "RX", "RY" };
+    if (hot < 0 || dabs(v[hot]) < 0.2) {
+        return 0;
+    }
+    for (i = 0; i < 6; i++) {
+        if (i != hot && dabs(v[i]) * 2.0 > dabs(v[hot])) {
+            return 0; /* zwei Kanaele etwa gleich weit: uneindeutig */
+        }
+    }
+    {
+        static const char *nm[6] = { "LX", "LY", "RX", "RY", "LT", "RT" };
         strcpy_s(name, cap, nm[hot]);
-        return 1;
     }
-    if (n_hot == 0 && !half) {
-        int dl = (int)cur->lt - (int)L->base.lt, dr = (int)cur->rt - (int)L->base.rt;
-        int lt = abs(dl) > 160, rt = abs(dr) > 160;
-        int lt_half = abs(dl) > 40 && !lt, rt_half = abs(dr) > 40 && !rt;
-        if (!lt_half && !rt_half && (lt ^ rt)) {
-            strcpy_s(name, cap, lt ? "LT" : "RT");
-            return 1;
-        }
-    }
-    return 0;
+    return 1;
 }
 
 int lctrl_axis_partner(int idx)
@@ -1844,7 +1845,7 @@ int lctrl_joy_learn(const imap_joy_state_t *base, const imap_joy_state_t *prev,
             best = i;
         }
     }
-    if (best < 0 || iabs_(bestd) < 26214) { /* 40 % des Wegs */
+    if (best < 0 || iabs_(bestd) < LCTRL_JOY_LEARN_MIN) { /* W432: 20 % des Bereichs (vorher 40 %) */
         return 0;
     }
     {
@@ -1904,7 +1905,7 @@ int lctrl_joy_learner_step(lctrl_joy_learner_t *L, int ok,
                            const imap_joy_state_t *cur, unsigned axmask,
                            int npov, int idx, char *out, size_t cap)
 {
-    int i, cand = -1, cd = 0, moving, released, r;
+    int i, cand = -1, cd = 0, cex = -1, moving, released, r;
     imap_joy_state_t pos;
     if (!L || !cur || !out || idx < 0 || idx >= LCTRL_ELEM_N) {
         return 0;
@@ -1918,8 +1919,16 @@ int lctrl_joy_learner_step(lctrl_joy_learner_t *L, int ok,
         int still = L->settle > 0;
         for (i = 0; i < IJOY_AXES && still; i++) {
             if ((axmask & (1u << i)) &&
-                iabs_((int)cur->axis[i] - (int)L->prev.axis[i]) > 655) {
+                iabs_((int)cur->axis[i] - (int)L->prev.axis[i]) > LCTRL_JOY_STILL) {
                 still = 0;
+            }
+        }
+        for (i = 0; i < IJOY_AXES; i++) { /* W432: Rauschen der laufenden Ruhephase */
+            int dd = iabs_((int)cur->axis[i] - (int)L->prev.axis[i]);
+            if (!still || !(axmask & (1u << i))) {
+                L->jit[i] = 0;
+            } else if (dd > L->jit[i]) {
+                L->jit[i] = dd;
             }
         }
         L->settle = still ? L->settle + 1 : 1;
@@ -1981,12 +1990,14 @@ int lctrl_joy_learner_step(lctrl_joy_learner_t *L, int ok,
             L->peakd[i] = d;
             L->peak[i] = cur->axis[i];
         }
-        if (iabs_(L->peakd[i]) > iabs_(cd)) {
+        /* W432: Auslenkung ueber dem Rauschen der Ruhephase zaehlt */
+        if (iabs_(L->peakd[i]) - L->jit[i] > cex) {
+            cex = iabs_(L->peakd[i]) - L->jit[i];
             cd = L->peakd[i];
             cand = i;
         }
     }
-    if (cand < 0 || iabs_(cd) < 26214) {
+    if (cand < 0 || cex < LCTRL_JOY_LEARN_MIN) { /* W432: 20 % (vorher 40 %) */
         L->stable = 0;
         L->prev = *cur;
         return 0;
@@ -1995,7 +2006,7 @@ int lctrl_joy_learner_step(lctrl_joy_learner_t *L, int ok,
         L->cand = cand;
         L->stable = 0;
     }
-    moving = iabs_((int)cur->axis[cand] - (int)L->prev.axis[cand]) > 1310;
+    moving = iabs_((int)cur->axis[cand] - (int)L->prev.axis[cand]) > 1310 + L->jit[cand];
     released = iabs_((int)cur->axis[cand] - (int)L->base.axis[cand]) * 2 <
                iabs_(cd);
     L->stable = moving ? 0 : L->stable + 1;

@@ -788,7 +788,7 @@ void diag_combat_tick(unsigned frame)
         }
         for (i2 = 0; i2 < 5u; i2++) { sb_tex_diag_info(st_read(SBA(tx[i2])), ti[i2], sizeof ti[i2]); }
         HLOG_I("AMMOHUD: f=%u mode=%u slot=%u n=%u wid=%u/%u/%u am=%u/%u/%u mg=%u/%u/%u sup=%u v=%u "
-               "sub=%u swid=%u/%u/%u sam=%u/%u/%u smg=%u/%u/%u disp=%u/%u hud=%u/%u/%u efc=%u ed4=%u c_am=%u/%u/%u c_mg=%u/%u/%u | 78FC[%s] 7D24[%s] 791C[%s] 7914[%s] 7900[%s]",
+               "sub=%u swid=%u/%u/%u sam=%u/%u/%u smg=%u/%u/%u disp=%u/%u hud=%u/%u/%u efc=%u ed4=%u c_am=%u/%u/%u c_mg=%u/%u/%u | 78FC[%s] 7D24[%s] 791C[%s] 7914[%s] 7900[%s] eng=%u rep=%u",
                frame, st_read(SBA(0x354F3Cu)), st_read(SBA(0x356C94u)), st_read(SBA(0x35211Cu)),
                st_read(SBA(0x354FBCu)), st_read(SBA(0x354FC0u)), st_read(SBA(0x354FC4u)),
                am[0], am[1], am[2], mg[0], mg[1], mg[2], st_read(SBA(0x356EE4u)), st_read16(SBA(0x6CA6C4u)) & 0xFFFFu,
@@ -799,7 +799,8 @@ void diag_combat_tick(unsigned frame)
                st_read(SBA(0x560EFCu)), st_read(SBA(0x560ED4u)),
                st_read(SBA(0x560F54u)), st_read(SBA(0x560F58u)), st_read(SBA(0x560F5Cu)),
                st_read(SBA(0x560F60u)), st_read(SBA(0x560F64u)), st_read(SBA(0x560F68u)),
-               ti[0], ti[1], ti[2], ti[3], ti[4]);
+               ti[0], ti[1], ti[2], ti[3], ti[4],
+               st_read16(SBA(0x3516DCu)) & 0xFFFFu, st_read(SBA(0x3B8CC0u))); /* W425: Ansicht (0 = Cockpit) / Replay */
     }
 }
 

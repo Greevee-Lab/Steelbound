@@ -29,6 +29,7 @@ typedef struct {
     int sbc_mouse_off;      /* W128: 1 = Maus-Achsen aus, solange der Controller aktiv ist */
     int aim_assist;         /* W236: Zielhilfe 0 = Original, 1 = Fadenkreuz am Rand dreht die Sicht, 2 = Waffenarm fest (Altwert aim_turn=1 -> 1) */
     int auto_gear;          /* W218: 1 = automatischer Gangwechsel (vereinfachte Steuerung) */
+    int sb_allied_squads;   /* W424: 1 = verbuendete Trupps kaempfen auch fern vom Spieler ([gameplay], nur SB, Standard 1) */
     int monitor_view;       /* W319 MONITOR-VIEW: 1 = Monitoransicht, 2 = + Radar/FRONT VIEW ([render] monitor_view, Standard 0) */
     int cockpit_hide;       /* W268 COCKPIT-HIDE: 1 = Cockpit in der Mission ausblenden ([render] cockpit_hide, Standard 0) */
     int fx_wireframe;       /* W278 ORIG-FLAG: Spass-Effekte (W240, nur ESC-Menue); der Launcher kennt sie fuer Hinweis/Zuruecksetzen */
@@ -95,7 +96,7 @@ typedef struct {
     int photo_jpg;            /* 0 = PNG, 1 = JPG */
     int photo_aspect;         /* Bildformat nur Aussenwelt: 0 Ausschnitt (nur cfg), 1 breit (experimentell), 2 4:3 wie Monitor (Standard, W290) */
     /* W290 QUICK-SHOT: eine Aufnahme-Konfiguration fuer Fotomodus und Schnell-Screenshot */
-    int photo_view;           /* 0 wie im Spiel, 1 ohne Cockpit (Vollbild-Ansicht), 2 nur Aussenwelt */
+    int photo_view;           /* 0 wie im Spiel, 1 ohne Cockpit (Vollbild-Ansicht), 2 nur Aussenwelt, 3 Cinematic (W428) */
     int photo_size;           /* 1/2/4/8 = x Fenster, -4 = 4K (Standard), -8 = 8K; alte cfg ohne photo_size: photo_scale > 1 */
     int photo_hud;            /* [photo] photo_hud: 1 = HUD im Foto, 0 = HUD des Hauptmonitors weglassen */
     int replay_label;         /* [render] replay_label: 1 = REPLAY-Schriftzug der Wiedergabe zeigen (Original) */

@@ -1397,13 +1397,22 @@ void sb_tex_hud_tick(void)
 void sb_tex_hud_format(char *o, size_t cap)
 {
     static const char *nm[5] = { "78FC", "7D24", "791C", "7914", "7900" };
-    unsigned i, mode = 0;
+    unsigned i, mode = 0, eng = 0, rep = 0;
     size_t u;
     if (!o || !cap) { return; }
     __try { mode = *(volatile unsigned *)(uintptr_t)SBA(0x354F3Cu); } __except (EXCEPTION_EXECUTE_HANDLER) { mode = 0; }
     _snprintf_s(o, cap, _TRUNCATE, "cockpit displays (W345): mode=%u lockwatch=%d/64 forgotten=%u full=%u guard_added=%u guard=%d",
                 g_sba_loc ? 0u : mode, g_lw_n, g_lw_forgot, g_lw_full, g_lw_hudadd, g_cfg.tex_hud_guard);
     if (g_sba_loc) { return; }
+    /* W425 SUPPLY-HUD: Ansicht und Replay dazuschreiben. Ausserhalb der Cockpit-Ansicht (Vollbild/
+     * Aussenkamera, eng=[0x3516DC]!=0, SPIELZUSTAENDE 24.2) zeichnet das Spiel die Anzeige-Texturen
+     * nicht, der Client prueft sie dann nicht - "ALT" ist dort erwartet und kein Fehler. */
+    __try {
+        eng = *(volatile unsigned short *)(uintptr_t)SBA(0x3516DCu);
+        rep = *(volatile unsigned *)(uintptr_t)SBA(0x3B8CC0u);
+    } __except (EXCEPTION_EXECUTE_HANDLER) { eng = 0; rep = 0; }
+    u = strlen(o);
+    _snprintf_s(o + u, cap - u, _TRUNCATE, " view=%s replay=%u", eng ? "outside" : "cockpit", rep == 1u ? 1u : 0u);
     for (i = 0; i < 5u; i++) {
         char b[112];
         unsigned x = hud_ptr(g_hud_tex[i]);

@@ -301,6 +301,14 @@ void hcfg_defaults(void)
     g_cfg.memreg_keep = 1; /* W417 SB-BRIEF-BLACK (#66): verdraengte Register-Eintraege behalten (wirkt erst nach Ring-Ueberlauf) */
     g_cfg.loc_rule_clipdump_block = 1; /* W420 LOC-CLIPDUMP: Nutzerentscheid 22.11., Standard an (Host-Regel) */
     g_cfg.loc_clip_diag = 0; /* W420 DIAG */
+    g_cfg.loc_insignia_rt = 1; /* W422 LOC-INSIGNIA-PEN (Fix, nur LoC) */
+    g_cfg.loc_ins_diag = 0; /* W422 DIAG */
+    g_cfg.loc_zcache_alt = 1; /* W423 LOC-XSB-LOOP (Fix, nur LoC) */
+    g_cfg.loc_boot_nopause = 1; /* W423 LOC-XSB-LOOP (Fix, nur LoC) */
+    g_cfg.loc_boot_diag = 0; /* W423 DIAG */
+    g_cfg.input_hold_test[0] = '\0'; /* W423 TEST */
+    g_cfg.sb_allied_squads = 1; /* W424 SB-ALLIED-SQUADS (Gameplay, nur SB, Nutzerentscheid 22.11.: Standard an) */
+    g_cfg.sb_ally_diag = 0; /* W424 DIAG */
     g_cfg.ip_ablate = 0; /* W174 DIAG */
     g_cfg.hlog_async = 1; /* W168 PERF-TICK */
     g_cfg.audio_decode_par = 4; /* W168 PERF-TICK */
@@ -391,6 +399,7 @@ void hcfg_defaults(void)
     g_cfg.interp_eyefix = 1; /* FIX(W224 LINE-FLICKER) */
     g_cfg.interp_eyediag = 0;
     g_cfg.interp_hlerp = 0; /* W237 LINE-FLICKER2: Option, Standard aus (Nutzer-Gegenprobe offen) */
+    g_cfg.interp_p2hom = 1; /* FIX(W429 M3-ROAD-FIX): P2 homogen lerpen (hlerp-Modus 3) + reject-Lockerung, nur SB */
     g_cfg.pf_max = 1; /* DIAG(POPIN,W91) */
     g_cfg.interp_inst = 1; /* FIX(POPIN,W91): Instanz-Zuordnung (A/B W91_r6 vs W91_r7) */
     g_cfg.interp_pass = 1; /* FIX(POPIN,W91): Mehrpass-Konsistenz */
@@ -459,6 +468,9 @@ void hcfg_defaults(void)
     g_cfg.photo_rt_max = 8192;          /* W233 SHOT-8K-MONITOR */
     g_cfg.photo_aa = 2;                 /* W249 PHOTO-PIXEL: Kantenglaettung 2x2 */
     g_cfg.photo_view = 0;               /* W290 QUICK-SHOT: wie im Spiel */
+    g_cfg.photo_cine_self = 40;         /* W428 PHOTO-CINEMATIC: eigene VT-Teile = Modell-Ursprung naeher als 4,0 m an der Kamera */
+    g_cfg.save_delete_fix = 1;          /* W433 REPLAY-DELETE (Fix): RootDirectory-relative Oeffnungen, Ordner loeschen */
+    g_cfg.save_delete_selftest = 0;     /* W433 DIAG */
     g_cfg.photo_size = 0;               /* W290: nicht gesetzt -> photo_scale > 1 bzw. 4K */
     g_cfg.photo_hud = 1;                /* W290: HUD im Foto */
     g_cfg.replay_label = 1;             /* W290: Original */
@@ -1002,13 +1014,72 @@ static int set_key_w420(const char *k, const char *v)
     return 1;
 }
 
+/* W422 LOC-INSIGNIA-PEN: eigene Schluessel (C1026) */
+static int set_key_w422(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_insignia_rt") == 0) { g_cfg.loc_insignia_rt = atoi(v) ? 1 : 0; } /* FIX */
+    else if (strcmp(k, "loc_ins_diag") == 0) { g_cfg.loc_ins_diag = atoi(v); } /* DIAG */
+    else { return 0; }
+    return 1;
+}
+
+/* W423 LOC-XSB-LOOP: eigene Schluessel (C1026) */
+static int set_key_w423(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_zcache_alt") == 0) { g_cfg.loc_zcache_alt = atoi(v) ? 1 : 0; } /* FIX */
+    else if (strcmp(k, "loc_boot_nopause") == 0) { g_cfg.loc_boot_nopause = atoi(v) ? 1 : 0; } /* FIX */
+    else if (strcmp(k, "loc_boot_diag") == 0) { g_cfg.loc_boot_diag = atoi(v); } /* DIAG */
+    else if (strcmp(k, "input_hold_test") == 0) { strcpy_s(g_cfg.input_hold_test, sizeof g_cfg.input_hold_test, v); } /* TEST */
+    else { return 0; }
+    return 1;
+}
+
+/* W424 SB-ALLIED-SQUADS: eigene Schluessel (C1026) */
+static int set_key_w424(const char *k, const char *v)
+{
+    if (strcmp(k, "sb_allied_squads") == 0) { g_cfg.sb_allied_squads = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "sb_ally_diag") == 0) { g_cfg.sb_ally_diag = atoi(v); } /* DIAG */
+    else { return 0; }
+    return 1;
+}
+
+/* W428 PHOTO-CINEMATIC: eigene Schluessel (C1026) */
+static int set_key_w428(const char *k, const char *v)
+{
+    if (strcmp(k, "photo_cine_self") == 0) { g_cfg.photo_cine_self = atoi(v); }
+    else if (strcmp(k, "photo_cine_diag") == 0) { g_cfg.photo_cine_diag = atoi(v); } /* DIAG */
+    else { return 0; }
+    return 1;
+}
+
+/* W433 REPLAY-DELETE: eigene Schluessel (C1026) */
+static int set_key_w433(const char *k, const char *v)
+{
+    if (strcmp(k, "save_delete_fix") == 0) { g_cfg.save_delete_fix = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "save_delete_selftest") == 0) { g_cfg.save_delete_selftest = atoi(v); } /* DIAG */
+    else { return 0; }
+    return 1;
+}
+
+/* W429 M3-ROAD-FIX: eigene Schluessel (C1026) */
+static int set_key_w429(const char *k, const char *v)
+{
+    if (strcmp(k, "interp_p2hom") == 0) { g_cfg.interp_p2hom = atoi(v); } /* FIX */
+    else { return 0; }
+    return 1;
+}
+
 static void set_key_b(const char *k, const char *v);
 static void set_key(const char *k, const char *v)
 {
+    if (set_key_w433(k, v)) {
+        return;
+    }
     if (set_key_remaster(k, v) || set_key_overlay(k, v) || set_key_vr(k, v) || set_key_w371(k, v) || set_key_w376(k, v) ||
         set_key_w395(k, v) || set_key_lsarb(k, v) || set_key_imlock(k, v) || set_key_w405(k, v) || set_key_w406(k, v) ||
         set_key_w410(k, v) || set_key_w412(k, v) || set_key_w413(k, v) || set_key_w415(k, v) || set_key_w417(k, v) ||
-        set_key_w420(k, v)) {
+        set_key_w420(k, v) || set_key_w422(k, v) || set_key_w423(k, v) || set_key_w424(k, v) || set_key_w428(k, v) ||
+        set_key_w429(k, v)) {
         return;
     }
     if (strcmp(k, "xbe_path") == 0) {

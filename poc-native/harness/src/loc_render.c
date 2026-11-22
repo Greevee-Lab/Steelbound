@@ -14,6 +14,8 @@ unsigned g_loc_draws;
 static unsigned s_prev_draws;
 
 extern int g_rqp_bump_as_2d; /* render_psgen.c */
+static void loc_ins_diag_frame(unsigned f); /* DIAG(W422) */
+static void loc_render_insignia_frame(void); /* W422 */
 
 void loc_render_frame(unsigned f)
 {
@@ -52,6 +54,8 @@ void loc_render_frame(unsigned f)
     }
     s_prev_draws = g_loc_draws;
     g_loc_draws = 0;
+    if (g_cfg.loc_ins_diag) { loc_ins_diag_frame(f); } /* DIAG(W422) */
+    loc_render_insignia_frame(); /* W422 LOC-INSIGNIA-PEN: CPU-Texturen des Editors */
     if (g_sba_loc) {
         loc_sync_frame(f); /* W297: Testfolge loc_steps (nur mit loc_sync=1 geparst) */
         loc_net_lobby_frame(f); /* W350: DIAG Lobby-Belegung (nur loc_net_diag=1) */
@@ -342,6 +346,95 @@ int loc_render_vismap(unsigned surf, unsigned *host, unsigned *pitch)
     if (host) { *host = b; }
     if (pitch) { *pitch = (p >= 256u * 4u && p <= 4096u) ? p : 0u; }
     return 1;
+}
+
+/* ---------------------------------------------------------------------------
+ * W422 LOC-INSIGNIA-PEN (GitHub #67): Stift-RTs des Insignien-Editors (Szene 19, Objekt [0x57C6B8],
+ * Init FUN_0009C7B0, Texturen FUN_0009A4B0..0x9A7C9). Die Zeichenflaeche liegt als Index-Bytes
+ * (64x64) in [obj+0x46C], ihre Anzeige-Textur [obj+0x4D0] fuellt die CPU je Bild (FUN_0009C230).
+ * Die Stift-Vorschau zeichnet das Spiel in ein eigenes 64x64-RT (Textur [obj+0x4D4], LIN_A8R8G8B8,
+ * Speicher [obj+0x468], Surface [obj+0x694]) und benutzt dafuer den gemeinsamen Xbox-Speicher:
+ *   1. FUN_000A1970 (Bild-Update) loescht den RT-Speicher per CPU (0x4000 B Nullen, kein Clear),
+ *   2. FUN_000A0450: SetRenderTarget(+0x694), Stift-Quad (FUN_0009AC30 u. a.), zurueck, BlockOnFence,
+ *   3. FUN_0009C510 liest den RT-Speicher per CPU -> Ebene [obj+0x470] (Index bzw. 0xFF),
+ *   4. Stift gedrueckt (Flag 0x10000000 in [obj+0x144], A gehalten): FUN_0009C5B0 uebernimmt die Ebene
+ *      in die Flaeche,
+ *   5. die RT-Textur liegt als Vorschau ueber der Flaeche (FUN_0009AA20 mit [obj+0x4D4]).
+ * Ohne gemeinsamen Speicher blieb das RT GPU-only: Schritt 1 loeschte es nie (jeder Stift-Abdruck blieb
+ * stehen = Phantom-Spur entlang des Cursors), Schritt 3 las nur die CPU-Nullen (Stift setzte nichts).
+ * Zweites RT dieser Art: 384x16 [obj+0x6BC] (Textur [obj+0x4FC], Speicher [obj+0x174], FUN_0009C720).
+ * Rueckgabe 1 = surf ist eines dieser RTs (nur LoC-Profil, loc_insignia_rt).
+ * ------------------------------------------------------------------------- */
+#define LINS_OBJ 0x57C6B8u
+int loc_render_insignia_rt(unsigned surf)
+{
+    unsigned o = 0, a = 0, b = 0;
+    if (!g_sba_loc || !g_cfg.loc_insignia_rt || !surf) { return 0; }
+    __try {
+        o = *(volatile const unsigned *)(uintptr_t)LINS_OBJ;
+        if (o) {
+            a = *(volatile const unsigned *)(uintptr_t)(o + 0x694u);
+            b = *(volatile const unsigned *)(uintptr_t)(o + 0x6BCu);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
+    return o && (surf == a || surf == b);
+}
+
+/* W422: Texturen, die der Editor per CPU direkt in ihren Speicher schreibt (ohne LockRect, also ohne
+ * TEXDIRTY): Anzeige der Zeichenflaeche [obj+0x4D0] (FUN_0009C230 je Bild, 64x64 = 16 KB), 8 Muster
+ * [obj+0x4D8..0x4F4] und 100 Vorschaubilder der Insignien-Dateien [obj+0x500..0x68C] (FUN_0009A340).
+ * Der Refresh-Hash des Textur-Caches prueft nur die ersten und letzten 4 KB (W168 tex_hash_fast) - bei
+ * 64x64 die Zeilen 0-15 und 48-63. Striche in den Zeilen 16-47 erschienen daher nie (der Cursor sass etwa
+ * bei Y:38 im Testerbild). Je Bild als geaendert markieren: der naechste Get vergleicht den vollen Inhalt
+ * (W377 loc_text_cache) bzw. laedt neu. Nur solange der Editor existiert (nur LoC-Profil, loc_insignia_rt). */
+static void loc_render_insignia_frame(void)
+{
+    unsigned o = 0, x[109], n = 0, k;
+    if (!g_sba_loc || !g_cfg.loc_insignia_rt) { return; }
+    __try {
+        o = *(volatile const unsigned *)(uintptr_t)LINS_OBJ;
+        if (!o) { return; }
+        x[n++] = *(volatile const unsigned *)(uintptr_t)(o + 0x4D0u);
+        for (k = 0; k < 8u; k++) { x[n++] = *(volatile const unsigned *)(uintptr_t)(o + 0x4D8u + k * 4u); }
+        for (k = 0; k < 100u; k++) { x[n++] = *(volatile const unsigned *)(uintptr_t)(o + 0x500u + k * 4u); }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    for (k = 0; k < n; k++) {
+        if (x[k]) { sb_tex_mark_dirty(x[k]); }
+    }
+}
+
+/* DIAG(W422) loc_ins_diag: Zustand des Insignien-Editors alle 30 Bilder (nur solange [0x57C6B8] gesetzt).
+ * Spielzustand, keine Eingaben: Zustand/Unterzustand, Werkzeug [obj+0x1A], Cursor [obj+0x10C/0x110],
+ * Stift-Flag 0x10000000 aus [obj+0x144], Farbe [obj+0xE2], Pixel != 0 in der Flaeche, Ebene != 0xFF,
+ * Woerter != 0 im Stift-RT-Speicher. */
+static void loc_ins_diag_frame(unsigned f)
+{
+    unsigned o = 0, cv = 0, ly = 0, rm = 0, fl = 0, i, nc = 0, nl = 0, nr = 0;
+    unsigned char st = 0, sub = 0, col = 0;
+    unsigned short tool = 0;
+    float cx = 0.0f, cy = 0.0f;
+    if (!g_sba_loc || (f % 30u) != 0u) { return; }
+    __try {
+        o = *(volatile const unsigned *)(uintptr_t)LINS_OBJ;
+        if (!o) { return; }
+        st = *(volatile const unsigned char *)(uintptr_t)o;
+        sub = *(volatile const unsigned char *)(uintptr_t)(o + 1u);
+        tool = *(volatile const unsigned short *)(uintptr_t)(o + 0x1Au);
+        cx = *(volatile const float *)(uintptr_t)(o + 0x10Cu);
+        cy = *(volatile const float *)(uintptr_t)(o + 0x110u);
+        fl = *(volatile const unsigned *)(uintptr_t)(o + 0x144u);
+        col = *(volatile const unsigned char *)(uintptr_t)(o + 0xE2u);
+        cv = *(volatile const unsigned *)(uintptr_t)(o + 0x46Cu);
+        ly = *(volatile const unsigned *)(uintptr_t)(o + 0x470u);
+        rm = *(volatile const unsigned *)(uintptr_t)(o + 0x468u);
+        for (i = 0; i < 4096u; i++) {
+            if (cv) { nc += *(volatile const unsigned char *)(uintptr_t)(cv + i) != 0u; }
+            if (ly) { nl += *(volatile const unsigned char *)(uintptr_t)(ly + i) != 0xFFu; }
+            if (rm) { nr += *(volatile const unsigned *)(uintptr_t)(rm + i * 4u) != 0u; }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    HLOG_I("LOCINS f=%u zustand=%u.%u werkzeug=%u cursor=%.0f,%.0f stift=%u farbe=%u flaeche=%u ebene=%u rtspeicher=%u fix=%d",
+           f, st, sub, tool, cx, cy, (fl & 0x10000000u) ? 1u : 0u, col, nc, nl, nr, g_cfg.loc_insignia_rt);
 }
 
 /* ---------------------------------------------------------------------------

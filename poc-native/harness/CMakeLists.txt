@@ -87,6 +87,7 @@ add_library(sb_emu SHARED
   src/sb_rauto_core.c
   src/sb_mauto.c
   src/sb_mauto_core.c
+  src/sb_ally.c
   src/sb_cchain.c
   src/sb_cchain_core.c
   src/fs_emu.c

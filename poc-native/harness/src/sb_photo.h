@@ -45,6 +45,11 @@ extern const int kSbPhotoSize[SB_PHOTO_NSIZE];
 #define SB_PV_GAME 0  /* wie im Spiel (Cockpit bzw. die gerade gezeigte Vollbild-Ansicht) */
 #define SB_PV_FLAT 1  /* ohne Cockpit: Vollbild-Ansicht des Spiels (W268-Flag nur fuer die Aufnahme) */
 #define SB_PV_WORLD 2 /* nur Aussenwelt: Kamerabild ohne HUD/Monitor (W195 "Cockpit aus") */
+/* W428 PHOTO-CINEMATIC: wie "nur Aussenwelt" (Vollbild-Aussensicht ohne HUD und Monitor-Effekt), zusaetzlich ohne
+ * die Teile des eigenen VT (Waffenarm/Geschuetz), die das Spiel ins Welt-RT zeichnet. Shader-, Licht- und
+ * Nachbearbeitungs-Einstellungen bleiben unveraendert; live wird nichts umgeschaltet. Nur SB (LoC: wie Aussenwelt). */
+#define SB_PV_CINE 3
+#define SB_PV_N 4
 
 typedef struct {
     int monitor_fx, shading, effect_pending; /* W198: temporary options, missing recorded state */
@@ -53,6 +58,8 @@ typedef struct {
     int vr;            /* VR-Betrieb: Fotomodus aus */
     int cockpit;       /* 1 = Cockpit-Pfad (Ansicht wie im Spiel / ohne Cockpit), 0 = nur Aussenwelt */
     int view;          /* W290: SB_PV_* (gewaehlt) */
+    int world;         /* W428: Aussenwelt-Pfad (nur Aussenwelt oder Cinematic) */
+    int cine_ok;       /* W428: Cinematic hier waehlbar (SB, nicht LoC) */
     int flat;          /* W290: Spiel zeigt gerade die Vollbild-Ansicht */
     int stepping;      /* W290: Ansicht wird umgeschaltet (Spiel laeuft kurz weiter) */
     int freecam;       /* 1 = freie Kamera */

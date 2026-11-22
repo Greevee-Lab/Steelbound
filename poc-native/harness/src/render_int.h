@@ -322,6 +322,7 @@ extern int g_ip_recording;
 extern unsigned g_ip_sigparts[3]; /* DIAG(FPS-INTERP-2): VS/Textur/PS des naechsten rec_draw */
 /* DIAG(W237 LINE-FLICKER2): echte Clip-w der Quell-Vertices des naechsten rec_draw (P2 im RT: Strom hat w=1);
  * render_im.c setzt sie nur bei interp_eyediag > 0, render_interp.c verbraucht (NULL danach). */
+int sb_ip_hlerp(void); /* FIX(W429 M3-ROAD-FIX): wirksamer interp_hlerp-Modus (interp_p2hom: 3 in SB) */
 extern const float *g_ip_tw;
 extern unsigned g_ip_tw_n, g_ip_tw_prim;
 unsigned sb_interp_hash(const void *base, unsigned stride, unsigned n);
@@ -415,6 +416,8 @@ typedef struct {
     /* W290 QUICK-SHOT: HUD aus bei Monitor-Effekt an: 2D-Draws in das Monitor-RT des Hauptmonitors (Eintrag mon),
      * die weder das Welt-RT kopieren noch Korn/Stoerzeilen sind (o->nolerp), werden ausgelassen */
     int hud_off, mon;
+    /* W428 PHOTO-CINEMATIC: Draws des eigenen VT im Welt-RT (fahren mit der Kamera mit) auslassen */
+    int cine;
 } sb_ph_rep_t;
 typedef struct {
     int ok;

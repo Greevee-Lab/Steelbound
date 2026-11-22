@@ -16,6 +16,10 @@ void imap_state_init(imap_state_t *st)
     st->m_ax = 0x7F;
     st->m_ay = 0x7F;
     st->m_step_frame = 0xFFFFFFFFu;
+    /* W423 LOC-XSB-LOOP (#71): Client-Aktionen (Menue/Pause, Foto, Feedback, ...) reagieren nur auf eine echte
+     * Flanke nach dem Start - eine schon beim Start gehaltene Taste/Achse muss erst losgelassen werden. */
+    st->prev_vr_recenter = st->prev_pause = st->prev_feedback_shot = st->prev_feedback_clip = 1;
+    st->prev_photo = st->prev_orig_view = st->prev_quick_shot = st->prev_net_hud = 1;
 }
 
 void imap_mouse_center(imap_state_t *st)

@@ -650,14 +650,16 @@ static int rq_compile_x(const char *src, const char *target, ID3DBlob **out)
 }
 
 /* Zwischenbild-Variante: 1 = Lerp, 2 = + W224 eyefix, | 4 = W237 echte Clip-w (Strom 3/4) fuer die
- * eyefix-Pruefung, | 8 = W237 homogener Lerp (interp_hlerp=2), | 16 = W265 Lagen fuer den Dreieck-Waechter (GS). */
+ * eyefix-Pruefung, | 8 = W237 homogener Lerp (interp_hlerp=2), | 16 = W265 Lagen fuer den Dreieck-Waechter (GS),
+ * | 32 = W429 ohne W237-Bildsprung-Regel (hlerp-Modus 3: gleiche Regel je Vertex wie der 3D-Pass). */
 static int rq_guard_flag(void)
 {
     return (g_cfg.interp_guard || g_cfg.interp_guard_diag) ? 16 : 0; /* FIX(W265 LINE-GUARD); DIAG zaehlt auch ohne Korrektur */
 }
 static int rq_lerp_flags(void)
 {
-    return (g_cfg.interp_eyefix ? 2 : 1) | (g_cfg.interp_hlerp ? 4 : 0) | (g_cfg.interp_hlerp >= 2 ? 8 : 0) | rq_guard_flag();
+    const int hl = sb_ip_hlerp(); /* W429: wirksamer Modus (interp_p2hom) */
+    return (g_cfg.interp_eyefix ? 2 : 1) | (hl ? 4 : 0) | (hl >= 2 ? 8 : 0) | (hl == 3 ? 32 : 0) | rq_guard_flag();
 }
 
 static int rq_mklayout(const rq_vsent_t *e, int lerp, ID3DBlob *b, ID3D11InputLayout **out, int raw)
@@ -794,7 +796,7 @@ static int rq_raw_build(rq_vsent_t *e, unsigned handle, const unsigned *st, cons
         return 0;
     }
     /* W237: Roh-Variante bekam W224 (eyefix) nie; mit interp_hlerp gleiche Flags wie die gepackte, sonst alt (1) */
-    if (!rqv_hlsl_ex(&e->prog, g_cfg.interp_hlerp ? rq_lerp_flags() : (1 | rq_guard_flag()), &e->raw, src2, sizeof src2, cof, &nc)) {
+    if (!rqv_hlsl_ex(&e->prog, sb_ip_hlerp() ? rq_lerp_flags() : (1 | rq_guard_flag()), &e->raw, src2, sizeof src2, cof, &nc)) {
         return 0;
     }
     if (!rq_compile_vs2(src, src2, &b, &bl, &fail1)) { /* W318 shade_par_compile */
@@ -803,7 +805,7 @@ static int rq_raw_build(rq_vsent_t *e, unsigned handle, const unsigned *st, cons
     }
     if (FAILED(sb_warm_create_vs(b->lpVtbl->GetBufferPointer(b), b->lpVtbl->GetBufferSize(b), &e->vsr)) ||
         FAILED(sb_warm_create_vs(bl->lpVtbl->GetBufferPointer(bl), bl->lpVtbl->GetBufferSize(bl), &e->vsrl)) ||
-        !rq_mklayout(e, 0, b, &e->layr, 1) || !rq_mklayout(e, g_cfg.interp_hlerp ? rq_lerp_flags() : (1 | rq_guard_flag()), bl, &e->layrl, 1)) {
+        !rq_mklayout(e, 0, b, &e->layr, 1) || !rq_mklayout(e, sb_ip_hlerp() ? rq_lerp_flags() : (1 | rq_guard_flag()), bl, &e->layrl, 1)) {
         b->lpVtbl->Release(b); bl->lpVtbl->Release(bl);
         rq_raw_release(e);
         e->rawsig = sig; e->rawok = -1;

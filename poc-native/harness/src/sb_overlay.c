@@ -105,6 +105,7 @@ enum {
     OI_VOLM, OI_VOLMU, OI_VOLSFX, OI_VOLVOX, /* W303 AUDIO-VOLUME: Gesamt, Musik, Effekte, Sprache/Funk */
     OI_RPFX, /* W299 REPLAY-FX: Replay-Bildfilter live (Vollbild-Ansicht, experimentell) */
     OI_MONVIEW, /* W319 MONITOR-VIEW: Monitoransicht (Gruppe Cockpit, nach "Cockpit") */
+    OI_ALLY, /* W424 SB-ALLIED-SQUADS: verbuendete Trupps fern vom Spieler (Gruppe Spiel, ab naechster Mission) */
     OI_N
 };
 /* W291 ESC-REWORK: Gruppen statt Seiten (Namen und Reihenfolge wie die
@@ -116,7 +117,7 @@ enum {
 enum { OG_QUICK, OG_GAME, OG_DISP, OG_CKP, OG_WORLD, OG_FX, OG_COLOR, OG_TEX, OG_AUDIO, OG_VR, OG_DEBUG, OG_N };
 #define OV_NPAGES OG_N
 static const short kOgQuick[] = { OI_PRESET, OI_FPS, OI_WINMODE, OI_CHIDE, OI_SMON, OI_STEX };
-static const short kOgGame[] = { OI_ASSIST, OI_AUTOGEAR, OI_MMODE, OI_MSENS, OI_STICKAIM, OI_STICKSENS };
+static const short kOgGame[] = { OI_ASSIST, OI_AUTOGEAR, OI_ALLY, OI_MMODE, OI_MSENS, OI_STICKAIM, OI_STICKSENS }; /* + W424 */
 static const short kOgGameA[] = { OI_SBCMOUSE, OI_MPAUSE, OI_SAVELOCK, OI_SLCOMMIT };
 static const short kOgDisp[] = { OI_FPS, OI_WINMODE, OI_RES, OI_RTS, OI_EDGE };
 static const short kOgDispA[] = { OI_EDGEW, OI_EDGES, OI_CPERSP, OI_CPANINI, OI_CWIDTH, OI_VRON }; /* Breitbild wie Launcher */
@@ -175,6 +176,9 @@ static volatile LONG g_ov_qh, g_ov_qt;
 static volatile LONG g_ov_swallow_k, g_ov_swallow_m; /* verschluckte Spiel-Tasten/Maustasten */
 static volatile LONG g_ov_blocked_q;    /* gesperrte echte Tasten-Abfragen (key_down) */
 static int g_ov_was_open;               /* Render-Thread: letzter gesehener Zustand */
+static const char *volatile g_ov_why_req; /* W423: Grund der naechsten Oeffnung (Geraet/Tastenart, nie Eingabefolgen) */
+static const char *g_ov_why = "-";       /* W423: Grund der letzten Oeffnung (F11-Bericht) */
+const char *sb_ovl_open_why(void) { return g_ov_why; }
 static int g_ov_sel;                    /* gewaehlte Zeile (Index in der Seite) */
 static int g_ov_page;                   /* W121: 0 = Allgemein, 1 = Shader (W131: 2 = Shader 2) */
 static int g_ov_rts = -1;               /* W121/2: gewaehlte Welt-Aufloesung (rt_scale, wirkt nach Neustart) */
@@ -955,6 +959,11 @@ static void ov_change(int i, int dir)
         g_cfg.auto_gear = !g_cfg.auto_gear;
         HLOG_I("OVERLAY: auto_gear -> %d (f=%u)", g_cfg.auto_gear, g_present_no);
         break;
+    case OI_ALLY: /* W424: Einstellung gilt je Mission ab ihrem ersten Bild (laufende Mission bleibt wie gestartet) */
+        g_cfg.sb_allied_squads = !g_cfg.sb_allied_squads;
+        HLOG_I("OVERLAY: sb_allied_squads -> %d (ab naechster Mission, f=%u)", g_cfg.sb_allied_squads, g_present_no);
+        ov_status_key("ovl.st_ally");
+        break;
     case OI_STICKAIM: /* W271: wirkt sofort (Hook liest g_cfg je Poll) */
         g_cfg.stick_aim = !g_cfg.stick_aim;
         HLOG_I("OVERLAY: stick_aim -> %s (f=%u)", g_cfg.stick_aim ? "relative" : "position", g_present_no);
@@ -1446,6 +1455,7 @@ static const ov_key_t kOvKeys[] = {
     { "sbc_mouse_off", "input" }, /* W128 */
     { "aim_assist", "input" },      { "auto_gear", "input" }, /* W218, W236 */
     { "aim_turn", "input" }, /* W236: Altwert neutralisieren (immer 0) */
+    { "sb_allied_squads", "gameplay" }, /* W424 */
     { "stick_aim", "input" },       { "stick_aim_sens", "input" }, /* W271 */
     { "remaster", "remaster" },     { "hd_textures", "remaster" },
     { "hd_scale", "remaster" },     { "window_mode", "display" },
@@ -1509,6 +1519,7 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     else if (strcmp(k, "aim_assist") == 0) { v = g_cfg.aim_assist; } /* W236 */
     else if (strcmp(k, "aim_turn") == 0) { v = 0; } /* W236: Altwert (W218) neutral */
     else if (strcmp(k, "auto_gear") == 0) { v = g_cfg.auto_gear; }
+    else if (strcmp(k, "sb_allied_squads") == 0) { v = g_cfg.sb_allied_squads; } /* W424 */
     else if (strcmp(k, "stick_aim_sens") == 0) { v = g_cfg.stick_aim_sens; } /* W271 */
     else if (strcmp(k, "remaster") == 0) { v = g_cfg.remaster; }
     else if (strcmp(k, "hd_textures") == 0) { v = g_cfg.hd_textures; }
@@ -2169,9 +2180,9 @@ static int ov_ph_enabled(int it, const sb_photo_ui_t *u)
     switch (it) {
     case PR_FREECAM: return u->rec;
     case PR_MECH: return 0; /* Studie Stufe 3: nicht umgesetzt (BERICHT W195) */
-    case PR_ASPECT: return u->rec && u->view == SB_PV_WORLD; /* W290: Bildformat nur bei "nur Aussenwelt" */
-    case PR_MFX: return u->view != SB_PV_WORLD; /* W290: Aussenwelt hat keinen Monitor */
-    case PR_HUD: return u->view != SB_PV_WORLD && u->rec; /* W290: HUD aus braucht die Aufzeichnung */
+    case PR_ASPECT: return u->rec && u->world; /* W290: Bildformat nur bei "nur Aussenwelt" (W428: und Cinematic) */
+    case PR_MFX: return !u->world && u->view != SB_PV_CINE; /* W290: Aussenwelt hat keinen Monitor; W428: Cinematic schaltet ihn ab */
+    case PR_HUD: return !u->world && u->view != SB_PV_CINE && u->rec; /* W290: HUD aus braucht die Aufzeichnung */
     case PR_YAW: case PR_PITCH: case PR_DIST: case PR_RESET: return u->freecam;
     default: return 1;
     }
@@ -2208,11 +2219,13 @@ static void ov_ph_change(int it, int dir)
     sb_photo_ui_t u;
     sb_photo_get(&u);
     switch (it) {
-    case PR_VIEW: { /* W290: wie im Spiel -> ohne Cockpit -> nur Aussenwelt (ohne Aufzeichnung nicht) */
-        int v = (u.view + (dir < 0 ? 2 : 1)) % 3;
-        if (v == SB_PV_WORLD && !u.rec) { v = dir < 0 ? SB_PV_FLAT : SB_PV_GAME; ov_status_key("ovl.ph_st_norec"); }
+    case PR_VIEW: { /* W290: wie im Spiel -> ohne Cockpit -> nur Aussenwelt (ohne Aufzeichnung nicht); W428: -> Cinematic (nur SB) */
+        int nv = u.cine_ok ? SB_PV_N : SB_PV_CINE;
+        int v = (u.view + (dir < 0 ? nv - 1 : 1)) % nv;
+        if (v >= SB_PV_WORLD && !u.rec) { v = dir < 0 ? SB_PV_FLAT : SB_PV_GAME; ov_status_key("ovl.ph_st_norec"); }
         sb_photo_set_view(v);
         if (sb_photo_stepping()) { ov_status_key("ovl.ph_st_step"); }
+        else if (v == SB_PV_CINE) { ov_status_key("ovl.ph_st_cine"); } /* W428: was Cinematic tut */
         break;
     }
     case PR_FREECAM:
@@ -2220,19 +2233,19 @@ static void ov_ph_change(int it, int dir)
         sb_photo_set_freecam(!u.freecam);
         break;
     case PR_MFX: /* W290: die Live-Einstellung Monitor-Effekt (gilt weiter wie im ESC-Menue) */
-        if (u.view == SB_PV_WORLD) { ov_status_key("ovl.ph_st_mfx_world"); break; }
+        if (u.world || u.view == SB_PV_CINE) { ov_status_key(u.view == SB_PV_CINE ? "ovl.ph_st_cine" : "ovl.ph_st_mfx_world"); break; }
         sb_photo_set_effect(0, !u.monitor_fx);
         break;
     case PR_SHADER: sb_photo_set_effect(1, !u.shading); break;
     case PR_HUD: /* W290 */
-        if (u.view == SB_PV_WORLD) { ov_status_key("ovl.ph_st_mfx_world"); break; }
+        if (u.world || u.view == SB_PV_CINE) { ov_status_key(u.view == SB_PV_CINE ? "ovl.ph_st_cine" : "ovl.ph_st_mfx_world"); break; }
         if (!u.rec) { ov_status_key("ovl.ph_st_norec"); break; }
         g_cfg.photo_hud = g_cfg.photo_hud ? 0 : 1;
         HLOG_I("PHOTO: HUD %s (f=%u)", g_cfg.photo_hud ? "an" : "aus", g_present_no);
         break;
     case PR_MECH: ov_status_key("ovl.ph_st_mech"); break;
     case PR_ASPECT: /* W290: 4:3 (wie Monitor) <-> breit (experimentell); "Ausschnitt" nur per cfg */
-        if (!u.rec || u.view != SB_PV_WORLD) { ov_status_key("ovl.ph_st_aspect"); break; }
+        if (!u.rec || !u.world) { ov_status_key("ovl.ph_st_aspect"); break; }
         sb_photo_set_aspect(u.aspect == 2 ? 1 : 2);
         break;
     case PR_RES: { /* W290: Fenster, 4K, 8K, x2, x4, x8 */
@@ -2310,7 +2323,13 @@ static void ov_ph_tick(void)
     {
         int was = sb_photo_stepping();
         sb_photo_step_tick(); /* W290: Ansicht umschalten (Spiel laeuft kurz) */
-        if (was && !sb_photo_stepping()) { g_ov_status[0] = 0; g_ov_dirty = 1; }
+        if (was && !sb_photo_stepping()) {
+            sb_photo_ui_t u0;
+            sb_photo_get(&u0);
+            g_ov_status[0] = 0;
+            if (u0.view == SB_PV_CINE) { ov_status_key("ovl.ph_st_cine"); } /* W428: nach dem Umschalten erklaeren */
+            g_ov_dirty = 1;
+        }
     }
     sb_photo_get(&u);
     { /* Zensus (Aufzeichnung ja/nein) kommt mit dem ersten Pausenbild: Panel dann neu zeichnen */
@@ -2425,6 +2444,7 @@ static const char *ov_oi_home(int i)
     case OI_SAVELOCK: return "save_lock";
     case OI_ASSIST: return "aim_assist";
     case OI_AUTOGEAR: return "auto_gear";
+    case OI_ALLY: return "sb_allied_squads"; /* W424 */
     case OI_STICKAIM: return "stick_aim";
     case OI_STICKSENS: return "stick_aim_sens";
     case OI_VRSHELL: return "vr_shell";
@@ -2525,7 +2545,7 @@ static void ov_struct_check(void)
            ov_grp_vis(OG_VR));
     { /* W416 LOC-ESC-MENU: SB nichts gesperrt; LoC: erwartete Sperren/Ausblendungen; im LoC-Lauf Wertprobe */
         static const short kMustLock[] = { OI_SMON, OI_GRAIN, OI_CHIDE, OI_MONVIEW, OI_CPERSP, OI_ASSIST, OI_AUTOGEAR,
-                                           OI_SAVELOCK, OI_SLCOMMIT, OI_STEX, OI_VRON, OI_RPLABEL, OI_RPFX, OI_SGLOW,
+                                           OI_ALLY, OI_SAVELOCK, OI_SLCOMMIT, OI_STEX, OI_VRON, OI_RPLABEL, OI_RPFX, OI_SGLOW,
                                            OI_CLIGHT, OI_SLOOK, OI_CSAT, OI_SSAO, OI_LABEL };
         static const short kMustFree[] = { OI_FPS, OI_WINMODE, OI_RTS, OI_MMODE, OI_MSENS, OI_STICKAIM, OI_MPAUSE,
                                            OI_SHADING, OI_PRESET, OI_SSHADOW, OI_FOG, OI_LCKP, OI_AA, OI_WSHARP,
@@ -2788,6 +2808,7 @@ void sb_ovl_request_feedback(int clip)
     if (!g_cfg.overlay || g_ov_open || sb_clip_active()) { return; }
     if (InterlockedCompareExchange(&g_fb_hot_request, clip ? 2 : 1, 0)) { return; }
     if (!clip) {
+        g_ov_why_req = "feedback key"; /* W423 */
         InterlockedExchange(&g_ov_req, SC_FBKIND);
         InterlockedExchange(&g_ov_open, 1);
         if (!g_pn_net) { sb_pause_request(1, "Feedback hotkey"); } /* W357: im Netzspiel laeuft das Spiel weiter */
@@ -2806,6 +2827,7 @@ void sb_ovl_request_photo(const char *why)
     }
     HLOG_I("MENU: Fotomodus angefordert (%s)", why ? why : "");
     g_ph_from_menu = 0;
+    g_ov_why_req = "controller binding photo"; /* W423 */
     InterlockedExchange(&g_ov_req, SC_PHOTO);
     InterlockedExchange(&g_ov_open, 1);
 }
@@ -2852,6 +2874,7 @@ void sb_ovl_request_pause(const char *why)
     if (!g_cfg.overlay || g_ov_open) { return; }
     if (g_pn_net) { ov_pn_hint(1); return; } /* W357 */
     HLOG_I("MENU: Pause angefordert (%s)", why ? why : "");
+    g_ov_why_req = "controller/joystick binding pause"; /* W423 */
     InterlockedExchange(&g_ov_req, SC_PAUSED);
     InterlockedExchange(&g_ov_open, 1);
 }
@@ -2917,7 +2940,7 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         }
         if (wp == VK_ESCAPE) {
             if (!(lp & 0x40000000)) { /* keine Autowiederholung */
-                if (!g_ov_open) { ov_open_ui(g_cfg.game_menu ? SC_MENU : SC_SET); } /* W188: zuerst das Spielmenue */
+                if (!g_ov_open) { g_ov_why_req = "keyboard Esc"; ov_open_ui(g_cfg.game_menu ? SC_MENU : SC_SET); } /* W188: zuerst das Spielmenue; W423: Grund */
                 else { ov_qpush(VK_ESCAPE); } /* zurueck/zu entscheidet der Render-Thread je Bildschirm */
             }
             return 1;
@@ -2937,7 +2960,7 @@ int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
         if (!g_ov_textmode && !g_ov_open && sb_ov_key((unsigned)wp, (lp & 0x40000000) != 0)) { return 1; } /* W278: Original <-> eigene */
         if (!g_ov_textmode && wp != VK_F10 && ov_is_pause_vk((int)wp)) { /* W188: Pause-Taste */
             if (!(lp & 0x40000000)) {
-                if (!g_ov_open) { ov_open_ui(SC_PAUSED); }
+                if (!g_ov_open) { g_ov_why_req = "keyboard pause key"; ov_open_ui(SC_PAUSED); }
                 else { ov_qpush(OK_PAUSE); }
             }
             return 1;
@@ -3572,7 +3595,7 @@ static void ov_qs_tick(unsigned n)
             g_qs_notes = 0;
             g_qs_t0 = n;
             g_qs_ms0 = GetTickCount64();
-            if (g_cfg.photo_view == SB_PV_FLAT && !sb_flat_now()) {
+            if ((g_cfg.photo_view == SB_PV_FLAT || (g_cfg.photo_view == SB_PV_CINE && !g_sba_loc)) && !sb_flat_now()) { /* W428: Cinematic nutzt die Vollbild-Ansicht */
                 sb_flat_request(1);
                 g_qs_state = QS_FLAT;
             } else {
@@ -3755,6 +3778,7 @@ static void ov_frame(unsigned n)
         g_ov_notice_on = 1;
         HLOG_I("NOTICE: Hinweis offen (f=%u)", g_present_no);
         InterlockedExchange(&g_ov_welcome_on, 1);
+        g_ov_why_req = "notice (automatic)"; /* W423 */
         InterlockedExchange(&g_ov_req, SC_WELCOME);
         InterlockedExchange(&g_ov_open, 1);
         if (h) { PostMessageA(h, OV_MSG_OPENED, 0, 0); }
@@ -3770,6 +3794,7 @@ static void ov_frame(unsigned n)
             HLOG_I("WELCOME: Alpha-Hinweis offen (f=%u, Belegung %s)", g_present_no,
                    (g_fb_bind_known & 3) == 3 ? "aus Profil" : "Standard");
             InterlockedExchange(&g_ov_welcome_on, 1);
+            g_ov_why_req = "alpha notice (automatic, once per start)"; /* W423 */
             InterlockedExchange(&g_ov_req, SC_WELCOME);
             InterlockedExchange(&g_ov_open, 1);
             if (h) { PostMessageA(h, OV_MSG_OPENED, 0, 0); } /* Maus frei, gehaltene Spiel-Tasten los (UI-Thread) */
@@ -3791,6 +3816,14 @@ static void ov_frame(unsigned n)
             g_ov_mgen_seen = g_ov_mgen;
             InterlockedExchange(&g_ov_blocked_q, 0);
             HLOG_I("OVERLAY: offen (f=%u) -> echte Eingaben gehen ans Overlay", g_present_no);
+            { /* W423: Grund der Oeffnung (Geraet/Tastenart, keine Eingabefolgen) */
+                extern int krnl_loc_copy_done(void);
+                const char *w = g_ov_why_req;
+                g_ov_why_req = NULL;
+                g_ov_why = w ? w : (rq == SC_PHOTO ? "photo key" : "other");
+                HLOG_I("OVERLAY: Grund: %s (Bildschirm %ld, menu_pause=%d%s)", g_ov_why, (long)rq, g_cfg.menu_pause,
+                       g_sba_loc ? (krnl_loc_copy_done() ? ", LoC-Start fertig" : ", LoC-Start laeuft noch") : "");
+            }
         } else {
             HWND h = sb_render_hwnd();
             HLOG_I("OVERLAY: zu (f=%u; verschluckt: tasten=%ld maustasten=%ld, gesperrte Abfragen=%ld)", g_present_no,
@@ -3856,6 +3889,14 @@ static void ov_frame(unsigned n)
                 why = want ? "ESC-Menue" : "Netzspiel: ESC-Menue ohne Pause";
             }
             else { why = "menu_pause=0"; }
+            if (want && g_sba_loc && g_cfg.loc_boot_nopause && !OV_IS_FB(g_ov_scr) && g_ov_scr != SC_PHOTO) {
+                /* W423 LOC-XSB-LOOP: im LoC-Start (Kopie media\sndeff -> Z:, Logos) haelt das Menue das Spiel nicht an */
+                extern int krnl_loc_copy_done(void);
+                if (!krnl_loc_copy_done()) {
+                    want = 0;
+                    why = "LoC-Start laeuft (Kopie nach Z:), ohne Pause";
+                }
+            }
         }
         if (!want && g_qs_state == QS_PAUSE) { want = 1; why = "Schnell-Screenshot"; } /* W290 */
         sb_pause_request(want, why);
@@ -3866,6 +3907,17 @@ void sb_ovl_present_begin(unsigned n)
 {
     if (!g_cfg.overlay) { return; }
     if (!g_ov_init) { ov_init_state(); }
+    if (g_cfg.input_hold_test[0] && g_cfg.input_test_hook) { /* TEST(W423): Taste ab Bild 0 gehalten (Wiederholmeldungen) */
+        int vk = _stricmp(g_cfg.input_hold_test, "esc") == 0 ? VK_ESCAPE :
+                 _stricmp(g_cfg.input_hold_test, "pause") == 0 ? VK_PAUSE : 0;
+        HWND h = sb_render_hwnd();
+        static int said;
+        if (vk && h) {
+            /* Bit 30 = Taste war schon unten: so meldet Windows eine vor dem Fensterstart gehaltene Taste */
+            PostMessageA(h, WM_KEYDOWN, (WPARAM)vk, (LPARAM)(0x40000001u | (MapVirtualKeyA((UINT)vk, 0) << 16)));
+            if (!said) { said = 1; HLOG_I("TEST: Taste 0x%02X gehalten ab f=%u (synthetisch, input_hold_test)", vk, n); }
+        }
+    }
     sb_ov_tick(n); /* W278 ORIG-FLAG: Umschalten (Taste), Start-Hinweis; vor dem Menue-Takt */
     if (g_cfg.sbc_usb) { /* W305 JOY-HOTPLUG: Original-Controller getrennt/verbunden */
         int sev = sbc_wire_take_event();
@@ -4194,7 +4246,9 @@ static void ov_label(int i, wchar_t *o, size_t cap)
         /* W299 */
         "ovl.lb_rpfx",
         /* W319 */
-        "ovl.lb_monview" };
+        "ovl.lb_monview",
+        /* W424 */
+        "ovl.lb_ally" };
     ov_wkey(o, cap, lb[i]);
 }
 
@@ -4244,6 +4298,7 @@ static void ov_value(int i, wchar_t *o, size_t cap)
                         g_cfg.aim_assist == 1 ? "ovl.v_assist1" : "ovl.v_offorig");
         break;
     case OI_AUTOGEAR: ov_wkey(o, cap, g_cfg.auto_gear ? "ovl.v_on" : "ovl.v_off"); break;
+    case OI_ALLY: ov_wkey(o, cap, g_cfg.sb_allied_squads ? "ovl.v_on" : "ovl.v_offorig"); break; /* W424 */
     case OI_STICKAIM: ov_wkey(o, cap, g_cfg.stick_aim ? "ovl.v_stickrel" : "ovl.v_stickpos"); break; /* W271 */
     case OI_STICKSENS: _snwprintf_s(o, cap, _TRUNCATE, L"%d", g_cfg.stick_aim_sens); break;
     case OI_HD:
@@ -4880,12 +4935,12 @@ static void ov_paint_photo(void)
         }
         vb[0] = 0;
         switch (it) {
-        case PR_MFX: ov_wkey(vb, 80, u.monitor_fx ? "ovl.v_on" : "ovl.v_off"); break;
-        case PR_HUD: ov_wkey(vb, 80, g_cfg.photo_hud ? "ovl.v_on" : "ovl.v_off"); break; /* W290 */
+        case PR_MFX: ov_wkey(vb, 80, (u.monitor_fx && u.view != SB_PV_CINE) ? "ovl.v_on" : "ovl.v_off"); break;
+        case PR_HUD: ov_wkey(vb, 80, (g_cfg.photo_hud && u.view != SB_PV_CINE) ? "ovl.v_on" : "ovl.v_off"); break; /* W290; W428: Cinematic = aus */
         case PR_SHADER: ov_wkey(vb, 80, u.shading ? "ovl.ph_original" : "ovl.v_off"); break;
         case PR_VIEW: {
-            static const char *const vk3[3] = { "ovl.ph_v_game", "ovl.ph_v_flat", "ovl.ph_v_world" };
-            ov_wkey(vb, 80, u.stepping ? "ovl.ph_v_step" : vk3[u.view >= 0 && u.view <= 2 ? u.view : 0]);
+            static const char *const vk3[SB_PV_N] = { "ovl.ph_v_game", "ovl.ph_v_flat", "ovl.ph_v_world", "ovl.ph_v_cine" }; /* W428 */
+            ov_wkey(vb, 80, u.stepping ? "ovl.ph_v_step" : vk3[u.view >= 0 && u.view < SB_PV_N ? u.view : 0]);
             break;
         }
         case PR_ASPECT: {

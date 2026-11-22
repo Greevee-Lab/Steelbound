@@ -64,6 +64,10 @@ int app_xr_runtime_present(char *path_out, size_t cap);
  * 1 = Sprache gesetzt, 2 = randlos gewaehlt. */
 int app_firstrun_defaults(launcher_settings_t *s, unsigned langid, int work_w,
                           int work_h);
+/* W431 DEFAULT-BINDINGS: Neue Installation (kind == 0: keine user.cfg, kein Standard-Profil)
+ * ohne gesetztes input_profile -> "default_full", sofern profiles/default_full.ini im
+ * Client-Ordner liegt. Bestehende cfg (kind != 0) mit leerem Profil bleibt Legacy. 1 = gesetzt. */
+int app_firstrun_input_profile(launcher_settings_t *s, const char *client_dir, int kind);
 /* W217: Importiert das Modul (Datei oder geladenes Modul) die DLL `dll`?
  * 1 = ja, 0 = nein, -1 = nicht lesbar. Liest nur die Importtabelle. */
 int app_pe_imports(const wchar_t *file, HMODULE mod, const char *dll);
@@ -140,7 +144,14 @@ void w283_gui_selftest(const char *client_override, int *pass, int *fail);
 void w290_gui_selftest(const char *client_override, int *pass, int *fail); /* W290 QUICK-SHOT */
 void w303_gui_selftest(const char *client_override, int *pass, int *fail); /* W303 AUDIO-VOLUME */
 void w365_gui_selftest(const char *client_override, int *pass, int *fail); /* W365 BIND-COMBO */
+/* W432 HOTAS-AXES: Fake-Geraete WingMan (0) + Arduino (1) aus launcher.c, Belegungsdialog-Fall in
+ * launcher_gui.c. Nur Selbsttest (ijoy_test_*), nie im Spielerpfad. */
+int w432_fixture_plug(int acc, int thr_unk);
+void w432_fixture_tick(int t, int dev, int obj, long peak, int btn, long noise);
+void w432_gui_selftest(const char *client_override, int *pass, int *fail);
 void w419_gui_selftest(const char *client_override, int *pass, int *fail); /* W419 CTRL-EXPORT */
+void w430_selftest(int *pass, int *fail); /* W430 CTRL-IMPORT-FUZZ */
+int w430_ctrl_fuzz(long n, unsigned seed, char *why, size_t wc, long *stat);
 void w299_bind_selftest(int *pass, int *fail); /* W299 REPLAY: Zeile "Replay beenden" */
 
 #ifdef __cplusplus

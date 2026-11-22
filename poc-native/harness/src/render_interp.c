@@ -116,6 +116,10 @@ typedef struct {
     float mva[16];    /* W317: Matrix N-1 bei rzm */
     float pref[4][4]; /* 4 Bezugs-Vertices (erster, 1/3, 2/3, letzter): Plausibilitaet */
     float rn[4][3];   /* POPIN (W91): deren NDC x/y + w (einmal je Draw, fuer ip_cost) */
+    float prefw[4];   /* FIX(W429): echte Clip-w der Bezugs-Vertices bei P2 im RT (Strom schon durch w geteilt) */
+    unsigned char p2w; /* W429: 1 = prefw gueltig (w-Nebenpuffer dieses Draws aufgezeichnet) */
+    int exj;           /* W429 DIAG: exakter Durchgang, der interp_pass ausloeste */
+    unsigned char exr; /* W429 DIAG: gelerpter Draw nachtraeglich exakt (1 = interp_pass, 2 = Ablage Liste/indiziert) */
     unsigned sig, rawhash, outhash;
     int match;
     float col[4]; /* Clear */
@@ -267,6 +271,7 @@ static unsigned st_eyex_draws, st_eyex_verts, st_eyex_ln;
 /* W237: Vertex-Sprung-Statistik in zwischengerechneten Draws */
 static unsigned st_p2x_draws, st_p2x_verts, st_p2x_hit, st_jmp_verts, st_jmp_fp, st_p2x_ln;
 static unsigned st_p2rej; /* W406 interp_p2rej: P2-Draws statt reject gelerpt */
+static unsigned st_p2hom[2]; /* W429 interp_p2hom: reject mit gleichen Eingangsdaten gelerpt [0] 3D, [1] P2 */
 static unsigned st_jf[IP_W_N], st_jb[IP_W_N], st_jfd[IP_W_N]; /* W237: Sprung vor (beide w>0) / hinter der Kamera je why; Draws mit Sprung vorn */
 static unsigned st_wwhy[IP_W_N];
 static void ip_cw_rec(int li, unsigned vbcap, unsigned vstart, unsigned n, const float mvp[16],
@@ -335,8 +340,8 @@ static void ip_w_upload(ip_list_t *L)
 {
     D3D11_BOX b;
     L->wb_ok = 0;
-    if (!g_cfg.interp_hlerp || L->ipw_bad || !L->ipw || !L->nverts || L->nverts > L->ipwcap) {
-        if (g_cfg.interp_hlerp && L->nverts) { st_hw_fail++; }
+    if (!sb_ip_hlerp() || L->ipw_bad || !L->ipw || !L->nverts || L->nverts > L->ipwcap) {
+        if (sb_ip_hlerp() && L->nverts) { st_hw_fail++; }
         return;
     }
     if (!L->wb || L->wbcap < L->nverts) {
@@ -364,7 +369,7 @@ static void ip_hw_bind(ID3D11DeviceContext *c, const ip_list_t *B, const ip_list
 {
     ID3D11Buffer *vb[2];
     UINT st[2], of[2];
-    if (!g_cfg.interp_hlerp || !ip_hw_one) { return; }
+    if (!sb_ip_hlerp() || !ip_hw_one) { return; }
     if (B->wb_ok && A->wb_ok && B->wb && A->wb) {
         vb[0] = B->wb; vb[1] = A->wb;
         st[0] = st[1] = (UINT)sizeof(float);
@@ -1294,7 +1299,7 @@ static const char *kIP_VS =
     "  o.pos = c0 + ip_t * (c1 - c0);\n" /* gleiche Komponenten bleiben bitgenau (W73) */
     "#ifdef IP_EYE\n" /* FIX(W224 LINE-FLICKER): w-Wechsel -> Tick N (kein Lauf durch w=0) */
     "  if (ew0 * ew1 <= 0.0) { o.pos = c1; }\n"
-    "#ifdef IP_HW\n" /* FIX(W237): unplausibler Bildsprung vor der Kamera (Nahebene, Fehlpaarung) -> Tick N */
+    "#ifdef IP_JUMP\n" /* FIX(W237): unplausibler Bildsprung vor der Kamera (Nahebene, Fehlpaarung) -> Tick N (nicht im W429-Modus 3) */
     "  else if (ew0 > 0.0 && ew1 > 0.0) {\n"
     "    float2 n0 = c0.xy / c0.w, n1 = c1.xy / c1.w;\n"
     "    if (any(abs(n1 - n0) > IP_JUMP * (1.0 + max(abs(n0), abs(n1))))) { o.pos = c1; } }\n"
@@ -1429,12 +1434,13 @@ static int ip_init(void)
     for (i = 0; i < IP_LISTS; i++) { g_ipl[i].bbref = -1; }
     {
         /* FIX(W224 LINE-FLICKER): interp_eyefix=1 -> Variante mit IP_EYE */
-        char ipsrc[3072];
+        char ipsrc[4096];
+        const int hl = sb_ip_hlerp(); /* W429: Modus 3 = homogen ohne Bildsprung-Regel */
         _snprintf_s(ipsrc, sizeof ipsrc, _TRUNCATE, "%s%s%s%s%s",
                     (g_cfg.interp_guard || g_cfg.interp_guard_diag) ? "#define IP_GUARD 1\n" : "", /* W265 */
                     g_cfg.interp_eyefix ? "#define IP_EYE 1\n" : "",
-                    g_cfg.interp_hlerp ? "#define IP_HW 1\n#define IP_JUMP 0.5\n" : "",
-                    g_cfg.interp_hlerp >= 2 ? "#define IP_HWH 1\n" : "", kIP_VS); /* W237 */
+                    hl == 3 ? "#define IP_HW 1\n" : (hl ? "#define IP_HW 1\n#define IP_JUMP 0.5\n" : ""),
+                    hl >= 2 ? "#define IP_HWH 1\n" : "", kIP_VS); /* W237 */
         if (!sb_im_compile(ipsrc, "vs_4_0", &vsb)) { return 0; }
     }
     hr = ID3D11Device_CreateVertexShader(g_dev, vsb->lpVtbl->GetBufferPointer(vsb),
@@ -1453,7 +1459,7 @@ static int ip_init(void)
     el[4].Format = DXGI_FORMAT_R32_FLOAT; el[4].InputSlot = 3; el[4].AlignedByteOffset = 0;
     el[5].SemanticName = "IPW"; el[5].SemanticIndex = 1; /* Tick N-1 (Strom 4) */
     el[5].Format = DXGI_FORMAT_R32_FLOAT; el[5].InputSlot = 4; el[5].AlignedByteOffset = 0;
-    hr = ID3D11Device_CreateInputLayout(g_dev, el, g_cfg.interp_hlerp ? 6 : 4, vsb->lpVtbl->GetBufferPointer(vsb),
+    hr = ID3D11Device_CreateInputLayout(g_dev, el, sb_ip_hlerp() ? 6 : 4, vsb->lpVtbl->GetBufferPointer(vsb),
                                         vsb->lpVtbl->GetBufferSize(vsb), &ip_lay2);
     vsb->lpVtbl->Release(vsb);
     if (FAILED(hr)) { return 0; }
@@ -1464,7 +1470,7 @@ static int ip_init(void)
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &ip_cb0))) { return 0; }
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &ip_cb1))) { return 0; }
-    if (g_cfg.interp_hlerp) { /* FIX(W237): Ersatz-Strom w = 1 (Stride 0) fuer Ticks ohne w-Puffer */
+    if (sb_ip_hlerp()) { /* FIX(W237): Ersatz-Strom w = 1 (Stride 0) fuer Ticks ohne w-Puffer */
         static const float ones[4] = { 1.0f, 1.0f, 1.0f, 1.0f };
         D3D11_SUBRESOURCE_DATA sd;
         memset(&bd, 0, sizeof bd);
@@ -1569,6 +1575,17 @@ static void ip_rec_draw_core(const float pref[4][4], unsigned outhash, unsigned 
                              const float mvp[16], unsigned has_tex, int cls,
                              unsigned sig, unsigned rawhash, unsigned vstart, LONGLONG q0,
                              unsigned ib1, unsigned nsv);
+static float s_prefw[4]; /* FIX(W429): echte w der Bezugs-Vertices des naechsten Draws (P2 im RT) */
+static int s_prefw_ok;
+
+/* FIX(W429 M3-ROAD-FIX): wirksamer interp_hlerp-Modus. interp_hlerp gesetzt -> dieser (1/2 wie W237); sonst mit
+ * interp_p2hom (nur SB) Modus 3 = homogener Lerp der P2-Draws im RT mit echter Clip-w, W224-Regel mit echter w,
+ * OHNE die W237-Bildsprung-Regel - also dieselbe Regel je Vertex wie beim 3D-Pass derselben Geometrie. */
+int sb_ip_hlerp(void)
+{
+    if (g_cfg.interp_hlerp) { return g_cfg.interp_hlerp; }
+    return (g_cfg.interp_p2hom && !g_sba_loc) ? 3 : 0;
+}
 
 void sb_interp_rec_draw(const im_vertex_t *v, unsigned n, unsigned topo,
                         const float mvp[16], unsigned has_tex, int cls,
@@ -1592,7 +1609,15 @@ void sb_interp_rec_draw(const im_vertex_t *v, unsigned n, unsigned topo,
         const float *tw = g_ip_tw;
         unsigned twn = g_ip_tw_n, twp = g_ip_tw_prim;
         g_ip_tw = NULL;
-        if (g_cfg.interp_hlerp) { ip_w_rec(L, vstart, n, tw, twn, twp); }
+        if (sb_ip_hlerp()) { ip_w_rec(L, vstart, n, tw, twn, twp); }
+        if (tw && sb_ip_hlerp()) { /* FIX(W429): echte w der Bezugs-Vertices (Abbildung wie ip_w_rec) */
+            for (q = 0; q < 4u; q++) {
+                unsigned k = (n - 1u) * q / 3u;
+                unsigned s = (twp != 3u && twp != 6u && twp != 7u && twp != 8u && twp != 9u && twp != 10u && n <= twn) ? k : sb_im_exp_src(twp, twn, k);
+                s_prefw[q] = s < twn ? tw[s] : 1.0f;
+            }
+            s_prefw_ok = 1;
+        }
         if (g_cfg.interp_eyediag > 0) { ip_cw_rec(ip_rec, L->vbcap, vstart, n, mvp, v, NULL, 0, 0, tw, twn, twp); } /* DIAG(W224) */
     }
     ip_rec_draw_core((const float (*)[4])pref, sb_interp_hash(v, sizeof *v, n), n, topo, mvp,
@@ -1658,7 +1683,14 @@ void sb_interp_rec_draw_src(const im_vertex_t *src, unsigned prim, unsigned nsrc
         const float *tw = g_ip_tw;
         unsigned twn = g_ip_tw_n, twp = g_ip_tw_prim;
         g_ip_tw = NULL;
-        if (g_cfg.interp_hlerp) { ip_w_rec(L, vstart, nsv, tw, twn, ib1 ? 5u : twp); } /* W264: indiziert w je Quell-Vertex */
+        if (sb_ip_hlerp()) { ip_w_rec(L, vstart, nsv, tw, twn, ib1 ? 5u : twp); } /* W264: indiziert w je Quell-Vertex */
+        if (tw && sb_ip_hlerp()) { /* FIX(W429): echte w der Bezugs-Vertices (tw je Quell-Vertex) */
+            for (q = 0; q < 4u; q++) {
+                unsigned s = sb_im_exp_src(prim, nsrc, (n - 1u) * q / 3u);
+                s_prefw[q] = s < twn ? tw[s] : 1.0f;
+            }
+            s_prefw_ok = 1;
+        }
         if (g_cfg.interp_eyediag > 0) { ip_cw_rec(ip_rec, L->vbcap, vstart, n, mvp, NULL, src, prim, nsrc, tw, twn, twp); } /* DIAG(W224) */
     }
     step = n > 64u ? n / 64u : 1u; /* Stichprobe exakt wie sb_interp_hash */
@@ -1680,9 +1712,12 @@ static void ip_rec_draw_core(const float pref[4][4], unsigned outhash, unsigned 
 {
     ip_list_t *L = &g_ipl[ip_rec];
     ip_op_t *o;
+    const int pw = s_prefw_ok; /* W429 */
+    s_prefw_ok = 0;
     o = ip_new_op(L);
     if (!o) { return; }
     o->kind = IP_DRAW;
+    if (pw) { memcpy(o->prefw, s_prefw, sizeof o->prefw); o->p2w = 1; } /* W429 */
     o->cls = (unsigned char)(cls ? 1 : 0);
     o->topo = topo;
     memcpy(o->mvp, mvp, sizeof o->mvp);
@@ -1856,6 +1891,38 @@ static int ip_p2rej_ok(const ip_op_t *a, const ip_op_t *o, float maxjump)
         if (fabsf(x1 - x0) > maxjump || fabsf(y1 - y0) > maxjump) { return 0; }
         nin++;
     }
+    return nin > 0;
+}
+
+/* FIX(W429 M3-ROAD-FIX) interp_p2hom: Welt-Draw mit GLEICHEN Eingangsdaten (gleicher Eingangs-Hash und Vertexzahl:
+ * Vertex i <-> i ist derselbe Punkt), der an ip_plausible scheitert. Das Bodenstueck vor dem VT zeichnet das Spiel
+ * zweimal (P2 vorab transformiert und 3D mit Matrix, W406); ein einziger Bezugs-Vertex an der Augenebene bzw.
+ * hinter der Kamera (riesige bzw. gefaltete Bildlage) liess bisher einen Pass exakt stehen, waehrend der andere
+ * gelerpt wurde -> Schichten senkrecht versetzt, Spalt. Mit dem homogenen Lerp (hlerp-Modus 3) behandelt der VS
+ * jeden Vertex wie im 3D-Pass (Clip-Lerp, w-Wechsel -> Tick N); hier zaehlen darum nur Bezugs-Vertices, die in
+ * beiden Ticks vor der Kamera (echte w > 0) und im erweiterten Bild (|ndc| <= 2) liegen: mindestens einer, und alle
+ * diese springen hoechstens maxjump (Schnitt bzw. falsche Instanz -> weiter exakt). Fuer P2 und 3D dieselbe Regel.
+ * P2 nur mit echter w beider Ticks (sonst Bildraum-Lerp, bleibt exakt). 1 = lerpen. */
+static unsigned st_rr[4]; /* W429 Ablehnungsgruende: Daten neu, ohne echte w, kein Bezug im Bild, Sprung */
+static int ip_rej_relax(const ip_list_t *A, const ip_list_t *B, const ip_op_t *a, const ip_op_t *o, float maxjump)
+{
+    int q, nin = 0;
+    const int p2 = ip_mvp_affine(o->mvp);
+    if (a->rawhash != o->rawhash || a->nv != o->nv || p2 != ip_mvp_affine(a->mvp)) { st_rr[0]++; return 0; }
+    if (p2 && (!a->p2w || !o->p2w || !A->wb_ok || !B->wb_ok || sb_ip_hlerp() < 2)) { st_rr[1]++; return 0; }
+    for (q = 0; q < 4; q++) {
+        float c0[4], c1[4], w0, w1, x0, y0, x1, y1;
+        ip_clip(a->pref[q], a->mvp, c0);
+        ip_clip(o->pref[q], o->mvp, c1);
+        w0 = p2 ? a->prefw[q] * c0[3] : c0[3];
+        w1 = p2 ? o->prefw[q] * c1[3] : c1[3];
+        if (w0 <= 1e-6f || w1 <= 1e-6f || c0[3] == 0.0f || c1[3] == 0.0f) { continue; } /* hinter der Kamera: W224 je Vertex */
+        x0 = c0[0] / c0[3]; y0 = c0[1] / c0[3]; x1 = c1[0] / c1[3]; y1 = c1[1] / c1[3];
+        if (fabsf(x0) > 2.0f || fabsf(y0) > 2.0f || fabsf(x1) > 2.0f || fabsf(y1) > 2.0f) { continue; }
+        if (fabsf(x1 - x0) > maxjump || fabsf(y1 - y0) > maxjump) { st_rr[3]++; return 0; }
+        nin++;
+    }
+    if (!nin) { st_rr[2]++; }
     return nin > 0;
 }
 
@@ -2101,6 +2168,20 @@ static int ip_inst_closer(ip_list_t *B, unsigned oi, const ip_op_t *a, float c)
     return 0;
 }
 
+/* FIX(W429 M3-ROAD-FIX) interp_p2hom: zwei Vortick-Kandidaten, die Durchgaenge DERSELBEN Lage sind (gleiche
+ * Eingangsdaten, Vertexzahl, Matrix, Ziel und bitgleiche Bezugs-Vertices samt echter w), liefern im Zwischenbild
+ * dieselbe Lage (aus A kommt nur die Position, Farbe/UV aus Tick N) - die Wahl ist dann gleichgueltig und nicht
+ * mehrdeutig. Bisher wurden mehrfach gezeichnete Bodenstuecke (P2, ein Bezugs-Vertex an der Augenebene -> grosser
+ * Sprung c1 = c2 > 0,02) "nicht eindeutig" exakt, und per interp_pass alle Durchgaenge der Instanz mit ihnen
+ * (M3: ~8000 von ~8800 Spalt-Ecken exakt/gelerpt). Nur SB. */
+static int ip_same_pass(const ip_op_t *x, const ip_op_t *y)
+{
+    if (!g_cfg.interp_p2hom || g_sba_loc) { return 0; }
+    return x->nv == y->nv && x->rawhash == y->rawhash && x->rtv == y->rtv && x->p2w == y->p2w &&
+           memcmp(x->mvp, y->mvp, sizeof x->mvp) == 0 && memcmp(x->pref, y->pref, sizeof x->pref) == 0 &&
+           (!x->p2w || memcmp(x->prefw, y->prefw, sizeof x->prefw) == 0);
+}
+
 /* interp_inst=1: Partner fuer o (Index oi). -1 = keiner (neu im Bild bzw. nicht
  * eindeutig -> exakt). *amb = 1, wenn es Kandidaten gab, aber keiner eindeutig. */
 static int ip_pick_inst(ip_list_t *A, ip_list_t *B, unsigned oi, int *amb)
@@ -2114,7 +2195,7 @@ static int ip_pick_inst(ip_list_t *A, ip_list_t *B, unsigned oi, int *amb)
     if (n > 1) { st_imulti++; }
     if (c1 >= IP_COST_INF) { *amb = 1; return -1; }
     /* eindeutig: Zweitbester deutlich weiter weg (oder beide praktisch gleich nah) */
-    if (second >= 0 && c2 < 2.0f * c1 && c2 > 0.02f) { *amb = 1; return -1; }
+    if (second >= 0 && c2 < 2.0f * c1 && c2 > 0.02f && !ip_same_pass(&A->ops[best], &A->ops[second])) { *amb = 1; return -1; }
     if (ip_inst_closer(B, oi, &A->ops[best], c1)) { *amb = 1; return -1; }
     return best;
 }
@@ -3048,6 +3129,95 @@ static void li_rej_note(const ip_op_t *a, const ip_op_t *o)
     else { li_rj_j[mj < 0.75f ? 0 : mj < 1.0f ? 1 : mj < 2.0f ? 2 : 3]++; }
 }
 
+/* FIX(W429 M3-ROAD-FIX) interp_p2hom, zweite Stufe (nach der Zuordnung, vor interp_rawzc/interp_pass): exakte Welt-Draws
+ * mit gleichen Eingangsdaten wie ein Vortick-Draw.
+ * - reject (Partner gleicher Daten, an ip_plausible und ip_rej_relax gescheitert): Die 4 Bezugs-Vertices des grossen
+ *   Bodenstuecks unter dem VT liegen oft alle ausserhalb des Bildes bzw. hinter der Kamera (M3: ~1300-3600 je 300 Ticks).
+ * - nomatch mit Geometrie-Partner (gleiche Daten, Vertexzahl, Ziel; andere VS-Signatur) - so faellt der 3D-Pass des
+ *   Bodenstuecks oft aus, waehrend der P2-Pass gelerpt wird (bis ~10 px Versatz). Nur ein freier Partner.
+ * Ruht der Draw in der Welt, gilt fuer seine Clip-Lagen c_B ~ c_A * D mit der Kamerabewegung D = M_A^-1 * M_B des Ziels
+ * (rz_cam, 3D-Matrix-Paare wie W251/W284); geprueft an allen 4 Bezugs-Vertices in x, y, w (auch hinter der Kamera; P2:
+ * Clip-Lage aus Bildlage und echter w). Relative Abweichung <= 0,05 -> lerpen (Vertex i <-> i mit den eigenen
+ * Matrizen bzw. homogen; nomatch <= 0,02). Die Bodenstuecke weichen ~0,4 % vom Kamera-D ab (gleich fuer P2- und 3D-Pass, daher bleiben
+ * W251/W284 mit 1e-3 dort exakt); falsche Instanzen, Schnitte und Spruenge liegen bei O(1). reject zaehlt weiter als
+ * reject (Schnitt-Erkennung unveraendert). */
+#define P2HC_TOL 0.05f    /* reject: Partner aus der Instanz-Zuordnung */
+#define P2HC_TOL_NM 0.02f /* nomatch: Geometrie-Partner nur nach Lage gewaehlt -> strenger */
+static unsigned st_p2c[5]; /* gelerpt reject 3D, reject P2, nomatch 3D, nomatch P2, Kamera passt nicht */
+static unsigned st_p2e[6]; /* abgelehnt nach Fehler: <0,1 / <0,2 / <0,5 / <1 / >=1 / keine Kamera; DIAG-Verteilung */
+static unsigned st_p2ok[4]; /* angenommen nach Fehler: <1e-3 / <5e-3 / <2e-2 / <=0,05 */
+static float ip_p2hom_err(const ip_op_t *a, const ip_op_t *o, int p2, const double D[8][16], int nD)
+{
+    int x, q, j;
+    float best = 1e30f;
+    for (x = 0; x < nD; x++) {
+        float emax = 0.0f;
+        for (q = 0; q < 4 && emax <= best; q++) {
+            float c0[4], c1[4];
+            double p[4], dx, dy, dw, nb, e;
+            ip_clip(a->pref[q], a->mvp, c0);
+            ip_clip(o->pref[q], o->mvp, c1);
+            if (p2) { /* Strom schon durch w geteilt (w = 1): Clip-Lage = Bildlage * echte w */
+                for (j = 0; j < 3; j++) { c0[j] *= a->prefw[q]; c1[j] *= o->prefw[q]; }
+                c0[3] = a->prefw[q]; c1[3] = o->prefw[q];
+            }
+            for (j = 0; j < 4; j++) {
+                p[j] = c0[0] * D[x][0 * 4 + j] + c0[1] * D[x][1 * 4 + j] + c0[2] * D[x][2 * 4 + j] + c0[3] * D[x][3 * 4 + j];
+            }
+            dx = p[0] - c1[0]; dy = p[1] - c1[1]; dw = p[3] - c1[3];
+            nb = fabs(c1[0]) + fabs(c1[1]) + fabs(c1[3]) + fabs(p[0]) + fabs(p[1]) + fabs(p[3]);
+            e = nb > 1e-9 ? 2.0 * (fabs(dx) + fabs(dy) + fabs(dw)) / nb : 1.0;
+            if ((float)e > emax) { emax = (float)e; }
+        }
+        if (emax < best) { best = emax; }
+    }
+    return best;
+}
+static void ip_p2hom_cam(ip_list_t *A, ip_list_t *B)
+{
+    unsigned i;
+    int pre = 0;
+    for (i = 0; i < B->nops; i++) {
+        ip_op_t *o = &B->ops[i];
+        ip_op_t *a;
+        double D[8][16];
+        int nD, p2, g = -1, nm;
+        float best;
+        if (o->kind != IP_DRAW || !o->cls || o->flag) { continue; }
+        nm = o->why == IP_W_NOMATCH;
+        if (nm) {
+            if (o->match >= 0) { continue; }
+            g = ip_pick_geo(A, o, 0);
+            if (g < 0 || A->ops[g].taken) { continue; }
+            a = &A->ops[g];
+        } else {
+            if (o->why != IP_W_REJECT || o->match < 0 || (unsigned)o->match >= A->nops) { continue; }
+            a = &A->ops[o->match];
+        }
+        p2 = ip_mvp_affine(o->mvp);
+        if (a->kind != IP_DRAW || !a->cls || a->rawhash != o->rawhash || a->nv != o->nv || p2 != ip_mvp_affine(a->mvp) ||
+            a->rtv != o->rtv || a->ib1 != o->ib1) { continue; }
+        if (p2 && (!a->p2w || !o->p2w || !A->wb_ok || !B->wb_ok || sb_ip_hlerp() < 2)) { continue; }
+        if (!pre) { rz_cam_pre(A, B); pre = 1; }
+        nD = rz_cam(A, B, o, D);
+        best = nD ? ip_p2hom_err(a, o, p2, D, nD) : 1e30f;
+        if (best <= (nm ? P2HC_TOL_NM : P2HC_TOL)) {
+            if (nm) { o->match = g; a->taken = 1; }
+            o->flag = 1; o->why = IP_W_LERP; /* reject-Zaehler bleibt (Schnitt-Erkennung) */
+            st_p2c[(nm ? 2 : 0) + (p2 ? 1 : 0)]++;
+            st_p2ok[best < 1e-3f ? 0 : best < 5e-3f ? 1 : best < 2e-2f ? 2 : 3]++;
+        } else {
+            static unsigned nl;
+            st_p2c[4]++;
+            st_p2e[!nD ? 5 : best < 0.1f ? 0 : best < 0.2f ? 1 : best < 0.5f ? 2 : best < 1.0f ? 3 : 4]++;
+            if (g_cfg.seam_diag > 0 && nl < (unsigned)g_cfg.seam_diag && (g_cfg.pf_ring <= 0 || sb_pf_active())) { /* W429 DIAG */
+                nl++;
+                HLOG_I("P2HC f=%u i=%u n=%u p2=%d %s kameras=%d fehler=%.3g", B->frame, i, o->nv, p2, nm ? "nomatch" : "reject", nD, (double)best);
+            }
+        }
+    }
+}
+
 static int ip_match(ip_list_t *A, ip_list_t *B, int log)
 {
     unsigned i, jp = 0, ndraw = 0, nclr = 0, nworld = 0, nmatch = 0, nlerp = 0,
@@ -3171,10 +3341,15 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
             if (ip_still(a, o)) { nstatic++; o->why = IP_W_STATIC; }
             else if (ip_plausible(a, o, g_cfg.interp_maxjump)) { o->flag = 1; nlerp++; o->why = IP_W_LERP; }
             else if (g_cfg.interp_p2rej && ip_p2rej_ok(a, o, g_cfg.interp_maxjump)) { o->flag = 1; nlerp++; o->why = IP_W_LERP; st_p2rej++; } /* W406 */
+            else if (g_cfg.interp_p2hom && !g_sba_loc && !g_cfg.vr_enable && ip_rej_relax(A, B, a, o, g_cfg.interp_maxjump)) {
+                /* FIX(W429): reject-Zaehler bleibt (Schnitt-Erkennung "viele unplausible Spruenge" unveraendert) */
+                nreject++; o->flag = 1; o->why = IP_W_LERP; st_p2hom[ip_mvp_affine(o->mvp) ? 1 : 0]++;
+            }
             else { nreject++; o->why = IP_W_REJECT; if (g_sba_loc && g_cfg.interp_diag >= 1) { li_rej_note(a, o); } }
             if (iwbest >= 0 && o->why == IP_W_LERP) { ip_iwrong_log(A, B, i, found, iwbest); } /* DIAG(POPIN,W91) */
         }
     }
+    if (g_cfg.interp_p2hom && !g_sba_loc && !g_cfg.vr_enable) { ip_p2hom_cam(A, B); } /* FIX(W429) vor interp_pass */
     if (g_cfg.interp_rawzc) {
         /* FIX(W284 INTERP-RAWCHG): "rawchg" = gleiche Signatur, neue Eingangsdaten, Vertex-Lerp an
          * ip_plausible gescheitert (Bezugs-Vertices wechseln die Augenebene oder springen weit) -> bisher
@@ -3577,11 +3752,16 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
                 for (j = ph[k]; j >= 0; j = pn[j]) {
                     const ip_op_t *e = &B->ops[j];
                     if (e->gkey == o->gkey && e->rtv == o->rtv && e->rawhash == o->rawhash && e->nv == o->nv &&
-                        memcmp(e->mvp, o->mvp, sizeof o->mvp) == 0) { same = 1; break; }
+                        memcmp(e->mvp, o->mvp, sizeof o->mvp) == 0 &&
+                        /* FIX(W429): P2 (vorab transformiert) traegt nur die Bildraum-Matrix - gleiche Matrix heisst dort
+                         * NICHT gleiche Instanz (dasselbe Gelaende-Netz an anderer Stelle). Instanz = gleiche Bildlage. */
+                        !(g_cfg.interp_p2hom && !g_sba_loc && ip_mvp_affine(o->mvp) && memcmp(e->pref, o->pref, sizeof o->pref) != 0)) {
+                        same = 1; o->exj = j; break;
+                    }
                 }
                 if (!same) { nfalse++; hit = 0; }
             }
-            if (hit) { o->flag = 0; npass++; }
+            if (hit) { o->flag = 0; npass++; o->exr = 1; }
         }
         st_ipass += npass;
         st_ipass_false += nfalse;
@@ -3705,7 +3885,7 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
     for (i = 0; i < B->nops; i++) { /* W264 DRAW-OPT2: Lerp nur zwischen gleich abgelegten Draws (beide Liste oder beide indiziert) */
         ip_op_t *o = &B->ops[i];
         if (o->kind == IP_DRAW && o->flag && o->match >= 0 && (unsigned)o->match < A->nops &&
-            A->ops[o->match].ib1 != o->ib1 && !(o->rzb && (g_cfg.interp_streak & 4))) { o->flag = 0; if (nlerp) { nlerp--; } } /* W294: rzb liest nur B */
+            A->ops[o->match].ib1 != o->ib1 && !(o->rzb && (g_cfg.interp_streak & 4))) { o->flag = 0; o->exr = 2; if (nlerp) { nlerp--; } } /* W294: rzb liest nur B */
     }
     if (g_cfg.interp_eyediag > 0) { /* DIAG(W237): Zuordnungs-Ergebnis der Welt-Draws (cls=1) */
         for (i = 0; i < B->nops; i++) {
@@ -5289,6 +5469,48 @@ static int ip_ph_is_hud(const ip_op_t *o)
     if (ip_ph.wld >= 0 && o->sh_srv && o->sh_srv == g_ish[ip_ph.wld].srv) { return 0; }
     return 1;
 }
+/* W428 PHOTO-CINEMATIC: Draw des eigenen VT (nur Foto-Wiedergabe mit cine): 3D-Draw in das Welt-RT, dessen
+ * Modell-Ursprung naeher als photo_cine_self/10 Einheiten an der Spielkamera liegt. Lage aus der mvp und der
+ * Spiel-Projektion des Draws (Zeilenvektoren: Ursprung -> Clip = Zeile 3; x = m12/a, y = m13/b, Tiefe = w = m15).
+ * Draws mit Pixel-Matrix (P2/RHW, auf der CPU transformiert) tragen keine Sicht-Lage und bleiben. */
+static unsigned ip_ph_nself; /* ausgelassene Draws des eigenen VT (cine) */
+static int ip_ph_is_self(const ip_op_t *o)
+{
+    const vsh_prog_t *vp;
+    float a, b, x, y, z, r;
+    if (!ip_ph.cine || ip_ph.wld < 0 || o->kind != IP_DRAW || !o->cls || o->sh_rtv != g_ish[ip_ph.wld].rtv) { return 0; }
+    vp = o->pvs ? vsh_program(o->pvs) : NULL;
+    if (vp && vp->kind == 2) { return (g_cfg.photo_cine_diag & 2) ? 1 : 0; } /* DIAG(W428): P2 testweise aus */
+    if (o->mvp[3] == 0.0f && o->mvp[7] == 0.0f && o->mvp[11] == 0.0f && o->mvp[15] == 1.0f) { return 0; } /* Pixel-Matrix */
+    a = o->prj[0];
+    b = o->prj[1];
+    r = (float)g_cfg.photo_cine_self * 0.1f;
+    if (a <= 1e-4f || b <= 1e-4f || r <= 0.0f) { return 0; }
+    x = o->mvp[12] / a;
+    y = o->mvp[13] / b;
+    z = o->mvp[15];
+    if (x * x + y * y + z * z > r * r) { return 0; }
+    static unsigned s_ndg;
+    if ((g_cfg.photo_cine_diag & 1) && s_ndg < 200u) {
+        s_ndg++;
+        HLOG_I("PHOTO cine: eigener VT nv=%u tex=%x Ursprung %.2f,%.2f,%.2f (Abstand %.2f)", o->nv, o->has_tex, (double)x,
+               (double)y, (double)z, sqrt((double)(x * x + y * y + z * z)));
+    }
+    return 1;
+}
+/* W428: Einblendung (Cinematic): Draw ins Monitor-RT, der nicht das Welt-RT kopiert (HUD-Glyphen, Marken, Radar,
+ * FRONT VIEW, Texte), bzw. Draw in den Backbuffer, der weder das Monitor-RT noch das Welt-RT zeigt (Einblendungen
+ * und Cockpit-Reste der Vollbild-Ansicht). Ohne Monitor-RT bzw. Welt-RT im Zensus: nichts auslassen. */
+static unsigned ip_ph_ncmfx, ip_ph_ncovl;
+static int ip_ph_cine_ovl(const ip_op_t *o, int bb)
+{
+    ID3D11ShaderResourceView *ws = ip_ph.wld >= 0 ? g_ish[ip_ph.wld].srv : NULL;
+    ID3D11ShaderResourceView *ms = ip_ph.mon >= 0 ? g_ish[ip_ph.mon].srv : NULL;
+    if (!ws) { return 0; }
+    if (ms && o->sh_rtv == g_ish[ip_ph.mon].rtv) { return o->sh_srv != ws; }
+    if (bb) { return o->sh_srv != ws && (!ms || o->sh_srv != ms); }
+    return 0;
+}
 static ID3D11ShaderResourceView *ip_ph_shsrv[8]; /* Schatten-SRV der skalierten Eintraege (gesetzt in ip_pl_render) */
 
 static ID3D11ShaderResourceView *ip_ph_srv(ID3D11ShaderResourceView *s)
@@ -5960,6 +6182,11 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
         }
         if (ip_pl_on && o->nolerp && (ip_pl_mfx & (o->nolerp == MFX_WASH ? 1u : 2u))) { ip_pl_nmfx++; continue; } /* W193: monitor_fx aus */
         if (ip_ph.on && ip_ph.hud_off && ip_ph_is_hud(o)) { ip_ph_nhud++; continue; } /* W290: HUD aus (nur Foto) */
+        if (ip_ph.on && ip_ph.cine && o->kind == IP_DRAW) { /* W428 PHOTO-CINEMATIC (nur Foto-Wiedergabe) */
+            if (ip_ph_is_self(o)) { ip_ph_nself++; continue; } /* eigener VT im Welt-RT */
+            if (o->nolerp) { ip_ph_ncmfx++; continue; } /* Monitor-Effekt (Korn-Wash/Stoerzeilen) */
+            if (ip_ph_cine_ovl(o, B->bbref >= 0 && o->sh_rtv == g_ish[B->bbref].rtv)) { ip_ph_ncovl++; continue; } /* Einblendungen (Radar, FRONT VIEW, Marken, Texte) */
+        }
         if (vtk && vt_skip[i]) { continue; } /* W183 VR-FIX3: RT-Op, Ziel hat den Tick-Endstand */
         if ((g_cfg.loc_interp_dbg & 1) && g_sba_loc && lerp_ok && !dbg && o->kind == IP_DRAW && o->cls && !o->flag) { continue; } /* DIAG(W349) */
         if ((ccm & 3) && i < (unsigned)cc_pfx) { /* W146 GPU-COST: BB-Anfang aus dem Cockpit-Cache */
@@ -6583,12 +6810,13 @@ static void ip_diag_tick(ip_list_t *A, int ai, ip_list_t *B, int bi)
  * der Vortick-Lagen bei rein gelerpten Gruppen (sprA: Partner-Vertices zeigen auf verschiedene Weltpunkte).
  * Zeilen SEAM (erste N Ticks mit Fund, mit pf_ring nur in den Bildfolgen), SEAMW (schlimmste Gruppen),
  * SEAMSUM (alle 200 Ticks, je Paar-Klasse). Nur Diagnose, Bild unveraendert. W410: KEIL/KEILSUM (alle 100 Ticks). */
-typedef struct { unsigned long long key; unsigned op; float tx, ty, ax, ay, nx, ny; unsigned char why, flag, rzb, rt; } sd_ent_t;
+typedef struct { unsigned long long key; unsigned op; float tx, ty, ax, ay, nx, ny, ew0, ew1; unsigned k; unsigned char why, flag, rzb, rt; } sd_ent_t; /* W429: ew0/ew1 echte w N-1/N, k Vertex */
 static sd_ent_t *sd_e;
 static unsigned sd_cap;
 static unsigned sd_cls_n[IP_W_N * IP_W_N + 1], sd_cls_bad[IP_W_N * IP_W_N + 1];
 static float sd_cls_max[IP_W_N * IP_W_N + 1];
 static unsigned sd_ticks, sd_lines, sd_groups, sd_bad05, sd_bad2, sd_badA;
+static unsigned sd_mx[2][7]; /* W429 DIAG: exakte Seite gemischter Spalte [3D|P2][Vertex-Regel, interp_pass, Ablage, nomatch, rawchg, reject, sonst] */
 static unsigned sd_rj_draws[2], sd_rj_verts[2], sd_rj_bad[2], sd_rjl; /* [0] 3D-Matrix, [1] P2 (vorab transformiert) */
 static float sd_rj_max[2], sd_rj_dy[2];
 static double sd_rj_sum[2];
@@ -6693,7 +6921,7 @@ static void ip_seam_diag(ip_list_t *A, int ai, ip_list_t *B, int bi)
     ID3D11RenderTargetView *rts[16];
     unsigned nrt = 0, ne = 0, i, k, g0, gtick = 0, gbad05 = 0, gbad2 = 0, gbadA = 0;
     double tmax = 0.0;
-    struct { float s, dy; unsigned i0, i1, w0, w1; float x, y; } worst[3];
+    struct { float s, dy; unsigned i0, i1, w0, w1; float x, y; float e[4]; unsigned k0, k1; } worst[3]; /* W429: e = echte w N-1/N beider Ecken */
     memset(worst, 0, sizeof worst);
     if (!PA || !PB || !A || !B || !(g_sba_loc ? loc_render_interp_mission() : sb_in_mission()) ||
         (g_cfg.pf_ring > 0 && !sb_pf_active())) { return; } /* mit pf_ring nur in den Bildfolgen; W410: auch LoC-Mission */
@@ -6715,6 +6943,7 @@ static void ip_seam_diag(ip_list_t *A, int ai, ip_list_t *B, int bi)
             float c1[4], c[4], c0[4], px, py;
             int q, lerp = 0;
             long long qx, qy;
+            float sew0 = 0.0f, sew1 = 0.0f; /* W429 DIAG */
             ip_clip(PB[o->vstart + k], o->mvp, c1);
             if (c1[3] <= 1e-6f) { continue; }
             px = o->vp.TopLeftX + (c1[0] / c1[3] * 0.5f + 0.5f) * o->vp.Width;
@@ -6723,10 +6952,36 @@ static void ip_seam_diag(ip_list_t *A, int ai, ip_list_t *B, int bi)
             memcpy(c, c1, sizeof c);
             c0[0] = c0[1] = c0[2] = 0.0f; c0[3] = -1.0f;
             if (o->flag && a && (o->rzb || k < a->nv)) {
+                /* W429: wie der Zwischenbild-VS - echte w (interp_hlerp-Strom), homogener Lerp (Modus >= 2),
+                 * W224-Regel mit echter w, Bildsprung-Regel nur in den W237-Modi 1/2 */
+                float hw0 = 1.0f, hw1 = 1.0f, ew0, ew1, h0[4], h1[4];
+                const int hl = sb_ip_hlerp();
+                int pre = 0;
                 ip_clip(o->rzb ? PB[o->vstart + k] : PA[a->vstart + k], IP_AMVP(o, a), c0);
-                if (!(g_cfg.interp_eyefix && c0[3] * c1[3] <= 0.0f)) {
-                    for (q = 0; q < 4; q++) { c[q] = (1.0f - T) * c0[q] + T * c1[q]; }
-                    lerp = 1;
+                if (hl && A->wb_ok && B->wb_ok && A->ipw && B->ipw && o->vstart + k < B->ipwcap &&
+                    (o->rzb || a->vstart + k < A->ipwcap)) {
+                    hw1 = B->ipw[o->vstart + k];
+                    hw0 = o->rzb ? hw1 : A->ipw[a->vstart + k];
+                }
+                ew0 = c0[3] * hw0; ew1 = c1[3] * hw1;
+                sew0 = ew0; sew1 = ew1;
+                memcpy(h0, c0, sizeof h0); memcpy(h1, c1, sizeof h1);
+                if (hl >= 2 && c0[3] == 1.0f && c1[3] == 1.0f) {
+                    pre = 1;
+                    for (q = 0; q < 4; q++) { h0[q] *= hw0; h1[q] *= hw1; }
+                }
+                if (!(g_cfg.interp_eyefix && ew0 * ew1 <= 0.0f)) {
+                    int jmp = 0;
+                    if (g_cfg.interp_eyefix && hl && hl != 3 && ew0 > 0.0f && ew1 > 0.0f) {
+                        float nx0 = c0[0] / c0[3], ny0 = c0[1] / c0[3], nx1 = c1[0] / c1[3], ny1 = c1[1] / c1[3];
+                        jmp = fabsf(nx1 - nx0) > 0.5f * (1.0f + fmaxf(fabsf(nx0), fabsf(nx1))) ||
+                              fabsf(ny1 - ny0) > 0.5f * (1.0f + fmaxf(fabsf(ny0), fabsf(ny1)));
+                    }
+                    if (!jmp) {
+                        for (q = 0; q < 4; q++) { c[q] = (1.0f - T) * h0[q] + T * h1[q]; }
+                        if (pre && c[3] != 0.0f) { c[0] /= c[3]; c[1] /= c[3]; c[2] /= c[3]; c[3] = 1.0f; }
+                        lerp = 1;
+                    }
                 }
             }
             if (c[3] <= 1e-6f) { continue; }
@@ -6747,6 +7002,7 @@ static void ip_seam_diag(ip_list_t *A, int ai, ip_list_t *B, int bi)
             sd_e[ne].flag = (unsigned char)(lerp ? 1 : 0);
             sd_e[ne].rzb = (unsigned char)(o->rzb != 0);
             sd_e[ne].rt = (unsigned char)r;
+            sd_e[ne].ew0 = sew0; sd_e[ne].ew1 = sew1; sd_e[ne].k = k;
             ne++;
         }
     }
@@ -6819,6 +7075,13 @@ static void ip_seam_diag(ip_list_t *A, int ai, ip_list_t *B, int bi)
             if (best > 0.5f) {
                 sd_cls_bad[cl]++;
                 gbad05++;
+                if (cl == IP_W_N * IP_W_N) { /* W429 DIAG: warum ist die exakte Ecke exakt? */
+                    const sd_ent_t *ee = sd_e[bx].flag ? &sd_e[by] : &sd_e[bx];
+                    const ip_op_t *eo = &B->ops[ee->op];
+                    unsigned c = eo->flag ? 0u : eo->exr == 1 ? 1u : eo->exr == 2 ? 2u : eo->why == IP_W_NOMATCH ? 3u :
+                                 eo->why == IP_W_RAWCHG ? 4u : eo->why == IP_W_REJECT ? 5u : 6u;
+                    sd_mx[ip_mvp_affine(eo->mvp) ? 1 : 0][c]++;
+                }
                 if (best > 2.0f) { gbad2++; }
                 if (best > sd_cls_max[cl]) { sd_cls_max[cl] = best; }
                 for (x = 0; x < 3; x++) {
@@ -6829,6 +7092,8 @@ static void ip_seam_diag(ip_list_t *A, int ai, ip_list_t *B, int bi)
                         worst[x].w0 = sd_e[bx].why | ((unsigned)sd_e[bx].flag << 8) | ((unsigned)sd_e[bx].rzb << 9);
                         worst[x].w1 = sd_e[by].why | ((unsigned)sd_e[by].flag << 8) | ((unsigned)sd_e[by].rzb << 9);
                         worst[x].x = sd_e[bx].nx; worst[x].y = sd_e[bx].ny;
+                        worst[x].e[0] = sd_e[bx].ew0; worst[x].e[1] = sd_e[bx].ew1; worst[x].k0 = sd_e[bx].k;
+                        worst[x].e[2] = sd_e[by].ew0; worst[x].e[3] = sd_e[by].ew1; worst[x].k1 = sd_e[by].k;
                         break;
                     }
                 }
@@ -6849,6 +7114,17 @@ static void ip_seam_diag(ip_list_t *A, int ai, ip_list_t *B, int bi)
                    B->frame, k, (double)worst[k].s, (double)worst[k].dy, (double)worst[k].x, (double)worst[k].y,
                    worst[k].i0, o0->nv, kIP_WHY[worst[k].w0 & 0xFF], (worst[k].w0 >> 8) & 1u, (worst[k].w0 >> 9) & 1u, o0->match,
                    worst[k].i1, o1->nv, kIP_WHY[worst[k].w1 & 0xFF], (worst[k].w1 >> 8) & 1u, (worst[k].w1 >> 9) & 1u, o1->match);
+            if (o0->exr == 1 && o0->exj >= 0 && (unsigned)o0->exj < B->nops) { /* W429 DIAG: ausloesender exakter Durchgang */
+                const ip_op_t *e = &B->ops[o0->exj];
+                HLOG_I("SEAMP f=%u i=%u -> j=%d %s m=%d n=%u p2w=%u gleiche_lage=%d", B->frame, worst[k].i0, o0->exj,
+                       kIP_WHY[e->why < IP_W_N ? e->why : 0], e->match, e->nv, e->p2w,
+                       memcmp(e->pref, o0->pref, sizeof e->pref) == 0);
+            }
+            HLOG_I("SEAMV f=%u #%u A: i=%u k=%u p2=%u ex=%u ib=%u/%u w=%.4g->%.4g | B: i=%u k=%u p2=%u ex=%u ib=%u/%u w=%.4g->%.4g", B->frame, k, /* W429 DIAG */
+                   worst[k].i0, worst[k].k0, (unsigned)ip_mvp_affine(o0->mvp), o0->exr, o0->ib1,
+                   (o0->match >= 0 && (unsigned)o0->match < A->nops) ? A->ops[o0->match].ib1 : 99u, (double)worst[k].e[0], (double)worst[k].e[1],
+                   worst[k].i1, worst[k].k1, (unsigned)ip_mvp_affine(o1->mvp), o1->exr, o1->ib1,
+                   (o1->match >= 0 && (unsigned)o1->match < A->nops) ? A->ops[o1->match].ib1 : 99u, (double)worst[k].e[2], (double)worst[k].e[3]);
         }
     }
     if (sd_ticks >= 200u) {
@@ -6872,6 +7148,10 @@ static void ip_seam_diag(ip_list_t *A, int ai, ip_list_t *B, int bi)
                sd_rj_draws[1] ? sd_rj_sum[1] / sd_rj_draws[1] : 0.0, (double)sd_rj_dy[1],
                sd_rj_draws[0], sd_rj_verts[0], sd_rj_bad[0], (double)sd_rj_max[0],
                sd_rj_draws[0] ? sd_rj_sum[0] / sd_rj_draws[0] : 0.0, (double)sd_rj_dy[0]);
+        HLOG_I("SEAMX ticks=%u exakte_seite 3d: vertex=%u pass=%u ablage=%u nomatch=%u rawchg=%u reject=%u sonst=%u | p2: vertex=%u pass=%u ablage=%u nomatch=%u rawchg=%u reject=%u sonst=%u",
+               sd_ticks, sd_mx[0][0], sd_mx[0][1], sd_mx[0][2], sd_mx[0][3], sd_mx[0][4], sd_mx[0][5], sd_mx[0][6],
+               sd_mx[1][0], sd_mx[1][1], sd_mx[1][2], sd_mx[1][3], sd_mx[1][4], sd_mx[1][5], sd_mx[1][6]); /* W429 DIAG */
+        memset(sd_mx, 0, sizeof sd_mx);
         memset(sd_rj_draws, 0, sizeof sd_rj_draws); memset(sd_rj_verts, 0, sizeof sd_rj_verts); memset(sd_rj_bad, 0, sizeof sd_rj_bad);
         memset(sd_rj_max, 0, sizeof sd_rj_max); memset(sd_rj_dy, 0, sizeof sd_rj_dy); memset(sd_rj_sum, 0, sizeof sd_rj_sum);
         sd_ticks = sd_groups = sd_bad05 = sd_bad2 = sd_badA = 0;
@@ -8389,7 +8669,7 @@ static void ip_stat_log(void)
         st_bb_ok = st_bb_far = st_bb_no = st_bb_build = 0;
         st_bb_ms = 0.0;
     }
-    if (g_cfg.interp_hlerp) { /* FIX(W237) */
+    if (sb_ip_hlerp()) { /* FIX(W237) */
         HLOG_I("INTERP hlerp: ticks=%u fehl=%u draws=%u ersatz=%u (homogener Zwischenbild-Lerp, w-Puffer je Tick)",
                st_hw_up, st_hw_fail, st_hw_draws, st_hw_one);
     }
@@ -8435,6 +8715,18 @@ static void ip_stat_log(void)
         HLOG_I("INTERP streak: modus=%d rawlerp_versatz=%u davon_welt=%u kamera_abw=%u rawchg_ohne_tiefe=%u",
                g_cfg.interp_streak, st_sk_rlofs, st_sk_rl, st_sk_rlcam, st_sk_nod);
         st_sk_rlofs = st_sk_rl = st_sk_rlcam = st_sk_nod = 0;
+    }
+    if (g_cfg.interp_p2hom && !g_sba_loc) { /* FIX(W429) */
+        HLOG_I("INTERP p2hom: hlerp=%d reject_gelerpt_3d=%u reject_gelerpt_p2=%u (gleiche Eingangsdaten, Bezugs-Vertices im Bild springen wenig)"
+               " exakt_daten_neu=%u exakt_ohne_w=%u exakt_kein_bezug=%u exakt_sprung=%u",
+               sb_ip_hlerp(), st_p2hom[0], st_p2hom[1], st_rr[0], st_rr[1], st_rr[2], st_rr[3]);
+        HLOG_I("INTERP p2cam: reject_3d=%u reject_p2=%u nomatch_3d=%u nomatch_p2=%u kamera_abw=%u fehler_ok=%u/%u/%u/%u"
+               " fehler_abw=%u/%u/%u/%u/%u ohne_kamera=%u (Welt-Ruhe-Pruefung, Grenze 0,05 bzw. nomatch 0,02)",
+               st_p2c[0], st_p2c[1], st_p2c[2], st_p2c[3], st_p2c[4], st_p2ok[0], st_p2ok[1], st_p2ok[2], st_p2ok[3],
+               st_p2e[0], st_p2e[1], st_p2e[2], st_p2e[3], st_p2e[4], st_p2e[5]);
+        st_p2hom[0] = st_p2hom[1] = 0;
+        memset(st_p2c, 0, sizeof st_p2c); memset(st_p2e, 0, sizeof st_p2e); memset(st_p2ok, 0, sizeof st_p2ok);
+        memset(st_rr, 0, sizeof st_rr);
     }
     if (g_cfg.interp_p2rej) { /* OPTION(W406) */
         HLOG_I("INTERP p2rej: gelerpt=%u (P2-Draws mit gleichen Eingangsdaten, sonst reject)", st_p2rej);
@@ -8739,7 +9031,15 @@ ID3D11Resource *sb_interp_photo_render(const sb_ph_rep_t *ph, sb_pl_info_t *inf,
     ID3D11Resource *r;
     ip_ph_ncam = ip_ph_nred = ip_ph_nclr = 0;
     ip_ph_nhud = 0;
+    ip_ph_nself = ip_ph_ncmfx = ip_ph_ncovl = 0;
     r = ip_pl_render(inf, ph);
+    if (ph && ph->cine) { /* W428 */
+        static unsigned nlog;
+        if (nlog++ < 12u) {
+            HLOG_I("PHOTO: Cinematic - ausgelassen: %u Draws des eigenen VT (Welt-RT e%d), %u Monitor-Effekt, %u Einblendungen "
+                   "(Monitor-RT e%d / Backbuffer)", ip_ph_nself, ph->wld, ip_ph_ncmfx, ip_ph_ncovl, ph->mon);
+        }
+    }
     if (ph && ph->hud_off && (ip_ph_nhud || ph->mon < 0)) { /* W290 */
         static unsigned nlog;
         if (nlog++ < 4u) { HLOG_I("PHOTO: HUD aus - %u HUD-Draws im Monitor-RT e%d ausgelassen", ip_ph_nhud, ph->mon); }
@@ -9041,6 +9341,36 @@ static void ip_ph_quant(ip_list_t *B, int best, unsigned w_tw, unsigned w_lw)
     }
 }
 
+/* DIAG(W428) PHOTO-CINEMATIC: je Welt-Draw Lage des Modell-Ursprungs in der Sicht der Spielkamera
+ * (Zeile 3 der mvp / Projektion: x = m12/a, y = m13/b, z = m15), Bezugs-NDC und -w (photo_diag Bit 4). */
+static void ip_ph_selfdiag(ip_list_t *B, int best)
+{
+    unsigned i, n = 0;
+    for (i = 0; i < B->nops && n < 400u; i++) {
+        const ip_op_t *o = &B->ops[i];
+        const vsh_prog_t *vp;
+        float a, b, wmin = 1e30f, x0 = 9.0f, x1 = -9.0f, y0 = 9.0f, y1 = -9.0f;
+        int q;
+        if (o->kind != IP_DRAW || o->sh_rtv != g_ish[best].rtv) { continue; }
+        vp = o->pvs ? vsh_program(o->pvs) : NULL;
+        a = o->prj[0] > 1e-4f ? o->prj[0] : 1.0f;
+        b = o->prj[1] > 1e-4f ? o->prj[1] : 1.0f;
+        for (q = 0; q < 4; q++) {
+            if (o->rn[q][2] < wmin) { wmin = o->rn[q][2]; }
+            if (o->rn[q][0] < x0) { x0 = o->rn[q][0]; } if (o->rn[q][0] > x1) { x1 = o->rn[q][0]; }
+            if (o->rn[q][1] < y0) { y0 = o->rn[q][1]; } if (o->rn[q][1] > y1) { y1 = o->rn[q][1]; }
+        }
+        n++;
+        HLOG_I("PHOTO cine: i=%u cls=%u vsk=%d nv=%u tex=%x rq=%d pxp=%08x pps=%08x nolerp=%d fxk=%u org=%.2f,%.2f,%.2f "
+               "prj=%.3f,%.3f,%.4f,%.4f w=%.2f ndc=%.2f..%.2f,%.2f..%.2f r0=%.3f,%.3f,%.3f r1=%.3f,%.3f,%.3f",
+               i, (unsigned)o->cls, vp ? (int)vp->kind : -1, o->nv, o->has_tex, o->rq, o->pxp, o->pps, o->nolerp, o->fxk,
+               (double)(o->mvp[12] / a), (double)(o->mvp[13] / b), (double)o->mvp[15], (double)o->prj[0], (double)o->prj[1],
+               (double)o->prj[2], (double)o->prj[3], (double)wmin, (double)x0, (double)x1, (double)y0, (double)y1,
+               (double)(o->mvp[0] / a), (double)(o->mvp[1] / b), (double)o->mvp[3], (double)(o->mvp[4] / a),
+               (double)(o->mvp[5] / b), (double)o->mvp[7]);
+    }
+}
+
 int sb_interp_photo_census(sb_ph_census_t *c, int log)
 {
     ip_list_t *B;
@@ -9135,7 +9465,8 @@ int sb_interp_photo_census(sb_ph_census_t *c, int log)
             c->w_tex = g_ish[best].sh;
         }
         if (!gotvp && c->w_tw) { c->g_w = c->w_lw = c->w_tw; c->g_h = c->w_lh = c->w_th; }
-        if (log && g_cfg.photo_diag) { ip_ph_quant(B, best, c->w_tw, c->w_lw); } /* DIAG(W249) */
+        if (log && (g_cfg.photo_diag & ~16)) { ip_ph_quant(B, best, c->w_tw, c->w_lw); } /* DIAG(W249) */
+        if (log && (g_cfg.photo_diag & 16)) { ip_ph_selfdiag(B, best); } /* DIAG(W428) */
     }
     for (k = 0; k < IP_SH_MAX && c->n_rt < 16u; k++) { /* RT-Ziele (ohne BB) mit Tiefe, Groesse, Draws */
         if (k == B->bbref || !cnt[k] || !g_ish[k].sh) { continue; }

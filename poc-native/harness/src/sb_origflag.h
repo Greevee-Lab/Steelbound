@@ -115,11 +115,20 @@ static const sb_of_key_t kSbOrigFlag[] = {
 /* Doku/Selbsttest: neutrale Schluessel (duerfen NIE in kSbOrigFlag stehen). */
 static const char *const kSbOrigNeutral[] = {
     "interp_fps", "fps_limit", "fs_interp_match", "present_interval", "rt_scale", "rt_scale_dyn",
-    "window_mode", "fs_hz", "width", "height", "aspect_mode", "hd_scale", "interp_hlerp", "interp_guard",
+    "window_mode", "fs_hz", "width", "height", "aspect_mode", "hd_scale", "interp_hlerp", "interp_p2hom", "interp_guard",
     "mouse_mode", "mouse_sens", "aim_assist", "auto_gear", "stick_aim", "stick_aim_sens", "sbc_usb",
     "audio", "audio_live", "game_tick", "vr_enable", "vr_preset", "save_lock", "photo_scale",
 };
 #define SB_OF_NNEUTRAL ((int)(sizeof kSbOrigNeutral / sizeof kSbOrigNeutral[0]))
+
+/* W424 (Einordnung W278): Gameplay-Abweichungen mit Standard AN. Sie aendern
+ * das Spielgeschehen, nicht das Bild, und werden deshalb NIE als Experimental
+ * gekennzeichnet, nie von "Zurueck zum Original"/Einmal-Start/Umschalttaste
+ * gesetzt (duerfen nicht in kSbOrigFlag stehen). Original-Wert in Klammern:
+ *   sb_allied_squads (0) - verbuendete Trupps kaempfen auch fern vom Spieler
+ *                          (Nutzerentscheid 22.11.2026, nur Steel Battalion). */
+static const char *const kSbOrigGameplay[] = { "sb_allied_squads" };
+#define SB_OF_NGAMEPLAY ((int)(sizeof kSbOrigGameplay / sizeof kSbOrigGameplay[0]))
 
 /* Sprachschluessel je Gruppe (Liste im Hinweis, kurz, klein geschrieben). */
 static const char *const kSbOrigGroupKey[SB_OFG_N] = {

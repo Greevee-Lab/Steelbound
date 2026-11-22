@@ -7,6 +7,7 @@
 #include <windows.h>
 #include "sb_profile.h" /* W229 SBA() */
 #include <stdlib.h>
+#include <string.h>
 #include "hcfg.h"
 #include "hlog.h"
 #include "input_mouse.h"
@@ -153,6 +154,11 @@ int imouse_test_pad(short *lx, short *ly, unsigned short *buttons)
 {
     LONG b, xy;
     if (!g_cfg.input_test_hook) return 0;
+    if (_strnicmp(g_cfg.input_hold_test, "pad:", 4) == 0) { /* TEST(W423): synthetisches Pad ab Bild 0 gehalten */
+        *lx = *ly = 0;
+        *buttons = (unsigned short)strtoul(g_cfg.input_hold_test + 4, NULL, 16);
+        return 1;
+    }
     b = g_test_pad_btn;
     if (!(b & 0x10000)) return 0;
     xy = g_test_pad_xy;

@@ -321,6 +321,7 @@ int gui_page_from_name(const char *v)
 #define ID_VOL_MUSIC 1119
 #define ID_VOL_SFX 1120
 #define ID_VOL_VOICE 1121
+#define ID_CTRL_ALLY 1123  /* W424 SB-ALLIED-SQUADS: verbuendete Trupps kaempfen auch fern vom Spieler (nur SB) */
 #define ID_HRTF 1122       /* W356 AUDIO-2: Kopfhoerer (3D-Klang/HRTF wie die Konsole) */
 #define VOL_N 21          /* Listen 100 %, 95 %, ... 0 % (5er-Schritte, wie ESC) */
 #define EXY 18             /* W303: Karte "Fotos & Screenshots" 18 tiefer (Platz fuer die Lautstaerke) */
@@ -2760,8 +2761,8 @@ static void paint_ctrl(void)
            48, 30, C_DIM);
     paint_reason(24, COL2 + 18, CY0 + 142, COLW - 36, 16);
     /* W271 STICK-RELATIVE: Stick-Zielen wie die Maus-Zeile */
-    label1(F_SMALL, LT("gui.ctl_stick"), COL2 + 18, CY0 + 228, 56, 30, C_DIM);
-    label1(F_SMALL, LT("gui.ctl_sens"), COL2 + COLW - 18 - 54 - 48, CY0 + 228,
+    label1(F_SMALL, LT("gui.ctl_stick"), COL2 + 18, CY0 + 262, 56, 30, C_DIM); /* W424: 228 -> 262 */
+    label1(F_SMALL, LT("gui.ctl_sens"), COL2 + COLW - 18 - 54 - 48, CY0 + 262,
            48, 30, C_DIM);
 }
 
@@ -6718,7 +6719,7 @@ static void ui_from_settings(const launcher_settings_t *s)
     { /* W290 QUICK-SHOT: Groesse Fenster/4K/8K/x2/x4/x8, Ansicht, Bildformat 4:3/breit, Replay-Schalter */
         int sz = lcfg_photo_size_eff(s);
         ComboBox_SetCurSel(ctl(ID_PH_RES), sz == -4 ? 1 : sz == -8 ? 2 : sz == 2 ? 3 : sz == 4 ? 4 : sz == 8 ? 5 : 0);
-        ComboBox_SetCurSel(ctl(ID_PH_VIEW), (s->photo_view >= 0 && s->photo_view <= 2) ? s->photo_view : 0);
+        ComboBox_SetCurSel(ctl(ID_PH_VIEW), (s->photo_view >= 0 && s->photo_view <= 3) ? s->photo_view : 0);
         ComboBox_SetCurSel(ctl(ID_PH_ASP), s->photo_aspect == 1 ? 1 : 0);
         ui_set_checked(ID_RP_LABEL, s->replay_label);
         ui_set_checked(ID_RP_LOGO, s->replay_logo);
@@ -6733,6 +6734,7 @@ static void ui_from_settings(const launcher_settings_t *s)
     ComboBox_SetCurSel(ctl(ID_CTRL_AIMASSIST),
                        (s->aim_assist >= 0 && s->aim_assist <= 2) ? s->aim_assist : 0); /* W236 */
     ui_set_checked(ID_CTRL_AUTOGEAR, s->auto_gear);
+    ui_set_checked(ID_CTRL_ALLY, s->sb_allied_squads); /* W424 */
     ComboBox_SetCurSel(ctl(ID_CHIDE), cview_sel(s->cockpit_hide, s->monitor_view)); /* W268, W319 */
     ComboBox_SetCurSel(ctl(ID_STICK_AIM), s->stick_aim ? 1 : 0); /* W271 */
     ComboBox_SetCurSel(ctl(ID_STICK_SENS),
@@ -6833,7 +6835,7 @@ static void ui_to_settings(launcher_settings_t *s)
         s->photo_scale = s->photo_size > 0 ? s->photo_size : 1; /* alter Schluessel (W195) passend mitschreiben */
         s->photo_jpg = ComboBox_GetCurSel(ctl(ID_PH_FMT)) == 1 ? 1 : 0;
         sel = ComboBox_GetCurSel(ctl(ID_PH_VIEW));
-        s->photo_view = (sel >= 0 && sel <= 2) ? sel : 0;
+        s->photo_view = (sel >= 0 && sel <= 3) ? sel : 0;
         s->photo_aspect = ComboBox_GetCurSel(ctl(ID_PH_ASP)) == 1 ? 1 : 2;
         s->replay_label = ui_checked(ID_RP_LABEL) ? 1 : 0;
         s->replay_logo = ui_checked(ID_RP_LOGO) ? 1 : 0;
@@ -6848,6 +6850,7 @@ static void ui_to_settings(launcher_settings_t *s)
     s->aim_assist = ComboBox_GetCurSel(ctl(ID_CTRL_AIMASSIST)); /* W236 */
     if (s->aim_assist < 0 || s->aim_assist > 2) s->aim_assist = 0;
     s->auto_gear = ui_checked(ID_CTRL_AUTOGEAR);
+    s->sb_allied_squads = ui_checked(ID_CTRL_ALLY); /* W424 */
     sel = ComboBox_GetCurSel(ctl(ID_CHIDE)); /* W268, W319: 0 Cockpit, 1 Vollbild-Ansicht, 2/3 Monitoransicht (+ Felder) */
     s->cockpit_hide = sel == 1 ? 1 : 0;
     s->monitor_view = sel >= 2 && sel <= 3 ? sel - 1 : 0;
@@ -7240,9 +7243,9 @@ static int ui_refresh_visibility(void)
  * Tooltip). Grundlage: Client-Code (LoC-Profil g_sba_loc: SB-Hooks nicht installiert, SB-Adressen lesen die
  * Null-Seite), Tabelle in BERICHT_M2 "W402". Einzige Stelle der Liste. */
 static const int kLocLock[] = { ID_PAL50, ID_CPERSP, ID_CPANINI, ID_CWIDTH, ID_CHIDE, ID_MONFX,
-                                ID_CTRL_AIMASSIST, ID_CTRL_AUTOGEAR, ID_RP_LABEL, ID_RP_LOGO, ID_WM_MEDIA,
+                                ID_CTRL_AIMASSIST, ID_CTRL_AUTOGEAR, ID_CTRL_ALLY, ID_RP_LABEL, ID_RP_LOGO, ID_WM_MEDIA,
                                 ID_GFX_TEX, ID_REM_SCALE, ID_GFX_PACKS, ID_VR, ID_VRPRESET, ID_VRRES,
-                                ID_EDGE, ID_EDGE_S, ID_EDGE_W, ID_SAVE_LOCK };
+                                ID_EDGE, ID_EDGE_S, ID_EDGE_W, ID_SAVE_LOCK, ID_REM_LABEL /* W427 */ };
 #define KLOCLOCK_N (sizeof kLocLock / sizeof kLocLock[0])
 static const char *loc_lock_key(int id) /* NULL = nicht gesperrt */
 {
@@ -7251,9 +7254,11 @@ static const char *loc_lock_key(int id) /* NULL = nicht gesperrt */
     }
     switch (id) {
     case ID_PAL50: return "gui.loc_lock_tick";
-    case ID_CPERSP: case ID_CPANINI: case ID_CWIDTH: case ID_CHIDE: return "gui.loc_lock_cockpit";
+    case ID_CPERSP: case ID_CPANINI: case ID_CWIDTH: case ID_CHIDE: case ID_REM_LABEL: /* W427: hud_label_avoid wie ESC */
+        return "gui.loc_lock_cockpit";
     case ID_MONFX: return "gui.loc_lock_monfx";
     case ID_CTRL_AIMASSIST: case ID_CTRL_AUTOGEAR: return "gui.loc_lock_assist";
+    case ID_CTRL_ALLY: return "gui.loc_lock_ally"; /* W424 */
     case ID_RP_LABEL: case ID_RP_LOGO: case ID_WM_MEDIA: return "gui.loc_lock_replay";
     case ID_GFX_TEX: case ID_REM_SCALE: case ID_GFX_PACKS: return "gui.loc_lock_packs";
     case ID_VR: case ID_VRPRESET: case ID_VRRES: return "gui.loc_lock_vr";
@@ -8833,6 +8838,28 @@ static const char *bind_combo_hint(int idx)
     return NULL;
 }
 
+/* W221 HOTAS: Joysticks neu aufzaehlen, Ruhestellung merken (Achsen-
+ * Auslenkung zaehlt relativ dazu; Schubhebel ruhen nicht mittig).
+ * W432: eigene Funktion (Selbsttest ruft sie im Bild-Modus). */
+static void bind_cap_joy_init(void)
+{
+    g_cap_jn = 0;
+    if (ijoy_init() == 0) {
+        int i, n;
+        joy_cal_load(); /* W312: Lerner sieht kalibrierte Achsen */
+        n = ijoy_scan();
+        for (i = 0; i < n && i < IJOY_MAX_DEV; i++) {
+            const ijoy_info_t *in = ijoy_info(i);
+            if (!in) {
+                break;
+            }
+            g_cap_jl[i] = *in;
+            lctrl_joy_learner_reset(&g_cap_jlrn[i]);
+            g_cap_jn = i + 1;
+        }
+    }
+}
+
 static void bind_start_capture(HWND hd, int mode)
 {
     char t[256], sbc_st[256];
@@ -8870,23 +8897,7 @@ static void bind_start_capture(HWND hd, int mode)
         g_cap_sbc_stop = 0;
         g_cap_sbc_thr = CreateThread(NULL, 0, bind_sbc_thread, hd, 0, NULL);
     }
-    /* W221 HOTAS: Joysticks neu aufzaehlen, Ruhestellung merken (Achsen-
-     * Auslenkung zaehlt relativ dazu; Schubhebel ruhen nicht mittig). */
-    g_cap_jn = 0;
-    if (ijoy_init() == 0) {
-        int i, n;
-        joy_cal_load(); /* W312: Lerner sieht kalibrierte Achsen */
-        n = ijoy_scan();
-        for (i = 0; i < n && i < IJOY_MAX_DEV; i++) {
-            const ijoy_info_t *in = ijoy_info(i);
-            if (!in) {
-                break;
-            }
-            g_cap_jl[i] = *in;
-            lctrl_joy_learner_reset(&g_cap_jlrn[i]);
-            g_cap_jn = i + 1;
-        }
-    }
+    bind_cap_joy_init();
     _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.bind_press"),
                 kCtrlElems[g_bind_sel].key, LT(kCtrlElems[g_bind_sel].lkey));
     ui_settext(bctl(hd, IDB_PROMPT), t);
@@ -13595,13 +13606,13 @@ static int cx_put_text(const char *path, const char *text, size_t n)
 static void cx_shot_state(const char *state)
 {
     char tmp[1024], dir[1100], pd[1200], src[1300], dst[1300], fx[1200], q[1400], msg[600];
-    static const char *const ship[2] = { "keyboard_default", "xbox_pad_default" };
+    static const char *const ship[3] = { "keyboard_default", "xbox_pad_default", "default_full" };
     int k, bad = strcmp(state, "cx_bad") == 0;
     u8_GetTempPath(tmp, sizeof tmp);
     _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw419_shot_client", tmp);
     _snprintf_s(pd, sizeof pd, _TRUNCATE, "%s/profiles", dir);
     lcfg_mkdir_p(pd);
-    for (k = 0; k < 2; k++) { /* nur die mitgelieferten Profile in den Temp-Ordner (Liste wie beim Spieler) */
+    for (k = 0; k < 3; k++) { /* nur die mitgelieferten Profile in den Temp-Ordner (Liste wie beim Spieler) */
         wchar_t ws[1300], wd[1300];
         _snprintf_s(src, sizeof src, _TRUNCATE, "%s/profiles/%s.ini", g_client_dir, ship[k]);
         _snprintf_s(dst, sizeof dst, _TRUNCATE, "%s/%s.ini", pd, ship[k]);
@@ -15366,9 +15377,9 @@ static void ui_apply_language(void)
     }
     {
         static const char *const kPhAsp[] = { "ovl.ph_asp_square", "ovl.ph_asp_wide" }; /* W290: 4:3 / breit */
-        static const char *const kPhView[] = { "ovl.ph_v_game", "ovl.ph_v_flat", "ovl.ph_v_world" };
+        static const char *const kPhView[] = { "ovl.ph_v_game", "ovl.ph_v_flat", "ovl.ph_v_world", "ovl.ph_v_cine" }; /* W428: Cinematic */
         combo_refill(ID_PH_ASP, kPhAsp, 2);
-        combo_refill(ID_PH_VIEW, kPhView, 3);
+        combo_refill(ID_PH_VIEW, kPhView, 4);
     }
     ui_settext(ctl(ID_RP_LABEL), LT("gui.rp_label"));
     ui_settext(ctl(ID_RP_LOGO), LT("gui.rp_logo"));
@@ -15389,6 +15400,7 @@ static void ui_apply_language(void)
     ui_settext(ctl(ID_CTRL_MOUSEOFF), LT("gui.ctl_mouseoff"));
     combo_refill(ID_CTRL_AIMASSIST, kAssist, 3); /* W236 */
     ui_settext(ctl(ID_CTRL_AUTOGEAR), LT("gui.ctl_autogear"));
+    ui_settext(ctl(ID_CTRL_ALLY), LT("gui.ctl_ally")); /* W424 */
     ui_settext(ctl(ID_PAL50), LT("gui.pal50")); /* W234 */
     ui_settext(ctl(ID_CTRL_ASSIST), LT("gui.ctl_assist"));
     ui_settext(ctl(ID_CTRL_BROWSER), LT("gui.keys_browser")); /* W179 */
@@ -15681,6 +15693,7 @@ static void pergame_load(int game, launcher_settings_t *s)
     s->mouse_mode = d.mouse_mode;
     s->rt_scale = d.rt_scale;
     s->rt_scale_dyn = d.rt_scale_dyn;
+    s->sb_allied_squads = d.sb_allied_squads; /* W424: Testwert aus sb_native.cfg nicht uebernehmen */
     s->gfx_preset_rev = 0;
     game_cfg_path(LGAME_LOC, p, sizeof p);
     s->game_tick = 30; /* nach dem Laden erneut: PAL gibt es in LoC nicht */
@@ -19047,6 +19060,7 @@ static int loctab_apply_state(const char *name)
         strcmp(name, "loc_wide") == 0 || strncmp(name, "loc_onl", 7) == 0 || /* W334: loc_onl* wie loc_ok */
         strcmp(name, "loc_netq") == 0 || /* W397 */
         strcmp(name, "loc_hover") == 0 || /* W398 */
+        strcmp(name, "loc_adv") == 0 || /* W427 */
         strncmp(name, "loc_net", 7) == 0) { /* W392: loc_net* wie loc_ok */
         strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_ISO);
         g_locfix.kind = LGAME_IMG_LOC;
@@ -19686,15 +19700,17 @@ static void build_controls(void)
     combo_add(c, LT("gui.ctl_assist1"));
     combo_add(c, LT("gui.ctl_assist2"));
     mk(w, K_TOGGLE, ID_CTRL_AUTOGEAR, P_CTRL, COL2 + 18, CY0 + 192, COLW - 36, 28, LT("gui.ctl_autogear"), 0);
+    /* W424 SB-ALLIED-SQUADS: Spiel-Option (Standard an), darunter Stick und Tastenliste je 34 px tiefer */
+    mk(w, K_TOGGLE, ID_CTRL_ALLY, P_CTRL, COL2 + 18, CY0 + 226, COLW - 36, 28, LT("gui.ctl_ally"), 0);
     /* W271 STICK-RELATIVE: Gamepad-/Joystick-Stick auf dem Zielhebel
      * (Position = Original, "wie eine Maus" = haelt beim Loslassen) */
-    c = mk(w, K_COMBO, ID_STICK_AIM, P_CTRL, COL2 + 78, CY0 + 228,
+    c = mk(w, K_COMBO, ID_STICK_AIM, P_CTRL, COL2 + 78, CY0 + 262,
            COLW - 18 - 54 - 48 - 8 - 78, 30, "", 0);
     SendMessageW(c, CB_SETDROPPEDWIDTH, (WPARAM)SX(300), 0);
     combo_add(c, LT("gui.stick_pos"));
     combo_add(c, LT("gui.stick_rel"));
     c = mk(w, K_COMBO, ID_STICK_SENS, P_CTRL, COL2 + COLW - 18 - 54,
-           CY0 + 228, 54, 30, "", 0);
+           CY0 + 262, 54, 30, "", 0);
     {
         char t[8];
         for (i = 1; i <= 16; i++) {
@@ -19702,7 +19718,7 @@ static void build_controls(void)
             combo_add(c, t);
         }
     }
-    mk(w, K_MEMO, ID_KEYS, P_CTRL, COL2 + 18, CY0 + 266, COLW - 36, 172,
+    mk(w, K_MEMO, ID_KEYS, P_CTRL, COL2 + 18, CY0 + 300, COLW - 36, 138,
        "", 0);
 
     /* W179 KEYS-HTML: Tastenuebersicht als HTML (immer aktiv, ohne Regel) */
@@ -19738,6 +19754,7 @@ static void build_controls(void)
     combo_add(c, LT("ovl.ph_v_game"));
     combo_add(c, LT("ovl.ph_v_flat"));
     combo_add(c, LT("ovl.ph_v_world"));
+    combo_add(c, LT("ovl.ph_v_cine")); /* W428 PHOTO-CINEMATIC */
     c = mk(w, K_COMBO, ID_PH_RES, P_AUDIO, CX0 + 440, CY0 + 250 + EXY, CW - 18 - 440, 30, "", 0);
     combo_add(c, LT("gui.extras_res_1"));
     combo_add(c, "4K");
@@ -21047,6 +21064,10 @@ static void on_command_inner(int id, int code)
         ui_set_checked(ID_CTRL_AUTOGEAR, !ui_checked(ID_CTRL_AUTOGEAR));
         set_status(LT(ui_checked(ID_CTRL_AUTOGEAR) ? "gui.ctl_autogear_on" : "gui.ctl_simple_off"));
         break;
+    case ID_CTRL_ALLY: /* W424 */
+        ui_set_checked(ID_CTRL_ALLY, !ui_checked(ID_CTRL_ALLY));
+        set_status(LT(ui_checked(ID_CTRL_ALLY) ? "gui.ctl_ally_on" : "gui.ctl_ally_off"));
+        break;
     case ID_PAL50: { /* W234 PAL50: Spieltakt 25/30, Bildratenliste neu beschriften */
         ui_set_checked(ID_PAL50, !ui_checked(ID_PAL50));
         ip_fill(ctl(ID_IPFPS)); /* W309: behaelt die Wahl */
@@ -22133,6 +22154,7 @@ static const struct {
     /* W276 LOC-LAUNCH: Bereich Line of Contact (Pruef-Fixture, bereinigte Pfade) */
     { "loc_empty", "", 0 },
     { "loc_ok", "", 0 },
+    { "loc_adv", "", 0 }, /* W427: wie loc_ok mit "Erweiterte Einstellungen zeigen" (gesperrte Zeilen sichtbar) */
     { "loc_hover", "", 0 }, /* W398: wie loc_ok, Maus auf dem inaktiven Spielnamen */
     { "loc_pg", "", 0 }, /* W402: LoC mit eigenen Werten (16:9, 1920x1080, 60 FPS) */
     { "loc_sb", "", 0 },
@@ -22391,6 +22413,7 @@ static void gui_fill(void)
             sb_lang_set(g_s.lang);
             strncpy_s(note, sizeof note, LT("app.no_usercfg"), _TRUNCATE);
         }
+        (void)app_firstrun_input_profile(&g_s, g_client_dir, kind); /* W431: neue Installation -> default_full */
     }
     strcpy_s(g_note, sizeof g_note, note);
     g_note_kind = kind; /* W173 */
@@ -22410,7 +22433,7 @@ static void gui_fill(void)
     g_upd_ask = netq_should_ask(g_upd_ver, g_upd_cfg, g_loc_online); /* W397: Online an = steelnet, keine Frage */
     if (g_o.state[0]) { /* W171: --state (nur Shots, nie gespeichert) */
         gui_apply_state(g_o.state);
-        if (strcmp(g_o.state, "advanced") == 0) { /* W291: Bild mit Feinreglern (nicht gespeichert) */
+        if (strcmp(g_o.state, "advanced") == 0 || strcmp(g_o.state, "loc_adv") == 0) { /* W291: Bild mit Feinreglern (nicht gespeichert) */
             g_show_adv = 1; /* build_controls setzt Haken und Kartenlage */
         }
     }
@@ -24216,6 +24239,10 @@ static void pergame_gui_selftest(int *pass, int *fail)
         ui_apply_rules();
         if (IsWindowEnabled(ctl(ID_CTRL_AIMASSIST)) || IsWindowEnabled(ctl(ID_CTRL_AUTOGEAR)))
             strcpy_s(why, sizeof why, "e: Zielhilfe/Automatik in LoC frei");
+        else if (IsWindowEnabled(ctl(ID_CTRL_ALLY))) /* W424 */
+            strcpy_s(why, sizeof why, "e: Verbuendete Trupps in LoC frei");
+        else if (IsWindowEnabled(ctl(ID_REM_LABEL)) || !loc_lock_key(ID_REM_LABEL)) /* W427: HUD-Etikett wie im ESC-Menue */
+            strcpy_s(why, sizeof why, "e: HUD-Etikett in LoC nicht gesperrt");
         loctab_set_game(LGAME_SB);
         show_page(P_AUDIO);
         ui_apply_rules();
@@ -31029,6 +31056,147 @@ void w365_gui_selftest(const char *client_override, int *pass, int *fail)
 }
 #undef W365_WHY
 
+/* --- W432 HOTAS-AXES: Belegungsdialog mit nachgebauten Tester-Geraeten -------
+ * Offscreen-Dialog im Temp-Client-Ordner (nie echte Profile). Fake-DirectInput
+ * (WingMan Force 3D + Arduino Micro gleichzeitig, launcher.c w432_fixture_*):
+ * Lernen ueber den echten Dialogweg bind_start_capture -> bind_cap_joy je Takt;
+ * zentrierte Achsen mit kurzem Weg, Schub am Ende, zwei Geraete -> zwei joyN-
+ * Zeilen. Gamepad-Weg (Xbox-Modus) ueber bind_cap_pad_state. */
+static char g_w432_why[300];
+static char g_w432_prof[1200];
+#define W432_WHY(...) do { if (!g_w432_why[0]) _snprintf_s(g_w432_why, sizeof g_w432_why, _TRUNCATE, __VA_ARGS__); } while (0)
+
+static void w432_joy_cap(HWND hd, const char *elem, int dev, int obj, long peak, const char *want)
+{
+    int idx = lctrl_bind_elem_index(elem), t;
+    char row[256];
+    if (g_w432_why[0]) {
+        return;
+    }
+    w365_select(hd, idx);
+    bind_start_capture(hd, 1);
+    bind_cap_joy_init(); /* Bild-Modus (shot) zaehlt selbst keine Geraete auf */
+    for (t = 0; t < 40 && g_cap_mode; t++) {
+        w432_fixture_tick(t, dev, obj, peak, -1, 0);
+        bind_cap_joy(hd);
+    }
+    if (g_cap_mode) {
+        bind_end_capture(hd, NULL);
+    }
+    lctrl_bind_row_text(&g_bind, idx, row, sizeof row);
+    if (strcmp(row, want) != 0) {
+        W432_WHY("%s: '%s' statt '%s'", elem, row, want);
+    }
+}
+
+static void w432_bind_probe(HWND hd)
+{
+    int sx = lctrl_bind_elem_index("sight_x"), k;
+    char row[256];
+    if (w432_fixture_plug(1, 0) != 2) {
+        W432_WHY("Fake-Geraete nicht aufgezaehlt");
+        ijoy_test_end();
+        return;
+    }
+    /* WingMan = Geraet 0 -> JOY0, Arduino = Geraet 1 -> JOY1 (neue joyN-Zeilen) */
+    w432_joy_cap(hd, "aim_x", 0, 0, 223, "JOY0:X:dz=0.05");
+    w432_joy_cap(hd, "aim_y", 1, 1, 9830, "JOY1:Y:dz=0.05");
+    w432_joy_cap(hd, "rot", 0, 2, 198, "JOY0:RZ:dz=0.05");
+    w432_joy_cap(hd, "pedal_l", 0, 3, 0, "JOY0:S0:dz=0.05:inv=1");
+    w432_joy_cap(hd, "pedal_r", 1, 2, 30000, "JOY1:S0:dz=0.05");
+    if (!g_w432_why[0] && (!strstr(g_bind.joy[0], "Test Stick 0") || !strstr(g_bind.joy[1], "Test Stick 1"))) {
+        W432_WHY("joyN-Zeilen: '%s' / '%s'", g_bind.joy[0], g_bind.joy[1]);
+    }
+    ijoy_test_end();
+    /* Gamepad-Weg: Drehachse eines Flugsticks im Xbox-Modus (RX, 49 %), Schub ruht auf RY = -32768 */
+    if (!g_w432_why[0]) {
+        lctrl_pad_t rest, mv;
+        memset(&rest, 0, sizeof rest);
+        rest.ry = -32768;
+        mv = rest;
+        mv.rx = 16000;
+        w365_select(hd, sx);
+        bind_start_capture(hd, 1);
+        lctrl_pad_learner_reset(&g_cap_plrn);
+        g_cap_prev = rest;
+        for (k = 0; k < 8 && g_cap_mode; k++) {
+            bind_cap_pad_state(hd, k < 4 ? &rest : &mv);
+        }
+        if (g_cap_mode) {
+            bind_end_capture(hd, NULL);
+        }
+        lctrl_bind_row_text(&g_bind, sx, row, sizeof row);
+        if (strcmp(row, "PAD:RX:dz=0.12:curve=1.3") != 0) {
+            W432_WHY("sight_x (Pad): '%s'", row);
+        }
+    }
+    if (!g_w432_why[0]) {
+        static char buf[4096];
+        FILE *f = NULL;
+        buf[0] = 0;
+        if (bind_save(hd) != 0) {
+            W432_WHY("Speichern scheiterte");
+            return;
+        }
+        if (u8_fopen_s(&f, g_w432_prof, "rb") == 0 && f) {
+            size_t got = fread(buf, 1, sizeof buf - 1, f);
+            buf[got] = 0;
+            fclose(f);
+        }
+        if (!strstr(buf, "JOY0:X:dz=0.05") || !strstr(buf, "JOY1:S0:dz=0.05") || !strstr(buf, "Test Stick 1") ||
+            !strstr(buf, "PAD:RX:dz=0.12")) {
+            W432_WHY("Datei ohne JOY-Achsen/joyN-Zeilen");
+        }
+    }
+}
+
+void w432_gui_selftest(const char *client_override, int *pass, int *fail)
+{
+    char tmp[1024], dir[1100], pd[1200], keepdir[sizeof g_client_dir], keepl[8];
+    gui_opts_t keepo = g_o;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw432_bind", tmp);
+    _snprintf_s(pd, sizeof pd, _TRUNCATE, "%s/profiles", dir);
+    lcfg_mkdir_p(pd);
+    _snprintf_s(g_w432_prof, sizeof g_w432_prof, _TRUNCATE, "%s/user_w432Test.ini", pd);
+    write_file(g_w432_prof, "[buttons]\nbi0 = KEY:SPACE\n");
+    g_w432_why[0] = 0;
+    strcpy_s(keepl, sizeof keepl, sb_lang_code());
+    sb_lang_set("en");
+    if (!(gui_init(client_override) && gui_create(1))) {
+        strcpy_s(g_w432_why, sizeof g_w432_why, "Fenster nicht erzeugt");
+    } else {
+        build_controls();
+        tips_build();
+        ShowWindow(g_hwnd, SW_SHOWNOACTIVATE); /* ausserhalb des Bildschirms */
+        strcpy_s(keepdir, sizeof keepdir, g_client_dir);
+        strcpy_s(g_client_dir, sizeof g_client_dir, dir); /* nie das echte Profil */
+        g_o.shot = 3;
+        g_o.bind_sel = -1;
+        g_o.bind_learn = g_o.bind_joydemo = g_o.bind_stickdemo = g_o.bind_wheeldemo = g_o.bind_combodemo = 0;
+        g_bind_testfn = w432_bind_probe;
+        bind_dialog_modal("user_w432Test", g_w432_prof);
+        g_bind_testfn = NULL;
+        g_o = keepo;
+        strcpy_s(g_client_dir, sizeof g_client_dir, keepdir);
+        ShowWindow(g_hwnd, SW_HIDE);
+        gui_teardown();
+    }
+    ijoy_test_end(); /* falls der Dialog vorher endete */
+    sb_lang_set(keepl);
+    u8_DeleteFile(g_w432_prof);
+    {
+        wchar_t w[1200];
+        u8_to_w(pd, w, 1200);
+        RemoveDirectoryW(w);
+        u8_to_w(dir, w, 1200);
+        RemoveDirectoryW(w);
+    }
+    if (!g_w432_why[0]) W282_OK("W432 HOTAS-AXES bind-dialog (WingMan X 75 %/Y/RZ 55 %/Schub + Arduino Y 70 %/Throttle 37 % ueber bind_cap_joy, JOY0/JOY1-Zeilen, Pad-Drehachse RX 49 %, Datei)");
+    else W282_FAIL("W432 HOTAS-AXES bind-dialog", g_w432_why);
+}
+#undef W432_WHY
+
 /* --- W290 QUICK-SHOT: Schnell-Screenshot + Fotomodus im Belegungsdialog, Karte "Fotos & Screenshots" ---------
  * Rein: Uebergang alter Profile (photo=F12 -> Shift+F12 + quick_shot=F12), eigene Belegung bleibt, leere Zeile =
  * aus ("quick_shot =" beim Speichern), "Alle leeren" behaelt beide, Tastenliste mit der echten Belegung.
@@ -31159,7 +31327,7 @@ static void w290_card(void)
         uictl_t *u = ui_find(ids[k]);
         if (!u || !ui_visible_on(u, P_AUDIO) || ui_visible_on(u, P_GFX)) { W290_WHY("Element %d fehlt/falsche Seite", ids[k]); return; }
     }
-    if (ComboBox_GetCount(ctl(ID_PH_RES)) != 6 || ComboBox_GetCount(ctl(ID_PH_VIEW)) != 3 || ComboBox_GetCount(ctl(ID_PH_ASP)) != 2) {
+    if (ComboBox_GetCount(ctl(ID_PH_RES)) != 6 || ComboBox_GetCount(ctl(ID_PH_VIEW)) != 4 || ComboBox_GetCount(ctl(ID_PH_ASP)) != 2) { /* W428: 4 Ansichten */
         W290_WHY("Listen Groesse/Ansicht/Bildformat (%d/%d/%d)", ComboBox_GetCount(ctl(ID_PH_RES)),
                  ComboBox_GetCount(ctl(ID_PH_VIEW)), ComboBox_GetCount(ctl(ID_PH_ASP)));
         return;
@@ -31220,6 +31388,45 @@ static void w290_card(void)
         if (!g_w290_why[0] && (lcfg_load_file(f, &a) != 0 || a.photo_size != -4)) W290_WHY("photo_size gewinnt");
         u8_DeleteFile(f);
     }
+    lcfg_defaults(&a);
+    ui_from_settings(&a);
+}
+
+/* W428 PHOTO-CINEMATIC: Ansicht "Cinematic" (photo_view=3) in der Karte Fotos & Screenshots: Listeneintrag mit
+ * Sprachtext, Rundweg Oberflaeche und user.cfg, ungueltiger Wert -> wie im Spiel. Fenster muss gebaut sein. */
+static char g_w428_why[256];
+static void w428_cine_card(void)
+{
+    launcher_settings_t a, b;
+    char f[1300], tmp[1024];
+    wchar_t it[128];
+    g_w428_why[0] = 0;
+    if (ComboBox_GetCount(ctl(ID_PH_VIEW)) != 4) { strcpy_s(g_w428_why, sizeof g_w428_why, "Ansicht-Liste ohne 4. Eintrag"); return; }
+    it[0] = 0;
+    if (SendMessageW(ctl(ID_PH_VIEW), CB_GETLBTEXTLEN, 3, 0) < 128) { SendMessageW(ctl(ID_PH_VIEW), CB_GETLBTEXT, 3, (LPARAM)it); }
+    if (wcscmp(it, L"Cinematic") != 0) { strcpy_s(g_w428_why, sizeof g_w428_why, "4. Eintrag nicht Cinematic"); return; }
+    lcfg_defaults(&a);
+    a.photo_view = 3;
+    ui_from_settings(&a);
+    lcfg_defaults(&b);
+    ui_to_settings(&b);
+    if (b.photo_view != 3) { _snprintf_s(g_w428_why, sizeof g_w428_why, _TRUNCATE, "Rundweg Oberflaeche (%d)", b.photo_view); return; }
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(f, sizeof f, _TRUNCATE, "%sw428_user_%lu.cfg", tmp, GetCurrentProcessId());
+    u8_DeleteFile(f);
+    if (lcfg_save_user(f, &b) != 0) { strcpy_s(g_w428_why, sizeof g_w428_why, "lcfg_save_user"); return; }
+    lcfg_defaults(&a);
+    if (lcfg_load_file(f, &a) != 0 || a.photo_view != 3) {
+        _snprintf_s(g_w428_why, sizeof g_w428_why, _TRUNCATE, "Rundweg user.cfg (%d)", a.photo_view);
+    }
+    if (!g_w428_why[0]) {
+        write_file(f, "[photo]\nphoto_view=4\n");
+        lcfg_defaults(&a);
+        if (lcfg_load_file(f, &a) != 0 || a.photo_view != 0) {
+            _snprintf_s(g_w428_why, sizeof g_w428_why, _TRUNCATE, "photo_view=4 -> %d statt 0", a.photo_view);
+        }
+    }
+    u8_DeleteFile(f);
     lcfg_defaults(&a);
     ui_from_settings(&a);
 }
@@ -31311,6 +31518,8 @@ void w290_gui_selftest(const char *client_override, int *pass, int *fail)
         tips_build();
         ShowWindow(g_hwnd, SW_SHOWNOACTIVATE); /* ausserhalb des Bildschirms */
         w290_card();
+        if (!g_w290_why[0]) { w428_cine_card(); } /* W428 */
+        else { strcpy_s(g_w428_why, sizeof g_w428_why, "W290-Karte vorher rot"); }
         strcpy_s(keepdir, sizeof keepdir, g_client_dir);
         strcpy_s(g_client_dir, sizeof g_client_dir, dir); /* nie das echte Profil */
         g_o.shot = 3;
@@ -31336,6 +31545,8 @@ void w290_gui_selftest(const char *client_override, int *pass, int *fail)
     }
     if (!g_w290_why[0]) W282_OK("W290 QUICKSHOT gui (Karte Fotos & Screenshots auf Ton & Extras: Elemente, Kolben, Listen, Standard, Rundweg Oberflaeche/user.cfg, alte cfg; Belegungsdialog: altes Profil -> F12/Shift+F12, Lernen Strg+F12 / Druck / Umschalt+F12, kein Konflikt, Alle leeren behaelt, Datei [client], leer bleibt leer)");
     else W282_FAIL("W290 QUICKSHOT gui", g_w290_why);
+    if (!g_w428_why[0]) W282_OK("W428 CINEMATIC gui (Ansicht Cinematic als 4. Eintrag, Rundweg Oberflaeche/user.cfg photo_view=3, photo_view=4 -> wie im Spiel)");
+    else W282_FAIL("W428 CINEMATIC gui", g_w428_why);
 }
 #undef W290_WHY
 
@@ -31824,3 +32035,263 @@ void w419_gui_selftest(const char *client_override, int *pass, int *fail)
     else W282_FAIL("W419 CTRL-EXPORT gui", g_w419_why);
 }
 #undef W419_WHY
+
+/* ---- W430 CTRL-IMPORT-FUZZ: deterministischer Mutations-Fuzzer fuer lcx_parse (.sbcontrols) ----------------
+ * Korpus: Beispieldatei + die kaputten/boesartigen Dateien aus W419 (+ ein paar gueltige Minimalfaelle).
+ * Mutationen (1..4 gestapelt): Bitflip, Byte setzen, Einfuegen, Loeschen, Abschneiden, Block verdoppeln, lange
+ * Zeile, NUL/Steuerzeichen, Unicode (gueltig + kaputt), riesige Zahlen, Zeilen aus anderen Korpusdateien.
+ * Fester Seed (xorshift32). Geprueft je Eingabe: kein Absturz, Rueckgabecode im Bereich, Fehlermeldung gesetzt
+ * und terminiert, bei Fehler d vollstaendig leer, bei Erfolg Name ohne Pfadzeichen, Werte gueltig, nur erlaubte
+ * Zeichen in Quellen, Rundreise lcx_build -> lcx_parse stabil, Laufzeit je Eingabe < 1 s. lcx_parse selbst
+ * schreibt nichts auf die Platte (reiner Pufferweg); lcx_read_file nur lesend. */
+static const char *const kW430Seeds[] = {
+    "[steelbound_controls]\nformat = 1\nprofile = x\n[end]\n",
+    "[steelbound_controls]\nformat = 1\nlauncher = 0.3.2\ngame = loc\nprofile = user_a\n[settings]\nmouse_sens = 3\n"
+    "pad_dz_stick = 10\njoy_cal0 = 044F:B10A,X,-30000,200,31000,4,0\nsbc_cal_rot = -100,0,100\n"
+    "[profile]\njoy0 = Pad One\nbi0 = KEY:A, MOUSE:LEFT, PAD:A\naim_x = JOY0:X:dz=0.05:curve=1.5:sens=2:inv=1\n"
+    "pedal_r = JOY0:Z:zone=10-90\nchaff = KEY:C, PAD:LB+PAD:X\n[end]\n",
+    "[steelbound_controls]\nformat = 1\nprofile = ..\\..\\evil\n[profile]\nbi0 = KEY:A\n[end]\n",
+    "[steelbound_controls]\nformat = 1\nprofile = C:/Windows/x\n[end]\n",
+    "[steelbound_controls]\nformat = 1\n[profile]\nbi0 = KEY:A\n[end]\n",
+    "[steelbound_controls]\nformat = 1\nprofile = a\n[settings]\nmouse_sens = 99\n[end]\n",
+    "[steelbound_controls]\nformat = 1\nprofile = a\n[settings]\nmouse_mode = fast\n[end]\n",
+    "[steelbound_controls]\nformat = 1\nprofile = a\n[settings]\njoy_cal3 = 1:2,Q,9,9,1,0,0\n[end]\n",
+    "[steelbound_controls]\nformat = 1\nprofile = a\n[settings]\nsbc_cal_rot = 5;del\n[end]\n",
+    "[steelbound_controls]\nformat = 1\nprofile = a\n[profile]\naim_x = PAD:LX:dz=5\n[end]\n",
+    "[steelbound_controls]\nformat = 1\nprofile = a\n[profile]\nbi0 = KEY:A;calc.exe\n[end]\n",
+    "[steelbound_controls]\nformat = 1\nprofile = a\n[profile]\nbi0 = KEY:A, KEY:B, KEY:C, KEY:D, KEY:E\n[end]\n",
+    "[steelbound_controls]\nformat = 1\nprofile = a\n[profile]\npedal_r = JOY0:Z:zone=40-200\n[end]\n",
+    "[steelbound_controls]\nformat = 2\nprofile = a\n[end]\n",
+    "[buttons]\nbi0 = KEY:SPACE\n",
+    "[steelbound_controls]\nformat = 1\nprofile = user_x\nfuture = 1\n[settings]\nmouse_sens = 3\nwidth = 3840\n"
+    "xbe_path = x.xbe\n[graphics]\nshading = 1\n[profile]\nbi0 = KEY:A, MIDI:C4, PAD:A\nlaser = KEY:L\n[end]\n",
+    "\xEF\xBB\xBF[steelbound_controls]\r\nformat = 1\r\nprofile = bom\r\n[end]\r\n",
+};
+#define W430_NSEED ((int)(sizeof kW430Seeds / sizeof kW430Seeds[0]))
+/* Einsatzstuecke fuer Einfuegen/Ersetzen (Schluessel, Zahlen, Unicode, Steuerzeichen) */
+static const char *const kW430Bits[] = {
+    "[end]", "[settings]", "[profile]", "[steelbound_controls]", "[x]", "\n", "\r\n", "=", ",", "#", ";", ":", "+",
+    "99999999999999999999", "-2147483648", "2147483647", "4294967296", "-0", "1e999", "nan", "0x7fffffff", "-1",
+    "000000000000000000001", "\xC3\xBC\xC3\xA4", "\xE2\x82\xAC", "\xF0\x9F\x8E\xAE", "\xC0\xAF", "\xFF\xFE", "\xED\xA0\x80",
+    "\xEF\xBB\xBF", "format", "profile", "game", "launcher", "mouse_sens", "joy_cal0", "sbc_cal_rot", "joy0", "joy9",
+    "KEY:", "MOUSE:", "PAD:", "SBC:", "JOY0:", "JOY9:", ":dz=", ":curve=", ":sens=", ":inv=", ":half=", ":zone=",
+    "zone=-5--3", "zone=1-1-1", "dz=0.9", "dz=-0.1", "bi0", "aim_x", "pedal_r", "chaff", "\\", "/", "..", "%s%n",
+    "\x01", "\x1F", "\x7F", "\t", "\xA0", "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+};
+#define W430_NBITS ((int)(sizeof kW430Bits / sizeof kW430Bits[0]))
+#define W430_MAXLEN (LCX_MAX_BYTES + 2048)
+#define W430_SELFTEST_N 20000
+
+static unsigned g_w430_rng;
+static unsigned w430_rnd(void)
+{
+    unsigned x = g_w430_rng;
+    x ^= x << 13;
+    x ^= x >> 17;
+    x ^= x << 5;
+    g_w430_rng = x;
+    return x;
+}
+static size_t w430_below(size_t n) { return n ? (size_t)(w430_rnd() % (unsigned)n) : 0; }
+
+/* Einfuegen von s (sl Bytes) an Stelle at; Rueckgabe neue Laenge (Grenze W430_MAXLEN). */
+static size_t w430_ins(char *b, size_t len, size_t at, const char *s, size_t sl)
+{
+    if (at > len) { at = len; }
+    if (len + sl > W430_MAXLEN) { return len; }
+    memmove(b + at + sl, b + at, len - at);
+    memcpy(b + at, s, sl);
+    return len + sl;
+}
+
+static size_t w430_mutate(char *b, size_t len)
+{
+    int k, rounds = 1 + (int)w430_below(4);
+    for (k = 0; k < rounds; k++) {
+        size_t at = w430_below(len + 1), a, n;
+        switch (w430_below(12)) {
+        case 0: /* Bitflip(s) */
+            for (n = 1 + w430_below(4); n && len; n--) { b[w430_below(len)] ^= (char)(1u << w430_below(8)); }
+            break;
+        case 1: /* Byte setzen */
+            if (len) { b[w430_below(len)] = (char)w430_rnd(); }
+            break;
+        case 2: { /* Zufallsbytes einfuegen */
+            char r[16];
+            n = 1 + w430_below(16);
+            for (a = 0; a < n; a++) { r[a] = (char)w430_rnd(); }
+            len = w430_ins(b, len, at, r, n);
+            break;
+        }
+        case 3: /* Bereich loeschen */
+            if (len) {
+                n = 1 + w430_below(len < 64 ? len : 64);
+                if (at + n > len) { at = len - n; }
+                memmove(b + at, b + at + n, len - at - n);
+                len -= n;
+            }
+            break;
+        case 4: /* abschneiden */
+            len = w430_below(len + 1);
+            break;
+        case 5: /* Block verdoppeln (wiederholt: Groesse treiben) */
+            if (len && len < W430_MAXLEN / 2) {
+                n = 1 + w430_below(len < 200 ? len : 200);
+                if (at + n > len) { at = len - n; }
+                for (a = 1 + w430_below(8); a; a--) {
+                    char tmp[200];
+                    memcpy(tmp, b + at, n);
+                    len = w430_ins(b, len, at, tmp, n);
+                }
+            }
+            break;
+        case 6: { /* lange Zeile */
+            static char longl[70000];
+            n = (size_t)(w430_below(4) == 0 ? 65000 : 480 + w430_below(120));
+            memset(longl, w430_below(2) ? 'A' : '=', n);
+            len = w430_ins(b, len, at, longl, n);
+            break;
+        }
+        case 7: { /* NUL/Steuerzeichen */
+            static const char cc[] = { 0, 1, 7, 8, 11, 12, 27, 31, 127 };
+            char c = cc[w430_below(sizeof cc)];
+            len = w430_ins(b, len, at, &c, 1);
+            break;
+        }
+        case 8: case 9: { /* Einsatzstueck (Unicode, Zahlen, Schluessel ...) */
+            const char *s = kW430Bits[w430_below((size_t)W430_NBITS)];
+            len = w430_ins(b, len, at, s, strlen(s));
+            break;
+        }
+        case 10: { /* Zeile aus anderer Korpusdatei */
+            const char *o = kW430Seeds[w430_below((size_t)W430_NSEED)];
+            size_t ol = strlen(o), s0 = w430_below(ol), s1 = s0;
+            while (s0 > 0 && o[s0 - 1] != '\n') { s0--; }
+            while (s1 < ol && o[s1] != '\n') { s1++; }
+            len = w430_ins(b, len, at, o + s0, s1 - s0 + (s1 < ol ? 1 : 0));
+            break;
+        }
+        default: { /* Zeile durch Einsatzstueck ersetzen (Schluessel/Wert-Teil) */
+            const char *s = kW430Bits[w430_below((size_t)W430_NBITS)];
+            size_t e = at, st = at;
+            while (st > 0 && b[st - 1] != '\n') { st--; }
+            while (e < len && b[e] != '\n') { e++; }
+            if (e > st) { memmove(b + st, b + e, len - e); len -= e - st; }
+            len = w430_ins(b, len, st, s, strlen(s));
+            break;
+        }
+        }
+    }
+    return len;
+}
+
+/* Pruefung eines Ergebnisses; 0 = ok, sonst Text in why. */
+static int w430_check(const char *in, size_t len, const lcx_data_t *d, int rc, const char *err, char *why, size_t wc)
+{
+    static lcx_data_t z;
+    static lcx_data_t d2;
+    static char out[LCX_MAX_BYTES * 2];
+    char err2[300];
+    size_t i;
+    int a, r, rc2;
+    (void)in;
+    if (rc < LCX_OK || rc > LCX_E_LINE) { _snprintf_s(why, wc, _TRUNCATE, "rc %d ausserhalb", rc); return 1; }
+    if (memchr(err, 0, 300) == NULL) { _snprintf_s(why, wc, _TRUNCATE, "Meldung nicht terminiert"); return 1; }
+    if (rc != LCX_OK) {
+        if (!err[0]) { _snprintf_s(why, wc, _TRUNCATE, "Fehler %d ohne Meldung", rc); return 1; }
+        if (memcmp(d, &z, sizeof z) != 0) { _snprintf_s(why, wc, _TRUNCATE, "Fehler %d: Daten nicht leer", rc); return 1; }
+        return 0;
+    }
+    if (d->format < 1 || d->format > LCX_FORMAT || !d->profile[0] || strlen(d->profile) > 63 ||
+        d->n_set < 0 || d->n_set > LCX_SET_MAX) {
+        _snprintf_s(why, wc, _TRUNCATE, "OK mit ungueltigem Kopf (format %d, n_set %d)", d->format, d->n_set);
+        return 1;
+    }
+    for (i = 0; d->profile[i]; i++) {
+        unsigned char c = (unsigned char)d->profile[i];
+        if (c < 0x20 || c == 0x7F || strchr("/\\:*?\"<>|", c)) { _snprintf_s(why, wc, _TRUNCATE, "Name mit Zeichen %02X", c); return 1; }
+    }
+    if (strstr(d->profile, "..")) { _snprintf_s(why, wc, _TRUNCATE, "Name mit .."); return 1; }
+    for (a = 0; a < d->n_set; a++) {
+        char k[96];
+        const char *eq = strchr(d->set[a], '=');
+        if (!eq || (size_t)(eq - d->set[a]) >= 48) { _snprintf_s(why, wc, _TRUNCATE, "Wert ohne Schluessel"); return 1; }
+        memcpy(k, d->set[a], (size_t)(eq - d->set[a]));
+        k[eq - d->set[a]] = '\0';
+        if (lcx_set_check(k, eq + 1) != 1) { _snprintf_s(why, wc, _TRUNCATE, "OK mit ungueltigem Wert %.40s", d->set[a]); return 1; }
+    }
+    for (a = 0; a < LCTRL_ELEM_N; a++) {
+        if (d->bind.row[a].n_alt < 0 || d->bind.row[a].n_alt > LCTRL_ALT_N) { _snprintf_s(why, wc, _TRUNCATE, "n_alt %d", d->bind.row[a].n_alt); return 1; }
+        for (r = 0; r < d->bind.row[a].n_alt; r++) {
+            const unsigned char *c = (const unsigned char *)d->bind.row[a].alt[r];
+            if (memchr(c, 0, 96) == NULL || !*c) { _snprintf_s(why, wc, _TRUNCATE, "Quelle leer/unterminiert"); return 1; }
+            for (; *c; c++) {
+                if (!(isalnum(*c) || strchr(":+=._!-", *c))) { _snprintf_s(why, wc, _TRUNCATE, "Quelle mit Zeichen %02X", *c); return 1; }
+            }
+        }
+    }
+    /* Rundreise: bauen und erneut lesen -> gleiche Daten */
+    if (lcx_build(d, out, sizeof out) != 0) { _snprintf_s(why, wc, _TRUNCATE, "Rundreise: lcx_build voll"); return 1; }
+    rc2 = lcx_parse(out, strlen(out), &d2, err2, sizeof err2);
+    if (rc2 != LCX_OK || d2.n_set != d->n_set || strcmp(d2.profile, d->profile) != 0 || !w419_bind_eq(&d2.bind, &d->bind)) {
+        _snprintf_s(why, wc, _TRUNCATE, "Rundreise: rc %d, Werte %d/%d", rc2, d2.n_set, d->n_set);
+        return 1;
+    }
+    (void)len;
+    return 0;
+}
+
+/* n Mutationen mit Seed; Rueckgabe 0 = ok. stat[0] = OK-Importe, stat[1] = abgelehnt. */
+int w430_ctrl_fuzz(long n, unsigned seed, char *why, size_t wc, long *stat)
+{
+    static lcx_data_t d;
+    static char buf[W430_MAXLEN + 16];
+    char err[300];
+    long it;
+    why[0] = '\0';
+    stat[0] = stat[1] = 0;
+    g_w430_rng = seed ? seed : 0x430u;
+    for (it = 0; it < n; it++) {
+        const char *s = it % 7 == 0 ? kCxFixture : kW430Seeds[w430_below((size_t)W430_NSEED)];
+        size_t len = strlen(s), outlen;
+        ULONGLONG t0;
+        int rc;
+        memcpy(buf, s, len);
+        outlen = it < W430_NSEED ? len : w430_mutate(buf, len); /* erste Runde: Korpus unveraendert */
+        buf[outlen] = '\0';
+        memset(&d, 0xA5, sizeof d); /* Vorbelegung: lcx_parse muss d vollstaendig selbst setzen */
+        memset(err, 0xA5, sizeof err);
+        t0 = GetTickCount64();
+        rc = lcx_parse(buf, outlen, &d, err, sizeof err);
+        if (GetTickCount64() - t0 > 1000) { _snprintf_s(why, wc, _TRUNCATE, "Eingabe %ld: %llu ms (Laufzeit)", it, (unsigned long long)(GetTickCount64() - t0)); return 1; }
+        if (w430_check(buf, outlen, &d, rc, err, why, wc)) {
+            char tmp[160], p[1200];
+            FILE *f = NULL;
+            u8_GetTempPath(tmp, sizeof tmp);
+            _snprintf_s(p, sizeof p, _TRUNCATE, "%sw430_fund_%lu.sbcontrols", tmp, GetCurrentProcessId());
+            if (u8_fopen_s(&f, p, "wb") == 0 && f) { fwrite(buf, 1, outlen, f); fclose(f); }
+            { char w2[300]; _snprintf_s(w2, sizeof w2, _TRUNCATE, "Eingabe %ld (Seed %u, %u Bytes): %s", it, seed, (unsigned)outlen, why); strcpy_s(why, wc, w2); }
+            return 1;
+        }
+        stat[rc == LCX_OK ? 0 : 1]++;
+    }
+    return 0;
+}
+
+/* Selbsttest: kurz (feste Anzahl, deutlich unter 5 s). Lang: launcher --controls-fuzz N [--seed S]. */
+void w430_selftest(int *pass, int *fail)
+{
+    char why[400];
+    long stat[2];
+    ULONGLONG t0 = GetTickCount64();
+    int rc = w430_ctrl_fuzz(W430_SELFTEST_N, 0x430u, why, sizeof why, stat);
+    ULONGLONG ms = GetTickCount64() - t0;
+    if (!rc && stat[0] > 100 && stat[1] > 100 && ms < 5000) {
+        printf("PASS W430 CTRL-IMPORT-FUZZ (%ld Mutationen fester Seed, %ld Importe, %ld abgelehnt, %llu ms; Invarianten: Rueckgabe, Meldung, leere Daten bei Fehler, Name, Werte, Quellen, Rundreise)\n",
+               (long)W430_SELFTEST_N, stat[0], stat[1], (unsigned long long)ms);
+        (*pass)++;
+    } else {
+        printf("FAIL W430 CTRL-IMPORT-FUZZ: %s (%ld/%ld, %llu ms)\n", why[0] ? why : "zu wenig Vielfalt oder zu langsam", stat[0], stat[1], (unsigned long long)ms);
+        (*fail)++;
+    }
+}

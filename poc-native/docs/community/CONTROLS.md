@@ -66,6 +66,34 @@ works. **Clear all …** keeps it, like the other client keys. Layouts saved
 before this change keep working: without their own entry, Shift + F8 (or
 `orig_key` in `user.cfg`) applies.
 
+## Layout "default_full": a key for every action
+
+Besides the Standard layout (unchanged, also used when no layout is chosen) the
+launcher ships **default_full**. Pick it on the **Controls** page. It keeps every
+Standard key and adds a key for each control that had none, so the whole original
+controller works from the keyboard. A fresh installation starts with it selected; existing setups keep what they have. Your own layouts are never touched or replaced.
+Line of Contact uses the same controls.
+
+| Action | Key | Used in |
+|---|---|---|
+| Toggle switches: filter / oxygen / fuel / buffer / VT location | 1 2 3 4 5 | both |
+| COMM 1-5 | 6 7 8 9 0 | Steel Battalion (radio buttons) |
+| Multi-monitor open / close | B | both |
+| Sub-monitor mode | J | both |
+| Manipulator | U | Steel Battalion |
+| Line colour | K | Steel Battalion |
+| Washer | Y | Steel Battalion |
+| Fire extinguisher | P | both |
+| Tank detach | End | Steel Battalion |
+| Function buttons F1 / F2 / F3 of the controller | F4 / F5 / F6 | rarely used by the games |
+| Main weapon select / Sub-weapon select | Page Up / Page Down | both |
+| Sight button (press the sight stick) | F7 | both |
+| Weapon arm to centre | Home | both |
+
+Every other action keeps its Standard key (see the table above). Gears and tuner
+use Q/E and G/T (stepping reaches every gear). No key clashes with the client keys
+(ESC, F2, F3, F8-F12, Pause, Backspace, Alt+Enter). A selftest checks this.
+
 ## Gamepad (XInput)
 
 | Input | Function |

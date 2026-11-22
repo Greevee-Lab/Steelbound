@@ -2090,6 +2090,7 @@ static void test_ovlloclock(void)
         { "monitor_fx", "ovl.ll_monfx" }, { "monitor_grain", "ovl.ll_monfx" }, { "cockpit_hide", "ovl.ll_cockpit" },
         { "monitor_view", "ovl.ll_cockpit" }, { "cockpit_persp", "ovl.ll_cockpit" }, { "hud_label_avoid", "ovl.ll_cockpit" },
         { "aim_assist", "ovl.ll_assist" }, { "auto_gear", "ovl.ll_assist" }, { "replay_label", "ovl.ll_replay" },
+        { "sb_allied_squads", "ovl.ll_assist" }, /* W424 */
         { "watermark_media", "ovl.ll_replay" }, { "replay_fx_live", "ovl.ll_replay" }, { "remaster", "ovl.ll_packs" },
         { "hd_textures", "ovl.ll_packs" }, { "vr_enable", "ovl.ll_vr" }, { "vr_preset", "ovl.ll_vr" },
         { "save_lock", "ovl.ll_savelock" }, { "cockpit_glow", "ovl.ll_post" }, { "cockpit_light", "ovl.ll_post" },

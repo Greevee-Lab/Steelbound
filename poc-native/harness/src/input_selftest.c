@@ -48,6 +48,7 @@
 #include "input_map.h"
 #include "input_tap.h"
 #include "input_sbc_usb.h"
+#include "sb_ally_core.h" /* W424 */
 
 static int n_checks, n_fail;
 static long n_states;
@@ -1734,6 +1735,23 @@ static void run_pause_cases(const imap_profile_t *kb, const imap_profile_t *xbox
     s.pad.buttons = IMAP_PAD_Y;
     s.pad_present = 1;
     CHECK(imap_action_pause(&p, &st, &s) == 0, "pause: Pad Y halten -> 0");
+    /* W423 LOC-XSB-LOOP (#71): schon beim Start gehalten -> erst nach Loslassen eine Flanke */
+    imap_state_init(&st);
+    make_snap(&s, fr++, &c);
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = IMAP_PAD_Y;
+    s.pad_present = 1;
+    CHECK(imap_action_pause(&p, &st, &s) == 0, "pause: Pad Y ab Start gehalten -> 0 (W423)");
+    CHECK(imap_action_photo(&p, &st, &s) == 0 && imap_action_net_hud(&p, &st, &s) == 0, "W423: andere Aktionen still");
+    make_snap(&s, fr++, &c);
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = IMAP_PAD_Y;
+    s.pad_present = 1;
+    CHECK(imap_action_pause(&p, &st, &s) == 0, "pause: weiter gehalten -> 0 (W423)");
+    s.pad.buttons = 0;
+    CHECK(imap_action_pause(&p, &st, &s) == 0, "pause: losgelassen -> 0 (W423)");
+    s.pad.buttons = IMAP_PAD_Y;
+    CHECK(imap_action_pause(&p, &st, &s) == 1, "pause: neuer Druck nach dem Start -> Flanke (W423)");
     /* ohne Geraet still */
     imap_state_init(&st);
     make_snap(&s, fr++, &c);
@@ -1962,7 +1980,8 @@ static void run_origview_cases(const imap_profile_t *kb, const imap_profile_t *x
         imap_state_init(&st2);
         make_snap(&s, fr++, &c);
         s.sbc_present = 1;
-        s.sbc[0] = s.sbc[2] = 0;
+        s.sbc[0] = s.sbc[1] = s.sbc[2] = 0;
+        (void)imap_action_orig_view(&r, &st2, &s); /* W423: Ruhe nach dem Start, dann erst eine Flanke */
         s.sbc[1] = (uint16_t)(1u << 2); /* bi18 CHAFF = Wort 1 Bit 2 (wie Teil 12) */
         n = imap_action_orig_view(&r, &st2, &s);
         s.sbc[1] = 0;
@@ -2059,7 +2078,8 @@ static void run_quickshot_cases(const imap_profile_t *kb, const imap_profile_t *
         imap_state_init(&st2);
         make_snap(&s, fr++, &c);
         s.sbc_present = 1;
-        s.sbc[0] = s.sbc[2] = 0;
+        s.sbc[0] = s.sbc[1] = s.sbc[2] = 0;
+        (void)imap_action_quick_shot(&r, &st2, &s); /* W423: Ruhe nach dem Start, dann erst eine Flanke */
         s.sbc[1] = (uint16_t)(1u << 2); /* bi18 CHAFF */
         n = imap_action_quick_shot(&r, &st2, &s);
         s.sbc[1] = 0;
@@ -4215,6 +4235,71 @@ static void run_w396_center_cases(void)
     CHECK(b.sight_x == 0 && b.sight_y == 0, "W396: Sicht nach dem Zentrieren in Ruhe: %d,%d", b.sight_x, b.sight_y);
 }
 
+/* Teil 31: W431 DEFAULT-BINDINGS - default_full: jede Aktion hat eine Taste, keine Doppel-/Client-Tasten. */
+static void run_w431_default_full_cases(void)
+{
+    static const int reserved[] = { VK_ESCAPE, VK_F10, VK_F2, VK_F3, VK_F8, VK_F9, VK_F11, VK_F12, VK_PAUSE,
+                                    VK_BACK, VK_SNAPSHOT };
+    imap_profile_t p;
+    int bi, a, k, n, rc, used[256][2], nused = 0, bad_reserved = 0, dup = 0, unbound = 0, nopress = 0;
+    printf("Teil 31: W431 default_full (jede Aktion belegt)\n");
+    rc = imap_profile_load("default_full", &p);
+    CHECK(rc == 0, "w431: default_full.ini gefunden (rc=%d)", rc);
+    if (rc != 0) return;
+    CHECK(p.has_pad == 0 && p.has_sbc == 0, "w431: nur Tastatur/Maus");
+    for (bi = 0; bi < 39; bi++) { /* Tasten: belegt, einzeln gedrueckt -> genau dieses Bit */
+        int vks[8], mods[8];
+        n = imap_bind_key_combos(&p.btn[bi], vks, mods, 8);
+        if (p.btn[bi].n == 0 || n == 0) { unbound++; printf("  bi%d unbelegt\n", bi); continue; }
+        for (a = 0; a < n; a++) {
+            for (k = 0; k < (int)(sizeof reserved / sizeof reserved[0]); k++)
+                if (vks[a] == reserved[k] && mods[a] == 0) { bad_reserved++; printf("  bi%d nutzt Client-Taste %d\n", bi, vks[a]); }
+            for (k = 0; k < nused; k++)
+                if (used[k][0] == vks[a] && used[k][1] == mods[a]) { dup++; printf("  bi%d doppelt (VK %d)\n", bi, vks[a]); }
+            if (nused < 256) { used[nused][0] = vks[a]; used[nused][1] = mods[a]; nused++; }
+        }
+        {
+            imap_state_t st;
+            imap_block_t b;
+            int keys[8], nk = 0;
+            unsigned long long want = 1ull << bi, got;
+            imap_state_init(&st);
+            for (a = 0; a < 1; a++) {
+                keys[nk++] = vks[0];
+                if (mods[0] & 1) { keys[nk++] = VK_SHIFT; keys[nk++] = VK_LSHIFT; }
+            }
+            w365_apply(&p, &b, &st, keys, nk, 0, 1000u + (unsigned)bi);
+            got = (unsigned long long)b.buttons[0] | ((unsigned long long)b.buttons[1] << 16) |
+                  ((unsigned long long)b.buttons[2] << 32);
+            if (!(got & want)) { nopress++; printf("  bi%d wirkt nicht (btn=%llX)\n", bi, got); }
+        }
+    }
+    CHECK(unbound == 0, "w431: alle 39 Tasten belegt (unbelegt=%d)", unbound);
+    CHECK(nopress == 0, "w431: jede Taste setzt ihr Bit (Fehler=%d)", nopress);
+    CHECK(dup == 0, "w431: keine Taste doppelt (%d)", dup);
+    CHECK(bad_reserved == 0, "w431: keine Client-Taste belegt (%d)", bad_reserved);
+    CHECK(p.gear_up.n && p.gear_down.n && p.tuner_up.n && p.tuner_down.n, "w431: Gang/Tuner hoch+runter");
+    for (a = 0; a < IMAP_AX_COUNT; a++) {
+        int has = p.axis[a].neg.n || p.axis[a].pos.n || p.axis[a].mouse;
+        if (a == IMAP_AX_PEDAL_L || a == IMAP_AX_PEDAL_M || a == IMAP_AX_PEDAL_R) has = p.axis[a].pos.n || p.axis[a].neg.n;
+        CHECK(has, "w431: Achse %d belegt", a);
+    }
+    CHECK(p.vr_recenter.n && p.pause.n && p.photo.n && p.feedback_shot.n && p.feedback_clip.n && p.quick_shot.n &&
+          p.orig_view.n && p.replay_exit.n && p.net_hud.n && p.aim_center.n, "w431: Client-Aktionen belegt");
+    {   /* Client-Aktionen nicht mit Spiel-Tasten teilen (ausser den bekannten Client-Tasten selbst) */
+        const imap_bind_t *ca[] = { &p.aim_center, &p.pause, &p.replay_exit, &p.net_hud, &p.quick_shot, &p.photo,
+                                    &p.feedback_shot, &p.feedback_clip, &p.orig_view, &p.vr_recenter };
+        int cd = 0, i;
+        for (i = 0; i < (int)(sizeof ca / sizeof ca[0]); i++) {
+            int vks[8], mods[8], m = imap_bind_key_combos(ca[i], vks, mods, 8);
+            for (a = 0; a < m; a++)
+                for (k = 0; k < nused; k++)
+                    if (used[k][0] == vks[a] && used[k][1] == mods[a]) cd++;
+        }
+        CHECK(cd == 0, "w431: Client-Aktionen kollidieren nicht mit Spiel-Tasten (%d)", cd);
+    }
+}
+
 int main(int argc, char **argv)
 {
     imap_profile_t kb_file, kb_in, xbox_file, xbox_in;
@@ -4236,6 +4321,35 @@ int main(int argc, char **argv)
     { extern int sb_mauto_selftest(void); CHECK(sb_mauto_selftest() == 0, "W272 Teststart"); }
     { extern int sb_cchain_selftest(void); CHECK(sb_cchain_selftest() == 0, "W303 Kampagnen-Kette"); }
     { extern int avol_selftest(void); CHECK(avol_selftest() == 0, "W303 Lautstaerke"); }
+    { /* W424 SB-ALLIED-SQUADS: Freigabe und Zusatzregel (reine Logik) */
+        static const sb_ally_pt_t al[2] = { { 100, 50 }, { -20, 300 } };
+        static const unsigned char tst[4] = { 1, 2, 3, 4 };
+        static unsigned seen[8];
+        CHECK(sb_ally_extra(0, 1, 1, 0, 0, al, 0, SB_ALLY_RANGE), "W426 verbuendet + gesehen -> aktiv");
+        CHECK(!sb_ally_extra(0, 1, 0, 0, 0, al, 2, SB_ALLY_RANGE), "W426 verbuendet, nie gesehen -> eingefroren (Original)");
+        CHECK(!sb_ally_extra(1, 1, 1, 100, 50, al, 2, SB_ALLY_RANGE), "W424 Trupp-Mitglied folgt dem Anfuehrer");
+        CHECK(sb_ally_extra(0, 0, 0, 107, 43, al, 2, SB_ALLY_RANGE), "W424 Feind am Rand (+7/-7) aktiv");
+        CHECK(!sb_ally_extra(0, 0, 0, 108, 50, al, 2, SB_ALLY_RANGE), "W424 Feind +8 bleibt eingefroren");
+        CHECK(sb_ally_extra(0, 0, 0, -25, 295, al, 2, SB_ALLY_RANGE), "W424 Feind nahe zweitem Verbuendeten");
+        CHECK(!sb_ally_extra(0, 0, 0, 100, 50, al, 0, SB_ALLY_RANGE), "W426 ohne gesehene Verbuendete nichts");
+        /* W426 Merker "gesehen": Bild 0 zaehlt nicht, bleibt danach, Tod/Neubelegung loescht */
+        CHECK(!sb_ally_mark(seen, 8, 3, sb_ally_key(17), 0) && !sb_ally_seen(seen, 8, 3, sb_ally_key(17)),
+              "W426 Bild 0 merkt nicht");
+        CHECK(sb_ally_mark(seen, 8, 3, sb_ally_key(17), 5) && sb_ally_seen(seen, 8, 3, sb_ally_key(17)),
+              "W426 Original aktiv -> gesehen");
+        CHECK(!sb_ally_mark(seen, 8, 3, sb_ally_key(17), 6), "W426 nur einmal neu gemerkt");
+        CHECK(sb_ally_keep(seen, 8, 3, sb_ally_key(17), 1) && sb_ally_seen(seen, 8, 3, sb_ally_key(17)),
+              "W426 bleibt gesehen, wenn der Spieler weiterzieht");
+        CHECK(!sb_ally_keep(seen, 8, 3, sb_ally_key(40), 1) && !sb_ally_seen(seen, 8, 3, sb_ally_key(40)) &&
+              seen[3] == 0, "W426 Slot neu belegt -> nicht gesehen");
+        CHECK(sb_ally_mark(seen, 8, 4, sb_ally_key(0), 9) && !sb_ally_keep(seen, 8, 4, sb_ally_key(0), 0) &&
+              seen[4] == 0, "W426 Tod loescht Merker");
+        CHECK(!sb_ally_mark(seen, 8, 8, sb_ally_key(1), 9) && !sb_ally_seen(seen, 8, -1, sb_ally_key(1)),
+              "W426 Index ausserhalb");
+        CHECK(sb_ally_key(0) != 0 && sb_ally_key(0xFFFF) != 0, "W426 Schluessel nie 0");
+        CHECK(sb_ally_fnv64(tst, 0) == 14695981039346656037ull && sb_ally_fnv64(tst, 4) != sb_ally_fnv64(tst, 3),
+              "W424 fnv64");
+    }
 
     printf("input_selftest: Vergleich alt<->neu + Gamepad-Logik\n");
 
@@ -4325,6 +4439,8 @@ int main(int argc, char **argv)
     run_w394_preview_cases(); /* Teil 28: W394 */
     run_w396_center_cases(); /* Teil 29: W396 */
     run_w403_eject_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 30: W403 */
+
+    run_w431_default_full_cases(); /* Teil 31: W431 */
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;

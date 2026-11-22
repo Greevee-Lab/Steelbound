@@ -151,6 +151,11 @@ void lorig_selftest(int *pass, int *fail)
             _snprintf_s(why, sizeof why, _TRUNCATE, "neutraler Schluessel %s steht als experimentell", kSbOrigNeutral[i]);
         }
     }
+    for (i = 0; i < SB_OF_NGAMEPLAY && !why[0]; i++) { /* W424: Gameplay-Abweichung mit Standard an, nie gekennzeichnet */
+        if (sb_of_find(kSbOrigGameplay[i]) >= 0) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Gameplay-Schluessel %s steht als experimentell", kSbOrigGameplay[i]);
+        }
+    }
     for (k = 0; k < SB_GP_NKEY && !why[0]; k++) { /* Preset-Schluessel: alles ausser Bildrate/Aufloesung */
         const char *key = kSbGfxPreset[k].key;
         int neutral = k == SB_GP_FPS || k == SB_GP_RT || k == SB_GP_DYN || k == SB_GP_MATCH;

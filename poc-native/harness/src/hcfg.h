@@ -92,6 +92,11 @@ typedef struct {
                             * ruhenden Draws (M_A^-1*M_B passt zur Kamera des Ziels) als Matrix-Lerp der Tick-N-Vertices zeichnen
                             * (rzb): neu gebaute Gelaende-Netze (~9000 Vertices) ordnen Vertex i je Tick anderen Weltpunkten zu ->
                             * Keile/Loecher. 1 = nur LoC (Standard), 2 = auch SB, 0 = aus */
+    int interp_p2hom;     /* FIX(W429 M3-ROAD-FIX): 1 = P2 im RT (Strom schon durch w geteilt) im Zwischenbild homogen lerpen
+                           * (echte Clip-w aus dem W237-Nebenpuffer, interp_hlerp-Modus 3 wenn interp_hlerp=0) mit derselben
+                           * Regel je Vertex wie der 3D-Pass (nur W224-w-Wechsel), und Welt-Draws mit GLEICHEN Eingangsdaten,
+                           * die nur an Bezugs-Vertices ausserhalb des Bildes bzw. hinter der Kamera scheitern (reject), lerpen;
+                           * nur SB (LoC unveraendert); 0 = alt */
     int seam_diag;        /* DIAG(W406 M3-ROAD-JITTER): N = Fugen-Messung zwischen Nachbar-Draws im Zwischenbild (SEAM/SEAMW, erste N Ticks mit Fund; SEAMSUM je 200 Ticks, nur sichtbare Ecken), braucht interp_diag>=3; 0 = aus */
     int loc_wlag_fix;     /* W412 LOC-WORLD-LAG: 1 = Himmel (Welt-Draw mit eigener Tiefe) mit derselben vorhergesagten Kamera wie die Welt (nur LoC, nur mit Kamera-Versatz W385/W390), 0 = aus (alt) */
     int loc_wlag_diag;    /* DIAG(W412 LOC-WORLD-LAG): Bit 1 = Zeile LOCWLAG alle 10 s (Kamera je Draw-Klasse, Versatz in Grad), 0 = aus */
@@ -99,6 +104,13 @@ typedef struct {
     int memreg_keep;      /* W417 SB-BRIEF-BLACK (#66): 1 = Eintraege, die der volle Register-Ring (8192) verdraengt, als Bereiche behalten; Adressabfragen (Texturkopf-Pruefung) finden sie weiter, solange der Speicher zugesagt ist (vorher nach langen Laeufen Film im Briefing schwarz, Grund 1); 0 = alt */
     int loc_rule_clipdump_block; /* W420 LOC-CLIPDUMP: Host-Regel "Clip dumping unterbinden" (1 = Magazinwechsel setzt die Feuerpause der Hauptwaffe nicht zurueck; Standard 1, gilt im Match nach der Einstellung des Hosts, loc_rule.c) */
     int loc_clip_diag;    /* W420 DIAG: Zeile LOCCLIP je Sekunde (Schuesse, Waffe, Magazine, Feuerpause des eigenen VT) */
+    int loc_insignia_rt;  /* W422 LOC-INSIGNIA-PEN: 1 = Stift-RTs des Insignien-Editors (64x64 [[0x57C6B8]+0x694], 384x16 +0x6BC) teilen den Speicher mit der CPU wie auf der Xbox: vor jeder Session Xbox-Speicher -> RT, danach RT -> Xbox-Speicher bis zum BlockOnFence; dazu CPU-beschriebene Editor-Texturen (Flaeche [obj+0x4D0], Muster, Datei-Vorschauen) je Bild voll auf Aenderung pruefen (Standard); 0 = alt (Stift setzt nichts, Cursor-Spur, Zeilen 16-47 der Flaeche nie sichtbar); nur LoC-Profil */
+    int sb_allied_squads; /* W424 SB-ALLIED-SQUADS: 1 = verbuendete Trupps (und Feinde in ihrer Naehe) werden auch fern vom Spieler simuliert (Thunk an 0x5CED9; W426: erst nachdem das Original die verbuendete Einheit einmal aktiv geschaltet hat, danach bis Missionsende; wirkt ab der naechsten Mission; Standard 1), 0 = Original (eingefroren ausserhalb der Spielerzone, kein Patch); nur SB-Profil */
+    int sb_ally_diag;     /* DIAG(W424): Zeile SBALLY alle 300 Spielbilder (Einheiten, Original aktiv, Zusatz verbuendet/Feind) und Verbuendeten-Lage */
+    int loc_ins_diag;     /* DIAG(W422): Zeile LOCINS alle 30 Bilder im Insignien-Editor (Zustand, Werkzeug, Cursor, Stift, Pixel in Flaeche/Ebene/RT-Speicher); 0 = aus */
+    int loc_zcache_alt;   /* W423 LOC-XSB-LOOP (#71): 1 = ist der Datei-Cache Z: (<hdd_root_loc>\ZCACHE) nicht beschreibbar, weicht Z: auf einen Ersatzordner aus (%LOCALAPPDATA%\Steelbound\loc_zcache bzw. %TEMP%\Steelbound_loc_zcache, Kurzpfad); sonst kopiert LoC media\sndeff endlos und haengt am Dolby-Logo (Standard); 0 = alt; nur LoC-Profil */
+    int loc_boot_nopause; /* W423 LOC-XSB-LOOP: 1 = ESC-Menue, Alpha-Hinweis und Pause-Taste halten das Spiel in LoC erst an, wenn der Start-Kopiervorgang nach Z: fertig ist (Boot laeuft weiter, Standard); 0 = alt; nur LoC-Profil */
+    int loc_boot_diag;    /* DIAG(W423): LOCBOOTDIAG-Zeilen: Rueckgabewerte von Oeffnen/Lesen/Seek fuer media\sndeff und Z:, CreateSoundBank, Wiederholzaehler, Pause-Zustand in der Startphase (je Art begrenzt); 0 = aus */
     int memreg_diag;      /* DIAG(W417 SB-BRIEF-BLACK): 1 = Speicherregister messen (MEMREG-Zeilen: Fuellstand je Art alle 1024 Eintraege, Ring voll, verdraengte grosse Eintraege) und bei Textur-Ablehnung Grund 1 Lage der Adresse (VirtualQuery, Register-Nachbarn, verdraengter Eintrag); 0 = aus */
     int loc_stat_diag;    /* DIAG(W415 LOC-STATIC-LAG): Bit 1 = Zeile LOCSTAT alle 10 s (Versatz jedes Welt-Draws im Zwischenbild gegen die Kamera der Welt an derselben Stelle, Pixel je Klasse), Bit 2 = groesste Einzel-Draws (LOCSTAT top), Bit 4 = Bezug Mehrheits-D, Bit 8 = exakte Draws mit Versatz (LOCSTAT ex), Bit 16 = Tickweg je Kamera-Kandidat (LOCSTAT paar); 0 = aus */
     int loc_sndloop_fix;  /* W413 LOC-SOUND-LOOP (#65): 1 = nach jedem Neurechnen Toene stoppen, die die korrigierte Zeitlinie nicht mehr gestartet bzw. schon gestoppt hat (nachgeholte Waisen, Index-/Quellen-Stopps, Sicherheitsnetz), nur LoC-Rollback; 0 = alt (nur W375-Waisen) */
@@ -731,6 +743,7 @@ typedef struct {
     /* [overlay] (W118 REM-OVERLAY, sb_overlay.c) */
     int overlay;                /* 1 = ESC oeffnet das Einstellungs-Overlay (Spieler-Standard), 0 = aus (ESC wie bisher) */
     char overlay_test[1024];    /* TEST(W118): Skript "<bild>:<aktion>,..." -> PostMessage an das eigene Fenster (leer = aus) */
+    char input_hold_test[64];   /* TEST(W423): ab Bild 0 gehaltene synthetische Eingabe: "esc" | "pause" (Tastatur, Wiederholmeldungen ans eigene Fenster) bzw. "pad:<hex>" (Test-Pad, input_test_hook); leer = aus */
     char overlay_save_path[512]; /* "Als Standard speichern": Ziel (leer = user.cfg neben sb_native.cfg bzw. SB_USER_CFG) */
     /* W188 GAME-MENU (sb_overlay.c, sb_pause.c, sb_feedback.c) */
     int game_menu;              /* 1 = ESC oeffnet zuerst das Spielmenue (Weiter/Einstellungen/Fotomodus/Feedback/Beenden), 0 = ESC direkt in die Einstellungen (W118) */
@@ -759,6 +772,10 @@ typedef struct {
     int photo_view;             /* W290 QUICK-SHOT: Ansicht der Aufnahme: 0 = wie im Spiel (Standard), 1 = ohne Cockpit (Vollbild-Ansicht des Spiels), 2 = nur Aussenwelt (ohne HUD/Monitor) */
     int photo_size;             /* W290: Groesse: 1/2/4/8 = x Fenster, -4 = 4K, -8 = 8K, 0 = nicht gesetzt (photo_scale > 1 bzw. 4K) */
     int photo_hud;              /* W290: 1 = HUD im Foto (Standard), 0 = HUD des Hauptmonitors weglassen (Monitor-Effekt bleibt; braucht Tick-Aufzeichnung) */
+    int photo_cine_self;        /* W428 PHOTO-CINEMATIC (photo_view=3): Welt-Draws, deren Modell-Ursprung naeher als N/10 Spiel-Einheiten (~m) an der Spielkamera liegt, gelten als eigener VT und fehlen im Foto. Standard 40; 0 = nichts auslassen */
+    int photo_cine_diag;        /* DIAG(W428): Bit 1 = Zeile je ausgelassenem Draw (begrenzt), Bit 2 = zusaetzlich alle P2-Draws (Vertex-Programm) im Welt-RT auslassen (Test); 0 = aus */
+    int save_delete_fix;        /* W433 REPLAY-DELETE: 1 = NtCreateFile/NtOpenFile beachten RootDirectory (Ordner-Handle + relativer Name, XAPI XDeleteSaveGame), Loeschen beim Schliessen auch fuer Ordner, nur im Spiel-Laufwerk (Standard); 0 = alt */
+    int save_delete_selftest;   /* DIAG(W433): Selbsttest Spielstand-Ordner loeschen wie XDeleteSaveGame (synthetischer Ordner unter UDATA, vor dem Spiel) */
     int replay_label;           /* W290: 1 = REPLAY-Schriftzug der Wiedergabe zeigen (Original, Standard), 0 = weglassen (live, Foto, Video) */
     int replay_logo;            /* W290: 1 = Spiel-Logo der Wiedergabe zeigen (Original, Standard), 0 = weglassen */
     int watermark_media;        /* W290: 1 = Wasserzeichen auch im Video-Export (Standard), 0 = nicht im Video-Export */

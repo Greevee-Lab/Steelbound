@@ -20,6 +20,239 @@
  * liefert ACCESS_DENIED wie auf der DVD. */
 static iso_vfs_t *g_iso;
 
+/* ---------- W423 LOC-XSB-LOOP (GitHub #71): Datei-Cache Z: im LoC-Start ----------
+ * LoC kopiert beim Start in einem eigenen Thread (FUN_0001DA50) 33 Dateien aus
+ * media/sndeff auf dem Spiel-Laufwerk (zuerst bank.xsb) per CopyFile nach Z: und prueft jede Kopie
+ * durch Oeffnen; scheitert das, wiederholt es ohne Ende. Das Startbild wartet
+ * auf diesen Thread (Dolby-Logo), die Soundbaenke liest das Spiel danach aus Z:.
+ * Ist <hdd_root_loc>\ZCACHE nicht beschreibbar, oeffnet das Spiel also tausendfach
+ * je Sekunde D:\...\bank.xsb (Log "FILE open ...bank.xsb -> xh=0x113") und haengt.
+ * Hier: Schreibtest beim Start, Ersatzordner (loc_zcache_alt), Erkennung der
+ * Schleife mit einer klaren Zeile, Drosselung gleicher Oeffnungen im Log,
+ * Zustand fuer den F11-Bericht. Alles nur im LoC-Profil (g_zc_pre leer bei SB). */
+static char g_zc_pre[640];          /* "<hdd_root>\ZCACHE\" (Backslashes), leer = nicht LoC */
+static char g_zc_alt[640];          /* Ersatzordner fuer Z: (leer = keiner) */
+static volatile LONG g_zc_state;    /* 0 = ungeprueft, 1 = ok, 2 = Ersatz aktiv, 3 = kein Ordner beschreibbar */
+static volatile LONG g_zc_err;      /* letzter Win32-Fehler beim Schreiben nach Z: */
+static volatile LONG g_zc_wfail;    /* Schreibfehler auf Z: gesamt */
+static volatile LONG g_loc_copy_done; /* COPY_CHK.txt auf Z: erfolgreich geoeffnet = Start-Kopie fertig */
+static volatile LONG g_loc_reopen_max; /* groesste Zahl gleicher Oeffnungen in Folge */
+static char g_loc_reopen_name[64];  /* Dateiname dazu (ohne Ordner) */
+static volatile LONG g_lbd_n;       /* DIAG-Zeilen bisher (Grenze) */
+static ULONGLONG g_zc_t0;           /* Zeitpunkt des Schreibtests (Startphase) */
+
+static int zc_starts(const char *s, const char *pre)
+{
+    size_t n = strlen(pre);
+    return n && _strnicmp(s, pre, n) == 0;
+}
+
+static int zc_is_z(const char *host)
+{
+    return g_zc_pre[0] && (zc_starts(host, g_zc_pre) || (g_zc_alt[0] && zc_starts(host, g_zc_alt) &&
+                                                          host[strlen(g_zc_alt)] == '\\'));
+}
+
+static int lbd_ok(void)
+{
+    return g_cfg.loc_boot_diag && InterlockedIncrement(&g_lbd_n) <= 600;
+}
+
+static int lbd_path(const char *p)
+{
+    return zc_is_z(p) || strstr(p, "\\sndeff\\") != NULL || strstr(p, "\\SNDEFF\\") != NULL;
+}
+
+/* Schreibtest: Ordner anlegen, Probedatei schreiben und loeschen. 1 = beschreibbar. */
+static int zc_probe(const char *dir, DWORD *err)
+{
+    char p[700];
+    HANDLE h;
+    DWORD wr = 0;
+    int ok;
+    xb_mkdir_p(dir);
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\~sb_zprobe.tmp", dir);
+    h = CreateFileA(p, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        *err = GetLastError();
+        return 0;
+    }
+    ok = WriteFile(h, "Z", 1, &wr, NULL) && wr == 1;
+    *err = ok ? 0 : GetLastError();
+    CloseHandle(h);
+    return ok;
+}
+
+/* Ersatzordner k (0 = %LOCALAPPDATA%\Steelbound\loc_zcache, 1 = %TEMP%\Steelbound_loc_zcache)
+ * als ANSI-sicherer Kurzpfad. 1 = ok. */
+static int zc_alt_dir(int k, char *out, size_t cap)
+{
+    wchar_t w[600], s[600];
+    DWORD n;
+    BOOL lossy = FALSE;
+    if (k == 0) {
+        n = GetEnvironmentVariableW(L"LOCALAPPDATA", w, 520);
+        if (n == 0 || n >= 520) return 0;
+        wcscat_s(w, 600, L"\\Steelbound");
+        CreateDirectoryW(w, NULL);
+        wcscat_s(w, 600, L"\\loc_zcache");
+    } else {
+        n = GetTempPathW(520, w);
+        if (n == 0 || n >= 520) return 0;
+        while (n && (w[n - 1] == L'\\' || w[n - 1] == L'/')) w[--n] = 0;
+        wcscat_s(w, 600, L"\\Steelbound_loc_zcache");
+    }
+    CreateDirectoryW(w, NULL);
+    n = GetShortPathNameW(w, s, 600);
+    if (n == 0 || n >= 600) wcscpy_s(s, 600, w);
+    n = (DWORD)WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, s, -1, out, (int)cap, NULL, &lossy);
+    return n > 0 && !lossy && strlen(out) < 400;
+}
+
+/* Z: auf einen beschreibbaren Ersatzordner legen (einmal). */
+static void zc_switch(const char *why)
+{
+    char d[640];
+    DWORD e = 0;
+    int k;
+    if (!g_cfg.loc_zcache_alt) {
+        HLOG_W("LOCZC: kein Ersatzordner fuer Z: (loc_zcache_alt=0, %s)", why);
+        InterlockedExchange(&g_zc_state, 3);
+        return;
+    }
+    if (g_zc_state >= 2) return;
+    for (k = 0; k < 2; k++) {
+        if (zc_alt_dir(k, d, sizeof d) && zc_probe(d, &e)) {
+            char *s;
+            for (s = d; *s; s++) {
+                if (*s == '/') *s = '\\'; /* Host-Pfade vergleichen mit Backslashes (zc_is_z) */
+            }
+            strcpy_s(g_zc_alt, sizeof g_zc_alt, d);
+            InterlockedExchange(&g_zc_state, 2);
+            HLOG_W("LOCZC: Datei-Cache Z: weicht aus nach '%s' (%s, Win32 %ld) - Start laeuft weiter", d, why,
+                   (long)g_zc_err);
+            return;
+        }
+    }
+    InterlockedExchange(&g_zc_state, 3);
+    HLOG_E("LOCZC: auch kein Ersatzordner fuer Z: beschreibbar (%s, Win32 %lu) - LoC kann den Start nicht beenden", why,
+           (unsigned long)e);
+}
+
+/* Aufruf aus dem Kernel-Start (nach dem Anlegen von ZCACHE), nur LoC-Profil. */
+void krnl_loc_zcache_check(void)
+{
+    char d[640];
+    char *s;
+    DWORD e = 0;
+    _snprintf_s(d, sizeof d, _TRUNCATE, "%s\\ZCACHE", g_cfg.hdd_root);
+    for (s = d; *s; s++) {
+        if (*s == '/') *s = '\\';
+    }
+    _snprintf_s(g_zc_pre, sizeof g_zc_pre, _TRUNCATE, "%s\\", d);
+    g_zc_t0 = GetTickCount64();
+    if (zc_probe(d, &e)) {
+        InterlockedExchange(&g_zc_state, 1);
+        if (g_cfg.loc_boot_diag) HLOG_I("LOCBOOTDIAG: Datei-Cache Z: beschreibbar (Pfadlaenge %u)", (unsigned)strlen(d));
+        return;
+    }
+    InterlockedExchange(&g_zc_err, (LONG)e);
+    HLOG_W("LOCZC: Datei-Cache Z: nicht beschreibbar ('%s', Win32 %lu, Pfadlaenge %u) - LoC kopiert beim Start "
+           "media\\sndeff nach Z: und wuerde endlos wiederholen", d, (unsigned long)e, (unsigned)strlen(d));
+    zc_switch("Schreibtest beim Start");
+}
+
+/* 1 = Start-Kopie fertig (COPY_CHK.txt gesehen) bzw. Startphase vorbei (Sicherheitsnetz 90 s, falls eine
+ * andere Fassung COPY_CHK.txt nie oeffnet); nur fuer die Pause-Regel im LoC-Start. */
+int krnl_loc_copy_done(void)
+{
+    return g_loc_copy_done != 0 || !g_zc_pre[0] || (g_zc_t0 && GetTickCount64() - g_zc_t0 > 90000u);
+}
+
+/* Kurzzustand fuer F11-Bericht (keine Pfade, keine Eingaben). */
+int krnl_loc_boot_diag_line(char *o, int cap)
+{
+    static const char *zs[] = { "unchecked", "ok", "fallback", "unwritable" };
+    LONG st = g_zc_state;
+    if (!g_zc_pre[0]) return 0;
+    _snprintf_s(o, (size_t)cap, _TRUNCATE, "zcache=%s win32=%ld write_fail=%ld start_copy=%s reopen_max=%ld (%s)",
+                zs[st & 3], (long)g_zc_err, (long)g_zc_wfail, g_loc_copy_done ? "done" : "running",
+                (long)g_loc_reopen_max, g_loc_reopen_name[0] ? g_loc_reopen_name : "-");
+    return 1;
+}
+
+/* Erfolgreiches Oeffnen: gleiche Datei in Folge (ohne anderes erfolgreiches Oeffnen dazwischen)
+ * nur beim 1.-10., 100., 1000., ... Mal protokollieren; ab 50 einmalig eine Schleifen-Meldung. */
+static int loc_open_ok_log(const char *host)
+{
+    static char last[512];
+    static unsigned long n;
+    static LONG lk, said;
+    int show;
+    while (InterlockedExchange(&lk, 1)) {
+        SwitchToThread();
+    }
+    if (strcmp(last, host) == 0) {
+        n++;
+    } else {
+        strncpy_s(last, sizeof last, host, _TRUNCATE);
+        n = 1;
+    }
+    if ((LONG)n > g_loc_reopen_max) {
+        const char *b = strrchr(host, '\\');
+        InterlockedExchange(&g_loc_reopen_max, (LONG)n);
+        strncpy_s(g_loc_reopen_name, sizeof g_loc_reopen_name, b ? b + 1 : host, _TRUNCATE);
+    }
+    show = n <= 10 || n == 100 || n == 1000 || n % 10000 == 0;
+    if (show && n >= 100) {
+        HLOG_I("LOCFILE: '%s' erneut geoeffnet (%lu Mal in Folge)", host, n);
+    }
+    if (n == 50 && !said) {
+        said = 1;
+        HLOG_E("LOCBOOT: Endlosschleife erkannt - '%s' wird immer wieder geoeffnet (50 Mal in Folge; Z: %s, Win32 %ld, "
+               "Schreibfehler Z: %ld). Bei media\\sndeff: LoC kann den Datei-Cache Z: nicht fuellen, Start haengt am "
+               "Dolby-Logo", host, g_zc_state == 3 ? "nicht beschreibbar" : g_zc_state == 2 ? "Ersatzordner" : "ok",
+               (long)g_zc_err, (long)g_zc_wfail);
+    }
+    InterlockedExchange(&lk, 0);
+    return show;
+}
+
+/* Schreibfehler auf Z: (gleiche Datei in Folge zaehlen); ab dem 3. Ersatzordner. */
+static void zc_write_failed(const char *host, DWORD e)
+{
+    static char last[512];
+    static unsigned long n;
+    static LONG lk;
+    unsigned long k;
+    while (InterlockedExchange(&lk, 1)) {
+        SwitchToThread();
+    }
+    if (strcmp(last, host) == 0) {
+        n++;
+    } else {
+        strncpy_s(last, sizeof last, host, _TRUNCATE);
+        n = 1;
+    }
+    k = n;
+    InterlockedExchange(&lk, 0);
+    InterlockedIncrement(&g_zc_wfail);
+    InterlockedExchange(&g_zc_err, (LONG)e);
+    if (k == 3 && g_zc_state < 2) {
+        HLOG_W("LOCZC: Schreiben nach Z: scheitert wiederholt ('%s', Win32 %lu)", host, (unsigned long)e);
+        zc_switch("Kopierfehler");
+    }
+}
+
+/* Ersatzordner aktiv: Pfad im Ersatzordner -> Pfad im urspruenglichen ZCACHE (Lesen als Rueckfall). */
+static int zc_orig_path(const char *host, char *out, size_t cap)
+{
+    size_t n = strlen(g_zc_alt);
+    if (!g_zc_alt[0] || !zc_starts(host, g_zc_alt) || host[n] != '\\') return 0;
+    _snprintf_s(out, cap, _TRUNCATE, "%s%s", g_zc_pre, host + n + 1);
+    return 1;
+}
+
 /* W213: A pending host entry survives a short caller buffer. */
 typedef struct {
     HANDLE find;
@@ -219,7 +452,11 @@ static int xb_path_to_host_ex(const char *xb, size_t nbytes, char *out, size_t c
                ((tmp[0] == 'Z' || tmp[0] == 'z') && tmp[1] == ':')) {
         /* Z: (Utility/Cache, beschreibbar) -> hdd_root/ZCACHE */
         rel = tmp[1] == '?' ? tmp + 6 : tmp + 2;
-        _snprintf_s(base, sizeof base, _TRUNCATE, "%s/ZCACHE", g_cfg.hdd_root);
+        if (g_zc_alt[0]) { /* W423: Ersatzordner (LoC, ZCACHE nicht beschreibbar) */
+            strcpy_s(base, sizeof base, g_zc_alt);
+        } else {
+            _snprintf_s(base, sizeof base, _TRUNCATE, "%s/ZCACHE", g_cfg.hdd_root);
+        }
     } else if (_strnicmp(tmp, "\\Device\\Harddisk0\\Partition",
                          sizeof "\\Device\\Harddisk0\\Partition" - 1) == 0 ||
                _strnicmp(tmp, "Device\\Harddisk0\\partition",
@@ -363,7 +600,16 @@ static u32 vfs_open(const char *host, const char *drel, u32 access, u32 disp,
     en->vfs_dir_k = 0;
     en->vfs = 1;
     *out_xh = xh;
-    HLOG_I("FILE open '%s' -> xh=0x%X", host, xh);
+    if (!g_sba_loc || loc_open_ok_log(host)) { /* W423: LoC drosselt gleiche Oeffnungen in Folge */
+        HLOG_I("FILE open '%s' -> xh=0x%X", host, xh);
+    }
+    if (g_cfg.loc_boot_diag && lbd_path(host) && lbd_ok()) {
+        iso_vfs_stat_t vs;
+        memset(&vs, 0, sizeof vs);
+        iso_vfs_stat(g_iso, node, &vs);
+        HLOG_I("LOCBOOTDIAG: open D: '%s' access=0x%X disp=%u opt=0x%X -> ok xh=0x%X groesse=%u attr=0x%X", drel, access,
+               disp, options, xh, vs.size, vs.attr);
+    }
     replay_note_file(host);
     return X_STATUS_SUCCESS;
 }
@@ -584,6 +830,102 @@ static int loc_open_fail_log(const char *host)
     return show;
 }
 
+/* W433 REPLAY-DELETE: liegt p unterhalb von root (gleiche Schreibweise wie die
+ * Host-Pfade, '/' und '\' gleich, ohne Endtrenner)? Die Wurzel selbst zaehlt nicht. */
+static int sd_under(const char *root, const char *p)
+{
+    size_t n = 0, i;
+    if (!root || !root[0] || !p) {
+        return 0;
+    }
+    n = strlen(root);
+    while (n > 1 && (root[n - 1] == '/' || root[n - 1] == '\\')) {
+        n--;
+    }
+    for (i = 0; i < n; i++) {
+        char a = root[i] == '/' ? '\\' : root[i], b = p[i] == '/' ? '\\' : p[i];
+        if (!b || tolower((unsigned char)a) != tolower((unsigned char)b)) {
+            return 0;
+        }
+    }
+    if (p[n] != '\\' && p[n] != '/') {
+        return 0;
+    }
+    for (i = n; p[i] == '\\' || p[i] == '/'; i++) {
+    }
+    return p[i] != 0;
+}
+
+/* W433: 1 = Pfad enthaelt eine "."- oder ".."-Komponente. */
+static int sd_dotseg(const char *p)
+{
+    const char *s = p;
+    while (*s) {
+        const char *e = s;
+        while (*e && *e != '\\' && *e != '/') {
+            e++;
+        }
+        if ((e - s == 1 && s[0] == '.') || (e - s == 2 && s[0] == '.' && s[1] == '.')) {
+            return 1;
+        }
+        s = *e ? e + 1 : e;
+    }
+    return 0;
+}
+
+/* W433: Loeschen nur im beschreibbaren Spiel-Laufwerk (hdd_root inkl. TDATA/UDATA/
+ * ZCACHE/_savelock, bzw. W423-Ersatzordner fuer Z:), nie ausserhalb. */
+static int sd_in_drive(const char *p)
+{
+    if (!p || !p[0] || sd_dotseg(p)) {
+        return 0;
+    }
+    return sd_under(g_cfg.hdd_root, p) || (g_zc_alt[0] && sd_under(g_zc_alt, p));
+}
+
+/* W433: ObjectName relativ zu RootDirectory aufloesen (NT-Semantik). Die XAPI im
+ * XBE (XDeleteSaveGame -> FUN_00193474/FUN_001932F7) oeffnet die Dateien eines
+ * Spielstands per NtOpenFile(RootDirectory = Ordner-Handle, Name = "SaveMeta.xbx").
+ * Nur echte Ordner-Handles auf der Festplatte (keine Pseudo-Handles wie
+ * 0xFFFFFFFD, keine Abbild-Handles). Name: relativ, ohne Laufwerk, ohne "."/"..".
+ * 1 = aufgeloest (out), 0 = kein solcher Fall (alter Weg), -1 = abgelehnt. */
+static int sd_rel_path(u32 root, const char *name, size_t nbytes, char *out, size_t cap)
+{
+    ht_entry_t *re;
+    char rel[512];
+    size_t n, pn;
+    char *s;
+    if (!g_cfg.save_delete_fix || !root) {
+        return 0;
+    }
+    re = ht_get(root);
+    if (!re || re->kind != HT_FILE || re->vfs || !re->path[0]) {
+        return 0;
+    }
+    n = nbytes < sizeof rel - 1 ? nbytes : sizeof rel - 1;
+    if (n == 0 || nbytes >= sizeof rel) {
+        return -1;
+    }
+    memcpy(rel, name, n);
+    rel[n] = '\0';
+    for (s = rel; *s; s++) {
+        if (*s == '/') {
+            *s = '\\';
+        }
+    }
+    if (rel[0] == '\\' || strchr(rel, ':') || sd_dotseg(rel)) {
+        return -1;
+    }
+    pn = strlen(re->path);
+    while (pn > 0 && (re->path[pn - 1] == '\\' || re->path[pn - 1] == '/')) {
+        pn--;
+    }
+    if (_snprintf_s(out, cap, _TRUNCATE, "%.*s\\%s", (int)pn, re->path, rel) <= 0) {
+        return -1;
+    }
+    return 1;
+}
+
 static u32 open_by_attrs(u32 pAttr, u32 access, u32 share, u32 disp, u32 options,
                          u32 *out_xh)
 {
@@ -603,6 +945,17 @@ static u32 open_by_attrs(u32 pAttr, u32 access, u32 share, u32 disp, u32 options
     as = oa->object_name;
     if (!as || !as->buffer) {
         return X_STATUS_OBJECT_NAME_INVALID;
+    }
+    {
+        int rr = oa->root_directory ? sd_rel_path(oa->root_directory, as->buffer, as->length, host, sizeof host) : 0;
+        if (rr < 0) { /* W433: relativer Name mit Laufwerk/"..": nie ausserhalb des Ordners */
+            HLOG_W("FILE open relativ zu 0x%X abgelehnt '%.*s'", oa->root_directory, (int)(as->length < 200 ? as->length : 200),
+                   as->buffer);
+            return X_STATUS_OBJECT_NAME_INVALID;
+        }
+        if (rr > 0) {
+            goto resolved;
+        }
     }
     if (oa->root_directory) {
         static unsigned nrd;
@@ -625,6 +978,7 @@ static u32 open_by_attrs(u32 pAttr, u32 access, u32 share, u32 disp, u32 options
             }
         }
     }
+resolved:
     if (access & 0x80000000u) {
         want |= GENERIC_READ;
     }
@@ -636,6 +990,10 @@ static u32 open_by_attrs(u32 pAttr, u32 access, u32 share, u32 disp, u32 options
     }
     if (want == 0) {
         want = GENERIC_READ;
+    }
+    if (!(options & X_FILE_DIRECTORY_FILE)) { /* W424 SB-ALLIED-SQUADS: Replay-Vermerk (*.rep, nur SB) */
+        extern void sb_ally_rep_open(const char *host, int write);
+        sb_ally_rep_open(host, (want & GENERIC_WRITE) != 0);
     }
     if (options & X_FILE_DIRECTORY_FILE) {
         flags |= FILE_FLAG_BACKUP_SEMANTICS;
@@ -694,8 +1052,25 @@ static u32 open_by_attrs(u32 pAttr, u32 access, u32 share, u32 disp, u32 options
     }
     h = CreateFileA(host, want, share ? share : (DWORD)(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE),
                     NULL, xb_disposition_to_win(disp), flags, NULL);
+    if (h == INVALID_HANDLE_VALUE && g_zc_alt[0] && !(want & GENERIC_WRITE) && disp == X_FILE_OPEN) {
+        /* W423: Ersatzordner fuer Z: aktiv - fehlt die Datei dort, lesend aus dem alten ZCACHE */
+        DWORD e0 = GetLastError();
+        char orig[1024];
+        if ((e0 == ERROR_FILE_NOT_FOUND || e0 == ERROR_PATH_NOT_FOUND) && zc_orig_path(host, orig, sizeof orig)) {
+            h = CreateFileA(orig, want, share ? share : (DWORD)(FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE),
+                            NULL, OPEN_EXISTING, flags, NULL);
+        }
+        if (h == INVALID_HANDLE_VALUE) SetLastError(e0);
+    }
     if (h == INVALID_HANDLE_VALUE) {
         DWORD e = GetLastError();
+        if (g_zc_pre[0] && (want & GENERIC_WRITE) && zc_is_z(host)) { /* W423: Z: nicht beschreibbar? */
+            zc_write_failed(host, e);
+        }
+        if (g_cfg.loc_boot_diag && lbd_path(host) && lbd_ok()) {
+            HLOG_I("LOCBOOTDIAG: open '%s' access=0x%X disp=%u opt=0x%X -> FEHLER Win32 %lu", host, access, disp,
+                   options, (unsigned long)e);
+        }
         if (stale) { free(stale); stale = NULL; }
         if (!g_sba_loc || loc_open_fail_log(host)) { /* W275: LoC drosselt Wiederholungen */
             HLOG_I("FILE open '%s' (disp=%u opt=0x%X) -> FEHLER %lu", host, disp,
@@ -729,7 +1104,20 @@ opened:
         }
     }
     *out_xh = xh;
-    HLOG_I("FILE open '%s' -> xh=0x%X", host, xh);
+    if (!g_sba_loc || loc_open_ok_log(host)) { /* W423: LoC drosselt gleiche Oeffnungen in Folge */
+        HLOG_I("FILE open '%s' -> xh=0x%X", host, xh);
+    }
+    if (g_zc_pre[0] && !g_loc_copy_done && zc_is_z(host)) {
+        const char *b = strrchr(host, '\\');
+        if (b && _stricmp(b + 1, "COPY_CHK.txt") == 0) { /* W423: letzte Datei der Start-Kopie liegt auf Z: */
+            InterlockedExchange(&g_loc_copy_done, 1);
+            HLOG_I("LOCBOOT: Start-Kopie nach Z: fertig (COPY_CHK.txt, Z: %s, Schreibfehler %ld)",
+                   g_zc_state == 2 ? "Ersatzordner" : "ok", (long)g_zc_wfail);
+        }
+    }
+    if (g_cfg.loc_boot_diag && lbd_path(host) && lbd_ok()) {
+        HLOG_I("LOCBOOTDIAG: open '%s' access=0x%X disp=%u opt=0x%X -> ok xh=0x%X", host, access, disp, options, xh);
+    }
     {   /* A4: Datei-Ereignis fuer zustandsgesteuertes Replay */
         extern void replay_note_file(const char *path);
         replay_note_file(host);
@@ -871,6 +1259,10 @@ u32 __stdcall hle_NtReadFile(u32 xh, u32 ev, u32 apc, u32 apcCtx, u32 iosb,
         if (g_cfg.tex_dump && got) { sb_rem_note_read(buf, got, e->path); } /* DIAG(REM-FRAME,W103): Textur-Quelle */
     }
 read_done:
+    if (g_cfg.loc_boot_diag && g_sba_loc && !g_loc_copy_done && lbd_path(e->path) && lbd_ok()) { /* DIAG(W423) */
+        HLOG_I("LOCBOOTDIAG: read xh=0x%X '%s' len=%u off=%lld -> st=0x%X got=%lu", xh, e->path, len,
+               pOff ? (long long)*(int64_t *)(uintptr_t)pOff : -1LL, st, (unsigned long)got);
+    }
     if (iosb) {
         ((xb_io_status_block *)(uintptr_t)iosb)->status = st;
         ((xb_io_status_block *)(uintptr_t)iosb)->information = got;
@@ -973,6 +1365,65 @@ u32 __stdcall hle_NtWriteFile(u32 xh, u32 ev, u32 apc, u32 apcCtx, u32 iosb,
     return st;
 }
 
+/* W433: gleicher Host-Pfad (Gross/Klein und Endtrenner egal). */
+static int sd_same(const char *a, const char *b)
+{
+    size_t na = strlen(a), nb = strlen(b), i;
+    while (na > 0 && (a[na - 1] == '\\' || a[na - 1] == '/')) {
+        na--;
+    }
+    while (nb > 0 && (b[nb - 1] == '\\' || b[nb - 1] == '/')) {
+        nb--;
+    }
+    if (na != nb) {
+        return 0;
+    }
+    for (i = 0; i < na; i++) {
+        char x = a[i] == '/' ? '\\' : a[i], y = b[i] == '/' ? '\\' : b[i];
+        if (tolower((unsigned char)x) != tolower((unsigned char)y)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* W433 REPLAY-DELETE: Loeschen beim Schliessen (FileDispositionInformation TRUE).
+ * Ordner per RemoveDirectoryA - DeleteFileA loescht keine Ordner, der
+ * Spielstand-Ordner eines geloeschten Replays blieb deshalb stehen. Haelt ein
+ * anderer Handle denselben Pfad noch offen (Windows: Freigabe-Verletzung), wird
+ * das Loeschen wie unter NT bis zum Schliessen des letzten Handles vertagt.
+ * Nur innerhalb des Spiel-Laufwerks (sd_in_drive). */
+static void krnl_delete_on_close(u32 xh, const ht_entry_t *e)
+{
+    DWORD a, err = 0;
+    int dir, ok;
+    unsigned i;
+    if (!sd_in_drive(e->path)) {
+        HLOG_W("FILE delete-close '%s' abgelehnt (ausserhalb des Spiel-Laufwerks)", e->path);
+        return;
+    }
+    a = GetFileAttributesA(e->path);
+    dir = a != INVALID_FILE_ATTRIBUTES && (a & FILE_ATTRIBUTE_DIRECTORY);
+    ok = dir ? RemoveDirectoryA(e->path) : DeleteFileA(e->path);
+    if (!ok) {
+        err = GetLastError();
+    }
+    if (!ok && (err == ERROR_SHARING_VIOLATION || err == ERROR_ACCESS_DENIED)) {
+        for (i = 0; i < XB_HANDLE_MAX; i++) {
+            u32 oh = XB_HANDLE_BASE + i;
+            ht_entry_t *o = oh == xh ? NULL : ht_get(oh);
+            if (o && o->kind == HT_FILE && !o->vfs && o->path[0] && sd_same(o->path, e->path)) {
+                o->delete_on_close = 1;
+                HLOG_I("FILE delete-close '%s' (%s) vertagt: Handle 0x%X noch offen (Win32 %lu)", e->path,
+                       dir ? "Ordner" : "Datei", oh, (unsigned long)err);
+                return;
+            }
+        }
+    }
+    HLOG_I("FILE delete-close '%s' (%s) -> %s %lu", e->path, dir ? "Ordner" : "Datei", ok ? "ok" : "FEHLER",
+           (unsigned long)err);
+}
+
 u32 __stdcall hle_NtClose(u32 xh)
 {
     ht_entry_t *e = ht_get(xh);
@@ -988,14 +1439,18 @@ u32 __stdcall hle_NtClose(u32 xh)
     if (e->kind == HT_FILE) {
         host_dir_close(e);
         if (!e->vfs) { /* W150: Abbild-Handles haben kein Host-Handle */
+            extern void sb_ally_rep_close(const char *host);
             CloseHandle(e->host);
+            sb_ally_rep_close(e->path); /* W424: Aufzeichnung geschrieben -> Vermerk */
         }
         if (e->stale) { /* W63 FATXSTALE */
             free(e->stale);
             e->stale = NULL;
             e->stale_len = 0;
         }
-        if (e->delete_on_close && e->path[0]) {
+        if (e->delete_on_close && e->path[0] && !e->vfs && g_cfg.save_delete_fix) {
+            krnl_delete_on_close(xh, e);
+        } else if (e->delete_on_close && e->path[0]) {
             DeleteFileA(e->path);
         }
     } else if (e->host && e->host != GetCurrentThread() &&
@@ -2123,5 +2578,243 @@ int krnl_savelock_selftest(void)
 #undef ST_CHECK
     HLOG_I("SAVELOCK-SELFTEST: %s (%u/%u Pruefungen, Modus %s)", fail ? "FEHLER" : "ok", n - fail, n,
            act ? "geschuetzt" : "original");
+    return (int)fail;
+}
+
+/* ---------- W433 REPLAY-DELETE: Selbsttest (save_delete_selftest=1, vor dem Spiel) ----------
+ * Spielt XAPI XDeleteSaveGame aus dem XBE nach (FUN_00191CE4 -> FUN_00193474 ->
+ * FUN_001932F7, Parameter wie im Original): Ordner U:\<id>\ oeffnen (0x110101,
+ * Freigabe 3, 0x4021), Eintraege einzeln auflisten (Klasse 1, 0x146 Byte, ohne
+ * Maske), jeden Eintrag RELATIV zum Ordner-Handle oeffnen (0x110100|Ordner,
+ * Freigabe 7, 0x4040 bzw. 0x4001), Unterordner rekursiv, Disposition(TRUE),
+ * schliessen; zuletzt Disposition auf dem Ordner selbst, schliessen.
+ * Nur synthetische Ordner W433_sd_<pid>_* unter dem Lauf-hdd_root. */
+static u32 sd_open(u32 root, const char *name, u32 access, u32 share, u32 opt, u32 *xh)
+{
+    xb_ansi_string as;
+    xb_object_attributes oa;
+    xb_io_status_block io;
+    as.length = (xb_u16)strlen(name);
+    as.max_length = as.length;
+    as.buffer = (char *)name;
+    oa.root_directory = root;
+    oa.object_name = &as;
+    oa.attributes = 0x40;
+    *xh = 0;
+    return hle_NtOpenFile((u32)(uintptr_t)xh, access, (u32)(uintptr_t)&oa, (u32)(uintptr_t)&io, share, opt);
+}
+
+static u32 sd_delete_tree(u32 dir, int depth)
+{
+    static unsigned char buf[8][0x146 + 2];
+    unsigned char *b = buf[depth & 7];
+    xb_io_status_block io;
+    unsigned char del = 1;
+    u32 st, restart = 1;
+    for (;;) {
+        char name[0x120];
+        u32 nl, attr, ch = 0;
+        int isdir;
+        st = hle_NtQueryDirectoryFile(dir, 0, 0, 0, (u32)(uintptr_t)&io, (u32)(uintptr_t)b, 0x146, 1, 0, restart);
+        restart = 0;
+        if (st != X_STATUS_SUCCESS) {
+            break;
+        }
+        nl = *(u32 *)(b + 0x3C);
+        attr = *(u32 *)(b + 0x38);
+        if (nl == 0 || nl >= sizeof name) {
+            return 0xC0000001u;
+        }
+        memcpy(name, b + 0x40, nl);
+        name[nl] = 0;
+        isdir = (attr & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        st = sd_open(dir, name, 0x110100u | (isdir ? 1u : 0u), 7, isdir ? 0x4001u : 0x4040u, &ch);
+        if (st != X_STATUS_SUCCESS) {
+            return st; /* wie das Original: Abbruch beim ersten Fehler */
+        }
+        if (isdir && depth < 7) {
+            st = sd_delete_tree(ch, depth + 1);
+        } else {
+            st = hle_NtSetInformationFile_counted(ch, (u32)(uintptr_t)&io, (u32)(uintptr_t)&del, 1, 13);
+        }
+        hle_NtClose(ch);
+        if ((int)st < 0) {
+            return st;
+        }
+    }
+    if (st != X_STATUS_NO_MORE_FILES && st != 0xC000000Fu) {
+        return st;
+    }
+    return hle_NtSetInformationFile_counted(dir, (u32)(uintptr_t)&io, (u32)(uintptr_t)&del, 1, 13);
+}
+
+/* Spielstand loeschen wie XDeleteSaveGame (Ordner U:\<id>\). */
+static u32 sd_delete_save(const char *id)
+{
+    char p[300];
+    u32 xh = 0, st;
+    _snprintf_s(p, sizeof p, _TRUNCATE, "\\??\\U:\\%s\\", id);
+    st = sd_open(0, p, 0x110101u, 3, 0x4021u, &xh);
+    if (st != X_STATUS_SUCCESS) {
+        return st;
+    }
+    st = sd_delete_tree(xh, 0);
+    hle_NtClose(xh);
+    return st;
+}
+
+/* Wie oft listet U:\ den Ordner id (XFindFirstSaveGame-Sicht)? */
+static int sd_listed(const char *id)
+{
+    static unsigned char b[0x146 + 2];
+    xb_io_status_block io;
+    u32 xh = 0, restart = 1;
+    int hits = 0, k;
+    if (sd_open(0, "\\??\\U:\\", 0x100001u, 3, 0x4021u, &xh) != X_STATUS_SUCCESS) {
+        return -1;
+    }
+    for (k = 0; k < 4096; k++) {
+        u32 nl;
+        if (hle_NtQueryDirectoryFile(xh, 0, 0, 0, (u32)(uintptr_t)&io, (u32)(uintptr_t)b, 0x146, 1, 0, restart) !=
+            X_STATUS_SUCCESS) {
+            break;
+        }
+        restart = 0;
+        nl = *(u32 *)(b + 0x3C);
+        if (nl == strlen(id) && _strnicmp((const char *)b + 0x40, id, nl) == 0) {
+            hits++;
+        }
+    }
+    hle_NtClose(xh);
+    return hits;
+}
+
+static int sd_mkfile(const char *dir, const char *name, unsigned sz)
+{
+    char p[800];
+    HANDLE h;
+    DWORD w = 0;
+    static unsigned char z[4096];
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\%s", dir, name);
+    h = CreateFileA(p, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) {
+        return 0;
+    }
+    while (sz) {
+        DWORD c = sz < sizeof z ? sz : (DWORD)sizeof z;
+        WriteFile(h, z, c, &w, NULL);
+        sz -= c;
+    }
+    CloseHandle(h);
+    return 1;
+}
+
+/* Synthetischer Replay-Spielstand: SaveMeta.xbx, SaveImage.xbx, st00_0.rep, Unterordner. */
+static int sd_mksave(const char *id, char *host, size_t cap)
+{
+    char sub[800];
+    _snprintf_s(host, cap, _TRUNCATE, "%s\\UDATA\\%s\\%s", g_cfg.hdd_root, XB_TITLE_ID_STR, id);
+    xb_mkdir_p(host);
+    _snprintf_s(sub, sizeof sub, _TRUNCATE, "%s\\sub", host);
+    CreateDirectoryA(sub, NULL);
+    return sd_mkfile(host, "SaveMeta.xbx", 48) && sd_mkfile(host, "SaveImage.xbx", 64) &&
+           sd_mkfile(host, "st00_0.rep", 4096) && sd_mkfile(sub, "x.bin", 16);
+}
+
+/* Aufraeumen nach Fehlern (nur der synthetische Ordner). */
+static void sd_rmtree(const char *host)
+{
+    char p[800];
+    WIN32_FIND_DATAA fd;
+    HANDLE f;
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\*", host);
+    f = FindFirstFileA(p, &fd);
+    if (f != INVALID_HANDLE_VALUE) {
+        do {
+            if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+            _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\%s", host, fd.cFileName);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) sd_rmtree(p); else DeleteFileA(p);
+        } while (FindNextFileA(f, &fd));
+        FindClose(f);
+    }
+    RemoveDirectoryA(host);
+}
+
+int krnl_savedelete_selftest(void)
+{
+    char id1[64], id2[64], h1[700], h2[700], p[800];
+    u32 n = 0, fail = 0, st, xh = 0, other = 0;
+    int fix = g_cfg.save_delete_fix;
+    unsigned char del = 1;
+    xb_io_status_block io;
+#define SD_CHECK(cond, what) do { n++; if (!(cond)) { fail++; HLOG_E("SAVEDELETE-SELFTEST: FEHLER %s", what); } } while (0)
+    sprintf_s(id1, sizeof id1, "W433_sd_%lu_a", GetCurrentProcessId());
+    sprintf_s(id2, sizeof id2, "W433_sd_%lu_b", GetCurrentProcessId());
+    if (!sd_mksave(id1, h1, sizeof h1) || !sd_mksave(id2, h2, sizeof h2)) {
+        HLOG_E("SAVEDELETE-SELFTEST: Testordner nicht anlegbar (%s)", g_cfg.hdd_root);
+        sd_rmtree(h1);
+        sd_rmtree(h2);
+        return 1;
+    }
+    /* 1. Replay loeschen entfernt Container und Listeneintrag */
+    SD_CHECK(sd_listed(id1) == 1, "vorher gelistet");
+    st = sd_delete_save(id1);
+    SD_CHECK(st == X_STATUS_SUCCESS, "XDeleteSaveGame-Kette meldet Erfolg");
+    SD_CHECK(GetFileAttributesA(h1) == INVALID_FILE_ATTRIBUTES, "Spielstand-Ordner entfernt");
+    SD_CHECK(sd_listed(id1) == 0, "nicht mehr gelistet");
+    SD_CHECK(sd_listed(id2) == 1, "anderer Spielstand unberuehrt");
+    /* 2. Offener Handle (ohne Loesch-Freigabe, wie die Ordner-Oeffnung des Spiels)
+     *    blockiert nicht dauerhaft: Loeschen vertagt bis zu dessen Schliessen. */
+    _snprintf_s(p, sizeof p, _TRUNCATE, "\\??\\U:\\%s\\", id2);
+    st = sd_open(0, p, 0x100001u, 3, 0x4021u, &other);
+    SD_CHECK(st == X_STATUS_SUCCESS, "zweiter Ordner-Handle");
+    st = sd_delete_save(id2);
+    SD_CHECK(st == X_STATUS_SUCCESS, "Loeschen bei offenem Handle meldet Erfolg");
+    if (other) {
+        hle_NtClose(other);
+    }
+    SD_CHECK(GetFileAttributesA(h2) == INVALID_FILE_ATTRIBUTES, "nach dem Schliessen entfernt");
+    SD_CHECK(sd_listed(id2) == 0, "nach dem Schliessen nicht mehr gelistet");
+    /* 3. Pfadpruefung: relative Namen bleiben im Ordner, Loeschen nur im Laufwerk */
+    sd_mksave(id1, h1, sizeof h1);
+    _snprintf_s(p, sizeof p, _TRUNCATE, "\\??\\U:\\%s\\", id1);
+    if (sd_open(0, p, 0x110101u, 3, 0x4021u, &xh) == X_STATUS_SUCCESS) {
+        u32 t = 0;
+        SD_CHECK(sd_open(xh, "..\\SaveMeta.xbx", 0x110100u, 7, 0x4040u, &t) == X_STATUS_OBJECT_NAME_INVALID && !t,
+                 "relativ '..' abgelehnt");
+        SD_CHECK(sd_open(xh, "C:\\Windows\\win.ini", 0x80000000u, 7, 0x4040u, &t) == X_STATUS_OBJECT_NAME_INVALID && !t,
+                 "relativ mit Laufwerk abgelehnt");
+        SD_CHECK(sd_open(xh, "\\SaveMeta.xbx", 0x80000000u, 7, 0x4040u, &t) == X_STATUS_OBJECT_NAME_INVALID && !t,
+                 "relativ mit Wurzel abgelehnt");
+        st = sd_open(xh, "sub\\x.bin", 0x80000000u, 7, 0x4040u, &t);
+        SD_CHECK(st == X_STATUS_SUCCESS && t && ht_get(t), "relativ Unterpfad");
+        if (st == X_STATUS_SUCCESS && ht_get(t)) {
+            _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\sub\\x.bin", h1);
+            SD_CHECK(sd_same(ht_get(t)->path, p), "relativ = Ordner + Name");
+            hle_NtClose(t);
+        }
+        hle_NtClose(xh);
+    } else {
+        SD_CHECK(0, "Ordner fuer Pfadpruefung");
+    }
+    SD_CHECK(!sd_in_drive("C:\\Windows\\win.ini"), "ausserhalb des Laufwerks");
+    SD_CHECK(!sd_in_drive(g_cfg.hdd_root), "Laufwerkswurzel selbst");
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\UDATA\\..\\..\\x", g_cfg.hdd_root);
+    SD_CHECK(!sd_in_drive(p), "'..' im Pfad");
+    SD_CHECK(sd_in_drive(h1), "Spielstand im Laufwerk");
+    /* 4. Pilot loeschen (DeleteFileA-Weg: absoluter Pfad, Datei) weiter ok */
+    _snprintf_s(p, sizeof p, _TRUNCATE, "\\??\\U:\\%s\\st00_0.rep", id1);
+    st = sd_open(0, p, 0x00010000u | 0x00100000u, 7, 0x4040u, &xh);
+    SD_CHECK(st == X_STATUS_SUCCESS, "Datei absolut oeffnen (DELETE)");
+    if (st == X_STATUS_SUCCESS) {
+        hle_NtSetInformationFile_counted(xh, (u32)(uintptr_t)&io, (u32)(uintptr_t)&del, 1, 13);
+        hle_NtClose(xh);
+    }
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\st00_0.rep", h1);
+    SD_CHECK(GetFileAttributesA(p) == INVALID_FILE_ATTRIBUTES, "Datei geloescht (DeleteFileA-Weg)");
+    sd_rmtree(h1);
+    sd_rmtree(h2);
+#undef SD_CHECK
+    HLOG_I("SAVEDELETE-SELFTEST: %s (%u/%u Pruefungen, save_delete_fix=%d)", fail ? "FEHLER" : "ok", n - fail, n, fix);
     return (int)fail;
 }

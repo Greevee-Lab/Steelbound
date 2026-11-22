@@ -151,6 +151,7 @@ static void cli_usage(void)
            "  --write-user-profile R    Benutzerprofil user_R.ini schreiben\n"
            "  --controls-export OUT     W419: Steuerung (aktives Profil + Werte) als .sbcontrols\n"
            "  --controls-check DATEI    W419: .sbcontrols nur pruefen (nichts aendern)\n"
+           "  --controls-fuzz N [--seed S]  W430: Mutations-Fuzzer fuer den Import (Standard 200000)\n"
            "                            (Basis --from B, --set-bind \"e=a;...\", --force)\n"
            "  --bind-shot[=AKTION]    Test: Belegungs-Dialog sichern (BMP+PNG)\n"
            "  --bind-learn            mit --bind-shot: Lernmodus im Bild (W228)\n"
@@ -278,6 +279,8 @@ void app_load_effective(const char *client_dir, launcher_settings_t *s,
          * Spieler-Standard ist auto; user.cfg/Profil gewinnen danach). */
         s->rt_scale = d.rt_scale;
         s->rt_scale_dyn = d.rt_scale_dyn;
+        /* W424: Testkette faehrt sb_allied_squads=0 (bitgleich), Spieler-Standard ist 1 */
+        s->sb_allied_squads = d.sb_allied_squads;
     }
     lcfg_user_cfg_path(client_dir, p, sizeof p); /* W150 USER-DATA */
     s->gfx_preset_rev = 0; /* W296 PRESET-ORIG: Stand kommt aus user.cfg (fehlt = vor W296) */
@@ -351,6 +354,21 @@ int app_firstrun_defaults(launcher_settings_t *s, unsigned langid, int work_w,
         r |= 2;
     }
     return r;
+}
+
+/* W431 DEFAULT-BINDINGS: siehe launcher_app.h. */
+int app_firstrun_input_profile(launcher_settings_t *s, const char *client_dir, int kind)
+{
+    char path[1200];
+    if (kind != 0 || !s || s->input_profile[0]) {
+        return 0;
+    }
+    if (lctrl_input_profile_path(client_dir, "default_full", path, sizeof path) != 0 ||
+        u8_GetFileAttributes(path) == INVALID_FILE_ATTRIBUTES) {
+        return 0;
+    }
+    strcpy_s(s->input_profile, sizeof s->input_profile, "default_full");
+    return 1;
 }
 
 /* W217: Importtabelle eines PE-Abbilds (als Bild abgebildet) durchsuchen. */
@@ -833,6 +851,320 @@ static __declspec(noinline) void st_w312_joycalib(int *pass_, int *fail_)
 #undef W312_FAIL
 }
 
+/* W432 HOTAS-AXES (GitHub #6, 0.3.1): Joystick-Achsen im Belegungsdialog.
+ * Nachbau der Tester-Geraete als Fake-DirectInput (ijoy_test_*, keine
+ * Hardware, keine Eingabewerte in Dateien): WingMan Force 3D (X Y RZ S0,
+ * logisch 0..255, 7 Tasten, POV) und Arduino Micro (X Y + Throttle 02:BB,
+ * logisch 0..65535, 8 Tasten, POV). Beide Geraete laufen gleichzeitig, je
+ * 50-ms-Takt wie bind_cap_joy: ijoy_read -> lctrl_joy_learner_step. */
+#define W432_ABS 0x02u
+#define W432_BTN 0x04u
+#define W432_POV 0x10u
+#define W432_INST(n) ((unsigned)(n) << 8)
+#define W432_NDEV 2
+static ijoy_obj_t g_w432_o[W432_NDEV][IJOY_OBJ_MAX];
+static long g_w432_rest[W432_NDEV][IJOY_OBJ_MAX];
+static long g_w432_lmax[W432_NDEV];
+static int g_w432_acc[W432_NDEV], g_w432_n[W432_NDEV];
+static lctrl_joy_learner_t g_w432_L[W432_NDEV];
+
+static int w432_add(ijoy_obj_t *o, int n, int kind, unsigned type, unsigned short up, unsigned short u,
+                    const char *nm, long lmax, int acc)
+{
+    memset(&o[n], 0, sizeof o[n]);
+    o[n].kind = kind;
+    o[n].type = type;
+    o[n].upage = up;
+    o[n].usage = u;
+    strncpy_s(o[n].name, sizeof o[n].name, nm, _TRUNCATE);
+    if (kind <= IJOY_K_AXIS) {
+        /* acc = Treiber nimmt DIPROP_RANGE an (Fake: lo == hi -> Werte
+         * -32768..32767, DirectInput skaliert), sonst Rohbereich 0..lmax */
+        o[n].lo = 0;
+        o[n].hi = acc ? 0 : lmax;
+        o[n].llo = 0;
+        o[n].lhi = lmax;
+    }
+    o[n].read = -1;
+    return n + 1;
+}
+
+static int w432_btns(ijoy_obj_t *o, int n, int count)
+{
+    int b;
+    for (b = 0; b < count; b++) {
+        n = w432_add(o, n, IJOY_K_BTN, W432_BTN | W432_INST(b), 0x09, (unsigned short)(b + 1), "Button", 0, 0);
+    }
+    return n;
+}
+
+/* Geraet d einrichten: 0 = WingMan Force 3D, 1 = Arduino Micro. thr_unk =
+ * Arduino-Throttle mit unbekannter GUID (nur Usage 02:BB). Ruhewerte in
+ * logischen Einheiten (Mitte bzw. Schub am Ende). */
+static void w432_dev(int d, int acc, int thr_unk)
+{
+    ijoy_obj_t *o = g_w432_o[d];
+    int n = 0;
+    g_w432_acc[d] = acc;
+    if (d == 0) {
+        g_w432_lmax[d] = 255;
+        n = w432_add(o, n, IJOY_K_X, W432_ABS | W432_INST(0), 0x01, 0x30, "X Axis", 255, acc);
+        n = w432_add(o, n, IJOY_K_Y, W432_ABS | W432_INST(1), 0x01, 0x31, "Y Axis", 255, acc);
+        n = w432_add(o, n, IJOY_K_RZ, W432_ABS | W432_INST(5), 0x01, 0x35, "Rz Axis", 255, acc);
+        n = w432_add(o, n, IJOY_K_SLIDER, W432_ABS | W432_INST(6), 0x01, 0x36, "Slider", 255, acc);
+        n = w432_add(o, n, IJOY_K_POV, W432_POV | W432_INST(0), 0x01, 0x39, "Hat Switch", 0, 0);
+        n = w432_btns(o, n, 7);
+        g_w432_rest[d][0] = g_w432_rest[d][1] = g_w432_rest[d][2] = 128;
+        g_w432_rest[d][3] = 255; /* Schub ganz zurueck */
+    } else {
+        g_w432_lmax[d] = 65535;
+        n = w432_add(o, n, IJOY_K_X, W432_ABS | W432_INST(0), 0x01, 0x30, "X", 65535, acc);
+        n = w432_add(o, n, IJOY_K_Y, W432_ABS | W432_INST(1), 0x01, 0x31, "Y", 65535, acc);
+        n = w432_add(o, n, thr_unk ? IJOY_K_AXIS : IJOY_K_SLIDER, W432_ABS | W432_INST(2), 0x02, 0xBB, "Throttle",
+                     65535, acc);
+        n = w432_add(o, n, IJOY_K_POV, W432_POV | W432_INST(0), 0x01, 0x39, "Hat Switch", 0, 0);
+        n = w432_btns(o, n, 8);
+        g_w432_rest[d][0] = g_w432_rest[d][1] = 32768;
+        g_w432_rest[d][2] = 6000; /* Schiebepoti nahe Minimum */
+    }
+    g_w432_n[d] = n;
+}
+
+/* Beide Geraete einstecken (Fake) und aufzaehlen. */
+static int w432_plug(void)
+{
+    static const char specs[IMAP_JOY_MAX][96] = { "", "", "", "" };
+    int d;
+    ijoy_test_begin(W432_NDEV, specs, 0u);
+    for (d = 0; d < W432_NDEV; d++) {
+        ijoy_test_objects(d, g_w432_o[d], g_w432_n[d]);
+    }
+    return ijoy_scan();
+}
+
+static void w432_put(int d, int k, long raw)
+{
+    long m = g_w432_lmax[d], v = raw < 0 ? 0 : raw > m ? m : raw;
+    if (g_w432_acc[d]) { /* DirectInput skaliert logisch 0..m auf -32768..32767 */
+        v = -32768 + (long)(((long long)v * 65535 + m / 2) / m);
+    }
+    ijoy_test_obj_value(d, k, v);
+}
+
+/* Ein Lernvorgang: 8 Takte Ruhe, dann bewegt sich Objekt obj von Geraet dev
+ * in 4 Takten von der Ruhe auf peak (logisch) und bleibt dort; btn >= 0:
+ * statt Achse diese Taste ab Takt 8 gedrueckt. noise = Rauschen auf allen
+ * Achsen beider Geraete (logisch, abwechselnd +/-). Rueckgabe wie
+ * lctrl_joy_learner_step, *who = Geraet, out = Teil hinter "JOYn:". */
+/* Fake-Takt t setzen (auch fuer den Dialog-Selbsttest in launcher_gui.c). */
+void w432_fixture_tick(int t, int dev, int obj, long peak, int btn, long noise)
+{
+    int d, k;
+    for (d = 0; d < W432_NDEV; d++) {
+        for (k = 0; k < g_w432_n[d]; k++) {
+            const ijoy_obj_t *b = &g_w432_o[d][k];
+            if (b->kind <= IJOY_K_AXIS) {
+                long v = g_w432_rest[d][k];
+                if (d == dev && k == obj && btn < 0 && t >= 8) {
+                    int s = t - 8;
+                    v = s >= 3 ? peak : v + (peak - v) * (s + 1) / 4;
+                }
+                if (noise) {
+                    v += ((t + k) & 1) ? noise : -noise;
+                }
+                w432_put(d, k, v);
+            } else if (b->kind == IJOY_K_POV) {
+                ijoy_test_obj_value(d, k, -1);
+            } else if (b->kind == IJOY_K_BTN) {
+                ijoy_test_obj_value(d, k, (d == dev && k == btn && t >= 8) ? 1 : 0);
+            }
+        }
+    }
+}
+
+/* WingMan (Geraet 0) + Arduino (Geraet 1) als Fake einstecken; Anzahl. */
+int w432_fixture_plug(int acc, int thr_unk)
+{
+    w432_dev(0, acc, 0);
+    w432_dev(1, acc, thr_unk);
+    return w432_plug();
+}
+
+static int w432_learn(int idx, int dev, int obj, long peak, int btn, long noise, char *out, size_t cap, int *who)
+{
+    int t, d, r;
+    *who = -1;
+    out[0] = '\0';
+    for (d = 0; d < W432_NDEV; d++) {
+        lctrl_joy_learner_reset(&g_w432_L[d]);
+    }
+    for (t = 0; t < 40; t++) {
+        w432_fixture_tick(t, dev, obj, peak, btn, noise);
+        for (d = 0; d < W432_NDEV; d++) {
+            imap_joy_state_t st;
+            const ijoy_info_t *in = ijoy_info(d);
+            int ok;
+            if (!in) {
+                continue;
+            }
+            ok = ijoy_read(d, &st);
+            r = lctrl_joy_learner_step(&g_w432_L[d], ok, &st, in->axmask, in->npov, idx, out, cap);
+            if (r) {
+                *who = d;
+                return r;
+            }
+        }
+    }
+    return 0;
+}
+
+static __declspec(noinline) void st_w432_hotas(int *pass_, int *fail_)
+{
+#define W432_OK(name) do { printf("PASS %s\n", name); (*pass_)++; } while (0)
+#define W432_FAIL(name, fmt, ...) do { printf("FAIL %s: " fmt "\n", name, __VA_ARGS__); (*fail_)++; } while (0)
+    /* Erwartung je Fall: Element, Geraet, Objekt, Ziel (logisch), Ergebnis */
+    static const struct {
+        const char *elem;
+        int dev, obj;
+        long peak;
+        const char *want; /* Teil hinter JOYn: */
+        const char *what;
+    } c[] = {
+        /* WingMan: Mitte 128, Weg 75 % bzw. 55 % des Halbwegs (alt: 80 % noetig) */
+        { "aim_x", 0, 0, 223, "X:dz=0.05", "WingMan X Mitte->rechts 75%" },
+        { "aim_y", 0, 1, 33, "Y:dz=0.05", "WingMan Y Mitte->vorn 75%" },
+        { "rot", 0, 2, 198, "RZ:dz=0.05", "WingMan RZ Drehung 55%" },
+        { "rot", 0, 2, 58, "RZ:dz=0.05:inv=1", "WingMan RZ Drehung links 55%" },
+        { "pedal_r", 0, 3, 0, "S0:dz=0.05:inv=1", "WingMan Schub Ende->Ende" },
+        /* Arduino: Mitte 32768, Weg 70 %; Schiebepoti 6000 -> 30000 (37 %) */
+        { "aim_x", 1, 0, 55705, "X:dz=0.05", "Arduino X Mitte->rechts 70%" },
+        { "aim_y", 1, 1, 9830, "Y:dz=0.05", "Arduino Y Mitte->vorn 70%" },
+        { "pedal_r", 1, 2, 30000, "S0:dz=0.05", "Arduino Throttle 02:BB 37%" },
+    };
+    static const char *const mode[4] = { "DIPROP_RANGE angenommen", "Rohbereich (Software-Umrechnung)",
+                                         "Throttle ohne GUID", "Rauschen +-1 %" };
+    char out[64], why[600];
+    int m, i, who, r, n, ok;
+    for (m = 0; m < 4; m++) {
+        int acc = m != 1, nok = 0, ncase = 0;
+        why[0] = '\0';
+        n = w432_fixture_plug(acc, m == 2);
+        if (n != 2) {
+            _snprintf_s(why, sizeof why, _TRUNCATE, "%d Geraete statt 2", n);
+        }
+        for (i = 0; i < (int)(sizeof c / sizeof c[0]) && n == 2; i++) { /* alle Faelle, Fehler gesammelt */
+            long noise = m == 3 ? (c[i].dev ? 640 : 3) : 0; /* 16 Bit: +-1 %, 8 Bit: +-3 LSB */
+            int idx = lctrl_bind_elem_index(c[i].elem);
+            ncase++;
+            r = w432_learn(idx, c[i].dev, c[i].obj, c[i].peak, -1, noise, out, sizeof out, &who);
+            if (r == 3 && who == c[i].dev && strcmp(out, c[i].want) == 0) {
+                nok++;
+            } else {
+                size_t L = strlen(why);
+                _snprintf_s(why + L, sizeof why - L, _TRUNCATE, "%s%s->'%s'", L ? "; " : "", c[i].what, out);
+            }
+        }
+        if (n == 2) { /* Taste am Arduino (alt bei Rauschen: keine Basis -> auch keine Taste) */
+            ncase++;
+            r = w432_learn(lctrl_bind_elem_index("bi0"), 1, 4 + 2, 0, 4 + 2, m == 3 ? 640 : 0, out, sizeof out,
+                           &who);
+            if (r == 1 && who == 1 && strcmp(out, "B3") == 0) {
+                nok++;
+            } else {
+                size_t L = strlen(why);
+                _snprintf_s(why + L, sizeof why - L, _TRUNCATE, "%sArduino Taste 3->'%s'", L ? "; " : "", out);
+            }
+        }
+        if (!why[0]) { /* Ruhe (mit Rauschen) und kleine Bewegung (10 %) lernen nichts */
+            r = w432_learn(lctrl_bind_elem_index("aim_x"), 0, 0, 128, -1, m == 3 ? 3 : 0, out, sizeof out, &who);
+            if (r == 0) {
+                r = w432_learn(lctrl_bind_elem_index("aim_x"), 1, 0, 32768 + 6554, -1, m == 3 ? 640 : 0, out,
+                               sizeof out, &who);
+            }
+            if (r != 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Ruhe/10 %% lernte '%s' (Geraet %d)", out, who);
+            }
+        }
+        ijoy_test_end();
+        ok = !why[0];
+        {
+            char name[160];
+            _snprintf_s(name, sizeof name, _TRUNCATE,
+                        "W432 HOTAS-AXES %s (WingMan X/Y/RZ/S0 + Arduino X/Y/Throttle, Taste, Ruhe; %d/%d)", mode[m],
+                        nok, ncase);
+            if (ok) {
+                W432_OK(name);
+            } else {
+                W432_FAIL(name, "%s", why);
+            }
+        }
+    }
+    /* Gamepad-Weg (HORI Flight Stick im Xbox-Modus): Stick, Drehachse mit
+     * kurzem Weg, Schub am Anschlag, Trigger als Ruder. Rest: Stick Mitte,
+     * Schub RY = -32768 (Annahme, Belegung je Geraet verschieden). */
+    {
+        static const struct {
+            short lx, ly, rx, ry;
+            unsigned char lt, rt;
+            const char *want; /* "" = nichts lernen */
+            const char *what;
+        } p[] = {
+            { 24000, 11000, 0, -32768, 0, 0, "LX", "Stick rechts mit Nebenweg Y 34 %" },
+            { -3000, -26000, 0, -32768, 0, 0, "LY", "Stick vorn 80 %" },
+            { 0, 0, 16000, -32768, 0, 0, "RX", "Drehachse 49 %" },
+            { 0, 0, 0, 0, 0, 0, "RY", "Schub Anschlag->Mitte" },
+            { 0, 0, 0, -32768, 0, 120, "RT", "Trigger 47 %" },
+            { 20000, 20000, 0, -32768, 0, 0, "", "Diagonale" },
+            { 3000, -2000, 2500, -32000, 3, 4, "", "Rauschen/kleiner Weg" },
+        };
+        char why[600] = "", nm[16];
+        int i, k, nok = 0;
+        for (i = 0; i < (int)(sizeof p / sizeof p[0]); i++) {
+            lctrl_pad_t rest, cur;
+            lctrl_pad_learner_t L;
+            int got = 0;
+            memset(&rest, 0, sizeof rest);
+            rest.ry = -32768;
+            lctrl_pad_learner_reset(&L);
+            nm[0] = '\0';
+            for (k = 0; k < 12 && !got; k++) {
+                cur = rest;
+                if (k & 1) { /* leichtes Rauschen in der Ruhe (+-600) */
+                    cur.lx = 600;
+                    cur.rx = -600;
+                }
+                if (k >= 4) {
+                    cur.lx = p[i].lx;
+                    cur.ly = p[i].ly;
+                    cur.rx = p[i].rx;
+                    cur.ry = p[i].ry;
+                    cur.lt = p[i].lt;
+                    cur.rt = p[i].rt;
+                }
+                got = lctrl_pad_learner_axis(&L, &cur, nm, sizeof nm);
+            }
+            if (got ? strcmp(nm, p[i].want) == 0 : !p[i].want[0]) {
+                nok++;
+            } else {
+                size_t L2 = strlen(why);
+                _snprintf_s(why + L2, sizeof why - L2, _TRUNCATE, "%s%s->'%s'", L2 ? "; " : "", p[i].what,
+                            got ? nm : "");
+            }
+        }
+        if (!why[0]) {
+            char name[160];
+            _snprintf_s(name, sizeof name, _TRUNCATE,
+                        "W432 HOTAS-AXES Gamepad-Weg (Xbox-Modus: Stick, Drehachse, Schub, Trigger, Diagonale; %d/%d)",
+                        nok, (int)(sizeof p / sizeof p[0]));
+            W432_OK(name);
+        } else {
+            W432_FAIL("W432 HOTAS-AXES Gamepad-Weg", "%s", why);
+        }
+    }
+#undef W432_OK
+#undef W432_FAIL
+}
+
 /* W332 Selbsttest: enthaelt die Datei (bis 64 KB) den Text? */
 static int st_file_has(const char *path, const char *needle)
 {
@@ -1202,6 +1534,39 @@ static int cli_selftest(const char *client_override)
             T_OK("W218 simple-controls cfg (Standard 0, Roundtrip)");
         } else {
             T_FAIL("W218 simple-controls cfg", "%s", "Werte falsch");
+        }
+        u8_DeleteFile(tmp);
+    }
+
+    /* W424 SB-ALLIED-SQUADS: Standard 1, Roundtrip 0 -> 1 ([gameplay]) */
+    {
+        int ok;
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w424_ally_test.cfg");
+        u8_DeleteFile(tmp);
+        lcfg_defaults(&a);
+        ok = a.sb_allied_squads == 1;
+        a.sb_allied_squads = 0;
+        if (ok && lcfg_save_user(tmp, &a) == 0) {
+            lcfg_defaults(&b);
+            lcfg_load_file(tmp, &b);
+            ok = b.sb_allied_squads == 0;
+            b.sb_allied_squads = 1;
+            if (ok && lcfg_save_user(tmp, &b) == 0) {
+                lcfg_defaults(&a);
+                a.sb_allied_squads = 0;
+                lcfg_load_file(tmp, &a);
+                ok = a.sb_allied_squads == 1;
+            } else {
+                ok = 0;
+            }
+        } else {
+            ok = 0;
+        }
+        if (ok) {
+            T_OK("W424 allied-squads cfg (Standard 1, Roundtrip)");
+        } else {
+            T_FAIL("W424 allied-squads cfg", "%s", "Werte falsch");
         }
         u8_DeleteFile(tmp);
     }
@@ -1621,6 +1986,7 @@ static int cli_selftest(const char *client_override)
                 lctrl_user_rest_ok("") ||
                 !lctrl_name_shipped("keyboard_default") ||
                 !lctrl_name_shipped("xbox_pad_default") ||
+                !lctrl_name_shipped("default_full") ||
                 lctrl_name_shipped("user_mein")) {
                 ok = 0;
             }
@@ -2482,6 +2848,7 @@ static int cli_selftest(const char *client_override)
     st_w309_fpsmon(&pass, &fail); /* W309 FPS-MONITOR */
     st_sbc_trunc(&pass, &fail); /* Tastenbelegung ohne SBC */
     st_w312_joycalib(&pass, &fail); /* W312 JOY-CALIB */
+    st_w432_hotas(&pass, &fail);    /* W432 HOTAS-AXES */
 
     /* 29 (W143): Assistent-cfg Speichern/Zuruecksetzen erhaelt fremde Zeilen */
     {
@@ -3090,6 +3457,43 @@ static int cli_selftest(const char *client_override)
             T_OK("46 game-data (Abbild / Ordner ohne XBE-Feld / ungueltig)");
         } else {
             T_FAIL("46 game-data", "%s", why);
+        }
+    }
+
+    /* W431 DEFAULT-BINDINGS: frische Installation (kind 0) -> default_full; vorhandene cfg ohne Profil bleibt
+     * Legacy; gesetztes Profil und fehlende Profildatei bleiben unberuehrt. */
+    {
+        char cd[1100], pd[1200], pf[1300];
+        launcher_settings_t fs;
+        FILE *pfh = NULL;
+        int ok;
+        u8_GetTempPath(tmp, sizeof tmp);
+        _snprintf_s(cd, sizeof cd, _TRUNCATE, "%sw431_client", tmp);
+        _snprintf_s(pd, sizeof pd, _TRUNCATE, "%s/profiles", cd);
+        _snprintf_s(pf, sizeof pf, _TRUNCATE, "%s/default_full.ini", pd);
+        lcfg_mkdir_p(pd);
+        lcfg_defaults(&fs);
+        ok = app_firstrun_input_profile(&fs, cd, 0) == 0 && !fs.input_profile[0]; /* Datei fehlt */
+        if (fopen_s(&pfh, pf, "wb") == 0 && pfh) {
+            fputs("[buttons]\nbi0 = KEY:SPACE\n", pfh);
+            fclose(pfh);
+        } else {
+            ok = 0;
+        }
+        lcfg_defaults(&fs);
+        ok = ok && app_firstrun_input_profile(&fs, cd, 0) == 1 && strcmp(fs.input_profile, "default_full") == 0;
+        lcfg_defaults(&fs);
+        ok = ok && app_firstrun_input_profile(&fs, cd, 1) == 0 && !fs.input_profile[0]; /* user.cfg da: Legacy */
+        ok = ok && app_firstrun_input_profile(&fs, cd, 2) == 0 && !fs.input_profile[0]; /* Standard-Profil da */
+        strcpy_s(fs.input_profile, sizeof fs.input_profile, "user_mein");
+        ok = ok && app_firstrun_input_profile(&fs, cd, 0) == 0 && strcmp(fs.input_profile, "user_mein") == 0;
+        u8_DeleteFile(pf);
+        RemoveDirectoryA(pd);
+        RemoveDirectoryA(cd);
+        if (ok) {
+            T_OK("W431 firstrun-profile (frisch -> default_full, vorhandene cfg bleibt Legacy, eigenes Profil/fehlende Datei unberuehrt)");
+        } else {
+            T_FAIL("W431 firstrun-profile", "%s", "Vorwahl falsch");
         }
     }
 
@@ -3884,7 +4288,9 @@ static int cli_selftest(const char *client_override)
     w303_gui_selftest(client_override, &pass, &fail); /* W303 AUDIO-VOLUME */
     w299_bind_selftest(&pass, &fail); /* W299 REPLAY */
     w365_gui_selftest(client_override, &pass, &fail); /* W365 BIND-COMBO */
+    w432_gui_selftest(client_override, &pass, &fail); /* W432 HOTAS-AXES: Belegungsdialog */
     w419_gui_selftest(client_override, &pass, &fail); /* W419 CTRL-EXPORT */
+    w430_selftest(&pass, &fail); /* W430 CTRL-IMPORT-FUZZ (kurz) */
     if (!ls_replay_selftest()) { T_OK("W254 replay list (folders, SaveMeta name, mission, signature state, order, set args)"); }
     else { T_FAIL("W254 replay list", "%s", "failed"); }
     if (!ls_selftest()) { T_OK("W199 save-import layouts, conflicts, backup, ZIP roundtrip, rejection"); }
@@ -4815,6 +5221,16 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
             client_override, cli_value(argc, argv, "--write-user-profile"),
             cli_value(argc, argv, "--from"), cli_value(argc, argv, "--set-bind"),
             cli_flag(argc, argv, "--force"));
+    } else if (cli_flag(argc, argv, "--controls-fuzz") || cli_value(argc, argv, "--controls-fuzz")) {
+        char why[400];
+        long st[2];
+        const char *nv = cli_value(argc, argv, "--controls-fuzz"), *sv = cli_value(argc, argv, "--seed");
+        long nn = nv && atol(nv) > 0 ? atol(nv) : 200000;
+        unsigned sd = sv ? (unsigned)strtoul(sv, NULL, 0) : 0x430u;
+        cli_console(); /* W430 CTRL-IMPORT-FUZZ */
+        rc = w430_ctrl_fuzz(nn, sd, why, sizeof why, st);
+        if (rc) { printf("FUND: %s\n", why); }
+        else { printf("OK: %ld Mutationen (Seed %u): %ld Importe, %ld abgelehnt\n", nn, sd, st[0], st[1]); }
     } else if (cli_value(argc, argv, "--controls-export") || cli_value(argc, argv, "--controls-check")) {
         cli_console(); /* W419 CTRL-EXPORT */
         rc = cli_controls(client_override, cli_value(argc, argv, "--controls-export"),

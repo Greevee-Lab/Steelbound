@@ -23,6 +23,7 @@
 #include "sb_watermark.h"
 #include "kernel_hle.h"
 #include "xdk_hooks.h"
+#include "loc_chatnet.h" /* W437: Chat vor dem Minidump loeschen */
 
 #pragma comment(lib, "dbghelp.lib")
 
@@ -351,6 +352,7 @@ static void dump_now(void)
     mei.ThreadId = g_dj.tid;
     mei.ExceptionPointers = g_dj.ep;
     mei.ClientPointers = FALSE;
+    loc_chat_crash_wipe(); /* W437: Chat-Inhalte (Verlauf, Eingabezeile, Anzeige) nie im Minidump */
     g_dj.ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), f,
                                 (MINIDUMP_TYPE)(MiniDumpWithIndirectlyReferencedMemory | MiniDumpScanMemory),
                                 g_dj.ep ? &mei : NULL, NULL, NULL) ? 1 : 0;

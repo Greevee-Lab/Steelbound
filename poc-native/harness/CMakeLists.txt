@@ -136,6 +136,8 @@ add_library(sb_emu SHARED
   src/loc_aim.c
   src/loc_vpf.c
   src/loc_dodge.c
+  src/loc_autogear.c
+  src/loc_aimassist.c
   src/loc_smooth.c
   src/loc_audio.c
   src/loc_audio_scope.c
@@ -150,6 +152,10 @@ add_library(sb_emu SHARED
   src/loc_rbn.c
   src/loc_rule.c
   src/loc_rulenet.c
+  src/loc_chat.c
+  src/loc_chatnet.c
+  src/loc_lobbylist.c
+  src/loc_netpanel.c
   src/loc_lsarb.c
   src/loc_lsarb_game.c
   src/krnl_loc.c
@@ -183,6 +189,7 @@ add_library(sb_emu SHARED
   src/input_sbc_usb.c
   src/sbc_fixture.c
   src/sbc_wire.c
+  src/input_despike.c
   src/input_map.c
   src/input_joy.c
   src/input_mouse.c
@@ -281,8 +288,10 @@ add_executable(input_selftest
   src/sb_profile.c
   src/input_map.c
   src/input_joy.c
+  src/input_despike.c
   src/input_tap.c
   src/input_sbc_usb.c
+  src/loc_rbi.c
 )
 target_include_directories(input_selftest PRIVATE src)
 target_link_libraries(input_selftest PRIVATE setupapi winusb)
@@ -329,6 +338,7 @@ add_executable(loc_net_selftest
   tests/loc_net_selftest.c
   src/loc_net_core.c
   src/loc_rule.c
+  src/loc_chat.c
   src/loc_netsim.c
   src/loc_route.c
   ${SB_LOC_TUN_SRC}
@@ -338,6 +348,16 @@ add_executable(loc_net_selftest
 target_include_directories(loc_net_selftest PRIVATE src)
 target_link_libraries(loc_net_selftest PRIVATE sb_bearssl ws2_32 winmm bcrypt secur32 crypt32)
 target_compile_options(loc_net_selftest PRIVATE /W3)
+
+# ---- loc_chat_selftest: W437 LOC-CHAT Kern (Codec, Bereinigung, Ratenbremse, Stummschalten, Fuzz, Minidump-Loeschen) ----
+add_executable(loc_chat_selftest
+  tests/loc_chat_selftest.c
+  src/loc_chat.c
+)
+target_include_directories(loc_chat_selftest PRIVATE src)
+target_link_libraries(loc_chat_selftest PRIVATE dbghelp)
+target_compile_options(loc_chat_selftest PRIVATE /W3)
+set_source_files_properties(src/loc_chat.c PROPERTIES COMPILE_OPTIONS "/sdl;/W4;/WX") # netznah (SECURITY.md §7)
 
 # ---- loc_audio_selftest: XACT-1-Parser (XWB/XSB) + Wave-Bank-Dekodierung, synthetische Daten (W298) ----
 add_executable(loc_audio_selftest

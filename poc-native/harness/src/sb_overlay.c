@@ -56,6 +56,8 @@ int imouse_subclassed(void);                   /* input_mouse.c */
 void imouse_release_keys(void);                /* input_mouse.c (UI-Thread) */
 int sb_render_pause_jpg(const char *path, unsigned *ow, unsigned *oh); /* d3d11_render.c (W188, unter ctx_lock) */
 #include "sb_pausenet.h" /* W357 LOC-PAUSE-NET */
+#include "loc_chatnet.h" /* W437 LOC-CHAT */
+#include "loc_rollback.h" /* W447 LOC-NET-AUTO: Netzmodus */
 int loc_net_peer_live(void);                                     /* loc_net.c (W357, nur lesend) */
 int loc_mouse_mission(void);                                     /* loc_pad.c (W357: Missionsanker der Testfolge) */
 int sb_render_snap_async(const char *path, int utf8);            /* d3d11_render.c (W357): Bild ohne Pause */
@@ -106,6 +108,7 @@ enum {
     OI_RPFX, /* W299 REPLAY-FX: Replay-Bildfilter live (Vollbild-Ansicht, experimentell) */
     OI_MONVIEW, /* W319 MONITOR-VIEW: Monitoransicht (Gruppe Cockpit, nach "Cockpit") */
     OI_ALLY, /* W424 SB-ALLIED-SQUADS: verbuendete Trupps fern vom Spieler (Gruppe Spiel, ab naechster Mission) */
+    OI_NETMODE, /* W447 LOC-NET-AUTO: Netzmodus Auto/Rollback/Lockstep (Gruppe Spiel, nur LoC, ab naechster Mission) */
     OI_N
 };
 /* W291 ESC-REWORK: Gruppen statt Seiten (Namen und Reihenfolge wie die
@@ -117,7 +120,7 @@ enum {
 enum { OG_QUICK, OG_GAME, OG_DISP, OG_CKP, OG_WORLD, OG_FX, OG_COLOR, OG_TEX, OG_AUDIO, OG_VR, OG_DEBUG, OG_N };
 #define OV_NPAGES OG_N
 static const short kOgQuick[] = { OI_PRESET, OI_FPS, OI_WINMODE, OI_CHIDE, OI_SMON, OI_STEX };
-static const short kOgGame[] = { OI_ASSIST, OI_AUTOGEAR, OI_ALLY, OI_MMODE, OI_MSENS, OI_STICKAIM, OI_STICKSENS }; /* + W424 */
+static const short kOgGame[] = { OI_NETMODE, OI_ASSIST, OI_AUTOGEAR, OI_ALLY, OI_MMODE, OI_MSENS, OI_STICKAIM, OI_STICKSENS }; /* + W424, W447 */
 static const short kOgGameA[] = { OI_SBCMOUSE, OI_MPAUSE, OI_SAVELOCK, OI_SLCOMMIT };
 static const short kOgDisp[] = { OI_FPS, OI_WINMODE, OI_RES, OI_RTS, OI_EDGE };
 static const short kOgDispA[] = { OI_EDGEW, OI_EDGES, OI_CPERSP, OI_CPANINI, OI_CWIDTH, OI_VRON }; /* Breitbild wie Launcher */
@@ -405,6 +408,15 @@ static const char *ov_loc_lock(int i)
     return g_sba_loc ? ov_loc_lock_ex(i, 1, ov_loc_wide()) : NULL;
 }
 
+/* W440 LOC-LOBBY-MODES: Hinweis einer bedienbaren Zeile in LoC (Zielhilfe/Automatik nur in Arcade-Lobbys) oder NULL */
+static const char *ov_loc_hint(int i)
+{
+    char k[40];
+    if (!g_sba_loc) { return NULL; }
+    ov_loc_key(i, k, sizeof k);
+    return sb_ovl_loc_hint(k, 1);
+}
+
 /* Gruppe in LoC ohne jede wirksame Zeile? (Zeilen ohne Schluessel, z. B. Presets, zaehlen nicht) */
 static int ov_grp_loc_hidden_ex(int g, int loc, int wide)
 {
@@ -435,6 +447,7 @@ static int ov_grp_vis(int g)
 /* W291: Zeile unter den gegebenen Umstaenden vorhanden (Controller-Zeile nur mit sbc_usb). */
 static int ov_row_avail(int i)
 {
+    if (i == OI_NETMODE) { return g_sba_loc; } /* W447: Netzmodus nur in Line of Contact */
     return i != OI_SBCMOUSE || g_cfg.sbc_usb;
 }
 
@@ -959,6 +972,16 @@ static void ov_change(int i, int dir)
         g_cfg.auto_gear = !g_cfg.auto_gear;
         HLOG_I("OVERLAY: auto_gear -> %d (f=%u)", g_cfg.auto_gear, g_present_no);
         break;
+    case OI_NETMODE: { /* W447: Netzmodus Auto -> Rollback -> Lockstep, Wunsch im Hallo, ab der naechsten Mission */
+        int m = (loc_rb_net_mode() + (dir > 0 ? 1 : 2)) % 3;
+        if (loc_rb_net_mode_set(m)) {
+            HLOG_I("OVERLAY: loc_net_mode -> %d (ab naechster Mission, f=%u)", m, g_present_no);
+            ov_status_key("ovl.st_netmode");
+        } else {
+            ov_status_key("ovl.st_netmode_ls"); /* ohne Eingabeschicht gestartet: Lockstep bis zum Neustart */
+        }
+        break;
+    }
     case OI_ALLY: /* W424: Einstellung gilt je Mission ab ihrem ersten Bild (laufende Mission bleibt wie gestartet) */
         g_cfg.sb_allied_squads = !g_cfg.sb_allied_squads;
         HLOG_I("OVERLAY: sb_allied_squads -> %d (ab naechster Mission, f=%u)", g_cfg.sb_allied_squads, g_present_no);
@@ -1721,7 +1744,7 @@ static int ov_grp_at(int n)
 /* W188: Bildschirm wechseln (Render-Thread) */
 /* W290 QUICK-SHOT: Aufnahme-Einstellungen des Fotomodus (eine Konfiguration mit dem Schnell-Screenshot) beim
  * Verlassen in user.cfg merken, wenn sie sich geaendert haben (Verfahren wie "Als Standard speichern"). */
-static int g_ph_cfg0[5];
+static int g_ph_cfg0[6];
 static void ov_ph_cfg_snap(int *v)
 {
     v[0] = g_cfg.photo_view;
@@ -1729,15 +1752,16 @@ static void ov_ph_cfg_snap(int *v)
     v[2] = g_cfg.photo_jpg;
     v[3] = g_cfg.photo_aspect;
     v[4] = g_cfg.photo_hud;
+    v[5] = g_cfg.photo_cine_self; /* W445 */
 }
 
 static void ov_ph_persist(void)
 {
-    static const char *const keys[5] = { "photo_view", "photo_size", "photo_format", "photo_aspect", "photo_hud" };
-    static const char *const secs[5] = { "photo", "photo", "photo", "photo", "photo" };
-    char b0[8], b1[8], b3[8];
-    const char *vals[5];
-    int now[5], n;
+    static const char *const keys[6] = { "photo_view", "photo_size", "photo_format", "photo_aspect", "photo_hud", "photo_cine_self" };
+    static const char *const secs[6] = { "photo", "photo", "photo", "photo", "photo", "photo" };
+    char b0[8], b1[8], b3[8], b5[12];
+    const char *vals[6];
+    int now[6], n;
     ov_ph_cfg_snap(now);
     if (memcmp(now, g_ph_cfg0, sizeof now) == 0) { return; }
     memcpy(g_ph_cfg0, now, sizeof now);
@@ -1754,8 +1778,10 @@ static void ov_ph_persist(void)
     vals[2] = now[2] ? "jpg" : "png";
     vals[3] = b3;
     vals[4] = now[4] ? "1" : "0";
-    n = sb_ovl_cfg_write(g_ov_save_path, 5, keys, secs, vals);
-    if (n >= 0) { HLOG_I("PHOTO: Einstellungen gemerkt (photo_view=%s photo_size=%s photo_format=%s photo_aspect=%s photo_hud=%s)", b0, b1, vals[2], b3, vals[4]); }
+    _snprintf_s(b5, sizeof b5, _TRUNCATE, "%d", now[5]);
+    vals[5] = b5;
+    n = sb_ovl_cfg_write(g_ov_save_path, 6, keys, secs, vals);
+    if (n >= 0) { HLOG_I("PHOTO: Einstellungen gemerkt (photo_view=%s photo_size=%s photo_format=%s photo_aspect=%s photo_hud=%s photo_cine_self=%s)", b0, b1, vals[2], b3, vals[4], b5); }
     else { HLOG_W("PHOTO: Einstellungen merken fehlgeschlagen"); }
 }
 
@@ -2158,8 +2184,9 @@ static void ov_key_menu(int vk)
 /* W290: PR_VIEW (vorher PR_COCKPIT) = Ansicht wie im Spiel / ohne Cockpit / nur Aussenwelt; PR_MECH und PR_SHADER
  * stehen nicht mehr im Panel (tote Zeile bzw. Grafik-Einstellung des ESC-Menues). */
 enum { PR_VIEW, PR_FREECAM, PR_MECH, PR_RES, PR_FMT, PR_SHOT, PR_BACK, PR_YAW, PR_PITCH, PR_DIST, PR_RESET, PR_ASPECT, PR_MFX, PR_SHADER,
-       PR_HUD /* W290: HUD im Foto an/aus (Monitor-Effekt bleibt) */ };
-static const int kPhRows0[] = { PR_VIEW, PR_ASPECT, PR_MFX, PR_HUD, PR_FREECAM, PR_RES, PR_FMT, PR_SHOT, PR_BACK };
+       PR_HUD /* W290: HUD im Foto an/aus (Monitor-Effekt bleibt) */,
+       PR_CSELF /* W445: Reichweite eigene VT-Teile (nur Cinematic) */ };
+static const int kPhRows0[] = { PR_VIEW, PR_ASPECT, PR_MFX, PR_HUD, PR_CSELF, PR_FREECAM, PR_RES, PR_FMT, PR_SHOT, PR_BACK };
 static const int kPhRows1[] = { PR_FREECAM, PR_YAW, PR_PITCH, PR_DIST, PR_RESET, PR_SHOT, PR_BACK };
 #define PH_NR0 ((int)(sizeof kPhRows0 / sizeof kPhRows0[0]))
 #define PH_NR1 ((int)(sizeof kPhRows1 / sizeof kPhRows1[0]))
@@ -2183,6 +2210,7 @@ static int ov_ph_enabled(int it, const sb_photo_ui_t *u)
     case PR_ASPECT: return u->rec && u->world; /* W290: Bildformat nur bei "nur Aussenwelt" (W428: und Cinematic) */
     case PR_MFX: return !u->world && u->view != SB_PV_CINE; /* W290: Aussenwelt hat keinen Monitor; W428: Cinematic schaltet ihn ab */
     case PR_HUD: return !u->world && u->view != SB_PV_CINE && u->rec; /* W290: HUD aus braucht die Aufzeichnung */
+    case PR_CSELF: return u->view == SB_PV_CINE && u->cine_ok; /* W445: nur Cinematic */
     case PR_YAW: case PR_PITCH: case PR_DIST: case PR_RESET: return u->freecam;
     default: return 1;
     }
@@ -2244,6 +2272,17 @@ static void ov_ph_change(int it, int dir)
         HLOG_I("PHOTO: HUD %s (f=%u)", g_cfg.photo_hud ? "an" : "aus", g_present_no);
         break;
     case PR_MECH: ov_status_key("ovl.ph_st_mech"); break;
+    case PR_CSELF: { /* W445: Reichweite eigene VT-Teile (aus, 1,0 .. 12,0 in 0,5) */
+        int v = g_cfg.photo_cine_self;
+        if (u.view != SB_PV_CINE || !u.cine_ok) { ov_status_key("ovl.ph_st_cself"); break; }
+        if (dir > 0) { v = v < SB_CSELF_LO ? SB_CSELF_LO : v + SB_CSELF_STEP; if (v > SB_CSELF_HI) { v = 0; } }
+        else { v = v <= 0 ? SB_CSELF_HI : (v <= SB_CSELF_LO ? 0 : v - SB_CSELF_STEP); }
+        if (v > 0) { v = SB_CSELF_LO + (v - SB_CSELF_LO + SB_CSELF_STEP / 2) / SB_CSELF_STEP * SB_CSELF_STEP; } /* auf das Raster */
+        g_cfg.photo_cine_self = v;
+        ov_status_key("ovl.ph_st_cself");
+        HLOG_I("PHOTO: Reichweite eigene VT-Teile -> %d (f=%u)", v, g_present_no);
+        break;
+    }
     case PR_ASPECT: /* W290: 4:3 (wie Monitor) <-> breit (experimentell); "Ausschnitt" nur per cfg */
         if (!u.rec || !u.world) { ov_status_key("ovl.ph_st_aspect"); break; }
         sb_photo_set_aspect(u.aspect == 2 ? 1 : 2);
@@ -2544,12 +2583,13 @@ static void ov_struct_check(void)
     HLOG_I("OVERLAY check: Debug sichtbar=%d (esc_debug=%d; mit 0: %d, mit 1: %d), VR sichtbar=%d", dv, esc0, d0, d1,
            ov_grp_vis(OG_VR));
     { /* W416 LOC-ESC-MENU: SB nichts gesperrt; LoC: erwartete Sperren/Ausblendungen; im LoC-Lauf Wertprobe */
-        static const short kMustLock[] = { OI_SMON, OI_GRAIN, OI_CHIDE, OI_MONVIEW, OI_CPERSP, OI_ASSIST, OI_AUTOGEAR,
+        static const short kMustLock[] = { OI_SMON, OI_GRAIN, OI_CHIDE, OI_MONVIEW, OI_CPERSP, OI_ASSIST,
                                            OI_ALLY, OI_SAVELOCK, OI_SLCOMMIT, OI_STEX, OI_VRON, OI_RPLABEL, OI_RPFX, OI_SGLOW,
                                            OI_CLIGHT, OI_SLOOK, OI_CSAT, OI_SSAO, OI_LABEL };
         static const short kMustFree[] = { OI_FPS, OI_WINMODE, OI_RTS, OI_MMODE, OI_MSENS, OI_STICKAIM, OI_MPAUSE,
                                            OI_SHADING, OI_PRESET, OI_SSHADOW, OI_FOG, OI_LCKP, OI_AA, OI_WSHARP,
-                                           OI_FXPRESET, OI_FXSOFT, OI_VOLM, OI_VOLVOX, OI_SBCMOUSE };
+                                           OI_FXPRESET, OI_FXSOFT, OI_VOLM, OI_VOLVOX, OI_SBCMOUSE,
+                                           OI_AUTOGEAR /* W441 */ };
         int nsb = 0, nloc43 = 0, nloc169 = 0, lf = 0, w, hid = 0, hidsb = 0, probe = -1;
         for (k = 0; k < OI_N; k++) {
             nsb += ov_loc_lock_ex(k, 0, 1) != NULL;
@@ -2920,6 +2960,7 @@ static LONG ov_click_code(HWND w, LPARAM lp)
 int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (!g_cfg.overlay) { return 0; }
+    if (!g_ov_open && loc_chat_wndproc(w, msg, wp, lp)) { return 1; } /* W437: Chatzeile (nur LoC online) vor dem Menue */
     switch (msg) {
     case OV_MSG_TEST: /* TEST(W188): interne Taste (z. B. Umschalt+TAB, Mausrad) ueber den Ring */
         if (g_ov_open) { ov_qpush((int)wp); }
@@ -4248,7 +4289,9 @@ static void ov_label(int i, wchar_t *o, size_t cap)
         /* W319 */
         "ovl.lb_monview",
         /* W424 */
-        "ovl.lb_ally" };
+        "ovl.lb_ally",
+        /* W447 */
+        "ovl.lb_netmode" };
     ov_wkey(o, cap, lb[i]);
 }
 
@@ -4299,6 +4342,11 @@ static void ov_value(int i, wchar_t *o, size_t cap)
         break;
     case OI_AUTOGEAR: ov_wkey(o, cap, g_cfg.auto_gear ? "ovl.v_on" : "ovl.v_off"); break;
     case OI_ALLY: ov_wkey(o, cap, g_cfg.sb_allied_squads ? "ovl.v_on" : "ovl.v_offorig"); break; /* W424 */
+    case OI_NETMODE: { /* W447 */
+        int m = loc_rb_net_mode();
+        ov_wkey(o, cap, m == 0 ? "ovl.v_nm_auto" : m == 1 ? "ovl.v_nm_rb" : "ovl.v_nm_ls");
+        break;
+    }
     case OI_STICKAIM: ov_wkey(o, cap, g_cfg.stick_aim ? "ovl.v_stickrel" : "ovl.v_stickpos"); break; /* W271 */
     case OI_STICKSENS: _snwprintf_s(o, cap, _TRUNCATE, L"%d", g_cfg.stick_aim_sens); break;
     case OI_HD:
@@ -4864,7 +4912,8 @@ static void ov_paint_photo(void)
     static const char *const tk[PH_NTABS] = { "ovl.ph_tab_photo", "ovl.ph_tab_cam" };
     static const char *const lk[] = { "ovl.ph_view", "ovl.ph_freecam", "ovl.ph_mech", "ovl.ph_res", "ovl.ph_fmt",
                                       "ovl.ph_shot", "ovl.lb_back", "ovl.ph_yaw", "ovl.ph_pitch", "ovl.ph_dist",
-                                      "ovl.ph_reset", "ovl.ph_aspect", "ovl.ph_monitor_fx", "ovl.ph_shader", "ovl.ph_hud" };
+                                      "ovl.ph_reset", "ovl.ph_aspect", "ovl.ph_monitor_fx", "ovl.ph_shader", "ovl.ph_hud",
+                                      "ovl.ph_cself" /* W445 */ };
     int W = (int)ov_bw, H = (int)ov_bh, rowh = S(12.5f), pad = S(6.0f), b = S(1.0f), th = S(OV_TABH), gap = S(3.0f);
     int y, k, t, x, tw[PH_NTABS], sum = 0, foc = g_ph_sel < 0;
     wchar_t lb[80], vb[80], nm[PH_NTABS][32], tag[48];
@@ -4938,6 +4987,10 @@ static void ov_paint_photo(void)
         case PR_MFX: ov_wkey(vb, 80, (u.monitor_fx && u.view != SB_PV_CINE) ? "ovl.v_on" : "ovl.v_off"); break;
         case PR_HUD: ov_wkey(vb, 80, (g_cfg.photo_hud && u.view != SB_PV_CINE) ? "ovl.v_on" : "ovl.v_off"); break; /* W290; W428: Cinematic = aus */
         case PR_SHADER: ov_wkey(vb, 80, u.shading ? "ovl.ph_original" : "ovl.v_off"); break;
+        case PR_CSELF: /* W445: Reichweite in m (Zehntel), 0 = aus */
+            if (g_cfg.photo_cine_self > 0) { _snwprintf_s(vb, 80, _TRUNCATE, L"%.1f m", (double)g_cfg.photo_cine_self * 0.1); }
+            else { ov_wkey(vb, 80, "ovl.v_off"); }
+            break;
         case PR_VIEW: {
             static const char *const vk3[SB_PV_N] = { "ovl.ph_v_game", "ovl.ph_v_flat", "ovl.ph_v_world", "ovl.ph_v_cine" }; /* W428 */
             ov_wkey(vb, 80, u.stepping ? "ovl.ph_v_step" : vk3[u.view >= 0 && u.view < SB_PV_N ? u.view : 0]);
@@ -5132,6 +5185,10 @@ static void ov_paint(void)
         if (g_ov_sel >= 0 && g_ov_sel < ov_nrows() && ov_loc_lock(ov_row(g_ov_sel))) { /* W416: Grund der LoC-Sperre */
             wchar_t ll[96];
             ov_wkey(ll, 96, ov_loc_lock(ov_row(g_ov_sel)));
+            ov_text(pad + S(2.0f), y, ll, OV_C_TXT, 0);
+        } else if (g_ov_sel >= 0 && g_ov_sel < ov_nrows() && ov_loc_hint(ov_row(g_ov_sel))) { /* W440: nur Arcade */
+            wchar_t ll[96];
+            ov_wkey(ll, 96, ov_loc_hint(ov_row(g_ov_sel)));
             ov_text(pad + S(2.0f), y, ll, OV_C_TXT, 0);
         } else if (g_ov_page == OG_DEBUG) { /* W240: Hinweis "experimental, just for fun" */
             ov_wkey(leg, 64, g_cfg.vr_enable ? "ovl.xp_note_vr" : "ovl.xp_note");

@@ -20,6 +20,8 @@ extern "C" {
  * 0 = Pfad inaktiv oder keine Quelle (Hook faehrt Tastatur pur).
  * sbc_usb=0 -> immer 0 (bitgenau heutiges Verhalten). */
 int sbc_wire_poll(sbc_state_t *st);
+/* W439: verworfene Ausreisser des Filters ctrl_despike (Zaehler, F11-Paket) */
+unsigned sbc_wire_despike_spikes(void);
 
 /* XInputSetState-Verdrahtung (Schritt 5, LEDs): Feedback-Struct des Spiels
  * (fb = 0x4AF0C0 + Port*0x56) auswerten, LED-Report ans Geraet senden

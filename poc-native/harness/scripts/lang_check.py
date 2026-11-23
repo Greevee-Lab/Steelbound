@@ -47,6 +47,9 @@ SRC = [
     "launcher/src/launcher_loctp_gui.inc",  # W336: Dialog/Knoepfe (nur intern)
     "harness/src/loc_rollback.c",  # W346 LOC-ROLLBACK-R4: Meldung bei Desync (loc.rb_*)
     "harness/src/loc_rulenet.c",  # W420 LOC-CLIPDUMP: Match-Regel/Version (loc.rule_*, loc.ver_*)
+    "harness/src/krnl_file.c",  # W434 LOC-PILOT-LOST: Spielstand-Ordner (loc.save_*)
+    "harness/src/loc_chatnet.c",  # W437 LOC-CHAT: Systemzeilen und Eingabeaufforderung (chat.*)
+    "harness/src/loc_netpanel.c",  # W447 LOC-NET-AUTO: Netz-Panel der Lobby (ovl.np_*)
 ]
 
 # W180 EXPORT: Quellen, die im Community-Export (noch) fehlen duerfen (Pack
@@ -65,7 +68,7 @@ KEY_RE = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)+$")
 # LT("k"), sb_lang("k"), sb_lang_w("k" + jedes Literal mit Sprach-Praefix
 # (deckt Tabellen mit Schluesseln ab, z. B. kCtrlElems, Overlay-Labels).
 USE_RE = re.compile(r'(?:\bLT|\bsb_lang(?:_w)?)\s*\(\s*"([^"]+)"')
-LIT_RE = re.compile(r'"((?:gui|ovl|bind|fx|vr|app|cfg|msg|as)\.[A-Za-z0-9_.]+)"')
+LIT_RE = re.compile(r'"((?:gui|ovl|bind|fx|vr|app|cfg|msg|as|chat)\.[A-Za-z0-9_.]+)"')  # W437: chat.*
 PH_RE = re.compile(r"%(?:\d+\$)?[+#\-0 ]*(?:\d+|\*)?(?:\.(?:\d+|\*))?"
                    r"(?:hh|h|ll|l|j|z|t|L|I64|I32|w)?[diuoxXfFeEgGaAcspS%]")
 

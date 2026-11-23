@@ -178,7 +178,9 @@ int lctrl_bind_empty_line_row(int idx)
     return idx >= 0 && idx < LCTRL_ELEM_N &&
            (strcmp(kCtrlElems[idx].key, "orig_view") == 0 || strcmp(kCtrlElems[idx].key, "quick_shot") == 0 ||
             strcmp(kCtrlElems[idx].key, "replay_exit") == 0 || /* W299: leer = aus (sonst Standard) */
-            strcmp(kCtrlElems[idx].key, "net_hud") == 0);      /* W374 */
+            strcmp(kCtrlElems[idx].key, "net_hud") == 0 ||     /* W374 */
+            strcmp(kCtrlElems[idx].key, "menu_back") == 0 ||   /* W438 */
+            strcmp(kCtrlElems[idx].key, "chat") == 0);         /* W437 */
 }
 
 void lctrl_key_combo(int mod_vk, int vk, char *out, size_t cap)
@@ -1075,6 +1077,10 @@ const lctrl_elem_t kCtrlElems[LCTRL_ELEM_N] = {
     { "replay_exit", "-", "bind.replay_exit", LCTRL_ACT },
     /* W374 LOC-NET-OVERLAY: Netz-Overlay an/aus (Abschnitt [client], Standard F3; Umschalt + Taste = Ecke). */
     { "net_hud", "-", "bind.net_hud", LCTRL_ACT },
+    /* W438 CTRL-RESET-040: Zurueck in den LoC-Menues (Taste B des virtuellen Menue-Pads, nur Tastatur). */
+    { "menu_back", "-", "bind.menu_back", LCTRL_ACT },
+    /* W437 LOC-CHAT: Chatzeile oeffnen (nur Line of Contact online, nur Tastatur; Standard Enter, falls frei). */
+    { "chat", "-", "bind.chat", LCTRL_ACT },
 };
 
 /* W159: kanonische SBC-Quellnamen bi0..38 (parserstabil, s. kBiAlias). */
@@ -1310,6 +1316,45 @@ static void bind_replay_exit_default(lctrl_bind_t *b, int seen)
     }
 }
 
+/* W438: Profil ohne menu_back-Zeile -> BACKSPACE, INSERT wenn START (bi6) auf BACKSPACE liegt (wie der Client). */
+static void bind_menu_back_default(lctrl_bind_t *b, int seen)
+{
+    int mb = lctrl_bind_elem_index("menu_back"), st = lctrl_bind_elem_index("bi6"), a, back = 0;
+    if (seen || mb < 0) {
+        return;
+    }
+    for (a = 0; st >= 0 && a < b->row[st].n_alt; a++) {
+        if (_stricmp(b->row[st].alt[a], "KEY:BACKSPACE") == 0) {
+            back = 1;
+        }
+    }
+    lctrl_bind_set(b, mb, back ? LCTRL_MENU_BACK_ALT : LCTRL_MENU_BACK_DEFAULT);
+}
+
+/* W437: Profil ohne chat-Zeile -> ENTER, ausser eine Spieltaste (bi0..bi38) nutzt ENTER ohne Zusatztaste (wie der
+ * Client, imap_profile_parse). */
+static void bind_chat_default(lctrl_bind_t *b, int seen)
+{
+    int ch = lctrl_bind_elem_index("chat"), i, a, used = 0;
+    if (seen || ch < 0) {
+        return;
+    }
+    for (i = 0; i < 39 && !used; i++) {
+        char k[8];
+        int r;
+        _snprintf_s(k, sizeof k, _TRUNCATE, "bi%d", i);
+        r = lctrl_bind_elem_index(k);
+        for (a = 0; r >= 0 && a < b->row[r].n_alt; a++) {
+            if (_stricmp(b->row[r].alt[a], "KEY:ENTER") == 0 || _stricmp(b->row[r].alt[a], "KEY:RETURN") == 0) {
+                used = 1;
+            }
+        }
+    }
+    if (!used) {
+        lctrl_bind_set(b, ch, LCTRL_CHAT_DEFAULT);
+    }
+}
+
 /* W374: Profil ohne net_hud-Zeile -> Standard F3 wie im Client. */
 static void bind_net_hud_default(lctrl_bind_t *b, int seen)
 {
@@ -1327,6 +1372,8 @@ int lctrl_bind_load_file(const char *path, lctrl_bind_t *b)
     int qs = lctrl_bind_elem_index("quick_shot"), qseen = 0; /* W290 */
     int re = lctrl_bind_elem_index("replay_exit"), rseen = 0; /* W299 */
     int nh = lctrl_bind_elem_index("net_hud"), nseen = 0;     /* W374 */
+    int mbk = lctrl_bind_elem_index("menu_back"), mseen = 0;  /* W438 */
+    int chk = lctrl_bind_elem_index("chat"), cseen = 0;       /* W437 */
     lctrl_bind_init(b);
     if (u8_fopen_s(&f, path, "r") != 0 || !f) { return 1; }
     while (fgets(line, sizeof line, f)) {
@@ -1335,12 +1382,16 @@ int lctrl_bind_load_file(const char *path, lctrl_bind_t *b)
         if (r == qs) { qseen = 1; }
         if (r == re) { rseen = 1; }
         if (r == nh) { nseen = 1; }
+        if (r == mbk) { mseen = 1; }
+        if (r == chk) { cseen = 1; }
     }
     fclose(f);
     bind_orig_default(b, seen);
     bind_quick_default(b, qseen);
     bind_replay_exit_default(b, rseen);
     bind_net_hud_default(b, nseen);
+    bind_menu_back_default(b, mseen);
+    bind_chat_default(b, cseen);
     return 0;
 }
 
@@ -1354,6 +1405,8 @@ int lctrl_bind_load_text(const char *text, lctrl_bind_t *b)
     int qs = lctrl_bind_elem_index("quick_shot"), qseen = 0; /* W290 */
     int re = lctrl_bind_elem_index("replay_exit"), rseen = 0; /* W299 */
     int nh = lctrl_bind_elem_index("net_hud"), nseen = 0;     /* W374 */
+    int mbk = lctrl_bind_elem_index("menu_back"), mseen = 0;  /* W438 */
+    int chk = lctrl_bind_elem_index("chat"), cseen = 0;       /* W437 */
     lctrl_bind_init(b);
     if (!text) { return 1; }
     while (*p) {
@@ -1367,6 +1420,8 @@ int lctrl_bind_load_text(const char *text, lctrl_bind_t *b)
         if (r == qs) { qseen = 1; }
         if (r == re) { rseen = 1; }
         if (r == nh) { nseen = 1; }
+        if (r == mbk) { mseen = 1; }
+        if (r == chk) { cseen = 1; }
         p += n;
         while (*p == '\r' || *p == '\n') { p++; }
     }
@@ -1374,6 +1429,8 @@ int lctrl_bind_load_text(const char *text, lctrl_bind_t *b)
     bind_quick_default(b, qseen);
     bind_replay_exit_default(b, rseen);
     bind_net_hud_default(b, nseen);
+    bind_menu_back_default(b, mseen);
+    bind_chat_default(b, cseen);
     return 0;
 }
 
@@ -1402,10 +1459,18 @@ int lctrl_bind_alt_is_sbc(const char *alt)
     return 0;
 }
 
+/* W438 CTRL-RESET-040: START (bi6) und "Replay beenden" duerfen dieselbe Taste teilen (default_full: Backspace).
+ * START wirkt im Spiel-Replay nicht (W299), replay_exit nur waehrend der Wiedergabe -> kein Konflikt. */
+static int conf_pair_ok(int i, int m)
+{
+    int st = lctrl_bind_elem_index("bi6"), re = lctrl_bind_elem_index("replay_exit");
+    return st >= 0 && re >= 0 && ((i == st && m == re) || (i == re && m == st));
+}
+
 /* Konflikt-Suche: gleiche Alternative auf mehreren Elementen. */
 int lctrl_bind_conflicts(const lctrl_bind_t *b, char out[][160], int max)
 {
-    int i, m, a, n = 0;
+    int i, m, a, n = 0, st = lctrl_bind_elem_index("bi6");
     if (!b || max <= 0) { return 0; }
     for (i = 0; i < LCTRL_ELEM_N; i++) {
         int j;
@@ -1427,6 +1492,11 @@ int lctrl_bind_conflicts(const lctrl_bind_t *b, char out[][160], int max)
             for (m = 0; m < LCTRL_ELEM_N; m++) {
                 for (a = 0; a < b->row[m].n_alt; a++) {
                     if (strieq(b->row[m].alt[a], alt)) {
+                        int s2;
+                        if (st >= 0 && m != st && conf_pair_ok(m, st)) { /* W438: replay_exit neben START */
+                            for (s2 = 0; s2 < b->row[st].n_alt && !strieq(b->row[st].alt[s2], alt); s2++) {}
+                            if (s2 < b->row[st].n_alt) { break; }
+                        }
                         wl += (size_t)_snprintf_s(who + wl, sizeof who - wl,
                                                  _TRUNCATE, "%s%s",
                                                  cnt ? ", " : "",
@@ -1618,7 +1688,7 @@ int lctrl_bind_conflicts_for(const lctrl_bind_t *b, int idx,
         memset(&c, 0, sizeof c);
         c.alt = j;
         for (m = 0; m < LCTRL_ELEM_N; m++) {
-            if (m == idx) { continue; }
+            if (m == idx || conf_pair_ok(idx, m)) { continue; } /* W438: START + Replay beenden erlaubt */
             for (a = 0; a < b->row[m].n_alt; a++) {
                 if (strieq(b->row[m].alt[a], b->row[idx].alt[j])) {
                     if (c.n < 8) { c.other[c.n++] = m; }

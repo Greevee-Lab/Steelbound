@@ -4,16 +4,16 @@ Keyboard and mouse always work. A gamepad (XInput) and the original
 Steel Battalion controller (USB) work in parallel. Input only works
 while the game window has focus.
 
-## Keyboard and mouse (Standard layout)
+## Keyboard and mouse (default layout)
 
 | What | Key |
 |---|---|
-| Menus: select / confirm / START | Arrows / SPACE / ENTER |
+| Menus: select / confirm / START | Arrows / SPACE / Backspace |
 | Skip briefing movie | L or middle mouse button |
 | Close cockpit hatch | H |
 | Ignition | I |
 | Toggle switches (at the status check) | 1 2 3 4 5 |
-| START (all bars above the line) | ENTER |
+| START (all bars above the line) | Backspace |
 | Main weapon (primary fire) | Left mouse button or SPACE |
 | Sub-weapon | Right mouse button or F |
 | Lock-on | Middle mouse button or L |
@@ -36,11 +36,21 @@ while the game window has focus.
 | Screenshot (quick, uses the photo-mode settings, no menu) | F12 |
 | Photo mode (menu; in photo mode F12 takes the photo) | Shift+F12 |
 | Original look ↔ your settings (compare live) | Shift + F8 (assignable: Controls page, "orig_view") |
-| Exit a running replay (the mouse no longer ends replays; gamepad, original controller and joystick work as in the original) | Backspace (assignable: Controls page, "replay_exit") |
+| Exit a running replay (the mouse no longer ends replays; gamepad, original controller and joystick work as in the original) | Backspace, the START key (assignable: Controls page, "replay_exit") |
+| Line of Contact menus: back (gamepad B) | Insert (assignable: Controls page, "Menu back"); START and select follow your START and main-weapon keys |
 | Performance overlay | F2 (Shift + F2 moves it) |
 | Network overlay in Line of Contact online play (route, ping, loss, rollback, smoothing; see LINE_OF_CONTACT.md) | F3 (Shift + F3 moves it; assignable: Controls page, "Network overlay") |
 | Window / fullscreen | Alt + Enter |
 | VR: recenter view | F8 |
+
+**Enter** does nothing in the game: it is kept free for the Line of Contact chat.
+**ESC** always opens the game menu.
+
+**Version 0.4.0 reset the controls once.** Everyone starts with this
+default layout (*default_full*) once; your own layouts stay on the
+**Controls** page and you can pick them again at any time. New
+installations start with it anyway. The launcher shows a one-time note
+with the name of your previous layout.
 
 Mouse aiming is **Absolute** by default (the crosshair follows the
 mouse); **Sensitivity** (1–16) is on the **Controls** page next to the
@@ -68,10 +78,12 @@ before this change keep working: without their own entry, Shift + F8 (or
 
 ## Layout "default_full": a key for every action
 
-Besides the Standard layout (unchanged, also used when no layout is chosen) the
-launcher ships **default_full**. Pick it on the **Controls** page. It keeps every
-Standard key and adds a key for each control that had none, so the whole original
-controller works from the keyboard. A fresh installation starts with it selected; existing setups keep what they have. Your own layouts are never touched or replaced.
+**default_full** is the default layout (since 0.4.0 for everyone, see above).
+It adds a key for each control of the original controller, so the whole
+controller works from the keyboard. Compared with the old Standard layout
+(*keyboard_default*, still selectable and used when no layout is chosen)
+START moves from Enter to **Backspace** and *Menu back* (Line of Contact) to
+**Insert**. Your own layout files are never touched, changed or deleted.
 Line of Contact uses the same controls.
 
 | Action | Key | Used in |
@@ -92,7 +104,9 @@ Line of Contact uses the same controls.
 
 Every other action keeps its Standard key (see the table above). Gears and tuner
 use Q/E and G/T (stepping reaches every gear). No key clashes with the client keys
-(ESC, F2, F3, F8-F12, Pause, Backspace, Alt+Enter). A selftest checks this.
+(ESC, F2, F3, F8-F12, Pause, Alt+Enter), and Enter stays free for the Line of
+Contact chat. The only shared key is Backspace: START and *Exit a running
+replay* (START does nothing during a replay). A selftest checks this.
 
 ## Gamepad (XInput)
 
@@ -201,7 +215,7 @@ Wait briefly between steps.
    or the five switches: filter, oxygen, fuel, buffer, VT location).
    Each accepted row animates to OK. Pressing 1–5 earlier does not count;
    just press them again on this screen.
-4. **START** (ENTER, or the START button) once **every bar is above the
+4. **START** (Backspace, or the START button) once **every bar is above the
    line**. Too early stalls the start; wait until the bars rise again
    and press START again.
 

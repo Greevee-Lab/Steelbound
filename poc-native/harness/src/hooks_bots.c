@@ -4,6 +4,7 @@
 #include "hooks_int.h"
 #include "input_mouse.h" /* W79: input_source, input_focus_only */
 #include "sb_overlay.h" /* W118: Overlay sperrt echte Eingabe */
+#include "loc_chatnet.h" /* W437: offene Chatzeile sperrt die Eingabe */
 
 /* M2b-Replay: "pkt:vk,len;..." simuliert Tastendrucke (unbeaufsichtigte
  * Tests). Max 8 Slots, einmalig geparst. */
@@ -614,6 +615,9 @@ int key_down(int vk)
 {
     int i;
     replay_parse();
+    /* W437 LOC-CHAT: offene Chatzeile -> keine Taste ans Spiel (auch nicht aus einer Testfolge; LoC-Menue-Pad,
+     * Sicht je Bild und SBC gleichermassen). Ohne Chat (SB, offline, Zeile zu) unveraendert. */
+    if (loc_chat_typing()) return 0;
     /* M2b: Bei aktivem Replay echte Tastatur ignorieren (Phantom-Inputs
      * durch parallele PC-Nutzung verfaelschen unbeaufsichtigte Tests). */
     if (!input_replay_active()) {

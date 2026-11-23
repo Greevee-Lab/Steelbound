@@ -2992,14 +2992,61 @@ static void rbl_tick(void)
     }
 }
 
+/* ================= W447 LOC-NET-AUTO: Netzmodus Auto (Profil je Mission, loc_rbn.h) =================
+ * Profil DIREKT: Ziel 1 Tick (d_low = 1), Regler schneller (ein gutes Fenster nach dem Ringstart) und strenger
+ * (Korrekturen, Spruenge); Profil ROLLBACK bzw. FEST: Regler wie W386. Kein Moduswechsel im Match; Wechsel der
+ * Verzoegerung weiter nur ueber rbl/rbi_set_delay (Slots sind die Wahrheit, Determinismus unberuehrt). */
+static int s_auto_drtt = 80, s_auto_djit = 15;     /* Grenzen fuer DIREKT (loc_rb_opts adrtt=/adjit=; Messreihe W447) */
+static int s_auto_start1 = 60;                     /* DIREKT beginnt mit 1 Tick bis zu dieser RTT (ms, loc_rb_opts adstart=, 0 = nie;
+                                                    * Messreihe W447: 30 ms sauber, 80 ms ohne Ring ~2 s Stau im Start) */
+static int s_auto_good = 1, s_auto_lcpm = 300, s_auto_hcpm = 600, s_auto_hjump = 300; /* Regler DIREKT (Korrekturgrenzen wie W386) */
+static volatile LONG s_auto_prof;                  /* Profil der laufenden Mission (RBN_PROF_*), -1 = keine */
+static volatile LONG s_auto_rtt, s_auto_var;       /* Messwerte beim Missionsbeginn (ms) */
+static volatile LONG s_auto_mode = -1;             /* Wunsch zur Laufzeit: 0 Auto, 1 Rollback, 2 Lockstep (-1 = cfg) */
+static const char *const k_auto_prof[3] = {"fest (Rollback)", "auto -> direkt", "auto -> rollback"};
+
+/* Regler-Einstellungen fuer das Profil der laufenden Mission */
+static void auto_rbl_cfg(int prof, rbl_cfg_t *c)
+{
+    *c = s_rbl_cfg;
+    if (prof != RBN_PROF_DIRECT) return;
+    c->good_n = s_auto_good;
+    c->lcpm = s_auto_lcpm;
+    c->hcpm = s_auto_hcpm;
+    c->hjump = s_auto_hjump;
+}
+
 /* Missionsbeginn mit R2 (Host und Client): Regler zuruecksetzen. */
 static void rbl_mission_begin(u32 epoch, int delay, int rtt)
 {
-    int dl;
+    int dl, prof, var, start_low = 0;
+    rbl_cfg_t cfg;
     u32 now = GetTickCount();
     if (!s_rbl) return;
+    EnterCriticalSection(&s_rbn_cs);
+    prof = rbn_profile(s_rbn);
+    var = rbn_rttvar_max(s_rbn, now);
+    LeaveCriticalSection(&s_rbn_cs);
+    InterlockedExchange(&s_auto_prof, prof);
+    InterlockedExchange(&s_auto_rtt, rtt);
+    InterlockedExchange(&s_auto_var, var);
+    auto_rbl_cfg(prof, &cfg);
+    if (prof == RBN_PROF_DIRECT && delay == 1 && s_rbi_delay <= 0) { /* W447: Start mit 1 Tick, Rueckweg d_std */
+        int ds = rbn_pick_delay(rtt, s_rbi_dmin, s_rbi_dmax);
+        start_low = ds > 1;
+        delay = ds > 1 ? ds : 2;
+    }
     dl = (s_rbl_cfg.on && s_rbi_delay <= 0) ? rbn_pick_low(rtt, delay, s_rbl_cfg.lowmax) : delay;
-    rbl_begin(s_rbl, &s_rbl_cfg, epoch, rbi_self(s_rbc), s_rbi_npeers, delay, dl);
+    if (prof == RBN_PROF_DIRECT && s_rbl_cfg.on && s_rbi_delay <= 0) dl = 1; /* W447: Ziel 1 Tick */
+    HLOG_I("LOCRBI-AUTO: Mission: Profil %s (RTT %d ms, Schwankung %d ms, Grenzen direkt <= %d/%d ms) -> Start D=%d, Ziel D=%d, "
+           "Regler gut=%d Korrekturen/min <= %d, zurueck > %d, Sprung > %d",
+           (prof >= 0 && prof <= 2) ? k_auto_prof[prof] : "?", rtt, var, s_auto_drtt, s_auto_djit, start_low ? 1 : delay, dl, cfg.good_n,
+           cfg.lcpm, cfg.hcpm, cfg.hjump);
+    rbl_begin(s_rbl, &cfg, epoch, rbi_self(s_rbc), s_rbi_npeers, delay, dl);
+    if (start_low) {
+        rbl_start_low(s_rbl);
+        HLOG_I("LOCRBI-AUTO: Mission beginnt direkt mit D=1 (Rueckweg D=%d, bis zum Ringstart ohne Rueckwechsel wegen Ring)", delay);
+    }
     memset(s_rbl_dticks, 0, sizeof s_rbl_dticks);
     s_rbl_have = 0;
     s_rbl_win = 0;
@@ -3028,6 +3075,7 @@ static void rbl_mission_end(void)
                100.0 * s_rbl_dticks[2] / tot, 100.0 * s_rbl_dticks[3] / tot, s_rbl_switch_n, st->dchg_down, st->dchg_up,
                st->dchg_late, st->est_late, st->est_wrong, st->est_n);
     rbl_end(s_rbl);
+    InterlockedExchange(&s_auto_prof, -1); /* W447 */
 }
 
 static void rbi_left_reset(void); /* W366 */
@@ -3072,6 +3120,7 @@ static void rbi_fallback_ls(int why)
     s_rbi_mst = RBN_ST_LS;
     s_rbi_ls_missions++;
     s_rbi_last_why = (u32)why;
+    InterlockedExchange(&s_auto_prof, -1); /* W447 */
     EnterCriticalSection(&s_rbn_cs);
     hw = rbn_host_why(s_rbn);
     rbn_peers_desc(s_rbn, GetTickCount(), pd, (int)sizeof pd);
@@ -4602,6 +4651,15 @@ static void rbi_install(void)
         QueryPerformanceCounter(&q);
         s_rbn = rbn_new(1, (u32)(q.QuadPart ^ (q.QuadPart >> 32) ^ (GetCurrentProcessId() << 16)) | 1u, s_rbi_dmin,
                         s_rbi_dmax, s_rbi_delay);
+        if (s_rbn) { /* W447: Netzmodus Auto (loc_net_auto) und Grenzen fuer DIREKT */
+            rbn_set_want(s_rbn, 1, g_cfg.loc_net_auto);
+            rbn_set_direct(s_rbn, s_auto_drtt, s_auto_djit);
+            rbn_set_direct_start(s_rbn, s_auto_start1);
+            InterlockedExchange(&s_auto_mode, g_cfg.loc_net_auto ? 0 : 1);
+            InterlockedExchange(&s_auto_prof, -1);
+            HLOG_I("LOCRBI-AUTO: Netzmodus %s (Grenzen direkt: RTT <= %d ms, Schwankung <= %d ms)",
+                   g_cfg.loc_net_auto ? "Auto" : "Rollback (fest)", s_auto_drtt, s_auto_djit);
+        }
     }
     if (!s_rbc || !s_rbn || !s_rbi_tramp || !rbi_sock_open()) {
         HLOG_W("LOCRBI: Eingabeschicht nicht verfuegbar - Missionen laufen im Original-Lockstep");
@@ -5275,6 +5333,13 @@ static void rb_parse_opts(const char *p)
         else if (strncmp(p, "predq=", 6) == 0) { s_rbi_predq = atoi(p + 6); }   /* W385 */
         else if (strncmp(p, "lowd=", 5) == 0) { s_rbl_cfg.on = atoi(p + 5); }    /* W386 niedrige Verzoegerung */
         else if (strncmp(p, "lowmax=", 7) == 0) { s_rbl_cfg.lowmax = atoi(p + 7); }
+        else if (strncmp(p, "adrtt=", 6) == 0) { s_auto_drtt = atoi(p + 6); }   /* W447 Auto: Grenze DIREKT RTT */
+        else if (strncmp(p, "adjit=", 6) == 0) { s_auto_djit = atoi(p + 6); }   /* W447: Grenze DIREKT Schwankung */
+        else if (strncmp(p, "adgood=", 7) == 0) { s_auto_good = atoi(p + 7); }  /* W447: Regler DIREKT */
+        else if (strncmp(p, "adstart=", 8) == 0) { s_auto_start1 = atoi(p + 8); } /* W447: DIREKT ab Start 1 Tick */
+        else if (strncmp(p, "adlcpm=", 7) == 0) { s_auto_lcpm = atoi(p + 7); }
+        else if (strncmp(p, "adhcpm=", 7) == 0) { s_auto_hcpm = atoi(p + 7); }
+        else if (strncmp(p, "adjump=", 7) == 0) { s_auto_hjump = atoi(p + 7); }
         else if (strncmp(p, "lcpm=", 5) == 0) { s_rbl_cfg.lcpm = atoi(p + 5); }
         else if (strncmp(p, "hcpm=", 5) == 0) { s_rbl_cfg.hcpm = atoi(p + 5); }
         else if (strncmp(p, "ldep=", 5) == 0) { s_rbl_cfg.ldep = atoi(p + 5); }
@@ -5700,6 +5765,70 @@ int loc_rb_hud_read(loc_rb_hud *o)
         o->depth_p95 = tmp[((u32)k * 95u) / 100u];
     }
     o->depth_n = (unsigned)k;
+    o->net_mode = loc_rb_net_mode(); /* W447 */
+    o->prof = (int)s_auto_prof;
+    o->prof_rtt = (int)s_auto_rtt;
+    o->prof_var = (int)s_auto_var;
+    return 1;
+}
+
+/* W447 LOC-NET-AUTO: Netzmodus zur Laufzeit (ESC-Menue) und Lobby-Anzeige */
+int loc_rb_net_mode(void)
+{
+    LONG m = s_auto_mode;
+    if (!g_cfg.loc_rb_input || !s_rbi || !s_rbn) return 2;
+    return (m >= 0 && m <= 2) ? (int)m : (g_cfg.loc_net_auto ? 0 : 1);
+}
+
+int loc_rb_net_mode_set(int mode)
+{
+    if (mode < 0 || mode > 2) return 0;
+    if (!g_cfg.loc_rb_input || !s_rbi || !s_rbn) return mode == 2;
+    EnterCriticalSection(&s_rbn_cs);
+    rbn_set_want(s_rbn, mode != 2, mode == 0);
+    LeaveCriticalSection(&s_rbn_cs);
+    InterlockedExchange(&s_auto_mode, mode);
+    g_cfg.loc_net_auto = mode == 0;
+    HLOG_I("LOCRBI-AUTO: Netzmodus -> %s (ESC-Menue, ab der naechsten Mission)",
+           mode == 0 ? "Auto" : mode == 1 ? "Rollback" : "Lockstep");
+    return 1;
+}
+
+int loc_rb_lobby_read(loc_rb_lobby *o)
+{
+    u32 now = GetTickCount();
+    int pi[LOC_RB_LOBBY_PEERS], rt[LOC_RB_LOBBY_PEERS], wa[LOC_RB_LOBBY_PEERS], k;
+    if (!o) return 0;
+    memset(o, 0, sizeof *o);
+    o->rtt = o->var = -1;
+    o->net_mode = loc_rb_net_mode();
+    if (!g_cfg.loc_rb_input || !s_rbi || !s_rbn) return 0;
+    o->in_mission = s_rbi_mst == RBN_ST_R2 || s_rbi_mst == RBN_ST_LS || s_rbi_mst == RBN_ST_TENT || s_rbi_mst == RBN_ST_PEND;
+    EnterCriticalSection(&s_rbn_cs);
+    o->agreed = rbn_auto_agreed(s_rbn, now);
+    o->rtt = rbn_rtt_max(s_rbn, now);
+    o->var = rbn_rttvar_max(s_rbn, now);
+    o->npeer = rbn_peer_list(s_rbn, now, pi, rt, wa, LOC_RB_LOBBY_PEERS);
+    LeaveCriticalSection(&s_rbn_cs);
+    for (k = 0; k < o->npeer; k++) {
+        o->peer[k].pidx = pi[k];
+        o->peer[k].rtt = rt[k];
+        o->peer[k].wauto = wa[k];
+    }
+    if (s_rbi_mst == RBN_ST_R2 && s_auto_prof >= 0) { /* laufende Mission: gewaehltes Profil und wirksames D */
+        o->prof = (int)s_auto_prof;
+        o->d_start = s_rbl ? rbl_dstd(s_rbl) : (int)s_rbi_reg_d;
+        o->d_target = (int)s_rbi_reg_d;
+        return 1;
+    }
+    /* Lobby: Vorschau wie die Entscheidung des Hosts beim Missionsbeginn */
+    o->prof = o->agreed ? rbn_pick_profile(o->rtt, o->var, s_auto_drtt, s_auto_djit) : RBN_PROF_FIXED;
+    o->d_start = s_rbi_delay > 0 ? s_rbi_delay : rbn_pick_delay(o->rtt, s_rbi_dmin, s_rbi_dmax);
+    o->d_target = (s_rbi_delay > 0 || !s_rbl_cfg.on) ? o->d_start
+                  : (o->prof == RBN_PROF_DIRECT ? 1 : rbn_pick_low(o->rtt, o->d_start, s_rbl_cfg.lowmax));
+    if (o->d_target < 1) o->d_target = 1;
+    if (o->prof == RBN_PROF_DIRECT && s_auto_start1 > 0 && o->rtt >= 0 && o->rtt <= s_auto_start1 && s_rbi_delay <= 0)
+        o->d_start = 1; /* Start gleich mit 1 Tick */
     return 1;
 }
 

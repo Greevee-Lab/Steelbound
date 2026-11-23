@@ -29,6 +29,11 @@ typedef struct {
     uint32_t poll;
     long long tq;
     float wspan_ms;
+    /* W442 LOC-AIMASSIST: Basis fuer den naechsten eigenen Satz = Zustand nach allen eigenen erzeugten Saetzen.
+     * have_bst 1 = gueltig (Rollback-Eingabeschicht, n >= 0 Saetze), 0 = keine Basis (Lockstep: ausstehende eigene
+     * Saetze unbekannt; Sonderpfad; ausserhalb der Mission) - die Zielhilfe wirkt dann nicht. */
+    la_state_t bst;
+    int have_bst;
 } loc_aim_pub_t;
 
 /* Render-Seite: juengstes Ergebnis kopieren. 1 = gueltig und loc_local_aim an. */

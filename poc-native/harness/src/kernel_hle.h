@@ -56,6 +56,7 @@ int krnl_savelock_commit(void);
 int krnl_savelock_selftest(void);
 int krnl_directory_selftest(void); /* W213 */
 int krnl_savedelete_selftest(void); /* W433 REPLAY-DELETE */
+int krnl_loc_save_selftest(void); /* W434 LOC-PILOT-LOST */
 void *krnl_event_host(unsigned xh);
 unsigned long __stdcall krnl_GetExitCodeThread(unsigned long xh,
                                                unsigned long *code);

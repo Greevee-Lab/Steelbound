@@ -60,6 +60,13 @@ void lctrl_key_combo(int mod_vk, int vk, char *out, size_t cap);
 #define LCTRL_REPLAY_EXIT_DEFAULT "KEY:BACKSPACE"
 /* W374 LOC-NET-OVERLAY: Standard "Netz-Overlay" (Client: IMAP_NET_HUD_DEFAULT); leere Zeile heisst aus. */
 #define LCTRL_NET_HUD_DEFAULT "KEY:F3"
+/* W438 CTRL-RESET-040: Standard "Menue zurueck" (LoC-Menue-Pad B, Client: IMAP_MENU_BACK_DEFAULT/_ALT). Fehlt die
+ * Zeile, gilt BACKSPACE bzw. INSERT, wenn START (bi6) auf BACKSPACE liegt; leere Zeile heisst aus. */
+#define LCTRL_MENU_BACK_DEFAULT "KEY:BACKSPACE"
+#define LCTRL_MENU_BACK_ALT "KEY:INSERT"
+/* W437 LOC-CHAT: Standard "Chat" (Client: IMAP_CHAT_DEFAULT). Fehlt die Zeile, gilt ENTER, sofern keine Spieltaste
+ * (bi0..bi38) ENTER ohne Zusatztaste nutzt, sonst aus; leere Zeile heisst aus. */
+#define LCTRL_CHAT_DEFAULT "KEY:ENTER"
 #define LCTRL_PHOTO_DEFAULT "KEY:SHIFT+KEY:F12"
 
 /* --- SBC-USB-Status ---------------------------------------------------- */
@@ -176,7 +183,7 @@ typedef struct {
     lctrl_kind_t kind;
 } lctrl_elem_t;
 
-#define LCTRL_ELEM_N 78 /* W188: + Client-Aktion pause, W195: + photo, W271: + aim_center, W283: + orig_view, W290: + quick_shot, W299: + replay_exit, W374: + net_hud */
+#define LCTRL_ELEM_N 80 /* W437: + chat; W438: + menu_back; W188: + Client-Aktion pause, W195: + photo, W271: + aim_center, W283: + orig_view, W290: + quick_shot, W299: + replay_exit, W374: + net_hud */
 extern const lctrl_elem_t kCtrlElems[LCTRL_ELEM_N];
 /* W159: Original-Controller-Tasten als Belegungs-Quellen (SBC:<name>).
  * Kanonische Namen bi0..38, parserstabil wie input_map.c (kBiAlias).

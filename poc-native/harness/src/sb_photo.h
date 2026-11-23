@@ -50,6 +50,12 @@ extern const int kSbPhotoSize[SB_PHOTO_NSIZE];
  * Nachbearbeitungs-Einstellungen bleiben unveraendert; live wird nichts umgeschaltet. Nur SB (LoC: wie Aussenwelt). */
 #define SB_PV_CINE 3
 #define SB_PV_N 4
+/* W445 PHOTO-CINE-SELF: Reichweite eigene VT-Teile ([photo] photo_cine_self, Zehntel-Einheiten ~ dm): Panel/Launcher-Schritte
+ * 0 (aus) und SB_CSELF_LO..SB_CSELF_HI in SB_CSELF_STEP. Gleiche Liste im Launcher (launcher_gui.c, kCself). */
+#define SB_CSELF_LO 10
+#define SB_CSELF_HI 120
+#define SB_CSELF_STEP 5
+#define SB_CSELF_N (1 + (SB_CSELF_HI - SB_CSELF_LO) / SB_CSELF_STEP + 1)
 
 typedef struct {
     int monitor_fx, shading, effect_pending; /* W198: temporary options, missing recorded state */

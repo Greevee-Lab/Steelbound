@@ -6,6 +6,7 @@
 #include "input_map.h"
 #include "input_mouse.h"
 #include "sb_overlay.h"
+#include "loc_chatnet.h" /* W437 */
 #include "sb_profile.h"
 #include "loc_aim.h"
 #include "loc_hud_math.h"
@@ -120,6 +121,7 @@ int loc_vpf_preview(const uint8_t base[14], uint8_t out[14], uint32_t *poll)
         MemoryBarrier();
         p = s_pub;
         (void)imouse_raw_peek(&dx, &dy);
+        if (loc_chat_typing()) dx = dy = 0; /* W437: Simulation bekommt beim Tippen keine Deltas -> Vorschau auch nicht */
         MemoryBarrier();
         q2 = s_seq;
         ok = q1 == q2;
@@ -133,7 +135,8 @@ int loc_vpf_preview(const uint8_t base[14], uint8_t out[14], uint32_t *poll)
     /* Achsen, die der letzte Poll aus der Legacy-Belegung bekam und die danach unveraendert blieben */
     for (k = 0; k < 4; k++) have[k] = p.leg[k] == p.fin[k];
     ax = p.fin[0]; ay = p.fin[1]; sx = (int8_t)p.fin[2]; sy = (int8_t)p.fin[3];
-    if (p.keys_live && !(g_cfg.input_focus_only && !imouse_has_focus()) && !(g_cfg.overlay && sb_ovl_open())) {
+    if (p.keys_live && !(g_cfg.input_focus_only && !imouse_has_focus()) && !(g_cfg.overlay && sb_ovl_open()) &&
+        !loc_chat_typing()) { /* W437: offene Chatzeile wie offenes Menue */
         /* Spielerbetrieb: Pfeiltasten jetzt (wie imap_legacy_apply), Maus auf dem Rest */
         int L = imsg_key_peek(VK_LEFT), R = imsg_key_peek(VK_RIGHT), U = imsg_key_peek(VK_UP), D = imsg_key_peek(VK_DOWN);
         int sh = imsg_key_peek(VK_SHIFT);

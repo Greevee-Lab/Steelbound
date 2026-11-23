@@ -8,6 +8,11 @@
 #include "iso_vfs.h"     /* W150 ISO-DIRECT */
 #include "sb_savecheck.h" /* W187 KIA-LOAD */
 #include "sb_rauto.h"     /* W254 REPLAY-LAUNCHER */
+#include "sb_diagcore.h"  /* W434: Ordner mit Platzhaltern */
+#include "sb_lang.h"      /* W434: Meldung (de/en) */
+#include "sb_origview.h"  /* W434: Einblendung */
+#include <aclapi.h>       /* W434: Selbsttest (Ordner sperren) */
+#include <sddl.h>
 #include <ctype.h>
 #include <intrin.h> /* W187: _AddressOfReturnAddress (FILE delete) */
 
@@ -250,6 +255,468 @@ static int zc_orig_path(const char *host, char *out, size_t cap)
     size_t n = strlen(g_zc_alt);
     if (!g_zc_alt[0] || !zc_starts(host, g_zc_alt) || host[n] != '\\') return 0;
     _snprintf_s(out, cap, _TRUNCATE, "%s%s", g_zc_pre, host + n + 1);
+    return 1;
+}
+
+/* ---------- W449 LOC-BOOT-SEQ-PERF (GitHub #85): Lesedauer im LoC-Profil ----------
+ * Befund: niedrige FPS und kein Ton in der VT-Startsequenz beim Tester von #71/#73. Nachgestellt (Datenordner per ACL
+ * gesperrt, 0.3.3- und W434-Verhalten) bleiben Bildrate, Ton-Cues und Hash gleich - die Sperre allein erklaert es nicht.
+ * Offen ist ein langsamer Datentraeger bzw. Virenschutz, der jedes Lesen bremst (Spiel-Thread wartet, Ton-Stream
+ * verhungert). Deshalb nur Zaehler: Anzahl, langsame (>= 50 ms = ein Missionstick) und laengste Lesung je Quelle.
+ * 0 = Disc (D:, Abbild/Ordner), 1 = Festplatte (T:/U:/Z:/E:), 2 = Ton-Stream (Wave-Banks, loc_audio.c). */
+#define LIO_SLOW_US 50000
+static volatile LONG g_lio_n[3], g_lio_slow[3], g_lio_max_us[3], g_lio_err[3];
+static volatile LONG g_lio_logged_slow; /* Summe langsamer Lesungen bei der letzten LOCIO-Zeile */
+
+LONGLONG krnl_loc_io_t0(void)
+{
+    LARGE_INTEGER q;
+    if (!g_sba_loc) return 0;
+    QueryPerformanceCounter(&q);
+    return q.QuadPart ? q.QuadPart : 1;
+}
+
+void krnl_loc_io_note(int k, LONGLONG q0, int ok)
+{
+    static LONGLONG qpf;
+    LARGE_INTEGER q;
+    LONGLONG us;
+    LONG cur;
+    if (!q0 || k < 0 || k > 2) return;
+    QueryPerformanceCounter(&q);
+    if (!qpf) {
+        LARGE_INTEGER f;
+        QueryPerformanceFrequency(&f);
+        qpf = f.QuadPart ? f.QuadPart : 1;
+    }
+    us = (q.QuadPart - q0) * 1000000 / qpf;
+    if (us < 0) us = 0;
+    if (us > 0x7FFFFFFF) us = 0x7FFFFFFF;
+    InterlockedIncrement(&g_lio_n[k]);
+    if (!ok) InterlockedIncrement(&g_lio_err[k]);
+    if (us >= LIO_SLOW_US) InterlockedIncrement(&g_lio_slow[k]);
+    cur = g_lio_max_us[k];
+    while ((LONG)us > cur) {
+        LONG prev = InterlockedCompareExchange(&g_lio_max_us[k], (LONG)us, cur);
+        if (prev == cur) break;
+        cur = prev;
+    }
+}
+
+/* F11 info.txt "loc io:" (nur Zaehler, keine Pfade). 0 = nicht LoC. */
+int krnl_loc_io_diag_line(char *o, int cap)
+{
+    static const char *nm[3] = { "disc", "hdd", "sound stream" };
+    int k, n = 0;
+    if (!g_sba_loc || cap < 2) return 0;
+    o[0] = '\0';
+    for (k = 0; k < 3; k++) {
+        n += _snprintf_s(o + n, (size_t)(cap - n), _TRUNCATE, "%s%s reads=%ld slow(>=50ms)=%ld max=%.1fms err=%ld",
+                         k ? "; " : "", nm[k], (long)g_lio_n[k], (long)g_lio_slow[k], g_lio_max_us[k] / 1000.0,
+                         (long)g_lio_err[k]);
+        if (n < 0 || n >= cap - 1) break;
+    }
+    return 1;
+}
+
+/* Logzeile alle 30 s (loc_audio_tick), nur wenn seit der letzten Zeile neue langsame Lesungen dazukamen. */
+void krnl_loc_io_log(int waited_s)
+{
+    char b[400];
+    LONG s = g_lio_slow[0] + g_lio_slow[1] + g_lio_slow[2];
+    if (!g_sba_loc || s == g_lio_logged_slow) return;
+    g_lio_logged_slow = s;
+    if (krnl_loc_io_diag_line(b, (int)sizeof b)) {
+        HLOG_W("LOCIO: t=%ds langsames Lesen (Datentraeger/Virenschutz?) - %s", waited_s, b);
+    }
+}
+
+/* ---------- W434 LOC-PILOT-LOST (GitHub #73): Spielstand-Ordner im LoC-Profil ----------
+ * LoC speichert den Piloten auf T: in SYSTEMLINK/LINKUSER (<hdd_root_loc>/TDATA/43430009/...),
+ * Einstellungen in CONFIG/CONFIG.DAT, Replays/Insignien auf U:. Ist der ganze Ordner
+ * nicht beschreibbar, schlug bisher jedes Schreiben fehl (FILE open ... -> FEHLER), das Spiel
+ * zeigte den Piloten trotzdem (nur im Speicher), nach dem Neustart war er weg. W423 hatte nur
+ * Z: (Sound-Cache) umgelenkt. Hier: Schreibtest beim Start; bei Fehler laeuft das ganze
+ * Laufwerk (T:/U:/E:/Z:) ueber den festen Ersatzordner %LOCALAPPDATA%\Steelbound\loc_save
+ * (ANSI-sicherer Kurzpfad, nie %TEMP%). Vorhandene Staende des Originals werden einmal
+ * uebernommen (nie ueberschrieben); die Merkdatei im Ersatzordner nennt das Original und haelt
+ * den Ersatzordner aktiv, auch wenn das Original spaeter wieder beschreibbar ist (Lesen und
+ * Schreiben bleiben am selben Ort). Geht auch das nicht: klare Meldung (Log, Einblendung, F11),
+ * kein stilles Verwerfen. Nur LoC-Profil (g_ls_state 0 bei SB). */
+#define LS_MARK "steelbound_loc_save.txt"
+static volatile LONG g_ls_state;   /* 0 = nicht LoC, 1 = ok, 2 = Ersatzordner, 3 = nicht beschreibbar */
+static volatile LONG g_ls_err;     /* Win32-Fehler des Schreibtests im Original */
+static volatile LONG g_ls_wfail;   /* gescheiterte Schreib-Oeffnungen auf T:/U:/E: */
+static volatile LONG g_ls_werr;    /* letzter Win32-Fehler dazu */
+static int g_ls_sticky, g_ls_mig;  /* Ersatzordner per Merkdatei / einmal uebernommene Dateien */
+static char g_ls_root[640];        /* aktiver Spielstand-Ordner (Backslashes, ohne Endtrenner) */
+static char g_ls_show[400];        /* aktiver Ordner mit Platzhaltern (UTF-8) */
+static char g_ls_oshow[400];       /* urspruenglicher Ordner mit Platzhaltern (UTF-8) */
+static ULONGLONG g_ls_toast_t;
+
+static void ls_norm(char *s)
+{
+    for (; *s; s++) {
+        if (*s == '/') *s = '\\';
+    }
+}
+
+static void ls_strip(char *s)
+{
+    size_t n = strlen(s);
+    while (n > 3 && (s[n - 1] == '\\' || s[n - 1] == '/')) s[--n] = 0;
+}
+
+/* Grund in Klartext (englisch, fuer Einblendung/Log/F11). */
+static const char *ls_reason(DWORD e)
+{
+    switch (e) {
+    case 0: return "ok";
+    case ERROR_ACCESS_DENIED: return "access denied - folder permissions, Controlled Folder Access or antivirus";
+    case ERROR_FILE_NOT_FOUND:
+    case ERROR_PATH_NOT_FOUND: return "folder cannot be created";
+    case ERROR_INVALID_NAME: return "invalid path - characters outside the system code page";
+    case ERROR_WRITE_PROTECT: return "drive is write-protected";
+    case ERROR_DISK_FULL:
+    case ERROR_HANDLE_DISK_FULL: return "disk full";
+    case ERROR_SHARING_VIOLATION:
+    case ERROR_LOCK_VIOLATION: return "file in use by another program";
+    case ERROR_FILENAME_EXCED_RANGE: return "path too long";
+    default: return "Windows error";
+    }
+}
+
+/* Ordner fuer Log/F11/Einblendung: Langform, %LOCALAPPDATA% usw., Client-Ordner -> <client>,
+ * sonst <pfad>\name (sb_diag_sanitize, gleiche Regeln wie F11). Nie Benutzername. */
+static void ls_show_path(const char *p, char *out, size_t cap)
+{
+    wchar_t w[700], l[700], ew[700];
+    char exe[700], *s;
+    sb_diag_root_t root[1];
+    DWORD n;
+    out[0] = 0;
+    if (!MultiByteToWideChar(CP_ACP, 0, p, -1, w, 700)) return;
+    n = GetLongPathNameW(w, l, 700);
+    if (n == 0 || n >= 700) wcscpy_s(l, 700, w);
+    for (n = 0; l[n]; n++) {
+        if (l[n] == L'/') l[n] = L'\\';
+    }
+    if (!WideCharToMultiByte(CP_UTF8, 0, l, -1, out, (int)cap, NULL, NULL)) out[0] = 0;
+    exe[0] = 0;
+    n = GetModuleFileNameW(NULL, ew, 700);
+    if (n && n < 700 && WideCharToMultiByte(CP_UTF8, 0, ew, -1, exe, sizeof exe, NULL, NULL)) {
+        s = strrchr(exe, '\\');
+        if (s) *s = 0;
+    }
+    root[0].path = exe;
+    root[0].tag = "<client>";
+    {
+        char last[64] = "";
+        const char *b = strrchr(out, '\\');
+        if (b && strlen(b + 1) < sizeof last) strcpy_s(last, sizeof last, b + 1);
+        sb_diag_sanitize(out, cap, root, exe[0] ? 1 : 0);
+        if (strcmp(out, "<pfad>") == 0 && last[0] && sb_diag_clean_hits(last) == 0) { /* Ordnername bleibt lesbar */
+            _snprintf_s(out, cap, _TRUNCATE, "<pfad>\\%s", last);
+        }
+    }
+}
+
+/* Ordner fuer die Einblendung (Spieler soll ihn finden): Langform, nur %LOCALAPPDATA%/%USERPROFILE%
+ * ersetzt (kein Benutzername im Bild bzw. in einem F11-Bildschirmfoto). UTF-16. */
+static void ls_ui_path(const char *p, wchar_t *out, int cap)
+{
+    static const wchar_t *const ev[][2] = { { L"LOCALAPPDATA", L"%LOCALAPPDATA%" }, { L"USERPROFILE", L"%USERPROFILE%" } };
+    wchar_t w[700], l[700], e[700], el[700];
+    DWORD n;
+    int i;
+    out[0] = 0;
+    if (!MultiByteToWideChar(CP_ACP, 0, p, -1, w, 700)) return;
+    n = GetLongPathNameW(w, l, 700);
+    if (n == 0 || n >= 700) wcscpy_s(l, 700, w);
+    for (n = 0; l[n]; n++) {
+        if (l[n] == L'/') l[n] = L'\\';
+    }
+    for (i = 0; i < 2; i++) {
+        size_t k;
+        n = GetEnvironmentVariableW(ev[i][0], e, 700);
+        if (n == 0 || n >= 700) continue;
+        n = GetLongPathNameW(e, el, 700);
+        if (n == 0 || n >= 700) wcscpy_s(el, 700, e);
+        for (k = 0; el[k]; k++) {
+            if (el[k] == L'/') el[k] = L'\\';
+        }
+        k = wcslen(el);
+        while (k > 3 && el[k - 1] == L'\\') el[--k] = 0;
+        if (k >= 3 && _wcsnicmp(l, el, k) == 0 && (l[k] == L'\\' || l[k] == 0)) {
+            _snwprintf_s(out, cap, _TRUNCATE, L"%s%s", ev[i][1], l + k);
+            return;
+        }
+    }
+    wcsncpy_s(out, cap, l, _TRUNCATE);
+}
+
+/* Schreibtest eines Spiel-Laufwerks: TDATA\<id> und UDATA\<id> anlegen und je eine
+ * Probedatei schreiben. 1 = beschreibbar. */
+/* Ordner fehlt (Win32 2/3): eigentlicher Grund = Anlegen im tiefsten vorhandenen Elternordner. */
+static DWORD ls_mkdir_err(const char *dir)
+{
+    char t[700], p[760];
+    char *s;
+    DWORD a;
+    strcpy_s(t, sizeof t, dir);
+    for (;;) {
+        a = GetFileAttributesA(t);
+        if (a != INVALID_FILE_ATTRIBUTES) break;
+        s = strrchr(t, '\\');
+        if (!s || s - t < 3) return 0;
+        *s = 0;
+    }
+    if (!(a & FILE_ATTRIBUTE_DIRECTORY)) return ERROR_PATH_NOT_FOUND; /* Datei statt Ordner */
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\~sb_dprobe", t);
+    if (CreateDirectoryA(p, NULL)) {
+        RemoveDirectoryA(p);
+        return 0;
+    }
+    a = GetLastError();
+    return a == ERROR_ALREADY_EXISTS ? 0 : a;
+}
+
+static int ls_probe_dir(const char *d, DWORD *err)
+{
+    DWORD m;
+    if (zc_probe(d, err)) return 1;
+    if (*err == ERROR_PATH_NOT_FOUND || *err == ERROR_FILE_NOT_FOUND) {
+        m = ls_mkdir_err(d);
+        if (m) *err = m;
+    }
+    return 0;
+}
+
+static int ls_probe_drive(const char *root, DWORD *err)
+{
+    char d[700];
+    *err = 0;
+    _snprintf_s(d, sizeof d, _TRUNCATE, "%s\\TDATA\\%s", root, XB_TITLE_ID_STR);
+    if (!ls_probe_dir(d, err)) return 0;
+    _snprintf_s(d, sizeof d, _TRUNCATE, "%s\\UDATA\\%s", root, XB_TITLE_ID_STR);
+    return ls_probe_dir(d, err);
+}
+
+/* Ersatzordner %LOCALAPPDATA%\Steelbound\loc_save als ANSI-sicherer Kurzpfad (wie W423). create = 0:
+ * nur wenn er schon existiert (beschreibbarer Normalfall legt nichts an). 1 = ok. */
+static int ls_alt_dir(char *out, size_t cap, int create)
+{
+    wchar_t w[600], s[600];
+    DWORD n;
+    BOOL lossy = FALSE;
+    out[0] = 0;
+    n = GetEnvironmentVariableW(L"LOCALAPPDATA", w, 520);
+    if (n == 0 || n >= 520) return 0;
+    wcscat_s(w, 600, L"\\Steelbound");
+    if (create) CreateDirectoryW(w, NULL);
+    wcscat_s(w, 600, L"\\loc_save");
+    if (create) CreateDirectoryW(w, NULL);
+    else if (GetFileAttributesW(w) == INVALID_FILE_ATTRIBUTES) return 0;
+    n = GetShortPathNameW(w, s, 600);
+    if (n == 0 || n >= 600) wcscpy_s(s, 600, w);
+    n = (DWORD)WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, s, -1, out, (int)cap, NULL, &lossy);
+    if (n == 0 || lossy || strlen(out) >= 400) {
+        out[0] = 0;
+        return 0;
+    }
+    ls_norm(out);
+    ls_strip(out);
+    return 1;
+}
+
+/* Baum kopieren, vorhandene Ziele nie ueberschreiben. Rueckgabe: kopierte Dateien. */
+static int ls_copy_tree(const char *src, const char *dst, int depth, int *budget)
+{
+    char m[800], a[800], b[800];
+    WIN32_FIND_DATAA fd;
+    HANDLE f;
+    int n = 0;
+    if (depth > 8 || *budget <= 0) return 0;
+    _snprintf_s(m, sizeof m, _TRUNCATE, "%s\\*", src);
+    f = FindFirstFileA(m, &fd);
+    if (f == INVALID_HANDLE_VALUE) return 0;
+    xb_mkdir_p(dst);
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) continue; /* nie Verknuepfungen folgen */
+        _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\%s", src, fd.cFileName);
+        _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\%s", dst, fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            n += ls_copy_tree(a, b, depth + 1, budget);
+        } else if ((*budget)-- > 0 && CopyFileA(a, b, TRUE)) {
+            n++;
+        }
+    } while (*budget > 0 && FindNextFileA(f, &fd));
+    FindClose(f);
+    return n;
+}
+
+/* Merkdatei lesen: 1 = vorhanden, orig = Inhalt (urspruenglicher Ordner). */
+static int ls_mark_read(const char *alt, char *orig, size_t cap)
+{
+    char p[700];
+    FILE *f;
+    size_t n;
+    orig[0] = 0;
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\" LS_MARK, alt);
+    if (fopen_s(&f, p, "rb") != 0 || !f) return 0;
+    n = fread(orig, 1, cap - 1, f);
+    fclose(f);
+    orig[n] = 0;
+    while (n && (orig[n - 1] == '\r' || orig[n - 1] == '\n' || orig[n - 1] == ' ')) orig[--n] = 0;
+    return 1;
+}
+
+static void ls_mark_write(const char *alt, const char *orig)
+{
+    char p[700];
+    FILE *f;
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\" LS_MARK, alt);
+    if (fopen_s(&f, p, "wb") == 0 && f) {
+        fprintf(f, "%s\r\n", orig);
+        fclose(f);
+    }
+}
+
+/* Kern (auch Selbsttest): orig = Spielstand-Ordner laut Einstellung, alt = Ersatzordner ("" = keiner).
+ * out = aktiver Ordner. Rueckgabe 1 ok, 2 Ersatzordner, 3 nicht beschreibbar. */
+static int ls_resolve(const char *orig, const char *alt, char *out, size_t cap, DWORD *err, DWORD *aerr, int *mig,
+                      int *sticky)
+{
+    char mk[700];
+    int ok, has_mark, mine;
+    DWORD ae = 0;
+    *err = *aerr = 0;
+    *mig = *sticky = 0;
+    ok = ls_probe_drive(orig, err);
+    has_mark = alt[0] && ls_mark_read(alt, mk, sizeof mk);
+    mine = has_mark && _stricmp(mk, orig) == 0;
+    if (mine && ls_probe_drive(alt, &ae)) { /* Ersatzordner bleibt aktiv (Staende liegen dort) */
+        strcpy_s(out, cap, alt);
+        *sticky = 1;
+        return 2;
+    }
+    if (ok) {
+        strcpy_s(out, cap, orig);
+        return 1;
+    }
+    if (!alt[0] || !ls_probe_drive(alt, &ae)) {
+        *aerr = alt[0] ? ae : ERROR_PATH_NOT_FOUND;
+        strcpy_s(out, cap, orig);
+        return 3;
+    }
+    if (!has_mark) { /* erstes Mal: vorhandene Staende einmal uebernehmen, nie ueberschreiben */
+        char a[700], b[700];
+        int budget = 4000;
+        _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\TDATA", orig);
+        _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\TDATA", alt);
+        *mig = ls_copy_tree(a, b, 0, &budget);
+        _snprintf_s(a, sizeof a, _TRUNCATE, "%s\\UDATA", orig);
+        _snprintf_s(b, sizeof b, _TRUNCATE, "%s\\UDATA", alt);
+        *mig += ls_copy_tree(a, b, 0, &budget);
+        ls_mark_write(alt, orig);
+    }
+    strcpy_s(out, cap, alt);
+    return 2;
+}
+
+static void ls_toast(int fail, const char *why)
+{
+    wchar_t t1[160], fmt[260], t2[600], pw[400], ww[200];
+    char orig[640];
+    strcpy_s(orig, sizeof orig, g_cfg.hdd_root);
+    ls_ui_path(fail ? orig : g_ls_root, pw, 400); /* vor dem Umschalten = Original */
+    if (!MultiByteToWideChar(CP_UTF8, 0, why, -1, ww, 200)) ww[0] = 0;
+    {   /* Einblendung hat 200 Zeichen: Grund kurz ("access denied"), Einzelheiten im Log/F11 */
+        wchar_t *c = wcsstr(ww, L" - ");
+        if (c) *c = 0;
+    }
+    if (fail) {
+        sb_lang_w("loc.save_fail_t", t1, 160);
+        sb_lang_w("loc.save_fail_d", fmt, 260);
+    } else {
+        sb_lang_w("loc.save_alt_t", t1, 160);
+        sb_lang_w("loc.save_alt_d", fmt, 260);
+    }
+    if (wcsstr(fmt, L"%s")) _snwprintf_s(t2, 600, _TRUNCATE, fmt, pw, ww);
+    else wcsncpy_s(t2, 600, fmt, _TRUNCATE);
+    sb_ov_toast_msg(t1, t2, fail ? 15000u : 12000u);
+}
+
+/* Aufruf aus dem Kernel-Start (nach dem Anlegen von TDATA/UDATA, vor Z:), nur LoC-Profil.
+ * Setzt bei Bedarf g_cfg.hdd_root auf den Ersatzordner (dann folgen T:/U:/E:/Z:). */
+void krnl_loc_save_check(void)
+{
+    char orig[640], alt[640] = "", act[640];
+    DWORD e = 0, ae = 0;
+    int st, mig = 0, sticky = 0;
+    strcpy_s(orig, sizeof orig, g_cfg.hdd_root);
+    ls_norm(orig);
+    ls_strip(orig);
+    ls_show_path(orig, g_ls_oshow, sizeof g_ls_oshow);
+    if (g_cfg.loc_save_alt && !ls_alt_dir(alt, sizeof alt, 0) && !ls_probe_drive(orig, &e)) {
+        ls_alt_dir(alt, sizeof alt, 1); /* erst bei Bedarf anlegen */
+    }
+    st = ls_resolve(orig, alt, act, sizeof act, &e, &ae, &mig, &sticky);
+    g_ls_sticky = sticky;
+    g_ls_mig = mig;
+    InterlockedExchange(&g_ls_err, (LONG)e);
+    strcpy_s(g_ls_root, sizeof g_ls_root, act);
+    ls_show_path(act, g_ls_show, sizeof g_ls_show);
+    if (st == 2) strcpy_s(g_cfg.hdd_root, sizeof g_cfg.hdd_root, act);
+    InterlockedExchange(&g_ls_state, st);
+    if (st == 1) {
+        HLOG_I("LOCSAVE: save folder '%s' writable", g_ls_show);
+    } else if (st == 2 && sticky) {
+        HLOG_W("LOCSAVE: save folder '%s' (fallback, kept because it holds the saves since the original '%s' was not "
+               "writable; original now %s) - reading and writing stay here; to go back, copy TDATA/UDATA back and "
+               "delete " LS_MARK, g_ls_show, g_ls_oshow, e ? "still not writable" : "writable again");
+    } else if (st == 2) {
+        HLOG_W("LOCSAVE: save folder '%s' is not writable (%s, Win32 %lu) - Line of Contact saves to fallback '%s' "
+               "instead (%d existing files copied once)", g_ls_oshow, ls_reason(e), (unsigned long)e, g_ls_show, mig);
+        ls_toast(0, ls_reason(e));
+    } else {
+        HLOG_E("LOCSAVE: save folder '%s' is not writable (%s, Win32 %lu) and %s - pilots and settings will NOT be kept",
+               g_ls_oshow, ls_reason(e), (unsigned long)e,
+               !g_cfg.loc_save_alt ? "the fallback is off (loc_save_alt=0)" : "no fallback folder is writable either");
+        ls_toast(1, ls_reason(e));
+        g_ls_toast_t = GetTickCount64();
+    }
+}
+
+/* Gescheiterte Schreib-Oeffnung auf dem Spielstand-Laufwerk (nicht Z:): melden statt still verwerfen. */
+static void ls_write_failed(const char *host, DWORD e)
+{
+    size_t n = strlen(g_ls_root);
+    LONG k;
+    if (!g_ls_state || !n || _strnicmp(host, g_ls_root, n) != 0 || host[n] != '\\' || zc_is_z(host)) return;
+    k = InterlockedIncrement(&g_ls_wfail);
+    InterlockedExchange(&g_ls_werr, (LONG)e);
+    if (k <= 20) {
+        HLOG_E("LOCSAVE: could not write '%s' in the save folder (%s, Win32 %lu) - not saved", host + n + 1,
+               ls_reason(e), (unsigned long)e);
+    }
+    if (GetTickCount64() - g_ls_toast_t > 20000u || !g_ls_toast_t) {
+        g_ls_toast_t = GetTickCount64();
+        ls_toast(1, ls_reason(e));
+    }
+}
+
+/* Kurzzustand fuer F11-Bericht (Ordner mit Platzhaltern, keine Eingaben). */
+int krnl_loc_save_diag_line(char *o, int cap)
+{
+    static const char *ss[] = { "-", "ok", "fallback", "unwritable" };
+    LONG st = g_ls_state;
+    if (!st) return 0;
+    _snprintf_s(o, (size_t)cap, _TRUNCATE,
+                "folder=%s writable=%s state=%s%s original=%s win32=%ld (%s) write_fail=%ld last_win32=%ld copied=%d",
+                g_ls_show, st == 3 ? "no" : "yes", ss[st & 3], g_ls_sticky ? " (kept)" : "", g_ls_oshow,
+                (long)g_ls_err, ls_reason((DWORD)g_ls_err), (long)g_ls_wfail, (long)g_ls_werr, g_ls_mig);
     return 1;
 }
 
@@ -1006,6 +1473,7 @@ resolved:
             if (h == INVALID_HANDLE_VALUE) {
                 DWORD e = GetLastError();
                 HLOG_I("FILE mkdir+open '%s' -> FEHLER %lu", host, e);
+                if (g_ls_state) ls_write_failed(host, e); /* W434: Spielstand-Ordner nicht anlegbar */
                 return winerr_to_status(e);
             }
             goto opened;
@@ -1066,6 +1534,10 @@ resolved:
         DWORD e = GetLastError();
         if (g_zc_pre[0] && (want & GENERIC_WRITE) && zc_is_z(host)) { /* W423: Z: nicht beschreibbar? */
             zc_write_failed(host, e);
+        }
+        if (g_ls_state && ((want & GENERIC_WRITE) || disp != X_FILE_OPEN) &&
+            !((disp == X_FILE_OPEN || disp == X_FILE_OVERWRITE) && e == ERROR_FILE_NOT_FOUND)) {
+            ls_write_failed(host, e); /* W434: Spielstand nicht geschrieben - melden */
         }
         if (g_cfg.loc_boot_diag && lbd_path(host) && lbd_ok()) {
             HLOG_I("LOCBOOTDIAG: open '%s' access=0x%X disp=%u opt=0x%X -> FEHLER Win32 %lu", host, access, disp,
@@ -1203,9 +1675,11 @@ u32 __stdcall hle_NtReadFile(u32 xh, u32 ev, u32 apc, u32 apcCtx, u32 iosb,
     ht_entry_t *e = ht_get(xh);
     DWORD got = 0;
     u32 st;
+    LONGLONG lio0; /* W449: Lesedauer (nur LoC, sonst 0) */
     if (!e || e->kind != HT_FILE) {
         return X_STATUS_INVALID_HANDLE;
     }
+    lio0 = krnl_loc_io_t0();
     LOC_RB_PREWRITE(buf, len); /* W330: Kernel schreibt in den Gast-Puffer (Rollback-Schreibschutz) */
     if (loc_rb_spec()) { /* W390: Vorlauf liest; die Dateiposition stellt krnl_file_spec_restore danach zurueck */
         krnl_file_spec_touch(xh);
@@ -1259,6 +1733,7 @@ u32 __stdcall hle_NtReadFile(u32 xh, u32 ev, u32 apc, u32 apcCtx, u32 iosb,
         if (g_cfg.tex_dump && got) { sb_rem_note_read(buf, got, e->path); } /* DIAG(REM-FRAME,W103): Textur-Quelle */
     }
 read_done:
+    krnl_loc_io_note(e->vfs ? 0 : 1, lio0, st == X_STATUS_SUCCESS || st == X_STATUS_END_OF_FILE); /* W449 */
     if (g_cfg.loc_boot_diag && g_sba_loc && !g_loc_copy_done && lbd_path(e->path) && lbd_ok()) { /* DIAG(W423) */
         HLOG_I("LOCBOOTDIAG: read xh=0x%X '%s' len=%u off=%lld -> st=0x%X got=%lu", xh, e->path, len,
                pOff ? (long long)*(int64_t *)(uintptr_t)pOff : -1LL, st, (unsigned long)got);
@@ -2816,5 +3291,156 @@ int krnl_savedelete_selftest(void)
     sd_rmtree(h2);
 #undef SD_CHECK
     HLOG_I("SAVEDELETE-SELFTEST: %s (%u/%u Pruefungen, save_delete_fix=%d)", fail ? "FEHLER" : "ok", n - fail, n, fix);
+    return (int)fail;
+}
+
+/* ---------- W434 LOC-PILOT-LOST: Selbsttest (loc_save_selftest=1, vor dem Spiel) ----------
+ * Synthetische Ordner <hdd_root>\W434_ls_<pid>\..., nie der echte Datenordner. "Nicht
+ * beschreibbar" per Verweigern-Eintrag (Jeder: Daten schreiben/anhaengen/Attribute) wie beim
+ * Tester vermutet (Rechte, Ueberwachter Ordnerzugriff), bzw. Datei an Stelle eines Ordners. */
+static int ls_st_acl(const char *dir, int deny)
+{
+    wchar_t w[700];
+    PSECURITY_DESCRIPTOR sd = NULL;
+    PACL dacl = NULL;
+    BOOL present = FALSE, def = FALSE;
+    DWORD rc;
+    if (!MultiByteToWideChar(CP_ACP, 0, dir, -1, w, 700)) return 0;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            deny ? L"D:(D;OICI;0x116;;;WD)(A;OICI;FA;;;WD)" : L"D:(A;OICI;FA;;;WD)", SDDL_REVISION_1, &sd, NULL)) {
+        return 0;
+    }
+    GetSecurityDescriptorDacl(sd, &present, &dacl, &def);
+    rc = SetNamedSecurityInfoW(w, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION, NULL,
+                               NULL, dacl, NULL);
+    LocalFree(sd);
+    return rc == ERROR_SUCCESS;
+}
+
+static int ls_st_put(const char *p, const char *txt)
+{
+    FILE *f;
+    char d[800], *s;
+    strcpy_s(d, sizeof d, p);
+    s = strrchr(d, '\\');
+    if (s) {
+        *s = 0;
+        xb_mkdir_p(d);
+    }
+    if (fopen_s(&f, p, "wb") != 0 || !f) return 0;
+    fputs(txt, f);
+    fclose(f);
+    return 1;
+}
+
+static int ls_st_is(const char *p, const char *txt)
+{
+    FILE *f;
+    char b[64];
+    size_t n;
+    if (fopen_s(&f, p, "rb") != 0 || !f) return 0;
+    n = fread(b, 1, sizeof b - 1, f);
+    fclose(f);
+    b[n] = 0;
+    return strcmp(b, txt) == 0;
+}
+
+int krnl_loc_save_selftest(void)
+{
+    char base[640], o1[700], a1[700], o2[700], a2[700], o4[700], a4[700], f4[700], out[700], p[800], q[800], la[700];
+    u32 n = 0, fail = 0;
+    DWORD e, ae;
+    int st, mig, sticky;
+#define LS_CHECK(cond, what) do { n++; if (!(cond)) { fail++; HLOG_E("LOCSAVE-SELFTEST: FEHLER %s", what); } } while (0)
+    _snprintf_s(base, sizeof base, _TRUNCATE, "%s\\W434_ls_%lu", g_cfg.hdd_root, GetCurrentProcessId());
+    ls_norm(base);
+    xb_mkdir_p(base);
+    if (!(GetFileAttributesA(base) & FILE_ATTRIBUTE_DIRECTORY) || GetFileAttributesA(base) == INVALID_FILE_ATTRIBUTES) {
+        HLOG_E("LOCSAVE-SELFTEST: Testordner unter hdd_root nicht anlegbar - Selbsttest braucht einen beschreibbaren hdd_root");
+        return 1;
+    }
+    _snprintf_s(o1, sizeof o1, _TRUNCATE, "%s\\ok_LOC", base);
+    _snprintf_s(a1, sizeof a1, _TRUNCATE, "%s\\alt1", base);
+    _snprintf_s(o2, sizeof o2, _TRUNCATE, "%s\\ro_LOC", base);
+    _snprintf_s(a2, sizeof a2, _TRUNCATE, "%s\\alt2", base);
+    _snprintf_s(f4, sizeof f4, _TRUNCATE, "%s\\file4", base);
+    _snprintf_s(o4, sizeof o4, _TRUNCATE, "%s\\file4\\x_LOC", base);
+    _snprintf_s(a4, sizeof a4, _TRUNCATE, "%s\\file4\\alt", base);
+    xb_mkdir_p(a1);
+    xb_mkdir_p(a2);
+
+    /* 1. beschreibbarer Ordner: unveraendert, Ersatzordner unberuehrt */
+    st = ls_resolve(o1, a1, out, sizeof out, &e, &ae, &mig, &sticky);
+    LS_CHECK(st == 1 && sd_same(out, o1) && e == 0 && !mig && !sticky, "beschreibbar: Original bleibt aktiv");
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\TDATA", a1);
+    _snprintf_s(q, sizeof q, _TRUNCATE, "%s\\" LS_MARK, a1);
+    LS_CHECK(GetFileAttributesA(p) == INVALID_FILE_ATTRIBUTES && GetFileAttributesA(q) == INVALID_FILE_ATTRIBUTES,
+             "beschreibbar: Ersatzordner unberuehrt");
+    st = ls_resolve(o1, "", out, sizeof out, &e, &ae, &mig, &sticky);
+    LS_CHECK(st == 1 && sd_same(out, o1), "beschreibbar ohne Ersatzordner (loc_save_alt=0) gleich");
+
+    /* 2. nicht beschreibbar (Verweigern-Eintrag), vorhandener Pilot -> Ersatzordner mit Uebernahme */
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\TDATA\\%s\\SYSTEMLINK\\LINKUSER", o2, XB_TITLE_ID_STR);
+    LS_CHECK(ls_st_put(p, "PILOT-A"), "Pilot im Original anlegen");
+    LS_CHECK(ls_st_acl(o2, 1), "Original sperren");
+    st = ls_resolve(o2, a2, out, sizeof out, &e, &ae, &mig, &sticky);
+    LS_CHECK(st == 2 && sd_same(out, a2) && e == ERROR_ACCESS_DENIED && !sticky, "gesperrt: Ersatzordner aktiv (Win32 5)");
+    LS_CHECK(mig == 1, "vorhandener Pilot einmal uebernommen");
+    _snprintf_s(q, sizeof q, _TRUNCATE, "%s\\TDATA\\%s\\SYSTEMLINK\\LINKUSER", a2, XB_TITLE_ID_STR);
+    LS_CHECK(ls_st_is(q, "PILOT-A"), "uebernommener Pilot gleich");
+    /* Spiel speichert neuen Piloten (im aktiven Ordner), dann Neustart */
+    _snprintf_s(q, sizeof q, _TRUNCATE, "%s\\TDATA\\%s\\SYSTEMLINK\\LINKUSER", out, XB_TITLE_ID_STR);
+    LS_CHECK(ls_st_put(q, "PILOT-B"), "neuer Pilot im aktiven Ordner gespeichert");
+    st = ls_resolve(o2, a2, out, sizeof out, &e, &ae, &mig, &sticky);
+    LS_CHECK(st == 2 && sd_same(out, a2) && sticky && !mig, "Neustart: derselbe Ersatzordner, keine neue Uebernahme");
+    _snprintf_s(q, sizeof q, _TRUNCATE, "%s\\TDATA\\%s\\SYSTEMLINK\\LINKUSER", out, XB_TITLE_ID_STR);
+    LS_CHECK(ls_st_is(q, "PILOT-B"), "Pilot uebersteht Neustart");
+    LS_CHECK(DeleteFileA(q), "Pilot im Ersatzordner loeschen");
+    st = ls_resolve(o2, a2, out, sizeof out, &e, &ae, &mig, &sticky);
+    LS_CHECK(st == 2 && GetFileAttributesA(q) == INVALID_FILE_ATTRIBUTES, "geloeschter Pilot kommt nicht aus dem Original zurueck");
+    /* 3. Original wieder beschreibbar: Staende bleiben im Ersatzordner (Lesen = Schreiben) */
+    LS_CHECK(ls_st_acl(o2, 0), "Original freigeben");
+    st = ls_resolve(o2, a2, out, sizeof out, &e, &ae, &mig, &sticky);
+    LS_CHECK(st == 2 && sd_same(out, a2) && sticky && e == 0, "Original wieder frei: Ersatzordner bleibt (Merkdatei)");
+    /* andere Merkdatei (anderer Datenordner): beschreibbares Original gilt */
+    st = ls_resolve(o1, a2, out, sizeof out, &e, &ae, &mig, &sticky);
+    LS_CHECK(st == 1 && sd_same(out, o1), "fremde Merkdatei: beschreibbares Original");
+
+    /* 4. Original und Ersatzordner nicht beschreibbar -> klare Meldung, kein Erfolg vorgetaeuscht */
+    LS_CHECK(ls_st_put(f4, "x"), "Datei statt Ordner");
+    st = ls_resolve(o4, a4, out, sizeof out, &e, &ae, &mig, &sticky);
+    LS_CHECK(st == 3 && sd_same(out, o4) && e != 0 && ae != 0, "beide gesperrt: Zustand nicht beschreibbar");
+    LS_CHECK(strstr(ls_reason(ERROR_ACCESS_DENIED), "Controlled Folder Access") != NULL && ls_reason(e)[0],
+             "Grund im Klartext");
+    st = ls_resolve(o4, "", out, sizeof out, &e, &ae, &mig, &sticky);
+    LS_CHECK(st == 3 && sd_same(out, o4), "ohne Ersatzordner (loc_save_alt=0): nicht beschreibbar");
+    /* leerer gesperrter Ordner (TDATA nicht anlegbar): Grund = Zugriff verweigert, nicht "fehlt" */
+    _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\ro3_LOC", base);
+    xb_mkdir_p(p);
+    LS_CHECK(ls_st_acl(p, 1), "leeren Ordner sperren");
+    st = ls_resolve(p, "", out, sizeof out, &e, &ae, &mig, &sticky);
+    LS_CHECK(st == 3 && e == ERROR_ACCESS_DENIED, "leerer gesperrter Ordner: Win32 5");
+    ls_st_acl(p, 0);
+
+    /* 5. Anzeige mit Platzhaltern, ohne Benutzername */
+    if (GetEnvironmentVariableA("LOCALAPPDATA", la, sizeof la) > 0) {
+        _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\Steelbound\\loc\\hdd_LOC", la);
+        ls_show_path(p, q, sizeof q);
+        LS_CHECK(strcmp(q, "%LOCALAPPDATA%\\Steelbound\\loc\\hdd_LOC") == 0 && sb_diag_clean_hits(q) == 0,
+                 "Anzeige %LOCALAPPDATA%\\Steelbound\\loc\\hdd_LOC");
+        {
+            wchar_t uw[400];
+            _snprintf_s(p, sizeof p, _TRUNCATE, "%s/Steelbound/loc/hdd_LOC", la);
+            ls_ui_path(p, uw, 400);
+            LS_CHECK(wcscmp(uw, L"%LOCALAPPDATA%\\Steelbound\\loc\\hdd_LOC") == 0, "Einblendung %LOCALAPPDATA%\\...");
+        }
+    }
+    ls_show_path(base, q, sizeof q);
+    LS_CHECK(sb_diag_clean_hits(q) == 0, "Anzeige Testordner ohne Benutzername");
+
+    ls_st_acl(o2, 0);
+    sd_rmtree(base);
+#undef LS_CHECK
+    HLOG_I("LOCSAVE-SELFTEST: %s (%u/%u Pruefungen)", fail ? "FEHLER" : "ok", n - fail, n);
     return (int)fail;
 }

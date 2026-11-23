@@ -13,6 +13,7 @@
 #include <stdarg.h>
 
 #include "input_joy.h"
+#include "input_despike.h" /* W439 */
 
 /* Windows-SDK-dinput.h kennt DIDFT_OPTIONAL nicht (nur altes DX-SDK). */
 #ifndef DIDFT_OPTIONAL
@@ -1256,6 +1257,11 @@ static SRWLOCK g_slk = SRWLOCK_INIT;
 static char g_spec[IMAP_JOY_MAX][96];
 static unsigned g_used;
 static imap_joy_state_t g_slot_st[IMAP_JOY_MAX];
+static volatile LONG g_ds_on;            /* W439: Ausreisser-Filter an */
+static despike_t g_ds[IMAP_JOY_MAX];     /* W439: nur Lese-Thread */
+static volatile LONG g_ds_spikes;
+void ijoy_set_despike(int on) { InterlockedExchange(&g_ds_on, on ? 1 : 0); }
+unsigned ijoy_despike_spikes(void) { return (unsigned)g_ds_spikes; }
 static unsigned g_slot_mask;
 static char g_slot_nm[IMAP_JOY_MAX][96];
 static volatile LONG g_thr_started;
@@ -1321,6 +1327,19 @@ static void ijoy_tick(ijoy_sup_t *sp, DWORD now)
         } else if (!g_dev[d].dev) {
             sp->need_scan = 1; /* freigegeben, Aufzaehlung steht aus */
         }
+    }
+    if (g_ds_on) { /* W439: Ausreisser-Filter je Slot (Achsen-Strom alle ~4 ms) */
+        LONG sp = 0;
+        for (s = 0; s < IMAP_JOY_MAX; s++) {
+            int k, v[IJOY_AXES], o[IJOY_AXES];
+            if (!(mask & (1u << s))) { g_ds[s].init = 0; continue; }
+            if (!g_ds[s].n) despike_init(&g_ds[s], IJOY_AXES, DESPIKE_THR_S16, DESPIKE_HOLD_MS);
+            for (k = 0; k < IJOY_AXES; k++) v[k] = st[s].axis[k];
+            despike_feed(&g_ds[s], v, (uint64_t)now, o);
+            for (k = 0; k < IJOY_AXES; k++) st[s].axis[k] = (int16_t)o[k];
+            sp += (LONG)g_ds[s].spikes;
+        }
+        InterlockedExchange(&g_ds_spikes, sp);
     }
     AcquireSRWLockExclusive(&g_slk);
     memcpy(g_slot_st, st, sizeof st);

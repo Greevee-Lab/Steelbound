@@ -41,6 +41,7 @@
 #include <stdio.h>
 #include <string.h>
 #include <math.h>
+#include <stdlib.h> /* W439: abs */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -49,6 +50,7 @@
 #include "input_tap.h"
 #include "input_sbc_usb.h"
 #include "sb_ally_core.h" /* W424 */
+#include "input_despike.h" /* W439 */
 
 static int n_checks, n_fail;
 static long n_states;
@@ -135,7 +137,8 @@ static const int kCoreKeys[] = {
     VK_RETURN, VK_SPACE, 'F', 'L', VK_TAB, 'M', 'Z', 'X', 'C', 'O',
     'N', 'R', 'V', 'I', 'H', 'A', 'D', 'W', 'S', 'Q', 'E', 'T', 'G',
     VK_LEFT, VK_RIGHT, VK_UP, VK_DOWN, VK_SHIFT,
-    VK_LCONTROL, VK_RCONTROL, VK_CONTROL /* W110: Slide-Step (nur links) */
+    VK_LCONTROL, VK_RCONTROL, VK_CONTROL, /* W110: Slide-Step (nur links) */
+    VK_DELETE /* W436: Eject-Akkord Umschalt+Entf (W403) - Legacy == keyboard_default */
 };
 #define KCORE_N ((int)(sizeof kCoreKeys / sizeof kCoreKeys[0]))
 
@@ -4202,6 +4205,139 @@ static void run_w403_eject_cases(const imap_profile_t *kb, const imap_profile_t 
             CHECK((b.buttons[0] & (1u << 3)) != 0, "w403: xbox BACK+Y -> Eject (btn=%04X)", b.buttons[0]);
         }
     }
+    { /* W436 LOC-EJECT (#76): Standardbelegung ohne Profil (Legacy) - der Launcher zeigt dafuer keyboard_default */
+        cfgvar_t c = { 1, 1, 0, 1, 4, 0, 0 };
+        imap_snap_t s;
+        imap_state_init(&st);
+        make_snap(&s, fr++, &c);
+        set_keys(k_sd, 3);
+        imap_legacy_apply(&b, &st, &s);
+        CHECK(b.buttons[0] == (1u << 3) && b.buttons[1] == 0 && b.buttons[2] == 0 && b.pedal_l == 0,
+              "w436: Legacy Umschalt+Entf -> nur Eject (btn=%04X %04X %04X pedal=%u)", b.buttons[0], b.buttons[1],
+              b.buttons[2], b.pedal_l);
+        make_snap(&s, fr++, &c);
+        set_keys(k_d, 1);
+        imap_legacy_apply(&b, &st, &s);
+        CHECK(!(b.buttons[0] & (1u << 3)), "w436: Legacy Entf allein -> kein Eject (btn=%04X)", b.buttons[0]);
+        make_snap(&s, fr++, &c);
+        set_keys(k_s, 2);
+        imap_legacy_apply(&b, &st, &s);
+        CHECK(b.buttons[0] == 0 && b.buttons[1] == 0 && b.buttons[2] == 0,
+              "w436: Legacy Umschalt allein -> keine Taste (btn=%04X)", b.buttons[0]);
+        set_keys(NULL, 0);
+    }
+}
+
+/* Teil 32 (W436 LOC-EJECT, GitHub #76): Eject per Kombination bis ins Rollback-Eingabewort. Kette: Umschalt+Entf
+ * (Legacy, keyboard_default, default_full) bzw. Pad BACK+Y -> SBC-Block bi3 -> Eingabesatz wie FUN_0001CAE0 (LoC,
+ * Ghidra nur gelesen: Knopf 0..3 -> Byte 0 Bit 0..3, Eject = 0x08) -> eigener Rahmen der Eingabeschicht (loc_rbi.c)
+ * -> Paket -> Entnahme beim Mitspieler. Druck genau einen Tick (eigener Rahmen q = 6 -> Slot q - P0 + D = 4).
+ * a) Paket rechtzeitig: Slot 4 traegt 0x08, kein anderer Slot. b) Paket kommt erst nach Slot 6: der Mitspieler hat
+ * Slots 4..6 vorhergesagt (ohne Eject, keine erfundene Flanke), verlangt einen Rollback, die Neurechnung entnimmt in
+ * Slot 4 den Eject. */
+#include "loc_rbi.h"
+static void w436_pack(const imap_block_t *b, uint8_t in[RBI_IN])
+{
+    int k;
+    memset(in, 0, RBI_IN);
+    for (k = 0; k < 4; k++)
+        if (b->buttons[0] & (1u << k)) in[0] |= (uint8_t)(1u << k);
+}
+
+/* Rueckgabe 0 = gruen; late = Paket mit dem Druck erst nach den Vorhersagen zustellen */
+static int w436_chain(const imap_block_t *press, int late, char *why, size_t cap)
+{
+    rbi_t *a = rbi_new(), *b = rbi_new();
+    uint8_t hdr[RBI_HDR] = { 1, 0, 0, 0, 3, 0, 0, 0 }, in[RBI_IN], out[RBI_FR], p[RBI_PKT_MAX];
+    imap_block_t idle;
+    int q, n, s, bad = 0, sent = 0, pl = 0;
+    uint32_t ticks = 0, sback = 0;
+    memset(&idle, 0, sizeof idle);
+    idle.aiming_x = idle.aiming_y = 0x7F;
+    why[0] = '\0';
+    rbi_begin(a, 5, 0, 2, 8);
+    rbi_begin(b, 5, 1, 2, 8);
+    for (q = 0; q < 4; q++) { /* Vorlauf P0 = 4 (wie FUN_0001D3D0) */
+        w436_pack(&idle, in);
+        rbi_own(a, hdr, in);
+    }
+    for (q = 4; q < 12; q++) { /* je Tick: eigene Entnahme, dann eigener Rahmen q (Druck nur in q = 6) */
+        (void)rbi_take(a, 0, 0, out);
+        (void)rbi_tick_end(a, NULL);
+        w436_pack(q == 6 ? press : &idle, in);
+        rbi_own(a, hdr, in);
+        if (late && q == 5) { /* nur Rahmen bis q = 5 (Slot 3) zustellen */
+            n = rbi_tx(a, p, (int)sizeof p);
+            if (n <= 0 || rbi_rx(b, p, n, 1) != 1) bad |= 1;
+            sent = 1;
+        }
+    }
+    if (!late) {
+        n = rbi_tx(a, p, (int)sizeof p);
+        if (n <= 0 || rbi_rx(b, p, n, 1) != 1) bad |= 1;
+        for (s = 0; s < 9; s++) {
+            if (rbi_take(b, 0, 0, out) != 1) { bad |= 2; break; }
+            (void)rbi_tick_end(b, NULL);
+            if (((out[RBI_HDR] & 0x08) != 0) != (s == 4)) bad |= 4;
+        }
+    } else {
+        for (s = 0; s < 7; s++) { /* Slots 0..3 bestaetigt, 4..6 vorhergesagt */
+            if (rbi_take(b, 0, 0, out) != 1) { bad |= 2; break; }
+            (void)rbi_tick_end(b, NULL);
+            if (out[RBI_HDR] & 0x08) bad |= 8; /* Vorhersage erfindet keinen Eject */
+        }
+        n = rbi_tx(a, p, (int)sizeof p); /* jetzt der Rest (mit dem Druck) */
+        if (!sent || n <= 0 || rbi_rx(b, p, n, 1) != 1) bad |= 1;
+        pl = rbi_plan(b, rbi_commits(b), &ticks, &sback);
+        if (pl <= 0 || ticks < 3u) bad |= 16;
+        for (s = 4; s < 9 && !bad; s++) { /* Neurechnung ab Slot 4, dann live weiter */
+            if (rbi_take(b, 0, 0, out) != 1) { bad |= 2; break; }
+            (void)rbi_tick_end(b, NULL);
+            if (((out[RBI_HDR] & 0x08) != 0) != (s == 4)) bad |= 4;
+        }
+    }
+    _snprintf_s(why, cap, _TRUNCATE, "bad=0x%X plan=%d ticks=%u", bad, pl, ticks);
+    rbi_free(a);
+    rbi_free(b);
+    return bad;
+}
+
+static void run_w436_eject_chain(const imap_profile_t *kb, const imap_profile_t *xbox)
+{
+    static const int k_sd[] = { VK_SHIFT, VK_LSHIFT, VK_DELETE };
+    cfgvar_t c = { 1, 1, 0, 1, 4, 0, 0 };
+    imap_profile_t full;
+    imap_state_t st;
+    imap_snap_t s;
+    imap_block_t b[4];
+    static const char *const nm[4] = { "Legacy Umschalt+Entf", "keyboard_default Umschalt+Entf",
+                                       "default_full Umschalt+Entf", "xbox_pad_default BACK+Y" };
+    char why[96];
+    int i, late, rc;
+    printf("Teil 32: W436 Eject per Kombination im Rollback-Eingabewort\n");
+    imap_state_init(&st);
+    make_snap(&s, 1, &c);
+    set_keys(k_sd, 3);
+    imap_legacy_apply(&b[0], &st, &s);
+    imap_state_init(&st);
+    w365_apply(kb, &b[1], &st, k_sd, 3, 0, 2);
+    rc = imap_profile_load("default_full", &full);
+    CHECK(rc == 0, "w436: default_full geladen (rc=%d)", rc);
+    imap_state_init(&st);
+    if (rc == 0) w365_apply(&full, &b[2], &st, k_sd, 3, 0, 3);
+    else memset(&b[2], 0, sizeof b[2]);
+    imap_state_init(&st);
+    w365_apply(xbox, &b[3], &st, NULL, 0, (unsigned short)(IMAP_PAD_BACK | IMAP_PAD_Y), 4);
+    set_keys(NULL, 0);
+    for (i = 0; i < 4; i++) {
+        CHECK((b[i].buttons[0] & (1u << 3)) != 0, "w436: %s -> SBC bi3 (btn=%04X)", nm[i], b[i].buttons[0]);
+        for (late = 0; late < 2; late++) {
+            int bad = w436_chain(&b[i], late, why, sizeof why);
+            CHECK(bad == 0, "w436: %s, %s: Eject nicht genau in Slot 4 (%s)", nm[i],
+                  late ? "Paket spaet (Vorhersage + Rollback)" : "Paket rechtzeitig", why);
+            if (i == 0) printf("  %s, %s: %s\n", nm[i], late ? "spaet" : "rechtzeitig", why);
+        }
+    }
 }
 
 /* Teil 29 (W396 LOC-POLISH): Maus-Akkus beim Missionswechsel zur Mitte, auch die Sicht (mouse_sight=1). */
@@ -4238,8 +4374,10 @@ static void run_w396_center_cases(void)
 /* Teil 31: W431 DEFAULT-BINDINGS - default_full: jede Aktion hat eine Taste, keine Doppel-/Client-Tasten. */
 static void run_w431_default_full_cases(void)
 {
+    /* W438: ENTER ist im Spiel fuer den LoC-Chat reserviert, ESC fuer das Client-Menue; BACKSPACE ist seit
+     * 0.4.0 START (bi6) und keine reine Client-Taste mehr (replay_exit teilt sie bewusst, s. unten). */
     static const int reserved[] = { VK_ESCAPE, VK_F10, VK_F2, VK_F3, VK_F8, VK_F9, VK_F11, VK_F12, VK_PAUSE,
-                                    VK_BACK, VK_SNAPSHOT };
+                                    VK_RETURN, VK_SNAPSHOT };
     imap_profile_t p;
     int bi, a, k, n, rc, used[256][2], nused = 0, bad_reserved = 0, dup = 0, unbound = 0, nopress = 0;
     printf("Teil 31: W431 default_full (jede Aktion belegt)\n");
@@ -4285,19 +4423,469 @@ static void run_w431_default_full_cases(void)
         CHECK(has, "w431: Achse %d belegt", a);
     }
     CHECK(p.vr_recenter.n && p.pause.n && p.photo.n && p.feedback_shot.n && p.feedback_clip.n && p.quick_shot.n &&
-          p.orig_view.n && p.replay_exit.n && p.net_hud.n && p.aim_center.n, "w431: Client-Aktionen belegt");
-    {   /* Client-Aktionen nicht mit Spiel-Tasten teilen (ausser den bekannten Client-Tasten selbst) */
+          p.orig_view.n && p.replay_exit.n && p.net_hud.n && p.aim_center.n && p.menu_back.n,
+          "w431: Client-Aktionen belegt");
+    {   /* Client-Aktionen nicht mit Spiel-Tasten teilen (ausser den bekannten Client-Tasten selbst).
+         * W438: einzige erlaubte Ausnahme replay_exit = START (bi6, BACKSPACE): START wirkt im Spiel-Replay nicht
+         * (W299), replay_exit nur waehrend der Wiedergabe -> die START-Taste beendet das Replay. */
         const imap_bind_t *ca[] = { &p.aim_center, &p.pause, &p.replay_exit, &p.net_hud, &p.quick_shot, &p.photo,
-                                    &p.feedback_shot, &p.feedback_clip, &p.orig_view, &p.vr_recenter };
-        int cd = 0, i;
+                                    &p.feedback_shot, &p.feedback_clip, &p.orig_view, &p.vr_recenter, &p.menu_back };
+        int cd = 0, cc = 0, i, j, svk[8], smod[8], sn = imap_bind_key_combos(&p.btn[6], svk, smod, 8);
         for (i = 0; i < (int)(sizeof ca / sizeof ca[0]); i++) {
             int vks[8], mods[8], m = imap_bind_key_combos(ca[i], vks, mods, 8);
-            for (a = 0; a < m; a++)
+            for (a = 0; a < m; a++) {
+                int is_start = 0;
+                for (j = 0; j < sn; j++)
+                    if (svk[j] == vks[a] && smod[j] == mods[a]) is_start = 1;
+                if (ca[i] == &p.replay_exit && is_start) continue; /* W438: erlaubt (s. oben) */
                 for (k = 0; k < nused; k++)
-                    if (used[k][0] == vks[a] && used[k][1] == mods[a]) cd++;
+                    if (used[k][0] == vks[a] && used[k][1] == mods[a]) { cd++; printf("  Client-Aktion %d: VK %d\n", i, vks[a]); }
+                for (k = 0; k < (int)(sizeof reserved / sizeof reserved[0]); k++)
+                    if (vks[a] == reserved[k] && mods[a] == 0 && vks[a] == VK_RETURN) cc++; /* Enter = Chat */
+            }
+            for (j = i + 1; j < (int)(sizeof ca / sizeof ca[0]); j++) { /* Client-Aktionen untereinander */
+                int v2[8], m2[8], n2 = imap_bind_key_combos(ca[j], v2, m2, 8), x, y;
+                for (x = 0; x < m; x++)
+                    for (y = 0; y < n2; y++)
+                        if (vks[x] == v2[y] && mods[x] == m2[y]) { cd++; printf("  Client-Aktionen %d/%d: VK %d\n", i, j, vks[x]); }
+            }
         }
         CHECK(cd == 0, "w431: Client-Aktionen kollidieren nicht mit Spiel-Tasten (%d)", cd);
+        CHECK(cc == 0, "w438: ENTER bleibt frei (Chat), auch fuer Client-Aktionen (%d)", cc);
+        CHECK(sn == 1 && svk[0] == VK_BACK && smod[0] == 0, "w438: START (bi6) = BACKSPACE");
+        CHECK(p.menu_back.n == 1 && !p.menu_back.alt[0].chord && p.menu_back.alt[0].a.code == VK_INSERT,
+              "w438: menu_back (LoC-Pad B) = INSERT");
     }
+}
+
+/* Teil 33: W438 CTRL-RESET-040 - LoC-Menue-Pad folgt dem Profil (START = bi6, A = bi0, B = menu_back). */
+static int w438_keys[8], w438_nkeys;
+static int w438_key(int vk, void *ctx)
+{
+    int i;
+    (void)ctx;
+    for (i = 0; i < w438_nkeys; i++)
+        if (w438_keys[i] == vk) return 1;
+    return 0;
+}
+static unsigned w438_bits(const imap_profile_t *p, int k0, int k1)
+{
+    w438_nkeys = 0;
+    if (k0) w438_keys[w438_nkeys++] = k0;
+    if (k1) w438_keys[w438_nkeys++] = k1;
+    return imap_loc_pad_bits(p, w438_key, NULL);
+}
+/* Teil 35: W439 LOC-RETICLE-JUMP (#78) - Ausreisser-Filter analoger Achsen (input_despike, Schalter ctrl_despike).
+ * Synthetische Report-Folgen (keine Eingaben aufgezeichnet): einzelne Ausreisser verworfen, normale und schnelle echte
+ * Bewegung unverzoegert bzw. hoechstens ein Report verzoegert, Haltezeit, Neutralstand, Joystick-Slots (Fake-DirectInput). */
+static void run_w439_despike_cases(void)
+{
+    despike_t d;
+    int v[8], o[8], k, ok, maxlag, bad;
+    uint64_t t = 1000;
+    uint32_t rnd = 12345u;
+    printf("Teil 35: W439 Ausreisser-Filter analoger Achsen\n");
+    despike_init(&d, 2, DESPIKE_THR_U8, DESPIKE_HOLD_MS);
+    v[0] = 128; v[1] = -1;
+    despike_feed(&d, v, t, o);
+    CHECK(o[0] == 128 && o[1] == -1, "w439: erster Report direkt");
+    /* einzelner Ausreisser (Poti) auf Achse 0 bzw. 1 -> nie ausgegeben */
+    v[0] = 255; despike_feed(&d, v, t += 8, o);
+    ok = o[0] == 128;
+    v[0] = 130; despike_feed(&d, v, t += 8, o);
+    ok = ok && o[0] == 130 && d.spikes == 1u;
+    CHECK(ok, "w439: Einzel-Ausreisser 128 -> 255 -> 130 verworfen (out=%d spikes=%u)", o[0], d.spikes);
+    v[1] = -128; despike_feed(&d, v, t += 8, o);
+    ok = o[1] == -1;
+    v[1] = 2; despike_feed(&d, v, t += 8, o);
+    CHECK(ok && o[1] == 2 && d.spikes == 2u, "w439: Ausreisser auf vorzeichenbehafteter Achse verworfen");
+    /* kleine Schritte (<= Schwelle) gehen ohne Verzoegerung durch, bitgleich */
+    ok = 1;
+    for (k = 0; k < 40; k++) { v[0] = 130 + k * 3; despike_feed(&d, v, t += 8, o); ok = ok && o[0] == v[0]; }
+    CHECK(ok, "w439: normale Bewegung (Schritt 3) unverzoegert");
+    /* echte schnelle Bewegung: Sprung, naechster Report bestaetigt -> genau ein Report Verzoegerung */
+    despike_reset(&d, (v[0] = 128, v[1] = 0, v));
+    v[0] = 200; despike_feed(&d, v, t += 8, o);
+    ok = o[0] == 128;
+    v[0] = 203; despike_feed(&d, v, t += 8, o);
+    CHECK(ok && o[0] == 203, "w439: echter Sprung bestaetigt -> uebernommen (out=%d)", o[0]);
+    /* Rampe mit grossen Schritten in eine Richtung: weiter in dieselbe Richtung -> uebernehmen */
+    despike_reset(&d, (v[0] = 0, v[1] = 0, v));
+    v[0] = 60; despike_feed(&d, v, t += 8, o);
+    k = o[0];
+    v[0] = 120; despike_feed(&d, v, t += 8, o);
+    CHECK(k == 0 && o[0] == 120, "w439: Rampe 0/60/120 -> 120 nach einem Report (out=%d)", o[0]);
+    /* Haltezeit: Sprung ohne weiteren Report (SBC sendet nur bei Aenderung) gilt nach hold_ms als echt */
+    v[0] = 250; despike_feed(&d, v, t += 8, o);
+    ok = o[0] == 120;
+    despike_read(&d, t + DESPIKE_HOLD_MS - 1u, o);
+    ok = ok && o[0] == 120;
+    despike_read(&d, t + DESPIKE_HOLD_MS, o);
+    CHECK(ok && o[0] == 250, "w439: ohne Folge-Report nach %u ms uebernommen (out=%d)", DESPIKE_HOLD_MS, o[0]);
+    t += DESPIKE_HOLD_MS;
+    /* Neutralstand (Trennung): sofort, ohne Kandidat */
+    v[0] = 128; v[1] = 0; despike_reset(&d, v);
+    v[0] = 128; despike_feed(&d, v, t += 8, o);
+    CHECK(o[0] == 128 && !d.has_cand[0], "w439: Neutralstand sofort");
+    /* Poti-Rauschen +-6 mit seltenen Ausreissern (0 bzw. 255), langsame Bewegung: Ausgabe bleibt nahe am Signal,
+     * kein Ausreisser durch, Verzoegerung hoechstens 1 Report */
+    despike_init(&d, 1, DESPIKE_THR_U8, DESPIKE_HOLD_MS);
+    bad = 0; maxlag = 0;
+    for (k = 0; k < 4000; k++) {
+        int sig = 128 + (int)(90.0 * sin(k * 0.01)), x;
+        rnd = rnd * 1664525u + 1013904223u;
+        x = sig + (int)((rnd >> 8) % 13u) - 6;
+        if ((rnd >> 20) % 97u == 0u) { x = ((rnd >> 4) & 1u) ? 255 : 0; }
+        v[0] = x;
+        despike_feed(&d, v, t += 8, o);
+        if (abs(o[0] - sig) > DESPIKE_THR_U8 + 6) bad++; /* Ausreisser naeher als die Schwelle am Signal gehen durch */
+        if (abs(o[0] - sig) > maxlag) maxlag = abs(o[0] - sig);
+    }
+    CHECK(bad == 0 && d.spikes >= 30u, "w439: Rauschen + Ausreisser: Abweichung max %d (Grenze Schwelle+Rauschen %d), verworfen %u",
+          maxlag, DESPIKE_THR_U8 + 6, d.spikes);
+    /* Zusatz-Latenz (Messung fuer den Bericht): Hebel-Bewegungen ohne Ausreisser, Report alle 4 ms (SBC: nur bei
+     * Aenderung). Gezaehlt werden Reports, deren Ausgabe vom Eingang abweicht (= verzoegert), in ms. */
+    {
+        static const int dur_ms[5] = { 400, 200, 100, 40, 20 }; /* volle Auslenkung 0 -> 255 in ... ms */
+        int pi;
+        for (pi = 0; pi < 5; pi++) {
+            int n = dur_ms[pi] / 4, late = 0, worst = 0, run = 0;
+            despike_init(&d, 1, DESPIKE_THR_U8, DESPIKE_HOLD_MS);
+            v[0] = 0; despike_feed(&d, v, t += 4, o);
+            for (k = 1; k <= n + 5; k++) {
+                v[0] = k >= n ? 255 : (255 * k) / n;
+                despike_feed(&d, v, t += 4, o);
+                if (o[0] != v[0]) { late++; run++; if (run > worst) worst = run; } else { run = 0; }
+            }
+            printf("  w439 Latenz: 0->255 in %3d ms (Schritt %3d): verzoegerte Reports %d, laengste Verzoegerung %d ms\n",
+                   dur_ms[pi], 255 / (n ? n : 1), late, worst * 4);
+            CHECK(worst <= 1 && (255 / (n ? n : 1) > DESPIKE_THR_U8 || late == 0),
+                  "w439: Latenz %d ms-Bewegung: hoechstens 1 Report (4 ms), unter der Schwelle 0 (late=%d worst=%d)",
+                  dur_ms[pi], late, worst);
+        }
+    }
+    /* Joystick-Slots (Fake-DirectInput): aus = Original (Ausreisser kommt durch), an = verworfen */
+    {
+        char specs[IMAP_JOY_MAX][96];
+        imap_joy_state_t js[IMAP_JOY_MAX];
+        int seen_off = 0, seen_on = 0, r;
+        memset(specs, 0, sizeof specs);
+        for (r = 0; r < 2; r++) {
+            int *seen = r ? &seen_on : &seen_off;
+            ijoy_set_despike(r);
+            ijoy_test_begin(1, (const char (*)[96])specs, 1u);
+            ijoy_test_axis(0, 1000);
+            ijoy_test_run(40);
+            ijoy_test_axis(0, 30000); /* ein Takt (4 ms) Ausreisser */
+            ijoy_test_run(4);
+            ijoy_slots_get(js);
+            if (js[0].axis[0] == 30000) (*seen)++;
+            ijoy_test_axis(0, 1200);
+            ijoy_test_run(4);
+            ijoy_slots_get(js);
+            if (js[0].axis[0] == 30000) (*seen)++;
+            ijoy_test_run(40);
+            ijoy_slots_get(js);
+            if (js[0].axis[0] != 1200) (*seen) += 10;
+            ijoy_test_end();
+        }
+        ijoy_set_despike(0);
+        CHECK(seen_off == 1 && seen_on == 0 && ijoy_despike_spikes() >= 1u,
+              "w439: Joystick aus = Original (Ausreisser sichtbar %d), an = verworfen (%d, Zaehler %u)", seen_off, seen_on,
+              ijoy_despike_spikes());
+    }
+}
+
+static void run_w438_loc_pad_cases(void)
+{
+    imap_profile_t full, kb, p;
+    int rc;
+    printf("Teil 33: W438 LoC-Menue-Pad aus dem Profil\n");
+    /* Legacy (kein Profil, Testketten): unveraendert Enter = START, SPACE = A, Backspace = B */
+    CHECK(w438_bits(NULL, VK_RETURN, 0) == IMAP_LPAD_START, "w438: Legacy Enter = START");
+    CHECK(w438_bits(NULL, VK_SPACE, 0) == IMAP_LPAD_A, "w438: Legacy SPACE = A");
+    CHECK(w438_bits(NULL, VK_BACK, 0) == IMAP_LPAD_B, "w438: Legacy Backspace = B");
+    CHECK(imap_loc_pad_bits(NULL, NULL, NULL) == 0, "w438: ohne Tastenfunktion nichts");
+    rc = imap_profile_load("default_full", &full);
+    CHECK(rc == 0, "w438: default_full geladen (rc=%d)", rc);
+    if (rc == 0) {
+        CHECK(w438_bits(&full, VK_RETURN, 0) == 0, "w438: default_full Enter loest im Pad nichts aus");
+        CHECK(w438_bits(&full, VK_BACK, 0) == IMAP_LPAD_START, "w438: default_full Backspace = START (nicht B)");
+        CHECK(w438_bits(&full, VK_SPACE, 0) == IMAP_LPAD_A, "w438: default_full SPACE = A");
+        CHECK(w438_bits(&full, VK_INSERT, 0) == IMAP_LPAD_B, "w438: default_full Insert = B");
+        CHECK(w438_bits(&full, 'F', VK_LBUTTON) == 0, "w438: andere Tasten/Maus kein Pad-Knopf");
+    }
+    rc = imap_profile_load("keyboard_default", &kb);
+    CHECK(rc >= 0, "w438: keyboard_default geladen (rc=%d)", rc);
+    if (rc >= 0) { /* Standard-Belegung (START = Enter): menu_back fehlt -> wie bisher Backspace */
+        CHECK(kb.menu_back_set == 0 && w438_bits(&kb, VK_BACK, 0) == IMAP_LPAD_B &&
+              w438_bits(&kb, VK_RETURN, 0) == IMAP_LPAD_START, "w438: keyboard_default unveraendert (Enter/Backspace)");
+    }
+    /* Profil ohne menu_back-Zeile, START auf Backspace -> B weicht auf Insert aus */
+    CHECK(imap_profile_parse("bi6 = KEY:BACKSPACE\nbi0 = KEY:SPACE\n", "t", &p) == 0 && p.menu_back_set == 0 &&
+          w438_bits(&p, VK_INSERT, 0) == IMAP_LPAD_B && w438_bits(&p, VK_BACK, 0) == IMAP_LPAD_START,
+          "w438: ohne Zeile + START=Backspace -> B = Insert");
+    /* Umbelegt: START = Shift+P, B = leer (aus), A = Strg */
+    CHECK(imap_profile_parse("bi6 = KEY:SHIFT+KEY:P\nbi0 = KEY:LCTRL\nmenu_back =\n", "t2", &p) == 0 &&
+          p.menu_back_set == 1 && p.menu_back.n == 0, "w438: menu_back leer = aus");
+    CHECK(w438_bits(&p, 'P', 0) == 0 && w438_bits(&p, 'P', VK_SHIFT) == IMAP_LPAD_START &&
+          w438_bits(&p, VK_LCONTROL, 0) == IMAP_LPAD_A && w438_bits(&p, VK_BACK, 0) == 0 &&
+          w438_bits(&p, VK_RETURN, 0) == 0, "w438: umbelegte Tasten (Shift+P / Strg)");
+    CHECK(imap_profile_parse("menu_back = KEY:DECIMAL, KEY:B\n", "t3", &p) == 0 && w438_bits(&p, 'B', 0) == IMAP_LPAD_B,
+          "w438: menu_back mehrere Tasten");
+}
+
+/* Teil 34: W437 LOC-CHAT - Chat-Taste im Profil und neutrale Eingabe bei offener Chatzeile. */
+static int w437_chat_combo(const imap_profile_t *p, int *vk, int *md)
+{
+    int v[4], m[4], n = imap_bind_key_combos(&p->chat, v, m, 4);
+    if (n > 0) {
+        *vk = v[0];
+        *md = m[0];
+    }
+    return n;
+}
+/* frames Polls mit gedrueckten Spieltasten, Maustaste/-bewegung (synthetisch) und Mausrad; block = Chatzeile offen.
+ * Vergleich mit derselben Folge ganz ohne Eingabe. Rueckgabe: 1 = alle Bloecke gleich der Folge ohne Eingabe. */
+static int w437_neutral_run(const imap_profile_t *prof, int block, unsigned *hash)
+{
+    static const cfgvar_t cv = {1, 1, 0, 1, 4, 0, 0};
+    static const int keys[] = {'W', 'S', 'A', 'D', VK_SPACE, 'F', 'R', 'E', 'Q', VK_LCONTROL, VK_SHIFT, VK_DELETE,
+                               VK_BACK, VK_UP, VK_LEFT, '1', '3', 320, 321, 322, 324, 325};
+    imap_state_t sa, sb;
+    imap_block_t ba, bb;
+    imap_snap_t s, e;
+    int f, same = 1;
+    unsigned h = 2166136261u;
+    imap_state_init(&sa);
+    imap_state_init(&sb);
+    for (f = 0; f < 90; f++) {
+        size_t i;
+        make_snap(&s, 5000u + (unsigned)f, &cv);
+        s.wheel_mask = 1u;
+        s.pad_present = 1;
+        s.pad.buttons = 0xFFFF;
+        s.pad.lx = 30000;
+        s.pad.rt = 255;
+        if (block) imap_snap_block_ui(&s);
+        memset(&ba, 0, sizeof ba);
+        set_keys(keys, (int)(sizeof keys / sizeof keys[0]));
+        if (prof) imap_profile_apply(&ba, &sa, prof, &s);
+        else imap_legacy_apply(&ba, &sa, &s);
+        make_snap(&e, 5000u + (unsigned)f, &cv);
+        memset(&bb, 0, sizeof bb);
+        set_keys(NULL, 0);
+        if (prof) imap_profile_apply(&bb, &sb, prof, &e);
+        else imap_legacy_apply(&bb, &sb, &e);
+        same &= memcmp(&ba, &bb, sizeof ba) == 0;
+        for (i = 0; i < sizeof ba; i++) h = (h ^ ((const uint8_t *)&ba)[i]) * 16777619u;
+    }
+    set_keys(NULL, 0);
+    if (hash) *hash = h;
+    return same;
+}
+static void run_w437_chat_cases(void)
+{
+    imap_profile_t full, kb, p;
+    int rc, vk = 0, md = -1;
+    unsigned h1 = 0, h2 = 0;
+    printf("Teil 34: W437 Chat-Taste und neutrale Eingabe bei offener Chatzeile\n");
+    rc = imap_profile_load("default_full", &full);
+    CHECK(rc == 0, "w437: default_full geladen (rc=%d)", rc);
+    if (rc == 0) {
+        CHECK(full.chat_set == 1 && w437_chat_combo(&full, &vk, &md) == 1 && vk == VK_RETURN && md == 0,
+              "w437: default_full chat = Enter");
+        CHECK(w437_neutral_run(&full, 1, &h1) && w437_neutral_run(&full, 1, &h2) && h1 == h2,
+              "w437: default_full - offene Chatzeile = keine Eingabe (90 Polls, Tasten/Maus/Rad/Pad), deterministisch");
+        CHECK(!w437_neutral_run(&full, 0, NULL), "w437: Gegenprobe ohne Chatzeile - dieselbe Eingabe wirkt");
+    }
+    CHECK(w437_neutral_run(NULL, 1, NULL) && !w437_neutral_run(NULL, 0, NULL),
+          "w437: Legacy - offene Chatzeile = keine Eingabe, Gegenprobe wirkt");
+    rc = imap_profile_load("keyboard_default", &kb);
+    CHECK(rc >= 0 && kb.chat_set == 0 && kb.chat.n == 0,
+          "w437: keyboard_default (Enter = START) ohne Zeile -> keine Chat-Taste (kein Konflikt)");
+    CHECK(imap_profile_parse("bi0 = KEY:SPACE\nbi6 = KEY:BACKSPACE\n", "t", &p) == 0 && p.chat_set == 0 &&
+          w437_chat_combo(&p, &vk, &md) == 1 && vk == VK_RETURN && md == 0, "w437: ohne Zeile, Enter frei -> Enter");
+    CHECK(imap_profile_parse("bi6 = KEY:SHIFT+KEY:ENTER\n", "t2", &p) == 0 && w437_chat_combo(&p, &vk, &md) == 1 &&
+          vk == VK_RETURN, "w437: Umschalt+Enter als START -> Enter allein bleibt Chat");
+    CHECK(imap_profile_parse("chat =\n", "t3", &p) == 0 && p.chat_set == 1 && p.chat.n == 0, "w437: chat leer = aus");
+    CHECK(imap_profile_parse("chat = KEY:T\n", "t4", &p) == 0 && w437_chat_combo(&p, &vk, &md) == 1 && vk == 'T' &&
+          md == 0, "w437: chat umbelegt (T)");
+    CHECK(imap_profile_parse("chat = KEY:CTRL+KEY:ENTER\n", "t5", &p) == 0 && w437_chat_combo(&p, &vk, &md) == 1 &&
+          vk == VK_RETURN && md == 2, "w437: chat mit Zusatztaste (Strg+Enter)");
+}
+
+/* Teil W441 (LOC-AUTOGEAR): Gang-Automatik mit dem LoC-Gangmodell. VT-Modell nach der Messung W441: Mittel je Gang
+ * 22/36/55/85/168 Einheiten je Tick (R -30), Schrittzyklus als Welligkeit (Gang 1 Periode 45, 2-4 Periode 25, Gang 5
+ * gleichmaessig), Bremse haelt sofort an, ohne Pedal -1 je Tick. Eingaben nur synthetisch. */
+typedef struct {
+    float vm, x, z, hy;
+    unsigned t;
+} w441_vt_t;
+
+static float w441_vt_tick(w441_vt_t *m, const imap_block_t *b)
+{
+    static const float tgt[14] = { 0, 0, 0, 0, 0, 0, 0, -30.f, 0, 22.f, 36.f, 55.f, 85.f, 168.f };
+    int gas = b->pedal_r >= 0x40, brk = b->pedal_m >= 0x40, g = b->gear;
+    float d, rip = 0.0f;
+    if (brk) {
+        m->vm = 0.0f;
+    } else if (gas && g != 8 && g >= 7 && g <= 13) {
+        if (g == 13) m->vm += m->vm < tgt[g] ? 1.2f : 0.0f;
+        else m->vm += (tgt[g] - m->vm) / 20.0f;
+    } else {
+        m->vm = m->vm > 1.0f ? m->vm - 1.0f : (m->vm < -1.0f ? m->vm + 1.0f : 0.0f);
+    }
+    if (g == 9) rip = 0.9f * sinf(6.2831853f * (float)m->t / 45.0f);
+    else if (g >= 10 && g <= 12) rip = 0.6f * sinf(6.2831853f * (float)m->t / 25.0f);
+    d = m->vm * (1.0f + rip);
+    if (m->vm > 0.0f && d < 0.0f) d = 0.0f;
+    if (m->vm < 0.0f && d > 0.0f) d = 0.0f;
+    m->x += d * sinf(m->hy);
+    m->z += d * cosf(m->hy);
+    m->t++;
+    return d;
+}
+
+/* ein Tick wie loc_autogear_poll: Lage -> Verlauf -> v -> Schaltschritt -> VT-Modell. Rueckgabe Gang. */
+static int w441_tick(imap_autogear_t *ag, const imap_autogear_cfg_t *c, imap_agvel_t *vl, w441_vt_t *m, uint8_t *gst,
+                     int gas, int brk, unsigned *step, imap_block_t *out)
+{
+    imap_block_t b;
+    int g;
+    blk_neutral(&b);
+    b.gear = *gst;
+    b.pedal_r = gas ? 0xFF : 0;
+    b.pedal_m = brk ? 0xFF : 0;
+    (*step)++;
+    imap_agvel_push(vl, m->x, m->z, m->hy, *step, LOC_AG_JUMP);
+    {
+        imap_autogear_cfg_t ce = *c; /* wie loc_autogear_poll: Hochschalten erst am Plateau */
+        if (!imap_agvel_loc_plateau(vl, ag->init ? *step - ag->shift_frame : 0u)) ce.v_min = 1e30f;
+        g = imap_autogear_step(ag, &ce, &b, gst, imap_agvel_loc_v(vl, &b, c->pedal_on), *step);
+    }
+    w441_vt_tick(m, &b);
+    if (out) *out = b;
+    return g;
+}
+
+static void run_w441_loc_autogear_cases(void)
+{
+    imap_autogear_t ag;
+    imap_autogear_cfg_t c;
+    imap_agvel_t vl;
+    w441_vt_t m;
+    imap_block_t b;
+    uint8_t gst = 8;
+    unsigned step = 100, i, t_stop = 0, t_rev = 0, h1 = 2166136261u, h2 = 2166136261u;
+    int g, prev = 8, ups = 0, downs = 0, shifts1, run;
+    printf("Teil W441: LoC-Gang-Automatik (Schaltlogik, Geschwindigkeit, Determinismus)\n");
+    imap_autogear_defaults_loc(&c);
+    CHECK(c.min_hold == 45 && c.win == 30 && c.rev_delay == 6 && c.v_min == LOC_AG_VMIN && c.v_stop == LOC_AG_VSTOP &&
+          c.pedal_on == 0x40 && c.down_pct == 70.0f, "w441: LoC-Parameter (Haltezeit 2,25 s, Plateau 1,5 s, R nach 0,3 s)");
+
+    /* Geschwindigkeit: Vorzeichen, gleicher Schritt, Sprung, Luecke */
+    memset(&vl, 0, sizeof vl);
+    imap_agvel_push(&vl, 0.0f, 0.0f, 0.0f, 1, LOC_AG_JUMP);
+    for (i = 2; i <= 11; i++) imap_agvel_push(&vl, 0.0f, 10.0f * (float)(i - 1), 0.0f, i, LOC_AG_JUMP);
+    CHECK(vl.n == 10 && fabsf(imap_agvel_avg(&vl, 10) - 10.0f) < 1e-3f && fabsf(imap_agvel_avg(&vl, 40) - 2.5f) < 1e-3f,
+          "w441: vorwaerts 10/Tick, vor Beginn Stillstand (v10=%.3f v40=%.3f n=%u)", imap_agvel_avg(&vl, 10),
+          imap_agvel_avg(&vl, 40), vl.n);
+    imap_agvel_push(&vl, 0.0f, 999.0f, 0.0f, 11, LOC_AG_JUMP);
+    CHECK(vl.n == 10, "w441: gleicher Schritt zweimal ohne Wirkung");
+    imap_agvel_push(&vl, 0.0f, 80.0f, 0.0f, 12, LOC_AG_JUMP);
+    CHECK(vl.n == 11 && imap_agvel_avg(&vl, 1) < -19.9f, "w441: rueckwaerts negativ (%.2f)", imap_agvel_avg(&vl, 1));
+    imap_agvel_push(&vl, 0.0f, 60.0f, 3.14159265f, 14, LOC_AG_JUMP); /* Luecke 2, Blick gedreht: vorwaerts */
+    CHECK(vl.n == 13 && fabsf(imap_agvel_avg(&vl, 2) - 10.0f) < 1e-3f, "w441: Luecke aufgefuellt (%.2f)",
+          imap_agvel_avg(&vl, 2));
+    imap_agvel_push(&vl, 50000.0f, 60.0f, 0.0f, 15, LOC_AG_JUMP);
+    CHECK(vl.n == 0 && imap_agvel_avg(&vl, 40) == 0.0f, "w441: Sprung (Eject/Neustart) -> Verlauf neu");
+    imap_agvel_push(&vl, 50000.0f, 60.0f, 0.0f, 60, LOC_AG_JUMP);
+    CHECK(vl.n == 0, "w441: Luecke > 30 -> Verlauf neu");
+    blk_neutral(&b);
+    b.pedal_m = 0xFF;
+    imap_agvel_push(&vl, 50000.0f, 70.0f, 0.0f, 61, LOC_AG_JUMP);
+    for (i = 62; i < 120; i++) /* 30/Tick bis 110, danach steht der VT (Bremse) */
+        imap_agvel_push(&vl, 50000.0f, 70.0f + 30.0f * (float)(i < 110 ? i - 61 : 49), 0.0f, i, LOC_AG_JUMP);
+    CHECK(imap_agvel_loc_v(&vl, &b, 0x40) == 0.0f && imap_agvel_avg(&vl, LOC_AG_NLONG) > 5.0f,
+          "w441: Bremse -> kurzes Mittel (0) statt Fahr-Mittel (%.1f)", imap_agvel_avg(&vl, LOC_AG_NLONG));
+    b.gear = 7;
+    CHECK(imap_agvel_loc_v(&vl, &b, 0x40) > 5.0f, "w441: in R ist die Bremse das Gas -> Fahr-Mittel");
+
+    /* Zweimal dieselbe synthetische Folge: Anfahren bis 5, ausrollen, bremsen -> R, rueckwaerts, Gas -> 1 */
+    for (run = 0; run < 2; run++) {
+        memset(&ag, 0, sizeof ag);
+        memset(&vl, 0, sizeof vl);
+        memset(&m, 0, sizeof m);
+        m.hy = 0.7f;
+        gst = 8;
+        step = 100;
+        prev = 8;
+        ups = downs = 0;
+        t_stop = t_rev = 0;
+        for (i = 0; i < 1600; i++) { /* 80 s Gas */
+            g = w441_tick(&ag, &c, &vl, &m, &gst, 1, 0, &step, &b);
+            if (g > prev) ups++;
+            if (g < prev) downs++;
+            prev = g;
+            if (run == 0) h1 = (h1 ^ (unsigned)b.gear ^ ((unsigned)b.pedal_r << 8) ^ ((unsigned)b.pedal_m << 16)) * 16777619u;
+            else h2 = (h2 ^ (unsigned)b.gear ^ ((unsigned)b.pedal_r << 8) ^ ((unsigned)b.pedal_m << 16)) * 16777619u;
+        }
+        if (run == 0) {
+            CHECK(gst == 13, "w441: Gas lang -> 5. Gang trotz Schrittzyklus (gst=%u)", gst);
+            CHECK(ups == 5 && downs == 0, "w441: 5x hoch, 0x runter, kein Pendeln (hoch=%d runter=%d)", ups, downs);
+            CHECK(ag.vtop[9] > 19.0f && ag.vtop[9] < 26.0f && ag.vtop[10] > 31.0f && ag.vtop[11] > 48.0f &&
+                      ag.vtop[12] > 75.0f, "w441: hoch erst nahe der Gang-Endgeschwindigkeit (1:%.1f 2:%.1f 3:%.1f 4:%.1f)",
+                  ag.vtop[9], ag.vtop[10], ag.vtop[11], ag.vtop[12]);
+            CHECK(ag.vtop[9] > 15.0f && ag.vtop[9] < 30.0f && ag.vtop[12] > 55.0f,
+                  "w441: Endgeschw. gelernt (1:%.1f 4:%.1f)", ag.vtop[9], ag.vtop[12]);
+        }
+        shifts1 = ag.shifts;
+        for (i = 0; i < 100; i++) { /* ausrollen ohne Pedal: kein Wechsel ausser runter */
+            g = w441_tick(&ag, &c, &vl, &m, &gst, 0, 0, &step, &b);
+            if (run == 0) h1 = (h1 ^ (unsigned)b.gear) * 16777619u;
+            else h2 = (h2 ^ (unsigned)b.gear) * 16777619u;
+        }
+        for (i = 0; i < 80; i++) { /* bremsen bis Stillstand, gehalten -> R */
+            g = w441_tick(&ag, &c, &vl, &m, &gst, 0, 1, &step, &b);
+            if (!t_stop && m.vm == 0.0f) t_stop = i;
+            if (!t_rev && g == 7) t_rev = i;
+            if (run == 0) h1 = (h1 ^ (unsigned)b.gear ^ ((unsigned)b.pedal_r << 8)) * 16777619u;
+            else h2 = (h2 ^ (unsigned)b.gear ^ ((unsigned)b.pedal_r << 8)) * 16777619u;
+        }
+        if (run == 0) {
+            CHECK(ag.shifts >= shifts1 && gst == 7, "w441: Bremse im Stand -> R (gst=%u)", gst);
+            CHECK(t_rev > t_stop && t_rev - t_stop <= 16, "w441: R nach %u Ticks Stillstand (<= 0,8 s)", t_rev - t_stop);
+            CHECK(b.gear == 7 && b.pedal_r == 0xFF && b.pedal_m == 0, "w441: in R Bremse = Gas (r=%u m=%u)", b.pedal_r,
+                  b.pedal_m);
+            CHECK(m.vm < -5.0f, "w441: faehrt rueckwaerts (vm=%.1f)", m.vm);
+        }
+        for (i = 0; i < 40; i++) { /* Gas in R: Spiel sieht Bremse -> Stillstand -> 1. Gang */
+            g = w441_tick(&ag, &c, &vl, &m, &gst, 1, 0, &step, &b);
+            if (run == 0) h1 = (h1 ^ (unsigned)b.gear ^ ((unsigned)b.pedal_m << 16)) * 16777619u;
+            else h2 = (h2 ^ (unsigned)b.gear ^ ((unsigned)b.pedal_m << 16)) * 16777619u;
+        }
+        if (run == 0) CHECK(gst == 9, "w441: Gas in R -> anhalten -> 1. Gang (gst=%u)", gst);
+    }
+    CHECK(h1 == h2, "w441: gleiche Eingabefolge -> gleiche Bloecke (deterministisch, %08X/%08X)", h1, h2);
+
+    /* Gang 2 gehalten: Tal im Schrittzyklus ist kein Stillstand (kein Ruecksprung in den 1. Gang) */
+    memset(&ag, 0, sizeof ag);
+    memset(&vl, 0, sizeof vl);
+    memset(&m, 0, sizeof m);
+    gst = 10;
+    step = 5000;
+    m.vm = 36.0f;
+    downs = 0;
+    prev = 10;
+    c.v_min = 1e9f; /* Hochschalten aus: nur Ruecksprung pruefen */
+    for (i = 0; i < 400; i++) {
+        g = w441_tick(&ag, &c, &vl, &m, &gst, 1, 0, &step, NULL);
+        if (g < prev) downs++;
+        prev = g;
+    }
+    CHECK(downs == 0 && gst == 10, "w441: Gang 2 mit Schrittzyklus bleibt (runter=%d gst=%u)", downs, gst);
+    imap_autogear_defaults_loc(&c);
 }
 
 int main(int argc, char **argv)
@@ -4441,6 +5029,11 @@ int main(int argc, char **argv)
     run_w403_eject_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 30: W403 */
 
     run_w431_default_full_cases(); /* Teil 31: W431 */
+    run_w436_eject_chain(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 32: W436 */
+    run_w438_loc_pad_cases(); /* Teil 33: W438 */
+    run_w437_chat_cases(); /* Teil 34: W437 */
+    run_w439_despike_cases(); /* Teil 35: W439 */
+    run_w441_loc_autogear_cases(); /* Teil 36: W441 */
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;

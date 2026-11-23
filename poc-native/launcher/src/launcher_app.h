@@ -150,6 +150,7 @@ int w432_fixture_plug(int acc, int thr_unk);
 void w432_fixture_tick(int t, int dev, int obj, long peak, int btn, long noise);
 void w432_gui_selftest(const char *client_override, int *pass, int *fail);
 void w419_gui_selftest(const char *client_override, int *pass, int *fail); /* W419 CTRL-EXPORT */
+void w438_gui_selftest(const char *client_override, int *pass, int *fail); /* W438 CTRL-RESET-040 */
 void w430_selftest(int *pass, int *fail); /* W430 CTRL-IMPORT-FUZZ */
 int w430_ctrl_fuzz(long n, unsigned seed, char *why, size_t wc, long *stat);
 void w299_bind_selftest(int *pass, int *fail); /* W299 REPLAY: Zeile "Replay beenden" */

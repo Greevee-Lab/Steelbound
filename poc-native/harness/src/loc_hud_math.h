@@ -63,3 +63,15 @@ static int lh_mark_shift(const double c[4], const float *C, double ax, double ay
     *dy = la_clamp(b[1] / b[3] - ay, -0.5, 0.5);
     return 1;
 }
+/* W439 LOC-RETICLE-JUMP: Verschiebung fuer Fadenkreuz-Draws, die im Zwischenbild exakt aus Tick N (B) gezeichnet
+ * werden. r = Soll - lerp(a, b, t) (Verschiebung fuer gelerpte Draws), a/b = simulierte Mitte in A/B. Gezeichnet liegt
+ * der exakte Draw bei b, also braucht er Soll - b = r + lerp(a, b, t) - b. Ohne Zwischenbild (lerp 0) gilt r. */
+static void lh_ret_exact_shift(double rx, double ry, const float a[2], const float b[2], double t, int lerp, double out[2])
+{
+    out[0] = rx;
+    out[1] = ry;
+    if (lerp) {
+        out[0] = rx + ((double)a[0] + ((double)b[0] - a[0]) * t) - b[0];
+        out[1] = ry + ((double)a[1] + ((double)b[1] - a[1]) * t) - b[1];
+    }
+}

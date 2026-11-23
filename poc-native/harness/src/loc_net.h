@@ -36,9 +36,19 @@ typedef struct loc_net_hud {
     struct { char name[24]; int rtt, state, active; } alt[4]; /* rtt < 0 = keine Antwort; state 0 aus, 1 ?, 2 gut */
 } loc_net_hud;
 int loc_net_hud_read(loc_net_hud *o);
+/* W440 LOC-LOBBY-MODES (loc_assist.h): wirksamer Spielmodus des laufenden Spiels (LAS_FREE in SB bzw. LoC ohne Netz,
+ * LAS_SIM, LAS_ARCADE), src = Quelle (LAS_SRC_*). Logzeile LOCMODE bei jedem Wechsel. */
+int loc_net_assist_mode(int *src);
+/* W440: wirksamer Wert einer Hilfe (aim_assist, auto_gear) vor dem Eingabewort: in Sim 0, sonst cfg_value
+ * (Steel Battalion: immer cfg_value). Die gespeicherte Einstellung bleibt unveraendert. */
+int loc_assist_gate(int cfg_value);
 /* W357 LOC-PAUSE-NET: 1 = Mitspieler verbunden (eigener Transport mit Verbindung, eigener Lockstep-Rahmen oder
  * Empfang auf den Spiel-Sockets in den letzten SB_PN_HOLD_MS); nur lesend, je Bild vom Spiel-Thread (Overlay). */
 int loc_net_peer_live(void);
+/* W447 LOC-NET-AUTO: GetTickCount des letzten eigenen Lockstep-Rahmens (0 = nie / kein LoC-Netz). */
+long loc_net_last34_ms(void);
+/* W447: offene Spiel-TCP-Stroeme (> 0 = Sitzung: Lobby oder Match). */
+long loc_net_streams(void);
 /* W350 LOC-REJOIN (DIAG, nur loc_net_diag=1): Belegung der Verbindungstabelle des Spiels je Bild lesen und bei
  * Aenderung eine Zeile LOCROSTER loggen (Plaetze, Seiten-Zaehler; keine Namen, keine Inhalte). */
 void loc_net_lobby_frame(unsigned f);

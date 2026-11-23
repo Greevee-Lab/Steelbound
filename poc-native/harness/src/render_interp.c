@@ -43,20 +43,26 @@
 #include "vr.h" /* W134 VR-PROTO */
 #include "render_reproj.h" /* W295 WORLD-REPROJ */
 #include "render_interp_bb.h" /* W347 GHOST: Billboard-Paarung per Kamera */
+#include "render_interp_eye.h" /* W448 LOC-CHAFF-LOOK: Netze hinter der Kamera exakt */
 #include "render_interp_shref.h" /* W361 LOC-INTERP-CRASH: Listen halten ihre Schatten-Views */
 #include "sb_profile.h" /* W323 LOC-INTERP: g_sba_loc */
 #include "loc_render.h" /* W323 LOC-INTERP: Missions-Weiche und 20-Hz-Takt */
 #include "loc_aim.h" /* W376 LOC-LOCAL-AIM */
+#include "loc_aimassist.h" /* W442 LOC-AIMASSIST */
 #include "loc_vpf.h" /* W394 LOC-VIEW-PERFRAME */
 #include "loc_hud_math.h" /* W394 */
+#include "loc_ret_mark.h" /* W444 LOC-RETICLE-MARK */
 #include "loc_aim_law.h" /* W376: Kamera-Korrektur la_cam_corr */
 #include "loc_smooth.h" /* W385 LOC-SMOOTH */
 #include "loc_smooth_math.h"
 #include "render_pace.h" /* W393 LOC-PACING */
+#include "loc_rollback.h" /* W439: Rollback-Zaehler (DIAG locret_rep.bin) */
 /* W394: Matrizen je Wiedergabe: 0 Kamera (W376), 1 Fadenkreuz (W376), 2 + j Marken des VT j, Kompass, Radar */
-#define LA_NM (2 + LS_MAXV + 2)
+#define LA_NM (2 + LS_MAXV + 3)
 #define LA_LAW_CMP (3 + LS_MAXV)
 #define LA_LAW_RAD (4 + LS_MAXV)
+#define LA_LAW_RETX (5 + LS_MAXV) /* W439: Fadenkreuz-Draw, der im Zwischenbild exakt aus Tick N gezeichnet wird */
+#define LA_IS_RET(law) ((law) == 2 || (law) == LA_LAW_RETX)
 #define LA_ON(on, law) ((law) && (((unsigned)(on) >> ((law) - 1)) & 1u))
 #include "xdk_hooks.h" /* W376: hooks_frame_count (DIAG) */
 #include <math.h>
@@ -150,9 +156,15 @@ typedef struct {
     unsigned char wlc; /* W412 LOC-WORLD-LAG: Klasse im Weltziel (li_smooth_apply): 1 Welt mit Kamera K, 2 eigener VT,
                         * 3 nicht affin zur Kamera, 4 anderer VT (Versatz X), 5 Welt ohne K (keine Vorhersage),
                         * 6 Himmel (Weltkoordinaten, eigene Tiefe) mit K (loc_wlag_fix) */
+    unsigned char lsk; /* W435 LOC-SKY-LAG-REG: 1 = Himmel (Weltkoordinaten, eigene Tiefe) am Swap erkannt (li_aim_attach) */
 } ip_op_t;
 static volatile LONG li_cp_rec, li_cp_ok, li_cp_rep; /* W340: Kopier-Ops aufgezeichnet / mit Schatten / wiedergegeben (LOCINTERP stat) */
 static volatile LONG wl_fix_lists, wl_fix_draws; /* W412 LOC-WORLD-LAG: Listen/Draws mit Himmel-Kamera (Zeile LOCINTERP wlag) */
+/* W435 LOC-SKY-LAG-REG: Listen/Draws mit Himmel-Sicht-Korrektur (Zeile LOCINTERP sky435); DIAG Bit 4: Wiedergaben mit
+ * Sicht-Korrektur, Himmel-Draws darin, davon korrigiert; Listen mit K (W390) und davon mit Himmel-K (W412) */
+static volatile LONG sk_lists, sk_draws, sk_rep, sk_rep_on, sk_rep_sky, sk_rep_skyc, sk_rep_na, sk_klists, sk_klists_sky, sk_klists_has;
+static volatile LONG sk_rejlerp; /* W435: Himmel unplausibel -> Matrix-Lerp (statt exakt aus Tick N) */
+static double sk_last_ang, sk_ang_sum, sk_ang_max; /* DIAG(W435): Winkel der Sicht-Korrektur (rad), Summe/Max in Wiedergaben mit Korrektur */
 static volatile LONG li_cp_seen; /* W347: Kopien waehrend der Aufzeichnung (SB: INTERP selfcopy) */
 /* W317 INTERP-PAIR: Matrix N-1 eines gelerpten Draws (rzm: eigene Matrix, sonst die des Partners a) */
 #define IP_AMVP(o, a) ((o)->rzm ? (o)->mva : (a)->mvp)
@@ -219,9 +231,11 @@ typedef struct {
     float la_d[4];    /* W376: Sicht Gier/Nick, Arm x/y (vorhergesagt minus simuliert, rad) */
     double la_vp[16]; /* W376: Weltkamera (haeufigste mvp der Welt-Draws vor der ersten BB-Kopie) */
     unsigned la_seq;  /* W376: Nummer des Ruhepunkts der Vorhersage */
+    unsigned la_nsk, la_nskl, la_nna; /* W435: Himmel-Draws, davon mit Sicht-Korrektur (law 1), sonstige nicht-affine Welt-Draws mit Tiefe */
     float la_rc[2];   /* W376: Fadenkreuz-Mitte im Weltziel (NDC) laut Simulation */
     float la_rd[2];   /* W376: vorhergesagte Verschiebung des Fadenkreuzes (NDC) */
     int la_ret;       /* W376: Fadenkreuz-Draws markiert (o->law == 2) */
+    unsigned la_nret, la_rjmv; /* W439: markierte Fadenkreuz-Draws, wegen Bewegungs-Pruefung verworfene Kandidaten */
     float la_s[2];    /* W394: simulierte Sicht Gier/Nick dieser Liste (rad) */
     /* W394 LOC-HUD-VIEW: je VT simulierte Bildlage a (NDC) und angezeigte Lage als Clip-Vektor c = [q, 1] * VP (q = Lage
      * nach W387-Versatz und W390-Kamera), Marken-Draws je VT; Kompass/Radar: Gier-Abweichung der eigenen Kamera (rad) */
@@ -1869,6 +1883,16 @@ static int ip_plausible(const ip_op_t *a, const ip_op_t *o, float maxjump)
     return front > 0 || behind == 4;
 }
 
+/* FIX(W448 LOC-CHAFF-LOOK, GitHub #83) loc_interp_eyeblind: Matrix-Lerp eines Netzes (gleiche Eingangsdaten, > 8
+ * Vertices), dessen 4 Bezugs-Vertices in beiden Ticks hinter der Kamera liegen, nicht zulassen -> exakt aus Tick N
+ * (Regel und Begruendung in render_interp_eye.h; Chaff-Huelsen an der Augenebene). Nur LoC. 1 = exakt. */
+static unsigned st_w448_eye;
+static int w448_eye_blind(const ip_op_t *a, const ip_op_t *o)
+{
+    if (!g_sba_loc || !g_cfg.loc_interp_eyeblind || g_cfg.vr_enable) { return 0; }
+    return ip_eye_blind((const float (*)[4])a->pref, a->mvp, a->nv, (const float (*)[4])o->pref, o->mvp, o->nv);
+}
+
 /* OPTION(W406 M3-ROAD-JITTER) interp_p2rej: vorab transformierte Welt-Draws (P2 im Renderziel, Strom schon
  * durch w geteilt, affine Bildraum-Matrix) mit GLEICHEN Eingangsdaten scheitern an ip_plausible, sobald EIN
  * Bezugs-Vertex nahe der Augenebene liegt: dessen Pixellage ist riesig (|ndc| >> 1) und springt bei kleinster
@@ -3339,11 +3363,18 @@ static int ip_match(ip_list_t *A, ip_list_t *B, int log)
                 continue;
             }
             if (ip_still(a, o)) { nstatic++; o->why = IP_W_STATIC; }
+            else if (w448_eye_blind(a, o)) { nnomatch++; o->why = IP_W_NOMATCH; st_w448_eye++; } /* FIX(W448): exakt */
             else if (ip_plausible(a, o, g_cfg.interp_maxjump)) { o->flag = 1; nlerp++; o->why = IP_W_LERP; }
             else if (g_cfg.interp_p2rej && ip_p2rej_ok(a, o, g_cfg.interp_maxjump)) { o->flag = 1; nlerp++; o->why = IP_W_LERP; st_p2rej++; } /* W406 */
             else if (g_cfg.interp_p2hom && !g_sba_loc && !g_cfg.vr_enable && ip_rej_relax(A, B, a, o, g_cfg.interp_maxjump)) {
                 /* FIX(W429): reject-Zaehler bleibt (Schnitt-Erkennung "viele unplausible Spruenge" unveraendert) */
                 nreject++; o->flag = 1; o->why = IP_W_LERP; st_p2hom[ip_mvp_affine(o->mvp) ? 1 : 0]++;
+            }
+            else if (g_sba_loc && g_cfg.loc_sky_fix && o->lsk && a->lsk && !g_cfg.vr_enable) {
+                /* W435 LOC-SKY-LAG-REG: Himmel in beiden Listen (Spalten x, y, w = Kamera) -> der Matrix-Lerp zeigt ihn genau
+                 * mit der Zwischenkamera der Welt (Bezugs-Vertices des grossen Quads springen beim Drehen > interp_maxjump).
+                 * reject-Zaehler bleibt (Schnitt-Erkennung unveraendert, wie W429). */
+                nreject++; o->flag = 1; o->why = IP_W_LERP; InterlockedIncrement(&sk_rejlerp);
             }
             else { nreject++; o->why = IP_W_REJECT; if (g_sba_loc && g_cfg.interp_diag >= 1) { li_rej_note(a, o); } }
             if (iwbest >= 0 && o->why == IP_W_LERP) { ip_iwrong_log(A, B, i, found, iwbest); } /* DIAG(POPIN,W91) */
@@ -5473,8 +5504,31 @@ static int ip_ph_is_hud(const ip_op_t *o)
  * Modell-Ursprung naeher als photo_cine_self/10 Einheiten an der Spielkamera liegt. Lage aus der mvp und der
  * Spiel-Projektion des Draws (Zeilenvektoren: Ursprung -> Clip = Zeile 3; x = m12/a, y = m13/b, Tiefe = w = m15).
  * Draws mit Pixel-Matrix (P2/RHW, auf der CPU transformiert) tragen keine Sicht-Lage und bleiben. */
+/* W445 PHOTO-CINE-SELF: kleinster Abstand zur Spielkamera aus Modell-Ursprung und den 4 Bezugs-Vertices (pref: erster,
+ * 1/3, 2/3, letzter) in Kamera-Sicht (x = c0/a, y = c1/b, Tiefe = w). 1e30 = keine Sicht-Projektion. */
+static float ip_ph_near_ref(const ip_op_t *o)
+{
+    float a = o->prj[0], b = o->prj[1], x, y, z, d2, best;
+    int q;
+    if (a <= 1e-4f || b <= 1e-4f) { return 1e30f; }
+    x = o->mvp[12] / a;
+    y = o->mvp[13] / b;
+    z = o->mvp[15];
+    best = x * x + y * y + z * z;
+    for (q = 0; q < 4; q++) {
+        float c[4];
+        ip_clip(o->pref[q], o->mvp, c);
+        x = c[0] / a;
+        y = c[1] / b;
+        z = c[3];
+        d2 = x * x + y * y + z * z;
+        if (d2 < best) { best = d2; }
+    }
+    return sqrtf(best);
+}
 static unsigned ip_ph_nself; /* ausgelassene Draws des eigenen VT (cine) */
-static int ip_ph_is_self(const ip_op_t *o)
+static unsigned ip_ph_nextra; /* W445: davon Luecke (Draw mitten in der Folge eigener Teile) */
+static int ip_ph_is_self_dist(const ip_op_t *o)
 {
     const vsh_prog_t *vp;
     float a, b, x, y, z, r;
@@ -5497,6 +5551,68 @@ static int ip_ph_is_self(const ip_op_t *o)
                (double)y, (double)z, sqrt((double)(x * x + y * y + z * z)));
     }
     return 1;
+}
+/* W445 PHOTO-CINE-SELF: Merker je Op, einmal je Foto-Wiedergabe (ip_ph_self_prep): 1 = eigener Teil (Abstandsregel),
+ * 3 = Luecke (3D-Draw mitten in der Folge eigener Teile). Gepruefte und verworfene Merkmale: BERICHT_M2 W445 (P2-Kopien
+ * ohne Bildwirkung, der P2-Draw direkt vor den eigenen Teilen ist der Himmel, naechster Vertex trifft Gelaende/Strassen). */
+static unsigned char ip_ph_self_f[IP_OPS_MAX];
+static const ip_list_t *ip_ph_self_L; /* NULL = neu bestimmen (je sb_interp_photo_render) */
+static int ip_ph_world3d(const ip_op_t *o)
+{
+    return o->kind == IP_DRAW && o->cls && o->sh_rtv == g_ish[ip_ph.wld].rtv;
+}
+/* W445: Sichtlage-Abstand des Ursprungs (wie ip_ph_is_self_dist, ohne Schwelle); 1e30 = keine Sicht-Matrix/P2 */
+static float ip_ph_org_dist(const ip_op_t *o)
+{
+    const vsh_prog_t *vp = o->pvs ? vsh_program(o->pvs) : NULL;
+    float a = o->prj[0], b = o->prj[1], x, y, z;
+    if ((vp && vp->kind == 2) || a <= 1e-4f || b <= 1e-4f) { return 1e30f; }
+    if (o->mvp[3] == 0.0f && o->mvp[7] == 0.0f && o->mvp[11] == 0.0f && o->mvp[15] == 1.0f) { return 1e30f; }
+    x = o->mvp[12] / a;
+    y = o->mvp[13] / b;
+    z = o->mvp[15];
+    return sqrtf(x * x + y * y + z * z);
+}
+static void ip_ph_self_prep(const ip_list_t *B)
+{
+    unsigned i, j, n = B->nops < IP_OPS_MAX ? B->nops : IP_OPS_MAX, nown = 0, nsw = 0;
+    float r2 = (float)g_cfg.photo_cine_self * 0.2f; /* Lueckenregel: hoechstens doppelte Reichweite */
+    ip_ph_self_L = B;
+    memset(ip_ph_self_f, 0, n);
+    for (i = 0; i < n; i++) {
+        if (ip_ph_is_self_dist(&B->ops[i])) { ip_ph_self_f[i] = 1; nown++; }
+    }
+    if (!nown) { return; }
+    /* Luecke: 3D-Draw (Sicht-Matrix) zwischen zwei eigenen Teilen der Zeichenfolge (naechster 3D-Draw davor und danach
+     * im Welt-RT eigen) und naeher als 2x Reichweite - z. B. das Dreieck (Sprite) ~6,2-6,8 vor dem Auge zwischen Rohr
+     * und Arm, das mit der Kamera mitfaehrt (Zensus W445). Fremde Objekte stehen nicht mitten in der VT-Folge. */
+    for (j = 0; j < n; j++) {
+        unsigned p, q;
+        if (ip_ph_self_f[j] || !ip_ph_world3d(&B->ops[j]) || ip_ph_org_dist(&B->ops[j]) > r2) { continue; }
+        for (p = j; p-- > 0;) { if (ip_ph_world3d(&B->ops[p])) { break; } }
+        for (q = j + 1; q < n; q++) { if (ip_ph_world3d(&B->ops[q])) { break; } }
+        if (p < j && q < n && ip_ph_self_f[p] == 1 && ip_ph_self_f[q] == 1) { ip_ph_self_f[j] = 3; nsw++; }
+    }
+    if (g_cfg.photo_cine_diag & 1) { /* DIAG(W445): je Wiedergabe-Liste Merker (begrenzt) */
+        static unsigned s_nsum;
+        if (s_nsum < 400u) {
+            char t[1024];
+            int k = 0;
+            s_nsum++;
+            t[0] = 0;
+            for (j = 0; j < n && k < (int)sizeof t - 24; j++) {
+                if (ip_ph_self_f[j]) { k += _snprintf_s(t + k, sizeof t - (size_t)k, _TRUNCATE, " %u:%u/%u", j, ip_ph_self_f[j], B->ops[j].nv); }
+            }
+            HLOG_I("PHOTO cine: Merker ser=%u eigen=%u Luecke=%u |%s", B->serial, nown, nsw, t);
+        }
+    }
+}
+static int ip_ph_is_self(const ip_list_t *B, unsigned i)
+{
+    if (!ip_ph.cine || ip_ph.wld < 0 || i >= IP_OPS_MAX) { return 0; }
+    if (ip_ph_self_L != B) { ip_ph_self_prep(B); }
+    if (ip_ph_self_f[i] > 1) { ip_ph_nextra++; }
+    return ip_ph_self_f[i] != 0;
 }
 /* W428: Einblendung (Cinematic): Draw ins Monitor-RT, der nicht das Welt-RT kopiert (HUD-Glyphen, Marken, Radar,
  * FRONT VIEW, Texte), bzw. Draw in den Backbuffer, der weder das Monitor-RT noch das Welt-RT zeigt (Einblendungen
@@ -5876,6 +5992,7 @@ static int li_vpf_view(double v[4])
     double w;
     if (!loc_aim_get(&P) || !P.have_pst) { InterlockedIncrement(&li_vpf_n[0]); return 0; }
     r = loc_vpf_preview(P.last_in, F, &q);
+    if (r) (void)loc_aimassist_preview(&P.pst, P.last_in, F); /* W442: naechster Poll mit Zielhilfe (sonst Sicht-Ruckeln) */
     QueryPerformanceCounter(&now);
     AcquireSRWLockExclusive(&li_vpf_lk);
     if (r && q == P.poll) {
@@ -5909,6 +6026,156 @@ static void li_vpf_note(const ip_list_t *B, float t, int mode, double yaw, doubl
     r.syaw = (float)syaw; r.sx = (float)sx;
     AcquireSRWLockExclusive(&lk);
     if (!f) { f = (FILE *)loc_aim_diag_file("locvpf_rep.bin"); }
+    if (f) { fwrite(&r, sizeof r, 1, f); }
+    ReleaseSRWLockExclusive(&lk);
+}
+
+/* ---------- W439 LOC-RETICLE-JUMP: Messung Fadenkreuz je Wiedergabe ----------
+ * Soll = angezeigte Fadenkreuz-Mitte laut Sicht je Bild (bx + rx); gezeichnet = Mitte, wie die Fadenkreuz-Draws dieser
+ * Wiedergabe tatsaechlich liegen (Bezugs-Vertex gelerpt bzw. exakt aus Tick N, plus Verschiebung M[1], minus Versatz des
+ * Draws zur simulierten Mitte). Nur Spielzustand und Bildlagen, keine Eingaben. */
+typedef struct {
+    int stage;            /* 0 = nicht in LoC/aus, 1 = B ohne Vorhersage (la_ok 0), 2 = normal */
+    int mode;             /* li_vpf_view-Rueckgabe (0..3) */
+    double tx, ty;        /* Soll-Mitte (NDC) */
+    double bx, by;        /* simulierte Mitte (lerp A/B) */
+    double vy, vp;        /* angezeigte Sicht Gier/Nick (rad) */
+    double rx, ry;        /* Fadenkreuz-Verschiebung dieser Wiedergabe */
+} li_ret_t;
+static volatile LONG lr_rep, lr_ret, lr_lost, lr_exact, lr_nola, lr_jumps, lr_jumps_all;
+static volatile LONG lr_retx; /* W439: Fadenkreuz-Draws mit Verschiebung gegen B (exakt gezeichnet) */
+static volatile LONG lr_rjmv; /* W439: Fadenkreuz-Kandidaten, die die Bewegungs-Pruefung verwarf */
+/* W444: Listen mit Fadenkreuz, Teile je Regel (Form/Partner/Start), verworfene fremde Start-Kandidaten, Listen mit um das Gedaechtnis ergaenzter Vorlage */
+static volatile LONG lrm_st_lists, lrm_st_form, lrm_st_pair, lrm_st_seed, lrm_st_fremd, lrm_st_mem;
+static double lr_err_max;
+static int lr_hist_n;
+static double lr_hist[3][2];
+static LONGLONG lr_hist_q[3];
+/* F11: Sprung-Zaehler (nur Zaehler) */
+unsigned loc_ret_jumps(void) { return (unsigned)lr_jumps_all; }
+static void li_ret_note(const ip_list_t *B, const ip_list_t *A, int lerp_ok, float t, int on, const li_ret_t *rr,
+                        float M[][16])
+{
+    static FILE *f;
+    static SRWLOCK lk = SRWLOCK_INIT;
+    struct {
+        LONGLONG q; unsigned ser, aser; float t; int lerp_ok, stage, mode, on, retB, retA, nret, nlerp, nlost;
+        float tx, ty, gx, gy, bx, by, vy, vp, rx, ry, rcBx, rcBy, rn0x, rn0y; unsigned rb, rjB, nrA;
+        int fi, fm; float dx, dy; /* erster Fadenkreuz-Draw: Op-Index, Partner in A, gezeichnete Lage (Bezugs-Vertex) */
+        int npl; float epl;       /* Teile ohne Markierung in B, deren Partner in A Fadenkreuz war; groesste Abweichung vom Soll */
+        float gx2, gy2, epl2, emk2; /* W444: Mitte mit Teil-Versatz je Teil (gelerpt zwischen A und B), groesste Abweichung je Teil
+                                   * vom eigenen Soll (Lage ohne Vorhersage + Verschiebung) fuer unmarkierte bzw. markierte Teile */
+    } r;
+    LARGE_INTEGER q;
+    double gx = 0.0, gy = 0.0, gx2 = 0.0, gy2 = 0.0;
+    int n = 0, nl = 0, nlost = 0;
+    unsigned i;
+    if (!g_sba_loc) { return; }
+    memset(&r, 0, sizeof r);
+    r.rn0x = r.rn0y = 9.0f;
+    InterlockedIncrement(&lr_rep);
+    if (rr->stage == 2 && B->la_ret) {
+        for (i = 0; i < B->nops; i++) {
+            const ip_op_t *o = &B->ops[i];
+            double px, py;
+            int lp;
+            if (o->kind != IP_DRAW || !LA_IS_RET(o->law)) { continue; }
+            lp = lerp_ok && o->flag && o->match >= 0 && A && (unsigned)o->match < A->nops;
+            px = o->rn[0][0]; py = o->rn[0][1];
+            if (lp) { const ip_op_t *a = &A->ops[o->match]; px = a->rn[0][0] + (px - a->rn[0][0]) * (double)t; py = a->rn[0][1] + (py - a->rn[0][1]) * (double)t; nl++; }
+            if (LA_ON(on, o->law)) { px += M[o->law - 1][12]; py += M[o->law - 1][13]; } /* angewandte Verschiebung */
+            gx += px - ((double)o->rn[0][0] - B->la_rc[0]);
+            gy += py - ((double)o->rn[0][1] - B->la_rc[1]);
+            { /* W444: Soll je Teil = eigener Versatz zur simulierten Mitte (gelerpt wie der Draw) + Soll-Mitte */
+                double ox = (double)o->rn[0][0] - B->la_rc[0], oy = (double)o->rn[0][1] - B->la_rc[1], e2;
+                if (lp && A->la_ok) {
+                    const ip_op_t *a = &A->ops[o->match];
+                    ox = ((double)a->rn[0][0] - A->la_rc[0]) + (ox - ((double)a->rn[0][0] - A->la_rc[0])) * (double)t;
+                    oy = ((double)a->rn[0][1] - A->la_rc[1]) + (oy - ((double)a->rn[0][1] - A->la_rc[1])) * (double)t;
+                }
+                gx2 += px - ox; gy2 += py - oy;
+                e2 = sqrt((px - ox - rr->tx) * (px - ox - rr->tx) + (py - oy - rr->ty) * (py - oy - rr->ty));
+                if (e2 > r.emk2) { r.emk2 = (float)e2; }
+            }
+            if (!n) { r.rn0x = o->rn[0][0]; r.rn0y = o->rn[0][1]; r.fi = (int)i; r.fm = o->match; r.dx = (float)px; r.dy = (float)py; }
+            n++;
+        }
+        if (A && A->la_ret && lerp_ok) { /* Teile, die B nicht markierte (ohne Verschiebung gezeichnet) */
+            for (i = 0; i < B->nops; i++) {
+                const ip_op_t *o = &B->ops[i];
+                const ip_op_t *a;
+                double px, py, e;
+                if (o->kind != IP_DRAW || LA_IS_RET(o->law) || o->match < 0 || (unsigned)o->match >= A->nops) { continue; }
+                a = &A->ops[o->match];
+                if (!LA_IS_RET(a->law)) { continue; }
+                px = o->rn[0][0]; py = o->rn[0][1];
+                if (o->flag) { px = a->rn[0][0] + (px - a->rn[0][0]) * (double)t; py = a->rn[0][1] + (py - a->rn[0][1]) * (double)t; }
+                px -= (double)a->rn[0][0] - A->la_rc[0];
+                py -= (double)a->rn[0][1] - A->la_rc[1];
+                e = sqrt((px - rr->tx) * (px - rr->tx) + (py - rr->ty) * (py - rr->ty));
+                r.npl++;
+                if (e > r.epl) { r.epl = (float)e; }
+                /* W444: fehlende Verschiebung = Abweichung vom eigenen Soll (gelerpt rx, exakt Soll - Mitte B) */
+                e = o->flag ? sqrt(rr->rx * rr->rx + rr->ry * rr->ry)
+                            : sqrt((rr->tx - B->la_rc[0]) * (rr->tx - B->la_rc[0]) + (rr->ty - B->la_rc[1]) * (rr->ty - B->la_rc[1]));
+                if (e > r.epl2) { r.epl2 = (float)e; }
+            }
+        }
+    } else if (A && A->la_ret && lerp_ok) {
+        /* Fadenkreuz in A markiert, in B nicht (bzw. B ohne Vorhersage): Partner der A-Fadenkreuz-Draws ohne Verschiebung */
+        for (i = 0; i < B->nops; i++) {
+            const ip_op_t *o = &B->ops[i];
+            const ip_op_t *a;
+            double px, py;
+            if (o->kind != IP_DRAW || o->match < 0 || (unsigned)o->match >= A->nops) { continue; }
+            a = &A->ops[o->match];
+            if (!LA_IS_RET(a->law)) { continue; }
+            px = o->rn[0][0]; py = o->rn[0][1];
+            if (o->flag) { px = a->rn[0][0] + (px - a->rn[0][0]) * (double)t; py = a->rn[0][1] + (py - a->rn[0][1]) * (double)t; nl++; }
+            gx += px - ((double)a->rn[0][0] - A->la_rc[0]);
+            gy += py - ((double)a->rn[0][1] - A->la_rc[1]);
+            nlost++;
+            n++;
+        }
+    }
+    if (n) { gx /= n; gy /= n; gx2 /= n; gy2 /= n; }
+    if (rr->stage == 1) { InterlockedIncrement(&lr_nola); }
+    if (n && !nlost) { InterlockedIncrement(&lr_ret); }
+    if (nlost) { InterlockedIncrement(&lr_lost); }
+    if (n && nl < n) { InterlockedIncrement(&lr_exact); }
+    QueryPerformanceCounter(&q);
+    { /* Sprung: gezeichnete Mitte weicht vom Mittel der Nachbarn ab und kehrt zurueck (Nachbar-Abstand klein) */
+        AcquireSRWLockExclusive(&lk);
+        if (n) {
+            double e;
+            lr_hist[0][0] = lr_hist[1][0]; lr_hist[0][1] = lr_hist[1][1]; lr_hist_q[0] = lr_hist_q[1];
+            lr_hist[1][0] = lr_hist[2][0]; lr_hist[1][1] = lr_hist[2][1]; lr_hist_q[1] = lr_hist_q[2];
+            lr_hist[2][0] = gx; lr_hist[2][1] = gy; lr_hist_q[2] = q.QuadPart;
+            if (lr_hist_n < 3) { lr_hist_n++; }
+            if (lr_hist_n == 3 && (double)(lr_hist_q[2] - lr_hist_q[0]) * 1000.0 / (double)ip_qpf.QuadPart < 120.0) {
+                double mx = 0.5 * (lr_hist[0][0] + lr_hist[2][0]), my = 0.5 * (lr_hist[0][1] + lr_hist[2][1]);
+                double ex = lr_hist[1][0] - mx, ey = lr_hist[1][1] - my;
+                double nx = lr_hist[2][0] - lr_hist[0][0], ny = lr_hist[2][1] - lr_hist[0][1];
+                e = sqrt(ex * ex + ey * ey);
+                if (e > lr_err_max) { lr_err_max = e; }
+                if (e > 0.02 && e > 2.0 * sqrt(nx * nx + ny * ny)) { InterlockedIncrement(&lr_jumps); InterlockedIncrement(&lr_jumps_all); }
+            }
+        } else {
+            lr_hist_n = 0;
+        }
+        ReleaseSRWLockExclusive(&lk);
+    }
+    if (!(g_cfg.loc_ret_diag & 1) || (!g_cfg.loc_replay_tick[0] && !g_cfg.loc_steps[0])) { return; }
+    r.q = q.QuadPart; r.ser = B->serial; r.aser = A ? A->serial : 0u; r.t = t; r.lerp_ok = lerp_ok; r.stage = rr->stage;
+    r.mode = rr->mode; r.on = on; r.retB = B->la_ret; r.retA = A ? A->la_ret : 0; r.nret = n; r.nlerp = nl; r.nlost = nlost;
+    r.tx = (float)rr->tx; r.ty = (float)rr->ty; r.gx = n ? (float)gx : 9.0f; r.gy = n ? (float)gy : 9.0f;
+    r.gx2 = n ? (float)gx2 : 9.0f; r.gy2 = n ? (float)gy2 : 9.0f;
+    r.bx = (float)rr->bx; r.by = (float)rr->by; r.vy = (float)rr->vy; r.vp = (float)rr->vp; r.rx = (float)rr->rx; r.ry = (float)rr->ry;
+    r.rcBx = B->la_rc[0]; r.rcBy = B->la_rc[1];
+    r.rjB = B->la_rjmv; r.nrA = A ? A->la_nret : 0u;
+    { loc_rb_hud h; r.rb = loc_rb_hud_read(&h) ? h.rb_total : 0u; }
+    AcquireSRWLockExclusive(&lk);
+    if (!f) { f = (FILE *)loc_aim_diag_file("locret_rep.bin"); }
     if (f) { fwrite(&r, sizeof r, 1, f); }
     ReleaseSRWLockExclusive(&lk);
 }
@@ -5951,12 +6218,28 @@ static int ip_hm_prep(const ip_list_t *B, const ip_list_t *A, float t, const flo
     return on;
 }
 
-static int ip_la_prep0(const ip_list_t *B, const ip_list_t *A, int lerp_ok, float t, int dbg, int vr, float M[LA_NM][16]);
+static int ip_la_prep0(const ip_list_t *B, const ip_list_t *A, int lerp_ok, float t, int dbg, int vr, float M[LA_NM][16],
+                       li_ret_t *rr);
 /* Rueckgabe Bitmaske: 1 = Kamera-Korrektur M[0] (o->law 1), 2 = Fadenkreuz-Verschiebung M[1] (o->law 2),
  * 4 << j = Marken des VT j (W394). */
 static int ip_la_prep(const ip_list_t *B, const ip_list_t *A, int lerp_ok, float t, int dbg, int vr, float M[LA_NM][16])
 {
-    int on = ip_la_prep0(B, A, lerp_ok, t, dbg, vr, M);
+    li_ret_t rr;
+    int on;
+    memset(&rr, 0, sizeof rr);
+    on = ip_la_prep0(B, A, lerp_ok, t, dbg, vr, M, &rr);
+    if (rr.stage) { li_ret_note(B, A, lerp_ok, t, on, &rr, M); } /* W439: Fadenkreuz-Zeitreihe/Sprung-Zaehler */
+    if (g_sba_loc && (g_cfg.loc_wlag_diag & 4) && !dbg && !vr && B->la_ok) { /* DIAG(W435): Himmel in Wiedergaben mit Sicht-Korrektur */
+        InterlockedIncrement(&sk_rep);
+        if (on & 1) {
+            InterlockedIncrement(&sk_rep_on);
+            InterlockedExchangeAdd(&sk_rep_sky, (LONG)B->la_nsk);
+            InterlockedExchangeAdd(&sk_rep_skyc, (LONG)B->la_nskl);
+            InterlockedExchangeAdd(&sk_rep_na, (LONG)B->la_nna);
+            sk_ang_sum += sk_last_ang; /* nur Anzeige-Statistik */
+            if (sk_last_ang > sk_ang_max) { sk_ang_max = sk_last_ang; }
+        }
+    }
     if (g_sba_loc && g_cfg.loc_hud_predict && !dbg && !vr && !ip_ph.on && !ip_pl_on && g_cfg.interp_mode != 1) {
         if (B->hm_ok && B->hm_vt) { on |= ip_hm_prep(B, lerp_ok ? A : NULL, t, (on & 1) ? M[0] : NULL, M); }
         if (B->hm_ncmp && fabs(B->hm_dyaw) > 1e-6) { /* Kompassband: eigene Gier angezeigt - simuliert (W390) */
@@ -5976,12 +6259,14 @@ static int ip_la_prep(const ip_list_t *B, const ip_list_t *A, int lerp_ok, float
     }
     return on;
 }
-static int ip_la_prep0(const ip_list_t *B, const ip_list_t *A, int lerp_ok, float t, int dbg, int vr, float M[LA_NM][16])
+static int ip_la_prep0(const ip_list_t *B, const ip_list_t *A, int lerp_ok, float t, int dbg, int vr, float M[LA_NM][16],
+                       li_ret_t *rr)
 {
     static const double up[3] = {0.0, 1.0, 0.0};
     double dy, dp, Cd[16], rx, ry;
     int i, apply, on = 0;
     if (!g_sba_loc || dbg || vr || ip_ph.on || ip_pl_on || g_cfg.interp_mode == 1 || !B->la_ok) {
+        if (g_sba_loc && !dbg && !vr && !ip_ph.on && !ip_pl_on && g_cfg.interp_mode != 1 && g_cfg.loc_local_aim) { rr->stage = 1; }
         return 0;
     }
     apply = g_cfg.loc_local_aim != 0;
@@ -6023,8 +6308,11 @@ static int ip_la_prep0(const ip_list_t *B, const ip_list_t *A, int lerp_ok, floa
         if ((g_cfg.loc_hud_diag & 4) && (g_cfg.loc_replay_tick[0] || g_cfg.loc_steps[0])) {
             li_vpf_note(B, t, mode, sy + dy / LA_TURN_K, bx + rx, by + ry, sy, bx);
         }
+        rr->stage = 2; rr->mode = mode; rr->tx = bx + rx; rr->ty = by + ry; rr->bx = bx; rr->by = by; /* W439 */
+        rr->vy = sy + dy / LA_TURN_K; rr->vp = sp + dp / LA_NICK_K; rr->rx = rx; rr->ry = ry;
     }
     if (g_cfg.loc_aim_diag & 32) { li_la_note(B, t, dy, dp, apply, rx, ry); }
+    sk_last_ang = sqrt(dy * dy + dp * dp); /* DIAG(W435): Winkel der Sicht-Korrektur dieser Wiedergabe (rad) */
     if (!apply) { return 0; }
     InterlockedIncrement(&li_la_rep);
     if (fabs(dy) + fabs(dp) >= 1e-6 && la_cam_corr(Cd, B->la_vp, up, dy, dp)) {
@@ -6037,6 +6325,22 @@ static int ip_la_prep0(const ip_list_t *B, const ip_list_t *A, int lerp_ok, floa
             M[1][0] = M[1][5] = M[1][10] = M[1][15] = 1.0f;
             M[1][12] = (float)la_clamp(rx, -1.0, 1.0); M[1][13] = (float)la_clamp(ry, -1.0, 1.0);
             on |= 2;
+        }
+        if (g_cfg.loc_ret_fix) {
+            /* W439 LOC-RETICLE-JUMP: Die Verschiebung rx = Soll - lerp(A, B, t) der simulierten Mitte gilt nur fuer
+             * gelerpte Fadenkreuz-Draws. Draws, die im Zwischenbild exakt aus Tick N gezeichnet werden (Sprung zu gross
+             * fuer die strenge 2D-Zuordnung, o->law LA_LAW_RETX), liegen bei der Mitte von B -> Soll - B. Vorher lag das
+             * Fadenkreuz dort bei jedem Tick um (1 - t) * Tickschritt neben dem Soll (Ruck beim schnellen Zielen). */
+            double e2[2], ex, ey;
+            lh_ret_exact_shift(rx, ry, A ? A->la_rc : B->la_rc, B->la_rc, (double)t, lerp_ok && A && A->la_ok, e2);
+            ex = e2[0]; ey = e2[1];
+            if (fabs(ex) + fabs(ey) >= 1e-5) {
+                float *m = M[LA_LAW_RETX - 1];
+                memset(m, 0, 64);
+                m[0] = m[5] = m[10] = m[15] = 1.0f;
+                m[12] = (float)la_clamp(ex, -1.0, 1.0); m[13] = (float)la_clamp(ey, -1.0, 1.0);
+                on |= 1 << (LA_LAW_RETX - 1);
+            }
         }
     }
     if (on) { InterlockedIncrement(&li_la_on); }
@@ -6183,7 +6487,7 @@ static void ip_replay_ex(ip_list_t *B, int bi, ip_list_t *A, int ai, float t, in
         if (ip_pl_on && o->nolerp && (ip_pl_mfx & (o->nolerp == MFX_WASH ? 1u : 2u))) { ip_pl_nmfx++; continue; } /* W193: monitor_fx aus */
         if (ip_ph.on && ip_ph.hud_off && ip_ph_is_hud(o)) { ip_ph_nhud++; continue; } /* W290: HUD aus (nur Foto) */
         if (ip_ph.on && ip_ph.cine && o->kind == IP_DRAW) { /* W428 PHOTO-CINEMATIC (nur Foto-Wiedergabe) */
-            if (ip_ph_is_self(o)) { ip_ph_nself++; continue; } /* eigener VT im Welt-RT */
+            if (ip_ph_is_self(B, i)) { ip_ph_nself++; continue; } /* eigener VT im Welt-RT (W445: mit Luecke) */
             if (o->nolerp) { ip_ph_ncmfx++; continue; } /* Monitor-Effekt (Korn-Wash/Stoerzeilen) */
             if (ip_ph_cine_ovl(o, B->bbref >= 0 && o->sh_rtv == g_ish[B->bbref].rtv)) { ip_ph_ncovl++; continue; } /* Einblendungen (Radar, FRONT VIEW, Marken, Texte) */
         }
@@ -8276,6 +8580,40 @@ static void pd_stat_log(LONGLONG now)
             HLOG_I("LOCINTERP wlag: %.1fs Himmel mit vorhergesagter Kamera: Listen=%ld Draws=%ld", secs,
                    (long)InterlockedExchange(&wl_fix_lists, 0), (long)InterlockedExchange(&wl_fix_draws, 0));
         }
+        if (g_cfg.loc_sky_fix || (g_cfg.loc_wlag_diag & 4)) { /* W435 LOC-SKY-LAG-REG: eigene Zeile (LOCINTERP stat bleibt unveraendert) */
+            HLOG_I("LOCINTERP sky435: %.1fs Himmel mit Sicht-Korrektur: Listen=%ld Draws=%ld | Himmel unplausibel->Lerp=%ld", secs,
+                   (long)InterlockedExchange(&sk_lists, 0), (long)InterlockedExchange(&sk_draws, 0),
+                   (long)InterlockedExchange(&sk_rejlerp, 0));
+            if (g_cfg.loc_wlag_diag & 4) { /* DIAG(W435) */
+                long rep = InterlockedExchange(&sk_rep, 0), ron = InterlockedExchange(&sk_rep_on, 0);
+                long rsk = InterlockedExchange(&sk_rep_sky, 0), rskc = InterlockedExchange(&sk_rep_skyc, 0);
+                long rna = InterlockedExchange(&sk_rep_na, 0), kl = InterlockedExchange(&sk_klists, 0);
+                long kls = InterlockedExchange(&sk_klists_sky, 0), klh = InterlockedExchange(&sk_klists_has, 0);
+                HLOG_I("LOCWLAG sicht: %.1fs Wiedergaben=%ld mit Sicht-Korrektur=%ld (Winkel Mittel %.3f max %.3f Grad) | darin "
+                       "Himmel-Draws=%ld korrigiert=%ld (%.1f %%) sonstige nicht-affin=%ld | Listen mit K=%ld Himmel mit K=%ld Himmel erkannt=%ld",
+                       secs, rep, ron, ron ? sk_ang_sum / (double)ron * 57.29577951 : 0.0, sk_ang_max * 57.29577951, rsk, rskc,
+                       rsk ? 100.0 * (double)rskc / (double)rsk : 0.0, rna, kl, kls, klh);
+                sk_ang_sum = sk_ang_max = 0.0;
+            }
+        }
+        if (g_cfg.loc_ret_fix) { /* W439 LOC-RETICLE-JUMP: eigene Zeile (LOCINTERP stat bleibt unveraendert) */
+            HLOG_I("LOCINTERP ret439: %.1fs Fadenkreuz-Draws exakt aus Tick N, Verschiebung gegen B=%ld | Kandidaten "
+                   "verworfen (Bewegung)=%ld", secs, (long)InterlockedExchange(&lr_retx, 0), (long)InterlockedExchange(&lr_rjmv, 0));
+        }
+        if (g_cfg.loc_ret_mark) { /* W444 LOC-RETICLE-MARK: eigene Zeile */
+            HLOG_I("LOCINTERP retmark444: %.1fs Listen mit Fadenkreuz=%ld | Teile ueber Form=%ld Partner=%ld Start-Pruefung=%ld | "
+                   "fremd verworfen=%ld | Vorlage um Gedaechtnis ergaenzt=%ld", secs, (long)InterlockedExchange(&lrm_st_lists, 0),
+                   (long)InterlockedExchange(&lrm_st_form, 0), (long)InterlockedExchange(&lrm_st_pair, 0),
+                   (long)InterlockedExchange(&lrm_st_seed, 0), (long)InterlockedExchange(&lrm_st_fremd, 0),
+                   (long)InterlockedExchange(&lrm_st_mem, 0));
+        }
+        if (g_cfg.loc_ret_diag & 2) { /* DIAG(W439 LOC-RETICLE-JUMP): eigene Zeile */
+            HLOG_I("LOCRET: %.1fs Wiedergaben=%ld mit Fadenkreuz=%ld verloren=%ld exakt=%ld ohne Vorhersage=%ld | Spruenge=%ld (gesamt %ld) "
+                   "Abweichung max %.4f NDC", secs, (long)InterlockedExchange(&lr_rep, 0), (long)InterlockedExchange(&lr_ret, 0),
+                   (long)InterlockedExchange(&lr_lost, 0), (long)InterlockedExchange(&lr_exact, 0), (long)InterlockedExchange(&lr_nola, 0),
+                   (long)InterlockedExchange(&lr_jumps, 0), (long)lr_jumps_all, lr_err_max);
+            lr_err_max = 0.0;
+        }
         if (g_cfg.loc_stat_fix) { /* W415 LOC-STATIC-LAG: eigene Zeile (LOCINTERP stat bleibt unveraendert) */
             HLOG_I("LOCINTERP stat415: %.1fs Welt-Kamera ok=%u verworfen=%u keine=%u | Gelaende mit Welt-Kamera=%u Weltkoordinaten ohne Partner mit Welt-Kamera=%u",
                    secs, st_w415_cam, st_w415_rej, st_w415_nocam, st_w415_rzm, st_w415_nm);
@@ -8285,6 +8623,10 @@ static void pd_stat_log(LONGLONG now)
             HLOG_I("LOCINTERP rawrzb: %.1fs rawlerp->Matrix-Lerp=%u (>=1000 Vertices %u) Gelaende mit Kamera=%u Kamera passt nicht=%u bewegt=%u",
                    secs, st_w410_rzb, st_w410_big, st_w410_rzm, st_w410_cam, st_w410_mov);
             st_w410_rzb = st_w410_big = st_w410_cam = st_w410_mov = st_w410_rzm = 0;
+        }
+        if (g_cfg.loc_interp_eyeblind) { /* W448 LOC-CHAFF-LOOK: eigene Zeile */
+            HLOG_I("LOCINTERP eye448: %.1fs Netze hinter der Kamera exakt statt Matrix-Lerp=%u", secs, st_w448_eye);
+            st_w448_eye = 0;
         }
         if (g_cfg.interp_diag >= 1 && li_rj_n) { /* DIAG(W340) */
             HLOG_I("LOCINTERP reject: %u (w-Wechsel %u, Sprung <0.75 %u, <1 %u, <2 %u, >=2 %u NDC; >=1000 Vertices %u), davon Kamera-Lerp %u",
@@ -9032,12 +9374,16 @@ ID3D11Resource *sb_interp_photo_render(const sb_ph_rep_t *ph, sb_pl_info_t *inf,
     ip_ph_ncam = ip_ph_nred = ip_ph_nclr = 0;
     ip_ph_nhud = 0;
     ip_ph_nself = ip_ph_ncmfx = ip_ph_ncovl = 0;
+    ip_ph_nextra = 0;
+    ip_ph_self_L = NULL; /* W445: Merker eigener VT je Wiedergabe neu (Liste/Reichweite koennen wechseln) */
     r = ip_pl_render(inf, ph);
+    ip_ph_self_L = NULL;
     if (ph && ph->cine) { /* W428 */
         static unsigned nlog;
-        if (nlog++ < 12u) {
+        if (nlog++ < 12u || (g_cfg.photo_cine_diag & 1)) { /* W445: mit DIAG jede Wiedergabe */
             HLOG_I("PHOTO: Cinematic - ausgelassen: %u Draws des eigenen VT (Welt-RT e%d), %u Monitor-Effekt, %u Einblendungen "
-                   "(Monitor-RT e%d / Backbuffer)", ip_ph_nself, ph->wld, ip_ph_ncmfx, ip_ph_ncovl, ph->mon);
+                   "(Monitor-RT e%d / Backbuffer); W445: davon %u Luecke, Reichweite %d", ip_ph_nself, ph->wld, ip_ph_ncmfx,
+                   ip_ph_ncovl, ph->mon, ip_ph_nextra, g_cfg.photo_cine_self);
         }
     }
     if (ph && ph->hud_off && (ip_ph_nhud || ph->mon < 0)) { /* W290 */
@@ -9346,10 +9692,12 @@ static void ip_ph_quant(ip_list_t *B, int best, unsigned w_tw, unsigned w_lw)
 static void ip_ph_selfdiag(ip_list_t *B, int best)
 {
     unsigned i, n = 0;
+    const ip_list_t *A = NULL; /* W445 DIAG: Vortick (Partner o->match) */
+    if (ip_nhist >= 2 && g_ipl[ip_hist[ip_nhist - 2]].serial == B->prevser && B->pair_ok) { A = &g_ipl[ip_hist[ip_nhist - 2]]; }
     for (i = 0; i < B->nops && n < 400u; i++) {
         const ip_op_t *o = &B->ops[i];
         const vsh_prog_t *vp;
-        float a, b, wmin = 1e30f, x0 = 9.0f, x1 = -9.0f, y0 = 9.0f, y1 = -9.0f;
+        float a, b, wmin = 1e30f, x0 = 9.0f, x1 = -9.0f, y0 = 9.0f, y1 = -9.0f, dm = -1.0f;
         int q;
         if (o->kind != IP_DRAW || o->sh_rtv != g_ish[best].rtv) { continue; }
         vp = o->pvs ? vsh_program(o->pvs) : NULL;
@@ -9360,14 +9708,20 @@ static void ip_ph_selfdiag(ip_list_t *B, int best)
             if (o->rn[q][0] < x0) { x0 = o->rn[q][0]; } if (o->rn[q][0] > x1) { x1 = o->rn[q][0]; }
             if (o->rn[q][1] < y0) { y0 = o->rn[q][1]; } if (o->rn[q][1] > y1) { y1 = o->rn[q][1]; }
         }
+        if (A && o->match >= 0 && (unsigned)o->match < A->nops) { /* W445: Ursprung in Kamera-Sicht gegen den Vortick */
+            const ip_op_t *p = &A->ops[o->match];
+            float pa = p->prj[0] > 1e-4f ? p->prj[0] : 1.0f, pb = p->prj[1] > 1e-4f ? p->prj[1] : 1.0f;
+            float dx = o->mvp[12] / a - p->mvp[12] / pa, dy = o->mvp[13] / b - p->mvp[13] / pb, dz = o->mvp[15] - p->mvp[15];
+            dm = sqrtf(dx * dx + dy * dy + dz * dz);
+        }
         n++;
         HLOG_I("PHOTO cine: i=%u cls=%u vsk=%d nv=%u tex=%x rq=%d pxp=%08x pps=%08x nolerp=%d fxk=%u org=%.2f,%.2f,%.2f "
-               "prj=%.3f,%.3f,%.4f,%.4f w=%.2f ndc=%.2f..%.2f,%.2f..%.2f r0=%.3f,%.3f,%.3f r1=%.3f,%.3f,%.3f",
+               "prj=%.3f,%.3f,%.4f,%.4f w=%.2f ndc=%.2f..%.2f,%.2f..%.2f r0=%.3f,%.3f,%.3f r1=%.3f,%.3f,%.3f near=%.2f dm=%.3f",
                i, (unsigned)o->cls, vp ? (int)vp->kind : -1, o->nv, o->has_tex, o->rq, o->pxp, o->pps, o->nolerp, o->fxk,
                (double)(o->mvp[12] / a), (double)(o->mvp[13] / b), (double)o->mvp[15], (double)o->prj[0], (double)o->prj[1],
                (double)o->prj[2], (double)o->prj[3], (double)wmin, (double)x0, (double)x1, (double)y0, (double)y1,
                (double)(o->mvp[0] / a), (double)(o->mvp[1] / b), (double)o->mvp[3], (double)(o->mvp[4] / a),
-               (double)(o->mvp[5] / b), (double)o->mvp[7]);
+               (double)(o->mvp[5] / b), (double)o->mvp[7], (double)ip_ph_near_ref(o), (double)dm);
     }
 }
 
@@ -9834,7 +10188,7 @@ static unsigned wl_lists, wl_cam, wl_turn, wl_agree, wl_oppo, wl_errn[WL_SH];
 static double wl_lead_sum, wl_lead_abs, wl_rate_sum, wl_err[WL_SH], wl_lead_max;
 static unsigned wl_cls_n[7], wl_cls_v[7], wl_cls_ex[7], wl_cls_exv[7], wl_cls_cm[7]; /* Draws, Vertices, davon exakt, Kamera-Lerp */
 static unsigned wl_cls_lists;
-static unsigned wl_why[3][IP_W_N + 2]; /* Welt mit K: Gruppe 0 Netz >= 1000 Vertices, 1 untexturiert <= 32 (Linien/Pfosten), 2 sonst;
+static unsigned wl_why[4][IP_W_N + 2]; /* Welt mit K: Gruppe 0 Netz >= 1000 Vertices, 1 untexturiert <= 32 (Linien/Pfosten), 2 sonst, 3 Himmel (W435);
                                          * Spalte IP_W_N = davon rzb (Tick-N-Vertices per Matrix), IP_W_N + 1 = rzm (mit der Kamera) */
 static double wl_cls_lagdeg[7]; /* Summe Versatz der Klasse gegen die gezeigte Kamera (Grad) */
 static LONGLONG wl_tlog;
@@ -9920,6 +10274,11 @@ static void li_wlag_after(const ip_list_t *L)
             if (o->flag && o->rzb) { wl_why[g][IP_W_N]++; }
             if (o->flag && o->rzm) { wl_why[g][IP_W_N + 1]++; }
         }
+        if (c == 6u || o->lsk) { /* W435: Himmel (mit K oder nur erkannt) */
+            wl_why[3][o->why < IP_W_N ? o->why : 0]++;
+            if (o->flag && o->rzb) { wl_why[3][IP_W_N]++; }
+            if (o->flag && o->rzm) { wl_why[3][IP_W_N + 1]++; }
+        }
     }
     if (any) { wl_cls_lists++; }
     if (!wl_tlog) { wl_tlog = now; }
@@ -9947,10 +10306,10 @@ static void li_wlag_after(const ip_list_t *L)
                wl_cls_n[3] ? wl_cls_lagdeg[3] / wl_cls_n[3] : 0.0, wl_cls_n[4] / cl, wl_cls_v[4] / cl, wl_cls_ex[4] / cl,
                wl_cls_cm[4] / cl, wl_cls_n[5] / cl, wl_cls_v[5] / cl, wl_cls_ex[5] / cl, wl_cls_cm[5] / cl,
                wl_cls_n[6] / cl, wl_cls_v[6] / cl, wl_cls_ex[6] / cl, wl_cls_cm[6] / cl);
-        for (s = 0; s < 3u; s++) {
+        for (s = 0; s < 4u; s++) {
             const unsigned *w = wl_why[s];
             HLOG_I("LOCWLAG why: Welt %s je Liste static=%.1f lerp=%.1f (rzb %.1f, rzm %.1f) rawlerp=%.1f nomatch=%.1f rawchg=%.1f reject=%.1f",
-                   s == 0u ? "Netz>=1000" : (s == 1u ? "Linien/Pfosten" : "Objekte"), w[IP_W_STATIC] / cl, w[IP_W_LERP] / cl,
+                   s == 0u ? "Netz>=1000" : (s == 1u ? "Linien/Pfosten" : (s == 2u ? "Objekte" : "Himmel")), w[IP_W_STATIC] / cl, w[IP_W_LERP] / cl,
                    w[IP_W_N] / cl, w[IP_W_N + 1] / cl, w[IP_W_RAWLERP] / cl, w[IP_W_NOMATCH] / cl, w[IP_W_RAWCHG] / cl,
                    w[IP_W_REJECT] / cl);
         }
@@ -10452,6 +10811,11 @@ static void li_smooth_apply(ip_list_t *L)
         }
     }
     if (nsky) { InterlockedIncrement(&wl_fix_lists); InterlockedExchangeAdd(&wl_fix_draws, (LONG)nsky); } /* W412 */
+    if (camon && (g_cfg.loc_wlag_diag & 4)) { /* DIAG(W435): Listen mit K, davon Himmel mit K, davon Himmel erkannt (li_aim_attach) */
+        InterlockedIncrement(&sk_klists);
+        if (nsky) { InterlockedIncrement(&sk_klists_sky); }
+        if (L->la_ok && L->la_nsk) { InterlockedIncrement(&sk_klists_has); }
+    }
     if (apply) {
         loc_smooth_render_note(nobj, ncam, nown, nvt);
         QueryPerformanceCounter(&lsq1); /* W387 */
@@ -10544,18 +10908,42 @@ static void li_aim_attach(ip_list_t *L)
     wt = la_world_rtv(L, &sp);
     for (i = 0; i < 16; i++) { L->la_vp[i] = cam[i]; }
     if (!la_m4inv_d(VPi, L->la_vp)) { return; }
+    L->la_nsk = L->la_nskl = L->la_nna = 0;
     for (i = 0; i < L->nops && i < sp; i++) {
         ip_op_t *o = &L->ops[i];
         double c3[4];
         int k, j;
         o->law = 0;
+        o->lsk = 0;
         if (o->kind != IP_DRAW || o->rtv != wt || !o->cls) { continue; }
         for (k = 0; k < 4; k++) {
             c3[k] = 0.0;
             for (j = 0; j < 4; j++) { c3[k] += (double)o->mvp[k * 4 + j] * VPi[j * 4 + 3]; }
         }
         if (fabs(c3[0]) + fabs(c3[1]) + fabs(c3[2]) + fabs(c3[3] - 1.0) < 0.02) { o->law = 1; nw++; }
+        else if (wl_same_view(o->mvp, L->la_vp)) {
+            /* W435 LOC-SKY-LAG-REG: Himmel (Spalten x, y, w = Kamera, eigene Tiefe; W412). Die Sicht-Korrektur C =
+             * VP^-1 * G * VP dreht um das Auge; ihre Zeile z ist (0, 0, 1, 0), d. h. x, y, w des Bildes haengen nur von
+             * x, y, w ab -> mvp * C zeigt den Himmel genau dort, wo die korrigierte Kamera ihn sieht (Selbsttest SKY435). */
+            o->lsk = 1;
+            L->la_nsk++;
+            if (g_cfg.loc_sky_fix) { o->law = 1; L->la_nskl++; }
+        } else if (o->dsv && !ip_mvp_affine(o->mvp)) { /* sonstige perspektivische Draws ohne affinen Weltbezug (DIAG) */
+            static unsigned s_nal;
+            L->la_nna++;
+            if ((g_cfg.loc_wlag_diag & 4) && s_nal < 24u && (L->serial % 97u) == 0u) {
+                s_nal++;
+                HLOG_I("LOCWLAG sicht-na: ser=%u i=%u n=%u tex=%u mvp=%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g "
+                       "VP=%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g,%.5g",
+                       L->serial, i, o->nv, o->has_tex, o->mvp[0], o->mvp[1], o->mvp[2], o->mvp[3], o->mvp[4], o->mvp[5],
+                       o->mvp[6], o->mvp[7], o->mvp[8], o->mvp[9], o->mvp[10], o->mvp[11], o->mvp[12], o->mvp[13], o->mvp[14],
+                       o->mvp[15], L->la_vp[0], L->la_vp[1], L->la_vp[2], L->la_vp[3], L->la_vp[4], L->la_vp[5], L->la_vp[6],
+                       L->la_vp[7], L->la_vp[8], L->la_vp[9], L->la_vp[10], L->la_vp[11], L->la_vp[12], L->la_vp[13],
+                       L->la_vp[14], L->la_vp[15]);
+            }
+        }
     }
+    if (L->la_nskl) { InterlockedIncrement(&sk_lists); InterlockedExchangeAdd(&sk_draws, (LONG)L->la_nskl); } /* W435 */
     L->la_d[0] = pb.dys; L->la_d[1] = pb.dps; L->la_d[2] = pb.dax; L->la_d[3] = pb.day;
     L->la_s[0] = pb.ys; L->la_s[1] = pb.ps; /* W394 */
     { /* Fadenkreuz (Messlauf W376_A9): Mitte im Weltziel x = -py tan(Arm_x - Sicht_x), y = -py tan(Arm_y + Sicht_y),
@@ -10564,6 +10952,7 @@ static void li_aim_attach(ip_list_t *L)
         double c3 = sqrt(L->la_vp[3] * L->la_vp[3] + L->la_vp[7] * L->la_vp[7] + L->la_vp[11] * L->la_vp[11]);
         double py = c3 > 0.0 ? c1 / c3 : 0.0, rx = (double)pb.ax - pb.ys, ry = (double)pb.ay + pb.ps;
         double rx2 = rx + (double)pb.dax - pb.dys, ry2 = ry + (double)pb.day + pb.dps;
+        if (py > 0.0) loc_aimassist_note_py(py); /* W442: Rand der Zielhilfe */
         L->la_rc[0] = (float)(-py * tan(la_clamp(rx, -1.4, 1.4)));
         L->la_rc[1] = (float)(-py * tan(la_clamp(ry, -1.4, 1.4)));
         L->la_rd[0] = (float)(-py * tan(la_clamp(rx2, -1.4, 1.4))) - L->la_rc[0];
@@ -10579,13 +10968,128 @@ static void li_aim_attach(ip_list_t *L)
  * Kopie, erster Vertex in der Box +-0,16 / +-0,12 NDC um die erwartete Mitte (A9: 7 Draws, Rahmen + Marken, alle
  * anderen HUD-Elemente >= 0,3 entfernt). Hat sich die Mitte gegen den Vortick bewegt, muss sich ein zugeordneter
  * Draw ebenso bewegen (+-0,01), sonst ist er ein ruhendes Element, das zufaellig in der Box liegt. */
+/* DIAG(W444 LOC-RETICLE-MARK) loc_ret_diag Bit 4 (nur Testfolge): je Liste alle kleinen 2D-Draws im Weltziel nach der
+ * Kopie im Umkreis 0,6 NDC der Formel-Mitte (Op, Partner, Signatur, Vertexzahl, Bildlage, Markierung) nach
+ * locret_cand.txt. Nur Bildlagen/Draw-Merkmale, keine Eingaben. */
+static void li_ret_cand_dump(const ip_list_t *L, const ip_list_t *A, unsigned sp, ID3D11RenderTargetView *wt)
+{
+    static FILE *f;
+    static unsigned nl;
+    unsigned i;
+    if (nl >= 40000u) { return; }
+    if (!f) { f = (FILE *)loc_aim_diag_file("locret_cand.txt"); if (!f) { return; } }
+    nl++;
+    fprintf(f, "L %u %u rc=%.5f,%.5f arc=%.5f,%.5f aok=%d aret=%d n=%u rj=%u sp=%u nops=%u\n", L->serial, A ? A->serial : 0u,
+            L->la_rc[0], L->la_rc[1], A ? A->la_rc[0] : 0.0f, A ? A->la_rc[1] : 0.0f, A ? A->la_ok : 0, A ? A->la_ret : 0,
+            L->la_nret, L->la_rjmv, sp, L->nops);
+    for (i = sp + 1u; i < L->nops; i++) {
+        const ip_op_t *o = &L->ops[i];
+        const ip_op_t *a = (A && o->match >= 0 && (unsigned)o->match < A->nops) ? &A->ops[o->match] : NULL;
+        if (o->kind != IP_DRAW || o->cls || o->nv > 256u || o->rtv != wt) { continue; }
+        if (fabs(o->rn[0][0] - L->la_rc[0]) > 0.6f || fabs(o->rn[0][1] - L->la_rc[1]) > 0.6f) { continue; }
+        fprintf(f, "D %u m=%d al=%d law=%d fl=%d tex=%u nv=%u tp=%u sig=%08x s0=%08x gk=%08x vs=%08x px=%08x ps=%08x bs=%p "
+                "r=%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f,%.5f a=%.5f,%.5f\n",
+                i, o->match, a ? a->law : -1, o->law, o->flag, o->has_tex, o->nv, o->topo, o->sig, o->sig0, o->gkey, o->pvs,
+                o->pxp, o->pps, (void *)o->bs, o->rn[0][0], o->rn[0][1], o->rn[1][0], o->rn[1][1], o->rn[2][0], o->rn[2][1],
+                o->rn[3][0], o->rn[3][1], a ? a->rn[0][0] : 9.0f, a ? a->rn[0][1] : 9.0f);
+    }
+}
+
+/* W444 LOC-RETICLE-MARK (loc_ret_mark, loc_ret_mark.h): Fadenkreuz-Teile ueber Form-Identitaet zur Vorliste (ergaenzt
+ * um Teile aus dem Gedaechtnis, hoechstens LRM_MEMT Ticks alt), Zuordnungs-Partner mit Formwechsel und die alte Pruefung
+ * (Kasten + Formel-Bewegung) als Start. Nur im Swap (ein Aufrufer). Zaehler fuer die Zeile LOCINTERP retmark444. */
+static lrm_mem_t lrm_mem[LRM_MAXP];
+static int lrm_mem_n;
+static void lrm_part_of(const ip_op_t *o, lrm_part_t *p)
+{
+    int k;
+    for (k = 0; k < 4; k++) { p->p[k][0] = o->rn[k][0]; p->p[k][1] = o->rn[k][1]; }
+    p->nv = o->nv;
+    p->grp = o->sig0;
+}
+static void li_aim_reticle_w444(ip_list_t *L, const ip_list_t *A, unsigned sp, ID3D11RenderTargetView *wt, int moved)
+{
+    lrm_part_t prev[LRM_MAXP], mk[LRM_MAXP];
+    unsigned prev_op[LRM_MAXP], cop[LRM_MAXC], i, n = 0;
+    lrm_cand_t c[LRM_MAXC];
+    unsigned char why[LRM_MAXC];
+    int np = 0, nc = 0, k, j, na;
+    if (A && A->la_ret) {
+        for (i = 0; i < A->nops && np < LRM_MAXP; i++) {
+            const ip_op_t *a = &A->ops[i];
+            if (a->kind != IP_DRAW || !LA_IS_RET(a->law)) { continue; }
+            lrm_part_of(a, &prev[np]);
+            prev_op[np] = i;
+            np++;
+        }
+    }
+    na = np;
+    np = lrm_prev_add_mem(prev, NULL, np, lrm_mem, lrm_mem_n, L->serial);
+    for (k = na; k < np; k++) { prev_op[k] = 0xFFFFFFFFu; }
+    if (np > na) { InterlockedIncrement(&lrm_st_mem); }
+    for (i = sp + 1u; i < L->nops && nc < LRM_MAXC; i++) {
+        ip_op_t *o = &L->ops[i];
+        int seed = 1;
+        if (o->kind != IP_DRAW || o->cls || o->has_tex || o->nv > 64u || o->rtv != wt) { continue; }
+        if (fabs(o->rn[0][0] - L->la_rc[0]) > LRM_WIN || fabs(o->rn[0][1] - L->la_rc[1]) > LRM_WIN) { continue; }
+        /* alte Pruefung (W376/W394/W439) als Start-Regel */
+        if (fabs(o->rn[0][0] - L->la_rc[0]) > 0.16f || fabs(o->rn[0][1] - L->la_rc[1]) > 0.12f) {
+            if (!g_cfg.loc_view_perframe || !A || !A->la_ret || o->match < 0 || (unsigned)o->match >= A->nops ||
+                !LA_IS_RET(A->ops[o->match].law) || fabs(o->rn[0][0] - L->la_rc[0]) > 0.35f || fabs(o->rn[0][1] - L->la_rc[1]) > 0.3f) {
+                seed = 0;
+            }
+        }
+        if (seed && moved && o->match >= 0 && (unsigned)o->match < A->nops) {
+            const ip_op_t *a = &A->ops[o->match];
+            float ex = (o->rn[0][0] - a->rn[0][0]) - (L->la_rc[0] - A->la_rc[0]);
+            float ey = (o->rn[0][1] - a->rn[0][1]) - (L->la_rc[1] - A->la_rc[1]);
+            if (fabs(ex) > 0.01f || fabs(ey) > 0.01f) { L->la_rjmv++; seed = 0; }
+        }
+        lrm_part_of(o, &c[nc].d);
+        c[nc].seed = (unsigned char)seed;
+        c[nc].prev = -1;
+        if (A && o->match >= 0) {
+            for (j = 0; j < np; j++) { if (prev_op[j] == (unsigned)o->match) { c[nc].prev = j; break; } }
+        }
+        cop[nc] = i;
+        nc++;
+    }
+    lrm_mark(prev, np, c, nc, L->la_rc, why);
+    for (k = 0; k < nc; k++) {
+        ip_op_t *o;
+        if (!why[k]) { if (c[k].seed) { InterlockedIncrement(&lrm_st_fremd); } continue; }
+        o = &L->ops[cop[k]];
+        o->law = 2;
+        if (g_cfg.loc_ret_fix && !(o->flag && A && o->match >= 0 && (unsigned)o->match < A->nops)) {
+            o->law = LA_LAW_RETX; /* W439: im Zwischenbild exakt aus Tick N -> Verschiebung gegen die Mitte von B */
+            InterlockedIncrement(&lr_retx);
+        }
+        if (why[k] == LRM_FORM) { InterlockedIncrement(&lrm_st_form); }
+        else if (why[k] == LRM_PAIR) { InterlockedIncrement(&lrm_st_pair); }
+        else { InterlockedIncrement(&lrm_st_seed); }
+        if (n < LRM_MAXP) { mk[n] = c[k].d; }
+        n++;
+    }
+    if (n) {
+        lrm_mem_n = lrm_mem_update(lrm_mem, lrm_mem_n, mk, n < LRM_MAXP ? (int)n : LRM_MAXP, L->serial);
+        InterlockedIncrement(&lrm_st_lists);
+    }
+    L->la_ret = n > 0u;
+    L->la_nret = n;
+    InterlockedExchangeAdd(&li_la_rets, (LONG)n);
+    InterlockedExchangeAdd(&lr_rjmv, (LONG)L->la_rjmv);
+    if ((g_cfg.loc_ret_diag & 4) && (g_cfg.loc_replay_tick[0] || g_cfg.loc_steps[0])) { li_ret_cand_dump(L, A, sp, wt); }
+}
+
 static void li_aim_reticle(ip_list_t *L, const ip_list_t *A)
 {
     unsigned sp = 0, i, n = 0;
     ID3D11RenderTargetView *wt = la_world_rtv(L, &sp);
     int moved = A && A->la_ok && (fabs(L->la_rc[0] - A->la_rc[0]) + fabs(L->la_rc[1] - A->la_rc[1]) > 0.01);
     L->la_ret = 0;
+    L->la_nret = L->la_rjmv = 0;
     if (!wt || !sp) { return; }
+    if (g_cfg.loc_ret_mark) { li_aim_reticle_w444(L, A, sp, wt, moved); return; } /* W444 LOC-RETICLE-MARK */
     for (i = sp + 1u; i < L->nops; i++) {
         ip_op_t *o = &L->ops[i];
         if (o->kind != IP_DRAW || o->cls || o->has_tex || o->nv > 64u || o->rtv != wt) { continue; }
@@ -10593,21 +11097,31 @@ static void li_aim_reticle(ip_list_t *L, const ip_list_t *A)
             /* W394 (nur mit loc_view_perframe): Partner eines Fadenkreuz-Draws der Vorliste bleibt Fadenkreuz (weitere Box),
              * sonst faellt das Fadenkreuz fuer einen Tick auf den simulierten Stand zurueck (Sprung, Lauf C4) */
             if (!g_cfg.loc_view_perframe || !A || !A->la_ret || o->match < 0 || (unsigned)o->match >= A->nops ||
-                A->ops[o->match].law != 2 || fabs(o->rn[0][0] - L->la_rc[0]) > 0.35f || fabs(o->rn[0][1] - L->la_rc[1]) > 0.3f) {
+                !LA_IS_RET(A->ops[o->match].law) || fabs(o->rn[0][0] - L->la_rc[0]) > 0.35f || fabs(o->rn[0][1] - L->la_rc[1]) > 0.3f) {
                 continue;
             }
         }
         if (moved && o->match >= 0 && (unsigned)o->match < A->nops) {
+            /* W439: Beim schnellen Zielen/Drehen weicht die Formel-Mitte vom gezeichneten Fadenkreuz ab; diese Pruefung
+             * verwirft dann Teile (Messung V10: 145 Listen mit 1 statt 7 Draws). Mit loc_ret_mark (W444) ist sie nur noch
+             * eine von drei Regeln (li_aim_reticle_w444, loc_ret_mark.h). */
             const ip_op_t *a = &A->ops[o->match];
             float ex = (o->rn[0][0] - a->rn[0][0]) - (L->la_rc[0] - A->la_rc[0]);
             float ey = (o->rn[0][1] - a->rn[0][1]) - (L->la_rc[1] - A->la_rc[1]);
-            if (fabs(ex) > 0.01f || fabs(ey) > 0.01f) { continue; }
+            if (fabs(ex) > 0.01f || fabs(ey) > 0.01f) { L->la_rjmv++; continue; }
         }
         o->law = 2;
+        if (g_cfg.loc_ret_fix && !(o->flag && A && o->match >= 0 && (unsigned)o->match < A->nops)) {
+            o->law = LA_LAW_RETX; /* W439: im Zwischenbild exakt aus Tick N -> Verschiebung gegen die Mitte von B */
+            InterlockedIncrement(&lr_retx);
+        }
         n++;
     }
     L->la_ret = n > 0u;
+    L->la_nret = n;
     InterlockedExchangeAdd(&li_la_rets, (LONG)n);
+    InterlockedExchangeAdd(&lr_rjmv, (LONG)L->la_rjmv);
+    if ((g_cfg.loc_ret_diag & 4) && (g_cfg.loc_replay_tick[0] || g_cfg.loc_steps[0])) { li_ret_cand_dump(L, A, sp, wt); }
 }
 
 /* DIAG(LOC-IM-LOCK) imlock_diag=1: Teilzeiten des Swaps unter ctx_lock bis zur Zuordnung (lange > 1 ms summiert).

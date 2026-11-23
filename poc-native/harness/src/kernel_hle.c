@@ -1075,6 +1075,10 @@ void krnl_init(xbe_image_t *img)
         _snprintf_s(d, sizeof d, _TRUNCATE, "%s/UDATA/%s", g_cfg.hdd_root,
                     XB_TITLE_ID_STR);
         xb_mkdir_p(d);
+        if (g_sba_loc) { /* W434 LOC-PILOT-LOST (#73): Spielstand-Ordner beschreibbar? sonst Ersatzordner */
+            extern void krnl_loc_save_check(void);
+            krnl_loc_save_check();
+        }
         /* Z: (Cache-Partition) existiert auf der Xbox immer; frischer
          * Datenordner (Community-Erststart) -> sonst FEHLER 3 auf ZCACHE */
         _snprintf_s(d, sizeof d, _TRUNCATE, "%s/ZCACHE", g_cfg.hdd_root);

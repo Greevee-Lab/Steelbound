@@ -94,6 +94,38 @@ int rbn_rtt_max(const rbn_t *n, uint32_t now);
 int rbn_pick_delay(int rtt_ms, int dmin, int dmax);
 const rbn_stats_t *rbn_stats(const rbn_t *n);
 
+/* ---- W447 LOC-NET-AUTO: Netzmodus "Auto" (Profil Direkt/Rollback je Mission) ----
+ * Kein harter Moduswechsel im Match: der Motor bleibt die Eingabeschicht (R2) mit adaptiver Verzoegerung. Auto waehlt
+ * beim Missionsbeginn ein Profil (Host fuer alle, im Hallo verteilt):
+ *  - DIREKT: alle Umlaufzeiten klein und ruhig -> Ziel 1 Tick Verzoegerung (Eingaben kommen rechtzeitig an, praktisch
+ *    keine Korrekturen, Gefuehl wie Lockstep ohne Einfrieren bei Spitzen); schneller auf 1 Tick, strengere Grenzen.
+ *  - ROLLBACK: sonst; Regelung und Werkzeuge wie bisher (W385/W386/W387/W390).
+ * Hallo Flags b3 = "Auto gewuenscht" (loc_net_auto=1). Auto gilt nur, wenn der Host und jeder Mitspieler Auto wollen;
+ * sonst Profil FEST (= Rollback wie bisher). Lockstep (loc_rb_input=0 bzw. Wunsch aus) gewinnt wie bisher.
+ * Host traegt das Profil bei einer R2-Entscheidung in Byte 27 ein (0 fest, 1 Auto-Direkt, 2 Auto-Rollback). */
+enum { RBN_PROF_FIXED = 0, RBN_PROF_DIRECT = 1, RBN_PROF_ROLLBACK = 2 };
+/* Wunsch zur Laufzeit aendern (ESC-Menue; wirkt ab der naechsten Mission): want = Eingabeschicht (0 = Lockstep),
+ * want_auto = Auto. */
+void rbn_set_want(rbn_t *n, int want, int want_auto);
+int rbn_want(const rbn_t *n);
+int rbn_want_auto(const rbn_t *n);
+/* Profil aus Umlaufzeit (rtt_eff = Mittel + 2 Schwankung wie rbn_rtt_max, ms) und Schwankung (rttvar, ms):
+ * DIREKT, wenn rtt_eff <= direct_rtt und rttvar <= direct_jit, sonst ROLLBACK; unbekannt (< 0) = ROLLBACK. */
+int rbn_pick_profile(int rtt_eff, int rttvar, int direct_rtt, int direct_jit);
+/* Groesste Schwankung (rttvar, ms) aller frischen Mitspieler, -1 = unbekannt. */
+int rbn_rttvar_max(const rbn_t *n, uint32_t now);
+/* Host: Grenzen fuer DIREKT setzen (Standard 80 ms / 15 ms). */
+void rbn_set_direct(rbn_t *n, int direct_rtt, int direct_jit);
+/* Host: DIREKT beginnt die Mission gleich mit 1 Tick (statt d_std, Regler startet niedrig, rbl_start_low), wenn die
+ * groesste RTT (wie rbn_rtt_max) <= start_rtt ms ist; 0 = nie. */
+void rbn_set_direct_start(rbn_t *n, int start_rtt);
+/* Profil der laufenden R2-Mission (RBN_PROF_*; Host: eigene Entscheidung, Client: vom Host). */
+int rbn_profile(const rbn_t *n);
+/* Lobby: Auto mit allen frischen Mitspielern vereinbart (alle wollen Auto)? 1 = ja. */
+int rbn_auto_agreed(const rbn_t *n, uint32_t now);
+/* Lobby-Anzeige: frische Mitspieler (Platz, geglaettete RTT ms, Auto-Wunsch); Rueckgabe Anzahl (<= cap). */
+int rbn_peer_list(const rbn_t *n, uint32_t now, int *pidx, int *rtt, int *wauto, int cap);
+
 /* ---- W386 LOC-LATENCY: Verzoegerung adaptiv um 1 Tick senken ("niedrige Verzoegerung") ----
  * Der Host regelt fuer alle gleich; Wechsel nur an sicheren Stellen. Ablauf:
  *  - Missionsbeginn mit der ausgehandelten Verzoegerung d_std (rbn_pick_delay, bewaehrt; der Ring steht noch nicht,
@@ -184,3 +216,7 @@ int rbl_take_decision(rbl_t *l, int *d, uint32_t *slot);
 /* TEST (loc_rb_opts ltest=N): Host entscheidet sofort fuer d (d_std bzw. d_low), ohne Regelung. 1 = neue Entscheidung. */
 int rbl_force(rbl_t *l, int d, uint32_t next_slot, int rtt_ms);
 const rbl_stats_t *rbl_stats(const rbl_t *l);
+/* W447: nach rbl_begin - Mission laeuft schon mit d_low (Profil DIREKT mit Start 1 Tick). Bis alle Seiten den Ring melden,
+ * ist "Ring fehlt" kein Grund zurueck; sonst gelten die Grenzen der niedrigen Stufe (zurueck auf d_std). */
+void rbl_start_low(rbl_t *l);
+int rbl_startlow(const rbl_t *l);

@@ -282,6 +282,8 @@ static void la_predict(const void *rbc)
         }
         if (v.ok) {
             v.n = n;
+            v.bst = s; /* W442: Basis der Zielhilfe (auch n = 0) */
+            v.have_bst = 1;
             if (n > 0) { /* W394: Basis fuer den Zusatz-Schritt je Bild */
                 v.pst = s;
                 v.have_pst = 1;
@@ -321,7 +323,7 @@ void loc_aim_game_tick(int replay, int slot, const void *rbc)
     if (g_cfg.loc_aim_diag & 5) {
         la_diag_tick(slot);
     }
-    if (g_cfg.loc_local_aim || (g_cfg.loc_aim_diag & 16)) {
+    if (g_cfg.loc_local_aim || (g_cfg.loc_aim_diag & 16) || g_cfg.aim_assist) { /* W442: Basis der Zielhilfe */
         la_predict(rbc);
     }
 }

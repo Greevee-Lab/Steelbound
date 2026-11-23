@@ -29,6 +29,7 @@ typedef struct {
     int sbc_mouse_off;      /* W128: 1 = Maus-Achsen aus, solange der Controller aktiv ist */
     int aim_assist;         /* W236: Zielhilfe 0 = Original, 1 = Fadenkreuz am Rand dreht die Sicht, 2 = Waffenarm fest (Altwert aim_turn=1 -> 1) */
     int auto_gear;          /* W218: 1 = automatischer Gangwechsel (vereinfachte Steuerung) */
+    int ctrl_despike;       /* W439: 1 = Ausreisser-Filter fuer analoge Achsen (Original-Controller, Joystick), Standard 1, 0 = Original */
     int sb_allied_squads;   /* W424: 1 = verbuendete Trupps kaempfen auch fern vom Spieler ([gameplay], nur SB, Standard 1) */
     int monitor_view;       /* W319 MONITOR-VIEW: 1 = Monitoransicht, 2 = + Radar/FRONT VIEW ([render] monitor_view, Standard 0) */
     int cockpit_hide;       /* W268 COCKPIT-HIDE: 1 = Cockpit in der Mission ausblenden ([render] cockpit_hide, Standard 0) */
@@ -102,7 +103,27 @@ typedef struct {
     int replay_label;         /* [render] replay_label: 1 = REPLAY-Schriftzug der Wiedergabe zeigen (Original) */
     int replay_logo;          /* [render] replay_logo: 1 = Spiel-Logo der Wiedergabe zeigen (Original) */
     int watermark_media;      /* [overlay] watermark_media: 1 = Wasserzeichen auch im Video-Export */
+    int photo_cine_self;      /* W445 [photo] photo_cine_self: Reichweite eigene VT-Teile im Cinematic-Foto (Zehntel, 0 = aus) */
 } launcher_settings_t;
+/* W445 PHOTO-CINE-SELF: Standard und Raster wie der Client (hcfg.c, sb_photo.h SB_CSELF_*): 0 = aus, sonst LO..HI in STEP */
+#define LCFG_CSELF_DEF 40
+#define LCFG_CSELF_LO 10
+#define LCFG_CSELF_HI 120
+#define LCFG_CSELF_STEP 5
+#define LCFG_CSELF_N (1 + (LCFG_CSELF_HI - LCFG_CSELF_LO) / LCFG_CSELF_STEP + 1)
+static __inline int lcfg_cself_clamp(int v)
+{
+    if (v <= 0) { return 0; }
+    if (v < LCFG_CSELF_LO) { v = LCFG_CSELF_LO; }
+    if (v > LCFG_CSELF_HI) { v = LCFG_CSELF_HI; }
+    return LCFG_CSELF_LO + (v - LCFG_CSELF_LO + LCFG_CSELF_STEP / 2) / LCFG_CSELF_STEP * LCFG_CSELF_STEP;
+}
+/* Listenindex im Launcher (0 = aus, 1.. = LO, LO+STEP, ...) */
+static __inline int lcfg_cself_index(int v)
+{
+    v = lcfg_cself_clamp(v);
+    return v ? 1 + (v - LCFG_CSELF_LO) / LCFG_CSELF_STEP : 0;
+}
 
 /* W290: wirksame Aufnahmegroesse (photo_size geprueft, sonst 4K) */
 int lcfg_photo_size_eff(const launcher_settings_t *s);

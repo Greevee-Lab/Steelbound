@@ -254,7 +254,11 @@ static u32 la_rand(void)
 }
 
 /* Streaming: Bytes ab Dateioffset lesen (Abbild oder Host-Datei). */
-static int la_read_at(u32 xh, uint64_t off, void *buf, u32 len)
+LONGLONG krnl_loc_io_t0(void);                    /* W449 krnl_file.c: Lesedauer (nur LoC) */
+void krnl_loc_io_note(int k, LONGLONG q0, int ok);
+void krnl_loc_io_log(int waited_s);
+
+static int la_read_at_raw(u32 xh, uint64_t off, void *buf, u32 len)
 {
     unsigned long got = 0;
     long long o = (long long)off;
@@ -273,6 +277,15 @@ static int la_read_at(u32 xh, uint64_t off, void *buf, u32 len)
         ov.OffsetHigh = (DWORD)(off >> 32);
         return ReadFile(h, buf, len, &g, &ov) && g == len;
     }
+}
+
+/* W449 (#85): Streaming-Lesungen mit Dauer zaehlen (langsamer Datentraeger/Virenschutz -> Ton verhungert) */
+static int la_read_at(u32 xh, uint64_t off, void *buf, u32 len)
+{
+    LONGLONG q0 = krnl_loc_io_t0();
+    int ok = la_read_at_raw(xh, off, buf, len);
+    krnl_loc_io_note(2, q0, ok);
+    return ok;
 }
 
 /* ---------------- Benachrichtigungen ---------------- */
@@ -2274,9 +2287,34 @@ static void la_api_report(int waited_s)
     HLOG_I("LOCAPI t=%ds Geschwindigkeit != 0: %ld, max |v| = %.2f; RPC angewendet %ld, ohne Kurve %ld", waited_s, s_vel_nz, sqrt((double)s_vel_max2), st_rpc, st_rpc_none);
 }
 
+/* W449 LOC-BOOT-SEQ-PERF (#85): F11 info.txt "loc audio:" - Ausgabe, Lautstaerke, Ton-Zaehler (keine Pfade/Eingaben).
+ * Ohne Sperre gelesen (nur Zaehler). */
+int loc_audio_diag_line(char *o, int cap)
+{
+    int k;
+    unsigned pm = 0;
+    int ch = audio_out_channels();
+    const char *out = g_cfg.audio_live == 0 ? "off" : g_cfg.audio_live == 2 ? "winmm" : ch > 0 ? "wasapi" : "wasapi (no device)";
+    if (cap < 2) return 0;
+    if (!s_active) {
+        _snprintf_s(o, (size_t)cap, _TRUNCATE, "inactive (audio=%d loc_audio=%d) output=%s", g_cfg.audio, g_cfg.loc_audio, out);
+        return 1;
+    }
+    for (k = 0; k < LA_MAX_CAT; k++) {
+        if (s_cat_pause[k]) pm |= 1u << k;
+    }
+    _snprintf_s(o, (size_t)cap, _TRUNCATE,
+                "output=%s channels=%d volume=%d/%d/%d/%d cues played=%ld failed=%ld streams=%ld packets=%ld "
+                "stream_read_fail=%ld wma_silent=%ld paused_categories=0x%X",
+                out, ch, g_cfg.volume_master, g_cfg.volume_music, g_cfg.volume_sfx, g_cfg.volume_voice, (long)st_play,
+                (long)st_fail, (long)st_streams, (long)st_spkts, (long)st_sread_fail, (long)st_wma, pm);
+    return 1;
+}
+
 void loc_audio_tick(int waited_s)
 {
     int i, act = 0, busy = 0;
+    if (waited_s % 30 == 0) krnl_loc_io_log(waited_s); /* W449: nur bei neuen langsamen Lesungen */
     if (!s_active || waited_s % 30 != 0) {
         return;
     }

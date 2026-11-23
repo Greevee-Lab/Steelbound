@@ -51,8 +51,28 @@ typedef struct loc_rb_hud {
     int tsync;           /* W372: Art des Zeitabgleichs (2 = ueber gemessenen Puffer) */
     double tsync_ms;     /* W372: Vorsprung laut Zeitabgleich (ms, + = wir liegen vorn) */
     int buf_ms;          /* W372: Puffer-Median zum Mitspieler (ms), -999 = noch unbekannt */
+    int net_mode;        /* W447: gewaehlter Netzmodus 0 Auto, 1 Rollback, 2 Lockstep */
+    int prof;            /* W447: Profil der laufenden Mission (RBN_PROF_* 0 fest, 1 direkt, 2 rollback), -1 = keine */
+    int prof_rtt, prof_var; /* W447: Messwerte beim Missionsbeginn (ms) */
 } loc_rb_hud;
 int loc_rb_hud_read(loc_rb_hud *o);
+/* W447 LOC-NET-AUTO: Netzmodus zur Laufzeit (ESC-Menue): 0 Auto, 1 Rollback, 2 Lockstep; wirkt ab der naechsten Mission
+ * (Hallo-Wunsch). Ohne Eingabeschicht (Start mit loc_rb_input=0) nur Lockstep: Rueckgabe 0 = nicht moeglich. */
+int loc_rb_net_mode(void);
+int loc_rb_net_mode_set(int mode);
+/* W447: Lobby-Anzeige (Panel): was Auto waehlen wuerde bzw. gewaehlt hat. 0 = keine Eingabeschicht. */
+#define LOC_RB_LOBBY_PEERS 8
+typedef struct loc_rb_lobby {
+    int net_mode;        /* 0 Auto, 1 Rollback, 2 Lockstep */
+    int in_mission;      /* 1 = Mission laeuft (R2 oder Lockstep), 0 = Lobby/Menue */
+    int agreed;          /* Auto mit allen frischen Mitspielern vereinbart */
+    int prof;            /* RBN_PROF_* (Vorschau in der Lobby bzw. laufende Mission) */
+    int d_start, d_target; /* Verzoegerung in Ticks (Start / Ziel nach dem Ringstart) */
+    int rtt, var;        /* groesste RTT (Mittel + 2 Schwankung) / Schwankung, ms (-1 = unbekannt) */
+    int npeer;
+    struct { int pidx, rtt, wauto; } peer[LOC_RB_LOBBY_PEERS]; /* wauto 0 Lockstep, 1 Rollback, 2 Auto */
+} loc_rb_lobby;
+int loc_rb_lobby_read(loc_rb_lobby *o);
 /* W396: wirksame Eingabeverzoegerung im Rollback (Ticks, = F3-Zeile), 0 = nicht im Rollback-Modus */
 int loc_rb_eff_delay(void);
 /* W420 LOC-CLIPDUMP: GetTickCount|1 des letzten eigenen Rahmens (FUN_0004EC80, auch im Rollback, wo kein TCP-0x34

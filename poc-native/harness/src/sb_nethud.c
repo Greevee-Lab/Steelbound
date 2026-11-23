@@ -13,6 +13,7 @@
 #include "loc_rollback.h"
 #include "loc_smooth.h" /* W387 */
 #include "loc_lsarb_game.h" /* LOC-LOCKSTEP-ARBITER */
+#include "loc_assist.h" /* W440 LOC-LOBBY-MODES */
 #include <stdlib.h>
 #include <wchar.h>
 
@@ -259,12 +260,38 @@ static void nh_sample(void)
             nh_lw("ovl.nh_why", f, 96);
             nh_add(&x, 0, f, r);
         }
+        if (have_rb) { /* W447 LOC-NET-AUTO: Netzmodus und Profil der Mission (mit Grund) */
+            const char *k = rb.net_mode == 2 ? "ovl.nh_nm_ls" : rb.prof == 1 ? "ovl.nh_auto_direct" :
+                            rb.prof == 2 ? "ovl.nh_auto_rb" : rb.prof == 0 ? (rb.net_mode == 0 ? "ovl.nh_auto_fixed" : "ovl.nh_nm_rb") :
+                            rb.net_mode == 0 ? "ovl.nh_auto_wait" : "ovl.nh_nm_rb";
+            nh_lw(k, f, 96);
+            nh_add(&x, 0, f, rb.prof_rtt, rb.prof_var);
+        }
         { /* W420 LOC-CLIPDUMP: Match-Regel des Hosts */
             int ron = 0, rsrc = 0, rmis = 0;
             if (loc_rule_hud(&ron, &rsrc, &rmis)) {
                 nh_lw(ron ? "ovl.nh_rule_on" : "ovl.nh_rule_off", a, 48);
                 nh_lw(rsrc == 0 ? "ovl.nh_rule_local" : "ovl.nh_rule_host", b, 48);
                 nh_lw("ovl.nh_rule", f, 96);
+                nh_add(&x, 0, f, a, b);
+            }
+        }
+        { /* W440 LOC-LOBBY-MODES: Spielmodus der Lobby und die wirksamen eigenen Hilfen */
+            int lsrc = 0, lm = loc_net_assist_mode(&lsrc), ea, eg;
+            if (lm != LAS_FREE) {
+                wchar_t h1[32], h2[32];
+                ea = las_value(lm, g_cfg.aim_assist);
+                eg = las_value(lm, g_cfg.auto_gear);
+                nh_lw(lm == LAS_ARCADE ? "ovl.nh_lm_arcade" : lsrc == LAS_SRC_LOBBY ? "ovl.nh_lm_sim" : "ovl.nh_lm_nolobby",
+                      a, 48);
+                if (ea && eg) {
+                    nh_lw("ovl.nh_lm_aim", h1, 32);
+                    nh_lw("ovl.nh_lm_gear", h2, 32);
+                    _snwprintf_s(b, 48, _TRUNCATE, L"%s, %s", h1, h2);
+                } else {
+                    nh_lw(ea ? "ovl.nh_lm_aim" : eg ? "ovl.nh_lm_gear" : "ovl.nh_lm_none", b, 48);
+                }
+                nh_lw("ovl.nh_lmode", f, 96);
                 nh_add(&x, 0, f, a, b);
             }
         }
@@ -372,6 +399,12 @@ void sb_nhud_test_log(void)
     }
     HLOG_I("NETHUD test W394: hud_marken=%d sicht_je_bild=%d", g_cfg.loc_hud_predict != 0,
            g_cfg.loc_view_perframe && g_cfg.loc_local_aim); /* W394: eigene Zeile */
+    { /* W440: eigene Zeile (Spielmodus, wirksame Hilfen; nur Einstellungen, keine Eingaben) */
+        int lsrc = 0, lm = loc_net_assist_mode(&lsrc);
+        HLOG_I("NETHUD test W440: lobby_modus=%s quelle=%s zielhilfe=%d gang_automatik=%d (eingestellt %d/%d)",
+               las_name(lm), las_src_name(lsrc), las_value(lm, g_cfg.aim_assist), las_value(lm, g_cfg.auto_gear),
+               g_cfg.aim_assist, g_cfg.auto_gear);
+    }
 }
 
 /* ------------------------------------------------------------------ */

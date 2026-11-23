@@ -28,6 +28,8 @@
 #include "loc_guard.h"
 #include "steelnet_pins.h"
 #include "sb_version.h" /* W421: sb_netver_cmp (gemeinsam mit dem Launcher) */
+#include "loc_assist.h" /* W440: las_parse */
+#include "loc_chat.h"   /* W446: lch_json_str_u8 (steelnet-Chat), LCH_SN_LINE_MAX */
 #include <ws2tcpip.h>
 #include <mmsystem.h>
 #include <math.h>
@@ -39,6 +41,7 @@
 #pragma comment(lib, "winmm.lib")
 
 #define TUN_MAX_LINKS 12
+#define LOCTUN_SN_LINE LCH_SN_LINE_MAX /* W446: eine ausgehende chat-Zeile */
 #define TUN_MAX_STREAMS 48
 #define TUN_SQ 2048
 #define TUN_RQ 2048
@@ -145,6 +148,7 @@ typedef struct tlink {
     lguard_bucket b_dec, b_ack, b_dg[2];
     lguard_bucket b_app; /* W338: R2-Eingabekanal */
     lguard_bucket b_app2; /* W420: Regelkanal (eigene Bremse, stoert den R2-Kanal nicht) */
+    lguard_bucket b_app3; /* W437: Chatkanal (eigene Bremse) */
     lguard_bucket b_rp;  /* W395: Antworten auf Wegproben */
     struct sockaddr_in cand[TUN_MAX_CAND];
     int ncand;
@@ -191,6 +195,7 @@ typedef struct tlink {
 /* W373 LOC-PUBLIC-LOBBY: oeffentliche Lobby eines anderen Hosts, lokal vertreten (Host-Info, Beitritt). */
 typedef struct tghost {
     int used, lid, est;  /* Lobby-Id, Ping-Schaetzung ms (-1 = unbekannt) */
+    int mode;            /* W443: Lobby-Modus aus lobby_list.play_mode (LAS_SIM, LAS_ARCADE; fehlt/ungueltig = Sim) */
     uint32_t vip;        /* vip des Hosts (aus rules, geprueft) */
     char name[16];       /* Anzeigename <= 15 Zeichen */
     uint8_t sf[8], cf[2];/* Sitze/Lager/Mission/Optionen, Zaehler je Seite (geprueft) */
@@ -242,6 +247,18 @@ struct loctun {
     loctun_app_fn volatile app_fn; /* W338: Empfaenger im Client */
     volatile uint16_t app2_gp;      /* W420: zweiter Kanal (Match-Regel, loc_rule.c), 0 = aus */
     loctun_app_fn volatile app2_fn;
+    volatile uint16_t chat_gp;       /* W437: Chatkanal (loc_chat.c), 0 = aus */
+    loctun_chat_fn volatile chat_fn;
+    int chat_hit;                    /* W437: dieses Paket trug Chat -> Klartextpuffer loeschen */
+    /* W446 STEELNET-CHAT (Steuerkanal) */
+    loctun_snchat_fn volatile sn_fn;
+    volatile LONG sn_want;           /* abonnieren (loc_snchat) */
+    volatile LONG sn_state;          /* loctun_snchat_state */
+    int sn_sub_sent;                 /* zuletzt gesendeter Wunsch (-1 = noch keiner auf dieser Verbindung) */
+    int sn_hist_done;                /* Verlauf schon angefordert (einmal je Prozess: keine Doppel nach Neuverbindung) */
+    char sn_out[4][LOCTUN_SN_LINE];  /* Warteschlange UI -> Transport (unter cs) */
+    int sn_out_len[4], sn_out_n;
+    double lb_welcome_at;            /* W446 TEST join_delay_ms */
     /* Treffpunkt */
     int lb_state, lb_lobby_id, lb_joined, lb_listed;
     SOCKET lb_s;
@@ -263,6 +280,7 @@ struct loctun {
     uint64_t bctr;
     char my_pilot[17];  /* wirksamer Name aus welcome (Transkript) */
     char lobby_code[16];/* Raumcode der eigenen Lobby (Anzeige im Launcher) */
+    volatile LONG play_mode; /* W440: Modus der aktuellen Lobby (0 keine, 1 sim, 2 arcade); liest der Eingabe-Thread */
     char need_ver[16];  /* W420: vom Treffpunkt verlangte bzw. neuere Version eines Mitspielers (nur [0-9A-Za-z.+-]) */
     char peer_ver[16];  /* W420: Version des abgelehnten Mitspielers ("" = Feld fehlt, aelterer Client) */
     volatile LONG ver_state; /* W420: 0 nichts, 1 Treffpunkt lehnt ab, 2 Mitspieler mit anderer Version abgelehnt */
@@ -1173,6 +1191,16 @@ static void tl_deliver_dg(loctun *t, tlink *L, uint16_t src, uint16_t dst, const
         if (fn) fn(L->vip, d, len);
         return;
     }
+    if (t->chat_fn && t->chat_gp && dst == t->chat_gp && src == t->chat_gp) { /* W437: Chatkanal, nie an den Gast */
+        loctun_chat_fn fn = t->chat_fn;
+        t->chat_hit = 1;
+        if (!lguard_bucket_take(&L->b_app3, tl_now(t), 4.0, 8.0)) { /* Chat selbst: 3 je 5 s */
+            InterlockedIncrement(&t->st.dg_drop);
+            return;
+        }
+        if (fn) fn(L->vip, L->pilot, d, len);
+        return;
+    }
     /* W329: Zielport bestimmt der Mitspieler. Nur Ports, die das eigene Spiel gebunden hat - sonst koennte er
      * beliebige lokale UDP-Dienste (alles auf 0.0.0.0 ist auch ueber die 127.x-Adresse erreichbar) ansprechen. */
     if (hp == 0 || !locnet_udp_bound(t->n, hp)) {
@@ -1621,6 +1649,10 @@ static void tl_rx_sbt(loctun *t, const uint8_t *pkt, int plen, const struct sock
         break;
     case T_DATA:
         if (L->up) tl_rx_data(t, li, p, len, now);
+        if (t->chat_hit) { /* W437: Klartext mit Chat nicht im Puffer liegen lassen (Minidump) */
+            t->chat_hit = 0;
+            SecureZeroMemory(p, sizeof p);
+        }
         break;
     case T_PING:
         if (len == HDR + RP_LEN && p[HDR] == 'R' && p[HDR + 1] == 'T') {
@@ -1834,6 +1866,21 @@ static int js_ep(const char *v, const char *ve, struct sockaddr_in *out)
     return 1;
 }
 
+/* W440 LOC-LOBBY-MODES: Modus eigener Lobbys beim Anlegen (Einstellung des Hosts; ungueltig = Sim). */
+static const char *lb_my_play_mode(const loctun *t)
+{
+    return las_parse(t->c.play_mode) == LAS_ARCADE ? "arcade" : "sim";
+}
+
+/* W440: Modus der aktuellen Lobby setzen (0 = keine); Logzeile nur bei Aenderung (keine Namen, kein Raumcode). */
+static void lb_play_mode_set(loctun *t, int mode, const char *why)
+{
+    LONG old = InterlockedExchange(&t->play_mode, (LONG)mode);
+    if (old != (LONG)mode) {
+        tl_logf(t, "LOCMODE: Lobby-Modus %s (%s)", mode ? las_name(mode) : "keiner", why);
+    }
+}
+
 static void lb_close(loctun *t, const char *why, double now);
 
 /* W334: eine JSON-Zeile ueber TLS (nie vor bestandener Pin-Pruefung; sbtls_write lehnt das selbst ab). */
@@ -1882,6 +1929,11 @@ static void lb_close(loctun *t, const char *why, double now)
     SecureZeroMemory(t->my_pub, sizeof t->my_pub);
     SecureZeroMemory(t->udp_key, sizeof t->udp_key);
     t->lobby_code[0] = 0;
+    lb_play_mode_set(t, 0, "Treffpunkt getrennt"); /* W440 */
+    InterlockedExchange(&t->sn_state, 0);          /* W446: neue Verbindung = neues Abonnement */
+    t->sn_sub_sent = -1;
+    for (i = 0; i < t->sn_out_n; i++) SecureZeroMemory(t->sn_out[i], sizeof t->sn_out[i]);
+    t->sn_out_n = 0;
     if (t->pub) { /* W373: neue Steuerverbindung = neue Lobby; offene Beitritte scheitern */
         if (t->pub_joining) pub_reject(t, t->pub_join, "Treffpunkt getrennt", now);
         pub_ghosts_clear(t);
@@ -2345,6 +2397,13 @@ static void lb_on_lobby_state(loctun *t, const char *m, const char *e)
             tl_logf(t, "LOCLOBBY: Raumcode der Lobby bereit (im Launcher sichtbar)");
         }
     }
+    { /* W440 LOC-LOBBY-MODES: Modus der Lobby (fehlt = aelterer Dienst = Sim; nur "sim"/"arcade", sonst Sim) */
+        char pm[12] = "";
+        int mode = LAS_SIM;
+        v = js_get(lb, lbe, "play_mode", &ve);
+        if (v && js_str(v, ve, pm, sizeof pm) && las_parse(pm)) mode = las_parse(pm);
+        lb_play_mode_set(t, mode, v ? (las_parse(pm) ? "lobby_state" : "lobby_state, unbekannter Wert") : "lobby_state ohne Feld");
+    }
     if (!t->lb_joined) {
         t->lb_joined = 1;
         t->lb_state = LB_LOBBY;
@@ -2532,6 +2591,7 @@ static void pub_leave(loctun *t, const char *why, double now)
         L->used = 0;
     }
     tl_logf(t, "LOCPUB: Lobby %d verlassen (%s)", t->lb_lobby_id, why);
+    lb_play_mode_set(t, 0, "Lobby verlassen"); /* W440 */
     t->lb_joined = 0;
     t->lb_listed = 1;
     if (t->lb_state == LB_LOBBY) t->lb_state = LB_HELLO;
@@ -2571,7 +2631,7 @@ static int pub_rules(loctun *t, const uint8_t s[8], const uint8_t c[2], char *ou
 
 static void pub_publish(loctun *t, const uint8_t s[8], const uint8_t c[2], int create, double now)
 {
-    char rules[400], b[600], nm[64];
+    char rules[400], b[700], nm[64];
     if (!pub_rules(t, s, c, rules, sizeof rules)) return;
     memcpy(t->pub_sig, s, 8);
     memcpy(t->pub_sig + 8, c, 2);
@@ -2581,8 +2641,8 @@ static void pub_publish(loctun *t, const uint8_t s[8], const uint8_t c[2], int c
         tl_js_esc(t->my_pilot[0] ? t->my_pilot : "Pilot", nm, sizeof nm);
         _snprintf_s(b, sizeof b, _TRUNCATE,
                     "{\"t\":\"lobby_create\",\"name\":\"%s\",\"game\":\"loc\",\"mode\":\"syslink\",\"map\":\"m%02u\","
-                    "\"max_players\":%d,\"rules\":%s,\"visibility\":\"public\"}",
-                    nm, s[5], maxp < 2 ? 2 : (maxp > 10 ? 10 : maxp), rules);
+                    "\"max_players\":%d,\"rules\":%s,\"visibility\":\"public\",\"play_mode\":\"%s\"}",
+                    nm, s[5], maxp < 2 ? 2 : (maxp > 10 ? 10 : maxp), rules, lb_my_play_mode(t)); /* W440 */
         t->pub_creating = 1;
         tl_logf(t, "LOCPUB: Match angeboten - oeffentliche Lobby anlegen (Mission %u, Sitze %d/%d)", s[5],
                 (int8_t)s[2], (int8_t)s[3]);
@@ -2623,12 +2683,12 @@ static void pub_on_list(loctun *t, const char *m, const char *e, double now)
     more = js_get(m, e, "more", &moree);
     for (el = js_arr_first(v, ve); el; el = js_arr_next(el, ve, NULL)) {
         const char *ee = js_skip(el, ve, 0), *x, *xe, *ru, *rue;
-        char pilot[24] = "", state[12] = "", key[40];
+        char pilot[24] = "", state[12] = "", key[40], pm[12] = "";
         double id = 0, f[11], rt;
         static const char *const k[11] = {"vip", "fa", "fb", "ma", "mb", "tm", "ms", "cf", "op", "ca", "cb"};
         uint8_t s8[8], c2[2];
         uint32_t vip;
-        int j, est = -1, ok = 1;
+        int j, est = -1, ok = 1, pmode;
         tghost *g;
         if (!ee) break;
         if (++n > 64) break; /* Obergrenze je Liste */
@@ -2638,6 +2698,9 @@ static void pub_on_list(loctun *t, const char *m, const char *e, double now)
         js_str(x, xe, state, sizeof state);
         x = js_get(el, ee, "host_pilot", &xe);
         js_str(x, xe, pilot, sizeof pilot);
+        /* W443 LOC-LOBBY-LIST: Modus je Lobby wie W440 streng (nur "sim"/"arcade"; fehlt = aelterer Dienst = Sim) */
+        x = js_get(el, ee, "play_mode", &xe);
+        pmode = (x && js_str(x, xe, pm, sizeof pm) && las_parse(pm)) ? las_parse(pm) : LAS_SIM;
         ru = js_get(el, ee, "rules", &rue);
         for (j = 0; j < 11 && ok; j++) {
             x = ru ? js_get(ru, rue, k[j], &xe) : NULL;
@@ -2701,6 +2764,7 @@ static void pub_on_list(loctun *t, const char *m, const char *e, double now)
         memcpy(g->sf, s8, 8);
         memcpy(g->cf, c2, 2);
         g->est = est;
+        g->mode = pmode; /* W443 */
         pub_name(pilot, est, g->name);
         g->seen = now;
         seen[g - t->gh] = 1;
@@ -2886,7 +2950,7 @@ static void pub_tick(loctun *t, double now)
  * Rolle "join" ohne Code: oeffentliche Lobby gleichen Namens suchen. */
 static void lb_enter(loctun *t)
 {
-    char b[400], r[200];
+    char b[480], r[200];
     if (t->pub) { /* W373: oeffentlich - Lobby erst, wenn das Spiel ein Match anbietet (pub_tick) */
         t->lb_listed = 1;
         return;
@@ -2901,11 +2965,91 @@ static void lb_enter(loctun *t)
         tl_js_esc(t->c.room, r, sizeof r); /* W329; v2: nur Anzeigename */
         _snprintf_s(b, sizeof b, _TRUNCATE,
                     "{\"t\":\"lobby_create\",\"name\":\"%s\",\"game\":\"loc\",\"mode\":\"syslink\",\"map\":\"any\","
-                    "\"max_players\":10,\"rules\":{},\"visibility\":\"code\"}",
-                    r);
+                    "\"max_players\":10,\"rules\":{},\"visibility\":\"code\",\"play_mode\":\"%s\"}",
+                    r, lb_my_play_mode(t)); /* W440 */
         lb_send(t, b);
     }
     t->lb_listed = 1;
+}
+
+/* W446 STEELNET-CHAT: Antworten und Nachrichten des Dienstes (Steuerkanal). Inhalte nie ins Log; der Klartext liegt nur
+ * kurz in einem lokalen Puffer, der danach geloescht wird. */
+static void lb_on_snchat(loctun *t, const char *typ, const char *m, const char *e)
+{
+    const char *v, *ve;
+    loctun_snchat_fn fn = t->sn_fn;
+    if (strcmp(typ, "chat_sub") == 0) {
+        char code[16] = "";
+        v = js_get(m, e, "code", &ve);
+        js_str(v, ve, code, sizeof code);
+        v = js_get(m, e, "on", &ve);
+        if (v && ve - v == 4 && memcmp(v, "true", 4) == 0) {
+            InterlockedExchange(&t->sn_state, 2);
+            tl_logf(t, "LOCSNCHAT: steelnet-Chat abonniert");
+        } else {
+            InterlockedExchange(&t->sn_state, strcmp(code, "off") == 0 ? 0 : 1);
+            tl_logf(t, "LOCSNCHAT: steelnet-Chat nicht abonniert%s", strcmp(code, "off") == 0 ? " (Dienst: aus)" : "");
+        }
+        return;
+    }
+    if (strcmp(typ, "chat_status") == 0) {
+        char code[24] = "";
+        size_t i;
+        v = js_get(m, e, "code", &ve);
+        js_str(v, ve, code, sizeof code);
+        for (i = 0; code[i]; i++) {
+            if (!((code[i] >= 'a' && code[i] <= 'z') || code[i] == '_')) return; /* nur bekannte Form */
+        }
+        if (code[0] && strcmp(code, "ok") != 0 && fn) fn(2, NULL, (const uint8_t *)code, (int)i);
+        return;
+    }
+    /* "chat": nur abonniert; Absender = Pilotname der Sitzung beim Dienst (druckbares ASCII, <= 16) */
+    if (t->sn_state != 2 || !fn) return;
+    {
+        char from[24] = "";
+        uint8_t txt[LCH_MAX_TEXT_BYTES * 2];
+        int n, k, hist = 0;
+        const char *tv, *tve;
+        v = js_get(m, e, "from", &ve);
+        if (!v || *v != '"' || ve - v > 18 || memchr(v, '\\', (size_t)(ve - v)) || !js_str(v, ve, from, sizeof from) ||
+            !from[0])
+            return; /* Dienst-Namen sind [A-Za-z0-9 _-]: kein Escape */
+        for (k = 0; from[k]; k++) {
+            if ((unsigned char)from[k] < 0x20 || (unsigned char)from[k] > 0x7E || from[k] == '\\') return;
+        }
+        v = js_get(m, e, "hist", &ve);
+        if (v && ve - v == 1 && *v == '1') hist = 1;
+        tv = js_get(m, e, "text", &tve);
+        n = lch_json_str_u8(tv, tve, txt, (int)sizeof txt);
+        if (n > 0) fn(hist, from, txt, n);
+        SecureZeroMemory(txt, sizeof txt);
+    }
+}
+
+/* W446: Abonnement nach dem Schalter halten, eingereihte chat-Zeilen senden (Transport-Thread, unter cs). */
+static void lb_snchat_tick(loctun *t)
+{
+    int want = t->sn_want ? 1 : 0, i;
+    if (t->sn_state == 0 || !t->my_cid) {
+        for (i = 0; i < t->sn_out_n; i++) SecureZeroMemory(t->sn_out[i], sizeof t->sn_out[i]);
+        t->sn_out_n = 0;
+        return;
+    }
+    if (!want && t->sn_sub_sent < 0) t->sn_sub_sent = 0; /* nie abonniert: nichts abzubestellen */
+    if (want != t->sn_sub_sent) {
+        char b[64];
+        _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"chat_sub\",\"on\":%s,\"hist\":%s}", want ? "true" : "false",
+                    want && !t->sn_hist_done ? "true" : "false");
+        if (want) t->sn_hist_done = 1;
+        t->sn_sub_sent = want;
+        lb_send(t, b);
+        if (t->sn_state == 0) return; /* Senden gescheitert -> lb_close hat alles zurueckgesetzt */
+    }
+    for (i = 0; i < t->sn_out_n; i++) { /* lb_close (Sendefehler) leert die Schlange: Schleife endet dann */
+        if (t->sn_state == 2) lb_send(t, t->sn_out[i]);
+        if (i < t->sn_out_n) SecureZeroMemory(t->sn_out[i], sizeof t->sn_out[i]);
+    }
+    t->sn_out_n = 0;
 }
 
 static void lb_on_line(loctun *t, const char *m, const char *e, double now)
@@ -2996,8 +3140,15 @@ static void lb_on_line(loctun *t, const char *m, const char *e, double now)
         }
         t->relays_start = now;
         t->relays_done = 0;
-        lb_enter(t);
+        /* W446: Dienst bietet den steelnet-Chat an (Feld fehlt = aelterer Dienst) */
+        v = js_get(m, e, "chat", &ve);
+        InterlockedExchange(&t->sn_state, (v && ve - v == 4 && memcmp(v, "true", 4) == 0) ? 1 : 0);
+        t->sn_sub_sent = -1;
+        t->lb_welcome_at = now;
+        if (t->c.join_delay_ms <= 0) lb_enter(t); /* W446 TEST: sonst spaeter aus lb_poll */
         t->lb_list_last = now;
+    } else if (strcmp(typ, "chat") == 0 || strcmp(typ, "chat_sub") == 0 || strcmp(typ, "chat_status") == 0) {
+        lb_on_snchat(t, typ, m, e); /* W446 */
     } else if (strcmp(typ, "lobby_list") == 0 && t->pub) { /* W373 */
         pub_on_list(t, m, e, now);
     } else if (strcmp(typ, "lobby_list") == 0 && !t->lb_joined) {
@@ -3041,6 +3192,7 @@ static void lb_on_line(loctun *t, const char *m, const char *e, double now)
             L->used = 0;
         }
         t->lobby_code[0] = 0;
+        lb_play_mode_set(t, 0, "Lobby geschlossen"); /* W440 */
         t->lb_joined = 0;
         t->lb_listed = 0;
         t->lb_list_last = now;
@@ -3207,7 +3359,7 @@ static void lb_poll(loctun *t, double now)
             if (t->lb_s == INVALID_SOCKET) return;
             memmove(t->lb_in, nl + 1, (size_t)(t->lb_inlen - l - 1));
             t->lb_inlen -= l + 1;
-            t->lb_in[t->lb_inlen] = 0;
+            SecureZeroMemory(t->lb_in + t->lb_inlen, (size_t)l + 1); /* W446: verarbeitete Zeile (Chattext) loeschen */
         }
         if (t->lb_inlen >= (int)sizeof t->lb_in - 1) {
             lb_close(t, "zeile", now);
@@ -3225,7 +3377,11 @@ static void lb_poll(loctun *t, double now)
     }
     if (t->my_cid && (now - t->lb_bind_last >= (t->bound ? 25000.0 : 300.0))) lb_bind(t, now);
     if (t->pub && t->my_cid) pub_tick(t, now); /* W373 */
-    if (t->my_cid && !t->pub && !t->lb_joined && t->lb_listed == 0 && now - t->lb_list_last >= (t->c.code[0] ? 10000.0 : 1000.0)) {
+    lb_snchat_tick(t);                         /* W446 */
+    if (t->lb_s == INVALID_SOCKET) return;
+    if (t->my_cid && !t->pub && !t->lb_joined && t->lb_listed == 0 &&
+        now - t->lb_list_last >= (t->c.code[0] ? 10000.0 : 1000.0) &&
+        now - t->lb_welcome_at >= (double)t->c.join_delay_ms) { /* W446 TEST join_delay_ms (Standard 0) */
         lb_enter(t);
         t->lb_list_last = now;
     }
@@ -4407,6 +4563,74 @@ void loctun_set_app2(loctun *t, uint16_t gp, loctun_app_fn fn)
     t->app2_fn = fn;
 }
 
+void loctun_set_chat(loctun *t, uint16_t gp, loctun_chat_fn fn) /* W437 */
+{
+    if (!t) return;
+    t->chat_fn = NULL;
+    t->chat_gp = gp;
+    t->chat_fn = fn;
+}
+
+void loctun_set_snchat(loctun *t, loctun_snchat_fn fn, int want) /* W446 */
+{
+    if (!t) return;
+    t->sn_fn = fn;
+    InterlockedExchange(&t->sn_want, fn && want ? 1 : 0);
+    SetEvent(t->ev_app);
+}
+
+int loctun_snchat_state(loctun *t) /* W446 */
+{
+    return t ? (int)t->sn_state : 0;
+}
+
+int loctun_snchat_send(loctun *t, const char *json, int len) /* W446 */
+{
+    int ok = 0;
+    if (!t || !json || len <= 0 || len >= LOCTUN_SN_LINE) return 0;
+    EnterCriticalSection(&t->cs);
+    if (t->sn_state == 2 && t->sn_out_n < 4) {
+        memcpy(t->sn_out[t->sn_out_n], json, (size_t)len);
+        t->sn_out[t->sn_out_n][len] = 0;
+        t->sn_out_len[t->sn_out_n] = len;
+        t->sn_out_n++;
+        ok = 1;
+    }
+    LeaveCriticalSection(&t->cs);
+    if (ok) SetEvent(t->ev_app);
+    return ok;
+}
+
+int loctun_my_pilot(loctun *t, char *buf, int cap) /* W437 */
+{
+    int r;
+    if (!buf || cap <= 0) return 0;
+    buf[0] = 0;
+    if (!t || !t->c.lobby[0]) return 0;
+    EnterCriticalSection(&t->cs);
+    strncpy_s(buf, (size_t)cap, t->my_pilot, _TRUNCATE);
+    LeaveCriticalSection(&t->cs);
+    r = buf[0] != 0;
+    return r;
+}
+
+int loctun_peer_pilot(loctun *t, uint32_t vip, char *buf, int cap) /* W437 */
+{
+    tlink *L;
+    int r = 0;
+    if (!buf || cap <= 0) return 0;
+    buf[0] = 0;
+    if (!t) return 0;
+    EnterCriticalSection(&t->cs);
+    L = tl_link_by_vip(t, vip);
+    if (L && L->pilot[0]) {
+        strncpy_s(buf, (size_t)cap, L->pilot, _TRUNCATE);
+        r = 1;
+    }
+    LeaveCriticalSection(&t->cs);
+    return r;
+}
+
 int loctun_is_peer(loctun *t, uint32_t vip)
 {
     int r;
@@ -4505,6 +4729,12 @@ int loctun_auth_state(loctun *t)
     return t ? (int)t->auth_state : 0;
 }
 
+int loctun_play_mode(loctun *t) /* W440 */
+{
+    if (!t || !t->c.lobby[0]) return 0;
+    return (int)InterlockedCompareExchange(&t->play_mode, 0, 0);
+}
+
 int loctun_lobby_state(loctun *t)
 {
     if (!t || !t->c.lobby[0]) return 0;
@@ -4571,6 +4801,7 @@ int loctun_test_line(loctun *t, uint32_t my_cid, const char *line, char *out, in
     }
     if (line) lb_on_line(t, line, line + strlen(line), now);
     if (t->pub && t->my_cid) pub_tick(t, now);
+    if (t->my_cid) lb_snchat_tick(t); /* W446: Abonnement/Senden des steelnet-Chats */
     t->test_cap = NULL;
     LeaveCriticalSection(&t->cs);
     return t->pub;
@@ -4584,6 +4815,27 @@ int loctun_pub_games(loctun *t)
     for (i = 0; i < TUN_MAX_GHOST; i++) n += t->gh[i].used;
     LeaveCriticalSection(&t->cs);
     return n;
+}
+
+int loctun_pub_lookup(loctun *t, const int *lid, int n, int *mode, int *est) /* W443 */
+{
+    int i, j, found = 0;
+    if (!t || !lid || !mode || !est || n <= 0) return 0;
+    EnterCriticalSection(&t->cs);
+    for (i = 0; i < n; i++) {
+        mode[i] = 0;
+        est[i] = -1;
+        for (j = 0; j < TUN_MAX_GHOST && lid[i] > 0; j++) {
+            if (t->gh[j].used && t->gh[j].lid == lid[i]) {
+                mode[i] = t->gh[j].mode == LAS_ARCADE ? LAS_ARCADE : LAS_SIM;
+                est[i] = t->gh[j].est;
+                found++;
+                break;
+            }
+        }
+    }
+    LeaveCriticalSection(&t->cs);
+    return found;
 }
 
 int loctun_sec_state(loctun *t)

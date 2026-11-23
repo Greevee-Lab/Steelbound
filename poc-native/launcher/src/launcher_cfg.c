@@ -42,6 +42,7 @@ void lcfg_defaults(launcher_settings_t *s)
     s->sbc_mouse_off = 1;       /* W128: Maus-Achsen aus bei aktivem Controller */
     s->aim_assist = 0;          /* W236 AIM-ASSIST: Standard Original */
     s->auto_gear = 0;
+    s->ctrl_despike = 1; /* W439: Ausreisser-Filter an (Nutzerentscheid 22.11.), 0 = Original */
     s->sb_allied_squads = 1; /* W424 SB-ALLIED-SQUADS: Standard an (Nutzerentscheid 22.11.), 0 = Original */
     s->cockpit_hide = 0; /* W268 */
     s->monitor_view = 0; /* W319 */
@@ -56,6 +57,7 @@ void lcfg_defaults(launcher_settings_t *s)
     s->photo_view = 0;   /* W290 QUICK-SHOT: wie im Spiel */
     s->photo_size = -4;  /* W290: 4K (alte cfg mit photo_scale > 1 ohne photo_size: dieser Faktor) */
     s->photo_hud = 1;    /* W290: HUD im Foto */
+    s->photo_cine_self = LCFG_CSELF_DEF; /* W445 */
     s->replay_label = 1; /* W290: Original */
     s->replay_logo = 1;
     s->watermark_media = 1;
@@ -451,6 +453,8 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         s->auto_gear = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "sb_allied_squads") == 0) { /* W424 */
         s->sb_allied_squads = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "ctrl_despike") == 0) { /* W439 */
+        s->ctrl_despike = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "cockpit_hide") == 0) { /* W268 */
         s->cockpit_hide = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "monitor_view") == 0) { /* W319 */
@@ -490,6 +494,8 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         s->photo_size = (n == 1 || n == 2 || n == 4 || n == 8 || n == -4 || n == -8) ? n : -4;
     } else if (strcmp(k, "photo_hud") == 0) { /* W290 */
         s->photo_hud = atoi(v) ? 1 : 0;
+    } else if (strcmp(k, "photo_cine_self") == 0) { /* W445: aufs Raster (0 = aus) */
+        s->photo_cine_self = lcfg_cself_clamp(atoi(v));
     } else if (strcmp(k, "replay_label") == 0) { /* W290 */
         s->replay_label = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "replay_logo") == 0) { /* W290 */
@@ -684,6 +690,7 @@ static const char *kManaged[][2] = {
     { "aim_assist", "input" },     { "auto_gear", "input" }, /* W218, W236 */
     { "aim_turn", "input" }, /* W236: Altwert neutralisieren (immer 0) */
     { "sb_allied_squads", "gameplay" }, /* W424 */
+    { "ctrl_despike", "input" }, /* W439 */
     { "stick_aim", "input" },      { "stick_aim_sens", "input" }, /* W271 */
     { "save_lock", "game" }, /* W190 */
     { "game_tick", "game" }, /* W234 PAL50 */
@@ -691,6 +698,7 @@ static const char *kManaged[][2] = {
     { "photo_format", "photo" },    { "photo_aspect", "photo" },
     { "photo_view", "photo" },      { "photo_size", "photo" }, /* W290 QUICK-SHOT */
     { "photo_hud", "photo" }, /* W290 */
+    { "photo_cine_self", "photo" }, /* W445 */
     { "replay_label", "render" },   { "replay_logo", "render" }, /* W290 */
     { "watermark_media", "overlay" }, /* W290 */
     { "interp_fps", "render" },
@@ -836,6 +844,8 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = s->auto_gear ? 1 : 0;
         } else if (strcmp(k, "sb_allied_squads") == 0) { /* W424 */
             v = s->sb_allied_squads ? 1 : 0;
+        } else if (strcmp(k, "ctrl_despike") == 0) { /* W439 */
+            v = s->ctrl_despike ? 1 : 0;
         } else if (strcmp(k, "cockpit_hide") == 0) { /* W268 */
             v = s->cockpit_hide ? 1 : 0;
         } else if (strcmp(k, "monitor_view") == 0) { /* W319 */
@@ -856,6 +866,8 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = (s->photo_view >= 0 && s->photo_view <= 3) ? s->photo_view : 0;
         } else if (strcmp(k, "photo_hud") == 0) { /* W290 */
             v = s->photo_hud ? 1 : 0;
+        } else if (strcmp(k, "photo_cine_self") == 0) { /* W445 */
+            v = lcfg_cself_clamp(s->photo_cine_self);
         } else if (strcmp(k, "replay_label") == 0) { /* W290 */
             v = s->replay_label ? 1 : 0;
         } else if (strcmp(k, "replay_logo") == 0) {

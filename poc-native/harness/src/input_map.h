@@ -385,6 +385,17 @@ typedef struct {
      * net_hud_set = 1: Zeile steht im Profil (auch leer = aus); fehlt sie, gilt der Standard. */
     imap_bind_t net_hud;
     int net_hud_set;
+    /* W438 CTRL-RESET-040: Client-Aktion "menu_back" = Taste B des virtuellen Menue-Pads in Line of Contact
+     * (loc_pad.c, Zurueck in den Netzmenues). Nur Tastatur-Atome/Zusatz+Taste wirken. menu_back_set = 1: Zeile
+     * steht im Profil (auch leer = aus); fehlt sie, gilt BACKSPACE bzw. INSERT, wenn START (bi6) auf BACKSPACE
+     * liegt (imap_profile_parse). */
+    imap_bind_t menu_back;
+    int menu_back_set;
+    /* W437 LOC-CHAT: Client-Aktion "chat" = Chatzeile oeffnen (nur LoC online; Tasten wertet das Fenster aus,
+     * loc_chatnet.c). chat_set = 1: Zeile steht im Profil (auch leer = aus); fehlt sie, gilt ENTER, sofern keine
+     * Spieltaste (bi0..bi38) ENTER ohne Zusatztaste nutzt, sonst aus (imap_profile_parse). */
+    imap_bind_t chat;
+    int chat_set;
     int has_pad; /* 1 = Profil referenziert Pad-Quellen */
     int has_sbc; /* 1 = Profil referenziert SBC-Quellen */
     /* W221 HOTAS (experimentell): Geraete-Zuordnung je Slot ("joy0 = <Name
@@ -451,6 +462,19 @@ int imap_action_net_hud(const imap_profile_t *prof, imap_state_t *st, const imap
 int imap_action_replay_exit(const imap_profile_t *prof, const imap_snap_t *snap);
 #define IMAP_REPLAY_EXIT_DEFAULT "KEY:BACKSPACE"
 #define IMAP_NET_HUD_DEFAULT "KEY:F3" /* W374 */
+/* W438 CTRL-RESET-040: Tasten des virtuellen LoC-Menue-Pads (loc_pad.c). prof == NULL: Legacy (kein Profil)
+ * wie bisher Enter = START, SPACE = A, Backspace = B. Mit Profil: START folgt bi6, A folgt bi0, B folgt
+ * "menu_back" (je nur Tastatur: einfache Tasten und Zusatz+Taste, keine Maus/Pads). Rein, testbar. */
+#define IMAP_LPAD_START 1u
+#define IMAP_LPAD_A 2u
+#define IMAP_LPAD_B 4u
+unsigned imap_loc_pad_bits(const imap_profile_t *prof, imap_key_fn key, void *ctx);
+#define IMAP_MENU_BACK_DEFAULT "KEY:BACKSPACE"
+#define IMAP_MENU_BACK_ALT "KEY:INSERT" /* wenn START (bi6) auf BACKSPACE liegt */
+#define IMAP_CHAT_DEFAULT "KEY:ENTER" /* W437: Chatzeile (nur wenn ENTER keine Spieltaste ist) */
+/* W437 LOC-CHAT: Schnappschuss neutralisieren (offene Chatzeile): keine Taste, keine Maus, kein Pad/Controller/
+ * Joystick. Danach imap_profile_apply/imap_legacy_apply wie immer (Rastschalter/Gang/Akku behalten ihren Stand). */
+void imap_snap_block_ui(imap_snap_t *snap);
 /* W290: Uebergang fuer Profile ohne quick_shot-Zeile (von imap_profile_parse gerufen):
  *   photo genau KEY:F12 (alter Standard) -> photo = KEY:SHIFT+KEY:F12, quick_shot = KEY:F12;
  *   sonst bleibt photo, quick_shot = KEY:F12, wenn F12 (ohne Zusatztaste) frei ist, sonst leer.
@@ -617,6 +641,53 @@ void imap_autogear_defaults(imap_autogear_cfg_t *c);
 int imap_autogear_step(imap_autogear_t *ag, const imap_autogear_cfg_t *c,
                        imap_block_t *blk, uint8_t *gear_st, float v,
                        unsigned frame);
+
+/* W441 LOC-AUTOGEAR: dieselbe Schaltlogik in Line of Contact. Ein Schritt = eine
+ * SBC-Abfrage = ein Spieltick (20 Hz, LOC_BOOT W436), Geschwindigkeit in
+ * Spieleinheiten (~mm) je Tick. Haltezeit 2,25 s, Plateau-Fenster 1,5 s,
+ * 0,3 s Bremse im Stand bis R; Schwellen aus der Messung W441. */
+/* Messung W441 (MISSION 00, Gang je 300 Ticks gehalten): Der VT geht mit
+ * Schrittzyklus - je Tick 0..60 (Gang 1, Periode ~45 Ticks) bzw. bis ~130
+ * (Gang 4, ~25 Ticks), im Mittel 1: ~22, 2: ~36, 3: ~55, 4: ~85, 5: 168
+ * (gleichmaessig), R: ~-30. Bremse haelt den VT im selben Tick an. Daher
+ * Geschwindigkeit als Mittel ueber 45 Ticks (ein Schrittzyklus Gang 1, Rest-
+ * welligkeit +-15 %), Plateau ueber 30 Ticks, beim Bremsen das kurze Mittel
+ * ueber 8 Ticks. Abgleich mit der Messung: Hochschalten jeweils nahe der
+ * Endgeschwindigkeit des Gangs (BERICHT_M2 W441). */
+#define LOC_AG_VMIN 12.0f    /* Mindest-v fuer Hochschalten (Einheiten/Tick, ~55 % von Gang 1) */
+#define LOC_AG_VSTOP 5.0f    /* |v| darunter = Stillstand */
+#define LOC_AG_JUMP 1000.0f  /* Weg je Tick darueber = Sprung (Eject, Neustart), Verlauf neu */
+#define LOC_AG_NLONG 45      /* Ticks fuer das Fahr-Mittel (= Schrittzyklus Gang 1) */
+#define LOC_AG_NSHORT 8      /* Ticks fuer das Brems-Mittel */
+#define LOC_AG_PLAT_PCT 5.0f /* Plateau: Fahr-Mittel jetzt < 5 % ueber dem der 45 Ticks davor */
+void imap_autogear_defaults_loc(imap_autogear_cfg_t *c);
+
+/* W441: Weg je Tick des eigenen VT aus Lage (x/z) und Gier hy, vorzeichenbehaftet
+ * (vorwaerts = Richtung (sin hy, cos hy) positiv), Ring der letzten 128 Ticks.
+ * Luecke > 30 Schritte oder Sprung > jump je Schritt setzt den Verlauf zurueck;
+ * gleicher Schritt zweimal = ohne Wirkung. imap_agvel_avg: Summe der letzten
+ * hoechstens nwin Ticks / nwin (Ticks vor Verlauf-Beginn zaehlen als Stillstand -
+ * sonst taeuscht ein halber Schrittzyklus am Anfang ein Plateau vor). */
+typedef struct {
+    float d[128];
+    float lx, lz;
+    unsigned lstep;
+    unsigned n;    /* gefuellte Ticks seit Verlauf-Beginn */
+    int have;      /* letzte Lage gueltig */
+} imap_agvel_t;
+void imap_agvel_push(imap_agvel_t *vl, float x, float z, float hy, unsigned step, float jump);
+float imap_agvel_avg(const imap_agvel_t *vl, int nwin);
+/* W441: v fuer imap_autogear_step in LoC: Fahr-Mittel, solange nicht gebremst wird;
+ * mit wirksamer Bremse (ausser R: Bremse ohne Gas, in R: Gas ohne Bremse) das kurze
+ * Mittel - die Bremse haelt den VT sofort an, Stillstand/R ohne 2 s Nachlauf. */
+float imap_agvel_loc_v(const imap_agvel_t *vl, const imap_block_t *blk, int pedal_on);
+/* W441: Zusatzbedingung fuer das Hochschalten in LoC (1 = erlaubt): zwei volle,
+ * nicht ueberlappende Fahr-Mittel (je ein Schrittzyklus), beide im aktuellen Gang
+ * (since_shift >= 90 Ticks), steigen um < 5 %. Ohne sie schaltete der Zwei-Instanzen-Lauf A1 bei ~70 % der Gang-Endgeschwindigkeit
+ * hoch (Welligkeit verdeckte den Anstieg); der hoehere Gang zieht dann nicht durch
+ * (5. Gang ab ~50 faellt auf 35, Pendeln 4-5). Der Aufrufer sperrt sonst nur
+ * das Hochschalten (v_min), Runter/Stillstand/R bleiben. */
+int imap_agvel_loc_plateau(const imap_agvel_t *vl, unsigned since_shift);
 
 /* ---- Gamepad-Poll (Hook-Seite) ----
  * Laedt xinput1_4 (Fallback 1_3/9_1_0) dynamisch, fragt Port 0..3, cached

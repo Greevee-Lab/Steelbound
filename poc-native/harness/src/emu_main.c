@@ -1963,6 +1963,7 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     krnl_init(&img);
     if (g_cfg.directory_selftest) krnl_directory_selftest();
     if (g_cfg.save_delete_selftest) krnl_savedelete_selftest(); /* DIAG(W433) */
+    if (g_cfg.loc_save_selftest) krnl_loc_save_selftest(); /* DIAG(W434) */
     if (g_cfg.savelock_selftest) { /* DIAG(SAVE-LOCK,W190) */
         krnl_savelock_selftest();
     }

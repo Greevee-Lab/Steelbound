@@ -218,6 +218,7 @@ int imouse_selftest(void)
     { extern int imouse_w260_selftest(void); fail += imouse_w260_selftest(); }
     { extern int imouse_w299_selftest(void); fail += imouse_w299_selftest(); }
     { extern int imouse_w341_selftest(void); fail += imouse_w341_selftest(); }
+    { extern int imouse_w436_selftest(void); fail += imouse_w436_selftest(); }
     VERIFY(!bad_registration, "foreground-only Raw Input registration");
     VERIFY(physical == 0, "test focus never invokes physical cursor APIs");
     printf("W208 simulated physical calls=%d\n", physical);
@@ -612,5 +613,48 @@ int imouse_w341_selftest(void)
     event(WM_TIMER, IMOUSE_TIMER_ID);
     fail += w225_reason("W341 SB-Profil unveraendert (Mission)", 1, "mission");
     printf("W341 LOC-MOUSE: Fehler=%d\n", fail);
+    return fail;
+}
+
+/* W436 LOC-EJECT (GitHub #76): kurzer Druck Umschalt+Entf ganz zwischen zwei Abfragen des Spiels (Down und Up kommen
+ * als Fenster-Nachrichten vor dem naechsten Poll, Launcher-Weg input_source=1). Die naechste Abfrage sieht beide
+ * Tasten gleichzeitig (Akkord -> Eject), das Folgebild auch noch (IMSG_MIN_FRAMES), danach ist alles los. Ebenso,
+ * wenn Umschalt gehalten bleibt und nur Entf kurz getippt wird. Je Spieltick fragt LoC den SBC genau einmal ab
+ * (LOCRBI-LAT "mehrere=0"), direkt danach entsteht der eigene Rahmen -> der Druck landet in einem Rahmen. */
+int imouse_w436_selftest(void)
+{
+    int fail = 0, sh, de;
+    unsigned f = 5000;
+    int save_src = g_cfg.input_source;
+    g_cfg.input_source = 1;
+    imsg_clear();
+    sh = imsg_key(VK_SHIFT, f);
+    de = imsg_key(VK_DELETE, f);
+    if (sh || de) { printf("W436 FAIL vorher gedrueckt (%d %d)\n", sh, de); fail++; }
+    event(WM_KEYDOWN, VK_SHIFT);
+    event(WM_KEYDOWN, VK_DELETE);
+    event(WM_KEYUP, VK_DELETE);
+    event(WM_KEYUP, VK_SHIFT);
+    f++;
+    sh = imsg_key(VK_SHIFT, f);
+    de = imsg_key(VK_DELETE, f);
+    if (!sh || !de) { printf("W436 FAIL kurzer Akkord nicht in der naechsten Abfrage (%d %d)\n", sh, de); fail++; }
+    sh = imsg_key(VK_SHIFT, f + 1);
+    de = imsg_key(VK_DELETE, f + 1);
+    if (!sh || !de) { printf("W436 FAIL kurzer Akkord fehlt im Folgebild (%d %d)\n", sh, de); fail++; }
+    sh = imsg_key(VK_SHIFT, f + 2);
+    de = imsg_key(VK_DELETE, f + 2);
+    if (sh || de) { printf("W436 FAIL Akkord klemmt (%d %d)\n", sh, de); fail++; }
+    event(WM_KEYDOWN, VK_SHIFT); /* Umschalt gehalten, Entf kurz zwischen zwei Abfragen */
+    sh = imsg_key(VK_SHIFT, f + 3);
+    event(WM_KEYDOWN, VK_DELETE);
+    event(WM_KEYUP, VK_DELETE);
+    sh = imsg_key(VK_SHIFT, f + 4);
+    de = imsg_key(VK_DELETE, f + 4);
+    if (!sh || !de) { printf("W436 FAIL Entf-Tipp bei gehaltenem Umschalt verloren (%d %d)\n", sh, de); fail++; }
+    event(WM_KEYUP, VK_SHIFT);
+    imsg_clear();
+    g_cfg.input_source = save_src;
+    printf("W436 LOC-EJECT kurzer Druck (Fenster-Nachrichten): Fehler=%d\n", fail);
     return fail;
 }

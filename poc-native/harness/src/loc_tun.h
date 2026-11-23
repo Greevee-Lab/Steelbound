@@ -54,6 +54,9 @@ typedef struct loctun_cfg {
     int test_refuse_ms;   /* W409 TEST: eigenes Spiel gilt die ersten N ms nach jedem OPEN als "lauscht nicht" */
     int ver_check;        /* W420 TEST: Versionspruefung im HELLO auch ohne Treffpunkt (Standard 0: nur steelnet) */
     char ver_test[16];    /* W420 TEST: eigene Version statt SB_NET_VERSION ("-" = HELLO ohne Versionsfeld wie aeltere Clients) */
+    char play_mode[8];    /* W440 LOC-LOBBY-MODES: Modus eigener Lobbys beim Anlegen ("sim" = Standard, "arcade") */
+    int join_delay_ms;    /* W446 TEST: Lobby erst N ms nach dem welcome betreten bzw. anlegen (steelnet-Chat ausserhalb
+                           * einer Lobby nachweisen), 0 = sofort (Standard) */
     char route_sim[256];  /* W395 TEST: je Weg eigene Verzoegerung/Ausfall, "name:SPEC/name:SPEC" mit name = direct oder
                            * Relayname, SPEC wie loc_netsim plus cut:A-B (Sekunden ab Transportstart, B leer = bis Ende) */
 } loctun_cfg;
@@ -92,6 +95,28 @@ void loctun_set_app(loctun *t, uint16_t gp, loctun_app_fn fn);
 /* W420 LOC-CLIPDUMP: zweiter Kanal gleicher Art (Match-Regel "SBRU", loc_rule.c) auf eigenem Spielport, eigene
  * Ratenbremse (20/s). Aeltere Clients kennen den Port nicht und verwerfen das Datagramm (nicht gebunden). */
 void loctun_set_app2(loctun *t, uint16_t gp, loctun_app_fn fn);
+/* W437 LOC-CHAT: dritter Kanal gleicher Art (Textchat "SBCH", loc_chat.c) auf eigenem Spielport, eigene Ratenbremse
+ * (4/s, Burst 8; die Nachrichtengrenze 3 je 5 s prueft der Chat). fn bekommt zusaetzlich den Pilotnamen des
+ * Mitspielers aus der Sitzung (peer_info, an die Schluessel gebunden; leer ohne Treffpunkt). Nie an den Gast; der
+ * entschluesselte Puffer wird nach der Zustellung geloescht. fn = NULL schaltet ab. */
+typedef void (*loctun_chat_fn)(uint32_t vip, const char *pilot, const uint8_t *d, int len);
+void loctun_set_chat(loctun *t, uint16_t gp, loctun_chat_fn fn);
+/* W446 STEELNET-CHAT: steelnet-weiter Chat ueber den TLS-Steuerkanal des Treffpunkts (kein neuer Kanal, PROTOKOLL.md
+ * W446). fn laeuft im Transport-Thread unter der Transport-Sperre (kurz halten, keine loctun_*-Aufrufe darin):
+ * kind 0 = Nachricht, 1 = Verlaufszeile (beim Abonnieren), 2 = Statuscode des Dienstes (from = NULL, text = Code,
+ * z. B. "rate", "muted", "account_required"). Der Klartextpuffer wird nach dem Aufruf geloescht. want = abonnieren
+ * (Schalter loc_snchat); ohne want sendet der Dienst nichts. fn = NULL schaltet ab. */
+typedef void (*loctun_snchat_fn)(int kind, const char *from, const uint8_t *text, int len);
+void loctun_set_snchat(loctun *t, loctun_snchat_fn fn, int want);
+/* W446: 0 = kein Treffpunkt bzw. Dienst ohne Chat, 1 = Dienst bietet Chat (welcome), 2 = abonniert (Tab verfuegbar). */
+int loctun_snchat_state(loctun *t);
+/* W446: eine fertige chat-Zeile (lch_sn_tx, ohne Zeilenumbruch) zum Senden einreihen (UI-Thread). 1 = eingereiht,
+ * 0 = nicht abonniert bzw. Warteschlange voll. Die Kopie wird nach dem Senden geloescht. */
+int loctun_snchat_send(loctun *t, const char *json, int len);
+/* W437: eigener wirksamer Pilotname (welcome, Transkript) in buf; 1 = vorhanden (nur mit Treffpunkt). */
+int loctun_my_pilot(loctun *t, char *buf, int cap);
+/* W437: Pilotname des Mitspielers mit virtueller Adresse vip (leer = unbekannt). 1 = gefunden. */
+int loctun_peer_pilot(loctun *t, uint32_t vip, char *buf, int cap);
 /* W420 (Nutzerentscheid 22.11.): steelnet nur mit gleicher Client-Version (poc-native/VERSION). Rueckgabe 0 = keine
  * Ablehnung, 1 = Treffpunkt verlangt need (Fehler version_required), 2 = Mitspieler mit Version peer ("" = Feld fehlt,
  * aelterer Client) abgelehnt; need = die neuere der beiden Versionen. */
@@ -109,6 +134,9 @@ void loctun_log_stats(loctun *t, int waited_s);
 int loctun_lobby_state(loctun *t);
 /* W328: Konto-Anmeldung am Treffpunkt: 0 keine (Gast), 1 laeuft, 2 angenommen, -1 abgelehnt. */
 int loctun_auth_state(loctun *t);
+/* W440 LOC-LOBBY-MODES: Spielmodus der aktuellen steelnet-Lobby aus lobby_state.play_mode: 0 = in keiner Lobby
+ * (bzw. kein Treffpunkt), 1 = sim (auch: Feld fehlt = aelterer Dienst, unbekannter Wert), 2 = arcade (LAS_*). */
+int loctun_play_mode(loctun *t);
 /* W334: Raumcode der eigenen Lobby ("XXXX-XXXX", leer = noch keiner). 1 = vorhanden. */
 int loctun_lobby_code(loctun *t, char *buf, int cap);
 /* W334: 0 ok, 1 Krypto-Selbsttest fehlgeschlagen, 2 Server-Pruefung (Pin) fehlgeschlagen, 3 kein Pin
@@ -123,6 +151,9 @@ int loctun_diag(loctun *t, char *buf, int cap);
 int loctun_test_line(loctun *t, uint32_t my_cid, const char *line, char *out, int cap);
 /* W373: Zahl der lokal vertretenen offenen oeffentlichen Spiele (Geister). */
 int loctun_pub_games(loctun *t);
+/* W443 LOC-LOBBY-LIST: Modus (LAS_SIM/LAS_ARCADE, 0 = keine solche Lobby) und Ping-Schaetzung (ms, -1 = unbekannt)
+ * der lokal vertretenen oeffentlichen Lobbys lid[0..n-1] (Lobby-Id aus der XNKID der Host-Info). Rueckgabe: gefunden. */
+int loctun_pub_lookup(loctun *t, const int *lid, int n, int *mode, int *est);
 /* W374 LOC-NET-OVERLAY (F3): Werte des i-ten Mitspielers fuer das Netz-Overlay (nur Zahlen und der Pilotname
  * aus dem Treffpunkt, keine Adressen). 0 = kein solcher Eintrag. */
 #define LOCTUN_HUD_ALT 4 /* W395: Wege je Mitspieler im Overlay */

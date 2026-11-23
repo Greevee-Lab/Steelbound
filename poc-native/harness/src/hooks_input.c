@@ -13,8 +13,12 @@
 #include "sb_mauto.h" /* W272 ALPHA-TEST */
 #include "loc_pad.h" /* W297: Pfeile in LoC-Menues ans Pad */
 #include "loc_vpf.h" /* W394 LOC-VIEW-PERFRAME */
+#include "loc_autogear.h" /* W441 LOC-AUTOGEAR */
+#include "loc_aimassist.h" /* W442 LOC-AIMASSIST */
 #include "sb_profile.h" /* W297: g_sba_loc */
 #include "sb_cchain.h" /* W303 CAMPAIGN-CHAIN */
+#include "loc_chatnet.h" /* W437 LOC-CHAT */
+#include "loc_net.h" /* W440 LOC-LOBBY-MODES: loc_assist_gate */
 
 static uint8_t g_fake_input[512];
 unsigned g_last_pstate;
@@ -48,6 +52,20 @@ static int hook_key_down(int vk, void *ctx)
 {
     (void)ctx;
     return key_down(vk);
+}
+
+/* W438 CTRL-RESET-040: Tasten des LoC-Menue-Pads (loc_pad.c). Ohne Profil bzw. bei Ladefehler Legacy
+ * (Enter = START, SPACE = A, Backspace = B), mit Profil dessen Belegung (START = bi6, A = bi0, B = menu_back);
+ * Profil gewaehlt, aber noch nicht geladen -> nichts gedrueckt. */
+unsigned hooks_loc_pad_bits(void)
+{
+    if (!g_cfg.input_profile[0] || (g_prof_init && g_prof_load_rc < 0)) {
+        return imap_loc_pad_bits(NULL, hook_key_down, NULL);
+    }
+    if (!g_prof_init) {
+        return 0;
+    }
+    return imap_loc_pad_bits(&g_prof, hook_key_down, NULL);
 }
 
 /* W297 LOC-MISSION: In den LoC-Netzmenues liest die Sammelabfrage (0x125F70) den
@@ -594,7 +612,7 @@ static void w236_aim_assist(sbc_in_t *s, const imap_state_t *gs)
         int sst = sbc_wire_status();
         if (sst == SBC_WIRE_USB_OK || sst == SBC_WIRE_FIXTURE) return;
     }
-    if (g_cfg.overlay && sb_ovl_open()) return;
+    if ((g_cfg.overlay && sb_ovl_open()) || loc_chat_typing()) return; /* W437: auch bei offener Chatzeile */
     if (!imouse_assist_allowed()) {
         guide_on = 0;
         return;
@@ -703,7 +721,7 @@ static void w218_simple_controls(sbc_in_t *s, imap_state_t *gs, int gear_direct)
         int sst = sbc_wire_status();
         if (sst == SBC_WIRE_USB_OK || sst == SBC_WIRE_FIXTURE) return;
     }
-    if (g_cfg.overlay && sb_ovl_open()) return;
+    if ((g_cfg.overlay && sb_ovl_open()) || loc_chat_typing()) return; /* W437: auch bei offener Chatzeile */
     __try {
         u32 tab = *(volatile u32 *)(uintptr_t)SBA(0x351828u);
         u32 n = *(volatile u32 *)(uintptr_t)SBA(0x352288u);
@@ -999,6 +1017,9 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                     int nvk[4], nmod[4], nn;
                     nn = imap_bind_key_combos(&g_prof.net_hud, nvk, nmod, 4);
                     sb_nhud_set_binding(nvk, nmod, nn);
+                    /* W437 LOC-CHAT: Tasten der Aktion "chat" (Standard Enter, falls frei; leere Zeile = aus) */
+                    nn = imap_bind_key_combos(&g_prof.chat, nvk, nmod, 4);
+                    loc_chat_set_binding(nvk, nmod, nn);
                 }
                 if (g_prof_load_rc >= 0) {
                     /* W283 ORIG-KEY-BIND: Aktion "orig_view" (Standard
@@ -1065,6 +1086,7 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                 static unsigned joy_last = 0xFFFFFFFFu;
                 if (!joy_started) {
                     joy_started = 1;
+                    ijoy_set_despike(g_cfg.ctrl_despike); /* W439: Ausreisser-Filter (Standard an, 0 = Original) */
                     joy_rc = ijoy_slots_start((const char (*)[96])g_prof.joy_dev,
                                               g_prof.joy_used);
                     HLOG_I("INPUT: Joystick/HOTAS (experimentell) %s, Slots 0x%X",
@@ -1103,6 +1125,7 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                            "aktiv), Maustasten an");
                 }
             }
+            if (loc_chat_typing()) imap_snap_block_ui(&snap); /* W437: Chatzeile offen -> Spiel ohne Eingabe */
             if (g_prof_load_rc >= 0) {
                 imap_profile_apply((imap_block_t *)s, &g_prof_st, &g_prof,
                                    &snap);
@@ -1157,6 +1180,7 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
             } else
                 imap_legacy_apply((imap_block_t *)s, &g_leg, &snap);
         } else {
+            if (loc_chat_typing()) imap_snap_block_ui(&snap); /* W437 */
             imap_legacy_apply((imap_block_t *)s, &g_leg, &snap);
         }
         if (g_cfg.key_toggles && !snap.replay_active) {
@@ -1178,7 +1202,14 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
             if (g_cfg.toggle_assist)
                 w87_toggle_assist(s, ts, chg); /* W87 */
         }
-        if (g_cfg.auto_gear) {
+        if (g_sba_loc && (loc_assist_gate(g_cfg.auto_gear) || g_cfg.input_diag)) { /* W440+W441: Sim-Gate */
+            /* W441 LOC-AUTOGEAR: Gang-Automatik in LoC (eigene VAs, ein Schritt je Spieltick). */
+            imap_state_t *gs = (g_cfg.input_profile[0] &&
+                                g_prof_load_rc >= 0) ? &g_prof_st : &g_leg;
+            loc_autogear_poll((imap_block_t *)s, &gs->gear, g_cfg.input_profile[0] &&
+                                                             g_prof_load_rc >= 0 &&
+                                                             g_prof_st.gear_direct_hit);
+        } else if (loc_assist_gate(g_cfg.auto_gear)) { /* W440 */
             /* W218 SIMPLE-CONTROLS: Gang-Automatik. */
             imap_state_t *gs = (g_cfg.input_profile[0] &&
                                 g_prof_load_rc >= 0) ? &g_prof_st : &g_leg;
@@ -1186,12 +1217,13 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                                             g_prof_load_rc >= 0 &&
                                             g_prof_st.gear_direct_hit);
         }
-        if (g_cfg.aim_assist) {
+        if (loc_assist_gate(g_cfg.aim_assist)) { /* W440: in LoC-Sim-Lobbys wirksam 0 */
             /* W236 AIM-ASSIST: vor der absoluten Vorsteuerung (sieht den
              * Hebel = Arm-Soll, nicht die Vorsteuer-Spitzen). */
             imap_state_t *gs = (g_cfg.input_profile[0] &&
                                 g_prof_load_rc >= 0) ? &g_prof_st : &g_leg;
-            w236_aim_assist(s, gs);
+            if (g_sba_loc) loc_aimassist_poll(s, gs->m_aim_src & 3u); /* W442: LoC-Sicht/Arm-Modell */
+            else w236_aim_assist(s, gs);
         }
         {
             /* W87: absolute Maus (Vorsteuerung auf die Spielglaettung);
@@ -1203,7 +1235,7 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
             if (g_sba_loc) loc_vpf_mapped(as, &snap, s, !(g_cfg.input_profile[0] && g_prof_load_rc >= 0)); /* W394 */
         }
     }
-    sbc_merge(s); /* W75: USB/Fixture als Zweitquelle (sbc_usb=1) */
+    if (!loc_chat_typing()) sbc_merge(s); /* W75: USB/Fixture als Zweitquelle (sbc_usb=1); W437: nicht beim Tippen */
     if (g_sba_loc) loc_vpf_end(s); /* W394: Poll fertig (Akku-Stand fuer die Anzeige veroeffentlicht) */
     if (g_sba_loc) loc_mouse_note(g_w341_dx, g_w341_dy, s->aiming_x, s->aiming_y, s->buttons[0]); /* W341: nur Zaehler */
     sb_rauto_apply(s); /* W254 REPLAY-LAUNCHER: Menue-Fuehrung (nur mit replay_autoplay) */

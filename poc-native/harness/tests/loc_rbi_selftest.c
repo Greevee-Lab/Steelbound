@@ -110,6 +110,8 @@ static int g_tap_deff;      /* W380: wirksame Verzoegerung (Slot = Rahmen - Vorl
 static u32 g_tap_inv, g_tap_take, g_tap_miss; /* W380: live erfundene Flanken / gepruefte Entnahmen / Rahmen != Wahrheit */
 static u32 g_tap_at[MAXS + 2];  /* W380: Flanken von B in A's Zeitlinie nach Tick t (Neurechnen ueberschreibt) */
 static int tap_truth(u32 q) { return q >= 4u && (q % 13u) < (u32)g_tap; } /* Vorlauf (4 Rahmen) ohne Pedal */
+static int g_tap_byte = 5;       /* W436: Lage des Tipps im Eingabesatz (W380: Byte 5 Pedal; W436: Byte 0 Knopf 3 Eject) */
+static uint8_t g_tap_mask = 0xFF; /* W436: Bits des Tipps (W380 0xFF, W436 0x08); uebrige Bits bleiben Zufall */
 static int g_ramp;          /* W385: Achsen (Byte 9..13) als Rampen mit wechselnder Steigung, Tasten in langen Abschnitten */
 static int g_predm, g_predq = 6; /* W385: Vorhersagemodus beider Seiten */
 
@@ -120,7 +122,8 @@ static void own_frame(inst_t *X, int prefill)
     int k;
     hdr[1] = (uint8_t)X->st.acc;
     for (k = 0; k < RBI_IN; k++) in[k] = (uint8_t)(v >> ((k & 3) * 8));
-    if (g_tap) in[5] = tap_truth(X->tprod) ? 0xFF : 0; /* W380: Muster ueber den Rahmenindex der Eingabeschicht */
+    if (g_tap) /* W380: Muster ueber den Rahmenindex der Eingabeschicht (W436: Lage/Bits einstellbar) */
+        in[g_tap_byte] = (uint8_t)((in[g_tap_byte] & (uint8_t)~g_tap_mask) | (tap_truth(X->tprod) ? g_tap_mask : 0u));
     if (g_ramp && !prefill) { /* W385: wie Maus/Hebel - stetige Bewegung, Steigung wechselt alle 23 Rahmen (auch 0 = Halten) */
         u32 q = X->prod, seg = q / 23u, sg;
         u32 bs = (q / 61u) * 2246822519u ^ (u32)X->me;
@@ -206,7 +209,7 @@ static void toy_tick(inst_t *X)
         if (X->st.buf[i][1] != X->st.buf[X->me][1]) X->sync_bad++;
     }
     for (i = 0; i < NP; i++) { /* W380: Pedal-Flanke wie im Spiel aus dem entnommenen Satz */
-        uint8_t pd = X->st.buf[i][RBI_HDR + 5];
+        uint8_t pd = (uint8_t)(X->st.buf[i][RBI_HDR + g_tap_byte] & g_tap_mask); /* W436: Lage/Bits einstellbar */
         if (g_tap && i != X->me && !rbi_replaying(X->r)) { /* live: Flanke nur, wenn die Wahrheit sie hat */
             u32 q = rbi_cons(X->r, i) - 1u + 4u - (u32)g_tap_deff;
             int tr = tap_truth(q), trp = q > 0 && tap_truth(q - 1u);
@@ -451,8 +454,9 @@ static void scenario(const char *name, const scen_t *sc, int expect_rb)
             u32 q = k + 4u - (u32)g_tap_deff;
             if (tap_truth(q) && !(q > 0 && tap_truth(q - 1u))) n++;
         }
-        printf("%-28s W380 Pedal-Tipps (%d Rahmen): Flanken B in A bis Tick %u: %u, Wahrheit %u | live erfunden %u, "
-               "live abweichend %u von %u\n", name, g_tap, T, g_tap_at[T], n, g_tap_inv, g_tap_miss, g_tap_take);
+        printf("%-28s Tipps (%d Rahmen, Byte %d Bits %02X): Flanken B in A bis Tick %u: %u, Wahrheit %u | live erfunden "
+               "%u, live abweichend %u von %u\n", name, g_tap, g_tap_byte, g_tap_mask, T, g_tap_at[T], n, g_tap_inv,
+               g_tap_miss, g_tap_take);
         CHECK(g_tap_at[T] == n, "%s: W380 Flanken von B in der Zeitlinie von A %u statt %u", name, g_tap_at[T], n);
         CHECK(n > 100u, "%s: W380 zu wenige Tipps (%u)", name, n);
         CHECK(g_tap_inv == 0u, "%s: W380 Vorhersage erfand %u Pedal-Flanken (live)", name, g_tap_inv);
@@ -880,6 +884,44 @@ static void w380_cases(void)
         CHECK(g_tap_miss > 0u, "%s: W380 keine Fehlvorhersage des Pedals (Fall prueft nichts)", k[i].n);
     }
     g_tap = 0;
+}
+
+/* W436 LOC-EJECT (GitHub #76): Eject im Rollback. Das Spiel packt SBC-Knopf 3 (Eject) in Byte 0 Bit 0x08 des
+ * Eingabesatzes (FUN_0001CAE0) und bildet beim Empfaenger daraus Pegel/Flanke je entnommenem Satz (FUN_0001B870,
+ * FUN_0001B0A0). B drueckt Eject jeweils genau einen Tick (kuerzester Druck, den das Spiel sieht) bzw. 3 Ticks; A sagt
+ * B voraus (wiederholt den letzten bestaetigten Satz: nie eine erfundene Flanke) und rechnet nach der Fehlvorhersage
+ * neu. Pruefung wie W380: jede Flanke von B genau einmal in der endgueltigen Zeitlinie von A, keine erfundene,
+ * beide Seiten synchron (Hash-Abgleich). Die uebrigen Bits von Byte 0 wechseln zufaellig mit. */
+static void w436_cases(void)
+{
+    static const struct { int dab, dba, jit, loss, D, tap; const char *n; } k[] = {
+        {3, 3, 3, 10, 2, 1, "W436 Eject 1 Tick, 3+3, Verlust"},
+        {2, 2, 2, 0, 1, 1, "W436 Eject 1 Tick, 2+2, D=1"},
+        {5, 5, 4, 5, 3, 1, "W436 Eject 1 Tick, 5+5, D=3"},
+        {1, 6, 3, 2, 2, 3, "W436 Eject 3 Ticks, 1/6"},
+    };
+    scen_t s;
+    int i;
+    g_tap_byte = 0;
+    g_tap_mask = 0x08;
+    for (i = 0; i < (int)(sizeof k / sizeof k[0]); i++) {
+        memset(&s, 0, sizeof s);
+        s.delay_ab = k[i].dab;
+        s.delay_ba = k[i].dba;
+        s.jitter = k[i].jit;
+        s.loss_pct = k[i].loss;
+        s.D = k[i].D;
+        s.maxpred = 10;
+        s.ticks = 6000;
+        g_tap = k[i].tap;
+        g_tap_deff = k[i].D;
+        g_tap_inv = g_tap_take = g_tap_miss = 0;
+        scenario(k[i].n, &s, 1);
+        CHECK(g_tap_miss > 0u, "%s: W436 keine Fehlvorhersage des Eject-Knopfs (Fall prueft nichts)", k[i].n);
+    }
+    g_tap = 0;
+    g_tap_byte = 5;
+    g_tap_mask = 0xFF;
 }
 
 /* W385 LOC-SMOOTH: Vorhersage fremder Achsen mit gedaempftem Trend. (a) rbi_predict rein: Modus 0 = Wiederholung wie
@@ -1313,6 +1355,80 @@ static void rbn_case_ok(u32 owd, int expect_d)
     nn_free(&N);
 }
 
+/* W447 LOC-NET-AUTO: Profil Direkt/Rollback je Mission, Auto nur wenn alle wollen, Wunsch zur Laufzeit. */
+static int w447_one(u32 owd, int autoA, int autoB, int *prof_a, int *prof_b, int *d)
+{
+    nnet_t N;
+    int ok;
+    nn_init(&N, 1, 1, owd, 0);
+    rbn_set_want(N.n[0], 1, autoA);
+    rbn_set_want(N.n[1], 1, autoB);
+    nn_step(&N, 3000);
+    rbn_mission_start(N.n[0], N.now, 0, 1);
+    nn_step(&N, 300);
+    rbn_mission_start(N.n[1], N.now, 1, 1);
+    nn_step(&N, 2000);
+    ok = rbn_state(N.n[0]) == RBN_ST_R2 && rbn_state(N.n[1]) == RBN_ST_R2;
+    *prof_a = rbn_profile(N.n[0]);
+    *prof_b = rbn_profile(N.n[1]);
+    *d = rbn_delay(N.n[0]);
+    nn_free(&N);
+    return ok;
+}
+static void w447_cases(void)
+{
+    int pa, pb, d, ok;
+    nnet_t N;
+    printf("Aushandlung W447 (Auto: Profil Direkt/Rollback)\n");
+    CHECK(rbn_pick_profile(-1, 0, 100, 15) == RBN_PROF_ROLLBACK && rbn_pick_profile(40, -1, 100, 15) == RBN_PROF_ROLLBACK &&
+              rbn_pick_profile(40, 5, 100, 15) == RBN_PROF_DIRECT && rbn_pick_profile(100, 15, 100, 15) == RBN_PROF_DIRECT &&
+              rbn_pick_profile(101, 5, 100, 15) == RBN_PROF_ROLLBACK && rbn_pick_profile(60, 16, 100, 15) == RBN_PROF_ROLLBACK,
+          "W447 rbn_pick_profile Grenzen");
+    ok = w447_one(15, 1, 1, &pa, &pb, &d); /* 30 ms RTT, ruhig */
+    CHECK(ok && pa == RBN_PROF_DIRECT && pb == RBN_PROF_DIRECT, "W447 30 ms beide Auto -> Direkt auf beiden Seiten (%d/%d/%d)", ok, pa, pb);
+    ok = w447_one(90, 1, 1, &pa, &pb, &d); /* 180 ms RTT */
+    CHECK(ok && pa == RBN_PROF_ROLLBACK && pb == RBN_PROF_ROLLBACK && d == 3, "W447 180 ms Auto -> Rollback, D 3 (%d/%d/%d/%d)", ok, pa,
+          pb, d);
+    ok = w447_one(15, 1, 0, &pa, &pb, &d);
+    CHECK(ok && pa == RBN_PROF_FIXED && pb == RBN_PROF_FIXED, "W447 Client ohne Auto -> fest (Rollback wie bisher) (%d/%d/%d)", ok, pa, pb);
+    ok = w447_one(15, 0, 1, &pa, &pb, &d);
+    CHECK(ok && pa == RBN_PROF_FIXED && pb == RBN_PROF_FIXED, "W447 Host ohne Auto -> fest (%d/%d/%d)", ok, pa, pb);
+    /* Wunsch zur Laufzeit: Client schaltet auf Lockstep (ESC-Menue) -> naechste Mission Lockstep fuer beide */
+    nn_init(&N, 1, 1, 15, 0);
+    rbn_set_want(N.n[0], 1, 1);
+    rbn_set_want(N.n[1], 1, 1);
+    nn_step(&N, 3000);
+    CHECK(rbn_auto_agreed(N.n[0], N.now) && rbn_auto_agreed(N.n[1], N.now), "W447 Lobby: Auto vereinbart");
+    rbn_set_want(N.n[1], 1, 0);
+    nn_step(&N, 1000);
+    CHECK(!rbn_auto_agreed(N.n[0], N.now) && rbn_want(N.n[1]) && !rbn_want_auto(N.n[1]), "W447 Lobby: Client auf Rollback");
+    rbn_set_want(N.n[1], 0, 1);
+    N.send[1] = 0; /* ohne Wunsch sendet der Client kein Hallo (rbn_tx 0) */
+    CHECK(!rbn_want_auto(N.n[1]), "W447 ohne Eingabeschicht kein Auto");
+    nn_step(&N, RBN_FRESH_MS + 1000);
+    CHECK(rbn_mission_start(N.n[1], N.now, 1, 1) == RBN_ST_LS, "W447 Client auf Lockstep -> Lockstep");
+    CHECK(rbn_mission_start(N.n[0], N.now, 0, 1) == RBN_ST_TENT || rbn_state(N.n[0]) == RBN_ST_LS, "W447 Host bietet an/Lockstep");
+    nn_step(&N, RBN_WAIT_MS + 1000);
+    CHECK(rbn_state(N.n[0]) == RBN_ST_LS, "W447 Host faellt auf Lockstep (%d)", rbn_state(N.n[0]));
+    {
+        int pi[4], rt[4], wa[4], np = rbn_peer_list(N.n[0], N.now, pi, rt, wa, 4);
+        CHECK(np == 0, "W447 Peer-Liste ohne frisches Hallo leer (%d)", np);
+    }
+    nn_free(&N);
+    nn_init(&N, 1, 1, 20, 0);
+    rbn_set_want(N.n[0], 1, 1);
+    rbn_set_want(N.n[1], 1, 1);
+    nn_step(&N, 3000);
+    {
+        int pi[4], rt[4], wa[4], np = rbn_peer_list(N.n[0], N.now, pi, rt, wa, 4);
+        CHECK(np == 1 && pi[0] == 1 && rt[0] >= 35 && rt[0] <= 45 && wa[0] == 2, "W447 Peer-Liste (n %d Platz %d RTT %d Auto %d)", np,
+              np ? pi[0] : -9, np ? rt[0] : -9, np ? wa[0] : -9);
+        CHECK(rbn_rttvar_max(N.n[0], N.now) >= 0 && rbn_rttvar_max(N.n[0], N.now) <= 15, "W447 Schwankung klein (%d)",
+              rbn_rttvar_max(N.n[0], N.now));
+    }
+    nn_free(&N);
+}
+
 /* W370 LOC-RB-FALLBACK-US: erster Menschentest (DE <-> US-Westkueste, ~190 ms) fiel auf Lockstep zurueck. */
 static void w370_cases(void)
 {
@@ -1490,6 +1606,7 @@ static void rbn_tests(void)
           rbn_state(N.n[0]), rbn_why(N.n[0]));
     nn_free(&N);
     w370_cases();
+    w447_cases();
     /* Frist: keine Pakete mehr -> beide Lockstep */
     nn_init(&N, 1, 1, 20, 0);
     nn_step(&N, 3000);
@@ -1540,8 +1657,11 @@ static void rbn_tests(void)
         q[4] = 2;
         CHECK(rbn_rx(b, 5200, q, n, 3) == -1, "Version verworfen");
         memcpy(q, p, (size_t)n);
-        q[6] |= 8;
+        q[6] |= 16; /* W447: b3 = Auto gewuenscht ist jetzt gueltig */
         CHECK(rbn_rx(b, 5200, q, n, 3) == -1, "unbekannte Flags verworfen");
+        memcpy(q, p, (size_t)n);
+        q[27] = 3;
+        CHECK(rbn_rx(b, 5200, q, n, 3) == -1, "W447 R2-Profil > 2 verworfen");
         memcpy(q, p, (size_t)n);
         q[25] = 9;
         CHECK(rbn_rx(b, 5200, q, n, 3) == -1, "Verzoegerung > 8 verworfen");
@@ -2240,6 +2360,85 @@ static int w386_feed(rbl_t *host, rbl_t *cli, const rbl_rep_t *r, u32 now)
     return n == RBL_LEN ? rbl_rx(host, now, b, n) : -9;
 }
 
+/* W447: Regler startet niedrig (Profil DIREKT, Start 1 Tick): fehlender Ring in der Startphase schickt nicht zurueck,
+ * danach gelten die Grenzen der niedrigen Stufe; Start 1 Tick in der Aushandlung. */
+static void w447_ctl(void)
+{
+    rbl_cfg_t c;
+    rbl_t *h = rbl_new(), *cl = rbl_new();
+    rbl_rep_t ro, rc;
+    u32 now = 200000u, sl = 0;
+    int d = 0, k, w = 1;
+    rbl_cfg_default(&c);
+    c.good_n = 1;
+    rbl_begin(h, &c, 0xBEEF0001u, 0, 1, 2, 1);
+    rbl_begin(cl, &c, 0xBEEF0001u, 1, 1, 2, 1);
+    rbl_start_low(h);
+    CHECK(rbl_target(h) == 1 && rbl_startlow(h), "W447 Start niedrig: Ziel 1");
+    for (k = 0; k < 3; k++, now += RBL_WIN_MS) { /* Ring fehlt noch auf beiden Seiten: kein Rueckwechsel */
+        w386_rep(&rc, 1, (unsigned)(300 + k), 0, 0);
+        rc.ready = 0;
+        CHECK(w386_feed(h, cl, &rc, now) == 1, "W447 Bericht angenommen");
+        w386_rep(&ro, 1, (unsigned)w++, 0, 0);
+        ro.ready = 0;
+        CHECK(rbl_host_step(h, now, &ro, 1000u, 40) == 0 && rbl_target(h) == 1, "W447 ohne Ring kein Rueckwechsel (k %d)", k);
+    }
+    w386_rep(&rc, 1, 310u, 0, 0);
+    w386_feed(h, cl, &rc, now);
+    w386_rep(&ro, 1, (unsigned)w++, 0, 0);
+    CHECK(rbl_host_step(h, now, &ro, 1500u, 40) == 0 && !rbl_startlow(h), "W447 Ring auf beiden Seiten: Startphase vorbei");
+    now += RBL_WIN_MS;
+    w386_rep(&rc, 1, 311u, 0, 0);
+    rc.ready = 0; /* jetzt zaehlt ein fehlender Ring wieder (schwer) */
+    w386_feed(h, cl, &rc, now);
+    w386_rep(&ro, 1, (unsigned)w++, 0, 0);
+    CHECK(rbl_host_step(h, now, &ro, 2000u, 40) == 1 && rbl_take_decision(h, &d, &sl) && d == 2,
+          "W447 nach der Startphase: Ring weg -> zurueck auf D 2 (%d)", d);
+    rbl_free(h);
+    rbl_free(cl);
+    { /* Aushandlung: DIREKT mit Start 1 Tick -> beide Seiten D 1; ohne Schalter D 2 */
+        nnet_t N;
+        int st1, st2;
+        nn_init(&N, 1, 1, 15, 0);
+        rbn_set_want(N.n[0], 1, 1);
+        rbn_set_want(N.n[1], 1, 1);
+        rbn_set_direct_start(N.n[0], 60);
+        nn_step(&N, 3000);
+        rbn_mission_start(N.n[0], N.now, 0, 1);
+        nn_step(&N, 300);
+        rbn_mission_start(N.n[1], N.now, 1, 1);
+        nn_step(&N, 2000);
+        st1 = rbn_delay(N.n[0]);
+        st2 = rbn_delay(N.n[1]);
+        CHECK(rbn_profile(N.n[1]) == RBN_PROF_DIRECT && st1 == 1 && st2 == 1, "W447 DIREKT Start 1 Tick beide Seiten (%d/%d)", st1, st2);
+        nn_free(&N);
+        nn_init(&N, 1, 1, 15, 0); /* 30 ms: DIREKT, aber ueber einer Startgrenze von 20 ms -> Start d_std 2 */
+        rbn_set_want(N.n[0], 1, 1);
+        rbn_set_want(N.n[1], 1, 1);
+        rbn_set_direct_start(N.n[0], 20);
+        nn_step(&N, 3000);
+        rbn_mission_start(N.n[0], N.now, 0, 1);
+        nn_step(&N, 300);
+        rbn_mission_start(N.n[1], N.now, 1, 1);
+        nn_step(&N, 2000);
+        CHECK(rbn_profile(N.n[1]) == RBN_PROF_DIRECT && rbn_delay(N.n[1]) == 2, "W447 DIREKT ueber Startgrenze: Start D 2 (%d/%d)",
+              rbn_profile(N.n[1]), rbn_delay(N.n[1]));
+        nn_free(&N);
+        nn_init(&N, 1, 1, 90, 0);
+        rbn_set_want(N.n[0], 1, 1);
+        rbn_set_want(N.n[1], 1, 1);
+        rbn_set_direct_start(N.n[0], 60);
+        nn_step(&N, 3000);
+        rbn_mission_start(N.n[0], N.now, 0, 1);
+        nn_step(&N, 300);
+        rbn_mission_start(N.n[1], N.now, 1, 1);
+        nn_step(&N, 2000);
+        CHECK(rbn_profile(N.n[1]) == RBN_PROF_ROLLBACK && rbn_delay(N.n[1]) == 3, "W447 ROLLBACK unberuehrt vom Start-Schalter (%d)",
+              rbn_delay(N.n[1]));
+        nn_free(&N);
+    }
+}
+
 static void w386_ctl(void)
 {
     rbl_cfg_t c;
@@ -2563,6 +2762,7 @@ static void w386_cases(void)
     w386_unit_switch();
     w386_twin();
     w386_ctl();
+    w447_ctl(); /* W447 */
     w386_pkt();
 }
 
@@ -2693,6 +2893,7 @@ int main(void)
     w359_heap_cases();
     w372_cases(); /* W372 */
     w380_cases(); /* W380 */
+    w436_cases(); /* W436 */
     w385_cases(); /* W385 */
     w386_cases(); /* W386 */
     w381_xkey_cases(); /* W381 (#61) */

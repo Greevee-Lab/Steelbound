@@ -8,6 +8,8 @@
 #include "hlog.h"
 #include "loc_sync.h"
 #include "loc_net.h"
+#include "loc_lobbylist_ovl.h" /* W443 */
+#include "loc_netpanel.h" /* W447 */
 #include "render_qa.h" /* W358: g_rq_active */
 
 unsigned g_loc_draws;
@@ -59,6 +61,8 @@ void loc_render_frame(unsigned f)
     if (g_sba_loc) {
         loc_sync_frame(f); /* W297: Testfolge loc_steps (nur mit loc_sync=1 geparst) */
         loc_net_lobby_frame(f); /* W350: DIAG Lobby-Belegung (nur loc_net_diag=1) */
+        loc_lobbylist_frame(f); /* W443 LOC-LOBBY-LIST: Modus/Ping je Zeile der Suchliste */
+        loc_netpanel_frame(f); /* W447 LOC-NET-AUTO: Netz-Panel in der Lobby */
     }
 }
 

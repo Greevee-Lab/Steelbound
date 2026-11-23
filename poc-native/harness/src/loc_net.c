@@ -18,6 +18,8 @@
 #include "loc_guard.h"
 #include "loc_rollback.h" /* W353: loc_rb_diag */
 #include "sb_pausenet.h" /* W357 */
+#include "loc_assist.h" /* W440 LOC-LOBBY-MODES */
+#include "sb_profile.h" /* W440: g_sba_loc */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -650,6 +652,8 @@ int loc_net_install(void)
         strncpy_s(tc.code, sizeof tc.code, g_cfg.loc_lobby_code, _TRUNCATE); /* W334 */
         strncpy_s(tc.vis, sizeof tc.vis, g_cfg.loc_lobby_vis, _TRUNCATE);   /* W373 */
         strncpy_s(tc.spki, sizeof tc.spki, g_cfg.loc_lobby_spki, _TRUNCATE);
+        strcpy_s(tc.play_mode, sizeof tc.play_mode, g_cfg.loc_play_mode == LAS_ARCADE ? "arcade" : "sim"); /* W440 */
+        tc.join_delay_ms = g_cfg.loc_lobby_join_delay;                      /* W446 TEST */
         _snprintf_s(tc.status_path, sizeof tc.status_path, _TRUNCATE, "%s%sloc_net_status.txt", od ? od : "",
                     od ? "/" : "");
         g_ln.tun = loctun_start(&tc, &g_ln, g_ln.sim, ln_log);
@@ -844,6 +848,32 @@ int loc_net_peer_live(void)
                            (long)g_ln.st.accepts + g_ln.st.connects - g_ln.st.leave, 1);
 }
 
+/* W440 LOC-LOBBY-MODES: wirksamer Spielmodus (loc_assist.h). Liest nur Zustaende (Eingabe-Thread je Abfrage, Overlay
+ * 2x/s); Logzeile LOCMODE einmal je Wechsel von Modus/Quelle mit der Wirkung auf die eigenen Hilfen. */
+int loc_net_assist_mode(int *src)
+{
+    static volatile LONG last = -1;
+    int s = LAS_SRC_SB, m, srv, lobby = 0;
+    LONG key;
+    srv = g_cfg.loc_lobby[0] && _stricmp(g_cfg.loc_transport, "udp") == 0;
+    if (g_sba_loc && g_ln.tun) lobby = loctun_play_mode(g_ln.tun);
+    m = las_effective(g_sba_loc, g_cfg.loc_boot && g_cfg.loc_net, srv, lobby, g_cfg.loc_play_mode_test, &s);
+    key = (LONG)(m * 16 + s);
+    if (InterlockedExchange(&last, key) != key && g_sba_loc) {
+        HLOG_I("LOCMODE: wirksam %s (Quelle %s) - Zielhilfe %d -> %d, Gang-Automatik %d -> %d (Ausweich-Hilfe und "
+               "Kippschalter-Hilfe unveraendert)", las_name(m), las_src_name(s), g_cfg.aim_assist,
+               las_value(m, g_cfg.aim_assist), g_cfg.auto_gear, las_value(m, g_cfg.auto_gear));
+    }
+    if (src) *src = s;
+    return m;
+}
+
+int loc_assist_gate(int cfg_value)
+{
+    if (!cfg_value || !g_sba_loc) return cfg_value; /* SB und ausgeschaltete Hilfe: unveraendert, ohne Abfrage */
+    return las_value(loc_net_assist_mode(NULL), cfg_value);
+}
+
 int loc_net_hud_read(loc_net_hud *o) /* W374 F3-Overlay */
 {
     int i;
@@ -900,4 +930,17 @@ int loc_net_diag_line(char *buf, int cap)
                 g_cfg.loc_net ? (_stricmp(g_cfg.loc_transport, "udp") == 0 ? "udp" : "tcp-original") : "off",
                 tun[0] ? " " : "", tun, g_cfg.loc_netsim[0] ? "on" : "off", g_cfg.loc_sync ? "sync=on" : "sync=off", rb);
     return 1;
+}
+
+/* W447 LOC-NET-AUTO: GetTickCount des letzten eigenen Lockstep-Rahmens (0 = nie bzw. kein LoC-Netz); Lobby-Panel im
+ * Lockstep (ohne Eingabeschicht). Nur Lesen. */
+long loc_net_last34_ms(void)
+{
+    return (g_cfg.loc_boot && g_ln.ready) ? (long)g_ln.st.last34_ms : 0;
+}
+
+/* W447: offene Spiel-TCP-Stroeme (connect + accept - Abgaenge); > 0 = das Spiel ist in einer Sitzung (Lobby/Match). */
+long loc_net_streams(void)
+{
+    return (g_cfg.loc_boot && g_ln.ready) ? (long)g_ln.st.accepts + g_ln.st.connects - g_ln.st.leave : 0;
 }

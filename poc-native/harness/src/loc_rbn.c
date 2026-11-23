@@ -3,10 +3,11 @@
  *
  * Paket "SBRH" (little endian, Laenge exakt RBN_PKT_HEAD + nent * RBN_PKT_ENT):
  *   0  "SBRH"            4  ver = 1            5  Spielerindex (0..9, 0xFF unbekannt)
- *   6  Flags (b0 Wunsch, b1 in Mission, b2 Host-Entscheidung gueltig, Rest 0)       7  nent (0..4)
+ *   6  Flags (b0 Wunsch, b1 in Mission, b2 Host-Entscheidung gueltig, b3 Auto gewuenscht (W447), Rest 0)  7  nent (0..4)
  *   8  Kennung (!= 0)    12 Uhrzeit ms         16 Entscheidung: Folge   20 Alter der Entscheidung ms
  *   24 Entscheidung: Modus (0/1 LS/2 R2)   25 Verzoegerung (0 oder 1..8)   26 angewandter Modus (0/1/2)
- *   27 Lockstep-Grund RBN_WHY_* (W370; nur bei Lockstep-Entscheidung des Hosts, sonst 0)
+ *   27 Lockstep-Grund RBN_WHY_* (W370; nur bei Lockstep-Entscheidung des Hosts), bei R2-Entscheidung W447 Profil
+ *      RBN_PROF_* (0 fest, 1 Auto-Direkt, 2 Auto-Rollback), sonst 0
  *   28 angewandte Folge  32 Alter der eigenen Mission ms (0 = keine)
  *   je Eintrag: Kennung des Mitspielers, Echo seiner Uhrzeit, Haltezeit ms (u16), Flags (b0 Wunsch gesehen), 0 */
 #include "loc_rbn.h"
@@ -26,10 +27,12 @@ typedef struct {
     u32 nonce;
     u32 last_rx;
     int want, pidx, in_mission, ack_me;
+    int want_auto;            /* W447: Hallo b3 */
     u32 ping_t, ping_rx;      /* letzte Uhrzeit des Mitspielers + eigene Empfangszeit (fuer das Echo) */
     double srtt, rttvar;
     int rtt_ok;
     int dec_valid, dec_mode, dec_delay, dec_why; /* W370: dec_why = Lockstep-Grund des Hosts (Byte 27) */
+    int dec_prof;             /* W447: Profil einer R2-Entscheidung (Byte 27) */
     u32 dec_seq, dec_at;      /* Zeitpunkt der Entscheidung in eigener Uhr (Empfang - Alter) */
     int app_mode;
     u32 app_seq, mis_at;      /* Missionsbeginn des Mitspielers in eigener Uhr (0 = keine) */
@@ -38,6 +41,8 @@ typedef struct {
 
 struct rbn {
     int want, dmin, dmax, dfix;
+    int want_auto, direct_rtt, direct_jit, direct_start1; /* W447 */
+    int dec_prof, prof;       /* W447: Host-Entscheidung (Profil) bzw. Profil der laufenden Mission */
     u32 nonce;
     rbn_peer p[RBN_MAXPEER];
     /* eigene Mission */
@@ -82,6 +87,8 @@ rbn_t *rbn_new(int want, uint32_t nonce, int dmin, int dmax, int dfix)
     n->dmax = dmax;
     n->dfix = dfix;
     n->self = -1;
+    n->direct_rtt = 80; /* W447 (Messreihe: D = 1 rechtzeitig bis ~80 ms gemessen) */
+    n->direct_jit = 15;
     n->st_.rtt_min = 0xFFFFFFFFu;
     return n;
 }
@@ -125,6 +132,7 @@ int rbn_tx(rbn_t *n, uint32_t now, int self, uint8_t *b, int cap)
     fl = 1;
     if (n->st != RBN_ST_IDLE) fl |= 2;
     if (n->self == 0 && n->dec_mode != RBN_MODE_NONE && n->seq) fl |= 4;
+    if (n->want_auto) fl |= 8; /* W447 */
     b[6] = (uint8_t)fl;
     wr32(b + 8, n->nonce);
     wr32(b + 12, now);
@@ -135,6 +143,7 @@ int rbn_tx(rbn_t *n, uint32_t now, int self, uint8_t *b, int cap)
         b[24] = (uint8_t)n->dec_mode;
         b[25] = (uint8_t)(n->dec_mode == RBN_MODE_R2 ? n->dec_delay : 0);
         if (n->dec_mode == RBN_MODE_LS && n->dec_why > 0 && n->dec_why < RBN_WHY_N) b[27] = (uint8_t)n->dec_why;
+        if (n->dec_mode == RBN_MODE_R2 && n->dec_prof > 0 && n->dec_prof <= RBN_PROF_ROLLBACK) b[27] = (uint8_t)n->dec_prof; /* W447 */
     }
     b[26] = (uint8_t)n->app_mode;
     wr32(b + 28, n->app_seq);
@@ -173,7 +182,7 @@ int rbn_rx(rbn_t *n, uint32_t now, const uint8_t *b, int len, uint64_t src)
     pidx = b[5];
     fl = b[6];
     ne = b[7];
-    if ((pidx >= 10 && pidx != 0xFF) || (fl & ~7) || ne > RBN_PKT_MAXENT || len != RBN_PKT_HEAD + ne * RBN_PKT_ENT) goto bad;
+    if ((pidx >= 10 && pidx != 0xFF) || (fl & ~15) || ne > RBN_PKT_MAXENT || len != RBN_PKT_HEAD + ne * RBN_PKT_ENT) goto bad;
     nonce = rd32(b + 8);
     dage = rd32(b + 20);
     mage = rd32(b + 32);
@@ -181,8 +190,11 @@ int rbn_rx(rbn_t *n, uint32_t now, const uint8_t *b, int len, uint64_t src)
     dd = b[25];
     am = b[26];
     if (!nonce || dm > 2 || dd > 8 || am > 2 || dage > AGE_MAX || mage > AGE_MAX) goto bad;
-    /* W370: Byte 27 = Lockstep-Grund, nur bei einer Lockstep-Entscheidung des Hosts, sonst 0 */
-    if (b[27] && (!(fl & 4) || dm != RBN_MODE_LS || b[27] >= RBN_WHY_N)) goto bad;
+    /* W370: Byte 27 = Lockstep-Grund, nur bei einer Lockstep-Entscheidung des Hosts; W447: bei einer R2-Entscheidung
+     * das Profil (1..2); sonst 0 */
+    if (b[27] && (!(fl & 4) || (dm == RBN_MODE_LS && b[27] >= RBN_WHY_N) || (dm == RBN_MODE_R2 && b[27] > RBN_PROF_ROLLBACK) ||
+                  (dm != RBN_MODE_LS && dm != RBN_MODE_R2)))
+        goto bad;
     if (fl & 4) {
         if (!rd32(b + 16) || dm == RBN_MODE_NONE || (dm == RBN_MODE_R2 && dd < 1) || (dm != RBN_MODE_R2 && dd) ||
             pidx != 0)
@@ -223,6 +235,7 @@ int rbn_rx(rbn_t *n, uint32_t now, const uint8_t *b, int len, uint64_t src)
     P->nonce = nonce;
     P->last_rx = now;
     P->want = fl & 1;
+    P->want_auto = (fl & 8) ? 1 : 0; /* W447 */
     P->pidx = pidx == 0xFF ? -1 : pidx;
     P->in_mission = (fl & 2) ? 1 : 0;
     P->ping_t = rd32(b + 12);
@@ -257,7 +270,8 @@ int rbn_rx(rbn_t *n, uint32_t now, const uint8_t *b, int len, uint64_t src)
         P->dec_mode = dm;
         P->dec_delay = dd;
         P->dec_at = now - dage;
-        P->dec_why = b[27];
+        P->dec_why = dm == RBN_MODE_LS ? b[27] : 0;
+        P->dec_prof = dm == RBN_MODE_R2 ? b[27] : 0; /* W447 */
     }
     P->app_mode = am;
     P->app_seq = rd32(b + 28);
@@ -332,6 +346,8 @@ static void host_set_ls(rbn_t *n, int why)
     n->dec_mode = RBN_MODE_LS; /* Entscheidung fuer alle sichtbar auf Lockstep (mit Grund, W370) */
     n->dec_delay = 0;
     n->dec_why = why;
+    n->dec_prof = 0; /* W447 */
+    n->prof = 0;
     set_ls(n, why);
 }
 
@@ -362,6 +378,16 @@ static int host_decide(rbn_t *n, u32 now, int final)
     n->dec_why = 0;
     n->dec_delay = n->dfix ? n->dfix : rbn_pick_delay(rbn_rtt_max(n, now), n->dmin, n->dmax);
     n->delay = n->dec_delay;
+    /* W447: Profil - Auto nur, wenn Host und alle Mitspieler Auto wollen; dann nach Umlaufzeit/Schwankung */
+    n->dec_prof = rbn_auto_agreed(n, now) ? rbn_pick_profile(rbn_rtt_max(n, now), rbn_rttvar_max(n, now), n->direct_rtt,
+                                                            n->direct_jit)
+                                          : RBN_PROF_FIXED;
+    n->prof = n->dec_prof;
+    if (n->dec_prof == RBN_PROF_DIRECT && n->direct_start1 > 0 && !n->dfix && rbn_rtt_max(n, now) >= 0 &&
+        rbn_rtt_max(n, now) <= n->direct_start1) { /* W447: DIREKT mit kleiner RTT beginnt mit 1 Tick */
+        n->dec_delay = 1;
+        n->delay = 1;
+    }
     n->st_.decisions_r2++;
     n->st = RBN_ST_TENT;
     n->why = RBN_WHY_NONE;
@@ -383,6 +409,7 @@ int rbn_mission_start(rbn_t *n, uint32_t now, int self, int npeers)
     n->app_mode = RBN_MODE_NONE;
     n->hwait = 0;
     n->host_why = 0;
+    n->prof = 0; /* W447 */
     for (i = 0; i < RBN_MAXPEER; i++) n->p[i].confirmed = 0;
     if (!n->want) {
         set_ls(n, RBN_WHY_SELF_OFF);
@@ -442,6 +469,7 @@ int rbn_poll(rbn_t *n, uint32_t now)
             if (H->dec_mode == RBN_MODE_R2) {
                 n->epoch = (H->nonce & 0xFFFF0000u) ^ (H->dec_seq & 0xFFFFu);
                 n->delay = H->dec_delay;
+                n->prof = H->dec_prof; /* W447 */
                 set_r2(n);
             } else {
                 n->host_why = H->dec_why;
@@ -508,6 +536,77 @@ int rbn_peers_desc(const rbn_t *n, uint32_t now, char *buf, int cap)
     return k;
 }
 int rbn_peer_disagrees(const rbn_t *n) { return n ? n->disagree : 0; }
+
+/* ---- W447 LOC-NET-AUTO (Beschreibung in loc_rbn.h) ---- */
+void rbn_set_want(rbn_t *n, int want, int want_auto)
+{
+    if (!n) return;
+    n->want = want ? 1 : 0;
+    n->want_auto = (want && want_auto) ? 1 : 0;
+}
+int rbn_want(const rbn_t *n) { return n ? n->want : 0; }
+int rbn_want_auto(const rbn_t *n) { return n ? n->want_auto : 0; }
+
+int rbn_pick_profile(int rtt_eff, int rttvar, int direct_rtt, int direct_jit)
+{
+    if (rtt_eff < 0 || rttvar < 0) return RBN_PROF_ROLLBACK;
+    return (rtt_eff <= direct_rtt && rttvar <= direct_jit) ? RBN_PROF_DIRECT : RBN_PROF_ROLLBACK;
+}
+
+int rbn_rttvar_max(const rbn_t *n, uint32_t now)
+{
+    int i, mx = -1;
+    if (!n) return -1;
+    for (i = 0; i < RBN_MAXPEER; i++) {
+        const rbn_peer *P = &n->p[i];
+        int v;
+        if (!fresh(P, now) || !P->rtt_ok) continue;
+        v = (int)(P->rttvar + 0.5);
+        if (v > mx) mx = v;
+    }
+    return mx;
+}
+
+void rbn_set_direct(rbn_t *n, int direct_rtt, int direct_jit)
+{
+    if (!n) return;
+    if (direct_rtt >= 0 && direct_rtt <= 1000) n->direct_rtt = direct_rtt;
+    if (direct_jit >= 0 && direct_jit <= 500) n->direct_jit = direct_jit;
+}
+
+int rbn_profile(const rbn_t *n) { return (n && n->st == RBN_ST_R2) ? n->prof : 0; }
+void rbn_set_direct_start(rbn_t *n, int start1)
+{
+    if (n) n->direct_start1 = (start1 > 0 && start1 <= 1000) ? start1 : 0;
+}
+
+int rbn_auto_agreed(const rbn_t *n, uint32_t now)
+{
+    int i, k = 0;
+    if (!n || !n->want || !n->want_auto) return 0;
+    for (i = 0; i < RBN_MAXPEER; i++) {
+        const rbn_peer *P = &n->p[i];
+        if (!fresh(P, now) || !P->want) continue;
+        if (!P->want_auto) return 0;
+        k++;
+    }
+    return k > 0;
+}
+
+int rbn_peer_list(const rbn_t *n, uint32_t now, int *pidx, int *rtt, int *wauto, int cap)
+{
+    int i, k = 0;
+    if (!n) return 0;
+    for (i = 0; i < RBN_MAXPEER && k < cap; i++) {
+        const rbn_peer *P = &n->p[i];
+        if (!fresh(P, now)) continue;
+        if (pidx) pidx[k] = P->pidx;
+        if (rtt) rtt[k] = P->rtt_ok ? (int)(P->srtt + 0.5) : -1;
+        if (wauto) wauto[k] = P->want ? (P->want_auto ? 2 : 1) : 0;
+        k++;
+    }
+    return k;
+}
 const rbn_stats_t *rbn_stats(const rbn_t *n) { return &n->st_; }
 
 /* ================= W386 LOC-LATENCY: niedrige Verzoegerung (Beschreibung in loc_rbn.h) =================
@@ -533,6 +632,7 @@ struct rbl {
     int active, self, npeers, d_std, d_low;
     u32 epoch;
     int target;               /* Host: aktuelles Ziel */
+    int startlow;             /* W447: Mission beginnt niedrig (Profil DIREKT): Ring fehlt anfangs, das ist kein Grund zurueck */
     int good, bad;            /* Fenster in Folge */
     u32 cool_until;
     int cool_set, ups;
@@ -765,7 +865,7 @@ int rbl_host_step(rbl_t *l, uint32_t now, const rbl_rep_t *own, uint32_t next_sl
         int sev = 0, bad = 0, why = RBL_WHY_NONE;
         for (k = 0; k < n; k++) {
             const rbl_rep_t *r = R[k];
-            if (!r->ready) { sev = 1; why = RBL_WHY_NOTREADY; }
+            if (!r->ready) { if (!l->startlow) { sev = 1; why = RBL_WHY_NOTREADY; } } /* W447: Start niedrig */
             else if ((int)r->rp > l->c.hrp) { sev = 1; why = RBL_WHY_REPLAY; }
             else if ((int)r->hang >= 2 * l->c.hhang) { sev = 1; why = RBL_WHY_HANG; }
             else if ((int)r->dep >= l->c.hdep + 2) { sev = 1; why = RBL_WHY_DEPTH; }
@@ -775,6 +875,11 @@ int rbl_host_step(rbl_t *l, uint32_t now, const rbl_rep_t *own, uint32_t next_sl
             else if ((int)r->jump > l->c.hjump) { bad = 1; if (!why) why = RBL_WHY_JUMP; }
         }
         if (!all && !sev) { bad = 1; if (!why) why = RBL_WHY_NOTREADY; } /* Mitspieler meldet sich nicht mehr */
+        if (l->startlow && all) { /* W447: Startphase vorbei, sobald alle Seiten den Ring melden */
+            int rd = 1;
+            for (k = 0; k < n; k++) rd &= R[k]->ready ? 1 : 0;
+            if (rd) l->startlow = 0;
+        }
         { /* W386: Haenger ueber 6 Fenster (einzelne Fenster sind verrauscht, die Summe trennt WLAN von sauberen Wegen) */
             unsigned wm = 0, sum = 0;
             int j;
@@ -800,6 +905,15 @@ int rbl_host_step(rbl_t *l, uint32_t now, const rbl_rep_t *own, uint32_t next_sl
     }
     return 0;
 }
+
+void rbl_start_low(rbl_t *l)
+{
+    if (!l || !l->active || l->d_low >= l->d_std) return;
+    l->target = l->d_low;
+    l->startlow = 1;
+    l->good = l->bad = 0;
+}
+int rbl_startlow(const rbl_t *l) { return l ? l->startlow : 0; }
 
 int rbl_force(rbl_t *l, int d, uint32_t next_slot, int rtt_ms)
 {

@@ -121,6 +121,9 @@ int hooks_read_hang(unsigned *h, unsigned *len, unsigned *ov, unsigned *ms)
     return 1;
 }
 
+long long krnl_loc_io_t0(void);                         /* W449 krnl_file.c: Lesedauer (nur LoC, sonst 0) */
+void krnl_loc_io_note(int k, long long q0, int ok);
+
 u32 __stdcall hook_ReadFile(u32 hFile, u32 buf, u32 len, u32 pRead,
                                    u32 ov)
 {
@@ -130,6 +133,8 @@ u32 __stdcall hook_ReadFile(u32 hFile, u32 buf, u32 len, u32 pRead,
     static u32 calls;
     g_act_reads++;
     if ((host || vfs) && buf && len) {
+        long long lio0 = krnl_loc_io_t0(); /* W449 (#85) */
+        int rok;
         LOC_RB_PREWRITE(buf, len); /* W330: Kernel schreibt in den Gast-Puffer (Rollback-Schreibschutz) */
         g_rd_h = hFile;
         g_rd_len = len;
@@ -139,8 +144,8 @@ u32 __stdcall hook_ReadFile(u32 hFile, u32 buf, u32 len, u32 pRead,
         if (vfs) {
             char rp[400];
             unsigned long g = 0;
-            krnl_vfs_read(hFile, ov ? (const long long *)(uintptr_t)(ov + 8) : NULL,
-                          (void *)(uintptr_t)buf, len, &g, rp, sizeof rp);
+            rok = krnl_vfs_read(hFile, ov ? (const long long *)(uintptr_t)(ov + 8) : NULL,
+                                (void *)(uintptr_t)buf, len, &g, rp, sizeof rp) != 0;
             got = g;
             g_act_rbytes += got; /* W32: nur Zaehler */
             if (g_cfg.tex_dump && got) { sb_rem_note_read(buf, got, rp); } /* DIAG(REM-FRAME,W103) */
@@ -150,13 +155,14 @@ u32 __stdcall hook_ReadFile(u32 hFile, u32 buf, u32 len, u32 pRead,
             li.QuadPart = *(int64_t *)(uintptr_t)(ov + 8);
             SetFilePointerEx(host, li, NULL, FILE_BEGIN);
         }
-        ReadFile(host, (void *)(uintptr_t)buf, len, &got, NULL);
+        rok = ReadFile(host, (void *)(uintptr_t)buf, len, &got, NULL) != 0;
         g_act_rbytes += got; /* W32: nur Zaehler */
         if (g_cfg.tex_dump && got) { /* DIAG(REM-FRAME,W103): Textur-Quelle (Datei je Lese-Puffer) */
             char rp[400];
             if (GetFinalPathNameByHandleA((HANDLE)host, rp, sizeof rp, 0)) { sb_rem_note_read(buf, got, rp); }
         }
         }
+        krnl_loc_io_note(vfs ? 0 : 1, lio0, rok); /* W449 */
         /* W22: Seek-Cache nachfuehren (ov-Seek laeuft unbedingt, auch got=0!) */
         if (ov)
             krnl_seek_note(hFile, (unsigned long long)*(int64_t *)(uintptr_t)(ov + 8) + got);

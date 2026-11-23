@@ -37,6 +37,7 @@
 #include "loc_rollback.h" /* W325 */
 #include "loc_lsarb_game.h" /* LOC-LOCKSTEP-ARBITER */
 #include "loc_rulenet.h" /* W420 LOC-CLIPDUMP */
+#include "loc_chatnet.h" /* W437 LOC-CHAT */
 #include "sb_tex.h" /* W297: Texttextur nach Lock neu hochladen */
 #include "loc_render.h" /* W297: Textebene */
 #include "d3d11_render.h" /* W342: sb_render_im_vdata (SetVertexData2s/4s) */
@@ -938,6 +939,7 @@ void loc_boot_install(void)
     loc_xdk_internals();
     loc_unlock_install(); /* W408: alle VTs/Missionen/Items frei (immer, nur LoC) */
     loc_rule_install(); /* W420: Clip dumping unterbinden (Host-Regel, Standard an, Abgleich im Match) */
+    loc_chat_install(); /* W437: Textchat LoC online (Standard an, nur mit Treffpunkt + sec=ok) */
     HLOG_I("LOCBOOT: %u XDK-Hooks, %u uebergangen, %u Stubs (von %u), %u Byte-Patches installiert",
            s_nhook, s_nskip, s_nstub, (unsigned)LOC_N_STUBS, s_nbytes);
     HLOG_I("LOCBOOT: %u W277-Eingriffe mit Bytevergleich (IDirectSound_Release, D3DSurface_LockRect, "

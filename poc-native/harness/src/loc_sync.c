@@ -484,6 +484,23 @@ static void __cdecl ls_record(void)
             }
         }
     }
+    if (g_cfg.loc_census_ticks[0]) { /* DIAG(W448): Draw-Zensus an Lockstep-Rahmen */
+        static int s_ct_done;
+        const char *p = g_cfg.loc_census_ticks;
+        int idx = 0;
+        while (*p) {
+            long at = strtol(p, (char **)&p, 10);
+            if (!(s_ct_done & (1 << idx)) && at > 0 && n >= at && idx < 30) {
+                extern volatile int g_fx_census_req;
+                s_ct_done |= 1 << idx;
+                g_fx_census_req = 1;
+                HLOG_W("LOCCENSUS: Zensus angefordert bei Rahmen %ld (Ziel %ld)", n, at);
+                break;
+            }
+            while (*p == ',' || *p == ' ') { p++; }
+            if (++idx >= 30) { break; }
+        }
+    }
     loc_dodge_frame(); /* W380 DIAG (ohne loc_dodge_diag ohne Wirkung) */
     if (desync && !s_desync_logged) {
         s_desync_logged = 1;

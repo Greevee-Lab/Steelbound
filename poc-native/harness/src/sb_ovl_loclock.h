@@ -5,7 +5,7 @@
  * sb_overlay.c ov_loc_key). Rueckgabe = Sprachschluessel des Grundes
  * (ovl.ll_*) oder NULL = bedienbar. Gleiche Gruende wie der Launcher
  * (launcher_gui.c kLocLock/loc_lock_key, W402): Cockpit, Monitor-Effekte,
- * Zielhilfe/Automatik/verbuendete Trupps (W424), Replay, Texturpakete, VR, Spielstandschutz, Raender bei
+ * verbuendete Trupps (W424; Zielhilfe/Automatik seit W440 frei mit Hinweis, sb_ovl_loc_hint), Replay, Texturpakete, VR, Spielstandschutz, Raender bei
  * 16:9. Dazu ESC-eigen "post": die Endbild-Nachbearbeitung (sb_shfx_post)
  * prueft die SB-Missionsszene (sfx_mission: SBA(0x6B96DC) == 0x2C), die im
  * LoC-Profil auf der Null-Seite liegt - Cockpit-Leuchten/-Licht, Farbe, SSAO
@@ -31,7 +31,7 @@ static __inline const char *sb_ovl_loc_lock(const char *key, int loc, int wide16
     static const char *const kCockpit[] = { "cockpit_persp", "cockpit_panini", "cockpit_width", "cockpit_hide",
                                             "monitor_view", "hud_label_avoid", NULL };
     static const char *const kMonFx[] = { "monitor_fx", "monitor_grain", "monitor_glitch", NULL };
-    static const char *const kAssist[] = { "aim_assist", "auto_gear", "aim_turn", "sb_allied_squads", NULL }; /* + W424 */
+    static const char *const kAssist[] = { "aim_turn", "sb_allied_squads", NULL }; /* + W424; W440: aim_assist/auto_gear frei */
     static const char *const kReplay[] = { "replay_label", "replay_logo", "watermark_media", "replay_fx_live", NULL };
     static const char *const kPacks[] = { "remaster", "hd_textures", "hd_scale", NULL };
     static const char *const kSave[] = { "save_lock", NULL };
@@ -48,6 +48,15 @@ static __inline const char *sb_ovl_loc_lock(const char *key, int loc, int wide16
     if (sb_ovl_ll_is(key, kSave)) { return "ovl.ll_savelock"; }
     if (sb_ovl_ll_is(key, kPost)) { return "ovl.ll_post"; }
     if (wide169 && sb_ovl_ll_is(key, kEdge)) { return "ovl.ll_edge"; }
+    return NULL;
+}
+
+/* W440 LOC-LOBBY-MODES: bedienbare Zeilen mit Hinweis in LoC (nicht gesperrt). Zielhilfe und Gang-Automatik wirken
+ * nur in Arcade-Lobbys; Sim-Lobbys schalten sie fuer das Match ab (loc_assist.h). NULL = kein Hinweis. */
+static __inline const char *sb_ovl_loc_hint(const char *key, int loc)
+{
+    if (!loc || !key) { return NULL; }
+    if (strcmp(key, "aim_assist") == 0 || strcmp(key, "auto_gear") == 0) { return "ovl.ll_arcade"; }
     return NULL;
 }
 

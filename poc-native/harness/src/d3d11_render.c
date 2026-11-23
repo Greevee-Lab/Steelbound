@@ -57,6 +57,9 @@ static float g_last_game_aspect, g_last_out_aspect;
 #include <dxgi1_6.h> /* W370: Adapterwahl (EnumAdapterByGpuPreference) */
 #include "sbc_wire.h" /* W305 */
 #include "loc_net.h" /* W366: loc_net_bye */
+#include "loc_chatnet.h" /* W437 LOC-CHAT */
+#include "loc_lobbylist_ovl.h" /* W443 LOC-LOBBY-LIST */
+#include "loc_netpanel.h" /* W447 LOC-NET-AUTO */
 int g_vr_blit; /* W134 VR-PROTO: sb_render_blit zeigt ein Augenbild (ohne Nachbearbeitung des Monobilds) */
 
 static LRESULT CALLBACK sb_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
@@ -1303,6 +1306,15 @@ static void sb_render_present_body(unsigned flags)
     if (sb_vexp_rec() && !g_swap_res) { /* W255 VIDEO-EXPORT: gezeigtes Bild (wie Clip, vor ESC/F2) */
         sb_ctx_enter(); sb_vexp_frame(g_rtv); sb_ctx_leave();
     }
+    if (loc_chat_visible() && !g_swap_res) { /* W437 LOC-CHAT: nach Clip/Video/F11-Bild (nie darin), Bereich gesichert */
+        sb_ctx_enter(); loc_chat_draw(g_rtv, 1); sb_ctx_leave();
+    }
+    if (loc_lobbylist_visible() && !g_swap_res) { /* W443 LOC-LOBBY-LIST: wie der Chat, Bereich gesichert */
+        sb_ctx_enter(); loc_lobbylist_draw(g_rtv, 1); sb_ctx_leave();
+    }
+    if (loc_netpanel_visible() && !g_swap_res) { /* W447 LOC-NET-AUTO: Netz-Panel der Lobby, wie der Chat */
+        sb_ctx_enter(); loc_netpanel_draw(g_rtv, 1); sb_ctx_leave();
+    }
     /* W118 REM-OVERLAY: offenes Overlay auf den Spiel-BB (Bereich gesichert,
      * nach dem Present zurueck); mit FPS-INTERP in sb_render_blit. */
     if (g_cfg.overlay && (sb_ovl_open() || sb_clip_active()) && !g_swap_res) {
@@ -1322,6 +1334,18 @@ static void sb_render_present_body(unsigned flags)
     if (g_cfg.overlay_test[0] && !g_swap_res) { /* TEST(W118): Overlay-Bild */
         char onm[48];
         if (sb_ovl_shot_due(onm, sizeof onm)) { sb_render_shot_name(onm, NULL); }
+    }
+    if (g_cfg.loc_chat_test[0] && !g_swap_res) { /* TEST(W437): Chat-Bild */
+        char cnm[48];
+        if (loc_chat_shot_due(cnm, sizeof cnm)) { sb_render_shot_name(cnm, NULL); }
+    }
+    if (g_cfg.loc_lobby_list_test && !g_swap_res) { /* TEST(W443): Suchliste mit Anzeige */
+        char lnm[48];
+        if (loc_lobbylist_shot_due(lnm, sizeof lnm)) { sb_render_shot_name(lnm, NULL); }
+    }
+    if (g_cfg.loc_net_panel_test && !g_swap_res) { /* TEST(W447): Netz-Panel */
+        char pnm[48];
+        if (loc_netpanel_shot_due(pnm, sizeof pnm)) { sb_render_shot_name(pnm, NULL); }
     }
     if (g_cfg.screenshot_frame > 0 &&
         n_present >= (unsigned)g_cfg.screenshot_frame) {
@@ -1351,7 +1375,8 @@ static void sb_render_present_body(unsigned flags)
          * shots/loct_<Tick>.jpg (Vergleich vorher/nachher bei gleichem Spielstand). */
         static unsigned last_t = 0xFFFFFFFFu, nsh;
         unsigned t = *(volatile unsigned *)(uintptr_t)0x3070F4u;
-        if (t != last_t && t > 0u && t % (unsigned)g_cfg.loc_shot_tick_every == 0u && nsh < 64u) {
+        if (t != last_t && t > 0u && t >= (unsigned)g_cfg.loc_shot_tick_from && /* W448 TEST: ab Tick */
+            t % (unsigned)g_cfg.loc_shot_tick_every == 0u && nsh < 64u) {
             char nm[40];
             _snprintf_s(nm, sizeof nm, _TRUNCATE, "loct_%06u", t);
             sb_render_shot_name(nm, NULL);
@@ -1486,6 +1511,9 @@ static void sb_render_present_body(unsigned flags)
         sb_ctx_leave();
         sb_ovl_present_end();
     }
+    loc_netpanel_restore(); /* W447: nach der Suchliste gesichert -> davor zurueck */
+    loc_lobbylist_restore(); /* W443: nach dem Chat gesichert -> davor zurueck */
+    loc_chat_restore(); /* W437: nach dem Overlay gesichert -> davor zurueck (vor Einblendung/Wasserzeichen) */
     sb_ov_toast_restore(); /* W278: vor dem Wasserzeichen zurueck (danach gesichert); ohne Sicherung sofort zurueck, kein Lock */
     if (g_cfg.watermark) { /* W219 WATERMARK: zuletzt zurueck (zuerst gesichert) */
         sb_ctx_enter();
@@ -1716,6 +1744,24 @@ void sb_render_blit(ID3D11Resource *src)
         sb_vexp_frame(g_swap_rtv);
         sb_ctx_leave();
     }
+    if (loc_chat_visible()) { /* W437 LOC-CHAT: auf jedes gezeigte Bild, nach Clip/Video (nie darin) */
+        sb_ctx_enter();
+        if (!g_swap_rtv) { ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv); }
+        loc_chat_draw(g_swap_rtv, 0);
+        sb_ctx_leave();
+    }
+    if (loc_lobbylist_visible()) { /* W443 LOC-LOBBY-LIST: auf jedes gezeigte Bild */
+        sb_ctx_enter();
+        if (!g_swap_rtv) { ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv); }
+        loc_lobbylist_draw(g_swap_rtv, 0);
+        sb_ctx_leave();
+    }
+    if (loc_netpanel_visible()) { /* W447 LOC-NET-AUTO: auf jedes gezeigte Bild */
+        sb_ctx_enter();
+        if (!g_swap_rtv) { ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv); }
+        loc_netpanel_draw(g_swap_rtv, 0);
+        sb_ctx_leave();
+    }
     if (g_cfg.overlay && (sb_ovl_open() || sb_clip_active())) { /* W118 REM-OVERLAY: auf jedes gezeigte Bild (Kopie ueberschreibt ganz) */
         sb_ctx_enter();
         if (!g_swap_rtv &&
@@ -1750,6 +1796,24 @@ void sb_render_blit(ID3D11Resource *src)
         char onm[48];
         sb_ctx_enter();
         if (sb_ovl_shot_due(onm, sizeof onm)) { sb_render_shot_name(onm, g_swap_res); }
+        sb_ctx_leave();
+    }
+    if (g_cfg.loc_chat_test[0]) { /* TEST(W437): Chat-Bild (gezeigtes Bild) */
+        char cnm[48];
+        sb_ctx_enter();
+        if (loc_chat_shot_due(cnm, sizeof cnm)) { sb_render_shot_name(cnm, g_swap_res); }
+        sb_ctx_leave();
+    }
+    if (g_cfg.loc_lobby_list_test) { /* TEST(W443): Suchliste mit Anzeige (gezeigtes Bild) */
+        char lnm[48];
+        sb_ctx_enter();
+        if (loc_lobbylist_shot_due(lnm, sizeof lnm)) { sb_render_shot_name(lnm, g_swap_res); }
+        sb_ctx_leave();
+    }
+    if (g_cfg.loc_net_panel_test) { /* TEST(W447): Netz-Panel (gezeigtes Bild) */
+        char pnm[48];
+        sb_ctx_enter();
+        if (loc_netpanel_shot_due(pnm, sizeof pnm)) { sb_render_shot_name(pnm, g_swap_res); }
         sb_ctx_leave();
     }
 }

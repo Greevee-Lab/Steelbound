@@ -121,6 +121,9 @@ void imap_mouse_preview(const imap_state_t *st, const imap_snap_t *snap, int dx,
 static int imap_real_btn(const imap_snap_t *snap, int vk)
 {
     if (snap->real_vk) return snap->real_vk(vk) != 0;
+    /* W435: LoC-Testmodus (W341 mouse_live, nur input_test_hook + loc_mouse_test) liest nie die echten Maustasten
+     * (sonst wirkten mit mouse_capture=1 und input_source=0 Klicks des Nutzers im unsichtbaren Testclient) */
+    if (snap->mouse_live) return 0;
     return (GetAsyncKeyState(vk) & 0x8000) != 0;
 }
 
@@ -277,6 +280,10 @@ void imap_legacy_apply(imap_block_t *blk, imap_state_t *st,
             if (key_down(256 + bi, kctx)) imap_btn(blk, bi);
         }
     }
+    /* W436 LOC-EJECT (#76): Eject (bi3) = Umschalt+Entf wie keyboard_default (W403). Der Launcher zeigt fuer die
+     * Standardbelegung (Legacy, input_profile leer) keyboard_default an; hier fehlte der Akkord, Eject hatte ohne
+     * Profil keine Taste. Testfolgen/Replays druecken Entf nie -> bitgleich. */
+    if (key_down(VK_SHIFT, kctx) && key_down(VK_DELETE, kctx)) imap_btn(blk, 3);
     ign = key_down('I', kctx);
     hatch = key_down('H', kctx);
     if (snap->sbc_momentary) {
@@ -1118,6 +1125,37 @@ static void imap_collect_suppression(const imap_profile_t *prof,
     imap_supp_bind(&prof->quick_shot, snap);
     imap_supp_bind(&prof->replay_exit, snap);
     imap_supp_bind(&prof->net_hud, snap); /* W374 */
+    imap_supp_bind(&prof->menu_back, snap); /* W438 */
+    imap_supp_bind(&prof->chat, snap); /* W437 */
+}
+
+/* W437 LOC-CHAT: offene Chatzeile -> das Spiel bekommt keine Eingabe (wie bei offenem ESC-Menue): Tasten,
+ * Maustasten/-deltas/-rad, Pad, Original-Controller und Joystick tragen nichts bei. Rastschalter, Gang und
+ * Zielhebel-Akku behalten ihren Stand (keine neue Flanke). Rein, deterministisch. */
+static int imap_key_none(int vk, void *ctx)
+{
+    (void)vk;
+    (void)ctx;
+    return 0;
+}
+static int imap_vk_none(int vk)
+{
+    (void)vk;
+    return 0;
+}
+void imap_snap_block_ui(imap_snap_t *s)
+{
+    s->key = imap_key_none;
+    s->ctx = NULL;
+    s->real_vk = imap_vk_none;
+    s->real_blocked = 1;
+    s->raw_dx = s->raw_dy = 0;
+    s->wheel_mask = s->wheel_step = 0;
+    s->pad_present = 0;
+    memset(&s->pad, 0, sizeof s->pad);
+    s->sbc_present = 0;
+    s->sbc[0] = s->sbc[1] = s->sbc[2] = 0;
+    s->joy_mask = 0;
 }
 
 void imap_profile_apply(imap_block_t *blk, imap_state_t *st,
@@ -1667,7 +1705,9 @@ enum {
     IMAP_ACT_ORIG_VIEW = 6,  /* W283: Original-Optik <-> eigene Einstellungen */
     IMAP_ACT_QUICK_SHOT = 7, /* W290: Schnell-Screenshot */
     IMAP_ACT_REPLAY_EXIT = 8, /* W299: Spiel-Replay beenden */
-    IMAP_ACT_NET_HUD = 9 /* W374: Netz-Overlay */
+    IMAP_ACT_NET_HUD = 9, /* W374: Netz-Overlay */
+    IMAP_ACT_MENU_BACK = 10, /* W438: LoC-Menue-Pad B (Zurueck) */
+    IMAP_ACT_CHAT = 11 /* W437: Chatzeile (LoC online) */
 };
 
 /* Elementname -> Ziel. btn_i >= 0: Taste; axis >= 0 (+negpos 0/1/2 =
@@ -1715,6 +1755,14 @@ static int imap_elem_parse(const char *name, imap_elem_t *e)
     }
     if (imap_strieq(name, "net_hud")) { /* W374: Netz-Overlay */
         e->action = IMAP_ACT_NET_HUD;
+        return 0;
+    }
+    if (imap_strieq(name, "menu_back")) { /* W438: LoC-Menue-Pad B */
+        e->action = IMAP_ACT_MENU_BACK;
+        return 0;
+    }
+    if (imap_strieq(name, "chat")) { /* W437: Chatzeile */
+        e->action = IMAP_ACT_CHAT;
         return 0;
     }
     if (imap_strieq(name, "photo")) { /* W195: Fotomodus */
@@ -2328,6 +2376,14 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
             out->net_hud.n = 0;
             out->net_hud_set = 1;
         }
+        if (e.action == IMAP_ACT_MENU_BACK) { /* W438: letzte Zeile gewinnt, leer = aus */
+            out->menu_back.n = 0;
+            out->menu_back_set = 1;
+        }
+        if (e.action == IMAP_ACT_CHAT) { /* W437: letzte Zeile gewinnt, leer = aus */
+            out->chat.n = 0;
+            out->chat_set = 1;
+        }
         for (alt = strtok_s(val, ",", &ctx); alt;
              alt = strtok_s(NULL, ",", &ctx)) {
             int rc;
@@ -2356,6 +2412,10 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
                 rc = imap_bind_add(&out->replay_exit, alt, &out->has_pad, &out->has_sbc);
             } else if (e.action == IMAP_ACT_NET_HUD) { /* W374 */
                 rc = imap_bind_add(&out->net_hud, alt, &out->has_pad, &out->has_sbc);
+            } else if (e.action == IMAP_ACT_MENU_BACK) { /* W438 */
+                rc = imap_bind_add(&out->menu_back, alt, &out->has_pad, &out->has_sbc);
+            } else if (e.action == IMAP_ACT_CHAT) { /* W437 */
+                rc = imap_bind_add(&out->chat, alt, &out->has_pad, &out->has_sbc);
             } else if (e.btn_i >= 0) {
                 rc = imap_bind_add(&out->btn[e.btn_i], alt, &out->has_pad,
                                    &out->has_sbc);
@@ -2404,8 +2464,59 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
         out->net_hud.n = 0;
         (void)imap_bind_add(&out->net_hud, IMAP_NET_HUD_DEFAULT, &dp, &ds);
     }
+    if (!out->menu_back_set) { /* W438: Profil ohne Zeile -> BACKSPACE (wie bisher), INSERT wenn START dort liegt */
+        int dp = 0, ds = 0, vks[8], mods[8], n, i, back_start = 0;
+        n = imap_bind_key_combos(&out->btn[6], vks, mods, 8);
+        for (i = 0; i < n; i++) {
+            if (vks[i] == VK_BACK && mods[i] == 0) back_start = 1;
+        }
+        out->menu_back.n = 0;
+        (void)imap_bind_add(&out->menu_back, back_start ? IMAP_MENU_BACK_ALT : IMAP_MENU_BACK_DEFAULT, &dp, &ds);
+    }
+    if (!out->chat_set) { /* W437: Profil ohne Zeile -> ENTER, ausser eine Spieltaste nutzt ENTER (z. B. START) */
+        int dp = 0, ds = 0, vks[8], mods[8], n, i, b, used = 0;
+        for (b = 0; b < (int)(sizeof out->btn / sizeof out->btn[0]) && !used; b++) {
+            n = imap_bind_key_combos(&out->btn[b], vks, mods, 8);
+            for (i = 0; i < n; i++) {
+                if (vks[i] == VK_RETURN && mods[i] == 0) used = 1;
+            }
+        }
+        out->chat.n = 0;
+        if (!used) (void)imap_bind_add(&out->chat, IMAP_CHAT_DEFAULT, &dp, &ds);
+    }
     out->joy_used = imap_profile_joy_used(out);
     return 0;
+}
+
+/* W438 CTRL-RESET-040: Tastatur-Bindung gedrueckt? (einfache Tasten und Zusatz+Taste wie im Fenster) */
+static int imap_lpad_down(const imap_bind_t *b, imap_key_fn key, void *ctx)
+{
+    int vks[8], mods[8], n = imap_bind_key_combos(b, vks, mods, 8), i;
+    for (i = 0; i < n; i++) {
+        if (!key(vks[i], ctx)) continue;
+        if ((mods[i] & 1) && !key(VK_SHIFT, ctx)) continue;
+        if ((mods[i] & 2) && !key(VK_CONTROL, ctx)) continue;
+        if ((mods[i] & 4) && !key(VK_MENU, ctx)) continue;
+        return 1;
+    }
+    return 0;
+}
+
+/* W438 CTRL-RESET-040: Tasten des LoC-Menue-Pads (Beschreibung s. input_map.h). */
+unsigned imap_loc_pad_bits(const imap_profile_t *prof, imap_key_fn key, void *ctx)
+{
+    unsigned r = 0;
+    if (!key) return 0;
+    if (!prof) { /* Legacy (kein Profil, Testketten): unveraendert */
+        if (key(VK_RETURN, ctx)) r |= IMAP_LPAD_START;
+        if (key(VK_SPACE, ctx)) r |= IMAP_LPAD_A;
+        if (key(VK_BACK, ctx)) r |= IMAP_LPAD_B;
+        return r;
+    }
+    if (imap_lpad_down(&prof->btn[6], key, ctx)) r |= IMAP_LPAD_START;
+    if (imap_lpad_down(&prof->btn[0], key, ctx)) r |= IMAP_LPAD_A;
+    if (imap_lpad_down(&prof->menu_back, key, ctx)) r |= IMAP_LPAD_B;
+    return r;
 }
 
 /* W290 QUICK-SHOT: Uebergang (Beschreibung s. input_map.h). */
@@ -2708,6 +2819,10 @@ int imap_profile_equal(const imap_profile_t *a, const imap_profile_t *b)
     if (a->replay_exit_set != b->replay_exit_set) return 1;
     if (imap_bind_equal(&a->net_hud, &b->net_hud)) return 1; /* W374 */
     if (a->net_hud_set != b->net_hud_set) return 1;
+    if (imap_bind_equal(&a->menu_back, &b->menu_back)) return 1; /* W438 */
+    if (a->menu_back_set != b->menu_back_set) return 1;
+    if (imap_bind_equal(&a->chat, &b->chat)) return 1; /* W437 */
+    if (a->chat_set != b->chat_set) return 1;
     if (a->orig_view_set != b->orig_view_set) return 1;
     if (a->has_pad != b->has_pad) return 1;
     if (a->has_sbc != b->has_sbc) return 1; /* W159 */
@@ -2991,4 +3106,77 @@ int imap_autogear_step(imap_autogear_t *ag, const imap_autogear_cfg_t *c,
     blk->gear = (uint8_t)g;
     if (gear_st) *gear_st = (uint8_t)g;
     return g;
+}
+
+void imap_autogear_defaults_loc(imap_autogear_cfg_t *c)
+{
+    imap_autogear_defaults(c);
+    c->min_hold = LOC_AG_NLONG; /* 2,25 s: Fahr-Mittel nach dem Wechsel neu gefuellt (SB 45 Bilder = 1,5 s) */
+    c->win = 30;                /* Plateau ueber 1,5 s */
+    c->rev_delay = 6;           /* 0,3 s Bremse im Stand bis R (+ kurzes Mittel) */
+    c->v_min = LOC_AG_VMIN;
+    c->v_stop = LOC_AG_VSTOP;
+}
+
+void imap_agvel_push(imap_agvel_t *vl, float x, float z, float hy, unsigned step, float jump)
+{
+    unsigned df, k;
+    float dx, dz, d;
+    if (vl->have && step == vl->lstep) return; /* gleicher Schritt */
+    if (!vl->have) {
+        vl->have = 1;
+        vl->n = 0;
+        vl->lx = x;
+        vl->lz = z;
+        vl->lstep = step;
+        return;
+    }
+    df = step - vl->lstep;
+    dx = x - vl->lx;
+    dz = z - vl->lz;
+    vl->lx = x;
+    vl->lz = z;
+    vl->lstep = step;
+    if (df > 30u || dx * dx + dz * dz > jump * jump * (float)(df * df)) {
+        vl->n = 0; /* Neustart/Eject/Teleport: Verlauf neu ab dieser Lage */
+        return;
+    }
+    d = sqrtf(dx * dx + dz * dz);
+    if (dx * sinf(hy) + dz * cosf(hy) < 0.0f) d = -d;
+    d /= (float)df;
+    for (k = 0; k < df; k++) { /* fehlende Schritte mit dem Mittel auffuellen */
+        vl->d[vl->n & 127u] = d;
+        vl->n++;
+    }
+}
+
+float imap_agvel_avg(const imap_agvel_t *vl, int nwin)
+{
+    unsigned m, k;
+    float s = 0.0f;
+    if (nwin < 1) nwin = 1;
+    if (nwin > 128) nwin = 128;
+    m = vl->n < (unsigned)nwin ? vl->n : (unsigned)nwin;
+    if (!m) return 0.0f;
+    for (k = 0; k < m; k++) s += vl->d[(vl->n - 1u - k) & 127u];
+    return s / (float)nwin; /* vor Verlauf-Beginn = Stillstand (Missionsbeginn, nach Sprung): steigt von 0 an */
+}
+
+int imap_agvel_loc_plateau(const imap_agvel_t *vl, unsigned since_shift)
+{
+    unsigned k;
+    float now = 0.0f, prev = 0.0f;
+    if (vl->n < 2u * LOC_AG_NLONG || since_shift < 2u * LOC_AG_NLONG) return 0; /* beide Mittel im aktuellen Gang */
+    for (k = 0; k < LOC_AG_NLONG; k++) {
+        now += vl->d[(vl->n - 1u - k) & 127u];
+        prev += vl->d[(vl->n - 1u - LOC_AG_NLONG - k) & 127u];
+    }
+    return now - prev < now * LOC_AG_PLAT_PCT / 100.0f;
+}
+
+float imap_agvel_loc_v(const imap_agvel_t *vl, const imap_block_t *blk, int pedal_on)
+{
+    int gas = blk->pedal_r >= pedal_on, brk = blk->pedal_m >= pedal_on;
+    int braking = blk->gear == 7 ? (gas && !brk) : (brk && !gas);
+    return imap_agvel_avg(vl, braking ? LOC_AG_NSHORT : LOC_AG_NLONG);
 }

@@ -264,10 +264,15 @@ void hcfg_defaults(void)
     g_cfg.loc_interp_rzalt = 1; /* W349 LOC-FRAMES-2: rawchg-Partner per Kamera-Pruefung (nur LoC) */
     g_cfg.loc_wlag_fix = 1; /* W412 LOC-WORLD-LAG: Himmel mit derselben vorhergesagten Kamera wie die Welt (Nachweis W412) */
     g_cfg.loc_stat_fix = 1; /* W415 LOC-STATIC-LAG: Gelaende in Zwischenbildern mit der Kamera der Welt bewegen (Nachweis W415) */
+    g_cfg.ctrl_despike = 1; /* W439 (#78, Nutzerentscheid 22.11.): Ausreisser-Filter analoger Achsen (SBC, Joystick) an, 0 = Original */
+    g_cfg.loc_ret_fix = 1; /* W439 LOC-RETICLE-JUMP (#78): exakt gezeichnete Fadenkreuz-Draws gegen B verschieben (Nachweis W439) */
+    g_cfg.loc_ret_mark = 1; /* W444 LOC-RETICLE-MARK (#78): Fadenkreuz-Teile ueber Form-Identitaet erkennen (Nachweis W444) */
+    g_cfg.loc_sky_fix = 1; /* W435 LOC-SKY-LAG-REG (#74): Himmel auch mit der Sicht-Korrektur je Bild (Nachweis W435) */
     g_cfg.loc_sndloop_fix = 1; /* W413 LOC-SOUND-LOOP (#65): Ton nach dem Neurechnen mit der korrigierten Zeitlinie abgleichen */
     g_cfg.loc_sndloop_grace = 30; /* W413: Sicherheitsnetz, Ticks ohne Besitzer bis zum Stopp */
     g_cfg.loc_audio_loopcount = 1; /* W413: Schleifenzahl der XSB (direkte Eintraege einmal, Sound-Spuren 0/n/endlos) */
     g_cfg.loc_interp_rawrzb = 1; /* W410 LOC-GFX-JITTER: rawlerp ruhender Welt-Draws per Matrix-Lerp (1 = LoC, 2 = auch SB, 0 = aus) */
+    g_cfg.loc_interp_eyeblind = 1; /* W448 LOC-CHAFF-LOOK (#83): Netze mit allen Bezuegen hinter der Kamera im Zwischenbild exakt (nur LoC, Nachweis W448) */
     g_cfg.loc_interp_rejcam = 1; /* W340 LOC-FRAMES: unplausible Spruenge mit Kamera-Pruefung lerpen (nur LoC) */
     g_cfg.loc_widescreen = 0; /* W326 LOC-WIDE: 4:3 wie bisher (nur LoC) */
     g_cfg.loc_vdata_s = 1; /* W342 LOC-DISPLAY: UI-Grundformen per SetVertexData2s/4s (nur LoC) */
@@ -301,11 +306,27 @@ void hcfg_defaults(void)
     g_cfg.memreg_keep = 1; /* W417 SB-BRIEF-BLACK (#66): verdraengte Register-Eintraege behalten (wirkt erst nach Ring-Ueberlauf) */
     g_cfg.loc_rule_clipdump_block = 1; /* W420 LOC-CLIPDUMP: Nutzerentscheid 22.11., Standard an (Host-Regel) */
     g_cfg.loc_clip_diag = 0; /* W420 DIAG */
+    g_cfg.loc_chat = 1;        /* W437 LOC-CHAT: Nutzerwunsch 22.11., Standard an (nur LoC online) */
+    g_cfg.loc_chat_direct = 0; /* W437 TEST */
+    g_cfg.loc_chat_test[0] = 0; /* W437 TEST */
+    g_cfg.loc_play_mode = 1;      /* W440 LOC-LOBBY-MODES: eigene Lobbys Sim (Nutzerentscheid 23.11.) */
+    g_cfg.loc_play_mode_test = 0; /* W440 TEST */
+    g_cfg.loc_lobby_list = 1;      /* W443 LOC-LOBBY-LIST: Anzeige in der Suchliste (nur LoC online, oeffentlich) */
+    g_cfg.loc_lobby_list_test = 0; /* W443 TEST */
+    g_cfg.loc_aa_diag = 0;        /* W442 DIAG */
+    g_cfg.loc_snchat = 1;            /* W446 STEELNET-CHAT: Nutzerwunsch 23.11., Standard an */
+    g_cfg.loc_snchat_test[0] = 0;    /* W446 TEST */
+    g_cfg.loc_lobby_join_delay = 0;  /* W446 TEST */
+    g_cfg.loc_net_auto = 1;       /* W447 LOC-NET-AUTO: Netzmodus Auto (Nutzerentscheid 23.11.: Standard) */
+    g_cfg.loc_net_panel = 1;      /* W447: Lobby-Panel (Netzmodus, Verzoegerung, Ping) */
+    g_cfg.loc_net_panel_test = 0; /* W447 TEST */
     g_cfg.loc_insignia_rt = 1; /* W422 LOC-INSIGNIA-PEN (Fix, nur LoC) */
     g_cfg.loc_ins_diag = 0; /* W422 DIAG */
     g_cfg.loc_zcache_alt = 1; /* W423 LOC-XSB-LOOP (Fix, nur LoC) */
     g_cfg.loc_boot_nopause = 1; /* W423 LOC-XSB-LOOP (Fix, nur LoC) */
     g_cfg.loc_boot_diag = 0; /* W423 DIAG */
+    g_cfg.loc_save_alt = 1; /* W434 LOC-PILOT-LOST (Fix, nur LoC) */
+    g_cfg.loc_save_selftest = 0; /* W434 DIAG */
     g_cfg.input_hold_test[0] = '\0'; /* W423 TEST */
     g_cfg.sb_allied_squads = 1; /* W424 SB-ALLIED-SQUADS (Gameplay, nur SB, Nutzerentscheid 22.11.: Standard an) */
     g_cfg.sb_ally_diag = 0; /* W424 DIAG */
@@ -1069,10 +1090,129 @@ static int set_key_w429(const char *k, const char *v)
     return 1;
 }
 
+/* W434 LOC-PILOT-LOST: eigene Schluessel (C1026) */
+static int set_key_w434(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_save_alt") == 0) { g_cfg.loc_save_alt = atoi(v) ? 1 : 0; } /* FIX */
+    else if (strcmp(k, "loc_save_selftest") == 0) { g_cfg.loc_save_selftest = atoi(v); } /* DIAG */
+    else { return 0; }
+    return 1;
+}
+
+/* W435 LOC-SKY-LAG-REG: eigene Schluessel (C1026) */
+static int set_key_w435(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_sky_fix") == 0) { g_cfg.loc_sky_fix = atoi(v) ? 1 : 0; } /* FIX */
+    else { return 0; }
+    return 1;
+}
+
+/* W437 LOC-CHAT: eigene Schluessel (C1026) */
+static int set_key_w437(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_chat") == 0) { g_cfg.loc_chat = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "loc_chat_direct") == 0) { g_cfg.loc_chat_direct = atoi(v) ? 1 : 0; } /* TEST */
+    else if (strcmp(k, "loc_chat_test") == 0) { strncpy_s(g_cfg.loc_chat_test, sizeof g_cfg.loc_chat_test, v, _TRUNCATE); } /* TEST */
+    else { return 0; }
+    return 1;
+}
+
+/* W439 LOC-RETICLE-JUMP: eigene Schluessel (C1026) */
+static int set_key_w439(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_ret_diag") == 0) { g_cfg.loc_ret_diag = atoi(v); } /* DIAG */
+    else if (strcmp(k, "loc_ret_fix") == 0) { g_cfg.loc_ret_fix = atoi(v) ? 1 : 0; } /* FIX */
+    else if (strcmp(k, "ctrl_despike") == 0) { g_cfg.ctrl_despike = atoi(v) ? 1 : 0; } /* Standard 1 (Nutzerentscheid), 0 = Original */
+    else { return 0; }
+    return 1;
+}
+
+/* W440 LOC-LOBBY-MODES: eigene Schluessel (C1026). Werte exakt "sim"/"arcade" (wie der Dienst), sonst Sim. */
+static int set_key_w440(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_play_mode") == 0) { g_cfg.loc_play_mode = strcmp(v, "arcade") == 0 ? 2 : 1; }
+    else if (strcmp(k, "loc_play_mode_test") == 0) { /* TEST */
+        g_cfg.loc_play_mode_test = strcmp(v, "arcade") == 0 ? 2 : strcmp(v, "sim") == 0 ? 1 : 0;
+    }
+    else { return 0; }
+    return 1;
+}
+
+/* W446 STEELNET-CHAT: eigene Schluessel (C1026) */
+static int set_key_w446(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_snchat") == 0) { g_cfg.loc_snchat = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "loc_snchat_test") == 0) { strncpy_s(g_cfg.loc_snchat_test, sizeof g_cfg.loc_snchat_test, v, _TRUNCATE); } /* TEST */
+    else if (strcmp(k, "loc_lobby_join_delay") == 0) { /* TEST */
+        int d = atoi(v);
+        g_cfg.loc_lobby_join_delay = d < 0 ? 0 : d > 600000 ? 600000 : d;
+    }
+    else { return 0; }
+    return 1;
+}
+
+/* W448 LOC-CHAFF-LOOK: eigene Schluessel (C1026). */
+static int set_key_w448(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_census_ticks") == 0) { strncpy_s(g_cfg.loc_census_ticks, sizeof g_cfg.loc_census_ticks, v, _TRUNCATE); } /* DIAG */
+    else if (strcmp(k, "loc_shot_tick_from") == 0) { g_cfg.loc_shot_tick_from = atoi(v); } /* TEST */
+    else if (strcmp(k, "loc_interp_eyeblind") == 0) { g_cfg.loc_interp_eyeblind = atoi(v) ? 1 : 0; } /* FIX */
+    else { return 0; }
+    return 1;
+}
+
+static int set_key_w444(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_ret_mark") == 0) { g_cfg.loc_ret_mark = atoi(v) ? 1 : 0; } /* FIX */
+    else { return 0; }
+    return 1;
+}
+
+static int set_key_w443(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_lobby_list") == 0) { g_cfg.loc_lobby_list = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "loc_lobby_list_test") == 0) { g_cfg.loc_lobby_list_test = atoi(v) ? 1 : 0; } /* TEST */
+    else { return 0; }
+    return 1;
+}
+
+/* W442 LOC-AIMASSIST: eigene Schluessel (C1026). */
+static int set_key_w442(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_aa_diag") == 0) { g_cfg.loc_aa_diag = atoi(v); } /* DIAG */
+    else { return 0; }
+    return 1;
+}
+
+/* W447 LOC-NET-AUTO: eigene Schluessel (C1026). loc_net_mode = Kurzform fuer Launcher/Hand (auto|rollback|lockstep). */
+static int set_key_w447(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_net_auto") == 0) { g_cfg.loc_net_auto = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "loc_net_mode") == 0) {
+        if (_stricmp(v, "lockstep") == 0 || strcmp(v, "2") == 0) { g_cfg.loc_rb_input = 0; g_cfg.loc_net_auto = 0; }
+        else if (_stricmp(v, "rollback") == 0 || strcmp(v, "1") == 0) { g_cfg.loc_rb_input = 1; g_cfg.loc_net_auto = 0; }
+        else { g_cfg.loc_rb_input = 1; g_cfg.loc_net_auto = 1; } /* auto (Standard) */
+    }
+    else if (strcmp(k, "loc_net_panel") == 0) { g_cfg.loc_net_panel = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "loc_net_panel_test") == 0) { g_cfg.loc_net_panel_test = atoi(v); } /* TEST */
+    else { return 0; }
+    return 1;
+}
+
 static void set_key_b(const char *k, const char *v);
 static void set_key(const char *k, const char *v)
 {
-    if (set_key_w433(k, v)) {
+    if (set_key_w447(k, v)) {
+        return;
+    }
+    if (set_key_w443(k, v)) {
+        return;
+    }
+    if (set_key_w433(k, v) || set_key_w434(k, v)) {
+        return;
+    }
+    if (set_key_w435(k, v) || set_key_w437(k, v) || set_key_w439(k, v) || set_key_w440(k, v) || set_key_w444(k, v) || set_key_w442(k, v) ||
+        set_key_w446(k, v) || set_key_w448(k, v)) {
         return;
     }
     if (set_key_remaster(k, v) || set_key_overlay(k, v) || set_key_vr(k, v) || set_key_w371(k, v) || set_key_w376(k, v) ||
@@ -2419,7 +2559,9 @@ void hcfg_apply_set(const char *set, const char *tag)
         *eq = '\0';
         set_key(p, eq + 1);
         /* W334 (SECURITY.md §3.5): der Raumcode erscheint nie im Log */
-        HLOG_I("cfg: Override %s=%s (%s)", p, strcmp(p, "loc_lobby_code") == 0 && eq[1] ? "***" : eq + 1,
+        HLOG_I("cfg: Override %s=%s (%s)", p,
+               (strcmp(p, "loc_lobby_code") == 0 || strcmp(p, "loc_chat_test") == 0 || strcmp(p, "loc_snchat_test") == 0) && eq[1]
+                   ? "***" : eq + 1, /* W437/W446: Chattext nie im Log */
                tag ? tag : "?");
     }
     SecureZeroMemory(buf, sizeof buf);

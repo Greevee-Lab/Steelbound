@@ -334,6 +334,34 @@ int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
             _snprintf_s(info + used, sizeof info - used, _TRUNCATE, "loc boot: %s; menu opened by: %s\r\n", bd,
                         sb_ovl_open_why());
     }
+    if (g_cfg.loc_boot) { /* W449 LOC-BOOT-SEQ-PERF (#85): Ton-Ausgabe/-Zaehler und Lesedauer (nur Zaehler/Codes) */
+        extern int loc_audio_diag_line(char *o, int cap);
+        extern int krnl_loc_io_diag_line(char *o, int cap);
+        size_t used = strlen(info);
+        char ad[400], io[400];
+        if (loc_audio_diag_line(ad, (int)sizeof ad))
+            _snprintf_s(info + used, sizeof info - used, _TRUNCATE, "loc audio: %s\r\n", ad);
+        used = strlen(info);
+        if (krnl_loc_io_diag_line(io, (int)sizeof io))
+            _snprintf_s(info + used, sizeof info - used, _TRUNCATE, "loc io: %s\r\n", io);
+    }
+    if (g_cfg.loc_boot || g_cfg.sbc_usb || g_cfg.ctrl_despike) { /* W439 LOC-RETICLE-JUMP (#78): nur Zaehler, keine Eingaben */
+        extern unsigned loc_ret_jumps(void);
+        extern unsigned ijoy_despike_spikes(void);
+        size_t used = strlen(info);
+        _snprintf_s(info + used, sizeof info - used, _TRUNCATE,
+                    "reticle jumps: %u (drawn reticle off and back within one frame, frame rates above 20 FPS); "
+                    "axis spike filter: %s, outliers dropped controller=%u joystick=%u\r\n",
+                    loc_ret_jumps(), g_cfg.ctrl_despike ? "on" : "off (original)", sbc_wire_despike_spikes(),
+                    ijoy_despike_spikes());
+    }
+    if (g_cfg.loc_boot) { /* W434 LOC-PILOT-LOST (#73): Spielstand-Ordner (Platzhalter statt Nutzerpfad) */
+        extern int krnl_loc_save_diag_line(char *o, int cap);
+        size_t used = strlen(info);
+        char sd[900];
+        if (krnl_loc_save_diag_line(sd, (int)sizeof sd))
+            _snprintf_s(info + used, sizeof info - used, _TRUNCATE, "loc save: %s\r\n", sd);
+    }
     { /* W315 TEX-WHITE-AMD: Block "texture health" (nur Technikdaten) */
         size_t used = strlen(info);
         if (used + 3 < sizeof info) {

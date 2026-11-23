@@ -169,6 +169,16 @@ online: **steelnet** (online play, server status, version hint), **Version only*
 your IP address), shows a note when a newer version exists and **downloads
 nothing** – updating stays your decision.
 
+## Is the chat private?
+
+Lobby chat is end-to-end encrypted between the players in the match. steelnet chat is
+encrypted up to the server, but the server sees the text in plain form and keeps only the
+last 20 messages, in memory. Chat messages are never logged or saved to disk, neither on
+your PC nor on the server. IP addresses are never written to disk; the server holds them in
+memory only while you are connected, for connections and rate limits. With a direct
+connection, the other players' game clients need your address to connect. The same note is
+behind **Chat privacy** on the launcher's *Multiplayer* page.
+
 ## Where do I change settings?
 
 Everyday settings are on the launcher pages (**Play**, **Display**,

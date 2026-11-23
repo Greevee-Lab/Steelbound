@@ -173,6 +173,10 @@ void ijoy_shutdown(void);
 int ijoy_slots_start(const char specs[IMAP_JOY_MAX][96], unsigned used);
 /* Letzter Stand: Rueckgabe Bitmaske der Slots mit Geraet. */
 unsigned ijoy_slots_get(imap_joy_state_t out[IMAP_JOY_MAX]);
+/* W439 LOC-RETICLE-JUMP: Ausreisser-Filter (input_despike.h) fuer die Achsen der Slots, vor ijoy_slots_start setzen
+ * (Client: ctrl_despike, Standard 1; 0 = Original). Zaehler: verworfene Ausreisser aller Slots. */
+void ijoy_set_despike(int on);
+unsigned ijoy_despike_spikes(void);
 /* Fuer Log: Name des Geraets in Slot i ("" = keins). */
 void ijoy_slot_name(int i, char *out, int cap);
 

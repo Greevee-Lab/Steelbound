@@ -119,6 +119,26 @@ int lgame_loc169_migrate(const char *loccfg);
  * with_edges = 1 schreibt zusaetzlich die Rand-Standardwerte (neue Datei). 0 = ok, -1 = Fehler. */
 int lgame_loc169_mark(const char *loccfg, int wide, int with_edges);
 
+/* W438 CTRL-RESET-040 (Nutzerentscheid 22.11.): In 0.4.0 wird die Steuerung einmalig fuer alle auf
+ * "default_full" gestellt (START auf Backspace, Enter frei fuer den LoC-Chat). Markierung
+ * launcher_ctrl_reset_040=1 in user.cfg (launcher_* liest der Client nicht). Eigene user_*.ini bleiben als
+ * Dateien unveraendert, es wird nur das aktive Profil umgestellt. */
+#define LGAME_KEY_CTRL040 "launcher_ctrl_reset_040"
+#define LGAME_CTRL040_PROFILE "default_full"
+/* 1 = user.cfg traegt launcher_ctrl_reset_040=1 */
+int lgame_ctrl040_marked(const char *usercfg);
+/* Markierung setzen (Launcher speichert user.cfg; neue Installationen bekommen so nie einen Reset).
+ * Datei fehlt -> nichts (1). 0 = ok/war schon da, -1 = Fehler. */
+int lgame_ctrl040_mark(const char *usercfg);
+/* Einmal-Reset: user.cfg fehlt (neue Installation) oder ist markiert -> 0, nichts geschrieben. Sonst
+ * input_profile=default_full in user.cfg und, falls vorhanden, in loccfg (user_loc.cfg); danach die Markierung.
+ * prev_sb/prev_loc: bisheriges Profil je Spiel ("" = Standard/Legacy bzw. LoC-Datei fehlt). Rueckgabe:
+ * Bit 0 = SB umgestellt, Bit 1 = LoC umgestellt (je nur, wenn vorher ein anderes Profil galt), 0x100 =
+ * nur markiert (galt schon default_full), -1 = Schreibfehler (keine Markierung, naechster Start versucht es
+ * erneut). Idempotent; laeuft genau einmal je user.cfg. */
+int lgame_ctrl040_reset(const char *usercfg, const char *loccfg, char *prev_sb, size_t cap_sb, char *prev_loc,
+                        size_t cap_loc);
+
 /* LoC-Datenordner: base = Datenordner (Profil/portabel) bzw. Client-Ordner
  * (legacy). out = base\loc (Endtrenner von base egal). Rein, testbar. */
 void lgame_loc_dir(const char *base, char *out, size_t cap);

@@ -10,6 +10,9 @@
  * (key_down: echte Tasten bzw. Test-Tastenfolge loc_replay), loc_pad_keys=1:
  *   Ziffernblock 8/2/4/6 = Steuerkreuz (+ linker Stick), SPACE/Ziffernblock 0 = A,
  *   Backspace = B, Enter = START. Pfeiltasten bleiben beim SBC (Visier).
+ * W438 CTRL-RESET-040: Mit Belegungsprofil folgen START, A und B dem Profil (START = bi6, A = bi0,
+ *   B = Aktion menu_back; default_full: Backspace / SPACE / Insert). Enter loest dann nichts mehr aus
+ *   (frei fuer den Chat). Ohne Profil (Legacy, Testketten) unveraendert wie oben.
  * Die Menues fragen Pad und SBC gemeinsam ab (Sammelabfrage 0x125F70).
  * Nur im LoC-Profil mit loc_net=1. */
 #include "loc_pad.h"
@@ -20,6 +23,7 @@
 #include "loc_net.h"
 #include "input_mouse.h" /* W341: imouse_test_post, imouse_captured */
 #include "xdk_hooks.h" /* W341: hooks_frame_count */
+#include "input_map.h" /* W438: IMAP_LPAD_* */
 
 #include <string.h>
 #include <intrin.h>
@@ -100,6 +104,7 @@ u32 loc_pad_get_state(u32 pState)
 {
     uint8_t st[22];
     uint16_t b = 0;
+    unsigned lp;
     memset(st, 0, sizeof st);
     *(u32 *)st = ++s_packet;
     if (!g_cfg.loc_pad_keys) { /* neutral: Bedienung ueber den SBC-Pfad (gleiche Tasten) */
@@ -119,7 +124,8 @@ u32 loc_pad_get_state(u32 pState)
     }
     if (key_down(VK_NUMPAD4)) b |= 0x0004;
     if (key_down(VK_NUMPAD6)) b |= 0x0008;
-    if (key_down(VK_RETURN)) b |= 0x0010; /* START */
+    lp = hooks_loc_pad_bits(); /* W438: START/A/B aus dem Profil (Legacy: Enter/SPACE/Backspace) */
+    if (lp & IMAP_LPAD_START) b |= 0x0010; /* START */
     memcpy(st + 4, &b, 2);
     { /* Steuerkreuz zusaetzlich als linker Stick (manche Seiten lesen nur den Stick) */
         int16_t lx = 0, ly = 0;
@@ -130,12 +136,12 @@ u32 loc_pad_get_state(u32 pState)
         memcpy(st + 14, &lx, 2);
         memcpy(st + 16, &ly, 2);
     }
-    if (key_down(VK_SPACE) || key_down(VK_NUMPAD0)) st[6 + 0] = 0xFF; /* A */
-    if (key_down(VK_BACK)) st[6 + 1] = 0xFF;  /* B */
+    if ((lp & IMAP_LPAD_A) || key_down(VK_NUMPAD0)) st[6 + 0] = 0xFF; /* A */
+    if (lp & IMAP_LPAD_B) st[6 + 1] = 0xFF;  /* B */
     if (g_cfg.loc_net_diag) { /* DIAG: Pad-Felder des Spiels (Port 1: 0x2C9020/0x2C9060 + 0x13C) */
         static uint16_t lastb = 0xFFFF;
-        static uint8_t lasta;
-        if (b != lastb || st[6] != lasta) {
+        static uint8_t lasta, lastbb;
+        if (b != lastb || st[6] != lasta || st[7] != lastbb) { /* W438: + Pad B */
             uint16_t held = 0, edge = 0;
             u32 mport = 0, mon = 0, poll = 0, every = 0;
             __try {
@@ -146,10 +152,11 @@ u32 loc_pad_get_state(u32 pState)
                 poll = *(const u32 *)(uintptr_t)0x306B30u;
                 every = *(const u32 *)(uintptr_t)0x306944u;
             } __except (EXCEPTION_EXECUTE_HANDLER) {}
-            HLOG_I("LOCPADDIAG: f=%u Pad b=0x%X A=%u | Spiel gehalten=0x%X Flanke=0x%X Menueport=%u aktiv=%u Takt=%u/%u",
-                   hooks_frame_count(), b, st[6], held, edge, mport, mon, poll, every);
+            HLOG_I("LOCPADDIAG: f=%u Pad b=0x%X A=%u B=%u | Spiel gehalten=0x%X Flanke=0x%X Menueport=%u aktiv=%u Takt=%u/%u",
+                   hooks_frame_count(), b, st[6], st[7], held, edge, mport, mon, poll, every);
             lastb = b;
             lasta = st[6];
+            lastbb = st[7];
         }
     }
     __try {
@@ -192,8 +199,9 @@ int loc_pad_install(void)
     VirtualProtect(p, 5, old, &old);
     FlushInstructionCache(GetCurrentProcess(), p, 5);
     s_on = 1;
-    HLOG_I("LOCPAD: aktiv (Port %u; Ziffernblock 8/2/4/6=Steuerkreuz, SPACE/0=A, Backspace=B, Enter=START; Tasten %s)",
-           LOC_PAD_PORT, g_cfg.loc_pad_keys ? "an" : "aus");
+    HLOG_I("LOCPAD: aktiv (Port %u; Ziffernblock 8/2/4/6=Steuerkreuz, Ziffernblock 0=A; START/A/B %s; Tasten %s)",
+           LOC_PAD_PORT, g_cfg.input_profile[0] ? "aus dem Profil (bi6/bi0/menu_back)" : "Legacy Enter/SPACE/Backspace",
+           g_cfg.loc_pad_keys ? "an" : "aus");
     return 1;
 }
 

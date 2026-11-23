@@ -1165,6 +1165,136 @@ static __declspec(noinline) void st_w432_hotas(int *pass_, int *fail_)
 #undef W432_FAIL
 }
 
+static int st_file_has(const char *path, const char *needle);
+
+/* W438 Selbsttest: Datei (bis 16 KB) lesen; -1 = fehlt. */
+static int st_file_read(const char *path, char *buf, size_t cap)
+{
+    FILE *f = NULL;
+    size_t n;
+    buf[0] = '\0';
+    if (u8_fopen_s(&f, path, "rb") != 0 || !f) {
+        return -1;
+    }
+    n = fread(buf, 1, cap - 1, f);
+    fclose(f);
+    buf[n] = '\0';
+    return (int)n;
+}
+
+static int st_file_write(const char *path, const char *text)
+{
+    FILE *f = NULL;
+    if (u8_fopen_s(&f, path, "wb") != 0 || !f) {
+        return -1;
+    }
+    fputs(text, f);
+    fclose(f);
+    return 0;
+}
+
+static int st_count(const char *hay, const char *needle)
+{
+    int c = 0;
+    const char *p = hay;
+    size_t l = strlen(needle);
+    while ((p = strstr(p, needle)) != NULL) {
+        c++;
+        p += l;
+    }
+    return c;
+}
+
+/* W438 CTRL-RESET-040: Reset genau einmal, user_*.ini unveraendert, neue Installation ohne Reset. */
+static int w438_ctrl_reset_selftest(const char *tmp, char *why, size_t wcap)
+{
+    static char a[16384], b[16384];
+    char dir[1100], uc[1200], lc[1200], ini[1200], psb[96], ploc[96];
+    static const char kIni[] = "# eigene Belegung (Testdaten)\r\n[buttons]\r\nbi6 = KEY:ENTER\r\n";
+    launcher_settings_t s;
+    int r;
+    why[0] = '\0';
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw438_ctrl", tmp);
+    lcfg_mkdir_p(dir);
+    _snprintf_s(uc, sizeof uc, _TRUNCATE, "%s/user.cfg", dir);
+    _snprintf_s(lc, sizeof lc, _TRUNCATE, "%s/user_loc.cfg", dir);
+    _snprintf_s(ini, sizeof ini, _TRUNCATE, "%s/user_mein.ini", dir);
+    u8_DeleteFile(uc);
+    u8_DeleteFile(lc);
+    /* a: neue Installation (keine user.cfg): nichts, nichts angelegt */
+    r = lgame_ctrl040_reset(uc, lc, psb, sizeof psb, ploc, sizeof ploc);
+    if (r != 0 || st_file_read(uc, a, sizeof a) >= 0 || lgame_ctrl040_mark(uc) != 1 || st_file_read(uc, a, sizeof a) >= 0) {
+        _snprintf_s(why, wcap, _TRUNCATE, "a: neue Installation rc=%d", r);
+    }
+    /* b: erstes Speichern legt user.cfg an + Markierung -> danach nie ein Reset */
+    if (!why[0]) {
+        lcfg_defaults(&s);
+        strcpy_s(s.input_profile, sizeof s.input_profile, "user_mein");
+        if (lcfg_save_user(uc, &s) != 0 || lgame_ctrl040_mark(uc) != 0 || !lgame_ctrl040_marked(uc) ||
+            lgame_ctrl040_reset(uc, lc, psb, sizeof psb, ploc, sizeof ploc) != 0 ||
+            !st_file_has(uc, "input_profile=user_mein"))
+            _snprintf_s(why, wcap, _TRUNCATE, "%s", "b: gespeicherte neue Installation wurde zurueckgesetzt");
+    }
+    /* c: bestehende Installation (0.3.x, ohne Markierung), eigene Belegung in beiden Spielen */
+    if (!why[0]) {
+        st_file_write(ini, kIni);
+        st_file_write(uc, "# user.cfg\r\n[input]\r\ninput_profile=user_mein\r\nfoo=1\r\n[display]\r\nwidth=1280\r\n");
+        st_file_write(lc, "# user_loc.cfg\r\n[input]\r\ninput_profile = keyboard_default\r\n");
+        r = lgame_ctrl040_reset(uc, lc, psb, sizeof psb, ploc, sizeof ploc);
+        st_file_read(uc, a, sizeof a);
+        st_file_read(lc, b, sizeof b);
+        if (r != 3 || strcmp(psb, "user_mein") != 0 || strcmp(ploc, "keyboard_default") != 0)
+            _snprintf_s(why, wcap, _TRUNCATE, "c: rc=%d alt='%s'/'%s'", r, psb, ploc);
+        else if (st_count(a, "input_profile=") != 1 || !strstr(a, "input_profile=default_full") ||
+                 st_count(a, LGAME_KEY_CTRL040 "=1") != 1 || !strstr(a, "foo=1") || !strstr(a, "width=1280") ||
+                 st_count(b, "input_profile") != 1 || !strstr(b, "input_profile=default_full") ||
+                 strstr(b, LGAME_KEY_CTRL040))
+            _snprintf_s(why, wcap, _TRUNCATE, "%s", "c: Dateiinhalt nach dem Reset falsch");
+        else if (st_file_read(ini, b, sizeof b) < 0 || strcmp(b, kIni) != 0)
+            _snprintf_s(why, wcap, _TRUNCATE, "%s", "c: user_mein.ini veraendert");
+    }
+    /* d: zweiter Start: nichts, Dateien bitgleich */
+    if (!why[0]) {
+        static char a2[16384], b2[16384];
+        st_file_read(lc, b, sizeof b);
+        r = lgame_ctrl040_reset(uc, lc, psb, sizeof psb, ploc, sizeof ploc);
+        st_file_read(uc, a2, sizeof a2);
+        st_file_read(lc, b2, sizeof b2);
+        if (r != 0 || strcmp(a, a2) != 0 || strcmp(b, b2) != 0 || psb[0] || ploc[0])
+            _snprintf_s(why, wcap, _TRUNCATE, "d: zweiter Start rc=%d", r);
+    }
+    /* e: Spieler waehlt die alte Belegung, Launcher speichert (auch eine aeltere Fassung behaelt fremde
+     *    launcher_*-Zeilen): Markierung bleibt, kein erneuter Reset */
+    if (!why[0]) {
+        lcfg_defaults(&s);
+        lcfg_load_file(uc, &s);
+        strcpy_s(s.input_profile, sizeof s.input_profile, "user_mein");
+        if (lcfg_save_user(uc, &s) != 0 || !lgame_ctrl040_marked(uc) ||
+            lgame_ctrl040_reset(uc, lc, psb, sizeof psb, ploc, sizeof ploc) != 0 ||
+            !st_file_has(uc, "input_profile=user_mein"))
+            _snprintf_s(why, wcap, _TRUNCATE, "%s", "e: Reset nach Speichern erneut");
+    }
+    /* f: schon default_full (z. B. W431-Erststart mit 0.3.4) -> nur markiert, kein Hinweis; Legacy ohne Zeile */
+    if (!why[0]) {
+        u8_DeleteFile(lc);
+        st_file_write(uc, "[input]\r\ninput_profile=default_full\r\n");
+        r = lgame_ctrl040_reset(uc, lc, psb, sizeof psb, ploc, sizeof ploc);
+        if (r != 0x100 || !lgame_ctrl040_marked(uc) || st_file_read(lc, b, sizeof b) >= 0)
+            _snprintf_s(why, wcap, _TRUNCATE, "f: schon default_full rc=%d", r);
+    }
+    if (!why[0]) {
+        st_file_write(uc, "[display]\r\nwidth=1280\r\n");
+        r = lgame_ctrl040_reset(uc, lc, psb, sizeof psb, ploc, sizeof ploc);
+        if (r != 1 || psb[0] || !st_file_has(uc, "input_profile=default_full"))
+            _snprintf_s(why, wcap, _TRUNCATE, "f: Legacy rc=%d alt='%s'", r, psb);
+    }
+    u8_DeleteFile(uc);
+    u8_DeleteFile(lc);
+    u8_DeleteFile(ini);
+    RemoveDirectoryA(dir);
+    return why[0] ? 1 : 0;
+}
+
 /* W332 Selbsttest: enthaelt die Datei (bis 64 KB) den Text? */
 static int st_file_has(const char *path, const char *needle)
 {
@@ -3497,6 +3627,17 @@ static int cli_selftest(const char *client_override)
         }
     }
 
+    /* W438 CTRL-RESET-040: einmaliger Reset auf default_full (genau einmal, user_*.ini unveraendert) */
+    {
+        char why[200];
+        u8_GetTempPath(tmp, sizeof tmp);
+        if (w438_ctrl_reset_selftest(tmp, why, sizeof why) == 0) {
+            T_OK("W438 ctrl-reset-040 (genau einmal, user_*.ini unveraendert, neue Installation ohne Reset, Markierung bleibt beim Speichern)");
+        } else {
+            T_FAIL("W438 ctrl-reset-040", "%s", why);
+        }
+    }
+
     /* W217 FIRST-RUN: frischer Nutzerordner (Profil-Modus mit leerer Wurzel
      * wie ein neuer PC; nie das echte %LOCALAPPDATA%). Laden schreibt nichts,
      * Standardwerte + Erststart-Regeln, erstes Speichern legt die Wurzel an,
@@ -4290,6 +4431,7 @@ static int cli_selftest(const char *client_override)
     w365_gui_selftest(client_override, &pass, &fail); /* W365 BIND-COMBO */
     w432_gui_selftest(client_override, &pass, &fail); /* W432 HOTAS-AXES: Belegungsdialog */
     w419_gui_selftest(client_override, &pass, &fail); /* W419 CTRL-EXPORT */
+    w438_gui_selftest(client_override, &pass, &fail); /* W438 CTRL-RESET-040 */
     w430_selftest(&pass, &fail); /* W430 CTRL-IMPORT-FUZZ (kurz) */
     if (!ls_replay_selftest()) { T_OK("W254 replay list (folders, SaveMeta name, mission, signature state, order, set args)"); }
     else { T_FAIL("W254 replay list", "%s", "failed"); }

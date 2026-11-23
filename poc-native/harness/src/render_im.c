@@ -2262,6 +2262,9 @@ static void sb_im_submit_body(void)
                g_present_no, m3d_ndraw, fx_nv(0x354u, 0u), fx_nv(0x30Cu, 0u),
                fx_nv(0x338u, 0u), fx_nv(0x334u, 0u), fx_nv(0x330u, 0u),
                fx_nv(0x384u, 0u), fx_nv(0x388u, 0u));
+        if (g_sba_loc) { /* DIAG(W448): Schattierungsmodus (NV097 0x37C SHADE_MODE, GL 0x1D00 FLAT / 0x1D01 SMOOTH) */
+            HLOG_W("M3D shm f=%u i=%u sm=0x%X has=%d", g_present_no, m3d_ndraw, fx_nv(0x37Cu, 0u), fx_nv_has(0x37Cu));
+        }
         if (g_sba_loc) { /* DIAG(LOC-ORIGINAL,W363): Sampler-Zustand + Texturkopf je Stufe (Kanten-Zensus loc_texfilt) */
             unsigned ls_xp[4], ls_n[4], lk;
             sb_tex_stages(ls_xp, ls_n);

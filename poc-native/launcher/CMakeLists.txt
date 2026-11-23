@@ -107,6 +107,7 @@ add_executable(sb_launcher WIN32
   src/launcher_account.c
   ../harness/src/input_sbc_usb.c
   ../harness/src/input_joy.c
+  ../harness/src/input_despike.c
   ../harness/src/sbc_fixture.c
   ../harness/src/sbc_test.c
   ../harness/src/sb_lang.c

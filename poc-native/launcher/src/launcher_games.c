@@ -430,6 +430,9 @@ static int loc169_set_keys(const char *path, const char *const *keys, const char
             if (strcmp(keys[k], LGAME_KEY_LOC169) == 0) {
                 o += (size_t)_snprintf_s(out + o, cap - o, _TRUNCATE,
                                          "# launcher: 16:9 + Fade out as Line of Contact default applied once\n");
+            } else if (strcmp(keys[k], LGAME_KEY_CTRL040) == 0) { /* W438 */
+                o += (size_t)_snprintf_s(out + o, cap - o, _TRUNCATE,
+                                         "# launcher: controls reset to the 0.4.0 default layout once\n");
             } else if (strcmp(keys[k], LGAME_KEY_LOC_WIDE) == 0) {
                 o += (size_t)_snprintf_s(out + o, cap - o, _TRUNCATE,
                                          "# Line of Contact picture format (0 = 4:3 original, 1 = 16:9, 2 = 720p)\n");
@@ -487,6 +490,96 @@ int lgame_loc169_mark(const char *loccfg, int wide, int with_edges)
         pv[k] = v[k];
     }
     return loc169_set_keys(loccfg, kK, pv, with_edges ? 5 : 2, 1) == 0 ? 0 : -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* W438 CTRL-RESET-040: einmaliger Steuerungs-Reset auf default_full    */
+/* ------------------------------------------------------------------ */
+/* Letzter Wert eines Schluessels (wie der Client: spaetere Zeile gewinnt). 1 = gefunden. */
+static int cfg_last_str(const char *path, const char *key, char *out, size_t cap)
+{
+    FILE *f = NULL;
+    char line[1200];
+    int found = 0;
+    out[0] = '\0';
+    if (!path || u8_fopen_s(&f, path, "r") != 0 || !f) {
+        return 0;
+    }
+    while (fgets(line, sizeof line, f)) {
+        const char *val = key_line(line, key);
+        if (val) {
+            trim_val(val, out, cap);
+            found = 1;
+        }
+    }
+    fclose(f);
+    return found;
+}
+
+int lgame_ctrl040_marked(const char *usercfg)
+{
+    char v[64];
+    return cfg_last_str(usercfg, LGAME_KEY_CTRL040, v, sizeof v) && atoi(v) != 0;
+}
+
+int lgame_ctrl040_mark(const char *usercfg)
+{
+    static const char *const kK[1] = { LGAME_KEY_CTRL040 };
+    static const char *const kV[1] = { "1" };
+    int r;
+    if (!usercfg || !file_exists_u8(usercfg)) {
+        return 1;
+    }
+    if (lgame_ctrl040_marked(usercfg)) {
+        return 0;
+    }
+    r = loc169_set_keys(usercfg, kK, kV, 1, 0);
+    return r == 0 ? 0 : -1;
+}
+
+int lgame_ctrl040_reset(const char *usercfg, const char *loccfg, char *prev_sb, size_t cap_sb, char *prev_loc,
+                        size_t cap_loc)
+{
+    static const char *const kP[1] = { "input_profile" };
+    static const char *const kV[1] = { LGAME_CTRL040_PROFILE };
+    char sb[96], lc[96];
+    int r = 0;
+    if (prev_sb && cap_sb) {
+        prev_sb[0] = '\0';
+    }
+    if (prev_loc && cap_loc) {
+        prev_loc[0] = '\0';
+    }
+    if (!usercfg || !file_exists_u8(usercfg) || lgame_ctrl040_marked(usercfg)) {
+        return 0; /* neue Installation (Standard gilt schon) oder schon zurueckgesetzt */
+    }
+    (void)cfg_last_str(usercfg, "input_profile", sb, sizeof sb);
+    if (_stricmp(sb, LGAME_CTRL040_PROFILE) != 0) {
+        if (loc169_set_keys(usercfg, kP, kV, 1, 0) != 0) {
+            return -1;
+        }
+        r |= 1;
+    }
+    lc[0] = '\0';
+    if (loccfg && file_exists_u8(loccfg)) {
+        (void)cfg_last_str(loccfg, "input_profile", lc, sizeof lc);
+        if (_stricmp(lc, LGAME_CTRL040_PROFILE) != 0) {
+            if (loc169_set_keys(loccfg, kP, kV, 1, 0) != 0) {
+                return -1;
+            }
+            r |= 2;
+        }
+    }
+    if (lgame_ctrl040_mark(usercfg) != 0) {
+        return -1;
+    }
+    if (prev_sb && cap_sb && (r & 1)) {
+        strncpy_s(prev_sb, cap_sb, sb, _TRUNCATE);
+    }
+    if (prev_loc && cap_loc && (r & 2)) {
+        strncpy_s(prev_loc, cap_loc, lc, _TRUNCATE);
+    }
+    return r ? r : 0x100;
 }
 
 void lgame_loc_dir(const char *base, char *out, size_t cap)

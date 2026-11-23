@@ -11,6 +11,7 @@
 #include "hcfg.h"
 #include "hlog.h"
 #include "sbc_fixture.h"
+#include "input_despike.h" /* W439 */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
@@ -91,10 +92,38 @@ static int wire_poll(void *ctx, sbc_usb_dev_t *dev, sbc_state_t *st)
 
 static const sbc_link_ops_t kWireOps = {wire_open, wire_close, wire_poll, NULL};
 
-static void sbc_cache_put(const sbc_state_t *st)
+/* W439 LOC-RETICLE-JUMP: Ausreisser-Filter (ctrl_despike, Standard 1) auf den 8 analogen Achsen, je USB-Report
+ * (Lese-Thread) bzw. je Fixture-Abfrage; Haltezeit-Ende bei der Abfrage des Spiels (sbc_wire_poll). Unter g_sbc_cs. */
+static despike_t g_sbc_ds;
+static void sbc_ds_get(const sbc_state_t *st, int v[8])
+{
+    v[0] = st->aiming_x; v[1] = st->aiming_y; v[2] = st->rot_lever; v[3] = st->sight_x; v[4] = st->sight_y;
+    v[5] = st->pedal_l; v[6] = st->pedal_m; v[7] = st->pedal_r;
+}
+static void sbc_ds_set(sbc_state_t *st, const int v[8])
+{
+    st->aiming_x = (uint8_t)v[0]; st->aiming_y = (uint8_t)v[1]; st->rot_lever = (int8_t)v[2]; st->sight_x = (int8_t)v[3];
+    st->sight_y = (int8_t)v[4]; st->pedal_l = (uint8_t)v[5]; st->pedal_m = (uint8_t)v[6]; st->pedal_r = (uint8_t)v[7];
+}
+/* kind 0 = neuer Report, 1 = Neutralstand (Trennung: sofort, Filter zuruecksetzen), 2 = nur Haltezeit pruefen */
+static void sbc_ds_apply(sbc_state_t *st, int kind)
+{
+    int v[8], o[8];
+    if (!g_cfg.ctrl_despike) return;
+    if (!g_sbc_ds.n) despike_init(&g_sbc_ds, 8, DESPIKE_THR_U8, DESPIKE_HOLD_MS);
+    sbc_ds_get(st, v);
+    if (kind == 1) { despike_reset(&g_sbc_ds, v); return; }
+    if (kind == 0) despike_feed(&g_sbc_ds, v, GetTickCount64(), o);
+    else despike_read(&g_sbc_ds, GetTickCount64(), o);
+    sbc_ds_set(st, o);
+}
+unsigned sbc_wire_despike_spikes(void) { return g_sbc_ds.spikes; }
+
+static void sbc_cache_put(const sbc_state_t *st, int kind)
 {
     EnterCriticalSection(&g_sbc_cs);
     g_sbc_cache = *st;
+    sbc_ds_apply(&g_sbc_cache, kind); /* W439 */
     g_sbc_have = 1;
     LeaveCriticalSection(&g_sbc_cs);
 }
@@ -118,7 +147,7 @@ static DWORD WINAPI sbc_reader_thread(void *arg)
             fail_n = 0;
         }
         if (ev & SBC_LEV_STATE) {
-            sbc_cache_put(&st);
+            sbc_cache_put(&st, 0);
             if (ev & SBC_LEV_BACK) { /* auch: erstmals spaet eingesteckt */
                 InterlockedExchange(&g_sbc_event, 2);
                 HLOG_I("CTRL: SBC %sverbunden - gedrueckte Taster "
@@ -132,7 +161,7 @@ static DWORD WINAPI sbc_reader_thread(void *arg)
              * Kippschalter/Tuner gehalten, Gang 0 = Hook haelt den Gang. */
             sbc_state_t nz;
             sbc_usb_neutral_hold(&g_link.last, g_link.have_last, &nz);
-            sbc_cache_put(&nz);
+            sbc_cache_put(&nz, 1);
             InterlockedExchange(&g_sbc_conn, 2);
             InterlockedExchange(&g_sbc_event, 1);
             HLOG_W("CTRL: SBC getrennt (%s) - neutral (Achsen Mitte, "
@@ -294,12 +323,14 @@ int sbc_wire_poll(sbc_state_t *st)
     /* Fixture gesetzt? Dann sie statt des Geraets (kein USB-Open). */
     if (g_cfg.sbc_fixture[0]) {
         have = sbc_fixture_poll(st);
+        if (have) sbc_ds_apply(st, 0); /* W439: Fixture-Eintrag je Abfrage wie ein Report (nur Spiel-Thread) */
     } else {
         if (!sbc_usb_ensure()) {
             return 0;
         }
         EnterCriticalSection(&g_sbc_cs);
         if (g_sbc_have) {
+            if (InterlockedCompareExchange(&g_sbc_conn, 0, 0) != 2) sbc_ds_apply(&g_sbc_cache, 2); /* W439: Haltezeit */
             *st = g_sbc_cache;
             have = 1;
         }

@@ -307,6 +307,7 @@ int gui_page_from_name(const char *v)
 #define ID_CTRL_JOY 1106 /* W221 HOTAS (experimentell): Joystick-Dialog */
 #define ID_CTRL_EXPORT 2930 /* W419 CTRL-EXPORT: Steuerung als .sbcontrols exportieren */
 #define ID_CTRL_IMPORT 2931 /* W419: .sbcontrols importieren (als neues Profil) */
+#define ID_CTRL_DESPIKE 2932 /* W439 LOC-RETICLE-JUMP: Ausreisser-Filter analoger Achsen (Standard an) */
 #define ID_PAL50 1108 /* W234 PAL50: Spieltakt 25 (wie EU-Konsole am 50-Hz-TV) */
 #define ID_CHIDE 1109 /* W268 COCKPIT-HIDE: Cockpit ausblenden (Grafik > HUD & Cockpit); W319: Auswahl Cockpit / Vollbild-Ansicht / Monitoransicht (+ Felder) */
 #define ID_STICK_AIM 1111  /* W271 (Merge: 1109 belegt durch W268) STICK-RELATIVE: Stick-Zielen Position / wie eine Maus */
@@ -323,6 +324,15 @@ int gui_page_from_name(const char *v)
 #define ID_VOL_VOICE 1121
 #define ID_CTRL_ALLY 1123  /* W424 SB-ALLIED-SQUADS: verbuendete Trupps kaempfen auch fern vom Spieler (nur SB) */
 #define ID_HRTF 1122       /* W356 AUDIO-2: Kopfhoerer (3D-Klang/HRTF wie die Konsole) */
+#define ID_PH_CSELF 1125   /* W445 PHOTO-CINE-SELF: Reichweite eigene VT-Teile (Cinematic) */
+/* W445: Karte "Fotos & Screenshots" mit Zeile "Cinematic: eigene VT-Teile bis" - Zeilen darunter enger */
+#define PHY_FMT 288        /* Format | Bildformat (vorher 290) */
+#define PHY_CS 326         /* W445: Cinematic-Reichweite */
+#define PHY_RP 362         /* Ueberschrift Replays & Video-Export (vorher 330) */
+#define PHY_T1 380         /* Schalter Zeile 1 (vorher 348) */
+#define PHY_T2 410         /* Schalter Zeile 2 (vorher 382) */
+#define PHY_TXT 442        /* Hinweis/Fotoordner (vorher 420, Hoehe 44 -> 34) */
+#define PHY_TXTH 34
 #define VOL_N 21          /* Listen 100 %, 95 %, ... 0 % (5er-Schritte, wie ESC) */
 #define EXY 18             /* W303: Karte "Fotos & Screenshots" 18 tiefer (Platz fuer die Lautstaerke) */
 static const int kVolId[4] = { ID_VOL_MASTER, ID_VOL_MUSIC, ID_VOL_SFX, ID_VOL_VOICE };
@@ -520,6 +530,7 @@ static void orig_paint_play(int loc);
 static int orig_banner_on(void); /* W293 */
 static void xicon_texts(void); /* W287 */
 static void onl_sync_ui(void);  /* W392 */
+static void lnet_netmode_fill(void); /* W447 */
 static void paint_lnet(void);   /* W392 */
 static void xtip_text(int id, char *out, size_t cap);
 static int loc_tip_id(int id); /* W387: LoC-Bedienelemente mit eigenem Tooltip */
@@ -2722,15 +2733,18 @@ static void paint_audio(void)
     label1(F_TINY, LT("gui.extras_dir"), CX0 + 18, CY0 + 190 + EXY, CW - 36, 16, C_DIM);
     label1(F_SMALL, LT("gui.extras_view"), CX0 + 18, CY0 + 250 + EXY, 110, 30, C_DIM);
     label1(F_SMALL, LT("gui.extras_res"), CX0 + 372, CY0 + 250 + EXY, 66, 30, C_DIM);
-    label1(F_SMALL, LT("gui.extras_fmt"), CX0 + 18, CY0 + 290 + EXY, 110, 30, C_DIM);
-    label1(F_SMALL, LT("gui.extras_asp"), CX0 + 250, CY0 + 290 + EXY, 188, 30, C_DIM);
-    label1(F_TINY, LT("gui.extras_rp"), CX0 + 18, CY0 + 330 + EXY, CW - 36, 16, C_DIM);
+    label1(F_SMALL, LT("gui.extras_fmt"), CX0 + 18, CY0 + PHY_FMT + EXY, 110, 30, C_DIM);
+    label1(F_SMALL, LT("gui.extras_asp"), CX0 + 250, CY0 + PHY_FMT + EXY, 188, 30, C_DIM);
+    /* W445: Cinematic-Reichweite eigene VT-Teile (Liste) mit kurzem Hinweis rechts daneben */
+    label1(F_SMALL, LT("gui.extras_cself"), CX0 + 18, CY0 + PHY_CS + EXY, 226, 30, C_DIM);
+    label(F_TINY, LT("gui.extras_cself_txt"), CX0 + 362, CY0 + PHY_CS + EXY - 2, CW - 18 - 362, 34, C_DIM);
+    label1(F_TINY, LT("gui.extras_rp"), CX0 + 18, CY0 + PHY_RP + EXY, CW - 36, 16, C_DIM);
     {
         char d[600], t[900];
         extras_default_dir(d, sizeof d);
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.extras_txt"), d);
-        if (!paint_reason(33, CX0 + 18, CY0 + 420 + EXY, CW - 36, 44)) { /* W195 R33: Ordner nicht nutzbar */
-            label(F_TINY, t, CX0 + 18, CY0 + 420 + EXY, CW - 36, 44, C_DIM);
+        if (!paint_reason(33, CX0 + 18, CY0 + PHY_TXT + EXY, CW - 36, PHY_TXTH)) { /* W195 R33: Ordner nicht nutzbar */
+            label(F_TINY, t, CX0 + 18, CY0 + PHY_TXT + EXY, CW - 36, PHY_TXTH, C_DIM);
         }
     }
 }
@@ -2759,7 +2773,9 @@ static void paint_ctrl(void)
     label1(F_SMALL, LT("gui.ctl_mouse"), COL2 + 18, CY0 + 108, 56, 30, C_DIM);
     label1(F_SMALL, LT("gui.ctl_sens"), COL2 + COLW - 18 - 54 - 48, CY0 + 108,
            48, 30, C_DIM);
-    paint_reason(24, COL2 + 18, CY0 + 142, COLW - 36, 16);
+    if (!paint_reason(24, COL2 + 18, CY0 + 142, COLW - 36, 16) && g_game == LGAME_LOC) { /* W440: Hilfen nur Arcade */
+        label1(F_TINY, LT("gui.loc_arcade_only"), COL2 + 18, CY0 + 142, COLW - 36, 16, C_DIM);
+    }
     /* W271 STICK-RELATIVE: Stick-Zielen wie die Maus-Zeile */
     label1(F_SMALL, LT("gui.ctl_stick"), COL2 + 18, CY0 + 262, 56, 30, C_DIM); /* W424: 228 -> 262 */
     label1(F_SMALL, LT("gui.ctl_sens"), COL2 + COLW - 18 - 54 - 48, CY0 + 262,
@@ -3656,6 +3672,18 @@ static void combo_add(HWND cb, const char *u8)
     wchar_t *w = u8_wdup(u8);
     SendMessageW(cb, CB_ADDSTRING, 0, (LPARAM)(w ? w : L""));
     free(w);
+}
+
+/* W445 PHOTO-CINE-SELF: Liste Aus, 1.0 m .. 12.0 m (Zehntel wie [photo] photo_cine_self, Raster LCFG_CSELF_*) */
+static void cself_fill(HWND cb)
+{
+    int k;
+    combo_add(cb, LT("gui.off"));
+    for (k = LCFG_CSELF_LO; k <= LCFG_CSELF_HI; k += LCFG_CSELF_STEP) {
+        char t[16];
+        _snprintf_s(t, sizeof t, _TRUNCATE, "%d.%d m", k / 10, k % 10);
+        combo_add(cb, t);
+    }
 }
 
 /* W309 FPS-MONITOR: Monitore fuer die Bildratenliste. "a/b,c" = Simulation
@@ -6725,6 +6753,7 @@ static void ui_from_settings(const launcher_settings_t *s)
         ui_set_checked(ID_RP_LOGO, s->replay_logo);
         ui_set_checked(ID_WM_MEDIA, s->watermark_media);
         ui_set_checked(ID_PH_HUD, s->photo_hud);
+        ComboBox_SetCurSel(ctl(ID_PH_CSELF), lcfg_cself_index(s->photo_cine_self)); /* W445 (Freigabe: ui_apply_rules) */
     }
     ComboBox_SetCurSel(ctl(ID_PH_FMT), s->photo_jpg ? 1 : 0);
     ui_set_checked(ID_ASPECT, s->aspect_mode ? 1 : 0);
@@ -6735,6 +6764,7 @@ static void ui_from_settings(const launcher_settings_t *s)
                        (s->aim_assist >= 0 && s->aim_assist <= 2) ? s->aim_assist : 0); /* W236 */
     ui_set_checked(ID_CTRL_AUTOGEAR, s->auto_gear);
     ui_set_checked(ID_CTRL_ALLY, s->sb_allied_squads); /* W424 */
+    ui_set_checked(ID_CTRL_DESPIKE, s->ctrl_despike); /* W439 */
     ComboBox_SetCurSel(ctl(ID_CHIDE), cview_sel(s->cockpit_hide, s->monitor_view)); /* W268, W319 */
     ComboBox_SetCurSel(ctl(ID_STICK_AIM), s->stick_aim ? 1 : 0); /* W271 */
     ComboBox_SetCurSel(ctl(ID_STICK_SENS),
@@ -6841,6 +6871,8 @@ static void ui_to_settings(launcher_settings_t *s)
         s->replay_logo = ui_checked(ID_RP_LOGO) ? 1 : 0;
         s->watermark_media = ui_checked(ID_WM_MEDIA) ? 1 : 0;
         s->photo_hud = ui_checked(ID_PH_HUD) ? 1 : 0;
+        sel = ComboBox_GetCurSel(ctl(ID_PH_CSELF)); /* W445: 0 = aus, k = LO + (k-1)*STEP */
+        s->photo_cine_self = (sel > 0 && sel < LCFG_CSELF_N) ? LCFG_CSELF_LO + (sel - 1) * LCFG_CSELF_STEP : (sel == 0 ? 0 : LCFG_CSELF_DEF);
     }
     /* Bildformat fest (S3.10, nie strecken). */
     s->aspect_mode = 1;
@@ -6851,6 +6883,7 @@ static void ui_to_settings(launcher_settings_t *s)
     if (s->aim_assist < 0 || s->aim_assist > 2) s->aim_assist = 0;
     s->auto_gear = ui_checked(ID_CTRL_AUTOGEAR);
     s->sb_allied_squads = ui_checked(ID_CTRL_ALLY); /* W424 */
+    s->ctrl_despike = ui_checked(ID_CTRL_DESPIKE); /* W439 */
     sel = ComboBox_GetCurSel(ctl(ID_CHIDE)); /* W268, W319: 0 Cockpit, 1 Vollbild-Ansicht, 2/3 Monitoransicht (+ Felder) */
     s->cockpit_hide = sel == 1 ? 1 : 0;
     s->monitor_view = sel >= 2 && sel <= 3 ? sel - 1 : 0;
@@ -7241,9 +7274,10 @@ static int ui_refresh_visibility(void)
 /* Text der sperrenden Regel eines Elements ("" = keine Sperre/sichtbar frei). */
 /* W402 LAUNCHER-PERGAME: Optionen, die es in Line of Contact nicht gibt (sichtbar, gesperrt, Grund im
  * Tooltip). Grundlage: Client-Code (LoC-Profil g_sba_loc: SB-Hooks nicht installiert, SB-Adressen lesen die
- * Null-Seite), Tabelle in BERICHT_M2 "W402". Einzige Stelle der Liste. */
+ * Null-Seite), Tabelle in BERICHT_M2 "W402". Einzige Stelle der Liste. W440: Zielhilfe und Gang-Automatik sind
+ * frei (Hinweis "nur Arcade-Lobbys", gui.loc_arcade_tip/gui.loc_arcade_only). */
 static const int kLocLock[] = { ID_PAL50, ID_CPERSP, ID_CPANINI, ID_CWIDTH, ID_CHIDE, ID_MONFX,
-                                ID_CTRL_AIMASSIST, ID_CTRL_AUTOGEAR, ID_CTRL_ALLY, ID_RP_LABEL, ID_RP_LOGO, ID_WM_MEDIA,
+                                ID_CTRL_ALLY, ID_RP_LABEL, ID_RP_LOGO, ID_WM_MEDIA,
                                 ID_GFX_TEX, ID_REM_SCALE, ID_GFX_PACKS, ID_VR, ID_VRPRESET, ID_VRRES,
                                 ID_EDGE, ID_EDGE_S, ID_EDGE_W, ID_SAVE_LOCK, ID_REM_LABEL /* W427 */ };
 #define KLOCLOCK_N (sizeof kLocLock / sizeof kLocLock[0])
@@ -7257,7 +7291,6 @@ static const char *loc_lock_key(int id) /* NULL = nicht gesperrt */
     case ID_CPERSP: case ID_CPANINI: case ID_CWIDTH: case ID_CHIDE: case ID_REM_LABEL: /* W427: hud_label_avoid wie ESC */
         return "gui.loc_lock_cockpit";
     case ID_MONFX: return "gui.loc_lock_monfx";
-    case ID_CTRL_AIMASSIST: case ID_CTRL_AUTOGEAR: return "gui.loc_lock_assist";
     case ID_CTRL_ALLY: return "gui.loc_lock_ally"; /* W424 */
     case ID_RP_LABEL: case ID_RP_LOGO: case ID_WM_MEDIA: return "gui.loc_lock_replay";
     case ID_GFX_TEX: case ID_REM_SCALE: case ID_GFX_PACKS: return "gui.loc_lock_packs";
@@ -7536,6 +7569,14 @@ static void ui_apply_rules(void)
             InvalidateRect(ctl(id), NULL, FALSE);
         }
     }
+    { /* W445 PHOTO-CINE-SELF: Reichweite eigene VT-Teile nur bei Ansicht Cinematic (SB; LoC: Cinematic = Aussenwelt) */
+        HWND cs = ctl(ID_PH_CSELF);
+        int en = g_game != LGAME_LOC && ctl(ID_PH_VIEW) && ComboBox_GetCurSel(ctl(ID_PH_VIEW)) == 3;
+        if (cs && (IsWindowEnabled(cs) != FALSE) != en) {
+            EnableWindow(cs, en ? TRUE : FALSE);
+            InvalidateRect(cs, NULL, FALSE);
+        }
+    }
     /* W220 PLAY-LAYOUT: Sichtbarkeit geaendert (z. B. Einrichtungskarte ->
      * Bereitschaft nach "Durchsuchen") -> Hintergrund neu aufbauen. Sonst
      * blieb das alte Bild (leeres Pfadfeld, Texte der Karte) unter den neu
@@ -7622,6 +7663,11 @@ static int save_user_merged(const char *upath)
         return -1;
     }
     pergame_mark();
+    if (loctab_may_write()) { /* W438: gespeicherte Installation -> kein spaeterer Steuerungs-Reset */
+        char cp[1200];
+        user_cfg_path(cp, sizeof cp);
+        (void)lgame_ctrl040_mark(cp);
+    }
     if (g_game == LGAME_LOC) { /* W402: Sprache ist global (Launcher liest sie aus user.cfg) */
         char sp[1200];
         user_cfg_path(sp, sizeof sp);
@@ -8560,6 +8606,7 @@ static void bind_refresh(HWND hd, int keep_joy)
         ui_settext(bctl(hd, IDB_CUR), t);
     }
     bind_src_fill(hd);
+    InvalidateRect(lb, NULL, FALSE); /* #75: Tasten in der Liste aktuell halten */
     if (!keep_joy) {
         bind_joy_row(hd);
     }
@@ -8725,7 +8772,44 @@ static void bind_draw_row(const DRAWITEMSTRUCT *d)
         cv_fill(&c, SX(8), h - 1, w - SX(16), 1, C_ACCENT, 80, 0);
     } else if (i >= 0 && i < LCTRL_ELEM_N) {
         const lctrl_elem_t *e = &kCtrlElems[i];
-        int cw = SX(76), cx = w - SX(6) - cw, nx = SX(18), nr = cx - SX(4);
+        /* #75: rechts die belegten Tasten/Knoepfe (lesbar), nicht die interne Kennung */
+        int cw = (w - SX(24)) * 2 / 5, cx = w - SX(6) - cw, nx = SX(18), nr = cx - SX(4);
+        char keys[200];
+        int unset = g_bind.row[i].n_alt == 0, a;
+        keys[0] = '\0';
+        if (unset) {
+            strncpy_s(keys, sizeof keys, LT("gui.bind_unset"), _TRUNCATE);
+        }
+        for (a = 0; a < g_bind.row[i].n_alt; a++) {
+            char pr[160];
+            if (!lctrl_src_pretty(g_bind.row[i].alt[a], pr, sizeof pr)) {
+                const char *s = g_bind.row[i].alt[a];
+                size_t k, o = 0;
+                int word = 1;
+                if (_strnicmp(s, "KEY:", 4) == 0) {
+                    s += 4; /* KEY:SPACE -> Space */
+                } else if (_strnicmp(s, "MOUSE:", 6) == 0) {
+                    strcpy_s(pr, sizeof pr, "Mouse ");
+                    o = 6;
+                    s += 6; /* MOUSE:LEFT -> Mouse Left */
+                } else {
+                    word = -1; /* Pad/Joystick: wie im Profil */
+                }
+                for (k = 0; s[k] && o + 1 < sizeof pr; k++) {
+                    char ch = s[k];
+                    if (word >= 0) {
+                        ch = word ? (char)toupper((unsigned char)ch) : (char)tolower((unsigned char)ch);
+                        word = !isalnum((unsigned char)ch);
+                    }
+                    pr[o++] = ch;
+                }
+                pr[o] = '\0';
+            }
+            if (a) {
+                strncat_s(keys, sizeof keys, ", ", _TRUNCATE);
+            }
+            strncat_s(keys, sizeof keys, pr, _TRUNCATE);
+        }
         if (sel) {
             cv_fill(&c, SX(2), SX(1), w - SX(4), h - SX(2), RGB(255, 255, 255),
                     dis ? 10 : 20, SX(4));
@@ -8744,7 +8828,8 @@ static void bind_draw_row(const DRAWITEMSTRUCT *d)
         cv_text(&c, g_f[F_SMALL], LT(e->lkey), nx, 0, nr - nx, h,
                 dis ? C_FAINT : C_TEXT,
                 DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-        cv_text(&c, g_f[F_TINY], e->key, cx, 0, cw, h, C_FAINT,
+        cv_text(&c, g_f[F_TINY], keys, cx, 0, cw, h,
+                (unset || dis) ? C_FAINT : C_DIM,
                 DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         if ((d->itemState & ODS_FOCUS) && !(d->itemState & ODS_NOFOCUSRECT)) {
             cv_ring(&c, SX(1), 0, w - SX(2), h, C_ACCENT, 140, SX(4), 1);
@@ -13392,14 +13477,9 @@ static int cx_import_check(const char *path, const ijoy_info_t *list, int nlist,
         memset(&g_cx, 0, sizeof g_cx);
         return 1;
     }
-    for (i = 0; i < g_cx.n_set; i++) {
-        char k[48];
+    for (i = 0; i < g_cx.n_set; i++) { /* W442: Zielhilfe zaehlt auch in LoC (seit W441 Gang-Automatik) */
         const char *eq = strchr(g_cx.set[i], '=');
-        if (!eq || (size_t)(eq - g_cx.set[i]) >= sizeof k) { continue; }
-        memcpy(k, g_cx.set[i], (size_t)(eq - g_cx.set[i]));
-        k[eq - g_cx.set[i]] = '\0';
-        /* LoC: Zielhilfe/Automatik gibt es dort nicht (gesperrt, W402) */
-        if (g_game == LGAME_LOC && (strcmp(k, "aim_assist") == 0 || strcmp(k, "auto_gear") == 0)) { continue; }
+        if (!eq || (size_t)(eq - g_cx.set[i]) >= 48u) { continue; }
         nset++;
     }
     g_cx_nmiss = lcx_missing(&g_cx, list, nlist, sbc_present, g_cx_miss, 8);
@@ -13432,7 +13512,7 @@ static int cx_import_check(const char *path, const ijoy_info_t *list, int nlist,
 static int cx_import_apply(int cfg, char *msg, size_t cap)
 {
     char pp[1200], dir[1100], uc[1200], err[512];
-    int keep_assist, keep_gear, i;
+    int i;
     size_t o;
     if (!g_cx_name[0] || lctrl_input_profile_path(g_client_dir, g_cx_name, pp, sizeof pp) != 0) {
         _snprintf_s(msg, cap, _TRUNCATE, "%s %s", LT("gui.cx_noname"), LT("gui.cx_nochange"));
@@ -13449,13 +13529,7 @@ static int cx_import_apply(int cfg, char *msg, size_t cap)
         return 1;
     }
     ui_to_settings(&g_s);
-    keep_assist = g_s.aim_assist;
-    keep_gear = g_s.auto_gear;
-    lcx_get_settings(&g_cx, &g_s);
-    if (g_game == LGAME_LOC) { /* W402: in LoC gesperrt, Wert bleibt */
-        g_s.aim_assist = keep_assist;
-        g_s.auto_gear = keep_gear;
-    }
+    lcx_get_settings(&g_cx, &g_s); /* W442: Zielhilfe und Gang-Automatik auch in LoC uebernommen (wirken in Arcade-Lobbys) */
     strcpy_s(g_s.input_profile, sizeof g_s.input_profile, g_cx_name);
     ui_from_settings(&g_s);
     refresh_ctrl_profiles(g_cx_name);
@@ -15381,6 +15455,15 @@ static void ui_apply_language(void)
         combo_refill(ID_PH_ASP, kPhAsp, 2);
         combo_refill(ID_PH_VIEW, kPhView, 4);
     }
+    { /* W445: erster Eintrag "Aus" in der Sprache */
+        HWND c = ctl(ID_PH_CSELF);
+        if (c) {
+            int cur = ComboBox_GetCurSel(c);
+            ComboBox_ResetContent(c);
+            cself_fill(c);
+            ComboBox_SetCurSel(c, cur);
+        }
+    }
     ui_settext(ctl(ID_RP_LABEL), LT("gui.rp_label"));
     ui_settext(ctl(ID_RP_LOGO), LT("gui.rp_logo"));
     ui_settext(ctl(ID_WM_MEDIA), LT("gui.wm_media"));
@@ -15401,6 +15484,7 @@ static void ui_apply_language(void)
     combo_refill(ID_CTRL_AIMASSIST, kAssist, 3); /* W236 */
     ui_settext(ctl(ID_CTRL_AUTOGEAR), LT("gui.ctl_autogear"));
     ui_settext(ctl(ID_CTRL_ALLY), LT("gui.ctl_ally")); /* W424 */
+    ui_settext(ctl(ID_CTRL_DESPIKE), LT("gui.ctl_despike")); /* W439 */
     ui_settext(ctl(ID_PAL50), LT("gui.pal50")); /* W234 */
     ui_settext(ctl(ID_CTRL_ASSIST), LT("gui.ctl_assist"));
     ui_settext(ctl(ID_CTRL_BROWSER), LT("gui.keys_browser")); /* W179 */
@@ -15525,14 +15609,18 @@ static int gametab_id(int id) /* W398: Wortmarken-Tabs im Kopf */
 /* W392 LAUNCHER-NETTAB: Seite "Netzwerk" im LoC-Bereich (Navigationsplatz von Packs, den es bei LoC nicht gibt).
  * Dort liegen Rollback, eigene Bewegung sofort, Gegner glaetten (ID_LOC_SMOOTH, frueher unter dem Start) und
  * niedrigere Eingabeverzoegerung sowie "Standard wiederherstellen". */
-#define ID_LNET_RB 2793    /* Schalter Rollback-Netcode (loc_rb_input) */
+#define ID_LNET_RB 2793    /* W447: Auswahl Netzmodus Auto (Standard) / Rollback / Lockstep (frueher Schalter Rollback-Netcode, loc_rb_input) */
 #define ID_LNET_OWN 2794   /* Schalter eigene Bewegung sofort (loc_own_predict) */
 #define ID_LNET_LOWD 2795  /* Schalter adaptive niedrigere Eingabeverzoegerung (loc_rb_opts lowd=0 = aus) */
 #define ID_LNET_RESET 2796 /* Knopf Standard wiederherstellen (alles an, Gegner glaetten Auto) */
 #define ID_LNET_CLIP 2797  /* W420 LOC-CLIPDUMP: Schalter "Clip dumping unterbinden (Host-Regel)" */
 #define ID_LNET_VERPAGE 2798 /* W420: Knopf Release-Seite bei Versionsablehnung (steelnet, nur dann sichtbar) */
+#define ID_LNET_CHAT 2799  /* W437 LOC-CHAT: Schalter "Chat" (loc_chat, Standard an) */
+#define ID_LNET_MODE 2800  /* W440 LOC-LOBBY-MODES: Auswahl Lobby-Modus beim Hosten (Sim = Standard / Arcade) */
+#define ID_LNET_SNCHAT 2801 /* W446 STEELNET-CHAT: Schalter "steelnet chat" (loc_snchat, Standard an) */
+#define ID_LNET_PRIV 2802 /* W450 LAUNCHER-PRIVACY-INFO: Knopf "Chat privacy" (kleines Fenster mit dem Datenschutz-Hinweis) */
 #define ID_LNET_FIRST ID_LNET_RB
-#define ID_LNET_LAST ID_LNET_VERPAGE
+#define ID_LNET_LAST ID_LNET_PRIV
 /* W293 LOC-LAYOUT: Spielen = Kopf, Start, Bereitschaft (wie SB), Hinweisband
  * unten; Disc, Spielstaende & Daten und Online liegen links auf Erweitert
  * (rechts die gemeinsamen Teile Feinabstimmung + Launcher). */
@@ -15788,7 +15876,12 @@ static int g_loc_smooth_opp = 1;     /* W387 */
 #define LNET_OWN_KEY "launcher_loc_own_predict"
 #define LNET_LOWD_KEY "launcher_loc_low_delay"
 #define LNET_RBOPTS_MAX 127 /* hcfg.h loc_rb_opts[128] */
-static int g_loc_rb_on = 1;   /* W392 */
+static int g_loc_rb_on = 1;   /* W392 (0 = Netzmodus Lockstep) */
+/* W447 LOC-NET-AUTO (GitHub #82, Nutzerentscheid 23.11.): Netzmodus Auto (Standard) / Rollback / Lockstep als eine
+ * Auswahl (ID_LNET_RB). Lockstep = launcher_loc_rollback=0 (wie W392), Auto/Rollback = launcher_loc_net_auto (fehlt/
+ * ungueltig = 1). Nur "Rollback (manuell)" haengt loc_net_auto=0 an (Standard des Clients ist Auto). */
+#define LNET_AUTO_KEY "launcher_loc_net_auto"
+static int g_loc_net_auto = 1; /* W447 */
 static int g_loc_own_pred = 1; /* W392 */
 static int g_loc_lowd = 1;    /* W392 */
 /* W420 LOC-CLIPDUMP: Match-Regel des Hosts "Clip dumping unterbinden" (Nutzerentscheid 22.11.: Standard an), gemerkt in
@@ -15796,10 +15889,23 @@ static int g_loc_lowd = 1;    /* W392 */
  * dort gilt die lokale Einstellung). Keine Grafik-Abweichung, sondern Spielregel (W278: kein Experimental). */
 #define LNET_CLIP_KEY "launcher_loc_clipdump_block"
 static int g_loc_clip = 1;
+/* W437 LOC-CHAT: Textchat in LoC online (Nutzerwunsch 22.11.: Standard an), gemerkt in user.cfg (fehlt/ungueltig = 1),
+ * als loc_chat an jeden LoC-Start (beim Testpartner an beide Seiten). Aus = weder Anzeige noch Senden. */
+#define LNET_CHAT_KEY "launcher_loc_chat"
+static int g_loc_chat = 1;
+/* W446 STEELNET-CHAT (GitHub #81, Nutzerwunsch 23.11.): steelnet-weiter Chat, getrennt vom Lobby-Chat, Standard an,
+ * gemerkt in user.cfg (fehlt/ungueltig = 1), als loc_snchat an jeden LoC-Start. Aus = kein Abonnement beim Dienst. */
+#define LNET_SNCHAT_KEY "launcher_loc_snchat"
+static int g_loc_snchat = 1;
+/* W440 LOC-LOBBY-MODES (GitHub #79, Nutzerentscheid 23.11.): Modus der Lobbys, die ich hoste - 0 = Sim (Standard:
+ * keine Zielhilfe, keine Gang-Automatik fuer alle), 1 = Arcade (jeder nur seine eigenen Hilfen). Gemerkt in user.cfg
+ * (fehlt/ungueltig = Sim), als loc_play_mode=sim|arcade an jeden LoC-Start (loc_rule_set_append; Testpartner: --set). */
+#define LNET_MODE_KEY "launcher_loc_play_mode"
+static int g_loc_arcade = 0;
 
 static int loc_tip_id(int id) /* W387: Tooltip am Element (tips_build, Text in xtip_text) */
 {
-    return id == ID_LOC_SMOOTH;
+    return id == ID_LOC_SMOOTH || id == ID_CTRL_AIMASSIST || id == ID_CTRL_AUTOGEAR; /* W440: Hinweis nur in LoC */
 }
 static int g_onl_fix_srv = -1;       /* Shots/Selbsttest: -1 = echte Pins, sonst 0/1 */
 static int g_onl_fixture;            /* Shots: Status vorgegeben, nie von der Platte */
@@ -16074,6 +16180,10 @@ static void loc_net_set_append(char *set, size_t cap)
             _snprintf_s(set + l, cap - l, _TRUNCATE, ";loc_rb_opts=%s", m);
         }
     }
+    if (g_loc_rb_on && !g_loc_net_auto) { /* W447: Rollback manuell (Auto ist Standard des Clients) */
+        l = strlen(set);
+        _snprintf_s(set + l, cap - l, _TRUNCATE, ";loc_net_auto=0");
+    }
 }
 
 /* W420: Host-Regel an den --set eines LoC-Starts haengen (eigene Funktion: die Kette der Netzwerk-Schalter bleibt) */
@@ -16081,12 +16191,19 @@ static void loc_rule_set_append(char *set, size_t cap)
 {
     size_t l = strlen(set);
     _snprintf_s(set + l, cap - l, _TRUNCATE, "%sloc_rule_clipdump_block=%d", l ? ";" : "", g_loc_clip ? 1 : 0);
+    l = strlen(set);
+    _snprintf_s(set + l, cap - l, _TRUNCATE, ";loc_chat=%d", g_loc_chat ? 1 : 0); /* W437 */
+    l = strlen(set);
+    _snprintf_s(set + l, cap - l, _TRUNCATE, ";loc_snchat=%d", g_loc_snchat ? 1 : 0); /* W446 */
+    l = strlen(set);
+    _snprintf_s(set + l, cap - l, _TRUNCATE, ";loc_play_mode=%s", g_loc_arcade ? "arcade" : "sim"); /* W440 */
 }
 
 /* W392: Stimmen alle Netzwerk-Schalter mit dem Standard ueberein? (Hinweis auf LoC-Spielen) */
 static int lnet_is_default(void)
 {
-    return g_loc_rb_on && g_loc_own_pred && g_loc_lowd && g_loc_smooth_opp == 1 && g_loc_clip;
+    return g_loc_rb_on && g_loc_net_auto && g_loc_own_pred && g_loc_lowd && g_loc_smooth_opp == 1 && g_loc_clip && g_loc_chat &&
+           g_loc_snchat && !g_loc_arcade; /* W440: Standard Sim; W446; W447 */
 }
 
 /* loc_net_status.txt lesen (Schluessel=Wert je Zeile, letzte Zeile gewinnt).
@@ -16302,7 +16419,11 @@ static void onl_load(void)
     g_loc_public = 1; /* W373: Standard oeffentlich */
     g_loc_smooth_opp = 1; /* W387: Standard auto */
     g_loc_rb_on = g_loc_own_pred = g_loc_lowd = 1; /* W392: Standard an */
+    g_loc_net_auto = 1; /* W447: Standard Auto */
     g_loc_clip = 1; /* W420: Standard an */
+    g_loc_chat = 1; /* W437: Standard an */
+    g_loc_snchat = 1; /* W446: Standard an */
+    g_loc_arcade = 0; /* W440: Standard Sim */
     if (!g_onl_since) { /* laufendes Spiel (Launcher neu geoeffnet) zaehlt, alte Laeufe nicht */
         g_onl_since = onl_now_ft() - 600ULL * 10000000ULL;
     }
@@ -16324,11 +16445,24 @@ static void onl_load(void)
             if (strncmp(line, LNET_OWN_KEY "=", sizeof LNET_OWN_KEY) == 0) {
                 g_loc_own_pred = lnet_bool_parse(line + sizeof LNET_OWN_KEY);
             }
+            if (strncmp(line, LNET_AUTO_KEY "=", sizeof LNET_AUTO_KEY) == 0) { /* W447: fehlt/ungueltig = 1 (Auto) */
+                g_loc_net_auto = lnet_bool_parse(line + sizeof LNET_AUTO_KEY);
+            }
             if (strncmp(line, LNET_LOWD_KEY "=", sizeof LNET_LOWD_KEY) == 0) {
                 g_loc_lowd = lnet_bool_parse(line + sizeof LNET_LOWD_KEY);
             }
             if (strncmp(line, LNET_CLIP_KEY "=", sizeof LNET_CLIP_KEY) == 0) { /* W420: fehlt/ungueltig = 1 */
                 g_loc_clip = lnet_bool_parse(line + sizeof LNET_CLIP_KEY);
+            }
+            if (strncmp(line, LNET_CHAT_KEY "=", sizeof LNET_CHAT_KEY) == 0) { /* W437: fehlt/ungueltig = 1 */
+                g_loc_chat = lnet_bool_parse(line + sizeof LNET_CHAT_KEY);
+            }
+            if (strncmp(line, LNET_SNCHAT_KEY "=", sizeof LNET_SNCHAT_KEY) == 0) { /* W446: fehlt/ungueltig = 1 */
+                g_loc_snchat = lnet_bool_parse(line + sizeof LNET_SNCHAT_KEY);
+            }
+            if (strncmp(line, LNET_MODE_KEY "=", sizeof LNET_MODE_KEY) == 0) { /* W440: nur genau 1 = Arcade */
+                const char *mv = line + sizeof LNET_MODE_KEY;
+                g_loc_arcade = mv[0] == '1' && (mv[1] == 0 || mv[1] == '\r' || mv[1] == '\n' || mv[1] == ' ');
             }
         }
         fclose(f);
@@ -16424,8 +16558,8 @@ static void onl_sync_ui(void)
         EnableWindow(ctl(ID_LOC_SMOOTH), g_loc_rb_on ? TRUE : FALSE);
     }
     /* W392: Netzwerk-Schalter; ohne Rollback wirken die drei anderen nicht -> grau (Wert bleibt gemerkt) */
-    if (ctl(ID_LNET_RB)) {
-        ui_set_checked(ID_LNET_RB, g_loc_rb_on);
+    if (ctl(ID_LNET_RB)) { /* W447: Auswahl Netzmodus */
+        lnet_netmode_fill();
     }
     if (ctl(ID_LNET_OWN)) {
         ui_set_checked(ID_LNET_OWN, g_loc_own_pred);
@@ -16437,6 +16571,17 @@ static void onl_sync_ui(void)
     }
     if (ctl(ID_LNET_CLIP)) { /* W420: unabhaengig vom Rollback */
         ui_set_checked(ID_LNET_CLIP, g_loc_clip);
+    }
+    if (ctl(ID_LNET_CHAT)) { /* W437: unabhaengig vom Rollback */
+        ui_set_checked(ID_LNET_CHAT, g_loc_chat);
+    }
+    if (ctl(ID_LNET_SNCHAT)) { /* W446: unabhaengig vom Rollback */
+        ui_set_checked(ID_LNET_SNCHAT, g_loc_snchat);
+    }
+    if (ctl(ID_LNET_MODE)) { /* W440: unabhaengig vom Rollback */
+        g_updating++;
+        ComboBox_SetCurSel(ctl(ID_LNET_MODE), g_loc_arcade ? 1 : 0);
+        g_updating--;
     }
     if (ctl(ID_LNET_RESET)) {
         EnableWindow(ctl(ID_LNET_RESET), lnet_is_default() ? FALSE : TRUE);
@@ -16548,14 +16693,84 @@ static void loc_smooth_fill(void)
 #define LNET_H 342
 #define LNET_IND 28                             /* Einrueckung der von Rollback abhaengigen Zeilen */
 #define LNET_CTL_W 300                          /* Schalter/Auswahl-Breite (W397: Hinweis rechts daneben) */
-#define LNET_ROW(i) (LNET_Y + 76 + (i) * 52)    /* Zeile i: Element, Hinweis rechts (W397; W420: 5 Zeilen) */
+#define LNET_ROW(i) (LNET_Y + 72 + (i) * 34)    /* Zeile i: Element, Hinweis rechts (W397; W420: 5 Zeilen; W437: 6; W440: 7; W446: 8 Zeilen, enger) */
 #define LNET_HINT_X (CX0 + 18 + LNET_IND + LNET_CTL_W + 16)
-static const char *const kLnetHint[5] = { "gui.lnet_rb_hint", "gui.lnet_own_hint", "gui.lnet_smooth_hint",
-                                          "gui.lnet_lowd_hint", "gui.lnet_clip_hint" };
+static const char *const kLnetHint[8] = { "gui.lnet_rb_hint", "gui.lnet_own_hint", "gui.lnet_smooth_hint",
+                                          "gui.lnet_lowd_hint", "gui.lnet_clip_hint", "gui.lnet_chat_hint",
+                                          "gui.lnet_snchat_hint" /* W446 */, "gui.lnet_mode_hint" /* W440 */ };
 
 static void lnet_redraw(void)
 {
     redraw_rect(CX0, LNET_Y, CW, LNET_H + 4);
+}
+
+/* W447 LOC-NET-AUTO: Eintraege (Sprache) der Auswahl Netzmodus, Auswahl nach g_loc_rb_on/g_loc_net_auto. */
+static int lnet_netmode_cur(void) { return !g_loc_rb_on ? 2 : (g_loc_net_auto ? 0 : 1); }
+static void lnet_netmode_fill(void)
+{
+    HWND c = ctl(ID_LNET_RB);
+    if (!c) {
+        return;
+    }
+    g_updating++;
+    ComboBox_ResetContent(c);
+    combo_add(c, LT("gui.lnet_nm_auto"));
+    combo_add(c, LT("gui.lnet_nm_rb"));
+    combo_add(c, LT("gui.lnet_nm_ls"));
+    ComboBox_SetCurSel(c, lnet_netmode_cur());
+    g_updating--;
+}
+/* 1 = Auswahl steht nicht auf Lockstep (frueher: Schalter Rollback an) */
+static int lnet_rb_ui(void) { return ctl(ID_LNET_RB) && ComboBox_GetCurSel(ctl(ID_LNET_RB)) != 2; }
+
+/* W447: Auswahl Netzmodus, sofort in user.cfg gemerkt (wirkt beim naechsten Start). */
+static void lnet_netmode_pick(int v)
+{
+    static const char *const kSt[3] = { "gui.lnet_nm_auto_on", "gui.lnet_nm_rb_on", "gui.lnet_nm_ls_on" };
+    int bad = 0;
+    if (v < 0 || v > 2 || v == lnet_netmode_cur()) {
+        return;
+    }
+    g_loc_rb_on = v != 2;
+    if (v != 2) {
+        g_loc_net_auto = v == 0;
+    }
+    onl_sync_ui();
+    bad |= onl_save_key(LNET_RB_KEY, g_loc_rb_on) < 0;
+    bad |= onl_save_key(LNET_AUTO_KEY, g_loc_net_auto) < 0;
+    if (!bad) {
+        set_status_k(LT(kSt[v]), 1);
+    }
+    lnet_redraw();
+}
+
+/* W440 LOC-LOBBY-MODES: Eintraege (Sprache) der Auswahl Lobby-Modus, Auswahl nach g_loc_arcade. */
+static void lnet_mode_fill(void)
+{
+    HWND c = ctl(ID_LNET_MODE);
+    if (!c) {
+        return;
+    }
+    g_updating++;
+    ComboBox_ResetContent(c);
+    combo_add(c, LT("gui.lnet_mode_sim"));
+    combo_add(c, LT("gui.lnet_mode_arcade"));
+    ComboBox_SetCurSel(c, g_loc_arcade ? 1 : 0);
+    g_updating--;
+}
+
+/* W440: Auswahl Lobby-Modus, sofort in user.cfg gemerkt (gilt fuer Lobbys, die ich ab dem naechsten Start anlege). */
+static void lnet_mode_pick(void)
+{
+    int v = ComboBox_GetCurSel(ctl(ID_LNET_MODE)) == 1;
+    if (v == g_loc_arcade) {
+        return;
+    }
+    g_loc_arcade = v;
+    if (onl_save_key(LNET_MODE_KEY, g_loc_arcade) >= 0) {
+        set_status_k(LT(g_loc_arcade ? "gui.lnet_mode_arcade_on" : "gui.lnet_mode_sim_on"), 1);
+    }
+    lnet_redraw();
 }
 
 static int *lnet_var(int id, const char **key, const char **name)
@@ -16575,6 +16790,16 @@ static int *lnet_var(int id, const char **key, const char **name)
         *name = "gui.lnet_clip";
         return &g_loc_clip;
     }
+    if (id == ID_LNET_CHAT) { /* W437 */
+        *key = LNET_CHAT_KEY;
+        *name = "gui.lnet_chat";
+        return &g_loc_chat;
+    }
+    if (id == ID_LNET_SNCHAT) { /* W446 */
+        *key = LNET_SNCHAT_KEY;
+        *name = "gui.lnet_snchat";
+        return &g_loc_snchat;
+    }
     *key = LNET_LOWD_KEY;
     *name = "gui.lnet_lowd";
     return &g_loc_lowd;
@@ -16587,7 +16812,8 @@ static void lnet_toggle(int id)
     const char *key, *name;
     int *v = lnet_var(id, &key, &name);
     char t[300];
-    if (id != ID_LNET_RB && id != ID_LNET_CLIP && !g_loc_rb_on) { /* W420: Host-Regel gilt auch im Lockstep */
+    if (id != ID_LNET_RB && id != ID_LNET_CLIP && id != ID_LNET_CHAT && id != ID_LNET_SNCHAT &&
+        !g_loc_rb_on) { /* W420/W437/W446: auch im Lockstep */
         onl_sync_ui();
         return;
     }
@@ -16605,11 +16831,19 @@ static void lnet_reset(void)
 {
     int bad = 0;
     g_loc_rb_on = g_loc_own_pred = g_loc_lowd = 1;
+    g_loc_net_auto = 1; /* W447 */
     g_loc_smooth_opp = 1;
     g_loc_clip = 1; /* W420 */
+    g_loc_chat = 1; /* W437 */
+    g_loc_snchat = 1; /* W446 */
+    g_loc_arcade = 0; /* W440: Sim */
     onl_sync_ui();
     bad |= onl_save_key(LNET_CLIP_KEY, 1) < 0;
+    bad |= onl_save_key(LNET_CHAT_KEY, 1) < 0;
+    bad |= onl_save_key(LNET_SNCHAT_KEY, 1) < 0;
+    bad |= onl_save_key(LNET_MODE_KEY, 0) < 0;
     bad |= onl_save_key(LNET_RB_KEY, 1) < 0;
+    bad |= onl_save_key(LNET_AUTO_KEY, 1) < 0; /* W447 */
     bad |= onl_save_key(LNET_OWN_KEY, 1) < 0;
     bad |= onl_save_key(LNET_LOWD_KEY, 1) < 0;
     bad |= onl_save_key(ONL_SMOOTH_KEY, 1) < 0;
@@ -16638,38 +16872,197 @@ static void paint_lnet(void)
     }
     card(x, y, w, LNET_H, LT("gui.lnet_title"));
     label(F_TINY, LT("gui.lnet_intro"), x + 18, y + 38, w - 36 - 0, 34, C_DIM);
-    for (i = 0; i < 5; i++) {
-        int dep = i >= 1 && i <= 3; /* W420: Zeile 4 (Host-Regel) haengt nicht am Rollback */
+    for (i = 0; i < 8; i++) {
+        int dep = i >= 1 && i <= 3; /* W420: Zeile 4 (Host-Regel), W437: 5 (Chat), W446: 6 (steelnet-Chat), W440: 7 (Lobby-Modus) nicht am Rollback */
         int ind = dep ? LNET_IND : 0;
         int grey = dep && !g_loc_rb_on;
         COLORREF c = i == 0 ? (g_loc_rb_on ? C_DIM : C_WARN) : (!dep || g_loc_rb_on ? C_DIM : C_FAINT);
         (void)ind;
         label(F_TINY, LT(grey ? "gui.lnet_needs_rb" : kLnetHint[i]), LNET_HINT_X, LNET_ROW(i) - 2,
-              x + w - 18 - LNET_HINT_X, 48, c);
+              x + w - 18 - LNET_HINT_X, 34, c);
     }
+}
+
+/* W450 LAUNCHER-PRIVACY-INFO: kleines Fenster (Dialogstil wie Replays) mit dem Datenschutz-Hinweis zu Chat und
+ * steelnet. Inhalt = Faktenpruefung in BERICHT_M2 "W450". mode 0 = normal, 1 = Bild (aussen, ohne Aktivierung),
+ * 2 = Selbsttest (aussen, schliesst sich ueber den Schliessen-Knopf). Rueckgabe 1 = Fenster war da, Texte vorhanden. */
+#define IDPV_TEXT 720
+#define IDPV_CLOSE 721
+static int g_pv_done, g_pv_mode;
+
+static LRESULT CALLBACK pv_proc(HWND hd, UINT msg, WPARAM wp, LPARAM lp)
+{
+    switch (msg) {
+    case WM_COMMAND:
+        if (LOWORD(wp) == IDPV_CLOSE || LOWORD(wp) == IDCANCEL) {
+            g_pv_done = 1;
+        }
+        return 0;
+    case WM_DRAWITEM:
+        draw_item((const DRAWITEMSTRUCT *)lp);
+        return TRUE;
+    case WM_CTLCOLORSTATIC:
+        return ctlcolor((HDC)wp, (HWND)lp, 1);
+    case WM_ERASEBKGND: {
+        RECT r;
+        GetClientRect(hd, &r);
+        if (!g_br_dialog) {
+            g_br_dialog = CreateSolidBrush(C_DIALOG);
+        }
+        FillRect((HDC)wp, &r, g_br_dialog);
+        return 1;
+    }
+    case WM_TIMER:
+        if (wp == 9 && g_pv_mode != 0) {
+            KillTimer(hd, 9);
+            if (g_pv_mode == 1) {
+                char path[1200];
+                int rc;
+                RedrawWindow(hd, NULL, NULL, RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+                _snprintf_s(path, sizeof path, _TRUNCATE, "%s/w450_privacy_%s_%d.png", g_o.out_dir, sb_lang_code(),
+                            g_dpi * 100 / 96);
+                rc = shot_window(hd, path, 1);
+                printf("privacy-shot: %s%s\n", rc == 0 ? "" : "FEHLER ", path);
+                g_pv_done = 1;
+            } else {
+                SendMessageW(hd, WM_COMMAND, MAKEWPARAM(IDPV_CLOSE, BN_CLICKED), 0); /* Schliessen-Knopf */
+            }
+        }
+        return 0;
+    case WM_CLOSE:
+        g_pv_done = 1;
+        return 0;
+    }
+    return DefWindowProcW(hd, msg, wp, lp);
+}
+
+static int privacy_texts(char *out, int cap)
+{
+    static const char *const kK[5] = { "gui.lnet_priv_1", "gui.lnet_priv_2", "gui.lnet_priv_3", "gui.lnet_priv_4",
+                                       "gui.lnet_priv_5" };
+    int i, l = 0, ok = 1;
+    out[0] = 0;
+    for (i = 0; i < 5; i++) {
+        const char *t = LT(kK[i]);
+        if (!t || !t[0] || strncmp(t, "gui.", 4) == 0) {
+            ok = 0; /* Schluessel fehlt */
+            continue;
+        }
+        l += _snprintf_s(out + l, (size_t)(cap - l), _TRUNCATE, "%s%s", i ? "\r\n\r\n" : "", t);
+    }
+    return ok;
+}
+
+static int privacy_dialog_modal(int mode)
+{
+    static int reg;
+    HWND hd;
+    RECT rc = { 0, 0, 0, 0 };
+    MSG msg;
+    int ui_mark = g_ui_n, ok;
+    DWORD exs = mode ? (WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW) : 0;
+    int x = CW_USEDEFAULT, y = CW_USEDEFAULT;
+    char txt[2400];
+    wchar_t title[96];
+    if (!reg) {
+        WNDCLASSW wc;
+        memset(&wc, 0, sizeof wc);
+        wc.lpfnWndProc = pv_proc;
+        wc.hInstance = GetModuleHandleW(NULL);
+        wc.lpszClassName = L"SbPrivacy";
+        wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+        RegisterClassW(&wc);
+        reg = 1;
+    }
+    ok = privacy_texts(txt, (int)sizeof txt);
+    g_pv_done = 0;
+    g_pv_mode = mode;
+    rc.right = SX(540);
+    rc.bottom = SX(312);
+    AdjustWindowRectEx(&rc, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU, FALSE, exs);
+    if (mode) {
+        offscreen_pos(&x, &y);
+    } else if (g_hwnd) {
+        RECT pr;
+        GetWindowRect(g_hwnd, &pr);
+        x = pr.left + ((pr.right - pr.left) - (rc.right - rc.left)) / 2;
+        y = pr.top + ((pr.bottom - pr.top) - (rc.bottom - rc.top)) / 2;
+    }
+    u8_to_w(LT("gui.lnet_priv_title"), title, 96);
+    hd = CreateWindowExW(exs, L"SbPrivacy", title, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_CLIPCHILDREN, x, y,
+                         rc.right - rc.left, rc.bottom - rc.top, g_hwnd, NULL, GetModuleHandleW(NULL), NULL);
+    if (!hd) {
+        return 0;
+    }
+    {
+        BOOL dark = TRUE;
+        DwmSetWindowAttribute(hd, 20 /* DWMWA_USE_IMMERSIVE_DARK_MODE */, &dark, sizeof dark);
+    }
+    mk(hd, K_STATIC, IDPV_TEXT, PG_DIALOG, 20, 16, 500, 240, txt, WS_VISIBLE);
+    mk(hd, K_ACCENT, IDPV_CLOSE, PG_DIALOG, 400, 268, 120, 30, LT("gui.btn_close"), WS_VISIBLE);
+    if (g_hwnd) {
+        EnableWindow(g_hwnd, FALSE);
+    }
+    if (mode) {
+        if (!is_offscreen(hd)) {
+            printf("privacy-shot: FEHLER Fenster nicht au" U8_SZ "erhalb des Bildschirms - Abbruch\n");
+            g_pv_done = 1;
+            ok = 0;
+        } else {
+            ShowWindow(hd, SW_SHOWNOACTIVATE);
+            SetTimer(hd, 9, mode == 1 ? 400 : 30, NULL);
+        }
+    } else {
+        ShowWindow(hd, SW_SHOW);
+        SetFocus(bctl(hd, IDPV_CLOSE));
+    }
+    UpdateWindow(hd);
+    while (!g_pv_done && GetMessageW(&msg, NULL, 0, 0) > 0) {
+        if (IsDialogMessageW(hd, &msg)) {
+            continue;
+        }
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    if (g_hwnd) {
+        EnableWindow(g_hwnd, TRUE);
+    }
+    DestroyWindow(hd);
+    g_ui_n = ui_mark;
+    return ok;
 }
 
 static void lnet_build(HWND w)
 {
     int x = CX0 + 18;
-    mk(w, K_TOGGLE, ID_LNET_RB, P_LNET, x, LNET_ROW(0), LNET_CTL_W, 28, LT("gui.lnet_rb"), 0);
+    mk(w, K_COMBO, ID_LNET_RB, P_LNET, x, LNET_ROW(0), LNET_CTL_W, 28, "", 0); /* W447: Netzmodus */
+    lnet_netmode_fill();
     mk(w, K_TOGGLE, ID_LNET_OWN, P_LNET, x + LNET_IND, LNET_ROW(1), LNET_CTL_W, 28, LT("gui.lnet_own"), 0);
     /* W387 Gegner glaetten: frueher unter dem Startknopf auf LoC-Spielen (gleicher Schluessel, Wert bleibt) */
     mk(w, K_COMBO, ID_LOC_SMOOTH, P_LNET, x + LNET_IND, LNET_ROW(2), LNET_CTL_W, 28, "", 0);
     mk(w, K_TOGGLE, ID_LNET_LOWD, P_LNET, x + LNET_IND, LNET_ROW(3), LNET_CTL_W, 28, LT("gui.lnet_lowd"), 0);
     mk(w, K_BTN, ID_LNET_RESET, P_LNET, CX0 + CW - 18 - 200, LNET_Y + 9, 200, 28, LT("gui.lnet_reset"), 0); /* W397 */
     mk(w, K_TOGGLE, ID_LNET_CLIP, P_LNET, x, LNET_ROW(4), LNET_CTL_W, 28, LT("gui.lnet_clip"), 0); /* W420 */
+    mk(w, K_TOGGLE, ID_LNET_CHAT, P_LNET, x, LNET_ROW(5), LNET_CTL_W, 28, LT("gui.lnet_chat"), 0); /* W437 */
+    mk(w, K_TOGGLE, ID_LNET_SNCHAT, P_LNET, x, LNET_ROW(6), LNET_CTL_W, 28, LT("gui.lnet_snchat"), 0); /* W446 */
+    mk(w, K_COMBO, ID_LNET_MODE, P_LNET, x, LNET_ROW(7), LNET_CTL_W, 28, "", 0); /* W440 */
+    lnet_mode_fill();
+    mk(w, K_BTN, ID_LNET_PRIV, P_LNET, CX0 + CW - 18 - 200 - 12 - 200 - 12 - 150, LNET_Y + 9, 150, 28, LT("gui.lnet_priv_btn"), 0); /* W450 */
     mk(w, K_BTN, ID_LNET_VERPAGE, P_LNET, CX0 + CW - 18 - 200 - 12 - 200, LNET_Y + 9, 200, 28, LT("gui.lnet_verpage"), 0);
 }
 
 static void lnet_relabel(void)
 {
-    if (ctl(ID_LNET_RB)) ui_settext(ctl(ID_LNET_RB), LT("gui.lnet_rb"));
+    lnet_netmode_fill(); /* W447 */
     if (ctl(ID_LNET_OWN)) ui_settext(ctl(ID_LNET_OWN), LT("gui.lnet_own"));
     if (ctl(ID_LNET_LOWD)) ui_settext(ctl(ID_LNET_LOWD), LT("gui.lnet_lowd"));
     if (ctl(ID_LNET_RESET)) ui_settext(ctl(ID_LNET_RESET), LT("gui.lnet_reset"));
     if (ctl(ID_LNET_CLIP)) ui_settext(ctl(ID_LNET_CLIP), LT("gui.lnet_clip")); /* W420 */
+    if (ctl(ID_LNET_CHAT)) ui_settext(ctl(ID_LNET_CHAT), LT("gui.lnet_chat")); /* W437 */
+    if (ctl(ID_LNET_SNCHAT)) ui_settext(ctl(ID_LNET_SNCHAT), LT("gui.lnet_snchat")); /* W446 */
+    lnet_mode_fill(); /* W440 */
     if (ctl(ID_LNET_VERPAGE)) ui_settext(ctl(ID_LNET_VERPAGE), LT("gui.lnet_verpage"));
+    if (ctl(ID_LNET_PRIV)) ui_settext(ctl(ID_LNET_PRIV), LT("gui.lnet_priv_btn")); /* W450 */
 }
 
 /* Timer (2 s) und Seitenwechsel: Status des laufenden/letzten Spiels. */
@@ -18665,12 +19058,26 @@ static int loctab_command(int id, int code)
             onl_sync_ui(); /* W392: "Standard wiederherstellen" an/aus */
         }
         return 1;
-    case ID_LNET_RB: /* W392 LAUNCHER-NETTAB */
+    case ID_LNET_RB: /* W447: Auswahl Netzmodus (BN_CLICKED = Selbsttest W392: Lockstep an/aus) */
+        if (code == CBN_SELCHANGE && !g_updating) {
+            lnet_netmode_pick(ComboBox_GetCurSel(ctl(ID_LNET_RB)));
+        } else if (code == BN_CLICKED) {
+            lnet_toggle(id);
+        }
+        return 1;
     case ID_LNET_OWN:
     case ID_LNET_LOWD:
     case ID_LNET_CLIP: /* W420 */
+    case ID_LNET_CHAT: /* W437 */
+    case ID_LNET_SNCHAT: /* W446 */
         if (code == BN_CLICKED) {
             lnet_toggle(id);
+        }
+        return 1;
+    case ID_LNET_MODE: /* W440 */
+        if (code == CBN_SELCHANGE && !g_updating) {
+            lnet_mode_pick();
+            onl_sync_ui(); /* "Standard wiederherstellen" an/aus */
         }
         return 1;
     case ID_LNET_VERPAGE: /* W420: Release-Seite im Browser (kein Download, kein Selbst-Update) */
@@ -18681,6 +19088,11 @@ static int loctab_command(int id, int code)
     case ID_LNET_RESET:
         if (code == BN_CLICKED) {
             lnet_reset();
+        }
+        return 1;
+    case ID_LNET_PRIV: /* W450: Datenschutz-Hinweis zu Chat und steelnet (kein Schreiben, nur Anzeige) */
+        if (code == BN_CLICKED) {
+            privacy_dialog_modal(g_o.shot != 0 ? 1 : 0);
         }
         return 1;
     case ID_LOC_CODE_COPY: /* W334: Raumcode der eigenen Lobby kopieren */
@@ -19038,7 +19450,11 @@ static int loctab_apply_state(const char *name)
     g_loc.game = LGAME_LOC;
     g_loc_smooth_opp = 1; /* W387: Shots immer mit Standard (Auto), nie die Wahl aus user.cfg */
     g_loc_rb_on = g_loc_own_pred = g_loc_lowd = 1; /* W392: ebenso Netzwerk-Schalter (loc_net_off: Rollback aus) */
+    g_loc_net_auto = 1; /* W447 */
     g_loc_clip = 1; /* W420 */
+    g_loc_chat = 1; /* W437 */
+    g_loc_snchat = 1; /* W446 */
+    g_loc_arcade = 0; /* W440 */
     g_loc_online = 0;   /* W397: Shots ohne loc_onl* immer Stufe "nicht steelnet" (nie die Wahl aus user.cfg) */
     g_upd_ask = 0;
     if (strcmp(name, "loc_netq") == 0) { /* W397: Erstabfrage (wie update_ask) */
@@ -19230,6 +19646,10 @@ static void xtip_text(int id, char *out, size_t cap)
         _snprintf_s(out, cap, _TRUNCATE, "%s\n%s", LT("gui.exp_tip"), LT("gui.exp_tip_photo"));
     } else if (id == ID_LOC_SMOOTH) { /* W387 LOC-SMOOTH-OPP */
         strncpy_s(out, cap, LT("gui.loc_smooth_tip"), _TRUNCATE);
+    } else if (id == ID_CTRL_AIMASSIST || id == ID_CTRL_AUTOGEAR) { /* W440: in LoC nur in Arcade-Lobbys (SB: kein Tooltip) */
+        if (g_game == LGAME_LOC) {
+            strncpy_s(out, cap, LT("gui.loc_arcade_tip"), _TRUNCATE);
+        }
     } else if (id == ID_LOC_WIDE_XI) { /* W326 LOC-WIDE: Bildformat 16:9/720p (LoC) */
         _snprintf_s(out, cap, _TRUNCATE, "%s\n%s", LT("gui.exp_tip"), LT("gui.exp_tip_locwide"));
     } else if (id == ID_XWARN_SB || id == ID_XWARN_LOC) {
@@ -19718,7 +20138,9 @@ static void build_controls(void)
             combo_add(c, t);
         }
     }
-    mk(w, K_MEMO, ID_KEYS, P_CTRL, COL2 + 18, CY0 + 300, COLW - 36, 138,
+    /* W439 LOC-RETICLE-JUMP: Ausreisser-Filter (Standard an) ueber der Tastenuebersicht (Memo 34 px kuerzer) */
+    mk(w, K_TOGGLE, ID_CTRL_DESPIKE, P_CTRL, COL2 + 18, CY0 + 296, COLW - 36, 28, LT("gui.ctl_despike"), 0);
+    mk(w, K_MEMO, ID_KEYS, P_CTRL, COL2 + 18, CY0 + 334, COLW - 36, 104,
        "", 0);
 
     /* W179 KEYS-HTML: Tastenuebersicht als HTML (immer aktiv, ohne Regel) */
@@ -19762,16 +20184,18 @@ static void build_controls(void)
     combo_add(c, LT("gui.extras_res_2"));
     combo_add(c, LT("gui.extras_res_4"));
     combo_add(c, LT("gui.extras_res_8"));
-    c = mk(w, K_COMBO, ID_PH_FMT, P_AUDIO, CX0 + 130, CY0 + 290 + EXY, 104, 30, "", 0);
+    c = mk(w, K_COMBO, ID_PH_FMT, P_AUDIO, CX0 + 130, CY0 + PHY_FMT + EXY, 104, 30, "", 0);
     combo_add(c, "PNG");
     combo_add(c, "JPG");
-    c = mk(w, K_COMBO, ID_PH_ASP, P_AUDIO, CX0 + 440, CY0 + 290 + EXY, CW - 18 - 440, 30, "", 0);
+    c = mk(w, K_COMBO, ID_PH_ASP, P_AUDIO, CX0 + 440, CY0 + PHY_FMT + EXY, CW - 18 - 440, 30, "", 0);
     combo_add(c, LT("ovl.ph_asp_square"));
     combo_add(c, LT("ovl.ph_asp_wide"));
-    mk(w, K_TOGGLE, ID_RP_LABEL, P_AUDIO, CX0 + 18, CY0 + 348 + EXY, COLW - 36, 28, LT("gui.rp_label"), 0);
-    mk(w, K_TOGGLE, ID_RP_LOGO, P_AUDIO, COL2 + 18, CY0 + 348 + EXY, COLW - 36, 28, LT("gui.rp_logo"), 0);
-    mk(w, K_TOGGLE, ID_WM_MEDIA, P_AUDIO, CX0 + 18, CY0 + 382 + EXY, COLW - 36, 28, LT("gui.wm_media"), 0);
-    mk(w, K_TOGGLE, ID_PH_HUD, P_AUDIO, COL2 + 18, CY0 + 382 + EXY, COLW - 36, 28, LT("gui.ph_hud"), 0); /* W290 */
+    c = mk(w, K_COMBO, ID_PH_CSELF, P_AUDIO, CX0 + 250, CY0 + PHY_CS + EXY, 104, 30, "", 0); /* W445 */
+    cself_fill(c);
+    mk(w, K_TOGGLE, ID_RP_LABEL, P_AUDIO, CX0 + 18, CY0 + PHY_T1 + EXY, COLW - 36, 28, LT("gui.rp_label"), 0);
+    mk(w, K_TOGGLE, ID_RP_LOGO, P_AUDIO, COL2 + 18, CY0 + PHY_T1 + EXY, COLW - 36, 28, LT("gui.rp_logo"), 0);
+    mk(w, K_TOGGLE, ID_WM_MEDIA, P_AUDIO, CX0 + 18, CY0 + PHY_T2 + EXY, COLW - 36, 28, LT("gui.wm_media"), 0);
+    mk(w, K_TOGGLE, ID_PH_HUD, P_AUDIO, COL2 + 18, CY0 + PHY_T2 + EXY, COLW - 36, 28, LT("gui.ph_hud"), 0); /* W290 */
 
     /* --- Erweitert: Spieldateien (Ordner-Modus), Spielstaende, gespeicherte
      * Einstellungen, Feinabstimmung, Launcher, Diagnose --- */
@@ -21029,6 +21453,16 @@ static void on_command_inner(int id, int code)
             set_status(LT("gui.vol_status"));
         }
         break;
+    case ID_PH_VIEW: /* W445: Reichweite eigene VT-Teile folgt der Ansicht (nur Cinematic) */
+        if (code == CBN_SELCHANGE && !g_updating) {
+            ui_apply_rules();
+        }
+        break;
+    case ID_PH_CSELF: /* W445 */
+        if (code == CBN_SELCHANGE && !g_updating) {
+            set_status(LT("gui.extras_cself_txt"));
+        }
+        break;
     case ID_RP_LABEL: /* W290: Replay-Schalter (live, Foto, Video-Export) */
     case ID_RP_LOGO:
     case ID_WM_MEDIA:
@@ -21052,6 +21486,7 @@ static void on_command_inner(int id, int code)
                                                  "gui.ctl_assist2_on" };
             int sel = ComboBox_GetCurSel(ctl(ID_CTRL_AIMASSIST));
             set_status(LT(kTip[(sel >= 0 && sel <= 2) ? sel : 0]));
+            if (g_game == LGAME_LOC && sel > 0) set_status(LT("gui.loc_arcade_tip")); /* W440 */
         }
         break;
     case ID_STICK_AIM: /* W271 */
@@ -21063,10 +21498,15 @@ static void on_command_inner(int id, int code)
     case ID_CTRL_AUTOGEAR: /* W218 */
         ui_set_checked(ID_CTRL_AUTOGEAR, !ui_checked(ID_CTRL_AUTOGEAR));
         set_status(LT(ui_checked(ID_CTRL_AUTOGEAR) ? "gui.ctl_autogear_on" : "gui.ctl_simple_off"));
+        if (g_game == LGAME_LOC && ui_checked(ID_CTRL_AUTOGEAR)) set_status(LT("gui.loc_arcade_tip")); /* W440 */
         break;
     case ID_CTRL_ALLY: /* W424 */
         ui_set_checked(ID_CTRL_ALLY, !ui_checked(ID_CTRL_ALLY));
         set_status(LT(ui_checked(ID_CTRL_ALLY) ? "gui.ctl_ally_on" : "gui.ctl_ally_off"));
+        break;
+    case ID_CTRL_DESPIKE: /* W439 */
+        ui_set_checked(ID_CTRL_DESPIKE, !ui_checked(ID_CTRL_DESPIKE));
+        set_status(LT(ui_checked(ID_CTRL_DESPIKE) ? "gui.ctl_despike_on" : "gui.ctl_despike_off"));
         break;
     case ID_PAL50: { /* W234 PAL50: Spieltakt 25/30, Bildratenliste neu beschriften */
         ui_set_checked(ID_PAL50, !ui_checked(ID_PAL50));
@@ -22185,6 +22625,7 @@ static const struct {
     /* W392 LAUNCHER-NETTAB: Seite Netzwerk (--ui-shot packs = Platz der Seite bei LoC) */
     { "loc_net", "", 0 },     /* Standard: alles an, Gegner glaetten Auto */
     { "loc_net_off", "", 0 }, /* Rollback aus: abhaengige Schalter grau, Hinweis auf Spielen */
+    { "loc_net_priv", "", 0 }, /* W450: Seite Netzwerk + Datenschutz-Fenster (zweites Bild) */
     { "loc_netq", "", 0 },    /* W397: Erstabfrage "Online & Updates" auf LoC-Spielen (Release-Version) */
     { "effectpack", "shading=1;world_sharpen=60;aa_mode=3;ssao=25;color_sat=110;color_gain=103;"
                     "shade_shadow=1;fx_soft=60;fx_embers=160;fx_light=40;fx_light_cockpit=30;"
@@ -22391,10 +22832,43 @@ static int w220_state(const char *name)
     return 1;
 }
 
+/* W438 CTRL-RESET-040: einmaliger Steuerungs-Reset beim ersten Start mit 0.4.0 (vor dem Laden der Werte, vor
+ * der LoC-Uebernahme). Nur mit mitgeliefertem default_full.ini; Shots schreiben nie. Eigene user_*.ini bleiben
+ * unveraendert, nur input_profile in user.cfg/user_loc.cfg wird umgestellt. Hinweis nur bei echter Umstellung. */
+static char g_ctrl040_msg[512];
+static int g_ctrl040_rc; /* letztes Ergebnis von lgame_ctrl040_reset (Selbsttest) */
+static void ctrl040_reset(void)
+{
+    char up[1200], lp[1200], path[1200], psb[96], ploc[96], names[220];
+    const char *a, *b;
+    g_ctrl040_msg[0] = '\0';
+    g_ctrl040_rc = 0;
+    if (!loctab_may_write() ||
+        lctrl_input_profile_path(g_client_dir, LGAME_CTRL040_PROFILE, path, sizeof path) != 0 ||
+        u8_GetFileAttributes(path) == INVALID_FILE_ATTRIBUTES) {
+        return;
+    }
+    user_cfg_path(up, sizeof up);
+    game_cfg_path(LGAME_LOC, lp, sizeof lp);
+    g_ctrl040_rc = lgame_ctrl040_reset(up, lp, psb, sizeof psb, ploc, sizeof ploc);
+    if (g_ctrl040_rc <= 0 || g_ctrl040_rc == 0x100) {
+        return;
+    }
+    a = (g_ctrl040_rc & 1) ? (psb[0] ? psb : LT("gui.legacy_label")) : NULL;
+    b = (g_ctrl040_rc & 2) ? (ploc[0] ? ploc : LT("gui.legacy_label")) : NULL;
+    if (a && b && _stricmp(a, b) != 0) {
+        _snprintf_s(names, sizeof names, _TRUNCATE, "%s / %s", a, b);
+    } else {
+        strcpy_s(names, sizeof names, a ? a : b);
+    }
+    _snprintf_s(g_ctrl040_msg, sizeof g_ctrl040_msg, _TRUNCATE, LT("gui.ctrl_reset_040"), names);
+}
+
 static void gui_fill(void)
 {
     char note[256] = { 0 };
     int kind = 0;
+    ctrl040_reset(); /* W438: einmal, vor dem Laden */
     app_load_effective(g_client_dir, &g_s, note, sizeof note, &kind,
                        g_o.lang[0] ? g_o.lang : NULL);
     g_firstrun = kind == 0;
@@ -22470,6 +22944,9 @@ static void gui_fill(void)
                                 : LT("gui.fill_ready"));
     }
     loctab_fill_done(); /* W276: Bereich LoC -> Navigation + Statuszeile */
+    if (g_ctrl040_msg[0] && g_has_ldr) { /* W438: einmaliger Hinweis nach dem Steuerungs-Reset (Vorrang) */
+        set_status_k(g_ctrl040_msg, 1);
+    }
     if (g_o.shot != 0 && strncmp(g_o.state, "cx_", 3) == 0) { /* W419: Import-Ergebnis (Temp-Ordner) */
         cx_shot_state(g_o.state);
     }
@@ -22864,6 +23341,9 @@ int gui_main(const char *client_override, const gui_opts_t *o)
                                ComboBox_GetCount(ctl(ID_IPFPS)), r ? "FEHLER " : "", path);
                         rc |= r;
                     }
+                }
+                if (p == P_LNET && strcmp(g_o.state, "loc_net_priv") == 0) {
+                    privacy_dialog_modal(1); /* W450: Hinweisfenster neben der Seite Netzwerk */
                 }
                 if (p == P_ADV && strcmp(g_o.state, "replays") == 0) {
                     replay_dialog_modal(1); /* W254: Replay-Dialog mit Beispieldaten */
@@ -24237,8 +24717,12 @@ static void pergame_gui_selftest(int *pass, int *fail)
     if (!why[0]) {
         show_page(P_CTRL);
         ui_apply_rules();
-        if (IsWindowEnabled(ctl(ID_CTRL_AIMASSIST)) || IsWindowEnabled(ctl(ID_CTRL_AUTOGEAR)))
-            strcpy_s(why, sizeof why, "e: Zielhilfe/Automatik in LoC frei");
+        xtip_text(ID_CTRL_AUTOGEAR, t, sizeof t);
+        if (!IsWindowEnabled(ctl(ID_CTRL_AIMASSIST)) || !IsWindowEnabled(ctl(ID_CTRL_AUTOGEAR)) ||
+            loc_lock_key(ID_CTRL_AIMASSIST) || loc_lock_key(ID_CTRL_AUTOGEAR)) /* W440: frei mit Hinweis */
+            strcpy_s(why, sizeof why, "e: Zielhilfe/Automatik in LoC gesperrt (W440: frei, nur Arcade)");
+        else if (strcmp(t, LT("gui.loc_arcade_tip")) != 0 || !loc_tip_id(ID_CTRL_AIMASSIST))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "e: W440 Hinweis Arcade fehlt ('%.80s')", t);
         else if (IsWindowEnabled(ctl(ID_CTRL_ALLY))) /* W424 */
             strcpy_s(why, sizeof why, "e: Verbuendete Trupps in LoC frei");
         else if (IsWindowEnabled(ctl(ID_REM_LABEL)) || !loc_lock_key(ID_REM_LABEL)) /* W427: HUD-Etikett wie im ESC-Menue */
@@ -24248,6 +24732,10 @@ static void pergame_gui_selftest(int *pass, int *fail)
         ui_apply_rules();
         if (!why[0] && (!IsWindowEnabled(ctl(ID_PAL50)) || !ui_checked(ID_PAL50)))
             strcpy_s(why, sizeof why, "e: PAL in SB gesperrt oder Wert verloren");
+        if (!why[0]) { /* W440: in SB kein Arcade-Hinweis */
+            xtip_text(ID_CTRL_AIMASSIST, t, sizeof t);
+            if (t[0]) _snprintf_s(why, sizeof why, _TRUNCATE, "e: W440 Arcade-Hinweis in SB ('%.80s')", t);
+        }
         loctab_set_game(LGAME_LOC);
     }
     /* f: Startweg: LoC startet mit user_loc.cfg (SB_USER_CFG), nie PAL; die SB-Kette kennt keine LoC-Werte */
@@ -24321,7 +24809,7 @@ static void pergame_gui_selftest(int *pass, int *fail)
     ui_apply_rules();
     if (!why[0]) {
         GT_OK("65e W402 LAUNCHER-PERGAME (SB/LoC getrennt gespeichert und angezeigt, hin und her inkl. ungespeicherter Werte, "
-              "LoC-Start mit user_loc.cfg + Spielerblock, nie PAL, PAL/Zielhilfe/Automatik/Replay in LoC gesperrt mit Grund, "
+              "LoC-Start mit user_loc.cfg + Spielerblock, nie PAL, PAL/Replay in LoC gesperrt mit Grund, Zielhilfe/Automatik frei mit Arcade-Hinweis (W440), "
               "SB frei, 16:9 in Startbereit/Anzeige/Warnband, Texte DE/EN ohne 'geteilt')");
     } else {
         GT_FAIL("65e W402 LAUNCHER-PERGAME", "%s", why);
@@ -26565,7 +27053,7 @@ static __declspec(noinline) void lnet_gui_selftest(int *pass, int *fail)
     show_page(P_LNET);
     pump();
     if (!why[0] && (g_page != P_LNET || !g_loc_rb_on || !g_loc_own_pred || !g_loc_lowd || g_loc_smooth_opp != 1 ||
-                    !ui_checked(ID_LNET_RB) || !ui_checked(ID_LNET_OWN) || !ui_checked(ID_LNET_LOWD) ||
+                    !lnet_rb_ui() || !ui_checked(ID_LNET_OWN) || !ui_checked(ID_LNET_LOWD) ||
                     !IsWindowEnabled(ctl(ID_LNET_OWN)) || !IsWindowEnabled(ctl(ID_LNET_LOWD)) ||
                     !IsWindowEnabled(ctl(ID_LOC_SMOOTH)) || IsWindowEnabled(ctl(ID_LNET_RESET))))
         _snprintf_s(why, sizeof why, _TRUNCATE, "Standard: Seite %d rb %d own %d lowd %d smooth %d", g_page, g_loc_rb_on,
@@ -26587,7 +27075,7 @@ static __declspec(noinline) void lnet_gui_selftest(int *pass, int *fail)
         on_command(ID_LNET_RB, BN_CLICKED);
         pump();
         gt_read(cfg, buf, sizeof buf);
-        if (g_loc_rb_on || ui_checked(ID_LNET_RB) || !strstr(buf, "launcher_loc_rollback=0\n") ||
+        if (g_loc_rb_on || lnet_rb_ui() || !strstr(buf, "launcher_loc_rollback=0\n") ||
             !strstr(buf, "# fremde Zeile\n"))
             _snprintf_s(why, sizeof why, _TRUNCATE, "Rollback aus nicht gemerkt: %.120s", buf);
         else if (IsWindowEnabled(ctl(ID_LNET_OWN)) || IsWindowEnabled(ctl(ID_LNET_LOWD)) ||
@@ -26603,7 +27091,7 @@ static __declspec(noinline) void lnet_gui_selftest(int *pass, int *fail)
             g_loc_rb_on = 1;
             onl_load();
             onl_sync_ui();
-            if (g_loc_rb_on || ui_checked(ID_LNET_RB) || IsWindowEnabled(ctl(ID_LNET_OWN)))
+            if (g_loc_rb_on || lnet_rb_ui() || IsWindowEnabled(ctl(ID_LNET_OWN)))
                 strcpy_s(why, sizeof why, "Rollback aus nach Laden");
         }
         if (!why[0]) {
@@ -26737,7 +27225,7 @@ static __declspec(noinline) void lnet_gui_selftest(int *pass, int *fail)
     if (!why[0]) {
         char s4[200] = "vr_enable=0";
         loc_rule_set_append(s4, sizeof s4);
-        if (!g_loc_clip || !ui_checked(ID_LNET_CLIP) || strcmp(s4, "vr_enable=0;loc_rule_clipdump_block=1") != 0)
+        if (!g_loc_clip || !ui_checked(ID_LNET_CLIP) || strcmp(s4, "vr_enable=0;loc_rule_clipdump_block=1;loc_chat=1;loc_snchat=1;loc_play_mode=sim") != 0)
             _snprintf_s(why, sizeof why, _TRUNCATE, "W420 Standard '%s'", s4);
         loctab_vis(ID_LNET_CLIP, 1, "W420 Schalter Clip dumping", why, sizeof why);
         loctab_vis(ID_LNET_VERPAGE, 0, "W420 Release-Knopf ohne Versionsablehnung", why, sizeof why);
@@ -26747,20 +27235,180 @@ static __declspec(noinline) void lnet_gui_selftest(int *pass, int *fail)
             strcpy_s(s4, sizeof s4, "vr_enable=0");
             loc_rule_set_append(s4, sizeof s4);
             if (g_loc_clip || ui_checked(ID_LNET_CLIP) || !strstr(buf, "launcher_loc_clipdump_block=0\n") ||
-                strcmp(s4, "vr_enable=0;loc_rule_clipdump_block=0") != 0 || lnet_is_default() ||
+                strcmp(s4, "vr_enable=0;loc_rule_clipdump_block=0;loc_chat=1;loc_snchat=1;loc_play_mode=sim") != 0 || lnet_is_default() ||
                 !IsWindowEnabled(ctl(ID_LNET_RESET)))
                 _snprintf_s(why, sizeof why, _TRUNCATE, "W420 aus: '%s' / %.120s", s4, buf);
         }
+    }
+    /* W437: Chat - Standard an, unabhaengig vom Rollback, gemerkt, als loc_chat an den Start */
+    if (!why[0]) {
+        char s4[200] = "vr_enable=0";
+        loctab_vis(ID_LNET_CHAT, 1, "W437 Schalter Chat", why, sizeof why);
+        if (!why[0] && (!g_loc_chat || !ui_checked(ID_LNET_CHAT) || !IsWindowEnabled(ctl(ID_LNET_CHAT))))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "W437 Chat nicht an");
+        if (!why[0]) {
+            on_command(ID_LNET_CHAT, BN_CLICKED);
+            gt_read(cfg, buf, sizeof buf);
+            loc_rule_set_append(s4, sizeof s4);
+            if (g_loc_chat || ui_checked(ID_LNET_CHAT) || !strstr(buf, "launcher_loc_chat=0\n") || !strstr(s4, ";loc_chat=0") ||
+                lnet_is_default())
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W437 Chat aus: '%s' / %.120s", s4, buf);
+        }
+        if (!why[0]) { /* neu laden: gemerkter Wert gilt */
+            g_loc_chat = 1;
+            onl_load();
+            if (g_loc_chat) _snprintf_s(why, sizeof why, _TRUNCATE, "W437 Chat aus nicht gemerkt");
+        }
+    }
+    /* W446 STEELNET-CHAT: steelnet-Chat - Standard an, getrennt vom Chat-Schalter, unabhaengig vom Rollback, gemerkt,
+     * als loc_snchat an den Start */
+    if (!why[0]) {
+        char s4[200] = "vr_enable=0";
+        loctab_vis(ID_LNET_SNCHAT, 1, "W446 Schalter steelnet chat", why, sizeof why);
+        if (!why[0] && (!g_loc_snchat || !ui_checked(ID_LNET_SNCHAT) || !IsWindowEnabled(ctl(ID_LNET_SNCHAT))))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "W446 steelnet chat nicht an");
+        if (!why[0]) {
+            int chat_before = g_loc_chat;
+            on_command(ID_LNET_SNCHAT, BN_CLICKED);
+            gt_read(cfg, buf, sizeof buf);
+            loc_rule_set_append(s4, sizeof s4);
+            if (g_loc_snchat || ui_checked(ID_LNET_SNCHAT) || !strstr(buf, "launcher_loc_snchat=0\n") ||
+                !strstr(s4, ";loc_snchat=0") || lnet_is_default() || g_loc_chat != chat_before)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W446 steelnet chat aus: '%s' / %.120s", s4, buf);
+        }
+        if (!why[0]) { /* neu laden: gemerkter Wert gilt */
+            g_loc_snchat = 1;
+            onl_load();
+            if (g_loc_snchat) _snprintf_s(why, sizeof why, _TRUNCATE, "W446 steelnet chat aus nicht gemerkt");
+        }
+        if (!why[0]) { /* zurueck auf an (eigener Schluessel, der Chat-Schalter bleibt wie er ist) */
+            on_command(ID_LNET_SNCHAT, BN_CLICKED);
+            gt_read(cfg, buf, sizeof buf);
+            if (!g_loc_snchat || !strstr(buf, "launcher_loc_snchat=1\n"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W446 steelnet chat wieder an: %.120s", buf);
+        }
+    }
+    /* W440 LOC-LOBBY-MODES: Lobby-Modus - Standard Sim, unabhaengig vom Rollback, gemerkt, als loc_play_mode an den
+     * Start; ungueltige Werte = Sim; "Standard wiederherstellen" setzt Sim (unten h) */
+    if (!why[0]) {
+        char s4[200] = "vr_enable=0";
+        loctab_vis(ID_LNET_MODE, 1, "W440 Auswahl Lobby-Modus", why, sizeof why);
+        loc_rule_set_append(s4, sizeof s4);
+        if (!why[0] && (g_loc_arcade || ComboBox_GetCurSel(ctl(ID_LNET_MODE)) != 0 || !IsWindowEnabled(ctl(ID_LNET_MODE)) ||
+                        ComboBox_GetCount(ctl(ID_LNET_MODE)) != 2 || !strstr(s4, ";loc_play_mode=sim")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "W440 Standard nicht Sim: '%s'", s4);
+        if (!why[0]) {
+            g_updating++;
+            ComboBox_SetCurSel(ctl(ID_LNET_MODE), 1);
+            g_updating--;
+            on_command(ID_LNET_MODE, CBN_SELCHANGE);
+            gt_read(cfg, buf, sizeof buf);
+            strcpy_s(s4, sizeof s4, "vr_enable=0");
+            loc_rule_set_append(s4, sizeof s4);
+            if (!g_loc_arcade || !strstr(buf, "launcher_loc_play_mode=1\n") || !strstr(s4, ";loc_play_mode=arcade") ||
+                lnet_is_default() || !IsWindowEnabled(ctl(ID_LNET_RESET)))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W440 Arcade: '%s' / %.120s", s4, buf);
+        }
+        if (!why[0]) { /* neu laden: gemerkter Wert gilt */
+            g_loc_arcade = 0;
+            onl_load();
+            if (!g_loc_arcade) _snprintf_s(why, sizeof why, _TRUNCATE, "W440 Arcade nicht gemerkt");
+        }
+        if (!why[0]) { /* ungueltige Werte in user.cfg = Sim */
+            static const char *const kBad[] = { "2", "arcade", "", "-1", "1x" };
+            static const char kLine[] = "launcher_loc_play_mode=1\n";
+            int bi;
+            for (bi = 0; bi < 5 && !why[0]; bi++) {
+                char *p;
+                FILE *wf = NULL;
+                onl_save_key(LNET_MODE_KEY, 1);
+                gt_read(cfg, buf, sizeof buf);
+                p = strstr(buf, kLine);
+                if (p && u8_fopen_s(&wf, cfg, "w") == 0 && wf) {
+                    fwrite(buf, 1, (size_t)(p - buf), wf);
+                    fprintf(wf, "launcher_loc_play_mode=%s\n%s", kBad[bi], p + sizeof kLine - 1);
+                    fclose(wf);
+                } else {
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "W440 Testdatei nicht schreibbar");
+                }
+                g_loc_arcade = 1;
+                onl_load();
+                if (!why[0] && g_loc_arcade) _snprintf_s(why, sizeof why, _TRUNCATE, "W440 ungueltig '%s' nicht Sim", kBad[bi]);
+            }
+            g_loc_arcade = 1; /* fuer h: Standard wiederherstellen muss Sim setzen */
+            onl_save_key(LNET_MODE_KEY, 1);
+            onl_sync_ui();
+        }
+    }
+    /* W447 LOC-NET-AUTO: Auswahl Netzmodus Auto (Standard) / Rollback / Lockstep, gemerkt, Kette */
+    if (!why[0]) {
+        char w4[300] = "", s7[1024];
+        write_file(cfg, "# fremde Zeile\n");
+        onl_load();
+        onl_sync_ui();
+        strcpy_s(s7, sizeof s7, "vr_enable=0");
+        loc_net_set_append(s7, sizeof s7);
+        if (!g_loc_net_auto || !g_loc_rb_on || ComboBox_GetCount(ctl(ID_LNET_RB)) != 3 ||
+            ComboBox_GetCurSel(ctl(ID_LNET_RB)) != 0 || strstr(s7, "loc_net_auto") || !lnet_is_default())
+            _snprintf_s(w4, sizeof w4, _TRUNCATE, "Standard Auto: auto %d rb %d sel %d '%s'", g_loc_net_auto, g_loc_rb_on,
+                        ComboBox_GetCurSel(ctl(ID_LNET_RB)), s7);
+        if (!w4[0]) { /* Rollback manuell */
+            ComboBox_SetCurSel(ctl(ID_LNET_RB), 1);
+            on_command(ID_LNET_RB, CBN_SELCHANGE);
+            gt_read(cfg, buf, sizeof buf);
+            s7[0] = '\0';
+            loc_net_set_append(s7, sizeof s7);
+            if (g_loc_net_auto || !g_loc_rb_on || !strstr(buf, "launcher_loc_net_auto=0\n") ||
+                !strstr(buf, "launcher_loc_rollback=1\n") || !strstr(buf, "# fremde Zeile\n") ||
+                strcmp(s7, "loc_rb_input=1;loc_own_predict=1;loc_smooth_opp=1;loc_net_auto=0") != 0 || lnet_is_default() ||
+                !IsWindowEnabled(ctl(ID_LNET_OWN)) || !IsWindowEnabled(ctl(ID_LNET_RESET)))
+                _snprintf_s(w4, sizeof w4, _TRUNCATE, "Rollback manuell: '%s' / %.120s", s7, buf);
+        }
+        if (!w4[0]) { /* Laden: Rollback bleibt */
+            g_loc_net_auto = 1;
+            onl_load();
+            onl_sync_ui();
+            if (g_loc_net_auto || ComboBox_GetCurSel(ctl(ID_LNET_RB)) != 1)
+                strcpy_s(w4, sizeof w4, "Rollback manuell nach Laden");
+        }
+        if (!w4[0]) { /* Lockstep: loc_rb_input=0, abhaengige Schalter grau, kein loc_net_auto in der Kette */
+            ComboBox_SetCurSel(ctl(ID_LNET_RB), 2);
+            on_command(ID_LNET_RB, CBN_SELCHANGE);
+            gt_read(cfg, buf, sizeof buf);
+            s7[0] = '\0';
+            loc_net_set_append(s7, sizeof s7);
+            if (g_loc_rb_on || lnet_rb_ui() || !strstr(buf, "launcher_loc_rollback=0\n") ||
+                strcmp(s7, "loc_rb_input=0;loc_own_predict=1;loc_smooth_opp=1") != 0 || IsWindowEnabled(ctl(ID_LNET_OWN)))
+                _snprintf_s(w4, sizeof w4, _TRUNCATE, "Lockstep: '%s' / %.120s", s7, buf);
+        }
+        if (!w4[0]) { /* zurueck auf Auto */
+            ComboBox_SetCurSel(ctl(ID_LNET_RB), 0);
+            on_command(ID_LNET_RB, CBN_SELCHANGE);
+            gt_read(cfg, buf, sizeof buf);
+            s7[0] = '\0';
+            loc_net_set_append(s7, sizeof s7);
+            if (!g_loc_rb_on || !g_loc_net_auto || !strstr(buf, "launcher_loc_net_auto=1\n") ||
+                !strstr(buf, "launcher_loc_rollback=1\n") || strstr(s7, "loc_net_auto") || !lnet_is_default())
+                _snprintf_s(w4, sizeof w4, _TRUNCATE, "Auto: '%s' / %.120s", s7, buf);
+        }
+        if (!w4[0] && (strcmp(LT("gui.lnet_nm_auto"), "Network mode: Auto (recommended)") != 0 || strcmp(LT("gui.lnet_nm_ls"), "Network mode: Lockstep") != 0))
+            _snprintf_s(w4, sizeof w4, _TRUNCATE, "Texte '%s'", LT("gui.lnet_nm_auto"));
+        if (!w4[0])
+            GT_OK("77d W447 LOC-NET-AUTO network mode Auto (default) / Rollback / Lockstep: saved, read back, chain "
+                  "(Auto = nothing extra, Rollback = loc_net_auto=0, Lockstep = loc_rb_input=0), dependent switches greyed in Lockstep");
+        else
+            GT_FAIL("77d W447 LOC-NET-AUTO", "%s", w4);
     }
     /* h: Standard wiederherstellen */
     if (!why[0]) {
         on_command(ID_LNET_RESET, BN_CLICKED);
         gt_read(cfg, buf, sizeof buf);
-        if (!lnet_is_default() || !ui_checked(ID_LNET_RB) || !ui_checked(ID_LNET_OWN) || !ui_checked(ID_LNET_LOWD) ||
+        if (!lnet_is_default() || !lnet_rb_ui() || !ui_checked(ID_LNET_OWN) || !ui_checked(ID_LNET_LOWD) ||
             ComboBox_GetCurSel(ctl(ID_LOC_SMOOTH)) != 1 || IsWindowEnabled(ctl(ID_LNET_RESET)) ||
             !IsWindowEnabled(ctl(ID_LNET_OWN)) || !strstr(buf, "launcher_loc_rollback=1\n") ||
             !strstr(buf, "launcher_loc_own_predict=1\n") || !strstr(buf, "launcher_loc_low_delay=1\n") ||
-            !strstr(buf, "launcher_loc_smooth_opp=1\n") || !strstr(buf, "# fremde Zeile\n"))
+            !strstr(buf, "launcher_loc_smooth_opp=1\n") || !strstr(buf, "# fremde Zeile\n") ||
+            g_loc_arcade || ComboBox_GetCurSel(ctl(ID_LNET_MODE)) != 0 || !strstr(buf, "launcher_loc_play_mode=0\n")) /* W440 */
             _snprintf_s(why, sizeof why, _TRUNCATE, "Standard wiederherstellen: %.160s", buf);
     }
     /* i: Sprache DE (Navigation + Schalter) */
@@ -26770,7 +27418,7 @@ static __declspec(noinline) void lnet_gui_selftest(int *pass, int *fail)
         ui_apply_language();
         ui_gettext(ctl(ID_NAV0 + P_PACKS), nt, sizeof nt);
         ui_gettext(ctl(ID_LNET_RB), tt, sizeof tt);
-        if (strncmp(nt, "Multiplayer", 11) != 0 || strcmp(tt, "Rollback-Netcode") != 0) /* W397 */
+        if (strncmp(nt, "Multiplayer", 11) != 0 || strcmp(tt, "Netzmodus: Auto (empfohlen)") != 0) /* W397; W447: Netzmodus */
             _snprintf_s(why, sizeof why, _TRUNCATE, "de '%s' / '%s'", nt, tt);
         /* W397: im Launcher "Account" statt "Pilot" (Piloten sind Spielobjekte), DE und EN;
          * W418: Name "steelnet account" / "steelnet-Konto" (Nutzerentscheid) */
@@ -26812,6 +27460,61 @@ static __declspec(noinline) void lnet_gui_selftest(int *pass, int *fail)
               "online (internal: test partner user game only), never in SB start, restore defaults, relabel, SB keeps Packs)");
     } else {
         GT_FAIL("77c W392 LAUNCHER-NETTAB", "%s", why);
+    }
+}
+
+/* --- 77d (W450 LAUNCHER-PRIVACY-INFO): Knopf neben den Chat-Schaltern, Fenster oeffnet und schliesst (Schliessen-Knopf),
+ * Texte EN und DE vorhanden und verschieden, Knopf nur auf LoC (Seite Netzwerk) sichtbar, Aufruf aendert nichts. --- */
+static __declspec(noinline) void privacy_gui_selftest(int *pass, int *fail)
+{
+    char why[300] = "", a[2400], b[2400], keep[16];
+    int g0 = g_game, p0 = g_page, chat0 = g_loc_chat, sn0 = g_loc_snchat, i;
+    HWND bt = ctl(ID_LNET_PRIV);
+    if (!bt || !ctl(ID_LNET_CHAT) || !ctl(ID_LNET_SNCHAT)) {
+        GT_FAIL("77d W450 LAUNCHER-PRIVACY-INFO", "%s", "Knopf fehlt");
+        return;
+    }
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    sb_lang_set("en");
+    ui_apply_language();
+    if (!privacy_texts(a, (int)sizeof a)) strcpy_s(why, sizeof why, "EN Text fehlt");
+    sb_lang_set("de");
+    ui_apply_language();
+    if (!why[0] && !privacy_texts(b, (int)sizeof b)) strcpy_s(why, sizeof why, "DE Text fehlt");
+    if (!why[0] && (strcmp(a, b) == 0 || strlen(a) < 300 || strlen(a) > 1100)) strcpy_s(why, sizeof why, "Texte gleich/Laenge");
+    for (i = 0; i < 2 && !why[0]; i++) { /* oeffnet und schliesst, in beiden Sprachen */
+        sb_lang_set(i ? "de" : "en");
+        ui_apply_language();
+        if (!privacy_dialog_modal(2)) strcpy_s(why, sizeof why, "Fenster oeffnet nicht");
+        else if (!IsWindowEnabled(g_hwnd) || g_pv_done != 1) strcpy_s(why, sizeof why, "Fenster schliesst nicht");
+    }
+    sb_lang_set("en");
+    ui_apply_language();
+    if (!why[0]) {
+        char t[200];
+        t[0] = 0;
+        ui_gettext(bt, t, sizeof t);
+        if (strcmp(t, "Chat privacy") != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "Knopftext '%s'", t);
+    }
+    g_game = LGAME_LOC;
+    loctab_nav_layout();
+    show_page(P_LNET);
+    if (!why[0] && !IsWindowVisible(bt)) strcpy_s(why, sizeof why, "Knopf nicht sichtbar auf LoC Netzwerk");
+    g_game = LGAME_SB;
+    loctab_nav_layout();
+    show_page(P_PACKS);
+    if (!why[0] && IsWindowVisible(bt)) strcpy_s(why, sizeof why, "Knopf bei SB sichtbar");
+    if (!why[0] && (g_loc_chat != chat0 || g_loc_snchat != sn0)) strcpy_s(why, sizeof why, "Schalter veraendert");
+    g_game = g0;
+    loctab_nav_layout();
+    show_page(p0);
+    sb_lang_set(keep);
+    ui_apply_language();
+    if (!why[0]) {
+        GT_OK("77d W450 LAUNCHER-PRIVACY-INFO Chat privacy button (LoC network page only), window opens/closes via Close, "
+              "EN/DE text present, no setting changed)");
+    } else {
+        GT_FAIL("77d W450 LAUNCHER-PRIVACY-INFO", "%s", why);
     }
 }
 
@@ -29373,6 +30076,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
             onl_gui_selftest(pass, fail); /* W334 LOC-SEC: Online (steelnet) (Fall 77) */
             smooth_gui_selftest(pass, fail); /* W387 LOC-SMOOTH-OPP: Gegner glaetten (Fall 77b) */
             lnet_gui_selftest(pass, fail);   /* W392 LAUNCHER-NETTAB: Seite Netzwerk (Fall 77c) */
+            privacy_gui_selftest(pass, fail); /* W450 LAUNCHER-PRIVACY-INFO (Fall 77d) */
             /* --- 64 (W259 SETTINGS-RESET): Launcher bleibt offen, im Spiel wird
              * per ESC "Als Standard speichern" gesichert, danach startet derselbe
              * Launcher erneut. Vorher schrieb er seine alten Werte zurueck
@@ -31405,25 +32109,47 @@ static void w428_cine_card(void)
     it[0] = 0;
     if (SendMessageW(ctl(ID_PH_VIEW), CB_GETLBTEXTLEN, 3, 0) < 128) { SendMessageW(ctl(ID_PH_VIEW), CB_GETLBTEXT, 3, (LPARAM)it); }
     if (wcscmp(it, L"Cinematic") != 0) { strcpy_s(g_w428_why, sizeof g_w428_why, "4. Eintrag nicht Cinematic"); return; }
+    /* W445: Liste "Reichweite eigene VT-Teile" (Aus + Raster), nur bei Cinematic frei, Standard 4.0 m */
+    if (ComboBox_GetCount(ctl(ID_PH_CSELF)) != LCFG_CSELF_N) {
+        _snprintf_s(g_w428_why, sizeof g_w428_why, _TRUNCATE, "W445 Reichweite: %d Eintraege statt %d", ComboBox_GetCount(ctl(ID_PH_CSELF)), LCFG_CSELF_N);
+        return;
+    }
+    lcfg_defaults(&a);
+    if (a.photo_cine_self != 40 || lcfg_cself_index(a.photo_cine_self) != 7) { strcpy_s(g_w428_why, sizeof g_w428_why, "W445 Standard nicht 4.0 m"); return; }
+    ui_from_settings(&a);
+    ui_apply_rules();
+    if (IsWindowEnabled(ctl(ID_PH_CSELF))) { strcpy_s(g_w428_why, sizeof g_w428_why, "W445 Reichweite frei ohne Cinematic"); return; }
     lcfg_defaults(&a);
     a.photo_view = 3;
+    a.photo_cine_self = 65; /* W445 */
     ui_from_settings(&a);
+    ui_apply_rules();
+    if (!IsWindowEnabled(ctl(ID_PH_CSELF))) { strcpy_s(g_w428_why, sizeof g_w428_why, "W445 Reichweite grau bei Cinematic"); return; }
     lcfg_defaults(&b);
     ui_to_settings(&b);
     if (b.photo_view != 3) { _snprintf_s(g_w428_why, sizeof g_w428_why, _TRUNCATE, "Rundweg Oberflaeche (%d)", b.photo_view); return; }
+    if (b.photo_cine_self != 65) { _snprintf_s(g_w428_why, sizeof g_w428_why, _TRUNCATE, "W445 Rundweg Oberflaeche Reichweite (%d)", b.photo_cine_self); return; }
     u8_GetTempPath(tmp, sizeof tmp);
     _snprintf_s(f, sizeof f, _TRUNCATE, "%sw428_user_%lu.cfg", tmp, GetCurrentProcessId());
     u8_DeleteFile(f);
     if (lcfg_save_user(f, &b) != 0) { strcpy_s(g_w428_why, sizeof g_w428_why, "lcfg_save_user"); return; }
     lcfg_defaults(&a);
-    if (lcfg_load_file(f, &a) != 0 || a.photo_view != 3) {
-        _snprintf_s(g_w428_why, sizeof g_w428_why, _TRUNCATE, "Rundweg user.cfg (%d)", a.photo_view);
+    if (lcfg_load_file(f, &a) != 0 || a.photo_view != 3 || a.photo_cine_self != 65) {
+        _snprintf_s(g_w428_why, sizeof g_w428_why, _TRUNCATE, "Rundweg user.cfg (%d, Reichweite %d)", a.photo_view, a.photo_cine_self);
     }
     if (!g_w428_why[0]) {
-        write_file(f, "[photo]\nphoto_view=4\n");
+        write_file(f, "[photo]\nphoto_view=4\nphoto_cine_self=999\n");
         lcfg_defaults(&a);
-        if (lcfg_load_file(f, &a) != 0 || a.photo_view != 0) {
-            _snprintf_s(g_w428_why, sizeof g_w428_why, _TRUNCATE, "photo_view=4 -> %d statt 0", a.photo_view);
+        if (lcfg_load_file(f, &a) != 0 || a.photo_view != 0 || a.photo_cine_self != LCFG_CSELF_HI) {
+            _snprintf_s(g_w428_why, sizeof g_w428_why, _TRUNCATE, "photo_view=4 -> %d statt 0 / Reichweite 999 -> %d", a.photo_view,
+                        a.photo_cine_self);
+        }
+    }
+    if (!g_w428_why[0]) { /* W445: 0 = aus bleibt, krumme Werte aufs Raster */
+        write_file(f, "[photo]\nphoto_cine_self=0\n");
+        lcfg_defaults(&a);
+        if (lcfg_load_file(f, &a) != 0 || a.photo_cine_self != 0 || lcfg_cself_clamp(7) != 10 || lcfg_cself_clamp(63) != 65) {
+            _snprintf_s(g_w428_why, sizeof g_w428_why, _TRUNCATE, "W445 Reichweite 0/Raster (%d)", a.photo_cine_self);
         }
     }
     u8_DeleteFile(f);
@@ -32292,6 +33018,87 @@ void w430_selftest(int *pass, int *fail)
         (*pass)++;
     } else {
         printf("FAIL W430 CTRL-IMPORT-FUZZ: %s (%ld/%ld, %llu ms)\n", why[0] ? why : "zu wenig Vielfalt oder zu langsam", stat[0], stat[1], (unsigned long long)ms);
+        (*fail)++;
+    }
+}
+
+/* W438 CTRL-RESET-040: Startpfad des Einmal-Resets (ctrl040_reset wie in gui_fill) mit Temp-Client-Ordner und
+ * Temp-user.cfg: Hinweis mit altem Namen genau einmal, ohne default_full.ini kein Reset, Belegungsdialog zeigt
+ * menu_back (default_full: Insert) und meldet START + Replay beenden auf Backspace nicht als Konflikt. */
+void w438_gui_selftest(const char *client_override, int *pass, int *fail)
+{
+    char tmp[1024], dir[1100], pd[1200], pf[1300], uc[1300], keep[1024], why[200] = { 0 };
+    static lctrl_bind_t b;
+    lctrl_conf1_t cf[LCTRL_ALT_N];
+    FILE *f = NULL;
+    (void)client_override;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw438_gui_%lu", tmp, GetCurrentProcessId());
+    _snprintf_s(pd, sizeof pd, _TRUNCATE, "%s/profiles", dir);
+    _snprintf_s(pf, sizeof pf, _TRUNCATE, "%s/default_full.ini", pd);
+    _snprintf_s(uc, sizeof uc, _TRUNCATE, "%s/user.cfg", dir);
+    lcfg_mkdir_p(pd);
+    strcpy_s(keep, sizeof keep, g_client_dir);
+    strcpy_s(g_client_dir, sizeof g_client_dir, dir);
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, uc);
+    if (u8_fopen_s(&f, uc, "wb") == 0 && f) {
+        fputs("[input]\ninput_profile=user_mein\n", f);
+        fclose(f);
+    }
+    ctrl040_reset(); /* a: default_full.ini fehlt -> nichts */
+    if (g_ctrl040_rc != 0 || g_ctrl040_msg[0] || lgame_ctrl040_marked(uc)) {
+        strcpy_s(why, sizeof why, "a: Reset ohne default_full.ini");
+    }
+    if (!why[0]) {
+        if (u8_fopen_s(&f, pf, "wb") == 0 && f) {
+            fputs("[buttons]\nbi6 = KEY:BACKSPACE\n", f);
+            fclose(f);
+        }
+        ctrl040_reset(); /* b: Reset + Hinweis mit altem Namen */
+        if (g_ctrl040_rc != 1 || !strstr(g_ctrl040_msg, "user_mein") || !lgame_ctrl040_marked(uc))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "b: rc=%d Hinweis '%s'", g_ctrl040_rc, g_ctrl040_msg);
+    }
+    if (!why[0]) {
+        ctrl040_reset(); /* c: zweiter Start ohne Hinweis */
+        if (g_ctrl040_rc != 0 || g_ctrl040_msg[0])
+            _snprintf_s(why, sizeof why, _TRUNCATE, "c: zweiter Start rc=%d", g_ctrl040_rc);
+    }
+    if (!why[0]) { /* d: default_full im Dialog: menu_back = Insert, Backspace bei START ohne Konfliktmeldung */
+        int st = lctrl_bind_elem_index("bi6"), mb = lctrl_bind_elem_index("menu_back");
+        char conf[8][160];
+        lctrl_bind_init(&b);
+        lctrl_bind_load_text("[buttons]\nbi6 = KEY:BACKSPACE\n[client]\nreplay_exit = KEY:BACKSPACE\nmenu_back = KEY:INSERT\n", &b);
+        if (mb < 0 || b.row[mb].n_alt != 1 || strcmp(b.row[mb].alt[0], "KEY:INSERT") != 0 ||
+            lctrl_bind_conflicts(&b, conf, 8) != 0 || lctrl_bind_conflicts_for(&b, st, cf, LCTRL_ALT_N) != 0 ||
+            strcmp(LT("bind.menu_back"), "bind.menu_back") == 0)
+            strcpy_s(why, sizeof why, "d: default_full im Dialog");
+        lctrl_bind_init(&b); /* ohne Zeile: Standard Backspace (START auf Enter) bzw. Insert (START auf Backspace) */
+        lctrl_bind_load_text("[buttons]\nbi6 = KEY:ENTER\n", &b);
+        if (!why[0] && (b.row[mb].n_alt != 1 || strcmp(b.row[mb].alt[0], "KEY:BACKSPACE") != 0))
+            strcpy_s(why, sizeof why, "d: Standard ohne Zeile (Enter-START)");
+        lctrl_bind_init(&b);
+        lctrl_bind_load_text("[buttons]\nbi6 = KEY:BACKSPACE\nbi0 = KEY:INSERT\n", &b);
+        if (!why[0] && (b.row[mb].n_alt != 1 || strcmp(b.row[mb].alt[0], "KEY:INSERT") != 0 ||
+                        lctrl_bind_conflicts(&b, conf, 8) != 1))
+            strcpy_s(why, sizeof why, "d: Ausweichtaste/echter Konflikt");
+    }
+    strcpy_s(g_client_dir, sizeof g_client_dir, keep);
+    g_ucfg_test[0] = '\0';
+    g_ctrl040_msg[0] = '\0';
+    u8_DeleteFile(pf);
+    u8_DeleteFile(uc);
+    {
+        wchar_t w[1300];
+        u8_to_w(pd, w, 1300);
+        RemoveDirectoryW(w);
+        u8_to_w(dir, w, 1300);
+        RemoveDirectoryW(w);
+    }
+    if (!why[0]) {
+        printf("PASS W438 CTRL-RESET-040 gui (Startpfad: ohne default_full.ini nichts, Reset mit Hinweis + altem Namen genau einmal; Belegung menu_back, START + Replay beenden ohne Konflikt)\n");
+        (*pass)++;
+    } else {
+        printf("FAIL W438 CTRL-RESET-040 gui: %s\n", why);
         (*fail)++;
     }
 }

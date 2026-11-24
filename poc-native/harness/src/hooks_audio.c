@@ -175,39 +175,6 @@ static u32 __stdcall hook_DSa_A8(u32 v, u32 a)
     (void)a;
     return hook_DSa_A4(v);
 }
-static u32 __stdcall hook_DSa_A12(u32 v, u32 a, u32 b)
-{
-    (void)a;
-    (void)b;
-    return hook_DSa_A4(v);
-}
-static u32 __stdcall hook_DSa_A16(u32 v, u32 a, u32 b, u32 c)
-{
-    (void)a;
-    (void)b;
-    (void)c;
-    return hook_DSa_A4(v);
-}
-static u32 __stdcall hook_DSa_A20(u32 v, u32 a, u32 b, u32 c, u32 d)
-{
-    (void)a;
-    (void)b;
-    (void)c;
-    (void)d;
-    return hook_DSa_A4(v);
-}
-static u32 __stdcall hook_DSa_A32(u32 v, u32 a, u32 b, u32 c, u32 d, u32 e,
-                                 u32 f, u32 g)
-{
-    (void)a;
-    (void)b;
-    (void)c;
-    (void)d;
-    (void)e;
-    (void)f;
-    (void)g;
-    return hook_DSa_A4(v);
-}
 
 /* W89 DIAG(SFX): Ereignis-Spur (nur bei audio_sfx_diag > 0 aktiv). */
 #define SFXD(v, w, a, b, c)                                                  \
@@ -478,9 +445,10 @@ static u32 __stdcall hook_DSa_StopEx(u32 v, u32 a, u32 b, u32 c)
     SFXD(v, "StopEx", a, b, c);
     (void)a;
     (void)b;
-    (void)c;
-    if (v)
+    if (v) {
+        audio_note_stopex(v, c); /* W456 DIAG: DSBSTOPEX_ENVELOPE (Release) - Verhalten unveraendert sofort */
         audio_stop(v);
+    }
     return 0;
 }
 static u32 __stdcall hook_DSa_GetStatus(u32 v, u32 pStatus)

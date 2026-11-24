@@ -11,6 +11,7 @@
 #include "sb_profile.h" /* W229 SBA() */
 #include "kernel_hle.h" /* W391: krnl_main_thread (test_render_slow_ms) */
 #include "render_fx_rem.h" /* W133 REM-FX */
+#include "render_post.h" /* W463 RCORE: Nachbearbeitungskette */
 #include "sb_remaster.h" /* W103 REM-FRAME */
 #include "render_qa.h"
 #include "render_clip.h"
@@ -30,6 +31,44 @@ unsigned g_im_vb_pos;      /* IMRING: naechster freier Vertex */
 unsigned g_im_frame_draws; /* DRAWSTORM: Draws seit Present */
 static IDXGISwapChain *g_swap;
 static ID3D11Resource *g_swap_res; /* FPS-INTERP (W69): Swapchain-BB, wenn das Spiel offscreen zeichnet */
+#include <dxgi1_6.h> /* W468: IDXGIFactory5 (Tearing-Pruefung); unten fuer W370 ebenfalls */
+/* W468 PERF-PACING swap_flip: Flip-Modell (FLIP_DISCARD, 2 Puffer). Alles zeichnet weiter in ein dauerhaftes Ziel
+ * g_flip_fb (Rolle des bisherigen SEQUENTIAL-BB: Inhalt bleibt nach Present, Wiederhol-Present/Pause/Screenshots
+ * unveraendert), vor jedem Present eine Kopie in den echten Swapchain-Puffer g_flip_real. g_tearing: Swapchain mit
+ * ALLOW_TEARING (frame_pacing=2, VRR) - Present mit Intervall 0 im Fenster/randlos dann mit DXGI_PRESENT_ALLOW_TEARING. */
+static ID3D11Texture2D *g_flip_real, *g_flip_fb;
+static int g_tearing;
+static void sb_flip_release(void)
+{
+    if (g_flip_real) { ID3D11Texture2D_Release(g_flip_real); g_flip_real = NULL; }
+    if (g_flip_fb) { ID3D11Texture2D_Release(g_flip_fb); g_flip_fb = NULL; }
+}
+/* vor Present (unter ctx_lock bzw. im Spiel-Thread ohne Takt-Thread): Present-Flags */
+static UINT sb_flip_pre_present(UINT interval)
+{
+    if (!g_flip_real) { return 0; }
+    sb_ctx_enter();
+    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)g_flip_real, (ID3D11Resource *)g_flip_fb);
+    sb_ctx_leave();
+    if (g_tearing && interval == 0) {
+        BOOL fs = FALSE;
+        if (SUCCEEDED(IDXGISwapChain_GetFullscreenState(g_swap, &fs, NULL)) && !fs) { return DXGI_PRESENT_ALLOW_TEARING; }
+    }
+    return 0;
+}
+static int sb_tearing_supported(void)
+{
+    IDXGIFactory1 *f1 = NULL;
+    IDXGIFactory5 *f5 = NULL;
+    BOOL ok = FALSE;
+    if (FAILED(CreateDXGIFactory1(&IID_IDXGIFactory1, (void **)&f1)) || !f1) { return 0; }
+    if (SUCCEEDED(IDXGIFactory1_QueryInterface(f1, &IID_IDXGIFactory5, (void **)&f5)) && f5) {
+        if (FAILED(IDXGIFactory5_CheckFeatureSupport(f5, DXGI_FEATURE_PRESENT_ALLOW_TEARING, &ok, sizeof ok))) { ok = FALSE; }
+        IDXGIFactory5_Release(f5);
+    }
+    IDXGIFactory1_Release(f1);
+    return ok ? 1 : 0;
+}
 static ID3D11RenderTargetView *g_swap_rtv; /* W107 EDGE-MODE: RTV auf g_swap_res (Maske nach der Kopie), bei Bedarf */
 ID3D11RenderTargetView *g_rtv;
 ID3D11DepthStencilView *g_dsv;
@@ -60,6 +99,8 @@ static float g_last_game_aspect, g_last_out_aspect;
 #include "loc_chatnet.h" /* W437 LOC-CHAT */
 #include "loc_lobbylist_ovl.h" /* W443 LOC-LOBBY-LIST */
 #include "loc_netpanel.h" /* W447 LOC-NET-AUTO */
+#include "loc_replayctl.h" /* W457 */
+#include "loc_lobbywidget.h" /* W460 LOC-LOBBY-WIDGET */
 int g_vr_blit; /* W134 VR-PROTO: sb_render_blit zeigt ein Augenbild (ohne Nachbearbeitung des Monobilds) */
 
 static LRESULT CALLBACK sb_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
@@ -105,6 +146,25 @@ static void sb_create_views(void)
     if (FAILED(hr) || !bb) {
         HLOG_E("render: GetBuffer fehlgeschlagen (hr=0x%lX)", (long)hr);
         ExitProcess(7);
+    }
+    sb_flip_release();
+    if (g_cfg.swap_flip) { /* W468: dauerhaftes Ziel statt des rotierenden Flip-Puffers */
+        ID3D11Texture2D *fb = NULL;
+        D3D11_TEXTURE2D_DESC fd;
+        ID3D11Texture2D_GetDesc(bb, &fd);
+        fd.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        fd.Usage = D3D11_USAGE_DEFAULT;
+        fd.CPUAccessFlags = 0;
+        fd.MiscFlags = 0;
+        if (SUCCEEDED(ID3D11Device_CreateTexture2D(g_dev, &fd, NULL, &fb)) && fb) {
+            g_flip_real = bb; /* behaelt die GetBuffer-Referenz */
+            g_flip_fb = fb;
+            ID3D11Texture2D_AddRef(fb);
+            bb = fb;
+        } else {
+            HLOG_E("render: Flip-Zwischenziel %ux%u fehlgeschlagen", fd.Width, fd.Height);
+            ExitProcess(7);
+        }
     }
     if (g_cfg.interp_fps > 0) {
         /* FPS-INTERP (W69): Spiel zeichnet in eine Offscreen-Textur gleicher
@@ -735,6 +795,20 @@ void sb_render_init(void)
     g_swap_flags = (g_cfg.alt_enter && (g_cfg.window_mode == 2 ||
                     (g_cfg.window_mode == 0 && g_cfg.alt_enter_mode == 2)))
                        ? DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH : 0u;
+    /* W468 PERF-PACING: frame_pacing=2 (VRR) = Flip-Modell + Tearing erlaubt (wenn das System es kann); VR und
+     * Fenster ohne Offscreen-Weg bleiben unberuehrt, swap_flip=1 allein = Flip ohne Tearing. */
+    if (g_cfg.frame_pacing == 2 && !g_cfg.vr_enable) { g_cfg.swap_flip = 1; }
+    if (g_cfg.vr_enable) { g_cfg.swap_flip = 0; }
+    if (g_cfg.swap_flip) {
+        sd.BufferCount = 2;
+        sd.SwapEffect = DXGI_SWAP_EFFECT_FLIP_DISCARD;
+        if (g_cfg.frame_pacing == 2 && sb_tearing_supported()) {
+            g_tearing = 1;
+            g_swap_flags |= DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+        }
+        HLOG_I("render: Flip-Modell (W468 frame_pacing=%d), Tearing %s", g_cfg.frame_pacing,
+               g_tearing ? "erlaubt (VRR/G-Sync/FreeSync im Fenster/randlos)" : "aus");
+    }
     sd.Flags = g_swap_flags;
     {   /* W302 AMD-ARTIFACTS: d3d_debug/d3d_warp (Standard 0 = Hardware ohne Flags wie bisher) */
         HRESULT hdbg = S_OK;
@@ -752,6 +826,17 @@ void sb_render_init(void)
             hdbg = hr;
             hr = D3D11CreateDeviceAndSwapChain(NULL, sb_d3ddbg_driver(), NULL, 0,
                                                levels, 3, D3D11_SDK_VERSION, &sd,
+                                               &g_swap, &g_dev, &got, &g_ctx);
+        }
+        if (FAILED(hr) && g_cfg.swap_flip) { /* W468: Flip nicht moeglich -> Blit wie bisher */
+            HLOG_W("render: Flip-Swapchain scheitert (hr=0x%lX) - Blit (SEQUENTIAL) wie bisher", (long)hr);
+            g_cfg.swap_flip = 0;
+            g_tearing = 0;
+            g_swap_flags &= ~(unsigned)DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+            sd.BufferCount = 1;
+            sd.SwapEffect = DXGI_SWAP_EFFECT_SEQUENTIAL;
+            sd.Flags = g_swap_flags;
+            hr = D3D11CreateDeviceAndSwapChain(NULL, sb_d3ddbg_driver(), NULL, 0, levels, 3, D3D11_SDK_VERSION, &sd,
                                                &g_swap, &g_dev, &got, &g_ctx);
         }
         if (SUCCEEDED(hr)) { sb_d3ddbg_init(g_dev, hdbg); }
@@ -1173,6 +1258,28 @@ dump:
 
 void sb_render_snap_tick(void); /* W357 */
 static void sb_render_present_body(unsigned flags);
+/* W463 RCORE: Ziele der Nachbearbeitungskette (render_post.c) je Present-Weg, unter ctx_lock. */
+static int post_game_get(sb_post_tgt_t *t)
+{
+    t->rtv = g_rtv;
+    ID3D11RenderTargetView_GetResource(g_rtv, &t->res);
+    return t->res != NULL;
+}
+static void post_game_put(sb_post_tgt_t *t)
+{
+    if (t->res) { ID3D11Resource_Release(t->res); t->res = NULL; }
+}
+static int post_swap_get(sb_post_tgt_t *t)
+{
+    if (!g_swap_rtv &&
+        FAILED(ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv))) {
+        g_swap_rtv = NULL;
+    }
+    t->rtv = g_swap_rtv;
+    t->res = g_swap_res;
+    return 1;
+}
+
 void sb_render_present(unsigned flags)
 {
     int z0 = g_ph_zone; /* DIAG(PERF-TICK,W168) */
@@ -1258,42 +1365,16 @@ static void sb_render_present_body(unsigned flags)
      * Swapchain-BB (sb_render_blit) - Aufzeichnung/Verify bleiben unmaskiert. */
     /* W121 SHADE-FX: Cockpit-Licht-Optionen (Standard aus) vor der Randmaske;
      * mit FPS-INTERP in sb_render_blit (nach Aufzeichnung/Verify). */
-    if (!g_swap_res && shfx_post_on()) { /* W131: + Farbe/FXAA/SSAO */
-        ID3D11Resource *pres = NULL;
+    /* W463 RCORE: Kette shfx -> fxr -> panini -> vapor -> edge aus der Pass-Tabelle (render_post.c). */
+    if (g_cfg.shfx_var[0] && !g_swap_res) { /* TEST(W465): Bild vor der Nachbearbeitung fuer Varianten-Testbilder */
+        sb_post_tgt_t vt = { NULL, NULL };
         sb_ctx_enter();
-        ID3D11RenderTargetView_GetResource(g_rtv, &pres);
-        if (pres) { sb_shfx_post(g_rtv, pres); ID3D11Resource_Release(pres); }
+        if (post_game_get(&vt)) { sb_shfx_var_pre(vt.res); }
+        post_game_put(&vt);
         sb_ctx_leave();
     }
-    if (!g_swap_res && fxr_ckp_active() && !sb_mv_on()) { /* W319: kein Cockpit-Licht ohne Cockpit */ /* W133 REM-FX: Explosions-Licht Cockpit (wie Cockpit-Licht W121) */
-        ID3D11Resource *pres = NULL;
-        sb_ctx_enter();
-        ID3D11RenderTargetView_GetResource(g_rtv, &pres);
-        if (pres) { fxr_post(g_rtv, pres); ID3D11Resource_Release(pres); }
-        sb_ctx_leave();
-    }
-    if (!g_swap_res && (g_cfg.cockpit_panini || g_cfg.cockpit_width || g_cfg.cockpit_persp_cycle[0]) && !sb_mv_on()) { /* W191 UW-PERSP: Panini der Cockpit-Ansicht vor der Randmaske (W235: + Breite) */
-        float pd = sb_cp_panini_d();
-        if (pd > 0.0f || sb_cp_width() > 1.0f) {
-            ID3D11Resource *pres = NULL;
-            sb_ctx_enter();
-            ID3D11RenderTargetView_GetResource(g_rtv, &pres);
-            if (pres) { sb_cp_panini_apply(g_rtv, pres, pd); ID3D11Resource_Release(pres); }
-            sb_ctx_leave();
-        }
-    }
-    if (!g_swap_res && g_cfg.fx_vaporwave && sb_xfx_vapor_on()) { /* W240 FX-EXPERIMENTAL: Vaporwave vor der Randmaske */
-        ID3D11Resource *pres = NULL;
-        sb_ctx_enter();
-        ID3D11RenderTargetView_GetResource(g_rtv, &pres);
-        if (pres) { sb_xfx_vapor_apply(g_rtv, pres); ID3D11Resource_Release(pres); }
-        sb_ctx_leave();
-    }
-    if ((g_cfg.edge_mode > 0 || sb_mv_on() || g_loc_wide) && !g_swap_res) { /* W326: LoC nativ 16:9 ohne Hor+ */ /* W319: Monitoransicht immer mit schwarzem Rand ausserhalb der 4:3-Box */
-        sb_ctx_enter();
-        sb_edge_apply(g_rtv);
-        sb_ctx_leave();
-    }
+    sb_post_chain(SB_POST_SITE_GAME, !g_swap_res, 0, post_game_get, post_game_put);
+    if (sb_phud_visible()) { sb_phud_layout_pre(); } /* W467: F2/F3 zuerst im Belegungsplan (zeichnen als letzte) */
     if (sb_wm_on() && !g_swap_res) { /* W219 WATERMARK: vor dem Clip-Abgriff (im Clip sichtbar), Bereich gesichert */
         sb_ctx_enter(); sb_wm_draw(g_rtv, 1); sb_ctx_leave();
     }
@@ -1314,6 +1395,12 @@ static void sb_render_present_body(unsigned flags)
     }
     if (loc_netpanel_visible() && !g_swap_res) { /* W447 LOC-NET-AUTO: Netz-Panel der Lobby, wie der Chat */
         sb_ctx_enter(); loc_netpanel_draw(g_rtv, 1); sb_ctx_leave();
+    }
+    if (loc_rpc_visible() && !g_swap_res) { /* W457 LOC-REPLAY-CTRL: Bedienhilfe im Replay, wie das Netz-Panel */
+        sb_ctx_enter(); loc_rpc_draw(g_rtv, 1); sb_ctx_leave();
+    }
+    if (loc_lobbywidget_visible() && !g_swap_res) { /* W460 LOC-LOBBY-WIDGET: wie das Lobby-Infopanel */
+        sb_ctx_enter(); loc_lobbywidget_draw(g_rtv, 1); sb_ctx_leave();
     }
     /* W118 REM-OVERLAY: offenes Overlay auf den Spiel-BB (Bereich gesichert,
      * nach dem Present zurueck); mit FPS-INTERP in sb_render_blit. */
@@ -1347,6 +1434,14 @@ static void sb_render_present_body(unsigned flags)
         char pnm[48];
         if (loc_netpanel_shot_due(pnm, sizeof pnm)) { sb_render_shot_name(pnm, NULL); }
     }
+    if (g_cfg.loc_replay_ctrl_test && !g_swap_res) { /* TEST(W457): Replay-Viewer */
+        char rnm[48];
+        if (loc_rpc_shot_due(rnm, sizeof rnm)) { sb_render_shot_name(rnm, NULL); }
+    }
+    if (g_cfg.loc_lobby_widget_test && !g_swap_res) { /* TEST(W460): Lobby-Widget */
+        char wnm[48];
+        if (loc_lobbywidget_shot_due(wnm, sizeof wnm)) { sb_render_shot_name(wnm, NULL); }
+    }
     if (g_cfg.screenshot_frame > 0 &&
         n_present >= (unsigned)g_cfg.screenshot_frame) {
         if (g_cfg.screenshot_every > 0) {
@@ -1355,9 +1450,17 @@ static void sb_render_present_body(unsigned flags)
                 n_present <= (unsigned)g_cfg.screenshot_frame +
                     (unsigned)g_cfg.screenshot_max * (unsigned)g_cfg.screenshot_every) {
                 sb_render_screenshot(n_present);
+                if (g_cfg.shfx_var[0] && !g_swap_res) { /* TEST(W465) shfx_var: Varianten (Demo/Replay) */
+                    sb_post_tgt_t vt = { NULL, NULL };
+                    char vnm[40];
+                    _snprintf_s(vnm, sizeof vnm, _TRUNCATE, "shot_%06u", n_present);
+                    if (post_game_get(&vt)) { sb_shfx_var_shots(vt.rtv, vt.res, vnm); }
+                    post_game_put(&vt);
+                }
             } else if (((g_cfg.shade_ab && g_cfg.shading) || g_cfg.mfx_ab || g_cfg.shfx_ab || g_cfg.shadow_ab || g_cfg.psconst_ab) && /* W127 shadow_ab, ISSUE-LIGHT psconst_ab */ /* DIAG(RENDER-QA3,W100 / MONITOR-FX,W105 / SHADE-FX,W121): Partnerbild */
                        ((n_present - (unsigned)g_cfg.screenshot_frame) % (unsigned)g_cfg.screenshot_every == 1u ||
-                        (g_cfg.shfx_ab == 5 && (n_present - (unsigned)g_cfg.screenshot_frame) % (unsigned)g_cfg.screenshot_every == 2u)) && /* W131 Preset-Tripel: +2 */
+                        (g_cfg.shfx_ab == 5 && (n_present - (unsigned)g_cfg.screenshot_frame) % (unsigned)g_cfg.screenshot_every == 2u) ||
+                        (g_cfg.shfx_ab == 7 && (n_present - (unsigned)g_cfg.screenshot_frame) % (unsigned)g_cfg.screenshot_every - 2u < 2u)) && /* W131 Preset-Tripel: +2; TEST(W471) Quartett +2/+3 */
                        n_present <= (unsigned)g_cfg.screenshot_frame + 1u +
                            (unsigned)g_cfg.screenshot_max * (unsigned)g_cfg.screenshot_every) {
                 sb_render_screenshot(n_present);
@@ -1380,6 +1483,11 @@ static void sb_render_present_body(unsigned flags)
             char nm[40];
             _snprintf_s(nm, sizeof nm, _TRUNCATE, "loct_%06u", t);
             sb_render_shot_name(nm, NULL);
+            if (g_cfg.shfx_var[0] && !g_swap_res) { /* TEST(W465) shfx_var: Varianten desselben Bilds */
+                sb_post_tgt_t vt = { NULL, NULL };
+                if (post_game_get(&vt)) { sb_shfx_var_shots(vt.rtv, vt.res, nm); }
+                post_game_put(&vt);
+            }
             nsh++;
         }
         last_t = t;
@@ -1489,7 +1597,8 @@ static void sb_render_present_body(unsigned flags)
     { long long q0 = (g_cfg.rq_perf || g_phud_meas) ? rq_qpc() : 0;
     if (g_phud_meas) { sb_ctx_enter(); sb_phud_present_pre(); sb_ctx_leave(); } /* W122 PERF-HUD: GPU-Zeit */
     if (g_cfg.gpu_burn > 0 && g_cfg.gpu_burn_menu > 0) { extern void sb_gpu_burn(void); sb_ctx_enter(); sb_gpu_burn(); sb_ctx_leave(); } /* DIAG(W377): langsame GPU auch in Menues */
-    hr = IDXGISwapChain_Present(g_swap, (unsigned)interval, 0);
+    { UINT pfl = sb_flip_pre_present((UINT)interval); /* W468 swap_flip */
+    hr = IDXGISwapChain_Present(g_swap, (unsigned)interval, pfl); }
     g_pd_last_q = rq_qpc(); /* W138 */
     sb_warm_note_game_present(g_pd_last_q); /* W139 warm_gpu: Ladephase erkennen */
     { extern void sb_lm_note_game_present(LONGLONG q, int locked); sb_lm_note_game_present(g_pd_last_q, g_cfg.vr_enable || pdl); } /* W377 LOC-MENU-FPS */
@@ -1511,6 +1620,8 @@ static void sb_render_present_body(unsigned flags)
         sb_ctx_leave();
         sb_ovl_present_end();
     }
+    loc_lobbywidget_restore(); /* W460: nach dem Replay-Viewer gesichert -> davor zurueck */
+    loc_rpc_restore(); /* W457: nach dem Netz-Panel gesichert -> davor zurueck */
     loc_netpanel_restore(); /* W447: nach der Suchliste gesichert -> davor zurueck */
     loc_lobbylist_restore(); /* W443: nach dem Chat gesichert -> davor zurueck */
     loc_chat_restore(); /* W437: nach dem Overlay gesichert -> davor zurueck (vor Einblendung/Wasserzeichen) */
@@ -1597,6 +1708,7 @@ int sb_render_resize(unsigned w, unsigned h, const char *why)
     if (g_bb_dsrv) { ID3D11ShaderResourceView_Release(g_bb_dsrv); g_bb_dsrv = NULL; }
     if (g_swap_rtv) { ID3D11RenderTargetView_Release(g_swap_rtv); g_swap_rtv = NULL; } /* W107 */
     if (g_swap_res) { ID3D11Resource_Release(g_swap_res); g_swap_res = NULL; }
+    sb_flip_release(); /* W468: auch die Flip-Referenzen, sonst scheitert ResizeBuffers */
     ID3D11DeviceContext_Flush(g_ctx);
     hr = IDXGISwapChain_ResizeBuffers(g_swap, 0, w, h, DXGI_FORMAT_UNKNOWN, g_swap_flags);
     if (FAILED(hr)) {
@@ -1667,59 +1779,15 @@ void sb_render_blit(ID3D11Resource *src)
         ID3D11Resource_Release(res);
     }
     sb_gp_mark(GP_POST); /* DIAG(GPU-COST,W146) */
-    if (!g_vr_blit && shfx_post_on()) { /* W121 SHADE-FX (+W131): Cockpit-Licht/Farbe/FXAA/SSAO auf das gezeigte Bild (nach Verify/Wiedergabe) */
-        sb_ctx_enter();
-        if (!g_swap_rtv &&
-            FAILED(ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv))) {
-            g_swap_rtv = NULL;
-        }
-        sb_shfx_post(g_swap_rtv, g_swap_res);
-        sb_ctx_leave();
-    }
-    sb_gp_mark(GP_FXPOST); /* DIAG(GPU-COST,W146) */
-    if (!g_vr_blit && fxr_ckp_active() && !sb_mv_on()) { /* W133 REM-FX: Explosions-Licht Cockpit auf jedes gezeigte Bild (W319: nicht in der Monitoransicht) */
-        sb_ctx_enter();
-        if (!g_swap_rtv &&
-            FAILED(ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv))) {
-            g_swap_rtv = NULL;
-        }
-        fxr_post(g_swap_rtv, g_swap_res);
-        sb_ctx_leave();
-    }
-    sb_gp_mark(GP_HUD); /* DIAG(GPU-COST,W146) */
-    if (!g_vr_blit && (g_cfg.cockpit_panini || g_cfg.cockpit_width || g_cfg.cockpit_persp_cycle[0]) && !sb_mv_on() &&
-        (sb_cp_panini_d() > 0.0f || sb_cp_width() > 1.0f)) { /* W191 UW-PERSP: Panini auf jedes gezeigte Bild (auch Pause-Standbild), W235: + Breite */
-        sb_ctx_enter();
-        if (!g_swap_rtv &&
-            FAILED(ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv))) {
-            g_swap_rtv = NULL;
-        }
-        sb_cp_panini_apply(g_swap_rtv, g_swap_res, sb_cp_panini_d());
-        sb_ctx_leave();
-    }
-    if (!g_vr_blit && g_cfg.fx_vaporwave && sb_xfx_vapor_on()) { /* W240 FX-EXPERIMENTAL: Vaporwave auf jedes gezeigte Bild (auch Pause-Standbild) */
-        sb_ctx_enter();
-        if (!g_swap_rtv &&
-            FAILED(ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv))) {
-            g_swap_rtv = NULL;
-        }
-        sb_xfx_vapor_apply(g_swap_rtv, g_swap_res);
-        sb_ctx_leave();
-    }
-    if (!g_vr_blit && (g_cfg.edge_mode > 0 || sb_mv_on() || g_loc_wide)) { /* W326 */ /* W319: Monitoransicht immer mit schwarzem Rand */ /* W107 EDGE-MODE: Maske auf das gezeigte Bild (nach Verify/Wiedergabe) */
-        sb_ctx_enter();
-        if (!g_swap_rtv &&
-            FAILED(ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv))) {
-            g_swap_rtv = NULL;
-        }
-        sb_edge_apply(g_swap_rtv);
-        sb_ctx_leave();
-    }
+    /* W463 RCORE: Kette shfx -> fxr -> panini -> vapor -> edge aus der Pass-Tabelle (render_post.c),
+     * mit den GPU-COST-Marken GP_FXPOST (nach shfx) und GP_HUD (nach fxr) wie bisher. */
+    sb_post_chain(SB_POST_SITE_SWAP, !g_vr_blit, 1, post_swap_get, NULL);
     if (g_cfg.vr_enable && !g_vr_blit && sb_vr_panels_on()) { /* W197 VR-MENU: Leinwand-Quelle ohne ESC-Menue/F2 */
         sb_ctx_enter();
         sb_vr_canvas_source(g_swap_res);
         sb_ctx_leave();
     }
+    if (sb_phud_visible()) { sb_phud_layout_pre(); } /* W467: F2/F3 zuerst im Belegungsplan (zeichnen als letzte) */
     if (sb_wm_on()) { /* W219 WATERMARK: auf jedes gezeigte Bild, vor dem Clip-Abgriff */
         sb_ctx_enter();
         if (!g_swap_rtv) { ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv); }
@@ -1760,6 +1828,18 @@ void sb_render_blit(ID3D11Resource *src)
         sb_ctx_enter();
         if (!g_swap_rtv) { ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv); }
         loc_netpanel_draw(g_swap_rtv, 0);
+        sb_ctx_leave();
+    }
+    if (loc_rpc_visible()) { /* W457 LOC-REPLAY-CTRL: auf jedes gezeigte Bild */
+        sb_ctx_enter();
+        if (!g_swap_rtv) { ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv); }
+        loc_rpc_draw(g_swap_rtv, 0);
+        sb_ctx_leave();
+    }
+    if (loc_lobbywidget_visible()) { /* W460 LOC-LOBBY-WIDGET: auf jedes gezeigte Bild */
+        sb_ctx_enter();
+        if (!g_swap_rtv) { ID3D11Device_CreateRenderTargetView(g_dev, g_swap_res, NULL, &g_swap_rtv); }
+        loc_lobbywidget_draw(g_swap_rtv, 0);
         sb_ctx_leave();
     }
     if (g_cfg.overlay && (sb_ovl_open() || sb_clip_active())) { /* W118 REM-OVERLAY: auf jedes gezeigte Bild (Kopie ueberschreibt ganz) */
@@ -1816,6 +1896,18 @@ void sb_render_blit(ID3D11Resource *src)
         if (loc_netpanel_shot_due(pnm, sizeof pnm)) { sb_render_shot_name(pnm, g_swap_res); }
         sb_ctx_leave();
     }
+    if (g_cfg.loc_replay_ctrl_test) { /* TEST(W457): Replay-Viewer (gezeigtes Bild) */
+        char rnm[48];
+        sb_ctx_enter();
+        if (loc_rpc_shot_due(rnm, sizeof rnm)) { sb_render_shot_name(rnm, g_swap_res); }
+        sb_ctx_leave();
+    }
+    if (g_cfg.loc_lobby_widget_test) { /* TEST(W460): Lobby-Widget (gezeigtes Bild) */
+        char wnm[48];
+        sb_ctx_enter();
+        if (loc_lobbywidget_shot_due(wnm, sizeof wnm)) { sb_render_shot_name(wnm, g_swap_res); }
+        sb_ctx_leave();
+    }
 }
 
 /* FPS-INTERP (W69): nacktes Present eines Zwischen-/Tick-Bildes (ohne
@@ -1857,7 +1949,7 @@ void sb_render_present_raw(void)
     if (pf_on) { pf_capture(pf_note_t >= 1.0f ? 'x' : 'i'); } /* DIAG(POPIN,W91), unter ctx_lock */
     if (g_cfg.gpu_burn > 0) { extern void sb_gpu_burn(void); sb_gpu_burn(); } /* DIAG(PERF-SPIKE,W318) */
     if (g_phud_meas) { sb_phud_present_pre(); } /* W122 PERF-HUD */
-    hr = IDXGISwapChain_Present(g_swap, 0, 0);
+    hr = IDXGISwapChain_Present(g_swap, 0, sb_flip_pre_present(0)); /* W468 swap_flip */
     g_pd_last_q = rq_qpc(); /* W138 */
     if (g_phud_meas) { sb_phud_present_post(q0, 0); } /* W122 PERF-HUD */
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {

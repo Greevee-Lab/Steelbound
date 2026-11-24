@@ -37,6 +37,7 @@ typedef struct {
     int app_mode;
     u32 app_seq, mis_at;      /* Missionsbeginn des Mitspielers in eigener Uhr (0 = keine) */
     int confirmed;            /* Host: R2 fuer die laufende Mission bestaetigt */
+    u32 pre_ack_seq, pre_ack_t; /* W475 Host: letzte gueltige Bestaetigung des Vorschlags (Folge, Empfangszeit) */
 } rbn_peer;
 
 struct rbn {
@@ -61,6 +62,26 @@ struct rbn {
     u32 last_applied;         /* Client: zuletzt angewandte Folge des Hosts */
     int disagree;
     rbn_stats_t st_;
+    /* W475 LOC-RB-PREAGREE */
+    u32 dec_seq;              /* Host: Folge der Entscheidung der laufenden/letzten Mission (Hallo), getrennt von seq */
+    int role;                 /* RBN_ROLE_* (Lobby) */
+    u32 host_ip, ctx;         /* Client: Beitrittsziel; Host: Lobby-Kontext */
+    /* Host: Vorschlag */
+    u32 pre_seq, pre_digest, pre_ctx, pre_chg_t, pre_wd_seq, pre_wd_until;
+    int pre_d, pre_prof, pre_wauto, pre_npart;
+    u32 pre_part[RBN_PRE_MAXPART];
+    uint64_t pre_psrc[RBN_PRE_MAXPART];
+    int conn_n;               /* Host: Zahl der verbundenen Adressen fuer den Missionsbeginn (-1 = unbekannt) */
+    u32 conn_ip[RBN_PRE_MAXPART + 2];
+    /* Client: Bindung */
+    int bnd, bnd_d, bnd_prof;
+    u32 bnd_hn, bnd_seq, bnd_digest, bnd_rx_t, pre_seen, pre_seen_hn;
+    uint64_t bnd_src;
+    /* Mission */
+    int pre_used, pre_proofed, pre_miss;
+    u32 pre_c, pre_hn;
+    uint64_t pre_src;
+    rbn_pre_stats_t pst;
 };
 
 static void wr32(uint8_t *p, u32 v)
@@ -90,6 +111,7 @@ rbn_t *rbn_new(int want, uint32_t nonce, int dmin, int dmax, int dfix)
     n->direct_rtt = 80; /* W447 (Messreihe: D = 1 rechtzeitig bis ~80 ms gemessen) */
     n->direct_jit = 15;
     n->st_.rtt_min = 0xFFFFFFFFu;
+    n->conn_n = -1;
     return n;
 }
 void rbn_free(rbn_t *n) { free(n); }
@@ -124,21 +146,24 @@ int rbn_rtt_max(const rbn_t *n, uint32_t now)
 int rbn_tx(rbn_t *n, uint32_t now, int self, uint8_t *b, int cap)
 {
     int i, ne = 0, fl = 0;
-    if (!n || !n->want || cap < RBN_PKT_MAX) return 0;
+    /* W475: ein gebundener Client (bzw. in einer Mission aus der Vorab-Einigung) sendet auch mit Wunsch "aus" weiter
+     * (Flags b0 = 0), damit der Host die Aenderung sieht und den Vorschlag zuruecknimmt */
+    if (!n || (!n->want && !n->bnd && n->st != RBN_ST_PRE && !(n->st == RBN_ST_R2 && n->pre_used)) || cap < RBN_PKT_MAX)
+        return 0;
     memset(b, 0, RBN_PKT_MAX);
     memcpy(b, "SBRH", 4);
     b[4] = 1;
     b[5] = (uint8_t)((self >= 0 && self < 10) ? self : 0xFF);
-    fl = 1;
+    fl = n->want ? 1 : 0;
     if (n->st != RBN_ST_IDLE) fl |= 2;
-    if (n->self == 0 && n->dec_mode != RBN_MODE_NONE && n->seq) fl |= 4;
+    if (n->self == 0 && n->dec_mode != RBN_MODE_NONE && n->dec_seq) fl |= 4;
     if (n->want_auto) fl |= 8; /* W447 */
     b[6] = (uint8_t)fl;
     wr32(b + 8, n->nonce);
     wr32(b + 12, now);
     if (fl & 4) {
         u32 age = now - n->dec_at;
-        wr32(b + 16, n->seq);
+        wr32(b + 16, n->dec_seq); /* W475: Folge der Entscheidung (seq zaehlt auch Vorschlaege) */
         wr32(b + 20, age > AGE_MAX ? AGE_MAX : age);
         b[24] = (uint8_t)n->dec_mode;
         b[25] = (uint8_t)(n->dec_mode == RBN_MODE_R2 ? n->dec_delay : 0);
@@ -364,7 +389,8 @@ static int host_decide(rbn_t *n, u32 now, int final)
         n->app_mode = RBN_MODE_NONE;
         return n->st;
     }
-    n->seq++;
+    n->seq++; /* W475: liegt immer ueber jedem Vorschlag (Vorschlaege zaehlen seq mit) -> andere Epoche als c */
+    n->dec_seq = n->seq;
     n->dec_at = now;
     n->app_seq = n->seq;
     n->epoch = (n->nonce & 0xFFFF0000u) ^ (n->seq & 0xFFFFu);
@@ -395,6 +421,175 @@ static int host_decide(rbn_t *n, u32 now, int final)
     return n->st;
 }
 
+/* ---- W475 LOC-RB-PREAGREE (Beschreibung loc_rbn.h) ---- */
+static void pre_unbind(rbn_t *n)
+{
+    if (n->bnd) n->pst.unbind++;
+    n->bnd = 0;
+}
+
+static void pre_withdraw(rbn_t *n, u32 now)
+{
+    if (!n->pre_seq) return;
+    n->pre_wd_seq = n->pre_seq;
+    n->pre_wd_until = (now + 2000u) | 1u; /* Ruecknahme 2 s lang mitsenden (Verlust) */
+    n->pre_seq = 0;
+    n->pre_chg_t = 0;
+}
+
+/* Missionsbeginn ohne Nutzung: Vorschlag/Bindung sind verbraucht (gelten nur fuer genau diesen Start). */
+static void pre_consume(rbn_t *n)
+{
+    if (n->pre_seq) n->pst.miss_host++;
+    n->pre_seq = 0;
+    n->pre_chg_t = 0;
+    n->pre_wd_until = 0;
+    if (n->bnd) {
+        n->bnd = 0; /* verbraucht, nicht "geloest" */
+    }
+}
+
+static rbn_peer *peer_by_src(rbn_t *n, uint64_t src)
+{
+    int i;
+    for (i = 0; i < RBN_MAXPEER; i++)
+        if (n->p[i].used && n->p[i].src == src) return &n->p[i];
+    return NULL;
+}
+
+static int pre_acked(const rbn_t *n, u32 now, int k)
+{
+    int i;
+    for (i = 0; i < RBN_MAXPEER; i++) {
+        const rbn_peer *P = &n->p[i];
+        if (!P->used || P->src != n->pre_psrc[k] || P->nonce != n->pre_part[k]) continue;
+        return fresh(P, now) && P->want && P->pre_ack_seq == n->pre_seq && (u32)(now - P->pre_ack_t) <= RBN_PRE_ACKAGE_MS;
+    }
+    return 0;
+}
+
+int rbn_pre_ready(const rbn_t *n, uint32_t now)
+{
+    int k;
+    if (!n || !n->pre_seq || n->pre_npart < 1) return 0;
+    for (k = 0; k < n->pre_npart; k++)
+        if (!pre_acked(n, now, k)) return 0;
+    return 1;
+}
+
+/* Host, Missionsbeginn: Fall a (alle gebunden und bestaetigt, nichts geaendert) -> sofort R2 mit c. */
+static int pre_host_try(rbn_t *n, u32 now)
+{
+    int k, j;
+    n->pre_miss = !n->pre_seq ? 1 : n->pre_seq != n->seq ? 2 : (!n->want || n->want_auto != n->pre_wauto) ? 3
+                : n->role != RBN_ROLE_HOST ? 4 : n->npeers != n->pre_npart ? 5 : !rbn_pre_ready(n, now) ? 6 : 0;
+    if (n->pre_miss) return 0;
+    if (n->conn_n >= 0) { /* gleiche Adressen wie die Teilnehmer (Mehrfachmengen-Vergleich) */
+        int used[RBN_PRE_MAXPART] = {0};
+        n->pre_miss = 7;
+        if (n->conn_n != n->pre_npart) return 0;
+        for (j = 0; j < n->conn_n; j++) {
+            for (k = 0; k < n->pre_npart; k++)
+                if (!used[k] && (u32)(n->pre_psrc[k] >> 16) == n->conn_ip[j]) break;
+            if (k >= n->pre_npart) return 0;
+            used[k] = 1;
+        }
+        n->pre_miss = 0;
+    }
+    n->dec_seq = n->seq;
+    n->dec_at = now;
+    n->app_seq = n->seq;
+    n->epoch = (n->nonce & 0xFFFF0000u) ^ (n->seq & 0xFFFFu);
+    n->hwait = 0;
+    n->dec_mode = RBN_MODE_R2;
+    n->dec_why = 0;
+    n->dec_delay = n->delay = n->pre_d;
+    n->dec_prof = n->prof = n->pre_prof;
+    for (k = 0; k < n->pre_npart; k++) {
+        rbn_peer *P = peer_by_src(n, n->pre_psrc[k]);
+        if (P) P->confirmed = 1;
+    }
+    n->st_.decisions_r2++;
+    n->pst.used_host++;
+    n->pre_used = 1;
+    n->pre_c = n->seq;
+    n->pre_hn = n->nonce;
+    n->pre_seq = 0; /* verbraucht */
+    n->pre_wd_until = 0;
+    set_r2(n);
+    return 1;
+}
+
+/* Client, Missionsbeginn: gebunden -> PRE (Epoche/D von c, Entnahme erst nach dem Beweis). */
+static int pre_client_try(rbn_t *n, u32 now)
+{
+    rbn_peer *H;
+    if (!n->bnd || n->role != RBN_ROLE_JOIN) return 0;
+    H = peer_by_src(n, n->bnd_src);
+    if (!H || H->nonce != n->bnd_hn) return 0;
+    if ((u32)(now - n->bnd_rx_t) > RBN_PRE_HOLD_MS && !H->in_mission) return 0;
+    n->pre_c = n->bnd_seq;
+    n->pre_hn = n->bnd_hn;
+    n->pre_src = n->bnd_src;
+    n->pre_proofed = 0;
+    n->epoch = (n->bnd_hn & 0xFFFF0000u) ^ (n->bnd_seq & 0xFFFFu);
+    n->delay = n->bnd_d;
+    n->prof = n->bnd_prof;
+    n->bnd = 0; /* verbraucht */
+    n->st = RBN_ST_PRE;
+    n->why = RBN_WHY_NONE;
+    n->app_mode = RBN_MODE_NONE;
+    return 1;
+}
+
+static void pre_to_r2(rbn_t *n)
+{
+    n->last_applied = n->pre_c;
+    n->app_seq = n->pre_c;
+    n->pre_used = 1;
+    n->pst.used_client++;
+    set_r2(n);
+}
+
+static int pre_client_poll(rbn_t *n, u32 now)
+{
+    rbn_peer *H = peer_by_src(n, n->pre_src);
+    if (n->pre_proofed) {
+        n->pst.pre_r2_frame++;
+        pre_to_r2(n);
+        return n->st;
+    }
+    if (H && H->nonce == n->pre_hn && H->dec_valid && H->dec_seq >= n->pre_c && H->dec_seq > n->last_applied &&
+        same_mission(n, H->dec_at | 1u)) {
+        if (H->dec_seq == n->pre_c && H->dec_mode == RBN_MODE_R2 && H->dec_delay == n->delay &&
+            H->dec_prof == n->prof) {
+            n->pst.pre_r2_hello++;
+            pre_to_r2(n);
+            return n->st;
+        }
+        /* Host hat anders entschieden (bisheriger Weg): folgen wie PEND - noch nichts entnommen */
+        n->pst.pre_diverge++;
+        n->last_applied = H->dec_seq;
+        n->app_seq = H->dec_seq;
+        if (H->dec_mode == RBN_MODE_R2) {
+            n->epoch = (H->nonce & 0xFFFF0000u) ^ (H->dec_seq & 0xFFFFu);
+            n->delay = H->dec_delay;
+            n->prof = H->dec_prof;
+            set_r2(n);
+        } else {
+            n->pst.pre_ls++;
+            n->host_why = H->dec_why;
+            set_ls(n, RBN_WHY_HOST_LS);
+        }
+        return n->st;
+    }
+    if ((u32)(now - n->mis_start) > RBN_WAIT_MS) {
+        n->pst.pre_timeout++;
+        set_ls(n, RBN_WHY_TIMEOUT);
+    }
+    return n->st;
+}
+
 int rbn_mission_start(rbn_t *n, uint32_t now, int self, int npeers)
 {
     int i;
@@ -410,7 +605,13 @@ int rbn_mission_start(rbn_t *n, uint32_t now, int self, int npeers)
     n->hwait = 0;
     n->host_why = 0;
     n->prof = 0; /* W447 */
+    n->pre_used = n->pre_proofed = 0; /* W475 */
+    n->pre_c = n->pre_hn = 0;
+    n->pre_src = 0;
     for (i = 0; i < RBN_MAXPEER; i++) n->p[i].confirmed = 0;
+    if (self == 0 && pre_host_try(n, now)) return n->st;  /* W475: Vorab-Einigung, sofort R2 */
+    if (self > 0 && self < 10 && pre_client_try(n, now)) return n->st; /* W475: gebunden -> PRE (vor dem Wunsch!) */
+    pre_consume(n);
     if (!n->want) {
         set_ls(n, RBN_WHY_SELF_OFF);
         return n->st;
@@ -441,6 +642,7 @@ int rbn_poll(rbn_t *n, uint32_t now)
 {
     int i;
     if (!n) return RBN_ST_LS;
+    if (n->st == RBN_ST_PRE) return pre_client_poll(n, now); /* W475 */
     if (n->st == RBN_ST_TENT && n->hwait) return host_decide(n, now, (u32)(now - n->mis_start) > RBN_GRACE_MS); /* W370 */
     if (n->st == RBN_ST_TENT) {
         int conf = 0;
@@ -451,7 +653,7 @@ int rbn_poll(rbn_t *n, uint32_t now)
                 host_set_ls(n, RBN_WHY_PEER_LS);
                 return n->st;
             }
-            if (P->app_mode == RBN_MODE_R2 && P->app_seq == n->seq) P->confirmed = 1;
+            if (P->app_mode == RBN_MODE_R2 && P->app_seq == n->dec_seq) P->confirmed = 1;
             if (P->confirmed) conf++;
         }
         if (conf >= n->npeers) {
@@ -930,4 +1132,329 @@ int rbl_take_decision(rbl_t *l, int *d, uint32_t *slot)
     if (d) *d = l->dec_d;
     if (slot) *slot = l->dec_slot;
     return 1;
+}
+
+/* ================= W475 LOC-RB-PREAGREE: Paket "SBRP" (Vorab-Einigung in der Lobby) =================
+ * little endian, Laenge exakt RBN_PRE_HEAD + 4 * npart:
+ *   0 "SBRP"   4 ver = 1   5 kind (1 Vorschlag, 2 Bestaetigung, 3 Ruecknahme)   6 Flags (kind 1: b0 alle bestaetigt)
+ *   7 npart (kind 1: 1..8, sonst 0)   8 Kennung des Absenders (!= 0)   12 Kennung des Hosts (kind 1/3 = Absender)
+ *   16 Folge c (!= 0)   20 Pruefsumme (kind 1: rbn_pre_digest des Vorschlags, kind 2: bestaetigte, kind 3: 0)
+ *   24 Modus (kind 1: 2 = R2, sonst 0)   25 Verzoegerung (kind 1: 1..8)   26 Profil (kind 1: 0..2)   27 0
+ *   28 Lobby-Kontext (kind 1, beliebig; sonst 0)   32 kind 1: Teilnehmer-Kennungen (je != 0, streng aufsteigend) */
+static u32 fnv_u32(u32 h, u32 v)
+{
+    int k;
+    for (k = 0; k < 4; k++) {
+        h ^= (v >> (8 * k)) & 0xFFu;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+uint32_t rbn_pre_digest(uint32_t hnonce, uint32_t seq, int mode, int d, int prof, uint32_t ctx, const uint32_t *part, int npart)
+{
+    u32 h = 2166136261u;
+    int k;
+    h = fnv_u32(h, 0x50524253u); /* "SBRP" */
+    h = fnv_u32(h, hnonce);
+    h = fnv_u32(h, seq);
+    h = fnv_u32(h, (u32)mode | ((u32)d << 8) | ((u32)prof << 16));
+    h = fnv_u32(h, ctx);
+    h = fnv_u32(h, (u32)npart);
+    for (k = 0; k < npart; k++) h = fnv_u32(h, part[k]);
+    return h;
+}
+
+int rbn_is_pre(const uint8_t *b, int len) { return b && len >= 4 && memcmp(b, "SBRP", 4) == 0; }
+
+int rbn_pre_check(const uint8_t *b, int len)
+{
+    int kind, np, k;
+    u32 snd, hn, seq;
+    if (!b || len < RBN_PRE_HEAD || len > RBN_PRE_MAX || memcmp(b, "SBRP", 4) != 0 || b[4] != 1 || b[27]) return 0;
+    kind = b[5];
+    np = b[7];
+    snd = rd32(b + 8);
+    hn = rd32(b + 12);
+    seq = rd32(b + 16);
+    if (!snd || !hn || !seq) return 0;
+    if (kind == RBN_PRE_PROP) {
+        u32 part[RBN_PRE_MAXPART];
+        if ((b[6] & ~1) || np < 1 || np > RBN_PRE_MAXPART || len != RBN_PRE_HEAD + 4 * np || hn != snd) return 0;
+        if (b[24] != RBN_MODE_R2 || b[25] < 1 || b[25] > 8 || b[26] > RBN_PROF_ROLLBACK) return 0;
+        for (k = 0; k < np; k++) {
+            part[k] = rd32(b + RBN_PRE_HEAD + 4 * k);
+            if (!part[k] || part[k] == hn || (k && part[k] <= part[k - 1])) return 0;
+        }
+        return rd32(b + 20) == rbn_pre_digest(hn, seq, b[24], b[25], b[26], rd32(b + 28), part, np);
+    }
+    if (kind != RBN_PRE_ACK && kind != RBN_PRE_WD) return 0;
+    if (b[6] || np || len != RBN_PRE_HEAD || b[24] || b[25] || b[26] || rd32(b + 28)) return 0;
+    if (kind == RBN_PRE_ACK) return hn != snd;
+    return hn == snd && rd32(b + 20) == 0;
+}
+
+void rbn_set_lobby(rbn_t *n, int role, uint32_t host_ip, uint32_t ctx)
+{
+    if (!n) return;
+    if (role < RBN_ROLE_NONE || role > RBN_ROLE_JOIN) role = RBN_ROLE_NONE;
+    if (n->bnd && (role != RBN_ROLE_JOIN || host_ip != n->host_ip)) pre_unbind(n);
+    n->role = role;
+    n->host_ip = role == RBN_ROLE_JOIN ? host_ip : 0;
+    n->ctx = role == RBN_ROLE_HOST ? ctx : 0;
+}
+
+void rbn_pre_set_conn(rbn_t *n, int nip, const uint32_t *ips)
+{
+    int k;
+    if (!n) return;
+    if (nip < 0 || !ips || nip > RBN_PRE_MAXPART + 2) {
+        n->conn_n = -1;
+        return;
+    }
+    n->conn_n = nip;
+    for (k = 0; k < nip; k++) n->conn_ip[k] = ips[k];
+}
+
+static void sort_part(u32 *v, uint64_t *s, int np)
+{
+    int a, b;
+    for (a = 1; a < np; a++)
+        for (b = a; b > 0 && v[b - 1] > v[b]; b--) {
+            u32 t = v[b];
+            uint64_t ts = s[b];
+            v[b] = v[b - 1];
+            v[b - 1] = t;
+            s[b] = s[b - 1];
+            s[b - 1] = ts;
+        }
+}
+
+void rbn_pre_tick(rbn_t *n, uint32_t now)
+{
+    u32 part[RBN_MAXPEER];
+    uint64_t psrc[RBN_MAXPEER];
+    int i, np = 0, nowant = 0, cd, cprof, rtt, same;
+    if (!n) return;
+    if (n->bnd && (u32)(now - n->bnd_rx_t) > RBN_PRE_HOLD_MS) { /* Client: Bindung ohne Auffrischung abgelaufen */
+        rbn_peer *H = peer_by_src(n, n->bnd_src);
+        if (!H || !H->in_mission || !fresh(H, now)) pre_unbind(n); /* Host schon in der Mission: gilt fuer diesen Start */
+    }
+    if (n->role != RBN_ROLE_HOST || !n->want || n->st != RBN_ST_IDLE) {
+        if (n->st == RBN_ST_IDLE) pre_withdraw(n, now);
+        return;
+    }
+    for (i = 0; i < RBN_MAXPEER; i++) {
+        rbn_peer *P = &n->p[i];
+        if (!fresh(P, now)) continue;
+        if (!P->want || !P->ack_me) {
+            nowant++;
+            continue;
+        }
+        if (np < RBN_MAXPEER) {
+            part[np] = P->nonce;
+            psrc[np] = P->src;
+            np++;
+        }
+    }
+    if (nowant || np < 1 || np > RBN_PRE_MAXPART) { /* nicht alle koennen/wollen: kein Vorschlag (Missionsbeginn wie bisher) */
+        pre_withdraw(n, now);
+        return;
+    }
+    sort_part(part, psrc, np);
+    rtt = rbn_rtt_max(n, now);
+    cd = n->dfix ? n->dfix : rbn_pick_delay(rtt, n->dmin, n->dmax);
+    cprof = rbn_auto_agreed(n, now) ? rbn_pick_profile(rtt, rbn_rttvar_max(n, now), n->direct_rtt, n->direct_jit)
+                                    : RBN_PROF_FIXED;
+    if (cprof == RBN_PROF_DIRECT && n->direct_start1 > 0 && !n->dfix && rtt >= 0 && rtt <= n->direct_start1) cd = 1;
+    same = n->pre_seq && np == n->pre_npart && n->ctx == n->pre_ctx && n->want_auto == n->pre_wauto;
+    for (i = 0; same && i < np; i++)
+        if (part[i] != n->pre_part[i] || psrc[i] != n->pre_psrc[i]) same = 0;
+    if (same) {
+        if (cd == n->pre_d && cprof == n->pre_prof) {
+            n->pre_chg_t = 0;
+            return;
+        }
+        if (!n->pre_chg_t) {
+            n->pre_chg_t = now | 1u;
+            return;
+        }
+        if ((u32)(now - n->pre_chg_t) < RBN_PRE_HYST_MS) return;
+    }
+    /* neuer Vorschlag (neue Folge; der alte ist damit fuer jeden Client zurueckgenommen) */
+    n->seq++;
+    n->pre_seq = n->seq;
+    n->pre_d = cd;
+    n->pre_prof = cprof;
+    n->pre_ctx = n->ctx;
+    n->pre_wauto = n->want_auto;
+    n->pre_npart = np;
+    n->pre_chg_t = 0;
+    n->pre_wd_until = 0;
+    for (i = 0; i < np; i++) {
+        n->pre_part[i] = part[i];
+        n->pre_psrc[i] = psrc[i];
+    }
+    n->pre_digest = rbn_pre_digest(n->nonce, n->pre_seq, RBN_MODE_R2, cd, cprof, n->pre_ctx, part, np);
+    n->pst.prop++;
+}
+
+int rbn_pre_tx(rbn_t *n, uint32_t now, uint8_t *b, int cap)
+{
+    int k;
+    if (!n || !b || cap < RBN_PRE_MAX) return 0;
+    memset(b, 0, RBN_PRE_HEAD);
+    memcpy(b, "SBRP", 4);
+    b[4] = 1;
+    wr32(b + 8, n->nonce);
+    if (n->role == RBN_ROLE_HOST && n->pre_seq && n->st == RBN_ST_IDLE) {
+        b[5] = RBN_PRE_PROP;
+        b[6] = (uint8_t)(rbn_pre_ready(n, now) ? 1 : 0);
+        b[7] = (uint8_t)n->pre_npart;
+        wr32(b + 12, n->nonce);
+        wr32(b + 16, n->pre_seq);
+        wr32(b + 20, n->pre_digest);
+        b[24] = RBN_MODE_R2;
+        b[25] = (uint8_t)n->pre_d;
+        b[26] = (uint8_t)n->pre_prof;
+        wr32(b + 28, n->pre_ctx);
+        for (k = 0; k < n->pre_npart; k++) wr32(b + RBN_PRE_HEAD + 4 * k, n->pre_part[k]);
+        n->pst.prop_tx++;
+        return RBN_PRE_HEAD + 4 * n->pre_npart;
+    }
+    if (n->role == RBN_ROLE_HOST && n->pre_wd_until && (int32_t)(n->pre_wd_until - now) > 0 && n->pre_wd_seq) {
+        b[5] = RBN_PRE_WD;
+        wr32(b + 12, n->nonce);
+        wr32(b + 16, n->pre_wd_seq);
+        n->pst.wd_tx++;
+        return RBN_PRE_HEAD;
+    }
+    if (n->bnd && n->st == RBN_ST_IDLE && (u32)(now - n->bnd_rx_t) <= RBN_PRE_ACKWIN_MS) {
+        b[5] = RBN_PRE_ACK;
+        wr32(b + 12, n->bnd_hn);
+        wr32(b + 16, n->bnd_seq);
+        wr32(b + 20, n->bnd_digest);
+        n->pst.ack_tx++;
+        return RBN_PRE_HEAD;
+    }
+    return 0;
+}
+
+int rbn_pre_rx(rbn_t *n, uint32_t now, const uint8_t *b, int len, uint64_t src)
+{
+    int kind, k, np, mine = 0;
+    u32 snd, hn, seq, dg;
+    rbn_peer *P;
+    if (!n) return 0;
+    if (!rbn_pre_check(b, len)) {
+        n->pst.rx_bad++;
+        return -1;
+    }
+    kind = b[5];
+    np = b[7];
+    snd = rd32(b + 8);
+    hn = rd32(b + 12);
+    seq = rd32(b + 16);
+    dg = rd32(b + 20);
+    if (snd == n->nonce) return 0; /* eigenes Paket */
+    /* Bindung an das Hallo: derselbe Absender muss mit derselben Kennung frisch bekannt sein */
+    P = peer_by_src(n, src);
+    if (!P || P->nonce != snd || !fresh(P, now)) {
+        n->pst.rx_ign++;
+        return 0;
+    }
+    if (kind == RBN_PRE_ACK) { /* Host: Bestaetigung genau des laufenden Vorschlags von einem Teilnehmer */
+        if (n->role != RBN_ROLE_HOST || !n->pre_seq || hn != n->nonce || seq != n->pre_seq || dg != n->pre_digest ||
+            n->st != RBN_ST_IDLE) {
+            n->pst.rx_ign++;
+            return 0;
+        }
+        for (k = 0; k < n->pre_npart; k++)
+            if (n->pre_part[k] == snd && n->pre_psrc[k] == src) break;
+        if (k >= n->pre_npart) {
+            n->pst.rx_ign++;
+            return 0;
+        }
+        P->pre_ack_seq = seq;
+        P->pre_ack_t = now;
+        n->pst.ack_rx++;
+        return 1;
+    }
+    /* Vorschlag/Ruecknahme: nur vom Beitrittsziel (Client) */
+    if (n->role != RBN_ROLE_JOIN || !n->host_ip || (u32)(src >> 16) != n->host_ip) {
+        n->pst.rx_ign++;
+        return 0;
+    }
+    if (n->pre_seen_hn != hn) { /* anderer Host-Prozess: Folgen neu */
+        n->pre_seen_hn = hn;
+        n->pre_seen = 0;
+    }
+    if (kind == RBN_PRE_WD) {
+        if (seq > n->pre_seen) n->pre_seen = seq;
+        if (n->bnd && n->bnd_hn == hn && seq >= n->bnd_seq) pre_unbind(n);
+        n->pst.wd_rx++;
+        return 1;
+    }
+    if (n->st != RBN_ST_IDLE || seq <= n->last_applied) { /* nur in der Lobby, nie fuer eine schon entschiedene Folge */
+        n->pst.rx_ign++;
+        return 0;
+    }
+    if (n->bnd && n->bnd_hn == hn && seq == n->bnd_seq) { /* Auffrischung desselben Vorschlags */
+        if (dg != n->bnd_digest) {
+            n->pst.rx_bad++;
+            return -1;
+        }
+        n->bnd_rx_t = now;
+        return 1;
+    }
+    if (seq <= n->pre_seen) { /* aelter oder Wiederholung einer zurueckgenommenen Folge */
+        n->pst.rx_ign++;
+        return 0;
+    }
+    n->pre_seen = seq;
+    for (k = 0; k < np; k++)
+        if (rd32(b + RBN_PRE_HEAD + 4 * k) == n->nonce) mine = 1;
+    if (!mine || !n->want) { /* nicht Teilnehmer bzw. kein Rollback gewuenscht: nicht binden (alte Bindung ist ueberholt) */
+        pre_unbind(n);
+        n->pst.rx_ign++;
+        return 0;
+    }
+    n->bnd = 1;
+    n->bnd_hn = hn;
+    n->bnd_seq = seq;
+    n->bnd_digest = dg;
+    n->bnd_d = b[25];
+    n->bnd_prof = b[26];
+    n->bnd_src = src;
+    n->bnd_rx_t = now;
+    n->pst.bind++;
+    return 1;
+}
+
+void rbn_pre_proof(rbn_t *n, uint64_t src)
+{
+    if (n && n->st == RBN_ST_PRE && src == n->pre_src) n->pre_proofed = 1;
+}
+
+int rbn_pre_bound(const rbn_t *n, uint32_t *seq)
+{
+    if (!n || !n->bnd) return 0;
+    if (seq) *seq = n->bnd_seq;
+    return 1;
+}
+
+int rbn_pre_used(const rbn_t *n) { return n ? n->pre_used : 0; }
+uint64_t rbn_pre_host_src(const rbn_t *n) { return n ? (n->st == RBN_ST_PRE ? n->pre_src : (n->bnd ? n->bnd_src : 0)) : 0; }
+const rbn_pre_stats_t *rbn_pre_stats(const rbn_t *n) { return &n->pst; }
+int rbn_pre_miss(const rbn_t *n) { return n ? n->pre_miss : 0; }
+
+/* W475 TEST (loc_rb_opts pretest=1): Verzoegerungswechsel genau beim Missionsbeginn - neuer Vorschlag mit anderer D, noch
+ * ohne Bestaetigung (Rueckfallweg im echten Spiel pruefen). */
+void rbn_pre_test_bump(rbn_t *n)
+{
+    if (!n || !n->pre_seq) return;
+    n->seq++;
+    n->pre_seq = n->seq;
+    n->pre_d = n->pre_d == 2 ? 3 : 2;
+    n->pre_digest = rbn_pre_digest(n->nonce, n->pre_seq, RBN_MODE_R2, n->pre_d, n->pre_prof, n->pre_ctx, n->pre_part, n->pre_npart);
 }

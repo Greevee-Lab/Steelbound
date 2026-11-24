@@ -59,6 +59,7 @@ typedef struct {
     uint32_t n;
     int n_cues, n_ent, n_wb;
     uint32_t wb_off, idx_off, ent_off;
+    uint32_t t3d_off; /* W456: Kopf +0x10 = 3D-Parametertabelle (0x28 B je Satz) */
 } lxf_xsb_t;
 
 #define LXF_MAX_TRACKS 8
@@ -79,6 +80,20 @@ typedef struct {
     int db100_xact; /* -16 x Bit 0-8, >= -10000 */
     int lfe_mb;     /* -50 x Bit 9-15, >= -10000 */
     int room_mb;    /* -256 x (+0xF), >= -10000 */
+    /* W456 BOOTSND (#93): Huellkurven-Ereignis der Sound-Liste (Typ 0x0A, 12 B ab +8), belegt am Ereignis-Verteiler
+     * der Bibliothek (0x1C26E2, Fall 10/11 -> SetEG 0x1C861D): +8 Delay, +10 Attack, +12 Hold, +14 Decay, +16 Release
+     * (u16, 512 Samples bei 48 kHz je Einheit), +18 Sustain (0..255), +19 Modus (Startphase, 1 = Delay).
+     * Typ 0x0A = Amplitude (dwEG 1); 0x0B (Multi, + Tonhoehen-/Filterskala) kommt in Bank.xsb nicht vor. */
+    int eg_on;
+    int eg[7]; /* Modus, Delay, Attack, Hold, Decay, Release, Sustain */
+    /* W456: 3D-Parameter des Eintrags, belegt an der Bibliothek (0x1C6702: Eintrag +0xB Bit 0 -> 0x1C4E15): Satz =
+     * Tabelle (Kopf +0x10) + (Eintrag +0xC) x 0x28: +0/+2 Kegelwinkel, +4 Kegel-Aussenpegel, +8 MinDistance (float),
+     * +0xC MaxDistance, +0x10 DistanceFactor, +0x14 Rolloff, +0x18 Doppler, +0x1C Modus, +0x1D/+0x1E Rolloff-Kurve
+     * (Setter 0x1C927A/92C3/934C/9306/938F/941B/93D5/90FE/9461 -> DS3DBUFFER ab Stimme +0x48). Bank.xsb: 1042
+     * Eintraege Satz 0 (Min 100, Max 100000, Rolloff 1, Modus normal), 38 Satz 118 (Min 1). */
+    int has3d;          /* Eintrag +0xB Bit 0 und gueltiger Satz */
+    float min3d, max3d, rolloff3d;
+    int mode3d;
 } lxf_cue_t;
 
 /* W413 LOC-SOUND-LOOP (GitHub #65): Schleife einer Spur aus Wellen-Flag und XSB-Schleifenzahl. Belegt an Bank.xsb:

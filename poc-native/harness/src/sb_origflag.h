@@ -75,6 +75,7 @@ static const sb_of_key_t kSbOrigFlag[] = {
     { "world_focus",      100, SB_OFG_LIGHT, 1, 1 },
     { "shade_shadow",       0, SB_OFG_LIGHT, 1, 1 },
     { "shadow_soft",        0, SB_OFG_LIGHT, 1, 1 },
+    { "shadow_sun",         0, SB_OFG_LIGHT, 1, 1 }, /* W471: LoC Sonne/Schatten (W466) */
     /* Nachbearbeitung */
     { "world_sharpen",      0, SB_OFG_POST, 1, 1 },
     { "aa_mode",            0, SB_OFG_POST, 1, 1 },
@@ -118,6 +119,7 @@ static const char *const kSbOrigNeutral[] = {
     "window_mode", "fs_hz", "width", "height", "aspect_mode", "hd_scale", "interp_hlerp", "interp_p2hom", "interp_guard",
     "mouse_mode", "mouse_sens", "aim_assist", "auto_gear", "stick_aim", "stick_aim_sens", "sbc_usb",
     "audio", "audio_live", "game_tick", "vr_enable", "vr_preset", "save_lock", "photo_scale",
+    "frame_pacing", /* W468: nur Bildtakt, Bild unveraendert */
 };
 #define SB_OF_NNEUTRAL ((int)(sizeof kSbOrigNeutral / sizeof kSbOrigNeutral[0]))
 
@@ -156,9 +158,19 @@ static int sb_of_find(const char *key)
 
 /* Weicht Wert v des Schluessels i vom Original ab (und zaehlt)? fx_interp
  * ist ein Schalter (jeder Wert != 0 = an, wie sb_gfxpreset.h). */
-static int sb_of_dev(int i, int v)
+/* W471 LOC-SHADOW-ORIG: Original-Wert je Spiel. Line of Contact zeigt auf der Xbox die Schlagschatten des
+ * spieleigenen Schattenpuffers (W466/W471) -> dort ist shade_shadow = 1 das Original (wie sb_gfxpreset.h
+ * sb_gp_val). Steel Battalion unveraendert. loc = Line of Contact. */
+static int sb_of_orig(int i, int loc)
+{
+    if (i < 0 || i >= SB_OF_NKEY) { return 0; }
+    if (loc && i == sb_of_find("shade_shadow")) { return 1; }
+    return kSbOrigFlag[i].orig;
+}
+
+static int sb_of_dev(int i, int v, int loc)
 {
     if (i < 0 || i >= SB_OF_NKEY || !kSbOrigFlag[i].det) { return 0; }
-    if (i == sb_of_find("fx_interp")) { return (v != 0) != (kSbOrigFlag[i].orig != 0); }
-    return v != kSbOrigFlag[i].orig;
+    if (i == sb_of_find("fx_interp")) { return (v != 0) != (sb_of_orig(i, loc) != 0); }
+    return v != sb_of_orig(i, loc);
 }

@@ -180,7 +180,20 @@ int lctrl_bind_empty_line_row(int idx)
             strcmp(kCtrlElems[idx].key, "replay_exit") == 0 || /* W299: leer = aus (sonst Standard) */
             strcmp(kCtrlElems[idx].key, "net_hud") == 0 ||     /* W374 */
             strcmp(kCtrlElems[idx].key, "menu_back") == 0 ||   /* W438 */
-            strcmp(kCtrlElems[idx].key, "chat") == 0);         /* W437 */
+            strcmp(kCtrlElems[idx].key, "chat") == 0 ||        /* W437 */
+            lctrl_bind_lrp_row(idx) >= 0);                    /* W457 */
+}
+
+/* W457: Index der LoC-Replay-Aktion (0..LCTRL_LRP_N-1) bzw. -1. */
+int lctrl_bind_lrp_row(int idx)
+{
+    static const char *const nm[LCTRL_LRP_N] = LCTRL_LRP_NAMES;
+    int i;
+    if (idx < 0 || idx >= LCTRL_ELEM_N) return -1;
+    for (i = 0; i < LCTRL_LRP_N; i++) {
+        if (strcmp(kCtrlElems[idx].key, nm[i]) == 0) return i;
+    }
+    return -1;
 }
 
 void lctrl_key_combo(int mod_vk, int vk, char *out, size_t cap)
@@ -1081,6 +1094,14 @@ const lctrl_elem_t kCtrlElems[LCTRL_ELEM_N] = {
     { "menu_back", "-", "bind.menu_back", LCTRL_ACT },
     /* W437 LOC-CHAT: Chatzeile oeffnen (nur Line of Contact online, nur Tastatur; Standard Enter, falls frei). */
     { "chat", "-", "bind.chat", LCTRL_ACT },
+    /* W457 LOC-REPLAY-CTRL: Replay-Viewer von Line of Contact (nur waehrend der Wiedergabe; druecken die
+     * Direkttaste des Original-Controllers). Standard wie im Client (IMAP_LRP_DEFAULTS). */
+    { "replay_pause", "-", "bind.replay_pause", LCTRL_ACT },
+    { "replay_next", "-", "bind.replay_next", LCTRL_ACT },
+    { "replay_prev", "-", "bind.replay_prev", LCTRL_ACT },
+    { "replay_camera", "-", "bind.replay_camera", LCTRL_ACT },
+    { "replay_speed", "-", "bind.replay_speed", LCTRL_ACT },
+    { "replay_help", "-", "bind.replay_help", LCTRL_ACT },
 };
 
 /* W159: kanonische SBC-Quellnamen bi0..38 (parserstabil, s. kBiAlias). */
@@ -1355,6 +1376,18 @@ static void bind_chat_default(lctrl_bind_t *b, int seen)
     }
 }
 
+/* W457: Profil ohne replay_*-Zeile (LoC-Replay) -> Standard wie im Client (IMAP_LRP_DEFAULTS). */
+static void bind_lrp_default(lctrl_bind_t *b, const int *seen)
+{
+    static const char *const nm[LCTRL_LRP_N] = LCTRL_LRP_NAMES;
+    static const char *const df[LCTRL_LRP_N] = LCTRL_LRP_DEFAULTS;
+    int i;
+    for (i = 0; i < LCTRL_LRP_N; i++) {
+        int r = lctrl_bind_elem_index(nm[i]);
+        if (!seen[i] && r >= 0) lctrl_bind_set(b, r, df[i]);
+    }
+}
+
 /* W374: Profil ohne net_hud-Zeile -> Standard F3 wie im Client. */
 static void bind_net_hud_default(lctrl_bind_t *b, int seen)
 {
@@ -1374,6 +1407,7 @@ int lctrl_bind_load_file(const char *path, lctrl_bind_t *b)
     int nh = lctrl_bind_elem_index("net_hud"), nseen = 0;     /* W374 */
     int mbk = lctrl_bind_elem_index("menu_back"), mseen = 0;  /* W438 */
     int chk = lctrl_bind_elem_index("chat"), cseen = 0;       /* W437 */
+    int lseen[LCTRL_LRP_N] = {0};                              /* W457 */
     lctrl_bind_init(b);
     if (u8_fopen_s(&f, path, "r") != 0 || !f) { return 1; }
     while (fgets(line, sizeof line, f)) {
@@ -1384,6 +1418,7 @@ int lctrl_bind_load_file(const char *path, lctrl_bind_t *b)
         if (r == nh) { nseen = 1; }
         if (r == mbk) { mseen = 1; }
         if (r == chk) { cseen = 1; }
+        if (lctrl_bind_lrp_row(r) >= 0) { lseen[lctrl_bind_lrp_row(r)] = 1; }
     }
     fclose(f);
     bind_orig_default(b, seen);
@@ -1392,6 +1427,7 @@ int lctrl_bind_load_file(const char *path, lctrl_bind_t *b)
     bind_net_hud_default(b, nseen);
     bind_menu_back_default(b, mseen);
     bind_chat_default(b, cseen);
+    bind_lrp_default(b, lseen);
     return 0;
 }
 
@@ -1407,6 +1443,7 @@ int lctrl_bind_load_text(const char *text, lctrl_bind_t *b)
     int nh = lctrl_bind_elem_index("net_hud"), nseen = 0;     /* W374 */
     int mbk = lctrl_bind_elem_index("menu_back"), mseen = 0;  /* W438 */
     int chk = lctrl_bind_elem_index("chat"), cseen = 0;       /* W437 */
+    int lseen[LCTRL_LRP_N] = {0};                              /* W457 */
     lctrl_bind_init(b);
     if (!text) { return 1; }
     while (*p) {
@@ -1422,6 +1459,7 @@ int lctrl_bind_load_text(const char *text, lctrl_bind_t *b)
         if (r == nh) { nseen = 1; }
         if (r == mbk) { mseen = 1; }
         if (r == chk) { cseen = 1; }
+        if (lctrl_bind_lrp_row(r) >= 0) { lseen[lctrl_bind_lrp_row(r)] = 1; }
         p += n;
         while (*p == '\r' || *p == '\n') { p++; }
     }
@@ -1431,6 +1469,7 @@ int lctrl_bind_load_text(const char *text, lctrl_bind_t *b)
     bind_net_hud_default(b, nseen);
     bind_menu_back_default(b, mseen);
     bind_chat_default(b, cseen);
+    bind_lrp_default(b, lseen);
     return 0;
 }
 
@@ -1464,6 +1503,10 @@ int lctrl_bind_alt_is_sbc(const char *alt)
 static int conf_pair_ok(int i, int m)
 {
     int st = lctrl_bind_elem_index("bi6"), re = lctrl_bind_elem_index("replay_exit");
+    /* W457: LoC-Replay-Aktionen wirken nur im Replay-Viewer -> dieselbe Taste auf einem Spiel-Element ist erlaubt */
+    if ((lctrl_bind_lrp_row(i) >= 0 && m >= 0 && m < LCTRL_ELEM_N && kCtrlElems[m].kind != LCTRL_ACT) ||
+        (lctrl_bind_lrp_row(m) >= 0 && i >= 0 && i < LCTRL_ELEM_N && kCtrlElems[i].kind != LCTRL_ACT))
+        return 1;
     return st >= 0 && re >= 0 && ((i == st && m == re) || (i == re && m == st));
 }
 

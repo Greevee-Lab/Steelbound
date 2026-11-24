@@ -241,7 +241,7 @@ static void alpha_tools_apply(void)
     }
 }
 
-static void alpha_page_shown(void)
+void alpha_page_shown(void)
 {
     alpha_vt_refresh(0);
     alpha_ab_sync();
@@ -256,7 +256,7 @@ static void alpha_page_shown(void)
     }
 }
 
-static void paint_alpha(void)
+void paint_alpha(void)
 {
     char t[1400];
     int vt = -1, i = ComboBox_GetCurSel(ctl(ID_AL_VT));
@@ -345,7 +345,7 @@ static void alpha_fill_static(void)
     }
 }
 
-static void alpha_build_controls(HWND w)
+void alpha_build_controls(HWND w)
 {
     /* Reihenfolge = Tab-Reihenfolge: links Mission/VT/Schwierigkeit, rechts
      * Schalter + Start, darunter A/B */
@@ -368,7 +368,7 @@ static void alpha_build_controls(HWND w)
     alpha_tools_apply();
 }
 
-static void alpha_relabel(void)
+void alpha_relabel(void)
 {
     ui_settext(ctl(ID_AL_SKIP), LT("gui.alpha_skip"));
     ui_settext(ctl(ID_AL_START), LT("gui.alpha_btn_start"));

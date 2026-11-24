@@ -126,8 +126,37 @@ typedef struct {
     /* W421 LOC-VERSION-GATE: "min_client_version" der Antwort, nur strikt X.Y.Z (sb_netver_strict), sonst ""
      * (aelterer Server, leer, kaputt, zu lang -> keine Sperre). */
     char min_ver[16];
+    /* W470 LAUNCHER-HUB: weitere oeffentliche Zahlen aus "online" (games_today, peak_7d); -1 = nicht geliefert */
+    int games_today;
+    int peak_7d;
 } lacc_probe_t;
 int lacc_probe(lacc_probe_t *o); /* 0 = erreichbar */
+
+/* W470 LAUNCHER-HUB: oeffentliche Lobbys fuer steelnet > Info. W472 LOBBIES-AUTH: nur mit eigenem steelnet-Konto,
+ * angemeldete Aktion "lobbies" (Challenge + HMAC-Nachweis wie status, post_auth); ohne Konto kein Netz, Fehler
+ * "no_account". Server ohne die Aktion -> http 404 / not_found, Seite zeigt dann einen Hinweis. Gleicher
+ * Dienst/TLS/SPKI-Pin wie lacc_probe, keine Adresse im Ergebnis. Namen nur druckbares ASCII (sonst '?'),
+ * hoechstens LACC_LOB_NAME-1 Zeichen. */
+#define LACC_LOB_MAX 12
+#define LACC_LOB_NAME 24
+typedef struct {
+    char host[LACC_LOB_NAME]; /* Host-Pilot wie in der Lobbyliste im Spiel */
+    int arcade;               /* 1 = ARCADE, 0 = SIM */
+    int players, max_players;
+    int started;              /* 1 = Spiel laeuft (nicht mehr offen) */
+} lacc_lobby_t;
+typedef struct {
+    int ok;      /* 1 = Liste gelesen */
+    int http;    /* HTTP-Status (404 = Server ohne Aktion, 401 = Anmeldung abgelehnt, 429 = zu viele Anfragen) */
+    int retry_after; /* W472: Sekunden aus rate_limited (0 = keine Angabe) */
+    int ms;
+    int n;       /* Eintraege in l */
+    int more;    /* weitere Lobbys, die nicht in der Antwort stehen */
+    lacc_lobby_t l[LACC_LOB_MAX];
+    char error[48];
+} lacc_lobbies_t;
+int lacc_lobbies(const lacc_store_t *st, lacc_lobbies_t *o); /* blockierend (Thread); 0 = ok */
+int lacc_lobbies_parse(const char *body, lacc_lobbies_t *o); /* rein (Selbsttest); 0 = gueltig */
 
 /* ---------------- Aktionen (blockierend) ----------------
  * Rueckgabe 0 = ok, sonst Fehler mit Code in err (API-Code oder net/pin/off/

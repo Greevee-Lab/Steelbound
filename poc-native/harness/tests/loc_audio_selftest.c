@@ -212,7 +212,7 @@ static int real_banks(const char *dir)
     uint32_t n;
     uint8_t *xsb;
     lxf_xsb_t xs;
-    int i, k, ok = 0, miss = 0, codec[3] = {0}, loops = 0, tracks = 0;
+    int i, k, ok = 0, miss = 0, codec[3] = {0}, loops = 0, tracks = 0, egs = 0, eg_rel = 0, n3d = 0, n3d100 = 0, n3d1 = 0;
     snprintf(p, sizeof p, "%s/Bank.xsb", dir);
     xsb = slurp(p, &n);
     if (!xsb || lxf_xsb_parse(xsb, n, &xs) != 0) {
@@ -226,6 +226,11 @@ static int real_banks(const char *dir)
             miss++;
             continue;
         }
+        egs += c.eg_on; /* W456: Huellkurven-Ereignisse (0x0A) */
+        n3d += c.has3d; /* W456: 3D-Satz je Eintrag */
+        n3d100 += c.has3d && c.min3d == 100.0f;
+        n3d1 += c.has3d && c.min3d == 1.0f;
+        if (c.eg_on && c.eg[5] > eg_rel) eg_rel = c.eg[5];
         for (k = 0; k < c.ntrack; k++) {
             uint32_t nb;
             uint8_t *wb;
@@ -248,6 +253,8 @@ static int real_banks(const char *dir)
     }
     printf("echte Baenke: %d Cues, aufgeloest %d, Fehler %d; Spuren %d (PCM %d, ADPCM %d, WMA %d), Schleifen %d\n",
            xs.n_cues, ok, miss, tracks, codec[0], codec[1], codec[2], loops);
+    printf("echte Baenke W456: Cues mit Huellkurve %d, laengstes Release %d (%.2f s); Cues mit 3D-Satz %d (Min 100: %d, Min 1: %d)\n",
+           egs, eg_rel, eg_rel * 512.0 / 48000.0, n3d, n3d100, n3d1);
     free(xsb);
     return miss ? 1 : 0;
 }
@@ -641,6 +648,43 @@ int main(int argc, char **argv)
             s2[snd + 26] = 5; s2[snd + 27] = 0;
             CHECK(lxf_xsb_parse(s2, ns, &xs) == 0 && lxf_xsb_cue(&xs, 2, 0, &c) == 0 && c.track[0].loopc == 5,
                   "W413 Sound-Spur 5 loopc=%d", c.track[0].loopc);
+            /* W456 (#93): Huellkurven-Ereignis 0x0A wie TE017 (Bank.xsb): Delay 0, Attack 0x2E, Hold 0, Decay 0,
+             * Release 0x232, Sustain 0xFF, Modus 1; Spuren unveraendert, direkter Eintrag ohne Huellkurve */
+            s2[snd + 10] = 0x2E; s2[snd + 11] = 0; s2[snd + 16] = 0x32; s2[snd + 17] = 0x02; s2[snd + 18] = 0xFF;
+            s2[snd + 19] = 1; s2[snd + 8] = 3; s2[snd + 12] = 4; s2[snd + 14] = 5;
+            CHECK(lxf_xsb_parse(s2, ns, &xs) == 0 && lxf_xsb_cue(&xs, 2, 0, &c) == 0 && c.eg_on == 1 && c.eg[0] == 1 &&
+                      c.eg[1] == 3 && c.eg[2] == 0x2E && c.eg[3] == 4 && c.eg[4] == 5 && c.eg[5] == 0x232 && c.eg[6] == 0xFF &&
+                      c.ntrack == 2 && c.track[0].bank == 2 && c.track[1].bank == 0,
+                  "W456 Huellkurve on=%d %d/%d/%d/%d/%d/%d/%d", c.eg_on, c.eg[0], c.eg[1], c.eg[2], c.eg[3], c.eg[4], c.eg[5],
+                  c.eg[6]);
+            CHECK(lxf_xsb_cue(&xs, 0, 0, &c) == 0 && c.eg_on == 0, "W456 direkter Eintrag ohne Huellkurve");
+            CHECK(c.has3d == 0, "W456 ohne 3D-Tabelle (Kopf +0x10 = 0) kein 3D-Satz");
+            free(s2);
+            /* W456: 3D-Tabelle (Kopf +0x10) mit 2 Saetzen wie Bank.xsb (Satz 0: Min 100/Max 100000, Satz 1: Min 1);
+             * Eintrag 0 (Flag 0x09, Bit 0) -> Satz 1, Eintrag 3 (Flag 0x01) -> Satz 0, Eintrag 1 (Flag 0x09) Index
+             * ausserhalb -> kein Satz */
+            {
+                uint32_t n3 = ns + 2 * 0x28, t3 = ns, ent = 0x38 + 3 * 0x14;
+                float f100 = 100.0f, f1e5 = 100000.0f, f1 = 1.0f;
+                s2 = (uint8_t *)calloc(1, n3);
+                memcpy(s2, s, ns);
+                memcpy(s2 + 0x10, &t3, 4);
+                memcpy(s2 + t3 + 8, &f100, 4); memcpy(s2 + t3 + 0xC, &f1e5, 4); memcpy(s2 + t3 + 0x14, &f1, 4);
+                memcpy(s2 + t3 + 0x28 + 8, &f1, 4); memcpy(s2 + t3 + 0x28 + 0xC, &f1e5, 4); memcpy(s2 + t3 + 0x28 + 0x14, &f1, 4);
+                s2[ent + 0xC] = 1; /* Eintrag 0 -> Satz 1 */
+                s2[ent + 0x14 + 0xC] = 7; /* Eintrag 1 -> Satz 7 (ausserhalb) */
+                CHECK(lxf_xsb_parse(s2, n3, &xs) == 0 && lxf_xsb_cue(&xs, 0, 0, &c) == 0 && c.has3d == 1 && c.min3d == 1.0f &&
+                          c.max3d == 100000.0f && c.rolloff3d == 1.0f && c.mode3d == 0,
+                      "W456 3D-Satz 1: has=%d min=%.1f max=%.1f", c.has3d, c.min3d, c.max3d);
+                CHECK(lxf_xsb_cue(&xs, 2, 0, &c) == 0 && c.has3d == 1 && c.min3d == 100.0f && c.ntrack == 2,
+                      "W456 3D-Satz 0 (Sound-Liste): has=%d min=%.1f", c.has3d, c.min3d);
+                for (k2 = 0; k2 < 16; k2++) { /* Cue 1: Zufall auf Eintrag 1 (Satz ausserhalb) bzw. 2 (Flag 0x11, Bit 0, Satz 0) */
+                    CHECK(lxf_xsb_cue(&xs, 1, (uint32_t)k2, &c) == 0, "W456 Cue 1");
+                    if (c.entry == 1) CHECK(c.has3d == 0, "W456 Satz ausserhalb der Datei angenommen");
+                }
+                printf("W456 XSB-3D-Satz: Min/Max/Rolloff/Modus je Eintrag, ausserhalb der Datei verworfen: OK\n");
+            }
+            printf("W456 XSB-Huellkurve (Ereignis 0x0A): Delay/Attack/Hold/Decay/Release/Sustain/Modus: OK\n");
             free(s2);
             (void)lxf_xsb_parse(s, ns, &xs);
             mode_ok = lxf_track_loop_mode(0, 0xFFFF) == LXF_LOOP_ONCE && lxf_track_loop_mode(1, 0) == LXF_LOOP_ONCE &&

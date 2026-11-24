@@ -751,6 +751,88 @@ static void probe_minver(const char *body, lacc_probe_t *o)
     }
 }
 
+/* W470: optionale Zahl aus dem Objekt "online" (-1 = fehlt/unplausibel). */
+static int probe_opt(const char *body, const char *key)
+{
+    const char *p = js_find(body, "online");
+    char obj[512], pat[40];
+    const char *q;
+    long long v;
+    if (!p || *p != '{') return -1;
+    q = strchr(p, '}'); /* "online" enthaelt nur Zahlen (keine Zeichenketten, keine Unterobjekte) */
+    if (!q || (size_t)(q - p) + 2 > sizeof obj) return -1;
+    memcpy(obj, p, (size_t)(q - p) + 1);
+    obj[q - p + 1] = '\0';
+    _snprintf_s(pat, sizeof pat, _TRUNCATE, "%s", key);
+    if (!lacc_js_int(obj, pat, &v) || v < 0 || v > 1000000) return -1;
+    return (int)v;
+}
+
+/* W470 LAUNCHER-HUB: Antwort der Aktion lobbies lesen (W472: angemeldet). Ungueltige Eintraege fallen weg (Zahlen ausserhalb 0..64,
+ * mehr Spieler als Plaetze, fehlender Host); Namen nur druckbares ASCII. 0 = Liste gelesen (auch leer). */
+int lacc_lobbies_parse(const char *body, lacc_lobbies_t *o)
+{
+    const char *p = body ? js_find(body, "lobbies") : NULL, *q;
+    long long v;
+    o->n = 0;
+    o->more = 0;
+    if (!p || *p != '[') return 1;
+    p++;
+    for (;;) {
+        char obj[600], host[64], mode[16], st[16];
+        long long pl = -1, mx = -1;
+        int depth = 0, instr = 0;
+        size_t k;
+        while (*p == ' ' || *p == ',' || *p == '\r' || *p == '\n' || *p == '\t') p++;
+        if (*p == ']') break;
+        if (*p != '{') return 1;
+        for (q = p; *q; q++) { /* passende } (Zeichenketten uebersprungen) */
+            if (instr) {
+                if (*q == '\\' && q[1]) q++;
+                else if (*q == '"') instr = 0;
+            } else if (*q == '"') {
+                instr = 1;
+            } else if (*q == '{') {
+                depth++;
+            } else if (*q == '}' && --depth == 0) {
+                break;
+            }
+        }
+        if (*q != '}') return 1;
+        if ((size_t)(q - p) + 2 <= sizeof obj && o->n < LACC_LOB_MAX) {
+            memcpy(obj, p, (size_t)(q - p) + 1);
+            obj[q - p + 1] = '\0';
+            host[0] = mode[0] = st[0] = '\0';
+            lacc_js_str(obj, "host", host, sizeof host);
+            lacc_js_str(obj, "play_mode", mode, sizeof mode);
+            lacc_js_str(obj, "state", st, sizeof st);
+            lacc_js_int(obj, "players", &pl);
+            lacc_js_int(obj, "max_players", &mx);
+            if (host[0] && pl >= 0 && pl <= 64 && mx >= 1 && mx <= 64 && pl <= mx) {
+                lacc_lobby_t *e = &o->l[o->n++];
+                for (k = 0; host[k] && k + 1 < sizeof e->host; k++) {
+                    unsigned char c = (unsigned char)host[k];
+                    e->host[k] = (char)(c >= 0x20 && c < 0x7F ? c : '?');
+                }
+                e->host[k] = '\0';
+                e->arcade = strcmp(mode, "arcade") == 0;
+                e->started = strcmp(st, "open") != 0;
+                e->players = (int)pl;
+                e->max_players = (int)mx;
+            } else if (o->n >= LACC_LOB_MAX) {
+                o->more++;
+            }
+        } else {
+            o->more++;
+        }
+        p = q + 1;
+    }
+    if (lacc_js_int(p, "more", &v) && v > 0 && v < 100000) {
+        o->more += (int)v;
+    }
+    return 0;
+}
+
 /* ====================================================================== Aktionen */
 int lacc_probe(lacc_probe_t *o)
 {
@@ -768,6 +850,8 @@ int lacc_probe(lacc_probe_t *o)
         lacc_js_str(r.body, "version", o->version, sizeof o->version);
         probe_counts(r.body, o);
         probe_minver(r.body, o); /* W421 */
+        o->games_today = probe_opt(r.body, "games_today"); /* W470 */
+        o->peak_7d = probe_opt(r.body, "peak_7d");
     } else {
         strcpy_s(o->error, sizeof o->error, r.error[0] ? r.error : "net");
     }
@@ -816,6 +900,41 @@ static int post_auth(const lacc_srv_t *s, const lacc_store_t *st, const char *ac
     wipe(body, sizeof body);
     wipe(proof, sizeof proof);
     return rc;
+}
+
+/* W472 LOBBIES-AUTH: Lobbyliste nur mit eigenem Konto (angemeldete Aktion "lobbies", Challenge + Nachweis wie
+ * status). Ohne Konto kein Netz ("no_account"). Fehler: API-Code (auth_failed, rate_limited + retry_after,
+ * not_found = Server ohne Aktion) oder net/pin/off/bad. Kein Log, keine Adresse, Antwortpuffer wird geloescht. */
+int lacc_lobbies(const lacc_store_t *st, lacc_lobbies_t *o)
+{
+    lacc_srv_t s;
+    lacc_resp_t r;
+    char err[48] = "";
+    ULONGLONG t0;
+    memset(o, 0, sizeof *o);
+    memset(&r, 0, sizeof r);
+    if (!lacc_server(&s)) {
+        strcpy_s(o->error, sizeof o->error, "off");
+        return 1;
+    }
+    if (!st || !st->have) {
+        strcpy_s(o->error, sizeof o->error, "no_account");
+        return 1;
+    }
+    t0 = GetTickCount64();
+    if (post_auth(&s, st, "lobbies", "", &r, err, sizeof err) == 0 && lacc_lobbies_parse(r.body, o) == 0) {
+        o->ok = 1;
+    } else {
+        o->n = o->more = 0;
+        strcpy_s(o->error, sizeof o->error, err[0] ? err : "bad");
+    }
+    o->http = r.http;
+    if (!o->ok && r.retry_after > 0) {
+        o->retry_after = r.retry_after > 3600 ? 3600 : (int)r.retry_after;
+    }
+    o->ms = (int)(GetTickCount64() - t0);
+    SecureZeroMemory(&r, sizeof r);
+    return o->ok ? 0 : 1;
 }
 
 /* Antwort mit account/name/key/gen -> st (+ speichern) */
@@ -1460,6 +1579,28 @@ int lacc_cli(const char *client_dir, int argc, char **argv)
             printf("\n");
         } else {
             printf("error %s ms=%d\n", pr.error, pr.ms);
+        }
+        return rc;
+    }
+    if (strcmp(act, "lobbies") == 0) { /* W470/W472: dieselbe Abfrage wie steelnet > Info (angemeldet, keine Adresse) */
+        lacc_lobbies_t lb;
+        int i, sim = 0, arc = 0, run = 0;
+        rc = lacc_lobbies(ld == 1 ? &st : NULL, &lb); /* W472: nur mit eigenem Konto */
+        if (rc == 0) {
+            for (i = 0; i < lb.n; i++) {
+                run += lb.l[i].started;
+                if (lb.l[i].arcade) arc++;
+                else sim++;
+            }
+            printf("ok ms=%d lobbies=%d more=%d sim=%d arcade=%d started=%d\n", lb.ms, lb.n, lb.more, sim, arc, run);
+            for (i = 0; i < lb.n; i++) {
+                printf("lobby host=%s mode=%s players=%d/%d state=%s\n", lb.l[i].host, lb.l[i].arcade ? "arcade" : "sim",
+                       lb.l[i].players, lb.l[i].max_players, lb.l[i].started ? "started" : "open");
+            }
+        } else {
+            printf("error %s http=%d ms=%d", lb.error, lb.http, lb.ms);
+            if (lb.retry_after > 0) printf(" retry_after=%d", lb.retry_after);
+            printf("\n");
         }
         return rc;
     }

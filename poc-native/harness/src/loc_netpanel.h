@@ -1,11 +1,12 @@
-/* loc_netpanel.h - W447 LOC-NET-AUTO (GitHub #82): kleines Netz-Panel in der LoC-Lobby.
+/* loc_netpanel.h - W447 LOC-NET-AUTO (GitHub #82), seit W453 LOC-LOBBY-INFO (GitHub #90) das Lobby-Infopanel.
  *
- * Zeigt beim Entstehen bzw. Beitreten einer Lobby, was der Netzmodus waehlt (Auto -> Direkt/Rollback, Rollback bzw.
- * Lockstep manuell), die Verzoegerung in Ticks und ms (Start -> Ziel), den Lobby-Modus (Sim/Arcade, W440) und den Ping
- * je Mitspieler. Aktualisiert sich (2x/s), klappt nach einigen Sekunden ohne Aenderung auf eine Zeile zusammen,
+ * Dauerhaft, solange der Lobby-Screen einer LoC-Sitzung aktiv ist (Mitspieler verbunden, keine Mission), dezent unten
+ * rechts in der Ecke des Bildschirms (Backbuffer, Slot OVS_SLOT_LOBBYINFO, Chat unten links). Hoechstens 5 Zeilen:
+ * Netzmodus (Auto -> Direkt/Rollback bzw. Rollback/Lockstep manuell), Verzoegerung in Ticks und ms (Start -> Ziel),
+ * schlechtester Ping der Lobby (gruen bis 80 ms, gelb bis 150 ms, rot darueber), Sim/Arcade (W440) mit Sichtbarkeit der
+ * Lobby (oeffentlich, privat mit Raumcode, System Link) und Host-Regel Clip dumping (W420). Aktualisiert sich 2x/s,
  * verschwindet in der Mission, bei offenem ESC-Menue und bei sichtbarem NET-Overlay (F3, zeigt mehr); Schalter
- * loc_net_panel (Standard 1). Lage: obere rechte Ecke des Spielbilds (frei in der Lobby, 4:3/16:9/21:9 geprueft).
- * Nur Zahlen und Pilotnamen aus der Sitzung, nichts im Log ausser Zaehlern. */
+ * loc_net_panel (Standard 1, Launcher und ESC-Menue). Nur lesend: aendert nichts am Match. Log LOCNETPANEL nur Zahlen. */
 #pragma once
 
 struct ID3D11RenderTargetView;

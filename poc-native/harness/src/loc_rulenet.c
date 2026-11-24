@@ -420,14 +420,17 @@ static DWORD WINAPI lrn_thread(LPVOID unused)
                 int i;
                 for (i = 0; i < 15 && need[i]; i++) wn[i] = (wchar_t)(unsigned char)need[i];
                 wn[i] = 0;
-                sb_lang_w("loc.ver_t", fmt, 300);
+                if (vs == 3) sb_lang_w("loc.ver_t_lan", fmt, 300); /* W454: LAN */
+                else sb_lang_w("loc.ver_t", fmt, 300);
                 if (wcsstr(fmt, L"%s")) _snwprintf_s(t1, 200, _TRUNCATE, fmt, wn[0] ? wn : L"?");
                 else wcsncpy_s(t1, 200, fmt, _TRUNCATE);
                 if (vs == 1) sb_lang_w("loc.ver_d_srv", t2, 300);
+                else if (vs == 3) sb_lang_w("loc.ver_d_lan", t2, 300); /* W454: LAN-Mitspieler */
                 else sb_lang_w("loc.ver_d_peer", t2, 300);
                 sb_ov_toast_msg(t1, t2, 15000u);
-                HLOG_W("LOCVER: %s - steelnet braucht die neueste Version (%s), Hinweis im Spiel",
-                       vs == 1 ? "Treffpunkt lehnt ab" : "Mitspieler mit anderer Version abgelehnt", need[0] ? need : "?");
+                HLOG_W("LOCVER: %s - %s braucht dieselbe Version (%s), Hinweis im Spiel",
+                       vs == 1 ? "Treffpunkt lehnt ab" : "Mitspieler mit anderer Version abgelehnt", vs == 3 ? "LAN" : "steelnet",
+                       need[0] ? need : "?");
             }
             last_vs = vs;
         }

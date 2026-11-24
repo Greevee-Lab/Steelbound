@@ -36,8 +36,9 @@ static __inline const char *sb_ovl_loc_lock(const char *key, int loc, int wide16
     static const char *const kPacks[] = { "remaster", "hd_textures", "hd_scale", NULL };
     static const char *const kSave[] = { "save_lock", NULL };
     static const char *const kEdge[] = { "edge_mode", "edge_fade_width", "edge_fade_strength", NULL };
-    static const char *const kPost[] = { "cockpit_glow", "cockpit_spill", "cockpit_light", "color_sat", "color_temp",
-                                         "color_lift", "color_gamma", "color_gain", "ssao", NULL };
+    /* W465 LOC-ENHANCED: Cockpit-Leuchten/-Licht und Farbe laufen in LoC (eigene Szenenerkennung,
+     * loc_render_post_scene); nur SSAO bleibt gesperrt (LoC-Tiefe nicht geprueft). */
+    static const char *const kPost[] = { "ssao", NULL };
     if (!loc || !key || !key[0]) { return NULL; }
     if (sb_ovl_ll_is(key, kCockpit)) { return "ovl.ll_cockpit"; }
     if (sb_ovl_ll_is(key, kMonFx)) { return "ovl.ll_monfx"; }

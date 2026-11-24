@@ -16,6 +16,9 @@ int loc_chat_typing(void);
 int loc_chat_avail(void);
 /* Fenster-Nachricht (UI-Thread, aus sb_ovl_wndproc vor dem Menue). 1 = verbraucht. */
 int loc_chat_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp);
+/* W452: IME-Kontext an den Chat-Zustand angleichen (UI-Thread, vor jeder Fenster-Nachricht, auch bei offenem Menue):
+ * IME nur bei offener Chatzeile, sonst kein Eingabekontext (Spieltasten nie im IME). */
+void loc_chat_ime_tick(HWND w);
 /* Tasten der Client-Aktion "chat" (Profil; Standard Enter bis zum Laden). mods: Bit 0 Umschalt, 1 Strg, 2 Alt. */
 void loc_chat_set_binding(const int *vks, const int *mods, int n);
 /* Anzeige (Render-Thread, unter ctx_lock): sichtbar? / zeichnen (save = Bereich sichern) / Bereich zurueck. */

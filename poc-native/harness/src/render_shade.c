@@ -897,7 +897,6 @@ static rq_vsent_t *rq_vs_get_slow0(unsigned handle)
     rq_vsent_t *e = NULL;
     unsigned i, slots[136 * 4], n = 0, k;
     static char src[96 * 1024];
-    ID3DBlob *b = NULL, *bl = NULL;
     if (!vp) { return NULL; }
     for (i = 0; i < g_rqvs_n; i++) {
         if (g_rqvs[i].handle == handle) {
@@ -1479,6 +1478,9 @@ static unsigned g_rq_lastnst;
 const float *rq_last_pblk(void) { return g_rq_lastpb; }
 unsigned rq_last_pstages(void) { return g_rq_lastnst; }
 float g_rq_diag_od[3][4]; /* DIAG(SHADE-M2,W117): oD0, oD1, oFog des letzten rq_diag_vertex */
+/* DIAG(SB-SUN-WHITEOUT,W477): Nebel des letzten Draws mit Nebel (Textur-Gesundheit F11) */
+unsigned g_rq_wfog_tb, g_rq_wfog_col, g_rq_wfog_f;
+float g_rq_wfog_st, g_rq_wfog_en, g_rq_wfog_de;
 int rq_diag_vertex(unsigned i, float pos[4], float ot[4][4])
 {
     static float vin[16][4], cc[RQV_NCONST][4];
@@ -1600,6 +1602,8 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
         st.u = rq_u32(SBA(0x21AC28u)); en.u = rq_u32(SBA(0x21AC2Cu)); de.u = rq_u32(SBA(0x21AC30u));
         fg[0] = 0.0f; fg[1] = 1.0f; fg[2] = 1.0f; fg[3] = 0.0f;
         if (fen && (mask & 1u)) {
+            g_rq_wfog_tb = ftb; g_rq_wfog_st = st.f; g_rq_wfog_en = en.f; g_rq_wfog_de = de.f; /* W477 DIAG: F11 */
+            g_rq_wfog_col = g_rq_fogcolor; g_rq_wfog_f = g_present_no;
             if (ftb == 0u) { fg[0] = 1.0f; fg[1] = 1.0f; fg[2] = 1.0f; }
             else if (ftb == 3u) {
                 float kk = (en.f != st.f) ? 1.0f / (en.f - st.f) : 8192.0f;
@@ -1632,7 +1636,6 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
     memset(pblk, 0, sizeof pblk);
     for (k = 0; k < 8u; k++) {
         unsigned c0 = d[10 + k], c1 = d[18 + k];
-        int uniq0k = (d[53] & 0x100u) != 0, uniq1k = (d[53] & 0x1000u) != 0;
         unsigned r0 = (d[57] >> (k * 4u)) & 0xFu, r1 = (d[58] >> (k * 4u)) & 0xFu;
         if (r0 < 8u && (g_rq_psconst_set & (1u << r0))) { c0 = g_rq_psconst[r0]; }
         if (r1 < 8u && (g_rq_psconst_set & (1u << r1))) { c1 = g_rq_psconst[r1]; }
@@ -1673,7 +1676,7 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
         } else if (mask & 4u) {
             /* DIAG(SHADOWBUF,W127) shadow_ab=1: im Screenshot-Bild ohne Schattenvergleich
              * (T1 = 1 wie shade_shadow=0, Tiefenpass laeuft weiter), Partnerbild +1 mit. */
-            if (g_cfg.shade_shadow && !((g_cfg.shadow_ab || g_cfg.shfx_ab == 5) && rq_ab_base())) { /* W131: Preset-Tripel A = Original */ /* RENDER-QA3 (W100): Schattenpuffer? */
+            if (g_cfg.shade_shadow && !((g_cfg.shadow_ab || g_cfg.shfx_ab == 5 || g_cfg.shfx_ab == 7) && rq_ab_base())) { /* W471: Quartett A */ /* W131: Preset-Tripel A = Original */ /* RENDER-QA3 (W100): Schattenpuffer? */
                 unsigned sxp[4], snn[4];
                 float zs = 0.0f;
                 sb_tex_stages(sxp, snn);
@@ -1685,6 +1688,18 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
                     tsc[k * 4u + 2] = 1.0f;
                     tsc[k * 4u + 3] = (zs > 0.0f) ? 1.0f / zs : 1.0f;
                     g_rq_shadow_draws++;
+                    if (g_sba_loc && g_cfg.loc_shadow_diag) { /* DIAG(W471): Filter des Spiels auf der Schattenstufe */
+                        extern unsigned g_rq_shadowfunc;
+                        static unsigned nfl, lastf = 0xFFFFFFFFu;
+                        unsigned tb = SBA(0x21A8B0u) + k * 32u * 4u;
+                        unsigned fm = rq_u32(tb + 3u * 4u), fn = rq_u32(tb + 4u * 4u), fp = rq_u32(tb + 5u * 4u);
+                        unsigned key = (fm << 16) | (fn << 8) | fp;
+                        if (key != lastf && nfl < 16u) {
+                            nfl++; lastf = key;
+                            HLOG_I("LOCSHADOW filt f=%u st=%u %ux%u mag=%u min=%u mip=%u func=0x%X", g_present_no, k,
+                                   w, h, fm, fn, fp, g_rq_shadowfunc);
+                        }
+                    }
                     continue;
                 }
                 s = NULL; w = h = 0;

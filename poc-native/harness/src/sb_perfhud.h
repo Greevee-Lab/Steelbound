@@ -49,6 +49,8 @@ void sb_phud_present_post(long long q_before, int direct); /* direct = Present i
 /* Panel auf rtv zeichnen (unter ctx_lock). save=1: Bereich sichern
  * (Spiel-BB ohne FPS-INTERP, sb_phud_restore nach dem Present). */
 void sb_phud_draw(struct ID3D11RenderTargetView *rtv, int save);
+/* W467: F2/F3-Flaeche des letzten Bildes vorab im Belegungsplan anmelden (vor den LoC-Panels aufrufen) */
+void sb_phud_layout_pre(void);
 void sb_phud_restore(void);
 /* 1 = Panel sichtbar */
 int sb_phud_visible(void);

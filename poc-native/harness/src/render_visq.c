@@ -36,6 +36,7 @@
  * Objektzaehler ab 0, gelesen ueber FUN_00016A10) bleibt "sichtbar". */
 #include "render_int.h"
 #include "sb_perfhud.h" /* W125 TICK-PERF */
+#include "render_visqz.h" /* W477 SB-SUN-WHITEOUT */
 #include <d3d11_1.h>
 
 #define VISQ_POOL 256u
@@ -125,6 +126,44 @@ int sb_visq_ztest(void)
 /* W313 P2-ZTEST: Draw liegt zwischen Begin/EndVisibilityTest (Sonne, Flares,
  * Objekt-Occlusion-Vorpass FUN_00025790) -> dort gilt allein vis_ztest. */
 int sb_visq_in_test(void) { return g_vq_cur != NULL; }
+
+/* FIX(SB-SUN-WHITEOUT,W477) vis_zfar (render_visqz.h): vortransformierter Punkt im
+ * Sichtbarkeitstest mit Tiefentest, alle z > 1 -> 1 = Draw auslassen (Ergebnis 0 wie NV2A,
+ * unabhaengig davon, ob der Treiber z clippt oder klemmt). vis_zfar=2 (TEST): z auf 1,0
+ * klemmen = AMD-Verhalten nachstellen, Draw bleibt. Vor dem Hochladen aufrufen (v wird bei 2
+ * veraendert). Zeile "VISQ zfar" zaehlt die Faelle (erste und dann je 500). */
+static unsigned g_vqz_n, g_vqz_onscr;
+/* W477: Zaehler fuer die Textur-Gesundheit (F11): Flare-Tests, davon sichtbar, Testpunkte hinter
+ * der hinteren Ebene (davon im Bild). */
+void sb_visq_stats(unsigned *tests, unsigned *vis, unsigned *zfar, unsigned *zfar_on)
+{
+    *tests = g_vqf_tests; *vis = g_vqf_vis; *zfar = g_vqz_n; *zfar_on = g_vqz_onscr;
+}
+int sb_visq_zfar(im_vertex_t *v, unsigned n, int rhw, unsigned prim)
+{
+    unsigned i, on = 0;
+    D3D11_VIEWPORT vp;
+    UINT nvp = 1;
+    if (!g_cfg.vis_zfar || !rhw || prim != 1u || !v || !n || !sb_visq_ztest()) { return 0; }
+    if (!sb_visqz_behind_far(&v[0].pos[2], (unsigned)(sizeof *v / sizeof(float)), n, fx_nv(0x354u, 0x201u))) { return 0; }
+    g_vqz_n++;
+    memset(&vp, 0, sizeof vp);
+    if (g_ctx) { ID3D11DeviceContext_RSGetViewports(g_ctx, &nvp, &vp); }
+    for (i = 0; i < n; i++) {
+        if (v[i].pos[0] >= vp.TopLeftX && v[i].pos[0] < vp.TopLeftX + vp.Width &&
+            v[i].pos[1] >= vp.TopLeftY && v[i].pos[1] < vp.TopLeftY + vp.Height) { on = 1; }
+    }
+    if (on) { g_vqz_onscr++; }
+    if (g_vqz_n == 1u || (g_vqz_n % 500u) == 0u || (g_cfg.vis_diag && on && g_vqz_onscr < 200u)) {
+        HLOG_I("VISQ zfar f=%u n=%u im_bild=%u modus=%d pos=(%.1f %.1f %.6f) vp=%.0fx%.0f", g_present_no, g_vqz_n,
+               g_vqz_onscr, g_cfg.vis_zfar, v[0].pos[0], v[0].pos[1], v[0].pos[2], vp.Width, vp.Height);
+    }
+    if (g_cfg.vis_zfar == 2 || g_cfg.vis_zfar == 3) { /* TEST: 2 = AMD-Klemmung nachstellen, 3 = gilt immer als sichtbar (Folge im Bild) */
+        for (i = 0; i < n; i++) { v[i].pos[2] = g_cfg.vis_zfar == 3 ? 0.0f : 1.0f; }
+        return 0;
+    }
+    return 1;
+}
 static char g_vq_dd[700]; /* DIAG(W304): letzter Punkt-Draw im Test */
 static int g_vq_onscr; /* DIAG(W304): Punkt liegt im Ziel */
 float g_vqd_raw[4], g_vqd_mat[4][4]; int g_vqd_em, g_vqd_rowe; unsigned g_vqd_vs; /* DIAG(W304), render_im.c */

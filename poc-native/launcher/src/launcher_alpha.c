@@ -303,8 +303,9 @@ void la_suggest_cli(const la_check_t *res, char *out, size_t cap)
 /* ------------------------------------------------------------------ */
 /* Start-Kette                                                         */
 /* ------------------------------------------------------------------ */
-/* Pfad fuer die --set-Kette: muss in der ANSI-Codepage darstellbar sein
- * (Client liest per GetCommandLineA), kein '"', ';' -> "\;". */
+/* Pfad fuer die --set-Kette: muss in der aktiven Codepage darstellbar sein
+ * (Client liest per GetCommandLineA; seit W455 UTF-8, also jeder Pfad),
+ * kein '"', ';' -> "\;". */
 static int chain_path(const char *u8, char *out, size_t cap)
 {
     char acp[LA_P], back[LA_P * 2];
@@ -1218,7 +1219,14 @@ void la_selftest(int *pass, int *fail)
             ok = 0;
             strcpy_s(why, sizeof why, "'\"' nicht abgelehnt");
         }
-        if (ok && la_extra_args(&s, "C:\\\xE6\x97\xA5\\HDD", "C:\\x\\HDD_US", x, sizeof x) != 1) {
+        if (ok && u8_acp_is_utf8()) {
+            /* W455 UNICODE-PATHS: Launcher und Client laufen mit UTF-8-Codepage -> Japanisch geht 1:1 durch. */
+            if (la_extra_args(&s, "C:\\\xE6\x97\xA5\\HDD", "C:\\x\\HDD_US", x, sizeof x) != 0 ||
+                !strstr(x, "hdd_root=C:\\\xE6\x97\xA5\\HDD;")) {
+                ok = 0;
+                _snprintf_s(why, sizeof why, _TRUNCATE, "UTF-8-Pfad nicht durchgereicht '%.150s'", x);
+            }
+        } else if (ok && la_extra_args(&s, "C:\\\xE6\x97\xA5\\HDD", "C:\\x\\HDD_US", x, sizeof x) != 1) {
             ok = 0;
             strcpy_s(why, sizeof why, "Zeichen ausserhalb der ANSI-Codepage nicht abgelehnt");
         }

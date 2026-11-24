@@ -220,3 +220,75 @@ const rbl_stats_t *rbl_stats(const rbl_t *l);
  * ist "Ring fehlt" kein Grund zurueck; sonst gelten die Grenzen der niedrigen Stufe (zurueck auf d_std). */
 void rbl_start_low(rbl_t *l);
 int rbl_startlow(const rbl_t *l);
+
+/* ---- W475 LOC-RB-PREAGREE: Vorab-Einigung in der Lobby (Paket "SBRP", Missionsstart ohne Netzrunde) ----
+ * Ablauf (Lobby, Kanal der Eingabeschicht, gleicher Takt wie das Hallo):
+ *  - Host (Rolle RBN_ROLE_HOST, eigenes Spiel bietet ein Match an) schlaegt fuer die naechste Mission verbindlich vor:
+ *    {Folge c, Modus R2, Verzoegerung D, Profil, Lobby-Kontext ctx, Kennungen aller Teilnehmer}. c ist die Folge, die
+ *    die Entscheidung beim Missionsbeginn tragen wird (Epoche = Host-Kennung ^ c wie bisher). Neuer Vorschlag (neue
+ *    Folge) bei Aenderung der Teilnehmer, eines Wunsches (Rollback/Auto) oder des Kontexts sofort, bei anderer D bzw.
+ *    anderem Profil nach RBN_PRE_HYST_MS; kein Vorschlag mehr = Ruecknahme (kind 3).
+ *  - Client (Rolle RBN_ROLE_JOIN) nimmt einen Vorschlag nur vom Beitrittsziel (Adresse) an, dessen Kennung zur
+ *    Hallo-Bindung dieses Absenders passt, mit Folge > allen bisher gesehenen dieses Hosts, mit eigener Kennung in der
+ *    Teilnehmerliste und nur ausserhalb einer Mission. Er ist damit GEBUNDEN und bestaetigt {Host, c, Pruefsumme}
+ *    (kind 2), solange die letzte Auffrischung hoechstens RBN_PRE_ACKWIN_MS alt ist. Bindung endet mit Ruecknahme,
+ *    neuem Vorschlag oder RBN_PRE_HOLD_MS ohne Auffrischung. Ein gebundener Client waehlt nie einseitig Lockstep (ein
+ *    Wunsch "aus" wirkt nach der Ruecknahme bzw. ab der folgenden Mission).
+ *  - Missionsbeginn Host: Vorschlag c noch gueltig, jeder Teilnehmer frisch bestaetigt (<= RBN_PRE_ACKAGE_MS), Zahl
+ *    der verbundenen Mitspieler = Teilnehmer und (falls bekannt) gleiche Adressen -> sofort R2 mit c (keine Netzrunde,
+ *    Entscheidung wie bisher im Hallo). Sonst bisheriger Weg (W469), Folge > c (andere Epoche).
+ *  - Missionsbeginn Client: gebunden -> Zustand RBN_ST_PRE: Eingabeschicht mit Epoche/D von c, eigene Rahmen werden
+ *    gesendet, ENTNOMMEN wird erst nach dem Beweis, dass der Host c gewaehlt hat (Rahmen des Hosts mit dieser Epoche,
+ *    rbn_pre_proof, oder Hallo-Entscheidung c). Entscheidet der Host anders (andere Folge bzw. Lockstep), folgt der
+ *    Client ihr wie im bisherigen Weg (nichts entnommen -> ohne Zustandsabweichung). Nicht gebunden -> PEND wie bisher.
+ * Rein (keine Sockets/Log); Selbsttest tests/loc_rbi_selftest.c, Vektoren net/tools/sbt2_vectors.json "rbn_pre",
+ * Fuzz-Ziel fz_net_rbn. SECURITY.md Ä43. */
+#define RBN_ST_PRE 5
+#define RBN_PRE_HEAD 32
+#define RBN_PRE_MAXPART RBN_MAXPEER
+#define RBN_PRE_MAX (RBN_PRE_HEAD + RBN_PRE_MAXPART * 4)
+#define RBN_PRE_HYST_MS 1000u    /* D/Profil muessen so lange anders sein, bevor neu vorgeschlagen wird */
+#define RBN_PRE_ACKWIN_MS 1000u  /* Client bestaetigt nur so lange nach der letzten Auffrischung */
+#define RBN_PRE_ACKAGE_MS 1500u  /* Host: Bestaetigung gilt so lange */
+#define RBN_PRE_HOLD_MS 6000u    /* Client: Bindung ohne Auffrischung */
+enum { RBN_ROLE_NONE = 0, RBN_ROLE_HOST = 1, RBN_ROLE_JOIN = 2 };
+enum { RBN_PRE_PROP = 1, RBN_PRE_ACK = 2, RBN_PRE_WD = 3 };
+
+typedef struct {
+    uint32_t prop, prop_tx, ack_rx, ack_tx, wd_tx, wd_rx, rx_bad, rx_ign, bind, unbind, used_host, used_client,
+        miss_host, pre_r2_frame, pre_r2_hello, pre_diverge, pre_ls, pre_timeout;
+} rbn_pre_stats_t;
+
+/* Lobby-Rolle (Anbindung: Lobby-Zustand des Spiels bzw. Beitrittsziel) und Kontext des Hosts (Pruefsumme der
+ * Lobby-Einstellungen, 0 = keiner). host_ip = Adresse des Beitrittsziels (Absenderkennung >> 16), nur Rolle JOIN. */
+void rbn_set_lobby(rbn_t *n, int role, uint32_t host_ip, uint32_t ctx);
+/* Host: Vorschlag in der Lobby pflegen (vor rbn_pre_tx aufrufen). */
+void rbn_pre_tick(rbn_t *n, uint32_t now);
+/* Paket bauen (Host: Vorschlag bzw. Ruecknahme, Client: Bestaetigung). Rueckgabe Laenge, 0 = nichts. */
+int rbn_pre_tx(rbn_t *n, uint32_t now, uint8_t *buf, int cap);
+int rbn_is_pre(const uint8_t *buf, int len);
+/* Pruefen und uebernehmen (wie rbn_rx: 1 angenommen, 0 ignoriert, -1 ungueltig). */
+int rbn_pre_rx(rbn_t *n, uint32_t now, const uint8_t *buf, int len, uint64_t src);
+/* Nur Formatpruefung (Vektoren/Fuzz): 1 = gueltig. */
+int rbn_pre_check(const uint8_t *buf, int len);
+/* Pruefsumme eines Vorschlags (FNV-1a ueber Host-Kennung, Folge, Modus, D, Profil, Kontext, Teilnehmer). */
+uint32_t rbn_pre_digest(uint32_t hnonce, uint32_t seq, int mode, int d, int prof, uint32_t ctx, const uint32_t *part, int npart);
+/* Host vor rbn_mission_start: Adressen (Absenderkennung >> 16) der verbundenen Mitspieler; nip < 0 = unbekannt
+ * (dann nur die Zahl). */
+void rbn_pre_set_conn(rbn_t *n, int nip, const uint32_t *ips);
+/* Client in RBN_ST_PRE: Rahmen der Eingabeschicht mit der Epoche von c von src angenommen (Beweis, falls src = Host). */
+void rbn_pre_proof(rbn_t *n, uint64_t src);
+/* 1 = Client gebunden (Lobby-Anzeige/Log), *seq = Folge. */
+int rbn_pre_bound(const rbn_t *n, uint32_t *seq);
+/* 1 = Host hat einen Vorschlag und alle Teilnehmer haben frisch bestaetigt. */
+int rbn_pre_ready(const rbn_t *n, uint32_t now);
+/* 1 = laufende Mission begann aus der Vorab-Einigung (Host Fall a bzw. Client aus PRE). */
+int rbn_pre_used(const rbn_t *n);
+/* Absenderkennung des Hosts der Bindung (Client), 0 = keine. */
+uint64_t rbn_pre_host_src(const rbn_t *n);
+/* Host: Grund, warum der letzte Missionsbeginn die Vorab-Einigung nicht nutzte: 0 genutzt, 1 kein Vorschlag, 2 Folge
+ * ueberholt, 3 Wunsch geaendert, 4 Rolle, 5 Zahl der Mitspieler, 6 Bestaetigung fehlt/alt, 7 Adressen anders. */
+int rbn_pre_miss(const rbn_t *n);
+/* TEST (loc_rb_opts pretest=1): neuer Vorschlag mit anderer D ohne Bestaetigung (Verzoegerungswechsel beim Start). */
+void rbn_pre_test_bump(rbn_t *n);
+const rbn_pre_stats_t *rbn_pre_stats(const rbn_t *n);

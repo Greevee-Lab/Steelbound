@@ -41,12 +41,15 @@
  * je Paar die naechste Option aus kSfxSets (Log "SHFX ab #k"). shot_mission=1 ->
  * screenshot_frame zaehlt ab Beginn der Kampagnen-Mission (Modus 4). */
 #include "render_int.h"
+#include <math.h> /* W465: expf, ldexp */
 #include "sb_profile.h" /* W229 SBA() */
 #include "render_qa.h"
 #include "sb_tex.h"
 #include "sb_gfxpreset.h" /* W173 LAUNCHER-P4: einheitliches Grafik-Preset */
 #include "sb_remaster.h" /* W173: sb_rem_fx_locked (Effect-Pack-Ausnahme) */
 #include "sb_state.h" /* W232: sb_in_mission */
+#include "render_sblook.h" /* W459: SB look (LoC) */
+#include "loc_render.h" /* W465: loc_render_post_scene */
 
 int rq_ab_base(void); /* render_shade.c */
 
@@ -69,13 +72,26 @@ static int sfx_neutral(void)
     return g_shfx_bypass || (g_cfg.shfx_ab && rq_ab_base());
 }
 
+/* W459 LOC-FX-LIGHT: wirksame Bloom-Staerke. SB look (Experimental, nur LoC, Bit SBLOOK_BLOOM_BOOST) legt den
+ * SB-Bloom-Regler auf den spieleigenen LoC-Bloom: die LoC-Komposition (PS T0*T1.a + T1*(1-T1.a) + T2 + C0*T3)
+ * liest das 14^2-Bloom-RT (Hauptbild) bzw. 9^2 (Lock-On-Kamera) in ein Ziel >= 128 - dieselbe Regel wie die
+ * SB-Monitor-Komposition (render_sblook.h). Sonst bloom_strength (100 = Original). */
+static int sfx_bloom_pct(void)
+{
+    if (g_sba_loc && (sblook_bits(g_cfg.loc_sblook, g_cfg.loc_sblook_mask) & SBLOOK_BLOOM_BOOST)) {
+        return g_cfg.loc_sblook_bloom;
+    }
+    return g_cfg.bloom_strength;
+}
+
 int shfx_world_on(void)
 {
     return g_cfg.world_fog != 100 || g_cfg.world_contrast != 100 || g_cfg.world_gamma != 100 ||
-           g_cfg.world_sharpen > 0 || g_cfg.bloom_strength != 100 || g_cfg.bloom_threshold > 0 ||
+           g_cfg.world_sharpen > 0 || sfx_bloom_pct() != 100 || g_cfg.bloom_threshold > 0 ||
            g_cfg.world_exposure != 100 || g_cfg.tonemap != 0 || g_cfg.light_world != 100 ||
            g_cfg.light_cockpit != 100 || g_cfg.world_focus != 100 ||
-           (g_cfg.aa_mode & 2) || (g_cfg.shadow_soft && g_cfg.shade_shadow); /* W131 SHADER-OPT2 */
+           (g_cfg.aa_mode & 2) || (g_cfg.shadow_soft && g_cfg.shade_shadow) || /* W131 SHADER-OPT2 */
+           (g_sba_loc && g_cfg.shade_shadow && g_cfg.shadow_sun > 0); /* W466 */
 }
 
 int shfx_cockpit_on(void)
@@ -90,11 +106,21 @@ static int shfx_grade_on(void)
            g_cfg.color_gamma != 100 || g_cfg.color_gain != 100;
 }
 
+/* W465 LOC-ENHANCED: Licht bei Muendungsfeuer, Treffern und Explosionen im LoC-Cockpit (fx_light_cockpit, in SB
+ * macht das render_fx_rem.c aus den Explosionsdaten des Spiels). LoC: bildbasiert - Hellpass des Endbilds
+ * (1/16), Mittelwert 1x1, gleitender Mittelwert ~0,6 s; Licht = Anstieg ueber den Mittelwert (Farbe des
+ * Feuers), Abklingen ~0,2 s, aufs Cockpit (nicht auf leuchtende Pixel), am staerksten zum Fenster hin. Reine
+ * Darstellung, keine Rueckwirkung auf das Spiel; ganz auf der GPU (keine Rueckleseverzoegerung). */
+static int sfx_flash_on(void)
+{
+    return g_sba_loc && g_cfg.fx_light_cockpit > 0;
+}
+
 /* W131 SHADER-OPT2: irgendeine Nachbearbeitung des Endbilds (Mission) aktiv?
  * Cockpit-Licht (W121), Farbabstimmung, FXAA Endbild (aa_mode Bit 1), SSAO. */
 int shfx_post_on(void)
 {
-    return shfx_cockpit_on() || shfx_grade_on() || (g_cfg.aa_mode & 1) || g_cfg.ssao > 0;
+    return shfx_cockpit_on() || shfx_grade_on() || (g_cfg.aa_mode & 1) || g_cfg.ssao > 0 || sfx_flash_on();
 }
 
 /* RT-Slot zu einer Texturadresse (wie sb_rtt_lookup, ohne Nebenwirkung) */
@@ -192,7 +218,7 @@ static void sfx_consts_core(float *sx, const int srvk[4], const unsigned *xp_in,
             sfx_is_world(s)) {
             flags |= 2u << k;
             g_sfx_nflag[0]++;
-        } else if ((g_cfg.bloom_strength != 100 || g_cfg.bloom_threshold > 0) && g_rtt[s].w <= 32u && g_rtt[s].h <= 32u &&
+        } else if ((sfx_bloom_pct() != 100 || g_cfg.bloom_threshold > 0) && g_rtt[s].w <= 32u && g_rtt[s].h <= 32u &&
                    tgt >= 0 && tgt < g_rtt_n && g_rtt[tgt].w >= 128u) {
             flags |= 0x20u << k;
             g_sfx_nflag[1]++;
@@ -211,13 +237,15 @@ static void sfx_consts_core(float *sx, const int srvk[4], const unsigned *xp_in,
         sx[0] = fu.f;
     }
     sx[2] = (float)sfx_pct(g_cfg.world_sharpen, 0, 100) / 100.0f;
-    sx[3] = (float)sfx_pct(g_cfg.bloom_strength, 0, 200) / 100.0f;
+    sx[3] = (float)sfx_pct(sfx_bloom_pct(), 0, 200) / 100.0f; /* W459: LoC SB look */
     sx[4] = (float)sfx_pct(g_cfg.world_contrast, 50, 200) / 100.0f;
     sx[5] = (float)sfx_pct(g_cfg.world_gamma, 50, 200) / 100.0f;
     sx[6] = 0.2f; /* Drehpunkt Kontrast */
     sx[7] = (float)sfx_pct(g_cfg.bloom_threshold, 0, 90) / 100.0f; /* Bloom-Schwelle */
     sx[13] = (g_cfg.aa_mode & 2) ? 1.0f : 0.0f;                         /* W131: FXAA Welt-RT (rq_sfx) */
     sx[14] = (g_cfg.shadow_soft && g_cfg.shade_shadow) ? 1.0f : 0.0f;   /* W131: 3x3-Gauss-PCF (rq_shadow) */
+    sx[15] = (g_sba_loc && g_cfg.shade_shadow && g_cfg.shadow_sun > 0) ?  /* W466: Sonnen-/Schattenkontrast (LoC) */
+             (float)sfx_pct(g_cfg.shadow_sun, 0, 200) / 100.0f : 0.0f;
     if (flags) { g_sfx_nflag[2]++; }
 }
 
@@ -240,16 +268,19 @@ static const char kSFX_VS[] =
 #define SFX_PS_HEAD \
     "cbuffer P : register(b0) { float4 p0; float4 p1; float4 p2; float4 p3; float4 p4; float4 p5; float4 p6; float4 p7; };\n" \
     "Texture2D t0 : register(t0); Texture2D t1 : register(t1); Texture2D t2 : register(t2); Texture2D t3 : register(t3);\n" \
+    "Texture2D t4 : register(t4);\n" \
     "SamplerState s0 : register(s0);\n" \
     "struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
 
 /* Hellpass + 4x4-Mittel (vier bilineare Abgriffe) */
 static const char kSFX_PS_BRIGHT[] = SFX_PS_HEAD
-    "float3 bp(float3 c) { float m = max(c.r, max(c.g, c.b));\n"
-    "  return c * saturate((m - p0.z) / p0.w); }\n"
+    "float3 bp(float3 c, float th) { float m = max(c.r, max(c.g, c.b));\n"
+    "  return c * saturate((m - th) / p0.w); }\n"
     "float4 main(O i) : SV_Target { float2 d = p0.xy;\n"
-    "  float3 c = bp(t0.Sample(s0, i.uv + float2(-d.x, -d.y)).rgb) + bp(t0.Sample(s0, i.uv + float2(d.x, -d.y)).rgb)\n"
-    "           + bp(t0.Sample(s0, i.uv + float2(-d.x, d.y)).rgb) + bp(t0.Sample(s0, i.uv + float2(d.x, d.y)).rgb);\n"
+    "  float th = p0.z;\n"
+    "  if (p1.w > 0.0) { float3 l = t1.SampleLevel(s0, i.uv, 0).rgb; th = max(th, max(l.r, max(l.g, l.b)) * p1.w); }\n" /* W465 LoC: lokaler Kontrast */
+    "  float3 c = bp(t0.Sample(s0, i.uv + float2(-d.x, -d.y)).rgb, th) + bp(t0.Sample(s0, i.uv + float2(d.x, -d.y)).rgb, th)\n"
+    "           + bp(t0.Sample(s0, i.uv + float2(-d.x, d.y)).rgb, th) + bp(t0.Sample(s0, i.uv + float2(d.x, d.y)).rgb, th);\n"
     "  return float4(c * 0.25, 1); }\n";
 
 /* 4x4-Verkleinerung ohne Hellpass */
@@ -293,8 +324,31 @@ static const char kSFX_PS_COMPX[] = SFX_PS_HEAD
     "    r = saturate(r * p5.z + p5.x * (1.0 - r));\n"
     "    r = pow(max(r, 0.0), p5.y);\n"
     "    float l = dot(r, float3(0.2126, 0.7152, 0.0722)); r = l + (r - l) * p4.w; }\n"
+    "  if (p7.x > 0.0) { float3 fl = t4.Load(int3(1, 0, 0)).rgb * p7.x;\n" /* W465: LoC-Blitzlicht */
+    "    float2 q = (i.p.xy - p7.yz) / max(p7.w, 1.0); float fa = 0.45 + 0.55 * saturate(1.0 - 0.6 * dot(q, q));\n"
+    "    r += (r * 1.6 + 0.035) * fl * fa * (1.0 - smoothstep(0.55, 0.9, m)); }\n"
     "  if (p6.x == 1.0) { r = ao.xxx; }\n"
     "  return float4(saturate(r), c.a); }\n";
+
+/* W465: warm gewichteter Mittelwert des Hellpass-Bilds (1/16, t0, lokaler Kontrast) im Fensterbereich (Mitte,
+ * x 0,2..0,8, y 0,05..0,6) -> 1x1. Warm = Feuer/Explosion/Muendungsfeuer; Himmel (blau), Radar/HUD (gruen) und
+ * grosse helle Flaechen zaehlen kaum (Messung W465: Schuss 5x Grundwert). */
+static const char kSFX_PS_MEAN[] = SFX_PS_HEAD
+    "float4 main(O i) : SV_Target { float3 c = float3(0, 0, 0);\n"
+    "  [unroll] for (int y = 0; y < 12; y++) { [unroll] for (int x = 0; x < 16; x++) {\n"
+    "    float2 uv = float2(0.2 + 0.6 * (x + 0.5) / 16.0, 0.05 + 0.55 * (y + 0.5) / 12.0);\n"
+    "    float3 s = t0.SampleLevel(s0, uv, 0).rgb; c += s * saturate((s.r - s.b) * 3.0 / max(max(s.r, s.g), 1e-4)); } }\n"
+    "  return float4(c / 192.0, 1); }\n";
+
+/* W465: Blitz-Zustand 2x1: x=0 gleitender Mittelwert, x=1 Lichtfarbe (Anstieg, abklingend).
+ * t0 = Mittelwert jetzt (1x1), t1 = Zustand vorher; p0 = (Mischrate Mittelwert, Abklingfaktor, Verstaerkung, Neustart) */
+static const char kSFX_PS_FLASH[] = SFX_PS_HEAD
+    "float4 main(O i) : SV_Target { float3 cur = t0.Load(int3(0, 0, 0)).rgb;\n"
+    "  float3 avg = t1.Load(int3(0, 0, 0)).rgb, fl = t1.Load(int3(1, 0, 0)).rgb;\n"
+    "  if (p0.w > 0.5) { avg = cur; fl = float3(0, 0, 0); }\n"
+    "  if (i.p.x < 1.0) { return float4(lerp(avg, cur, p0.x), 1); }\n"
+    "  float3 d = max(cur - avg * 1.1 - 0.0004, 0.0) * p0.z;\n"
+    "  return float4(min(max(fl * p0.y, d), 1.5), 1); }\n";
 
 /* W131 SHADER-OPT2: FXAA (eigene Umsetzung des veroeffentlichten Verfahrens,
  * Lottes 2009 - Luma-Kontrast, Kantenrichtung, Kantensuche, Subpixel-Anteil;
@@ -371,8 +425,8 @@ static const char kSFX_PS_AOBLUR[] = SFX_PS_HEAD SFX_PS_LZ
     "  float ao = acc / ws;\n"
     "  return float4(ao, ao, ao, 1); }\n";
 
-enum { SP_BRIGHT, SP_DOWN, SP_BLUR, SP_COMP, SP_COMPX, SP_FXAA, SP_AO, SP_AOBLUR, SP_N };
-#define SFX_NTEX 8
+enum { SP_BRIGHT, SP_DOWN, SP_BLUR, SP_COMP, SP_COMPX, SP_FXAA, SP_AO, SP_AOBLUR, SP_MEAN, SP_FLASH, SP_N };
+#define SFX_NTEX 11 /* W465: 8 = Mittelwert 1x1, 9/10 = Blitz-Zustand 2x1 (Wechselpuffer) */
 static ID3D11VertexShader *sfx_vs;
 static ID3D11PixelShader *sfx_ps[SP_N];
 static ID3D11Buffer *sfx_cb;
@@ -389,11 +443,19 @@ static ID3D11RenderTargetView *sfx_rtv[SFX_NTEX];
 static unsigned sfx_w[SFX_NTEX], sfx_h[SFX_NTEX];
 static DXGI_FORMAT sfx_fmt;
 static unsigned sfx_napply;
+static ID3D11ShaderResourceView *sfx_t4; /* W465: 5. Eingang (t4) fuer sfx_pass, sonst NULL */
+static int sfx_fl_cur = 9, sfx_fl_reset = 1; /* W465: aktueller Blitz-Zustand (9/10), Neustart */
+static LONGLONG sfx_fl_t; /* W465: letzte Auswertung (QPC) */
+static int sfx_noupd; /* TEST(W465) shfx_var: Blitz-Zustand nur lesen */
+static float sfx_fl_hold; /* W465: Sekunden seit Neustart des Blitz-Zustands */
+static int sfx_scene_last = -1; /* W465: Szenenwechsel -> Blitz-Zustand neu */
+static int sfx_scene; /* W465: LoC-Szene dieses Bilds (loc_render_post_scene), SB 1 */
 
 static int sfx_init(void)
 {
     static const char *const ps_src[SP_N] = { kSFX_PS_BRIGHT, kSFX_PS_DOWN, kSFX_PS_BLUR, kSFX_PS_COMP,
-                                              kSFX_PS_COMPX, kSFX_PS_FXAA, kSFX_PS_AO, kSFX_PS_AOBLUR };
+                                              kSFX_PS_COMPX, kSFX_PS_FXAA, kSFX_PS_AO, kSFX_PS_AOBLUR,
+                                              kSFX_PS_MEAN, kSFX_PS_FLASH };
     ID3DBlob *b = NULL;
     D3D11_BUFFER_DESC bd;
     D3D11_SAMPLER_DESC sd;
@@ -453,6 +515,7 @@ static void sfx_free_tex(void)
         if (sfx_tex[k]) { ID3D11Texture2D_Release(sfx_tex[k]); sfx_tex[k] = NULL; }
         sfx_w[k] = sfx_h[k] = 0;
     }
+    sfx_fl_reset = 1; /* W465 */
 }
 
 static int sfx_mk(int k, unsigned w, unsigned h, DXGI_FORMAT f, int rt)
@@ -510,21 +573,21 @@ static void sfx_pass(int ps, ID3D11RenderTargetView *rtv, unsigned w, unsigned h
 {
     D3D11_MAPPED_SUBRESOURCE m;
     D3D11_VIEWPORT vp;
-    ID3D11ShaderResourceView *sv[4];
-    ID3D11ShaderResourceView *nul[4] = { NULL, NULL, NULL, NULL };
+    ID3D11ShaderResourceView *sv[5];
+    ID3D11ShaderResourceView *nul[5] = { NULL, NULL, NULL, NULL, NULL };
     if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)sfx_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &m))) {
         memcpy(m.pData, p, 128);
         ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)sfx_cb, 0);
     }
-    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 4, nul); /* Ziel nie zugleich als SRV */
+    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 5, nul); /* Ziel nie zugleich als SRV */
     ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &rtv, NULL); /* auch kein DSV (BB-Tiefe als SRV) */
     vp.TopLeftX = 0.0f; vp.TopLeftY = 0.0f;
     vp.Width = (float)w; vp.Height = (float)h;
     vp.MinDepth = 0.0f; vp.MaxDepth = 1.0f;
     ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
     ID3D11DeviceContext_PSSetShader(g_ctx, sfx_ps[ps], NULL, 0);
-    sv[0] = a; sv[1] = b; sv[2] = c; sv[3] = d;
-    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 4, sv);
+    sv[0] = a; sv[1] = b; sv[2] = c; sv[3] = d; sv[4] = sfx_t4;
+    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 5, sv);
     ID3D11DeviceContext_Draw(g_ctx, 3, 0);
 }
 
@@ -542,6 +605,109 @@ static void sfx_grade_params(float p[32])
     p[23] = 1.0f;
 }
 
+/* DIAG(W465) shfx_flash_diag=1: Blitz-Zustand (2x1) und Mittelwert (1x1) zuruecklesen und alle 10 Bilder loggen
+ * (Kalibrierung; blockiert die GPU, nur fuer Messlaeufe). */
+static float sfx_h2f(unsigned short h)
+{
+    unsigned e = (h >> 10) & 31u, m = h & 1023u;
+    float v = e == 0u ? (float)m / 16777216.0f : (float)ldexp((double)(1024u + m), (int)e - 25);
+    return (h & 0x8000u) ? -v : v;
+}
+
+static void sfx_flash_diag(ID3D11Texture2D *st, ID3D11Texture2D *cur)
+{
+    static ID3D11Texture2D *stg;
+    static unsigned n;
+    D3D11_TEXTURE2D_DESC td;
+    D3D11_MAPPED_SUBRESOURCE m;
+    D3D11_BOX bx = { 0, 0, 0, 2, 1, 1 };
+    if ((++n % (unsigned)(g_cfg.shfx_flash_diag > 1 ? g_cfg.shfx_flash_diag : 10)) != 0u) { return; }
+    if (!stg) {
+        memset(&td, 0, sizeof td);
+        td.Width = 4; td.Height = 1; td.MipLevels = 1; td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT; td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_STAGING; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &stg))) { stg = NULL; return; }
+    }
+    ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)stg, 0, 0, 0, 0, (ID3D11Resource *)st, 0, &bx);
+    bx.right = 1;
+    ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)stg, 0, 2, 0, 0, (ID3D11Resource *)cur, 0, &bx);
+    if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)stg, 0, D3D11_MAP_READ, 0, &m))) {
+        const unsigned short *h = (const unsigned short *)m.pData;
+        float v[12];
+        int i;
+        for (i = 0; i < 12; i++) { v[i] = sfx_h2f(h[(i / 3) * 4 + (i % 3)]); }
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)stg, 0);
+        HLOG_I("SHFXFLASH f=%u cur=%.3f/%.3f/%.3f avg=%.3f/%.3f/%.3f licht=%.3f/%.3f/%.3f", g_present_no,
+               v[6], v[7], v[8], v[0], v[1], v[2], v[3], v[4], v[5]);
+    }
+}
+
+/* DIAG(W465) shfx_gpu_diag=1: GPU-Zeit je Stufe der Nachbearbeitung (Zeitstempel-Abfragen, Auslesen 4 Bilder
+ * spaeter ohne Warten). Stufen: 0 Kopie, 1 Leuchten/Spill (Hellpass + Unschaerfe), 2 Blitzlicht, 3 SSAO,
+ * 4 Komposition (Licht/Farbe), 5 FXAA. Log SHFXGPU alle 300 ausgewerteten Bilder (Mittel in ms). */
+#define SFX_GQ_N 4
+#define SFX_GQ_ST 7
+static ID3D11Query *sfx_gq_dis[SFX_GQ_N], *sfx_gq_ts[SFX_GQ_N][SFX_GQ_ST];
+static int sfx_gq_used[SFX_GQ_N], sfx_gq_i, sfx_gq_on;
+static double sfx_gq_sum[SFX_GQ_ST];
+static unsigned sfx_gq_n;
+static void sfx_gq_mark(int st)
+{
+    if (sfx_gq_on && sfx_gq_ts[sfx_gq_i][st]) { ID3D11DeviceContext_End(g_ctx, (ID3D11Asynchronous *)sfx_gq_ts[sfx_gq_i][st]); }
+}
+static void sfx_gq_begin(void)
+{
+    int j, k;
+    sfx_gq_on = 0;
+    if (!g_cfg.shfx_gpu_diag) { return; }
+    j = (sfx_gq_i + 1) % SFX_GQ_N;
+    if (!sfx_gq_dis[j]) {
+        D3D11_QUERY_DESC qd;
+        memset(&qd, 0, sizeof qd);
+        qd.Query = D3D11_QUERY_TIMESTAMP_DISJOINT;
+        if (FAILED(ID3D11Device_CreateQuery(g_dev, &qd, &sfx_gq_dis[j]))) { sfx_gq_dis[j] = NULL; return; }
+        qd.Query = D3D11_QUERY_TIMESTAMP;
+        for (k = 0; k < SFX_GQ_ST; k++) {
+            if (FAILED(ID3D11Device_CreateQuery(g_dev, &qd, &sfx_gq_ts[j][k]))) { sfx_gq_ts[j][k] = NULL; return; }
+        }
+    }
+    if (sfx_gq_used[j]) { /* aelteste Messung auswerten (4 Bilder alt), sonst verwerfen */
+        D3D11_QUERY_DATA_TIMESTAMP_DISJOINT dj;
+        UINT64 t[SFX_GQ_ST];
+        int ok = ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)sfx_gq_dis[j], &dj, sizeof dj,
+                                             D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK && !dj.Disjoint && dj.Frequency;
+        for (k = 0; ok && k < SFX_GQ_ST; k++) {
+            ok = ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)sfx_gq_ts[j][k], &t[k], sizeof t[k],
+                                             D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK;
+        }
+        if (ok) {
+            for (k = 1; k < SFX_GQ_ST; k++) { sfx_gq_sum[k - 1] += (double)(t[k] - t[k - 1]) * 1000.0 / (double)dj.Frequency; }
+            if (++sfx_gq_n % 300u == 0u) {
+                HLOG_I("SHFXGPU n=%u ms: kopie=%.3f leuchten=%.3f blitz=%.3f ssao=%.3f komp=%.3f fxaa=%.3f summe=%.3f bb=%ux%u",
+                       sfx_gq_n, sfx_gq_sum[0] / 300.0, sfx_gq_sum[1] / 300.0, sfx_gq_sum[2] / 300.0, sfx_gq_sum[3] / 300.0,
+                       sfx_gq_sum[4] / 300.0, sfx_gq_sum[5] / 300.0,
+                       (sfx_gq_sum[0] + sfx_gq_sum[1] + sfx_gq_sum[2] + sfx_gq_sum[3] + sfx_gq_sum[4] + sfx_gq_sum[5]) / 300.0,
+                       sfx_w[0], sfx_h[0]);
+                memset(sfx_gq_sum, 0, sizeof sfx_gq_sum);
+            }
+        }
+        sfx_gq_used[j] = 0;
+    }
+    sfx_gq_i = j;
+    sfx_gq_on = 1;
+    ID3D11DeviceContext_Begin(g_ctx, (ID3D11Asynchronous *)sfx_gq_dis[j]);
+    sfx_gq_mark(0);
+}
+static void sfx_gq_end(void)
+{
+    if (!sfx_gq_on) { return; }
+    sfx_gq_mark(SFX_GQ_ST - 1);
+    ID3D11DeviceContext_End(g_ctx, (ID3D11Asynchronous *)sfx_gq_dis[sfx_gq_i]);
+    sfx_gq_used[sfx_gq_i] = 1;
+    sfx_gq_on = 0;
+}
+
 /* Nachbearbeitung auf rtv (Ressource res, Backbuffer-Groesse). Aufruf unter ctx_lock. */
 static void sfx_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, int quiet)
 {
@@ -551,8 +717,9 @@ static void sfx_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, int quie
     float spill = (float)sfx_pct(g_cfg.cockpit_spill, 0, 100) / 100.0f;
     float light = (float)sfx_pct(g_cfg.cockpit_light, 30, 100) / 100.0f;
     int grade = shfx_grade_on(), aa = (g_cfg.aa_mode & 1) != 0, ssao = g_cfg.ssao > 0;
-    int bloom = glow > 0.0f || spill > 0.0f;
-    int comp = shfx_cockpit_on() || grade || ssao;
+    int flash = sfx_flash_on() && sfx_scene == 1; /* W465: nur Cockpit-Mission */
+    int bloom = glow > 0.0f || spill > 0.0f || flash;
+    int comp = shfx_cockpit_on() || grade || ssao || flash;
     ID3D11ShaderResourceView *ao_srv = NULL;
     /* gesicherter Zustand */
     ID3D11RenderTargetView *s_rtv = NULL;
@@ -567,11 +734,12 @@ static void sfx_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, int quie
     D3D11_PRIMITIVE_TOPOLOGY s_topo;
     ID3D11VertexShader *s_vs = NULL;
     ID3D11PixelShader *s_ps = NULL;
-    ID3D11ShaderResourceView *s_srv[4] = { NULL, NULL, NULL, NULL };
+    ID3D11ShaderResourceView *s_srv[5] = { NULL, NULL, NULL, NULL, NULL };
     ID3D11SamplerState *s_smp = NULL;
     ID3D11Buffer *s_cb = NULL;
     int k;
 
+    if (sfx_scene == 2) { light = 1.0f; } /* W465: LoC Replay/Aussenkamera - kein Cockpit zum Abdunkeln */
     if (!rtv || !res || !g_ctx || !sfx_init()) { return; }
     ID3D11Texture2D_GetDesc((ID3D11Texture2D *)res, &dd);
     if (!sfx_size(dd.Width, dd.Height, dd.Format)) { return; }
@@ -602,11 +770,18 @@ static void sfx_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, int quie
     ID3D11DeviceContext_IAGetPrimitiveTopology(g_ctx, &s_topo);
     ID3D11DeviceContext_VSGetShader(g_ctx, &s_vs, NULL, NULL);
     ID3D11DeviceContext_PSGetShader(g_ctx, &s_ps, NULL, NULL);
-    ID3D11DeviceContext_PSGetShaderResources(g_ctx, 0, 4, s_srv);
+    ID3D11DeviceContext_PSGetShaderResources(g_ctx, 0, 5, s_srv);
     ID3D11DeviceContext_PSGetSamplers(g_ctx, 0, 1, &s_smp);
     ID3D11DeviceContext_PSGetConstantBuffers(g_ctx, 0, 1, &s_cb);
 
+    if (flash && !sfx_tex[8] && (!sfx_mk(8, 1, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, 1) ||
+                                 !sfx_mk(9, 2, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, 1) ||
+                                 !sfx_mk(10, 2, 1, DXGI_FORMAT_R16G16B16A16_FLOAT, 1))) {
+        flash = 0; /* Zwischenbilder fehlen: ohne Blitzlicht weiter */
+    }
+    sfx_gq_begin(); /* DIAG(W465) */
     ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)sfx_tex[0], res);
+    sfx_gq_mark(1);
     ID3D11DeviceContext_OMSetBlendState(g_ctx, sfx_bs, NULL, 0xFFFFFFFFu);
     ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, sfx_ds, 0);
     ID3D11DeviceContext_RSSetState(g_ctx, sfx_rs);
@@ -618,10 +793,22 @@ static void sfx_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, int quie
 
     memset(p, 0, sizeof p);
     if (bloom) {
+        ID3D11ShaderResourceView *loc_mean = NULL;
+        if (g_sba_loc) { /* W465 LoC: lokales Mittel (1/16) - grosse helle Flaechen (Himmel) leuchten nicht, nur
+                          * kleine Lichtquellen (Lampen, LEDs, Anzeigen, Feuer, Funken) */
+            p[0] = 1.0f / (float)sfx_w[0]; p[1] = 1.0f / (float)sfx_h[0];
+            sfx_pass(SP_DOWN, sfx_rtv[2], sfx_w[2], sfx_h[2], sfx_srv[0], NULL, NULL, NULL, p);
+            p[0] = 1.0f / (float)sfx_w[2]; p[1] = 1.0f / (float)sfx_h[2];
+            sfx_pass(SP_DOWN, sfx_rtv[4], sfx_w[4], sfx_h[4], sfx_srv[2], NULL, NULL, NULL, p);
+            loc_mean = sfx_srv[4];
+            p[7] = (float)sfx_pct(g_cfg.shfx_loc_lc, 0, 300) / 100.0f; /* Schwelle = lokales Mittel x Faktor */
+        }
         /* Hellpass Kopie -> 1/4 (Abgriffe in der Mitte der 2x2-Bloecke) */
         p[0] = 1.0f / (float)sfx_w[0]; p[1] = 1.0f / (float)sfx_h[0];
         p[2] = 0.55f; p[3] = 0.35f; /* Schwelle max(R,G,B) 0,55 .. 0,9 */
-        sfx_pass(SP_BRIGHT, sfx_rtv[1], sfx_w[1], sfx_h[1], sfx_srv[0], NULL, NULL, NULL, p);
+        if (g_sba_loc) { p[2] = (float)sfx_pct(g_cfg.shfx_loc_th, 0, 100) / 100.0f; p[3] = 0.25f; }
+        sfx_pass(SP_BRIGHT, sfx_rtv[1], sfx_w[1], sfx_h[1], sfx_srv[0], loc_mean, NULL, NULL, p);
+        p[7] = 0.0f;
         /* Glow: Gauss H/V auf 1/4 */
         p[4] = 1.0f / (float)sfx_w[1]; p[5] = 0.0f; p[6] = 1.0f;
         sfx_pass(SP_BLUR, sfx_rtv[2], sfx_w[2], sfx_h[2], sfx_srv[1], NULL, NULL, NULL, p);
@@ -637,6 +824,31 @@ static void sfx_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, int quie
             sfx_pass(SP_BLUR, sfx_rtv[3], sfx_w[3], sfx_h[3], sfx_srv[4], NULL, NULL, NULL, p);
         }
     }
+    sfx_gq_mark(2);
+    if (flash && sfx_noupd) { sfx_t4 = sfx_srv[sfx_fl_cur]; } /* TEST(W465) Variante: Zustand nur lesen */
+    else if (flash) { /* W465: Mittelwert des Hellpass (1/16) -> 1x1, Zustand fortschreiben (Wechselpuffer 9/10) */
+        LARGE_INTEGER qn, qf;
+        float dt, q[32];
+        int nx = sfx_fl_cur == 9 ? 10 : 9;
+        QueryPerformanceCounter(&qn); QueryPerformanceFrequency(&qf);
+        dt = sfx_fl_t ? (float)((double)(qn.QuadPart - sfx_fl_t) / (double)qf.QuadPart) : 0.0f;
+        if (dt > 0.25f || dt <= 0.0f) { dt = dt > 0.25f ? 0.25f : 0.0f; }
+        sfx_fl_t = qn.QuadPart;
+        memset(q, 0, sizeof q);
+        q[0] = 1.0f - expf(-dt / 0.6f);  /* gleitender Mittelwert ~0,6 s */
+        q[1] = expf(-dt / 0.2f);         /* Abklingen ~0,2 s */
+        if (sfx_fl_reset) { sfx_fl_hold = 0.0f; }
+        sfx_fl_hold += dt;               /* Szenenbeginn (Einblenden) ~2 s ohne Blitzlicht */
+        q[2] = sfx_fl_hold < 2.0f ? 0.0f : (float)sfx_pct(g_cfg.shfx_flash_gain, 0, 1000); /* Verstaerkung Anstieg -> Lichtfarbe */
+        q[3] = sfx_fl_reset ? 1.0f : 0.0f;
+        sfx_pass(SP_MEAN, sfx_rtv[8], 1, 1, sfx_srv[3], NULL, NULL, NULL, q);
+        sfx_pass(SP_FLASH, sfx_rtv[nx], 2, 1, sfx_srv[8], sfx_srv[sfx_fl_cur], NULL, NULL, q);
+        sfx_fl_cur = nx;
+        sfx_fl_reset = 0;
+        sfx_t4 = sfx_srv[nx];
+        if (g_cfg.shfx_flash_diag) { sfx_flash_diag(sfx_tex[nx], sfx_tex[8]); }
+    }
+    sfx_gq_mark(3);
     if (ao_srv) { /* W131 SSAO: roh (6) -> geglaettet (7), Radius 2 % der Bildhoehe */
         float q[32];
         memset(q, 0, sizeof q);
@@ -647,12 +859,17 @@ static void sfx_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, int quie
         sfx_pass(SP_AO, sfx_rtv[6], sfx_w[0], sfx_h[0], g_bb_dsrv, NULL, NULL, NULL, q);
         sfx_pass(SP_AOBLUR, sfx_rtv[7], sfx_w[0], sfx_h[0], sfx_srv[6], g_bb_dsrv, NULL, NULL, q);
     }
+    sfx_gq_mark(4);
     p[8] = glow * 1.6f;   /* Glow-Faktor bei 100 % */
     p[9] = spill * 2.5f;  /* Spill-Faktor bei 100 % (breit verteilt -> schwach) */
     p[10] = light;
+    if (flash) { /* W465: Staerke, Zentrum (Fenster: Mitte, obere 40 % des Bilds), Radius */
+        p[28] = (float)sfx_pct(g_cfg.fx_light_cockpit, 0, 200) / 100.0f;
+        p[29] = 0.5f * (float)dd.Width; p[30] = 0.36f * (float)dd.Height; p[31] = 0.75f * (float)dd.Height;
+    }
     if (comp) {
         ID3D11RenderTargetView *ct = aa ? sfx_rtv[5] : rtv;
-        if (!grade && !ao_srv && !g_cfg.ssao_view) {
+        if (!grade && !ao_srv && !g_cfg.ssao_view && !flash) {
             sfx_pass(SP_COMP, ct, dd.Width, dd.Height, sfx_srv[0], bloom ? sfx_srv[1] : NULL,
                      bloom ? sfx_srv[3] : NULL, NULL, p);
         } else {
@@ -663,6 +880,7 @@ static void sfx_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, int quie
                      bloom ? sfx_srv[3] : NULL, ao_srv, p);
         }
     }
+    sfx_gq_mark(5);
     if (aa) { /* W131 FXAA Endbild: nach Licht/Farbe (Quelle 5 bzw. Kopie 0) */
         float q[32];
         memset(q, 0, sizeof q);
@@ -670,9 +888,11 @@ static void sfx_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, int quie
         sfx_pass(SP_FXAA, rtv, dd.Width, dd.Height, comp ? sfx_srv[5] : sfx_srv[0], NULL, NULL, NULL, q);
     }
 
+    sfx_gq_end(); /* DIAG(W465) */
+    sfx_t4 = NULL;
     {
-        ID3D11ShaderResourceView *nul[4] = { NULL, NULL, NULL, NULL };
-        ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 4, nul);
+        ID3D11ShaderResourceView *nul[5] = { NULL, NULL, NULL, NULL, NULL };
+        ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 5, nul);
     }
     ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &s_rtv, s_dsv);
     ID3D11DeviceContext_OMSetBlendState(g_ctx, s_bs, s_bf, s_mask);
@@ -683,7 +903,7 @@ static void sfx_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, int quie
     ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, s_topo);
     ID3D11DeviceContext_VSSetShader(g_ctx, s_vs, NULL, 0);
     ID3D11DeviceContext_PSSetShader(g_ctx, s_ps, NULL, 0);
-    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 4, s_srv);
+    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 5, s_srv);
     ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 1, &s_smp);
     ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 0, 1, &s_cb);
     if (s_rtv) { ID3D11RenderTargetView_Release(s_rtv); }
@@ -694,7 +914,7 @@ static void sfx_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, int quie
     if (s_lay) { ID3D11InputLayout_Release(s_lay); }
     if (s_vs) { ID3D11VertexShader_Release(s_vs); }
     if (s_ps) { ID3D11PixelShader_Release(s_ps); }
-    for (k = 0; k < 4; k++) { if (s_srv[k]) { ID3D11ShaderResourceView_Release(s_srv[k]); } }
+    for (k = 0; k < 5; k++) { if (s_srv[k]) { ID3D11ShaderResourceView_Release(s_srv[k]); } }
     if (s_smp) { ID3D11SamplerState_Release(s_smp); }
     if (s_cb) { ID3D11Buffer_Release(s_cb); }
     if (quiet) { return; }
@@ -710,11 +930,71 @@ static void sfx_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, int quie
 static int sfx_mission(void)
 {
     unsigned s = 0, m = 0;
+    if (g_sba_loc) { /* W465 LOC-ENHANCED: LoC-eigene Szenenerkennung statt SB-Adressen (Null-Seite) */
+        sfx_scene = loc_render_post_scene();
+        if (sfx_scene != sfx_scene_last) { sfx_fl_reset = 1; sfx_scene_last = sfx_scene; }
+        return sfx_scene != 0;
+    }
+    sfx_scene = 1;
     __try {
         s = *(volatile unsigned *)(uintptr_t)M3D_SCENE_ADDR;
         m = *(volatile unsigned *)(uintptr_t)M3D_MLOOP_ADDR;
     } __except (EXCEPTION_EXECUTE_HANDLER) { return 0; }
     return s == 0x2Cu && m == 1u;
+}
+
+/* TEST(W465) shfx_var="name:key=v,key=v|name2:...": zu jedem LoC-Testbild (loc_shot_tick_every, Bild ohne
+ * Zwischenbilder) zusaetzlich je Variante dasselbe Bild mit anderen Nachbearbeitungs-Werten als
+ * loct_<Tick>_<name>.jpg (gleicher Augenblick, Vergleich/Abstimmung der Effekte). Das gezeigte Bild bleibt
+ * unveraendert (vorher/nachher gesichert); Blitzlicht-Zustand wird gelesen, nicht fortgeschrieben. */
+static ID3D11Texture2D *sfx_vpre, *sfx_vfin;
+static int sfx_vok;
+static int sfx_vtex(ID3D11Texture2D **t, ID3D11Resource *res)
+{
+    D3D11_TEXTURE2D_DESC td, cd;
+    ID3D11Texture2D_GetDesc((ID3D11Texture2D *)res, &td);
+    if (*t) {
+        ID3D11Texture2D_GetDesc(*t, &cd);
+        if (cd.Width == td.Width && cd.Height == td.Height && cd.Format == td.Format) { return 1; }
+        ID3D11Texture2D_Release(*t);
+        *t = NULL;
+    }
+    td.MipLevels = 1; td.ArraySize = 1; td.SampleDesc.Count = 1; td.SampleDesc.Quality = 0;
+    td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_SHADER_RESOURCE; td.CPUAccessFlags = 0; td.MiscFlags = 0;
+    return SUCCEEDED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, t));
+}
+void sb_shfx_var_pre(ID3D11Resource *res)
+{
+    sfx_vok = 0;
+    if (!g_cfg.shfx_var[0] || !g_sba_loc || !res) { return; }
+    if (!sfx_vtex(&sfx_vpre, res)) { return; }
+    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)sfx_vpre, res);
+    sfx_vok = 1;
+}
+void sb_shfx_var_shots(ID3D11RenderTargetView *rtv, ID3D11Resource *res, const char *base)
+{
+    static hcfg_t save;
+    char list[sizeof g_cfg.shfx_var], *v, *ctx = NULL;
+    if (!sfx_vok || !rtv || !res || !sfx_vtex(&sfx_vfin, res)) { return; }
+    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)sfx_vfin, res);
+    strcpy_s(list, sizeof list, g_cfg.shfx_var);
+    save = g_cfg;
+    for (v = strtok_s(list, "|", &ctx); v; v = strtok_s(NULL, "|", &ctx)) {
+        char nm[96], set[512], *c = strchr(v, ':'), *q;
+        if (!c) { continue; }
+        *c = '\0';
+        strcpy_s(set, sizeof set, c + 1);
+        for (q = set; *q; q++) { if (*q == ',') { *q = ';'; } }
+        g_cfg = save;
+        g_cfg.shfx_var[0] = '\0';
+        hcfg_apply_set(set, "shfx_var");
+        ID3D11DeviceContext_CopyResource(g_ctx, res, (ID3D11Resource *)sfx_vpre);
+        if (shfx_post_on() && sfx_mission()) { sfx_noupd = 1; sfx_apply(rtv, res, 1); sfx_noupd = 0; }
+        _snprintf_s(nm, sizeof nm, _TRUNCATE, "%s_%s", base, v);
+        sb_render_shot_name(nm, NULL);
+    }
+    g_cfg = save;
+    ID3D11DeviceContext_CopyResource(g_ctx, res, (ID3D11Resource *)sfx_vfin);
 }
 
 /* Aufrufstelle Present/Blit (unter ctx_lock): rtv/res = gezeigtes Bild */
@@ -859,24 +1139,31 @@ typedef struct {
     int fog, con, gam, sharp, bloom, glow, spill, light;     /* W121 Teil 1 */
     int expo, tone, bthr, lworld, lckp, focus;               /* W121 Teil 2 */
     int aa, ssao, sat, temp, lift, cgam, gain, shadow, soft; /* W131 */
+    int sun;                                                 /* W471 */
 } sfx_preset_t;
-static const char *const kSfxName[SB_GP_NPRE] = { "original", "dezent", "stark", "performance", "klar" };
+static const char *const kSfxName[SB_GP_NPRE] = { "original", "dezent", "stark", "performance", "klar", "enhanced",
+                                                  "vivid" /* W478 */ };
 
 /* cfg-Feld je Preset-Schluessel (Reihenfolge = kSbGfxPreset). */
-typedef char sb_gp_nkey_chk[(SB_GP_NKEY == 38 && SB_GP_FX0 == 24 && SB_GP_HD == 29 && SB_GP_MFX == 34 &&
-                              SB_GP_EDGE == 35 && SB_GP_EDGE + SB_GP_NEDGE == SB_GP_NKEY) ? 1 : -1];
+typedef char sb_gp_nkey_chk[(SB_GP_NKEY == 39 && SB_GP_FX0 == 25 && SB_GP_HD == 30 && SB_GP_MFX == 35 &&
+                              SB_GP_EDGE == 36 && SB_GP_EDGE + SB_GP_NEDGE == SB_GP_NKEY) ? 1 : -1];
 static int *const kGpField[SB_GP_NKEY] = {
     &g_cfg.shading, &g_cfg.world_fog, &g_cfg.world_contrast, &g_cfg.world_gamma, &g_cfg.world_sharpen,
     &g_cfg.bloom_strength, &g_cfg.cockpit_glow, &g_cfg.cockpit_spill, &g_cfg.cockpit_light,
     &g_cfg.world_exposure, &g_cfg.tonemap, &g_cfg.bloom_threshold, &g_cfg.light_world, &g_cfg.light_cockpit,
     &g_cfg.world_focus, &g_cfg.aa_mode, &g_cfg.ssao, &g_cfg.color_sat, &g_cfg.color_temp, &g_cfg.color_lift,
     &g_cfg.color_gamma, &g_cfg.color_gain, &g_cfg.shade_shadow, &g_cfg.shadow_soft,
+    &g_cfg.shadow_sun, /* W471 */
     &g_cfg.fx_soft, &g_cfg.fx_embers, &g_cfg.fx_light, &g_cfg.fx_light_cockpit, &g_cfg.fx_interp,
     &g_cfg.hd_textures,
     &g_cfg.interp_fps, &g_cfg.rt_scale, &g_cfg.rt_scale_dyn, &g_cfg.fs_interp_match,
     &g_cfg.monitor_fx, /* W252 */
     &g_cfg.edge_mode, &g_cfg.edge_fade_width, &g_cfg.edge_fade_strength, /* W266 */
 };
+
+/* W471: Preset-Wert fuer das laufende Spiel (LoC-Original = Spalte 0 mit den Schatten des Spiels) */
+static int gp_loc(void) { return g_sba_loc || g_cfg.loc_boot; }
+static int gp_want(int k, int q) { return sb_gp_val(k, q, gp_loc()); }
 
 static void gp_range(int part, int *k0, int *k1)
 {
@@ -899,7 +1186,7 @@ int sb_gfx_part_is(int q, int part)
     if (q < 0 || q >= SB_GP_NPRE) { return 0; }
     gp_range(part, &k0, &k1);
     for (k = k0; k < k1; k++) {
-        int want = kSbGfxPreset[k].v[q];
+        int want = gp_want(k, q);
         if (sb_rem_fx_locked(kSbGfxPreset[k].key)) { continue; }
         if (k == SB_GP_FX0 + 4) { want = want != 0; }
         if (gp_cur(k) != want) { return 0; }
@@ -915,7 +1202,7 @@ void sb_gfx_part_apply(int q, int part)
     gp_range(part, &k0, &k1);
     for (k = k0; k < k1 && k < SB_GP_HD; k++) {
         if (sb_rem_fx_locked(kSbGfxPreset[k].key)) { continue; }
-        *kGpField[k] = kSbGfxPreset[k].v[q];
+        *kGpField[k] = gp_want(k, q);
     }
 }
 
@@ -946,6 +1233,7 @@ int sb_gfx_preset_match_for(int fps, int rt)
 {
     int q;
     for (q = 0; q < SB_GP_NPRE; q++) {
+        if (!sb_gp_visible(q, g_sba_loc || g_cfg.loc_boot)) { continue; } /* W465: nur waehlbare Presets des Spiels */
         if (sb_gfx_part_is(q, SB_GFX_SHADER) && sb_gfx_part_is(q, SB_GFX_FX) &&
             gp_cur(SB_GP_HD) == kSbGfxPreset[SB_GP_HD].v[q] &&
             fps == kSbGfxPreset[SB_GP_FPS].v[q] &&
@@ -957,6 +1245,58 @@ int sb_gfx_preset_match_for(int fps, int rt)
             sb_gfx_edge_is(q)) { return q; }
     }
     return -1;
+}
+
+/* W465 LOC-ENHANCED: LoC-Spieler-cfg ohne Marke gfx_loc_rev (vor Enhanced bzw. ohne Launcher-Umstellung) ->
+ * Optik-Schluessel (Shader + Effekte, ohne Bildrate/Skalierung/Raender) auf Enhanced, SB look (W459) aus - er ist
+ * Teil von Enhanced. Gleiche Regel wie der Launcher (Migration user_loc.cfg). Nur zur Laufzeit, Datei unberuehrt.
+ * W466: Marke 1 (W465-Enhanced ohne Schatten) -> Enhanced mit Schatten.
+ * W471 LOC-SHADOW-ORIG: Marke 1/2 -> genau das alte Enhanced (Rev 1 bzw. 2, sb_gp_enh_old) wird das neue Enhanced
+ * (Kontrast 100, gedeckter, Sonne 115); genau das alte Original (Spalte 0 ohne Schatten) wird Original mit den
+ * Schatten des Spiels; eigene Werte bleiben, nur shadow_sun bekommt (falls nicht in der Datei) den bis W471
+ * wirksamen Wert 140. shadow_sun < 0 = nicht in der Datei (hcfg). */
+static int gp_optic_is(int col, int rev)
+{
+    int k;
+    for (k = 0; k < SB_GP_HD; k++) {
+        int v = *kGpField[k], want;
+        if (k == SB_GP_SUN) {
+            if (col == 0 || rev == 1) { continue; } /* ohne Schatten wirkungslos (ESC schrieb 140 auch in Original) */
+            if (v < 0) { continue; }               /* fehlt = 140 (alt) */
+        }
+        want = col == 0 ? kSbGfxPreset[k].v[0] : sb_gp_enh_old(k, rev);
+        if (k == SB_GP_FX0 + 4) { v = v != 0; want = want != 0; }
+        if (v != want) { return 0; }
+    }
+    return 1;
+}
+
+static void gp_optic_set(int q)
+{
+    int k;
+    for (k = 0; k < SB_GP_HD; k++) { *kGpField[k] = sb_gp_val(k, q, 1); }
+}
+
+void sb_gfx_loc_default(void)
+{
+    int rev = g_cfg.gfx_loc_rev;
+    if (rev == 1 || rev == 2) {
+        if (gp_optic_is(SB_GP_ENHANCED, rev)) {
+            gp_optic_set(SB_GP_ENHANCED);
+            HLOG_I("cfg: LoC %s=%d (altes Enhanced) -> Enhanced W471", SB_GP_LOC_REV_KEY, rev);
+        } else if (gp_optic_is(0, rev)) {
+            gp_optic_set(0);
+            HLOG_I("cfg: LoC %s=%d (Original) -> Original mit den Schatten des Spiels (W471)", SB_GP_LOC_REV_KEY, rev);
+        } else {
+            if (g_cfg.shadow_sun < 0) { g_cfg.shadow_sun = SB_GP_SUN_REV2; }
+            HLOG_I("cfg: LoC %s=%d, eigene Optik -> unveraendert (shadow_sun=%d, W471)", SB_GP_LOC_REV_KEY, rev,
+                   g_cfg.shadow_sun);
+        }
+        return;
+    }
+    gp_optic_set(SB_GP_ENHANCED);
+    g_cfg.loc_sblook = 0;
+    HLOG_I("cfg: LoC ohne %s -> Grafik-Preset Enhanced (W465)", SB_GP_LOC_REV_KEY);
 }
 
 int sb_gfx_preset_match(void)
@@ -974,9 +1314,9 @@ static void sfx_preset_get(int q, sfx_preset_t *t)
     f[5] = &t->bloom; f[6] = &t->glow; f[7] = &t->spill; f[8] = &t->light; f[9] = &t->expo;
     f[10] = &t->tone; f[11] = &t->bthr; f[12] = &t->lworld; f[13] = &t->lckp; f[14] = &t->focus;
     f[15] = &t->aa; f[16] = &t->ssao; f[17] = &t->sat; f[18] = &t->temp; f[19] = &t->lift;
-    f[20] = &t->cgam; f[21] = &t->gain; f[22] = &t->shadow; f[23] = &t->soft;
+    f[20] = &t->cgam; f[21] = &t->gain; f[22] = &t->shadow; f[23] = &t->soft; f[24] = &t->sun;
     t->name = kSfxName[q];
-    for (k = 0; k < SB_GP_FX0; k++) { *f[k] = kSbGfxPreset[k].v[q]; }
+    for (k = 0; k < SB_GP_FX0; k++) { *f[k] = gp_want(k, q); }
 }
 
 static void sfx_preset_set(const sfx_preset_t *t)
@@ -989,7 +1329,7 @@ static void sfx_preset_set(const sfx_preset_t *t)
     g_cfg.light_world = t->lworld; g_cfg.light_cockpit = t->lckp; g_cfg.world_focus = t->focus;
     g_cfg.aa_mode = t->aa; g_cfg.ssao = t->ssao; g_cfg.color_sat = t->sat; g_cfg.color_temp = t->temp;
     g_cfg.color_lift = t->lift; g_cfg.color_gamma = t->cgam; g_cfg.color_gain = t->gain;
-    g_cfg.shade_shadow = t->shadow; g_cfg.shadow_soft = t->soft;
+    g_cfg.shade_shadow = t->shadow; g_cfg.shadow_soft = t->soft; g_cfg.shadow_sun = t->sun;
 }
 
 /* 0 Original, 1 dezent, 2 stark (nur Shader-Teil) */
@@ -1049,6 +1389,17 @@ void sb_shfx_present_end(unsigned n)
     unsigned sf = (unsigned)g_cfg.screenshot_frame, ev = (unsigned)g_cfg.screenshot_every, ph;
     int nsets = (int)(sizeof kSfxSets3 / sizeof kSfxSets3[0]);
     if (g_cfg.shfx_ab < 4 || !sf || !ev || n + 1u < sf) { return; }
+    if (g_cfg.shfx_ab == 7) { /* TEST(W471) LoC-Quartett: +0 Original alt (ohne Schatten, Bypass), +1 Original neu
+                               * (mit den Schatten des Spiels), +2 Enhanced bis W471, +3 Werte der cfg (Kandidat) */
+        static int sv7[SB_GP_HD], have7;
+        int kk;
+        ph = (n + 1u - sf) % ev; /* Versatz des naechsten Bilds; die Werte gelten ab dem naechsten Bild */
+        if (!have7) { for (kk = 0; kk < SB_GP_HD; kk++) { sv7[kk] = *kGpField[kk]; } have7 = 1; }
+        if (ph <= 1u) { for (kk = 0; kk < SB_GP_HD; kk++) { *kGpField[kk] = sb_gp_val(kk, 0, 1); } }
+        else if (ph == 2u) { for (kk = 0; kk < SB_GP_HD; kk++) { *kGpField[kk] = sb_gp_enh_old(kk, 2); } }
+        else if (ph == 3u) { for (kk = 0; kk < SB_GP_HD; kk++) { *kGpField[kk] = sv7[kk]; } }
+        return;
+    }
     if (!saved) {
         saved = 1;
         memset(&sv, 0, sizeof sv);

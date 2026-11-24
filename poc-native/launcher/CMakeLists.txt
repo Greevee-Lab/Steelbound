@@ -86,6 +86,18 @@ add_executable(sb_launcher WIN32
   src/launcher_saves.c
   src/launcher.c
   src/launcher_gui.c
+  src/launcher_gui_draw.c
+  src/launcher_gui_settings.c
+  src/launcher_gui_help.c
+  src/launcher_gui_bind.c
+  src/launcher_gui_assist.c
+  src/launcher_gui_content.c
+  src/launcher_gui_loc.c
+  src/launcher_gui_hub.c
+  src/launcher_gui_account.c
+  src/launcher_gui_test_loc.c
+  src/launcher_gui_test.c
+  src/launcher_gui_int.h
   src/launcher_u8.c
   src/launcher_cfg.c
   src/launcher_ctrl.c

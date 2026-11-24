@@ -29,8 +29,8 @@
 #define LCH_VER 1
 #define LCH_KIND_TEXT 1
 #define LCH_HDR 16
-#define LCH_MAX_CHARS 120                       /* Zeichen (Codepunkte) je Nachricht */
-#define LCH_MAX_TEXT_BYTES (LCH_MAX_CHARS * 4)  /* 480 */
+#define LCH_MAX_CHARS 240                       /* Zeichen (Codepunkte) je Nachricht (W452: 120 -> 240) */
+#define LCH_MAX_TEXT_BYTES (LCH_MAX_CHARS * 4)  /* 960 (SBCH 976 Byte < SBT2-Nutzlast 1168 - 22 - 10) */
 #define LCH_PKT_MAX (LCH_HDR + LCH_MAX_TEXT_BYTES)
 #define LCH_PORT_GP 1262                        /* eigener Spielport (Quelle = Ziel), nicht an das Spiel */
 #define LCH_RATE_N 3
@@ -149,7 +149,7 @@ void lch_wipe(lch_state *s);
  * {"t":"chat","id":N,"from":"<Pilot>","text":"...","ts":N[,"hist":1]} - Text wird hier noch einmal bereinigt, der Name
  * auf druckbares ASCII gekuerzt; /mute gilt fuer beide Tabs. Eigene Zeile erst mit dem Echo des Dienstes (zeigt den
  * bereinigten Text, bestaetigt die Zustellung). Nichts davon wird geloggt. */
-#define LCH_SN_LINE_MAX 800 /* {"t":"chat","text":"..."} + 480 Byte UTF-8 + Escapes */
+#define LCH_SN_LINE_MAX 1100 /* {"t":"chat","text":"..."} + 960 Byte UTF-8 bzw. 240 x 2 Byte Escape (W452) */
 typedef struct lch_sn {
     lch_hist hist;          /* Verlauf des steelnet-Tabs (der Lobby-Verlauf bleibt lch_state.hist) */
     lch_rate tx_rate;       /* eigene Ratenbremse (3 je 5 s, strenger als der Dienst) */
@@ -169,3 +169,43 @@ int lch_sn_rx(lch_sn *sn, const lch_mute *mute, uint32_t now, const char *from, 
  * -1 = Bremse. */
 int lch_sn_tx(lch_sn *sn, uint32_t now, const lch_input *in, char *out, int cap);
 void lch_sn_wipe(lch_sn *sn);
+
+/* ---------------- W474 CHATTABS: Lobby-/Match-Zustand und Reiter (rein, Selbsttest) ----------------
+ * Ein zentraler Zustand "in einer Lobby bzw. im Match dieser Lobby" fuer Chat-Reiter "Lobby" und Lobby-Infopanel
+ * (loc_net_lobby_state). Eingaben: offene Spiel-TCP-Stroeme (das Spiel ist in einer Sitzung), Szene u16 [0x727988],
+ * Seite der Szene 8 (lch_page: Text-Id der ersten Menuezeile + Zeilenzahl, Werte W460), eigene Lockstep-Rahmen in
+ * den letzten 3 s bzw. Mission laut Eingabeschicht. LoC kehrt nach dem Match nicht in die Lobby zurueck: Ergebnis und
+ * Nachbesprechung gehoeren noch zur Sitzung (Lobby-Zustand), erst SIGN OUT beendet sie (Stroeme zu). Reihenfolge: ohne Strom keine Lobby; Mission/Lockstep = Match;
+ * Szene 8 auf MAIN MENU, MatchMaking oder Suche = keine Lobby, sonst Lobby (SESSION, Seitenwahl, VT-Auswahl,
+ * Briefing); Menues ausserhalb des Hubs (Szene 0/1/3/4/5/6: Logos, Titel, Hauptmenue, Benutzerdaten) = keine
+ * Lobby; jede andere Szene mit offenem Strom (Laden, Ergebnis) = Match. */
+enum { LCH_SES_NONE = 0, LCH_SES_LOBBY = 1, LCH_SES_MATCH = 2 };
+enum { LCH_PAGE_OTHER = 0, LCH_PAGE_MAIN = 1, LCH_PAGE_MATCH = 2, LCH_PAGE_SEARCH = 3 };
+#define LCH_TID_MAIN 0x1B4   /* MISSION SELECT (MAIN MENU, 7 Zeilen) - wie LW_TID_MAIN */
+#define LCH_TID_MATCH 0x3A0  /* Search Match (MatchMaking, 2 Zeilen) - wie LW_TID_MATCH */
+#define LCH_TID_SEARCH 0x432 /* Suchergebnis und "Cancel?"-Dialog (1 Zeile) */
+int lch_page(int scene, int text_id, int nitems);
+int lch_session_from(int streams, int scene, int page, int lockstep, int rb_mission);
+/* 1 = man steht selbst ausserhalb der Lobby-Seiten (MAIN MENU, MatchMaking, Suche, Menues ausserhalb des Hubs). Nur dann
+ * wird der Lobby-Verlauf geleert; geht nur der letzte Gast (Ersteller allein in seiner Lobby), verschwindet der Reiter,
+ * der Verlauf bleibt. */
+int lch_out_of_lobby(int scene, int page);
+
+/* Reiter in Anzeige- und Tab-Reihenfolge steelnet | Lobby | Team (Nutzer 24.11.). */
+enum { LCH_TAB_SN = 0, LCH_TAB_LOBBY = 1, LCH_TAB_TEAM = 2, LCH_TAB_N = 3 };
+typedef struct lch_tabin {
+    int ses;            /* LCH_SES_* */
+    int lobby_link;     /* Lobby-Chat technisch moeglich: Schalter loc_chat, sec ok, Mitspieler verbunden, Treffpunkt/LAN/direkt */
+    int sn_ready;       /* steelnet-Chat abonniert (loc_snchat, Treffpunkt verbunden) */
+    int team_known;     /* Team-Zuordnung sicher belegt (W474: nie, Teil B offen) */
+    int mis_sn, mis_lobby, mis_team; /* Schluessel loc_chat_mission_* (gelten nur im Match) */
+} lch_tabin;
+/* Bitmaske 1 << LCH_TAB_* der verfuegbaren Reiter. Lobby/Team nur in Lobby bzw. Match; im Match zusaetzlich je
+ * Schluessel loc_chat_mission_*; steelnet ueberall, im Match nur mit loc_chat_mission_sn. */
+unsigned lch_tabs_avail(const lch_tabin *in);
+/* Tab-Taste: naechster verfuegbarer Reiter nach cur in Reihenfolge (zyklisch); keiner sonst -> cur. */
+int lch_tab_next(int cur, unsigned avail);
+/* Automatischer Wechsel: Lobby neu verfuegbar -> Lobby; aktiver Reiter weg -> erster verfuegbarer; sonst cur. */
+int lch_tab_auto(int cur, unsigned avail, unsigned prev_avail);
+/* Verlauf leeren (Lobby verlassen: der naechste Beitritt beginnt leer). */
+void lch_hist_clear(lch_hist *h);

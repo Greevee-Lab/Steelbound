@@ -14,7 +14,7 @@
 
 /* ---- Fremdsprache (de.lang) ---- */
 #define LANG_FILE_MAX (192 * 1024)
-#define LANG_ENT_MAX 2048
+#define LANG_ENT_MAX 4096 /* W460: 2048 reichte nicht mehr (de.lang 2243 Eintraege, Rest fiel still auf Englisch zurueck) */
 typedef struct {
     const char *key;
     const char *val;

@@ -37,6 +37,8 @@ static lk_t s_lk[RBR_RMAX * 3];
 static int s_nlk;
 static u32 s_npg;
 static uint8_t *s_S;               /* Schatten */
+static uint8_t *s_S_keep;          /* W469: Schatten-Speicher, bleibt ueber rbr_stop erhalten (vorab reserviert) */
+static u32 s_S_cap;                /* Seiten in s_S_keep */
 static volatile uint8_t *s_pst;    /* Seitenzustand */
 static u32 *s_stamp, s_gen;        /* Laden: Seite schon zurueckgeschrieben */
 static u32 *s_dl;                  /* Sichern: Liste gemeldeter Seiten */
@@ -244,6 +246,48 @@ static LONG rbr_veh_body(EXCEPTION_POINTERS *ep)
 
 void rbr_set_owner(uint32_t tid) { s_owner = tid; }
 
+/* W469 LOC-RB-HITCH: Schatten (und Ring-Puffer) vorab anlegen und jede Seite einmal beschreiben, damit Ringstart und
+ * Neuaufbau keine 11 000 Erstzugriffe auf frischen Speicher im Spiel-Thread bezahlen (W469 V1: rbr_start ~23 ms). */
+static int rbr_touch(uint8_t *p, u32 pages)
+{
+    u32 i;
+    if (!p) return -1;
+    for (i = 0; i < pages; i++) ((volatile uint8_t *)p)[(size_t)i * PG] = 0;
+    return 0;
+}
+static int rbr_shadow_reserve(u32 pages)
+{
+    if (s_S_keep && s_S_cap >= pages) return 0;
+    if (s_S_keep) VirtualFree(s_S_keep, 0, MEM_RELEASE);
+    s_S_cap = 0;
+    s_S_keep = (uint8_t *)VirtualAlloc(NULL, (SIZE_T)pages * PG, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    if (rbr_touch(s_S_keep, pages) != 0) return -1;
+    s_S_cap = pages;
+    return 0;
+}
+int rbr_prealloc(unsigned pool_pages, unsigned shadow_pages)
+{
+    int r = 0;
+    if (s_active) return -1;
+    if (pool_pages < 64) pool_pages = 64;
+    if (!s_pool) {
+        s_pool = (uint8_t *)VirtualAlloc(NULL, (SIZE_T)pool_pages * PG, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+        s_ent = (ent_t *)calloc(pool_pages, sizeof(ent_t));
+        if (!s_pool || !s_ent) {
+            if (s_pool) VirtualFree(s_pool, 0, MEM_RELEASE);
+            free(s_ent);
+            s_pool = NULL;
+            s_ent = NULL;
+            r = -1;
+        } else {
+            s_cap = pool_pages;
+            (void)rbr_touch(s_pool, pool_pages);
+        }
+    }
+    if (shadow_pages && rbr_shadow_reserve(shadow_pages) != 0) r = -1;
+    return r;
+}
+
 int rbr_start(void)
 {
     int i, j;
@@ -264,7 +308,7 @@ int rbr_start(void)
         }
     }
     qsort(s_lk, (size_t)s_nlk, sizeof s_lk[0], lk_cmp);
-    s_S = (uint8_t *)VirtualAlloc(NULL, (SIZE_T)s_npg * PG, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+    s_S = rbr_shadow_reserve(s_npg + s_npg / 8u) == 0 ? s_S_keep : NULL; /* W469: vorab reserviert, sonst +12 % Reserve */
     s_pst = (volatile uint8_t *)calloc(s_npg + 8, 1);
     s_stamp = (u32 *)calloc(s_npg + 8, sizeof(u32));
     s_dl = (u32 *)calloc(s_npg + 8, sizeof(u32));
@@ -327,8 +371,7 @@ void rbr_stop(void)
     s_stop_us[1] = us_of(t2 - t1);
     if (s_veh) RemoveVectoredExceptionHandler(s_veh);
     s_veh = NULL;
-    if (s_S) VirtualFree(s_S, 0, MEM_RELEASE);
-    s_S = NULL;
+    s_S = NULL; /* W469: Speicher bleibt in s_S_keep (naechster Start/Neuaufbau ohne neue Allokation) */
     free((void *)s_pst);
     s_pst = NULL;
     free(s_stamp);

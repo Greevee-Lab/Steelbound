@@ -122,6 +122,7 @@ void audio_commit_deferred(void)
 /* ---------------- Huellkurven ---------------- */
 enum { EGM_OFF = 0, EGM_DELAY, EGM_ATTACK, EGM_HOLD, EGM_DECAY, EGM_SUSTAIN, EGM_RELEASE, EGM_FORCE };
 static LONG g_eg_set[2], g_eg_live[2], g_eg_play[2], g_eg_rel, g_eg_off;
+static LONG g_sx_env, g_sx_env_rel; /* W456 DIAG (SB): StopEx mit DSBSTOPEX_ENVELOPE / davon EA mit Release laufend */
 static double g_ef_hist[25]; /* Puffer-Spielzeit (Frames) je EF-Tonhoehenversatz in Halbtoenen -12..+12 */
 
 static int g_eg_psmin = 0, g_eg_psmax = 0;
@@ -176,12 +177,32 @@ void aufx_voice_play(audio_voice_t *v)
     v->hr.init = 0; /* W356: neuer Ton, HRTF-Parameter ohne Rampe von der alten Richtung */
 }
 
-/* Unter au_lock (audio_stop): 1 = EA-Release laeuft, Stimme spielt noch aus. Nur
- * wenn das Spiel eine Amplituden-Huellkurve gesetzt hat (sonst Stop sofort wie bisher). */
-int aufx_voice_stop(audio_voice_t *v)
+/* W456 BOOTSND: StopEx mit DSBSTOPEX_ENVELOPE - die EA geht vom aktuellen Pegel in die Release-Phase (MCPX
+ * voice_release; Verlauf in eg_step). Unter au_lock. 0 = keine laufende EA mit Release (Aufrufer stoppt sofort). */
+int aufx_voice_release(audio_voice_t *v)
 {
-    (void)v;
-    return 0; /* IDirectSoundBuffer_Stop = sofort (StopEx mit DSBSTOPEX_ENVELOPE nutzt das Spiel nicht, s. Bericht) */
+    if (!g_cfg.audio_eg || !v->eg[1][7] || v->eg[1][5] == 0u || v->eg_ph[1] <= EGM_OFF || v->eg_ph[1] >= EGM_RELEASE)
+        return 0;
+    v->eg_rel0[1] = v->eg_lv[1];
+    v->eg_ph[1] = EGM_RELEASE;
+    v->eg_t[1] = 0.0;
+    if (v->eg[0][7] && v->eg_ph[0] > EGM_OFF && v->eg_ph[0] < EGM_RELEASE) { /* EF folgt (Tonhoehe) */
+        v->eg_rel0[0] = v->eg_lv[0];
+        v->eg_ph[0] = EGM_RELEASE;
+        v->eg_t[0] = 0.0;
+    }
+    return 1;
+}
+
+/* W456 DIAG (SB-Pfad, hook_DSa_StopEx): StopEx-Flags zaehlen - ENVELOPE (1) und ob die Stimme eine laufende EA mit
+ * Release hat (dann haette die Konsole ausgeklungen; der SB-Pfad stoppt weiter sofort). Unter au_lock. */
+void aufx_note_stopex(audio_voice_t *v, au32 flags)
+{
+    if (!(flags & 1u) || !v->playing)
+        return;
+    g_sx_env++;
+    if (v->eg[1][7] && v->eg[1][5] && v->eg_ph[1] > EGM_OFF && v->eg_ph[1] < EGM_RELEASE)
+        g_sx_env_rel++;
 }
 
 static void eg_step(audio_voice_t *v, int k, double dt)
@@ -591,9 +612,9 @@ void aufx_log_stats(void)
 {
     lis_t l = g_lis;
     if (g_cfg.audio_eg || g_cfg.audio_api_diag)
-        HLOG_I("AUDIO eg (W348): audio_eg=%d setEF=%ld setEA=%ld davon_beim_spielen=%ld/%ld playEF=%ld playEA=%ld ea_aus=%ld pitchscale=%d..%d",
+        HLOG_I("AUDIO eg (W348): audio_eg=%d setEF=%ld setEA=%ld davon_beim_spielen=%ld/%ld playEF=%ld playEA=%ld ea_aus=%ld pitchscale=%d..%d stopex_env=%ld davon_mit_release=%ld",
                g_cfg.audio_eg, g_eg_set[0], g_eg_set[1], g_eg_live[0], g_eg_live[1], g_eg_play[0], g_eg_play[1], g_eg_off, g_eg_psmin,
-               g_eg_psmax);
+               g_eg_psmax, g_sx_env, g_sx_env_rel);
     if (g_cfg.audio_eg) { /* DIAG: Anteil der Puffer-Spielzeit je EF-Versatz (Halbtoene) */
         char b[400];
         size_t o = 0;

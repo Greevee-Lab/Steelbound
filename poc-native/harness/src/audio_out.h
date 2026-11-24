@@ -98,6 +98,14 @@ void ds_api_diag_log(void);
 void audio_set_filter(au32 v, au32 pDesc);
 void audio_set_i3dl2(au32 v, au32 pParams);
 void audio_note_eg(au32 v, au32 pDesc);
+/* W456 BOOTSND (LoC-XACT-HLE): DSENVELOPEDESC als 10 Werte (dwEG, Modus, Delay, Attack, Hold, Decay, Release,
+ * Sustain, PitchScale, FilterCutOff) setzen - wirkt wie SetEG mit dem naechsten Play (audio_eg=1). */
+void audio_set_eg(au32 v, const au32 *d10);
+/* W456: StopEx(DSBSTOPEX_ENVELOPE): laeuft die Amplituden-Huellkurve mit Release > 0, klingt die Stimme ueber
+ * die Release-Phase aus (Ende = Stimme aus) und die Rueckgabe ist 1; sonst sofort aus wie audio_stop, Rueckgabe 0. */
+int audio_stop_release(au32 v);
+void audio_note_stopex(au32 v, au32 flags); /* W456 DIAG: StopEx-Flags (SB-Pfad) */
+unsigned audio_voice_id(au32 v); /* W456 DIAG: Stimmen-Nummer (voice_levels.csv), 0 = keine */
 /* W356 AUDIO-2 (XACT-HLE, LoC): DSI3DL2BUFFER als 9 Werte (Occlusion je Quelle), Pegel des
  * I3DL2-Mixbins (Hall-Send je Cue, mB; -10000 = kein Send), Mixbin-Pegel FL FR C LFE BL BR (linear;
  * Stereo-Faltung wie audio_set_mixbins, Surround nutzt die Bins direkt). */

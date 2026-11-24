@@ -9,6 +9,7 @@
 #include "loc_tun.h"
 #include "render_int.h"
 #include "sb_overlay.h"
+#include "overlay_style.h" /* W461 OVERLAY-CORE */
 #include "loc_net.h"
 #include "loc_net_core.h"
 #include "loc_lobbylist.h"
@@ -119,13 +120,11 @@ void loc_lobbylist_frame(unsigned f)
 }
 
 /* ------------------------------------------------------------------ Anzeige (Render-Thread) */
-static HDC s_dc;
-static HBITMAP s_bmp, s_bmp_old;
-static unsigned *s_bits, *s_pm;
-static unsigned s_dw, s_dh, s_w, s_h, s_pmcap;
-static ID3D11Texture2D *s_tex;
-static ID3D11ShaderResourceView *s_srv;
-static unsigned s_tw, s_th;
+static ovs_canvas_t s_cv;    /* W461: GDI-Flaeche, Schriften und Textur aus overlay_style */
+static ovs_font_t s_fn[3];
+static ovs_tex_t s_tx;
+static unsigned *s_pm;
+static unsigned s_w, s_h, s_pmcap;
 static sb_ovl_save_t s_save;
 static u32 s_drawn_gen, s_drawn_box, s_shot_gen;
 static int s_tex_dirty, s_have;
@@ -141,24 +140,6 @@ static unsigned s_ox, s_oy; /* Lage des Inhalts im Backbuffer */
 #define LLV_DX1 521
 #define LLV_DY0 221
 #define LLV_DLH 15
-
-static void llv_box(unsigned *bx, unsigned *by, unsigned *bw, unsigned *bh)
-{
-    float ga = g_loc_wide ? 16.0f / 9.0f : 4.0f / 3.0f, ba = (float)g_bb_w / (float)(g_bb_h ? g_bb_h : 1);
-    if (ga >= ba) {
-        *bw = g_bb_w;
-        *bh = (unsigned)((float)g_bb_w / ga + 0.5f);
-        if (*bh > g_bb_h) *bh = g_bb_h;
-        *bx = 0;
-        *by = (g_bb_h - *bh) / 2;
-    } else {
-        *bh = g_bb_h;
-        *bw = (unsigned)((float)g_bb_h * ga + 0.5f);
-        if (*bw > g_bb_w) *bw = g_bb_w;
-        *bx = (g_bb_w - *bw) / 2;
-        *by = 0;
-    }
-}
 
 int loc_lobbylist_visible(void)
 {
@@ -182,17 +163,7 @@ typedef struct llv_item {
     wchar_t txt[24];
 } llv_item;
 
-static void llv_gdi_free(void)
-{
-    if (s_bmp) {
-        SelectObject(s_dc, s_bmp_old);
-        DeleteObject(s_bmp);
-        s_bmp = NULL;
-        s_bits = NULL;
-    }
-}
-
-static int llv_px(float f, float v) { int r = (int)(v * f + 0.5f); return r < 1 ? 1 : r; }
+#define llv_px ovs_px
 
 /* Inhalt (s_w x s_h, vormultipliziertes BGRA) aus dem Schnappschuss. 1 = ok (0 = nichts zu zeigen). */
 static int llv_render(const llv_snap *sn, float fx, float fy)
@@ -201,7 +172,6 @@ static int llv_render(const llv_snap *sn, float fx, float fy)
     int ni = 0, k, i;
     unsigned w = (unsigned)llv_px(fx, (float)(LLV_AX1 - LLV_AX0)), h = (unsigned)llv_px(fy, (float)(LLV_AY1 - LLV_AY0));
     HFONT fn[3], fold;
-    BITMAPINFO bi;
     for (k = 0; k < sn->v.nvis; k++) { /* Marke je Zeile links neben dem Namen */
         const char *lb = llv_mode_label(sn->mode[k]);
         int y0, y1;
@@ -214,9 +184,9 @@ static int llv_render(const llv_snap *sn, float fx, float fy)
         p->r.right = llv_px(fx, (float)(LLV_NAME_X - 6));
         p->r.top = llv_px(fy, (float)(y0 + 5 - LLV_AY0));
         p->r.bottom = llv_px(fy, (float)(y1 - 4 - LLV_AY0));
-        p->col = 0xFFFFFF;
-        p->bg = sn->mode[k] == 2 ? 0xD2780F : 0x3C6E9B;
-        p->bga = 0.92f;
+        p->col = OVS_RGB_TAG_TXT;
+        p->bg = sn->mode[k] == 2 ? OVS_RGB_ARCADE_BG : OVS_RGB_SIM_BG; /* W467: Tokens */
+        p->bga = OVS_TAG_ALPHA;
         p->font = 0;
         p->fmt = DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
         MultiByteToWideChar(CP_ACP, 0, lb, -1, p->txt, 24);
@@ -234,7 +204,7 @@ static int llv_render(const llv_snap *sn, float fx, float fy)
             p->r.right = llv_px(fx, (float)(LLV_DX0 + 150 - LLV_AX0));
             p->r.top = llv_px(fy, (float)yt);
             p->r.bottom = llv_px(fy, (float)(yt + 13));
-            p->col = 0xE6E6E6;
+            p->col = OVS_RGB_TEXT;
             p->font = 1;
             p->fmt = DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
             MultiByteToWideChar(CP_ACP, 0, lab[i], -1, p->txt, 24);
@@ -244,88 +214,37 @@ static int llv_render(const llv_snap *sn, float fx, float fy)
             p->r.right = llv_px(fx, (float)(LLV_DX1 - LLV_AX0));
             p->r.top = llv_px(fy, (float)(yt - 1));
             p->r.bottom = llv_px(fy, (float)(yt + 14));
-            p->col = i == 0 && sn->sel_mode == 2 ? 0xFFA028 : 0xFFD21E;
+            p->col = i == 0 && sn->sel_mode == 2 ? OVS_RGB_BAD : OVS_RGB_MID;
             p->font = 2;
             p->fmt = DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX;
             MultiByteToWideChar(CP_ACP, 0, val[i], -1, p->txt, 24);
         }
     }
     if (!ni || w < 8u || h < 8u) return 0;
-    if (!s_dc) {
-        s_dc = CreateCompatibleDC(NULL);
-        if (!s_dc) return 0;
-    }
-    if (!s_bmp || s_dw != w || s_dh != h) {
-        llv_gdi_free();
-        memset(&bi, 0, sizeof bi);
-        bi.bmiHeader.biSize = sizeof bi.bmiHeader;
-        bi.bmiHeader.biWidth = (LONG)w;
-        bi.bmiHeader.biHeight = -(LONG)h;
-        bi.bmiHeader.biPlanes = 1;
-        bi.bmiHeader.biBitCount = 32;
-        bi.bmiHeader.biCompression = BI_RGB;
-        s_bmp = CreateDIBSection(s_dc, &bi, DIB_RGB_COLORS, (void **)&s_bits, NULL, 0);
-        if (!s_bmp || !s_bits) {
-            s_bmp = NULL;
-            return 0;
-        }
-        s_bmp_old = (HBITMAP)SelectObject(s_dc, s_bmp);
-        s_dw = w;
-        s_dh = h;
-    }
-    if (!s_pm || s_pmcap < w * h) {
-        free(s_pm);
-        s_pm = (unsigned *)malloc((size_t)w * h * 4u);
-        s_pmcap = s_pm ? w * h : 0;
-        if (!s_pm) return 0;
-    }
-    fn[0] = CreateFontW(-llv_px(fy, 10.0f), 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
-                        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, VARIABLE_PITCH | FF_SWISS, L"Bahnschrift SemiCondensed");
-    fn[1] = CreateFontW(-llv_px(fy, 10.0f), 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
-                        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, VARIABLE_PITCH | FF_SWISS, L"Bahnschrift");
-    fn[2] = CreateFontW(-llv_px(fy, 13.0f), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
-                        CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, VARIABLE_PITCH | FF_SWISS, L"Bahnschrift");
-    if (!fn[0] || !fn[1] || !fn[2]) {
-        for (i = 0; i < 3; i++) if (fn[i]) DeleteObject(fn[i]);
-        return 0;
-    }
-    memset(s_bits, 0, (size_t)w * h * 4u);
+    if (!ovs_canvas_size(&s_cv, w, h) || !ovs_buf(&s_pm, &s_pmcap, w * h)) return 0;
+    fn[0] = ovs_font_get(&s_fn[0], OVS_FACE_COND, FW_BOLD, llv_px(fy, 10.0f));
+    fn[1] = ovs_font_get(&s_fn[1], OVS_FACE_UI, FW_NORMAL, llv_px(fy, 10.0f));
+    fn[2] = ovs_font_get(&s_fn[2], OVS_FACE_UI, FW_SEMIBOLD, llv_px(fy, 13.0f));
+    if (!fn[0] || !fn[1] || !fn[2]) return 0;
+    memset(s_cv.bits, 0, (size_t)w * h * 4u);
     memset(s_pm, 0, (size_t)w * h * 4u);
-    fold = (HFONT)SelectObject(s_dc, fn[0]);
-    SetBkMode(s_dc, TRANSPARENT);
-    SetTextColor(s_dc, RGB(255, 255, 255));
+    fold = (HFONT)SelectObject(s_cv.dc, fn[0]);
+    SetTextColor(s_cv.dc, RGB(255, 255, 255));
     for (i = 0; i < ni; i++) {
-        SelectObject(s_dc, fn[it[i].font]);
-        DrawTextW(s_dc, it[i].txt, -1, &it[i].r, it[i].fmt);
+        SelectObject(s_cv.dc, fn[it[i].font]);
+        DrawTextW(s_cv.dc, it[i].txt, -1, &it[i].r, it[i].fmt);
     }
     GdiFlush();
     /* je Element: Hintergrund (vormultipliziert), darueber Text (Abdeckung = groesster Kanal des weissen Texts) */
     for (i = 0; i < ni; i++) {
         const llv_item *p = &it[i];
-        float cr = (float)((p->col >> 16) & 255u), cg = (float)((p->col >> 8) & 255u), cb = (float)(p->col & 255u);
-        float br = (float)((p->bg >> 16) & 255u) * p->bga, bgc = (float)((p->bg >> 8) & 255u) * p->bga;
-        float bb = (float)(p->bg & 255u) * p->bga;
-        int x, y;
-        for (y = p->r.top; y < p->r.bottom && y < (int)h; y++) {
-            for (x = p->r.left; x < p->r.right && x < (int)w; x++) {
-                unsigned px = s_bits[(unsigned)y * w + (unsigned)x];
-                unsigned m = (px >> 16) & 255u, g2 = (px >> 8) & 255u, b2 = px & 255u;
-                float c, oa, orr, og, ob;
-                if (g2 > m) m = g2;
-                if (b2 > m) m = b2;
-                c = (float)m / 255.0f;
-                oa = c + p->bga * (1.0f - c);
-                orr = cr * c + br * (1.0f - c);
-                og = cg * c + bgc * (1.0f - c);
-                ob = cb * c + bb * (1.0f - c);
-                s_pm[(unsigned)y * w + (unsigned)x] = ((unsigned)(oa * 255.0f + 0.5f) << 24) |
-                                                      ((unsigned)(orr + 0.5f) << 16) | ((unsigned)(og + 0.5f) << 8) |
-                                                      (unsigned)(ob + 0.5f);
-            }
-        }
+        int y, x1 = p->r.right < (int)w ? p->r.right : (int)w;
+        if (x1 <= p->r.left) continue;
+        for (y = p->r.top; y < p->r.bottom && y < (int)h; y++)
+            ovs_pm_span(s_pm + (unsigned)y * w + (unsigned)p->r.left, s_cv.bits + (unsigned)y * w + (unsigned)p->r.left,
+                        x1 - p->r.left, p->col, p->bg, p->bga);
     }
-    SelectObject(s_dc, fold);
-    for (i = 0; i < 3; i++) DeleteObject(fn[i]);
+    SelectObject(s_cv.dc, fold);
     s_w = w;
     s_h = h;
     s_tex_dirty = 1;
@@ -334,43 +253,11 @@ static int llv_render(const llv_snap *sn, float fx, float fy)
 
 static int llv_upload(void)
 {
-    D3D11_MAPPED_SUBRESOURCE map;
-    unsigned y;
-    if (!s_tex || s_tw != s_w || s_th != s_h) { /* Quad zeigt die ganze Textur: Groesse = Inhalt */
-        D3D11_TEXTURE2D_DESC td;
-        if (s_srv) { ID3D11ShaderResourceView_Release(s_srv); s_srv = NULL; }
-        if (s_tex) { ID3D11Texture2D_Release(s_tex); s_tex = NULL; }
-        memset(&td, 0, sizeof td);
-        td.Width = s_w;
-        td.Height = s_h;
-        td.MipLevels = 1;
-        td.ArraySize = 1;
-        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_DYNAMIC;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &s_tex)) ||
-            FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)s_tex, NULL, &s_srv))) {
-            if (s_tex) { ID3D11Texture2D_Release(s_tex); s_tex = NULL; }
-            return 0;
-        }
-        s_tw = s_w;
-        s_th = s_h;
-        s_tex_dirty = 1;
-    }
+    int r = ovs_tex_ensure(&s_tx, s_w, s_h); /* Quad zeigt die ganze Textur: Groesse = Inhalt */
+    if (!r) return 0;
+    if (r == 2) s_tex_dirty = 1;
     if (!s_tex_dirty) return 1;
-    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)s_tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) return 0;
-    for (y = 0; y < s_th; y++) {
-        unsigned char *row = (unsigned char *)map.pData + (size_t)y * map.RowPitch;
-        if (y < s_h) {
-            memcpy(row, s_pm + (size_t)y * s_w, s_w * 4u);
-            if (s_tw > s_w) memset(row + s_w * 4u, 0, (s_tw - s_w) * 4u);
-        } else {
-            memset(row, 0, s_tw * 4u);
-        }
-    }
-    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)s_tex, 0);
+    if (!ovs_tex_write(&s_tx, s_pm)) return 0;
     s_tex_dirty = 0;
     return 1;
 }
@@ -382,7 +269,7 @@ void loc_lobbylist_draw(ID3D11RenderTargetView *rtv, int save)
     llv_snap sn;
     u32 box;
     if (!loc_lobbylist_visible() || !rtv || !g_dev || !g_ctx || !g_bb_w || !g_bb_h) return;
-    llv_box(&bx, &by, &bw, &bh);
+    ovs_loc_box(&bx, &by, &bw, &bh);
     if (bw < 64u || bh < 48u) return;
     fx = (float)bw / 640.0f;
     fy = (float)bh / 480.0f;
@@ -403,8 +290,9 @@ void loc_lobbylist_draw(ID3D11RenderTargetView *rtv, int save)
     s_ox = bx + (unsigned)((float)LLV_AX0 * fx + 0.5f);
     s_oy = by + (unsigned)((float)LLV_AY0 * fy + 0.5f);
     if (s_ox + s_w > g_bb_w || s_oy + s_h > g_bb_h) return;
+    ovs_layout_claim(OVS_SLOT_LOBBYLIST, s_ox, s_oy, s_w, s_h);
     if (save) sb_ovl_save_take(&s_save, rtv, s_ox, s_oy, s_w, s_h);
-    sb_ovl_quad(rtv, s_srv, s_ox, s_oy, s_w, s_h);
+    sb_ovl_quad(rtv, s_tx.srv, s_ox, s_oy, s_w, s_h);
 }
 
 void loc_lobbylist_restore(void)

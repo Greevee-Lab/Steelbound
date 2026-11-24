@@ -376,6 +376,54 @@ static void test_eg(void)
     aufx_voice_play(&v);
     aufx_chunk(&v, BLK);
     CHECK(fabsf(v.step_mul - 1.4142f) < 1e-3f, "EF OFF, Skala 64: %.4f statt 1,414", v.step_mul);
+    /* W456 (LoC #93): Release beim StopEx(ENVELOPE) - TE017-Huellkurve (Attack 46, Release 562, Sustain 255, Modus 1):
+     * nach 1 s Sustain 1,0; Release vom aktuellen Pegel exp(-6,91 t/T), Stimme nach T = 6,0 s aus. Ohne Release (0)
+     * bzw. EA OFF: aufx_voice_release = 0 (Aufrufer stoppt sofort). */
+    memset(&v, 0, sizeof v);
+    v.kind = 1;
+    v.dop = 1.0f;
+    eg_desc(d, 1, 1, 0, 46, 0, 0, 562, 255, 0);
+    aufx_eg_set(&v, d);
+    v.playing = 1;
+    aufx_voice_play(&v);
+    CHECK(v.eg_lv[1] == 0.0f, "W456 Attack beginnt bei 0 (%.3f)", v.eg_lv[1]);
+    for (c = 0; c < (int)(0.25 * MIXRATE / BLK); c++)
+        aufx_chunk(&v, BLK);
+    CHECK(v.eg_lv[1] > 0.4f && v.eg_lv[1] < 0.6f, "W456 Attack nach 0,25 s %.3f statt ~0,51", v.eg_lv[1]);
+    for (; c < (int)(1.0 * MIXRATE / BLK); c++)
+        aufx_chunk(&v, BLK);
+    CHECK(fabsf(v.eg_lv[1] - 1.0f) < 1e-4f && v.eg_ph[1] == 5, "W456 Sustain %.3f Phase %d", v.eg_lv[1], v.eg_ph[1]);
+    CHECK(aufx_voice_release(&v) == 1 && v.eg_ph[1] == 6, "W456 Release startet nicht");
+    CHECK(aufx_voice_release(&v) == 0, "W456 zweites Release");
+    {
+        int n1 = (int)(1.0 * MIXRATE / BLK), nT = (int)(562 * unit * MIXRATE / BLK) + 2, k;
+        for (k = 0; k < n1; k++)
+            aufx_chunk(&v, BLK);
+        CHECK(v.playing && fabs(v.eg_lv[1] - exp(-6.91 * 1.0 / (562 * unit))) < 0.02, "W456 Release nach 1 s %.3f",
+              v.eg_lv[1]);
+        printf("W456 Release (TE017, T=%.2f s): Pegel nach 1 s %.3f, ", 562 * unit, v.eg_lv[1]);
+        for (; k < nT; k++)
+            aufx_chunk(&v, BLK);
+        CHECK(!v.playing && v.eg_lv[1] == 0.0f, "W456 Stimme nach Release nicht aus (spielt %d, %.4f)", v.playing,
+              v.eg_lv[1]);
+        printf("nach T aus\n");
+    }
+    memset(&v, 0, sizeof v);
+    v.kind = 1;
+    v.dop = 1.0f;
+    eg_desc(d, 1, 1, 0, 0, 0, 0, 0, 255, 0); /* Release 0 */
+    aufx_eg_set(&v, d);
+    v.playing = 1;
+    aufx_voice_play(&v);
+    aufx_chunk(&v, BLK);
+    CHECK(aufx_voice_release(&v) == 0, "W456 Release 0 muss sofort stoppen");
+    eg_desc(d, 1, 0, 0, 0, 0, 0, 100, 255, 0); /* Modus OFF (Pool-Stimme ohne Huellkurve) */
+    aufx_eg_set(&v, d);
+    v.playing = 0;
+    aufx_voice_play(&v);
+    v.playing = 1;
+    aufx_chunk(&v, BLK);
+    CHECK(v.eg_lv[1] == 1.0f && aufx_voice_release(&v) == 0, "W456 EA OFF: Pegel %.3f, kein Release", v.eg_lv[1]);
     /* audio_eg=0: neutral */
     g_cfg.audio_eg = 0;
     aufx_chunk(&v, BLK);

@@ -16,6 +16,7 @@ typedef struct {
     char game_image[512];   /* W150 ISO-DIRECT: Spiel-Abbild (Vorrang vor xbe_path/media_root), leer = Ordner-Modus */
     unsigned width, height;
     int present_interval; /* 0 = aus, 1 = VSync */
+    int frame_pacing;     /* W468 PERF-PACING: 0 = Timer (alt), 1 = Monitor (Standard), 2 = VRR (Flip + Tearing) */
     int fs_interp_match; /* W207: exclusive refresh matching, default 1 */
     int fps_limit;        /* 0 = aus */
     int audio;            /* 0 = stumm, 1 = an */
@@ -63,7 +64,7 @@ typedef struct {
     int monitor_fx;         /* W252: Monitor-Effekte 1 = Original, 0 = aus ([render] monitor_fx; 2 = DIAG-Altpfad bleibt) */
     /* W131 SHADER-OPT2: Shader-Optionen ([render], Client hcfg.c; ESC-Menue
      * "Shader"/"Shader 2"). Reihenfolge = lcfg_shx_key(); Standard = Original. */
-    int shx[25]; /* W153: + LSHX_LABEL */
+    int shx[26]; /* W153: + LSHX_LABEL; W471: + LSHX_SUN */
     /* W173 LAUNCHER-P4: Effekte [render] fx_* (Client render_fx_rem.c, ESC
      * "Effekte"); gehoeren zum einheitlichen Grafik-Preset. */
     int fx[5];
@@ -104,6 +105,7 @@ typedef struct {
     int replay_logo;          /* [render] replay_logo: 1 = Spiel-Logo der Wiedergabe zeigen (Original) */
     int watermark_media;      /* [overlay] watermark_media: 1 = Wasserzeichen auch im Video-Export */
     int photo_cine_self;      /* W445 [photo] photo_cine_self: Reichweite eigene VT-Teile im Cinematic-Foto (Zehntel, 0 = aus) */
+    int gfx_custom;           /* W476 [render] launcher_gfx_custom: 1 = Grafik-Preset "Custom" ausdruecklich gewaehlt (nur Launcher) */
 } launcher_settings_t;
 /* W445 PHOTO-CINE-SELF: Standard und Raster wie der Client (hcfg.c, sb_photo.h SB_CSELF_*): 0 = aus, sonst LO..HI in STEP */
 #define LCFG_CSELF_DEF 40
@@ -133,6 +135,7 @@ enum {
     LSHX_SHADING, LSHX_FOG, LSHX_CON, LSHX_GAM, LSHX_SHARP, LSHX_BLOOM, LSHX_GLOW, LSHX_SPILL,
     LSHX_LIGHT, LSHX_EXPO, LSHX_TONE, LSHX_BTHR, LSHX_LWORLD, LSHX_LCKP, LSHX_FOCUS, LSHX_AA,
     LSHX_SSAO, LSHX_SAT, LSHX_TEMP, LSHX_LIFT, LSHX_CGAM, LSHX_GAIN, LSHX_SHADOW, LSHX_SOFT,
+    LSHX_SUN, /* W471: shadow_sun (LoC Sonne/Schatten, Preset-Schluessel) */
     LSHX_LABEL, LSHX_N /* W153 HUD-LABEL-OPT */
 };
 const char *lcfg_shx_key(int i);
@@ -150,7 +153,16 @@ const char *lcfg_fx_key(int i);
  * W266: Breitbild-Raender (edge_mode, edge_fade_width/-strength) ebenfalls.
  * Abgeleitet (kein eigener Schalter): remaster = hd_textures, fx_enhanced =
  * irgendein Effekt > 0, ultrawide/postfx = 0 (Platzhalter). */
-enum { LGP_ORIGINAL = 0, LGP_SUBTLE = 1, LGP_STRONG = 2, LGP_PERFORMANCE = 3, LGP_CLEAR = 4, LGP_CUSTOM = 5 };
+enum { LGP_ORIGINAL = 0, LGP_SUBTLE = 1, LGP_STRONG = 2, LGP_PERFORMANCE = 3, LGP_CLEAR = 4, LGP_ENHANCED = 5,
+       LGP_VIVID = 6, LGP_CUSTOM = 7 };
+/* W478 LOC-ENHANCED-VIVID: LGP_VIVID = Spalte SB_GP_VIVID ("Enhanced Vivid", nur Line of Contact, wie Enhanced
+ * ohne Experimental-Hinweis). LGP_CUSTOM steht immer direkt hinter der letzten Tabellenspalte (Pruefung in
+ * launcher_cfg.c). */
+/* W465 LOC-ENHANCED: LGP_ENHANCED = Spalte SB_GP_ENHANCED (nur Line of Contact). Sichtbar je Spiel
+ * (sb_gp_visible): SB Original/Performance/Klare Sicht, LoC Original/Enhanced; Remastered (1/2) bleibt in der
+ * Tabelle, ist aber nicht waehlbar. Erkennung (lcfg_gfx_preset) und Basis (lcfg_gfx_base) laufen nur ueber die
+ * im aktiven Spiel sichtbaren Presets; das aktive Spiel setzt lcfg_gfx_set_loc (Standard SB) oder - in der
+ * Oberflaeche - eine Bindung an g_game (lcfg_gfx_bind_game). */
 /* W252 CLEAR-VIEW: LGP_CLEAR = "Klare Sicht" (Original ohne Weltbeleuchtung
  * und ohne Monitor-Effekte); das Preset besitzt dazu monitor_fx (LGK_MFX). */
 /* Schluessel-Index k (0..LGK_N-1): 0..LSHX_N-1 = shx[] (LSHX_LABEL gehoert
@@ -172,16 +184,22 @@ const char *lcfg_gfx_key(int k);              /* cfg-Name ("" = keiner) */
 int lcfg_gfx_owned(int k);                    /* 1 = gehoert zum Preset */
 int lcfg_gfx_value(const launcher_settings_t *s, int k); /* wirksam (HD: remaster && hd_textures) */
 int lcfg_gfx_preset_value(int preset, int k); /* Sollwert (0..2), -1 = nicht im Preset */
+int lcfg_gfx_preset_value_loc(int preset, int k, int loc); /* W471: dasselbe fuer ein Spiel (LoC-Original = Schatten an) */
 /* Effect-Pack-Ausnahme: Maske der Schluessel, die ein aktives Effect Pack
  * setzt (Name wie kSbFxParams, z. B. "color_sat"; fremde Namen ignoriert). */
 void lcfg_gfx_lock_key(lgp_mask_t *m, const char *key);
 /* Erkanntes Preset (LGP_*); gesperrte Schluessel zaehlen nicht. */
 int lcfg_gfx_preset(const launcher_settings_t *s, lgp_mask_t lock);
+/* W476 LAUNCHER-CUSTOM-PRESET: lcfg_gfx_preset liefert LGP_CUSTOM auch, wenn s->gfx_custom (Custom
+ * ausdruecklich gewaehlt, cfg launcher_gfx_custom=1; der Client ignoriert "launcher_*"). lcfg_gfx_match =
+ * Erkennung nur ueber die Werte (ohne die Wahl). lcfg_gfx_apply mit einem Preset loescht die Wahl. */
+#define LCFG_KEY_GFX_CUSTOM "launcher_gfx_custom"
+int lcfg_gfx_match(const launcher_settings_t *s, lgp_mask_t lock);
 /* Abweichungen vom Preset p (Anzahl bzw. Maske; ohne gesperrte). */
 int lcfg_gfx_diff(const launcher_settings_t *s, int p, lgp_mask_t lock, lgp_mask_t *mask);
 /* Basis von Benutzerdefiniert: Preset mit den wenigsten Abweichungen. */
 int lcfg_gfx_base(const launcher_settings_t *s, lgp_mask_t lock);
-/* Preset 0..4 anwenden (alle Schluessel + Ableitungen; hud_label_avoid
+/* Preset 0..SB_GP_NPRE-1 anwenden (alle Schluessel + Ableitungen; hud_label_avoid
  * und hd_scale bleiben). */
 void lcfg_gfx_apply(launcher_settings_t *s, int preset);
 /* Ableitungen setzen: remaster = hd_textures = (remaster && hd_textures),
@@ -195,8 +213,24 @@ void lcfg_gfx_migrate(launcher_settings_t *s);
  * auto; jede andere Rate bleibt. Setzt danach gfx_preset_rev = SB_GP_REV.
  * 1 = umgestellt. */
 int lcfg_gfx_migrate_fps(launcher_settings_t *s);
+/* W465 LOC-ENHANCED: aktives Spiel der Preset-Erkennung. set_loc = fester Wert (loest eine Bindung),
+ * bind_game = folgt (*game == loc_value) (Oberflaeche: &g_game, LGAME_LOC). */
+void lcfg_gfx_set_loc(int loc);
+void lcfg_gfx_bind_game(const int *game, int loc_value);
+int lcfg_gfx_loc(void);
+int lcfg_gfx_visible(int preset); /* 1 = im aktiven Spiel waehlbar (sb_gp_visible) */
+/* W465: SB - exakt "Remastered dezent/stark" (Erkennung ueber alle Spalten, ohne Sperren) -> Original.
+ * Benutzerdefiniert bleibt. 1 = umgestellt. */
+int lcfg_gfx_migrate_remaster(launcher_settings_t *s);
+/* W465: LoC - Optik-Schluessel (shx ohne LSHX_LABEL, fx[]; k < LGK_HD) auf die Enhanced-Spalte. Bildrate,
+ * Skalierung, Raender, monitor_fx und HD bleiben. */
+void lcfg_gfx_apply_loc_look(launcher_settings_t *s);
 /* Effekt-Stufe allein (0..2, LGP_CUSTOM = eigene Werte), gesperrte zaehlen nicht. */
 int lcfg_fx_level(const launcher_settings_t *s, lgp_mask_t lock);
+/* W466: Effekt-Liste je Spiel (LoC: 0 Original, 1 Enhanced, 2 Vivid = Enhanced-Effekte mit Vivid-Farbwerten (W478);
+ * SB wie lcfg_fx_level), LGP_CUSTOM = eigene Werte. */
+int lcfg_fx_level_game(const launcher_settings_t *s, lgp_mask_t lock, int loc);
+void lcfg_fx_apply_sel(launcher_settings_t *s, int sel, int loc);
 void lcfg_fx_apply_level(launcher_settings_t *s, int level);
 
 void lcfg_defaults(launcher_settings_t *s);void lcfg_defaults(launcher_settings_t *s);

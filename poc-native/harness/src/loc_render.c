@@ -10,7 +10,10 @@
 #include "loc_net.h"
 #include "loc_lobbylist_ovl.h" /* W443 */
 #include "loc_netpanel.h" /* W447 */
+#include "loc_replayctl.h" /* W457 */
+#include "loc_lobbywidget.h" /* W460 */
 #include "render_qa.h" /* W358: g_rq_active */
+#include "render_sblook.h" /* W459 */
 
 unsigned g_loc_draws;
 static unsigned s_prev_draws;
@@ -19,8 +22,42 @@ extern int g_rqp_bump_as_2d; /* render_psgen.c */
 static void loc_ins_diag_frame(unsigned f); /* DIAG(W422) */
 static void loc_render_insignia_frame(void); /* W422 */
 
+
+/* ---------------------------------------------------------------------------
+ * W459 LOC-FX-LIGHT: SB look (Experimental) - Original-Bloom-Pfad des Spiels im Cockpit-Missionsbild
+ * freischalten (Befund und Stellen: render_sblook.h). Beim Start und bei jeder Schalter-Aenderung; vorher
+ * Bytevergleich, fremde Bytes -> nichts aendern (Log). Reine Darstellung, Spielzustand unberuehrt.
+ * ------------------------------------------------------------------------- */
+static unsigned s_sbl_bits = 0xFFFFFFFFu;
+void loc_render_sblook_apply(void)
+{
+    unsigned bits, i;
+    if (!g_sba_loc) { return; }
+    bits = sblook_bits(g_cfg.loc_sblook, g_cfg.loc_sblook_mask);
+    if (g_cfg.bloom_strength > 100) { /* W465 LOC-ENHANCED: SB-Bloom (Enhanced 150 %) -> Bloom-Pfade wie SB look */
+        bits |= SBLOOK_BLOOM_MAIN | SBLOOK_BLOOM_CAM;
+    }
+    if (bits == s_sbl_bits) { return; }
+    s_sbl_bits = bits;
+    for (i = 0; i < sizeof kSBLOOK_SITES / sizeof kSBLOOK_SITES[0]; i++) {
+        const sblook_site_t *st = &kSBLOOK_SITES[i];
+        unsigned char *p = (unsigned char *)(uintptr_t)st->va;
+        DWORD old;
+        int act;
+        __try { act = sblook_site_action(st, p, bits); } __except (EXCEPTION_EXECUTE_HANDLER) { act = -1; }
+        if (act < 0) { HLOG_W("LOCSBLOOK: %s - Bytes weichen ab, unveraendert", st->name); continue; }
+        if (act == 0) { continue; }
+        if (!VirtualProtect(p, st->len, PAGE_EXECUTE_READWRITE, &old)) { continue; }
+        memcpy(p, act == 1 ? st->patch : st->expect, st->plen);
+        VirtualProtect(p, st->len, old, &old);
+        FlushInstructionCache(GetCurrentProcess(), p, st->len);
+        HLOG_I("LOCSBLOOK: %s %s", st->name, act == 1 ? "an" : "aus (Original)");
+    }
+}
+
 void loc_render_frame(unsigned f)
 {
+    loc_render_sblook_apply(); /* W459: Schalter-Aenderung (ESC/cfg) */
     /* W285: 1 = BUMPENVMAP-Naeherung (wie 2D); W297: 2 = echt (V8U8 + Bump-Matrix) */
     g_rqp_bump_as_2d = g_sba_loc ? (g_cfg.loc_bumpenv >= 2 ? 2 : g_cfg.loc_bumpenv ? 1 : 0) : 0;
     if (g_cfg.loc_census_from > 0 && (f % 10u) == 0u) { /* DIAG: Draws je Bild (Szenenwahl) */
@@ -63,6 +100,8 @@ void loc_render_frame(unsigned f)
         loc_net_lobby_frame(f); /* W350: DIAG Lobby-Belegung (nur loc_net_diag=1) */
         loc_lobbylist_frame(f); /* W443 LOC-LOBBY-LIST: Modus/Ping je Zeile der Suchliste */
         loc_netpanel_frame(f); /* W447 LOC-NET-AUTO: Netz-Panel in der Lobby */
+        loc_rpc_frame(f); /* W457 LOC-REPLAY-CTRL: Replay-Viewer (Zustand, Bedienhilfe) */
+        loc_lobbywidget_frame(f); /* W460 LOC-LOBBY-WIDGET: offene Lobbys im Hauptmenue/MatchMaking */
     }
 }
 
@@ -133,6 +172,17 @@ static void tex_alpha_diag(ID3D11Texture2D *src, const char *what)
     ID3D11Texture2D_Release(st);
 }
 
+/* W465: LoC 4:3 mit vollem Hor+ (nicht nativ 16:9, Box schmaler als der Backbuffer, loc_horp_comp=1): die
+ * Komposition des Spiels (Glow/Bloom/Korn/Tiefenunschaerfe, W459) deckt dann die volle Breite ab. Vorher nur die
+ * 4:3-Box -> im Replay sichtbare Kante zum Hor+-Rand (BERICHT W459 §2). */
+int loc_render_horp_full(void)
+{
+    unsigned bx = 0, by = 0, bw = 0, bh = 0;
+    if (!g_sba_loc || g_loc_wide || !g_cfg.loc_horp_comp) { return 0; }
+    sb_aspect_box(&bx, &by, &bw, &bh);
+    return bw > 0u && bw + 2u < g_bb_w;
+}
+
 static ID3D11ShaderResourceView *bbc_copy(void)
 {
     ID3D11Resource *res = NULL;
@@ -145,6 +195,7 @@ static ID3D11ShaderResourceView *bbc_copy(void)
     if (s_bbc_srv && s_bbc_frame == g_present_no && s_bbc_draw == g_loc_draws) { return s_bbc_srv; }
     sb_aspect_box(&bx, &by, &bw, &bh);
     if (!bw || !bh) { return NULL; }
+    if (loc_render_horp_full()) { bx = 0; bw = g_bb_w; } /* W465: Hor+-Raender mit kopieren */
     sb_ctx_enter();
     ID3D11RenderTargetView_GetResource(g_rtv, &res);
     if (!res || FAILED(ID3D11Resource_QueryInterface(res, &IID_ID3D11Texture2D, (void **)&bb)) || !bb) {
@@ -465,6 +516,16 @@ int loc_render_interp_mission(void)
         last = m;
     }
     return m;
+}
+
+int loc_render_post_scene(void)
+{
+    extern int loc_mouse_mission(void); /* loc_pad.c */
+    unsigned rep = 0;
+    if (!g_sba_loc) { return 0; }
+    if (loc_mouse_mission()) { return 1; }
+    __try { rep = *(volatile const unsigned *)(uintptr_t)0x306BA8u; } __except (EXCEPTION_EXECUTE_HANDLER) { rep = 0; }
+    return rep ? 2 : 0;
 }
 
 int loc_render_tick_hz(void)

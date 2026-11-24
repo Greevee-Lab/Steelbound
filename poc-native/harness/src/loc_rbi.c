@@ -584,6 +584,45 @@ static int ax_err(const uint8_t *a, const uint8_t *b)
     return e;
 }
 
+/* W475: Slot-Zuordnung der eigenen Rahmen festlegen (wie die erste Entnahme, ohne etwas zu entnehmen). */
+int rbi_prime(rbi_t *r)
+{
+    u32 q;
+    if (!r->active) return 0;
+    if (r->p0 >= 0) return 1;
+    r->p0 = (int)r->own_prod;
+    r->deff = r->delay < r->p0 ? r->delay : r->p0;
+    for (q = r->own_prod > RBI_WIN ? r->own_prod - RBI_WIN : 0; q < r->own_prod; q++) {
+        int32_t s = (int32_t)q - r->p0 + r->deff;
+        if (s >= 0 && r->oqtag[q & WM] == q + 1u) put_conf(&r->p[r->self], (u32)s, r->oq[q & WM]);
+    }
+    return 1;
+}
+
+/* W475: neue Epoche/Verzoegerung, solange noch kein Slot entnommen und kein Tick gebucht wurde (auch nach rbi_prime):
+ * eigene erzeugte Rahmen bleiben, alles andere (Slot-Zuordnung, empfangene Rahmen, Bindungen) beginnt neu. */
+int rbi_rebind(rbi_t *r, u32 epoch, int delay)
+{
+    static uint8_t oq[RBI_WIN][RBI_FR];
+    static u32 oqtag[RBI_WIN];
+    u32 own_prod;
+    int i, self, maxpred;
+    if (!r->active || r->replay || r->g || r->c) return 0;
+    for (i = 0; i < RBI_MAXP; i++)
+        if (r->p[i].cons) return 0;
+    if (r->p0 < 0) return rbi_configure(r, epoch, delay);
+    memcpy(oq, r->oq, sizeof oq);
+    memcpy(oqtag, r->oqtag, sizeof oqtag);
+    own_prod = r->own_prod;
+    self = r->self;
+    maxpred = r->maxpred;
+    rbi_begin(r, epoch, self, delay, maxpred);
+    memcpy(r->oq, oq, sizeof oq);
+    memcpy(r->oqtag, oqtag, sizeof oqtag);
+    r->own_prod = own_prod;
+    return 1;
+}
+
 int rbi_take(rbi_t *r, int i, u32 cmin, uint8_t out[RBI_FR])
 {
     rbi_pl *P, *S;
@@ -592,15 +631,7 @@ int rbi_take(rbi_t *r, int i, u32 cmin, uint8_t out[RBI_FR])
     uint8_t pred_fr[RBI_FR];
     int pred = 0;
     if (!r->active || i < 0 || i >= RBI_MAXP) return 0;
-    if (r->p0 < 0) { /* erste Entnahme der Mission: Vorlauf steht fest, eigene Rahmen bekommen Slots */
-        u32 q;
-        r->p0 = (int)r->own_prod;
-        r->deff = r->delay < r->p0 ? r->delay : r->p0;
-        for (q = r->own_prod > RBI_WIN ? r->own_prod - RBI_WIN : 0; q < r->own_prod; q++) {
-            int32_t s = (int32_t)q - r->p0 + r->deff;
-            if (s >= 0 && r->oqtag[q & WM] == q + 1u) put_conf(&r->p[r->self], (u32)s, r->oq[q & WM]);
-        }
-    }
+    if (r->p0 < 0) rbi_prime(r); /* erste Entnahme der Mission: Vorlauf steht fest, eigene Rahmen bekommen Slots */
     P = &r->p[i];
     S = &r->p[r->self];
     n = P->cons;

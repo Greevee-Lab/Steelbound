@@ -38,6 +38,8 @@
 #include "render_line_src.h" /* W352 ISSUE-EMP line_scale */
 #include "render_interp_shref.h" /* W361 LOC-INTERP-CRASH */
 #include "render_interp_eye.h" /* W448 LOC-CHAFF-LOOK */
+#include "render_sblook.h" /* W459 LOC-FX-LIGHT */
+#include "render_visqz.h" /* W477 SB-SUN-WHITEOUT */
 #include "render_locmenu.h" /* W377 LOC-MENU-FPS */
 #include "render_rq_exp.h" /* W383 LOC-GH-DATA (#62) */
 #include "sb_tex_budget.h" /* W383 LOC-GH-DATA (#60) */
@@ -2304,10 +2306,10 @@ static void test_ovlloclock(void)
         { "sb_allied_squads", "ovl.ll_assist" }, /* W424; W440: aim_assist/auto_gear frei mit Hinweis (unten) */
         { "watermark_media", "ovl.ll_replay" }, { "replay_fx_live", "ovl.ll_replay" }, { "remaster", "ovl.ll_packs" },
         { "hd_textures", "ovl.ll_packs" }, { "vr_enable", "ovl.ll_vr" }, { "vr_preset", "ovl.ll_vr" },
-        { "save_lock", "ovl.ll_savelock" }, { "cockpit_glow", "ovl.ll_post" }, { "cockpit_light", "ovl.ll_post" },
-        { "color_sat", "ovl.ll_post" }, { "color_gain", "ovl.ll_post" }, { "ssao", "ovl.ll_post" },
+        { "save_lock", "ovl.ll_savelock" }, { "ssao", "ovl.ll_post" }, /* W465: Leuchten/Licht/Farbe frei */
     };
-    static const char *const freek[] = { "interp_fps", "window_mode", "rt_scale", "shading", "world_fog", "light_world",
+    static const char *const freek[] = { "cockpit_glow", "cockpit_spill", "cockpit_light", "color_sat", "color_gain", /* W465 */
+                                         "interp_fps", "window_mode", "rt_scale", "shading", "world_fog", "light_world",
                                          "light_cockpit", "bloom_strength", "shade_shadow", "aa_mode", "world_sharpen",
                                          "fx_soft", "fx_light_cockpit", "mouse_mode", "mouse_sens", "stick_aim",
                                          "sbc_mouse_off", "menu_pause", "volume_master", "volume_voice",
@@ -2436,6 +2438,80 @@ static void test_eye448(void)
       eye448_refs(pa, -556.0f, -540.0f, -530.0f, -521.0f); eye448_refs(pb, -314.0f, -290.0f, -260.0f, -246.0f);
       n++; if (ip_eye_blind((const float (*)[4])pa, Mr, 66u, (const float (*)[4])pb, Mr, 66u)) { fail++; } }
     printf("EYE448 (W448): %d Faelle (Netz hinter der Kamera exakt, Augenebene, vorn, Partikel <= 8 Vertices, Vertexzahl, Matrix): %d Fehler\n", n, fail);
+    g_fail += fail;
+}
+
+/* ---------- W477 SB-SUN-WHITEOUT: Flare-Testpunkt hinter der hinteren Ebene (render_visqz.h) ----------
+ * Werte aus M10 (Gen-2-VT, Sonne hinter der Kamera): z = 1,001365 bzw. 1,001297 -> auf der NV2A nie
+ * sichtbar (LEQUAL gegen Tiefe <= 1), egal ob ein D3D11-Treiber clippt oder auf 1,0 klemmt.
+ * Sonne im Bild vor dem Himmel (z = 0,999525) und NaN bleiben wie bisher (nicht ausgelassen). */
+static void test_visqz(void)
+{
+    /* je Vertex x, y, z, w; Schrittweite 4 Floats (im Client: Groesse von im_vertex_t) */
+    static const float behind[2][4] = { { -79.014f, 254.476f, 1.001365f, 1.0f }, { 272.689f, 243.627f, 1.001297f, 1.0f } };
+    static const float front[4] = { 643.258f, -193.541f, 0.999525f, 1.0f };
+    static const float edge[4] = { 100.0f, 100.0f, 1.0f, 1.0f };
+    static const float mixed[2][4] = { { 10.0f, 10.0f, 1.0013f, 1.0f }, { 11.0f, 10.0f, 0.9990f, 1.0f } };
+    float nanv[4] = { 10.0f, 10.0f, 0.0f, 1.0f };
+    volatile float zero = 0.0f;
+    int fail = 0, n = 0;
+    nanv[2] = zero / zero;
+    n++; if (!sb_visqz_behind_far(&behind[0][2], 4u, 1u, 0x203u)) { fail++; }      /* LEQUAL, z > 1 -> auslassen */
+    n++; if (!sb_visqz_behind_far(&behind[0][2], 4u, 2u, 0x203u)) { fail++; }      /* beide Punkte dahinter */
+    n++; if (!sb_visqz_behind_far(&behind[1][2], 4u, 1u, 0x201u)) { fail++; }      /* LESS */
+    n++; if (!sb_visqz_behind_far(&behind[1][2], 4u, 1u, 0x202u)) { fail++; }      /* EQUAL */
+    n++; if (!sb_visqz_behind_far(&behind[1][2], 4u, 1u, 0x00010203u)) { fail++; } /* nur untere 16 Bit zaehlen */
+    n++; if (sb_visqz_behind_far(front + 2, 4u, 1u, 0x203u)) { fail++; }           /* Sonne vor dem Himmel bleibt */
+    n++; if (sb_visqz_behind_far(edge + 2, 4u, 1u, 0x203u)) { fail++; }            /* z = 1 genau: besteht LEQUAL */
+    n++; if (sb_visqz_behind_far(&mixed[0][2], 4u, 2u, 0x203u)) { fail++; }        /* ein Punkt davor -> bleibt */
+    n++; if (sb_visqz_behind_far(nanv + 2, 4u, 1u, 0x203u)) { fail++; }            /* NaN -> wie bisher */
+    n++; if (sb_visqz_behind_far(&behind[0][2], 4u, 1u, 0x204u)) { fail++; }       /* GREATER: NV2A bestuende */
+    n++; if (sb_visqz_behind_far(&behind[0][2], 4u, 1u, 0x206u)) { fail++; }       /* GEQUAL */
+    n++; if (sb_visqz_behind_far(&behind[0][2], 4u, 1u, 0x207u)) { fail++; }       /* ALWAYS */
+    n++; if (sb_visqz_behind_far(&behind[0][2], 4u, 0u, 0x203u)) { fail++; }       /* keine Vertices */
+    n++; if (sb_visqz_behind_far(NULL, 4u, 1u, 0x203u)) { fail++; }
+    printf("VISQZ (W477): %d Faelle (Flare-Testpunkt z > 1 bei LESS/LEQUAL/EQUAL auslassen, sonst wie bisher): %d Fehler\n", n, fail);
+    g_fail += fail;
+}
+
+/* ---------- W459 LOC-FX-LIGHT: SB look (Experimental) - Bloom-Pfad des Spiels (render_sblook.h) ---------- */
+static void test_sblook(void)
+{
+    unsigned char m[8], c[8];
+    const sblook_site_t *a = &kSBLOOK_SITES[0], *b = &kSBLOOK_SITES[1];
+    int fail = 0, n = 0;
+    /* Schalter: aus -> keine Bits; an -> Maske (nur Bits 1/2) */
+    n++; if (sblook_bits(0, 3) != 0u) { fail++; }
+    n++; if (sblook_bits(1, 3) != 3u) { fail++; }
+    n++; if (sblook_bits(1, 1) != SBLOOK_BLOOM_MAIN) { fail++; }
+    n++; if (sblook_bits(1, 0xFF) != 7u) { fail++; }
+    n++; if (sblook_bits(1, 7) & ~SBLOOK_ALL) { fail++; }
+    n++; if (!(sblook_bits(1, 7) & SBLOOK_BLOOM_BOOST) || (sblook_bits(1, 3) & SBLOOK_BLOOM_BOOST)) { fail++; } /* Bit 4 = Bloom-Verstaerkung */
+    n++; if (sblook_bits(0, 7) != 0u) { fail++; }
+    /* Originalbytes: an -> patchen, aus -> nichts */
+    memcpy(m, a->expect, 8);
+    n++; if (sblook_site_action(a, m, 3u) != 1) { fail++; }
+    n++; if (sblook_site_action(a, m, 0u) != 0) { fail++; }
+    n++; if (sblook_site_action(a, m, SBLOOK_BLOOM_CAM) != 0) { fail++; } /* fremdes Bit */
+    /* gepatcht (JZ -> JMP, Rest gleich): an -> nichts, aus -> zurueck */
+    memcpy(m, a->patch, a->plen);
+    n++; if (sblook_site_state(a, m) != 1) { fail++; }
+    n++; if (sblook_site_action(a, m, 3u) != 0) { fail++; }
+    n++; if (sblook_site_action(a, m, 0u) != 2) { fail++; }
+    n++; if (m[0] != 0xEB || a->patch[0] != 0xEB || a->expect[0] != 0x74) { fail++; }
+    /* fremde Bytes (anderes Abbild) -> verweigert, auch wenn nur der Rest abweicht */
+    memcpy(c, a->expect, 8); c[3] = 0x36;
+    n++; if (sblook_site_action(a, c, 3u) != -1) { fail++; }
+    c[0] = 0xEB;
+    n++; if (sblook_site_action(a, c, 0u) != -1) { fail++; }
+    /* Lock-On-Kamera: JNZ 75 07 + CALL -> 2x NOP */
+    memset(c, 0, 8); c[0] = 0x75; c[1] = 0x07; c[2] = 0xE8;
+    n++; if (sblook_site_action(b, c, SBLOOK_BLOOM_CAM) != 1) { fail++; }
+    n++; if (sblook_site_action(b, c, SBLOOK_BLOOM_MAIN) != 0) { fail++; }
+    c[0] = 0x90; c[1] = 0x90;
+    n++; if (sblook_site_action(b, c, 0u) != 2) { fail++; }
+    n++; if (a->va != 0x29712u || b->va != 0x298BBu) { fail++; }
+    printf("SBLOOK (W459): %d Faelle (Schalter/Maske, patchen, zuruecksetzen, fremde Bytes verweigert, Lock-On-Kamera): %d Fehler\n", n, fail);
     g_fail += fail;
 }
 
@@ -2972,6 +3048,8 @@ int main(int argc, char **argv)
     test_retmark444(); /* W444 */
     test_loclook();
     test_eye448(); /* W448 */
+    test_sblook(); /* W459 */
+    test_visqz(); /* W477 */
     test_linescale();
     test_shref();
     test_rqexp();

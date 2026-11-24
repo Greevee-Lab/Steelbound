@@ -249,6 +249,30 @@ void imap_slide_assist(imap_state_t *st, imap_block_t *blk, int dig, int hold);
 unsigned imap_toggles_apply(imap_block_t *blk, imap_state_t *st,
                             const imap_snap_t *snap);
 
+/* W451 LOC-TOGGLE-SYNC (toggle_assist in Line of Contact, GitHub #87): Schalterpruefung des LoC-Cockpits
+ * (Cockpit [0x390CA0 + Spieler*0x374], FUN_000733E0): +0x214 = 1 Pruefung laeuft, +0x220 = 1 Schalterstufe,
+ * +0x224+4i Zustand je Schalter: 0 aus, 1 Balken steigt, 2 faellt, 3 fertig, 4 = beim Eintritt schon AN (blinkt
+ * rot, FUN_00073260: erst AUS zaehlt). Nach Eject/Respawn steht die Rast noch auf AN -> alle 5 auf 4.
+ * Reine Funktion (Selbsttest): v = gelesene Spielwerte, latch = Rast (tog_latch), chg = gerade umgeklappte
+ * Schalter (imap_toggles_apply), btn2 = buttons[2] des SBC-Blocks (bi34+i = Bit 2+i). Ein Druck auf einen
+ * Schalter in Zustand 4 legt ihn neu um: Rast bleibt AN, das Bit bleibt AUS, bis das Spiel den Schalter auf
+ * "aus" fuehrt (Zustand != 4, mindestens IMAP_LOCTOG_MIN Abfragen, hoechstens IMAP_LOCTOG_MAX), dann wieder AN
+ * -> Zustand 1. Rueckgabe: Bitmaske der neu umgelegten Schalter (Log). */
+#define IMAP_LOCTOG_MIN 2
+#define IMAP_LOCTOG_MAX 40
+typedef struct {
+    int valid;  /* Cockpit des eigenen Spielers gelesen */
+    int phase;  /* +0x214 */
+    int sub;    /* +0x220 */
+    int st[5];  /* +0x224 + 4i */
+} imap_loctog_view_t;
+typedef struct {
+    uint8_t pulse;     /* Bit i: Schalter i liegt im AUS-Puls */
+    uint8_t n[5];      /* Abfragen im Puls */
+} imap_loctog_t;
+unsigned imap_loctog_step(imap_loctog_t *t, const imap_loctog_view_t *v, uint8_t *latch, unsigned chg,
+                          uint16_t *btn2);
+
 /* ---- Legacy-Abbildung (1:1 aus hooks_input.c extrahiert) ----
  * Exakt die bisherige feste Belegung (BUTTONMAP.md): Tasten, 256+bi-
  * Virtuals, I/H-Taster/Toggle, Pfeile (-> Sight immer, -> Aiming nur ohne
@@ -337,6 +361,20 @@ typedef enum {
     IMAP_AX_COUNT
 } imap_axis_t;
 
+/* W457 LOC-REPLAY-CTRL: Client-Aktionen fuer den Replay-Viewer von Line of Contact (nur waehrend der Wiedergabe,
+ * loc_replayctl.c). Reihenfolge = Index in imap_profile_t.lrp[]. */
+typedef enum {
+    IMAP_LRP_PAUSE = 0, /* "replay_pause"  Pause/Weiter           (SBC F1 = bi22) */
+    IMAP_LRP_NEXT,      /* "replay_next"   naechster Spieler      (SBC F2 = bi23) */
+    IMAP_LRP_PREV,      /* "replay_prev"   voriger Spieler        (bi23 + Chaff bi18 = rueckwaerts) */
+    IMAP_LRP_CAMERA,    /* "replay_camera" Kamera wechseln        (SBC FSS = bi13) */
+    IMAP_LRP_SPEED,     /* "replay_speed"  Zeitlupe stufen        (SBC Tank Detach = bi19) */
+    IMAP_LRP_HELP,      /* "replay_help"   Bedienhilfe ein/aus    (nur Overlay) */
+    IMAP_LRP_N
+} imap_lrp_t;
+#define IMAP_LRP_DEFAULTS { "KEY:P", "KEY:T", "KEY:G", "KEY:PAGEUP", "KEY:PAGEDOWN", "KEY:F1" }
+#define IMAP_LRP_NAMES { "replay_pause", "replay_next", "replay_prev", "replay_camera", "replay_speed", "replay_help" }
+
 typedef struct {
     char name[64];
     imap_bind_t btn[39];
@@ -396,6 +434,10 @@ typedef struct {
      * Spieltaste (bi0..bi38) ENTER ohne Zusatztaste nutzt, sonst aus (imap_profile_parse). */
     imap_bind_t chat;
     int chat_set;
+    /* W457 LOC-REPLAY-CTRL: Replay-Aktionen (imap_lrp_t). lrp_set[i] = 1: Zeile steht im Profil (auch leer = aus);
+     * fehlt sie, gilt IMAP_LRP_DEFAULTS[i] (imap_profile_parse). Alle Quellen (Tastatur, Pad, SBC, Joystick). */
+    imap_bind_t lrp[IMAP_LRP_N];
+    int lrp_set[IMAP_LRP_N];
     int has_pad; /* 1 = Profil referenziert Pad-Quellen */
     int has_sbc; /* 1 = Profil referenziert SBC-Quellen */
     /* W221 HOTAS (experimentell): Geraete-Zuordnung je Slot ("joy0 = <Name
@@ -461,6 +503,25 @@ int imap_action_net_hud(const imap_profile_t *prof, imap_state_t *st, const imap
 /* W299 REPLAY: Pegel der Aktion "replay_exit" (alle Quellen inkl. Tastatur). Unbelegt -> 0. */
 int imap_action_replay_exit(const imap_profile_t *prof, const imap_snap_t *snap);
 #define IMAP_REPLAY_EXIT_DEFAULT "KEY:BACKSPACE"
+/* W457 LOC-REPLAY-CTRL: Pegel der Replay-Aktion i (imap_lrp_t; alle Quellen inkl. Tastatur, wie replay_exit).
+ * Unbelegt/ungueltig -> 0. Der Aufrufer prueft, ob der LoC-Replay-Viewer laeuft. */
+int imap_action_lrp(const imap_profile_t *prof, const imap_snap_t *snap, int i);
+/* W457: Name der Replay-Aktion i ("replay_pause" ...) bzw. NULL. */
+const char *imap_lrp_name(int i);
+/* W457 LOC-REPLAY-CTRL: SBC-Bitnummern (bi) der Direkttasten des Viewers. */
+#define LRP_BI_MAIN 0     /* Hauptwaffe: Menuepunkt ausloesen */
+#define LRP_BI_PAUSE 22   /* F1 -> Punkt 0 */
+#define LRP_BI_PLAYER 23  /* F2 -> Punkt 3 */
+#define LRP_BI_CAMERA 13  /* FSS -> Punkt 2 */
+#define LRP_BI_SPEED 19   /* Tank Detach -> Punkt 1 */
+#define LRP_BI_EXITSEL 15 /* Line Color Change -> Punkt 8 waehlen (Beenden braucht danach die Hauptwaffe) */
+#define LRP_BI_BACK 18    /* Chaff gehalten = rueckwaerts */
+#define LRP_ITEM_EXIT 8
+
+/* Rein, testbar: SBC-Tasten fuer die Aktionspegel lvl[IMAP_LRP_N] und replay_exit (exit_lvl), sel = gewaehlter
+ * Menuepunkt [0x306AA0]. ODER-t in b[3] (bi0..15, 16..31, 32..38). Rueckgabe: Anzahl gesetzter Tasten. */
+int imap_lrp_bits(const int lvl[IMAP_LRP_N], int exit_lvl, int sel, uint16_t b[3]);
+
 #define IMAP_NET_HUD_DEFAULT "KEY:F3" /* W374 */
 /* W438 CTRL-RESET-040: Tasten des virtuellen LoC-Menue-Pads (loc_pad.c). prof == NULL: Legacy (kein Profil)
  * wie bisher Enter = START, SPACE = A, Backspace = B. Mit Profil: START folgt bi6, A folgt bi0, B folgt

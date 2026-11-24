@@ -743,6 +743,145 @@ static void dump_profile(const imap_profile_t *p)
     }
 }
 
+/* W451 LOC-TOGGLE-SYNC: Rast + LoC-Schalterpruefung (imap_loctog_step), Eject-Fall. Ein Poll = Abbildung,
+ * Rast, Schritt; v = simulierte Spielwerte (Cockpit +0x214/+0x220/+0x224). */
+static unsigned lt_poll(imap_block_t *b, imap_state_t *st, imap_snap_t *sn, imap_loctog_t *t,
+                        const imap_loctog_view_t *v, int key1, unsigned *refl)
+{
+    int k1[] = { '1' };
+    unsigned chg;
+    set_keys(key1 ? k1 : NULL, key1 ? 1 : 0);
+    imap_legacy_apply(b, st, sn);
+    chg = imap_toggles_apply(b, st, sn);
+    *refl = imap_loctog_step(t, v, &st->tog_latch, chg, &b->buttons[2]);
+    return chg;
+}
+
+static void run_loctog_cases(void)
+{
+    imap_block_t b;
+    imap_state_t st;
+    imap_snap_t sn;
+    imap_loctog_t t;
+    imap_loctog_view_t v;
+    cfgvar_t c = { 1, 1, 0, 1, 4, 0, 0 };
+    unsigned refl, i, n_off = 0, back = 0;
+    int k, k1[] = { '1' };
+
+    printf("Teil 4b: W451 LoC-Kippschalter nach Eject (toggle_assist)\n");
+    imap_state_init(&st);
+    memset(&t, 0, sizeof t);
+    memset(&v, 0, sizeof v);
+    make_snap(&sn, 1, &c);
+    sn.replay_active = 0;
+    /* Erster VT: Pruefung, Druck 1 -> Rast AN, Zustand 0 -> normal (keine Hilfe noetig). */
+    v.valid = 1; v.phase = 1; v.sub = 1;
+    lt_poll(&b, &st, &sn, &t, &v, 1, &refl);
+    CHECK(refl == 0 && (st.tog_latch & 1) && (b.buttons[2] & 0x4), "erster VT: Druck 1 rastet AN (Zustand 0, ohne Hilfe)");
+    lt_poll(&b, &st, &sn, &t, &v, 0, &refl);
+    v.st[0] = 3; /* fertig */
+    lt_poll(&b, &st, &sn, &t, &v, 0, &refl);
+    CHECK((b.buttons[2] & 0x4) && t.pulse == 0, "Schalter fertig, Bit bleibt AN");
+    /* Eject: neuer VT, Pruefung beginnt, Rast noch AN -> Spiel fuehrt Zustand 4 (blinkt rot). */
+    v.st[0] = 4;
+    lt_poll(&b, &st, &sn, &t, &v, 0, &refl);
+    CHECK((b.buttons[2] & 0x4) && refl == 0, "nach Eject: ohne Druck keine Aenderung (Bit AN, Zustand 4)");
+    /* Druck 1: neu umlegen - Rast bleibt AN, Bit AUS. */
+    lt_poll(&b, &st, &sn, &t, &v, 1, &refl);
+    CHECK(refl == 1 && (st.tog_latch & 1) && !(b.buttons[2] & 0x4) && (t.pulse & 1),
+          "Eject: Druck 1 -> neu umgelegt (Rast AN, Bit AUS)");
+    /* Spiel sieht AUS erst nach der Eingabeverzoegerung (3 Polls), dann Zustand 0; danach Bit wieder AN. */
+    for (k = 0; k < 8; k++) {
+        if (k == 3) v.st[0] = 0;
+        lt_poll(&b, &st, &sn, &t, &v, 0, &refl);
+        if (!(b.buttons[2] & 0x4)) n_off++;
+        else if (!back) back = (unsigned)k + 1u;
+    }
+    CHECK(n_off == 3 && back == 4 && t.pulse == 0 && (st.tog_latch & 1),
+          "AUS bis Zustand != 4 (%u Polls), dann AN (Poll %u)", n_off, back);
+    v.st[0] = 1; /* Balken steigt */
+    lt_poll(&b, &st, &sn, &t, &v, 0, &refl);
+    CHECK((b.buttons[2] & 0x4), "Zustand 1: Bit AN, Schalter zaehlt");
+
+    /* Gegenprobe ohne Hilfe (reine Rast W79): Druck klappt nur AUS. */
+    imap_state_init(&st);
+    make_snap(&sn, 1, &c);
+    sn.replay_active = 0;
+    set_keys(k1, 1);
+    imap_legacy_apply(&b, &st, &sn);
+    imap_toggles_apply(&b, &st, &sn);
+    set_keys(NULL, 0);
+    imap_legacy_apply(&b, &st, &sn);
+    imap_toggles_apply(&b, &st, &sn);
+    set_keys(k1, 1);
+    imap_legacy_apply(&b, &st, &sn);
+    imap_toggles_apply(&b, &st, &sn);
+    CHECK(!(st.tog_latch & 1) && !(b.buttons[2] & 0x4), "Gegenprobe ohne Hilfe: zweiter Druck = AUS");
+
+    /* Ausserhalb der Schalterstufe (stufe != 1, ungueltig) bzw. Zustand 3: normaler Rastdruck = AUS. */
+    for (i = 0; i < 3; i++) {
+        imap_state_init(&st);
+        memset(&t, 0, sizeof t);
+        memset(&v, 0, sizeof v);
+        v.valid = i != 1; v.phase = 1; v.sub = i == 0 ? 2 : 1; v.st[0] = i == 2 ? 3 : 4;
+        lt_poll(&b, &st, &sn, &t, &v, 1, &refl);
+        lt_poll(&b, &st, &sn, &t, &v, 0, &refl);
+        lt_poll(&b, &st, &sn, &t, &v, 1, &refl);
+        CHECK(refl == 0 && !(st.tog_latch & 1) && !(b.buttons[2] & 0x4) && t.pulse == 0,
+              "Fall %u (stufe 2 / ungueltig / Zustand 3): Druck = AUS wie bisher", i);
+    }
+
+    /* Spiel reagiert nie (Zustand bleibt 4): Puls endet nach IMAP_LOCTOG_MAX Polls, Bit wieder AN. */
+    imap_state_init(&st);
+    memset(&t, 0, sizeof t);
+    memset(&v, 0, sizeof v);
+    st.tog_latch = 1;
+    v.valid = 1; v.phase = 1; v.sub = 1; v.st[0] = 4;
+    lt_poll(&b, &st, &sn, &t, &v, 1, &refl);
+    for (k = 0; k < IMAP_LOCTOG_MAX + 2; k++) lt_poll(&b, &st, &sn, &t, &v, 0, &refl);
+    CHECK(t.pulse == 0 && (b.buttons[2] & 0x4) && (st.tog_latch & 1), "Deckel: Puls endet, Bit wieder AN");
+
+    /* Zweiter Druck mitten im Puls: bleibt AN (Puls laeuft weiter), kein Wechsel auf AUS. */
+    imap_state_init(&st);
+    memset(&t, 0, sizeof t);
+    st.tog_latch = 1;
+    lt_poll(&b, &st, &sn, &t, &v, 1, &refl);
+    lt_poll(&b, &st, &sn, &t, &v, 0, &refl);
+    lt_poll(&b, &st, &sn, &t, &v, 1, &refl);
+    CHECK(refl == 1 && (st.tog_latch & 1) && !(b.buttons[2] & 0x4) && (t.pulse & 1),
+          "Druck im Puls: Rast AN, Puls laeuft");
+
+    /* Alle 5 nach Eject: je ein Druck legt jeden Schalter neu um (andere Bits unberuehrt). */
+    imap_state_init(&st);
+    memset(&t, 0, sizeof t);
+    st.tog_latch = 0x1F;
+    for (k = 0; k < 5; k++) v.st[k] = 4;
+    {
+        int keys[1];
+        unsigned chg;
+        for (k = 0; k < 5; k++) {
+            keys[0] = '1' + k;
+            set_keys(keys, 1);
+            imap_legacy_apply(&b, &st, &sn);
+            chg = imap_toggles_apply(&b, &st, &sn);
+            refl = imap_loctog_step(&t, &v, &st.tog_latch, chg, &b.buttons[2]);
+            CHECK(refl == (1u << k) && st.tog_latch == 0x1F && !(b.buttons[2] & (1u << (2 + k))),
+                  "Schalter %d neu umgelegt", k + 1);
+            set_keys(NULL, 0);
+            imap_legacy_apply(&b, &st, &sn);
+            imap_toggles_apply(&b, &st, &sn);
+            imap_loctog_step(&t, &v, &st.tog_latch, 0, &b.buttons[2]);
+        }
+        for (k = 0; k < 5; k++) v.st[k] = 0;
+        for (k = 0; k < 4; k++) {
+            imap_legacy_apply(&b, &st, &sn);
+            imap_toggles_apply(&b, &st, &sn);
+            imap_loctog_step(&t, &v, &st.tog_latch, 0, &b.buttons[2]);
+        }
+        CHECK(t.pulse == 0 && (b.buttons[2] & 0x7C) == 0x7C, "alle 5 wieder AN (0x%X)", b.buttons[2] & 0x7C);
+    }
+}
+
 /* W79 INPUT-REAL: Kippschalter-Rast (key_toggles), Raw-Maus, Sperre. */
 static void run_realcases(const imap_profile_t *xbox)
 {
@@ -4769,6 +4908,93 @@ static int w441_tick(imap_autogear_t *ag, const imap_autogear_cfg_t *c, imap_agv
     return g;
 }
 
+/* ---- Teil 37: W457 LOC-REPLAY-CTRL - Replay-Aktionen fuer den LoC-Viewer ---- */
+static void run_w457_replay_cases(const imap_profile_t *kb, const imap_profile_t *xbox)
+{
+    static const int dvk[IMAP_LRP_N] = { 'P', 'T', 'G', VK_PRIOR, VK_NEXT, VK_F1 };
+    imap_profile_t p, q;
+    imap_snap_t s;
+    cfgvar_t c = { 1, 0, 0, 1, 4, 0, 0 };
+    int i, lvl[IMAP_LRP_N];
+    uint16_t b[3];
+    printf("Teil 37: W457 LoC-Replay-Aktionen\n");
+    for (i = 0; i < IMAP_LRP_N; i++) {
+        CHECK(kb->lrp_set[i] == 0 && kb->lrp[i].n == 1 && kb->lrp[i].alt[0].a.kind == IMAP_A_KEY &&
+              kb->lrp[i].alt[0].a.code == dvk[i], "lrp %s: kb Standard (code=%d)", imap_lrp_name(i),
+              kb->lrp[i].n ? kb->lrp[i].alt[0].a.code : -1);
+        CHECK(xbox->lrp[i].n == 1 && xbox->lrp[i].alt[0].a.code == dvk[i], "lrp %s: xbox Standard", imap_lrp_name(i));
+    }
+    CHECK(imap_lrp_name(-1) == NULL && imap_lrp_name(IMAP_LRP_N) == NULL && strcmp(imap_lrp_name(0), "replay_pause") == 0,
+          "lrp: Namen");
+    CHECK(imap_profile_parse("replay_pause =\n", "t", &p) == 0 && p.lrp_set[IMAP_LRP_PAUSE] == 1 &&
+          p.lrp[IMAP_LRP_PAUSE].n == 0 && p.lrp[IMAP_LRP_NEXT].n == 1, "lrp: leere Zeile = aus, Rest Standard");
+    CHECK(imap_profile_parse("replay_next = KEY:F6\nreplay_next = KEY:RIGHT\n", "t", &p) == 0 &&
+          p.lrp[IMAP_LRP_NEXT].n == 1 && p.lrp[IMAP_LRP_NEXT].alt[0].a.code == VK_RIGHT, "lrp: letzte Zeile gewinnt");
+    CHECK(imap_profile_parse("replay_camera = KEY:C, PAD:Y, SBC:FSS, JOY1:B4\n", "t", &p) == 0 &&
+          p.lrp[IMAP_LRP_CAMERA].n == 4 && p.has_pad && p.has_sbc && (p.joy_used & 2u) != 0,
+          "lrp: 4 Quellen (n=%d joy=0x%X)", p.lrp[IMAP_LRP_CAMERA].n, p.joy_used);
+    CHECK(imap_profile_parse("replay_speed = KEY:F6\n", "t", &p) == 0 &&
+          imap_profile_parse("replay_speed = KEY:F7\n", "t", &q) == 0 && imap_profile_equal(&p, &q) != 0,
+          "lrp: Vergleich erkennt Unterschied");
+    CHECK(imap_profile_parse("replay_help =\n", "t", &p) == 0 && imap_profile_parse("pause =\n", "t", &q) == 0 &&
+          imap_profile_equal(&p, &q) != 0, "lrp: Vergleich erkennt leere Zeile");
+    /* Pegel je Quelle */
+    make_snap(&s, 361000u, &c);
+    set_keys(NULL, 0);
+    for (i = 0; i < IMAP_LRP_N; i++) CHECK(imap_action_lrp(kb, &s, i) == 0, "lrp %s: Ruhe -> 0", imap_lrp_name(i));
+    for (i = 0; i < IMAP_LRP_N; i++) {
+        int k[1];
+        k[0] = dvk[i];
+        set_keys(k, 1);
+        CHECK(imap_action_lrp(kb, &s, i) == 1 && imap_action_lrp(kb, &s, (i + 1) % IMAP_LRP_N) == 0,
+              "lrp %s: eigene Taste -> 1, andere 0", imap_lrp_name(i));
+    }
+    set_keys(NULL, 0);
+    CHECK(imap_action_lrp(kb, &s, -1) == 0 && imap_action_lrp(kb, &s, IMAP_LRP_N) == 0 && imap_action_lrp(NULL, &s, 0) == 0,
+          "lrp: ungueltiger Index/Profil -> 0");
+    CHECK(imap_profile_parse("replay_camera = PAD:Y, SBC:FSS\n", "t", &p) == 0, "lrp: Profil Pad/SBC");
+    memset(&s.pad, 0, sizeof s.pad);
+    s.pad.buttons = IMAP_PAD_Y;
+    s.pad_present = 1;
+    CHECK(imap_action_lrp(&p, &s, IMAP_LRP_CAMERA) == 1, "lrp: Pad Y -> Kamera");
+    s.pad.buttons = 0;
+    s.pad_present = 0;
+    s.sbc_present = 1;
+    s.sbc[0] = (uint16_t)(1u << 13); /* bi13 FSS */
+    CHECK(imap_action_lrp(&p, &s, IMAP_LRP_CAMERA) == 1, "lrp: SBC FSS -> Kamera");
+    s.sbc[0] = 0;
+    s.sbc_present = 0;
+    /* Abbildung auf die Direkttasten des Original-Controllers (Tabelle 0x231970) */
+    memset(lvl, 0, sizeof lvl);
+    memset(b, 0, sizeof b);
+    CHECK(imap_lrp_bits(lvl, 0, 0, b) == 0 && !b[0] && !b[1] && !b[2], "bits: nichts -> keine Taste");
+    lvl[IMAP_LRP_PAUSE] = 1;
+    CHECK(imap_lrp_bits(lvl, 0, 0, b) == 1 && b[1] == (1u << 6) && !b[0], "bits: Pause -> F1 (bi22)");
+    memset(lvl, 0, sizeof lvl); memset(b, 0, sizeof b);
+    lvl[IMAP_LRP_NEXT] = 1;
+    CHECK(imap_lrp_bits(lvl, 0, 0, b) == 1 && b[1] == (1u << 7), "bits: naechster Spieler -> F2 (bi23)");
+    memset(lvl, 0, sizeof lvl); memset(b, 0, sizeof b);
+    lvl[IMAP_LRP_PREV] = 1;
+    CHECK(imap_lrp_bits(lvl, 0, 0, b) == 2 && b[1] == ((1u << 7) | (1u << 2)), "bits: voriger Spieler -> F2 + Chaff");
+    memset(lvl, 0, sizeof lvl); memset(b, 0, sizeof b);
+    lvl[IMAP_LRP_CAMERA] = 1;
+    CHECK(imap_lrp_bits(lvl, 0, 0, b) == 1 && b[0] == (1u << 13) && !b[1], "bits: Kamera -> FSS (bi13)");
+    memset(lvl, 0, sizeof lvl); memset(b, 0, sizeof b);
+    lvl[IMAP_LRP_SPEED] = 1;
+    CHECK(imap_lrp_bits(lvl, 0, 0, b) == 1 && b[1] == (1u << 3), "bits: Zeitlupe -> Tank Detach (bi19)");
+    memset(lvl, 0, sizeof lvl); memset(b, 0, sizeof b);
+    lvl[IMAP_LRP_HELP] = 1;
+    CHECK(imap_lrp_bits(lvl, 0, 0, b) == 0 && !b[0] && !b[1], "bits: Hilfe -> keine Spieltaste");
+    memset(lvl, 0, sizeof lvl); memset(b, 0, sizeof b);
+    CHECK(imap_lrp_bits(lvl, 1, 3, b) == 1 && b[0] == (1u << 15), "bits: Beenden, Punkt 3 -> Line Color (Punkt 8 waehlen)");
+    memset(b, 0, sizeof b);
+    CHECK(imap_lrp_bits(lvl, 1, 8, b) == 1 && b[0] == 1u, "bits: Beenden, Punkt 8 -> Hauptwaffe (ausloesen)");
+    b[0] = 0x0040u; b[1] = 0; b[2] = 0;
+    lvl[IMAP_LRP_PAUSE] = 1;
+    CHECK(imap_lrp_bits(lvl, 0, 0, b) == 1 && b[0] == 0x0040u && b[1] == (1u << 6), "bits: ODER, vorhandene Tasten bleiben");
+    CHECK(imap_lrp_bits(NULL, 0, 0, b) == 0 && imap_lrp_bits(lvl, 0, 0, NULL) == 0, "bits: NULL -> 0");
+}
+
 static void run_w441_loc_autogear_cases(void)
 {
     imap_autogear_t ag;
@@ -4976,6 +5202,7 @@ int main(int argc, char **argv)
 
     /* Teil 4: W79 INPUT-REAL. */
     run_realcases(rc_xbox == 0 ? &xbox_file : &xbox_in);
+    run_loctog_cases(); /* Teil 4b: W451 */
 
     /* Teil 6: W92 INPUT-TAPS. */
     run_tapcases();
@@ -5034,6 +5261,7 @@ int main(int argc, char **argv)
     run_w437_chat_cases(); /* Teil 34: W437 */
     run_w439_despike_cases(); /* Teil 35: W439 */
     run_w441_loc_autogear_cases(); /* Teil 36: W441 */
+    run_w457_replay_cases(rc_kb == 0 ? &kb_file : &kb_in, rc_xbox == 0 ? &xbox_file : &xbox_in); /* Teil 37: W457 */
 
     printf("selftest: %d checks, %d failed\n", n_checks, n_fail);
     return n_fail ? 1 : 0;

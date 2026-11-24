@@ -11,6 +11,7 @@
 #include "launcher_app.h"
 #include "launcher_u8.h"
 #include "launcher_cfg.h" /* W369: lcfg_image_check im Selbsttest */
+#include "sb_gfxpreset.h" /* W465: SB_GP_LOC_REV(_KEY) */
 #include "sb_lang.h"
 #include "sb_gamever.h"
 #include "iso_vfs.h"
@@ -65,10 +66,10 @@ static void trim_val(const char *v, char *out, size_t cap)
     }
 }
 
-#define LGAME_NKEYS 5 /* W402: + launcher_pergame (Markierung der Uebernahme) */
+#define LGAME_NKEYS 6 /* W402: + launcher_pergame (Markierung der Uebernahme); W459: + loc_sblook */
 static const char *const kKeys[LGAME_NKEYS] = { LGAME_KEY_GAME, LGAME_KEY_LOC_IMAGE,
                                                 LGAME_KEY_LOC_SERVER, LGAME_KEY_LOC_WIDE,
-                                                LGAME_KEY_PERGAME };
+                                                LGAME_KEY_PERGAME, LGAME_KEY_LOC_SBLOOK };
 
 /* W326 LOC-WIDE: Bildformat (Index der Auswahl = Wert) */
 int lgame_wide_count(void)
@@ -119,6 +120,9 @@ int lgame_cfg_load(const char *path, lgame_state_t *st)
         } else if ((val = key_line(line, LGAME_KEY_LOC_WIDE)) != NULL) {
             trim_val(val, v, sizeof v);
             st->loc_widescreen = lgame_wide_clamp(atoi(v)); /* wie hcfg (atoi), ungueltig -> 0 */
+        } else if ((val = key_line(line, LGAME_KEY_LOC_SBLOOK)) != NULL) {
+            trim_val(val, v, sizeof v);
+            st->loc_sblook = atoi(v) != 0 ? 1 : 0; /* W459: fehlt/ungueltig = 0 */
         }
     }
     fclose(f);
@@ -136,7 +140,7 @@ int lgame_cfg_save_ex(const char *path, const lgame_state_t *st, unsigned mask, 
     FILE *f = NULL;
     char line[1200], vals[LGAME_NKEYS][1100], *out;
     size_t n = 0, cap = 1024 * 1024;
-    int done[LGAME_NKEYS] = { 0, 0, 0, 0, 0 }, k;
+    int done[LGAME_NKEYS] = { 0, 0, 0, 0, 0, 0 }, k;
     out = (char *)malloc(cap);
     if (!out || !path) {
         free(out);
@@ -147,6 +151,7 @@ int lgame_cfg_save_ex(const char *path, const lgame_state_t *st, unsigned mask, 
     strncpy_s(vals[2], sizeof vals[2], st->loc_server, _TRUNCATE);
     _snprintf_s(vals[3], sizeof vals[3], _TRUNCATE, "%d", lgame_wide_clamp(st->loc_widescreen));
     strcpy_s(vals[4], sizeof vals[4], "1");
+    strcpy_s(vals[5], sizeof vals[5], st->loc_sblook ? "1" : "0");
     for (k = 0; k < LGAME_NKEYS; k++) {
         if (!(mask & (1u << k))) {
             done[k] = 1; /* nicht schreiben: vorhandene Zeile bleibt (oder faellt per drop weg) */
@@ -357,6 +362,22 @@ int lgame_loc169_marked(const char *loccfg)
     return on;
 }
 
+/* render-Schluessel (unter "[render]" anhaengen): Raender, W465 gfx_loc_rev und Grafik-Preset-Schluessel.
+ * Der Client ignoriert Abschnitte; der Kopf dient nur der Lesbarkeit. */
+static int loc_render_key(const char *key)
+{
+    int k;
+    if (strncmp(key, "edge_", 5) == 0 || strcmp(key, SB_GP_LOC_REV_KEY) == 0) {
+        return 1;
+    }
+    for (k = 0; k < LGK_N; k++) {
+        if (lcfg_gfx_owned(k) && strcmp(lcfg_gfx_key(k), key) == 0) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 /* Schluessel ersetzen (erste Zeile, Doppelte entfernt) bzw. anhaengen; fehlende render-Schluessel mit
  * "[render]"-Kopf. Datei fehlt: nur mit create anlegen. 0 = ok, 1 = fehlt (nicht angelegt), -1 = Fehler. */
 static int loc169_set_keys(const char *path, const char *const *keys, const char *const *vals, int n, int create)
@@ -365,8 +386,8 @@ static int loc169_set_keys(const char *path, const char *const *keys, const char
     char line[1200];
     char *out;
     size_t o = 0, cap = 1024 * 1024;
-    int done[8] = { 0 }, k, need_render = 0, ok;
-    if (!path || n > 8) {
+    int done[48] = { 0 }, k, need_render = 0, ok;
+    if (!path || n > 48) { /* W465: bis 48 (Optik-Schluessel der LoC-Umstellung) */
         return -1;
     }
     out = (char *)malloc(cap);
@@ -412,7 +433,7 @@ static int loc169_set_keys(const char *path, const char *const *keys, const char
                                  " - Line of Contact settings (launcher). Steel Battalion uses user.cfg.\n");
     }
     for (k = 0; k < n; k++) {
-        if (!done[k] && strncmp(keys[k], "edge_", 5) == 0) {
+        if (!done[k] && loc_render_key(keys[k])) {
             need_render = 1;
         }
     }
@@ -420,7 +441,7 @@ static int loc169_set_keys(const char *path, const char *const *keys, const char
         o += (size_t)_snprintf_s(out + o, cap - o, _TRUNCATE, "[render]\n");
     }
     for (k = 0; k < n; k++) { /* zuerst die render-Schluessel unter dem Kopf */
-        if (!done[k] && strncmp(keys[k], "edge_", 5) == 0) {
+        if (!done[k] && loc_render_key(keys[k])) {
             o += (size_t)_snprintf_s(out + o, cap - o, _TRUNCATE, "%s=%s\n", keys[k], vals[k]);
             done[k] = 1;
         }
@@ -490,6 +511,129 @@ int lgame_loc169_mark(const char *loccfg, int wide, int with_edges)
         pv[k] = v[k];
     }
     return loc169_set_keys(loccfg, kK, pv, with_edges ? 5 : 2, 1) == 0 ? 0 : -1;
+}
+
+/* ------------------------------------------------------------------ */
+/* W465 LOC-ENHANCED: Grafik-Standard "Enhanced" in Line of Contact,    */
+/* einmalige Umstellung je user_loc.cfg (Marke gfx_loc_rev).            */
+/* ------------------------------------------------------------------ */
+static int cfg_last_str(const char *path, const char *key, char *out, size_t cap);
+
+int lgame_loc_rev(const char *loccfg)
+{
+    char v[64];
+    return cfg_last_str(loccfg, SB_GP_LOC_REV_KEY, v, sizeof v) ? atoi(v) : 0;
+}
+
+int lgame_loc_gfx_migrate(const char *loccfg)
+{
+    const char *keys[48];
+    const char *pv[48];
+    char v[48][16];
+    launcher_settings_t t;
+    int k, n = 0, custom;
+    int rev = loccfg ? lgame_loc_rev(loccfg) : 0;
+    if (!loccfg || !file_exists_u8(loccfg) || rev >= SB_GP_LOC_REV) {
+        return 0; /* keine LoC-Datei (Erststart setzt Enhanced) oder schon umgestellt */
+    }
+    memset(&t, 0, sizeof t);
+    lcfg_gfx_apply_loc_look(&t); /* Sollwerte aus der Tabelle (nie hart kodiert) */
+    {
+        /* W476 LAUNCHER-CUSTOM-PRESET: ausdruecklich gewaehltes Custom (launcher_gfx_custom=1) - keine Umstellung
+         * auf Enhanced/Original; Rev 0 nur die Marke, Rev 1/2 wie eigene Werte (shadow_sun + Marke). */
+        char cv[16];
+        custom = cfg_last_str(loccfg, LCFG_KEY_GFX_CUSTOM, cv, sizeof cv) && atoi(cv) != 0;
+    }
+    if (custom && rev == 0) {
+        return lgame_loc_rev_mark(loccfg) == 0 ? 1 : -1;
+    }
+    if (rev == 1 || rev == 2) {
+        /* W466: Marke 1 = W465-Enhanced ohne Schatten. W471: Marke 1/2 -> genau das alte Enhanced (sb_gp_enh_old)
+         * wird das neue Enhanced, genau das alte Original (Spalte 0 ohne Schatten) wird Original mit den Schatten
+         * des Spiels; sonst (eigene Werte) nur shadow_sun = 140 (bis W471 wirksam, wenn nicht in der Datei) + Marke. */
+        launcher_settings_t c;
+        char sv[64];
+        int sun_in = cfg_last_str(loccfg, "shadow_sun", sv, sizeof sv);
+        int enh = 1, orig = 1, col;
+        lcfg_defaults(&c);
+        lcfg_load_file(loccfg, &c);
+        for (k = 0; k < LGK_HD; k++) {
+            int r, cv;
+            if (!lcfg_gfx_owned(k) || (r = sb_gp_find(lcfg_gfx_key(k))) < 0) {
+                continue;
+            }
+            cv = lcfg_gfx_value(&c, k);
+            if (k == LGK_FX0 + LFX_INTERP) {
+                if (cv != (kSbGfxPreset[r].v[0] != 0)) { orig = 0; }
+                if (cv != (sb_gp_enh_old(r, rev) != 0)) { enh = 0; }
+                continue;
+            }
+            if (k != LSHX_SUN && cv != kSbGfxPreset[r].v[0]) { orig = 0; } /* Sonne ohne Schatten wirkungslos */
+            if ((k != LSHX_SUN || (rev == 2 && sun_in)) && cv != sb_gp_enh_old(r, rev)) { enh = 0; }
+        }
+        if (custom) {
+            enh = orig = 0; /* W476: ausdruecklich Custom bleibt Custom */
+        }
+        if (!enh && !orig) {
+            if (sun_in) {
+                return lgame_loc_rev_mark(loccfg) == 0 ? 1 : -1;
+            }
+            keys[n] = lcfg_gfx_key(LSHX_SUN);
+            _snprintf_s(v[n], sizeof v[n], _TRUNCATE, "%d", SB_GP_SUN_REV2);
+            n++;
+        } else {
+            col = enh ? SB_GP_ENHANCED : LGP_ORIGINAL;
+            for (k = 0; k < LGK_HD && n < 46; k++) {
+                if (!lcfg_gfx_owned(k)) {
+                    continue;
+                }
+                keys[n] = lcfg_gfx_key(k);
+                _snprintf_s(v[n], sizeof v[n], _TRUNCATE, "%d", lcfg_gfx_preset_value_loc(col, k, 1));
+                n++;
+            }
+        }
+        keys[n] = SB_GP_LOC_REV_KEY;
+        _snprintf_s(v[n], sizeof v[n], _TRUNCATE, "%d", SB_GP_LOC_REV);
+        n++;
+        for (k = 0; k < n; k++) {
+            pv[k] = v[k];
+        }
+        return loc169_set_keys(loccfg, keys, pv, n, 0) == 0 ? 1 : -1;
+    }
+    for (k = 0; k < LGK_HD && n < 46; k++) {
+        if (!lcfg_gfx_owned(k)) {
+            continue;
+        }
+        keys[n] = lcfg_gfx_key(k);
+        _snprintf_s(v[n], sizeof v[n], _TRUNCATE, "%d", lcfg_gfx_value(&t, k));
+        n++;
+    }
+    keys[n] = LGAME_KEY_LOC_SBLOOK;
+    strcpy_s(v[n], sizeof v[n], "0");
+    n++;
+    keys[n] = SB_GP_LOC_REV_KEY;
+    _snprintf_s(v[n], sizeof v[n], _TRUNCATE, "%d", SB_GP_LOC_REV);
+    n++;
+    for (k = 0; k < n; k++) {
+        pv[k] = v[k];
+    }
+    return loc169_set_keys(loccfg, keys, pv, n, 0) == 0 ? 1 : -1;
+}
+
+int lgame_loc_rev_mark(const char *loccfg)
+{
+    static const char *const kK[1] = { SB_GP_LOC_REV_KEY };
+    char v[16];
+    const char *pv[1];
+    if (!loccfg || !file_exists_u8(loccfg)) {
+        return 1;
+    }
+    if (lgame_loc_rev(loccfg) == SB_GP_LOC_REV) {
+        return 0;
+    }
+    _snprintf_s(v, sizeof v, _TRUNCATE, "%d", SB_GP_LOC_REV);
+    pv[0] = v;
+    return loc169_set_keys(loccfg, kK, pv, 1, 0) == 0 ? 0 : -1;
 }
 
 /* ------------------------------------------------------------------ */

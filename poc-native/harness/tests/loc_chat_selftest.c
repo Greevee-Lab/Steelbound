@@ -63,7 +63,7 @@ static void codec_tests(void)
     CHECK(lch_parse(b, len, &p) && p.nonce == 0xA1B2C3D4u && p.seq == 7u && p.len == 10 && memcmp(p.text, "Hallo Welt", 10) == 0,
           "Rundreise");
     memset(t, 'x', sizeof t);
-    CHECK(lch_build(b, sizeof b, 1, 1, t, LCH_MAX_TEXT_BYTES) == LCH_PKT_MAX, "groesstes Paket (480 Byte Text)");
+    CHECK(lch_build(b, sizeof b, 1, 1, t, LCH_MAX_TEXT_BYTES) == LCH_PKT_MAX, "groesstes Paket (960 Byte Text, W452)");
     CHECK(lch_parse(b, LCH_PKT_MAX, &p) && p.len == LCH_MAX_TEXT_BYTES, "groesstes Paket lesbar");
     CHECK(lch_build(b, sizeof b, 1, 1, t, LCH_MAX_TEXT_BYTES + 1) == 0, "zu langer Text wird nicht gebaut");
     CHECK(lch_build(b, sizeof b, 1, 1, t, 0) == 0, "leerer Text wird nicht gebaut");
@@ -88,7 +88,7 @@ static void codec_tests(void)
             case 8: memset(c + 12, 0, 4); break;     /* Nummer 0 */
             case 9: cl = len - 1; break;             /* abgeschnitten */
             case 10: cl = len + 1; c[len] = 0; break; /* Ueberhang */
-            default: c[6] = 0xE1; c[7] = 0x01; cl = LCH_HDR + 0x1E1; break; /* 481 > Grenze */
+            default: c[6] = 0xC1; c[7] = 0x03; cl = LCH_HDR + 0x3C1; break; /* W452: 961 > Grenze */
             }
             bad += !lch_parse(c, cl, &p);
         }
@@ -103,7 +103,7 @@ static void sanitize_tests(void)
     uint32_t c[LCH_MAX_CHARS + 4];
     char big[2000];
     int n, i;
-    uint8_t u8[600];
+    uint8_t u8[LCH_MAX_TEXT_BYTES + 8];
     printf("Bereinigung\n");
     n = san8("Hallo Welt", 10, c);
     CHECK(cps_eq_ascii(c, n, "Hallo Welt"), "ASCII unveraendert");
@@ -142,13 +142,13 @@ static void sanitize_tests(void)
     CHECK(cps_eq_ascii(c, n, "pqrst"), "Private Nutzung, Tag-Zeichen, Nichtzeichen, Objekt-Ersatz entfernt");
     memset(big, 'A', sizeof big);
     n = san8(big, 500, c);
-    CHECK(n == LCH_MAX_CHARS, "ueber 120 Zeichen -> 120");
-    for (i = 0; i < 480; i += 4) { big[i] = (char)0xF0; big[i + 1] = (char)0x9F; big[i + 2] = (char)0x98; big[i + 3] = (char)0x80; }
-    n = san8(big, 480, c);
-    CHECK(n == LCH_MAX_CHARS && lch_cps_to_u8(c, n, u8, sizeof u8) == 480, "120 4-Byte-Zeichen = 480 Byte (passt ins Paket)");
+    CHECK(n == LCH_MAX_CHARS && LCH_MAX_CHARS == 240, "W452: ueber 240 Zeichen -> 240");
+    for (i = 0; i < 960; i += 4) { big[i] = (char)0xF0; big[i + 1] = (char)0x9F; big[i + 2] = (char)0x98; big[i + 3] = (char)0x80; }
+    n = san8(big, 960, c);
+    CHECK(n == LCH_MAX_CHARS && lch_cps_to_u8(c, n, u8, sizeof u8) == 960, "W452: 240 4-Byte-Zeichen = 960 Byte (passt ins Paket)");
     {
         wchar_t w[LCH_LINE_W];
-        CHECK(lch_cps_to_w(c, n, w, LCH_LINE_W) == 240 && w[0] == 0xD83D && w[1] == 0xDE00 && w[240] == 0,
+        CHECK(lch_cps_to_w(c, n, w, LCH_LINE_W) == 480 && w[0] == 0xD83D && w[1] == 0xDE00 && w[480] == 0,
               "UTF-16 mit Surrogatpaaren passt in die Zeile");
     }
     {
@@ -265,12 +265,12 @@ static void input_tests(void)
     CHECK(lch_input_wchar(&in, 0x200D) == 0 && lch_input_wchar(&in, 0xFEFF) == 0, "Nullbreiten-Zeichen nicht aufgenommen");
     lch_input_back(&in);
     CHECK(in.n == 0, "Backspace loescht ein ganzes Zeichen (auch 4-Byte)");
-    for (i = 0; i < 200; i++) lch_input_wchar(&in, 'a');
-    CHECK(in.n == LCH_MAX_CHARS, "Eingabe hoechstens 120 Zeichen");
-    CHECK(lch_input_w(&in, w, LCH_LINE_W) == 120, "Anzeige der Eingabe");
+    for (i = 0; i < 300; i++) lch_input_wchar(&in, 'a');
+    CHECK(in.n == LCH_MAX_CHARS, "W452: Eingabe hoechstens 240 Zeichen");
+    CHECK(lch_input_w(&in, w, LCH_LINE_W) == 240, "Anzeige der Eingabe");
     lch_input_back(&in);
     lch_input_back(&in);
-    CHECK(in.n == 118, "mehrfach Backspace");
+    CHECK(in.n == 238, "mehrfach Backspace");
 }
 
 static void set_line(lch_input *in, const char *a)
@@ -521,7 +521,7 @@ static void sn_tests(void)
     CHECK(js_dec("\"a\"b\"", u, sizeof u) < 0, "W446 JSON: Anfuehrungszeichen mitten im Wert");
     CHECK(js_dec("\"abcdef\"", u, 4) < 0, "W446 JSON: Puffer zu klein");
     CHECK(js_dec("\"\\", u, sizeof u) < 0 && js_dec("\"\\\"", u, sizeof u) < 0, "W446 JSON: Escape am Ende");
-    /* Encoder: Rundreise, Escapes, 120 Emoji passen */
+    /* Encoder: Rundreise, Escapes, 240 Emoji passen (W452) */
     n = san8("Gr\xC3\xBC\xC3\x9F" "e \"x\" \\ y", 15, cps);
     k = lch_json_text(cps, n, body, (int)sizeof body);
     CHECK(k > 0 && strstr(body, "\\\"x\\\"") && strstr(body, " \\\\ "), "W446 JSON-Text: Escapes");
@@ -533,7 +533,7 @@ static void sn_tests(void)
     }
     for (k = 0; k < LCH_MAX_CHARS; k++) cps[k] = 0x1F600;
     n = lch_json_text(cps, LCH_MAX_CHARS, body, (int)sizeof body);
-    CHECK(n == 480, "W446 JSON-Text: 120 Emoji = 480 Byte UTF-8");
+    CHECK(n == 960, "W452 JSON-Text: 240 Emoji = 960 Byte UTF-8");
     /* Senden: Zeile, Ratenbremse, leer */
     memset(&sn, 0, sizeof sn);
     set_line(&in, "  hallo   steelnet  ");
@@ -595,6 +595,191 @@ static void sn_tests(void)
     }
 }
 
+/* W452 CHATUX: 240 Zeichen (Codepunkte, nicht Byte), Japanisch (Kana/Kanji, IME-Ergebnisse), Kyrillisch durch
+ * Bereinigung, Paket, Empfang, Eingabezeile und JSON (steelnet). Team-Tab entfaellt (BERICHT_M2 W452): kein
+ * Team-Filter im Kern. */
+static void w452_tests(void)
+{
+    static const char jp[] = "\xE3\x81\x93\xE3\x82\x93\xE3\x81\xAB\xE3\x81\xA1\xE3\x81\xAF"; /* こんにちは */
+    static const char kanji[] = "\xE6\x88\xA6\xE9\x97\x98\xE9\x96\x8B\xE5\xA7\x8B";            /* 戦闘開始 */
+    static const char ru[] = "\xD0\x9F\xD1\x80\xD0\xB8\xD0\xB2\xD0\xB5\xD1\x82";               /* Привет */
+    static const char kata_hw[] = "\xEF\xBD\xB6\xEF\xBE\x80";                                   /* ｶﾀ (Halbbreite) */
+    uint32_t c[LCH_MAX_CHARS], c2[LCH_MAX_CHARS];
+    uint8_t u8[LCH_MAX_TEXT_BYTES + 8], pkt[LCH_PKT_MAX + 8];
+    char big[LCH_MAX_TEXT_BYTES + 16], line[LCH_SN_LINE_MAX];
+    wchar_t w[LCH_LINE_W];
+    lch_state s;
+    lch_input in;
+    lch_sn sn;
+    lch_mute mu;
+    int n, i, len;
+    printf("W452 (240 Zeichen, CJK, Kyrillisch)\n");
+    n = san8(jp, (int)strlen(jp), c);
+    CHECK(n == 5 && c[0] == 0x3053 && c[4] == 0x306F, "W452: Hiragana bleibt (5 Codepunkte)");
+    n = san8(kanji, (int)strlen(kanji), c);
+    CHECK(n == 4 && c[0] == 0x6226 && c[3] == 0x59CB, "W452: Kanji bleibt");
+    n = san8(ru, (int)strlen(ru), c);
+    CHECK(n == 6 && c[0] == 0x041F && c[5] == 0x0442, "W452: Kyrillisch bleibt");
+    n = san8(kata_hw, (int)strlen(kata_hw), c);
+    CHECK(n == 2 && c[0] == 0xFF76, "W452: Halbbreiten-Katakana bleibt");
+    n = san8("a\xE3\x80\x80\xE3\x80\x80" "b", 8, c);
+    CHECK(cps_eq_ascii(c, n, "a b"), "W452: ideografisches Leerzeichen (IME) -> ein Leerzeichen");
+    /* Grenze zaehlt Codepunkte: 241 Kanji (723 Byte) -> 240, 240 Kanji = 720 Byte passen ins Paket */
+    for (i = 0; i < 241; i++) { big[i * 3] = (char)0xE6; big[i * 3 + 1] = (char)0xBC; big[i * 3 + 2] = (char)0xA2; } /* 漢 */
+    n = lch_sanitize_u8((const uint8_t *)big, 723, c, LCH_MAX_CHARS);
+    CHECK(n == 240 && c[239] == 0x6F22, "W452: 241 Kanji -> 240 (Codepunkte, nicht Byte)");
+    len = lch_cps_to_u8(c, n, u8, (int)sizeof u8);
+    CHECK(len == 720, "W452: 240 Kanji = 720 Byte UTF-8");
+    lch_init(&s, 0x77u);
+    len = lch_build(pkt, (int)sizeof pkt, 9, 1, u8, len);
+    CHECK(len == LCH_HDR + 720, "W452: Paket mit 240 Kanji gebaut");
+    CHECK(lch_rx(&s, 1000, 0x7F000002u, "Aki", pkt, len) == 1, "W452: 240 Kanji empfangen");
+    {
+        const lch_line *l = lch_hist_get(&s.hist, 0);
+        CHECK(l && wcslen(l->text) == 240 && l->text[0] == 0x6F22, "W452: Verlaufszeile 240 Kanji vollstaendig");
+    }
+    /* Kyrillisch + Japanisch gemischt durch Senden (Eingabezeile -> Paket -> Empfang) */
+    lch_input_clear(&in);
+    {
+        static const unsigned seq[] = { 0x041F, 0x0440, 0x0438, 0x0432, 0x0435, 0x0442, 0x3000, 0x6226, 0x95D8, 0xFF01 };
+        for (i = 0; i < (int)(sizeof seq / sizeof seq[0]); i++) lch_input_wchar(&in, seq[i]);
+    }
+    CHECK(in.n == 10, "W452: IME-Ergebnis (Kyrillisch, ideogr. Leerzeichen, Kanji) in der Eingabezeile");
+    len = lch_tx(&s, 2000, &in, "Me", pkt, (int)sizeof pkt);
+    CHECK(len > LCH_HDR, "W452: gemischte Zeile gesendet");
+    {
+        lch_pkt p;
+        CHECK(lch_parse(pkt, len, &p) && p.len == 6 * 2 + 1 + 3 * 3, "W452: Netzformat UTF-8 (Leerzeichen bereinigt)");
+        n = lch_sanitize_u8(p.text, p.len, c2, LCH_MAX_CHARS);
+        CHECK(n == 10 && c2[6] == 0x20 && c2[7] == 0x6226 && c2[9] == 0xFF01, "W452: Rundreise Kyrillisch/Kanji");
+    }
+    /* Eingabezeile: 240 Kana, das 241. wird abgewiesen; Surrogatpaar (Emoji) zaehlt als ein Zeichen */
+    lch_input_clear(&in);
+    for (i = 0; i < 240; i++) lch_input_wchar(&in, 0x3042);
+    CHECK(in.n == 240 && lch_input_wchar(&in, 0x3044) == 0, "W452: Eingabe 240 Kana, 241. abgewiesen");
+    lch_input_clear(&in);
+    lch_input_wchar(&in, 0xD83D);
+    lch_input_wchar(&in, 0xDE00);
+    CHECK(in.n == 1 && in.cp[0] == 0x1F600, "W452: Surrogatpaar = ein Zeichen");
+    CHECK(lch_input_w(&in, w, LCH_LINE_W) == 2, "W452: Anzeige als Surrogatpaar");
+    /* steelnet: 240 Kanji als JSON-Zeile (UTF-8 roh) passen in LCH_SN_LINE_MAX und kommen gleich an */
+    memset(&sn, 0, sizeof sn);
+    memset(&mu, 0, sizeof mu);
+    lch_input_clear(&in);
+    for (i = 0; i < 240; i++) lch_input_wchar(&in, 0x6F22);
+    n = lch_sn_tx(&sn, 1000, &in, line, (int)sizeof line);
+    CHECK(n == 20 + 720 + 2 && n < LCH_SN_LINE_MAX, "W452 steelnet: 240 Kanji = 742 Byte JSON-Zeile");
+    lch_input_clear(&in);
+    for (i = 0; i < 240; i++) lch_input_wchar(&in, '"');
+    n = lch_sn_tx(&sn, 7000, &in, line, (int)sizeof line);
+    CHECK(n == 20 + 480 + 2 && n < LCH_SN_LINE_MAX, "W452 steelnet: 240 Anfuehrungszeichen escaped passen");
+    CHECK(lch_sn_rx(&sn, &mu, 8000, "Aki", u8, 720, 0, "Me") == 1, "W452 steelnet: 240 Kanji empfangen");
+    {
+        const lch_line *l = lch_hist_get(&sn.hist, 0);
+        CHECK(l && wcslen(l->text) == 240, "W452 steelnet: Zeile vollstaendig");
+    }
+    lch_wipe(&s);
+    lch_sn_wipe(&sn);
+    SecureZeroMemory(big, sizeof big);
+    SecureZeroMemory(u8, sizeof u8);
+}
+
+
+/* W474 CHATTABS: Lobby-Zustand, Reiter je Zustand, Reihenfolge, Tab-Taste, Match-Schluessel */
+static unsigned tabs_for(int ses, int link, int sn, int msn, int mlb, int mtm)
+{
+    lch_tabin ti;
+    memset(&ti, 0, sizeof ti);
+    ti.ses = ses;
+    ti.lobby_link = link;
+    ti.sn_ready = sn;
+    ti.team_known = 0;
+    ti.mis_sn = msn;
+    ti.mis_lobby = mlb;
+    ti.mis_team = mtm;
+    return lch_tabs_avail(&ti);
+}
+
+static void w474_tests(void)
+{
+    const unsigned SN = 1u << LCH_TAB_SN, LB = 1u << LCH_TAB_LOBBY, TM = 1u << LCH_TAB_TEAM;
+    lch_tabin ti;
+    lch_hist h;
+    wchar_t t[8] = { 'h', 'i', 0 };
+    /* Seiten (W460-Werte) */
+    CHECK(lch_page(8, LCH_TID_MAIN, 7) == LCH_PAGE_MAIN && lch_page(8, LCH_TID_MATCH, 2) == LCH_PAGE_MATCH &&
+              lch_page(8, LCH_TID_SEARCH, 1) == LCH_PAGE_SEARCH,
+          "Seiten MAIN MENU / MatchMaking / Suche erkannt");
+    CHECK(lch_page(8, 0x3A3, 13) == LCH_PAGE_OTHER && lch_page(8, 0x43B, 6) == LCH_PAGE_OTHER &&
+              lch_page(8, LCH_TID_MAIN, 6) == LCH_PAGE_OTHER && lch_page(5, LCH_TID_MAIN, 7) == LCH_PAGE_OTHER,
+          "Lobby-Seiten (SESSION) und Zufallstreffer sind keine Menueseite");
+    /* Zustand */
+    CHECK(lch_session_from(0, 8, LCH_PAGE_OTHER, 0, 0) == LCH_SES_NONE, "ohne Spielstrom keine Lobby (Raum des Transports zaehlt nicht)");
+    CHECK(lch_session_from(0, 20, LCH_PAGE_OTHER, 1, 1) == LCH_SES_NONE, "ohne Spielstrom auch kein Match");
+    CHECK(lch_session_from(1, 8, LCH_PAGE_OTHER, 0, 0) == LCH_SES_LOBBY, "Strom + Szene 8 Lobby-Seite = Lobby");
+    CHECK(lch_session_from(2, 8, LCH_PAGE_MAIN, 0, 0) == LCH_SES_NONE, "Hauptmenue mit (altem) Strom = keine Lobby");
+    CHECK(lch_session_from(2, 8, LCH_PAGE_MATCH, 0, 0) == LCH_SES_NONE, "MatchMaking nach dem Verlassen = keine Lobby");
+    CHECK(lch_session_from(2, 8, LCH_PAGE_SEARCH, 0, 0) == LCH_SES_NONE, "Suche/Ergebnis = keine Lobby");
+    CHECK(lch_session_from(1, 8, LCH_PAGE_OTHER, 1, 0) == LCH_SES_MATCH && lch_session_from(1, 8, LCH_PAGE_OTHER, 0, 1) == LCH_SES_MATCH,
+          "Lockstep bzw. Mission der Eingabeschicht = Match");
+    CHECK(lch_session_from(1, 12, LCH_PAGE_OTHER, 0, 0) == LCH_SES_MATCH, "andere Szene mit Strom (Laden, Ergebnis) = Match");
+    CHECK(lch_session_from(1, 1, LCH_PAGE_OTHER, 0, 0) == LCH_SES_NONE && lch_session_from(1, 5, LCH_PAGE_OTHER, 0, 0) == LCH_SES_NONE &&
+              lch_session_from(1, 3, LCH_PAGE_OTHER, 0, 0) == LCH_SES_NONE && lch_session_from(1, 6, LCH_PAGE_OTHER, 0, 0) == LCH_SES_NONE,
+          "Titel/Hauptmenue/Benutzerdaten = keine Lobby");
+    CHECK(lch_out_of_lobby(8, LCH_PAGE_MAIN) && lch_out_of_lobby(8, LCH_PAGE_MATCH) && lch_out_of_lobby(8, LCH_PAGE_SEARCH) &&
+              lch_out_of_lobby(1, LCH_PAGE_OTHER) && lch_out_of_lobby(5, LCH_PAGE_OTHER),
+          "selbst verlassen (Hauptmenue/MatchMaking/Suche/Titel): Verlauf wird geleert");
+    CHECK(!lch_out_of_lobby(8, LCH_PAGE_OTHER) && !lch_out_of_lobby(12, LCH_PAGE_OTHER),
+          "Ersteller allein in seiner Lobby (letzter Gast weg): Reiter weg, Verlauf bleibt");
+    /* Verfuegbarkeit je Zustand (Standard: mission_sn 0, lobby 1, team 1) */
+    CHECK(tabs_for(LCH_SES_NONE, 1, 1, 0, 1, 1) == SN, "Hauptmenue mit steelnet: nur steelnet (Lobby-Reiter fehlt trotz Transport)");
+    CHECK(tabs_for(LCH_SES_NONE, 1, 0, 0, 1, 1) == 0u, "Hauptmenue ohne steelnet (Offline/LAN/aus): kein Reiter -> Enter ans Spiel");
+    CHECK(tabs_for(LCH_SES_LOBBY, 1, 1, 0, 1, 1) == (SN | LB), "Lobby: steelnet | Lobby (Schalter gelten in der Lobby nicht)");
+    CHECK(tabs_for(LCH_SES_LOBBY, 1, 1, 0, 0, 0) == (SN | LB), "Lobby: Match-Schluessel 0 wirken nicht");
+    CHECK(tabs_for(LCH_SES_LOBBY, 0, 1, 0, 1, 1) == SN, "Lobby ohne verbundenen Mitspieler: nur steelnet");
+    CHECK(tabs_for(LCH_SES_LOBBY, 1, 0, 0, 1, 1) == LB, "LAN-Lobby (kein steelnet): nur Lobby");
+    CHECK(tabs_for(LCH_SES_MATCH, 1, 1, 0, 1, 1) == LB, "Match Standard: steelnet aus (loc_chat_mission_sn=0), Lobby an");
+    CHECK(tabs_for(LCH_SES_MATCH, 1, 1, 1, 1, 1) == (SN | LB), "Match mit loc_chat_mission_sn=1: steelnet | Lobby");
+    CHECK(tabs_for(LCH_SES_MATCH, 1, 1, 1, 0, 1) == SN, "Match mit loc_chat_mission_lobby=0: nur steelnet");
+    CHECK(tabs_for(LCH_SES_MATCH, 1, 1, 0, 0, 1) == 0u, "Match alles aus: kein Reiter -> Enter ans Spiel");
+    CHECK(tabs_for(LCH_SES_LOBBY, 1, 1, 0, 1, 1) == (SN | LB), "zurueck in der Lobby: Reiter wieder da");
+    memset(&ti, 0, sizeof ti);
+    ti.ses = LCH_SES_MATCH; ti.lobby_link = 1; ti.sn_ready = 1; ti.team_known = 1; ti.mis_sn = 1; ti.mis_lobby = 1; ti.mis_team = 0;
+    CHECK(lch_tabs_avail(&ti) == (SN | LB), "Match mit loc_chat_mission_team=0: kein Team (falls Team bekannt)");
+    ti.mis_team = 1;
+    CHECK(lch_tabs_avail(&ti) == (SN | LB | TM), "Team nur mit sicherer Zuordnung (team_known)");
+    ti.team_known = 0;
+    CHECK(!(lch_tabs_avail(&ti) & TM), "ohne sichere Zuordnung nie ein Team-Reiter");
+    ti.ses = LCH_SES_NONE; ti.team_known = 1;
+    CHECK(!(lch_tabs_avail(&ti) & (LB | TM)), "ausserhalb der Lobby weder Lobby noch Team");
+    CHECK(lch_tabs_avail(NULL) == 0u, "NULL: nichts verfuegbar");
+    /* Reihenfolge und Tab-Taste */
+    CHECK(LCH_TAB_SN == 0 && LCH_TAB_LOBBY == 1 && LCH_TAB_TEAM == 2 && LCH_TAB_N == 3, "Reihenfolge steelnet | Lobby | Team");
+    CHECK(lch_tab_next(LCH_TAB_SN, SN | LB) == LCH_TAB_LOBBY && lch_tab_next(LCH_TAB_LOBBY, SN | LB) == LCH_TAB_SN,
+          "Tab-Taste: steelnet -> Lobby -> steelnet");
+    CHECK(lch_tab_next(LCH_TAB_SN, SN | LB | TM) == LCH_TAB_LOBBY && lch_tab_next(LCH_TAB_LOBBY, SN | LB | TM) == LCH_TAB_TEAM &&
+              lch_tab_next(LCH_TAB_TEAM, SN | LB | TM) == LCH_TAB_SN,
+          "Tab-Taste mit Team: steelnet -> Lobby -> Team -> steelnet");
+    CHECK(lch_tab_next(LCH_TAB_SN, SN | TM) == LCH_TAB_TEAM && lch_tab_next(LCH_TAB_LOBBY, LB) == LCH_TAB_LOBBY,
+          "Tab-Taste ueberspringt fehlende Reiter, allein bleibt er");
+    /* automatischer Wechsel */
+    CHECK(lch_tab_auto(LCH_TAB_SN, SN | LB, SN) == LCH_TAB_LOBBY, "Lobby-Beitritt: Sprung auf Lobby");
+    CHECK(lch_tab_auto(LCH_TAB_SN, SN | LB, SN | LB) == LCH_TAB_SN, "in der Lobby: Wahl des Nutzers bleibt");
+    CHECK(lch_tab_auto(LCH_TAB_LOBBY, SN, SN | LB) == LCH_TAB_SN, "Lobby verlassen: Wechsel auf steelnet");
+    CHECK(lch_tab_auto(LCH_TAB_SN, LB, SN | LB) == LCH_TAB_LOBBY, "Match ohne steelnet: aktiver Reiter wird Lobby");
+    CHECK(lch_tab_auto(LCH_TAB_LOBBY, 0u, LB) == LCH_TAB_LOBBY, "nichts verfuegbar: Reiter bleibt (Chat zu)");
+    /* Verlauf leeren */
+    memset(&h, 0, sizeof h);
+    lch_hist_push(&h, LCH_L_OTHER, "Bob", t, 5u);
+    lch_hist_push(&h, LCH_L_OTHER, "Bob", t, 6u);
+    {
+        uint32_t g = h.gen;
+        lch_hist_clear(&h);
+        CHECK(h.n == 0 && lch_hist_get(&h, 0) == NULL && h.gen == g + 1u && h.l[0].name[0] == 0 && h.l[0].text[0] == 0,
+              "Lobby verlassen: Verlauf leer und geloescht, naechster Beitritt beginnt leer");
+    }
+}
+
 int main(int argc, char **argv)
 {
     int i, fuzz_n = 200000;
@@ -612,6 +797,8 @@ int main(int argc, char **argv)
     input_tests();
     cmd_tests();
     sn_tests(); /* W446 */
+    w452_tests(); /* W452 */
+    w474_tests(); /* W474 */
     CHECK(fuzz_run(fuzz_n) == 0, "Fuzz ohne Fund");
     wipe_tests(dump_dir);
     printf("loc_chat_selftest: %d/%d OK\n", s_ok, s_n);

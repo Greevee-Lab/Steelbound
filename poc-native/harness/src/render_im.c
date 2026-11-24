@@ -511,15 +511,6 @@ static void sb_render_vb_draw_body(unsigned prim, const unsigned char *vdata,
     sb_ctx_leave();
 }
 
-/* Float-Bitbild (NaN/Inf als %08X; Min/Max wuerden sie
- * verstecken, da jeder Vergleich mit NaN falsch ist). */
-static unsigned sb_fbits(float f)
-{
-    unsigned u;
-    memcpy(&u, &f, sizeof u);
-    return u;
-}
-
 /* Row-major 4x4-Multiplikation (D3DMATRIX-Konvention): C = A*B. */
 static void sb_mat4_mul(float out[16], const float a[16], const float b[16])
 {
@@ -894,7 +885,8 @@ static void sb_im_submit_body(void);
  * Modellraum-Huelle der Rohpositionen, Textur/PS, Farbe/UV der ersten 4 Vertices
  * (fast: umgewandelt; sonst Slots v2/v3). Nur mit [log] heli_call > 0 gerufen. */
 extern void heli_draw_diag(const float *mvp, unsigned n, unsigned vs);
-extern float g_heli_bb[6], g_heli_cu[4][6];
+extern float g_heli_bb[6], g_heli_cu[4][6], g_heli_pq[4][3];
+extern unsigned g_heli_prim;
 extern unsigned g_heli_xp, g_heli_ps;
 extern int g_heli_fast;
 static void heli_diag_submit(const float *mvp, const float *pb, size_t pst, unsigned n, int fast, unsigned vs)
@@ -913,11 +905,13 @@ static void heli_diag_submit(const float *mvp, const float *pb, size_t pst, unsi
     g_heli_xp = sb_tex_xptr();
     g_heli_ps = g_im_pshader;
     g_heli_fast = fast;
+    g_heli_prim = g_im_prim;
     for (q = 0; q < 4u && q < n; q++) {
         const float *col = fast ? g_imf[q].col : g_im_buf[q][2];
         g_heli_cu[q][0] = col[0]; g_heli_cu[q][1] = col[1]; g_heli_cu[q][2] = col[2]; g_heli_cu[q][3] = col[3];
         g_heli_cu[q][4] = fast ? g_imf[q].uv[0] : g_im_buf[q][3][0];
         g_heli_cu[q][5] = fast ? g_imf[q].uv[1] : g_im_buf[q][3][1];
+        g_heli_pq[q][0] = pb[(size_t)q * pst]; g_heli_pq[q][1] = pb[(size_t)q * pst + 1]; g_heli_pq[q][2] = pb[(size_t)q * pst + 2];
     }
     heli_draw_diag(mvp, n, vs);
 }
@@ -1268,6 +1262,7 @@ static void sb_im_submit_body(void)
     int fxr_on = 0, fxr_cls = 0; /* W133 REM-FX */
     int xw_on = 0; ID3D11RasterizerState *xw_saved = NULL; /* W240 FX-EXPERIMENTAL: Drahtgitter */
     ID3D11GeometryShader *lgs = NULL; /* FIX(ISSUE-EMP,W352) line_scale: Linien-Band in skalierten Spiel-RTs */
+    int vq_zskip = 0; /* FIX(SB-SUN-WHITEOUT,W477) vis_zfar: Testpunkt hinter der hinteren Ebene nicht zeichnen */
 #define IMPOS(i) (pb + (size_t)(i) * pst)
 #define IMP_MARK(k) do { if (RQP_FULL || g_iml_on) { long long t_ = rq_qpc(); if (RQP_FULL) { g_imp_q[k] += t_ - imq; } g_iml_ph[k] += t_ - imq; imq = t_; } } while (0)
     if (!g_dev || n == 0) {
@@ -1448,7 +1443,6 @@ static void sb_im_submit_body(void)
             float scz = g_vp_game.maxz - g_vp_game.minz;
             float ofx = vpw * 0.5f + (float)g_vp_game.x;
             float ofy = vph * 0.5f + (float)g_vp_game.y;
-            float ofz = g_vp_game.minz;
             int eye_clip = 0;
             unsigned flash_blend, flash_src, flash_dst;
             sb_render_blend_state(&flash_blend, &flash_src, &flash_dst);
@@ -1559,13 +1553,27 @@ static void sb_im_submit_body(void)
         if (g_cfg.aspect_mode && !rtt_active()) {
             /* Feste 640x480-Referenz (RHW = Framebuffer-Pixel, s.o.). */
             vw = (float)g_game_fb_w; vh = (float)g_game_fb_h; /* W277: SB 640x480, LoC 720x480 */
-            if (g_sba_loc && loc_render_is_bbtex(sb_tex_xptr())) { vw *= (float)g_loc_ss; } /* W285: LoC-Komposition im 1440er-Puffer (W326: 720p 1:1) */
+            int loc_comp = g_sba_loc && loc_render_is_bbtex(sb_tex_xptr());
+            if (loc_comp) { vw *= (float)g_loc_ss; } /* W285: LoC-Komposition im 1440er-Puffer (W326: 720p 1:1) */
             unsigned bx, by, bw, bh;
             sb_aspect_box(&bx, &by, &bw, &bh);
             nL = (float)bx / (float)g_bb_w * 2.0f - 1.0f;
             nR = (float)(bx + bw) / (float)g_bb_w * 2.0f - 1.0f;
             nT = 1.0f - (float)by / (float)g_bb_h * 2.0f;
             nB = 1.0f - (float)(by + bh) / (float)g_bb_h * 2.0f;
+            if (loc_comp && loc_render_horp_full()) {
+                /* W465: LoC 4:3 + volles Hor+ - bildfuellende Komposition (Replay/Aussenkamera, Welt im BB) auf die
+                 * volle Breite: die BB-Kopie umfasst dann auch die Hor+-Raender (loc_render.c bbc_copy), Texel-UV
+                 * 0..Breite bilden damit genau die volle Breite ab -> keine Kante zwischen Box und Rand. */
+                float mnx = 1e30f, mxx = -1e30f;
+                unsigned q;
+                for (q = 0; q < n; q++) {
+                    float px = IMPOS(q)[0];
+                    if (px < mnx) { mnx = px; }
+                    if (px > mxx) { mxx = px; }
+                }
+                if (mnx <= 1.0f && mxx >= vw - 1.0f) { nL = -1.0f; nR = 1.0f; }
+            }
         }
         memset(mvp, 0, sizeof mvp);
         mvp[0] = (nR - nL) / vw;
@@ -1925,6 +1933,7 @@ static void sb_im_submit_body(void)
      * nur beim Umlauf. Vorher DISCARD des ganzen 3-MB-VB pro Draw -> der
      * Treiber muss pro Draw umbenennen; bei Draw-Stuermen (bootFCS1: ~82k
      * Draws/Frame) blockierte Map bis 116 ms -> 1 Frame/35 s. */
+    { extern int g_visq_on; if (g_visq_on && rhw) { extern int sb_visq_zfar(im_vertex_t *v, unsigned n, int rhw, unsigned prim); vq_zskip = sb_visq_zfar(ov, n, rhw, g_im_prim); } } /* W477 vor dem Hochladen */
     IMP_MARK(IMP_PRE); /* DIAG(IM-PERF,W99) */
     if (fast && g_cfg.im_fast == 2) { im_fast_check_expand(ov, g_im_prim, n, nout); } /* DIAG(IM-PERF,W99) */
     if (fast) { /* PERF(IM-PERF,W99): Expansion direkt in Tick-VB bzw. IM-Ring */
@@ -2421,7 +2430,8 @@ static void sb_im_submit_body(void)
     if (g_cfg.vis_diag) { extern void sb_visq_draw_diag(const im_vertex_t *v, unsigned n, int rhw, unsigned prim, unsigned tex); sb_visq_draw_diag(ov, n, rhw, g_im_prim, ip_tex); } /* DIAG(FLARE-OCCL,W304) */
     if (fxr_cls) { fxr_bind(); } else if (fxr_on) { fxr_note_other(); } /* W133 REM-FX: Tiefen-Kopie, Effekt-PS */
     if (lgs) { ID3D11DeviceContext_GSSetShader(g_ctx, lgs, NULL, 0); g_ls_draws++; } /* FIX(ISSUE-EMP,W352) */
-    if (g_rq_active) { rq_draw(ip_vb ? ip_vb : g_im_vb, nout, vb_start, ibf); } /* RENDER-QA; W264 ibf */
+    if (vq_zskip) { /* W477 vis_zfar: auf der NV2A kein Pixel -> Abfrage zaehlt 0 */ }
+    else if (g_rq_active) { rq_draw(ip_vb ? ip_vb : g_im_vb, nout, vb_start, ibf); } /* RENDER-QA; W264 ibf */
     else if (ibf != 0xFFFFFFFFu) { /* W264 DRAW-OPT2: Strip/Fan/Quad ueber festen Indexpuffer */
         sb_im_ib_bind(g_ctx);
         WD_CALL("draw_im", g_ctx, ID3D11DeviceContext_DrawIndexed(g_ctx, nout, ibf, (INT)vb_start));

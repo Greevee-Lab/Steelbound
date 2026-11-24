@@ -115,6 +115,12 @@ int rbi_p0(const rbi_t *r);          /* Vorlauf P0, -1 vor der ersten Entnahme *
 void rbi_end(rbi_t *r);              /* Mission vorbei (inaktiv) */
 /* W346: Epoche und Verzoegerung nach der Aushandlung setzen; nur vor der ersten Entnahme (1 = gesetzt). */
 int rbi_configure(rbi_t *r, uint32_t epoch, int delay);
+/* W475 LOC-RB-PREAGREE: Slot-Zuordnung der eigenen Rahmen jetzt festlegen (wie bei der ersten Entnahme), ohne etwas zu
+ * entnehmen - danach sendet rbi_tx die eigenen Rahmen schon (Vorab-Einigung: Client wartet auf den Beweis). 1 = ok. */
+int rbi_prime(rbi_t *r);
+/* W475: Epoche/Verzoegerung neu setzen, solange noch kein Slot entnommen und kein Spieltick gebucht ist (auch nach
+ * rbi_prime). Eigene erzeugte Rahmen bleiben erhalten, empfangene Rahmen und Bindungen beginnen neu. 1 = gesetzt. */
+int rbi_rebind(rbi_t *r, uint32_t epoch, int delay);
 /* W386 LOC-LATENCY: Verzoegerung waehrend der Mission wechseln (nur die Zuordnung der EIGENEN Rahmen zu Slots; die Slots
  * selbst sind die Wahrheit, jeder Mitspieler bekommt genau die gesendeten Rahmen -> immer deterministisch).
  * Angewandt beim ersten eigenen Live-Rahmen, dessen Slot >= from_slot waere (rbi_own, nicht im Neurechnen):

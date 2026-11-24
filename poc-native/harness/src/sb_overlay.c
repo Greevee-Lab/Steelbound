@@ -25,6 +25,7 @@
 #include "sb_lang.h" /* W142 L10N */
 #include "sb_watermark.h" /* PO: sb_version_str fuer W222 */
 #include "sb_overlay.h"
+#include "overlay_style.h" /* W461 OVERLAY-CORE */
 #include "sb_perfhud.h" /* W122: Test-Aktion PHUDPOS */
 #include "sb_nethud.h" /* W374: Test-Aktionen NHUD/NHUDPOS */
 #include "sb_remaster.h"
@@ -109,6 +110,9 @@ enum {
     OI_MONVIEW, /* W319 MONITOR-VIEW: Monitoransicht (Gruppe Cockpit, nach "Cockpit") */
     OI_ALLY, /* W424 SB-ALLIED-SQUADS: verbuendete Trupps fern vom Spieler (Gruppe Spiel, ab naechster Mission) */
     OI_NETMODE, /* W447 LOC-NET-AUTO: Netzmodus Auto/Rollback/Lockstep (Gruppe Spiel, nur LoC, ab naechster Mission) */
+    OI_NETPANEL, /* W453 LOC-LOBBY-INFO: Lobby-Infopanel unten rechts an/aus (Gruppe Spiel, nur LoC, wirkt sofort) */
+    OI_LOBBYWIDGET, /* W460 LOC-LOBBY-WIDGET: Widget offene Lobbys im Hauptmenue/MatchMaking an/aus (Gruppe Spiel, nur LoC) */
+    OI_SHSUN, /* W466 LOC-ENHANCED-2: Sonnen-/Schattenkontrast (Gruppe Welt, Erweitert, nur LoC, wirkt sofort) */
     OI_N
 };
 /* W291 ESC-REWORK: Gruppen statt Seiten (Namen und Reihenfolge wie die
@@ -120,7 +124,7 @@ enum {
 enum { OG_QUICK, OG_GAME, OG_DISP, OG_CKP, OG_WORLD, OG_FX, OG_COLOR, OG_TEX, OG_AUDIO, OG_VR, OG_DEBUG, OG_N };
 #define OV_NPAGES OG_N
 static const short kOgQuick[] = { OI_PRESET, OI_FPS, OI_WINMODE, OI_CHIDE, OI_SMON, OI_STEX };
-static const short kOgGame[] = { OI_NETMODE, OI_ASSIST, OI_AUTOGEAR, OI_ALLY, OI_MMODE, OI_MSENS, OI_STICKAIM, OI_STICKSENS }; /* + W424, W447 */
+static const short kOgGame[] = { OI_NETMODE, OI_NETPANEL, OI_LOBBYWIDGET, OI_ASSIST, OI_AUTOGEAR, OI_ALLY, OI_MMODE, OI_MSENS, OI_STICKAIM, OI_STICKSENS }; /* + W424, W447, W453, W460 */
 static const short kOgGameA[] = { OI_SBCMOUSE, OI_MPAUSE, OI_SAVELOCK, OI_SLCOMMIT };
 static const short kOgDisp[] = { OI_FPS, OI_WINMODE, OI_RES, OI_RTS, OI_EDGE };
 static const short kOgDispA[] = { OI_EDGEW, OI_EDGES, OI_CPERSP, OI_CPANINI, OI_CWIDTH, OI_VRON }; /* Breitbild wie Launcher */
@@ -128,7 +132,7 @@ static const short kOgCkp[] = { OI_CHIDE, OI_MONVIEW, OI_SMON }; /* + W319 */
 static const short kOgCkpA[] = { OI_GRAIN, OI_GLITCH, OI_LABEL, OI_RPLABEL, OI_RPLOGO, OI_WMMEDIA }; /* Korn/Stoerung unter Monitor-Effekt; + W290 */
 static const short kOgWorld[] = { OI_SHADING, OI_SLIGHT, OI_SSHADOW, OI_FOG, OI_SBLOOM, OI_SGLOW };
 static const short kOgWorldA[] = { OI_EXPO, OI_TONE, OI_WGAM, OI_WCON, OI_LWORLD, OI_LCKP, OI_CLIGHT, OI_CGLOW, OI_CSPILL,
-                                   OI_BLOOM, OI_BTHR }; /* Schatten: Sammelregler ist die Einstellung (wie Launcher) */
+                                   OI_BLOOM, OI_BTHR, OI_SHSUN }; /* Schatten: Sammelregler ist die Einstellung (wie Launcher); W466 */
 static const short kOgFx[] = { OI_FXPRESET, OI_AA, OI_SSAO, OI_WSHARP };
 static const short kOgFxA[] = { OI_FXSOFT, OI_FXEMB, OI_FXLIGHT, OI_FXLCKP, OI_FXIP, OI_FOCUS, OI_RPFX }; /* + W299 */
 static const short kOgColor[] = { OI_SLOOK };
@@ -281,7 +285,7 @@ static char g_ov_save_path[600];
 
 /* ---- Test-Hook (overlay_test) ---- */
 typedef struct { unsigned at; int rel; int mi; int act; int vk; char txt[28]; } ov_step_t;
-enum { OA_KEY, OA_SHOT, OA_FOCUS1, OA_FOCUS0, OA_LOG, OA_PHUDPOS,
+enum { OA_KEY, OA_SHOT, OA_FOCUS1, OA_FOCUS0, OA_LOG, OA_PHUDPOS, OA_TOAST, /* W467 TEST: Probe-Einblendung */
        OA_TKEY, OA_TXT, OA_MROW, OA_MTAB, OA_PAD, OA_STATE, /* W188 */
        OA_PEEK, /* W193: Taste "Menue ausblenden" druecken (vk 1) / loslassen (vk 0) */
        OA_PHOTO, OA_KDN, OA_KUP, OA_MDRAG, OA_CHAR, /* W192 OA_CHAR, W195: Foto-Taste, Taste halten/loslassen, Ziehen dx_dy */
@@ -306,19 +310,20 @@ static ID3D11Buffer *ov_vb;
 static ID3D11BlendState *ov_bs;
 static ID3D11RasterizerState *ov_rs;
 static ID3D11DepthStencilState *ov_ds;
-static ID3D11Texture2D *ov_tex;
-static ID3D11ShaderResourceView *ov_srv;
-static unsigned ov_tw, ov_th;
+static ovs_tex_t ov_tx;                  /* W461: Panel-Textur (overlay_style) */
+#define ov_srv (ov_tx.srv)
+#define ov_tw (ov_tx.w)
+#define ov_th (ov_tx.h)
 static int ov_state;                     /* 0 = noch nicht, 1 = bereit, -1 = gescheitert */
 static sb_ovl_save_t ov_bbsave;          /* gesicherter BB-Bereich (W122: gemeinsame API) */
 
-/* ---- GDI ---- */
-static HDC ov_dc;
-static HBITMAP ov_bmp, ov_bmp_old;
-static unsigned *ov_bits;
-static unsigned ov_bw, ov_bh;
-static HFONT ov_font, ov_font_old;
-static int ov_font_px;
+/* ---- GDI (W461: Zeichenflaeche + Hauptschrift aus overlay_style; f = Faktor g_ovf) ---- */
+static ovs_canvas_t ov_cv = { .f = 1.0f };
+#define ov_dc (ov_cv.dc)
+#define ov_bits (ov_cv.bits)
+#define ov_bw (ov_cv.w)
+#define ov_bh (ov_cv.h)
+#define ov_font_px (ov_cv.font_px)
 
 /* ------------------------------------------------------------------ */
 /* Hilfen                                                              */
@@ -447,7 +452,7 @@ static int ov_grp_vis(int g)
 /* W291: Zeile unter den gegebenen Umstaenden vorhanden (Controller-Zeile nur mit sbc_usb). */
 static int ov_row_avail(int i)
 {
-    if (i == OI_NETMODE) { return g_sba_loc; } /* W447: Netzmodus nur in Line of Contact */
+    if (i == OI_NETMODE || i == OI_NETPANEL || i == OI_LOBBYWIDGET || i == OI_SHSUN) { return g_sba_loc; } /* W447/W453/W460/W466: nur in Line of Contact */
     return i != OI_SBCMOUSE || g_cfg.sbc_usb;
 }
 
@@ -566,7 +571,7 @@ static int ov_effective(int i)
     case OI_EXPO: case OI_TONE: case OI_BTHR: case OI_LWORLD: case OI_LCKP: case OI_FOCUS: return g_cfg.shading != 0;
     case OI_SHADOW: case OI_VQASYNC: return g_cfg.shading != 0; /* W131 */
     case OI_SLIGHT: case OI_SBLOOM: case OI_SSHADOW: return g_cfg.shading != 0; /* W291: Sammel wie die Einzelwerte */
-    case OI_SHSOFT: return g_cfg.shading != 0 && g_cfg.shade_shadow != 0;
+    case OI_SHSOFT: case OI_SHSUN: return g_cfg.shading != 0 && g_cfg.shade_shadow != 0; /* W466: Sonne nur mit Schatten */
     case OI_CPERSP: case OI_CPANINI: case OI_CWIDTH: return !g_cfg.vr_enable; /* W191/W235: nur Desktop, in VR ohne Wirkung (gedimmt) */
     case OI_RPFX: return g_cfg.cockpit_hide && !g_cfg.vr_enable && g_cfg.monitor_view <= 0; /* W299: wirkt nur in der Vollbild-Ansicht */
     case OI_CHIDE: return !g_cfg.vr_enable && g_cfg.monitor_view <= 0; /* W319: Monitoransicht hat Vorrang (gedimmt) */
@@ -713,7 +718,7 @@ static void ov_sum_change(int sm, int dir)
 {
     const ov_sum_t *m = &kOvSum[sm];
     int q0 = ov_sum_match(sm), q, k;
-    q = q0 < 0 ? m->orig : ov_clamp(q0 + dir, 0, m->ns - 1);
+    q = q0 < 0 ? (sm == SM_SHADOW && g_sba_loc ? 1 : m->orig) : ov_clamp(q0 + dir, 0, m->ns - 1); /* W471: LoC-Original = Hart */
     if (q == q0) { return; }
     for (k = 0; k < m->nk; k++) {
         if (*m->f[k] != m->v[q][k]) {
@@ -782,7 +787,7 @@ static const struct { const char *key; unsigned char og; } kOvKeyGrp[] = {
     { "bloom_strength", OG_WORLD }, { "cockpit_glow", OG_WORLD }, { "cockpit_spill", OG_WORLD },
     { "cockpit_light", OG_WORLD }, { "world_exposure", OG_WORLD }, { "tonemap", OG_WORLD },
     { "bloom_threshold", OG_WORLD }, { "light_world", OG_WORLD }, { "light_cockpit", OG_WORLD },
-    { "shade_shadow", OG_WORLD }, { "shadow_soft", OG_WORLD },
+    { "shade_shadow", OG_WORLD }, { "shadow_soft", OG_WORLD }, { "shadow_sun", OG_WORLD }, /* W471 */
     { "fx_soft", OG_FX }, { "fx_embers", OG_FX }, { "fx_light", OG_FX }, { "fx_light_cockpit", OG_FX },
     { "fx_interp", OG_FX }, { "aa_mode", OG_FX }, { "ssao", OG_FX }, { "world_sharpen", OG_FX }, { "world_focus", OG_FX },
     { "color_sat", OG_COLOR }, { "color_temp", OG_COLOR }, { "color_lift", OG_COLOR }, { "color_gamma", OG_COLOR },
@@ -809,7 +814,7 @@ static void ov_reset(int og)
     if (og == OG_QUICK) { /* Schnappschuss fuer "Rueckgaengig" */
         for (i = 0; i < SB_OF_NKEY; i++) {
             int *p = sb_ov_field(kSbOrigFlag[i].key);
-            g_ov_usnap[i] = p ? *p : kSbOrigFlag[i].orig;
+            g_ov_usnap[i] = p ? *p : sb_of_orig(i, g_sba_loc);
         }
         g_ov_usnap_rem = g_cfg.remaster;
         g_ov_usnap_hd = g_cfg.hd_textures;
@@ -828,8 +833,8 @@ static void ov_reset(int og)
         if (sb_ovl_loc_lock(k, g_sba_loc, ov_loc_wide())) { continue; } /* W416: in LoC gesperrt -> Wert bleibt */
         if (strcmp(k, "hd_textures") == 0) { hd = 1; continue; }
         p = sb_ov_field(k);
-        if (p && *p != kSbOrigFlag[i].orig) {
-            *p = kSbOrigFlag[i].orig;
+        if (p && *p != sb_of_orig(i, g_sba_loc)) { /* W471: LoC-Original mit den Schatten des Spiels */
+            *p = sb_of_orig(i, g_sba_loc);
             HLOG_I("OVERLAY: %s -> %d (f=%u)", k, *p, g_present_no);
             n++;
         }
@@ -982,6 +987,18 @@ static void ov_change(int i, int dir)
         }
         break;
     }
+    case OI_SHSUN: /* W466: Sonnen-/Schattenkontrast 0..200 %, wirkt sofort (Shader-Konstante je Draw) */
+        g_cfg.shadow_sun = ov_clamp(g_cfg.shadow_sun + dir * 10, 0, 200);
+        HLOG_I("OVERLAY: shadow_sun -> %d (f=%u)", g_cfg.shadow_sun, g_present_no);
+        break;
+    case OI_NETPANEL: /* W453: Lobby-Infopanel, wirkt sofort (Panel liest g_cfg je Abtastung); dauerhaft ueber "Als Standard speichern" */
+        g_cfg.loc_net_panel = !g_cfg.loc_net_panel;
+        HLOG_I("OVERLAY: loc_net_panel -> %d (f=%u)", g_cfg.loc_net_panel, g_present_no);
+        break;
+    case OI_LOBBYWIDGET: /* W460: Widget offene Lobbys, wirkt sofort (Widget liest g_cfg je Abtastung) */
+        g_cfg.loc_lobby_widget = !g_cfg.loc_lobby_widget;
+        HLOG_I("OVERLAY: loc_lobby_widget -> %d (f=%u)", g_cfg.loc_lobby_widget, g_present_no);
+        break;
     case OI_ALLY: /* W424: Einstellung gilt je Mission ab ihrem ersten Bild (laufende Mission bleibt wie gestartet) */
         g_cfg.sb_allied_squads = !g_cfg.sb_allied_squads;
         HLOG_I("OVERLAY: sb_allied_squads -> %d (ab naechster Mission, f=%u)", g_cfg.sb_allied_squads, g_present_no);
@@ -1103,7 +1120,12 @@ static void ov_change(int i, int dir)
                        * (Shader + Effekte + HD-Texturen, sb_gfxpreset.h; Effect-Pack-Schluessel bleiben) */
         int q = sb_gfx_preset_match_for(ov_fps_sel(), g_ov_rts >= 0 ? g_ov_rts : g_cfg.rt_scale), q0 = q, hd;
         if (q < 0) { q = dir > 0 ? -1 : SB_GP_NPRE; }
-        q = ov_clamp(q + dir, 0, SB_GP_NPRE - 1);
+        { /* W465: naechstes waehlbares Preset des Spiels (SB ohne Remastered, LoC Original/Enhanced/Vivid W478) */
+            int n = q + dir;
+            while (n >= 0 && n < SB_GP_NPRE && !sb_gp_visible(n, g_sba_loc)) { n += dir; }
+            if (n < 0 || n >= SB_GP_NPRE) { return; }
+            q = n;
+        }
         if (q == q0) { return; }
         sb_gfx_part_apply(q, SB_GFX_ALL);
         if (kSbGfxPreset[SB_GP_FPS].v[q] == SB_FPS_AUTO) { /* W296 PRESET-ORIG: Original = Monitor (auto) */
@@ -1123,7 +1145,8 @@ static void ov_change(int i, int dir)
             g_cfg.monitor_fx = kSbGfxPreset[SB_GP_MFX].v[q];
         }
         sb_gfx_edge_apply(q); /* W266 PRESET-EDGE: Breitbild-Raender live (je Present gelesen) */
-        ov_status_key(q == SB_GP_PERFORMANCE ? "ovl.st_performance" : q == SB_GP_CLEAR ? "ovl.st_clear" : "ovl.st_rt");
+        ov_status_key(q == SB_GP_PERFORMANCE ? "ovl.st_performance" : q == SB_GP_CLEAR ? "ovl.st_clear" :
+                      q == SB_GP_ENHANCED ? "ovl.st_enhanced" : q == SB_GP_VIVID ? "ovl.st_vivid" : "ovl.st_rt"); /* W465, W478 */
         hd = kSbGfxPreset[SB_GP_HD].v[q];
         if (hd != (ov_hd_on() ? 1 : 0)) {
             if (g_ov_avail) {
@@ -1440,6 +1463,7 @@ static const ov_key_t kOvKeys[] = {
     { "fs_interp_match", "render" },
     { "interp_fps", "render" },     { "shading", "render" },
     { SB_GP_REV_KEY, "render" }, /* W296 PRESET-ORIG: Stand der Preset-Tabelle (immer SB_GP_REV) */
+    { SB_GP_LOC_REV_KEY, "render" }, /* W465: LoC-Marke (nur LoC geschrieben): bewusste Wahl bleibt */
     { "monitor_fx", "render" },     { "monitor_grain", "render" },
     { "monitor_glitch", "render" }, { "edge_mode", "render" },
     { "edge_fade_width", "render" }, { "edge_fade_strength", "render" },
@@ -1460,6 +1484,7 @@ static const ov_key_t kOvKeys[] = {
     { "color_lift", "render" },     { "color_gamma", "render" },
     { "color_gain", "render" },     { "shade_shadow", "render" },
     { "shadow_soft", "render" },    { "vis_query_async", "render" },
+    { "shadow_sun", "render" }, /* W466: LoC Sonne/Schatten (nur user_loc.cfg) */
     { "hud_label_avoid", "render" }, /* W153 */
     { "replay_label", "render" },   { "replay_logo", "render" }, /* W290-Schalter (Abschnitte wie launcher_cfg.c) */
     { "watermark_media", "overlay" },
@@ -1479,6 +1504,8 @@ static const ov_key_t kOvKeys[] = {
     { "aim_assist", "input" },      { "auto_gear", "input" }, /* W218, W236 */
     { "aim_turn", "input" }, /* W236: Altwert neutralisieren (immer 0) */
     { "sb_allied_squads", "gameplay" }, /* W424 */
+    { "loc_net_panel", "overlay" }, /* W453: Lobby-Infopanel (nur LoC wirksam) */
+    { "loc_lobby_widget", "overlay" }, /* W460: Widget offene Lobbys (nur LoC wirksam) */
     { "stick_aim", "input" },       { "stick_aim_sens", "input" }, /* W271 */
     { "remaster", "remaster" },     { "hd_textures", "remaster" },
     { "hd_scale", "remaster" },     { "window_mode", "display" },
@@ -1525,6 +1552,7 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     if (strcmp(k, "fs_interp_match") == 0) { v = g_cfg.fs_interp_match; }
     else if (strcmp(k, "interp_fps") == 0) { v = ov_fps_sel(); } /* W223: auto -> -1 */
     else if (strcmp(k, SB_GP_REV_KEY) == 0) { v = SB_GP_REV; } /* W296: wer speichert, kennt Original = auto */
+    else if (strcmp(k, SB_GP_LOC_REV_KEY) == 0) { v = SB_GP_LOC_REV; } /* W465 */
     else if (strcmp(k, "shading") == 0) { v = g_cfg.shading; }
     else if (strcmp(k, "monitor_fx") == 0) { v = g_cfg.monitor_fx; }
     else if (strcmp(k, "monitor_grain") == 0) { v = g_cfg.monitor_grain; }
@@ -1543,6 +1571,8 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     else if (strcmp(k, "aim_turn") == 0) { v = 0; } /* W236: Altwert (W218) neutral */
     else if (strcmp(k, "auto_gear") == 0) { v = g_cfg.auto_gear; }
     else if (strcmp(k, "sb_allied_squads") == 0) { v = g_cfg.sb_allied_squads; } /* W424 */
+    else if (strcmp(k, "loc_net_panel") == 0) { v = g_cfg.loc_net_panel; } /* W453 */
+    else if (strcmp(k, "loc_lobby_widget") == 0) { v = g_cfg.loc_lobby_widget; } /* W460 */
     else if (strcmp(k, "stick_aim_sens") == 0) { v = g_cfg.stick_aim_sens; } /* W271 */
     else if (strcmp(k, "remaster") == 0) { v = g_cfg.remaster; }
     else if (strcmp(k, "hd_textures") == 0) { v = g_cfg.hd_textures; }
@@ -1587,6 +1617,7 @@ static void ov_key_value(const char *k, char *out, size_t cap)
     else if (strcmp(k, "color_gain") == 0) { v = g_cfg.color_gain; }
     else if (strcmp(k, "shade_shadow") == 0) { v = g_cfg.shade_shadow; }
     else if (strcmp(k, "shadow_soft") == 0) { v = g_cfg.shadow_soft; }
+    else if (strcmp(k, "shadow_sun") == 0) { v = g_cfg.shadow_sun; } /* W466 */
     else if (strcmp(k, "hud_label_avoid") == 0) { v = g_cfg.hud_label_avoid; } /* W153 */
     else if (strcmp(k, "replay_label") == 0) { v = g_cfg.replay_label ? 1 : 0; } /* W290-Schalter */
     else if (strcmp(k, "replay_logo") == 0) { v = g_cfg.replay_logo ? 1 : 0; }
@@ -1698,6 +1729,8 @@ static int ov_save(void)
     int n = 0;
     for (i = 0; i < OV_NKEYS; i++) {
         if (sb_ovl_loc_lock(kOvKeys[i].key, g_sba_loc, ov_loc_wide())) { continue; } /* W416: LoC-gesperrt -> Zeile der Datei bleibt */
+        if (!g_sba_loc && strcmp(kOvKeys[i].key, SB_GP_LOC_REV_KEY) == 0) { continue; } /* W465: nur user_loc.cfg */
+        if (!g_sba_loc && strcmp(kOvKeys[i].key, "shadow_sun") == 0) { continue; } /* W466: nur user_loc.cfg */
         keys[n] = kOvKeys[i].key;
         secs[n] = kOvKeys[i].sec;
         ov_key_value(kOvKeys[i].key, vbuf[n], sizeof vbuf[n]);
@@ -2484,6 +2517,9 @@ static const char *ov_oi_home(int i)
     case OI_ASSIST: return "aim_assist";
     case OI_AUTOGEAR: return "auto_gear";
     case OI_ALLY: return "sb_allied_squads"; /* W424 */
+    case OI_NETPANEL: return "loc_net_panel"; /* W453 */
+    case OI_LOBBYWIDGET: return "loc_lobby_widget"; /* W460 */
+    case OI_SHSUN: return "shadow_sun"; /* W466 */
     case OI_STICKAIM: return "stick_aim";
     case OI_STICKSENS: return "stick_aim_sens";
     case OI_VRSHELL: return "vr_shell";
@@ -2521,7 +2557,7 @@ static int ov_list_has(const char *list, const char *key)
 
 static void ov_struct_check(void)
 {
-    static const char *const exempt[] = { "fs_interp_match", "aim_turn", SB_GP_REV_KEY }; /* setzt das Preset bzw. Altwert; W296 Dateistand */
+    static const char *const exempt[] = { "fs_interp_match", "aim_turn", SB_GP_REV_KEY, SB_GP_LOC_REV_KEY }; /* setzt das Preset bzw. Altwert; W296 Dateistand */
     unsigned char seen[OI_N];
     int g, k, j, nfail = 0, nrows = 0, nkey = 0, page0 = g_ov_page, d0, d1, dv, esc0 = g_cfg.esc_debug;
     int adv0[OG_N];
@@ -2960,6 +2996,7 @@ static LONG ov_click_code(HWND w, LPARAM lp)
 int sb_ovl_wndproc(HWND w, UINT msg, WPARAM wp, LPARAM lp)
 {
     if (!g_cfg.overlay) { return 0; }
+    loc_chat_ime_tick(w); /* W452: IME nur bei offener Chatzeile (auch wenn das Menue die Zeile geschlossen hat) */
     if (!g_ov_open && loc_chat_wndproc(w, msg, wp, lp)) { return 1; } /* W437: Chatzeile (nur LoC online) vor dem Menue */
     switch (msg) {
     case OV_MSG_TEST: /* TEST(W188): interne Taste (z. B. Umschalt+TAB, Mausrad) ueber den Ring */
@@ -3196,6 +3233,7 @@ static void ov_test_parse(void)
         else if (_stricmp(act, "FOCUS1") == 0) { s->act = OA_FOCUS1; }
         else if (_stricmp(act, "FOCUS0") == 0) { s->act = OA_FOCUS0; }
         else if (_stricmp(act, "LOG") == 0) { s->act = OA_LOG; }
+        else if (_stricmp(act, "TOAST") == 0) { s->act = OA_TOAST; } /* W467 TEST: Einblendung (Bildbeleg Overlays) */
         else if (_stricmp(act, "PHUDPOS") == 0) { s->act = OA_PHUDPOS; } /* W122: Leistungs-Overlay Ecke (wie Shift+F2) */
         else if (_stricmp(act, "NHUD") == 0) { s->act = OA_NHUD; }       /* W374: Netz-Overlay an/aus (wie F3) */
         else if (_stricmp(act, "NHUDPOS") == 0) { s->act = OA_NHUDPOS; } /* W374: Netz-Overlay Ecke (wie Shift+F3) */
@@ -3325,6 +3363,7 @@ static void ov_test_tick(unsigned n)
         g_ov_step++;
         switch (s->act) {
         case OA_SHOT: g_ov_shot_due = 1; break;
+        case OA_TOAST: sb_ov_toast_msg(L"OVERLAY TEST", L"Toast sample \x00B7 shown together with the other overlays", 8000u); break; /* W467 TEST */
         case OA_FOCUS1: PostMessageA(h, IMOUSE_MSG_TEST_FOCUS, 1, 0); break;
         case OA_FOCUS0: PostMessageA(h, IMOUSE_MSG_TEST_FOCUS, 0, 0); break;
         case OA_LOG: sb_phud_test_log(); sb_nhud_test_log(); PostMessageA(h, IMOUSE_MSG_TEST_STATE, 0, 0); ov_log_values("test"); ov_log_shader("test"); ov_log_shader2("test"); ov_log_fx("test"); break;
@@ -4056,37 +4095,19 @@ void sb_ovl_present_end(void)
 /* ------------------------------------------------------------------ */
 /* Panel (GDI)                                                         */
 /* ------------------------------------------------------------------ */
-#define OV_C_BG     SB_UI_C_BG
-#define OV_C_TXT    SB_UI_C_TXT
-#define OV_C_DIM    SB_UI_C_DIM
-#define OV_C_LINE   SB_UI_C_LINE
-#define OV_C_HEAD   SB_UI_C_HEAD
-#define OV_C_SEL    SB_UI_C_SEL
-#define OV_C_EXP    RGB(255, 196, 92) /* W278 ORIG-FLAG: experimentell und aktiv */
-#define OV_ALPHA    SB_UI_ALPHA
+#define OV_C_BG     OVS_C_BG
+#define OV_C_TXT    OVS_C_TXT
+#define OV_C_DIM    OVS_C_DIM
+#define OV_C_LINE   OVS_C_LINE
+#define OV_C_HEAD   OVS_C_HEAD
+#define OV_C_SEL    OVS_C_SEL
+#define OV_C_EXP    OVS_C_ACCENT /* W278 ORIG-FLAG: experimentell und aktiv */
+#define OV_ALPHA    OVS_ALPHA
 
-static float g_ovf = 1.0f;
-static int S(float x)
-{
-    int v = (int)(x * g_ovf + 0.5f);
-    return v < 1 ? 1 : v;
-}
-
-static void ov_fill(int x0, int y0, int x1, int y1, COLORREF c)
-{
-    RECT r;
-    HBRUSH b = CreateSolidBrush(c);
-    r.left = x0; r.top = y0; r.right = x1; r.bottom = y1;
-    FillRect(ov_dc, &r, b);
-    DeleteObject(b);
-}
-
-static void ov_text(int x, int y, const wchar_t *s, COLORREF c, int right)
-{
-    SetTextColor(ov_dc, c);
-    SetTextAlign(ov_dc, (right ? TA_RIGHT : TA_LEFT) | TA_TOP);
-    TextOutW(ov_dc, x, y, s, (int)wcslen(s));
-}
+#define g_ovf (ov_cv.f)
+static int S(float x) { return ovs_px(g_ovf, x); }
+#define ov_fill(x0, y0, x1, y1, c) ovs_fill(ov_dc, x0, y0, x1, y1, c)
+#define ov_text(x, y, s, c, right) ovs_text(ov_dc, x, y, s, c, right)
 
 /* W287 EXP-ICON: Kolben (Segoe Fluent Icons U+F196) statt "EXP", wenn die
  * Schrift das Zeichen hat (Windows 11). Sonst bleibt der Text "EXP"
@@ -4095,24 +4116,23 @@ static void ov_text(int x, int y, const wchar_t *s, COLORREF c, int right)
 #define OV_EXP_GLYPH L"\xF196"
 static HFONT ov_exp_font(void)
 {
-    static HFONT f[2];
+    static ovs_font_t fs[2]; /* W461: Halter im gemeinsamen Font-Cache */
     static int px[2], ok[2], next;
+    HFONT f;
     int i;
     for (i = 0; i < 2; ++i) {
-        if (f[i] && px[i] == ov_font_px) { return ok[i] ? f[i] : NULL; }
+        if (fs[i].f && px[i] == ov_font_px) { return ok[i] ? fs[i].f : NULL; }
     }
     if (!ov_dc) { return NULL; }
     i = next;
     next ^= 1;
-    if (f[i]) { DeleteObject(f[i]); }
     px[i] = ov_font_px;
     ok[i] = 0;
-    f[i] = CreateFontW(-ov_font_px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
-                       CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, DEFAULT_PITCH, L"Segoe Fluent Icons");
-    if (f[i]) {
+    f = ovs_font_get(&fs[i], OVS_FACE_ICON, FW_NORMAL, ov_font_px);
+    if (f) {
         wchar_t face[64] = L"";
         WORD g = 0xFFFF;
-        HFONT o = (HFONT)SelectObject(ov_dc, f[i]);
+        HFONT o = (HFONT)SelectObject(ov_dc, f);
         GetTextFaceW(ov_dc, 64, face);
         if (_wcsicmp(face, L"Segoe Fluent Icons") == 0 &&
             GetGlyphIndicesW(ov_dc, OV_EXP_GLYPH, 1, &g, GGI_MARK_NONEXISTING_GLYPHS) != GDI_ERROR && g != 0xFFFF) {
@@ -4121,7 +4141,7 @@ static HFONT ov_exp_font(void)
         SelectObject(ov_dc, o);
         HLOG_I("ORIGFLAG: ESC-Markierung %s (%d px)", ok[i] ? "Symbol" : "Text EXP", ov_font_px);
     }
-    return ok[i] ? f[i] : NULL;
+    return ok[i] ? f : NULL;
 }
 
 /* Symbol an x/y (TA_TOP wie ov_text), Rueckgabe = Breite in Pixeln. Ohne
@@ -4291,7 +4311,13 @@ static void ov_label(int i, wchar_t *o, size_t cap)
         /* W424 */
         "ovl.lb_ally",
         /* W447 */
-        "ovl.lb_netmode" };
+        "ovl.lb_netmode",
+        /* W453 */
+        "ovl.lb_netpanel",
+        /* W460 */
+        "ovl.lb_lobbywidget",
+        /* W466 */
+        "ovl.lb_shsun" };
     ov_wkey(o, cap, lb[i]);
 }
 
@@ -4342,6 +4368,12 @@ static void ov_value(int i, wchar_t *o, size_t cap)
         break;
     case OI_AUTOGEAR: ov_wkey(o, cap, g_cfg.auto_gear ? "ovl.v_on" : "ovl.v_off"); break;
     case OI_ALLY: ov_wkey(o, cap, g_cfg.sb_allied_squads ? "ovl.v_on" : "ovl.v_offorig"); break; /* W424 */
+    case OI_NETPANEL: ov_wkey(o, cap, g_cfg.loc_net_panel ? "ovl.v_on" : "ovl.v_off"); break; /* W453 */
+    case OI_LOBBYWIDGET: ov_wkey(o, cap, g_cfg.loc_lobby_widget ? "ovl.v_on" : "ovl.v_off"); break; /* W460 */
+    case OI_SHSUN: /* W466 */
+        if (g_cfg.shadow_sun <= 0) { ov_wkey(o, cap, "ovl.v_off"); }
+        else { _snwprintf_s(o, cap, _TRUNCATE, L"%d %%", g_cfg.shadow_sun); }
+        break;
     case OI_NETMODE: { /* W447 */
         int m = loc_rb_net_mode();
         ov_wkey(o, cap, m == 0 ? "ovl.v_nm_auto" : m == 1 ? "ovl.v_nm_rb" : "ovl.v_nm_ls");
@@ -4426,6 +4458,7 @@ static void ov_value(int i, wchar_t *o, size_t cap)
         const ov_sum_t *m = &kOvSum[ov_sum_idx(i)];
         int q = ov_sum_match(ov_sum_idx(i));
         if (q < 0) { ov_wkey(o, cap, "ovl.v_custom"); }
+        else if (i == OI_SSHADOW && g_sba_loc && q < 2) { ov_wkey(o, cap, q ? "ovl.v_hardorig" : "ovl.v_off"); } /* W471: LoC-Original = Schatten des Spiels */
         else if (m->lbl[q]) { ov_wkey(o, cap, m->lbl[q]); }
         else { _snwprintf_s(o, cap, _TRUNCATE, L"%d %%", m->v[q][0]); }
         break;
@@ -4515,7 +4548,8 @@ static void ov_value(int i, wchar_t *o, size_t cap)
     case OI_PRESET: { /* W131, W143; W173 LAUNCHER-P4: einheitliches Preset. W296 PRESET-ORIG: nur
                        * "Original" (Monitor-Rate) ohne Bildrate im Namen, Spalte 3 "Performance" */
         static const char *const pn[SB_GP_NPRE] = { "ovl.v_orig_hd", "ovl.v_subtle", "ovl.v_strong", "ovl.v_performance",
-                                                    "ovl.v_clear" /* W252 */ };
+                                                    "ovl.v_clear" /* W252 */, "ovl.v_enhanced" /* W465 */,
+                                                    "ovl.v_vivid" /* W478 */ };
         int q = sb_gfx_preset_match_for(ov_fps_sel(), g_ov_rts >= 0 ? g_ov_rts : g_cfg.rt_scale);
         ov_wkey(o, cap, q >= 0 ? pn[q] : "ovl.v_custom");
         break;
@@ -4642,61 +4676,15 @@ static void ov_layout(unsigned boxh, unsigned *w, unsigned *h)
 
 static int ov_gdi_size(unsigned w, unsigned h)
 {
-    BITMAPINFO bi;
-    if (ov_dc && w == ov_bw && h == ov_bh) { return 1; }
-    if (!ov_dc) {
-        ov_dc = CreateCompatibleDC(NULL);
-        if (!ov_dc) { return 0; }
-    }
-    if (ov_bmp) {
-        SelectObject(ov_dc, ov_bmp_old);
-        DeleteObject(ov_bmp);
-        ov_bmp = NULL;
-    }
-    if (ov_font) {
-        SelectObject(ov_dc, ov_font_old);
-        DeleteObject(ov_font);
-        ov_font = NULL;
-    }
-    memset(&bi, 0, sizeof bi);
-    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
-    bi.bmiHeader.biWidth = (LONG)w;
-    bi.bmiHeader.biHeight = -(LONG)h; /* top-down */
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    ov_bmp = CreateDIBSection(ov_dc, &bi, DIB_RGB_COLORS, (void **)&ov_bits, NULL, 0);
-    if (!ov_bmp || !ov_bits) { return 0; }
-    ov_bmp_old = (HBITMAP)SelectObject(ov_dc, ov_bmp);
-    ov_font_px = S(10.5f);
-    ov_font = CreateFontW(-ov_font_px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
-                          OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FIXED_PITCH | FF_MODERN,
-                          L"Consolas");
-    if (ov_font) { ov_font_old = (HFONT)SelectObject(ov_dc, ov_font); }
-    SetBkMode(ov_dc, TRANSPARENT);
-    ov_bw = w;
-    ov_bh = h;
+    if (!ovs_canvas_size(&ov_cv, w, h)) { return 0; }
+    if (!ov_font_px) { ovs_canvas_font(&ov_cv, OVS_FACE_MONO, FW_NORMAL, S(OVS_FS_MENU)); }
     return 1;
 }
 
 /* Rahmen + Eckwinkel (HUD-Klammern) + Kopfzeile - gemeinsam fuer alle Bildschirme (W188) */
 static int ov_frame_head(int W, int H, const wchar_t *title, const wchar_t *tag)
 {
-    int b = S(1.0f), cl = S(8.0f), head = S(20.0f), pad = S(6.0f), ty;
-    ov_fill(0, 0, W, H, OV_C_BG);
-    ov_fill(0, 0, W, b, OV_C_LINE);
-    ov_fill(0, H - b, W, H, OV_C_LINE);
-    ov_fill(0, 0, b, H, OV_C_LINE);
-    ov_fill(W - b, 0, W, H, OV_C_LINE);
-    ov_fill(0, 0, cl, 2 * b + 1, OV_C_TXT);
-    ov_fill(0, 0, 2 * b + 1, cl, OV_C_TXT);
-    ov_fill(W - cl, H - 2 * b - 1, W, H, OV_C_TXT);
-    ov_fill(W - 2 * b - 1, H - cl, W, H, OV_C_TXT);
-    ov_fill(b + S(2.0f), b + S(2.0f), W - b - S(2.0f), head, OV_C_HEAD);
-    ty = b + S(2.0f) + (head - b - S(2.0f) - ov_font_px) / 2 - S(0.5f);
-    ov_text(pad + S(2.0f), ty, title, OV_C_BG, 0);
-    if (tag && tag[0]) { ov_text(W - pad - S(2.0f), ty, tag, OV_C_BG, 1); }
-    return head;
+    return ovs_frame(ov_dc, g_ovf, W, H, ov_font_px, &OVS_FRAME_MENU, title, tag); /* W461: gemeinsamer Rahmen */
 }
 
 /* W222: Tastenname einer Belegung fuer den Alpha-Hinweis (0 = nicht belegt) */
@@ -4903,7 +4891,7 @@ static void ov_paint_menu(void)
     rst[0] = 0;
     ov_text(pad + S(2.0f), y, g_ov_status[0] ? g_ov_status : rst, OV_C_TXT, 0);
     GdiFlush();
-    sb_ovl_ui_finish(ov_bits, ov_bw, ov_bh, g_ovf);
+    ovs_finish(ov_bits, ov_bw, ov_bh, g_ovf);
 }
 
 /* W195 PHOTO-MODE: Foto-Panel (Look der Einstellungen: Kopf, Tab-Zeile, Zeilen Bezeichnung/Wert, Fusszeilen) */
@@ -5055,7 +5043,7 @@ static void ov_paint_photo(void)
         ov_text(pad + S(2.0f), y, g_ov_status[0] ? g_ov_status : st, OV_C_TXT, 0);
     }
     GdiFlush();
-    sb_ovl_ui_finish(ov_bits, ov_bw, ov_bh, g_ovf);
+    ovs_finish(ov_bits, ov_bw, ov_bh, g_ovf);
 }
 
 static void ov_paint(void)
@@ -5225,22 +5213,7 @@ static void ov_paint(void)
         }
     }
     GdiFlush();
-    sb_ovl_ui_finish(ov_bits, ov_bw, ov_bh, g_ovf);
-}
-
-/* W122: Scanlines (jede 2. Zeile leicht dunkler, ab Faktor 2) +
- * vormultipliziertes Alpha (Deckung SB_UI_ALPHA) - gemeinsamer Look. */
-void sb_ovl_ui_finish(unsigned *bits, unsigned w, unsigned h, float factor)
-{
-    unsigned n = w * h, px;
-    for (px = 0; px < n; px++) {
-        unsigned c = bits[px], r = (c >> 16) & 255u, g = (c >> 8) & 255u, bl = c & 255u;
-        float a = OV_ALPHA, k = (((px / w) & 1u) && factor >= 2.0f) ? 0.86f : 1.0f;
-        r = (unsigned)((float)r * a * k + 0.5f);
-        g = (unsigned)((float)g * a * k + 0.5f);
-        bl = (unsigned)((float)bl * a * k + 0.5f);
-        bits[px] = ((unsigned)(a * 255.0f + 0.5f) << 24) | (r << 16) | (g << 8) | bl;
-    }
+    ovs_finish(ov_bits, ov_bw, ov_bh, g_ovf);
 }
 
 /* ------------------------------------------------------------------ */
@@ -5339,38 +5312,11 @@ static int ov_d3d_init(void)
 
 static int ov_tex_upload(void)
 {
-    D3D11_MAPPED_SUBRESOURCE map;
-    unsigned y;
-    if (!ov_tex || ov_tw != ov_bw || ov_th != ov_bh) {
-        D3D11_TEXTURE2D_DESC td;
-        if (ov_srv) { ID3D11ShaderResourceView_Release(ov_srv); ov_srv = NULL; }
-        if (ov_tex) { ID3D11Texture2D_Release(ov_tex); ov_tex = NULL; }
-        memset(&td, 0, sizeof td);
-        td.Width = ov_bw;
-        td.Height = ov_bh;
-        td.MipLevels = 1;
-        td.ArraySize = 1;
-        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_DYNAMIC;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &ov_tex)) ||
-            FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)ov_tex, NULL, &ov_srv))) {
-            HLOG_W("OVERLAY: Panel-Textur %ux%u gescheitert", ov_bw, ov_bh);
-            return 0;
-        }
-        ov_tw = ov_bw;
-        ov_th = ov_bh;
-    }
-    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)ov_tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+    if (!ovs_tex_ensure(&ov_tx, ov_bw, ov_bh)) {
+        HLOG_W("OVERLAY: Panel-Textur %ux%u gescheitert", ov_bw, ov_bh);
         return 0;
     }
-    for (y = 0; y < ov_bh; y++) {
-        memcpy((unsigned char *)map.pData + (size_t)y * map.RowPitch, ov_bits + (size_t)y * ov_bw, ov_bw * 4u);
-    }
-    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)ov_tex, 0);
-    return 1;
+    return ovs_tex_write(&ov_tx, ov_bits);
 }
 
 /* Bereich (x,y,w,h) des Ziels sichern (nur Spiel-Backbuffer ohne Interp).
@@ -5585,34 +5531,17 @@ int sb_ovl_vrtex_upload(sb_ovl_vrtex_t *t, const unsigned *bits, unsigned w, uns
 
 /* Zweiter GDI-Zeichenkontext (VR-Aufloesung): Tausch mit den Desktop-Globalen,
  * damit ov_layout/ov_gdi_size/ov_paint unveraendert in beiden Groessen zeichnen. */
-typedef struct {
-    HDC dc;
-    HBITMAP bmp, bmp_old;
-    unsigned *bits;
-    unsigned bw, bh;
-    HFONT font, font_old;
-    int font_px;
-    float f;
-} ov_gdi_t;
-static ov_gdi_t ov_vrg = { NULL, NULL, NULL, NULL, 0, 0, NULL, NULL, 0, 1.0f };
+static ovs_canvas_t ov_vrg = { .f = 1.0f };
 static sb_ovl_vrtex_t ov_vrt;
 static int ov_vr_scr = -1, ov_vr_rows_y, ov_vr_rowh, ov_vr_nrows;
 static float ov_vr_f;
 static long long ov_vr_q;
 
-static void ov_gdi_swap(ov_gdi_t *o)
+static void ov_gdi_swap(ovs_canvas_t *o)
 {
-    HDC dc = ov_dc;
-    HBITMAP b = ov_bmp, bo = ov_bmp_old;
-    unsigned *bits = ov_bits;
-    unsigned bw = ov_bw, bh = ov_bh;
-    HFONT fo = ov_font, foo = ov_font_old;
-    int fp = ov_font_px;
-    float f = g_ovf;
-    ov_dc = o->dc; ov_bmp = o->bmp; ov_bmp_old = o->bmp_old; ov_bits = o->bits; ov_bw = o->bw; ov_bh = o->bh;
-    ov_font = o->font; ov_font_old = o->font_old; ov_font_px = o->font_px; g_ovf = o->f;
-    o->dc = dc; o->bmp = b; o->bmp_old = bo; o->bits = bits; o->bw = bw; o->bh = bh;
-    o->font = fo; o->font_old = foo; o->font_px = fp; o->f = f;
+    ovs_canvas_t t = ov_cv;
+    ov_cv = *o;
+    *o = t;
 }
 
 /* Render-Thread (sb_ovl_draw, unter ctx_lock): VR-Panel neu zeichnen, wenn sich
@@ -5698,11 +5627,11 @@ void sb_ovl_draw(ID3D11RenderTargetView *rtv, int save)
         wchar_t rec[64];
         g_ovf = 1.5f;
         if (!ov_d3d_init() || !ov_gdi_size(152, 32)) { return; }
-        ov_fill(0, 0, 152, 32, RGB(24, 8, 8));
+        ov_fill(0, 0, 152, 32, OVS_C_REC_BG); /* W467: Tokens */
         if (sb_clip_seconds()) { _snwprintf_s(rec, 64, _TRUNCATE, L"\x25CF REC %d", sb_clip_seconds()); }
         else { ov_wkey(rec, 64, "ovl.clip_finishing"); }
-        ov_text(8, 5, rec, RGB(255, 100, 100), 0);
-        sb_ovl_ui_finish(ov_bits, 152, 32, 1.5f);
+        ov_text(8, 5, rec, OVS_C_REC, 0);
+        ovs_finish(ov_bits, 152, 32, 1.5f);
         if (ov_tex_upload()) {
             if (save) { sb_ovl_save_take(&ov_bbsave, rtv, 16, 16, 152, 32); }
             sb_ovl_quad(rtv, ov_srv, 16, 16, 152, 32);

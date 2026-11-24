@@ -15,6 +15,8 @@
 #include "sb_userdata.h" /* W150 USER-DATA */
 #include "sb_gfxpreset.h" /* W173 LAUNCHER-P4: Preset-Werte (wie Client) */
 #include "sb_fpsrate.h" /* W223 FPS-RATES: gueltige Bildraten */
+/* W478: Launcher-Presets = Tabellenspalten, Custom direkt dahinter */
+typedef char lgp_custom_chk[(LGP_CUSTOM == SB_GP_NPRE && LGP_ENHANCED == SB_GP_ENHANCED && LGP_VIVID == SB_GP_VIVID) ? 1 : -1];
 
 #ifndef SB_HARNESS_DIR_DEFAULT
 #define SB_HARNESS_DIR_DEFAULT ""
@@ -30,6 +32,7 @@ void lcfg_defaults(launcher_settings_t *s)
     s->width = 2560;
     s->height = 1080;
     s->present_interval = 0;
+    s->frame_pacing = 1; /* W468 */
     s->fs_interp_match = 1;
     s->fps_limit = 120;
     s->audio = 1;
@@ -109,10 +112,10 @@ static const char *const kShxKey[LSHX_N] = {
     "shading", "world_fog", "world_contrast", "world_gamma", "world_sharpen", "bloom_strength",
     "cockpit_glow", "cockpit_spill", "cockpit_light", "world_exposure", "tonemap", "bloom_threshold",
     "light_world", "light_cockpit", "world_focus", "aa_mode", "ssao", "color_sat", "color_temp",
-    "color_lift", "color_gamma", "color_gain", "shade_shadow", "shadow_soft", "hud_label_avoid"
+    "color_lift", "color_gamma", "color_gain", "shade_shadow", "shadow_soft", "shadow_sun", "hud_label_avoid"
 };
 static const int kShxDef[LSHX_N] = {
-    1, 100, 100, 100, 0, 100, 0, 0, 100, 100, 0, 0, 100, 100, 100, 0, 0, 100, 0, 0, 100, 100, 0, 0, 0
+    1, 100, 100, 100, 0, 100, 0, 0, 100, 100, 0, 0, 100, 100, 100, 0, 0, 100, 0, 0, 100, 100, 0, 0, 0, 0
 };
 static const char *const kFxKey[LFX_N] = { /* W173: Reihenfolge = sb_gfxpreset.h */
     "fx_soft", "fx_embers", "fx_light", "fx_light_cockpit", "fx_interp"
@@ -226,12 +229,17 @@ int lcfg_gfx_value(const launcher_settings_t *s, int k)
     return 0;
 }
 
-int lcfg_gfx_preset_value(int preset, int k)
+int lcfg_gfx_preset_value_loc(int preset, int k, int loc)
 {
     int r = gfx_row(k);
     if (r < 0 || preset < 0 || preset >= SB_GP_NPRE) { return -1; }
     if (k == LGK_FX0 + LFX_INTERP) { return kSbGfxPreset[r].v[preset] != 0; }
-    return kSbGfxPreset[r].v[preset];
+    return sb_gp_val(r, preset, loc); /* W471: LoC-Original mit den Schatten des Spiels */
+}
+
+int lcfg_gfx_preset_value(int preset, int k)
+{
+    return lcfg_gfx_preset_value_loc(preset, k, lcfg_gfx_loc());
 }
 
 void lcfg_gfx_lock_key(lgp_mask_t *m, const char *key)
@@ -265,11 +273,43 @@ int lcfg_gfx_diff(const launcher_settings_t *s, int p, lgp_mask_t lock,
     return n;
 }
 
+/* W465 LOC-ENHANCED: aktives Spiel (Standard SB; Oberflaeche: Bindung an g_game) */
+static int g_gp_loc_fixed;
+static const int *g_gp_game;
+static int g_gp_game_loc;
+
+void lcfg_gfx_set_loc(int loc)
+{
+    g_gp_loc_fixed = loc ? 1 : 0;
+    g_gp_game = NULL;
+}
+
+void lcfg_gfx_bind_game(const int *game, int loc_value)
+{
+    g_gp_game = game;
+    g_gp_game_loc = loc_value;
+}
+
+int lcfg_gfx_loc(void)
+{
+    return g_gp_game ? *g_gp_game == g_gp_game_loc : g_gp_loc_fixed;
+}
+
+int lcfg_gfx_visible(int preset)
+{
+    return preset >= 0 && preset < SB_GP_NPRE && sb_gp_visible(preset, lcfg_gfx_loc());
+}
+
 int lcfg_gfx_preset(const launcher_settings_t *s, lgp_mask_t lock)
+{
+    return s->gfx_custom ? LGP_CUSTOM : lcfg_gfx_match(s, lock); /* W476: ausdruecklich gewaehltes Custom */
+}
+
+int lcfg_gfx_match(const launcher_settings_t *s, lgp_mask_t lock)
 {
     int p;
     for (p = 0; p < SB_GP_NPRE; p++) {
-        if (lcfg_gfx_diff(s, p, lock, NULL) == 0) {
+        if (lcfg_gfx_visible(p) && lcfg_gfx_diff(s, p, lock, NULL) == 0) {
             return p;
         }
     }
@@ -280,7 +320,11 @@ int lcfg_gfx_base(const launcher_settings_t *s, lgp_mask_t lock)
 {
     int p, best = 0, bn = 1 << 30;
     for (p = 0; p < SB_GP_NPRE; p++) {
-        int n = lcfg_gfx_diff(s, p, lock, NULL);
+        int n;
+        if (!lcfg_gfx_visible(p)) {
+            continue;
+        }
+        n = lcfg_gfx_diff(s, p, lock, NULL);
         if (n < bn) {
             bn = n;
             best = p;
@@ -309,6 +353,7 @@ void lcfg_gfx_apply(launcher_settings_t *s, int preset)
     if (preset < 0 || preset >= SB_GP_NPRE) {
         return; /* Benutzerdefiniert: Einzelwerte bleiben */
     }
+    s->gfx_custom = 0; /* W476: Preset gewaehlt -> keine ausdrueckliche Custom-Wahl mehr */
     for (k = 0; k < LGK_N; k++) {
         int v;
         if (gfx_row(k) < 0) { /* W296: nicht im Preset (-1 ist jetzt ein Wert: interp_fps auto) */
@@ -350,7 +395,8 @@ void lcfg_gfx_migrate(launcher_settings_t *s)
 int lcfg_gfx_migrate_fps(launcher_settings_t *s)
 {
     int done = 0;
-    if (s->gfx_preset_rev < SB_GP_REV && s->interp_fps == SB_GP_LEGACY_ORIG_FPS && s->fs_interp_match == 1) {
+    if (s->gfx_preset_rev < SB_GP_REV && !s->gfx_custom && /* W476: ausdruecklich Custom -> Werte bleiben */
+        s->interp_fps == SB_GP_LEGACY_ORIG_FPS && s->fs_interp_match == 1) {
         /* Erkennung ohne Effect-Pack-Sperre: gespeicherte Werte muessen selbst
          * Original sein (ein Pack aendert sie nie, er gilt nur im Spiel). */
         launcher_settings_t t = *s;
@@ -362,6 +408,41 @@ int lcfg_gfx_migrate_fps(launcher_settings_t *s)
     }
     s->gfx_preset_rev = SB_GP_REV;
     return done;
+}
+
+int lcfg_gfx_migrate_remaster(launcher_settings_t *s)
+{
+    if (s->gfx_custom) {
+        return 0; /* W476: ausdruecklich gewaehltes Custom bleibt unveraendert */
+    }
+    if (lcfg_gfx_diff(s, LGP_SUBTLE, 0, NULL) == 0 || lcfg_gfx_diff(s, LGP_STRONG, 0, NULL) == 0) {
+        lcfg_gfx_apply(s, LGP_ORIGINAL);
+        return 1;
+    }
+    return 0;
+}
+
+void lcfg_gfx_apply_loc_look(launcher_settings_t *s)
+{
+    int k, any = 0;
+    for (k = 0; k < LGK_HD; k++) {
+        int v;
+        if (gfx_row(k) < 0) {
+            continue; /* LSHX_LABEL (hud_label_avoid) gehoert nicht zum Preset */
+        }
+        v = lcfg_gfx_preset_value(SB_GP_ENHANCED, k);
+        if (k < LSHX_N) {
+            s->shx[k] = v;
+        } else {
+            s->fx[k - LGK_FX0] = v;
+        }
+    }
+    for (k = 0; k < LFX_N; k++) {
+        if (s->fx[k] > 0) {
+            any = 1;
+        }
+    }
+    s->fx_enhanced = any;
 }
 
 int lcfg_fx_level(const launcher_settings_t *s, lgp_mask_t lock)
@@ -379,6 +460,82 @@ int lcfg_fx_level(const launcher_settings_t *s, lgp_mask_t lock)
         }
     }
     return LGP_CUSTOM;
+}
+
+/* W466 LOC-ENHANCED-2: Effekt-Stufen je Spiel. LoC zeigt "Original" (Spalte 0) und "Enhanced" (Spalte
+ * SB_GP_ENHANCED) statt Original/Dezent/Stark (W465: Enhanced stand dort als "Benutzerdefiniert", weil
+ * fx_light_cockpit=150 keiner SB-Stufe entspricht). Rueckgabe = Index der Auswahlliste bzw. LGP_CUSTOM. */
+/* W478 LOC-ENHANCED-VIVID: Shader-Schluessel, in denen Vivid von Enhanced abweicht (Farbe/Kontrast/Bloom/Sonne,
+ * aus der Tabelle). Die Effekte (fx_*) beider sind gleich; "Vivid" in der Effekt-Liste = Enhanced-Effekte mit
+ * diesen Vivid-Werten. Alle (ungesperrten) Schluessel auf Spalte col? */
+static int fx_vivid_key(int k)
+{
+    int r = gfx_row(k);
+    return k < LSHX_N && r >= 0 && kSbGfxPreset[r].v[SB_GP_VIVID] != kSbGfxPreset[r].v[SB_GP_ENHANCED];
+}
+
+static int fx_vivid_is(const launcher_settings_t *s, lgp_mask_t lock, int col)
+{
+    int k;
+    for (k = 0; k < LSHX_N; k++) {
+        if (fx_vivid_key(k) && !(lock & ((lgp_mask_t)1 << k)) && s->shx[k] != lcfg_gfx_preset_value(col, k)) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+static void fx_vivid_set(launcher_settings_t *s, int col)
+{
+    int k;
+    for (k = 0; k < LSHX_N; k++) {
+        if (fx_vivid_key(k)) {
+            s->shx[k] = lcfg_gfx_preset_value(col, k);
+        }
+    }
+}
+
+int lcfg_fx_level_game(const launcher_settings_t *s, lgp_mask_t lock, int loc)
+{
+    static const int kLocCol[2] = { LGP_ORIGINAL, SB_GP_ENHANCED };
+    int i, k;
+    if (!loc) {
+        return lcfg_fx_level(s, lock);
+    }
+    for (i = 0; i < 2; i++) {
+        for (k = LGK_FX0; k < LGK_FX0 + LFX_N; k++) {
+            if (!(lock & ((lgp_mask_t)1 << k)) &&
+                lcfg_gfx_value(s, k) != lcfg_gfx_preset_value(kLocCol[i], k)) {
+                break;
+            }
+        }
+        if (k == LGK_FX0 + LFX_N) {
+            return (i == 1 && fx_vivid_is(s, lock, SB_GP_VIVID)) ? 2 : i; /* W478: Enhanced-Effekte + Vivid-Farbe */
+        }
+    }
+    return LGP_CUSTOM;
+}
+
+/* W466: Auswahl sel der Effekt-Liste anwenden (LoC 0/1/2 = Original/Enhanced/Vivid, SB 0..2); sonst nichts.
+ * W478: Vivid setzt zu den Effekten die Vivid-Farbwerte; Enhanced stellt sie zurueck, wenn sie Vivid waren. */
+void lcfg_fx_apply_sel(launcher_settings_t *s, int sel, int loc)
+{
+    int k;
+    if (!loc) {
+        lcfg_fx_apply_level(s, sel);
+        return;
+    }
+    if (sel < 0 || sel > 2) {
+        return;
+    }
+    for (k = LGK_FX0; k < LGK_FX0 + LFX_N; k++) {
+        s->fx[k - LGK_FX0] = lcfg_gfx_preset_value(sel == 2 ? SB_GP_VIVID : sel ? SB_GP_ENHANCED : LGP_ORIGINAL, k);
+    }
+    if (sel == 2) {
+        fx_vivid_set(s, SB_GP_VIVID);
+    } else if (sel == 1 && fx_vivid_is(s, 0, SB_GP_VIVID)) {
+        fx_vivid_set(s, SB_GP_ENHANCED);
+    }
 }
 
 void lcfg_fx_apply_level(launcher_settings_t *s, int level)
@@ -415,6 +572,8 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         s->height = (unsigned)atoi(v);
     } else if (strcmp(k, "present_interval") == 0) {
         s->present_interval = atoi(v);
+    } else if (strcmp(k, "frame_pacing") == 0) { /* W468 */
+        s->frame_pacing = _stricmp(v, "timer") == 0 ? 0 : _stricmp(v, "monitor") == 0 ? 1 : _stricmp(v, "vrr") == 0 ? 2 : atoi(v);
     } else if (strcmp(k, "fs_interp_match") == 0) {
         s->fs_interp_match = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "fps_limit") == 0) {
@@ -506,6 +665,8 @@ static void set_key(launcher_settings_t *s, const char *k, const char *v)
         s->interp_fps = atoi(v);
     } else if (strcmp(k, SB_GP_REV_KEY) == 0) { /* W296 */
         s->gfx_preset_rev = atoi(v);
+    } else if (strcmp(k, LCFG_KEY_GFX_CUSTOM) == 0) { /* W476 */
+        s->gfx_custom = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "vr_enable") == 0) { /* W134 */
         s->vr_enable = atoi(v) ? 1 : 0;
     } else if (strcmp(k, "vr_preview") == 0) {
@@ -679,6 +840,7 @@ static const char *kManaged[][2] = {
     { "hdd_root", "game" },         { "game_image", "game" }, /* W150 */
     { "width", "display" },
     { "height", "display" },        { "present_interval", "display" },
+    { "frame_pacing", "render" }, /* W468 */
     { "fs_interp_match", "render" },
     { "fps_limit", "display" },     { "audio", "audio" },
     { "audio_live", "audio" },      { "aspect_mode", "render" },
@@ -703,6 +865,7 @@ static const char *kManaged[][2] = {
     { "watermark_media", "overlay" }, /* W290 */
     { "interp_fps", "render" },
     { SB_GP_REV_KEY, "render" }, /* W296 PRESET-ORIG: Stand der Preset-Tabelle (immer SB_GP_REV) */
+    { LCFG_KEY_GFX_CUSTOM, "render" }, /* W476: Custom ausdruecklich gewaehlt (nur Launcher) */
     { "window_mode", "display" },   { "fs_hz", "display" },
     { "mouse_mode", "input" },      { "mouse_sens", "input" },
     { "edge_mode", "render" },      { "edge_fade_width", "render" }, /* W107 */
@@ -731,6 +894,7 @@ static const char *kManaged[][2] = {
     { "color_temp", "render" },     { "color_lift", "render" },
     { "color_gamma", "render" },    { "color_gain", "render" },
     { "shade_shadow", "render" },   { "shadow_soft", "render" },
+    { "shadow_sun", "render" }, /* W471-Preset-Schluessel; W476: fehlte hier -> LoC-Enhanced nach Neustart Custom */
     { "hud_label_avoid", "render" }, /* W153 */
     /* W173 LAUNCHER-P4: Effekte gehoeren zum Grafik-Preset (vorher nur ESC) */
     { "fx_soft", "render" },        { "fx_embers", "render" },
@@ -812,6 +976,8 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = (int)s->height;
         } else if (strcmp(k, "present_interval") == 0) {
             v = s->present_interval;
+        } else if (strcmp(k, "frame_pacing") == 0) { /* W468 */
+            v = s->frame_pacing;
         } else if (strcmp(k, "fs_interp_match") == 0) {
             v = s->fs_interp_match;
         } else if (strcmp(k, "fps_limit") == 0) {
@@ -880,6 +1046,8 @@ static void key_value(const launcher_settings_t *s, const char *k,
             v = s->interp_fps;
         } else if (strcmp(k, SB_GP_REV_KEY) == 0) { /* W296: wer speichert, kennt Original = auto */
             v = SB_GP_REV;
+        } else if (strcmp(k, LCFG_KEY_GFX_CUSTOM) == 0) { /* W476 */
+            v = s->gfx_custom ? 1 : 0;
         } else if (strcmp(k, "window_mode") == 0) {
             v = s->window_mode;
         } else if (strcmp(k, "fs_hz") == 0) {
@@ -1825,6 +1993,9 @@ paths_ok:
     if (s->present_interval < 0 || s->present_interval > 1) {
         FAIL(LT("cfg.bad_vsync"), s->present_interval);
     }
+    if (s->frame_pacing < 0 || s->frame_pacing > 2) { /* W468 */
+        FAIL(LT("cfg.bad_pacing"), s->frame_pacing);
+    }
     /* W47, Regel S3.10 (nie strecken): aspect_mode=0 streckt 2D aufs
      * Vollbild und wird darum abgelehnt; der Client kennt nur 0/1. */
     if (s->sbc_mouse_off < 0 || s->sbc_mouse_off > 1) {
@@ -2052,6 +2223,7 @@ int lcfg_profile_load(const char *client_dir, const char *name,
         return 1;
     }
     lcfg_gfx_migrate_fps(s); /* W296 PRESET-ORIG: altes Original 120 -> auto */
+    (void)lcfg_gfx_migrate_remaster(s); /* W465: Remastered -> Original */
     return 0;
 }
 

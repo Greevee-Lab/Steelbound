@@ -24,6 +24,7 @@
 #include "sb_profile.h" /* W229 SBA() */
 #include "render_qa.h"
 #include "sb_overlay.h"
+#include "overlay_style.h" /* W461 OVERLAY-CORE */
 #include "sb_perfhud.h"
 #include "sb_nethud.h" /* W374: F3-Netz-Overlay (gleiche Zeichenstellen) */
 #include "sb_pause.h"
@@ -118,17 +119,18 @@ static volatile LONG ph_prof_run;
 static void ph_prof_start(void);
 static void ph_prof_follow(void); /* DIAG(W391) */
 
-/* Panel */
-static HDC ph_dc;
-static HBITMAP ph_bmp, ph_bmp_old;
-static unsigned *ph_bits;
-static unsigned ph_bw, ph_bh;
-static HFONT ph_font, ph_font_old;
-static int ph_font_px;
-static float ph_f = 1.0f;
-static ID3D11Texture2D *ph_tex;
-static ID3D11ShaderResourceView *ph_srv;
-static unsigned ph_tw, ph_th;
+/* Panel (W461: Zeichenflaeche, Schrift und Textur aus overlay_style) */
+static ovs_canvas_t ph_cv = { .f = 1.0f };
+#define ph_dc (ph_cv.dc)
+#define ph_bits (ph_cv.bits)
+#define ph_bw (ph_cv.w)
+#define ph_bh (ph_cv.h)
+#define ph_font_px (ph_cv.font_px)
+#define ph_f (ph_cv.f)
+static ovs_tex_t ph_tx;
+#define ph_srv (ph_tx.srv)
+#define ph_tw (ph_tx.w)
+#define ph_th (ph_tx.h)
 static sb_ovl_save_t ph_save;
 
 /* ------------------------------------------------------------------ */
@@ -1564,29 +1566,11 @@ static void ph_log(void)
 /* ------------------------------------------------------------------ */
 /* Panel (GDI, Look des ESC-Overlays)                                  */
 /* ------------------------------------------------------------------ */
-#define PH_C_WARN RGB(255, 176, 64)
+#define PH_C_WARN OVS_C_WARN
 
-static int S(float x)
-{
-    int v = (int)(x * ph_f + 0.5f);
-    return v < 1 ? 1 : v;
-}
-
-static void ph_fill(int x0, int y0, int x1, int y1, COLORREF c)
-{
-    RECT r;
-    HBRUSH b = CreateSolidBrush(c);
-    r.left = x0; r.top = y0; r.right = x1; r.bottom = y1;
-    FillRect(ph_dc, &r, b);
-    DeleteObject(b);
-}
-
-static void ph_text(int x, int y, const wchar_t *s, COLORREF c, int right)
-{
-    SetTextColor(ph_dc, c);
-    SetTextAlign(ph_dc, (right ? TA_RIGHT : TA_LEFT) | TA_TOP);
-    TextOutW(ph_dc, x, y, s, (int)wcslen(s));
-}
+static int S(float x) { return ovs_px(ph_f, x); }
+#define ph_fill(x0, y0, x1, y1, c) ovs_fill(ph_dc, x0, y0, x1, y1, c)
+#define ph_text(x, y, s, c, right) ovs_text(ph_dc, x, y, s, c, right)
 
 #define PH_ROWS 8
 static int ph_vr_paint; /* W197 VR-MENU: 1 = Zeichnen fuer die VR-Flaeche (Zusatzzeile VR) */
@@ -1596,8 +1580,7 @@ static void ph_layout(unsigned bbh, unsigned *w, unsigned *h)
     unsigned bx, by, bw, bh;
     sb_aspect_box(&bx, &by, &bw, &bh);
     (void)bbh;
-    ph_f = (float)bh / 540.0f;
-    if (ph_f < 1.0f) { ph_f = 1.0f; }
+    ph_f = ovs_scale_ui(bh);
     ph_layout_f(w, h);
 }
 
@@ -1617,73 +1600,38 @@ static void ph_layout_f(unsigned *w, unsigned *h)
 
 static int ph_gdi_size(unsigned w, unsigned h)
 {
-    BITMAPINFO bi;
-    if (ph_dc && w == ph_bw && h == ph_bh) { return 1; }
-    if (!ph_dc) {
-        ph_dc = CreateCompatibleDC(NULL);
-        if (!ph_dc) { return 0; }
-    }
-    if (ph_bmp) { SelectObject(ph_dc, ph_bmp_old); DeleteObject(ph_bmp); ph_bmp = NULL; }
-    if (ph_font) { SelectObject(ph_dc, ph_font_old); DeleteObject(ph_font); ph_font = NULL; }
-    memset(&bi, 0, sizeof bi);
-    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
-    bi.bmiHeader.biWidth = (LONG)w;
-    bi.bmiHeader.biHeight = -(LONG)h;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    ph_bmp = CreateDIBSection(ph_dc, &bi, DIB_RGB_COLORS, (void **)&ph_bits, NULL, 0);
-    if (!ph_bmp || !ph_bits) { return 0; }
-    ph_bmp_old = (HBITMAP)SelectObject(ph_dc, ph_bmp);
-    ph_font_px = S(9.0f);
-    ph_font = CreateFontW(-ph_font_px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
-                          CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
-    if (ph_font) { ph_font_old = (HFONT)SelectObject(ph_dc, ph_font); }
-    SetBkMode(ph_dc, TRANSPARENT);
-    ph_bw = w;
-    ph_bh = h;
+    if (!ovs_canvas_size(&ph_cv, w, h)) { return 0; }
+    if (!ph_font_px) { ovs_canvas_font(&ph_cv, OVS_FACE_MONO, FW_NORMAL, S(OVS_FS_HUD)); }
     return 1;
 }
 
 static void ph_paint(void)
 {
-    int W = (int)ph_bw, H = (int)ph_bh, b = S(1.0f), pad = S(5.0f), rowh = S(10.0f), head = S(15.0f);
-    int y, ty, gx0, gx1, gy0, gy1, i;
+    int W = (int)ph_bw, H = (int)ph_bh, pad = S(5.0f), rowh = S(10.0f), head;
+    int y, gx0, gx1, gy0, gy1, i;
     wchar_t t[128], kn[16];
     ph_stat_t s;
     COLORREF cf;
     static const wchar_t *const wm[3] = { L"Fenster", L"Randlos", L"Exklusiv" };
     unsigned rts;
     ph_stats(1.0, &s);
-    ph_fill(0, 0, W, H, SB_UI_C_BG);
-    ph_fill(0, 0, W, b, SB_UI_C_LINE);
-    ph_fill(0, H - b, W, H, SB_UI_C_LINE);
-    ph_fill(0, 0, b, H, SB_UI_C_LINE);
-    ph_fill(W - b, 0, W, H, SB_UI_C_LINE);
-    ph_fill(0, 0, S(7.0f), 2 * b + 1, SB_UI_C_TXT);
-    ph_fill(0, 0, 2 * b + 1, S(7.0f), SB_UI_C_TXT);
-    ph_fill(W - S(7.0f), H - 2 * b - 1, W, H, SB_UI_C_TXT);
-    ph_fill(W - 2 * b - 1, H - S(7.0f), W, H, SB_UI_C_TXT);
-    /* Kopf */
-    ph_fill(b + S(2.0f), b + S(2.0f), W - b - S(2.0f), head, SB_UI_C_HEAD);
-    ty = b + S(2.0f) + (head - b - S(2.0f) - ph_font_px) / 2 - S(0.5f);
-    ph_text(pad + S(1.0f), ty, L"\u25A0 SYS-PERF", SB_UI_C_BG, 0);
+    /* Rahmen + Kopf (W461: gemeinsamer HUD-Rahmen) */
     ph_key_name(kn, 16);
     _snwprintf_s(t, 128, _TRUNCATE, L"LEISTUNG %s", kn);
-    ph_text(W - pad - S(1.0f), ty, t, SB_UI_C_BG, 1);
+    head = ovs_frame(ph_dc, ph_f, W, H, ph_font_px, &OVS_FRAME_HUD, L"\u25A0 SYS-PERF", t);
     y = head + S(3.0f);
     /* Zeile 1: FPS + Ticks */
-    cf = (s.frames && s.ft_avg > s.target * 1.15) ? PH_C_WARN : SB_UI_C_TXT;
+    cf = (s.frames && s.ft_avg > s.target * 1.15) ? PH_C_WARN : OVS_C_TXT;
     _snwprintf_s(t, 128, _TRUNCATE, L"FPS %6.1f", s.fps);
     ph_text(pad, y, t, cf, 0);
     _snwprintf_s(t, 128, _TRUNCATE, L"Ticks/s %4.1f", s.tps);
-    ph_text(W - pad, y, t, (s.ticks && s.tps < 29.0 && rq_in_mission()) ? PH_C_WARN : SB_UI_C_TXT, 1);
+    ph_text(W - pad, y, t, (s.ticks && s.tps < 29.0 && rq_in_mission()) ? PH_C_WARN : OVS_C_TXT, 1);
     y += rowh;
     _snwprintf_s(t, 128, _TRUNCATE, L"Bild %5.2f ms  %5.2f\u2013%5.2f", s.ft_avg, s.ft_min, s.ft_max);
-    ph_text(pad, y, t, SB_UI_C_TXT, 0);
+    ph_text(pad, y, t, OVS_C_TXT, 0);
     y += rowh;
     _snwprintf_s(t, 128, _TRUNCATE, L"1%%-Low %5.1f FPS (%5.2f ms)", s.low1, s.p99);
-    ph_text(pad, y, t, (s.frames && s.p99 > s.target * 1.5) ? PH_C_WARN : SB_UI_C_TXT, 0);
+    ph_text(pad, y, t, (s.frames && s.p99 > s.target * 1.5) ? PH_C_WARN : OVS_C_TXT, 0);
     y += rowh + S(2.0f);
     /* Graph: Bildzeit der letzten Bilder (1 px je Bild, rechts = neu),
      * Skala 0..33,3 ms, Linien bei 8,3 (120) und 16,7 ms (60). */
@@ -1691,40 +1639,40 @@ static void ph_paint(void)
     gx1 = W - pad;
     gy0 = y;
     gy1 = y + S(34.0f);
-    ph_fill(gx0, gy0, gx1, gy1, RGB(2, 14, 7));
+    ph_fill(gx0, gy0, gx1, gy1, OVS_C_GRAPH);
     {
         double scale = (double)(gy1 - gy0) / 33.333;
         int y120 = gy1 - (int)(8.333 * scale + 0.5), y60 = gy1 - (int)(16.667 * scale + 0.5);
         int x;
-        ph_fill(gx0, y120, gx1, y120 + 1, SB_UI_C_DIM);
-        ph_fill(gx0, y60, gx1, y60 + 1, SB_UI_C_DIM);
+        ph_fill(gx0, y120, gx1, y120 + 1, OVS_C_DIM);
+        ph_fill(gx0, y60, gx1, y60 + 1, OVS_C_DIM);
         for (x = gx1 - 1, i = 0; x >= gx0 && (unsigned)i < ph_fn && (unsigned)i < PH_RING; x--, i++) {
             const ph_frame_t *f = &ph_fr[(ph_fn - 1u - (unsigned)i) % PH_RING];
             double ft = f->ft;
             int hgt = (int)(ft * scale + 0.5);
-            COLORREF c = ft > s.target * 2.0 ? PH_C_WARN : (ft > s.target * 1.5 ? SB_UI_C_TXT : SB_UI_C_LINE);
+            COLORREF c = ft > s.target * 2.0 ? PH_C_WARN : (ft > s.target * 1.5 ? OVS_C_TXT : OVS_C_LINE);
             if (hgt > gy1 - gy0) { hgt = gy1 - gy0; }
             if (hgt < 1) { hgt = 1; }
             ph_fill(x, gy1 - hgt, x + 1, gy1, c);
         }
-        ph_text(gx0 + S(1.0f), gy0, L"33", SB_UI_C_DIM, 0);
-        ph_text(gx1 - S(1.0f), y60 - ph_font_px + S(1.0f), L"60", SB_UI_C_DIM, 1);
-        ph_text(gx1 - S(1.0f), y120 - ph_font_px + S(1.0f), L"120", SB_UI_C_DIM, 1);
+        ph_text(gx0 + S(1.0f), gy0, L"33", OVS_C_DIM, 0);
+        ph_text(gx1 - S(1.0f), y60 - ph_font_px + S(1.0f), L"60", OVS_C_DIM, 1);
+        ph_text(gx1 - S(1.0f), y120 - ph_font_px + S(1.0f), L"120", OVS_C_DIM, 1);
     }
     y = gy1 + S(3.0f);
     /* CPU je Tick */
     _snwprintf_s(t, 128, _TRUNCATE, L"CPU Spiel%5.1f Rend%5.1f Intp%4.1f", s.game, s.render, s.interp + s.iwait);
-    ph_text(pad, y, t, SB_UI_C_TXT, 0);
+    ph_text(pad, y, t, OVS_C_TXT, 0);
     y += rowh;
     _snwprintf_s(t, 128, _TRUNCATE, L"Tick-Last %5.1f ms (max %5.1f)", s.busy, s.busy_max);
-    ph_text(pad, y, t, (s.busy_max > 33.3 * 0.75) ? PH_C_WARN : SB_UI_C_TXT, 0);
+    ph_text(pad, y, t, (s.busy_max > 33.3 * 0.75) ? PH_C_WARN : OVS_C_TXT, 0);
     y += rowh;
     if (ph_gq_fail) { _snwprintf_s(t, 128, _TRUNCATE, L"GPU  nicht messbar"); }
     else { _snwprintf_s(t, 128, _TRUNCATE, L"GPU Zw%5.2f Tick%5.1f max%5.1f", s.gpu_z, s.gpu_t, s.gpu_max); }
-    ph_text(pad, y, t, SB_UI_C_TXT, 0);
+    ph_text(pad, y, t, OVS_C_TXT, 0);
     y += rowh;
     _snwprintf_s(t, 128, _TRUNCATE, L"Draws/Tick %5.0f  Pres %4.2f skip %u", s.draws, s.pres_avg, s.skip);
-    ph_text(pad, y, t, SB_UI_C_TXT, 0);
+    ph_text(pad, y, t, OVS_C_TXT, 0);
     y += rowh;
     if (g_cfg.perf_gpass > 0) { /* DIAG(GPU-COST,W146): GPU je Pass eines Zwischenbilds (ms, Mittel 1 s) */
         static LONGLONG gq;
@@ -1733,12 +1681,12 @@ static void ph_paint(void)
         _snwprintf_s(t, 128, _TRUNCATE, L"Pass Welt%4.1f/%3.1f RT%4.1f BB%4.1f/%3.1f",
                      gp_last[GP_WELT] + gp_last[GP_WELT_SH], gp_last[GP_WELT_SH], gp_last[GP_SUB] + gp_last[GP_SUB_SH],
                      gp_last[GP_BB] + gp_last[GP_BB_SH], gp_last[GP_BB_SH]);
-        ph_text(pad, y, t, SB_UI_C_TXT, 0);
+        ph_text(pad, y, t, OVS_C_TXT, 0);
         y += rowh;
         _snwprintf_s(t, 128, _TRUNCATE, L"MFX%4.1f FX%4.1f Post%4.1f St%4.1f VR%4.1f",
                      gp_last[GP_MFX], gp_last[GP_FX], gp_last[GP_POST] + gp_last[GP_FXPOST] + gp_last[GP_BLIT] + gp_last[GP_HUD],
                      gp_last[GP_START], gp_last_vr);
-        ph_text(pad, y, t, SB_UI_C_TXT, 0);
+        ph_text(pad, y, t, OVS_C_TXT, 0);
         y += rowh;
     }
     rts = sb_rtt_dyn_factor(); /* W146: aktueller Faktor (rt_scale_dyn) */
@@ -1762,7 +1710,7 @@ static void ph_paint(void)
             }
         }
     }
-    ph_text(pad, y, t, SB_UI_C_DIM, 0);
+    ph_text(pad, y, t, OVS_C_DIM, 0);
     if (krnl_savelock_active()) { /* W190 SAVE-LOCK: sichtbarer Hinweis */
         y += rowh;
         sb_lang_w("ovl.sl_note", t, 128);
@@ -1772,46 +1720,19 @@ static void ph_paint(void)
         const char *vt = sb_vr_hud_text();
         y += rowh;
         if (!MultiByteToWideChar(CP_UTF8, 0, vt, -1, t, 128)) { t[0] = 0; }
-        ph_text(pad, y, t, SB_UI_C_TXT, 0);
+        ph_text(pad, y, t, OVS_C_TXT, 0);
     }
     GdiFlush();
-    sb_ovl_ui_finish(ph_bits, ph_bw, ph_bh, ph_f);
+    ovs_finish(ph_bits, ph_bw, ph_bh, ph_f);
 }
 
 static int ph_tex_upload(void)
 {
-    D3D11_MAPPED_SUBRESOURCE map;
-    unsigned y;
-    if (!ph_tex || ph_tw != ph_bw || ph_th != ph_bh) {
-        D3D11_TEXTURE2D_DESC td;
-        if (ph_srv) { ID3D11ShaderResourceView_Release(ph_srv); ph_srv = NULL; }
-        if (ph_tex) { ID3D11Texture2D_Release(ph_tex); ph_tex = NULL; }
-        memset(&td, 0, sizeof td);
-        td.Width = ph_bw;
-        td.Height = ph_bh;
-        td.MipLevels = 1;
-        td.ArraySize = 1;
-        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_DYNAMIC;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &ph_tex)) ||
-            FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)ph_tex, NULL, &ph_srv))) {
-            HLOG_W("PERFHUD: Panel-Textur %ux%u gescheitert", ph_bw, ph_bh);
-            return 0;
-        }
-        ph_tw = ph_bw;
-        ph_th = ph_bh;
-    }
-    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)ph_tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+    if (!ovs_tex_ensure(&ph_tx, ph_bw, ph_bh)) {
+        HLOG_W("PERFHUD: Panel-Textur %ux%u gescheitert", ph_bw, ph_bh);
         return 0;
     }
-    for (y = 0; y < ph_bh; y++) {
-        memcpy((unsigned char *)map.pData + (size_t)y * map.RowPitch, ph_bits + (size_t)y * ph_bw, ph_bw * 4u);
-    }
-    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)ph_tex, 0);
-    return 1;
+    return ovs_tex_write(&ph_tx, ph_bits);
 }
 
 static void sb_phud_draw_perf(ID3D11RenderTargetView *rtv, int save, unsigned *rect);
@@ -1824,11 +1745,22 @@ void sb_phud_draw(ID3D11RenderTargetView *rtv, int save)
     if (sb_nhud_visible()) { sb_nhud_draw(rtv, save, rect[2] ? rect : NULL); }
 }
 
+static unsigned ph_rect[4]; /* W467: Flaeche des zuletzt gezeichneten F2-Panels (x, y, w, h) */
+
+/* W467 OVERLAY-UNIFY: F2/F3 zeichnen als letzte (ueber den LoC-Panels). Damit Netzpanel, Replay-Hilfe und Widget ihnen
+ * im Belegungsplan trotzdem ausweichen, melden sie vor allen anderen die Flaeche des letzten Bildes an (ein Bild alt,
+ * beim Zeichnen ersetzt dieselbe Anmeldung sie). */
+void sb_phud_layout_pre(void)
+{
+    if (ph_vis && ph_rect[2] && ph_rect[3]) { ovs_layout_claim(OVS_SLOT_PERF, ph_rect[0], ph_rect[1], ph_rect[2], ph_rect[3]); }
+    if (sb_nhud_visible()) { sb_nhud_layout_pre(); }
+}
+
 static void sb_phud_draw_perf(ID3D11RenderTargetView *rtv, int save, unsigned *rect)
 {
     unsigned pw, ph, x0, y0, m;
     LONGLONG now;
-    static unsigned lk[4];
+    unsigned *lk = ph_rect;
     if (!ph_vis || !rtv || !g_ctx || !g_dev) { return; }
     ph_layout(g_bb_h, &pw, &ph);
     if (pw + 4u > g_bb_w || ph + 4u > g_bb_h) { return; }
@@ -1839,9 +1771,9 @@ static void sb_phud_draw_perf(ID3D11RenderTargetView *rtv, int save, unsigned *r
         ph_paint();
         if (!ph_tex_upload()) { return; }
     }
-    m = (unsigned)S(8.0f);
-    x0 = (ph_pos == 1 || ph_pos == 2) ? m : g_bb_w - pw - m;
-    y0 = (ph_pos <= 1) ? m : g_bb_h - ph - m;
+    m = (unsigned)S(OVS_MARGIN);
+    ovs_anchor((ovs_corner)ph_pos, pw, ph, m, &x0, &y0);
+    ovs_layout_claim(OVS_SLOT_PERF, x0, y0, pw, ph);
     if (lk[0] != x0 || lk[1] != y0 || lk[2] != pw || lk[3] != ph) {
         lk[0] = x0; lk[1] = y0; lk[2] = pw; lk[3] = ph;
         HLOG_I("PERFHUD panel %ux%u @%u,%u (bb %ux%u, Ecke %d, Faktor %.2f, Schrift %d px)", pw, ph, x0, y0, g_bb_w,
@@ -1862,33 +1794,16 @@ void sb_phud_restore(void)
  * Zweiter GDI-Kontext (Tausch mit den Desktop-Globalen wie sb_overlay.c), Faktor aus
  * vr_menu_px (Bezugsbox 540 Einheiten), Neuzeichnen alle 200 ms wie am Desktop. VR-Thread,
  * unter ctx_lock (dieselbe Sperre wie sb_phud_draw). */
-typedef struct {
-    HDC dc;
-    HBITMAP bmp, bmp_old;
-    unsigned *bits;
-    unsigned bw, bh;
-    HFONT font, font_old;
-    int font_px;
-    float f;
-} ph_gdi_t;
-static ph_gdi_t ph_vrg = { NULL, NULL, NULL, NULL, 0, 0, NULL, NULL, 0, 1.0f };
+static ovs_canvas_t ph_vrg = { .f = 1.0f };
 static sb_ovl_vrtex_t ph_vrt;
 static LONGLONG ph_vr_last;
 static float ph_vr_f;
 
-static void ph_gdi_swap(ph_gdi_t *o)
+static void ph_gdi_swap(ovs_canvas_t *o)
 {
-    HDC dc = ph_dc;
-    HBITMAP b = ph_bmp, bo = ph_bmp_old;
-    unsigned *bits = ph_bits;
-    unsigned bw = ph_bw, bh = ph_bh;
-    HFONT fo = ph_font, foo = ph_font_old;
-    int fp = ph_font_px;
-    float f = ph_f;
-    ph_dc = o->dc; ph_bmp = o->bmp; ph_bmp_old = o->bmp_old; ph_bits = o->bits; ph_bw = o->bw; ph_bh = o->bh;
-    ph_font = o->font; ph_font_old = o->font_old; ph_font_px = o->font_px; ph_f = o->f;
-    o->dc = dc; o->bmp = b; o->bmp_old = bo; o->bits = bits; o->bw = bw; o->bh = bh;
-    o->font = fo; o->font_old = foo; o->font_px = fp; o->f = f;
+    ovs_canvas_t t = ph_cv;
+    ph_cv = *o;
+    *o = t;
 }
 
 int sb_phud_vr_panel(ID3D11ShaderResourceView **srv, unsigned *tw, unsigned *th, float *uw, float *uh)

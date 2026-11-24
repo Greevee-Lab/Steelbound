@@ -2,10 +2,11 @@
 /* launcher_u8.h - UTF-8-Schicht des Launchers (W82 LAUNCHER-UI2).
  * Intern sind alle Zeichenketten UTF-8 (char *). An der Windows-Grenze
  * wird nach UTF-16 gewandelt (W-API), damit Pfade mit Nicht-ASCII-Zeichen
- * funktionieren. cfg-Dateien bleiben in der ANSI-Codepage (wie bisher, der
- * Client liest sie mit A-API, s. hcfg.c): Pfadwerte werden beim Lesen
- * ANSI -> UTF-8 und beim Schreiben UTF-8 -> ANSI gewandelt (Fallback:
- * 8.3-Kurzname). Quelltext bleibt ASCII: Umlaute als UTF-8-Escapes
+ * funktionieren. cfg-Dateien stehen in der aktiven Codepage (der Client
+ * liest sie mit A-API, s. hcfg.c). Seit W455 ist das per Manifest UTF-8
+ * (Launcher und sb_ldr), u8_to_acp/u8_from_acp sind dann 1:1; nur auf
+ * altem Windows (vor 1903) gilt weiter ANSI mit 8.3-Kurzname als
+ * Fallback. Quelltext bleibt ASCII: Umlaute als UTF-8-Escapes
  * (Makros U8_AE ... unten). */
 #ifdef __cplusplus
 extern "C" {
@@ -46,6 +47,12 @@ void u8_from_acp(const char *acp, char *out, size_t cap);
 int u8_to_acp(const char *u8, char *out, size_t cap);
 /* 1 = rein ASCII. */
 int u8_is_ascii(const char *s);
+/* W455 UNICODE-PATHS: 1 = Prozess laeuft mit UTF-8 als aktiver Codepage (Manifest). Dann sind
+ * u8_to_acp/u8_from_acp 1:1 (cfg-Dateien UTF-8); ungueltiges UTF-8 (alte ANSI-cfg) wird aus der
+ * System-ANSI-Codepage u8_legacy_acp() gelesen. u8_valid: 1 = gueltiges UTF-8 (oder leer). */
+int u8_acp_is_utf8(void);
+unsigned u8_legacy_acp(void);
+int u8_valid(const char *s);
 
 /* Datei-Wrapper (Pfade UTF-8). */
 int u8_fopen_s(FILE **f, const char *path, const char *mode);

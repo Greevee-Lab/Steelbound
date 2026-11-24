@@ -303,6 +303,9 @@ void app_load_effective(const char *client_dir, launcher_settings_t *s,
             kind = 2;
         }
     }
+    /* W465 LOC-ENHANCED: "Remastered dezent/stark" ist nicht mehr waehlbar - exakt diese Werte -> Original
+     * (Benutzerdefiniert bleibt). Gespeichert wird das beim naechsten Speichern/Start. */
+    (void)lcfg_gfx_migrate_remaster(s);
     /* W142: Sprache steht erst nach allen Ladungen fest (Hinweis danach). */
     if (lang_override && *lang_override) {
         strcpy_s(s->lang, sizeof s->lang,
@@ -2423,8 +2426,9 @@ static int cli_selftest(const char *client_override)
             a.shx[LSHX_SAT] != 100 || a.shx[LSHX_SHADING] != 1 || a.fx[LFX_EMBERS] != 0) {
             ok = 0;
         }
-        lcfg_gfx_apply(&a, LGP_STRONG);
-        if (lcfg_gfx_preset(&a, 0) != LGP_STRONG || a.shx[LSHX_SHADING] != 1 ||
+        lcfg_gfx_apply(&a, LGP_STRONG); /* W465: Spalte bleibt, ist aber nicht waehlbar -> Erkennung Custom */
+        if (lcfg_gfx_preset(&a, 0) != LGP_CUSTOM || lcfg_gfx_diff(&a, LGP_STRONG, 0, NULL) != 0 ||
+            a.shx[LSHX_SHADING] != 1 ||
             a.shx[LSHX_AA] != 3 || a.shx[LSHX_SHADOW] != 1 || a.shx[LSHX_SOFT] != 1 ||
             a.shx[LSHX_FOG] != 100 || a.fx[LFX_SOFT] != 100 || a.fx[LFX_EMBERS] != 120 ||
             !a.hd_textures || a.shx[LSHX_LABEL] != 0) {
@@ -2434,7 +2438,7 @@ static int cli_selftest(const char *client_override)
             FILE *g = NULL;
             lcfg_defaults(&b);
             lcfg_load_file(tmp, &b);
-            if (memcmp(&a, &b, sizeof a) != 0 || lcfg_gfx_preset(&b, 0) != LGP_STRONG) {
+            if (memcmp(&a, &b, sizeof a) != 0 || lcfg_gfx_diff(&b, LGP_STRONG, 0, NULL) != 0) {
                 ok = 0;
             }
             memset(buf, 0, sizeof buf);
@@ -2448,7 +2452,8 @@ static int cli_selftest(const char *client_override)
                 ok = 0;
             }
             b.shx[LSHX_SAT] = 120; /* Einzelwert (ESC-Menue) -> Benutzerdefiniert */
-            if (lcfg_gfx_preset(&b, 0) != LGP_CUSTOM || lcfg_gfx_base(&b, 0) != LGP_STRONG) {
+            if (lcfg_gfx_preset(&b, 0) != LGP_CUSTOM || lcfg_gfx_diff(&b, LGP_STRONG, 0, NULL) != 1 ||
+                lcfg_gfx_migrate_remaster(&b) != 0) { /* W465: Custom bleibt Custom */
                 ok = 0;
             }
             lcfg_gfx_apply(&b, LGP_ORIGINAL); /* W173: setzt shading/fx/HD explizit */
@@ -2462,8 +2467,12 @@ static int cli_selftest(const char *client_override)
                 ok = 0;
             }
             lcfg_gfx_apply(&b, LGP_SUBTLE);
-            if (lcfg_gfx_preset(&b, 0) != LGP_SUBTLE || b.shx[LSHX_SSAO] != 25 ||
-                b.fx[LFX_SOFT] != 60 || b.shx[LSHX_SHADING] != 1) {
+            if (lcfg_gfx_preset(&b, 0) != LGP_CUSTOM || lcfg_gfx_diff(&b, LGP_SUBTLE, 0, NULL) != 0 ||
+                b.shx[LSHX_SSAO] != 25 || b.fx[LFX_SOFT] != 60 || b.shx[LSHX_SHADING] != 1) {
+                ok = 0;
+            }
+            /* W465: exakt Remastered -> Original */
+            if (lcfg_gfx_migrate_remaster(&b) != 1 || lcfg_gfx_preset(&b, 0) != LGP_ORIGINAL) {
                 ok = 0;
             }
         } else {
@@ -2484,9 +2493,13 @@ static int cli_selftest(const char *client_override)
         char why[200] = "";
         int p, k;
         for (p = 0; p < SB_GP_NPRE && !why[0]; p++) {
+            /* W465: Erkennung nur ueber die sichtbaren Presets des Spiels (Enhanced: LoC; Remastered: keins) */
+            int loc = !sb_gp_visible(p, 0) && sb_gp_visible(p, 1), vis = sb_gp_visible(p, loc);
+            int exp = vis ? p : LGP_CUSTOM;
+            lcfg_gfx_set_loc(loc);
             lcfg_defaults(&a);
             lcfg_gfx_apply(&a, p);
-            if (lcfg_gfx_preset(&a, 0) != p) {
+            if (lcfg_gfx_preset(&a, 0) != exp || lcfg_gfx_diff(&a, p, 0, NULL) != 0) {
                 _snprintf_s(why, sizeof why, _TRUNCATE, "Preset %d nicht erkannt", p);
             }
             for (k = 0; k < LGK_N && !why[0]; k++) { /* Sollwerte = Client-Tabelle */
@@ -2531,14 +2544,14 @@ static int cli_selftest(const char *client_override)
                  * bei Gleichstand nennt die Basis das kleinere Preset (p bleibt
                  * eine der naechsten). */
                 if (lcfg_gfx_preset(&b, 0) != LGP_CUSTOM ||
-                    lcfg_gfx_diff(&b, lcfg_gfx_base(&b, 0), 0, NULL) != lcfg_gfx_diff(&b, p, 0, NULL)) {
+                    (vis && lcfg_gfx_diff(&b, lcfg_gfx_base(&b, 0), 0, NULL) != lcfg_gfx_diff(&b, p, 0, NULL))) {
                     _snprintf_s(why, sizeof why, _TRUNCATE, "P%d: %s geaendert -> %d/Basis %d", p,
                                 lcfg_gfx_key(k), lcfg_gfx_preset(&b, 0), lcfg_gfx_base(&b, 0));
                 }
             }
             b = a; /* hud_label_avoid: eigene Option (PO 7.11.) */
             b.shx[LSHX_LABEL] = 1;
-            if (!why[0] && lcfg_gfx_preset(&b, 0) != p) {
+            if (!why[0] && (lcfg_gfx_preset(&b, 0) != exp || lcfg_gfx_diff(&b, p, 0, NULL) != 0)) {
                 _snprintf_s(why, sizeof why, _TRUNCATE, "P%d: Etikett macht Custom", p);
             }
             lcfg_gfx_apply(&b, (p + 1) % SB_GP_NPRE);
@@ -2546,10 +2559,11 @@ static int cli_selftest(const char *client_override)
                 _snprintf_s(why, sizeof why, _TRUNCATE, "P%d: Preset setzt Etikett", p);
             }
         }
-        if (!why[0]) { /* Effect-Pack-Ausnahme */
+        lcfg_gfx_set_loc(0);
+        if (!why[0]) { /* Effect-Pack-Ausnahme (W465: mit Performance, Remastered ist nicht waehlbar) */
             lgp_mask_t lock = 0;
             lcfg_defaults(&a);
-            lcfg_gfx_apply(&a, LGP_SUBTLE);
+            lcfg_gfx_apply(&a, LGP_PERFORMANCE);
             a.shx[LSHX_SAT] = 140;
             a.fx[LFX_EMBERS] = 200;
             p = lcfg_gfx_preset(&a, 0);
@@ -2557,8 +2571,8 @@ static int cli_selftest(const char *client_override)
             k = lcfg_gfx_preset(&a, lock);
             lcfg_gfx_lock_key(&lock, "fx_embers");
             lcfg_gfx_lock_key(&lock, "unknown_key");
-            if (p != LGP_CUSTOM || k != LGP_CUSTOM || lcfg_gfx_preset(&a, lock) != LGP_SUBTLE ||
-                lcfg_fx_level(&a, lock) != LGP_SUBTLE || lcfg_fx_level(&a, 0) != LGP_CUSTOM) {
+            if (p != LGP_CUSTOM || k != LGP_CUSTOM || lcfg_gfx_preset(&a, lock) != LGP_PERFORMANCE ||
+                lcfg_fx_level(&a, lock) != LGP_ORIGINAL || lcfg_fx_level(&a, 0) != LGP_CUSTOM) {
                 strcpy_s(why, sizeof why, "Effect-Pack-Ausnahme");
             }
         }
@@ -2594,7 +2608,7 @@ static int cli_selftest(const char *client_override)
             }
         }
         if (!why[0]) {
-            T_OK("52 gfx-preset-p4 (5 Presets + Custom, Client-Tabelle, Effect Pack, Etikett)");
+            T_OK("52 gfx-preset-p4 (6 Presets + Custom, sichtbar je Spiel, Client-Tabelle, Effect Pack, Etikett)");
         } else {
             T_FAIL("52 gfx-preset-p4", "%s", why);
         }
@@ -2716,7 +2730,7 @@ static int cli_selftest(const char *client_override)
             lcfg_gfx_apply(&b, p);
             if (b.edge_mode != 1 || b.edge_fade_width != 8 || b.edge_fade_strength != 100 || /* W278: 4:3 */
                 lcfg_gfx_preset_value(p, LGK_EDGE) != 1 || lcfg_gfx_preset_value(p, LGK_EDGEW) != 8 ||
-                lcfg_gfx_preset_value(p, LGK_EDGES) != 100 || lcfg_gfx_preset(&b, 0) != p) {
+                lcfg_gfx_preset_value(p, LGK_EDGES) != 100 || lcfg_gfx_diff(&b, p, 0, NULL) != 0) { /* W465: auch unsichtbare */
                 _snprintf_s(why, sizeof why, _TRUNCATE, "Preset %d setzt Raender nicht", p);
             }
         }
@@ -2787,7 +2801,9 @@ static int cli_selftest(const char *client_override)
             strcpy_s(why, sizeof why, "Standard/Original != auto");
         }
         for (p = 1; p < SB_GP_NPRE && !why[0]; p++) { /* uebrige Presets wie bisher */
-            if (lcfg_gfx_preset_value(p, LGK_FPS) != (p == LGP_PERFORMANCE ? 60 : 120)) {
+            /* W465: Enhanced (LoC) nicht hier - seine Werte koennen sich beim Feinschliff noch aendern */
+            if (p != LGP_ENHANCED && p != LGP_VIVID && /* W478: Vivid (LoC) wie Enhanced */
+                lcfg_gfx_preset_value(p, LGK_FPS) != (p == LGP_PERFORMANCE ? 60 : 120)) {
                 _snprintf_s(why, sizeof why, _TRUNCATE, "Preset %d Bildrate %d", p, lcfg_gfx_preset_value(p, LGK_FPS));
             }
         }
@@ -2973,6 +2989,53 @@ static int cli_selftest(const char *client_override)
         if (rr[10].active) { ok = 0; strcpy_s(why, sizeof why, "r10 144@144"); }
         if (ok) { T_OK("W223 fps-rates (auto + 30..240, validate, save/load, Custom, R10)"); }
         else { T_FAIL("W223 fps-rates", "%s", why); }
+    }
+    { /* W468 PERF-PACING: Bildtakt frame_pacing (Standard Monitor, Roundtrip, Pruefung, Namen, R10 mit VRR) */
+        int ok = 1, i;
+        char e[256], why[96] = "";
+        lr_env_t env;
+        lr_res_t rr[LR_N];
+        lcfg_defaults(&b);
+        if (b.frame_pacing != 1) { ok = 0; strcpy_s(why, sizeof why, "default"); }
+        u8_GetTempPath(tmp, sizeof tmp);
+        strcat_s(tmp, sizeof tmp, "w468_pacing.cfg");
+        for (i = 0; i < 3; i++) {
+            u8_DeleteFile(tmp);
+            lcfg_defaults(&a);
+            a.frame_pacing = i;
+            if (lcfg_save_user(tmp, &a) != 0) { ok = 0; }
+            lcfg_defaults(&b);
+            lcfg_load_file(tmp, &b);
+            if (memcmp(&a, &b, sizeof a) || b.frame_pacing != i) { ok = 0; strcpy_s(why, sizeof why, "roundtrip"); }
+            st_valid_base(&a);
+            a.frame_pacing = i;
+            if (lcfg_validate(&a, e, sizeof e) != 0) { ok = 0; _snprintf_s(why, sizeof why, _TRUNCATE, "valid %d: %.60s", i, e); }
+        }
+        u8_DeleteFile(tmp);
+        st_valid_base(&a);
+        a.frame_pacing = 3;
+        if (lcfg_validate(&a, e, sizeof e) == 0) { ok = 0; strcpy_s(why, sizeof why, "3 accepted"); }
+        lcfg_defaults(&b);
+        lcfg_apply_set(&b, "frame_pacing=vrr");
+        if (b.frame_pacing != 2) { ok = 0; strcpy_s(why, sizeof why, "set vrr"); }
+        lcfg_apply_set(&b, "frame_pacing=timer");
+        if (b.frame_pacing != 0) { ok = 0; strcpy_s(why, sizeof why, "set timer"); }
+        /* R10: 120 auf 165 Hz warnt mit Monitor-Takt, mit VRR nicht; 240 auf 165 Hz warnt auch mit VRR */
+        lcfg_defaults(&b);
+        b.window_mode = 0;
+        lrules_env_default(&env, &b);
+        env.display_hz = 165;
+        b.interp_fps = 120;
+        lrules_eval(&env, rr);
+        if (!rr[10].active) { ok = 0; strcpy_s(why, sizeof why, "r10 120@165"); }
+        b.frame_pacing = 2;
+        lrules_eval(&env, rr);
+        if (rr[10].active) { ok = 0; strcpy_s(why, sizeof why, "r10 vrr 120@165"); }
+        b.interp_fps = 240;
+        lrules_eval(&env, rr);
+        if (!rr[10].active) { ok = 0; strcpy_s(why, sizeof why, "r10 vrr 240@165"); }
+        if (ok) { T_OK("W468 frame pacing (default monitor, save/load, validate, names, R10 with VRR)"); }
+        else { T_FAIL("W468 frame pacing", "%s", why); }
     }
 
     st_w309_fpsmon(&pass, &fail); /* W309 FPS-MONITOR */
@@ -4514,6 +4577,100 @@ static int cli_selftest(const char *client_override)
         }
     }
     st_valid_cleanup(); /* COMM-SELFTEST2 */
+    /* W455 UNICODE-PATHS: Prozess mit UTF-8-Codepage (Manifest); Ordner mit Kyrillisch, Japanisch und Akzent
+     * per A-API und CRT anlegen/schreiben/umbenennen/loeschen, cfg-Rundlauf in UTF-8, alte ANSI-cfg lesbar,
+     * Umgebung (SB_USERDATA_ROOT-Weg) verlustfrei. Nur im Temp-Ordner. */
+    {
+#define W455_DIR "\xD0\x98" "\xD0\xB3" "\xD0\xBE" "\xD1\x80" "\xD1\x8C" " " "\xE3\x83\x86" "\xE3\x82\xB9" "\xE3\x83\x88" " " "\xC3\xA9"
+        static char base[1200], dir[1400], p1[1500], p2[1500], cfgp[1500], raw[8192], ev[1500];
+        static wchar_t wd[1400], we[1500];
+        const char *why = NULL;
+        size_t n = 0;
+        FILE *fh = NULL;
+        u8_GetTempPath(base, sizeof base);
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%ssb_w455_%lu", base, GetCurrentProcessId());
+        CreateDirectoryA(dir, NULL);
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%ssb_w455_%lu\\" W455_DIR, base, GetCurrentProcessId());
+        if (!u8_acp_is_utf8()) {
+            why = "GetACP != 65001 (Manifest activeCodePage fehlt?)";
+        } else if (!CreateDirectoryA(dir, NULL) && GetLastError() != ERROR_ALREADY_EXISTS) {
+            why = "CreateDirectoryA (UTF-8) scheitert";
+        } else if (u8_to_w(dir, wd, 1400) <= 0 || !(GetFileAttributesW(wd) & FILE_ATTRIBUTE_DIRECTORY) ||
+                   GetFileAttributesW(wd) == INVALID_FILE_ATTRIBUTES) {
+            why = "Ordner per W-API nicht unter dem Unicode-Namen";
+        }
+        if (!why) { /* CRT (fopen, schmal): Replay-artige Datei schreiben, lesen, umbenennen, loeschen */
+            _snprintf_s(p1, sizeof p1, _TRUNCATE, "%s\\replay_\xC3\xA9.bin", dir);
+            _snprintf_s(p2, sizeof p2, _TRUNCATE, "%s\\replay_\xD0\x98.bin", dir);
+            if (fopen_s(&fh, p1, "wb") != 0 || !fh) {
+                why = "fopen(w) im Unicode-Ordner";
+            } else {
+                fwrite("W455", 1, 4, fh);
+                fclose(fh);
+                fh = NULL;
+                memset(raw, 0, 8);
+                if (fopen_s(&fh, p1, "rb") != 0 || !fh) {
+                    why = "fopen(r)";
+                } else {
+                    n = fread(raw, 1, 8, fh);
+                    fclose(fh);
+                    if (n != 4 || memcmp(raw, "W455", 4) != 0) why = "Inhalt";
+                    else if (!MoveFileA(p1, p2)) why = "MoveFileA (umbenennen)";
+                    else if (!DeleteFileA(p2) || GetFileAttributesA(p2) != INVALID_FILE_ATTRIBUTES) why = "DeleteFileA";
+                }
+            }
+        }
+        if (!why) { /* cfg-Rundlauf: Pfade UTF-8 in der Datei, gleich zurueck */
+            _snprintf_s(cfgp, sizeof cfgp, _TRUNCATE, "%s\\user.cfg", dir);
+            lcfg_defaults(&a);
+            _snprintf_s(a.hdd_root, sizeof a.hdd_root, _TRUNCATE, "%s\\HDD", dir);
+            _snprintf_s(a.game_image, sizeof a.game_image, _TRUNCATE, "%s\\game.iso", dir);
+            memset(raw, 0, sizeof raw);
+            if (lcfg_save_user(cfgp, &a) != 0) {
+                why = "lcfg_save_user";
+            } else if (u8_fopen_s(&fh, cfgp, "rb") != 0 || !fh) {
+                why = "cfg nicht lesbar";
+            } else {
+                n = fread(raw, 1, sizeof raw - 1, fh);
+                fclose(fh);
+                lcfg_defaults(&b);
+                lcfg_load_file(cfgp, &b);
+                if (!strstr(raw, W455_DIR)) why = "cfg enthaelt den Pfad nicht als UTF-8";
+                else if (strcmp(a.hdd_root, b.hdd_root) != 0 || strcmp(a.game_image, b.game_image) != 0)
+                    why = "cfg-Rundlauf ungleich";
+            }
+        }
+        if (!why) { /* alte cfg aus der ANSI-Zeit: Bytes der System-Codepage -> UTF-8 */
+            static const char old1252[] = "hdd_root=w455_J\xF6rg_HDD\n";
+            if (u8_fopen_s(&fh, cfgp, "wb") != 0 || !fh) {
+                why = "alte cfg schreiben";
+            } else {
+                fwrite(old1252, 1, sizeof old1252 - 1, fh);
+                fclose(fh);
+                lcfg_defaults(&b);
+                lcfg_load_file(cfgp, &b);
+                if (u8_legacy_acp() == 1252 && strcmp(b.hdd_root, "w455_J\xC3\xB6rg_HDD") != 0) why = "alte ANSI-cfg falsch gelesen";
+                else if (!u8_valid(b.hdd_root)) why = "alte ANSI-cfg ergibt ungueltiges UTF-8";
+            }
+        }
+        if (!why) { /* Umgebung (Launcher -> Client, z. B. SB_USERDATA_ROOT): A setzen, W lesen */
+            SetEnvironmentVariableA("SB_W455_TEST", dir);
+            if (GetEnvironmentVariableW(L"SB_W455_TEST", we, 1500) == 0 || wcscmp(we, wd) != 0) why = "Umgebung A->W";
+            else if (GetEnvironmentVariableA("SB_W455_TEST", ev, sizeof ev) == 0 || strcmp(ev, dir) != 0) why = "Umgebung W->A";
+            SetEnvironmentVariableA("SB_W455_TEST", NULL);
+        }
+        if (cfgp[0]) u8_DeleteFile(cfgp);
+        RemoveDirectoryA(dir);
+        _snprintf_s(dir, sizeof dir, _TRUNCATE, "%ssb_w455_%lu", base, GetCurrentProcessId());
+        RemoveDirectoryA(dir);
+        printf("     (W455: Codepage %u, Alt-Codepage %u)\n", GetACP(), u8_legacy_acp());
+        if (!why) {
+            T_OK("W455 unicode paths (UTF-8 codepage, Cyrillic/Japanese/accent folder: create/write/read/rename/delete, cfg UTF-8 roundtrip, legacy ANSI cfg, env)");
+        } else {
+            T_FAIL("W455 unicode paths", "%s", why);
+        }
+#undef W455_DIR
+    }
     /* W414: Stapel-Reserve des Hauptthreads. Vorher lag die Spitze bei ~1008 von 1024 KB (cli_selftest
      * hatte 13 lctrl_bind_t a ~31 KB auf dem Stapel, Rahmen 640 KB), kleine Zusaetze liefen in C00000FD.
      * Spitze = festgeschriebener Stapel (TIB StackBase - StackLimit); Grenze 75 % der PE-Reserve,
@@ -4958,8 +5115,6 @@ int app_launch_client(const char *client_dir, const char *xbe_path,
 {
     return app_launch_client_set(client_dir, xbe_path, NULL, err, errcap);
 }
-
-#define launch_client app_launch_client
 
 /* --start [--vr]: user.cfg schreiben + Client starten (mit --dry-run: nur
  * schreiben, nicht starten; die Start-Kommandozeile wird gezeigt). W159:

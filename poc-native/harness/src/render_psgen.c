@@ -203,7 +203,8 @@ int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_
              * Spekular V1, Umgebungslicht C0 je Stufe) VOR den Combiner-Klemmungen -
              * so kommen ueberstrahlte Details zurueck. Nebelfarbe bleibt. */
             "  if ((asuint(sfx0.x) & 0xA00u) != 0u) { V0.rgb = saturate(i.col.rgb * sfx2.z); V1.rgb = saturate(i.spec.rgb * sfx2.z); }\n"
-            "  float4 T0 = 0, T1 = 0, T2 = 0, T3 = 0;\n",
+            "  float4 T0 = 0, T1 = 0, T2 = 0, T3 = 0;\n"
+            "  float SHV = 1.0, SHN = 0.0;\n", /* W466: Schattenwert (1 = Sonne) fuer shadow_sun */
             g_rqp_bump_as_2d == 2 ? " float4 bm[4];" : "");
     for (i = 0; i < 4u; i++) {
         static const char *tn[4] = { "tx0", "tx1", "tx2", "tx3" };
@@ -217,7 +218,7 @@ int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_
             /* RENDER-QA3 (W100): tsc[i].w != 0 = Schattenpuffer (Tiefe als SRV,
              * Vergleich mit r = z/w * tsc[i].w, s. rq_shadow). */
             rps(&s, "  if (tsc[%u].z != 0.0) { float iw%u = %s.w != 0.0 ? 1.0 / %s.w : 1.0; float2 uv%u = %s.xy * iw%u * tsc[%u].xy;\n"
-                    "    if (tsc[%u].w != 0.0) { T%u = rq_shadow(%s, uv%u, %s.z * iw%u * tsc[%u].w, tsc[%u].xy); } else {\n"
+                    "    if (tsc[%u].w != 0.0) { T%u = rq_shadow(%s, uv%u, %s.z * iw%u * tsc[%u].w, tsc[%u].xy); SHV = min(SHV, T%u.r); SHN = 1.0; } else {\n"
                     "    T%u = %s.Sample(%s, uv%u);\n"
                     "    if ((asuint(sfx0.x) & %uu) != 0u) { T%u.rgb = rq_sfx(%s, %s, uv%u, T%u.rgb); }\n"
                     "    if ((asuint(sfx0.x) & %uu) != 0u) { T%u.rgb = max(T%u.rgb - sfx1.w, 0.0) / (1.0 - sfx1.w) * sfx0.w; }\n"
@@ -225,7 +226,7 @@ int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_
                     "    if ((asuint(pflags.z) & %uu) != 0u && T%u.a < (0.5 / 255.0)) { discard; } }\n"
                     "  } else { T%u = float4(1, 1, 1, 1); }\n",
                 i, i, cn[i], cn[i], i, cn[i], i, i,
-                i, i, tn[i], i, cn[i], i, i, i,
+                i, i, tn[i], i, cn[i], i, i, i, i,
                 i, tn[i], sn[i], i,
                 2u << i, i, tn[i], sn[i], i, i,
                 0x20u << i, i, i,
@@ -371,9 +372,30 @@ int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_
             "    else if (sfx2.y == 2.0) { x *= 0.6; x = (x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14); }\n"
             "    if ((asuint(sfx0.x) & 0x400u) != 0u) { x = pow(saturate(x), sfx2.w); }\n"
             "    o.rgb = x; }\n");
+    /* W466 LOC-ENHANCED-2 shadow_sun (sfx3.w > 0, nur LoC mit Schattenpuffer): Sonnen-/Schattenkontrast auf
+     * Flaechen mit Schattenstufe - beleuchtet (SHV = 1) warm heller, im Schatten (SHV = 0) kuehler dunkler,
+     * dazwischen weich (PCF). W471: Sonne weniger warm (hell 0,12/0,10/0,06 statt 0,14/0,10/0,03, Schatten
+     * 0,30/0,25/0,16 statt 0,30/0,24/0,12 = weniger blau; Nutzer 24.11. "SB-Original-Optik, nur besser").
+     * Mit Nebel-Final-Combiner (out = F*Farbe + (1-F)*Nebel) wirkt die Abstufung nur
+     * auf den Farbanteil, die Nebelfarbe bleibt. sfx3.w = 0 (Standard, SB, LoC Original): unveraendert. */
+    if (info->uses_fog) {
+        rps(&s, "  if (sfx3.w > 0.0 && SHN > 0.0) { float3 m = lerp(1.0 - float3(0.30, 0.25, 0.16) * sfx3.w, 1.0 + float3(0.12, 0.10, 0.06) * sfx3.w, SHV);\n"
+                "    float3 fp = fogc.rgb * (1.0 - FOG.a); o.rgb = fp + (o.rgb - fp) * m; }\n");
+    } else {
+        rps(&s, "  if (sfx3.w > 0.0 && SHN > 0.0) { o.rgb *= lerp(1.0 - float3(0.30, 0.25, 0.16) * sfx3.w, 1.0 + float3(0.12, 0.10, 0.06) * sfx3.w, SHV); }\n");
+    }
     rps(&s, "  float4 res = saturate(o);\n");
     if (g_rqp_nan_mark) { /* DIAG(AMD-ARTIFACTS,W302): nicht endliche Combiner-Ausgabe magenta (saturate machte 0 daraus) */
         rps(&s, "  if (any((asuint(o) & 0x7F800000u) == 0x7F800000u)) { res = float4(1.0, 0.0, 1.0, 1.0); }\n");
+    }
+    if (g_rqp_nan_mark == 2) { /* DIAG(SB-SUN-WHITEOUT,W477): nicht endliche Texturkoordinaten gesampelter Stufen cyan */
+        static const char *cn2[4] = { "i.t0", "i.t1", "i.t2", "i.t3" };
+        for (i = 0; i < 4u; i++) {
+            if (info->sample_mask & (1u << i)) {
+                rps(&s, "  if (tsc[%u].z != 0.0 && any((asuint(%s) & 0x7F800000u) == 0x7F800000u)) { res = float4(0.0, 1.0, 1.0, 1.0); }\n",
+                    i, cn2[i]);
+            }
+        }
     }
     rps(&s, ""
             "  { uint af = asuint(pflags.x); if (af != 0u) { uint a8 = (uint)(res.a * 255.0 + 0.5); uint r8 = asuint(pflags.y);\n"

@@ -2767,6 +2767,7 @@ static void w386_cases(void)
 }
 
 int lsarb_selftest(int *ok); /* LOC-LOCKSTEP-ARBITER (tests/loc_lsarb_cases.c) */
+int rbn_pre_selftest(int *ok); /* W475 LOC-RB-PREAGREE (tests/loc_rbn_pre_cases.c) */
 
 int main(void)
 {
@@ -2777,6 +2778,7 @@ int main(void)
     leave_tests(); /* W366 */
     channel_fuzz2();
     rbn_tests();
+    g_fail += rbn_pre_selftest(&g_ok); /* W475 LOC-RB-PREAGREE */
     memset(&s, 0, sizeof s);
     s.D = 2;
     s.maxpred = 10;

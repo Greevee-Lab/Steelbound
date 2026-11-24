@@ -937,6 +937,7 @@ void loc_boot_install(void)
         LOC_STUB(WSAStartup);
     }
     loc_xdk_internals();
+    loc_render_sblook_apply(); /* W459: SB look (Experimental, Standard aus) */
     loc_unlock_install(); /* W408: alle VTs/Missionen/Items frei (immer, nur LoC) */
     loc_rule_install(); /* W420: Clip dumping unterbinden (Host-Regel, Standard an, Abgleich im Match) */
     loc_chat_install(); /* W437: Textchat LoC online (Standard an, nur mit Treffpunkt + sec=ok) */

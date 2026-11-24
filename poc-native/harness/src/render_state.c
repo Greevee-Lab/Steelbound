@@ -40,7 +40,6 @@ void sb_render_rs_note(unsigned method, unsigned value)
     default: return;
     }
     if (value != *slot) {
-        unsigned old = *slot;
         *slot = value;
     }
 }
@@ -49,7 +48,6 @@ void sb_render_rs_stencil_enable(unsigned v)
 {
     v = v ? 1u : 0u;
     if (v != rs_st_enable) {
-        unsigned old = rs_st_enable;
         rs_st_enable = v;
     }
 }

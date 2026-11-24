@@ -513,7 +513,7 @@ void sb_rtt_rb_sync_resolve(int why)
 static unsigned *g_rbc_buf[2];           /* [0] = Standard, [1] = DIAG anderer Versatz */
 static int g_rbc_slot = -1;              /* Slot der Karte (aktuelle Session) */
 static unsigned g_rbc_imdraws, g_rbc_bad; /* IM-Draws / nicht abbildbar in der Session */
-static unsigned g_rbcd_n, g_rbcd_diff[2], g_rbcd_diffmax[2], g_rbcd_val, g_rbcd_bad, g_rbcd_sess;
+static unsigned g_rbcd_n, g_rbcd_diff[2], g_rbcd_diffmax[2], g_rbcd_val, g_rbcd_bad;
 
 static int rbc_candidate(int c)
 {
@@ -1397,20 +1397,48 @@ void sb_rtt_on_set_target(unsigned surf, unsigned depth, unsigned caller)
         rtt_session_end(surf, "BB");
         return;
     }
+    if (g_sba_loc && g_cfg.shade_shadow && depth && g_cfg.loc_shadow_diag) { /* DIAG(W466): Koepfe Farb-/Tiefenziel */
+        static unsigned nd;
+        unsigned hs[4] = { 0 }, hd[4] = { 0 }, q;
+        __try { for (q = 0; q < 4u; q++) { hs[q] = *(unsigned *)(uintptr_t)(surf + q * 4u); hd[q] = *(unsigned *)(uintptr_t)(depth + q * 4u); } }
+        __except (EXCEPTION_EXECUTE_HANDLER) {}
+        if (((hd[3] >> 8) & 0xFFu) >= 0x2Au && ((hd[3] >> 8) & 0xFFu) <= 0x31u && nd < (unsigned)g_cfg.loc_shadow_diag) {
+            nd++;
+            HLOG_I("LOCSHADOW set #%u: surf=0x%X [%08X %08X %08X %08X] depth=0x%X [%08X %08X %08X %08X] caller=0x%X f=%u",
+                   nd, surf, hs[0], hs[1], hs[2], hs[3], depth, hd[0], hd[1], hd[2], hd[3], caller, g_present_no);
+        }
+    }
     if (!rtt_hdr(surf, &data, &fmt, &size) && g_cfg.shading && g_cfg.shade_shadow && g_cfg.rtt && depth &&
         rtt_hdr(depth, &data, &fmt, &size) && ((fmt >> 8) & 0xFFu) >= 0x2Au && ((fmt >> 8) & 0xFFu) <= 0x31u &&
-        rtt_dims(fmt, size, &w, &h)) {
+        rtt_dims(fmt, size, &w, &h) &&
+        (!g_sba_loc || (g_cfg.loc_shadow_sel & (w >= 1024u ? 1 : 2)))) {
         /* RENDER-QA3 (W100, shade_shadow): Tiefenpass in einen Schattenpuffer
          * (FUN_00031590: Dummy-Farbflaeche Data=0 + 2048^2 LIN_F16-Tiefe,
          * BERICHT W36). Die Tiefenflaeche wird ein eigenes RT (Schluessel =
          * Tiefen-Surface), ihre Tiefe sampelt der Shading-Pfad als Stufe 1
          * (sb_rtt_depth_srv). Sonst wie bisher (Dummy-Tiefenpass). */
-        surf = depth;
-        idx = rtt_find(surf);
+        idx = rtt_find(depth);
         if (idx >= 0 && !g_rtt[idx].isdepth) { idx = -1; }
         if (idx < 0) {
             if (g_rtt_n < RTT_MAX) { idx = g_rtt_n++; }
-            else { goto shadow_fail; }
+            else if (g_cfg.rtt_stale) {
+                /* FIX(W466): volle Tabelle (LoC: 64 Lobby-RTs) -> wie der normale Weg einen veralteten bzw.
+                 * den am laengsten nicht gerenderten Eintrag verdraengen. Vorher: goto shadow_fail mit
+                 * surf = depth -> Tiefenpass als normales Farb-RT 1800^2 (eigene D24-Tiefe), Schatten nie
+                 * auswertbar (LoC-Cockpit-Mission ohne Schatten). */
+                int j, best = -1;
+                for (j = 0; j < RTT_MAX; j++) {
+                    if (j == g_rtt_bound || j == g_rtt_cur) { continue; }
+                    if (best < 0 || (g_rtt[j].stale && !g_rtt[best].stale) ||
+                        (g_rtt[j].stale == g_rtt[best].stale && g_rtt[j].lastset < g_rtt[best].lastset)) { best = j; }
+                }
+                if (best < 0) { goto shadow_fail; }
+                idx = best;
+                if (g_rtt_bound == idx) { rtt_bind_bb(); }
+                if (g_rtt_cur == idx) { g_rtt_cur = -1; }
+                rtt_release_entry(idx);
+            } else { goto shadow_fail; }
+            surf = depth;
             memset(&g_rtt[idx], 0, sizeof g_rtt[idx]);
             g_rtt[idx].surf = surf; g_rtt[idx].data = data;
             rtt_data_note(data);
@@ -1426,6 +1454,7 @@ void sb_rtt_on_set_target(unsigned surf, unsigned depth, unsigned caller)
             HLOG_I("RTT Schattenpuffer: depth=0x%X data=0x%X %ux%u fmt=0x%08X caller=0x%X f=%u (slot %d)",
                    depth, data, w, h, fmt, caller, g_present_no, idx);
         }
+        surf = depth;
         goto have_entry;
     }
 shadow_fail:
@@ -1665,9 +1694,15 @@ ID3D11ShaderResourceView *sb_rtt_depth_srv(unsigned xptr, unsigned *w, unsigned 
     unsigned data = 0;
     int i;
     if (!xptr) { return NULL; }
-    __try { data = *(unsigned *)(uintptr_t)(xptr + 4); }
+    unsigned tf = 0;
+    __try { data = *(unsigned *)(uintptr_t)(xptr + 4); tf = (*(unsigned *)(uintptr_t)(xptr + 0xCu) >> 8) & 0xFFu; }
     __except (EXCEPTION_EXECUTE_HANDLER) { return NULL; }
     if (!data) { return NULL; }
+    /* FIX(W466 LOC-ENHANCED-2): LoC legt den 1800^2-Schattenpuffer und das 256^2-Glow-Ziel auf dieselbe
+     * Datenadresse (0x5718000). Nur Texturen im Tiefenformat (0x2A..0x31) sind der Schattenpuffer; ein
+     * Farbtextur-Zugriff (Glow in der Komposition) bekam sonst die Tiefe -> Bild weiss. SB: Schattenpuffer
+     * ist LIN_F16 0x31, Bedingung dort immer erfuellt. */
+    if (g_sba_loc && (tf < 0x2Au || tf > 0x31u)) { return NULL; }
     for (i = 0; i < g_rtt_n; i++) {
         if (g_rtt[i].isdepth && g_rtt[i].data == data && g_rtt[i].dsrv) {
             if (w) { *w = g_rtt[i].w; }

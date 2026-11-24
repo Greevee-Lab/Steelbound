@@ -32,6 +32,8 @@ void sb_nhud_tick(void);
 int sb_nhud_visible(void);
 /* Panel zeichnen (unter ctx_lock, aus sb_phud_draw). avoid = Rechteck x,y,w,h des F2-Panels (NULL = keins). */
 void sb_nhud_draw(struct ID3D11RenderTargetView *rtv, int save, const unsigned *avoid);
+/* W467: Flaeche des letzten Bildes im Belegungsplan vorab anmelden */
+void sb_nhud_layout_pre(void);
 void sb_nhud_restore(void);
 /* Test-Hooks (overlay_test NHUD / NHUDPOS) und Belegzeile (overlay_test LOG). */
 void sb_nhud_toggle(void);

@@ -5,6 +5,7 @@
  * und setzt die Textzeilen (SRW-Sperre). Nichts davon laeuft im Spiel-Thread ausser zwei int-Tests je Tick. */
 #include "render_int.h"
 #include "sb_overlay.h"
+#include "overlay_style.h" /* W461 OVERLAY-CORE */
 #include "sb_perfhud.h"
 #include "sb_nethud.h"
 #include "loc_rulenet.h" /* W420 */
@@ -29,7 +30,7 @@ static char nh_save_path[600];
 /* Textzeilen (Abtast-Thread -> Render) */
 #define NH_ROWS 16
 #define NH_COLS 64
-#define NH_C_WARN RGB(255, 176, 64)
+#define NH_C_WARN OVS_C_WARN
 typedef struct {
     int n;
     wchar_t t[NH_ROWS][NH_COLS];
@@ -41,16 +42,17 @@ static volatile LONG nh_ver;
 static HANDLE nh_thr, nh_wake;
 
 /* Panel (GDI, Look wie sb_perfhud.c) */
-static HDC nh_dc;
-static HBITMAP nh_bmp, nh_bmp_old;
-static unsigned *nh_bits;
-static unsigned nh_bw, nh_bh;
-static HFONT nh_font, nh_font_old;
-static int nh_font_px;
-static float nh_f = 1.0f;
-static ID3D11Texture2D *nh_tex;
-static ID3D11ShaderResourceView *nh_srv;
-static unsigned nh_tw, nh_th;
+static ovs_canvas_t nh_cv = { .f = 1.0f }; /* W461: Zeichenflaeche, Schrift und Textur aus overlay_style */
+#define nh_dc (nh_cv.dc)
+#define nh_bits (nh_cv.bits)
+#define nh_bw (nh_cv.w)
+#define nh_bh (nh_cv.h)
+#define nh_font_px (nh_cv.font_px)
+#define nh_f (nh_cv.f)
+static ovs_tex_t nh_tx;
+#define nh_srv (nh_tx.srv)
+#define nh_tw (nh_tx.w)
+#define nh_th (nh_tx.h)
 static LONG nh_painted = -1;
 static int nh_paint_rows;
 static sb_ovl_save_t nh_save;
@@ -348,8 +350,8 @@ static void nh_sample(void)
         if (nt.tun && nt.known >= 2) {
             for (i = 0; i < nt.npeer; i++) {
                 nh_name(nt.peer[i].name, i, a, 16);
-                if (nt.peer[i].up) { nh_add(&x, nt.peer[i].ping > 150.0, L"· %-10s %4d ms", a, (int)(nt.peer[i].ping + 0.5)); }
-                else { nh_lw("ovl.nh_down", b, 48); nh_add(&x, 1, L"· %-10s %s", a, b); }
+                if (nt.peer[i].up) { nh_add(&x, nt.peer[i].ping > 150.0, L"\u00B7 %-10s %4d ms", a, (int)(nt.peer[i].ping + 0.5)); }
+                else { nh_lw("ovl.nh_down", b, 48); nh_add(&x, 1, L"\u00B7 %-10s %s", a, b); }
             }
         }
     }
@@ -471,55 +473,13 @@ void sb_nhud_tick(void)
 /* ------------------------------------------------------------------ */
 /* Panel (GDI, Look des ESC-Overlays)                                   */
 /* ------------------------------------------------------------------ */
-static int S(float x)
-{
-    int v = (int)(x * nh_f + 0.5f);
-    return v < 1 ? 1 : v;
-}
-
-static void nh_fill(int x0, int y0, int x1, int y1, COLORREF c)
-{
-    RECT r;
-    HBRUSH b = CreateSolidBrush(c);
-    r.left = x0; r.top = y0; r.right = x1; r.bottom = y1;
-    FillRect(nh_dc, &r, b);
-    DeleteObject(b);
-}
-
-static void nh_text(int x, int y, const wchar_t *s, COLORREF c, int right)
-{
-    SetTextColor(nh_dc, c);
-    SetTextAlign(nh_dc, (right ? TA_RIGHT : TA_LEFT) | TA_TOP);
-    TextOutW(nh_dc, x, y, s, (int)wcslen(s));
-}
+static int S(float x) { return ovs_px(nh_f, x); }
+#define nh_text(x, y, s, c, right) ovs_text(nh_dc, x, y, s, c, right)
 
 static int nh_gdi_size(unsigned w, unsigned h)
 {
-    BITMAPINFO bi;
-    if (nh_dc && w == nh_bw && h == nh_bh) { return 1; }
-    if (!nh_dc) {
-        nh_dc = CreateCompatibleDC(NULL);
-        if (!nh_dc) { return 0; }
-    }
-    if (nh_bmp) { SelectObject(nh_dc, nh_bmp_old); DeleteObject(nh_bmp); nh_bmp = NULL; }
-    if (nh_font) { SelectObject(nh_dc, nh_font_old); DeleteObject(nh_font); nh_font = NULL; }
-    memset(&bi, 0, sizeof bi);
-    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
-    bi.bmiHeader.biWidth = (LONG)w;
-    bi.bmiHeader.biHeight = -(LONG)h;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    nh_bmp = CreateDIBSection(nh_dc, &bi, DIB_RGB_COLORS, (void **)&nh_bits, NULL, 0);
-    if (!nh_bmp || !nh_bits) { nh_bw = nh_bh = 0; return 0; }
-    nh_bmp_old = (HBITMAP)SelectObject(nh_dc, nh_bmp);
-    nh_font_px = S(9.0f);
-    nh_font = CreateFontW(-nh_font_px, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS,
-                          CLIP_DEFAULT_PRECIS, ANTIALIASED_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
-    if (nh_font) { nh_font_old = (HFONT)SelectObject(nh_dc, nh_font); }
-    SetBkMode(nh_dc, TRANSPARENT);
-    nh_bw = w;
-    nh_bh = h;
+    if (!ovs_canvas_size(&nh_cv, w, h)) { return 0; }
+    if (!nh_font_px) { ovs_canvas_font(&nh_cv, OVS_FACE_MONO, FW_NORMAL, S(OVS_FS_HUD)); }
     return 1;
 }
 
@@ -527,78 +487,46 @@ static void nh_key_name(wchar_t *o, size_t cap)
 {
     int vk = (int)nh_vk[0], m = (int)nh_mod[0];
     o[0] = 0;
-    if (vk >= VK_F1 && vk <= VK_F24) { _snwprintf_s(o, cap, _TRUNCATE, L"%sF%d", (m & 1) ? L"⇧" : L"", vk - VK_F1 + 1); }
+    if (vk >= VK_F1 && vk <= VK_F24) { _snwprintf_s(o, cap, _TRUNCATE, L"%sF%d", (m & 1) ? L"\u21E7" : L"", vk - VK_F1 + 1); }
     else if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) { _snwprintf_s(o, cap, _TRUNCATE, L"%c", vk); }
 }
 
 static void nh_paint(const nh_text_t *x)
 {
-    int W = (int)nh_bw, H = (int)nh_bh, b = S(1.0f), pad = S(5.0f), rowh = S(10.0f), head = S(15.0f);
-    int y, ty, i;
+    int W = (int)nh_bw, H = (int)nh_bh, pad = S(5.0f), rowh = S(10.0f), head;
+    int y, i;
     wchar_t t[64], kn[16];
-    nh_fill(0, 0, W, H, SB_UI_C_BG);
-    nh_fill(0, 0, W, b, SB_UI_C_LINE);
-    nh_fill(0, H - b, W, H, SB_UI_C_LINE);
-    nh_fill(0, 0, b, H, SB_UI_C_LINE);
-    nh_fill(W - b, 0, W, H, SB_UI_C_LINE);
-    nh_fill(0, 0, S(7.0f), 2 * b + 1, SB_UI_C_TXT);
-    nh_fill(0, 0, 2 * b + 1, S(7.0f), SB_UI_C_TXT);
-    nh_fill(W - S(7.0f), H - 2 * b - 1, W, H, SB_UI_C_TXT);
-    nh_fill(W - 2 * b - 1, H - S(7.0f), W, H, SB_UI_C_TXT);
-    nh_fill(b + S(2.0f), b + S(2.0f), W - b - S(2.0f), head, SB_UI_C_HEAD);
-    ty = b + S(2.0f) + (head - b - S(2.0f) - nh_font_px) / 2 - S(0.5f);
-    nh_text(pad + S(1.0f), ty, L"■ SYS-NET", SB_UI_C_BG, 0);
     nh_lw("ovl.nh_title", t, 32);
     nh_key_name(kn, 16);
     if (kn[0]) {
         size_t l = wcslen(t);
         _snwprintf_s(t + l, 64 - l, _TRUNCATE, L" %s", kn);
     }
-    nh_text(W - pad - S(1.0f), ty, t, SB_UI_C_BG, 1);
+    head = ovs_frame(nh_dc, nh_f, W, H, nh_font_px, &OVS_FRAME_HUD, L"\u25A0 SYS-NET", t); /* W461: gemeinsamer HUD-Rahmen */
     y = head + S(3.0f);
     for (i = 0; i < x->n; i++) {
-        nh_text(pad, y, x->t[i], x->warn[i] ? NH_C_WARN : SB_UI_C_TXT, 0);
+        nh_text(pad, y, x->t[i], x->warn[i] ? NH_C_WARN : OVS_C_TXT, 0);
         y += rowh;
     }
     GdiFlush();
-    sb_ovl_ui_finish(nh_bits, nh_bw, nh_bh, nh_f);
+    ovs_finish(nh_bits, nh_bw, nh_bh, nh_f);
 }
 
 static int nh_tex_upload(void)
 {
-    D3D11_MAPPED_SUBRESOURCE map;
-    unsigned y;
-    if (!nh_tex || nh_tw != nh_bw || nh_th != nh_bh) {
-        D3D11_TEXTURE2D_DESC td;
-        if (nh_srv) { ID3D11ShaderResourceView_Release(nh_srv); nh_srv = NULL; }
-        if (nh_tex) { ID3D11Texture2D_Release(nh_tex); nh_tex = NULL; }
-        memset(&td, 0, sizeof td);
-        td.Width = nh_bw;
-        td.Height = nh_bh;
-        td.MipLevels = 1;
-        td.ArraySize = 1;
-        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_DYNAMIC;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &nh_tex)) ||
-            FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)nh_tex, NULL, &nh_srv))) {
-            HLOG_W("NETHUD: Panel-Textur %ux%u gescheitert", nh_bw, nh_bh);
-            nh_tw = nh_th = 0;
-            return 0;
-        }
-        nh_tw = nh_bw;
-        nh_th = nh_bh;
-    }
-    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)nh_tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+    if (!ovs_tex_ensure(&nh_tx, nh_bw, nh_bh)) {
+        HLOG_W("NETHUD: Panel-Textur %ux%u gescheitert", nh_bw, nh_bh);
         return 0;
     }
-    for (y = 0; y < nh_bh; y++) {
-        memcpy((unsigned char *)map.pData + (size_t)y * map.RowPitch, nh_bits + (size_t)y * nh_bw, nh_bw * 4u);
-    }
-    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)nh_tex, 0);
-    return 1;
+    return ovs_tex_write(&nh_tx, nh_bits);
+}
+
+static unsigned nh_rect[4]; /* W467: Flaeche des zuletzt gezeichneten F3-Panels (x, y, w, h) */
+
+/* W467: Flaeche des letzten Bildes vorab anmelden (sb_phud_layout_pre) */
+void sb_nhud_layout_pre(void)
+{
+    if (nh_vis && nh_rect[2] && nh_rect[3]) { ovs_layout_claim(OVS_SLOT_NETHUD, nh_rect[0], nh_rect[1], nh_rect[2], nh_rect[3]); }
 }
 
 void sb_nhud_draw(ID3D11RenderTargetView *rtv, int save, const unsigned *avoid)
@@ -606,7 +534,7 @@ void sb_nhud_draw(ID3D11RenderTargetView *rtv, int save, const unsigned *avoid)
     unsigned bx, by, bw, bh, pw, ph, x0, y0, m;
     int rows;
     LONG ver = nh_ver;
-    static unsigned lk[4];
+    unsigned *lk = nh_rect;
     static nh_text_t cur;
     if (!nh_vis || !rtv || !g_ctx || !g_dev) { return; }
     if (ver != nh_painted || !nh_srv) { /* neue Zeilen: Kopie unter der Sperre */
@@ -616,9 +544,29 @@ void sb_nhud_draw(ID3D11RenderTargetView *rtv, int save, const unsigned *avoid)
     }
     rows = cur.n > 0 ? cur.n : 1;
     sb_aspect_box(&bx, &by, &bw, &bh);
-    nh_f = (float)bh / 540.0f;
-    if (nh_f < 1.0f) { nh_f = 1.0f; }
+    nh_f = ovs_scale_ui(bh);
     pw = (unsigned)S(196.0f);
+    { /* W467 OVERLAY-UNIFY: Breite nach der laengsten Zeile (vorher fest 196, lange Zeilen wurden abgeschnitten),
+       * hoechstens 320 Einheiten bzw. 45 % der Bildbreite; waechst nur, solange Faktor gleich (kein Zappeln) */
+        static unsigned wmax;
+        static float wf;
+        static LONG mver = -1;
+        HDC dc = (ver != mver || wf != nh_f) ? ovs_canvas_dc(&nh_cv) : NULL; /* nur bei neuen Zeilen messen */
+        unsigned cap = (unsigned)S(320.0f), k;
+        if (wf != nh_f) { wf = nh_f; wmax = 0; }
+        mver = ver;
+        if (dc && (nh_font_px == S(OVS_FS_HUD) || ovs_canvas_font(&nh_cv, OVS_FACE_MONO, FW_NORMAL, S(OVS_FS_HUD)))) {
+            for (k = 0; k < (unsigned)cur.n && k < NH_ROWS; k++) {
+                SIZE sz;
+                if (GetTextExtentPoint32W(dc, cur.t[k], (int)wcslen(cur.t[k]), &sz) && (unsigned)sz.cx + 2u * (unsigned)S(5.0f) > pw)
+                    pw = (unsigned)sz.cx + 2u * (unsigned)S(5.0f);
+            }
+        }
+        if (cap > g_bb_w * 45u / 100u) cap = g_bb_w * 45u / 100u;
+        if (pw > cap) pw = cap > (unsigned)S(196.0f) ? cap : (unsigned)S(196.0f);
+        if (pw < wmax) pw = wmax;
+        wmax = pw;
+    }
     ph = (unsigned)(S(15.0f) + S(3.0f) + rows * S(10.0f) + S(4.0f));
     if (pw + 4u > g_bb_w || ph + 4u > g_bb_h) { return; }
     if (!nh_gdi_size(pw, ph)) { return; }
@@ -628,15 +576,15 @@ void sb_nhud_draw(ID3D11RenderTargetView *rtv, int save, const unsigned *avoid)
         nh_painted = ver;
         nh_paint_rows = rows;
     }
-    m = (unsigned)S(8.0f);
-    x0 = (nh_pos == 1 || nh_pos == 2) ? m : g_bb_w - pw - m;
-    y0 = (nh_pos <= 1) ? m : g_bb_h - ph - m;
+    m = (unsigned)S(OVS_MARGIN);
+    ovs_anchor((ovs_corner)nh_pos, pw, ph, m, &x0, &y0);
     if (avoid && x0 < avoid[0] + avoid[2] && avoid[0] < x0 + pw && y0 < avoid[1] + avoid[3] && avoid[1] < y0 + ph) {
         /* F2-Panel im Weg: oben darunter, unten darueber stapeln */
         if (nh_pos <= 1) { y0 = avoid[1] + avoid[3] + m / 2u; }
         else { y0 = avoid[1] > ph + m / 2u ? avoid[1] - ph - m / 2u : 0u; }
         if (y0 + ph > g_bb_h) { return; }
     }
+    ovs_layout_claim(OVS_SLOT_NETHUD, x0, y0, pw, ph);
     if (lk[0] != x0 || lk[1] != y0 || lk[2] != pw || lk[3] != ph) {
         lk[0] = x0; lk[1] = y0; lk[2] = pw; lk[3] = ph;
         HLOG_I("NETHUD panel %ux%u @%u,%u (bb %ux%u, Ecke %d, Faktor %.2f, Zeilen %d%s)", pw, ph, x0, y0, g_bb_w, g_bb_h,

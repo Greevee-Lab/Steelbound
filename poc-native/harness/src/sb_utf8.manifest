@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!-- W455 UNICODE-PATHS: UTF-8 als aktive Codepage des Prozesses (Windows 10 1903+).
+     Damit rechnen alle A-APIs, fopen/_stat, getenv und argv im Emu-Prozess mit
+     UTF-8 statt der ANSI-Codepage: Pfade mit Kyrillisch/Japanisch/Akzenten
+     (Benutzerprofil, Installationsordner) gehen nicht mehr verloren.
+     Bewusst nur dieser Eintrag (kein supportedOS/DPI: Verhalten sonst unveraendert).
+     Altes Windows ignoriert ihn (GetACP bleibt ANSI, Verhalten wie vor W455). -->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <activeCodePage xmlns="http://schemas.microsoft.com/SMI/2019/WindowsSettings">UTF-8</activeCodePage>
+    </windowsSettings>
+  </application>
+</assembly>

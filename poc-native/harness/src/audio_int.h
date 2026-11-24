@@ -261,8 +261,9 @@ void au3d_voice_vel(audio_voice_t *v, au32 x, au32 y, au32 z);
 
 /* ---- audio_fx.c (W348 AUDIO-DSP) ---- */
 void aufx_voice_play(audio_voice_t *v); /* Huellkurven starten (Play) */
-int aufx_voice_stop(audio_voice_t *v); /* 1 = Amplituden-Release laeuft (Stimme spielt aus) */
 void aufx_eg_set(audio_voice_t *v, const au32 *d); /* DSENVELOPEDESC */
+void aufx_note_stopex(audio_voice_t *v, au32 flags); /* W456 DIAG (SB-StopEx); au_lock */
+int aufx_voice_release(audio_voice_t *v); /* W456: EA in die Release-Phase (1) oder keine laufende EA mit Release (0); au_lock */
 void aufx_chunk(audio_voice_t *v, au32 n); /* je Chunk: EG weiter, step_mul, eg_ea0 -> eg_lv[1] */
 void aufx_reverb_begin(au32 n); /* Send-Puffer leeren */
 float *aufx_reverb_send(void); /* Stereo-Send-Puffer (n Frames) oder NULL */

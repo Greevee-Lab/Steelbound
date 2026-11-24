@@ -32,11 +32,6 @@ int au_probe_write(au32 p, const void *src, au32 n)
     return ok;
 }
 
-static int au_probe_u32(au32 p, au32 *out)
-{
-    return au_probe_read(p, out, 4);
-}
-
 /* WAVEFORMATEX validieren (PCM 8/16, Xbox-ADPCM 105). */
 int au_wfx_ok(const wfx_t *w)
 {

@@ -74,11 +74,6 @@ int lrules_always(int rule)
     return (rule >= LR_FIRST && rule <= LR_LAST) ? kDef[rule].always : 0;
 }
 
-const char *lrules_name(int rule)
-{
-    return (rule >= LR_FIRST && rule <= LR_LAST) ? kDef[rule].name : "";
-}
-
 void lrules_env_default(lr_env_t *e, const launcher_settings_t *s)
 {
     memset(e, 0, sizeof *e);
@@ -191,8 +186,9 @@ void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N])
     /* R10: Bildrate ueber der Bildwiederholrate auf Fenster/randlos (W223:
      * jede feste Rate, nicht nur 120; auto folgt dem Monitor). W309: auch
      * eine Rate, die die Monitorrate nicht glatt teilt (120 auf 165 Hz). */
+    /* W468: mit Bildtakt VRR zeigt der Monitor auch Nicht-Teiler gleichmaessig -> nur "ueber Monitorrate" warnt. */
     if (s->interp_fps > 0 && s->window_mode != 2 && e->display_hz > 0 &&
-        sb_fps_flags(e->display_hz, s->interp_fps) != 0) {
+        (sb_fps_flags(e->display_hz, s->interp_fps) & (s->frame_pacing == 2 ? SB_FPS_F_ABOVE : (SB_FPS_F_JUDDER | SB_FPS_F_ABOVE))) != 0) {
         hit(&out[10], 10, LR_LVL_WARN);
         _snprintf_s(out[10].text, sizeof out[10].text, _TRUNCATE,
                     LT("gui.rule_r10"), e->display_hz, s->interp_fps);
@@ -444,7 +440,7 @@ void lrules_selftest(int *pass, int *fail)
             lr_env_t e2;
             lr_res_t r2[LR_N];
             lcfg_defaults(&t);
-            lcfg_gfx_apply(&t, LGP_SUBTLE);
+            lcfg_gfx_apply(&t, LGP_PERFORMANCE); /* W465: sichtbares Preset (Remastered nicht waehlbar) */
             t.shx[LSHX_SAT] = 140;
             lrules_env_default(&e2, &t);
             lrules_eval(&e2, r2);

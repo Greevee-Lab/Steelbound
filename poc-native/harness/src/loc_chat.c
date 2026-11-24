@@ -743,3 +743,72 @@ void lch_sn_wipe(lch_sn *sn)
 {
     if (sn) lch_zero(&sn->hist, sizeof sn->hist);
 }
+
+/* ------------------------------------------------------------------ W474 CHATTABS */
+int lch_page(int scene, int text_id, int nitems)
+{
+    if (scene != 8) return LCH_PAGE_OTHER;
+    if (text_id == LCH_TID_MAIN && nitems == 7) return LCH_PAGE_MAIN;
+    if (text_id == LCH_TID_MATCH && nitems == 2) return LCH_PAGE_MATCH;
+    if (text_id == LCH_TID_SEARCH && nitems == 1) return LCH_PAGE_SEARCH;
+    return LCH_PAGE_OTHER;
+}
+
+int lch_session_from(int streams, int scene, int page, int lockstep, int rb_mission)
+{
+    if (streams <= 0) return LCH_SES_NONE;
+    if (lockstep || rb_mission) return LCH_SES_MATCH;
+    if (scene == 8) return page == LCH_PAGE_OTHER ? LCH_SES_LOBBY : LCH_SES_NONE;
+    if (scene >= 0 && scene <= 6 && scene != 2) return LCH_SES_NONE; /* Logos, Titel, Hauptmenue, Benutzerdaten */
+    return LCH_SES_MATCH;
+}
+
+int lch_out_of_lobby(int scene, int page)
+{
+    if (scene == 8) return page != LCH_PAGE_OTHER;
+    return scene >= 0 && scene <= 6 && scene != 2;
+}
+
+unsigned lch_tabs_avail(const lch_tabin *in)
+{
+    unsigned m = 0;
+    int match;
+    if (!in) return 0;
+    match = in->ses == LCH_SES_MATCH;
+    if (in->sn_ready && (!match || in->mis_sn)) m |= 1u << LCH_TAB_SN;
+    if (in->ses != LCH_SES_NONE && in->lobby_link) {
+        if (!match || in->mis_lobby) m |= 1u << LCH_TAB_LOBBY;
+        if (in->team_known && (!match || in->mis_team)) m |= 1u << LCH_TAB_TEAM;
+    }
+    return m;
+}
+
+int lch_tab_next(int cur, unsigned avail)
+{
+    int k;
+    for (k = 1; k < LCH_TAB_N; k++) {
+        int o = (cur + k) % LCH_TAB_N;
+        if (avail & (1u << o)) return o;
+    }
+    return cur;
+}
+
+int lch_tab_auto(int cur, unsigned avail, unsigned prev_avail)
+{
+    int t;
+    unsigned lb = 1u << LCH_TAB_LOBBY;
+    if ((avail & lb) && !(prev_avail & lb)) return LCH_TAB_LOBBY; /* Lobby betreten: Sprung auf Lobby */
+    if (cur >= 0 && cur < LCH_TAB_N && (avail & (1u << cur))) return cur;
+    for (t = 0; t < LCH_TAB_N; t++)
+        if (avail & (1u << t)) return t;
+    return cur;
+}
+
+void lch_hist_clear(lch_hist *h)
+{
+    uint32_t g;
+    if (!h) return;
+    g = h->gen;
+    lch_zero(h, sizeof *h);
+    h->gen = g + 1u;
+}

@@ -41,19 +41,6 @@ int assist_cfg_owns(const char *key)
     return 0;
 }
 
-/* Zeile = "key =..." (Toleranz wie lcfg line_is_key)? */
-static int line_is_key(const char *line, const char *key)
-{
-    size_t n;
-    line += strspn(line, " \t");
-    n = strlen(key);
-    if (strncmp(line, key, n) != 0) {
-        return 0;
-    }
-    line += n + strspn(line + n, " \t");
-    return *line == '=';
-}
-
 /* Key einer "key=..."-Zeile nach out (Toleranz wie oben). 1 = ok. */
 static int line_key(const char *line, char *out, size_t cap)
 {
@@ -682,14 +669,6 @@ int assist_open(assist_t *as, const char *fixture)
     return src;
 }
 
-void assist_close(assist_t *as)
-{
-    EnterCriticalSection(&as->cs);
-    a_close_src(as);
-    LeaveCriticalSection(&as->cs);
-    a_emit(as, ASSIST_EV_SOURCE, ASSIST_SRC_NONE, 0, NULL);
-}
-
 int assist_source(assist_t *as)
 {
     int s;
@@ -697,11 +676,6 @@ int assist_source(assist_t *as)
     s = as->src;
     LeaveCriticalSection(&as->cs);
     return s;
-}
-
-int assist_source_err(assist_t *as)
-{
-    return as->src_err;
 }
 
 void assist_set_fast(assist_t *as, int on)
@@ -794,13 +768,6 @@ void assist_raw(assist_t *as, uint8_t raw[SBC_USB_IN_LEN])
 {
     EnterCriticalSection(&as->cs);
     memcpy(raw, as->raw, SBC_USB_IN_LEN);
-    LeaveCriticalSection(&as->cs);
-}
-
-void assist_state(assist_t *as, sbc_state_t *st)
-{
-    EnterCriticalSection(&as->cs);
-    *st = as->st;
     LeaveCriticalSection(&as->cs);
 }
 
@@ -1461,11 +1428,6 @@ int assist_led_all(assist_t *as, int level)
 int assist_led_seq_start(assist_t *as)
 {
     return a_start(as, JOB_LED_SEQ, 0, 0);
-}
-
-void assist_led_seq_stop(assist_t *as)
-{
-    assist_test_stop(as);
 }
 
 int assist_led_level(assist_t *as, int led)

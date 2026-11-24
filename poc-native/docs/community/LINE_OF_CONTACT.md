@@ -19,6 +19,7 @@ then, so everyone in a match has the same choice; pilots you already have get th
   Japanese *Pilot Test* disc and a game with the **title update** applied – the launcher tells you
   so and asks for the unmodified disc.
 - For online play: an internet connection. No account needed – you play as a guest.
+- For LAN play: PCs in the same local network – no internet needed (see [LAN mode](#lan-mode-no-internet)).
 
 ## Set up (once)
 
@@ -48,9 +49,9 @@ the same for both. Line of Contact keeps its own saves (see **Saves & data** on 
 
 On the **Multiplayer** page, the *Match* card lets you choose **Public** (default) or **Private (room code)**.
 If the launcher is set to *Check version only* or *Offline*, the card shows a note with a button to the
-launcher settings. Line of Contact needs steelnet: without *Connect to steelnet* (gear at the top right,
-Online & Updates) **Play Line of Contact** is greyed out and the page shows why; the network settings can
-still be changed.
+launcher settings. Online play needs steelnet: without *Connect to steelnet* (gear at the top right,
+Online & Updates) **Play Line of Contact** is greyed out and the page shows why, unless you switch the
+*Match* card to **LAN (no internet)**; the network settings can still be changed.
 
 - **Public:** leave the room code empty and press **Play Line of Contact**. In the game the host creates a match
   (**System Link Play → MatchMaking → Create Match**); it shows up for every pilot under
@@ -78,6 +79,30 @@ and the game corrects itself when a fellow pilot's input arrives late. If rollba
 the game shows *Rollback off – higher input delay* with the reason for a few seconds and plays the
 mission in the original lockstep. Nothing pauses online, just like on the console: F11 and the Esc
 menu only open on **your** screen while the match keeps running.
+
+## LAN mode (no internet)
+
+For LAN parties or when the internet is down, the *Match* card on the **Multiplayer** page has a switch at the top:
+**Online (steelnet)** (default) or **LAN (no internet)**. In LAN mode the game never contacts steelnet – no account,
+version, relay or chat connection – and **Play Line of Contact** works even if the launcher is set to *Offline*.
+
+1. On every PC: choose **LAN (no internet)**. Leave **Room** empty (default `LAN`) or agree on a room name; all
+   players need the same room name.
+2. Optional: agree on a **Password**. Only players with the same room name and password can connect. The launcher
+   keeps the password only while it is open (it is never saved to a file); type it again after a restart.
+3. Press **Play Line of Contact**. In the game the host creates a match (**System Link Play → MatchMaking →
+   Create Match**); everyone else finds it under **Search Match**, like the original System Link.
+
+- The PCs find each other with a broadcast inside your local network (UDP port **47210**, never routed beyond
+  your network). If Windows asks whether `sb_ldr.exe` may use the network, allow it for **private networks**.
+  Your network should be set to *Private* in Windows – public networks block the search.
+- Everyone needs the **same Steelbound version**; a player with another version is not connected and the game
+  shows a note.
+- Game traffic is encrypted like online. With a password, nobody without it can join or read along; without a
+  password, anyone in the same network can join – use a password at events with devices you don't know.
+- Network mode (Auto/Rollback/Lockstep) and the lobby chat work as online (the lobby chat reaches all players in
+  the same LAN room). **Not available in LAN mode:** the public lobby list with ping, steelnet chat, relays and the
+  account. LAN lobbies always use **Sim** mode (no aim assist or automatic gears for anyone).
 
 ## Network settings
 

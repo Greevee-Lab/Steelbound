@@ -49,9 +49,15 @@ unsigned lorig_mask(const launcher_settings_t *s, int fx_pack)
 {
     unsigned m = 0;
     int i;
+    int loc = lcfg_gfx_loc();
     for (i = 0; i < SB_OF_NKEY; i++) {
         int v = lorig_value(s, kSbOrigFlag[i].key);
-        if (v >= 0 && sb_of_dev(i, v)) { m |= 1u << kSbOrigFlag[i].grp; }
+        if (loc) { /* W465 LOC-ENHANCED: in LoC gilt der Wert der Enhanced-Spalte als "kein Experimental";
+                    * W478: ebenso der Wert der Spalte Vivid (Enhanced-Variante, ohne Hinweis) */
+            int r = sb_gp_find(kSbOrigFlag[i].key);
+            if (r >= 0 && (v == kSbGfxPreset[r].v[SB_GP_ENHANCED] || v == kSbGfxPreset[r].v[SB_GP_VIVID])) { continue; }
+        }
+        if (v >= 0 && sb_of_dev(i, v, loc)) { m |= 1u << kSbOrigFlag[i].grp; } /* W471: LoC-Original mit Schatten */
     }
     if (fx_pack) { m |= 1u << SB_OFG_PACKS; }
     return m;
@@ -85,10 +91,10 @@ unsigned lorig_preset_mask(int preset)
 
 void lorig_reset(launcher_settings_t *s)
 {
-    int i;
+    int i, loc = lcfg_gfx_loc();
     for (i = 0; i < SB_OF_NKEY; i++) {
         int *p = lorig_field(s, kSbOrigFlag[i].key);
-        if (p) { *p = kSbOrigFlag[i].orig; }
+        if (p) { *p = sb_of_orig(i, loc); } /* W471: LoC "Back to original" = mit den Schatten des Spiels */
     }
     s->remaster = 0;
     s->hd_textures = 0;
@@ -101,7 +107,7 @@ int lorig_once_args(char *out, size_t cap)
     char t[64];
     out[0] = '\0';
     for (i = 0; i < SB_OF_NKEY; i++) {
-        _snprintf_s(t, sizeof t, _TRUNCATE, "%s=%d;", kSbOrigFlag[i].key, kSbOrigFlag[i].orig);
+        _snprintf_s(t, sizeof t, _TRUNCATE, "%s=%d;", kSbOrigFlag[i].key, sb_of_orig(i, lcfg_gfx_loc())); /* W471 */
         if (strcat_s(out, cap, t) != 0) { out[0] = '\0'; return 1; }
     }
     /* HD aus, keine Packs (leere Liste: weder Texture noch Effect Packs), Einblendung */
@@ -167,17 +173,32 @@ void lorig_selftest(int *pass, int *fail)
         }
     }
     if (!why[0]) { /* Original/Performance original, Remastered/Klare Sicht experimentell */
-        static const int want[SB_GP_NPRE] = { 0, 1, 1, 0, 1 };
-        int p;
-        for (p = 0; p < SB_GP_NPRE && !why[0]; p++) {
-            launcher_settings_t t;
-            lcfg_defaults(&t);
-            lcfg_gfx_apply(&t, p);
-            if ((lorig_mask(&t, 0) != 0) != want[p]) {
-                _snprintf_s(why, sizeof why, _TRUNCATE, "Preset %d: Maske 0x%X (erwartet %s)", p, lorig_mask(&t, 0),
-                            want[p] ? "experimentell" : "original");
+        /* W465: Enhanced ist in SB-Werten experimentell, in LoC (Standard) nicht */
+        static const int want[SB_GP_NPRE] = { 0, 1, 1, 0, 1, 1, 1 }; /* W478: Vivid wie Enhanced */
+        int p, g;
+        for (g = 0; g < 2 && !why[0]; g++) {
+            lcfg_gfx_set_loc(g);
+            for (p = 0; p < SB_GP_NPRE && !why[0]; p++) {
+                launcher_settings_t t;
+                int w = (g && (p == LGP_ENHANCED || p == LGP_VIVID)) ? 0 : want[p];
+                lcfg_defaults(&t);
+                lcfg_gfx_apply(&t, p);
+                if ((lorig_mask(&t, 0) != 0) != w) {
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "%s Preset %d: Maske 0x%X (erwartet %s)", g ? "LoC" : "SB", p,
+                                lorig_mask(&t, 0), w ? "experimentell" : "original");
+                }
+            }
+            if (!why[0] && g) { /* LoC: Abweichung von Enhanced bleibt markiert */
+                launcher_settings_t t;
+                lcfg_defaults(&t);
+                lcfg_gfx_apply(&t, LGP_ENHANCED);
+                t.shx[LSHX_SSAO] = lcfg_gfx_preset_value(LGP_ENHANCED, LSHX_SSAO) + 25;
+                if (lorig_mask(&t, 0) == 0) {
+                    strcpy_s(why, sizeof why, "LoC: Abweichung von Enhanced nicht markiert");
+                }
             }
         }
+        lcfg_gfx_set_loc(0);
     }
     if (!why[0]) { /* Einzelne Gruppen */
         static const struct { const char *set; unsigned grp; } kc[] = {

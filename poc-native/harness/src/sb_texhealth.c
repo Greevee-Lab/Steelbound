@@ -154,6 +154,7 @@ static unsigned g_th_smiss_total, g_th_smiss_frames, g_th_smiss_max, g_th_smiss_
 static unsigned g_th_now_f;
 static float g_th_gl_now, g_th_gl_max, g_th_gl_gain;
 static unsigned g_th_gl_max_f, g_th_gl_frames, g_th_gl_last_f;
+static float g_th_gl2_now, g_th_gl2_max; /* W477: Blendung zweiter Pass [0x351684] (FRONT VIEW) */
 
 static void th_note(unsigned stage, unsigned xptr, unsigned why, unsigned present)
 {
@@ -278,6 +279,10 @@ void sb_th_present(unsigned present)
         if (gl > g_th_gl_max) { g_th_gl_max = gl; g_th_gl_max_f = present; g_th_gl_gain = gn; }
         if (gl >= 0.5f) { g_th_gl_frames++; }
         if (gl > 0.0f) { g_th_gl_last_f = present; }
+        { float g2 = 0.0f; /* W477 SB-SUN-WHITEOUT */
+          __try { g2 = *(volatile float *)(uintptr_t)SBA(0x351684u); } __except (EXCEPTION_EXECUTE_HANDLER) { g2 = 0.0f; }
+          if (!(g2 >= -16.0f && g2 <= 16.0f)) { g2 = 0.0f; }
+          g_th_gl2_now = g2; if (g2 > g_th_gl2_max) { g_th_gl2_max = g2; } }
     }
     if (present - g_th_vram_last < 1800u) { return; }
     g_th_vram_last = present;
@@ -376,6 +381,31 @@ void sb_th_format(char *o, size_t cap, int live)
         _snprintf_s(o + u, cap - u, _TRUNCATE,
                     "\r\nstage 1-3 sampled without texture set (ISSUE44): %u in %u frames, last present %u st%u ps=0x%X",
                     g_th_empty_total, g_th_empty_frames, g_th_empty_last_f, g_th_empty_st, g_th_empty_ps);
+        if (!g_sba_loc) { /* W477 SB-SUN-WHITEOUT: Licht/Nebel/Monitor-Korn der Welt, Flare-Tests (nur Zahlen, nur SB) */
+            float amb[3] = { 0, 0, 0 }, base = 0, fst = 0, fend = 0, fden = 0, wa512 = 0, wa256 = 0, ws256 = 0, nite = 0, lvl = 0;
+            unsigned fen = 0, ftb = 0, ft = 0, fv = 0, zf = 0, zfo = 0, fcol = 0;
+            extern void sb_visq_stats(unsigned *tests, unsigned *vis, unsigned *zfar, unsigned *zfar_on);
+            __try {
+                amb[0] = *(volatile float *)(uintptr_t)SBA(0x358250u); amb[1] = *(volatile float *)(uintptr_t)SBA(0x358254u);
+                amb[2] = *(volatile float *)(uintptr_t)SBA(0x358258u); base = *(volatile float *)(uintptr_t)SBA(0x35224Cu);
+                wa512 = *(volatile float *)(uintptr_t)SBA(0x352150u); wa256 = *(volatile float *)(uintptr_t)SBA(0x35641Cu);
+                ws256 = *(volatile float *)(uintptr_t)SBA(0x356DBCu); nite = *(volatile float *)(uintptr_t)SBA(0x351638u);
+                lvl = *(volatile float *)(uintptr_t)SBA(0x352BD8u);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            sb_visq_stats(&ft, &fv, &zf, &zfo);
+            { /* Nebel des letzten Welt-Draws mit Nebel (render_shade.c), nicht der aktuelle Zustand (Cockpit: aus) */
+                extern unsigned g_rq_wfog_tb, g_rq_wfog_col, g_rq_wfog_f;
+                extern float g_rq_wfog_st, g_rq_wfog_en, g_rq_wfog_de;
+                fen = g_rq_wfog_f; ftb = g_rq_wfog_tb; fst = g_rq_wfog_st; fend = g_rq_wfog_en; fden = g_rq_wfog_de; fcol = g_rq_wfog_col;
+            }
+            u = strlen(o);
+            _snprintf_s(o + u, cap - u, _TRUNCATE,
+                        "\r\nworld light (W477): pass2 glare now=%.2f max=%.2f ambient=(%.3f %.3f %.3f) base=%.3f "
+                        "fog (last world draw, present %u) tbl=%u start=%.1f end=%.1f dens=%.5f col=0x%08X monitor grain a512=%.2f a256=%.2f+%.2f "
+                        "night=%.2f noise=%.2f flare tests=%u visible=%u behind-far=%u (in view %u) vis_zfar=%d",
+                        g_th_gl2_now, g_th_gl2_max, amb[0], amb[1], amb[2], base, fen, ftb, fst, fend, fden, fcol,
+                        wa512, wa256, ws256, nite, lvl, ft, fv, zf, zfo, g_cfg.vis_zfar);
+        }
     }
     u = strlen(o);
     _snprintf_s(o + u, cap - u, _TRUNCATE, "\r\nhd pack: %s\r\nmissing-texture marker: %s\r\n", hd[0] ? hd : "off",
@@ -391,7 +421,7 @@ void sb_th_format(char *o, size_t cap, int live)
 
 void sb_th_log(const char *why)
 {
-    char b[4096], *p, *q; /* W360: 3072 -> 4096 (neue Zeilen) */
+    char b[5120], *p, *q; /* W360: 3072 -> 4096 (neue Zeilen); W477: 5120 (Zeile world light) */
     sb_th_format(b, sizeof b, 1);
     HLOG_I("TEXHEALTH Block (%s):", why ? why : "?");
     for (p = b; *p; p = q) {

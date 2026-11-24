@@ -73,8 +73,13 @@ typedef struct loc_rb_lobby {
     struct { int pidx, rtt, wauto; } peer[LOC_RB_LOBBY_PEERS]; /* wauto 0 Lockstep, 1 Rollback, 2 Auto */
 } loc_rb_lobby;
 int loc_rb_lobby_read(loc_rb_lobby *o);
+/* W474 CHATTABS: 1 = Mission laut Eingabeschicht (wie loc_rb_lobby.in_mission, ohne Sperre); 0 ohne Eingabeschicht. */
+int loc_rb_in_mission(void);
 /* W396: wirksame Eingabeverzoegerung im Rollback (Ticks, = F3-Zeile), 0 = nicht im Rollback-Modus */
 int loc_rb_eff_delay(void);
+/* W469 LOC-RB-HITCH: je Lockstep-Rahmen (ls_record, Spiel-Thread): Abstand messen, bei Haenger LOCHITCH mit Aufteilung.
+ * stallf = Stauframe-Zaehler des Spiels. Nur Ganzzahlen. */
+void loc_rb_hitch_frame(unsigned stallf);
 /* W420 LOC-CLIPDUMP: GetTickCount|1 des letzten eigenen Rahmens (FUN_0004EC80, auch im Rollback, wo kein TCP-0x34
  * gesendet wird), 0 = nie. Nur mit loc_rb_input=1 (sonst zeigt locnet.last34_ms die Mission). */
 extern volatile long g_loc_rb_own_ms;

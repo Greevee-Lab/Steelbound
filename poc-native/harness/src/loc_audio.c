@@ -62,7 +62,7 @@ static volatile LONG st_spec_skip;
 #define LA_NOTE_CUES 4096
 #define LA_MAX_WAVE_BYTES (40u * 1024u * 1024u)
 #define LA_RPC_SLOTS 4 /* W363: Parameter-Namen je Cue */
-#define LA_MIN3D 8.0f /* W: XSB-3D-Parameter unbekannt; Spiel rechnet in ~Metern (x0,01x0,5) */
+#define LA_MIN3D 8.0f /* W298 (W): nur noch fuer Eintraege ohne XSB-3D-Satz bzw. loc_audio_3d_xsb=0 (W456: Satz je Eintrag, lxf_cue_t.has3d) */
 #define LA_MAX3D 1000.0f
 #define LA_DOWNMIX_DB (-770) /* 5.1-Wellen (Stream.xwb): Mischer-Downmix summiert bis x2,9 -> ITU-Norm 1/2,414 */
 #define LA_3D_HEADROOM (-600) /* W: 3D-Cues -6 dB (sonst im Gefecht 0,1-2,8 % Uebersteuerung, W298_A2) */
@@ -163,6 +163,7 @@ static int s_mis_on;
 static lw_pl_t *s_mis_pl; /* W375: Missions-Playlist (Einsatzbeginn FUN_0008C3D0), ihr Release = Missionsende */
 static volatile LONG st_mis_stop, st_orphan_stop;
 static volatile LONG st_loop_once, st_loop_n, st_loop_n_end; /* W413: XSB-Schleifenzahl: einmal / endlich / endlich beendet */
+static volatile LONG st_eg_play, st_eg_rel, st_eg_cut; /* W456: Cues mit Huellkurve / Stopps mit Release-Ausklang / sofort */
 static la_pool_t s_pool[LA_MAX_POOL];
 static int s_npool;
 static int s_cat_db[LA_MAX_CAT];
@@ -623,6 +624,10 @@ static void la_cue_apply(la_cue_t *c)
         memset(a, 0, sizeof a);
         {
             float mn = LA_MIN3D, mx = LA_MAX3D;
+            if (g_cfg.loc_audio_3d_xsb && c->c.has3d) { /* W456: Min/Max-Abstand des XSB-Eintrags wie die Bibliothek (0x1C4E15) */
+                mn = c->c.min3d;
+                mx = c->c.max3d;
+            }
             memcpy(&a[13], &mn, 4);
             memcpy(&a[14], &mx, 4);
         }
@@ -682,8 +687,12 @@ static void la_cue_release_voices(la_cue_t *c, int stop)
             if (p->is_stream) {
                 la_pool_clear(p);
             } else {
-                if (stop && p->v) {
-                    audio_stop(p->v);
+                if (stop && p->v) { /* W456: stop 2 = Stop ohne Flag 2 -> Release-Huellkurve (sonst sofort) */
+                    if (stop == 2 && audio_stop_release(p->v)) {
+                        InterlockedIncrement(&st_eg_rel);
+                    } else {
+                        audio_stop(p->v);
+                    }
                 }
                 p->busy = 0;
             }
@@ -692,7 +701,8 @@ static void la_cue_release_voices(la_cue_t *c, int stop)
     }
 }
 
-/* Cue beenden (gestoppt oder ausgelaufen): Stimmen frei, Meldung, Slot frei. */
+/* Cue beenden (gestoppt oder ausgelaufen): Stimmen frei, Meldung, Slot frei. stopped: 0 = ausgelaufen, 1 = sofort
+ * gestoppt, 2 = gestoppt mit Release-Huellkurve (W456: Stop ohne Flag 2, Stimme klingt ohne Cue aus). */
 static void la_cue_end(la_cue_t *c, int stopped)
 {
     if (c->state == 0) {
@@ -866,6 +876,14 @@ static void la_cue_start(la_cue_t *c)
         nv++;
         if (!p->is_stream) p->w.loop = w.loop; /* W413: wiederverwendete Stimme derselben Welle traegt das alte Flag */
         audio_set_frequency(p->v, la_track_freq(c, t, w.rate)); /* W363: + RPC */
+        if (g_cfg.loc_audio_eg) { /* W456: Huellkurve der Sound-Liste (Ereignis 0x0A vor dem Play) bzw. aus (Pool-Stimme) */
+            u32 d[10] = { 1u, 0u, 0u, 0u, 0u, 0u, 0u, 255u, 0u, 0u };
+            if (c->c.eg_on) {
+                int k2;
+                for (k2 = 0; k2 < 7; k2++) d[1 + k2] = (u32)c->c.eg[k2];
+            }
+            audio_set_eg(p->v, d);
+        }
         if (p->is_stream) {
             InterlockedIncrement(&st_tracks);
             if (w.loop) {
@@ -899,11 +917,14 @@ static void la_cue_start(la_cue_t *c)
         }
     }
     InterlockedIncrement(&st_play);
+    if (c->c.eg_on && g_cfg.loc_audio_eg) InterlockedIncrement(&st_eg_play);
     if (g_cfg.loc_audio >= 2 && InterlockedIncrement(&st_cuelog) <= 400) {
         const char *nm = lxf_xsb_cue_name(&c->sb->x, c->cue);
-        HLOG_I("LOCAUDIO cue %d '%s' Spuren=%d Stimmen=%d Kat=%d dB=%d Pitch=%d Quelle=%s", c->cue, nm ? nm : "?",
-               c->c.ntrack, nv, k, c->c.db100, c->c.pitch,
-               c->src ? (c->src->is3d ? "3D" : "2D") : "-");
+        HLOG_I("LOCAUDIO cue %d '%s' Spuren=%d Stimmen=%d Kat=%d dB=%d Pitch=%d Quelle=%s v=%u Pegel=%d EG=%d/%d/%d Min3D=%.0f", c->cue,
+               nm ? nm : "?", c->c.ntrack, nv, k, c->c.db100, c->c.pitch, c->src ? (c->src->is3d ? "3D" : "2D") : "-",
+               c->pool[0] ? audio_voice_id(s_pool[c->pool[0] - 1].v) : 0u, /* W456 DIAG: voice_levels.csv */
+               g_cfg.audio_xact_sends ? c->c.db100_xact : c->c.db100, c->c.eg_on ? c->c.eg[2] : -1, c->c.eg_on ? c->c.eg[5] : -1,
+               c->c.eg_on ? c->c.eg[6] : -1, (g_cfg.loc_audio_3d_xsb && c->c.has3d) ? c->c.min3d : LA_MIN3D);
     }
 }
 
@@ -1361,6 +1382,11 @@ static u32 __stdcall la_SetMasterVolume(u32 e, u32 cat, u32 vol)
     }
     if (InterlockedIncrement(&n) <= 24) {
         HLOG_I("LOCAUDIO: SetMasterVolume Kategorie %u = %d/100 dB", cat, (int)vol);
+    } else if (g_cfg.loc_audio >= 2 && (int)vol != s_cat_db[cat]) { /* W456 DIAG: weitere Wertwechsel mit Aufrufer */
+        static volatile LONG nd;
+        if (InterlockedIncrement(&nd) <= 300)
+            HLOG_I("LOCAUDIO: SetMasterVolume Kategorie %u = %d/100 dB (Wechsel, Aufrufer 0x%X)", cat, (int)vol,
+                   (u32)(uintptr_t)_ReturnAddress());
     }
     lk();
     s_cat_db[cat] = (int)vol < -10000 ? -10000 : ((int)vol > 0 ? 0 : (int)vol);
@@ -1626,6 +1652,21 @@ static u32 __stdcall la_PrepareEx(u32 sbp, u32 params, u32 pp)
     return 0;
 }
 
+/* W456 DIAG (loc_audio>=2): Belegung der Ton-Slot-Tabelle des Spiels (0x5765B0, 0xC0 Slots je 0x5C B; FUN_000890B0
+ * verwirft einen Ton still, wenn kein Slot frei ist: frei = [3] == 0 und [2] == -1). */
+static volatile LONG st_slot_max;
+static void la_slot_diag(void)
+{
+    static u32 tab[0xC0 * 0x17];
+    int i, used = 0;
+    if (g_cfg.loc_audio < 2 || !la_rd(0x5765B0u, tab, sizeof tab))
+        return;
+    for (i = 0; i < 0xC0; i++)
+        used += tab[i * 0x17 + 3] != 0 || tab[i * 0x17 + 2] != 0xFFFFFFFFu;
+    if (used > st_slot_max)
+        st_slot_max = used;
+}
+
 static u32 __stdcall la_PlayEx(u32 sbp, u32 params, u32 pp)
 {
     loc_api_count(24); /* W363 */ LA_SPEC_GUARD(24);
@@ -1637,6 +1678,7 @@ static u32 __stdcall la_PlayEx(u32 sbp, u32 params, u32 pp)
         return LA_E_FAIL;
     }
     src = IS_SRC((void *)(uintptr_t)p[2]) ? (la_src_t *)(uintptr_t)p[2] : NULL;
+    la_slot_diag(); /* W456 DIAG */
     lk();
     if ((p[0] & 4u) && (int)p[1] == -1) { /* vorbereiteten Cue (*pp) starten */
         u32 h = 0;
@@ -1685,14 +1727,20 @@ static u32 __stdcall la_Stop(u32 sbp, u32 cue, u32 flags, u32 pcue)
                  (int)cue, flags, t ? "gueltig" : (pcue ? "unbekannt" : "-"), t ? t->serial : 0u, t ? t->cue : -1,
                  t ? t->state : -1, t ? t->loops : 0, (u32)(uintptr_t)_ReturnAddress(), GetCurrentThreadId());
     }
-    if ((int)cue >= 0) {
-        for (i = 0; i < LA_MAX_CUE; i++) {
-            if (s_cue[i].state != 0 && s_cue[i].cue == (int)cue) {
-                la_cue_end(&s_cue[i], 1);
+    {
+        /* W456: Bibliothek (0x1C7E79 -> 0x1C531E) setzt Flag 1 dazu; ohne Flag 2 (sofort) klingen die Stimmen ueber die
+         * Release-Huellkurve aus (StopEx DSBSTOPEX_ENVELOPE), ohne Huellkurve endet die Stimme wie bisher sofort. */
+        int how = (!g_cfg.loc_audio_eg || (flags & 2u)) ? 1 : 2;
+        if (how == 1) InterlockedIncrement(&st_eg_cut);
+        if ((int)cue >= 0) {
+            for (i = 0; i < LA_MAX_CUE; i++) {
+                if (s_cue[i].state != 0 && s_cue[i].cue == (int)cue) {
+                    la_cue_end(&s_cue[i], how);
+                }
             }
+        } else if (IS_CUE((void *)(uintptr_t)pcue)) {
+            la_cue_end((la_cue_t *)(uintptr_t)pcue, how);
         }
-    } else if (IS_CUE((void *)(uintptr_t)pcue)) {
-        la_cue_end((la_cue_t *)(uintptr_t)pcue, 1);
     }
     ulk();
     return 0;
@@ -2332,6 +2380,11 @@ void loc_audio_tick(int waited_s)
            "verdraengt %ld) Streams=%ld (Pakete %ld, Lesefehler %ld) WMA-stumm=%ld Fehler=%ld",
            waited_s, st_play, st_prep, act, st_stop, st_end, st_notes, st_drop_notes, st_tracks, st_loops, st_voices,
            s_npool, busy, st_reuse, st_evict, st_streams, st_spkts, st_sread_fail, st_wma, st_fail);
+    if (st_eg_play || st_eg_rel) /* W456 (#93): eigene Zeile (geparste Zeilen unveraendert) */
+        HLOG_I("LOCAUDIO: t=%ds Huellkurven: Cues=%ld Stop mit Ausklang=%ld Stop sofort=%ld", waited_s, st_eg_play, st_eg_rel,
+               st_eg_cut);
+    if (st_slot_max) /* W456 DIAG */
+        HLOG_I("LOCAUDIO: t=%ds Spiel-Ton-Slots hoechstens belegt=%ld/192", waited_s, st_slot_max);
     if (st_stream_steal) /* W379 (#54) */
         HLOG_I("LOCAUDIO: t=%ds Streaming-Welle neu gestartet, alte Instanz beendet=%ld", waited_s, st_stream_steal);
     if (st_loop_once || st_loop_n) /* W413 (#65): eigene Zeile (geparste Zeilen unveraendert) */

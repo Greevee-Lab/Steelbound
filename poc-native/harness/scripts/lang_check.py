@@ -20,6 +20,18 @@ PREFIXES = ("gui.", "ovl.", "bind.", "fx.", "vr.", "app.", "cfg.", "msg.", "as."
 
 SRC = [
     "launcher/src/launcher_gui.c",
+    "launcher/src/launcher_gui_int.h",  # W462 LAUNCHER-SPLIT
+    "launcher/src/launcher_gui_draw.c",  # W462 LAUNCHER-SPLIT
+    "launcher/src/launcher_gui_settings.c",  # W462 LAUNCHER-SPLIT
+    "launcher/src/launcher_gui_help.c",  # W462 LAUNCHER-SPLIT
+    "launcher/src/launcher_gui_bind.c",  # W462 LAUNCHER-SPLIT
+    "launcher/src/launcher_gui_assist.c",  # W462 LAUNCHER-SPLIT
+    "launcher/src/launcher_gui_content.c",  # W462 LAUNCHER-SPLIT
+    "launcher/src/launcher_gui_loc.c",  # W462 LAUNCHER-SPLIT
+    "launcher/src/launcher_gui_hub.c",  # W470 LAUNCHER-HUB
+    "launcher/src/launcher_gui_account.c",  # W462 LAUNCHER-SPLIT
+    "launcher/src/launcher_gui_test_loc.c",  # W462 LAUNCHER-SPLIT
+    "launcher/src/launcher_gui_test.c",  # W462 LAUNCHER-SPLIT
     "launcher/src/launcher_ctrl.c",
     "launcher/src/launcher_cfg.c",
     "launcher/src/launcher_assist.c",
@@ -45,11 +57,14 @@ SRC = [
     "launcher/src/launcher_orig.c",  # W278 (Hinweis, gui.of_*)
     "launcher/src/launcher_loctp.c",  # W336 LOC-TESTPARTNER (gui.loctp_*, nur intern)
     "launcher/src/launcher_loctp_gui.inc",  # W336: Dialog/Knoepfe (nur intern)
-    "harness/src/loc_rollback.c",  # W346 LOC-ROLLBACK-R4: Meldung bei Desync (loc.rb_*)
+    "harness/src/loc_rb_resim.c",  # W346 LOC-ROLLBACK-R4: Meldung bei Desync (loc.rb_*; W464: aus loc_rollback.c)
+    "harness/src/loc_rb_input.c",  # W464: Rollback-Gruende der Eingabeschicht (ovl.rb_why_*, aus loc_rollback.c)
     "harness/src/loc_rulenet.c",  # W420 LOC-CLIPDUMP: Match-Regel/Version (loc.rule_*, loc.ver_*)
     "harness/src/krnl_file.c",  # W434 LOC-PILOT-LOST: Spielstand-Ordner (loc.save_*)
     "harness/src/loc_chatnet.c",  # W437 LOC-CHAT: Systemzeilen und Eingabeaufforderung (chat.*)
     "harness/src/loc_netpanel.c",  # W447 LOC-NET-AUTO: Netz-Panel der Lobby (ovl.np_*)
+    "harness/src/loc_replayctl.c",  # W457 LOC-REPLAY-CTRL: Replay-Bedienhilfe (ovl.lrp_*)
+    "harness/src/loc_lobbywidget.c",  # W460 LOC-LOBBY-WIDGET: offene Lobbys (ovl.lw_*)
 ]
 
 # W180 EXPORT: Quellen, die im Community-Export (noch) fehlen duerfen (Pack
@@ -210,6 +225,16 @@ def main():
         pe, pd = placeholders(en[key][0]), placeholders(de[key][0])
         if pe != pd:
             fail(f"Schluessel '{key}': Platzhalter en={pe} de={pd}")
+    # W460: der Lader (sb_lang.c, Harness und Launcher) nimmt hoechstens LANG_ENT_MAX Eintraege je Datei; alles
+    # dahinter fiel still auf Englisch zurueck (de.lang 2243 > 2048).
+    try:
+        with open(os.path.join(root, "harness", "src", "sb_lang.c"), encoding="utf-8", errors="replace") as f:
+            m = re.search(r"#define\s+LANG_ENT_MAX\s+(\d+)", f.read())
+        cap = int(m.group(1)) if m else 0
+    except OSError:
+        cap = 0
+    if cap and max(len(en), len(de)) > cap:
+        fail(f"{max(len(en), len(de))} Eintraege > LANG_ENT_MAX {cap} (sb_lang.c) - Rest waere ohne Uebersetzung")
     # Harte Faelle: Key-Literal ohne LT() ausserhalb bekannter Tabellen?
     # (Hinweis, kein Fehler: Tabellen halten Schluessel ohne LT.)
     for w in warns:

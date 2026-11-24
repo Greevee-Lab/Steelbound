@@ -2,6 +2,7 @@
  * Einordnung s. sb_origflag.h. Quelltext ASCII. */
 #include "render_int.h"
 #include "sb_overlay.h"
+#include "overlay_style.h" /* W461 OVERLAY-CORE */
 #include "sb_photo.h"
 #include "sb_lang.h"
 #include "sb_pack.h"
@@ -23,6 +24,7 @@ static const ov_field_t kOvField[] = {
     { "bloom_threshold", &g_cfg.bloom_threshold }, { "light_world", &g_cfg.light_world },
     { "light_cockpit", &g_cfg.light_cockpit }, { "world_focus", &g_cfg.world_focus },
     { "shade_shadow", &g_cfg.shade_shadow }, { "shadow_soft", &g_cfg.shadow_soft },
+    { "shadow_sun", &g_cfg.shadow_sun }, /* W471 */
     { "world_sharpen", &g_cfg.world_sharpen }, { "aa_mode", &g_cfg.aa_mode }, { "ssao", &g_cfg.ssao },
     { "color_sat", &g_cfg.color_sat }, { "color_temp", &g_cfg.color_temp },
     { "color_lift", &g_cfg.color_lift }, { "color_gamma", &g_cfg.color_gamma },
@@ -76,7 +78,7 @@ static int ov_hd_avail(void)
 static int ov_cur(int i)
 {
     if (i == g_ihd) { return (g_cfg.remaster && g_cfg.hd_textures && ov_hd_avail()) ? 1 : 0; }
-    return g_fp[i] ? *g_fp[i] : kSbOrigFlag[i].orig;
+    return g_fp[i] ? *g_fp[i] : sb_of_orig(i, g_sba_loc); /* W471: LoC-Original mit Schatten */
 }
 
 static int ov_fx_pack(void)
@@ -94,7 +96,7 @@ unsigned sb_ov_mask(void)
     int i;
     ov_init();
     for (i = 0; i < SB_OF_NKEY; i++) {
-        if (sb_of_dev(i, ov_cur(i))) { m |= 1u << kSbOrigFlag[i].grp; }
+        if (sb_of_dev(i, ov_cur(i), g_sba_loc)) { m |= 1u << kSbOrigFlag[i].grp; }
     }
     if (ov_fx_pack()) { m |= 1u << SB_OFG_PACKS; }
     return m;
@@ -105,10 +107,10 @@ int sb_ov_key_state(const char *key)
     int i = key ? sb_of_find(key) : -1;
     ov_init();
     if (i < 0) { return 0; }
-    if (sb_of_dev(i, ov_cur(i))) { return 2; }
+    if (sb_of_dev(i, ov_cur(i), g_sba_loc)) { return 2; }
     if (!kSbOrigFlag[i].det) { /* Rand-Breite/-Staerke: folgen edge_mode */
         int e = sb_of_find("edge_mode");
-        return sb_of_dev(e, ov_cur(e)) ? 2 : 1;
+        return sb_of_dev(e, ov_cur(e), g_sba_loc) ? 2 : 1;
     }
     return 1;
 }
@@ -154,7 +156,7 @@ static void ov_set(int orig, const char *why)
         g_snap_rem = g_cfg.remaster;
         g_snap_hd = g_cfg.hd_textures;
         for (i = 0; i < SB_OF_NKEY; i++) {
-            if (g_fp[i] && i != g_ihd) { *g_fp[i] = kSbOrigFlag[i].orig; }
+            if (g_fp[i] && i != g_ihd) { *g_fp[i] = sb_of_orig(i, g_sba_loc); }
         }
         hd_want = 0;
     } else {
@@ -305,25 +307,27 @@ int sb_ov_key(unsigned vk, int repeat)
 }
 
 /* ---- Einblendung (Band oben in der 4:3-Box) ---------------------------- */
-#define TO_TITLE_R 255
-#define TO_TITLE_G 196
-#define TO_TITLE_B 92
-#define TO_TEXT_R 200
-#define TO_TEXT_G 236
-#define TO_TEXT_B 205
-#define TO_BG_A 0.84f
+/* W467 OVERLAY-UNIFY: Farben und Deckung aus overlay_style (SB-UI wie ESC-Menue) */
+#define TO_TITLE_R GetRValue(OVS_C_ACCENT)
+#define TO_TITLE_G GetGValue(OVS_C_ACCENT)
+#define TO_TITLE_B GetBValue(OVS_C_ACCENT)
+#define TO_TEXT_R GetRValue(OVS_C_TXT)
+#define TO_TEXT_G GetGValue(OVS_C_TXT)
+#define TO_TEXT_B GetBValue(OVS_C_TXT)
+#define TO_BG_A OVS_ALPHA
 
 static wchar_t g_t1[160], g_t2[200];
 static ULONGLONG g_until;
 static int g_tdirty = 1;
-static HDC to_dc;
-static HBITMAP to_bmp, to_bmp_old;
-static unsigned *to_bits, *to_pm;
-static unsigned to_w, to_h, to_tw, to_th;
+static ovs_canvas_t to_cv; /* W461: GDI-Flaeche, Schriften und Textur aus overlay_style */
+#define to_dc (to_cv.dc)
+#define to_bits (to_cv.bits)
+static ovs_font_t to_fn[2];
+static unsigned *to_pm;
+static unsigned to_w, to_h;
 static float to_f;
 static int to_dirty_tex = 1;
-static ID3D11Texture2D *to_tex;
-static ID3D11ShaderResourceView *to_srv;
+static ovs_tex_t to_tx;
 static sb_ovl_save_t to_save;
 
 static void ov_toast(const wchar_t *t1, const wchar_t *t2, unsigned ms)
@@ -435,28 +439,11 @@ int sb_ov_toast_on(void)
     return g_until && GetTickCount64() < g_until && !g_cfg.vr_enable && !sb_photo_active() && !sb_ovl_open();
 }
 
-static void to_box(unsigned w, unsigned h, unsigned *bx, unsigned *by, unsigned *bw, unsigned *bh)
-{
-    float ga = 640.0f / 480.0f, ba = (float)w / (float)(h ? h : 1);
-    if (ga >= ba) {
-        *bw = w; *bh = (unsigned)((float)w / ga + 0.5f); if (*bh > h) { *bh = h; }
-        *bx = 0; *by = (h - *bh) / 2;
-    } else {
-        *bh = h; *bw = (unsigned)((float)h * ga + 0.5f); if (*bw > w) { *bw = w; }
-        *bx = (w - *bw) / 2; *by = 0;
-    }
-}
-
-static int S(float f, float x)
-{
-    int v = (int)(x * f + 0.5f);
-    return v < 1 ? 1 : v;
-}
+#define S ovs_px
 
 /* Band bei Faktor f, hoechstens maxw breit, in to_pm rendern. 1 = ok. */
 static int to_render(float f, unsigned maxw)
 {
-    BITMAPINFO bi;
     HFONT f1, f2, fold;
     SIZE s1, s2;
     RECT r;
@@ -464,12 +451,10 @@ static int to_render(float f, unsigned maxw)
     unsigned w, h, i, x, y;
     int n1 = (int)wcslen(g_t1), n2 = (int)wcslen(g_t2);
     if (to_pm && f == to_f && !g_tdirty) { return 1; }
-    if (!to_dc) { to_dc = CreateCompatibleDC(NULL); if (!to_dc) { return 0; } }
-    f1 = CreateFontW(-p1, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-                     ANTIALIASED_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
-    f2 = CreateFontW(-p2, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_TT_PRECIS, CLIP_DEFAULT_PRECIS,
-                     ANTIALIASED_QUALITY, FIXED_PITCH | FF_MODERN, L"Consolas");
-    if (!f1 || !f2) { if (f1) { DeleteObject(f1); } if (f2) { DeleteObject(f2); } return 0; }
+    if (!ovs_canvas_dc(&to_cv)) { return 0; }
+    f1 = ovs_font_get(&to_fn[0], OVS_FACE_MONO, FW_BOLD, p1);
+    f2 = ovs_font_get(&to_fn[1], OVS_FACE_MONO, FW_NORMAL, p2);
+    if (!f1 || !f2) { return 0; }
     fold = (HFONT)SelectObject(to_dc, f1);
     if (!GetTextExtentPoint32W(to_dc, g_t1, n1, &s1)) { s1.cx = p1 * n1 / 2; s1.cy = p1; }
     SelectObject(to_dc, f2);
@@ -477,20 +462,10 @@ static int to_render(float f, unsigned maxw)
     w = (unsigned)((s1.cx > s2.cx ? s1.cx : s2.cx) + 2 * pad + 2 * bd);
     if (w > maxw) { w = maxw; }
     h = (unsigned)(s1.cy + (n2 ? gap + s2.cy : 0) + 2 * pad);
-    if (to_bmp) { SelectObject(to_dc, to_bmp_old); DeleteObject(to_bmp); to_bmp = NULL; to_bits = NULL; }
-    memset(&bi, 0, sizeof bi);
-    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
-    bi.bmiHeader.biWidth = (LONG)w;
-    bi.bmiHeader.biHeight = -(LONG)h;
-    bi.bmiHeader.biPlanes = 1;
-    bi.bmiHeader.biBitCount = 32;
-    bi.bmiHeader.biCompression = BI_RGB;
-    to_bmp = CreateDIBSection(to_dc, &bi, DIB_RGB_COLORS, (void **)&to_bits, NULL, 0);
-    if (!to_bmp || !to_bits) {
-        SelectObject(to_dc, fold); DeleteObject(f1); DeleteObject(f2);
+    if (!ovs_canvas_size(&to_cv, w, h)) {
+        SelectObject(to_dc, fold);
         return 0;
     }
-    to_bmp_old = (HBITMAP)SelectObject(to_dc, to_bmp);
     memset(to_bits, 0, (size_t)w * h * 4u);
     SetBkMode(to_dc, TRANSPARENT);
     /* Abdeckung: Titel im Rotkanal, Zeile 2 im Gruenkanal (Graustufen-AA) */
@@ -507,12 +482,12 @@ static int to_render(float f, unsigned maxw)
     GdiFlush();
     free(to_pm);
     to_pm = (unsigned *)malloc((size_t)w * h * 4u);
-    if (!to_pm) { SelectObject(to_dc, fold); DeleteObject(f1); DeleteObject(f2); return 0; }
+    if (!to_pm) { SelectObject(to_dc, fold); return 0; }
     for (y = 0, i = 0; y < h; y++) {
         for (x = 0; x < w; x++, i++) {
             float c1 = (float)((to_bits[i] >> 16) & 255u) / 255.0f, c2 = (float)((to_bits[i] >> 8) & 255u) / 255.0f;
             int edge = x < (unsigned)bd || y < (unsigned)bd || x >= w - (unsigned)bd || y >= h - (unsigned)bd;
-            float a = TO_BG_A, rr = 4.0f * a, gg = 22.0f * a, bb = 11.0f * a;
+            float a = TO_BG_A, rr = GetRValue(OVS_C_BG) * a, gg = GetGValue(OVS_C_BG) * a, bb = GetBValue(OVS_C_BG) * a;
             if (edge) { rr = TO_TITLE_R * a; gg = TO_TITLE_G * a; bb = TO_TITLE_B * a; }
             rr = TO_TITLE_R * c1 + rr * (1.0f - c1); gg = TO_TITLE_G * c1 + gg * (1.0f - c1);
             bb = TO_TITLE_B * c1 + bb * (1.0f - c1); a = c1 + a * (1.0f - c1);
@@ -523,8 +498,6 @@ static int to_render(float f, unsigned maxw)
         }
     }
     SelectObject(to_dc, fold);
-    DeleteObject(f1);
-    DeleteObject(f2);
     to_w = w;
     to_h = h;
     to_f = f;
@@ -537,10 +510,10 @@ static int to_place(unsigned w, unsigned h, unsigned *x0, unsigned *y0)
 {
     unsigned bx, by, bw, bh, m;
     float f;
-    to_box(w, h, &bx, &by, &bw, &bh);
-    f = (float)bh / 540.0f;
-    if (f < 1.0f) { f = 1.0f; }
-    m = (unsigned)S(f, 10.0f);
+    if (g_sba_loc) { ovs_loc_box(&bx, &by, &bw, &bh); } /* W467: LoC 16:9 -> Spielbox statt 4:3 */
+    else { ovs_fit_box(640.0f / 480.0f, w, h, &bx, &by, &bw, &bh); }
+    f = ovs_scale_ui(bh);
+    m = (unsigned)S(f, OVS_MARGIN);
     if (bw <= 4u * m) { return 0; }
     if (!to_render(f, bw - 2u * m)) { return 0; }
     if (to_w + 2u * m > bw || to_h + 2u * m > bh) { return 0; }
@@ -551,39 +524,14 @@ static int to_place(unsigned w, unsigned h, unsigned *x0, unsigned *y0)
 
 static int to_upload(void)
 {
-    D3D11_MAPPED_SUBRESOURCE map;
-    unsigned y;
-    if (!to_tex || to_tw != to_w || to_th != to_h) {
-        D3D11_TEXTURE2D_DESC td;
-        if (to_srv) { ID3D11ShaderResourceView_Release(to_srv); to_srv = NULL; }
-        if (to_tex) { ID3D11Texture2D_Release(to_tex); to_tex = NULL; }
-        memset(&td, 0, sizeof td);
-        td.Width = to_w;
-        td.Height = to_h;
-        td.MipLevels = 1;
-        td.ArraySize = 1;
-        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_DYNAMIC;
-        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-        td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-        if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &to_tex)) ||
-            FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)to_tex, NULL, &to_srv))) {
-            HLOG_W("ORIGFLAG: Textur %ux%u gescheitert", to_w, to_h);
-            return 0;
-        }
-        to_tw = to_w;
-        to_th = to_h;
-        to_dirty_tex = 1;
-    }
-    if (!to_dirty_tex) { return 1; }
-    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)to_tex, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+    int r = ovs_tex_ensure(&to_tx, to_w, to_h);
+    if (!r) {
+        HLOG_W("ORIGFLAG: Textur %ux%u gescheitert", to_w, to_h);
         return 0;
     }
-    for (y = 0; y < to_h; y++) {
-        memcpy((unsigned char *)map.pData + (size_t)y * map.RowPitch, to_pm + (size_t)y * to_w, to_w * 4u);
-    }
-    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)to_tex, 0);
+    if (r == 2) { to_dirty_tex = 1; }
+    if (!to_dirty_tex) { return 1; }
+    if (!ovs_tex_write(&to_tx, to_pm)) { return 0; }
     to_dirty_tex = 0;
     return 1;
 }
@@ -594,8 +542,9 @@ void sb_ov_toast_draw(ID3D11RenderTargetView *rtv, int save)
     if (!sb_ov_toast_on() || !rtv || !g_ctx || !g_dev) { return; }
     if (!to_place(g_bb_w, g_bb_h, &x0, &y0)) { return; }
     if (!to_upload()) { return; }
+    ovs_layout_claim(OVS_SLOT_TOAST, x0, y0, to_w, to_h);
     if (save) { sb_ovl_save_take(&to_save, rtv, x0, y0, to_w, to_h); }
-    sb_ovl_quad(rtv, to_srv, x0, y0, to_w, to_h);
+    sb_ovl_quad(rtv, to_tx.srv, x0, y0, to_w, to_h);
 }
 
 void sb_ov_toast_restore(void)

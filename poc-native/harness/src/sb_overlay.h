@@ -78,16 +78,8 @@ void sb_ovl_request_feedback(int clip);
 void sb_ovl_notice(const char *const *lines, int n);
 void sb_ovl_notice_ex(const char *title_key, const char *tag_key, const char *const *lines, int n); /* W272 */
 
-/* ---- W122: kleine gemeinsame API (Look + Zeichenweg), genutzt vom
- * Leistungs-Overlay sb_perfhud.c. Farben (GDI COLORREF) und Deckung des
- * gruenen SB-UI. ---- */
-#define SB_UI_C_BG    RGB(4, 22, 11)
-#define SB_UI_C_TXT   RGB(140, 255, 150)
-#define SB_UI_C_DIM   RGB(58, 120, 68)
-#define SB_UI_C_LINE  RGB(80, 200, 100)
-#define SB_UI_C_HEAD  RGB(70, 190, 88)
-#define SB_UI_C_SEL   RGB(24, 84, 40)
-#define SB_UI_ALPHA   0.88f
+/* ---- W122: kleine gemeinsame API (Zeichenweg) fuer alle Overlays. Look (Farben,
+ * Schriften, Abstaende, DIB/Textur, Umrechnung) seit W461 in overlay_style.h. ---- */
 struct ID3D11ShaderResourceView;
 struct ID3D11Texture2D;
 struct ID3D11Resource;
@@ -101,8 +93,6 @@ typedef struct {
 void sb_ovl_save_take(sb_ovl_save_t *s, struct ID3D11RenderTargetView *rtv, unsigned x, unsigned y, unsigned w,
                       unsigned h);
 void sb_ovl_save_put(sb_ovl_save_t *s);
-/* Scanlines + vormultipliziertes Alpha auf eine 32-Bit-DIB (Zeilen top-down) */
-void sb_ovl_ui_finish(unsigned *bits, unsigned w, unsigned h, float factor);
 /* vormultiplizierte BGRA-Textur 1:1 (Texel-Load, nie gestreckt) bei x0,y0
  * auf rtv zeichnen; Kontextzustand gesichert. Unter ctx_lock. 1 = ok. */
 int sb_ovl_quad(struct ID3D11RenderTargetView *rtv, struct ID3D11ShaderResourceView *srv, unsigned x0, unsigned y0,

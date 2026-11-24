@@ -71,8 +71,6 @@ typedef struct {
 
 /* Muster der Regel (LR_PAT_*), 0 = keine Regel. */
 int lrules_pattern(int rule);
-/* Kurzbeschreibung (ASCII, Test/Doku). */
-const char *lrules_name(int rule);
 /* Alle Regeln auswerten. out[0] bleibt leer. */
 void lrules_eval(const lr_env_t *e, lr_res_t out[LR_N]);
 /* Fester Umgebungs-Standard fuer Tests (alles vorhanden, nichts aktiv). */

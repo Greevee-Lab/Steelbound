@@ -151,6 +151,8 @@ static int g_heli_live;
 float g_heli_bb[6]; /* Modellraum-Huelle des aktuellen Draws (render_im.c) */
 unsigned g_heli_xp, g_heli_ps; /* Textur (Stufe 0) und Pixelshader des aktuellen Draws (render_im.c) */
 float g_heli_cu[4][6]; /* erste 4 Vertices: Farbe rgba + UV (render_im.c, P2-Pfad) */
+float g_heli_pq[4][3]; /* W364: erste 4 Vertices: Modellraum-Position (render_im.c) */
+unsigned g_heli_prim; /* W458: Primitiv-Typ des aktuellen Draws (render_im.c) */
 int g_heli_fast;
 static int inv4(const float *m, float *o)
 {
@@ -223,6 +225,24 @@ void heli_draw_diag(const float *mvp, unsigned n, unsigned vs)
                g_frames, g_heli_fast, g_heli_cu[0][0], g_heli_cu[0][1], g_heli_cu[0][2], g_heli_cu[0][3],
                g_heli_cu[0][4], g_heli_cu[0][5], g_heli_cu[1][4], g_heli_cu[1][5], g_heli_cu[2][4], g_heli_cu[2][5],
                g_heli_cu[3][4], g_heli_cu[3][5]);
+        HLOG_I("HELIDRAW-P f=%u p=%.2f,%.2f,%.2f %.2f,%.2f,%.2f %.2f,%.2f,%.2f %.2f,%.2f,%.2f", g_frames,
+               g_heli_pq[0][0], g_heli_pq[0][1], g_heli_pq[0][2], g_heli_pq[1][0], g_heli_pq[1][1], g_heli_pq[1][2],
+               g_heli_pq[2][0], g_heli_pq[2][1], g_heli_pq[2][2], g_heli_pq[3][0], g_heli_pq[3][1], g_heli_pq[3][2]);
+    }
+    if (n >= 3u && !(vs & 0x80000000u)) {
+        /* W458: Cull-Modus des Spiels und Umlauf des ersten Dreiecks im NDC (y oben; >0 = gegen den Uhrzeigersinn) */
+        extern unsigned sb_render_cullmode(void);
+        float nd[3][2], ar;
+        int q2, ok = 1;
+        for (q2 = 0; q2 < 3; q2++) {
+            float cx = g_heli_pq[q2][0] * mvp[0] + g_heli_pq[q2][1] * mvp[4] + g_heli_pq[q2][2] * mvp[8] + mvp[12];
+            float cy = g_heli_pq[q2][0] * mvp[1] + g_heli_pq[q2][1] * mvp[5] + g_heli_pq[q2][2] * mvp[9] + mvp[13];
+            float cw = g_heli_pq[q2][0] * mvp[3] + g_heli_pq[q2][1] * mvp[7] + g_heli_pq[q2][2] * mvp[11] + mvp[15];
+            if (cw <= 1e-6f) { ok = 0; break; }
+            nd[q2][0] = cx / cw; nd[q2][1] = cy / cw;
+        }
+        ar = ok ? (nd[1][0] - nd[0][0]) * (nd[2][1] - nd[0][1]) - (nd[2][0] - nd[0][0]) * (nd[1][1] - nd[0][1]) : 0.0f;
+        HLOG_I("HELIDRAW-C f=%u n=%u prim=%u cull=0x%X ndc_area=%.5f ok=%d", g_frames, n, g_heli_prim, sb_render_cullmode(), ar, ok);
     }
 }
 

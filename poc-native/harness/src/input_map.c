@@ -246,6 +246,38 @@ unsigned imap_toggles_apply(imap_block_t *blk, imap_state_t *st,
     return changed;
 }
 
+/* W451 LOC-TOGGLE-SYNC (s. Header). */
+unsigned imap_loctog_step(imap_loctog_t *t, const imap_loctog_view_t *v, uint8_t *latch, unsigned chg,
+                          uint16_t *btn2)
+{
+    unsigned refl = 0;
+    int i, armed = v && v->valid && v->phase == 1 && v->sub == 1;
+    for (i = 0; i < 5; i++) {
+        uint8_t bit = (uint8_t)(1u << i);
+        uint16_t bb = (uint16_t)(1u << (2 + i));
+        if ((chg & bit) && armed && v->st[i] == 4 && !(*latch & bit)) {
+            *latch |= bit; /* bleibt eingerastet */
+            if (!(t->pulse & bit)) t->n[i] = 0;
+            t->pulse |= bit;
+            refl |= bit;
+        }
+        if (t->pulse & bit) {
+            int done;
+            if (t->n[i] < 255u) t->n[i]++;
+            done = !(*latch & bit) || t->n[i] > IMAP_LOCTOG_MAX ||
+                   (t->n[i] > IMAP_LOCTOG_MIN && !(armed && v->st[i] == 4));
+            if (done) {
+                t->pulse &= (uint8_t)~bit;
+                t->n[i] = 0;
+                if (*latch & bit) *btn2 |= bb;
+            } else {
+                *btn2 &= (uint16_t)~bb;
+            }
+        }
+    }
+    return refl;
+}
+
 /* ---- Legacy-Abbildung (1:1 aus hook_XInputGetState extrahiert) ----
  * Reihenfolge und Semantik unveraendert; nur Globals -> imap_state_t und
  * key_down/g_cfg -> Snapshot. */
@@ -1127,6 +1159,7 @@ static void imap_collect_suppression(const imap_profile_t *prof,
     imap_supp_bind(&prof->net_hud, snap); /* W374 */
     imap_supp_bind(&prof->menu_back, snap); /* W438 */
     imap_supp_bind(&prof->chat, snap); /* W437 */
+    for (k = 0; k < IMAP_LRP_N; k++) imap_supp_bind(&prof->lrp[k], snap); /* W457 */
 }
 
 /* W437 LOC-CHAT: offene Chatzeile -> das Spiel bekommt keine Eingabe (wie bei offenem ESC-Menue): Tasten,
@@ -1487,6 +1520,38 @@ int imap_action_replay_exit(const imap_profile_t *prof, const imap_snap_t *snap)
     return imap_bind_active(&prof->replay_exit, &loc) ? 1 : 0;
 }
 
+/* W457 LOC-REPLAY-CTRL: Pegel der Replay-Aktion i (alle Quellen inkl. Tastatur; der Aufrufer prueft den Viewer). */
+int imap_action_lrp(const imap_profile_t *prof, const imap_snap_t *snap, int i)
+{
+    imap_snap_t loc;
+    if (!prof || !snap || i < 0 || i >= IMAP_LRP_N || prof->lrp[i].n == 0) return 0;
+    loc = *snap;
+    imap_collect_suppression(prof, &loc);
+    return imap_bind_active(&prof->lrp[i], &loc) ? 1 : 0;
+}
+
+/* W457: SBC-Direkttasten des LoC-Replay-Viewers (rein, testbar; Beschreibung input_map.h). */
+static void imap_lrp_set_bi(uint16_t b[3], int bi)
+{
+    if (bi >= 0 && bi < 39) b[bi >> 4] |= (uint16_t)(1u << (bi & 15));
+}
+
+int imap_lrp_bits(const int lvl[IMAP_LRP_N], int exit_lvl, int sel, uint16_t b[3])
+{
+    int n = 0;
+    if (!lvl || !b) return 0;
+    if (lvl[IMAP_LRP_PAUSE]) { imap_lrp_set_bi(b, LRP_BI_PAUSE); n++; }
+    if (lvl[IMAP_LRP_NEXT] || lvl[IMAP_LRP_PREV]) { imap_lrp_set_bi(b, LRP_BI_PLAYER); n++; }
+    if (lvl[IMAP_LRP_PREV]) { imap_lrp_set_bi(b, LRP_BI_BACK); n++; } /* Chaff gehalten: Punkt rueckwaerts */
+    if (lvl[IMAP_LRP_CAMERA]) { imap_lrp_set_bi(b, LRP_BI_CAMERA); n++; }
+    if (lvl[IMAP_LRP_SPEED]) { imap_lrp_set_bi(b, LRP_BI_SPEED); n++; }
+    if (exit_lvl) { /* erst "Beenden" waehlen (Direkttaste loest Punkt 8 nicht aus), dann Hauptwaffe */
+        imap_lrp_set_bi(b, sel == LRP_ITEM_EXIT ? LRP_BI_MAIN : LRP_BI_EXITSEL);
+        n++;
+    }
+    return n;
+}
+
 /* W283: Umschalt/Strg/Alt-Tasten -> Bit (0 = keine Zusatztaste). */
 static int imap_vk_mod_bit(int vk)
 {
@@ -1707,8 +1772,17 @@ enum {
     IMAP_ACT_REPLAY_EXIT = 8, /* W299: Spiel-Replay beenden */
     IMAP_ACT_NET_HUD = 9, /* W374: Netz-Overlay */
     IMAP_ACT_MENU_BACK = 10, /* W438: LoC-Menue-Pad B (Zurueck) */
-    IMAP_ACT_CHAT = 11 /* W437: Chatzeile (LoC online) */
+    IMAP_ACT_CHAT = 11, /* W437: Chatzeile (LoC online) */
+    IMAP_ACT_LRP0 = 12 /* W457: Replay-Aktionen LoC, IMAP_ACT_LRP0 + imap_lrp_t (bis + IMAP_LRP_N - 1) */
 };
+
+static const char *const kLrpNames[IMAP_LRP_N] = IMAP_LRP_NAMES; /* W457 */
+static const char *const kLrpDefaults[IMAP_LRP_N] = IMAP_LRP_DEFAULTS;
+
+const char *imap_lrp_name(int i)
+{
+    return (i >= 0 && i < IMAP_LRP_N) ? kLrpNames[i] : NULL;
+}
 
 /* Elementname -> Ziel. btn_i >= 0: Taste; axis >= 0 (+negpos 0/1/2 =
  * analog/neg/pos); gear: 0=up 1=down 2+r/n/1..5; tuner: 0=up 1=down;
@@ -1764,6 +1838,12 @@ static int imap_elem_parse(const char *name, imap_elem_t *e)
     if (imap_strieq(name, "chat")) { /* W437: Chatzeile */
         e->action = IMAP_ACT_CHAT;
         return 0;
+    }
+    for (i = 0; i < IMAP_LRP_N; i++) { /* W457: Replay-Aktionen LoC */
+        if (imap_strieq(name, kLrpNames[i])) {
+            e->action = IMAP_ACT_LRP0 + i;
+            return 0;
+        }
     }
     if (imap_strieq(name, "photo")) { /* W195: Fotomodus */
         e->action = IMAP_ACT_PHOTO;
@@ -2310,6 +2390,7 @@ static unsigned imap_profile_joy_used(const imap_profile_t *p)
     m |= imap_bind_joy_used(&p->quick_shot); /* W290 */
     m |= imap_bind_joy_used(&p->replay_exit); /* W299 */
     m |= imap_bind_joy_used(&p->net_hud);     /* W374 */
+    for (i = 0; i < IMAP_LRP_N; i++) m |= imap_bind_joy_used(&p->lrp[i]); /* W457 */
     return m;
 }
 
@@ -2384,6 +2465,10 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
             out->chat.n = 0;
             out->chat_set = 1;
         }
+        if (e.action >= IMAP_ACT_LRP0 && e.action < IMAP_ACT_LRP0 + IMAP_LRP_N) { /* W457: letzte Zeile gewinnt */
+            out->lrp[e.action - IMAP_ACT_LRP0].n = 0;
+            out->lrp_set[e.action - IMAP_ACT_LRP0] = 1;
+        }
         for (alt = strtok_s(val, ",", &ctx); alt;
              alt = strtok_s(NULL, ",", &ctx)) {
             int rc;
@@ -2416,6 +2501,8 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
                 rc = imap_bind_add(&out->menu_back, alt, &out->has_pad, &out->has_sbc);
             } else if (e.action == IMAP_ACT_CHAT) { /* W437 */
                 rc = imap_bind_add(&out->chat, alt, &out->has_pad, &out->has_sbc);
+            } else if (e.action >= IMAP_ACT_LRP0 && e.action < IMAP_ACT_LRP0 + IMAP_LRP_N) { /* W457 */
+                rc = imap_bind_add(&out->lrp[e.action - IMAP_ACT_LRP0], alt, &out->has_pad, &out->has_sbc);
             } else if (e.btn_i >= 0) {
                 rc = imap_bind_add(&out->btn[e.btn_i], alt, &out->has_pad,
                                    &out->has_sbc);
@@ -2483,6 +2570,15 @@ int imap_profile_parse(const char *text, const char *name, imap_profile_t *out)
         }
         out->chat.n = 0;
         if (!used) (void)imap_bind_add(&out->chat, IMAP_CHAT_DEFAULT, &dp, &ds);
+    }
+    { /* W457: Replay-Aktionen ohne Zeile -> Standard */
+        int li;
+        for (li = 0; li < IMAP_LRP_N; li++) {
+            int dp = 0, ds = 0;
+            if (out->lrp_set[li]) continue;
+            out->lrp[li].n = 0;
+            (void)imap_bind_add(&out->lrp[li], kLrpDefaults[li], &dp, &ds);
+        }
     }
     out->joy_used = imap_profile_joy_used(out);
     return 0;
@@ -2823,6 +2919,13 @@ int imap_profile_equal(const imap_profile_t *a, const imap_profile_t *b)
     if (a->menu_back_set != b->menu_back_set) return 1;
     if (imap_bind_equal(&a->chat, &b->chat)) return 1; /* W437 */
     if (a->chat_set != b->chat_set) return 1;
+    { /* W457 */
+        int li;
+        for (li = 0; li < IMAP_LRP_N; li++) {
+            if (imap_bind_equal(&a->lrp[li], &b->lrp[li])) return 1;
+            if (a->lrp_set[li] != b->lrp_set[li]) return 1;
+        }
+    }
     if (a->orig_view_set != b->orig_view_set) return 1;
     if (a->has_pad != b->has_pad) return 1;
     if (a->has_sbc != b->has_sbc) return 1; /* W159 */

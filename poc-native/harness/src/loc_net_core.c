@@ -388,6 +388,11 @@ typedef struct ln_gw {
 } ln_gw;
 #define LN_GW_MAX 64 /* W335: 32 -> 64 (Ueberlauf jetzt fail closed, ln_gw_get) */
 static ln_gw s_gw[LN_GW_MAX];
+/* W474 CHATTABS: offene Spiel-TCP-Stroeme (connect/accept), bis das Spiel den Socket schliesst oder der Mitspieler
+ * geht. Frueher zaehlte loc_net_streams nur Abgaenge des Mitspielers - verliess man selbst die Lobby, blieb der Zaehler
+ * > 0 (Lobby-Infopanel stand im Hauptmenue, BERICHT_M2 W474). Unter s_walk_lock. */
+#define LN_OPEN_MAX 64
+static SOCKET s_open[LN_OPEN_MAX];
 
 static void ln_walk_lock(void)
 {
@@ -411,6 +416,25 @@ static void ln_walk_reset(SOCKET s)
     for (i = 0; i < LN_GW_MAX; i++) {
         if (s_gw[i].s == s) memset(&s_gw[i], 0, sizeof s_gw[i]);
     }
+    InterlockedExchange(&s_walk_lock, 0);
+}
+
+/* W474: Strom s als offen (on = 1) bzw. beendet (on = 0) fuehren; n->st.open = Zahl offener Stroeme. */
+static void ln_open_mark(locnet *n, SOCKET s, int on)
+{
+    int i, fr = -1, c = 0;
+    ln_walk_lock();
+    for (i = 0; i < LN_OPEN_MAX; i++) {
+        if (s_open[i] == s) {
+            if (!on) s_open[i] = 0;
+            fr = -2;
+        } else if (fr == -1 && s_open[i] == 0) {
+            fr = i;
+        }
+    }
+    if (on && fr >= 0) s_open[fr] = s;
+    for (i = 0; i < LN_OPEN_MAX; i++) c += s_open[i] != 0;
+    InterlockedExchange(&n->st.open, c);
     InterlockedExchange(&s_walk_lock, 0);
 }
 
@@ -537,6 +561,7 @@ void locnet_note_stream(locnet *n, SOCKET s, int out, const char *buf, int len)
 
 int locnet_closesocket(locnet *n, SOCKET s)
 {
+    ln_open_mark(n, s, 0); /* W474 */
     InterlockedCompareExchange(&n->tcp_listen, 0, (LONG)s); /* W409 */
     ln_walk_reset(s); /* W324 */
     ln_udp_mark(n, s, 0); /* W329 */
@@ -613,6 +638,10 @@ int locnet_connect(locnet *n, SOCKET s, const struct sockaddr *a, int len)
     ln_nodelay(n, s);
     InterlockedIncrement(&n->st.connects);
     ln_walk_reset(s); /* W324: neuer Strom */
+    { /* W474: nur Stroeme (verbundene UDP-Sockets zaehlen nicht als Sitzung) */
+        int st = 0, sl = sizeof st;
+        if (getsockopt(s, SOL_SOCKET, SO_TYPE, (char *)&st, &sl) == 0 && st == SOCK_STREAM) ln_open_mark(n, s, 1);
+    }
     r = connect(s, (struct sockaddr *)&in, sizeof in);
     e = r ? WSAGetLastError() : 0;
     ln_logf(n, "LOCNET: connect %s:%u (Spielport %u) -> %d (%d)", locnet_ip_str(in.sin_addr.s_addr, ipb),
@@ -655,6 +684,7 @@ SOCKET locnet_accept(locnet *n, SOCKET s, struct sockaddr *a, int *len)
         *len = sizeof in;
     }
     InterlockedIncrement(&n->st.accepts);
+    ln_open_mark(n, c, 1); /* W474 */
     ln_logf(n, "LOCNET: accept von %s", locnet_ip_str(in.sin_addr.s_addr, ipb));
     return c;
 }
@@ -856,6 +886,7 @@ static int ln_tcp_leave(locnet *n, SOCKET s)
     ln_gw_get(s)->dead = 1;
     InterlockedExchange(&s_walk_lock, 0);
     InterlockedIncrement(&n->st.leave);
+    ln_open_mark(n, s, 0); /* W474: Abgang des Mitspielers beendet den Strom */
     memset(&pa, 0, sizeof pa);
     if (getpeername(s, (struct sockaddr *)&pa, &pl) != 0) pa.sin_addr.s_addr = 0;
     ln_logf(n, "LOCNET: Strom von %s beendet - dem Spiel als Verbindungsreset gemeldet (Abgang)",

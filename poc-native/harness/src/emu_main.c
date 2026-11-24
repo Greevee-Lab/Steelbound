@@ -1811,6 +1811,8 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
         const char *rv = sb_version_str(), *st = sb_release_stage(rv);
         HLOG_I("VERSION: Steelbound %s%s%s (%s edition)", rv[0] ? rv : "dev", st[0] ? " " : "", st, SB_EDITION_NAME);
     }
+    /* W455 UNICODE-PATHS: Pfade laufen nur mit UTF-8-Codepage (sb_utf8.manifest an sb_ldr) Unicode-fest. */
+    HLOG_I("CODEPAGE: aktiv %u%s", GetACP(), GetACP() == CP_UTF8 ? " (UTF-8, Pfade Unicode-fest)" : " (ANSI: altes Windows, Nicht-ANSI-Pfade unsicher)");
     hcfg_load(cfg_path);
     /* W159: Start-Parameter --set "k=v;..." (Launcher: vr_enable je Startweg).
      * Gewinnt ueber sb_native.cfg, user.cfg und SB_CFG_SET; die Dateien
@@ -1979,30 +1981,6 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
     /* W339 SEC-A3: W^X fuer das Gastabbild nach dem Setzen der Hooks (SECURITY.md §6.6 Punkt 4). Standard: LoC an
      * (Netzspiel mit fremden Rahmen), SB aus (kein Netz; Abschnitte/Laufzeit-Patches nicht vermessen). */
     guest_wx_apply(&img, g_cfg.guest_wx < 0 ? (g_sba_loc ? 1 : 0) : g_cfg.guest_wx);
-    /* BINKPATCH-AUS (Bink-Completion noetig: TEXMOVIE/effect.efp-Load
-     * wartet auf Bink-Textur. Patch -> Deadlock. Original -> langsam). */
-#if 0
-    {
-        static const unsigned bc[] = { 0x241E80, 0x242210, 0x242715, 0x242CF0,
-            0x243350, 0x243540, 0x243560, 0x243660, 0x2436B0, 0x243900,
-            0x244840, 0x244880, 0x244A20, 0x2456B0, 0x245810, 0x245880,
-            0x24DB9F, 0x25269A, 0x253A17, 0x253A1C, 0x253A3E, 0x253D24,
-            0x253D7A, 0x253D86, 0x253F63, 0x253FD2, 0x2557A4 };
-        unsigned i, np = 0;
-        DWORD old;
-        for (i = 0; i < sizeof bc / sizeof bc[0]; i++) {
-            unsigned char *p = (unsigned char *)(uintptr_t)bc[i];
-            __try {
-                VirtualProtect(p, 6, PAGE_EXECUTE_READWRITE, &old);
-                p[0] = 0xB8; p[1] = 1; p[2] = 0; p[3] = 0; p[4] = 0;
-                p[5] = 0xC3;
-                VirtualProtect(p, 6, old, &old);
-                np++;
-            } __except (EXCEPTION_EXECUTE_HANDLER) {}
-        }
-        HLOG_I("BINKPATCH: %u/27 Einstiege -> mov eax,1+ret", np);
-    }
-#endif
 
     if (g_cfg.hdr_race_test > 0) { /* DIAG(HDRSWAP,W94) */
         HANDLE rt = krnl_CreateThread(hdr_race_thread, NULL, 0, NULL);

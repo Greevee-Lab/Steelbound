@@ -49,6 +49,9 @@ target_compile_options(sb_ldr PRIVATE /W3 /GS-)
 # Lade-Konfiguration; der Loader liest keine Fremddaten), /SAFESEH (SEH-Handler des Gastcodes liegen
 # im Abbild-Bereich des Loaders). DLL-Suchpfad: SetDefaultDllDirectories in ldr.c.
 target_link_options(sb_ldr PRIVATE "/NXCOMPAT")
+# W455 UNICODE-PATHS: UTF-8 als aktive Codepage des ganzen Prozesses (Manifest gilt nur an der Exe).
+# Damit sind alle A-APIs/CRT-Pfade in sb_emu.dll Unicode-fest (Benutzerprofil mit Kyrillisch usw.).
+target_sources(sb_ldr PRIVATE src/sb_utf8.manifest)
 
 # ---- W142 L10N-EN: eingebautes Englisch (sb_lang_en.inc aus en.lang) ----
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -109,6 +112,14 @@ add_library(sb_emu SHARED
   src/sb_texhealth.c
   src/render_visq.c
   src/render_interp.c
+  src/render_interp_rec.c
+  src/render_interp_match.c
+  src/render_interp_shadow.c
+  src/render_interp_replay.c
+  src/render_interp_present.c
+  src/render_interp_diag.c
+  src/render_interp_photo.c
+  src/render_interp_loc.c
   src/render_warm.c
   src/render_locmenu.c
   src/render_edge.c
@@ -116,6 +127,7 @@ add_library(sb_emu SHARED
   src/render_monview.c
   src/render_cpanini.c
   src/render_xfx.c
+  src/render_post.c
   src/render_winmode.c
   src/render_combiner.c
   src/render_shade.c
@@ -137,6 +149,7 @@ add_library(sb_emu SHARED
   src/loc_vpf.c
   src/loc_dodge.c
   src/loc_autogear.c
+  src/loc_toggle.c
   src/loc_aimassist.c
   src/loc_smooth.c
   src/loc_audio.c
@@ -146,6 +159,12 @@ add_library(sb_emu SHARED
   src/loc_sync.c
   src/loc_state.c
   src/loc_rollback.c
+  src/loc_rb_snap.c
+  src/loc_rb_rec.c
+  src/loc_rb_input.c
+  src/loc_rb_resim.c
+  src/loc_rb_spec.c
+  src/loc_rb_hitch.c
   src/loc_lampdiag.c
   src/loc_rb_ring.c
   src/loc_rbi.c
@@ -156,12 +175,15 @@ add_library(sb_emu SHARED
   src/loc_chatnet.c
   src/loc_lobbylist.c
   src/loc_netpanel.c
+  src/loc_replayctl.c
+  src/loc_lobbywidget.c
   src/loc_lsarb.c
   src/loc_lsarb_game.c
   src/krnl_loc.c
   src/sb_userdata.c
   src/sb_savecheck.c
   src/sb_overlay.c
+  src/overlay_style.c
   src/sb_pause.c
   src/render_photo.c
   src/render_reproj.c
@@ -207,21 +229,24 @@ target_link_libraries(sb_emu PRIVATE d3d11 dxgi dxguid dbghelp windowscodecs ole
 target_sources(sb_emu PRIVATE src/loc_net.c src/loc_net_core.c src/loc_netsim.c src/loc_route.c) # W395: loc_route (Wegwahl)
 # W324 LOC-NETPLAY: eigener UDP-Transport mit Internet-Treffpunkt (DNS, Relays). W389: seit 0.3.0 auch im
 # Community-Export; nur mit -DSB_LOC_PLAY=OFF bekommt Community den Platzhalter (Original-Transport).
+# W464 NET-CORE: Transport in Module aufgeteilt (gemeinsamer Zustand loc_tun_int.h, Modulkarte BERICHT_M2 W464).
+set(SB_LOC_TUN_FULL src/loc_tun.c src/loc_tun_link.c src/loc_tun_wire.c src/loc_tun_lobby.c src/loc_tun_pub.c
+    src/loc_tun_lan.c) # W454 LOC-LAN-MODE: Entdeckung im LAN (ohne steelnet)
 if(SB_EDITION_COMMUNITY AND SB_LOC_PLAY)
   if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/loc_tun.c)
     message(FATAL_ERROR "SB_LOC_PLAY=ON braucht src/loc_tun.c (Community-Export ab W389 bzw. 0.3.0)")
   endif()
-  set(SB_LOC_TUN_SRC src/loc_tun.c)
+  set(SB_LOC_TUN_SRC ${SB_LOC_TUN_FULL})
 elseif(SB_EDITION_COMMUNITY)
   set(SB_LOC_TUN_SRC src/loc_tun_stub.c)
 else()
-  set(SB_LOC_TUN_SRC src/loc_tun.c)
+  set(SB_LOC_TUN_SRC ${SB_LOC_TUN_FULL})
 endif()
 target_sources(sb_emu PRIVATE ${SB_LOC_TUN_SRC})
 target_link_libraries(sb_emu PRIVATE ws2_32)
 # W334 LOC-SEC-CLIENT: Sicherheitsprotokoll v2 (SECURITY.md §12 B) - SChannel-TLS mit SPKI-Pin, SBT2 ueber CNG,
 # Gastfilter (auch in den HLE-Hooks beider Fassungen). Netznahe neue Dateien mit /sdl /W4 /WX (SECURITY.md §7).
-set(SB_LOC_SEC_SRC src/sb_tls.c src/sb_e2e.c src/loc_guard.c)
+set(SB_LOC_SEC_SRC src/sb_tls.c src/sb_e2e.c src/loc_guard.c src/loc_lan.c) # W454: loc_lan = reiner LAN-Kern (beide Fassungen)
 set_source_files_properties(${SB_LOC_SEC_SRC} PROPERTIES COMPILE_OPTIONS "/sdl;/W4;/WX")
 # W407 CRYPTO-PORTABLE: X25519 und AES-256-GCM aus einer unveraenderten Teilkopie von BearSSL 0.6 (MIT,
 # third_party/bearssl/LICENSE.txt) statt Windows-CNG - gleiche Bausteine auf jeder Plattform, zeitkonstant
@@ -315,6 +340,7 @@ add_executable(iso_vfs_check
   src/sb_userdata.c
   src/sb_savecheck.c
 )
+target_sources(iso_vfs_check PRIVATE src/sb_utf8.manifest) # W455: Pfade UTF-8 wie sb_ldr
 target_include_directories(iso_vfs_check PRIVATE src)
 target_compile_options(iso_vfs_check PRIVATE /W3)
 
@@ -336,6 +362,7 @@ endif()
 # ---- loc_net_selftest: System-Link-Netz-HLE LoC, zwei Instanzen ueber Loopback (W286; seit W292 beide Fassungen) ----
 add_executable(loc_net_selftest
   tests/loc_net_selftest.c
+  src/loc_rbn.c
   src/loc_net_core.c
   src/loc_rule.c
   src/loc_chat.c
@@ -403,6 +430,7 @@ target_compile_options(loc_rb_selftest PRIVATE /W3)
 add_executable(loc_rbi_selftest
   tests/loc_rbi_selftest.c
   tests/loc_lsarb_cases.c
+  tests/loc_rbn_pre_cases.c
   src/loc_rbi.c
   src/loc_rbn.c
   src/loc_lsarb.c

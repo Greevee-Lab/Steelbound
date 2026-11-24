@@ -56,7 +56,7 @@ static void dg_init(void)
 }
 
 /* ui_visible_on: Knoepfe der Karten (Update-Karte weicht der Absturz-Karte). */
-static int dg_ctl_visible(int id)
+int dg_ctl_visible(int id)
 {
     if (id == ID_DG_OPEN || id == ID_DG_GH || id == ID_DG_DISMISS) {
         return g_dg_show && g_game != LGAME_LOC;
@@ -68,7 +68,7 @@ static int dg_ctl_visible(int id)
 }
 
 /* Spielen: 1 = Karte gezeichnet (Update-Karte entfaellt). */
-static int dg_paint_play(void)
+int dg_paint_play(void)
 {
     char t[600];
     if (!g_dg_show) {
@@ -118,7 +118,7 @@ static void dg_paint_alpha(int y, int h)
     label1(F_TINY, t, DG_X + 18, y + 88, DG_W - 36, 16, C_TEXT);
 }
 
-static void dg_build_controls(HWND w)
+void dg_build_controls(HWND w)
 {
     mk(w, K_BTN, ID_DG_OPEN, P_PLAY, UPD_X + 18, UPD_Y + 58, 160, 28, LT("gui.dg_open"), 0);
     mk(w, K_BTN, ID_DG_GH, P_PLAY, UPD_X + 18 + 160 + 8, UPD_Y + 58, UPD_W - 36 - 168, 28, LT("gui.dg_gh"), 0);
@@ -127,7 +127,7 @@ static void dg_build_controls(HWND w)
     mk(w, K_BTN, ID_DG_REPORTS, P_ALPHA, DG_X + 18, AL_Y2 + 146, DG_W - 36, 28, LT("gui.dg_reports"), 0);
 }
 
-static void dg_relabel(void)
+void dg_relabel(void)
 {
     ui_settext(ctl(ID_DG_OPEN), LT("gui.dg_open"));
     ui_settext(ctl(ID_DG_GH), LT("gui.dg_gh"));

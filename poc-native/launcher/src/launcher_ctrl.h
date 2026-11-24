@@ -45,6 +45,8 @@ int lctrl_bind_mouse_combo_row(int idx);
 /* W290: 1 = eine leere Zeile wird als "<name> =" gespeichert (aus, kein Rueckfall/Uebergang im Client):
  * orig_view, quick_shot. */
 int lctrl_bind_empty_line_row(int idx);
+/* W457: Index der LoC-Replay-Aktion (0..LCTRL_LRP_N-1) bzw. -1. */
+int lctrl_bind_lrp_row(int idx);
 /* W283: Quelle "KEY:<Zusatz>+KEY:<Taste>" (mod_vk = 0: nur "KEY:<Taste>").
  * Zusatztasten werden auf SHIFT/CTRL/ALT gefaltet (wie der Client). */
 void lctrl_key_combo(int mod_vk, int vk, char *out, size_t cap);
@@ -64,6 +66,10 @@ void lctrl_key_combo(int mod_vk, int vk, char *out, size_t cap);
  * Zeile, gilt BACKSPACE bzw. INSERT, wenn START (bi6) auf BACKSPACE liegt; leere Zeile heisst aus. */
 #define LCTRL_MENU_BACK_DEFAULT "KEY:BACKSPACE"
 #define LCTRL_MENU_BACK_ALT "KEY:INSERT"
+/* W457 LOC-REPLAY-CTRL: Replay-Aktionen von Line of Contact (Namen/Standard wie im Client, IMAP_LRP_NAMES/_DEFAULTS). */
+#define LCTRL_LRP_N 6
+#define LCTRL_LRP_NAMES { "replay_pause", "replay_next", "replay_prev", "replay_camera", "replay_speed", "replay_help" }
+#define LCTRL_LRP_DEFAULTS { "KEY:P", "KEY:T", "KEY:G", "KEY:PAGEUP", "KEY:PAGEDOWN", "KEY:F1" }
 /* W437 LOC-CHAT: Standard "Chat" (Client: IMAP_CHAT_DEFAULT). Fehlt die Zeile, gilt ENTER, sofern keine Spieltaste
  * (bi0..bi38) ENTER ohne Zusatztaste nutzt, sonst aus; leere Zeile heisst aus. */
 #define LCTRL_CHAT_DEFAULT "KEY:ENTER"
@@ -183,7 +189,7 @@ typedef struct {
     lctrl_kind_t kind;
 } lctrl_elem_t;
 
-#define LCTRL_ELEM_N 80 /* W437: + chat; W438: + menu_back; W188: + Client-Aktion pause, W195: + photo, W271: + aim_center, W283: + orig_view, W290: + quick_shot, W299: + replay_exit, W374: + net_hud */
+#define LCTRL_ELEM_N 86 /* W457: + 6 LoC-Replay-Aktionen; W437: + chat; W438: + menu_back; W188: + Client-Aktion pause, W195: + photo, W271: + aim_center, W283: + orig_view, W290: + quick_shot, W299: + replay_exit, W374: + net_hud */
 extern const lctrl_elem_t kCtrlElems[LCTRL_ELEM_N];
 /* W159: Original-Controller-Tasten als Belegungs-Quellen (SBC:<name>).
  * Kanonische Namen bi0..38, parserstabil wie input_map.c (kBiAlias).

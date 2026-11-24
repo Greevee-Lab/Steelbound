@@ -164,6 +164,7 @@ int lxf_xsb_parse(const uint8_t *d, uint32_t n, lxf_xsb_t *x)
     x->n_ent = rds16(d, n, 0x1C, &ok);
     x->n_cues = rds16(d, n, 0x1E, &ok);
     x->n_wb = rds16(d, n, 0x22, &ok);
+    x->t3d_off = rd32(d, n, 0x10, &ok); /* W456 */
     x->idx_off = 0x38;
     x->ent_off = x->idx_off + (uint32_t)x->n_cues * 0x14u;
     if (!ok || x->n_ent < 0 || x->n_cues < 0 || x->n_wb < 0 || x->n_wb > 256 ||
@@ -285,6 +286,25 @@ int lxf_xsb_cue(const lxf_xsb_t *x, int cue, uint32_t rnd, lxf_cue_t *c)
     if (!ok) {
         return -4;
     }
+    if (fl & 1) { /* W456: 3D-Parametersatz (lxf_cue_t.has3d) */
+        uint32_t r = x->t3d_off + 0x28u * (uint32_t)(rd8(x->d, x->n, eo + 0xC, &ok) | (rd8(x->d, x->n, eo + 0xD, &ok) << 8));
+        if (ok && x->t3d_off >= 0x38u && (uint64_t)r + 0x28u <= x->n) {
+            float f[3];
+            uint32_t u[3];
+            u[0] = rd32(x->d, x->n, r + 8, &ok);
+            u[1] = rd32(x->d, x->n, r + 0xC, &ok);
+            u[2] = rd32(x->d, x->n, r + 0x14, &ok);
+            memcpy(f, u, sizeof f);
+            if (ok && f[0] > 0.0f && f[0] < 1e9f && f[1] >= f[0] && f[1] <= 1e12f && f[2] >= 0.0f && f[2] <= 10.0f) {
+                c->has3d = 1;
+                c->min3d = f[0];
+                c->max3d = f[1];
+                c->rolloff3d = f[2];
+                c->mode3d = rd8(x->d, x->n, r + 0x1C, &ok);
+            }
+        }
+        ok = 1;
+    }
     if (fl & 0x10) {
         add_from_table(x, c, rd32(x->d, x->n, eo, &ok), rnd);
     } else if (fl & 0x08) {
@@ -300,7 +320,16 @@ int lxf_xsb_cue(const lxf_xsb_t *x, int cue, uint32_t rnd, lxf_cue_t *c)
             if (!ok) {
                 break;
             }
-            if (t == 0 || t == 1) {
+            if (t == 0x0A && sz >= 12) { /* W456: Amplituden-Huellkurve (lxf_cue_t.eg) */
+                c->eg_on = 1;
+                c->eg[0] = rd8(x->d, x->n, so + 19, &ok);
+                c->eg[1] = 0xFFFF & rds16(x->d, x->n, so + 8, &ok);
+                c->eg[2] = 0xFFFF & rds16(x->d, x->n, so + 10, &ok);
+                c->eg[3] = 0xFFFF & rds16(x->d, x->n, so + 12, &ok);
+                c->eg[4] = 0xFFFF & rds16(x->d, x->n, so + 14, &ok);
+                c->eg[5] = 0xFFFF & rds16(x->d, x->n, so + 16, &ok);
+                c->eg[6] = rd8(x->d, x->n, so + 18, &ok);
+            } else if (t == 0 || t == 1) {
                 int sf = rd8(x->d, x->n, so + 5, &ok);
                 if (sf == 0x04 || sf == 0x44) {
                     add_from_table(x, c, rd32(x->d, x->n, so + 8, &ok), rnd);

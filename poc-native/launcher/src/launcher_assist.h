@@ -57,9 +57,7 @@ void assist_destroy(assist_t *as);
  * sonst Fixture-Datei. Rueckgabe ASSIST_SRC_* (NONE = kein Geraet und
  * keine/falsche Fixture - Dialog bleibt nutzbar, Hinweis anzeigen). */
 int assist_open(assist_t *as, const char *fixture);
-void assist_close(assist_t *as);
 int assist_source(assist_t *as);
-int assist_source_err(assist_t *as); /* SBC_ERR_* der letzten Oeffnung */
 
 /* Timer-Aufruf der Oberflaeche (ca. 10 Hz): pollt die Quelle (nur wenn der
  * Arbeiter idle ist), versucht verlorene Geraete neu zu oeffnen (1/s).
@@ -69,7 +67,6 @@ void assist_poll(assist_t *as);
 /* Letzter Report (1 = gueltig). */
 int assist_has_report(assist_t *as);
 void assist_raw(assist_t *as, uint8_t raw[SBC_USB_IN_LEN]);
-void assist_state(assist_t *as, sbc_state_t *st);
 
 /* Schneller Takt (nur Fixture/Shots): Uhr mal 20, Schlaf durch 20. */
 void assist_set_fast(assist_t *as, int on);
@@ -110,7 +107,6 @@ int assist_led_set(assist_t *as, int led, int level);
 int assist_led_all(assist_t *as, int level);
 /* Folge auf dem Arbeiter (Fortschritt per ASSIST_EV_LED). 1 = gestartet. */
 int assist_led_seq_start(assist_t *as);
-void assist_led_seq_stop(assist_t *as);
 /* Mock-Pegel (Fixture) bzw. zuletzt gesetzte Pegel (Geraet) je LED. */
 int assist_led_level(assist_t *as, int led);
 

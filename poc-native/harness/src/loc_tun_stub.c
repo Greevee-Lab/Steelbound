@@ -37,6 +37,13 @@ int loctun_version_state(loctun *t, char *need, int ncap, char *peer, int pcap) 
     return 0;
 }
 void loctun_set_app2(loctun *t, uint16_t gp, loctun_app_fn fn) { (void)t; (void)gp; (void)fn; } /* W420 */
+int loctun_lan_state(loctun *t, int *peers, int *up) /* W454 */
+{
+    (void)t;
+    if (peers) *peers = 0;
+    if (up) *up = 0;
+    return 0;
+}
 void loctun_set_chat(loctun *t, uint16_t gp, loctun_chat_fn fn) { (void)t; (void)gp; (void)fn; } /* W437 */
 void loctun_set_snchat(loctun *t, loctun_snchat_fn fn, int want) { (void)t; (void)fn; (void)want; } /* W446 */
 int loctun_snchat_state(loctun *t) { (void)t; return 0; } /* W446 */
@@ -93,6 +100,13 @@ int loctun_pub_lookup(loctun *t, const int *lid, int n, int *mode, int *est) /* 
         est[i] = -1;
     }
     return 0;
+}
+void loctun_pub_watch(loctun *t, int on) { (void)t; (void)on; } /* W460 */
+int loctun_pub_list(loctun *t, loctun_pub_entry *out, int cap, int *total) /* W460 */
+{
+    (void)t; (void)out; (void)cap;
+    if (total) *total = 0;
+    return LOCTUN_PL_OFF;
 }
 int loctun_peer_hud_get(loctun *t, int i, loctun_peer_hud *o) /* W374 */
 {

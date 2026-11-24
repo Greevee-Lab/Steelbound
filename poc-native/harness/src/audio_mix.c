@@ -334,10 +334,6 @@ static void ring_write6(const int16_t *s6, au32 n)
 
 /* Bis zu n Frames lesen, Rueckgabe Anzahl. W356: dstx != NULL = weitere 4 Kanaele je Frame. */
 static LONG ring_read_x(int16_t *dst, int16_t *dstx, LONG n);
-static LONG ring_read(int16_t *dst, LONG n)
-{
-    return ring_read_x(dst, NULL, n);
-}
 
 static LONG ring_read_x(int16_t *dst, int16_t *dstx, LONG n)
 {

@@ -12,8 +12,10 @@
 #include "sb_rauto.h" /* W254 REPLAY-LAUNCHER */
 #include "sb_mauto.h" /* W272 ALPHA-TEST */
 #include "loc_pad.h" /* W297: Pfeile in LoC-Menues ans Pad */
+#include "loc_replayctl.h" /* W457 */
 #include "loc_vpf.h" /* W394 LOC-VIEW-PERFRAME */
 #include "loc_autogear.h" /* W441 LOC-AUTOGEAR */
+#include "loc_toggle.h" /* W451 LOC-TOGGLE-SYNC */
 #include "loc_aimassist.h" /* W442 LOC-AIMASSIST */
 #include "sb_profile.h" /* W297: g_sba_loc */
 #include "sb_cchain.h" /* W303 CAMPAIGN-CHAIN */
@@ -1020,6 +1022,7 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                     /* W437 LOC-CHAT: Tasten der Aktion "chat" (Standard Enter, falls frei; leere Zeile = aus) */
                     nn = imap_bind_key_combos(&g_prof.chat, nvk, nmod, 4);
                     loc_chat_set_binding(nvk, nmod, nn);
+                    loc_rpc_set_profile(&g_prof); /* W457: Tastennamen der Replay-Bedienhilfe */
                 }
                 if (g_prof_load_rc >= 0) {
                     /* W283 ORIG-KEY-BIND: Aktion "orig_view" (Standard
@@ -1138,6 +1141,9 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                         HLOG_I("REPLAY: Aktion replay_exit -> Wiedergabe beenden (f=%u)", g_frames);
                     re_prev = lvl;
                 }
+                if (g_sba_loc) { /* W457 LOC-REPLAY-CTRL: Replay-Aktionen -> SBC-Direkttasten, nur im LoC-Viewer */
+                    loc_rpc_apply(&g_prof, &snap, s->buttons);
+                }
                 { /* W271 STICK-RELATIVE: Hinweise (einmal bzw. je Zentrieren) */
                     static int sr_logged;
                     if (g_prof_st.m_rate_src && !sr_logged) {
@@ -1183,7 +1189,7 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
             if (loc_chat_typing()) imap_snap_block_ui(&snap); /* W437 */
             imap_legacy_apply((imap_block_t *)s, &g_leg, &snap);
         }
-        if (g_cfg.key_toggles && !snap.replay_active) {
+        if (g_cfg.key_toggles && (!snap.replay_active || g_cfg.toggle_test)) { /* W451: toggle_test = TEST */
             /* W79: Kippschalter als Rastschalter (Tasten 1-5 / Profil). */
             static const char *const tn[5] = {
                 "FILT CONTROL", "OXYGEN SUPPLY", "FUEL FLOW",
@@ -1199,7 +1205,9 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
                            (ts->tog_latch & (1u << i)) ? "AN" : "AUS",
                            g_frames);
             }
-            if (g_cfg.toggle_assist)
+            if (g_cfg.toggle_assist && g_sba_loc)
+                loc_toggle_poll((imap_block_t *)s, &ts->tog_latch, chg, g_frames); /* W451: LoC-Schalterpruefung */
+            else if (g_cfg.toggle_assist)
                 w87_toggle_assist(s, ts, chg); /* W87 */
         }
         if (g_sba_loc && (loc_assist_gate(g_cfg.auto_gear) || g_cfg.input_diag)) { /* W440+W441: Sim-Gate */
@@ -1236,6 +1244,21 @@ u32 __stdcall hook_XInputGetState(u32 h, u32 pState)
         }
     }
     if (!loc_chat_typing()) sbc_merge(s); /* W75: USB/Fixture als Zweitquelle (sbc_usb=1); W437: nicht beim Tippen */
+    { /* #87: beim Tippen Stellungen halten (Kippschalter bi34-38, Tuner, Gang). Ohne das fielen
+       * physische Schalter von Original-Controller/Joystick auf AUS (Sauerstoff, Filter). */
+        static imap_block_t s_pos;
+        static int s_pos_ok;
+        imap_block_t *pb = (imap_block_t *)s;
+        const uint16_t tm = (uint16_t)(0x1Fu << (34 % 16)); /* bi34..bi38 in buttons[2] */
+        if (!loc_chat_typing()) {
+            s_pos = *pb;
+            s_pos_ok = 1;
+        } else if (s_pos_ok) {
+            pb->buttons[34 / 16] = (uint16_t)((pb->buttons[34 / 16] & (uint16_t)~tm) | (s_pos.buttons[34 / 16] & tm));
+            pb->tuner = s_pos.tuner;
+            pb->gear = s_pos.gear;
+        }
+    }
     if (g_sba_loc) loc_vpf_end(s); /* W394: Poll fertig (Akku-Stand fuer die Anzeige veroeffentlicht) */
     if (g_sba_loc) loc_mouse_note(g_w341_dx, g_w341_dy, s->aiming_x, s->aiming_y, s->buttons[0]); /* W341: nur Zaehler */
     sb_rauto_apply(s); /* W254 REPLAY-LAUNCHER: Menue-Fuehrung (nur mit replay_autoplay) */

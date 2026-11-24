@@ -461,6 +461,7 @@ static void __cdecl ls_record(void)
     }
     n = InterlockedIncrement(&s_frames);
     nl_record(delay); /* W322 */
+    loc_rb_hitch_frame(stallf); /* W469 */
     if (!loc_rb_resim()) { /* W382: Spieltakt fuer das Feedback-Paket (nur Ganzzahlen, kein x87 im Thunk) */
         LARGE_INTEGER q, f;
         QueryPerformanceCounter(&q);

@@ -480,6 +480,8 @@ void sb_cp_present(unsigned n); /* DIAG cockpit_persp_shots (Present, unter ctx_
 void sb_cp_edge_box(unsigned *bx, unsigned *by, unsigned *bw, unsigned *bh); /* Bildraender-Box um die Kanten-Verschiebung erweitern */
 void sb_edge_ab_shots(const char *base, ID3D11Resource *src); /* DIAG(EDGE-MODE,W107): edge_ab=1, unter ctx_lock */
 void sb_render_shot_name(const char *name, ID3D11Resource *src);
+void sb_shfx_var_pre(ID3D11Resource *res); /* TEST(W465) shfx_var */
+void sb_shfx_var_shots(ID3D11RenderTargetView *rtv, ID3D11Resource *res, const char *base);
 /* RTT-Notizen (render_rtt.c) */
 void rtt_note_draw(unsigned prim, unsigned n, int rhw, unsigned xptr);
 extern int g_rtt_selfread; /* W106 rtt_selfcopy */

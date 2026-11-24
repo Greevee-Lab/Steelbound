@@ -49,6 +49,11 @@ int loc_net_peer_live(void);
 long loc_net_last34_ms(void);
 /* W447: offene Spiel-TCP-Stroeme (> 0 = Sitzung: Lobby oder Match). */
 long loc_net_streams(void);
+/* W474 CHATTABS: zentraler Zustand "in einer Lobby bzw. im Match dieser Lobby" (LCH_SES_NONE/LOBBY/MATCH aus
+ * loc_chat.h) fuer Chat-Reiter "Lobby" und Lobby-Infopanel; beliebiger Thread, nur lesend. */
+int loc_net_lobby_state(void);
+/* W474: wie loc_net_lobby_state, zusaetzlich *out = 1, wenn man selbst ausserhalb der Lobby-Seiten steht (lch_out_of_lobby). */
+int loc_net_lobby_state_ex(int *out);
 /* W350 LOC-REJOIN (DIAG, nur loc_net_diag=1): Belegung der Verbindungstabelle des Spiels je Bild lesen und bei
  * Aenderung eine Zeile LOCROSTER loggen (Plaetze, Seiten-Zaehler; keine Namen, keine Inhalte). */
 void loc_net_lobby_frame(unsigned f);

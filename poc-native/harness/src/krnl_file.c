@@ -88,13 +88,31 @@ static int zc_probe(const char *dir, DWORD *err)
     return ok;
 }
 
+/* W455 UNICODE-PATHS: UTF-16-Hostpfad -> Pfad in der aktiven Codepage (A-APIs). Unter UTF-8
+ * (sb_utf8.manifest) immer verlustfrei; WC_NO_BEST_FIT_CHARS/lpUsedDefaultChar sind mit CP_UTF8
+ * ungueltig (die Wandlung schluege fehl -> Ersatzordner nie nutzbar). 1 = verlustfrei. */
+static int kf_w_to_acp(const wchar_t *s, char *out, size_t cap)
+{
+    BOOL lossy = FALSE;
+    int n;
+    if (GetACP() == CP_UTF8) {
+        n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, s, -1, out, (int)cap, NULL, NULL);
+    } else {
+        n = WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, s, -1, out, (int)cap, NULL, &lossy);
+    }
+    if (n <= 0 || lossy) {
+        if (cap) out[0] = 0;
+        return 0;
+    }
+    return 1;
+}
+
 /* Ersatzordner k (0 = %LOCALAPPDATA%\Steelbound\loc_zcache, 1 = %TEMP%\Steelbound_loc_zcache)
  * als ANSI-sicherer Kurzpfad. 1 = ok. */
 static int zc_alt_dir(int k, char *out, size_t cap)
 {
     wchar_t w[600], s[600];
     DWORD n;
-    BOOL lossy = FALSE;
     if (k == 0) {
         n = GetEnvironmentVariableW(L"LOCALAPPDATA", w, 520);
         if (n == 0 || n >= 520) return 0;
@@ -110,8 +128,7 @@ static int zc_alt_dir(int k, char *out, size_t cap)
     CreateDirectoryW(w, NULL);
     n = GetShortPathNameW(w, s, 600);
     if (n == 0 || n >= 600) wcscpy_s(s, 600, w);
-    n = (DWORD)WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, s, -1, out, (int)cap, NULL, &lossy);
-    return n > 0 && !lossy && strlen(out) < 400;
+    return kf_w_to_acp(s, out, cap) && strlen(out) < 400;
 }
 
 /* Z: auf einen beschreibbaren Ersatzordner legen (einmal). */
@@ -508,7 +525,6 @@ static int ls_alt_dir(char *out, size_t cap, int create)
 {
     wchar_t w[600], s[600];
     DWORD n;
-    BOOL lossy = FALSE;
     out[0] = 0;
     n = GetEnvironmentVariableW(L"LOCALAPPDATA", w, 520);
     if (n == 0 || n >= 520) return 0;
@@ -519,8 +535,7 @@ static int ls_alt_dir(char *out, size_t cap, int create)
     else if (GetFileAttributesW(w) == INVALID_FILE_ATTRIBUTES) return 0;
     n = GetShortPathNameW(w, s, 600);
     if (n == 0 || n >= 600) wcscpy_s(s, 600, w);
-    n = (DWORD)WideCharToMultiByte(CP_ACP, WC_NO_BEST_FIT_CHARS, s, -1, out, (int)cap, NULL, &lossy);
-    if (n == 0 || lossy || strlen(out) >= 400) {
+    if (!kf_w_to_acp(s, out, cap) || strlen(out) >= 400) {
         out[0] = 0;
         return 0;
     }
@@ -843,18 +858,8 @@ static const char *symlink_find(const char *from)
     return NULL;
 }
 
+
 /* ---------- Xbox-Pfad -> Host-Pfad ---------- */
-static void wide_to_narrow(const wchar_t *w, size_t nchars, char *out, size_t cap)
-{
-    size_t i;
-    for (i = 0; i + 1 < cap && i < nchars && w[i]; i++) {
-        wchar_t c = w[i];
-        out[i] = (char)(c < 128 ? c : '?');
-    }
-    out[i] = '\0';
-}
-
-
 static void xb_skip_sep(const char **s)
 {
     while (**s == '\\' || **s == '/') {

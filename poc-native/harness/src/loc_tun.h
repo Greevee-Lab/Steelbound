@@ -57,6 +57,12 @@ typedef struct loctun_cfg {
     char play_mode[8];    /* W440 LOC-LOBBY-MODES: Modus eigener Lobbys beim Anlegen ("sim" = Standard, "arcade") */
     int join_delay_ms;    /* W446 TEST: Lobby erst N ms nach dem welcome betreten bzw. anlegen (steelnet-Chat ausserhalb
                            * einer Lobby nachweisen), 0 = sofort (Standard) */
+    /* W454 LOC-LAN-MODE: LAN ohne steelnet (nur ohne Treffpunkt; Entdeckung loc_tun_lan.c, SECURITY.md §36) */
+    int lan;              /* 1 = LAN-Modus */
+    uint16_t lan_port;    /* Entdeckungs-Port (0 = LLAN_PORT 47210) */
+    char lan_room[17];    /* Raumname (leer = "LAN"), nur druckbares ASCII */
+    char lan_pass[64];    /* Raumpasswort (leer = aus Umgebung SB_LAN_PASS, sonst ohne); wird nach dem Ableiten geloescht */
+    char lan_targets[128];/* TEST/Notweg: zusaetzliche Unicast-Ziele "ip:port,..." (nur privat); nur Loopback = kein Broadcast */
     char route_sim[256];  /* W395 TEST: je Weg eigene Verzoegerung/Ausfall, "name:SPEC/name:SPEC" mit name = direct oder
                            * Relayname, SPEC wie loc_netsim plus cut:A-B (Sekunden ab Transportstart, B leer = bis Ende) */
 } loctun_cfg;
@@ -121,6 +127,9 @@ int loctun_peer_pilot(loctun *t, uint32_t vip, char *buf, int cap);
  * Ablehnung, 1 = Treffpunkt verlangt need (Fehler version_required), 2 = Mitspieler mit Version peer ("" = Feld fehlt,
  * aelterer Client) abgelehnt; need = die neuere der beiden Versionen. */
 int loctun_version_state(loctun *t, char *need, int ncap, char *peer, int pcap);
+/* W454: Rueckgabe 3 = LAN-Mitspieler mit anderer Version nicht verbunden (need/peer wie 2). */
+/* W454 LOC-LAN-MODE: 1 = LAN-Modus aktiv (Entdeckung laeuft); peers = gefundene Mitspieler im Raum, up = verbunden. */
+int loctun_lan_state(loctun *t, int *peers, int *up);
 
 /* Zustand fuer Log/Launcher/Selbsttest. */
 int loctun_links_up(loctun *t);
@@ -154,6 +163,20 @@ int loctun_pub_games(loctun *t);
 /* W443 LOC-LOBBY-LIST: Modus (LAS_SIM/LAS_ARCADE, 0 = keine solche Lobby) und Ping-Schaetzung (ms, -1 = unbekannt)
  * der lokal vertretenen oeffentlichen Lobbys lid[0..n-1] (Lobby-Id aus der XNKID der Host-Info). Rueckgabe: gefunden. */
 int loctun_pub_lookup(loctun *t, const int *lid, int n, int *mode, int *est);
+/* W460 LOC-LOBBY-WIDGET (GitHub #95): offene oeffentliche Lobbys fuer das Widget im Hauptmenue/MatchMaking.
+ * loctun_pub_watch(t, 1): solange das Widget sichtbar ist, fragt der Transport die Liste hoechstens alle 12 s beim
+ * Treffpunkt an (gleiche Anfrage wie die Suche, "lobby_list"); 0 = aus. loctun_pub_list: hoechstens cap Eintraege
+ * (aelteste Lobby zuerst), *total = alle offenen. Rueckgabe: Zahl in out, LOCTUN_PL_OFF = kein oeffentlicher
+ * Treffpunkt (System Link, Raumcode), LOCTUN_PL_WAIT = noch nicht angemeldet bzw. Liste fehlt/aelter als 40 s. */
+#define LOCTUN_PL_OFF (-1)
+#define LOCTUN_PL_WAIT (-2)
+typedef struct loctun_pub_entry {
+    int lid, mode, est;  /* Lobby-Id, LAS_SIM/LAS_ARCADE, Ping-Schaetzung ms (-1 = unbekannt) */
+    int cur, max;        /* belegte / alle Sitze */
+    char pilot[24];      /* Host-Pilot (UTF-8) */
+} loctun_pub_entry;
+void loctun_pub_watch(loctun *t, int on);
+int loctun_pub_list(loctun *t, loctun_pub_entry *out, int cap, int *total);
 /* W374 LOC-NET-OVERLAY (F3): Werte des i-ten Mitspielers fuer das Netz-Overlay (nur Zahlen und der Pilotname
  * aus dem Treffpunkt, keine Adressen). 0 = kein solcher Eintrag. */
 #define LOCTUN_HUD_ALT 4 /* W395: Wege je Mitspieler im Overlay */

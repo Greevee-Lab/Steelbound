@@ -36,6 +36,7 @@ enum { LGAME_SB = 0, LGAME_LOC = 1, LGAME_N = 2 };
 #define LGAME_KEY_LOC_IMAGE "launcher_loc_image"
 #define LGAME_KEY_LOC_SERVER "launcher_loc_server"
 #define LGAME_KEY_LOC_WIDE "loc_widescreen" /* W326: liest der Client (hcfg) */
+#define LGAME_KEY_LOC_SBLOOK "loc_sblook"   /* W459: liest der Client (hcfg), 0/1 */
 
 /* W326 LOC-WIDE: Bildformat im LoC-Profil. W414: 16:9 ist Standard und nicht mehr experimentell, 720p
  * bliebe experimentell (nicht angeboten). LOC_WIDE_720P = 0 nimmt den Eintrag "720p (16:9)"
@@ -58,6 +59,7 @@ typedef struct {
     char loc_image[512];   /* UTF-8, leer = nicht gewaehlt */
     char loc_server[128];  /* leer = Standard (spaeter) */
     int loc_widescreen;    /* W326: LGAME_WIDE_* (nur angebotene Modi) */
+    int loc_sblook;        /* W459: "SB look (Experimental)" 0/1, nur user_loc.cfg, fehlt = 0 */
 } lgame_state_t;
 
 void lgame_defaults(lgame_state_t *st);
@@ -87,7 +89,7 @@ int lgame_cfg_save(const char *usercfg_path, const lgame_state_t *st);
 #define LGAME_KEY_PERGAME "launcher_pergame" /* 1 = Uebernahme der gemeinsamen Werte erledigt */
 #define LGAME_LOC_CFG_NAME "user_loc.cfg"
 enum {
-    LGAME_K_GAME = 1, LGAME_K_IMAGE = 2, LGAME_K_SERVER = 4, LGAME_K_WIDE = 8, LGAME_K_PERGAME = 16,
+    LGAME_K_GAME = 1, LGAME_K_IMAGE = 2, LGAME_K_SERVER = 4, LGAME_K_WIDE = 8, LGAME_K_PERGAME = 16, LGAME_K_SBLOOK = 32,
     LGAME_K_LAUNCHER = 1 | 2 | 4 | 16 /* gehoeren in user.cfg */
 };
 /* Schluessel aus mask schreiben (ersetzen/anhaengen), Schluessel aus drop entfernen, alles andere bleibt. */
@@ -118,6 +120,18 @@ int lgame_loc169_migrate(const char *loccfg);
 /* Beim Schreiben der LoC-Datei durch den Launcher: loc_widescreen=<wide> + Markierung (legt die Datei an);
  * with_edges = 1 schreibt zusaetzlich die Rand-Standardwerte (neue Datei). 0 = ok, -1 = Fehler. */
 int lgame_loc169_mark(const char *loccfg, int wide, int with_edges);
+
+/* W465 LOC-ENHANCED (Nutzer 24.11.): "Enhanced" ist in Line of Contact der Grafik-Standard. Marke
+ * SB_GP_LOC_REV_KEY (gfx_loc_rev, [render]) in user_loc.cfg; liest auch der Client (ohne Marke = Enhanced). */
+/* Stand der Datei (fehlt/ohne Marke = 0). */
+int lgame_loc_rev(const char *loccfg);
+/* Einmal-Umstellung: Datei vorhanden und gfx_loc_rev < SB_GP_LOC_REV -> Optik-Schluessel (shx ohne
+ * hud_label_avoid, fx_*) auf die Enhanced-Spalte, loc_sblook=0, gfx_loc_rev=SB_GP_LOC_REV (ersetzen/anhaengen,
+ * sofort geschrieben). Bildrate, Skalierung, Raender und monitor_fx bleiben. 1 = umgestellt, 0 = nichts zu tun,
+ * -1 = Schreibfehler. Idempotent. */
+int lgame_loc_gfx_migrate(const char *loccfg);
+/* Marke setzen (jedes Speichern der LoC-Datei durch den Launcher). Datei fehlt: nicht anlegen (1). 0 = ok. */
+int lgame_loc_rev_mark(const char *loccfg);
 
 /* W438 CTRL-RESET-040 (Nutzerentscheid 22.11.): In 0.4.0 wird die Steuerung einmalig fuer alle auf
  * "default_full" gestellt (START auf Backspace, Enter frei fuer den LoC-Chat). Markierung

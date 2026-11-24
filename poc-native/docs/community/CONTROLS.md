@@ -214,7 +214,9 @@ Wait briefly between steps.
 3. **Toggle switches**: only on that screen, flip all five (1 2 3 4 5,
    or the five switches: filter, oxygen, fuel, buffer, VT location).
    Each accepted row animates to OK. Pressing 1–5 earlier does not count;
-   just press them again on this screen.
+   just press them again on this screen. In Line of Contact the same
+   applies after an eject or respawn: switches that are still on blink
+   red, one press each flips them again.
 4. **START** (Backspace, or the START button) once **every bar is above the
    line**. Too early stalls the start; wait until the bars rise again
    and press START again.

@@ -10,6 +10,7 @@ extern unsigned g_loc_draws; /* Draws im laufenden Bild (nur LoC-Profil gezaehlt
 
 /* Je Present (aus m3d_present_tick): Bildzaehler weiterschalten. */
 void loc_render_frame(unsigned f);
+void loc_render_sblook_apply(void); /* W459: SB look (Experimental), render_sblook.h */
 /* DIAG: 1 = Zensus in diesem Bild ausloesen (loc_census_from + loc_census_draws). */
 int loc_render_census_go(unsigned f);
 
@@ -35,6 +36,12 @@ int loc_render_insignia_rt(unsigned surf);
 int loc_render_interp_mission(void);
 /* W323: Missionstakt in Hz (vblank_hz / Felder je Bild, Original 60/3 = 20). */
 int loc_render_tick_hz(void);
+/* W465 LOC-ENHANCED: Szene fuer die Endbild-Nachbearbeitung (render_shfx.c): 1 = Cockpit-Mission (Lockstep aktiv,
+ * eigener VT abgesetzt, nicht Karte), 2 = Replay/Aussenkamera/Demo (Welt im Backbuffer, [0x306BA8] != 0), 0 = sonst
+ * (Menues, Lobby, Karte) -> keine Nachbearbeitung. */
+int loc_render_post_scene(void);
+/* W465: 1 = LoC 4:3 mit vollem Hor+ -> Spiel-Komposition (Welt im BB) auf volle Breite (loc_horp_comp, Standard 1). */
+int loc_render_horp_full(void);
 /* DIAG(W358 LOC-LOOK) loc_lookstat: Zustandszaehler je Draw (aus render_im.c, nur LoC) */
 void loc_render_lookstat(int rhw, unsigned has_tex);
 /* DIAG(W349 LOC-FRAMES-2) loc_ui_diag: Farbe der UI-Rahmen (FUN_000ECF10) mit Aufrufkette */

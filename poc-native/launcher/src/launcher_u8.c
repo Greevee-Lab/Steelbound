@@ -90,6 +90,38 @@ int u8_is_ascii(const char *s)
     return 1;
 }
 
+/* W455 UNICODE-PATHS: laeuft der Prozess mit UTF-8 als aktiver Codepage (Manifest, Win10 1903+), sind
+ * "ACP" und UTF-8 dasselbe: cfg-Dateien stehen dann in UTF-8, Wandlung entfaellt. Nur alte cfg-Dateien
+ * aus der ANSI-Zeit (ungueltiges UTF-8) werden aus der System-ANSI-Codepage gelesen. */
+int u8_acp_is_utf8(void)
+{
+    return GetACP() == CP_UTF8;
+}
+
+unsigned u8_legacy_acp(void)
+{
+    static unsigned cp;
+    if (!cp) {
+        DWORD v = 0;
+        if (GetLocaleInfoEx(LOCALE_NAME_SYSTEM_DEFAULT, LOCALE_IDEFAULTANSICODEPAGE | LOCALE_RETURN_NUMBER,
+                            (LPWSTR)&v, (int)(sizeof v / sizeof(wchar_t))) > 0 &&
+            v != 0 && v != CP_UTF8) {
+            cp = v;
+        } else {
+            cp = 1252; /* weltweit UTF-8 aktiv oder unbekannt: Westeuropaeisch als Altbestand */
+        }
+    }
+    return cp;
+}
+
+int u8_valid(const char *s)
+{
+    if (!s || !*s || u8_is_ascii(s)) {
+        return 1;
+    }
+    return MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, s, -1, NULL, 0) > 0;
+}
+
 void u8_from_acp(const char *acp, char *out, size_t cap)
 {
     wchar_t w[2048];
@@ -102,11 +134,11 @@ void u8_from_acp(const char *acp, char *out, size_t cap)
         out[0] = '\0';
         return;
     }
-    if (u8_is_ascii(acp)) {
+    if (u8_is_ascii(acp) || (u8_acp_is_utf8() && u8_valid(acp))) {
         strcpy_s(out, cap, acp);
         return;
     }
-    if (MultiByteToWideChar(CP_ACP, 0, acp, -1, w, 2048) <= 0) {
+    if (MultiByteToWideChar(u8_acp_is_utf8() ? u8_legacy_acp() : CP_ACP, 0, acp, -1, w, 2048) <= 0) {
         strcpy_s(out, cap, acp);
         return;
     }
@@ -131,7 +163,12 @@ int u8_to_acp(const char *u8, char *out, size_t cap)
     if (!out || cap == 0) {
         return 2;
     }
-    if (u8_is_ascii(u8)) {
+    if (u8_is_ascii(u8) || u8_acp_is_utf8()) {
+        /* W455: unter UTF-8-Codepage verlustfrei 1:1 (WC_NO_BEST_FIT_CHARS waere mit CP_UTF8 ungueltig). */
+        if (u8 && strlen(u8) >= cap) {
+            out[0] = 0;
+            return 2;
+        }
         strcpy_s(out, cap, u8 ? u8 : "");
         return 0;
     }

@@ -48,12 +48,6 @@ static void sbpk_dirname(const char *path, char *out, size_t cap)
 /* ------------------------------------------------------------------ */
 /* Validatoren (wie tools/pack/sbpack.py)                              */
 /* ------------------------------------------------------------------ */
-static int sbpk_ishex(int c)
-{
-    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
-           (c >= 'A' && c <= 'F');
-}
-
 static int sbpk_sha64(const char *s)
 {
     int i;
@@ -336,18 +330,6 @@ static void sbpk_add(sbpk_finds_t *f, int red, const char *rule,
     strncpy_s(d->rule, sizeof d->rule, rule, _TRUNCATE);
     strncpy_s(d->reason, sizeof d->reason, reason, _TRUNCATE);
     strncpy_s(d->detail, sizeof d->detail, detail ? detail : "", _TRUNCATE);
-}
-
-static void sbpk_addf(sbpk_finds_t *f, int red, const char *rule,
-                      const char *reason, const char *d1, const char *d2)
-{
-    char b[220];
-    if (d2 && d2[0]) {
-        _snprintf_s(b, sizeof b, _TRUNCATE, "%s %s", d1 ? d1 : "", d2);
-    } else {
-        strncpy_s(b, sizeof b, d1 ? d1 : "", _TRUNCATE);
-    }
-    sbpk_add(f, red, rule, reason, b);
 }
 
 /* ------------------------------------------------------------------ */

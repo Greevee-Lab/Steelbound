@@ -25,6 +25,7 @@ typedef struct locnet_stats {
     volatile LONG guard; /* W334: vom Gastfilter in den HLE-Hooks verworfen */
     volatile LONG hold;  /* W334: recv mit unentschiedenem Rahmenkopf (WSAEWOULDBLOCK, nur Zaehler) */
     volatile LONG leave; /* W350: Stromende eines Mitspielers dem Spiel als Verbindungsreset gemeldet (Abgaenge) */
+    volatile LONG open; /* W474: offene Spiel-TCP-Stroeme jetzt (connect/accept bis eigenes Schliessen bzw. Abgang) */
     volatile LONG last34_ms; /* W297: GetTickCount des letzten gesendeten 0x34-Rahmens (Lockstep aktiv) */
     volatile LONG typ_seen[2][8]; /* W297: Rahmentyp < 256 gesehen (Bit), [0] empfangen, [1] gesendet - nur Typ, kein Inhalt */
 } locnet_stats;

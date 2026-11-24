@@ -29,6 +29,7 @@
  */
 #include "render_int.h"
 #include <math.h>
+#include "render_post.h" /* W463 RCORE: sb_post_fs_t */
 
 static const char kPN_VS[] =
     "struct O { float4 p : SV_Position; float2 uv : TEXCOORD0; };\n"
@@ -50,94 +51,8 @@ static const char kPN_PS[] =
     "  if (any(suv < 0.0) || any(suv > 1.0)) return float4(0.0, 0.0, 0.0, 1.0);\n"
     "  return float4(t0.SampleLevel(s0, suv, 0).rgb, 1.0); }\n";
 
-static ID3D11VertexShader *pn_vs;
-static ID3D11PixelShader *pn_ps;
-static ID3D11Buffer *pn_cb;
-static ID3D11SamplerState *pn_smp;
-static ID3D11RasterizerState *pn_rs;
-static ID3D11DepthStencilState *pn_ds;
-static ID3D11Texture2D *pn_tex;
-static ID3D11ShaderResourceView *pn_srv;
-static unsigned pn_tw, pn_th;
-static DXGI_FORMAT pn_fmt;
-static int pn_state;
-
-static int pn_init(void)
-{
-    ID3DBlob *b = NULL;
-    D3D11_BUFFER_DESC bd;
-    D3D11_SAMPLER_DESC sd;
-    D3D11_RASTERIZER_DESC rd;
-    D3D11_DEPTH_STENCIL_DESC dsd;
-    if (pn_state) { return pn_state > 0; }
-    pn_state = -1;
-    if (!g_dev) { return 0; }
-    if (sb_im_compile(kPN_VS, "vs_4_0", &b)) {
-        ID3D11Device_CreateVertexShader(g_dev, b->lpVtbl->GetBufferPointer(b), b->lpVtbl->GetBufferSize(b), NULL, &pn_vs);
-        b->lpVtbl->Release(b);
-        b = NULL;
-    }
-    if (sb_im_compile(kPN_PS, "ps_4_0", &b)) {
-        ID3D11Device_CreatePixelShader(g_dev, b->lpVtbl->GetBufferPointer(b), b->lpVtbl->GetBufferSize(b), NULL, &pn_ps);
-        b->lpVtbl->Release(b);
-        b = NULL;
-    }
-    memset(&bd, 0, sizeof bd);
-    bd.ByteWidth = 32;
-    bd.Usage = D3D11_USAGE_DYNAMIC;
-    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
-    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &pn_cb))) { pn_cb = NULL; }
-    memset(&sd, 0, sizeof sd);
-    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sd.MaxLOD = D3D11_FLOAT32_MAX;
-    if (FAILED(ID3D11Device_CreateSamplerState(g_dev, &sd, &pn_smp))) { pn_smp = NULL; }
-    memset(&rd, 0, sizeof rd);
-    rd.FillMode = D3D11_FILL_SOLID;
-    rd.CullMode = D3D11_CULL_NONE;
-    rd.DepthClipEnable = TRUE;
-    if (FAILED(ID3D11Device_CreateRasterizerState(g_dev, &rd, &pn_rs))) { pn_rs = NULL; }
-    memset(&dsd, 0, sizeof dsd);
-    dsd.DepthEnable = FALSE;
-    dsd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
-    dsd.DepthFunc = D3D11_COMPARISON_ALWAYS;
-    if (FAILED(ID3D11Device_CreateDepthStencilState(g_dev, &dsd, &pn_ds))) { pn_ds = NULL; }
-    if (!pn_vs || !pn_ps || !pn_cb || !pn_smp || !pn_rs || !pn_ds) {
-        HLOG_E("CPANINI: Ressourcen gescheitert -> cockpit_panini wirkungslos");
-        return 0;
-    }
-    pn_state = 1;
-    return 1;
-}
-
-static int pn_ensure_copy(ID3D11Resource *res)
-{
-    D3D11_TEXTURE2D_DESC td;
-    ID3D11Texture2D_GetDesc((ID3D11Texture2D *)res, &td);
-    if (pn_tex && pn_tw == td.Width && pn_th == td.Height && pn_fmt == td.Format) { return 1; }
-    if (pn_srv) { ID3D11ShaderResourceView_Release(pn_srv); pn_srv = NULL; }
-    if (pn_tex) { ID3D11Texture2D_Release(pn_tex); pn_tex = NULL; }
-    td.MipLevels = 1;
-    td.ArraySize = 1;
-    td.SampleDesc.Count = 1;
-    td.SampleDesc.Quality = 0;
-    td.Usage = D3D11_USAGE_DEFAULT;
-    td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
-    td.CPUAccessFlags = 0;
-    td.MiscFlags = 0;
-    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &pn_tex))) { pn_tex = NULL; return 0; }
-    if (FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)pn_tex, NULL, &pn_srv))) {
-        ID3D11Texture2D_Release(pn_tex);
-        pn_tex = NULL;
-        pn_srv = NULL;
-        return 0;
-    }
-    pn_tw = td.Width;
-    pn_th = td.Height;
-    pn_fmt = td.Format;
-    return 1;
-}
+/* W463 RCORE: Vollbild-Kopierpass gemeinsam mit Vaporwave (render_post.c) */
+static sb_post_fs_t pn = { kPN_VS, kPN_PS, 32, "CPANINI: Ressourcen gescheitert -> cockpit_panini wirkungslos" };
 
 /* Mitte-Vergroesserung S der Panini-Abbildung bei d (Raender fest). */
 float sb_cp_panini_scale(float d)
@@ -156,31 +71,16 @@ void sb_cp_panini_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, float 
 {
     float b = g_proj_game.m[5], T, th, S, cb[8], wf = sb_cp_width();
     D3D11_MAPPED_SUBRESOURCE map;
-    D3D11_VIEWPORT vp, s_vp;
-    UINT s_nvp = 1, s_mask = 0, s_sref = 0;
-    ID3D11RenderTargetView *s_rtv = NULL;
-    ID3D11DepthStencilView *s_dsv = NULL;
-    ID3D11BlendState *s_bs = NULL;
-    FLOAT s_bf[4];
-    ID3D11DepthStencilState *s_ds = NULL;
-    ID3D11RasterizerState *s_rs = NULL;
-    ID3D11InputLayout *s_lay = NULL;
-    D3D11_PRIMITIVE_TOPOLOGY s_topo;
-    ID3D11VertexShader *s_vs = NULL;
-    ID3D11PixelShader *s_ps = NULL;
-    ID3D11ShaderResourceView *s_srv = NULL, *nul = NULL;
-    ID3D11SamplerState *s_smp = NULL;
-    ID3D11Buffer *s_cb = NULL;
     if (!(d > 0.0f)) { d = 0.0f; }
     if ((d == 0.0f && !(wf > 1.0f)) || !rtv || !res || !g_ctx || !g_bb_w || !g_bb_h) { return; }
     if (!(wf >= 1.0f)) { wf = 1.0f; }
-    if (!pn_init() || !pn_ensure_copy(res)) { return; }
+    if (!sb_post_fs_init(&pn) || !sb_post_fs_ensure_copy(&pn, res)) { return; }
     if (!(b > 0.3f && b < 20.0f)) { b = 2.41421356f; }
     T = ((float)g_bb_w / (float)g_bb_h) / b;
     th = atanf(T);
     S = d > 0.0f ? T * (d + cosf(th)) / ((d + 1.0f) * sinf(th)) : 1.0f; /* d = 0: Identitaet (nur Breite) */
-    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)pn_tex, res);
-    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)pn_cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) { return; }
+    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)pn.tex, res);
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)pn.cb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) { return; }
     cb[0] = T;
     cb[1] = b;
     cb[2] = d;
@@ -189,64 +89,8 @@ void sb_cp_panini_apply(ID3D11RenderTargetView *rtv, ID3D11Resource *res, float 
     cb[5] = 1.0f / wf; /* W235: Breite (1 = aus, bitgleich zum W191-Pass) */
     cb[6] = cb[7] = 0.0f;
     memcpy(map.pData, cb, sizeof cb);
-    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)pn_cb, 0);
-    /* Zustand sichern */
-    ID3D11DeviceContext_OMGetRenderTargets(g_ctx, 1, &s_rtv, &s_dsv);
-    ID3D11DeviceContext_OMGetBlendState(g_ctx, &s_bs, s_bf, &s_mask);
-    ID3D11DeviceContext_OMGetDepthStencilState(g_ctx, &s_ds, &s_sref);
-    ID3D11DeviceContext_RSGetState(g_ctx, &s_rs);
-    ID3D11DeviceContext_RSGetViewports(g_ctx, &s_nvp, &s_vp);
-    ID3D11DeviceContext_IAGetInputLayout(g_ctx, &s_lay);
-    ID3D11DeviceContext_IAGetPrimitiveTopology(g_ctx, &s_topo);
-    ID3D11DeviceContext_VSGetShader(g_ctx, &s_vs, NULL, NULL);
-    ID3D11DeviceContext_PSGetShader(g_ctx, &s_ps, NULL, NULL);
-    ID3D11DeviceContext_PSGetShaderResources(g_ctx, 0, 1, &s_srv);
-    ID3D11DeviceContext_PSGetSamplers(g_ctx, 0, 1, &s_smp);
-    ID3D11DeviceContext_PSGetConstantBuffers(g_ctx, 0, 1, &s_cb);
-    vp.TopLeftX = 0.0f;
-    vp.TopLeftY = 0.0f;
-    vp.Width = (float)g_bb_w;
-    vp.Height = (float)g_bb_h;
-    vp.MinDepth = 0.0f;
-    vp.MaxDepth = 1.0f;
-    ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &rtv, NULL);
-    ID3D11DeviceContext_OMSetBlendState(g_ctx, NULL, NULL, 0xFFFFFFFFu);
-    ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, pn_ds, 0);
-    ID3D11DeviceContext_RSSetState(g_ctx, pn_rs);
-    ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
-    ID3D11DeviceContext_IASetInputLayout(g_ctx, NULL);
-    ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ID3D11DeviceContext_VSSetShader(g_ctx, pn_vs, NULL, 0);
-    ID3D11DeviceContext_PSSetShader(g_ctx, pn_ps, NULL, 0);
-    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &pn_srv);
-    ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 1, &pn_smp);
-    ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 0, 1, &pn_cb);
-    ID3D11DeviceContext_Draw(g_ctx, 3, 0);
-    /* Zustand zurueck */
-    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &nul);
-    ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &s_rtv, s_dsv);
-    ID3D11DeviceContext_OMSetBlendState(g_ctx, s_bs, s_bf, s_mask);
-    ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, s_ds, s_sref);
-    ID3D11DeviceContext_RSSetState(g_ctx, s_rs);
-    if (s_nvp) { ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &s_vp); }
-    ID3D11DeviceContext_IASetInputLayout(g_ctx, s_lay);
-    ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, s_topo);
-    ID3D11DeviceContext_VSSetShader(g_ctx, s_vs, NULL, 0);
-    ID3D11DeviceContext_PSSetShader(g_ctx, s_ps, NULL, 0);
-    ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &s_srv);
-    ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 1, &s_smp);
-    ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 0, 1, &s_cb);
-    if (s_rtv) { ID3D11RenderTargetView_Release(s_rtv); }
-    if (s_dsv) { ID3D11DepthStencilView_Release(s_dsv); }
-    if (s_bs) { ID3D11BlendState_Release(s_bs); }
-    if (s_ds) { ID3D11DepthStencilState_Release(s_ds); }
-    if (s_rs) { ID3D11RasterizerState_Release(s_rs); }
-    if (s_lay) { ID3D11InputLayout_Release(s_lay); }
-    if (s_vs) { ID3D11VertexShader_Release(s_vs); }
-    if (s_ps) { ID3D11PixelShader_Release(s_ps); }
-    if (s_srv) { ID3D11ShaderResourceView_Release(s_srv); }
-    if (s_smp) { ID3D11SamplerState_Release(s_smp); }
-    if (s_cb) { ID3D11Buffer_Release(s_cb); }
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)pn.cb, 0);
+    sb_post_fs_draw(&pn, rtv, (float)g_bb_w, (float)g_bb_h);
     {
         static int lk = -1, lwk = -1;
         static unsigned lw;

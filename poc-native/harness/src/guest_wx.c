@@ -213,14 +213,6 @@ void guest_wx_scan(const char *when)
            (unsigned)bytes);
 }
 
-int guest_wx_data_exec(void)
-{
-    MEMORY_BASIC_INFORMATION mi;
-    if (!s_probe) return 1;
-    if (VirtualQuery((LPCVOID)(uintptr_t)s_probe, &mi, sizeof mi) != sizeof mi) return 1;
-    return (mi.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY)) != 0;
-}
-
 uint32_t guest_wx_data_probe_addr(void)
 {
     return g_guest_wx ? s_probe : 0;

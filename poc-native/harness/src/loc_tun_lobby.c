@@ -1,0 +1,1207 @@
+/* loc_tun_lobby.c - W464 NET-CORE: aus loc_tun.c verschoben (W324/W334/W446 u. a.), unveraendert.
+ * Treffpunkt steelnet: Mini-JSON mit Grenzpruefung, Steuerkanal (TLS mit SPKI-Pin, HELLO/Anmeldung, BIND),
+ * Relays und Wegwahl (route), peer_info, lobby_state, Lobby betreten, steelnet-Chat, Zeilenleser lb_on_line,
+ * Steuerkanal-Zyklus lb_poll, Relay-/Bindungs-Antworten (SBN) auf dem UDP-Socket. ONLINE-Pfad (vgl. LAN, §W464). */
+#include "loc_tun_int.h"
+
+/* ====================================================================== Treffpunkt (steelnet) */
+/* --- Mini-JSON (nur fuer die Antworten unseres eigenen Dienstes, mit Grenzpruefung) --- */
+static const char *js_ws(const char *p, const char *e)
+{
+    while (p < e && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n')) p++;
+    return p;
+}
+
+const char *js_skip(const char *p, const char *e, int depth)
+{
+    p = js_ws(p, e);
+    if (p >= e || depth > 16) return NULL;
+    if (*p == '"') {
+        for (p++; p < e; p++) {
+            if (*p == '\\') { p++; continue; }
+            if (*p == '"') return p + 1;
+        }
+        return NULL;
+    }
+    if (*p == '{' || *p == '[') {
+        char close = *p == '{' ? '}' : ']';
+        p = js_ws(p + 1, e);
+        if (p < e && *p == close) return p + 1;
+        for (;;) {
+            if (close == '}') {
+                p = js_skip(p, e, depth + 1); /* Schluessel */
+                if (!p) return NULL;
+                p = js_ws(p, e);
+                if (p >= e || *p != ':') return NULL;
+                p++;
+            }
+            p = js_skip(p, e, depth + 1);
+            if (!p) return NULL;
+            p = js_ws(p, e);
+            if (p >= e) return NULL;
+            if (*p == ',') { p = js_ws(p + 1, e); continue; }
+            if (*p == close) return p + 1;
+            return NULL;
+        }
+    }
+    while (p < e && *p != ',' && *p != '}' && *p != ']' && *p != ' ' && *p != '\r' && *p != '\n') p++;
+    return p;
+}
+
+/* Wert zu key im Objekt ab obj ('{'); *ve = Ende des Wertes. */
+const char *js_get(const char *obj, const char *e, const char *key, const char **ve)
+{
+    const char *p = js_ws(obj, e);
+    size_t kl = strlen(key);
+    if (p >= e || *p != '{') return NULL;
+    p = js_ws(p + 1, e);
+    while (p < e && *p == '"') {
+        const char *ks = p + 1, *kend = js_skip(p, e, 0), *v, *vend;
+        if (!kend) return NULL;
+        p = js_ws(kend, e);
+        if (p >= e || *p != ':') return NULL;
+        v = js_ws(p + 1, e);
+        vend = js_skip(v, e, 0);
+        if (!vend) return NULL;
+        if ((size_t)(kend - 1 - ks) == kl && memcmp(ks, key, kl) == 0) {
+            if (ve) *ve = vend;
+            return v;
+        }
+        p = js_ws(vend, e);
+        if (p < e && *p == ',') p = js_ws(p + 1, e);
+    }
+    return NULL;
+}
+
+int js_num(const char *v, const char *ve, double *out)
+{
+    char b[48];
+    size_t l;
+    if (!v || v >= ve) return 0;
+    l = (size_t)(ve - v);
+    if (l >= sizeof b || *v == '"' || *v == 'n' || *v == '{' || *v == '[') return 0;
+    memcpy(b, v, l);
+    b[l] = 0;
+    *out = atof(b);
+    return 1;
+}
+
+int js_str(const char *v, const char *ve, char *out, int cap)
+{
+    int o = 0;
+    if (!v || v >= ve || *v != '"') return 0;
+    for (v++; v < ve - 1 && o < cap - 1; v++) {
+        if (*v == '\\' && v + 1 < ve - 1) {
+            v++;
+            out[o++] = *v == 'n' ? '\n' : *v;
+            continue;
+        }
+        out[o++] = *v;
+    }
+    out[o] = 0;
+    return 1;
+}
+
+const char *js_arr_first(const char *v, const char *ve)
+{
+    const char *p;
+    if (!v || v >= ve || *v != '[') return NULL;
+    p = js_ws(v + 1, ve);
+    return (p < ve && *p != ']') ? p : NULL;
+}
+
+const char *js_arr_next(const char *el, const char *ve, const char **elend)
+{
+    const char *p = js_skip(el, ve, 0);
+    if (elend) *elend = p;
+    if (!p) return NULL;
+    p = js_ws(p, ve);
+    if (p < ve && *p == ',') return js_ws(p + 1, ve);
+    return NULL;
+}
+
+/* [ip, port] */
+static int js_ep(const char *v, const char *ve, struct sockaddr_in *out)
+{
+    const char *a = js_arr_first(v, ve), *ae, *b, *be;
+    char ip[48];
+    double port;
+    struct in_addr in;
+    if (!a) return 0;
+    b = js_arr_next(a, ve, &ae);
+    if (!b || !js_str(a, ae, ip, sizeof ip)) return 0;
+    js_arr_next(b, ve, &be);
+    if (!be || !js_num(b, be, &port) || port < 1 || port > 65535) return 0;
+    if (inet_pton(AF_INET, ip, &in) != 1) return 0;
+    memset(out, 0, sizeof *out);
+    out->sin_family = AF_INET;
+    out->sin_addr = in;
+    out->sin_port = htons((uint16_t)port);
+    return 1;
+}
+
+/* W440 LOC-LOBBY-MODES: Modus eigener Lobbys beim Anlegen (Einstellung des Hosts; ungueltig = Sim). */
+const char *lb_my_play_mode(const loctun *t)
+{
+    return las_parse(t->c.play_mode) == LAS_ARCADE ? "arcade" : "sim";
+}
+
+/* W440: Modus der aktuellen Lobby setzen (0 = keine); Logzeile nur bei Aenderung (keine Namen, kein Raumcode). */
+void lb_play_mode_set(loctun *t, int mode, const char *why)
+{
+    LONG old = InterlockedExchange(&t->play_mode, (LONG)mode);
+    if (old != (LONG)mode) {
+        tl_logf(t, "LOCMODE: Lobby-Modus %s (%s)", mode ? las_name(mode) : "keiner", why);
+    }
+}
+
+static void lb_close(loctun *t, const char *why, double now);
+
+/* W334: eine JSON-Zeile ueber TLS (nie vor bestandener Pin-Pruefung; sbtls_write lehnt das selbst ab). */
+void lb_send(loctun *t, const char *json)
+{
+    char b[4200];
+    int l = _snprintf_s(b, sizeof b, _TRUNCATE, "%s\n", json);
+    if (l > 0 && t->test_cap && t->test_cap_len + l < t->test_cap_max) { /* W373 TEST */
+        memcpy(t->test_cap + t->test_cap_len, b, (size_t)l);
+        t->test_cap_len += l;
+        t->test_cap[t->test_cap_len] = 0;
+    }
+    if (l > 0 && t->tls && t->lb_s != INVALID_SOCKET && (t->lb_state == LB_HELLO || t->lb_state == LB_LOBBY)) {
+        if (sbtls_write(t->tls, b, l) != SBTLS_OK) lb_close(t, "tls-senden", tl_now(t));
+    }
+    SecureZeroMemory(b, sizeof b);
+}
+/* Trennung vom Treffpunkt: Schluessel dieser Steuerverbindung loeschen; alle Lobby-Verbindungen enden (neue
+ * Steuerverbindung = neue client_id, neues E, neue Paarschluessel - SECURITY.md §4.2 Punkte 4/5). */
+static void lb_close(loctun *t, const char *why, double now)
+{
+    int i;
+    if (t->tls) {
+        sbtls_free(t->tls);
+        t->tls = NULL;
+    }
+    if (t->lb_s != INVALID_SOCKET) {
+        WSAEventSelect(t->lb_s, NULL, 0);
+        closesocket(t->lb_s);
+        t->lb_s = INVALID_SOCKET;
+    }
+    if (t->lb_state != LB_OFF) tl_logf(t, "LOCLOBBY: Treffpunkt getrennt (%s) - neuer Versuch in 5 s", why);
+    /* W353: Grund fuer den Launcher - Aufbau gescheitert (Netz/Firewall/Dienst aus) bzw. Verbindung verloren */
+    if (t->lb_state == LB_CONNECTING || t->lb_state == LB_TLS) {
+        strcpy_s(t->lb_err, sizeof t->lb_err, "connect");
+    } else if (t->lb_state != LB_OFF && strcmp(why, "upgrade_required") != 0 && strcmp(why, "e2e_required") != 0) {
+        strcpy_s(t->lb_err, sizeof t->lb_err, "lost");
+    }
+    for (i = 0; i < TUN_MAX_LINKS; i++) {
+        tlink *L = &t->links[i];
+        if (!L->used || L->cid == 0) continue;
+        tl_link_drop(t, L, "Treffpunkt getrennt");
+        L->used = 0;
+    }
+    sbe2e_kp_free(&t->kp);
+    SecureZeroMemory(t->my_pub, sizeof t->my_pub);
+    SecureZeroMemory(t->udp_key, sizeof t->udp_key);
+    t->lobby_code[0] = 0;
+    lb_play_mode_set(t, 0, "Treffpunkt getrennt"); /* W440 */
+    InterlockedExchange(&t->sn_state, 0);          /* W446: neue Verbindung = neues Abonnement */
+    t->sn_sub_sent = -1;
+    for (i = 0; i < t->sn_out_n; i++) SecureZeroMemory(t->sn_out[i], sizeof t->sn_out[i]);
+    t->sn_out_n = 0;
+    if (t->pub) { /* W373: neue Steuerverbindung = neue Lobby; offene Beitritte scheitern */
+        if (t->pub_joining) pub_reject(t, t->pub_join, "Treffpunkt getrennt", now);
+        pub_ghosts_clear(t);
+        t->pub_host = t->pub_started = t->pub_creating = 0;
+        t->pub_host_vip = t->pub_host_cid = 0;
+    }
+    t->my_cid = 0;
+    t->bctr = 0;
+    t->lb_state = LB_OFF;
+    t->lb_joined = 0;
+    t->lb_listed = 0;
+    t->bound = 0;
+    t->lb_next_try = now + 5000.0;
+}
+
+/* W329: Konfigurationswerte (Raum, Pilotname) JSON-sicher in einen String einsetzen. */
+void tl_js_esc(const char *in, char *out, size_t cap)
+{
+    size_t o = 0;
+    for (; in && *in && o + 7 < cap; in++) {
+        unsigned char c = (unsigned char)*in;
+        if (c == '"' || c == '\\') {
+            out[o++] = '\\';
+            out[o++] = (char)c;
+        } else if (c < 0x20 || c == 0x7F) {
+            o += (size_t)_snprintf_s(out + o, cap - o, _TRUNCATE, "\\u%04x", c);
+        } else {
+            out[o++] = (char)c;
+        }
+    }
+    out[o] = 0;
+}
+
+/* W329: Lobbyliste nur fuer den eigenen Raum (Server filtert mit "name"; alte Server ignorieren das Feld).
+ * Ungefiltert kann die Liste aller Lobbys eine Steuerzeile sprengen - dann faende der Client seinen Raum nie. */
+static void lb_list(loctun *t)
+{
+    char b[300], r[200];
+    tl_js_esc(t->c.room, r, sizeof r);
+    _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"lobby_list\",\"game\":\"loc\",\"name\":\"%s\"}", r);
+    lb_send(t, b);
+}
+
+/* W334: Pins fuer den Treffpunkt (SECURITY.md §3.2/§3.6). 0 = keiner -> keine Verbindung. */
+static int lb_pins(loctun *t, const struct sockaddr_in *a)
+{
+    char ev[80];
+    DWORD gl;
+    int lo = (ntohl(a->sin_addr.s_addr) >> 24) == 127;
+    t->npins = 0;
+    memset(t->pins, 0, sizeof t->pins);
+    if (_stricmp(t->lb_host, SB_STEELNET_HOST) == 0) {
+        if (sbtls_parse_pin(SB_STEELNET_SPKI1, t->pins[t->npins])) t->npins++;
+        if (sbtls_parse_pin(SB_STEELNET_SPKI2, t->pins[t->npins])) t->npins++;
+    }
+    if (t->npins < 2 && t->c.spki[0] && sbtls_parse_pin(t->c.spki, t->pins[t->npins])) t->npins++; /* loc_lobby_spki */
+    gl = GetEnvironmentVariableA("SB_STEELNET_SPKI", ev, sizeof ev);
+    if (lo && gl > 0 && gl < sizeof ev && t->npins < 2 && sbtls_parse_pin(ev, t->pins[t->npins])) t->npins++; /* TEST */
+    return t->npins;
+}
+
+static void lb_connect(loctun *t, double now)
+{
+    struct sockaddr_in a;
+    u_long nb = 1;
+    if (!tl_resolve(t->lb_host, t->lb_port, &a)) {
+        tl_logf(t, "LOCLOBBY: Treffpunkt nicht aufloesbar - neuer Versuch in 5 s");
+        strcpy_s(t->lb_err, sizeof t->lb_err, "dns"); /* W353: kein Netz bzw. Name unbekannt */
+        t->lb_next_try = now + 5000.0;
+        return;
+    }
+    if (!tl_dest_ok(t, a.sin_addr.s_addr)) {
+        tl_logf(t, "LOCLOBBY: Treffpunkt-Adresse nicht erlaubt");
+        t->lb_next_try = now + 60000.0;
+        return;
+    }
+    if (lb_pins(t, &a) == 0) {
+        /* ohne Pin kein ungepruefter Kanal - auch nicht fuer private Server (SECURITY.md §3.6) */
+        if (InterlockedExchange(&t->sec, SEC_NOPIN) != SEC_NOPIN)
+            tl_logf(t, "LOCSEC: kein Server-Pin fuer den Treffpunkt (Dienst nicht eingerichtet bzw. loc_lobby_spki fehlt) - "
+                       "Online-Spiel aus");
+        t->lb_next_try = now + 60000.0;
+        return;
+    }
+    t->lb_addr = a;
+    t->lb_s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (t->lb_s == INVALID_SOCKET) return;
+    tl_nodelay(t->lb_s);
+    ioctlsocket(t->lb_s, FIONBIO, &nb);
+    tl_sock_events(t, t->lb_s, FD_READ | FD_WRITE | FD_CONNECT | FD_CLOSE);
+    t->lb_inlen = 0;
+    t->lb_state = LB_CONNECTING;
+    t->lb_next_try = now + 5000.0; /* Zeitlimit fuer den Aufbau */
+    if (connect(t->lb_s, (struct sockaddr *)&a, sizeof a) != 0 && WSAGetLastError() != WSAEWOULDBLOCK) {
+        lb_close(t, "connect", now);
+    }
+}
+
+static void lb_hello(loctun *t)
+{
+    char b[640], ip[16], pe[120], pub[65];
+    struct sockaddr_in me;
+    int l = sizeof me;
+    tl_js_esc(t->c.pilot, pe, sizeof pe); /* W329 */
+    getsockname(t->us, (struct sockaddr *)&me, &l);
+    if (me.sin_addr.s_addr == INADDR_ANY) {
+        /* eigene LAN-Adresse fuer den Durchstich im selben Netz: die zum Treffpunkt benutzte */
+        struct sockaddr_in la;
+        int ll = sizeof la;
+        if (getsockname(t->lb_s, (struct sockaddr *)&la, &ll) == 0) me.sin_addr = la.sin_addr;
+    }
+    tohex(t->my_pub, 32, pub);
+    _snprintf_s(b, sizeof b, _TRUNCATE,
+                "{\"t\":\"hello\",\"v\":2,\"client\":\"steelbound-loc\",\"pilot\":\"%s\",\"controller\":\"kbm\","
+                "\"local_eps\":[[\"%s\",%u]],\"e2e\":{\"suite\":1,\"pub\":\"%s\"},\"cver\":\"%s\"}",
+                pe, locnet_ip_str(me.sin_addr.s_addr, ip), t->uport, pub, tl_myver(t)); /* W420: cver */
+    if (t->acct) { /* W328: Konto -> auth_challenge statt welcome */
+        size_t bl = strlen(b);
+        _snprintf_s(b + bl - 1, sizeof b - bl + 1, _TRUNCATE, ",\"account\":%u,\"exp\":%lld}", t->acct, t->acct_exp);
+    }
+    t->lb_state = LB_HELLO;
+    lb_send(t, b);
+}
+
+/* W334: BIND2/KEEPALIVE2 (SECURITY.md §5.1): "SBN1" | Typ | client_id u32 | bctr u64 | HMAC(udp_key, 0..16)[:16] */
+static void lb_bind(loctun *t, double now)
+{
+    uint8_t p[33], mac[32];
+    memcpy(p, "SBN1", 4);
+    p[4] = t->bound ? SN_KEEPALIVE2 : SN_BIND2;
+    put32be(p + 5, t->my_cid);
+    t->bctr++;
+    put32be(p + 9, (uint32_t)(t->bctr >> 32));
+    put32be(p + 13, (uint32_t)t->bctr);
+    sbe2e_hmac(t->udp_key, 32, p, 17, mac);
+    memcpy(p + 17, mac, 16);
+    SecureZeroMemory(mac, sizeof mac);
+    sendto(t->us, (const char *)p, 33, 0, (struct sockaddr *)&t->srv_udp, sizeof t->srv_udp); /* nie verzoegert */
+    t->lb_bind_last = now;
+}
+
+static trelay *lb_relay(loctun *t, const char *name, int create)
+{
+    int i;
+    for (i = 0; i < t->nrelays; i++) {
+        if (strcmp(t->relays[i].name, name) == 0) return &t->relays[i];
+    }
+    if (!create || t->nrelays >= TUN_MAX_RELAYS) return NULL;
+    memset(&t->relays[t->nrelays], 0, sizeof t->relays[0]);
+    strncpy_s(t->relays[t->nrelays].name, sizeof t->relays[0].name, name, _TRUNCATE);
+    return &t->relays[t->nrelays++];
+}
+
+void lb_relay_set(loctun *t, const char *name, const char *host, uint16_t port)
+{
+    trelay *r = lb_relay(t, name, 1);
+    if (!r) return;
+    strncpy_s(r->host, sizeof r->host, host && host[0] ? host : t->lb_host, _TRUNCATE);
+    r->port = port;
+    r->resolved = tl_resolve(r->host, r->port, &r->addr) && tl_dest_ok(t, r->addr.sin_addr.s_addr);
+    r->pings = 0;
+    r->nrtt = 0;
+    r->ms = -1;
+    if (!r->resolved) tl_logf(t, "LOCLOBBY: Relay %s nicht erreichbar/aufloesbar", r->name);
+}
+
+void lb_report(loctun *t)
+{
+    char b[2048];
+    int o, i, first = 1;
+    o = _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"route_report\",\"relays\":[");
+    for (i = 0; i < t->nrelays && o > 0; i++) {
+        if (t->relays[i].ms < 0) continue;
+        o += _snprintf_s(b + o, sizeof b - o, _TRUNCATE, "%s[\"%s\",%.1f]", first ? "" : ",", t->relays[i].name,
+                         t->relays[i].ms);
+        first = 0;
+    }
+    o += _snprintf_s(b + o, sizeof b - o, _TRUNCATE, "],\"peers\":[");
+    first = 1;
+    for (i = 0; i < TUN_MAX_LINKS && o > 0; i++) {
+        tlink *L = &t->links[i];
+        if (!L->used || L->cid == 0) continue;
+        if (L->direct_ok && L->direct_rtt > 0) {
+            o += _snprintf_s(b + o, sizeof b - o, _TRUNCATE, "%s[%u,%.1f]", first ? "" : ",", L->cid, L->direct_rtt);
+        } else if (L->direct_failed) {
+            o += _snprintf_s(b + o, sizeof b - o, _TRUNCATE, "%s[%u,null]", first ? "" : ",", L->cid);
+        } else {
+            continue;
+        }
+        first = 0;
+        L->reported = 1;
+    }
+    if (o > 0) _snprintf_s(b + o, sizeof b - o, _TRUNCATE, "]}");
+    lb_send(t, b);
+}
+
+static void lb_on_route(loctun *t, const char *m, const char *e)
+{
+    const char *v, *ve, *el, *ee;
+    double d;
+    char mode[16] = "";
+    v = js_get(m, e, "mode", &ve);
+    js_str(v, ve, mode, sizeof mode);
+    v = js_get(m, e, "max_ms", &ve);
+    if (js_num(v, ve, &d)) t->route_max = d;
+    strcpy_s(t->route_mode, sizeof t->route_mode, mode);
+    v = js_get(m, e, "relays", &ve); /* W395: waehlbare Relays (fehlt beim alten Treffpunkt = alle) */
+    if (v) {
+        unsigned mask = 0;
+        for (el = js_arr_first(v, ve); el; el = js_arr_next(el, ve, NULL)) {
+            char rn[24] = "";
+            trelay *r;
+            ee = js_skip(el, ve, 0);
+            if (!ee || !js_str(el, ee, rn, sizeof rn)) continue;
+            r = lb_relay(t, rn, 0);
+            if (r) mask |= 1u << (unsigned)(r - t->relays);
+        }
+        t->relay_usable = mask;
+        t->relay_usable_set = 1;
+    }
+    v = js_get(m, e, "links", &ve);
+    for (el = js_arr_first(v, ve); el; el = js_arr_next(el, ve, NULL)) {
+        const char *x, *xe;
+        char via[12] = "", rname[24] = "", host[96] = "", tk[80] = "";
+        double peer = 0, port = 0, lid = 0, ms = -1;
+        tlink *L;
+        ee = js_skip(el, ve, 0);
+        if (!ee) break;
+        x = js_get(el, ee, "peer", &xe);
+        js_num(x, xe, &peer);
+        x = js_get(el, ee, "via", &xe);
+        js_str(x, xe, via, sizeof via);
+        x = js_get(el, ee, "ms", &xe);
+        js_num(x, xe, &ms);
+        if (!(peer > 0 && peer <= 4294967295.0)) continue; /* W329: Bereich vor (uint32_t) */
+        L = tl_link_by_cid(t, (uint32_t)peer, 0);
+        if (!L) continue;
+        L->route_ms = ms;
+        L->route_seen = 1;
+        /* W395: link_id + Ticket kommen (neuer Treffpunkt) fuer jedes Paar, auch "direct" - Grundlage fuer die
+         * Bindung an allen Relays; ein alter Treffpunkt nennt sie nur bei "relay". */
+        x = js_get(el, ee, "link_id", &xe);
+        js_num(x, xe, &lid);
+        x = js_get(el, ee, "ticket", &xe);
+        js_str(x, xe, tk, sizeof tk);
+        if (lid >= 1 && lid <= 4294967295.0 && tk[0]) {
+            uint8_t tkb[TICKET_LEN];
+            if (unhex(tk, tkb, TICKET_LEN)) {
+                if (!L->have_ticket || L->relay_link != (uint32_t)lid) {
+                    int ri;
+                    for (ri = 0; ri < TUN_MAX_RELAYS; ri++) { /* neue link_id: alle Bindungen neu */
+                        L->rb[ri].ok = 0;
+                        L->rb[ri].have_cookie = 0;
+                        L->rb[ri].bind_last = 0;
+                    }
+                }
+                memcpy(L->ticket, tkb, TICKET_LEN);
+                L->relay_link = (uint32_t)lid;
+                L->have_ticket = 1;
+                SecureZeroMemory(tkb, sizeof tkb);
+            }
+        }
+        if (strcmp(via, "direct") == 0) {
+            if (L->want != 1) tl_logf(t, "LOCROUTE: c%u -> direkt (%.1f ms, Modus %s)", L->cid, ms, mode);
+            L->want = 1;
+            continue;
+        }
+        x = js_get(el, ee, "relay", &xe);
+        js_str(x, xe, rname, sizeof rname);
+        x = js_get(el, ee, "host", &xe);
+        js_str(x, xe, host, sizeof host);
+        x = js_get(el, ee, "port", &xe);
+        js_num(x, xe, &port);
+        if (!(port >= 0 && port <= 65535) || !(lid >= 0 && lid <= 4294967295.0)) continue; /* W329 */
+        {
+            trelay *r = lb_relay(t, rname, 0);
+            int idx;
+            if (!r || (host[0] && strcmp(host, r->host) != 0) || (port > 0 && (uint16_t)port != r->port)) {
+                lb_relay_set(t, rname, host, (uint16_t)port);
+                r = lb_relay(t, rname, 0);
+            }
+            if (!r || !r->resolved || !L->have_ticket || L->relay_link != (uint32_t)lid) {
+                tl_logf(t, "LOCROUTE: c%u -> Relay %s unbrauchbar", L->cid, rname);
+                continue;
+            }
+            idx = (int)(r - t->relays);
+            if (L->want != 2 || L->want_ri != idx) {
+                tl_logf(t, "LOCROUTE: c%u -> Relay %s (%.1f ms, Modus %s)%s", L->cid, rname, ms, mode,
+                        L->rt_on ? " - Vorschlag, Wahl im Client (W395)" : "");
+            }
+            L->want_ri = idx;
+            L->want = 2;
+        }
+    }
+}
+
+/* W334: Verbindung auf Anfang setzen (neues Paar): alles abbauen, Eintrag mit derselben cid neu belegen. */
+static tlink *tl_link_fresh(loctun *t, tlink *L)
+{
+    uint32_t cid = L->cid;
+    if (L->up || L->e2e.valid || L->lsn != INVALID_SOCKET) {
+        tl_link_drop(t, L, "neues Paar vom Treffpunkt");
+    }
+    L->used = 0;
+    return tl_link_by_cid(t, cid, 1);
+}
+
+static void lb_on_peer_info(loctun *t, const char *m, const char *e)
+{
+    const char *v, *ve, *el, *ee, *x = NULL, *xe = NULL;   /* W332: /sdl C4703 */
+    double peer = 0, acct = 0, lobby = 0, suite = 0;
+    char pn_hex[40] = "", pub_hex[80] = "", pilot[24] = "";
+    uint8_t pn[16], pub[32];
+    tlink *L;
+    struct sockaddr_in ep, cand[TUN_MAX_CAND];
+    int ncand = 0, k;
+    v = js_get(m, e, "peer", &ve);
+    if (!js_num(v, ve, &peer) || !(peer > 0 && peer <= 4294967295.0)) return; /* W329: Bereich vor (uint32_t) */
+    v = js_get(m, e, "pair_nonce", &ve);
+    js_str(v, ve, pn_hex, sizeof pn_hex);
+    v = js_get(m, e, "e2e", &ve);
+    x = v ? js_get(v, ve, "suite", &xe) : NULL;
+    js_num(x, xe, &suite);
+    x = v ? js_get(v, ve, "pub", &xe) : NULL;
+    js_str(x, xe, pub_hex, sizeof pub_hex);
+    v = js_get(m, e, "account", &ve);
+    js_num(v, ve, &acct);
+    v = js_get(m, e, "lobby_id", &ve);
+    js_num(v, ve, &lobby);
+    v = js_get(m, e, "pilot", &ve);
+    js_str(v, ve, pilot, sizeof pilot);
+    if ((uint32_t)peer == t->my_cid || !unhex(pn_hex, pn, 16) || suite != 1.0 || !unhex(pub_hex, pub, 32) ||
+        !(acct >= 0 && acct <= 4294967295.0) || !(lobby >= 0 && lobby <= 4294967295.0) || !pilot[0] ||
+        strlen(pilot) > 16) {
+        tl_logf(t, "LOCSEC: peer_info fuer c%u unvollstaendig/ungueltig - verworfen", (unsigned)peer);
+        return;
+    }
+    /* Adressen fuer den Durchstich */
+    v = js_get(m, e, "public_ep", &ve);
+    if (js_ep(v, ve, &ep) && tl_dest_ok(t, ep.sin_addr.s_addr)) cand[ncand++] = ep;
+    v = js_get(m, e, "local_eps", &ve);
+    for (el = js_arr_first(v, ve); el && ncand < TUN_MAX_CAND; el = js_arr_next(el, ve, &ee)) {
+        const char *y = js_skip(el, ve, 0);
+        int dup = 0;
+        if (!y || !js_ep(el, y, &ep) || !tl_dest_ok(t, ep.sin_addr.s_addr)) continue;
+        for (k = 0; k < ncand; k++) dup |= sa_eq(&cand[k], &ep);
+        if (!dup) cand[ncand++] = ep;
+    }
+    L = tl_link_by_cid(t, (uint32_t)peer, 1);
+    if (!L) return;
+    if (L->e2e.valid || L->blocked) {
+        if (memcmp(L->pair_nonce, pn, 16) == 0 && memcmp(L->peer_pub, pub, 32) == 0) {
+            /* gleiches Paar (z. B. neue NAT-Adresse nach BIND2 des Partners): nur Adressen auffrischen. Ein wegen
+             * Verstoss gesperrter Partner bleibt gesperrt, bis der Treffpunkt ein neues Paar bildet. */
+            if (!L->blocked) {
+                memcpy(L->cand, cand, sizeof cand);
+                L->ncand = ncand;
+                if (!L->direct_ok && !t->c.nodirect && !L->punching) {
+                    L->punching = 1;
+                    L->punch_start = tl_now(t);
+                    L->punch_last = 0;
+                }
+            }
+            return;
+        }
+        if (memcmp(L->pair_nonce, pn, 16) == 0) {
+            /* W333 (SECURITY.md §14, Fuer W334 Nr. 2): gleiches pair_nonce, aber anderer Schluessel -> Abbruch,
+             * nie still neu ableiten (Treffpunkt fehlerhaft oder Eingriff) */
+            L->blocked = 1;
+            sbe2e_link_free(&L->e2e);
+            tl_logf(t, "LOCSEC: peer_info fuer c%u mit gleichem pair_nonce, aber anderem Schluessel - getrennt", L->cid);
+            return;
+        }
+        L = tl_link_fresh(t, L);
+        if (!L) return;
+    }
+    /* Schluessel je Paar (SECURITY.md §4.3) - W464: Paarbildung in tl_link_pair (loc_tun_link.c), Meldung an den
+     * Treffpunkt bleibt hier */
+    k = tl_link_pair(t, L, (uint32_t)peer, (uint32_t)lobby, pn, pub, (uint32_t)acct, pilot, cand, ncand);
+    if (k == TL_PAIR_KEY || k == TL_PAIR_SID) {
+        char b[96];
+        _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"link_report\",\"peer\":%u,\"kind\":\"failed\"}", L->cid);
+        lb_send(t, b);
+    }
+    if (k != TL_PAIR_OK) return;
+    tl_logf(t, "LOCLOBBY: Mitspieler c%u (%s, %s), %d Adressen fuer den Durchstich, Ende-zu-Ende-Schluessel bereit%s",
+            L->cid, L->pilot, L->account ? "Konto" : "Gast", L->ncand, t->c.nodirect ? " (direkt aus: TEST)" : "");
+}
+
+static void lb_on_lobby_state(loctun *t, const char *m, const char *e)
+{
+    const char *lb, *lbe, *v, *ve, *el;
+    double id = 0;
+    int i;
+    char code[24] = "";
+    lb = js_get(m, e, "lobby", &lbe);
+    if (!lb) return;
+    v = js_get(lb, lbe, "id", &ve);
+    js_num(v, ve, &id);
+    if (!(id >= 0 && id <= 2147483647.0)) return;
+    t->lb_lobby_id = (int)id;
+    /* W334: Raumcode der Lobby (nur an Mitglieder), Anzeige im Launcher; nur Crockford-Zeichen und '-' */
+    v = js_get(lb, lbe, "code", &ve);
+    if (!v) v = js_get(m, e, "code", &ve);
+    if (js_str(v, ve, code, sizeof code)) {
+        size_t k, l = strlen(code);
+        int ok = l >= 8 && l <= 9;
+        for (k = 0; k < l && ok; k++) ok = (code[k] >= '0' && code[k] <= '9') || (code[k] >= 'A' && code[k] <= 'Z') || code[k] == '-';
+        if (ok && strcmp(code, t->lobby_code) != 0) {
+            strcpy_s(t->lobby_code, sizeof t->lobby_code, code);
+            tl_logf(t, "LOCLOBBY: Raumcode der Lobby bereit (im Launcher sichtbar)");
+        }
+    }
+    { /* W440 LOC-LOBBY-MODES: Modus der Lobby (fehlt = aelterer Dienst = Sim; nur "sim"/"arcade", sonst Sim) */
+        char pm[12] = "";
+        int mode = LAS_SIM;
+        v = js_get(lb, lbe, "play_mode", &ve);
+        if (v && js_str(v, ve, pm, sizeof pm) && las_parse(pm)) mode = las_parse(pm);
+        lb_play_mode_set(t, mode, v ? (las_parse(pm) ? "lobby_state" : "lobby_state, unbekannter Wert") : "lobby_state ohne Feld");
+    }
+    if (!t->lb_joined) {
+        t->lb_joined = 1;
+        t->lb_state = LB_LOBBY;
+        t->lb_err[0] = 0; /* W353: in der Lobby - alter Fehlergrund gilt nicht mehr */
+        t->lb_host_left = 0; /* W366 */
+        tl_logf(t, "LOCLOBBY: in Lobby %d", t->lb_lobby_id);
+    }
+    /* Mitspieler, die gegangen sind: Verbindung beenden */
+    v = js_get(lb, lbe, "members", &ve);
+    for (i = 0; i < TUN_MAX_LINKS; i++) {
+        tlink *L = &t->links[i];
+        int found = 0;
+        if (!L->used || L->cid == 0) continue;
+        for (el = js_arr_first(v, ve); el; el = js_arr_next(el, ve, NULL)) {
+            const char *ee = js_skip(el, ve, 0), *x, *xe;
+            double cid = 0;
+            if (!ee) break;
+            x = js_get(el, ee, "client_id", &xe);
+            if (js_num(x, xe, &cid) && cid > 0 && cid <= 4294967295.0 && (uint32_t)cid == L->cid) found = 1;
+        }
+        if (!found && !L->up) {
+            tl_link_drop(t, L, "nicht mehr in der Lobby");
+            L->used = 0; /* noch nicht verbunden: verwerfen */
+        } else if (!found && !L->down_logged) {
+            tl_logf(t, "LOCLOBBY: c%u hat die Lobby verlassen", L->cid);
+            L->down_logged = 1;
+        }
+    }
+}
+
+/* W334: Lobby betreten - mit Raumcode beitreten, sonst eigene Code-Lobby anlegen (Standard, SECURITY.md §3.5);
+ * Rolle "join" ohne Code: oeffentliche Lobby gleichen Namens suchen. */
+static void lb_enter(loctun *t)
+{
+    char b[480], r[200];
+    if (t->pub) { /* W373: oeffentlich - Lobby erst, wenn das Spiel ein Match anbietet (pub_tick) */
+        t->lb_listed = 1;
+        return;
+    }
+    if (t->c.code[0]) {
+        tl_js_esc(t->c.code, r, sizeof r);
+        _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"lobby_join\",\"code\":\"%s\"}", r);
+        lb_send(t, b);
+    } else if (_stricmp(t->c.role, "join") == 0) {
+        lb_list(t);
+    } else {
+        tl_js_esc(t->c.room, r, sizeof r); /* W329; v2: nur Anzeigename */
+        _snprintf_s(b, sizeof b, _TRUNCATE,
+                    "{\"t\":\"lobby_create\",\"name\":\"%s\",\"game\":\"loc\",\"mode\":\"syslink\",\"map\":\"any\","
+                    "\"max_players\":10,\"rules\":{},\"visibility\":\"code\",\"play_mode\":\"%s\"}",
+                    r, lb_my_play_mode(t)); /* W440 */
+        lb_send(t, b);
+    }
+    t->lb_listed = 1;
+}
+
+/* W446 STEELNET-CHAT: Antworten und Nachrichten des Dienstes (Steuerkanal). Inhalte nie ins Log; der Klartext liegt nur
+ * kurz in einem lokalen Puffer, der danach geloescht wird. */
+static void lb_on_snchat(loctun *t, const char *typ, const char *m, const char *e)
+{
+    const char *v, *ve;
+    loctun_snchat_fn fn = t->sn_fn;
+    if (strcmp(typ, "chat_sub") == 0) {
+        char code[16] = "";
+        v = js_get(m, e, "code", &ve);
+        js_str(v, ve, code, sizeof code);
+        v = js_get(m, e, "on", &ve);
+        if (v && ve - v == 4 && memcmp(v, "true", 4) == 0) {
+            InterlockedExchange(&t->sn_state, 2);
+            tl_logf(t, "LOCSNCHAT: steelnet-Chat abonniert");
+        } else {
+            InterlockedExchange(&t->sn_state, strcmp(code, "off") == 0 ? 0 : 1);
+            tl_logf(t, "LOCSNCHAT: steelnet-Chat nicht abonniert%s", strcmp(code, "off") == 0 ? " (Dienst: aus)" : "");
+        }
+        return;
+    }
+    if (strcmp(typ, "chat_status") == 0) {
+        char code[24] = "";
+        size_t i;
+        v = js_get(m, e, "code", &ve);
+        js_str(v, ve, code, sizeof code);
+        for (i = 0; code[i]; i++) {
+            if (!((code[i] >= 'a' && code[i] <= 'z') || code[i] == '_')) return; /* nur bekannte Form */
+        }
+        if (code[0] && strcmp(code, "ok") != 0 && fn) fn(2, NULL, (const uint8_t *)code, (int)i);
+        return;
+    }
+    /* "chat": nur abonniert; Absender = Pilotname der Sitzung beim Dienst (druckbares ASCII, <= 16) */
+    if (t->sn_state != 2 || !fn) return;
+    {
+        char from[24] = "";
+        uint8_t txt[LCH_MAX_TEXT_BYTES * 2];
+        int n, k, hist = 0;
+        const char *tv, *tve;
+        v = js_get(m, e, "from", &ve);
+        if (!v || *v != '"' || ve - v > 18 || memchr(v, '\\', (size_t)(ve - v)) || !js_str(v, ve, from, sizeof from) ||
+            !from[0])
+            return; /* Dienst-Namen sind [A-Za-z0-9 _-]: kein Escape */
+        for (k = 0; from[k]; k++) {
+            if ((unsigned char)from[k] < 0x20 || (unsigned char)from[k] > 0x7E || from[k] == '\\') return;
+        }
+        v = js_get(m, e, "hist", &ve);
+        if (v && ve - v == 1 && *v == '1') hist = 1;
+        tv = js_get(m, e, "text", &tve);
+        n = lch_json_str_u8(tv, tve, txt, (int)sizeof txt);
+        if (n > 0) fn(hist, from, txt, n);
+        SecureZeroMemory(txt, sizeof txt);
+    }
+}
+
+/* W446: Abonnement nach dem Schalter halten, eingereihte chat-Zeilen senden (Transport-Thread, unter cs). */
+void lb_snchat_tick(loctun *t)
+{
+    int want = t->sn_want ? 1 : 0, i;
+    if (t->sn_state == 0 || !t->my_cid) {
+        for (i = 0; i < t->sn_out_n; i++) SecureZeroMemory(t->sn_out[i], sizeof t->sn_out[i]);
+        t->sn_out_n = 0;
+        return;
+    }
+    if (!want && t->sn_sub_sent < 0) t->sn_sub_sent = 0; /* nie abonniert: nichts abzubestellen */
+    if (want != t->sn_sub_sent) {
+        char b[64];
+        _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"chat_sub\",\"on\":%s,\"hist\":%s}", want ? "true" : "false",
+                    want && !t->sn_hist_done ? "true" : "false");
+        if (want) t->sn_hist_done = 1;
+        t->sn_sub_sent = want;
+        lb_send(t, b);
+        if (t->sn_state == 0) return; /* Senden gescheitert -> lb_close hat alles zurueckgesetzt */
+    }
+    for (i = 0; i < t->sn_out_n; i++) { /* lb_close (Sendefehler) leert die Schlange: Schleife endet dann */
+        if (t->sn_state == 2) lb_send(t, t->sn_out[i]);
+        if (i < t->sn_out_n) SecureZeroMemory(t->sn_out[i], sizeof t->sn_out[i]);
+    }
+    t->sn_out_n = 0;
+}
+
+void lb_on_line(loctun *t, const char *m, const char *e, double now)
+{
+    const char *v, *ve;
+    char typ[24] = "";
+    v = js_get(m, e, "t", &ve);
+    if (!js_str(v, ve, typ, sizeof typ)) return;
+    if (strcmp(typ, "auth_challenge") == 0 && t->acct) { /* W328: Beweis mit dem Spielschluessel */
+        char nonce[40] = "", msg[96], b[128], hex[65];
+        double cid = 0;
+        uint8_t mac[32];
+        v = js_get(m, e, "nonce", &ve);
+        js_str(v, ve, nonce, sizeof nonce);
+        v = js_get(m, e, "client_id", &ve);
+        js_num(v, ve, &cid);
+        if (strlen(nonce) != 32 || !(cid > 0 && cid <= 4294967295.0)) {
+            lb_close(t, "auth", now);
+            return;
+        }
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "steelnet-auth-v1|%s|%u", nonce, (unsigned)cid);
+        tl_hmac(t->gkey, 32, msg, strlen(msg), mac);
+        sb_sha256_hex(mac, hex);
+        _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"auth\",\"proof\":\"%s\"}", hex);
+        lb_send(t, b);
+        SecureZeroMemory(b, sizeof b);
+        SecureZeroMemory(mac, sizeof mac);
+        SecureZeroMemory(hex, sizeof hex);
+        return;
+    }
+    if (strcmp(typ, "welcome") == 0) {
+        double cid = 0, up = 0, ver = 0;
+        char key[80] = "", eff[24] = "";
+        const char *el;
+        size_t k;
+        v = js_get(m, e, "v", &ve);
+        js_num(v, ve, &ver);
+        if (ver != 2.0) { /* W334: nur v2 */
+            lb_close(t, "welcome v != 2", now);
+            return;
+        }
+        v = js_get(m, e, "client_id", &ve);
+        js_num(v, ve, &cid);
+        v = js_get(m, e, "udp_key", &ve);
+        js_str(v, ve, key, sizeof key);
+        v = js_get(m, e, "udp_port", &ve);
+        js_num(v, ve, &up);
+        v = js_get(m, e, "pilot", &ve); /* W328: wirksamer Name (Kontoname bzw. Guest-...), geht ins Transkript */
+        js_str(v, ve, eff, sizeof eff);
+        /* W329: Zahlen vom Netz vor der Umwandlung begrenzen (double -> uint ausserhalb des Bereichs ist UB) */
+        if (!(cid > 0 && cid <= 4294967295.0) || !(up >= 1 && up <= 65535) || !unhex(key, t->udp_key, 32) || !eff[0] ||
+            strlen(eff) > 16) {
+            SecureZeroMemory(key, sizeof key);
+            lb_close(t, "welcome", now);
+            return;
+        }
+        SecureZeroMemory(key, sizeof key);
+        for (k = 0; eff[k]; k++) {
+            if ((unsigned char)eff[k] < 0x20 || (unsigned char)eff[k] > 0x7E) {
+                lb_close(t, "welcome", now);
+                return;
+            }
+        }
+        strcpy_s(t->my_pilot, sizeof t->my_pilot, eff);
+        t->my_cid = (uint32_t)cid;
+        t->bctr = 0;
+        t->srv_udp = t->lb_addr;
+        t->srv_udp.sin_port = htons((uint16_t)up);
+        t->lb_state = LB_HELLO; /* bis zur Lobby */
+        tl_logf(t, "LOCLOBBY: angemeldet als c%u", t->my_cid);
+        tl_logf(t, "LOCLOBBY: Pilot \"%s\" (%s)", eff, t->acct ? "Konto" : "Gast");
+        if (t->acct) InterlockedExchange(&t->auth_state, 2);
+        lb_bind(t, now);
+        /* Relays des Treffpunkts */
+        v = js_get(m, e, "relays", &ve);
+        for (el = js_arr_first(v, ve); el; el = js_arr_next(el, ve, NULL)) {
+            const char *ee = js_skip(el, ve, 0), *x, *xe;
+            char name[24] = "", host[96] = "";
+            double port = 0;
+            if (!ee) break;
+            x = js_get(el, ee, "name", &xe);
+            js_str(x, xe, name, sizeof name);
+            x = js_get(el, ee, "host", &xe);
+            js_str(x, xe, host, sizeof host);
+            x = js_get(el, ee, "port", &xe);
+            js_num(x, xe, &port);
+            if (name[0] && port >= 1 && port <= 65535) lb_relay_set(t, name, host, (uint16_t)port);
+        }
+        t->relays_start = now;
+        t->relays_done = 0;
+        /* W446: Dienst bietet den steelnet-Chat an (Feld fehlt = aelterer Dienst) */
+        v = js_get(m, e, "chat", &ve);
+        InterlockedExchange(&t->sn_state, (v && ve - v == 4 && memcmp(v, "true", 4) == 0) ? 1 : 0);
+        t->sn_sub_sent = -1;
+        t->lb_welcome_at = now;
+        if (t->c.join_delay_ms <= 0) lb_enter(t); /* W446 TEST: sonst spaeter aus lb_poll */
+        t->lb_list_last = now;
+    } else if (strcmp(typ, "chat") == 0 || strcmp(typ, "chat_sub") == 0 || strcmp(typ, "chat_status") == 0) {
+        lb_on_snchat(t, typ, m, e); /* W446 */
+    } else if (strcmp(typ, "lobby_list") == 0 && t->pub) { /* W373 */
+        pub_on_list(t, m, e, now);
+    } else if (strcmp(typ, "lobby_list") == 0 && !t->lb_joined) {
+        const char *el;
+        double found = 0;
+        v = js_get(m, e, "lobbies", &ve);
+        for (el = js_arr_first(v, ve); el; el = js_arr_next(el, ve, NULL)) {
+            const char *ee = js_skip(el, ve, 0), *x, *xe;
+            char name[40] = "", state[12] = "";
+            double id = 0;
+            if (!ee) break;
+            x = js_get(el, ee, "name", &xe);
+            js_str(x, xe, name, sizeof name);
+            x = js_get(el, ee, "state", &xe);
+            js_str(x, xe, state, sizeof state);
+            x = js_get(el, ee, "id", &xe);
+            js_num(x, xe, &id);
+            if (strcmp(name, t->c.room) == 0 && strcmp(state, "open") == 0) found = id;
+        }
+        if (found > 2147483647.0) found = 0; /* W329: Bereich vor (int) */
+        if (found > 0) {
+            char b[96];
+            _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"lobby_join\",\"lobby_id\":%d}", (int)found);
+            lb_send(t, b);
+        }
+        t->lb_listed = 0; /* ohne Treffer spaeter erneut */
+    } else if (strcmp(typ, "lobby_state") == 0) {
+        lb_on_lobby_state(t, m, e);
+        if (t->pub) pub_on_state(t, m, e); /* W373 */
+    } else if (strcmp(typ, "peer_info") == 0) {
+        lb_on_peer_info(t, m, e);
+    } else if (strcmp(typ, "route") == 0) {
+        lb_on_route(t, m, e);
+    } else if (strcmp(typ, "lobby_closed") == 0) {
+        int i;
+        tl_logf(t, "LOCLOBBY: Lobby geschlossen (Host gegangen)");
+        for (i = 0; i < TUN_MAX_LINKS; i++) { /* §4.2 Punkt 5: Schluessel loeschen, Stellvertreter schliessen */
+            tlink *L = &t->links[i];
+            if (!L->used || L->cid == 0) continue;
+            tl_link_drop(t, L, "Lobby geschlossen");
+            L->used = 0;
+        }
+        t->lobby_code[0] = 0;
+        lb_play_mode_set(t, 0, "Lobby geschlossen"); /* W440 */
+        t->lb_joined = 0;
+        t->lb_listed = 0;
+        t->lb_list_last = now;
+        if (t->lb_state == LB_LOBBY) t->lb_state = LB_HELLO;
+        if (t->pub) { /* W373: oeffentlich - das Spiel meldet den Abgang selbst, zurueck zur Suche */
+            t->pub_host = t->pub_started = 0;
+            t->pub_host_vip = 0;
+            if (t->pub_joining) pub_reject(t, t->pub_join, "Lobby geschlossen", now);
+        } else {
+            t->lb_host_left = 1; /* W366: Launcher meldet "Host hat die Lobby geschlossen" (nicht "Code falsch") */
+            strcpy_s(t->lb_err, sizeof t->lb_err, "closed");
+        }
+    } else if (strcmp(typ, "error") == 0) {
+        char code[32] = "";
+        v = js_get(m, e, "code", &ve);
+        js_str(v, ve, code, sizeof code);
+        tl_logf(t, "LOCLOBBY: Fehler vom Treffpunkt: %s", code);
+        if (strcmp(code, "auth_failed") == 0) { /* W328: Konto abgelehnt (abgelaufen/abgemeldet) -> als Gast weiter */
+            tl_logf(t, "LOCLOBBY: Konto-Anmeldung abgelehnt - weiter als Gast (Launcher: neu anmelden)");
+            t->acct = 0;
+            SecureZeroMemory(t->gkey, sizeof t->gkey);
+            InterlockedExchange(&t->auth_state, -1);
+        }
+        if (strcmp(code, "version_required") == 0) { /* W420: Treffpunkt verlangt eine neuere Client-Version */
+            char msg[96] = "", nv[16] = "";
+            const char *q;
+            v = js_get(m, e, "msg", &ve);
+            js_str(v, ve, msg, sizeof msg);
+            q = strstr(msg, "client version ");
+            if (q) {
+                char tmp[24];
+                int i;
+                q += 15;
+                for (i = 0; i < 23 && q[i] && q[i] != ' '; i++) tmp[i] = q[i];
+                tmp[i] = 0;
+                tl_ver_clean(tmp, i, nv, (int)sizeof nv);
+            }
+            EnterCriticalSection(&t->cs);
+            strcpy_s(t->need_ver, sizeof t->need_ver, nv);
+            t->peer_ver[0] = 0;
+            LeaveCriticalSection(&t->cs);
+            InterlockedExchange(&t->ver_state, 1);
+            InterlockedExchange(&t->sec, SEC_VERSION);
+            tl_logf(t, "LOCVER: Treffpunkt verlangt Client-Version %s (eigene %s) - Online-Spiel aus", nv[0] ? nv : "?",
+                    SB_NET_VERSION);
+            lb_close(t, code, now);
+            t->lb_next_try = now + 600000.0;
+            return;
+        }
+        if (strcmp(code, "upgrade_required") == 0 || strcmp(code, "e2e_required") == 0) {
+            InterlockedExchange(&t->sec, SEC_UPGRADE);
+            tl_logf(t, "LOCSEC: Treffpunkt lehnt die Protokollversion ab - Online-Spiel aus");
+            lb_close(t, code, now);
+            t->lb_next_try = now + 600000.0;
+            return;
+        }
+        if (strcmp(code, "rate_limited") == 0) {
+            /* W333 (SECURITY.md §14, Fuer W334 Nr. 5): zu viele falsche Raumcodes von dieser Adresse */
+            tl_logf(t, "LOCLOBBY: zu viele Versuche - bitte kurz warten (neuer Versuch in 60 s)");
+            strcpy_s(t->lb_err, sizeof t->lb_err, "rate"); /* W353 */
+            t->lb_list_last = now + 50000.0;
+        }
+        if (strcmp(code, "lobby_not_found") == 0 && t->c.code[0]) {
+            tl_logf(t, "LOCLOBBY: Raumcode nicht gefunden (Lobby zu oder Code falsch) - neuer Versuch in 10 s");
+            strcpy_s(t->lb_err, sizeof t->lb_err, t->lb_host_left ? "closed" : "code"); /* W353, W366 */
+        }
+        if (strcmp(code, "lobby_full") == 0) strcpy_s(t->lb_err, sizeof t->lb_err, "full"); /* W353 */
+        if (t->pub && t->pub_joining && !t->lb_joined && /* W373: Beitritt gescheitert -> Spiel verlaesst den Wartezustand */
+            (strcmp(code, "lobby_full") == 0 || strcmp(code, "lobby_started") == 0 ||
+             strcmp(code, "lobby_not_found") == 0 || strcmp(code, "rate_limited") == 0 ||
+             strcmp(code, "already_in_lobby") == 0)) {
+            pub_reject(t, t->pub_join, code, now);
+        }
+        if (t->pub && t->pub_creating && !t->lb_joined) t->pub_creating = 0; /* W373: Anlegen abgelehnt */
+        if (!t->lb_joined) t->lb_listed = 0; /* z. B. lobby_full: spaeter erneut */
+    }
+}
+
+void lb_poll(loctun *t, double now)
+{
+    if (!t->c.lobby[0]) return;
+    if (t->lb_state == LB_OFF) {
+        if (now >= t->lb_next_try) lb_connect(t, now);
+        return;
+    }
+    if (t->lb_s == INVALID_SOCKET) return;
+    if (t->lb_state == LB_CONNECTING) {
+        fd_set w, x;
+        struct timeval tv = {0, 0};
+        FD_ZERO(&w);
+        FD_ZERO(&x);
+        FD_SET(t->lb_s, &w);
+        FD_SET(t->lb_s, &x);
+        if (select(0, NULL, &w, &x, &tv) > 0) {
+            if (FD_ISSET(t->lb_s, &x)) {
+                lb_close(t, "connect", now);
+                return;
+            }
+            /* W334: TLS mit SPKI-Pin; vor bestandener Pruefung geht kein Anwendungsbyte hinaus */
+            if (sbtls_client_new(&t->tls, t->lb_s, t->lb_host, (const uint8_t(*)[32])t->pins, t->npins) != SBTLS_OK) {
+                tl_logf(t, "LOCSEC: %s", sbtls_error(t->tls));
+                lb_close(t, "tls", now);
+                return;
+            }
+            t->lb_state = LB_TLS;
+            t->lb_next_try = now + 10000.0; /* Handshake + welcome: 10 s (SECURITY.md §3.3) */
+        } else if (now >= t->lb_next_try) {
+            lb_close(t, "timeout", now);
+            return;
+        } else {
+            return;
+        }
+    }
+    if (t->lb_state == LB_TLS) {
+        int r = sbtls_handshake(t->tls);
+        if (r == SBTLS_WANT_IO) {
+            if (now >= t->lb_next_try) lb_close(t, "tls-timeout", now);
+            return;
+        }
+        if (r != SBTLS_OK) {
+            if (sbtls_pin_failed(t->tls)) {
+                InterlockedExchange(&t->sec, SEC_PIN);
+                tl_logf(t, "LOCSEC: Server-Pruefung fehlgeschlagen (Pin passt nicht) - keine Daten gesendet");
+            } else {
+                tl_logf(t, "LOCSEC: %s", sbtls_error(t->tls));
+            }
+            lb_close(t, "tls", now);
+            return;
+        }
+        if (sbe2e_keypair(&t->kp, t->my_pub) != 0) {
+            tl_logf(t, "LOCSEC: Schluesselpaar nicht erzeugbar - Online-Spiel aus");
+            InterlockedExchange(&t->sec, SEC_SELFTEST);
+            lb_close(t, "e2e", now);
+            return;
+        }
+        InterlockedCompareExchange(&t->sec, SEC_OK, SEC_PIN);
+        tl_logf(t, "LOCLOBBY: Treffpunkt verbunden (%s, Server-Pin bestaetigt)", sbtls_version(t->tls));
+        lb_hello(t);
+        t->lb_ping_last = now;
+        if (t->lb_s == INVALID_SOCKET) return;
+    }
+    if (sbtls_flush(t->tls) == SBTLS_FAIL) {
+        lb_close(t, "tls-senden", now);
+        return;
+    }
+    for (;;) {
+        int r = sbtls_read(t->tls, t->lb_in + t->lb_inlen, (int)sizeof t->lb_in - 1 - t->lb_inlen);
+        char *nl;
+        if (r == SBTLS_CLOSED) {
+            lb_close(t, "eof", now);
+            return;
+        }
+        if (r == SBTLS_FAIL) {
+            tl_logf(t, "LOCSEC: %s", sbtls_error(t->tls));
+            lb_close(t, "tls", now);
+            return;
+        }
+        if (r == SBTLS_WANT_IO) break;
+        t->lb_inlen += r;
+        t->lb_in[t->lb_inlen] = 0;
+        while ((nl = (char *)memchr(t->lb_in, '\n', (size_t)t->lb_inlen)) != NULL) {
+            int l = (int)(nl - t->lb_in);
+            lb_on_line(t, t->lb_in, t->lb_in + l, now);
+            if (t->lb_s == INVALID_SOCKET) return;
+            memmove(t->lb_in, nl + 1, (size_t)(t->lb_inlen - l - 1));
+            t->lb_inlen -= l + 1;
+            SecureZeroMemory(t->lb_in + t->lb_inlen, (size_t)l + 1); /* W446: verarbeitete Zeile (Chattext) loeschen */
+        }
+        if (t->lb_inlen >= (int)sizeof t->lb_in - 1) {
+            lb_close(t, "zeile", now);
+            return;
+        }
+    }
+    if (!t->my_cid && now >= t->lb_next_try) {
+        lb_close(t, "welcome-timeout", now);
+        return;
+    }
+    if (now - t->lb_ping_last >= 15000.0) {
+        lb_send(t, "{\"t\":\"ping\"}");
+        t->lb_ping_last = now;
+        if (t->lb_s == INVALID_SOCKET) return;
+    }
+    if (t->my_cid && (now - t->lb_bind_last >= (t->bound ? 25000.0 : 300.0))) lb_bind(t, now);
+    if (t->pub && t->my_cid) pub_tick(t, now); /* W373 */
+    lb_snchat_tick(t);                         /* W446 */
+    if (t->lb_s == INVALID_SOCKET) return;
+    if (t->my_cid && !t->pub && !t->lb_joined && t->lb_listed == 0 &&
+        now - t->lb_list_last >= (t->c.code[0] ? 10000.0 : 1000.0) &&
+        now - t->lb_welcome_at >= (double)t->c.join_delay_ms) { /* W446 TEST join_delay_ms (Standard 0) */
+        lb_enter(t);
+        t->lb_list_last = now;
+    }
+}
+
+/* W395: Relay-Index einer Absenderadresse (-1 = keines). */
+static int tl_relay_by_addr(loctun *t, const struct sockaddr_in *a)
+{
+    int i;
+    for (i = 0; i < t->nrelays; i++) {
+        if (t->relays[i].resolved && sa_eq(a, &t->relays[i].addr)) return i;
+    }
+    return -1;
+}
+
+/* W395: Soll die Verbindung an Relay ri gebunden sein? Mit eigener Wegwahl an allen Relays (dieselbe link_id, das
+ * Ticket gilt auf jedem Relay mit dem gemeinsamen Schluessel), sonst nur am vom Treffpunkt gewaehlten. */
+int tl_bind_want(loctun *t, const tlink *L, int ri)
+{
+    if (!L->used || L->blocked || !L->e2e.valid || !L->have_ticket || L->relay_link == 0) return 0;
+    if (ri < 0 || ri >= t->nrelays || !t->relays[ri].resolved) return 0;
+    if (L->want == 2 && L->want_ri == ri) return 1;
+    if (!t->c.route_auto) return 0;
+    /* Wartung (Treffpunkt nennt das Relay nicht mehr): keine neue Bindung, ein laufender Weg laeuft aus */
+    return !t->relay_usable_set || (t->relay_usable & (1u << ri)) || (L->path == 2 && L->relay_idx == ri && L->rb[ri].ok);
+}
+
+/* W334: TBIND_CONFIRM mit Ticket und Rueckweg-Cookie (SECURITY.md §5.2). */
+void tl_tbind_confirm(loctun *t, tlink *L, int ri)
+{
+    uint8_t p[5 + TICKET_LEN + 16];
+    memcpy(p, "SBN1", 4);
+    p[4] = SN_TBIND_CONFIRM;
+    memcpy(p + 5, L->ticket, TICKET_LEN);
+    memcpy(p + 5 + TICKET_LEN, L->rb[ri].cookie, 16);
+    tl_sendto(t, &t->relays[ri].addr, p, sizeof p);
+}
+
+void lb_rx_sbn(loctun *t, const uint8_t *p, int len, const struct sockaddr_in *from, double now)
+{
+    int i;
+    if (len < 5) return;
+    switch (p[4]) {
+    case SN_BIND_ACK:
+        if (len == 11 && sa_eq(from, &t->srv_udp)) {
+            if (!t->bound) tl_logf(t, "LOCLOBBY: UDP beim Treffpunkt gebunden");
+            t->bound = 1;
+        }
+        break;
+    case SN_PONG:
+        if (len == 13) {
+            for (i = 0; i < t->nrelays; i++) {
+                trelay *r = &t->relays[i];
+                int k;
+                if (!sa_eq(from, &r->addr) || memcmp(r->nonce, p + 5, 7) != 0) continue;
+                k = p[12];
+                if (k < 5 && r->ping_at[k] > 0) {
+                    if (r->nrtt < 5) r->rtt[r->nrtt++] = now - r->ping_at[k];
+                    r->ping_at[k] = 0;
+                }
+            }
+        }
+        break;
+    case SN_TBIND_COOKIE:
+        /* Cookie kommt nur an die echte Absenderadresse (O2). Es traegt keinen Link-Bezug: fuer jede wartende
+         * Bindung an diesem Relay versuchen (falsche Kombinationen verwirft das Relay). */
+        if (len == 21) {
+            int ri = tl_relay_by_addr(t, from);
+            for (i = 0; i < TUN_MAX_LINKS && ri >= 0; i++) {
+                tlink *L = &t->links[i];
+                if (tl_bind_want(t, L, ri) && !L->rb[ri].ok) {
+                    memcpy(L->rb[ri].cookie, p + 5, 16);
+                    L->rb[ri].have_cookie = 1;
+                    tl_tbind_confirm(t, L, ri);
+                }
+            }
+        }
+        break;
+    case SN_TBIND_ACK:
+        if (len == 9) {
+            uint32_t lid = get32be(p + 5);
+            int ri = tl_relay_by_addr(t, from);
+            for (i = 0; i < TUN_MAX_LINKS && ri >= 0; i++) {
+                tlink *L = &t->links[i];
+                if (tl_bind_want(t, L, ri) && L->relay_link == lid && !L->rb[ri].ok) {
+                    L->rb[ri].ok = 1;
+                    L->rt_last_ok[1 + ri] = now;
+                    tl_logf(t, "LOCTUN: Relay %s fuer c%u gebunden", t->relays[ri].name, L->cid);
+                }
+            }
+        }
+        break;
+    case SN_RELAY_FROM:
+        if (len > 9) {
+            uint32_t lid = get32be(p + 5);
+            int ri = tl_relay_by_addr(t, from);
+            for (i = 0; i < TUN_MAX_LINKS && ri >= 0 && lid != 0; i++) {
+                tlink *L = &t->links[i];
+                /* W395: jedes Relay, an dem die link_id gebunden sein soll (Echtheit pruefte SBT2) */
+                if (L->used && L->relay_link == lid && tl_bind_want(t, L, ri)) {
+                    tl_rx_sbt(t, p + 9, len - 9, from, i, ri, now); /* Nutzlast = SBT2 (sonst verworfen) */
+                    break;
+                }
+            }
+        }
+        break;
+    default:
+        break;
+    }
+}
+

@@ -21,6 +21,10 @@
 #include "loc_chat.h"     /* W437 LOC-CHAT */
 #include "loc_assist.h"   /* W440 LOC-LOBBY-MODES */
 #include "loc_lobbylist.h" /* W443 LOC-LOBBY-LIST */
+#include "loc_lobbywidget.h" /* W460 LOC-LOBBY-WIDGET */
+#include "loc_lan.h"       /* W454 LOC-LAN-MODE */
+#include "loc_rbn.h"       /* W475 LOC-RB-PREAGREE (Vektoren SBRP) */
+#include "sb_sha256.h"
 
 static int s_ok, s_n;
 #define CHECK(c, msg)                                                   \
@@ -1907,6 +1911,33 @@ static void vector_tests(const char *path, int required)
             CHECK(lguard_udp_ok((uint16_t)jm_num(jm_get(e, "port")), c, dl) == jm_true(jm_get(e, "ok")), msg);
         }
     }
+    /* W475 LOC-RB-PREAGREE: Paket SBRP (Format, Pruefsumme) gegen die Python-Referenz */
+    arr = jm_get(js, "rbn_pre");
+    if (required) CHECK(arr && jm_len(arr) >= 30, "W475: Vektoren rbn_pre vorhanden");
+    for (i = 0; arr && i < jm_len(arr); i++) {
+        const char *e = jm_idx(arr, i), *dv = jm_get(e, "digest");
+        int pl = jm_hex(jm_get(e, "pkt"), c, sizeof c), okexp = jm_true(jm_get(e, "ok"));
+        char msg[160];
+        jm_str(jm_get(e, "name"), name, sizeof name);
+        _snprintf_s(msg, sizeof msg, _TRUNCATE, "Vektor: SBRP \"%s\" %s", name, okexp ? "gueltig" : "verworfen");
+        CHECK(rbn_pre_check(c, pl) == okexp, msg);
+        if (dv && okexp && pl >= RBN_PRE_HEAD) {
+            uint32_t part[RBN_PRE_MAXPART], want = 0, k2;
+            int np = c[7];
+            char dh[16];
+            jm_str(dv, dh, sizeof dh);
+            want = (uint32_t)strtoul(dh, NULL, 16);
+            for (k2 = 0; k2 < (uint32_t)np && k2 < RBN_PRE_MAXPART; k2++)
+                part[k2] = (uint32_t)c[32 + 4 * k2] | ((uint32_t)c[33 + 4 * k2] << 8) | ((uint32_t)c[34 + 4 * k2] << 16) |
+                           ((uint32_t)c[35 + 4 * k2] << 24);
+            _snprintf_s(msg, sizeof msg, _TRUNCATE, "Vektor: SBRP-Pruefsumme \"%s\"", name);
+            CHECK(rbn_pre_digest((uint32_t)c[12] | ((uint32_t)c[13] << 8) | ((uint32_t)c[14] << 16) | ((uint32_t)c[15] << 24),
+                                 (uint32_t)c[16] | ((uint32_t)c[17] << 8) | ((uint32_t)c[18] << 16) | ((uint32_t)c[19] << 24),
+                                 c[24], c[25], c[26],
+                                 (uint32_t)c[28] | ((uint32_t)c[29] << 8) | ((uint32_t)c[30] << 16) | ((uint32_t)c[31] << 24),
+                                 part, np) == want, msg);
+        }
+    }
     free(js);
 }
 
@@ -2232,26 +2263,6 @@ static SOCKET fl_accept(SOCKET lis, int ms)
     return fp_tcp_pending(lis, ms) ? accept(lis, NULL, NULL) : INVALID_SOCKET;
 }
 
-/* Eine Zeile (ohne '\n') lesen; -1 = keine vollstaendige Zeile in ms, -2 = Verbindung zu. */
-static int fl_line(SOCKET c, char *buf, int cap, int ms)
-{
-    double t0 = now_ms();
-    int o = 0;
-    for (;;) {
-        double left = ms - (now_ms() - t0);
-        char ch;
-        int k;
-        if (left <= 0 || !fp_tcp_pending(c, (int)left + 1)) return -1;
-        k = recv(c, &ch, 1, 0);
-        if (k <= 0) return -2;
-        if (ch == '\n') {
-            buf[o] = 0;
-            return o;
-        }
-        if (o < cap - 1) buf[o++] = ch;
-    }
-}
-
 /* Datagramme am Beobachter (UDP-Port des Treffpunkts) zaehlen, die mit "SBN1" beginnen. */
 static int fl_udp_count(SOCKET u, int ms)
 {
@@ -2481,12 +2492,30 @@ static void pub_tests(void)
     strcat_s(line, sizeof line, ",{\"id\":21,\"host_pilot\":\"Started\",\"state\":\"started\",\"rules\":{}}]}");
     loctun_test_line(G.tun, 0, line, out, sizeof out);
     CHECK(loctun_pub_games(G.tun) == 3, "W373: Liste -> 3 offene Spiele (ungueltige, volle, gestartete, Adresskonflikte nicht)");
+    { /* W460 LOC-LOBBY-WIDGET: Liste fuer das Widget (gleiche Geister, aelteste zuerst, Obergrenze, nur Zahlen/Namen) */
+        loctun_pub_entry pe[5];
+        int tot = -1, n, okc = 1;
+        n = loctun_pub_list(G.tun, pe, 5, &tot);
+        CHECK(n == 3 && tot == 3 && pe[0].lid == 11 && pe[1].lid == 12 && pe[2].lid == 13,
+              "W460: Widget-Liste 3 offene Lobbys, aelteste (kleinste Id) zuerst");
+        CHECK(n == 3 && strcmp(pe[0].pilot, "Alpha") == 0 && strcmp(pe[1].pilot, "Guest-Bravo") == 0 && pe[0].cur == 1 &&
+                  pe[0].max == 10 && pe[0].mode == LAS_SIM && pe[0].est < 0,
+              "W460: Eintrag Pilot, Spieler 1/10, Modus Sim, Ping unbekannt");
+        for (i = 0; n == 3 && pe[2].pilot[i]; i++) okc &= (unsigned char)pe[2].pilot[i] >= 0x20;
+        CHECK(n == 3 && okc, "W460: Pilotname ohne Steuerzeichen");
+        n = loctun_pub_list(G.tun, pe, 2, &tot);
+        CHECK(n == 2 && tot == 3 && pe[0].lid == 11 && pe[1].lid == 12, "W460: Obergrenze cap, total = alle offenen");
+    }
     CHECK(locnet_addr_known(&G, vA) && locnet_addr_known(&G, vB) && !locnet_addr_known(&G, ip4("127.88.7.8")),
           "W373: XNetXnAddrToInAddr kennt nur gelistete Geister");
     /* Suche des Spiels -> Host-Info je Spiel (Nonce-Echo, XNADDR = Absender, Gastfilter), Liste wird frisch geholt */
     pub_search(&G, g1201, nonce, &seed);
     loctun_test_line(G.tun, 0, NULL, out, sizeof out);
     CHECK(strstr(out, "\"t\":\"lobby_list\"") && strstr(out, "\"open\":true"), "W373: Suche holt die Liste (open:true)");
+    loctun_pub_watch(G.tun, 1); /* W460: Widget sichtbar, Liste eben geholt -> keine weitere Abfrage vor Ablauf von 12 s */
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    CHECK(!strstr(out, "lobby_list"), "W460: Widget sichtbar - keine zweite Abfrage binnen 12 s (Rate-Limit)");
+    loctun_pub_watch(G.tun, 0);
     k = pub_recv_all(&G, g1201, nonce, vips, 64, &bad);
     CHECK(k == 3 && bad == 0, "W373: Suche -> 3 Host-Infos (Typ 2, 100 B, Nonce-Echo, XNADDR = Absender, Gastfilter ok)");
     {
@@ -3426,6 +3455,13 @@ static void w443_llv_tests(void)
     char pt[16];
     int i, y0, y1, ok = 1;
     w443_entry(e, 31);
+    /* W460 LOC-LOBBY-WIDGET: Seitenerkennung (Szene 8, Text-Id der ersten Zeile, Zahl der Zeilen) */
+    CHECK(lw_screen_from(8, LW_TID_MAIN, 7) == 1 && lw_screen_from(8, LW_TID_MATCH, 2) == 2,
+          "W460: MAIN MENU (0x1B4, 7 Zeilen) und MatchMaking (0x3A0, 2 Zeilen) erkannt");
+    CHECK(lw_screen_from(8, 0x1B5, 25) == 0 && lw_screen_from(8, 0x432, 1) == 0 && lw_screen_from(5, LW_TID_MAIN, 7) == 0 &&
+              lw_screen_from(8, LW_TID_MAIN, 2) == 0 && lw_screen_from(8, LW_TID_MATCH, 7) == 0 && lw_screen_from(12, LW_TID_MATCH, 2) == 0 &&
+              lw_screen_from(-1, -1, -1) == 0,
+          "W460: Missionswahl, Suchergebnis/Cancel-Dialog, andere Szenen und Mischwerte -> kein Widget");
     CHECK(llv_entry_lid(e) == 31, "W443: Listeneintrag eines Geists -> Lobby-Id aus der XNKID");
     w443_entry(e, 2147483647);
     CHECK(llv_entry_lid(e) == 2147483647, "W443: groesste Lobby-Id");
@@ -3681,6 +3717,393 @@ static void w420_ver_tests(void)
     w420_ver_case(43300, "0.3.2", "-", 0, "aelterer Client ohne Versionsfeld");
 }
 
+/* ---------- W454 LOC-LAN-MODE: LAN ohne steelnet (reiner Kern + Transport ueber Loopback) ---------- */
+static void w454_hex(const uint8_t *p, int n, char *out)
+{
+    static const char H[] = "0123456789abcdef";
+    int i;
+    for (i = 0; i < n; i++) {
+        out[2 * i] = H[p[i] >> 4];
+        out[2 * i + 1] = H[p[i] & 15];
+    }
+    out[2 * n] = 0;
+}
+
+static void w454_beacon_fixed(llan_beacon *o)
+{
+    int i;
+    memset(o, 0, sizeof *o);
+    o->tport = 47555;
+    o->cid = 0x12345678u;
+    strcpy_s(o->room, sizeof o->room, "LAN");
+    o->room_id = llan_room_id("LAN");
+    for (i = 0; i < 16; i++) o->nonce[i] = (uint8_t)i;
+    for (i = 0; i < 32; i++) o->pub[i] = (uint8_t)(64 + i);
+    strcpy_s(o->pilot, sizeof o->pilot, "Alice");
+    strcpy_s(o->ver, sizeof o->ver, "0.4.1");
+    o->mode = 1;
+}
+
+/* Vektoren unabhaengig mit Python hashlib berechnet (pbkdf2_hmac, sha256, hmac) - BERICHT_M2 W454 */
+static void w454_lan_unit_tests(void)
+{
+    char room[32], pil[32], hx[80];
+    uint8_t psk[32], pn[16], th[32], key[32], b[LLAN_BEACON_LEN + 4], d[32];
+    uint8_t nlo[16], nhi[16];
+    llan_beacon o, q;
+    int i, ok;
+    CHECK(llan_room_norm("", room, sizeof room) && strcmp(room, "LAN") == 0, "W454: Raumname leer = LAN");
+    CHECK(llan_room_norm("  Party  ", room, sizeof room) && strcmp(room, "Party") == 0, "W454: Raumname ohne Randleerzeichen");
+    CHECK(!llan_room_norm("12345678901234567", room, sizeof room) && !llan_room_norm("R\xc3\xa4um", room, sizeof room) &&
+              !llan_room_norm("a\tb", room, sizeof room),
+          "W454: Raumname zu lang / nicht ASCII / Steuerzeichen abgelehnt");
+    llan_pilot_norm("J\xc3\xbcrgen", pil, sizeof pil);
+    CHECK(strcmp(pil, "J?rgen") == 0, "W454: Pilotname UTF-8 -> ein '?' je Zeichen");
+    llan_pilot_norm("", pil, sizeof pil);
+    CHECK(strcmp(pil, "Pilot") == 0, "W454: Pilotname leer = Pilot");
+    llan_pilot_norm("ABCDEFGHIJKLMNOPQRS", pil, sizeof pil);
+    CHECK(strlen(pil) == 16, "W454: Pilotname auf 16 Zeichen gekuerzt");
+    CHECK(llan_room_id("LAN") == 0x1efa18b4u && llan_room_id("Party") == 0x62a20445u, "W454: Raumkennung (Vektor)");
+    llan_psk("LAN", "geheim", 0, psk);
+    w454_hex(psk, 32, hx);
+    CHECK(strcmp(hx, "898c8a6e172f1e9be38139ec23a9bae2f7b7828e1478bf646d2536f50b71d656") == 0,
+          "W454: Raumschluessel PBKDF2-HMAC-SHA256 20000 (Vektor, Passwort)");
+    llan_psk("LAN", "", 0, psk);
+    w454_hex(psk, 32, hx);
+    CHECK(strcmp(hx, "8d6221e9cdd995a97569321fbad3906b5191320053d21a15117b35a449e6e553") == 0,
+          "W454: Raumschluessel ohne Passwort (Vektor, oeffentlich bekannt)");
+    llan_psk("Party", "pw", 3, psk);
+    w454_hex(psk, 32, hx);
+    CHECK(strcmp(hx, "3640831340daae6135df699567c110de0eee30a6fc3e432dc0d40f8535a4549d") == 0,
+          "W454: Raumschluessel Raum als Salz (Vektor, 3 Runden)");
+    for (i = 0; i < 16; i++) {
+        nlo[i] = (uint8_t)i;
+        nhi[i] = (uint8_t)(16 + i);
+    }
+    llan_pair_nonce(nlo, nhi, pn);
+    w454_hex(pn, 16, hx);
+    CHECK(strcmp(hx, "8e36c42208e422f1f2863381533ebbe1") == 0, "W454: pair_nonce aus beiden Zufallswerten (Vektor)");
+    memset(th, 0x11, 32);
+    memset(key, 0x22, 32);
+    llan_th_mix(th, key);
+    w454_hex(th, 32, hx);
+    CHECK(strcmp(hx, "978bde21bf424836c6df1fdab109215951cdfbbb4ddc0552094a75796b8fa76c") == 0,
+          "W454: Transkript an den Raumschluessel gebunden (Vektor)");
+    /* Paket: Bau gegen Vektor, Rundweg */
+    w454_beacon_fixed(&o);
+    CHECK(llan_beacon_build(b, sizeof b, &o) == LLAN_BEACON_LEN, "W454: SBL1 gebaut (116 Byte)");
+    sb_sha256(b, LLAN_BEACON_LEN, d);
+    w454_hex(d, 32, hx);
+    CHECK(strcmp(hx, "4b162cbd5de409301b3e62f7dfe426fcac20a2d27f6faae025fc524fb6222dc8") == 0, "W454: SBL1 Byte fuer Byte (Vektor)");
+    memset(&q, 0, sizeof q);
+    CHECK(llan_beacon_parse(b, LLAN_BEACON_LEN, &q) == 1 && q.cid == o.cid && q.tport == o.tport &&
+              strcmp(q.room, "LAN") == 0 && strcmp(q.pilot, "Alice") == 0 && strcmp(q.ver, "0.4.1") == 0 && q.mode == 1 &&
+              memcmp(q.pub, o.pub, 32) == 0 && memcmp(q.nonce, o.nonce, 16) == 0,
+          "W454: SBL1 Rundweg (alle Felder)");
+    /* Bau verweigert ungueltige Felder */
+    q = o; q.cid = 0; ok = llan_beacon_build(b, sizeof b, &q) == 0;
+    q = o; q.tport = 0; ok &= llan_beacon_build(b, sizeof b, &q) == 0;
+    q = o; q.room_id ^= 1; ok &= llan_beacon_build(b, sizeof b, &q) == 0;
+    q = o; strcpy_s(q.ver, sizeof q.ver, "0.4/1"); ok &= llan_beacon_build(b, sizeof b, &q) == 0;
+    q = o; q.mode = 3; ok &= llan_beacon_build(b, sizeof b, &q) == 0;
+    CHECK(ok, "W454: SBL1-Bau verweigert ungueltige Felder");
+    /* Pruefung: jede Verletzung verworfen */
+    {
+        static const struct { int off; uint8_t val; const char *why; } kMut[] = {
+            { 0, 'X', "Magic" }, { 4, 2, "Protokoll" }, { 5, 1, "Reserve 5" }, { 115, 1, "Reserve 115" },
+            { 64, 0, "Raum leer" }, { 64, 17, "Raum zu lang" }, { 65, 0x7F, "Raum Steuerzeichen" }, { 70, 'x', "Raum-Fuellung" },
+            { 81, 0, "Pilot leer" }, { 81, 17, "Pilot zu lang" }, { 82, 0x19, "Pilot Steuerzeichen" }, { 90, 'x', "Pilot-Fuellung" },
+            { 98, 0, "Version leer" }, { 99, '/', "Version Zeichen" }, { 110, 'x', "Version-Fuellung" }, { 113, '1', "Version 16 Zeichen" },
+            { 114, 0, "Modus 0" }, { 114, 3, "Modus 3" }, { 12, 0, "Raumkennung passt nicht" },
+        };
+        uint8_t m[LLAN_BEACON_LEN + 4];
+        int k, all = 1;
+        llan_beacon_build(b, sizeof b, &o);
+        for (k = 0; k < (int)(sizeof kMut / sizeof kMut[0]); k++) {
+            memcpy(m, b, LLAN_BEACON_LEN);
+            m[kMut[k].off] = kMut[k].val;
+            if (llan_beacon_parse(m, LLAN_BEACON_LEN, &q)) {
+                all = 0;
+                printf("  W454: Mutation %s angenommen\n", kMut[k].why);
+            }
+        }
+        memcpy(m, b, LLAN_BEACON_LEN);
+        m[6] = m[7] = 0; /* tport 0 */
+        all &= !llan_beacon_parse(m, LLAN_BEACON_LEN, &q);
+        memcpy(m, b, LLAN_BEACON_LEN);
+        memset(m + 8, 0, 4); /* cid 0 */
+        all &= !llan_beacon_parse(m, LLAN_BEACON_LEN, &q);
+        memcpy(m, b, LLAN_BEACON_LEN);
+        memset(m + 32, 0, 32); /* Schluessel 0 */
+        all &= !llan_beacon_parse(m, LLAN_BEACON_LEN, &q);
+        all &= !llan_beacon_parse(b, LLAN_BEACON_LEN - 1, &q) && !llan_beacon_parse(b, LLAN_BEACON_LEN + 1, &q) &&
+               !llan_beacon_parse(b, 0, &q) && !llan_beacon_parse(NULL, LLAN_BEACON_LEN, &q);
+        CHECK(all, "W454: SBL1-Pruefung verwirft jede Feldverletzung (Laenge, Magic, Reserve, Namen, Fuellung, Version, Modus, Kennung)");
+    }
+    /* Fuzz: zufaellige Mutationen und Zufallspuffer - nie Absturz, angenommen nur kanonische Pakete */
+    {
+        uint32_t rng = 0x454u;
+        uint8_t m[160], r2[LLAN_BEACON_LEN + 4];
+        int k, acc = 0, noncanon = 0;
+        llan_beacon_build(b, sizeof b, &o);
+        for (k = 0; k < 200000; k++) {
+            int n = LLAN_BEACON_LEN, j, flips;
+            rng = rng * 1103515245u + 12345u;
+            if ((k & 7) == 0) { /* Zufallspuffer beliebiger Laenge */
+                n = (int)((rng >> 8) % 160u);
+                for (j = 0; j < n; j++) {
+                    rng = rng * 1103515245u + 12345u;
+                    m[j] = (uint8_t)(rng >> 16);
+                }
+                if (n >= 5 && (k & 15) == 0) {
+                    memcpy(m, "SBL1", 4);
+                    m[4] = 1;
+                }
+            } else {
+                memcpy(m, b, LLAN_BEACON_LEN);
+                flips = 1 + (int)((rng >> 12) % 4u);
+                for (j = 0; j < flips; j++) {
+                    rng = rng * 1103515245u + 12345u;
+                    m[(rng >> 8) % LLAN_BEACON_LEN] ^= (uint8_t)(1u << ((rng >> 4) & 7u));
+                }
+            }
+            if (llan_beacon_parse(m, n, &q)) {
+                acc++;
+                if (llan_beacon_build(r2, sizeof r2, &q) != LLAN_BEACON_LEN || memcmp(r2, m, LLAN_BEACON_LEN) != 0) noncanon++;
+            }
+        }
+        {
+            char msg[160];
+            _snprintf_s(msg, sizeof msg, _TRUNCATE,
+                        "W454: Fuzz 200000 SBL1-Mutationen ohne Absturz, %d angenommen, alle kanonisch (%d abweichend)", acc,
+                        noncanon);
+            CHECK(noncanon == 0, msg);
+        }
+    }
+    /* Schluessel: beide Seiten gleich mit gleichem Passwort, ungleich mit anderem (wie loc_tun_lan.c/tl_link_pair) */
+    {
+        static const uint8_t ka[32] = { 0x77, 0x07, 0x6d, 0x0a, 0x73, 0x18, 0xa5, 0x7d, 0x3c, 0x16, 0xc1, 0x72, 0x51, 0xb2,
+                                        0x66, 0x45, 0xdf, 0x4c, 0x2f, 0x87, 0xeb, 0xc0, 0x99, 0x2a, 0xb1, 0x77, 0xfb, 0xa5,
+                                        0x1d, 0xb9, 0x2c, 0x2a };
+        static const uint8_t kb[32] = { 0x5d, 0xab, 0x08, 0x7e, 0x62, 0x4a, 0x8a, 0x4b, 0x79, 0xe1, 0x7f, 0x8b, 0x83, 0x80,
+                                        0x0e, 0xe6, 0x6f, 0x3b, 0xb1, 0x29, 0x26, 0x18, 0xb6, 0xfd, 0x1c, 0x2f, 0x8b, 0x27,
+                                        0xff, 0x88, 0xe0, 0xeb };
+        sbe2e_kp A, B;
+        sbe2e_side sa_, sb2;
+        sbe2e_link LA, LB, LC;
+        uint8_t tha[32], thb[32], thc[32], pskA[32], pskC[32], pkt[128], pt[64];
+        int n1, r1, r2;
+        memset(&sa_, 0, sizeof sa_);
+        memset(&sb2, 0, sizeof sb2);
+        memset(&LA, 0, sizeof LA);
+        memset(&LB, 0, sizeof LB);
+        memset(&LC, 0, sizeof LC);
+        sbe2e_kp_import(&A, ka, sa_.pub);
+        sbe2e_kp_import(&B, kb, sb2.pub);
+        sa_.cid = 100;
+        sb2.cid = 200;
+        strcpy_s(sa_.pilot, sizeof sa_.pilot, "Alice");
+        strcpy_s(sb2.pilot, sizeof sb2.pilot, "Bob");
+        llan_psk("LAN", "geheim", 3, pskA);
+        llan_psk("LAN", "falsch", 3, pskC);
+        sbe2e_transcript(tha, llan_room_id("LAN"), pn, &sa_, &sb2);
+        memcpy(thb, tha, 32);
+        memcpy(thc, tha, 32);
+        llan_th_mix(tha, pskA);
+        llan_th_mix(thb, pskA);
+        llan_th_mix(thc, pskC);
+        r1 = sbe2e_derive(&A, sb2.pub, tha, 100, 200, &LA);
+        r2 = sbe2e_derive(&B, sa_.pub, thb, 200, 100, &LB);
+        sbe2e_derive(&B, sa_.pub, thc, 200, 100, &LC);
+        CHECK(r1 == 0 && r2 == 0 && LA.sid == LB.sid && LA.sid != LC.sid, "W454: gleiche Schluessel nur mit gleichem Raumpasswort");
+        memset(pt, 0, sizeof pt);
+        pt[0] = 4; /* PING */
+        n1 = sbe2e_seal(&LA, pt, 5, pkt, sizeof pkt);
+        CHECK(n1 > 0 && sbe2e_open(&LB, pkt, n1, pt, sizeof pt) == 5, "W454: SBT2 mit LAN-Schluessel: Gegenseite oeffnet");
+        n1 = sbe2e_seal(&LA, pt, 5, pkt, sizeof pkt);
+        CHECK(n1 > 0 && sbe2e_open(&LC, pkt, n1, pt, sizeof pt) < 0, "W454: anderes Raumpasswort: Paket wird verworfen");
+        sbe2e_link_free(&LA);
+        sbe2e_link_free(&LB);
+        sbe2e_link_free(&LC);
+        sbe2e_kp_free(&A);
+        sbe2e_kp_free(&B);
+    }
+}
+
+/* Transport im LAN-Modus ueber Loopback (TEST-Ziele statt Broadcast): Instanz i mit Entdeckungs-Port base+10+i. */
+typedef struct w454_inst {
+    locnet N;
+} w454_inst;
+
+static int w454_start(w454_inst *I, int idx, int base, int n, const char *room, const char *pass, const char *ver,
+                      const char *pilot)
+{
+    loctun_cfg c;
+    int k;
+    size_t l;
+    memset(I, 0, sizeof *I);
+    if (!locnet_init(&I->N, "random", base + idx * 10, "none", 10, lg)) return 0;
+    loctun_cfg_default(&c);
+    c.proxy_base = (uint16_t)(base + 3000 + idx * 100);
+    c.port = (uint16_t)(base + 900 + idx);
+    c.lan = 1;
+    c.lan_port = (uint16_t)(base + 10 + idx);
+    strcpy_s(c.lan_room, sizeof c.lan_room, room);
+    strcpy_s(c.lan_pass, sizeof c.lan_pass, pass);
+    strcpy_s(c.pilot, sizeof c.pilot, pilot);
+    if (ver) strcpy_s(c.ver_test, sizeof c.ver_test, ver);
+    c.lan_targets[0] = 0;
+    for (k = 0; k < n; k++) {
+        if (k == idx) continue;
+        l = strlen(c.lan_targets);
+        _snprintf_s(c.lan_targets + l, sizeof c.lan_targets - l, _TRUNCATE, "%s127.0.0.1:%d", l ? "," : "", base + 10 + k);
+    }
+    I->N.tun = loctun_start(&c, &I->N, NULL, lg);
+    return I->N.tun != NULL;
+}
+
+static int w454_wait_links(w454_inst *I, int n, int want, int ms)
+{
+    int t, k, all;
+    for (t = 0; t < ms; t += 20) {
+        all = 1;
+        for (k = 0; k < n; k++) all &= loctun_links_up(I[k].N.tun) == want && I[k].N.npeers == want;
+        if (all) return 1;
+        Sleep(20);
+    }
+    return 0;
+}
+
+static void w454_stop(w454_inst *I, int n)
+{
+    int k;
+    for (k = 0; k < n; k++) locnet_shutdown(&I[k].N);
+}
+
+static volatile LONG s_w454_chat;
+static char s_w454_from[24];
+static void w454_chat_cb(uint32_t vip, const char *pilot, const uint8_t *d, int len)
+{
+    (void)vip; (void)d; (void)len;
+    strncpy_s(s_w454_from, sizeof s_w454_from, pilot ? pilot : "", _TRUNCATE);
+    InterlockedIncrement(&s_w454_chat);
+}
+
+static void w454_lan_tun_tests(void)
+{
+    w454_inst I[3];
+    int ok, peers = 0, up = 0, k;
+    char need[16], pv[16], nm[24];
+    /* drei Clients im selben Raum mit Passwort: jeder findet jeden (Masche), Pilotnamen aus der Entdeckung */
+    ok = w454_start(&I[0], 0, 45400, 3, "Party", "geheim", NULL, "Alice") &&
+         w454_start(&I[1], 1, 45400, 3, "Party", "geheim", NULL, "Bob") &&
+         w454_start(&I[2], 2, 45400, 3, "Party", "geheim", NULL, "Carol");
+    CHECK(ok, "W454: drei Transporte im LAN-Modus gestartet (ohne Treffpunkt)");
+    ok = ok && w454_wait_links(I, 3, 2, 8000);
+    CHECK(ok, "W454: LAN-Entdeckung + Durchstich: drei Clients verbinden sich untereinander (je 2 Verbindungen, SBT2)");
+    if (ok) {
+        CHECK(loctun_lan_state(I[0].N.tun, &peers, &up) == 1 && peers == 2 && up == 2 && loctun_lobby_state(I[0].N.tun) == 3 &&
+                  loctun_sec_state(I[0].N.tun) == 0,
+              "W454: LAN-Zustand (2 Mitspieler, 2 verbunden, Raum = Lobby fuer den Chat, sec ok)");
+        nm[0] = 0;
+        CHECK(loctun_my_pilot(I[1].N.tun, nm, sizeof nm) && strcmp(nm, "Bob") == 0, "W454: eigener Pilotname im LAN");
+        nm[0] = 0;
+        CHECK(loctun_peer_pilot(I[0].N.tun, I[2].N.self_ip, nm, sizeof nm) && strcmp(nm, "Carol") == 0,
+              "W454: Pilotname des Mitspielers aus der Entdeckung (an die Schluessel gebunden)");
+        { /* Spiel-Suche (UDP 1201 Broadcast) ueber den Transport an alle */
+            SOCKET a = locnet_socket(&I[0].N, AF_INET, SOCK_DGRAM, IPPROTO_UDP), b = locnet_socket(&I[1].N, AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+            struct sockaddr_in la = sa(INADDR_ANY, 1201), to = sa(INADDR_BROADCAST, 1201), fr;
+            BOOL on = TRUE;
+            char q[0x14], r[64];
+            int fl = sizeof fr, got = -1, t;
+            u_long nb = 1;
+            memset(q, 0, sizeof q);
+            q[0] = 1;
+            locnet_bind(&I[0].N, a, (struct sockaddr *)&la, sizeof la);
+            locnet_bind(&I[1].N, b, (struct sockaddr *)&la, sizeof la);
+            setsockopt(a, SOL_SOCKET, SO_BROADCAST, (const char *)&on, sizeof on);
+            ioctlsocket(b, (long)0x8004667E, &nb);
+            locnet_sendto(&I[0].N, a, q, sizeof q, 0, (struct sockaddr *)&to, sizeof to);
+            for (t = 0; t < 100 && got < 0; t++) {
+                fl = sizeof fr;
+                got = locnet_recvfrom(&I[1].N, b, r, sizeof r, 0, (struct sockaddr *)&fr, &fl);
+                if (got < 0) Sleep(20);
+            }
+            CHECK(got == 0x14 && r[0] == 1 && fr.sin_addr.s_addr == I[0].N.self_ip,
+                  "W454: System-Link-Suche (Broadcast 1201) erreicht den LAN-Mitspieler mit virtueller Absenderadresse");
+            locnet_closesocket(&I[0].N, a);
+            locnet_closesocket(&I[1].N, b);
+        }
+        { /* Lobby-Chat P2P im LAN */
+            uint8_t pkt[LCH_PKT_MAX];
+            int len = lch_build(pkt, sizeof pkt, 0x454u, 1u, (const uint8_t *)"Hallo LAN", 9);
+            s_w454_chat = 0;
+            loctun_set_chat(I[2].N.tun, (uint16_t)LCH_PORT_GP, w454_chat_cb);
+            loctun_dgram(I[0].N.tun, INADDR_BROADCAST, (uint16_t)LCH_PORT_GP, (uint16_t)LCH_PORT_GP, (const char *)pkt, len);
+            for (k = 0; k < 100 && !s_w454_chat; k++) Sleep(20);
+            Sleep(200);
+            CHECK(s_w454_chat == 1 && strcmp(s_w454_from, "Alice") == 0,
+                  "W454: Lobby-Chat im LAN genau einmal beim Mitspieler, Absendername aus der Sitzung");
+            loctun_set_chat(I[2].N.tun, (uint16_t)LCH_PORT_GP, NULL);
+        }
+    }
+    w454_stop(I, 3);
+    /* falsches Passwort: Entdeckung ja, Verbindung nie (andere Schluessel) */
+    ok = w454_start(&I[0], 0, 45600, 2, "Party", "geheim", NULL, "Alice") &&
+         w454_start(&I[1], 1, 45600, 2, "Party", "falsch", NULL, "Mallory");
+    CHECK(ok, "W454: zwei Transporte mit verschiedenen Passwoertern gestartet");
+    if (ok) {
+        Sleep(3000);
+        loctun_lan_state(I[0].N.tun, &peers, &up);
+        CHECK(loctun_links_up(I[0].N.tun) == 0 && loctun_links_up(I[1].N.tun) == 0 && peers == 1 && up == 0 &&
+                  loctun_get_stats(I[0].N.tun)->e2e_bad + loctun_get_stats(I[1].N.tun)->e2e_bad > 0,
+              "W454: anderes Raumpasswort: gefunden, aber keine Verbindung (Pakete scheitern an der Authentisierung)");
+        Sleep(13500); /* LAN_PAIR_MS 15 s: Verbindungsplatz frei, Kennung uebergangen */
+        loctun_lan_state(I[0].N.tun, &peers, &up);
+        CHECK(peers == 0 && up == 0 && loctun_links_up(I[0].N.tun) == 0,
+              "W454: Paar ohne Verbindung nach 15 s freigegeben (kein dauerhaft belegter Platz durch falsches Passwort)");
+    }
+    w454_stop(I, 2);
+    /* andere Version: vor dem Schluesseltausch abgelehnt, Meldung 3 mit der neueren Version */
+    ok = w454_start(&I[0], 0, 45700, 2, "LAN", "", "0.4.1", "Alice") && w454_start(&I[1], 1, 45700, 2, "LAN", "", "0.4.2", "Bob");
+    CHECK(ok, "W454: zwei Transporte mit verschiedenen Versionen gestartet");
+    if (ok) {
+        Sleep(2500);
+        CHECK(loctun_links_up(I[0].N.tun) == 0 && loctun_version_state(I[0].N.tun, need, sizeof need, pv, sizeof pv) == 3 &&
+                  strcmp(need, "0.4.2") == 0 && strcmp(pv, "0.4.2") == 0,
+              "W454: andere Client-Version im LAN: keine Verbindung, Meldung (3) mit der neueren Version");
+    }
+    w454_stop(I, 2);
+    /* anderer Raum: still uebergangen (keine Verbindung, keine Versionsmeldung) */
+    ok = w454_start(&I[0], 0, 45800, 2, "Rot", "", NULL, "Alice") && w454_start(&I[1], 1, 45800, 2, "Blau", "", NULL, "Bob");
+    if (ok) {
+        Sleep(2500);
+        loctun_lan_state(I[0].N.tun, &peers, &up);
+        CHECK(loctun_links_up(I[0].N.tun) == 0 && peers == 0 && loctun_version_state(I[0].N.tun, NULL, 0, NULL, 0) == 0,
+              "W454: anderer Raum: still uebergangen (keine Verbindung)");
+    } else {
+        CHECK(0, "W454: Transporte fuer den Raumtest gestartet");
+    }
+    w454_stop(I, 2);
+    /* ohne Passwort (Standard-Raum LAN) verbinden sich zwei Clients */
+    ok = w454_start(&I[0], 0, 45900, 2, "", "", NULL, "Alice") && w454_start(&I[1], 1, 45900, 2, "LAN", "", NULL, "Bob");
+    CHECK(ok && w454_wait_links(I, 2, 1, 6000), "W454: Standard-Raum ohne Passwort: zwei Clients verbunden");
+    w454_stop(I, 2);
+    /* LAN nie zusammen mit dem festen Testweg bzw. Treffpunkt */
+    {
+        locnet X;
+        loctun_cfg c;
+        if (locnet_init(&X, "random", 46000, "none", 10, lg)) {
+            loctun_cfg_default(&c);
+            c.lan = 1;
+            strcpy_s(c.peers, sizeof c.peers, "127.0.0.1:46901");
+            X.tun = loctun_start(&c, &X, NULL, lg);
+            CHECK(X.tun && loctun_lan_state(X.tun, NULL, NULL) == 0, "W454: loc_lan neben dem festen Testweg abgelehnt (LAN aus)");
+            locnet_shutdown(&X);
+        }
+    }
+}
+
 int main(int argc, char **argv)
 {
     locnet A, B, C, X1, X2;
@@ -3697,6 +4120,7 @@ int main(int argc, char **argv)
     for (i = 1; i < argc; i++) { /* W334: --vectors <pfad>: Krypto/Filter gegen sbt2_vectors.json */
         if (strcmp(argv[i], "--vectors") == 0 && i + 1 < argc) {
             sec_unit_tests();
+            w454_lan_unit_tests(); /* W454: LAN-Kern (Vektoren, Fuzz) */
             vector_tests(argv[i + 1], 1);
             printf("loc_net_selftest --vectors: %d/%d OK\n", s_ok, s_n);
             return s_ok == s_n ? 0 : 1;
@@ -3985,6 +4409,7 @@ int main(int argc, char **argv)
         w440_mode_tun_tests();   /* W440 LOC-LOBBY-MODES: play_mode im Transport */
         w443_tun_tests();        /* W443 LOC-LOBBY-LIST: Modus je Zeile der Suchliste */
         w446_snchat_tun_tests(); /* W446 STEELNET-CHAT: steelnet-Chat im Steuerkanal */
+        w454_lan_tun_tests();    /* W454 LOC-LAN-MODE: LAN ohne steelnet */
     } else {
         printf("Hinweis: eigener Transport nur in der privaten Fassung - Transport-Pruefungen uebersprungen\n");
     }
@@ -3993,6 +4418,7 @@ int main(int argc, char **argv)
     w420_rule_tests(); /* W420 LOC-CLIPDUMP: Match-Regel */
     w440_las_tests();  /* W440 LOC-LOBBY-MODES: Durchsetzungsregel */
     w443_llv_tests();  /* W443 LOC-LOBBY-LIST: Zuordnung Zeile <-> Lobby */
+    w454_lan_unit_tests(); /* W454 LOC-LAN-MODE: LAN-Kern */
     pause_net_tests(); /* W357 */
     printf("loc_net_selftest: %d/%d OK\n", s_ok, s_n);
     return s_ok == s_n ? 0 : 1;

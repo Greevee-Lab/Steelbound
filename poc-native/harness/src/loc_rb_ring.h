@@ -57,6 +57,9 @@ int rbr_add(uint32_t va, uint32_t len, int want_ww, const uint32_t *alias, int n
 /* Heisse Seiten: nach n aufeinanderfolgenden beschriebenen Ticks offen lassen (0 = aus), nach cool unveraenderten
  * Ticks wieder schuetzen (Standard 2/64). Vor rbr_start. */
 void rbr_set_hot(unsigned n, unsigned cool);
+/* W469: Ring-Puffer und Schatten vorab anlegen und einmal beschreiben (vor dem ersten rbr_init/rbr_start, z. B. beim
+ * Einschalten); rbr_init nutzt den Puffer, wenn pool_pages gleich ist. 0 = ok. */
+int rbr_prealloc(unsigned pool_pages, unsigned shadow_pages);
 int rbr_start(void);          /* Schutz setzen, Write-Watch zuruecksetzen, Schattenkopie; 0 = ok */
 void rbr_stop(void);          /* Schutz zurueck, VEH weg, Speicher frei (rbr_init noetig fuer neuen Start) */
 int rbr_active(void);

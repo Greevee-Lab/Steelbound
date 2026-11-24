@@ -2036,6 +2036,46 @@ void audio_set_room_send(au32 v, int mb)
     au_unlock();
 }
 
+void audio_set_eg(au32 v, const au32 *d10)
+{
+    audio_voice_t *vp = au_lookup(v);
+    if (vp && d10)
+        aufx_eg_set(vp, d10);
+}
+
+int audio_stop_release(au32 v)
+{
+    audio_voice_t *vp = au_lookup(v);
+    int rel;
+    if (!vp)
+        return 0;
+    au_lock();
+    rel = vp->playing && aufx_voice_release(vp);
+    if (!rel) {
+        if (vp->kind == 1 && vp->playing)
+            g_stat_stop++;
+        vp->playing = 0;
+    }
+    au_unlock();
+    return rel;
+}
+
+void audio_note_stopex(au32 v, au32 flags)
+{
+    audio_voice_t *vp = au_lookup(v);
+    if (!vp)
+        return;
+    au_lock();
+    aufx_note_stopex(vp, flags);
+    au_unlock();
+}
+
+unsigned audio_voice_id(au32 v)
+{
+    audio_voice_t *vp = au_lookup(v);
+    return vp ? vp->id : 0u;
+}
+
 void audio_note_eg(au32 v, au32 pDesc)
 {
     audio_voice_t *vp = au_lookup(v);

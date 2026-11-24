@@ -20,6 +20,7 @@
 #include "sb_pausenet.h" /* W357 */
 #include "loc_assist.h" /* W440 LOC-LOBBY-MODES */
 #include "sb_profile.h" /* W440: g_sba_loc */
+#include "loc_chat.h" /* W474: lch_session_from */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -585,7 +586,7 @@ int loc_net_install(void)
          * zufaellige virtuelle Adresse (eindeutig auch zwischen Rechnern). Ohne loc_transport=udp wie bisher. */
         int udp = _stricmp(g_cfg.loc_transport, "udp") == 0;
         const char *addr = g_cfg.loc_net_addr;
-        if (udp && g_cfg.loc_lobby[0] && _stricmp(addr, "auto") == 0) {
+        if (udp && (g_cfg.loc_lobby[0] || g_cfg.loc_lan) && _stricmp(addr, "auto") == 0) { /* W454: auch LAN */
             addr = "random";
         }
         if (!locnet_init(&g_ln, addr, g_cfg.loc_net_port, udp ? "none" : g_cfg.loc_net_peers, g_cfg.loc_net_rtt,
@@ -654,6 +655,12 @@ int loc_net_install(void)
         strncpy_s(tc.spki, sizeof tc.spki, g_cfg.loc_lobby_spki, _TRUNCATE);
         strcpy_s(tc.play_mode, sizeof tc.play_mode, g_cfg.loc_play_mode == LAS_ARCADE ? "arcade" : "sim"); /* W440 */
         tc.join_delay_ms = g_cfg.loc_lobby_join_delay;                      /* W446 TEST */
+        tc.lan = g_cfg.loc_lan && !g_cfg.loc_lobby[0];                       /* W454 LOC-LAN-MODE */
+        tc.lan_port = (uint16_t)g_cfg.loc_lan_port;
+        strncpy_s(tc.lan_room, sizeof tc.lan_room, g_cfg.loc_lan_room, _TRUNCATE);
+        strncpy_s(tc.lan_pass, sizeof tc.lan_pass, g_cfg.loc_lan_pass, _TRUNCATE);
+        SecureZeroMemory(g_cfg.loc_lan_pass, sizeof g_cfg.loc_lan_pass);
+        strncpy_s(tc.lan_targets, sizeof tc.lan_targets, g_cfg.loc_lan_targets, _TRUNCATE);
         _snprintf_s(tc.status_path, sizeof tc.status_path, _TRUNCATE, "%s%sloc_net_status.txt", od ? od : "",
                     od ? "/" : "");
         g_ln.tun = loctun_start(&tc, &g_ln, g_ln.sim, ln_log);
@@ -939,8 +946,60 @@ long loc_net_last34_ms(void)
     return (g_cfg.loc_boot && g_ln.ready) ? (long)g_ln.st.last34_ms : 0;
 }
 
-/* W447: offene Spiel-TCP-Stroeme (connect + accept - Abgaenge); > 0 = das Spiel ist in einer Sitzung (Lobby/Match). */
+/* W447: offene Spiel-TCP-Stroeme; > 0 = das Spiel ist in einer Sitzung (Lobby/Match). W474: echte Zahl offener
+ * Stroeme (eigenes Schliessen zaehlt mit, frueher nur Abgaenge des Mitspielers -> nach dem Verlassen blieb sie > 0). */
 long loc_net_streams(void)
 {
-    return (g_cfg.loc_boot && g_ln.ready) ? (long)g_ln.st.accepts + g_ln.st.connects - g_ln.st.leave : 0;
+    return (g_cfg.loc_boot && g_ln.ready) ? (long)g_ln.st.open : 0;
+}
+
+/* W474 CHATTABS: zentraler Lobby-/Match-Zustand (LCH_SES_*, loc_chat.h lch_session_from) fuer Chat-Reiter "Lobby" und
+ * Lobby-Infopanel. Liest Szene, Seite (Text-Id der ersten Menuezeile, Zeilenzahl), Lockstep-Rahmen und die Mission der
+ * Eingabeschicht; ein Abgang (NONE) gilt erst nach LN_SES_HOLD_MS ununterbrochen (Uebergaenge zwischen Seiten),
+ * Lobby <-> Match sofort. Beliebige Threads (Chat-Thread 10x/s, Spiel-Thread 2x/s); Log LOCSES je Wechsel (nur Zahlen). */
+#define LN_SES_HOLD_MS 400u
+static SRWLOCK s_ses_lock = SRWLOCK_INIT;
+static int s_ses_rep;
+static u32 s_ses_none_t;
+int loc_net_lobby_state(void) { return loc_net_lobby_state_ex(NULL); }
+
+int loc_net_lobby_state_ex(int *out)
+{
+    int scene = -1, tid = -1, nit = -1, ls = 0, rbm, streams, page, raw, rep;
+    u32 now = GetTickCount();
+    if (out) *out = 1;
+    if (!g_cfg.loc_boot || !g_ln.ready || !g_sba_loc) return LCH_SES_NONE;
+    streams = (int)g_ln.st.open;
+    __try {
+        scene = *(volatile const uint16_t *)(uintptr_t)0x727988u;  /* Szene (W344) */
+        tid = (int)*(volatile const u32 *)(uintptr_t)0x6DC68Cu;     /* Text-Id der ersten Menuezeile (W460) */
+        nit = *(volatile const uint8_t *)(uintptr_t)0x6DD2B0u;      /* Zeilenzahl (W460) */
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        scene = -1;
+    }
+    /* Mission = eigene Lockstep-Rahmen in den letzten 3 s (wie W447) bzw. Mission der Eingabeschicht. Nicht [0x306830]:
+     * die Aktiv-Maske bleibt nach TIME UP bis in die Nachbesprechung und ueber SIGN OUT hinaus (LOC_BOOT W375 E4/E5). */
+    ls = g_ln.st.last34_ms && (u32)(now - (u32)g_ln.st.last34_ms) < 3000u;
+    rbm = loc_rb_in_mission();
+    page = lch_page(scene, tid, nit);
+    raw = lch_session_from(streams, scene, page, ls, rbm);
+    if (out) *out = lch_out_of_lobby(scene, page);
+    AcquireSRWLockExclusive(&s_ses_lock);
+    if (raw != LCH_SES_NONE) {
+        s_ses_none_t = 0;
+        rep = raw;
+    } else if (s_ses_rep == LCH_SES_NONE) {
+        rep = LCH_SES_NONE;
+    } else {
+        if (!s_ses_none_t) s_ses_none_t = now | 1u;
+        rep = (u32)(now - s_ses_none_t) >= LN_SES_HOLD_MS ? LCH_SES_NONE : s_ses_rep;
+    }
+    if (rep != s_ses_rep) {
+        HLOG_I("LOCSES: %s (Szene %d Seite %d Text-Id 0x%X/%d Stroeme %d Lockstep %d Mission %d)",
+               rep == LCH_SES_MATCH ? "Match" : rep == LCH_SES_LOBBY ? "Lobby" : "keine Lobby", scene, page,
+               (unsigned)tid, nit, streams, ls, rbm);
+        s_ses_rep = rep;
+    }
+    ReleaseSRWLockExclusive(&s_ses_lock);
+    return rep;
 }

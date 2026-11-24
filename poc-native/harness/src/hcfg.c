@@ -50,7 +50,6 @@ void hcfg_defaults(void)
     g_cfg.loc_vq_cache = 1; /* W377: VirtualQuery-Zwischenspeicher je Spielbild (Texturauffrischung, nur LoC) */
     g_cfg.loc_xb_prio = 1;  /* W391: Xbox-Threads ueber normal (nur LoC; fremde Last weicht vom Xbox-Kern aus) */
     g_cfg.loc_text_cache = 1; /* W377: LoC-Textebene nur bei geaendertem Inhalt neu hochladen, in die vorhandene Textur */
-    g_cfg.loc_rb_fastq = 1; /* W371 LOC-PERF: Ring-Neuaufbau: Regionen-Zwischenspeicher statt VirtualQuery je Eintrag (0 = alt, 2 = DIAG beide) */
     g_cfg.loc_rb_input = !SB_EDITION_COMMUNITY || SB_LOC_PLAY; /* W346: Rollback intern standardmaessig an (je Mission ausgehandelt), Community mit SB_LOC_PLAY (W389: seit 0.3.0 Standard an, LoC fuer alle) */
     g_cfg.loc_pad_keys = 1;      /* W286: Ziffernblock/SPACE/Backspace/Enter auch an das Menue-Gamepad */
     g_cfg.loc_mouse = 1;         /* W341: Maus zielt in der LoC-Mission */
@@ -71,10 +70,7 @@ void hcfg_defaults(void)
     g_cfg.dpi_aware = -1;       /* W81: auto */
     g_cfg.fs_interp_match = 1;  /* W81: exklusiv Interp-Takt = Hz */
     g_cfg.winmode_alt_max = 8;  /* W81 Test */
-    g_cfg.fog_scale = 1.0f;
-    g_cfg.draw_distance_scale = 1.0f;
     g_cfg.level = HLOG_INFO;
-    g_cfg.per_call = 0;
     g_cfg.syscall_trace = 0;
     g_cfg.hle_arity_check = 0; /* W162: Arity-Selbsttest + Zaehler aus */
     g_cfg.hlog_keep = 1;
@@ -250,6 +246,10 @@ void hcfg_defaults(void)
     g_cfg.interp_pace_clock = 1; /* W393: stetige Bilduhr (Latenz weich nachgefuehrt), 1 = LoC, 2 = auch SB, 0 = alt */
     g_cfg.pace_vsync = 1; /* W393: mit present_interval=1 Bildtakt an den VBlank koppeln (LoC) */
     g_cfg.pace_diag = 0;
+    g_cfg.frame_pacing = 1; /* W468: Monitor-Raster (SB Fenster/randlos, ganzzahliges Verhaeltnis) */
+    g_cfg.pace_log = 0;
+    g_cfg.pace_sim_mhz = 0;
+    g_cfg.swap_flip = 0;
     g_cfg.interp_pace_up = 200; /* W393 TEST: Bilduhr hoechstens 20 % langsamer, wenn L steigt */
     g_cfg.interp_pace_hold = 0; /* W393 TEST: elastisches Halten (gemessen schlechter: 2,5-4x mehr gehaltene Bilder) */
     g_cfg.interp_pace_dn = 20;  /* W393 TEST: hoechstens 2 % schneller, wenn L faellt */
@@ -271,6 +271,8 @@ void hcfg_defaults(void)
     g_cfg.loc_sndloop_fix = 1; /* W413 LOC-SOUND-LOOP (#65): Ton nach dem Neurechnen mit der korrigierten Zeitlinie abgleichen */
     g_cfg.loc_sndloop_grace = 30; /* W413: Sicherheitsnetz, Ticks ohne Besitzer bis zum Stopp */
     g_cfg.loc_audio_loopcount = 1; /* W413: Schleifenzahl der XSB (direkte Eintraege einmal, Sound-Spuren 0/n/endlos) */
+    g_cfg.loc_audio_3d_xsb = 1; /* W456: 3D-Abstaende aus Bank.xsb */
+    g_cfg.loc_audio_eg = 1; /* W456: Huellkurven (Attack/Release) der Bank.xsb wie die XACT-Bibliothek */
     g_cfg.loc_interp_rawrzb = 1; /* W410 LOC-GFX-JITTER: rawlerp ruhender Welt-Draws per Matrix-Lerp (1 = LoC, 2 = auch SB, 0 = aus) */
     g_cfg.loc_interp_eyeblind = 1; /* W448 LOC-CHAFF-LOOK (#83): Netze mit allen Bezuegen hinter der Kamera im Zwischenbild exakt (nur LoC, Nachweis W448) */
     g_cfg.loc_interp_rejcam = 1; /* W340 LOC-FRAMES: unplausible Spruenge mit Kamera-Pruefung lerpen (nur LoC) */
@@ -285,7 +287,20 @@ void hcfg_defaults(void)
     g_cfg.loc_swznorm = 1; /* W363 LOC-ORIGINAL: swizzled Texturen normiert (NV2A) */
     g_cfg.loc_lintexel = 1; /* W368 LOC-COCKPIT: Linear-Texturen mit Programm-UV texeladressiert (NV2A) */
     g_cfg.loc_vsod0 = 1; /* W358 LOC-LOOK: Vertex-Licht der P2-Programme (nur LoC; Nachweis L1) */
-    g_cfg.loc_glow = 0; /* W285 LOC-RENDER: Glow-Komposition (Test, nur LoC) */
+    g_cfg.loc_glow = 1; /* W285 LOC-RENDER: Glow-Komposition; W459: Standard 1 (Original: Replay/Demo mit Glow+Bloom+Korn) */
+    g_cfg.loc_sblook = 0; /* W459: SB look (Experimental), nur LoC */
+    g_cfg.loc_sblook_mask = 7; /* W459: Unterschalter Bit1 Bloom Hauptbild, Bit2 Bloom Lock-On-Kamera, Bit4 Bloom-Verstaerkung */
+    g_cfg.loc_sblook_bloom = 150; /* W459: Bloom-Staerke bei SB look (%, wie bloom_strength; 200 waescht den Himmel aus) */
+    g_cfg.gfx_loc_rev = 0; /* W465: fehlt = LoC-Spieler-cfg vor Enhanced (Client wendet Enhanced an) */
+    g_cfg.shfx_flash_diag = 0; /* DIAG(W465) */
+    g_cfg.loc_horp_comp = 1; /* W465: LoC 4:3 + Hor+: Komposition auf volle Breite */
+    g_cfg.shadow_sun = -1; /* W466: LoC Sonnen-/Schattenkontrast in %, wirkt nur mit shade_shadow. W471: Preset-Schluessel,
+                            * Standard 0 (= Original, Spalte 0); -1 = "fehlt in der cfg" bis zum Ende des Ladens (Migration
+                            * eigener Werte: bis W471 galt ohne Eintrag 140), dann 0 */
+    g_cfg.loc_shadow_sel = 3; /* W466: LoC-Schattenpuffer, Bit 1 gross (>=1024), Bit 2 klein */
+    g_cfg.shfx_loc_lc = 130; /* W465: LoC-Leuchten nur ueber lokalem Mittel x 1,3 (Himmel leuchtet nicht) */
+    g_cfg.shfx_loc_th = 60;  /* W465: LoC-Leuchten Schwelle max(R,G,B) 0,6 */
+    g_cfg.shfx_flash_gain = 150; /* W465: LoC-Blitzlicht Verstaerkung */
     g_cfg.loc_census_draws = 300; /* W285 LOC-RENDER: Zensus nur in 3D-Bildern (DIAG, nur LoC) */
     g_cfg.vsh_color = 1; /* W50 WASH: oD0-Farbquelle an (Fix) */
     g_cfg.im_zero_explicit = 1; /* W54 TITLEBG2: explizites Null-Alpha transparent (Fix) */
@@ -316,10 +331,18 @@ void hcfg_defaults(void)
     g_cfg.loc_aa_diag = 0;        /* W442 DIAG */
     g_cfg.loc_snchat = 1;            /* W446 STEELNET-CHAT: Nutzerwunsch 23.11., Standard an */
     g_cfg.loc_snchat_test[0] = 0;    /* W446 TEST */
+    g_cfg.loc_chat_mission_sn = 0;   /* W474 CHATTABS: Nutzer 24.11. - steelnet-Chat im Match aus */
+    g_cfg.loc_chat_mission_lobby = 1; /* W474 */
+    g_cfg.loc_chat_mission_team = 1;  /* W474 (Team-Reiter noch nicht umgesetzt) */
     g_cfg.loc_lobby_join_delay = 0;  /* W446 TEST */
     g_cfg.loc_net_auto = 1;       /* W447 LOC-NET-AUTO: Netzmodus Auto (Nutzerentscheid 23.11.: Standard) */
-    g_cfg.loc_net_panel = 1;      /* W447: Lobby-Panel (Netzmodus, Verzoegerung, Ping) */
+    g_cfg.loc_net_panel = 1;      /* W447/W453: Lobby-Infopanel unten rechts (Netzmodus, Verzoegerung, Ping, Modus, Regel) */
     g_cfg.loc_net_panel_test = 0; /* W447 TEST */
+    g_cfg.loc_replay_help = 1;      /* W457: Bedienhilfe im LoC-Replay */
+    g_cfg.loc_replay_ctrl_test = 0; /* W457 TEST */
+    g_cfg.loc_lobby_widget = 1;      /* W460: Widget offene Lobbys (Hauptmenue/MatchMaking) */
+    g_cfg.loc_lobby_widget_test = 0; /* W460 TEST */
+    g_cfg.loc_lobby_widget_diag = 0; /* W460 DIAG */
     g_cfg.loc_insignia_rt = 1; /* W422 LOC-INSIGNIA-PEN (Fix, nur LoC) */
     g_cfg.loc_ins_diag = 0; /* W422 DIAG */
     g_cfg.loc_zcache_alt = 1; /* W423 LOC-XSB-LOOP (Fix, nur LoC) */
@@ -382,6 +405,7 @@ void hcfg_defaults(void)
     g_cfg.shade_texskip = 1; /* W112: FIX(SHADE-BLOOM), wirkt nur mit shading=1 */
     g_cfg.vis_query = 1; /* W117: FIX(SHADE-M2), 1 = nur mit shading=1 */
     g_cfg.vis_query_all = 2; /* W304: FIX(FLARE-OCCL), Sonne + Licht-Flares echt */
+    g_cfg.vis_zfar = 1; /* W477 SB-SUN-WHITEOUT: Testpunkt hinter der hinteren Ebene besteht den Tiefentest nicht (NV2A); 2 = TEST AMD-Klemmung */
     g_cfg.vis_ztest = 1; /* W304/W337: Testpunkte mit Tiefentest wie NV2A (W337: Sonne im Bild + frei belegt, M6) */
     g_cfg.p2_ztest = 1; /* W313 P2-ZTEST: FIX, P2-Draws in Spiel-RTs mit Tiefentest des Spiels wie NV2A (Feuer/Lichter nicht mehr durch Waende) */
     g_cfg.p2z_diag = 0; /* W313: DIAG(P2-ZTEST) */
@@ -888,7 +912,7 @@ static int set_key_w371(const char *k, const char *v)
 {
     if (strcmp(k, "shade_fast_first") == 0) { g_cfg.shade_fast_first = atoi(v); }
     else if (strcmp(k, "shade_fast_level") == 0) { g_cfg.shade_fast_level = atoi(v); }
-    else if (strcmp(k, "loc_rb_fastq") == 0) { g_cfg.loc_rb_fastq = atoi(v); }
+    else if (strcmp(k, "loc_rb_fastq") == 0) { (void)v; } /* W461: ohne Leser seit W372 - nur noch gelesen, ignoriert */
     else if (strcmp(k, "loc_menu_hz") == 0) { g_cfg.loc_menu_hz = atoi(v); }
     else if (strcmp(k, "loc_menu_diag") == 0) { g_cfg.loc_menu_diag = atoi(v); }
     else if (strcmp(k, "gpu_burn_menu") == 0) { g_cfg.gpu_burn_menu = atoi(v); }
@@ -973,6 +997,34 @@ static int set_key_w405(const char *k, const char *v)
     return 1;
 }
 
+/* W459 LOC-FX-LIGHT: eigene Schluessel (C1026) */
+static int set_key_w459(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_sblook") == 0) { g_cfg.loc_sblook = atoi(v); } /* Experimental */
+    else if (strcmp(k, "loc_sblook_mask") == 0) { g_cfg.loc_sblook_mask = atoi(v); }
+    else if (strcmp(k, "loc_sblook_bloom") == 0) { g_cfg.loc_sblook_bloom = atoi(v); }
+    else if (strcmp(k, "gfx_loc_rev") == 0) { g_cfg.gfx_loc_rev = atoi(v); } /* W465: Marke Enhanced-Umstellung */
+    else if (strcmp(k, "shfx_flash_diag") == 0) { g_cfg.shfx_flash_diag = atoi(v); } /* DIAG(W465) */
+    else if (strcmp(k, "shfx_gpu_diag") == 0) { g_cfg.shfx_gpu_diag = atoi(v); } /* DIAG(W465) */
+    else if (strcmp(k, "loc_horp_comp") == 0) { g_cfg.loc_horp_comp = atoi(v); } /* W465 */
+    else if (strcmp(k, "shfx_loc_lc") == 0) { g_cfg.shfx_loc_lc = atoi(v); } /* W465 */
+    else if (strcmp(k, "shfx_loc_th") == 0) { g_cfg.shfx_loc_th = atoi(v); } /* W465 */
+    else if (strcmp(k, "shfx_flash_gain") == 0) { g_cfg.shfx_flash_gain = atoi(v); } /* W465 */
+    else if (strcmp(k, "shfx_var") == 0) { strcpy_s(g_cfg.shfx_var, sizeof g_cfg.shfx_var, v); } /* TEST(W465) */
+    else { return 0; }
+    return 1;
+}
+
+/* W466 LOC-ENHANCED-2: eigene Schluessel (C1026) */
+static int set_key_w466(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_shadow_sel") == 0) { g_cfg.loc_shadow_sel = atoi(v); } /* W466 */
+    else if (strcmp(k, "shadow_sun") == 0) { g_cfg.shadow_sun = atoi(v); } /* W466 */
+    else if (strcmp(k, "loc_shadow_diag") == 0) { g_cfg.loc_shadow_diag = atoi(v); } /* DIAG(W466) */
+    else { return 0; }
+    return 1;
+}
+
 /* W406 M3-ROAD-JITTER: eigene Schluessel (C1026) */
 static int set_key_w406(const char *k, const char *v)
 {
@@ -1005,6 +1057,8 @@ static int set_key_w413(const char *k, const char *v)
     else if (strcmp(k, "loc_sndloop_grace") == 0) { g_cfg.loc_sndloop_grace = atoi(v); } /* FIX */
     else if (strcmp(k, "loc_sndloop_diag") == 0) { g_cfg.loc_sndloop_diag = atoi(v); } /* DIAG */
     else if (strcmp(k, "loc_audio_loopcount") == 0) { g_cfg.loc_audio_loopcount = atoi(v); } /* FIX */
+    else if (strcmp(k, "loc_audio_3d_xsb") == 0) { g_cfg.loc_audio_3d_xsb = atoi(v); } /* FIX W456 */
+    else if (strcmp(k, "loc_audio_eg") == 0) { g_cfg.loc_audio_eg = atoi(v); } /* FIX W456 */
     else { return 0; }
     return 1;
 }
@@ -1138,6 +1192,16 @@ static int set_key_w440(const char *k, const char *v)
     return 1;
 }
 
+/* W474 CHATTABS: Chat im Match je Reiter (C1026) */
+static int set_key_w474(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_chat_mission_sn") == 0) { g_cfg.loc_chat_mission_sn = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "loc_chat_mission_lobby") == 0) { g_cfg.loc_chat_mission_lobby = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "loc_chat_mission_team") == 0) { g_cfg.loc_chat_mission_team = atoi(v) ? 1 : 0; }
+    else { return 0; }
+    return 1;
+}
+
 /* W446 STEELNET-CHAT: eigene Schluessel (C1026) */
 static int set_key_w446(const char *k, const char *v)
 {
@@ -1152,6 +1216,28 @@ static int set_key_w446(const char *k, const char *v)
 }
 
 /* W448 LOC-CHAFF-LOOK: eigene Schluessel (C1026). */
+/* W454 LOC-LAN-MODE: eigene Schluessel (C1026) */
+static int set_key_w454(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_lan") == 0) { g_cfg.loc_lan = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "loc_lan_room") == 0) { strncpy_s(g_cfg.loc_lan_room, sizeof g_cfg.loc_lan_room, v, _TRUNCATE); }
+    else if (strcmp(k, "loc_lan_pass") == 0) { strncpy_s(g_cfg.loc_lan_pass, sizeof g_cfg.loc_lan_pass, v, _TRUNCATE); }
+    else if (strcmp(k, "loc_lan_port") == 0) {
+        int p = atoi(v);
+        g_cfg.loc_lan_port = p > 0 && p < 65536 ? p : 0;
+    }
+    else if (strcmp(k, "loc_lan_targets") == 0) { strncpy_s(g_cfg.loc_lan_targets, sizeof g_cfg.loc_lan_targets, v, _TRUNCATE); } /* TEST */
+    else { return 0; }
+    return 1;
+}
+
+static int set_key_w451(const char *k, const char *v)
+{
+    if (strcmp(k, "toggle_test") == 0) { g_cfg.toggle_test = atoi(v) ? 1 : 0; } /* TEST */
+    else { return 0; }
+    return 1;
+}
+
 static int set_key_w448(const char *k, const char *v)
 {
     if (strcmp(k, "loc_census_ticks") == 0) { strncpy_s(g_cfg.loc_census_ticks, sizeof g_cfg.loc_census_ticks, v, _TRUNCATE); } /* DIAG */
@@ -1195,6 +1281,26 @@ static int set_key_w447(const char *k, const char *v)
     }
     else if (strcmp(k, "loc_net_panel") == 0) { g_cfg.loc_net_panel = atoi(v) ? 1 : 0; }
     else if (strcmp(k, "loc_net_panel_test") == 0) { g_cfg.loc_net_panel_test = atoi(v); } /* TEST */
+    else if (strcmp(k, "loc_replay_help") == 0) { g_cfg.loc_replay_help = atoi(v) ? 1 : 0; } /* W457 */
+    else if (strcmp(k, "loc_replay_ctrl_test") == 0) { g_cfg.loc_replay_ctrl_test = atoi(v); } /* W457 TEST */
+    else if (strcmp(k, "loc_lobby_widget") == 0) { g_cfg.loc_lobby_widget = atoi(v) ? 1 : 0; } /* W460 */
+    else if (strcmp(k, "loc_lobby_widget_test") == 0) { g_cfg.loc_lobby_widget_test = atoi(v); } /* W460 TEST */
+    else if (strcmp(k, "loc_lobby_widget_diag") == 0) { g_cfg.loc_lobby_widget_diag = atoi(v); } /* W460 DIAG */
+    else { return 0; }
+    return 1;
+}
+
+static int set_key_w468(const char *k, const char *v) /* W468 PERF-PACING */
+{
+    if (strcmp(k, "frame_pacing") == 0) {
+        if (_stricmp(v, "timer") == 0) { g_cfg.frame_pacing = 0; }
+        else if (_stricmp(v, "monitor") == 0) { g_cfg.frame_pacing = 1; }
+        else if (_stricmp(v, "vrr") == 0) { g_cfg.frame_pacing = 2; }
+        else { int n = atoi(v); g_cfg.frame_pacing = n < 0 ? 0 : (n > 2 ? 2 : n); }
+    }
+    else if (strcmp(k, "pace_log") == 0) { g_cfg.pace_log = atoi(v); } /* DIAG */
+    else if (strcmp(k, "pace_sim_hz") == 0) { g_cfg.pace_sim_mhz = (int)(atof(v) * 1000.0 + 0.5); } /* TEST */
+    else if (strcmp(k, "swap_flip") == 0) { g_cfg.swap_flip = atoi(v) ? 1 : 0; }
     else { return 0; }
     return 1;
 }
@@ -1202,6 +1308,9 @@ static int set_key_w447(const char *k, const char *v)
 static void set_key_b(const char *k, const char *v);
 static void set_key(const char *k, const char *v)
 {
+    if (set_key_w468(k, v)) {
+        return;
+    }
     if (set_key_w447(k, v)) {
         return;
     }
@@ -1212,11 +1321,11 @@ static void set_key(const char *k, const char *v)
         return;
     }
     if (set_key_w435(k, v) || set_key_w437(k, v) || set_key_w439(k, v) || set_key_w440(k, v) || set_key_w444(k, v) || set_key_w442(k, v) ||
-        set_key_w446(k, v) || set_key_w448(k, v)) {
+        set_key_w446(k, v) || set_key_w474(k, v) || set_key_w448(k, v) || set_key_w451(k, v) || set_key_w454(k, v)) {
         return;
     }
     if (set_key_remaster(k, v) || set_key_overlay(k, v) || set_key_vr(k, v) || set_key_w371(k, v) || set_key_w376(k, v) ||
-        set_key_w395(k, v) || set_key_lsarb(k, v) || set_key_imlock(k, v) || set_key_w405(k, v) || set_key_w406(k, v) ||
+        set_key_w395(k, v) || set_key_lsarb(k, v) || set_key_imlock(k, v) || set_key_w405(k, v) || set_key_w406(k, v) || set_key_w459(k, v) || set_key_w466(k, v) ||
         set_key_w410(k, v) || set_key_w412(k, v) || set_key_w413(k, v) || set_key_w415(k, v) || set_key_w417(k, v) ||
         set_key_w420(k, v) || set_key_w422(k, v) || set_key_w423(k, v) || set_key_w424(k, v) || set_key_w428(k, v) ||
         set_key_w429(k, v)) {
@@ -1232,8 +1341,7 @@ static void set_key(const char *k, const char *v)
         strcpy_s(g_cfg.game_image, sizeof g_cfg.game_image, v);
     } else if (strcmp(k, "version_check") == 0) {
         g_cfg.version_check = atoi(v);
-    } else if (strcmp(k, "allow_ntsc_u") == 0) { /* W229 US-PROFILE */
-        g_cfg.allow_ntsc_u = atoi(v);
+    } else if (strcmp(k, "allow_ntsc_u") == 0) { /* W229 US-PROFILE: seit W230 ohne Wirkung (Launcher/Skripte setzen es noch) - W461: ignoriert */
     } else if (strcmp(k, "ntsc_u") == 0) { /* W230 US-PLAY: Notbremse */
         g_cfg.ntsc_u = atoi(v);
     } else if (strcmp(k, "hdd_root_us") == 0) { /* W230 US-PLAY */
@@ -1407,14 +1515,12 @@ static void set_key(const char *k, const char *v)
         g_cfg.winmode_alt_from = atoi(v);
     } else if (strcmp(k, "winmode_alt_max") == 0) {
         g_cfg.winmode_alt_max = atoi(v);
-    } else if (strcmp(k, "fog_scale") == 0) {
-        g_cfg.fog_scale = (float)atof(v);
-    } else if (strcmp(k, "draw_distance_scale") == 0) {
-        g_cfg.draw_distance_scale = (float)atof(v);
+    } else if (strcmp(k, "fog_scale") == 0 || strcmp(k, "draw_distance_scale") == 0) {
+        /* W461: nie verdrahtet (nur geloggt) - in Nutzer-cfgs vorhanden, daher gelesen und ignoriert */
     } else if (strcmp(k, "level") == 0) {
         g_cfg.level = atoi(v);
     } else if (strcmp(k, "per_call") == 0) {
-        g_cfg.per_call = atoi(v);
+        /* W461: ohne Leser - in Nutzer-cfgs vorhanden, daher gelesen und ignoriert */
     } else if (strcmp(k, "syscall_trace") == 0) {
         g_cfg.syscall_trace = atoi(v);
     } else if (strcmp(k, "hle_arity_check") == 0) {
@@ -2263,6 +2369,8 @@ static void set_key_b(const char *k, const char *v)
         g_cfg.vis_query = atoi(v);
     } else if (strcmp(k, "vis_query_all") == 0) { /* W117 */
         g_cfg.vis_query_all = atoi(v);
+    } else if (strcmp(k, "vis_zfar") == 0) { /* FIX(SB-SUN-WHITEOUT,W477) */
+        g_cfg.vis_zfar = atoi(v);
     } else if (strcmp(k, "vis_ztest") == 0) { /* W304 FLARE-OCCL */
         g_cfg.vis_ztest = atoi(v);
     } else if (strcmp(k, "p2_ztest") == 0) { /* W313 P2-ZTEST */
@@ -2583,6 +2691,31 @@ static void hcfg_apply_env(void)
     SecureZeroMemory(buf, sizeof buf); /* W334: enthaelt ggf. den Raumcode */
 }
 
+/* W455 UNICODE-PATHS: sb_ldr laeuft mit UTF-8 als aktiver Codepage (sb_utf8.manifest), cfg-Dateien
+ * sind damit UTF-8. Eine Zeile mit ungueltigem UTF-8 stammt aus einer alten ANSI-cfg (Launcher vor
+ * W455, Nutzer-cfg vom Overlay): aus der System-ANSI-Codepage nach UTF-8 heben, sonst waere z. B. ein
+ * Pfad mit Umlaut nicht mehr zu oeffnen. Ohne UTF-8-Codepage (altes Windows) unveraendert. */
+static int g_cfg_legacy_lines;
+
+static void hcfg_line_legacy(char *line, size_t cap)
+{
+    static wchar_t w[4096];
+    static char u8[4096];
+    const unsigned char *q = (const unsigned char *)line;
+    DWORD cp = 0;
+    while (*q && *q < 0x80) q++;
+    if (!*q || GetACP() != CP_UTF8) return;
+    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, line, -1, NULL, 0) > 0) return;
+    if (GetLocaleInfoEx(LOCALE_NAME_SYSTEM_DEFAULT, LOCALE_IDEFAULTANSICODEPAGE | LOCALE_RETURN_NUMBER,
+                        (LPWSTR)&cp, (int)(sizeof cp / sizeof(wchar_t))) <= 0 || cp == 0 || cp == CP_UTF8) {
+        cp = 1252;
+    }
+    if (MultiByteToWideChar(cp, 0, line, -1, w, 4096) <= 0) return;
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, u8, (int)sizeof u8, NULL, NULL) <= 0 || strlen(u8) >= cap) return;
+    strcpy_s(line, cap, u8);
+    g_cfg_legacy_lines++;
+}
+
 /* W26 (Launcher, A10): eine INI-Datei parsen. missing_ok=1 -> fehlende
  * Datei ist kein Fehler (die Nutzer-cfg user.cfg ist optional).
  * Rueckgabe: 0 = geparst, 1 = fehlt. */
@@ -2599,6 +2732,7 @@ static int hcfg_parse_file(const char *path, int missing_ok)
     }
     while (fgets(line, sizeof line, f)) {
         char *eq, *k, *v, *end;
+        hcfg_line_legacy(line, sizeof line); /* W455: alte ANSI-Zeile -> UTF-8 */
         k = line + strspn(line, " \t");
         if (*k == '#' || *k == ';' || *k == '[' || *k == '\n' || *k == '\0') {
             continue;
@@ -2622,6 +2756,10 @@ static int hcfg_parse_file(const char *path, int missing_ok)
         set_key(k, v);
     }
     fclose(f);
+    if (g_cfg_legacy_lines) {
+        HLOG_I("cfg: %s: %d Zeile(n) aus alter ANSI-Codepage nach UTF-8 gelesen (W455)", path, g_cfg_legacy_lines);
+        g_cfg_legacy_lines = 0;
+    }
     return 0;
 }
 
@@ -2638,6 +2776,7 @@ const char *hcfg_user_cfg_path(void)
  * (gleiche Regel wie Launcher lcfg_gfx_migrate_fps). Jede andere Rate
  * bleibt; nach dem ersten Speichern steht gfx_preset_rev=1 in der Datei. */
 int sb_gfx_preset_match_for(int fps, int rt); /* render_shfx.c */
+void sb_gfx_loc_default(void);                /* render_shfx.c (W465) */
 static void hcfg_migrate_fps(void)
 {
     int hz;
@@ -2726,13 +2865,16 @@ int hcfg_load(const char *path)
     if (user_loaded) { /* W296: nur Spieler-cfg (Tests laufen ohne user.cfg) */
         hcfg_migrate_fps();
     }
+    if (user_path[0] && g_cfg.loc_boot && g_cfg.gfx_loc_rev < SB_GP_LOC_REV) {
+        sb_gfx_loc_default(); /* W465: LoC-Spieler ohne Marke -> Enhanced (Tests ohne Spieler-cfg bleiben Original) */
+    }
+    if (g_cfg.shadow_sun < 0) { g_cfg.shadow_sun = 0; } /* W471: fehlt = 0 (Original) */
     if (g_cfg.game_tick == 25) { /* W234 PAL50: Echtzeit 60 -> 50 VBlanks/s (Testtakt 0 bleibt) */
         if (g_cfg.vblank_hz == 60) { g_cfg.vblank_hz = 50; }
         HLOG_I("cfg: game_tick=25 (PAL50, vblank_hz=%d, PAL-EEPROM)", g_cfg.vblank_hz);
     }
-    HLOG_I("cfg: %s geladen (%ux%u, fps_limit=%d, vblank_hz=%d, fog=%.2f, drawdist=%.2f)",
-           path, g_cfg.width, g_cfg.height, g_cfg.fps_limit, g_cfg.vblank_hz,
-           g_cfg.fog_scale, g_cfg.draw_distance_scale);
+    HLOG_I("cfg: %s geladen (%ux%u, fps_limit=%d, vblank_hz=%d)",
+           path, g_cfg.width, g_cfg.height, g_cfg.fps_limit, g_cfg.vblank_hz);
     HLOG_I("cfg: fair_cs=%d thread_priorities=%d resume_yield_ms=%d "
            "tex_size_header=%d im_ring=%d safe_suspend=%d out=%s",
            g_cfg.fair_cs, g_cfg.thread_priorities,

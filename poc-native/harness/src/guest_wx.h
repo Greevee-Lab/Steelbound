@@ -27,8 +27,6 @@ void guest_wx_apply(const xbe_image_t *img, int mode);
 void guest_wx_section_loaded(const section_info_t *s);
 /* Prozessweite Zaehlung beschreibbar+ausfuehrbarer Bereiche (Log, ohne Inhalte). */
 void guest_wx_scan(const char *when);
-/* TEST: 1 = Byte im Gast-Datenbereich ist ausfuehrbar (W^X wirkt nicht), 0 = nicht ausfuehrbar laut VirtualQuery. */
-int guest_wx_data_exec(void);
 /* TEST (loc_crash_test, Modus 2): Adresse einer beschreibbaren, nicht ausfuehrbaren Gastseite (0 = keine). */
 uint32_t guest_wx_data_probe_addr(void);
 

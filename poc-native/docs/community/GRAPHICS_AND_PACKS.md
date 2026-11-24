@@ -61,7 +61,7 @@ One choice on the **Graphics** page. Remastered presets may reduce FPS.
 | Remastered subtle (experimental) | Better lighting, effects and textures. May reduce FPS. |
 | Remastered strong (experimental) | The strongest remastered look. May reduce FPS. |
 | Clear view (experimental) | Easier to see: no lighting, no monitor noise. Not original. |
-| Custom | Appears when you change an option. Based on a preset; **Reset** returns to it. |
+| Custom | Your own settings. Click it to keep the current look as your own starting point, or just change any option. Based on a preset; **Reset** returns to it. |
 
 Every preset sets **Widescreen sides** to **4:3 (original)**. Widescreen
 is your own choice on the **Display** page (experimental); it makes the

@@ -164,6 +164,7 @@ int s_rbi_rbtest_n, s_rbi_rbtest_k; /* W355 TEST rbtest=N,K: alle N Live-Ticks R
 static u32 s_rbi_rbtest_cnt, s_rbi_rbtest_ok, s_rbi_rbtest_next;
 int s_rbi_force_desync = -1;     /* TEST desync=N: eigener Hash von Slot N verfaelscht (Gegenprobe Desync-Ende) */
 int s_rbi_dmin = 2, s_rbi_dmax = 3; /* W346: Grenzen der adaptiven Verzoegerung (D=1 nur fest) */
+int s_rbi_dmax_set; /* W494: dmax ausdruecklich per loc_rb_opts gesetzt (sonst online RBI_DMAX_ONLINE) */
 long long s_rbi_lt_last;         /* DIAG langer Tick: Zeit des letzten Ruhepunkts */
 u32 s_rbi_lt_n, s_rbi_lt_max, s_rbi_lt_logged;
 static const char *const k_rbn_why[RBN_WHY_N] = {"-", "eigener Schalter aus", "Mitspieler ohne Rollback",

@@ -177,6 +177,8 @@ static void cli_usage(void)
            "                          loc_acc_view_unsec|view_login|view_ok = Account-Seite, W399,\n"
            "                          loc_acc_view_manage|view_net|signin_code|view_unsec_login =\n"
            "                          Kontoseite mit Aufklappern bzw. Server nicht erreichbar, W418,\n"
+           "                          loc_acc_view_unsec_nogt|view_gt_edit|view_gt_taken|view_gtoff|\n"
+           "                          view_off|view_code|view_login_err|signin_login = Kontoseite W502,\n"
            "                          ready_hover/loc_hover = Maus auf dem inaktiven Spielnamen, W398),\n"
            "                          nur Anzeige (Packs-Ordner: Umgebung SB_PACKS_DIR)\n"
            "  --dpi N                 mit --ui-shot/--bind-shot: DPI erzwingen\n"

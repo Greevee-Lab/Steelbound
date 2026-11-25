@@ -51,6 +51,11 @@ static void pub_ghost_close(tghost *g)
     g->used = 0;
 }
 
+void pub_ghosts_close_one(tghost *g) /* W482 */
+{
+    pub_ghost_close(g);
+}
+
 void pub_ghosts_clear(loctun *t)
 {
     int i;
@@ -449,10 +454,45 @@ static int pub_host_stream(loctun *t)
     return 0;
 }
 
+static void pub_join_tick(loctun *t, double now);
+
+/* W501 ONLINE-BOTH: System Link <-> Xbox Live (Netz-Thread, unter cs). Der Transport startet wie ohne loc_live im
+ * System-Link-Zustand (oeffentlich bzw. Code-Lobby). Betritt das Spiel den Xbox-Live-Fluss (XOnline-HLE), ruht System
+ * Link: offene System-Link-Lobby verlassen, Geister weg, Live-Modus wie W482 (pub = 1, keine Start-Lobby). Verlaesst es
+ * Xbox Live (Logon-Task geschlossen), enden die Live-Anfragen und die Live-Lobby; System Link wie beim Start (Code-
+ * Lobby wird neu betreten; ohne Raumcode = neue eigene Code-Lobby). */
+void pub_live_mode_tick(loctun *t, double now)
+{
+    int want = t->live_cap && t->live_want;
+    if (want == t->live) return;
+    if (t->pub_joining) pub_reject(t, t->pub_join, want ? "Xbox Live gewaehlt" : "Xbox Live verlassen", now);
+    if (!want) lv_reset(t, "Xbox Live verlassen");
+    if (t->lb_joined) pub_leave(t, want ? "Xbox Live gewaehlt" : "Xbox Live verlassen", now);
+    pub_ghosts_clear(t);
+    t->pub_host = t->pub_started = t->pub_creating = 0;
+    t->pub_host_vip = t->pub_host_cid = 0;
+    t->pub_t1_new = 0;
+    t->pub_t3_len = 0;
+    t->live = want;
+    t->pub = want ? 1 : t->pub0;
+    t->lb_listed = t->pub ? 1 : 0; /* System Link ohne pub: lb_enter wie beim Start (lb_poll) */
+    t->pub_list_at = -1e9;
+    t->pub_create_at = now + 1000.0;
+    tl_logf(t, want ? "LOCLIVE: Spiel im Xbox-Live-Menue - Transport im Live-Modus (System Link ruht)"
+                    : "LOCLIVE: Xbox Live verlassen - Transport wieder System Link (%s)",
+            t->pub ? "oeffentlich" : t->c.code[0] ? "Raumcode" : "eigene Code-Lobby");
+}
+
 void pub_tick(loctun *t, double now)
 {
     uint8_t s[8], c[2];
-    int state = -1, snap = pub_snap(t, s, c, &state), open_host;
+    int state = -1, snap, open_host;
+    if (t->live) { /* W482: Host per live_create (keine oeffentliche Lobby), keine System-Link-Suche; Beitritt wie W373 */
+        lv_tick(t, now);
+        pub_join_tick(t, now); /* waehlt das Spiel einen anderen Host, verlaesst es die eigene Lobby (pub_leave) */
+        return;
+    }
+    snap = pub_snap(t, s, c, &state);
     open_host = snap && (state == 0x22 || state == 0x23) && pub_fields_ok(s, c);
     /* --- Host --- */
     if (!t->lb_joined) {
@@ -498,6 +538,12 @@ void pub_tick(loctun *t, double now)
     } else if (!t->lb_joined && t->pub_watch && now - t->pub_list_at >= TUN_WATCH_MS) {
         pub_list_req(t, now); /* W460 LOC-LOBBY-WIDGET: Hauptmenue/MatchMaking sichtbar (hoechstens alle 12 s) */
     }
+    pub_join_tick(t, now);
+}
+
+/* Beitritt zu einem gewaehlten Geist, Zeitlimit, Platz freigeben ohne Spielverbindung (W373; W482 auch Live). */
+static void pub_join_tick(loctun *t, double now)
+{
     if (t->pub_join >= 0 && !t->pub_joining && t->gh[t->pub_join].used) {
         char b[96];
         if (t->lb_joined) pub_leave(t, "anderes Spiel gewaehlt", now);
@@ -506,7 +552,13 @@ void pub_tick(loctun *t, double now)
         t->pub_join_vip = t->gh[t->pub_join].vip;
         t->pub_join_bad = 0;
         t->pub_host_cid = 0;
-        _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"lobby_join\",\"lobby_id\":%d}", t->gh[t->pub_join].lid);
+        if (t->gh[t->pub_join].live) { /* W482: Live-Session - XNKEY kommt mit lobby_state nur an Mitglieder */
+            char sid[17];
+            tohex(t->gh[t->pub_join].live_sid, 8, sid);
+            _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"live_join\",\"lv\":1,\"sid\":\"%s\"}", sid);
+        } else {
+            _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"lobby_join\",\"lobby_id\":%d}", t->gh[t->pub_join].lid);
+        }
         lb_send(t, b);
         tl_logf(t, "LOCPUB: Spiel gewaehlt - trete Lobby %d bei", t->gh[t->pub_join].lid);
     }

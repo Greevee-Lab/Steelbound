@@ -38,6 +38,7 @@
 #include "loc_lsarb_game.h" /* LOC-LOCKSTEP-ARBITER */
 #include "loc_rulenet.h" /* W420 LOC-CLIPDUMP */
 #include "loc_chatnet.h" /* W437 LOC-CHAT */
+#include "loc_camp.h" /* W492 CAMP-E2E: Reinforcements-Schutz */
 #include "sb_tex.h" /* W297: Texttextur nach Lock neu hochladen */
 #include "loc_render.h" /* W297: Textebene */
 #include "d3d11_render.h" /* W342: sb_render_im_vdata (SetVertexData2s/4s) */
@@ -71,6 +72,9 @@ static void loc_miss(u32 eu)
         HLOG_I("LOCBOOT: SB-Adresse 0x%X ohne LoC-Gegenstueck -> Null-Seite (#%ld)", eu, k);
     }
 }
+
+/* W493: Bildzaehler fuer die LOCMEM-Quarantaene */
+static uint32_t loc_mem_clock(void) { return (uint32_t)hooks_frame_count(); }
 
 void loc_boot_select(void)
 {
@@ -134,6 +138,7 @@ void loc_boot_select(void)
         hlog_close();
         ExitProcess(8);
     }
+    loc_mem_config(g_cfg.loc_mem_reclaim, (uint32_t)g_cfg.loc_mem_quar, loc_mem_clock); /* W493 LOC-MEMLEAK */
     HLOG_I("LOCBOOT: Profil %s aktiv, Spielstaende getrennt: hdd_root=%s (save_check/save_lock/SB-Replay aus)",
            sb_profile_name(), g_cfg.hdd_root);
 }
@@ -572,6 +577,74 @@ static __declspec(naked) void loc_ground_check(void)
     }
 }
 
+/* ---------------------------------------------------------------- W492 CAMP-E2E: Reinforcements-Auswahl
+ * FUN_00118E50 (EBX = &Index u16, EDX = Maske, ESI = Schritt +1/-1, Rueckgabe AX) sucht das naechste gesetzte Bit in
+ * Shop-VTs | Garage-VTs und kommt bei Maske 0 nie zurueck (Spiel-Thread haengt). Das kann auch mit gueltigen
+ * Kampagnendaten passieren (Lager ohne VT im Shop dieses Turns, Bestand ausverkauft, eigene VTs verloren); nur
+ * Xbox-Live-Kampagne (loc_live=1). Schutz: Maske 0 -> Rueckgabe 0 (Cursor bleibt, wie "keine Aenderung"). */
+static volatile LONG s_reinf_blocked;
+static int __cdecl loc_reinf_check(uint32_t mask)
+{
+    if (!loccamp_reinf_blocked(mask)) return 0;
+    if (InterlockedIncrement(&s_reinf_blocked) == 1) {
+        HLOG_I("LOCCAMP: Reinforcements-Auswahl ohne VT (Garage und Shop leer) - Cursor bleibt (Schutz 0x118E50)");
+    }
+    return 1;
+}
+static __declspec(naked) void loc_reinf_guard(void)
+{
+    __asm {
+        pushad
+        push edx
+        call loc_reinf_check
+        add esp, 4
+        test eax, eax
+        popad
+        jnz blocked
+        xor eax, eax
+        mov ax, word ptr [ebx]
+        push 0x118E55
+        ret
+    blocked:
+        xor eax, eax
+        ret
+    }
+}
+
+/* W492 TEST/DIAG (nur mit loc_camp_min_side): Missionsende FUN_00029C60(Code, Verzoegerung) mit Aufrufer und
+ * Teamlage ins Log (Teilnehmermaske [0x306830], Anzahl [0x3071A0], je Spieler Team u16 [0x5C515C + i*0xAE8] und
+ * Flags [0x5C5168 + i*0xAE8]). Keine Eingaben. */
+static volatile LONG s_end_notes;
+static void __cdecl loc_end_note(u32 ret, u32 code, u32 delay)
+{
+    char buf[256];
+    int i, n, o;
+    if (*(volatile u32 *)(uintptr_t)0x3068E0u != 0 || InterlockedIncrement(&s_end_notes) > 6) return;
+    n = (int)*(volatile u32 *)(uintptr_t)0x3071A0u;
+    o = sprintf_s(buf, sizeof buf, "maske=0x%X n=%d", *(volatile u32 *)(uintptr_t)0x306830u, n);
+    for (i = 0; i < n && i < 10 && o > 0 && o < (int)sizeof buf - 40; i++) {
+        o += sprintf_s(buf + o, sizeof buf - o, " p%d:team=%u fl=0x%X", i,
+                       (unsigned)*(volatile uint16_t *)(uintptr_t)(0x5C515Cu + (u32)i * 0xAE8u),
+                       *(volatile u32 *)(uintptr_t)(0x5C5168u + (u32)i * 0xAE8u));
+    }
+    HLOG_I("LOCCAMP: Missionsende Code %u (Verz. %u) von 0x%X, %s", code, delay, ret, buf);
+}
+static __declspec(naked) void loc_end_hook(void)
+{
+    __asm {
+        pushad
+        push dword ptr [esp + 40]
+        push dword ptr [esp + 40]
+        push dword ptr [esp + 40]
+        call loc_end_note
+        add esp, 12
+        popad
+        mov eax, dword ptr ds:[0x3068E0]
+        push 0x29C65
+        ret
+    }
+}
+
 /* ---------------------------------------------------------------- W408 LOC-UNLOCK-ALL
  * Alle VTs, Missionen und Items immer frei (Nutzer 21.11., kein Schalter; LOC_RE1 §4, LOC_BOOT §74).
  * CONFIG.DAT liegt im Speicher bei 0x7279B4 (0x24 B): +0x18 VT-Maske, +0x1C Missions-Maske, +0x20 Item-Maske.
@@ -730,6 +803,66 @@ static void locu_patch(u32 va, const uint8_t *expect, u32 len, uint8_t op, void 
     FlushInstructionCache(GetCurrentProcess(), p, 5);
     HLOG_I("LOCUNLOCK: Eingriff %s @0x%X", name, va);
 }
+/* W495 HATCH-LIGHTS (Steelbound#102): Lichtleiste des oberen Monitors haengt in der Startsequenz im Himmel.
+ * Befund: FUN_0007B890 zeichnet die Cockpit-Lichtgruppe mit FUN_00075200 (je Teil MVP = Welt[Zeichen-Slot
+ * [0x3071E0]] x ViewProj 0x3078D0). Im Lichtmodell ist die Lichtleiste ein Kind des Lukenlichts; ihre
+ * Spur in der Startanimation dreht genau gegen die Luke, die Welt (lokal x Eltern-Welt, FUN_00085140) bleibt
+ * fest auf dem Platz des geschlossenen Monitors. Unsere Nachbildung rechnet das wie der Spielcode.
+ * Korrektur (loc_hatch_lights=1): vor dem Zeichnen erhaelt jedes Teil der Gruppe mit bewegtem Elternteil
+ * (Eltern-Index >= 1) im Zeichen-Slot die Welt Endlage (letzter Schluessel der Spur) x Eltern-Welt. Das Licht
+ * faehrt starr mit Luke und Monitor; in der Endlage (Luke zu) ist das Ergebnis gleich. Spielzustand und
+ * Animationsdaten bleiben unveraendert (das Spiel rechnet die Welt beim naechsten Update selbst neu). */
+typedef void(__cdecl *loc_euler_mtx_t)(float *out, const float *rot3, const float *pos3); /* FUN_00084B70 */
+typedef void(__cdecl *loc_draw_lights_t)(int ent);                                       /* FUN_00075200 */
+static void hl_mul(float *o, const float *a, const float *b) /* o = a x b (Zeilenvektoren, wie FUN_0012F3F9) */
+{
+    float r[16];
+    unsigned i, j;
+    for (i = 0; i < 4u; i++) {
+        for (j = 0; j < 4u; j++) {
+            r[i * 4u + j] = a[i * 4u] * b[j] + a[i * 4u + 1u] * b[4u + j] + a[i * 4u + 2u] * b[8u + j] + a[i * 4u + 3u] * b[12u + j];
+        }
+    }
+    memcpy(o, r, sizeof r);
+}
+static unsigned s_hl_fixed;
+static void hl_fix(int ei)
+{
+    __try {
+        const u32 en = *(const u32 *)(uintptr_t)0x2F70ACu + (u32)ei * 0x60u;
+        const u32 an = *(const u32 *)(uintptr_t)(en + 0x4Cu), parts = *(const u32 *)(uintptr_t)(en + 0x50u);
+        const u32 np = *(const uint8_t *)(uintptr_t)(en + 0x36u), drw = *(const u32 *)(uintptr_t)0x3071E0u;
+        u32 mdl, par, p;
+        if (!an || !parts || np < 3u || drw > 2u) return;
+        if (*(const uint8_t *)(uintptr_t)(en + 0x48u) & 2u) return; /* gespiegelte Spuren: unberuehrt */
+        mdl = *(const u32 *)(uintptr_t)(*(const u32 *)(uintptr_t)0x560BD4u + *(const uint16_t *)(uintptr_t)(en + 2u) * 4u);
+        par = mdl ? *(const u32 *)(uintptr_t)(mdl + 0x18u) : 0u;
+        if (!par) return;
+        for (p = 2; p < np; p++) {
+            __declspec(align(16)) float loc[16];
+            const int q = *(const signed char *)(uintptr_t)(par + p);
+            u32 tr, n, last;
+            if (q < 1 || (u32)q >= p) continue; /* Wurzel bzw. Kind der Wurzel: unveraendert */
+            tr = an + *(const u32 *)(uintptr_t)(an + p * 4u);
+            n = *(const uint16_t *)(uintptr_t)(tr + 2u);
+            if (n < 2u) continue; /* keine Animation */
+            last = tr + 4u + (n - 1u) * 0x1Cu; /* Schluessel: u16, u16 Zeit, Rotation xyz, Position xyz */
+            ((loc_euler_mtx_t)(uintptr_t)0x84B70u)(loc, (const float *)(uintptr_t)(last + 4u), (const float *)(uintptr_t)(last + 0x10u));
+            hl_mul((float *)(uintptr_t)(parts + p * 0x1E0u + (drw + 4u) * 0x40u), loc,
+                   (const float *)(uintptr_t)(parts + (u32)q * 0x1E0u + (drw + 4u) * 0x40u));
+            if (s_hl_fixed++ == 0) {
+                HLOG_I("HATCH-LIGHTS: Ent %d Teil %u (Eltern %d) faehrt in Endlage mit (Spur %u Schluessel)", ei, p, q, n);
+            }
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {}
+}
+/* ersetzt den Aufruf FUN_00075200 in FUN_0007B890 (0x7B9EE) */
+static void __cdecl loc_hatch_draw(int ei)
+{
+    hl_fix(ei);
+    ((loc_draw_lights_t)(uintptr_t)0x75200u)(ei);
+}
+
 static void loc_unlock_install(void)
 {
     static const uint8_t k_load[7] = { 0x89, 0x0D, 0xD0, 0x79, 0x72, 0x00, 0xC3 };  /* mov [0x7279D0],ecx; ret */
@@ -939,6 +1072,44 @@ void loc_boot_install(void)
     loc_xdk_internals();
     loc_render_sblook_apply(); /* W459: SB look (Experimental, Standard aus) */
     loc_unlock_install(); /* W408: alle VTs/Missionen/Items frei (immer, nur LoC) */
+    if (g_cfg.loc_hatch_lights) { /* W495 HATCH-LIGHTS (#102) */
+        static const uint8_t k_lights[5] = { 0xE8, 0x0D, 0x98, 0xFF, 0xFF }; /* call 0x75200 */
+        locu_patch(0x7B9EEu, k_lights, 5, 0xE8, (void *)loc_hatch_draw, "Cockpit-Lichtgruppe (FUN_00075200, W495)");
+    }
+    if (g_cfg.loc_live) { /* W492: Reinforcements-Auswahl mit leerer Maske (nur Xbox-Live-Kampagne) */
+        static const uint8_t k_reinf[5] = { 0x33, 0xC0, 0x66, 0x8B, 0x03 }; /* xor eax,eax; mov ax,[ebx] */
+        loc_patch_checked(0x118E50u, k_reinf, 5, (void *)loc_reinf_guard, "Reinforcements-Auswahl (0x118E50, Live)");
+    }
+    if (g_cfg.loc_live && !g_cfg.loc_camp_min_side) {
+        g_cfg.loc_camp_min_side = LOC_CAMP_BETA_MIN_SIDE; /* Nutzer 25.11.: Beta 0.6.0 - 1 Pilot je Seite reicht (Schluessel 0 = Original) */
+    }
+    if (g_cfg.loc_live && g_cfg.loc_camp_min_side > 0) {
+        /* W492 TEST: BEGIN verlangt im Original je Seite min = Kampagne ? 3 : 1 (FUN_000FC4B0 @0xFC538:
+         * mov esi,eax; neg esi; sbb esi,esi; and esi,2; push 1; inc esi) -> mov esi,N; push 1; 5x nop */
+        static const uint8_t k_min[12] = { 0x8B, 0xF0, 0xF7, 0xDE, 0x1B, 0xF6, 0x83, 0xE6, 0x02, 0x6A, 0x01, 0x46 };
+        uint8_t d[12] = { 0xBE, 0, 0, 0, 0, 0x6A, 0x01, 0x90, 0x90, 0x90, 0x90, 0x90 };
+        d[1] = (uint8_t)g_cfg.loc_camp_min_side;
+        loc_patch_bytes(0xFC538u, k_min, d, 12, "TEST BEGIN-Mindestzahl je Seite (0xFC538, loc_camp_min_side)");
+        { /* FUN_00052BA0 (Lobby-Zustaende 0x49..0x4C, Kampagnenzweig [G+4]==0): eigene + andere Seite <= 2 -> Zustand
+           * 0x51 "session was canceled" (cmp eax,2 @0x52BC9). TEST: Schwelle min(Original, 2*N-1) */
+            static const uint8_t k_tot[3] = { 0x83, 0xF8, 0x02 };
+            uint8_t t[3] = { 0x83, 0xF8, 0x02 };
+            if (g_cfg.loc_camp_min_side == 1) t[2] = 0x01;
+            if (t[2] != k_tot[2]) loc_patch_bytes(0x52BC9u, k_tot, t, 3, "TEST Abbruchschwelle Teilnehmer (0x52BC9, loc_camp_min_side)");
+        }
+        if (g_cfg.loc_camp_min_side == 1) { /* Einsatz: Modus [0x306B00]==0 und je Seite genau 1 aktiver Pilot
+            * ([0x306770]==1, [0x306774]==1) -> sofort Ende Code 5/1/2 nach Punkten (0x2C18D..0x2C1BD). TEST: jne -> jmp */
+            static const uint8_t k_1v1[4] = { 0x85, 0xC0, 0x75, 0x3A };
+            static const uint8_t d_1v1[4] = { 0x85, 0xC0, 0xEB, 0x3A };
+            loc_patch_bytes(0x2C18Du, k_1v1, d_1v1, 4, "TEST Einsatzende 1 gegen 1 aus (0x2C18F, loc_camp_min_side=1)");
+        }
+        { /* DIAG Missionsende (mov eax,[0x3068E0]) */
+            static const uint8_t k_end[5] = { 0xA1, 0xE0, 0x68, 0x30, 0x00 };
+            loc_patch_checked(0x29C60u, k_end, 5, (void *)loc_end_hook, "TEST DIAG Missionsende (0x29C60)");
+        }
+        HLOG_W("LOCCAMP: loc_camp_min_side=%d - BEGIN ab %d Pilot(en) je Seite (Original Kampagne 3, Beta-Standard 1)",
+               g_cfg.loc_camp_min_side, g_cfg.loc_camp_min_side);
+    }
     loc_rule_install(); /* W420: Clip dumping unterbinden (Host-Regel, Standard an, Abgleich im Match) */
     loc_chat_install(); /* W437: Textchat LoC online (Standard an, nur mit Treffpunkt + sec=ok) */
     HLOG_I("LOCBOOT: %u XDK-Hooks, %u uebergangen, %u Stubs (von %u), %u Byte-Patches installiert",
@@ -984,6 +1155,7 @@ void loc_boot_tick(int waited_s)
         loc_audio_tick(waited_s); /* W298 */
         loc_sync_tick(waited_s); /* W297 */
         loc_rb_tick(waited_s); /* W325 */
+        loc_mem_tick(); /* W493: abgelaufene Quarantaene freigeben */
         if (waited_s % 30 == 0) {
             loc_mem_stats();
         }

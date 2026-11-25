@@ -339,6 +339,32 @@ void loc_render_text_lock(unsigned surf, unsigned bits, unsigned pitch)
     s_txt[k].data = data; s_txt[k].bits = bits; s_txt[k].pitch = pitch; s_txt[k].w = w; s_txt[k].h = h;
 }
 
+/* ---------------------------------------------------------------------------
+ * W485 LIVEQOS: Live-Dialoge ohne Text (Kontenauswahl, Hinweis nach dem Logon).
+ * Das Live-Konto-Modul (Zustand PTR 0x27D670, Zeichnen FUN_0011BF10/FUN_0011C150/FUN_0011C580) schreibt
+ * jeden Text per XFONT in die Textebene (FUN_00122320) und blendet sie mit FUN_0011A820 als VOLLBILD-Quad
+ * ein: Position und UV (0,0)-([0x3069D0],[0x3071E4]) = Spiel-Framebuffer, in LoC 720x480. Die
+ * 2D-Heuristik in sb_im_submit nimmt nur x <= 704 (640 + 64) als Pixelkoordinate -> der Quad lief als
+ * 3D-Draw (Pixel als Objektkoordinaten durch die Matrix) und landete ausserhalb des Bilds. System-Link-
+ * Dialoge blenden die Textebene nur im Textrechteck ein (FUN_00115450, x < 704) und waren nicht betroffen.
+ * Hier: fuer Draws mit der Textebene als Textur gilt die Grenze Framebuffer + 64. Nur im Live-Modus.
+ * ------------------------------------------------------------------------- */
+void loc_render_rhw_range(unsigned xptr, float *xmax, float *ymax)
+{
+    unsigned data = 0, k;
+    static volatile LONG s_nlog;
+    if (!g_sba_loc || !g_cfg.loc_live || !xptr || !s_ntxt || g_game_fb_w <= 640u) { return; }
+    __try { data = *(const unsigned *)(uintptr_t)(xptr + 4u); } __except (EXCEPTION_EXECUTE_HANDLER) { return; }
+    for (k = 0; k < s_ntxt && s_txt[k].data != data; k++) {}
+    if (!data || k == s_ntxt) { return; }
+    *xmax = (float)g_game_fb_w + 64.0f;
+    if ((float)g_game_fb_h + 64.0f > *ymax) { *ymax = (float)g_game_fb_h + 64.0f; }
+    if (InterlockedIncrement(&s_nlog) == 1) {
+        HLOG_I("LOCTEXT: Textebene im Live-Modus als 2D bis %ux%u (Framebuffer %ux%u + 64; Live-Dialoge blenden sie als Vollbild-Quad ein)",
+               g_game_fb_w + 64u, g_game_fb_h + 64u, g_game_fb_w, g_game_fb_h);
+    }
+}
+
 void loc_render_on_clear(unsigned surf, unsigned flags, unsigned color)
 {
     unsigned data = 0, parent = 0, k, y, x;

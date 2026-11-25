@@ -25,7 +25,7 @@
 #define RBN_MAXPEER 8
 #define RBN_PKT_HEAD 36
 #define RBN_PKT_ENT 12
-#define RBN_PKT_MAXENT 4
+#define RBN_PKT_MAXENT 8 /* W494: = RBN_MAXPEER (vorher 4: ab 6 Spielern blieb ein Paar ohne RTT) */
 #define RBN_PKT_MAX (RBN_PKT_HEAD + RBN_PKT_MAXENT * RBN_PKT_ENT)
 #define RBN_FRESH_MS 3000u   /* Hallo gilt so lange als aktuell */
 #define RBN_WAIT_MS 12000u   /* Frist fuer Entscheidung (Client) bzw. Bestaetigung (Host) */

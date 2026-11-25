@@ -117,6 +117,16 @@ typedef struct {
     int loc_chat_mission_lobby; /* W474: Lobby-Chat waehrend des Matchs (Standard 1) */
     int loc_chat_mission_team;  /* W474: Team-Chat waehrend des Matchs (Standard 1; ohne Team-Reiter wirkungslos) */
     int loc_lobby_join_delay; /* W446 TEST: Lobby erst N ms nach dem welcome betreten/anlegen (0 = sofort) */
+    int loc_lobby_resume;     /* W500: Abriss der Treffpunkt-Verbindung -> Sitzung fortsetzen (1 = Standard, 0 = alter Neuaufbau) */
+    int loc_lobby_cut;        /* W500 TEST: Steuerverbindung N s nach jedem (Wieder-)Aufbau abreissen (0 = aus) */
+    int loc_lobby_cut_mode;   /* W500 TEST: 0 = harter Reset, 1 = still liegenlassen (Dienst merkt nichts) */
+    int loc_live;             /* W479 LIVE-LOGON: 1 = LoC im Xbox-Live-Modus (XOnline-HLE, steelnet als Live-Dienst, braucht Treffpunkt + Konto; docs/loc/LOC_LIVE.md), 0 = System Link wie bisher (Standard) */
+    int loc_camp;             /* W491 CAMP-CLIENT: 1 = Kampagne im Xbox-Live-Modus anbieten (Standard; Ticket + Steelbound-Zugang, docs/loc/LOC_CAMPAIGN.md), 0 = Campaign bleibt grau */
+    char loc_camp_id[33];     /* W491: "" bzw. "season" = Produktivsaison steelbound-s1 (47100), "test" = Testkampagne steelbound-test (47103) */
+    char loc_camp_host[128];  /* W491: Zugang (Hostname), "" = Treffpunkt-Host (relay.steelbound.dev) */
+    int loc_camp_port;        /* W491: Zugangsport, 0 = nach Kampagne */
+    char loc_camp_spki[65];   /* W491: zusaetzlicher Pin (hex64) NUR fuer einen lokalen Test-Zugang (Loopback) */
+    int loc_camp_min_side;    /* W492: Mindestzahl Piloten je Seite (1..3); 0 = nicht gesetzt -> Beta-Standard LOC_CAMP_BETA_MIN_SIDE (1); -1 = Original (Schluessel 0: Kampagne 3, sonst 1; FUN_000FC4B0); nur loc_live=1 */
     int loc_lan;              /* W454 LOC-LAN-MODE: 1 = LAN-Modus ohne steelnet (Entdeckung im lokalen Netz, mit loc_transport=udp) */
     char loc_lan_room[17];    /* W454: Raumname (leer = "LAN") */
     char loc_lan_pass[64];    /* W454: Raumpasswort (besser Umgebung SB_LAN_PASS, wie der Launcher; leer = ohne) */
@@ -510,6 +520,7 @@ typedef struct {
     int m3d_census_gate; /* DIAG(MONITORVIEW,W36): 1 = Missions-Zensus erst ab VT-online ([0x53831C]==1, nach START), 2 = nur Modus 4 (W101), 0 = ab 1. Missions-Frame */
     int loc_census_from; /* W285 DIAG(LOC-RENDER): nur LoC-Profil: Zensus (m3d_census = Abstand) ab diesem Frame statt SB-Szene 0x2C; 0 = aus */
     int loc_bbtex; /* W285 LOC-RENDER: 1 = Backbuffer-Surface als Textur (LoC-Glow-Kette) aus einer Kopie der 4:3-Box (Standard), 0 = alt (weiss); nur LoC-Profil */
+    int loc_hatch_lights; /* W495 HATCH-LIGHTS (#102): 1 = Lichtteile der Cockpit-Lichtgruppe mit bewegtem Elternteil fahren in Endlage mit (Standard), 0 = Original (Monitorlichter haengen bei offener Luke im Himmel); nur LoC */
     int loc_visq; /* W297 LOC-MISSION: Sichtbarkeitstests 1 = echt (Occlusion-Query), 2 = immer sichtbar, 0 = alt (1 Pixel, Standard); nur LoC, A12 ohne sichtbaren Unterschied */
     int loc_text_clear; /* W297 LOC-MISSION: 1 = D3D-Clear der Textebene loescht auch den CPU-Speicher (Standard), 0 = alt; nur LoC */
     int loc_vpreset; /* W297 LOC-MISSION: 1 = SetRenderTarget setzt den Viewport auf die volle Zielgroesse (wie D3D; Standard), 0 = alt; nur LoC-Profil */
@@ -925,6 +936,11 @@ typedef struct {
     int vr_shell;               /* 1 = dunkle, schlichte Huelle um den Sitz fuellt leere Bildteile (Standard), 0 = schwarz wie bisher */
     int vr_vignette;            /* Rand-Vignette 0..100 %: Deckung der weltfesten Blende jenseits des modellierten Cockpits (Standard 80, 0 = aus) */
     int vr_shell_diag;          /* DIAG(VR-SHELL,W242): 1 = leere Pixel magenta statt Huelle, ohne Vignette (Messung der Abdeckung) */
+    /* W493 LOC-MEMLEAK (#101), nur LoC-Profil */
+    int loc_mem_reclaim;        /* FIX: 1 = VB/IB aus CreateVertex/IndexBuffer2 mit Xbox-Refcount (Common 0x01000001/0x01010001); Release auf 0 gibt die Daten nach der Quarantaene an LOCMEM zurueck, freie Bloecke nach Groessenklassen wiederverwendet (Standard); 0 = alt (nie frei, Bereich lief nach ~1 h voll) */
+    int loc_mem_quar;           /* Quarantaene freigegebener LOCMEM-Bloecke in Bildern (Inhalt bleibt so lange stehen, Standard 300 = 10 s bei 30 Bildern/s; 0 = sofort) */
+    /* W496 NET-TELEMETRY: Netzbericht an steelnet (nur LoC mit Treffpunkt), Launcher-Frage "anonyme Netzstatistik" */
+    int net_report;             /* 1 = Zustimmung: feste Codes/Zahlen am Lobby-/Match-Ende an steelnet (loc_tun_netrep.c); 0 = nie (Standard, bis gefragt) */
 } hcfg_t;
 
 extern hcfg_t g_cfg;

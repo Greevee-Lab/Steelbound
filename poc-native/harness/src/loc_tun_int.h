@@ -61,7 +61,9 @@
 #ifndef SB_NET_VERSION
 #define SB_NET_VERSION "dev"
 #endif
-#define TUN_ROUTE_SIMS 4 /* W395 TEST loc_route_sim: Wege mit eigener Verzoegerung/Ausfall */
+#define TUN_ROUTE_SIMS 8 /* W395 TEST loc_route_sim: Wege mit eigener Verzoegerung/Ausfall (W494: auch je Mitspieler "@Prefix") */
+#define TUN_RS_Q 24      /* W500: unbestaetigte eigene Steuerzeilen (Bestaetigung kommt mit jedem pong, alle 15 s) */
+#define TUN_RS_LINE 4200 /* W500: wie der Sendepuffer von lb_send */
 #define K_STREAM 1
 #define K_DGRAM 2
 #define S_OPEN 1
@@ -89,6 +91,7 @@
 #define TUN_RP_RATE 100.0   /* W395: Wegproben-Antworten je Verbindung und Sekunde (9 Wege x 10/s Proben) */
 #define TUN_DG_RATE 60.0    /* Datagramme zum Spiel je Mitspieler und Port (§6.4), Burst 120 */
 #define TUN_WATCH_MS 12000.0 /* W460: Abfrage der Liste fuer das Lobby-Widget hoechstens alle 12 s */
+#define TUN_QOS_ONLINE_MAX 598 /* W494: online gemeldete QoS-RTT hoechstens (RttMed/2 < 300 -> Klasse 2, Beitritt klappt) */
 #define LAN_MAX_PEERS 24     /* W454: bekannte LAN-Clients (Paare hoechstens TUN_MAX_LINKS) */
 #define LAN_MAX_TG 4         /* W454: TEST-Ziele loc_lan_targets */
 #define TUN_MAX_GHOST 24    /* W373: oeffentliche Lobbys je Suche (Spiel nimmt bis 49 Hosts) */
@@ -196,7 +199,24 @@ typedef struct tghost {
     SOCKET s[2];         /* vip:Stellvertreter+201 / +202 (erst beim Senden) */
     unsigned ans;        /* Suche (pub_seq), fuer die schon geantwortet wurde */
     double seen;
+    int live;            /* W482 LIVE-MATCH: Host einer Live-Session (Beitritt per live_join mit live_sid) */
+    uint8_t live_sid[8];
 } tghost;
+
+/* W482 LIVE-MATCH: Anfrage der XOnline-HLE an steelnet (loc_tun_live.c) */
+#define TUN_LIVE_REQ 8
+#define TUN_LIVE_JSON 3900
+typedef struct lvreq {
+    int id;              /* 0 = frei */
+    int state;           /* 0 offen, 1 fertig, -1 Fehler */
+    int queued, with_vip;
+    double q_at, sent_at;
+    char err[24];
+    uint8_t sid[8], key[16];
+    int nsess;
+    loclive_sess *sess;  /* live_results (calloc, frei bei Abholung) */
+    char json[TUN_LIVE_JSON];
+} lvreq;
 
 typedef struct tstream {
     int used, link, connecting, rd_closed, fin_rx, fin_sent, wr_shut;
@@ -273,6 +293,7 @@ struct loctun {
     uint8_t udp_key[32];/* BIND2/KEEPALIVE2-MAC (aus welcome) */
     uint64_t bctr;
     char my_pilot[17];  /* wirksamer Name aus welcome (Transkript) */
+    char my_gamertag[16]; /* W487: Gamertag des Kontos aus welcome (leer = keiner gesetzt bzw. Gast) */
     char lobby_code[16];/* Raumcode der eigenen Lobby (Anzeige im Launcher) */
     volatile LONG play_mode; /* W440: Modus der aktuellen Lobby (0 keine, 1 sim, 2 arcade); liest der Eingabe-Thread */
     char need_ver[16];  /* W420: vom Treffpunkt verlangte bzw. neuere Version eines Mitspielers (nur [0-9A-Za-z.+-]) */
@@ -312,12 +333,29 @@ struct loctun {
     volatile LONG pub_watch; /* W460 LOC-LOBBY-WIDGET: Widget sichtbar -> Liste alle TUN_WATCH_MS frisch halten */
     double pub_list_rx;      /* W460: letzte Liste empfangen (tl_now, 0 = noch keine) */
     LONG pub_answered;
+    /* W482 LIVE-MATCH (loc_tun_live.c): Xbox-Live-Modus - keine Lobby beim Start, Sessions ueber live_* */
+    int live;                   /* W501: Laufzeitzustand - 1 nur, solange das Spiel im Xbox-Live-Fluss ist */
+    int live_cap;               /* W501 ONLINE-BOTH: Xbox Live moeglich (loc_live=1 + Treffpunkt); Start = System Link */
+    int pub0;                   /* W501: pub fuer System Link (ausserhalb von Xbox Live) */
+    volatile LONG live_want;    /* W501: Wunsch des Spiel-Threads (loctun_live_mode), Netz-Thread schaltet um */
+    lvreq lv_req[TUN_LIVE_REQ];
+    int lv_next, lv_own;
+    uint8_t lv_own_sid[8];      /* eigene Session (Keepalive) */
+    double lv_keep_at;
+    /* W491 CAMP-CLIENT (loc_tun_live.c): Kampagnen-Ticket (nur hier, nie im Spielspeicher) */
+    char ct_camp[33];           /* Kampagnen-ID, "" = nie angefordert */
+    int ct_want, ct_pending, ct_id, ct_state, ct_len; /* ct_state: 0 offen, 1 Ticket da, -1 Fehler */
+    long long ct_exp;           /* gueltig bis (Unix-s) */
+    double ct_sent_at, ct_retry_at;
+    char ct_err[24];
+    uint8_t ct_ticket[300];
     uint8_t pub_t3[0x2C4];      /* Beitrittsanfrage des eigenen Spiels (bis die Verbindung steht) */
     int pub_t3_len;
     uint16_t pub_t3_src;
     /* W395 TEST loc_route_sim: je Weg eigene Verzoegerungsstufe bzw. Ausfallfenster */
     struct { char name[24]; locnetsim *sim; double cut_a, cut_b; int cut_logged; } rsim[TUN_ROUTE_SIMS];
     int nrsim;
+    int qos_capped; /* W494: QoS-Begrenzung online schon gemeldet */
     unsigned relay_usable;      /* W395: Bit i = Relay i darf gewaehlt werden (route "relays"; ohne Feld alle) */
     int relay_usable_set;
     /* W454 LOC-LAN-MODE (loc_tun_lan.c) */
@@ -338,6 +376,22 @@ struct loctun {
     volatile LONG lan_rx, lan_bad, lan_tx, lan_ign;
     char *test_cap;             /* W373 TEST (loctun_test_line): gesendete Steuerzeilen mitschneiden */
     int test_cap_len, test_cap_max;
+    struct tnetrep *nr;         /* W496 NET-TELEMETRY (loc_tun_netrep.c), NULL = Netzbericht aus */
+    char lb_last_drop[12];      /* W496 Stufe 1: Code der letzten Trennung einer stehenden Anmeldung (hello "rc"), "" = keine */
+    loctun_game_fn volatile game_fn;
+    /* W500 LOBBY-RESUME (SECURITY.md §47): Abriss der Steuerverbindung -> dieselbe Sitzung fortsetzen */
+    char rs_tok[65];            /* Fortsetzungs-Token aus dem letzten welcome (Hex), "" = Sitzung nicht fortsetzbar */
+    int rs_ttl_ms;              /* Frist des Dienstes (welcome "rttl") */
+    int rs_susp;                /* 1 = Verbindung weg, Sitzung (cid, E, Mitspieler) gehalten, Fortsetzung laeuft */
+    int rs_try, rs_count, rs_n_ok;
+    double rs_since, rs_deadline, rs_cut_next;
+    uint64_t rs_rx;             /* Zeilen vom Dienst nach dem welcome (Bestaetigung "rx" an den Dienst) */
+    uint64_t rs_base;           /* Folgenummer des aeltesten Eintrags in rs_q */
+    int rs_qn, rs_qh;           /* Eintraege, Ringanfang (voll: aelteste verdraengt -> ggf. keine Fortsetzung) */
+    char rs_q[TUN_RS_Q][TUN_RS_LINE]; /* eigene Zeilen nach dem welcome, noch nicht bestaetigt (fuer das Nachsenden) */
+    int rs_ql[TUN_RS_Q];
+    SOCKET rs_old_s;            /* TEST loc_lobby_cut Modus 1: liegengelassene alte Verbindung (Dienst merkt nichts) */
+    sbtls *rs_old_tls;
 };
 /* W373: oeffentliche Lobbys - Funktionen in loc_tun_pub.c (W464: Vorausdeklarationen jetzt unten) */
 
@@ -361,6 +415,7 @@ int tl_dest_ok(loctun *t, uint32_t ip);
 int tl_resolve(const char *host, uint16_t port, struct sockaddr_in *out);
 int tl_split_hostport(const char *s, char *host, int hl, uint16_t *port);
 int tl_rsim_find(loctun *t, const struct sockaddr_in *a);
+int tl_rsim_find_link(loctun *t, const tlink *L);
 int tl_rsim_cut(loctun *t, int k);
 void tl_rsim_setup(loctun *t);
 void tl_sendto(loctun *t, const struct sockaddr_in *to, const uint8_t *buf, int len);
@@ -417,6 +472,8 @@ void lb_report(loctun *t);
 void lb_snchat_tick(loctun *t);
 void lb_on_line(loctun *t, const char *m, const char *e, double now);
 void lb_poll(loctun *t, double now);
+void lb_rs_reset(loctun *t);                          /* W500: Fortsetzungszustand loeschen */
+void lb_lost(loctun *t, const char *why, double now); /* W500: Abriss -> fortsetzen oder lb_close */
 int tl_bind_want(loctun *t, const tlink *L, int ri);
 void tl_tbind_confirm(loctun *t, tlink *L, int ri);
 void lb_rx_sbn(loctun *t, const uint8_t *p, int len, const struct sockaddr_in *from, double now);
@@ -435,5 +492,21 @@ void pub_on_state(loctun *t, const char *m, const char *e);
 void pub_reject(loctun *t, int gi, const char *why, double now);
 void pub_on_link_up(loctun *t, tlink *L);
 void pub_tick(loctun *t, double now);
+void pub_ghosts_close_one(tghost *g); /* W482 */
+/* W482 LIVE-MATCH (loc_tun_live.c) */
+void lv_reset(loctun *t, const char *why);
+void lv_on_line(loctun *t, const char *typ, const char *m, const char *e, double now);
+int lv_on_error(loctun *t, const char *m, const char *e);
+void lv_tick(loctun *t, double now);
+void pub_live_mode_tick(loctun *t, double now); /* W501: System Link <-> Xbox Live umschalten (Netz-Thread, unter cs) */
+/* W496 NET-TELEMETRY (loc_tun_netrep.c): alle unter t->cs, ohne Zustimmung (t->nr == NULL) sofort zurueck */
+const char *tl_drop_code(const char *why); /* Trennungsgrund -> fester Code (closed/timeout/tls/refused/version/error) */
+void nr_start(loctun *t);
+void nr_free(loctun *t);
+void nr_on_welcome(loctun *t, const char *m, const char *e, double now);
+void nr_on_drop(loctun *t, const char *why, double now);
+void nr_on_host_left(loctun *t);
+void nr_tick(loctun *t, double now);
+void nr_exit(loctun *t);
 
 #endif /* LOC_TUN_INT_H */

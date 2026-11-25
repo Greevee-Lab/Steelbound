@@ -4,6 +4,7 @@
 #include "loc_rollback.h" /* W330: Write-Watch/Freigabe-Meldung */
 #include "krnl_int.h"
 #include "loc_mem.h" /* W277 LOC-DISC */
+#include <intrin.h> /* W493: _ReturnAddress (LOCMEM-Aufrufer) */
 
 static int in_game_region(u32 va, u32 size)
 {
@@ -1252,7 +1253,7 @@ u32 __stdcall hle_MmAllocateContiguousMemory(u32 size)
 { 
     static unsigned nreu;
     if (loc_mem_active()) { /* W277: LoC - Contig mit Xbox-Spiegel (SB nie) */
-        u32 lr = loc_mem_alloc(size ? size : 0x1000, 0x1000, 0);
+        u32 lr = loc_mem_alloc_t(size ? size : 0x1000, 0x1000, 0, LOCMEM_T_CONTIG, (u32)(uintptr_t)_ReturnAddress()); /* W493: Aufrufer-Statistik */
         if (lr) { exreg_add(lr, size ? size : 0x1000); }
         return lr;
     }
@@ -1297,7 +1298,8 @@ u32 __stdcall hle_MmAllocateContiguousMemoryEx(u32 size, u32 low, u32 high,
     (void)low;
     (void)high;
     if (loc_mem_active()) { /* W277: LoC - Contig mit Xbox-Spiegel (SB nie), Schutz bleibt RW */
-        u32 lr = loc_mem_alloc(size ? size : 0x1000, align > 0x1000u ? align : 0x1000u, 0);
+        u32 lr = loc_mem_alloc_t(size ? size : 0x1000, align > 0x1000u ? align : 0x1000u, 0, LOCMEM_T_CONTIGEX,
+                                 (u32)(uintptr_t)_ReturnAddress()); /* W493: Aufrufer-Statistik */
         (void)prot;
         if (lr) { exreg_add(lr, size ? size : 0x1000); }
         return lr;

@@ -689,6 +689,7 @@ static void netm_set(int m)
     }
     ui_refresh_visibility();
     redraw_all();
+    if (g_o.shot == 0) nrq_eval(); /* W496: nach der Erstabfrage bzw. Stufe steelnet einmal fragen */
 }
 
 /* ------------------------------------------------------------------ */
@@ -1321,6 +1322,7 @@ void lset_build(HWND w)
        0);
     mk(w, K_BTN, ID_LSET_RELPAGE, P_LSET, CX0 + 18, CY0 + LSET_NET_H - 42, 150, 28,
        LT("gui.upd_open"), 0);
+    nrq_build(w); /* W496 */
     netm_sync_ui();
 }
 
@@ -1339,6 +1341,7 @@ void lset_relabel(void)
     if (ctl(ID_LSET_RELPAGE)) ui_settext(ctl(ID_LSET_RELPAGE), LT("gui.upd_open"));
     if (ctl(ID_MP_GOSET)) ui_settext(ctl(ID_MP_GOSET), LT("gui.mp_goset"));
     if (ctl(ID_LOC_MP_GO)) ui_settext(ctl(ID_LOC_MP_GO), LT("gui.mp_go"));
+    nrq_relabel(); /* W496 */
 }
 
 /* Sichtbarkeit (-1 = nicht zustaendig). Vor dem LoC-Bereich geprueft. */
@@ -1382,6 +1385,9 @@ int lset_visible(int id, int page)
 static int lset_command(int id, int code)
 {
     (void)code;
+    if (nrq_command(id)) { /* W496 */
+        return 1;
+    }
     if (id == ID_LSET_OPEN) {
         lset_open();
         return 1;
@@ -1417,6 +1423,21 @@ static int lset_command(int id, int code)
     return 0;
 }
 
+/* W486 SB-GFX-OPTIONS (#98): Meldungen der Kombi-Liste (oeffnen, schliessen, Wahl bestaetigt/verworfen) aendern
+ * keinen Wert. user32 sendet bei einer Mausauswahl CBN_SELENDOK (und bei offener Liste CBN_CLOSEUP) vor
+ * CBN_SELCHANGE. Die Regelauswertung dazwischen lief gfx_sync_ui und setzte die Grafikfelder (Monitor-Effekt,
+ * Weltbeleuchtung, Schatten, Effekte, Kantenglaettung) auf den alten Wert zurueck, CBN_SELCHANGE las dann den alten
+ * Wert. Die Regeln laufen weiter nach CBN_SELCHANGE/CBN_EDITCHANGE. */
+static int combo_list_note(int id, int code)
+{
+    const uictl_t *u;
+    if (code != CBN_DROPDOWN && code != CBN_CLOSEUP && code != CBN_SELENDOK && code != CBN_SELENDCANCEL) {
+        return 0;
+    }
+    u = ui_find(id);
+    return u && (u->kind == K_COMBO || u->kind == K_COMBOEDIT);
+}
+
 void on_command(int id, int code)
 {
     if (hub_command(id, code)) { /* W470: Reiter der Bereiche Optionen/steelnet */
@@ -1444,7 +1465,7 @@ void on_command(int id, int code)
     }
     on_command_inner(id, code);
     /* W171: nach jeder Bedienung Regelwerk neu (Freigaben + Begruendungen) */
-    if (!g_updating && id != ID_CLOSE && id != ID_MIN) {
+    if (!g_updating && id != ID_CLOSE && id != ID_MIN && !combo_list_note(id, code)) { /* W486 */
         ui_apply_rules();
     }
 }
@@ -2496,6 +2517,12 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == ACC_TIMER) {
             acc_name_tick(); /* W418: Namenspruefung beim Tippen */
         }
+        if (wp == ACC_GT_TIMER) {
+            acc_gt_tick(); /* W487: Gamertag-Pruefung beim Tippen */
+        }
+        if (wp == ACC_HL_TIMER) {
+            acc_hl_tick(); /* W502: Hervorhebung der Zielkarte beenden */
+        }
         if (wp == SNP_TIMER) {
             snp_tick(); /* W403: steelnet-Chip, alle 60 s sichtbar bzw. 5 min minimiert (nur Stufe steelnet) */
         }
@@ -2509,6 +2536,9 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         free(j);
         return 0;
     }
+    case WM_APP_CAMP: /* W491: Ergebnis der Kampagnen-Erreichbarkeit */
+        camp_msg(lp, wp);
+        return 0;
     case WM_APP_ACC: { /* W328: Ergebnis eines Konto-Auftrags */
         acc_job_t *j = (acc_job_t *)lp;
         if (j && (int)wp == g_acc_gen && g_acc_busy) {
@@ -2574,6 +2604,9 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
 #endif
         if (g_upd_ask && g_o.shot == 0) {
             upd_set_cfg(0); /* W250: Schliessen ohne Antwort = Nein (nie wieder ungefragt) */
+        }
+        if (g_nrq_open && g_o.shot == 0) {
+            nrq_dismiss(); /* W496: Fenster zu ohne Antwort = Nein, naechster Start fragt hoechstens noch einmal */
         }
         PostQuitMessage(0);
         return 0;
@@ -2804,6 +2837,19 @@ static const struct {
     { "loc_acc_view_net", "", 0 },    /* W418: Konto da, Server nicht erreichbar (Status unbekannt) */
     { "loc_acc_signin_code", "", 0 }, /* W418: kein Konto, "Mit einem Code" aufgeklappt */
     { "loc_acc_view_unsec_login", "", 0 }, /* W418: ungesichert, "Login und Passwort festlegen" offen */
+    { "loc_acc_view_gt", "", 0 },       /* W487: gesichert, Gamertag-Karte offen (naechste Aenderung in 3 Tagen) */
+    { "loc_acc_view_nogt", "", 0 },     /* W487: gesichert, noch kein Gamertag, Gamertag-Karte offen */
+    { "loc_acc_view_unsec_gt", "", 0 }, /* W487: ungesichert, Gamertag-Karte offen */
+    { "loc_acc_nogt", "", 0 },          /* W487: Karte Match & network, gesichert ohne Gamertag */
+    { "loc_acc_new_gt", "", 0 },        /* W487: Kontoseite "Ich bin neu" mit Gamertag-Vorschlag */
+    { "loc_acc_view_unsec_nogt", "", 0 }, /* W502: ungesichert, ohne Gamertag (Fall des Nutzers) */
+    { "loc_acc_view_gt_edit", "", 0 },  /* W502: gesichert, Gamertag aendern offen */
+    { "loc_acc_view_gt_taken", "", 0 }, /* W502: ohne Gamertag, Pruefmeldung "vergeben" unter dem Feld */
+    { "loc_acc_view_gtoff", "", 0 },    /* W502: Dienst ohne Gamertags */
+    { "loc_acc_view_off", "", 0 },      /* W502: steelnet in dieser Ausgabe nicht eingerichtet */
+    { "loc_acc_view_code", "", 0 },     /* W502: Kontoeinstellungen, Codeformular mit Formatfehler */
+    { "loc_acc_view_login_err", "", 0 }, /* W502: ungesichert, Login-Formular mit Fehlermeldung */
+    { "loc_acc_signin_login", "", 0 },  /* W502: kein Konto, Anmelden mit Login offen */
     /* W334 LOC-SEC: Karte "Online (steelnet)" (Dienst als eingerichtet vorgegeben, nichts gespeichert) */
     { "loc_onl", "", 0 },     /* Online an, Raumcode der eigenen Lobby (Kopieren) */
     { "loc_onl_err", "", 0 }, /* Online an, sec=pin_failed (Server-Pruefung fehlgeschlagen) */
@@ -2819,10 +2865,17 @@ static const struct {
     { "loc_net_chatoff", "", 0 }, /* W473: Reiter "Lobby & chat", Chat und steelnet-Chat aus (abhaengige grau) */
     { "loc_net_lan", "", 0 },     /* W473: LAN-Modus (Karte Match: Verbindung LAN, Raum, Passwort) */
     { "loc_net_lanchat", "", 0 }, /* W473: LAN-Modus, Reiter "Lobby & chat" (steelnet grau) */
+    { "loc_net_live", "", 0 },      /* W487/W501: Online mit Gamertag (System Link + Xbox Live, Kampagne) */
+    { "loc_net_live_campx", "", 0 },   /* W491: Live bereit, Kampagnenserver nicht erreichbar */
+    { "loc_net_live_campold", "", 0 }, /* W491: Live bereit, Launcher veraltet (Mindestversion 0.3.3) */
+    { "loc_net_live_campt", "", 0 },   /* W491: intern Testkampagne, Reiter Lobby & Chat */
+    { "loc_net_live_nogt", "", 0 }, /* W487/W501: Online ohne Gamertag (nur System Link, Hinweis; Start frei) */
     { "loc_acc_dc", "", 0 },      /* W473: Konto-Karte gesichert nur mit Discord */
     { "loc_acc_lg", "", 0 },      /* W473: Konto-Karte gesichert nur mit Login */
     { "loc_acc_net", "", 0 },     /* W473: Konto-Karte, Server nicht erreichbar (Status unbekannt) */
     { "loc_netq", "", 0 },    /* W397: Erstabfrage "Online & Updates" auf LoC-Spielen (Release-Version) */
+    { "loc_net_nrqask", "", 0 }, /* W496: Dialog "anonyme Netzwerkstatistik" (Stufe steelnet, nie beantwortet) */
+    { "loc_net_nrq", "", 0 },    /* W496: Netzwerk-Seite mit Schalter an (Zustimmung) */
     { "effectpack", "shading=1;world_sharpen=60;aa_mode=3;ssao=25;color_sat=110;color_gain=103;"
                     "shade_shadow=1;fx_soft=60;fx_embers=160;fx_light=40;fx_light_cockpit=30;"
                     "fx_interp=1;remaster=1;hd_textures=1", 0 },
@@ -3120,6 +3173,7 @@ static void gui_fill(void)
     dg_init(); /* W279: neuer Absturzbericht seit dem letzten Hinweis? */
     loctab_load(); /* W276: gewaehltes Spiel + LoC-Abbild (user.cfg) */
     pergame_init(); /* W402: LoC gewaehlt -> Werte aus user_loc.cfg */
+    nrq_load(); /* W496: Antwort auf die Frage "anonyme Netzwerkstatistik" (user.cfg) */
     g_upd_ask = netq_should_ask(g_upd_ver, g_upd_cfg, g_loc_online); /* W397: Online an = steelnet, keine Frage */
     if (g_o.state[0]) { /* W171: --state (nur Shots, nie gespeichert) */
         gui_apply_state(g_o.state);
@@ -3577,6 +3631,7 @@ int gui_main(const char *client_override, const gui_opts_t *o)
     ShowWindow(g_hwnd, SW_SHOW);
     UpdateWindow(g_hwnd);
     SetFocus(ctl(ID_START_BIG));
+    nrq_eval(); /* W496: einmaliger Dialog (Fokus auf "Yes", nur im eigenen Fenster) */
     SetTimer(g_hwnd, 1, 100, NULL); /* Gamepad-Live-Anzeige (10 Hz) */
     if (lupd_auto_check(g_upd_ver, g_upd_cfg)) {
         upd_start(0); /* W250: nur nach Zustimmung, still bei Fehlern */
@@ -3593,6 +3648,15 @@ int gui_main(const char *client_override, const gui_opts_t *o)
         if (msg.message == WM_KEYDOWN && msg.wParam == 'Z' &&
             GetKeyState(VK_CONTROL) < 0 && g_undo_on) { /* W171 Muster C */
             on_command(ID_UNDO, BN_CLICKED);
+            continue;
+        }
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE && g_nrq_open) {
+            nrq_dismiss(); /* W496: Esc = Nein (fuer jetzt) */
+            continue;
+        }
+        if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN && g_nrq_open) {
+            uictl_t *u = ui_by_hwnd(GetFocus());
+            on_command(u && u->id == ID_NRQ_NO ? ID_NRQ_NO : ID_NRQ_YES, BN_CLICKED); /* W496: Standard = Ja */
             continue;
         }
         if (msg.message == WM_KEYDOWN && msg.wParam == VK_RETURN) {

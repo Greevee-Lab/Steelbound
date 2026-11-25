@@ -29,6 +29,7 @@ SRC = [
     "launcher/src/launcher_gui_content.c",  # W462 LAUNCHER-SPLIT
     "launcher/src/launcher_gui_loc.c",  # W462 LAUNCHER-SPLIT
     "launcher/src/launcher_gui_hub.c",  # W470 LAUNCHER-HUB
+    "launcher/src/launcher_gui_netrep.c",  # W496 NET-TELEMETRY
     "launcher/src/launcher_gui_account.c",  # W462 LAUNCHER-SPLIT
     "launcher/src/launcher_gui_test_loc.c",  # W462 LAUNCHER-SPLIT
     "launcher/src/launcher_gui_test.c",  # W462 LAUNCHER-SPLIT

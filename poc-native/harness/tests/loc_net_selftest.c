@@ -25,6 +25,7 @@
 #include "loc_lan.h"       /* W454 LOC-LAN-MODE */
 #include "loc_rbn.h"       /* W475 LOC-RB-PREAGREE (Vektoren SBRP) */
 #include "sb_sha256.h"
+#include "loc_camp.h" /* W491 CAMP-CLIENT */
 
 static int s_ok, s_n;
 #define CHECK(c, msg)                                                   \
@@ -34,6 +35,18 @@ static int s_ok, s_n;
             s_ok++;                                                     \
         } else {                                                        \
             printf("FEHLER: %s (Zeile %d)\n", msg, __LINE__);           \
+        }                                                               \
+    } while (0)
+/* W494: CHECK mit Format-Argumenten */
+#define CHECKF(c, ...)                                                  \
+    do {                                                                \
+        s_n++;                                                          \
+        if (c) {                                                        \
+            s_ok++;                                                     \
+        } else {                                                        \
+            printf("FEHLER: ");                                         \
+            printf(__VA_ARGS__);                                        \
+            printf(" (Zeile %d)\n", __LINE__);                          \
         }                                                               \
     } while (0)
 
@@ -1011,6 +1024,54 @@ static void gt_bad_frame(const char *name, const uint8_t *fr, int n, int udp)
     if (glis != INVALID_SOCKET) closesocket(glis);
     if (gu != INVALID_SOCKET) closesocket(gu);
     gt_stop(&B, &f);
+}
+
+/* W494 LOC-FARPING: weite Strecke (AU-EU, 350 ms RTT, 30 ms Jitter, 2 % Verlust in Bursts). Verbindung steht ohne
+ * Treffpunkt binnen 5 s, TCP 1000 verbunden, 200 Rahmen geordnet und vollstaendig, groesste Luecke weit unter der
+ * Stillegrenze des Spiels (Spiel: Mitspieler 200 Abfragen still ~3,3 s -> raus, LOC_RE1 6.3), Datagramme kommen an. */
+static void w494_far_tun_tests(void)
+{
+    /* zweite Stufe: far-500 (500 ms, 40 ms Jitter, 2 % Burst) = Absturzstufe der Abnahme; Luecke < 3000 ms */
+    static const struct { const char *spec, *name; double gap_max, rtt_lo, rtt_hi; } k_far[2] = {
+        {"au-eu-bad,seed:11", "350 ms / 2 %% Burst", 1500.0, 300.0, 600.0},
+        {"far-500,seed:5", "500 ms / 2 %% Burst", 3000.0, 450.0, 900.0},
+    };
+    tun_pair P;
+    SOCKET acon, bacc, blis;
+    double maxgap = 0, t0;
+    int k, j, inorder = 0, path = 0, red = 0;
+    uint32_t vip = 0;
+    double srtt = 0;
+    char relay[24];
+    int n0 = s_n, k0 = s_ok;
+    CHECK(loctun_qos_game(713, 1) == 598 && loctun_qos_game(657, 1) == 598 && loctun_qos_game(598, 1) == 598 &&
+              loctun_qos_game(484, 1) == 484 && loctun_qos_game(713, 0) == 713,
+          "W494: QoS ans Spiel online hoechstens 598 ms (Ping < 300, Klasse 2), LAN unveraendert");
+    for (j = 0; j < 2; j++) {
+        const int up = tun_pair_start(&P, 52000 + 100 * j, k_far[j].spec, NULL, 0, 0);
+        CHECKF(up, "W494: Verbindung ueber %s steht", k_far[j].spec);
+        if (up && tun_tcp(&P, &acon, &bacc, &blis)) {
+            t0 = now_ms();
+            k = tun_frames(acon, bacc, 200, 50, &maxgap, &inorder); /* 20 Ticks/s wie der Lockstep */
+            loctun_link_info(P.A.tun, 0, &path, &srtt, &red, &vip, relay, sizeof relay);
+            printf("W494 ");
+            printf(k_far[j].name);
+            printf(": %d Rahmen in %.0f ms, groesste Luecke %.0f ms, RTT %.0f ms, N=%d\n", k, now_ms() - t0, maxgap,
+                   srtt, red);
+            CHECKF(k == 200 && inorder, "W494: %s: 200 Rahmen geordnet und vollstaendig (%d)", k_far[j].spec, k);
+            CHECKF(maxgap < k_far[j].gap_max, "W494: %s: groesste Luecke %.0f ms < %.0f ms (Spiel trennt nach ~3,3 s)",
+                   k_far[j].spec, maxgap, k_far[j].gap_max);
+            CHECKF(srtt > k_far[j].rtt_lo && srtt < k_far[j].rtt_hi, "W494: %s: gemessene RTT %.0f ms passt",
+                   k_far[j].spec, srtt);
+            closesocket(acon);
+            closesocket(bacc);
+            closesocket(blis);
+        } else {
+            CHECKF(0, "W494: TCP ueber %s verbunden", k_far[j].spec);
+        }
+        tun_pair_stop(&P);
+    }
+    printf("W494 weite Strecke: %d/%d OK\n", s_ok - k0, s_n - n0);
 }
 
 static void tun_guard_tests(void)
@@ -3025,6 +3086,69 @@ static void route_unit_tests(void)
     CHECK(locroute_score(&r.p[0], 1150) < 0, "W395: unter 8 Antworten keine Bewertung");
     CHECK(!locroute_probe_due(&r, 5, 1150, &q) && !locroute_probe_due(&r, LOCROUTE_MAXP, 1150, &q),
           "W395: nicht nutzbarer/ungueltiger Weg ohne Probe");
+    /* W494 LOC-FARPING: weite Wege (AU-EU ~330 ms) */
+    CHECKF(locroute_hyst(100) == LOCROUTE_HYST_MS && locroute_hyst(330) > 32.9 && locroute_hyst(330) < 33.1,
+          "W494: Wechsel-Vorsprung 25 ms bis 250 ms Bewertung, darueber 10 %%");
+    CHECKF(locroute_far_extra(100) == 0 && locroute_far_extra(150) == 0 && locroute_far_extra(370) > 329.9,
+          "W494: Ausfall-Zuschlag nur oberhalb 150 ms Basis");
+    { /* zwei weite Relays: 30 ms Unterschied bei 330 ms ist kein Wechselgrund mehr (vorher > 25 ms -> Wechsel) */
+        ru_reset();
+        memset(&e, 0, sizeof e);
+        e.rtt[1] = 330; e.rtt[2] = 330;
+        locroute_init(&r);
+        now = 1000;
+        locroute_set_avail(&r, 1, 1, now);
+        locroute_set_avail(&r, 2, 1, now);
+        sw = 0;
+        ru_run(&r, &e, &now, 12000, 1, &sw, NULL, NULL);
+        CHECKF(r.decided && r.active == 1, "W494: weite Relays gleich -> erstes gewaehlt (aktiv %d)", r.active);
+        e.rtt[2] = 300;
+        ru_run(&r, &e, &now, 72000, 1, &sw, NULL, NULL);
+        CHECKF(sw == 0 && r.active == 1, "W494: 330 vs 300 ms: kein Springen (Wechsel %d)", sw);
+        e.rtt[2] = 270;
+        ru_run(&r, &e, &now, 92000, 1, &sw, NULL, NULL);
+        CHECKF(sw == 1 && r.active == 2, "W494: 330 vs 270 ms: ein Wechsel (Wechsel %d, aktiv %d)", sw, r.active);
+    }
+    { /* weiter direkter Weg mit Burst-Verlust 500 ms: kein Ausfallwechsel; echter Ausfall 3 s: Wechsel */
+        ru_reset();
+        memset(&e, 0, sizeof e);
+        e.rtt[0] = 330; e.rtt[1] = 345;
+        locroute_init(&r);
+        now = 1000;
+        locroute_set_avail(&r, 0, 1, now);
+        locroute_set_avail(&r, 1, 1, now);
+        sw = 0;
+        fail_at = -1;
+        ru_run(&r, &e, &now, 15000, 1, &sw, &fail_at, NULL);
+        CHECKF(r.active == 0 && sw == 0, "W494: weiter direkter Weg gewaehlt (aktiv %d)", r.active);
+        e.dead[0] = 1;
+        ru_run(&r, &e, &now, 15500, 1, &sw, &fail_at, NULL);
+        e.dead[0] = 0;
+        ru_run(&r, &e, &now, 25000, 1, &sw, &fail_at, NULL);
+        CHECKF(sw == 0 && r.active == 0, "W494: 500 ms Burst auf 330-ms-Weg: kein Ausfallwechsel (Wechsel %d)", sw);
+        e.dead[0] = 1;
+        t_cut = now;
+        ru_run(&r, &e, &now, now + 3000, 1, &sw, &fail_at, NULL);
+        CHECKF(sw == 1 && r.active == 1 && fail_at > 0 && fail_at - t_cut < 1600,
+              "W494: echter Ausfall auf weitem Weg erkannt (nach %.0f ms)", fail_at - t_cut);
+    }
+    { /* Gegenprobe kurzer Weg: Ausfallgrenze unveraendert (30 ms, Ausfall nach < 500 ms erkannt) */
+        ru_reset();
+        memset(&e, 0, sizeof e);
+        e.rtt[0] = 30; e.rtt[1] = 45;
+        locroute_init(&r);
+        now = 1000;
+        locroute_set_avail(&r, 0, 1, now);
+        locroute_set_avail(&r, 1, 1, now);
+        sw = 0;
+        fail_at = -1;
+        ru_run(&r, &e, &now, 12000, 1, &sw, &fail_at, NULL);
+        e.dead[0] = 1;
+        t_cut = now;
+        ru_run(&r, &e, &now, now + 2000, 1, &sw, &fail_at, NULL);
+        CHECKF(sw == 1 && fail_at > 0 && fail_at - t_cut < 500, "W494: kurzer Weg: Ausfall wie bisher (%.0f ms)",
+              fail_at - t_cut);
+    }
     printf("W395 loc_route: %d/%d OK\n", s_ok - k0, s_n - n0);
 }
 
@@ -3505,7 +3629,11 @@ static void w443_llv_tests(void)
     llv_ping_text(-1, pt, sizeof pt);
     ok &= strcmp(pt, "--") == 0;
     llv_ping_text(5000, pt, sizeof pt);
-    ok &= strcmp(pt, "~999 ms") == 0;
+    ok &= strcmp(pt, "~999 ms HIGH") == 0; /* W494: weite Lobby markiert */
+    llv_ping_text(250, pt, sizeof pt);
+    ok &= strcmp(pt, "~250 ms") == 0;
+    llv_ping_text(320, pt, sizeof pt);
+    ok &= strcmp(pt, "~320 ms HIGH") == 0;
     llv_row_y(0, &y0, &y1);
     ok &= y0 == 0x57 && y1 == 0x6E;
     llv_row_y(9, &y0, &y1);
@@ -3601,6 +3729,246 @@ static void w443_tun_tests(void)
     locnet_shutdown(&G);
 }
 
+/* ---------- W482 LIVE-MATCH: Live-Sessions im Transport (Einspeisung, ohne Netz) ---------- */
+static void w482_sess(char *b, size_t cap, const char *sid, int lid, uint32_t vip_host, const char *attrs)
+{
+    char e[700];
+    _snprintf_s(e, sizeof e, _TRUNCATE,
+                "%s{\"sid\":\"%s\",\"lobby_id\":%d,\"vip\":%u,\"kind\":\"match\",\"slots\":[9,1,0,0],\"attrs\":%s}",
+                b[strlen(b) - 1] == '[' ? "" : ",", sid, lid, vip_host, attrs);
+    strcat_s(b, cap, e);
+}
+
+static void w482_live_tun_tests(void)
+{
+    locnet G;
+    loctun_cfg c;
+    static char out[16384], line[8192];
+    static loclive_sess ss[LOCLIVE_MAX_RESULTS];
+    char err[24];
+    uint8_t sid[8], key[16], tp3[0x2C4];
+    uint32_t vA = ip4("127.88.31.1"), vB = ip4("127.88.31.2"), seed = 482;
+    int id, r, n = 0, i, k;
+    SetEnvironmentVariableA("SB_STEELNET_SPKI", NULL); /* kein Pin -> nur Einspeisung, keine Verbindung */
+    if (!locnet_init(&G, "127.0.0.62", 48900, "none", 10, lg)) {
+        CHECK(0, "W482: Instanz startet");
+        return;
+    }
+    loctun_cfg_default(&c);
+    c.port = 48990;
+    c.proxy_base = 49100;
+    c.allow_public = 1;
+    c.live = 1;
+    strcpy_s(c.lobby, sizeof c.lobby, "127.0.0.1:44998");
+    strcpy_s(c.pilot, sizeof c.pilot, "LiveA");
+    G.tun = loctun_start(&c, &G, NULL, lg);
+    /* W501 ONLINE-BOTH: mit loc_live=1 startet der Transport im System-Link-Zustand (hier Code-Lobby, pub = 0);
+     * Live erst, wenn das Spiel den Live-Fluss betritt (loctun_live_mode). */
+    CHECK(G.tun && loctun_test_line(G.tun, 7, NULL, out, sizeof out) == 0 &&
+              loctun_live_send(G.tun, "{\"t\":\"live_search\",\"lv\":1}", 0) == 0,
+          "W501: loc_live=1 startet als System Link (kein Live-Modus, keine Live-Anfrage)");
+    if (G.tun) loctun_live_mode(G.tun, 1);
+    CHECK(G.tun && loctun_test_line(G.tun, 7, NULL, out, sizeof out) == 1, "W482: Live-Modus nutzt die Geister-Mechanik");
+    if (!G.tun) {
+        locnet_shutdown(&G);
+        return;
+    }
+    CHECK(!strstr(out, "lobby_create") && !strstr(out, "lobby_list") && !strstr(out, "lobby_join"),
+          "W482: Live-Modus - keine Lobby beim Start, keine System-Link-Liste");
+    CHECK(loctun_live_send(G.tun, "kein json", 0) == 0 && loctun_live_send(G.tun, NULL, 0) == 0,
+          "W482: Anfrage ohne Objekt abgelehnt");
+    /* Create: eigene vip wird eingesetzt, ref lv<n> */
+    id = loctun_live_send(G.tun, "{\"t\":\"live_create\",\"lv\":1,\"kind\":\"match\",\"slots\":[9,1,0,0],\"attrs\":[[1,0]]}", 1);
+    CHECK(id > 0 && loctun_live_poll(G.tun, id, err, sizeof err, sid, key, NULL, 0, &n) == 0, "W482: Create eingereiht, laeuft");
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "{\"ref\":\"lv%d\",\"vip\":%u,\"t\":\"live_create\"", id, (unsigned)ntohl(G.self_ip));
+    CHECK(strstr(out, line) != NULL, "W482: Create gesendet mit ref und eigener vip");
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    CHECK(!strstr(out, "live_create"), "W482: Create nur einmal gesendet");
+    _snprintf_s(line, sizeof line, _TRUNCATE,
+                "{\"t\":\"live_session\",\"sid\":\"8011223344556677\",\"key\":\"00112233445566778899aabbccddeeff\","
+                "\"lobby_id\":5,\"kind\":\"match\",\"ref\":\"lv%d\"}", id);
+    loctun_test_line(G.tun, 0, line, out, sizeof out);
+    r = loctun_live_poll(G.tun, id, err, sizeof err, sid, key, NULL, 0, &n);
+    CHECK(r == 1 && sid[0] == 0x80 && sid[7] == 0x77 && key[0] == 0x00 && key[15] == 0xFF, "W482: live_session -> XNKID/XNKEY");
+    CHECK(loctun_live_poll(G.tun, id, err, sizeof err, sid, key, NULL, 0, &n) == -2, "W482: Ergebnis nur einmal abholbar");
+    /* kaputte Antwort (Schluessel zu kurz) -> Fehler */
+    id = loctun_live_send(G.tun, "{\"t\":\"live_create\",\"lv\":1}", 1);
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "{\"t\":\"live_session\",\"sid\":\"80\",\"key\":\"00\",\"ref\":\"lv%d\"}", id);
+    loctun_test_line(G.tun, 0, line, out, sizeof out);
+    CHECK(loctun_live_poll(G.tun, id, err, sizeof err, sid, key, NULL, 0, &n) == -1 && strcmp(err, "bad_answer") == 0,
+          "W482: unvollstaendige live_session -> Fehler");
+    /* Fehler des Dienstes */
+    id = loctun_live_send(G.tun, "{\"t\":\"live_update\",\"lv\":1,\"sid\":\"8011223344556677\"}", 0);
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    loctun_test_line(G.tun, 0, "{\"t\":\"error\",\"code\":\"x\",\"msg\":\"m\",\"ref\":\"lv999\"}", out, sizeof out);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "{\"t\":\"error\",\"code\":\"not_owner\",\"msg\":\"no\",\"ref\":\"lv%d\"}", id);
+    loctun_test_line(G.tun, 0, line, out, sizeof out);
+    CHECK(loctun_live_poll(G.tun, id, err, sizeof err, sid, key, NULL, 0, &n) == -1 && strcmp(err, "not_owner") == 0,
+          "W482: error mit ref lv<n> -> Fehlercode des Dienstes (fremdes ref ignoriert)");
+    /* Suche: gueltig, int64 voll, String mit \u-Maskierung; ungueltige Eintraege verworfen */
+    id = loctun_live_send(G.tun, "{\"t\":\"live_search\",\"lv\":1,\"proc\":1,\"max\":50,\"params\":[]}", 0);
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "{\"t\":\"live_results\",\"proc\":1,\"ref\":\"lv%d\",\"sessions\":[", id);
+    w482_sess(line, sizeof line, "80aa000000000001", 41, ntohl(vA),
+              "[[1,0],[8,-9223372036854775808],[1048591,\"Gr\\u00fc\\u00dfe \\\"A\\\"\"],[16,9007199254740993]]");
+    w482_sess(line, sizeof line, "80aa000000000002", 42, ntohl(vB), "[[1,1],[1048591,\"Bravo\"]]");
+    w482_sess(line, sizeof line, "80aa000000000003", 43, ntohl(ip4("10.1.2.3")), "[[1,1]]");        /* vip nicht 127/8 */
+    w482_sess(line, sizeof line, "80aa000000000004", 44, ntohl(G.self_ip), "[[1,1]]");               /* eigene vip */
+    w482_sess(line, sizeof line, "80aa000000000005", 45, ntohl(ip4("127.88.31.5")), "[[1048591,\"0123456789ABCDEF\"]]"); /* 16 */
+    w482_sess(line, sizeof line, "80aa000000000006", 46, ntohl(ip4("127.88.31.6")), "[[1048591,\"a\\nb\"]]"); /* Steuerz. */
+    w482_sess(line, sizeof line, "80aa000000000007", 47, ntohl(ip4("127.88.31.7")), "[[1,\"x\"]]");   /* Typ */
+    w482_sess(line, sizeof line, "80aa000000000008", 48, ntohl(ip4("127.88.31.8")), "[[2097153,1]]"); /* Blob */
+    w482_sess(line, sizeof line, "80aa00000000000", 49, ntohl(ip4("127.88.31.9")), "[[1,1]]");        /* sid 15 */
+    w482_sess(line, sizeof line, "80aa00000000000a", 0, ntohl(ip4("127.88.31.10")), "[[1,1]]");       /* lobby 0 */
+    w482_sess(line, sizeof line, "80aa00000000000b", 51, ntohl(ip4("127.88.31.11")), "[[1,1,2]]");    /* 3 Elemente */
+    w482_sess(line, sizeof line, "80aa00000000000c", 52, ntohl(ip4("127.88.31.12")), "[[1,1.5]]");    /* Bruch */
+    strcat_s(line, sizeof line, "]}");
+    loctun_test_line(G.tun, 0, line, out, sizeof out);
+    memset(ss, 0, sizeof ss);
+    r = loctun_live_poll(G.tun, id, err, sizeof err, NULL, NULL, ss, LOCLIVE_MAX_RESULTS, &n);
+    CHECK(r == 1 && n == 2, "W482: Suche -> 2 gueltige Sessions (vip/Laenge/Steuerzeichen/Typ/Blob/sid/Lobby/Form verworfen)");
+    CHECK(n == 2 && ss[0].lobby_id == 41 && ss[0].vip == vA && ss[0].slots[0] == 9 && ss[0].slots[1] == 1 && ss[0].nattr == 4,
+          "W482: Session: Lobby, vip (Netzreihenfolge), Plaetze, Attribute");
+    CHECK(n == 2 && ss[0].attr[1].v == INT64_MIN && ss[0].attr[3].v == 9007199254740993ll,
+          "W482: int64 ohne Rundung (auch > 2^53)");
+    CHECK(n == 2 && ss[0].attr[2].is_str && ss[0].attr[2].w[2] == 0xFC && ss[0].attr[2].w[3] == 0xDF &&
+              ss[0].attr[2].w[6] == '"' && ss[0].attr[2].w[8] == '"' && ss[0].attr[2].w[9] == 0,
+          "W482: String \\u-Maskierung und \\\" -> WCHAR");
+    CHECK(locnet_addr_known(&G, vA) && locnet_addr_known(&G, vB) && !locnet_addr_known(&G, ip4("127.88.31.5")),
+          "W482: XNetXnAddrToInAddr kennt die Hosts der Treffer (Geister), nicht verworfene");
+    CHECK(loctun_pub_games(G.tun) == 2 && loctun_pub_list(G.tun, NULL, 0, NULL) == LOCTUN_PL_OFF,
+          "W482: 2 Geister, nicht im System-Link-Widget");
+    /* Beitritt: Typ 3 des Spiels an die vip von B -> live_join mit sid (nicht lobby_join) */
+    memset(tp3, 0, sizeof tp3);
+    tp3[0] = 3;
+    CHECK(loctun_dgram(G.tun, vB, 1202, 1202, (const char *)tp3, (int)sizeof tp3) == (int)sizeof tp3,
+          "W482: Beitrittsanfrage an den Geist angenommen (gemerkt)");
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    CHECK(strstr(out, "{\"t\":\"live_join\",\"lv\":1,\"sid\":\"80aa000000000002\"}") && !strstr(out, "lobby_join"),
+          "W482: Beitritt per live_join mit der sid des gewaehlten Hosts");
+    /* neue Suche ohne B: der gewaehlte Geist bleibt, A verschwindet */
+    id = loctun_live_send(G.tun, "{\"t\":\"live_search\",\"lv\":1,\"proc\":1,\"max\":50,\"params\":[]}", 0);
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "{\"t\":\"live_results\",\"proc\":1,\"ref\":\"lv%d\",\"sessions\":[]}", id);
+    loctun_test_line(G.tun, 0, line, out, sizeof out);
+    r = loctun_live_poll(G.tun, id, err, sizeof err, NULL, NULL, ss, LOCLIVE_MAX_RESULTS, &n);
+    CHECK(r == 1 && n == 0 && !locnet_addr_known(&G, vA) && locnet_addr_known(&G, vB),
+          "W482: leere Suche verwirft alte Geister, gewaehlter Host bleibt bis zum Ende des Beitritts");
+    /* Ablauf beim Dienst: live_deleted ohne ref */
+    loctun_test_line(G.tun, 0, "{\"t\":\"live_deleted\",\"sid\":\"8011223344556677\",\"left\":true,\"reason\":\"expired\"}", out,
+                     sizeof out);
+    CHECK(1, "W482: live_deleted (Ablauf) ohne Absturz");
+    /* Mutationen der Ergebniszeile: kein Absturz, Ergebnisse immer begrenzt */
+    _snprintf_s(line, sizeof line, _TRUNCATE, "{\"t\":\"live_results\",\"proc\":1,\"ref\":\"lv%d\",\"sessions\":[", 0);
+    w482_sess(line, sizeof line, "80aa000000000001", 41, ntohl(vA), "[[1,0],[1048591,\"Gr\\u00fc\"],[16,7]]");
+    strcat_s(line, sizeof line, "]}");
+    k = 1;
+    for (i = 0; i < 3000; i++) {
+        char m[1024], ref[24];
+        size_t l, j;
+        int r2, nn = 0;
+        id = loctun_live_send(G.tun, "{\"t\":\"live_search\",\"lv\":1,\"proc\":1,\"params\":[]}", 0);
+        loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+        strcpy_s(m, sizeof m, line);
+        _snprintf_s(ref, sizeof ref, _TRUNCATE, "\"ref\":\"lv%d\"", id);
+        {
+            char *q = strstr(m, "\"ref\":\"lv0\"");
+            if (q) { /* ref einsetzen */
+                char tail[1024];
+                strcpy_s(tail, sizeof tail, q + 11);
+                *q = 0;
+                strcat_s(m, sizeof m, ref);
+                strcat_s(m, sizeof m, tail);
+            }
+        }
+        l = strlen(m);
+        for (j = 0; j < 1 + (size_t)(pub_rand(&seed) % 4); j++) {
+            uint32_t pos = 40 + pub_rand(&seed) % (uint32_t)(l - 40);
+            m[pos] = (char)("[]{},:\"0123456789-\\un"[pub_rand(&seed) % 21]);
+        }
+        if (pub_rand(&seed) % 5 == 0) m[40 + pub_rand(&seed) % (uint32_t)(l - 40)] = 0; /* gekuerzt */
+        loctun_test_line(G.tun, 0, m, out, sizeof out);
+        r2 = loctun_live_poll(G.tun, id, err, sizeof err, NULL, NULL, ss, LOCLIVE_MAX_RESULTS, &nn);
+        if (r2 == 0) { /* keine passende Antwort erkannt: Anfrage aufgeben */
+            _snprintf_s(m, sizeof m, _TRUNCATE, "{\"t\":\"error\",\"code\":\"x\",\"ref\":\"lv%d\"}", id);
+            loctun_test_line(G.tun, 0, m, out, sizeof out);
+            r2 = loctun_live_poll(G.tun, id, err, sizeof err, NULL, NULL, ss, LOCLIVE_MAX_RESULTS, &nn);
+        }
+        k &= r2 != 0 && nn >= 0 && nn <= 1;
+        for (j = 0; j < (size_t)nn; j++) k &= ss[j].nattr <= LOCLIVE_MAX_ATTR && (ntohl(ss[j].vip) >> 24) == 127u;
+        if (!k) {
+            printf("W482 Fuzz-Abweichung bei Lauf %d: r=%d n=%d\n", i, r2, nn);
+            break;
+        }
+    }
+    CHECK(k, "W482: 3000 veraenderte/gekuerzte live_results ohne Absturz, Treffer begrenzt und geprueft");
+    { /* W501 ONLINE-BOTH: Xbox Live verlassen (Logon-Task zu) -> System Link wie beim Start, Wiedereintritt */
+        int id2 = loctun_live_send(G.tun, "{\"t\":\"live_search\",\"lv\":1}", 0);
+        loctun_live_mode(G.tun, 0);
+        r = loctun_test_line(G.tun, 7, NULL, out, sizeof out);
+        err[0] = 0;
+        CHECK(id2 > 0 && r == 0 && loctun_live_poll(G.tun, id2, err, sizeof err, sid, key, ss, LOCLIVE_MAX_RESULTS, &n) == -1 &&
+                  strcmp(err, "offline") == 0 && loctun_pub_games(G.tun) == 0 &&
+                  loctun_live_send(G.tun, "{\"t\":\"live_search\",\"lv\":1}", 0) == 0,
+              "W501: Xbox Live verlassen -> offene Live-Anfrage offline, Geister weg, System Link (pub wie beim Start)");
+        loctun_live_mode(G.tun, 1);
+        r = loctun_test_line(G.tun, 7, NULL, out, sizeof out);
+        id2 = loctun_live_send(G.tun, "{\"t\":\"live_search\",\"lv\":1}", 0);
+        CHECK(r == 1 && id2 > 0, "W501: erneut Xbox Live -> Live-Modus, Anfrage eingereiht");
+    }
+    locnet_shutdown(&G);
+    { /* W501: oeffentliche System-Link-Lobbys mit loc_live=1 wie ohne (pub = 1, aber kein Live-Modus) */
+        locnet G2;
+        loctun_cfg c2;
+        if (locnet_init(&G2, "127.0.0.63", 48901, "none", 10, lg)) {
+            loctun_cfg_default(&c2);
+            c2.port = 48991;
+            c2.proxy_base = 49200;
+            c2.allow_public = 1;
+            c2.live = 1;
+            strcpy_s(c2.vis, sizeof c2.vis, "public");
+            strcpy_s(c2.lobby, sizeof c2.lobby, "127.0.0.1:44998");
+            strcpy_s(c2.pilot, sizeof c2.pilot, "LiveP");
+            G2.tun = loctun_start(&c2, &G2, NULL, lg);
+            r = G2.tun ? loctun_test_line(G2.tun, 8, NULL, out, sizeof out) : -1;
+            CHECK(r == 1 && loctun_live_send(G2.tun, "{\"t\":\"live_search\",\"lv\":1}", 0) == 0,
+                  "W501: loc_live=1 + oeffentlich -> System-Link-Lobbys (pub), keine Live-Anfrage");
+            if (G2.tun) {
+                loctun_live_mode(G2.tun, 1);
+                loctun_test_line(G2.tun, 8, NULL, out, sizeof out);
+                loctun_live_mode(G2.tun, 0);
+                r = loctun_test_line(G2.tun, 8, NULL, out, sizeof out);
+                CHECK(r == 1 && loctun_live_send(G2.tun, "{\"t\":\"live_search\",\"lv\":1}", 0) == 0,
+                      "W501: zurueck aus Xbox Live -> wieder oeffentliche System-Link-Lobbys");
+            }
+            locnet_shutdown(&G2);
+        } else {
+            CHECK(0, "W501: Instanz startet");
+        }
+    }
+    { /* W501: ohne loc_live wirkt loctun_live_mode nicht */
+        locnet G3;
+        loctun_cfg c3;
+        if (locnet_init(&G3, "127.0.0.64", 48902, "none", 10, lg)) {
+            loctun_cfg_default(&c3);
+            c3.port = 48992;
+            c3.proxy_base = 49300;
+            c3.allow_public = 1;
+            strcpy_s(c3.lobby, sizeof c3.lobby, "127.0.0.1:44998");
+            G3.tun = loctun_start(&c3, &G3, NULL, lg);
+            if (G3.tun) loctun_live_mode(G3.tun, 1);
+            r = G3.tun ? loctun_test_line(G3.tun, 9, NULL, out, sizeof out) : -1;
+            CHECK(r == 0 && loctun_live_send(G3.tun, "{\"t\":\"live_search\",\"lv\":1}", 0) == 0,
+                  "W501: loc_live=0 -> loctun_live_mode ohne Wirkung");
+            locnet_shutdown(&G3);
+        } else {
+            CHECK(0, "W501: Instanz startet");
+        }
+    }
+}
+
 /* ---------- W446 STEELNET-CHAT: steelnet-Chat ueber den Steuerkanal (Einspeisung, ohne Netz) ---------- */
 static volatile LONG s_w446_n[3];
 static char s_w446_from[24], s_w446_txt[600];
@@ -3613,6 +3981,218 @@ static void w446_cb(int kind, const char *from, const uint8_t *text, int len)
     s_w446_len = len < (int)sizeof s_w446_txt - 1 ? len : (int)sizeof s_w446_txt - 1;
     memcpy(s_w446_txt, text, (size_t)s_w446_len);
     s_w446_txt[s_w446_len] = 0;
+}
+
+/* ---------- W500 LOBBY-RESUME: Abriss der Steuerverbindung -> dieselbe Sitzung fortsetzen (ohne Netz) ---------- */
+static int w500_val(const char *info, const char *key, char *out, int cap)
+{
+    char k[24];
+    const char *p, *q;
+    _snprintf_s(k, sizeof k, _TRUNCATE, "%s=", key);
+    p = strstr(info, k);
+    out[0] = 0;
+    if (!p || (p != info && p[-1] != ' ')) return 0;
+    p += strlen(k);
+    q = strchr(p, ' ');
+    if (!q) q = p + strlen(p);
+    if (q - p >= cap) return 0;
+    memcpy(out, p, (size_t)(q - p));
+    out[q - p] = 0;
+    return 1;
+}
+
+static unsigned w500_fnv(const char *s)
+{
+    unsigned h = 2166136261u;
+    if (!s[0]) return 0;
+    for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u;
+    return h;
+}
+
+static int w500_tok(const char *info, const char *tok)
+{
+    char v[40], want[16];
+    _snprintf_s(want, sizeof want, _TRUNCATE, "%08x", w500_fnv(tok));
+    return w500_val(info, "tok", v, sizeof v) && strcmp(v, want) == 0;
+}
+
+static long long w500_num(const char *info, const char *key)
+{
+    char v[40];
+    return w500_val(info, key, v, sizeof v) ? _atoi64(v) : -1;
+}
+
+static void w500_resume_tests(void)
+{
+    static const char tok1[] = "1111111111111111111111111111111111111111111111111111111111111111";
+    static const char tok2[] = "2222222222222222222222222222222222222222222222222222222222222222";
+    static const char key_a[] = "aaaaaaaa00000000000000000000000000000000000000000000000000000000";
+    static const char key_b[] = "bbbbbbbb00000000000000000000000000000000000000000000000000000000";
+    static const char peer[] = "{\"t\":\"peer_info\",\"peer\":77,\"pair_nonce\":\"00112233445566778899aabbccddeeff\",\"e2e\":{\"suite\":1,"
+                               "\"pub\":\"9f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0\"},\"account\":12,"
+                               "\"lobby_id\":3,\"pilot\":\"Peer\",\"local_eps\":[]}";
+    static const char state[] = "{\"t\":\"lobby_state\",\"lobby\":{\"id\":3,\"members\":[{\"client_id\":9},{\"client_id\":77}],"
+                                "\"play_mode\":\"sim\"}}";
+    locnet G;
+    loctun_cfg c;
+    char out[16384], a[1024], b[1024], line[1024], v1[40], v2[40];
+    long long tx;
+    int n0 = s_n, ok0 = s_ok;
+    SetEnvironmentVariableA("SB_STEELNET_SPKI", NULL); /* kein Pin -> keine echte Verbindung (nur Einspeisung) */
+    if (!locnet_init(&G, "127.0.0.62", 47960, "none", 10, lg)) {
+        CHECK(0, "W500: Instanz startet");
+        return;
+    }
+    loctun_cfg_default(&c);
+    c.port = 47995;
+    c.proxy_base = 48900;
+    c.allow_public = 1;
+    strcpy_s(c.lobby, sizeof c.lobby, "127.0.0.1:44997");
+    strcpy_s(c.pilot, sizeof c.pilot, "Res");
+    CHECK(c.resume == 1, "W500: Fortsetzung ist Standard (loc_lobby_resume=1)");
+    G.tun = loctun_start(&c, &G, NULL, lg);
+    if (!G.tun) {
+        CHECK(0, "W500: Transport startet");
+        locnet_shutdown(&G);
+        return;
+    }
+    /* 1. fortsetzbare Sitzung: Konto, welcome mit Token, Lobby, Mitspieler mit Paarschluessel */
+    loctun_test_resume(G.tun, 1, 4242, out, sizeof out);
+    loctun_test_resume(G.tun, 3, 0, out, sizeof out);
+    CHECK(strstr(out, "\"account\":4242") && strstr(out, "\"rs\":1}") && !strstr(out, "\"resume\""),
+          "W500: hello einer Konto-Sitzung bittet um Fortsetzbarkeit (rs:1, ohne resume)");
+    _snprintf_s(line, sizeof line, _TRUNCATE, "{\"t\":\"welcome\",\"v\":2,\"client_id\":9,\"udp_key\":\"%s\",\"udp_port\":47000,"
+                "\"pilot\":\"Res\",\"guest\":false,\"relays\":[],\"rtok\":\"%s\",\"rttl\":90}", key_a, tok1);
+    loctun_test_resume(G.tun, 7, 0, out, sizeof out); /* Zeile vor dem welcome (frische Verbindung, Konto) */
+    loctun_test_resume(G.tun, 4, 0, a, sizeof a);
+    CHECK(w500_num(a, "qn") == 1 && w500_num(a, "count") == 0, "W500: Zeile vor dem welcome wird gehalten (Pruefung F4)");
+    loctun_test_line(G.tun, 9, line, out, sizeof out);
+    CHECK(strstr(out, "{\"t\":\"x7\"}") != NULL, "W500: gehaltene Zeile geht direkt nach dem welcome hinaus (gezaehlt)");
+    loctun_test_line(G.tun, 0, state, out, sizeof out);
+    loctun_test_line(G.tun, 0, peer, out, sizeof out);
+    loctun_test_resume(G.tun, 4, 0, a, sizeof a);
+    CHECK(w500_num(a, "count") == 1 && w500_num(a, "rx") == 2 && w500_tok(a, tok1) && w500_num(a, "links") == 1 &&
+              w500_num(a, "valid") == 1 && w500_num(a, "lobby") == 3,
+          "W500: welcome mit rtok -> Zaehlung ab dem welcome (rx 2), Lobby, Paarschluessel abgeleitet");
+    CHECK(w500_num(a, "qn") >= 1, "W500: eigene Zeilen nach dem welcome bis zur Bestaetigung behalten (lobby_create)");
+    tx = w500_num(a, "base") + w500_num(a, "qn");
+    _snprintf_s(line, sizeof line, _TRUNCATE, "{\"t\":\"pong\",\"seq\":0,\"rx\":%lld}", tx);
+    loctun_test_line(G.tun, 0, line, out, sizeof out);
+    loctun_test_resume(G.tun, 4, 0, a, sizeof a);
+    CHECK(w500_num(a, "qn") == 0 && w500_num(a, "base") == tx && w500_num(a, "rx") == 3,
+          "W500: pong rx bestaetigt alle eigenen Zeilen (Schlange leer, Klartext geloescht)");
+    loctun_test_line(G.tun, 0, "{\"t\":\"pong\",\"seq\":0,\"rx\":99999}", out, sizeof out);
+    loctun_test_resume(G.tun, 4, 0, a, sizeof a);
+    CHECK(w500_num(a, "base") == tx, "W500: pong rx groesser als gesendet -> ignoriert");
+    /* 2. Abriss: Sitzung bleibt, Mitspieler + Schluessel unveraendert, Spiel sieht weiter die Lobby */
+    loctun_test_resume(G.tun, 2, 0, out, sizeof out);
+    loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+    CHECK(w500_num(b, "susp") == 1 && w500_num(b, "links") == 1 && w500_num(b, "valid") == 1 && w500_num(b, "cid") == 9,
+          "W500: Abriss -> Fortsetzung laeuft, Mitspieler-Verbindung bleibt (kein lb_close)");
+    CHECK(w500_val(a, "sid", v1, sizeof v1) && w500_val(b, "sid", v2, sizeof v2) && strcmp(v1, v2) == 0 &&
+              w500_val(a, "ktx", v1, sizeof v1) && w500_val(b, "ktx", v2, sizeof v2) && strcmp(v1, v2) == 0 &&
+              w500_val(a, "pub", v1, sizeof v1) && w500_val(b, "pub", v2, sizeof v2) && strcmp(v1, v2) == 0,
+          "W500: Paarschluessel (sid, Schluesselplan) und eigenes E unveraendert");
+    CHECK(w500_num(b, "lobby") == 3 && w500_num(b, "joined") == 1, "W500: Spiel sieht waehrend der Luecke weiter die Lobby");
+    loctun_test_resume(G.tun, 7, 0, out, sizeof out); /* Zeile waehrend der Luecke */
+    loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+    CHECK(w500_num(b, "qn") == 1, "W500: Zeile waehrend der Luecke wartet auf das Nachsenden");
+    loctun_test_resume(G.tun, 3, 0, out, sizeof out);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "\"resume\":{\"cid\":9,\"tok\":\"%s\",\"rx\":4}", tok1);
+    CHECK(strstr(out, line) != NULL && strstr(out, "\"rs\":1"), "W500: hello der Fortsetzung mit cid, Token und rx");
+    loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+    CHECK(w500_num(b, "qn") == 1, "W500: hello geht direkt hinaus, nicht in die Nachsende-Schlange");
+    CHECK(w500_val(a, "pub", v1, sizeof v1) && strstr(out, "\"pub\":\"") != NULL, "W500: hello der Fortsetzung mit demselben E");
+    loctun_test_line(G.tun, 0, "{\"t\":\"auth_challenge\",\"nonce\":\"00112233445566778899aabbccddeeff\",\"client_id\":41}", out,
+                     sizeof out);
+    loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+    CHECK(strstr(out, "{\"t\":\"auth\",\"proof\":\"") != NULL && w500_num(b, "qn") == 1 && w500_num(b, "rx") == 4 &&
+              w500_num(b, "susp") == 1,
+          "W500: Beweis auf die Challenge der Fortsetzung geht sofort hinaus (nicht in die Schlange, nicht gezaehlt)");
+    /* 3. welcome der Fortsetzung: neues Token, neuer udp_key, nur Unbestaetigtes wird nachgesendet */
+    _snprintf_s(line, sizeof line, _TRUNCATE, "{\"t\":\"welcome\",\"v\":2,\"client_id\":9,\"udp_key\":\"%s\",\"udp_port\":47000,"
+                "\"pilot\":\"Res\",\"guest\":false,\"relays\":[],\"resumed\":true,\"rx\":%lld,\"rtok\":\"%s\",\"rttl\":90}",
+                key_b, tx, tok2);
+    loctun_test_line(G.tun, 0, line, out, sizeof out);
+    loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+    CHECK(w500_num(b, "susp") == 0 && w500_num(b, "st") == 3 && w500_tok(b, tok2) && strstr(b, "udp=bbbbbbbb") &&
+              w500_num(b, "bctr") <= 1 && w500_num(b, "bound") == 0,
+          "W500: Fortsetzung ok -> neues Token, neuer udp_key, BIND2 neu ab Zaehler 1");
+    CHECK(strstr(out, "{\"t\":\"x7\"}") != NULL && !strstr(out, "lobby_create"),
+          "W500: nur die unbestaetigte Zeile der Luecke wird nachgesendet");
+    CHECK(w500_val(a, "sid", v1, sizeof v1) && w500_val(b, "sid", v2, sizeof v2) && strcmp(v1, v2) == 0 &&
+              w500_num(b, "valid") == 1 && w500_num(b, "rx") == 4,
+          "W500: nach der Fortsetzung dieselben Paarschluessel, Zaehlung laeuft weiter");
+    /* 4. Ablehnung (welcome ohne resumed = normaler neuer Einstieg) -> lb_close wie bisher */
+    loctun_test_resume(G.tun, 2, 0, out, sizeof out);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "{\"t\":\"welcome\",\"v\":2,\"client_id\":31,\"udp_key\":\"%s\",\"udp_port\":47000,"
+                "\"pilot\":\"Res\",\"guest\":false,\"relays\":[],\"rtok\":\"%s\",\"rttl\":90}", key_a, tok1);
+    loctun_test_line(G.tun, 0, line, out, sizeof out);
+    loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+    CHECK(w500_num(b, "susp") == 0 && w500_num(b, "links") == 0 && w500_num(b, "st") == 0 && w500_num(b, "count") == 0 &&
+              w500_tok(b, ""),
+          "W500: Fortsetzung abgelehnt -> sauberer Neuaufbau (Mitspieler getrennt, Token geloescht)");
+    /* 5. resumed mit falscher cid bzw. rx ausserhalb -> ebenfalls lb_close */
+    {
+        static const char *const badw[] = {
+            "{\"t\":\"welcome\",\"v\":2,\"client_id\":8,\"udp_key\":\"%s\",\"udp_port\":47000,\"pilot\":\"Res\",\"relays\":[],"
+            "\"resumed\":true,\"rx\":%lld,\"rtok\":\"%s\"}",
+            "{\"t\":\"welcome\",\"v\":2,\"client_id\":9,\"udp_key\":\"%s\",\"udp_port\":47000,\"pilot\":\"Res\",\"relays\":[],"
+            "\"resumed\":true,\"rx\":%lld9,\"rtok\":\"%s\"}",
+            "{\"t\":\"welcome\",\"v\":2,\"client_id\":9,\"udp_key\":\"%s\",\"udp_port\":47000,\"pilot\":\"Res\",\"relays\":[],"
+            "\"resumed\":true,\"rx\":%lld,\"rtok\":\"%s0\"}"};
+        int k, good = 0;
+        for (k = 0; k < 3; k++) {
+            loctun_test_resume(G.tun, 1, 4242, out, sizeof out); /* neues E wie nach dem TLS-Aufbau */
+            _snprintf_s(line, sizeof line, _TRUNCATE, "{\"t\":\"welcome\",\"v\":2,\"client_id\":9,\"udp_key\":\"%s\",\"udp_port\":47000,"
+                        "\"pilot\":\"Res\",\"guest\":false,\"relays\":[],\"rtok\":\"%s\",\"rttl\":90}", key_a, tok1);
+            loctun_test_line(G.tun, 9, line, out, sizeof out);
+            loctun_test_line(G.tun, 0, state, out, sizeof out);
+            loctun_test_line(G.tun, 0, peer, out, sizeof out);
+            loctun_test_resume(G.tun, 4, 0, a, sizeof a);
+            tx = w500_num(a, "base") + w500_num(a, "qn");
+            loctun_test_resume(G.tun, 2, 0, out, sizeof out);
+            _snprintf_s(line, sizeof line, _TRUNCATE, badw[k], key_b, tx, tok2);
+            loctun_test_line(G.tun, 0, line, out, sizeof out);
+            loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+            good += w500_num(a, "valid") == 1 && w500_num(b, "links") == 0 && w500_num(b, "susp") == 0;
+        }
+        CHECK(good == 3, "W500: resumed mit fremder cid, rx ausserhalb oder kaputtem Token -> Neuaufbau");
+    }
+    /* 6. Frist abgelaufen -> lb_close */
+    loctun_test_resume(G.tun, 1, 4242, out, sizeof out);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "{\"t\":\"welcome\",\"v\":2,\"client_id\":9,\"udp_key\":\"%s\",\"udp_port\":47000,"
+                "\"pilot\":\"Res\",\"guest\":false,\"relays\":[],\"rtok\":\"%s\",\"rttl\":90}", key_a, tok1);
+    loctun_test_line(G.tun, 9, line, out, sizeof out);
+    loctun_test_line(G.tun, 0, state, out, sizeof out);
+    loctun_test_line(G.tun, 0, peer, out, sizeof out);
+    loctun_test_resume(G.tun, 2, 0, out, sizeof out);
+    loctun_test_resume(G.tun, 4, 0, a, sizeof a);
+    loctun_test_resume(G.tun, 5, 0, out, sizeof out);
+    loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+    CHECK(w500_num(a, "susp") == 1 && w500_num(a, "valid") == 1 && w500_num(b, "susp") == 0 && w500_num(b, "links") == 0,
+          "W500: Frist abgelaufen -> lb_close wie bisher (Mitspieler getrennt)");
+    /* 7. Gegenprobe loc_lobby_resume=0: altes Verhalten (Abriss trennt sofort) */
+    loctun_test_resume(G.tun, 8, 0, out, sizeof out);
+    loctun_test_resume(G.tun, 1, 4242, out, sizeof out);
+    loctun_test_line(G.tun, 9, line, out, sizeof out);
+    loctun_test_line(G.tun, 0, state, out, sizeof out);
+    loctun_test_line(G.tun, 0, peer, out, sizeof out);
+    loctun_test_resume(G.tun, 4, 0, a, sizeof a);
+    loctun_test_resume(G.tun, 2, 0, out, sizeof out);
+    loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+    CHECK(w500_num(a, "count") == 0 && w500_num(a, "valid") == 1 && w500_num(b, "links") == 0 && w500_num(b, "susp") == 0,
+          "W500 Gegenprobe: ohne Fortsetzung trennt der Abriss alle Mitspieler (lb_close)");
+    loctun_test_resume(G.tun, 8, 1, out, sizeof out);
+    /* 8. Gast (kein Konto): kein rs, Abriss = lb_close */
+    loctun_test_resume(G.tun, 1, 0, out, sizeof out);
+    loctun_test_resume(G.tun, 3, 0, out, sizeof out);
+    CHECK(!strstr(out, "\"rs\":1"), "W500: Gast bittet nicht um Fortsetzung");
+    loctun_test_line(G.tun, 9, line, out, sizeof out);
+    loctun_test_resume(G.tun, 4, 0, a, sizeof a);
+    CHECK(w500_num(a, "count") == 0, "W500: Gast nimmt kein Token an");
+    locnet_shutdown(&G);
+    printf("W500 Fortsetzung: %d/%d OK\n", s_ok - ok0, s_n - n0);
 }
 
 static void w446_snchat_tun_tests(void)
@@ -3705,6 +4285,65 @@ static void w446_snchat_tun_tests(void)
                                    "000000000000000000000000\",\"udp_port\":47000,\"pilot\":\"Host\",\"relays\":[]}", out, sizeof out);
         CHECK(loctun_snchat_state(G.tun) == 0 && !strstr(out, "chat_sub"), "W446: aelterer Dienst ohne chat-Feld -> kein Tab");
         loctun_set_snchat(G.tun, NULL, 0);
+        locnet_shutdown(&G);
+    }
+}
+
+/* W487 LIVE-GAMERTAG: Gamertag im welcome (nur Konto-Sitzungen, Regel wie steelcore, ungueltig = keiner) */
+static void w487_gamertag_tests(void)
+{
+    static const char w1[] = "{\"t\":\"welcome\",\"v\":2,\"client_id\":7,\"udp_key\":\"00000000000000000000000000000000000000"
+                             "00000000000000000000000000\",\"udp_port\":47000,\"pilot\":\"acct name\",\"guest\":false,"
+                             "\"relays\":[],\"gamertag\":\"Night Hawk\"}";
+    static const char *const bad[] = {"\"1Hawk\"", "\"Night  Hawk\"", "\"Night_Hawk\"", "\"ABCDEFGHIJKLMNOP\"", "\"\"",
+                                      "\"Hawk \"", "42", "\"ABCDEFGHIJKLMNOPQRSTUVWXYZABCDEFGHIJ\""};
+    locnet G;
+    loctun_cfg c;
+    char out[8192], line[512], g[24];
+    int pass, i, nbad = 0;
+    SetEnvironmentVariableA("SB_STEELNET_SPKI", NULL);
+    for (pass = 0; pass < 2; pass++) { /* 0 = Konto, 1 = Gast */
+        if (!locnet_init(&G, "127.0.0.62", 47700 + pass * 40, "none", 10, lg)) {
+            CHECK(0, "W487: Instanz startet");
+            return;
+        }
+        loctun_cfg_default(&c);
+        c.port = (uint16_t)(47980 + pass);
+        c.proxy_base = (uint16_t)(48900 + pass * 200);
+        c.allow_public = 1;
+        strcpy_s(c.lobby, sizeof c.lobby, "127.0.0.1:44996");
+        strcpy_s(c.pilot, sizeof c.pilot, "Host");
+        if (!pass)
+            strcpy_s(c.auth, sizeof c.auth, "5:9999999999:0101010101010101010101010101010101010101010101010101010101010101");
+        G.tun = loctun_start(&c, &G, NULL, lg);
+        if (!G.tun) {
+            CHECK(0, "W487: Transport startet");
+            locnet_shutdown(&G);
+            return;
+        }
+        loctun_test_line(G.tun, 7, NULL, out, sizeof out);
+        CHECK(!loctun_my_gamertag(G.tun, g, sizeof g) && !g[0], "W487: vor dem welcome kein Gamertag");
+        loctun_test_line(G.tun, 0, w1, out, sizeof out);
+        if (pass) {
+            CHECK(!loctun_my_gamertag(G.tun, g, sizeof g), "W487: Gast bekommt nie einen Gamertag (auch wenn gesendet)");
+        } else {
+            CHECK(loctun_my_gamertag(G.tun, g, sizeof g) && strcmp(g, "Night Hawk") == 0,
+                  "W487: Gamertag aus dem welcome (Konto), unabhaengig vom Pilotnamen");
+            for (i = 0; i < (int)(sizeof bad / sizeof bad[0]); i++) {
+                _snprintf_s(line, sizeof line, _TRUNCATE,
+                            "{\"t\":\"welcome\",\"v\":2,\"client_id\":7,\"udp_key\":\"000000000000000000000000000000000000"
+                            "0000000000000000000000000000\",\"udp_port\":47000,\"pilot\":\"acct name\",\"relays\":[],"
+                            "\"gamertag\":%s}", bad[i]);
+                loctun_test_line(G.tun, 0, line, out, sizeof out);
+                nbad += !loctun_my_gamertag(G.tun, g, sizeof g);
+            }
+            CHECK(nbad == (int)(sizeof bad / sizeof bad[0]), "W487: ungueltiger Gamertag im welcome -> keiner (8 Faelle)");
+            loctun_test_line(G.tun, 0, w1, out, sizeof out);
+            loctun_test_line(G.tun, 0, "{\"t\":\"welcome\",\"v\":2,\"client_id\":7,\"udp_key\":\"0000000000000000000000000000"
+                                       "000000000000000000000000000000000000\",\"udp_port\":47000,\"pilot\":\"acct name\","
+                                       "\"relays\":[]}", out, sizeof out);
+            CHECK(!loctun_my_gamertag(G.tun, g, sizeof g), "W487: neues welcome ohne Gamertag loescht den alten");
+        }
         locnet_shutdown(&G);
     }
 }
@@ -4104,6 +4743,201 @@ static void w454_lan_tun_tests(void)
     }
 }
 
+/* ---- W491 CAMP-CLIENT: connect zur virtuellen Kampagnenadresse -> Bruecke (hier ein Loopback-Listener) ---- */
+static int s_camp_mode;    /* 1 = umlenken, -1 = Kampagne nicht verfuegbar */
+static uint16_t s_camp_port; /* Port des Test-Listeners */
+static volatile LONG s_camp_calls;
+static int camp_fake(SOCKET s, struct sockaddr_in *dst)
+{
+    (void)s;
+    InterlockedIncrement(&s_camp_calls);
+    if (s_camp_mode <= 0) return s_camp_mode;
+    dst->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    dst->sin_port = htons(s_camp_port);
+    return 1;
+}
+static void t_camp_redirect(locnet *n)
+{
+    struct sockaddr_in a, vip;
+    int l = sizeof a, r, k;
+    SOCKET L, s, g;
+    LONG open0;
+    char b[64];
+    static const char frame[] = "\x05\x00\x22\x60\x00\xFF\xFF\xFF\xFF"; /* 0x6022-Antwort: fuer den Gastfilter Unsinn */
+    u_long nb = 1;
+    L = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    bind(L, (struct sockaddr *)&a, sizeof a);
+    listen(L, 4);
+    getsockname(L, (struct sockaddr *)&a, &l);
+    s_camp_port = ntohs(a.sin_port);
+    vip = sa(htonl(LOCCAMP_VIP), (uint16_t)LOCCAMP_GAME_PORT);
+    locnet_set_camp_redirect(camp_fake);
+
+    s_camp_mode = -1;
+    s = locnet_socket(n, AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    r = locnet_connect(n, s, (struct sockaddr *)&vip, sizeof vip);
+    CHECK(r == SOCKET_ERROR && WSAGetLastError() == WSAECONNREFUSED && !locnet_is_camp(s),
+          "Kampagne nicht verfuegbar: connect zur virtuellen Adresse -> WSAECONNREFUSED");
+    locnet_closesocket(n, s);
+
+    s_camp_mode = 1;
+    open0 = n->st.open;
+    s = locnet_socket(n, AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    r = locnet_connect(n, s, (struct sockaddr *)&vip, sizeof vip);
+    g = accept(L, NULL, NULL);
+    CHECK(r == 0 && g != INVALID_SOCKET, "Umleitung: connect zur virtuellen Kampagnenadresse erreicht die Bruecke");
+    CHECK(locnet_is_camp(s) && n->st.open == open0, "Umleitung: Kampagnen-Socket markiert, zaehlt nicht als Spielsitzung");
+    send(g, frame, 9, 0);
+    k = 0;
+    for (r = 0; r < 200 && k < 9; r++) {
+        int got = locnet_recv(n, s, b + k, (int)sizeof b - k, 0);
+        if (got > 0) k += got;
+        else Sleep(5);
+    }
+    CHECK(k == 9 && memcmp(b, frame, 9) == 0, "Kampagnen-Strom am Gastfilter vorbei, Bytes unveraendert");
+    CHECK(locnet_send(n, s, "\x00\x00\x10\x20", 4, 0) == 4 && recv(g, b, sizeof b, 0) == 4 && b[2] == 0x10,
+          "Kampagnen-Strom Spiel -> Bruecke unveraendert");
+    closesocket(g);
+    for (r = 0; r < 200; r++) {
+        k = locnet_recv(n, s, b, sizeof b, 0);
+        if (k == 0 || (k < 0 && WSAGetLastError() != WSAEWOULDBLOCK)) break;
+        Sleep(5);
+    }
+    CHECK(k == 0, "Stromende des Kampagnenservers geht unveraendert ans Spiel (kein Verbindungsreset)");
+    locnet_closesocket(n, s);
+    CHECK(!locnet_is_camp(s), "closesocket: Kampagnen-Markierung entfernt");
+
+    s_camp_calls = 0;
+    s = locnet_socket(n, AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    ioctlsocket(s, FIONBIO, &nb);
+    vip.sin_port = htons((uint16_t)(LOCCAMP_GAME_PORT + 1));
+    locnet_connect(n, s, (struct sockaddr *)&vip, sizeof vip);
+    CHECK(s_camp_calls == 0 && !locnet_is_camp(s), "anderer Port der virtuellen Adresse wird nicht umgelenkt");
+    locnet_closesocket(n, s);
+    locnet_set_camp_redirect(NULL);
+    closesocket(L);
+}
+
+/* W496 NET-TELEMETRY Stufe 2: Netzbericht nur mit Zustimmung, nur Codes; Warteschlange, Laufmarke ("crash"), Senden nur
+ * an einen Dienst mit "netlog". Ohne Netz (kein Pin -> der Transport verbindet nie), Dateien in %TEMP%. */
+static int nr_exists(const char *p) { return GetFileAttributesA(p) != INVALID_FILE_ATTRIBUTES; }
+static void nr_put(const char *p, const char *text)
+{
+    FILE *f = NULL;
+    if (fopen_s(&f, p, "wb") == 0 && f) {
+        fputs(text, f);
+        fclose(f);
+    }
+}
+static int nr_private(const char *s) /* 1 = etwas Persoenliches in der Zeile */
+{
+    return strstr(s, "Seeker") || strstr(s, "127.0.") || strstr(s, "pilot") || strstr(s, "account") || strstr(s, "code\"");
+}
+static loctun *nr_tun(locnet *N, int consent, const char *dir)
+{
+    loctun_cfg c;
+    if (!locnet_init(N, "127.0.0.59", 48100, "none", 10, lg)) return NULL;
+    loctun_cfg_default(&c);
+    c.port = 48190;
+    c.proxy_base = 48500;
+    c.allow_public = 1;
+    strcpy_s(c.lobby, sizeof c.lobby, "127.0.0.1:44998");
+    strcpy_s(c.pilot, sizeof c.pilot, "Seeker");
+    strcpy_s(c.netrep_dir, sizeof c.netrep_dir, dir);
+    c.net_report = consent;
+    c.gpu_vendor = 0x10DE;
+    N->tun = loctun_start(&c, N, NULL, lg);
+    return N->tun;
+}
+static void t_netrep(void)
+{
+    locnet N;
+    loctun *t;
+    char tmp[MAX_PATH], dir[MAX_PATH], qp[MAX_PATH], mp[MAX_PATH], out[8192], line[1024];
+    int k;
+    SetEnvironmentVariableA("SB_STEELNET_SPKI", NULL);
+    GetTempPathA(sizeof tmp, tmp);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%ssb_w496_%lu", tmp, GetCurrentProcessId());
+    CreateDirectoryA(dir, NULL);
+    _snprintf_s(qp, sizeof qp, _TRUNCATE, "%s\\net_report_q.txt", dir);
+    _snprintf_s(mp, sizeof mp, _TRUNCATE, "%s\\net_report_run.txt", dir);
+    /* 1. ohne Zustimmung: alte Warteschlange und Laufmarke weg, kein Zustand, keine Zeile */
+    nr_put(qp, "{\"t\":\"net_report\",\"r\":{\"v\":1,\"kind\":\"lobby\"}}\n");
+    nr_put(mp, "1\n");
+    t = nr_tun(&N, 0, dir);
+    CHECK(t && loctun_netrep_test(t, 3, 1, 0, 0, NULL, out, sizeof out) == -1, "W496: ohne Zustimmung kein Netzbericht");
+    CHECK(!nr_exists(qp) && !nr_exists(mp), "W496: ohne Zustimmung alte Warteschlange und Laufmarke geloescht");
+    if (t) {
+        loctun_test_line(t, 7, "{\"t\":\"lobby_closed\",\"lobby_id\":3,\"reason\":\"host_left\"}", out, sizeof out);
+        CHECK(!strstr(out, "net_report"), "W496: ohne Zustimmung keine Zeile net_report");
+    }
+    locnet_shutdown(&N);
+    /* 2. Zustimmung, voriger Lauf ohne geordnetes Ende (Laufmarke liegt noch) -> nur der Code "crash" */
+    nr_put(mp, "1\n");
+    t = nr_tun(&N, 1, dir);
+    if (!t) {
+        CHECK(0, "W496: Instanz mit Zustimmung startet");
+        locnet_shutdown(&N);
+        return;
+    }
+    k = loctun_netrep_test(t, 6, 0, 0, 0, NULL, line, sizeof line);
+    CHECK(k == 1 && strstr(line, "\"kind\":\"crash\"") && strstr(line, "\"gpu\":4318") && !strstr(line, "\"peers\"") &&
+              !nr_private(line), "W496: Laufmarke vom vorigen Lauf -> Bericht crash (nur Code, Version, GPU-ID)");
+    CHECK(nr_exists(mp) && nr_exists(qp), "W496: neue Laufmarke, Warteschlange als Datei");
+    loctun_netrep_test(t, 3, 0, 0, 0, NULL, out, sizeof out); /* welcome ohne netlog */
+    k = loctun_netrep_test(t, 2, 1500, 0, 0, NULL, out, sizeof out);
+    CHECK(k == 1 && !strstr(out, "net_report"), "W496: Dienst ohne netlog -> nichts gesendet, Bericht bleibt");
+    loctun_netrep_test(t, 3, 1, 0, 0, NULL, out, sizeof out); /* zweites welcome, Dienst mit netlog (Neuverbindung 1) */
+    k = loctun_netrep_test(t, 2, 1500, 0, 0, NULL, out, sizeof out);
+    CHECK(k == 0 && strstr(out, "{\"t\":\"net_report\",\"r\":{\"v\":1,\"kind\":\"crash\"") && !nr_exists(qp),
+          "W496: Dienst mit netlog -> gesendet, Warteschlange und Datei geloescht");
+    /* Lobby + Match (Spielzustand per Test): 300 Rollbacks in 30 s, ein Desync */
+    loctun_netrep_test(t, 5, 1, 0, 0, NULL, out, sizeof out);
+    loctun_netrep_test(t, 1, 1, 100, 0, NULL, out, sizeof out);
+    loctun_netrep_test(t, 2, 1500, 0, 0, NULL, out, sizeof out);
+    loctun_netrep_test(t, 1, 1, 250, 0, NULL, out, sizeof out);
+    loctun_netrep_test(t, 2, 30000, 0, 0, NULL, out, sizeof out);
+    loctun_netrep_test(t, 1, 0, 400, 1, NULL, out, sizeof out);
+    k = loctun_netrep_test(t, 2, 1500, 0, 0, NULL, out, sizeof out);
+    CHECK(k == 0 && strstr(out, "\"kind\":\"match\"") && strstr(out, "\"end\":\"desync\"") && strstr(out, "\"rbs\":9.") &&
+              strstr(out, "\"desync\":1") && strstr(out, "\"recon\":1") && strstr(out, "\"dur\":3") &&
+              strstr(out, "\"path\":\"none\"") && !nr_private(out),
+          "W496: Match-Bericht (Ende desync, Rollbacks/s, Neuverbindungen) ohne Namen/Adressen");
+    loctun_netrep_test(t, 5, 0, 0, 0, NULL, out, sizeof out);
+    loctun_netrep_test(t, 2, 1500, 0, 0, NULL, out, sizeof out);
+    CHECK(strstr(out, "\"kind\":\"lobby\"") && strstr(out, "\"end\":\"left\"") && !nr_private(out),
+          "W496: Lobby verlassen -> Lobby-Bericht");
+    /* Trennung -> Bericht disconnect in der Warteschlange (offline), beim naechsten welcome gesendet */
+    loctun_netrep_test(t, 4, 0, 0, 0, "timeout", out, sizeof out);
+    k = loctun_netrep_test(t, 6, 0, 0, 0, NULL, line, sizeof line);
+    CHECK(k == 1 && strstr(line, "\"kind\":\"disconnect\"") && strstr(line, "\"why\":\"timeout\"") && nr_exists(qp),
+          "W496: Trennung -> Bericht disconnect (why timeout) in der Warteschlange");
+    loctun_netrep_test(t, 3, 1, 0, 0, NULL, out, sizeof out);
+    loctun_netrep_test(t, 2, 1500, 0, 0, NULL, out, sizeof out);
+    CHECK(strstr(out, "\"kind\":\"disconnect\"") && !nr_exists(qp), "W496: nach der Neuanmeldung gesendet");
+    /* geordnetes Ende waehrend eines Matches -> "quit" in der Datei, Laufmarke weg */
+    loctun_netrep_test(t, 5, 1, 0, 0, NULL, out, sizeof out);
+    loctun_netrep_test(t, 1, 1, 0, 0, NULL, out, sizeof out);
+    loctun_netrep_test(t, 2, 1500, 0, 0, NULL, out, sizeof out);
+    k = loctun_netrep_test(t, 7, 0, 0, 0, NULL, out, sizeof out);
+    CHECK(k == 1 && nr_exists(qp) && !nr_exists(mp), "W496: Prozessende im Match -> Bericht in der Datei, Laufmarke weg");
+    locnet_shutdown(&N);
+    /* 3. Neustart: Bericht aus der Datei, keine "crash"-Meldung (geordnetes Ende) */
+    t = nr_tun(&N, 1, dir);
+    k = t ? loctun_netrep_test(t, 6, 0, 0, 0, NULL, line, sizeof line) : -9;
+    CHECK(k == 1 && strstr(line, "\"end\":\"quit\"") && !strstr(line, "crash"),
+          "W496: Neustart laedt die Warteschlange, kein crash nach geordnetem Ende");
+    locnet_shutdown(&N);
+    /* 4. Zustimmung zurueckgezogen -> Warteschlange geloescht */
+    t = nr_tun(&N, 0, dir);
+    CHECK(t && !nr_exists(qp) && !nr_exists(mp), "W496: Zustimmung zurueckgezogen -> Warteschlange geloescht");
+    locnet_shutdown(&N);
+    RemoveDirectoryA(dir);
+}
+
 int main(int argc, char **argv)
 {
     locnet A, B, C, X1, X2;
@@ -4180,6 +5014,9 @@ int main(int argc, char **argv)
               locnet_ip_allowed(ip4("172.20.0.1")) && !locnet_ip_allowed(ip4("172.32.0.1")) &&
               !locnet_ip_allowed(ip4("8.8.4.4")) && !locnet_ip_allowed(INADDR_BROADCAST),
           "Adressfilter Loopback/privat");
+
+    t_camp_redirect(&A); /* W491 CAMP-CLIENT */
+    t_netrep(); /* W496 NET-TELEMETRY */
 
     /* --- Portabbildung --- */
     CHECK(locnet_port_out(&A, ip4("127.0.0.23"), 1202) == 35202, "Port 1202 -> Basis des Mitspielers");
@@ -4401,6 +5238,7 @@ int main(int argc, char **argv)
         w335_tests();      /* W335 NET-AUDIT */
         w350_tun_tests();  /* W350 LOC-REJOIN */
         w409_tun_tests();  /* W409 LOC-MESH-KICK */
+        w494_far_tun_tests(); /* W494 LOC-FARPING: 350 ms + 2 % Burst-Verlust */
         tun_lobby_guard_tests(); /* W332 */
         pub_tests();             /* W373 LOC-PUBLIC-LOBBY */
         route_feed_tests();      /* W395 LOC-ROUTE */
@@ -4409,6 +5247,9 @@ int main(int argc, char **argv)
         w440_mode_tun_tests();   /* W440 LOC-LOBBY-MODES: play_mode im Transport */
         w443_tun_tests();        /* W443 LOC-LOBBY-LIST: Modus je Zeile der Suchliste */
         w446_snchat_tun_tests(); /* W446 STEELNET-CHAT: steelnet-Chat im Steuerkanal */
+        w500_resume_tests();     /* W500 LOBBY-RESUME: Fortsetzung der Steuerverbindung */
+        w487_gamertag_tests(); /* W487 LIVE-GAMERTAG: Gamertag im welcome */
+        w482_live_tun_tests();   /* W482 LIVE-MATCH: Live-Sessions im Transport */
         w454_lan_tun_tests();    /* W454 LOC-LAN-MODE: LAN ohne steelnet */
     } else {
         printf("Hinweis: eigener Transport nur in der privaten Fassung - Transport-Pruefungen uebersprungen\n");

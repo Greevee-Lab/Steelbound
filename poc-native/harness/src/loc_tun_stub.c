@@ -54,6 +54,12 @@ int loctun_my_pilot(loctun *t, char *buf, int cap) /* W437 */
     if (buf && cap > 0) buf[0] = 0;
     return 0;
 }
+int loctun_my_gamertag(loctun *t, char *buf, int cap) /* W487 */
+{
+    (void)t;
+    if (buf && cap > 0) buf[0] = 0;
+    return 0;
+}
 int loctun_peer_pilot(loctun *t, uint32_t vip, char *buf, int cap) /* W437 */
 {
     (void)t; (void)vip;
@@ -61,6 +67,7 @@ int loctun_peer_pilot(loctun *t, uint32_t vip, char *buf, int cap) /* W437 */
     return 0;
 }
 int loctun_links_up(loctun *t) { (void)t; return 0; }
+int loctun_qos_game(int rtt_ms, int online) { (void)online; return rtt_ms; }
 int loctun_link_info(loctun *t, int i, int *path, double *srtt_ms, int *red, uint32_t *vip, char *relay, int rlen)
 {
     (void)t; (void)i; (void)path; (void)srtt_ms; (void)red; (void)vip; (void)relay; (void)rlen;
@@ -77,6 +84,36 @@ void loctun_log_stats(loctun *t, int waited_s) { (void)t; (void)waited_s; }
 int loctun_lobby_state(loctun *t) { (void)t; return 0; }
 int loctun_play_mode(loctun *t) { (void)t; return 0; } /* W440 */
 int loctun_auth_state(loctun *t) { (void)t; return 0; }
+uint32_t loctun_account(loctun *t) { (void)t; return 0; } /* W479 */
+void loctun_camp_want(loctun *t, const char *campaign, int force) { (void)t; (void)campaign; (void)force; } /* W491 */
+int loctun_camp_ticket(loctun *t, uint8_t *out, int cap, long long *exp, char *err, int errcap) /* W491 */
+{
+    (void)t; (void)out; (void)cap;
+    if (exp) *exp = 0;
+    if (err && errcap > 0) strcpy_s(err, (size_t)errcap, "off");
+    return -1;
+}
+int loctun_live_send(loctun *t, const char *json, int with_vip) { (void)t; (void)json; (void)with_vip; return 0; } /* W482 */
+void loctun_live_mode(loctun *t, int on) { (void)t; (void)on; } /* W501 */
+int loctun_live_poll(loctun *t, int id, char *err, int errcap, uint8_t sid[8], uint8_t key[16], loclive_sess *sess,
+                     int cap, int *nsess)
+{
+    (void)t; (void)id; (void)sid; (void)key; (void)sess; (void)cap;
+    if (err && errcap > 0) err[0] = 0;
+    if (nsess) *nsess = 0;
+    return -2;
+}
+void loctun_xnaddr(loctun *t, uint32_t vip, uint8_t out[36]) { (void)t; (void)vip; memset(out, 0, 36); }
+int loctun_qos_target(loctun *t, uint32_t vip, loclive_qos_val *v) /* W485 */
+{
+    (void)t; (void)vip;
+    if (v) { v->src = LOCLIVE_QOS_SRC_NONE; v->rtt_min = v->rtt_med = LOCLIVE_QOS_RTT_DEFAULT; }
+    return 0;
+}
+int loctun_qos_service(loctun *t, loclive_qos_val *v) /* W485 */
+{
+    return loctun_qos_target(t, 0, v);
+}
 int loctun_lobby_code(loctun *t, char *buf, int cap)
 {
     (void)t;
@@ -87,6 +124,12 @@ int loctun_sec_state(loctun *t) { (void)t; return 0; }
 int loctun_test_line(loctun *t, uint32_t my_cid, const char *line, char *out, int cap) /* W373 */
 {
     (void)t; (void)my_cid; (void)line;
+    if (out && cap > 0) out[0] = 0;
+    return -1;
+}
+int loctun_test_resume(loctun *t, int op, uint32_t arg, char *out, int cap) /* W500 */
+{
+    (void)t; (void)op; (void)arg;
     if (out && cap > 0) out[0] = 0;
     return -1;
 }
@@ -119,4 +162,11 @@ int loctun_diag(loctun *t, char *buf, int cap) /* W353 */
     (void)t;
     if (buf && cap > 0) buf[0] = 0;
     return 0;
+}
+void loctun_set_game_fn(loctun *t, loctun_game_fn fn) { (void)t; (void)fn; } /* W496 */
+int loctun_netrep_test(loctun *t, int op, int a, int b, int c, const char *s, char *out, int cap) /* W496 */
+{
+    (void)t; (void)op; (void)a; (void)b; (void)c; (void)s;
+    if (out && cap > 0) out[0] = 0;
+    return -1;
 }

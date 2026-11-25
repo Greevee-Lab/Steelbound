@@ -1332,16 +1332,21 @@ static void sb_im_submit_body(void)
      * PERF(IM-PERF,W99): fast + force3d -> Ergebnis wird direkt danach auf
      * 0 gesetzt, Schleife ueberspringen (3D-Objektkoordinaten liegen oft
      * ganz im Pixel-Bereich -> lief bisher ueber alle Vertices). */
+    { float rx1 = 704.0f, ry1 = 544.0f;
+      /* W485 LIVEQOS: Live-Dialoge blenden die Textebene als Vollbild-Quad (720x480) ein -> Grenze dort
+       * Framebuffer + 64 (loc_render_rhw_range, nur loc_live und Textebene; sonst 704x544 wie bisher). */
+      if (g_sba_loc && g_cfg.loc_live) { loc_render_rhw_range(sb_tex_xptr(), &rx1, &ry1); }
     if (fast && g_im_force3d) { rhw = 0; } else
     for (i = 0; i < n; i++) {
         const float *pp = IMPOS(i);
         float x = pp[0], y = pp[1];
         float z = pp[2], w = pp[3];
-        if (x < -64.0f || x > 704.0f || y < -64.0f || y > 544.0f ||
+        if (x < -64.0f || x > rx1 || y < -64.0f || y > ry1 ||
             z < -1.0f || z > 2.0f || w < 0.999f || w > 1.001f) {
             rhw = 0;
             break;
         }
+    }
     }
     if (g_im_force3d) { rhw = 0; } /* VB: FLOAT3/4 -> 3D */
     /* VSH2D (W38): P1/P2-Programme emulieren (exakte oPos statt Heuristik).

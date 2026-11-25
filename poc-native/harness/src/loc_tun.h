@@ -19,6 +19,7 @@
 #pragma once
 #include <winsock2.h>
 #include <stdint.h>
+#include "loc_live.h" /* W482 LIVE-MATCH: loclive_sess */
 
 struct locnet;
 struct locnetsim;
@@ -63,8 +64,18 @@ typedef struct loctun_cfg {
     char lan_room[17];    /* Raumname (leer = "LAN"), nur druckbares ASCII */
     char lan_pass[64];    /* Raumpasswort (leer = aus Umgebung SB_LAN_PASS, sonst ohne); wird nach dem Ableiten geloescht */
     char lan_targets[128];/* TEST/Notweg: zusaetzliche Unicast-Ziele "ip:port,..." (nur privat); nur Loopback = kein Broadcast */
+    int live;             /* W482 LIVE-MATCH: Xbox-Live-Modus (loc_live=1, nur mit Treffpunkt): keine Lobby beim Start;
+                           * Sessions ueber loctun_live_send, Beitritt zu gefundenen Hosts per live_join */
     char route_sim[256];  /* W395 TEST: je Weg eigene Verzoegerung/Ausfall, "name:SPEC/name:SPEC" mit name = direct oder
                            * Relayname, SPEC wie loc_netsim plus cut:A-B (Sekunden ab Transportstart, B leer = bis Ende) */
+    /* W496 NET-TELEMETRY Stufe 2 (loc_tun_netrep.c): Netzbericht an steelnet, nur feste Codes und Zahlen */
+    int net_report;       /* 1 = Zustimmung des Spielers (Launcher net_report=1); 0 = nie senden, Warteschlange loeschen */
+    char netrep_dir[260]; /* Ordner fuer Warteschlange (net_report_q.txt) und Laufmarke (net_report_run.txt), leer = keine */
+    unsigned gpu_vendor;  /* PCI-Hersteller-ID der GPU (nur die ID, 0 = unbekannt) */
+    /* W500 LOBBY-RESUME: Abriss der Treffpunkt-Verbindung -> Sitzung fortsetzen statt alle Mitspieler zu trennen */
+    int resume;           /* 1 = fortsetzen (Standard), 0 = altes Verhalten (sauberer Neuaufbau; Gegenprobe) */
+    int cut_s;            /* TEST: Steuerverbindung N s nach jedem (Wieder-)Aufbau abreissen (0 = aus) */
+    int cut_mode;         /* TEST: 0 = harter Reset (RST, Dienst merkt es), 1 = still liegenlassen (Dienst merkt nichts) */
 } loctun_cfg;
 
 typedef struct loctun_stats {
@@ -121,6 +132,8 @@ int loctun_snchat_state(loctun *t);
 int loctun_snchat_send(loctun *t, const char *json, int len);
 /* W437: eigener wirksamer Pilotname (welcome, Transkript) in buf; 1 = vorhanden (nur mit Treffpunkt). */
 int loctun_my_pilot(loctun *t, char *buf, int cap);
+/* W487 LIVE-GAMERTAG: Gamertag des angemeldeten Kontos (welcome, aus steelcore) in buf; 1 = vorhanden. */
+int loctun_my_gamertag(loctun *t, char *buf, int cap);
 /* W437: Pilotname des Mitspielers mit virtueller Adresse vip (leer = unbekannt). 1 = gefunden. */
 int loctun_peer_pilot(loctun *t, uint32_t vip, char *buf, int cap);
 /* W420 (Nutzerentscheid 22.11.): steelnet nur mit gleicher Client-Version (poc-native/VERSION). Rueckgabe 0 = keine
@@ -135,6 +148,9 @@ int loctun_lan_state(loctun *t, int *peers, int *up);
 int loctun_links_up(loctun *t);
 /* Weg und RTT des i-ten Mitspielers: path 0 = keiner, 1 = direkt, 2 = Relay. 0 = kein solcher Eintrag. */
 int loctun_link_info(loctun *t, int i, int *path, double *srtt_ms, int *red, uint32_t *vip, char *relay, int rlen);
+/* W494: an das Spiel gemeldete QoS-RTT (ms) aus der gemessenen; online (Treffpunkt) hoechstens 598 ms, weil das
+ * Spiel ab RttMed 600 (Ping 300, Klasse 1) den Beitritt abbricht. Ohne Treffpunkt (LAN) unveraendert. */
+int loctun_qos_game(int rtt_ms, int online);
 const loctun_stats *loctun_get_stats(loctun *t);
 uint16_t loctun_port(loctun *t);
 /* Logzeilen LOCTUN (je Mitspieler) und Statusdatei; aus loc_net_tick alle 10 s. */
@@ -143,6 +159,34 @@ void loctun_log_stats(loctun *t, int waited_s);
 int loctun_lobby_state(loctun *t);
 /* W328: Konto-Anmeldung am Treffpunkt: 0 keine (Gast), 1 laeuft, 2 angenommen, -1 abgelehnt. */
 int loctun_auth_state(loctun *t);
+/* W479 LIVE-LOGON: Konto-ID der Anmeldung (0 = Gast bzw. kein Treffpunkt); nur die Zahl, nie Schluessel. */
+uint32_t loctun_account(loctun *t);
+/* W482 LIVE-MATCH: Anfrage an steelnet einreihen (json = vollstaendiges Objekt ohne ref; with_vip: eigene vip wird
+ * eingesetzt). Gesendet im Transport-Thread. Rueckgabe Anfrage-Nr. > 0, 0 = kein Live-Modus/keine Verbindung/voll. */
+int loctun_live_send(loctun *t, const char *json, int with_vip);
+/* W501 ONLINE-BOTH: Spiel betritt (on = 1) bzw. verlaesst (0) den Xbox-Live-Fluss (XOnline-HLE: Kontenauswahl/Logon
+ * bzw. Logon-Task geschlossen). Der Transport startet immer im System-Link-Zustand; der Netz-Thread schaltet um
+ * (System-Link-Lobby verlassen bzw. Live-Anfragen beenden). Ohne loc_live/Treffpunkt wirkungslos. */
+void loctun_live_mode(loctun *t, int on);
+/* Ergebnis abholen: 0 laeuft, 1 fertig, -1 Fehler (err = Code des Dienstes bzw. timeout/offline), -2 unbekannt.
+ * Bei 1/-1 wird die Anfrage freigegeben; sid/key aus live_session, sess (bis cap) aus live_results. */
+int loctun_live_poll(loctun *t, int id, char *err, int errcap, uint8_t sid[8], uint8_t key[16], loclive_sess *sess,
+                     int cap, int *nsess);
+/* W485 LIVE-QOS: RTT fuer XNetQosLookup im Live-Modus. loctun_qos_target: Mitspieler mit vip (Netzreihenfolge);
+ * Rueckgabe 1 = verbunden (src DIRECT/RELAY, RttMed = SRTT + 4*RTTVAR + Reserve wie die System-Link-Messung, RttMin =
+ * kleinste RTT), 2 = gefundener Host ohne Verbindung (src EST: Relay-Schaetzung + Reserve), 0 = unbekannt (Vorgabe).
+ * loctun_qos_service: RTT zum Treffpunkt (dessen Relay-Ping), 0 = noch nicht gemessen (Vorgabe). */
+int loctun_qos_target(loctun *t, uint32_t vip, loclive_qos_val *v);
+int loctun_qos_service(loctun *t, loclive_qos_val *v);
+/* W491 CAMP-CLIENT: Kampagnen-Ticket ueber den angemeldeten Steuerkanal (nur Live-Modus; Spielschluessel, nie der
+ * Geraeteschluessel). Das Ticket bleibt im Transport (nie im Spielspeicher). loctun_camp_want: Kampagnen-ID setzen und
+ * ein Ticket anfordern (force = vorhandenes verwerfen, z. B. nach Ablehnung durch den Zugang). Der Transport erneuert
+ * es danach selbst vor Ablauf. loctun_camp_ticket: > 0 = Ticketlaenge (Kopie nach out, exp = gueltig bis, Unix-s),
+ * 0 = noch keins (laeuft), -1 = abgelehnt/aus/offline (err = Code des Dienstes bzw. timeout/offline/bad_ticket). */
+void loctun_camp_want(loctun *t, const char *campaign, int force);
+int loctun_camp_ticket(loctun *t, uint8_t *out, int cap, long long *exp, char *err, int errcap);
+/* XNADDR (36 B) fuer eine vip (Netzreihenfolge), wie XNetGetTitleXnAddr/XNetInAddrToXnAddr des Netz-HLE. */
+void loctun_xnaddr(loctun *t, uint32_t vip, uint8_t out[36]);
 /* W440 LOC-LOBBY-MODES: Spielmodus der aktuellen steelnet-Lobby aus lobby_state.play_mode: 0 = in keiner Lobby
  * (bzw. kein Treffpunkt), 1 = sim (auch: Feld fehlt = aelterer Dienst, unbekannter Wert), 2 = arcade (LAS_*). */
 int loctun_play_mode(loctun *t);
@@ -158,6 +202,10 @@ int loctun_diag(loctun *t, char *buf, int cap);
  * nur Zeitschritt), my_cid > 0 = angemeldet; danach rechnet die oeffentliche Logik einen Schritt. out = seither vom
  * Client gesendete Steuerzeilen ('\n'-getrennt). Rueckgabe 1 = oeffentlicher Modus, 0 = nicht, -1 = Fehler. */
 int loctun_test_line(loctun *t, uint32_t my_cid, const char *line, char *out, int cap);
+/* W500 LOBBY-RESUME TEST (loc_net_selftest): op 1 = wie nach dem TLS-Aufbau (Schluesselpaar, Konto arg), 2 = Abriss
+ * der Steuerverbindung ("eof"), 3 = hello senden, 4 = Zustand als Text, 5 = Frist jetzt ablaufen lassen + lb_poll,
+ * 6 = Zeitschritt lb_poll. out = gesendete Steuerzeilen (op 1-3, 5, 6) bzw. Zustand (op 4). 0 = ok, -1 = Fehler. */
+int loctun_test_resume(loctun *t, int op, uint32_t arg, char *out, int cap);
 /* W373: Zahl der lokal vertretenen offenen oeffentlichen Spiele (Geister). */
 int loctun_pub_games(loctun *t);
 /* W443 LOC-LOBBY-LIST: Modus (LAS_SIM/LAS_ARCADE, 0 = keine solche Lobby) und Ping-Schaetzung (ms, -1 = unbekannt)
@@ -194,3 +242,18 @@ typedef struct loctun_peer_hud {
     int rt_on, decided;            /* eigene Wegwahl aktiv / erste Wahl nach dem Messfenster getroffen */
 } loctun_peer_hud;
 int loctun_peer_hud_get(loctun *t, int i, loctun_peer_hud *o);
+/* W496 NET-TELEMETRY: Spielzustand fuer den Netzbericht (aus dem Transport-Thread hoechstens 1x/s gelesen, nur Zahlen):
+ * Mission laeuft, Rollbacks gesamt, Desync-Enden gesamt, Mitspieler der Mission (-1 = unbekannt). 0 = nicht lieferbar. */
+typedef struct loctun_game_info {
+    int in_mission;
+    unsigned rb_total, desyncs;
+    int npeers;
+    unsigned gpu_vendor;  /* PCI-Hersteller-ID der benutzten GPU (0 = unbekannt) */
+} loctun_game_info;
+typedef int (*loctun_game_fn)(loctun_game_info *o);
+void loctun_set_game_fn(loctun *t, loctun_game_fn fn);
+/* W496 TEST (loc_net_selftest): Netzbericht ohne Netz pruefen. op: 1 Spielzustand setzen (a = in_mission, b = Rollbacks,
+ * c = Desyncs), 2 Zeitschritt um a ms + Takt (out = gesendete Steuerzeilen), 3 angemeldet (a = welcome.netlog), 4 getrennt
+ * (s = Grund), 5 Lobby (a = beigetreten), 6 Warteschlange (Rueckgabe Zahl, out = erste Zeile), 7 Prozessende.
+ * Rueckgabe -1 = Netzbericht aus (keine Zustimmung bzw. kein Treffpunkt). */
+int loctun_netrep_test(loctun *t, int op, int a, int b, int c, const char *s, char *out, int cap);

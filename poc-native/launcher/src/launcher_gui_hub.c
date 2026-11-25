@@ -403,6 +403,17 @@ void hub_lobby_fixture(int n)
     }
     g_hubl.n = n > 0 ? (n < LACC_LOB_MAX ? n : LACC_LOB_MAX) : 0;
     g_hubl.ok = n >= 0;
+    if (n >= 0 && n <= 4) { /* W485: Bilder/Selbsttest mit Xbox-Live-Abschnitt (zwei Sessions, eine laeuft) */
+        static const char *const kLive[2] = { "Harrier", "Guest-Lynx" };
+        for (i = 0; i < 2; i++) {
+            lacc_lobby_t *e = &g_hubl.lv[i];
+            strcpy_s(e->host, sizeof e->host, kLive[i]);
+            e->max_players = 10;
+            e->players = i == 0 ? 2 : 10;
+            e->started = i == 1;
+        }
+        g_hubl.nlive = 2;
+    }
     g_hubl_when.wHour = 12;
     g_hubl_when.wMinute = 5;
 }
@@ -540,6 +551,7 @@ static void paint_neti_lobbies(void)
 {
     char t[160];
     int x = COL2, y0 = CY0, i, shown = 0, rest;
+    int sl_rows = NETI_LOB_ROWS, lv_rows = 0, lv_shown = 0, ly = y0 + 44; /* W485 */
     card(x, y0, COLW, NETI_LOB_H, LT("gui.hub_lob_title"));
     if (g_hubl_state != 1) {
         const char *m;
@@ -563,8 +575,15 @@ static void paint_neti_lobbies(void)
         _snprintf_s(t, sizeof t, _TRUNCATE, "%d", open);
         L_text(F_CARD, t, x + 18, y0 + 12, COLW - 36, 24, C_ACCENT, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
     }
+    /* W485 LIVE-QOS: Xbox-Live-Sessions (Gruppe "live", W482) als eigener, markierter Abschnitt unter den
+     * System-Link-Lobbys (Nutzerentscheid 25.11.); hoechstens 3 Zeilen, die System-Link-Liste ruecken zusammen. */
+    if (g_hubl.nlive > 0) {
+        lv_rows = g_hubl.nlive < 3 ? g_hubl.nlive : 3;
+        sl_rows = NETI_LOB_ROWS - 1 - lv_rows;
+    }
     if (g_hubl.n == 0) {
         label(F_TINY, LT("gui.hub_lob_none"), x + 18, y0 + 44, COLW - 36, 40, C_DIM);
+        ly = y0 + 44 + NETI_ROW + 4;
     } else {
         int hy = y0 + 44;
         label1(F_TINY, LT("gui.hub_lob_host"), x + 18, hy, 130, 20, C_FAINT);
@@ -572,7 +591,7 @@ static void paint_neti_lobbies(void)
         label1(F_TINY, LT("gui.hub_lob_pl"), x + 224, hy, 52, 20, C_FAINT);
         label1(F_TINY, LT("gui.hub_lob_st"), x + 278, hy, 52, 20, C_FAINT);
         L_fill(x + 18, hy + 21, COLW - 36, 1, RGB(255, 255, 255), 22, 0);
-        for (i = 0; i < g_hubl.n && shown < NETI_LOB_ROWS; i++, shown++) {
+        for (i = 0; i < g_hubl.n && shown < sl_rows; i++, shown++) {
             const lacc_lobby_t *e = &g_hubl.l[i];
             int ry = hy + 26 + shown * NETI_ROW;
             COLORREF bg = e->arcade ? RGB(0xD2, 0x78, 0x0F) : RGB(0x3C, 0x6E, 0x9B); /* Farben der Suchliste (W443) */
@@ -586,8 +605,27 @@ static void paint_neti_lobbies(void)
             label1(F_TINY, LT(e->started ? "gui.hub_lob_run" : "gui.hub_lob_open"), x + 278, ry, 52, 22,
                    e->started ? C_FAINT : C_OK);
         }
+        ly = hy + 26 + shown * NETI_ROW + 4;
     }
-    rest = g_hubl.n - shown + g_hubl.more;
+    if (lv_rows > 0) { /* W485: Kopf mit Kennzeichen, dann die Sessions (Host, LIVE/CHAT, Plaetze, Zustand) */
+        L_fill(x + 18, ly, COLW - 36, 1, RGB(255, 255, 255), 22, 0);
+        L_fill(x + 18, ly + 6, 4, 14, RGB(0x6A, 0xB0, 0x2E), 255, 1);
+        label1(F_TINY, LT("gui.hub_lob_live"), x + 28, ly + 2, COLW - 46, 22, C_ACCENT);
+        for (i = 0; i < g_hubl.nlive && lv_shown < lv_rows; i++, lv_shown++) {
+            const lacc_lobby_t *e = &g_hubl.lv[i];
+            int ry = ly + 26 + lv_shown * NETI_ROW;
+            L_text(F_TINY, e->host, x + 18, ry, 132, 22, e->started ? C_DIM : C_TEXT,
+                   DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS | DT_NOPREFIX);
+            L_fill(x + 156, ry + 3, 58, 16, RGB(0x4E, 0x8A, 0x22), e->started ? 140 : 255, 4);
+            L_text(F_TINY, LT(e->chat ? "gui.hub_lob_live_chat" : "gui.hub_lob_live_match"), x + 156, ry + 3, 58, 16,
+                   RGB(255, 255, 255), DT_CENTER | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+            _snprintf_s(t, sizeof t, _TRUNCATE, "%d/%d", e->players, e->max_players);
+            label1(F_TINY, t, x + 224, ry, 52, 22, e->started || e->players >= e->max_players ? C_DIM : C_TEXT);
+            label1(F_TINY, LT(e->started ? "gui.hub_lob_run" : "gui.hub_lob_open"), x + 278, ry, 52, 22,
+                   e->started ? C_FAINT : C_OK);
+        }
+    }
+    rest = g_hubl.n - shown + g_hubl.more + g_hubl.nlive - lv_shown + g_hubl.live_more;
     if (rest > 0) {
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.hub_lob_more"), rest);
         label1(F_TINY, t, x + 18, y0 + NETI_LOB_H - 54, COLW - 36, 20, C_DIM);

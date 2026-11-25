@@ -3,6 +3,7 @@
  * in launcher_gui_int.h. */
 #include "launcher_gui_int.h"
 #include "sb_gfxpreset.h" /* W465: SB_GP_LOC_REV */
+#include "launcher_camp.h" /* W491: LCAMP_* */
 /* Selbsttest (Faelle 20-25)                                            */
 /* ------------------------------------------------------------------ */
 
@@ -840,6 +841,503 @@ void loc_lan_gui_selftest(int *pass, int *fail)
         GT_OK("65g W454 LOC-LAN-MODE (Auswahl Online/LAN, LAN-Start ohne steelnet frei, Kette ohne Treffpunkt/Konto/Passwort, Passwort nur Umgebung und danach geloescht, steelnet-Teile aus/grau, keine Versionssperre im LAN, Raumname geprueft, gemerkt, zurueck = gesperrt)");
     } else {
         GT_FAIL("65g W454 LOC-LAN-MODE", "%s", why);
+    }
+}
+
+/* --- 65h (W487 LIVE-GAMERTAG, W501 ONLINE-BOTH): Multiplayer > Match: Verbindung nur Online/LAN (kein Eintrag Xbox
+ * Live mehr). Online mit Konto + Gamertag: Kette = Online (loc_transport=udp;loc_lobby=...) + loc_live=1 + loc_camp=1
+ * je genau einmal (im Spiel System Link oder Xbox Live). Online ohne Gamertag / ohne Konto / Stand unbekannt: Start
+ * frei, nur System Link (kein loc_live), Hinweis mit Weg zur Kontoseite, kein Seitenwechsel. LAN nie loc_live.
+ * Migration: launcher_loc_live=1 in user.cfg -> einmalig Online (auch gegen launcher_loc_lan=1), Schluessel danach 0. --- */
+void loc_live_gui_selftest(int *pass, int *fail)
+{
+    char why[300] = "", tmp[1024], cfg[1200], txt[4096] = "", s1[64] = "", s2[64] = "a=1";
+    int on0 = g_loc_online, fs0 = g_onl_fix_srv, uc0 = g_upd_cfg, ask0 = g_upd_ask, lan0 = g_loc_lan;
+    lacc_store_t a0 = g_acc;
+    FILE *f = NULL;
+    size_t n;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw487_gui_user_%lu.cfg", tmp, GetCurrentProcessId());
+    write_file(cfg, "[display]\nwidth=1280\n");
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    g_locgate_skip = 0;
+    g_onl_fix_srv = 1;
+    g_upd_cfg = 1;
+    g_upd_ask = 0;
+    gt_setenv("SB_TEST_LOC_READY", "1");
+    strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_ISO);
+    memset(&g_locfix, 0, sizeof g_locfix);
+    g_locfix.kind = LGAME_IMG_LOC;
+    g_locfix.title_id = LGAME_TID_LOC;
+    g_game = LGAME_LOC;
+    loctab_nav_layout();
+    show_page(P_PLAY);
+    ui_settext(ctl(ID_LOC_IMAGE), LOC_ISO);
+    loctab_check();
+    lan_kind_set(0);
+    on_command(ID_NETM0 + NETM_STEEL, BN_CLICKED);
+    locver_fixture("0.0.1");
+    acc_fixture(1, 1, 1, 1, 0); /* Konto mit Gamertag "Ace Pilot" */
+    { /* 0 (W485 MERGEFIX/W501): eine Pruefung lnet_live_ok (nicht LAN, Konto, Gamertag) + ein live_set_append (nur
+       * online). Faelle: mit Gamertag, offline, LAN, ohne Gamertag, ohne Konto, Stand unbekannt. */
+        static const char *const kCase[6] = { "Gamertag", "offline", "LAN", "ohne Gamertag", "ohne Konto", "unbekannt" };
+        int k;
+        for (k = 0; k < 6 && !why[0]; k++) {
+            int onl = k != 1, r, ok, on;
+            acc_fixture(1, 1, 1, 1, 0);
+            g_loc_lan = k == 2;
+            if (k == 3) g_acc_st.gamertag[0] = '\0';
+            if (k == 4) memset(&g_acc, 0, sizeof g_acc);
+            if (k == 5) g_acc_st_ok = 0;
+            strcpy_s(s1, sizeof s1, "");
+            strcpy_s(s2, sizeof s2, "a=1");
+            ok = lnet_live_ok();
+            on = lnet_live_on();
+            r = live_set_append(s1, sizeof s1, onl);
+            r += live_set_append(s2, sizeof s2, onl);
+            if (k == 0 && (!ok || !on || r != 2 || strcmp(s1, "loc_live=1") != 0 || strcmp(s2, "a=1;loc_live=1") != 0))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "live_set_append %s: %d '%s' '%s'", kCase[k], r, s1, s2);
+            else if (k != 0 && (r != 0 || s1[0] || strcmp(s2, "a=1") != 0 || (k >= 2 && (ok || on))))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "live_set_append %s: ok %d on %d r %d '%s' '%s'", kCase[k], ok, on, r, s1, s2);
+        }
+        g_loc_lan = 1;
+        onl_load(); /* user.cfg ohne Schluessel: Standard Online */
+        if (!why[0] && (g_loc_lan || lnet_kind_get() != 0)) strcpy_s(why, sizeof why, "Standard ist nicht Online");
+        on_command(ID_NETM0 + NETM_STEEL, BN_CLICKED);
+        locver_fixture("0.0.1");
+        acc_fixture(1, 1, 1, 1, 0);
+    }
+    if (!why[0]) { /* 1: Auswahl hat genau 2 Eintraege (Online, LAN); LAN -> Online, steelnet-Teile wieder an */
+        show_page(P_LNET);
+        pump();
+        if (!ctl(ID_LNET_KIND) || ComboBox_GetCount(ctl(ID_LNET_KIND)) != 2)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Auswahl hat %d Eintraege (erwartet 2)",
+                        ctl(ID_LNET_KIND) ? (int)ComboBox_GetCount(ctl(ID_LNET_KIND)) : -1);
+        else {
+            ComboBox_SetCurSel(ctl(ID_LNET_KIND), 1);
+            on_command(ID_LNET_KIND, CBN_SELCHANGE);
+            if (!g_loc_lan || lnet_kind_get() != 1) strcpy_s(why, sizeof why, "LAN nicht gewaehlt");
+            ComboBox_SetCurSel(ctl(ID_LNET_KIND), 0);
+            on_command(ID_LNET_KIND, CBN_SELCHANGE);
+            pump();
+            if (!why[0] && (g_loc_lan || lnet_kind_get() != 0 || !lnet_live_on()))
+                strcpy_s(why, sizeof why, "Online nicht gewaehlt bzw. Live nicht verfuegbar");
+            else if (!why[0] && (IsWindowVisible(ctl(ID_LNET_LANROOM)) || !IsWindowEnabled(ctl(ID_LNET_SNCHAT))))
+                strcpy_s(why, sizeof why, "Online: LAN-Felder sichtbar bzw. steelnet-Chat grau");
+        }
+    }
+    if (!why[0]) { /* 2: Online mit Gamertag: Kette Online + loc_live=1 + loc_camp=1 je genau einmal; Infozeile */
+        char t[400];
+        COLORREF col;
+        const char *p;
+        camp_fixture(LCAMP_R_OK);
+        show_page(P_PLAY);
+        pump();
+        g_loc_last_cmd[0] = '\0';
+        on_command(ID_LOC_START, BN_CLICKED);
+        p = strstr(g_loc_last_cmd, "loc_live=1");
+        if (!p || strstr(p + 10, "loc_live") || !strstr(g_loc_last_cmd, "loc_camp=1") ||
+            strstr(strstr(g_loc_last_cmd, "loc_camp=1") + 10, "loc_camp=") ||
+            !strstr(g_loc_last_cmd, "loc_transport=udp") || !strstr(g_loc_last_cmd, "loc_lobby=") || strstr(g_loc_last_cmd, "loc_lan=1"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Online+Gamertag: Kette '%.220s'", g_loc_last_cmd);
+        live_info(t, sizeof t, &col);
+        if (!why[0] && (!strstr(t, "Ace Pilot") || col == C_WARN)) _snprintf_s(why, sizeof why, _TRUNCATE, "Live-Info '%s'", t);
+    }
+    if (!why[0]) { /* 3: Migration launcher_loc_live=1 -> Online (einmalig, auch gegen LAN), Schluessel danach 0 */
+        static const char *const kIn[4] = { "launcher_loc_live=1\n", "launcher_loc_lan=1\nlauncher_loc_live=1\n",
+                                            "launcher_loc_live=0\nlauncher_loc_lan=1\n", "launcher_loc_live=2\n" };
+        static const int kLan[4] = { 0, 0, 1, 0 };
+        static const char *const kWant[4] = { "launcher_loc_live=0", "launcher_loc_live=0", "launcher_loc_live=0",
+                                              "launcher_loc_live=2" };
+        int k;
+        for (k = 0; k < 4 && !why[0]; k++) {
+            write_file(cfg, kIn[k]);
+            onl_load();
+            txt[0] = 0;
+            if (u8_fopen_s(&f, cfg, "rb") == 0 && f) {
+                n = fread(txt, 1, sizeof txt - 1, f);
+                txt[n] = 0;
+                fclose(f);
+            }
+            if (g_loc_lan != kLan[k] || lnet_kind_get() != kLan[k] || !strstr(txt, kWant[k]) ||
+                strstr(txt, "launcher_loc_live=1") || (k == 1 && !strstr(txt, "launcher_loc_lan=0")))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Migration %d: LAN %d '%.160s'", k, g_loc_lan, txt);
+        }
+        write_file(cfg, "[display]\nwidth=1280\n"); /* Auswahl schreibt launcher_loc_live nie */
+        lnet_kind_set(1);
+        lnet_kind_set(0);
+        txt[0] = 0;
+        if (u8_fopen_s(&f, cfg, "rb") == 0 && f) {
+            n = fread(txt, 1, sizeof txt - 1, f);
+            txt[n] = 0;
+            fclose(f);
+        }
+        if (!why[0] && (strstr(txt, "launcher_loc_live") || !strstr(txt, "launcher_loc_lan=0")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Auswahl: user.cfg '%.200s'", txt);
+        on_command(ID_NETM0 + NETM_STEEL, BN_CLICKED);
+        locver_fixture("0.0.1");
+    }
+    if (!why[0]) { /* 4: ohne Gamertag / ohne Konto / Stand unbekannt: Start frei, nur System Link, Hinweis, kein Sprung */
+        static const int kWant[3] = { ACC_LIVE_NOGT, ACC_LIVE_NOACC, ACC_LIVE_UNK };
+        static const char *const kMsg[3] = { "gui.live_sl_only", "gui.live_sl_only", "gui.live_need_status" };
+        int k;
+        for (k = 0; k < 3 && !why[0]; k++) {
+            char t[400];
+            COLORREF col;
+            acc_fixture(1, 1, 1, 1, 0);
+            if (k == 0) g_acc_st.gamertag[0] = '\0';
+            else if (k == 1) memset(&g_acc, 0, sizeof g_acc);
+            else g_acc_st_ok = 0;
+            show_page(P_PLAY);
+            pump();
+            g_loc_last_cmd[0] = '\0';
+            on_command(ID_LOC_START, BN_CLICKED);
+            pump();
+            live_info(t, sizeof t, &col);
+            if (acc_live_state() != kWant[k] || !g_loc_last_cmd[0] || strstr(g_loc_last_cmd, "loc_live") ||
+                strstr(g_loc_last_cmd, "loc_camp") || !strstr(g_loc_last_cmd, "loc_transport=udp") || g_page != P_PLAY)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Fall %d: Zustand %d Seite %d '%.180s'", k, acc_live_state(), g_page,
+                            g_loc_last_cmd);
+            else if (strcmp(t, LT(kMsg[k])) != 0 || col != C_WARN)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Fall %d: Hinweis '%.200s'", k, t);
+        }
+        acc_fixture(1, 1, 1, 1, 0);
+        g_acc_live_pending = 2; /* Start nach dem Status: genau einmal durchlassen, dann wieder normal */
+        if (!why[0] && (!acc_live_prestart() || g_acc_live_pending != 0)) strcpy_s(why, sizeof why, "acc_live_prestart nach Status");
+        if (!why[0] && !acc_live_prestart()) strcpy_s(why, sizeof why, "acc_live_prestart sperrt");
+    }
+    if (!why[0]) { /* 5: LAN: nie loc_live/loc_camp (auch mit Gamertag), Live nicht verfuegbar */
+        acc_fixture(1, 1, 1, 1, 0);
+        lnet_kind_set(1);
+        show_page(P_PLAY);
+        g_loc_last_cmd[0] = '\0';
+        on_command(ID_LOC_START, BN_CLICKED);
+        if (lnet_live_on() || !strstr(g_loc_last_cmd, "loc_lan=1") || strstr(g_loc_last_cmd, "loc_live") ||
+            strstr(g_loc_last_cmd, "loc_camp"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "LAN: '%.200s'", g_loc_last_cmd);
+    }
+    /* aufraeumen */
+    SetEnvironmentVariableA("SB_TEST_LOC_READY", NULL);
+    lnet_kind_set(0);
+    camp_fixture(LCAMP_R_UNKNOWN);
+    g_acc_live_pending = 0;
+    g_loc_lan = lan0;
+    g_loc_lan_room[0] = 0;
+    g_locgate_skip = 1;
+    g_loc_online = on0;
+    g_onl_fix_srv = fs0;
+    g_upd_cfg = uc0;
+    g_upd_ask = ask0;
+    g_loc_last_cmd[0] = '\0';
+    g_locfix_path[0] = '\0';
+    g_loc_checked = 0;
+    ui_settext(ctl(ID_LOC_IMAGE), "");
+    u8_DeleteFile(cfg);
+    g_ucfg_test[0] = '\0';
+    g_acc_fixture = 0;
+    g_acc_loaded = 0;
+    g_acc_view = 0;
+    acc_x_reset();
+    g_acc = a0;
+    memset(&g_acc_st, 0, sizeof g_acc_st);
+    g_acc_st_ok = 0;
+    g_game = LGAME_SB;
+    loctab_nav_layout();
+    onl_sync_ui();
+    netm_sync_ui();
+    show_page(P_PLAY);
+    if (!why[0]) {
+        GT_OK("65h W487/W501 ONLINE-BOTH (connection Online/LAN only, 2 entries; one check account+gamertag+not LAN; Online with gamertag: loc_live=1 + loc_camp=1 exactly once; without gamertag/account/status: start allowed, System Link only, hint, no page jump; LAN never loc_live; migration launcher_loc_live=1 -> Online once, key 0, choice never writes it)");
+    } else {
+        GT_FAIL("65h W487/W501 ONLINE-BOTH", "%s", why);
+    }
+}
+
+/* --- 65i (W491 CAMP-CLIENT): Kampagnenstatus fuer Online mit Gamertag (W501). (0) lcamp_state alle Kombinationen Konto/Gamertag/
+ * Version/Erreichbarkeit (6 x 2 x 3); (1) camp_status aus den echten Quellen (acc_fixture, locver_fixture,
+ * camp_fixture) -> richtiger Hinweis EN/DE, Texte passen einzeilig (Karte Match + Karte Multiplayer); (2) Pruefung nur
+ * Online mit Gamertag (steelnet), gecacht (Selbsttest zaehlt nur, nie Netz); Ergebnis (camp_apply) wirkt; (3) Start
+ * Online mit Gamertag: loc_live=1 + loc_camp=1 genau einmal, auch wenn nicht erreichbar (Start nie gesperrt); ohne Gamertag/LAN ohne
+ * loc_camp; (4) intern: Auswahl Saison/Testkampagne (Lobby & Chat), gemerkt in user.cfg, Test -> loc_camp_id=test,
+ * Standard wiederherstellen = Saison; Community: keine Auswahl, nie loc_camp_id (auch mit Schluessel in user.cfg). --- */
+void camp_gui_selftest(int *pass, int *fail)
+{
+    char why[300] = "", tmp[1024], cfg[1200], t[300], w[300];
+    int on0 = g_loc_online, fs0 = g_onl_fix_srv, uc0 = g_upd_cfg, ask0 = g_upd_ask, lan0 = g_loc_lan;
+    int ct0 = g_camp_test, tab0 = g_lnet_tab;
+    lacc_store_t a0 = g_acc;
+#if !SB_EDITION_COMMUNITY
+    char txt[4096] = "";
+    FILE *f = NULL;
+    size_t n;
+#endif
+    int li;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw491_gui_user_%lu.cfg", tmp, GetCurrentProcessId());
+    write_file(cfg, "[display]\nwidth=1280\n");
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    { /* 0: reine Logik, alle Kombinationen */
+        static const int kAcc[6] = { ACC_LIVE_OK, ACC_LIVE_OFF, ACC_LIVE_NOACC, ACC_LIVE_UNK, ACC_LIVE_NOGT, ACC_LIVE_GTOFF };
+        static const int kWant[6] = { -1, LCAMP_OFF, LCAMP_NOACC, LCAMP_UNK, LCAMP_NOGT, LCAMP_GTOFF };
+        static const int kReach[3] = { LCAMP_R_UNKNOWN, LCAMP_R_OK, LCAMP_R_FAIL };
+        static const int kReachWant[3] = { LCAMP_CHECK, LCAMP_OK, LCAMP_UNREACH };
+        int a, o, r;
+        for (a = 0; a < 6 && !why[0]; a++) {
+            for (o = 0; o < 2 && !why[0]; o++) {
+                for (r = 0; r < 3 && !why[0]; r++) {
+                    int want = kWant[a] >= 0 ? kWant[a] : o ? LCAMP_OLD : kReachWant[r];
+                    int got = lcamp_state(kAcc[a], o, kReach[r]);
+                    if (got != want)
+                        _snprintf_s(why, sizeof why, _TRUNCATE, "lcamp_state(acc %d, alt %d, reach %d) = %d, erwartet %d", kAcc[a],
+                                    o, kReach[r], got, want);
+                }
+            }
+        }
+        if (!why[0] && lcamp_state(ACC_LIVE_OK, 0, LCAMP_R_OK) != LCAMP_OK) strcpy_s(why, sizeof why, "alles erfuellt != verfuegbar");
+    }
+    g_locgate_skip = 0;
+    g_onl_fix_srv = 1;
+    g_upd_cfg = 1;
+    g_upd_ask = 0;
+    gt_setenv("SB_TEST_LOC_READY", "1");
+    strcpy_s(g_locfix_path, sizeof g_locfix_path, LOC_ISO);
+    memset(&g_locfix, 0, sizeof g_locfix);
+    g_locfix.kind = LGAME_IMG_LOC;
+    g_locfix.title_id = LGAME_TID_LOC;
+    g_game = LGAME_LOC;
+    loctab_nav_layout();
+    show_page(P_PLAY);
+    ui_settext(ctl(ID_LOC_IMAGE), LOC_ISO);
+    loctab_check();
+    lan_kind_set(0);
+    on_command(ID_NETM0 + NETM_STEEL, BN_CLICKED);
+    locver_fixture("0.0.1");
+    acc_fixture(1, 1, 1, 1, 0);
+    g_camp_test = 0;
+    for (li = 0; li < 2 && !why[0]; li++) { /* 1: echte Quellen -> Zustand + Text (EN/DE), Texte passen */
+        static const char *const kKey[LCAMP_N] = { "gui.camp_ok",   "gui.camp_off",   "gui.camp_noacc",
+                                                   "gui.camp_unk",  "gui.camp_gtoff", "gui.camp_nogt",
+                                                   "gui.camp_old",  "gui.camp_check", "gui.camp_unreach" };
+        int k;
+        const char *bad;
+        sb_lang_set(li ? "de" : "en");
+        ui_apply_language();
+        for (k = 0; k < 9 && !why[0]; k++) {
+            int want;
+            acc_fixture(k == 0 ? 0 : 1, k == 1 ? 0 : 1, 1, 1, 0);
+            locver_fixture(k == 5 ? "0.3.3" : "0.0.1");
+            camp_fixture(k == 6 ? LCAMP_R_UNKNOWN : k == 7 ? LCAMP_R_FAIL : LCAMP_R_OK);
+            if (k == 2) g_acc_st_ok = 0;
+            if (k == 3) g_acc_st.gamertag[0] = '\0';
+            if (k == 4) {
+                g_acc_st.gamertag[0] = '\0';
+                strcpy_s(g_acc_st.gt_state, sizeof g_acc_st.gt_state, "off");
+            }
+            want = k == 0 ? LCAMP_OFF : k == 1 ? LCAMP_NOACC : k == 2 ? LCAMP_UNK : k == 3 ? LCAMP_NOGT : k == 4 ? LCAMP_GTOFF
+                 : k == 5 ? LCAMP_OLD : k == 6 ? LCAMP_CHECK : k == 7 ? LCAMP_UNREACH : LCAMP_OK;
+            camp_text(camp_status(), t, sizeof t);
+            _snprintf_s(w, sizeof w, _TRUNCATE, LT(kKey[want]), LT("gui.camp_name"));
+            if (camp_status() != want || strcmp(t, w) != 0 || !strchr(t, ':'))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s Fall %d: Zustand %d (erwartet %d) '%.120s'", li ? "de" : "en", k,
+                            camp_status(), want, t);
+        }
+        bad = camp_texts_fit();
+        if (!why[0] && bad) _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Zeile passt nicht einzeilig: '%.200s'", li ? "de" : "en", bad);
+        if (!why[0]) { /* Infozeile: Live bereit -> 2 Zeilen (Gamertag, Kampagne gruen); ohne Gamertag -> 0 (live_info) */
+            COLORREF c2 = 0;
+            acc_fixture(1, 1, 1, 1, 0);
+            locver_fixture("0.0.1");
+            camp_fixture(LCAMP_R_OK);
+            if (!camp_info2(t, sizeof t, w, sizeof w, &c2) || !strstr(t, "Ace Pilot") || c2 != C_OK)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s Infozeile bereit '%.100s' '%.100s'", li ? "de" : "en", t, w);
+            camp_fixture(LCAMP_R_FAIL);
+            if (!why[0] && (!camp_info2(t, sizeof t, w, sizeof w, &c2) || c2 != C_WARN)) strcpy_s(why, sizeof why, "Infozeile Server weg");
+            g_acc_st.gamertag[0] = '\0';
+            if (!why[0] && camp_info2(t, sizeof t, w, sizeof w, &c2)) strcpy_s(why, sizeof why, "Infozeile ohne Gamertag != live_info");
+        }
+    }
+    sb_lang_set("en");
+    ui_apply_language();
+    acc_fixture(1, 1, 1, 1, 0);
+    locver_fixture("0.0.1");
+    if (!why[0]) { /* 2 (W501): Pruefung nur Online mit Gamertag (steelnet), gecacht; Ergebnis wirkt */
+        int n0;
+        g_camp_dry = 1;
+        g_camp_dry_n = 0;
+        lnet_kind_set(0);
+        g_acc_st.gamertag[0] = '\0';
+        camp_fixture(LCAMP_R_UNKNOWN);
+        if (camp_kick() || g_camp_dry_n) strcpy_s(why, sizeof why, "Pruefung Online ohne Gamertag");
+        acc_fixture(1, 1, 1, 1, 0);
+        lnet_kind_set(1);
+        if (!why[0] && (camp_kick() || g_camp_dry_n)) strcpy_s(why, sizeof why, "Pruefung im LAN");
+        lnet_kind_set(0);
+        camp_fixture(LCAMP_R_UNKNOWN);
+        n0 = g_camp_dry_n;
+        if (!why[0] && (!camp_kick() || g_camp_dry_n != n0 + 1)) strcpy_s(why, sizeof why, "keine Pruefung Online mit Gamertag");
+        camp_apply(0, LCAMP_R_OK);
+        if (!why[0] && (camp_kick() || camp_status() != LCAMP_OK)) strcpy_s(why, sizeof why, "Ergebnis nicht gecacht bzw. nicht verfuegbar");
+        camp_apply(0, LCAMP_R_FAIL);
+        if (!why[0] && (camp_kick() || camp_status() != LCAMP_UNREACH)) strcpy_s(why, sizeof why, "Fehler nicht gecacht (60 s)");
+        on_command(ID_NETM0 + NETM_OFF, BN_CLICKED); /* ohne Stufe steelnet: nie */
+        camp_fixture(LCAMP_R_UNKNOWN);
+        if (!why[0] && camp_kick()) strcpy_s(why, sizeof why, "Pruefung ohne Stufe steelnet");
+        on_command(ID_NETM0 + NETM_STEEL, BN_CLICKED);
+        locver_fixture("0.0.1");
+        g_camp_dry = 0;
+    }
+    if (!why[0]) { /* 3 (W501): Start Online mit Gamertag: loc_camp=1 genau einmal, auch nicht erreichbar (Start nie
+                    * gesperrt); Online ohne Gamertag und LAN ohne */
+        int k;
+        for (k = 0; k < 2 && !why[0]; k++) {
+            const char *p;
+            acc_fixture(1, 1, 1, 1, 0);
+            lnet_kind_set(0);
+            g_camp_test = 0;
+            camp_fixture(k ? LCAMP_R_FAIL : LCAMP_R_OK);
+            show_page(P_PLAY);
+            pump();
+            g_loc_last_cmd[0] = '\0';
+            on_command(ID_LOC_START, BN_CLICKED);
+            p = strstr(g_loc_last_cmd, "loc_camp=1");
+            if (!strstr(g_loc_last_cmd, "loc_live=1") || !p || strstr(p + 10, "loc_camp=") || strstr(g_loc_last_cmd, "loc_camp_id"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Live-Start (%s): '%.220s'", k ? "nicht erreichbar" : "erreichbar", g_loc_last_cmd);
+        }
+        lnet_kind_set(0);
+        g_acc_st.gamertag[0] = '\0'; /* W501: Online ohne Gamertag - Start frei, nur System Link */
+        g_loc_last_cmd[0] = '\0';
+        on_command(ID_LOC_START, BN_CLICKED);
+        if (!why[0] && (!g_loc_last_cmd[0] || strstr(g_loc_last_cmd, "loc_camp") || strstr(g_loc_last_cmd, "loc_live")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Online ohne Gamertag: '%.200s'", g_loc_last_cmd);
+        acc_fixture(1, 1, 1, 1, 0);
+        lnet_kind_set(1);
+        g_loc_last_cmd[0] = '\0';
+        on_command(ID_LOC_START, BN_CLICKED);
+        if (!why[0] && (!g_loc_last_cmd[0] || strstr(g_loc_last_cmd, "loc_camp"))) _snprintf_s(why, sizeof why, _TRUNCATE, "LAN: '%.200s'", g_loc_last_cmd);
+        lnet_kind_set(0);
+    }
+#if !SB_EDITION_COMMUNITY
+    if (!why[0]) { /* 4 intern: Auswahl, gemerkt, Testkampagne an den Start, Hinweis in der Zeile, Standard = Saison */
+        acc_fixture(1, 1, 1, 1, 0);
+        lnet_kind_set(0); /* W501: Online (mit Gamertag) statt Live-Modus */
+        show_page(P_LNET);
+        lnet_tab_pick(1);
+        pump();
+        if (!ctl(ID_LNET_CAMP) || ComboBox_GetCount(ctl(ID_LNET_CAMP)) != 2 || !IsWindowVisible(ctl(ID_LNET_CAMP)) ||
+            ComboBox_GetCurSel(ctl(ID_LNET_CAMP)) != 0)
+            strcpy_s(why, sizeof why, "intern: Auswahl Kampagne fehlt bzw. nicht Saison");
+        else {
+            int i, found = 0;
+            ComboBox_SetCurSel(ctl(ID_LNET_CAMP), 1);
+            on_command(ID_LNET_CAMP, CBN_SELCHANGE);
+            camp_fixture(LCAMP_R_OK);
+            if (!g_camp_test || camp_sel() != 1) strcpy_s(why, sizeof why, "intern: Testkampagne nicht gewaehlt");
+            for (i = 0; i < lnet_row_count() && !why[0]; i++) { /* Hinweis der Zeile = Status der Testkampagne, passt */
+                RECT rc;
+                const char *ht = NULL;
+                int id = 0;
+                if (lnet_hint_rect(i, &rc, &ht, &id) == 1 && id == ID_LNET_CAMP) {
+                    _snprintf_s(w, sizeof w, _TRUNCATE, LT("gui.camp_ok"), LT("gui.camp_name_test"));
+                    found = 1;
+                    if (!ht || strcmp(ht, w) != 0 ||
+                        !ui_text_fits(F_TINY, ht, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top, 0))
+                        _snprintf_s(why, sizeof why, _TRUNCATE, "intern: Hinweis '%.150s'", ht ? ht : "-");
+                }
+            }
+            if (!why[0] && !found) strcpy_s(why, sizeof why, "intern: Zeile Kampagne nicht im Reiter Lobby & Chat");
+        }
+        if (!why[0]) {
+            if (u8_fopen_s(&f, cfg, "rb") == 0 && f) {
+                n = fread(txt, 1, sizeof txt - 1, f);
+                txt[n] = 0;
+                fclose(f);
+            }
+            if (!strstr(txt, "launcher_loc_camp_test=1")) _snprintf_s(why, sizeof why, _TRUNCATE, "intern user.cfg: '%.200s'", txt);
+        }
+        if (!why[0]) {
+            const char *p;
+            show_page(P_PLAY);
+            pump();
+            g_loc_last_cmd[0] = '\0';
+            on_command(ID_LOC_START, BN_CLICKED);
+            p = strstr(g_loc_last_cmd, "loc_camp_id=test");
+            if (!strstr(g_loc_last_cmd, "loc_camp=1") || !p || strstr(p + 16, "loc_camp_id"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "intern Test-Start: '%.220s'", g_loc_last_cmd);
+        }
+        if (!why[0]) { /* Laden: nur genau 1; Standard wiederherstellen = Saison */
+            write_file(cfg, "launcher_loc_camp_test=1\n");
+            onl_load();
+            if (!g_camp_test) strcpy_s(why, sizeof why, "intern Laden: Test nicht gemerkt");
+            write_file(cfg, "launcher_loc_camp_test=2\n");
+            onl_load();
+            if (!why[0] && g_camp_test) strcpy_s(why, sizeof why, "intern Laden: ungueltig als Test");
+            g_camp_test = 1;
+            if (!why[0] && lnet_is_default()) strcpy_s(why, sizeof why, "intern: Test gilt als Standard");
+            lnet_reset();
+            if (!why[0] && (g_camp_test || !lnet_is_default())) strcpy_s(why, sizeof why, "intern: Standard wiederherstellen != Saison");
+        }
+    }
+#else
+    if (!why[0]) { /* 4 Community: keine Auswahl, nie loc_camp_id (auch mit Schluessel in user.cfg bzw. gesetzter Variable) */
+        acc_fixture(1, 1, 1, 1, 0);
+        write_file(cfg, "launcher_loc_camp_test=1\n");
+        onl_load();
+        if (g_camp_test) strcpy_s(why, sizeof why, "Community: Schluessel gelesen");
+        on_command(ID_NETM0 + NETM_STEEL, BN_CLICKED); /* onl_load setzt die Stufe aus der (Test-)cfg zurueck */
+        locver_fixture("0.0.1");
+        acc_fixture(1, 1, 1, 1, 0);
+        lnet_kind_set(0); /* W501: Online (mit Gamertag) statt Live-Modus */
+        show_page(P_LNET);
+        lnet_tab_pick(1);
+        pump();
+        if (!why[0] && ctl(ID_LNET_CAMP)) strcpy_s(why, sizeof why, "Community: Auswahl Kampagne vorhanden");
+        g_camp_test = 1;
+        if (!why[0] && camp_sel() != 0) strcpy_s(why, sizeof why, "Community: camp_sel != Saison");
+        show_page(P_PLAY);
+        pump();
+        g_loc_last_cmd[0] = '\0';
+        on_command(ID_LOC_START, BN_CLICKED);
+        if (!why[0] && (!strstr(g_loc_last_cmd, "loc_camp=1") || strstr(g_loc_last_cmd, "loc_camp_id")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Community-Start: '%.220s'", g_loc_last_cmd);
+        g_camp_test = 0;
+    }
+#endif
+    /* aufraeumen */
+    SetEnvironmentVariableA("SB_TEST_LOC_READY", NULL);
+    lnet_kind_set(0);
+    lnet_tab_pick(tab0);
+    camp_fixture(LCAMP_R_UNKNOWN);
+    g_camp_dry = 0;
+    g_camp_test = ct0;
+    g_loc_lan = lan0;
+    g_loc_lan_room[0] = 0;
+    g_locgate_skip = 1;
+    g_loc_online = on0;
+    g_onl_fix_srv = fs0;
+    g_upd_cfg = uc0;
+    g_upd_ask = ask0;
+    g_loc_last_cmd[0] = '\0';
+    g_locfix_path[0] = '\0';
+    g_loc_checked = 0;
+    ui_settext(ctl(ID_LOC_IMAGE), "");
+    u8_DeleteFile(cfg);
+    g_ucfg_test[0] = '\0';
+    g_acc_fixture = 0;
+    g_acc_loaded = 0;
+    g_acc_view = 0;
+    acc_x_reset();
+    g_acc = a0;
+    memset(&g_acc_st, 0, sizeof g_acc_st);
+    g_acc_st_ok = 0;
+    g_game = LGAME_SB;
+    loctab_nav_layout();
+    onl_sync_ui();
+    netm_sync_ui();
+    show_page(P_PLAY);
+    if (!why[0]) {
+        GT_OK("65i W491 CAMP-CLIENT campaign status (all 36 combinations account/gamertag/version/reachability, real sources -> right hint EN/DE, one-line fit on Match + Multiplayer cards, check only Online with gamertag (steelnet) and cached, never network in test, start Online with gamertag: loc_camp=1 exactly once even if unreachable, without gamertag/LAN without; internal: season/test choice saved, loc_camp_id=test only with test, reset = season; community: no choice, never loc_camp_id)");
+    } else {
+        GT_FAIL("65i W491 CAMP-CLIENT campaign status", "%s", why);
     }
 }
 
@@ -2466,23 +2964,28 @@ __declspec(noinline) void acc_gui_selftest(int *pass, int *fail)
     /* d: Verwaltungsansicht deckt die Seite, Code anzeigen/verbergen, Passwort maskiert */
     on_command(ID_ACC_MANAGE, BN_CLICKED);
     pump();
-    /* W418: ungesichert = eine Karte "Ein Schritt: sichern" (Discord, Login aufklappbar, Code anzeigen);
-     * Code/Abmelden/Loeschen erst unter "Verwalten" */
+    /* W418/W502: ungesichert = Karte Sichern (Discord, Login als Knopf, Code anzeigen) und Kontoeinstellungen
+     * (Code einloesen, Abmelden, Loeschen) gleichzeitig sichtbar; Formulare ersetzen den Inhalt ihrer Karte */
     if (!why[0] && (!g_acc_view || acc_gt_vis(ID_LNET_RB) || acc_gt_vis(ID_LOC_VIS) || acc_gt_vis(ID_VSYNC) ||
                     acc_gt_vis(ID_ACC_DISCORD) || acc_gt_vis(ID_ACC_V_LOGIN) || !acc_gt_vis(ID_ACC_X_LOGIN) ||
-                    acc_gt_vis(ID_ACC_V_DELETE) || !acc_gt_vis(ID_ACC_V_RECSHOW) || acc_gt_vis(ID_ACC_X_CODE) ||
+                    !acc_gt_vis(ID_ACC_V_DELETE) || !acc_gt_vis(ID_ACC_V_RECSHOW) || !acc_gt_vis(ID_ACC_X_CODE) ||
                     !acc_gt_vis(ID_NAVSUB_ACC) || !acc_sub_active() || acc_gt_vis(ID_ACC_V_CODE) ||
-                    !acc_gt_vis(ID_ACC_V_DISCORD) || !acc_gt_vis(ID_ACC_X_MANAGE)))
+                    !acc_gt_vis(ID_ACC_V_DISCORD) || !acc_gt_vis(ID_ACC_O_SEC)))
         strcpy_s(why, sizeof why, "Ansicht: Sichtbarkeit");
-    on_command(ID_ACC_X_MANAGE, BN_CLICKED);
+    on_command(ID_ACC_X_CODE, BN_CLICKED);
     pump();
-    if (!why[0] && (!acc_gt_vis(ID_ACC_V_DELETE) || !acc_gt_vis(ID_ACC_V_FORGET) || !acc_gt_vis(ID_ACC_V_CODE)))
-        strcpy_s(why, sizeof why, "Verwalten: Code/Abmelden/Loeschen");
-    on_command(ID_ACC_X_LOGIN, BN_CLICKED); /* ungesichert: Login oder Verwalten (einer offen) */
+    if (!why[0] && (acc_gt_vis(ID_ACC_V_DELETE) || acc_gt_vis(ID_ACC_V_FORGET) || !acc_gt_vis(ID_ACC_V_CODE) ||
+                    !acc_gt_vis(ID_ACC_V_CDCANCEL)))
+        strcpy_s(why, sizeof why, "Einstellungen: Codeformular");
+    on_command(ID_ACC_V_CDCANCEL, BN_CLICKED);
     pump();
-    if (!why[0] && (!acc_gt_vis(ID_ACC_V_LOGIN) || !acc_gt_vis(ID_ACC_V_PASS) || g_acc_x_manage ||
-                    acc_gt_vis(ID_ACC_V_DELETE)))
-        strcpy_s(why, sizeof why, "Login aufklappen");
+    if (!why[0] && (!acc_gt_vis(ID_ACC_V_DELETE) || acc_gt_vis(ID_ACC_V_CODE)))
+        strcpy_s(why, sizeof why, "Einstellungen: Abbrechen");
+    on_command(ID_ACC_X_LOGIN, BN_CLICKED); /* ungesichert: Login-Formular in der Karte Sichern */
+    pump();
+    if (!why[0] && (!acc_gt_vis(ID_ACC_V_LOGIN) || !acc_gt_vis(ID_ACC_V_PASS) || acc_gt_vis(ID_ACC_V_RECSHOW) ||
+                    !acc_gt_vis(ID_ACC_V_DELETE)))
+        strcpy_s(why, sizeof why, "Login-Formular");
     if (!why[0] && !(GetWindowLongW(ctl(ID_ACC_V_PASS), GWL_STYLE) & ES_PASSWORD))
         strcpy_s(why, sizeof why, "Passwortfeld nicht maskiert");
     if (!why[0] && g_acc_rec[0]) strcpy_s(why, sizeof why, "Code ohne Klick sichtbar");
@@ -2512,7 +3015,7 @@ __declspec(noinline) void acc_gui_selftest(int *pass, int *fail)
     pump();
     if (!why[0] && (!acc_gt_vis(ID_ACC_X_CODE) || acc_gt_vis(ID_ACC_V_CODE) || acc_gt_vis(ID_ACC_V_RECSHOW) ||
                     acc_gt_vis(ID_ACC_V_DELETE) || !acc_gt_vis(ID_ACC_V_DISCORD) || !acc_gt_vis(ID_ACC_X_LOGIN) ||
-                    acc_gt_vis(ID_ACC_V_LOGIN) || acc_gt_vis(ID_ACC_X_MANAGE) ||
+                    acc_gt_vis(ID_ACC_V_LOGIN) || acc_gt_vis(ID_ACC_V_FORGET) ||
                     !acc_gt_vis(ID_ACC_NAME) || !acc_gt_vis(ID_ACC_CREATE) || acc_gt_vis(ID_ACC_SIGNIN)))
         strcpy_s(why, sizeof why, "Anmelden-Ansicht");
     on_command(ID_ACC_X_LOGIN, BN_CLICKED);
@@ -2595,6 +3098,25 @@ __declspec(noinline) void acc_gui_selftest(int *pass, int *fail)
                 strcpy_s(why, sizeof why, "Schluessel nicht im Testprofil");
             SecureZeroMemory(&chk, sizeof chk);
         }
+        if (!why[0] && !g_acc_st.gamertag[0]) { /* W487: ersten Gamertag ueber die Gamertag-Karte setzen (gamertag_set) */
+            char gt[16];
+            _snprintf_s(gt, sizeof gt, _TRUNCATE, "Gt%lu", GetCurrentProcessId() % 100000);
+            g_acc_view = 1;
+            g_acc_x_gt = 1;
+            acc_refresh();
+            ui_settext(ctl(ID_ACC_V_GT), gt);
+            if (g_hwnd) KillTimer(g_hwnd, ACC_GT_TIMER);
+            on_command(ID_ACC_V_GTBTN, BN_CLICKED);
+            if (!acc_gt_wait(20000)) {
+                strcpy_s(why, sizeof why, "Gamertag setzen: Zeitueberschreitung");
+            } else if (strcmp(g_acc_last_err, "gamertag_off") == 0) {
+                printf("     (76: Dienst ohne Gamertags - Setzen uebersprungen)\n");
+            } else if (strcmp(g_acc_st.gamertag, gt) != 0 || acc_live_state() != ACC_LIVE_OK || g_acc_st.gt_next <= 0) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Gamertag setzen (%s, '%s')", g_acc_last_err, g_acc_st.gamertag);
+            }
+            g_acc_x_gt = 0;
+            g_acc_view = 0;
+        }
         if (!why[0]) {
             int c0 = g_confirm_auto;
             g_confirm_auto = 1;
@@ -2622,7 +3144,7 @@ __declspec(noinline) void acc_gui_selftest(int *pass, int *fail)
         loctab_nav_layout();
         show_page(p0);
         if (!why[0]) {
-            GT_OK("76 W328 account UI over the network (create via worker thread + WM_APP_ACC, status, key in test profile, delete with confirm)");
+            GT_OK("76 W328 account UI over the network (create via worker thread + WM_APP_ACC, status, key in test profile, W487 first gamertag via gamertag card, delete with confirm)");
         } else {
             GT_FAIL("76 W328 account UI", "%s", why);
         }
@@ -2715,7 +3237,7 @@ __declspec(noinline) void accpage_gui_selftest(int *pass, int *fail)
         acc_geo_t gg;
         uictl_t *du = ui_find(ID_ACC_V_DISCORD);
         acc_geo(&gg);
-        if (!why[0] && (!acc_gt_vis(ID_ACC_V_DISCORD) || accpage_gt_y(ID_ACC_V_DISCORD) != gg.ay + 44 || !du ||
+        if (!why[0] && (!acc_gt_vis(ID_ACC_V_DISCORD) || accpage_gt_y(ID_ACC_V_DISCORD) != gg.r_dc + 4 || !du ||
                         du->kind != K_ACCENT))
             strcpy_s(why, sizeof why, "ungesichert: Discord nicht Hauptknopf der Sichern-Karte");
     }
@@ -2744,18 +3266,15 @@ __declspec(noinline) void accpage_gui_selftest(int *pass, int *fail)
     acc_fixture(1, 1, 0, 1, 1);
     acc_refresh();
     pump();
-    if (!why[0] && acc_gt_vis(ID_ACC_V_DISCORD)) /* W418: gesichert -> kompakt, Discord erst unter Verwalten */
-        strcpy_s(why, sizeof why, "Login: Discord ohne Verwalten sichtbar");
-    on_command(ID_ACC_X_MANAGE, BN_CLICKED);
-    pump();
-    {
+    { /* W502: Zeile Discord der Karte Sichern (Knopf "Mit Discord verbinden", kein Hauptknopf) */
         acc_geo_t gg;
+        uictl_t *du = ui_find(ID_ACC_V_DISCORD);
         acc_geo(&gg);
-        if (!why[0] && (!acc_gt_vis(ID_ACC_V_DISCORD) || accpage_gt_y(ID_ACC_V_DISCORD) != gg.r_dc + 6))
-            strcpy_s(why, sizeof why, "Login: Discord nicht in der Zeile Discord (Verwalten)");
+        if (!why[0] && (!acc_gt_vis(ID_ACC_V_DISCORD) || accpage_gt_y(ID_ACC_V_DISCORD) != gg.r_dc + 4 || !du ||
+                        du->kind != K_BTN))
+            strcpy_s(why, sizeof why, "Login: Discord nicht in der Zeile Discord");
     }
     acc_fixture(1, 1, 1, 1, 1);
-    g_acc_x_manage = 1;
     acc_refresh();
     pump();
     if (!why[0] && acc_gt_vis(ID_ACC_V_DISCORD)) strcpy_s(why, sizeof why, "verbunden: Discord-Knopf sichtbar");
@@ -2766,7 +3285,8 @@ __declspec(noinline) void accpage_gui_selftest(int *pass, int *fail)
     {
         acc_geo_t gg;
         acc_geo(&gg);
-        if (!why[0] && (accpage_gt_y(ID_ACC_NAME) != gg.ay + 62 || !acc_gt_vis(ID_ACC_NAME) || acc_gt_vis(ID_ACC_SIGNIN)))
+        if (!why[0] && (accpage_gt_y(ID_ACC_NAME) <= gg.lo_y || ui_find(ID_ACC_NAME)->x >= COL2 ||
+                        !acc_gt_vis(ID_ACC_NAME) || acc_gt_vis(ID_ACC_SIGNIN)))
             strcpy_s(why, sizeof why, "ohne Account: Anlegen nicht in der Karte Neu");
     }
     g_acc_try_op = 0;
@@ -2871,6 +3391,17 @@ static int accux_gt_layout(char *why, size_t cap, const char *tag)
     return 1;
 }
 
+/* W502: alle Texte der Kontoseite passen in ihre Kaesten (acc_page_texts_fit misst statt zu zeichnen) */
+static int page_texts_fit_tag(char *why, size_t cap, const char *tag)
+{
+    char w[200];
+    if (acc_page_texts_fit(w, sizeof w)) {
+        return 1;
+    }
+    _snprintf_s(why, cap, _TRUNCATE, "%s: Text %s", tag, w);
+    return 0;
+}
+
 /* Zahl der sichtbaren Akzentknoepfe auf der Kontoseite (ein Hauptknopf je Zustand) */
 static int accux_gt_accents(void)
 {
@@ -2905,29 +3436,30 @@ static int accux_gt_nocheck(void)
 __declspec(noinline) void accux_gui_selftest(int *pass, int *fail)
 {
     static const char *const kTerms[] = {
-        "gui.acc_title", "gui.acc_name", "gui.acc_name_long", "gui.acc_create", "gui.acc_signin", "gui.acc_head_none",
-        "gui.acc_head_none2", "gui.acc_new_title", "gui.acc_have_title", "gui.acc_x_login_in", "gui.acc_x_code_in",
-        "gui.acc_code_label", "gui.acc_code_hint", "gui.acc_ready", "gui.acc_unsecured", "gui.acc_sec_one",
-        "gui.acc_sec_dc_btn", "gui.acc_rec_write", "gui.acc_x_manage", "gui.acc_m_code", "gui.acc_l_login",
+        "gui.acc_title", "gui.acc_name", "gui.acc_name_long", "gui.acc_create", "gui.acc_signin",
+        "gui.acc_head_none2", "gui.acc_new_title", "gui.acc_have_title", "gui.acc_b_login_in", "gui.acc_b_code",
+        "gui.acc_code_label", "gui.acc_code_hint", "gui.acc_ov_online_ok", "gui.acc_ov_sec_no", "gui.acc_sec_one",
+        "gui.acc_sec_dc_btn", "gui.acc_rec_title", "gui.acc_set_title", "gui.acc_m_code_text", "gui.acc_l_login_s",
         "gui.acc_st_both", "gui.acc_st_discord", "gui.acc_st_login", "gui.acc_st_net", "gui.acc_created",
         "gui.mp_card_pilot", "gui.mp_card_nopilot", "gui.acc_mp_new", "gui.acc_mp_go", "gui.mp_sub_acc",
-        "gui.acc_privacy", "gui.acc_err_name", "gui.acc_err_taken", "gui.acc_sum_none",
+        "gui.acc_privacy", "gui.acc_err_name", "gui.acc_err_taken", "gui.acc_sum_none", "gui.acc_ov_title",
     };
+    /* W502: Zustaende der Kontoseite (xl = Login-Formular, xc = Codeformular) */
     static const struct {
-        int srv, have, dc, lg, man, xl, xc, net;
+        int srv, have, dc, lg, xl, xc, net;
         const char *tag;
     } kSt[] = {
-        { 1, 0, 0, 0, 0, 0, 0, 0, "kein Konto" },          { 1, 0, 0, 0, 0, 1, 0, 0, "kein Konto + Login" },
-        { 1, 0, 0, 0, 0, 0, 1, 0, "kein Konto + Code" },   { 1, 1, 0, 0, 0, 0, 0, 0, "ungesichert" },
-        { 1, 1, 0, 0, 0, 1, 0, 0, "ungesichert + Login" }, { 1, 1, 0, 0, 1, 0, 0, 0, "ungesichert + Verwalten" },
-        { 1, 1, 1, 1, 0, 0, 0, 0, "gesichert" },           { 1, 1, 1, 0, 1, 0, 0, 0, "gesichert + Verwalten" },
-        { 1, 1, 0, 1, 1, 1, 0, 0, "Login + Verwalten + Passwort" }, { 1, 1, 0, 0, 1, 0, 0, 1, "nicht erreichbar" },
-        { 0, 0, 0, 0, 0, 0, 0, 0, "nicht eingerichtet" },
+        { 1, 0, 0, 0, 0, 0, 0, "kein Konto" },          { 1, 0, 0, 0, 1, 0, 0, "kein Konto + Login" },
+        { 1, 0, 0, 0, 0, 1, 0, "kein Konto + Code" },   { 1, 1, 0, 0, 0, 0, 0, "ungesichert" },
+        { 1, 1, 0, 0, 1, 0, 0, "ungesichert + Login" }, { 1, 1, 0, 0, 0, 1, 0, "ungesichert + Code" },
+        { 1, 1, 1, 1, 0, 0, 0, "gesichert" },           { 1, 1, 1, 0, 0, 1, 0, "gesichert + Code" },
+        { 1, 1, 0, 1, 1, 1, 0, "Login + Passwort + Code" }, { 1, 1, 0, 0, 0, 0, 1, "nicht erreichbar" },
+        { 0, 0, 0, 0, 0, 0, 0, "nicht eingerichtet" },
     };
     char why[300] = "", keep[16], t[300], tag[80];
     int g0 = g_game, p0 = g_page, c0 = g_confirm_auto, li, s, i;
     lacc_store_t a0 = g_acc;
-    if (!ctl(ID_ACC_X_LOGIN) || !ctl(ID_ACC_X_CODE) || !ctl(ID_ACC_X_MANAGE) || !ctl(ID_LOC_MP_ACC)) {
+    if (!ctl(ID_ACC_X_LOGIN) || !ctl(ID_ACC_X_CODE) || !ctl(ID_ACC_O_SEC) || !ctl(ID_LOC_MP_ACC)) {
         GT_FAIL("75c W418 LAUNCHER-ACCOUNT-UX", "%s", "Elemente fehlen");
         return;
     }
@@ -2947,9 +3479,8 @@ __declspec(noinline) void accux_gui_selftest(int *pass, int *fail)
                 memset(&g_acc_st, 0, sizeof g_acc_st);
                 strcpy_s(g_acc_st_err, sizeof g_acc_st_err, "net");
             }
-            g_acc_x_manage = kSt[s].man;
             g_acc_x_login = kSt[s].xl;
-            g_acc_x_code = kSt[s].xc;
+            g_acc_x_code = kSt[s].xc && !(kSt[s].xl && !kSt[s].have); /* kein Konto: ein Formular */
             show_page(P_LNET);
             acc_refresh();
             pump();
@@ -2963,49 +3494,49 @@ __declspec(noinline) void accux_gui_selftest(int *pass, int *fail)
                 break;
             }
             acc_n = accux_gt_accents();
-            want_acc = st == ACCS_NONE || st == ACCS_UNSEC; /* Erstellen bzw. Mit Discord sichern; sonst keiner */
+            /* Erstellen bzw. Mit Discord sichern; Login-Formular statt der Zeilen -> keiner */
+            want_acc = st == ACCS_NONE || (st == ACCS_UNSEC && !kSt[s].xl);
             if (acc_n != want_acc) {
                 _snprintf_s(why, sizeof why, _TRUNCATE, "%s: %d Hauptknoepfe (erwartet %d)", tag, acc_n, want_acc);
                 break;
             }
+            if (!page_texts_fit_tag(why, sizeof why, tag)) { /* W502 */
+                break;
+            }
             switch (st) {
             case ACCS_NONE:
-                if (!acc_gt_vis(ID_ACC_NAME) || !acc_gt_vis(ID_ACC_CREATE) || !acc_gt_vis(ID_ACC_V_DISCORD) ||
-                    !acc_gt_vis(ID_ACC_X_LOGIN) || !acc_gt_vis(ID_ACC_X_CODE) || acc_gt_vis(ID_ACC_X_MANAGE) ||
+                if (!acc_gt_vis(ID_ACC_NAME) || !acc_gt_vis(ID_ACC_CREATE) || !acc_gt_vis(ID_ACC_O_ONLINE) ||
+                    acc_gt_vis(ID_ACC_V_DISCORD) != !(kSt[s].xl || kSt[s].xc) ||
+                    acc_gt_vis(ID_ACC_X_LOGIN) != !(kSt[s].xl || kSt[s].xc) ||
                     acc_gt_vis(ID_ACC_V_RECSHOW) || acc_gt_vis(ID_ACC_V_DELETE) || acc_gt_vis(ID_ACC_V_FORGET) ||
-                    acc_gt_vis(ID_ACC_V_LOGIN) != kSt[s].xl || acc_gt_vis(ID_ACC_V_CODE) != kSt[s].xc ||
+                    acc_gt_vis(ID_ACC_O_LIVE) || acc_gt_vis(ID_ACC_O_SEC) ||
+                    acc_gt_vis(ID_ACC_V_LOGIN) != kSt[s].xl || acc_gt_vis(ID_ACC_V_CODE) != (kSt[s].xc && !kSt[s].xl) ||
                     ui_find(ID_ACC_NAME)->x >= COL2 || ui_find(ID_ACC_V_DISCORD)->x < COL2)
-                    _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Elemente (Neu links, Schon ein Konto rechts)", tag);
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Elemente (Erstellen links, Schon ein Konto rechts)", tag);
                 ui_gettext(ctl(ID_ACC_V_DISCORD), t, sizeof t);
                 if (!why[0] && strcmp(t, LT("gui.acc_discord_login")) != 0)
                     _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Discord '%s'", tag, t);
                 break;
             case ACCS_UNSEC:
-                if (!acc_gt_vis(ID_ACC_V_DISCORD) || !acc_gt_vis(ID_ACC_X_LOGIN) || !acc_gt_vis(ID_ACC_V_RECSHOW) ||
-                    !acc_gt_vis(ID_ACC_V_RECCOPY) || !acc_gt_vis(ID_ACC_X_MANAGE) || acc_gt_vis(ID_ACC_NAME) ||
-                    acc_gt_vis(ID_ACC_X_CODE) || acc_gt_vis(ID_ACC_V_LOGIN) != kSt[s].xl ||
-                    acc_gt_vis(ID_ACC_V_DELETE) != kSt[s].man || acc_gt_vis(ID_ACC_V_CODE) != kSt[s].man)
-                    _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Elemente (eine Karte Sichern)", tag);
-                ui_gettext(ctl(ID_ACC_V_DISCORD), t, sizeof t);
-                if (!why[0] && strcmp(t, LT("gui.acc_sec_dc_btn")) != 0)
-                    _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Discord '%s'", tag, t);
-                break;
             case ACCS_SEC:
             case ACCS_UNK:
-                if (!acc_gt_vis(ID_ACC_X_MANAGE) || acc_gt_vis(ID_ACC_NAME) || acc_gt_vis(ID_ACC_X_CODE) ||
-                    acc_gt_vis(ID_ACC_V_DELETE) != kSt[s].man || acc_gt_vis(ID_ACC_V_FORGET) != kSt[s].man ||
-                    acc_gt_vis(ID_ACC_V_RECSHOW) != kSt[s].man || acc_gt_vis(ID_ACC_V_CODE) != kSt[s].man ||
-                    acc_gt_vis(ID_ACC_X_LOGIN) != kSt[s].man ||
-                    acc_gt_vis(ID_ACC_V_DISCORD) != (kSt[s].man && !kSt[s].dc) ||
-                    acc_gt_vis(ID_ACC_V_LOGIN) != (kSt[s].man && kSt[s].xl))
-                    _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Elemente (kompakt, Verwalten)", tag);
-                if (!why[0] && kSt[s].man) { /* Reihenfolge: Discord, Login, Code, Code einloesen, Abmelden, Loeschen */
-                    acc_geo_t gg;
-                    acc_geo(&gg);
-                    if (!(gg.r_dc < gg.r_lg && gg.r_lg < gg.r_rec && gg.r_rec < gg.r_code && gg.r_code < gg.r_out &&
-                          gg.r_out < gg.r_del && ui_find(ID_ACC_V_DELETE)->y > ui_find(ID_ACC_V_FORGET)->y))
-                        _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Reihenfolge Verwalten", tag);
+                /* Sichern links (Zeilen bzw. Login-Formular), Einstellungen rechts (Knoepfe bzw. Codeformular) */
+                if (acc_gt_vis(ID_ACC_NAME) || acc_gt_vis(ID_ACC_CREATE) ||
+                    acc_gt_vis(ID_ACC_X_LOGIN) != !kSt[s].xl || acc_gt_vis(ID_ACC_V_RECSHOW) != !kSt[s].xl ||
+                    acc_gt_vis(ID_ACC_V_LOGIN) != kSt[s].xl || acc_gt_vis(ID_ACC_V_LGCANCEL) != kSt[s].xl ||
+                    acc_gt_vis(ID_ACC_V_DISCORD) != (!kSt[s].xl && !kSt[s].dc) ||
+                    acc_gt_vis(ID_ACC_X_CODE) != !kSt[s].xc || acc_gt_vis(ID_ACC_V_FORGET) != !kSt[s].xc ||
+                    acc_gt_vis(ID_ACC_V_DELETE) != !kSt[s].xc || acc_gt_vis(ID_ACC_V_CODE) != kSt[s].xc ||
+                    acc_gt_vis(ID_ACC_O_SEC) != (st == ACCS_UNSEC) ||
+                    acc_gt_vis(ID_ACC_O_ONLINE) != (st == ACCS_UNK && netm_get() == NETM_STEEL))
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Elemente (Sichern | Einstellungen)", tag);
+                if (!why[0] && st == ACCS_UNSEC && !kSt[s].xl) {
+                    ui_gettext(ctl(ID_ACC_V_DISCORD), t, sizeof t);
+                    if (strcmp(t, LT("gui.acc_sec_dc_btn")) != 0)
+                        _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Discord '%s'", tag, t);
                 }
+                if (!why[0] && !kSt[s].xc && ui_find(ID_ACC_V_DELETE)->y <= ui_find(ID_ACC_V_FORGET)->y + 36)
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Loeschen nicht abgesetzt", tag);
                 if (!why[0] && kSt[s].net) {
                     COLORREF c = 0;
                     const char *k = acc_unk_text(&c);
@@ -3014,7 +3545,7 @@ __declspec(noinline) void accux_gui_selftest(int *pass, int *fail)
                 }
                 break;
             default: /* nicht eingerichtet: nur der Hinweis */
-                if (acc_gt_vis(ID_ACC_NAME) || acc_gt_vis(ID_ACC_V_DISCORD) || acc_gt_vis(ID_ACC_X_MANAGE) ||
+                if (acc_gt_vis(ID_ACC_NAME) || acc_gt_vis(ID_ACC_V_DISCORD) || acc_gt_vis(ID_ACC_O_ONLINE) ||
                     acc_gt_vis(ID_ACC_X_LOGIN))
                     _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Elemente ohne Dienst", tag);
                 break;
@@ -3050,9 +3581,9 @@ __declspec(noinline) void accux_gui_selftest(int *pass, int *fail)
         ui_settext(ctl(ID_ACC_V_CODE), "abcd efgh jkmn");
         on_command(ID_ACC_V_CODEBTN, BN_CLICKED);
         if (!why[0] && g_acc_try_op != ACC_OP_TRANSFER) strcpy_s(why, sizeof why, "Uebertragungscode");
-        /* mit Konto: Verwalten, Rueckfrage (ersetzt das Konto) - abgelehnt -> kein Auftrag */
+        /* mit Konto: Kontoeinstellungen (Codeformular), Rueckfrage (ersetzt das Konto) - abgelehnt -> kein Auftrag */
         acc_fixture(1, 1, 1, 1, 1);
-        g_acc_x_manage = 1;
+        g_acc_x_code = 1;
         acc_refresh();
         pump();
         g_acc_try_op = 0;
@@ -3126,18 +3657,18 @@ __declspec(noinline) void accux_gui_selftest(int *pass, int *fail)
         if (!why[0] && acc_gt_vis(ID_LOC_MP_ACC)) strcpy_s(why, sizeof why, "Knopf auch mit steelnet sichtbar");
         on_command(ID_NETM0 + nm0, BN_CLICKED);
     }
-    /* 6: Verwalten bleibt in der Sitzung offen (Seitenwechsel), nichts gespeichert */
+    /* 6: W502: offenes Codeformular bleibt in der Sitzung offen (Seitenwechsel), Abbrechen schliesst, nichts gespeichert */
     if (!why[0]) {
         acc_fixture(1, 1, 1, 1, 1);
         show_page(P_LNET);
-        on_command(ID_ACC_X_MANAGE, BN_CLICKED);
+        on_command(ID_ACC_X_CODE, BN_CLICKED);
         on_command(ID_NAVSUB_MATCH, BN_CLICKED);
         on_command(ID_NAVSUB_ACC, BN_CLICKED);
         pump();
-        if (!g_acc_x_manage || !acc_gt_vis(ID_ACC_V_DELETE)) strcpy_s(why, sizeof why, "Verwalten nicht gemerkt");
-        on_command(ID_ACC_X_MANAGE, BN_CLICKED);
+        if (!g_acc_x_code || !acc_gt_vis(ID_ACC_V_CODE)) strcpy_s(why, sizeof why, "Codeformular nicht gemerkt");
+        on_command(ID_ACC_V_CDCANCEL, BN_CLICKED);
         pump();
-        if (!why[0] && (g_acc_x_manage || acc_gt_vis(ID_ACC_V_DELETE))) strcpy_s(why, sizeof why, "Verwalten zuklappen");
+        if (!why[0] && (g_acc_x_code || !acc_gt_vis(ID_ACC_V_DELETE))) strcpy_s(why, sizeof why, "Codeformular abbrechen");
     }
     /* Aufraeumen */
     g_confirm_auto = c0;
@@ -3156,6 +3687,443 @@ __declspec(noinline) void accux_gui_selftest(int *pass, int *fail)
         GT_OK("75c W418 LAUNCHER-ACCOUNT-UX (per state EN/DE: visible elements, one main button, no overlap above the privacy line incl. expanders; no Check name; debounced name check; one code field detects recovery/transfer code, confirm with account; terms without Pilot; Multiplayer card button to the account page; Manage kept per session)");
     } else {
         GT_FAIL("75c W418 LAUNCHER-ACCOUNT-UX", "%s", why);
+    }
+}
+
+/* --- 75d (W487 LIVE-GAMERTAG): Gamertag auf der Kontoseite. Je Zustand (EN + DE) sichtbare Elemente und keine
+ * Ueberlappung (Erstellen mit Gamertag-Feld; Kopf "Gamertag: X"; Gamertag-Karte statt Verwalten, ungesichert,
+ * gesichert, nicht erreichbar, ohne Gamertag), Aufklapper schliessen sich aus, lokale Vorpruefung ohne Netz
+ * (Erstellen und Setzen), gleicher Name/Grenze laut Status, Spieler-Aenderung beendet den Vorschlag, Statustexte
+ * (change_limit mit Datum, unbekannt), Karte Match & network mit Gamertag-Zeile. --- */
+__declspec(noinline) void w487_gt_gui_selftest(int *pass, int *fail)
+{
+    static const struct {
+        int have, dc, lg, gt, net, nogt;
+        const char *tag;
+    } kSt[] = {
+        { 0, 0, 0, 0, 0, 0, "kein Konto" },          { 1, 0, 0, 1, 0, 0, "ungesichert + Gamertag" },
+        { 1, 1, 1, 1, 0, 0, "gesichert + Gamertag" }, { 1, 1, 0, 1, 0, 1, "gesichert ohne Gamertag" },
+        { 1, 0, 0, 1, 1, 0, "nicht erreichbar + Gamertag" }, { 1, 1, 1, 0, 0, 0, "gesichert, Karte zu" },
+    };
+    char why[300] = "", keep[16], t[300], tag[80], w2[300];
+    int g0 = g_game, p0 = g_page, c0 = g_confirm_auto, li, s;
+    lacc_store_t a0 = g_acc;
+    COLORREF c;
+    if (!ctl(ID_ACC_GT) || !ctl(ID_ACC_X_GT) || !ctl(ID_ACC_V_GT) || !ctl(ID_ACC_V_GTBTN)) {
+        GT_FAIL("75d W487 LIVE-GAMERTAG account page", "%s", "Elemente fehlen");
+        return;
+    }
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    g_confirm_auto = 1;
+    g_game = LGAME_LOC;
+    loctab_nav_layout();
+    /* 1: je Zustand (EN + DE) - W502: Gamertag-Karte immer da (mit Konto), Feld ohne Gamertag, sonst Anzeige +
+     * "Aendern"; Aendern offen = Feld + Abbrechen */
+    for (li = 0; li < 2 && !why[0]; li++) {
+        sb_lang_set(li ? "de" : "en");
+        ui_apply_language();
+        for (s = 0; s < (int)(sizeof kSt / sizeof kSt[0]) && !why[0]; s++) {
+            int field, chg;
+            acc_fixture(1, kSt[s].have, kSt[s].dc, kSt[s].lg, 1);
+            if (kSt[s].net) {
+                g_acc_st_ok = 0;
+                memset(&g_acc_st, 0, sizeof g_acc_st);
+                strcpy_s(g_acc_st_err, sizeof g_acc_st_err, "net");
+            }
+            if (kSt[s].nogt) g_acc_st.gamertag[0] = '\0';
+            g_acc_x_gt = kSt[s].gt;
+            show_page(P_LNET);
+            acc_refresh();
+            pump();
+            _snprintf_s(tag, sizeof tag, _TRUNCATE, "%s %s", li ? "de" : "en", kSt[s].tag);
+            if (!accux_gt_layout(why, sizeof why, tag)) break;
+            if (!kSt[s].have) {
+                if (!acc_gt_vis(ID_ACC_GT) || acc_gt_vis(ID_ACC_X_GT) || acc_gt_vis(ID_ACC_V_GT) ||
+                    ui_find(ID_ACC_GT)->y <= ui_find(ID_ACC_NAME)->y || ui_find(ID_ACC_CREATE)->y <= ui_find(ID_ACC_GT)->y)
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Gamertag-Feld beim Erstellen (Lage/Sichtbarkeit)", tag);
+                continue;
+            }
+            field = !kSt[s].net && (kSt[s].nogt || kSt[s].gt);
+            chg = !kSt[s].net && !kSt[s].nogt && !kSt[s].gt;
+            if (acc_gt_vis(ID_ACC_GT) || acc_gt_vis(ID_ACC_V_GT) != field || acc_gt_vis(ID_ACC_V_GTBTN) != field ||
+                acc_gt_vis(ID_ACC_X_GT) != chg || acc_gt_vis(ID_ACC_V_GTCANCEL) != (field && !kSt[s].nogt) ||
+                acc_gt_vis(ID_ACC_O_LIVE) != (!kSt[s].net && kSt[s].nogt) || !acc_gt_vis(ID_ACC_V_DELETE)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Sichtbarkeit Gamertag-Karte", tag);
+                break;
+            }
+            {
+                acc_geo_t gg;
+                acc_geo(&gg);
+                if (field && (ui_find(ID_ACC_V_GT)->y < gg.gt_y || ui_find(ID_ACC_V_GT)->y + 28 > gg.gt_y + gg.gt_h ||
+                              gg.gt_y >= gg.lo_y)) {
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Gamertag-Feld nicht in der Karte direkt unter der Uebersicht", tag);
+                    break;
+                }
+            }
+            if (kSt[s].nogt) {
+                const char *l1 = acc_gt_line1(w2, sizeof w2, &c);
+                if (strcmp(l1, LT("gui.acc_gt_none")) != 0 || c != C_WARN)
+                    _snprintf_s(why, sizeof why, _TRUNCATE, "%s: ohne Gamertag nicht deutlich ('%s')", tag, l1);
+            }
+            if (!why[0] && !page_texts_fit_tag(why, sizeof why, tag)) break;
+        }
+    }
+    sb_lang_set("en");
+    ui_apply_language();
+    /* 2: W502 - "Aendern" oeffnet das Feld in der Karte (Fokus), Abbrechen schliesst und leert es */
+    if (!why[0]) {
+        acc_fixture(1, 1, 1, 1, 1);
+        show_page(P_LNET);
+        acc_refresh();
+        on_command(ID_ACC_X_GT, BN_CLICKED);
+        pump();
+        if (!g_acc_x_gt || !acc_gt_vis(ID_ACC_V_GT) || !acc_gt_vis(ID_ACC_V_GTCANCEL) || acc_gt_vis(ID_ACC_X_GT) ||
+            g_acc_focus_id != ID_ACC_V_GT)
+            strcpy_s(why, sizeof why, "Aendern oeffnet das Feld nicht");
+        ui_settext(ctl(ID_ACC_V_GT), "Iron Wolf");
+        if (g_hwnd) KillTimer(g_hwnd, ACC_GT_TIMER);
+        on_command(ID_ACC_V_GTCANCEL, BN_CLICKED);
+        pump();
+        ui_gettext(ctl(ID_ACC_V_GT), t, sizeof t);
+        if (!why[0] && (g_acc_x_gt || acc_gt_vis(ID_ACC_V_GT) || !acc_gt_vis(ID_ACC_X_GT) || t[0] ||
+                        g_acc_focus_id != ID_ACC_X_GT))
+            strcpy_s(why, sizeof why, "Abbrechen schliesst das Feld nicht");
+        g_acc_st.gt_next = (long long)time(NULL) + 2 * 86400LL; /* gesperrt: Aendern grau, Datum in der Karte */
+        acc_refresh();
+        if (!why[0] && (IsWindowEnabled(ctl(ID_ACC_X_GT)) || !strstr(acc_gt_limit(t, sizeof t), "-")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "gesperrt: Aendern aktiv bzw. ohne Datum ('%s')", t);
+        g_acc_st.gt_next = 0;
+        acc_refresh();
+    }
+    /* 3: Setzen - lokale Vorpruefung, gleicher Name, Grenze laut Status, sonst Auftrag (Testmodus ohne Netz) */
+    if (!why[0]) {
+        acc_fixture(1, 1, 1, 1, 1);
+        g_acc_x_gt = 1;
+        show_page(P_LNET);
+        acc_refresh();
+        g_acc_try_op = 0;
+        ui_settext(ctl(ID_ACC_V_GT), "1 bad");
+        on_command(ID_ACC_V_GTBTN, BN_CLICKED);
+        if (g_acc_try_op || g_acc_gtmsg_id != ID_ACC_V_GT || strcmp(g_acc_gtmsg, LT("gui.acc_gt_rules")) != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "ungueltig: op %d '%s'", g_acc_try_op, g_acc_gtmsg);
+        ui_settext(ctl(ID_ACC_V_GT), "Ace Pilot");
+        on_command(ID_ACC_V_GTBTN, BN_CLICKED);
+        acc_gt_status_text("unchanged", 0, "Ace Pilot", t, sizeof t);
+        if (!why[0] && (g_acc_try_op || strcmp(g_acc_gtmsg, t) != 0))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "gleicher Name: op %d '%s'", g_acc_try_op, g_acc_gtmsg);
+        g_acc_st.gt_next = (long long)time(NULL) + 2 * 86400LL;
+        ui_settext(ctl(ID_ACC_V_GT), "Ace Two");
+        on_command(ID_ACC_V_GTBTN, BN_CLICKED);
+        acc_gt_status_text("change_limit", g_acc_st.gt_next, "Ace Two", t, sizeof t);
+        if (!why[0] && (g_acc_try_op || strcmp(g_acc_gtmsg, t) != 0 || !strstr(t, "-")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Grenze: op %d '%s'", g_acc_try_op, g_acc_gtmsg);
+        g_acc_st.gt_next = 0;
+        on_command(ID_ACC_V_GTBTN, BN_CLICKED);
+        if (!why[0] && g_acc_try_op != ACC_OP_GT_SET) _snprintf_s(why, sizeof why, _TRUNCATE, "Setzen: op %d", g_acc_try_op);
+        /* erster Gamertag: ohne Rueckfrage, ohne Grenze */
+        g_acc_st.gamertag[0] = '\0';
+        g_acc_st.gt_next = (long long)time(NULL) + 86400LL;
+        g_acc_try_op = 0;
+        on_command(ID_ACC_V_GTBTN, BN_CLICKED);
+        if (!why[0] && g_acc_try_op != ACC_OP_GT_SET) strcpy_s(why, sizeof why, "erster Gamertag gesperrt");
+        ui_settext(ctl(ID_ACC_V_GT), "");
+    }
+    /* 4: Erstellen mit Gamertag - ungueltig lokal abgelehnt, sonst Auftrag; Spieler-Aenderung beendet den Vorschlag */
+    if (!why[0]) {
+        acc_fixture(1, 0, 0, 0, 1);
+        show_page(P_LNET);
+        acc_refresh();
+        ui_settext(ctl(ID_ACC_NAME), "Ace Pilot");
+        if (g_hwnd) KillTimer(g_hwnd, ACC_TIMER);
+        if (g_acc_gt_user) strcpy_s(why, sizeof why, "Vorschlag vor der Eingabe beendet");
+        ui_settext(ctl(ID_ACC_GT), "Ace;Pilot");
+        if (!why[0] && !g_acc_gt_user) strcpy_s(why, sizeof why, "Eingabe beendet den Vorschlag nicht");
+        g_acc_try_op = 0;
+        on_command(ID_ACC_CREATE, BN_CLICKED);
+        if (!why[0] && (g_acc_try_op || g_acc_gtmsg_id != ID_ACC_GT))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Erstellen ungueltig: op %d '%s'", g_acc_try_op, g_acc_gtmsg);
+        ui_settext(ctl(ID_ACC_GT), "");
+        if (!why[0] && g_acc_gt_user) strcpy_s(why, sizeof why, "leeres Feld: Vorschlag nicht wieder an");
+        ui_settext(ctl(ID_ACC_GT), "Ace Pilot");
+        on_command(ID_ACC_CREATE, BN_CLICKED);
+        if (!why[0] && g_acc_try_op != ACC_OP_CREATE) _snprintf_s(why, sizeof why, _TRUNCATE, "Erstellen: op %d", g_acc_try_op);
+        if (g_hwnd) KillTimer(g_hwnd, ACC_GT_TIMER);
+        ui_settext(ctl(ID_ACC_NAME), "");
+        ui_settext(ctl(ID_ACC_GT), "");
+        if (g_hwnd) {
+            KillTimer(g_hwnd, ACC_TIMER);
+            KillTimer(g_hwnd, ACC_GT_TIMER);
+        }
+    }
+    /* 5: Statustexte (alle bekannten Codes, change_limit mit Datum, unbekannt = allgemein) */
+    if (!why[0]) {
+        static const char *const kCodes[] = { "ok", "taken", "similar", "reserved", "blocked", "invalid_length",
+                                              "invalid_characters", "change_limit", "unchanged", "off", "unavailable" };
+        int k;
+        for (k = 0; k < (int)(sizeof kCodes / sizeof kCodes[0]) && !why[0]; k++) {
+            acc_gt_status_text(kCodes[k], 1764000000LL, "Ace", t, sizeof t);
+            if (!t[0] || strcmp(t, LT("gui.acc_gt_refused")) == 0 || strstr(t, "%"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "Statustext %s: '%s'", kCodes[k], t);
+        }
+        acc_gt_status_text("change_limit", 1764000000LL, "Ace", t, sizeof t);
+        if (!why[0] && !strstr(t, "2025-11-2")) _snprintf_s(why, sizeof why, _TRUNCATE, "change_limit ohne Datum: '%s'", t);
+        acc_gt_status_text("weird", 0, "Ace", t, sizeof t);
+        if (!why[0] && strcmp(t, LT("gui.acc_gt_refused")) != 0) strcpy_s(why, sizeof why, "unbekannter Status");
+    }
+    /* 6: Karte Match & network (gesichert): Gamertag-Zeile bzw. "nicht gesetzt" (warnfarben), passt */
+    if (!why[0]) {
+        acc_fixture(1, 1, 1, 1, 0);
+        acc_card_gt(t, sizeof t, &c);
+        _snprintf_s(w2, sizeof w2, _TRUNCATE, LT("gui.acc_gt_head"), "Ace Pilot");
+        if (strcmp(t, w2) != 0 || !ui_text_fits(F_TINY, t, 0, 0, COLW - 36 - 188, 28, 1))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Karte: '%s'", t);
+        g_acc_st.gamertag[0] = '\0';
+        if (!why[0] && (strcmp(acc_card_gt(t, sizeof t, &c), LT("gui.acc_gt_card_none")) != 0 || c != C_WARN))
+            strcpy_s(why, sizeof why, "Karte ohne Gamertag");
+    }
+    /* Aufraeumen */
+    g_confirm_auto = c0;
+    g_acc_fixture = 0;
+    g_acc_loaded = 0;
+    g_acc_view = 0;
+    acc_x_reset();
+    g_acc = a0;
+    g_game = g0;
+    loctab_nav_layout();
+    acc_layout();
+    show_page(p0);
+    sb_lang_set(keep);
+    ui_apply_language();
+    if (!why[0]) {
+        GT_OK("75d W487 LIVE-GAMERTAG account page (create with gamertag field, header Gamertag: X, gamertag card instead of Manage per state EN/DE without overlap, expanders exclusive, local check without network for create/set, unchanged/limit from status, typing ends the suggestion, status texts incl. change_limit date, card line)");
+    } else {
+        GT_FAIL("75d W487 LIVE-GAMERTAG account page", "%s", why);
+    }
+}
+
+/* --- 75e (W502 ACCOUNT-PAGE): Kontoseite neu gegliedert. Je Zustand (EN + DE): jedes sichtbare Element liegt in
+ * einer gezeichneten Karte, keine Ueberlappung, nur echte Knoepfe/Felder (keine Textlinks), Karten in der
+ * Reihenfolge Uebersicht -> Gamertag -> Sichern | Einstellungen, Tab-Reihenfolge folgt den Karten, Knoepfe der
+ * Uebersicht in ihrer Zeile, alle Texte passen. Spruenge der Uebersicht (Gamertag waehlen -> Feld + Hervorhebung,
+ * Konto sichern -> Discord, Konto erstellen -> Name, Erneut versuchen -> Statusabfrage), Einsprung
+ * acc_open_gamertag() von einer anderen Seite (mit/ohne Gamertag, ohne Konto). --- */
+static int w502_card_of(const uictl_t *u, const RECT *r, const int *k, int n)
+{
+    int i;
+    for (i = 0; i < n; i++) {
+        if (u->x >= r[i].left + 4 && u->x + u->w <= r[i].right - 4 && u->y >= r[i].top + 4 &&
+            u->y + u->h_ <= r[i].bottom - 4) {
+            return i;
+        }
+    }
+    (void)k;
+    return -1;
+}
+
+static int w502_check_page(char *why, size_t cap, const char *tag)
+{
+    RECT r[8];
+    int k[8], n = acc_page_cards(r, k, 8), i, last = -1, j;
+    acc_geo_t g;
+    acc_geo(&g);
+    for (j = 1; j < n; j++) { /* Reihenfolge der Karten: oben nach unten, links nach rechts, ohne Ueberlappung */
+        if (r[j].top < r[j - 1].top || (r[j].top == r[j - 1].top && r[j].left < r[j - 1].right) ||
+            (r[j].top > r[j - 1].top && r[j].top < r[j - 1].bottom)) {
+            _snprintf_s(why, cap, _TRUNCATE, "%s: Karten %d/%d Reihenfolge/Ueberlappung", tag, j - 1, j);
+            return 0;
+        }
+        if (r[j].bottom > ACC_PRIV_Y - 4) {
+            _snprintf_s(why, cap, _TRUNCATE, "%s: Karte %d reicht in die Datenschutzzeile", tag, j);
+            return 0;
+        }
+    }
+    for (i = 0; i < g_ui_n; i++) {
+        uictl_t *u = &g_ui[i];
+        int c;
+        if (u->parent != g_hwnd || u->page != P_LNET || !IsWindowVisible(u->h)) {
+            continue;
+        }
+        if (u->id >= ID_NAVSUB_MATCH && u->id <= ID_NAVSUB_ACC) {
+            continue; /* Leiste */
+        }
+        if (u->kind != K_BTN && u->kind != K_ACCENT && u->kind != K_EDIT) {
+            _snprintf_s(why, cap, _TRUNCATE, "%s: Element %d ist kein Knopf/Feld (Art %d)", tag, u->id, u->kind);
+            return 0;
+        }
+        c = w502_card_of(u, r, k, n);
+        if (c < 0) {
+            _snprintf_s(why, cap, _TRUNCATE, "%s: Element %d (%d,%d %dx%d) liegt in keiner Karte", tag, u->id, u->x, u->y,
+                        u->w, u->h_);
+            return 0;
+        }
+        if (c < last) { /* Tab-Reihenfolge = Erzeugungsreihenfolge, folgt den Karten */
+            _snprintf_s(why, cap, _TRUNCATE, "%s: Tab-Reihenfolge springt zurueck (Element %d)", tag, u->id);
+            return 0;
+        }
+        last = c;
+        if (u->id == ID_ACC_O_ONLINE || u->id == ID_ACC_O_LIVE || u->id == ID_ACC_O_SEC) {
+            int row = u->id == ID_ACC_O_ONLINE ? 0 : u->id == ID_ACC_O_LIVE ? 1 : 2;
+            if (k[c] != ACC_CARD_OV || u->y != g.ov_y + 42 + row * 32 + 2 || u->x + u->w != CX0 + CW - 18) {
+                _snprintf_s(why, cap, _TRUNCATE, "%s: Knopf %d nicht rechts in seiner Zeile der Uebersicht", tag, u->id);
+                return 0;
+            }
+        }
+    }
+    if (!accux_gt_layout(why, cap, tag)) {
+        return 0;
+    }
+    return page_texts_fit_tag(why, cap, tag);
+}
+
+__declspec(noinline) void w502_accpage_gui_selftest(int *pass, int *fail)
+{
+    static const struct {
+        int have, dc, lg, nogt, lock, xg, xl, xc, net, gtoff;
+        const char *tag;
+    } kSt[] = {
+        { 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, "kein Konto" },          { 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, "kein Konto + Login" },
+        { 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, "kein Konto + Code" },   { 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, "ungesichert ohne Gamertag" },
+        { 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, "ungesichert mit Gamertag" }, { 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, "Discord" },
+        { 1, 0, 1, 0, 0, 0, 0, 0, 0, 0, "Login" },               { 1, 1, 1, 0, 1, 0, 0, 0, 0, 0, "gesperrt (7 Tage)" },
+        { 1, 1, 1, 0, 0, 1, 0, 0, 0, 0, "Gamertag aendern" },    { 1, 0, 0, 0, 0, 0, 0, 0, 1, 0, "nicht erreichbar" },
+        { 1, 1, 0, 1, 0, 0, 0, 0, 0, 1, "ohne Gamertags" },      { 1, 0, 0, 1, 0, 0, 1, 1, 0, 0, "Login + Code offen" },
+    };
+    static const int kSz[3] = { LLAY_SZ_COMPACT, LLAY_SZ_NORMAL, LLAY_SZ_LARGE };
+    char why[300] = "", keep[16], tag[96], t[200];
+    int g0 = g_game, p0 = g_page, c0 = g_confirm_auto, li, s, nm0 = netm_get(), sz;
+    int id0 = g_lay.id, sz0 = g_lay.size, shot0 = g_o.shot;
+    lacc_store_t a0 = g_acc;
+    if (!ctl(ID_ACC_O_ONLINE) || !ctl(ID_ACC_O_LIVE) || !ctl(ID_ACC_O_SEC) || !ctl(ID_ACC_V_GTCANCEL) ||
+        !ctl(ID_ACC_V_LGCANCEL) || !ctl(ID_ACC_V_CDCANCEL)) {
+        GT_FAIL("75e W502 ACCOUNT-PAGE", "%s", "Elemente fehlen");
+        return;
+    }
+    strcpy_s(keep, sizeof keep, sb_lang_code());
+    g_confirm_auto = 1;
+    g_game = LGAME_LOC;
+    loctab_nav_layout();
+    /* 1: je Groesse (Kompakt/Normal/Gross, ohne Speichern), Sprache (EN + DE) und Zustand */
+    g_o.shot = 2;
+    for (sz = 0; sz < 3 && !why[0]; sz++)
+    for (li = 0; li < 2 && !why[0]; li++) {
+        lay_switch(LLAY_A, kSz[sz]);
+        sb_lang_set(li ? "de" : "en");
+        ui_apply_language();
+        for (s = 0; s < (int)(sizeof kSt / sizeof kSt[0]) && !why[0]; s++) {
+            acc_fixture(1, kSt[s].have, kSt[s].dc, kSt[s].lg, 1);
+            if (kSt[s].net) {
+                g_acc_st_ok = 0;
+                memset(&g_acc_st, 0, sizeof g_acc_st);
+                strcpy_s(g_acc_st_err, sizeof g_acc_st_err, "net");
+            }
+            if (kSt[s].nogt) g_acc_st.gamertag[0] = '\0';
+            if (kSt[s].gtoff) strcpy_s(g_acc_st.gt_state, sizeof g_acc_st.gt_state, "off");
+            if (kSt[s].lock) g_acc_st.gt_next = (long long)time(NULL) + 3 * 86400LL;
+            g_acc_x_gt = kSt[s].xg;
+            g_acc_x_login = kSt[s].xl;
+            g_acc_x_code = kSt[s].xc && !(kSt[s].xl && !kSt[s].have);
+            show_page(P_LNET);
+            acc_refresh();
+            pump();
+            _snprintf_s(tag, sizeof tag, _TRUNCATE, "%s %s %s", sz == 0 ? "kompakt" : sz == 1 ? "normal" : "gross",
+                        li ? "de" : "en", kSt[s].tag);
+            if (!w502_check_page(why, sizeof why, tag)) break;
+            /* Uebersicht: Knopf genau dort, wo etwas fehlt */
+            if (kSt[s].have && (acc_gt_vis(ID_ACC_O_LIVE) != (kSt[s].nogt && !kSt[s].gtoff && !kSt[s].net) ||
+                                acc_gt_vis(ID_ACC_O_SEC) != (!kSt[s].dc && !kSt[s].lg && !kSt[s].net))) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Knoepfe der Uebersicht", tag);
+                break;
+            }
+            if (kSt[s].lock && (IsWindowEnabled(ctl(ID_ACC_X_GT)) || !acc_gt_vis(ID_ACC_X_GT))) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Aendern trotz Sperre aktiv", tag);
+                break;
+            }
+        }
+    }
+    lay_switch(id0, sz0);
+    g_o.shot = shot0;
+    sb_lang_set("en");
+    ui_apply_language();
+    /* 2: Spruenge der Uebersicht (Fokus nur gemerkt, im Selbsttest kein SetFocus) */
+    if (!why[0]) {
+        acc_fixture(1, 1, 0, 0, 1);
+        g_acc_st.gamertag[0] = '\0';
+        show_page(P_LNET);
+        acc_refresh();
+        g_acc_focus_id = 0;
+        on_command(ID_ACC_O_LIVE, BN_CLICKED);
+        if (g_acc_focus_id != ID_ACC_V_GT || g_acc_hl != ACC_CARD_GT || !acc_gt_vis(ID_ACC_V_GT))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Gamertag waehlen: Fokus %d, Karte %d", g_acc_focus_id, g_acc_hl);
+        g_acc_x_login = 1;
+        on_command(ID_ACC_O_SEC, BN_CLICKED);
+        if (!why[0] && (g_acc_focus_id != ID_ACC_V_DISCORD || g_acc_hl != ACC_CARD_SEC || g_acc_x_login ||
+                        !acc_gt_vis(ID_ACC_V_DISCORD)))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Konto sichern: Fokus %d, Karte %d", g_acc_focus_id, g_acc_hl);
+        acc_hl_tick();
+        if (!why[0] && g_acc_hl) strcpy_s(why, sizeof why, "Hervorhebung endet nicht");
+        acc_fixture(1, 0, 0, 0, 1);
+        acc_refresh();
+        on_command(ID_ACC_O_ONLINE, BN_CLICKED);
+        if (!why[0] && (g_acc_focus_id != ID_ACC_NAME || g_acc_hl != ACC_CARD_NEW))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Konto erstellen: Fokus %d, Karte %d", g_acc_focus_id, g_acc_hl);
+        /* Status unbekannt mit steelnet: Erneut versuchen stoesst die vorhandene Statusabfrage an */
+        acc_fixture(1, 1, 0, 0, 1);
+        g_acc_st_ok = 0;
+        strcpy_s(g_acc_st_err, sizeof g_acc_st_err, "net");
+        if (nm0 != NETM_STEEL) on_command(ID_NETM0 + NETM_STEEL, BN_CLICKED);
+        show_page(P_LNET);
+        acc_refresh();
+        pump();
+        ui_gettext(ctl(ID_ACC_O_ONLINE), t, sizeof t);
+        g_acc_try_op = 0;
+        on_command(ID_ACC_O_ONLINE, BN_CLICKED);
+        if (!why[0] && (!acc_gt_vis(ID_ACC_O_ONLINE) || strcmp(t, LT("gui.acc_ov_retry")) != 0 ||
+                        g_acc_try_op != ACC_OP_STATUS))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Erneut versuchen: '%s' op %d", t, g_acc_try_op);
+        if (nm0 != NETM_STEEL) on_command(ID_NETM0 + nm0, BN_CLICKED);
+    }
+    /* 3: Einsprung acc_open_gamertag() von einer anderen Seite (W501: Match ohne Gamertag) */
+    if (!why[0]) {
+        acc_fixture(1, 1, 1, 1, 0);
+        g_acc_st.gamertag[0] = '\0';
+        show_page(P_PLAY);
+        pump();
+        g_acc_focus_id = 0;
+        acc_open_gamertag();
+        pump();
+        if (g_page != P_LNET || !g_acc_view || !acc_sub_active() || g_acc_focus_id != ID_ACC_V_GT ||
+            g_acc_hl != ACC_CARD_GT || !acc_gt_vis(ID_ACC_V_GT))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Einsprung ohne Gamertag: Seite %d Fokus %d", g_page, g_acc_focus_id);
+        acc_fixture(1, 1, 1, 1, 0);
+        show_page(P_PLAY);
+        acc_open_gamertag();
+        pump();
+        if (!why[0] && (g_acc_focus_id != ID_ACC_X_GT || !acc_gt_vis(ID_ACC_X_GT) || acc_gt_vis(ID_ACC_V_GT)))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Einsprung mit Gamertag: Fokus %d", g_acc_focus_id);
+        acc_fixture(1, 0, 0, 0, 0);
+        show_page(P_PLAY);
+        acc_open_gamertag();
+        pump();
+        if (!why[0] && (g_page != P_LNET || g_acc_focus_id != ID_ACC_NAME || g_acc_hl != ACC_CARD_NEW))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Einsprung ohne Konto: Fokus %d", g_acc_focus_id);
+    }
+    /* Aufraeumen */
+    g_confirm_auto = c0;
+    g_acc_fixture = 0;
+    g_acc_loaded = 0;
+    g_acc_view = 0;
+    acc_x_reset();
+    g_acc = a0;
+    g_game = g0;
+    loctab_nav_layout();
+    acc_layout();
+    show_page(p0);
+    sb_lang_set(keep);
+    ui_apply_language();
+    if (!why[0]) {
+        GT_OK("75e W502 ACCOUNT-PAGE (per state EN/DE: every element inside a drawn card, no overlap, buttons/fields only, card order overview -> gamertag -> secure | settings, tab order follows the cards, overview buttons in their row, all texts fit; jumps: choose gamertag/secure/create/try again; entry acc_open_gamertag from another page with/without gamertag and without account)");
+    } else {
+        GT_FAIL("75e W502 ACCOUNT-PAGE", "%s", why);
     }
 }
 
@@ -6340,6 +7308,27 @@ __declspec(noinline) void hub_gui_selftest(int *pass, int *fail)
                             lacc_lobbies_parse("{\"lobbies\":[{\"host\":\"A\"", &lb) == 0))
                 strcpy_s(why, sizeof why, "Parser: kaputte Antwort angenommen");
         }
+        if (!why[0]) { /* W485 LIVE-QOS: Gruppe "live" getrennt (Eintraege tragen selbst "live":true), Chatraum, Rest */
+            static const char kLive[] =
+                "{\"ok\":true,\"lobbies\":[{\"host\":\"A\",\"play_mode\":\"sim\",\"players\":1,\"max_players\":2,"
+                "\"state\":\"open\"}],\"more\":0,\"live\":[{\"host\":\"LiveA\",\"game\":\"loc\",\"kind\":\"match\","
+                "\"players\":2,\"max_players\":10,\"state\":\"open\",\"live\":true},{\"host\":\"LiveB\",\"kind\":\"chat\","
+                "\"players\":1,\"max_players\":4,\"state\":\"started\",\"live\":true},{\"host\":\"\",\"players\":1,"
+                "\"max_players\":2}],\"live_more\":4}";
+            memset(&lb, 0, sizeof lb);
+            if (lacc_lobbies_parse(kLive, &lb) != 0 || lb.n != 1 || lb.nlive != 2 || lb.live_more != 4 ||
+                strcmp(lb.lv[0].host, "LiveA") || lb.lv[0].chat || lb.lv[0].started || lb.lv[0].players != 2 ||
+                strcmp(lb.lv[1].host, "LiveB") || !lb.lv[1].chat || !lb.lv[1].started || strcmp(lb.l[0].host, "A"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W485 Live-Gruppe: n %d nlive %d live_more %d", lb.n, lb.nlive,
+                            lb.live_more);
+            memset(&lb, 0, sizeof lb);
+            if (!why[0] && (lacc_lobbies_parse(kBody[2], &lb) != 0 || lb.nlive != 0 || lb.live_more != 0))
+                strcpy_s(why, sizeof why, "W485: aelterer Server ohne live -> leer");
+            memset(&lb, 0, sizeof lb);
+            if (!why[0] && (lacc_lobbies_parse("{\"lobbies\":[],\"more\":0,\"live\":[{\"host\":\"Q\"", &lb) != 0 ||
+                            lb.nlive != 0))
+                strcpy_s(why, sizeof why, "W485: kaputte Live-Gruppe darf die Liste nicht kippen");
+        }
     }
     /* 6: Seite mit 0/1/6 Lobbys (und ohne Liste/Fehler) ohne Ueberlappung in Layout A Normal/Gross */
     for (k = 0; k < 9 && !why[0]; k++) {
@@ -6827,5 +7816,394 @@ __declspec(noinline) void mppolish_gui_selftest(int *pass, int *fail)
               "wie steelnet > Info; Spiel-Reiter ohne Unterstreichung in Optionen/steelnet)");
     } else {
         GT_FAIL("77f W473 LAUNCHER-MP-POLISH", "%s", why);
+    }
+}
+
+/* W486 SB-GFX-OPTIONS (Fall 74h, GitHub #98): jedes Auswahlfeld der Grafikseite (Karten rechts) in SB und LoC je
+ * Preset einmal aendern wie mit der Maus. Die Auswahl laeuft durch die echte user32-Kette des Kombifelds: Zeile der
+ * Liste setzen, die Liste meldet LBN_SELCHANGE an das Kombifeld, user32 sendet daraufhin CBN_SELENDOK, CBN_CLOSEUP
+ * und CBN_SELCHANGE per WM_COMMAND an das Hauptfenster (keine Eingabe, kein Fokus, Fenster unsichtbar). In 0.5.0 lief
+ * nach CBN_SELENDOK die Regelauswertung mit gfx_sync_ui und setzte das Feld auf den alten Wert zurueck; CBN_SELCHANGE
+ * las danach den alten Wert. Pruefung je Feld: Auswahl bleibt, Preset springt auf Custom (Cockpit gehoert nicht zum
+ * Preset: Preset bleibt), Speichern + Neustart zeigt den Wert. user.cfg/user_loc.cfg = Temp-Dateien (g_ucfg_test). */
+#define W486_NIDS 8
+static const int kW486Ids[W486_NIDS] = { ID_MONFX, ID_CHIDE, ID_GFX_LIGHT, ID_GFX_SHADOW, ID_GFX_SOFT, ID_GFX_FX,
+                                         ID_AAMODE, ID_GFX_TEX };
+static int g_w486_seq[16], g_w486_nseq, g_w486_id;
+
+static LRESULT CALLBACK w486_spy(HWND h, UINT msg, WPARAM wp, LPARAM lp, UINT_PTR sid, DWORD_PTR ref)
+{
+    LRESULT r;
+    int note = msg == WM_COMMAND && (int)LOWORD(wp) == g_w486_id ? (int)HIWORD(wp) : -1;
+    (void)sid;
+    (void)ref;
+    if (note >= 0 && g_w486_nseq < 16) {
+        g_w486_seq[g_w486_nseq++] = note;
+    }
+    r = DefSubclassProc(h, msg, wp, lp);
+    if (note == CBN_SELENDOK) { /* offene Liste: user32 schliesst sie zwischen SELENDOK und SELCHANGE (CBN_CLOSEUP) */
+        SendMessageW(h, WM_COMMAND, MAKEWPARAM(g_w486_id, CBN_CLOSEUP), lp);
+    }
+    return r;
+}
+
+/* Auswahl wie mit der Maus (Liste oeffnet, Zeile, Liste schliesst); Rueckgabe: Auswahl danach */
+static int w486_pick_real(int id, int sel)
+{
+    HWND c = ctl(id), par;
+    COMBOBOXINFO ci;
+    memset(&ci, 0, sizeof ci);
+    ci.cbSize = sizeof ci;
+    if (!c || !GetComboBoxInfo(c, &ci) || !ci.hwndList) {
+        return -2;
+    }
+    par = GetParent(c);
+    g_w486_id = id;
+    g_w486_nseq = 0;
+    SetWindowSubclass(par, w486_spy, 486, 0);
+    SendMessageW(par, WM_COMMAND, MAKEWPARAM(id, CBN_DROPDOWN), (LPARAM)c); /* Liste oeffnet */
+    SendMessageW(ci.hwndList, LB_SETCURSEL, (WPARAM)sel, 0);                /* Zeile unter der Maus */
+    SendMessageW(c, WM_COMMAND, MAKEWPARAM(GetDlgCtrlID(ci.hwndList), LBN_SELCHANGE), (LPARAM)ci.hwndList);
+    pump();
+    RemoveWindowSubclass(par, w486_spy, 486);
+    return ComboBox_GetCurSel(c);
+}
+
+static int w486_saw(int code)
+{
+    int i;
+    for (i = 0; i < g_w486_nseq; i++) {
+        if (g_w486_seq[i] == code) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static const char *w486_name(int id)
+{
+    return id == ID_MONFX ? "Monitor effect" : id == ID_CHIDE ? "Cockpit" : id == ID_GFX_LIGHT ? "World lighting"
+           : id == ID_GFX_SHADOW ? "Shadows" : id == ID_GFX_SOFT ? "Soft shadows" : id == ID_GFX_FX ? "Effects"
+           : id == ID_AAMODE ? "Anti-aliasing" : "Textures";
+}
+
+/* Neustart des aktiven Spiels (SB wie app_load_effective, LoC wie pergame_load) */
+static void w486_reload(const char *cfg)
+{
+    if (g_game == LGAME_LOC) {
+        pergame_load(LGAME_LOC, &g_s);
+    } else {
+        lcfg_defaults(&g_s);
+        g_s.gfx_preset_rev = 0;
+        lcfg_load_file(cfg, &g_s);
+        lcfg_gfx_migrate_fps(&g_s);
+        (void)lcfg_gfx_migrate_remaster(&g_s);
+    }
+    disk_base_sync(&g_s);
+    ui_from_settings(&g_s);
+    show_page(P_GFX);
+    pump();
+}
+
+/* Ein Feld im Preset p aendern, Custom pruefen, speichern, neu laden, Anzeige pruefen, Preset wieder setzen */
+static void w486_field(int p, int id, const char *cfg, const char *tag, char *why, size_t cap, int *done)
+{
+    HWND c = ctl(id);
+    lgp_mask_t lock = gfx_lock_now();
+    launcher_settings_t r0, r1;
+    int cur, n, want, got, i, m, sel[W486_NIDS], chk;
+    char t[600];
+    if (!c || !ui_visible_on(ui_find(id), P_GFX)) {
+        return; /* nicht auf der Seite (z. B. Texturen) */
+    }
+    if (!IsWindowEnabled(c)) {
+        tip_text(id, t, sizeof t);
+        if (!t[0]) {
+            _snprintf_s(why, cap, _TRUNCATE, "%s %s: grau ohne Begruendung", tag, w486_name(id));
+        }
+        return; /* gesperrt mit Grund (LoC-Sperre W402, Regel R15/R16) */
+    }
+    w476_now(&r0);
+    cur = ComboBox_GetCurSel(c);
+    n = id == ID_GFX_FX ? 3 : ComboBox_GetCount(c); /* Effekte: ohne Eintrag "Custom" */
+    want = (cur + 1) % n;
+    got = w486_pick_real(id, want);
+    w476_now(&r1);
+    m = lcfg_gfx_match(&r1, lock);
+    /* Erwartetes Preset: Custom (bzw. ein anderes Preset mit genau diesen Werten). Nicht im Preset sind Cockpit
+     * (W268/W319) und die Monitor-Staerken Grain/Interference (W105; im Preset nur an/aus = monitor_fx, W252). */
+    if (id == ID_CHIDE || (id == ID_MONFX && cur < 3 && want < 3)) {
+        chk = p;
+    } else {
+        chk = (m != LGP_CUSTOM && m != p && lcfg_gfx_visible(m)) ? m : LGP_CUSTOM;
+    }
+    if (got != want) {
+        _snprintf_s(why, cap, _TRUNCATE, "%s %s: Auswahl %d nicht uebernommen (zeigt %d, Folge %d Meldungen)", tag,
+                    w486_name(id), want, got, g_w486_nseq);
+    } else if (!w486_saw(CBN_SELCHANGE)) {
+        _snprintf_s(why, cap, _TRUNCATE, "%s %s: keine CBN_SELCHANGE-Meldung", tag, w486_name(id));
+    } else if (memcmp(&r0, &r1, sizeof r0) == 0) {
+        _snprintf_s(why, cap, _TRUNCATE, "%s %s: Wert unveraendert", tag, w486_name(id));
+    } else if (!ui_checked(ID_GP0 + chk) || (chk != p && ui_checked(ID_GP0 + p)) ||
+               (id != ID_CHIDE && lcfg_gfx_preset(&r1, lock) != chk)) {
+        _snprintf_s(why, cap, _TRUNCATE, "%s %s: Preset nicht %d (Custom %d, alt %d)", tag, w486_name(id), chk,
+                    ui_checked(ID_GP0 + LGP_CUSTOM), ui_checked(ID_GP0 + p));
+    }
+    for (i = 0; i < W486_NIDS; i++) {
+        sel[i] = ctl(kW486Ids[i]) ? ComboBox_GetCurSel(ctl(kW486Ids[i])) : -1;
+    }
+    if (!why[0]) { /* Speichern, Neustart: Wert und Custom stehen noch da */
+        int rc = g_game == LGAME_LOC ? do_save(0) : w476_save_sb(cfg);
+        if (rc != 0) {
+            _snprintf_s(why, cap, _TRUNCATE, "%s %s: Speichern rc %d", tag, w486_name(id), rc);
+        } else {
+            w486_reload(cfg);
+            for (i = 0; i < W486_NIDS && !why[0]; i++) {
+                int s = ctl(kW486Ids[i]) ? ComboBox_GetCurSel(ctl(kW486Ids[i])) : -1;
+                if (s != sel[i]) {
+                    _snprintf_s(why, cap, _TRUNCATE, "%s %s: nach Neustart %s %d statt %d", tag, w486_name(id),
+                                w486_name(kW486Ids[i]), s, sel[i]);
+                }
+            }
+            if (!why[0] && !ui_checked(ID_GP0 + chk)) {
+                _snprintf_s(why, cap, _TRUNCATE, "%s %s: nach Neustart Preset nicht %d", tag, w486_name(id), chk);
+            }
+        }
+    }
+    g_confirm_auto = 1; /* R14: eigene Werte ersetzen */
+    if (!ui_checked(ID_GP0 + p)) {
+        on_command(ID_GP0 + p, BN_CLICKED);
+        pump();
+    }
+    if (ComboBox_GetCurSel(c) != cur) {
+        (void)w486_pick_real(id, cur); /* nicht im Preset (Cockpit, Monitor-Staerke): Feld selbst zurueck */
+    }
+    if (!why[0] && (!ui_checked(ID_GP0 + p) || ComboBox_GetCurSel(c) != cur)) {
+        _snprintf_s(why, cap, _TRUNCATE, "%s %s: Preset %d nicht wieder gesetzt", tag, w486_name(id), p);
+    }
+    (*done)++;
+}
+
+__declspec(noinline) void w486_gui_selftest(int *pass, int *fail)
+{
+    static const int kSbP[3] = { LGP_ORIGINAL, LGP_PERFORMANCE, LGP_CLEAR };
+    static const int kLocP[3] = { LGP_ORIGINAL, LGP_ENHANCED, LGP_VIVID };
+    static const int kSbNeed[6] = { ID_MONFX, ID_CHIDE, ID_GFX_LIGHT, ID_GFX_SHADOW, ID_GFX_FX, ID_AAMODE };
+    char why[300] = "", tmp[1024], cfg[1200], lcf[1200], seq[80] = "";
+    launcher_settings_t keep_s = g_s, keep_base = g_disk_base;
+    int keep_ok = g_disk_base_ok, keep_game = g_game, keep_page = g_page, keep_conf = g_confirm_auto;
+    int keep_adv = g_show_adv, g, i, k, done = 0;
+    lgame_state_t keep_loc = g_loc;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw486_user_%lu.cfg", tmp, GetCurrentProcessId());
+    lgame_cfg_path(cfg, LGAME_LOC, lcf, sizeof lcf);
+    write_file(cfg, "[display]\nwidth=1280\nlauncher_pergame=1\nlauncher_loc169=1\n");
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    u8_DeleteFile(lcf);
+    memset(g_pg_ok, 0, sizeof g_pg_ok);
+    g_loc.loc_widescreen = LGAME_WIDE_169;
+    g_loc.loc_sblook = 0;
+    g_game = LGAME_SB;
+    g_show_adv = 1; /* Feinregler sichtbar: auch "Weiche Schatten" (ohne launcher_ui.cfg zu schreiben) */
+    lcfg_defaults(&g_s);
+    disk_base_sync(&g_s);
+    ui_from_settings(&g_s);
+    lay_gfx_apply();
+    show_page(P_GFX);
+    pump();
+    for (g = 0; g < 2 && !why[0]; g++) {
+        if (g == 1) {
+            loctab_set_game(LGAME_LOC);
+            show_page(P_GFX);
+            pump();
+        }
+        for (i = 0; i < 3 && !why[0]; i++) {
+            int p = g ? kLocP[i] : kSbP[i];
+            char tag[40];
+            _snprintf_s(tag, sizeof tag, _TRUNCATE, "%s P%d", g ? "LoC" : "SB", p);
+            g_confirm_auto = 1;
+            if (!ui_checked(ID_GP0 + p)) {
+                on_command(ID_GP0 + p, BN_CLICKED);
+                pump();
+            }
+            if (!ui_checked(ID_GP0 + p)) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Preset nicht waehlbar", tag);
+                break;
+            }
+            if (!g && p == LGP_ORIGINAL) { /* #98: in SB Original sind alle sechs Felder frei */
+                for (k = 0; k < 6 && !why[0]; k++) {
+                    HWND c = ctl(kSbNeed[k]);
+                    if (!c || !ui_visible_on(ui_find(kSbNeed[k]), P_GFX) || !IsWindowEnabled(c))
+                        _snprintf_s(why, sizeof why, _TRUNCATE, "%s %s: nicht sichtbar/frei", tag,
+                                    w486_name(kSbNeed[k]));
+                }
+            }
+            if (g && (IsWindowEnabled(ctl(ID_MONFX)) || IsWindowEnabled(ctl(ID_CHIDE)))) {
+                _snprintf_s(why, sizeof why, _TRUNCATE, "%s: Monitor/Cockpit in LoC nicht gesperrt (W402)", tag);
+            }
+            for (k = 0; k < W486_NIDS && !why[0]; k++) {
+                w486_field(p, kW486Ids[k], cfg, tag, why, sizeof why, &done);
+                if (!seq[0] && g_w486_nseq > 0) { /* beobachtete Folge einmal ausgeben (Beleg) */
+                    int j;
+                    for (j = 0; j < g_w486_nseq; j++) {
+                        char x[8];
+                        _snprintf_s(x, sizeof x, _TRUNCATE, "%s%d", j ? "," : "", g_w486_seq[j]);
+                        strcat_s(seq, sizeof seq, x);
+                    }
+                }
+            }
+        }
+    }
+    if (!why[0] && done < 24) {
+        _snprintf_s(why, sizeof why, _TRUNCATE, "nur %d Felder geprueft", done);
+    }
+    printf("     (74h: %d Felder geaendert, Meldungen je Auswahl %s)\n", done, seq);
+    if (g_game == LGAME_LOC) {
+        loctab_set_game(LGAME_SB);
+    }
+    u8_DeleteFile(cfg);
+    u8_DeleteFile(lcf);
+    g_ucfg_test[0] = '\0';
+    g_loc = keep_loc;
+    memset(g_pg_ok, 0, sizeof g_pg_ok);
+    g_confirm_auto = keep_conf;
+    g_show_adv = keep_adv;
+    g_game = keep_game;
+    g_s = keep_s;
+    g_disk_base = keep_base;
+    g_disk_base_ok = keep_ok;
+    ui_from_settings(&g_s);
+    lay_gfx_apply();
+    loctab_nav_layout();
+    show_page(keep_page);
+    ui_apply_rules();
+    if (!why[0]) {
+        GT_OK("74h W486 GFX-OPTIONS (#98: jedes Auswahlfeld der Grafikseite per echter Kombifeld-Kette geaendert, SB "
+              "Original/Performance/Clear view + LoC Original/Enhanced/Vivid: Auswahl bleibt, Preset -> Custom, "
+              "Speichern + Neustart zeigt den Wert, LoC-Sperren bleiben)");
+    } else {
+        GT_FAIL("74h W486 GFX-OPTIONS", "%s", why);
+    }
+}
+
+/* W496 NET-TELEMETRY (Fall 77g): Frage "anonyme Netzwerkstatistik" (einmal, Ja = Standard, Esc/X = Nein und hoechstens
+ * noch einmal fragen), Schalter auf der Netzwerk-Seite, net_report im LoC-Start nur online + Zustimmung. Temp-user.cfg. */
+static int w496_has(const char *path, const char *needle)
+{
+    char b[4096] = "";
+    FILE *f = NULL;
+    size_t n;
+    if (u8_fopen_s(&f, path, "rb") != 0 || !f) return 0;
+    n = fread(b, 1, sizeof b - 1, f);
+    fclose(f);
+    b[n] = 0;
+    return strstr(b, needle) != NULL;
+}
+__declspec(noinline) void w496_gui_selftest(int *pass, int *fail)
+{
+    char why[300] = "", tmp[1024], cfg[1200], keep_ucfg[1200], set[200];
+    int keep_on = g_loc_online, keep_fix = g_onl_fix_srv, keep_ask = g_upd_ask, keep_page = g_page;
+    int keep_cfg = g_nrq_cfg, keep_dis = g_nrq_dismiss, keep_open = g_nrq_open, keep_now = g_nrq_asked_now;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(cfg, sizeof cfg, _TRUNCATE, "%sw496_user_%lu.cfg", tmp, GetCurrentProcessId());
+    strcpy_s(keep_ucfg, sizeof keep_ucfg, g_ucfg_test);
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, cfg);
+    g_onl_fix_srv = 1;
+    g_upd_ask = 0;
+    /* 1. Regel */
+    if (!nrq_should_ask(-1, 0, 1, 0) || !nrq_should_ask(-1, 1, 1, 0) || nrq_should_ask(-1, 2, 1, 0) ||
+        nrq_should_ask(0, 0, 1, 0) || nrq_should_ask(1, 0, 1, 0) || nrq_should_ask(-1, 0, 0, 0) || nrq_should_ask(-1, 0, 1, 1))
+        strcpy_s(why, sizeof why, "Regel nrq_should_ask");
+    /* 2. nie beantwortet + steelnet -> Dialog, nur seine Knoepfe; ohne Antwort net_report=0 */
+    if (!why[0]) {
+        write_file(cfg, "launcher_loc_online=1\n");
+        onl_load();
+        nrq_load();
+        g_nrq_asked_now = 0;
+        nrq_eval();
+        pump();
+        set[0] = 0;
+        nrq_set_append(set, sizeof set, 1);
+        if (!g_nrq_open || !IsWindowVisible(ctl(ID_NRQ_YES)) || !IsWindowVisible(ctl(ID_NRQ_NO)) ||
+            (ctl(ID_START_BIG) && IsWindowVisible(ctl(ID_START_BIG))))
+            strcpy_s(why, sizeof why, "Dialog nicht offen bzw. nicht modal");
+        else if (strcmp(set, "net_report=0") != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "ohne Antwort gesendet: %s", set);
+    }
+    /* 3. Nein danke */
+    if (!why[0]) {
+        on_command(ID_NRQ_NO, BN_CLICKED);
+        pump();
+        if (g_nrq_open || g_nrq_cfg != 0 || IsWindowVisible(ctl(ID_NRQ_YES)) || !w496_has(cfg, "launcher_net_report=0"))
+            strcpy_s(why, sizeof why, "Nein: Zustand/Datei");
+        nrq_load();
+        if (!why[0] && (g_nrq_cfg != 0 || nrq_should_ask(g_nrq_cfg, g_nrq_dismiss, 1, 0)))
+            strcpy_s(why, sizeof why, "Nein: nach Neustart erneut gefragt");
+    }
+    /* 4. Esc/X ohne Antwort: Nein fuer jetzt, hoechstens noch einmal fragen */
+    if (!why[0]) {
+        int r;
+        write_file(cfg, "launcher_loc_online=1\n");
+        for (r = 0; r < 3 && !why[0]; r++) {
+            nrq_load();
+            g_nrq_asked_now = 0;
+            nrq_eval();
+            if (r < 2 && !g_nrq_open) _snprintf_s(why, sizeof why, _TRUNCATE, "Esc: Start %d nicht gefragt", r + 1);
+            if (r == 2 && g_nrq_open) strcpy_s(why, sizeof why, "Esc: dritter Start fragt noch");
+            nrq_dismiss();
+            pump();
+        }
+        set[0] = 0;
+        nrq_set_append(set, sizeof set, 1);
+        if (!why[0] && (g_nrq_cfg != -1 || !w496_has(cfg, "launcher_net_report_dismiss=2") || strcmp(set, "net_report=0")))
+            strcpy_s(why, sizeof why, "Esc: Zaehler/Zustimmung");
+    }
+    /* 5. Ja (Standard-Knopf) -> net_report=1 nur online */
+    if (!why[0]) {
+        write_file(cfg, "launcher_loc_online=1\n");
+        nrq_load();
+        g_nrq_asked_now = 0;
+        nrq_eval();
+        on_command(ID_NRQ_YES, BN_CLICKED);
+        pump();
+        set[0] = 0;
+        nrq_set_append(set, sizeof set, 1);
+        if (g_nrq_open || g_nrq_cfg != 1 || !w496_has(cfg, "launcher_net_report=1") || strcmp(set, "net_report=1"))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "Ja: Zustand/Datei/Start (%s)", set);
+        set[0] = 0;
+        nrq_set_append(set, sizeof set, 0);
+        if (!why[0] && strcmp(set, "net_report=0") != 0) strcpy_s(why, sizeof why, "Ja: offline gesendet");
+    }
+    /* 6. Schalter (gleicher Kurztext) */
+    if (!why[0]) {
+        lnet_toggle(ID_LNET_NETREP);
+        if (g_nrq_cfg != 0 || ui_checked(ID_LNET_NETREP) || !w496_has(cfg, "launcher_net_report=0"))
+            strcpy_s(why, sizeof why, "Schalter aus");
+        lnet_toggle(ID_LNET_NETREP);
+        if (!why[0] && (g_nrq_cfg != 1 || !ui_checked(ID_LNET_NETREP)))
+            strcpy_s(why, sizeof why, "Schalter an");
+        if (!why[0] && strcmp(LT("gui.lnet_netrep"), LT("gui.nrq_title")) != 0)
+            strcpy_s(why, sizeof why, "Schalter: anderer Kurztext als der Dialog");
+    }
+    /* 7. Text: "keine persoenlichen Daten", nicht "keine Daten" */
+    if (!why[0] && (!strstr(LT("gui.nrq_text"), "no personal data") || strstr(LT("gui.nrq_text"), "no data")))
+        strcpy_s(why, sizeof why, "Text: no personal data");
+    DeleteFileA(cfg);
+    strcpy_s(g_ucfg_test, sizeof g_ucfg_test, keep_ucfg);
+    g_loc_online = keep_on;
+    g_onl_fix_srv = keep_fix;
+    g_upd_ask = keep_ask;
+    g_nrq_cfg = keep_cfg;
+    g_nrq_dismiss = keep_dis;
+    g_nrq_open = keep_open;
+    g_nrq_asked_now = keep_now;
+    show_page(keep_page);
+    ui_refresh_visibility();
+    onl_sync_ui();
+    if (!why[0]) {
+        GT_OK("77g W496 NET-TELEMETRY (Frage anonyme Netzwerkstatistik: einmal, modal, Ja/Nein, Esc/X = Nein und hoechstens "
+              "noch einmal, Schalter mit gleichem Kurztext, net_report=1 nur online mit Zustimmung)");
+    } else {
+        GT_FAIL("77g W496 NET-TELEMETRY", "%s", why);
     }
 }

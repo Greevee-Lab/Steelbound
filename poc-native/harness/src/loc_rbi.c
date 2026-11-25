@@ -908,7 +908,10 @@ int rbi_tx(rbi_t *r, uint8_t *buf, int cap)
     if (!r->active || cap < RBI_PKT_MAX || r->replay) return 0; /* W355: nie im Neurechnen (cons zurueckgesetzt) */
     S = &r->p[r->self];
     for (j = 0; j < RBI_MAXP; j++) {
-        if (j == r->self || !r->p[j].bound) continue;
+        /* W494: abgegangene Mitspieler (rbi_peer_gone) bestaetigen nie mehr - ohne diese Ausnahme blieb lo auf ihrer
+         * letzten Bestaetigung stehen, jedes Paket trug nur deren + RBI_PKT_FRAMES Rahmen und alle Uebrigen standen
+         * 24 Slots nach dem Abgang still (Laeufe D0/D1/F5b: Stau bei Abgang + 24, nach ~30 s endet jede Mission). */
+        if (j == r->self || !r->p[j].bound || ((r->gone >> j) & 1u)) continue;
         any = 1;
         if (r->p[j].ack_of_me + 1 < lo) lo = r->p[j].ack_of_me + 1;
     }

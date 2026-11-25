@@ -88,10 +88,12 @@ static __inline const char *llv_mode_label(int mode)
 }
 
 /* Ping-Schaetzung (ms, ueber das Relay, W373): "~120 ms", unbekannt "--". */
+#define LLV_PING_FAR 250 /* W494 LOC-FARPING: ab hier "HIGH" (Match wirkt verzoegert, wie Lobby-Infopanel NP_PING_FAR) */
 static __inline void llv_ping_text(int est, char *out, size_t cap)
 {
     if (!out || cap < 4) return;
-    if (est > 0) _snprintf_s(out, cap, _TRUNCATE, "~%d ms", est > 999 ? 999 : est);
+    if (est > LLV_PING_FAR) _snprintf_s(out, cap, _TRUNCATE, "~%d ms HIGH", est > 999 ? 999 : est); /* W494 */
+    else if (est > 0) _snprintf_s(out, cap, _TRUNCATE, "~%d ms", est);
     else strcpy_s(out, cap, "--");
 }
 

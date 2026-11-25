@@ -27,6 +27,10 @@ int loc_render_bb_lookup(unsigned xptr, struct ID3D11ShaderResourceView **srv, u
  * CPU-Speicher mit (Xbox: gemeinsamer Speicher). surf = gebundenes Ziel (0 = Backbuffer). */
 void loc_render_text_lock(unsigned surf, unsigned bits, unsigned pitch);
 void loc_render_on_clear(unsigned surf, unsigned flags, unsigned color);
+/* W485 LIVEQOS (Live-Dialoge): obere Grenze der 2D-Heuristik fuer IM-Draws (sb_im_submit). Standard 704x544
+ * (640x480 + 64). Nur Xbox-Live-Modus (loc_live) und nur fuer Draws, die die Textebene sampeln: Grenze =
+ * LoC-Framebuffer + 64 (720x480 -> 784x544). Sonst unveraendert (SB, System Link bitgleich). */
+void loc_render_rhw_range(unsigned xptr, float *xmax, float *ymax);
 /* W311: 1 = surf ist die LoC-Sichtkarte (loc_vismap); host/pitch = Lesezeiger des Spiels (Dauer-Lock, 0 = keiner). */
 int loc_render_vismap(unsigned surf, unsigned *host, unsigned *pitch);
 /* W422 LOC-INSIGNIA-PEN: 1 = surf ist ein Stift-RT des Insignien-Editors (Speicher mit der CPU geteilt:

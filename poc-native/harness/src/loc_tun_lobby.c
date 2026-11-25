@@ -102,6 +102,20 @@ int js_str(const char *v, const char *ve, char *out, int cap)
     return 1;
 }
 
+/* W487 LIVE-GAMERTAG: Gamertag-Regel wie steelcore/loclive_tag_valid (1-15, A-Z a-z 0-9, einzelne Leerzeichen,
+ * vorn Buchstabe, hinten kein Leerzeichen); hier eigene Kopie, weil loc_tun ohne loc_live gelinkt wird. */
+static int lb_tag_valid(const char *s)
+{
+    size_t n = strlen(s), i;
+    if (n < 1 || n > 15 || !((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z')) || s[n - 1] == ' ') return 0;
+    for (i = 0; i < n; i++) {
+        char c = s[i];
+        if (c == ' ' ? s[i + 1] == ' ' : !((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')))
+            return 0;
+    }
+    return 1;
+}
+
 const char *js_arr_first(const char *v, const char *ve)
 {
     const char *p;
@@ -157,26 +171,143 @@ void lb_play_mode_set(loctun *t, int mode, const char *why)
 
 static void lb_close(loctun *t, const char *why, double now);
 
+/* W373 TEST: gesendete Steuerzeile mitschneiden */
+static void lb_cap(loctun *t, const char *b, int l)
+{
+    if (l > 0 && t->test_cap && t->test_cap_len + l < t->test_cap_max) {
+        memcpy(t->test_cap + t->test_cap_len, b, (size_t)l);
+        t->test_cap_len += l;
+        t->test_cap[t->test_cap_len] = 0;
+    }
+}
+
+/* W500: eigene Zeile nach dem welcome bis zur Bestaetigung des Dienstes behalten (Nachsenden nach einer Fortsetzung).
+ * Ring voll: die aelteste faellt heraus (rs_base steigt); hat der Dienst sie nicht, scheitert die Fortsetzung sauber. */
+static void lb_rs_keep(loctun *t, const char *b, int l)
+{
+    int i;
+    if (l <= 0 || l > TUN_RS_LINE) return;
+    if (t->rs_qn == TUN_RS_Q) {
+        SecureZeroMemory(t->rs_q[t->rs_qh], (size_t)t->rs_ql[t->rs_qh]);
+        t->rs_qh = (t->rs_qh + 1) % TUN_RS_Q;
+        t->rs_qn--;
+        t->rs_base++;
+    }
+    i = (t->rs_qh + t->rs_qn) % TUN_RS_Q;
+    memcpy(t->rs_q[i], b, (size_t)l);
+    t->rs_ql[i] = l;
+    t->rs_qn++;
+}
+
+/* W500: der Dienst hat alle eigenen Zeilen < rx (pong bzw. welcome der Fortsetzung). 0 = rx ausserhalb. */
+static int lb_rs_ack(loctun *t, uint64_t rx)
+{
+    if (rx < t->rs_base || rx > t->rs_base + (uint64_t)t->rs_qn) return 0;
+    while (t->rs_base < rx) { /* Klartext (z. B. Chat) sofort loeschen */
+        SecureZeroMemory(t->rs_q[t->rs_qh], (size_t)t->rs_ql[t->rs_qh]);
+        t->rs_qh = (t->rs_qh + 1) % TUN_RS_Q;
+        t->rs_qn--;
+        t->rs_base++;
+    }
+    return 1;
+}
+
 /* W334: eine JSON-Zeile ueber TLS (nie vor bestandener Pin-Pruefung; sbtls_write lehnt das selbst ab). */
 void lb_send(loctun *t, const char *json)
 {
     char b[4200];
     int l = _snprintf_s(b, sizeof b, _TRUNCATE, "%s\n", json);
-    if (l > 0 && t->test_cap && t->test_cap_len + l < t->test_cap_max) { /* W373 TEST */
-        memcpy(t->test_cap + t->test_cap_len, b, (size_t)l);
-        t->test_cap_len += l;
-        t->test_cap[t->test_cap_len] = 0;
-    }
-    if (l > 0 && t->tls && t->lb_s != INVALID_SOCKET && (t->lb_state == LB_HELLO || t->lb_state == LB_LOBBY)) {
-        if (sbtls_write(t->tls, b, l) != SBTLS_OK) lb_close(t, "tls-senden", tl_now(t));
+    lb_cap(t, b, l);
+    if (l > 0 && t->rs_susp) { /* W500: Verbindung weg, Fortsetzung laeuft - danach nachsenden */
+        if (t->rs_count) lb_rs_keep(t, b, l);
+    } else if (l > 0 && t->lb_state == LB_HELLO && !t->my_cid && t->acct && t->c.resume) {
+        /* W500 (Pruefung F4): vor dem welcome halten - der Dienst zaehlt Zeilen erst nach seinem welcome; ginge die
+         * Zeile vorher hinaus, kaeme sie dort ggf. nach dem welcome an und beide Zaehler liefen auseinander */
+        lb_rs_keep(t, b, l);
+    } else if (l > 0 && (t->lb_state == LB_HELLO || t->lb_state == LB_LOBBY)) {
+        if (t->rs_count) lb_rs_keep(t, b, l); /* W500: zaehlt wie beim Dienst jede Zeile nach dem welcome */
+        if (t->tls && t->lb_s != INVALID_SOCKET && sbtls_write(t->tls, b, l) != SBTLS_OK) lb_lost(t, "tls-senden", tl_now(t));
     }
     SecureZeroMemory(b, sizeof b);
 }
-/* Trennung vom Treffpunkt: Schluessel dieser Steuerverbindung loeschen; alle Lobby-Verbindungen enden (neue
- * Steuerverbindung = neue client_id, neues E, neue Paarschluessel - SECURITY.md §4.2 Punkte 4/5). */
-static void lb_close(loctun *t, const char *why, double now)
+
+/* W500: Anmeldezeilen (hello, auth) direkt senden - nie in die Nachsende-Schlange (waehrend einer Fortsetzung landete
+ * lb_send dort) und nicht mitgezaehlt (der Dienst zaehlt erst ab seinem welcome). */
+static void lb_send_now(loctun *t, const char *json)
+{
+    char b[1024];
+    int l = _snprintf_s(b, sizeof b, _TRUNCATE, "%s\n", json);
+    lb_cap(t, b, l);
+    if (l > 0 && t->tls && t->lb_s != INVALID_SOCKET && sbtls_write(t->tls, b, l) != SBTLS_OK) {
+        SecureZeroMemory(b, sizeof b);
+        lb_lost(t, "tls-senden", tl_now(t));
+        return;
+    }
+    SecureZeroMemory(b, sizeof b);
+}
+
+/* W500 LOBBY-RESUME (SECURITY.md §47) ---------------------------------------------------------------------------
+ * Reisst die TLS-Steuerverbindung ab (Feld: Reset von aussen 20 s nach dem Verbinden), bleibt die Sitzung stehen:
+ * gleiche client_id, gleiches E (kp/my_pub), alle Mitspieler-Verbindungen und Paarschluessel unveraendert. Der Client
+ * verbindet neu (TLS mit Pin), meldet sich mit dem Spielschluessel an und legt das Einmal-Token vor. Lehnt der Dienst ab
+ * (welcome ohne "resumed") oder laeuft die Frist ab: lb_close wie bisher. */
+void lb_rs_reset(loctun *t)
 {
     int i;
+    for (i = 0; i < TUN_RS_Q; i++)
+        if (t->rs_ql[i]) SecureZeroMemory(t->rs_q[i], (size_t)t->rs_ql[i]);
+    memset(t->rs_ql, 0, sizeof t->rs_ql);
+    t->rs_qn = t->rs_qh = 0;
+    t->rs_base = t->rs_rx = 0;
+    t->rs_count = t->rs_susp = t->rs_try = 0;
+    t->rs_cut_next = 0;
+    SecureZeroMemory(t->rs_tok, sizeof t->rs_tok);
+    if (t->rs_old_tls) {
+        sbtls_free(t->rs_old_tls);
+        t->rs_old_tls = NULL;
+    }
+    if (t->rs_old_s != INVALID_SOCKET) {
+        closesocket(t->rs_old_s);
+        t->rs_old_s = INVALID_SOCKET;
+    }
+}
+
+static int lb_rs_can(const loctun *t, const char *why)
+{
+    if (!t->c.resume || !t->acct || !t->rs_tok[0] || !t->my_cid || !t->rs_count) return 0;
+    if (!t->rs_susp && t->lb_state != LB_HELLO && t->lb_state != LB_LOBBY) return 0;
+    /* nur Transportfehler; Pin, Protokollfehler, Ablehnungen des Dienstes -> lb_close */
+    return strcmp(why, "eof") == 0 || strncmp(why, "tls", 3) == 0 || strcmp(why, "connect") == 0 ||
+           strcmp(why, "timeout") == 0 || strcmp(why, "welcome-timeout") == 0;
+}
+
+void lb_lost(loctun *t, const char *why, double now)
+{
+    static const double backoff[4] = {500.0, 1000.0, 2000.0, 4000.0};
+    double nt;
+    if (!lb_rs_can(t, why)) {
+        lb_close(t, why, now);
+        return;
+    }
+    if (!t->rs_susp) {
+        /* Frist: der Dienst haelt die Sitzung rttl s nach der letzten eigenen Zeile (Ping alle 15 s) -> mit Abstand davor */
+        double f = (t->rs_ttl_ms > 0 ? (double)t->rs_ttl_ms : 90000.0) - 20000.0;
+        if (f > 60000.0) f = 60000.0;
+        if (f < 3000.0) f = 3000.0;
+        t->rs_susp = 1;
+        t->rs_try = 0;
+        t->rs_since = now;
+        t->rs_deadline = now + f;
+        tl_logf(t, "LOCLOBBY: Treffpunkt-Verbindung abgerissen (%s) - setze Sitzung c%u fort, Mitspieler bleiben verbunden",
+                why, t->my_cid);
+    } else {
+        t->rs_try++;
+        tl_logf(t, "LOCLOBBY: Fortsetzung Versuch %d gescheitert (%s)", t->rs_try, why);
+    }
+    if (now >= t->rs_deadline) {
+        lb_close(t, "resume-frist", now);
+        return;
+    }
     if (t->tls) {
         sbtls_free(t->tls);
         t->tls = NULL;
@@ -186,9 +317,122 @@ static void lb_close(loctun *t, const char *why, double now)
         closesocket(t->lb_s);
         t->lb_s = INVALID_SOCKET;
     }
-    if (t->lb_state != LB_OFF) tl_logf(t, "LOCLOBBY: Treffpunkt getrennt (%s) - neuer Versuch in 5 s", why);
+    t->lb_state = LB_OFF;
+    t->lb_inlen = 0;
+    nt = now + backoff[t->rs_try < 3 ? t->rs_try : 3];
+    t->lb_next_try = nt < t->rs_deadline ? nt : t->rs_deadline;
+}
+
+/* W500 TEST loc_lobby_cut: Abriss wie im Feld nachstellen. Modus 0: harter Reset (RST, Dienst sieht den Fehler sofort);
+ * Modus 1: Verbindung still liegenlassen (Dienst merkt nichts, die Fortsetzung muss die alte selbst schliessen). */
+static void lb_cut_test(loctun *t, double now)
+{
+    tl_logf(t, "LOCLOBBY: TEST loc_lobby_cut - Steuerverbindung %s", t->c.cut_mode == 1 ? "still liegengelassen" : "hart getrennt");
+    t->rs_cut_next = 0;
+    if (t->c.cut_mode == 1 && t->lb_s != INVALID_SOCKET) {
+        if (t->rs_old_tls) sbtls_free(t->rs_old_tls);
+        if (t->rs_old_s != INVALID_SOCKET) closesocket(t->rs_old_s);
+        WSAEventSelect(t->lb_s, NULL, 0);
+        t->rs_old_s = t->lb_s;
+        t->rs_old_tls = t->tls;
+        t->lb_s = INVALID_SOCKET;
+        t->tls = NULL;
+    } else if (t->lb_s != INVALID_SOCKET) {
+        struct linger lg0 = {1, 0};
+        setsockopt(t->lb_s, SOL_SOCKET, SO_LINGER, (const char *)&lg0, sizeof lg0);
+    }
+    lb_lost(t, "tls", now);
+}
+
+static void lb_bind(loctun *t, double now);
+
+/* W500: welcome auf eine Fortsetzung. Nur mit resumed:true, derselben client_id, neuem Token und neuem udp_key gilt sie;
+ * sonst hat der Dienst einen normalen neuen Einstieg gemacht -> lb_close (neues E, neue Mitspieler-Schluessel). */
+static void lb_rs_on_welcome(loctun *t, const char *m, const char *e, int resumed, double now)
+{
+    const char *v, *ve;
+    double cid = 0, rx = -1, ttl = 0;
+    char key[80] = "", tok[80] = "";
+    uint8_t k[32], tk[32];
+    int ok, i, n = 0;
+    v = js_get(m, e, "client_id", &ve);
+    js_num(v, ve, &cid);
+    v = js_get(m, e, "udp_key", &ve);
+    js_str(v, ve, key, sizeof key);
+    v = js_get(m, e, "rtok", &ve);
+    js_str(v, ve, tok, sizeof tok);
+    v = js_get(m, e, "rx", &ve);
+    js_num(v, ve, &rx);
+    v = js_get(m, e, "rttl", &ve);
+    js_num(v, ve, &ttl);
+    ok = resumed && cid > 0 && cid <= 4294967295.0 && (uint32_t)cid == t->my_cid && strlen(tok) == 64 && unhex(tok, tk, 32) &&
+         unhex(key, k, 32) && rx >= 0 && rx <= 9007199254740992.0 && lb_rs_ack(t, (uint64_t)rx);
+    SecureZeroMemory(tk, sizeof tk);
+    SecureZeroMemory(key, sizeof key);
+    if (!ok) {
+        SecureZeroMemory(k, sizeof k);
+        SecureZeroMemory(tok, sizeof tok);
+        tl_logf(t, "LOCLOBBY: Fortsetzung abgelehnt - sauberer Neuaufbau (Mitspieler werden neu verbunden)");
+        lb_close(t, "resume", now);
+        t->lb_next_try = now + 500.0;
+        return;
+    }
+    memcpy(t->udp_key, k, 32); /* neues Sitzungsgeheimnis fuer BIND2/KEEPALIVE2, UDP neu binden */
+    SecureZeroMemory(k, sizeof k);
+    strcpy_s(t->rs_tok, sizeof t->rs_tok, tok);
+    SecureZeroMemory(tok, sizeof tok);
+    if (ttl >= 10 && ttl <= 3600) t->rs_ttl_ms = (int)(ttl * 1000.0);
+    t->bctr = 0;
+    t->bound = 0;
+    t->rs_susp = 0;
+    t->rs_n_ok++;
+    t->lb_state = t->lb_joined ? LB_LOBBY : LB_HELLO;
+    t->lb_ping_last = now;
+    t->rs_cut_next = t->c.cut_s > 0 ? now + 1000.0 * t->c.cut_s : 0;
+    if (t->rs_old_tls) { /* TEST Modus 1: der Dienst hat die alte Verbindung schon geschlossen */
+        sbtls_free(t->rs_old_tls);
+        t->rs_old_tls = NULL;
+    }
+    if (t->rs_old_s != INVALID_SOCKET) {
+        closesocket(t->rs_old_s);
+        t->rs_old_s = INVALID_SOCKET;
+    }
+    for (i = 0; i < t->rs_qn; i++) { /* was der Dienst nicht hat, in Reihenfolge nachsenden */
+        int j = (t->rs_qh + i) % TUN_RS_Q;
+        lb_cap(t, t->rs_q[j], t->rs_ql[j]);
+        if (t->tls && t->lb_s != INVALID_SOCKET && sbtls_write(t->tls, t->rs_q[j], t->rs_ql[j]) != SBTLS_OK) {
+            lb_lost(t, "tls-senden", now);
+            return;
+        }
+        n++;
+    }
+    tl_logf(t, "LOCLOBBY: Sitzung c%u fortgesetzt nach %.1f s (Versuch %d, %d Zeilen nachgesendet) - Mitspieler unveraendert",
+            t->my_cid, (now - t->rs_since) / 1000.0, t->rs_try + 1, n);
+    lb_bind(t, now);
+}
+/* Trennung vom Treffpunkt: Schluessel dieser Steuerverbindung loeschen; alle Lobby-Verbindungen enden (neue
+ * Steuerverbindung = neue client_id, neues E, neue Paarschluessel - SECURITY.md §4.2 Punkte 4/5). */
+static void lb_close(loctun *t, const char *why, double now)
+{
+    int i, susp = t->rs_susp; /* W500: gescheiterte Fortsetzung = Trennung einer stehenden Anmeldung */
+    nr_on_drop(t, why, now); /* W496: Trennung einer stehenden Anmeldung -> Bericht (Warteschlange) */
+    if (t->lb_state == LB_HELLO || t->lb_state == LB_LOBBY || susp) /* W496 Stufe 1: Grund fuer das naechste hello ("rc") */
+        strcpy_s(t->lb_last_drop, sizeof t->lb_last_drop, tl_drop_code(why));
+    lb_rs_reset(t);
+    if (t->tls) {
+        sbtls_free(t->tls);
+        t->tls = NULL;
+    }
+    if (t->lb_s != INVALID_SOCKET) {
+        WSAEventSelect(t->lb_s, NULL, 0);
+        closesocket(t->lb_s);
+        t->lb_s = INVALID_SOCKET;
+    }
+    if (t->lb_state != LB_OFF || susp) tl_logf(t, "LOCLOBBY: Treffpunkt getrennt (%s) - neuer Versuch in 5 s", why);
     /* W353: Grund fuer den Launcher - Aufbau gescheitert (Netz/Firewall/Dienst aus) bzw. Verbindung verloren */
-    if (t->lb_state == LB_CONNECTING || t->lb_state == LB_TLS) {
+    if (susp && strcmp(why, "upgrade_required") != 0 && strcmp(why, "e2e_required") != 0) {
+        strcpy_s(t->lb_err, sizeof t->lb_err, "lost"); /* W500: Fortsetzung gescheitert */
+    } else if (t->lb_state == LB_CONNECTING || t->lb_state == LB_TLS) {
         strcpy_s(t->lb_err, sizeof t->lb_err, "connect");
     } else if (t->lb_state != LB_OFF && strcmp(why, "upgrade_required") != 0 && strcmp(why, "e2e_required") != 0) {
         strcpy_s(t->lb_err, sizeof t->lb_err, "lost");
@@ -204,6 +448,7 @@ static void lb_close(loctun *t, const char *why, double now)
     SecureZeroMemory(t->udp_key, sizeof t->udp_key);
     t->lobby_code[0] = 0;
     lb_play_mode_set(t, 0, "Treffpunkt getrennt"); /* W440 */
+    if (t->live) lv_reset(t, "Treffpunkt getrennt"); /* W482: offene Live-Anfragen scheitern, Session endet beim Dienst */
     InterlockedExchange(&t->sn_state, 0);          /* W446: neue Verbindung = neues Abonnement */
     t->sn_sub_sent = -1;
     for (i = 0; i < t->sn_out_n; i++) SecureZeroMemory(t->sn_out[i], sizeof t->sn_out[i]);
@@ -302,15 +547,16 @@ static void lb_connect(loctun *t, double now)
     t->lb_state = LB_CONNECTING;
     t->lb_next_try = now + 5000.0; /* Zeitlimit fuer den Aufbau */
     if (connect(t->lb_s, (struct sockaddr *)&a, sizeof a) != 0 && WSAGetLastError() != WSAEWOULDBLOCK) {
-        lb_close(t, "connect", now);
+        lb_lost(t, "connect", now); /* W500 */
     }
 }
 
 static void lb_hello(loctun *t)
 {
-    char b[640], ip[16], pe[120], pub[65];
+    char b[900], ip[16], pe[120], pub[65];
     struct sockaddr_in me;
     int l = sizeof me;
+    size_t bl;
     tl_js_esc(t->c.pilot, pe, sizeof pe); /* W329 */
     getsockname(t->us, (struct sockaddr *)&me, &l);
     if (me.sin_addr.s_addr == INADDR_ANY) {
@@ -325,11 +571,24 @@ static void lb_hello(loctun *t)
                 "\"local_eps\":[[\"%s\",%u]],\"e2e\":{\"suite\":1,\"pub\":\"%s\"},\"cver\":\"%s\"}",
                 pe, locnet_ip_str(me.sin_addr.s_addr, ip), t->uport, pub, tl_myver(t)); /* W420: cver */
     if (t->acct) { /* W328: Konto -> auth_challenge statt welcome */
-        size_t bl = strlen(b);
+        bl = strlen(b);
         _snprintf_s(b + bl - 1, sizeof b - bl + 1, _TRUNCATE, ",\"account\":%u,\"exp\":%lld}", t->acct, t->acct_exp);
     }
+    if (t->lb_last_drop[0]) { /* W496 Stufe 1 (Betrieb, ohne Zustimmung): Code der letzten Trennung bei der Neuverbindung */
+        bl = strlen(b);
+        _snprintf_s(b + bl - 1, sizeof b - bl + 1, _TRUNCATE, ",\"rc\":\"%s\"}", t->lb_last_drop);
+    }
+    if (t->acct && t->c.resume) { /* W500: fortsetzbare Sitzung erbeten; bei laufender Fortsetzung Token + Zaehler */
+        bl = strlen(b);
+        if (t->rs_susp && t->rs_tok[0])
+            _snprintf_s(b + bl - 1, sizeof b - bl + 1, _TRUNCATE, ",\"rs\":1,\"resume\":{\"cid\":%u,\"tok\":\"%s\",\"rx\":%llu}}",
+                        t->my_cid, t->rs_tok, (unsigned long long)t->rs_rx);
+        else
+            _snprintf_s(b + bl - 1, sizeof b - bl + 1, _TRUNCATE, ",\"rs\":1}");
+    }
     t->lb_state = LB_HELLO;
-    lb_send(t, b);
+    lb_send_now(t, b); /* W500: direkt, nicht ueber lb_send (Nachsende-Schlange) */
+    SecureZeroMemory(b, sizeof b);
 }
 
 /* W334: BIND2/KEEPALIVE2 (SECURITY.md §5.1): "SBN1" | Typ | client_id u32 | bctr u64 | HMAC(udp_key, 0..16)[:16] */
@@ -764,7 +1023,17 @@ void lb_snchat_tick(loctun *t)
     t->sn_out_n = 0;
 }
 
+static void lb_on_line_x(loctun *t, const char *m, const char *e, double now);
+
+/* W500: jede Zeile nach dem welcome zaehlt (wie beim Dienst); die Zahl geht als "rx" in ping und Fortsetzung. */
 void lb_on_line(loctun *t, const char *m, const char *e, double now)
+{
+    int cnt = t->rs_count && !t->rs_susp;
+    lb_on_line_x(t, m, e, now);
+    if (cnt && t->rs_count) t->rs_rx++;
+}
+
+static void lb_on_line_x(loctun *t, const char *m, const char *e, double now)
 {
     const char *v, *ve;
     char typ[24] = "";
@@ -786,7 +1055,7 @@ void lb_on_line(loctun *t, const char *m, const char *e, double now)
         tl_hmac(t->gkey, 32, msg, strlen(msg), mac);
         sb_sha256_hex(mac, hex);
         _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"auth\",\"proof\":\"%s\"}", hex);
-        lb_send(t, b);
+        lb_send_now(t, b); /* W500: auch waehrend einer Fortsetzung sofort */
         SecureZeroMemory(b, sizeof b);
         SecureZeroMemory(mac, sizeof mac);
         SecureZeroMemory(hex, sizeof hex);
@@ -801,6 +1070,11 @@ void lb_on_line(loctun *t, const char *m, const char *e, double now)
         js_num(v, ve, &ver);
         if (ver != 2.0) { /* W334: nur v2 */
             lb_close(t, "welcome v != 2", now);
+            return;
+        }
+        if (t->rs_susp) { /* W500: Antwort auf eine Fortsetzung */
+            v = js_get(m, e, "resumed", &ve);
+            lb_rs_on_welcome(t, m, e, v && ve - v == 4 && memcmp(v, "true", 4) == 0, now);
             return;
         }
         v = js_get(m, e, "client_id", &ve);
@@ -826,6 +1100,15 @@ void lb_on_line(loctun *t, const char *m, const char *e, double now)
             }
         }
         strcpy_s(t->my_pilot, sizeof t->my_pilot, eff);
+        { /* W487 LIVE-GAMERTAG: Gamertag des Kontos (steelcore), nur Konto-Sitzungen; ungueltig = keiner */
+            char gt[24] = "";
+            t->my_gamertag[0] = 0;
+            v = js_get(m, e, "gamertag", &ve);
+            if (t->acct && v && js_str(v, ve, gt, sizeof gt) && lb_tag_valid(gt))
+                strcpy_s(t->my_gamertag, sizeof t->my_gamertag, gt);
+            else if (t->acct && v)
+                tl_logf(t, "LOCLOBBY: Gamertag im welcome ungueltig - ignoriert");
+        }
         t->my_cid = (uint32_t)cid;
         t->bctr = 0;
         t->srv_udp = t->lb_addr;
@@ -857,8 +1140,55 @@ void lb_on_line(loctun *t, const char *m, const char *e, double now)
         InterlockedExchange(&t->sn_state, (v && ve - v == 4 && memcmp(v, "true", 4) == 0) ? 1 : 0);
         t->sn_sub_sent = -1;
         t->lb_welcome_at = now;
+        { /* W500: fortsetzbare Sitzung (nur Konto, nur wenn der Dienst ein Token gibt) - ab hier zaehlen beide Seiten */
+            char tok[80] = "";
+            uint8_t tk[32];
+            double ttl = 0;
+            int held = t->rs_qn, k; /* vor dem welcome gehaltene Zeilen (Folgenummern 0..held-1) */
+            t->rs_count = 0;
+            t->rs_rx = t->rs_base = 0;
+            SecureZeroMemory(t->rs_tok, sizeof t->rs_tok);
+            if (t->rs_old_tls) {
+                sbtls_free(t->rs_old_tls);
+                t->rs_old_tls = NULL;
+            }
+            if (t->rs_old_s != INVALID_SOCKET) {
+                closesocket(t->rs_old_s);
+                t->rs_old_s = INVALID_SOCKET;
+            }
+            v = js_get(m, e, "rtok", &ve);
+            if (t->acct && t->c.resume && v && js_str(v, ve, tok, sizeof tok) && strlen(tok) == 64 && unhex(tok, tk, 32)) {
+                strcpy_s(t->rs_tok, sizeof t->rs_tok, tok);
+                v = js_get(m, e, "rttl", &ve);
+                js_num(v, ve, &ttl);
+                t->rs_ttl_ms = (ttl >= 10 && ttl <= 3600) ? (int)(ttl * 1000.0) : 90000;
+                t->rs_count = 1;
+            }
+            SecureZeroMemory(tok, sizeof tok);
+            SecureZeroMemory(tk, sizeof tk);
+            t->rs_cut_next = t->c.cut_s > 0 ? now + 1000.0 * t->c.cut_s : 0; /* TEST loc_lobby_cut */
+            for (k = 0; k < held; k++) { /* gehaltene Zeilen jetzt senden (gezaehlt, bis zur Bestaetigung behalten) */
+                int j = (t->rs_qh + k) % TUN_RS_Q;
+                lb_cap(t, t->rs_q[j], t->rs_ql[j]);
+                if (t->tls && t->lb_s != INVALID_SOCKET && sbtls_write(t->tls, t->rs_q[j], t->rs_ql[j]) != SBTLS_OK) {
+                    lb_lost(t, "tls-senden", now);
+                    return;
+                }
+            }
+            if (!t->rs_count) { /* Dienst ohne Fortsetzung: nichts behalten */
+                for (k = 0; k < TUN_RS_Q; k++)
+                    if (t->rs_ql[k]) SecureZeroMemory(t->rs_q[k], (size_t)t->rs_ql[k]);
+                memset(t->rs_ql, 0, sizeof t->rs_ql);
+                t->rs_qn = t->rs_qh = 0;
+            }
+        }
+        nr_on_welcome(t, m, e, now); /* W496: Dienst nimmt Netzberichte ("netlog") */
         if (t->c.join_delay_ms <= 0) lb_enter(t); /* W446 TEST: sonst spaeter aus lb_poll */
         t->lb_list_last = now;
+    } else if (strcmp(typ, "pong") == 0) { /* W500: Bestaetigung der eigenen Zeilen -> Nachsende-Schlange kuerzen */
+        double rx = -1;
+        v = js_get(m, e, "rx", &ve);
+        if (t->rs_count && js_num(v, ve, &rx) && rx >= 0 && rx <= 9007199254740992.0) lb_rs_ack(t, (uint64_t)rx);
     } else if (strcmp(typ, "chat") == 0 || strcmp(typ, "chat_sub") == 0 || strcmp(typ, "chat_status") == 0) {
         lb_on_snchat(t, typ, m, e); /* W446 */
     } else if (strcmp(typ, "lobby_list") == 0 && t->pub) { /* W373 */
@@ -897,6 +1227,7 @@ void lb_on_line(loctun *t, const char *m, const char *e, double now)
     } else if (strcmp(typ, "lobby_closed") == 0) {
         int i;
         tl_logf(t, "LOCLOBBY: Lobby geschlossen (Host gegangen)");
+        nr_on_host_left(t); /* W496 */
         for (i = 0; i < TUN_MAX_LINKS; i++) { /* §4.2 Punkt 5: Schluessel loeschen, Stellvertreter schliessen */
             tlink *L = &t->links[i];
             if (!L->used || L->cid == 0) continue;
@@ -917,8 +1248,11 @@ void lb_on_line(loctun *t, const char *m, const char *e, double now)
             t->lb_host_left = 1; /* W366: Launcher meldet "Host hat die Lobby geschlossen" (nicht "Code falsch") */
             strcpy_s(t->lb_err, sizeof t->lb_err, "closed");
         }
+    } else if (strncmp(typ, "live_", 5) == 0 || strcmp(typ, "campaign_ticket") == 0) {
+        if (t->live) lv_on_line(t, typ, m, e, now); /* W482 LIVE-MATCH, W491 CAMP-CLIENT (Ticket) */
     } else if (strcmp(typ, "error") == 0) {
         char code[32] = "";
+        if (t->live && lv_on_error(t, m, e)) return; /* W482: Antwort auf eine Live-Anfrage (ref lv<n>) */
         v = js_get(m, e, "code", &ve);
         js_str(v, ve, code, sizeof code);
         tl_logf(t, "LOCLOBBY: Fehler vom Treffpunkt: %s", code);
@@ -987,6 +1321,10 @@ void lb_poll(loctun *t, double now)
 {
     if (!t->c.lobby[0]) return;
     if (t->lb_state == LB_OFF) {
+        if (t->rs_susp && now >= t->rs_deadline) { /* W500: Frist vorbei -> sauberer Neuaufbau wie bisher */
+            lb_close(t, "resume-frist", now);
+            return;
+        }
         if (now >= t->lb_next_try) lb_connect(t, now);
         return;
     }
@@ -1000,19 +1338,19 @@ void lb_poll(loctun *t, double now)
         FD_SET(t->lb_s, &x);
         if (select(0, NULL, &w, &x, &tv) > 0) {
             if (FD_ISSET(t->lb_s, &x)) {
-                lb_close(t, "connect", now);
+                lb_lost(t, "connect", now);
                 return;
             }
             /* W334: TLS mit SPKI-Pin; vor bestandener Pruefung geht kein Anwendungsbyte hinaus */
             if (sbtls_client_new(&t->tls, t->lb_s, t->lb_host, (const uint8_t(*)[32])t->pins, t->npins) != SBTLS_OK) {
                 tl_logf(t, "LOCSEC: %s", sbtls_error(t->tls));
-                lb_close(t, "tls", now);
+                lb_lost(t, "tls", now);
                 return;
             }
             t->lb_state = LB_TLS;
             t->lb_next_try = now + 10000.0; /* Handshake + welcome: 10 s (SECURITY.md §3.3) */
         } else if (now >= t->lb_next_try) {
-            lb_close(t, "timeout", now);
+            lb_lost(t, "timeout", now);
             return;
         } else {
             return;
@@ -1021,20 +1359,22 @@ void lb_poll(loctun *t, double now)
     if (t->lb_state == LB_TLS) {
         int r = sbtls_handshake(t->tls);
         if (r == SBTLS_WANT_IO) {
-            if (now >= t->lb_next_try) lb_close(t, "tls-timeout", now);
+            if (now >= t->lb_next_try) lb_lost(t, "tls-timeout", now);
             return;
         }
         if (r != SBTLS_OK) {
-            if (sbtls_pin_failed(t->tls)) {
+            if (sbtls_pin_failed(t->tls)) { /* W500: nie fortsetzen - Sitzung endet wie bisher */
                 InterlockedExchange(&t->sec, SEC_PIN);
                 tl_logf(t, "LOCSEC: Server-Pruefung fehlgeschlagen (Pin passt nicht) - keine Daten gesendet");
-            } else {
-                tl_logf(t, "LOCSEC: %s", sbtls_error(t->tls));
+                lb_close(t, "tls", now);
+                return;
             }
-            lb_close(t, "tls", now);
+            tl_logf(t, "LOCSEC: %s", sbtls_error(t->tls));
+            lb_lost(t, "tls", now);
             return;
         }
-        if (sbe2e_keypair(&t->kp, t->my_pub) != 0) {
+        /* W500: bei einer Fortsetzung bleibt das Schluesselpaar (E geht in alle Paarschluessel ein, SECURITY.md §4.3) */
+        if (!t->rs_susp && sbe2e_keypair(&t->kp, t->my_pub) != 0) {
             tl_logf(t, "LOCSEC: Schluesselpaar nicht erzeugbar - Online-Spiel aus");
             InterlockedExchange(&t->sec, SEC_SELFTEST);
             lb_close(t, "e2e", now);
@@ -1047,19 +1387,19 @@ void lb_poll(loctun *t, double now)
         if (t->lb_s == INVALID_SOCKET) return;
     }
     if (sbtls_flush(t->tls) == SBTLS_FAIL) {
-        lb_close(t, "tls-senden", now);
+        lb_lost(t, "tls-senden", now);
         return;
     }
     for (;;) {
         int r = sbtls_read(t->tls, t->lb_in + t->lb_inlen, (int)sizeof t->lb_in - 1 - t->lb_inlen);
         char *nl;
         if (r == SBTLS_CLOSED) {
-            lb_close(t, "eof", now);
+            lb_lost(t, "eof", now);
             return;
         }
         if (r == SBTLS_FAIL) {
             tl_logf(t, "LOCSEC: %s", sbtls_error(t->tls));
-            lb_close(t, "tls", now);
+            lb_lost(t, "tls", now);
             return;
         }
         if (r == SBTLS_WANT_IO) break;
@@ -1067,7 +1407,7 @@ void lb_poll(loctun *t, double now)
         t->lb_in[t->lb_inlen] = 0;
         while ((nl = (char *)memchr(t->lb_in, '\n', (size_t)t->lb_inlen)) != NULL) {
             int l = (int)(nl - t->lb_in);
-            lb_on_line(t, t->lb_in, t->lb_in + l, now);
+            lb_on_line(t, t->lb_in, t->lb_in + l, now); /* W500: zaehlt die Zeilen nach dem welcome selbst */
             if (t->lb_s == INVALID_SOCKET) return;
             memmove(t->lb_in, nl + 1, (size_t)(t->lb_inlen - l - 1));
             t->lb_inlen -= l + 1;
@@ -1078,16 +1418,28 @@ void lb_poll(loctun *t, double now)
             return;
         }
     }
-    if (!t->my_cid && now >= t->lb_next_try) {
-        lb_close(t, "welcome-timeout", now);
+    if ((!t->my_cid || t->rs_susp) && now >= t->lb_next_try) {
+        lb_lost(t, "welcome-timeout", now);
+        return;
+    }
+    if (t->rs_susp) return; /* W500: Fortsetzung wartet auf ihr welcome */
+    if (t->rs_cut_next > 0 && now >= t->rs_cut_next) { /* W500 TEST loc_lobby_cut */
+        lb_cut_test(t, now);
         return;
     }
     if (now - t->lb_ping_last >= 15000.0) {
-        lb_send(t, "{\"t\":\"ping\"}");
+        if (t->rs_count) { /* W500: Bestaetigung der empfangenen Zeilen (der Dienst kuerzt seinen Nachsende-Ring) */
+            char pb[64];
+            _snprintf_s(pb, sizeof pb, _TRUNCATE, "{\"t\":\"ping\",\"rx\":%llu}", (unsigned long long)t->rs_rx);
+            lb_send(t, pb);
+        } else {
+            lb_send(t, "{\"t\":\"ping\"}");
+        }
         t->lb_ping_last = now;
         if (t->lb_s == INVALID_SOCKET) return;
     }
     if (t->my_cid && (now - t->lb_bind_last >= (t->bound ? 25000.0 : 300.0))) lb_bind(t, now);
+    if (t->live_cap) pub_live_mode_tick(t, now); /* W501 ONLINE-BOTH: System Link <-> Xbox Live */
     if (t->pub && t->my_cid) pub_tick(t, now); /* W373 */
     lb_snchat_tick(t);                         /* W446 */
     if (t->lb_s == INVALID_SOCKET) return;
@@ -1205,3 +1557,76 @@ void lb_rx_sbn(loctun *t, const uint8_t *p, int len, const struct sockaddr_in *f
     }
 }
 
+
+/* W500 TEST: 32-Bit-Pruefsumme des Tokens fuer den Selbsttest (das Token selbst erscheint nie in einer Ausgabe). */
+static unsigned w500_fnv(const char *s)
+{
+    unsigned h = 2166136261u;
+    if (!s[0]) return 0;
+    for (; *s; s++) h = (h ^ (unsigned char)*s) * 16777619u;
+    return h;
+}
+
+/* W500 TEST (loc_net_selftest): Fortsetzung ohne Netz durchspielen (loc_tun.h). */
+int loctun_test_resume(loctun *t, int op, uint32_t arg, char *out, int cap)
+{
+    double now;
+    int i, nl = 0, nv = 0;
+    const tlink *L0 = NULL;
+    if (!t || !out || cap < 1) return -1;
+    out[0] = 0;
+    EnterCriticalSection(&t->cs);
+    now = tl_now(t);
+    if (op != 4) {
+        t->test_cap = out;
+        t->test_cap_len = 0;
+        t->test_cap_max = cap;
+    }
+    switch (op) {
+    case 1:
+        if (!t->kp.key && sbe2e_keypair(&t->kp, t->my_pub) != 0) break;
+        t->acct = arg;
+        t->acct_exp = 4102444800LL;
+        break;
+    case 2:
+        lb_lost(t, "eof", now);
+        break;
+    case 3:
+        lb_hello(t);
+        break;
+    case 4:
+        for (i = 0; i < TUN_MAX_LINKS; i++) {
+            if (!t->links[i].used || !t->links[i].cid) continue;
+            nl++;
+            nv += t->links[i].e2e.valid;
+            if (!L0) L0 = &t->links[i];
+        }
+        _snprintf_s(out, (size_t)cap, _TRUNCATE,
+                    "susp=%d st=%d cid=%u count=%d rx=%llu base=%llu qn=%d tok=%08x udp=%02x%02x%02x%02x bctr=%llu bound=%d "
+                    "links=%d valid=%d sid=%08x ktx=%p pub=%02x%02x%02x%02x lobby=%d joined=%d",
+                    t->rs_susp, t->lb_state, t->my_cid, t->rs_count, (unsigned long long)t->rs_rx,
+                    (unsigned long long)t->rs_base, t->rs_qn, w500_fnv(t->rs_tok), t->udp_key[0], t->udp_key[1], t->udp_key[2],
+                    t->udp_key[3], (unsigned long long)t->bctr, t->bound, nl, nv, L0 ? L0->e2e.sid : 0,
+                    L0 ? L0->e2e.ktx : NULL, t->my_pub[0], t->my_pub[1], t->my_pub[2], t->my_pub[3],
+                    loctun_lobby_state(t), t->lb_joined);
+        break;
+    case 5:
+        t->rs_deadline = now - 1.0;
+        lb_poll(t, now);
+        break;
+    case 6:
+        lb_poll(t, now);
+        break;
+    case 7:
+        lb_send(t, "{\"t\":\"x7\"}");
+        break;
+    case 8:
+        t->c.resume = (int)arg;
+        break;
+    default:
+        break;
+    }
+    t->test_cap = NULL;
+    LeaveCriticalSection(&t->cs);
+    return 0;
+}

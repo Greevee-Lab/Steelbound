@@ -94,6 +94,7 @@ add_executable(sb_launcher WIN32
   src/launcher_gui_content.c
   src/launcher_gui_loc.c
   src/launcher_gui_hub.c
+  src/launcher_gui_netrep.c # W496 NET-TELEMETRY: Frage anonyme Netzwerkstatistik
   src/launcher_gui_account.c
   src/launcher_gui_test_loc.c
   src/launcher_gui_test.c
@@ -117,6 +118,8 @@ add_executable(sb_launcher WIN32
   src/launcher_orig.c
   src/launcher_layout.c
   src/launcher_account.c
+  src/launcher_camp.c
+  ../harness/src/sb_tls.c
   ../harness/src/input_sbc_usb.c
   ../harness/src/input_joy.c
   ../harness/src/input_despike.c

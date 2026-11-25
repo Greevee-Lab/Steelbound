@@ -1202,6 +1202,59 @@ static void leave_tests(void)
     CHECK(with >= 1400u, "W366: A laeuft nach dem Abgang nicht weiter (%u Ticks)", with);
 }
 
+/* W494 LOC-FARPING: 3 Spieler, C stuerzt ab (bestaetigt nicht mehr). A muss seine neuen Rahmen weiter an B senden.
+ * Vorher blieb der Paketanfang lo bei der letzten Bestaetigung von C stehen und jedes Paket trug nur 24 Rahmen ab
+ * dort: B bekam nie mehr als "C-Bestaetigung + 24" und A/B standen still (Laeufe D0/D1/F5b). Rueckgabe: 1 = Paket von
+ * A reicht bis zum neuesten eigenen Rahmen. */
+static int gone_tx_case(int mark_gone, u32 *lo_out, int *nf_out)
+{
+    rbi_t *r[3];
+    uint8_t p[RBI_PKT_MAX];
+    uint8_t hdr[RBI_HDR] = {1, 0x55, 0, 0, 7, 0, 0, 0}, in[RBI_IN] = {0};
+    int n, k, i, j, nf;
+    u32 lo;
+    for (i = 0; i < 3; i++) {
+        r[i] = rbi_new();
+        rbi_begin(r[i], 3, i, 1, 8);
+        rbi_own(r[i], hdr, in);
+        rbi_prime(r[i]); /* Slot-Zuordnung wie bei der ersten Entnahme */
+    }
+    for (k = 0; k < 9; k++) { /* alle drei laufen, tauschen aus (Bindung + Bestaetigungen) */
+        for (i = 0; i < 3; i++) rbi_own(r[i], hdr, in);
+        for (i = 0; i < 3; i++) {
+            n = rbi_tx(r[i], p, (int)sizeof p);
+            for (j = 0; j < 3; j++)
+                if (j != i && n > 0) rbi_rx(r[j], p, n, (uint64_t)(10 + i));
+        }
+    }
+    if (mark_gone) rbi_peer_gone(r[0], 2); /* C weg (vom Spiel entfernt) */
+    for (k = 0; k < 100; k++) { /* nur noch A und B */
+        rbi_own(r[0], hdr, in);
+        rbi_own(r[1], hdr, in);
+        n = rbi_tx(r[0], p, (int)sizeof p);
+        if (n > 0) rbi_rx(r[1], p, n, 10);
+        n = rbi_tx(r[1], p, (int)sizeof p);
+        if (n > 0) rbi_rx(r[0], p, n, 11);
+    }
+    n = rbi_tx(r[0], p, (int)sizeof p);
+    lo = n > 0 ? ((u32)p[20] | (u32)p[21] << 8 | (u32)p[22] << 16 | (u32)p[23] << 24) : 0;
+    nf = n > 0 ? p[7] : 0;
+    *lo_out = lo;
+    *nf_out = nf;
+    for (i = 0; i < 3; i++) rbi_free(r[i]);
+    return lo + (u32)nf >= 110u; /* 110 eigene Rahmen (Slots 0..109) */
+}
+
+static void gone_tx_tests(void)
+{
+    u32 lo1, lo0;
+    int nf1, nf0, with = gone_tx_case(1, &lo1, &nf1), without = gone_tx_case(0, &lo0, &nf0);
+    printf("W494 Abgang bei 3 Spielern: Paket von A ab Slot %u mit %d Rahmen (abgemeldet), ab %u mit %d (Gegenprobe)\n",
+           lo1, nf1, lo0, nf0);
+    CHECK(with, "W494: nach Abgang von C traegt A's Paket die neuesten Rahmen (ab %u, %d Rahmen)", lo1, nf1);
+    CHECK(!without, "W494: Gegenprobe ohne Abmeldung haengt an C's Bestaetigung (ab %u, %d Rahmen)", lo0, nf0);
+}
+
 static void channel_tests(void)
 {
     rbi_t *a = rbi_new(), *b = rbi_new();
@@ -1674,9 +1727,56 @@ static void rbn_tests(void)
         memcpy(q, p, (size_t)n);
         q[8] = q[9] = q[10] = q[11] = 0;
         CHECK(rbn_rx(b, 5200, q, n, 3) == -1, "Kennung 0 verworfen");
-        memcpy(q, p, (size_t)n);
-        q[RBN_PKT_HEAD + 11] = 1;
-        CHECK(rbn_rx(b, 5200, q, n, 3) == -1, "Fuellbyte im Eintrag verworfen");
+        { /* W494: Byte 11 je Eintrag = RTT des Absenders zu diesem Mitspieler; Dritte uebernehmen sie in rbn_rtt_max */
+            rbn_t *c3 = rbn_new(1, 0x33330001u, 1, 3, 0);
+            int ex = (int)p[RBN_PKT_HEAD + 11];
+            CHECK(ex >= 1 && ex <= 4, "W494: Eintrag traegt die RTT des Hosts zum Mitspieler (%d x 8 ms)", ex);
+            CHECK(rbn_rtt_max(c3, 5200) == -1, "W494: Dritter ohne Hallo kennt keine RTT");
+            CHECK(rbn_rx(c3, 5200, p, n, 9) == 1, "W494: Hallo mit RTT-Byte vom Dritten angenommen");
+            CHECK(rbn_rtt_max(c3, 5200) == 8 * ex, "W494: Dritter kennt die Strecke Host-Mitspieler (%d ms)",
+                  rbn_rtt_max(c3, 5200));
+            memcpy(q, p, (size_t)n);
+            q[RBN_PKT_HEAD + 11] = 45; /* 360 ms */
+            CHECK(rbn_rx(c3, 5250, q, n, 9) == 1 && rbn_rtt_max(c3, 5250) == 360,
+                  "W494: weite Strecke zwischen anderen (360 ms) bestimmt rbn_rtt_max");
+            CHECK(rbn_pick_delay(rbn_rtt_max(c3, 5250), 2, 8) == 5 && rbn_pick_delay(540, 2, 8) == 7 &&
+                      rbn_pick_delay(900, 2, 8) == 8 && rbn_pick_delay(230, 2, 8) == 3,
+                  "W494: 360 ms -> D 5, 540 -> 7, 900 -> 8, 230 -> 3 wie bisher (dmax online 8)");
+            CHECK(rbn_rtt_max(c3, 5250 + RBN_FRESH_MS + 1) == -1, "W494: gemeldete Strecke verfaellt mit dem Hallo");
+            rbn_free(c3);
+        }
+        { /* W494: 6 Spieler (wie Issue #103): jeder kennt nach drei Hallo-Runden die RTT zu allen 5 Mitspielern
+           * (vorher hoechstens 4 Eintraege je Hallo -> ein Paar blieb ohne Echo, ohne RTT und ohne "Wunsch gesehen") */
+            enum { NP6 = 6 };
+            rbn_t *m6[NP6];
+            uint8_t h6[RBN_PKT_MAX];
+            int i6, j6, r6, nh, ok6 = 1, all6 = 1, pr[RBN_MAXPEER];
+            uint32_t t6 = 9000;
+            for (i6 = 0; i6 < NP6; i6++) m6[i6] = rbn_new(1, 0x60000001u + (uint32_t)i6 * 0x1111u, 2, 8, 0);
+            for (r6 = 0; r6 < 3; r6++) {
+                for (i6 = 0; i6 < NP6; i6++) {
+                    nh = rbn_tx(m6[i6], t6, i6, h6, (int)sizeof h6);
+                    for (j6 = 0; j6 < NP6; j6++)
+                        if (j6 != i6 && rbn_rx(m6[j6], t6 + 40, h6, nh, 100 + (uint64_t)i6) != 1) ok6 = 0;
+                    t6 += 50; /* Uhr laeuft fuer alle vorwaerts (Empfang t+40, naechster Sender t+50) */
+                }
+                t6 += 100;
+            }
+            for (i6 = 0; i6 < NP6; i6++) {
+                int np = rbn_peer_list(m6[i6], t6, NULL, pr, NULL, RBN_MAXPEER), bad = np != NP6 - 1;
+                for (j6 = 0; j6 < np; j6++)
+                    if (pr[j6] < 0) bad = 1;
+                if (bad) {
+                    all6 = 0;
+                    printf("  W494 6 Spieler: Knoten %d kennt %d Mitspieler, RTT:", i6, np);
+                    for (j6 = 0; j6 < np; j6++) printf(" %d", pr[j6]);
+                    printf("\n");
+                }
+            }
+            CHECK(ok6, "W494: 6 Spieler: alle Hallos angenommen");
+            CHECK(all6, "W494: 6 Spieler: jeder kennt die RTT zu allen 5 Mitspielern");
+            for (i6 = 0; i6 < NP6; i6++) rbn_free(m6[i6]);
+        }
         CHECK(rbn_rx(b, 5200, p, n, 4) == -1, "gleiche Kennung von anderer Adresse verworfen");
         for (k = 0; k < 200000; k++) { /* Zufallsverfaelschung: nie Absturz; nichts Ungueltiges wird R2-faehig */
             int len = (int)(rnd() % (u32)(RBN_PKT_MAX + 8)), j, r;
@@ -2775,6 +2875,7 @@ int main(void)
     printf("loc_rbi_selftest (W338 LOC-ROLLBACK-R2, W346 R3/R4)\n");
     g_fail += lsarb_selftest(&g_ok);
     channel_tests();
+    gone_tx_tests(); /* W494 */
     leave_tests(); /* W366 */
     channel_fuzz2();
     rbn_tests();

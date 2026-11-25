@@ -2,6 +2,7 @@
  * W462 LAUNCHER-SPLIT: aus launcher_gui.c verschoben (unveraendert), gemeinsamer Zustand
  * in launcher_gui_int.h. */
 #include "launcher_gui_int.h"
+#include "launcher_camp.h" /* W491 CAMP-CLIENT */
 /* W276 LOCTAB: Spielauswahl Steel Battalion | Line of Contact          */
 /* Umschalter in der Titelleiste (gemerkt in user.cfg, launcher_games). */
 /* Gemeinsam: Anzeige, Grafik, Steuerung, Ton (dieselben Elemente und   */
@@ -22,7 +23,7 @@ int gametab_id(int id) /* W398: Wortmarken-Tabs im Kopf */
  * Dort liegen Rollback, eigene Bewegung sofort, Gegner glaetten (ID_LOC_SMOOTH, frueher unter dem Start) und
  * niedrigere Eingabeverzoegerung sowie "Standard wiederherstellen". */
 #define ID_LNET_FIRST ID_LNET_RB
-#define ID_LNET_LAST ID_LNET_MTEAM /* W454; W473: Reiter + Chat im Spiel */
+#define ID_LNET_LAST ID_LNET_NETREP /* W496: + Schalter Netzwerkstatistik (2813/2814 = Dialog, nrq_visible zuerst); vorher ID_LNET_CAMP. W454; W473: Reiter + Chat im Spiel (W485 MERGEFIX: Live-Schalter entfiel, Wahl per ID_LNET_KIND); W491: Kampagne (intern) */
 /* W293 LOC-LAYOUT: Spielen = Kopf, Start, Bereitschaft (wie SB), Hinweisband
  * unten; Disc, Spielstaende & Daten und Online liegen links auf Erweitert
  * (rechts die gemeinsamen Teile Feinabstimmung + Launcher). */
@@ -309,6 +310,18 @@ int g_loc_arcade = 0;
 int g_loc_lan = 0;
 char g_loc_lan_room[17];
 static char g_loc_lan_pass[64];
+/* W487 LIVE-GAMERTAG: Xbox-Live-Modus (experimentell, Nutzerwunsch 25.11.) als dritte Auswahl "Verbindung" der Karte
+ * Match: wie Online (steelnet, Treffpunkt, Transport udp) plus loc_live=1 (Client: XOnline-HLE, LoC-eigenes Xbox-Live-
+ * Menue ueber steelnet, docs/loc/LOC_LIVE.md). Schliesst LAN aus, braucht ein steelnet-Konto mit Gamertag (letzter
+ * status, acc_live_state). Gemerkt in user.cfg launcher_loc_live (fehlt/ungueltig = 0, nur genau 1 = an).
+ * W485 MERGEFIX: W485 (LIVE-QOS) hatte unabhaengig einen Schalter "Xbox-Live-Modus" unter Multiplayer > Lobby & Chat;
+ * er entfiel, dieses Dropdown ist der einzige Weg. Die Pruefungen beider Pakete (Konto, nicht LAN; Gamertag) stecken
+ * in lnet_live_ok, live_set_append haengt loc_live=1 genau einmal je Start an.
+ * W501 ONLINE-BOTH (Nutzer 25.11.): kein eigener Eintrag "Xbox Live" mehr, nur Online/LAN. Online mit Konto und Gamertag
+ * (lnet_live_on) startet immer mit loc_live=1 - im Spiel waehlt der Spieler System Link oder Xbox Live (CONNECTION
+ * TYPE). Ohne Gamertag nur System Link (Start nie gesperrt), LAN nie. launcher_loc_live wird nur noch beim Laden
+ * gelesen: alt 1 = einmalig Online (onl_load schreibt danach 0). */
+#define LNET_LIVE_KEY "launcher_loc_live"
 /* W473 MPPOLISH: Chat waehrend des Spiels (Nutzer 24.11.). Schluessel des Clients (W474) stehen direkt in
  * user_loc.cfg (die Datei, die der LoC-Client per SB_USER_CFG liest); fehlt/ungueltig = Standard: steelnet 0,
  * Lobby 1, Team 1. Kein --set: so bleiben ESC-Aenderungen des Clients gueltig. Aeltere Clients ignorieren die
@@ -614,7 +627,8 @@ int lnet_is_default(void)
 {
     return g_loc_rb_on && g_loc_net_auto && g_loc_own_pred && g_loc_lowd && g_loc_smooth_opp == 1 && g_loc_clip && g_loc_chat &&
            g_loc_snchat && !g_loc_arcade && /* W440: Standard Sim; W446; W447 */
-           !g_loc_msn && g_loc_mlobby && g_loc_mteam; /* W473: Chat im Spiel (steelnet aus, Lobby/Team an) */
+           !g_loc_msn && g_loc_mlobby && g_loc_mteam && /* W473: Chat im Spiel (steelnet aus, Lobby/Team an) */
+           !g_camp_test; /* W491: Saison (Community immer 0) */
 }
 
 /* loc_net_status.txt lesen (Schluessel=Wert je Zeile, letzte Zeile gewinnt).
@@ -874,8 +888,239 @@ void lan_kind_fill(void)
     ComboBox_ResetContent(c);
     combo_add(c, LT("gui.lan_kind_online"));
     combo_add(c, LT("gui.lan_kind_lan"));
-    ComboBox_SetCurSel(c, g_loc_lan ? 1 : 0);
+    ComboBox_SetCurSel(c, lnet_kind_get()); /* W501: Eintrag Xbox Live entfiel (Online bietet beides) */
     g_updating--;
+}
+
+/* W487/W501: Verbindung 0 = Online (steelnet; mit Gamertag System Link + Xbox Live), 1 = LAN */
+int lnet_kind_get(void)
+{
+    return g_loc_lan ? 1 : 0;
+}
+
+/* W485 MERGEFIX: Xbox Live startbar? Nicht im LAN (W454/W487) und steelnet-Konto (W485) mit Gamertag (W487) laut
+ * letztem status (acc_live_state, kein Netz; ohne Konto = ACC_LIVE_NOACC). */
+int lnet_live_ok(void)
+{
+    return !g_loc_lan && acc_live_state() == ACC_LIVE_OK;
+}
+
+/* W501: "Online mit Gamertag" - Stufe steelnet, nicht LAN, Konto mit Gamertag. Dann bietet der Start im Spiel System Link
+ * und Xbox Live (loc_live=1), sonst nur System Link. */
+int lnet_live_on(void)
+{
+    return netm_get() == NETM_STEEL && lnet_live_ok();
+}
+
+/* W487/W485/W501: ";loc_live=1" an den --set des LoC-Starts - nur online (onl) und lnet_live_ok (Konto mit Gamertag, nie
+ * im LAN). Treffpunkt/Transport kommen aus onl_set_append. Einzige Stelle fuer loc_live; 1 = angehaengt. */
+int live_set_append(char *set, size_t cap, int onl)
+{
+    size_t l = strlen(set);
+    if (!onl || !lnet_live_ok()) return 0;
+    _snprintf_s(set + l, cap - l, _TRUNCATE, "%sloc_live=1", l ? ";" : "");
+    return 1;
+}
+
+/* W487/W501: Infozeile der Karte Match (Online): beides verfuegbar (Gamertag) bzw. nur System Link und was fehlt */
+int live_info(char *out, size_t cap, COLORREF *col)
+{
+    int st = acc_live_state();
+    if (st == ACC_LIVE_OK) {
+        _snprintf_s(out, cap, _TRUNCATE, LT("gui.live_ready"), g_acc_st.gamertag);
+        *col = C_DIM;
+    } else if (st == ACC_LIVE_UNK && g_acc_busy == ACC_OP_STATUS) { /* W501: Status laeuft (Seite gerade geoeffnet) */
+        strncpy_s(out, cap, LT("gui.live_checking"), _TRUNCATE);
+        *col = C_DIM;
+    } else {
+        strncpy_s(out, cap, acc_live_text(st), _TRUNCATE);
+        *col = C_WARN;
+    }
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
+/* W491 CAMP-CLIENT: Kampagnenstatus im Xbox-Live-Modus (launcher_camp.h). Verfuegbar nur mit Konto + Gamertag  */
+/* (acc_live_state), aktueller Version (loc_ver_gate, W421) und erreichbarem Steelbound-Zugang (TLS + Pin, nur  */
+/* Handshake). Die Pruefung laeuft einmal im Hintergrund (Thread, Ergebnis per WM_APP_CAMP), angestossen beim    */
+/* Zeichnen der Live-Infozeile (Seite Spielen/Multiplayer), nie in Shots/Selbsttest (g_snp_live, g_camp_dry).    */
+/* Cache: erreichbar 5 min, sonst 60 s. Nicht verfuegbar sperrt den Start nie: Free Mission geht, Campaign ist   */
+/* im Spiel grau; der Hinweis sagt warum.                                                                         */
+/* ------------------------------------------------------------------ */
+#define CAMP_TTL_OK_MS (5ULL * 60ULL * 1000ULL)
+#define CAMP_TTL_FAIL_MS (60ULL * 1000ULL)
+#define CAMP_TIMEOUT_MS 5000
+#define LNET_CAMP_KEY "launcher_loc_camp_test" /* nur intern: 1 = Testkampagne */
+typedef char camp_acc_map_chk[(ACC_LIVE_OK == 0 && ACC_LIVE_OFF == 1 && ACC_LIVE_NOACC == 2 && ACC_LIVE_UNK == 3 &&
+                               ACC_LIVE_NOGT == 4 && ACC_LIVE_GTOFF == 5) ? 1 : -1]; /* = launcher_camp.c A_* */
+static void lnet_redraw(void);
+int g_camp_test = 0;
+int g_camp_reach[2];
+static ULONGLONG g_camp_at[2]; /* GetTickCount64 des letzten Ergebnisses (0 = keins) */
+int g_camp_busy, g_camp_gen, g_camp_dry, g_camp_dry_n;
+typedef struct {
+    HWND h;
+    int gen, k, rc;
+} camp_job_t;
+
+int camp_sel(void)
+{
+#if SB_EDITION_COMMUNITY
+    return 0; /* Community: immer die Saison, nie loc_camp_id=test */
+#else
+    return g_camp_test ? 1 : 0;
+#endif
+}
+
+int camp_status(void)
+{
+    return lcamp_state(acc_live_state(), loc_ver_gate(), g_camp_reach[camp_sel()]);
+}
+
+const char *camp_text(int st, char *buf, size_t cap)
+{
+    static const char *const kKey[LCAMP_N] = { "gui.camp_ok",   "gui.camp_off",   "gui.camp_noacc",
+                                               "gui.camp_unk",  "gui.camp_gtoff", "gui.camp_nogt",
+                                               "gui.camp_old",  "gui.camp_check", "gui.camp_unreach" };
+    if (st < 0 || st >= LCAMP_N) st = LCAMP_UNK;
+    _snprintf_s(buf, cap, _TRUNCATE, LT(kKey[st]), LT(camp_sel() ? "gui.camp_name_test" : "gui.camp_name"));
+    return buf;
+}
+
+static DWORD WINAPI camp_thread(LPVOID p)
+{
+    camp_job_t *j = (camp_job_t *)p;
+    char err[16];
+    j->rc = lcamp_probe(j->k, CAMP_TIMEOUT_MS, err, sizeof err);
+    if (!PostMessageW(j->h, WM_APP_CAMP, (WPARAM)j->gen, (LPARAM)j)) {
+        free(j);
+    }
+    return 0;
+}
+
+int camp_kick(void)
+{
+    int k = camp_sel();
+    ULONGLONG now = GetTickCount64();
+    camp_job_t *j;
+    HANDLE th;
+    if (!lnet_live_on() || g_camp_busy || !g_hwnd) { /* W501: nur Online mit Gamertag (vorher Live-Modus) */
+        return 0;
+    }
+    if (g_camp_at[k] && now - g_camp_at[k] < (g_camp_reach[k] == LCAMP_R_OK ? CAMP_TTL_OK_MS : CAMP_TTL_FAIL_MS)) {
+        return 0; /* gecacht */
+    }
+    if (g_camp_dry) { /* Selbsttest: nur zaehlen, nie Netz */
+        g_camp_dry_n++;
+        return 1;
+    }
+    if (!g_snp_live || g_o.shot != 0) {
+        return 0;
+    }
+    j = (camp_job_t *)calloc(1, sizeof *j);
+    if (!j) {
+        return 0;
+    }
+    j->h = g_hwnd;
+    j->gen = ++g_camp_gen;
+    j->k = k;
+    th = CreateThread(NULL, 0, camp_thread, j, 0, NULL);
+    if (!th) {
+        free(j);
+        return 0;
+    }
+    CloseHandle(th);
+    g_camp_busy = 1;
+    return 1;
+}
+
+void camp_apply(int k, int reach)
+{
+    k = k ? 1 : 0;
+    g_camp_reach[k] = reach;
+    g_camp_at[k] = GetTickCount64();
+    if (g_hwnd && g_game == LGAME_LOC && (g_page == P_PLAY || g_page == P_LNET)) {
+        onl_redraw();
+        if (g_page == P_LNET) lnet_redraw(); /* Lobby & Chat: Zeile Kampagne (intern) */
+        if (g_page == P_PLAY) redraw_rect(LOC_NET_X, LOC_NET_Y, LOC_NET_W, LOC_NET_H + 4);
+    }
+}
+
+void camp_msg(LPARAM lp, WPARAM wp)
+{
+    camp_job_t *j = (camp_job_t *)lp;
+    if (j && (int)wp == g_camp_gen && g_camp_busy) {
+        g_camp_busy = 0;
+        camp_apply(j->k, j->rc == 0 ? LCAMP_R_OK : LCAMP_R_FAIL); /* Grund (net/pin/tls) nicht anzeigen, nie loggen */
+    }
+    free(j);
+}
+
+void camp_fixture(int reach)
+{
+    g_camp_reach[0] = g_camp_reach[1] = reach;
+    g_camp_at[0] = g_camp_at[1] = reach == LCAMP_R_UNKNOWN ? 0 : GetTickCount64();
+    g_camp_busy = 0;
+}
+
+int camp_set_append(char *set, size_t cap)
+{
+    size_t l = strlen(set);
+    _snprintf_s(set + l, cap - l, _TRUNCATE, "%sloc_camp=1", l ? ";" : "");
+#if !SB_EDITION_COMMUNITY
+    if (camp_sel()) {
+        l = strlen(set);
+        _snprintf_s(set + l, cap - l, _TRUNCATE, ";loc_camp_id=test");
+    }
+#endif
+    return 1;
+}
+
+/* Live bereit: Zeile 1 = kurz "System Link + Xbox Live" + Gamertag (W501), Zeile 2 = Kampagnenstatus (stoesst die
+ * Pruefung an). Live nicht bereit: 0 (dann gilt live_info: nur System Link und was fuer Live/Kampagne fehlt). */
+int camp_info2(char *l1, size_t c1, char *l2, size_t c2, COLORREF *col2)
+{
+    int st;
+    if (acc_live_state() != ACC_LIVE_OK) {
+        return 0;
+    }
+    _snprintf_s(l1, c1, _TRUNCATE, LT("gui.live_ready1"), g_acc_st.gamertag);
+    camp_kick();
+    st = camp_status();
+    camp_text(st, l2, c2);
+    *col2 = st == LCAMP_OK ? C_OK : st == LCAMP_CHECK ? C_DIM : C_WARN;
+    return 1;
+}
+
+#if !SB_EDITION_COMMUNITY
+static void camp_fill(void)
+{
+    HWND c = ctl(ID_LNET_CAMP);
+    if (!c) {
+        return;
+    }
+    g_updating++;
+    ComboBox_ResetContent(c);
+    combo_add(c, LT("gui.camp_pick_season"));
+    combo_add(c, LT("gui.camp_pick_test"));
+    ComboBox_SetCurSel(c, g_camp_test ? 1 : 0);
+    g_updating--;
+}
+#endif
+
+void camp_pick(void)
+{
+#if !SB_EDITION_COMMUNITY
+    int v = ctl(ID_LNET_CAMP) && ComboBox_GetCurSel(ctl(ID_LNET_CAMP)) == 1;
+    if (v == g_camp_test) {
+        return;
+    }
+    g_camp_test = v;
+    if (onl_save_key(LNET_CAMP_KEY, g_camp_test) >= 0) {
+        set_status_k(LT(g_camp_test ? "gui.camp_pick_test_on" : "gui.camp_pick_season_on"), 1);
+    }
+    redraw_all();
+#endif
 }
 
 void lan_cues(void)
@@ -909,18 +1154,29 @@ void lan_build_init(void)
 /* Auswahl Online/LAN (UI) bzw. Felder geaendert. */
 void lan_kind_pick(void)
 {
-    int v = ctl(ID_LNET_KIND) ? ComboBox_GetCurSel(ctl(ID_LNET_KIND)) == 1 : 0;
-    if (v == g_loc_lan) return;
-    lan_kind_set(v);
+    int k = ctl(ID_LNET_KIND) ? ComboBox_GetCurSel(ctl(ID_LNET_KIND)) : 0;
+    if (k < 0 || k > 1) k = 0; /* W501: zwei Eintraege */
+    if (k == lnet_kind_get()) return;
+    lnet_kind_set(k);
 }
 
 void lan_kind_set(int v)
 {
-    g_loc_lan = v ? 1 : 0;
+    lnet_kind_set(v ? 1 : 0);
+}
+
+void lnet_kind_set(int k)
+{
+    g_loc_lan = k == 1; /* W501: nur noch Online (0) / LAN (1) */
     onl_save_key(LNET_LAN_KEY, g_loc_lan);
     onl_sync_ui();
     loc_gate_sync(); /* LoC-Start sofort frei bzw. gesperrt */
     set_status_k(LT(g_loc_lan ? "gui.lan_on" : "gui.lan_off"), 1);
+    if (ctl(ID_LNET_KIND) && ComboBox_GetCurSel(ctl(ID_LNET_KIND)) != k) {
+        g_updating++;
+        ComboBox_SetCurSel(ctl(ID_LNET_KIND), k);
+        g_updating--;
+    }
     ui_refresh_visibility();
     redraw_all();
 }
@@ -1013,6 +1269,7 @@ void onl_load(void)
     char up[1200], line[256];
     FILE *f = NULL;
     size_t kl = strlen(ONL_KEY);
+    int mig = 0; /* W501: launcher_loc_live=1 gefunden */
     g_loc_online = 0;
     g_loc_public = 1; /* W373: Standard oeffentlich */
     g_loc_smooth_opp = 1; /* W387: Standard auto */
@@ -1023,6 +1280,7 @@ void onl_load(void)
     g_loc_snchat = 1; /* W446: Standard an */
     g_loc_arcade = 0; /* W440: Standard Sim */
     g_loc_lan = 0;    /* W454: Standard steelnet */
+    g_camp_test = 0;  /* W491: Standard Saison */
     g_loc_lan_room[0] = 0;
     if (!g_onl_since) { /* laufendes Spiel (Launcher neu geoeffnet) zaehlt, alte Laeufe nicht */
         g_onl_since = onl_now_ft() - 600ULL * 10000000ULL;
@@ -1064,6 +1322,16 @@ void onl_load(void)
                 const char *lv = line + sizeof LNET_LAN_KEY;
                 g_loc_lan = lv[0] == '1' && (lv[1] == 0 || lv[1] == '\r' || lv[1] == '\n' || lv[1] == ' ');
             }
+            if (strncmp(line, LNET_LIVE_KEY "=", sizeof LNET_LIVE_KEY) == 0) { /* W501: alt genau 1 = Xbox Live -> Online */
+                const char *lv = line + sizeof LNET_LIVE_KEY;
+                mig = lv[0] == '1' && (lv[1] == 0 || lv[1] == '\r' || lv[1] == '\n' || lv[1] == ' ');
+            }
+#if !SB_EDITION_COMMUNITY
+            if (strncmp(line, LNET_CAMP_KEY "=", sizeof LNET_CAMP_KEY) == 0) { /* W491: nur genau 1 = Testkampagne */
+                const char *cv = line + sizeof LNET_CAMP_KEY;
+                g_camp_test = cv[0] == '1' && (cv[1] == 0 || cv[1] == '\r' || cv[1] == '\n' || cv[1] == ' ');
+            }
+#endif
             if (strncmp(line, LNET_LANROOM_KEY "=", sizeof LNET_LANROOM_KEY) == 0) { /* W454: ungueltig = Standard */
                 char r[64];
                 size_t rl;
@@ -1079,6 +1347,12 @@ void onl_load(void)
             }
         }
         fclose(f);
+    }
+    if (mig) { /* W501: einmalige Migration ohne Rueckfrage - zuletzt gewaehlt war Xbox Live, jetzt Online (bietet beides) */
+        int lan0 = g_loc_lan;
+        g_loc_lan = 0;
+        onl_save_key(LNET_LIVE_KEY, 0); /* danach nie wieder ausgewertet */
+        if (lan0) onl_save_key(LNET_LAN_KEY, 0);
     }
     lnet_mission_load(); /* W473: Chat im Spiel (user_loc.cfg) */
 }
@@ -1207,6 +1481,9 @@ void onl_sync_ui(void)
     if (ctl(ID_LNET_CHAT)) { /* W437: unabhaengig vom Rollback */
         ui_set_checked(ID_LNET_CHAT, g_loc_chat);
     }
+    if (ctl(ID_LNET_NETREP)) { /* W496: Zustimmung (nur genau "ja" = an) */
+        ui_set_checked(ID_LNET_NETREP, g_nrq_cfg == 1);
+    }
     if (ctl(ID_LNET_SNCHAT)) { /* W446: unabhaengig vom Rollback; W454: im LAN nicht verfuegbar (grau, Wert bleibt) */
         ui_set_checked(ID_LNET_SNCHAT, g_loc_snchat);
         EnableWindow(ctl(ID_LNET_SNCHAT), g_loc_lan ? FALSE : TRUE);
@@ -1225,12 +1502,17 @@ void onl_sync_ui(void)
     }
     if (ctl(ID_LNET_KIND)) { /* W454 */
         g_updating++;
-        if (ComboBox_GetCurSel(ctl(ID_LNET_KIND)) != (g_loc_lan ? 1 : 0)) ComboBox_SetCurSel(ctl(ID_LNET_KIND), g_loc_lan ? 1 : 0);
+        if (ComboBox_GetCurSel(ctl(ID_LNET_KIND)) != lnet_kind_get()) ComboBox_SetCurSel(ctl(ID_LNET_KIND), lnet_kind_get()); /* W487 */
         g_updating--;
     }
     if (ctl(ID_LNET_MODE)) { /* W440: unabhaengig vom Rollback */
         g_updating++;
         ComboBox_SetCurSel(ctl(ID_LNET_MODE), g_loc_arcade ? 1 : 0);
+        g_updating--;
+    }
+    if (ctl(ID_LNET_CAMP)) { /* W491: nur intern vorhanden */
+        g_updating++;
+        ComboBox_SetCurSel(ctl(ID_LNET_CAMP), g_camp_test ? 1 : 0);
         g_updating--;
     }
     if (ctl(ID_LNET_RESET)) {
@@ -1366,6 +1648,7 @@ static const lnet_row_t kLnetRows[] = {
     { 0, 1, ID_LNET_OWN, NULL, "gui.lnet_own_hint", 1 },
     { 0, 2, ID_LOC_SMOOTH, "gui.lnet_smooth", "gui.lnet_smooth_hint", 1 },
     { 0, 3, ID_LNET_LOWD, NULL, "gui.lnet_lowd_hint", 1 },
+    { 0, 4, ID_LNET_NETREP, NULL, "gui.lnet_netrep_hint", 0 }, /* W496: anonyme Netzwerkstatistik (Zustimmung) */
     { 1, 0, ID_LNET_MODE, "gui.lnet_mode", "gui.lnet_mode_hint", 0 },
     { 1, 1, ID_LNET_CLIP, NULL, "gui.lnet_clip_hint", 0 },
     { 1, 2, ID_LNET_CHAT, NULL, "gui.lnet_chat_hint", 0 },
@@ -1374,10 +1657,16 @@ static const lnet_row_t kLnetRows[] = {
     { 1, 4, ID_LNET_MTEAM, NULL, "gui.lnet_mteam_hint", 2 },
     { 1, 5, ID_LNET_SNCHAT, NULL, "gui.lnet_snchat_hint", 0 },
     { 1, 6, ID_LNET_MSN, NULL, "gui.lnet_msn_hint", 3 },
+#if !SB_EDITION_COMMUNITY
+    { 1, 7, ID_LNET_CAMP, "gui.lnet_camp", "gui.lnet_camp_hint", 0 }, /* W491: mit Team-Reiter Platz der Karte pruefen */
+#endif
 #else /* Nutzer 24.11.: ohne Team-Reiter im Spiel kein Team-Schalter (Reiter -1 = nie sichtbar, Wert bleibt in der cfg) */
     { -1, 4, ID_LNET_MTEAM, NULL, "gui.lnet_mteam_hint", 2 },
     { 1, 4, ID_LNET_SNCHAT, NULL, "gui.lnet_snchat_hint", 0 },
     { 1, 5, ID_LNET_MSN, NULL, "gui.lnet_msn_hint", 3 },
+#if !SB_EDITION_COMMUNITY
+    { 1, 6, ID_LNET_CAMP, "gui.lnet_camp", "gui.lnet_camp_hint", 0 }, /* W491 CAMP-CLIENT: nur intern, Saison/Test */
+#endif
 #endif
 };
 #define LNET_NROWS ((int)(sizeof kLnetRows / sizeof kLnetRows[0]))
@@ -1414,6 +1703,10 @@ int lnet_id_grey(int id)
 static const char *lnet_row_hint(const lnet_row_t *r)
 {
     if (r->id == ID_LNET_MTEAM && !LNET_HAVE_TEAM_TAB) return LT("gui.lnet_mteam_later");
+    if (r->id == ID_LNET_CAMP && lnet_live_on()) { /* W491/W501: Online mit Gamertag - Status der gewaehlten Kampagne */
+        static char ct[200];
+        return camp_text(camp_status(), ct, sizeof ct);
+    }
     if ((r->id == ID_LNET_SNCHAT || r->id == ID_LNET_MSN) && g_loc_lan) return LT("gui.lan_na");
     if (r->dep == 1 && !g_loc_rb_on) return LT("gui.lnet_needs_rb");
     if (r->dep == 2 && !g_loc_chat) return LT("gui.lnet_needs_chat");
@@ -1622,6 +1915,14 @@ void lnet_toggle(int id)
     const char *key, *name;
     int bit, *v = lnet_mvar(id, &key, &name, &bit);
     char t[300];
+    if (id == ID_LNET_NETREP) { /* W496: Zustimmung umlegen (beantwortet die Frage), wirkt beim naechsten LoC-Start */
+        nrq_set(g_nrq_cfg != 1);
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT(g_nrq_cfg == 1 ? "gui.lnet_set_on" : "gui.lnet_set_off"), LT("gui.lnet_netrep"));
+        set_status_k(t, 1);
+        onl_sync_ui();
+        lnet_redraw();
+        return;
+    }
     if (v) {
         const lnet_row_t *r = lnet_row_of(id);
         if (r && lnet_row_grey(r)) {
@@ -1665,6 +1966,7 @@ void lnet_reset(void)
     g_loc_arcade = 0; /* W440: Sim */
     g_loc_msn = 0; /* W473 */
     g_loc_mlobby = g_loc_mteam = 1;
+    g_camp_test = 0; /* W491: Saison */
     onl_sync_ui();
     bad |= onl_save_key(LNET_CLIP_KEY, 1) < 0;
     bad |= onl_save_key(LNET_CHAT_KEY, 1) < 0;
@@ -1678,6 +1980,9 @@ void lnet_reset(void)
     bad |= lnet_mission_save(ID_LNET_MSN) < 0; /* W473 */
     bad |= lnet_mission_save(ID_LNET_MLOBBY) < 0;
     bad |= lnet_mission_save(ID_LNET_MTEAM) < 0;
+#if !SB_EDITION_COMMUNITY
+    bad |= onl_save_key(LNET_CAMP_KEY, 0) < 0; /* W491 */
+#endif
     if (!bad) {
         set_status_k(LT("gui.lnet_reset_done"), 1);
     }
@@ -1972,7 +2277,8 @@ static void lnet_build(HWND w)
             } kT[] = { { ID_LNET_OWN, "gui.lnet_own" },       { ID_LNET_LOWD, "gui.lnet_lowd" },
                        { ID_LNET_CLIP, "gui.lnet_clip" },     { ID_LNET_CHAT, "gui.lnet_chat" },
                        { ID_LNET_SNCHAT, "gui.lnet_snchat" }, { ID_LNET_MSN, "gui.lnet_msn" },
-                       { ID_LNET_MLOBBY, "gui.lnet_mlobby" }, { ID_LNET_MTEAM, "gui.lnet_mteam" } };
+                       { ID_LNET_MLOBBY, "gui.lnet_mlobby" }, { ID_LNET_MTEAM, "gui.lnet_mteam" },
+                       { ID_LNET_NETREP, "gui.lnet_netrep" } };
             int k;
             for (k = 0; k < (int)(sizeof kT / sizeof kT[0]); k++) {
                 if (kT[k].id == r->id) {
@@ -1983,6 +2289,9 @@ static void lnet_build(HWND w)
     }
     lnet_netmode_fill(); /* W447 */
     lnet_mode_fill();    /* W440 */
+#if !SB_EDITION_COMMUNITY
+    camp_fill(); /* W491 */
+#endif
     ui_set_checked(ID_LNET_TAB0, g_lnet_tab == 0);
     ui_set_checked(ID_LNET_TAB1, g_lnet_tab == 1);
 }
@@ -1998,13 +2307,16 @@ static void lnet_relabel(void)
                { ID_LNET_VERPAGE, "gui.lnet_verpage" }, { ID_LNET_PRIV, "gui.lnet_priv_btn" },
                { ID_LNET_TAB0, "gui.lnet_tab_net" },    { ID_LNET_TAB1, "gui.lnet_tab_lobby" },
                { ID_LNET_MSN, "gui.lnet_msn" },         { ID_LNET_MLOBBY, "gui.lnet_mlobby" },
-               { ID_LNET_MTEAM, "gui.lnet_mteam" } };
+               { ID_LNET_MTEAM, "gui.lnet_mteam" },       { ID_LNET_NETREP, "gui.lnet_netrep" } };
     int i;
     lnet_netmode_fill(); /* W447 */
     for (i = 0; i < (int)(sizeof kL / sizeof kL[0]); i++) {
         if (ctl(kL[i].id)) ui_settext(ctl(kL[i].id), LT(kL[i].key));
     }
     lnet_mode_fill(); /* W440 */
+#if !SB_EDITION_COMMUNITY
+    camp_fill(); /* W491 */
+#endif
 }
 /* Timer (2 s) und Seitenwechsel: Status des laufenden/letzten Spiels. */
 void onl_tick(void)
@@ -2034,7 +2346,7 @@ void onl_paint(void)
         label1(F_SMALL, LT("gui.mp_sum_lan"), x + 18, y + 38, w - 36, 22, C_TEXT);
         lan_info(t, sizeof t, &col);
         label(F_TINY, t, x + 18, y + 62, w - 36, 32, col);
-    } else if (netm_get() == NETM_STEEL) {
+    } else if (netm_get() == NETM_STEEL) { /* W501: eigener Xbox-Live-Zweig entfiel (Status steht auf der Karte Match) */
         label1(F_SMALL, LT(g_loc_public ? "gui.mp_sum_pub" : "gui.mp_sum_priv"), x + 18, y + 38, w - 36, 22, C_TEXT);
         onl_info(t, sizeof t, &col);
         if (col != C_DIM) { /* Raumcode der eigenen Lobby, Fehler, Vertrauenshinweis (Eingabehinweise: Multiplayer) */
@@ -2070,7 +2382,18 @@ static void mp_paint_match(void)
               C_WARN);
         return;
     }
-    onl_info(t, sizeof t, &col);
+    if (onl_info(t, sizeof t, &col) == 0 && (col == C_DIM || strcmp(t, LT("gui.loc_onl_trust")) == 0)) {
+        /* W501: Online - statt der Eingabe-/Vertrauenshinweise die Zeile "System Link und Xbox Live" (Gamertag +
+         * Kampagne, W491) bzw. "nur System Link" mit Weg zum Konto. Raumcode, Versions- und Verbindungsfehler gehen vor. */
+        char t2[200];
+        COLORREF c2;
+        if (camp_info2(t, sizeof t, t2, sizeof t2, &c2)) { /* W491: bereit -> Zeile Gamertag + Zeile Kampagne */
+            label1(F_TINY, t, x + 18, MP_INFO_Y, w - 36, MP_INFO_H / 2, C_DIM);
+            label1(F_TINY, t2, x + 18, MP_INFO_Y + MP_INFO_H / 2, w - 36, MP_INFO_H / 2, c2);
+            return;
+        }
+        live_info(t, sizeof t, &col);
+    }
     label(F_TINY, t, x + 18, MP_INFO_Y, w - 36, MP_INFO_H, col);
 }
 
@@ -2101,6 +2424,39 @@ const char *mp_labels_fit(void)
             if (!ui_text_fits(F_TINY, t, CX0 + 18, MP_INFO_Y, COLW - 36, MP_INFO_H, 0) ||
                 !ui_text_fits(F_TINY, t, LOC_NET_X + 18, LOC_NET_Y + 62, LOC_NET_W - 36, 32, 0)) {
                 return t;
+            }
+        }
+    }
+    return NULL;
+}
+
+/* W491: Selbsttest - Kampagnenzeile (alle Zustaende, Saison und Test) passt einzeilig in die Live-Infozeile der Karte
+ * Match und der Karte Multiplayer unter Spielen; Zeile 1 mit einem typischen Gamertag ebenso. NULL = alles passt. */
+const char *camp_texts_fit(void)
+{
+    static char t[300];
+    int st, k, t0 = g_camp_test;
+    for (k = 0; k < 2; k++) {
+        g_camp_test = k;
+        for (st = 0; st <= LCAMP_N; st++) {
+            if (st == LCAMP_N) {
+                _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.live_ready1"), "Iron Wolf 1234");
+            } else {
+                camp_text(st, t, sizeof t);
+            }
+            if (!ui_text_fits(F_TINY, t, CX0 + 18, MP_INFO_Y, COLW - 36, MP_INFO_H / 2, 1) ||
+                !ui_text_fits(F_TINY, t, LOC_NET_X + 18, LOC_NET_Y + 78, LOC_NET_W - 36, 16, 1)) {
+                g_camp_test = t0;
+                return t;
+            }
+        }
+    }
+    g_camp_test = t0;
+    { /* W501: Online ohne Gamertag bzw. Stand unbekannt - Hinweis passt zweizeilig in die Infozeile der Karte Match */
+        static const char *const kL[4] = { "gui.live_sl_only", "gui.live_need_status", "gui.live_checking", "gui.acc_gt_off" };
+        for (k = 0; k < 4; k++) {
+            if (!ui_text_fits(F_TINY, LT(kL[k]), CX0 + 18, MP_INFO_Y, COLW - 36, MP_INFO_H, 0)) {
+                return LT(kL[k]);
             }
         }
     }
@@ -2643,6 +2999,9 @@ void loctab_start(void)
         set_status_k(LT("gui.loc_gate_why"), 2);
         return;
     }
+    if (!acc_live_prestart()) { /* W501: keine Sperre mehr; nur Gamertag-Stand unbekannt -> erst Status, dann Start */
+        return;
+    }
     { /* W353: intern immer, Community nur im privaten Testpaket (lgame_loc_client_ready) */
         char d[1200], acp[1200], set[4096], raw[64] = "", xbe_u8[1200];
         int onl = g_loc_online && onl_srv_on() && !g_loc_lan; /* W454: LAN = nie steelnet */
@@ -2672,6 +3031,10 @@ void loctab_start(void)
             set_status_k(LT("gui.lan_room_bad"), 2);
             onl_redraw();
             return;
+        }
+        nrq_set_append(set, sizeof set, onl); /* W496: Netzbericht nur online und mit Zustimmung, sonst ausdruecklich 0 */
+        if (live_set_append(set, sizeof set, onl)) { /* W487/W485/W501: genau einmal, Online + Konto mit Gamertag, nie LAN */
+            camp_set_append(set, sizeof set); /* W491: Kampagne an (auch wenn laut Launcher nicht verfuegbar: Spiel zeigt sie grau) */
         }
         if ((onl || g_loc_lan) && g_o.shot == 0) { /* Status ab diesem Lauf (aeltere Datei gilt nicht); W454: auch LAN */
             g_onl_since = onl_now_ft() - 2ULL * 10000000ULL;
@@ -2720,6 +3083,12 @@ void loctab_start(void)
         }
         lcfg_mkdir_p(d);
         if (app_launch_client_env(g_client_dir, xbe_u8, set, env, m, sizeof m) == 0) {
+            int cs = strstr(set, "loc_camp=1") ? camp_status() : LCAMP_OK;
+            if (cs != LCAMP_OK && cs != LCAMP_CHECK) { /* W491: Start trotzdem; sagen, warum Campaign im Spiel grau ist */
+                char ct[200];
+                size_t ml = strlen(m);
+                _snprintf_s(m + ml, sizeof m - ml, _TRUNCATE, " %s", camp_text(cs, ct, sizeof ct));
+            }
             set_status_k(m, 1);
         } else {
             set_status_k(m, 2);

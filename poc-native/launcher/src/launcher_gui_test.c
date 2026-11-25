@@ -1713,6 +1713,8 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
             gameswitch_gui_selftest(pass, fail); /* W398 LAUNCHER-GAMESWITCH (Fall 65c) */
             loc_gate_gui_selftest(pass, fail); /* W400 LAUNCHER-LOC-ONLINE-GATE (Fall 65d) */
             loc_lan_gui_selftest(pass, fail); /* W454 LOC-LAN-MODE (Fall 65g) */
+            loc_live_gui_selftest(pass, fail); /* W487 LIVE-GAMERTAG (Fall 65h) */
+            camp_gui_selftest(pass, fail); /* W491 CAMP-CLIENT (Fall 65i) */
             r1_polish_gui_selftest(pass, fail); /* W403 LAUNCHER-R1-POLISH (Fall 65e) */
             locver_gui_selftest(pass, fail); /* W421 LOC-VERSION-GATE (Fall 65f) */
             header_polish_selftest(pass, fail); /* W401 LAUNCHER-HEADER-POLISH (Fall 65d) */
@@ -1742,9 +1744,13 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
             w465_gui_selftest(pass, fail); /* W465 LOC-ENHANCED (Fall 74e) */
             w476_gui_selftest(pass, fail); /* W476 LAUNCHER-CUSTOM-PRESET (Fall 74f) */
             w478_gui_selftest(pass, fail); /* W478 LOC-ENHANCED-VIVID (Fall 74g) */
+            w486_gui_selftest(pass, fail); /* W486 SB-GFX-OPTIONS (Fall 74h, #98) */
+            w496_gui_selftest(pass, fail); /* W496 NET-TELEMETRY (Fall 77g) */
             acc_gui_selftest(pass, fail); /* W328 STEELNET-ACCOUNT (Fall 75/76) */
             accpage_gui_selftest(pass, fail); /* W399 LAUNCHER-ACCOUNT-PAGE (Fall 75b) */
             accux_gui_selftest(pass, fail);   /* W418 LAUNCHER-ACCOUNT-UX (Fall 75c) */
+            w487_gt_gui_selftest(pass, fail); /* W487 LIVE-GAMERTAG (Fall 75d) */
+            w502_accpage_gui_selftest(pass, fail); /* W502 ACCOUNT-PAGE (Fall 75e) */
             onl_gui_selftest(pass, fail); /* W334 LOC-SEC: Online (steelnet) (Fall 77) */
             smooth_gui_selftest(pass, fail); /* W387 LOC-SMOOTH-OPP: Gegner glaetten (Fall 77b) */
             lnet_gui_selftest(pass, fail);   /* W392 LAUNCHER-NETTAB: Seite Netzwerk (Fall 77c) */

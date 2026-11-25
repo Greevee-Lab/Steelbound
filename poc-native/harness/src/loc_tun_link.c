@@ -151,6 +151,44 @@ int tl_rsim_find(loctun *t, const struct sockaddr_in *a)
     return -1;
 }
 
+/* W494 TEST loc_route_sim "@PREFIX:SPEC": Strecke je Mitspieler (Pilotname beginnt mit PREFIX, z. B. @AU / @EU), damit
+ * mehrere Clients auf einer Maschine Regionenpaare nachbilden (jede Seite verzoegert ihre Sendungen um die halbe RTT).
+ * Gilt fuer alle Pakete der Verbindung (direkt und ueber Relays), -1 = keiner. */
+int tl_rsim_find_link(loctun *t, const tlink *L)
+{
+    int i;
+    if (!L || !L->pilot[0]) return -1;
+    for (i = 0; i < t->nrsim; i++) {
+        const char *n = t->rsim[i].name;
+        size_t k;
+        if (n[0] != '@') continue;
+        k = strlen(n + 1);
+        if (!k) continue;
+        if (_strnicmp(L->pilot, n + 1, k) == 0) return i;
+        { /* Gastkonten heissen "Guest-<Pilot>" (devserver): Praefix auch nach einem '-' */
+            const char *d = strchr(L->pilot, '-');
+            if (d && _strnicmp(d + 1, n + 1, k) == 0) return i;
+        }
+    }
+    return -1;
+}
+
+/* Versiegeltes Paket einer Verbindung senden (W494: ueber die Strecke des Mitspielers, falls TEST gesetzt). */
+static void tl_sendto_link(loctun *t, tlink *L, const struct sockaddr_in *to, const uint8_t *buf, int len)
+{
+    if (t->nrsim) {
+        int k = tl_rsim_find_link(t, L);
+        if (k >= 0) {
+            if (tl_rsim_cut(t, k)) return;
+            if (t->rsim[k].sim && tl_dest_ok(t, to->sin_addr.s_addr) && !t->netcut) {
+                locnetsim_send(t->rsim[k].sim, t->us, 0, (const char *)buf, len, 0, to);
+                return;
+            }
+        }
+    }
+    tl_sendto(t, to, buf, len);
+}
+
 /* 1 = Weg k ist gerade im Ausfallfenster (beide Richtungen verwerfen). */
 int tl_rsim_cut(loctun *t, int k)
 {
@@ -264,7 +302,7 @@ void tl_send_to(loctun *t, tlink *L, const struct sockaddr_in *to, const uint8_t
     uint8_t pkt[TUN_PKT];
     int n = tl_seal(t, L, pt, len, pkt);
     if (n <= 0) return;
-    tl_sendto(t, to, pkt, n);
+    tl_sendto_link(t, L, to, pkt, n);
     tl_after_seal(t, L);
 }
 
@@ -281,12 +319,12 @@ void tl_send_slot(loctun *t, tlink *L, int slot, const uint8_t *pt, int len)
     n = tl_seal(t, L, pt, len, b + 9);
     if (n <= 0) return;
     if (slot == 0) {
-        tl_sendto(t, &L->direct, b + 9, n);
+        tl_sendto_link(t, L, &L->direct, b + 9, n);
     } else {
         memcpy(b, "SBN1", 4);
         b[4] = SN_RELAY;
         put32be(b + 5, L->relay_link);
-        tl_sendto(t, &t->relays[slot - 1].addr, b, n + 9);
+        tl_sendto_link(t, L, &t->relays[slot - 1].addr, b, n + 9);
     }
     L->last_tx = tl_now(t);
     InterlockedIncrement(&L->s_tx);

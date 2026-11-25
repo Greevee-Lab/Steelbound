@@ -97,6 +97,17 @@ double locroute_loss(const locroute_path *p, double now)
     return ev >= 4 ? (double)lost / (double)ev : 0.0;
 }
 
+double locroute_far_extra(double base)
+{
+    return base > LOCROUTE_FAR_MS ? LOCROUTE_FAR_K * (base - LOCROUTE_FAR_MS) : 0.0;
+}
+
+double locroute_hyst(double score)
+{
+    double h = LOCROUTE_HYST_REL * score;
+    return h > LOCROUTE_HYST_MS ? h : LOCROUTE_HYST_MS;
+}
+
 int locroute_alive(const locroute_path *p, double now)
 {
     double base, ago, ivl;
@@ -105,7 +116,9 @@ int locroute_alive(const locroute_path *p, double now)
     base = p->srtt + 4.0 * p->jit;
     ivl = p->ivl > 0 ? p->ivl : LOCROUTE_IVL;
     ago = now - p->last_ok;
-    if (ago > 3.0 * ivl + base + 100.0) return 0;
+    /* W494: auf weiten Wegen (Basis > 150 ms) reissen Burst-Verluste von 4-6 Proben sonst die Ausfallgrenze (Wechsel
+     * ohne echten Ausfall, Weg springt). Zuschlag 1,5 x (Basis - 150 ms); darunter unveraendert. */
+    if (ago > 3.0 * ivl + base + 100.0 + locroute_far_extra(base)) return 0;
     if (ago > ivl + base + 30.0) return 1;
     return 2;
 }
@@ -211,7 +224,7 @@ int locroute_step(locroute *r, double now, int ready, int *why)
     b = locroute_best(r, now, 0);
     if (b >= 0 && b != act) {
         double sa = locroute_score(&r->p[act], now), sb = locroute_score(&r->p[b], now);
-        if (sa >= 0 && sa - sb > LOCROUTE_HYST_MS) {
+        if (sa >= 0 && sa - sb > locroute_hyst(sa)) { /* W494: ab 250 ms Bewertung 10 % statt fest 25 ms */
             if (r->cand != b) {
                 r->cand = b;
                 r->cand_since = now;

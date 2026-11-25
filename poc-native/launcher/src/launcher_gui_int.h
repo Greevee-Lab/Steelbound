@@ -301,7 +301,7 @@ typedef struct {
     int checked;
     int hover;
 } uictl_t;
-#define UI_MAX 288 /* W287: + Symbole; W373: 240 war voll (letzter Knopf des Belegungsdialogs fehlte) */
+#define UI_MAX 320 /* W287: + Symbole; W373: 240 war voll (letzter Knopf des Belegungsdialogs fehlte); W487: 288 voll (+4 Gamertag) */
 #define EDGE_W1 88
 /* W278 ORIG-FLAG: Hinweis "nicht die Original-Optik" (Block "W278 ORIGFLAG" vor build_controls) */
 #define ID_ORIG_RESET 2780     /* Spielen: "Back to original" (nur Grafik) */
@@ -669,6 +669,25 @@ static const char kCxFixture[] =
 #define ID_LNET_MSN 2808    /* W473: Schalter steelnet-Chat im Spiel erlauben (user_loc.cfg loc_chat_mission_sn, Standard 0) */
 #define ID_LNET_MLOBBY 2809 /* W473: Schalter Lobby-Chat im Spiel erlauben (loc_chat_mission_lobby, Standard 1) */
 #define ID_LNET_MTEAM 2810  /* W473: Schalter Team-Chat im Spiel erlauben (loc_chat_mission_team, Standard 1) */
+#define ID_LNET_CAMP 2812   /* W491 CAMP-CLIENT: nur intern - Auswahl Kampagne Saison / Testkampagne (Lobby & Chat) */
+#define ID_NRQ_YES 2813     /* W496 NET-TELEMETRY: Dialog "anonyme Netzwerkstatistik" - Ja (Standard-Knopf) */
+#define ID_NRQ_NO 2814      /* W496: ... Nein danke */
+#define ID_LNET_NETREP 2815 /* W496: Schalter "Anonyme Netzwerkstatistik" (LoC > Netzwerk, Reiter Network) */
+/* W496 (launcher_gui_netrep.c) */
+extern int g_nrq_cfg, g_nrq_dismiss, g_nrq_open, g_nrq_asked_now;
+int nrq_should_ask(int cfg, int dismiss, int steel, int upd_ask);
+int nrq_consent(void);
+void nrq_set_append(char *set, size_t cap, int onl);
+__declspec(noinline) void w496_gui_selftest(int *pass, int *fail);
+void nrq_load(void);
+void nrq_eval(void);
+void nrq_set(int yes);
+void nrq_dismiss(void);
+void nrq_build(HWND w);
+void nrq_relabel(void);
+int nrq_visible(int id);
+int nrq_command(int id);
+void nrq_paint(void);
 #define LOC_SUM_Y (CY0 + 216) /* Karte "Ready to play" (wie SB) */
 #define LOC_SUM_H 220         /* 8 px Luft bis zum Band (OB_Y_LOC) */
 #define LOC_DISC_Y CY0        /* Erweitert: Disc-Karte */
@@ -715,7 +734,7 @@ static const char *const kOnlErr[][2] = {
 #define WM_APP_ACC (WM_APP + 22) /* Ergebnis eines Konto-Auftrags (l = acc_job_t*) */
 #define ID_ACC_NAME 2850       /* Karte/Seite: Kontoname */
 #define ID_ACC_CREATE 2851     /* Karte/Seite: Konto erstellen */
-#define ID_ACC_X_LOGIN 2852    /* W418: Aufklapper Login und Passwort (frueher "Name pruefen", entfaellt) */
+#define ID_ACC_X_LOGIN 2852    /* W418: Login und Passwort (W502: Knopf, oeffnet das Formular in der Karte) */
 #define ID_ACC_SIGNIN 2853     /* Karte: Ich habe schon ein Konto (-> Kontoseite) */
 #define ID_ACC_DISCORD 2854    /* Karte: Mit Discord verbinden */
 #define ID_ACC_MANAGE 2855     /* Karte: Konto verwalten (-> Kontoseite) */
@@ -726,40 +745,62 @@ static const char *const kOnlErr[][2] = {
 #define ID_ACC_V_LOGINBTN 2860 /* Seite: anmelden / sichern / speichern */
 #define ID_ACC_V_CODE 2861     /* Seite: ein Codefeld (Wiederherstellungs- oder Uebertragungscode, Format entscheidet) */
 #define ID_ACC_V_CODEBTN 2862
-#define ID_ACC_X_CODE 2863     /* W418: Aufklapper "Mit einem Code" (frueher Feld Wiederherstellungscode) */
-#define ID_ACC_X_MANAGE 2864   /* W418: Aufklapper "Verwalten" (mit Konto; frueher Knopf Wiederherstellungscode) */
+#define ID_ACC_X_CODE 2863     /* W418: "Mit einem Code" (W502: Knopf, oeffnet das Codeformular in der Karte) */
+/* 2864: frueher Aufklapper "Verwalten" (W502: Karte "Kontoeinstellungen", immer sichtbar) */
 #define ID_ACC_V_RECSHOW 2865  /* Seite (mit Konto): Code anzeigen */
 #define ID_ACC_V_RECCOPY 2866  /* Seite (mit Konto): Code kopieren */
 #define ID_ACC_V_DELETE 2867   /* Seite: Konto loeschen (Rueckfrage) */
 #define ID_ACC_V_FORGET 2868   /* Seite: auf diesem PC abmelden */
 #define ACC_PRIV_Y (WIN_H - BOT_H - 46) /* Datenschutzzeile (zwei Zeilen, ueber der Fussleiste) */
 #define ACC_TIMER 418        /* W418: Namenspruefung beim Tippen (entprellt) */
+/* W487 LIVE-GAMERTAG: Gamertag-Felder (ausserhalb ID_ACC_FIRST..LAST, dort liegen ID_NAVSUB_*) */
+#define ID_ACC_GT 2874       /* Kontoseite, kein Konto: Gamertag beim Erstellen (Vorschlag vom Dienst) */
+#define ID_ACC_X_GT 2875     /* Kontoseite, Gamertag-Karte mit Gamertag: "Aendern ..." (W502: Knopf statt Aufklapper im Kopf) */
+#define ID_ACC_V_GT 2876     /* Kontoseite, Gamertag-Karte: neuer Gamertag */
+#define ID_ACC_V_GTBTN 2877  /* Kontoseite, Gamertag-Karte: setzen/aendern */
+#define ACC_GT_TIMER 487     /* W487: Gamertag-Pruefung beim Tippen (entprellt) */
+/* W502 ACCOUNT-PAGE: Uebersicht "Was du spielen kannst" (je Zeile ein Knopf zur naechsten Aktion) und Abbrechen der
+ * eingebetteten Formulare (Gamertag aendern, Login, Code) */
+#define ID_ACC_O_ONLINE 2882   /* Zeile Online: Konto erstellen (kein Konto) bzw. Erneut versuchen (Status unbekannt) */
+#define ID_ACC_O_LIVE 2883     /* Zeile Xbox Live & Kampagne: Gamertag waehlen (springt zur Gamertag-Karte) */
+#define ID_ACC_O_SEC 2884      /* Zeile Gesichert: Konto sichern (springt zur Karte Sichern) */
+#define ID_ACC_V_GTCANCEL 2885
+#define ID_ACC_V_LGCANCEL 2886
+#define ID_ACC_V_CDCANCEL 2887
+#define ACC_W502_ID(id) ((id) >= ID_ACC_O_ONLINE && (id) <= ID_ACC_V_CDCANCEL)
+#define ACC_HL_TIMER 502       /* Hervorhebung der Zielkarte nach einem Sprung */
+enum { ACC_CARD_NONE, ACC_CARD_OV, ACC_CARD_GT, ACC_CARD_SEC, ACC_CARD_SET, ACC_CARD_NEW, ACC_CARD_HAVE, ACC_CARD_OFF };
 enum { ACC_OP_STATUS = 1, ACC_OP_CHECK, ACC_OP_CREATE, ACC_OP_DISCORD_LINK, ACC_OP_DISCORD_LOGIN,
-       ACC_OP_LOGIN_SET, ACC_OP_LOGIN, ACC_OP_TRANSFER, ACC_OP_RECOVERY, ACC_OP_DELETE };
+       ACC_OP_LOGIN_SET, ACC_OP_LOGIN, ACC_OP_TRANSFER, ACC_OP_RECOVERY, ACC_OP_DELETE,
+       ACC_OP_GT_CHECK, ACC_OP_GT_SET };
 typedef struct {
     HWND h;
     int op, gen;
-    char a[64];          /* Name / Login / Code */
+    char a[64];          /* Name / Login / Code / W487: Gamertag */
     char b[300];         /* Passwort (wird geloescht) */
+    char c[64];          /* W487: Gamertag beim Erstellen bzw. Vorschlagsbasis (gamertag_check suggest) */
+    int fid;             /* W487: Feld der Gamertag-Pruefung (ID_ACC_GT / ID_ACC_V_GT) */
     char dir[1200];
     lacc_srv_t srv;
     lacc_store_t st;     /* Eingang: aktuelles Konto; Ausgang: neues Konto */
     lacc_status_t status;
+    lacc_gtcheck_t gtc;  /* W487 */
+    lacc_gtset_t gts;    /* W487 */
     int avail, rc;
     char err[64];
 } acc_job_t;
 /* W418: Zustand der Kontoseite (ein Zustand, ein naechster Schritt) */
 enum { ACCS_OFF, ACCS_NONE, ACCS_UNSEC, ACCS_SEC, ACCS_UNK };
+/* W502 ACCOUNT-PAGE: eine Rechnung fuer Steuerelemente und Zeichnen (logisch). Mit Konto: Uebersicht, Gamertag,
+ * darunter Sichern (links) | Kontoeinstellungen (rechts). Kein Konto: Uebersicht, darunter Erstellen | Schon ein Konto.
+ * -1 = Teil nicht da. */
 typedef struct {
     int st;
-    int hh;          /* Kopfkarte (y = CY0) */
-    int ay, ah, lh;  /* Hauptkarte(n): kein Konto = zwei Karten (lh = linke Karte), ungesichert = Sichern-Karte */
-    int xl, xc;      /* Aufklapper Login / Code (y) */
-    int lg;          /* Login-Felder (y der ersten Beschriftung) */
-    int cd;          /* kein Konto: Codefeld (y der Beschriftung) */
-    int rec;         /* ungesichert: Spalte Wiederherstellungscode (y) */
-    int my, mh;      /* Verwalten (my < 0 = zu) */
-    int r_dc, r_lg, r_lgx, r_rec, r_code, r_out, r_del;
+    int ov_y, ov_h;          /* Uebersicht "Was du spielen kannst" */
+    int gt_y, gt_h;          /* Gamertag-Karte (mit Konto) */
+    int lo_y, lo_h;          /* untere Reihe */
+    int lx, lw, rx, rw;      /* linke / rechte Karte der unteren Reihe */
+    int r_dc, r_lg, r_rec;   /* Zeilen der Karte Sichern (y) */
 } acc_geo_t;
 typedef struct {
     const char *label;
@@ -1230,6 +1271,49 @@ void lan_kind_set(int v);
 void lan_field_changed(int id);
 int lan_room_valid(const char *r);
 int lan_set_append(char *set, size_t cap);
+/* W487 LIVE-GAMERTAG / W501 ONLINE-BOTH: Verbindung der Karte Match nur noch Online/LAN. Online mit steelnet-Konto und
+ * Gamertag (lnet_live_on) startet mit loc_live=1 per --set (im Spiel System Link oder Xbox Live waehlbar), ohne
+ * Gamertag nur System Link, LAN nie. launcher_loc_live=1 (alt) wird beim Laden einmalig zu Online (onl_load).
+ * W485 MERGEFIX: einziger Weg ist dieses Dropdown (der W485-Schalter unter Lobby & Chat entfiel). */
+void lnet_kind_set(int k);   /* 0 = Online (steelnet), 1 = LAN */
+int lnet_kind_get(void);
+int lnet_live_ok(void);      /* W485/W487: Live startbar = nicht LAN, steelnet-Konto mit Gamertag (acc_live_state OK) */
+int lnet_live_on(void);      /* W501: Online mit Gamertag = Stufe steelnet + lnet_live_ok */
+int live_set_append(char *set, size_t cap, int onl); /* ";loc_live=1" nur bei onl + lnet_live_ok; 1 = angehaengt */
+enum { ACC_LIVE_OK, ACC_LIVE_OFF, ACC_LIVE_NOACC, ACC_LIVE_UNK, ACC_LIVE_NOGT, ACC_LIVE_GTOFF };
+int acc_live_state(void);    /* Startbarkeit Live aus dem letzten status (kein Netz) */
+const char *acc_live_text(int st); /* Hinweis (aktive Sprache), NULL bei ACC_LIVE_OK */
+int acc_live_prestart(void);  /* W501: 1 = jetzt starten; 0 = Gamertag-Stand unbekannt, Status laeuft, Start folgt */
+void acc_gt_tick(void);      /* W487: entprellte Gamertag-Pruefung (ACC_GT_TIMER) */
+void acc_gt_status_text(const char *status, long long next_at, const char *name, char *out, size_t cap);
+const char *acc_card_gt(char *buf, size_t cap, COLORREF *c);   /* Karte Match & network (gesichert) */
+const char *acc_gt_line1(char *buf, size_t cap, COLORREF *c);  /* Gamertag-Karte Zeile 1 */
+const char *acc_gt_limit(char *buf, size_t cap);               /* Gamertag-Karte Grenze */
+int live_info(char *out, size_t cap, COLORREF *col);           /* Infozeile der Karte Match (Online, W501) */
+/* W491 CAMP-CLIENT: Kampagnenstatus fuer Online mit Gamertag (W501; launcher_camp.h). Verfuegbar = Konto + Gamertag (acc_live_state)
+ * + aktuelle Version (loc_ver_gate) + Zugang erreichbar (camp_kick: einmalige TLS-Pruefung mit Pin im Hintergrund,
+ * Ergebnis 5 min gecacht, Fehler nach 60 s erneut). Start mit loc_live=1: loc_camp=1, intern mit Testkampagne
+ * zusaetzlich loc_camp_id=test (Community nie). */
+#define WM_APP_CAMP (WM_APP + 49)
+extern int g_camp_test;              /* intern: 1 = Testkampagne (user.cfg launcher_loc_camp_test); Community immer 0 */
+extern int g_camp_reach[2];          /* LCAMP_R_* je Kampagne (0 Saison, 1 Test) */
+extern int g_camp_busy, g_camp_gen, g_camp_dry, g_camp_dry_n;
+int camp_sel(void);                  /* 0 Saison, 1 Testkampagne (Community immer 0) */
+int camp_status(void);               /* LCAMP_* */
+const char *camp_text(int st, char *buf, size_t cap); /* Hinweis (aktive Sprache), eine Zeile */
+int camp_kick(void);                 /* Pruefung anstossen, wenn faellig; 1 = gestartet (Selbsttest: gezaehlt) */
+void camp_apply(int k, int reach);   /* Ergebnis uebernehmen (UI-Thread; Selbsttest direkt) */
+void camp_msg(LPARAM lp, WPARAM wp); /* WM_APP_CAMP */
+void camp_fixture(int reach);        /* Shots/Selbsttest: beide Kampagnen mit diesem Ergebnis, nie Netz */
+int camp_set_append(char *set, size_t cap); /* ";loc_camp=1" (+ intern ";loc_camp_id=test"); nur nach live_set_append */
+void camp_pick(void);                /* intern: Auswahl Saison/Testkampagne (ID_LNET_CAMP) */
+int camp_info2(char *l1, size_t c1, char *l2, size_t c2, COLORREF *col2); /* Live bereit: Zeile 1 + Kampagne; sonst 0 */
+const char *camp_texts_fit(void);    /* Selbsttest: NULL = alle Kampagnenzeilen passen einzeilig, sonst der Text */
+extern int g_acc_x_gt;
+extern int g_acc_gt_user;
+extern char g_acc_gtmsg[200];
+extern int g_acc_gtmsg_id;
+extern int g_acc_live_pending;
 int loc_tip_id(int id) /* W387: Tooltip am Element (tips_build, Text in xtip_text) */;
 extern int g_onl_fix_srv;
 extern int g_onl_fixture;
@@ -1340,7 +1424,6 @@ extern int g_acc_try_op;
 extern char g_acc_last_err[64];
 extern int g_acc_x_code;
 extern int g_acc_x_login;
-extern int g_acc_x_manage;
 extern char g_acc_st_err[24];
 extern char g_acc_fmsg[200];
 extern int g_acc_fmsg_id;
@@ -1354,10 +1437,17 @@ void acc_refresh(void);
 void acc_done(acc_job_t *j);
 void acc_page_shown(void);
 void acc_play_shown(void);
-int acc_link_id(int id);
 int acc_danger_id(int id);
-void acc_link_paint(canvas_t *c, const uictl_t *u, int w, int h, const wchar_t *txt, int n, int focus, int dis);
 int acc_visible(int id, int page);
+/* W502 ACCOUNT-PAGE: Einsprung fuer andere Seiten (z. B. W501 Match ohne Gamertag): Kontoseite oeffnen, Gamertag-Karte
+ * zeigen, Feld fokussieren (mit Gamertag: Knopf "Aendern"), Karte kurz hervorheben. Nur im eigenen Fenster, kein
+ * Vordergrund. */
+void acc_open_gamertag(void);
+void acc_hl_tick(void);          /* ACC_HL_TIMER: Hervorhebung nach einem Sprung beenden */
+extern int g_acc_focus_id;       /* Selbsttest: zuletzt angeforderter Fokus der Kontoseite (ID) */
+extern int g_acc_hl;             /* hervorgehobene Karte (ACC_CARD_*, 0 = keine) */
+int acc_page_cards(RECT *r, int *kind, int cap); /* Selbsttest: gezeichnete Karten der Kontoseite (logisch) */
+int acc_page_texts_fit(char *why, size_t cap);   /* Selbsttest: alle Texte der Seite passen (Zustand, Sprache) */
 int acc_view_active(void);
 int acc_sub_active(void);
 void acc_layout(void);
@@ -1477,6 +1567,8 @@ void gameswitch_gui_selftest(int *pass, int *fail);
 void header_polish_selftest(int *pass, int *fail);
 void loc_gate_gui_selftest(int *pass, int *fail);
 void loc_lan_gui_selftest(int *pass, int *fail); /* W454 */
+void loc_live_gui_selftest(int *pass, int *fail); /* W487 */
+void camp_gui_selftest(int *pass, int *fail);     /* W491 */
 void r1_polish_gui_selftest(int *pass, int *fail);
 __declspec(noinline) void locver_gui_selftest(int *pass, int *fail);
 void pergame_gui_selftest(int *pass, int *fail);
@@ -1489,6 +1581,8 @@ __declspec(noinline) void locip_gui_selftest(int *pass, int *fail);
 __declspec(noinline) void acc_gui_selftest(int *pass, int *fail);
 __declspec(noinline) void accpage_gui_selftest(int *pass, int *fail);
 __declspec(noinline) void accux_gui_selftest(int *pass, int *fail);
+__declspec(noinline) void w487_gt_gui_selftest(int *pass, int *fail); /* W487 */
+__declspec(noinline) void w502_accpage_gui_selftest(int *pass, int *fail); /* W502 ACCOUNT-PAGE (Fall 75e) */
 __declspec(noinline) void onl_gui_selftest(int *pass, int *fail);
 __declspec(noinline) void smooth_gui_selftest(int *pass, int *fail);
 __declspec(noinline) void lnet_gui_selftest(int *pass, int *fail);
@@ -1498,6 +1592,7 @@ __declspec(noinline) void locsblook_gui_selftest(int *pass, int *fail); /* W459 
 __declspec(noinline) void w465_gui_selftest(int *pass, int *fail); /* W465 */
 __declspec(noinline) void w476_gui_selftest(int *pass, int *fail); /* W476 */
 __declspec(noinline) void w478_gui_selftest(int *pass, int *fail); /* W478 */
+__declspec(noinline) void w486_gui_selftest(int *pass, int *fail); /* W486 */
 __declspec(noinline) void loc169_gui_selftest(int *pass, int *fail);
 __declspec(noinline) void fpsmon_gui_selftest(int *pass, int *fail);
 void porig_gui_selftest(int *pass, int *fail);

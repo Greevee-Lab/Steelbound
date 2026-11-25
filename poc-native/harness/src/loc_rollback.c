@@ -1141,7 +1141,7 @@ static void rb_parse_opts(const char *p)
             g_loc_cs_note = s_csn ? rb_cs_note : NULL;
         }
         else if (strncmp(p, "dmin=", 5) == 0) { s_rbi_dmin = atoi(p + 5); }           /* W346 */
-        else if (strncmp(p, "dmax=", 5) == 0) { s_rbi_dmax = atoi(p + 5); }
+        else if (strncmp(p, "dmax=", 5) == 0) { s_rbi_dmax = atoi(p + 5); s_rbi_dmax_set = 1; }
         while (*p && *p != ';') p++;
     }
 }
@@ -1235,6 +1235,11 @@ int loc_rb_install(void)
         if (s_rbi_delay < 0) s_rbi_delay = 0; /* W346: 0 = adaptiv nach Umlaufzeit (dmin..dmax) */
         if (s_rbi_delay > 8) s_rbi_delay = 8;
         if (s_rbi_dmin < 1) s_rbi_dmin = 1;
+        /* W494 LOC-FARPING: online (steelnet) darf die adaptive Verzoegerung bis 8 Ticks (400 ms) wachsen (500 ms RTT -> D 6, mit Schwankung bis 8), damit bei
+         * weiten Lobbys (AU-EU ~320 ms) fremde Eingaben rechtzeitig ankommen statt jede zu spaet (dmax 3 = 150 ms, W447: ab 250 ms jede spaet).
+         * Die Formel rbn_pick_delay bleibt; unter ~230 ms RTT ergibt sie wie bisher hoechstens 3. LAN/ohne Treffpunkt
+         * unveraendert 3. */
+        if (!s_rbi_dmax_set && g_cfg.loc_lobby[0]) s_rbi_dmax = RBI_DMAX_ONLINE;
         if (s_rbi_dmax > 8) s_rbi_dmax = 8;
         if (s_rbi_dmax < s_rbi_dmin) s_rbi_dmax = s_rbi_dmin;
         if (s_rbi_maxpred < 1) s_rbi_maxpred = 1;

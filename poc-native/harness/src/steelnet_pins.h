@@ -30,3 +30,13 @@
 #ifndef SB_STEELNET_SPKI2
 #define SB_STEELNET_SPKI2 "a8327e9afec35d4a4a33610fd036c1d6f7f40af93025f8ffb3e0e45ac47dbcb1" /* Folgeschluessel, offline verwahrt */
 #endif
+
+/* W491 CAMP-CLIENT: Steelbound-Zugang des Kampagnenservers (CAMP-GATEWAY W490, LOC_CAMPAIGN.md). Host = SB_STEELNET_HOST,
+ * Port 47100 (Saison) bzw. 47103 (Testkampagne). Pin wie oben: SHA-256 ueber das DER-SubjectPublicKeyInfo des
+ * Gateway-Zertifikats (Server: /etc/steelcore/gateway/server.crt). SPKI2 = Folgeschluessel (noch keiner: leer). */
+#ifndef SB_CAMPAIGN_SPKI1
+#define SB_CAMPAIGN_SPKI1 "34a25f1a71ab798a147f5c4b652fade83542cdfc0b9d0035f4e3f970101fc635" /* EU-Zugang seit 25.11. (W490) */
+#endif
+#ifndef SB_CAMPAIGN_SPKI2
+#define SB_CAMPAIGN_SPKI2 ""
+#endif

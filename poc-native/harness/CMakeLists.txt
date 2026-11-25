@@ -226,12 +226,14 @@ target_link_libraries(sb_emu PRIVATE d3d11 dxgi dxguid dbghelp windowscodecs ole
 # alle Schnittstellen, kein DNS, nur mit loc_boot=1) in beiden Fassungen (Nutzer 15.11.: "keine Geheimnisse").
 # Community: clean_check-Freigaben in editions/clean_allow.tsv (Kategorie netz); der LoC-Start im Launcher
 # bleibt dort gesperrt (lgame_loc_client_ready).
-target_sources(sb_emu PRIVATE src/loc_net.c src/loc_net_core.c src/loc_netsim.c src/loc_route.c) # W395: loc_route (Wegwahl)
+target_sources(sb_emu PRIVATE src/loc_net.c src/loc_net_core.c src/loc_netsim.c src/loc_route.c src/loc_live.c src/loc_live_hle.c src/loc_camp.c src/loc_camp_bridge.c) # W395: loc_route (Wegwahl); W479: loc_live (Xbox-Live-Modus)
 # W324 LOC-NETPLAY: eigener UDP-Transport mit Internet-Treffpunkt (DNS, Relays). W389: seit 0.3.0 auch im
 # Community-Export; nur mit -DSB_LOC_PLAY=OFF bekommt Community den Platzhalter (Original-Transport).
 # W464 NET-CORE: Transport in Module aufgeteilt (gemeinsamer Zustand loc_tun_int.h, Modulkarte BERICHT_M2 W464).
 set(SB_LOC_TUN_FULL src/loc_tun.c src/loc_tun_link.c src/loc_tun_wire.c src/loc_tun_lobby.c src/loc_tun_pub.c
-    src/loc_tun_lan.c) # W454 LOC-LAN-MODE: Entdeckung im LAN (ohne steelnet)
+    src/loc_tun_lan.c # W454 LOC-LAN-MODE: Entdeckung im LAN (ohne steelnet)
+    src/loc_tun_live.c # W482 LIVE-MATCH: Xbox-Live-Sessions ueber steelnet
+    src/loc_tun_netrep.c) # W496 NET-TELEMETRY: Netzbericht an steelnet (nur mit Zustimmung)
 if(SB_EDITION_COMMUNITY AND SB_LOC_PLAY)
   if(NOT EXISTS ${CMAKE_CURRENT_SOURCE_DIR}/src/loc_tun.c)
     message(FATAL_ERROR "SB_LOC_PLAY=ON braucht src/loc_tun.c (Community-Export ab W389 bzw. 0.3.0)")
@@ -331,6 +333,16 @@ target_include_directories(hlock_selftest PRIVATE src)
 target_link_libraries(hlock_selftest PRIVATE synchronization)
 target_compile_options(hlock_selftest PRIVATE /W3)
 
+# ---- loc_mem_selftest: LOCMEM-Allokator (Release, Quarantaene, Groessenklassen), synthetisch (W493 LOC-MEMLEAK) ----
+add_executable(loc_mem_selftest
+  tests/loc_mem_selftest.c
+  src/loc_mem.c
+  src/hlock.c
+)
+target_include_directories(loc_mem_selftest PRIVATE src)
+target_link_libraries(loc_mem_selftest PRIVATE synchronization)
+target_compile_options(loc_mem_selftest PRIVATE /W4 /WX)
+
 # ---- iso_vfs_check: XDVDFS-Abbild pruefen/vergleichen (W150 ISO-DIRECT) ----
 add_executable(iso_vfs_check
   tests/iso_vfs_check.c
@@ -368,6 +380,8 @@ add_executable(loc_net_selftest
   src/loc_chat.c
   src/loc_netsim.c
   src/loc_route.c
+  src/loc_live.c
+  src/loc_camp.c
   ${SB_LOC_TUN_SRC}
   ${SB_LOC_SEC_SRC}
   src/sb_sha256.c
@@ -375,6 +389,15 @@ add_executable(loc_net_selftest
 target_include_directories(loc_net_selftest PRIVATE src)
 target_link_libraries(loc_net_selftest PRIVATE sb_bearssl ws2_32 winmm bcrypt secur32 crypt32)
 target_compile_options(loc_net_selftest PRIVATE /W3)
+
+# ---- loc_live_selftest: W479 LIVE-LOGON Kern (Logon-/Task-Rueckgaben, Dienststatus, Gamertag-Regel, Pseudo-XUID, Merkdatei) ----
+add_executable(loc_live_selftest
+  tests/loc_live_selftest.c
+  src/loc_live.c
+  src/loc_camp.c
+)
+target_include_directories(loc_live_selftest PRIVATE src)
+target_compile_options(loc_live_selftest PRIVATE /W4 /WX)
 
 # ---- loc_chat_selftest: W437 LOC-CHAT Kern (Codec, Bereinigung, Ratenbremse, Stummschalten, Fuzz, Minidump-Loeschen) ----
 add_executable(loc_chat_selftest
@@ -480,7 +503,7 @@ sb_add_verinfo(sb_emu "Steelbound client core")
 
 # W116: Edition an alle C-Ziele (nur community setzt etwas)
 if(SB_EDITION_COMMUNITY)
-  foreach(t sb_ldr sb_emu sbc_probe input_selftest render_selftest iso_vfs_check)
+  foreach(t sb_ldr sb_emu sbc_probe input_selftest render_selftest iso_vfs_check loc_net_selftest)  # 0.6.0: loc_net_selftest bindet loc_tun_netrep.c (sb_edition.h) ein
     target_compile_definitions(${t} PRIVATE SB_EDITION_COMMUNITY=1)
     target_link_options(${t} PRIVATE "/PDBALTPATH:%_PDB%")
     if(SB_LOC_PLAY)

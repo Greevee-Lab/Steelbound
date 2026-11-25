@@ -21,6 +21,8 @@
 #include "loc_assist.h" /* W440 LOC-LOBBY-MODES */
 #include "sb_profile.h" /* W440: g_sba_loc */
 #include "loc_chat.h" /* W474: lch_session_from */
+#include "loc_live_hle.h" /* W479 LIVE-LOGON */
+#include "loc_camp_bridge.h" /* W491 CAMP-CLIENT */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -32,6 +34,8 @@ typedef uint32_t u32;
 static locnet g_ln;
 void loc_net_bye(void)
 {
+    loc_live_log_counts(1); /* W485 */
+    loccamp_bridge_stop(); /* W491: Bruecke beenden, Zaehler ins Log */
     if (g_ln.tun) loctun_bye_all(g_ln.tun); /* W366 */
 }
 static volatile LONG s_first[40];
@@ -39,6 +43,24 @@ static volatile LONG s_first[40];
 static void ln_log(const char *m)
 {
     HLOG_I("%s", m);
+}
+
+/* W496 NET-TELEMETRY: Spielzustand fuer den Netzbericht (Transport-Thread, hoechstens 1x/s; nur Zaehler, keine Eingaben) */
+extern u32 s_rbi_end_desync;          /* loc_rb_int.h: Missionsenden wegen Hash-Abweichung */
+extern volatile unsigned g_sb_gpu_vendor; /* d3d11_render.c: PCI-Hersteller-ID der benutzten GPU */
+static int ln_game_info(loctun_game_info *o)
+{
+    loc_rb_hud h;
+    memset(o, 0, sizeof *o);
+    o->npeers = -1;
+    o->gpu_vendor = g_sb_gpu_vendor;
+    if (loc_rb_hud_read(&h)) {
+        o->rb_total = h.rb_total;
+        o->npeers = h.npeers;
+    }
+    o->in_mission = loc_rb_in_mission();
+    o->desyncs = s_rbi_end_desync;
+    return 1;
 }
 
 static void ln_first(int id, const char *name, u32 ra)
@@ -180,11 +202,56 @@ static u32 __stdcall ln_XNetGetConnectStatus(u32 ina)
     FIRST(14, "XNetGetConnectStatus");
     return 2u; /* XNET_CONNECT_STATUS_CONNECTED */
 }
+/* W485 LIVE-QOS: XNQOS-Block im Live-Modus. Ziele 0..cxna-1 = Hosts/Mitspieler (XNADDR-Zeigerliste apxna),
+ * danach cina Dienste (Dienst 6 = steelnet). RTT je Ziel aus dem Transport (loctun_qos_target/_service), Bitrate je
+ * Weg >= 205 200 bit/s, alle Eintraege COMPLETE. Freigabe wie bisher mit locnet_qos_free (free). */
+static void *ln_qos_live(u32 cxna, u32 apxna, u32 cina, u32 probes)
+{
+    static volatile LONG logged;
+    loclive_qos_val v[LOCLIVE_QOS_MAX_TARGETS];
+    unsigned n = cxna + cina, i;
+    uint32_t sz;
+    uint8_t *q;
+    if (n == 0) n = 1;
+    if (n > LOCLIVE_QOS_MAX_TARGETS) n = LOCLIVE_QOS_MAX_TARGETS;
+    for (i = 0; i < n; i++) {
+        v[i].src = LOCLIVE_QOS_SRC_NONE;
+        v[i].rtt_min = v[i].rtt_med = LOCLIVE_QOS_RTT_DEFAULT;
+        if (i < cxna) {
+            u32 px = 0;
+            uint8_t x[LOCNET_XNADDR_SIZE];
+            uint32_t ip;
+            memset(x, 0, sizeof x);
+            ln_copy((u32)(uintptr_t)&px, (const void *)(uintptr_t)(apxna + 4u * i), 4);
+            if (px) ln_copy((u32)(uintptr_t)x, (const void *)(uintptr_t)px, sizeof x);
+            ip = locnet_xnaddr_ip(x);
+            if (ip && ip == g_ln.self_ip) {
+                v[i].src = LOCLIVE_QOS_SRC_DIRECT;
+                v[i].rtt_min = v[i].rtt_med = 1;
+            } else if (g_ln.tun) {
+                loctun_qos_target(g_ln.tun, ip, &v[i]);
+            }
+        } else if (g_ln.tun) {
+            loctun_qos_service(g_ln.tun, &v[i]);
+        }
+    }
+    sz = 8u + LOCLIVE_QOS_INFO_SIZE * n;
+    q = (uint8_t *)calloc(1, sz);
+    if (!q) return NULL;
+    loclive_qos_block(q, sz, probes, v, n);
+    loc_live_qos_note(cxna, cina, probes, v, n, InterlockedIncrement(&logged));
+    return q;
+}
+
 static u32 __stdcall ln_XNetQosListen(u32 pkid, u32 pb, u32 cb, u32 bps, u32 flags)
 {
-    (void)pkid; (void)pb; (void)cb; (void)bps;
+    (void)pkid; (void)pb; (void)cb;
     if (InterlockedExchange(&s_first[15], 1) == 0) {
         HLOG_I("LOCNET: XNetQosListen erster Aufruf (Flags 0x%X)", flags);
+    }
+    if (loc_live_active()) { /* W485: Host meldet Bereitschaft (ENABLE|SET_BITSPERSEC) bzw. Freigabe (0x10) */
+        loc_live_count(LLC_QOS_LISTEN);
+        loc_live_qos_listen(flags, bps);
     }
     return 0;
 }
@@ -198,7 +265,12 @@ static u32 __stdcall ln_XNetQosLookup(u32 cxna, u32 apxna, u32 apkid, u32 apkey,
         HLOG_I("LOCNET: XNetQosLookup erster Aufruf (%u Peers, %u Dienste, %u Proben) -> RTT %d ms", cxna, cina,
                probes, g_ln.rtt_ms);
     }
-    q = locnet_qos_alloc(&g_ln, cxna + cina, probes);
+    if (loc_live_active()) loc_live_count(LLC_QOS_LOOKUP); /* W485 */
+    if (loc_live_active()) { /* W485 LIVE-QOS: je Ziel echte Werte des Transports (System Link unveraendert) */
+        q = ln_qos_live(cxna, apxna, cina, probes);
+    } else {
+        q = locnet_qos_alloc(&g_ln, cxna + cina, probes);
+    }
     if (!q) {
         return WSAENOBUFS;
     }
@@ -209,6 +281,7 @@ static u32 __stdcall ln_XNetQosLookup(u32 cxna, u32 apxna, u32 apkid, u32 apkey,
 static u32 __stdcall ln_XNetQosRelease(u32 q)
 {
     FIRST(17, "XNetQosRelease");
+    if (loc_live_active()) loc_live_count(LLC_QOS_RELEASE); /* W485 */
     locnet_qos_free((void *)(uintptr_t)q);
     return 0;
 }
@@ -240,6 +313,12 @@ static u32 __stdcall ln_setsockopt(u32 s, u32 level, u32 opt, u32 val, u32 len)
 }
 static u32 __stdcall ln_bind(u32 s, u32 a, u32 len)
 {
+    if (loc_live_active() && a && len >= 8) { /* W501: System-Link-Suchport 1201 im Live-Fluss = Spiel ist in System Link */
+        struct sockaddr_in sa;
+        memset(&sa, 0, sizeof sa);
+        ln_copy((u32)(uintptr_t)&sa, (const void *)(uintptr_t)a, 8);
+        if (sa.sin_family == AF_INET && ntohs(sa.sin_port) == 1201) loc_live_syslink_seen();
+    }
     return (u32)locnet_bind(&g_ln, (SOCKET)s, (const struct sockaddr *)(uintptr_t)a, (int)len);
 }
 static u32 __stdcall ln_connect(u32 s, u32 a, u32 len)
@@ -655,6 +734,10 @@ int loc_net_install(void)
         strncpy_s(tc.spki, sizeof tc.spki, g_cfg.loc_lobby_spki, _TRUNCATE);
         strcpy_s(tc.play_mode, sizeof tc.play_mode, g_cfg.loc_play_mode == LAS_ARCADE ? "arcade" : "sim"); /* W440 */
         tc.join_delay_ms = g_cfg.loc_lobby_join_delay;                      /* W446 TEST */
+        tc.resume = g_cfg.loc_lobby_resume;                                  /* W500 */
+        tc.cut_s = g_cfg.loc_lobby_cut;                                      /* W500 TEST */
+        tc.cut_mode = g_cfg.loc_lobby_cut_mode;
+        tc.live = g_cfg.loc_live ? 1 : 0;                                    /* W482 LIVE-MATCH */
         tc.lan = g_cfg.loc_lan && !g_cfg.loc_lobby[0];                       /* W454 LOC-LAN-MODE */
         tc.lan_port = (uint16_t)g_cfg.loc_lan_port;
         strncpy_s(tc.lan_room, sizeof tc.lan_room, g_cfg.loc_lan_room, _TRUNCATE);
@@ -663,7 +746,11 @@ int loc_net_install(void)
         strncpy_s(tc.lan_targets, sizeof tc.lan_targets, g_cfg.loc_lan_targets, _TRUNCATE);
         _snprintf_s(tc.status_path, sizeof tc.status_path, _TRUNCATE, "%s%sloc_net_status.txt", od ? od : "",
                     od ? "/" : "");
+        tc.net_report = g_cfg.net_report == 1;  /* W496: nur mit Zustimmung (ohne Treffpunkt bleibt der Bericht aus) */
+        strncpy_s(tc.netrep_dir, sizeof tc.netrep_dir, hcfg_out_dir(), _TRUNCATE); /* Warteschlange/Laufmarke */
+        tc.gpu_vendor = g_sb_gpu_vendor;
         g_ln.tun = loctun_start(&tc, &g_ln, g_ln.sim, ln_log);
+        if (g_ln.tun) loctun_set_game_fn(g_ln.tun, ln_game_info); /* W496 */
         if (!g_ln.tun) {
             HLOG_W("LOCTUN: Transport nicht gestartet - keine Mitspieler (loc_transport=tcp fuer System Link)");
         }
@@ -679,6 +766,11 @@ int loc_net_install(void)
         FlushInstructionCache(GetCurrentProcess(), p, 5);
     }
     HLOG_I("LOCNET: %u XNet-/Winsock-Einstiege umgelenkt (Bytevergleich ok)", n);
+    if (g_cfg.loc_live) { /* W479 LIVE-LOGON: XOnline-HLE, steelnet als Live-Dienst (Standard aus) */
+        if (!g_ln.tun || !g_cfg.loc_lobby[0])
+            HLOG_W("LOCLIVE: loc_live=1 braucht Treffpunkt (loc_lobby) und eigenen Transport (loc_transport=udp) - Logon wird fehlschlagen");
+        loc_live_install(g_ln.tun);
+    }
     return 1;
 }
 
@@ -832,6 +924,7 @@ void loc_net_tick(int waited_s)
                    ss->udp_lost, ss->nagle_held, ss->send_err, ss->overflow);
         }
     }
+    if (waited_s > 0 && waited_s % 60 == 0) loc_live_log_counts(0); /* W485: Live-Aufrufe als Zaehler (nur bei Aenderung) */
     if (g_ln.tun && waited_s % 10 == 0) { /* W324: Weg, RTT, Verlust, Redundanz je Mitspieler */
         loctun_log_stats(g_ln.tun, waited_s);
     }

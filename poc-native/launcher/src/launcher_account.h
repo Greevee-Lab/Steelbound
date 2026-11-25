@@ -39,13 +39,42 @@ typedef struct {
     int test;            /* 1 = Test-Ueberschreibung (Loopback) aktiv */
 } lacc_srv_t;
 
+/* W487 LIVE-GAMERTAG: Xbox-Live-Gamertag als eigenes Merkmal des Kontos (Regeln/Eindeutigkeit im steelcore-Kern,
+ * steelnet reicht durch). Lokale Vorpruefung lacc_valid_gamertag: 1-15 Zeichen [A-Za-z0-9 ], erstes Zeichen ein
+ * Buchstabe, kein Leerzeichen am Ende, keine zwei Leerzeichen hintereinander. */
+#define LACC_GT_CAP 16       /* 15 Zeichen + Null */
 typedef struct {
     int discord;
     int login;
     char login_name[40];
     long long created;
     int gen;
+    /* W487: "gamertag" (leer = keiner bzw. aelterer Server), "gamertag_next_change" (Unix-s, 0 = jetzt erlaubt),
+     * "gamertag_change_days" (Standard 7), "gamertag_state" ok|off|unavailable ("" = aelterer Server) */
+    char gamertag[LACC_GT_CAP];
+    long long gt_next;
+    int gt_days;
+    char gt_state[16];
 } lacc_status_t;
+
+/* W487: Antwort von gamertag_check (rein geparst, lacc_gtcheck_parse). */
+typedef struct {
+    int has_name;                 /* Antwort enthielt "gamertag" (Pruefung eines Namens) */
+    char gamertag[LACC_GT_CAP];
+    int valid, available;
+    char status[24];              /* ok|taken|similar|reserved|blocked|invalid_length|invalid_characters */
+    char suggestion[LACC_GT_CAP]; /* freier Vorschlag ("" = keiner) */
+} lacc_gtcheck_t;
+
+/* W487: Ergebnis von gamertag_set bzw. des Gamertag-Teils von create. Erfolg: gamertag/next_at gesetzt, bei create
+ * ggf. status = "gamertag_error" (off|unavailable|<status>: Konto angelegt, Gamertag nicht gesetzt). Fehler
+ * gamertag_refused: status = taken|similar|reserved|blocked|invalid_length|invalid_characters|change_limit|unchanged,
+ * next_at bei change_limit. */
+typedef struct {
+    char gamertag[LACC_GT_CAP];
+    long long next_at;
+    char status[24];
+} lacc_gtset_t;
 
 /* ---------------- Krypto (rein) ---------------- */
 void lacc_hmac(const uint8_t *key, size_t klen, const void *msg, size_t n, uint8_t out[32]);
@@ -73,6 +102,9 @@ int lacc_random(void *buf, size_t n); /* 1 = ok (BCryptGenRandom) */
 int lacc_valid_name(const char *s);   /* Pilotname: 1-16 [A-Za-z0-9 _-], kein Guest-/Gast-Praefix */
 int lacc_valid_login(const char *s);  /* Login: 3-32 [A-Za-z0-9 _-] */
 int lacc_valid_password(const char *s); /* 10-256 Bytes */
+int lacc_valid_gamertag(const char *s); /* W487: Regel wie steelcore (siehe oben) */
+/* W487: Gamertag-Statuscode in die Regel-Kurzform (1 = bekannter Code). */
+int lacc_gt_status_known(const char *status);
 
 /* ---------------- Konfiguration ---------------- */
 /* 1 = eingerichtet (Pin gesetzt), 0 = aus. Test-Ueberschreibung nur fuer Loopback. */
@@ -144,7 +176,9 @@ typedef struct {
     int arcade;               /* 1 = ARCADE, 0 = SIM */
     int players, max_players;
     int started;              /* 1 = Spiel laeuft (nicht mehr offen) */
+    int chat;                 /* W485: Live-Session ist ein Chatraum (sonst Match) */
 } lacc_lobby_t;
+#define LACC_LIVE_MAX 6 /* W485 LIVE-QOS: Xbox-Live-Sessions (Gruppe "live" der Aktion lobbies, Server: hoechstens 6) */
 typedef struct {
     int ok;      /* 1 = Liste gelesen */
     int http;    /* HTTP-Status (404 = Server ohne Aktion, 401 = Anmeldung abgelehnt, 429 = zu viele Anfragen) */
@@ -153,6 +187,9 @@ typedef struct {
     int n;       /* Eintraege in l */
     int more;    /* weitere Lobbys, die nicht in der Antwort stehen */
     lacc_lobby_t l[LACC_LOB_MAX];
+    int nlive;      /* W485: Eintraege in lv (eigener, markierter Abschnitt "Xbox Live"; nie mit l gemischt) */
+    int live_more;  /* W485: weitere Live-Sessions */
+    lacc_lobby_t lv[LACC_LIVE_MAX];
     char error[48];
 } lacc_lobbies_t;
 int lacc_lobbies(const lacc_store_t *st, lacc_lobbies_t *o); /* blockierend (Thread); 0 = ok */
@@ -166,8 +203,27 @@ int lacc_lobbies_parse(const char *body, lacc_lobbies_t *o); /* rein (Selbsttest
 int lacc_op_check(const lacc_srv_t *s, const char *name, int *available, char *err, size_t ecap);
 int lacc_op_create(const lacc_srv_t *s, const char *dir, const char *name, lacc_store_t *st,
                    char *err, size_t ecap);
+/* W487: create mit optionalem Gamertag (NULL/"" = ohne). gt (darf NULL sein) bekommt gesetzten Gamertag bzw.
+ * gamertag_error; Fehler "gamertag_refused" (kein Konto angelegt) mit gt->status. Ungueltiger Gamertag lokal:
+ * "invalid_gamertag" (kein Netz). */
+int lacc_op_create_gt(const lacc_srv_t *s, const char *dir, const char *name, const char *gamertag, lacc_store_t *st,
+                      lacc_gtset_t *gt, char *err, size_t ecap);
+/* W487: Rumpf von create (rein, Selbsttest): {"name":"..."[,"gamertag":"..."]} mit JSON-Maskierung. */
+void lacc_create_body(const char *name, const char *gamertag, char *out, size_t cap);
 int lacc_op_status(const lacc_srv_t *s, const lacc_store_t *st, lacc_status_t *o, char *err,
                    size_t ecap);
+/* W487: Antwort von status -> o (rein, Selbsttest/Fuzzer). Gamertag nur, wenn lacc_valid_gamertag. */
+void lacc_status_parse(const char *body, lacc_status_t *o);
+/* W487: gamertag_check (offen, ohne Anmeldung). name und/oder suggest (NULL/"" = weglassen). */
+int lacc_op_gamertag_check(const lacc_srv_t *s, const char *name, const char *suggest, lacc_gtcheck_t *o,
+                           char *err, size_t ecap);
+int lacc_gtcheck_parse(const char *body, lacc_gtcheck_t *o); /* rein; 0 = gueltig */
+void lacc_gtcheck_body(const char *name, const char *suggest, char *out, size_t cap); /* rein */
+/* W487: gamertag_set (angemeldet, Nonce + HMAC wie login_set). o (darf NULL sein): Ergebnis bzw. Ablehnung. */
+int lacc_op_gamertag_set(const lacc_srv_t *s, const lacc_store_t *st, const char *name, lacc_gtset_t *o,
+                         char *err, size_t ecap);
+/* W487: Antwort (Erfolg oder gamertag_refused) -> o (rein). */
+void lacc_gtset_parse(const char *body, lacc_gtset_t *o);
 int lacc_op_login_set(const lacc_srv_t *s, const lacc_store_t *st, const char *login,
                       const char *password, char *err, size_t ecap);
 int lacc_op_login(const lacc_srv_t *s, const char *dir, const char *login, const char *password,

@@ -3,6 +3,7 @@
  * Loopback/private Ziele, verwirft Pakete/Verbindungen fremder Absender. */
 #define _CRT_RAND_S
 #include "loc_net_core.h"
+#include "loc_camp.h" /* W491 CAMP-CLIENT */
 #include "loc_netsim.h"
 #include "loc_tun.h"
 #include "loc_guard.h"
@@ -438,12 +439,41 @@ static void ln_open_mark(locnet *n, SOCKET s, int on)
     InterlockedExchange(&s_walk_lock, 0);
 }
 
+/* W491 CAMP-CLIENT: Kampagnen-Sockets (connect zur virtuellen Kampagnenadresse, auf die Loopback-Bruecke umgelenkt).
+ * Sie tragen das Kampagnen-Protokoll unseres eigenen Servers (TLS, Pin, Rahmenpruefung in der Bruecke), nicht den
+ * Spielverkehr eines Mitspielers: kein Gastfilter, keine Typ-Merkliste, zaehlen nicht als offene Spielsitzung, ein
+ * Stromende geht unveraendert ans Spiel (der Server schliesst nach der Antwort). */
+#define LN_CAMP_MAX 16
+static volatile LONG s_camp[LN_CAMP_MAX];
+static locnet_camp_fn s_camp_fn;
+void locnet_set_camp_redirect(locnet_camp_fn f)
+{
+    s_camp_fn = f;
+}
+static void ln_camp_mark(SOCKET s, int on)
+{
+    int i;
+    for (i = 0; i < LN_CAMP_MAX; i++) {
+        if (on ? InterlockedCompareExchange(&s_camp[i], (LONG)s, 0) == 0
+               : InterlockedCompareExchange(&s_camp[i], 0, (LONG)s) == (LONG)s)
+            return;
+    }
+}
+int locnet_is_camp(SOCKET s)
+{
+    int i;
+    if (s == INVALID_SOCKET || s == 0) return 0;
+    for (i = 0; i < LN_CAMP_MAX; i++)
+        if (s_camp[i] == (LONG)s) return 1;
+    return 0;
+}
+
 static void ln_seen(locnet *n, SOCKET s, int out, const char *buf, int len)
 {
     struct sockaddr_in me;
     int l = sizeof me, sock_type = 0, tl = sizeof sock_type, pos = 0, i, fr = -1;
     ln_walk *w = NULL;
-    if (!buf || len < 1) {
+    if (!buf || len < 1 || locnet_is_camp(s)) { /* W491: Kampagnen-Strom ist kein Spielverkehr */
         return;
     }
     getsockopt(s, SOL_SOCKET, SO_TYPE, (char *)&sock_type, &tl);
@@ -561,6 +591,10 @@ void locnet_note_stream(locnet *n, SOCKET s, int out, const char *buf, int len)
 
 int locnet_closesocket(locnet *n, SOCKET s)
 {
+    if (locnet_is_camp(s)) { /* W491: Kampagnen-Strom, nie in den Spiel-Listen */
+        ln_camp_mark(s, 0);
+        return closesocket(s);
+    }
     ln_open_mark(n, s, 0); /* W474 */
     InterlockedCompareExchange(&n->tcp_listen, 0, (LONG)s); /* W409 */
     ln_walk_reset(s); /* W324 */
@@ -622,6 +656,21 @@ int locnet_connect(locnet *n, SOCKET s, const struct sockaddr *a, int len)
         return connect(s, a, len);
     }
     memcpy(&in, a, sizeof in);
+    if (s_camp_fn && loccamp_is_vip(in.sin_addr.s_addr, in.sin_port)) {
+        /* W491 CAMP-CLIENT: Kampagnen-Transaktion -> Loopback-Bruecke (TLS zum Steelbound-Zugang im Netz-Thread) */
+        int cr = s_camp_fn(s, &in);
+        if (cr <= 0) {
+            ln_logf(n, "LOCCAMP: connect zur Kampagne verweigert (Kampagne nicht verfuegbar)");
+            WSASetLastError(WSAECONNREFUSED);
+            return SOCKET_ERROR;
+        }
+        ln_camp_mark(s, 1);
+        r = connect(s, (struct sockaddr *)&in, sizeof in);
+        e = r ? WSAGetLastError() : 0;
+        ln_logf(n, "LOCCAMP: connect zur Kampagne -> Bruecke (%d, %d)", r, e);
+        if (r) WSASetLastError(e);
+        return r;
+    }
     if (!locnet_ip_allowed(in.sin_addr.s_addr)) {
         ln_logf(n, "LOCNET: connect zu %s verweigert (nicht lokal)", locnet_ip_str(in.sin_addr.s_addr, ipb));
         WSASetLastError(WSAEHOSTUNREACH);
@@ -936,6 +985,7 @@ int locnet_recv(locnet *n, SOCKET s, char *buf, int len, int flags)
         WSASetLastError(WSAEWOULDBLOCK);
         return SOCKET_ERROR;
     }
+    if (locnet_is_camp(s)) return recv(s, buf, len, flags); /* W491: Kampagnen-Strom (Rahmen prueft die Bruecke) */
     ln_walk_lock();
     g = ln_gw_get(s);
     w = g->w;

@@ -623,6 +623,7 @@ static DWORD WINAPI sb_ui_thread(LPVOID unused)
  * GTX 1660 Ti, 20 Spielbilder/s mit Rollback). gpu_pref=1 waehlt per DXGI 1.6 den leistungsstaerksten Adapter; Standard 0 = wie
  * bisher (Standardadapter). Keine Exporte NvOptimusEnablement im Loader: dessen Abbild ueberschreibt das XBE. */
 static unsigned g_ad_n, g_ad_best_mb, g_ad_best_vendor;
+volatile unsigned g_sb_gpu_vendor; /* W496 NET-TELEMETRY: PCI-Hersteller-ID der benutzten GPU (Netzbericht, nur die ID) */
 static char g_ad_best[128];
 
 static IDXGIAdapter *sb_adapter_pick(int hw)
@@ -676,6 +677,7 @@ static void sb_adapter_used(void)
         if (SUCCEEDED(IDXGIAdapter_GetDesc(ad, &d))) {
             WideCharToMultiByte(CP_UTF8, 0, d.Description, -1, nm, (int)sizeof nm, NULL, NULL);
             mb = (unsigned)(d.DedicatedVideoMemory >> 20);
+            g_sb_gpu_vendor = (unsigned)d.VendorId; /* W496 */
             HLOG_I("render: Grafik laeuft auf '%s' (Hersteller 0x%04X, eigener Speicher %u MB, %u Adapter, gpu_pref=%d)", nm,
                    (unsigned)d.VendorId, mb, g_ad_n, g_cfg.gpu_pref);
             if (g_ad_n > 1 && g_ad_best_mb >= 2u * (mb + 256u)) {

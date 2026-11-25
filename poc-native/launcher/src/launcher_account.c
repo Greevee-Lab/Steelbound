@@ -22,6 +22,7 @@
 #include "sb_sha256.h"
 #include "sb_userdata.h"
 #include "sb_version.h" /* W421: sb_netver_strict (min_client_version aus /v1/info) */
+#include "launcher_camp.h" /* W491: --steelnet campaign-probe */
 
 #define printf cli_printf
 
@@ -278,6 +279,36 @@ int lacc_valid_password(const char *s)
 {
     size_t n = s ? strlen(s) : 0;
     return n >= 10 && n <= 256;
+}
+
+/* W487 LIVE-GAMERTAG: Regel wie steelcore - 1-15 Zeichen [A-Za-z0-9 ], erstes Zeichen ein Buchstabe, kein
+ * Leerzeichen am Ende, keine zwei Leerzeichen hintereinander. */
+int lacc_valid_gamertag(const char *s)
+{
+    size_t n, i;
+    if (!s) return 0;
+    n = strlen(s);
+    if (n < 1 || n > 15) return 0;
+    if (!((s[0] >= 'A' && s[0] <= 'Z') || (s[0] >= 'a' && s[0] <= 'z'))) return 0;
+    if (s[n - 1] == ' ') return 0;
+    for (i = 0; i < n; i++) {
+        char c = s[i];
+        if (!((c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == ' ')) return 0;
+        if (c == ' ' && i + 1 < n && s[i + 1] == ' ') return 0;
+    }
+    return 1;
+}
+
+int lacc_gt_status_known(const char *status)
+{
+    static const char *const k[] = { "ok", "taken", "similar", "reserved", "blocked", "invalid_length",
+                                     "invalid_characters", "change_limit", "unchanged", "off", "unavailable" };
+    int i;
+    if (!status) return 0;
+    for (i = 0; i < (int)(sizeof k / sizeof k[0]); i++) {
+        if (strcmp(status, k[i]) == 0) return 1;
+    }
+    return 0;
 }
 
 /* ====================================================================== Konfiguration */
@@ -769,23 +800,24 @@ static int probe_opt(const char *body, const char *key)
 }
 
 /* W470 LAUNCHER-HUB: Antwort der Aktion lobbies lesen (W472: angemeldet). Ungueltige Eintraege fallen weg (Zahlen ausserhalb 0..64,
- * mehr Spieler als Plaetze, fehlender Host); Namen nur druckbares ASCII. 0 = Liste gelesen (auch leer). */
-int lacc_lobbies_parse(const char *body, lacc_lobbies_t *o)
+ * mehr Spieler als Plaetze, fehlender Host); Namen nur druckbares ASCII. 0 = Liste gelesen (auch leer).
+ * W485 LIVE-QOS: Gruppe "live" (Xbox-Live-Sessions, W482) getrennt nach lv/nlive/live_more; fehlt sie (aelterer
+ * Server), bleibt sie leer. p zeigt auf '['; Rueckgabe: Zeiger hinter ']' bzw. NULL (kaputt). */
+static const char *lob_array(const char *p, lacc_lobby_t *arr, int cap, int *n, int *more)
 {
-    const char *p = body ? js_find(body, "lobbies") : NULL, *q;
-    long long v;
-    o->n = 0;
-    o->more = 0;
-    if (!p || *p != '[') return 1;
+    const char *q;
+    *n = 0;
+    *more = 0;
+    if (!p || *p != '[') return NULL;
     p++;
     for (;;) {
-        char obj[600], host[64], mode[16], st[16];
+        char obj[600], host[64], mode[16], st[16], kind[16];
         long long pl = -1, mx = -1;
         int depth = 0, instr = 0;
         size_t k;
         while (*p == ' ' || *p == ',' || *p == '\r' || *p == '\n' || *p == '\t') p++;
-        if (*p == ']') break;
-        if (*p != '{') return 1;
+        if (*p == ']') return p + 1;
+        if (*p != '{') return NULL;
         for (q = p; *q; q++) { /* passende } (Zeichenketten uebersprungen) */
             if (instr) {
                 if (*q == '\\' && q[1]) q++;
@@ -798,18 +830,19 @@ int lacc_lobbies_parse(const char *body, lacc_lobbies_t *o)
                 break;
             }
         }
-        if (*q != '}') return 1;
-        if ((size_t)(q - p) + 2 <= sizeof obj && o->n < LACC_LOB_MAX) {
+        if (*q != '}') return NULL;
+        if ((size_t)(q - p) + 2 <= sizeof obj && *n < cap) {
             memcpy(obj, p, (size_t)(q - p) + 1);
             obj[q - p + 1] = '\0';
-            host[0] = mode[0] = st[0] = '\0';
+            host[0] = mode[0] = st[0] = kind[0] = '\0';
             lacc_js_str(obj, "host", host, sizeof host);
             lacc_js_str(obj, "play_mode", mode, sizeof mode);
             lacc_js_str(obj, "state", st, sizeof st);
+            lacc_js_str(obj, "kind", kind, sizeof kind);
             lacc_js_int(obj, "players", &pl);
             lacc_js_int(obj, "max_players", &mx);
             if (host[0] && pl >= 0 && pl <= 64 && mx >= 1 && mx <= 64 && pl <= mx) {
-                lacc_lobby_t *e = &o->l[o->n++];
+                lacc_lobby_t *e = &arr[(*n)++];
                 for (k = 0; host[k] && k + 1 < sizeof e->host; k++) {
                     unsigned char c = (unsigned char)host[k];
                     e->host[k] = (char)(c >= 0x20 && c < 0x7F ? c : '?');
@@ -817,18 +850,48 @@ int lacc_lobbies_parse(const char *body, lacc_lobbies_t *o)
                 e->host[k] = '\0';
                 e->arcade = strcmp(mode, "arcade") == 0;
                 e->started = strcmp(st, "open") != 0;
+                e->chat = strcmp(kind, "chat") == 0;
                 e->players = (int)pl;
                 e->max_players = (int)mx;
-            } else if (o->n >= LACC_LOB_MAX) {
-                o->more++;
+            } else if (*n >= cap) {
+                (*more)++;
             }
         } else {
-            o->more++;
+            (*more)++;
         }
         p = q + 1;
     }
-    if (lacc_js_int(p, "more", &v) && v > 0 && v < 100000) {
+}
+
+int lacc_lobbies_parse(const char *body, lacc_lobbies_t *o)
+{
+    const char *p = body ? js_find(body, "lobbies") : NULL, *e;
+    long long v;
+    int more = 0;
+    o->n = 0;
+    o->more = 0;
+    o->nlive = 0;
+    o->live_more = 0;
+    e = lob_array(p, o->l, LACC_LOB_MAX, &o->n, &more);
+    if (!e) {
+        o->n = 0;
+        return 1;
+    }
+    o->more = more;
+    if (lacc_js_int(e, "more", &v) && v > 0 && v < 100000) {
         o->more += (int)v;
+    }
+    /* W485: Gruppe "live" = Schluessel "live" mit Liste (die Eintraege selbst tragen "live":true) */
+    for (p = e; (p = js_find(p, "live")) != NULL && *p != '[';) {
+    }
+    if (p) {
+        const char *le = lob_array(p, o->lv, LACC_LIVE_MAX, &o->nlive, &more);
+        if (!le) {
+            o->nlive = 0; /* kaputte Live-Gruppe: System-Link-Liste bleibt gueltig */
+        } else {
+            o->live_more = more;
+            if (lacc_js_int(le, "live_more", &v) && v > 0 && v < 100000) o->live_more += (int)v;
+        }
     }
     return 0;
 }
@@ -980,29 +1043,164 @@ int lacc_op_check(const lacc_srv_t *s, const char *name, int *available, char *e
     return 0;
 }
 
+/* W487: Gamertag aus der Antwort nur, wenn er die Regel erfuellt (Anzeige/Vergleich), sonst "" */
+static void gt_take(const char *body, const char *key, char *out, size_t cap)
+{
+    char t[64];
+    out[0] = '\0';
+    if (lacc_js_str(body, key, t, sizeof t) && lacc_valid_gamertag(t)) strcpy_s(out, cap, t);
+}
+
+/* W487: Statuscode (nur [a-z_], hoechstens 23 Zeichen), sonst "" */
+static void gt_code(const char *body, const char *key, char *out, size_t cap)
+{
+    char t[64];
+    const char *q;
+    out[0] = '\0';
+    if (!lacc_js_str(body, key, t, sizeof t) || !t[0] || strlen(t) >= cap) return;
+    for (q = t; *q; q++) {
+        if (!((*q >= 'a' && *q <= 'z') || *q == '_')) return;
+    }
+    strcpy_s(out, cap, t);
+}
+
+void lacc_create_body(const char *name, const char *gamertag, char *out, size_t cap)
+{
+    char e[64], g[64];
+    lacc_js_esc(name ? name : "", e, sizeof e);
+    if (gamertag && gamertag[0]) {
+        lacc_js_esc(gamertag, g, sizeof g);
+        _snprintf_s(out, cap, _TRUNCATE, "{\"name\":\"%s\",\"gamertag\":\"%s\"}", e, g);
+    } else {
+        _snprintf_s(out, cap, _TRUNCATE, "{\"name\":\"%s\"}", e);
+    }
+}
+
+void lacc_gtset_parse(const char *body, lacc_gtset_t *o)
+{
+    long long v = 0;
+    memset(o, 0, sizeof *o);
+    if (!body) return;
+    gt_take(body, "gamertag", o->gamertag, sizeof o->gamertag);
+    if (lacc_js_int(body, "next_change_at", &v) && v > 0) o->next_at = v;
+    gt_code(body, "status", o->status, sizeof o->status);
+    if (!o->status[0]) gt_code(body, "gamertag_error", o->status, sizeof o->status);
+}
+
+int lacc_op_create_gt(const lacc_srv_t *s, const char *dir, const char *name, const char *gamertag, lacc_store_t *st,
+                      lacc_gtset_t *gt, char *err, size_t ecap)
+{
+    lacc_resp_t r;
+    lacc_gtset_t g;
+    char body[192];
+    int rc;
+    memset(&g, 0, sizeof g);
+    if (gt) memset(gt, 0, sizeof *gt);
+    if (!lacc_valid_name(name)) return fail(err, ecap, "invalid_name");
+    if (gamertag && gamertag[0] && !lacc_valid_gamertag(gamertag)) return fail(err, ecap, "invalid_gamertag");
+    lacc_create_body(name, gamertag, body, sizeof body);
+    if (post(s, "create", body, &r, err, ecap) != 0) {
+        if (strcmp(err, "gamertag_refused") == 0 && gt) lacc_gtset_parse(r.body, gt);
+        return 1;
+    }
+    lacc_gtset_parse(r.body, &g); /* vor take_key (loescht den Antwortpuffer) */
+    rc = take_key(s, dir, &r, st, err, ecap);
+    if (rc == 0 && gt) *gt = g;
+    return rc;
+}
+
 int lacc_op_create(const lacc_srv_t *s, const char *dir, const char *name, lacc_store_t *st,
                    char *err, size_t ecap)
 {
-    lacc_resp_t r;
-    char e[64], body[128];
-    if (!lacc_valid_name(name)) return fail(err, ecap, "invalid_name");
-    lacc_js_esc(name, e, sizeof e);
-    _snprintf_s(body, sizeof body, _TRUNCATE, "{\"name\":\"%s\"}", e);
-    if (post(s, "create", body, &r, err, ecap) != 0) return 1;
-    return take_key(s, dir, &r, st, err, ecap);
+    return lacc_op_create_gt(s, dir, name, NULL, st, NULL, err, ecap);
+}
+
+void lacc_status_parse(const char *body, lacc_status_t *o)
+{
+    long long v = 0;
+    memset(o, 0, sizeof *o);
+    o->gt_days = 7;
+    if (!body) return;
+    lacc_js_bool(body, "discord", &o->discord);
+    lacc_js_bool(body, "login", &o->login);
+    lacc_js_str(body, "login_name", o->login_name, sizeof o->login_name);
+    if (lacc_js_int(body, "created", &v)) o->created = v;
+    if (lacc_js_int(body, "gen", &v)) o->gen = (int)v;
+    gt_take(body, "gamertag", o->gamertag, sizeof o->gamertag);
+    if (lacc_js_int(body, "gamertag_next_change", &v) && v > 0) o->gt_next = v;
+    if (lacc_js_int(body, "gamertag_change_days", &v) && v > 0 && v <= 365) o->gt_days = (int)v;
+    gt_code(body, "gamertag_state", o->gt_state, sizeof o->gt_state);
 }
 
 int lacc_op_status(const lacc_srv_t *s, const lacc_store_t *st, lacc_status_t *o, char *err, size_t ecap)
 {
     lacc_resp_t r;
-    long long v = 0;
     memset(o, 0, sizeof *o);
     if (post_auth(s, st, "status", "", &r, err, ecap) != 0) return 1;
-    lacc_js_bool(r.body, "discord", &o->discord);
-    lacc_js_bool(r.body, "login", &o->login);
-    lacc_js_str(r.body, "login_name", o->login_name, sizeof o->login_name);
-    if (lacc_js_int(r.body, "created", &v)) o->created = v;
-    if (lacc_js_int(r.body, "gen", &v)) o->gen = (int)v;
+    lacc_status_parse(r.body, o);
+    return 0;
+}
+
+void lacc_gtcheck_body(const char *name, const char *suggest, char *out, size_t cap)
+{
+    char e1[64], e2[64];
+    int hn = name && name[0], hs = suggest && suggest[0];
+    lacc_js_esc(hn ? name : "", e1, sizeof e1);
+    lacc_js_esc(hs ? suggest : "", e2, sizeof e2);
+    if (hn && hs) _snprintf_s(out, cap, _TRUNCATE, "{\"gamertag\":\"%s\",\"suggest\":\"%s\"}", e1, e2);
+    else if (hn) _snprintf_s(out, cap, _TRUNCATE, "{\"gamertag\":\"%s\"}", e1);
+    else _snprintf_s(out, cap, _TRUNCATE, "{\"suggest\":\"%s\"}", e2);
+}
+
+int lacc_gtcheck_parse(const char *body, lacc_gtcheck_t *o)
+{
+    char t[64];
+    memset(o, 0, sizeof *o);
+    if (!body) return 1;
+    if (lacc_js_str(body, "gamertag", t, sizeof t)) {
+        o->has_name = 1;
+        if (lacc_valid_gamertag(t)) strcpy_s(o->gamertag, sizeof o->gamertag, t);
+        if (!lacc_js_bool(body, "valid", &o->valid) || !lacc_js_bool(body, "available", &o->available)) return 1;
+        gt_code(body, "status", o->status, sizeof o->status);
+        if (!o->status[0]) return 1;
+        if (o->available && (!o->valid || !o->gamertag[0])) o->available = 0; /* nie "frei" ohne gueltigen Namen */
+    }
+    gt_take(body, "suggestion", o->suggestion, sizeof o->suggestion);
+    return 0;
+}
+
+int lacc_op_gamertag_check(const lacc_srv_t *s, const char *name, const char *suggest, lacc_gtcheck_t *o,
+                           char *err, size_t ecap)
+{
+    lacc_resp_t r;
+    char body[192];
+    memset(o, 0, sizeof *o);
+    if ((!name || !name[0]) && (!suggest || !suggest[0])) return fail(err, ecap, "bad_request");
+    if (name && strlen(name) > 40) return fail(err, ecap, "invalid_gamertag");
+    if (suggest && strlen(suggest) > 40) return fail(err, ecap, "bad_request");
+    lacc_gtcheck_body(name, suggest, body, sizeof body);
+    if (post(s, "gamertag_check", body, &r, err, ecap) != 0) return 1;
+    if (lacc_gtcheck_parse(r.body, o) != 0) return fail(err, ecap, "bad");
+    return 0;
+}
+
+int lacc_op_gamertag_set(const lacc_srv_t *s, const lacc_store_t *st, const char *name, lacc_gtset_t *o,
+                         char *err, size_t ecap)
+{
+    lacc_resp_t r;
+    char e[64], extra[128];
+    lacc_gtset_t g;
+    if (o) memset(o, 0, sizeof *o);
+    if (!lacc_valid_gamertag(name)) return fail(err, ecap, "invalid_gamertag");
+    lacc_js_esc(name, e, sizeof e);
+    _snprintf_s(extra, sizeof extra, _TRUNCATE, ",\"gamertag\":\"%s\"", e);
+    if (post_auth(s, st, "gamertag_set", extra, &r, err, ecap) != 0) {
+        if (strcmp(err, "gamertag_refused") == 0 && o) lacc_gtset_parse(r.body, o);
+        return 1;
+    }
+    lacc_gtset_parse(r.body, &g);
+    if (!g.gamertag[0]) return fail(err, ecap, "bad");
+    if (o) *o = g;
     return 0;
 }
 
@@ -1519,6 +1717,15 @@ int lacc_cli(const char *client_dir, int argc, char **argv)
     const char *act = argc > 0 ? argv[0] : "";
     const char *a1 = argc > 1 ? argv[1] : "", *a2 = argc > 2 ? argv[2] : "";
     int rc = 1, ld;
+    if (strcmp(act, "campaign-probe") == 0) { /* W491: Kampagnenzugang wie der Launcher (TLS + Pin, nur Handshake;
+                                                * ohne Kontodatei, keine Adresse in der Ausgabe) */
+        char ce[16];
+        int test = strcmp(a1, "test") == 0;
+        rc = lcamp_probe(test, 5000, ce, sizeof ce);
+        if (rc == 0) printf("ok campaign=%s\n", test ? "test" : "season");
+        else printf("error %s\n", ce[0] ? ce : "net");
+        return rc == 0 ? 0 : 1;
+    }
     lacc_server(&s);
     lacc_default_dir(client_dir, dir, sizeof dir);
     ld = lacc_store_load(dir, &st);
@@ -1619,15 +1826,48 @@ int lacc_cli(const char *client_dir, int argc, char **argv)
         int av = 0;
         rc = lacc_op_check(&s, a1, &av, err, sizeof err);
         if (rc == 0) printf("ok available=%d\n", av);
-    } else if (strcmp(act, "create") == 0) {
-        rc = lacc_op_create(&s, dir, a1, &st, err, sizeof err);
-        if (rc == 0) cli_out_store("", &st);
+    } else if (strcmp(act, "create") == 0) { /* W487: create NAME [GAMERTAG] */
+        lacc_gtset_t g;
+        rc = lacc_op_create_gt(&s, dir, a1, a2, &st, &g, err, sizeof err);
+        if (rc == 0) {
+            printf("ok account=%lu name=%s gen=%d gamertag=%s%s%s\n", (unsigned long)st.account, st.name, st.gen,
+                   g.gamertag, g.status[0] ? " gamertag_error=" : "", g.status);
+        } else if (strcmp(err, "gamertag_refused") == 0) {
+            printf("error gamertag_refused status=%s\n", g.status[0] ? g.status : "-");
+            wipe(&st, sizeof st);
+            return 1;
+        }
+    } else if (strcmp(act, "gamertag-check") == 0) { /* W487: gamertag-check NAME | gamertag-check --suggest BASE */
+        lacc_gtcheck_t o;
+        int sg = strcmp(a1, "--suggest") == 0;
+        rc = lacc_op_gamertag_check(&s, sg ? NULL : a1, sg ? a2 : NULL, &o, err, sizeof err);
+        if (rc == 0) {
+            if (o.has_name) {
+                printf("ok gamertag=%s valid=%d available=%d status=%s suggestion=%s\n", o.gamertag, o.valid,
+                       o.available, o.status, o.suggestion);
+            } else {
+                printf("ok suggestion=%s\n", o.suggestion);
+            }
+        }
+    } else if (strcmp(act, "gamertag-set") == 0) { /* W487: gamertag-set NAME (angemeldet) */
+        lacc_gtset_t g;
+        memset(&g, 0, sizeof g);
+        rc = ld == 1 ? lacc_op_gamertag_set(&s, &st, a1, &g, err, sizeof err) : fail(err, sizeof err, "no_account");
+        if (rc == 0) {
+            printf("ok gamertag=%s next_change_at=%lld\n", g.gamertag, g.next_at);
+        } else if (strcmp(err, "gamertag_refused") == 0) {
+            printf("error gamertag_refused status=%s next_change_at=%lld\n", g.status[0] ? g.status : "-", g.next_at);
+            wipe(&st, sizeof st);
+            return 1;
+        }
     } else if (strcmp(act, "status") == 0) {
         lacc_status_t o;
         rc = ld == 1 ? lacc_op_status(&s, &st, &o, err, sizeof err) : fail(err, sizeof err, "no_account");
         if (rc == 0) {
-            printf("ok account=%lu name=%s gen=%d discord=%d login=%d login_name=%s\n", (unsigned long)st.account,
-                   st.name, o.gen, o.discord, o.login, o.login_name);
+            printf("ok account=%lu name=%s gen=%d discord=%d login=%d login_name=%s gamertag=%s gamertag_next_change=%lld "
+                   "gamertag_change_days=%d gamertag_state=%s\n",
+                   (unsigned long)st.account, st.name, o.gen, o.discord, o.login, o.login_name, o.gamertag, o.gt_next,
+                   o.gt_days, o.gt_state[0] ? o.gt_state : "-");
         }
     } else if (strcmp(act, "discord-link") == 0 || strcmp(act, "discord-login") == 0) {
         int lm = strcmp(act, "discord-login") == 0;
@@ -1670,9 +1910,10 @@ int lacc_cli(const char *client_dir, int argc, char **argv)
         rc = ld == 1 ? lacc_op_delete(&s, dir, &st, err, sizeof err) : fail(err, sizeof err, "no_account");
         if (rc == 0) printf("ok deleted=1\n");
     } else {
-        printf("error usage (create NAME | check NAME | status | local | info | discord-link | discord-login | "
+        printf("error usage (create NAME [GAMERTAG] | check NAME | gamertag-check NAME | gamertag-check --suggest BASE | "
+               "gamertag-set NAME | status | local | info | discord-link | discord-login | "
                "login-set LOGIN | login LOGIN (Passwort ueber stdin) | transfer CODE | recovery-show | "
-               "recovery CODE | logout-all | delete | forget)\n");
+               "recovery CODE | logout-all | delete | forget | campaign-probe [test])\n");
         return 2;
     }
     if (rc != 0) printf("error %s\n", err[0] ? err : "bad");
@@ -2177,6 +2418,97 @@ void lacc_selftest(int *pass, int *fail_n)
             strcpy_s(why, sizeof why, "uebergrosse Anfrage");
     }
     ST_RESULT("W332 account: Discord loopback parser without socket (foreign paths 404, wrong/missing state, error=, %-decoding, 4 KB request)");
+
+    /* W487 LIVE-GAMERTAG: lokale Regel (Grenzfaelle), Rumpf create/gamertag_check (Maskierung), Parser status/
+     * gamertag_check/gamertag_set inkl. gamertag_refused/change_limit, kein Netz bei ungueltigem Gamertag */
+    {
+        static const char *const kOk[] = { "A", "Ace Pilot", "abcdefghijklmno", "Z9 9 9", "a1" };
+        static const char *const kBad[] = { "", "1Ace", " Ace", "Ace ", "Ace  Pilot", "abcdefghijklmnop", "Ace_Pilot",
+                                            "Ace-1", "\xC3\xA4" "bc", "Ace\tX", "Ace;x" };
+        char b[256], e2[64];
+        lacc_status_t so;
+        lacc_gtcheck_t gc;
+        lacc_gtset_t gs;
+        lacc_srv_t off;
+        for (i = 0; i < (int)(sizeof kOk / sizeof kOk[0]) && !why[0]; i++)
+            if (!lacc_valid_gamertag(kOk[i])) _snprintf_s(why, sizeof why, _TRUNCATE, "gueltig abgelehnt: '%s'", kOk[i]);
+        for (i = 0; i < (int)(sizeof kBad / sizeof kBad[0]) && !why[0]; i++)
+            if (lacc_valid_gamertag(kBad[i])) _snprintf_s(why, sizeof why, _TRUNCATE, "ungueltig angenommen: '%s'", kBad[i]);
+        if (!why[0] && lacc_valid_gamertag(NULL)) strcpy_s(why, sizeof why, "NULL angenommen");
+        lacc_create_body("Ace Pilot", "Ace Pilot", b, sizeof b);
+        if (!why[0] && strcmp(b, "{\"name\":\"Ace Pilot\",\"gamertag\":\"Ace Pilot\"}") != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "create-Rumpf '%s'", b);
+        lacc_create_body("Ace", "a\"b\\c", b, sizeof b); /* Maskierung (Rumpf bleibt gueltiges JSON) */
+        if (!why[0] && strcmp(b, "{\"name\":\"Ace\",\"gamertag\":\"a\\\"b\\\\c\"}") != 0)
+            _snprintf_s(why, sizeof why, _TRUNCATE, "create-Rumpf maskiert '%s'", b);
+        if (!why[0] && (!lacc_js_str(b, "gamertag", e2, sizeof e2) || strcmp(e2, "a\"b\\c") != 0))
+            strcpy_s(why, sizeof why, "create-Rumpf Rundlauf");
+        lacc_create_body("Ace", "", b, sizeof b);
+        if (!why[0] && strcmp(b, "{\"name\":\"Ace\"}") != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "create ohne Gamertag '%s'", b);
+        lacc_gtcheck_body("Ace", NULL, b, sizeof b);
+        if (!why[0] && strcmp(b, "{\"gamertag\":\"Ace\"}") != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "check-Rumpf '%s'", b);
+        lacc_gtcheck_body(NULL, "Ace Pilot", b, sizeof b);
+        if (!why[0] && strcmp(b, "{\"suggest\":\"Ace Pilot\"}") != 0) _snprintf_s(why, sizeof why, _TRUNCATE, "suggest-Rumpf '%s'", b);
+        lacc_gtcheck_body("Ace", "Ace", b, sizeof b);
+        if (!why[0] && strcmp(b, "{\"gamertag\":\"Ace\",\"suggest\":\"Ace\"}") != 0) strcpy_s(why, sizeof why, "check+suggest-Rumpf");
+        /* status: neuer Server, aelterer Server (ohne Felder), kaputter Gamertag */
+        lacc_status_parse("{\"ok\":true,\"discord\":true,\"login\":false,\"gen\":2,\"gamertag\":\"Ace Pilot\","
+                          "\"gamertag_next_change\":1764000000,\"gamertag_change_days\":7,\"gamertag_state\":\"ok\"}", &so);
+        if (!why[0] && (!so.discord || so.gen != 2 || strcmp(so.gamertag, "Ace Pilot") != 0 || so.gt_next != 1764000000LL ||
+                        so.gt_days != 7 || strcmp(so.gt_state, "ok") != 0))
+            strcpy_s(why, sizeof why, "status (neu)");
+        lacc_status_parse("{\"ok\":true,\"discord\":false,\"login\":true,\"login_name\":\"x\"}", &so);
+        if (!why[0] && (so.gamertag[0] || so.gt_next || so.gt_days != 7 || so.gt_state[0] || !so.login))
+            strcpy_s(why, sizeof why, "status (alter Server)");
+        lacc_status_parse("{\"ok\":true,\"gamertag\":\"1;rm\",\"gamertag_state\":\"Off!\",\"gamertag_change_days\":-3}", &so);
+        if (!why[0] && (so.gamertag[0] || so.gt_state[0] || so.gt_days != 7)) strcpy_s(why, sizeof why, "status (kaputte Werte)");
+        lacc_status_parse("{\"ok\":true,\"gamertag\":\"\",\"gamertag_next_change\":0,\"gamertag_state\":\"unavailable\"}", &so);
+        if (!why[0] && (so.gamertag[0] || so.gt_next || strcmp(so.gt_state, "unavailable") != 0))
+            strcpy_s(why, sizeof why, "status (ohne Gamertag)");
+        /* gamertag_check */
+        if (!why[0] && (lacc_gtcheck_parse("{\"ok\":true,\"gamertag\":\"Ace\",\"valid\":true,\"available\":false,"
+                                           "\"status\":\"taken\",\"suggestion\":\"\"}", &gc) != 0 ||
+                        !gc.has_name || gc.available || !gc.valid || strcmp(gc.status, "taken") != 0 || gc.suggestion[0]))
+            strcpy_s(why, sizeof why, "check taken");
+        if (!why[0] && (lacc_gtcheck_parse("{\"ok\":true,\"suggestion\":\"Ace Pilot2\"}", &gc) != 0 || gc.has_name ||
+                        strcmp(gc.suggestion, "Ace Pilot2") != 0))
+            strcpy_s(why, sizeof why, "check suggest");
+        if (!why[0] && (lacc_gtcheck_parse("{\"ok\":true,\"gamertag\":\"Ace\",\"valid\":true,\"available\":true,"
+                                           "\"status\":\"ok\"}", &gc) != 0 || !gc.available))
+            strcpy_s(why, sizeof why, "check frei");
+        if (!why[0] && lacc_gtcheck_parse("{\"ok\":true,\"gamertag\":\"Ace\",\"valid\":true}", &gc) == 0)
+            strcpy_s(why, sizeof why, "check ohne available angenommen");
+        if (!why[0] && (lacc_gtcheck_parse("{\"ok\":true,\"gamertag\":\"1x\",\"valid\":true,\"available\":true,"
+                                           "\"status\":\"ok\"}", &gc) != 0 || gc.available))
+            strcpy_s(why, sizeof why, "check: ungueltiger Name als frei");
+        if (!why[0] && (lacc_gtcheck_parse("{\"ok\":true,\"gamertag\":\"Ace\",\"valid\":false,\"available\":false,"
+                                           "\"status\":\"invalid_characters\",\"suggestion\":\"Bad Name!\"}", &gc) != 0 ||
+                        strcmp(gc.status, "invalid_characters") != 0 || gc.suggestion[0]))
+            strcpy_s(why, sizeof why, "check invalid/kaputter Vorschlag");
+        /* gamertag_set: Erfolg, gamertag_refused (taken, change_limit), create mit gamertag_error */
+        lacc_gtset_parse("{\"ok\":true,\"gamertag\":\"Ace Pilot\",\"next_change_at\":1764600000}", &gs);
+        if (!why[0] && (strcmp(gs.gamertag, "Ace Pilot") != 0 || gs.next_at != 1764600000LL || gs.status[0]))
+            strcpy_s(why, sizeof why, "set ok");
+        lacc_gtset_parse("{\"ok\":false,\"error\":\"gamertag_refused\",\"status\":\"change_limit\",\"next_change_at\":1764600000}", &gs);
+        if (!why[0] && (strcmp(gs.status, "change_limit") != 0 || gs.next_at != 1764600000LL || gs.gamertag[0]))
+            strcpy_s(why, sizeof why, "set change_limit");
+        lacc_gtset_parse("{\"ok\":false,\"error\":\"gamertag_refused\",\"status\":\"similar\"}", &gs);
+        if (!why[0] && (strcmp(gs.status, "similar") != 0 || gs.next_at)) strcpy_s(why, sizeof why, "set similar");
+        lacc_gtset_parse("{\"ok\":true,\"account\":5,\"gamertag\":\"\",\"gamertag_error\":\"unavailable\"}", &gs);
+        if (!why[0] && (gs.gamertag[0] || strcmp(gs.status, "unavailable") != 0)) strcpy_s(why, sizeof why, "create gamertag_error");
+        if (!why[0] && (!lacc_gt_status_known("change_limit") || !lacc_gt_status_known("similar") || lacc_gt_status_known("x")))
+            strcpy_s(why, sizeof why, "Statuscodes");
+        /* ungueltiger Gamertag: lokal abgelehnt, ohne Netz (Dienst "aus" wuerde sonst "off" melden) */
+        memset(&off, 0, sizeof off);
+        if (!why[0] && (lacc_op_gamertag_set(&off, NULL, "1bad", &gs, e2, sizeof e2) == 0 || strcmp(e2, "invalid_gamertag") != 0))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "set lokal: '%s'", e2);
+        if (!why[0] && (lacc_op_create_gt(&off, "", "Ace", "x ", NULL, &gs, e2, sizeof e2) == 0 ||
+                        strcmp(e2, "invalid_gamertag") != 0))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "create lokal: '%s'", e2);
+        if (!why[0] && (lacc_op_gamertag_check(&off, "Ace", NULL, &gc, e2, sizeof e2) == 0 || strcmp(e2, "off") != 0))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "check ohne Dienst: '%s'", e2);
+    }
+    ST_RESULT("W487 account: gamertag rule (edge cases), create/gamertag_check bodies with JSON escaping, status/gamertag_check/gamertag_set parsers incl. gamertag_refused/change_limit, local refusal without network");
 #undef ST_RESULT
     wipe(K, sizeof K);
     wipe(G, sizeof G);

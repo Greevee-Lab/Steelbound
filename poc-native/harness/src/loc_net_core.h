@@ -75,6 +75,13 @@ void locnet_set_udp_state_check(locnet_udp_state_fn f);
 /* W339: Spiel-TCP-Socket wegen eines Verstosses trennen (wie der Gastfilter: shutdown, recv meldet WSAECONNRESET). */
 void locnet_guard_kill(locnet *n, SOCKET s, int why);
 
+/* W491 CAMP-CLIENT: connect zur virtuellen Kampagnenadresse (loc_camp.h) umlenken. Rueckruf: 1 = dst ersetzt
+ * (Loopback-Bruecke), <= 0 = Kampagne nicht verfuegbar (connect scheitert mit WSAECONNREFUSED). NULL = aus (Standard:
+ * ohne Live-Modus ist die Adresse ein normales, verweigertes Ziel). Kampagnen-Sockets umgehen den Gastfilter (eigene
+ * Rahmenpruefung in der Bruecke) und zaehlen nicht als offene Spielsitzung. */
+typedef int (*locnet_camp_fn)(SOCKET s, struct sockaddr_in *dst);
+void locnet_set_camp_redirect(locnet_camp_fn f);
+int locnet_is_camp(SOCKET s);
 /* 1 = Loopback (127/8), privat (10/8, 172.16/12, 192.168/16) oder link-local (169.254/16). */
 int locnet_ip_allowed(uint32_t ip_net);
 

@@ -29,6 +29,9 @@
 #define LOCROUTE_SUSTAIN_MS 3000.0 /* ... ueber diese Dauer */
 #define LOCROUTE_MIN_GAP_MS 10000.0 /* kein erneuter Komfortwechsel davor (Ausfall wechselt immer) */
 #define LOCROUTE_DUAL_MS 1000.0   /* doppelt senden nach einem Wechsel */
+#define LOCROUTE_HYST_REL 0.10    /* W494: Vorsprung mindestens 10 % der Bewertung (weite Wege), sonst HYST_MS */
+#define LOCROUTE_FAR_MS 150.0     /* W494: ab dieser Basis (RTT + 4 Schwankung) toleriert die Ausfallgrenze mehr ... */
+#define LOCROUTE_FAR_K 1.5        /* ... und zwar 1,5 ms je ms darueber (Burst-Verlust auf weiten Wegen) */
 
 typedef struct locroute_path {
     int avail;                 /* Weg nutzbar (direkt bestaetigt bzw. Relay gebunden) */
@@ -60,6 +63,9 @@ typedef struct locroute {
 } locroute;
 
 void locroute_init(locroute *r);
+/* W494: Zuschlag der Ausfallgrenze fuer weite Wege (ms) und Wechsel-Vorsprung zur Bewertung score (ms). */
+double locroute_far_extra(double base);
+double locroute_hyst(double score);
 /* Weg nutzbar/nicht mehr nutzbar (Messwerte werden beim Wiedereintritt neu aufgebaut). */
 void locroute_set_avail(locroute *r, int slot, int avail, double now);
 /* Probe faellig? Liefert 1 und die Probennummer, traegt die Sendung ein. */

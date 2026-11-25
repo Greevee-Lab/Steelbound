@@ -301,7 +301,8 @@ extern u32 s_rbi_hc_tick, s_rbi_end_heap;
 extern u32 s_rbi_hc_n, s_rbi_hc_nodes_max, s_rbi_hc_us_max, s_rbi_hc_bad, s_rbi_hc_part, s_rbi_hc_vq, s_rbi_hc_busy;
 extern int s_rbi_rbtest_n, s_rbi_rbtest_k;
 extern int s_rbi_force_desync;
-extern int s_rbi_dmin, s_rbi_dmax;
+extern int s_rbi_dmin, s_rbi_dmax, s_rbi_dmax_set;
+#define RBI_DMAX_ONLINE 8 /* W494: Obergrenze der adaptiven Verzoegerung online (Ticks, 400 ms; ausgelegt bis 500 ms RTT + Schwankung) */
 extern long long s_rbi_lt_last;
 extern u32 s_rbi_lt_n, s_rbi_lt_max, s_rbi_lt_logged;
 extern const char *const k_rbn_why_slug[RBN_WHY_N];

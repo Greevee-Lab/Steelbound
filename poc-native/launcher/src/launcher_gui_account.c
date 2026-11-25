@@ -2,6 +2,7 @@
  * W462 LAUNCHER-SPLIT: aus launcher_gui.c verschoben (unveraendert), gemeinsamer Zustand
  * in launcher_gui_int.h. */
 #include "launcher_gui_int.h"
+#include "launcher_camp.h" /* W491: LCAMP_R_* (Shot-Zustaende) */
 /* W328 STEELNET-ACCOUNT: Pilotenkonto im Bereich LoC (Logik + Netz in  */
 /* launcher_account.c). Karte "Pilot" auf LoC > Erweitert (statt des    */
 /* Platzhalters "Online spielen (spaeter)", sobald der Dienst einge-    */
@@ -12,15 +13,28 @@
 /* ------------------------------------------------------------------ */
 #define ID_ACC_FIRST ID_ACC_NAME
 #define ID_ACC_LAST ID_ACC_V_FORGET
-/* W418 LAUNCHER-ACCOUNT-UX: Unterseite Multiplayer > Account ("steelnet account"), ein Zustand, ein naechster
- * Schritt. Kein Konto: Kopf + zwei Karten (Neu | Schon ein Konto). Angemeldet, ungesichert: Kopf (Name, bereit,
- * Warnzeile) + eine Karte "Ein Schritt: sichern". Gesichert bzw. Status unbekannt: kompakte Kopfzeile + "Verwalten"
- * (aufklappbar). Datenschutzzeile klein am Seitenende. Lage je Zustand in acc_layout() bzw. acc_geo(). */
-#define ACC_LINK_H 24        /* Aufklapper (Textlink mit Pfeil) */
-#define ACC_HALF_W ((CW - 36 - 24) / 2) /* Halbe Breite in einer vollen Karte (ungesichert: Login | Code) */
-#define ACC_RX (CX0 + 18 + ACC_HALF_W + 24)
-#define ACC_M_LW 300         /* Verwalten: Breite der Textspalte links */
+/* W418 LAUNCHER-ACCOUNT-UX: Unterseite Multiplayer > Account ("steelnet account").
+ * W502 ACCOUNT-PAGE: neu gegliedert, eine Seite ohne Aufklapper-Textlinks:
+ *   1. Uebersicht "Was du spielen kannst": Online (System Link ueber steelnet), Xbox Live & Kampagne (Gamertag),
+ *      Konto gesichert - je Zeile Haken bzw. Hinweis und rechts ein echter Knopf zur naechsten Aktion.
+ *   2. Gamertag-Karte (mit Konto direkt nach der Uebersicht): Feld + Setzen bzw. Anzeige + "Aendern", 7-Tage-Regel
+ *      einmal.
+ *   3. unten links "Konto sichern" (Discord, Login, Wiederherstellungscode als gleichwertige Zeilen; das Login-Formular
+ *      ersetzt die Zeilen in der Karte), rechts "Kontoeinstellungen" (Code einloesen, Abmelden, Loeschen rot abgesetzt).
+ *   Kein Konto: Uebersicht, darunter "Konto erstellen" (Name, Gamertag optional) | "Ich habe schon ein Konto".
+ *   Datenschutzzeile unveraendert am Seitenende. Lage je Zustand in acc_geo() (eine Rechnung fuer Elemente und Bild). */
 #define ACC_CHECK_MS 700
+#define ACC_GAP 10           /* Abstand zwischen Karten */
+#define ACC_OV_ROW 32        /* Zeile der Uebersicht */
+#define ACC_OV_TOP 42        /* erste Zeile unter dem Kartentitel */
+#define ACC_OV_H (ACC_OV_TOP + 3 * ACC_OV_ROW + 8)
+#define ACC_OV_BTN_W 160     /* Knopf rechts in der Uebersicht */
+#define ACC_OV_LBL_W 184     /* Spalte Bezeichnung (nach dem Symbol) */
+#define ACC_GT_H 92          /* Gamertag-Karte */
+#define ACC_SEC_W 420        /* Karte Sichern (links); rechts Kontoeinstellungen */
+#define ACC_ROW_BTN_W 170    /* Knopf rechts in einer Zeile der Karte Sichern */
+#define ACC_NONE_H 262       /* kein Konto: Karten Erstellen | Schon ein Konto */
+#define ACC_HL_MS 1600       /* Hervorhebung nach einem Sprung */
 
 
 
@@ -43,11 +57,40 @@ int g_acc_try_op;          /* W399 Selbsttest: zuletzt angestossener Auftrag im 
 char g_acc_last_err[64];
 /* W418: Aufklapper (nur pro Sitzung gemerkt, nie gespeichert), Fehler der letzten Statusabfrage, Meldung unter
  * einem Feld (Name: frei/vergeben/ungueltig; Code: Format; Login: Fehler) */
-int g_acc_x_login, g_acc_x_code, g_acc_x_manage;
+int g_acc_x_login, g_acc_x_code; /* W502: eingebettete Formulare (Login | Code) statt Aufklapper */
+int g_acc_focus_id;        /* W502: zuletzt angeforderter Fokus (Selbsttest; im Shot/Selbsttest kein SetFocus) */
+int g_acc_hl;              /* W502: hervorgehobene Karte nach einem Sprung (ACC_CARD_*) */
 char g_acc_st_err[24];
 char g_acc_fmsg[200];
 int g_acc_fmsg_id;         /* Feld der Meldung (ID_ACC_NAME, ID_ACC_V_CODE, ID_ACC_V_LOGIN), 0 = keine */
 COLORREF g_acc_fmsg_col;
+/* W487 LIVE-GAMERTAG: Gamertag beim Erstellen (Vorschlag des Dienstes, solange der Spieler das Feld nicht selbst
+ * geaendert hat) und Gamertag-Karte der Kontoseite. Eigene Meldung am Gamertag-Feld (neben der Namensmeldung).
+ * W502: g_acc_x_gt = "Aendern" offen (nur mit Gamertag; ohne Gamertag steht das Feld immer da). */
+int g_acc_x_gt;
+int g_acc_gt_user;         /* 1 = Spieler hat das Gamertag-Feld beim Erstellen selbst geaendert (kein Vorschlag mehr) */
+char g_acc_gtmsg[200];
+int g_acc_gtmsg_id;        /* ID_ACC_GT / ID_ACC_V_GT, 0 = keine */
+static COLORREF g_acc_gtmsg_col;
+static int g_acc_gt_tick_fid; /* Feld der laufenden Entprellung */
+int g_acc_live_pending;    /* 1 = Live-Start wartet auf den Status (Gamertag) */
+#define ACC_GT_ID(id) ((id) >= ID_ACC_GT && (id) <= ID_ACC_V_GTBTN)
+
+static void acc_gtmsg(int id, const char *t, COLORREF c)
+{
+    g_acc_gtmsg_id = t && *t ? id : 0;
+    strncpy_s(g_acc_gtmsg, sizeof g_acc_gtmsg, t ? t : "", _TRUNCATE);
+    g_acc_gtmsg_col = c;
+}
+
+static const char *acc_gtmsg_for(int id, COLORREF *c)
+{
+    if (g_acc_gtmsg_id != id || !g_acc_gtmsg[0]) {
+        return NULL;
+    }
+    *c = g_acc_gtmsg_col;
+    return g_acc_gtmsg;
+}
 
 static void acc_dir(char *out, size_t cap)
 {
@@ -118,95 +161,66 @@ int acc_state(void)
     return acc_secured() ? ACCS_SEC : ACCS_UNSEC;
 }
 
-/* W418: Lage der Kontoseite je Zustand und Aufklapper (eine Rechnung fuer Steuerelemente und Zeichnen).
- * Alle y logisch; -1 = Zeile/Teil nicht da. */
-
+/* W418/W502: Lage der Kontoseite je Zustand (eine Rechnung fuer Steuerelemente und Zeichnen). Alle y logisch;
+ * -1 = Teil nicht da. Die Seite passt ohne Rollen ueber die Datenschutzzeile (ACC_PRIV_Y). */
 void acc_geo(acc_geo_t *g)
 {
-    int y;
     memset(g, 0xff, sizeof *g); /* alles -1 */
     g->st = acc_state();
-    g->hh = 88;
-    g->ah = 0;
-    g->mh = 0;
-    switch (g->st) {
-    case ACCS_NONE:
-        g->hh = 70;
-        g->ay = CY0 + g->hh + 12;
-        g->lh = 166;
-        g->xl = g->ay + 86;
-        y = g->xl + ACC_LINK_H + 6;
-        if (g_acc_x_login) {
-            g->lg = g->xl + 30;
-            y = g->xl + 170;
-        }
-        g->xc = y;
-        y = g->xc + ACC_LINK_H;
-        if (g_acc_x_code) {
-            g->cd = g->xc + 30;
-            y = g->xc + 112;
-        }
-        g->ah = y - g->ay + 14;
-        if (g->ah < g->lh) {
-            g->ah = g->lh;
-        }
-        break;
-    case ACCS_UNSEC:
-        g->hh = 88;
-        g->ay = CY0 + g->hh + 12;
-        g->xl = g->ay + 96;
-        g->rec = g->ay + 96;
-        y = g->rec + 78; /* Titel, Code, Knoepfe */
-        if (g_acc_x_login) {
-            g->lg = g->xl + 30;
-            if (g->xl + 192 > y) {
-                y = g->xl + 192;
-            }
-        }
-        g->ah = y - g->ay + 12;
-        if (g_acc_x_manage) { /* nur Code, Abmelden, Loeschen (Discord/Login/Code stehen in der Karte darueber) */
-            g->my = g->ay + g->ah + 12;
-            y = g->my + 14;
-            g->r_code = y;
-            y += 58 + 8;
-            g->r_out = y;
-            y += 36;
-            g->r_del = y;
-            y += 36;
-            g->mh = y - g->my + 6;
-        }
-        break;
-    case ACCS_SEC:
-    case ACCS_UNK:
-        g->hh = 64;
-        if (g_acc_x_manage) {
-            g->my = CY0 + g->hh + 12;
-            y = g->my + 14;
-            g->r_dc = y;
-            y += 48;
-            g->r_lg = y;
-            y += 48;
-            if (g_acc_x_login) {
-                g->r_lgx = y;
-                g->lg = y;
-                y += 72;
-            }
-            g->r_rec = y;
-            y += 48;
-            g->r_code = y;
-            y += 58 + 8;
-            g->r_out = y;
-            y += 36;
-            g->r_del = y;
-            y += 36;
-            g->mh = y - g->my + 6;
-        }
-        break;
-    default:
-        break;
+    if (g->st == ACCS_OFF) {
+        return;
     }
+    g->ov_y = CY0;
+    g->ov_h = ACC_OV_H;
+    if (g->st == ACCS_NONE) { /* Erstellen | Schon ein Konto */
+        g->lo_y = g->ov_y + g->ov_h + ACC_GAP;
+        g->lo_h = ACC_NONE_H;
+        g->lx = CX0;
+        g->lw = COLW;
+        g->rx = COL2;
+        g->rw = COLW;
+        return;
+    }
+    g->gt_y = g->ov_y + g->ov_h + ACC_GAP;
+    g->gt_h = ACC_GT_H;
+    g->lo_y = g->gt_y + g->gt_h + ACC_GAP;
+    g->lo_h = ACC_PRIV_Y - 8 - g->lo_y;
+    g->lx = CX0;
+    g->lw = ACC_SEC_W;
+    g->rx = CX0 + ACC_SEC_W + 12;
+    g->rw = CW - ACC_SEC_W - 12;
+    g->r_dc = g->lo_y + 42;
+    g->r_lg = g->r_dc + 46;
+    g->r_rec = g->r_lg + 46;
 }
 
+/* W502: gezeichnete Karten der Kontoseite (Selbsttest: jedes sichtbare Element liegt in einer Karte). Anzahl. */
+int acc_page_cards(RECT *r, int *kind, int cap)
+{
+    acc_geo_t g;
+    int n = 0;
+    acc_geo(&g);
+#define ACC_CARD_ADD(k, x, y, w, h)                                                                                    \
+    do {                                                                                                               \
+        if (n < cap) {                                                                                                 \
+            SetRect(&r[n], (x), (y), (x) + (w), (y) + (h));                                                            \
+            kind[n] = (k);                                                                                             \
+        }                                                                                                              \
+        n++;                                                                                                           \
+    } while (0)
+    if (g.st == ACCS_OFF) {
+        ACC_CARD_ADD(ACC_CARD_OFF, CX0, CY0, CW, 88);
+        return n < cap ? n : cap;
+    }
+    ACC_CARD_ADD(ACC_CARD_OV, CX0, g.ov_y, CW, g.ov_h);
+    if (g.gt_y >= 0) {
+        ACC_CARD_ADD(ACC_CARD_GT, CX0, g.gt_y, CW, g.gt_h);
+    }
+    ACC_CARD_ADD(g.st == ACCS_NONE ? ACC_CARD_NEW : ACC_CARD_SEC, g.lx, g.lo_y, g.lw, g.lo_h);
+    ACC_CARD_ADD(g.st == ACCS_NONE ? ACC_CARD_HAVE : ACC_CARD_SET, g.rx, g.lo_y, g.rw, g.lo_h);
+#undef ACC_CARD_ADD
+    return n < cap ? n : cap;
+}
 /* W418: Meldung unter einem Feld (Name/Code/Login); "" = keine */
 static void acc_fmsg(int id, const char *t, COLORREF c)
 {
@@ -224,11 +238,15 @@ static const char *acc_fmsg_for(int id, COLORREF *c)
     return g_acc_fmsg;
 }
 
-/* W418: Aufklapper zu (neuer Kontozustand: Anlegen, Anmelden, Abmelden, Loeschen) */
+/* W418: Formulare zu (neuer Kontozustand: Anlegen, Anmelden, Abmelden, Loeschen) */
 void acc_x_reset(void)
 {
-    g_acc_x_login = g_acc_x_code = g_acc_x_manage = 0;
+    g_acc_x_login = g_acc_x_code = 0;
+    g_acc_x_gt = 0; /* W487 */
+    g_acc_hl = 0;   /* W502 */
+    g_acc_gt_user = 0;
     acc_fmsg(0, "", 0);
+    acc_gtmsg(0, "", 0);
 }
 
 /* W418: ein Codefeld fuer beide Codes. Das Format entscheidet: Wiederherstellungscode = 32 Zeichen Base32
@@ -283,6 +301,8 @@ static void acc_err_text(const char *code, char *out, size_t cap)
         { "rate_limited", "gui.acc_err_rate" }, { "auth_failed", "gui.acc_err_auth" },
         { "no_account", "gui.acc_err_auth" },   { "server_busy", "gui.acc_err_busy" },
         { "store", "gui.acc_err_store" },       { "browser", "gui.acc_err_browser" },
+        { "gamertag_off", "gui.acc_gt_off" },   { "invalid_gamertag", "gui.acc_gt_rules" }, /* W487 */
+        { "gamertag_refused", "gui.acc_gt_refused" },
     };
     int i;
     for (i = 0; i < (int)(sizeof kErr / sizeof kErr[0]); i++) {
@@ -294,18 +314,88 @@ static void acc_err_text(const char *code, char *out, size_t cap)
     _snprintf_s(out, cap, _TRUNCATE, LT("gui.acc_err_other"), code);
 }
 
+/* W487: Datum (lokal, JJJJ-MM-TT) eines Unix-Zeitpunkts */
+static void acc_gt_date(long long t, char *out, size_t cap)
+{
+    struct tm tm;
+    time_t tt = (time_t)t;
+    if (t <= 0 || localtime_s(&tm, &tt) != 0) {
+        strcpy_s(out, cap, "?");
+        return;
+    }
+    strftime(out, cap, "%Y-%m-%d", &tm);
+}
+
+/* W487: Gamertag-Statuscode (gamertag_check, gamertag_refused, gamertag_error) -> Text; next_at fuer change_limit */
+void acc_gt_status_text(const char *status, long long next_at, const char *name, char *out, size_t cap)
+{
+    static const struct {
+        const char *st, *key;
+    } kSt[] = {
+        { "ok", "gui.acc_gt_st_ok" },
+        { "taken", "gui.acc_gt_st_taken" },
+        { "similar", "gui.acc_gt_st_similar" },
+        { "reserved", "gui.acc_gt_st_reserved" },
+        { "blocked", "gui.acc_gt_st_blocked" },
+        { "invalid_length", "gui.acc_gt_st_invalid_length" },
+        { "invalid_characters", "gui.acc_gt_st_invalid_characters" },
+        { "change_limit", "gui.acc_gt_st_change_limit" },
+        { "unchanged", "gui.acc_gt_st_unchanged" },
+        { "off", "gui.acc_gt_off" },
+        { "unavailable", "gui.acc_gt_st_unavailable" },
+    };
+    const char *k = NULL;
+    char d[32];
+    int i;
+    for (i = 0; status && i < (int)(sizeof kSt / sizeof kSt[0]); i++) {
+        if (strcmp(status, kSt[i].st) == 0) k = kSt[i].key;
+    }
+    if (!k) {
+        strncpy_s(out, cap, LT("gui.acc_gt_refused"), _TRUNCATE);
+        return;
+    }
+    if (strcmp(status, "change_limit") == 0) {
+        acc_gt_date(next_at, d, sizeof d);
+        _snprintf_s(out, cap, _TRUNCATE, LT(k), d);
+    } else if (strcmp(status, "ok") == 0 || strcmp(status, "taken") == 0 || strcmp(status, "similar") == 0) {
+        _snprintf_s(out, cap, _TRUNCATE, LT(k), name && name[0] ? name : "?");
+    } else {
+        strncpy_s(out, cap, LT(k), _TRUNCATE);
+    }
+}
+
+/* W487: Fehler eines Gamertag-Auftrags (create/gamertag_set/gamertag_check) -> Text */
+static void acc_gt_err_text(const acc_job_t *j, char *out, size_t cap)
+{
+    const char *nm = j->op == ACC_OP_CREATE ? j->c : j->a;
+    if (strcmp(j->err, "gamertag_refused") == 0 && j->gts.status[0]) {
+        acc_gt_status_text(j->gts.status, j->gts.next_at, nm, out, cap);
+    } else if (j->op != ACC_OP_CREATE && (strcmp(j->err, "not_found") == 0 || strcmp(j->err, "bad_request") == 0)) {
+        strncpy_s(out, cap, LT("gui.acc_gt_off"), _TRUNCATE); /* aelterer Dienst ohne Gamertag-Aktionen */
+    } else {
+        acc_err_text(j->err, out, cap);
+    }
+}
+
+/* W502: Gamertag-Aenderung laut letztem Status gesperrt (7-Tage-Regel; der Dienst prueft selbst) */
+static int acc_gt_locked(void)
+{
+    return g_acc_st_ok && g_acc_st.gamertag[0] && g_acc_st.gt_next > (long long)time(NULL);
+}
+
 void acc_refresh(void)
 {
     if (!g_hwnd) {
         return;
     }
-    acc_layout(); /* W399/W418: Lage je Zustand und Aufklapper */
+    acc_layout(); /* W399/W418/W502: Lage je Zustand und Formular */
     ui_refresh_visibility();
     nav_sub_layout(); /* W399: Markierung des Unterpunkts */
     {
         static const int kBtn[] = { ID_ACC_CREATE, ID_ACC_SIGNIN, ID_ACC_DISCORD, ID_ACC_MANAGE,
                                     ID_ACC_V_DISCORD, ID_ACC_V_LOGINBTN, ID_ACC_V_CODEBTN, ID_ACC_X_LOGIN,
-                                    ID_ACC_X_CODE, ID_ACC_V_DELETE, ID_ACC_V_FORGET };
+                                    ID_ACC_X_CODE, ID_ACC_V_DELETE, ID_ACC_V_FORGET, ID_ACC_V_GTBTN, ID_ACC_X_GT,
+                                    ID_ACC_O_ONLINE };
         int i;
         for (i = 0; i < (int)(sizeof kBtn / sizeof kBtn[0]); i++) {
             HWND b = ctl(kBtn[i]);
@@ -313,6 +403,9 @@ void acc_refresh(void)
             if ((kBtn[i] == ID_ACC_DISCORD || kBtn[i] == ID_ACC_V_DISCORD) && g_acc.have && g_acc_st_ok &&
                 g_acc_st.discord) {
                 en = FALSE; /* schon verbunden */
+            }
+            if (kBtn[i] == ID_ACC_X_GT && acc_gt_locked()) {
+                en = FALSE; /* W502: naechste Aenderung erst am Datum der Karte */
             }
             if (b) {
                 EnableWindow(b, en);
@@ -335,18 +428,23 @@ void acc_refresh(void)
                                                   : st == ACCS_UNSEC ? "gui.acc_login_save"
                                                                      : "gui.acc_save"));
         }
-        if (ctl(ID_ACC_X_LOGIN)) {
-            ui_settext(ctl(ID_ACC_X_LOGIN), LT(st == ACCS_NONE ? "gui.acc_x_login_in"
-                                               : lg            ? "gui.acc_login_change"
-                                                               : "gui.acc_x_login_set"));
+        if (ctl(ID_ACC_X_LOGIN)) { /* W502: Knopf in der Karte (kein Textlink) */
+            ui_settext(ctl(ID_ACC_X_LOGIN), LT(st == ACCS_NONE ? "gui.acc_b_login_in"
+                                               : lg            ? "gui.acc_b_login_chg"
+                                                               : "gui.acc_b_login_set"));
         }
         if (ctl(ID_LOC_MP_ACC)) { /* W418: Karte Multiplayer (Spielen) */
             ui_settext(ctl(ID_LOC_MP_ACC), LT(g_acc.have ? "gui.acc_mp_go" : "gui.acc_mp_new"));
         }
+        if (ctl(ID_ACC_V_GTBTN)) {
+            ui_settext(ctl(ID_ACC_V_GTBTN), LT(g_acc_st_ok && g_acc_st.gamertag[0] ? "gui.acc_gt_change" : "gui.acc_gt_set"));
+        }
+        if (ctl(ID_ACC_O_ONLINE)) { /* W502: Uebersicht, Zeile Online */
+            ui_settext(ctl(ID_ACC_O_ONLINE), LT(st == ACCS_NONE ? "gui.acc_create" : "gui.acc_ov_retry"));
+        }
     }
     redraw_all();
 }
-
 static DWORD WINAPI acc_thread(LPVOID p)
 {
     acc_job_t *j = (acc_job_t *)p;
@@ -355,7 +453,11 @@ static DWORD WINAPI acc_thread(LPVOID p)
     switch (j->op) {
     case ACC_OP_STATUS: j->rc = lacc_op_status(&j->srv, &j->st, &j->status, e, ec); break;
     case ACC_OP_CHECK: j->rc = lacc_op_check(&j->srv, j->a, &j->avail, e, ec); break;
-    case ACC_OP_CREATE: j->rc = lacc_op_create(&j->srv, j->dir, j->a, &j->st, e, ec); break;
+    case ACC_OP_CREATE: j->rc = lacc_op_create_gt(&j->srv, j->dir, j->a, j->c, &j->st, &j->gts, e, ec); break; /* W487 */
+    case ACC_OP_GT_CHECK:
+        j->rc = lacc_op_gamertag_check(&j->srv, j->a[0] ? j->a : NULL, j->c[0] ? j->c : NULL, &j->gtc, e, ec);
+        break;
+    case ACC_OP_GT_SET: j->rc = lacc_op_gamertag_set(&j->srv, &j->st, j->a, &j->gts, e, ec); break;
     case ACC_OP_DISCORD_LINK: j->rc = lacc_op_discord(&j->srv, j->dir, 0, &j->st, 180000, &g_acc_cancel, e, ec); break;
     case ACC_OP_DISCORD_LOGIN: j->rc = lacc_op_discord(&j->srv, j->dir, 1, &j->st, 180000, &g_acc_cancel, e, ec); break;
     case ACC_OP_LOGIN_SET: j->rc = lacc_op_login_set(&j->srv, &j->st, j->a, j->b, e, ec); break;
@@ -373,8 +475,9 @@ static DWORD WINAPI acc_thread(LPVOID p)
     return 0;
 }
 
-/* Auftrag starten (a/b duerfen NULL sein). 0 = gestartet. */
-static int acc_start(int op, const char *a, const char *b)
+/* Auftrag starten (a/b/c duerfen NULL sein; W487: c = Gamertag beim Erstellen bzw. Vorschlagsbasis, fid = Feld der
+ * Gamertag-Pruefung). 0 = gestartet. */
+static int acc_start3(int op, const char *a, const char *b, const char *c, int fid)
 {
     acc_job_t *j;
     HANDLE th;
@@ -393,8 +496,10 @@ static int acc_start(int op, const char *a, const char *b)
     j->h = g_hwnd;
     j->op = op;
     j->gen = ++g_acc_gen;
+    j->fid = fid;
     if (a) strcpy_s(j->a, sizeof j->a, a);
     if (b) strcpy_s(j->b, sizeof j->b, b);
+    if (c) strncpy_s(j->c, sizeof j->c, c, _TRUNCATE);
     acc_dir(j->dir, sizeof j->dir);
     lacc_server(&j->srv);
     j->st = g_acc;
@@ -407,12 +512,26 @@ static int acc_start(int op, const char *a, const char *b)
     }
     CloseHandle(th);
     g_acc_busy = op;
-    if (op != ACC_OP_STATUS && op != ACC_OP_CHECK) { /* W418: Namenspruefung still (Meldung unter dem Feld) */
+    if (op != ACC_OP_STATUS && op != ACC_OP_CHECK && op != ACC_OP_GT_CHECK) { /* W418/W487: Pruefungen still */
         set_status_k(LT(op == ACC_OP_DISCORD_LINK || op == ACC_OP_DISCORD_LOGIN ? "gui.acc_wait_discord"
                                                                                   : "gui.acc_working"), 0);
     }
     acc_refresh();
     return 0;
+}
+
+static int acc_start(int op, const char *a, const char *b)
+{
+    return acc_start3(op, a, b, NULL, 0);
+}
+
+/* W487: Gamertag-Feld setzen, ohne es als Spieler-Aenderung zu zaehlen */
+static void acc_gt_settext(int id, const char *t)
+{
+    if (!ctl(id)) return;
+    g_updating++;
+    ui_settext(ctl(id), t);
+    g_updating--;
 }
 
 /* Ergebnis (UI-Thread) */
@@ -431,14 +550,29 @@ void acc_done(acc_job_t *j)
             if (strcmp(j->err, "auth_failed") == 0) { /* Konto geloescht/abgemeldet (neue Generation) */
                 set_status_k(LT("gui.acc_err_auth"), 2);
             }
+            if (g_acc_live_pending == 1) { /* W487/W501: Start wartete auf den Status - trotzdem starten (System Link) */
+                g_acc_live_pending = 2;
+                acc_refresh();
+                loctab_start();
+                return;
+            }
         } else if (op == ACC_OP_CHECK) {
             acc_fmsg(0, "", 0); /* W418: stille Pruefung - ohne Antwort keine Meldung (Erstellen prueft erneut) */
+        } else if (op == ACC_OP_GT_CHECK) { /* W487: still, nur "Dienst ohne Gamertags" zeigen */
+            acc_gtmsg(j->fid, strcmp(j->err, "gamertag_off") == 0 ? e : "", C_WARN);
         } else {
+            int gtf = op == ACC_OP_GT_SET || (op == ACC_OP_CREATE && (strcmp(j->err, "gamertag_refused") == 0 ||
+                                                                       strcmp(j->err, "invalid_gamertag") == 0));
+            if (gtf) acc_gt_err_text(j, e, sizeof e); /* W487: Grund der Ablehnung (vergeben, aehnlich, Grenze ...) */
             set_status_k(e, 2);
             /* W418: Fehler direkt unter dem betroffenen Feld */
-            if (op == ACC_OP_CREATE) acc_fmsg(ID_ACC_NAME, e, C_ERR);
+            if (op == ACC_OP_CREATE && gtf) acc_gtmsg(ID_ACC_GT, e, C_ERR);
+            else if (op == ACC_OP_GT_SET) acc_gtmsg(ID_ACC_V_GT, e, C_ERR);
+            else if (op == ACC_OP_CREATE) acc_fmsg(ID_ACC_NAME, e, C_ERR);
             else if (op == ACC_OP_TRANSFER || op == ACC_OP_RECOVERY) acc_fmsg(ID_ACC_V_CODE, e, C_ERR);
             else if (op == ACC_OP_LOGIN || op == ACC_OP_LOGIN_SET) acc_fmsg(ID_ACC_V_LOGIN, e, C_ERR);
+            if (op == ACC_OP_GT_SET && strcmp(j->err, "gamertag_refused") == 0 && j->gts.next_at > 0 && g_acc_st_ok)
+                g_acc_st.gt_next = j->gts.next_at; /* Grenze vom Dienst uebernehmen */
         }
         acc_refresh();
         return;
@@ -448,6 +582,32 @@ void acc_done(acc_job_t *j)
         g_acc_st = j->status;
         g_acc_st_ok = 1;
         g_acc_st_err[0] = '\0';
+        break;
+    case ACC_OP_GT_CHECK: { /* W487: Ergebnis unter dem Feld, nur wenn der Text noch im Feld steht */
+        char cur[80] = "", bas[80] = "";
+        if (ctl(j->fid)) ui_gettext(ctl(j->fid), cur, sizeof cur);
+        if (j->a[0]) { /* Pruefung eines Namens */
+            if (strcmp(cur, j->a) == 0) {
+                acc_gt_status_text(j->gtc.status, 0, j->a, m, sizeof m);
+                acc_gtmsg(j->fid, m, j->gtc.available ? C_OK : C_ERR);
+            }
+        } else if (j->fid == ID_ACC_GT && !g_acc_gt_user && j->gtc.suggestion[0]) { /* Vorschlag zum Kontonamen */
+            if (ctl(ID_ACC_NAME)) ui_gettext(ctl(ID_ACC_NAME), bas, sizeof bas);
+            if (strcmp(bas, j->c) == 0) {
+                acc_gt_settext(ID_ACC_GT, j->gtc.suggestion);
+                acc_gt_status_text("ok", 0, j->gtc.suggestion, m, sizeof m);
+                acc_gtmsg(ID_ACC_GT, m, C_OK);
+            }
+        }
+        break;
+    }
+    case ACC_OP_GT_SET:
+        strcpy_s(g_acc_st.gamertag, sizeof g_acc_st.gamertag, j->gts.gamertag);
+        g_acc_st.gt_next = j->gts.next_at;
+        acc_gt_settext(ID_ACC_V_GT, "");
+        _snprintf_s(m, sizeof m, _TRUNCATE, LT("gui.acc_gt_done"), j->gts.gamertag);
+        acc_gtmsg(ID_ACC_V_GT, m, C_OK);
+        set_status_k(m, 1);
         break;
     case ACC_OP_CHECK: { /* W418: Ergebnis unter dem Feld, nur wenn der Name noch im Feld steht */
         char cur[80] = "";
@@ -472,7 +632,17 @@ void acc_done(acc_job_t *j)
         g_acc_st_err[0] = '\0';
         acc_x_reset(); /* W418: neuer Zustand -> Aufklapper zu */
         _snprintf_s(m, sizeof m, _TRUNCATE, LT(op == ACC_OP_CREATE ? "gui.acc_created" : "gui.acc_signed_in"), g_acc.name);
-        set_status_k(m, 1);
+        if (op == ACC_OP_CREATE && j->c[0] && (j->gts.status[0] || !j->gts.gamertag[0])) {
+            /* W487: Konto angelegt, Gamertag nicht gesetzt (Dienst ohne Gamertags/Kern nicht erreichbar) */
+            _snprintf_s(m, sizeof m, _TRUNCATE, LT("gui.acc_created_nogt"), g_acc.name);
+            set_status_k(m, 2);
+        } else if (op == ACC_OP_CREATE && j->gts.gamertag[0]) { /* W487: mit Gamertag */
+            _snprintf_s(m, sizeof m, _TRUNCATE, LT("gui.acc_created_gt"), g_acc.name, j->gts.gamertag);
+            set_status_k(m, 1);
+        } else {
+            set_status_k(m, 1);
+        }
+        if (op == ACC_OP_CREATE) acc_gt_settext(ID_ACC_GT, "");
         if (ctl(ID_ACC_V_PASS)) ui_settext(ctl(ID_ACC_V_PASS), "");
         if (ctl(ID_ACC_V_CODE)) ui_settext(ctl(ID_ACC_V_CODE), "");
         if (op != ACC_OP_CREATE) g_acc_view = 0; /* zurueck zur Karte */
@@ -504,6 +674,17 @@ void acc_done(acc_job_t *j)
     if (g_acc.have && !g_acc_st_ok && op != ACC_OP_STATUS) {
         acc_start(ACC_OP_STATUS, NULL, NULL);
     }
+    /* W487: Namenspruefung ok -> Gamertag-Vorschlag zum Kontonamen (solange der Spieler das Feld nicht geaendert hat) */
+    if (op == ACC_OP_CHECK && !g_acc.have && !g_acc_gt_user && lacc_valid_name(j->a)) {
+        char cur[80] = "";
+        if (ctl(ID_ACC_NAME)) ui_gettext(ctl(ID_ACC_NAME), cur, sizeof cur);
+        if (strcmp(cur, j->a) == 0) acc_start3(ACC_OP_GT_CHECK, NULL, NULL, j->a, ID_ACC_GT);
+    }
+    /* W487/W501: Start wartete auf den Status (Gamertag) - jetzt starten (mit Gamertag auch Xbox Live, sonst System Link) */
+    if (op == ACC_OP_STATUS && g_acc_live_pending == 1) {
+        g_acc_live_pending = 2; /* acc_live_prestart laesst den Start dann ohne neue Abfrage durch */
+        loctab_start();
+    }
 }
 
 /* Seite LoC > Erweitert gezeigt: Konto laden, Status einmal holen. */
@@ -527,45 +708,57 @@ void acc_play_shown(void)
     }
 }
 
-/* W418: Aufklapper (Textlink, Pfeil rechts = zu, unten = offen) und roter Knopf "Konto loeschen" */
-int acc_link_id(int id)
-{
-    return id == ID_ACC_X_LOGIN || id == ID_ACC_X_CODE || id == ID_ACC_X_MANAGE;
-}
-
+/* W418: roter Knopf "Konto loeschen" (W502: die Aufklapper-Textlinks entfielen, alles echte Knoepfe) */
 int acc_danger_id(int id)
 {
     return id == ID_ACC_V_DELETE;
 }
 
-void acc_link_paint(canvas_t *c, const uictl_t *u, int w, int h, const wchar_t *txt, int n, int focus, int dis)
+/* W502: Sichtbarkeit der Elemente der Kontoseite mit Konto (Uebersicht, Gamertag, Sichern, Einstellungen) */
+static int acc_vis_have(int id, int st)
 {
-    int open = u->id == ID_ACC_X_LOGIN ? g_acc_x_login : u->id == ID_ACC_X_CODE ? g_acc_x_code : g_acc_x_manage;
-    COLORREF fg = dis ? C_FAINT : u->hover ? C_ACCENT_HI : C_ACCENT;
-    wchar_t ic = g_has_icons ? (open ? 0xE70D : 0xE76C) : (open ? L'v' : L'>');
-    int iw = SX(16), tw = 0;
-    SIZE sz;
-    cv_textw(c, g_has_icons ? g_f[F_ICONSM] : g_f[F_SEMI], &ic, 1, 0, 0, iw, h, fg,
-             DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(c->dc, g_f[F_SEMI]);
-    if (GetTextExtentPoint32W(c->dc, txt, n, &sz)) {
-        tw = sz.cx;
+    int ok = g_acc_st_ok, gt = ok && g_acc_st.gamertag[0];
+    int gtoff = ok && !gt && (strcmp(g_acc_st.gt_state, "off") == 0 || strcmp(g_acc_st.gt_state, "unavailable") == 0);
+    switch (id) {
+    case ID_ACC_O_ONLINE: return st == ACCS_UNK && netm_get() == NETM_STEEL; /* Erneut versuchen */
+    case ID_ACC_O_LIVE: return ok && !gt && !gtoff;                         /* Gamertag waehlen */
+    case ID_ACC_O_SEC: return st == ACCS_UNSEC;                              /* Konto sichern */
+    case ID_ACC_V_GT: case ID_ACC_V_GTBTN: return ok && !gtoff && (!gt || g_acc_x_gt);
+    case ID_ACC_X_GT: return gt && !g_acc_x_gt;
+    case ID_ACC_V_GTCANCEL: return gt && g_acc_x_gt;
+    case ID_ACC_V_LOGIN: case ID_ACC_V_PASS: case ID_ACC_V_LOGINBTN: case ID_ACC_V_LGCANCEL: return g_acc_x_login;
+    case ID_ACC_V_DISCORD: return !g_acc_x_login && !(ok && g_acc_st.discord); /* verbunden -> nur Zustand */
+    case ID_ACC_X_LOGIN: case ID_ACC_V_RECSHOW: case ID_ACC_V_RECCOPY: return !g_acc_x_login;
+    case ID_ACC_V_CODE: case ID_ACC_V_CODEBTN: case ID_ACC_V_CDCANCEL: return g_acc_x_code;
+    case ID_ACC_X_CODE: case ID_ACC_V_FORGET: case ID_ACC_V_DELETE: return !g_acc_x_code;
     }
-    cv_textw(c, g_f[F_SEMI], txt, n, iw + SX(4), 0, w - iw - SX(4), h, fg,
-             DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-    if (u->hover && !dis) {
-        int uw = tw < w - iw - SX(4) ? tw : w - iw - SX(4);
-        cv_fill(c, iw + SX(4), h - SX(4), uw, 1, fg, 200, 0);
+    return 0;
+}
+
+/* W502: kein Konto - Erstellen (links) | Schon ein Konto (rechts: Knoepfe bzw. Login- oder Codeformular) */
+static int acc_vis_none(int id)
+{
+    int form = g_acc_x_login || g_acc_x_code;
+    switch (id) {
+    case ID_ACC_NAME: case ID_ACC_GT: case ID_ACC_CREATE: case ID_ACC_O_ONLINE: return 1;
+    case ID_ACC_V_DISCORD: case ID_ACC_X_LOGIN: case ID_ACC_X_CODE: return !form;
+    case ID_ACC_V_LOGIN: case ID_ACC_V_PASS: case ID_ACC_V_LOGINBTN: case ID_ACC_V_LGCANCEL: return g_acc_x_login;
+    case ID_ACC_V_CODE: case ID_ACC_V_CODEBTN: case ID_ACC_V_CDCANCEL: return g_acc_x_code;
     }
-    if (focus) {
-        cv_ring(c, 0, 0, w, h, C_ACCENT_HI, 200, SX(4), SX(2) < 2 ? 2 : SX(2));
-    }
+    return 0;
 }
 
 /* Sichtbarkeit (-1 = nicht zustaendig) */
 int acc_visible(int id, int page)
 {
-    int on, have, view, st, man;
+    int on, have, view, st;
+    if (ACC_GT_ID(id) || ACC_W502_ID(id)) { /* W487/W502: nur auf der Kontoseite */
+        if (g_game != LGAME_LOC || page != P_LNET || !g_acc_view || !acc_srv_on()) {
+            return 0;
+        }
+        st = acc_state();
+        return st == ACCS_NONE ? acc_vis_none(id) : g_acc.have ? acc_vis_have(id, st) : 0;
+    }
     if (id < ID_ACC_FIRST || id > ID_ACC_LAST) {
         return -1;
     }
@@ -589,28 +782,12 @@ int acc_visible(int id, int page)
         }
         return 0;
     }
-    /* W418: Kontoseite - nur die Elemente des Zustands und der offenen Aufklapper */
+    /* W502: Kontoseite - nur die Elemente des Zustands und des offenen Formulars */
     st = acc_state();
-    man = g_acc_x_manage;
-    switch (id) {
-    case ID_ACC_NAME: case ID_ACC_CREATE: case ID_ACC_X_CODE:
-        return st == ACCS_NONE;
-    case ID_ACC_V_DISCORD: /* verbunden -> nur Zustand, kein Knopf */
-        return st == ACCS_NONE || st == ACCS_UNSEC || (man && !(g_acc_st_ok && g_acc_st.discord));
-    case ID_ACC_X_LOGIN:
-        return st == ACCS_NONE || st == ACCS_UNSEC || man;
-    case ID_ACC_V_LOGIN: case ID_ACC_V_PASS: case ID_ACC_V_LOGINBTN:
-        return g_acc_x_login && (st == ACCS_NONE || st == ACCS_UNSEC || man);
-    case ID_ACC_V_CODE: case ID_ACC_V_CODEBTN:
-        return st == ACCS_NONE ? g_acc_x_code : man;
-    case ID_ACC_X_MANAGE:
-        return have;
-    case ID_ACC_V_RECSHOW: case ID_ACC_V_RECCOPY:
-        return st == ACCS_UNSEC || (have && man);
-    case ID_ACC_V_DELETE: case ID_ACC_V_FORGET:
-        return have && man;
+    if (st == ACCS_NONE) {
+        return acc_vis_none(id);
     }
-    return 0;
+    return have ? acc_vis_have(id, st) : 0;
 }
 
 /* In der Verwaltungsansicht: alle uebrigen Elemente der Seite aus. W399: Unterpunkt Account der Leiste, auch ohne
@@ -638,20 +815,34 @@ static void acc_put(int id, int x, int y, int w, int h)
     u->h_ = h;
     ui_place(u);
 }
-
 /* W473: Zeilen der Karte "steelnet account" (Match & network), logisch ab LOC_ONL_Y */
 #define ACC_C_L1 40  /* Zeile 1: angemeldet als / nicht angemeldet */
 #define ACC_C_L2 62  /* Zeile 2: gesichert ja/nein */
 #define ACC_C_WHY 86 /* Erklaerung (bis 3 kurze Zeilen) */
 #define ACC_C_WHY_H 48
 #define ACC_C_BTN 140 /* Knoepfe */
-/* W399/W418: Lage der Konto-Elemente je Ansicht (Karte auf Match & network bzw. Kontoseite), Zustand und
- * Aufklapper (acc_geo). Unsichtbare Elemente behalten ihre letzte Lage. */
+/* W502: Lage innerhalb der Karten der Kontoseite (relativ zur Kartenoberkante) */
+#define ACC_N_NAME 80   /* kein Konto, Erstellen: Feld Kontoname (Beschriftung -18, Meldung +30) */
+#define ACC_N_GT 152    /* Feld Gamertag (Beschriftung -18, Meldung +30, zwei Zeilen) */
+#define ACC_N_BTN 218   /* Erstellen */
+#define ACC_F_L1 80     /* Formular "Schon ein Konto": erstes Feld (Beschriftung -18) */
+#define ACC_F_L2 132    /* zweites Feld (Passwort) */
+#define ACC_G_ROW 40    /* Gamertag-Karte: Feld/Knoepfe bzw. Anzeige */
+#define ACC_S_FLD 60    /* Sichern, Login-Formular: Felder (Beschriftung -18) */
+#define ACC_S_BTN 140   /* Sichern, Login-Formular: Knoepfe */
+#define ACC_E_FLD 58    /* Einstellungen, Codeformular: Feld (Beschriftung -18) */
+#define ACC_E_BTN 94    /* Einstellungen, Codeformular: Knoepfe */
+#define ACC_E_CODE 62   /* Einstellungen: Code einloesen */
+#define ACC_E_OUT 98    /* Abmelden */
+#define ACC_E_SEP 140   /* Trennlinie */
+#define ACC_E_DEL 152   /* Loeschen */
+/* W399/W418/W502: Lage der Konto-Elemente je Ansicht (Karte auf Match & network bzw. Kontoseite), Zustand und
+ * Formular (acc_geo). Unsichtbare Elemente behalten ihre letzte Lage. */
 void acc_layout(void)
 {
     acc_geo_t g;
     uictl_t *dc = ui_find(ID_ACC_V_DISCORD);
-    int x0 = CX0 + 18, xr = CX0 + CW - 18, rx = COL2 + 18, rw = COLW - 36;
+    int x0 = CX0 + 18, xr = CX0 + CW - 18, i;
     if (!g_acc_view) { /* Karte "steelnet account" auf Match & network (W473: Zustand oben, Knoepfe unten) */
         int y = LOC_ONL_Y, xc = ACC_X + 18, unsec = acc_state() == ACCS_UNSEC;
         acc_put(ID_ACC_NAME, xc, y + 86, COLW - 36 - 8 - 130, 28);
@@ -662,63 +853,63 @@ void acc_layout(void)
         return;
     }
     acc_geo(&g);
-    acc_put(ID_ACC_X_MANAGE, xr - 120, CY0 + 12, 120, ACC_LINK_H);
     if (dc) {
         dc->kind = g.st == ACCS_UNSEC ? K_ACCENT : K_BTN; /* ein Hauptknopf je Zustand */
     }
-    switch (g.st) {
-    case ACCS_NONE:
-        acc_put(ID_ACC_NAME, x0, g.ay + 62, COLW - 36, 28);
-        acc_put(ID_ACC_CREATE, x0, g.ay + 120, 180, 30);
-        acc_put(ID_ACC_V_DISCORD, rx, g.ay + 44, rw, 30);
-        acc_put(ID_ACC_X_LOGIN, rx, g.xl, rw, ACC_LINK_H);
-        acc_put(ID_ACC_X_CODE, rx, g.xc, rw, ACC_LINK_H);
-        if (g.lg >= 0) {
-            acc_put(ID_ACC_V_LOGIN, rx, g.lg + 18, rw, 28);
-            acc_put(ID_ACC_V_PASS, rx, g.lg + 68, rw, 28);
-            acc_put(ID_ACC_V_LOGINBTN, rx, g.lg + 102, 160, 28);
-        }
-        if (g.cd >= 0) {
-            acc_put(ID_ACC_V_CODE, rx, g.cd + 18, rw - 104, 28);
-            acc_put(ID_ACC_V_CODEBTN, rx + rw - 96, g.cd + 18, 96, 28);
-        }
-        break;
-    case ACCS_UNSEC:
-        acc_put(ID_ACC_V_DISCORD, x0, g.ay + 44, 240, 32);
-        acc_put(ID_ACC_X_LOGIN, x0, g.xl, ACC_HALF_W, ACC_LINK_H);
-        acc_put(ID_ACC_V_RECSHOW, ACC_RX, g.rec + 48, 76, 26);
-        acc_put(ID_ACC_V_RECCOPY, ACC_RX + 82, g.rec + 48, 76, 26);
-        if (g.lg >= 0) {
-            acc_put(ID_ACC_V_LOGIN, x0, g.lg + 18, ACC_HALF_W, 28);
-            acc_put(ID_ACC_V_PASS, x0, g.lg + 68, ACC_HALF_W, 28);
-            acc_put(ID_ACC_V_LOGINBTN, x0, g.lg + 102, 180, 28);
-        }
-        break;
-    case ACCS_SEC:
-    case ACCS_UNK:
-        if (g.r_dc >= 0) {
-            acc_put(ID_ACC_V_DISCORD, xr - 210, g.r_dc + 6, 210, 28);
-            acc_put(ID_ACC_X_LOGIN, xr - 210, g.r_lg + 8, 210, ACC_LINK_H);
-            acc_put(ID_ACC_V_RECSHOW, xr - 210, g.r_rec + 4, 102, 26);
-            acc_put(ID_ACC_V_RECCOPY, xr - 102, g.r_rec + 4, 102, 26);
-        }
-        if (g.lg >= 0) {
-            acc_put(ID_ACC_V_LOGIN, x0, g.lg + 18, 214, 28);
-            acc_put(ID_ACC_V_PASS, x0 + 226, g.lg + 18, 214, 28);
-            acc_put(ID_ACC_V_LOGINBTN, x0 + 452, g.lg + 18, xr - x0 - 452, 28);
-        }
-        break;
-    default:
-        break;
+    if (g.st == ACCS_OFF) {
+        return;
     }
-    if (g.r_code >= 0) { /* Verwalten (beide Zustaende mit Konto): Code, Abmelden, Loeschen */
-        acc_put(ID_ACC_V_CODE, xr - 96 - 8 - 200, g.r_code + 4, 200, 28);
-        acc_put(ID_ACC_V_CODEBTN, xr - 96, g.r_code + 4, 96, 28);
-        acc_put(ID_ACC_V_FORGET, x0, g.r_out + 4, 210, 28);
-        acc_put(ID_ACC_V_DELETE, x0, g.r_del + 4, 210, 28);
+    { /* Uebersicht: je Zeile ein Knopf rechts */
+        static const int kOv[3] = { ID_ACC_O_ONLINE, ID_ACC_O_LIVE, ID_ACC_O_SEC };
+        for (i = 0; i < 3; i++) {
+            acc_put(kOv[i], xr - ACC_OV_BTN_W, g.ov_y + ACC_OV_TOP + i * ACC_OV_ROW + 2, ACC_OV_BTN_W, 28);
+        }
+    }
+    if (g.st == ACCS_NONE) {
+        int nx = g.lx + 18, nw = g.lw - 36, hx = g.rx + 18, hw = g.rw - 36, y = g.lo_y;
+        acc_put(ID_ACC_NAME, nx, y + ACC_N_NAME, nw, 28);
+        acc_put(ID_ACC_GT, nx, y + ACC_N_GT, nw, 28); /* W487 */
+        acc_put(ID_ACC_CREATE, nx, y + ACC_N_BTN, 180, 30);
+        acc_put(ID_ACC_V_DISCORD, hx, y + 62, hw, 30);
+        acc_put(ID_ACC_X_LOGIN, hx, y + 100, hw, 28);
+        acc_put(ID_ACC_X_CODE, hx, y + 136, hw, 28);
+        acc_put(ID_ACC_V_LOGIN, hx, y + ACC_F_L1, hw, 28);
+        acc_put(ID_ACC_V_PASS, hx, y + ACC_F_L2, hw, 28);
+        acc_put(ID_ACC_V_LOGINBTN, hx, y + 172, 150, 28);
+        acc_put(ID_ACC_V_LGCANCEL, hx + 158, y + 172, 110, 28);
+        acc_put(ID_ACC_V_CODE, hx, y + ACC_F_L1, hw, 28);
+        acc_put(ID_ACC_V_CODEBTN, hx, y + 116, 150, 28);
+        acc_put(ID_ACC_V_CDCANCEL, hx + 158, y + 116, 110, 28);
+        return;
+    }
+    { /* Gamertag-Karte: Feld + Setzen (+ Abbrechen beim Aendern) bzw. Anzeige + Aendern */
+        int y = g.gt_y + ACC_G_ROW;
+        acc_put(ID_ACC_V_GT, x0, y, 240, 28);
+        acc_put(ID_ACC_V_GTBTN, x0 + 250, y, 160, 28);
+        acc_put(ID_ACC_V_GTCANCEL, x0 + 418, y, 110, 28);
+        acc_put(ID_ACC_X_GT, xr - 150, y, 150, 28);
+    }
+    { /* Sichern: Zeilen Discord, Login, Wiederherstellungscode (Knoepfe rechts) bzw. Login-Formular */
+        int sx = g.lx + 18, sxr = g.lx + g.lw - 18, fw = (g.lw - 36 - 12) / 2;
+        acc_put(ID_ACC_V_DISCORD, sxr - ACC_ROW_BTN_W, g.r_dc + 4, ACC_ROW_BTN_W, 28);
+        acc_put(ID_ACC_X_LOGIN, sxr - ACC_ROW_BTN_W, g.r_lg + 4, ACC_ROW_BTN_W, 28);
+        acc_put(ID_ACC_V_RECSHOW, sxr - 166, g.r_rec, 80, 26);
+        acc_put(ID_ACC_V_RECCOPY, sxr - 80, g.r_rec, 80, 26);
+        acc_put(ID_ACC_V_LOGIN, sx, g.lo_y + ACC_S_FLD, fw, 28);
+        acc_put(ID_ACC_V_PASS, sx + fw + 12, g.lo_y + ACC_S_FLD, fw, 28);
+        acc_put(ID_ACC_V_LOGINBTN, sx, g.lo_y + ACC_S_BTN, ACC_ROW_BTN_W, 28);
+        acc_put(ID_ACC_V_LGCANCEL, sx + ACC_ROW_BTN_W + 8, g.lo_y + ACC_S_BTN, 110, 28);
+    }
+    { /* Kontoeinstellungen: Code einloesen, Abmelden, Loeschen bzw. Codeformular */
+        int tx = g.rx + 18, tw = g.rw - 36, bw = (tw - 8) / 2;
+        acc_put(ID_ACC_X_CODE, tx, g.lo_y + ACC_E_CODE, tw, 28);
+        acc_put(ID_ACC_V_FORGET, tx, g.lo_y + ACC_E_OUT, tw, 28);
+        acc_put(ID_ACC_V_DELETE, tx, g.lo_y + ACC_E_DEL, tw, 28);
+        acc_put(ID_ACC_V_CODE, tx, g.lo_y + ACC_E_FLD, tw, 28);
+        acc_put(ID_ACC_V_CODEBTN, tx, g.lo_y + ACC_E_BTN, bw, 28);
+        acc_put(ID_ACC_V_CDCANCEL, tx + bw + 8, g.lo_y + ACC_E_BTN, bw, 28);
     }
 }
-
 static void acc_open_view(int on)
 {
     g_acc_view = on;
@@ -772,9 +963,275 @@ static void acc_copy_code(void)
     SecureZeroMemory(w, sizeof w);
 }
 
+/* ------------------------------------------------------------------ */
+/* W487 LIVE-GAMERTAG: Gamertag beim Erstellen, Gamertag-Karte, Live-Start (W501: acc_gt_open entfiel mit der   */
+/* Startsperre; Weg zum Gamertag = Multiplayer > Konto bzw. "Konto verwalten")                                    */
+/* ------------------------------------------------------------------ */
+/* W502: Fokus auf ein Element der Kontoseite (nur im eigenen Fenster, nie Vordergrund; Shot/Selbsttest: nur merken) */
+static void acc_focus(int id)
+{
+    g_acc_focus_id = id;
+    if (g_o.shot == 0 && !g_in_gui_selftest && ctl(id) && IsWindowVisible(ctl(id)) && IsWindowEnabled(ctl(id))) {
+        SetFocus(ctl(id));
+    }
+}
+
+/* W502: Zielkarte nach einem Sprung kurz hervorheben (Akzentrahmen, endet per ACC_HL_TIMER) */
+static void acc_highlight(int card)
+{
+    g_acc_hl = card;
+    if (g_hwnd && g_o.shot == 0 && !g_in_gui_selftest) {
+        SetTimer(g_hwnd, ACC_HL_TIMER, ACC_HL_MS, NULL);
+    }
+    redraw_all();
+}
+
+void acc_hl_tick(void)
+{
+    if (g_hwnd) {
+        KillTimer(g_hwnd, ACC_HL_TIMER);
+    }
+    if (g_acc_hl) {
+        g_acc_hl = 0;
+        redraw_all();
+    }
+}
+
+/* W502: Einsprung "Kontoseite oeffnen und Gamertag fokussieren" (auch fuer andere Seiten, z. B. W501). Ohne Gamertag
+ * steht das Feld immer in der Karte; mit Gamertag liegt der Fokus auf "Aendern" (die 7-Tage-Regel bleibt sichtbar).
+ * Ohne Konto: Kontoseite mit Feld Kontoname (der Gamertag gehoert dort zum Erstellen). */
+void acc_open_gamertag(void)
+{
+    acc_load();
+    g_acc_x_login = 0;
+    g_acc_x_code = 0;
+    if (!g_acc_view) {
+        acc_open_view(1);
+    }
+    show_page(P_LNET);
+    acc_refresh();
+    if (acc_state() == ACCS_NONE) {
+        acc_highlight(ACC_CARD_NEW);
+        acc_focus(ID_ACC_NAME);
+        return;
+    }
+    acc_highlight(ACC_CARD_GT);
+    acc_focus(g_acc_st_ok && g_acc_st.gamertag[0] && !g_acc_x_gt ? ID_ACC_X_GT : ID_ACC_V_GT);
+}
+
+static int acc_gt_command(int id, int code)
+{
+    char a[80];
+    if (id == ID_ACC_GT || id == ID_ACC_V_GT) {
+        if (code == EN_SETFOCUS || code == EN_KILLFOCUS) {
+            g_focus_id = code == EN_SETFOCUS ? id : 0;
+            redraw_all();
+        } else if (code == EN_CHANGE && !g_updating) {
+            if (id == ID_ACC_GT) { /* Spieler tippt selbst: kein Vorschlag mehr; leer = wieder Vorschlag */
+                ui_gettext(ctl(id), a, sizeof a);
+                g_acc_gt_user = a[0] != '\0';
+            }
+            if (g_acc_gtmsg_id == id) {
+                acc_gtmsg(0, "", 0);
+                redraw_all();
+            }
+            g_acc_gt_tick_fid = id;
+            if (g_hwnd) {
+                SetTimer(g_hwnd, ACC_GT_TIMER, ACC_CHECK_MS, NULL);
+            }
+        }
+        return 1;
+    }
+    if (code != BN_CLICKED) {
+        return 1;
+    }
+    if (id == ID_ACC_X_GT || id == ID_ACC_V_GTCANCEL) { /* W502: Aendern oeffnet das Feld in der Karte, Abbrechen schliesst */
+        g_acc_x_gt = id == ID_ACC_X_GT;
+        acc_gt_settext(ID_ACC_V_GT, "");
+        if (g_hwnd) KillTimer(g_hwnd, ACC_GT_TIMER);
+        if (g_acc_gtmsg_id == ID_ACC_V_GT) acc_gtmsg(0, "", 0);
+        acc_refresh();
+        acc_focus(g_acc_x_gt ? ID_ACC_V_GT : ID_ACC_X_GT);
+        return 1;
+    }
+    if (id == ID_ACC_V_GTBTN) {
+        char q[400], d[32];
+        ui_gettext(ctl(ID_ACC_V_GT), a, sizeof a);
+        if (g_hwnd) KillTimer(g_hwnd, ACC_GT_TIMER);
+        if (!lacc_valid_gamertag(a)) {
+            acc_gtmsg(ID_ACC_V_GT, LT("gui.acc_gt_rules"), C_ERR);
+            set_status_k(LT("gui.acc_gt_rules"), 2);
+            redraw_all();
+            return 1;
+        }
+        if (g_acc_st_ok && g_acc_st.gamertag[0]) {
+            if (strcmp(a, g_acc_st.gamertag) == 0) {
+                acc_gt_status_text("unchanged", 0, a, q, sizeof q);
+                acc_gtmsg(ID_ACC_V_GT, q, C_WARN);
+                redraw_all();
+                return 1;
+            }
+            if (g_acc_st.gt_next > (long long)time(NULL)) { /* Grenze laut letztem Status (Dienst prueft selbst) */
+                acc_gt_status_text("change_limit", g_acc_st.gt_next, a, q, sizeof q);
+                acc_gtmsg(ID_ACC_V_GT, q, C_ERR);
+                set_status_k(q, 2);
+                redraw_all();
+                return 1;
+            }
+            acc_gt_date((long long)time(NULL) + 86400LL * (g_acc_st.gt_days > 0 ? g_acc_st.gt_days : 7), d, sizeof d);
+            _snprintf_s(q, sizeof q, _TRUNCATE, LT("gui.acc_gt_change_q"), g_acc_st.gamertag, a, d);
+            if (!ui_confirm(q, LT("gui.acc_gt_title"))) {
+                return 1;
+            }
+        }
+        acc_start3(ACC_OP_GT_SET, a, NULL, NULL, ID_ACC_V_GT);
+        return 1;
+    }
+    return 1;
+}
+
+/* W487: entprellte Gamertag-Pruefung (gamertag_check, still). Ungueltige Namen meldet die Seite ohne Netz; die
+ * Abfrage laeuft nur mit Stufe "Mit steelnet verbinden" (wie die Namenspruefung). */
+void acc_gt_tick(void)
+{
+    char a[80] = "";
+    int fid = g_acc_gt_tick_fid;
+    if (g_hwnd) {
+        KillTimer(g_hwnd, ACC_GT_TIMER);
+    }
+    if (!acc_srv_on() || !ctl(fid) || (fid != ID_ACC_GT && fid != ID_ACC_V_GT)) {
+        return;
+    }
+    ui_gettext(ctl(fid), a, sizeof a);
+    if (!a[0]) {
+        if (fid == ID_ACC_GT) { /* leer: wieder Vorschlag zum Kontonamen (beim naechsten Namens-Tick) */
+            g_acc_gt_user = 0;
+        }
+        return;
+    }
+    if (!lacc_valid_gamertag(a)) {
+        acc_gtmsg(fid, LT("gui.acc_gt_rules"), C_ERR);
+        redraw_all();
+        return;
+    }
+    if (netm_get() != NETM_STEEL && !g_acc_fixture) {
+        return; /* ohne steelnet: Erstellen/Setzen prueft */
+    }
+    if (acc_start3(ACC_OP_GT_CHECK, a, NULL, NULL, fid) == 0) {
+        acc_gtmsg(fid, LT("gui.acc_gt_checking"), C_DIM);
+        redraw_all();
+    } else if (g_acc_busy && g_hwnd) {
+        SetTimer(g_hwnd, ACC_GT_TIMER, ACC_CHECK_MS, NULL); /* anderer Auftrag laeuft: spaeter erneut */
+    }
+}
+
+/* W487/W501: Xbox Live verfuegbar (Online mit Gamertag)? Aus dem gespeicherten Konto und dem letzten status (kein Netz). */
+int acc_live_state(void)
+{
+    if (!acc_srv_on()) {
+        return ACC_LIVE_OFF;
+    }
+    if (g_o.shot == 0 && !g_in_gui_selftest) {
+        acc_load();
+    }
+    if (!g_acc.have) {
+        return ACC_LIVE_NOACC;
+    }
+    if (!g_acc_st_ok) {
+        return ACC_LIVE_UNK;
+    }
+    if (strcmp(g_acc_st.gt_state, "off") == 0 && !g_acc_st.gamertag[0]) {
+        return ACC_LIVE_GTOFF;
+    }
+    return g_acc_st.gamertag[0] ? ACC_LIVE_OK : ACC_LIVE_NOGT;
+}
+
+const char *acc_live_text(int st)
+{
+    switch (st) {
+    case ACC_LIVE_OFF: return LT("gui.loc_onl_nosrv");
+    case ACC_LIVE_NOACC: return LT("gui.live_sl_only"); /* W501: nur System Link, Weg zum Gamertag */
+    case ACC_LIVE_UNK: return LT("gui.live_need_status");
+    case ACC_LIVE_NOGT: return LT("gui.live_sl_only");
+    case ACC_LIVE_GTOFF: return LT("gui.acc_gt_off");
+    default: return NULL;
+    }
+}
+
+/* W501 ONLINE-BOTH: vor jedem LoC-Start (ersetzt die W487-Startsperre). Online (steelnet, nicht LAN) mit Konto, aber
+ * Gamertag-Stand unbekannt: Status einmal holen und danach starten (acc_done) - mit Gamertag System Link + Xbox Live,
+ * sonst nur System Link. Sperrt nie: 1 = jetzt starten, 0 = Start folgt nach dem Status. */
+int acc_live_prestart(void)
+{
+    if (g_acc_live_pending == 2) { /* Status fuer diesen Start schon geholt (Ergebnis egal) */
+        g_acc_live_pending = 0;
+        return 1;
+    }
+    if (netm_get() != NETM_STEEL || g_loc_lan || g_acc_fixture || g_o.shot != 0 || g_in_gui_selftest ||
+        acc_live_state() != ACC_LIVE_UNK) {
+        return 1;
+    }
+    if (g_acc_busy == ACC_OP_STATUS || acc_start(ACC_OP_STATUS, NULL, NULL) == 0) {
+        g_acc_live_pending = 1;
+        set_status_k(LT("gui.live_checking"), 0);
+        return 0;
+    }
+    return 1; /* anderer Auftrag laeuft: nicht warten, nur System Link */
+}
+
+/* W502: Knoepfe der Uebersicht (Sprung zur Karte der naechsten Aktion) und Abbrechen der eingebetteten Formulare */
+static int acc_w502_command(int id, int code)
+{
+    if (code != BN_CLICKED) {
+        return 1;
+    }
+    switch (id) {
+    case ID_ACC_O_ONLINE:
+        if (acc_state() == ACCS_NONE) { /* Konto erstellen: Feld Kontoname */
+            acc_highlight(ACC_CARD_NEW);
+            acc_focus(ID_ACC_NAME);
+        } else if (!g_acc_busy) { /* Status unbekannt: erneut abfragen (gleicher Auftrag wie beim Seitenaufruf) */
+            g_acc_st_err[0] = '\0';
+            acc_start(ACC_OP_STATUS, NULL, NULL);
+            acc_refresh();
+        }
+        return 1;
+    case ID_ACC_O_LIVE:
+        acc_open_gamertag();
+        return 1;
+    case ID_ACC_O_SEC:
+        g_acc_x_login = 0;
+        acc_refresh();
+        acc_highlight(ACC_CARD_SEC);
+        acc_focus(ID_ACC_V_DISCORD);
+        return 1;
+    case ID_ACC_V_LGCANCEL:
+        g_acc_x_login = 0;
+        if (ctl(ID_ACC_V_PASS)) ui_settext(ctl(ID_ACC_V_PASS), "");
+        if (g_acc_fmsg_id == ID_ACC_V_LOGIN) acc_fmsg(0, "", 0);
+        acc_refresh();
+        acc_focus(ID_ACC_X_LOGIN);
+        return 1;
+    case ID_ACC_V_CDCANCEL:
+        g_acc_x_code = 0;
+        if (ctl(ID_ACC_V_CODE)) ui_settext(ctl(ID_ACC_V_CODE), "");
+        if (g_acc_fmsg_id == ID_ACC_V_CODE) acc_fmsg(0, "", 0);
+        acc_refresh();
+        acc_focus(ID_ACC_X_CODE);
+        return 1;
+    }
+    return 1;
+}
+
 static int acc_command(int id, int code)
 {
     char a[80], b[300], q[400];
+    if (ACC_GT_ID(id) || id == ID_ACC_V_GTCANCEL) { /* W487 */
+        return acc_gt_command(id, code);
+    }
+    if (ACC_W502_ID(id)) { /* W502: Uebersicht, Abbrechen */
+        return acc_w502_command(id, code);
+    }
     if (id < ID_ACC_FIRST || id > ID_ACC_LAST) {
         return 0;
     }
@@ -811,37 +1268,38 @@ static int acc_command(int id, int code)
             redraw_all();
             return 1;
         }
-        acc_start(ACC_OP_CREATE, a, NULL);
+        { /* W487: Gamertag (Feld bzw. Vorschlag); leer = ohne (spaeter unter Konto setzen) */
+            char g[64] = "";
+            if (ctl(ID_ACC_GT)) ui_gettext(ctl(ID_ACC_GT), g, sizeof g);
+            if (g_hwnd) KillTimer(g_hwnd, ACC_GT_TIMER);
+            if (g[0] && !lacc_valid_gamertag(g)) {
+                set_status_k(LT("gui.acc_gt_rules"), 2);
+                acc_gtmsg(ID_ACC_GT, LT("gui.acc_gt_rules"), C_ERR);
+                redraw_all();
+                return 1;
+            }
+            acc_start3(ACC_OP_CREATE, a, NULL, g, 0);
+        }
         return 1;
     case ID_ACC_SIGNIN:
     case ID_ACC_MANAGE:
     case ID_LOC_MP_ACC: /* W418: Karte Multiplayer auf Spielen */
         acc_nav_sub(1); /* W399: Unterpunkt Account */
         return 1;
-    case ID_ACC_X_LOGIN: /* W418: Aufklapper (pro Sitzung) */
-        g_acc_x_login = !g_acc_x_login;
-        if (g_acc_x_login) {
-            int st = acc_state();
-            if (st == ACCS_NONE) g_acc_x_code = 0;          /* kein Konto: Login oder Code */
-            if (st == ACCS_UNSEC) g_acc_x_manage = 0;       /* ungesichert: Sichern oder Verwalten */
-            if (g_acc_st_ok && g_acc_st.login && ctl(ID_ACC_V_LOGIN)) ui_settext(ctl(ID_ACC_V_LOGIN), g_acc_st.login_name);
-        } else if (ctl(ID_ACC_V_PASS)) {
-            ui_settext(ctl(ID_ACC_V_PASS), "");
-        }
+    case ID_ACC_X_LOGIN: /* W502: Login-Formular ersetzt den Inhalt der Karte (Abbrechen: ID_ACC_V_LGCANCEL) */
+        g_acc_x_login = 1;
+        if (acc_state() == ACCS_NONE) g_acc_x_code = 0; /* kein Konto: Login oder Code (gleiche Karte) */
+        if (ctl(ID_ACC_V_LOGIN)) ui_settext(ctl(ID_ACC_V_LOGIN), g_acc_st_ok && g_acc_st.login ? g_acc_st.login_name : "");
         if (g_acc_fmsg_id == ID_ACC_V_LOGIN) acc_fmsg(0, "", 0);
         acc_refresh();
+        acc_focus(ID_ACC_V_LOGIN);
         return 1;
-    case ID_ACC_X_CODE:
-        g_acc_x_code = !g_acc_x_code;
-        if (g_acc_x_code) g_acc_x_login = 0;
+    case ID_ACC_X_CODE: /* W502: Codeformular in der Karte (Abbrechen: ID_ACC_V_CDCANCEL) */
+        g_acc_x_code = 1;
+        if (acc_state() == ACCS_NONE) g_acc_x_login = 0;
         if (g_acc_fmsg_id == ID_ACC_V_CODE) acc_fmsg(0, "", 0);
         acc_refresh();
-        return 1;
-    case ID_ACC_X_MANAGE:
-        g_acc_x_manage = !g_acc_x_manage;
-        if (g_acc_x_manage && acc_state() == ACCS_UNSEC) g_acc_x_login = 0;
-        if (!g_acc_x_manage && acc_state() != ACCS_UNSEC) g_acc_x_login = 0; /* Login-Felder liegen in Verwalten */
-        acc_refresh();
+        acc_focus(ID_ACC_V_CODE);
         return 1;
     case ID_ACC_DISCORD:
     case ID_ACC_V_DISCORD:
@@ -954,28 +1412,44 @@ void acc_name_tick(void)
 static void acc_build(HWND w)
 {
     int x = ACC_X + 18, y = LOC_ONL_Y; /* W397: rechts oben auf Multiplayer */
-    /* Karte "steelnet account" (W397: LoC > Multiplayer rechts oben). W418: ohne "Name pruefen". */
-    /* W473: Lage wie acc_layout (Zustand oben, Knoepfe unten; Manage ohne Discord-Knopf links, s. acc_layout) */
+    /* W502: Reihenfolge = Tab-Reihenfolge der Kontoseite (Uebersicht, Erstellen, Gamertag, Sichern, Einstellungen);
+     * Lage je Zustand setzt acc_layout. Die Karte "steelnet account" auf Match & network nutzt Name/Erstellen und
+     * die Knoepfe am Ende (W473). */
+    mk(w, K_BTN, ID_ACC_O_ONLINE, P_LNET, CX0 + CW - 18 - ACC_OV_BTN_W, CY0 + 44, ACC_OV_BTN_W, 28, LT("gui.acc_create"), 0);
+    mk(w, K_BTN, ID_ACC_O_LIVE, P_LNET, CX0 + CW - 18 - ACC_OV_BTN_W, CY0 + 76, ACC_OV_BTN_W, 28, LT("gui.acc_ov_gt_btn"), 0);
+    mk(w, K_BTN, ID_ACC_O_SEC, P_LNET, CX0 + CW - 18 - ACC_OV_BTN_W, CY0 + 108, ACC_OV_BTN_W, 28, LT("gui.acc_ov_sec_btn"), 0);
     mk(w, K_EDIT, ID_ACC_NAME, P_LNET, x, y + 86, COLW - 36 - 8 - 130, 28, "", 0);
+    /* W487: Gamertag beim Erstellen (nur Kontoseite), Tab-Reihenfolge Name -> Gamertag */
+    mk(w, K_EDIT, ID_ACC_GT, P_LNET, CX0 + 18, CY0 + 222, COLW - 36, 28, "", 0);
     mk(w, K_ACCENT, ID_ACC_CREATE, P_LNET, ACC_X + COLW - 18 - 130, y + 86, 130, 28, LT("gui.acc_create"), 0);
+    /* W487/W502: Gamertag-Karte (Feld + Setzen + Abbrechen bzw. Aendern) */
+    mk(w, K_EDIT, ID_ACC_V_GT, P_LNET, CX0 + 18, CY0 + 196, 240, 28, "", 0);
+    mk(w, K_BTN, ID_ACC_V_GTBTN, P_LNET, CX0 + 18 + 250, CY0 + 196, 160, 28, LT("gui.acc_gt_set"), 0);
+    mk(w, K_BTN, ID_ACC_V_GTCANCEL, P_LNET, CX0 + 18 + 418, CY0 + 196, 110, 28, LT("gui.acc_cancel"), 0);
+    mk(w, K_BTN, ID_ACC_X_GT, P_LNET, CX0 + CW - 18 - 150, CY0 + 196, 150, 28, LT("gui.acc_b_gt_change"), 0);
+    /* Sichern: Discord, Login (Formular), Wiederherstellungscode; kein Konto: Anmelden mit Discord/Login/Code */
+    mk(w, K_BTN, ID_ACC_V_DISCORD, P_LNET, COL2 + 18, CY0 + 300, ACC_ROW_BTN_W, 28, LT("gui.acc_discord_login"), 0);
+    mk(w, K_BTN, ID_ACC_X_LOGIN, P_LNET, COL2 + 18, CY0 + 340, ACC_ROW_BTN_W, 28, LT("gui.acc_b_login_in"), 0);
+    mk(w, K_EDIT, ID_ACC_V_LOGIN, P_LNET, COL2 + 18, CY0 + 316, COLW - 36, 28, "", 0);
+    mk(w, K_EDIT, ID_ACC_V_PASS, P_LNET, COL2 + 18, CY0 + 366, COLW - 36, 28, "", ES_PASSWORD);
+    mk(w, K_BTN, ID_ACC_V_LOGINBTN, P_LNET, COL2 + 18, CY0 + 400, 160, 28, LT("gui.acc_login_go"), 0);
+    mk(w, K_BTN, ID_ACC_V_LGCANCEL, P_LNET, COL2 + 186, CY0 + 400, 110, 28, LT("gui.acc_cancel"), 0);
+    mk(w, K_BTN, ID_ACC_V_RECSHOW, P_LNET, CX0 + 236, CY0 + 380, 80, 26, LT("gui.acc_rec_show"), 0);
+    mk(w, K_BTN, ID_ACC_V_RECCOPY, P_LNET, CX0 + 322, CY0 + 380, 80, 26, LT("gui.acc_rec_copy"), 0);
+    /* Kontoeinstellungen: Code einloesen (Formular), Abmelden, Loeschen */
+    mk(w, K_BTN, ID_ACC_X_CODE, P_LNET, COL2 + 18, CY0 + 376, COLW - 36, 28, LT("gui.acc_b_code"), 0);
+    mk(w, K_EDIT, ID_ACC_V_CODE, P_LNET, COL2 + 18, CY0 + 346, COLW - 36, 28, "", 0);
+    mk(w, K_BTN, ID_ACC_V_CODEBTN, P_LNET, COL2 + 18, CY0 + 382, 110, 28, LT("gui.acc_redeem"), 0);
+    mk(w, K_BTN, ID_ACC_V_CDCANCEL, P_LNET, COL2 + 136, CY0 + 382, 110, 28, LT("gui.acc_cancel"), 0);
+    mk(w, K_BTN, ID_ACC_V_FORGET, P_LNET, COL2 + 18, CY0 + 412, COLW - 36, 28, LT("gui.acc_forget"), 0);
+    mk(w, K_BTN, ID_ACC_V_DELETE, P_LNET, COL2 + 18, CY0 + 466, COLW - 36, 28, LT("gui.acc_delete"), 0);
+    /* Karte "steelnet account" (W397: LoC > Multiplayer rechts oben). W418: ohne "Name pruefen".
+     * W473: Lage wie acc_layout (Zustand oben, Knoepfe unten; Manage ohne Discord-Knopf links, s. acc_layout) */
     mk(w, K_BTN, ID_ACC_SIGNIN, P_LNET, x, y + 122, COLW - 36, 26, LT("gui.acc_signin"), 0);
     mk(w, K_ACCENT, ID_ACC_DISCORD, P_LNET, x, y + ACC_C_BTN, 168, 28, LT("gui.acc_discord_link"), 0);
     mk(w, K_BTN, ID_ACC_MANAGE, P_LNET, x + 174, y + ACC_C_BTN, COLW - 36 - 174, 28, LT("gui.acc_manage"), 0);
-    /* W418: Kontoseite. Lage je Zustand setzt acc_layout (Reihenfolge = Tab-Reihenfolge). Ein Hauptknopf je
-     * Zustand (Erstellen bzw. Mit Discord sichern); Aufklapper als Textlinks. */
-    mk(w, K_BTN, ID_ACC_X_MANAGE, P_LNET, CX0 + CW - 18 - 120, CY0 + 12, 120, ACC_LINK_H, LT("gui.acc_x_manage"), 0);
-    mk(w, K_BTN, ID_ACC_V_DISCORD, P_LNET, COL2 + 18, CY0 + 126, COLW - 36, 30, LT("gui.acc_discord_login"), 0);
-    mk(w, K_BTN, ID_ACC_X_LOGIN, P_LNET, COL2 + 18, CY0 + 168, COLW - 36, ACC_LINK_H, LT("gui.acc_x_login_in"), 0);
-    mk(w, K_EDIT, ID_ACC_V_LOGIN, P_LNET, COL2 + 18, CY0 + 216, COLW - 36, 28, "", 0);
-    mk(w, K_EDIT, ID_ACC_V_PASS, P_LNET, COL2 + 18, CY0 + 266, COLW - 36, 28, "", ES_PASSWORD);
-    mk(w, K_BTN, ID_ACC_V_LOGINBTN, P_LNET, COL2 + 18, CY0 + 300, 160, 28, LT("gui.acc_login_go"), 0);
-    mk(w, K_BTN, ID_ACC_V_RECSHOW, P_LNET, ACC_RX, CY0 + 244, 76, 26, LT("gui.acc_rec_show"), 0);
-    mk(w, K_BTN, ID_ACC_V_RECCOPY, P_LNET, ACC_RX + 82, CY0 + 244, 76, 26, LT("gui.acc_rec_copy"), 0);
-    mk(w, K_BTN, ID_ACC_X_CODE, P_LNET, COL2 + 18, CY0 + 198, COLW - 36, ACC_LINK_H, LT("gui.acc_x_code_in"), 0);
-    mk(w, K_EDIT, ID_ACC_V_CODE, P_LNET, COL2 + 18, CY0 + 246, COLW - 36 - 104, 28, "", 0);
-    mk(w, K_BTN, ID_ACC_V_CODEBTN, P_LNET, COL2 + COLW - 18 - 96, CY0 + 246, 96, 28, LT("gui.acc_redeem"), 0);
-    mk(w, K_BTN, ID_ACC_V_FORGET, P_LNET, CX0 + 18, CY0 + 400, 210, 28, LT("gui.acc_forget"), 0);
-    mk(w, K_BTN, ID_ACC_V_DELETE, P_LNET, CX0 + 18, CY0 + 436, 210, 28, LT("gui.acc_delete"), 0);
+    if (ctl(ID_ACC_GT)) SendMessageW(ctl(ID_ACC_GT), EM_LIMITTEXT, 15, 0);
+    if (ctl(ID_ACC_V_GT)) SendMessageW(ctl(ID_ACC_V_GT), EM_LIMITTEXT, 15, 0);
     if (ctl(ID_ACC_NAME)) SendMessageW(ctl(ID_ACC_NAME), EM_LIMITTEXT, 16, 0);
     if (ctl(ID_ACC_V_LOGIN)) SendMessageW(ctl(ID_ACC_V_LOGIN), EM_LIMITTEXT, 32, 0);
     if (ctl(ID_ACC_V_PASS)) SendMessageW(ctl(ID_ACC_V_PASS), EM_LIMITTEXT, 256, 0);
@@ -994,8 +1468,10 @@ static void acc_relabel(void)
         { ID_ACC_CREATE, "gui.acc_create" }, { ID_ACC_SIGNIN, "gui.acc_signin" },
         { ID_ACC_MANAGE, "gui.acc_manage" }, { ID_ACC_V_DELETE, "gui.acc_delete" },
         { ID_ACC_V_FORGET, "gui.acc_forget" }, { ID_ACC_V_RECCOPY, "gui.acc_rec_copy" },
-        { ID_ACC_V_CODEBTN, "gui.acc_redeem" }, { ID_ACC_X_CODE, "gui.acc_x_code_in" },
-        { ID_ACC_X_MANAGE, "gui.acc_x_manage" },
+        { ID_ACC_V_CODEBTN, "gui.acc_redeem" }, { ID_ACC_X_CODE, "gui.acc_b_code" },
+        { ID_ACC_O_LIVE, "gui.acc_ov_gt_btn" }, { ID_ACC_O_SEC, "gui.acc_ov_sec_btn" }, /* W502 */
+        { ID_ACC_X_GT, "gui.acc_b_gt_change" }, { ID_ACC_V_GTCANCEL, "gui.acc_cancel" },
+        { ID_ACC_V_LGCANCEL, "gui.acc_cancel" }, { ID_ACC_V_CDCANCEL, "gui.acc_cancel" },
     };
     int i;
     for (i = 0; i < (int)(sizeof kL / sizeof kL[0]); i++) {
@@ -1004,7 +1480,6 @@ static void acc_relabel(void)
     if (ctl(ID_ACC_V_RECSHOW)) ui_settext(ctl(ID_ACC_V_RECSHOW), LT(g_acc_rec[0] ? "gui.acc_rec_hide" : "gui.acc_rec_show"));
     acc_refresh();
 }
-
 /* Start LoC: mit gespeichertem Konto Pilotname (--set) + Umgebungsblock mit
  * SB_LOC_AUTH=<account>:<exp>:<G> (nur Kindprozess, nie Datei/Kommandozeile).
  * Ohne Konto: NULL (Client meldet sich als Gast). Transport/Treffpunkt bleiben. */
@@ -1113,7 +1588,23 @@ int acc_paint_card(void)
     if (m) {
         label(F_TINY, m, x0, y + ACC_C_WHY, w0, ACC_C_WHY_H, C_DIM);
     }
+    if (st == ACCS_SEC) { /* W487: Gamertag rechts neben "Manage account" (bzw. deutlich: noch keiner) */
+        m = acc_card_gt(t, sizeof t, &c);
+        label1(F_TINY, m, x0 + 188, y + ACC_C_BTN, w0 - 188, 28, c);
+    }
     return 1;
+}
+
+/* W487: Gamertag-Zeile der Karte (Match & network), gesichert: "Gamertag: X" bzw. "Gamertag: not set" */
+const char *acc_card_gt(char *buf, size_t cap, COLORREF *c)
+{
+    *c = C_DIM;
+    if (g_acc_st_ok && g_acc_st.gamertag[0]) {
+        _snprintf_s(buf, cap, _TRUNCATE, LT("gui.acc_gt_head"), g_acc_st.gamertag);
+        return buf;
+    }
+    *c = C_WARN;
+    return LT("gui.acc_gt_card_none");
 }
 /* W473: Selbsttest - passen die Texte der Karte im aktuellen Zustand (Zeilen 1/2 einzeilig, Erklaerung im Kasten)?
  * 1 = ja, sonst why gesetzt. */
@@ -1157,11 +1648,59 @@ int acc_card_fits(char *why, size_t cap, const char *tag)
     return 1;
 }
 
+/* ------------------------------------------------------------------ */
+/* W502 ACCOUNT-PAGE: Zeichnen der Kontoseite. Alle Texte laufen ueber acc_t(): im Pruefmodus (Selbsttest,         */
+/* g_acc_chk) wird nichts gezeichnet, sondern gemessen, ob jeder Text in seinen Kasten passt (EN/DE, je Zustand).   */
+/* ------------------------------------------------------------------ */
+enum { ACC_T1, ACC_T2, ACC_TR, ACC_TC }; /* einzeilig links / umbrechend / einzeilig rechts / mittig */
+static int g_acc_chk;          /* 1 = nur messen */
+static char g_acc_chk_why[200];
+
+static void acc_t(int font, const char *t, int x, int y, int w, int h, COLORREF c, int mode)
+{
+    if (!t || !*t) {
+        return;
+    }
+    if (g_acc_chk) {
+        if (!g_acc_chk_why[0] && !ui_text_fits(font, t, x, y, w, h, mode != ACC_T2)) {
+            _snprintf_s(g_acc_chk_why, sizeof g_acc_chk_why, _TRUNCATE, "'%.80s' passt nicht (%dx%d)", t, w, h);
+        }
+        return;
+    }
+    if (mode == ACC_T2) {
+        if (ui_text_fits(font, t, x, y, w, h, 1)) { /* eine Zeile: mittig im Kasten wie die einzeiligen */
+            L_text(font, t, x, y, w, h, c, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+        } else {
+            L_text(font, t, x, y, w, h, c, DT_LEFT | DT_WORDBREAK | DT_END_ELLIPSIS);
+        }
+        return;
+    }
+    L_text(font, t, x, y, w, h, c,
+           (mode == ACC_TR ? DT_RIGHT : mode == ACC_TC ? DT_CENTER : DT_LEFT) | DT_SINGLELINE | DT_VCENTER |
+               DT_END_ELLIPSIS);
+}
+
+static void acc_card(int x, int y, int w, int h, const char *title)
+{
+    if (g_acc_chk) {
+        if (title) acc_t(F_CARD, title, x + 18, y + 12, w - 36, 24, C_TEXT, ACC_T1);
+        return;
+    }
+    card(x, y, w, h, title);
+}
+
+static void acc_line(int x, int y, int w)
+{
+    if (!g_acc_chk) {
+        L_fill(x, y, w, 1, RGB(255, 255, 255), 14, 0);
+    }
+}
+
 /* W418: Wiederherstellungscode verdeckt bzw. angezeigt (Monospace) */
 static void acc_paint_code(int x, int y, int w)
 {
-    L_text(F_MONO, g_acc_rec[0] ? g_acc_rec : "\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2-\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2-\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2-\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2",
-           x, y, w, 22, g_acc_rec[0] ? C_TEXT : C_FAINT, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+    acc_t(F_MONO, g_acc_rec[0] ? g_acc_rec : "\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2-\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2-\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2-\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2\xE2\x80\xA2",
+          x, y, w, 20, g_acc_rec[0] ? C_TEXT : C_FAINT, ACC_T1);
 }
 
 /* W418: Kopfzeile bei unbekanntem Status (laeuft, nicht verbunden, Server nicht erreichbar, Pin, abgemeldet) */
@@ -1189,155 +1728,310 @@ const char *acc_unk_text(COLORREF *c)
     return LT("gui.acc_st_unknown");
 }
 
-/* W418: Beschriftungen der Login-Felder (Feld darunter bei +18 bzw. +68) */
-static void acc_paint_login_lbl(int x, int y, int w, int set)
+/* W487: Zeile 1 der Gamertag-Karte: "Gamertag: X" bzw. deutlich "noch kein Gamertag" / Dienst ohne Gamertags */
+const char *acc_gt_line1(char *buf, size_t cap, COLORREF *c)
 {
-    label1(F_TINY, LT("gui.acc_l_login"), x, y, w, 18, C_DIM);
-    label1(F_TINY, LT(set ? "gui.acc_l_pw_new" : "gui.acc_l_pw"), x, y + 50, w, 18, C_DIM);
+    *c = C_TEXT;
+    if (g_acc_st_ok && g_acc_st.gamertag[0]) {
+        _snprintf_s(buf, cap, _TRUNCATE, LT("gui.acc_gt_head"), g_acc_st.gamertag);
+        return buf;
+    }
+    *c = C_WARN;
+    if (!g_acc_st_ok) {
+        *c = C_DIM;
+        return LT("gui.acc_gt_unk");
+    }
+    if (strcmp(g_acc_st.gt_state, "off") == 0 || strcmp(g_acc_st.gt_state, "unavailable") == 0) {
+        return LT("gui.acc_gt_off");
+    }
+    return LT("gui.acc_gt_none");
 }
 
-/* W418: Verwalten (aufgeklappt): Discord, Login, Wiederherstellungscode, Code von einem anderen PC oder vom
- * Admin, Abmelden, Loeschen (ganz unten, rot). Ungesichert nur die letzten drei (Rest steht in der Karte darueber). */
-static void acc_paint_manage(const acc_geo_t *g)
+/* W487: Grenze der Gamertag-Karte (W502: rechts in der Titelzeile, einmal): naechste Aenderung bzw. "alle N Tage" */
+const char *acc_gt_limit(char *buf, size_t cap)
+{
+    char d[32];
+    if (acc_gt_locked()) {
+        acc_gt_date(g_acc_st.gt_next, d, sizeof d);
+        _snprintf_s(buf, cap, _TRUNCATE, LT("gui.acc_gt_next"), d);
+    } else {
+        _snprintf_s(buf, cap, _TRUNCATE, LT("gui.acc_gt_can"),
+                    g_acc_st_ok && g_acc_st.gt_days > 0 ? g_acc_st.gt_days : 7);
+    }
+    return buf;
+}
+
+/* W502: Symbol einer Zeile der Uebersicht: erledigt (gruener Haken), offen (Hinweis), unbekannt, spaeter */
+enum { ACC_I_OK, ACC_I_TODO, ACC_I_UNK, ACC_I_LATER };
+static void acc_ov_icon(int x, int y, int kind)
+{
+    COLORREF c = kind == ACC_I_OK ? C_OK : kind == ACC_I_TODO ? C_WARN : kind == ACC_I_UNK ? C_DIM : C_FAINT;
+    if (g_acc_chk) {
+        return;
+    }
+    if (kind == ACC_I_OK) {
+        L_fill(x, y, 20, 20, c, 255, 10);
+        if (g_has_icons) {
+            L_text(F_ICONSM, "\xEE\x9C\xBE", x, y, 20, 20, RGB(16, 22, 18), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        } else {
+            L_text(F_SEMI, "\xE2\x9C\x93", x, y, 20, 20, RGB(16, 22, 18), DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        }
+        return;
+    }
+    L_fill(x, y, 20, 20, c, 34, 10);
+    L_ring(x, y, 20, 20, c, 230, 10);
+    if (kind != ACC_I_LATER) {
+        L_text(F_SEMI, kind == ACC_I_TODO ? "!" : "?", x, y, 20, 20, c, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    }
+}
+
+/* W502: eine Zeile der Uebersicht (Symbol, Bezeichnung, Zustand in Worten; Knopf rechts setzt acc_layout) */
+static void acc_ov_row(const acc_geo_t *g, int i, int icon, const char *lbl, const char *det, COLORREF dc, int btn)
+{
+    int x0 = CX0 + 18, xr = CX0 + CW - 18, y = g->ov_y + ACC_OV_TOP + i * ACC_OV_ROW;
+    int dx = x0 + 30 + ACC_OV_LBL_W + 4, dr = btn ? xr - ACC_OV_BTN_W - 12 : xr;
+    if (i > 0) {
+        acc_line(x0, y - 1, xr - x0);
+    }
+    acc_ov_icon(x0, y + 6, icon);
+    acc_t(F_SEMI, lbl, x0 + 30, y, ACC_OV_LBL_W, ACC_OV_ROW, C_TEXT, ACC_T1);
+    acc_t(F_TINY, det, dx, y, dr - dx, ACC_OV_ROW, dc, ACC_T2);
+}
+
+/* W502: Zeile 2 mit Gamertag: "Bereit als X" plus Kampagnenstand, soweit der Launcher ihn kennt (launcher_camp.c) */
+static const char *acc_ov_live_ok(char *buf, size_t cap)
+{
+    int cs = camp_status();
+    const char *k = cs == LCAMP_OK ? "gui.acc_ov_camp_ok" : cs == LCAMP_OLD ? "gui.acc_ov_camp_old"
+                    : cs == LCAMP_UNREACH ? "gui.acc_ov_camp_unreach" : NULL;
+    char a[160];
+    _snprintf_s(a, sizeof a, _TRUNCATE, LT("gui.acc_ov_live_ok"), g_acc_st.gamertag);
+    if (k) {
+        _snprintf_s(buf, cap, _TRUNCATE, "%s \xC2\xB7 %s", a, LT(k));
+    } else {
+        strcpy_s(buf, cap, a);
+    }
+    return buf;
+}
+
+/* W502: Uebersicht "Was du spielen kannst" */
+static void acc_paint_ov(const acc_geo_t *g)
+{
+    char t[300], t2[300];
+    COLORREF c = C_DIM;
+    int ok = g_acc_st_ok, gt = ok && g_acc_st.gamertag[0];
+    acc_card(CX0, g->ov_y, CW, g->ov_h, LT("gui.acc_ov_title"));
+    if (g->st == ACCS_NONE) {
+        acc_ov_row(g, 0, ACC_I_TODO, LT("gui.acc_ov_online"), LT("gui.acc_ov_online_none"), C_WARN, 1);
+        acc_ov_row(g, 1, ACC_I_LATER, LT("gui.acc_ov_live"), LT("gui.acc_ov_live_noacc"), C_DIM, 0);
+        acc_ov_row(g, 2, ACC_I_LATER, LT("gui.acc_ov_sec"), LT("gui.acc_ov_sec_none"), C_DIM, 0);
+        return;
+    }
+    _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.acc_ov_name"), g_acc.name); /* Titelzeile rechts: welches Konto */
+    acc_t(F_SMALL, t, CX0 + 18 + 260, g->ov_y + 12, CW - 36 - 260, 24, C_DIM, ACC_TR);
+    if (g->st == ACCS_UNK) {
+        const char *k = acc_unk_text(&c);
+        acc_ov_row(g, 0, c == C_DIM ? ACC_I_UNK : ACC_I_TODO, LT("gui.acc_ov_online"), k, c,
+                   acc_vis_have(ID_ACC_O_ONLINE, g->st));
+    } else {
+        acc_ov_row(g, 0, ACC_I_OK, LT("gui.acc_ov_online"), LT("gui.acc_ov_online_ok"), C_OK, 0);
+    }
+    if (!ok) {
+        acc_ov_row(g, 1, ACC_I_UNK, LT("gui.acc_ov_live"), LT("gui.acc_ov_wait"), C_DIM, 0);
+    } else if (gt) {
+        acc_ov_row(g, 1, ACC_I_OK, LT("gui.acc_ov_live"), acc_ov_live_ok(t2, sizeof t2), C_OK, 0);
+    } else if (!acc_vis_have(ID_ACC_O_LIVE, g->st)) { /* Dienst ohne Gamertags */
+        acc_ov_row(g, 1, ACC_I_UNK, LT("gui.acc_ov_live"), LT("gui.acc_ov_live_gtoff"), C_WARN, 0);
+    } else {
+        acc_ov_row(g, 1, ACC_I_TODO, LT("gui.acc_ov_live"), LT("gui.acc_ov_live_nogt"), C_WARN, 1);
+    }
+    if (g->st == ACCS_SEC) {
+        const char *k = g_acc_st.discord && g_acc_st.login ? "gui.acc_c_sec_both"
+                        : g_acc_st.discord                 ? "gui.acc_c_sec_dc"
+                                                           : "gui.acc_c_sec_lg";
+        acc_ov_row(g, 2, ACC_I_OK, LT("gui.acc_ov_sec"), LT(k), C_OK, 0);
+    } else if (g->st == ACCS_UNSEC) {
+        acc_ov_row(g, 2, ACC_I_TODO, LT("gui.acc_ov_sec"), LT("gui.acc_ov_sec_no"), C_WARN, 1);
+    } else {
+        acc_ov_row(g, 2, ACC_I_UNK, LT("gui.acc_ov_sec"), LT("gui.acc_ov_wait"), C_DIM, 0);
+    }
+}
+
+/* W502: Gamertag-Karte (mit Konto): Feld + Setzen bzw. Anzeige + Aendern; Regel einmal rechts im Titel; Meldung
+ * neben den Knoepfen; unten ein Satz, wofuer */
+static void acc_paint_gt(const acc_geo_t *g)
 {
     char t[300];
     COLORREF c = C_DIM;
     const char *m;
-    int x0 = CX0 + 18, xr = CX0 + CW - 18;
-    card(CX0, g->my, CW, g->mh, NULL);
-    if (g->r_dc >= 0) {
-        int on = g_acc_st_ok && g_acc_st.discord;
-        label1(F_SMALL, LT("gui.acc_m_discord"), x0, g->r_dc, ACC_M_LW, 22, C_TEXT);
-        label1(F_TINY, LT(on ? "gui.acc_sec_dc_on" : g_acc_st_ok ? "gui.acc_sec_dc_off" : "gui.acc_st_unknown"), x0,
-               g->r_dc + 22, xr - x0 - 226, 18, on ? C_OK : C_DIM);
+    int x0 = CX0 + 18, xr = CX0 + CW - 18, y = g->gt_y + ACC_G_ROW;
+    int ok = g_acc_st_ok, gt = ok && g_acc_st.gamertag[0], field = acc_vis_have(ID_ACC_V_GT, g->st);
+    acc_card(CX0, g->gt_y, CW, g->gt_h, LT("gui.acc_gt_title"));
+    if (field || gt) {
+        acc_t(F_TINY, acc_gt_limit(t, sizeof t), x0 + 200, g->gt_y + 12, xr - x0 - 200, 24,
+              acc_gt_locked() ? C_WARN : C_DIM, ACC_TR);
     }
-    if (g->r_lg >= 0) {
-        L_fill(x0, g->r_lg - 6, xr - x0, 1, RGB(255, 255, 255), 12, 0);
-        label1(F_SMALL, LT("gui.acc_m_login"), x0, g->r_lg, ACC_M_LW, 22, C_TEXT);
-        if (g_acc_st_ok && g_acc_st.login) {
-            _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.acc_sec_lg_on"), g_acc_st.login_name);
-            label1(F_TINY, t, x0, g->r_lg + 22, xr - x0 - 226, 18, C_OK);
-        } else {
-            label1(F_TINY, LT(g_acc_st_ok ? "gui.acc_sec_lg_off" : "gui.acc_st_unknown"), x0, g->r_lg + 22,
-                   xr - x0 - 226, 18, C_DIM);
-        }
+    m = field ? acc_gtmsg_for(ID_ACC_V_GT, &c) : NULL; /* Pruef-/Fehlermeldung unter dem Feld (statt des Satzes) */
+    if (field && !gt) { /* Regel neben dem Knopf (beim Aendern ist dort Abbrechen) */
+        acc_t(F_TINY, LT("gui.acc_gt_rules"), x0 + 420, y - 2, xr - x0 - 420, 32, C_FAINT, ACC_T2);
+    } else if (gt && !field) {
+        acc_t(F_CARD, g_acc_st.gamertag, x0, y, xr - x0 - 170, 28, C_TEXT, ACC_T1);
+    } else if (!field) {
+        const char *l1 = acc_gt_line1(t, sizeof t, &c); /* unbekannt bzw. Dienst ohne Gamertags */
+        acc_t(F_SMALL, l1, x0, y, xr - x0, 28, c, ACC_T2);
     }
-    if (g->r_lgx >= 0) {
-        label1(F_TINY, LT("gui.acc_l_login"), x0, g->lg, 214, 18, C_DIM);
-        label1(F_TINY, LT("gui.acc_l_pw_new"), x0 + 226, g->lg, 214, 18, C_DIM);
-        m = acc_fmsg_for(ID_ACC_V_LOGIN, &c);
-        label1(F_TINY, m ? m : LT("gui.acc_login_rules"), x0, g->lg + 50, xr - x0, 18, m ? c : C_FAINT);
-    }
-    if (g->r_rec >= 0) {
-        L_fill(x0, g->r_rec - 6, xr - x0, 1, RGB(255, 255, 255), 12, 0);
-        label1(F_SMALL, LT("gui.acc_rec_title"), x0, g->r_rec, 150, 22, C_TEXT);
-        acc_paint_code(x0 + 160, g->r_rec, xr - 226 - x0 - 160);
-        label1(F_TINY, LT("gui.acc_rec_text"), x0, g->r_rec + 24, xr - x0 - 226, 18, C_DIM);
-    }
-    if (g->r_code >= 0) {
-        if (g->r_rec >= 0) {
-            L_fill(x0, g->r_code - 6, xr - x0, 1, RGB(255, 255, 255), 12, 0);
-        }
-        label1(F_SMALL, LT("gui.acc_m_code"), x0, g->r_code, xr - x0 - 320, 22, C_TEXT);
-        m = acc_fmsg_for(ID_ACC_V_CODE, &c);
-        label(F_TINY, m ? m : LT("gui.acc_m_code_text"), x0, g->r_code + 24, xr - x0 - 320, 30, m ? c : C_DIM);
-    }
-    if (g->r_out >= 0) {
-        L_fill(x0, g->r_out - 4, xr - x0, 1, RGB(255, 255, 255), 12, 0);
-        label1(F_TINY, LT("gui.acc_m_forget_text"), x0 + 226, g->r_out + 4, xr - x0 - 226, 28, C_DIM);
-        label1(F_TINY, LT("gui.acc_m_delete_text"), x0 + 226, g->r_del + 4, xr - x0 - 226, 28, C_DIM);
+    if (m) {
+        acc_t(F_TINY, m, x0, g->gt_y + 72, xr - x0, 18, c, ACC_T1);
+    } else {
+        acc_t(F_TINY, LT("gui.acc_gt_why"), x0, g->gt_y + 72, xr - x0, 18, C_FAINT, ACC_T1);
     }
 }
 
-/* W418 LAUNCHER-ACCOUNT-UX: Unterseite Multiplayer > Account ("steelnet account"), ein Zustand, ein naechster
- * Schritt (acc_geo): kein Konto = Neu | Schon ein Konto; ungesichert = Name, bereit, Warnzeile + "Ein Schritt:
- * sichern"; gesichert/unbekannt = kompakte Kopfzeile + Verwalten. Datenschutzzeile immer am Seitenende. */
+/* W502: Karte Konto sichern: Discord, Login und Passwort, Wiederherstellungscode als gleichwertige Zeilen; das
+ * Login-Formular ersetzt die Zeilen in der Karte */
+static void acc_paint_sec(const acc_geo_t *g)
+{
+    char t[300];
+    COLORREF c = C_DIM;
+    const char *m;
+    int ok = g_acc_st_ok, sx = g->lx + 18, sxr = g->lx + g->lw - 18, sw = sxr - sx;
+    int lw = sw - ACC_ROW_BTN_W - 10, fw = (sw - 12) / 2;
+    acc_card(g->lx, g->lo_y, g->lw, g->lo_h, LT(g->st == ACCS_UNSEC ? "gui.acc_sec_one" : "gui.acc_sec_title_ok"));
+    acc_t(F_TINY, LT("gui.acc_sec_why"), sx + 190, g->lo_y + 12, sw - 190, 24, C_DIM, ACC_TR);
+    if (g_acc_x_login) {
+        acc_t(F_TINY, LT("gui.acc_l_login_s"), sx, g->lo_y + ACC_S_FLD - 18, fw, 16, C_DIM, ACC_T1);
+        acc_t(F_TINY, LT("gui.acc_l_pw_new"), sx + fw + 12, g->lo_y + ACC_S_FLD - 18, fw, 16, C_DIM, ACC_T1);
+        m = acc_fmsg_for(ID_ACC_V_LOGIN, &c);
+        acc_t(F_TINY, m ? m : LT("gui.acc_login_rules"), sx, g->lo_y + ACC_S_FLD + 34, sw, 40, m ? c : C_FAINT, ACC_T2);
+        return;
+    }
+    /* Discord */
+    acc_t(F_SEMI, LT("gui.acc_m_discord"), sx, g->r_dc, lw, 20, C_TEXT, ACC_T1);
+    if (ok && g_acc_st.discord) {
+        _snprintf_s(t, sizeof t, _TRUNCATE, "\xE2\x9C\x93  %s", LT("gui.acc_sec_dc_on"));
+        acc_t(F_TINY, t, sx, g->r_dc + 20, sw, 18, C_OK, ACC_T1);
+    } else {
+        acc_t(F_TINY, LT(ok ? "gui.acc_sec_dc_sub" : "gui.acc_st_unknown_s"), sx, g->r_dc + 20, lw, 18, C_DIM, ACC_T1);
+    }
+    /* Login und Passwort */
+    acc_line(sx, g->r_lg - 4, sw);
+    acc_t(F_SEMI, LT("gui.acc_m_login"), sx, g->r_lg, lw, 20, C_TEXT, ACC_T1);
+    if (ok && g_acc_st.login) {
+        char l[160];
+        _snprintf_s(l, sizeof l, _TRUNCATE, LT("gui.acc_sec_lg_on"), g_acc_st.login_name);
+        _snprintf_s(t, sizeof t, _TRUNCATE, "\xE2\x9C\x93  %s", l);
+        acc_t(F_TINY, t, sx, g->r_lg + 20, lw, 18, C_OK, ACC_T1);
+    } else {
+        acc_t(F_TINY, LT(ok ? "gui.acc_sec_lg_off" : "gui.acc_st_unknown_s"), sx, g->r_lg + 20, lw, 18, C_DIM, ACC_T1);
+    }
+    /* Wiederherstellungscode: Zeile 1 Titel + Anzeigen/Kopieren, Zeile 2 Code (verdeckt mit Hinweis) */
+    acc_line(sx, g->r_rec - 4, sw);
+    acc_t(F_SEMI, LT("gui.acc_rec_title"), sx, g->r_rec, sw - 176, 26, C_TEXT, ACC_T1);
+    if (g_acc_rec[0]) {
+        acc_paint_code(sx, g->r_rec + 28, sw);
+    } else {
+        acc_paint_code(sx, g->r_rec + 28, 140);
+        acc_t(F_TINY, LT("gui.acc_rec_hint"), sx + 146, g->r_rec + 28, sw - 146, 20, C_DIM, ACC_T1);
+    }
+}
+
+/* W502: Karte Kontoeinstellungen: Code einloesen, Abmelden, (Trennlinie) Loeschen bzw. Codeformular */
+static void acc_paint_set(const acc_geo_t *g)
+{
+    COLORREF c = C_DIM;
+    const char *m;
+    int tx = g->rx + 18, tw = g->rw - 36;
+    acc_card(g->rx, g->lo_y, g->rw, g->lo_h, LT("gui.acc_set_title"));
+    if (g_acc_x_code) {
+        acc_t(F_TINY, LT("gui.acc_code_label"), tx, g->lo_y + ACC_E_FLD - 18, tw, 16, C_DIM, ACC_T1);
+        m = acc_fmsg_for(ID_ACC_V_CODE, &c);
+        acc_t(F_TINY, m ? m : LT("gui.acc_m_code_text"), tx, g->lo_y + ACC_E_BTN + 36, tw, 58, m ? c : C_DIM, ACC_T2);
+        return;
+    }
+    acc_t(F_TINY, LT("gui.acc_set_why"), tx, g->lo_y + 38, tw, 18, C_DIM, ACC_T1);
+    acc_line(tx, g->lo_y + ACC_E_SEP, tw);
+}
+
+/* W502: kein Konto - Erstellen (Name, Gamertag optional) | Ich habe schon ein Konto (Discord, Login, Code) */
+static void acc_paint_none(const acc_geo_t *g)
+{
+    COLORREF c = C_DIM;
+    const char *m;
+    int nx = g->lx + 18, nw = g->lw - 36, hx = g->rx + 18, hw = g->rw - 36, y = g->lo_y;
+    acc_card(g->lx, y, g->lw, g->lo_h, LT("gui.acc_new_title"));
+    if (!g_acc_chk) {
+        L_ring(g->lx, y, g->lw, g->lo_h, C_ACCENT, 150, 10);
+    }
+    acc_t(F_TINY, LT("gui.acc_head_none2"), nx, y + 38, nw, 16, C_DIM, ACC_T1);
+    acc_t(F_TINY, LT("gui.acc_name_long"), nx, y + ACC_N_NAME - 18, nw, 16, C_DIM, ACC_T1);
+    m = acc_fmsg_for(ID_ACC_NAME, &c);
+    acc_t(F_TINY, m ? m : LT("gui.acc_name_hint"), nx, y + ACC_N_NAME + 30, nw, 18, m ? c : C_FAINT, ACC_T1);
+    acc_t(F_TINY, LT("gui.acc_gt_label"), nx, y + ACC_N_GT - 18, nw, 16, C_DIM, ACC_T1);
+    m = acc_gtmsg_for(ID_ACC_GT, &c);
+    acc_t(F_TINY, m ? m : LT("gui.acc_gt_hint"), nx, y + ACC_N_GT + 30, nw, 34, m ? c : C_FAINT, ACC_T2);
+    acc_card(g->rx, y, g->rw, g->lo_h, LT("gui.acc_have_title"));
+    if (g_acc_x_login) {
+        acc_t(F_TINY, LT("gui.acc_l_login_s"), hx, y + ACC_F_L1 - 18, hw, 16, C_DIM, ACC_T1);
+        acc_t(F_TINY, LT("gui.acc_l_pw"), hx, y + ACC_F_L2 - 18, hw, 16, C_DIM, ACC_T1);
+        m = acc_fmsg_for(ID_ACC_V_LOGIN, &c);
+        if (m) acc_t(F_TINY, m, hx, y + 206, hw, 40, c, ACC_T2);
+    } else if (g_acc_x_code) {
+        acc_t(F_TINY, LT("gui.acc_code_label"), hx, y + ACC_F_L1 - 18, hw, 16, C_DIM, ACC_T1);
+        m = acc_fmsg_for(ID_ACC_V_CODE, &c);
+        acc_t(F_TINY, m ? m : LT("gui.acc_code_hint"), hx, y + 152, hw, 46, m ? c : C_FAINT, ACC_T2);
+    } else {
+        acc_t(F_TINY, LT("gui.acc_have_why"), hx, y + 38, hw, 16, C_DIM, ACC_T1);
+    }
+}
+
+/* W418/W502: Unterseite Multiplayer > Account ("steelnet account"): Uebersicht, dann die Karten des Zustands
+ * (acc_geo). Datenschutzzeile immer am Seitenende. */
 void acc_paint_view(void)
 {
-    char t[300];
-    COLORREF c = C_DIM;
-    const char *m;
     acc_geo_t g;
-    int x0 = CX0 + 18, rx = COL2 + 18, rw = COLW - 36;
+    int x0 = CX0 + 18;
     acc_geo(&g);
-    switch (g.st) {
-    case ACCS_OFF: /* steelnet in dieser Ausgabe nicht eingerichtet */
-        card(CX0, CY0, CW, 88, LT("gui.acc_title"));
-        label(F_TINY, LT("gui.loc_onl_nosrv"), x0, CY0 + 40, CW - 36, 40, C_DIM);
-        break;
-    case ACCS_NONE:
-        card(CX0, CY0, CW, g.hh, LT("gui.acc_head_none"));
-        label1(F_SMALL, LT("gui.acc_head_none2"), x0, CY0 + 38, CW - 36, 22, C_DIM);
-        /* links: "Ich bin neu" (hervorgehoben) */
-        card(CX0, g.ay, COLW, g.ah, LT("gui.acc_new_title"));
-        L_ring(CX0, g.ay, COLW, g.ah, C_ACCENT, 150, 10);
-        label1(F_TINY, LT("gui.acc_name_long"), x0, g.ay + 42, rw, 18, C_DIM);
-        m = acc_fmsg_for(ID_ACC_NAME, &c);
-        label1(F_TINY, m ? m : LT("gui.acc_name_hint"), x0, g.ay + 94, rw, 20, m ? c : C_FAINT);
-        /* rechts: "Ich habe schon ein Konto" */
-        card(COL2, g.ay, COLW, g.ah, LT("gui.acc_have_title"));
-        if (g.lg >= 0) {
-            acc_paint_login_lbl(rx, g.lg, rw, 0);
-            m = acc_fmsg_for(ID_ACC_V_LOGIN, &c);
-            if (m) {
-                label(F_TINY, m, rx + 170, g.lg + 100, rw - 170, 32, c);
+    if (g.st == ACCS_OFF) { /* steelnet in dieser Ausgabe nicht eingerichtet */
+        acc_card(CX0, CY0, CW, 88, LT("gui.acc_title"));
+        acc_t(F_TINY, LT("gui.loc_onl_nosrv"), x0, CY0 + 40, CW - 36, 40, C_DIM, ACC_T2);
+    } else {
+        acc_paint_ov(&g);
+        if (g.st == ACCS_NONE) {
+            acc_paint_none(&g);
+        } else {
+            acc_paint_gt(&g);
+            acc_paint_sec(&g);
+            acc_paint_set(&g);
+        }
+        if (g_acc_hl && !g_acc_chk) { /* Zielkarte nach einem Sprung (Uebersicht -> Karte) */
+            RECT r[8];
+            int k[8], n = acc_page_cards(r, k, 8), i;
+            for (i = 0; i < n; i++) {
+                if (k[i] == g_acc_hl) {
+                    L_ring(r[i].left, r[i].top, r[i].right - r[i].left, r[i].bottom - r[i].top, C_ACCENT, 255, 10);
+                    L_ring(r[i].left + 1, r[i].top + 1, r[i].right - r[i].left - 2, r[i].bottom - r[i].top - 2,
+                           C_ACCENT, 160, 9);
+                }
             }
         }
-        if (g.cd >= 0) {
-            label1(F_TINY, LT("gui.acc_code_label"), rx, g.cd, rw, 18, C_DIM);
-            m = acc_fmsg_for(ID_ACC_V_CODE, &c);
-            label(F_TINY, m ? m : LT("gui.acc_code_hint"), rx, g.cd + 50, rw, 30, m ? c : C_FAINT);
-        }
-        break;
-    case ACCS_UNSEC:
-        card(CX0, CY0, CW, g.hh, g_acc.name);
-        dot(x0, CY0 + 46, C_OK);
-        label1(F_SMALL, LT("gui.acc_ready"), x0 + 18, CY0 + 40, CW - 54, 22, C_OK);
-        dot(x0, CY0 + 68, C_WARN);
-        label1(F_SMALL, LT("gui.acc_unsecured"), x0 + 18, CY0 + 62, CW - 54, 22, C_WARN);
-        card(CX0, g.ay, CW, g.ah, LT("gui.acc_sec_one"));
-        label1(F_TINY, LT("gui.acc_sec_dc_rec"), x0 + 256, g.ay + 44, CW - 36 - 256, 32, C_DIM);
-        L_fill(x0, g.ay + 86, CW - 36, 1, RGB(255, 255, 255), 16, 0);
-        L_fill(ACC_RX - 12, g.ay + 96, 1, g.ah - 108, RGB(255, 255, 255), 16, 0);
-        /* rechts: Wiederherstellungscode notieren (Anzeigen/Kopieren) */
-        label1(F_SMALL, LT("gui.acc_rec_write"), ACC_RX, g.rec, ACC_HALF_W, 22, C_TEXT);
-        acc_paint_code(ACC_RX, g.rec + 24, ACC_HALF_W);
-        label(F_TINY, LT("gui.acc_rec_text"), ACC_RX + 166, g.rec + 46, ACC_HALF_W - 166, 32, C_DIM);
-        /* links: Login und Passwort festlegen (aufklappbar) */
-        if (g.lg >= 0) {
-            acc_paint_login_lbl(x0, g.lg, ACC_HALF_W, 1);
-            m = acc_fmsg_for(ID_ACC_V_LOGIN, &c);
-            label(F_TINY, m ? m : LT("gui.acc_login_rules"), x0, g.lg + 134, ACC_HALF_W, 30, m ? c : C_FAINT);
-        }
-        if (g.my >= 0) {
-            acc_paint_manage(&g);
-        }
-        break;
-    case ACCS_SEC:
-    case ACCS_UNK:
-        card(CX0, CY0, CW, g.hh, g_acc.name);
-        if (g.st == ACCS_SEC) {
-            const char *k = g_acc_st.discord && g_acc_st.login ? "gui.acc_st_both"
-                            : g_acc_st.discord                 ? "gui.acc_st_discord"
-                                                               : "gui.acc_st_login";
-            _snprintf_s(t, sizeof t, _TRUNCATE, "\xE2\x9C\x93  %s", LT(k)); /* gruener Haken */
-            label1(F_SMALL, t, x0, CY0 + 36, CW - 36 - 130, 22, C_OK);
-        } else {
-            const char *k = acc_unk_text(&c);
-            dot(x0, CY0 + 42, c);
-            label1(F_SMALL, k, x0 + 18, CY0 + 36, CW - 54 - 130, 22, c);
-        }
-        if (g.my >= 0) {
-            acc_paint_manage(&g);
-        }
-        break;
-    default:
-        break;
     }
     /* Datenschutz: was auf dem Server liegt (klein, alle Zustaende) */
-    label(F_TINY, LT("gui.acc_privacy"), x0, ACC_PRIV_Y, CW - 36, 32, C_FAINT);
+    acc_t(F_TINY, LT("gui.acc_privacy"), x0, ACC_PRIV_Y, CW - 36, 32, C_FAINT, ACC_T2);
 }
 
+/* W502 Selbsttest: passen alle Texte der Kontoseite im aktuellen Zustand (EN/DE)? 1 = ja, sonst why gesetzt. */
+int acc_page_texts_fit(char *why, size_t cap)
+{
+    g_acc_chk = 1;
+    g_acc_chk_why[0] = '\0';
+    acc_paint_view();
+    g_acc_chk = 0;
+    if (g_acc_chk_why[0]) {
+        strncpy_s(why, cap, g_acc_chk_why, _TRUNCATE);
+        return 0;
+    }
+    return 1;
+}
 /* W293: Bereitschaft LoC: Spiel, Grafik, Anzeige, Steuerung, Online (spaeter).
  * "Change" fuehrt zur Seite der Ursache (Spiel/Online = LoC > Erweitert). */
 static const int kLocSumPage[LOC_SUM_N] = { P_ADV, P_GFX, P_DISPLAY, P_CTRL, P_LNET }; /* W397: Online -> Multiplayer */
@@ -1455,6 +2149,7 @@ int loctab_command(int id, int code)
     case ID_LNET_MSN:    /* W473: Chat im Spiel */
     case ID_LNET_MLOBBY:
     case ID_LNET_MTEAM:
+    case ID_LNET_NETREP: /* W496: anonyme Netzwerkstatistik */
         if (code == BN_CLICKED) {
             lnet_toggle(id);
         }
@@ -1469,6 +2164,12 @@ int loctab_command(int id, int code)
         if (code == CBN_SELCHANGE && !g_updating) {
             lnet_mode_pick();
             onl_sync_ui(); /* "Standard wiederherstellen" an/aus */
+        }
+        return 1;
+    case ID_LNET_CAMP: /* W491: nur intern (Saison / Testkampagne) */
+        if (code == CBN_SELCHANGE && !g_updating) {
+            camp_pick();
+            onl_sync_ui();
         }
         return 1;
     case ID_LNET_VERPAGE: /* W420: Release-Seite im Browser (kein Download, kein Selbst-Update) */
@@ -1848,6 +2549,10 @@ int loctab_apply_state(const char *name)
     g_loc_arcade = 0; /* W440 */
     g_loc_online = 0;   /* W397: Shots ohne loc_onl* immer Stufe "nicht steelnet" (nie die Wahl aus user.cfg) */
     g_upd_ask = 0;
+    g_nrq_cfg = strcmp(name, "loc_net_nrq") == 0 ? 1 : -1; /* W496: Shots nie mit der echten Antwort */
+    g_nrq_dismiss = 0;
+    g_nrq_open = strcmp(name, "loc_net_nrqask") == 0;
+    if (g_nrq_open) g_loc_online = 1; /* Stufe steelnet */
     if (strcmp(name, "loc_netq") == 0) { /* W397: Erstabfrage (wie update_ask) */
         g_upd_ver = "0.3.0";
         g_upd_cfg = -1;
@@ -1864,6 +2569,16 @@ int loctab_apply_state(const char *name)
     g_loc_lan = strncmp(name, "loc_net_lan", 11) == 0;
     if (g_loc_lan) {
         strcpy_s(g_loc_lan_room, sizeof g_loc_lan_room, "Party");
+    }
+    if (strncmp(name, "loc_net_live", 12) == 0) { /* W487/W501: Online mit Konto-Fixture (mit/ohne Gamertag) */
+        g_loc_online = 1; /* Stufe steelnet (Live braucht den Treffpunkt) */
+        acc_fixture(1, 1, 1, 1, 0);
+        if (strcmp(name, "loc_net_live_nogt") == 0) g_acc_st.gamertag[0] = '\0';
+        /* W491: Kampagne - erreichbar (Standard), nicht erreichbar, veraltet; intern Testkampagne im Reiter Lobby & Chat */
+        camp_fixture(strcmp(name, "loc_net_live_campx") == 0 ? LCAMP_R_FAIL : LCAMP_R_OK);
+        if (strcmp(name, "loc_net_live_campold") == 0) locver_fixture("0.3.3");
+        g_camp_test = strcmp(name, "loc_net_live_campt") == 0;
+        if (g_camp_test) g_lnet_tab = 1;
     }
     if (strcmp(name, "loc_net_chatoff") == 0) {
         g_loc_chat = g_loc_snchat = 0;
@@ -1941,6 +2656,9 @@ void acc_fixture(int srv, int have, int discord, int login, int view)
         g_acc_st.discord = discord;
         g_acc_st.login = login;
         if (login) strcpy_s(g_acc_st.login_name, sizeof g_acc_st.login_name, "ace-login");
+        strcpy_s(g_acc_st.gamertag, sizeof g_acc_st.gamertag, "Ace Pilot"); /* W487: Beispiel-Gamertag */
+        g_acc_st.gt_days = 7;
+        strcpy_s(g_acc_st.gt_state, sizeof g_acc_st.gt_state, "ok");
     }
 }
 
@@ -1964,9 +2682,9 @@ void acc_apply_state(const char *name)
     else if (strcmp(name, "loc_acc_view_unsec") == 0) acc_fixture(1, 1, 0, 0, 1); /* W399 */
     else if (strcmp(name, "loc_acc_view_login") == 0) acc_fixture(1, 1, 0, 1, 1);
     else if (strcmp(name, "loc_acc_view_ok") == 0) acc_fixture(1, 1, 1, 1, 1);
-    else if (strcmp(name, "loc_acc_view_manage") == 0) { /* W418: gesichert, Verwalten offen */
+    else if (strcmp(name, "loc_acc_view_manage") == 0) { /* W418: gesichert (W502: Kontoeinstellungen, Code offen) */
         acc_fixture(1, 1, 1, 1, 1);
-        g_acc_x_manage = 1;
+        g_acc_x_code = 1;
     } else if (strcmp(name, "loc_acc_view_net") == 0) { /* W418: Server nicht erreichbar (Status unbekannt) */
         acc_fixture(1, 1, 0, 0, 1);
         g_acc_st_ok = 0;
@@ -1975,17 +2693,55 @@ void acc_apply_state(const char *name)
     } else if (strcmp(name, "loc_acc_signin_code") == 0) { /* W418: kein Konto, "Mit einem Code" offen */
         acc_fixture(1, 0, 0, 0, 1);
         g_acc_x_code = 1;
-    } else if (strcmp(name, "loc_acc_view_unsec_login") == 0) { /* W418: ungesichert, Login-Felder offen */
-        acc_fixture(1, 1, 0, 0, 1);
+    } else if (strcmp(name, "loc_acc_signin_login") == 0) { /* W502: kein Konto, Anmelden mit Login offen */
+        acc_fixture(1, 0, 0, 0, 1);
         g_acc_x_login = 1;
+    } else if (strcmp(name, "loc_acc_view_unsec_login") == 0 || strcmp(name, "loc_acc_view_login_err") == 0) {
+        acc_fixture(1, 1, 0, 0, 1); /* W418: ungesichert, Login-Formular offen (W502: mit Fehlermeldung) */
+        g_acc_x_login = 1;
+    } else if (strcmp(name, "loc_acc_view_gt") == 0) { /* W487/W502: gesichert, Gamertag-Wechsel gesperrt (3 Tage) */
+        acc_fixture(1, 1, 1, 1, 1);
+        g_acc_st.gt_next = (long long)time(NULL) + 3 * 86400LL;
+    } else if (strcmp(name, "loc_acc_view_gt_edit") == 0) { /* W502: gesichert, Gamertag aendern offen */
+        acc_fixture(1, 1, 1, 0, 1);
+        g_acc_x_gt = 1;
+    } else if (strcmp(name, "loc_acc_view_nogt") == 0) { /* W487: gesichert, noch kein Gamertag */
+        acc_fixture(1, 1, 1, 0, 1);
+        g_acc_st.gamertag[0] = '\0';
+    } else if (strcmp(name, "loc_acc_view_unsec_nogt") == 0 || strcmp(name, "loc_acc_view_gt_taken") == 0) {
+        acc_fixture(1, 1, 0, 0, 1); /* W502: ungesichert, ohne Gamertag (Fall des Nutzers; _taken: Pruefmeldung) */
+        g_acc_st.gamertag[0] = '\0';
+    } else if (strcmp(name, "loc_acc_view_gtoff") == 0) { /* W502: Dienst ohne Gamertags */
+        acc_fixture(1, 1, 1, 0, 1);
+        g_acc_st.gamertag[0] = '\0';
+        strcpy_s(g_acc_st.gt_state, sizeof g_acc_st.gt_state, "off");
+    } else if (strcmp(name, "loc_acc_view_off") == 0) { /* W502: steelnet nicht eingerichtet */
+        acc_fixture(0, 0, 0, 0, 1);
+    } else if (strcmp(name, "loc_acc_view_code") == 0) { /* W502: Kontoeinstellungen, Code mit Formatfehler */
+        acc_fixture(1, 1, 1, 1, 1);
+        g_acc_x_code = 1;
+    } else if (strcmp(name, "loc_acc_view_unsec_gt") == 0) { /* W487: ungesichert (W502: Gamertag aendern offen) */
+        acc_fixture(1, 1, 0, 0, 1);
+        g_acc_x_gt = 1;
+    } else if (strcmp(name, "loc_acc_nogt") == 0) { /* W487: Karte Match & network, gesichert ohne Gamertag */
+        acc_fixture(1, 1, 1, 0, 0);
+        g_acc_st.gamertag[0] = '\0';
+    } else if (strcmp(name, "loc_acc_new_gt") == 0) { /* W487: Kontoseite "Ich bin neu" mit Gamertag-Vorschlag */
+        acc_fixture(1, 0, 0, 0, 1);
+    }
+    if (strcmp(name, "loc_acc_view_ok") == 0) {
+        camp_fixture(LCAMP_R_OK); /* W502: Kampagnenstand in der Uebersicht (Fixture, nie Netz) */
     }
 }
-
 /* Nach dem Aufbau (Shot): Pruefung bzw. Startversuch wie der Nutzer. */
 void loctab_state_after(const char *name)
 {
     if (strncmp(name, "loc_", 4) != 0 ||
         (g_page != P_PLAY && g_page != P_ADV && g_page != P_LNET)) { /* W293: Disc auf Erweitert; W399: Konto auf MP */
+        return;
+    }
+    if (g_page == P_LNET && strncmp(name, "loc_net_live", 12) == 0) { /* W487: Konto-Karte zum Fixture (Lage) */
+        acc_refresh();
         return;
     }
     if (g_page == P_LNET && strncmp(name, "loc_acc", 7) != 0) { /* W399: auf Multiplayer nur die Konto-Zustaende */
@@ -1999,6 +2755,34 @@ void loctab_state_after(const char *name)
         if (g_acc_rec[0] && ctl(ID_ACC_V_RECSHOW)) ui_settext(ctl(ID_ACC_V_RECSHOW), LT("gui.acc_rec_hide"));
         if (g_acc_st.login && ctl(ID_ACC_V_LOGIN)) ui_settext(ctl(ID_ACC_V_LOGIN), g_acc_st.login_name);
         if (!g_acc.have && !g_acc_view && ctl(ID_ACC_NAME)) ui_settext(ctl(ID_ACC_NAME), "Ace Pilot");
+        if (strcmp(name, "loc_acc_new_gt") == 0 && ctl(ID_ACC_NAME)) { /* W487: Vorschlag wie vom Dienst */
+            char m[200];
+            ui_settext(ctl(ID_ACC_NAME), "Ace Pilot");
+            if (g_hwnd) KillTimer(g_hwnd, ACC_TIMER);
+            acc_gt_settext(ID_ACC_GT, "Ace Pilot2");
+            acc_gt_status_text("ok", 0, "Ace Pilot2", m, sizeof m);
+            acc_gtmsg(ID_ACC_GT, m, C_OK);
+            redraw_all();
+        }
+        { /* W502: Pruef- und Fehlermeldungen wie nach einer Eingabe (nur Anzeige, kein Netz) */
+            char m[300];
+            if (strcmp(name, "loc_acc_view_gt_taken") == 0) {
+                acc_gt_settext(ID_ACC_V_GT, "Ace Pilot");
+                acc_gt_status_text("taken", 0, "Ace Pilot", m, sizeof m);
+                acc_gtmsg(ID_ACC_V_GT, m, C_ERR);
+            } else if (strcmp(name, "loc_acc_view_gt_edit") == 0) {
+                acc_gt_settext(ID_ACC_V_GT, "Iron Wolf");
+                acc_gt_status_text("ok", 0, "Iron Wolf", m, sizeof m);
+                acc_gtmsg(ID_ACC_V_GT, m, C_OK);
+            } else if (strcmp(name, "loc_acc_view_login_err") == 0) {
+                if (ctl(ID_ACC_V_LOGIN)) ui_settext(ctl(ID_ACC_V_LOGIN), "ace-login");
+                acc_fmsg(ID_ACC_V_LOGIN, LT("gui.acc_err_pw"), C_ERR);
+            } else if (strcmp(name, "loc_acc_view_code") == 0) {
+                if (ctl(ID_ACC_V_CODE)) ui_settext(ctl(ID_ACC_V_CODE), "ABCD-EFGH");
+                acc_fmsg(ID_ACC_V_CODE, LT("gui.acc_err_code_fmt"), C_ERR);
+            }
+            redraw_all();
+        }
     }
     if (strcmp(name, "loc_start") == 0) {
         loctab_start();

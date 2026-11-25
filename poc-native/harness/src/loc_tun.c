@@ -583,6 +583,11 @@ static double tl_next_wake(loctun *t, double now)
     return nx;
 }
 
+int loctun_qos_game(int rtt_ms, int online)
+{
+    return (online && rtt_ms > TUN_QOS_ONLINE_MAX) ? TUN_QOS_ONLINE_MAX : rtt_ms;
+}
+
 static void tl_qos_update(loctun *t)
 {
     double worst = 0;
@@ -599,6 +604,19 @@ static void tl_qos_update(loctun *t)
         int r = (int)(worst + 0.5);
         if (r > 4999) r = 4999;
         if (r < 1) r = 1;
+        /* W494 LOC-FARPING (#103 "issues connecting to players over 300 ping"): das Spiel bildet aus RttMed/2 die
+         * QoS-Klasse (FUN_00052390: < 300 ms Ping -> 2, sonst 1). Ab Klasse 1 bricht der Beitritt in Zustand 0x2D ab
+         * (kein 0x14 nach 0x13, 0x2D -> 0x31 nach ~5 s; Lauf F5: gemeldet 657-713 ms, belegt), obwohl der Transport
+         * die Strecke traegt. Online (Treffpunkt) daher hoechstens TUN_QOS_ONLINE_MAX melden. Die Startverzoegerung
+         * des Original-Lockstep (clamp(Ping,100,5000)/50) bleibt damit bei 5 Ticks, die Regelung des Spiels geht bis
+         * 10; mit eigener Eingabeschicht (R2, Standard) waehlt rbn_pick_delay nach der echten RTT. LAN unveraendert. */
+        if (loctun_qos_game(r, t->c.lobby[0] != 0) != r) {
+            if (!t->qos_capped) tl_logf(t, "LOCTUN: QoS fuer das Spiel auf %d ms begrenzt (gemessen %d ms; Original "
+                                           "Klasse 1 ab 600 ms = Ping 300 bricht den Beitritt ab, W494)",
+                                        TUN_QOS_ONLINE_MAX, r);
+            t->qos_capped = 1;
+            r = TUN_QOS_ONLINE_MAX;
+        }
         t->n->rtt_ms = r; /* XNetQosLookup meldet das (Startverzoegerung des Spiels) */
     }
 }
@@ -623,7 +641,8 @@ static void tl_write_status(loctun *t, double now)
     _snprintf_s(tmp, sizeof tmp, _TRUNCATE, "%s.tmp", t->c.status_path);
     if (fopen_s(&f, tmp, "w") != 0 || !f) return;
     fprintf(f, "transport=udp\nlobby=%s\nroute=%s\nroute_mode=%s\npeers=%d\nrelay_links=%d\nping_ms=%.0f\n",
-            t->lb_state == LB_LOBBY ? "lobby" : (t->lb_state == LB_OFF ? (t->c.lobby[0] ? "getrennt" : "aus") : "verbinde"),
+            (t->lb_state == LB_LOBBY || (t->rs_susp && t->lb_joined)) ? "lobby" /* W500: Fortsetzung laeuft */
+                : (t->lb_state == LB_OFF && !t->rs_susp ? (t->c.lobby[0] ? "getrennt" : "aus") : "verbinde"),
             up == 0 ? "keiner" : (relay == 0 ? "direkt" : (relay == up ? "relay" : "gemischt")),
             t->route_mode[0] ? t->route_mode : "-", up, relay, worst);
     /* W334: Sicherheitszustand und Raumcode fuer den Launcher */
@@ -670,6 +689,7 @@ static DWORD WINAPI tl_thread(LPVOID arg)
         }
         tl_rx_udp(t, now);
         lb_poll(t, now);
+        nr_tick(t, now); /* W496 NET-TELEMETRY (nur mit Zustimmung) */
         lan_poll(t, now); /* W454 */
         tl_relay_pings(t, now);
         for (i = 0; i < TUN_MAX_LINKS; i++) {
@@ -723,6 +743,7 @@ void loctun_cfg_default(loctun_cfg *c)
     strcpy_s(c->role, sizeof c->role, "auto");
     c->route_auto = 1; /* W395 */
     c->open_hold_ms = 3000; /* W409 */
+    c->resume = 1;          /* W500 */
 }
 
 int loctun_available(void) { return 1; }
@@ -794,6 +815,7 @@ loctun *loctun_start(const loctun_cfg *c, locnet *n, locnetsim *sim, loctun_log_
     t->sim = sim;
     t->log = log;
     t->lb_s = INVALID_SOCKET;
+    t->rs_old_s = INVALID_SOCKET; /* W500 */
     t->lan_s = INVALID_SOCKET; /* W454 */
     QueryPerformanceFrequency(&f);
     t->qpf_ms = 1000.0 / (double)f.QuadPart;
@@ -826,6 +848,11 @@ loctun *loctun_start(const loctun_cfg *c, locnet *n, locnetsim *sim, loctun_log_
     n->tun_base = t->c.proxy_base; /* W373: Absender ohne Eintrag (Geister) wie Mitspieler abbilden */
     t->c.vis[sizeof t->c.vis - 1] = 0;
     t->pub = t->c.lobby[0] && !t->c.code[0] && _stricmp(t->c.vis, "public") == 0; /* W373: Code geht immer privat */
+    /* W482: Live-Modus nutzt die Geister/Beitrittsmechanik von W373. W501 ONLINE-BOTH: Start immer System Link wie
+     * ohne loc_live; Xbox Live erst, wenn das Spiel den Live-Fluss betritt (loctun_live_mode, pub_live_mode_tick). */
+    t->live_cap = t->c.live && t->c.lobby[0];
+    t->live = 0;
+    t->pub0 = t->pub;
     t->pub_list_at = -1e9; /* W373: erste Suche holt die Liste sofort */
     t->pub_join = -1;
     if (t->c.lobby[0]) {
@@ -946,6 +973,7 @@ loctun *loctun_start(const loctun_cfg *c, locnet *n, locnetsim *sim, loctun_log_
                     t->fz_rule ? ", Regel-Felder gezielt (W339)" : "");
         }
     }
+    nr_start(t); /* W496 NET-TELEMETRY: ohne Zustimmung kein Zustand, keine Datei */
     timeBeginPeriod(1); /* Abstaende der Kopien (gap_ms) brauchen 1-ms-Wartezeiten */
     t->th = CreateThread(NULL, 0, tl_thread, t, 0, NULL);
     if (!t->th) {
@@ -974,6 +1002,8 @@ void loctun_stop(loctun *t)
     WaitForSingleObject(t->th, 5000);
     CloseHandle(t->th);
     timeEndPeriod(1);
+    nr_exit(t); /* W496 */
+    nr_free(t);
     for (i = 0; i < t->nrsim; i++) {
         if (t->rsim[i].sim) locnetsim_stop(t->rsim[i].sim); /* W395 TEST */
     }
@@ -991,6 +1021,7 @@ void loctun_stop(loctun *t)
     for (i = 0; i < TUN_MAX_LINKS; i++) sbe2e_link_free(&t->links[i].e2e); /* W334 */
     if (t->tls) sbtls_free(t->tls);
     if (t->lb_s != INVALID_SOCKET) closesocket(t->lb_s);
+    lb_rs_reset(t); /* W500: Token, Nachsende-Schlange, liegengelassene TEST-Verbindung */
     lan_stop(t); /* W454 */
     sbe2e_kp_free(&t->kp);
     SecureZeroMemory(t->udp_key, sizeof t->udp_key);
@@ -1023,6 +1054,7 @@ void loctun_bye_all(loctun *t)
         n++;
     }
     if (n) tl_logf(t, "LOCTUN: Client endet - BYE an %d Mitspieler", n);
+    nr_exit(t); /* W496: offener Bericht in die Warteschlange, Laufmarke weg */
     LeaveCriticalSection(&t->cs);
     if (n && t->sim) Sleep(150); /* Test-Netzmodell (loc_netsim) stellt verzoegert zu - vor dem Prozessende abwarten */
 }
@@ -1186,6 +1218,17 @@ int loctun_my_pilot(loctun *t, char *buf, int cap) /* W437 */
     return r;
 }
 
+int loctun_my_gamertag(loctun *t, char *buf, int cap) /* W487 LIVE-GAMERTAG */
+{
+    if (!buf || cap <= 0) return 0;
+    buf[0] = 0;
+    if (!t || !t->c.lobby[0]) return 0;
+    EnterCriticalSection(&t->cs);
+    strncpy_s(buf, (size_t)cap, t->my_gamertag, _TRUNCATE);
+    LeaveCriticalSection(&t->cs);
+    return buf[0] != 0;
+}
+
 int loctun_peer_pilot(loctun *t, uint32_t vip, char *buf, int cap) /* W437 */
 {
     tlink *L;
@@ -1301,6 +1344,11 @@ int loctun_auth_state(loctun *t)
     return t ? (int)t->auth_state : 0;
 }
 
+uint32_t loctun_account(loctun *t) /* W479 */
+{
+    return t ? t->acct : 0;
+}
+
 int loctun_play_mode(loctun *t) /* W440 */
 {
     if (!t || !t->c.lobby[0]) return 0;
@@ -1311,6 +1359,7 @@ int loctun_lobby_state(loctun *t)
 {
     if (t && !t->c.lobby[0] && t->lan) return 3; /* W454: LAN-Raum gilt als Lobby (Lobby-Chat an alle im Raum) */
     if (!t || !t->c.lobby[0]) return 0;
+    if (t->rs_susp) return t->lb_joined ? 3 : 2; /* W500: Fortsetzung laeuft - fuer das Spiel unveraendert */
     return t->lb_state == LB_OFF || t->lb_state == LB_CONNECTING ? 1 : (t->lb_joined ? 3 : 2);
 }
 
@@ -1373,6 +1422,7 @@ int loctun_test_line(loctun *t, uint32_t my_cid, const char *line, char *out, in
         if (!t->my_pilot[0]) strcpy_s(t->my_pilot, sizeof t->my_pilot, t->c.pilot[0] ? t->c.pilot : "Pilot");
     }
     if (line) lb_on_line(t, line, line + strlen(line), now);
+    if (t->live_cap) pub_live_mode_tick(t, now); /* W501: wie lb_poll */
     if (t->pub && t->my_cid) pub_tick(t, now);
     if (t->my_cid) lb_snchat_tick(t); /* W446: Abonnement/Senden des steelnet-Chats */
     t->test_cap = NULL;
@@ -1421,7 +1471,7 @@ int loctun_pub_list(loctun *t, loctun_pub_entry *out, int cap, int *total) /* W4
     int i, j, n = 0, all = 0, r;
     if (total) *total = 0;
     if (!t || !out || cap <= 0) return LOCTUN_PL_OFF;
-    if (!t->pub) return LOCTUN_PL_OFF;
+    if (!t->pub || t->live) return LOCTUN_PL_OFF; /* W482: Live-Hosts nicht im System-Link-Widget */
     EnterCriticalSection(&t->cs);
     if (!t->my_cid || t->pub_list_rx <= 0 || tl_now(t) - t->pub_list_rx > 40000.0) {
         LeaveCriticalSection(&t->cs);

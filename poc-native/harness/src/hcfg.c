@@ -26,6 +26,7 @@ void hcfg_defaults(void)
     g_cfg.game_image[0] = 0;   /* W150: leer = Ordner-Modus (bisher) */
     g_cfg.version_check = 1;     /* W150: unbekannte Spielversion -> kein Start */
     g_cfg.loc_net = 1;           /* W286: System-Link-Netz-HLE (wirkt nur mit loc_boot=1) */
+    g_cfg.loc_camp = 1;          /* W491: Kampagne im Xbox-Live-Modus (wirkt nur mit loc_live=1) */
     strcpy_s(g_cfg.loc_net_addr, sizeof g_cfg.loc_net_addr, "auto");
     g_cfg.loc_net_port = 1000;
     strcpy_s(g_cfg.loc_net_peers, sizeof g_cfg.loc_net_peers, "auto");
@@ -216,6 +217,7 @@ void hcfg_defaults(void)
     g_cfg.m3d_census_gate = 0; /* W36 MONITORVIEW: Zensus-Gate aus (DIAG) */
     g_cfg.loc_bbtex = 1; /* W285 LOC-RENDER: Backbuffer als Textur (nur LoC) */
     g_cfg.loc_bumpenv = 1; /* W285 LOC-RENDER: BUMPENVMAP-Naeherung (nur LoC) */
+    g_cfg.loc_hatch_lights = 1; /* W495 HATCH-LIGHTS (#102): Monitorlichter fahren mit der Luke (nur LoC) */
     g_cfg.loc_visq = 0; /* W297 LOC-MISSION: Sichtbarkeitstests wie bisher (1 Pixel); 1 = echt, 2 = alles sichtbar (DIAG, nur LoC) */
     g_cfg.loc_text_clear = 1; /* W297 LOC-MISSION: Textebene beim Clear leeren (nur LoC) */
     g_cfg.loc_vpreset = 1; /* W297 LOC-MISSION: Viewport-Reset bei SetRenderTarget (nur LoC) */
@@ -266,6 +268,8 @@ void hcfg_defaults(void)
     g_cfg.loc_stat_fix = 1; /* W415 LOC-STATIC-LAG: Gelaende in Zwischenbildern mit der Kamera der Welt bewegen (Nachweis W415) */
     g_cfg.ctrl_despike = 1; /* W439 (#78, Nutzerentscheid 22.11.): Ausreisser-Filter analoger Achsen (SBC, Joystick) an, 0 = Original */
     g_cfg.loc_ret_fix = 1; /* W439 LOC-RETICLE-JUMP (#78): exakt gezeichnete Fadenkreuz-Draws gegen B verschieben (Nachweis W439) */
+    g_cfg.loc_mem_reclaim = 1; /* W493 LOC-MEMLEAK (#101): VB/IB-Daten bei Release zurueck an LOCMEM (Nachweis W493) */
+    g_cfg.loc_mem_quar = 300; /* W493: Quarantaene freigegebener LOCMEM-Bloecke (Bilder) */
     g_cfg.loc_ret_mark = 1; /* W444 LOC-RETICLE-MARK (#78): Fadenkreuz-Teile ueber Form-Identitaet erkennen (Nachweis W444) */
     g_cfg.loc_sky_fix = 1; /* W435 LOC-SKY-LAG-REG (#74): Himmel auch mit der Sicht-Korrektur je Bild (Nachweis W435) */
     g_cfg.loc_sndloop_fix = 1; /* W413 LOC-SOUND-LOOP (#65): Ton nach dem Neurechnen mit der korrigierten Zeitlinie abgleichen */
@@ -335,6 +339,9 @@ void hcfg_defaults(void)
     g_cfg.loc_chat_mission_lobby = 1; /* W474 */
     g_cfg.loc_chat_mission_team = 1;  /* W474 (Team-Reiter noch nicht umgesetzt) */
     g_cfg.loc_lobby_join_delay = 0;  /* W446 TEST */
+    g_cfg.loc_lobby_resume = 1;      /* W500 */
+    g_cfg.loc_lobby_cut = 0;         /* W500 TEST */
+    g_cfg.loc_lobby_cut_mode = 0;
     g_cfg.loc_net_auto = 1;       /* W447 LOC-NET-AUTO: Netzmodus Auto (Nutzerentscheid 23.11.: Standard) */
     g_cfg.loc_net_panel = 1;      /* W447/W453: Lobby-Infopanel unten rechts (Netzmodus, Verzoegerung, Ping, Modus, Regel) */
     g_cfg.loc_net_panel_test = 0; /* W447 TEST */
@@ -1211,6 +1218,12 @@ static int set_key_w446(const char *k, const char *v)
         int d = atoi(v);
         g_cfg.loc_lobby_join_delay = d < 0 ? 0 : d > 600000 ? 600000 : d;
     }
+    else if (strcmp(k, "loc_lobby_resume") == 0) { g_cfg.loc_lobby_resume = atoi(v) ? 1 : 0; } /* W500 */
+    else if (strcmp(k, "loc_lobby_cut") == 0) { /* W500 TEST */
+        int d = atoi(v);
+        g_cfg.loc_lobby_cut = d < 0 ? 0 : d > 3600 ? 3600 : d;
+    }
+    else if (strcmp(k, "loc_lobby_cut_mode") == 0) { g_cfg.loc_lobby_cut_mode = atoi(v) == 1 ? 1 : 0; } /* W500 TEST */
     else { return 0; }
     return 1;
 }
@@ -1227,6 +1240,42 @@ static int set_key_w454(const char *k, const char *v)
         g_cfg.loc_lan_port = p > 0 && p < 65536 ? p : 0;
     }
     else if (strcmp(k, "loc_lan_targets") == 0) { strncpy_s(g_cfg.loc_lan_targets, sizeof g_cfg.loc_lan_targets, v, _TRUNCATE); } /* TEST */
+    else { return 0; }
+    return 1;
+}
+
+/* W493 LOC-MEMLEAK: eigene Schluessel (C1026) */
+static int set_key_w493(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_mem_reclaim") == 0) { g_cfg.loc_mem_reclaim = atoi(v) ? 1 : 0; } /* FIX */
+    else if (strcmp(k, "loc_mem_quar") == 0) { int q = atoi(v); g_cfg.loc_mem_quar = q < 0 ? 0 : q > 100000 ? 100000 : q; }
+    else { return 0; }
+    return 1;
+}
+
+/* W496 NET-TELEMETRY: eigene Schluessel (C1026) */
+static int set_key_w496(const char *k, const char *v)
+{
+    if (strcmp(k, "net_report") == 0) { g_cfg.net_report = atoi(v) == 1 ? 1 : 0; } /* nur genau 1 = Zustimmung */
+    else { return 0; }
+    return 1;
+}
+
+static int set_key_w479(const char *k, const char *v) /* W479 LIVE-LOGON */
+{
+    if (strcmp(k, "loc_live") == 0) { g_cfg.loc_live = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "loc_camp") == 0) { g_cfg.loc_camp = atoi(v) ? 1 : 0; } /* W491 CAMP-CLIENT */
+    else if (strcmp(k, "loc_camp_id") == 0) { strncpy_s(g_cfg.loc_camp_id, sizeof g_cfg.loc_camp_id, v, _TRUNCATE); }
+    else if (strcmp(k, "loc_camp_host") == 0) { strncpy_s(g_cfg.loc_camp_host, sizeof g_cfg.loc_camp_host, v, _TRUNCATE); }
+    else if (strcmp(k, "loc_camp_port") == 0) {
+        int p = atoi(v);
+        g_cfg.loc_camp_port = p > 0 && p < 65536 ? p : 0;
+    }
+    else if (strcmp(k, "loc_camp_spki") == 0) { strncpy_s(g_cfg.loc_camp_spki, sizeof g_cfg.loc_camp_spki, v, _TRUNCATE); }
+    else if (strcmp(k, "loc_camp_min_side") == 0) { /* W492; Beta 0.6.0: ohne Schluessel 1 (loc_boot.c), 0 = Original */
+        int n = atoi(v);
+        g_cfg.loc_camp_min_side = n >= 1 && n <= 3 ? n : -1;
+    }
     else { return 0; }
     return 1;
 }
@@ -1321,7 +1370,8 @@ static void set_key(const char *k, const char *v)
         return;
     }
     if (set_key_w435(k, v) || set_key_w437(k, v) || set_key_w439(k, v) || set_key_w440(k, v) || set_key_w444(k, v) || set_key_w442(k, v) ||
-        set_key_w446(k, v) || set_key_w474(k, v) || set_key_w448(k, v) || set_key_w451(k, v) || set_key_w454(k, v)) {
+        set_key_w446(k, v) || set_key_w474(k, v) || set_key_w448(k, v) || set_key_w451(k, v) || set_key_w454(k, v) ||
+        set_key_w479(k, v) || set_key_w493(k, v) || set_key_w496(k, v)) {
         return;
     }
     if (set_key_remaster(k, v) || set_key_overlay(k, v) || set_key_vr(k, v) || set_key_w371(k, v) || set_key_w376(k, v) ||
@@ -1889,6 +1939,8 @@ static void set_key(const char *k, const char *v)
         g_cfg.loc_census_from = atoi(v);
     } else if (strcmp(k, "loc_bbtex") == 0) { /* W285 LOC-RENDER */
         g_cfg.loc_bbtex = atoi(v);
+    } else if (strcmp(k, "loc_hatch_lights") == 0) { /* W495 HATCH-LIGHTS */
+        g_cfg.loc_hatch_lights = atoi(v);
     } else if (strcmp(k, "loc_visq") == 0) { /* W297 LOC-MISSION */
         g_cfg.loc_visq = atoi(v);
     } else if (strcmp(k, "loc_text_clear") == 0) { /* W297 LOC-MISSION */

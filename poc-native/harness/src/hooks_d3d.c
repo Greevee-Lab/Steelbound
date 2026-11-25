@@ -3,6 +3,7 @@
  * Transform, Release, GPU-Register, Shader-Konstanten, Streams/Draws,
  * LockRect, KickOff). W68 SPLIT: 1:1 aus xdk_hooks.c verschoben. */
 #include "loc_mem.h" /* W277 LOC-DISC */
+#include "loc_rollback.h" /* W493: loc_rb_spec (Release im Vorlauf) */
 #include "loc_render.h" /* W326 LOC-WIDE */
 #include "hooks_int.h"
 #include <intrin.h>
@@ -1098,6 +1099,14 @@ u32 __stdcall hook_D3DResource_Release(u32 res)
 {
     static u32 calls;
     u32 rc = 1;
+    /* W493 LOC-MEMLEAK: VB/IB-Kopf aus loc_mem_res2_create (nur LoC, loc_mem_reclaim=1): Refcount wie XDK 0x1883D0,
+     * bei 0 Daten zurueck an LOCMEM (Quarantaene); im spekulativen Vorlauf nichts veraendern. */
+    if (g_cfg.res_refcount && res && loc_mem_active() && loc_mem_res2_release(res, loc_rb_spec(), &rc)) {
+        if (hlog_throttle(&calls)) {
+            HLOG_T("D3D D3DResource_Release(0x%X) -> %u (LOCMEM-VB/IB)", res, rc);
+        }
+        return rc;
+    }
     if (g_cfg.res_refcount && res) {
         __try {
             u32 c = *(u32 *)(uintptr_t)res;
@@ -1667,14 +1676,17 @@ u32 __stdcall hook_D3D_MakeSpace(u32 a, u32 b)
  * [Handle+4] als Daten-Zeiger (D3DResource-Layout Common@0/Data@+4) und
  * kopiert per rep movsd hinein (0x60448) -> echte Structs + Puffer!
  * (Fake-Handles zeigten auf .data-BSS -> Fault 0x29A6E802.) */
-static u32 create_res2(u32 len)
+static u32 create_res2(u32 len, int ib, u32 site)
 {
     u32 *r, *d;
     if (!len) {
         len = 4;
     }
+    if (loc_mem_active() && g_cfg.loc_mem_reclaim) { /* W493: Kopf wie XDK (Refcount 1), Release gibt frei */
+        return loc_mem_res2_create(len, ib, site);
+    }
     if (loc_mem_active()) { /* W277: LoC liest [res+4]|0x80000000 -> Daten im gespiegelten Bereich */
-        u32 ld = loc_mem_alloc(len, 16, 1);
+        u32 ld = loc_mem_alloc_t(len, 16, 1, ib ? LOCMEM_T_IB : LOCMEM_T_VB, site);
         if (!ld) {
             return 0;
         }
@@ -1702,7 +1714,7 @@ static u32 create_res2(u32 len)
 u32 __stdcall hook_D3D_CreateVB2(u32 a)
 {
     static u32 calls;
-    u32 h = create_res2(a);
+    u32 h = create_res2(a, 0, (u32)(uintptr_t)_ReturnAddress());
     if (hlog_throttle(&calls)) {
         HLOG_T("D3D CreateVB2(len=0x%X) -> 0x%X", a, h);
     }
@@ -1712,7 +1724,7 @@ u32 __stdcall hook_D3D_CreateVB2(u32 a)
 u32 __stdcall hook_D3D_CreateIB2(u32 a)
 {
     static u32 calls;
-    u32 h = create_res2(a);
+    u32 h = create_res2(a, 1, (u32)(uintptr_t)_ReturnAddress());
     if (hlog_throttle(&calls)) {
         HLOG_T("D3D CreateIB2(len=0x%X) -> 0x%X", a, h);
     }

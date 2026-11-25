@@ -3,13 +3,16 @@
  *
  * Paket "SBRH" (little endian, Laenge exakt RBN_PKT_HEAD + nent * RBN_PKT_ENT):
  *   0  "SBRH"            4  ver = 1            5  Spielerindex (0..9, 0xFF unbekannt)
- *   6  Flags (b0 Wunsch, b1 in Mission, b2 Host-Entscheidung gueltig, b3 Auto gewuenscht (W447), Rest 0)  7  nent (0..4)
+ *   6  Flags (b0 Wunsch, b1 in Mission, b2 Host-Entscheidung gueltig, b3 Auto gewuenscht (W447), Rest 0)  7  nent (0..8)
  *   8  Kennung (!= 0)    12 Uhrzeit ms         16 Entscheidung: Folge   20 Alter der Entscheidung ms
  *   24 Entscheidung: Modus (0/1 LS/2 R2)   25 Verzoegerung (0 oder 1..8)   26 angewandter Modus (0/1/2)
  *   27 Lockstep-Grund RBN_WHY_* (W370; nur bei Lockstep-Entscheidung des Hosts), bei R2-Entscheidung W447 Profil
  *      RBN_PROF_* (0 fest, 1 Auto-Direkt, 2 Auto-Rollback), sonst 0
  *   28 angewandte Folge  32 Alter der eigenen Mission ms (0 = keine)
- *   je Eintrag: Kennung des Mitspielers, Echo seiner Uhrzeit, Haltezeit ms (u16), Flags (b0 Wunsch gesehen), 0 */
+ *   je Eintrag: Kennung des Mitspielers, Echo seiner Uhrzeit, Haltezeit ms (u16), Flags (b0 Wunsch gesehen),
+ *   W494: eigene Umlaufzeit zu diesem Mitspieler (Mittel + 2 Schwankung) in 8-ms-Schritten aufgerundet (1..255,
+ *   0 = noch nicht gemessen). Damit kennt jeder (v. a. der Host) die schlechteste Strecke im ganzen Netz, auch
+ *   zwischen zwei anderen Mitspielern (Lockstep braucht jede Eingabe bei jedem). */
 #include "loc_rbn.h"
 
 #include <stdio.h>
@@ -33,6 +36,7 @@ typedef struct {
     int rtt_ok;
     int dec_valid, dec_mode, dec_delay, dec_why; /* W370: dec_why = Lockstep-Grund des Hosts (Byte 27) */
     int dec_prof;             /* W447: Profil einer R2-Entscheidung (Byte 27) */
+    int far_eff;              /* W494: groesste gemeldete Umlaufzeit des Mitspielers zu Dritten (ms, -1 = keine) */
     u32 dec_seq, dec_at;      /* Zeitpunkt der Entscheidung in eigener Uhr (Empfang - Alter) */
     int app_mode;
     u32 app_seq, mis_at;      /* Missionsbeginn des Mitspielers in eigener Uhr (0 = keine) */
@@ -140,6 +144,10 @@ int rbn_rtt_max(const rbn_t *n, uint32_t now)
         eff = (int)(P->srtt + 2.0 * P->rttvar + 0.5); /* geglaettet + Schwankung (wie TCP) */
         if (eff > mx) mx = eff;
     }
+    for (i = 0; i < RBN_MAXPEER; i++) { /* W494: Strecken zwischen anderen Mitspielern (von ihnen gemeldet) */
+        const rbn_peer *P = &n->p[i];
+        if (fresh(P, now) && P->far_eff > mx) mx = P->far_eff;
+    }
     return mx;
 }
 
@@ -188,7 +196,13 @@ int rbn_tx(rbn_t *n, uint32_t now, int self, uint8_t *b, int cap)
         e[8] = (uint8_t)held;
         e[9] = (uint8_t)(held >> 8);
         e[10] = (uint8_t)(P->want ? 1 : 0);
-        e[11] = 0;
+        if (P->rtt_ok) { /* W494: eigene Umlaufzeit zu diesem Mitspieler, 8-ms-Schritte aufgerundet, 1..255 */
+            double eff = P->srtt + 2.0 * P->rttvar;
+            int q8 = (int)((eff + 7.999) / 8.0);
+            e[11] = (uint8_t)(q8 < 1 ? 1 : (q8 > 255 ? 255 : q8));
+        } else {
+            e[11] = 0;
+        }
         ne++;
     }
     b[7] = (uint8_t)ne;
@@ -231,7 +245,7 @@ int rbn_rx(rbn_t *n, uint32_t now, const uint8_t *b, int len, uint64_t src)
     if ((fl & 2) && !mage) goto bad;
     for (i = 0; i < ne; i++) {
         const uint8_t *e = b + RBN_PKT_HEAD + i * RBN_PKT_ENT;
-        if (e[11] || (e[10] & ~1) || rd16(e + 8) > HOLD_MAX || !rd32(e)) goto bad;
+        if ((e[10] & ~1) || rd16(e + 8) > HOLD_MAX || !rd32(e)) goto bad; /* W494: Byte 11 = RTT zum Eintrag */
     }
     if (nonce == n->nonce) { /* eigenes Paket (Rundruf) */
         n->st_.rx_self++;
@@ -266,9 +280,13 @@ int rbn_rx(rbn_t *n, uint32_t now, const uint8_t *b, int len, uint64_t src)
     P->ping_t = rd32(b + 12);
     P->ping_rx = now;
     P->ack_me = 0;
+    P->far_eff = -1;
     for (i = 0; i < ne; i++) {
         const uint8_t *e = b + RBN_PKT_HEAD + i * RBN_PKT_ENT;
-        if (rd32(e) != n->nonce) continue;
+        if (rd32(e) != n->nonce) {
+            if (e[11] && 8 * (int)e[11] > P->far_eff) P->far_eff = 8 * (int)e[11]; /* W494: Strecke zu einem Dritten */
+            continue;
+        }
         P->ack_me = e[10] & 1;
         { /* Umlaufzeit: jetzt - Echo - Haltezeit beim Mitspieler */
             u32 rtt = now - rd32(e + 4) - rd16(e + 8);

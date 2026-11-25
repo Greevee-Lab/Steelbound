@@ -1173,6 +1173,12 @@ int ui_visible_on(const uictl_t *u, int page)
     if (!u) { /* W201: edition-specific controls need not exist. */
         return 0;
     }
+    { /* W496 NET-TELEMETRY: Dialog "anonyme Netzwerkstatistik" offen = nur seine Knoepfe */
+        int nv = nrq_visible(u->id);
+        if (nv >= 0) {
+            return nv;
+        }
+    }
     { /* W470 LAUNCHER-HUB: Spiel-Navigation nur im Spielbereich, Reiter je Bereich */
         int hv = hub_visible(u->id, page);
         if (hv >= 0) {
@@ -2428,6 +2434,7 @@ static void compose(void)
     }
     hub_paint_nav(); /* W470: Bereichstitel ueber den Reitern (Optionen/steelnet) */
     hdr_paint_status(); /* W397: Kopf rechts (steelnet / neue Version) */
+    nrq_paint(); /* W496: Dialog ueber allem (Seite abgedunkelt) */
     /* Eingabefelder: Rahmen (Fokus = Akzent) */
     for (i = 0; i < g_ui_n; i++) {
         uictl_t *u = &g_ui[i];
@@ -2646,9 +2653,7 @@ int xexp_title_len(int id, const wchar_t *txt, int n1)
 
 /* W398 LAUNCHER-GAMESWITCH (Block vor hdr_paint_status) */
 void gametab_paint(canvas_t *c, const uictl_t *u, int w, int h, const wchar_t *txt, int n, int focus);
-int acc_link_id(int id);   /* W418: Aufklapper der Kontoseite */
-int acc_danger_id(int id); /* W418: Konto loeschen */
-void acc_link_paint(canvas_t *c, const uictl_t *u, int w, int h, const wchar_t *txt, int n, int focus, int dis);
+int acc_danger_id(int id); /* W418: Konto loeschen (W502: Aufklapper-Textlinks entfielen, alles echte Knoepfe) */
 void draw_item(const DRAWITEMSTRUCT *d)
 {
     uictl_t *u = ui_by_hwnd(d->hwndItem);
@@ -2824,10 +2829,6 @@ void draw_item(const DRAWITEMSTRUCT *d)
         int rad;
         if (gametab_id(u->id)) { /* W398: Wortmarken-Tab statt Knopf (kein Hintergrund) */
             gametab_paint(&c, u, w, h, txt, n, focus);
-            break;
-        }
-        if (acc_link_id(u->id)) { /* W418: Aufklapper als Textlink mit Pfeil (kein Hintergrund) */
-            acc_link_paint(&c, u, w, h, txt, n, focus, dis);
             break;
         }
         acc = u->kind == K_ACCENT || u->kind == K_BIG || (u->kind == K_SEG && u->checked);

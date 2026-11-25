@@ -20,10 +20,11 @@
 
 typedef uint32_t u32;
 
-#define NP_ROWS 5   /* W453: Netzmodus, Verzoegerung, schlechtester Ping, Modus/Sichtbarkeit, Host-Regel */
+#define NP_ROWS 6   /* W453: Netzmodus, Verzoegerung, schlechtester Ping, (W494 Hinweis weite Lobby), Modus/Sichtbarkeit, Host-Regel */
 #define NP_COLS 96
 #define NP_PING_OK 80   /* gruen bis hier: Grenze von Auto -> Direkt (loc_rbn.c direct_rtt, W447) */
 #define NP_PING_MID 150 /* gelb bis hier, darueber rot (wie W447: > 150 ms auffaellig) */
+#define NP_PING_FAR 250 /* W494 LOC-FARPING: ab hier Hinweis "Match wirkt verzoegert" (adaptive Verzoegerung > 3 Ticks) */
 
 /* ------------------------------------------------------------------ Schnappschuss (Spiel-Thread -> Render-Thread) */
 typedef struct np_snap {
@@ -149,6 +150,10 @@ void loc_netpanel_frame(unsigned f)
             np_lw("ovl.np_ping_unk", n.row[n.nrow], NP_COLS);
         }
         n.col[n.nrow++] = np_ping_col(ping);
+        if (ping > NP_PING_FAR) { /* W494: weite Lobby (z. B. AU-EU) - Spiel bleibt verbunden, reagiert aber spuerbar traeger */
+            np_lw("ovl.np_far", n.row[n.nrow], NP_COLS);
+            n.col[n.nrow++] = OVS_RGB_BAD;
+        }
         /* Zeile 4: Sim/Arcade (W440) und Sichtbarkeit der Lobby */
         np_lw(lm == LAS_ARCADE ? "ovl.nh_lm_arcade" : "ovl.nh_lm_sim", a, NP_COLS);
         np_lw(vis == 2 ? "ovl.np_vis_pub" : vis == 1 ? "ovl.np_vis_code" : "ovl.np_vis_lan", b, NP_COLS);

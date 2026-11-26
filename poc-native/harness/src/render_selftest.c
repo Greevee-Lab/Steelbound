@@ -41,6 +41,7 @@
 #include "render_interp_eye.h" /* W448 LOC-CHAFF-LOOK */
 #include "render_sblook.h" /* W459 LOC-FX-LIGHT */
 #include "render_bloomlag.h" /* W507 LOC-BLOOM-LAG */
+#include "loc_postscene.h" /* W509 DEBRIEF-BLOOM */
 #include "render_visqz.h" /* W477 SB-SUN-WHITEOUT */
 #include "render_locmenu.h" /* W377 LOC-MENU-FPS */
 #include "render_rq_exp.h" /* W383 LOC-GH-DATA (#62) */
@@ -2654,6 +2655,28 @@ static void test_bloomlag(void)
     g_fail += fail;
 }
 
+/* ---------- W509 DEBRIEF-BLOOM: Szene der LoC-Nachbearbeitung nach dem Missionsende (loc_postscene.h) ----------
+ * Lockstep-Maske steht im Debriefing noch; Cockpit-Szene nur, solange die Missionsschleife laeuft (Zaehler 0 oder
+ * Abblende laeuft). Replay/Demo ohne Lockstep-Mission unveraendert. */
+static void test_postscene(void)
+{
+    int n = 0, fail = 0;
+    n++; if (lps_scene(1, 0u, 0u, 0u) != 1) { fail++; }       /* Mission laeuft */
+    n++; if (lps_scene(1, 0u, 60u, 0u) != 1) { fail++; }      /* Laenge von der letzten Mission, Zaehler zurueckgesetzt */
+    n++; if (lps_scene(1, 1u, 60u, 0u) != 1) { fail++; }      /* TIME UP: Abblende beginnt, Missionsbild */
+    n++; if (lps_scene(1, 59u, 60u, 0u) != 1) { fail++; }     /* letztes Bild der Abblende */
+    n++; if (lps_scene(1, 60u, 60u, 0u) != 0) { fail++; }     /* Schleife beendet -> Debriefing ohne Cockpit-Effekte */
+    n++; if (lps_scene(1, 60u, 60u, 1u) != 0) { fail++; }     /* auch mit stehendem Replay-Wort */
+    n++; if (lps_scene(1, 1u, 1u, 0u) != 0) { fail++; }       /* Abblende 1 Bild */
+    n++; if (lps_scene(0, 60u, 60u, 1u) != 2) { fail++; }     /* Replay-Viewer/Demo ohne Lockstep: wie bisher */
+    n++; if (lps_scene(0, 0u, 0u, 1u) != 2) { fail++; }
+    n++; if (lps_scene(0, 0u, 0u, 0u) != 0) { fail++; }       /* Menue/Lobby */
+    n++; if (lps_scene(0, 60u, 60u, 0u) != 0) { fail++; }
+    n++; if (lps_mission_over(0u, 0u) || !lps_mission_over(2u, 1u)) { fail++; }
+    printf("POSTSCENE (W509): %d Faelle (Mission, Abblende, Debriefing, Replay, Menue): %d Fehler\n", n, fail);
+    g_fail += fail;
+}
+
 /* ---------- W352 ISSUE-EMP: Linien-Band-GS (line_scale) ----------
  * Spiel-Viewport 16x16 (logisch) auf 64x64 (Faktor 4): Linie mit und ohne
  * GS rastern, gezaehlte Pixel gegen Laenge x Breite (1 Xbox-Pixel = 4 px). */
@@ -3276,6 +3299,7 @@ int main(int argc, char **argv)
     test_eye448(); /* W448 */
     test_sblook(); /* W459 */
     test_bloomlag(); /* W507 */
+    test_postscene(); /* W509 */
     test_visqz(); /* W477 */
     test_linescale();
     test_shref();

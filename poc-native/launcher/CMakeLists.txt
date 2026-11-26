@@ -151,6 +151,11 @@ add_custom_target(lang_check ALL
 if(SB_EDITION_COMMUNITY)
   target_compile_definitions(sb_launcher PRIVATE SB_EDITION_COMMUNITY=1)
   target_link_options(sb_launcher PRIVATE "/PDBALTPATH:%_PDB%")
+  # W513 DEFENDER: Release-Launcher mit vollstaendiger PDB wie sb_emu (W279). Bisher fehlte
+  # sb_launcher.pdb (keep_pdbs listet sie, Launcher-Abstuerze waren nicht aufloesbar) und die Exe hatte
+  # keinen CodeView-Eintrag. /OPT:REF,ICF ausdruecklich, weil /DEBUG sonst NOREF/NOICF setzt (Code bleibt gleich).
+  target_compile_options(sb_launcher PRIVATE /Zi)
+  target_link_options(sb_launcher PRIVATE /DEBUG:FULL /OPT:REF /OPT:ICF)
   if(SB_LOC_PLAY)
     target_compile_definitions(sb_launcher PRIVATE SB_LOC_PLAY=1)
   endif()

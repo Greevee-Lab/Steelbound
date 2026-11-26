@@ -154,6 +154,7 @@ static unsigned g_th_smiss_total, g_th_smiss_frames, g_th_smiss_max, g_th_smiss_
 static unsigned g_th_now_f;
 static float g_th_gl_now, g_th_gl_max, g_th_gl_gain;
 static unsigned g_th_gl_max_f, g_th_gl_frames, g_th_gl_last_f;
+static float g_th_gl_c0; /* W511: Umgebungslicht C0 [0x358250] beim Maximum der Blendung */
 static float g_th_gl2_now, g_th_gl2_max; /* W477: Blendung zweiter Pass [0x351684] (FRONT VIEW) */
 
 static void th_note(unsigned stage, unsigned xptr, unsigned why, unsigned present)
@@ -267,7 +268,9 @@ void sb_th_device(ID3D11Device *dev, int driver_cmdlists, int warp)
 void sb_th_present(unsigned present)
 {
     g_th_now_f = present;
-    if (!g_sba_loc && sb_in_mission()) { /* W360: Sonnenblendung des Spiels (nur SB, nur Mission) */
+    /* W360: Sonnenblendung des Spiels (nur SB). W511: auch Titel-Demo und Replays (Szene 0x2C + Missionsschleife);
+     * bisher nur sb_in_mission() -> ein F11-Paket aus Demo/Replay zeigte immer 0, auch waehrend der Blendung. */
+    if (!g_sba_loc && sb_state_mission_or_demo()) {
         float gl = 0.0f, gn = 0.0f;
         __try {
             gl = *(volatile float *)(uintptr_t)SBA(0x356D58u);
@@ -276,7 +279,10 @@ void sb_th_present(unsigned present)
         if (!(gl >= 0.0f && gl <= 16.0f)) { gl = 0.0f; } /* NaN/Unsinn */
         if (!(gn >= -16.0f && gn <= 16.0f)) { gn = 0.0f; }
         g_th_gl_now = gl;
-        if (gl > g_th_gl_max) { g_th_gl_max = gl; g_th_gl_max_f = present; g_th_gl_gain = gn; }
+        if (gl > g_th_gl_max) {
+            g_th_gl_max = gl; g_th_gl_max_f = present; g_th_gl_gain = gn;
+            __try { g_th_gl_c0 = *(volatile float *)(uintptr_t)SBA(0x358250u); } __except (EXCEPTION_EXECUTE_HANDLER) { g_th_gl_c0 = 0.0f; } /* W511 */
+        }
         if (gl >= 0.5f) { g_th_gl_frames++; }
         if (gl > 0.0f) { g_th_gl_last_f = present; }
         { float g2 = 0.0f; /* W477 SB-SUN-WHITEOUT */
@@ -373,10 +379,21 @@ void sb_th_format(char *o, size_t cap, int live)
         }
         u = strlen(o);
         _snprintf_s(o + u, cap - u, _TRUNCATE,
-                    "%s\r\nsun glare (W360): vis_ztest=%d now=%.2f max=%.2f (present %u, ambient gain %.2f) "
+                    "%s\r\nsun glare (W360): vis_ztest=%d now=%.2f max=%.2f (present %u, ambient gain %.2f, ambient %.3f) "
                     "frames>=0.5: %u last>0: present %u",
-                    n ? "" : " none", g_cfg.vis_ztest, g_th_gl_now, g_th_gl_max, g_th_gl_max_f, g_th_gl_gain,
+                    n ? "" : " none", g_cfg.vis_ztest, g_th_gl_now, g_th_gl_max, g_th_gl_max_f, g_th_gl_gain, g_th_gl_c0,
                     g_th_gl_frames, g_th_gl_last_f);
+        { /* W511 SB-SUN-WHITEOUT: Ergebnisse der Sonnen-Sichtbarkeitstests (Hauptpass / FRONT VIEW), GPU-Notausgaenge */
+            extern void sb_visq_sun_stats(unsigned *tests, unsigned *vis, unsigned *vis_f, unsigned *timeouts, unsigned *odd,
+                                          unsigned *oddmax, unsigned *made);
+            unsigned st[2] = { 0, 0 }, sv[2] = { 0, 0 }, sf[2] = { 0, 0 }, sto = 0, sodd = 0, smax = 0, smade = 0;
+            sb_visq_sun_stats(st, sv, sf, &sto, &sodd, &smax, &smade);
+            u = strlen(o);
+            _snprintf_s(o + u, cap - u, _TRUNCATE,
+                        " sun tests (W511): main visible=%u/%u (last present %u) front view visible=%u/%u (last present %u) gpu timeouts=%u "
+                        "impossible (more than 1 pixel)=%u max=%u queries=%u fresh=%d",
+                        sv[1], st[1], sf[1], sv[0], st[0], sf[0], sto, sodd, smax, smade, g_cfg.vis_query_fresh);
+        }
         u = strlen(o);
         _snprintf_s(o + u, cap - u, _TRUNCATE,
                     "\r\nstage 1-3 sampled without texture set (ISSUE44): %u in %u frames, last present %u st%u ps=0x%X",

@@ -42,7 +42,8 @@ int loc_render_interp_mission(void);
 int loc_render_tick_hz(void);
 /* W465 LOC-ENHANCED: Szene fuer die Endbild-Nachbearbeitung (render_shfx.c): 1 = Cockpit-Mission (Lockstep aktiv,
  * eigener VT abgesetzt, nicht Karte), 2 = Replay/Aussenkamera/Demo (Welt im Backbuffer, [0x306BA8] != 0), 0 = sonst
- * (Menues, Lobby, Karte) -> keine Nachbearbeitung. */
+ * (Menues, Lobby, Karte) -> keine Nachbearbeitung. W509: nach dem Missionsende (Ergebnis, Debriefing) 0, obwohl die
+ * Lockstep-Maske noch steht (loc_postscene.h). */
 int loc_render_post_scene(void);
 /* W465: 1 = LoC 4:3 mit vollem Hor+ -> Spiel-Komposition (Welt im BB) auf volle Breite (loc_horp_comp, Standard 1). */
 int loc_render_horp_full(void);

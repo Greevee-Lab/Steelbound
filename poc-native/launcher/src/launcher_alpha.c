@@ -930,7 +930,11 @@ static int st_dir_empty(const char *u8)
     return empty && st_exists(u8);
 }
 
-/* Verzeichnis-Verknuepfung (Junction) link -> target; 1 = angelegt. */
+/* Verzeichnis-Verknuepfung (Junction) link -> target; 1 = angelegt.
+ * W513 DEFENDER: nur Selbsttest. Release-Builds (SB_VERSION gesetzt, ohne SB_TEST_HOOKS) enthalten das
+ * Anlegen per FSCTL_SET_REPARSE_POINT nicht (typisches Heuristik-Merkmal); der Fall W272 c meldet dort
+ * "uebersprungen", die Schutzpruefung selbst laeuft unveraendert. */
+#if defined(SB_TEST_HOOKS) && SB_TEST_HOOKS
 typedef struct {
     DWORD tag;
     WORD len, res;
@@ -977,6 +981,14 @@ static int st_junction(const char *link_u8, const char *target_u8)
     }
     return ok ? 1 : 0;
 }
+#else
+static int st_junction(const char *link_u8, const char *target_u8)
+{
+    (void)link_u8;
+    (void)target_u8;
+    return 0; /* Release-Build: Junction-Teilfall uebersprungen (W513) */
+}
+#endif
 
 static void st_rmtree(const char *u8)
 {

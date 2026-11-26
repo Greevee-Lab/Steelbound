@@ -395,6 +395,7 @@ typedef struct {
     int screenshot_frame; /* 0 = aus, sonst BMP bei Frame N */
     int screenshot_every; /* 0 = 3 Shots (N/N+500/N+1000), sonst Intervall */
     int screenshot_max;   /* Deckel fuer screenshot_every-Shots (Default 400) */
+    int demo_shot_from, demo_shot_to, demo_shot_step; /* DIAG(SB-SUN-WHITEOUT,W511): Bilder relativ zum Beginn jeder Titel-Demo/jedes Replays (Szene 0x2C, Bild from..to, alle step; Name demoK_OFFSET) + Zeile DEMOSHOT (Blendung, C0); step 0 = aus */
     int screenshot_jpg;   /* 1 = JPG (WIC, ~0,4 MB), 0 = BMP (~11 MB) */
     int memscan_every;    /* DIAG(MEMSCAN): .data-Snapshot alle N Frames, 0 = aus */
     /* [audio] */
@@ -756,6 +757,7 @@ typedef struct {
     int shadow_soft;    /* SHADER-OPT2 (W131, nur shading=1;shade_shadow=1): 1 = 3x3-Gauss-PCF (Hypothese NV2A GAUSSIANCUBIC, weichere Kante), 0 = 2x2-PCF (bisher) */
     int hud_label_avoid; /* HUD-LABEL-OPT (W153): 1 = Ziel-Etikett weicht RELOAD/MAIN aus (nur bei Ueberlappung, sonst Originalstelle; wirkt ab Neustart), 0 = Original (kein Patch) */
     int vis_query_async; /* SHADER-OPT2 (W131, Leistung): 1 = Sonnentest liefert das letzte fertige Ergebnis statt blockierend zu warten (1 Bild Latenz), erstes Ergebnis blockierend; 0 = blockierend (bisher) */
+    int vis_query_fresh; /* FIX(SB-SUN-WHITEOUT,W511): 1 = Query-Objekte erst wiederverwenden, wenn die GPU ihr letztes Ergebnis fertig hat (sonst lieferten langsame GPUs/WARP fremde Pixelzahlen fuer den Sonnentest -> Blendung, weisser Hauptmonitor), 0 = alt (sofort wiederverwenden) */
     int bb_depth_srv;   /* SHADER-OPT2 (W131): 1 = Backbuffer-Tiefe typlos mit SRV anlegen (fuer ssao, sonst automatisch bei ssao>0); 0 = nur bei Bedarf */
     int ssao_view;      /* DIAG(SHADER-OPT2,W131): 1 = Endbild zeigt die SSAO-Verdeckung (Grauwert) statt des Bildes */
     int shfx_ab;        /* DIAG(SHADE-FX,W121): 1 = Screenshot-Bild mit Original-Werten, Partnerbild (+1) mit den Optionen, dazu <shot>_fx (gleiches Bild + Cockpit-Nachbearbeitung) */
@@ -822,6 +824,7 @@ typedef struct {
     int game_menu;              /* 1 = ESC oeffnet zuerst das Spielmenue (Weiter/Einstellungen/Fotomodus/Feedback/Beenden), 0 = ESC direkt in die Einstellungen (W118) */
     int pause_net;              /* W357 LOC-PAUSE-NET: 0 = aus (Pause wie bisher), 1 = im LoC-Netzspiel kein Anhalten (Standard), 2 = TEST: immer wie im Netzspiel */
     int menu_pause;             /* 1 = offenes ESC-Menue pausiert das Spiel (Spieler-Standard), 0 = Spiel laeuft dahinter weiter (Live-Vorschau) */
+    int keep_display_on;        /* #113: 1 = SetThreadExecutionState(ES_CONTINUOUS|ES_DISPLAY_REQUIRED|ES_SYSTEM_REQUIRED) solange der Client laeuft (nicht bei unsichtbaren Testlaeufen), 0 = aus */
     int esc_debug;              /* W291 ESC-REWORK: 1 = ESC-Gruppe "Debug" (Drahtgitter, Vaporwave, Sonnentest, Vergleich B) zeigen; der Launcher setzt es je Start aus alpha_tools, Standard 0 */
     int pause_live;             /* W193 PAUSE-LIVE: 1 = Standbild der Pause aus der FPS-INTERP-Aufzeichnung mit den aktuellen Einstellungen neu zeichnen, 0 = W188 (Kopie) */
     char menu_peek_key[16];     /* W193: Taste "Menue kurz ausblenden" (gedrueckt halten), Tastenname wie in Profilen; leer/OFF = aus */

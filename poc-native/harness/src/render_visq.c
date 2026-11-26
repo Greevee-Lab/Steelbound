@@ -92,21 +92,58 @@ int sb_visq_active(void)
            (g_sba_loc && g_cfg.loc_visq == 1); /* W297: LoC-Mission (Sichtbarkeit der Objekte) */
 }
 
+/* FIX(SB-SUN-WHITEOUT,W511) vis_query_fresh: Query-Objekte erst wiederverwenden, wenn die GPU ihr letztes
+ * Ergebnis fertig hat. Bisher ging jedes Objekt direkt nach End (Objekt-Culling, ~100 je Bild) bzw. beim
+ * Verwerfen aus dem Ring zurueck in den Pool und wurde sofort fuer den naechsten Begin genommen - auch fuer den
+ * Sonnentest. Laeuft die GPU hinterher (WARP, langsame AMD-Karten), lieferte der Treiber fuer den neuen Test
+ * Pixelzahlen eines frueheren Tests desselben Objekts: W511_w4 (WARP) Sonnentest n=32..225 bei Testpunkt
+ * ausserhalb des Bildes (NV2A: 0 oder 1), NVIDIA 0 in allen Laeufen. Mit Sonne nahe der Bildmitte baut das
+ * Spiel daraus die volle Blendung auf (Umgebungslicht x4, weisser Hauptmonitor, Tester-Clip RX 570).
+ * Neu: zurueckgegebene Objekte warten in einer FIFO, genommen wird nur das aelteste, wenn GetData es als
+ * fertig meldet; sonst ein neues Objekt. Ergebnisse auf schnellen GPUs unveraendert. 0 = alt. */
+#define VISQ_PEND 4096u
+/* W511: GPU-Notausgang (250 ms ohne Ergebnis): bisher "sichtbar" (1) -> unter WARP/haengender GPU Sonnen-Flare bzw.
+ * Blendung aus einem Test, der nie gezaehlt wurde (W511_w5: Flare-Test 262 ms, n=1). Gilt nur fuer echte Tests
+ * (Sonne, Flares); mit vis_query_fresh jetzt 0 = keine Blendung, kein Flare in diesem Bild. */
+#define VISQ_TIMEOUT_N (g_cfg.vis_query_fresh ? 0u : 1u)
+static ID3D11Query *g_vq_pend[VISQ_PEND];
+static unsigned g_vq_pend_head, g_vq_pend_n, g_vq_made, g_vq_pend_drop;
 static ID3D11Query *visq_take(void)
 {
     D3D11_QUERY_DESC qd;
     ID3D11Query *q = NULL;
-    if (g_vq_nfree) { return g_vq_free[--g_vq_nfree]; }
+    if (g_cfg.vis_query_fresh && g_ctx) {
+        if (g_vq_pend_n) {
+            ID3D11Query *o = g_vq_pend[g_vq_pend_head];
+            if (ID3D11DeviceContext_GetData(g_ctx, (ID3D11Asynchronous *)o, NULL, 0, D3D11_ASYNC_GETDATA_DONOTFLUSH) == S_OK) {
+                g_vq_pend_head = (g_vq_pend_head + 1u) % VISQ_PEND;
+                g_vq_pend_n--;
+                return o;
+            }
+        }
+    } else if (g_vq_nfree) { return g_vq_free[--g_vq_nfree]; }
     if (!g_dev) { return NULL; }
     qd.Query = D3D11_QUERY_OCCLUSION;
     qd.MiscFlags = 0;
     if (FAILED(ID3D11Device_CreateQuery(g_dev, &qd, &q))) { return NULL; }
+    g_vq_made++;
     return q;
 }
 
 static void visq_give(ID3D11Query *q)
 {
     if (!q) { return; }
+    if (g_cfg.vis_query_fresh) {
+        if (g_vq_pend_n == VISQ_PEND) { /* voll: aeltestes freigeben (D3D11 erlaubt Release laufender Queries) */
+            ID3D11Query_Release(g_vq_pend[g_vq_pend_head]);
+            g_vq_pend_head = (g_vq_pend_head + 1u) % VISQ_PEND;
+            g_vq_pend_n--;
+            g_vq_pend_drop++;
+        }
+        g_vq_pend[(g_vq_pend_head + g_vq_pend_n) % VISQ_PEND] = q;
+        g_vq_pend_n++;
+        return;
+    }
     if (g_vq_nfree < VISQ_POOL) { g_vq_free[g_vq_nfree++] = q; }
     else { ID3D11Query_Release(q); }
 }
@@ -138,6 +175,16 @@ static unsigned g_vqz_n, g_vqz_onscr;
 void sb_visq_stats(unsigned *tests, unsigned *vis, unsigned *zfar, unsigned *zfar_on)
 {
     *tests = g_vqf_tests; *vis = g_vqf_vis; *zfar = g_vqz_n; *zfar_on = g_vqz_onscr;
+}
+/* W511 SB-SUN-WHITEOUT: Sonnentests je Pass (0 = zweiter Pass 0x3FFE, 1 = Hauptpass 0x3FFF), davon sichtbar,
+ * Bild des letzten sichtbaren, GPU-Wartezeit-Notausgaenge (Ergebnis dann "sichtbar"). Fuer F11. */
+static unsigned g_vqs_tests[2], g_vqs_vis[2], g_vqs_vis_f[2], g_vqs_odd, g_vqs_max;
+void sb_visq_sun_stats(unsigned *tests, unsigned *vis, unsigned *vis_f, unsigned *timeouts, unsigned *odd, unsigned *oddmax,
+                       unsigned *made)
+{
+    unsigned s;
+    for (s = 0; s < 2u; s++) { tests[s] = g_vqs_tests[s]; vis[s] = g_vqs_vis[s]; vis_f[s] = g_vqs_vis_f[s]; }
+    *timeouts = g_vq_timeouts; *odd = g_vqs_odd; *oddmax = g_vqs_max; *made = g_vq_made;
 }
 int sb_visq_zfar(im_vertex_t *v, unsigned n, int rhw, unsigned prim)
 {
@@ -304,6 +351,13 @@ void sb_visq_end(unsigned index)
             HLOG_W("VISQ fend f=%u idx=0x%X draws=%u im_bild=%d (%u) %s", g_present_no, index, g_vq_ndraw, g_vq_onscr, nfin, g_vq_dd);
         }
     }
+    if (g_cfg.vis_diag && index >= 0x3FFEu) { /* DIAG(W511): Sonnentest-Draw (Position, rhw, Tiefe, Ziel) */
+        static unsigned nse;
+        if (nse < 400u || (g_present_no % 300u) == 0u) {
+            nse++;
+            HLOG_W("VISQ send f=%u idx=0x%X draws=%u im_bild=%d %s", g_present_no, index, g_vq_ndraw, g_vq_onscr, g_vq_dd);
+        }
+    }
     g_vq_dd[0] = 0; g_vq_onscr = 0;
     g_vq_cur = NULL;
     if (g_tb_on && index >= 0x3FFEu) { g_vq_endq[index & 1u] = tb_now(); g_vq_endf[index & 1u] = g_present_no; } /* DIAG(TICK-PERF,W125) */
@@ -348,7 +402,7 @@ int sb_visq_result(unsigned index, unsigned *out)
                 YieldProcessor();
             }
             TB_END(TB_VISQ, tbq);
-            g_vqa_last[sidx] = hr == S_OK ? (m > 0xFFFFFFFFull ? 0xFFFFFFFFu : (unsigned)m) : 1u;
+            g_vqa_last[sidx] = hr == S_OK ? (m > 0xFFFFFFFFull ? 0xFFFFFFFFu : (unsigned)m) : VISQ_TIMEOUT_N; /* W511 */
             g_vqa_have[sidx] = 1;
             vqa_drop_older(sidx, g_vqa_n[sidx]);
             g_vqa_block++;
@@ -404,23 +458,29 @@ int sb_visq_result(unsigned index, unsigned *out)
         if (visq_flare_idx(index)) { /* W304 */
             LARGE_INTEGER fq1;
             QueryPerformanceCounter(&fq1);
-            visq_flare_stat(index, hr == S_OK ? (n ? 1u : 0u) : 1u, 0, fq1.QuadPart - fq0.QuadPart);
+            visq_flare_stat(index, hr == S_OK ? (n ? 1u : 0u) : VISQ_TIMEOUT_N, 0, fq1.QuadPart - fq0.QuadPart);
         }
     }
     sb_ctx_leave();
-    if (hr != S_OK) { n = 1; }
+    if (hr != S_OK) { n = VISQ_TIMEOUT_N; } /* W511: mit vis_query_fresh 0 statt "sichtbar" */
 done:
     *out = n > 0xFFFFFFFFull ? 0xFFFFFFFFu : (unsigned)n;
     g_vq_ncalls++;
+    if (index >= 0x3FFEu) { /* W511: Zaehler fuer F11 (Sonnentests je Pass, davon sichtbar) */
+        g_vqs_tests[index & 1u]++;
+        if (*out) { g_vqs_vis[index & 1u]++; g_vqs_vis_f[index & 1u] = g_present_no; }
+        if (*out > 1u) { g_vqs_odd++; if (*out > g_vqs_max) { g_vqs_max = *out; } } /* ein Punkt: NV2A 0 oder 1 */
+    }
     if (g_cfg.vis_diag && index >= 0x3FFEu) { /* Sonne: Ergebnis + Blendung (Hauptpass 0x3FFF, zweiter Pass 0x3FFE) */
-        static unsigned nsun[2], lastf[2];
+        static unsigned nsun[2], lastf[2], nhot;
         unsigned s = index & 1u;
-        if (nsun[s] < 120u || g_present_no - lastf[s] >= 300u) {
-            float fl[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
-            /* W337: + Sonnen-Elevation/-Azimut (FUN_0001D8F0) */
-            static const unsigned ad[8] = { 0x356D58u, 0x351684u, 0x357DCCu, 0x357DD0u, 0x311590u, 0x31158Cu, 0x352110u, 0x352168u };
-            unsigned q;
-            for (q = 0; q < 8u; q++) { __try { fl[q] = *(volatile float *)(uintptr_t)SBA(ad[q]); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+        float fl[8] = { 0, 0, 0, 0, 0, 0, 0, 0 };
+        /* W337: + Sonnen-Elevation/-Azimut (FUN_0001D8F0) */
+        static const unsigned ad[8] = { 0x356D58u, 0x351684u, 0x357DCCu, 0x357DD0u, 0x311590u, 0x31158Cu, 0x352110u, 0x352168u };
+        unsigned q;
+        for (q = 0; q < 8u; q++) { __try { fl[q] = *(volatile float *)(uintptr_t)SBA(ad[q]); } __except (EXCEPTION_EXECUTE_HANDLER) {} }
+        /* W511: jedes Bild mit Treffer oder Blendung > 0 (gedeckelt), sonst wie bisher */
+        if (nsun[s] < 120u || g_present_no - lastf[s] >= 300u || ((*out || fl[0] > 0.0f || fl[1] > 0.0f) && nhot++ < 4000u)) {
             nsun[s]++; lastf[s] = g_present_no;
             HLOG_W("VISQ sun f=%u idx=0x%X n=%u blend356D58=%.4f blend351684=%.4f pos357DCC=(%.4f,%.4f) a311590=%.4f b31158C=%.4f elev=%.4f azim=%.4f",
                    g_present_no, index, *out, fl[0], fl[1], fl[2], fl[3], fl[4], fl[5], fl[6], fl[7]);

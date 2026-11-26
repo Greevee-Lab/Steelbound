@@ -1446,6 +1446,29 @@ static void sb_render_present_body(unsigned flags)
         char wnm[48];
         if (loc_lobbywidget_shot_due(wnm, sizeof wnm)) { sb_render_shot_name(wnm, NULL); }
     }
+    if (g_cfg.demo_shot_step > 0 && !g_sba_loc && !g_swap_res) { /* DIAG(SB-SUN-WHITEOUT,W511): Bilder relativ zum Demo-/Replay-Beginn */
+        extern int sb_state_mission_or_demo(void);
+        static unsigned ds_k, ds_start;
+        static int ds_in;
+        int in = sb_state_mission_or_demo();
+        if (in && !ds_in) { ds_k++; ds_start = n_present; }
+        ds_in = in;
+        if (in) {
+            unsigned off = n_present - ds_start;
+            if (off >= (unsigned)g_cfg.demo_shot_from && off <= (unsigned)g_cfg.demo_shot_to &&
+                (off - (unsigned)g_cfg.demo_shot_from) % (unsigned)g_cfg.demo_shot_step == 0u) {
+                char dnm[40];
+                float gl = 0.0f, g2 = 0.0f, c0 = 0.0f;
+                __try {
+                    gl = *(volatile float *)(uintptr_t)SBA(0x356D58u); g2 = *(volatile float *)(uintptr_t)SBA(0x351684u);
+                    c0 = *(volatile float *)(uintptr_t)SBA(0x358250u);
+                } __except (EXCEPTION_EXECUTE_HANDLER) {}
+                _snprintf_s(dnm, sizeof dnm, _TRUNCATE, "demo%u_%05u", ds_k, off);
+                HLOG_I("DEMOSHOT %s f=%u glare=%.4f glare2=%.4f c0=%.4f", dnm, n_present, gl, g2, c0);
+                sb_render_shot_name(dnm, NULL);
+            }
+        }
+    }
     if (g_cfg.screenshot_frame > 0 &&
         n_present >= (unsigned)g_cfg.screenshot_frame) {
         if (g_cfg.screenshot_every > 0) {

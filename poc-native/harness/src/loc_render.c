@@ -14,6 +14,7 @@
 #include "loc_lobbywidget.h" /* W460 */
 #include "render_qa.h" /* W358: g_rq_active */
 #include "render_sblook.h" /* W459 */
+#include "loc_postscene.h" /* W509 */
 
 unsigned g_loc_draws;
 static unsigned s_prev_draws;
@@ -547,11 +548,22 @@ int loc_render_interp_mission(void)
 int loc_render_post_scene(void)
 {
     extern int loc_mouse_mission(void); /* loc_pad.c */
-    unsigned rep = 0;
+    static int last = -1;
+    unsigned rep = 0, ec = 0, el = 0;
+    int m, s;
     if (!g_sba_loc) { return 0; }
-    if (loc_mouse_mission()) { return 1; }
-    __try { rep = *(volatile const unsigned *)(uintptr_t)0x306BA8u; } __except (EXCEPTION_EXECUTE_HANDLER) { rep = 0; }
-    return rep ? 2 : 0;
+    m = loc_mouse_mission();
+    __try {
+        rep = *(volatile const unsigned *)(uintptr_t)0x306BA8u;
+        ec = *(volatile const unsigned *)(uintptr_t)LPS_END_CTR; /* W509: Missionsende-Zaehler (nur lesen) */
+        el = *(volatile const unsigned *)(uintptr_t)LPS_END_LEN;
+    } __except (EXCEPTION_EXECUTE_HANDLER) { rep = 0; ec = 0; el = 0; }
+    s = lps_scene(m, ec, el, rep); /* W509 DEBRIEF-BLOOM: nach dem Missionsende (Debriefing) keine Cockpit-Szene */
+    if (s != last) {
+        HLOG_I("LOCPOST: Szene %d -> %d (Mission=%d Ende=%u/%u Replay=%u f=%u)", last, s, m, ec, el, rep, g_present_no);
+        last = s;
+    }
+    return s;
 }
 
 int loc_render_tick_hz(void)

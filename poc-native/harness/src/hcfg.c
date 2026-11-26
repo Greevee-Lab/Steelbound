@@ -510,6 +510,7 @@ void hcfg_defaults(void)
     g_cfg.game_menu = 1;                /* W188: ESC = Spielmenue */
     g_cfg.pause_net = 1;                /* W357 LOC-PAUSE-NET */
     g_cfg.menu_pause = 1;               /* W188: ESC-Menue pausiert */
+    g_cfg.keep_display_on = 1;          /* #113: Bildschirm bleibt waehrend des Spiels an */
     g_cfg.pause_live = 1;               /* W193: Standbild der Pause live neu zeichnen */
     strcpy_s(g_cfg.menu_peek_key, sizeof g_cfg.menu_peek_key, "H"); /* W193: H halten = Menue ausblenden */
     g_cfg.orig_hint = 0;                /* W278 ORIG-FLAG: Start-Hinweis aus (Spieler-cfg/Launcher setzen 1) */
@@ -643,6 +644,7 @@ void hcfg_defaults(void)
     g_cfg.shadow_soft = 0;
     g_cfg.hud_label_avoid = 0; /* W153 HUD-LABEL-OPT: Standard Original (kein Patch) */
     g_cfg.vis_query_async = 1; /* W138: Standard (W137 §4: Kampf p99 10,44 -> 9,63; 1 Bild Latenz der Blendung) */
+    g_cfg.vis_query_fresh = 1; /* W511 SB-SUN-WHITEOUT */
     g_cfg.bb_depth_srv = 0;
     g_cfg.ssao_view = 0;
     g_cfg.shfx_ab = 0;
@@ -878,6 +880,7 @@ static int set_key_overlay(const char *k, const char *v)
     else if (strcmp(k, "bink_pause") == 0) { g_cfg.bink_pause = atoi(v); }
     else if (strcmp(k, "pause_diag") == 0) { g_cfg.pause_diag = atoi(v); }
     else if (strcmp(k, "menu_pause") == 0) { g_cfg.menu_pause = atoi(v); } /* W188 */
+    else if (strcmp(k, "keep_display_on") == 0) { g_cfg.keep_display_on = atoi(v) ? 1 : 0; } /* #113 */
     else if (strcmp(k, "pause_net") == 0) { g_cfg.pause_net = atoi(v); } /* W357 */
     else if (strcmp(k, "esc_debug") == 0) { g_cfg.esc_debug = atoi(v) != 0; } /* W291 */
     else if (strcmp(k, "pause_live") == 0) { g_cfg.pause_live = atoi(v); } /* W193 */
@@ -2439,6 +2442,8 @@ static void set_key_b(const char *k, const char *v)
         g_cfg.shadow_soft = atoi(v);
     } else if (strcmp(k, "hud_label_avoid") == 0) { /* HUD-LABEL-OPT (W153) */
         g_cfg.hud_label_avoid = atoi(v);
+    } else if (strcmp(k, "vis_query_fresh") == 0) { /* FIX(SB-SUN-WHITEOUT,W511) */
+        g_cfg.vis_query_fresh = atoi(v);
     } else if (strcmp(k, "vis_query_async") == 0) {
         g_cfg.vis_query_async = atoi(v);
     } else if (strcmp(k, "bb_depth_srv") == 0) {
@@ -2521,6 +2526,12 @@ static void set_key_b(const char *k, const char *v)
         g_cfg.screenshot_frame = atoi(v);
     } else if (strcmp(k, "screenshot_every") == 0) {
         g_cfg.screenshot_every = atoi(v);
+    } else if (strcmp(k, "demo_shot_from") == 0) { /* DIAG(W511) */
+        g_cfg.demo_shot_from = atoi(v);
+    } else if (strcmp(k, "demo_shot_to") == 0) {
+        g_cfg.demo_shot_to = atoi(v);
+    } else if (strcmp(k, "demo_shot_step") == 0) {
+        g_cfg.demo_shot_step = atoi(v);
     } else if (strcmp(k, "screenshot_max") == 0) {
         g_cfg.screenshot_max = atoi(v);
     } else if (strcmp(k, "replay_autoplay") == 0) { /* W254 REPLAY-LAUNCHER */

@@ -1994,6 +1994,17 @@ __declspec(dllexport) void __stdcall sb_emulate(void)
         HLOG_E("watchdog-Thread nicht erstellbar (GLE=%lu)", GetLastError());
     }
 
+    /* #113: Bildschirm und System waehrend des Spiels wach halten (Gamepad/Controller zaehlen fuer Windows nicht als
+     * Aktivitaet). Der Haupt-Thread lebt bis zum Prozessende (Schleife unten), ES_CONTINUOUS gilt solange; beim
+     * Beenden faellt die Anforderung mit dem Prozess weg. Unsichtbare Testlaeufe und --run-seconds setzen nichts. */
+    if (g_cfg.keep_display_on && !g_cfg.window_hidden && g_run_seconds <= 0) {
+        EXECUTION_STATE es = SetThreadExecutionState(ES_CONTINUOUS | ES_DISPLAY_REQUIRED | ES_SYSTEM_REQUIRED);
+        HLOG_I("DISPLAY: Bildschirm bleibt waehrend des Spiels an (keep_display_on=1, vorher 0x%lX%s)",
+               (unsigned long)es, es ? "" : ", Aufruf fehlgeschlagen");
+    } else {
+        HLOG_I("DISPLAY: keep_display_on=%d (window_hidden=%d run_seconds=%d) - Windows-Energieeinstellungen gelten",
+               g_cfg.keep_display_on, g_cfg.window_hidden, (int)g_run_seconds);
+    }
     HLOG_I("== Entry 0x%X wird aufgerufen ==", xbe_entry(&img));
     ((void(__stdcall *)(void))(uintptr_t)xbe_entry(&img))();
     HLOG_I("== Entry kehrte zurueck (Xbox-Threads laufen weiter) ==");

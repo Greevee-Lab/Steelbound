@@ -812,3 +812,30 @@ void lch_hist_clear(lch_hist *h)
     lch_zero(h, sizeof *h);
     h->gen = g + 1u;
 }
+
+/* ---------------- W508 CHATBAR ---------------- */
+int lch_bar_fit(unsigned bb_w, unsigned bx, unsigned bw, float f, float m_units, unsigned *x, unsigned *w, float *fe)
+{
+    unsigned left, right, bar, m, avail, cw;
+    float fmin, fit;
+    int side;
+    if (!x || !w || !fe || bb_w == 0u || bw == 0u || bx == 0u || bw >= bb_w || bx > bb_w - bw || !(f > 0.0f)) return 0;
+    left = bx;
+    right = bb_w - bx - bw;
+    side = right > left ? 2 : 1;
+    bar = side == 1 ? left : right;
+    m = (unsigned)(m_units * f + 0.5f);
+    if (m < 1u) m = 1u;
+    if (bar <= 2u * m) return 0;
+    avail = bar - 2u * m;
+    fmin = f < LCH_BAR_STD_F ? f : LCH_BAR_STD_F;
+    fit = (float)avail / LCH_BAR_MIN_UNITS;
+    if (fit < fmin) return 0;
+    if (fit > f) fit = f;
+    cw = (unsigned)(LCH_W_UNITS * fit + 0.5f);
+    if (cw > avail) cw = avail;
+    *w = cw;
+    *fe = fit;
+    *x = side == 1 ? bx - m - cw : bx + bw + m;
+    return side;
+}

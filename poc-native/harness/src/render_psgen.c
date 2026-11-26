@@ -131,20 +131,25 @@ int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_
             "float rq_cmp(float r, float d) { uint f = (asuint(pflags.z) >> 8) & 7u;\n"
             "  return f == 1u ? (float)(r < d) : f == 2u ? (float)(r == d) : f == 3u ? (float)(r <= d) :\n"
             "         f == 4u ? (float)(r > d) : f == 5u ? (float)(r != d) : f == 6u ? (float)(r >= d) : f == 7u ? 1.0 : 0.0; }\n"
-            "float4 rq_shadow(Texture2D t, float2 uv, float r, float2 idim) {\n"
+            /* W512 ISSUE-109: bz = tsc.z; >= 2 = ADDRESS BORDER, Texel ausserhalb der Karte = Randtiefe bz - 2
+             * (LoC: 1 = groesste Tiefe, beleuchtet) statt Randtexel. bz = 1: Randtexel (bisher). */
+            "float rq_sdep(Texture2D t, int2 c, int2 mx, float bz) {\n"
+            "  if (bz >= 2.0 && (any(c < int2(0, 0)) || any(c > mx))) { return bz - 2.0; }\n"
+            "  return t.Load(int3(clamp(c, int2(0, 0), mx), 0)).r; }\n"
+            "float4 rq_shadow(Texture2D t, float2 uv, float r, float2 idim, float bz) {\n"
             "  float2 dim = 1.0 / idim; float2 p = uv * dim - 0.5; float2 f = frac(p); int2 b = (int2)floor(p);\n"
             "  int2 mx = (int2)dim - 1;\n"
-            "  float s00 = rq_cmp(r, t.Load(int3(clamp(b, int2(0, 0), mx), 0)).r);\n"
-            "  float s10 = rq_cmp(r, t.Load(int3(clamp(b + int2(1, 0), int2(0, 0), mx), 0)).r);\n"
-            "  float s01 = rq_cmp(r, t.Load(int3(clamp(b + int2(0, 1), int2(0, 0), mx), 0)).r);\n"
-            "  float s11 = rq_cmp(r, t.Load(int3(clamp(b + int2(1, 1), int2(0, 0), mx), 0)).r);\n"
+            "  float s00 = rq_cmp(r, rq_sdep(t, b, mx, bz));\n"
+            "  float s10 = rq_cmp(r, rq_sdep(t, b + int2(1, 0), mx, bz));\n"
+            "  float s01 = rq_cmp(r, rq_sdep(t, b + int2(0, 1), mx, bz));\n"
+            "  float s11 = rq_cmp(r, rq_sdep(t, b + int2(1, 1), mx, bz));\n"
             /* SHADER-OPT2 (W131) shadow_soft (sfx3.z > 0): 3x3-Gauss (1-2-1) gefaltet mit dem
              * bilinearen 2x2-PCF = 4x4 Vergleiche mit separablen Gewichten (Hypothese NV2A
              * MAG GAUSSIANCUBIC, weichere Kante). Sonst 2x2 wie bisher. */
             "  if (sfx3.z > 0.0) { float4 wx = float4((1.0 - f.x) * 0.25, (1.0 - f.x) * 0.5 + f.x * 0.25, (1.0 - f.x) * 0.25 + f.x * 0.5, f.x * 0.25);\n"
             "    float4 wy = float4((1.0 - f.y) * 0.25, (1.0 - f.y) * 0.5 + f.y * 0.25, (1.0 - f.y) * 0.25 + f.y * 0.5, f.y * 0.25);\n"
             "    float acc = 0.0; [unroll] for (int yy = 0; yy < 4; yy++) { [unroll] for (int xx = 0; xx < 4; xx++) {\n"
-            "      acc += wx[xx] * wy[yy] * rq_cmp(r, t.Load(int3(clamp(b + int2(xx - 1, yy - 1), int2(0, 0), mx), 0)).r); } }\n"
+            "      acc += wx[xx] * wy[yy] * rq_cmp(r, rq_sdep(t, b + int2(xx - 1, yy - 1), mx, bz)); } }\n"
             "    return acc.xxxx; }\n"
             "  return lerp(lerp(s00, s10, f.x), lerp(s01, s11, f.x), f.y).xxxx; }\n"
             /* SHADE-FX (W121): Optionen beim Lesen der Welt-RTs (sfx0.x Bit 1+k):
@@ -218,7 +223,7 @@ int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_
             /* RENDER-QA3 (W100): tsc[i].w != 0 = Schattenpuffer (Tiefe als SRV,
              * Vergleich mit r = z/w * tsc[i].w, s. rq_shadow). */
             rps(&s, "  if (tsc[%u].z != 0.0) { float iw%u = %s.w != 0.0 ? 1.0 / %s.w : 1.0; float2 uv%u = %s.xy * iw%u * tsc[%u].xy;\n"
-                    "    if (tsc[%u].w != 0.0) { T%u = rq_shadow(%s, uv%u, %s.z * iw%u * tsc[%u].w, tsc[%u].xy); SHV = min(SHV, T%u.r); SHN = 1.0; } else {\n"
+                    "    if (tsc[%u].w != 0.0) { T%u = rq_shadow(%s, uv%u, %s.z * iw%u * tsc[%u].w, tsc[%u].xy, tsc[%u].z); SHV = min(SHV, T%u.r); SHN = 1.0; } else {\n"
                     "    T%u = %s.Sample(%s, uv%u);\n"
                     "    if ((asuint(sfx0.x) & %uu) != 0u) { T%u.rgb = rq_sfx(%s, %s, uv%u, T%u.rgb); }\n"
                     "    if ((asuint(sfx0.x) & %uu) != 0u) { T%u.rgb = max(T%u.rgb - sfx1.w, 0.0) / (1.0 - sfx1.w) * sfx0.w; }\n"
@@ -226,7 +231,7 @@ int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_
                     "    if ((asuint(pflags.z) & %uu) != 0u && T%u.a < (0.5 / 255.0)) { discard; } }\n"
                     "  } else { T%u = float4(1, 1, 1, 1); }\n",
                 i, i, cn[i], cn[i], i, cn[i], i, i,
-                i, i, tn[i], i, cn[i], i, i, i, i,
+                i, i, tn[i], i, cn[i], i, i, i, i, i,
                 i, tn[i], sn[i], i,
                 2u << i, i, tn[i], sn[i], i, i,
                 0x20u << i, i, i,
@@ -384,6 +389,10 @@ int rqp_hlsl(const unsigned *d, unsigned stage_tex, char *buf, size_t bufn, rqp_
     } else {
         rps(&s, "  if (sfx3.w > 0.0 && SHN > 0.0) { o.rgb *= lerp(1.0 - float3(0.30, 0.25, 0.16) * sfx3.w, 1.0 + float3(0.12, 0.10, 0.06) * sfx3.w, SHV); }\n");
     }
+    /* W507 LOC-BLOOM-LAG (#107): Draws in das Bloom-Ziel des Spiels (nur LoC mit Enhanced-Bloom, render_bloomlag.h):
+     * 0x10000 Abkling-Quad a' = 1 - (1 - a)^k (k = sfx2.x), 0x20000 additiver Draw RGB * c (c = sfx2.y). */
+    rps(&s, "  if ((asuint(sfx0.x) & 0x30000u) != 0u) {\n"
+            "    if ((asuint(sfx0.x) & 0x10000u) != 0u) { o.a = 1.0 - pow(saturate(1.0 - o.a), sfx2.x); } else { o.rgb *= sfx2.y; } }\n");
     rps(&s, "  float4 res = saturate(o);\n");
     if (g_rqp_nan_mark) { /* DIAG(AMD-ARTIFACTS,W302): nicht endliche Combiner-Ausgabe magenta (saturate machte 0 daraus) */
         rps(&s, "  if (any((asuint(o) & 0x7F800000u) == 0x7F800000u)) { res = float4(1.0, 0.0, 1.0, 1.0); }\n");

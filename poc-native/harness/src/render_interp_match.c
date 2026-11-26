@@ -2,6 +2,7 @@
  * W463 RCORE: aus render_interp.c ausgegliedert (reines Verschieben); gemeinsamer Zustand in
  * render_interp_int.h, Modulkarte docs/RENDER_ARCH.md. */
 #include "render_interp_int.h"
+#include "render_interp_tree.h" /* W506 ISSUE-105 */
 
 /* ---------- Zuordnung Tick N-1 -> N ---------- */
 
@@ -938,6 +939,67 @@ int w415_world_cam(const ip_list_t *A, const ip_list_t *B, const ip_op_t *o, dou
     memcpy(Di, w415_wc.Di, sizeof w415_wc.Di);
     if (ia) { *ia = w415_wc.ia; }
     return 1;
+}
+/* FIX(W506 ISSUE-105) loc_tree_fix: Baeume in LoC-Zwischenbildern. Befund W506_D1/D2 (Mission 01 = map00, Drehen, 120 FPS):
+ * Baeume sind kleine texturierte Draws mit eigener Matrix (n = 3 je Dreieck, eine Textur/ein Shader, keine Effekt-Kennung).
+ * Je 10 s beim Drehen blieben 430-760 davon exakt (nomatch: viele gleiche Instanzen, Welt-Test mit rz_cam scheitert; die
+ * Billboard-Paarung W347 ist fuer LoC gesperrt; W415-rzm nimmt nur Draws in Weltkoordinaten) = Tick-N-Lage, 20 Hz, waehrend
+ * der Boden mit 120 FPS glitt; weitere 400-1000 gelerpte hatten einen Partner, der nicht zur Kamera der Welt passt (Nachbar-
+ * Dreieck bzw. anderer Baum) und glitten von dort (2-9 px). Beides zusammen = "Baeume wackeln" (#105).
+ * Fix: fuer kleine texturierte perspektivische Welt-Draws (<= 64 Vertices, mit Tiefe, nicht eigener/anderer VT, kein
+ * Effekt-Draw) im Weltziel mit bestaetigter Kamera der Welt (W415):
+ *  - exakt (kein bzw. verworfener Partner) -> Tick-N-Vertices mit der Kamera der Welt bewegen (rzm): exakt fuer ruhende
+ *    Welt, fuer in der Welt Bewegtes nie schlechter als exakt (wie W415);
+ *  - gelerpt (Matrix-/Vertex-Lerp), Partner weicht von der Kamera der Welt ab (> 0,003 NDC + 5 % der Ausdehnung) und ein
+ *    anderer Vortick-Draw gleicher Signatur/Vertexzahl passt als ruhendes Objekt (<= 0,01 NDC, hoechstens halber Fehler)
+ *    -> falscher Partner, ebenfalls rzm. Sonst (bewegte Objekte mit richtigem Partner) unveraendert.
+ * Nur LoC, nur Zwischenbilder (Tick-Bilder und 20 FPS unberuehrt), Simulation unberuehrt. */
+unsigned st_w506_ex, st_w506_part, st_w506_keep, st_w506_mov, st_w506_n; /* Zaehler (LOCINTERP baum506) */
+static void w506_tree_fix(ip_list_t *A, ip_list_t *B, unsigned *nlerp, unsigned *nnomatch, unsigned *nrawchg)
+{
+    unsigned i;
+    for (i = 0; i < B->nops; i++) {
+        ip_op_t *o = &B->ops[i];
+        const ip_op_t *a;
+        double Dw[16], cw[4][4], ext, dev, best = 1e9;
+        int ia = -1, j, nc = 0;
+        if (o->kind != IP_DRAW || !o->cls || !o->dsv || !o->has_tex || o->nv > 64u || o->rzm || o->nolerp || o->fxk == 1u ||
+            o->wlc == 2u || o->wlc == 4u || o->law > 1u || ip_mvp_affine(o->mvp)) { continue; }
+        if (!w415_world_cam(A, B, o, Dw, &ia) || ia < 0) { continue; } /* Kamera der Welt nicht bestaetigt (steht): alt */
+        if (!ipt_world((const float (*)[4])o->pref, o->mvp, Dw, cw, &ext)) { continue; }
+        st_w506_n++;
+        if (o->flag) {
+            if (o->match < 0 || (unsigned)o->match >= A->nops) { continue; }
+            a = &A->ops[o->match];
+            dev = ipt_dev(o->rzb ? (const float (*)[4])o->pref : (const float (*)[4])a->pref, IP_AMVP(o, a), (const double (*)[4])cw);
+            if (dev <= ipt_tol(ext)) { st_w506_keep++; continue; } /* Partner passt zur Kamera der Welt */
+            /* passt ein anderer Vortick-Draw gleicher Signatur/Vertexzahl als ruhendes Objekt? (Vorpruefung: Bezugs-Vertex 0) */
+            for (j = ip_hhead[IP_HB(o->sig)]; j >= 0 && nc < 256; j = ip_hnext[j]) {
+                const ip_op_t *c = &A->ops[j];
+                double e;
+                if (j == o->match || c->sig != o->sig || c->nv != o->nv || c->kind != IP_DRAW || c->rtv != o->rtv) { continue; }
+                if (cw[0][3] > 1e-6 && c->rn[0][2] > 1e-6f &&
+                    (fabs((double)c->rn[0][0] - cw[0][0] / cw[0][3]) > 2.0 * IPT_REST || fabs((double)c->rn[0][1] - cw[0][1] / cw[0][3]) > 2.0 * IPT_REST)) { continue; }
+                nc++;
+                e = ipt_dev((const float (*)[4])c->pref, c->mvp, (const double (*)[4])cw);
+                if (e < best) { best = e; }
+            }
+            if (!ipt_wrong_partner(dev, ipt_tol(ext), best)) { st_w506_mov++; continue; } /* bewegt mit richtigem Partner */
+            pr_mul_di(o->mva, o->mvp, Dw);
+            o->rzm = 1; o->rzb = 1; o->why = IP_W_LERP;
+            st_w506_part++;
+            continue;
+        }
+        /* exakt: Tick-N-Vertices mit der Kamera der Welt bewegen (Partner ohne Zuordnung = Platzhalter, rzb liest nur B) */
+        if (!(o->match >= 0 && (unsigned)o->match < A->nops)) { o->match = ia; }
+        if (o->why == IP_W_NOMATCH) { if (*nnomatch) { (*nnomatch)--; } }
+        else if (o->why == IP_W_RAWCHG) { if (*nrawchg) { (*nrawchg)--; } }
+        if (o->why != IP_W_REJECT) { (*nlerp)++; } /* reject: Zaehler bleiben (Schnitt-Erkennung unveraendert, wie W415) */
+        pr_mul_di(o->mva, o->mvp, Dw);
+        o->rzm = 1; o->rzb = 1; o->flag = 1;
+        o->why = IP_W_LERP;
+        st_w506_ex++;
+    }
 }
 /* W415: Bezugs-Draw (Tick N) der W410-Kamera im Ziel von o (nach rz_cam_pre), NULL = keiner */
 const ip_op_t *w415_cam_ref(const ip_list_t *B, const ip_op_t *o)
@@ -1986,6 +2048,7 @@ int ip_match(ip_list_t *A, ip_list_t *B, int log)
         if (nzd <= nlerp) { nlerp -= nzd; }
     }
     if (g_cfg.interp_pair || g_cfg.interp_pair_diag) { ip_pair_robust(A, B); } /* W317 INTERP-PAIR: nach W284/W294/W91/W251 (deren Ergebnis = alte Zuordnung) */
+    if (g_sba_loc && g_cfg.loc_tree_fix && !g_cfg.vr_enable) { w506_tree_fix(A, B, &nlerp, &nnomatch, &nrawchg); } /* FIX(W506 ISSUE-105): nach W317, vor W264 */
     for (i = 0; i < B->nops; i++) { /* W264 DRAW-OPT2: Lerp nur zwischen gleich abgelegten Draws (beide Liste oder beide indiziert) */
         ip_op_t *o = &B->ops[i];
         if (o->kind == IP_DRAW && o->flag && o->match >= 0 && (unsigned)o->match < A->nops &&

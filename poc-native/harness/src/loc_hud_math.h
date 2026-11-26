@@ -75,3 +75,60 @@ static void lh_ret_exact_shift(double rx, double ry, const float a[2], const flo
         out[1] = ry + ((double)a[1] + ((double)b[1] - a[1]) * t) - b[1];
     }
 }
+
+/* W505 ISSUE-106: Vorschau-Rahmen fuer den Zusatz-Schritt der Sicht je Bild. Mit Legacy-Belegung kennt loc_vpf den
+ * Satz des naechsten Polls aus dem Maus-Akku (lh_frame). Mit Eingabeprofil (input_profile, seit 0.4.0 Standard
+ * default_full) gibt es diese Vorschau nicht; bisher fiel die Anzeige dann auf die Basis (Vorhersage des letzten Ticks)
+ * zurueck - die gezeigte Sicht stand 5 von 6 Bildern still und sprang je Tick (Drehen wirkt wie 20 FPS). Jetzt gilt der
+ * letzte eigene Satz als naechster Satz (gehaltener Hebel dreht weiter); die naechste echte Vorhersage korrigiert. */
+static void lh_frame_repeat(const uint8_t base[14], uint8_t out[14])
+{
+    memcpy(out, base, 14);
+}
+
+/* W505: Gewicht des Zusatz-Schritts bei Wiederholung (Eingabeprofil): Bildzeit seit der Vorhersage / Abstand zweier
+ * Vorhersagen, linear in [-0,5, 1,5] (nicht auf 0..1 begrenzt): Mit dem naechsten Tick wird s1 zur neuen Basis und w
+ * faellt um genau 1 - die gezeigte Sicht bleibt stetig, auch fuer Bilder kurz vor bzw. nach der Veroeffentlichung. */
+static double lh_rep_weight(double ms_since_pub, double tick_ms)
+{
+    if (!(tick_ms > 1.0)) tick_ms = 50.0;
+    return la_clamp(ms_since_pub / tick_ms, -0.5, 1.5);
+}
+
+/* W505: Gleichmaessigkeit der gezeigten Sicht-Gier je Bild in Drehphasen (Zaehler fuer LOCVPF-GLATT und Selbsttest).
+ * Ring der letzten 7 Bilder (~1 Tick bei 120 FPS): Drehrate ueber den Ring; bewertet wird der mittlere Schritt gegen
+ * Rate * Bildabstand: stehend < 20 %, Sprung > 200 %. Bilder mit Abstand < 2 ms ersetzen das letzte (doppelte Wiedergabe). */
+typedef struct {
+    double y[7], ms[7];
+    int n;
+    unsigned turn, stall, jump;
+    double rel_sum;
+} lh_smooth_t;
+
+static void lh_smooth_add(lh_smooth_t *s, double ms, double yaw)
+{
+    int k;
+    if (s->n > 0 && ms - s->ms[s->n - 1] < 2.0) { /* gleiches Bild: letzte Probe ersetzen */
+        s->ms[s->n - 1] = ms;
+        s->y[s->n - 1] = s->n > 1 ? s->y[s->n - 2] + la_wrap(yaw - s->y[s->n - 2]) : yaw;
+        return;
+    }
+    if (s->n > 0 && ms - s->ms[s->n - 1] > 100.0) s->n = 0; /* Luecke (Pause, Menue) */
+    if (s->n == 7) {
+        for (k = 0; k < 6; k++) { s->y[k] = s->y[k + 1]; s->ms[k] = s->ms[k + 1]; }
+        s->n = 6;
+    }
+    s->ms[s->n] = ms;
+    s->y[s->n] = s->n ? s->y[s->n - 1] + la_wrap(yaw - s->y[s->n - 1]) : yaw; /* stetig (ohne Umbruch) */
+    s->n++;
+    if (s->n == 7 && s->ms[6] > s->ms[0]) {
+        double rate = (s->y[6] - s->y[0]) / (s->ms[6] - s->ms[0]); /* rad/ms */
+        double exp = fabs(rate) * (s->ms[3] - s->ms[2]), d = fabs(s->y[3] - s->y[2]);
+        if (fabs(rate) * 1000.0 > 0.2 && exp > 0.0) { /* Drehung > 0,2 rad/s */
+            s->turn++;
+            s->rel_sum += d / exp;
+            if (d < 0.2 * exp) s->stall++;
+            else if (d > 2.0 * exp) s->jump++;
+        }
+    }
+}

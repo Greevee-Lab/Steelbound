@@ -1687,6 +1687,18 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
                     tsc[k * 4u + 1] = 1.0f / (float)h;
                     tsc[k * 4u + 2] = 1.0f;
                     tsc[k * 4u + 3] = (zs > 0.0f) ? 1.0f / zs : 1.0f;
+                    if (g_sba_loc && g_cfg.loc_shadow_border) {
+                        /* FIX(W512 ISSUE109): ADDRESSU/V = BORDER (4) -> Abtastungen ausserhalb der Karte vergleichen
+                         * gegen die Randfarbe des Spiels statt gegen das Randtexel (rq_shadow, tsc.z = 2 + Randtiefe).
+                         * LoC: Randfarbe 0xFFFFFFFF = groesste Tiefe -> beleuchtet wie auf der NV2A. Vorher hing der
+                         * ganze Boden jenseits der Karte an wenigen Randtexeln und kippte gemeinsam (#109). */
+                        extern unsigned g_rq_border[4], g_rq_border_set;
+                        unsigned tb2 = SBA(0x21A8B0u) + k * 32u * 4u;
+                        if (rq_u32(tb2) == 4u && rq_u32(tb2 + 4u) == 4u && (g_rq_border_set & (1u << k))) {
+                            if (g_rq_border[k] == 0xFFFFFFFFu) { tsc[k * 4u + 2] = 3.0f; }
+                            else if (g_rq_border[k] == 0u) { tsc[k * 4u + 2] = 2.0f; }
+                        }
+                    }
                     g_rq_shadow_draws++;
                     if (g_sba_loc && g_cfg.loc_shadow_diag) { /* DIAG(W471): Filter des Spiels auf der Schattenstufe */
                         extern unsigned g_rq_shadowfunc;
@@ -1698,6 +1710,20 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
                             nfl++; lastf = key;
                             HLOG_I("LOCSHADOW filt f=%u st=%u %ux%u mag=%u min=%u mip=%u func=0x%X", g_present_no, k,
                                    w, h, fm, fn, fp, g_rq_shadowfunc);
+                        }
+                        { /* DIAG(W512): Adressmodus der Schattenstufe (Rand ausserhalb der Karte) */
+                            static unsigned nad, lasta = 0xFFFFFFFFu;
+                            unsigned au = rq_u32(tb), av = rq_u32(tb + 4u), ka = (au << 8) | av;
+                            if (ka != lasta && nad < 16u) {
+                                unsigned q2, t32[32];
+                                nad++; lasta = ka;
+                                for (q2 = 0; q2 < 32u; q2++) { t32[q2] = rq_u32(tb + q2 * 4u); }
+                                HLOG_I("LOCSHADOW addr f=%u st=%u au=%u av=%u ts=[%X %X %X %X %X %X %X %X %X %X %X %X | %X %X %X %X %X %X %X %X %X %X %X %X %X %X %X %X %X %X %X %X]",
+                                       g_present_no, k, au, av, t32[0], t32[1], t32[2], t32[3], t32[4], t32[5], t32[6],
+                                       t32[7], t32[8], t32[9], t32[10], t32[11], t32[12], t32[13], t32[14], t32[15],
+                                       t32[16], t32[17], t32[18], t32[19], t32[20], t32[21], t32[22], t32[23], t32[24],
+                                       t32[25], t32[26], t32[27], t32[28], t32[29], t32[30], t32[31]);
+                            }
                         }
                     }
                     continue;
@@ -1843,13 +1869,14 @@ int rq_bind(ID3D11ShaderResourceView *srv0, int rhw)
          * ebenfalls einen Nebel-Final-Combiner, zeichnet aber mit FOGENABLE=0 (W121_h4). */
         int is3d = g_rq_kind == 0u && !rhw, fogps = fen != 0u && g_rq_pse->info.uses_fog;
         int s0rt = srvk[0] && rq_stage_is_rt(0);
-        shfx_rq_consts(&pblk[24u * 4u], srvk, tgt, is3d, fogps, s0rt, g_rq_pse->info.nstages);
+        unsigned lbc = g_sba_loc ? shfx_loc_bloom_class(tgt) : 0u; /* W507 LOC-BLOOM-LAG */
+        shfx_rq_consts(&pblk[24u * 4u], srvk, tgt, is3d, fogps, s0rt, g_rq_pse->info.nstages, lbc);
         if (g_ip_recording) { /* W193 PAUSE-LIVE: Eingaben fuer die Neuberechnung in der Pause */
             unsigned sxp[4], snn[4];
             sb_tex_stages(sxp, snn);
             for (k = 0; k < 4u; k++) { g_rq_rec.sfx_xp[k] = srvk[k] ? sxp[k] : 0u; }
             g_rq_rec.sfx_tgt = (signed char)tgt;
-            g_rq_rec.sfx_fl = (unsigned char)((is3d ? 1 : 0) | (fogps ? 2 : 0) | (s0rt ? 4 : 0));
+            g_rq_rec.sfx_fl = (unsigned char)((is3d ? 1 : 0) | (fogps ? 2 : 0) | (s0rt ? 4 : 0) | ((lbc & 3u) << 3));
             g_rq_rec.sfx_nst = (unsigned char)g_rq_pse->info.nstages;
         }
     }

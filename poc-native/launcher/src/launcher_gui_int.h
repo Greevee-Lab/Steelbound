@@ -673,6 +673,7 @@ static const char kCxFixture[] =
 #define ID_NRQ_YES 2813     /* W496 NET-TELEMETRY: Dialog "anonyme Netzwerkstatistik" - Ja (Standard-Knopf) */
 #define ID_NRQ_NO 2814      /* W496: ... Nein danke */
 #define ID_LNET_NETREP 2815 /* W496: Schalter "Anonyme Netzwerkstatistik" (LoC > Netzwerk, Reiter Network) */
+#define ID_LNET_CHATBAR 2816 /* W508 CHATBAR: Schalter "Chat in den Seitenbalken" (loc_chat_pos, Standard an = auto) */
 /* W496 (launcher_gui_netrep.c) */
 extern int g_nrq_cfg, g_nrq_dismiss, g_nrq_open, g_nrq_asked_now;
 int nrq_should_ask(int cfg, int dismiss, int steel, int upd_ask);
@@ -1263,6 +1264,7 @@ extern int g_loc_lowd;
 extern int g_loc_clip;
 extern int g_loc_chat;
 extern int g_loc_snchat;
+extern int g_loc_chatbar; /* W508 */
 extern int g_loc_arcade;
 extern int g_loc_lan;        /* W454 LOC-LAN-MODE: 1 = Multiplayer nur im LAN (ohne steelnet) */
 extern char g_loc_lan_room[17];

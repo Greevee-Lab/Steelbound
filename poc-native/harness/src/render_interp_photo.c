@@ -150,7 +150,7 @@ static int ip_pl_consts(ip_list_t *B, sb_pl_info_t *inf)
         pb = ip_pl_cwork + (size_t)r->pfirst * 4u;
         inf->ncb++;
         shfx_rq_consts_rep(sx, r->sfx_xp, r->sfx_tgt, (r->sfx_fl & 1u) != 0, (r->sfx_fl & 2u) != 0,
-                           (r->sfx_fl & 4u) != 0, r->sfx_nst);
+                           (r->sfx_fl & 4u) != 0, r->sfx_nst, (r->sfx_fl >> 3) & 3u); /* W507: Bloom-Klasse */
         if (memcmp(&pb[24u * 4u], sx, sizeof sx) != 0) {
             memcpy(&pb[24u * 4u], sx, sizeof sx);
             inf->nsfx++;

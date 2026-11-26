@@ -780,6 +780,66 @@ static void w474_tests(void)
     }
 }
 
+/* W508 CHATBAR: Platz im Seitenbalken. Box wie ovs_fit_box (Seitenverhaeltnis a mittig), f wie ovs_scale_ui. */
+static void w508_box(float a, unsigned W, unsigned H, unsigned *bx, unsigned *bw, float *f)
+{
+    float ba = (float)W / (float)H, bh;
+    if (a >= ba) { *bw = W; *bx = 0; bh = (float)W / a; }
+    else { *bw = (unsigned)((float)H * a + 0.5f); *bx = (W - *bw) / 2; bh = (float)H; }
+    *f = bh / 540.0f < 1.0f ? 1.0f : bh / 540.0f;
+}
+static int w508_fit(float a, unsigned W, unsigned H, unsigned *x, unsigned *w, float *fe)
+{
+    unsigned bx, bw;
+    float f;
+    w508_box(a, W, H, &bx, &bw, &f);
+    return lch_bar_fit(W, bx, bw, f, 8.0f, x, w, fe);
+}
+static void w508_tests(void)
+{
+    unsigned x = 0, w = 0, W, H, bx, bw;
+    float fe = 0.0f, f;
+    int s, bad = 0, n = 0;
+    s = w508_fit(4.0f / 3.0f, 3440, 1440, &x, &w, &fe); /* 4:3 in 21:9: Balken 760 px */
+    CHECK(s == 1 && x == 21u && w == 718u && fe > 2.66f && fe < 2.67f, "4:3 auf 3440x1440: links, 718 px, Schrift unveraendert");
+    s = w508_fit(16.0f / 9.0f, 5120, 1440, &x, &w, &fe); /* 16:9 in 32:9: Balken 1280 px */
+    CHECK(s == 1 && w == 747u && x == 1280u - 21u - 747u, "16:9 auf 5120x1440: normale Breite an der Bildkante");
+    s = w508_fit(16.0f / 9.0f, 3440, 1440, &x, &w, &fe); /* LoC-Standard 16:9 auf 21:9: Balken 440 px */
+    CHECK(s == 1 && x == 21u && w == 398u && fe >= 2.0f && fe < 2.25f, "16:9 auf 3440x1440: Balken, Schrift >= Standard");
+    s = w508_fit(16.0f / 9.0f, 2560, 1080, &x, &w, &fe); /* Balken 320 px: zu schmal */
+    CHECK(s == 0, "16:9 auf 2560x1080: zu schmal, heutige Lage");
+    s = w508_fit(4.0f / 3.0f, 2560, 1080, &x, &w, &fe);
+    CHECK(s == 1 && x == 16u && w == 528u && fe == 2.0f, "4:3 auf 2560x1080: links, 528 px");
+    CHECK(w508_fit(16.0f / 9.0f, 1000, 900, &x, &w, &fe) == 0, "Fenster schmaler als das Bild (Letterbox): kein Seitenbalken");
+    CHECK(w508_fit(16.0f / 9.0f, 1920, 1080, &x, &w, &fe) == 0, "16:9 auf 1920x1080: kein Balken");
+    CHECK(w508_fit(4.0f / 3.0f, 1200, 600, &x, &w, &fe) == 0, "kleines Fenster 1200x600: Balken zu schmal");
+    s = lch_bar_fit(3441, 760, 1920, 1440.0f / 540.0f, 8.0f, &x, &w, &fe);
+    CHECK(s == 2 && x == 760u + 1920u + 21u && x + w + 21u <= 3441u, "rechter Balken breiter: rechts an der Bildkante");
+    CHECK(lch_bar_fit(1920, 0, 1920, 2.0f, 8.0f, &x, &w, &fe) == 0 && lch_bar_fit(1920, 10, 1920, 2.0f, 8.0f, &x, &w, &fe) == 0 &&
+              lch_bar_fit(0, 0, 0, 2.0f, 8.0f, &x, &w, &fe) == 0 && lch_bar_fit(3440, 760, 1920, 2.0f, 8.0f, NULL, &w, &fe) == 0,
+          "ungueltige Eingaben: kein Balken");
+    /* Eigenschaften ueber viele Fenstergroessen: nie im Bild, nie aus dem Fenster, nie schmaler als die Mindestbreite */
+    for (W = 640; W <= 7680; W += 37) {
+        for (H = 360; H <= 2160; H += 41) {
+            int k;
+            for (k = 0; k < 2; k++) {
+                unsigned m;
+                float fm;
+                w508_box(k ? 16.0f / 9.0f : 4.0f / 3.0f, W, H, &bx, &bw, &f);
+                s = lch_bar_fit(W, bx, bw, f, 8.0f, &x, &w, &fe);
+                if (!s) continue;
+                n++;
+                m = (unsigned)(8.0f * f + 0.5f);
+                fm = f < 2.0f ? f : 2.0f;
+                if (s == 1 && (x < m || x + w + m > bx)) bad++;
+                if (s == 2 && (x < bx + bw + m || x + w + m > W)) bad++;
+                if ((float)w + 0.5f < 180.0f * fm || fe < fm - 1e-4f || fe > f + 1e-4f) bad++;
+            }
+        }
+    }
+    CHECK(n > 100 && bad == 0, "viele Groessen: im Balken, im Fenster, Mindestbreite, Schrift zwischen Standard und f");
+}
+
 int main(int argc, char **argv)
 {
     int i, fuzz_n = 200000;
@@ -799,6 +859,7 @@ int main(int argc, char **argv)
     sn_tests(); /* W446 */
     w452_tests(); /* W452 */
     w474_tests(); /* W474 */
+    w508_tests(); /* W508 */
     CHECK(fuzz_run(fuzz_n) == 0, "Fuzz ohne Fund");
     wipe_tests(dump_dir);
     printf("loc_chat_selftest: %d/%d OK\n", s_ok, s_n);

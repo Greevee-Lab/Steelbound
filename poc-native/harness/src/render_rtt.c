@@ -1970,6 +1970,52 @@ have_match:
         }
     }
     if (g_rtt_bound == i) { rtt_bind_bb(); }
+    /* DIAG(LOC-BLOOM-LAG,W507) loc_bloom_diag=1: LoC-Bloom-Ziele (14^2 Hauptbild, 9^2 Kamera) beim Lesen
+     * zuruecklesen -> Zeile LOCBLOOM rt (Mittel/Max je Kanal, Anteil gesaettigter Kanaele). Blockiert. */
+    if (g_cfg.loc_bloom_diag && g_sba_loc && g_rtt[i].pw && g_rtt[i].pw <= 32u && g_rtt[i].ph <= 32u &&
+        (g_rtt[i].draws || g_rtt[i].clears)) {
+        static unsigned lb_last[64];
+        ID3D11Resource *res = NULL;
+        if (i >= 0 && i < 64 && lb_last[i] != g_present_no) {
+            lb_last[i] = g_present_no;
+            ID3D11ShaderResourceView_GetResource(g_rtt[i].srv, &res);
+        }
+        if (res) {
+            ID3D11Texture2D *stage = NULL;
+            D3D11_TEXTURE2D_DESC sd;
+            memset(&sd, 0, sizeof sd);
+            sd.Width = g_rtt[i].pw; sd.Height = g_rtt[i].ph; sd.MipLevels = 1; sd.ArraySize = 1;
+            sd.Format = DXGI_FORMAT_B8G8R8A8_UNORM; sd.SampleDesc.Count = 1;
+            sd.Usage = D3D11_USAGE_STAGING; sd.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+            if (SUCCEEDED(ID3D11Device_CreateTexture2D(g_dev, &sd, NULL, &stage)) && stage) {
+                D3D11_MAPPED_SUBRESOURCE map;
+                sb_ctx_enter();
+                ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)stage, res);
+                if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)stage, 0, D3D11_MAP_READ, 0, &map))) {
+                    unsigned x, y, c, sum[3] = { 0, 0, 0 }, mx[3] = { 0, 0, 0 }, nsat = 0, n = 0;
+                    for (y = 0; y < g_rtt[i].ph; y++) {
+                        const unsigned char *s = (const unsigned char *)map.pData + y * map.RowPitch;
+                        for (x = 0; x < g_rtt[i].pw; x++) {
+                            for (c = 0; c < 3u; c++) { /* BGRA -> R,G,B */
+                                unsigned v = s[x * 4u + 2u - c];
+                                sum[c] += v;
+                                if (v > mx[c]) { mx[c] = v; }
+                                if (v == 255u) { nsat++; }
+                            }
+                            n++;
+                        }
+                    }
+                    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)stage, 0);
+                    HLOG_I("LOCBLOOM rt slot=%d %ux%u f=%u tick=%u avg=%u/%u/%u max=%u/%u/%u sat=%u/%u", i,
+                           g_rtt[i].pw, g_rtt[i].ph, g_present_no, *(volatile unsigned *)(uintptr_t)0x3070F4u,
+                           n ? sum[0] / n : 0u, n ? sum[1] / n : 0u, n ? sum[2] / n : 0u, mx[0], mx[1], mx[2], nsat, n * 3u);
+                }
+                sb_ctx_leave();
+                ID3D11Texture2D_Release(stage);
+            }
+            ID3D11Resource_Release(res);
+        }
+    }
     /* RTT-DIAG: RT-Inhalt beim ersten Servieren als JPG (was zeigt das
      * Spiel aus dem RT? Titel leer vs. Menue voll?). Max 6 Dumps. */
     {

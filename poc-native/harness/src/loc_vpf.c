@@ -105,6 +105,7 @@ int loc_vpf_conv_aim(int v)
     return lh_conv_aim(v);
 }
 
+volatile LONG g_lvpf_repeat_n; /* W505: Vorschauen mit Eingabeprofil (letzter Satz wiederholt), Zeile LOCVPF-GLATT */
 int loc_vpf_preview(const uint8_t base[14], uint8_t out[14], uint32_t *poll)
 {
     static lvpf_pub_t p; /* nur Render-Thread (loc_aim/ip_la_prep halten die Reihenfolge) */
@@ -126,9 +127,18 @@ int loc_vpf_preview(const uint8_t base[14], uint8_t out[14], uint32_t *poll)
         q2 = s_seq;
         ok = q1 == q2;
     }
-    if (!ok || !p.legacy) {
+    if (!ok) {
         ReleaseSRWLockExclusive(&lk);
         return 0;
+    }
+    if (!p.legacy || (g_cfg.loc_vpf_test_profile && (g_cfg.loc_replay_tick[0] || g_cfg.loc_steps[0]))) {
+        /* W505 ISSUE-106: Eingabeprofil - letzter eigener Satz als naechster (sonst Sicht in Tick-Stufen) */
+        ReleaseSRWLockExclusive(&lk);
+        if (!g_cfg.loc_vpf_repeat) return 0;
+        *poll = p.poll;
+        lh_frame_repeat(base, out);
+        InterlockedIncrement(&g_lvpf_repeat_n);
+        return 2; /* Wiederholung: gilt bis zur naechsten Vorhersage (nicht nur bis zum naechsten Poll) */
     }
     *poll = p.poll;
     imap_mouse_preview(&p.st, &p.snap, dx, dy, &st2);

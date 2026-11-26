@@ -855,7 +855,28 @@ static SRWLOCK li_vpf_lk = SRWLOCK_INIT;
 static la_state_t li_vpf_full;
 static uint32_t li_vpf_full_seq;
 volatile LONG li_vpf_n[4]; /* LOCVPF-Zeile: Wiedergaben je Rueckgabe */
-static int li_vpf_view(double v[4])
+/* W505 ISSUE-106: Gleichmaessigkeit der gezeigten Sicht-Gier je Bild (Zeile LOCVPF-GLATT, nur Zaehler) */
+static SRWLOCK li_sm_lk = SRWLOCK_INIT;
+static lh_smooth_t li_sm;
+void li_vpf_smooth_take(unsigned out[3], double *rel_mean)
+{
+    AcquireSRWLockExclusive(&li_sm_lk);
+    out[0] = li_sm.turn; out[1] = li_sm.stall; out[2] = li_sm.jump;
+    *rel_mean = li_sm.turn ? li_sm.rel_sum / li_sm.turn : 0.0;
+    li_sm.turn = li_sm.stall = li_sm.jump = 0; li_sm.rel_sum = 0.0;
+    ReleaseSRWLockExclusive(&li_sm_lk);
+}
+/* Zeitbasis = Zustandszeit des Bildes (lerp der Listen-Zeiten mit t): laeuft mit den Faelligkeiten der Bilder (stetige
+ * Bilduhr W393), nicht mit dem Zeitpunkt der Wiedergabe (der Render-Thread bereitet Bilder vorab vor). */
+static void li_vpf_smooth_note(const ip_list_t *A, const ip_list_t *B, int lerp_ok, float t, double yaw)
+{
+    double ts = (double)B->tstate;
+    if (lerp_ok && A) { ts = (double)A->tstate + (double)t * (double)(B->tstate - A->tstate); }
+    AcquireSRWLockExclusive(&li_sm_lk);
+    lh_smooth_add(&li_sm, ts * 1000.0 / (double)ip_qpf.QuadPart, yaw);
+    ReleaseSRWLockExclusive(&li_sm_lk);
+}
+static int li_vpf_view(double v[4], LONGLONG fw)
 {
     loc_aim_pub_t P;
     uint8_t F[14];
@@ -869,7 +890,21 @@ static int li_vpf_view(double v[4])
     if (r) (void)loc_aimassist_preview(&P.pst, P.last_in, F); /* W442: naechster Poll mit Zielhilfe (sonst Sicht-Ruckeln) */
     QueryPerformanceCounter(&now);
     AcquireSRWLockExclusive(&li_vpf_lk);
-    if (r && q == P.poll) {
+    if (r == 2 && (q == P.poll || q == P.poll + 1u)) {
+        /* W505 ISSUE-106: Eingabeprofil - der wiederholte Satz haengt nicht am Maus-Akku, gilt also auch zwischen Poll und
+         * naechster Vorhersage. Rampe ueber den ganzen Abstand zweier Vorhersagen (statt bis zum Poll und dann halten):
+         * sonst stand je Tick ein Bild still und das naechste sprang (Bildfolge J2: 5/5/5/5/9/1 px). */
+        s1 = P.pst;
+        if (!la_step(&s1, F)) { s1 = P.pst; }
+        /* Zeit = Bildzeit fw (Zustandszeit + Latenz), nicht der Zeitpunkt der Wiedergabe: ein Bild wird teils zweimal
+         * wiedergegeben (vorab und nach einer neuen Liste), dann mit schon neuer Vorhersage. Linear auch etwas ueber 0..1
+         * hinaus: beim Wechsel der Vorhersage gilt w_neu = w_alt - 1 (stetig), spaete Ticks drehen weiter statt zu halten. */
+        w = lh_rep_weight((double)(fw - P.tq) * 1000.0 / (double)ip_qpf.QuadPart, P.tick_ms);
+        lh_blend(&P.pst, &s1, w, v);
+        li_vpf_full = s1;
+        li_vpf_full_seq = P.seq;
+        mode = 2;
+    } else if (r == 1 && q == P.poll) {
         s1 = P.pst;
         if (!la_step(&s1, F)) { s1 = P.pst; }
         w = lh_weight((double)(now.QuadPart - P.tq) * 1000.0 / (double)ip_qpf.QuadPart, P.wspan_ms);
@@ -877,7 +912,7 @@ static int li_vpf_view(double v[4])
         li_vpf_full = s1;
         li_vpf_full_seq = P.seq;
         mode = 2;
-    } else if (r && q == P.poll + 1u && li_vpf_full_seq == P.seq) {
+    } else if (r == 1 && q == P.poll + 1u && li_vpf_full_seq == P.seq) {
         v[0] = li_vpf_full.ys; v[1] = li_vpf_full.ps; v[2] = li_vpf_full.ax; v[3] = li_vpf_full.ay;
         mode = 3;
     } else {
@@ -1158,7 +1193,8 @@ static int ip_la_prep0(const ip_list_t *B, const ip_list_t *A, int lerp_ok, floa
             bx = A->la_rc[0] + (B->la_rc[0] - A->la_rc[0]) * (double)t;
             by = A->la_rc[1] + (B->la_rc[1] - A->la_rc[1]) * (double)t;
         }
-        if (g_cfg.loc_view_perframe && !loc_vpf_test_off() && (mode = li_vpf_view(v)) != 0) {
+        LONGLONG fw = (lerp_ok && A ? A->tstate + (LONGLONG)((double)t * (double)(B->tstate - A->tstate)) : B->tstate) + ip_lat; /* W505: Bildzeit */
+        if (g_cfg.loc_view_perframe && !loc_vpf_test_off() && (mode = li_vpf_view(v, fw)) != 0) {
             dy = la_clamp(la_wrap(v[0] - sy) * LA_TURN_K, -LA_MAXANG, LA_MAXANG);
             dp = la_clamp(la_wrap(v[1] - sp) * LA_NICK_K, -LA_MAXANG, LA_MAXANG);
             if (B->la_ret) {
@@ -1171,6 +1207,7 @@ static int ip_la_prep0(const ip_list_t *B, const ip_list_t *A, int lerp_ok, floa
         }
         rr->stage = 2; rr->mode = mode; rr->tx = bx + rx; rr->ty = by + ry; rr->bx = bx; rr->by = by; /* W439 */
         rr->vy = sy + dy / LA_TURN_K; rr->vp = sp + dp / LA_NICK_K; rr->rx = rx; rr->ry = ry;
+        li_vpf_smooth_note(A, B, lerp_ok, t, rr->vy); /* W505: gezeigte Sicht-Gier dieses Bildes */
     }
     if (g_cfg.loc_aim_diag & 32) { li_la_note(B, t, dy, dp, apply, rx, ry); }
     sk_last_ang = sqrt(dy * dy + dp * dp); /* DIAG(W435): Winkel der Sicht-Korrektur dieser Wiedergabe (rad) */

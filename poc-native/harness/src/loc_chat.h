@@ -209,3 +209,15 @@ int lch_tab_next(int cur, unsigned avail);
 int lch_tab_auto(int cur, unsigned avail, unsigned prev_avail);
 /* Verlauf leeren (Lobby verlassen: der naechste Beitritt beginnt leer). */
 void lch_hist_clear(lch_hist *h);
+
+/* ---------------- W508 CHATBAR: Chat in den schwarzen Seitenbalken (rein, Selbsttest) ----------------
+ * Spielbild (bx, bw) mittig im Backbuffer der Breite bb_w (Pillarbox). Der breitere Balken (links bei Gleichstand)
+ * nimmt den Chat auf, wenn er abzueglich je eines Randes (m_units * f) noch LCH_BAR_MIN_UNITS bei Standardschrift
+ * fasst. Standardschrift = SB-UI-Faktor 2 (1080p); bei groesserem Faktor darf die Schrift im Balken bis auf diese
+ * Groesse schrumpfen (fe in [min(f, 2), f]), damit z. B. 16:9 auf 3440x1440 noch passt. Breite = Balken minus Raender,
+ * hoechstens die normale Chatbreite (LCH_W_UNITS * fe); der Chat liegt an der Bildkante (Abstand ein Rand).
+ * Rueckgabe 0 = kein Balken bzw. zu schmal (heutige Lage), 1 = linker, 2 = rechter Balken; x/w in Pixeln, fe Faktor. */
+#define LCH_W_UNITS 280.0f       /* normale Chatbreite (Einheiten, 1080p: 560 px) */
+#define LCH_BAR_MIN_UNITS 180.0f /* Mindestbreite im Balken (Einheiten, Standardschrift 1080p: 360 px) */
+#define LCH_BAR_STD_F 2.0f       /* Standardschrift (SB-UI-Faktor 1080p) */
+int lch_bar_fit(unsigned bb_w, unsigned bx, unsigned bw, float f, float m_units, unsigned *x, unsigned *w, float *fe);

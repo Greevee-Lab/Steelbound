@@ -28,6 +28,7 @@
 #include "sb_texhash.h" /* W288 PACK-ZERO-TEX */
 #include "render_interp_bb.h" /* W347 GHOST */
 #include "render_interp_camfit.h" /* W349 LOC-FRAMES-2 */
+#include "render_interp_tree.h" /* W506 ISSUE-105 */
 #include "loc_aim_law.h" /* W376 LOC-LOCAL-AIM */
 #include "loc_smooth_math.h" /* W385 LOC-SMOOTH */
 #include "render_pace.h" /* W393 LOC-PACING */
@@ -39,6 +40,7 @@
 #include "render_interp_shref.h" /* W361 LOC-INTERP-CRASH */
 #include "render_interp_eye.h" /* W448 LOC-CHAFF-LOOK */
 #include "render_sblook.h" /* W459 LOC-FX-LIGHT */
+#include "render_bloomlag.h" /* W507 LOC-BLOOM-LAG */
 #include "render_visqz.h" /* W477 SB-SUN-WHITEOUT */
 #include "render_locmenu.h" /* W377 LOC-MENU-FPS */
 #include "render_rq_exp.h" /* W383 LOC-GH-DATA (#62) */
@@ -1014,6 +1016,61 @@ static void test_bbcam(void)
     r = bb_pick(pa, NT, P, (const float (*)[4])pb, D, &ec);
     n++; if (r != 6) { fail++; printf("BBCAM schnell: Baum 6 -> %d (ec=%.5f)\n", r, ec); }
     printf("BBCAM (W347): %d Faelle (Schwenk/Reihenfolge, bewegt, fremd, still, schnell): %d Fehler\n", n, fail);
+    g_fail += fail;
+}
+
+/* W506 ISSUE-105: Baeume in LoC-Zwischenbildern (render_interp_tree.h). Billboards wie W347 (je Tick zur Kamera gedreht,
+ * Vertices im Sichtraum, Matrix = P); Dw = Kamera der Welt Tick N -> Vortick. */
+static void test_tree506(void)
+{
+    static const double trees[4][2] = { { -20, 60 }, { -18, 61 }, { 0, 80 }, { 4, 15 } };
+    float P[16] = { 0 }, pa[4][4][4], pb[4][4];
+    double VA[16], VB[16], PA[16], PB[16], Pd[16] = { 0 }, IB[16], Dw[16], cw[4][4], ext, dev, best;
+    int n = 0, fail = 0, k, j;
+    double n0 = 1.0, f0 = 1000.0, ys = 1.0 / tan(30.0 * 3.14159265358979 / 180.0);
+    Pd[0] = ys; Pd[5] = ys; Pd[10] = f0 / (f0 - n0); Pd[11] = 1.0; Pd[14] = -n0 * f0 / (f0 - n0);
+    for (k = 0; k < 16; k++) { P[k] = (float)Pd[k]; }
+    bb_view(VA, 0.0, 0.0, 0.0);
+    bb_view(VB, 0.0, 0.3, 3.0); /* Schwenk 3 Grad + 0,3 m Fahrt je Tick */
+    bb_mul(PA, VA, Pd); bb_mul(PB, VB, Pd);
+    if (!bb_inv(IB, PB)) { fail++; }
+    bb_mul(Dw, IB, PA); /* Dw = M_B^-1 * M_A der Welt-Geometrie (wie w415_world_cam) */
+    for (k = 0; k < 4; k++) { bb_tree(pa[k], VA, trees[k][0], trees[k][1]); }
+    for (k = 0; k < 4; k++) {
+        /* (a) richtiger Partner (derselbe Baum, Eigendrehung 3 Grad): passt */
+        bb_tree(pb, VB, trees[k][0], trees[k][1]);
+        n++;
+        if (!ipt_world((const float (*)[4])pb, P, Dw, cw, &ext)) { fail++; printf("TREE506 Baum %d unsichtbar\n", k); continue; }
+        dev = ipt_dev((const float (*)[4])pa[k], P, (const double (*)[4])cw);
+        if (dev > ipt_tol(ext)) { fail++; printf("TREE506 richtig: Baum %d dev=%.5f tol=%.5f\n", k, dev, ipt_tol(ext)); }
+    }
+    /* (b) falscher Partner (Nachbarbaum 2 m daneben) wird erkannt, der richtige passt als ruhendes Objekt */
+    bb_tree(pb, VB, trees[0][0], trees[0][1]);
+    ipt_world((const float (*)[4])pb, P, Dw, cw, &ext);
+    dev = ipt_dev((const float (*)[4])pa[1], P, (const double (*)[4])cw);
+    best = ipt_dev((const float (*)[4])pa[0], P, (const double (*)[4])cw);
+    n++; if (!ipt_wrong_partner(dev, ipt_tol(ext), best)) { fail++; printf("TREE506 falsch: dev=%.5f best=%.5f\n", dev, best); }
+    /* (c) bewegtes Objekt (5 m versetzt) mit richtigem Partner: kein ruhender Kandidat -> Partner bleibt */
+    bb_tree(pb, VB, trees[0][0] - 5.0, trees[0][1]);
+    ipt_world((const float (*)[4])pb, P, Dw, cw, &ext);
+    dev = ipt_dev((const float (*)[4])pa[0], P, (const double (*)[4])cw);
+    best = 1e9;
+    for (j = 1; j < 4; j++) { double e = ipt_dev((const float (*)[4])pa[j], P, (const double (*)[4])cw); if (e < best) { best = e; } }
+    n++; if (ipt_wrong_partner(dev, ipt_tol(ext), best)) { fail++; printf("TREE506 bewegt: dev=%.5f best=%.5f\n", dev, best); }
+    /* (d) stehende Kamera (Dw = I): Abweichung 0 */
+    for (k = 0; k < 16; k++) { Dw[k] = (k % 5) == 0 ? 1.0 : 0.0; }
+    ipt_world((const float (*)[4])pa[2], P, Dw, cw, &ext);
+    dev = ipt_dev((const float (*)[4])pa[2], P, (const double (*)[4])cw);
+    n++; if (dev > 1e-6) { fail++; printf("TREE506 still: dev=%.7f\n", dev); }
+    /* (e) Vertex hinter der Kamera wird nicht bewertet, ganz dahinter = unbrauchbar */
+    {
+        float bh[4][4];
+        for (k = 0; k < 4; k++) { bh[k][0] = 0.0f; bh[k][1] = 0.0f; bh[k][2] = -5.0f; bh[k][3] = 1.0f; }
+        n++; if (ipt_world((const float (*)[4])bh, P, Dw, cw, &ext) != 0 || ipt_dev((const float (*)[4])bh, P, (const double (*)[4])cw) < 1e8) {
+            fail++; printf("TREE506 hinten: bewertet\n");
+        }
+    }
+    printf("TREE506 (W506): %d Faelle (richtig, falsch, bewegt, still, hinten): %d Fehler\n", n, fail);
     g_fail += fail;
 }
 
@@ -2515,6 +2572,88 @@ static void test_sblook(void)
     g_fail += fail;
 }
 
+/* ---------- W507 LOC-BLOOM-LAG (#107): Nachlauf des spieleigenen Bloom (render_bloomlag.h) ----------
+ * Modell des Spiels je Bild: B = B * (1 - a) + G (Abkling-Quad SRCALPHA/INVSRCALPHA, dann additiv ONE/ONE).
+ * Fix: a' = 1 - (1 - a)^k, G * c mit c = a'/a. Geprueft: Klassen/Schalter, gleiches Gleichgewicht, schnellerer
+ * Uebergang (Boden -> Himmel), auch mit 8-Bit-Ziel (Rundung wie UNORM-Blend). */
+static float bl_step8(float b, float g, float a)
+{
+    float v = b * (1.0f - a) + g; /* Blend in float, Ablage gerundet in 8 Bit (UNORM) */
+    if (v > 1.0f) { v = 1.0f; }
+    return floorf(v * 255.0f + 0.5f) / 255.0f;
+}
+
+/* Bilder bis 90 % des Wegs von b0 zum Gleichgewicht G/a (8 Bit: mindestens 2,5/255 Toleranz), 999 = nie;
+ * *end = Wert nach 200 Bildern. */
+static int bl_settle(float b0, float g, float a, int k, int q8, float *end)
+{
+    float ak = bloomlag_alpha(a, k), c = bloomlag_comp(a, k), b = b0, bt = g / a;
+    float tol = 0.1f * fabsf(b0 - bt);
+    int n, n90 = 999;
+    if (bt > 1.0f) { bt = 1.0f; }
+    if (q8 && tol < 2.5f / 255.0f) { tol = 2.5f / 255.0f; }
+    for (n = 1; n <= 200; n++) {
+        b = q8 ? bl_step8(b, g * c, ak) : b * (1.0f - ak) + g * c;
+        if (n90 == 999 && fabsf(b - bt) <= tol) { n90 = n; }
+    }
+    *end = b;
+    return n90;
+}
+
+static void test_bloomlag(void)
+{
+    int fail = 0, n = 0, q, ia;
+    static const unsigned kA8[2] = { 20u, 45u }; /* Mission 0x14, Zustand 0x2D (FUN_00020FA0) */
+    /* Klassen: nur LoC, Ziel <= 32^2, Blend an, SRCALPHA/INVSRCALPHA bzw. ONE/ONE */
+    n++; if (bloomlag_class(1, 14, 14, 1, 5, 6) != BLOOMLAG_DECAY) { fail++; }
+    n++; if (bloomlag_class(1, 14, 14, 1, 2, 2) != BLOOMLAG_ADD) { fail++; }
+    n++; if (bloomlag_class(1, 9, 9, 1, 5, 6) != BLOOMLAG_DECAY) { fail++; }   /* Lock-On-Kamera */
+    n++; if (bloomlag_class(0, 14, 14, 1, 5, 6) != 0u) { fail++; }             /* SB */
+    n++; if (bloomlag_class(1, 512, 512, 1, 2, 2) != 0u) { fail++; }           /* Welt-RT */
+    n++; if (bloomlag_class(1, 256, 256, 1, 5, 6) != 0u) { fail++; }           /* Glow-Ziel */
+    n++; if (bloomlag_class(1, 14, 14, 0, 5, 6) != 0u) { fail++; }             /* Blend aus */
+    n++; if (bloomlag_class(1, 14, 14, 1, 2, 1) != 0u) { fail++; }             /* ONE/ZERO */
+    n++; if (bloomlag_class(1, 0, 0, 1, 2, 2) != 0u) { fail++; }
+    /* Schalter: nur mit Enhanced-Bloom; Original (100/0) bleibt 1 */
+    n++; if (bloomlag_k(1, 4, 100, 0) != 1) { fail++; }
+    n++; if (bloomlag_k(1, 4, 130, 20) != 4) { fail++; }                      /* Enhanced */
+    n++; if (bloomlag_k(1, 4, 150, 20) != 4) { fail++; }                      /* Vivid */
+    n++; if (bloomlag_k(1, 4, 100, 20) != 4) { fail++; }                      /* nur Schwelle */
+    n++; if (bloomlag_k(1, 0, 130, 20) != 1 || bloomlag_k(1, 1, 130, 20) != 1) { fail++; }
+    n++; if (bloomlag_k(1, 99, 130, 20) != BLOOMLAG_KMAX) { fail++; }
+    n++; if (bloomlag_k(0, 4, 130, 20) != 1) { fail++; }                      /* SB */
+    n++; if (bloomlag_a(0) != 0.0f || bloomlag_a(300) != 0.0f || fabsf(bloomlag_a(20) - 20.0f / 255.0f) > 1e-6f) { fail++; } /* 0 = Original lassen */
+    n++; if (fabsf(bloomlag_comp(0.1f, 1) - 1.0f) > 1e-6f || fabsf(bloomlag_alpha(0.1f, 1) - 0.1f) > 1e-6f) { fail++; }
+    /* Uebergang Boden -> Himmel (Kanal B: Boden 0,06, Himmel 0,28 im Bloom, Messwerte W507 E2) und zurueck,
+     * float und 8 Bit: Gleichgewicht gleich, 90 %-Zeit Original >= 25 Bilder, k = 4 <= 8 Bilder */
+    for (ia = 0; ia < 2; ia++) {
+        float a = bloomlag_a(kA8[ia]);
+        for (q = 0; q < 2; q++) {
+            int dir;
+            for (dir = 0; dir < 2; dir++) {
+                float b0 = dir ? 0.28f : 0.06f, s1 = dir ? 0.06f : 0.28f, g = s1 * a, e1, e4;
+                int n1 = bl_settle(b0, g, a, 1, q, &e1), n4 = bl_settle(b0, g, a, 4, q, &e4);
+                /* float: gleiches Gleichgewicht; 8 Bit: Rest beim Gleichgewicht G/a hoechstens 2,5/255 und nie
+                 * groesser als im Original (das 8-Bit-Abklingen bleibt mit a = 20/255 bis zu ~6/255 haengen) */
+                n++; if (!q && fabsf(e1 - e4) > 1e-3f) { fail++; printf("  BLOOMLAG Gleichgewicht a=%u: %.4f vs %.4f\n", kA8[ia], e1, e4); }
+                n++; if (q && (fabsf(e4 - s1) > 2.5f / 255.0f || fabsf(e4 - s1) > fabsf(e1 - s1) + 0.5f / 255.0f)) {
+                    fail++; printf("  BLOOMLAG 8 Bit a=%u dir=%d: Original %.4f, k=4 %.4f, Soll %.4f\n", kA8[ia], dir, e1, e4, s1); }
+                n++; if (ia == 0 && (n1 < 25 || n4 < 1 || n4 > 8)) { fail++; printf("  BLOOMLAG 90%%-Zeit a=%u q=%d dir=%d: k1=%d k4=%d\n", kA8[ia], q, dir, n1, n4); }
+                n++; if (ia == 1 && (n4 < 1 || n4 * 3 > n1 + 2)) { fail++; printf("  BLOOMLAG 90%%-Zeit a=%u q=%d dir=%d: k1=%d k4=%d\n", kA8[ia], q, dir, n1, n4); }
+            }
+        }
+    }
+    /* Saettigung: wo c*G klemmt, war das Original ebenfalls gesaettigt (8 Bit) */
+    {
+        float a = bloomlag_a(20u), e1, e4;
+        (void)bl_settle(0.0f, 0.5f, a, 1, 1, &e1);
+        (void)bl_settle(0.0f, 0.5f, a, 4, 1, &e4);
+        n++; if (e1 < 0.999f || e4 < 0.999f) { fail++; }
+    }
+    printf("BLOOMLAG (W507): %d Faelle (Klassen, Schalter nur Enhanced-Bloom, Gleichgewicht, 90 %%-Zeit Original/k=4, 8 Bit, Saettigung): %d Fehler\n", n, fail);
+    g_fail += fail;
+}
+
 /* ---------- W352 ISSUE-EMP: Linien-Band-GS (line_scale) ----------
  * Spiel-Viewport 16x16 (logisch) auf 64x64 (Faktor 4): Linie mit und ohne
  * GS rastern, gezaehlte Pixel gegen Laenge x Breite (1 Xbox-Pixel = 4 px). */
@@ -2709,6 +2848,91 @@ static void test_linescale(void)
         printf("LSBB %s: %u Faelle\n", nf ? "FAIL" : "ok", (unsigned)(sizeof k / sizeof k[0]));
         g_fail += nf;
     }
+}
+
+/* ---------- W505 ISSUE-106: Sicht je Bild mit Eingabeprofil gleichmaessig (loc_hud_math.h lh_frame_repeat, lh_smooth) ----------
+ * Messgroesse lh_smooth_t (Zeile LOCVPF-GLATT): stehende Bilder / Spruenge der gezeigten Sicht-Gier in Drehphasen.
+ * (a) Messgroesse selbst: gleichmaessige Drehung -> 0 stehend/0 Sprung; Tick-Stufen (5 von 6 Bildern gleich) -> ~5/6
+ *     stehend, ~1/6 Sprung; doppelte Wiedergabe (< 2 ms) zaehlt nicht; Umbruch bei +-pi stetig.
+ * (b) Kette wie li_vpf_view: Sichthebel gehalten (Eingabeprofil, keine Legacy-Vorschau). Alt (Basis je Tick) stehen
+ *     5 von 6 Bildern; neu (Zusatz-Schritt mit dem letzten Satz, Gewicht nach Phase) kein stehendes Bild, kein Sprung,
+ *     Schritt/Soll im Mittel ~1, und am Tick-Wechsel stetig (gehalten = neue Basis). */
+static void test_w505(void)
+{
+    int n = 0, fail = 0, k, f;
+    {   /* (a) */
+        lh_smooth_t a, b, c;
+        double ms;
+        memset(&a, 0, sizeof a); memset(&b, 0, sizeof b); memset(&c, 0, sizeof c);
+        for (k = 0; k < 600; k++) {
+            ms = 1000.0 + k * (50.0 / 6.0);
+            lh_smooth_add(&a, ms, la_wrap(0.002 * k + 3.0));            /* gleichmaessig, ueber +-pi */
+            lh_smooth_add(&b, ms, 0.012 * (double)(k / 6));             /* Tick-Stufen */
+            lh_smooth_add(&c, ms, 0.002 * k); lh_smooth_add(&c, ms + 0.5, 0.002 * k); /* doppelt */
+        }
+        n++; if (a.turn < 590 || a.stall || a.jump || fabs(a.rel_sum / a.turn - 1.0) > 1e-6) { fail++; printf("W505 FAIL (a1) turn=%u stall=%u jump=%u\n", a.turn, a.stall, a.jump); }
+        n++; if (b.turn < 590 || b.stall < b.turn * 4 / 5 || b.jump < b.turn / 7 || b.stall + b.jump != b.turn) { fail++; printf("W505 FAIL (a2) turn=%u stall=%u jump=%u\n", b.turn, b.stall, b.jump); }
+        n++; if (c.turn != a.turn || c.stall || c.jump) { fail++; printf("W505 FAIL (a3) turn=%u stall=%u jump=%u\n", c.turn, c.stall, c.jump); }
+    }
+    {   /* (b) */
+        static const int sxs[3] = {60, 127, -90};
+        int si;
+        for (si = 0; si < 3; si++) {
+            la_state_t p, s1, hold;
+            uint8_t in[14], F[14];
+            lh_smooth_t olds, news;
+            double v[4], vprev = 0.0, cont = 0.0;
+            memset(&p, 0, sizeof p); memset(&olds, 0, sizeof olds); memset(&news, 0, sizeof news);
+            p.fa0 = 0x4000u; p.zoom = 20.0; p.arate = 0.05;
+            memset(in, 0, sizeof in);
+            in[12] = (uint8_t)(int8_t)sxs[si]; in[13] = (uint8_t)(int8_t)-1; /* Sicht x gehalten, y Ruhe */
+            for (k = 0; k < 40; k++) {
+                if (!la_step(&p, in)) { break; } /* neue Basis (Vorhersage nach dem Poll) */
+                if (k) { lh_blend(&p, &p, 0.0, v); cont = fmax(cont, fabs(la_wrap(v[0] - vprev))); } /* Tick-Wechsel: gehalten -> Basis */
+                lh_frame_repeat(in, F);
+                s1 = p;
+                if (!la_step(&s1, F)) { s1 = p; }
+                for (f = 0; f < 6; f++) {
+                    double ms = 1000.0 + k * 50.0 + f * (50.0 / 6.0);
+                    lh_smooth_add(&olds, ms, p.ys);                       /* alt: Basis je Tick */
+                    lh_blend(&p, &s1, lh_rep_weight(f * (50.0 / 6.0), 50.0), v); /* neu: Zusatz-Schritt mit letztem Satz */
+                    lh_smooth_add(&news, ms, v[0]);
+                }
+                hold = s1; lh_blend(&hold, &hold, 1.0, v); vprev = v[0]; /* bis zur naechsten Vorhersage gehalten (Modus 3) */
+            }
+            n++; if (olds.turn < 100 || olds.stall < olds.turn * 3 / 4) { fail++; printf("W505 FAIL (b-alt %d) turn=%u stall=%u\n", sxs[si], olds.turn, olds.stall); }
+            n++; if (news.turn < 100 || news.stall || news.jump || fabs(news.rel_sum / news.turn - 1.0) > 0.25) {
+                fail++; printf("W505 FAIL (b-neu %d) turn=%u stall=%u jump=%u rel=%.3f\n", sxs[si], news.turn, news.stall, news.jump, news.turn ? news.rel_sum / news.turn : 0.0);
+            }
+            n++; if (cont > 1e-12) { fail++; printf("W505 FAIL (b-stetig %d) %.3g\n", sxs[si], cont); }
+        }
+    }
+    {   /* (d) Bild kurz nach bzw. vor der naechsten Vorhersage (Bildzeit statt Wiedergabe-Zeit): alte Basis mit w > 1 bzw.
+         * neue Basis mit w < 0 zeigt fast dasselbe (Abweichung << ein Bildschritt); begrenzt auf [-0,5, 1,5] */
+        la_state_t p0, p1, p2;
+        uint8_t in[14];
+        double a[4], b[4], step, dmax = 0.0, ms;
+        memset(&p0, 0, sizeof p0); p0.fa0 = 0x4000u; p0.zoom = 20.0; p0.arate = 0.05;
+        memset(in, 0, sizeof in); in[12] = (uint8_t)(int8_t)100; in[13] = (uint8_t)(int8_t)-1;
+        for (k = 0; k < 8; k++) { (void)la_step(&p0, in); } /* eingeschwungen */
+        p1 = p0; (void)la_step(&p1, in); p2 = p1; (void)la_step(&p2, in);
+        step = fabs(la_wrap(p1.ys - p0.ys)) / 6.0; /* ein Bild bei 120 FPS */
+        for (ms = -6.0; ms <= 6.0; ms += 1.0) {
+            lh_blend(&p0, &p1, lh_rep_weight(50.0 + ms, 50.0), a); /* alte Vorhersage, Bild bei 50 + ms */
+            lh_blend(&p1, &p2, lh_rep_weight(ms, 50.0), b);        /* neue Vorhersage (veroeffentlicht bei 50) */
+            dmax = fmax(dmax, fabs(la_wrap(a[0] - b[0])));
+        }
+        n++; if (!(step > 0.0) || dmax > 0.1 * step) { fail++; printf("W505 FAIL (d) dmax=%.3g step=%.3g\n", dmax, step); }
+        n++; if (lh_rep_weight(-100.0, 50.0) != -0.5 || lh_rep_weight(500.0, 50.0) != 1.5 || lh_rep_weight(25.0, 0.0) != 0.5) { fail++; }
+    }
+    {   /* (c) lh_frame_repeat = Kopie */
+        uint8_t a[14], b[14];
+        for (k = 0; k < 14; k++) { a[k] = (uint8_t)(k * 37 + 5); }
+        memset(b, 0, sizeof b); lh_frame_repeat(a, b);
+        n++; if (memcmp(a, b, 14)) { fail++; }
+    }
+    printf("W505 (ISSUE-106): %d Faelle (Messgroesse Sicht je Bild, Zusatz-Schritt mit letztem Satz bei Eingabeprofil, Stetigkeit am Tick-Wechsel): %d Fehler\n", n, fail);
+    g_fail += fail;
 }
 
 /* ---------- W394 LOC-HUD-VIEW / LOC-VIEW-PERFRAME (loc_hud_math.h) ---------- */
@@ -3035,6 +3259,7 @@ int main(int argc, char **argv)
     test_cpersp();
     test_texzero();
     test_bbcam();
+    test_tree506(); /* W506 ISSUE-105 */
     test_camfit();
     test_locaim();
     test_locaa(); /* W442 */
@@ -3044,11 +3269,13 @@ int main(int argc, char **argv)
     test_locownpred(); /* W390 */
     test_pacing(); /* W393 */
     test_lochud(); /* W394 */
+    test_w505(); /* W505 ISSUE-106 */
     test_ret439(); /* W439 */
     test_retmark444(); /* W444 */
     test_loclook();
     test_eye448(); /* W448 */
     test_sblook(); /* W459 */
+    test_bloomlag(); /* W507 */
     test_visqz(); /* W477 */
     test_linescale();
     test_shref();

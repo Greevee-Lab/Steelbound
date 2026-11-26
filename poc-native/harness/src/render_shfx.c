@@ -49,6 +49,7 @@
 #include "sb_remaster.h" /* W173: sb_rem_fx_locked (Effect-Pack-Ausnahme) */
 #include "sb_state.h" /* W232: sb_in_mission */
 #include "render_sblook.h" /* W459: SB look (LoC) */
+#include "render_bloomlag.h" /* W507: Bloom-Nachlauf (LoC) */
 #include "loc_render.h" /* W465: loc_render_post_scene */
 
 int rq_ab_base(void); /* render_shade.c */
@@ -97,6 +98,45 @@ int shfx_world_on(void)
 int shfx_cockpit_on(void)
 {
     return g_cfg.cockpit_glow > 0 || g_cfg.cockpit_spill > 0 || g_cfg.cockpit_light < 100;
+}
+
+/* W507 LOC-BLOOM-LAG (#107): Draw in ein LoC-Bloom-Ziel (14^2 Hauptbild, 9^2 Kamera)? Klasse aus Zielgroesse und
+ * aktuellem Blend-Zustand (Spielpfad; die Pause-Wiedergabe nimmt die aufgezeichnete Klasse, rq_rec.sfx_fl). */
+unsigned shfx_loc_bloom_class(int tgt)
+{
+    unsigned on = 0, src = 0, dst = 0;
+    if (!g_sba_loc || tgt < 0 || tgt >= g_rtt_n) { return 0u; }
+    sb_render_blend_state(&on, &src, &dst);
+    return bloomlag_class(g_sba_loc, g_rtt[tgt].w, g_rtt[tgt].h, on, src, dst);
+}
+
+static unsigned s_lb_n[2]; /* W507: Draws mit schnellerem Bloom (Abklingen, additiv) */
+static unsigned s_lb_last[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu }, s_lb_nlog; /* W507: Zeile LOCBLOOM fast je Ziel bei neuem
+                                                                         * Abklingwert (max. 24) */
+
+/* W507: Faktor k und Ausgleich c fuer einen Draw der Klasse lbc in Ziel tgt; 0 = Original. Den Abklingwert a
+ * liest der Pfad aus dem Spiel ([0x307044] Hauptbild, [0x3071A8] Kamera), damit das Gleichgewicht exakt bleibt. */
+static int sfx_bloomlag(unsigned lbc, int tgt, float *k_out, float *c_out)
+{
+    int k = bloomlag_k(g_sba_loc, g_cfg.loc_bloom_fast, sfx_bloom_pct(), g_cfg.bloom_threshold);
+    unsigned a8 = 0;
+    float a;
+    if (k <= 1 || !lbc || tgt < 0 || tgt >= g_rtt_n) { return 0; }
+    __try { a8 = *(volatile const unsigned *)(uintptr_t)(g_rtt[tgt].w <= 11u ? 0x3071A8u : 0x307044u); }
+    __except (EXCEPTION_EXECUTE_HANDLER) { a8 = 0; }
+    a = bloomlag_a(a8);
+    if (a <= 0.0f) { return 0; } /* kein Abklingen im Spiel (a = 0): Original lassen */
+    *k_out = (float)k;
+    *c_out = bloomlag_comp(a, k);
+    if (a8 != s_lb_last[g_rtt[tgt].w <= 11u] && s_lb_nlog < 24u) {
+        s_lb_last[g_rtt[tgt].w <= 11u] = a8;
+        s_lb_nlog++;
+        HLOG_I("LOCBLOOM fast: Bloom-Nachlauf %dx schneller (Ziel %ux%u, a=%u/255 -> %.3f, Ausgleich %.2f), Zeitkonstante "
+               "%.2f -> %.2f s (Draws %u/%u)", k, g_rtt[tgt].w, g_rtt[tgt].h, a8, bloomlag_alpha(a, k), *c_out,
+               -0.05 / log(1.0 - a), -0.05 / log(1.0 - bloomlag_alpha(a, k)), s_lb_n[0], s_lb_n[1]);
+    }
+    s_lb_n[lbc == BLOOMLAG_DECAY ? 0 : 1]++;
+    return 1;
 }
 
 /* W131 SHADER-OPT2: Farbabstimmung des Endbilds aktiv? */
@@ -164,24 +204,27 @@ static int sfx_is_world(int slot)
 /* W193 PAUSE-LIVE: gemeinsamer Kern. xp_in = Stufen-Texturadressen der Aufzeichnung (Pause-
  * Wiedergabe, ohne Zaehler) bzw. NULL = aktuelle Stufen (rq_bind, bisheriger Weg). */
 static void sfx_consts_core(float *sx, const int srvk[4], const unsigned *xp_in, int tgt, int is3d, int fog_ps,
-                            int st0rt, unsigned nstages);
-void shfx_rq_consts(float *sx, const int srvk[4], int tgt, int is3d, int fog_ps, int st0rt, unsigned nstages)
+                            int st0rt, unsigned nstages, unsigned lbc);
+void shfx_rq_consts(float *sx, const int srvk[4], int tgt, int is3d, int fog_ps, int st0rt, unsigned nstages, unsigned lbc)
 {
-    sfx_consts_core(sx, srvk, NULL, tgt, is3d, fog_ps, st0rt, nstages);
+    sfx_consts_core(sx, srvk, NULL, tgt, is3d, fog_ps, st0rt, nstages, lbc);
 }
 
-void shfx_rq_consts_rep(float *sx, const unsigned xp[4], int tgt, int is3d, int fog_ps, int st0rt, unsigned nstages)
+void shfx_rq_consts_rep(float *sx, const unsigned xp[4], int tgt, int is3d, int fog_ps, int st0rt, unsigned nstages,
+                        unsigned lbc)
 {
-    unsigned nf[5];
+    unsigned nf[5], ln[2];
     int srvk[4], k;
     memcpy(nf, g_sfx_nflag, sizeof nf);
+    memcpy(ln, s_lb_n, sizeof ln);
     for (k = 0; k < 4; k++) { srvk[k] = xp[k] != 0u; }
-    sfx_consts_core(sx, srvk, xp, tgt, is3d, fog_ps, st0rt, nstages);
+    sfx_consts_core(sx, srvk, xp, tgt, is3d, fog_ps, st0rt, nstages, lbc);
     memcpy(g_sfx_nflag, nf, sizeof nf); /* Statistik nur aus dem Spielpfad */
+    memcpy(s_lb_n, ln, sizeof ln);
 }
 
 static void sfx_consts_core(float *sx, const int srvk[4], const unsigned *xp_in, int tgt, int is3d, int fog_ps,
-                            int st0rt, unsigned nstages)
+                            int st0rt, unsigned nstages, unsigned lbc)
 {
     unsigned flags = 0, xp[4], nn[4], k;
     memset(sx, 0, 16 * sizeof(float));
@@ -229,6 +272,13 @@ static void sfx_consts_core(float *sx, const int srvk[4], const unsigned *xp_in,
             flags |= 0x1000u << k;
             sx[12] = (float)sfx_pct(g_cfg.world_focus, 0, 100) / 100.0f;
             g_sfx_nflag[1]++;
+        }
+    }
+    if (lbc && !(flags & 0x200u)) { /* W507 LOC-BLOOM-LAG: Bloom-Ziel des Spiels (sfx2.x/y sind ohne 0x200 frei) */
+        float lk = 1.0f, lc = 1.0f;
+        if (sfx_bloomlag(lbc, tgt, &lk, &lc)) {
+            if (lbc == BLOOMLAG_DECAY) { flags |= 0x10000u; sx[8] = lk; } /* Abkling-Quad: a' = 1 - (1 - a)^k */
+            else { flags |= 0x20000u; sx[9] = lc; }                      /* additiv: RGB * c */
         }
     }
     {

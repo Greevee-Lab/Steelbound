@@ -57,7 +57,8 @@ typedef struct {
      * Bild haengt nicht davon ab. */
     unsigned sfx_xp[4];   /* Stufen-Texturadresse (0 = keine SRV bzw. Schattenpuffer) */
     signed char sfx_tgt;  /* gebundener RT-Slot (-1 = BB) */
-    unsigned char sfx_fl; /* Bit 0 3D (kind 0, kein RHW), Bit 1 Nebel im Spiel-PS, Bit 2 Stufe 0 ist RT */
+    unsigned char sfx_fl; /* Bit 0 3D (kind 0, kein RHW), Bit 1 Nebel im Spiel-PS, Bit 2 Stufe 0 ist RT,
+                           * Bit 3/4 W507 LoC-Bloom-Klasse (render_bloomlag.h) */
     unsigned char sfx_nst;
 } rq_rec_t;
 

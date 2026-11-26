@@ -557,6 +557,7 @@ __declspec(noinline) void sb_ctx_leave(void)
 
 /* ASPECT (W18): Vorab-Deklaration (Definition unten bei sb_im_submit). */
 static void sb_aspect_bars(void);
+static void side_bars_track(int had3d); /* W508 CHATBAR */
 
 /* A6 ui_thread: eigener Fenster-Thread. Er erzeugt das Fenster (Besitz)
  * und pumpt es per GetMessage-Loop (D3D-Device/Swapchain bleiben auf
@@ -1355,6 +1356,7 @@ static void sb_render_present_body(unsigned flags)
         unsigned cur3d = g_im_3d;
         int had3d = (cur3d != last_3d);
         last_3d = cur3d;
+        side_bars_track(had3d); /* W508 CHATBAR */
         if (!had3d) {
             sb_ctx_enter();
             sb_aspect_bars();
@@ -2458,6 +2460,28 @@ long sb_render_device_reason(void)
 {
     if (!g_dev) { return -1; }
     return (long)ID3D11Device_GetDeviceRemovedReason(g_dev);
+}
+
+/* W508 CHATBAR: Sind in diesem Bild schwarze Seitenbalken zu sehen? Balken entstehen (a) im 2D-Bild ohne 3D-Draws
+ * (aspect_mode, sb_aspect_bars: Menues, Lobby, Filme) und (b) dauerhaft, wenn die Randmaske ausserhalb der Box
+ * schwaerzt (LoC 16:9 immer, sonst edge_mode > 0, render_edge.c). Bei 4:3 mit edge_mode 0 fuellt das 3D-Bild im
+ * Match die Breite (Hor+) - dann keine Balken. Damit der Chat nicht springt, wechselt der 2D-Zustand erst nach
+ * SIDE_BARS_HYST Bildern in Folge. Render-Thread (Present). */
+#define SIDE_BARS_HYST 20
+static int s_side2d = 1, s_side_run;
+static void side_bars_track(int had3d)
+{
+    int want = had3d ? 0 : 1;
+    if (want == s_side2d) { s_side_run = 0; return; }
+    if (++s_side_run >= SIDE_BARS_HYST) { s_side2d = want; s_side_run = 0; }
+}
+int sb_aspect_side_bars(void)
+{
+    unsigned bx, by, bw, bh;
+    sb_aspect_box(&bx, &by, &bw, &bh);
+    if (bx == 0u || bw >= g_bb_w) { return 0; } /* Letterbox oder Vollbild */
+    if (g_loc_wide || g_cfg.edge_mode > 0) { return 1; }
+    return g_cfg.aspect_mode && s_side2d;
 }
 
 /* ASPECT (W18, Regel S3.10 "nie strecken"): zentriertes Rechteck im

@@ -228,10 +228,21 @@ static unsigned __stdcall clip_worker(void *unused)
     InterlockedExchange(&c.done,1);
     return 0;
 }
+/* W505 ISSUE-106: Zeitbasis QPC statt GetTickCount64 (~15,6 ms Raster). Vorher fiel mit "naechster Abgriff = jetzt +
+ * 33 ms" nur alle ~47 ms ein Bild an (~21 je Sekunde), die Luecken fuellte der Kodierer mit dem Vorbild - jeder Clip
+ * wirkte wie 20 FPS, auch wenn das Spiel mit 120 FPS lief. Jetzt ein Abgriff je 1/30-s-Fach. */
+static ULONGLONG clip_ms(void)
+{
+    static LONGLONG f;
+    LARGE_INTEGER q;
+    if (!f) { LARGE_INTEGER fr; QueryPerformanceFrequency(&fr); f = fr.QuadPart; }
+    QueryPerformanceCounter(&q);
+    return (ULONGLONG)(q.QuadPart / f * 1000 + (q.QuadPart % f) * 1000 / f);
+}
 int sb_clip_active(void) { return c.active != 0; }
 int sb_clip_seconds(void)
 {
-    ULONGLONG elapsed = GetTickCount64()-c.begin;
+    ULONGLONG elapsed = clip_ms()-c.begin;
     return elapsed >= 5000 ? 0 : 5-(int)(elapsed/1000);
 }
 int sb_clip_start(const char *dir)
@@ -246,7 +257,7 @@ int sb_clip_start(const char *dir)
     c.wake=CreateEventW(NULL,FALSE,FALSE,NULL); if (!c.wake) goto fail;
     /* Test-only failure injection, not a recording trigger. */
     c.force_jpg = g_cfg.overlay_test[0] && GetEnvironmentVariableA("SB_CLIP_TEST_JPG",NULL,0)>0;
-    c.begin=GetTickCount64(); c.next=c.begin;
+    c.begin=clip_ms(); c.next=c.begin;
     c.thread=(HANDLE)_beginthreadex(NULL,0,clip_worker,NULL,CREATE_SUSPENDED,NULL);
     if (!c.thread) goto fail;
     sb_clip_remove(dir);
@@ -263,7 +274,7 @@ void sb_clip_frame(ID3D11RenderTargetView *rtv)
 {
     ID3D11Resource *src=NULL; D3D11_TEXTURE2D_DESC td; unsigned i; ULONGLONG now;
     if (!c.active || c.stop || g_sb_paused || sb_ovl_open() || !rtv) return;
-    now=GetTickCount64();
+    now=clip_ms();
     if(now-c.begin>=5000) { InterlockedExchange(&c.stop,1); SetEvent(c.wake); return; }
     ID3D11RenderTargetView_GetResource(rtv,&src); if(!src) return;
     ID3D11Texture2D_GetDesc((ID3D11Texture2D *)src,&td);
@@ -301,7 +312,7 @@ void sb_clip_frame(ID3D11RenderTargetView *rtv)
     if(now>=c.next) for(i=0;i<CS;++i) if(!c.st[i].pending && c.st[i].tex) {
         c.st[i].at=(unsigned)((now-c.begin)*30/1000);
         ID3D11DeviceContext_CopyResource(g_ctx,(ID3D11Resource *)c.st[i].tex,src);
-        c.st[i].pending=1; c.next=now+33; break;
+        c.st[i].pending=1; c.next=c.begin+((now-c.begin)*30/1000+1)*1000/30; break; /* W505: naechstes 1/30-s-Fach */
     }
     ID3D11Resource_Release(src);
     return;
@@ -316,7 +327,7 @@ int sb_clip_poll(unsigned *bytes,unsigned *w,unsigned *h)
 {
     unsigned i; int result;
     if(!c.active) return 0;
-    if(GetTickCount64()-c.begin>=5000 && !c.stop) { InterlockedExchange(&c.stop,1); SetEvent(c.wake); }
+    if(clip_ms()-c.begin>=5000 && !c.stop) { InterlockedExchange(&c.stop,1); SetEvent(c.wake); }
     if(!c.done || WaitForSingleObject(c.thread,0)!=WAIT_OBJECT_0) return 0;
     result=c.result; *bytes=c.bytes; *w=c.w; *h=c.h;
     CloseHandle(c.thread); c.thread=NULL; CloseHandle(c.wake); c.wake=NULL;

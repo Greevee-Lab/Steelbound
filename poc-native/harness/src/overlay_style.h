@@ -158,6 +158,9 @@ void ovs_layout_claim(ovs_slot id, unsigned x, unsigned y, unsigned w, unsigned 
  * 1 = gefunden (x/y gesetzt), 0 = passt nicht mehr auf den Bildschirm. */
 int ovs_layout_place(ovs_slot id, ovs_corner c, unsigned w, unsigned h, unsigned margin, unsigned gap, unsigned *x,
                      unsigned *y);
+/* W508 CHATBAR: wie ovs_layout_place unten, aber in der festen Spalte x (z. B. Seitenbalken): von unten (Abstand
+ * margin) nach oben gestapelt hinter allem, was dort schon angemeldet ist. 1 = gefunden (y gesetzt, angemeldet). */
+int ovs_layout_place_col(ovs_slot id, unsigned x, unsigned w, unsigned h, unsigned margin, unsigned gap, unsigned *y);
 /* Anmeldung dieses Bildes abfragen (r = x, y, w, h). 1 = angemeldet. */
 int ovs_layout_get(ovs_slot id, unsigned r[4]);
 /* 1 = Rechteck ueberlappt eine Anmeldung dieses Bildes (ausser self) */

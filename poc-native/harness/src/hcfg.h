@@ -103,10 +103,12 @@ typedef struct {
     int ctrl_despike;     /* W439 LOC-RETICLE-JUMP (#78), Standard 1 (Nutzerentscheid 22.11., bewusste Ausnahme von "Abweichung = Experimental"): 1 = Ausreisser-Filter fuer analoge Achsen des Original-Controllers (SBC/USB) und von Joysticks (input_despike.h: Einzelwert mit Sprung > Schwelle wird verworfen, wenn der naechste Report zurueckkehrt; normale Bewegung unverzoegert; Gamepad/Maus ungefiltert), 0 = Original */
     int loc_ret_diag;     /* DIAG(W439 LOC-RETICLE-JUMP): Bit 1 = je Wiedergabe Fadenkreuz (Soll/gezeichnet), Sicht, Ereignisse nach locret_rep.bin (nur Testfolge), Bit 2 = Zeile LOCRET alle 10 s, Bit 4 = je Liste Fadenkreuz-Kandidaten nach locret_cand.txt (W444, nur Testfolge); 0 = aus (Sprung-Zaehler fuer F11 laeuft immer, nur Zaehler) */
     int loc_ret_mark;     /* W444 LOC-RETICLE-MARK (#78, Ursache 2): 1 = Fadenkreuz-Teile ueber Form-Identitaet zur Vorliste erkennen (loc_ret_mark.h; sonst verwarf die Bewegungs-Pruefung gegen die Formel-Mitte beim Drehen Teile, die dann ohne Sicht-Korrektur versetzt erschienen), nur LoC mit Zwischenbildern; 0 = alt (W376/W439) */
+    int loc_tree_fix;     /* W506 ISSUE-105: 1 = in Zwischenbildern kleine texturierte Welt-Draws mit eigener Matrix (Baeume, <= 64 Vertices), die exakt blieben oder deren Partner nicht zur Kamera der Welt passt, mit der Kamera der Welt bewegen (rzm, nur LoC); 0 = alt (Baeume stehen im Tick-Takt bzw. gleiten vom falschen Partner) */
     int loc_stat_fix;     /* W415 LOC-STATIC-LAG: 1 = in Zwischenbildern die Kamera der Welt (haeufigste gleiche Matrix im Weltziel, bestaetigt durch gelerpte Draws) fuer mit der Kamera bewegte Gelaende-Netze (W410 rzm) und fuer partnerlose Draws in Weltkoordinaten (grosses Bodennetz, nomatch) nehmen (nur LoC); 0 = alt (W410-Kamera bzw. exakt) */
     int memreg_keep;      /* W417 SB-BRIEF-BLACK (#66): 1 = Eintraege, die der volle Register-Ring (8192) verdraengt, als Bereiche behalten; Adressabfragen (Texturkopf-Pruefung) finden sie weiter, solange der Speicher zugesagt ist (vorher nach langen Laeufen Film im Briefing schwarz, Grund 1); 0 = alt */
     int loc_rule_clipdump_block; /* W420 LOC-CLIPDUMP: Host-Regel "Clip dumping unterbinden" (1 = Magazinwechsel setzt die Feuerpause der Hauptwaffe nicht zurueck; Standard 1, gilt im Match nach der Einstellung des Hosts, loc_rule.c) */
     int loc_chat;         /* W437 LOC-CHAT: Textchat in LoC online (Launcher "Chat", Standard 1; 0 = weder Anzeige noch Senden) */
+    int loc_chat_pos;     /* W508 CHATBAR: Lage des Chats - 0 = auto (Standard: in den schwarzen Seitenbalken, wenn breit genug), 1 = immer ueber dem Bild (unten links wie bis 0.6.0) */
     int loc_chat_direct;  /* W437 TEST: Chat auch im eigenen Transport ohne Treffpunkt (loc_transport_peers, Testschluessel) */
     char loc_chat_test[1024]; /* W437 TEST: Chat-Testfolge "ms:O;ms:T<Text>;ms:E" (Nachrichten an das eigene Fenster) */
     int loc_play_mode;       /* W440 LOC-LOBBY-MODES: Modus eigener steelnet-Lobbys (Host): 1 = sim (Standard), 2 = arcade
@@ -204,6 +206,8 @@ typedef struct {
     int interp_pace_dn;     /* W393 TEST: hoechste Beschleunigung in Promille, wenn L faellt (Standard 20) */
     int loc_hud_predict;    /* W394 LOC-HUD-VIEW: HUD-Marken mit Weltbezug (Zielmarken, Lock-On-Rahmen, Kompass, Radar) zur vorgezeichneten eigenen Kamera zeichnen (nur Anzeige): 0 aus, 1 an (Standard) */
     int loc_view_perframe;  /* W394: Sicht/Fadenkreuz je Bild aus Maus bzw. Hebel vorzeichnen (nur Anzeige, Simulation tastet weiter je Tick ab): 0 aus, 1 an */
+    int loc_vpf_repeat;     /* W505 ISSUE-106: mit Eingabeprofil (keine Legacy-Belegung) Vorschau-Rahmen = letzter eigener Satz, damit die Sicht je Bild weiterlaeuft statt in Tick-Stufen: 0 aus (alt), 1 an (Standard) */
+    int loc_vpf_test_profile; /* W505 TEST (nur mit Testfolge): Vorschau wie mit Eingabeprofil (Legacy-Akku-Vorschau aus), Vergleich alt/neu mit Legacy-Testfolgen */
     int loc_hud_diag;       /* W394 DIAG: Bit 1 HUD-Zensus mit Gegner im Bild (nur mit Testfolge), Bit 2 Zeilen LOCHUD/LOCVPF, Bit 4 Bild-Datei je Wiedergabe (nur mit Testfolge) */
     int loc_vpf_test;       /* W394 TEST: Pseudo-Taste 337 -> Mausschritte (Counts je 5 ms) ab zufaelliger Tickphase (nur input_test_hook + loc_mouse_test + Testfolge) */
     int loc_vpf_test_alt;   /* W394 TEST: 1 = loc_view_perframe je Gruppe von 4 Testschritten abwechselnd aus/an (Vergleich im selben Lauf) */
@@ -941,6 +945,11 @@ typedef struct {
     int loc_mem_quar;           /* Quarantaene freigegebener LOCMEM-Bloecke in Bildern (Inhalt bleibt so lange stehen, Standard 300 = 10 s bei 30 Bildern/s; 0 = sofort) */
     /* W496 NET-TELEMETRY: Netzbericht an steelnet (nur LoC mit Treffpunkt), Launcher-Frage "anonyme Netzstatistik" */
     int net_report;             /* 1 = Zustimmung: feste Codes/Zahlen am Lobby-/Match-Ende an steelnet (loc_tun_netrep.c); 0 = nie (Standard, bis gefragt) */
+    /* W507 LOC-BLOOM-LAG (#107), nur LoC */
+    int loc_bloom_diag;         /* DIAG: 1 = LoC-Bloom-Ziele (<= 32^2) beim Lesen zuruecklesen, Zeile LOCBLOOM rt (Mittel/Max je Kanal) */
+    int loc_bloom_fast;         /* FIX: Nachlauf des spieleigenen Bloom k-fach schneller bei gleicher Helligkeit (render_bloomlag.h), nur mit Enhanced-Bloom (bloom_strength != 100 oder bloom_threshold > 0); 0/1 = aus (Original-Zeitverhalten), Standard 4 */
+    /* W512 ISSUE-109, nur LoC */
+    int loc_shadow_border;      /* FIX: Schattenvergleich ausserhalb der Schattenkarte mit der Randfarbe des Spiels (ADDRESS BORDER, LoC: 0xFFFFFFFF = groesste Tiefe = beleuchtet) statt Randtexel; 0 = alt (Randtexel), Standard 1 */
 } hcfg_t;
 
 extern hcfg_t g_cfg;

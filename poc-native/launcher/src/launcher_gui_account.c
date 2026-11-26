@@ -2150,6 +2150,7 @@ int loctab_command(int id, int code)
     case ID_LNET_MLOBBY:
     case ID_LNET_MTEAM:
     case ID_LNET_NETREP: /* W496: anonyme Netzwerkstatistik */
+    case ID_LNET_CHATBAR: /* W508: Chat in den Seitenbalken */
         if (code == BN_CLICKED) {
             lnet_toggle(id);
         }
@@ -2546,6 +2547,7 @@ int loctab_apply_state(const char *name)
     g_loc_clip = 1; /* W420 */
     g_loc_chat = 1; /* W437 */
     g_loc_snchat = 1; /* W446 */
+    g_loc_chatbar = 1; /* W508 */
     g_loc_arcade = 0; /* W440 */
     g_loc_online = 0;   /* W397: Shots ohne loc_onl* immer Stufe "nicht steelnet" (nie die Wahl aus user.cfg) */
     g_upd_ask = 0;

@@ -556,7 +556,7 @@ extern const hlock_t *sb_ctx_hlock(void);
  * Gebaeude) muessen 0 px zeigen; bewegte (VTs, Geschosse) zeigen ihre eigene Bewegung. Zeile LOCSTAT alle 10 s je
  * Gruppe (Netz >= 1000, Linien/Pfosten untexturiert <= 32, Objekte) und Art (exakt, Matrix-Lerp, rzb, rzm, Vertex-Lerp):
  * Draws, max/p95 Versatz in Pixeln (Bildgroesse g_bb_w x g_bb_h). Bit 2: groesste Einzel-Draws (LOCSTAT top). Nur Zahlen. */
-#define LS15_G 3
+#define LS15_G 4 /* W506: Gruppe 3 = Billboards (texturiert, <= 12 Vertices: Baeume) */
 #define LS15_S 5
 #define LS15_CAP 16384u
 typedef struct { float px; unsigned f, i, nv, tex, why, st, wlc, g; float x, y; } ls15_top_t;
@@ -662,6 +662,7 @@ extern unsigned st_pz[PR_NC][PR_NO];
 extern unsigned st_pr_ticks, st_pr_set, st_pr_pair, st_pr_raw, st_pr_cam, st_pr_keep, st_pr_follow, st_pr_chg, st_pr_still, st_pr_ln, st_pr_lnd;
 extern double st_pr_ms, st_pr_max, st_pr_ms1, st_pr_ms2, st_pr_ms3;
 extern unsigned st_w415_rzm, st_w415_nm, st_w415_nocam, st_w415_cam, st_w415_rej;
+extern unsigned st_w506_ex, st_w506_part, st_w506_keep, st_w506_mov, st_w506_n; /* W506 ISSUE-105 (LOCINTERP baum506) */
 extern unsigned li_rj_w, li_rj_j[4], li_rj_big, li_rj_n, li_rj_cam;
 extern unsigned li_rz_alt, li_rz_vl, li_rj_cam2;
 extern unsigned st_p2c[5];
@@ -699,6 +700,7 @@ extern ID3D11ShaderResourceView *ip_ph_shsrv[8];
 extern volatile LONG li_la_rep, li_la_on;
 extern volatile LONG li_la_lists, li_la_draws, li_la_rets;
 extern volatile LONG li_vpf_n[4];
+void li_vpf_smooth_take(unsigned out[3], double *rel_mean); /* W505 ISSUE-106: Zaehler LOCVPF-GLATT holen und nullen */
 extern volatile LONG lr_rep, lr_ret, lr_lost, lr_exact, lr_nola, lr_jumps, lr_jumps_all;
 extern volatile LONG lr_retx;
 extern volatile LONG lr_rjmv;

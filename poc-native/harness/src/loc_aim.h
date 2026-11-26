@@ -29,6 +29,7 @@ typedef struct {
     uint32_t poll;
     long long tq;
     float wspan_ms;
+    float tick_ms;     /* W505: geschaetzter Abstand zweier Veroeffentlichungen (ms) - Rampe der Wiederholung (Eingabeprofil) */
     /* W442 LOC-AIMASSIST: Basis fuer den naechsten eigenen Satz = Zustand nach allen eigenen erzeugten Saetzen.
      * have_bst 1 = gueltig (Rollback-Eingabeschicht, n >= 0 Saetze), 0 = keine Basis (Lockstep: ausstehende eigene
      * Saetze unbekannt; Sonderpfad; ausserhalb der Mission) - die Zielhilfe wirkt dann nicht. */

@@ -209,6 +209,7 @@ static void la_vpf_meta(loc_aim_pub_t *v)
         if (dt >= 0.0 && dt < 40.0) s_dl += 0.05 * (dt - s_dl);
     }
     v->wspan_ms = (float)(s_tp - s_dl < 10.0 ? 10.0 : s_tp - s_dl);
+    v->tick_ms = (float)s_tp; /* W505 */
     if ((g_cfg.loc_hud_diag & 2) && v->have_pst && (g_cfg.loc_replay_tick[0] || g_cfg.loc_steps[0])) {
         /* DIAG(W394, nur Testfolge): Umrechnung Block -> Satz je Achse pruefen (Zaehler; erste Abweichungen als Paar) */
         static unsigned n, ok[4], bad[4], nlog, seen[4][8];

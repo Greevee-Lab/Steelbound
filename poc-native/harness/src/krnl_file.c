@@ -704,6 +704,26 @@ void krnl_loc_save_check(void)
     }
 }
 
+/* #104: Das Spiel prueft vor dem Anlegen eines Spielstands mehrere Plaetze (z. B. Replay-Speichern am Missionsende:
+ * SaveMeta.xbx mit OPEN_IF in UDATA\<titel>\<id>\, deren Ordner es erst danach anlegt). Ein "Pfad nicht gefunden",
+ * dessen direkter Elternordner fehlt, waehrend der Spielstand-Ordner selbst existiert, ist eine solche Abfrage und
+ * kein Schreibfehler. Echte Fehler (Zugriff verweigert, Datentraeger voll, ...) bleiben gemeldet. */
+static int ls_probe_missing_parent(const char *host, DWORD e)
+{
+    char par[1024];
+    char *s;
+    DWORD ra, pa;
+    if (e != ERROR_PATH_NOT_FOUND || !g_ls_root[0]) return 0;
+    if (strlen(host) >= sizeof par) return 0;
+    strcpy_s(par, sizeof par, host);
+    s = strrchr(par, '\\');
+    if (!s || s == par) return 0;
+    *s = 0;
+    pa = GetFileAttributesA(par);
+    ra = GetFileAttributesA(g_ls_root);
+    return pa == INVALID_FILE_ATTRIBUTES && ra != INVALID_FILE_ATTRIBUTES && (ra & FILE_ATTRIBUTE_DIRECTORY);
+}
+
 /* Gescheiterte Schreib-Oeffnung auf dem Spielstand-Laufwerk (nicht Z:): melden statt still verwerfen. */
 static void ls_write_failed(const char *host, DWORD e)
 {
@@ -1541,7 +1561,8 @@ resolved:
             zc_write_failed(host, e);
         }
         if (g_ls_state && ((want & GENERIC_WRITE) || disp != X_FILE_OPEN) &&
-            !((disp == X_FILE_OPEN || disp == X_FILE_OVERWRITE) && e == ERROR_FILE_NOT_FOUND)) {
+            !((disp == X_FILE_OPEN || disp == X_FILE_OVERWRITE) && e == ERROR_FILE_NOT_FOUND) &&
+            !ls_probe_missing_parent(host, e)) { /* #104: Platz-Abfrage vor dem Anlegen, kein Fehler */
             ls_write_failed(host, e); /* W434: Spielstand nicht geschrieben - melden */
         }
         if (g_cfg.loc_boot_diag && lbd_path(host) && lbd_ok()) {
@@ -3426,6 +3447,23 @@ int krnl_loc_save_selftest(void)
     st = ls_resolve(p, "", out, sizeof out, &e, &ae, &mig, &sticky);
     LS_CHECK(st == 3 && e == ERROR_ACCESS_DENIED, "leerer gesperrter Ordner: Win32 5");
     ls_st_acl(p, 0);
+
+    /* 4b. #104: Platz-Abfrage vor dem Anlegen (Elternordner fehlt, Spielstand-Ordner da) ist kein Schreibfehler */
+    {
+        char keep[sizeof g_ls_root];
+        strcpy_s(keep, sizeof keep, g_ls_root);
+        strcpy_s(g_ls_root, sizeof g_ls_root, o1);
+        _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\UDATA\\%s\\13AAC012BED4\\SaveMeta.xbx", o1, XB_TITLE_ID_STR);
+        LS_CHECK(ls_probe_missing_parent(p, ERROR_PATH_NOT_FOUND) == 1, "#104: Abfrage in neuem Spielstand-Ordner = kein Fehler");
+        LS_CHECK(ls_probe_missing_parent(p, ERROR_ACCESS_DENIED) == 0, "#104: Zugriff verweigert bleibt Fehler");
+        _snprintf_s(q, sizeof q, _TRUNCATE, "%s\\UDATA\\%s\\13AAC012BED4", o1, XB_TITLE_ID_STR);
+        xb_mkdir_p(q);
+        LS_CHECK(ls_probe_missing_parent(p, ERROR_PATH_NOT_FOUND) == 0, "#104: Elternordner vorhanden -> Fehler bleibt");
+        _snprintf_s(g_ls_root, sizeof g_ls_root, _TRUNCATE, "%s\\fehlt_LOC", base);
+        _snprintf_s(p, sizeof p, _TRUNCATE, "%s\\UDATA\\x\\SaveMeta.xbx", g_ls_root);
+        LS_CHECK(ls_probe_missing_parent(p, ERROR_PATH_NOT_FOUND) == 0, "#104: Spielstand-Ordner fehlt -> Fehler bleibt");
+        strcpy_s(g_ls_root, sizeof g_ls_root, keep);
+    }
 
     /* 5. Anzeige mit Platzhaltern, ohne Benutzername */
     if (GetEnvironmentVariableA("LOCALAPPDATA", la, sizeof la) > 0) {

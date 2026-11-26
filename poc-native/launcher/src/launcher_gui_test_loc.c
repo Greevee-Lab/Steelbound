@@ -4985,6 +4985,39 @@ __declspec(noinline) void lnet_gui_selftest(int *pass, int *fail)
                 _snprintf_s(why, sizeof why, _TRUNCATE, "W446 steelnet chat wieder an: %.120s", buf);
         }
     }
+    /* W508 CHATBAR: Chat in den Seitenbalken - Standard an (auto, Startzeile unveraendert), gemerkt, aus = ;loc_chat_pos=1 */
+    if (!why[0]) {
+        char s4[200] = "vr_enable=0";
+        loctab_vis(ID_LNET_CHATBAR, 1, "W508 Schalter Chat in den Seitenbalken", why, sizeof why);
+        loc_rule_set_append(s4, sizeof s4);
+        if (!why[0] && (!g_loc_chatbar || !ui_checked(ID_LNET_CHATBAR) || strstr(s4, "loc_chat_pos")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "W508 Seitenbalken nicht an bzw. Startzeile '%s'", s4);
+        if (!why[0]) {
+            RECT rc;
+            if (GetWindowRect(ctl(ID_LNET_CHATBAR), &rc) && rc.bottom <= rc.top)
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W508 Schalter ohne Hoehe");
+        }
+        if (!why[0]) {
+            strcpy_s(s4, sizeof s4, "vr_enable=0");
+            on_command(ID_LNET_CHATBAR, BN_CLICKED);
+            gt_read(cfg, buf, sizeof buf);
+            loc_rule_set_append(s4, sizeof s4);
+            if (g_loc_chatbar || ui_checked(ID_LNET_CHATBAR) || !strstr(buf, "launcher_loc_chat_bar=0\n") ||
+                !strstr(s4, ";loc_chat_pos=1") || lnet_is_default())
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W508 Seitenbalken aus: '%s' / %.120s", s4, buf);
+        }
+        if (!why[0]) { /* neu laden: gemerkter Wert gilt */
+            g_loc_chatbar = 1;
+            onl_load();
+            if (g_loc_chatbar) _snprintf_s(why, sizeof why, _TRUNCATE, "W508 Seitenbalken aus nicht gemerkt");
+        }
+        if (!why[0]) { /* zurueck auf an */
+            on_command(ID_LNET_CHATBAR, BN_CLICKED);
+            gt_read(cfg, buf, sizeof buf);
+            if (!g_loc_chatbar || !strstr(buf, "launcher_loc_chat_bar=1\n"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W508 Seitenbalken wieder an: %.120s", buf);
+        }
+    }
     /* W440 LOC-LOBBY-MODES: Lobby-Modus - Standard Sim, unabhaengig vom Rollback, gemerkt, als loc_play_mode an den
      * Start; ungueltige Werte = Sim; "Standard wiederherstellen" setzt Sim (unten h) */
     if (!why[0]) {

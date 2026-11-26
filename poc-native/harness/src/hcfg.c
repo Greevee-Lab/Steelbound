@@ -257,6 +257,7 @@ void hcfg_defaults(void)
     g_cfg.interp_pace_dn = 20;  /* W393 TEST: hoechstens 2 % schneller, wenn L faellt */
     g_cfg.loc_hud_predict = 1; /* W394 LOC-HUD-VIEW */
     g_cfg.loc_view_perframe = 1; /* W394 LOC-VIEW-PERFRAME (Nachweis W394 C3/C4, Standard an) */
+    g_cfg.loc_vpf_repeat = 1;    /* W505 ISSUE-106: mit Eingabeprofil Zusatz-Schritt mit dem letzten Satz (sonst Sicht in Tick-Stufen) */
     g_cfg.loc_hud_diag = 0; /* DIAG(W394) */
     g_cfg.loc_vpf_test = 0; /* TEST(W394) */
     g_cfg.loc_vpf_test_alt = 0; /* TEST(W394) */
@@ -265,11 +266,14 @@ void hcfg_defaults(void)
     g_cfg.loc_ui_diag = 0; /* DIAG(W349) */
     g_cfg.loc_interp_rzalt = 1; /* W349 LOC-FRAMES-2: rawchg-Partner per Kamera-Pruefung (nur LoC) */
     g_cfg.loc_wlag_fix = 1; /* W412 LOC-WORLD-LAG: Himmel mit derselben vorhergesagten Kamera wie die Welt (Nachweis W412) */
+    g_cfg.loc_tree_fix = 1; /* W506 ISSUE-105: Baeume in Zwischenbildern mit der Kamera der Welt (GitHub #105) */
     g_cfg.loc_stat_fix = 1; /* W415 LOC-STATIC-LAG: Gelaende in Zwischenbildern mit der Kamera der Welt bewegen (Nachweis W415) */
     g_cfg.ctrl_despike = 1; /* W439 (#78, Nutzerentscheid 22.11.): Ausreisser-Filter analoger Achsen (SBC, Joystick) an, 0 = Original */
     g_cfg.loc_ret_fix = 1; /* W439 LOC-RETICLE-JUMP (#78): exakt gezeichnete Fadenkreuz-Draws gegen B verschieben (Nachweis W439) */
     g_cfg.loc_mem_reclaim = 1; /* W493 LOC-MEMLEAK (#101): VB/IB-Daten bei Release zurueck an LOCMEM (Nachweis W493) */
     g_cfg.loc_mem_quar = 300; /* W493: Quarantaene freigegebener LOCMEM-Bloecke (Bilder) */
+    g_cfg.loc_bloom_fast = 4; /* W507 LOC-BLOOM-LAG (#107): Bloom-Nachlauf mit Enhanced-Bloom 4x schneller (Nachweis W507) */
+    g_cfg.loc_shadow_border = 1; /* W512 ISSUE-109: Schattenvergleich ausserhalb der Karte mit der Randfarbe (NV2A BORDER) */
     g_cfg.loc_ret_mark = 1; /* W444 LOC-RETICLE-MARK (#78): Fadenkreuz-Teile ueber Form-Identitaet erkennen (Nachweis W444) */
     g_cfg.loc_sky_fix = 1; /* W435 LOC-SKY-LAG-REG (#74): Himmel auch mit der Sicht-Korrektur je Bild (Nachweis W435) */
     g_cfg.loc_sndloop_fix = 1; /* W413 LOC-SOUND-LOOP (#65): Ton nach dem Neurechnen mit der korrigierten Zeitlinie abgleichen */
@@ -326,6 +330,7 @@ void hcfg_defaults(void)
     g_cfg.loc_rule_clipdump_block = 1; /* W420 LOC-CLIPDUMP: Nutzerentscheid 22.11., Standard an (Host-Regel) */
     g_cfg.loc_clip_diag = 0; /* W420 DIAG */
     g_cfg.loc_chat = 1;        /* W437 LOC-CHAT: Nutzerwunsch 22.11., Standard an (nur LoC online) */
+    g_cfg.loc_chat_pos = 0;    /* W508 CHATBAR: auto (Seitenbalken, wenn vorhanden) */
     g_cfg.loc_chat_direct = 0; /* W437 TEST */
     g_cfg.loc_chat_test[0] = 0; /* W437 TEST */
     g_cfg.loc_play_mode = 1;      /* W440 LOC-LOBBY-MODES: eigene Lobbys Sim (Nutzerentscheid 23.11.) */
@@ -1075,6 +1080,7 @@ static int set_key_w415(const char *k, const char *v)
 {
     if (strcmp(k, "loc_stat_diag") == 0) { g_cfg.loc_stat_diag = atoi(v); } /* DIAG */
     else if (strcmp(k, "loc_stat_fix") == 0) { g_cfg.loc_stat_fix = atoi(v); } /* FIX */
+    else if (strcmp(k, "loc_tree_fix") == 0) { g_cfg.loc_tree_fix = atoi(v); } /* FIX(W506 ISSUE-105) */
     else { return 0; }
     return 1;
 }
@@ -1172,6 +1178,7 @@ static int set_key_w435(const char *k, const char *v)
 static int set_key_w437(const char *k, const char *v)
 {
     if (strcmp(k, "loc_chat") == 0) { g_cfg.loc_chat = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "loc_chat_pos") == 0) { g_cfg.loc_chat_pos = atoi(v) == 1 ? 1 : 0; } /* W508 */
     else if (strcmp(k, "loc_chat_direct") == 0) { g_cfg.loc_chat_direct = atoi(v) ? 1 : 0; } /* TEST */
     else if (strcmp(k, "loc_chat_test") == 0) { strncpy_s(g_cfg.loc_chat_test, sizeof g_cfg.loc_chat_test, v, _TRUNCATE); } /* TEST */
     else { return 0; }
@@ -1257,6 +1264,23 @@ static int set_key_w493(const char *k, const char *v)
 static int set_key_w496(const char *k, const char *v)
 {
     if (strcmp(k, "net_report") == 0) { g_cfg.net_report = atoi(v) == 1 ? 1 : 0; } /* nur genau 1 = Zustimmung */
+    else { return 0; }
+    return 1;
+}
+
+/* W507 LOC-BLOOM-LAG (#107): eigene Schluessel (C1026) */
+static int set_key_w507(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_bloom_diag") == 0) { g_cfg.loc_bloom_diag = atoi(v); } /* DIAG */
+    else if (strcmp(k, "loc_bloom_fast") == 0) { int f = atoi(v); g_cfg.loc_bloom_fast = f < 0 ? 0 : f > 16 ? 16 : f; } /* FIX */
+    else { return 0; }
+    return 1;
+}
+
+/* W512 ISSUE-109: eigene Schluessel (C1026) */
+static int set_key_w512(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_shadow_border") == 0) { g_cfg.loc_shadow_border = atoi(v); } /* FIX */
     else { return 0; }
     return 1;
 }
@@ -1354,9 +1378,21 @@ static int set_key_w468(const char *k, const char *v) /* W468 PERF-PACING */
     return 1;
 }
 
+/* W505 ISSUE-106: eigene Schluessel (C1026). */
+static int set_key_w505(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_vpf_repeat") == 0) { g_cfg.loc_vpf_repeat = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "loc_vpf_test_profile") == 0) { g_cfg.loc_vpf_test_profile = atoi(v) ? 1 : 0; } /* TEST */
+    else { return 0; }
+    return 1;
+}
+
 static void set_key_b(const char *k, const char *v);
 static void set_key(const char *k, const char *v)
 {
+    if (set_key_w505(k, v)) {
+        return;
+    }
     if (set_key_w468(k, v)) {
         return;
     }
@@ -1371,7 +1407,7 @@ static void set_key(const char *k, const char *v)
     }
     if (set_key_w435(k, v) || set_key_w437(k, v) || set_key_w439(k, v) || set_key_w440(k, v) || set_key_w444(k, v) || set_key_w442(k, v) ||
         set_key_w446(k, v) || set_key_w474(k, v) || set_key_w448(k, v) || set_key_w451(k, v) || set_key_w454(k, v) ||
-        set_key_w479(k, v) || set_key_w493(k, v) || set_key_w496(k, v)) {
+        set_key_w479(k, v) || set_key_w493(k, v) || set_key_w496(k, v) || set_key_w507(k, v) || set_key_w512(k, v)) {
         return;
     }
     if (set_key_remaster(k, v) || set_key_overlay(k, v) || set_key_vr(k, v) || set_key_w371(k, v) || set_key_w376(k, v) ||

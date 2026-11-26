@@ -203,6 +203,7 @@ void sb_pd_start(void);           /* Takt-Thread einmalig starten (Spiel-Thread)
 int sb_render_offscreen(void);     /* 1 = FPS-INTERP-Offscreen-BB (d3d11_render.c) */
 int sb_pd_on(void);               /* 1 = Takt-Thread fuehrt den Bildtakt (Echtzeit, Offscreen-BB) */
 void sb_aspect_box(unsigned *bx, unsigned *by, unsigned *bw, unsigned *bh);
+int sb_aspect_side_bars(void); /* W508 CHATBAR: 1 = schwarze Seitenbalken in diesem Bild (Pillarbox, 2D oder Randmaske) */
 /* W277 LOC-DISC: Framebuffer-Groesse des Spiels fuer die 2D-Abbildung (RHW) in die
  * 4:3-Box. SB: fest 640x480; LoC: 720x480 aus CreateDevice (Xbox gibt 720x480 auf
  * 4:3 aus -> nicht-quadratische Pixel, Breite 720 fuellt die 4:3-Box). */
@@ -271,9 +272,12 @@ int shfx_world_on(void);
 int shfx_cockpit_on(void);
 int shfx_post_on(void); /* W131 SHADER-OPT2: Cockpit-Licht, Farbe, FXAA Endbild, SSAO */
 void shfx_note_3d(int slot);
-void shfx_rq_consts(float *sx, const int srvk[4], int tgt, int is3d, int fog_ps, int st0rt, unsigned nstages);
+/* W507: lbc = Klasse fuer LoC-Bloom-Ziele (render_bloomlag.h, shfx_loc_bloom_class), 0 = keine */
+void shfx_rq_consts(float *sx, const int srvk[4], int tgt, int is3d, int fog_ps, int st0rt, unsigned nstages, unsigned lbc);
 /* W193 PAUSE-LIVE: dasselbe mit den Stufen-Texturen der Aufzeichnung (xp[k] = 0: keine SRV) */
-void shfx_rq_consts_rep(float *sx, const unsigned xp[4], int tgt, int is3d, int fog_ps, int st0rt, unsigned nstages);
+void shfx_rq_consts_rep(float *sx, const unsigned xp[4], int tgt, int is3d, int fog_ps, int st0rt, unsigned nstages,
+                        unsigned lbc);
+unsigned shfx_loc_bloom_class(int tgt); /* W507 LOC-BLOOM-LAG: Spielpfad (aktueller Blend-Zustand) */
 void sb_shfx_post(ID3D11RenderTargetView *rtv, ID3D11Resource *res);
 void sb_shfx_ab_shot(const char *base);
 void sb_shfx_present(unsigned n);

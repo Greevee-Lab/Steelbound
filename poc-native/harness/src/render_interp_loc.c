@@ -461,7 +461,7 @@ void li_stat_after(const ip_list_t *A, const ip_list_t *B)
                 if (o->kind != IP_DRAW || !o->cls || !o->dsv || o->rtv != tr->rtv || ip_mvp_affine(o->mvp)) { continue; }
                 if (o->wlc == 2u || o->wlc == 4u) { continue; } /* eigener VT bzw. geglaetteter Gegner-VT (bewegt) */
                 lerp = o->flag && a != NULL;
-                g = o->nv >= 1000u ? 0u : ((!o->has_tex && o->nv <= 32u) ? 1u : 2u);
+                g = o->nv >= 1000u ? 0u : ((!o->has_tex && o->nv <= 32u) ? 1u : ((o->has_tex && o->nv <= 12u) ? 3u : 2u)); /* W506: 3 = Billboards */
                 s = !lerp ? 0u : (o->rzm ? 3u : (o->rzb ? 2u : (o->why == IP_W_RAWLERP ? 4u : 1u)));
                 if (o->law != tr->law) { ls15_law++; }
                 for (q = 0; q < 4; q++) {
@@ -500,6 +500,13 @@ void li_stat_after(const ip_list_t *A, const ip_list_t *B)
                            cr ? memcmp(cr->mvp, o->mvp, sizeof o->mvp) == 0 : -1, rot, xok ? X[12] : 0.0, xok ? X[13] : 0.0, xok ? X[14] : 0.0,
                            o->pvs, o->pps);
                 }
+                if ((g_cfg.loc_stat_diag & 32) && g == 3u && best > 0.5 && ls15_ln < 1200u && (g_cfg.pf_ring <= 0 || sb_pf_active())) {
+                    /* DIAG(W506 ISSUE-105): Billboard (Baum?) mit Versatz - Art, Partner, Shader/Textur, Blend-/Tiefenzustand */
+                    ls15_ln++;
+                    HLOG_I("LOCSTAT bb: f=%u i=%u n=%u why=%s art=%u m=%d px=%.2f ndc=%.2f,%.2f w=%.0f vs=%X tx=%X ps=%X bs=%p ds=%p fxk=%u",
+                           B->frame, i, o->nv, pr_why(o->why), s, o->match, best, bx, by, (double)o->rn[0][2], o->pvs, o->pxp,
+                           o->pps, (void *)o->bs, (void *)o->ds, o->fxk);
+                }
                 ls15_nd[g][s]++;
                 if (ls15_n[g][s] < LS15_CAP) { ls15_v[g][s][ls15_n[g][s]++] = (float)best; }
                 if (best > ls15_mx[g][s]) { ls15_mx[g][s] = best; }
@@ -517,7 +524,7 @@ void li_stat_after(const ip_list_t *A, const ip_list_t *B)
     }
     if (!ls15_tlog) { ls15_tlog = now; }
     if (ip_ms(ls15_tlog, now) >= 10000.0) {
-        static const char *gn[LS15_G] = { "Netz>=1000", "Linien/Pfosten", "Objekte" };
+        static const char *gn[LS15_G] = { "Netz>=1000", "Linien/Pfosten", "Objekte", "Billboards" };
         static const char *sn[LS15_S] = { "exakt", "lerp", "rzb", "rzm", "vlerp" };
         char b[900];
         int n;

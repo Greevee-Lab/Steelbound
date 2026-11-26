@@ -1264,7 +1264,23 @@ u32 __stdcall hook_D3D_SetTextureState_BumpEnv(u32 a, u32 b, u32 c)
     }
     return 0;
 }
-D3D_STATE2(SetTextureState_BorderColor)
+/* FIX(W512 ISSUE109): Randfarbe je Stufe merken. LoC setzt vor der Welt Stufe 1 = Schattenpuffer mit
+ * ADDRESSU/V = BORDER und Randfarbe 0xFFFFFFFF (0x3C1C0: SetTextureState_BorderColor(1, -1)) - ausserhalb der
+ * Schattenkarte liefert die NV2A damit die groesste Tiefe (= beleuchtet). Nur Spiegel. */
+unsigned g_rq_border[4], g_rq_border_set;
+u32 __stdcall hook_D3D_SetTextureState_BorderColor(u32 a, u32 b)
+{
+    static u32 la, lb;
+    static int have;
+    if (!have || a != la || b != lb) {
+        have = 1;
+        la = a;
+        lb = b;
+        HLOG_T("D3D SetTextureState_BorderColor(0x%X, 0x%X)", a, b);
+    }
+    if (a < 4u) { g_rq_border[a] = b; g_rq_border_set |= 1u << a; }
+    return 0;
+}
 D3D_STATE2(SetTextureState_ColorKeyColor)
 /* DIAG(TEX3D,W31): Combiner-Weg mit Stand (statt D3D_STATE3-Makro). */
 u32 __stdcall hook_D3D_SetTextureStageStateNotInline(u32 a, u32 b, u32 c)

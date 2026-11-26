@@ -863,7 +863,7 @@ static chat_bg s_bg[CHAT_BG_MAX];
 static int s_nbg;
 
 #define CHAT_BLINK_SHOW_MS 3000u     /* geschlossene Zeile: Reiterleiste nach Neuem im anderen Tab so lange sichtbar */
-#define CHAT_W_UNITS 280.0f          /* Breite (Einheiten, 1080p: 560 px), hoechstens 45 % der Bildschirmbreite */
+#define CHAT_W_UNITS LCH_W_UNITS     /* Breite (Einheiten, 1080p: 560 px), hoechstens 45 % der Bildschirmbreite */
 /* Farben aus dem Overlay-Stil (overlay_style.h) */
 #define CHAT_ACC OVS_RGB_ACCENT
 #define CHAT_TAB_BG OVS_RGB_TAB
@@ -1213,9 +1213,9 @@ static int chat_upload(void)
 
 void loc_chat_draw(ID3D11RenderTargetView *rtv, int save)
 {
-    unsigned bx, by, bw, bh, cw, maxh, m, gp, x0, y0;
+    unsigned bx, by, bw, bh, cw, maxh, m, gp, x0, y0, barx = 0u;
     float f;
-    int nrows;
+    int nrows, bar = 0;
     u32 sig[8];
     if (!loc_chat_visible() || !rtv || !g_dev || !g_ctx || !g_bb_w || !g_bb_h) return;
     ovs_loc_box(&bx, &by, &bw, &bh);
@@ -1225,13 +1225,24 @@ void loc_chat_draw(ID3D11RenderTargetView *rtv, int save)
     cw = (unsigned)SC(f, CHAT_W_UNITS);
     if (cw > g_bb_w * 45u / 100u) cw = g_bb_w * 45u / 100u;
     maxh = g_bb_h / 2u;
+    /* W508 CHATBAR: schwarze Seitenbalken breit genug -> Chat unten im (breiteren) Balken, Breite und Schrift passend
+     * (lch_bar_fit), Rand und Abstand wie alle Overlays. loc_chat_pos=1 bzw. ohne Balken: Lage wie bis 0.6.0. */
+    if (!g_cfg.loc_chat_pos && sb_aspect_side_bars()) {
+        unsigned bw2 = 0u;
+        float fe = f;
+        bar = lch_bar_fit(g_bb_w, bx, bw, f, OVS_MARGIN, &barx, &bw2, &fe);
+        if (bar) {
+            f = fe;
+            cw = bw2;
+        }
+    }
     if (cw < 96u || maxh < 48u) return;
     nrows = chat_collect(sig);
     if (nrows < 0) return;
     sig[3] = (u32)(f * 100.0f);
     sig[4] = cw;
     sig[5] = maxh;
-    sig[6] = 0;
+    sig[6] = (u32)bar;
     sig[7] = 0;
     if (memcmp(sig, s_sig, sizeof sig) != 0 || !s_pm) {
         if (!chat_render(nrows, f, cw, maxh)) return;
@@ -1239,6 +1250,11 @@ void loc_chat_draw(ID3D11RenderTargetView *rtv, int save)
     }
     cz(s_rows, sizeof s_rows);
     if (!chat_upload()) return;
+    /* W508: im Seitenbalken unten, hinter allem, was in dieser Spalte schon angemeldet ist (F2/F3 bei Shift-Ecke unten,
+     * Wasserzeichen); passt es dort nicht, die Lage wie bisher */
+    if (bar && s_w <= cw && ovs_layout_place_col(OVS_SLOT_CHAT, barx, s_w, s_h, m, gp, &y0)) {
+        x0 = barx;
+    } else
     /* Bildschirmecke unten links, hinter allem, was dort in diesem Bild schon angemeldet ist */
     if (!ovs_layout_place(OVS_SLOT_CHAT, OVS_BOTTOM_LEFT, s_w, s_h, m, gp, &x0, &y0)) {
         x0 = m;
@@ -1247,7 +1263,7 @@ void loc_chat_draw(ID3D11RenderTargetView *rtv, int save)
     /* W474 Teil F: immer unten links, auch im Match (kein Anheben ueber die Instrumente, Nutzer 24.11.). Breitbild mit
      * schmalerer Spielbox: im freien linken Rand nur, wenn der Chat dort ganz Platz hat, sonst unten links im Spielbild
      * (nicht halb im Rand, halb im Bild). */
-    if (bx > 0u && x0 < bx && x0 + s_w + m > bx) {
+    if (!bar && bx > 0u && x0 < bx && x0 + s_w + m > bx) {
         unsigned nx = bx + m;
         if (nx + s_w + m <= g_bb_w && !ovs_layout_hits(OVS_SLOT_CHAT, nx, y0, s_w, s_h)) {
             x0 = nx;

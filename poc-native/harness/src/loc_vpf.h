@@ -28,7 +28,8 @@ long long loc_vpf_poll_time(void);
 
 /* Render-Thread: aus dem Eingabesatz base (14 Byte, Rahmen des Polls *poll) den Vorschau-Rahmen out bilden (Achsen
  * Zielhebel/Sicht durch den jetzigen Akku-Stand ersetzt). Rueckgabe 1 = gueltig (*poll = Poll, auf dem die Vorschau
- * aufsetzt), 0 = gerade ein Poll im Gang bzw. nichts veroeffentlicht. */
+ * aufsetzt), 0 = gerade ein Poll im Gang bzw. nichts veroeffentlicht. W505: 2 = Eingabeprofil, out = base (letzter Satz
+ * wiederholt, gilt bis zur naechsten Vorhersage). */
 int loc_vpf_preview(const uint8_t base[14], uint8_t out[14], uint32_t *poll);
 
 /* Umrechnung Block-Wert -> Byte im 14-Byte-Eingabesatz (Zielhebel uint8 Mitte 0x7F/0x80 -> int8, Sicht int8). */

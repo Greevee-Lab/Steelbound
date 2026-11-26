@@ -998,6 +998,11 @@ static void pd_stat_log(LONGLONG now)
                    secs, st_w415_cam, st_w415_rej, st_w415_nocam, st_w415_rzm, st_w415_nm);
             st_w415_cam = st_w415_rej = st_w415_nocam = st_w415_rzm = st_w415_nm = 0;
         }
+        if (g_cfg.loc_tree_fix) { /* W506 ISSUE-105: eigene Zeile (LOCINTERP stat bleibt unveraendert) */
+            HLOG_I("LOCINTERP baum506: %.1fs kleine Welt-Draws mit Welt-Kamera=%u | exakt -> mit Welt-Kamera=%u falscher Partner -> mit Welt-Kamera=%u Partner passt=%u bewegt=%u",
+                   secs, st_w506_n, st_w506_ex, st_w506_part, st_w506_keep, st_w506_mov);
+            st_w506_n = st_w506_ex = st_w506_part = st_w506_keep = st_w506_mov = 0;
+        }
         if (g_cfg.loc_interp_rawrzb) { /* W410 LOC-GFX-JITTER: eigene Zeile (LOCINTERP stat bleibt unveraendert) */
             HLOG_I("LOCINTERP rawrzb: %.1fs rawlerp->Matrix-Lerp=%u (>=1000 Vertices %u) Gelaende mit Kamera=%u Kamera passt nicht=%u bewegt=%u",
                    secs, st_w410_rzb, st_w410_big, st_w410_rzm, st_w410_cam, st_w410_mov);
@@ -1038,6 +1043,17 @@ static void pd_stat_log(LONGLONG now)
             li_hm_px_n = 0; li_hm_px_sum = 0.0; li_hm_px_max = 0.0;
             InterlockedExchange(&li_vpf_n[0], 0); InterlockedExchange(&li_vpf_n[1], 0);
             InterlockedExchange(&li_vpf_n[2], 0); InterlockedExchange(&li_vpf_n[3], 0);
+        }
+        if (g_cfg.loc_local_aim) { /* W505 ISSUE-106: eigene Zeile (LOCHUD bleibt unveraendert), nur Zaehler */
+            unsigned sm[3];
+            double rel;
+            extern volatile LONG g_lvpf_repeat_n;
+            li_vpf_smooth_take(sm, &rel);
+            if (sm[0]) {
+                HLOG_I("LOCVPF-GLATT: %.1fs Bilder in Drehung=%u stehend=%u (%.1f %%) Sprung=%u (%.1f %%) Schritt/Soll mittel=%.2f "
+                       "| Vorschau mit Eingabeprofil (letzter Satz)=%ld Schalter=%d", secs, sm[0], sm[1], 100.0 * sm[1] / sm[0], sm[2],
+                       100.0 * sm[2] / sm[0], rel, InterlockedExchange(&g_lvpf_repeat_n, 0), g_cfg.loc_vpf_repeat);
+            }
         }
     }
     {   /* W361: sollte nie vorkommen (ip_list_refs_check, ip_sh_rc_watch) */

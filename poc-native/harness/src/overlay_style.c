@@ -130,6 +130,29 @@ int ovs_layout_place(ovs_slot id, ovs_corner c, unsigned w, unsigned h, unsigned
     return 0;
 }
 
+int ovs_layout_place_col(ovs_slot id, unsigned x, unsigned w, unsigned h, unsigned margin, unsigned gap, unsigned *y)
+{
+    int guard = 0;
+    unsigned py;
+    if ((unsigned)id >= OVS_SLOT_N || x + w > g_bb_w || h + 2u * margin > g_bb_h) return 0;
+    lay_sync();
+    s_lay_on[id] = 0;
+    py = g_bb_h - h - margin;
+    while (guard++ <= OVS_SLOT_N) {
+        int i, hit = -1;
+        for (i = 0; i < OVS_SLOT_N; i++)
+            if (s_lay_on[i] && lay_overlap(s_lay_r[i], x, py, w, h)) { hit = i; break; }
+        if (hit < 0) {
+            ovs_layout_claim(id, x, py, w, h);
+            *y = py;
+            return 1;
+        }
+        if (s_lay_r[hit][1] < h + gap + margin) return 0;
+        py = s_lay_r[hit][1] - h - gap;
+    }
+    return 0;
+}
+
 /* ------------------------------------------------------------------ Font-Cache */
 typedef struct {
     const wchar_t *name;

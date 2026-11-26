@@ -23,7 +23,7 @@ int gametab_id(int id) /* W398: Wortmarken-Tabs im Kopf */
  * Dort liegen Rollback, eigene Bewegung sofort, Gegner glaetten (ID_LOC_SMOOTH, frueher unter dem Start) und
  * niedrigere Eingabeverzoegerung sowie "Standard wiederherstellen". */
 #define ID_LNET_FIRST ID_LNET_RB
-#define ID_LNET_LAST ID_LNET_NETREP /* W496: + Schalter Netzwerkstatistik (2813/2814 = Dialog, nrq_visible zuerst); vorher ID_LNET_CAMP. W454; W473: Reiter + Chat im Spiel (W485 MERGEFIX: Live-Schalter entfiel, Wahl per ID_LNET_KIND); W491: Kampagne (intern) */
+#define ID_LNET_LAST ID_LNET_CHATBAR /* W508: + Schalter Chat in den Seitenbalken (2816). W496: + Schalter Netzwerkstatistik (2813/2814 = Dialog, nrq_visible zuerst); vorher ID_LNET_CAMP. W454; W473: Reiter + Chat im Spiel (W485 MERGEFIX: Live-Schalter entfiel, Wahl per ID_LNET_KIND); W491: Kampagne (intern) */
 /* W293 LOC-LAYOUT: Spielen = Kopf, Start, Bereitschaft (wie SB), Hinweisband
  * unten; Disc, Spielstaende & Daten und Online liegen links auf Erweitert
  * (rechts die gemeinsamen Teile Feinabstimmung + Launcher). */
@@ -296,6 +296,11 @@ int g_loc_chat = 1;
  * gemerkt in user.cfg (fehlt/ungueltig = 1), als loc_snchat an jeden LoC-Start. Aus = kein Abonnement beim Dienst. */
 #define LNET_SNCHAT_KEY "launcher_loc_snchat"
 int g_loc_snchat = 1;
+/* W508 CHATBAR (Nutzeridee 25.11.): Lage des Chats bei schwarzen Seitenbalken (Ultrawide) - an = auto (im Balken, wenn
+ * breit genug; Standard), aus = immer ueber dem Bild. Gemerkt in user.cfg (fehlt/ungueltig = 1); nur aus geht als
+ * loc_chat_pos=1 an den Start (Standard-Startzeile unveraendert). */
+#define LNET_CHATBAR_KEY "launcher_loc_chat_bar"
+int g_loc_chatbar = 1;
 /* W440 LOC-LOBBY-MODES (GitHub #79, Nutzerentscheid 23.11.): Modus der Lobbys, die ich hoste - 0 = Sim (Standard:
  * keine Zielhilfe, keine Gang-Automatik fuer alle), 1 = Arcade (jeder nur seine eigenen Hilfen). Gemerkt in user.cfg
  * (fehlt/ungueltig = Sim), als loc_play_mode=sim|arcade an jeden LoC-Start (loc_rule_set_append; Testpartner: --set). */
@@ -620,13 +625,17 @@ void loc_rule_set_append(char *set, size_t cap)
     _snprintf_s(set + l, cap - l, _TRUNCATE, ";loc_snchat=%d", g_loc_snchat ? 1 : 0); /* W446 */
     l = strlen(set);
     _snprintf_s(set + l, cap - l, _TRUNCATE, ";loc_play_mode=%s", g_loc_arcade ? "arcade" : "sim"); /* W440 */
+    if (!g_loc_chatbar) { /* W508: nur die Abweichung vom Standard */
+        l = strlen(set);
+        _snprintf_s(set + l, cap - l, _TRUNCATE, ";loc_chat_pos=1");
+    }
 }
 
 /* W392: Stimmen alle Netzwerk-Schalter mit dem Standard ueberein? (Hinweis auf LoC-Spielen) */
 int lnet_is_default(void)
 {
     return g_loc_rb_on && g_loc_net_auto && g_loc_own_pred && g_loc_lowd && g_loc_smooth_opp == 1 && g_loc_clip && g_loc_chat &&
-           g_loc_snchat && !g_loc_arcade && /* W440: Standard Sim; W446; W447 */
+           g_loc_snchat && !g_loc_arcade && g_loc_chatbar && /* W440: Standard Sim; W446; W447; W508 */
            !g_loc_msn && g_loc_mlobby && g_loc_mteam && /* W473: Chat im Spiel (steelnet aus, Lobby/Team an) */
            !g_camp_test; /* W491: Saison (Community immer 0) */
 }
@@ -1278,6 +1287,7 @@ void onl_load(void)
     g_loc_clip = 1; /* W420: Standard an */
     g_loc_chat = 1; /* W437: Standard an */
     g_loc_snchat = 1; /* W446: Standard an */
+    g_loc_chatbar = 1; /* W508: Standard auto */
     g_loc_arcade = 0; /* W440: Standard Sim */
     g_loc_lan = 0;    /* W454: Standard steelnet */
     g_camp_test = 0;  /* W491: Standard Saison */
@@ -1317,6 +1327,9 @@ void onl_load(void)
             }
             if (strncmp(line, LNET_SNCHAT_KEY "=", sizeof LNET_SNCHAT_KEY) == 0) { /* W446: fehlt/ungueltig = 1 */
                 g_loc_snchat = lnet_bool_parse(line + sizeof LNET_SNCHAT_KEY);
+            }
+            if (strncmp(line, LNET_CHATBAR_KEY "=", sizeof LNET_CHATBAR_KEY) == 0) { /* W508: fehlt/ungueltig = 1 */
+                g_loc_chatbar = lnet_bool_parse(line + sizeof LNET_CHATBAR_KEY);
             }
             if (strncmp(line, LNET_LAN_KEY "=", sizeof LNET_LAN_KEY) == 0) { /* W454: nur genau 1 = LAN */
                 const char *lv = line + sizeof LNET_LAN_KEY;
@@ -1480,6 +1493,9 @@ void onl_sync_ui(void)
     }
     if (ctl(ID_LNET_CHAT)) { /* W437: unabhaengig vom Rollback */
         ui_set_checked(ID_LNET_CHAT, g_loc_chat);
+    }
+    if (ctl(ID_LNET_CHATBAR)) { /* W508: unabhaengig von Rollback/LAN */
+        ui_set_checked(ID_LNET_CHATBAR, g_loc_chatbar);
     }
     if (ctl(ID_LNET_NETREP)) { /* W496: Zustimmung (nur genau "ja" = an) */
         ui_set_checked(ID_LNET_NETREP, g_nrq_cfg == 1);
@@ -1657,21 +1673,24 @@ static const lnet_row_t kLnetRows[] = {
     { 1, 4, ID_LNET_MTEAM, NULL, "gui.lnet_mteam_hint", 2 },
     { 1, 5, ID_LNET_SNCHAT, NULL, "gui.lnet_snchat_hint", 0 },
     { 1, 6, ID_LNET_MSN, NULL, "gui.lnet_msn_hint", 3 },
+    { 1, 7, ID_LNET_CHATBAR, NULL, "gui.lnet_chatbar_hint", 0 }, /* W508 */
 #if !SB_EDITION_COMMUNITY
-    { 1, 7, ID_LNET_CAMP, "gui.lnet_camp", "gui.lnet_camp_hint", 0 }, /* W491: mit Team-Reiter Platz der Karte pruefen */
+    { 1, 8, ID_LNET_CAMP, "gui.lnet_camp", "gui.lnet_camp_hint", 0 }, /* W491: mit Team-Reiter Platz der Karte pruefen */
 #endif
 #else /* Nutzer 24.11.: ohne Team-Reiter im Spiel kein Team-Schalter (Reiter -1 = nie sichtbar, Wert bleibt in der cfg) */
     { -1, 4, ID_LNET_MTEAM, NULL, "gui.lnet_mteam_hint", 2 },
     { 1, 4, ID_LNET_SNCHAT, NULL, "gui.lnet_snchat_hint", 0 },
     { 1, 5, ID_LNET_MSN, NULL, "gui.lnet_msn_hint", 3 },
+    { 1, 6, ID_LNET_CHATBAR, NULL, "gui.lnet_chatbar_hint", 0 }, /* W508 CHATBAR: Lage des Chats bei Seitenbalken */
 #if !SB_EDITION_COMMUNITY
-    { 1, 6, ID_LNET_CAMP, "gui.lnet_camp", "gui.lnet_camp_hint", 0 }, /* W491 CAMP-CLIENT: nur intern, Saison/Test */
+    { 1, 7, ID_LNET_CAMP, "gui.lnet_camp", "gui.lnet_camp_hint", 0 }, /* W491 CAMP-CLIENT: nur intern, Saison/Test */
 #endif
 #endif
 };
 #define LNET_NROWS ((int)(sizeof kLnetRows / sizeof kLnetRows[0]))
-/* y der Zeile: Network weiter auseinander (4 Zeilen), Lobby & chat enger (7 Zeilen) */
-static int lnet_row_y(int tab, int row) { return LNET_Y + 72 + row * (tab == 0 ? 40 : 32); }
+/* y der Zeile: Network weiter auseinander (5 Zeilen), Lobby & chat enger (bis 8 Zeilen; W508: ab +68 im Abstand 30,
+ * damit die letzte Zeile in der Karte bleibt: 68 + 7 * 30 + 28 = 306 <= LNET_H) */
+static int lnet_row_y(int tab, int row) { return tab == 0 ? LNET_Y + 72 + row * 40 : LNET_Y + 68 + row * 30; }
 static const lnet_row_t *lnet_row_of(int id)
 {
     int i;
@@ -1815,6 +1834,11 @@ static int *lnet_var(int id, const char **key, const char **name)
         *name = "gui.lnet_snchat";
         return &g_loc_snchat;
     }
+    if (id == ID_LNET_CHATBAR) { /* W508 */
+        *key = LNET_CHATBAR_KEY;
+        *name = "gui.lnet_chatbar";
+        return &g_loc_chatbar;
+    }
     *key = LNET_LOWD_KEY;
     *name = "gui.lnet_lowd";
     return &g_loc_lowd;
@@ -1939,8 +1963,8 @@ void lnet_toggle(int id)
         return;
     }
     v = lnet_var(id, &key, &name);
-    if (id != ID_LNET_RB && id != ID_LNET_CLIP && id != ID_LNET_CHAT && id != ID_LNET_SNCHAT &&
-        !g_loc_rb_on) { /* W420/W437/W446: auch im Lockstep */
+    if (id != ID_LNET_RB && id != ID_LNET_CLIP && id != ID_LNET_CHAT && id != ID_LNET_SNCHAT && id != ID_LNET_CHATBAR &&
+        !g_loc_rb_on) { /* W420/W437/W446/W508: auch im Lockstep */
         onl_sync_ui();
         return;
     }
@@ -1963,6 +1987,7 @@ void lnet_reset(void)
     g_loc_clip = 1; /* W420 */
     g_loc_chat = 1; /* W437 */
     g_loc_snchat = 1; /* W446 */
+    g_loc_chatbar = 1; /* W508 */
     g_loc_arcade = 0; /* W440: Sim */
     g_loc_msn = 0; /* W473 */
     g_loc_mlobby = g_loc_mteam = 1;
@@ -1971,6 +1996,7 @@ void lnet_reset(void)
     bad |= onl_save_key(LNET_CLIP_KEY, 1) < 0;
     bad |= onl_save_key(LNET_CHAT_KEY, 1) < 0;
     bad |= onl_save_key(LNET_SNCHAT_KEY, 1) < 0;
+    bad |= onl_save_key(LNET_CHATBAR_KEY, 1) < 0; /* W508 */
     bad |= onl_save_key(LNET_MODE_KEY, 0) < 0;
     bad |= onl_save_key(LNET_RB_KEY, 1) < 0;
     bad |= onl_save_key(LNET_AUTO_KEY, 1) < 0; /* W447 */
@@ -2278,7 +2304,7 @@ static void lnet_build(HWND w)
                        { ID_LNET_CLIP, "gui.lnet_clip" },     { ID_LNET_CHAT, "gui.lnet_chat" },
                        { ID_LNET_SNCHAT, "gui.lnet_snchat" }, { ID_LNET_MSN, "gui.lnet_msn" },
                        { ID_LNET_MLOBBY, "gui.lnet_mlobby" }, { ID_LNET_MTEAM, "gui.lnet_mteam" },
-                       { ID_LNET_NETREP, "gui.lnet_netrep" } };
+                       { ID_LNET_NETREP, "gui.lnet_netrep" }, { ID_LNET_CHATBAR, "gui.lnet_chatbar" } };
             int k;
             for (k = 0; k < (int)(sizeof kT / sizeof kT[0]); k++) {
                 if (kT[k].id == r->id) {
@@ -2307,7 +2333,8 @@ static void lnet_relabel(void)
                { ID_LNET_VERPAGE, "gui.lnet_verpage" }, { ID_LNET_PRIV, "gui.lnet_priv_btn" },
                { ID_LNET_TAB0, "gui.lnet_tab_net" },    { ID_LNET_TAB1, "gui.lnet_tab_lobby" },
                { ID_LNET_MSN, "gui.lnet_msn" },         { ID_LNET_MLOBBY, "gui.lnet_mlobby" },
-               { ID_LNET_MTEAM, "gui.lnet_mteam" },       { ID_LNET_NETREP, "gui.lnet_netrep" } };
+               { ID_LNET_MTEAM, "gui.lnet_mteam" },       { ID_LNET_NETREP, "gui.lnet_netrep" },
+               { ID_LNET_CHATBAR, "gui.lnet_chatbar" } };
     int i;
     lnet_netmode_fill(); /* W447 */
     for (i = 0; i < (int)(sizeof kL / sizeof kL[0]); i++) {

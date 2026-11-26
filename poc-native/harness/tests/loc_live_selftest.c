@@ -609,6 +609,34 @@ static void t_camp(void)
             check(mk == 1u && !loccamp_reinf_blocked(mk), "Reinforcements: Shop-Antwort (Vitzh unbegrenzt, Falchion ausverkauft) -> Maske Bit 0");
         }
     }
+    { /* W515 FACTIONSWAP (#110): Enlistment Office im HQ (FUN_000EF6B0 @0xEF737) */
+        const uint8_t *o = loccamp_swap_orig, *nw = loccamp_swap_new;
+        uint32_t va = LOCCAMP_SWAP_VA;
+        uint32_t jb_to = va + 6 + o[5], jbe_to = va + 12 + o[11], jmp_to = va + 6 + nw[5];
+        int t, f, bad = 0, diff = 0, i;
+        for (i = 0; i < 12; i++) diff += o[i] != nw[i];
+        check(o[4] == 0x72 && o[10] == 0x76 && nw[4] == 0xEB && diff == 2,
+              "Seitenwechsel: Patch ersetzt nur jb (Zug < 3) durch jmp, 2 Byte");
+        check(jb_to == 0xEF743u && jbe_to == 0xEF754u && jmp_to == jbe_to,
+              "Seitenwechsel: jmp springt wie 'Zug 3..6' hinter die Sperre (0xEF754), jb ging auf die Sperre (0xEF743)");
+        for (t = 0; t <= 9; t++) {
+            int orig_open = !loccamp_enlist_locked(1, 0, t, 0);
+            bad |= orig_open != (t >= 3 && t <= 6);   /* Original: nur Zug 3..6 */
+            bad |= loccamp_enlist_locked(1, 1, t, 1);  /* Patch: jeder Zug */
+            for (f = 0; f <= 4; f++) bad |= loccamp_enlist_locked(0, f, t, 1) != 1 || loccamp_enlist_locked(0, f, t, 0) != 1;
+            bad |= loccamp_enlist_locked(1, 4, t, 0) || loccamp_enlist_locked(1, 4, t, 1);
+        }
+        check(!bad, "Seitenwechsel: Original offen nur Zug 3..6, mit Patch jeder Zug; neutral immer offen, ohne Kampagne immer grau");
+    }
+    { /* W515: nach dem Wechsel ins CAMPAIGN-Menue (Pilot + Garage neu) statt ins MAIN MENU (FUN_00112730 @0x112738) */
+        const uint8_t *o = loccamp_swap_reload_orig, *nw = loccamp_swap_reload_new;
+        int i, diff = 0;
+        for (i = 0; i < 6; i++) diff += o[i] != nw[i];
+        check(o[2] == 0x74 && o[3] == 0x0B && LOCCAMP_SWAP_RELOAD_VA + 4 + o[3] == 0x112747u,
+              "Seitenwechsel: je (Flag 0x14 nicht gesetzt) bleibt auf dem HQ-Zweig (0x112747)");
+        check(o[4] == 0x6A && o[5] == LOCCAMP_SCREEN_MAIN && nw[5] == LOCCAMP_SCREEN_CAMPAIGN && diff == 1,
+              "Seitenwechsel: nur das push-Argument 8 (MAIN MENU) -> 3 (CAMPAIGN, laedt Pilot und Garage) aendert sich");
+    }
 }
 
 int main(void)

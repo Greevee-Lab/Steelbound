@@ -10,6 +10,7 @@
 #include "loc_net.h"
 #include "loc_lobbylist_ovl.h" /* W443 */
 #include "loc_netpanel.h" /* W447 */
+#include "loc_hostmig.h" /* W520 */
 #include "loc_replayctl.h" /* W457 */
 #include "loc_lobbywidget.h" /* W460 */
 #include "render_qa.h" /* W358: g_rq_active */
@@ -99,6 +100,7 @@ void loc_render_frame(unsigned f)
     if (g_sba_loc) {
         loc_sync_frame(f); /* W297: Testfolge loc_steps (nur mit loc_sync=1 geparst) */
         loc_net_lobby_frame(f); /* W350: DIAG Lobby-Belegung (nur loc_net_diag=1) */
+        loc_hostmig_frame(f); /* W520 HOSTMIG: Host-Wechsel (Hinweis, Neuaufbau der Spiel-Session) */
         loc_lobbylist_frame(f); /* W443 LOC-LOBBY-LIST: Modus/Ping je Zeile der Suchliste */
         loc_netpanel_frame(f); /* W447 LOC-NET-AUTO: Netz-Panel in der Lobby */
         loc_rpc_frame(f); /* W457 LOC-REPLAY-CTRL: Replay-Viewer (Zustand, Bedienhilfe) */

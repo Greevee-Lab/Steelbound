@@ -23,7 +23,7 @@ int gametab_id(int id) /* W398: Wortmarken-Tabs im Kopf */
  * Dort liegen Rollback, eigene Bewegung sofort, Gegner glaetten (ID_LOC_SMOOTH, frueher unter dem Start) und
  * niedrigere Eingabeverzoegerung sowie "Standard wiederherstellen". */
 #define ID_LNET_FIRST ID_LNET_RB
-#define ID_LNET_LAST ID_LNET_CHATBAR /* W508: + Schalter Chat in den Seitenbalken (2816). W496: + Schalter Netzwerkstatistik (2813/2814 = Dialog, nrq_visible zuerst); vorher ID_LNET_CAMP. W454; W473: Reiter + Chat im Spiel (W485 MERGEFIX: Live-Schalter entfiel, Wahl per ID_LNET_KIND); W491: Kampagne (intern) */
+#define ID_LNET_LAST ID_LNET_MENUBG /* W518b: + Schalter Menue-Hintergrund (2819). W520: + Host-Wechsel/Auto-Host (2817/2818). W508: + Schalter Chat in den Seitenbalken (2816). W496: + Schalter Netzwerkstatistik (2813/2814 = Dialog, nrq_visible zuerst); vorher ID_LNET_CAMP. W454; W473: Reiter + Chat im Spiel (W485 MERGEFIX: Live-Schalter entfiel, Wahl per ID_LNET_KIND); W491: Kampagne (intern) */
 /* W293 LOC-LAYOUT: Spielen = Kopf, Start, Bereitschaft (wie SB), Hinweisband
  * unten; Disc, Spielstaende & Daten und Online liegen links auf Erweitert
  * (rechts die gemeinsamen Teile Feinabstimmung + Launcher). */
@@ -301,6 +301,19 @@ int g_loc_snchat = 1;
  * loc_chat_pos=1 an den Start (Standard-Startzeile unveraendert). */
 #define LNET_CHATBAR_KEY "launcher_loc_chat_bar"
 int g_loc_chatbar = 1;
+/* W518b MENUBG (Nutzerwunsch 26.11., #111): bildfuellende Hintergrundebene im Verbindungs-/Pilotenmenue - an
+ * (Standard) = sichtbar, aus = wie vor W518 unsichtbar. Gemerkt in user.cfg (fehlt/ungueltig = 1); nur aus geht als
+ * loc_menu_bg=0 an den Start (Standard-Startzeile unveraendert). */
+#define LNET_MENUBG_KEY "launcher_loc_menu_bg"
+int g_loc_menubg = 1;
+/* W520 HOSTMIG (GitHub #123): Host-Wechsel offener Lobbys + Auto-Host. Host-Wechsel: Standard an (nur Abweichung geht als
+ * loc_host_migration=0 an den Start); Auto-Host: Standard aus (an = loc_auto_host=1), wirkt nur mit Host-Wechsel.
+ * W523 HOSTMIG-SCOPE (0.6.3): Schalter heisst „Host-Wechsel im Match“; Auto-Host ausgeblendet, gemerkter Wert ignoriert,
+ * nie in der Startzeile (kommt mit 0.7.0 neu). */
+#define LNET_HOSTMIG_KEY "launcher_loc_host_migration"
+#define LNET_AUTOHOST_KEY "launcher_loc_auto_host"
+int g_loc_hostmig = 1;
+int g_loc_autohost = 0;
 /* W440 LOC-LOBBY-MODES (GitHub #79, Nutzerentscheid 23.11.): Modus der Lobbys, die ich hoste - 0 = Sim (Standard:
  * keine Zielhilfe, keine Gang-Automatik fuer alle), 1 = Arcade (jeder nur seine eigenen Hilfen). Gemerkt in user.cfg
  * (fehlt/ungueltig = Sim), als loc_play_mode=sim|arcade an jeden LoC-Start (loc_rule_set_append; Testpartner: --set). */
@@ -629,13 +642,24 @@ void loc_rule_set_append(char *set, size_t cap)
         l = strlen(set);
         _snprintf_s(set + l, cap - l, _TRUNCATE, ";loc_chat_pos=1");
     }
+    if (!g_loc_menubg) { /* W518b: nur die Abweichung vom Standard */
+        l = strlen(set);
+        _snprintf_s(set + l, cap - l, _TRUNCATE, ";loc_menu_bg=0");
+    }
+    if (!g_loc_hostmig) { /* W520: nur die Abweichung vom Standard */
+        l = strlen(set);
+        _snprintf_s(set + l, cap - l, _TRUNCATE, ";loc_host_migration=0");
+    }
+    /* W523 HOSTMIG-SCOPE: Auto-Host ist in 0.6.3 aus (Schalter ausgeblendet, gemerkter Wert ignoriert) - kein
+     * loc_auto_host in der Startzeile; kommt mit 0.7.0 (HOSTMIG-MEM) neu */
 }
 
 /* W392: Stimmen alle Netzwerk-Schalter mit dem Standard ueberein? (Hinweis auf LoC-Spielen) */
 int lnet_is_default(void)
 {
     return g_loc_rb_on && g_loc_net_auto && g_loc_own_pred && g_loc_lowd && g_loc_smooth_opp == 1 && g_loc_clip && g_loc_chat &&
-           g_loc_snchat && !g_loc_arcade && g_loc_chatbar && /* W440: Standard Sim; W446; W447; W508 */
+           g_loc_snchat && !g_loc_arcade && g_loc_chatbar && g_loc_menubg && /* W518b; W440: Standard Sim; W446; W447; W508 */
+           g_loc_hostmig && !g_loc_autohost && /* W520 */
            !g_loc_msn && g_loc_mlobby && g_loc_mteam && /* W473: Chat im Spiel (steelnet aus, Lobby/Team an) */
            !g_camp_test; /* W491: Saison (Community immer 0) */
 }
@@ -1288,6 +1312,9 @@ void onl_load(void)
     g_loc_chat = 1; /* W437: Standard an */
     g_loc_snchat = 1; /* W446: Standard an */
     g_loc_chatbar = 1; /* W508: Standard auto */
+    g_loc_menubg = 1; /* W518b: Standard an */
+    g_loc_hostmig = 1; /* W520: Standard an */
+    g_loc_autohost = 0; /* W520: Standard aus */
     g_loc_arcade = 0; /* W440: Standard Sim */
     g_loc_lan = 0;    /* W454: Standard steelnet */
     g_camp_test = 0;  /* W491: Standard Saison */
@@ -1331,6 +1358,13 @@ void onl_load(void)
             if (strncmp(line, LNET_CHATBAR_KEY "=", sizeof LNET_CHATBAR_KEY) == 0) { /* W508: fehlt/ungueltig = 1 */
                 g_loc_chatbar = lnet_bool_parse(line + sizeof LNET_CHATBAR_KEY);
             }
+            if (strncmp(line, LNET_MENUBG_KEY "=", sizeof LNET_MENUBG_KEY) == 0) { /* W518b: fehlt/ungueltig = 1 */
+                g_loc_menubg = lnet_bool_parse(line + sizeof LNET_MENUBG_KEY);
+    }
+            if (strncmp(line, LNET_HOSTMIG_KEY "=", sizeof LNET_HOSTMIG_KEY) == 0) { /* W520: fehlt/ungueltig = 1 */
+                g_loc_hostmig = lnet_bool_parse(line + sizeof LNET_HOSTMIG_KEY);
+            }
+            /* W523: launcher_loc_auto_host wird nicht mehr gelesen (Auto-Host in 0.6.3 aus, g_loc_autohost bleibt 0) */
             if (strncmp(line, LNET_LAN_KEY "=", sizeof LNET_LAN_KEY) == 0) { /* W454: nur genau 1 = LAN */
                 const char *lv = line + sizeof LNET_LAN_KEY;
                 g_loc_lan = lv[0] == '1' && (lv[1] == 0 || lv[1] == '\r' || lv[1] == '\n' || lv[1] == ' ');
@@ -1497,6 +1531,16 @@ void onl_sync_ui(void)
     if (ctl(ID_LNET_CHATBAR)) { /* W508: unabhaengig von Rollback/LAN */
         ui_set_checked(ID_LNET_CHATBAR, g_loc_chatbar);
     }
+    if (ctl(ID_LNET_MENUBG)) { /* W518b */
+        ui_set_checked(ID_LNET_MENUBG, g_loc_menubg);
+    }
+    if (ctl(ID_LNET_HOSTMIG)) { /* W520 */
+        ui_set_checked(ID_LNET_HOSTMIG, g_loc_hostmig);
+    }
+    if (ctl(ID_LNET_AUTOHOST)) { /* W520: grau ohne Host-Wechsel (Wert bleibt) */
+        ui_set_checked(ID_LNET_AUTOHOST, g_loc_autohost);
+        EnableWindow(ctl(ID_LNET_AUTOHOST), g_loc_hostmig ? TRUE : FALSE);
+    }
     if (ctl(ID_LNET_NETREP)) { /* W496: Zustimmung (nur genau "ja" = an) */
         ui_set_checked(ID_LNET_NETREP, g_nrq_cfg == 1);
     }
@@ -1638,7 +1682,11 @@ static void loc_smooth_fill(void)
 /* bleibt gemerkt), je ein kurzer Hinweis, "Standard wiederherstellen". */
 /* ------------------------------------------------------------------ */
 #define LNET_Y (CY0 + 196) /* W397: unter Match/Account, volle Breite (W473: Karten darueber 184 hoch) */
+#if SB_EDITION_COMMUNITY
 #define LNET_H 308
+#else
+#define LNET_H 338 /* W518b: intern eine Zeile mehr (Kampagne) */
+#endif
 #define LNET_IND 28           /* Einrueckung abhaengiger Zeilen (Rollback bzw. Chat) */
 #define LNET_LBL_W 150        /* W473: Beschriftung links der Auswahlfelder */
 #define LNET_COMBO_W 202      /* W473: Auswahlfeld zeigt nur den Wert */
@@ -1665,6 +1713,8 @@ static const lnet_row_t kLnetRows[] = {
     { 0, 2, ID_LOC_SMOOTH, "gui.lnet_smooth", "gui.lnet_smooth_hint", 1 },
     { 0, 3, ID_LNET_LOWD, NULL, "gui.lnet_lowd_hint", 1 },
     { 0, 4, ID_LNET_NETREP, NULL, "gui.lnet_netrep_hint", 0 }, /* W496: anonyme Netzwerkstatistik (Zustimmung) */
+    { 0, 5, ID_LNET_HOSTMIG, NULL, "gui.lnet_hostmig_hint", 0 }, /* W520: Host-Wechsel (experimentell) */
+    { -1, 6, ID_LNET_AUTOHOST, NULL, "gui.lnet_autohost_hint", 4 }, /* W520: Auto-Host; W523: in 0.6.3 nie sichtbar (Reiter -1) */
     { 1, 0, ID_LNET_MODE, "gui.lnet_mode", "gui.lnet_mode_hint", 0 },
     { 1, 1, ID_LNET_CLIP, NULL, "gui.lnet_clip_hint", 0 },
     { 1, 2, ID_LNET_CHAT, NULL, "gui.lnet_chat_hint", 0 },
@@ -1674,6 +1724,7 @@ static const lnet_row_t kLnetRows[] = {
     { 1, 5, ID_LNET_SNCHAT, NULL, "gui.lnet_snchat_hint", 0 },
     { 1, 6, ID_LNET_MSN, NULL, "gui.lnet_msn_hint", 3 },
     { 1, 7, ID_LNET_CHATBAR, NULL, "gui.lnet_chatbar_hint", 0 }, /* W508 */
+    { 1, 8, ID_LNET_MENUBG, NULL, "gui.lnet_menubg_hint", 0 }, /* W518b (nur mit Team-Reiter, derzeit aus) */
 #if !SB_EDITION_COMMUNITY
     { 1, 8, ID_LNET_CAMP, "gui.lnet_camp", "gui.lnet_camp_hint", 0 }, /* W491: mit Team-Reiter Platz der Karte pruefen */
 #endif
@@ -1682,15 +1733,16 @@ static const lnet_row_t kLnetRows[] = {
     { 1, 4, ID_LNET_SNCHAT, NULL, "gui.lnet_snchat_hint", 0 },
     { 1, 5, ID_LNET_MSN, NULL, "gui.lnet_msn_hint", 3 },
     { 1, 6, ID_LNET_CHATBAR, NULL, "gui.lnet_chatbar_hint", 0 }, /* W508 CHATBAR: Lage des Chats bei Seitenbalken */
+    { 1, 7, ID_LNET_MENUBG, NULL, "gui.lnet_menubg_hint", 0 }, /* W518b MENUBG: Hintergrundebene in Menues */
 #if !SB_EDITION_COMMUNITY
-    { 1, 7, ID_LNET_CAMP, "gui.lnet_camp", "gui.lnet_camp_hint", 0 }, /* W491 CAMP-CLIENT: nur intern, Saison/Test */
+    { 1, 8, ID_LNET_CAMP, "gui.lnet_camp", "gui.lnet_camp_hint", 0 }, /* W491 CAMP-CLIENT: nur intern, Saison/Test */
 #endif
 #endif
 };
 #define LNET_NROWS ((int)(sizeof kLnetRows / sizeof kLnetRows[0]))
-/* y der Zeile: Network weiter auseinander (5 Zeilen), Lobby & chat enger (bis 8 Zeilen; W508: ab +68 im Abstand 30,
+/* y der Zeile: Network (W520: 7 Zeilen im Abstand 34, 72 + 6 * 34 + 28 = 304 <= LNET_H), Lobby & chat enger (bis 8 Zeilen; W508: ab +68 im Abstand 30,
  * damit die letzte Zeile in der Karte bleibt: 68 + 7 * 30 + 28 = 306 <= LNET_H) */
-static int lnet_row_y(int tab, int row) { return tab == 0 ? LNET_Y + 72 + row * 40 : LNET_Y + 68 + row * 30; }
+static int lnet_row_y(int tab, int row) { return tab == 0 ? LNET_Y + 72 + row * 34 : LNET_Y + 68 + row * 30; }
 static const lnet_row_t *lnet_row_of(int id)
 {
     int i;
@@ -1712,7 +1764,8 @@ static int lnet_row_grey(const lnet_row_t *r)
 {
     if (r->id == ID_LNET_MTEAM && !LNET_HAVE_TEAM_TAB) return 1;
     if ((r->id == ID_LNET_SNCHAT || r->id == ID_LNET_MSN) && g_loc_lan) return 1;
-    return (r->dep == 1 && !g_loc_rb_on) || (r->dep == 2 && !g_loc_chat) || (r->dep == 3 && !g_loc_snchat);
+    return (r->dep == 1 && !g_loc_rb_on) || (r->dep == 2 && !g_loc_chat) || (r->dep == 3 && !g_loc_snchat) ||
+           (r->dep == 4 && !g_loc_hostmig);
 }
 int lnet_id_grey(int id)
 {
@@ -1730,6 +1783,7 @@ static const char *lnet_row_hint(const lnet_row_t *r)
     if (r->dep == 1 && !g_loc_rb_on) return LT("gui.lnet_needs_rb");
     if (r->dep == 2 && !g_loc_chat) return LT("gui.lnet_needs_chat");
     if (r->dep == 3 && !g_loc_snchat) return LT("gui.lnet_needs_snchat");
+    if (r->dep == 4 && !g_loc_hostmig) return LT("gui.lnet_needs_hostmig");
     return LT(r->hint);
 }
 
@@ -1834,10 +1888,25 @@ static int *lnet_var(int id, const char **key, const char **name)
         *name = "gui.lnet_snchat";
         return &g_loc_snchat;
     }
+    if (id == ID_LNET_MENUBG) { /* W518b */
+        *key = LNET_MENUBG_KEY;
+        *name = "gui.lnet_menubg";
+        return &g_loc_menubg;
+    }
     if (id == ID_LNET_CHATBAR) { /* W508 */
         *key = LNET_CHATBAR_KEY;
         *name = "gui.lnet_chatbar";
         return &g_loc_chatbar;
+    }
+    if (id == ID_LNET_HOSTMIG) { /* W520 */
+        *key = LNET_HOSTMIG_KEY;
+        *name = "gui.lnet_hostmig";
+        return &g_loc_hostmig;
+    }
+    if (id == ID_LNET_AUTOHOST) { /* W520 */
+        *key = LNET_AUTOHOST_KEY;
+        *name = "gui.lnet_autohost";
+        return &g_loc_autohost;
     }
     *key = LNET_LOWD_KEY;
     *name = "gui.lnet_lowd";
@@ -1963,8 +2032,12 @@ void lnet_toggle(int id)
         return;
     }
     v = lnet_var(id, &key, &name);
+    if (id == ID_LNET_AUTOHOST) { /* W520: grau ohne Host-Wechsel; W523: Auto-Host in 0.6.3 aus (ausgeblendet, wirkungslos) */
+        onl_sync_ui();
+        return;
+    }
     if (id != ID_LNET_RB && id != ID_LNET_CLIP && id != ID_LNET_CHAT && id != ID_LNET_SNCHAT && id != ID_LNET_CHATBAR &&
-        !g_loc_rb_on) { /* W420/W437/W446/W508: auch im Lockstep */
+        id != ID_LNET_HOSTMIG && id != ID_LNET_AUTOHOST && id != ID_LNET_MENUBG && !g_loc_rb_on) { /* W420/W437/W446/W508: auch im Lockstep */
         onl_sync_ui();
         return;
     }
@@ -1988,6 +2061,9 @@ void lnet_reset(void)
     g_loc_chat = 1; /* W437 */
     g_loc_snchat = 1; /* W446 */
     g_loc_chatbar = 1; /* W508 */
+    g_loc_menubg = 1; /* W518b */
+    g_loc_hostmig = 1; /* W520 */
+    g_loc_autohost = 0;
     g_loc_arcade = 0; /* W440: Sim */
     g_loc_msn = 0; /* W473 */
     g_loc_mlobby = g_loc_mteam = 1;
@@ -1997,6 +2073,9 @@ void lnet_reset(void)
     bad |= onl_save_key(LNET_CHAT_KEY, 1) < 0;
     bad |= onl_save_key(LNET_SNCHAT_KEY, 1) < 0;
     bad |= onl_save_key(LNET_CHATBAR_KEY, 1) < 0; /* W508 */
+    bad |= onl_save_key(LNET_MENUBG_KEY, 1) < 0; /* W518b */
+    bad |= onl_save_key(LNET_HOSTMIG_KEY, 1) < 0; /* W520 */
+    bad |= onl_save_key(LNET_AUTOHOST_KEY, 0) < 0;
     bad |= onl_save_key(LNET_MODE_KEY, 0) < 0;
     bad |= onl_save_key(LNET_RB_KEY, 1) < 0;
     bad |= onl_save_key(LNET_AUTO_KEY, 1) < 0; /* W447 */
@@ -2055,6 +2134,9 @@ void paint_lnet(void)
         }
         if (r->id == ID_LNET_RB && !g_loc_rb_on) {
             c = C_WARN; /* W392: Lockstep sichtbar machen */
+        }
+        if ((r->id == ID_LNET_HOSTMIG || r->id == ID_LNET_AUTOHOST) && !grey) {
+            c = C_WARN; /* W520: experimentell */
         }
         if (r->lbl) {
             char t[120];
@@ -2304,7 +2386,9 @@ static void lnet_build(HWND w)
                        { ID_LNET_CLIP, "gui.lnet_clip" },     { ID_LNET_CHAT, "gui.lnet_chat" },
                        { ID_LNET_SNCHAT, "gui.lnet_snchat" }, { ID_LNET_MSN, "gui.lnet_msn" },
                        { ID_LNET_MLOBBY, "gui.lnet_mlobby" }, { ID_LNET_MTEAM, "gui.lnet_mteam" },
-                       { ID_LNET_NETREP, "gui.lnet_netrep" }, { ID_LNET_CHATBAR, "gui.lnet_chatbar" } };
+                       { ID_LNET_NETREP, "gui.lnet_netrep" }, { ID_LNET_CHATBAR, "gui.lnet_chatbar" },
+                       { ID_LNET_HOSTMIG, "gui.lnet_hostmig" }, { ID_LNET_AUTOHOST, "gui.lnet_autohost" },
+                       { ID_LNET_MENUBG, "gui.lnet_menubg" } };
             int k;
             for (k = 0; k < (int)(sizeof kT / sizeof kT[0]); k++) {
                 if (kT[k].id == r->id) {
@@ -2334,7 +2418,8 @@ static void lnet_relabel(void)
                { ID_LNET_TAB0, "gui.lnet_tab_net" },    { ID_LNET_TAB1, "gui.lnet_tab_lobby" },
                { ID_LNET_MSN, "gui.lnet_msn" },         { ID_LNET_MLOBBY, "gui.lnet_mlobby" },
                { ID_LNET_MTEAM, "gui.lnet_mteam" },       { ID_LNET_NETREP, "gui.lnet_netrep" },
-               { ID_LNET_CHATBAR, "gui.lnet_chatbar" } };
+               { ID_LNET_CHATBAR, "gui.lnet_chatbar" }, { ID_LNET_HOSTMIG, "gui.lnet_hostmig" },
+               { ID_LNET_AUTOHOST, "gui.lnet_autohost" }, { ID_LNET_MENUBG, "gui.lnet_menubg" } };
     int i;
     lnet_netmode_fill(); /* W447 */
     for (i = 0; i < (int)(sizeof kL / sizeof kL[0]); i++) {
@@ -3109,7 +3194,9 @@ void loctab_start(void)
             return;
         }
         lcfg_mkdir_p(d);
-        if (app_launch_client_env(g_client_dir, xbe_u8, set, env, m, sizeof m) == 0) {
+        void *ct_proc = NULL; /* W522: Exitcode einordnen (Absturz-Datensatz, nur mit Zustimmung) */
+        if (app_launch_client_env_proc(g_client_dir, xbe_u8, set, env, m, sizeof m, &ct_proc) == 0) {
+            nrq_ct_watch(ct_proc); /* W522 */
             int cs = strstr(set, "loc_camp=1") ? camp_status() : LCAMP_OK;
             if (cs != LCAMP_OK && cs != LCAMP_CHECK) { /* W491: Start trotzdem; sagen, warum Campaign im Spiel grau ist */
                 char ct[200];

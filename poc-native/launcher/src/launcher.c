@@ -4393,6 +4393,7 @@ static int cli_selftest(const char *client_override)
             strcmp(lcfg_exit_msg_key(5, LCFG_ED_US) ? lcfg_exit_msg_key(5, LCFG_ED_US) : "", "gui.exit5_us") ||
             strcmp(lcfg_exit_msg_key(8, LCFG_ED_US) ? lcfg_exit_msg_key(8, LCFG_ED_US) : "", "gui.exit8") ||
             strcmp(lcfg_exit_msg_key(39, LCFG_ED_EU) ? lcfg_exit_msg_key(39, LCFG_ED_EU) : "", "gui.exit39") || /* W339 */
+            strcmp(lcfg_exit_msg_key(16, LCFG_ED_EU) ? lcfg_exit_msg_key(16, LCFG_ED_EU) : "", "gui.exit16") || /* W516 */
             lcfg_exit_msg_key(0, LCFG_ED_US) || lcfg_exit_msg_key(1, LCFG_ED_EU) ||
             lcfg_exit_msg_key(4, LCFG_ED_US))
             strcpy_s(why, sizeof why, "exit-Schluessel");
@@ -5058,10 +5059,20 @@ int app_launch_client_proc(const char *client_dir, const char *xbe_path,
 int app_launch_client_env(const char *client_dir, const char *xbe_path, const char *set_args,
                           const void *env_w, char *err, size_t errcap)
 {
+    return app_launch_client_env_proc(client_dir, xbe_path, set_args, env_w, err, errcap, NULL);
+}
+
+/* W522 CRASH-TELEMETRY: mit Prozess-Handle (Exitcode des LoC-Spiels einordnen) */
+int app_launch_client_env_proc(const char *client_dir, const char *xbe_path, const char *set_args,
+                               const void *env_w, char *err, size_t errcap, void **proc)
+{
     char cmd[3600];
     unsigned long pid = 0;
     app_client_cmdline(client_dir, xbe_path, set_args, cmd, sizeof cmd);
-    if (!u8_CreateProcessEnv(cmd, client_dir, 0, 0, NULL, 0, env_w, &pid, NULL)) {
+    if (proc) {
+        *proc = NULL;
+    }
+    if (!u8_CreateProcessEnv(cmd, client_dir, 0, 0, NULL, 0, env_w, &pid, proc)) {
         _snprintf_s(err, errcap, _TRUNCATE, LT("app.launch_fail"), GetLastError());
         return 1;
     }

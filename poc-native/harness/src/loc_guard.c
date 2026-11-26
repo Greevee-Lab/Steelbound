@@ -265,12 +265,18 @@ void lguard_walk_advance(lguard_walk *w, const uint8_t *p, int avail, int take)
 
 int lguard_udp_check(uint16_t game_port, const uint8_t *d, int n, int *why)
 {
+    return lguard_udp_check_live(game_port, d, n, why, 0);
+}
+
+int lguard_udp_check_live(uint16_t game_port, const uint8_t *d, int n, int *why, int live)
+{
     unsigned typ;
     int need = 0;
     if (why) *why = LGUARD_V_TYPE;
     if (!d || n < 2) return 0;
     typ = (unsigned)d[0] | ((unsigned)d[1] << 8);
-    /* Positivliste Stufe 1 (SECURITY.md §6.3); gesperrt: 0x09, 0x15-0x19, 0x28/0x29, 0x39-0x3B, Port 1203 (VDP) */
+    /* Positivliste Stufe 1 (SECURITY.md §6.3); gesperrt: 0x09, 0x15-0x19 (W514: im Live-Betrieb frei), 0x28/0x29, 0x39-0x3B,
+     * Port 1203 (VDP) */
     if (game_port == 1201) {
         if (typ == 0x01) need = 0x14;
         else if (typ == 0x02) need = 100;
@@ -281,6 +287,12 @@ int lguard_udp_check(uint16_t game_port, const uint8_t *d, int n, int *why)
         case 0x07: need = 6; break; /* W373 (B): Sender FUN_00054210 schickt 6 B, Byte 4 = Grund (vorher 4 -> Trennung) */
         case 0x06: need = 0x308; break;
         case 0x38: need = 8; break;
+        /* W514 #112 (B, LOC_RE1 §6.5 W334-Tabelle): Handel im Chatraum - 0x15 Vorschlag (FUN_00055E40), 0x16
+         * zurueckgezogen (FUN_00057270), 0x17 angenommen (FUN_00057200, Sender FUN_000542F0), 0x18 abgelehnt
+         * (FUN_000571B0 / FUN_00054320), 0x19 kann nicht (FUN_000571E0 / FUN_00054350), je 4 B. Die Handler lesen den
+         * Rahmenkoerper nicht (nur Zustandsuebergang, Partner aus der Absenderadresse). Chatraeume gibt es nur ueber
+         * Xbox Live -> nur im Live-Betrieb frei, System Link/LAN unveraendert gesperrt. */
+        case 0x15: case 0x16: case 0x17: case 0x18: case 0x19: need = live ? 4 : 0; break;
         default: break;
         }
     }

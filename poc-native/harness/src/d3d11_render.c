@@ -20,6 +20,9 @@
 #include "sb_perfhud.h" /* W122 PERF-HUD */
 #include "hlock.h" /* W119 LOADLOCK */
 #include "loc_render.h" /* W285 LOC-RENDER */
+#include "sb_crash.h" /* W516 ISSUE-114: Geraeteverlust-Bericht */
+static int devlost_test_hit(void); /* W516 TEST gpu_lost_test (unten) */
+unsigned hooks_frame_count(void); /* W516: Bildzaehler fuer den Geraeteverlust-Bericht (xdk_hooks.h) */
 #include <intrin.h> /* W138 DIAG pd_diag: _ReturnAddress */
 
 int imouse_subclassed(void); /* input_mouse.c (W118) */
@@ -1632,9 +1635,9 @@ static void sb_render_present_body(unsigned flags)
     if (g_cfg.vr_enable || pdl) { sb_ctx_leave(); }
     if (g_phud_meas) { sb_ctx_enter(); sb_phud_present_post(q0, 1); sb_ctx_leave(); } /* W122 PERF-HUD */
     if (g_cfg.rq_perf) { g_rqp_q[RQP_PRESENT] += rq_qpc() - q0; } } } /* DIAG(SHADE-PERF,W80); W138: Ende pdl-Block */
+    if (devlost_test_hit()) { hr = DXGI_ERROR_DEVICE_REMOVED; } /* TEST(W516) gpu_lost_test */
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
-        HLOG_E("render: Device verloren (hr=0x%lX)", (long)hr);
-        ExitProcess(7);
+        sb_render_device_lost("present", (long)hr); /* W516 ISSUE-114: Grund + Bericht statt stummem Ende */
     }
     if (sb_phud_visible()) { /* W122 PERF-HUD: Spiel-BB-Bereich zurueck (vor dem Overlay: umgekehrte Reihenfolge) */
         sb_ctx_enter();
@@ -1979,9 +1982,9 @@ void sb_render_present_raw(void)
     hr = IDXGISwapChain_Present(g_swap, 0, sb_flip_pre_present(0)); /* W468 swap_flip */
     g_pd_last_q = rq_qpc(); /* W138 */
     if (g_phud_meas) { sb_phud_present_post(q0, 0); } /* W122 PERF-HUD */
+    if (devlost_test_hit()) { hr = DXGI_ERROR_DEVICE_REMOVED; } /* TEST(W516) gpu_lost_test */
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
-        HLOG_E("render: Device verloren (hr=0x%lX)", (long)hr);
-        ExitProcess(7);
+        sb_render_device_lost("present_raw", (long)hr); /* W516 ISSUE-114 */
     }
 }
 
@@ -2483,6 +2486,75 @@ long sb_render_device_reason(void)
 {
     if (!g_dev) { return -1; }
     return (long)ID3D11Device_GetDeviceRemovedReason(g_dev);
+}
+
+/* W516 ISSUE-114: Name eines DXGI-Geraetecodes (GetDeviceRemovedReason / Present-Rueckgabe). */
+const char *sb_render_hr_name(long hr)
+{
+    switch ((unsigned long)hr) {
+    case 0x00000000ul: return "S_OK";
+    case 0x887A0005ul: return "DXGI_ERROR_DEVICE_REMOVED";
+    case 0x887A0006ul: return "DXGI_ERROR_DEVICE_HUNG";
+    case 0x887A0007ul: return "DXGI_ERROR_DEVICE_RESET";
+    case 0x887A0020ul: return "DXGI_ERROR_DRIVER_INTERNAL_ERROR";
+    case 0x887A0001ul: return "DXGI_ERROR_INVALID_CALL";
+    case 0x8007000Eul: return "E_OUTOFMEMORY";
+    case 0xFFFFFFFFul: return "no device";
+    default: return "?";
+    }
+}
+
+/* W516 ISSUE-114: TEST [diag] gpu_lost_test=N - N s nach dem ersten Present meldet der Present-Pfad
+ * DXGI_ERROR_DEVICE_REMOVED (kuenstlicher Geraeteverlust, das Geraet selbst bleibt gesund). 0 = aus. */
+static volatile LONG s_devlost_sim; /* 1 = der gemeldete Verlust ist der kuenstliche */
+static int devlost_test_hit(void)
+{
+    static ULONGLONG t0;
+    int s = sb_crash_gpu_lost_test();
+    if (s <= 0) { return 0; }
+    if (!t0) { t0 = GetTickCount64(); }
+    if (GetTickCount64() - t0 < (ULONGLONG)s * 1000u) { return 0; }
+    InterlockedExchange(&s_devlost_sim, 1);
+    return 1;
+}
+
+/* W516 ISSUE-114: Grafikgeraet verloren (Present meldet DXGI_ERROR_DEVICE_REMOVED/RESET). Bisher nur eine Logzeile
+ * und ExitProcess(7) - fuer den Spieler "Spiel schliesst sich", ohne Bericht. Jetzt: Grund loggen
+ * (GetDeviceRemovedReason), fataler Bericht im Crash-Ordner (Launcher: "The last session crashed" + Meldung zu
+ * Exitcode 16), dann Ende. Ein neues Geraet samt aller Ressourcen anzulegen ist in diesem Renderer nicht
+ * machbar (Texturen/RTs/Shader/Zustands-Caches in ~40 Modulen, Spiel-Zustand haengt an den Objekten, BERICHT_M2
+ * W516). Nur der erste Aufrufer schreibt; weitere Threads warten auf dessen Ende. */
+void sb_render_device_lost(const char *where, long hr)
+{
+    static volatile LONG once;
+    char reason[320], detail[1400];
+    long why;
+    int sim = s_devlost_sim != 0;
+    if (InterlockedExchange(&once, 1)) {
+        Sleep(30000);
+        ExitProcess(SB_EXIT_GPU_LOST);
+    }
+    if (sim) { OutputDebugStringA("W516 gpu_lost_test: simulated device removal\n"); } /* TEST: VEH-Debug-Text (wie #114) */
+    why = sb_render_device_reason();
+    HLOG_E("render: Device verloren (hr=0x%lX %s, Grund=0x%lX %s, Ort=%s, Bild=%u%s)", hr, sb_render_hr_name(hr),
+           why, sb_render_hr_name(why), where ? where : "?", hooks_frame_count(), sim ? ", TEST gpu_lost_test" : "");
+    hlog_flush();
+    _snprintf_s(reason, sizeof reason, _TRUNCATE, "GPU device lost at %s: %s (0x%08lX), removed reason %s (0x%08lX)%s",
+                where ? where : "?", sb_render_hr_name(hr), hr, sb_render_hr_name(why), why,
+                sim ? " [TEST gpu_lost_test]" : "");
+    _snprintf_s(detail, sizeof detail, _TRUNCATE,
+                "SB-GPU-LOST: %s\r\n"
+                "frame: %u, backbuffer %ux%u, interp: %s, feedback clip active: %d\r\n"
+                "\r\nThe graphics driver removed or reset the GPU device while the game was running. The game cannot\r\n"
+                "continue on a lost device and closed itself (exit code %d).\r\n"
+                "Typical causes: a driver timeout after the GPU stopped responding (TDR), a driver crash or update,\r\n"
+                "an unstable GPU overclock or undervolt, or the GPU running out of video memory.\r\n",
+                reason, hooks_frame_count(), g_bb_w, g_bb_h, g_swap_res ? "offscreen" : "off", sb_clip_active(),
+                SB_EXIT_GPU_LOST);
+    sb_crash_tel_gpu(hr, why); /* W522: Datensatz fuer den Netzbericht (nur mit Zustimmung) */
+    sb_crash_gpu_lost(reason, detail);
+    hlog_flush();
+    ExitProcess(SB_EXIT_GPU_LOST);
 }
 
 /* W508 CHATBAR: Sind in diesem Bild schwarze Seitenbalken zu sehen? Balken entstehen (a) im 2D-Bild ohne 3D-Draws

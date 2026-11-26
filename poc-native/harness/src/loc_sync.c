@@ -188,6 +188,14 @@ static void ls_st_parse(const char *p)
 
 static void lp_swap(void); /* W320 LOC-PERF */
 
+void loc_sync_steps_replace(const char *prog) /* W520 TEST */
+{
+    s_st_n = s_st_cur = s_st_hit = s_st_jumps = 0;
+    s_st_since = s_st_hitf = 0;
+    ls_st_parse(prog ? prog : "");
+    HLOG_I("LOCSTEPS: Testfolge ersetzt (W520 Fortsetzung nach Neuaufbau), %d Schritte", s_st_n);
+}
+
 /* W344: Menue-Zustand lesen (0 = nicht lesbar). mn[6] = Woerter des Menue-Unterzustands (0 ohne Zeiger). */
 static int ls_state(u32 *scene, u32 *step, u32 *mn, u32 *s6)
 {

@@ -2,6 +2,10 @@
  * Hilfen (Log, Zeit, HMAC, Hex, Adressen, Wege-Simulation), Senden an Socket/Weg, Verbindungstabelle, RTT/RTO,
  * Stroeme (Spiel-TCP ueber Stellvertreter, Gastfilter je Rahmen) und Datagramme (Spiel-UDP, Doppel-Erkennung). */
 #include "loc_tun_int.h"
+#include <iphlpapi.h> /* W521: GetAdaptersAddresses (eigene globale IPv6-Adresse) */
+#pragma comment(lib, "iphlpapi.lib")
+
+static void tl_natf_note(loctun *t, const struct sockaddr_in *to); /* W521 TEST */
 
 /* ====================================================================== Hilfen */
 void tl_logf(loctun *t, const char *fmt, ...)
@@ -101,6 +105,10 @@ int sa_eq(const struct sockaddr_in *a, const struct sockaddr_in *b)
 
 int tl_dest_ok(loctun *t, uint32_t ip)
 {
+    if ((ntohl(ip) & 0xFFFF0000u) == TUN_V6_NET) { /* W521: IPv6-Ersatzadresse - nur ein belegter Tabelleneintrag */
+        uint32_t i = ntohl(ip) & 0xFFFFu;
+        return t->us6 != INVALID_SOCKET && i < TUN_V6T && t->v6t[i].used;
+    }
     if (ip == 0 || ip == INADDR_BROADCAST) return 0;
     return locnet_ip_allowed(ip) || t->c.allow_public;
 }
@@ -176,7 +184,7 @@ int tl_rsim_find_link(loctun *t, const tlink *L)
 /* Versiegeltes Paket einer Verbindung senden (W494: ueber die Strecke des Mitspielers, falls TEST gesetzt). */
 static void tl_sendto_link(loctun *t, tlink *L, const struct sockaddr_in *to, const uint8_t *buf, int len)
 {
-    if (t->nrsim) {
+    if (t->nrsim && !tl_is_v6(to)) {
         int k = tl_rsim_find_link(t, L);
         if (k >= 0) {
             if (tl_rsim_cut(t, k)) return;
@@ -255,6 +263,15 @@ void tl_sendto(loctun *t, const struct sockaddr_in *to, const uint8_t *buf, int 
         return;
     }
     if (t->netcut) return; /* W366 TEST: Netz weg */
+    if (t->c.nat_filter) tl_natf_note(t, to); /* W521 TEST: Ziel merken (Filter der NAT-Nachbildung) */
+    if (tl_is_v6(to)) { /* W521: ueber den IPv6-Socket an die echte Adresse */
+        struct sockaddr_in6 a6;
+        uint32_t i = ntohl(to->sin_addr.s_addr) & 0xFFFFu;
+        a6 = t->v6t[i].a;
+        a6.sin6_port = to->sin_port;
+        sendto(t->us6, (const char *)buf, len, 0, (const struct sockaddr *)&a6, sizeof a6);
+        return;
+    }
     if (t->nrsim) { /* W395 TEST: Weg mit eigener Verzoegerung bzw. im Ausfallfenster */
         int k = tl_rsim_find(t, to);
         if (k >= 0 && tl_rsim_cut(t, k)) return;
@@ -563,6 +580,7 @@ void tl_link_drop(loctun *t, tlink *L, const char *why)
     int i, li = (int)(L - t->links);
     uint32_t s;
     if (!L->used) return;
+    nr_on_link_drop(t, L, why); /* W521 (#118): Grund im Netzbericht (nur im Match, nur Zaehler) */
     if (L->e2e.valid && !L->blocked && L->path) {
         uint8_t bye[1];
         bye[0] = T_BYE;
@@ -593,6 +611,11 @@ void tl_link_drop(loctun *t, tlink *L, const char *why)
     L->punching = 0;
     L->direct_ok = 0;
     L->seen_ok = 0;
+    L->repunch_at = 0; /* W521 */
+    L->repunch_n = 0;
+    L->d4_pend_ok = 0;
+    L->punch_failed_once = 0;
+    L->late_direct = 0;
     memset(L->rb, 0, sizeof L->rb); /* W395 */
     L->rt_on = 0;
     locroute_init(&L->rt);
@@ -653,11 +676,23 @@ int tl_link_pair(loctun *t, tlink *L, uint32_t peer, uint32_t lobby, const uint8
     }
     memcpy(L->cand, cand, sizeof L->cand[0] * TUN_MAX_CAND);
     L->ncand = ncand;
+    /* W521: Budget und Zustand des Durchstichs gelten je Paarung */
+    memset(L->probes_tx, 0, sizeof L->probes_tx);
+    L->refl_n = 0;
+    L->seen_any = 0;
+    L->repunch_at = 0;
+    L->repunch_n = 0;
+    L->d4_pend_ok = 0;
+    L->punch_failed_once = 0;
+    L->late_direct = 0;
+    L->punch_hold_until = 0;
     if (!L->direct_ok && !t->c.nodirect) {
-        L->punching = 1;
-        L->punch_start = tl_now(t);
-        L->punch_last = 0;
         L->direct_failed = 0;
+        tl_punch_start(t, L, 1, tl_now(t));
+        if (t->c.punch_delay_ms > 0) { /* TEST: Durchstich beginnt spaeter (Zeitplan zaehlt ab dann) */
+            L->punch_hold_until = L->punch_start + t->c.punch_delay_ms;
+            L->punch_start = L->punch_hold_until;
+        }
     } else if (t->c.nodirect) {
         L->direct_failed = 1;
         L->rep_dirty = 1;
@@ -981,7 +1016,7 @@ void tl_deliver_dg(loctun *t, tlink *L, uint16_t src, uint16_t dst, const uint8_
     }
     {
         int why = 0;
-        if (!lguard_udp_check(dst, d, len, &why)) {
+        if (!lguard_udp_check_live(dst, d, len, &why, t->live)) { /* W514: Chatraum-Handel nur im Live-Betrieb */
             tl_guard_kill(t, L, why);
             return;
         }
@@ -995,3 +1030,480 @@ void tl_deliver_dg(loctun *t, tlink *L, uint16_t src, uint16_t dst, const uint8_
     sendto(s, (const char *)d, len, 0, (struct sockaddr *)&a, sizeof a);
 }
 
+/* ====================================================================== W521 NETPATHS (#119)
+ * Direkter Weg oefter: (1) IPv6 zuerst - jeder Client meldet seine eigene globale IPv6-Adresse ueber den bestehenden
+ * IPv4-TLS-Kanal (hello "eps6"), die Partner stanzen direkt untereinander (der Treffpunkt braucht kein IPv6);
+ * (2) Rueck-Stanzen: kommt ein echtes PROBE von einer unbekannten Adresse (symmetrisches NAT, andere Quelladresse),
+ * stanzen wir dorthin zurueck (vorher: nur Antwort, eigener Weg blieb zu -> "mixed"); (3) Zeitplan: 3 s schnell wie
+ * bisher, dann Relay anfordern, aber weiter stanzen (bis 5 s alle 100 ms, bis 15 s jede Sekunde), danach seltene
+ * Hintergrund-Stoesse (20 s, 40 s, ... hoechstens 10 min) - gelingt der Weg spaeter, wechselt die Wegwahl (W395) im
+ * laufenden Spiel von Relay auf direkt. Sicherheit (SECURITY.md §53): Proben sind authentisch (SBT2), nicht groesser
+ * als die Antwort, je Kandidat und Paarung hart begrenzt; IPv6-Adressen nie ins Log.
+ * IPv6 im sockaddr_in-Pfad: jede bekannte IPv6-Adresse bekommt eine Ersatzadresse 0.254.0.i (Port = echter Port),
+ * tl_sendto schickt sie ueber t->us6. 0.0.0.0/8 ist als Ziel nie gueltig, daher kollisionsfrei. */
+#define TL_PUNCH_FAIL_MS 3000.0   /* wie vor W521: danach Relay anfordern (der Beitritt wartet nicht laenger) */
+#define TL_PUNCH_FAST_MS 5000.0   /* bis hier alle 100 ms */
+#define TL_PUNCH_END_MS 15000.0   /* bis hier jede Sekunde */
+#define TL_BURST_MS 3000.0        /* Hintergrund-Stoss: 3 s alle 250 ms */
+#define TL_REPUNCH_FIRST_MS 20000.0
+#define TL_REPUNCH_MAX_MS 600000.0
+#define TL_REPUNCH_MAX 8          /* 20, 40, 80, 160, 320, 600, 600, 600 s */
+#define TL_PROBE_CAP 200          /* Proben je Kandidat und Paarung (schnell 50 + langsam 10 + 8 Stoesse je 12 = 156) */
+#define TL_V6_PREF_MS 1000.0      /* eine IPv4-Bestaetigung wartet so lange auf eine IPv6-Bestaetigung */
+#define TL_REFL_MAX 8             /* neue gesehene Absenderadressen je Paarung */
+
+int tl_is_v6(const struct sockaddr_in *a)
+{
+    return (ntohl(a->sin_addr.s_addr) & 0xFFFF0000u) == TUN_V6_NET;
+}
+
+static int tl_v6_eq(const struct sockaddr_in6 *a, const struct sockaddr_in6 *b)
+{
+    return a->sin6_port == b->sin6_port && memcmp(&a->sin6_addr, &b->sin6_addr, sizeof a->sin6_addr) == 0;
+}
+
+static int tl_v6_find(loctun *t, const struct sockaddr_in6 *a6)
+{
+    int i;
+    for (i = 1; i < TUN_V6T; i++) {
+        if (t->v6t[i].used && tl_v6_eq(&t->v6t[i].a, a6)) return i;
+    }
+    return -1;
+}
+
+static void tl_v6_syn(int i, uint16_t port_n, struct sockaddr_in *out)
+{
+    memset(out, 0, sizeof *out);
+    out->sin_family = AF_INET;
+    out->sin_addr.s_addr = htonl(TUN_V6_NET | (uint32_t)i);
+    out->sin_port = port_n;
+}
+
+/* 1 = Ersatzadresse (Tabellenplatz i) wird von einer Verbindung benutzt */
+static int tl_v6_ref(loctun *t, int i)
+{
+    struct sockaddr_in s;
+    int li, k;
+    tl_v6_syn(i, 0, &s);
+    for (li = 0; li < TUN_MAX_LINKS; li++) {
+        const tlink *L = &t->links[li];
+        if (!L->used) continue;
+        if ((L->direct_ok && L->direct.sin_addr.s_addr == s.sin_addr.s_addr) ||
+            (L->seen_ok && L->seen_from.sin_addr.s_addr == s.sin_addr.s_addr))
+            return 1;
+        for (k = 0; k < L->ncand; k++) {
+            if (L->cand[k].sin_addr.s_addr == s.sin_addr.s_addr) return 1;
+        }
+    }
+    return 0;
+}
+
+int tl_v6_intern(loctun *t, const struct sockaddr_in6 *a6, struct sockaddr_in *out)
+{
+    int i = tl_v6_find(t, a6), k, old = -1;
+    double now = tl_now(t);
+    if (i < 0) {
+        for (k = 1; k < TUN_V6T && i < 0; k++) {
+            if (!t->v6t[k].used) i = k;
+        }
+        for (k = 1; k < TUN_V6T && i < 0; k++) { /* voll: aeltesten unbenutzten Eintrag ersetzen */
+            if (!tl_v6_ref(t, k) && (old < 0 || t->v6t[k].last < t->v6t[old].last)) old = k;
+        }
+        if (i < 0) i = old;
+        if (i < 0) return 0;
+        memset(&t->v6t[i].a, 0, sizeof t->v6t[i].a);
+        t->v6t[i].a.sin6_family = AF_INET6;
+        t->v6t[i].a.sin6_addr = a6->sin6_addr;
+        t->v6t[i].a.sin6_port = a6->sin6_port;
+        t->v6t[i].a.sin6_scope_id = a6->sin6_scope_id;
+        t->v6t[i].used = 1;
+    }
+    t->v6t[i].last = now;
+    tl_v6_syn(i, a6->sin6_port, out);
+    return 1;
+}
+
+/* Taugt eine IPv6-Adresse als Kandidat? Global unicast (2000::/3) ohne Teredo, 6to4 und Doku-Bereich; ULA, Link-Local,
+ * Loopback und Multicast liegen ausserhalb von 2000::/3. TEST v6_loop: nur ::1. */
+int tl_v6_cand_ok(loctun *t, const struct in6_addr *a)
+{
+    const uint8_t *b = a->s6_addr;
+    static const uint8_t loop[16] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1};
+    if (t->c.v6_loop) return memcmp(b, loop, 16) == 0;
+    if ((b[0] & 0xE0) != 0x20) return 0;
+    if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x00 && b[3] == 0x00) return 0; /* 2001::/32 Teredo */
+    if (b[0] == 0x20 && b[1] == 0x02) return 0;                                 /* 2002::/16 6to4 */
+    if (b[0] == 0x20 && b[1] == 0x01 && b[2] == 0x0d && b[3] == 0xb8) return 0; /* 2001:db8::/32 Doku */
+    return 1;
+}
+
+void tl_v6_close(loctun *t)
+{
+    if (t->us6 != INVALID_SOCKET) {
+        WSAEventSelect(t->us6, NULL, 0);
+        closesocket(t->us6);
+    }
+    t->us6 = INVALID_SOCKET;
+    t->have6 = 0;
+    SecureZeroMemory(&t->my6, sizeof t->my6);
+}
+
+/* Beste eigene globale IPv6-Adresse: Schnittstelle aktiv, kein Tunnel (Teredo/ISATAP), Adresse "bevorzugt";
+ * stabile Adressen (DNS-geeignet) vor temporaeren. 1 = gefunden. */
+static int tl_v6_pick(loctun *t, struct in6_addr *out, int *stable)
+{
+    ULONG sz = 16384, r;
+    IP_ADAPTER_ADDRESSES *aa = NULL, *ad;
+    int best = 0, k;
+    for (k = 0; k < 3; k++) {
+        aa = (IP_ADAPTER_ADDRESSES *)malloc(sz);
+        if (!aa) return 0;
+        r = GetAdaptersAddresses(AF_INET6, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_SKIP_DNS_SERVER |
+                                 GAA_FLAG_SKIP_FRIENDLY_NAME, NULL, aa, &sz);
+        if (r == NO_ERROR) break;
+        free(aa);
+        aa = NULL;
+        if (r != ERROR_BUFFER_OVERFLOW) return 0;
+    }
+    if (!aa) return 0;
+    for (ad = aa; ad; ad = ad->Next) {
+        IP_ADAPTER_UNICAST_ADDRESS *u;
+        if (ad->OperStatus != IfOperStatusUp || ad->IfType == IF_TYPE_SOFTWARE_LOOPBACK || ad->IfType == IF_TYPE_TUNNEL)
+            continue;
+        for (u = ad->FirstUnicastAddress; u; u = u->Next) {
+            const struct sockaddr_in6 *s6 = (const struct sockaddr_in6 *)u->Address.lpSockaddr;
+            int score;
+            if (!s6 || s6->sin6_family != AF_INET6 || u->DadState != IpDadStatePreferred) continue;
+            if (!tl_v6_cand_ok(t, &s6->sin6_addr)) continue;
+            score = (u->Flags & IP_ADAPTER_ADDRESS_DNS_ELIGIBLE) ? 2 : 1; /* temporaere Adressen sind nicht DNS-geeignet */
+            if (score > best) {
+                best = score;
+                *out = s6->sin6_addr;
+            }
+        }
+    }
+    free(aa);
+    *stable = best == 2;
+    return best > 0;
+}
+
+/* Bei jedem hello: eigene IPv6-Adresse pruefen und den Socket genau an sie binden (die Quelladresse der Proben muss
+ * die gemeldete sein, sonst oeffnet die Firewall des Partners bzw. unsere eigene das falsche Loch). */
+void tl_v6_refresh(loctun *t, double now)
+{
+    struct in6_addr a;
+    struct sockaddr_in6 b;
+    int stable = 1, l = sizeof t->my6, rb = 1 << 20;
+    BOOL off = FALSE;
+    DWORD got = 0, v6only = 1;
+    u_long nb = 1;
+    t->v6_chk = now;
+    if (!t->c.ipv6 || t->c.punch_legacy || t->c.lan || !t->c.lobby[0] || t->c.nodirect) {
+        if (t->us6 != INVALID_SOCKET) tl_v6_close(t);
+        return;
+    }
+    if ((t->nrsim > 0 || t->sim) && !t->c.v6_loop) {
+        /* TEST loc_route_sim/Netzsimulator verzoegern nur den IPv4-Socket - mit IPv6 liefe der direkte Weg unverzoegert
+         * an der Simulation vorbei (Labor W494/W521 auf einem Rechner mit globalem IPv6) */
+        if (!t->v6_logged) tl_logf(t, "LOCNET6: TEST Wegsimulation aktiv - IPv6 aus (Simulation nur ueber IPv4)");
+        t->v6_logged = 1;
+        if (t->us6 != INVALID_SOCKET) tl_v6_close(t);
+        return;
+    }
+    memset(&a, 0, sizeof a);
+    if (t->c.v6_loop) {
+        a.s6_addr[15] = 1;
+    } else if (!tl_v6_pick(t, &a, &stable)) {
+        if (t->us6 != INVALID_SOCKET) {
+            tl_v6_close(t);
+            tl_logf(t, "LOCNET6: keine globale IPv6-Adresse mehr - nur IPv4");
+        } else if (!t->v6_logged) {
+            tl_logf(t, "LOCNET6: keine globale IPv6-Adresse - Durchstich nur ueber IPv4");
+        }
+        t->v6_logged = 1;
+        return;
+    }
+    if (t->us6 != INVALID_SOCKET && memcmp(&t->my6.sin6_addr, &a, sizeof a) == 0) return; /* unveraendert */
+    tl_v6_close(t);
+    t->us6 = socket(AF_INET6, SOCK_DGRAM, IPPROTO_UDP);
+    if (t->us6 == INVALID_SOCKET) return;
+    setsockopt(t->us6, IPPROTO_IPV6, IPV6_V6ONLY, (const char *)&v6only, sizeof v6only);
+    WSAIoctl(t->us6, 0x9800000Cu, &off, sizeof off, NULL, 0, &got, NULL, NULL); /* SIO_UDP_CONNRESET aus */
+    setsockopt(t->us6, SOL_SOCKET, SO_RCVBUF, (const char *)&rb, sizeof rb);
+    memset(&b, 0, sizeof b);
+    b.sin6_family = AF_INET6;
+    b.sin6_addr = a;
+    b.sin6_port = htons(t->uport); /* gleiche Portnummer wie IPv4 (Firewall-Regeln), sonst frei */
+    if (bind(t->us6, (struct sockaddr *)&b, sizeof b) != 0) {
+        b.sin6_port = 0;
+        if (bind(t->us6, (struct sockaddr *)&b, sizeof b) != 0) {
+            tl_logf(t, "LOCNET6: IPv6-Socket nicht bindbar (%d) - nur IPv4", WSAGetLastError());
+            tl_v6_close(t);
+            return;
+        }
+    }
+    getsockname(t->us6, (struct sockaddr *)&t->my6, &l);
+    ioctlsocket(t->us6, FIONBIO, &nb);
+    WSAEventSelect(t->us6, t->ev_net, FD_READ);
+    t->have6 = 1;
+    t->v6_logged = 0;
+    /* W521 / SECURITY.md §53: die Adresse selbst nie ins Log (Logs gehen in Fehlerberichte) */
+    tl_logf(t, "LOCNET6: eigene IPv6-Adresse als Kandidat (%s), Port %u",
+            t->c.v6_loop ? "TEST Loopback" : stable ? "global, stabil" : "global, temporaer", ntohs(t->my6.sin6_port));
+}
+
+int tl_v6_hello_field(loctun *t, char *out, size_t cap)
+{
+    char ip[64];
+    if (!t->have6 || t->us6 == INVALID_SOCKET) return 0;
+    if (!inet_ntop(AF_INET6, &t->my6.sin6_addr, ip, sizeof ip)) return 0;
+    return _snprintf_s(out, cap, _TRUNCATE, ",\"eps6\":[[\"%s\",%u]]", ip, ntohs(t->my6.sin6_port)) > 0;
+}
+
+/* Empfang auf dem IPv6-Socket: nur SBT2 (der Treffpunkt spricht nie IPv6). Unbekannte Absender laufen ueber den
+ * Tabellenplatz 0; erst wenn das Paket authentisch war und eine Verbindung die Adresse uebernimmt (PROBE: gesehen
+ * bzw. Rueck-Stanzen), bekommt sie einen festen Platz - unechter Verkehr fuellt die Tabelle nicht. */
+void tl_rx_udp6(loctun *t, double now)
+{
+    uint8_t b[2048];
+    if (t->us6 == INVALID_SOCKET) return;
+    for (;;) {
+        struct sockaddr_in6 from6;
+        struct sockaddr_in syn;
+        int fl = sizeof from6, r, i, li, k;
+        r = recvfrom(t->us6, (char *)b, sizeof b, 0, (struct sockaddr *)&from6, &fl);
+        if (r < 0) {
+            if (WSAGetLastError() == WSAECONNRESET || WSAGetLastError() == WSAEMSGSIZE) continue;
+            break;
+        }
+        if (r < 5 || t->netcut || fl < (int)sizeof from6 || from6.sin6_family != AF_INET6) continue;
+        if (memcmp(b, "SBT2", 4) != 0) {
+            InterlockedIncrement(&t->st.e2e_bad);
+            continue;
+        }
+        i = tl_v6_find(t, &from6);
+        if (i < 0) {
+            i = 0;
+            t->v6t[0].a = from6;
+            t->v6t[0].used = 1;
+        }
+        tl_v6_syn(i, from6.sin6_port, &syn);
+        if (t->c.nat_filter && !tl_natf_pass(t, &syn, now)) {
+            t->v6t[0].used = 0;
+            continue;
+        }
+        tl_rx_sbt(t, b, r, &syn, -1, -1, now);
+        if (i == 0) { /* Platz 0 uebernommen? -> festen Platz vergeben und die Verweise umschreiben */
+            struct sockaddr_in fix;
+            int need = 0;
+            for (li = 0; li < TUN_MAX_LINKS && !need; li++) {
+                const tlink *L = &t->links[li];
+                if (!L->used) continue;
+                need = (L->seen_ok && sa_eq(&L->seen_from, &syn)) || (L->direct_ok && sa_eq(&L->direct, &syn));
+                for (k = 0; k < L->ncand && !need; k++) need = sa_eq(&L->cand[k], &syn);
+            }
+            if (need && tl_v6_intern(t, &from6, &fix)) {
+                for (li = 0; li < TUN_MAX_LINKS; li++) {
+                    tlink *L = &t->links[li];
+                    if (!L->used) continue;
+                    if (sa_eq(&L->seen_from, &syn)) L->seen_from = fix;
+                    if (sa_eq(&L->direct, &syn)) L->direct = fix;
+                    for (k = 0; k < L->ncand; k++) {
+                        if (sa_eq(&L->cand[k], &syn)) L->cand[k] = fix;
+                    }
+                }
+            } else if (need) { /* kein Platz frei: Verweise verwerfen */
+                for (li = 0; li < TUN_MAX_LINKS; li++) {
+                    tlink *L = &t->links[li];
+                    if (L->used && L->seen_ok && sa_eq(&L->seen_from, &syn)) L->seen_ok = 0;
+                    if (L->used && L->direct_ok && sa_eq(&L->direct, &syn)) L->direct_ok = 0;
+                }
+            }
+            t->v6t[0].used = 0;
+        }
+    }
+}
+
+/* ---------------------------------------------------------------- TEST: NAT-Nachbildung (Labor) */
+static void tl_natf_note(loctun *t, const struct sockaddr_in *to)
+{
+    int i;
+    double now = tl_now(t);
+    for (i = 0; i < TUN_NATF; i++) {
+        if (t->natf[i].at > 0 && sa_eq(&t->natf[i].a, to)) {
+            t->natf[i].at = now;
+            return;
+        }
+    }
+    t->natf[t->natf_pos].a = *to;
+    t->natf[t->natf_pos].at = now;
+    t->natf_pos = (t->natf_pos + 1) % TUN_NATF;
+}
+
+/* nat_filter: nur Absender, an die wir in den letzten 60 s gesendet haben (port-restricted bzw. IPv6-Firewall) */
+int tl_natf_pass(loctun *t, const struct sockaddr_in *from, double now)
+{
+    int i;
+    if (!t->c.nat_filter) return 1;
+    for (i = 0; i < TUN_NATF; i++) {
+        if (t->natf[i].at > 0 && now - t->natf[i].at < 60000.0 && sa_eq(&t->natf[i].a, from)) return 1;
+    }
+    return 0;
+}
+
+/* ---------------------------------------------------------------- Durchstich-Zeitplan */
+static int tl_has_v6_cand(const tlink *L)
+{
+    int k;
+    for (k = 0; k < L->ncand; k++) {
+        if (tl_is_v6(&L->cand[k])) return 1;
+    }
+    return 0;
+}
+
+void tl_punch_start(loctun *t, tlink *L, int phase, double now)
+{
+    if (t->c.nodirect || L->direct_ok) return;
+    L->punching = 1;
+    L->punch_phase = phase;
+    L->punch_start = now;
+    L->punch_last = 0;
+}
+
+static void tl_direct_set(loctun *t, tlink *L, const struct sockaddr_in *a)
+{
+    char ipb[16];
+    int v6 = tl_is_v6(a);
+    L->direct = *a;
+    L->direct_ok = 1;
+    L->direct_failed = 0;
+    L->punching = 0;
+    L->d4_pend_ok = 0;
+    L->repunch_at = 0;
+    if (L->punch_failed_once) L->late_direct = 1;
+    /* W339 (W335 I3): oeffentliche Adresse des Mitspielers nie ins Log (Logs gehen in Fehlerberichte);
+     * Loopback/privat/link-local bleiben lesbar (Fehlersuche im LAN). Zeilenanfang unveraendert. W521: IPv6 nie. */
+    tl_logf(t, "LOCTUN: direkter Weg zu c%u offen (%s:%u)%s%s", L->cid,
+            (!v6 && locnet_ip_allowed(a->sin_addr.s_addr)) ? locnet_ip_str(a->sin_addr.s_addr, ipb) : "oeffentlich",
+            ntohs(a->sin_port), v6 ? " IPv6" : "", L->late_direct ? " - spaet, Wechsel von Relay auf direkt" : "");
+}
+
+static void tl_punch_fail_note(loctun *t, tlink *L)
+{
+    if (L->punch_failed_once) return;
+    L->punch_failed_once = 1;
+    L->direct_failed = 1;
+    L->rep_dirty = 1;
+    if (t->c.punch_legacy) {
+        tl_logf(t, "LOCTUN: direkter Weg zu c%u gescheitert (3 s) - Relay noetig", L->cid);
+    } else {
+        tl_logf(t, "LOCTUN: direkter Weg zu c%u gescheitert (3 s) - Relay noetig, Durchstich laeuft weiter (%s)", L->cid,
+                L->seen_any ? "Proben des Partners kommen an" : "noch nichts vom Partner");
+    }
+}
+
+void tl_punch_tick(loctun *t, tlink *L, double now)
+{
+    double age, iv, end;
+    int k;
+    if (!L->punching) {
+        /* Hintergrund-Versuch, solange nur ein Relay steht */
+        if (!t->c.punch_legacy && !t->c.nodirect && !L->direct_ok && L->punch_failed_once && L->repunch_at > 0 &&
+            now >= L->repunch_at && L->ncand > 0)
+            tl_punch_start(t, L, 3, now);
+        if (!L->punching) return;
+    }
+    if (now < L->punch_hold_until) return; /* TEST punch_delay_ms */
+    age = now - L->punch_start;
+    if (t->c.punch_legacy) { /* Gegenprobe: wie vor W521 */
+        if (age >= TL_PUNCH_FAIL_MS) {
+            L->punching = 0;
+            tl_punch_fail_note(t, L);
+            return;
+        }
+        iv = 100.0;
+    } else {
+        if (L->d4_pend_ok && (age >= TL_V6_PREF_MS || !tl_has_v6_cand(L))) { /* IPv6 kam nicht: IPv4 nehmen */
+            tl_direct_set(t, L, &L->d4_pend);
+            return;
+        }
+        if (L->punch_phase == 1 && age >= TL_PUNCH_FAIL_MS) tl_punch_fail_note(t, L);
+        end = L->punch_phase == 3 ? TL_BURST_MS : TL_PUNCH_END_MS;
+        if (age >= end) {
+            double d = TL_REPUNCH_FIRST_MS;
+            L->punching = 0;
+            tl_punch_fail_note(t, L);
+            for (k = 0; k < L->repunch_n && d < TL_REPUNCH_MAX_MS; k++) d *= 2.0;
+            if (d > TL_REPUNCH_MAX_MS) d = TL_REPUNCH_MAX_MS;
+            if (L->repunch_n < TL_REPUNCH_MAX) {
+                L->repunch_at = now + d;
+                L->repunch_n++;
+            } else {
+                L->repunch_at = 0;
+            }
+            if (L->punch_phase != 3) {
+                tl_logf(t, "LOCTUN: direkter Weg zu c%u nach 15 s nicht offen (%s) - bleibt Relay, neuer Versuch in %.0f s",
+                        L->cid, L->seen_any ? "nur eine Richtung" : "keine Antwort", d / 1000.0);
+            }
+            return;
+        }
+        iv = L->punch_phase == 3 ? 250.0 : (age < TL_PUNCH_FAST_MS ? 100.0 : 1000.0);
+    }
+    if (now - L->punch_last >= iv) {
+        uint8_t p[HDR + 8]; /* W334: PROBE als SBT2 (jede Sendung neuer ctr, nicht faelschbar) */
+        tl_hdr(p, T_PROBE);
+        memcpy(p + HDR, &L->probe_id, 8);
+        for (k = 0; k < L->ncand && L->e2e.valid; k++) { /* IPv6-Kandidaten stehen vorn (lb_on_peer_info) */
+            if (L->probes_tx[k] >= TL_PROBE_CAP) continue;
+            L->probes_tx[k]++;
+            tl_send_to(t, L, &L->cand[k], p, sizeof p);
+        }
+        L->punch_last = now;
+    }
+}
+
+/* Authentisches PROBE vom Partner (die Antwort ist schon gesendet): Rueck-Stanzen an eine unbekannte Absenderadresse
+ * (peer-reflexiv) - deren NAT hat fuer uns eine andere Zuordnung als die vom Treffpunkt gesehene. */
+void tl_probe_seen(loctun *t, tlink *L, const struct sockaddr_in *from, double now)
+{
+    int k, known = -1;
+    uint8_t p[HDR + 8];
+    L->seen_any = 1;
+    if (t->c.punch_legacy || L->direct_ok || t->c.nodirect || !L->e2e.valid) return;
+    for (k = 0; k < L->ncand; k++) {
+        if (sa_eq(&L->cand[k], from)) known = k;
+    }
+    if (known < 0) {
+        if (L->refl_n >= TL_REFL_MAX) return;
+        L->refl_n++;
+        known = L->ncand < TUN_MAX_CAND ? L->ncand++ : TUN_MAX_CAND - 1; /* voll: letzten (meist LAN) ersetzen */
+        L->cand[known] = *from;
+        L->probes_tx[known] = 0;
+        tl_logf(t, "LOCTUN: c%u erreicht uns ueber eine andere Adresse%s (NAT) - stanze dorthin zurueck", L->cid,
+                tl_is_v6(from) ? " (IPv6)" : "");
+    } else if (L->punching) {
+        return; /* bekannte Adresse, Durchstich laeuft: der Zeitplan deckt sie ab (keine doppelte Rate) */
+    }
+    if (L->probes_tx[known] < TL_PROBE_CAP) {
+        tl_hdr(p, T_PROBE);
+        memcpy(p + HDR, &L->probe_id, 8);
+        L->probes_tx[known]++;
+        tl_send_to(t, L, from, p, sizeof p);
+    }
+    if (!L->punching) tl_punch_start(t, L, 3, now);
+}
+
+/* PROBE_ACK mit unserer probe_id (Pruefungen beim Aufrufer): Weg zu dieser Adresse bestaetigt. IPv6 hat Vorrang -
+ * eine IPv4-Bestaetigung wartet bis TL_V6_PREF_MS nach Beginn auf IPv6, falls der Partner IPv6 gemeldet hat. */
+void tl_probe_ack(loctun *t, tlink *L, const struct sockaddr_in *from, double now)
+{
+    if (t->c.punch_legacy || tl_is_v6(from) || !L->punching || !tl_has_v6_cand(L) ||
+        now - L->punch_start >= TL_V6_PREF_MS) {
+        tl_direct_set(t, L, from);
+        return;
+    }
+    if (!L->d4_pend_ok) {
+        L->d4_pend = *from;
+        L->d4_pend_ok = 1;
+    }
+}

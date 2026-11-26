@@ -174,6 +174,7 @@ add_library(sb_emu SHARED
   src/loc_chat.c
   src/loc_chatnet.c
   src/loc_lobbylist.c
+  src/loc_hostmig.c
   src/loc_netpanel.c
   src/loc_replayctl.c
   src/loc_lobbywidget.c
@@ -193,6 +194,7 @@ add_library(sb_emu SHARED
   src/sb_feedback.c
   src/sb_diagcore.c
   src/sb_crash.c
+  src/sb_crashtel.c # W522 CRASH-TELEMETRY: Absturzklasse fuer den Netzbericht
   src/sb_perfhud.c
   src/sb_nethud.c
   src/sb_watermark.c
@@ -385,6 +387,7 @@ add_executable(loc_net_selftest
   ${SB_LOC_TUN_SRC}
   ${SB_LOC_SEC_SRC}
   src/sb_sha256.c
+  src/sb_crashtel.c # W522
 )
 target_include_directories(loc_net_selftest PRIVATE src)
 target_link_libraries(loc_net_selftest PRIVATE sb_bearssl ws2_32 winmm bcrypt secur32 crypt32)

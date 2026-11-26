@@ -382,6 +382,30 @@ static void veh_tbl_fix(PEXCEPTION_POINTERS ep, DWORD tls,
         if (un < 20) {
             un++;
             HLOG_W("VEH-OTHER: Code=0x%lX RIP=0x%p", code, addr);
+            /* W516 ISSUE-114: Herkunft benennen (Geraeteverlust kam mit Debug-Text + C++-Ausnahmen ohne Modul). */
+            if (code == 0x40010006u && ep->ExceptionRecord->NumberParameters >= 2) { /* OutputDebugStringA */
+                char t[160];
+                size_t i = 0, n = (size_t)ep->ExceptionRecord->ExceptionInformation[0];
+                const char *s = (const char *)ep->ExceptionRecord->ExceptionInformation[1];
+                __try {
+                    for (; s && i < n && i + 1 < sizeof t && s[i]; i++) {
+                        t[i] = (s[i] >= 0x20 && s[i] < 0x7F) ? s[i] : ' ';
+                    }
+                } __except (EXCEPTION_EXECUTE_HANDLER) { }
+                t[i] = '\0';
+                HLOG_W("VEH-OTHER: Debug-Text \"%s\"", t);
+            } else if (code == 0xE06D7363u && ep->ExceptionRecord->NumberParameters >= 3) { /* C++ throw (x86) */
+                HMODULE hm = NULL;
+                char mod[MAX_PATH] = "?";
+                const char *mb = mod;
+                if (GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                       (LPCSTR)ep->ExceptionRecord->ExceptionInformation[2], &hm) && hm &&
+                    GetModuleFileNameA(hm, mod, sizeof mod)) {
+                    const char *sl = strrchr(mod, '\\');
+                    mb = sl ? sl + 1 : mod;
+                }
+                HLOG_W("VEH-OTHER: C++-Ausnahme aus %s", hm ? mb : "(kein Modul)");
+            }
             /* W94 CRASHLOG: Dispatch-Abbruch (ungueltige SEH-Kette) bzw.
              * Stack-Ueberlauf enden ohne last_chance -> sofort sichern. */
             if (code == 0xC00001A5u || code == EXCEPTION_STACK_OVERFLOW) {
@@ -998,6 +1022,7 @@ static LONG WINAPI loc_netcrash_veh(EXCEPTION_POINTERS *ep)
     HLOG_E("LOCSEC: Ausnahme 0x%lX im Gastcode (RIP 0x%X) waehrend der Netzsitzung - Sitzung beendet (Absturz = Ende)",
            code, eip);
     crash_report(ep, "LOCSEC: Gastcode-Ausnahme im Netzspiel - Sitzung beendet");
+    loc_net_bye_crash(); /* W519: Mitspieler sehen den Abgang sofort (kein gehaltener Stillstand bis zur Obergrenze) */
     hlog_close();
     TerminateProcess(GetCurrentProcess(), LOC_NETCRASH_EXIT);
     return EXCEPTION_CONTINUE_SEARCH; /* unerreichbar */

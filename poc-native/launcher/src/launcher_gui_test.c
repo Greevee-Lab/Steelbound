@@ -1746,6 +1746,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
             w478_gui_selftest(pass, fail); /* W478 LOC-ENHANCED-VIVID (Fall 74g) */
             w486_gui_selftest(pass, fail); /* W486 SB-GFX-OPTIONS (Fall 74h, #98) */
             w496_gui_selftest(pass, fail); /* W496 NET-TELEMETRY (Fall 77g) */
+            w522_gui_selftest(pass, fail); /* W522 CRASH-TELEMETRY (Fall 77h) */
             acc_gui_selftest(pass, fail); /* W328 STEELNET-ACCOUNT (Fall 75/76) */
             accpage_gui_selftest(pass, fail); /* W399 LAUNCHER-ACCOUNT-PAGE (Fall 75b) */
             accux_gui_selftest(pass, fail);   /* W418 LAUNCHER-ACCOUNT-UX (Fall 75c) */

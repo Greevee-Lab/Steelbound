@@ -1836,6 +1836,9 @@ const char *lcfg_exit_msg_key(unsigned long code, int edition)
     if (code == 8) {
         return "gui.exit8";
     }
+    if (code == 16) { /* W516 ISSUE-114: Grafikgeraet verloren (DXGI_ERROR_DEVICE_REMOVED), Bericht geschrieben */
+        return "gui.exit16";
+    }
     if (code == 39) { /* W339: LoC-Netzspiel nach Gastcode-Ausnahme beendet (Absturz = Ende, SECURITY.md §6.6) */
         return "gui.exit39";
     }

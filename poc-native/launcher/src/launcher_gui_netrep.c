@@ -10,6 +10,7 @@
  * LoC-Start: net_report=0/1 im --set (launcher_gui_loc.c), der Client liest sonst nichts davon.
  * Schalter: LoC-Bereich Multiplayer > Match & Netzwerk > Reiter Netzwerk, Zeile mit dem Dialogtitel als Kurztext. */
 #include "launcher_gui_int.h"
+#include "sb_crashtel.h" /* W522 */
 
 #define NRQ_KEY "launcher_net_report"
 #define NRQ_DISMISS_KEY "launcher_net_report_dismiss"
@@ -45,6 +46,78 @@ void nrq_set_append(char *set, size_t cap, int onl)
     _snprintf_s(set + k, cap - k, _TRUNCATE, "%snet_report=%d", k ? ";" : "", onl && nrq_consent() ? 1 : 0);
 }
 
+/* ------------------------------------------------------------------ W522 CRASH-TELEMETRY Stufe 2 */
+/* Der Launcher ueberlebt einen Absturz des Spiels: nach dem Prozessende den Exitcode einordnen und den Datensatz des
+ * Clients (net_crash.txt im Ausgabeordner) ergaenzen bzw. anlegen (von aussen beendet, Fenster zu ohne geordnetes Ende,
+ * Absturz ohne Datensatz). Nur mit Zustimmung; der Launcher sendet nichts (Versand beim naechsten LoC-Start ueber
+ * steelnet). Shots/Selbsttest beruehren nie die echten Ordner. */
+static HANDLE g_ct_proc; /* LoC-Spiel (eigenes Handle aus CreateProcess) */
+static ULONGLONG g_ct_t0;
+ULONGLONG g_client_t0;   /* Start des SB-Spiels (do_start_ex) */
+
+int nrq_crash_note_dir(const char *dir_u8, unsigned long code, int game, unsigned run_s)
+{
+    if (!nrq_consent()) return 0;
+    return sbct_launcher_note(dir_u8, code, game, run_s);
+}
+
+static int ct_real_dirs(void)
+{
+    return g_o.shot == 0 && !g_ucfg_test[0];
+}
+
+void nrq_crash_after_exit(unsigned long code, int game, ULONGLONG t0)
+{
+    char logs[1200];
+    unsigned s = t0 ? (unsigned)((GetTickCount64() - t0) / 1000u) : 0u;
+    if (!ct_real_dirs() || !nrq_consent()) return;
+    ld_dirs(g_client_dir, NULL, logs, NULL, sizeof logs);
+    nrq_crash_note_dir(logs, code, game, s);
+}
+
+/* Zustimmung aus: liegender Datensatz weg (die Warteschlange loescht der naechste LoC-Start, W496) */
+static void nrq_crash_forget(void)
+{
+    char logs[1200];
+    wchar_t cp[700];
+    if (!ct_real_dirs()) return;
+    ld_dirs(g_client_dir, NULL, logs, NULL, sizeof logs);
+    if (sbct_path(cp, 700, logs, 1, SBCT_FILE)) DeleteFileW(cp);
+}
+
+void nrq_ct_watch(void *proc)
+{
+    if (g_ct_proc) CloseHandle(g_ct_proc);
+    g_ct_proc = (HANDLE)proc;
+    g_ct_t0 = GetTickCount64();
+    if (g_ct_proc && g_hwnd) SetTimer(g_hwnd, NRQ_CT_TIMER, 1000, NULL);
+}
+
+void nrq_ct_tick(void)
+{
+    DWORD code = 0;
+    if (!g_ct_proc) {
+        KillTimer(g_hwnd, NRQ_CT_TIMER);
+        return;
+    }
+    if (WaitForSingleObject(g_ct_proc, 0) != WAIT_OBJECT_0) return;
+    GetExitCodeProcess(g_ct_proc, &code);
+    CloseHandle(g_ct_proc);
+    g_ct_proc = NULL;
+    KillTimer(g_hwnd, NRQ_CT_TIMER);
+    nrq_crash_after_exit(code, SBCT_G_LOC, g_ct_t0);
+}
+
+/* SB-Start: ";net_report=1" nur mit Zustimmung und Stufe steelnet (SB sendet nie selbst; der Absturz-Datensatz geht
+ * mit dem naechsten LoC-Start raus). Ohne Zustimmung bleibt der Start unveraendert. 1 = angehaengt. */
+int nrq_sb_set_append(char *set, size_t cap)
+{
+    size_t k = strlen(set);
+    if (!nrq_consent() || netm_get() != NETM_STEEL || !onl_srv_on()) return 0;
+    _snprintf_s(set + k, cap - k, _TRUNCATE, "%snet_report=1", k ? ";" : "");
+    return 1;
+}
+
 void nrq_load(void)
 {
     char up[1200], line[256];
@@ -63,6 +136,7 @@ void nrq_load(void)
         }
     }
     fclose(f);
+    if (g_nrq_cfg != 1) nrq_crash_forget(); /* W522: ohne Zustimmung kein liegender Absturz-Datensatz */
 }
 
 static void nrq_show(int on)
@@ -89,6 +163,7 @@ void nrq_set(int yes)
 {
     g_nrq_cfg = yes ? 1 : 0;
     onl_save_key(NRQ_KEY, g_nrq_cfg); /* Shots/Selbsttest: nie geschrieben */
+    if (!g_nrq_cfg) nrq_crash_forget(); /* W522 */
     if (ctl(ID_LNET_NETREP)) ui_set_checked(ID_LNET_NETREP, g_nrq_cfg == 1);
 }
 

@@ -9,6 +9,7 @@ unsigned g_bb_w = 1920, g_bb_h = 1080;
 hcfg_t g_cfg;
 volatile LONG g_sb_paused;
 int sb_ovl_open(void) { return 0; }
+long sb_render_device_reason(void) { return g_dev ? (long)ID3D11Device_GetDeviceRemovedReason(g_dev) : -1; } /* W516 */
 void hlog_msg(int level, const char *fmt, ...) {
     va_list ap; (void)level; va_start(ap,fmt); vprintf(fmt,ap); va_end(ap); puts("");
 }

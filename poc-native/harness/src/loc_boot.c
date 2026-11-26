@@ -1080,6 +1080,18 @@ void loc_boot_install(void)
         static const uint8_t k_reinf[5] = { 0x33, 0xC0, 0x66, 0x8B, 0x03 }; /* xor eax,eax; mov ax,[ebx] */
         loc_patch_checked(0x118E50u, k_reinf, 5, (void *)loc_reinf_guard, "Reinforcements-Auswahl (0x118E50, Live)");
     }
+    if (g_cfg.loc_live && g_cfg.loc_camp && g_cfg.loc_camp_faction_swap) {
+        /* W515 FACTIONSWAP (#110): HQ-Menue der Kampagne (FUN_000EF6B0, Zustand 0): fuer einen Piloten mit Seite
+         * (Pilot+0x3B != 4) und gueltigen Zugdaten (FUN_000DED10 == 1) sperrt das Spiel den Punkt ENLISTMENT OFFICE
+         * (Menue-ID 0x1E0, FUN_000E1350(0x1E0,1,1)), wenn der Zug ausserhalb 3..6 liegt. Freigabe: jb (Zug < 3) ->
+         * jmp hinter die Sperre (0xEF754). Neutrale Piloten und Free Mission laufen nicht durch diesen Zweig. */
+        loc_patch_bytes(LOCCAMP_SWAP_VA, loccamp_swap_orig, loccamp_swap_new, 12,
+                        "Enlistment Office in jedem Zug (0xEF73B, loc_camp_faction_swap)");
+        /* Nach dem Wechsel (Server-Status 0, kein Rauswurf) ins CAMPAIGN-Menue statt ins MAIN MENU: das laedt Pilot und
+         * Garage der neuen Seite neu (FUN_00112730 push 8 -> push 3, siehe loc_camp.h). */
+        loc_patch_bytes(LOCCAMP_SWAP_RELOAD_VA, loccamp_swap_reload_orig, loccamp_swap_reload_new, 6,
+                        "Nach Seitenwechsel Pilot+Garage neu laden (0x11273C, loc_camp_faction_swap)");
+    }
     if (g_cfg.loc_live && !g_cfg.loc_camp_min_side) {
         g_cfg.loc_camp_min_side = LOC_CAMP_BETA_MIN_SIDE; /* Nutzer 25.11.: Beta 0.6.0 - 1 Pilot je Seite reicht (Schluessel 0 = Original) */
     }

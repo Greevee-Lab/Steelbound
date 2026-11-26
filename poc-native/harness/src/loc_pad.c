@@ -24,6 +24,7 @@
 #include "input_mouse.h" /* W341: imouse_test_post, imouse_captured */
 #include "xdk_hooks.h" /* W341: hooks_frame_count */
 #include "input_map.h" /* W438: IMAP_LPAD_* */
+#include "loc_hostmig.h" /* W520: Tasten des Neuaufbaus */
 
 #include <string.h>
 #include <intrin.h>
@@ -107,6 +108,22 @@ u32 loc_pad_get_state(u32 pState)
     unsigned lp;
     memset(st, 0, sizeof st);
     *(u32 *)st = ++s_packet;
+    { /* W520 HOSTMIG: Neuaufbau der Spiel-Session drueckt Menue-Tasten (auch ohne loc_pad_keys, ohne Profil) */
+        unsigned ab = loc_hostmig_pad_bits();
+        if (ab) {
+            uint16_t hb = (uint16_t)(ab & 0x1Fu);
+            int16_t lx = (hb & 4) ? -32768 : (hb & 8) ? 32767 : 0, ly = (hb & 1) ? 32767 : (hb & 2) ? -32768 : 0;
+            memcpy(st + 4, &hb, 2);
+            memcpy(st + 14, &lx, 2);
+            memcpy(st + 16, &ly, 2);
+            if (ab & 0x100u) st[6] = 0xFF;
+            if (ab & 0x200u) st[7] = 0xFF;
+            __try {
+                memcpy((void *)(uintptr_t)pState, st, sizeof st);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {}
+            return 0;
+        }
+    }
     if (!g_cfg.loc_pad_keys) { /* neutral: Bedienung ueber den SBC-Pfad (gleiche Tasten) */
         __try {
             memcpy((void *)(uintptr_t)pState, st, sizeof st);

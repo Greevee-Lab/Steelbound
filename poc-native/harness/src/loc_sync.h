@@ -16,3 +16,5 @@ int loc_sync_state_line(char *out, size_t cap);
 /* W386 LOC-LATENCY: Haenger (Abstand der Lockstep-Rahmen > 100 ms) seit Prozessstart (wie LOCLAT >100ms). */
 unsigned loc_sync_hangs(void);
 unsigned loc_sync_frames(void); /* W390 DIAG: Lockstep-Rahmen der Testfolge (Zaehler, keine Eingaben) */
+/* W520 TEST: laufende Testfolge (loc_steps) durch eine neue ersetzen (Fortsetzung nach dem Neuaufbau der Session). */
+void loc_sync_steps_replace(const char *prog);

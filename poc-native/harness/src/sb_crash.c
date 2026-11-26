@@ -24,6 +24,7 @@
 #include "kernel_hle.h"
 #include "xdk_hooks.h"
 #include "loc_chatnet.h" /* W437: Chat vor dem Minidump loeschen */
+#include "sb_crashtel.h" /* W522 CRASH-TELEMETRY */
 
 #pragma comment(lib, "dbghelp.lib")
 
@@ -31,6 +32,7 @@ extern void wd_sym_init(void); /* emu_main.c (SymInitialize einmal je Prozess) *
 
 /* ---- cfg ---- */
 static int g_dump_on = 1, g_hang_on = 1, g_hang_secs = 20, g_crash_test, g_hang_test, g_hang_loc = 1;
+static int g_gpu_lost_test; /* TEST(W516) */
 
 int sb_crash_cfg_key(const char *k, const char *v)
 {
@@ -40,6 +42,7 @@ int sb_crash_cfg_key(const char *k, const char *v)
     else if (strcmp(k, "crash_test") == 0) { g_crash_test = atoi(v); } /* TEST(W279) */
     else if (strcmp(k, "hang_test") == 0) { g_hang_test = atoi(v); }   /* TEST(W279) */
     else if (strcmp(k, "hang_report_loc") == 0) { g_hang_loc = atoi(v); } /* W411 */
+    else if (strcmp(k, "gpu_lost_test") == 0) { g_gpu_lost_test = atoi(v); } /* TEST(W516) */
     else { return 0; }
     return 1;
 }
@@ -62,6 +65,19 @@ static int g_hang_n, g_hang_open;
 static char g_buf[65536 * 4];     /* Textpuffer (kein malloc im Absturz) */
 static char g_tail[262144];
 static char g_cmdset[8192];
+
+/* W522 CRASH-TELEMETRY: Datensatz fuer den Netzbericht (nur mit net_report=1), alles beim Start vorbereitet */
+static int g_ct_on;               /* Zustimmung (net_report=1) und Pfad bekannt */
+static wchar_t g_ct_path[700];    /* <Ausgabeordner>\net_crash.txt */
+static ULONGLONG g_ct_t0;         /* Start (Laufzeitklasse) */
+static unsigned g_ct_rb;          /* Renderer-Bits (sb_crash_note_game) */
+static char g_ct_ver[17];
+static volatile LONG g_ct_fatal;  /* fataler Datensatz geschrieben (Haenger ueberschreibt ihn nicht) */
+static volatile LONG g_ct_hang;   /* Haenger-Datensatz liegt (Erholung loescht ihn) */
+static int g_ct_hthr = -1, g_ct_hn; /* Haenger: oberste Rahmen des ersten Spiel-Threads (Modul + RVA) */
+static int g_ct_hm[5];
+static unsigned g_ct_hr[5];
+extern volatile unsigned g_sb_gpu_vendor; /* d3d11_render.c (W496) */
 
 /* Hilfs-Thread fuer den Minidump */
 static HANDLE g_dreq, g_ddone, g_dthr;
@@ -145,6 +161,68 @@ void sb_crash_init(const char *dir_acp, const char *cmdline_set)
         g_roots[g_nroots++].tag = "<client>";
     }
     strcpy_s(g_cmdset, sizeof g_cmdset, cmdline_set ? cmdline_set : "");
+    /* W522: nur mit Zustimmung (net_report=1) einen Pfad vorbereiten; ohne bleibt der Handler stumm. Alte Datensaetze
+     * ohne Zustimmung loescht der LoC-Start (nr_start) bzw. der Launcher ("No"). */
+    if (!g_ct_t0) { g_ct_t0 = GetTickCount64(); }
+    g_ct_on = g_cfg.net_report == 1 && sbct_path(g_ct_path, 700, hcfg_out_dir(), 0, SBCT_FILE);
+    sbct_clean_ver(sb_version_str(), g_ct_ver, sizeof g_ct_ver);
+}
+
+/* W522: gemeinsamer Teil des Datensatzes (Absturz, Haenger, Geraeteverlust). Keine Allokation. */
+static void ct_fill(sbct_rec *r, int cls)
+{
+    unsigned secs = (unsigned)((GetTickCount64() - g_ct_t0) / 1000u);
+    memset(r, 0, sizeof *r);
+    r->ts = sbct_now();
+    r->cls = cls;
+    r->game = g_sba_loc ? SBCT_G_LOC : SBCT_G_SB;
+    r->ph = sbct_phase();
+    if (!r->ph) { r->ph = !g_sba_loc && sb_in_mission() ? SBCT_P_MATCH : SBCT_P_MENU; }
+    r->rt = sbct_rt_class(secs);
+    r->mem = sbct_mem_class();
+    r->rb = g_ct_rb;
+    r->gpu = g_sb_gpu_vendor & 0xFFFFu;
+    r->ed = SB_EDITION_COMMUNITY ? SBCT_E_COMMUNITY : SBCT_E_PRIVATE;
+    strcpy_s(r->ver, sizeof r->ver, g_ct_ver);
+}
+
+/* W522: fataler Absturz -> Klasse, Ausnahmecode, Modul+RVA, Bucket. Fehler hier lassen den Bericht unberuehrt. */
+static void ct_exception(EXCEPTION_POINTERS *ep)
+{
+    sbct_rec r;
+    EXCEPTION_RECORD *er = ep ? ep->ExceptionRecord : NULL;
+    if (!g_ct_on || !er) { return; }
+    __try {
+        ct_fill(&r, sbct_exc_cls((unsigned)er->ExceptionCode));
+        r.exc = (unsigned)er->ExceptionCode;
+        if ((er->ExceptionCode == 0xC0000005u || er->ExceptionCode == 0xC0000006u) && er->NumberParameters >= 1) {
+            ULONG_PTR a = er->ExceptionInformation[0];
+            r.acc = a == 0 ? SBCT_A_READ : a == 1 ? SBCT_A_WRITE : a == 8 ? SBCT_A_EXEC : SBCT_A_NONE;
+        }
+        r.mod = sbct_mod_at((uintptr_t)er->ExceptionAddress, &r.rva);
+        r.bkt = sbct_bucket(r.mod, r.rva, ep->ContextRecord);
+        if (sbct_write(g_ct_path, &r)) {
+            InterlockedExchange(&g_ct_fatal, 1);
+            InterlockedExchange(&g_ct_hang, 0);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+}
+
+/* W522: Grafikgeraet verloren (d3d11_render.c, vor sb_crash_gpu_lost). hr = Present-Ergebnis, why = Removed-Grund. */
+void sb_crash_tel_gpu(long hr, long why)
+{
+    sbct_rec r;
+    if (!g_ct_on) { return; }
+    __try {
+        ct_fill(&r, SBCT_C_GPU_LOST);
+        r.dxr = sbct_dxr_from_hr(why < 0 && why != -1 && why != -2 ? why : hr); /* -1/-2: kein Geraet/Abfrage fehlgeschlagen */
+        if (sbct_write(g_ct_path, &r)) {
+            InterlockedExchange(&g_ct_fatal, 1);
+            InterlockedExchange(&g_ct_hang, 0);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
 }
 
 static void pdb_id(HMODULE m, char *o, size_t cap)
@@ -261,6 +339,11 @@ void sb_crash_note_game(const sb_gamever_t *gv)
                 g_cfg.lang[0] ? g_cfg.lang : "en", g_cfg.input_profile[0] ? g_cfg.input_profile : "(legacy)",
                 sb_userdata_mode_name(sb_userdata_mode()), sb_userdata_mode_source());
     san(g_fixed, sizeof g_fixed);
+    /* W522: Renderer-/Experimental-Bits (feste Bedeutung, sb_crashtel.h) */
+    g_ct_rb = (g_cfg.shading ? SBCT_RB_SHADING : 0u) | (g_cfg.interp_fps != 0 ? SBCT_RB_INTERP : 0u) |
+              (g_cfg.remaster ? SBCT_RB_REMASTER : 0u) | (g_cfg.remaster && g_cfg.hd_textures ? SBCT_RB_HDTEX : 0u) |
+              (g_cfg.aa_mode > 0 ? SBCT_RB_AA : 0u) | (g_cfg.monitor_fx == 1 ? SBCT_RB_MONFX : 0u) |
+              (g_cfg.window_mode != 0 ? SBCT_RB_FULL : 0u) | (g_cfg.vr_enable ? SBCT_RB_VR : 0u);
     /* cfg-Abweichungen: user.cfg (sofern geladen) + Start-Kette + SB_CFG_SET */
     {
         char base[1100] = "sb_native.cfg", chain[17000], env[8192];
@@ -505,6 +588,14 @@ static int new_dir(const char *kind, char *out, size_t cap)
     return 0;
 }
 
+static volatile long g_gpu_why; /* W516: Ergebnis von gpu_why_thread (-2 = keins) */
+static DWORD WINAPI gpu_why_thread(LPVOID unused)
+{
+    (void)unused;
+    __try { g_gpu_why = sb_render_device_reason(); } __except (EXCEPTION_EXECUTE_HANDLER) { g_gpu_why = -2; }
+    return 0;
+}
+
 static void write_info(const char *dir, const char *kind, const char *status, const char *reason, const char *exc,
                        const char *dumpnote)
 {
@@ -513,6 +604,21 @@ static void write_info(const char *dir, const char *kind, const char *status, co
     static char th[5120]; /* W315: Textur-Gesundheit (letzter Stand, keine DXGI-Abfrage im Absturz); W360: 3072 -> 4096; W477: 5120 */
     GetLocalTime(&lt);
     state_line(st, sizeof st);
+    { /* W516 ISSUE-114: Zustand des Grafikgeraets (GetDeviceRemovedReason) in jedem Bericht. Abfrage in einem
+       * Hilfs-Thread mit 500 ms Frist: haelt ein haengender Thread die Geraetesperre, blockiert der Bericht nicht. */
+        size_t u = strlen(st);
+        long why = -2;
+        HANDLE h;
+        g_gpu_why = -2;
+        h = CreateThread(NULL, 64 * 1024, gpu_why_thread, NULL, 0, NULL);
+        if (h) {
+            if (WaitForSingleObject(h, 500) == WAIT_OBJECT_0) { why = g_gpu_why; }
+            CloseHandle(h);
+        }
+        _snprintf_s(st + u, sizeof st - u, _TRUNCATE, "\r\ngpu-device: %s (%s, 0x%08lX)",
+                    why == 0 ? "ok" : why == -1 ? "not created" : why == -2 ? "unknown" : "removed",
+                    why == -2 ? "query failed or timed out" : sb_render_hr_name(why), why);
+    }
     __try { sb_th_format(th, sizeof th, 0); } __except (EXCEPTION_EXECUTE_HANDLER) { strcpy_s(th, sizeof th, "[texture health] (unavailable)\r\n"); }
     _snprintf_s(g_buf, sizeof g_buf, _TRUNCATE,
                 "Steelbound %s report (W279)\r\n"
@@ -553,6 +659,7 @@ int sb_crash_report(EXCEPTION_POINTERS *ep, const char *why, const char *text, i
     char nm[64], dumpnote[400] = "", exc[400];
     EXCEPTION_RECORD *er = ep ? ep->ExceptionRecord : NULL;
     if (out_path && cap) { out_path[0] = '\0'; }
+    if (fatal) { ct_exception(ep); } /* W522: zuerst der kleine Datensatz (schnell), dann der Bericht wie bisher */
     if (!g_root[0]) { sb_crash_init(NULL, NULL); }
     if (!g_crash_dir_cur[0] && !new_dir("crash", g_crash_dir_cur, sizeof g_crash_dir_cur)) {
         g_crash_dir_cur[0] = '\0';
@@ -605,6 +712,37 @@ int sb_crash_report(EXCEPTION_POINTERS *ep, const char *why, const char *text, i
 }
 
 /* ------------------------------------------------------------------ */
+/* Grafikgeraet verloren (W516 ISSUE-114)                               */
+/* ------------------------------------------------------------------ */
+int sb_crash_gpu_lost_test(void) { return g_gpu_lost_test; }
+
+int sb_crash_gpu_lost(const char *reason, const char *detail)
+{
+    char dumpnote[400] = "", dp[800];
+    if (!g_root[0]) { sb_crash_init(NULL, NULL); }
+    if (!g_crash_dir_cur[0] && !new_dir("crash", g_crash_dir_cur, sizeof g_crash_dir_cur)) {
+        g_crash_dir_cur[0] = 0;
+        HLOG_W("CRASH: Ordner fuer den Geraeteverlust-Bericht nicht anlegbar");
+        return 0;
+    }
+    strcpy_s(g_buf, sizeof g_buf, detail ? detail : "");
+    san(g_buf, sizeof g_buf);
+    wfile(g_crash_dir_cur, "gpu_lost.txt", g_buf);
+    if (g_dump_on) { /* Stacks aller Threads: wo stand der Render-Thread, was taten die anderen */
+        _snprintf_s(dp, sizeof dp, _TRUNCATE, "%s\\gpu_lost.dmp", g_crash_dir_cur);
+        write_dump(dp, NULL, dumpnote, sizeof dumpnote);
+    }
+    g_fatal_written = 1;
+    InterlockedExchange(&g_fc_pending, 0);
+    _snprintf_s(dp, sizeof dp, _TRUNCATE, "%s\\recovered.txt", g_crash_dir_cur);
+    DeleteFileA(dp);
+    write_info(g_crash_dir_cur, "crash", "fatal", reason ? reason : "GPU device lost", "", dumpnote);
+    write_tail(g_crash_dir_cur);
+    HLOG_E("CRASH: Bericht %s (Grafikgeraet verloren, %s)", g_crash_dir_cur, dumpnote[0] ? dumpnote : "ohne Minidump");
+    return 1;
+}
+
+/* ------------------------------------------------------------------ */
 /* Haenger                                                             */
 /* ------------------------------------------------------------------ */
 static void hang_stacks(char *o, size_t cap)
@@ -624,6 +762,11 @@ static void hang_stacks(char *o, size_t cap)
         memset(&cx, 0, sizeof cx);
         cx.ContextFlags = CONTEXT_CONTROL | CONTEXT_INTEGER;
         if (GetThreadContext((HANDLE)h, &cx)) {
+            int ct_this = g_ct_hthr < 0; /* W522: Rahmen des ersten Spiel-Threads fuer den Datensatz */
+            if (ct_this) {
+                g_ct_hthr = i;
+                g_ct_hn = 0;
+            }
             _snprintf_s(o + used, cap - used, _TRUNCATE, "thread %d (start 0x%X): EIP=0x%08lX ESP=0x%08lX EBP=0x%08lX\r\n",
                         i, rt, cx.Eip, cx.Esp, cx.Ebp);
             used = strlen(o);
@@ -645,6 +788,10 @@ static void hang_stacks(char *o, size_t cap)
                                  SymFunctionTableAccess64, SymGetModuleBase64, NULL) ||
                     !sf.AddrPC.Offset) {
                     break;
+                }
+                if (ct_this && g_ct_hn < 5) { /* W522 */
+                    g_ct_hm[g_ct_hn] = sbct_mod_at((uintptr_t)sf.AddrPC.Offset, &g_ct_hr[g_ct_hn]);
+                    g_ct_hn++;
                 }
                 if (sf.AddrPC.Offset >= 0x10000u && sf.AddrPC.Offset < 0x2810000u) {
                     bn = "game"; /* Xbox-VA (liegt im Abbild von sb_ldr.exe), Namen: symbolize.py */
@@ -686,7 +833,22 @@ static void hang_report(int still_s)
         if (loc_rb_susp_diag(lb, (int)sizeof lb))
             _snprintf_s(g_buf + u, sizeof g_buf - u, _TRUNCATE, "LoC rollback: %s\r\n", lb);
     }
+    g_ct_hthr = -1;
+    g_ct_hn = 0;
     hang_stacks(g_buf, sizeof g_buf);
+    if (g_ct_on && !g_ct_fatal) { /* W522: Haenger-Datensatz (Erholung loescht ihn, ein Absturz ueberschreibt ihn) */
+        sbct_rec r;
+        int k = 0;
+        __try {
+            ct_fill(&r, SBCT_C_HANG);
+            while (k < g_ct_hn - 1 && sbct_is_sys(g_ct_hm[k])) { k++; } /* Ort: erster Rahmen ausserhalb der Wartestellen */
+            r.mod = g_ct_hn ? g_ct_hm[k] : SBCT_M_NONE;
+            r.rva = g_ct_hn ? g_ct_hr[k] : 0u;
+            r.bkt = g_ct_hn ? sbct_bucket_frames(g_ct_hm, g_ct_hr, g_ct_hn) : 0u;
+            if (sbct_write(g_ct_path, &r)) { InterlockedExchange(&g_ct_hang, 1); }
+        } __except (EXCEPTION_EXECUTE_HANDLER) {
+        }
+    }
     san(g_buf, sizeof g_buf);
     wfile(g_hang_dir, "hang.txt", g_buf);
     if (g_dump_on) {
@@ -748,6 +910,7 @@ void sb_crash_tick(int waited)
         if (g_hang_open && f != last_f) {
             g_hang_open = 0;
             mark_recovered(g_hang_dir, "New game frames appeared again after this hang.\r\n");
+            if (InterlockedExchange(&g_ct_hang, 0) && !g_ct_fatal) { DeleteFileW(g_ct_path); } /* W522: erholt = kein Absturz */
         }
         still_s = 0;
     }

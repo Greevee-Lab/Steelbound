@@ -94,6 +94,9 @@
 #define TUN_QOS_ONLINE_MAX 598 /* W494: online gemeldete QoS-RTT hoechstens (RttMed/2 < 300 -> Klasse 2, Beitritt klappt) */
 #define LAN_MAX_PEERS 24     /* W454: bekannte LAN-Clients (Paare hoechstens TUN_MAX_LINKS) */
 #define LAN_MAX_TG 4         /* W454: TEST-Ziele loc_lan_targets */
+#define TUN_V6T 32          /* W521: Tabelle IPv6-Adressen (Ersatzadresse 0.254.0.i im sockaddr_in-Pfad, i = 1..31) */
+#define TUN_V6_NET 0x00FE0000u /* W521: 0.254.0.0/16 - als Ziel nie gueltig (0/8), daher kollisionsfrei */
+#define TUN_NATF 32         /* W521 TEST nat_filter: gemerkte Ziele */
 #define TUN_MAX_GHOST 24    /* W373: oeffentliche Lobbys je Suche (Spiel nimmt bis 49 Hosts) */
 
 typedef struct tmsg {
@@ -130,6 +133,8 @@ typedef struct trelay {
 typedef struct tlink {
     int used, up, got_hello, peer_got, down_logged;
     int ver_bad;    /* W420: Mitspieler mit anderer bzw. ohne Client-Version (steelnet) - abgelehnt */
+    int gone_hint;  /* W519: Treffpunkt meldet den Abgang (nicht mehr in der Lobby bzw. Steuerverbindung per Reset/Ende
+                     * zu, peer_conn) - ein Stillstand im Spielstrom wird nicht gehalten */
     int bad_logged; /* W329: Bit 1 Port, 2 vip, 4 Puffer, 8 eigene vip (W332) - je Grund nur einmal protokollieren */
     uint32_t cid, vip;
     char pilot[24];
@@ -154,6 +159,18 @@ typedef struct tlink {
     double dping_at[5], drtt[5], direct_rtt, dping_next;
     struct sockaddr_in seen_from; /* Absender eines gueltigen PROBE (Weg zu uns offen) */
     int seen_ok;
+    /* W521 NETPATHS (#119) */
+    int punch_phase;          /* 1 schnell (100 ms bis 5 s), 2 langsam (1 s bis 15 s), 3 Hintergrund-Stoss (3 s, 250 ms) */
+    double repunch_at;        /* naechster Hintergrund-Versuch (0 = keiner) */
+    int repunch_n;            /* bisherige Hintergrund-Versuche (Abstand verdoppelt sich, Obergrenze TL_REPUNCH_MAX) */
+    int probes_tx[TUN_MAX_CAND]; /* gesendete Proben je Kandidat seit der Paarung (harte Obergrenze, SECURITY.md §49) */
+    struct sockaddr_in d4_pend; /* IPv4-Bestaetigung, die kurz auf eine IPv6-Bestaetigung wartet */
+    int d4_pend_ok;
+    int punch_failed_once;    /* Durchstich einmal gescheitert (Relay noetig) -> spaeterer Erfolg = Wechsel Relay -> direkt */
+    int late_direct;          /* direkter Weg erst nach dem ersten Fehlschlag (link_report "late") */
+    int seen_any;             /* ein PROBE des Partners kam an (Fehlschlagart oneway statt silent) */
+    int refl_n;               /* Rueck-Stanzen an gesehene Adressen (Obergrenze je Paarung) */
+    double punch_hold_until;  /* TEST punch_delay_ms */
     int relay_idx, want, path, reported, rep_dirty, rep_link; /* W395: relay_idx = aktives Relay */
     uint32_t relay_link;
     uint8_t ticket[TICKET_LEN];
@@ -301,7 +318,21 @@ struct loctun {
     volatile LONG ver_state; /* W420: 0 nichts, 1 Treffpunkt lehnt ab, 2 Mitspieler mit anderer Version abgelehnt */
     char lb_err[12];    /* W353: letzter Fehlergrund fuer den Launcher (err=, leer = keiner) */
     int lb_host_left;   /* W366: Host hat die Lobby geschlossen -> err=closed statt code beim erneuten Beitritt */
+    /* W520 HOSTMIG: Host der Lobby (client_id aus lobby_state), Lobby-Eigenschaften, offenes Ereignis fuer das Spiel */
+    uint32_t hm_host, hm_sugg;
+    int hm_mig, hm_auto, hm_have, hm_gone_sent, hm_hand_sent, hm_nmem;
+    loctun_hostmig_ev hm_ev;
     volatile LONG netcut; /* W366 TEST (netcut_file): Netz unterbrochen - UDP ein/aus verwerfen */
+    /* W521 NETPATHS: IPv6 fuer den direkten Weg (eigener Socket, an die gemeldete globale Adresse gebunden) */
+    SOCKET us6;
+    int have6;                  /* us6 gebunden, Kandidat wird gemeldet */
+    int v6_logged;              /* "kein globales IPv6" nur einmal protokollieren */
+    struct sockaddr_in6 my6;    /* eigene Adresse/Port (nie ins Log) */
+    double v6_chk;
+    struct { int used; struct sockaddr_in6 a; double last; } v6t[TUN_V6T]; /* Index 0 = Absender in Pruefung */
+    struct { struct sockaddr_in a; double at; } natf[TUN_NATF]; /* TEST nat_filter */
+    int natf_pos;
+    volatile LONG path_sw;      /* Wegwechsel direkt <-> Relay seit dem Start (Netzbericht psw) */
     double netcut_chk;
     volatile LONG sec;  /* SEC_* */
     int lb_code_tries;
@@ -385,6 +416,11 @@ struct loctun {
     int rs_susp;                /* 1 = Verbindung weg, Sitzung (cid, E, Mitspieler) gehalten, Fortsetzung laeuft */
     int rs_try, rs_count, rs_n_ok;
     double rs_since, rs_deadline, rs_cut_next;
+    /* W517 HOSTRESUME: letzte Zeile vom Dienst (Stille-Erkennung), Abmeldung beim Spielende, Hinweis "Reconnecting" */
+    double lb_rx_last;
+    int lb_bye;                 /* 1 = "bye" gesendet (Spiel endet): keine Neuverbindung mehr */
+    int rs_hint;                /* 1 = Hinweis "verbinde neu" angezeigt (nach RS_HINT_MS ohne Fortsetzung) */
+    volatile LONG rs_hint_pub;  /* fuer das Spiel (loctun_relink_state): 0 nichts, 1 verbinde neu, 2 wieder da, 3 gescheitert */
     uint64_t rs_rx;             /* Zeilen vom Dienst nach dem welcome (Bestaetigung "rx" an den Dienst) */
     uint64_t rs_base;           /* Folgenummer des aeltesten Eintrags in rs_q */
     int rs_qn, rs_qh;           /* Eintraege, Ringanfang (voll: aelteste verdraengt -> ggf. keine Fortsetzung) */
@@ -455,6 +491,19 @@ void tl_hello(loctun *t, tlink *L, double now);
 void tl_link_up(loctun *t, tlink *L);
 void tl_rx_sbt(loctun *t, const uint8_t *pkt, int plen, const struct sockaddr_in *from, int via_relay_link,
                       int via_ri, double now);
+/* ---- W521 NETPATHS (loc_tun_link.c): IPv6-Ersatzadressen, Durchstich-Zeitplan, NAT-Nachbildung (TEST) ---- */
+int tl_is_v6(const struct sockaddr_in *a);
+int tl_v6_intern(loctun *t, const struct sockaddr_in6 *a6, struct sockaddr_in *out);
+void tl_v6_refresh(loctun *t, double now);
+int tl_v6_hello_field(loctun *t, char *out, size_t cap);
+int tl_v6_cand_ok(loctun *t, const struct in6_addr *a);
+void tl_rx_udp6(loctun *t, double now);
+void tl_v6_close(loctun *t);
+int tl_natf_pass(loctun *t, const struct sockaddr_in *from, double now);
+void tl_punch_start(loctun *t, tlink *L, int phase, double now);
+void tl_punch_tick(loctun *t, tlink *L, double now);
+void tl_probe_seen(loctun *t, tlink *L, const struct sockaddr_in *from, double now);
+void tl_probe_ack(loctun *t, tlink *L, const struct sockaddr_in *from, double now);
 
 /* ---- loc_tun_lobby.c ---- */
 const char *js_skip(const char *p, const char *e, int depth);
@@ -464,6 +513,7 @@ int js_str(const char *v, const char *ve, char *out, int cap);
 const char *js_arr_first(const char *v, const char *ve);
 const char *js_arr_next(const char *el, const char *ve, const char **elend);
 const char *lb_my_play_mode(const loctun *t);
+const char *lb_hostmig_fields(const loctun *t); /* W520: ,"host_migration":true[,"auto_host":true] bzw. "" */
 void lb_play_mode_set(loctun *t, int mode, const char *why);
 void lb_send(loctun *t, const char *json);
 void tl_js_esc(const char *in, char *out, size_t cap);
@@ -474,6 +524,7 @@ void lb_on_line(loctun *t, const char *m, const char *e, double now);
 void lb_poll(loctun *t, double now);
 void lb_rs_reset(loctun *t);                          /* W500: Fortsetzungszustand loeschen */
 void lb_lost(loctun *t, const char *why, double now); /* W500: Abriss -> fortsetzen oder lb_close */
+void lb_bye(loctun *t);                              /* W517: Spiel endet geordnet -> "bye" an den Treffpunkt */
 int tl_bind_want(loctun *t, const tlink *L, int ri);
 void tl_tbind_confirm(loctun *t, tlink *L, int ri);
 void lb_rx_sbn(loctun *t, const uint8_t *p, int len, const struct sockaddr_in *from, double now);
@@ -506,6 +557,7 @@ void nr_free(loctun *t);
 void nr_on_welcome(loctun *t, const char *m, const char *e, double now);
 void nr_on_drop(loctun *t, const char *why, double now);
 void nr_on_host_left(loctun *t);
+void nr_on_link_drop(loctun *t, const tlink *L, const char *why); /* W521: Grund je getrennter Verbindung im Match */
 void nr_tick(loctun *t, double now);
 void nr_exit(loctun *t);
 

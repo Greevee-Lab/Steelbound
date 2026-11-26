@@ -105,6 +105,8 @@ typedef struct {
     int od0;            /* W50 WASH: oD0-Quellregister (v-N, -1 = unbekannt/kein MOV) */
     int ot0;            /* W90 FX-ORIG: oT0-Quellregister (MOV vN -> oT0, -1 = unbekannt) */
     int ot0i;           /* W84 TERRAIN-UV: oT0-Quellregister ueber ILU-MOV (gepaarter Slot 'MOV Rn.w, c1 : MOV oT0, vN', Licht-Programme), -1 = keins */
+    int ui2d;           /* W518 ISSUE111: 1 = einziger oPos-Schrieb 'MAD oPos, v0, cS, Rt' mit 'MOV Rt, cO' davor (nur Skala/Versatz,
+                         * keine Matrix = Bildschirm-Programm, LoC-UI); kind bleibt 0 */
 } vsh_prog_t;
 
 /* MISSION3D-Zensus (W25, render_diag.c). */
@@ -451,6 +453,12 @@ void sb_winmode_on_close(void);
 void sb_winmode_tick(unsigned n);
 int sb_winmode_current(void);
 void sb_render_present_raw(void);
+/* W516 ISSUE-114: Grafikgeraet verloren -> Grund loggen, fataler Bericht (sb_crash_gpu_lost), Ende mit
+ * SB_EXIT_GPU_LOST (Launcher: eigene Meldung + "The last session crashed"). Kehrt nicht zurueck. */
+#define SB_EXIT_GPU_LOST 16
+void sb_render_device_lost(const char *where, long hr);
+const char *sb_render_hr_name(long hr);
+long sb_render_device_reason(void);
 /* W393 LOC-PACING pace_vsync: auf den naechsten VBlank des Monitors der Swapchain warten (eigener Thread, ohne
  * ctx_lock). 1 = gewartet, 0 = kein Ausgang (Fenster/Swapchain fehlt). */
 int sb_render_vblank_wait(void);

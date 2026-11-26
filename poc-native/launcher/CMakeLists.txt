@@ -133,6 +133,7 @@ add_executable(sb_launcher WIN32
   ../harness/src/sb_userdata.c
   ../harness/src/sb_savecheck.c
   ../harness/src/sb_diagcore.c
+  ../harness/src/sb_crashtel.c # W522 CRASH-TELEMETRY: Exitcode einordnen
   src/hlog_stub.c
 )
 target_include_directories(sb_launcher PRIVATE src ../harness/src ${CMAKE_CURRENT_BINARY_DIR})

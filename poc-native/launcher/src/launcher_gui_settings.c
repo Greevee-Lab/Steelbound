@@ -1197,7 +1197,7 @@ int client_exit_report(unsigned long code, int edition, int show_box)
         return 0;
     }
     set_status_k(LT(k), 2);
-    if (show_box && code == 8) {
+    if (show_box && (code == 8 || code == 16)) { /* W516: Geraeteverlust - der Client zeigt selbst nichts */
         ui_msgbox(g_hwnd, LT(k), LT("gui.btn_start"), MB_ICONWARNING | MB_OK);
     }
     return 1;
@@ -1224,6 +1224,7 @@ void client_exit_poll(void)
         rp_export_done(code);
         return;
     }
+    nrq_crash_after_exit(code, SBCT_G_SB, g_client_t0); /* W522: Exitcode einordnen (nur mit Zustimmung) */
     {
         /* W259: im ESC-Menue gespeicherte Werte sofort im Launcher zeigen */
         int n = disk_refresh();
@@ -1292,6 +1293,7 @@ int do_start_ex(int dry, int vr, const char *extra)
         _snprintf_s(ed, sizeof ed, _TRUNCATE, "%sesc_debug=%d", set_args[0] ? ";" : "", g_alpha_tools ? 1 : 0);
         strcat_s(set_args, sizeof set_args, ed);
     }
+    nrq_sb_set_append(set_args, sizeof set_args); /* W522: Absturz-Datensatz nur mit Zustimmung (SB sendet nie selbst) */
     if (extra && *extra) { /* W254: Replay-Start ("replay_autoplay=<id>;...", nur dieser Start) */
         strcat_s(set_args, sizeof set_args, ";");
         strcat_s(set_args, sizeof set_args, extra);
@@ -1316,6 +1318,7 @@ int do_start_ex(int dry, int vr, const char *extra)
             CloseHandle((HANDLE)g_client_proc);
         }
         g_client_proc = proc;
+        g_client_t0 = GetTickCount64(); /* W522: Laufzeitklasse */
         if (proc) {
             SetTimer(g_hwnd, 7, 1000, NULL); /* W231: Exitcode 5/8 deuten */
         }

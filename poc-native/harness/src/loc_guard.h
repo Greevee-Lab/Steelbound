@@ -61,6 +61,9 @@ void lguard_walk_advance(lguard_walk *w, const uint8_t *p, int avail, int take);
 int lguard_udp_ok(uint16_t game_port, const uint8_t *d, int n);
 /* Wie lguard_udp_ok, Grund bei Ablehnung (LGUARD_V_*). */
 int lguard_udp_check(uint16_t game_port, const uint8_t *d, int n, int *why);
+/* W514: wie lguard_udp_check; live = 1 (Spiel im Xbox-Live-Fluss) gibt zusaetzlich die Handelstypen 0x15-0x19 des
+ * Chatraums frei (UDP 1202, je 4 B). */
+int lguard_udp_check_live(uint16_t game_port, const uint8_t *d, int n, int *why, int live);
 
 /* Laenge eines Rahmens wie FUN_0004EFE0: > 0 Laenge, 0 = unzulaessig, -1 = noch nicht bestimmbar (mehr Bytes). */
 int lguard_frame_len(const uint8_t *f, int avail);

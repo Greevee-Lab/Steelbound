@@ -27,6 +27,7 @@ void hcfg_defaults(void)
     g_cfg.version_check = 1;     /* W150: unbekannte Spielversion -> kein Start */
     g_cfg.loc_net = 1;           /* W286: System-Link-Netz-HLE (wirkt nur mit loc_boot=1) */
     g_cfg.loc_camp = 1;          /* W491: Kampagne im Xbox-Live-Modus (wirkt nur mit loc_live=1) */
+    g_cfg.loc_camp_faction_swap = 1; /* W515 (#110): Seitenwechsel jederzeit (Enlistment Office immer offen) */
     strcpy_s(g_cfg.loc_net_addr, sizeof g_cfg.loc_net_addr, "auto");
     g_cfg.loc_net_port = 1000;
     strcpy_s(g_cfg.loc_net_peers, sizeof g_cfg.loc_net_peers, "auto");
@@ -274,6 +275,9 @@ void hcfg_defaults(void)
     g_cfg.loc_mem_quar = 300; /* W493: Quarantaene freigegebener LOCMEM-Bloecke (Bilder) */
     g_cfg.loc_bloom_fast = 4; /* W507 LOC-BLOOM-LAG (#107): Bloom-Nachlauf mit Enhanced-Bloom 4x schneller (Nachweis W507) */
     g_cfg.loc_shadow_border = 1; /* W512 ISSUE-109: Schattenvergleich ausserhalb der Karte mit der Randfarbe (NV2A BORDER) */
+    g_cfg.loc_menu_bg = 1; /* W518b MENUBG: bildfuellende Menue-Hintergrundebene sichtbar (0 = wie vor W518 unsichtbar) */
+    g_cfg.loc_ui2d = 1; /* W518 ISSUE-111: LoC-UI-Programme (oPos = v0*cS+cO) immer 2D (gezoomte Einsatzkarte) */
+    g_cfg.loc_stall_hold = 60; /* W519 STALLHOLD (#122): Stillstand im Spielstrom bis 60 s halten (Nachweis W519) */
     g_cfg.loc_ret_mark = 1; /* W444 LOC-RETICLE-MARK (#78): Fadenkreuz-Teile ueber Form-Identitaet erkennen (Nachweis W444) */
     g_cfg.loc_sky_fix = 1; /* W435 LOC-SKY-LAG-REG (#74): Himmel auch mit der Sicht-Korrektur je Bild (Nachweis W435) */
     g_cfg.loc_sndloop_fix = 1; /* W413 LOC-SOUND-LOOP (#65): Ton nach dem Neurechnen mit der korrigierten Zeitlinie abgleichen */
@@ -345,6 +349,9 @@ void hcfg_defaults(void)
     g_cfg.loc_chat_mission_team = 1;  /* W474 (Team-Reiter noch nicht umgesetzt) */
     g_cfg.loc_lobby_join_delay = 0;  /* W446 TEST */
     g_cfg.loc_lobby_resume = 1;      /* W500 */
+    g_cfg.loc_ipv6 = 1;              /* W521 */
+    g_cfg.loc_host_migration = 1;    /* W520 (Experimental, Standard an) */
+    g_cfg.loc_hostmig_rebuild = 0;   /* W523: Menue-Neuaufbau/Auto-Host aus (0.6.3; TEST/0.7.0) */
     g_cfg.loc_lobby_cut = 0;         /* W500 TEST */
     g_cfg.loc_lobby_cut_mode = 0;
     g_cfg.loc_net_auto = 1;       /* W447 LOC-NET-AUTO: Netzmodus Auto (Nutzerentscheid 23.11.: Standard) */
@@ -1229,6 +1236,8 @@ static int set_key_w446(const char *k, const char *v)
         g_cfg.loc_lobby_join_delay = d < 0 ? 0 : d > 600000 ? 600000 : d;
     }
     else if (strcmp(k, "loc_lobby_resume") == 0) { g_cfg.loc_lobby_resume = atoi(v) ? 1 : 0; } /* W500 */
+    else if (strcmp(k, "loc_ipv6") == 0) { g_cfg.loc_ipv6 = atoi(v) ? 1 : 0; } /* W521 */
+    else if (strcmp(k, "loc_punch_legacy") == 0) { g_cfg.loc_punch_legacy = atoi(v) ? 1 : 0; } /* W521 TEST */
     else if (strcmp(k, "loc_lobby_cut") == 0) { /* W500 TEST */
         int d = atoi(v);
         g_cfg.loc_lobby_cut = d < 0 ? 0 : d > 3600 ? 3600 : d;
@@ -1288,6 +1297,39 @@ static int set_key_w512(const char *k, const char *v)
     return 1;
 }
 
+/* W518b MENUBG: eigener Schluessel */
+static int set_key_w518b(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_menu_bg") == 0) { g_cfg.loc_menu_bg = atoi(v) ? 1 : 0; } /* FIX */
+    else { return 0; }
+    return 1;
+}
+
+/* W518 ISSUE-111: eigene Schluessel (C1026) */
+static int set_key_w518(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_ui2d") == 0) { g_cfg.loc_ui2d = atoi(v) ? 1 : 0; } /* FIX */
+    else { return 0; }
+    return 1;
+}
+
+/* W519 STALLHOLD (#122): eigene Schluessel (C1026) */
+static int set_key_w519(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_stall_hold") == 0) { /* FIX: 0 = aus, sonst 15..120 s */
+        int n = atoi(v);
+        g_cfg.loc_stall_hold = n <= 0 ? 0 : n < 15 ? 15 : n > 120 ? 120 : n;
+    } else { return 0; }
+    return 1;
+}
+
+static int set_key_w515(const char *k, const char *v) /* W515 FACTIONSWAP (#110) */
+{
+    if (strcmp(k, "loc_camp_faction_swap") == 0) { g_cfg.loc_camp_faction_swap = atoi(v) ? 1 : 0; }
+    else { return 0; }
+    return 1;
+}
+
 static int set_key_w479(const char *k, const char *v) /* W479 LIVE-LOGON */
 {
     if (strcmp(k, "loc_live") == 0) { g_cfg.loc_live = atoi(v) ? 1 : 0; }
@@ -1326,6 +1368,28 @@ static int set_key_w448(const char *k, const char *v)
 static int set_key_w444(const char *k, const char *v)
 {
     if (strcmp(k, "loc_ret_mark") == 0) { g_cfg.loc_ret_mark = atoi(v) ? 1 : 0; } /* FIX */
+    else { return 0; }
+    return 1;
+}
+
+/* W520 HOSTMIG: eigene Schluessel (C1026). */
+static int set_key_w520(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_host_migration") == 0) { g_cfg.loc_host_migration = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "loc_auto_host") == 0) { g_cfg.loc_auto_host = atoi(v) ? 1 : 0; }
+    else if (strcmp(k, "loc_hostmig_test") == 0) { g_cfg.loc_hostmig_test = atoi(v) ? 1 : 0; } /* TEST */
+    else if (strcmp(k, "loc_hostmig_prog_host") == 0) { strcpy_s(g_cfg.loc_hostmig_prog_host, sizeof g_cfg.loc_hostmig_prog_host, v); } /* TEST */
+    else if (strcmp(k, "loc_hostmig_prog_join") == 0) { strcpy_s(g_cfg.loc_hostmig_prog_join, sizeof g_cfg.loc_hostmig_prog_join, v); } /* TEST */
+    else if (strcmp(k, "loc_hostmig_cont_host") == 0) { strcpy_s(g_cfg.loc_hostmig_cont_host, sizeof g_cfg.loc_hostmig_cont_host, v); } /* TEST */
+    else if (strcmp(k, "loc_hostmig_cont_join") == 0) { strcpy_s(g_cfg.loc_hostmig_cont_join, sizeof g_cfg.loc_hostmig_cont_join, v); } /* TEST */
+    else { return 0; }
+    return 1;
+}
+
+/* W523 HOSTMIG-SCOPE: eigene Schluessel (C1026). */
+static int set_key_w523(const char *k, const char *v)
+{
+    if (strcmp(k, "loc_hostmig_rebuild") == 0) { g_cfg.loc_hostmig_rebuild = atoi(v) ? 1 : 0; } /* TEST/0.7.0 */
     else { return 0; }
     return 1;
 }
@@ -1405,12 +1469,16 @@ static void set_key(const char *k, const char *v)
     if (set_key_w443(k, v)) {
         return;
     }
+    if (set_key_w520(k, v) || set_key_w523(k, v)) {
+        return;
+    }
     if (set_key_w433(k, v) || set_key_w434(k, v)) {
         return;
     }
     if (set_key_w435(k, v) || set_key_w437(k, v) || set_key_w439(k, v) || set_key_w440(k, v) || set_key_w444(k, v) || set_key_w442(k, v) ||
         set_key_w446(k, v) || set_key_w474(k, v) || set_key_w448(k, v) || set_key_w451(k, v) || set_key_w454(k, v) ||
-        set_key_w479(k, v) || set_key_w493(k, v) || set_key_w496(k, v) || set_key_w507(k, v) || set_key_w512(k, v)) {
+        set_key_w479(k, v) || set_key_w493(k, v) || set_key_w496(k, v) || set_key_w507(k, v) || set_key_w512(k, v) ||
+        set_key_w515(k, v) || set_key_w518(k, v) || set_key_w518b(k, v) || set_key_w519(k, v)) {
         return;
     }
     if (set_key_remaster(k, v) || set_key_overlay(k, v) || set_key_vr(k, v) || set_key_w371(k, v) || set_key_w376(k, v) ||

@@ -5018,6 +5018,90 @@ __declspec(noinline) void lnet_gui_selftest(int *pass, int *fail)
                 _snprintf_s(why, sizeof why, _TRUNCATE, "W508 Seitenbalken wieder an: %.120s", buf);
         }
     }
+    /* W518b MENUBG: Menue-Hintergrundebene - Standard an (Startzeile unveraendert), gemerkt, aus = ;loc_menu_bg=0 */
+    if (!why[0]) {
+        char s4[200] = "vr_enable=0";
+        loctab_vis(ID_LNET_MENUBG, 1, "W518b Schalter Menue-Hintergrund", why, sizeof why);
+        loc_rule_set_append(s4, sizeof s4);
+        if (!why[0] && (!g_loc_menubg || !ui_checked(ID_LNET_MENUBG) || strstr(s4, "loc_menu_bg")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "W518b Menue-Hintergrund nicht an bzw. Startzeile '%s'", s4);
+        if (!why[0]) {
+            strcpy_s(s4, sizeof s4, "vr_enable=0");
+            on_command(ID_LNET_MENUBG, BN_CLICKED);
+            gt_read(cfg, buf, sizeof buf);
+            loc_rule_set_append(s4, sizeof s4);
+            if (g_loc_menubg || ui_checked(ID_LNET_MENUBG) || !strstr(buf, "launcher_loc_menu_bg=0\n") ||
+                !strstr(s4, ";loc_menu_bg=0") || lnet_is_default())
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W518b Menue-Hintergrund aus: '%s' / %.120s", s4, buf);
+        }
+        if (!why[0]) { /* neu laden: gemerkter Wert gilt */
+            g_loc_menubg = 1;
+            onl_load();
+            if (g_loc_menubg) _snprintf_s(why, sizeof why, _TRUNCATE, "W518b Menue-Hintergrund aus nicht gemerkt");
+        }
+        if (!why[0]) { /* zurueck auf an */
+            on_command(ID_LNET_MENUBG, BN_CLICKED);
+            gt_read(cfg, buf, sizeof buf);
+            if (!g_loc_menubg || !strstr(buf, "launcher_loc_menu_bg=1\n"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W518b Menue-Hintergrund wieder an: %.120s", buf);
+        }
+    }
+    /* W520 HOSTMIG: Host-Wechsel (Standard an, Startzeile ohne Zusatz, aus = ;loc_host_migration=0), gemerkt, im Reiter
+     * Network; W523: Auto-Host ausgeblendet und wirkungslos */
+    if (!why[0]) {
+        char s4[300] = "vr_enable=0";
+        int tabw = g_lnet_tab;
+        lnet_tab_pick(0);
+        onl_sync_ui();
+        /* W523 HOSTMIG-SCOPE: Host-Wechsel heisst „im Match“; Auto-Host ausgeblendet, Klick wirkungslos, gemerkte 1
+         * wird ignoriert, nie loc_auto_host in der Startzeile */
+        loctab_vis(ID_LNET_HOSTMIG, 1, "W520 Schalter Host-Wechsel", why, sizeof why);
+        loctab_vis(ID_LNET_AUTOHOST, 0, "W523 Schalter Auto-Host (ausgeblendet)", why, sizeof why);
+        loc_rule_set_append(s4, sizeof s4);
+        if (!why[0] && (!g_loc_hostmig || g_loc_autohost || !ui_checked(ID_LNET_HOSTMIG) ||
+                        strstr(s4, "loc_host_migration") || strstr(s4, "loc_auto_host")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "W520 Standard falsch bzw. Startzeile '%s'", s4);
+        if (!why[0] && (strstr(LT("gui.lnet_hostmig"), "auto") || strstr(LT("gui.lnet_hostmig"), "Auto")))
+            _snprintf_s(why, sizeof why, _TRUNCATE, "W523 Beschriftung nennt Auto-Host: %s", LT("gui.lnet_hostmig"));
+        if (!why[0]) { /* Klick auf Auto-Host (ausgeblendet) aendert nichts */
+            on_command(ID_LNET_AUTOHOST, BN_CLICKED);
+            gt_read(cfg, buf, sizeof buf);
+            strcpy_s(s4, sizeof s4, "vr_enable=0");
+            loc_rule_set_append(s4, sizeof s4);
+            if (g_loc_autohost || strstr(buf, "launcher_loc_auto_host=1\n") || strstr(s4, "loc_auto_host"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W523 Auto-Host liess sich schalten: '%s' / %.120s", s4, buf);
+        }
+        if (!why[0]) { /* gemerkte 1 (aus 0.6.2/W520) wird ignoriert */
+            onl_save_key("launcher_loc_auto_host", 1);
+            onl_load();
+            strcpy_s(s4, sizeof s4, "vr_enable=0");
+            loc_rule_set_append(s4, sizeof s4);
+            if (g_loc_autohost || strstr(s4, "loc_auto_host"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W523 gemerkter Auto-Host wirkt: '%s'", s4);
+            onl_save_key("launcher_loc_auto_host", 0);
+        }
+        if (!why[0]) { /* Host-Wechsel aus: Startzeile */
+            on_command(ID_LNET_HOSTMIG, BN_CLICKED);
+            gt_read(cfg, buf, sizeof buf);
+            strcpy_s(s4, sizeof s4, "vr_enable=0");
+            loc_rule_set_append(s4, sizeof s4);
+            if (g_loc_hostmig || ui_checked(ID_LNET_HOSTMIG) || !strstr(buf, "launcher_loc_host_migration=0\n") ||
+                !strstr(s4, ";loc_host_migration=0") || strstr(s4, "loc_auto_host"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W520 Host-Wechsel aus: '%s' / %.120s", s4, buf);
+        }
+        if (!why[0]) { /* neu laden: gemerkt */
+            g_loc_hostmig = 1;
+            onl_load();
+            if (g_loc_hostmig || g_loc_autohost) _snprintf_s(why, sizeof why, _TRUNCATE, "W520 Werte nicht gemerkt");
+        }
+        if (!why[0]) { /* zurueck auf Standard */
+            on_command(ID_LNET_HOSTMIG, BN_CLICKED);
+            gt_read(cfg, buf, sizeof buf);
+            if (!g_loc_hostmig || g_loc_autohost || !strstr(buf, "launcher_loc_host_migration=1\n"))
+                _snprintf_s(why, sizeof why, _TRUNCATE, "W520 Standard wieder: %.120s", buf);
+        }
+        lnet_tab_pick(tabw);
+    }
     /* W440 LOC-LOBBY-MODES: Lobby-Modus - Standard Sim, unabhaengig vom Rollback, gemerkt, als loc_play_mode an den
      * Start; ungueltige Werte = Sim; "Standard wiederherstellen" setzt Sim (unten h) */
     if (!why[0]) {
@@ -8238,5 +8322,61 @@ __declspec(noinline) void w496_gui_selftest(int *pass, int *fail)
               "noch einmal, Schalter mit gleichem Kurztext, net_report=1 nur online mit Zustimmung)");
     } else {
         GT_FAIL("77g W496 NET-TELEMETRY", "%s", why);
+    }
+}
+
+/* W522 CRASH-TELEMETRY (Fall 77h): Exitcode des Spiels -> Datensatz nur mit Zustimmung (Temp-Ordner), SB-Start bekommt
+ * net_report=1 nur mit Zustimmung + Stufe steelnet, Zustimmungstext nennt Absturzart und Ort (EN/DE). */
+__declspec(noinline) void w522_gui_selftest(int *pass, int *fail)
+{
+    char why[300] = "", tmp[1024], dir[1200], set[200];
+    wchar_t cp[700];
+    sbct_rec r;
+    int keep_cfg = g_nrq_cfg, keep_on = g_loc_online, keep_fix = g_onl_fix_srv;
+    u8_GetTempPath(tmp, sizeof tmp);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%sw522_ct_%lu", tmp, GetCurrentProcessId());
+    CreateDirectoryA(dir, NULL);
+    sbct_path(cp, 700, dir, 1, SBCT_FILE);
+    DeleteFileW(cp);
+    /* 1. ohne Zustimmung: nichts */
+    g_nrq_cfg = 0;
+    if (nrq_crash_note_dir(dir, 1, SBCT_G_LOC, 100) != 0 || sbct_read(cp, &r) != 0)
+        strcpy_s(why, sizeof why, "ohne Zustimmung Datensatz geschrieben");
+    /* 2. mit Zustimmung: von aussen beendet -> killed (LoC, Laufzeitklasse) */
+    g_nrq_cfg = 1;
+    if (!why[0] && (nrq_crash_note_dir(dir, 1, SBCT_G_LOC, 100) != 1 || sbct_read(cp, &r) != 1 || r.cls != SBCT_C_KILLED ||
+                    r.game != SBCT_G_LOC || r.rt != 2))
+        strcpy_s(why, sizeof why, "Exit 1 -> killed");
+    DeleteFileW(cp);
+    if (!why[0] && (nrq_crash_note_dir(dir, 0, SBCT_G_SB, 100) != 0 || sbct_read(cp, &r) != 0))
+        strcpy_s(why, sizeof why, "geordnetes Ende -> nichts");
+    /* 3. SB-Start: net_report=1 nur mit Zustimmung + steelnet */
+    g_loc_online = 1;
+    g_onl_fix_srv = 1;
+    set[0] = 0;
+    if (!why[0] && (!nrq_sb_set_append(set, sizeof set) || strcmp(set, "net_report=1") != 0))
+        strcpy_s(why, sizeof why, "SB-Start mit Zustimmung ohne net_report=1");
+    g_nrq_cfg = 0;
+    set[0] = 0;
+    if (!why[0] && (nrq_sb_set_append(set, sizeof set) || set[0]))
+        strcpy_s(why, sizeof why, "SB-Start ohne Zustimmung mit net_report");
+    g_nrq_cfg = 1;
+    g_loc_online = 0;
+    set[0] = 0;
+    if (!why[0] && (nrq_sb_set_append(set, sizeof set) || set[0]))
+        strcpy_s(why, sizeof why, "SB-Start offline mit net_report");
+    /* 4. Text nennt Absturzart und Ort, bleibt "no personal data" */
+    if (!why[0] && (!strstr(LT("gui.nrq_text"), "crash type and location") || !strstr(LT("gui.nrq_text"), "no personal data")))
+        strcpy_s(why, sizeof why, "Text: crash type and location");
+    DeleteFileW(cp);
+    RemoveDirectoryA(dir);
+    g_nrq_cfg = keep_cfg;
+    g_loc_online = keep_on;
+    g_onl_fix_srv = keep_fix;
+    if (!why[0]) {
+        GT_OK("77h W522 CRASH-TELEMETRY (Exitcode -> Datensatz nur mit Zustimmung, SB-Start net_report=1 nur mit Zustimmung "
+              "+ steelnet, Text nennt Absturzart und Ort)");
+    } else {
+        GT_FAIL("77h W522 CRASH-TELEMETRY", "%s", why);
     }
 }

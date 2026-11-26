@@ -252,6 +252,7 @@ static const char *fb_repo(void)
 
 int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
 {
+    long gwhy;
     char gpu[200], build[40], txt8[1024], title[160], info[8192], game[200], state[240], ver[120];
     char e1[400], e2[400], e3[400], e4[400], e5[400], e6[64];
     char *logb;
@@ -267,6 +268,7 @@ int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
     }
     p->repl += sb_feedback_sanitize(txt8, sizeof txt8);
     fb_gpu(gpu, sizeof gpu);
+    gwhy = sb_render_device_reason(); /* W516 ISSUE-114: Geraetezustand (S_OK = gesund) */
     fb_build(build, sizeof build);
     GetLocalTime(&lt);
     if (g_fb_gv_set) {
@@ -294,13 +296,14 @@ int sb_feedback_finish(sb_fb_pkg_t *p, const wchar_t *text)
                 "client: %s\r\n"
                 "game_image: %s\r\n"
                 "gpu: %s\r\n"
+                "gpu-device: %s (0x%08lX)\r\n"
                 "display: %ux%u window_mode=%d interp_fps=%d vblank_hz=%d monitor_hz=%d\r\n"
                 "state: %s present=%u pauses=%u\r\n"
                 "settings: shading=%d monitor_fx=%d edge_mode=%d aa_mode=%d ssao=%d remaster=%d hd_textures=%d "
                 "hd_scale=%d vr_enable=%d lang=%s input_profile=%s menu_pause=%d\r\n"
                 "contents: screenshot.jpg (game image only, never the desktop), log.txt (end of the client log, "
                 "user name/computer name/paths replaced), info.txt, text.txt\r\n",
-                kn, lt.wYear, lt.wMonth, lt.wDay, lt.wHour, lt.wMinute, lt.wSecond, ver, game, gpu, g_bb_w, g_bb_h,
+                kn, lt.wYear, lt.wMonth, lt.wDay, lt.wHour, lt.wMinute, lt.wSecond, ver, game, gpu, sb_render_hr_name(gwhy), gwhy, g_bb_w, g_bb_h,
                 g_cfg.window_mode, g_cfg.interp_fps, g_cfg.vblank_hz, fb_monitor_hz(), state, g_present_no, sb_pause_count(),
                 g_cfg.shading, g_cfg.monitor_fx, g_cfg.edge_mode, g_cfg.aa_mode, g_cfg.ssao, g_cfg.remaster,
                 g_cfg.hd_textures, g_cfg.hd_scale, g_cfg.vr_enable, g_cfg.lang[0] ? g_cfg.lang : "en",

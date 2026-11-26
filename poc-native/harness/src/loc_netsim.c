@@ -69,6 +69,9 @@ static const ns_prof k_prof[] = {
     {"far-400", 400, 10, 0.5, 0, 0, 0, 0, 0},   /* W494 stetig 400 ms (kein Rauswurf) */
     {"far-500", 500, 40, 0.0, 0.007692, 0.3, 0.8, 0, 1}, /* W494 Absturzstufe 500 ms */
     {"mobile-bad", 80, 40, 0.0, 0.016667, 0.25, 0.8, 1000, 1}, /* bw = up (1000 kbit/s) */
+    {"hp-100", 100, 15, 0.0, 0.003797, 0.3, 0.8, 0, 1}, /* W521 #118: 100 ms, 15 ms Jitter, 1 % Verlust in Bursts */
+    {"hp-200", 200, 20, 0.0, 0.003797, 0.3, 0.8, 0, 1}, /* W521 #118: 200 ms, 20 ms Jitter, 1 % Verlust in Bursts */
+    {"hp-300", 300, 30, 0.0, 0.007692, 0.3, 0.8, 0, 1}, /* W521 #118: 300 ms, 30 ms Jitter, 2 % Verlust in Bursts */
 };
 static const struct { const char *alias, *name; } k_alias[] = {
     {"dsl", "eu-eu"}, {"dsl-fern", "eu-useast"}, {"uebersee", "eu-jp"}, {"wlan", "mobile-bad"},

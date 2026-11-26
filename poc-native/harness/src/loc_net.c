@@ -23,6 +23,8 @@
 #include "loc_chat.h" /* W474: lch_session_from */
 #include "loc_live_hle.h" /* W479 LIVE-LOGON */
 #include "loc_camp_bridge.h" /* W491 CAMP-CLIENT */
+#include "sb_lang.h" /* W517: Hinweis Fortsetzung */
+#include "sb_origview.h" /* W517: sb_ov_toast_msg */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -37,6 +39,10 @@ void loc_net_bye(void)
     loc_live_log_counts(1); /* W485 */
     loccamp_bridge_stop(); /* W491: Bruecke beenden, Zaehler ins Log */
     if (g_ln.tun) loctun_bye_all(g_ln.tun); /* W366 */
+}
+void loc_net_bye_crash(void) /* W519: Absturz im Netzspiel - nur Abmelden, hoechstens ~200 ms */
+{
+    if (g_ln.tun) loctun_bye_crash(g_ln.tun);
 }
 static volatile LONG s_first[40];
 
@@ -60,6 +66,15 @@ static int ln_game_info(loctun_game_info *o)
     }
     o->in_mission = loc_rb_in_mission();
     o->desyncs = s_rbi_end_desync;
+    {
+        locnet_hold_stats hs; /* W519: Luecken im Spielstrom, gehaltene Stillstaende */
+        int k;
+        locnet_hold_get_stats(&hs);
+        for (k = 0; k < 5; k++) o->st_gh[k] = (unsigned)hs.gh[k];
+        o->st_holds = (unsigned)hs.holds;
+        o->st_ok = (unsigned)hs.held_ok;
+        o->st_cap = (unsigned)hs.held_cap;
+    }
     return 1;
 }
 
@@ -296,9 +311,11 @@ static u32 __stdcall ln_socket(u32 af, u32 type, u32 proto)
     WSASetLastError(e);
     return (u32)s;
 }
+static void lsh_forget(SOCKET s); /* W519 */
 static u32 __stdcall ln_closesocket(u32 s)
 {
     FIRST(18, "closesocket");
+    lsh_forget((SOCKET)s); /* W519 */
     return (u32)locnet_closesocket(&g_ln, (SOCKET)s);
 }
 static u32 __stdcall ln_ioctlsocket(u32 s, u32 cmd, u32 argp)
@@ -337,11 +354,123 @@ static u32 __stdcall ln_accept(u32 s, u32 a, u32 plen)
 {
     return (u32)locnet_accept(&g_ln, (SOCKET)s, (struct sockaddr *)(uintptr_t)a, (int *)(uintptr_t)plen);
 }
+/* ---------- W519 STALLHOLD: kurze Stillstaende im Spielstrom halten (loc_net_core.h) ----------
+ * Das Spiel fragt je Platz mit select (ein Socket, Wartezeit 0) ab (FUN_00053B20). Bleibt der Strom eines Mitspielers
+ * still, waehrend der Transport nur einen Stau sieht, meldet ln_select ihn als lesbar (recv: WSAEWOULDBLOCK) - der
+ * Stillezaehler des Spiels bleibt 0, Lockstep/Rollback warten wie bisher (keine erfundenen Eingaben). Dazu bleibt der
+ * Eingabe-Stauzaehler [0x306900] (FUN_0001D4C0: > 600 Abfragen = eigene Mission endet) waehrend des Haltens unter der
+ * Grenze. Nur online (Treffpunkt + eigener Transport); LAN/System Link und SB unveraendert. Nur Zaehler/Adressen im Log. */
+#define LSH_STALL 0x306900u  /* Eingabe-Stauzaehler (Abfragen ohne alle Eingaben) */
+#define LSH_ACTIVE 0x306830u /* Lockstep-Aktiv-Maske (Mission) */
+#define LSH_NC 16
+static SOCKET s_lsh_s[LSH_NC];
+static uint32_t s_lsh_vip[LSH_NC];
+static ULONGLONG s_lsh_chk[LSH_NC]; /* "kein Mitspieler": erneut pruefen ab (Verbindung kann spaeter stehen) */
+static volatile LONG s_lsh_clamped;
+
+static uint32_t lsh_vip_of(SOCKET s)
+{
+    int i, fr = -1;
+    struct sockaddr_in pa;
+    int pl = sizeof pa;
+    uint32_t vip = 0;
+    for (i = 0; i < LSH_NC; i++) {
+        if (s_lsh_s[i] == s) {
+            if (s_lsh_vip[i] || GetTickCount64() < s_lsh_chk[i]) return s_lsh_vip[i];
+            s_lsh_s[i] = 0; /* neu pruefen (hoechstens alle 2 s je Socket) */
+            fr = i;
+            break;
+        }
+        if (fr < 0 && s_lsh_s[i] == 0) fr = i;
+    }
+    memset(&pa, 0, sizeof pa);
+    if (getpeername(s, (struct sockaddr *)&pa, &pl) == 0 && pa.sin_family == AF_INET &&
+        loctun_is_peer(g_ln.tun, pa.sin_addr.s_addr)) {
+        char ipb[16];
+        vip = pa.sin_addr.s_addr;
+        HLOG_I("LOCSTALL: Spielstrom von %s erkannt (Stillstand wird bis %d s gehalten)", locnet_ip_str(vip, ipb),
+               g_cfg.loc_stall_hold);
+    }
+    if (fr >= 0) { /* auch "kein Mitspieler" merken (erneute Pruefung fruehestens nach 2 s) */
+        s_lsh_s[fr] = s;
+        s_lsh_vip[fr] = vip;
+        s_lsh_chk[fr] = GetTickCount64() + 2000u;
+    }
+    return vip;
+}
+
+static void lsh_forget(SOCKET s)
+{
+    int i;
+    for (i = 0; i < LSH_NC; i++) {
+        if (s_lsh_s[i] == s) s_lsh_s[i] = 0;
+    }
+}
+
+static int lsh_peer(uint32_t vip, void *ctx)
+{
+    (void)ctx;
+    return loctun_peer_stall(g_ln.tun, vip, NULL);
+}
+
+static int lsh_select(u32 r, u32 w, u32 x, u32 tv, SOCKET s0, int ret)
+{
+    fd_set *rd = (fd_set *)(uintptr_t)r;
+    uint32_t vip;
+    locnet_hold_stats a, b;
+    int fake, real_rd;
+    char ipb[16];
+    (void)w;
+    (void)x;
+    (void)tv;
+    if (ret < 0) return ret;
+    real_rd = ret > 0 && FD_ISSET(s0, rd);
+    vip = lsh_vip_of(s0);
+    if (!vip) return ret;
+    locnet_hold_get_stats(&a);
+    fake = locnet_hold_poll(s0, vip, GetTickCount64(), real_rd, lsh_peer, NULL);
+    locnet_hold_get_stats(&b);
+    if (b.holds != a.holds) {
+        int age = -1, ps = loctun_peer_stall(g_ln.tun, vip, &age);
+        HLOG_W("LOCSTALL: Spielstrom von %s still - Stillstand wird gehalten (Transport %s, letztes Paket vor %d ms, "
+               "Obergrenze %d s)", locnet_ip_str(vip, ipb), ps == 1 ? "hoert ihn" : "still", age, g_cfg.loc_stall_hold);
+    }
+    if (b.held_ok != a.held_ok)
+        HLOG_I("LOCSTALL: Spielstrom von %s wieder da nach %ld ms Stillstand (gehalten, Stauzaehler %ld mal begrenzt) - Match "
+               "laeuft weiter", locnet_ip_str(vip, ipb), b.last_ok_ms, s_lsh_clamped);
+    if (b.held_cap != a.held_cap)
+        HLOG_W("LOCSTALL: Stillstand %s erreicht die Obergrenze - Original-Grenze des Spiels laeuft (Abgang in ~10 s)",
+               locnet_ip_str(vip, ipb));
+    if (b.held_gone != a.held_gone)
+        HLOG_W("LOCSTALL: Stillstand %s nicht mehr gehalten - Abgang gemeldet bzw. Verbindung beendet", locnet_ip_str(vip, ipb));
+    if (!fake) return ret;
+    FD_ZERO(rd);
+    FD_SET(s0, rd);
+    __try { /* Mission: Eingabe-Stauzaehler unter der Grenze halten (0x15 = Hinweis des Spiels bleibt) */
+        if (*(volatile u32 *)(uintptr_t)LSH_ACTIVE != 0u && *(volatile u32 *)(uintptr_t)LSH_STALL > 0x15u) {
+            *(volatile u32 *)(uintptr_t)LSH_STALL = 0x15u;
+            InterlockedIncrement(&s_lsh_clamped);
+        }
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+    }
+    return 1;
+}
+
 static u32 __stdcall ln_select(u32 nfds, u32 r, u32 w, u32 x, u32 tv)
 {
+    SOCKET s0 = 0;
+    int ret;
     FIRST(22, "select");
-    return (u32)select((int)nfds, (fd_set *)(uintptr_t)r, (fd_set *)(uintptr_t)w, (fd_set *)(uintptr_t)x,
-                       (const struct timeval *)(uintptr_t)tv);
+    if (r && locnet_hold_enabled()) { /* W519: genau ein Socket, nur Lesen (Abfrage des Spiels) */
+        const fd_set *rd = (const fd_set *)(uintptr_t)r;
+        if (rd->fd_count == 1 && (!w || ((const fd_set *)(uintptr_t)w)->fd_count == 0) &&
+            (!x || ((const fd_set *)(uintptr_t)x)->fd_count == 0))
+            s0 = rd->fd_array[0];
+    }
+    ret = select((int)nfds, (fd_set *)(uintptr_t)r, (fd_set *)(uintptr_t)w, (fd_set *)(uintptr_t)x,
+                 (const struct timeval *)(uintptr_t)tv);
+    if (s0) ret = lsh_select(r, w, x, tv, s0, ret);
+    return (u32)ret;
 }
 /* W339 TEST (loc_crash_test=N, Standard 0): N s nach Beginn der Netzsitzung im Spiel-Thread eine Ausnahme im
  * Gastkontext ausloesen - prueft "Absturz = Ende" (Erwartung: LOCSEC-Zeile, Absturzbericht, Exitcode 39).
@@ -735,6 +864,10 @@ int loc_net_install(void)
         strcpy_s(tc.play_mode, sizeof tc.play_mode, g_cfg.loc_play_mode == LAS_ARCADE ? "arcade" : "sim"); /* W440 */
         tc.join_delay_ms = g_cfg.loc_lobby_join_delay;                      /* W446 TEST */
         tc.resume = g_cfg.loc_lobby_resume;                                  /* W500 */
+        tc.ipv6 = g_cfg.loc_ipv6;                                            /* W521 */
+        tc.punch_legacy = g_cfg.loc_punch_legacy;                            /* W521 TEST */
+        tc.host_mig = g_cfg.loc_host_migration;                              /* W520 */
+        tc.auto_host = g_cfg.loc_host_migration && g_cfg.loc_auto_host && g_cfg.loc_hostmig_rebuild; /* W520; W523: nur TEST/0.7.0 */
         tc.cut_s = g_cfg.loc_lobby_cut;                                      /* W500 TEST */
         tc.cut_mode = g_cfg.loc_lobby_cut_mode;
         tc.live = g_cfg.loc_live ? 1 : 0;                                    /* W482 LIVE-MATCH */
@@ -751,6 +884,11 @@ int loc_net_install(void)
         tc.gpu_vendor = g_sb_gpu_vendor;
         g_ln.tun = loctun_start(&tc, &g_ln, g_ln.sim, ln_log);
         if (g_ln.tun) loctun_set_game_fn(g_ln.tun, ln_game_info); /* W496 */
+        if (g_ln.tun && g_cfg.loc_lobby[0] && g_cfg.loc_stall_hold > 0) { /* W519: nur online (Treffpunkt) */
+            locnet_hold_config(2500, g_cfg.loc_stall_hold * 1000, 10000);
+            HLOG_I("LOCSTALL: Stillstaende im Spielstrom werden bis %d s gehalten (ab 2,5 s Stille, danach Original-Grenze "
+                   "10 s; loc_stall_hold=0 = aus)", g_cfg.loc_stall_hold);
+        }
         if (!g_ln.tun) {
             HLOG_W("LOCTUN: Transport nicht gestartet - keine Mitspieler (loc_transport=tcp fuer System Link)");
         }
@@ -782,7 +920,80 @@ void loc_net_lobby_frame(unsigned f)
 {
     static u32 prev[5];
     static int n;
+    static int s_relink;
     u32 cur[5] = {0, 0, 0, 0, 0};
+    /* W517 HOSTRESUME: Treffpunkt-Verbindung abgerissen -> Hinweis "Reconnecting" statt stiller Trennung (erst nach 3 s,
+     * kurze Luecken bleiben unsichtbar); danach "wieder verbunden" bzw. "gescheitert". Mitspieler bleiben verbunden. */
+    if (g_ln.tun && (f & 15u) == 0) {
+        int r = loctun_relink_state(g_ln.tun);
+        if (r != s_relink) {
+            wchar_t t1[160], t2[240];
+            s_relink = r;
+            if (r == 1) {
+                sb_lang_w("loc.relink_t", t1, 160);
+                sb_lang_w("loc.relink_d", t2, 240);
+            } else if (r == 2) {
+                sb_lang_w("loc.relink_ok_t", t1, 160);
+                sb_lang_w("loc.relink_ok_d", t2, 240);
+            } else if (r == 3) {
+                sb_lang_w("loc.relink_fail_t", t1, 160);
+                sb_lang_w("loc.relink_fail_d", t2, 240);
+            }
+            if (r >= 1 && r <= 3) sb_ov_toast_msg(t1, t2, r == 1 ? 150000u : 7000u);
+        }
+    }
+    /* W519 STALLHOLD: gehaltener Stillstand im Spielstrom -> "Waiting for <Pilot> ..." mit Restzeit (ab 4 s Stille,
+     * kurze Ruckler bleiben unsichtbar); alle Mitspieler still = eigene Verbindung weg -> "Connection interrupted".
+     * Fortsetzung -> "<Pilot> is back". Obergrenze bzw. Abgang: das Spiel meldet den Abgang selbst wie bisher. */
+    if (g_ln.tun && locnet_hold_enabled() && (f & 15u) == 8u) {
+        static int s_shown, s_sec = -1;
+        locnet_hold_info hi;
+        locnet_hold_get(&hi, GetTickCount64());
+        if (hi.active && hi.silent_ms >= 4000 && s_relink != 1) {
+            int sec = (hi.left_ms + 999) / 1000;
+            if (sec != s_sec) {
+                wchar_t t1[160], t2[240], fmt[240], pw[32];
+                char pn[24];
+                pw[0] = 0;
+                if (hi.active >= 2 && hi.active >= hi.tracked) {
+                    sb_lang_w("loc.stall_all_t", t1, 160);
+                } else {
+                    if (!loctun_peer_pilot(g_ln.tun, hi.vip, pn, sizeof pn) ||
+                        !MultiByteToWideChar(CP_UTF8, 0, pn, -1, pw, 32))
+                        wcscpy_s(pw, 32, L"?");
+                    sb_lang_w("loc.stall_t", fmt, 240);
+                    _snwprintf_s(t1, 160, _TRUNCATE, fmt, pw);
+                }
+                if (hi.active >= 2 && hi.active >= hi.tracked)
+                    sb_lang_w("loc.stall_all_d", fmt, 240);
+                else
+                    sb_lang_w("loc.stall_d", fmt, 240);
+                _snwprintf_s(t2, 240, _TRUNCATE, fmt, sec);
+                sb_ov_toast_msg(t1, t2, 3000u);
+                if (!s_shown)
+                    HLOG_I("LOCSTALL: Hinweis - Warte auf %s (%d s Rest, %d von %d Mitspielern still)",
+                           hi.active >= 2 && hi.active >= hi.tracked ? "alle Mitspieler" : "Mitspieler", sec, hi.active,
+                           hi.tracked);
+                s_sec = sec;
+                s_shown = 1;
+            }
+        } else if (s_shown && hi.last_ok_vip_set) {
+            wchar_t t1[160], t2[240], fmt[240], pw[32];
+            char pn[24];
+            if (!loctun_peer_pilot(g_ln.tun, hi.ok_vip, pn, sizeof pn) || !MultiByteToWideChar(CP_UTF8, 0, pn, -1, pw, 32))
+                wcscpy_s(pw, 32, L"?");
+            sb_lang_w("loc.stall_ok_t", t1, 160);
+            sb_lang_w("loc.stall_ok_d", fmt, 240);
+            _snwprintf_s(t2, 240, _TRUNCATE, fmt, pw);
+            sb_ov_toast_msg(t1, t2, 4000u);
+            HLOG_I("LOCSTALL: Hinweis - Mitspieler wieder da nach %d ms", hi.ok_ms);
+            s_shown = 0;
+            s_sec = -1;
+        } else if (s_shown && !hi.active) {
+            s_shown = 0; /* Obergrenze bzw. Abgang: Einblendung laeuft aus, das Spiel meldet den Abgang */
+            s_sec = -1;
+        }
+    }
     /* W373 LOC-PUBLIC-LOBBY (LOC_BOOT §49.2, B): Host-Zustand fuer oeffentliche Lobbys alle 8 Bilder - Lobby-Zustand
      * G+0x15 (0x22/0x23 = Match angeboten, wartet auf Beitritte), S = G+0x5624 (Lager A/B, Sitze A/B, Modus, Mission,
      * Bestaetigung, Option), Spieler je Seite G+0xA4/A5. Nur Werte; der Transport prueft sie vor dem Veroeffentlichen. */
@@ -1055,6 +1266,35 @@ static SRWLOCK s_ses_lock = SRWLOCK_INIT;
 static int s_ses_rep;
 static u32 s_ses_none_t;
 int loc_net_lobby_state(void) { return loc_net_lobby_state_ex(NULL); }
+
+/* W520 HOSTMIG: duenne Huellen um den Transport (loc_hostmig.c im Spiel-Thread). */
+int loc_net_online(void) { return g_ln.ready && g_ln.tun && g_cfg.loc_lobby[0]; }
+int loc_net_hostmig_poll(loc_hostmig_ev *ev)
+{
+    loctun_hostmig_ev e;
+    if (!ev || !g_ln.tun || !loctun_hostmig_poll(g_ln.tun, &e)) return 0;
+    memset(ev, 0, sizeof *ev);
+    ev->me_new = e.me_new;
+    ev->me_old = e.me_old;
+    ev->reason = e.reason;
+    ev->host_cid = e.host_cid;
+    ev->old_cid = e.old_cid;
+    strcpy_s(ev->host, sizeof ev->host, e.host);
+    strcpy_s(ev->old, sizeof ev->old, e.old);
+    return 1;
+}
+int loc_net_hostmig_info(int *mig, int *autoh, int *sugg_me, int *am_host)
+{
+    return g_ln.tun ? loctun_hostmig_info(g_ln.tun, mig, autoh, sugg_me, am_host) : 0;
+}
+void loc_net_host_gone(void) { if (g_ln.tun) loctun_host_gone(g_ln.tun); }
+int loc_net_hostmig_members(void) { return g_ln.tun ? loctun_hostmig_members(g_ln.tun) : 0; }
+void loc_net_hostmig_sugg_name(char *out, int cap)
+{
+    if (out && cap > 0) out[0] = 0;
+    if (g_ln.tun) loctun_hostmig_sugg_name(g_ln.tun, out, cap);
+}
+void loc_net_handover(void) { if (g_ln.tun) loctun_handover(g_ln.tun); }
 
 int loc_net_lobby_state_ex(int *out)
 {

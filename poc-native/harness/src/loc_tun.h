@@ -56,6 +56,8 @@ typedef struct loctun_cfg {
     int ver_check;        /* W420 TEST: Versionspruefung im HELLO auch ohne Treffpunkt (Standard 0: nur steelnet) */
     char ver_test[16];    /* W420 TEST: eigene Version statt SB_NET_VERSION ("-" = HELLO ohne Versionsfeld wie aeltere Clients) */
     char play_mode[8];    /* W440 LOC-LOBBY-MODES: Modus eigener Lobbys beim Anlegen ("sim" = Standard, "arcade") */
+    int host_mig;         /* W520 HOSTMIG: eigene Lobbys mit host_migration:true anlegen (Experimental-Schalter) */
+    int auto_host;        /* W520: eigene Lobbys mit auto_host:true (nur mit host_mig) */
     int join_delay_ms;    /* W446 TEST: Lobby erst N ms nach dem welcome betreten bzw. anlegen (steelnet-Chat ausserhalb
                            * einer Lobby nachweisen), 0 = sofort (Standard) */
     /* W454 LOC-LAN-MODE: LAN ohne steelnet (nur ohne Treffpunkt; Entdeckung loc_tun_lan.c, SECURITY.md §36) */
@@ -76,6 +78,16 @@ typedef struct loctun_cfg {
     int resume;           /* 1 = fortsetzen (Standard), 0 = altes Verhalten (sauberer Neuaufbau; Gegenprobe) */
     int cut_s;            /* TEST: Steuerverbindung N s nach jedem (Wieder-)Aufbau abreissen (0 = aus) */
     int cut_mode;         /* TEST: 0 = harter Reset (RST, Dienst merkt es), 1 = still liegenlassen (Dienst merkt nichts) */
+    /* W521 NETPATHS (#119): direkter Weg oefter - IPv6-Kandidaten zuerst, Rueck-Stanzen an die gesehene Adresse,
+     * langsame Phase und Hintergrund-Wiederholung (Wechsel Relay -> direkt im Spiel) */
+    int ipv6;             /* 1 = eigene globale IPv6-Adresse als Kandidat melden und IPv6 zuerst stanzen (Standard), 0 = aus */
+    int punch_legacy;     /* TEST/Gegenprobe: 1 = Durchstich wie vor W521 (3 s, kein Rueck-Stanzen, keine Wiederholung, kein IPv6) */
+    int v6_loop;          /* TEST: ::1 statt einer globalen Adresse als eigener IPv6-Kandidat (Labor ohne IPv6-Anschluss) */
+    int nat_filter;       /* TEST NAT-Nachbildung: 1 = direkte Pakete nur von Adressen, an die wir in den letzten 60 s
+                           * gesendet haben (port-restricted Filter bzw. IPv6-Firewall) */
+    int cand_skew;        /* TEST NAT-Nachbildung: Port-Versatz fuer alle IPv4-Kandidaten der Mitspieler (Partner hinter
+                           * symmetrischem NAT: die gemeldete Zuordnung stimmt fuer uns nicht), 0 = aus */
+    int punch_delay_ms;   /* TEST: Durchstich erst N ms nach dem peer_info beginnen (spaet ankommendes peer_info) */
 } loctun_cfg;
 
 typedef struct loctun_stats {
@@ -97,12 +109,17 @@ void loctun_stop(loctun *t);
  * senden (authentisch, zweimal), damit sie den Abgang sofort sehen statt nach der Stillegrenze. Wartet hoechstens
  * 200 ms auf den Transport, baut nichts ab (der Prozess endet danach). */
 void loctun_bye_all(loctun *t);
+void loctun_bye_crash(loctun *t); /* W519: wie bye_all beim Absturz (ohne Netzbericht-Abschluss) */
 
 /* Spiel-UDP (aus dem Spiel-Thread): dst_vip = virtuelle Adresse des Mitspielers oder INADDR_BROADCAST
  * (an alle verbundenen), Ports als Spielports. Rueckgabe len (wie UDP: angenommen) oder -1 (kein Weg). */
 int loctun_dgram(loctun *t, uint32_t dst_vip, uint16_t src_gp, uint16_t dst_gp, const char *buf, int len);
 /* 1 = vip gehoert einem verbundenen Mitspieler. */
 int loctun_is_peer(loctun *t, uint32_t vip);
+/* W519 STALLHOLD: Zustand des Mitspielers vip fuer das Halten eines Stillstands im Spielstrom (LNH_PEER_* aus
+ * loc_net_core.h): 0 keine Verbindung (beendet/blockiert/unbekannt), 1 Transport hoert ihn (< 3 s), 2 still ohne
+ * Abgangsmeldung, 3 Abgang gemeldet (gone_hint). rx_age_ms (optional): ms seit dem letzten Paket. */
+int loctun_peer_stall(loctun *t, uint32_t vip, int *rx_age_ms);
 /* W338 LOC-ROLLBACK-R2: Datagramme mit Quell- UND Zielspielport gp gehen an den Client (fn) statt an das Spiel -
  * eigener Eingabekanal ueber SBT2 (Senden mit loctun_dgram(t, vip, gp, gp, ...)). Nie an den Gast; fn laeuft im
  * Transport-Thread (kurz halten), vip = Mitspieler; Inhaltspruefung beim Empfaenger (net/SECURITY.md §18 Ae1).
@@ -148,6 +165,12 @@ int loctun_lan_state(loctun *t, int *peers, int *up);
 int loctun_links_up(loctun *t);
 /* Weg und RTT des i-ten Mitspielers: path 0 = keiner, 1 = direkt, 2 = Relay. 0 = kein solcher Eintrag. */
 int loctun_link_info(loctun *t, int i, int *path, double *srtt_ms, int *red, uint32_t *vip, char *relay, int rlen);
+/* W521 NETPATHS: Zustand des direkten Wegs des i-ten Mitspielers (Labor/Selbsttest): direct_ok, v6 = ueber IPv6,
+ * late = erst nach gescheitertem Durchstich (Wechsel Relay -> direkt), failed = Durchstich einmal gescheitert,
+ * seen = ein PROBE des Partners kam an. 0 = kein solcher Eintrag. */
+int loctun_link_direct(loctun *t, int i, int *direct_ok, int *v6, int *late, int *failed, int *seen);
+/* W521: 1 = eigener IPv6-Kandidat gebunden und gemeldet */
+int loctun_has_v6(loctun *t);
 /* W494: an das Spiel gemeldete QoS-RTT (ms) aus der gemessenen; online (Treffpunkt) hoechstens 598 ms, weil das
  * Spiel ab RttMed 600 (Ping 300, Klasse 1) den Beitritt abbricht. Ohne Treffpunkt (LAN) unveraendert. */
 int loctun_qos_game(int rtt_ms, int online);
@@ -157,12 +180,33 @@ uint16_t loctun_port(loctun *t);
 void loctun_log_stats(loctun *t, int waited_s);
 /* Treffpunkt-Zustand: 0 aus, 1 verbinde, 2 angemeldet, 3 in Lobby. */
 int loctun_lobby_state(loctun *t);
+/* W517 HOSTRESUME: Fortsetzung fuer den Hinweis im Spiel: 0 nichts, 1 verbinde neu (seit >= 3 s), 2 wieder verbunden,
+ * 3 Fortsetzung gescheitert (Neuaufbau). Bleibt bis zum naechsten Wechsel stehen. */
+int loctun_relink_state(loctun *t);
+/* W520 HOSTMIG: Host-Wechsel der steelnet-Lobby (host_changed). Liefert ein Ereignis genau einmal (1), sonst 0.
+ * me_new = 1: dieser Client ist der neue Host; me_old = 1: dieser Client war der Host (Auto-Host). reason 1 = Host
+ * gegangen, 2 = Host verloren, 3 = Auto-Host. Namen druckbares ASCII (Anzeige), nie ins Log. */
+typedef struct { int me_new, me_old, reason; uint32_t host_cid, old_cid; char host[24], old[24]; } loctun_hostmig_ev;
+int loctun_hostmig_poll(loctun *t, loctun_hostmig_ev *ev);
+/* W520: Lobby-Eigenschaften fuer das Infopanel: *mig/*autoh = Lobby darf migrieren / Auto-Host, *sugg_me = 1 der
+ * Dienst schlaegt diesen Client als Host vor, *am_host = dieser Client ist Host. Rueckgabe 1 = in einer Lobby. */
+int loctun_hostmig_info(loctun *t, int *mig, int *autoh, int *sugg_me, int *am_host);
+/* W520: Pilotname des vom Dienst vorgeschlagenen Hosts (Anzeige, druckbares ASCII), "" = keiner/man selbst. */
+void loctun_hostmig_sugg_name(loctun *t, char *out, int cap);
+/* W520: Mitglieder der steelnet-Lobby (aus lobby_state), 0 = keine Lobby. */
+int loctun_hostmig_members(loctun *t);
+/* W520: Das Spiel hat den Host verloren (Lobby-Zustand 0x31) -> host_gone an den Dienst (zaehlt nur, solange auch
+ * der Dienst den Host verloren hat). W520 Auto-Host: lobby_handover anfragen (nur Host einer Auto-Host-Lobby). */
+void loctun_host_gone(loctun *t);
+void loctun_handover(loctun *t);
 /* W328: Konto-Anmeldung am Treffpunkt: 0 keine (Gast), 1 laeuft, 2 angenommen, -1 abgelehnt. */
 int loctun_auth_state(loctun *t);
 /* W479 LIVE-LOGON: Konto-ID der Anmeldung (0 = Gast bzw. kein Treffpunkt); nur die Zahl, nie Schluessel. */
 uint32_t loctun_account(loctun *t);
 /* W482 LIVE-MATCH: Anfrage an steelnet einreihen (json = vollstaendiges Objekt ohne ref; with_vip: eigene vip wird
  * eingesetzt). Gesendet im Transport-Thread. Rueckgabe Anfrage-Nr. > 0, 0 = kein Live-Modus/keine Verbindung/voll. */
+/* W514: 1, solange das Spiel im Xbox-Live-Fluss ist (t->live, W501); 0 ohne Transport. */
+int loctun_is_live(const loctun *t);
 int loctun_live_send(loctun *t, const char *json, int with_vip);
 /* W501 ONLINE-BOTH: Spiel betritt (on = 1) bzw. verlaesst (0) den Xbox-Live-Fluss (XOnline-HLE: Kontenauswahl/Logon
  * bzw. Logon-Task geschlossen). Der Transport startet immer im System-Link-Zustand; der Netz-Thread schaltet um
@@ -249,6 +293,9 @@ typedef struct loctun_game_info {
     unsigned rb_total, desyncs;
     int npeers;
     unsigned gpu_vendor;  /* PCI-Hersteller-ID der benutzten GPU (0 = unbekannt) */
+    /* W519 STALLHOLD (Zaehler seit Prozessstart, der Bericht bildet die Differenz je Match): Luecken im Spielstrom nach
+     * Laenge (< 5, < 15, < 30, < 60, >= 60 s), gehaltene Stillstaende, davon fortgesetzt bzw. bis zur Obergrenze */
+    unsigned st_gh[5], st_holds, st_ok, st_cap;
 } loctun_game_info;
 typedef int (*loctun_game_fn)(loctun_game_info *o);
 void loctun_set_game_fn(loctun *t, loctun_game_fn fn);

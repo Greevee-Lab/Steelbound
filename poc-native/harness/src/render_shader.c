@@ -4,6 +4,7 @@
  * d3d11_render.c verschoben. */
 #include "render_int.h"
 #include "sb_profile.h" /* W229 SBA() */
+#include "render_vsh.h" /* W518 ISSUE111: rqv_ui2d */
 
 /* ---------- M2b-Geometriepfad (IM -> D3D11) ---------- */
 /* Fixed-Function-Ersatz: Spiel nutzt Vertex-Shader-PROGRAMME (kein FVF).
@@ -483,6 +484,13 @@ static int vsh_classify(unsigned handle, vsh_prog_t *p)
         if (!vsh_in_v0(&dec[s], 0)) { ok = 0; break; }
     }
     if (ok && npos == 1) { p->kind = 1; return 1; }
+    /* W518 ISSUE111: Bildschirm-Programm mit Skala/Versatz (LoC-UI: MOV R0, c[48] : MOV oD0, v1 / MOV oT0, v2 /
+     * MAD oPos, v0, c[47], R0). Keine Matrix, also nie 3D; kind bleibt 0, ui2d wertet nur das LoC-Profil aus
+     * (render_im.c loc_ui2d). Pruefung rein in render_vsh.c (render_selftest). */
+    {
+        rqv_prog_t ui_p; /* ~3 KB Stapel, nur bei der Erstklassifizierung je Handle */
+        if (rqv_decode(slots, nslots, &ui_p) && rqv_ui2d(&ui_p)) { p->ui2d = 1; }
+    }
     /* P2: oPos.x/y/z/w aus DP4(v0, cE..) (+Tail MUL/MAD als letzte oPos). */
     {
         int opos[136], npos2 = 0, t1, t2, ex = -1, ey = -1, ew = -1, zx = -1;

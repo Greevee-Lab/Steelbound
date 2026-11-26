@@ -2503,6 +2503,9 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
         if (wp == 7) {
             client_exit_poll(); /* W231 */
         }
+        if (wp == NRQ_CT_TIMER) {
+            nrq_ct_tick(); /* W522: Ende des LoC-Spiels einordnen */
+        }
         if (wp == UPD_TIMER) {
             upd_timeout(); /* W250 */
         }

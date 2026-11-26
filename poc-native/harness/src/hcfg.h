@@ -120,6 +120,20 @@ typedef struct {
     int loc_chat_mission_team;  /* W474: Team-Chat waehrend des Matchs (Standard 1; ohne Team-Reiter wirkungslos) */
     int loc_lobby_join_delay; /* W446 TEST: Lobby erst N ms nach dem welcome betreten/anlegen (0 = sofort) */
     int loc_lobby_resume;     /* W500: Abriss der Treffpunkt-Verbindung -> Sitzung fortsetzen (1 = Standard, 0 = alter Neuaufbau) */
+    int loc_ipv6;             /* W521: eigene globale IPv6-Adresse als Durchstich-Kandidat, IPv6 zuerst (1 = Standard, 0 = nur IPv4) */
+    int loc_punch_legacy;     /* W521 TEST/Gegenprobe: 1 = Durchstich wie vor W521 */
+    int loc_host_migration;   /* W520 HOSTMIG (Experimental, Standard 1): eigene Lobbys erlauben den Host-Wechsel; Neuaufbau der
+                               * Spiel-Session nach host_changed. 0 = Lobby endet mit dem Host wie bisher */
+    int loc_auto_host;        /* W520: eigene Lobbys mit Auto-Host (Uebergabe an den stabilsten Spieler vor dem Match; Standard 0;
+                               * W523: wirkt nur mit loc_hostmig_rebuild=1) */
+    int loc_hostmig_rebuild;  /* W523 HOSTMIG-SCOPE TEST/0.7.0 (Standard 0): Neuaufbau der Spiel-Session ueber die Menues nach
+                               * einem Host-Wechsel in der Lobby bzw. nach dem Match und Auto-Host. 0 = 0.6.3: nur Hinweis, das
+                               * Match laeuft weiter (Host-Wechsel im Match), Lobby bleibt bei steelnet, Neuaufbau von Hand */
+    int loc_hostmig_test;     /* W520 TEST: Bilder aus den Ablaeufen (Taste *) */
+    char loc_hostmig_prog_host[400]; /* W520 TEST: anderer Ablauf fuer den neuen Host ("" = eingebaut) */
+    char loc_hostmig_prog_join[400]; /* W520 TEST: anderer Ablauf fuer die Mitspieler */
+    char loc_hostmig_cont_host[700]; /* W520 TEST: Testfolge (loc_steps) nach gelungenem Neuaufbau als neuer Host */
+    char loc_hostmig_cont_join[700]; /* W520 TEST: Testfolge nach gelungenem Neuaufbau als Mitspieler */
     int loc_lobby_cut;        /* W500 TEST: Steuerverbindung N s nach jedem (Wieder-)Aufbau abreissen (0 = aus) */
     int loc_lobby_cut_mode;   /* W500 TEST: 0 = harter Reset, 1 = still liegenlassen (Dienst merkt nichts) */
     int loc_live;             /* W479 LIVE-LOGON: 1 = LoC im Xbox-Live-Modus (XOnline-HLE, steelnet als Live-Dienst, braucht Treffpunkt + Konto; docs/loc/LOC_LIVE.md), 0 = System Link wie bisher (Standard) */
@@ -128,6 +142,7 @@ typedef struct {
     char loc_camp_host[128];  /* W491: Zugang (Hostname), "" = Treffpunkt-Host (relay.steelbound.dev) */
     int loc_camp_port;        /* W491: Zugangsport, 0 = nach Kampagne */
     char loc_camp_spki[65];   /* W491: zusaetzlicher Pin (hex64) NUR fuer einen lokalen Test-Zugang (Loopback) */
+    int loc_camp_faction_swap;/* W515 FACTIONSWAP (#110): 1 = Enlistment Office im Kampagnen-HQ in jedem Zug offen (Seitenwechsel jederzeit; Original nur Zug 3-6, FUN_000EF6B0 @0xEF73B), 0 = Original; nur loc_live=1 + loc_camp=1 */
     int loc_camp_min_side;    /* W492: Mindestzahl Piloten je Seite (1..3); 0 = nicht gesetzt -> Beta-Standard LOC_CAMP_BETA_MIN_SIDE (1); -1 = Original (Schluessel 0: Kampagne 3, sonst 1; FUN_000FC4B0); nur loc_live=1 */
     int loc_lan;              /* W454 LOC-LAN-MODE: 1 = LAN-Modus ohne steelnet (Entdeckung im lokalen Netz, mit loc_transport=udp) */
     char loc_lan_room[17];    /* W454: Raumname (leer = "LAN") */
@@ -953,6 +968,12 @@ typedef struct {
     int loc_bloom_fast;         /* FIX: Nachlauf des spieleigenen Bloom k-fach schneller bei gleicher Helligkeit (render_bloomlag.h), nur mit Enhanced-Bloom (bloom_strength != 100 oder bloom_threshold > 0); 0/1 = aus (Original-Zeitverhalten), Standard 4 */
     /* W512 ISSUE-109, nur LoC */
     int loc_shadow_border;      /* FIX: Schattenvergleich ausserhalb der Schattenkarte mit der Randfarbe des Spiels (ADDRESS BORDER, LoC: 0xFFFFFFFF = groesste Tiefe = beleuchtet) statt Randtexel; 0 = alt (Randtexel), Standard 1 */
+    /* W518 ISSUE-111, nur LoC */
+    int loc_ui2d;               /* FIX: Draws mit LoC-UI-Programm (einziger oPos-Schrieb MAD v0*cS+cO, keine Matrix) immer 2D, auch ausserhalb -64..704 x -64..544 (gezoomte Einsatzkarte im Menue); 0 = alt (Bereichs-Heuristik), Standard 1 */
+    int loc_menu_bg;            /* W518b MENUBG: 1 = bildfuellende ui2d-Hintergrundebene (x auf beiden Seiten ueber -64..704, Verbindungs-/Pilotenmenue) sichtbar (Standard); 0 = alte Bereichsgrenze (unsichtbar wie vor W518); die gezoomte Karte bleibt immer 2D */
+
+    /* W519 STALLHOLD (#122), nur LoC online (Treffpunkt + eigener Transport) */
+    int loc_stall_hold;         /* FIX: Stillstand im Spielstrom eines Mitspielers bis zu N s halten, solange der Transport nur einen Stau sieht (kein Abgang gemeldet), statt ihn nach der Original-Grenze (~10 s) zu entfernen; 0 = aus (Original), Standard 60, Bereich 15..120 */
 } hcfg_t;
 
 extern hcfg_t g_cfg;

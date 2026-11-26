@@ -283,7 +283,13 @@ void sb_clip_frame(ID3D11RenderTargetView *rtv)
         c.sw=td.Width; c.sh=td.Height; c.fmt=td.Format;
         for(i=0;i<c.w;++i) c.xmap[i]=(i*c.sw/c.w)*4;
         td.Usage=D3D11_USAGE_STAGING; td.BindFlags=0; td.CPUAccessFlags=D3D11_CPU_ACCESS_READ; td.MiscFlags=0;
-        for(i=0;i<CS;++i) if(FAILED(ID3D11Device_CreateTexture2D(g_dev,&td,NULL,&c.st[i].tex))) goto failed;
+        for(i=0;i<CS;++i) {
+            HRESULT hr=ID3D11Device_CreateTexture2D(g_dev,&td,NULL,&c.st[i].tex);
+            if(FAILED(hr)) { /* W516 ISSUE-114: Grund nennen (#114: erster Aufruf nach dem Geraeteverlust) */
+                HLOG_W("CLIP: Staging %ux%u gescheitert (hr=0x%lX, Geraet 0x%lX)",td.Width,td.Height,(long)hr,sb_render_device_reason());
+                goto failed;
+            }
+        }
     }
     if(td.Width!=c.sw || td.Height!=c.sh || td.Format!=c.fmt) goto failed; /* resize: ask for a fresh recording, never stretch */
     /* Drain oldest first: reusing a low ring index must not reorder timestamps. */

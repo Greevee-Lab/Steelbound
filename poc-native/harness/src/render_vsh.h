@@ -40,6 +40,12 @@ typedef struct {
 
 /* Slots: n * 4 DWORDs. Rueckgabe 1 = ok. */
 int rqv_decode(const unsigned *slots, unsigned n, rqv_prog_t *p);
+/* W518 ISSUE111: 1 = Bildschirm-Programm mit Skala/Versatz: einziger oPos-Schrieb 'MAD oPos, v0, cS, Rt' und Rt genau
+ * einmal davor per 'MOV Rt, cO' (keine Matrix, also nie 3D; LoC-UI c[47]/c[48]). */
+int rqv_ui2d(const rqv_prog_t *p);
+/* W518b MENUBG: 1 = x-Ausdehnung eines ui2d-Draws ragt auf BEIDEN Seiten ueber -64..704 hinaus (bildfuellende Ebene);
+ * die gezoomte Karte ragt nur in y hinaus und zaehlt nicht. */
+int rqv_ui2d_fullbleed_x(float minx, float maxx);
 /* Ein Vertex: vin[16][4] Eingaenge, c[192][4] Konstanten (ORB=0-Schriebe
  * gehen in c - Aufrufer gibt eine Kopie). */
 void rqv_run(const rqv_prog_t *p, const float (*vin)[4], float (*c)[4], rqv_out_t *out);

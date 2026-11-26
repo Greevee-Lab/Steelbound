@@ -35,6 +35,7 @@ static void tl_rx_udp(loctun *t, double now)
         }
         if (r < 5 || t->netcut) continue; /* W366 TEST: Netz weg - Empfang verwerfen */
         if (t->nrsim && tl_rsim_cut(t, tl_rsim_find(t, &from))) continue; /* W395 TEST: Weg ausgefallen */
+        if (t->c.nat_filter && !tl_natf_pass(t, &from, now)) continue;      /* W521 TEST: NAT-Nachbildung */
         if (t->lan && !locnet_ip_allowed(from.sin_addr.s_addr)) { /* W454: LAN - nur private Absender (SECURITY §36) */
             InterlockedIncrement(&t->st.bad);
             continue;
@@ -376,20 +377,7 @@ static void tl_link_timers(loctun *t, tlink *L, double now)
     int k;
     if (L->drop_pending) tl_link_drop(t, L, "Paketgrenze 2^32 erreicht");
     if (L->blocked || !L->e2e.valid) return; /* W334: ohne Schluessel kein Paket */
-    if (L->punching) {
-        if (now - L->punch_start >= 3000.0) {
-            L->punching = 0;
-            L->direct_failed = 1;
-            L->rep_dirty = 1;
-            tl_logf(t, "LOCTUN: direkter Weg zu c%u gescheitert (3 s) - Relay noetig", L->cid);
-        } else if (now - L->punch_last >= 100.0) {
-            uint8_t p[HDR + 8]; /* W334: PROBE als SBT2 (jede Sendung neuer ctr, nicht faelschbar) */
-            tl_hdr(p, T_PROBE);
-            memcpy(p + HDR, &L->probe_id, 8);
-            for (k = 0; k < L->ncand && L->e2e.valid; k++) tl_send_to(t, L, &L->cand[k], p, sizeof p);
-            L->punch_last = now;
-        }
-    }
+    tl_punch_tick(t, L, now); /* W521: Zeitplan, IPv6 zuerst, Hintergrund-Wiederholung (loc_tun_link.c) */
     /* Ping des direkten Weges (5 Proben, 100 ms Abstand; ohne Antwort nach 1 s erneut) */
     if (L->direct_ok && L->direct_rtt <= 0) {
         if (L->dpings < 5 && now >= L->dping_next) {
@@ -504,12 +492,25 @@ static void tl_link_timers(loctun *t, tlink *L, double now)
                 nri = L->want_ri;
             }
         } else if (L->want == 1 || L->cid == 0 || !t->c.lobby[0]) {
-            if (L->direct_ok) np = 1;
+            if (L->direct_ok) {
+                np = 1;
+            } else if (L->want == 1 && L->direct_failed && !t->c.punch_legacy) {
+                /* W521 (#119): der Treffpunkt sagt "direkt" (der Partner erreicht uns), unser eigener Durchstich ist aber
+                 * gescheitert - statt ohne Weg zu bleiben (Verbindung kam nie zustande) ein gebundenes Relay nehmen */
+                int r2;
+                for (r2 = 0; r2 < t->nrelays && np == 0; r2++) {
+                    if (L->rb[r2].ok) {
+                        np = 2;
+                        nri = r2;
+                    }
+                }
+            }
         } else if (L->direct_ok && L->path == 0) {
             np = 1; /* vorlaeufig direkt, bis der Treffpunkt entscheidet */
         }
         if (np != L->path || (np == 2 && nri != L->relay_idx)) {
             L->rep_link = 1;
+            if (L->path != 0 && np != L->path) InterlockedIncrement(&t->path_sw); /* W521: Wechsel direkt <-> Relay */
             if (L->path != 0 && !L->rt_on) {
                 tl_logf(t, "LOCROUTE: c%u Weg %s -> %s", L->cid, L->path == 1 ? "direkt" : "Relay",
                         np == 1 ? "direkt" : "Relay");
@@ -524,9 +525,14 @@ static void tl_link_timers(loctun *t, tlink *L, double now)
     }
     /* Weg dem Treffpunkt melden (Statistik), sobald die Verbindung steht und die RTT gemessen ist */
     if (L->rep_link && L->up && L->cid && L->rtt_n >= 4 && t->lb_s != INVALID_SOCKET && t->my_cid) {
-        char b[128];
-        _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"link_report\",\"peer\":%u,\"kind\":\"%s\",\"rtt_ms\":%.1f}",
-                    L->cid, L->path == 2 ? "relay" : "direct", L->srtt);
+        char b[192];
+        /* W521: Zusatzfelder (aeltere Dienste ignorieren sie) - direkt: Adressfamilie, "late" = erst nach Relay;
+         * Relay nach gescheitertem Durchstich: Art (oneway = Proben des Partners kamen an, silent = nichts) */
+        _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"link_report\",\"peer\":%u,\"kind\":\"%s\",\"rtt_ms\":%.1f%s%s%s}",
+                    L->cid, L->path == 2 ? "relay" : "direct", L->srtt,
+                    L->path == 1 ? (tl_is_v6(&L->direct) ? ",\"fam\":\"v6\"" : ",\"fam\":\"v4\"") : "",
+                    L->path == 1 && L->late_direct ? ",\"late\":1" : "",
+                    L->path == 2 && L->punch_failed_once && !L->direct_ok ? (L->seen_any ? ",\"pf\":\"oneway\"" : ",\"pf\":\"silent\"") : "");
         lb_send(t, b);
         L->rep_link = 0;
     }
@@ -688,6 +694,7 @@ static DWORD WINAPI tl_thread(LPVOID arg)
             }
         }
         tl_rx_udp(t, now);
+        tl_rx_udp6(t, now); /* W521 */
         lb_poll(t, now);
         nr_tick(t, now); /* W496 NET-TELEMETRY (nur mit Zustimmung) */
         lan_poll(t, now); /* W454 */
@@ -744,6 +751,7 @@ void loctun_cfg_default(loctun_cfg *c)
     c->route_auto = 1; /* W395 */
     c->open_hold_ms = 3000; /* W409 */
     c->resume = 1;          /* W500 */
+    c->ipv6 = 1;            /* W521 */
 }
 
 int loctun_available(void) { return 1; }
@@ -817,6 +825,7 @@ loctun *loctun_start(const loctun_cfg *c, locnet *n, locnetsim *sim, loctun_log_
     t->lb_s = INVALID_SOCKET;
     t->rs_old_s = INVALID_SOCKET; /* W500 */
     t->lan_s = INVALID_SOCKET; /* W454 */
+    t->us6 = INVALID_SOCKET;   /* W521 */
     QueryPerformanceFrequency(&f);
     t->qpf_ms = 1000.0 / (double)f.QuadPart;
     t->t0 = 0;
@@ -1019,10 +1028,12 @@ void loctun_stop(loctun *t)
         for (s = 0; s < TUN_RQ; s++) free(L->rq[s]);
     }
     for (i = 0; i < TUN_MAX_LINKS; i++) sbe2e_link_free(&t->links[i].e2e); /* W334 */
+    lb_bye(t); /* W517: geordnetes Ende -> "bye" an den Treffpunkt (Thread steht schon) */
     if (t->tls) sbtls_free(t->tls);
     if (t->lb_s != INVALID_SOCKET) closesocket(t->lb_s);
     lb_rs_reset(t); /* W500: Token, Nachsende-Schlange, liegengelassene TEST-Verbindung */
     lan_stop(t); /* W454 */
+    tl_v6_close(t); /* W521 */
     sbe2e_kp_free(&t->kp);
     SecureZeroMemory(t->udp_key, sizeof t->udp_key);
     SecureZeroMemory(t->gkey, sizeof t->gkey); /* W328 */
@@ -1034,7 +1045,7 @@ void loctun_stop(loctun *t)
     free(t);
 }
 
-void loctun_bye_all(loctun *t)
+static void tl_bye(loctun *t, int crash)
 {
     int i, k, n = 0;
     DWORD t0 = GetTickCount();
@@ -1054,10 +1065,22 @@ void loctun_bye_all(loctun *t)
         n++;
     }
     if (n) tl_logf(t, "LOCTUN: Client endet - BYE an %d Mitspieler", n);
-    nr_exit(t); /* W496: offener Bericht in die Warteschlange, Laufmarke weg */
+    if (!crash) nr_exit(t); /* W496: offener Bericht in die Warteschlange, Laufmarke weg (W519: Absturz behaelt sie) */
+    lb_bye(t); /* W517: auch beim Treffpunkt abmelden (keine gehaltene Sitzung, kein "Host verloren") */
     LeaveCriticalSection(&t->cs);
     if (n && t->sim) Sleep(150); /* Test-Netzmodell (loc_netsim) stellt verzoegert zu - vor dem Prozessende abwarten */
 }
+
+int loctun_is_live(const loctun *t)
+{
+    return t && *(volatile const int *)&t->live ? 1 : 0;
+}
+
+void loctun_bye_all(loctun *t) { tl_bye(t, 0); }
+
+/* W519 STALLHOLD: Absturz im Netzspiel (LOCSEC "Absturz = Ende") - BYE an die Mitspieler und "bye" an den Treffpunkt,
+ * damit sie den Abgang sofort sehen statt einen Stillstand bis zur Obergrenze zu halten; Laufmarke bleibt ("crash"). */
+void loctun_bye_crash(loctun *t) { tl_bye(t, 1); }
 
 int loctun_dgram(loctun *t, uint32_t dst_vip, uint16_t src_gp, uint16_t dst_gp, const char *buf, int len)
 {
@@ -1074,8 +1097,12 @@ int loctun_dgram(loctun *t, uint32_t dst_vip, uint16_t src_gp, uint16_t dst_gp, 
             t->pub_t1_at = tl_now(t);
             t->pub_t1_new = 1;
             SetEvent(t->ev_app);
-        } else if (dst_vip != INADDR_BROADCAST && dst_gp == 1202 && typ == 3 && len == 0x2C4 && !tl_link_by_vip(t, dst_vip)) {
+        } else if (dst_vip != INADDR_BROADCAST && dst_gp == 1202 && (typ == 3 || typ == 4) && len == 0x2C4 &&
+                   !tl_link_by_vip(t, dst_vip)) {
+            /* W514 #112: Typ 4 = Beitrittsanfrage Chatraum (FUN_00054030; Typ 3 = Match, FUN_00053F60). Chatraeume gibt
+             * es nur ueber Xbox Live -> Typ 4 nur an Live-Geister (System Link unveraendert). */
             tghost *g = pub_ghost_by_vip(t, dst_vip);
+            if (g && typ == 4 && !g->live) g = NULL;
             if (g) {
                 if (t->pub_join < 0 || t->pub_join == (int)(g - t->gh)) {
                     t->pub_join = (int)(g - t->gh);
@@ -1256,6 +1283,25 @@ int loctun_is_peer(loctun *t, uint32_t vip)
     return r;
 }
 
+int loctun_peer_stall(loctun *t, uint32_t vip, int *rx_age_ms) /* W519 */
+{
+    tlink *L;
+    int r = 0;
+    double age = 0.0;
+    if (rx_age_ms) *rx_age_ms = -1;
+    if (!t) return 0;
+    EnterCriticalSection(&t->cs);
+    L = tl_link_by_vip(t, vip);
+    if (L && L->used && L->up && !L->blocked && !L->drop_pending) {
+        age = tl_now(t) - L->last_rx;
+        if (age < 0.0) age = 0.0;
+        r = L->gone_hint ? 3 : age < 3000.0 ? 1 : 2;
+    }
+    LeaveCriticalSection(&t->cs);
+    if (rx_age_ms && r) *rx_age_ms = age > 3600000.0 ? 3600000 : (int)age;
+    return r;
+}
+
 int loctun_links_up(loctun *t)
 {
     int i, n = 0;
@@ -1284,6 +1330,37 @@ int loctun_link_info(loctun *t, int idx, int *path, double *srtt_ms, int *red, u
         r = 1;
         break;
     }
+    LeaveCriticalSection(&t->cs);
+    return r;
+}
+
+int loctun_link_direct(loctun *t, int idx, int *direct_ok, int *v6, int *late, int *failed, int *seen)
+{
+    int i, k = 0, r = 0;
+    if (!t) return 0;
+    EnterCriticalSection(&t->cs);
+    for (i = 0; i < TUN_MAX_LINKS; i++) {
+        tlink *L = &t->links[i];
+        if (!L->used) continue;
+        if (k++ != idx) continue;
+        if (direct_ok) *direct_ok = L->direct_ok;
+        if (v6) *v6 = L->direct_ok && tl_is_v6(&L->direct);
+        if (late) *late = L->late_direct;
+        if (failed) *failed = L->punch_failed_once;
+        if (seen) *seen = L->seen_any;
+        r = 1;
+        break;
+    }
+    LeaveCriticalSection(&t->cs);
+    return r;
+}
+
+int loctun_has_v6(loctun *t)
+{
+    int r;
+    if (!t) return 0;
+    EnterCriticalSection(&t->cs);
+    r = t->have6;
     LeaveCriticalSection(&t->cs);
     return r;
 }
@@ -1361,6 +1438,11 @@ int loctun_lobby_state(loctun *t)
     if (!t || !t->c.lobby[0]) return 0;
     if (t->rs_susp) return t->lb_joined ? 3 : 2; /* W500: Fortsetzung laeuft - fuer das Spiel unveraendert */
     return t->lb_state == LB_OFF || t->lb_state == LB_CONNECTING ? 1 : (t->lb_joined ? 3 : 2);
+}
+
+int loctun_relink_state(loctun *t)
+{
+    return t ? (int)InterlockedCompareExchange(&t->rs_hint_pub, 0, 0) : 0; /* W517 */
 }
 
 void loctun_log_stats(loctun *t, int waited_s)

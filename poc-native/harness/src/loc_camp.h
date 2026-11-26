@@ -81,4 +81,27 @@ int loccamp_reinf_blocked(uint32_t mask);
  * -1 = das Original kaeme nicht zurueck (Maske 0; hier nach 64 Schritten abgebrochen). step +1/-1. */
 int loccamp_reinf_next(uint16_t cur, uint32_t mask, int step, uint16_t *out);
 
+/* W515 FACTIONSWAP (#110): HQ-Menue der Kampagne (FUN_000EF6B0, Zustand 0). Fuer einen Piloten mit Seite (Pilot+0x3B
+ * != 4, 4 = neutral) sperrt das Spiel ENLISTMENT OFFICE (Menue-ID 0x1E0), wenn der Zug ausserhalb 3..6 liegt:
+ *   0xEF737 cmp ax,3 / jb 0xEF743 / cmp ax,6 / jbe 0xEF754 / 0xEF743 push 1,1,0x1E0 / call FUN_000E1350
+ * Patch (loc_camp_faction_swap=1): jb -> jmp 0xEF754 (dasselbe Ziel wie "Zug 3..6"). */
+#define LOCCAMP_SWAP_VA 0xEF737u
+extern const uint8_t loccamp_swap_orig[12];
+extern const uint8_t loccamp_swap_new[12];
+/* Nachbildung: 1 = Enlistment Office im HQ grau. campaign = [[0x278850]+0x14]==0, faction = Pilot+0x3B (0..3, 4
+ * neutral), turn = aktueller Zug (FUN_000DE460), swap = Patch aktiv. Ohne Kampagne ist der Punkt immer grau
+ * (FUN_000EF4A0), neutral immer offen (nur dort kann man sich einschreiben). */
+int loccamp_enlist_locked(int campaign, int faction, int turn, int swap);
+/* Nach einem erfolgreichen Wechsel (SetUserFaction-Status 0) verlaesst das Spiel das Enlistment Office mit
+ * FUN_00112730: Flag [0x6DF450]+0x14 gesetzt -> Bildschirm 8 (MAIN MENU), sonst 0xC (HQ). Im Pilotendatensatz steht
+ * dann noch die Garage der alten Seite (Pilot+0x3C, 60 x 8 B; MISSION SELECT bleibt so faelschlich frei). Patch:
+ * Bildschirm 3 (CAMPAIGN-Menue, FUN_00110740) laedt beim Betreten Pilot und Garage neu vom Server (0x1040 + 0x1021,
+ * FUN_0010FEA0 -> FUN_000E5840) und zeigt LISTED PILOT; A fuehrt wie nach der Anmeldung ins MAIN MENU.
+ *   0x112738 test cl,cl / je 0x112747 / push 8 -> push 3 */
+#define LOCCAMP_SWAP_RELOAD_VA 0x112738u
+extern const uint8_t loccamp_swap_reload_orig[6];
+extern const uint8_t loccamp_swap_reload_new[6];
+#define LOCCAMP_SCREEN_CAMPAIGN 3 /* CAMPAIGN-Menue (Pilot laden, LISTED PILOT) */
+#define LOCCAMP_SCREEN_MAIN 8     /* MAIN MENU */
+
 #endif

@@ -9,6 +9,7 @@
 int loc_net_install(void);
 void loc_net_tick(int waited_s);
 void loc_net_bye(void); /* W366: Client endet - Mitspielern BYE senden (eigener Transport) */
+void loc_net_bye_crash(void); /* W519 STALLHOLD: Absturz im Netzspiel - BYE/bye senden (ohne Netzbericht-Abschluss) */
 /* W297: Netz-Zustand fuer Testfolgen: 0 = Netz aus, 1 = Typ nicht gesehen, 2 = Typ gesehen (typ >= 256: nur Zaehler);
  * typ 512: 3 = Lockstep aktiv (eigener 0x34-Rahmen < 1 s alt). */
 int loc_net_test_state(long *accepts, long *connects, int out, unsigned typ);
@@ -57,3 +58,13 @@ int loc_net_lobby_state_ex(int *out);
 /* W350 LOC-REJOIN (DIAG, nur loc_net_diag=1): Belegung der Verbindungstabelle des Spiels je Bild lesen und bei
  * Aenderung eine Zeile LOCROSTER loggen (Plaetze, Seiten-Zaehler; keine Namen, keine Inhalte). */
 void loc_net_lobby_frame(unsigned f);
+/* W520 HOSTMIG: Treffpunkt aktiv (online), Host-Wechsel-Ereignis (einmal), Lobby-Eigenschaften, host_gone,
+ * Auto-Host-Anfrage. Ohne Transport: 0 bzw. nichts. */
+typedef struct { int me_new, me_old, reason; unsigned host_cid, old_cid; char host[24], old[24]; } loc_hostmig_ev;
+int loc_net_online(void);
+int loc_net_hostmig_poll(loc_hostmig_ev *ev);
+int loc_net_hostmig_info(int *mig, int *autoh, int *sugg_me, int *am_host);
+void loc_net_host_gone(void);
+void loc_net_hostmig_sugg_name(char *out, int cap);
+int loc_net_hostmig_members(void);
+void loc_net_handover(void);

@@ -152,6 +152,21 @@ const char *loccamp_state_name(int state)
     }
 }
 
+/* W515 FACTIONSWAP (#110): Enlistment Office in jedem Zug (siehe loc_camp.h, LOC_CAMPAIGN.md "Seitenwechsel"). */
+const uint8_t loccamp_swap_orig[12] = { 0x66, 0x3D, 0x03, 0x00, 0x72, 0x06, 0x66, 0x3D, 0x06, 0x00, 0x76, 0x11 };
+const uint8_t loccamp_swap_new[12] = { 0x66, 0x3D, 0x03, 0x00, 0xEB, 0x17, 0x66, 0x3D, 0x06, 0x00, 0x76, 0x11 };
+
+const uint8_t loccamp_swap_reload_orig[6] = { 0x84, 0xC9, 0x74, 0x0B, 0x6A, LOCCAMP_SCREEN_MAIN };
+const uint8_t loccamp_swap_reload_new[6] = { 0x84, 0xC9, 0x74, 0x0B, 0x6A, LOCCAMP_SCREEN_CAMPAIGN };
+
+int loccamp_enlist_locked(int campaign, int faction, int turn, int swap)
+{
+    if (!campaign) return 1; /* FUN_000EF4A0: ohne Kampagne nur MAINTENANCE BN */
+    if (faction == 4) return 0; /* neutral: nur ENLISTMENT OFFICE */
+    if (swap) return 0;
+    return turn < 3 || turn > 6;
+}
+
 /* W492 CAMP-E2E: Reinforcements-Auswahl (siehe loc_camp.h, LOC_CAMPAIGN.md "Reinforcements"). */
 int loccamp_reinf_blocked(uint32_t mask)
 {

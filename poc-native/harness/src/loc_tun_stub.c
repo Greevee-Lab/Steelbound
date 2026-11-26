@@ -22,12 +22,20 @@ loctun *loctun_start(const loctun_cfg *c, struct locnet *n, struct locnetsim *si
 
 void loctun_stop(loctun *t) { (void)t; }
 void loctun_bye_all(loctun *t) { (void)t; }
+void loctun_bye_crash(loctun *t) { (void)t; } /* W519 */
 int loctun_dgram(loctun *t, uint32_t dst_vip, uint16_t src_gp, uint16_t dst_gp, const char *buf, int len)
 {
     (void)t; (void)dst_vip; (void)src_gp; (void)dst_gp; (void)buf; (void)len;
     return -1;
 }
 int loctun_is_peer(loctun *t, uint32_t vip) { (void)t; (void)vip; return 0; }
+int loctun_peer_stall(loctun *t, uint32_t vip, int *rx_age_ms) /* W519 */
+{
+    (void)t;
+    (void)vip;
+    if (rx_age_ms) *rx_age_ms = -1;
+    return 0;
+}
 void loctun_set_app(loctun *t, uint16_t gp, loctun_app_fn fn) { (void)t; (void)gp; (void)fn; } /* W338 */
 int loctun_version_state(loctun *t, char *need, int ncap, char *peer, int pcap) /* W420 */
 {
@@ -68,6 +76,12 @@ int loctun_peer_pilot(loctun *t, uint32_t vip, char *buf, int cap) /* W437 */
 }
 int loctun_links_up(loctun *t) { (void)t; return 0; }
 int loctun_qos_game(int rtt_ms, int online) { (void)online; return rtt_ms; }
+int loctun_link_direct(loctun *t, int i, int *direct_ok, int *v6, int *late, int *failed, int *seen)
+{
+    (void)t; (void)i; (void)direct_ok; (void)v6; (void)late; (void)failed; (void)seen;
+    return 0;
+}
+int loctun_has_v6(loctun *t) { (void)t; return 0; }
 int loctun_link_info(loctun *t, int i, int *path, double *srtt_ms, int *red, uint32_t *vip, char *relay, int rlen)
 {
     (void)t; (void)i; (void)path; (void)srtt_ms; (void)red; (void)vip; (void)relay; (void)rlen;
@@ -82,6 +96,21 @@ const loctun_stats *loctun_get_stats(loctun *t)
 uint16_t loctun_port(loctun *t) { (void)t; return 0; }
 void loctun_log_stats(loctun *t, int waited_s) { (void)t; (void)waited_s; }
 int loctun_lobby_state(loctun *t) { (void)t; return 0; }
+int loctun_relink_state(loctun *t) { (void)t; return 0; }
+int loctun_hostmig_poll(loctun *t, loctun_hostmig_ev *ev) { (void)t; (void)ev; return 0; } /* W520 */
+int loctun_hostmig_info(loctun *t, int *mig, int *autoh, int *sugg_me, int *am_host) /* W520 */
+{
+    (void)t;
+    if (mig) *mig = 0;
+    if (autoh) *autoh = 0;
+    if (sugg_me) *sugg_me = 0;
+    if (am_host) *am_host = 0;
+    return 0;
+}
+void loctun_host_gone(loctun *t) { (void)t; } /* W520 */
+void loctun_hostmig_sugg_name(loctun *t, char *out, int cap) { (void)t; if (out && cap > 0) out[0] = 0; } /* W520 */
+int loctun_hostmig_members(loctun *t) { (void)t; return 0; } /* W520 */
+void loctun_handover(loctun *t) { (void)t; } /* W520 */
 int loctun_play_mode(loctun *t) { (void)t; return 0; } /* W440 */
 int loctun_auth_state(loctun *t) { (void)t; return 0; }
 uint32_t loctun_account(loctun *t) { (void)t; return 0; } /* W479 */

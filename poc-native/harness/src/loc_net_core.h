@@ -129,3 +129,53 @@ void *locnet_qos_alloc(const locnet *n, unsigned cnt, unsigned probes);
 void locnet_qos_free(void *q);
 
 const char *locnet_ip_str(uint32_t ip_net, char buf[16]);
+
+/* W519 STALLHOLD: kurze Stillstaende im Spielverkehr halten statt den Mitspieler zu entfernen.
+ * Das Spiel zaehlt je Platz die Abfragen ohne lesbaren Strom (FUN_00053B20 erhoeht C[i]+8 je Abfrage und setzt ihn auf
+ * 0, sobald select "lesbar" meldet); FUN_00050EF0 entfernt im Spiel einen Mitspieler ab 200 (eigener Platz ab 400),
+ * FUN_000520B0 in der Lobby ab 300 (je ~10 s). Solange der Transport fuer diesen Mitspieler nur einen Stau sieht
+ * (Verbindung besteht, kein Abgang gemeldet), meldet ln_select seinen Strom nach start_ms Stille als lesbar; recv
+ * liefert dann WSAEWOULDBLOCK (wie beim unentschiedenen Rahmenkopf, W334). Ab cap_ms - orig_ms Stille endet das
+ * Halten, die Original-Grenze laeuft dann noch orig_ms -> Entfernen bei ~cap_ms wie bisher geordnet.
+ * Reines Modul (Zeit von aussen, kein Spielspeicher), testbar im loc_net_selftest. */
+enum {
+    LNH_PEER_NONE = 0,   /* keine Verbindung im Transport (beendet, blockiert, unbekannt) -> nie halten */
+    LNH_PEER_ALIVE = 1,  /* Transport hoert den Mitspieler (Spiel des Mitspielers steht) -> halten */
+    LNH_PEER_SILENT = 2, /* Transport hoert nichts, kein Abgang gemeldet (Netz weg/Stau) -> halten */
+    LNH_PEER_GONE = 3    /* Abgang gemeldet (Treffpunkt: Steuerverbindung per Reset/Ende zu) -> nicht halten */
+};
+typedef int (*locnet_hold_peer_fn)(uint32_t vip, void *ctx); /* LNH_PEER_* */
+typedef struct locnet_hold_stats {
+    LONG gaps;      /* Luecken >= start_ms im Spielstrom (je Strom und Luecke einmal) */
+    LONG gap_max_ms;/* laengste Luecke (ms, auch ohne Halten) */
+    LONG holds;     /* davon gehalten */
+    LONG held_ok;   /* gehalten und Daten kamen wieder (Fortsetzung nach Stau) */
+    LONG held_cap;  /* gehalten bis zur Obergrenze (danach Original-Grenze) */
+    LONG held_gone; /* gehalten, dann Abgang gemeldet bzw. Verbindung weg */
+    LONG last_ok_ms;/* Dauer der zuletzt fortgesetzten (gehaltenen) Luecke */
+    LONG gh[5];     /* beendete Luecken >= start_ms nach Laenge: < 5 s, < 15 s, < 30 s, < 60 s, >= 60 s (Daten kamen wieder
+                     * bzw. Strom geschlossen) */
+} locnet_hold_stats;
+typedef struct locnet_hold_info {
+    int active;          /* Stroeme, die gerade gehalten werden */
+    int tracked;         /* Mitspieler-Stroeme insgesamt (bekannt, offen) */
+    uint32_t vip;        /* laengste gehaltene Luecke: Mitspieler */
+    int silent_ms;       /* ... Stille bisher */
+    int left_ms;         /* ... Restzeit bis zur Obergrenze (Entfernen) */
+    int last_ok_vip_set; /* 1 = seit der letzten Abfrage endete ein Halten mit Fortsetzung (vip in ok_vip) */
+    uint32_t ok_vip;
+    int ok_ms;           /* ... Dauer dieser Luecke */
+} locnet_hold_info;
+/* cap_ms <= 0 schaltet aus (Standard aus bis zum Aufruf). start_ms: Stille bis zum Halten; orig_ms: Restlauf der
+ * Original-Grenze nach dem Halten. */
+void locnet_hold_config(int start_ms, int cap_ms, int orig_ms);
+int locnet_hold_enabled(void);
+/* Eine select-Abfrage des Spiels auf genau einen Strom s (vip = Mitspieler, 0 = kein Mitspieler-Strom):
+ * real_rd = select meldete lesbar. Rueckgabe 1 = als lesbar melden (Halten), 0 = Ergebnis unveraendert. */
+int locnet_hold_poll(SOCKET s, uint32_t vip, unsigned long long now_ms, int real_rd, locnet_hold_peer_fn fn, void *ctx);
+/* 1 = s wird gerade gehalten (recv: WSAEWOULDBLOCK statt zu warten, falls keine Daten anstehen). */
+int locnet_hold_active(SOCKET s);
+void locnet_hold_forget(SOCKET s);
+void locnet_hold_get(locnet_hold_info *o, unsigned long long now_ms);
+void locnet_hold_get_stats(locnet_hold_stats *o);
+void locnet_hold_reset(void); /* Selbsttest: Tabelle und Zaehler leeren */

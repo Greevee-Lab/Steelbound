@@ -26,6 +26,8 @@
 #include "loc_rbn.h"       /* W475 LOC-RB-PREAGREE (Vektoren SBRP) */
 #include "sb_sha256.h"
 #include "loc_camp.h" /* W491 CAMP-CLIENT */
+#include "loc_hostmig_prog.h" /* W520 HOSTMIG: Neuaufbau-Ablaeufe */
+#include "sb_crashtel.h" /* W522 CRASH-TELEMETRY */
 
 static int s_ok, s_n;
 #define CHECK(c, msg)                                                   \
@@ -463,6 +465,8 @@ static int s_open_hold = -1;                /* W409: >= 0 = open_hold_ms beider 
 static int s_refuse_b;                      /* W409 TEST: test_refuse_ms nur bei B (connect wie unter Linux sofort abgelehnt) */
 static int s_ver_check;                     /* W420 TEST: Versionspruefung im HELLO ohne Treffpunkt */
 static char s_ver_a[16], s_ver_b[16];       /* W420 TEST: Versionen je Seite ("-" = ohne Feld) */
+/* W521 NETPATHS: NAT-Nachbildung je Seite fuer das Durchstich-Labor (--punch) */
+static int s_natf_a, s_natf_b, s_skew_a, s_skew_b, s_legacy, s_v6loop, s_pdelay_b;
 
 /* Zwei Instanzen mit Transport (feste Mitspieler oder Treffpunkt). simspec: Stufe auf beiden (NULL = aus). */
 static int tun_pair_start(tun_pair *P, int base, const char *simspec, const char *lobby, int nodirect, int red)
@@ -507,6 +511,14 @@ static int tun_pair_start(tun_pair *P, int base, const char *simspec, const char
         strcpy_s(cb.spki, sizeof cb.spki, s_spki);
         strcpy_s(ca.route_sim, sizeof ca.route_sim, s_rsim_a); /* W395 TEST: Wege mit eigener Verzoegerung */
         strcpy_s(cb.route_sim, sizeof cb.route_sim, s_rsim_b);
+        ca.nat_filter = s_natf_a; /* W521 TEST: NAT-Nachbildung */
+        cb.nat_filter = s_natf_b;
+        ca.cand_skew = s_skew_a;
+        cb.cand_skew = s_skew_b;
+        ca.punch_legacy = cb.punch_legacy = s_legacy;
+        ca.v6_loop = cb.v6_loop = s_v6loop == 1; /* 1 = ::1 (TEST), 2 = echte globale Adresse dieses Rechners */
+        ca.ipv6 = cb.ipv6 = s_v6loop != 0;
+        cb.punch_delay_ms = s_pdelay_b;
     } else {
         ca.port = (uint16_t)(base + 900);
         cb.port = (uint16_t)(base + 901);
@@ -2826,6 +2838,86 @@ static int tun_route_test(const char *lobby, int secs, const char *exp_first, co
     return s_ok == s_n ? 0 : 1;
 }
 
+/* ---------- W521 NETPATHS (#119): Durchstich-Labor mit NAT-Nachbildung, je Szenario vorher (punch_legacy) und nachher.
+ * NAT-Typen (je Seite): offen/cone = kein Filter; prc = port-restricted Filter (nur Absender, an die wir gesendet haben);
+ * sym = prc-Filter + der Partner sieht unsere Zuordnung falsch (cand_skew beim Partner, wie symmetrisches NAT mit eigener
+ * Zuordnung je Ziel). "+v6" = beide haben IPv6 (::1, TEST v6_loop) hinter derselben Filterregel (Firewall, kein NAT);
+ * "+Ns" = B beginnt N s spaeter (spaetes peer_info bzw. Hintergrund-Wiederholung). ---------- */
+typedef struct punch_case {
+    const char *name;
+    int fa, fb, ska, skb, v6, delay_b, secs;
+} punch_case;
+
+static int tun_punch_lab(const char *lobby, int reps, const char *only)
+{
+    static const punch_case cs[] = {
+        {"offen-offen", 0, 0, 0, 0, 0, 0, 20},
+        {"prc-prc", 1, 1, 0, 0, 0, 0, 20},
+        {"prc-prc+4s", 1, 1, 0, 0, 0, 4000, 20},
+        {"sym-cone", 1, 0, 0, 1000, 0, 0, 20},
+        {"sym-prc", 1, 1, 0, 1000, 0, 0, 20},
+        {"sym-sym", 1, 1, 1000, 1000, 0, 0, 20},
+        {"sym-prc+v6", 1, 1, 0, 1000, 1, 0, 20},
+        {"sym-sym+v6", 1, 1, 1000, 1000, 1, 0, 20},
+        {"prc-prc+25s", 1, 1, 0, 0, 0, 25000, 50}, /* Relay-Strecke 90 ms (rsim), direkt lokal -> Wechsel lohnt */
+        {"sym-sym+v6g", 1, 1, 1000, 1000, 2, 0, 20}, /* globale IPv6-Adresse des Rechners (nur wenn vorhanden) */
+    };
+    int nc = (int)(sizeof cs / sizeof cs[0]), c, mode, r, both[2] = {0, 0}, tot[2] = {0, 0}, base = 41000;
+    for (c = 0; c < nc; c++) {
+        int ok_m[2] = {0, 0}, n_m[2] = {0, 0};
+        if (only && only[0] && !strstr(cs[c].name, only)) continue;
+        for (mode = 0; mode < 2; mode++) {
+            for (r = 0; r < reps; r++) {
+                tun_pair P;
+                double t0, ta = -1, tb = -1;
+                int da = 0, db = 0, va = 0, vb = 0, la = 0, lb2 = 0, pa = 0, pb = 0, fa = 0, fb = 0, sa = 0, sb = 0, up;
+                s_natf_a = cs[c].fa;
+                s_natf_b = cs[c].fb;
+                s_skew_a = cs[c].ska;
+                s_skew_b = cs[c].skb;
+                s_v6loop = cs[c].v6;
+                s_pdelay_b = cs[c].delay_b;
+                s_legacy = mode == 0;
+                strcpy_s(s_rsim_a, sizeof s_rsim_a, cs[c].delay_b >= 20000 ? "main:eu-useast" : "");
+                strcpy_s(s_rsim_b, sizeof s_rsim_b, s_rsim_a);
+                base += 100;
+                if (base > 46000) base = 41100;
+                up = tun_pair_start(&P, base, NULL, lobby, 0, 0);
+                t0 = now_ms();
+                while (up && now_ms() - t0 < cs[c].secs * 1000.0) {
+                    loctun_link_direct(P.A.tun, 0, &da, &va, &la, &fa, &sa);
+                    loctun_link_direct(P.B.tun, 0, &db, &vb, &lb2, &fb, &sb);
+                    if (da && ta < 0) ta = (now_ms() - t0) / 1000.0;
+                    if (db && tb < 0) tb = (now_ms() - t0) / 1000.0;
+                    loctun_link_info(P.A.tun, 0, &pa, NULL, NULL, NULL, NULL, 0);
+                    loctun_link_info(P.B.tun, 0, &pb, NULL, NULL, NULL, NULL, 0);
+                    if (da && db && pa == 1 && pb == 1 && now_ms() - t0 > 3000.0) break; /* beide direkt und umgeschaltet */
+                    Sleep(100);
+                }
+                n_m[mode]++;
+                ok_m[mode] += up && da && db;
+                printf("W521PUNCH %-12s %-7s lauf=%d paar=%s direkt=%d/%d t=%.1f/%.1f s v6=%d/%d spaet=%d/%d weg=%s/%s "
+                       "gescheitert=%d/%d gesehen=%d/%d v6kand=%d/%d\n",
+                       cs[c].name, mode ? "nachher" : "vorher", r + 1, up ? "ok" : "FEHLT", da, db, ta, tb, va, vb, la, lb2,
+                       pa == 1 ? "direkt" : pa == 2 ? "relay" : "-", pb == 1 ? "direkt" : pb == 2 ? "relay" : "-", fa, fb, sa,
+                       sb, loctun_has_v6(P.A.tun), loctun_has_v6(P.B.tun));
+                fflush(stdout);
+                tun_pair_stop(&P);
+                Sleep(300);
+            }
+        }
+        printf("W521PUNCH-SUMME %-12s vorher %d/%d direkt, nachher %d/%d direkt\n", cs[c].name, ok_m[0], n_m[0], ok_m[1], n_m[1]);
+        both[0] += ok_m[0];
+        both[1] += ok_m[1];
+        tot[0] += n_m[0];
+        tot[1] += n_m[1];
+    }
+    s_natf_a = s_natf_b = s_skew_a = s_skew_b = s_v6loop = s_pdelay_b = s_legacy = 0;
+    s_rsim_a[0] = s_rsim_b[0] = 0;
+    printf("W521PUNCH-GESAMT vorher %d/%d direkt, nachher %d/%d direkt\n", both[0], tot[0], both[1], tot[1]);
+    return 0;
+}
+
 static int tun_lobby_test(const char *lobby, int nodirect, const char *simspec)
 {
     tun_pair P;
@@ -3739,6 +3831,85 @@ static void w482_sess(char *b, size_t cap, const char *sid, int lid, uint32_t vi
     strcat_s(b, cap, e);
 }
 
+/* W514 ISSUE-112: Chatraum der Kampagne (Neutral Zone) - Beitritt mit Typ 4 an einen Live-Geist -> live_join, Handel
+ * (UDP 1202 Typ 0x15-0x19, je 4 B) nur im Live-Betrieb durch die Positivliste. */
+static void w514_chat_tun_tests(void)
+{
+    locnet G;
+    loctun_cfg c;
+    static char out[16384], line[8192];
+    static loclive_sess ss[LOCLIVE_MAX_RESULTS];
+    char err[24];
+    uint8_t tp4[0x2C4], t4[4] = {0}, t5[5] = {0};
+    uint32_t vC = ip4("127.88.32.1");
+    int id, r, n = 0, why = 0;
+    unsigned typ;
+    /* Positivliste: Handelstypen nur live, exakt 4 B; ohne Live unveraendert gesperrt (System Link/LAN bitgleich) */
+    for (typ = 0x15; typ <= 0x19; typ++) {
+        t4[0] = (uint8_t)typ;
+        t5[0] = (uint8_t)typ;
+        CHECK(!lguard_udp_check(1202, t4, 4, &why) && why == LGUARD_V_TYPE && !lguard_udp_check_live(1202, t4, 4, &why, 0),
+              "W514: Handelstyp ohne Live gesperrt (wie bisher)");
+        CHECK(lguard_udp_check_live(1202, t4, 4, &why, 1) && why == LGUARD_OK, "W514: Handelstyp im Live-Betrieb frei (4 B)");
+        CHECK(!lguard_udp_check_live(1202, t5, 5, &why, 1) && !lguard_udp_check_live(1202, t4, 3, &why, 1),
+              "W514: Handelstyp mit falscher Laenge gesperrt");
+        CHECK(!lguard_udp_check_live(1201, t4, 4, &why, 1), "W514: Handelstyp nur an UDP 1202");
+    }
+    t4[0] = 0x14;
+    CHECK(!lguard_udp_check_live(1202, t4, 4, &why, 1), "W514: Nachbartyp 0x14 bleibt gesperrt");
+    t4[0] = 0x1A;
+    CHECK(!lguard_udp_check_live(1202, t4, 4, &why, 1), "W514: Nachbartyp 0x1A bleibt gesperrt");
+    t4[0] = 0x3B;
+    CHECK(!lguard_udp_check_live(1202, t4, 4, &why, 1), "W514: 0x3B bleibt auch live gesperrt");
+
+    SetEnvironmentVariableA("SB_STEELNET_SPKI", NULL);
+    if (!locnet_init(&G, "127.0.0.65", 48903, "none", 10, lg)) {
+        CHECK(0, "W514: Instanz startet");
+        return;
+    }
+    loctun_cfg_default(&c);
+    c.port = 48993;
+    c.proxy_base = 49400;
+    c.allow_public = 1;
+    c.live = 1;
+    strcpy_s(c.lobby, sizeof c.lobby, "127.0.0.1:44997");
+    strcpy_s(c.pilot, sizeof c.pilot, "ChatA");
+    G.tun = loctun_start(&c, &G, NULL, lg);
+    CHECK(G.tun && !loctun_is_live(G.tun) && !loctun_is_live(NULL), "W514: vor dem Live-Fluss nicht live");
+    if (!G.tun) {
+        locnet_shutdown(&G);
+        return;
+    }
+    loctun_live_mode(G.tun, 1);
+    loctun_test_line(G.tun, 7, NULL, out, sizeof out);
+    CHECK(loctun_is_live(G.tun), "W514: im Live-Fluss live");
+    /* Chatraum-Suche (Prozedur 2) mit einem Treffer -> Geist */
+    id = loctun_live_send(G.tun, "{\"t\":\"live_search\",\"lv\":1,\"proc\":2,\"max\":50,\"params\":[]}", 0);
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    _snprintf_s(line, sizeof line, _TRUNCATE, "{\"t\":\"live_results\",\"proc\":2,\"ref\":\"lv%d\",\"sessions\":[", id);
+    w482_sess(line, sizeof line, "80cc000000000001", 61, ntohl(vC), "[[1048591,\"Chat\"],[18,0],[19,10],[26,0]]");
+    strcat_s(line, sizeof line, "]}");
+    loctun_test_line(G.tun, 0, line, out, sizeof out);
+    r = loctun_live_poll(G.tun, id, err, sizeof err, NULL, NULL, ss, LOCLIVE_MAX_RESULTS, &n);
+    CHECK(r == 1 && n == 1 && locnet_addr_known(&G, vC), "W514: Chatraum gefunden, Host als Geist bekannt");
+    /* falsche Laenge: kein Beitritt */
+    memset(tp4, 0, sizeof tp4);
+    tp4[0] = 4;
+    loctun_dgram(G.tun, vC, 1202, 1202, (const char *)tp4, 0x2C0);
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    CHECK(!strstr(out, "live_join"), "W514: Typ 4 mit falscher Laenge ist keine Beitrittsanfrage");
+    /* Beitrittsanfrage Chatraum (Typ 4, 0x2C4 B, FUN_00054030) -> live_join mit der sid des Raums (#112) */
+    CHECK(loctun_dgram(G.tun, vC, 1202, 1202, (const char *)tp4, (int)sizeof tp4) == (int)sizeof tp4,
+          "W514: Chatraum-Beitrittsanfrage an den Geist angenommen (gemerkt)");
+    loctun_test_line(G.tun, 0, NULL, out, sizeof out);
+    CHECK(strstr(out, "{\"t\":\"live_join\",\"lv\":1,\"sid\":\"80cc000000000001\"}") && !strstr(out, "lobby_join"),
+          "W514: Chatraum-Beitritt per live_join (vorher: Client wartete endlos auf den Host)");
+    loctun_live_mode(G.tun, 0);
+    loctun_test_line(G.tun, 7, NULL, out, sizeof out);
+    CHECK(!loctun_is_live(G.tun), "W514: nach Xbox Live wieder nicht live (Handelstypen gesperrt)");
+    locnet_shutdown(&G);
+}
+
 static void w482_live_tun_tests(void)
 {
     locnet G;
@@ -4059,7 +4230,8 @@ static void w500_resume_tests(void)
     /* 1. fortsetzbare Sitzung: Konto, welcome mit Token, Lobby, Mitspieler mit Paarschluessel */
     loctun_test_resume(G.tun, 1, 4242, out, sizeof out);
     loctun_test_resume(G.tun, 3, 0, out, sizeof out);
-    CHECK(strstr(out, "\"account\":4242") && strstr(out, "\"rs\":1}") && !strstr(out, "\"resume\""),
+    CHECK(strstr(out, "\"account\":4242") && (strstr(out, "\"rs\":1}") || strstr(out, "\"rs\":1,\"eps6\":")) &&
+              !strstr(out, "\"resume\""), /* W521: mit globalem IPv6 folgt eps6 */
           "W500: hello einer Konto-Sitzung bittet um Fortsetzbarkeit (rs:1, ohne resume)");
     _snprintf_s(line, sizeof line, _TRUNCATE, "{\"t\":\"welcome\",\"v\":2,\"client_id\":9,\"udp_key\":\"%s\",\"udp_port\":47000,"
                 "\"pilot\":\"Res\",\"guest\":false,\"relays\":[],\"rtok\":\"%s\",\"rttl\":90}", key_a, tok1);
@@ -4191,6 +4363,127 @@ static void w500_resume_tests(void)
     loctun_test_line(G.tun, 9, line, out, sizeof out);
     loctun_test_resume(G.tun, 4, 0, a, sizeof a);
     CHECK(w500_num(a, "count") == 0, "W500: Gast nimmt kein Token an");
+    /* ---- W517 HOSTRESUME: Frist rttl - 10 s, Stille-Erkennung, Hinweis, "bye" ---- */
+    {
+        char wl[1024];
+        _snprintf_s(wl, sizeof wl, _TRUNCATE, "{\"t\":\"welcome\",\"v\":2,\"client_id\":9,\"udp_key\":\"%s\",\"udp_port\":47000,"
+                    "\"pilot\":\"Res\",\"guest\":false,\"relays\":[],\"rtok\":\"%s\",\"rttl\":120}", key_a, tok1);
+        loctun_test_resume(G.tun, 1, 4242, out, sizeof out);
+        loctun_test_line(G.tun, 9, wl, out, sizeof out);
+        loctun_test_line(G.tun, 0, state, out, sizeof out);
+        loctun_test_line(G.tun, 0, peer, out, sizeof out);
+        loctun_test_resume(G.tun, 4, 0, a, sizeof a);
+        tx = w500_num(a, "base") + w500_num(a, "qn");
+        loctun_test_resume(G.tun, 10, 39000, out, sizeof out);
+        loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+        CHECK(w500_num(a, "count") == 1 && w500_num(b, "susp") == 0, "W517: 39 s ohne Zeile vom Treffpunkt -> noch kein Abriss");
+        loctun_test_resume(G.tun, 10, 2000, out, sizeof out);
+        loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+        CHECK(w500_num(b, "susp") == 1 && w500_num(b, "links") == 1 && w500_num(b, "valid") == 1,
+              "W517: 40 s Stille (stiller Abriss) -> Fortsetzung, Mitspieler bleiben");
+        CHECK(w500_num(b, "dl") == 110000, "W517: Frist des Clients rttl - 10 s (110 s bei rttl 120)");
+        CHECK(w500_num(b, "hint") == 0 && w500_num(b, "relink") == 0, "W517: kein Hinweis in den ersten 3 s der Luecke");
+        loctun_test_resume(G.tun, 10, 3500, out, sizeof out);
+        loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+        CHECK(w500_num(b, "hint") == 1 && w500_num(b, "relink") == 1 && w500_num(b, "lobby") == 3,
+              "W517: nach 3 s Hinweis \"Reconnecting\" (Spiel sieht weiter die Lobby)");
+        loctun_test_resume(G.tun, 3, 0, out, sizeof out);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "{\"t\":\"welcome\",\"v\":2,\"client_id\":9,\"udp_key\":\"%s\",\"udp_port\":47000,"
+                    "\"pilot\":\"Res\",\"guest\":false,\"relays\":[],\"resumed\":true,\"rx\":%lld,\"rtok\":\"%s\",\"rttl\":120}",
+                    key_b, tx, tok2);
+        loctun_test_line(G.tun, 0, line, out, sizeof out);
+        loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+        CHECK(w500_num(b, "susp") == 0 && w500_num(b, "relink") == 2 && w500_num(b, "hint") == 0 && w500_num(b, "links") == 1,
+              "W517: Fortsetzung gelingt -> Hinweis \"wieder verbunden\"");
+        loctun_test_resume(G.tun, 9, 0, out, sizeof out);
+        loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+        CHECK(strstr(out, "{\"t\":\"bye\"}") != NULL && w500_num(b, "bye") == 1,
+              "W517: Spiel endet geordnet -> \"bye\" an den Treffpunkt");
+        loctun_test_resume(G.tun, 2, 0, out, sizeof out);
+        loctun_test_resume(G.tun, 10, 4000, out, sizeof out);
+        loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+        CHECK(w500_num(b, "hint") == 0 && w500_num(b, "st") == 0, "W517: nach \"bye\" keine Neuverbindung, kein Hinweis");
+        loctun_test_resume(G.tun, 11, 0, out, sizeof out);
+        /* Frist vorbei, Hinweis lief -> "gescheitert" */
+        loctun_test_resume(G.tun, 5, 0, out, sizeof out);
+        loctun_test_resume(G.tun, 1, 4242, out, sizeof out);
+        loctun_test_line(G.tun, 9, wl, out, sizeof out);
+        loctun_test_line(G.tun, 0, state, out, sizeof out);
+        loctun_test_line(G.tun, 0, peer, out, sizeof out);
+        loctun_test_resume(G.tun, 2, 0, out, sizeof out);
+        loctun_test_resume(G.tun, 10, 3500, out, sizeof out);
+        loctun_test_resume(G.tun, 5, 0, out, sizeof out);
+        loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+        CHECK(w500_num(b, "relink") == 3 && w500_num(b, "susp") == 0 && w500_num(b, "links") == 0,
+              "W517: Frist vorbei -> Hinweis \"gescheitert\", Neuaufbau wie bisher");
+        /* Ablehnung der Fortsetzung: den ungenutzten normalen Einstieg mit "bye" abmelden */
+        loctun_test_resume(G.tun, 1, 4242, out, sizeof out);
+        loctun_test_line(G.tun, 9, wl, out, sizeof out);
+        loctun_test_line(G.tun, 0, state, out, sizeof out);
+        loctun_test_line(G.tun, 0, peer, out, sizeof out);
+        loctun_test_resume(G.tun, 2, 0, out, sizeof out);
+        _snprintf_s(line, sizeof line, _TRUNCATE, "{\"t\":\"welcome\",\"v\":2,\"client_id\":31,\"udp_key\":\"%s\",\"udp_port\":47000,"
+                    "\"pilot\":\"Res\",\"guest\":false,\"relays\":[],\"rtok\":\"%s\",\"rttl\":120}", key_a, tok1);
+        loctun_test_line(G.tun, 0, line, out, sizeof out);
+        loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+        CHECK(strstr(out, "{\"t\":\"bye\"}") != NULL && w500_num(b, "susp") == 0 && w500_num(b, "links") == 0,
+              "W517: Fortsetzung abgelehnt -> ungenutzten Einstieg mit \"bye\" abmelden, dann Neuaufbau");
+        /* aelterer Dienst (rttl 90): Frist 80 s */
+        _snprintf_s(wl, sizeof wl, _TRUNCATE, "{\"t\":\"welcome\",\"v\":2,\"client_id\":9,\"udp_key\":\"%s\",\"udp_port\":47000,"
+                    "\"pilot\":\"Res\",\"guest\":false,\"relays\":[],\"rtok\":\"%s\",\"rttl\":90}", key_a, tok1);
+        loctun_test_resume(G.tun, 5, 0, out, sizeof out);
+        loctun_test_resume(G.tun, 1, 4242, out, sizeof out);
+        loctun_test_line(G.tun, 9, wl, out, sizeof out);
+        loctun_test_line(G.tun, 0, state, out, sizeof out);
+        loctun_test_resume(G.tun, 2, 0, out, sizeof out);
+        loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+        CHECK(w500_num(b, "susp") == 1 && w500_num(b, "dl") == 80000, "W517: aelterer Dienst (rttl 90) -> Frist 80 s");
+        loctun_test_resume(G.tun, 5, 0, out, sizeof out);
+    }
+    /* ---- W519 STALLHOLD: Zustand des Mitspielers fuer das Halten, peer_conn vom Treffpunkt ---- */
+    {
+        char wl[1024];
+        static const char state1[] = "{\"t\":\"lobby_state\",\"lobby\":{\"id\":3,\"members\":[{\"client_id\":9}],"
+                                     "\"play_mode\":\"sim\"}}";
+        uint32_t pv = ip4("127.77.1.2");
+        int age = 0;
+        _snprintf_s(wl, sizeof wl, _TRUNCATE, "{\"t\":\"welcome\",\"v\":2,\"client_id\":9,\"udp_key\":\"%s\",\"udp_port\":47000,"
+                    "\"pilot\":\"Res\",\"guest\":false,\"relays\":[],\"rtok\":\"%s\",\"rttl\":120}", key_a, tok1);
+        loctun_test_resume(G.tun, 1, 4242, out, sizeof out);
+        loctun_test_line(G.tun, 9, wl, out, sizeof out);
+        loctun_test_line(G.tun, 0, state, out, sizeof out);
+        loctun_test_line(G.tun, 0, peer, out, sizeof out);
+        CHECK(loctun_peer_stall(G.tun, pv, &age) == 0 && age == -1, "W519: Mitspieler ohne aufgebaute Verbindung -> nie halten");
+        loctun_test_resume(G.tun, 12, pv, out, sizeof out);
+        CHECK(loctun_peer_stall(G.tun, pv, &age) == 1 && age >= 0 && age < 1000,
+              "W519: Verbindung steht, Transport hoert ihn -> Stau (halten, Spiel des Mitspielers steht)");
+        loctun_test_resume(G.tun, 13, 5000, out, sizeof out);
+        CHECK(loctun_peer_stall(G.tun, pv, &age) == 2 && age >= 5000, "W519: Transport still, kein Abgang gemeldet -> Stau");
+        CHECK(loctun_peer_stall(G.tun, ip4("127.77.1.3"), NULL) == 0, "W519: fremde Adresse -> keine Verbindung");
+        loctun_test_line(G.tun, 0, "{\"t\":\"peer_conn\",\"cid\":77,\"st\":\"lost\",\"why\":\"timeout\"}", out, sizeof out);
+        CHECK(loctun_peer_stall(G.tun, pv, NULL) == 2, "W519: peer_conn lost/timeout (Stille) bleibt ein Stau");
+        loctun_test_line(G.tun, 0, "{\"t\":\"peer_conn\",\"cid\":77,\"st\":\"lost\",\"why\":\"protocol\"}", out, sizeof out);
+        loctun_test_line(G.tun, 0, "{\"t\":\"peer_conn\",\"cid\":78,\"st\":\"lost\",\"why\":\"reset\"}", out, sizeof out);
+        loctun_test_line(G.tun, 0, "{\"t\":\"peer_conn\",\"cid\":-1,\"st\":\"lost\",\"why\":\"reset\"}", out, sizeof out);
+        loctun_test_line(G.tun, 0, "{\"t\":\"peer_conn\",\"cid\":77,\"st\":\"lostlost\",\"why\":\"reset\"}", out, sizeof out);
+        loctun_test_line(G.tun, 0, "{\"t\":\"peer_conn\",\"cid\":77,\"st\":\"lost\",\"why\":\"resetresetreset\"}", out, sizeof out);
+        CHECK(loctun_peer_stall(G.tun, pv, NULL) == 2,
+              "W519: peer_conn mit fremdem Code / fremder bzw. ungueltiger cid / zu langen Werten -> verworfen");
+        loctun_test_line(G.tun, 0, "{\"t\":\"peer_conn\",\"cid\":77,\"st\":\"lost\",\"why\":\"reset\"}", out, sizeof out);
+        CHECK(loctun_peer_stall(G.tun, pv, NULL) == 3, "W519: peer_conn lost/reset (Rechner beendete die Verbindung) -> Abgang");
+        loctun_test_line(G.tun, 0, "{\"t\":\"peer_conn\",\"cid\":77,\"st\":\"back\"}", out, sizeof out);
+        CHECK(loctun_peer_stall(G.tun, pv, NULL) == 2, "W519: peer_conn back (fortgesetzt) -> wieder Stau statt Abgang");
+        loctun_test_line(G.tun, 0, "{\"t\":\"peer_conn\",\"cid\":77,\"st\":\"lost\",\"why\":\"closed\"}", out, sizeof out);
+        CHECK(loctun_peer_stall(G.tun, pv, NULL) == 3, "W519: peer_conn lost/closed -> Abgang");
+        loctun_test_line(G.tun, 0, "{\"t\":\"peer_conn\",\"cid\":77,\"st\":\"back\"}", out, sizeof out);
+        loctun_test_line(G.tun, 0, state1, out, sizeof out);
+        loctun_test_resume(G.tun, 4, 0, b, sizeof b);
+        CHECK(loctun_peer_stall(G.tun, pv, NULL) == 3 && w500_num(b, "gh") == 1,
+              "W519: Mitspieler nicht mehr in der Lobby (Treffpunkt) -> Abgang, kein Halten");
+        loctun_test_resume(G.tun, 12, 0, out, sizeof out);
+        CHECK(loctun_peer_stall(G.tun, pv, NULL) == 0, "W519: Verbindung beendet -> keine Verbindung");
+        loctun_test_resume(G.tun, 5, 0, out, sizeof out);
+    }
     locnet_shutdown(&G);
     printf("W500 Fortsetzung: %d/%d OK\n", s_ok - ok0, s_n - n0);
 }
@@ -4384,6 +4677,145 @@ static void w454_beacon_fixed(llan_beacon *o)
 }
 
 /* Vektoren unabhaengig mit Python hashlib berechnet (pbkdf2_hmac, sha256, hmac) - BERICHT_M2 W454 */
+/* W519 STALLHOLD: Halten eines Stillstands im Spielstrom (reines Modul in loc_net_core.c, Zeit von aussen) */
+static int s_w519_ps, s_w519_calls;
+static int w519_peer(uint32_t vip, void *ctx)
+{
+    (void)vip;
+    (void)ctx;
+    s_w519_calls++;
+    return s_w519_ps;
+}
+
+static void w519_hold_unit_tests(void)
+{
+    const SOCKET s = (SOCKET)0x1234, s2 = (SOCKET)0x1238;
+    const uint32_t v = 0x0201407Fu, v2 = 0x0301407Fu;
+    unsigned long long t0 = 1000000ull;
+    locnet_hold_stats st;
+    locnet_hold_info hi;
+    int n0 = s_n, ok0 = s_ok, k, r;
+    locnet_hold_reset();
+    locnet_hold_config(2500, 0, 10000);
+    CHECK(!locnet_hold_enabled() && locnet_hold_poll(s, v, t0, 0, w519_peer, NULL) == 0 &&
+              locnet_hold_poll(s, v, t0 + 30000, 0, w519_peer, NULL) == 0,
+          "W519: loc_stall_hold=0 -> nie halten (Original)");
+    locnet_hold_config(2500, 12000, 10000);
+    CHECK(!locnet_hold_enabled(), "W519: Obergrenze kleiner als Beginn + Restlauf -> aus");
+    locnet_hold_config(2500, 60000, 10000);
+    CHECK(locnet_hold_enabled(), "W519: Obergrenze 60 s -> an");
+    s_w519_ps = LNH_PEER_ALIVE;
+    s_w519_calls = 0;
+    CHECK(locnet_hold_poll(s, v, t0, 0, w519_peer, NULL) == 0, "W519: erste Abfrage beginnt die Messung");
+    CHECK(locnet_hold_poll(s, v, t0 + 50, 1, w519_peer, NULL) == 0 && locnet_hold_poll(s, v, t0 + 2000, 0, w519_peer, NULL) == 0 &&
+              s_w519_calls == 0,
+          "W519: Daten bzw. Stille < 2,5 s -> unveraendert, Transport nicht gefragt (Normalbetrieb bitgleich)");
+    locnet_hold_get_stats(&st);
+    CHECK(st.gaps == 0 && st.holds == 0, "W519: kurze Ruckler zaehlen nicht als Luecke");
+    CHECK(locnet_hold_poll(s, v, t0 + 2600, 0, w519_peer, NULL) == 1 && locnet_hold_active(s),
+          "W519: 2,5 s Stille, Transport sieht Stau -> als lesbar melden (Spiel zaehlt nicht weiter)");
+    locnet_hold_get(&hi, t0 + 2600);
+    CHECK(hi.active == 1 && hi.tracked == 1 && hi.vip == v && hi.silent_ms == 2550 && hi.left_ms == 60000 - 2550,
+          "W519: Anzeige kennt Mitspieler, Stille und Restzeit bis zur Obergrenze");
+    s_w519_ps = LNH_PEER_SILENT;
+    CHECK(locnet_hold_poll(s, v, t0 + 30000, 0, w519_peer, NULL) == 1, "W519: Transport still (Netz weg), kein Abgang -> weiter halten");
+    CHECK(locnet_hold_poll(s, v, t0 + 50049, 0, w519_peer, NULL) == 1, "W519: knapp vor Obergrenze - Restlauf -> weiter halten");
+    CHECK(locnet_hold_poll(s, v, t0 + 50050, 0, w519_peer, NULL) == 0 && !locnet_hold_active(s),
+          "W519: Obergrenze - 10 s erreicht -> Original-Grenze laeuft (Entfernen bei ~60 s, geordnet)");
+    s_w519_calls = 0;
+    CHECK(locnet_hold_poll(s, v, t0 + 52000, 0, w519_peer, NULL) == 0 && s_w519_calls == 0,
+          "W519: nach der Obergrenze in derselben Luecke kein erneutes Halten");
+    locnet_hold_get_stats(&st);
+    CHECK(st.gaps == 1 && st.holds == 1 && st.held_cap == 1 && st.held_ok == 0 && st.gap_max_ms >= 51950,
+          "W519: Zaehler Luecke 1, gehalten 1, Obergrenze 1");
+    CHECK(locnet_hold_poll(s, v, t0 + 55000, 1, w519_peer, NULL) == 0, "W519: Daten wieder da -> unveraendert");
+    locnet_hold_get_stats(&st);
+    CHECK(st.gh[3] == 1 && st.held_ok == 0, "W519: beendete Luecke 30-60 s gezaehlt (ohne Fortsetzung, Obergrenze war erreicht)");
+    /* zweite Luecke: Fortsetzung nach 8 s */
+    s_w519_ps = LNH_PEER_ALIVE;
+    CHECK(locnet_hold_poll(s, v, t0 + 58000, 0, w519_peer, NULL) == 1, "W519: neue Luecke -> wieder halten");
+    CHECK(locnet_hold_poll(s, v, t0 + 63000, 1, w519_peer, NULL) == 0 && !locnet_hold_active(s), "W519: Daten -> Halten endet");
+    locnet_hold_get_stats(&st);
+    CHECK(st.held_ok == 1 && st.last_ok_ms == 8000 && st.gh[1] == 1 && st.holds == 2 && st.gaps == 2,
+          "W519: Fortsetzung nach Stau gezaehlt (8 s, Klasse 5-15 s)");
+    locnet_hold_get(&hi, t0 + 63000);
+    CHECK(hi.last_ok_vip_set && hi.ok_vip == v && hi.ok_ms == 8000 && hi.active == 0, "W519: Anzeige bekommt die Fortsetzung einmal");
+    locnet_hold_get(&hi, t0 + 63000);
+    CHECK(!hi.last_ok_vip_set, "W519: Fortsetzungs-Meldung nur einmal");
+    /* Abgang gemeldet: nie halten, auch nicht spaeter in derselben Luecke */
+    s_w519_ps = LNH_PEER_GONE;
+    CHECK(locnet_hold_poll(s, v, t0 + 66000, 0, w519_peer, NULL) == 0, "W519: Abgang gemeldet (Reset beim Treffpunkt) -> nicht halten");
+    s_w519_ps = LNH_PEER_ALIVE;
+    CHECK(locnet_hold_poll(s, v, t0 + 67000, 0, w519_peer, NULL) == 0, "W519: nach Abgangsmeldung in derselben Luecke nicht mehr halten");
+    CHECK(locnet_hold_poll(s, v, t0 + 68000, 1, w519_peer, NULL) == 0, "W519: Daten beenden die Luecke");
+    /* gehalten, dann Verbindung weg */
+    CHECK(locnet_hold_poll(s, v, t0 + 71000, 0, w519_peer, NULL) == 1, "W519: Luecke 4 gehalten");
+    s_w519_ps = LNH_PEER_NONE;
+    CHECK(locnet_hold_poll(s, v, t0 + 72000, 0, w519_peer, NULL) == 0, "W519: Verbindung beendet -> Halten endet sofort");
+    locnet_hold_get_stats(&st);
+    CHECK(st.held_gone == 1 && st.holds == 3, "W519: gehalten, dann Abgang gezaehlt");
+    /* kein Mitspieler / neue Socket-Nummer / Tabelle voll / Schliessen */
+    s_w519_ps = LNH_PEER_ALIVE;
+    CHECK(locnet_hold_poll(s2, 0, t0, 0, w519_peer, NULL) == 0 && locnet_hold_poll(s2, 0, t0 + 9000, 0, w519_peer, NULL) == 0,
+          "W519: Strom ohne Mitspieler (vip 0) -> nie halten");
+    locnet_hold_poll(s, v2, t0 + 80000, 0, w519_peer, NULL);
+    CHECK(locnet_hold_poll(s, v2, t0 + 81000, 0, w519_peer, NULL) == 0, "W519: Socket-Nummer neu vergeben -> Messung beginnt frisch");
+    CHECK(locnet_hold_poll(s, v2, t0 + 83000, 0, w519_peer, NULL) == 1, "W519: ... und haelt erst nach 2,5 s eigener Stille");
+    locnet_hold_forget(s);
+    CHECK(!locnet_hold_active(s), "W519: geschlossener Socket wird vergessen");
+    locnet_hold_get_stats(&st);
+    CHECK(st.gh[0] >= 1, "W519: Luecke endet mit dem Schliessen -> nach Laenge gezaehlt");
+    for (k = 0; k < 16; k++) locnet_hold_poll((SOCKET)(0x2000 + 4 * k), v, t0, 0, w519_peer, NULL);
+    r = locnet_hold_poll((SOCKET)0x3000, v, t0, 0, w519_peer, NULL);
+    r |= locnet_hold_poll((SOCKET)0x3000, v, t0 + 9000, 0, w519_peer, NULL);
+    CHECK(r == 0, "W519: Tabelle voll -> weiterer Strom nie gehalten (Original-Verhalten)");
+    locnet_hold_get(&hi, t0 + 9000);
+    CHECK(hi.tracked == 16, "W519: 16 Mitspieler-Stroeme verfolgt");
+    for (k = 0; k < 16; k++) locnet_hold_poll((SOCKET)(0x2000 + 4 * k), v, t0 + 9000, 0, w519_peer, NULL);
+    locnet_hold_get(&hi, t0 + 9000);
+    CHECK(hi.active == 16 && hi.active >= hi.tracked, "W519: alle Mitspieler still -> Anzeige \"Verbindung unterbrochen\"");
+    for (k = 0; k < 16; k++) locnet_hold_forget((SOCKET)(0x2000 + 4 * k));
+    /* recv eines gehaltenen Stroms ohne Daten wartet nie (auch auf einem blockierenden Socket) */
+    {
+        locnet X;
+        SOCKET ls = INVALID_SOCKET, cs = INVALID_SOCKET, as = INVALID_SOCKET;
+        struct sockaddr_in a;
+        int al = sizeof a;
+        char rb[16];
+        DWORD tq;
+        if (locnet_init(&X, "127.0.0.63", 47860, "none", 10, lg)) {
+            ls = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            a = sa(ip4("127.0.0.1"), 0);
+            bind(ls, (struct sockaddr *)&a, sizeof a);
+            listen(ls, 1);
+            getsockname(ls, (struct sockaddr *)&a, &al);
+            cs = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+            connect(cs, (struct sockaddr *)&a, sizeof a);
+            as = accept(ls, NULL, NULL);
+            locnet_hold_poll(as, v, t0, 1, w519_peer, NULL);
+            CHECK(locnet_hold_poll(as, v, t0 + 3000, 0, w519_peer, NULL) == 1, "W519: echter Strom gehalten");
+            tq = GetTickCount();
+            r = locnet_recv(&X, as, rb, sizeof rb, 0);
+            CHECK(r == SOCKET_ERROR && WSAGetLastError() == WSAEWOULDBLOCK && GetTickCount() - tq < 500,
+                  "W519: recv eines gehaltenen Stroms ohne Daten -> WSAEWOULDBLOCK sofort (nie blockieren)");
+            send(cs, "\x37\x00\x00\x00", 4, 0);
+            Sleep(50);
+            r = locnet_recv(&X, as, rb, sizeof rb, 0);
+            CHECK(r == 4, "W519: Daten waehrend des Haltens kommen normal an (Gastfilter wie immer)");
+            locnet_hold_forget(as);
+            closesocket(as);
+            closesocket(cs);
+            closesocket(ls);
+            locnet_shutdown(&X);
+        } else {
+            CHECK(0, "W519: Instanz fuer recv-Fall startet");
+        }
+    }
+    locnet_hold_reset();
+    locnet_hold_config(2500, 0, 10000); /* aus: andere Faelle unberuehrt */
+    printf("W519 Stillstand halten: %d/%d OK\n", s_ok - ok0, s_n - n0);
+}
+
 static void w454_lan_unit_tests(void)
 {
     char room[32], pil[32], hx[80];
@@ -4852,6 +5284,237 @@ static loctun *nr_tun(locnet *N, int consent, const char *dir)
     N->tun = loctun_start(&c, N, NULL, lg);
     return N->tun;
 }
+/* W520 HOSTMIG: eingebaute Neuaufbau-Ablaeufe zerlegen sich vollstaendig, alle Sprungziele liegen im Ablauf (bzw. 99 =
+ * gescheitert), jeder endet mit dem Ziel-Lobbyzustand (0x22 Host, 0x2E Mitspieler); kaputte Ablaeufe werden abgelehnt. */
+static int hm_prog_ok(const char *prog, int n_want, int last_ls)
+{
+    hm_step st[64];
+    int n = hm_parse(prog, st, 64), i;
+    if (n != n_want) return 0;
+    for (i = 0; i < n; i++) {
+        int to = st[i].kind == HM_K_J ? st[i].arg : st[i].to_j;
+        if ((st[i].kind == HM_K_J || st[i].to > 0) && to != 99 && (to < 1 || to > n)) return 0;
+        if (st[i].kind != HM_K_J && (st[i].len < 1 || st[i].len > 120)) return 0;
+    }
+    return st[n - 1].kind == HM_K_LS && st[n - 1].arg == last_ls && st[n - 1].to_j == 99;
+}
+
+static void t_hostmig_prog(void)
+{
+    hm_step st[8];
+    CHECK(hm_prog_ok(HM_PROG_HOST, 8, 0x22), "W520: Ablauf neuer Host (8 Schritte, Ziel 0x22, Sprungziele gueltig)");
+    CHECK(hm_prog_ok(HM_PROG_JOIN, 13, 0x2E), "W520: Ablauf Mitspieler (13 Schritte, Ziel 0x2E, Sprungziele gueltig)");
+    CHECK(hm_prog_ok(HM_PROG_LEAVE, 17, 0x2E), "W520: Ablauf Auto-Host-Abgabe (17 Schritte, Ziel 0x2E, Sprungziele gueltig)");
+    CHECK(hm_parse("ls=0x31+60A,8", st, 8) < 0 && hm_parse("zz=1>A", st, 8) < 0, "W520: Schritt ohne '>' bzw. unbekannt abgelehnt");
+    CHECK(hm_parse("f>A,8;f>B,999;j=1", st, 8) == 3 && st[0].btn == 0x100 && st[1].btn == 0x200 && st[1].len == 8 &&
+              st[2].kind == HM_K_J && st[2].arg == 1, "W520: Tasten A/B, Laenge begrenzt, Sprung");
+    CHECK(hm_parse("f>A;f>A;f>A;f>A;f>A;f>A;f>A;f>A;f>A;f>A", st, 8) == 8, "W520: hoechstens Platz fuer cap Schritte");
+    { /* W523 HOSTMIG-SCOPE: ohne loc_hostmig_rebuild nie ein Ablauf; Hinweise je Lage; mit dem Schalter wie W520 */
+        const char *d = "";
+        int ok = 1, ls, r;
+        static const int lss[] = {0x02, 0x22, 0x23, 0x2E, 0x31, 0x4E, 0x4F, 0x50};
+        for (ls = 0; ls < (int)(sizeof lss / sizeof lss[0]); ls++)
+            for (r = 1; r <= 3; r++) {
+                int a = hm_decide(0, lss[ls], 0, 0, r, 0, &d), b = hm_decide(0, lss[ls], 1, 0, r, 0, &d),
+                    c = hm_decide(0, lss[ls], 0, 1, r, 0, &d);
+                if (a == HM_ACT_PEND || a == HM_ACT_LEAVE || b == HM_ACT_PEND || b == HM_ACT_LEAVE || c != HM_ACT_NONE) ok = 0;
+            }
+        CHECK(ok, "W523: ohne loc_hostmig_rebuild kein Neuaufbau und keine Auto-Host-Abgabe (alle Zustaende, Rollen, Gruende)");
+        CHECK(hm_decide(0, 0x4E, 0, 0, 1, 0, &d) == HM_ACT_HINT_AFTER && strcmp(d, "loc.hostmig_inmatch_hand_d") == 0 &&
+                  hm_decide(0, 0x50, 1, 0, 2, 0, &d) == HM_ACT_HINT_AFTER && strcmp(d, "loc.hostmig_inmatch_hand_d") == 0,
+              "W523: Wechsel im Match/Debriefing -> Mission laeuft weiter, Hinweis nach der Mission");
+        CHECK(hm_decide(0, 0x2E, 1, 0, 1, 0, &d) == HM_ACT_HINT_31 && strcmp(d, "loc.hostmig_hand_new_d") == 0 &&
+                  hm_decide(0, 0x22, 0, 0, 1, 0, &d) == HM_ACT_HINT_31 && strcmp(d, "loc.hostmig_hand_d") == 0 &&
+                  hm_decide(0, 0x31, 0, 0, 2, 0, &d) == HM_ACT_NONE && strcmp(d, "loc.hostmig_hand_d") == 0,
+              "W523: Wechsel in der Lobby -> nur Hinweis (neuer Host erstellt, die anderen suchen), erneut zur Meldung 0x31");
+        CHECK(hm_decide(1, 0x2E, 1, 0, 1, 0, &d) == HM_ACT_PEND && strcmp(d, "loc.hostmig_rebuild_d") == 0 &&
+                  hm_decide(1, 0x4E, 0, 0, 2, 0, &d) == HM_ACT_PEND && strcmp(d, "loc.hostmig_inmatch_d") == 0 &&
+                  hm_decide(1, 0x22, 0, 1, 3, 0, &d) == HM_ACT_LEAVE && hm_decide(1, 0x2E, 0, 1, 1, 0, &d) == HM_ACT_NONE &&
+                  hm_decide(1, 0x31, 0, 0, 1, 1, &d) == HM_ACT_NONE,
+              "W523: mit loc_hostmig_rebuild=1 (TEST/0.7.0) Neuaufbau und Auto-Host wie W520");
+    }
+}
+
+/* W520 HOSTMIG: lobby_state (host_migration, auto_host, suggest, Host) und host_changed -> Ereignis fuer das Spiel genau
+ * einmal, Namen bereinigt, ungueltige Zeilen ohne Wirkung; lobby_closed loescht den Zustand. */
+static void t_hostmig(void)
+{
+    locnet N;
+    loctun_cfg c;
+    loctun_hostmig_ev ev;
+    char out[4096], nm[24];
+    int mig = -1, autoh = -1, sme = -1, amh = -1;
+    SetEnvironmentVariableA("SB_STEELNET_SPKI", NULL);
+    if (!locnet_init(&N, "127.0.0.59", 47900, "none", 10, lg)) {
+        CHECK(0, "W520: Instanz startet");
+        return;
+    }
+    loctun_cfg_default(&c);
+    c.port = 47990;
+    c.proxy_base = 48100;
+    strcpy_s(c.lobby, sizeof c.lobby, "127.0.0.1:44998");
+    strcpy_s(c.code, sizeof c.code, "7K3M-Q9TX");
+    c.host_mig = 1;
+    N.tun = loctun_start(&c, &N, NULL, lg);
+    if (!N.tun) {
+        CHECK(0, "W520: Transport startet");
+        locnet_shutdown(&N);
+        return;
+    }
+    loctun_test_line(N.tun, 7, NULL, out, sizeof out);
+    CHECK(!loctun_hostmig_info(N.tun, &mig, &autoh, &sme, &amh) && !mig && !amh, "W520: ohne Lobby keine Eigenschaften");
+    loctun_test_line(N.tun, 0, "{\"t\":\"lobby_state\",\"lobby\":{\"id\":4,\"play_mode\":\"sim\",\"host_migration\":true,"
+                     "\"auto_host\":false,\"suggest\":5,\"members\":[{\"client_id\":5,\"pilot\":\"Alpha\",\"host\":true},"
+                     "{\"client_id\":7,\"pilot\":\"Me\",\"host\":false}]}}", out, sizeof out);
+    CHECK(loctun_hostmig_info(N.tun, &mig, &autoh, &sme, &amh) && mig == 1 && autoh == 0 && sme == 0 && amh == 0,
+          "W520: lobby_state -> Host-Wechsel an, kein Auto-Host, Vorschlag/Host = anderer");
+    CHECK(!loctun_hostmig_poll(N.tun, &ev), "W520: lobby_state allein ist kein Wechsel");
+    loctun_test_line(N.tun, 0, "{\"t\":\"host_changed\",\"lobby_id\":4,\"host\":0,\"pilot\":\"X\",\"old\":5,\"reason\":\"left\"}",
+                     out, sizeof out);
+    loctun_test_line(N.tun, 0, "{\"t\":\"host_changed\",\"lobby_id\":4,\"host\":\"7\",\"old\":5}", out, sizeof out);
+    loctun_test_line(N.tun, 0, "{\"t\":\"host_changed\",\"lobby_id\":4,\"host\":4294967296}", out, sizeof out);
+    CHECK(!loctun_hostmig_poll(N.tun, &ev), "W520: host_changed mit ungueltigem Host (0, Text, zu gross) ohne Wirkung");
+    loctun_test_line(N.tun, 0, "{\"t\":\"host_changed\",\"lobby_id\":4,\"host\":7,\"pilot\":\"Me\\u0001\\u00e4Y\",\"old\":5,"
+                     "\"old_pilot\":\"Alpha\nBeta\",\"reason\":\"left\"}", out, sizeof out);
+    memset(&ev, 0, sizeof ev);
+    CHECK(loctun_hostmig_poll(N.tun, &ev) && ev.me_new == 1 && ev.me_old == 0 && ev.reason == 1 && ev.host_cid == 7 &&
+              ev.old_cid == 5, "W520: host_changed -> Ereignis (neuer Host = dieser Client, Grund gegangen)");
+    CHECK(strchr(ev.host, 1) == NULL && strchr(ev.old, '\n') == NULL && strncmp(ev.host, "Me", 2) == 0,
+          "W520: Namen ohne Steuerzeichen");
+    CHECK(!loctun_hostmig_poll(N.tun, &ev), "W520: Ereignis genau einmal");
+    CHECK(loctun_hostmig_info(N.tun, &mig, &autoh, &sme, &amh) && amh == 1, "W520: danach ist dieser Client Host");
+    loctun_test_line(N.tun, 0, "{\"t\":\"host_changed\",\"lobby_id\":4,\"host\":9,\"pilot\":\"Z\",\"old\":7,\"reason\":\"auto\"}",
+                     out, sizeof out);
+    CHECK(loctun_hostmig_poll(N.tun, &ev) && ev.me_new == 0 && ev.me_old == 1 && ev.reason == 3,
+          "W520: Auto-Host -> dieser Client gibt den Host ab");
+    loctun_test_line(N.tun, 0, "{\"t\":\"host_changed\",\"lobby_id\":4,\"host\":5,\"old\":9,\"reason\":\"lost\"}", out, sizeof out);
+    CHECK(loctun_hostmig_poll(N.tun, &ev) && ev.reason == 2 && !ev.me_new && !ev.me_old && ev.host[0] == 0,
+          "W520: Host verloren, Mitspieler, fehlender Name = leer");
+    loctun_hostmig_sugg_name(N.tun, nm, sizeof nm);
+    CHECK(nm[0] == 0, "W520: Vorschlag ohne bekannten Mitspieler -> kein Name");
+    loctun_host_gone(N.tun); /* ohne Verbindung: nur keine Wirkung, kein Absturz */
+    loctun_handover(N.tun);
+    loctun_test_line(N.tun, 0, "{\"t\":\"lobby_closed\",\"lobby_id\":4,\"reason\":\"host_left\"}", out, sizeof out);
+    CHECK(!loctun_hostmig_info(N.tun, &mig, &autoh, &sme, &amh) && !mig && !amh, "W520: lobby_closed -> kein Zustand");
+    locnet_shutdown(&N);
+}
+
+/* W522 CRASH-TELEMETRY: Datensatz (Zeile, strenges Lesen, JSON), Einordnung (Ausnahme, Exitcode, Modul), Launcher-Stufe
+ * (anlegen/ergaenzen) - Dateien in %TEMP%. */
+static void ct_mkrec(sbct_rec *r, int cls)
+{
+    memset(r, 0, sizeof *r);
+    r->ts = 1700000000u;
+    r->cls = cls;
+    r->exc = 0xC0000005u;
+    r->acc = SBCT_A_WRITE;
+    r->mod = SBCT_M_SB_EMU;
+    r->rva = 0x0012ab34u;
+    r->bkt = 0x89abcdefu;
+    r->ph = SBCT_P_MATCH;
+    r->game = SBCT_G_LOC;
+    r->rt = 3;
+    r->mem = 2;
+    r->rb = SBCT_RB_SHADING | SBCT_RB_FULL;
+    r->gpu = 0x1002;
+    r->ed = SBCT_E_PRIVATE;
+    strcpy_s(r->ver, sizeof r->ver, "0.6.3");
+}
+static void t_crashtel(void)
+{
+    sbct_rec r, q;
+    char line[512], js[512], tmp[MAX_PATH], dir[MAX_PATH], mk[MAX_PATH];
+    wchar_t cp[700];
+    int n, k;
+    unsigned rva = 0;
+    HMODULE nt = GetModuleHandleA("ntdll.dll");
+    FARPROC fp = nt ? GetProcAddress(nt, "NtClose") : NULL;
+    ct_mkrec(&r, SBCT_C_AV);
+    n = sbct_format(line, sizeof line, &r);
+    CHECK(n > 0 && strcmp(line, "SBCT1 ts=1700000000 cls=av exc=c0000005 acc=w mod=sb_emu rva=0012ab34 bkt=89abcdef ph=match "
+                                "game=loc rt=5_15 mem=1_2 rb=65 gpu=4098 ed=private ver=0.6.3\n") == 0,
+          "W522: Datensatz als eine Zeile (nur Codes und Zahlen)");
+    CHECK(sbct_parse(line, &q) == 1 && memcmp(&q, &r, sizeof q) == 0, "W522: Zeile wird verlustfrei gelesen");
+    CHECK(!sbct_parse("SBCT1 ts=1 cls=av foo=1\n", &q) && !sbct_parse("SBCT1 ts=1 cls=bogus\n", &q) &&
+              !sbct_parse("SBCT1 ts=1 cls=av cls=hang\n", &q) && !sbct_parse("SBCT1 ts=1 cls=av ver=C:\\Users\n", &q) &&
+              !sbct_parse("SBCT1 cls=av\n", &q) && !sbct_parse("SBCT1 ts=1 cls=av rva=0012AB34\n", &q) &&
+              !sbct_parse("SBCT2 ts=1 cls=av\n", &q) && !sbct_parse("SBCT1 ts=1 cls=av gpu=70000\n", &q) &&
+              !sbct_parse("SBCT1 ts=1 cls=av rb=256\n", &q) && !sbct_parse("SBCT1 ts=1 cls=av mod=evil.dll\n", &q),
+          "W522: unbekannter Schluessel, falscher Wert, doppelt, Pfad, fehlende Pflicht, Grossbuchstaben -> verworfen");
+    n = sbct_json(js, sizeof js, &r, r.ts + 60u);
+    CHECK(n > 0 && strcmp(js, ",\"cls\":\"av\",\"exc\":\"c0000005\",\"acc\":\"w\",\"mod\":\"sb_emu\",\"rva\":\"0012ab34\","
+                              "\"bkt\":\"89abcdef\",\"ph\":\"match\",\"game\":\"loc\",\"rt\":\"5_15\",\"mem\":\"1_2\",\"rb\":65,"
+                              "\"rs\":1") == 0 && !strstr(js, "1700000000"),
+          "W522: JSON-Felder fuer den Bericht, Neustart-Merker innerhalb 2 min, ohne Zeitstempel");
+    sbct_json(js, sizeof js, &r, r.ts + 121u);
+    CHECK(!strstr(js, "\"rs\""), "W522: Neustart nach mehr als 2 min -> kein Merker");
+    r.mod = SBCT_M_OTHER;
+    sbct_json(js, sizeof js, &r, 0);
+    CHECK(strstr(js, "\"mod\":\"other\"") && !strstr(js, "\"rva\""), "W522: Fremdmodul -> nur \"other\", keine RVA");
+    CHECK(sbct_exc_cls(0xC0000005u) == SBCT_C_AV && sbct_exc_cls(0xC00000FDu) == SBCT_C_STACK &&
+              sbct_exc_cls(0xC0000017u) == SBCT_C_OOM && sbct_exc_cls(0xC0000409u) == SBCT_C_ABORT &&
+              sbct_exc_cls(0xC0000094u) == SBCT_C_OTHER, "W522: Ausnahmecode -> Klasse");
+    CHECK(sbct_exit_cls(0, 0) == SBCT_C_NONE && sbct_exit_cls(0, 1) == SBCT_C_CLOSED && sbct_exit_cls(1, 0) == SBCT_C_KILLED &&
+              sbct_exit_cls(16, 0) == SBCT_C_GPU_LOST && sbct_exit_cls(0xC0000005ul, 1) == SBCT_C_AV &&
+              sbct_exit_cls(0xC00000FDul, 0) == SBCT_C_STACK && sbct_exit_cls(5, 1) == SBCT_C_NONE &&
+              sbct_exit_cls(3, 0) == SBCT_C_ABORT && sbct_exit_cls(7, 0) == SBCT_C_OTHER,
+          "W522: Exitcode -> Klasse (geordnet nichts, Laufmarke -> closed, 1 -> killed, 16 -> gpu_lost)");
+    CHECK(sbct_mod_from_name("SB_EMU.DLL") == SBCT_M_SB_EMU && sbct_mod_from_name("nvwgf2um.dll") == SBCT_M_NVIDIA &&
+              sbct_mod_from_name("atidxx32.dll") == SBCT_M_AMD && sbct_mod_from_name("igd10iumd32.dll") == SBCT_M_INTEL &&
+              sbct_mod_from_name("d3dcompiler_47.dll") == SBCT_M_D3DCOMP && sbct_mod_from_name("KernelBase.dll") == SBCT_M_KERNEL &&
+              sbct_mod_from_name("overlay_hook.dll") == SBCT_M_OTHER && sbct_mod_from_name("") == SBCT_M_OTHER,
+          "W522: Modulname -> feste Kennung, Treiber nur Hersteller, Fremdmodul -> other");
+    CHECK(fp && sbct_mod_at((uintptr_t)fp, &rva) == SBCT_M_NTDLL && rva == (unsigned)((uintptr_t)fp - (uintptr_t)nt),
+          "W522: Adresse in ntdll -> Modul ntdll + RVA");
+    CHECK(sbct_mod_at((uintptr_t)GetProcAddress(GetModuleHandleA("ws2_32.dll"), "socket"), &rva) == SBCT_M_OTHER && rva == 0,
+          "W522: fremdes Modul -> other ohne RVA");
+    CHECK(sbct_mod_at(0x24E1D3u, &rva) == SBCT_M_GAME && rva == 0x24E1D3u, "W522: Gastbereich -> game + Gast-EIP");
+    CHECK(sbct_rt_class(30) == 1 && sbct_rt_class(299) == 2 && sbct_rt_class(900) == 4 && sbct_rt_class(7200) == 5 &&
+              sbct_dxr_from_hr((long)0x887A0006ul) == SBCT_D_HUNG && sbct_dxr_from_hr(0) == SBCT_D_OK,
+          "W522: Laufzeitklasse, DXGI-Grund");
+    /* Launcher-Stufe in %TEMP% */
+    GetTempPathA(sizeof tmp, tmp);
+    _snprintf_s(dir, sizeof dir, _TRUNCATE, "%ssb_w522_%lu", tmp, GetCurrentProcessId());
+    CreateDirectoryA(dir, NULL);
+    _snprintf_s(mk, sizeof mk, _TRUNCATE, "%s\\%s", dir, SBCT_MARK);
+    sbct_path(cp, 700, dir, 1, SBCT_FILE);
+    DeleteFileW(cp);
+    DeleteFileA(mk);
+    CHECK(sbct_launcher_note(dir, 0, SBCT_G_SB, 600) == 0 && sbct_read(cp, &q) == 0, "W522: geordnetes Ende -> keine Datei");
+    k = sbct_launcher_note(dir, 1, SBCT_G_LOC, 1000);
+    CHECK(k == 1 && sbct_read(cp, &q) == 1 && q.cls == SBCT_C_KILLED && q.game == SBCT_G_LOC && q.rt == 4 && !q.exc,
+          "W522: Exit 1 ohne Datensatz -> killed (Spiel, Laufzeitklasse)");
+    DeleteFileW(cp);
+    nr_put(mk, "1\n");
+    CHECK(sbct_launcher_note(dir, 0, SBCT_G_LOC, 10) == 1 && sbct_read(cp, &q) == 1 && q.cls == SBCT_C_CLOSED,
+          "W522: Exit 0 mit liegender Laufmarke -> closed");
+    DeleteFileA(mk);
+    ct_mkrec(&r, SBCT_C_HANG);
+    sbct_write(cp, &r);
+    CHECK(sbct_launcher_note(dir, 1, SBCT_G_LOC, 10) == 2 && sbct_read(cp, &q) == 1 && q.cls == SBCT_C_HANG &&
+              q.xc == SBCT_C_KILLED && q.rva == r.rva, "W522: Haenger, danach beendet -> Datensatz ergaenzt (xc killed)");
+    ct_mkrec(&r, SBCT_C_AV);
+    sbct_write(cp, &r);
+    CHECK(sbct_launcher_note(dir, 1, SBCT_G_LOC, 10) == 0 && sbct_read(cp, &q) == 1 && memcmp(&q, &r, sizeof q) == 0,
+          "W522: Absturz-Datensatz des Clients bleibt unveraendert (Exit 1 des Handlers)");
+    CHECK(sbct_launcher_note(dir, 0xC0000005ul, SBCT_G_SB, 10) == 0, "W522: vorhandener Datensatz wird nicht ersetzt");
+    DeleteFileW(cp);
+    CHECK(sbct_launcher_note(dir, 0xC0000005ul, SBCT_G_SB, 10) == 1 && sbct_read(cp, &q) == 1 && q.cls == SBCT_C_AV &&
+              q.exc == 0xC0000005u && q.mod == SBCT_M_NONE, "W522: Absturz ohne Datensatz -> Klasse aus dem Exitcode");
+    nr_put(mk, "1\n");
+    {
+        char p8[MAX_PATH];
+        _snprintf_s(p8, sizeof p8, _TRUNCATE, "%s\\%s", dir, SBCT_FILE);
+        nr_put(p8, "SBCT1 ts=1 cls=av\nSBCT1 ts=2 cls=hang\n");
+        CHECK(sbct_read(cp, &q) == -1, "W522: Datei mit zwei Zeilen -> verworfen");
+        nr_put(p8, "C:\\Users\\x\\secret\n");
+        CHECK(sbct_read(cp, &q) == -1, "W522: fremder Inhalt -> verworfen");
+        DeleteFileA(p8);
+    }
+    DeleteFileA(mk);
+    RemoveDirectoryA(dir);
+}
+
 static void t_netrep(void)
 {
     locnet N;
@@ -4899,6 +5562,9 @@ static void t_netrep(void)
     loctun_netrep_test(t, 1, 1, 100, 0, NULL, out, sizeof out);
     loctun_netrep_test(t, 2, 1500, 0, 0, NULL, out, sizeof out);
     loctun_netrep_test(t, 1, 1, 250, 0, NULL, out, sizeof out);
+    loctun_netrep_test(t, 8, 0, 2, 0, NULL, out, sizeof out); /* W519: im Match 2 Luecken < 5 s, 1 Luecke 15-30 s */
+    loctun_netrep_test(t, 8, 2, 1, 0, NULL, out, sizeof out);
+    loctun_netrep_test(t, 9, 1, 1, 0, NULL, out, sizeof out); /* ... davon 1 gehalten und fortgesetzt */
     loctun_netrep_test(t, 2, 30000, 0, 0, NULL, out, sizeof out);
     loctun_netrep_test(t, 1, 0, 400, 1, NULL, out, sizeof out);
     k = loctun_netrep_test(t, 2, 1500, 0, 0, NULL, out, sizeof out);
@@ -4906,10 +5572,36 @@ static void t_netrep(void)
               strstr(out, "\"desync\":1") && strstr(out, "\"recon\":1") && strstr(out, "\"dur\":3") &&
               strstr(out, "\"path\":\"none\"") && !nr_private(out),
           "W496: Match-Bericht (Ende desync, Rollbacks/s, Neuverbindungen) ohne Namen/Adressen");
+    CHECK(strstr(out, "\"sgh\":[2,0,1,0,0],\"sh\":1,\"sho\":1,\"shc\":0") != NULL,
+          "W519: Match-Bericht mit Luecken nach Laenge und gehaltenen Stillstaenden (Differenz seit Matchbeginn)");
+    CHECK(strstr(out, "\"psw\":0") && strstr(out, "\"d6\":0") && strstr(out, "\"plb\":0") && strstr(out, "\"plh\":0") &&
+              strstr(out, "\"plc\":0"),
+          "W521: Match-Bericht traegt Wegwechsel, IPv6-Wege und Trennungsgruende (Zahlen)");
+    loctun_netrep_test(t, 8, 4, 1, 0, NULL, out, sizeof out); /* W519: nach dem Match noch eine Luecke >= 60 s (Lobby) */
+    loctun_netrep_test(t, 9, 1, 0, 1, NULL, out, sizeof out);
+    /* W521 (#118): Host schliesst die Lobby im Match -> "host_left" statt "peer_lost" (vorher gewann peer_lost) */
+    loctun_netrep_test(t, 1, 1, 400, 1, NULL, out, sizeof out);
+    loctun_netrep_test(t, 2, 1500, 0, 0, NULL, out, sizeof out);
+    loctun_netrep_test(t, 22, 0, 0, 0, NULL, out, sizeof out);
+    loctun_netrep_test(t, 21, 2, 1, 1, NULL, out, sizeof out);
+    loctun_netrep_test(t, 1, 0, 400, 1, NULL, out, sizeof out);
+    loctun_netrep_test(t, 2, 1500, 0, 0, NULL, out, sizeof out);
+    CHECK(strstr(out, "\"kind\":\"match\"") && strstr(out, "\"end\":\"host_left\"") && strstr(out, "\"plh\":1"),
+          "W521: Lobby-Ende durch den Host im Match -> end host_left, plh 1");
+    /* Mitspieler beendet sein Spiel (BYE): bleibt peer_lost (Rueckwaerts-Vergleich), plb zeigt den Grund */
+    loctun_netrep_test(t, 1, 1, 400, 1, NULL, out, sizeof out);
+    loctun_netrep_test(t, 2, 1500, 0, 0, NULL, out, sizeof out);
+    loctun_netrep_test(t, 21, 1, 1, 1, NULL, out, sizeof out);
+    loctun_netrep_test(t, 1, 0, 400, 1, NULL, out, sizeof out);
+    loctun_netrep_test(t, 2, 1500, 0, 0, NULL, out, sizeof out);
+    CHECK(strstr(out, "\"end\":\"peer_lost\"") && strstr(out, "\"plb\":1") && strstr(out, "\"plh\":0"),
+          "W521: BYE eines Mitspielers -> peer_lost mit plb 1");
     loctun_netrep_test(t, 5, 0, 0, 0, NULL, out, sizeof out);
     loctun_netrep_test(t, 2, 1500, 0, 0, NULL, out, sizeof out);
     CHECK(strstr(out, "\"kind\":\"lobby\"") && strstr(out, "\"end\":\"left\"") && !nr_private(out),
           "W496: Lobby verlassen -> Lobby-Bericht");
+    CHECK(strstr(out, "\"sgh\":[2,0,1,0,1],\"sh\":2,\"sho\":1,\"shc\":1") != NULL,
+          "W519: Lobby-Bericht zaehlt Luecken seit Lobbybeginn (Match eingeschlossen)");
     /* Trennung -> Bericht disconnect in der Warteschlange (offline), beim naechsten welcome gesendet */
     loctun_netrep_test(t, 4, 0, 0, 0, "timeout", out, sizeof out);
     k = loctun_netrep_test(t, 6, 0, 0, 0, NULL, line, sizeof line);
@@ -4935,6 +5627,41 @@ static void t_netrep(void)
     t = nr_tun(&N, 0, dir);
     CHECK(t && !nr_exists(qp) && !nr_exists(mp), "W496: Zustimmung zurueckgezogen -> Warteschlange geloescht");
     locnet_shutdown(&N);
+    { /* W522: Absturz-Datensatz des vorigen Laufs -> Bericht "crash" mit Klasse und Ort, Datei weg */
+        char cpa[MAX_PATH];
+        sbct_rec cr;
+        wchar_t cpw[700];
+        _snprintf_s(cpa, sizeof cpa, _TRUNCATE, "%s\\%s", dir, SBCT_FILE);
+        sbct_path(cpw, 700, dir, 0, SBCT_FILE);
+        ct_mkrec(&cr, SBCT_C_AV);
+        cr.ts = sbct_now() - 30u;
+        sbct_write(cpw, &cr);
+        nr_put(mp, "1\n");
+        t = nr_tun(&N, 1, dir);
+        k = t ? loctun_netrep_test(t, 6, 0, 0, 0, NULL, line, sizeof line) : -9;
+        CHECK(k == 1 && strstr(line, "{\"t\":\"net_report\",\"r\":{\"v\":1,\"kind\":\"crash\",\"ver\":\"0.6.3\",\"ed\":\"private\","
+                                     "\"gpu\":4098,\"cls\":\"av\",\"exc\":\"c0000005\",\"acc\":\"w\",\"mod\":\"sb_emu\","
+                                     "\"rva\":\"0012ab34\",\"bkt\":\"89abcdef\",\"ph\":\"match\",\"game\":\"loc\",\"rt\":\"5_15\","
+                                     "\"mem\":\"1_2\",\"rb\":65,\"rs\":1}}") == line && !nr_private(line),
+              "W522: Datensatz -> Bericht crash (Version/GPU des abgestuerzten Laufs, Klasse, Ort, Neustart-Merker)");
+        CHECK(!nr_exists(cpa) && nr_exists(qp), "W522: Datensatz nach dem Einreihen geloescht, Bericht in der Warteschlange");
+        if (t) loctun_netrep_test(t, 7, 0, 0, 0, NULL, out, sizeof out);
+        locnet_shutdown(&N);
+        /* kaputter Datensatz -> verworfen, nur der Code wie bisher (Laufmarke) */
+        DeleteFileA(qp);
+        nr_put(cpa, "SBCT1 ts=1 cls=av path=C:\\x\n");
+        nr_put(mp, "1\n");
+        t = nr_tun(&N, 1, dir);
+        k = t ? loctun_netrep_test(t, 6, 0, 0, 0, NULL, line, sizeof line) : -9;
+        CHECK(k == 1 && strstr(line, "\"kind\":\"crash\"") && !strstr(line, "\"cls\"") && !strstr(line, "C:") && !nr_exists(cpa),
+              "W522: kaputter Datensatz verworfen und geloescht, nur der Code crash");
+        locnet_shutdown(&N);
+        /* ohne Zustimmung -> Datensatz geloescht, nichts gesendet */
+        sbct_write(cpw, &cr);
+        t = nr_tun(&N, 0, dir);
+        CHECK(t && !nr_exists(cpa) && !nr_exists(qp), "W522: ohne Zustimmung Absturz-Datensatz geloescht");
+        locnet_shutdown(&N);
+    }
     RemoveDirectoryA(dir);
 }
 
@@ -4955,9 +5682,18 @@ int main(int argc, char **argv)
         if (strcmp(argv[i], "--vectors") == 0 && i + 1 < argc) {
             sec_unit_tests();
             w454_lan_unit_tests(); /* W454: LAN-Kern (Vektoren, Fuzz) */
+            w519_hold_unit_tests(); /* W519 STALLHOLD */
             vector_tests(argv[i + 1], 1);
             printf("loc_net_selftest --vectors: %d/%d OK\n", s_ok, s_n);
             return s_ok == s_n ? 0 : 1;
+        }
+    }
+    for (i = 1; i < argc; i++) { /* TEST(W522): --ct-note DIR EXITCODE sb|loc SECS = Launcher-Stufe fuer den Labor-Nachweis */
+        if (strcmp(argv[i], "--ct-note") == 0 && i + 4 < argc) {
+            int rc = sbct_launcher_note(argv[i + 1], strtoul(argv[i + 2], NULL, 0),
+                                        strcmp(argv[i + 3], "loc") == 0 ? SBCT_G_LOC : SBCT_G_SB, (unsigned)atoi(argv[i + 4]));
+            printf("ct-note: %d\n", rc);
+            return rc < 0 ? 1 : 0;
         }
     }
     for (i = 1; i < argc; i++) { /* W334: --tls-check host:port --spki HEX[,HEX2] --expect ok|fail */
@@ -4981,6 +5717,16 @@ int main(int argc, char **argv)
                 if (strcmp(argv[j], "--rsim-b") == 0 && j + 1 < argc) strncpy_s(s_rsim_b, sizeof s_rsim_b, argv[j + 1], _TRUNCATE);
             }
             return tun_lobby_test(argv[i + 1], nd, sp);
+        }
+        if (strcmp(argv[i], "--punch") == 0 && i + 1 < argc) { /* W521: --punch host:port [--spki HEX] [--reps N] [--only NAME] */
+            int j, reps = 2;
+            const char *only = NULL;
+            for (j = 1; j < argc - 1; j++) {
+                if (strcmp(argv[j], "--spki") == 0) strncpy_s(s_spki, sizeof s_spki, argv[j + 1], _TRUNCATE);
+                if (strcmp(argv[j], "--reps") == 0) reps = atoi(argv[j + 1]);
+                if (strcmp(argv[j], "--only") == 0) only = argv[j + 1];
+            }
+            return tun_punch_lab(argv[i + 1], reps < 1 ? 1 : reps, only);
         }
         if (strcmp(argv[i], "--route") == 0 && i + 1 < argc) { /* W395 LOC-ROUTE */
             int j, secs = 30, maxsw = -1;
@@ -5016,7 +5762,10 @@ int main(int argc, char **argv)
           "Adressfilter Loopback/privat");
 
     t_camp_redirect(&A); /* W491 CAMP-CLIENT */
+    t_crashtel(); /* W522 CRASH-TELEMETRY */
     t_netrep(); /* W496 NET-TELEMETRY */
+    t_hostmig(); /* W520 HOSTMIG */
+    t_hostmig_prog(); /* W520: Neuaufbau-Ablaeufe */
 
     /* --- Portabbildung --- */
     CHECK(locnet_port_out(&A, ip4("127.0.0.23"), 1202) == 35202, "Port 1202 -> Basis des Mitspielers");
@@ -5250,6 +5999,7 @@ int main(int argc, char **argv)
         w500_resume_tests();     /* W500 LOBBY-RESUME: Fortsetzung der Steuerverbindung */
         w487_gamertag_tests(); /* W487 LIVE-GAMERTAG: Gamertag im welcome */
         w482_live_tun_tests();   /* W482 LIVE-MATCH: Live-Sessions im Transport */
+        w514_chat_tun_tests();   /* W514 ISSUE-112: Chatraum-Beitritt (Typ 4) und Handelstypen */
         w454_lan_tun_tests();    /* W454 LOC-LAN-MODE: LAN ohne steelnet */
     } else {
         printf("Hinweis: eigener Transport nur in der privaten Fassung - Transport-Pruefungen uebersprungen\n");
@@ -5260,6 +6010,7 @@ int main(int argc, char **argv)
     w440_las_tests();  /* W440 LOC-LOBBY-MODES: Durchsetzungsregel */
     w443_llv_tests();  /* W443 LOC-LOBBY-LIST: Zuordnung Zeile <-> Lobby */
     w454_lan_unit_tests(); /* W454 LOC-LAN-MODE: LAN-Kern */
+    w519_hold_unit_tests(); /* W519 STALLHOLD: Stillstand im Spielstrom halten */
     pause_net_tests(); /* W357 */
     printf("loc_net_selftest: %d/%d OK\n", s_ok, s_n);
     return s_ok == s_n ? 0 : 1;

@@ -154,6 +154,27 @@ static int js_ep(const char *v, const char *ve, struct sockaddr_in *out)
     return 1;
 }
 
+/* W521: IPv6-Kandidat ["addr", port] aus peer_info.eps6 -> Ersatzadresse 0.254.0.i (tl_v6_intern). Nur global unicast
+ * (TEST v6_loop: nur ::1); die Adresse selbst wird nie protokolliert. */
+static int lb_js_ep6(loctun *t, const char *v, const char *ve, struct sockaddr_in *out)
+{
+    const char *a = js_arr_first(v, ve), *ae, *b, *be;
+    char ip[64];
+    double port;
+    struct sockaddr_in6 a6;
+    if (!a) return 0;
+    b = js_arr_next(a, ve, &ae);
+    if (!b || !js_str(a, ae, ip, sizeof ip)) return 0;
+    js_arr_next(b, ve, &be);
+    if (!be || !js_num(b, be, &port) || port < 1 || port > 65535) return 0;
+    memset(&a6, 0, sizeof a6);
+    a6.sin6_family = AF_INET6;
+    if (inet_pton(AF_INET6, ip, &a6.sin6_addr) != 1 || !tl_v6_cand_ok(t, &a6.sin6_addr)) return 0;
+    a6.sin6_port = htons((uint16_t)port);
+    SecureZeroMemory(ip, sizeof ip);
+    return tl_v6_intern(t, &a6, out);
+}
+
 /* W440 LOC-LOBBY-MODES: Modus eigener Lobbys beim Anlegen (Einstellung des Hosts; ungueltig = Sim). */
 const char *lb_my_play_mode(const loctun *t)
 {
@@ -290,9 +311,12 @@ void lb_lost(loctun *t, const char *why, double now)
         return;
     }
     if (!t->rs_susp) {
-        /* Frist: der Dienst haelt die Sitzung rttl s nach der letzten eigenen Zeile (Ping alle 15 s) -> mit Abstand davor */
-        double f = (t->rs_ttl_ms > 0 ? (double)t->rs_ttl_ms : 90000.0) - 20000.0;
-        if (f > 60000.0) f = 60000.0;
+        /* Frist: W517 - der Dienst haelt die Sitzung rttl s ab dem Zeitpunkt, an dem er den Abriss bemerkt (seit W517
+         * 120 s; vorher 90 s ab der letzten Zeile). Er bemerkt ihn nie spaeter als wir selbst (Reset sofort, stiller
+         * Abriss: ping_timeout 45 s bzw. unsere Stille-Erkennung 40 s) -> bis rttl - 10 s versuchen (hoechstens 150 s).
+         * Ein zu spaeter Versuch kostet nichts: der Dienst antwortet mit einem normalen Einstieg -> lb_close wie bisher. */
+        double f = (t->rs_ttl_ms > 0 ? (double)t->rs_ttl_ms : 90000.0) - 10000.0;
+        if (f > 150000.0) f = 150000.0;
         if (f < 3000.0) f = 3000.0;
         t->rs_susp = 1;
         t->rs_try = 0;
@@ -373,6 +397,9 @@ static void lb_rs_on_welcome(loctun *t, const char *m, const char *e, int resume
         SecureZeroMemory(k, sizeof k);
         SecureZeroMemory(tok, sizeof tok);
         tl_logf(t, "LOCLOBBY: Fortsetzung abgelehnt - sauberer Neuaufbau (Mitspieler werden neu verbunden)");
+        /* W517: der Dienst hat einen normalen Einstieg gemacht, den wir nicht benutzen (neues E noetig) - abmelden,
+         * damit er ihn nicht 120 s als abgerissene Sitzung haelt und die naechste Anmeldung ihn "ersetzt" */
+        lb_send_now(t, "{\"t\":\"bye\"}");
         lb_close(t, "resume", now);
         t->lb_next_try = now + 500.0;
         return;
@@ -386,6 +413,12 @@ static void lb_rs_on_welcome(loctun *t, const char *m, const char *e, int resume
     t->bound = 0;
     t->rs_susp = 0;
     t->rs_n_ok++;
+    t->lb_rx_last = now; /* W517 */
+    if (t->rs_hint == 1) { /* W517: Hinweis lief -> "wieder verbunden" */
+        InterlockedExchange(&t->rs_hint_pub, 2);
+        tl_logf(t, "LOCLOBBY: Hinweis - wieder mit dem Treffpunkt verbunden");
+    }
+    t->rs_hint = 0;
     t->lb_state = t->lb_joined ? LB_LOBBY : LB_HELLO;
     t->lb_ping_last = now;
     t->rs_cut_next = t->c.cut_s > 0 ? now + 1000.0 * t->c.cut_s : 0;
@@ -416,6 +449,11 @@ static void lb_close(loctun *t, const char *why, double now)
 {
     int i, susp = t->rs_susp; /* W500: gescheiterte Fortsetzung = Trennung einer stehenden Anmeldung */
     nr_on_drop(t, why, now); /* W496: Trennung einer stehenden Anmeldung -> Bericht (Warteschlange) */
+    if (t->rs_hint == 1) { /* W517: Hinweis lief, Fortsetzung gescheitert */
+        InterlockedExchange(&t->rs_hint_pub, 3);
+        tl_logf(t, "LOCLOBBY: Hinweis - Fortsetzung gescheitert, Neuaufbau");
+    }
+    t->rs_hint = 0;
     if (t->lb_state == LB_HELLO || t->lb_state == LB_LOBBY || susp) /* W496 Stufe 1: Grund fuer das naechste hello ("rc") */
         strcpy_s(t->lb_last_drop, sizeof t->lb_last_drop, tl_drop_code(why));
     lb_rs_reset(t);
@@ -586,9 +624,43 @@ static void lb_hello(loctun *t)
         else
             _snprintf_s(b + bl - 1, sizeof b - bl + 1, _TRUNCATE, ",\"rs\":1}");
     }
+    { /* W521 (#119): eigene globale IPv6-Adresse fuer den Durchstich zwischen Spielern (der Treffpunkt reicht sie nur
+       * an Lobby-Partner weiter, braucht selbst kein IPv6; nie ins Log, SECURITY.md §53) */
+        char f6[96];
+        tl_v6_refresh(t, tl_now(t));
+        if (tl_v6_hello_field(t, f6, sizeof f6)) {
+            bl = strlen(b);
+            _snprintf_s(b + bl - 1, sizeof b - bl + 1, _TRUNCATE, "%s}", f6);
+        }
+        SecureZeroMemory(f6, sizeof f6);
+    }
     t->lb_state = LB_HELLO;
+    t->lb_rx_last = tl_now(t); /* W517: Stille-Erkennung ab der neuen Verbindung */
     lb_send_now(t, b); /* W500: direkt, nicht ueber lb_send (Nachsende-Schlange) */
     SecureZeroMemory(b, sizeof b);
+}
+
+/* W517 HOSTRESUME: das Spiel endet geordnet (Fenster zu, Ende des Testlaufs) -> "bye" an den Treffpunkt. Der Dienst
+ * beendet die Sitzung sofort (normaler Austritt, keine 120 s gehaltene Sitzung, kein "Host verloren" fuer die Lobby).
+ * Danach keine Neuverbindung mehr (lb_poll). Aufruf mit t->cs bzw. nach dem Ende des Transport-Threads. */
+void lb_bye(loctun *t)
+{
+    static const char bye[] = "{\"t\":\"bye\"}\n";
+    char sink[512];
+    int k;
+    if (t->lb_bye) return;
+    t->lb_bye = 1;
+    if (t->rs_susp || !t->my_cid || (t->lb_state != LB_HELLO && t->lb_state != LB_LOBBY)) return;
+    lb_cap(t, bye, (int)sizeof bye - 1); /* Selbsttest: Mitschnitt */
+    if (!t->tls || t->lb_s == INVALID_SOCKET) return;
+    if (sbtls_write(t->tls, bye, (int)sizeof bye - 1) != SBTLS_OK) return;
+    sbtls_flush(t->tls);
+    shutdown(t->lb_s, SD_SEND);
+    /* ungelesene Daten verwerfen: sonst setzt closesocket ein RST, das das "bye" beim Dienst ueberholen kann */
+    for (k = 0; k < 64 && recv(t->lb_s, sink, (int)sizeof sink, 0) > 0; k++) {
+    }
+    SecureZeroMemory(sink, sizeof sink);
+    tl_logf(t, "LOCLOBBY: Abmeldung beim Treffpunkt (Spiel endet)");
 }
 
 /* W334: BIND2/KEEPALIVE2 (SECURITY.md §5.1): "SBN1" | Typ | client_id u32 | bctr u64 | HMAC(udp_key, 0..16)[:16] */
@@ -774,6 +846,36 @@ static tlink *tl_link_fresh(loctun *t, tlink *L)
     return tl_link_by_cid(t, cid, 1);
 }
 
+/* W519 STALLHOLD: {"t":"peer_conn","cid":N,"st":"lost","why":"closed|reset|timeout"} bzw. "st":"back" - der Treffpunkt
+ * meldet, dass die Steuerverbindung eines Mitspielers abriss (Sitzung wird fuer die Fortsetzung gehalten) bzw. fortgesetzt
+ * wurde. "closed"/"reset" heisst: der Rechner des Mitspielers hat die Verbindung selbst beendet (Spiel zu, Absturz) -
+ * ein gleichzeitiger Stillstand im Spielstrom ist dann ein Abgang, kein Stau. "timeout" (Stille) bleibt ein Stau. Nur
+ * fuer bestehende Verbindungen, feste Werte, sonst verworfen. */
+static void lb_on_peer_conn(loctun *t, const char *m, const char *e)
+{
+    const char *v, *ve;
+    double cid = 0;
+    char st[8] = "", why[12] = "";
+    tlink *L;
+    v = js_get(m, e, "cid", &ve);
+    if (!js_num(v, ve, &cid) || !(cid > 0 && cid <= 4294967295.0)) return;
+    v = js_get(m, e, "st", &ve);
+    if (!js_str(v, ve, st, sizeof st)) return;
+    v = js_get(m, e, "why", &ve);
+    js_str(v, ve, why, sizeof why);
+    L = tl_link_by_cid(t, (uint32_t)cid, 0);
+    if (!L || !L->used) return;
+    if (strcmp(st, "lost") == 0 && (strcmp(why, "closed") == 0 || strcmp(why, "reset") == 0)) {
+        if (!L->gone_hint) tl_logf(t, "LOCLOBBY: c%u Steuerverbindung beendet (%s) - Stillstand gilt als Abgang", L->cid, why);
+        L->gone_hint = 1;
+    } else if (strcmp(st, "lost") == 0 && strcmp(why, "timeout") == 0) {
+        tl_logf(t, "LOCLOBBY: c%u Steuerverbindung still (timeout) - Stillstand wird gehalten", L->cid);
+    } else if (strcmp(st, "back") == 0) {
+        if (L->gone_hint) tl_logf(t, "LOCLOBBY: c%u Sitzung fortgesetzt - wieder verbunden", L->cid);
+        L->gone_hint = 0;
+    }
+}
+
 static void lb_on_peer_info(loctun *t, const char *m, const char *e)
 {
     const char *v, *ve, *el, *ee, *x = NULL, *xe = NULL;   /* W332: /sdl C4703 */
@@ -804,7 +906,15 @@ static void lb_on_peer_info(loctun *t, const char *m, const char *e)
         tl_logf(t, "LOCSEC: peer_info fuer c%u unvollstaendig/ungueltig - verworfen", (unsigned)peer);
         return;
     }
-    /* Adressen fuer den Durchstich */
+    /* Adressen fuer den Durchstich - W521: IPv6 zuerst (meist nur eine Firewall-Regel, kein NAT), nur mit eigenem
+     * IPv6; hoechstens 2, nur global unicast (tl_v6_cand_ok) */
+    if (t->have6 && !t->c.punch_legacy) {
+        v = js_get(m, e, "eps6", &ve);
+        for (el = js_arr_first(v, ve); el && ncand < 2; el = js_arr_next(el, ve, &ee)) {
+            const char *y = js_skip(el, ve, 0);
+            if (y && lb_js_ep6(t, el, y, &ep)) cand[ncand++] = ep;
+        }
+    }
     v = js_get(m, e, "public_ep", &ve);
     if (js_ep(v, ve, &ep) && tl_dest_ok(t, ep.sin_addr.s_addr)) cand[ncand++] = ep;
     v = js_get(m, e, "local_eps", &ve);
@@ -815,6 +925,11 @@ static void lb_on_peer_info(loctun *t, const char *m, const char *e)
         for (k = 0; k < ncand; k++) dup |= sa_eq(&cand[k], &ep);
         if (!dup) cand[ncand++] = ep;
     }
+    if (t->c.cand_skew) { /* W521 TEST NAT-Nachbildung: Partner hinter symmetrischem NAT (gemeldete Zuordnung falsch) */
+        for (k = 0; k < ncand; k++) {
+            if (!tl_is_v6(&cand[k])) cand[k].sin_port = htons((uint16_t)(ntohs(cand[k].sin_port) + t->c.cand_skew));
+        }
+    }
     L = tl_link_by_cid(t, (uint32_t)peer, 1);
     if (!L) return;
     if (L->e2e.valid || L->blocked) {
@@ -824,11 +939,8 @@ static void lb_on_peer_info(loctun *t, const char *m, const char *e)
             if (!L->blocked) {
                 memcpy(L->cand, cand, sizeof cand);
                 L->ncand = ncand;
-                if (!L->direct_ok && !t->c.nodirect && !L->punching) {
-                    L->punching = 1;
-                    L->punch_start = tl_now(t);
-                    L->punch_last = 0;
-                }
+                memset(L->probes_tx, 0, sizeof L->probes_tx); /* W521: neue Adressen, neues Budget (Treffpunkt-Takt) */
+                if (!L->direct_ok && !t->c.nodirect && !L->punching) tl_punch_start(t, L, 1, tl_now(t));
             }
             return;
         }
@@ -854,6 +966,178 @@ static void lb_on_peer_info(loctun *t, const char *m, const char *e)
     if (k != TL_PAIR_OK) return;
     tl_logf(t, "LOCLOBBY: Mitspieler c%u (%s, %s), %d Adressen fuer den Durchstich, Ende-zu-Ende-Schluessel bereit%s",
             L->cid, L->pilot, L->account ? "Konto" : "Gast", L->ncand, t->c.nodirect ? " (direkt aus: TEST)" : "");
+}
+
+/* ====================================================================== W520 HOSTMIG (LOC_BOOT §96)
+ * Host-Wechsel der steelnet-Lobby: der Dienst waehlt (SECURITY.md §49), der Client merkt sich Host und Eigenschaften
+ * und reicht host_changed einmal an das Spiel weiter (Hinweis, Neuaufbau der Spiel-Session). Namen nie ins Log. */
+const char *lb_hostmig_fields(const loctun *t)
+{
+    if (!t->c.host_mig) return "";
+    return t->c.auto_host ? ",\"host_migration\":true,\"auto_host\":true" : ",\"host_migration\":true";
+}
+
+static int hm_true(const char *v, const char *ve)
+{
+    return v && ve - v == 4 && memcmp(v, "true", 4) == 0;
+}
+
+/* Name fuer die Anzeige: nur druckbares ASCII, gekuerzt (wie die Lobby-Liste). */
+static void hm_name(const char *v, const char *ve, char *out, size_t cap)
+{
+    char tmp[64] = "";
+    size_t i, k = 0;
+    out[0] = 0;
+    if (!js_str(v, ve, tmp, sizeof tmp)) return;
+    for (i = 0; tmp[i] && k + 1 < cap; i++) {
+        if (tmp[i] >= 0x20 && tmp[i] < 0x7F) out[k++] = tmp[i];
+    }
+    out[k] = 0;
+}
+
+static void hm_on_state(loctun *t, const char *lb, const char *lbe)
+{
+    const char *v, *ve, *el;
+    double x = 0;
+    v = js_get(lb, lbe, "host_migration", &ve);
+    t->hm_mig = hm_true(v, ve);
+    v = js_get(lb, lbe, "auto_host", &ve);
+    t->hm_auto = hm_true(v, ve);
+    v = js_get(lb, lbe, "suggest", &ve);
+    t->hm_sugg = (js_num(v, ve, &x) && x > 0 && x <= 4294967295.0) ? (uint32_t)x : 0;
+    v = js_get(lb, lbe, "members", &ve);
+    t->hm_nmem = 0;
+    for (el = js_arr_first(v, ve); el; el = js_arr_next(el, ve, NULL)) {
+        const char *ee = js_skip(el, ve, 0), *h, *he, *c, *ce;
+        if (t->hm_nmem < 64) t->hm_nmem++;
+        double cid = 0;
+        if (!ee) break;
+        h = js_get(el, ee, "host", &he);
+        c = js_get(el, ee, "client_id", &ce);
+        if (hm_true(h, he) && js_num(c, ce, &cid) && cid > 0 && cid <= 4294967295.0) {
+            if (t->hm_host != (uint32_t)cid) t->hm_gone_sent = 0;
+            t->hm_host = (uint32_t)cid;
+        }
+    }
+}
+
+static void hm_on_changed(loctun *t, const char *m, const char *e)
+{
+    const char *v, *ve;
+    double h = 0, o = 0;
+    char why[12] = "";
+    loctun_hostmig_ev ev;
+    memset(&ev, 0, sizeof ev);
+    v = js_get(m, e, "host", &ve);
+    if (!js_num(v, ve, &h) || !(h > 0 && h <= 4294967295.0)) return;
+    v = js_get(m, e, "old", &ve);
+    if (!js_num(v, ve, &o) || !(o > 0 && o <= 4294967295.0)) o = 0;
+    ev.host_cid = (uint32_t)h;
+    ev.old_cid = (uint32_t)o;
+    v = js_get(m, e, "pilot", &ve);
+    hm_name(v, ve, ev.host, sizeof ev.host);
+    v = js_get(m, e, "old_pilot", &ve);
+    hm_name(v, ve, ev.old, sizeof ev.old);
+    v = js_get(m, e, "reason", &ve);
+    js_str(v, ve, why, sizeof why);
+    ev.reason = strcmp(why, "auto") == 0 ? 3 : strcmp(why, "lost") == 0 ? 2 : 1;
+    ev.me_new = ev.host_cid == t->my_cid;
+    ev.me_old = ev.old_cid != 0 && ev.old_cid == t->my_cid;
+    t->hm_host = ev.host_cid;
+    t->hm_gone_sent = 0;
+    t->hm_hand_sent = 0;
+    if (t->pub) { /* W373: oeffentliche Lobby - der neue Host veroeffentlicht (lobby_update), der alte nicht mehr */
+        t->pub_host = ev.me_new;
+        t->pub_started = 0;
+    }
+    t->hm_ev = ev;
+    t->hm_have = 1;
+    tl_logf(t, "LOCHOSTMIG: Host der Lobby gewechselt (%s) - c%u -> c%u%s", ev.reason == 3 ? "Auto-Host" :
+            ev.reason == 2 ? "Host verloren" : "Host gegangen", ev.old_cid, ev.host_cid,
+            ev.me_new ? ", dieser Client ist der neue Host" : ev.me_old ? ", dieser Client gibt den Host ab" : "");
+}
+
+int loctun_hostmig_poll(loctun *t, loctun_hostmig_ev *ev)
+{
+    int r = 0;
+    if (!t || !ev) return 0;
+    EnterCriticalSection(&t->cs);
+    if (t->hm_have) {
+        *ev = t->hm_ev;
+        t->hm_have = 0;
+        r = 1;
+    }
+    LeaveCriticalSection(&t->cs);
+    return r;
+}
+
+int loctun_hostmig_info(loctun *t, int *mig, int *autoh, int *sugg_me, int *am_host)
+{
+    int r;
+    if (!t) return 0;
+    EnterCriticalSection(&t->cs);
+    r = t->lb_joined && t->lb_state == LB_LOBBY;
+    if (mig) *mig = r && t->hm_mig;
+    if (autoh) *autoh = r && t->hm_auto;
+    if (sugg_me) *sugg_me = r && t->hm_sugg != 0 && t->hm_sugg == t->my_cid;
+    if (am_host) *am_host = r && t->hm_host != 0 && t->hm_host == t->my_cid;
+    LeaveCriticalSection(&t->cs);
+    return r;
+}
+
+void loctun_hostmig_sugg_name(loctun *t, char *out, int cap)
+{
+    int i, k = 0;
+    if (!out || cap <= 0) return;
+    out[0] = 0;
+    if (!t) return;
+    EnterCriticalSection(&t->cs);
+    if (t->hm_sugg && t->hm_sugg != t->my_cid) {
+        tlink *L = tl_link_by_cid(t, t->hm_sugg, 0);
+        if (L) {
+            for (i = 0; L->pilot[i] && k + 1 < cap; i++) {
+                if (L->pilot[i] >= 0x20 && L->pilot[i] < 0x7F) out[k++] = L->pilot[i];
+            }
+            out[k] = 0;
+        }
+    }
+    LeaveCriticalSection(&t->cs);
+}
+
+int loctun_hostmig_members(loctun *t)
+{
+    int n;
+    if (!t) return 0;
+    EnterCriticalSection(&t->cs);
+    n = (t->lb_joined && t->lb_state == LB_LOBBY) ? t->hm_nmem : 0;
+    LeaveCriticalSection(&t->cs);
+    return n;
+}
+
+void loctun_host_gone(loctun *t)
+{
+    char b[80];
+    if (!t) return;
+    EnterCriticalSection(&t->cs);
+    if (t->lb_joined && t->lb_state == LB_LOBBY && t->hm_mig && t->hm_host && t->hm_host != t->my_cid && !t->hm_gone_sent) {
+        _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"host_gone\",\"host\":%u}", t->hm_host);
+        lb_send(t, b);
+        t->hm_gone_sent = 1;
+        tl_logf(t, "LOCHOSTMIG: Spiel hat den Host c%u verloren - an den Treffpunkt gemeldet", t->hm_host);
+    }
+    LeaveCriticalSection(&t->cs);
+}
+
+void loctun_handover(loctun *t)
+{
+    if (!t) return;
+    EnterCriticalSection(&t->cs);
+    if (t->lb_joined && t->lb_state == LB_LOBBY && t->hm_auto && t->hm_host == t->my_cid && !t->hm_hand_sent) {
+        lb_send(t, "{\"t\":\"lobby_handover\"}");
+        t->hm_hand_sent = 1;
+        tl_logf(t, "LOCHOSTMIG: Auto-Host - Uebergabe an den stabilsten Spieler angefragt");
+    }
+    LeaveCriticalSection(&t->cs);
 }
 
 static void lb_on_lobby_state(loctun *t, const char *m, const char *e)
@@ -887,6 +1171,7 @@ static void lb_on_lobby_state(loctun *t, const char *m, const char *e)
         if (v && js_str(v, ve, pm, sizeof pm) && las_parse(pm)) mode = las_parse(pm);
         lb_play_mode_set(t, mode, v ? (las_parse(pm) ? "lobby_state" : "lobby_state, unbekannter Wert") : "lobby_state ohne Feld");
     }
+    hm_on_state(t, lb, lbe); /* W520 HOSTMIG */
     if (!t->lb_joined) {
         t->lb_joined = 1;
         t->lb_state = LB_LOBBY;
@@ -914,6 +1199,7 @@ static void lb_on_lobby_state(loctun *t, const char *m, const char *e)
             tl_logf(t, "LOCLOBBY: c%u hat die Lobby verlassen", L->cid);
             L->down_logged = 1;
         }
+        if (!found && L->up) L->gone_hint = 1; /* W519: kein Halten eines Stillstands fuer Gegangene */
     }
 }
 
@@ -936,8 +1222,8 @@ static void lb_enter(loctun *t)
         tl_js_esc(t->c.room, r, sizeof r); /* W329; v2: nur Anzeigename */
         _snprintf_s(b, sizeof b, _TRUNCATE,
                     "{\"t\":\"lobby_create\",\"name\":\"%s\",\"game\":\"loc\",\"mode\":\"syslink\",\"map\":\"any\","
-                    "\"max_players\":10,\"rules\":{},\"visibility\":\"code\",\"play_mode\":\"%s\"}",
-                    r, lb_my_play_mode(t)); /* W440 */
+                    "\"max_players\":10,\"rules\":{},\"visibility\":\"code\",\"play_mode\":\"%s\"%s}",
+                    r, lb_my_play_mode(t), lb_hostmig_fields(t)); /* W440, W520 */
         lb_send(t, b);
     }
     t->lb_listed = 1;
@@ -1029,6 +1315,7 @@ static void lb_on_line_x(loctun *t, const char *m, const char *e, double now);
 void lb_on_line(loctun *t, const char *m, const char *e, double now)
 {
     int cnt = t->rs_count && !t->rs_susp;
+    t->lb_rx_last = now; /* W517: Stille-Erkennung */
     lb_on_line_x(t, m, e, now);
     if (cnt && t->rs_count) t->rs_rx++;
 }
@@ -1220,12 +1507,21 @@ static void lb_on_line_x(loctun *t, const char *m, const char *e, double now)
     } else if (strcmp(typ, "lobby_state") == 0) {
         lb_on_lobby_state(t, m, e);
         if (t->pub) pub_on_state(t, m, e); /* W373 */
+    } else if (strcmp(typ, "peer_conn") == 0) { /* W519 */
+        lb_on_peer_conn(t, m, e);
     } else if (strcmp(typ, "peer_info") == 0) {
         lb_on_peer_info(t, m, e);
     } else if (strcmp(typ, "route") == 0) {
         lb_on_route(t, m, e);
+    } else if (strcmp(typ, "host_changed") == 0) {
+        hm_on_changed(t, m, e); /* W520 HOSTMIG */
+    } else if (strcmp(typ, "lobby_handover") == 0) {
+        tl_logf(t, "LOCHOSTMIG: Auto-Host - Antwort des Treffpunkts erhalten"); /* W520 */
     } else if (strcmp(typ, "lobby_closed") == 0) {
         int i;
+        t->hm_host = t->hm_sugg = 0; /* W520 */
+        t->hm_nmem = 0;
+        t->hm_mig = t->hm_auto = 0;
         tl_logf(t, "LOCLOBBY: Lobby geschlossen (Host gegangen)");
         nr_on_host_left(t); /* W496 */
         for (i = 0; i < TUN_MAX_LINKS; i++) { /* §4.2 Punkt 5: Schluessel loeschen, Stellvertreter schliessen */
@@ -1319,13 +1615,28 @@ static void lb_on_line_x(loctun *t, const char *m, const char *e, double now)
 
 void lb_poll(loctun *t, double now)
 {
-    if (!t->c.lobby[0]) return;
+    if (!t->c.lobby[0] || t->lb_bye) return; /* W517: nach "bye" (Spiel endet) keine Neuverbindung */
+    if (t->rs_susp && !t->rs_hint && now - t->rs_since >= 3000.0) { /* W517: Hinweis erst nach 3 s (kurze Luecken still) */
+        t->rs_hint = 1;
+        InterlockedExchange(&t->rs_hint_pub, 1);
+        tl_logf(t, "LOCLOBBY: Hinweis - verbinde neu mit dem Treffpunkt (Mitspieler bleiben verbunden)");
+    }
     if (t->lb_state == LB_OFF) {
         if (t->rs_susp && now >= t->rs_deadline) { /* W500: Frist vorbei -> sauberer Neuaufbau wie bisher */
             lb_close(t, "resume-frist", now);
             return;
         }
         if (now >= t->lb_next_try) lb_connect(t, now);
+        return;
+    }
+    /* W517: stiller Abriss (WLAN-Pause, Router neu verbunden): Der Dienst antwortet auf jeden Ping (alle 15 s); kommt
+     * 40 s lang keine Zeile, ist die Verbindung tot, auch wenn TCP noch nichts meldet -> fortsetzen statt warten. Nur
+     * fortsetzbare Sitzungen (Gaeste/aeltere Dienste unveraendert). */
+    if (t->rs_count && t->my_cid && t->lb_rx_last != 0.0 && now - t->lb_rx_last >= 40000.0 &&
+        (t->lb_state == LB_HELLO || t->lb_state == LB_LOBBY) && !t->rs_susp) {
+        tl_logf(t, "LOCLOBBY: seit %.0f s keine Zeile vom Treffpunkt - Verbindung gilt als abgerissen (stille)",
+                (now - t->lb_rx_last) / 1000.0);
+        lb_lost(t, "timeout", now);
         return;
     }
     if (t->lb_s == INVALID_SOCKET) return;
@@ -1603,12 +1914,14 @@ int loctun_test_resume(loctun *t, int op, uint32_t arg, char *out, int cap)
         }
         _snprintf_s(out, (size_t)cap, _TRUNCATE,
                     "susp=%d st=%d cid=%u count=%d rx=%llu base=%llu qn=%d tok=%08x udp=%02x%02x%02x%02x bctr=%llu bound=%d "
-                    "links=%d valid=%d sid=%08x ktx=%p pub=%02x%02x%02x%02x lobby=%d joined=%d",
+                    "links=%d valid=%d sid=%08x ktx=%p pub=%02x%02x%02x%02x lobby=%d joined=%d dl=%d hint=%d relink=%d bye=%d "
+                    "gh=%d",
                     t->rs_susp, t->lb_state, t->my_cid, t->rs_count, (unsigned long long)t->rs_rx,
                     (unsigned long long)t->rs_base, t->rs_qn, w500_fnv(t->rs_tok), t->udp_key[0], t->udp_key[1], t->udp_key[2],
                     t->udp_key[3], (unsigned long long)t->bctr, t->bound, nl, nv, L0 ? L0->e2e.sid : 0,
                     L0 ? L0->e2e.ktx : NULL, t->my_pub[0], t->my_pub[1], t->my_pub[2], t->my_pub[3],
-                    loctun_lobby_state(t), t->lb_joined);
+                    loctun_lobby_state(t), t->lb_joined, t->rs_susp ? (int)(t->rs_deadline - t->rs_since) : 0, t->rs_hint,
+                    loctun_relink_state(t), t->lb_bye, L0 ? L0->gone_hint : -1);
         break;
     case 5:
         t->rs_deadline = now - 1.0;
@@ -1622,6 +1935,33 @@ int loctun_test_resume(loctun *t, int op, uint32_t arg, char *out, int cap)
         break;
     case 8:
         t->c.resume = (int)arg;
+        break;
+    case 9: /* W517: Spiel endet geordnet */
+        lb_bye(t);
+        break;
+    case 10: /* W517: Zeitsprung arg ms (Stille bzw. Dauer der Luecke), dann lb_poll */
+        t->lb_rx_last -= (double)arg;
+        t->rs_since -= (double)arg;
+        lb_poll(t, now);
+        break;
+    case 11: /* W517: Abmeldung zuruecknehmen (naechster Selbsttest-Fall) */
+        t->lb_bye = 0;
+        break;
+    case 12: /* W519: erste Verbindung gilt als aufgebaut mit vip arg (ohne echtes UDP), letztes Paket jetzt */
+    case 13: /* W519: letztes Paket der ersten Verbindung arg ms zurueck */
+        for (i = 0; i < TUN_MAX_LINKS; i++) {
+            tlink *L = &t->links[i];
+            if (!L->used || !L->cid) continue;
+            if (op == 12) { /* arg 0 = wieder zuruecksetzen (vor dem Ende des Selbsttest-Falls) */
+                L->up = arg ? 1 : 0;
+                L->vip = arg;
+                L->last_rx = now;
+                L->last_tx = now + 3600000.0; /* keine Lebenszeichen ueber den (nicht vorhandenen) Weg */
+            } else {
+                L->last_rx -= (double)arg;
+            }
+            break;
+        }
         break;
     default:
         break;

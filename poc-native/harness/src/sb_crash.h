@@ -46,6 +46,16 @@ int sb_crash_report(EXCEPTION_POINTERS *ep, const char *why, const char *text, i
                     char *out_path, size_t cap);
 /* emu_main.c watchdog: alle 5 s (Test-Schalter, Haenger, Erholung). */
 void sb_crash_tick(int waited);
+/* W516 ISSUE-114: Grafikgeraet verloren (d3d11_render.c sb_render_device_lost): fataler Bericht im Absturz-
+ * Ordner (status fatal, reason = Kurzzeile, gpu_lost.txt = detail, gpu_lost.dmp = Minidump aller Threads,
+ * log_tail.txt). Jeder Bericht (auch Absturz/Haenger) fuehrt in info.txt die Zeile "gpu-device:"
+ * (GetDeviceRemovedReason). 1 = geschrieben. */
+int sb_crash_gpu_lost(const char *reason, const char *detail);
+/* TEST(W516) [diag] gpu_lost_test=N: Sekunden bis zum kuenstlichen Geraeteverlust (0 = aus). */
+int sb_crash_gpu_lost_test(void);
+/* W522 CRASH-TELEMETRY: Geraeteverlust als Datensatz fuer den Netzbericht (nur mit net_report=1), vor
+ * sb_crash_gpu_lost. hr = Ergebnis von Present, why = GetDeviceRemovedReason. */
+void sb_crash_tel_gpu(long hr, long why);
 
 #ifdef __cplusplus
 }

@@ -17,6 +17,7 @@
  * Alles im Transport-Thread bzw. unter t->cs, Takt 1 s (nr_tick); kein Einfluss auf Spiel-Thread oder Netz-Timing. */
 #include "loc_tun_int.h"
 #include "sb_edition.h"
+#include "sb_crashtel.h" /* W522 CRASH-TELEMETRY */
 
 #define NR_Q 4
 #define NR_LINE 700
@@ -44,8 +45,14 @@ typedef struct tnetrep {
     int match_done;            /* Match wegen "allein" beendet: neues erst nach dem Missionsende des Spiels */
     double match_at, alone_at; /* alone_at: seit wann kein Mitspieler mehr verbunden ist (0 = verbunden) */
     unsigned rb0, ds0;
+    unsigned gh0[5], sh0, sho0, shc0; /* W519: Stand der Stillstandszaehler bei Matchbeginn */
+    unsigned lgh0[5], lsh0, lsho0, lshc0; /* W519: ... bei Lobbybeginn */
     uint32_t cid[TUN_MAX_LINKS];
     unsigned hist[TUN_MAX_LINKS][NR_PC], loss_sum[TUN_MAX_LINKS], loss_n[TUN_MAX_LINKS];
+    /* W521 NETPATHS (#118/#119): Wegwechsel, direkte IPv6-Wege und Gruende getrennter Verbindungen im Match */
+    LONG psw0;                 /* t->path_sw beim Matchbeginn */
+    int plb, plh, plc;         /* getrennt durch BYE des Partners / Lobby-Ende (Host) / eigene Steuerverbindung */
+    uint8_t d6[TUN_MAX_LINKS]; /* Mitspieler (Slot wie cid[]) war direkt ueber IPv6 verbunden */
     /* Warteschlange */
     char q[NR_Q][NR_LINE];
     int nq;
@@ -159,6 +166,22 @@ static int nr_links(loctun *t, int *up)
 }
 
 /* Bericht bauen und einreihen. kind: lobby|match|disconnect|crash; end/why: Codes (NULL = Feld weglassen) */
+/* W519 STALLHOLD: Luecken im Spielstrom nach Laenge und gehaltene Stillstaende seit dem Stand g0/h0 (nur Zaehler) */
+static int nr_stall_fields(char *b, int cap, const loctun_game_info *gi, const unsigned *g0, unsigned h0, unsigned ho0,
+                           unsigned hc0)
+{
+    unsigned d[5], hs = gi->st_holds - h0, ho = gi->st_ok - ho0, hc = gi->st_cap - hc0;
+    int i;
+    if (cap <= 1) return 0;
+    for (i = 0; i < 5; i++) {
+        d[i] = gi->st_gh[i] - g0[i];
+        if (d[i] > 1000) d[i] = 1000;
+    }
+    i = _snprintf_s(b, (size_t)cap, _TRUNCATE, ",\"sgh\":[%u,%u,%u,%u,%u],\"sh\":%u,\"sho\":%u,\"shc\":%u", d[0], d[1], d[2],
+                    d[3], d[4], hs > 1000 ? 1000 : hs, ho > 1000 ? 1000 : ho, hc > 1000 ? 1000 : hc);
+    return i < 0 ? cap : i; /* abgeschnitten -> der Aufrufer verwirft den Bericht */
+}
+
 static void nr_report(loctun *t, const char *kind, const char *end, const char *why, int np, double dur_ms, int match)
 {
     tnetrep *r = t->nr;
@@ -208,15 +231,60 @@ static void nr_report(loctun *t, const char *kind, const char *end, const char *
             o += _snprintf_s(b + o, sizeof b - o, _TRUNCATE, ",\"rbs\":%.1f,\"desync\":%u", rbs > 1000.0 ? 1000.0 : rbs,
                              ds > 100 ? 100 : ds);
         }
+        if (have) o += nr_stall_fields(b + o, (int)sizeof b - o, &gi, r->gh0, r->sh0, r->sho0, r->shc0); /* W519 */
         o += _snprintf_s(b + o, sizeof b - o, _TRUNCATE, ",\"path\":\"%s\"",
                          r->path_mask == 3 ? "mixed" : r->path_mask == 2 ? "relay" : r->path_mask == 1 ? "direct" : "none");
         if ((r->path_mask & 2) && r->relay_i >= 0 && r->relay_i < t->nrelays) nr_clean(t->relays[r->relay_i].name, rel, 24, 1);
         if (rel[0]) o += _snprintf_s(b + o, sizeof b - o, _TRUNCATE, ",\"relay\":\"%s\"", rel);
+        { /* W521: Wegwechsel, direkte IPv6-Wege, Gruende getrennter Verbindungen (nur Zahlen) */
+            LONG sw = t->path_sw - r->psw0;
+            int d6 = 0;
+            for (i = 0; i < TUN_MAX_LINKS; i++) d6 += r->d6[i];
+            o += _snprintf_s(b + o, sizeof b - o, _TRUNCATE, ",\"psw\":%ld,\"d6\":%d,\"plb\":%d,\"plh\":%d,\"plc\":%d",
+                             sw < 0 ? 0L : (sw > 100 ? 100L : sw), d6 > 10 ? 10 : d6, r->plb > 10 ? 10 : r->plb,
+                             r->plh > 10 ? 10 : r->plh, r->plc > 10 ? 10 : r->plc);
+        }
     }
+    if (!match && have && strcmp(kind, "lobby") == 0) /* W519: Luecken seit Lobbybeginn */
+        o += nr_stall_fields(b + o, (int)sizeof b - o, &gi, r->lgh0, r->lsh0, r->lsho0, r->lshc0);
     if (o <= 0 || o >= (int)sizeof b - 3) return; /* abgeschnitten: lieber nichts als ein kaputter Bericht */
     strcat_s(b, sizeof b, "}}");
     nr_push(t, b);
     tl_logf(t, "LOCNETREP: Netzbericht \"%s\" eingereiht (%d in der Warteschlange)", kind, r->nq);
+}
+
+/* W521 (#118): warum eine Verbindung im Match endete (nur Zaehler, keine Kennung) */
+void nr_on_link_drop(loctun *t, const tlink *L, const char *why)
+{
+    tnetrep *r = t->nr;
+    if (!r || !r->match || !L->up || !why) return;
+    if (strcmp(why, "Partner hat beendet") == 0) r->plb++;
+    else if (strcmp(why, "Lobby geschlossen") == 0) r->plh++;
+    else if (strcmp(why, "Treffpunkt getrennt") == 0) r->plc++;
+}
+
+/* W522 CRASH-TELEMETRY: Bericht "crash" mit dem Datensatz des abgestuerzten Laufs (sb_crashtel.c, streng gelesen):
+ * Version/Fassung/GPU des abgestuerzten Laufs, Klasse, Ausnahmecode, Modul+RVA, Bucket, Phase usw. Ohne Datensatz (nur
+ * die Laufmarke) wie bisher nur der Code "crash". */
+static void nr_report_crash(loctun *t, const sbct_rec *cr)
+{
+    char b[NR_LINE], ver[20], ct[400];
+    int o, n = 0, comm = SB_EDITION_COMMUNITY ? 1 : 0;
+    unsigned gpu = t->c.gpu_vendor;
+    if (cr && cr->gpu) gpu = cr->gpu;
+    if (cr && cr->ed) comm = cr->ed == SBCT_E_COMMUNITY;
+    if (cr && cr->ver[0]) strcpy_s(ver, sizeof ver, cr->ver);
+    else nr_clean(tl_myver(t), ver, 17, 0);
+    if (cr) n = sbct_json(ct, (int)sizeof ct, cr, sbct_now());
+    o = _snprintf_s(b, sizeof b, _TRUNCATE, "{\"t\":\"net_report\",\"r\":{\"v\":1,\"kind\":\"crash\"");
+    if (ver[0]) o += _snprintf_s(b + o, sizeof b - o, _TRUNCATE, ",\"ver\":\"%s\"", ver);
+    o += _snprintf_s(b + o, sizeof b - o, _TRUNCATE, ",\"ed\":\"%s\",\"gpu\":%u%s", comm ? "community" : "private",
+                     gpu & 0xFFFFu, n > 0 ? ct : "");
+    if (o <= 0 || o >= (int)sizeof b - 3) return; /* abgeschnitten: lieber nichts als ein kaputter Bericht */
+    strcat_s(b, sizeof b, "}}");
+    nr_push(t, b);
+    tl_logf(t, "LOCNETREP: Netzbericht \"crash\" eingereiht (%s, %d in der Warteschlange)",
+            cr && sbct_cls_name(cr->cls) ? sbct_cls_name(cr->cls) : "ohne Datensatz", t->nr->nq);
 }
 
 const char *tl_drop_code(const char *why)
@@ -235,13 +303,16 @@ void nr_start(loctun *t)
 {
     tnetrep *r;
     char qp[300] = "", mp[300] = "";
+    wchar_t cp[700] = L"";
     if (t->c.netrep_dir[0]) {
         _snprintf_s(qp, sizeof qp, _TRUNCATE, "%s\\net_report_q.txt", t->c.netrep_dir);
         _snprintf_s(mp, sizeof mp, _TRUNCATE, "%s\\net_report_run.txt", t->c.netrep_dir);
+        sbct_path(cp, 700, t->c.netrep_dir, 0, SBCT_FILE); /* W522: Absturz-Datensatz */
     }
     if (!t->c.net_report) { /* keine Zustimmung (bzw. zurueckgezogen): nichts behalten, nichts senden */
         if (qp[0] && DeleteFileA(qp)) tl_logf(t, "LOCNETREP: Zustimmung aus - alte Warteschlange geloescht");
         if (mp[0]) DeleteFileA(mp);
+        if (cp[0] && DeleteFileW(cp)) tl_logf(t, "LOCNETREP: Zustimmung aus - alter Absturz-Datensatz geloescht"); /* W522 */
         return;
     }
     if (!t->c.lobby[0]) return; /* nur steelnet (LAN/Test ohne Treffpunkt: kein Bericht) */
@@ -254,7 +325,11 @@ void nr_start(loctun *t)
     nr_load(t);
     if (mp[0]) {
         FILE *f = NULL;
-        if (GetFileAttributesA(mp) != INVALID_FILE_ATTRIBUTES) nr_report(t, "crash", NULL, NULL, 0, -1.0, 0);
+        sbct_rec cr;
+        int crs = cp[0] ? sbct_read(cp, &cr) : 0; /* W522: 1 = gueltiger Datensatz, -1 = verworfen, 0 = keiner */
+        if (crs == 1) nr_report_crash(t, &cr);
+        else if (GetFileAttributesA(mp) != INVALID_FILE_ATTRIBUTES) nr_report_crash(t, NULL);
+        if (crs != 0) DeleteFileW(cp); /* eingereiht (die Warteschlange traegt ihn weiter) bzw. kaputt: weg */
         if (fopen_s(&f, mp, "wb") == 0 && f) {
             fputs("1\n", f);
             fclose(f);
@@ -309,6 +384,10 @@ static void nr_match_begin(loctun *t, const loctun_game_info *gi, double now)
     r->match_at = now;
     r->rb0 = gi->rb_total;
     r->ds0 = gi->desyncs;
+    memcpy(r->gh0, gi->st_gh, sizeof r->gh0); /* W519 */
+    r->sh0 = gi->st_holds;
+    r->sho0 = gi->st_ok;
+    r->shc0 = gi->st_cap;
     r->np = gi->npeers >= 0 ? gi->npeers + 1 : n + 1;
     r->up_max = up;
     r->peer_lost = 0;
@@ -319,6 +398,9 @@ static void nr_match_begin(loctun *t, const loctun_game_info *gi, double now)
     memset(r->hist, 0, sizeof r->hist);
     memset(r->loss_sum, 0, sizeof r->loss_sum);
     memset(r->loss_n, 0, sizeof r->loss_n);
+    r->psw0 = t->path_sw; /* W521 */
+    r->plb = r->plh = r->plc = 0;
+    memset(r->d6, 0, sizeof r->d6);
     if (r->hint == NR_H_HOST) r->hint = NR_H_NONE;
 }
 
@@ -345,6 +427,7 @@ static void nr_match_sample(loctun *t)
         r->loss_sum[slot] += (unsigned)(L->loss_in < 0 ? 0 : L->loss_in);
         r->loss_n[slot]++;
         if (L->path == 1) r->path_mask |= 1;
+        if (L->path == 1 && tl_is_v6(&L->direct)) r->d6[slot] = 1; /* W521 */
         if (L->path == 2) {
             r->path_mask |= 2;
             r->relay_i = L->relay_idx;
@@ -366,6 +449,9 @@ static void nr_match_end(loctun *t, const loctun_game_info *gi, double now, cons
     if (!end) {
         if (gi && gi->desyncs != r->ds0) end = "desync";
         else if (r->hint == NR_H_DISC) end = "disconnect";
+        /* W521 (#118): Lobby-Ende durch den Host trennt alle - das ist "host_left", kein Netzverlust (vorher gewann
+         * peer_lost, weil die getrennten Verbindungen im naechsten Takt als verloren zaehlten) */
+        else if (r->hint == NR_H_HOST && r->plh > 0) end = "host_left";
         else if (r->peer_lost) end = "peer_lost";
         else if (r->hint == NR_H_HOST) end = "host_left";
         else end = "end";
@@ -399,6 +485,16 @@ static void nr_tick_in(loctun *t, double now)
         r->lobby_at = now;
         r->lobby_peak = n + 1;
         if (r->hint != NR_H_DISC) r->hint = NR_H_NONE;
+        { /* W519: Stillstandszaehler bei Lobbybeginn (Bericht "lobby": Luecken in Lobby und Match zusammen) */
+            loctun_game_info g0;
+            memset(&g0, 0, sizeof g0);
+            if (r->test_gi_on) g0 = r->test_gi;
+            else if (t->game_fn) t->game_fn(&g0);
+            memcpy(r->lgh0, g0.st_gh, sizeof r->lgh0);
+            r->lsh0 = g0.st_holds;
+            r->lsho0 = g0.st_ok;
+            r->lshc0 = g0.st_cap;
+        }
     } else if (r->lobby && joined && n + 1 > r->lobby_peak) {
         r->lobby_peak = n + 1;
     }
@@ -420,6 +516,7 @@ static void nr_tick_in(loctun *t, double now)
         r->match_done = 1;
     }
     if (r->match && have && !gi.in_mission) nr_match_end(t, &gi, now, NULL);
+    sbct_set_phase(r->match ? SBCT_P_MATCH : (r->lobby || joined) ? SBCT_P_LOBBY : SBCT_P_MENU); /* W522: fuer den Absturz-Datensatz */
     if (r->lobby && !joined && !r->match) {
         nr_report(t, "lobby", r->hint == NR_H_DISC ? "disconnect" : r->hint == NR_H_HOST ? "host_left" : "left", NULL,
                   r->lobby_peak, now - r->lobby_at, 0);
@@ -488,6 +585,14 @@ int loctun_netrep_test(loctun *t, int op, int a, int b, int c, const char *s, ch
         r->test_gi.desyncs = (unsigned)c;
         r->test_gi.npeers = -1;
         break;
+    case 8: /* W519: Luecke der Laengenklasse a (0..4) um b erhoehen */
+        if (a >= 0 && a < 5) r->test_gi.st_gh[a] += (unsigned)b;
+        break;
+    case 9: /* W519: gehalten/fortgesetzt/Obergrenze um a/b/c erhoehen */
+        r->test_gi.st_holds += (unsigned)a;
+        r->test_gi.st_ok += (unsigned)b;
+        r->test_gi.st_cap += (unsigned)c;
+        break;
     case 2:
         r->test_dt += (double)a;
         nr_tick_in(t, tl_now(t));
@@ -519,6 +624,18 @@ int loctun_netrep_test(loctun *t, int op, int a, int b, int c, const char *s, ch
     case 7:
         nr_exit(t);
         ret = r->nq;
+        break;
+    case 21: /* W521: getrennte Verbindungen im Match (a: 1 BYE, 2 Lobby-Ende, 3 eigene Steuerverbindung; b Anzahl;
+             * c = 1: als verloren zaehlen wie nr_match_sample) */
+        if (r->match) {
+            if (a == 1) r->plb += b;
+            if (a == 2) r->plh += b;
+            if (a == 3) r->plc += b;
+            if (c) r->peer_lost = 1;
+        }
+        break;
+    case 22: /* W521: Lobby vom Host geschlossen (lobby_closed) */
+        nr_on_host_left(t);
         break;
     default:
         ret = -2;

@@ -214,8 +214,9 @@ static void pub_publish(loctun *t, const uint8_t s[8], const uint8_t c[2], int c
         tl_js_esc(t->my_pilot[0] ? t->my_pilot : "Pilot", nm, sizeof nm);
         _snprintf_s(b, sizeof b, _TRUNCATE,
                     "{\"t\":\"lobby_create\",\"name\":\"%s\",\"game\":\"loc\",\"mode\":\"syslink\",\"map\":\"m%02u\","
-                    "\"max_players\":%d,\"rules\":%s,\"visibility\":\"public\",\"play_mode\":\"%s\"}",
-                    nm, s[5], maxp < 2 ? 2 : (maxp > 10 ? 10 : maxp), rules, lb_my_play_mode(t)); /* W440 */
+                    "\"max_players\":%d,\"rules\":%s,\"visibility\":\"public\",\"play_mode\":\"%s\"%s}",
+                    nm, s[5], maxp < 2 ? 2 : (maxp > 10 ? 10 : maxp), rules, lb_my_play_mode(t),
+                    lb_hostmig_fields(t)); /* W440, W520 */
         t->pub_creating = 1;
         tl_logf(t, "LOCPUB: Match angeboten - oeffentliche Lobby anlegen (Mission %u, Sitze %d/%d)", s[5],
                 (int8_t)s[2], (int8_t)s[3]);

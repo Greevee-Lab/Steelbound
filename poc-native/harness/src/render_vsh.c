@@ -87,6 +87,49 @@ int rqv_decode(const unsigned *slots, unsigned n, rqv_prog_t *p)
     return 1;
 }
 
+/* W518 ISSUE111: Bildschirm-Programm mit Skala/Versatz (LoC-UI). */
+static int rqv_id_in(const rqv_in_t *in, unsigned mux)
+{
+    return in->mux == mux && in->neg == 0 && in->sw[0] == 0 && in->sw[1] == 1 && in->sw[2] == 2 && in->sw[3] == 3;
+}
+static int rqv_writes_temp(const rqv_op_t *o, unsigned r)
+{
+    if (o->mac != 0 && o->mac != 13 && o->macmask && o->outr == r) { return 1; }
+    if (o->ilu != 0 && o->ilumask && (o->mac != 0 ? 1u : o->outr) == r) { return 1; } /* gepaarte ILU schreibt R1 */
+    return 0;
+}
+int rqv_ui2d_fullbleed_x(float minx, float maxx)
+{
+    return minx < -64.0f && maxx > 704.0f;
+}
+int rqv_ui2d(const rqv_prog_t *p)
+{
+    int k, ps = -1, npos = 0, wr = -1, nw = 0;
+    const rqv_op_t *d, *m;
+    if (p->rel || p->nops < 2) { return 0; }
+    for (k = 0; k < p->nops; k++) {
+        const rqv_op_t *o = &p->ops[k];
+        if (o->omask && o->orb && (o->oaddr & 0xFu) == 0) { npos++; ps = k; }
+    }
+    if (npos != 1) { return 0; }
+    d = &p->ops[ps];
+    if (d->mac != 4 || d->omux != 0 || d->omask != 0xFu || d->vin != 0 || !rqv_id_in(&d->in[0], 2) ||
+        !rqv_id_in(&d->in[1], 3) || d->cidx == 58u || d->cidx == 59u || !rqv_id_in(&d->in[2], 1) || d->in[2].reg >= 12u) {
+        return 0;
+    }
+    for (k = 0; k < p->nops; k++) {
+        if (k != ps && rqv_writes_temp(&p->ops[k], d->in[2].reg)) { nw++; wr = k; }
+    }
+    if (nw != 1 || wr > ps) { return 0; }
+    m = &p->ops[wr];
+    if (m->mac != 1 || m->macmask != 0xFu || m->outr != d->in[2].reg || !rqv_id_in(&m->in[0], 3) ||
+        m->cidx == 58u || m->cidx == 59u) {
+        return 0;
+    }
+    if (m->ilu != 0 && m->ilumask && d->in[2].reg == 1u) { return 0; } /* gepaarte ILU ueberschreibt R1 */
+    return 1;
+}
+
 /* Produkt ohne Ueberlauf nach unendlich (NV2A). */
 static float rqv_fmul(float a, float b)
 {
@@ -439,6 +482,64 @@ int rqv_selftest(void (*logf)(const char *line))
             snprintf(line, sizeof line, "VSH %-28s %s got=%g", "MUL ohne Inf", ok ? "ok  " : "FAIL", o.o[RQV_OT3][0]);
             logf(line);
             fails += ok ? 0 : 1;
+        }
+    }
+    /* 12: W518 ISSUE111 rqv_ui2d - LoC-UI-Programme (MOV R0, c[48] : MOV oD0, v1 / MOV oT0, v2 / MAD oPos, v0, c[47], R0)
+     * sind 2D; P1 (MOV oPos, v0), Matrix (DP4), MAD mit v1, Teilmaske, Versatz aus c-37 und doppelt beschriebenes R0 nicht. */
+    {
+        static const struct { const char *name; int want; } kUi[] = {
+            { "ui2d LoC-Karte (Textur)", 1 }, { "ui2d LoC-Linien", 1 }, { "ui2d P1 MOV oPos,v0", 0 },
+            { "ui2d DP4-Matrix", 0 }, { "ui2d MAD mit v1", 0 }, { "ui2d oPos.xy", 0 },
+            { "ui2d Versatz c-37", 0 }, { "ui2d R0 zweimal", 0 }
+        };
+        int t;
+        for (t = 0; t < 8; t++) {
+            unsigned n = 3;
+            int got;
+            char line[128];
+            memset(sl, 0, sizeof sl);
+            /* Slot 0: MOV R0, c[48] (Spiegel 144; gepaart: ILU MOV oD0, v1), Slot 2 Skala c[47] = Spiegel 143 */
+            te_enc(&sl[0], 1, 1, t == 6 ? 59u : 144u, 1, TC(SWI, 0), TN, TV(1), 0xF, 0, 0, 0xF, 1, RQV_OD0, 1, 0, 0);
+            /* Slot 1: MOV oT0, v2 bzw. NOP (Linien) bzw. zweiter Schrieb auf R0 */
+            if (t == 1) {
+                te_enc(&sl[4], 0, 0, 0, 0, TN, TN, TN, 0, 0, 0, 0, 0, 0, 0, 0, 0);
+            } else if (t == 7) {
+                te_enc(&sl[4], 1, 0, 0, 2, TV(2), TN, TN, 0xF, 0, 0, 0, 0, 0, 0, 0, 0);
+            } else {
+                te_enc(&sl[4], 1, 0, 0, 2, TV(2), TN, TN, 0, 0, 0, 0xF, 1, RQV_OT0, 0, 0, 0);
+            }
+            /* Slot 2: oPos */
+            if (t == 2) {
+                te_enc(&sl[8], 1, 0, 0, 0, TV(0), TN, TN, 0, 0, 0, 0xF, 1, RQV_OPOS, 0, 0, 1);
+            } else if (t == 3) {
+                te_enc(&sl[8], 7, 0, 143, 0, TV(0), TC(SWI, 0), TN, 0, 0, 0, 0xF, 1, RQV_OPOS, 0, 0, 1);
+            } else {
+                te_enc(&sl[8], 4, 0, 143, t == 4 ? 1u : 0u, TV(0), TC(SWI, 0), TR(0, SWI, 0), 0, 0, 0,
+                       t == 5 ? 0xCu : 0xFu, 1, RQV_OPOS, 0, 0, 1);
+            }
+            rqv_decode(sl, n, &p);
+            got = rqv_ui2d(&p);
+            snprintf(line, sizeof line, "VSH %-28s %s got=%d want=%d", kUi[t].name, got == kUi[t].want ? "ok  " : "FAIL",
+                     got, kUi[t].want);
+            logf(line);
+            fails += got == kUi[t].want ? 0 : 1;
+        }
+    }
+    /* 13: W518b rqv_ui2d_fullbleed_x - bildfuellend (beide Seiten ueber -64/704) ja; Karte (nur y), einseitig, genau am Rand nein */
+    {
+        static const struct { const char *name; float a, b; int want; } kFb[] = {
+            { "fullbleed -100..740", -100.0f, 740.0f, 1 }, { "fullbleed Karte 0..640", 0.0f, 640.0f, 0 },
+            { "fullbleed links -100..640", -100.0f, 640.0f, 0 }, { "fullbleed rechts 0..740", 0.0f, 740.0f, 0 },
+            { "fullbleed Rand -64..704", -64.0f, 704.0f, 0 }
+        };
+        int t;
+        for (t = 0; t < 5; t++) {
+            int got = rqv_ui2d_fullbleed_x(kFb[t].a, kFb[t].b);
+            char line[128];
+            snprintf(line, sizeof line, "VSH %-28s %s got=%d want=%d", kFb[t].name, got == kFb[t].want ? "ok  " : "FAIL",
+                     got, kFb[t].want);
+            logf(line);
+            fails += got == kFb[t].want ? 0 : 1;
         }
     }
     return fails;

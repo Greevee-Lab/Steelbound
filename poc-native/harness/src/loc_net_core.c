@@ -596,6 +596,7 @@ int locnet_closesocket(locnet *n, SOCKET s)
         return closesocket(s);
     }
     ln_open_mark(n, s, 0); /* W474 */
+    locnet_hold_forget(s); /* W519 */
     InterlockedCompareExchange(&n->tcp_listen, 0, (LONG)s); /* W409 */
     ln_walk_reset(s); /* W324 */
     ln_udp_mark(n, s, 0); /* W329 */
@@ -858,7 +859,7 @@ static int ln_udp_guard(locnet *n, SOCKET s, char *buf, int r, uint32_t from_ip)
         gp = locnet_port_in(n, n->self_ip, ntohs(me.sin_port));
     }
     WSASetLastError(e);
-    if (lguard_udp_check(gp, (const uint8_t *)buf, r, &why)) {
+    if (lguard_udp_check_live(gp, (const uint8_t *)buf, r, &why, n->tun && loctun_is_live(n->tun))) { /* W514 */
         static volatile LONG st_logged;
         if (!s_udp_state || s_udp_state(gp, (const uint8_t *)buf, r, from_ip)) return 1;
         /* W339: 0x38 von einem Absender ohne Platz in der Spielertabelle (Rahmen selbst gueltig). W409: eigene Zeile -
@@ -995,6 +996,13 @@ int locnet_recv(locnet *n, SOCKET s, char *buf, int len, int flags)
         return SOCKET_ERROR;
     }
     InterlockedExchange(&s_walk_lock, 0);
+    if (locnet_hold_active(s)) { /* W519: gehaltener Strom ohne Daten - wie "noch keine Daten" melden, nie warten */
+        u_long av = 0;
+        if (ioctlsocket(s, FIONREAD, &av) == 0 && av == 0) {
+            WSASetLastError(WSAEWOULDBLOCK);
+            return SOCKET_ERROR;
+        }
+    }
     for (;;) {
         uint8_t *big = NULL; /* W339: groesserer Blick (bis LGUARD_HOLD_MAX + 16), nur wenn der Spielpuffer zu klein ist */
         const uint8_t *view = (const uint8_t *)buf;
@@ -1213,4 +1221,210 @@ int locnet_addr_known(locnet *n, uint32_t ip_net)
         if (n->peers[i].ip == ip_net) return 1;
     }
     return 0;
+}
+
+/* ================= W519 STALLHOLD: Stillstand im Spielstrom halten (Beschreibung in loc_net_core.h) ================= */
+#define LNH_MAX 16
+typedef struct lnh_ent {
+    SOCKET s;
+    uint32_t vip;
+    unsigned long long last_rd; /* letzte echte Lesbarkeit (0 = noch nie abgefragt) */
+    unsigned long long hold_at, last_sil;
+    int holding, expired, counted;
+} lnh_ent;
+static lnh_ent s_lnh[LNH_MAX];
+static volatile LONG s_lnh_lock;
+static int s_lnh_start = 2500, s_lnh_cap = 0, s_lnh_orig = 10000;
+static locnet_hold_stats s_lnh_st;
+static uint32_t s_lnh_ok_vip;
+static int s_lnh_ok_ms, s_lnh_ok_set;
+
+static void lnh_lock(void)
+{
+    while (InterlockedExchange(&s_lnh_lock, 1)) Sleep(0);
+}
+static void lnh_unlock(void) { InterlockedExchange(&s_lnh_lock, 0); }
+
+static void lnh_bucket(unsigned long long sil)
+{
+    int k = sil < 5000ull ? 0 : sil < 15000ull ? 1 : sil < 30000ull ? 2 : sil < 60000ull ? 3 : 4;
+    s_lnh_st.gh[k]++;
+}
+
+static lnh_ent *lnh_find(SOCKET s, int alloc)
+{
+    int i, fr = -1;
+    for (i = 0; i < LNH_MAX; i++) {
+        if (s_lnh[i].s == s) return &s_lnh[i];
+        if (fr < 0 && s_lnh[i].s == 0) fr = i;
+    }
+    if (!alloc || fr < 0) return NULL; /* Tabelle voll: dieser Strom wird nie gehalten (Original-Verhalten) */
+    memset(&s_lnh[fr], 0, sizeof s_lnh[fr]);
+    s_lnh[fr].s = s;
+    return &s_lnh[fr];
+}
+
+void locnet_hold_config(int start_ms, int cap_ms, int orig_ms)
+{
+    lnh_lock();
+    s_lnh_start = start_ms > 0 ? start_ms : 2500;
+    s_lnh_orig = orig_ms > 0 ? orig_ms : 10000;
+    s_lnh_cap = cap_ms > s_lnh_start + s_lnh_orig ? cap_ms : 0; /* kleiner als Beginn + Restlauf: aus */
+    lnh_unlock();
+}
+
+int locnet_hold_enabled(void) { return s_lnh_cap > 0; }
+
+int locnet_hold_poll(SOCKET s, uint32_t vip, unsigned long long now_ms, int real_rd, locnet_hold_peer_fn fn, void *ctx)
+{
+    lnh_ent *e;
+    unsigned long long sil;
+    int ps;
+    if (s_lnh_cap <= 0 || !s || s == INVALID_SOCKET) return 0;
+    lnh_lock();
+    e = lnh_find(s, vip != 0);
+    if (!e) {
+        lnh_unlock();
+        return 0;
+    }
+    if (e->vip != vip) { /* Socket-Nummer neu vergeben bzw. kein Mitspieler mehr: frisch beginnen */
+        if (e->counted) lnh_bucket(e->last_sil);
+        memset(e, 0, sizeof *e);
+        e->s = s;
+        e->vip = vip;
+    }
+    if (!vip) {
+        e->s = 0;
+        lnh_unlock();
+        return 0;
+    }
+    if (real_rd || !e->last_rd) {
+        if (real_rd && e->last_rd) {
+            sil = now_ms - e->last_rd;
+            if (e->counted) lnh_bucket(sil);
+            if (e->holding) {
+                s_lnh_st.held_ok++;
+                s_lnh_ok_vip = vip;
+                s_lnh_ok_ms = (int)(sil > 3600000ull ? 3600000ull : sil);
+                s_lnh_ok_set = 1;
+                s_lnh_st.last_ok_ms = s_lnh_ok_ms;
+            }
+        }
+        e->last_rd = now_ms;
+        e->holding = e->expired = e->counted = 0;
+        lnh_unlock();
+        return 0;
+    }
+    sil = now_ms - e->last_rd;
+    e->last_sil = sil;
+    if (sil < (unsigned long long)s_lnh_start) {
+        lnh_unlock();
+        return 0;
+    }
+    if ((LONG)(sil > 3600000ull ? 3600000ull : sil) > s_lnh_st.gap_max_ms) s_lnh_st.gap_max_ms = (LONG)(sil > 3600000ull ? 3600000ull : sil);
+    if (!e->counted) {
+        e->counted = 1;
+        s_lnh_st.gaps++;
+    }
+    if (e->expired) {
+        lnh_unlock();
+        return 0;
+    }
+    lnh_unlock();
+    ps = fn ? fn(vip, ctx) : LNH_PEER_NONE; /* ausserhalb der Sperre (der Transport nimmt seine eigene) */
+    lnh_lock();
+    e = lnh_find(s, 0);
+    if (!e || e->vip != vip) {
+        lnh_unlock();
+        return 0;
+    }
+    if (ps != LNH_PEER_ALIVE && ps != LNH_PEER_SILENT) { /* Abgang bzw. keine Verbindung: Original-Grenze */
+        if (e->holding) s_lnh_st.held_gone++;
+        e->holding = 0;
+        e->expired = 1;
+        lnh_unlock();
+        return 0;
+    }
+    if (sil >= (unsigned long long)(s_lnh_cap - s_lnh_orig)) { /* Obergrenze: ab hier zaehlt das Spiel wieder */
+        if (e->holding) s_lnh_st.held_cap++;
+        e->holding = 0;
+        e->expired = 1;
+        lnh_unlock();
+        return 0;
+    }
+    if (!e->holding) {
+        e->holding = 1;
+        e->hold_at = now_ms;
+        s_lnh_st.holds++;
+    }
+    lnh_unlock();
+    return 1;
+}
+
+int locnet_hold_active(SOCKET s)
+{
+    lnh_ent *e;
+    int r = 0;
+    if (s_lnh_cap <= 0) return 0;
+    lnh_lock();
+    e = lnh_find(s, 0);
+    if (e) r = e->holding;
+    lnh_unlock();
+    return r;
+}
+
+void locnet_hold_forget(SOCKET s)
+{
+    lnh_ent *e;
+    lnh_lock();
+    e = lnh_find(s, 0);
+    if (e) {
+        if (e->counted) lnh_bucket(e->last_sil); /* Luecke endete mit dem Schliessen (Mitspieler entfernt) */
+        memset(e, 0, sizeof *e);
+    }
+    lnh_unlock();
+}
+
+void locnet_hold_get(locnet_hold_info *o, unsigned long long now_ms)
+{
+    int i;
+    memset(o, 0, sizeof *o);
+    lnh_lock();
+    for (i = 0; i < LNH_MAX; i++) {
+        const lnh_ent *e = &s_lnh[i];
+        int sil;
+        if (!e->s || !e->vip || !e->last_rd) continue;
+        o->tracked++;
+        if (!e->holding) continue;
+        o->active++;
+        sil = (int)(now_ms - e->last_rd > 3600000ull ? 3600000ull : now_ms - e->last_rd);
+        if (sil >= o->silent_ms) {
+            o->silent_ms = sil;
+            o->vip = e->vip;
+            o->left_ms = s_lnh_cap - sil > 0 ? s_lnh_cap - sil : 0;
+        }
+    }
+    if (s_lnh_ok_set) {
+        o->last_ok_vip_set = 1;
+        o->ok_vip = s_lnh_ok_vip;
+        o->ok_ms = s_lnh_ok_ms;
+        s_lnh_ok_set = 0;
+    }
+    lnh_unlock();
+}
+
+void locnet_hold_get_stats(locnet_hold_stats *o)
+{
+    lnh_lock();
+    *o = s_lnh_st;
+    lnh_unlock();
+}
+
+void locnet_hold_reset(void)
+{
+    lnh_lock();
+    memset(s_lnh, 0, sizeof s_lnh);
+    memset(&s_lnh_st, 0, sizeof s_lnh_st);
+    s_lnh_ok_set = 0;
+    lnh_unlock();
 }

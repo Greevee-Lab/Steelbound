@@ -33,6 +33,9 @@ int app_launch_client_set(const char *client_dir, const char *xbe_path,
  * lacc_env_block; NULL = geerbt). */
 int app_launch_client_env(const char *client_dir, const char *xbe_path, const char *set_args,
                           const void *env_w, char *msg, size_t cap);
+/* W522: wie app_launch_client_env, liefert zusaetzlich den Prozess-Handle (proc != NULL: Aufrufer schliesst ihn). */
+int app_launch_client_env_proc(const char *client_dir, const char *xbe_path, const char *set_args,
+                               const void *env_w, char *msg, size_t cap, void **proc);
 /* W231: wie app_launch_client_set, liefert zusaetzlich den Prozess-Handle
  * (proc != NULL; Aufrufer schliesst ihn) fuer die Exitcode-Auswertung. */
 int app_launch_client_proc(const char *client_dir, const char *xbe_path,

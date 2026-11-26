@@ -20,7 +20,7 @@
 
 typedef uint32_t u32;
 
-#define NP_ROWS 6   /* W453: Netzmodus, Verzoegerung, schlechtester Ping, (W494 Hinweis weite Lobby), Modus/Sichtbarkeit, Host-Regel */
+#define NP_ROWS 8   /* W520: + Host-Wechsel, Vorschlag. W453: Netzmodus, Verzoegerung, schlechtester Ping, (W494 Hinweis weite Lobby), Modus/Sichtbarkeit, Host-Regel */
 #define NP_COLS 96
 #define NP_PING_OK 80   /* gruen bis hier: Grenze von Auto -> Direkt (loc_rbn.c direct_rtt, W447) */
 #define NP_PING_MID 150 /* gelb bis hier, darueber rot (wie W447: > 150 ms auffaellig) */
@@ -160,6 +160,29 @@ void loc_netpanel_frame(unsigned f)
         np_lw("ovl.np_lobby", fmt, NP_COLS);
         _snwprintf_s(n.row[n.nrow], NP_COLS, _TRUNCATE, fmt, a, b);
         n.col[n.nrow++] = lm == LAS_ARCADE ? OVS_RGB_BAD : OVS_RGB_INFO;
+        { /* W520 HOSTMIG: Host-Wechsel der Lobby (Experimental) und vorgeschlagener Host (stabilste Verbindung) */
+            int mig = 0, autoh = 0, sme = 0, amh = 0;
+            if (vis && loc_net_hostmig_info(&mig, &autoh, &sme, &amh)) {
+                np_lw(!mig ? "ovl.np_hm_off" : autoh ? "ovl.np_hm_auto" : "ovl.np_hm_on", n.row[n.nrow], NP_COLS);
+                n.col[n.nrow++] = mig ? OVS_RGB_INFO : OVS_RGB_DIM;
+                if (!g_cfg.loc_hostmig_rebuild) {
+                    /* W523 (0.6.3): kein Vorschlag (gehoerte zu Auto-Host/Menue-Neuaufbau; nur TEST/0.7.0) */
+                } else if (mig && amh && !sme) {
+                    char sn[24];
+                    wchar_t w[NP_COLS];
+                    loc_net_hostmig_sugg_name(sn, sizeof sn);
+                    if (sn[0]) {
+                        np_name(sn, w, NP_COLS);
+                        np_lw("ovl.np_hm_sugg", fmt, NP_COLS);
+                        _snwprintf_s(n.row[n.nrow], NP_COLS, _TRUNCATE, fmt, w);
+                        n.col[n.nrow++] = OVS_RGB_DIM;
+                    }
+                } else if (mig && sme && !amh) {
+                    np_lw("ovl.np_hm_sugg_me", n.row[n.nrow], NP_COLS);
+                    n.col[n.nrow++] = OVS_RGB_DIM;
+                }
+            }
+        }
         /* Zeile 5: Host-Regel (W420) */
         if (have_rule) {
             np_lw(r_on ? "ovl.np_rule_on" : "ovl.np_rule_off", n.row[n.nrow], NP_COLS);

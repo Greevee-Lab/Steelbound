@@ -11,6 +11,7 @@
 #include "sb_remaster.h" /* W103 REM-FRAME */
 #include "render_qa.h"
 #include "sb_texhealth.h" /* W315 */
+#include "render_vsh.h" /* W518b rqv_ui2d_fullbleed_x */
 
 /* ---------- Immediate-Mode (Xbox Begin/End, M2b-Geometrie) ----------
  * Semantik (Cxbx XbVertexBuffer.cpp): Register -1 (VERTEX) -> Slot 0
@@ -1332,16 +1333,38 @@ static void sb_im_submit_body(void)
      * PERF(IM-PERF,W99): fast + force3d -> Ergebnis wird direkt danach auf
      * 0 gesetzt, Schleife ueberspringen (3D-Objektkoordinaten liegen oft
      * ganz im Pixel-Bereich -> lief bisher ueber alle Vertices). */
-    { float rx1 = 704.0f, ry1 = 544.0f;
+    { float rx0 = -64.0f, ry0 = -64.0f, rx1 = 704.0f, ry1 = 544.0f;
       /* W485 LIVEQOS: Live-Dialoge blenden die Textebene als Vollbild-Quad (720x480) ein -> Grenze dort
        * Framebuffer + 64 (loc_render_rhw_range, nur loc_live und Textebene; sonst 704x544 wie bisher). */
       if (g_sba_loc && g_cfg.loc_live) { loc_render_rhw_range(sb_tex_xptr(), &rx1, &ry1); }
+      /* FIX(ISSUE111,W518) loc_ui2d: LoC-UI-Programm (oPos = v0 * cS + cO, keine Matrix) ist immer 2D. Die gezoomte
+       * Einsatzkarte im Lobby-/Briefing-Menue ragt ueber -64..704 x -64..544 hinaus (gemessen y -144..624) und fiel
+       * sonst in den 3D-Pfad (Positionen mit der zuletzt gesetzten Welt-Matrix -> schmales schraeges Band). */
+      if (g_sba_loc && g_cfg.loc_ui2d && !g_im_force3d && g_im_shader >= 0x10000u) {
+          const vsh_prog_t *up = vsh_program(g_im_shader);
+          if (up && up->ui2d) {
+              int wide = 1;
+              /* W518b MENUBG loc_menu_bg=0: bildfuellende Ebene (x auf beiden Seiten ueber -64..704, Verbindungs-/Pilotenmenue)
+               * behaelt die alte Bereichsgrenze (3D-Pfad, praktisch unsichtbar); die gezoomte Karte (nur y) bleibt 2D. */
+              if (!g_cfg.loc_menu_bg) {
+                  float mnx = 1e30f, mxx = -1e30f;
+                  unsigned q;
+                  for (q = 0; q < n; q++) {
+                      const float *qp = IMPOS(q);
+                      if (qp[0] < mnx) { mnx = qp[0]; }
+                      if (qp[0] > mxx) { mxx = qp[0]; }
+                  }
+                  if (rqv_ui2d_fullbleed_x(mnx, mxx)) { wide = 0; }
+              }
+              if (wide) { rx0 = ry0 = -4096.0f; rx1 = ry1 = 4096.0f; }
+          }
+      }
     if (fast && g_im_force3d) { rhw = 0; } else
     for (i = 0; i < n; i++) {
         const float *pp = IMPOS(i);
         float x = pp[0], y = pp[1];
         float z = pp[2], w = pp[3];
-        if (x < -64.0f || x > rx1 || y < -64.0f || y > ry1 ||
+        if (x < rx0 || x > rx1 || y < ry0 || y > ry1 ||
             z < -1.0f || z > 2.0f || w < 0.999f || w > 1.001f) {
             rhw = 0;
             break;

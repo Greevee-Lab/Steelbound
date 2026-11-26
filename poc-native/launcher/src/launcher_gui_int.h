@@ -55,6 +55,7 @@
 #include "sbc_test.h"
 #include "launcher_update.h" /* W250 UPDATE-CHECK */
 #include "launcher_alpha.h" /* W272 ALPHA-TEST: Seite "Alpha Test" (launcher_alpha.inc) */
+#include "sb_crashtel.h" /* W522 CRASH-TELEMETRY: SBCT_G_* */
 #include "launcher_diag.h" /* W279 DIAG-CRASH: Absturz-Karte + Diagnosepaket (launcher_diag.inc) */
 #include "launcher_games.h" /* W276 LOC-LAUNCH */
 #include "launcher_account.h" /* W328 STEELNET-ACCOUNT: Pilotenkonto */
@@ -673,6 +674,9 @@ static const char kCxFixture[] =
 #define ID_NRQ_YES 2813     /* W496 NET-TELEMETRY: Dialog "anonyme Netzwerkstatistik" - Ja (Standard-Knopf) */
 #define ID_NRQ_NO 2814      /* W496: ... Nein danke */
 #define ID_LNET_NETREP 2815 /* W496: Schalter "Anonyme Netzwerkstatistik" (LoC > Netzwerk, Reiter Network) */
+#define ID_LNET_HOSTMIG 2817 /* W520 HOSTMIG: Schalter "Experimental: host migration & auto host" (loc_host_migration, Standard an) */
+#define ID_LNET_AUTOHOST 2818 /* W520: Schalter "Auto host" (loc_auto_host, Standard aus; braucht HOSTMIG) */
+#define ID_LNET_MENUBG 2819 /* W518b MENUBG: Schalter "Menu background layer" (loc_menu_bg, Standard an) */
 #define ID_LNET_CHATBAR 2816 /* W508 CHATBAR: Schalter "Chat in den Seitenbalken" (loc_chat_pos, Standard an = auto) */
 /* W496 (launcher_gui_netrep.c) */
 extern int g_nrq_cfg, g_nrq_dismiss, g_nrq_open, g_nrq_asked_now;
@@ -689,6 +693,15 @@ void nrq_relabel(void);
 int nrq_visible(int id);
 int nrq_command(int id);
 void nrq_paint(void);
+/* W522 CRASH-TELEMETRY Stufe 2 (launcher_gui_netrep.c): Exitcode des Spiels einordnen, Datensatz ergaenzen/anlegen */
+#define NRQ_CT_TIMER 522 /* Ende des LoC-Spiels beobachten (1 s) */
+int nrq_crash_note_dir(const char *dir_u8, unsigned long code, int game, unsigned run_s);
+void nrq_crash_after_exit(unsigned long code, int game, ULONGLONG t0);
+void nrq_ct_watch(void *proc);
+void nrq_ct_tick(void);
+int nrq_sb_set_append(char *set, size_t cap);
+extern ULONGLONG g_client_t0;
+__declspec(noinline) void w522_gui_selftest(int *pass, int *fail);
 #define LOC_SUM_Y (CY0 + 216) /* Karte "Ready to play" (wie SB) */
 #define LOC_SUM_H 220         /* 8 px Luft bis zum Band (OB_Y_LOC) */
 #define LOC_DISC_Y CY0        /* Erweitert: Disc-Karte */
@@ -1265,6 +1278,8 @@ extern int g_loc_clip;
 extern int g_loc_chat;
 extern int g_loc_snchat;
 extern int g_loc_chatbar; /* W508 */
+extern int g_loc_menubg; /* W518b MENUBG */
+extern int g_loc_hostmig, g_loc_autohost; /* W520 */
 extern int g_loc_arcade;
 extern int g_loc_lan;        /* W454 LOC-LAN-MODE: 1 = Multiplayer nur im LAN (ohne steelnet) */
 extern char g_loc_lan_room[17];

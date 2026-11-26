@@ -478,21 +478,13 @@ void tl_rx_sbt(loctun *t, const uint8_t *pkt, int plen, const struct sockaddr_in
             tl_hdr(q, T_PROBE_ACK);
             memcpy(q + HDR, p + HDR, 8);
             tl_send_to(t, L, from, q, sizeof q);
+            tl_probe_seen(t, L, from, now); /* W521: an eine unbekannte Absenderadresse zurueckstanzen (peer-reflexiv) */
         }
         break;
     case T_PROBE_ACK: /* nur mit der offenen probe_id: direkter Weg zu dieser Adresse bestaetigt */
         if (len == HDR + 8 && via_relay_link < 0 && !t->c.nodirect && L->probe_id != 0 && !L->direct_ok &&
             memcmp(p + HDR, &L->probe_id, 8) == 0 && tl_dest_ok(t, from->sin_addr.s_addr)) {
-            char ipb[16];
-            L->direct = *from;
-            L->direct_ok = 1;
-            L->direct_failed = 0;
-            L->punching = 0;
-            /* W339 (W335 I3): oeffentliche Adresse des Mitspielers nie ins Log (Logs gehen in Fehlerberichte);
-             * Loopback/privat/link-local bleiben lesbar (Fehlersuche im LAN). Zeilenanfang unveraendert. */
-            tl_logf(t, "LOCTUN: direkter Weg zu c%u offen (%s:%u)", L->cid,
-                    locnet_ip_allowed(from->sin_addr.s_addr) ? locnet_ip_str(from->sin_addr.s_addr, ipb) : "oeffentlich",
-                    ntohs(from->sin_port));
+            tl_probe_ack(t, L, from, now); /* W521: IPv6 vor IPv4, Log ohne oeffentliche Adresse (loc_tun_link.c) */
         }
         break;
     case T_BYE:

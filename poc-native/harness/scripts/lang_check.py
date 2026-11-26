@@ -66,6 +66,9 @@ SRC = [
     "harness/src/loc_netpanel.c",  # W447 LOC-NET-AUTO: Netz-Panel der Lobby (ovl.np_*)
     "harness/src/loc_replayctl.c",  # W457 LOC-REPLAY-CTRL: Replay-Bedienhilfe (ovl.lrp_*)
     "harness/src/loc_lobbywidget.c",  # W460 LOC-LOBBY-WIDGET: offene Lobbys (ovl.lw_*)
+    "harness/src/loc_net.c",  # W517 HOSTRESUME: Hinweis Fortsetzung der Treffpunkt-Verbindung (loc.relink_*)
+    "harness/src/loc_hostmig.c",  # W520 HOSTMIG (loc.hostmig_*)
+    "harness/src/loc_hostmig_prog.h",  # W523 HOSTMIG-SCOPE (hm_decide: Toast-Beschreibungen)
 ]
 
 # W180 EXPORT: Quellen, die im Community-Export (noch) fehlen duerfen (Pack
@@ -84,7 +87,7 @@ KEY_RE = re.compile(r"^[a-z0-9_]+(\.[a-z0-9_]+)+$")
 # LT("k"), sb_lang("k"), sb_lang_w("k" + jedes Literal mit Sprach-Praefix
 # (deckt Tabellen mit Schluesseln ab, z. B. kCtrlElems, Overlay-Labels).
 USE_RE = re.compile(r'(?:\bLT|\bsb_lang(?:_w)?)\s*\(\s*"([^"]+)"')
-LIT_RE = re.compile(r'"((?:gui|ovl|bind|fx|vr|app|cfg|msg|as|chat)\.[A-Za-z0-9_.]+)"')  # W437: chat.*
+LIT_RE = re.compile(r'"((?:gui|ovl|bind|fx|vr|app|cfg|msg|as|chat|loc)\.[A-Za-z0-9_.]+)"')  # W437: chat.*, W520: loc.* (loc_hostmig.c)
 PH_RE = re.compile(r"%(?:\d+\$)?[+#\-0 ]*(?:\d+|\*)?(?:\.(?:\d+|\*))?"
                    r"(?:hh|h|ll|l|j|z|t|L|I64|I32|w)?[diuoxXfFeEgGaAcspS%]")
 

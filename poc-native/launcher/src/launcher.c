@@ -30,7 +30,8 @@
 #include "launcher_diag.h" /* W279 DIAG-CRASH */
 #include "launcher_orig.h" /* W278 ORIG-FLAG */
 #include "launcher_layout.h" /* W281 LAUNCHER-SIZE */
-#include "launcher_account.h" /* W328 STEELNET-ACCOUNT */
+#include "launcher_account.h"
+#include "launcher_acchelp.h" /* W537 */ /* W328 STEELNET-ACCOUNT */
 #if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
 #include "launcher_loctp.h" /* W336 LOC-TESTPARTNER (nur interne Ausgabe) */
 #endif
@@ -119,12 +120,22 @@ int cli_printf(const char *fmt, ...)
 
 #define printf cli_printf
 
+/* W532 AVFP: reine Test- und Entwicklerwerkzeuge (Selbsttest, Konto-Kommandozeile, Import-Fuzzer) nur in
+ * Entwickler-Builds bzw. im nicht ausgelieferten Test-Launcher (SB_LAUNCHER_SELFTEST, s. CMakeLists.txt). */
+#if (defined(SB_TEST_HOOKS) && SB_TEST_HOOKS) || SB_LAUNCHER_SELFTEST
+#define LCLI_DEV_TOOLS 1
+#else
+#define LCLI_DEV_TOOLS 0
+#endif
+
 static void cli_usage(void)
 {
     printf("sb_launcher - Steel-Battalion-Launcher (A10, Welle 3)\n"
            "Ohne Argumente: Fenster. Mit Argumenten (Exit 0 = ok):\n"
+#if LCLI_DEV_TOOLS
            "  --selftest              alle CLI-Tests (Exit 0 = gr" U8_UE "n)\n"
            "  --steelnet AKTION ...   W328 Pilotenkonto (create|check|status|login|...; Test: SB_STEELNET_API/PIN, SB_ACCOUNT_DIR)\n"
+#endif
            "  --check                 effektive Einstellungen + Validierung\n"
            "  --check-image PFAD      Spiel-Abbild pruefen (Version, lesbar)\n"
            "  --userdata              Datenorte (Modus, Pfade) + Selbsttest\n"
@@ -151,7 +162,9 @@ static void cli_usage(void)
            "  --write-user-profile R    Benutzerprofil user_R.ini schreiben\n"
            "  --controls-export OUT     W419: Steuerung (aktives Profil + Werte) als .sbcontrols\n"
            "  --controls-check DATEI    W419: .sbcontrols nur pruefen (nichts aendern)\n"
+#if LCLI_DEV_TOOLS
            "  --controls-fuzz N [--seed S]  W430: Mutations-Fuzzer fuer den Import (Standard 200000)\n"
+#endif
            "                            (Basis --from B, --set-bind \"e=a;...\", --force)\n"
            "  --bind-shot[=AKTION]    Test: Belegungs-Dialog sichern (BMP+PNG)\n"
            "  --bind-learn            mit --bind-shot: Lernmodus im Bild (W228)\n"
@@ -4451,6 +4464,7 @@ static int cli_selftest(const char *client_override)
     lupd_selftest(&pass, &fail); /* W250 UPDATE-CHECK (ohne Netz) */
     lgame_selftest(&pass, &fail); /* W276 LOC-LAUNCH (Spielauswahl, LoC-Abbild, Startsperre) */
     lacc_selftest(&pass, &fail); /* W328 STEELNET-ACCOUNT (Krypto, Pin, DPAPI, Discord-Rueckleitung, Kind-Umgebung) */
+    lach_selftest(&pass, &fail); /* W537 LAUNCHER-SLIM: Konto-Hilfsprogramm sb_account.exe (Protokoll, Abbruch) */
 #if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
     loctp_selftest(&pass, &fail); /* W336 LOC-TESTPARTNER (Profile, Ketten, Auswertung, Start/Stopp mit Attrappe) */
 #endif
@@ -5300,7 +5314,11 @@ static void app_lang_warn(const char *key)
     char b[160];
     _snprintf_s(b, sizeof b, _TRUNCATE, "sb_launcher: Sprachschluessel fehlt: %s\n",
                 key ? key : "?");
+#if defined(SB_TEST_HOOKS) && SB_TEST_HOOKS /* W535 AVVT: Debug-Ausgabe nur in Entwickler-Builds */
     OutputDebugStringA(b);
+#else
+    (void)b;
+#endif
 }
 
 int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
@@ -5413,13 +5431,31 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
 #endif
     } else if (cli_flag(argc, argv, "--selftest")) {
         cli_console();
+#if SB_LAUNCHER_SELFTEST
         rc = cli_selftest(client_override);
+#else
+        /* W532 AVFP: Der ausgelieferte Release-Launcher enthaelt den Selbsttest nicht (Testvektoren wie
+         * Attrappen-HTTP-Anfragen, Passwort-JSON und Schluessel sahen fuer Virenscanner-Heuristiken nach
+         * Backdoor aus). make_alpha.py prueft denselben Stand mit einem nicht ausgelieferten Test-Build
+         * (-DSB_LAUNCHER_SELFTEST=ON). */
+        printf("selftest: not included in this build (release)\n");
+        rc = 2;
+#endif
     } else if (cli_flag(argc, argv, "--steelnet")) { /* W328: Pilotenkonto ohne Fenster (Durchspieltest) */
-        int ai;
         cli_console();
-        for (ai = 1; ai < argc && strcmp(argv[ai], "--steelnet") != 0; ai++) {
+#if LCLI_DEV_TOOLS
+        {
+            int ai;
+            for (ai = 1; ai < argc && strcmp(argv[ai], "--steelnet") != 0; ai++) {
+            }
+            rc = lacc_cli(client_override, argc - ai - 1, argv + ai + 1);
         }
-        rc = lacc_cli(client_override, argc - ai - 1, argv + ai + 1);
+#else
+        /* W532 AVFP: Konto-Kommandozeile (Login mit Passwort ueber stdin, Wiederherstellung, Loeschen) ist ein
+         * Entwickler- und Betriebswerkzeug; im Release-Launcher gibt es dafuer die Konto-Seite. */
+        printf("steelnet: command line not included in this build (release); use the Account page\n");
+        rc = 2;
+#endif
     } else if (cli_flag(argc, argv, "--update-check")) { /* W250: ein echter Abruf (Beleg) */
         const char *as = cli_value(argc, argv, "--as-version");
         lupd_res_t r;
@@ -5538,9 +5574,15 @@ int WINAPI WinMain(HINSTANCE h, HINSTANCE p, LPSTR cmd, int show)
         long nn = nv && atol(nv) > 0 ? atol(nv) : 200000;
         unsigned sd = sv ? (unsigned)strtoul(sv, NULL, 0) : 0x430u;
         cli_console(); /* W430 CTRL-IMPORT-FUZZ */
+#if LCLI_DEV_TOOLS
         rc = w430_ctrl_fuzz(nn, sd, why, sizeof why, st);
         if (rc) { printf("FUND: %s\n", why); }
         else { printf("OK: %ld Mutationen (Seed %u): %ld Importe, %ld abgelehnt\n", nn, sd, st[0], st[1]); }
+#else
+        (void)nn; (void)sd; (void)why; (void)st;
+        printf("controls-fuzz: not included in this build (release)\n");
+        rc = 2;
+#endif
     } else if (cli_value(argc, argv, "--controls-export") || cli_value(argc, argv, "--controls-check")) {
         cli_console(); /* W419 CTRL-EXPORT */
         rc = cli_controls(client_override, cli_value(argc, argv, "--controls-export"),

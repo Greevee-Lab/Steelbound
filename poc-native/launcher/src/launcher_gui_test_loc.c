@@ -1095,6 +1095,11 @@ void camp_gui_selftest(int *pass, int *fail)
         }
         if (!why[0] && lcamp_state(ACC_LIVE_OK, 0, LCAMP_R_OK) != LCAMP_OK) strcpy_s(why, sizeof why, "alles erfuellt != verfuegbar");
     }
+    if (!why[0]) { /* W534 AVPRE: Erreichbarkeit = reines TCP (kein SChannel im Launcher) */
+        char tw[160];
+        lcamp_selftest_tcp(tw, sizeof tw);
+        if (tw[0]) _snprintf_s(why, sizeof why, _TRUNCATE, "lcamp_probe TCP: %s", tw);
+    }
     g_locgate_skip = 0;
     g_onl_fix_srv = 1;
     g_upd_cfg = 1;
@@ -3098,6 +3103,42 @@ __declspec(noinline) void acc_gui_selftest(int *pass, int *fail)
                 strcpy_s(why, sizeof why, "Schluessel nicht im Testprofil");
             SecureZeroMemory(&chk, sizeof chk);
         }
+        if (!why[0]) { /* W537: Konto neu laden, Spielschluessel beim Start, Wiederherstellungscode - ueber sb_account.exe */
+            lacc_store_t keep = g_acc;
+            char set[200] = "", u8[600];
+            wchar_t *env, *p;
+            int i, nz = 0, n = 0;
+            g_acc_loaded = 0;
+            memset(&g_acc, 0, sizeof g_acc);
+            acc_ensure_loaded();
+            for (i = 0; i < 32; i++) nz |= g_acc.key[i];
+            if (!g_acc.have || g_acc.account != keep.account || strcmp(g_acc.name, keep.name) != 0)
+                strcpy_s(why, sizeof why, "W537 neu laden (load)");
+            else if (nz) strcpy_s(why, sizeof why, "W537 Schluessel im Launcher-Speicher");
+            if (!why[0]) {
+                char want[32];
+                env = acc_launch_env(set, sizeof set);
+                _snprintf_s(want, sizeof want, _TRUNCATE, "SB_LOC_AUTH=%lu:", (unsigned long)keep.account);
+                for (p = env; p && *p; p += wcslen(p) + 1) {
+                    w_to_u8(p, u8, sizeof u8);
+                    if (strncmp(u8, want, strlen(want)) == 0 && strlen(u8) > strlen(want) + 64) n++;
+                }
+                if (n != 1) _snprintf_s(why, sizeof why, _TRUNCATE, "W537 Spielschluessel beim Start (%d)", n);
+                if (env) lacc_env_free(env);
+                SecureZeroMemory(u8, sizeof u8);
+            }
+            if (!why[0]) {
+                g_acc_view = 1;
+                acc_refresh();
+                g_acc_rec[0] = '\0';
+                on_command(ID_ACC_V_RECSHOW, BN_CLICKED);
+                if (strlen(g_acc_rec) != 39) strcpy_s(why, sizeof why, "W537 Wiederherstellungscode anzeigen");
+                on_command(ID_ACC_V_RECSHOW, BN_CLICKED);
+                if (!why[0] && g_acc_rec[0]) strcpy_s(why, sizeof why, "W537 Wiederherstellungscode verbergen");
+                g_acc_view = 0;
+            }
+            SecureZeroMemory(&keep, sizeof keep);
+        }
         if (!why[0] && !g_acc_st.gamertag[0]) { /* W487: ersten Gamertag ueber die Gamertag-Karte setzen (gamertag_set) */
             char gt[16];
             _snprintf_s(gt, sizeof gt, _TRUNCATE, "Gt%lu", GetCurrentProcessId() % 100000);
@@ -3144,7 +3185,7 @@ __declspec(noinline) void acc_gui_selftest(int *pass, int *fail)
         loctab_nav_layout();
         show_page(p0);
         if (!why[0]) {
-            GT_OK("76 W328 account UI over the network (create via worker thread + WM_APP_ACC, status, key in test profile, W487 first gamertag via gamertag card, delete with confirm)");
+            GT_OK("76 W328 account UI over the network (create via worker thread + WM_APP_ACC, status, key in test profile, W487 first gamertag via gamertag card, delete with confirm; W537: all via sb_account.exe, reload/game key/recovery code via helper, no key in launcher memory)");
         } else {
             GT_FAIL("76 W328 account UI", "%s", why);
         }

@@ -85,10 +85,19 @@ static void tl_accept(loctun *t, int li)
     }
 }
 
+/* W534 AVPRE: Der Sende-Fuzzer (W335/W339, nur Test) ist in Release-Builds (SB_VERSION_STR gesetzt, make_alpha/
+ * release.sh) nicht enthalten; Entwickler-Builds, loc_net_selftest und loc_live_selftest behalten ihn. */
+#if defined(SB_VERSION_STR)
+#define LOCTUN_FUZZ 0
+#else
+#define LOCTUN_FUZZ 1
+#endif
+
 /* ---------- W335 NET-AUDIT: Sende-Fuzzer fuer das Spiel-Fuzzing (SECURITY.md §6.6 Punkt 2) ----------
  * TEST: verfaelscht Felder in den Rahmen, die das EIGENE Spiel an den Mitspieler sendet - Typ (Bytes 0/1), Laenge und
  * die Anzahl von 0x34 (Byte 4) bleiben, damit der Gastfilter des Empfaengers die Rahmen durchlaesst. Nur aktiv mit
  * SB_LOC_FUZZ_TX und dem Testweg ohne Treffpunkt (loc_transport_peers); im Online-Pfad nie. Log nur Typ + Feldoffset. */
+#if LOCTUN_FUZZ
 static uint32_t fz_rand(loctun *t)
 {
     uint32_t x = t->fz_rng;
@@ -219,6 +228,7 @@ static void tl_fuzz_dgram(loctun *t, uint8_t *d, int len)
         fz_note(t, (unsigned)d[0] | ((unsigned)d[1] << 8), pos);
     }
 }
+#endif /* LOCTUN_FUZZ */
 
 static void tl_stream_read(loctun *t, tstream *st)
 {
@@ -274,7 +284,9 @@ static void tl_stream_read(loctun *t, tstream *st)
         r = recv(st->s, (char *)b, sizeof b, 0);
         if (r > 0) {
             st->tx_any = 1;
+#if LOCTUN_FUZZ
             if (t->fz_on) tl_fuzz_stream(t, st, b, r); /* W335 TEST */
+#endif
             tl_queue_msg(t, L, S_DATA, st->id, b, r);
             continue;
         }
@@ -971,9 +983,10 @@ loctun *loctun_start(const loctun_cfg *c, locnet *n, locnetsim *sim, loctun_log_
          * Treffpunkt (Release-Pfad, Bindung auf alle Schnittstellen) nie aktiv */
         tl_logf(t, "LOCSEC: loc_transport_peers (Testweg) mit Treffpunkt nicht erlaubt - uebergangen");
     } else if (t->c.peers[0]) {
+        tl_add_test_peers(t);
+#if LOCTUN_FUZZ
         char fz[24];
         DWORD fl = GetEnvironmentVariableA("SB_LOC_FUZZ_TX", fz, sizeof fz);
-        tl_add_test_peers(t);
         if (fl > 0 && fl < sizeof fz && atoi(fz) > 0) { /* W335 TEST: Sende-Fuzzer nur auf dem Testweg */
             t->fz_rng = (uint32_t)atoi(fz) * 2654435761u + (uint32_t)GetCurrentProcessId();
             t->fz_on = 1;
@@ -981,6 +994,7 @@ loctun *loctun_start(const loctun_cfg *c, locnet *n, locnetsim *sim, loctun_log_
             tl_logf(t, "LOCFUZZ: Sende-Fuzzer aktiv (TEST, Testweg ohne Treffpunkt)%s",
                     t->fz_rule ? ", Regel-Felder gezielt (W339)" : "");
         }
+#endif
     }
     nr_start(t); /* W496 NET-TELEMETRY: ohne Zustimmung kein Zustand, keine Datei */
     timeBeginPeriod(1); /* Abstaende der Kopien (gap_ms) brauchen 1-ms-Wartezeiten */
@@ -1141,7 +1155,9 @@ int loctun_dgram(loctun *t, uint32_t dst_vip, uint16_t src_gp, uint16_t dst_gp, 
         L->dq[slot].len = (uint16_t)len;
         L->dq[slot].tx = 0;
         memcpy(L->dq[slot].data, buf, (size_t)len);
+#if LOCTUN_FUZZ
         if (t->fz_on) tl_fuzz_dgram(t, L->dq[slot].data, len); /* W335 TEST */
+#endif
         InterlockedIncrement(&L->s_dgtx);
         InterlockedIncrement(&t->st.dg_tx);
         sent++;
@@ -1470,9 +1486,11 @@ void loctun_log_stats(loctun *t, int waited_s)
                     L->rt.nfail);
         }
     }
+#if LOCTUN_FUZZ
     if (t->fz_on) /* W335 TEST */
         tl_logf(t, "LOCFUZZ: t=%ds Rahmen verfaelscht=%ld Bytes=%ld Datagramme=%ld Gastfilter-Verstoesse=%ld", waited_s,
                 t->fz_frames, t->fz_bytes, t->fz_dg, t->st.guard);
+#endif
     LeaveCriticalSection(&t->cs);
 }
 

@@ -1128,16 +1128,22 @@ static void ks_td(char *out, size_t cap, size_t *o, const ks_toks_t *k,
 static void keysvg_build(const char *profile, const char *prof_text,
                          char *out, size_t cap, size_t *o)
 {
-    static lctrl_bind_t b;
-    static ks_toks_t tok[sizeof ks_elems / sizeof ks_elems[0]];
+    /* W535 AVVT: Arbeitsspeicher (~250 KB) vom Heap statt statisch (.bss des Release-Launchers verkleinert) */
+    lctrl_bind_t *b = (lctrl_bind_t *)calloc(1, sizeof *b);
+    ks_toks_t *tok = (ks_toks_t *)calloc((size_t)KS_N, sizeof *tok);
     int i, g, has_prof = profile && profile[0];
+    if (!b || !tok) {
+        free(b);
+        free(tok);
+        return; /* ohne Speicher: Abschnitt fehlt, Rest der Seite bleibt */
+    }
     if (!has_prof || (!prof_text && strcmp(profile, "keyboard_default") == 0)) {
-        lctrl_bind_load_text(ks_legacy_text, &b);
+        lctrl_bind_load_text(ks_legacy_text, b);
     } else {
-        lctrl_bind_load_text(prof_text ? prof_text : "", &b);
+        lctrl_bind_load_text(prof_text ? prof_text : "", b);
     }
     for (i = 0; i < KS_N; i++) {
-        ks_collect(&b, &ks_elems[i], &tok[i]);
+        ks_collect(b, &ks_elems[i], &tok[i]);
     }
     keyshtml_add(out, cap, o, "<section class=\"ctl\"><h2>");
     keyshtml_add(out, cap, o, LT("gui.svg_h"));
@@ -1305,6 +1311,8 @@ static void keysvg_build(const char *profile, const char *prof_text,
         }
     }
     keyshtml_add(out, cap, o, "</table></section>\n");
+    free(tok);
+    free(b);
 }
 
 /* W182: Fixture-Profil (eigener Text, keine Spieldaten) fuer Selbsttest
@@ -1643,11 +1651,15 @@ void keyshtml_build(const char *memo, const char *profile,
         keyshtml_add(out, cap, &o, e);
         keyshtml_add(out, cap, &o, "</h2>");
         if (prof_text && prof_text[0]) {
-            static char pre[65536];
-            keyshtml_escape(prof_text, pre, sizeof pre);
-            keyshtml_add(out, cap, &o, "<pre>");
-            keyshtml_add(out, cap, &o, pre);
-            keyshtml_add(out, cap, &o, "</pre>");
+            enum { PRE_CAP = 65536 };
+            char *pre = (char *)malloc(PRE_CAP); /* W535: Heap statt statisch */
+            if (pre) {
+                keyshtml_escape(prof_text, pre, PRE_CAP);
+                keyshtml_add(out, cap, &o, "<pre>");
+                keyshtml_add(out, cap, &o, pre);
+                keyshtml_add(out, cap, &o, "</pre>");
+                free(pre);
+            }
         } else if (prof_missing && prof_missing[0]) {
             keyshtml_escape(prof_missing, e, sizeof e);
             keyshtml_add(out, cap, &o, "<p>");
@@ -1791,7 +1803,9 @@ static void keyshtml_path(char *out, size_t cap)
 void keyshtml_open(void)
 {
     char prof[64], miss[512], path[1200];
-    static char praw[12288], pu8[24576], html[393216];
+    enum { HTML_CAP = 393216 };
+    static char praw[12288], pu8[24576];
+    char *html; /* W535 AVVT: 384 KB vom Heap statt statisch (.bss des Release-Launchers verkleinert) */
     const char *prof_text = NULL, *mouse_lbl;
     int r = 1, sens, msel, ssel;
     FILE *f = NULL;
@@ -1814,12 +1828,20 @@ void keyshtml_open(void)
     mouse_lbl = LT(msel == 1 ? "gui.mouse_rel" : "gui.mouse_abs");
     ssel = ComboBox_GetCurSel(ctl(ID_MOUSE_SENS));
     sens = (ssel >= 0 && ssel < 16) ? ssel + 1 : 4;
+    keyshtml_path(path, sizeof path);
+    html = (char *)calloc(1, HTML_CAP);
+    if (!html) {
+        char t[1500];
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.keys_write_err"), path);
+        set_status_k(t, 2);
+        return;
+    }
     keyshtml_build(LT("gui.keys_memo"), prof, prof_text,
                    miss[0] ? miss : NULL, mouse_lbl, sens, g_pad_txt,
-                   g_padlive_txt, g_sbc_txt, html, sizeof html);
-    keyshtml_path(path, sizeof path);
+                   g_padlive_txt, g_sbc_txt, html, HTML_CAP);
     if (u8_fopen_s(&f, path, "wb") != 0 || !f) {
         char t[1500];
+        free(html);
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.keys_write_err"), path);
         set_status_k(t, 2);
         return;
@@ -1828,11 +1850,13 @@ void keyshtml_open(void)
     if (hlen && fwrite(html, 1, hlen, f) != hlen) {
         char t[1500];
         fclose(f);
+        free(html);
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.keys_write_err"), path);
         set_status_k(t, 2);
         return;
     }
     fclose(f);
+    free(html);
     if (g_o.shot != 0) {
         printf("[open] %s\n", path);
         set_status(LT("gui.keys_open_ok"));
@@ -2025,13 +2049,21 @@ static void zadig_path(char *out, size_t cap)
 void zadig_open(void)
 {
     char path[1200];
-    static char html[65536];
+    enum { ZHTML_CAP = 65536 };
+    char *html = (char *)calloc(1, ZHTML_CAP); /* W535: Heap statt statisch */
     FILE *f = NULL;
     size_t hlen;
-    zadig_build(html, sizeof html);
     zadig_path(path, sizeof path);
+    if (!html) {
+        char t[1500];
+        _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.zadig_write_err"), path);
+        set_status_k(t, 2);
+        return;
+    }
+    zadig_build(html, ZHTML_CAP);
     if (u8_fopen_s(&f, path, "wb") != 0 || !f) {
         char t[1500];
+        free(html);
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.zadig_write_err"), path);
         set_status_k(t, 2);
         return;
@@ -2040,11 +2072,13 @@ void zadig_open(void)
     if (hlen && fwrite(html, 1, hlen, f) != hlen) {
         char t[1500];
         fclose(f);
+        free(html);
         _snprintf_s(t, sizeof t, _TRUNCATE, LT("gui.zadig_write_err"), path);
         set_status_k(t, 2);
         return;
     }
     fclose(f);
+    free(html);
     if (g_o.shot != 0) {
         printf("[open] %s\n", path);
         set_status(LT("gui.zadig_open_ok"));

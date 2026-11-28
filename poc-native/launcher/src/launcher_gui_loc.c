@@ -1024,7 +1024,8 @@ static DWORD WINAPI camp_thread(LPVOID p)
 {
     camp_job_t *j = (camp_job_t *)p;
     char err[16];
-    j->rc = lcamp_probe(j->k, CAMP_TIMEOUT_MS, err, sizeof err);
+    /* W537: reine TCP-Probe im Hilfsprogramm sb_account.exe (Launcher ohne Sockets) */
+    j->rc = lach_run("camp", NULL, NULL, NULL, NULL, j->k, CAMP_TIMEOUT_MS + 2000, NULL, NULL, err, sizeof err);
     if (!PostMessageW(j->h, WM_APP_CAMP, (WPARAM)j->gen, (LPARAM)j)) {
         free(j);
     }

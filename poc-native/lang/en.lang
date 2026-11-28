@@ -2124,6 +2124,7 @@ gui.acc_err_busy=Server busy – please try again later.
 gui.acc_err_store=Could not save the key on this PC.
 gui.acc_err_browser=Could not open the browser.
 gui.acc_err_other=Server error (%s).
+gui.acc_err_helper=The account helper sb_account.exe is missing or could not be started (antivirus?). Please extract the whole Steelbound package again.
 gui.acc_head_none2=No password, no email. Takes a few seconds.
 gui.acc_new_title=Create an account
 gui.acc_name_long=Account name (shown to other players)

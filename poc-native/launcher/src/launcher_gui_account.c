@@ -92,6 +92,13 @@ static const char *acc_gtmsg_for(int id, COLORREF *c)
     return g_acc_gtmsg;
 }
 
+static void acc_dir(char *out, size_t cap);
+/* W537: Ordner der Schluesseldatei (Test-Profil bzw. Standard) fuer Auftraege an sb_account.exe */
+void acc_dir_get(char *out, size_t cap)
+{
+    acc_dir(out, cap);
+}
+
 static void acc_dir(char *out, size_t cap)
 {
     if (g_acc_dir_test[0]) {
@@ -117,10 +124,50 @@ static void acc_load(void)
         return;
     }
     g_acc_loaded = 1;
+    memset(&g_acc, 0, sizeof g_acc);
     acc_dir(d, sizeof d);
-    if (lacc_store_load(d, &g_acc) != 1) {
-        memset(&g_acc, 0, sizeof g_acc);
+    {   /* W537: oeffentliche Felder vom Hilfsprogramm (der Launcher hat kein DPAPI); ohne Datei kein Aufruf */
+        char path[1300], e[48];
+        lach_res_t *r;
+        lacc_store_path(d, path, sizeof path);
+        if (u8_GetFileAttributes(path) == INVALID_FILE_ATTRIBUTES) return;
+        r = (lach_res_t *)calloc(1, sizeof *r);
+        if (r && lach_run("load", d, NULL, NULL, NULL, 0, 15000, NULL, r, e, sizeof e) == 0 && r->st_load == 1) {
+            g_acc = r->st; /* key bleibt 0 */
+        } else {
+            printf("[acc] Konto nicht lesbar (%s)\n", r ? (r->filled ? "Datei" : e) : "Speicher");
+        }
+        free(r);
     }
+}
+
+/* W537: Wiederherstellungscode bzw. Spielschluessel. Fixture (Selbsttest/Testbilder): lokal aus dem Fixture-Schluessel;
+ * sonst vom Hilfsprogramm (Schluessel K bleibt dort). 1 = ok. */
+static int acc_secret(const char *op, char *out, size_t cap)
+{
+    char d[1200], e[48];
+    lach_res_t *r;
+    int ok = 0;
+    out[0] = '\0';
+    if (!g_acc.have) return 0;
+    if (g_acc_fixture) {
+        if (op[0] == 'r') lacc_recovery_code(g_acc.account, g_acc.key, out, cap);
+        else lacc_game_auth(&g_acc, (long long)time(NULL), out, cap);
+        return out[0] != '\0';
+    }
+    acc_dir(d, sizeof d);
+    r = (lach_res_t *)calloc(1, sizeof *r);
+    if (r && lach_run(op, d, NULL, NULL, NULL, 0, 15000, NULL, r, e, sizeof e) == 0) {
+        strncpy_s(out, cap, op[0] == 'r' ? r->code : r->auth, _TRUNCATE);
+        ok = out[0] != '\0';
+    } else {
+        printf("[acc] %s: %s\n", op, e);
+    }
+    if (r) {
+        SecureZeroMemory(r, sizeof *r);
+        free(r);
+    }
+    return ok;
 }
 
 /* W472 LOBBIES-AUTH: steelnet > Info braucht das eigene Konto fuer die Lobbyliste (einmal laden, wie acc_load) */
@@ -289,6 +336,7 @@ static void acc_err_text(const char *code, char *out, size_t cap)
         const char *code, *key;
     } kErr[] = {
         { "net", "gui.acc_err_net" },           { "pin", "gui.acc_err_pin" },
+        { "helper", "gui.acc_err_helper" }, /* W537: sb_account.exe fehlt/startet nicht */
         { "off", "gui.acc_err_off" },           { "accounts_off", "gui.acc_err_off" },
         { "invalid_name", "gui.acc_err_name" }, { "name_taken", "gui.acc_err_taken" },
         { "invalid_login", "gui.acc_err_login" }, { "login_taken", "gui.acc_err_login_taken" },
@@ -445,27 +493,38 @@ void acc_refresh(void)
     }
     redraw_all();
 }
+/* W537 LAUNCHER-SLIM: Auftraege laufen im Hilfsprogramm sb_account.exe (launcher_acchelp.h); Netz, Challenge-
+ * Response, Discord-Empfaenger und das Schreiben der Schluesseldatei sind nicht mehr im Launcher. Das Hilfsprogramm
+ * liest/aktualisiert die Schluesseldatei in j->dir selbst; danach liest der Launcher sie neu (j->st). */
+static const char *const kAccOp[] = { "", "status", "check", "create", "discord-link", "discord-login", "login-set",
+                                      "login", "transfer", "recovery", "delete", "gtcheck", "gtset" };
 static DWORD WINAPI acc_thread(LPVOID p)
 {
     acc_job_t *j = (acc_job_t *)p;
     char *e = j->err;
     size_t ec = sizeof j->err;
-    switch (j->op) {
-    case ACC_OP_STATUS: j->rc = lacc_op_status(&j->srv, &j->st, &j->status, e, ec); break;
-    case ACC_OP_CHECK: j->rc = lacc_op_check(&j->srv, j->a, &j->avail, e, ec); break;
-    case ACC_OP_CREATE: j->rc = lacc_op_create_gt(&j->srv, j->dir, j->a, j->c, &j->st, &j->gts, e, ec); break; /* W487 */
-    case ACC_OP_GT_CHECK:
-        j->rc = lacc_op_gamertag_check(&j->srv, j->a[0] ? j->a : NULL, j->c[0] ? j->c : NULL, &j->gtc, e, ec);
-        break;
-    case ACC_OP_GT_SET: j->rc = lacc_op_gamertag_set(&j->srv, &j->st, j->a, &j->gts, e, ec); break;
-    case ACC_OP_DISCORD_LINK: j->rc = lacc_op_discord(&j->srv, j->dir, 0, &j->st, 180000, &g_acc_cancel, e, ec); break;
-    case ACC_OP_DISCORD_LOGIN: j->rc = lacc_op_discord(&j->srv, j->dir, 1, &j->st, 180000, &g_acc_cancel, e, ec); break;
-    case ACC_OP_LOGIN_SET: j->rc = lacc_op_login_set(&j->srv, &j->st, j->a, j->b, e, ec); break;
-    case ACC_OP_LOGIN: j->rc = lacc_op_login(&j->srv, j->dir, j->a, j->b, &j->st, e, ec); break;
-    case ACC_OP_TRANSFER: j->rc = lacc_op_transfer(&j->srv, j->dir, j->a, &j->st, e, ec); break;
-    case ACC_OP_RECOVERY: j->rc = lacc_op_recovery(&j->srv, j->dir, j->a, &j->st, e, ec); break;
-    case ACC_OP_DELETE: j->rc = lacc_op_delete(&j->srv, j->dir, &j->st, e, ec); break;
-    default: j->rc = 1; strcpy_s(e, ec, "bad"); break;
+    lach_res_t *res = (lach_res_t *)calloc(1, sizeof *res);
+    if (!res || j->op < ACC_OP_STATUS || j->op > ACC_OP_GT_SET) {
+        j->rc = 1;
+        strcpy_s(e, ec, "bad");
+    } else {
+        int disc = j->op == ACC_OP_DISCORD_LINK || j->op == ACC_OP_DISCORD_LOGIN;
+        lacc_store_t ns;
+        j->rc = lach_run(kAccOp[j->op], j->dir, j->a, j->b, j->c, 0, disc ? 185000 : 60000, &g_acc_cancel, res, e, ec);
+        j->status = res->status;
+        j->avail = res->avail;
+        j->gts = res->gts;
+        j->gtc = res->gtc;
+        if (res->filled && res->st_load >= 0) { /* 1 = Konto, 0 = keins (geloescht); -1 unlesbar bzw. kein Ergebnis: alt */
+            ns = res->st;                        /* nur oeffentliche Felder, key 0 */
+            if (ns.have && ns.account == j->st.account) memcpy(ns.key, j->st.key, sizeof ns.key); /* Fixture-Schluessel */
+            j->st = ns;
+        }
+        SecureZeroMemory(&ns, sizeof ns);
+    }
+    if (res) {
+        SecureZeroMemory(res, sizeof *res);
+        free(res);
     }
     SecureZeroMemory(j->b, sizeof j->b);
     if (!PostMessageW(j->h, WM_APP_ACC, (WPARAM)j->gen, (LPARAM)j)) {
@@ -941,7 +1000,7 @@ static void acc_copy_code(void)
     if (!g_acc.have) {
         return;
     }
-    lacc_recovery_code(g_acc.account, g_acc.key, c, sizeof c);
+    if (!acc_secret("recovery-show", c, sizeof c)) return; /* W537 */
     if (g_o.shot != 0) { /* Test: Zwischenablage des Nutzers nie anfassen */
         printf("[clipboard] Wiederherstellungscode (%u Zeichen)\n", (unsigned)strlen(c));
         SecureZeroMemory(c, sizeof c);
@@ -1349,7 +1408,7 @@ static int acc_command(int id, int code)
         if (g_acc_rec[0]) {
             SecureZeroMemory(g_acc_rec, sizeof g_acc_rec);
         } else if (g_acc.have) {
-            lacc_recovery_code(g_acc.account, g_acc.key, g_acc_rec, sizeof g_acc_rec);
+            acc_secret("recovery-show", g_acc_rec, sizeof g_acc_rec); /* W537: vom Hilfsprogramm */
         }
         ui_settext(ctl(ID_ACC_V_RECSHOW), LT(g_acc_rec[0] ? "gui.acc_rec_hide" : "gui.acc_rec_show"));
         redraw_all();
@@ -1492,7 +1551,9 @@ wchar_t *acc_launch_env(char *set, size_t cap)
         return NULL;
     }
     _snprintf_s(set + strlen(set), cap - strlen(set), _TRUNCATE, ";loc_lobby_pilot=%s", g_acc.name);
-    lacc_game_auth(&g_acc, (long long)time(NULL), a, sizeof a);
+    if (!acc_secret("game-auth", a, sizeof a)) { /* W537: Spielschluessel G vom Hilfsprogramm */
+        return NULL; /* ohne Schluessel startet der Client als Gast (wie ohne Konto) */
+    }
     env = lacc_env_block(LACC_ENV_AUTH, a);
     SecureZeroMemory(a, sizeof a);
     return env;

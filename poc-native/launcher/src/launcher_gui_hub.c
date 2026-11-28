@@ -178,6 +178,7 @@ typedef struct {
     int gen;
     lacc_store_t acc; /* W472: Kopie des eigenen Kontos fuer den Nachweis (nach dem Abruf geloescht) */
     lacc_lobbies_t r;
+    char dir[1200]; /* W537 */
 } hubl_job_t;
 
 lacc_lobbies_t g_hubl;
@@ -194,7 +195,21 @@ static SYSTEMTIME g_hubl_when;
 static DWORD WINAPI hubl_thread(LPVOID p)
 {
     hubl_job_t *j = (hubl_job_t *)p;
-    lacc_lobbies(&j->acc, &j->r);
+    memset(&j->r, 0, sizeof j->r);
+    if (!j->acc.have) { /* W472: ohne Konto kein Netz (wie lacc_lobbies) */
+        strcpy_s(j->r.error, sizeof j->r.error, "no_account");
+    } else { /* W537: angemeldete Aktion "lobbies" (Challenge-Response) im Hilfsprogramm sb_account.exe */
+        lach_res_t *res = (lach_res_t *)calloc(1, sizeof *res);
+        char e[48];
+        if (res && lach_run("lobbies", j->dir, NULL, NULL, NULL, 0, 30000, NULL, res, e, sizeof e) == 0) {
+            j->r = res->lob;
+        } else {
+            if (res) j->r = res->lob;
+            if (!j->r.error[0]) strcpy_s(j->r.error, sizeof j->r.error, res ? e : "helper");
+            j->r.ok = 0;
+        }
+        free(res);
+    }
     SecureZeroMemory(&j->acc, sizeof j->acc);
     if (!PostMessageW(j->h, WM_APP_HUBL, (WPARAM)j->gen, (LPARAM)j)) {
         free(j);
@@ -270,6 +285,7 @@ int hub_lobby_kick(void)
     j->h = g_hwnd;
     j->gen = ++g_hubl_gen;
     j->acc = g_acc;
+    acc_dir_get(j->dir, sizeof j->dir); /* W537: Ordner der Schluesseldatei fuer das Hilfsprogramm */
     th = CreateThread(NULL, 0, hubl_thread, j, 0, NULL);
     if (!th) {
         SecureZeroMemory(&j->acc, sizeof j->acc);

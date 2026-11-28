@@ -1,0 +1,141 @@
+# Builds the Windows release package (sb_launcher.exe, sb_ldr.exe, sb_emu.dll + files) from this
+# repository with MSVC (Win32, Release). Script: poc-native/tools/ci/build_release.py.
+#  - Tag v* (e.g. v0.6.4) or manual start: full package (ZIP + SHA256SUMS.txt + BUILDINFO.txt) as
+#    workflow artifact, plus a first-start check of the unpacked package (no game data involved).
+#  - Push to main that touches the sources: short check build only, no artifact.
+# No secrets are used. Actions are pinned to full commit SHAs (tag in the comment).
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+    paths:
+      - "poc-native/**"
+      - ".github/workflows/build.yml"
+  workflow_dispatch:
+    inputs:
+      runner:
+        description: "Runner image (windows-2022 = Visual Studio 2022, same compiler as the published releases)"
+        type: choice
+        options: [windows-2022, windows-2025-vs2026]
+        default: windows-2022
+      repro:
+        description: "Experimental: reproducible build flags (/Brepro)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+
+jobs:
+  build:
+    runs-on: ${{ inputs.runner || 'windows-2022' }}
+    timeout-minutes: 60
+    env:
+      # windows-2022: Visual Studio 2022 (MSVC 14.44). windows-2025-vs2026: VS 2026 with the
+      # MSVC 14.44 (v143) toolset, so both images use the same compiler.
+      BUILD_GENERATOR: ${{ inputs.runner == 'windows-2025-vs2026' && 'Visual Studio 18 2026' || 'Visual Studio 17 2022' }}
+      BUILD_TOOLSET: v143
+      BUILD_SDK: 10.0.26100.0
+      PYTHONUTF8: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.13"
+
+      - name: Mode and version
+        id: mode
+        shell: pwsh
+        run: |
+          $v = (Get-Content poc-native/VERSION -Raw).Trim()
+          if ($env:GITHUB_REF_TYPE -eq 'tag') {
+            $t = $env:GITHUB_REF_NAME -replace '^v', ''
+            if ($t -ne $v) { throw "Tag $env:GITHUB_REF_NAME does not match poc-native/VERSION ($v)" }
+          }
+          $full = if ($env:GITHUB_EVENT_NAME -eq 'push' -and $env:GITHUB_REF_TYPE -ne 'tag') { 'false' } else { 'true' }
+          "full=$full" >> $env:GITHUB_OUTPUT
+          "version=$v" >> $env:GITHUB_OUTPUT
+          "package=Steelbound-$v-win32" >> $env:GITHUB_OUTPUT
+          Write-Host "Version $v, full package: $full"
+
+      - name: Build
+        shell: pwsh
+        env:
+          BUILD_FULL: ${{ steps.mode.outputs.full }}
+          BUILD_REPRO: ${{ inputs.repro && 'true' || 'false' }}
+        run: |
+          $a = @('poc-native/tools/ci/build_release.py', '--out', "$env:RUNNER_TEMP/sb",
+                 '--generator', $env:BUILD_GENERATOR, '--toolset', $env:BUILD_TOOLSET, '--sdk', $env:BUILD_SDK)
+          if ($env:BUILD_FULL -ne 'true') { $a += '--probe' }
+          if ($env:BUILD_REPRO -eq 'true') { $a += '--repro' }
+          python @a
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Collect artifact
+        if: steps.mode.outputs.full == 'true'
+        shell: pwsh
+        env:
+          BUILD_PACKAGE: ${{ steps.mode.outputs.package }}
+        run: |
+          $o = "$env:RUNNER_TEMP/sb"
+          $d = New-Item -ItemType Directory -Force "$env:RUNNER_TEMP/artifact"
+          Copy-Item "$o/$env:BUILD_PACKAGE.zip", "$o/SHA256SUMS.txt", "$o/BUILDINFO.txt" $d
+          Get-Content "$o/SHA256SUMS.txt" | Select-String -Pattern '\.(exe|dll|zip)$'
+          "## Build $env:BUILD_PACKAGE" >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+          Get-Content "$o/SHA256SUMS.txt" | Select-String -Pattern '\.(exe|dll|zip)$' | ForEach-Object { $_.Line } >> $env:GITHUB_STEP_SUMMARY
+          Get-Content "$o/BUILDINFO.txt" >> $env:GITHUB_STEP_SUMMARY
+          '```' >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Upload package
+        if: steps.mode.outputs.full == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.mode.outputs.package }}
+          path: ${{ runner.temp }}/artifact/
+          if-no-files-found: error
+          retention-days: 90
+
+      # Code signing (not active). Kept here so the signing setup is reviewable before it is used.
+      # To enable: uncomment both steps, add the secret SIGNPATH_API_TOKEN and fill in the IDs.
+      # The unsigned package folder is uploaded as its own artifact; SignPath signs the three
+      # binaries inside it (artifact configuration in the SignPath project) after a manual approval, and the signed files come back as a new artifact.
+      #
+      # - name: Upload unsigned package for signing
+      #   id: upload-unsigned
+      #   if: github.ref_type == 'tag'
+      #   uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+      #   with:
+      #     name: unsigned-${{ steps.mode.outputs.package }}
+      #     path: ${{ runner.temp }}/sb/stage/${{ steps.mode.outputs.package }}/
+      #     if-no-files-found: error
+      #
+      # - name: Submit signing request
+      #   if: github.ref_type == 'tag'
+      #   uses: signpath/github-action-submit-signing-request@a2c5b60d9c75f073142b653c354b632eedce097b # v3.2
+      #   with:
+      #     api-token: ${{ secrets.SIGNPATH_API_TOKEN }}
+      #     organization-id: "00000000-0000-0000-0000-000000000000"  # placeholder
+      #     project-slug: "steelbound"                               # placeholder
+      #     signing-policy-slug: "release-signing"                   # placeholder
+      #     artifact-configuration-slug: "release-package"           # placeholder
+      #     github-artifact-id: ${{ steps.upload-unsigned.outputs.artifact-id }}
+      #     wait-for-completion: true
+      #     wait-for-completion-timeout-in-seconds: 86400
+      #     output-artifact-directory: ${{ runner.temp }}/signed/${{ steps.mode.outputs.package }}
+      #     parameters: |
+      #       version: "${{ steps.mode.outputs.version }}"
+      #
+      # Afterwards: zip the signed folder the same way as the unsigned one, write new checksums
+      # and upload it as "signed-<package>". The release itself is still created by hand.

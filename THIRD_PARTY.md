@@ -7,8 +7,9 @@ their own licenses. Nothing here is legal advice.
 ## Own artwork (not third-party)
 
 The launcher background image (`poc-native/launcher/res/bg_nutzer.png`,
-built from `bg_nutzer.webp` via `res/convert_bg.py`) is the project
-owner's own work and is licensed like the project's own assets. It is
+built from `bg_nutzer.webp` via `res/convert_bg.py`; in the binary
+release it is the file `res/launcher_bg.png` next to `sb_launcher.exe`) is
+the project owner's own work and is licensed like the project's own assets. It is
 listed here only for attribution; it is not a third-party component.
 
 ## Shipped with the release

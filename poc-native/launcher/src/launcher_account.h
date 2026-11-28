@@ -20,6 +20,7 @@ extern "C" {
 
 #define LACC_ENV_AUTH "SB_LOC_AUTH"
 #define LACC_FILE "steelnet_account.dat"
+#define LACC_DPAPI_ENTROPY "steelbound-steelnet-account-v1" /* zusaetzliche DPAPI-Entropie (Lesen + Schreiben) */
 #define LACC_GAME_TTL (24 * 3600) /* Spielschluessel: jetzt + 24 h */
 
 typedef struct {
@@ -240,6 +241,12 @@ int lacc_op_delete(const lacc_srv_t *s, const char *dir, lacc_store_t *st, char 
  * Code + verifier an die Konto-API. cancel (darf NULL sein): != 0 bricht ab. */
 int lacc_op_discord(const lacc_srv_t *s, const char *dir, int login_mode, lacc_store_t *st,
                     int timeout_ms, volatile long *cancel, char *err, size_t ecap);
+
+/* W537 LAUNCHER-SLIM: Browser-Oeffnen ersetzen. Im Hilfsprogramm sb_account.exe gesetzt: die Autorisierungs-URL geht
+ * an den Launcher, der den Browser selbst oeffnet (wie bisher aus dem Vordergrund-Prozess). NULL = ShellExecute bzw.
+ * Testausgabe "[discord-url]". Rueckgabe 0 = geoeffnet. */
+typedef int (*lacc_url_fn)(const char *url);
+extern lacc_url_fn g_lacc_open_url;
 
 /* ---------------- Loopback-Empfaenger (Discord-Rueckleitung) ---------------- */
 /* Oeffnet 127.0.0.1:port (0 = frei; *actual = Port). Rueckgabe Socket oder -1. */

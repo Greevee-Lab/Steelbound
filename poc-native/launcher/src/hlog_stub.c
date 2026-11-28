@@ -43,9 +43,13 @@ void hlog_msg(int level, const char *fmt, ...)
     va_start(ap, fmt);
     _vsnprintf_s(b, sizeof b, _TRUNCATE, fmt, ap);
     va_end(ap);
+#if defined(SB_TEST_HOOKS) && SB_TEST_HOOKS /* W535 AVVT: Debug-Ausgabe nur in Entwickler-Builds */
     OutputDebugStringA("sb_pack: ");
     OutputDebugStringA(b);
     OutputDebugStringA("\n");
+#else
+    (void)b;
+#endif
 }
 
 int hlog_throttle(uint32_t *counter)

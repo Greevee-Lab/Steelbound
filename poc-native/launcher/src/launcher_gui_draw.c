@@ -487,7 +487,7 @@ void fonts_make(void)
 }
 
 /* ------------------------------------------------------------------ */
-/* Hintergrundbild (Ressource IDR_BG, PNG, per WIC)                    */
+/* Hintergrundbild (Datei res/launcher_bg.png neben der Exe, per WIC)  */
 /* ------------------------------------------------------------------ */
 static const GUID kCLSID_WICFactory = {
     0xcacaf262, 0x9370, 0x4615, { 0xa1, 0x3b, 0x9f, 0x55, 0x39, 0xda, 0x4c, 0x0a }
@@ -522,37 +522,76 @@ static int wic_init(void)
     return 1;
 }
 
-/* Ressource dekodieren. 1 = ok. */
-int bg_load(void)
+/* W535 AVVT: Datei ganz einlesen (bis LAUNCHER_BG_MAX). -> malloc-Puffer oder NULL. */
+static BYTE *bg_read_file(const wchar_t *path, DWORD *n_out)
 {
-    HRSRC r;
-    HGLOBAL hg;
-    void *p;
-    DWORD n;
+    HANDLE f;
+    LARGE_INTEGER sz;
+    BYTE *buf = NULL;
+    DWORD got = 0;
+    *n_out = 0;
+    f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+        return NULL;
+    }
+    if (GetFileSizeEx(f, &sz) && sz.QuadPart > 0 && sz.QuadPart <= (LONGLONG)LAUNCHER_BG_MAX) {
+        buf = (BYTE *)malloc((size_t)sz.QuadPart);
+        if (buf && (!ReadFile(f, buf, (DWORD)sz.QuadPart, &got, NULL) || got != (DWORD)sz.QuadPart)) {
+            free(buf);
+            buf = NULL;
+        }
+    }
+    CloseHandle(f);
+    if (buf) {
+        *n_out = got;
+    }
+    return buf;
+}
+
+/* W535 AVVT: Pfad des Hintergrundbilds (Exe-Ordner + LAUNCHER_BG_REL). 1 = ok. */
+int bg_default_path(wchar_t *out, size_t cap)
+{
+    wchar_t *sep;
+    DWORD n = GetModuleFileNameW(NULL, out, (DWORD)cap);
+    if (n == 0 || n >= cap) {
+        return 0;
+    }
+    sep = wcsrchr(out, L'\\');
+    if (!sep) {
+        return 0;
+    }
+    sep[1] = 0;
+    return wcscat_s(out, cap, LAUNCHER_BG_REL) == 0;
+}
+
+/* PNG-Datei dekodieren (W535: statt RCDATA-Ressource). 1 = ok, 0 = fehlt/unlesbar -> einfarbiger Verlauf.
+ * path NULL = Standardpfad neben der Exe. Setzt bei Erfolg g_img/g_img_w/g_img_h. */
+int bg_load_file(const wchar_t *path)
+{
+    wchar_t def[MAX_PATH + 32];
+    BYTE *p;
+    DWORD n = 0;
     IWICStream *st = NULL;
     IWICBitmapDecoder *dec = NULL;
     IWICBitmapFrameDecode *fr = NULL;
     IWICFormatConverter *cvt = NULL;
     UINT w = 0, h = 0;
     int ok = 0;
-    if (g_img) {
-        return 1;
-    }
     if (!wic_init()) {
         return 0;
     }
-    r = FindResourceW(NULL, MAKEINTRESOURCEW(IDR_BG), MAKEINTRESOURCEW(10) /* RT_RCDATA */);
-    if (!r) {
-        return 0;
+    if (!path) {
+        if (!bg_default_path(def, sizeof(def) / sizeof(def[0]))) {
+            return 0;
+        }
+        path = def;
     }
-    hg = LoadResource(NULL, r);
-    p = hg ? LockResource(hg) : NULL;
-    n = SizeofResource(NULL, r);
-    if (!p || !n) {
+    p = bg_read_file(path, &n);
+    if (!p) {
         return 0;
     }
     if (SUCCEEDED(IWICImagingFactory_CreateStream(g_wic, &st)) &&
-        SUCCEEDED(IWICStream_InitializeFromMemory(st, (BYTE *)p, n)) &&
+        SUCCEEDED(IWICStream_InitializeFromMemory(st, p, n)) &&
         SUCCEEDED(IWICImagingFactory_CreateDecoderFromStream(
             g_wic, (IStream *)st, NULL, WICDecodeMetadataCacheOnDemand,
             &dec)) &&
@@ -563,17 +602,19 @@ int bg_load(void)
             NULL, 0.0, WICBitmapPaletteTypeCustom)) &&
         SUCCEEDED(IWICFormatConverter_GetSize(cvt, &w, &h)) && w > 0 &&
         h > 0 && w <= 8192 && h <= 8192) {
-        g_img = (uint32_t *)malloc((size_t)w * h * 4);
-        if (g_img &&
+        uint32_t *img = (uint32_t *)malloc((size_t)w * h * 4);
+        if (img &&
             SUCCEEDED(IWICFormatConverter_CopyPixels(cvt, NULL, w * 4,
                                                      w * h * 4,
-                                                     (BYTE *)g_img))) {
+                                                     (BYTE *)img))) {
+            free(g_img); /* erneutes Laden (Selbsttest) ersetzt das alte Bild */
+            g_img = img;
             g_img_w = (int)w;
             g_img_h = (int)h;
+            g_bgs_w = g_bgs_h = 0; /* Skalier-Cache neu bauen */
             ok = 1;
         } else {
-            free(g_img);
-            g_img = NULL;
+            free(img);
         }
     }
     if (cvt) {
@@ -588,7 +629,22 @@ int bg_load(void)
     if (st) {
         IWICStream_Release(st);
     }
+    free(p); /* WIC-Stream ist freigegeben, Pixel liegen kopiert in g_img */
     return ok;
+}
+
+/* Hintergrundbild einmal laden (Standardpfad). 1 = ok. */
+int bg_load(void)
+{
+    static int tried;
+    if (g_img) {
+        return 1;
+    }
+    if (tried) {
+        return 0; /* fehlende Datei nicht bei jedem Neuaufbau erneut suchen */
+    }
+    tried = 1;
+    return bg_load_file(NULL);
 }
 
 /* Zuschnitt "fuellen ohne Strecken": groesster Ausschnitt der Quelle mit

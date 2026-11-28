@@ -4,10 +4,12 @@
  * Kampagne "verfuegbar" nur, wenn ALLE gelten: steelnet-Konto angemeldet (letzter status), Gamertag gesetzt,
  * keine Mindestversion verletzt (W421, /v1/info) und Steelbound-Zugang des Kampagnenservers erreichbar. Die ersten
  * drei Punkte kommen aus den vorhandenen Quellen (acc_live_state, loc_ver_gate); die Erreichbarkeit prueft
- * lcamp_probe: TCP + TLS-Handshake mit SPKI-Pin (SB_CAMPAIGN_SPKI1/2, steelnet_pins.h) gegen SB_STEELNET_HOST:47100
- * (Saison) bzw. :47103 (Testkampagne), danach schliessen - KEIN Vorspann, keine Anwendungsdaten, keine Adresse ins
- * Log. TLS = harness/src/sb_tls.c (derselbe SChannel-Client wie die Kampagnenbruecke des Spiels; die Konto-API nutzt
- * WinHTTP und sendet immer HTTP-Kopfzeilen, das waere fuer den Zugang ein ungueltiger Vorspann).
+ * lcamp_probe: TCP-Verbindung zu SB_STEELNET_HOST:47100 (Saison) bzw. :47103 (Testkampagne), danach schliessen -
+ * KEIN TLS, kein Vorspann, keine Anwendungsdaten, keine Adresse ins Log (W534 AVPRE; vorher TLS-Handshake mit Pin).
+ * Kampagne "aus", wenn kein SPKI-Pin (SB_CAMPAIGN_SPKI1/2, steelnet_pins.h) eingebaut ist. lcamp_probe_tls (TCP + TLS
+ * + Pin, harness/src/sb_tls.c, derselbe SChannel-Client wie die Kampagnenbruecke des Spiels) nur fuer die
+ * Entwickler-CLI; die Konto-API nutzt WinHTTP und sendet immer HTTP-Kopfzeilen, das waere fuer den Zugang ein
+ * ungueltiger Vorspann.
  * Test-Ueberschreibung (nur Loopback): SB_CAMPAIGN_ADDR=127.0.0.1:<port>, SB_CAMPAIGN_SPKI=<hex64>. ASCII. */
 #include <stddef.h>
 
@@ -41,7 +43,13 @@ typedef struct {
 } lcamp_target_t;
 int lcamp_target(int test_campaign, lcamp_target_t *t);
 
-/* Blockierend (nur im Hintergrund-Thread bzw. CLI): TCP + TLS-Handshake + Pin, dann schliessen.
- * 0 = erreichbar; sonst 1 und err = "off" (kein Pin), "net" (keine TCP-Verbindung), "pin" (Pin passt nicht),
- * "tls" (Handshake abgelehnt/abgebrochen), "timeout". Nie Adresse/IP in err. */
+/* Blockierend (nur im Hintergrund-Thread bzw. CLI). W534 AVPRE: lcamp_probe (Oberflaeche) = nur TCP-Verbindung,
+ * dann schliessen; kein TLS im Launcher (kein SChannel/Secur32 im ausgelieferten Launcher), den Pin prueft der
+ * Spielprozess beim echten Verbinden. lcamp_probe_tls = TCP + TLS-Handshake + Pin (nur `--steelnet campaign-probe`,
+ * Entwickler-Builds; im Release ohne Aufrufer und vom Linker entfernt).
+ * 0 = erreichbar; sonst 1 und err = "off" (kein Pin), "net" (keine TCP-Verbindung), "pin" (Pin passt nicht, nur _tls),
+ * "tls" (Handshake abgelehnt/abgebrochen, nur _tls), "timeout". Nie Adresse/IP in err. */
 int lcamp_probe(int test_campaign, int timeout_ms, char *err, size_t ecap);
+int lcamp_probe_tls(int test_campaign, int timeout_ms, char *err, size_t ecap);
+/* W534 Selbsttest (Loopback): why leer = bestanden */
+void lcamp_selftest_tcp(char *why, size_t cap);

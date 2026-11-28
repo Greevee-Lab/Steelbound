@@ -453,7 +453,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
     {
         static lr_env_t fe;
         gui_opts_t o;
-        int ok43 = 0, ok44 = 0, ok45 = 0;
+        int ok43 = 0, ok44 = 0, ok45 = 0, ok44b = 0;
         char why43[200] = "", why44[200] = "", why45[300] = "";
         memset(&o, 0, sizeof o);
         o.shot = 5;
@@ -577,6 +577,28 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
                     strcpy_s(why44, sizeof why44, "Seitenzahl/Zyklus");
                 }
             }
+            /* 44b (W535 AVVT): Strg+Tab/Strg+Umschalt+Tab/Strg+Z als Tastenkuerzel-Tabelle (kein GetKeyState);
+             * Eintraege pruefen und WM_COMMAND aus der Tabelle (HIWORD 1) ans Hauptfenster leiten. */
+            {
+                HACCEL ha = kbacc_create();
+                ACCEL ac[8];
+                int na = ha ? CopyAcceleratorTableW(ha, ac, 8) : 0, k, f = 0;
+                for (k = 0; k < na; k++) {
+                    f |= (ac[k].key == VK_TAB && ac[k].fVirt == (FVIRTKEY | FCONTROL) && ac[k].cmd == ACC_NAV_NEXT) ? 1 : 0;
+                    f |= (ac[k].key == VK_TAB && ac[k].fVirt == (FVIRTKEY | FCONTROL | FSHIFT) &&
+                          ac[k].cmd == ACC_NAV_PREV) ? 2 : 0;
+                    f |= (ac[k].key == 'Z' && ac[k].fVirt == (FVIRTKEY | FCONTROL) && ac[k].cmd == ID_UNDO) ? 4 : 0;
+                }
+                if (ha) {
+                    DestroyAcceleratorTable(ha);
+                }
+                show_page(P_PLAY);
+                SendMessageW(g_hwnd, WM_COMMAND, MAKEWPARAM(ACC_NAV_NEXT, 1), 0);
+                k = g_page;
+                SendMessageW(g_hwnd, WM_COMMAND, MAKEWPARAM(ACC_NAV_PREV, 1), 0);
+                ok44b = na == 4 && f == 7 && k == nav_next(P_PLAY, 1) && g_page == P_PLAY;
+                printf("     (44b: %d Eintraege, Maske %d, Seite %d -> %d)\n", na, f, k, g_page);
+            }
             /* 45: Tab-Reihenfolge: jedes sichtbare, freie Element mit
              * Tabstopp ist per Tab erreichbar (Kreis), Reihenfolge = Anlage
              * (build_controls: Seite oben links -> unten, dann rechts). */
@@ -646,6 +668,11 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
             GT_OK("44 nav-8pages (Aliase, Strg+Tab-Zyklus, W272/W301 Test tools)");
         } else {
             GT_FAIL("44 nav-8pages", "%s", why44);
+        }
+        if (ok44b) {
+            GT_OK("44b kbacc (Strg+Tab/Strg+Umschalt+Tab/Strg+Z per Tastenkuerzel-Tabelle)");
+        } else {
+            GT_FAIL("44b kbacc", "%s", "Tabelle/WM_COMMAND-Weg");
         }
         if (ok45) {
             GT_OK("45 tab-order");
@@ -1902,7 +1929,7 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
     }
 
     /* 23 (W178 COMM-BG: beide Editionen; W162: groessen-unabhaengig):
-     * Hintergrundbild: Ressource dekodiert
+     * Hintergrundbild: Datei res/launcher_bg.png dekodiert (W535, vorher Ressource)
      * (beliebige Quellgroesse, z.B. 1672x941 seit 6.11.), Zuschnitt ohne
      * Strecken (Ausschnitt-Seitenverhaeltnis = Ziel-Seitenverhaeltnis, im
      * Quellbild), ausgeblichen (dunkler als die Quelle). */
@@ -1947,7 +1974,28 @@ void gui_selftest(const char *client_override, int *pass, int *fail)
         if (ok) {
             GT_OK("23 bg-image");
         } else {
-            GT_FAIL("23 bg-image", "%s", "Ressource/Zuschnitt/Abdunkeln");
+            GT_FAIL("23 bg-image", "%s", "Datei res/launcher_bg.png/Zuschnitt/Abdunkeln");
+        }
+    }
+
+    /* 23b (W535 AVVT): Hintergrundbild ist Datei neben der Exe, keine Ressource mehr; fehlende Datei = 0
+     * (einfarbiger Verlauf), das geladene Bild bleibt dabei unangetastet. */
+    {
+        wchar_t bp[MAX_PATH + 32], miss[MAX_PATH + 64];
+        size_t L;
+        uint32_t *keep = g_img;
+        int kw = g_img_w, kh = g_img_h;
+        int ok = FindResourceW(NULL, MAKEINTRESOURCEW(101), MAKEINTRESOURCEW(10) /* RT_RCDATA */) == NULL;
+        int okp = bg_default_path(bp, sizeof(bp) / sizeof(bp[0]));
+        L = okp ? wcslen(bp) : 0;
+        okp = okp && L > 19 && _wcsicmp(bp + L - 19, L"res\\launcher_bg.png") == 0 &&
+              GetFileAttributesW(bp) != INVALID_FILE_ATTRIBUTES;
+        swprintf(miss, sizeof(miss) / sizeof(miss[0]), L"%ls.fehlt", okp ? bp : L"x");
+        ok = ok && okp && bg_load_file(miss) == 0 && g_img == keep && g_img_w == kw && g_img_h == kh;
+        if (ok) {
+            GT_OK("23b bg-file (keine RCDATA, res\\launcher_bg.png, fehlt -> Rueckfall)");
+        } else {
+            GT_FAIL("23b bg-file", "%s", "RCDATA vorhanden / Datei fehlt / Rueckfall");
         }
     }
 

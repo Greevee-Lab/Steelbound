@@ -15,16 +15,14 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 # Harness (nur einkompiliert: SBC-Status exakt wie der Client).
 # W221 HOTAS: input_joy.c (DirectInput 8, dinput8.dll dynamisch, keine Lib).
 # W82: neue Oberflaeche (launcher_gui.c, W-API, randlos, WIC-Hintergrund),
-# UTF-8-Schicht (launcher_u8.c), Ressourcen (Hintergrundbild) + Manifest
+# UTF-8-Schicht (launcher_u8.c), Manifest
 # (Common Controls v6, Per-Monitor-DPI v2).
 # W116 EDITIONS: private (Standard) | community. community: kein
 # Buildzeit-Pfad zum Harness (Client-Suche nur --client-dir/SB_HARNESS_DIR/
-# Exe-Ordner), SB_EDITION_COMMUNITY=1, /PDBALTPATH. Beide Editionen betten
-# das Hintergrundbild ein (W178 COMM-BG: Eigentum des Projektinhabers).
+# Exe-Ordner), SB_EDITION_COMMUNITY=1, /PDBALTPATH. Beide Editionen liefern
+# das Hintergrundbild aus (W178 COMM-BG: Eigentum des Projektinhabers; seit W535 als Datei res/launcher_bg.png).
 set(SB_EDITION "private" CACHE STRING "Edition: private | community")
 set_property(CACHE SB_EDITION PROPERTY STRINGS private community)
-# W178 COMM-BG: beide Editionen betten das Hintergrundbild ein.
-set(SB_LAUNCHER_RC src/launcher.rc)
 if(SB_EDITION STREQUAL "community")
   set(SB_EDITION_COMMUNITY 1)
 elseif(SB_EDITION STREQUAL "private")
@@ -38,6 +36,39 @@ message(STATUS "SB_EDITION=${SB_EDITION}")
 # Interne Ausgabe: LoC-Start immer frei.
 option(SB_LOC_PLAY "W389: LoC-Start in der Community-Ausgabe (Standard an; OFF = grau, Notschalter)" ON)
 message(STATUS "SB_LOC_PLAY=${SB_LOC_PLAY}")
+# W538 AVLINK: Debug-Infos der ausgelieferten Exes (community: sb_launcher, sb_account). Vergleich auf VirusTotal,
+# danach wird die Siegervariante mit einer Zeile Standard (BERICHT_M2 W538):
+#   full  = Stand W513 (bis 27.11. Standard): /Zi /DEBUG:FULL /OPT:REF /OPT:ICF, CodeView-Name per /PDBALTPATH:%_PDB%
+#           (kommt ueber MSBuild als "%%%<ziel>.pdb%%%" in der Exe an)
+#   off   = (Standard seit 27.11.) ohne /Zi und /DEBUG (Linker-Standard /OPT:REF,ICF; kein CodeView-Eintrag, keine PDB) wie 0.6.1;
+#           dafuer /MAP (Modul+RVA aus der Absturz-Telemetrie aufloesbar, aendert die Exe nicht)
+#   name  = wie full, CodeView-Name aber woertlich <ziel>.pdb (ohne Pfad, ohne %-Reste)
+#   noref = /Zi /DEBUG:FULL mit /OPT:NOREF /OPT:NOICF (Linker-Standard bei /DEBUG)
+set(SB_RELEASE_DEBUGINFO "off" CACHE STRING "W538: Debug-Infos der Release-Exes: full | off | name | noref (Standard off seit 27.11.: VT-Test V1 ohne Bitdefender-Treffer)")
+set_property(CACHE SB_RELEASE_DEBUGINFO PROPERTY STRINGS full off name noref)
+if(NOT SB_RELEASE_DEBUGINFO MATCHES "^(full|off|name|noref)$")
+  message(FATAL_ERROR "SB_RELEASE_DEBUGINFO muss full, off, name oder noref sein (ist: ${SB_RELEASE_DEBUGINFO})")
+endif()
+if(SB_EDITION_COMMUNITY)
+  message(STATUS "SB_RELEASE_DEBUGINFO=${SB_RELEASE_DEBUGINFO}")
+endif()
+function(sb_release_debuginfo t)
+  if(SB_RELEASE_DEBUGINFO STREQUAL "off")
+    target_link_options(${t} PRIVATE "/MAP")
+    return()
+  endif()
+  if(SB_RELEASE_DEBUGINFO STREQUAL "name")
+    target_link_options(${t} PRIVATE "/PDBALTPATH:${t}.pdb")
+  else()
+    target_link_options(${t} PRIVATE "/PDBALTPATH:%_PDB%")
+  endif()
+  target_compile_options(${t} PRIVATE /Zi)
+  if(SB_RELEASE_DEBUGINFO STREQUAL "noref")
+    target_link_options(${t} PRIVATE /DEBUG:FULL /OPT:NOREF /OPT:NOICF)
+  else()
+    target_link_options(${t} PRIVATE /DEBUG:FULL /OPT:REF /OPT:ICF)
+  endif()
+endfunction()
 
 # W142 L10N-EN: eingebautes Englisch (sb_lang_en.inc aus en.lang).
 find_package(Python3 COMPONENTS Interpreter REQUIRED)
@@ -54,13 +85,15 @@ endif()
 # W162 FIX-SMALL: res/bg_nutzer.png ist per LFS versioniert (*.png) und liegt
 # in Worktrees nur als Zeiger vor (WIC-Dekodierung + Selbsttest 23 schlagen
 # dann fehl). In dem Fall das PNG zur Konfigurierungszeit aus dem direkt
-# versionierten WebP erzeugen (Ablage im Build-Ordner, Quelle unangetastet)
-# und eine erzeugte .rc mit absolutem Pfad einkompilieren (W178 COMM-BG:
-# beide Editionen; convert_bg.py ist byte-identisch zum eingecheckten PNG).
-# Mit echtem PNG (Haupt-Checkout): unveraendert.
+# versionierten WebP erzeugen (Ablage im Build-Ordner, Quelle unangetastet;
+# convert_bg.py ist byte-identisch zum eingecheckten PNG).
+# W535 AVVT: Das Bild ist keine Ressource mehr (VirusTotal: .rsrc-Block mit hoher Entropie -> "obfuscated"),
+# sondern liegt als Datei res/launcher_bg.png neben sb_launcher.exe (POST_BUILD unten; Release-Paket:
+# make_alpha.py). Fehlt die Datei, zeichnet der Launcher den einfarbigen Verlauf (wie Schalter "Hintergrund aus").
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
   ${CMAKE_CURRENT_SOURCE_DIR}/res/bg_nutzer.png)
-file(READ ${CMAKE_CURRENT_SOURCE_DIR}/res/bg_nutzer.png SB_BG_HEAD LIMIT 80)
+set(SB_BG_PNG ${CMAKE_CURRENT_SOURCE_DIR}/res/bg_nutzer.png)
+file(READ ${SB_BG_PNG} SB_BG_HEAD LIMIT 80)
 if(SB_BG_HEAD MATCHES "git-lfs.github.com/spec/v1")
   message(STATUS "bg_nutzer.png ist LFS-Zeiger, erzeuge aus WebP (convert_bg.py)")
   execute_process(
@@ -70,16 +103,7 @@ if(SB_BG_HEAD MATCHES "git-lfs.github.com/spec/v1")
   if(NOT SB_BG_GEN_RC EQUAL 0)
     message(FATAL_ERROR "convert_bg.py scheiterte (Pillow mit WebP noetig)")
   endif()
-  # W414: Pfad mit Vorwaerts-Schraegstrichen schreiben. Mit TO_NATIVE_PATH standen einfache
-  # Backslashes im rc-String, rc.exe las Ordner wie \abc, \new, \x.. als Escape (\a, \n, \x)
-  # und brach ab. rc.exe nimmt '/' als Trenner an (wie launcher.rc "../res/...").
-  file(TO_CMAKE_PATH "${CMAKE_CURRENT_BINARY_DIR}/bg_nutzer.png" SB_BG_PNG_RC)
-  string(REPLACE "\\" "/" SB_BG_PNG_RC "${SB_BG_PNG_RC}")
-  file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/launcher_bg.rc
-    "// erzeugt (W162): Hintergrundbild aus WebP (LFS-Zeiger im Quellbaum)\n"
-    "#define IDR_BG 101\n"
-    "IDR_BG RCDATA \"${SB_BG_PNG_RC}\"\n")
-  set(SB_LAUNCHER_RC ${CMAKE_CURRENT_BINARY_DIR}/launcher_bg.rc)
+  set(SB_BG_PNG ${CMAKE_CURRENT_BINARY_DIR}/bg_nutzer.png)
 endif()
 
 add_executable(sb_launcher WIN32
@@ -96,13 +120,10 @@ add_executable(sb_launcher WIN32
   src/launcher_gui_hub.c
   src/launcher_gui_netrep.c # W496 NET-TELEMETRY: Frage anonyme Netzwerkstatistik
   src/launcher_gui_account.c
-  src/launcher_gui_test_loc.c
-  src/launcher_gui_test.c
   src/launcher_gui_int.h
   src/launcher_u8.c
   src/launcher_cfg.c
   src/launcher_ctrl.c
-  ${SB_LAUNCHER_RC}
   src/sb_launcher.manifest
   src/launcher_assist.c
   src/launcher_packtest.c
@@ -119,7 +140,7 @@ add_executable(sb_launcher WIN32
   src/launcher_layout.c
   src/launcher_account.c
   src/launcher_camp.c
-  ../harness/src/sb_tls.c
+  src/launcher_acchelp.c # W537 LAUNCHER-SLIM: Konto-Auftraege ueber sb_account.exe
   ../harness/src/input_sbc_usb.c
   ../harness/src/input_joy.c
   ../harness/src/input_despike.c
@@ -142,6 +163,11 @@ add_custom_command(TARGET sb_launcher POST_BUILD
   COMMAND ${CMAKE_COMMAND} -E copy_directory
     ${SB_LANG_DIR}
     $<TARGET_FILE_DIR:sb_launcher>/lang)
+# W535 AVVT: Hintergrundbild als Datei neben die Exe (statt RCDATA-Ressource)
+add_custom_command(TARGET sb_launcher POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:sb_launcher>/res
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different ${SB_BG_PNG}
+    $<TARGET_FILE_DIR:sb_launcher>/res/launcher_bg.png)
 # W142: Sprach-Konsistenz bei jedem Build pruefen (Fehler = Build rot)
 add_custom_target(lang_check ALL
   COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/../harness/scripts/lang_check.py
@@ -151,12 +177,11 @@ add_custom_target(lang_check ALL
 # --client-dir, SB_HARNESS_DIR, Exe-Ordner (s. lcfg_find_client_dir).
 if(SB_EDITION_COMMUNITY)
   target_compile_definitions(sb_launcher PRIVATE SB_EDITION_COMMUNITY=1)
-  target_link_options(sb_launcher PRIVATE "/PDBALTPATH:%_PDB%")
   # W513 DEFENDER: Release-Launcher mit vollstaendiger PDB wie sb_emu (W279). Bisher fehlte
   # sb_launcher.pdb (keep_pdbs listet sie, Launcher-Abstuerze waren nicht aufloesbar) und die Exe hatte
   # keinen CodeView-Eintrag. /OPT:REF,ICF ausdruecklich, weil /DEBUG sonst NOREF/NOICF setzt (Code bleibt gleich).
-  target_compile_options(sb_launcher PRIVATE /Zi)
-  target_link_options(sb_launcher PRIVATE /DEBUG:FULL /OPT:REF /OPT:ICF)
+  # W538 AVLINK: seit dem Schalter SB_RELEASE_DEBUGINFO (oben), Standard full = genau diese Optionen.
+  sb_release_debuginfo(sb_launcher)
   if(SB_LOC_PLAY)
     target_compile_definitions(sb_launcher PRIVATE SB_LOC_PLAY=1)
   endif()
@@ -170,7 +195,7 @@ else()
   target_compile_definitions(sb_launcher PRIVATE LOCTP_REAL_SERVICE_ON=1)
 endif()
 target_link_libraries(sb_launcher PRIVATE comdlg32 shell32 ole32 comctl32 setupapi winusb
-  uxtheme dwmapi windowscodecs winhttp crypt32 bcrypt ws2_32)
+  uxtheme dwmapi windowscodecs winhttp crypt32 bcrypt ws2_32) # bcrypt/ws2_32 nur noch fuer den Netzteil (Dev/Test)
 # W250 UPDATE-CHECK: Release-Version wie beim Client (make_alpha.py setzt
 # -DSB_VERSION=0.1.0-alpha.N fuer beide Komponenten); leer = Entwickler-Build,
 # dann ist der Update-Hinweis ausgeblendet (nichts zu vergleichen).
@@ -186,6 +211,45 @@ endif()
 if(NOT SB_VERSION)
   target_compile_definitions(sb_launcher PRIVATE SB_TEST_HOOKS=1)
 endif()
+# W532 AVFP: Selbsttest (--selftest, ~13 000 Zeilen mit Testvektoren: Attrappen-HTTP-Anfragen an den
+# Discord-Ruecklauf, Passwort-JSON, Testschluessel, DPAPI-Proben) nicht im ausgelieferten Release-Launcher -
+# fuer Virenscanner-Heuristiken sah das nach Backdoor/Token-Stealer aus. AUTO = nur in Entwickler-Builds
+# (ohne SB_VERSION). make_alpha.py baut fuer den Erststart-Selbsttest zusaetzlich einen nicht ausgelieferten
+# Test-Launcher mit -DSB_LAUNCHER_SELFTEST=ON (gleiche Quellen, gleiche SB_VERSION). Ohne Aufrufer entfernt
+# der Linker (/OPT:REF, /Gy, /GF) Testcode und Teststrings.
+set(SB_LAUNCHER_SELFTEST "AUTO" CACHE STRING "W532: Selbsttest einbauen (AUTO = nur ohne SB_VERSION | ON | OFF)")
+set_property(CACHE SB_LAUNCHER_SELFTEST PROPERTY STRINGS AUTO ON OFF)
+if(SB_LAUNCHER_SELFTEST STREQUAL "AUTO")
+  if(SB_VERSION)
+    set(SB_LAUNCHER_SELFTEST_ON 0)
+  else()
+    set(SB_LAUNCHER_SELFTEST_ON 1)
+  endif()
+elseif(SB_LAUNCHER_SELFTEST)
+  set(SB_LAUNCHER_SELFTEST_ON 1)
+else()
+  set(SB_LAUNCHER_SELFTEST_ON 0)
+endif()
+target_compile_definitions(sb_launcher PRIVATE SB_LAUNCHER_SELFTEST=${SB_LAUNCHER_SELFTEST_ON})
+# W535 AVVT: GUI-Selbsttest-Quellen nur im Test-/Entwickler-Launcher. /OPT:REF entfernt zwar deren Code, aber nicht
+# die statischen Puffer (.bss ist kein COMDAT): ~2,5 MB der 5,7 MB grossen .data (VirtualSize) im Release-Launcher 0.6.3.
+if(SB_LAUNCHER_SELFTEST_ON)
+  target_sources(sb_launcher PRIVATE src/launcher_gui_test.c src/launcher_gui_test_loc.c)
+endif()
+# W537 LAUNCHER-SLIM: Netzteil des Kontos (HTTPS, Challenge-Response, Discord-Loopback, Lobbyliste, Erreichbarkeit,
+# Kampagnen-Probe, DPAPI-Schreiben) nur noch im Hilfsprogramm sb_account.exe (unten) und - fuer --steelnet (Konto-CLI)
+# und den Selbsttest - im Entwickler-/Test-Launcher (gleiche Bedingung wie LCLI_DEV_TOOLS in launcher.c). Der
+# ausgelieferte Launcher hat damit kein ws2_32, kein bcrypt, keine Zertifikats-APIs und keinen Empfaenger mehr.
+if(NOT SB_VERSION OR SB_LAUNCHER_SELFTEST_ON)
+  set(SB_LAUNCHER_NET_DEV 1)
+  target_sources(sb_launcher PRIVATE src/launcher_account_net.c src/launcher_camp_net.c ../harness/src/sb_tls.c)
+else()
+  set(SB_LAUNCHER_NET_DEV 0)
+endif()
+message(STATUS "W537: Konto-Netzteil im Launcher (nur Entwickler/Test) = ${SB_LAUNCHER_NET_DEV}")
+# /Gw: auch statische Daten (z. B. Testtabellen in Funktionen) als COMDAT, damit /OPT:REF sie ohne Aufrufer entfernt.
+target_compile_options(sb_launcher PRIVATE /Gw)
+message(STATUS "SB_LAUNCHER_SELFTEST=${SB_LAUNCHER_SELFTEST} (${SB_LAUNCHER_SELFTEST_ON})")
 message(STATUS "SB_VERSION=${SB_VERSION}")
 # W421 LOC-VERSION-GATE: eigene steelnet-Version wie beim Client (W420, harness/CMakeLists.txt) aus poc-native/VERSION,
 # auch in Entwickler-Builds; Vergleich mit min_client_version aus GET /v1/info (LoC-Start gesperrt, wenn aelter).
@@ -217,3 +281,38 @@ target_link_options(sb_launcher PRIVATE "/NODEFAULTLIB:libucrt.lib" "ucrt.lib")
 #             vorbereitet). /HIGHENTROPYVA gibt es nur fuer 64-bit (hier 32-bit).
 target_compile_options(sb_launcher PRIVATE /sdl /guard:cf)
 target_link_options(sb_launcher PRIVATE "/guard:cf" "/DYNAMICBASE" "/NXCOMPAT" "/DEPENDENTLOADFLAG:0x800" "/CETCOMPAT")
+
+# ---------------------------------------------------------------------------------------------------------------------
+# W537 LAUNCHER-SLIM: Konto-Hilfsprogramm sb_account.exe. Der Launcher startet es je Auftrag unsichtbar (vererbter
+# unbenannter Speicherblock + Ereignisse, keine Pipes; launcher_acchelp.h): steelnet-Konto (HTTPS + SPKI-Pin, Challenge-Response), Discord-Anmeldung (lokaler Empfaenger
+# 127.0.0.1 nur waehrend des Ablaufs), Lobbyliste, Erreichbarkeit (Kopf-Chip, Kampagne). Gleiche Quellen, Schalter,
+# VERSIONINFO, Manifest und Haertung wie der Launcher; liegt im selben Ausgabeordner (neben sb_launcher.exe).
+add_executable(sb_account WIN32
+  src/sb_account_main.c
+  src/launcher_account.c
+  src/launcher_account_net.c
+  src/launcher_camp.c
+  src/launcher_camp_net.c
+  src/launcher_u8.c
+  ../harness/src/sb_sha256.c
+  src/sb_account.manifest
+)
+target_include_directories(sb_account PRIVATE src ../harness/src ${CMAKE_CURRENT_BINARY_DIR})
+target_compile_definitions(sb_account PRIVATE LACC_HELPER=1 "SB_NET_VERSION=\"${SB_NET_VERSION}\"")
+if(SB_VERSION)
+  target_compile_definitions(sb_account PRIVATE "SB_VERSION_STR=\"${SB_VERSION}\"")
+else()
+  target_compile_definitions(sb_account PRIVATE SB_TEST_HOOKS=1)
+endif()
+target_compile_definitions(sb_account PRIVATE SB_LAUNCHER_SELFTEST=${SB_LAUNCHER_SELFTEST_ON})
+if(SB_EDITION_COMMUNITY)
+  target_compile_definitions(sb_account PRIVATE SB_EDITION_COMMUNITY=1)
+  sb_release_debuginfo(sb_account)  # W538 AVLINK (Standard full = /PDBALTPATH:%_PDB% /Zi /DEBUG:FULL /OPT:REF,ICF)
+endif()
+target_link_libraries(sb_account PRIVATE winhttp crypt32 bcrypt ws2_32)
+sb_add_verinfo(sb_account "Steelbound Account Helper")
+target_compile_options(sb_account PRIVATE /W3 /Gw /sdl /guard:cf)
+set_property(TARGET sb_account PROPERTY MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+target_link_options(sb_account PRIVATE "/NODEFAULTLIB:libucrt.lib" "ucrt.lib"
+  "/guard:cf" "/DYNAMICBASE" "/NXCOMPAT" "/DEPENDENTLOADFLAG:0x800" "/CETCOMPAT")
+add_dependencies(sb_launcher sb_account)

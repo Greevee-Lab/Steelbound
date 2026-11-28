@@ -2124,6 +2124,7 @@ gui.acc_err_busy=Server ausgelastet – bitte später erneut.
 gui.acc_err_store=Schlüssel konnte auf diesem PC nicht gespeichert werden.
 gui.acc_err_browser=Browser konnte nicht geöffnet werden.
 gui.acc_err_other=Serverfehler (%s).
+gui.acc_err_helper=Das Konto-Hilfsprogramm sb_account.exe fehlt oder startet nicht (Virenschutz?). Bitte das ganze Steelbound-Paket neu entpacken.
 gui.acc_head_none2=Kein Passwort, keine E-Mail. Dauert ein paar Sekunden.
 gui.acc_new_title=Konto erstellen
 gui.acc_name_long=Kontoname (sehen andere Spieler)

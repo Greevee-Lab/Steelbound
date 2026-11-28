@@ -272,13 +272,29 @@ target_include_directories(sb_bearssl PUBLIC third_party/bearssl/inc PRIVATE thi
 target_compile_options(sb_bearssl PRIVATE /W3 /sdl /wd4267) # C4267 nur aus dem (ungenutzten) bearssl_ssl.h
 target_sources(sb_emu PRIVATE ${SB_LOC_SEC_SRC})
 target_link_libraries(sb_emu PRIVATE sb_bearssl bcrypt secur32 crypt32)
-target_compile_options(sb_emu PRIVATE /Zi)
+# W538 AVLINK: Debug-Infos von sb_emu.dll in der community-Ausgabe (wie im Launcher, s. dort):
+#   full (Standard) = /Zi /DEBUG:FULL, CodeView-Name per /PDBALTPATH:%_PDB% (unten, W116); noref = wie full
+#   (sb_emu hatte nie /OPT:REF,ICF); off = ohne /Zi und /DEBUG, nur /MAP; name = CodeView-Name woertlich sb_emu.pdb
+set(SB_RELEASE_DEBUGINFO "full" CACHE STRING "W538: Debug-Infos der Release-Binaries: full | off | name | noref")
+set_property(CACHE SB_RELEASE_DEBUGINFO PROPERTY STRINGS full off name noref)
+if(NOT SB_RELEASE_DEBUGINFO MATCHES "^(full|off|name|noref)$")
+  message(FATAL_ERROR "SB_RELEASE_DEBUGINFO muss full, off, name oder noref sein (ist: ${SB_RELEASE_DEBUGINFO})")
+endif()
+set(SB_EMU_DEBUGINFO_OFF 0)
+if(SB_EDITION STREQUAL "community" AND SB_RELEASE_DEBUGINFO STREQUAL "off")
+  set(SB_EMU_DEBUGINFO_OFF 1)
+endif()
+if(NOT SB_EMU_DEBUGINFO_OFF)
+  target_compile_options(sb_emu PRIVATE /Zi)
+endif()
 # W279 DIAG-CRASH: Release (community) mit vollstaendiger PDB - FASTLINK-PDBs
 # verweisen auf die .obj-Dateien und taugen spaeter nicht zum Aufloesen von
 # Minidumps (crash_symbolize.py). Private Builds bleiben schnell (FASTLINK),
 # ausser -DSB_PDB_FULL=ON.
 option(SB_PDB_FULL "Vollstaendige PDB (/DEBUG:FULL) statt FASTLINK" OFF)
-if(SB_EDITION STREQUAL "community" OR SB_PDB_FULL)
+if(SB_EMU_DEBUGINFO_OFF)
+  # W538: kein /DEBUG (die Map-Datei kommt von /MAP unten)
+elseif(SB_EDITION STREQUAL "community" OR SB_PDB_FULL)
   target_link_options(sb_emu PRIVATE /DEBUG:FULL)
 else()
   target_link_options(sb_emu PRIVATE /DEBUG:FASTLINK)
@@ -508,7 +524,11 @@ sb_add_verinfo(sb_emu "Steelbound client core")
 if(SB_EDITION_COMMUNITY)
   foreach(t sb_ldr sb_emu sbc_probe input_selftest render_selftest iso_vfs_check loc_net_selftest)  # 0.6.0: loc_net_selftest bindet loc_tun_netrep.c (sb_edition.h) ein
     target_compile_definitions(${t} PRIVATE SB_EDITION_COMMUNITY=1)
-    target_link_options(${t} PRIVATE "/PDBALTPATH:%_PDB%")
+    if(t STREQUAL "sb_emu" AND SB_RELEASE_DEBUGINFO STREQUAL "name")
+      target_link_options(${t} PRIVATE "/PDBALTPATH:sb_emu.pdb")  # W538 AVLINK
+    elseif(NOT (t STREQUAL "sb_emu" AND SB_RELEASE_DEBUGINFO STREQUAL "off"))
+      target_link_options(${t} PRIVATE "/PDBALTPATH:%_PDB%")
+    endif()
     if(SB_LOC_PLAY)
       target_compile_definitions(${t} PRIVATE SB_LOC_PLAY=1)
     endif()

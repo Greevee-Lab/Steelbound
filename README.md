@@ -192,7 +192,9 @@ are welcome in the existing issue:
 </p>
 
 - A **launcher** (`sb_launcher.exe`): pick your own game copy, configure
-  settings, manage texture and effect packs, then play.
+  settings, manage texture and effect packs, then play. Online account
+  functions run in a small helper (`sb_account.exe`) that the launcher starts
+  only when needed.
 - A **client** (`sb_ldr.exe` + `sb_emu.dll`): runs the game natively with
   high-level emulation of kernel, XDK and D3D8 calls.
 - An **open package format** (`.sbpack`, see `PACK_FORMAT.md`) for community

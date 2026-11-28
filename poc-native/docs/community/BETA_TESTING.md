@@ -34,6 +34,7 @@ planned. Only use the archive from the official Releases page.
 | File / folder | Purpose |
 |---|---|
 | `sb_launcher.exe` | Launcher – start here |
+| `sb_account.exe` | Online account helper (steelnet account, Discord sign-in, online status); started by the launcher only when needed |
 | `sb_ldr.exe`, `sb_emu.dll` | Game runtime (started by the launcher) |
 | `sb_native.cfg` | Default settings (read-only; your changes go to `user.cfg`) |
 | `profiles/` | Default control layouts (keyboard, Xbox pad) |

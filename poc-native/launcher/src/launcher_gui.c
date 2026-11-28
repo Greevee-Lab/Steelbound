@@ -183,6 +183,29 @@ char g_dflt_setup[64];     /* Standard-Profil (profiles/standard.txt) */
 int g_confirm_auto;        /* Selbsttest: Rueckfragen mit Ja beantworten */
 launcher_settings_t g_undo_s; /* Muster C: Stand vor dem Umschalten */
 int g_undo_on;
+/* W535 AVVT: Tastenkuerzel-Tabelle des Hauptfensters (statt GetKeyState im Nachrichtenkreis) */
+static HACCEL g_kbacc;
+
+/* Strg+Tab / Strg+Umschalt+Tab (Seite vor/zurueck), Strg+Z bzw. Strg+Umschalt+Z (W171 Muster C). */
+HACCEL kbacc_create(void)
+{
+    ACCEL acc[] = {
+        { FVIRTKEY | FCONTROL, VK_TAB, ACC_NAV_NEXT },
+        { FVIRTKEY | FCONTROL | FSHIFT, VK_TAB, ACC_NAV_PREV },
+        { FVIRTKEY | FCONTROL, 'Z', ID_UNDO },
+        { FVIRTKEY | FCONTROL | FSHIFT, 'Z', ID_UNDO },
+    };
+    return CreateAcceleratorTableW(acc, (int)(sizeof(acc) / sizeof(acc[0])));
+}
+
+static void acc_command(int id)
+{
+    if (id == ACC_NAV_NEXT || id == ACC_NAV_PREV) {
+        show_page(nav_next(g_page, id == ACC_NAV_PREV ? -1 : 1));
+    } else if (id == ID_UNDO && g_undo_on) { /* W171 Muster C */
+        on_command(ID_UNDO, BN_CLICKED);
+    }
+}
 /* W172 LAUNCHER-P567 */
 int g_setup_force;         /* Spielen: Einrichtungskarte offen halten */
 int g_bb_setup = -1;       /* W220: Karte im zuletzt gezeichneten Bild (-1 = nicht Spielen) */
@@ -725,7 +748,17 @@ static int g_snp_today = -1, g_snp_peak = -1; /* W470: games_today/peak_7d der l
 static DWORD WINAPI snp_thread(LPVOID p)
 {
     snp_job_t *j = (snp_job_t *)p;
-    lacc_probe(&j->r);
+    lach_res_t *res = (lach_res_t *)calloc(1, sizeof *res); /* W537: GET /v1/info im Hilfsprogramm sb_account.exe */
+    char e[48];
+    memset(&j->r, 0, sizeof j->r);
+    if (res && lach_run("info", NULL, NULL, NULL, NULL, 0, 30000, NULL, res, e, sizeof e) == 0) {
+        j->r = res->probe;
+    } else {
+        if (res) j->r = res->probe; /* Fehlercode/Antwortzeit des Dienstes, falls geliefert */
+        if (!j->r.error[0]) strcpy_s(j->r.error, sizeof j->r.error, res ? e : "helper");
+        j->r.ok = 0;
+    }
+    free(res);
     if (!PostMessageW(j->h, WM_APP_SNP, (WPARAM)j->gen, (LPARAM)j)) {
         free(j);
     }
@@ -2426,8 +2459,8 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     }
     case WM_SETCURSOR: /* W401: Handcursor auf den Chips im Kopf */
         if ((HWND)wp == h && LOWORD(lp) == HTCLIENT) {
-            POINT p;
-            GetCursorPos(&p);
+            DWORD mp = GetMessagePos(); /* W535: Position der ausloesenden Nachricht statt GetCursorPos */
+            POINT p = { GET_X_LPARAM(mp), GET_Y_LPARAM(mp) };
             ScreenToClient(h, &p);
             if (hdr_hit(p) >= 0) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
@@ -2492,6 +2525,10 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp)
     case WM_CTLCOLORSTATIC:
         return ctlcolor((HDC)wp, (HWND)lp, msg == WM_CTLCOLORSTATIC);
     case WM_COMMAND:
+        if (HIWORD(wp) == 1 && lp == 0) { /* W535: Tastenkuerzel aus g_kbacc */
+            acc_command(LOWORD(wp));
+            return 0;
+        }
         on_command(LOWORD(wp), HIWORD(wp));
         return 0;
     case DM_GETDEFID:
@@ -3642,16 +3679,14 @@ int gui_main(const char *client_override, const gui_opts_t *o)
     g_snp_live = 1; /* W403: ab hier echter Fensterbetrieb (Shots/Selbsttest kommen nie hierher) */
     snp_kick();
     SetTimer(g_hwnd, SNP_TIMER, SNP_FAST_MS, NULL); /* Takt; Abstand je Sichtbarkeit in snp_tick */
+    /* W535 AVVT: Strg+Tab / Strg+Umschalt+Tab (Seite vor/zurueck) und Strg+Z (W171 Muster C) per
+     * Tastenkuerzel-Tabelle (TranslateAccelerator, fenstergebunden) statt eigener GetKeyState-Abfrage. */
+    g_kbacc = kbacc_create();
     while (GetMessageW(&msg, NULL, 0, 0) > 0) {
-        if (msg.message == WM_KEYDOWN && msg.wParam == VK_TAB &&
-            GetKeyState(VK_CONTROL) < 0) {
-            show_page(nav_next(g_page, GetKeyState(VK_SHIFT) < 0 ? -1 : 1));
-            continue;
-        }
-        if (msg.message == WM_KEYDOWN && msg.wParam == 'Z' &&
-            GetKeyState(VK_CONTROL) < 0 && g_undo_on) { /* W171 Muster C */
-            on_command(ID_UNDO, BN_CLICKED);
-            continue;
+        if (msg.message == WM_KEYDOWN && g_kbacc &&
+            (msg.wParam == VK_TAB || (msg.wParam == 'Z' && g_undo_on)) &&
+            TranslateAcceleratorW(g_hwnd, g_kbacc, &msg)) {
+            continue; /* -> WM_COMMAND mit HIWORD 1 (acc_command) */
         }
         if (msg.message == WM_KEYDOWN && msg.wParam == VK_ESCAPE && g_nrq_open) {
             nrq_dismiss(); /* W496: Esc = Nein (fuer jetzt) */
@@ -3677,6 +3712,10 @@ int gui_main(const char *client_override, const gui_opts_t *o)
         }
         TranslateMessage(&msg);
         DispatchMessageW(&msg);
+    }
+    if (g_kbacc) {
+        DestroyAcceleratorTable(g_kbacc);
+        g_kbacc = NULL;
     }
     g_hwnd = NULL;
     fonts_free();

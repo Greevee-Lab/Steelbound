@@ -59,6 +59,7 @@
 #include "launcher_diag.h" /* W279 DIAG-CRASH: Absturz-Karte + Diagnosepaket (launcher_diag.inc) */
 #include "launcher_games.h" /* W276 LOC-LAUNCH */
 #include "launcher_account.h" /* W328 STEELNET-ACCOUNT: Pilotenkonto */
+#include "launcher_acchelp.h" /* W537 LAUNCHER-SLIM: Konto-Auftraege ueber sb_account.exe */
 #if defined(SB_HAVE_LOCTP) && SB_HAVE_LOCTP
 #include "launcher_loctp.h" /* W336 LOC-TESTPARTNER (nur interne Ausgabe) */
 #endif
@@ -979,6 +980,12 @@ extern int g_img_h;
 extern int g_img_w;
 extern uint32_t *g_bgs;
 int bg_load(void);
+/* W535 AVVT: Tastenkuerzel des Hauptfensters (TranslateAccelerator statt GetKeyState) */
+#define ACC_NAV_NEXT 0xEF01 /* Strg+Tab: naechste Seite */
+#define ACC_NAV_PREV 0xEF02 /* Strg+Umschalt+Tab: vorige Seite */
+HACCEL kbacc_create(void);
+int bg_load_file(const wchar_t *path); /* W535: PNG-Datei (NULL = res/launcher_bg.png neben der Exe) */
+int bg_default_path(wchar_t *out, size_t cap);
 void bg_cover_rect(int sw, int sh, int dw, int dh, WICRect *out);
 int bg_scaled(int dw, int dh);
 int png_save(const uint32_t *px, int w, int h, const char *path);
@@ -1470,6 +1477,7 @@ int acc_sub_active(void);
 void acc_layout(void);
 void acc_nav_sub(int acc);
 void acc_ensure_loaded(void); /* W472: gespeichertes Konto einmal laden (steelnet > Info) */
+void acc_dir_get(char *out, size_t cap); /* W537: Ordner der Schluesseldatei (Hilfsprogramm-Auftraege) */
 void acc_name_tick(void);
 wchar_t *acc_launch_env(char *set, size_t cap);
 int acc_sum_row(char *val, size_t cap, COLORREF *col);
